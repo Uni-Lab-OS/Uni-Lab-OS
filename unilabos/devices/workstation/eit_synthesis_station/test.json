@@ -1,0 +1,20 @@
+{
+    "nodes": [
+        {
+            "id": "eit_station",
+            "name": "eit",
+            "children": [],
+            "parent": null,
+            "type": "device",
+            "class": "eit_stationmanager",
+            "position": {
+                "x": 0,
+                "y": 0,
+                "z": 0
+            },
+            "config": {
+            }
+        }
+    ],
+    "links": []
+}

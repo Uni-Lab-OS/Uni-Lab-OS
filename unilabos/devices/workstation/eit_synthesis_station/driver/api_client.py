@@ -4,8 +4,8 @@ from typing import Any, Dict, List, Optional, Union
 
 import requests
 
-from config.setting import Settings, configure_logging
-from .exceptions import (
+from unilabos.devices.workstation.eit_synthesis_station.config.setting import Settings, configure_logging
+from unilabos.devices.workstation.eit_synthesis_station.driver.exceptions import (
     ApiError,
     AuthenticationError,
     AuthorizationExpiredError,

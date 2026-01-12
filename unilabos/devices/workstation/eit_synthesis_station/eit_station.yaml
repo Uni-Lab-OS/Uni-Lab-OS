@@ -1,0 +1,208 @@
+eit_stationmanager:
+  category:
+  - eit_station
+  class:
+    action_value_mappings:
+      auto-align_chemicals_with_file:
+        feedback: {}
+        goal: {}
+        goal_default:
+          auto_delete: true
+          file_path: unilabos\devices\workstation\eit_synthesis_station\chemical_list.xlsx
+        handles: {}
+        result: {}
+        schema:
+          description: ''
+          properties:
+            feedback: {}
+            goal:
+              properties:
+                auto_delete:
+                  default: true
+                  type: boolean
+                file_path:
+                  type: string
+              required:
+              - file_path
+              type: object
+            result: {}
+          required:
+          - goal
+          title: align_chemicals_with_file参数
+          type: object
+        type: UniLabJsonCommand
+      auto-batch_in_tray_by_file:
+        feedback: {}
+        goal: {}
+        goal_default:
+          file_path: unilabos\devices\workstation\eit_synthesis_station\batch_in_tray.xlsx
+        handles: {}
+        result: {}
+        schema:
+          description: ''
+          properties:
+            feedback: {}
+            goal:
+              properties:
+                file_path:
+                  type: string
+              required:
+              - file_path
+              type: object
+            result: {}
+          required:
+          - goal
+          title: batch_in_tray_by_file参数
+          type: object
+        type: UniLabJsonCommand
+      auto-check_chemical_library_by_file:
+        feedback: {}
+        goal: {}
+        goal_default:
+          file_path: unilabos\devices\workstation\eit_synthesis_station\chemical_list.xlsx
+        handles: {}
+        result: {}
+        schema:
+          description: ''
+          properties:
+            feedback: {}
+            goal:
+              properties:
+                file_path:
+                  type: string
+              required:
+              - file_path
+              type: object
+            result: {}
+          required:
+          - goal
+          title: check_chemical_library_by_file参数
+          type: object
+        type: UniLabJsonCommand
+      auto-create_task_by_file:
+        feedback: {}
+        goal: {}
+        goal_default:
+          chemical_db_path: unilabos\devices\workstation\eit_synthesis_station\chemical_list1.csv
+          template_path: unilabos\devices\workstation\eit_synthesis_station\reaction_template.xlsx
+        handles: {}
+        result: {}
+        schema:
+          description: ''
+          properties:
+            feedback: {}
+            goal:
+              properties:
+                chemical_db_path:
+                  type: string
+                template_path:
+                  type: string
+              required:
+              - template_path
+              - chemical_db_path
+              type: object
+            result: {}
+          required:
+          - goal
+          title: create_task_by_file参数
+          type: object
+        type: UniLabJsonCommand
+      auto-deduplicate_chemical_library_by_file:
+        feedback: {}
+        goal: {}
+        goal_default:
+          file_path: unilabos\devices\workstation\eit_synthesis_station\chemical_list.xlsx
+          output_path: null
+        handles: {}
+        result: {}
+        schema:
+          description: ''
+          properties:
+            feedback: {}
+            goal:
+              properties:
+                file_path:
+                  type: string
+                output_path:
+                  type: string
+              required:
+              - file_path
+              type: object
+            result: {}
+          required:
+          - goal
+          title: deduplicate_chemical_library_by_file参数
+          type: object
+        type: UniLabJsonCommand
+      auto-export_chemical_list_to_file:
+        feedback: {}
+        goal: {}
+        goal_default:
+          output_path: null
+        handles: {}
+        result: {}
+        schema:
+          description: ''
+          properties:
+            feedback: {}
+            goal:
+              properties:
+                output_path:
+                  type: string
+              required:
+              - output_path
+              type: object
+            result: {}
+          required:
+          - goal
+          title: export_chemical_list_to_file参数
+          type: object
+        type: UniLabJsonCommand
+      auto-sync_chemicals_from_file:
+        feedback: {}
+        goal: {}
+        goal_default:
+          file_path: unilabos\devices\workstation\eit_synthesis_station\chemical_list1.csv
+          overwrite: false
+        handles: {}
+        result: {}
+        schema:
+          description: ''
+          properties:
+            feedback: {}
+            goal:
+              properties:
+                file_path:
+                  type: string
+                overwrite:
+                  default: false
+                  type: boolean
+              required:
+              - file_path
+              type: object
+            result: {}
+          required:
+          - goal
+          title: sync_chemicals_from_file参数
+          type: object
+        type: UniLabJsonCommand
+    module: unilabos.devices.workstation.eit_synthesis_station.station_manager:StationManager
+    status_types: {}
+    type: python
+  config_info: []
+  description: ''
+  handles: []
+  icon: ''
+  init_param_schema:
+    config:
+      properties:
+        settings:
+          type: string
+      required: []
+      type: object
+    data:
+      properties: {}
+      required: []
+      type: object
+  registry_type: device
+  version: 1.0.0

@@ -11,11 +11,11 @@ from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple
 
 # 引入底层的控制器 (假设在同一目录下)
-from controller.station_controller import SynthesisStationController
-from config.setting import Settings, configure_logging
-from config.constants import ResourceCode, TRAY_CODE_DISPLAY_NAME, TraySpec
+from unilabos.devices.workstation.eit_synthesis_station.controller.station_controller import SynthesisStationController
+from unilabos.devices.workstation.eit_synthesis_station.config.setting import Settings, configure_logging
+from unilabos.devices.workstation.eit_synthesis_station.config.constants import ResourceCode, TRAY_CODE_DISPLAY_NAME, TraySpec
 
-from driver.exceptions import ValidationError
+from unilabos.devices.workstation.eit_synthesis_station.driver.exceptions import ValidationError
 
 logger = logging.getLogger("StationManager")
 

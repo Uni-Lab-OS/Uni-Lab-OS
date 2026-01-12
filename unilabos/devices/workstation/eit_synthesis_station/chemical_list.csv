@@ -1,0 +1,2085 @@
+cas_number,chemical_id,name,substance,other_name,brand,package_size,storage_location,molecular_weight,density (g/mL),state
+57-11-4,395,Stearic Acid,硬脂酸,,adamas;安耐吉,5g;100g,1-4-2,284.48,0.845,solid
+59-02-9,396,vitamin E,维生素E,,安耐吉,25g,3-2,430.71,0.95,liquid
+60-12-8,397,Phenethyl alcohol,苯乙醇,,安耐吉,100ml;25ml,2-2,122.16,1.02,liquid
+68-05-3,398,Tetraethylammonium iodide,四乙基碘化铵,,adamas,25g,7-2,257.16,1.559,solid
+70-11-1,399,2-Bromoacetophenone,2-溴苯乙酮,,adamas,25g,2-3,199.04,1.476,solid
+74-11-3,400,4-Chlorobenzoic acid,对氯苯甲酸,,adamas,25g,1-4-4,156.57,1.54,solid
+75-03-6,401,Iodoethane,碘乙烷,,adamas,100g,R2,155.97,1.95,liquid
+75-08-1,402,Ethanethiol,乙硫醇,,adamas,25g,R1,62.13,0.839,liquid
+75-11-6,403,Diiodomethane,二碘甲烷,,adamas,25g,1-2-3,267.84,3.325,liquid
+76-03-9,404,Trichloroacetic acid,三氯乙酸,,adamas,25g,1-4-1,163.39,1.62,solid
+76-05-1,405,Trifluoroacetic acid,三氟乙酸 (TFA),,adamas,100g,1-4-1,114.02,1.489,liquid
+76-09-5,406,Pinacol,频哪醇,,adamas,100g,2-2,118.17,0.967,solid
+79-09-4,407,Propionic acid,丙酸,,安耐吉,100ml,1-5A,74.08,0.993,liquid
+84-11-7,408,Phenanthrenequinone,菲醌,,adamas,25g,2-3,208.21,1.405,solid
+88-05-1,409,"2,4,6-Trimethylaniline",均三甲苯胺,,adamas,25ml,3-5,135.21,0.963,liquid
+90-02-8,410,Salicylaldehyde,水杨醛,,adamas,0,4-3,122.12,1.146,liquid
+90-05-1,411,guaiacol,愈创木酚,,adamas,100g,4-3-2,124.14,1.129,solid
+93-04-9,412,2-Methoxynaphthalene,2-萘甲醚,,adamas,25g,4-4,158.2,1.064,solid
+93-09-4,413,2-Naphthoic acid,2-萘甲酸,,adamas,25g,,172.18,1.08,solid
+93-10-7,414,Quinaldic acid,喹啉-2-甲酸,,adamas,5g,1-4-4,173.17,1.2427,solid
+96-09-3,415,styrene oxide,氧化苯乙烯,,adamas,25ml,2-3-1,120.15,1.054,liquid
+98-06-6,416,tert-Butylbenzene,叔丁基苯,,adamas,25g,"2-3,A",134.22,0.867,liquid
+98-09-9,417,Benzenesulfonyl Chloride,苯磺酰氯,,安耐吉,100g,1-5-3,176.62,1.384,liquid
+98-10-2,418,Benzenesulfonamide,苯磺酰胺,,adamas;安耐吉,25g,3-4,157.19,1.274,solid
+99-04-7,419,m-Toluic Acid,间甲基苯甲酸,,adamas,25g,1-4-4,136.15,1.054,solid
+2438-04-2,420,O-isopropylbenzoic acid,2-异丙基苯甲酸,,adamas,1g,1-4-4,164.2,1.08,solid
+2459-09-8,421,Methyl isonicotinate,异烟酸甲酯,,energy;adamas,5g,2-4;4-2-1,137.14,1.161,liquid
+2491-06-7,422,"N,N-Dimethylglycine hydrochloride","N,N-二甲基甘氨酸盐酸盐",,adamas,25g,2-2,139.58,1.326,solid
+2544-06-1,423,3-methoxypropanoic acid,3-甲氧基丙酸,,安耐吉,5g,1-4-2,104.1,1.108,liquid
+2622-05-1,424,Allylmagnesium chloride,氯丙烯镁,,adamas;百灵威,500ml,R5,100.83,0.995,liquid
+2747-05-9,425,7-Acetoxy-4-methylcoumarin,7-乙酰氧基-4-甲基香豆素,,adamas,5g,2-3,218.21,1.1096,solid
+2835-06-5,426,2-Amino-2-phenylacetic acid,2-氨基-2-苯基乙酸,,adamas,25g,1-5-5,151.17,1.2023,solid
+2888-06-4,427,3-Chlorobenzenesulfonyl chloride,3-氯苯磺酰氯,,安耐吉,5g,R3,211.07,1.499,liquid
+3481-02-5,428,Cyclopropyl Phenyl Ketone,苯基环丙基甲酮,,adamas,5g,2-4,146.19,1.058,liquid
+4021-07-2,429,3-Methylpyridine-2-carboxylic acid,3-甲基-2-吡啶甲酸,,adamas,5g,1-4-4,137.14,1.23,solid
+4064-06-6,430,"1,2:3,4-Di-O-isopropylidene-D-galactopyranose",双丙酮半乳糖,,安耐吉,5g,2-3b,260.28,1.143,solid
+4345-03-3,431,α-Tocopheryl Succinate,维生素 E 琥珀酸酯,,adamas,25g,3-2,530.78,1.002,solid
+5063-03-6,432,5-ACETYL-2-NORBORNENE,2-乙酰基-5-降冰片烯,,adamas,1g,R9,136.19,1.005,liquid
+5337-03-1,433,Tetrahydropyran-4-carboxylic acid,四氢吡喃-4-甲酸,,adamas;安耐吉,5g,1-4-3,130.14,1.1066,solid
+5390-04-5,434,4-Pentyn-1-ol,4-戊炔-1-醇,,adamas,25g,3-2,84.12,0.904,liquid
+5428-09-1,435,N-allylphthalimide,N-烯丙基邻苯二甲酰亚胺,,adamas,100mg,3-4,187.19,1.233,solid
+5433-01-2,436,3-Bromocumene,3-异丙基溴苯,,adamas,5g,1-3-3,199.09,1.285,liquid
+5470-11-1,437,Hydroxylamine hydrochloride,盐酸羟胺,,安耐吉,25g,2-2,69.49,1.67,solid
+5619-04-5,438,DL-Serine methyl ester hydrochloride,DL-丝氨酸甲酯盐酸盐,,adamas,5g,2-2,155.58,1.37,solid
+5739-10-6,439,2-(1H-Imidazol-1-yl)ethanamine,2-咪唑-1-乙胺,,adamas,1g,4-2-3,111.15,1.15,liquid
+6240-11-5,440,1-adamantaneethanol,1-羟乙基金刚烷,,adamas,1g,2-2,180.29,0.9003,solid
+6415-07-2,441,Tris(pyrrolidinophosphine) oxide,"三(N,N-四亚甲基)磷酰胺",,adamas,25g,4-4-1,257.32,1.12,liquid
+6493-05-6,442,pentoxifylline,己酮可可碱,,安耐吉,5g,3-2,278.31,1.1713,solid
+6999-03-7,443,1-Bromo-4-(trimethylsilyl)benzene,对溴苯基三甲基硅烷,,adamas,5g,1-3-1,229.19,1.173,solid
+7021-09-2,444,DL-alpha-Methoxyphenylacetic Acid,DL-α-甲氧基苯乙酸,,adamas,5g,1-4-2,166.17,1.1708,solid
+7098-07-9,445,1-Ethylimidazole,1-乙基咪唑,,adamas,25g,4-2-2,96.13,0.997,liquid
+7143-01-3,446,Methanesulfonic anhydride,甲基磺酸酐,,adamas,100g,3-4,174.19,1.36,solid
+7377-03-9,447,Octanohydroxamic Acid,辛酰氧肟酸,,adamas,100g,4-4-1,159.23,0.97,solid
+7440-05-3,448,Palladium,钯/碳,,adamas,5g,D2,106.42,1.025,solid
+7446-08-4,449,Selenium(IV) oxide,二氧化硒,,3A,25g,4-3C,110.96,4.81,solid
+7623-09-8,450,2-Chloropropionyl chloride,2-氯丙酰氯,,adamas,25g,1-5-3,126.97,1.308,liquid
+7647-10-1,451,Palladium(II) chloride,氯化钯,,adamas,1g,D2,177.33,40,solid
+7758-02-3,452,Potassium bromide,溴化钾,,麦克林,100g,4-2c,119.0,3.119,solid
+7758-11-4,453,Potassium phosphate dibasic,"磷酸氢二钾,无水",,毕得,500g,4-2b,174.18,2.44,solid
+7773-01-5,454,Manganese(II) chloride,氯化锰,,adamas,2g,D2,125.84,2.98,solid
+100-06-1,455,4'-Methoxyacetophenone,对甲氧基苯乙酮,,安耐吉,25g,2-3,150.17,1.08,solid
+100-07-2,456,4-Methoxybenzoyl chloride,对甲氧基苯甲酰氯,,adamas,25g,1-5-3,170.59,1.26,liquid
+100-09-4,457,4-Methoxybenzoic acid,对甲氧基苯甲酸,,毕得,100g,1-5-5,152.15,1.385,solid
+100-10-7,458,4-(dimethylamino)benzaldehyde,对二甲胺基苯甲醛,,adamas,100g,3-2A;4-3,149.19,1.1,solid
+100-13-0,459,4-Nitrostyrene,4-硝基苯乙烯,,adamas,5g,3-4,149.15,1.163,liquid
+100-21-0,460,terephthalic acid,对苯二甲酸,,adamas,25g,1-4-5,166.13,1.58,solid
+1002-28-4,461,3-Hexyn-1-ol,3-己炔-1-醇,,adamas;安耐吉,5g,2-2A;3-2,98.14,0.898,liquid
+10025-73-7,462,Chromium (III) Chloride,无水三氯化铬,,安耐吉,10g,gR-催化剂,158.36,2.87,solid
+10025-77-1,463,Iron chloride hexahydrate,三氯化铁(III) 六水合物,,安耐吉,500g,5-2,270.3,1.82,solid
+10025-78-2,464,Trichlorosilane,三氯硅烷,,安耐吉,75g,R1,135.45,1.342,liquid
+10025-82-8,465,Indium chloride,氯化铟,,adamas,5g,D2,221.18,3.46,solid
+10025-87-3,466,(Phosphorus oxitrichloride;Phosphorus(V) oxychloride),三氯氧磷,,安耐吉,100g;100ml,1-5-6;2-2C,153.33,1.645,liquid
+10026-13-8,467,Phosphorus pentachloride,五氯化磷,,3A;adamas,100g;500g;0,3-3;gL;危化品最底层,208.24,1.6,solid
+10026-17-2,468,Cobalt(II) fluoride,氟化钴,,adamas,1g,gR-催化剂,96.93,4.46,solid
+10026-22-9,469,Cobalt nitrate hexahydrate,"硝酸钴,六水",,adamas,100g,D2,291.03,1.88,solid
+10028-22-5,470,Iron Sulfate,硫酸铁,,adamas,25g,D3,399.88,3.097,solid
+10031-26-2,471,Iron(III) bromide,溴化铁(III),,adamas,5g,gR-催化剂,295.56,4.5,solid
+10031-43-3,472,Copper(II) nitrate trihydrate,"硝酸铜,三水合物",,adamas,25g,D3,144.57,2.32,solid
+10031-53-5,473,Europium(III) nitrate hexahydrate,硝酸铕(III) 六水合物,,adamas,25g,D2-2A,446.07,,solid
+10034-81-8,474,Magnesium perchlorate,高氯酸镁,,adamas,25g,7-2,223.2,2.21,solid
+100367-39-3,475,4-bromo-2-methoxypyridine,2-甲氧基-4-溴吡啶,,安耐吉,5g,1-3-3,188.02,1.53,solid
+1003886-05-2,476,"(4S,4'S)-2,2'-(Cyclopentane-1,1-diyl)-bis(4-benzyl-4,5-dihydrooxazole)","(4S,4'S)-2,2'-(环戊烷-1,1-二基)-双(4-苄基-4,5-二氢噁唑)",,BLD,250mg,gR-配体,388.5,1.21,solid
+100-39-0,477,Benzyl bromide,溴化苄,,adamas,100g,1-3-2,171.03,1.44,liquid
+100-41-4,478,ethylbenzene,乙基苯,,adamas,5ml,1-5-2,106.17,0.867,liquid
+100-42-5,479,Styrene,苯乙烯,,adamas,100ml,R8,104.15,0.906,liquid
+10043-35-3,480,boric acid,硼酸,,adamas,500g,4-2B,61.83,1.44,solid
+10043-52-4,481,Calcium chloride,无水氯化钙,,安耐吉,500g,6-1,110.98,1.086,solid
+10043-52-4,482,Calcium chloride,氯化钙,,毕得,500g,6-1,110.98,1.086,solid
+100-44-7,483,Benzyl chloride,氯化苄,,adamas,500g,1-2,126.58,1.1,liquid
+100-46-9,484,Benzylamine,苄胺,,adamas,25g,3-5,107.15,0.981,liquid
+100-47-0,485,Benzonitrile,苯甲腈,,adamas,100g,3-4,103.12,1.01,liquid
+100-48-1,486,4-Cyanopyridine,4-氰基吡啶,,adamas,25g,4-2-2,104.11,1.1145,solid
+10049-05-5,487,Chromium(II) Chloride,氯化铬,,安耐吉,1g,gR-催化剂,122.9,2.9,solid
+100-51-6,488,benzyl alcohol,苯甲醇,,adamas,100g,2-2,108.14,1.045,liquid
+100-52-7,489,benzaldehyde,苯甲醛,,adamas,100ml,4-3,106.12,1.044,liquid
+100-53-8,490,Benzyl mercaptan,苄硫醇,,adamas,25g,R1,124.2,1.058,liquid
+100-58-3,491,Phenylmagnesium bromide,苯基溴化镁,,adamas;安耐吉,100ml;1L;500ml,R2;R4;R5,181.31,1.134,solid
+100-59-4,492,PHENYLMAgNESIUM CHLORIDE,苯基氯化镁,,安耐吉,500ml,R5,136.86,0.98,solid
+100643-71-8,493,Desloratadine,地氯雷他定,,安耐吉,5g,R1,310.82,1.2,solid
+100-66-3,494,Anisole,苯甲醚,,adamas,100ml,溶剂,108.14,0.995,liquid
+100-69-6,495,2-Vinylpyridine,2-乙烯基吡啶,,安耐吉,5ml,R8,105.14,0.975,liquid
+1007-03-0,496,Cyclopropyl phenyl carbinol,环丙基苯基碳酸酯,,adamas,1g,2-2,148.2,1.037,liquid
+100-70-9,497,2-Cyanopyridine,2-氰基吡啶,,adamas,100g,3-4,104.11,1.081,liquid
+100-71-0,498,2-Ethylpyridine,2-乙基吡啶,,adamas,25ml,4-2-1,107.15,0.937,liquid
+1007-26-7,499,Neopentylbenzene,"(2,2-二甲基丙基)苯",,adamas,250mg,4-3A,148.24,0.858,liquid
+10075-52-2,500,5-bromo-1-methyl-1H-indole,5-溴-1-甲基-1H-吲哚,,adamas,5g,1-3-3,210.07,1.47,solid
+100-76-5,501,Quinuclidine,奎宁环,,安耐吉,1g,4-2-3,111.18,0.8928,solid
+100-86-7,502,2-Methyl-1-phenyl-2-propanol,二甲基苄基原醇,,安耐吉,25g,2-2,150.22,0.974,liquid
+1009-67-2,503,alpha-methylhydrocinnamic acid,a-甲基去氢肉桂酸,,adamas,5g;1g,1-4-2,164.2,1.065,solid
+101-02-0,504,Triphenyl phosphite,亚磷酸三苯酯,,adamas,100ml,3-3,310.28,1.184,liquid
+10124-43-3,505,cobalt sulfate anhydrous,硫酸钴,,安耐吉,25g,D2,155.0,3.71,solid
+1012-72-2,506,"1,4-Di-tert-butylbenzene",对二叔丁基苯,,adamas,1g,1-5-2,190.32,0.985,solid
+10139-47-6,507,Zinc iodide,碘化锌,,adamas,1g,5-1,319.2,4.74,solid
+101-41-7,508,Methyl phenylacetate,苯乙酸甲酯,,adamas,100ml,2-4,150.17,1.066,solid
+101-55-3,509,4-Bromophenoxybenzene,4-溴苯基-苯基醚,,adamas,5g,1-3-3,249.1,1.423,liquid
+1016-77-9,510,3-Bromobenzophenone,3-溴二苯甲酮,,adamas,1g,1-3-3,261.11,1.4245,solid
+101-70-2,511,"4,4'-Dimethoxydiphenylamine","4,4'-二甲氧基二苯胺",,adamas,25g,3-5,229.27,1.0955,solid
+10170-68-0,512,Chromium(III) chloride tetrahydrofuran complex (1:3),四氢呋喃氯化铬,,energy,1g,gR-催化剂,374.67,,solid
+101-81-5,513,Diphenylmethane,二苯基甲烷,,adamas,100g,1-5-2,168.23,1.006,liquid
+101-82-6,514,2-Benzylpyridine,2-苄基吡啶,,adamas,25ml,4-2-1,169.22,1.054,liquid
+101-83-7,515,Dicyclohexylamine,二环己胺,,安耐吉;adamas,100ml;500ml,3-5,181.32,0.912,liquid
+102-01-2,516,Acetoacetanilide,乙酰乙酰苯胺,,安耐吉,100g,4-4-2,177.2,1.1,solid
+102-07-8,517,"1,3-Diphenylurea","1,3-二苯脲",,adamas,100g,4-4-1,212.25,1.239,solid
+10213-10-2,518,Sodium tungstate dihydrate,钨酸钠 二水合物,,3A,100g,6-2,288.84,4.18,solid
+10226-29-6,519,1-Bromo-5-hexanone,6-溴-2-己酮,,adamas,1g,R2,179.05,1.3494,liquid
+10226-30-9,520,6-Chloro-2-hexanone,6-氯-2-己酮,,adamas,25g,2-3,134.6,1.02,liquid
+10229-10-4,521,3-Pentyn-1-ol,3-戊炔-1-醇,,安耐吉;adamas,1g,2-2A;R9,84.12,0.912,liquid
+102-47-6,522,"3,4-Dichlorobenzyl chloride","3,4-二氯氯苄",,adamas,25g,1-2-2,195.47,1.411,liquid
+102-54-5,523,ferrocene,二茂铁,,adamas,100g,D-2;D3,186.03,1.49,solid
+102-71-6,524,Triethanolamine,三乙醇胺,,安耐吉,100ml,2-2,149.19,1.124,liquid
+102-86-3,525,Trihexylamine,三己胺,,安耐吉,5ml,3-5,269.51,0.794,liquid
+10294-33-4,526,Boron tribromide,三溴化硼,,adamas,100ml,R3,250.52,2.6,liquid
+10294-41-4,527,Cerium nitrate hexahydrate,"硝酸铈,六水合物",,安耐吉,25g,gR-催化剂,221.14,4.37,solid
+10294-42-5,528,Cerium(IV) sulfate tetrahydrate,"硫酸铈,四水合物",,adamas,100g,D3,256.2,1.06,solid
+10297-05-9,529,1-Chloro-4-iodobutane,1-氯-4-碘丁烷,,adamas,1g,1-2-3;R2,218.46,1.785,solid
+10309-37-2,530,Bakuchiol,补骨脂酚,,安耐吉,1g,L6,256.38,0.963,liquid
+10315-07-8,531,1-Benzylpiperidine-4-carboxylic acid,1-苄基哌啶-4-甲酸,,adamas,5g,1-4-3,219.28,1.165,solid
+103-25-3,532,3-Phenylpropionic acid methyl ester,3-苯丙酸甲酯,,adamas,25g,2-4,164.2,1.043,solid
+103-26-4,533,methyl cinnamate,肉桂酸甲酯,,adamas,25g,2-4,162.19,1.092,solid
+103-30-0,534,trans-stilbene,"反-1,2-二苯乙烯",,adamas,0,3-4,180.25,0.97,solid
+103-32-2,535,N-Phenylbenzylamine,N-苯基苄胺,,adamas,25g,3-5,183.25,1.061,solid
+103-33-3,536,azobenzene,偶氮苯,,adamas,1g,4-2-2,182.22,1.09,solid
+103336-06-7,537,N-BOC-ALPHA-METHYL-L-PROLINE,N-BOC-2-甲基-L-脯氨酸,,安耐吉,5g,1-4-1;1-5A,229.27,1.16,solid
+10333-68-3,538,1-(2-CARBOXYPHENYL)PYRROLE,1-(2-羰基苯)吡咯,,adamas,1g,1-4-4,187.19,1.18,solid
+1034449-15-4,539,"1,3-Dicyclohexylbenzimidazolium chloride, min. 97%","1,3 - 二环己基苯并咪唑氯化物",,乐研,100mg,3-2,318.89,,solid
+10344-69-1,540,diethyl malonimidate dihydrochloride,丙二酰亚胺二乙酯 二盐酸盐,,adamas,5g,R2,231.12,,solid
+1034901-50-2,541,"[4,4'-Bis(1,1-dimethylethyl)-2,2'-bipyridine] nickel (II) dichloride","[4,4'-双(1,1-二甲基乙基)-2,2'-联吡啶]二氯化镍(II)",,毕得,10g,gR-催化剂,398.0,,solid
+103-63-9,542,(2-Bromoethyl)benzene,(2-溴乙基)苯,,adamas,25g,1-3-1,185.06,1.355,liquid
+103-64-0,543,beta-bromostyrene,溴代苏合香烯,,adamas,25g,R8,183.05,1.427,liquid
+10365-94-3,544,"benzene-1,3,5-tricarbonitrile","1,3,5-苯三氰基",,adamas,250mg,3-4,153.14,1.27,solid
+103-67-3,545,N-Methylbenzylamine,N-甲基苄胺,,adamas,100g,3-5,121.18,0.939,liquid
+103694-68-4,546,"2,2-dimethyl-3-(3-methylphenyl)propan-1-ol",美研醇,,安耐吉;adamas,5g;100g,2-2;R3,178.27,0.96,liquid
+10377-51-2,547,Lithium iodide,无水碘化锂,,adamas,1g,6-1,133.85,3.49,solid
+103-83-3,548,"N,N-Dimethylbenzylamine","N,N-二甲基苄胺",,adamas,100ml,3-5,135.21,0.9,liquid
+103-84-4,549,Acetanilide,N-乙酰苯胺,,adamas,25g,3-5,135.16,1.121,solid
+103-90-2,550,Acetaminophen,扑热息痛,,adamas,100g,4-3-2,151.16,1.293,solid
+103962-05-6,551,1-iodo-4-(trifluoromethoxy)benzene,1-碘-4-(三氟甲氧基)苯,,adamas,5g,1-2-3,288.01,1.84,liquid
+10401-11-3,552,3-Hydroxyphenylacetylene,3-羟苯基乙炔,,adamas,5g,3-2,118.13,1.083,solid
+104-01-8,553,4-Methoxyphenylacetic acid,对甲氧基苯乙酸,,安耐吉,25g,1-4-4,166.17,1.1708,solid
+104-15-4,554,p-Toluenesulfonic acid,对甲苯磺酸,,adamas,100g,3-4,172.2,1.07,solid
+1041642-13-0,555,Potassium trifluoro(isopropyl)borate,异丙基三氟硼酸钾,,安耐吉,5g,R3,149.99,,solid
+10416-59-8,556,"N,O-Bis(trimethylsilyl)acetamide","N,O-双(三甲基硅基)乙酰胺 (BSA)",,安耐吉,25ml,3-2,203.43,0.832,liquid
+104-20-1,557,4-(4-Methoxyphenyl)-2-butanone,4-(4-甲氧苯基)-2-丁酮,,adamas,25g,2-3,178.23,1.046,liquid
+104-45-0,558,4-N-PROPYLANISOLE,二氢大茴香脑,,adamas,5g,1-5-2,150.22,0.941,solid
+104-51-8,559,Butylbenzene,丁苯,,adamas,5g,1-5-2,134.22,0.86,liquid
+104-53-0,560,Phenylpropyl aldehyde,苯丙醛,,adamas;毕得,25g,4-3;R7,134.18,1.019,liquid
+104-54-1,561,Cinnamyl Alcohol,肉桂醇,,adamas,100g,2-2,134.18,1.044,solid
+104-55-2,562,Cinnamaldehyde,肉桂醛,,adamas,100g,4-3,132.16,1.05,liquid
+10472-24-9,563,Methyl 2-cyclopentanonecarboxylate,2-甲氧羰基环戊酮,,adamas,100g,R8,142.15,1.145,solid
+104-82-5,564,4-Methylbenzyl chloride,4-甲基氯苄,,adamas,100g,1-2-2,140.61,1.062,liquid
+104-83-6,565,4-Chlorobenzyl chloride,4-氯氯苄,,adamas,100g,1-2-2,161.03,1.26,solid
+10485-09-3,566,2-bromo-1H-indene,2-溴化茚,,adamas,5g,R9,195.06,1.57,solid
+10486-00-7,567,Sodium perborate tetrahydrate,过硼酸钠四水合物,,adamas,100g,6-2,101.83,1.73,solid
+104-87-0,568,p-Tolualdehyde,对甲基苯甲醛,,安耐吉,25g,4-3,120.15,1.019,liquid
+104-92-7,569,1-bromo-4-methoxybenzene,对溴苯甲醚,,adamas,100g,1-3-4,187.03,1.494,liquid
+10493-44-4,570,"4-Bromo-1,1,2-trifluorobutene-1","4-溴-1,1,2-三氟-1-丁烯",,adamas,5g,R3,188.97,1.639,liquid
+104-94-9,571,p-Anisidine,对氨基苯甲醚,,安耐吉,25g,3-5,123.15,1.06,solid
+10500-57-9,572,"5,6,7,8-Tetrahydroquinoline","5,6,7,8-四氢喹啉",,adamas,25g,4-2-2,133.19,1.08,liquid
+10521-91-2,573,5-Phenyl-1-pentanol,苯戊醇,,adamas,5g,2-2,164.24,0.975,liquid
+105-30-6,574,2-methyl-1-pentanol,2-甲基-1-戊醇,,安耐吉,25ml,2-2,102.17,0.824,liquid
+105-34-0,575,Methyl cyanoacetate,氰乙酸甲酯,,adamas,100g,2-4,99.09,1.123,liquid
+10534-59-5,576,Tetrabutylammonium acetate,四丁基乙酸铵,,adamas,100g,7-2,301.51,0.99,solid
+10544-50-0,577,cyclic octaatomic sulfur,八硫杂环辛烷,,adamas,25g,3-3B,256.52,1.862,liquid
+105-45-3,578,Methyl acetoacetate,乙酰乙酸甲酯,,adamas,100g,2-4,116.12,1.076,liquid
+105-53-3,579,Diethyl malonate,丙二酸二乙酯,,安耐吉,100g,2-4,160.17,1.055,liquid
+105-58-8,580,Diethyl carbonate,碳酸二乙酯(DEC),,adamas,100ml,2-4,118.13,0.975,liquid
+10592-27-5,581,"2,3-DIHYDRO-1H-PYRROLO[2,3-B]PYRIDINE","2,3-二氢-7-氮杂吲哚",,adamas,5g,4-2-2,120.15,1.23,solid
+10601-99-7,582,3-Ethynylbenzoic acid,3-乙炔基苯甲酸,,adamas,5g,3-2,146.14,1.23,solid
+10602-00-3,583,4-Ethynylbenzoic acid,4-乙炔苯甲酸,,adamas,5g,3-2,146.14,1.23,solid
+106-23-0,584,citronellal,香茅醛,,adamas,25ml,4-3,154.25,0.857,liquid
+106-39-8,585,1-Bromo-4-chlorobenzene,对溴氯苯,,adamas,25g,1-2-1,191.45,1.651,solid
+106-41-2,586,4-Bromophbenol,4-溴苯酚,,安耐吉,25g,4-3-2,173.01,1.84,solid
+106-44-5,384,p-Cresol,对甲基苯酚,,adamas,25g,4-3-3,108.14,1.034,solid
+106-45-6,587,p-Toluenethiol,4-甲苯硫酚,,adamas,5g,1-5c,124.2,1.022,solid
+106-46-7,588,"1,4-Dichlorobenzene","1,4－二氯苯",,安耐吉,100g,1-2-1;1-3B,147.0,1.241,solid
+106-47-8,589,4-Chloroaniline,对氯苯胺,,安耐吉,25g,1-2-1,127.57,1.43,solid
+106-49-0,590,p-Toluidine,对甲苯胺,,安耐吉,100g,3-5,107.15,0.973,solid
+1066-54-2,591,Trimethylsilylacetylene,三甲基硅乙炔,,adamas;毕得,100g;25g,3-2;R7,98.22,0.695,liquid
+106685-40-9,592,adapalene,阿达帕林,,adamas,1g,3-2,412.52,1.233,solid
+1067-87-4,593,Diethyl Allylphosphonate,烯丙基磷酸二乙酯,,adamas,5ml,3-4,178.17,1.035,liquid
+106-93-4,594,"1,2-Dibromoethane","1,2-二溴乙烷",,安耐吉,25g,1-3,187.86,2.18,liquid
+106-94-5,595,1-Bromopropane,1-溴丙烷,,安耐吉,25g,1-3-1,122.99,1.354,liquid
+106-95-6,596,Allyl bromide,3-溴丙烯,,adamas,25g,3-4,120.98,1.398,liquid
+106-99-0,597,"1,3-Butadiene","1,3-丁二烯",,安耐吉,100ml,R3;R9,54.09,0.62,liquid
+107-02-8,598,Acrolein,丙烯醛,,安耐吉,25ml,R8,56.063,0.8,liquid
+107-05-1,599,Allyl chloride,氯丙烯,,adamas,100ml,R3,76.52,0.939,liquid
+1070663-78-3,600,"2-(Dicyclohexylphosphino)-3,6-dimethoxy-2'-4'-6'-tri-i-propyl-1,1'-biphenyl, min. 98% BrettPhos","2-(二环己基膦)-3,6-二甲氧基-2'-4'-6'-三-I-丙基-11'-联苯",,毕得,5g,gR,536.77,,solid
+1070-89-9,601,Sodium bis(trimethylsilyl)amide,双(三甲基硅烷基)氨基钠,,adamas;百灵威,100ml,R5,183.37,0.904,solid
+107-13-1,602,Acrylonitrile,丙烯腈,,adamas,100ml,R6,53.06,0.806,liquid
+107-21-1,603,Ethyleneglycol,乙二醇,,安耐吉,500ml,4-2b,62.07,1.113,liquid
+1072-63-5,604,1-Vinylimidazole,1-乙烯基咪唑,,adamas,5g,4-2-3,94.11,1.039,solid
+1073-67-2,605,4-Chlorostyrene,对氯苯乙烯,,毕得,25g,R8,138.59,1.155,liquid
+1074-82-4,606,Potassium phthalimide,邻苯二甲酰亚胺钾,,adamas,100g,4-2-2,186.23,1.63,solid
+1075-49-6,607,4-Vinylbenzoic Acid,4-乙烯基苯甲酸,,adamas,1g,1-4-5,148.16,1.3,solid
+107-58-4,608,N-tert-butylacrylamide,N-叔丁基丙烯酰胺,,adamas,25g,R1,127.18,1.0083,solid
+107-59-5,609,tert-Butyl chloroacetate,氯乙酸叔丁酯,,安耐吉,25g,1-2-1,150.6,1.053,liquid
+1076-96-6,610,Methyl 4-vinylbenzoate,4-乙烯基-苯甲酸甲酯,,adamas,1g,3-4,162.19,1.058,solid
+107-85-7,611,Isopentylamine,异戊胺,,adamas,5ml,3-5,87.16,0.751,liquid
+107-93-7,612,Crotonic Acid,巴豆酸,,adamas,1g,L6,86.09,1.027,solid
+107-95-9,613,β-Alanine,β-丙氨酸,,adamas,25g,1-4-3,89.09,1.437,solid
+107-96-0,614,3-Mercaptopropionic acid,3-巯基丙酸,,adamas,25g,3-3B,106.14,1.218,liquid
+1079-66-9,615,Chlorodiphenylphosphine,二苯基氯化膦,,毕得,5g,3-3,220.63,1.229,liquid
+108-03-2,616,1-Nitropropane,1-硝基丙烷,,adamas;安耐吉,0;500ml,2-2A;4-3C,89.09,0.998,liquid
+1080-44-0,617,N-P-TOSYLgLYCINE,N-对甲苯磺酰基甘氨酸,,adamas,5g,1-4-2,229.25,1.369,solid
+108-05-4,618,Vinyl acetate,乙酸乙烯酯,,安耐吉,100ml,3-4,86.09,0.934,liquid
+108078-14-4,619,2-Iodo-3-methylbenzoic acid,2-碘-3-甲基苯甲酸,,adamas,25g;5g,1-2-3;1-4-3,262.04,1.867,solid
+108-18-9,620,Diisopropylamine,二异丙胺,,百灵威;安耐吉,500ml,3-1A;3-5,101.19,0.722,liquid
+108-21-4,621,Isopropyl acetate,醋酸异丙酯,,安耐吉,100ml,gL,102.13,0.872,liquid
+108-22-5,622,Isopropenyl Acetate,乙酸异丙烯酯,,安耐吉,100ml,2-4,100.12,0.909,liquid
+108-29-2,623,纬-Valerolactone,γ-戊内酯,,adamas,500g,4-3C,100.12,1.05,liquid
+108-31-6,624,Maleic anhydride,马来酸酐,,adamas,100g,2-4,98.06,1.48,solid
+108-32-7,625,Propylene carbonate,碳酸丙烯酯,,adamas,100ml,3-5B,102.09,1.204,liquid
+1083-30-3,626,BETA-PHENYLPROPIOPHENONE,ω-苄基苯乙酮,,adamas,5g;1g,R1;R8,210.27,1.0614,solid
+108-36-1,627,m-Dibromobenzene,"1,3-二溴苯",,adamas,5g,1-3-3,235.9,1.952,liquid
+108-39-4,628,m-Cresol,间甲酚,,adamas,25g,4-3-3,108.14,1.034,liquid
+108438-43-3,629,1-methylindole-3-carboxylic acid methyl ester,1H-吲哚-3-甲酸甲酯,,adamas,1g,2-4,189.21,1.14,solid
+108-44-1,630,m-Toluidine,3-甲基苯胺,,adamas,25g,3-5,107.15,0.999,liquid
+108-47-4,631,"2,4-Lutidine","2,4-二甲基吡啶",,adamas,5g,4-2-1,107.15,0.927,liquid
+108-48-5,632,"2,6-Lutidine","2,6-二甲基吡啶",,adamas,100ml,4-2-1,107.15,0.92,liquid
+108-55-4,633,glutaric anhydride,戊二酸酐,,adamas,100g,2-4,114.1,1.411,solid
+108-59-8,634,Dimethyl Malonate,丙二酸二甲酯,,安耐吉;energy,500g;100g,2-4,132.11,1.156,liquid
+108-67-8,635,Mesitylene,均三甲苯,,adamas,100ml,1-5-2,120.19,0.864,liquid
+108-69-0,636,"3,5-Dimethylaniline","1-氨基-3,5-二甲苯",,adamas,5g,3-5,121.18,0.972,liquid
+108-75-8,637,"2,4,6-Trimethylpyridine","2,4,6-三甲基吡啶",,adamas,25ml,4-2-1,121.18,0.917,liquid
+108-85-0,638,Bromocyclohexane,溴代环己烷,,毕得,100g,1-3-2,163.06,1.324,liquid
+108-86-1,639,Bromobenzene,溴苯,,adamas,100g,1-3,157.01,1.491,liquid
+108-89-4,640,4-Methylpyridine,4-甲基吡啶,,adamas,25ml,4-2-1,93.13,0.957,liquid
+108-90-7,641,Chlorobenzene,氯苯,,安耐吉,0,1-3B,112.56,1.106,liquid
+108915-04-4,642,"2-[(4S)-4,5-dihydro-4-(1-Methylethyl)-2-oxazolyl]- yridine","(S)-2-(4-异丙基-4,5-二氢-噁唑-2-基)-吡啶",,BLD,1g,R4,190.24,1.14,solid
+108915-08-8,643,"2-[(4S)-4,5-dihydro-4-(phenylMethyl)-2-oxazolyl]- Pyridine","(S)-2-(4-苄基-4,5-二氢-噁唑-2-基)-吡啶",,BLD,250mg,R4,238.28,1.16,liquid
+108-91-8,644,Cyclohexylamine,环己胺,,adamas,100ml,3-5,99.17,0.867,liquid
+108-95-2,645,Phenol,苯酚,,安耐吉,1000g,4-3,94.11,1.071,solid
+109-02-4,646,4-Methylmorpholine,N-甲基吗啉,,安耐吉,100ml;500ml,3-5;4-2,101.15,0.92,liquid
+109-04-6,647,2-Bromopyridine,2-溴吡啶,,毕得,100g,1-3-3,158.0,1.657,solid
+109-06-8,648,2-Picoline,2-甲基吡啶,,TCI,100ml,4-2-1,93.13,0.943,liquid
+1092775-62-6,649,[Ir{dFCF3ppy}2(bpy)]PF6,"二[2-(2,4-二氟苯基)-5-三氟甲基吡啶][2-2'-联吡啶]铱二(六氟磷酸)盐",,,1g,gR-催化剂,1009.6987322,,solid
+109613-00-5,650,4-Acetylphenyltrifluoromethanesulphonate,4-乙酰苯基三氟甲烷磺酸酯,,adamas,1g,2-4,268.21,1.418,liquid
+109-65-9,651,n-Butyl bromide,1-溴丁烷,,adamas,100g,1-3-1,137.02,1.276,liquid
+109-66-0,652,Pentane,正戊烷,,adamas,500ml,溶剂柜,72.15,0.626,liquid
+109-70-6,653,1-Bromo-3-chloropropane,1-溴-3-氯丙烷,,adamas,25g,1-3-1,157.44,1.592,liquid
+109-72-8,654,n-Butyllithium,正丁基锂,,安耐吉;adamas,500ml;100ml,R5,64.06,0.68,liquid
+109-73-9,655,n-Butylamine,正丁胺,,安耐吉,500ml,3-5,73.14,0.74,liquid
+109-77-3,656,Malononitrile,丙二腈,,adamas,100g,3-4,66.06,1.049,solid
+109-79-5,657,Butanethiol,丁硫醇,,adamas,25g,R1,90.19,0.842,liquid
+109-86-4,658,2-Methoxyethanol,乙二醇甲醚,,adamas,100ml,溶剂柜,76.09,0.965,liquid
+109-97-7,659,Pyrrole,吡咯,,adamas,25ml,R9,67.09,0.967,liquid
+110-05-4,660,Di-tert-butyl peroxide,二叔丁基过氧化物,,adamas;安耐吉,100g;100ml,R1;R7,146.23,0.796,liquid
+110-18-9,661,"N,N,N',N'-Tetramethylethylenediamine","N,N,N',N'-四甲基乙二胺",,安耐吉,100ml,3-5,116.2,0.775,liquid
+110-52-1,662,"1,4-Dibromobutane","1,4-二溴丁烷",,adamas,100g,1-3-1,215.91,1.808,liquid
+110-53-2,663,1-Bromopentane,1-溴戊烷,,adamas,25g,1-3-2,151.04,1.218,liquid
+110-59-8,664,Valeronitrile,戊腈,,adamas,25g,3-4,83.13,0.795,liquid
+110-62-3,665,Valeraldehyde,正戊醛,,adamas,100ml,4-3,86.13,0.81,liquid
+110-70-3,666,"N,N'-Dimethylethylenediamine","N,N'-二甲基乙二胺",,adamas,25ml,3-5,88.15,0.819,liquid
+11077-24-0,667,ferrocenium hexafluorophosphate,二茂铁六氟磷酸,,ADAMAS;安耐吉,0;250mg,gR-催化剂;R7,331.0,,solid
+110-83-8,668,Cyclohexene,环己烯,,adamas,100ml,L1,82.14,0.811,liquid
+110-86-1,669,Pyridine,吡啶,,安耐吉,100ml;500ml,3-1B;R3,79.1,0.978,liquid
+110-87-2,670,"3,4-Dihydro-2H-pyran","3,4-二氢-2H-吡喃 (DHP)",,adamas,100ml,3-4,84.12,0.922,liquid
+110-91-8,671,Morpholine,吗啡啉,,adamas,100g,3-5,87.12,0.996,liquid
+110-93-0,672,6-Methyl-5-hepten-2-one,甲基庚烯酮,,adamas,100ml,2-3,126.2,0.855,liquid
+111-02-4,673,Squalene,反式角鲨烯,,adamas,25ml,R1,410.72,0.858,liquid
+111128-12-2,674,2-[4-(Bromomethyl)phenyl]propionic Acid,2-[4-(溴甲基)苯基]丙酸,,adamas,100g,1-4-2,243.1,1.4557,solid
+11121-48-5,675,FOOD RED NO 105,食用色素红色105号,,adamas,100mg,3-1,1017.64,,solid
+111-26-2,676,Hexylamine,正己胺,,adamas,25ml,3-5,101.19,0.766,liquid
+1112-67-0,677,Tetrabutylammonium chloride,四丁基氯化铵,,adamas,500g;100g;5g,7-2;D1-4A,277.92,0.98,solid
+1113-38-8,678,Ammonium oxalate,草酸铵,,adamas,25g,6-3,124.1,1.5,solid
+111-34-2,679,n-Butyl vinyl ether,乙烯基正丁醚,,安耐吉,25g,3-4,100.16,0.774,liquid
+11136-36-0,680,bis(pentamethylcyclopentadienyl)titanium dichloride,双(五甲基环戊烯)二氯化钛,,adamas,0.25g,gR-催化剂,389.23,,solid
+111-69-3,681,Adiponitrile,己二腈,,adamas,100g,3-4,108.14,0.951,liquid
+111-81-9,682,Methyl 10-Undecenoate,10-十一烯酸甲酯,,adamas,5g,3-4,198.3,0.882,solid
+1118-68-9,683,"N,N-Dimethylglycine","N,N-二甲基甘氨酸",,adamas,5g,1-4-2,103.12,1,solid
+1118-71-4,684,"2,2,6,6-Tetramethyl-3,5-heptanedione","2,2,6,6-四甲基-3,5-庚二酮",,adamas,25g,2-3,184.28,0.883,solid
+1119-51-3,685,5-Bromo-1-pentene,5-溴-1-戊烯,,adamas,25g,R6,149.03,1.258,liquid
+1119-60-4,686,6-Heptenoic acid,6-庚酸,,adamas,1g,3-4,128.17,0.946,liquid
+1121-07-9,687,N-Methylsuccinimide,N-甲基丁二酰胺,,安耐吉,5g,1-2-3,113.11,1.2416,solid
+1121-60-4,688,2-Pyridinecarboxaldehyde,吡啶-2-甲醛,,安耐吉,25g,4-2-3,107.11,1.126,liquid
+112245-09-7,689,(R)-tert-leucinol,D-叔亮氨醇,,adamas,5g,2-2,117.19,0.9,solid
+112245-13-3,690,(S)-TERT-LEUCINOL,S-叔亮氨醇,,adamas,25g,2-2,117.19,0.9,solid
+1122-58-3,691,4-Dimethylaminopyridine,4-二甲氨基吡啶 (DMAP),DMAP,毕得,500g,4-2,122.17,0.906,solid
+1122-91-4,692,4-Bromobenzaldehyde,对溴苯甲醛,,adamas,25g,4-3,185.02,1.85,solid
+112-31-2,693,Decyl aldehyde,癸醛,,energy,100ml,R7,156.27,0.83,liquid
+1123-25-7,694,1-Methyl-1-cyclohexanecarboxylic acid,1-甲基-1-环已羧酸,,adamas,1g,1-4-2,142.2,1.0037,solid
+1123-85-9,695,(2-phenyl-1-propanol;beta-Methylphenethyl alcohol),2-苯基-1-丙醇,,安耐吉,5g;25ml,2-2;gRLW,136.19,0.975,liquid
+112-40-3,696,Dodecane,十二烷,,安耐吉,100ml,2-3a,170.33,0.75,liquid
+112-41-4,697,1-Dodecene,1-十二烯,,adamas,25ml,3-4,168.32,0.758,liquid
+112-43-6,698,10-Undecen-1-ol,10-十一烯醇,,adamas,5ml,3-4,170.29,0.85,liquid
+1125-26-4,699,Vinylphenyldimethylsilane,二甲基苯基乙烯基硅烷,,adamas;安耐吉,5g;25ml,3-2,162.3,0.892,liquid
+1126-46-1,700,Methyl 4-chlorobenzoate,4-氯苯甲酸甲酯,,毕得,5g,1-3-2,170.59,1.382,solid
+1127-76-0,701,1-Ethylnaphthalene,1-乙基萘,,安耐吉,5g,R8,156.22,1.008,liquid
+112-80-1,702,oleic acid,油酸,,adamas,25ml,1-4-3,282.46,0.89,liquid
+112-82-3,703,1-Bromohexadecane,溴代十六烷,,adamas,25ml,1-3-1,305.34,0.999,liquid
+1129-65-3,704,1-Phenyl-1-hexyne,1-苯基-1-己炔,,adamas;毕得,5g;1g,3-2;4-3A;gRH,158.24,0.9,liquid
+1133-80-8,705,2-Bromofluorene,2-溴芴,,adamas,5g,1-3-3,245.11,1.4187,solid
+1134-35-6,706,"4,4'-Dimethyl-2,2'-dipyridyl","4,4'-二甲基-2,2'-联吡啶",,安耐吉,25g,gR-配体,184.24,1.116,solid
+113583-35-0,707,"2-Methylsulfonyl-4,6-dimethoxypyrimidine","4,6-二甲氧基-2-甲磺酰基嘧啶",,adamas,25g,3-4,218.23,1.317,solid
+1137-68-4,708,2-(2-Pyridyl)benzimidazole,2-(2-吡啶基)苯并咪唑,,adamas,1g,gR-配体,195.22,1.2142,solid
+1141-38-4,709,"2,6-NAPHTHALENEDICARBOXYLIC ACID","2,6-萘二羧酸",,adamas,5g,1-4-4,216.19,1.5,solid
+1148-79-4,710,"2,2':6',2''-Terpyridine",α，α，α-三联吡啶,,毕得,1g,gR-配体,233.27,1.1901,solid
+1149-23-1,711,"Diethyl 1,4-dihydro-2,6-dimethylpyridine-3,5-dicarboxylate","2,6-二甲基-1,4-二氢-3,5-吡啶二羧酸二乙酯",,adamas,25g,4-2-3,253.29,1.104,solid
+115091-29-7,712,"4,4',4''-Tri-tert-Butyl-2,2':6',2''-terpyridine","4,4',4″-三叔丁基-2,2':6',2″-三联吡啶",,毕得;adamas,250mg;5g,2-4a;gR-配体,401.59,1.004,solid
+115-11-7,713,Isobutylene,异丁烯,,adamas,100g,R3,56.11,0.5879,liquid
+115-19-5,714,2-Methyl-3-butyn-2-ol,2-甲基-3-丁炔-2-醇,,adamas,25ml,3-2,84.12,0.868,liquid
+115262-01-6,715,TriMethyl(broModifluoroMethyl)silane,二氟溴甲基三甲基硅烷,,安耐吉,5g,3-2,203.1,1.306,liquid
+115-86-6,716,Triphenylphosphate,磷酸三苯酯,,安耐吉,100g,3-3,326.28,1.2055,solid
+116230-30-9,717,2-Bromo-7-hydroxynaphthalene,2-溴-7-羟基萘,,adamas,25g,4-3-3,223.07,1.614,solid
+117-08-8,718,Tetrachlorophthalic anhydride,四氯苯二甲酸酐,,adamas,100g,1-5-1,285.9,1.49,solid
+117-34-0,719,"2,2-Diphenylacetic acid","2,2-二苯基乙酸",,安耐吉,5g,1-5-1,212.24,1.257,solid
+117408-98-7,720,"2-[(4S)-4-tert-butyl-4,5-dihydro-1,3-oxazol-2-yl]pyridine",(S)-4-叔丁基-2-(2-氮苯基)恶唑啉,,毕得,1g,gR-配体,204.27,1.08,solid
+117408-99-8,721,"(S)-2-(4-Phenyl-4,5-dihydro-oxazol-2-yl)-pyridine","(S)-2-(4-苯基-4,5-二氢-噁唑-2-基)-吡啶",,BLD,1g,gL-R,224.26,1.19,liquid
+1186-10-3,722,Diethyl 3-Bromopropylphosphonate,二乙基(3-溴丙基)膦酸酯,,adamas,1g,1-3-1,259.08,1.348,liquid
+118628-68-5,723,"(1R,2R)-(+)-N,N'-Dimethyl-1,2-diphenyl-1,2-ethane diamine","(1R,2R)-(+)-N,N'-二甲基-1,2-二苯基-1,2-乙烷二胺",,adamas,250mg,3-5,240.34,1.0485,solid
+118-72-9,724,"2,6-Dimethylthiophenol","2,6-二甲基苯硫酚",,adamas,1g,R3,138.23,1.038,liquid
+118-90-1,725,o-Toluic acid,邻甲基苯甲酸,,adamas,25g,1-5-1,136.15,1.062,solid
+118-91-2,726,2-Chlorobenzoic acid,2-氯苯甲酸,,adamas,25g,1-5-5,156.57,1.544,solid
+118-93-4,727,2'-Hydroxyacetophenone,2'-羟基苯乙酮,,adamas,25g,4-3-2,136.15,1.131,liquid
+118949-61-4,728,"2,6-Bis[(4S)-(-)-isopropyl-2-oxazolin-2-yl]pyridine","(S,S)-2,6-双(4-异丙基-2-噁唑啉-2-基)吡啶",,BLD,1g,gR-配体,301.38,1.23,solid
+1191-95-3,729,Cyclobutanone,环丁酮,,adamas,1g,R1,70.09,0.938,liquid
+119-26-6,730,"2,4-Dinitrophenylhydrazine","2,4-二硝基苯肼",,安耐吉,25g,3-5,198.136,1.7,solid
+1193-82-4,731,methyl phenyl sulfoxide,甲基苯基亚砜,,adamas,5g,4-4-3,140.2,1.1182,solid
+119-53-9,732,benzoin,安息香,,adamas,100g,2-3,212.24,1.31,solid
+1195-45-5,733,4-Fluorophenyl isocyanate,异氰酸对氟苯基酯,,adamas,25g,R7,137.11,1.206,liquid
+119-61-9,734,Benzophenone,二苯甲酮,,adamas,100g,2-3,182.22,1.11,solid
+119-64-2,735,"1,2,3,4-Tetrahydronaphthalene","1,2,3,4-四氢萘",,adamas,100g,1-5-2,132.2,0.973,liquid
+1196-57-2,736,2-Quinoxalinone,2-羟基喹喔啉,,adamas,5g,4-3-3,146.15,1.2312,solid
+119-91-5,737,"2,2'-Biquinoline","2,2'-联喹啉",,毕得,5g,gR-配体,256.3,0.9734,solid
+120-12-7,738,Anthracene,蒽,,adamas,25g,R2,178.23,1.28,solid
+12012-95-2,739,Allylpalladium(II) Chloride Dimer,氯化烯丙基钯(II)二聚物,,adamas,250mg,r3,365.89,,solid
+12015-14-4,740,Ammonium-D4 chloride,氯化铵-d4,,麦克林,0,1-1A,53.49,,solid
+120-23-0,741,2-Naphthyloxyacetic Acid,2-萘氧基乙酸,,adamas,25g,1-4-1,202.21,1.1868,solid
+12027-06-4,742,Ammonium iodide,碘化铵,,adamas,25g,7-2,144.94,2.51,solid
+120-33-2,743,Ethyl m-toluate,间甲基苯甲酸乙酯,,adamas,1g,2-4,164.2,1.03,liquid
+1205-02-3,744,Benzoyl-DL-alanine,N-苄基-DL-丙氨酸,,安耐吉,5g,1-4-2,193.2,1.2307,solid
+12069-32-8,745,Boron carbide,纳米碳化硼,,adamas,25g,7-1,55.25,2.51,solid
+12069-69-1,746,Cupric carbonate basic,碱式碳酸铜,,adamas,100g,D3,221.11,4,solid
+120-72-9,747,Indole,吲哚,,adamas,25g,4-2-2,117.15,1.22,solid
+1207294-92-5,748,"5,7-Di-tert-butyl-3-phenylbenzo[d]oxazol-3-ium tetrafluoroborate","5,7-二叔丁基-3-苯基苯并[D]恶唑-3-鎓四氟硼酸盐",,adamas,5g;1g,2-5C;3-2,395.25,,solid
+120801-75-4,749,Trimethylsilyl 2-(fluorosulphonyl)difluoroacetate,三甲基硅烷基 2-(氟磺酰基)二氟乙酸酯,,adamas,5g;0,2-3c;3-4A;R9,250.27,1.27,liquid
+120801-75-4,750,Trimethylsilyl 2-(fluorosulphonyl)difluoroacetate,"三甲硅烷基 2,2-二氟-2-(氟磺酰)醋酸盐",,adamas,5g,4-3a;R1,250.27,1.27,liquid
+120-80-9,751,Catechol,邻苯二酚,,安耐吉,25g,4-3-3,110.11,1.371,solid
+120-92-3,752,Cyclopentanone,环戊酮,,安耐吉,100ml,2-3,84.12,0.951,liquid
+1212-08-4,753,BENZENETHIOSULFONIC ACID S-PHENYL ESTER,S-苯基硫代苯基砜,,adamas;安耐吉,1g;5g,3-3B,250.34,1.35,solid
+12124-97-9,754,Ammonium bromide,溴化铵,,adamas,25g,D2-4A,97.94,2.43,solid
+12125-01-8,755,Ammonium fluoride,氟化铵,,安耐吉,500g,4-2c,37.04,1.11,solid
+12125-02-9,756,Ammonium chloride,氯化铵,,general,500g,6-3,53.49,1.52,solid
+12129-06-5,757,Pentamethylcyclopentadienyltitanium trichloride,五甲基环戊二烯基三氯化钛,,adamas,250mg,gR-催化剂,289.45,,solid
+121-34-6,758,Vanillic acid,香草酸,,adamas,5g,1-4-5,168.15,1.3037,solid
+121-39-1,759,ETHYL 3-PHENYLgLYCIDATE,3-苯基环氧乙烷甲酸乙酯,,adamas,5g,2-4,192.21,1.102,liquid
+121-44-8,760,Triethylamine,三乙胺,,安耐吉,100ml,3-2C;R2,101.19,0.728,liquid
+12150-46-8,761,"1,1'-Bis(diphenylphosphino)ferrocene","1,1'-双(二苯基膦)二茂铁 (DPPF)",,adamas,25g,3-3,554.38,,solid
+121-69-7,762,"N,N-Dimethylaniline","N,N-二甲基苯胺",,安耐吉,100ml,3-5,121.18,0.956,liquid
+1217-45-4,763,"9,10-Dicyanoanthracene","9,10-二氰基蒽",,adamas,1g,3-4,228.25,1.2027,solid
+121-88-0,764,2-Amino-5-nitrophenol,2-氨基-5-硝基苯酚,,adamas,5g,3-5,154.12,1.3617,solid
+121-98-2,765,Methyl anisate,4-甲氧基苯甲酸甲酯,,adamas,25g,2-4,166.17,1.1708,solid
+122-18-9,766,Benzyldimethylhexadecylammonium chloride,西他氯铵,,adamas,100g,7-2,396.09,0.9089,solid
+122-39-4,767,Diphenylamine,二苯胺,,麦克林,100g,3-5,169.22,1.16,solid
+122-48-5,768,Vanillylacetone,姜酮,,adamas,25g,2-3,194.23,1.14,solid
+122-52-1,769,Triethyl phosphite,亚磷酸三乙酯,,安耐吉,100ml,3-3,166.16,0.969,liquid
+122-59-8,770,Phenoxyacetic Acid,苯氧乙酸,,adamas,25g,1-4-3;1-5A,152.15,1.2143,solid
+122-66-7,771,"1,2-diphenylhydrazine",二苯肼,,adamas,5g,R2,184.24,1.158,solid
+1226898-27-6,772,(R)-4-tert-Butyl-2-[(SP)-2-(diphenylphosphino)ferrocenyl]-2-oxazoline,(4R)-4-叔丁基-2-[(2S)-2-(二苯基膦基)二茂铁基]-2-噁唑啉,,BLD,250mg,R4,495.373361,,solid
+122-84-9,773,1-(4-methoxyphenyl)propan-2-one,对甲氧基苯基丙酮,,adamas,25g,2-2b,164.2,1.067,liquid
+1228571-53-6,774,(R)-2-(1-aminoethyl)-4-chlorophenol,(R)-2-(1-氨乙基)-4-氯苯酚,,adamas,5g,3-2B,171.62,1.252,solid
+122860-33-7,775,1-cbz-4-hydroxymethylpiperidine,1-Cbz-4-羟甲基哌啶,,adamas,25g,2-4,249.31,1.162,liquid
+122918-25-6,776,2-Bromo-6-cyanopyridine,2-溴-6-氰基吡啶,,adamas,10 g,75-62-7,183.01,1.72,solid
+122-97-4,777,3-Phenyl-1-propanol,3-苯丙醇,,adamas;安耐吉,100ml;25g,2-2,136.19,1.001,liquid
+123-11-5,778,p-Anisaldehyde,对甲氧基苯甲醛,,adamas,25g,4-3,136.15,1.121,liquid
+123-19-3,779,4-Heptanone,4-庚酮,,adamas,25ml,2-3,114.19,0.817,liquid
+123-38-6,780,Propionaldehyde,丙醛,,麦克林,500ml,R1,58.08,0.805,liquid
+123-56-8,781,Succinimide,丁二酰亚胺,,adamas,100g,4-4-2,99.09,1.41,solid
+123-62-6,782,Propionic Anhydride,丙酸酐,,adamas,25g,2-4,130.14,1.015,liquid
+123640-38-0,783,"2,6-Di(1-pyrazolyl)pyridine","2,6-二(1-吡唑基)吡啶",,adamas,1g,gR-配体,211.22,1.32,solid
+123-75-1,784,Pyrrolidine,四氢吡咯,,adamas,100ml,3-5,71.12,0.852,liquid
+124-40-3,785,Dimethylamine,二甲胺,,adamas,100ml,3-5,45.08,0.89,liquid
+124-41-4,786,Sodium methylate,甲醇钠,,adamas,500g,6-2,54.02,0.97,liquid
+1246401-50-2,787,"(4R,4'R)-2,2'-[2-phenyl-1- (phenylmethyl)ethylidene]bis[4-(1-methylethyl)-4,5-dihydro-Oxazole","(4R,4'R)-2,2'-(1,3-二苯基丙烷-2,2-二基)双(4-苯基-4,5-二氢噁唑)",,adamas;BLD,250mg,gL-F;gL-R,486.6,,solid
+124-73-2,788,"1,2-dibromotetrafluoroethane","1,2-二溴四氟乙烷",,,100g,L2,259.82,2.175,liquid
+1252576-14-9,789,"(S)-4-benzyl-2-(quinolin-2-yl)-4,5-dihydrooxazole",(S)-4-苄基-2-(喹啉-2-基)噁唑啉,,BLD,250mg,gL-R,288.34,,solid
+1257527-14-2,790,(S)-5-CF3-pyrox-tBu,"[2-[(4S)-4-叔丁基-4,5-二氢-2-恶唑基]-4-三氟甲基吡啶]",,adamas,100mg,3-3,272.27,1.25,solid
+126-07-8,791,(+)-griseofulvin,(+)-灰黄霉素,,adamas,5g,3-2,352.77,1.2579,solid
+126213-50-1,792,"3,4-Ethylenedioxythiophene","3,4-乙烯二氧噻吩",,adamas,5g,2-3,142.18,1.331,liquid
+126-33-0,793,Sulfolane,环丁砜,,adamas;安耐吉,100g;500g,3-4;4-3C,120.17,1.261,liquid
+126456-43-7,794,"(1S,2R)-(-)-cis-1-Aminoindan-2-ol","(1S,2R)-(-)-顺式-1-氨基-2-茚醇",,adamas,25g,2-2,149.19,1.0753,solid
+126456-43-7,795,"(1S,2R)-(-)-cis-1-Aminoindan-2-ol","(1S,2R)-(-)-1-氨基-2-茚醇",,adamas,100g,2-2,149.19,1.0753,solid
+127-08-2,796,Potassium acetate,乙酸钾,,毕得,500g,6-2,98.14,1.57,solid
+1270-98-0,797,Cyclopentadienyltitanium(IV) Trichloride,三氯一茂钛,,毕得;adamas,1g,D2;gR-催化剂,219.32,,solid
+1271-19-8,798,Titanocene Dichloride,二氯二茂钛,,adamas,25g,gR-催化剂,248.96,1.6,solid
+1271-42-7,799,ferrocenecarboxylic acid,二茂铁甲酸,,adamas,25g,1-4-3,230.04,,solid
+127-17-3,800,Pyruvic acid,丙酮酸,,adamas,25g,1-4-3,88.06,1.267,liquid
+127-47-9,801,retinol acetate,醋酸维生素A,,adamas,25g,R8,328.49,1.0474,solid
+127-65-1,802,Chloramine-T,氯胺T,,安耐吉,100g,3-4,227.64,1.401,solid
+128071-98-7,803,4-Bromo-2-fluoropyridine,4-溴-2-氟吡啶,,adamas,1g,1-3-3,175.99,1.713,liquid
+128-08-5,804,N-Bromosuccinimide,N-溴代丁二酰亚胺,,安耐吉;TCI,100g;25g,4-4-2;R9,177.98,2.098,solid
+128-09-6,805,N-Chlorosuccinimide,N-氯代丁二酰亚胺,,adamas;TCI,500g;100g;25g,3-1B;4-2-3;gRLW,133.53,1.65,solid
+128143-88-4,806,"2,6-bis(2-pyridyl)-4(1H)-pyridone","2,6-二(2-吡啶基)-4(1H)-吡啶酮",,adamas,1g,2-4A,249.27,1.269,solid
+128143-89-5,807,"4'-Chloro-2,2':6',2''-terpyridine","4'-氯-2,2':6',2''-三联吡啶",,adamas,250mg,2-4A,267.71,1.2245,solid
+128-56-3,808,1-Anthraquinonesulfonic acid sodium salt,蒽醌-1-磺酸钠,,adamas,5g,L6,312.27,,solid
+128851-73-0,809,6-bromo-1-benzofuran,6-溴苯并呋喃,,adamas,1g,R3,197.03,1.608,solid
+129-00-0,810,Pyrene,芘,,adamas,25g,1-1;1-5-2,202.25,1.271,solid
+1291-47-0,811,"1,1'-dimethylferrocene",二甲基二茂铁,,adamas,1g,D3,214.08,1.2349,solid
+1295-35-8,812,"Bis(1,5-cyclooctadiene)nickel(0)","双(1,5-环辛二烯)合镍(0)",,adamas,2g,gR-催化剂,275.06,,solid
+129722-34-5,813,"3,4-Dihydro-7-(4-bromobutoxy)-2(1H)-quinolinone","7-(4-溴丁氧基)-3,4-二氢喹啉-2(1H)-酮",,adamas,5g,L3,298.18,1.383,solid
+1301-96-8,814,Silver(II) oxide,过氧化银,,赛默飞,5g,gR-催化剂,123.87,7.483,solid
+13036-02-7,815,Dimethyl 5-hydroxyisophthalate,5-羟基间苯二甲酸二甲酯,,adamas,25g,2-4;4-3-1,210.18,1.284,solid
+13057-17-5,816,Bromomethyl Methyl Ether,溴甲基甲醚,,adamas,25g,R1,124.96,1.531,liquid
+13061-96-6,817,Methylboronic acid,甲基硼酸,,adamas,25g,2-4,59.86,0.965,solid
+13081-18-0,818,ethyl trifluoropyruvate,"3,3,3-三氟丙酮酸乙酯",,adamas;安耐吉,25g;5g,2-4;R8,170.09,1.283,liquid
+1308-96-9,819,Europium(III) oxide,氧化铕,,adamas,25g,D2,351.93,7.42,solid
+130-95-0,820,quinine,奎宁,,adamas,1g,4-2,324.42,1.1294,solid
+13104-56-8,821,"4'-(4-methoxyphenyl)-2,2',6',2''-terpyridine","4'-(4-甲氧基苯基)-2,2':6',2''-三吡啶",,adamas,250mg,2-4A,339.39,1.174,solid
+1310-58-3,822,Potassium hydroxide,氢氧化钾,,general,500g,4-2a,56.11,1.45,solid
+1310-65-2,823,Lithium hydroxide,"氢氧化锂,无水",,adamas;3A,100g,6-1,23.95,1.43,solid
+13106-85-9,824,"2,4,6-Trimethoxypyrimidine","2,4,6-三甲氧基嘧啶",,adamas,250mg,4-2-3,170.17,1.15,solid
+131-08-8,825,Sodium anthraquinone-2-sulfonate,蒽醌-2-磺酸钠,,adamas,5g,2-3,312.27,1.66,solid
+131-09-9,826,2-Chloroanthraquinone,2-氯蒽醌,,adamas,25g,2-3,242.66,1.2377,solid
+13139-86-1,827,4-methoxyphenylmagnesium bromide,4-甲氧基苯基溴化镁,,安耐吉,100ml,R5,211.34,0.955,liquid
+1314-13-2,828,Zinc oxide,氧化锌,,adamas,5g,5-1,81.39,5.6,solid
+131747-41-6,829,2-(trifluoromethyl)isonicotinic acid,2-(三氟甲基)异烟酸,,adamas,1g,1-4b;1-5A,191.11,1.484,solid
+131833-89-1,830,"(S,S)-4,4′-diisopropyl-4,5,4′,5′-tetrahydro[2.2]bioxazolyl","(4S,4'S)-4,4'-二异丙基-4,4',5,5'-四氢-2,2'-双噁唑",,BLD,1g,gL-R,224.3,1.19,solid
+131833-93-7,831,"(S,S)-(-)-2,2'-Isopropylidenebis(4-tert-butyl-2-oxazoline)","(S,S)-(-)-2,2'-异亚丙基双(4-叔丁基-2-恶唑啉)",,BLD,1g,gL-R,294.43,1.04,solid
+131864-67-0,832,"(+)-2,6-Bis[(4R)-4-(i-propyl)-2-oxazolin-2-yl]pyridine","R,R-2,6-双(4-异丙基-2-恶唑啉-2-基)吡啶",,BLD,1g,gL-R,301.38,1.23,solid
+132-16-1,833,Iron phthalocyanine,铁酞菁,,adamas,5g,D3,568.37,0.326,solid
+13254-34-7,834,"2-heptanol, 2,6-dimethyl-","2,6-二甲基-2-庚醇",,adamas,25g,2-2,144.25,0.81,liquid
+13287-42-8,835,(2-bromoethyl)oxirane,"4-溴-1,2-环氧丁烷",,adamas,1g,R7,151.0,1.521,liquid
+13325-10-5,836,4-Amino-1-butanol,4-氨基-1-丁醇,,adamas,5g,2-2,89.14,0.967,liquid
+13329-40-3,837,4'-Iodoacetophenone,4-碘苯乙酮,,安耐吉,25g,1-2-3,246.05,1.7411,solid
+13331-23-2,838,2-Furylboronic acid,2-呋喃硼酸,,adamas,5g,2-4,111.89,1.25,solid
+1333-86-4,839,Carbon Black,炭黑,,adamas,1g,7-1,12.01,1.7,solid
+133463-88-4,840,"2,2'-Bis[(4S)-4-benzyl-2-oxazoline]","2,2'-双((4S)- 4 -苄基- 2 -恶唑啉)",,adamas,1g,gR-配体,320.39,1.21,solid
+1335-23-5,841,copper iodide,碘化铜,,麦克林,100g,D3,191.46,,solid
+133-59-5,842,o-Toluenesulfonyl Chloride,邻甲苯磺酰氯,,安耐吉,5g,R3,190.65,1.32,liquid
+133745-75-2,843,N-Fluorobenzenesulfonimide,N-氟代双苯磺酰胺,,adamas,25g,4-4-1,315.34,1.4466,solid
+1338-24-5,844,naphthenic acid,环烷酸,,adamas,25g,1-4-2,126.154,0.92,liquid
+13384-48-0,845,"magnesium, bromocyclobutyl-",环丁基溴化镁 0.5M,,adamas,100ml,R5,159.30738,,solid
+13395-16-9,846,Cupric acetylacetonate,乙酰丙酮铜,,安耐吉,25g,gR-催化剂,261.76,0.721,solid
+13400-13-0,847,Caesium fluoride,氟化铯,,adamas,25g,6-1,151.9,4.115,solid
+134-03-2,386,Sodium ascorbate,维生素C钠,,adamas,25g,3-2,198.11,1.66,solid
+13406-29-6,848,Tris(4-trifluoromethylphenyl)phosphine,三(4-三氟甲苯基)膦,,毕得,1g,gR-配体,466.28,,solid
+13462-88-9,849,Nickel bromide,溴化镍,,3A,1g,gR-催化剂,218.5,5.098,solid
+13462-90-3,850,Nickel(II) iodide,碘化镍,,毕得,25g,gR-催化剂,312.5,5.83,solid
+13466-78-9,851,3-Carene,3-蒈烯,,adamas,25g,3-4,136.23,0.857,liquid
+134-81-6,852,Benzil,联苯甲酰,,adamas,25g,2-3,210.23,1.521,solid
+13518-40-6,853,L-VALINE TERT-BUTYL ESTER HYDROCHLORIDE,L-缬氨酸叔丁酯盐酸盐,,adamas,5g,4-4-1,209.71,,solid
+135-19-3,854,2-Naphthol,2-萘酚,,毕得,100g,4-3,144.17,1.28,solid
+13520-61-1,855,Nickel(II) perchlorate hexahydrate,高氯酸镍,,adamas,5g,gR-催化剂,365.69,,solid
+1355162-85-4,856,"(S,S)-(-)-1,2-Bis(t-butylMethylphosphino)benzene (S,S)-BenzP*","(S,S)-(-)-1,2-双(叔丁基甲基膦基)苯",,BLD,100mg,gR-配体,282.35,,solid
+135565-31-0,857,"2,2'-Bioxazole, 4,4'-bis(1,1-dimethylethyl)-4,4',5,5'-tetrahydro-, (4S,4'S)-","(4S,4'S)-4,4'-双(1,1-二甲基乙基)-4,4',5,5'-四氢-2,2'-双噁唑",,BLD,250mg,R4,252.35,1.1,solid
+135-88-6,858,N-(2-Naphthyl)aniline,N-苯基-2-萘胺,,adamas,25g,R2,219.28,1.24,solid
+135-98-8,859,sec-butylbenzene,仲丁基苯,,adamas,5ml,1-5-2,134.22,0.863,liquid
+136030-00-7,860,"(1R,2S)-1-Amino-2-indanol","(1R,2S)-1-氨基-2-茚醇",,adamas,5g,2-2,149.19,1.0753,solid
+13610-02-1,861,Phenyl propargyl ether,苯基炔丙基醚,,adamas,5g,3-2,132.16,1.03,solid
+13633-25-5,862,4-Phenylbutyl Bromide,(4-溴丁基)苯,,adamas,1g,1-3,213.11,1.214,solid
+13683-41-5,863,(1-Bromovinyl)trimethylsilane,(1-溴乙烯基)三甲硅烷,,adamas,5g,R1;R8,179.13,1.156,liquid
+137052-08-5,864,1-(Tetrahydro-2H-pyran-4-yl)ethanone,1-(四氢-2H-吡喃-4-基)乙酮,,安耐吉,5g,2-3,128.17,1.024,liquid
+137-32-6,865,2-Methyl-1-butanol,2-甲基丁醇,,安耐吉,25ml,2-2,88.15,0.819,liquid
+13735-81-4,866,1-Phenyl-1-trimethylsilyloxyethylene,1-苯基-1-三甲基甲硅氧基乙烯,,安耐吉,5g,3-4,192.33,0.938,solid
+13739-02-1,867,Diacerein,双醋瑞因,,adamas,1g,1-4-5,368.29,1.491,solid
+13755-29-8,868,Sodium tetrafluoroborate,氟硼酸钠,,adamas,100g,7-2,109.79,2.47,solid
+13774-81-7,869,Borane-ammonia complex,硼烷氨络合物,,adamas,5g,R9,30.87,,solid
+13813-19-9,870,Sulfuric acid-d2,氘代硫酸,,adamas,5g,4-4A,100.09,1.87,liquid
+13815-94-6,871,Ruthenium(III) chloride trihydrate,三水氯化钌,,麦克林,5g,D2,225.44,,solid
+138163-12-9,872,1-Cbz-4-methylene-piperidine,1-Cbz-4-亚甲基哌啶,,安耐吉,25g,R1,231.29,1.11,liquid
+13826-27-2,873,"2,2'-Bis-1,3,2-benzodioxaborole",双联邻苯二酚硼酸酯,,adamas,5g,R3,237.81,1.31,solid
+13826-35-2,874,3-Phenoxybenzyl alcohol,3-苯氧基苯甲醇,,adamas,25g,2-2,200.23,1.149,liquid
+13826-83-0,875,Ammonium fluoroborate,氟硼酸铵,,adamas,100g;25g,7-2;D1-4A;gRa,104.84,1.871,solid
+13831-30-6,876,Acetoxyacetic acid,乙酰乙酸,,adamas,5g,1-4-2,118.09,1.0887,solid
+138-41-0,877,Carzenide,对磺酰胺苯甲酸,,adamas,25g,1-5-1,201.2,1.5083,solid
+138517-62-1,878,"N,N'-[(1R,2R)-1,2-diphenyl-1,2-ethanediyl]bis[2-(diphenylphosphino)-BenzaMide","N,N'-[(1R,2R)-1,2-二苯基-1,2-乙二基] 双[2-二苯基膦苯甲酰胺];N,N'-[(1R,2R)-1,2-二苯基-1,2-乙烷二取代]双[2-(二苯基膦)-苯甲酰胺",,adamas,0,R2,788.85,,solid
+13943-58-3,879,tetrapotassium ferrocyanide,亚铁氰化钾,,adamas,25g,7-2,1058.24,1.85,solid
+139507-52-1,880,Ethyl 2-(N-Methoxy-N-MethylaMino)-2-oxoacetate,2-(N-甲氧基-N-甲基氨基)-2-氧代乙酸乙酯,,adamas,5g,R3,161.15584,1.136,liquid
+13963-57-0,881,Aluminum triacetylacetone,三乙酰丙酮铝,,安耐吉,25g,6-1,324.31,1.27,solid
+13965-03-2,882,Bis(triphenylphosphine)palladium(II) chloride,二(三苯基膦)氯化钯,,安耐吉,25g,D2,701.9,,solid
+13965-03-2,883,Bis(triphenylphosphine)palladium(II) chloride,双三苯基磷二氯化钯,,adamas,5g,D2,701.9,,solid
+13991-08-7,884,"1,2-Bis(diphenylphosphino)benzene","1,2-双(二苯基磷基)苯",,毕得,5g,2-2c,446.47,,solid
+140-10-3,2456,(trans-cinnamic acid;cinnamic acid),反式肉桂酸,,adamas;毕得,25g;100g,1-4-3;1-4,148.16,1.248,solid
+140-11-4,885,Benzyl acetate,乙酸苄酯,,adamas,100g,2-4,150.17,1.054,liquid
+14024-18-1,886,Ferric acetylacetonate,三乙酰丙酮铁,,adamas,100g,D-3,353.17,5.24,solid
+14024-48-7,887,Bis(acetylacetonato)cobalt,乙酰丙酮钴(II),,毕得,25g,gR-催化剂,257.15,0.83,solid
+14024-56-7,888,"magnesium-2,4-pentanedionate dihydrate","二(2,4-戊二酸)镁(II)",,adamas,5g,6-1,222.52,,solid
+14024-63-6,889,Zinc acetylacetonate,乙酰丙酮锌,,adamas,25g,5-1,263.61,1.544,solid
+14036-06-7,890,Diethoxymethyl acetate,乙酸(二乙氧基)甲酯,,麦克林,5g,2-4,162.18,0.993,liquid
+14044-65-6,891,Borane-tetrahydrofuran complex,硼烷四氢呋喃络合物,,adamas,500ml,R5,85.94,0.898,liquid
+1406-66-2,892,tocopherols,生育酚(维生素E),,adamas,25g,3-2,416.67952,0.93,liquid
+140681-55-6,893,"1-ChloroMethyl-4-fluoro-1,4-diazoniabicyclo[2.2.2]octane bis(tetrafluoroborate)",选择性氟试剂,,adamas,25g,R9,354.26,1.71,solid
+14075-53-7,894,Potassium tetrafluoroborate,氟硼酸钾,,adamas,100g,7-2,125.9,2.505,solid
+14076-99-4,895,"Nickel,dichlorotetrakis(pyridine)-",二氯四(吡啶)镍,,毕得,1g,gR-催化剂,445.999,,solid
+14080-23-0,896,2-Cyanopyrimidine,2-氰基嘧啶,,安耐吉,25g,4-2-1,105.1,1.22,solid
+140-88-5,897,Ethyl acrylate,丙烯酸乙酯,,adamas,100ml,R6,100.12,0.921,liquid
+14114-05-7,898,Cyclopropyltriphenylphosphonium Bromide,溴化环丙基三苯鏻,,adamas,25g,3-3,383.26,,solid
+141-43-5,899,Monoethanolamine,乙醇胺,,安耐吉,100ml,2-2,61.08,1.012,liquid
+141452-01-9,900,"methyl 2,3-dihydro-1H-indole-5-carboxylate",吲哚啉-5-甲酸甲酯,,安耐吉,1g,R3,177.2,1.162,solid
+141556-45-8,901,"1,3-Bis(2,4,6-trimethylphenyl)imidazolium chloride","1,3-双(2,4,6-三甲基苯基)氯化咪唑鎓",,毕得,5g,3-2,340.89,1.0279,solid
+1416820-34-2,902,"Pyridine, 2-[(4S)-4,5-dihydro-4-(1-methylethyl)-2-oxazolyl]-4-(trifluoromethyl)-","(S)-4-异丙基-2-(4-(三氟甲基)吡啶-2-基)-4,5-二氢噁唑",,BLD,250mg,gR-配体,258.24,,solid
+14172-90-8,903,Cobalt(II) Tetraphenylporphyrin,meso-四苯基卟啉钴,,安耐吉,1g,D2-2A,671.65,1.2,solid
+141-76-4,904,3-Iodopropionic Acid,3-碘丙酸,,adamas,25g,R2,199.98,1.9815,solid
+141-82-2,905,Malonic Acid,丙二酸,,adamas,500g,1-4,104.06,1.619,solid
+142-04-1,906,Aniline hydrochloride,盐酸苯胺,,adamas,25g,3-5,129.59,1.2215,solid
+142-08-5,907,2-Hydroxypyridine,2-羟基吡啶,,安耐吉,100g;25g,4-2;4-3-2,95.1,1.39,solid
+14221-01-3,908,Terakis(triphenylphosphine)palladium(0),四(三苯基膦)钯(0),,adamas,1g,D2,1155.561844,,solid
+142-62-1,909,Hexanoic Acid,己酸,,adamas,100g,1-5A,116.16,0.927,liquid
+14264-16-5,910,Bis(triphenylphosphine)nickel(II)chloride,双(三苯基膦)二氯化镍,,毕得,25g,gR-催化剂,654.17,,solid
+14267-92-6,911,5-Chloro-1-pentyne,5-氯戊炔,,adamas,5g,3-2,102.56,0.968,liquid
+142-68-7,912,Tetrahydropyran,四氢吡喃,,adamas,25ml,4-4A,86.13,0.881,liquid
+142-71-2,913,Copper(II) acetate,醋酸铜,,adamas,100g,D3,181.63,1.92,solid
+14273-85-9,914,Methyl 4-iodobutyrate,4-碘丁酸甲酯,,adamas,1g,R3,228.03,1.689,liquid
+14283-07-9,915,Lithium tetrafluoroborate,四氟硼酸锂,,adamas,25g,7-2,93.75,0.852,solid
+1428328-51-1,916,(S)-BTBBPh-SaBOX,"1,3-双[4-(叔丁基)苯基]-2,2-双[(S)-4-苯基-4,5-二氢-2-恶唑基]丙烷",,BLD,250mg,gL-R,598.82,1.08,solid
+142946-79-0,917,"4,4'-bis(trifluoromethyl)-2,2'-bipyridine","4,4'-二(三氟甲基)-2,2'-联吡啶",,毕得,1g,gR-配体,292.18,1.403,solid
+142-96-1,918,(Di-n-butyl ether;Dibutyl ether),二丁醚,,adamas,100ml,3-3B;4-4A,130.23,0.764,liquid
+143-24-8,919,Tetraethyleneglycol dimethyl ether,四乙二醇二甲醚,,安耐吉,100ml,3-3B,222.28,1.009,liquid
+14324-83-5,920,nickel trifluoroacetylacetonate,"1,1,1-三氟乙酰丙酮镍",,adamas,0.25g,gR-催化剂;手套箱催化剂盒子,364.85,,solid
+14324-83-5,921,nickel trifluoroacetylacetonate,"1,1,1-三氟乙酰丙酮镍二水合物",,adamas,0.25g,gR-催化剂,364.85,,solid
+143-28-2,922,oleyl alcohol,油醇,,adamas,100g,L6,268.48,0.849,liquid
+143426-52-2,923,1-[4-(chloromethyl)phenyl]pyrazole,1-[4-(氯甲基)苯基]吡唑,,adamas,1g,1-2-2,192.64,1.19,solid
+1435467-28-9,924,"(3aS,3'aS,8aR,8'aR)-2,2'-[2-[4-(1,1- dimethylethyl)phenyl]-1-[[4-(1,1- dimethylethyl)phenyl]methyl]ethylidene]bis[3a,8 a-dihydro-8H-Indeno[1,2-d]oxazole","(3aS ,3a'S ,8aR ,8a'R )-2,2'-(1,3-bis(4-(tert -butyl)phenyl)propane-2,2-diyl)bis(3a,8a-dihydro-8H -indeno[1,2-d ]oxazole)",,BLD,250mg,gL-R,622.84,,solid
+1436-43-7,925,Quinoline-2-carbonitrile,2-氰基喹啉,,安耐吉,1g,3-4,154.17,1.21,solid
+1439-07-2,926,trans-stilbene oxide,反-氧化吡烯,,adamas,250mg,2-3-1,196.24,1.0405,solid
+144060-53-7,927,febuxostat,非布索坦,,adamas,5g,3-2,316.37,1.31,solid
+1442433-71-7,928,9-Mesityl-10-methylacridinium tetrafluoroborate,9-间二甲基-10-甲基吖啶鎓四氟硼酸盐,,,1g,gR-催化剂,399.2320928,,solid
+14425-64-0,929,4-Methoxyphenethyl bromide,4-(2-溴乙基)苯甲醚,,adamas,1g,1-3-2,215.09,1.3763,solid
+144-55-8,930,Sodium bicarbonate,碳酸氢钠,,gereral;general,500g,4-2b;6-2,84.01,2.16,solid
+14457-87-5,931,cerium (III) bromide hydrate,溴化铈(III),,阿拉丁,5g,D2-2A;gRb,379.83,5.18,solid
+144649-99-0,932,5-Bromo-2-methoxybenzonitrile,2-溴-5-甲氧基苯甲腈,,adamas,5g,1-3-3,212.04,1.56,solid
+14481-08-4,933,"BIS(2,2,6,6-TETRAMETHYL-3,5-HEPTANEDIONATO)NICKEL(II)","双(2,2,6,6,-四甲基-3,5-庚二酮酸)镍",,adamas,0.25g,gR-催化剂,425.23,,solid
+1449-46-3,934,Benzyltriphenylphosphonium bromide,苄基三苯基溴化膦,,adamas,100g,7-2,433.32,,solid
+1450-14-2,935,Hexamethyldisilane,六甲基二硅烷,,adamas,5ml;100ml,3-2;R3,146.38,0.715,liquid
+1450-74-4,936,5'-Chloro-2'-hydroxyacetophenone,5-氯-2-羟基苯乙酮,,安耐吉,100g,2-3,170.59,1.2315,solid
+145689-41-4,937,"2,3-Difluorophenylacetic acid","2,3-二氟苯乙酸",,adamas,5g,1-4-2,172.13,1.373,solid
+1458-98-6,938,3-Bromo-2-methylpropene,3-溴-2-甲基丙烯,,adamas,5g,R1,135.0,1.339,liquid
+1460-02-2,939,"1,3,5-Tri-tert-butylbenzene","1,3,5-三叔丁基苯",,adamas,5g,4-4B,246.43,0.8496,solid
+1460-18-0,940,Pentadecanedioic Acid,十五烷二酸,,adamas,5g,1-4-3,272.38,0.9913,solid
+1462-03-9,941,1-Methylcyclopentanol,1-甲基环戊醇,,adamas,5g,2-2,100.16,0.904,solid
+1462-96-0,942,1-Ethylcyclopentanol,1-乙基环戊醇,,adamas,5g,2-2,114.19,0.909,liquid
+14647-23-5,943,"1,2-Bis(diphenylphosphino)ethane nickel(II) chloride","[1,2-双(二苯基膦)乙烷]二氯化镍(II)",,adamas,25g,D1,528.02,,solid
+14649-03-7,944,(S)-(-)-alpha-Methylbenzyl isocyanate,(S)-(-)-1-苯乙基异氰酸酯,,adamas,5g,2-4,147.17,1.045,solid
+14667-55-1,945,"2,3,5-Trimethylpyrazine","2,3,5-三甲基吡嗪",,adamas,5g,4-2-1,122.17,0.979,solid
+147356-78-3,946,N-METHOXY-N-METHYLCYCLOPROPANECARBOXAMIDE,N-甲氧基-N-甲基环丙烷甲酰胺,,adamas,25g,R3,129.16,1.126,liquid
+147409-41-4,947,Bipymox,"6,6'-双(4-(S)-异丙基-2-噁唑啉基)-2,2'-联吡啶",,BLD;adamas,250mg;100mg,gL-R;gR-配体,378.47,1.25,solid
+147-71-7,948,D-(-)-Tartaric acid,D-(-)-酒石酸,,adamas,250g,1-4,150.09,1.8,solid
+14781-45-4,949,"Copper(II) hexafluoro-2,4-pentanedionate",双(六氟乙酰丙酮)合铜(II),,毕得;adams,1g;5g,2-4c;D2-2A,477.65,0.785,solid
+14783-09-6,950,copper chloride; phen,"二氯(1,10-菲咯啉)铜(II)",,adamas,1g,D3,314.66,,solid
+147-85-3,951,L-Proline,L-脯氨酸,,adamas,25g,1-4-1,115.13,1.35,solid
+14818-35-0,952,"2,6-DIMETHYL-4-NITROSOPHENOL",环吡酮杂质B,,adamas,5g,2-3,192.25,1.088,solid
+1483-56-3,953,2-bromo-5-(trifluoromethyl)benzoic acid,2-溴-5-三氟甲基苯甲酸,,adamas,5g,1-4-5,269.02,1.773,solid
+148461-14-7,954,"(4S)-(-)-4,5-DIHYDRO-2-[2'-(DIPHENYLPHOSPHINO)PHENYL]-4-ISOPROPYLOXAZOLE",二氢二苯磷苯基-4-异丙恶唑,,BLD,1g,R4,373.43,,solid
+148461-16-9,955,"(4S)-4-tert-butyl-2-[2-(diphenylphosphanyl)phenyl]-4,5-dihydro-1,3-oxazole",(S)-4-叔丁基-2-[2-(二苯基膦基)苯基]-2-噁唑啉,,adamas,100mg,gL-R,387.45,,solid
+148493-37-2,956,"2,6-Dichloro-3-iodopyridine","2,6-二氯-3-碘吡啶",,adamas,1g,4-2-3,273.89,2.129,solid
+1485-07-0,2457,(Naphthalen-2-ethanol;2-Naphthaleneethanol),2-萘乙醇,,adamas,1g,2-2,172.22,0.99,solid
+1485-70-7,957,N-Benzylbenzamide,N-苄基苯甲酰胺,,adamas,25g,4-4-1,211.26,1.0694,solid
+1486-28-8,958,Methyldiphenylphosphine,二苯基甲基膦,,adamas,1g,gR-配体,200.22,1.076,solid
+14866-33-2,959,Tetraoctylammonium bromide,四正辛基溴化铵,,adamas,100g,7-2,546.79,1.0041,solid
+148893-10-1,960,HATU,"2-(7-偶氮苯并三氮唑)-N,N,N',N'-四甲基脲六氟磷酸酯",,安耐吉,25g,R1,380.24,,solid
+1489-69-6,961,Cyclopropanecarboxaldehyde,环丙甲醛,,adamas,25g,R8,70.09,0.938,liquid
+14916-79-1,962,3-Heptyn-1-ol,3-庚炔-1-醇,,安耐吉,1g,R8,112.17,0.92,liquid
+14916-80-4,963,3-Octyn-1-ol,3-辛炔-1-醇,,adamas,5g,1-4C;2-2A;R7,126.2,0.88,liquid
+14918-21-9,964,5-Hexynenitrile,已炔腈,,adamas,0,3-2,93.13,0.889,solid
+1493-13-6,965,trifluoromethanesulfonic acid,三氟甲磺酸,,adamas,100g;25g,3-4,150.08,1.696,liquid
+14949-69-0,966,HEXAFLUOROACETYLACETONATO NICKEL (II) TRIHYDRATE,双(六氟乙基丙酮)合镍(II)水合物,,adamas,1g,gR-催化剂,472.79,,solid
+149-74-6,967,dichloromethylphenylsilane,甲基苯基二氯硅烷,,adamas,100ml,3-2,191.13,1.176,liquid
+1499-10-1,968,"9,10-Diphenylanthracene","9,10-二联苯蒽",,adamas,5g,D4,330.42,1.1398,solid
+1499-21-4,969,Diphenylphosphinyl chloride,二苯基次膦酰氯,,adamas,25g,R2,236.63,1.24,liquid
+1501-27-5,970,(MONO-METHYL GLUTARATE;MONO-METHYLgLUTARATE),戊二酸单甲酯,,adamas;安耐吉,5g;25g,1-4-2;1-5A;2-4,146.14,1.169,liquid
+150-13-0,971,4-Aminobenzoic acid,对氨基苯甲酸,,adamas,100g,1-5-5,137.14,1.374,solid
+15028-39-4,972,H-PHg-OME HCL,(S)-(+)-2-苯基甘氨酸甲酯盐酸盐,,adamas,0,R3,201.65,,solid
+150-30-1,973,DL-Phenylalanine,DL-苯丙氨酸,,adamas,25g;100g,3-5;R3,165.19,1.1603,solid
+1504-58-1,974,3-Phenyl-2-propyn-1-ol,3-苯基-2-丙炔-1-醇,,adamas,5g,R7,132.16,1.06,solid
+150529-93-4,975,"(R,R)-2,2'-(dimethylmethylene)bis(4-phenyl-2-oxazoline)","(+)-2,2'-异亚丙基双[(4R)-4-苯基-2-唑啉]",,adamas,250mg,gL-R,334.41,1.18,solid
+150529-93-4,976,"(R,R)-2,2'-(dimethylmethylene)bis(4-phenyl-2-oxazoline)","(R,R)-2,2'-异亚丙基双(4-苯基-2-恶唑啉)",,adamas,100mg,gR-配体,334.41,1.18,solid
+150639-33-1,977,(+)-(4S)-PHENYL-ALPHA-[(4S)-PHENYLOXAZOLIDIN-2-YLIDENE]-2-OXAZOLINE-2-ACETONITRILE,(4S)-(+)-苯基-Α-[(4S)-苯基噁唑烷-2-亚基]-2-噁唑啉-2-乙腈,,BLD,250mg,gL-R,331.37,1.27,solid
+150736-71-3,978,tert-butyl N-[(2R)-1-hydroxybutan-2-yl]carbamate,N-Boc-(R)-2-氨基-1-丁醇,,adamas,1g,2-2,189.25,,solid
+150736-72-4,979,"N-BOC-(S)-2-AMINO-1-BUTANOL, 96%",N-叔丁氧羰基-(S)-(-)-2-氨基-1-丁醇,,adamas,5g,3-2,189.25,,solid
+150-76-5,980,4-Methoxyphenol,对羟基苯甲醚,,安耐吉,25g;100g,4-3;4-3-2,124.14,1.55,solid
+15086-94-9,981,Solvent Red 43,溶剂红 43,,adamas,25g,D1-5A,647.89,1.02,solid
+151049-87-5,982,3-bromo-1-methylpyrazole,3-溴-1-甲基吡咯,,adamas,1g,1-3-4,161.0,1.585,liquid
+1514-82-5,983,"2-Bromo-3,3,3-trifluoropropene","2-溴-3,3,3-三氟-1-丙烯",,adamas,25g,R7,174.95,1.686,liquid
+1515-95-3,984,4-Ethylanisole,4-乙基苯甲醚,,adamas,5g,3-3B,136.19,0.958,liquid
+151670-69-8,985,"2,6-Bis[(4S)-benzyl-2-oxazolin-2-yl]pyridine","2,6-二[(4S)-4-苄基-2-噁唑啉基-2-基]吡啶",,BLD,1g,gR-配体,397.47,1.24,solid
+1517-82-4,986,"(1R,2S,5R)-(-)-Menthyl (S)-p-Toluenesulfinate","(1R,2S,5R)-(-)-薄荷基(S)-对甲苯亚磺酸酯",,乐研,10g,L6,294.45,1.08,solid
+151937-09-6,987,"benzenepropanoic acid, 4-(methoxycarbonyl)-",3-(4-甲氧基羰基苯基)丙酸,,adamas,5g,1-4-3,208.21,,solid
+15206-55-0,988,Methyl Benzoylformate,苯甲酰甲酸甲酯,,ernergy,100g,2-4,164.16,1.155,liquid
+15231-91-1,989,6-Bromo-2-naphthol,6-溴-2-萘酚,,adamas,100g,4-3-3,223.07,1.4412,solid
+15238-00-3,990,Cobalt(II) iodide,碘化钴,,adamas,5g,gR-催化剂,312.74,5.45,solid
+1532-71-4,991,1-Bromoisoquinoline,1-溴异喹啉,,adamas,5g,R3,208.05,1.564,solid
+15376-08-6,992,"三(2,2'-联吡啶)溴化镍","三(2,2'-联吡啶)溴化镍",,adamas,1g,gR-催化剂,607.16,,solid
+15418-29-8,993,Tetrakis(acetonitrile)copper(I) tetrafluoroborate,六氟磷酸四乙氰铜四氟硼酸盐,,adamas;阿拉丁,5g,D1;gR-催化剂,314.56,1.466,solid
+154748-49-9,994,3-(Boc-amino)cyclobutanone,3-氧代环丁基氨基甲酸叔丁酯,,energy,25g,2-3,185.22,1.1,solid
+155418-82-9,995,"(R)-2,2'-bis((S)-4-isopropyl-4,5-dihydrooxazol-2-yl)-1,1'-binaphthalene","(R)-2,2'-双((S)-4-异丙基-4,5-二氢恶唑-2-基)-1,1'-联萘",,BLD,250mg,R4,476.62,1.2,solid
+155830-69-6,996,(R)-(-)-1- (S)-2-(Diphenylphosphino)ferrocenyl ethyldi-t-butylphosphine,(R)-1-[(SP)-2-(二苯基膦基)二茂铁]乙基二叔丁基膦,,adamas,1g,gR-配体,542.45,,solid
+1560-54-9,997,Allyltriphenylphosphonium bromide,烯丙基三苯基溴化鏻,,adamas,25g,3-3,383.26,,solid
+156275-96-6,998,Triisopropylsilanethiol,三异丙基硅烷硫醇,,ADAMAS,1g,R6,190.42,0.887,liquid
+15684-35-2,999,cobalt tetrafluoroborate hexahydrate,氟硼酸钴,,adamas,5g,gR-催化剂,340.63,,solid
+15684-36-3,1000,Nickel(II) tetrafluoroborate hexahydrate,四氟硼酸镍(II)六水合物,,adamas,5g,gR-催化剂,163.51,1.5,solid
+15687-27-1,1001,ibuprofen,2-(4-异丁基苯基)丙酸,,adamas,25g,1-4-1,206.28,1.0364,solid
+156-87-6,1002,3-Aminopropanol,3-氨基-1-丙醇,,安耐吉,25g,2-2,75.11,0.982,liquid
+156-87-6,1003,3-Amino-1-propanol,3-氨基丙醇,,adamas,100g,3-5,75.11,0.982,liquid
+1569-69-3,1004,Cyclohexyl mercaptan,环己硫醇,,adamas,5g,R1,116.22,0.95,liquid
+15727-65-8,1005,1-Ethynylnaphthalene,1-乙炔萘,,adamas,5g,R6,152.19,1.07,liquid
+15750-47-7,1006,CERIUM(III) OXALATE,草酸铈(III)水合物,,阿拉丁,25g,D3,562.3,,solid
+15760-36-8,1007,3-Methylenecyclobutanecarboxylic acid,3-亚甲基环丁烷羧酸,,adamas,5g,3-4;R2,112.13,1.12,liquid
+1576-35-8,1008,4-Methylbenzenesulfonhydrazide,对甲苯磺酰肼,,adamas,100g,3-4,186.23,1.42,solid
+1576-84-7,1009,3-Butenyl Acetate,乙酸 -3-丁烯酯,,adamas,5g,3-5B,114.14,0.91,liquid
+1577-22-6,1010,5-Hexenoic Acid,5-己烯酸,,adamas,5g,1-4-2,114.14,0.961,liquid
+157904-67-1,1011,"(4R,4'R,5S,5'S)-2,2'-(1-Methylethylidene)bis[4,5-dihydro-4,5-diphenyl-Oxazole","2,2-双[2-(4R,5S二苯基-1,3-噁唑啉基)]丙烷",,BLD,250mg,gL-R,486.6,1.16,solid
+1585-07-5,1012,1-Bromo-4-ethylbenzene,1-溴-4-乙基苯,,adamas,5g,1-3,185.06,1.343,liquid
+1585-16-6,1013,"2,4,6-Trimethylbenzyl chloride","2,4,6-三甲基氯苄",,adamas,25g,1-2-2,168.66,1.0131,solid
+1589-60-2,1014,1-Phenylcyclohexanol,1-苯基-1-环己醇,,adamas;毕得,5g,2-2;gL;R8,176.25,1.035,solid
+15912-75-1,1015,triphenyl(propyl)phosphanium bromide,丙基三苯基溴化膦,,adamas,100g,R3,305.38,,solid
+1591-31-7,1016,4-Iodobiphenyl,4-碘联苯,,adamas,25g,1-2-3,280.1,1.6696,solid
+159269-48-4,1017,"1-fluoro-4-methyl-1,4-diazabicyclo[2.2.2]octane-1,4-diium ditetrafluoroborate","1-氟-4-甲基-1,4-二氮杂双环[2.2.2]辛烷四氟硼酸盐",,adamas,5g,R2,233.01,0.85,solid
+159635-49-1,1018,tert-Butyl 4-methylenepiperidine-1-carboxylate,N-Boc-4-亚甲基哌啶,,adamas,5g,2-3a,197.27,1,liquid
+16009-13-5,1019,Hemin,氯化血红素,,adamas,5g,R1,650.94,,solid
+16088-07-6,1020,DL-PHENYLALANINOL,DL-2-氨基-3-苯基-1-丙醇,,adamas,5g,D1-2A;L1,151.21,1.077,solid
+161233-97-2,1021,2-cyanopyridine-4-carboxylic acid,4-氰基吡啶-4-羧酸,,adamas,1g,1-4-5,148.12,1.42,solid
+161265-03-8,1022,"4,5-Bis(diphenylphosphino)-9,9-dimethylxanthene","4,5-双(二苯基膦)-9,9-二甲基氧杂蒽",,adamas;毕得,5g,2-2C;gR-配体,578.62,,solid
+16133-25-8,1023,pyridine-3-sulfonyl chloride,吡啶-3-磺酰氯,,安耐吉,5g,R3,177.61,1.488,solid
+1617-32-9,1024,3-PENTENOIC ACID,3-戊烯酸,,adamas,5g,3-4,100.12,0.986,liquid
+1620-75-3,1025,6-Methyl-2-pyridinecarbonitrile,6-甲基-2-吡啶甲腈,,adamas,10g,3-1A,118.14,1.08,solid
+1620-76-4,1026,2-Cyano-4-methylpyridine,2-氰基-4-甲基吡啶,,adamas,5g,3-4,118.14,1.08,solid
+1620-77-5,1027,2-Cyano-5-methylpyridine,2-氰基-5-甲基吡啶,,adamas,5g,3-4,118.14,1.08,solid
+16212-05-8,1028,Allyl Phenyl Sulfone,烯丙基苯砜,,adamas,1g,4-3a,182.24,1.189,liquid
+162157-03-1,1029,(S)-(4-Isopropyloxazolin-2-yl)ferrocene,(S)-(4-异丙基恶唑啉-2-基)二茂铁,,BLD,1g,R4,297.177,,solid
+16225-26-6,1030,"3,5-Di-tert-butylbenzoic Acid","3,5-叔丁基苯甲酸",,安耐吉,5g,1-5-1,234.33,0.9725,solid
+1623-93-4,1031,4-BIPHENYLSULFONYL CHLORIDE,对联苯磺酰氯,,adamas;安耐吉,25g;5g,3-4,252.72,1.32,solid
+162401-62-9,1032,3-(cyclopropylmethoxy)-4-(difluoromethoxy)benzoic acid,3-环丙甲氧基-4-二氟甲氧基苯甲酸,,安耐吉,5g,1-4-4,258.22,1.355,solid
+162401-62-9,1033,3-(cyclopropylmethoxy)-4-(difluoromethoxy)benzoic acid,3-(环丙甲氧基)-4-(二氟甲氧基)苯甲酸,,安耐吉,5g,1-4-4,258.22,1.355,solid
+1624-62-0,1034,Estrone 3-methyl ether,3-甲氧基雌酮,,adamas,100mg,2-3B,284.39,1.103,solid
+1625-91-8,1035,"4,4'-Di-tert-butylbiphenyl","4,4'-双叔丁基联苯",,adamas,25g,1-1,266.42,0.9463,solid
+162848-16-0,1036,"4-(1,2,4-triazol-1-yl)benzoic acid","4-(1H-1,2,4-三唑-1-基)苯甲酸",,adamas,250mg,1-4-5,189.17,,solid
+1629-58-9,1037,Ethyl vinyl ketone,1-戊烯-3-酮,,安耐吉,5ml,R1,84.12,0.845,solid
+163169-29-7,1038,"(S,S)-[2-(4'-i-Propyloxazolin-2'-yl)ferrocenyldiphenylphosphine",(S)-1-(二苯基膦基)-2-[(S)-4-异丙基恶唑啉-2-基]二茂铁,,adamas,100mg,gR-配体,475.31,,solid
+1631-83-0,1039,Diphenylchlorosilane,二苯基氯硅烷,,adamas,5g,3-2,218.75,1.118,liquid
+16355-92-3,1040,"1,10-Diiododecane","1,10-二碘癸烷",,adamas,5g,R2,394.07,2.35,solid
+1638-86-4,1041,Diethyl phenylphosphonite,苯基膦酸二乙酯,,adamas,5g,3-3,198.2,1.032,liquid
+1642-81-5,1042,4-(Chloromethyl)benzoic Acid,对氯甲基苯甲酸,,adamas,5g,1-4-4,170.59,1.315,solid
+1643-19-2,1043,Tetrabutylammonium bromide,四丁基溴化铵,,百灵威;安耐吉,100g;500g,2-1b;7-2,322.37,1.039,solid
+1643-30-7,1044,3-(4-Bromophenyl)propionic acid,3-(4-溴苯基)丙酸,,adamas,25g,1-4-3,229.07,1.531,solid
+164365-88-2,1045,Boc-NH-C4-Br,4-(Boc-氨基)丁基溴,,adamas,1g,1-3-1,252.15,1.228,liquid
+16456-81-8,1046,"5,10,15,20-tetraphenyl-21H,23H-porphine iron(III) chloride",四苯基卟啉铁,,adamas,100mg,D3,704.03,,solid
+1646862-39-6,1047,"Bis((R)-4-benzyl-4, 5-dihydrooxazol-2-yl)methane","双((R)-4-苄基-4, 5-二氢恶唑-2-基)甲烷",,BLD,250mg,gR-配体,334.41,1.19,liquid
+16473-35-1,1048,4-(Chloromethyl)benzyl alcohol,4-(氯甲基)苯甲基醇,,adamas,25g,1-2-2,156.61,1.195,solid
+165125-95-1,1049,"pyridine, 2,6-bis(4,5-dihydro-2-oxazolyl)-","2,6-双(4,5-二氢噁唑-2-基)吡啶",,adamas,250mg,gR-配体,217.22,1.43,solid
+16518-62-0,1050,"3-Bromo-N,N-dimethylaniline","3-溴-N,N-二甲基苯胺",,adamas,25g,1-3-3;3-5,200.08,1.402,liquid
+16520-62-0,1051,4-Phenyl-1-butyne,4-苯基-1-丁炔,,adamas;energy,1g;2g,2-2A;3-2,130.19,0.926,liquid
+1655-07-8,390,ethyl 2-cyclohexanonecarboxylate,2-环己酮甲酸乙酯,,adamas,5ml,2-4,170.21,1.064,liquid
+1656253-81-4,1052,"(4R,4'R,5S,5'S)-2,2'-(1,3-Dihydro-2H-inden-2-ylidene)bis[4,5-dihydro-4,5-diphenyloxazole","(4R,4'R,5S,5'S)-2,2'-(1,3-二氢-2H-茚-2-甲基叉双[4,5-二氢-4,5-二苯基恶唑",,BLD,250mg,gR-配体,560.68,1.22,solid
+1659-31-0,1053,Di-2-pyridyl Carbonate,碳酸二(2-吡啶)酯,,安耐吉,5g,2-4,216.19,1.307,solid
+1660-93-1,1054,"3,4,7,8-Tetramethyl-1,10-phenanthroline","3,4,7,8-四甲基-1,10-菲罗啉",,adamas,1g,gR-配体,236.31,1.0937,solid
+1661836-10-7,1055,Sodium fluoromethanesulfinate,氟甲基亚磺酸钠,,adamas,250mg,R1,120.0785532,,solid
+1662-01-7,1056,Bathophenanthroline,"4,7-二苯基-1,10-菲啰啉",,adamas,5g,gR-配体,332.4,1.2047,solid
+1663-39-4,1057,tert-Butyl acrylate,丙烯酸叔丁酯,,ADAMAS,25g,R7,128.17,0.875,liquid
+1663-45-2,1058,"1,2-Bis(diphenylphosphino)ethane","1,2-双(二苯基膦)乙烷 (DPPE)",,adamas,1g,gR-配体,398.42,,solid
+16635-95-3,1059,"1,2-Diphenylethylenediamine","1,2-二苯基乙二胺",,毕得,5g,3-5,212.29,0.97,solid
+1663-67-8,1060,Malonyl chloride,丙二酰氯,,energy,25g;5g,R8,140.95,1.449,liquid
+16642-79-8,1061,3-(4-Nitrophenyl)propanoic acid,3-(4-硝基苯基)丙酸,,adamas,5g,1-4-1,195.17,1.3544,solid
+16712-64-4,1062,6-Hydroxy-2-naphthoic Acid,2-羟基-6-萘甲酸,,adamas,100g,4-3-3,188.18,1.21,solid
+167171-03-1,1063,"(4R)-2-[2-(diphenylphosphanyl)phenyl]-4-phenyl-4,5-dihydro-1,3-oxazole",(R)-(-)-2-[2-(二苯基膦)苯基]-4-苯基-2-噁唑啉,,adamas,100mg,gL-R,407.44,,solid
+1679-64-7,1064,mono-Methyl terephthalate,对苯二甲酸单甲酯,,adamas,5g,1-4-5,180.16,1.1987,solid
+16839-97-7,1065,2-Methoxythiophene,2-甲氧基噻吩,,adamas,1g,3-3B,114.17,1.133,liquid
+16853-85-3,1066,Lithium aluminium hydride,氢化铝锂,,adamas,100g,D4,37.954298,0.97,solid
+16872-11-0,1067,"Hydrogen tetrafluoroborate,",氟硼酸,,安耐吉,0,4-3c,87.81,1.38,liquid
+16874-33-2,1068,2-tetrahydrofuroic acid,2-四氢糠酸,,adamas,5g,1-4-2,116.12,1.209,liquid
+16939-57-4,1069,"1-phenyl-1,3-butadiene","1-苯-1,3-丁二烯",,adamas,0;1g,-20 oC 1-A;L1;L2,130.19,0.9286,liquid
+16941-11-0,1070,Ammonium hexafluorophosphate,六氟磷酸铵,,adamas,100g,6-3,163.0,2.18,solid
+1694-92-4,1071,2-Nitrobenzenesulfonyl Chloride,邻硝基苯磺酰氯,,adamas,500g,R1,221.62,1.606,solid
+169590-42-5,1072,Celecoxib,塞来昔布,,adamas,5g,3-4,381.37,1.43,solid
+1701405-00-6,1073,"1-[(4S)-4,5-Dihydro-4-isopropyl-2-oxazolyl]isoquinoline","1-[(4S)-4,5-二氢-4-异丙基-2-恶唑基]异喹啉",,BLD,250mg,gL-R,240.3,1.18,solid
+170491-63-1,1074,2-HYDROXYMETHYL-PYRROLIDINE-1-CARBOXYLIC ACID TERT-BUTYL ESTER,2-羟甲基吡咯烷-1-羧酸丁酯,,安耐吉,5g,2-2;gRLW,201.26,1.084,solid
+170564-98-4,1075,(R)-3-Amino-3-phenylpropan-1-ol,(R)-3-氨基-3-苯基-1-丙醇,,adamas,1g,2-2,151.21,1.0406,solid
+17084-13-8,1076,Potassium hexafluorophosphate,六氟磷酸钾,,绍远,100g,7-2,184.06,2.75,solid
+17116-10-8,1077,Tetraethylammonium hexachlorocerate(IV),六氯铈(IV)四乙基铵,,毕得,100mg,,613.34,,solid
+171290-52-1,1078,"(1-ETHYNYL-3 5-DIMETHOXYBENZENE 98;3,5-Dimethoxyphenyl acetylene)","3,5-二甲氧基苯乙炔",,adamas,25g;5g,3-2,162.19,1.06,solid
+171364-79-7,1079,"4-METHOXYPHENYLBORONIC ACID, PINACOL ESTER",4-甲氧基苯硼酸频哪醇酯,,adamas,25g,2-4,234.1,1.02,solid
+1717-59-5,1080,"2,2-Difluoro-2-(fluorosulfonyl)acetic acid","2,2-二氟-2-(氟磺酰)醋酸盐",,adamas,5g,R2,178.09,1.723,liquid
+1717-59-5,1081,2-(Fluorosulfonyl)difluoroacetic acid,2-氟磺酰基二氟乙酸,,adamas,5g;10g,R8;R9,178.09,1.723,liquid
+1719-53-5,1082,Dichlorodiethylsilane,二氯二乙基硅烷,,adamas,1g,R9,157.11,1.05,liquid
+17213-57-9,1083,"3,5-Dimethoxybenzoyl Chloride","3,5-二甲氧基苯甲酰氯",,adamas,1g,1-5-3,200.62,1.2799,solid
+17217-57-1,1084,"4,4'-Dimethoxy-2,2'-bipyridine","4,4'-二甲氧基-2,2'-联吡啶",,adamas,1g;5g,2-4a;gR-配体,216.24,1.143,solid
+17247-58-4,1085,(Bromomethyl)cyclobutane,(溴甲基)环丁烷,,adamas,1g,1-3-1,149.03,1.326,liquid
+17283-81-7,1086,Dihydro-beta-ionone,二氢-β-紫罗兰酮,,adamas,5g,3-2,194.31,0.923,solid
+173035-10-4,1087,"1,3-bis(2,4,6-trimethylphenyl)-imidazolidinium-chloride","1,3-双( 2,4,6-三甲苯基)氯化咪唑鎓",,毕得,5g,3-2,344.92,,solid
+17347-32-9,1088,6-bromo-1-benzothiophene,6-溴苯并噻酚,,adamas,1g,gRc,213.09,1.649,solid
+1740-19-8,1089,Dehydroabietic acid,脱氢枞酸,,adamas,25g,1-4-1,300.44,1.058,solid
+174500-20-0,1090,"2,6-Bis[4S-4-phenyl-2-oxazolinyl]pyridine","2,6-双[4S-4-苯基-2-噁唑啉基]吡啶",,BLD,1g,gR-配体,369.42,1.28,solid
+174501-64-5,1091,1-Butyl-3-methyl-1H-imidazol-3-ium hexafluorophosphate(V),1-丁基-3-甲基咪唑六氟磷酸盐,,adamas,25g,7-2,284.18,1.38,liquid
+175166-49-1,1092,"(-)-2,2-Methylenebis(3A,8A-Dihydro-8H-Indeno(1,2-D)Oxazole)","(-)-2,2'-亚甲基双[(3aS,8aR)-3a,8a-二氢-8H-茚苯[1,2-d]并恶唑",,BLD,1g,gR-配体,330.38,1.48,solid
+17567-17-8,1093,"Potassium Tris(3,5-dimethylpyrazol-1-yl)borohydride","三(3,5-二甲基-1-吡唑基)硼氢化钾",,adamas,1g,gR-配体,336.29,,solid
+1759-53-1,1094,Cyclopropanecarboxylic Acid,环丙甲酸,,adamas,25g,1-4-1,86.09,1.081,liquid
+1762-34-1,1095,"5,5'-Dimethyl-2,2'-bipyridyl","5 5'-二甲基-2,2-联吡啶",,adamas,5g,3-3,184.24,1.06,solid
+176508-81-9,1096,4-Cyano-3-fluorobenzoic acid,4-氰基-3-氟苯甲酸,,adamas,1g,1-4-4,165.12,1.42,solid
+1765-93-1,1097,4-Fluorophenylboronic acid,4-氟苯硼酸,,adamas,25g,2-4,139.92,1.24,solid
+17754-90-4,1098,4-(Diethylamino)salicylaldehyde,4-(二乙基氨基)水杨醛,,安耐吉,25g,3-4B,193.24,1.0945,solid
+17763-67-6,1099,Phenyl Trifluoromethanesulfonate,苯基三氟甲烷磺酸酯,,安耐吉,5g,3-4,226.17,1.396,liquid
+1779-49-3,1100,Methyltriphenylphosphonium bromide,甲基三苯基溴化膦,,adamas,500g,3-3,357.22,,solid
+1779-51-7,1101,Butyltriphenylphosphonium bromide,丁基三苯基溴化膦,,adamas,100g,3-3,399.3,,solid
+178889-49-1,1102,1-methylcyclopentyl prop-2-enoate,丙烯酸甲基环戊酯,,TCI,1g,R1,154.21,0.97,liquid
+1791-26-0,1103,4-VINYL-BENZALDEHYDE,4-乙烯基苯甲醛,,adamas,1g,3-4,132.16,1.036,solid
+17966-67-5,1104,N-benzoyl-dl-leucine,N-苯甲酰亮氨酸,,TCI;adamas,25g;5g,1-4-2,235.28,1.132,solid
+17979-81-6,1105,sodium triethylborohydride,三乙基硼氢化钠,,adamas,1ml,4-1B,118.97,0.89,liquid
+1803416-30-9,1106,"2-[(4S)-4,5-dihydro-4-(1-methylethyl)- 2-oxazolyl]-5-(trifluoromethyl)-Pyridine","(S)-4-异丙基-2-(5-(三氟甲基)吡啶-2-基)-4,5-二氢噁唑",,BLD,250mg,R4,258.24,1.31,solid
+180516-87-4,1107,4-Carboxybenzeneboronic acid pinacol ester,4-羧基苯硼酸频那醇酯,,adamas,1g,1-4-5,248.08,1.15,solid
+180695-79-8,1108,1-Boc-4-bromopiperidine,1-Boc-4-溴哌啶,,adamas,1g,1-3-2,264.16,1.3403,solid
+1810004-87-5,1109,"3,6-di-tert-butyl-9-mesityl-10-phenylacridin-10-ium tetrafluoroborate","3,6,-二叔丁基-9-均三甲苯基-10-苯基吖啶-10-四氟硼酸盐",,,1g,gR-催化剂,573.5141128,,solid
+18107-18-1,1110,(Trimethylsilyl)diazomethane,(三甲基硅烷基)重氮甲烷,,adamas,25ml,R8,114.22,0.773,liquid
+18115-70-3,1111,lithium acetylacetonate,乙酰基丙酮锂,,energy,100g,6-1,106.05,,solid
+18162-48-6,1112,tert-Butyldimethylsilyl chloride,叔丁基二甲基氯硅烷,,adamas,100g,3-2,150.72,0.87,solid
+1817-57-8,1113,4-Phenyl-3-butyn-2-one,4-苯基-3-丁炔-2-酮,,adamas,1g,3-2,144.17,0.99,liquid
+1819994-24-5,1114,"(4R,4'R)-2,2'-Cyclopropylidenebis[4,5-dihydro-4-phenylo xazole]","(4R,4'R)-2,2'-环丙亚基双[4,5-二氢-4-苯基噁唑]",,adamas,100mg,gL-R,332.4,1.29,solid
+1821-12-1,1115,4-Phenylbutyric Acid,4-苯基丁酸,,adamas,5g;25g,1-4-1;1-4-2,164.2,1.0326,solid
+182122-08-3,1116,"(3aS,3'aS,8aR,8'a'R)-2,2'-cyclopropylidenebis[3a,8a-dihydro-8H-Indeno[1,2-d]oxazole","(3AS,3'AS,8AR,8'A'R)-2,2'-环丙亚基双[3A,8A-二氢-8H-茚并[1,2-D]噁唑]",,BLD,250mg,gR-配体,356.42,1.54,solid
+182122-12-9,1117,"(3aS,3'aS,8aR,8'aR)-2,2'-Cyclopentylidenebis[3a,8a-dihydr o-8H-indeno[1,2-d]oxazole]","(3AS,3'AS,8AR,8'AR)-2,2'-环亚戊基双[3A,8A-二氢-8H-茚并[1,2-D]噁唑",,adamas,100mg,gL-R,384.47,1.46,solid
+182122-13-0,1118,"(3aS,3a'S,8aR,8a'R)-2,2'-Cyclohexylidenebis[8,8a-dihydro -3aH-indeno[1,2-d]oxazole],99%e.e.","(3AS,3A'S,8AR,8A'R)-2,2'-环己亚基双[8,8A-二氢-3AH-茚并[1,2-D]噁唑]",,adamas,250mg,gL-R,398.5,1.42,solid
+18217-00-0,1119,1-(2-Chloroethyl)-4-methoxybenzene,2-(4-甲氧苯基)-氯乙烷,,adamas,1g,R3,170.64,1.13,liquid
+1826-67-1,1120,Vinylmagnesium bromide,乙烯基溴化镁,,adamas,500ml,R5,131.26,0.981,liquid
+1827-27-6,1121,5-Amino-2-fluoropyridine,2-氟-5-氨基吡啶,,adamas,25g,3-5,112.11,1.257,solid
+18282-51-4,1122,4-Iodobenzyl Alcohol,4-碘苄醇,,adamas,5g,2-2,234.03,1.867,solid
+18294-87-6,1123,1-Cyclohexene-1-acetic acid,1-环己烯基乙酸,,adamas,5g,1-4-2,140.18,1.04,solid
+1833-51-8,1124,Chloromethyldimethylphenylsilane,二甲基氯甲基苯基硅烷,,安耐吉,5g,3-2,184.74,1.024,liquid
+18346-57-1,1125,"Cobalt(II) dibromo(1,2-dimethoxyethane), min. 98%",溴化钴(II)乙二醇二甲醚加合物,,安耐吉,2g,gL-FR,308.8622,,solid
+1835-49-0,1126,Tetrafluoroterephthalonitrile,四氟对苯二腈,,adamas,25g,3-4,200.09,1.6184,solid
+184357-44-6,1127,"tert-butyl N-(3-hydroxy-2,2-dimethylpropyl)carbamate","3-羟基-2,2-二甲基丙基氨基甲酸叔丁酯",,韶速,1g,2-2,203.28,0.998,solid
+1849-27-0,1128,"1,4-Bis(Phenylethynyl)Benzene","1,4-双(苯乙基)苯",,adamas,250mg,3-2,278.35,1.15,solid
+18511-62-1,1129,2-(4-Fluorophenyl)oxirane,(±)-4-氟苯乙烯环氧化物,,adamas,250mg,2-3,138.14,1.167,liquid
+18531-99-2,1130,"(S)-(-)-1,1'-Bi-2-naphthol","S-1,1'-联-2-萘酚",,安耐吉,25g,4-3-1,286.32,1,solid
+185346-09-2,1131,"(-)-2,6-BIS[2-[3AS-(2(3'AR*,8'AS*),3A,8A)-3A,8A-DIHYDRO-8H-INDENO[1,2-D]OXAZOLE]]PYRIDINE","2,6-双[(3AS,8AR)-3A,8A-二氢-8H-茚并[1,2-D]恶唑啉-2-基]吡啶",,bld,1g,3-3,393.44,1.5,solid
+18618-55-8,1132,Cerium(III) chloride heptahydrate,"氯化铈,七水合物",,毕得,10g,gR-催化剂,372.58,~3.940,solid
+18653-75-3,1133,2-(1H-imidazol-2-yl)-pyridine,2-(咪唑-2-基)吡啶,,毕得,1g,gR-配体,145.16,1.214,solid
+186663-74-1,1134,N-Boc-2-aminophenol,N-BOC-2-氨基苯酚,,ADAMAS,1g,R6,209.24,1.182,solid
+18704-37-5,1135,8-Quinolinesulfonyl chloride,8-喹啉磺酰氯,,安耐吉,10g,R1,227.67,1.483,solid
+18704-37-5,1136,8-Quinolinesulfonyl chloride,喹啉-8-磺酰氯,,安耐吉,5g,R1,227.67,1.483,solid
+1873-77-4,1137,Tris(trimethylsilyl)silane,三(三甲基硅基)硅烷,,安耐吉,1g,3-2,248.66,0.806,liquid
+18742-02-4,1138,"2-(2-Bromoethyl)-1,3-dioxolane","2-(2-溴乙基)-1,3-二氧戊环",,adamas,5g,R7,181.03,1.542,liquid
+1877-75-4,1139,4-Methoxyphenoxyacetic acid,对甲氧基苯氧乙酸,,adamas,5g,1-5A,182.17,1.2481,solid
+1878-66-6,1140,4-Chlorophenylacetic acid,对氯苯乙酸,,adamas,25g,1-4-3,170.59,1.2315,solid
+188264-84-8,1141,"(S,S)-(+)-N,N'-BIS(3,5-DI-TERT-BUTYLSALICYLIDENE)-1,2-CYCLOHEXANEDIAMINO-COBALT(II)",环己二胺双（二叔丁基水杨烯）钴,,adamas,1g,gR-催化剂,603.76,,solid
+1885-29-6,1142,2-Aminobenzonitrile,2-氨基苯腈,,安耐吉;adamas,100g,3-4,118.14,1.11,solid
+18880-00-7,1143,4-(tert-Butyl)benzylbromide,4-叔丁基苄溴,,adamas,25g,R2,227.14,1.236,liquid
+1894189-67-3,1144,"Nickel, [4,4′-bis(1,1-dimethylethyl)-2,2′-bipyridine-κN1,κN1′]dibromo-, (SP-4-2)-","4,4'-双(1,1-二甲基乙基)-2,2'-联吡啶-ΚN1,ΚN1′]二溴化镍-(SP-4-2)-",,adamas,1g,gR-催化剂,488.92,,solid
+1895006-01-5,1145,Mes-Umemoto reagent,MES-UMEMOTO试剂,,安耐吉;adamas,5g;1g;0,4-4-3;L1;L6;转移至手套箱冰箱,488.5,,solid
+1907-33-1,1146,Lithium tert-butoxide,叔丁醇锂,,adamas,25g,6-1,80.05,0.89,liquid
+19099-54-8,1147,2-Isopropyliodobenzene,2-异丙基碘苯,,adamas,25g,1-2-3,246.09,1.54,liquid
+1910-42-5,1148,Paraquat,甲基紫精,,安耐吉,1g,4-2-2,257.159,1.25,solid
+1914-58-5,1149,trans-styrylacetic acid,4-苯基-3-丁烯酸,,adamas;安耐吉,1g,1-4-3,162.19,1.0281,solid
+19158-51-1,1150,Tosyl cyanide,4-甲苯磺酰氰,,adamas,5g,1-5-4;L6,181.21,1.3055,solid
+1918-00-9,1151,Dicamba,麦草畏,,毕得,25g,1-4-4,221.04,1.57,solid
+1923-70-2,1152,Tetrabutylammonium perchlorate,四丁基高氯酸铵,,adamas,25g,D1-4A,341.91,1.0387,solid
+1927-95-3,1153,4-Bromophenol Acetate,4-乙酰氧基溴苯,,adamas,1g,1-3-3,215.04,1.501,liquid
+192863-36-8,1154,Potassium (4-Methoxyphenyl)trifluoroborate,(4-甲氧基苯基)三氟硼酸钾,,adamas,5g,2-4,214.03,,solid
+1929-29-9,1155,3-(4-Methoxyphenyl)propionic acid,3-(4-甲氧基苯基)丙酸,,adamas,25g,1-4-3,180.2,1.144,solid
+1940-18-7,1156,1-ETHYLCYCLOHEXANOL,1-乙基环己醇,,adamas,25g,2-2,128.21,0.9227,solid
+19455-23-3,1157,"PotassiuM triMethylacetate, 95%",三甲基乙酸钾,,毕得,0,6-2,142.24,,solid
+1945-84-2,1158,2-Ethynylpyridine,2-乙炔基吡啶,,安耐吉,5g,3-2;R3,103.12,1.021,solid
+19477-73-7,1159,6-bromo-3H-isobenzofuran-1-one,6-溴-3H-异苯并呋喃-1-酮,,adamas,1g,R3,213.03,1.742,solid
+195062-57-8,1160,"4,4,5,5-tetramethyl-2-(4-methylphenyl)-1,3,2-dioxaborolane","4-(4,4,5,5-四甲基1,3,,2-二氧杂硼烷-二基)甲苯",,adamas,5g,R1,218.1,0.98,solid
+19513-05-4,1161,manganese(III) acetate dihydrate,醋酸锰二水合物,,adamas,1g,D2,268.1,1.59,solid
+195433-00-2,1162,"(4R,4'R)-2,2'-(4,6-Dibenzofurandiyl)bis[4,5-dihydro-4-phenyloxazole]","(4R,4'R)-2,2'-(4,6-二苯并呋喃二基)双[4,5-二氢-4-苯基恶唑]",,BLD,250mg,R4,458.51,1.33,solid
+195703-68-5,1163,"(3aS,3a'S,8aR,8a'R)-2,2'-(1,3-Diphenylpropane-2,2-diyl)bis(8,8a-dihydro-3aH-indeno[1,2-d]oxazole)","(3AS,3A'S,8AR,8A'R)-2,2'-(1,3-二苯基丙烷-2,2-二基)双(8,8A-二氢-3ΑH-茚并[1,2-D]噁唑)",,BLD,250mg,3-3,510.62,,solid
+19692-45-6,1164,4-tert-Butylbenzyl chloride,4-叔丁基苄氯,,adamas,25g,1-2-2,182.69,0.945,liquid
+19719-28-9,1165,"2,4-Dichlorophenylacetic acid","2,4-二氯苯乙酸",,adamas,5g,1-4-2,205.04,1.3806,solid
+1972-28-7,1166,diethyl azodiformate,偶氮二甲酸二乙酯 (DEAD),,adamas,100g,R1,174.15,1.106,liquid
+1973375-72-2,1167,"N]phenyl] iridium hexafluorophosphate, 98%","[5,5'-双(三氟甲基)-2,2'-联吡啶-ΚN,ΚN]双[3,5-二氟-2-[5-(三氟甲基)-2-吡啶基-ΚN]苯基]六氟磷酸铱",,,1g,gR-催化剂,1145.71,,solid
+19788-37-5,1168,"4-Chloromethyl-3,5-dimethylisoxazole","3,5-二甲基-4-(氯甲基)异噁唑",,adamas,1g,1-2-2,145.59,1.173,solid
+19788-49-9,1169,Ethyl 2-Mercaptopropionate,2-巯基丙酸乙酯,,adamas,5g,R7,134.2,1.031,liquid
+19845-69-3,1170,"1,6-Bis(diphenylphosphino)hexane","1,6-二(二苯基膦)己烷",,adamas,5g,3-3,454.52,,solid
+19845-69-3,1171,"1,6-Bis(diphenylphosphino)hexane","1,6-双(二苯基膦基)己烷",,绍远,5g,3-3,454.52,,solid
+198-55-0,1172,Perylene,苝,,adamas,5g,R2,252.31,1.35,solid
+19883-41-1,1173,H-D-PHg-OME HCL,(R)-2-苯基甘氨酸甲酯盐酸盐,,adamas,100g,2-2,201.65,,solid
+199277-70-8,1174,"Pyridine, 2-[(4S)-4,5-dihydro-4-(1-methylethyl)-2-oxazolyl]-6-methyl-","(S)-4-异丙基-2-(6-甲基吡啶-2-基)-4,5-二氢恶唑",,BLD,250mg,R4,204.27,1.12,solid
+20029-52-1,1175,4-Cyclohexylbenzoic Acid,4-环己基苯甲酸,,adamas,1g,1-4-5,204.26,1.115,solid
+20075-26-7,1176,1-(methoxymethyl)-1H-imidazole,1-甲氧基甲基-1H-咪唑,,adamas,1g,4-2-1,112.13,1.06,liquid
+201409-47-4,1177,"(3aS,8aR)-2-(2-diphenylphosphinophenyl)-3a,8a-dihydroindane[1,2-d]oxazole","(3AS,8aR)-2-(2-二苯基膦苯基)-3a,8a-dihydroindane[1,2-d]噁唑",,BLD,100mg,gR-配体,419.45,,solid
+201870-82-8,1178,"(Acetato-κO)[[2,2'-[(1R,2R)-1,2-cyclohexanediylbis[(nitrilo-κN)Methylidyne]]bis[4,6-bis(1,1-diMethylethyl)phenolato-κO]](2-)]cobalt","(SP-5-13)-(乙酸-κO)[[2,2'-[(1R,2R)-1,2-环己二基双[(次氮基-κN)亚甲基]]双[4,6-双(1,1-二甲基乙基)苯酚-κO]](2-)]钴",,adamas,250mg,R9,662.7875,,solid
+2026-48-4,1179,(S)-(+)-2-Amino-3-methyl-1-butanol,L-缬氨醇,,adamas,25g,D1-2A,103.16,0.926,solid
+2031-62-1,1180,Diethoxymethylsilane,甲基二乙氧基硅烷,,adamas,25ml,R3,134.25,0.838,solid
+203661-71-6,1181,6-Boc-2-oxo-6-aza-spiro[3.4]octane,6-BOC-2-氧代-6-氮杂螺[3.4]辛烷,,安耐吉;adamas,1g,2-4;R1,225.28,1.14,solid
+2039-82-9,1182,4-Bromostyrene,对溴苯乙烯,,adamas,5g,L1,183.05,1.4,liquid
+2039-88-5,1183,2-Bromostyrene,2-溴苯乙烯,,安耐吉,5g,R1,183.05,1.46,liquid
+2042-37-7,1184,2-Bromobenzonitrile,2-溴苯腈,,adamas,25g,3-4,182.02,1.496,solid
+20427-58-1,1185,Zinc hydroxide,氢氧化锌,,adamas,25g,5-1,99.39,3.05,solid
+20439-47-8,1186,"(1R,2R)-(-)-1,2-Diaminocyclohexane","左旋-反式-1,2-环己二胺",,adamas,25g,R2,114.19,0.931,solid
+2049-94-7,1187,ISOAMYLBENZENE,异戊基苯,,adamas,1ml,R1,148.24,0.854,liquid
+2051-18-5,1188,4-Isopropylbenzyl Chloride,4-异丙基苄氯,,adamas,1g,1-2-2,168.66,1.523,solid
+2051-62-9,1189,4-Chlorobiphenyl,4-氯联苯,,adamas,5g,1-2-1,188.65,1.132,solid
+2052-49-5,1190,Tetrabutylammonium hydroxide,四丁基氢氧化铵,,安耐吉,100ml,7-2,259.47,0.995,solid
+205647-96-7,1191,"(3aS,8aR)-2-(pyridin-2-yl)-8,8a-dihydro-3aH-indeno[1,2-d]oxazole","(3AS,8AR)-2-(吡啶-2-基)-8,8A二氢四氢-3AH-茚并[1,2-D]噁唑",,BLD,1g,gL-R,236.27,1.34,solid
+20667-12-3,1192,Silver(I) oxide,氧化银,,adamas;安耐吉,5g,D2,231.74,7.143,solid
+206996-60-3,1193,CERIUM (III) ACETATE,醋酸铈,,阿拉丁,10g,gRb,317.25,,solid
+20717-79-7,1194,1-Bromo-2-naphthoic Acid,1-溴-2-萘甲酸,,adamas,5g,1-5C,251.08,1.648,solid
+20769-85-1,1195,2-Bromoisobutyryl Bromide,2-溴代异丁酰溴,,adamas,100g,1-5-3,229.9,1.86,liquid
+2081-44-9,1196,Tetrahydro-4-pyranol,四氢吡喃-4-醇,,adamas,5g,2-2,102.13,1.071,liquid
+20875-34-7,1197,"(disulfide, bis[2,4,6-tris(1-methylethyl)phenyl];Bis(2,4,6-triisopropylphenyl) disulfide)","双(2,4,6-三异丙基苯基)二硫化物",,adamas;乐妍,100mg,3-3B;R8,470.82,,solid
+20880-92-6,1198,Diacetonefructose,果糖二丙酮,,adamas,25g,L1;L2,260.28,1.181,solid
+2094-72-6,1199,1-Adamantanecarbonyl chloride,金刚烷酰氯,,adamas,5g,1-5-3,198.69,1.049,solid
+20970-75-6,1200,3-Methylpicolinonitrile,2-氰基-3-甲基吡啶,,adamas,25g,3-4,118.14,1.1151,solid
+20989-17-7,1201,L-Phenylglycinol,(S)-(+)-2-苯甘氨醇,,adamas,100g,2-2,137.18,1.063,solid
+2107-70-2,1202,"3-(3,4-Dimethoxyphenyl)propionic acid","3,4-二甲氧基苯丙酸",,adamas,5g,1-4-3,210.23,1.1922,solid
+21087-29-6,1203,cinnamyl chloride,肉桂基氯,,adamas,25g,R3,152.62,1.096,liquid
+2113-51-1,1204,2-Iodobiphenyl,2-碘联苯,,adamas,5g,,280.1,1.59,solid
+21239-29-2,1205,"ethyl 3,5-dimethylbenzoate","3,5-二甲基苯甲酸乙酯",,adamas,25g,3-5B,178.23,1.113,liquid
+21252-69-7,1206,1-Octylimidazole,1-辛基咪唑,,adamas,1g,4-2-1,180.29,0.91,liquid
+21256-18-8,1207,Oxaprozin,奥沙普秦,,adamas,5g;25g,1-4-3,293.32,1.2278,solid
+2133-40-6,1208,(Methyl L-prolinate hydrochloride;L-Proline methyl ester hydrochloride),L-脯氨酸甲酯盐酸盐,,麦克林;安耐吉,25g,2-2;R9,165.62,1.1426,solid
+2133827-34-4,1209,"Oxazole, 2,2'-cyclopentylidenebis[4,5-dihydro-4,5-diphenyl-, (4R,4'R,5S,5'S)-","(4R,4'R,5S,5'S)-2,2'-亚环戊基双[4,5-二氢-4,5-二苯基噁唑]",,毕得,100mg,R9,512.64,,solid
+213697-53-1,1210,"2-Dicyclohexylphosphino-2'-(N,N-dimethylamino)biphenyl","2-二环己基膦基-2'-(N,N-二甲氨基)联苯",,毕得,5g,gR-配体,393.54,,solid
+214360-60-8,1211,"4'-(4,4,5,5-Tetramethyl-1,3,2-dioxaborolan-2-yl)acetanilide","4'-(4,4,5,5-四甲基-1,3,2-二氧硼烷-2-基)退热冰",,adamas,1g,2-4,261.12,1.07,solid
+214360-66-4,1212,"4-TERT-BUTYLPHENYLBORONIC ACID, PINACOL ESTER",4-叔丁基苯硼酸频那醇酯,,adamas,5g,2-4,260.18,0.96,solid
+21524-34-5,1213,"2-Bromo-1,3,5-triisopropylbenzene","2-溴-1,3,5-三异丙苯",,adamas,25g,1-3-4,283.25,1.118,liquid
+21615-34-9,1214,o-Anisoyl chloride,邻甲氧基苯甲酰氯,,adamas,100g,1-5-3,170.59,1.146,liquid
+21797-13-7,1215,Tetrakis(acetonitrile)palladium(II) tetrafluoroborate,四乙腈四氟硼酸钯,,adamas,250mg,D2,357.44,,solid
+21850-12-4,1216,cis-Octahydro-isoindole,顺式全氢异吲哚,,adamas,5g,3-2,125.21,1.081,liquid
+21907-50-6,1217,cesium trifluoroacetate,三氟乙酸铯,,adamas,1g,6-1,245.92,2,solid
+21957-58-4,1218,(2S)-2-(4-methylbenzenesulfonamido)propanoic acid,N-对甲苯磺酰-L-丙氨酸,,adamas,5g,1-4-2,243.28,1.319,solid
+220141-71-9,1219,"3,5-Difluorobenzyl chloride","3,5-二氟苄氯",,adamas,1g,1-2-2,162.56,1.294,liquid
+220227-21-4,1220,"2,4,5-Trifluorobenzenesulphonyl chloride","2,4,5-三氟苯磺酰氯",,adamas,5g,R3,230.59,1.657,liquid
+22061-78-5,1221,2-bromo-3-methylphenol,2-溴-3-甲基苯酚,,adamas,5g,R2,187.03,1.554,solid
+22071-15-4,1222,Ketoprofen,酮基布洛芬,,adamas,5g,1-4-2,254.28,1.1565,solid
+2210-24-4,1223,N-Phenylacrylamide,N-苯基丙烯酰胺,,adamas,5g,3-4,147.17,1.097,solid
+22112-78-3,1224,"5,10,15,20-tetrakis(4-methoxyphenyl)porphyrin","5,10,15,20-四三(4-甲氧基苯基)-21H,23H-卟啉",,adamas,1g,3-3,734.84,1.253,solid
+2215-77-2,1225,4-Phenoxybenzoic acid,4-苯氧基苯甲酸,,adamas,5g,1-4-5,214.22,1.1956,solid
+2216-51-5,1226,Menthol,L-薄荷醇,,安耐吉,25g,2-2,156.27,0.89,solid
+2216-94-6,1227,Ethyl Phenylpropiolate,苯丙酸乙酯,,安耐吉,5g,R8,174.2,1.055,solid
+22204-53-1,1228,Naproxen,萘普生,,adamas,100g,3-2,230.26,1.145,solid
+2226-96-2,1229,4-Hydroxy-TEMPO,阻聚剂701,,adamas,25g,R6,172.24,1.0402,solid
+2234-14-2,1230,"2',4',6'-Triisopropylacetophenone","2,4,6-三异丙基苯乙酮",,adamas,1g,2-3,246.39,0.9384,solid
+22348-32-9,1231,"(R)-(+)-α,α-Diphenylprolinol","(R)-(+)-α,α-二苯基脯氨醇",,adamas,1g,2-2,253.35,1.0078,solid
+224311-51-7,1232,2-(Di-tert-butylphosphino)biphenyl,2-(二叔丁基膦)联苯,,毕得,5g,gR-配体,298.4,1,solid
+2243-42-7,1233,2-Phenoxybenzoic Acid,2-苯氧基苯甲酸,,adamas,5g,1-4-5,214.22,1.1553,solid
+224-98-6,1234,anthraquinoline,蒽喹啉,,adamas,1g,gL-R,229.28,1.1281,solid
+22519-64-8,1235,Indium(III) chloride tetrahydrate,三氯化铟 四水合物,,adamas,5g,D2,291.85,,solid
+22532-61-2,1236,2-bromo-6-hydroxybenzaldehyde,2-溴-6-羟基苯甲醛,,adamas,5g,4-3,201.02,1.737,solid
+22693-41-0,1237,"benzenethiol, 2,4,6-tris(1-methylethyl)-","2,4,6-三异丙基苯硫酚",,adamas,1g,3-3B,236.42,0.937,liquid
+2270-20-4,1238,5-Phenylvaleric acid,5-苯基戊酸,,adamas,5g,1-4-1;1-5A,178.23,1.0292,solid
+2270-59-9,1239,5-Bromo-2-methyl-2-pentene,5-溴-2-甲基-2-戊烯,,安耐吉,5g,R6,163.06,1.217,liquid
+22724-81-8,1240,(2S)-2-aminopentan-1-ol,(S)-(+)-2-氨基-1-戊醇,,adamas,5g,2-2,103.16,0.915,solid
+229177-78-0,1241,"(S)-5,5',6,6',7,7',8,8'-Octahydro-[1,1'-binaphthalene]-2,2'-diamine","(S)-5,5',6,6',7,7',8,8'-八氢-[1,1'-联萘]-2,2'-二胺",,BLD,1g,R4,292.42,1.156,solid
+2304-30-5,1242,Tetrabutylphosphonium Chloride,四丁基氯化膦,,adamas,25g,7-2,294.88,0.978,solid
+231291-22-8,1243,6-(Trifluoromethyl)-3-pyridinecarboxylic acid,6-三氟甲基烟酸,,adamas,1g,1-4-5,191.11,1.484,solid
+2314-97-8,1244,Trifluoromethyliodide,三氟碘甲烷,,安耐吉,5g,R2,195.91,2.361,liquid
+23190-16-1,1245,"(1R,2S)-(-)-2-Amino-1,2-diphenylethanol","(1R,2S)-(-)-2-氨基-1,2-二苯基乙醇",,adamas,100g,2-2,213.28,1.148,solid
+2328084-27-9,1246,"4-Oxazolecarboxylic acid, 2,2′-cyclopropylidenebis[4,5-dihydro-, 4,4′-bis(1,1-dimethylethyl) ester, (4S,4′S)-","(4S,4'S)-2,2'-(环丙烷-1,1-二基)双(4,5-二氢恶唑-4-羧酸)二叔丁酯",,BLD,250mg,gR-配体,380.44,1.29,solid
+23287-26-5,1247,METHYL 3-METHYLSALICYLATE,2-羟基-3-甲基苯甲酸甲酯,,adamas,5g,2-4,166.17,1.1683,solid
+23295-32-1,1248,CHLORO(PYRIDINE)BIS(DIMETHYLgLYOXIMATO)COBALT(III),氯(吡啶)双(二甲基乙二肟)-钴,,安耐吉,1g,gR-催化剂,403.71,,solid
+23356-96-9,1249,L-(+)-Prolinol,L-(+)-脯氨醇,,adamas,25g,2-2,101.15,1.036,solid
+23364-44-5,1250,"(1S,2R)-2-Amino-1,2-diphenylethanol","(1S,2R)-2-氨基-1,2-二苯基乙醇",,adamas,25g,2-2,213.28,1.148,solid
+23426-63-3,1251,Methyl alpha-bromoisobutyrate,2-溴异丁酸甲酯,,adamas,100g,2-4,181.03,1.399,solid
+2344-80-1,1252,Chloromethyltrimethylsilane,氯甲基三甲基硅烷,,adamas;安耐吉,5g;25g,3-2,122.67,0.88,liquid
+2344-83-4,1253,3-Chloropropyltrimethylsilane,(3-氯丙基)三甲基硅烷,,adamas,5g,3-3,150.72,0.878,liquid
+2350-89-2,1254,4-Vinylbiphenyl,4-乙烯基联苯,,adamas;安耐吉,1g;5g,3-4;R8,180.25,0.997,solid
+236406-21-6,1255,1-Boc-4-(Hydroxymethyl)-4-methyl-piperidine,1-N-Boc-4-甲基羟甲基哌啶,,韶速,1g,2-2,229.32,1.034,liquid
+2368835-34-9,1256,"2,2'-Bioxazole, 4,4'-dicyclohexyl-4,4',5,5'-tetrahydro-, (4S,4'S)-","(4S,4'S)-4,4'-二环己基-4,4',5,5'-四氢-2,2'-联恶唑",,乐妍,100mg,gL-R,304.43,1.31,solid
+23719-80-4,1257,Cyclopropylmagnesium bromide,环丙基溴化镁,,adamas,100ml,R5,145.28,0.968,liquid
+23743-26-2,1258,"1,2-Bis(dicyclohexylphosphino)ethane","1, 2-双(二环己基磷基)-乙烷",,毕得,100mg,gL,422.62,,solid
+2374958-86-6,1259,"2,2'-Bi-1H-imidazole, 1,1'-bis([1,1'-biphenyl]-4-yl)-4,4',5,5'-tetrahydro-4,4'-bis(1-methylethyl)-, (4S,4'S)-","(4S,4'S)-1,1'-二([1,1'-联苯]-4-基)-4,4'-二异丙基-4,4',5,5'-四氢-1H,1'H-2,2'-联咪唑",,BLD,250mg,gL-R,526.71,1.12,solid
+2374958-89-9,1260,"(4S,4'S)-4,4'-二仲丁基-4,4',5,5'-四氢-2,2'-联恶唑","(4S,4'S)-4,4'-二仲丁基-4,4',5,5'-四氢-2,2'-联恶唑",,BLD,250mg,gR-配体,252.35,1.14,liquid
+2377-81-3,1261,Tetrafluoroisophthalonitrile,四氟间苯二腈,,adamas,25g,1-2-1;1-3B,200.09,1.6184,solid
+2380-36-1,1262,"3,5-Di-tert-butylaniline","3,5-二叔丁基苯胺",,乐研,5g,3-4C,205.34,0.912,solid
+2387-23-7,1263,"N,N'-DICYCLOHEXYLUREA","N,N’-二环己基脲",,energy,5g,4-2-2,224.34,1.02,solid
+23877-12-5,1264,tert-Butyl α-bromoisobutyrate,2-溴代异丁酸叔丁酯,,adamas,25g,1-3-2,223.11,1.196,liquid
+2396-68-1,1265,4-tert-Butylbenzenethiol,4-叔丁基苯硫酚,,adamas,1g,R3,166.28,0.964,liquid
+2396-80-7,1266,5-HEXENOIC ACID METHYL ESTER,5-已酸甲酯,,adamas,1g,3-4,128.17,0.91,liquid
+2398-37-0,1267,3-Bromoanisole,间溴苯甲醚,,毕得,100g,1-3-4,187.03,1.49,liquid
+2409691-04-7,1268,"Nickel, dibromo(4,4'-dimethoxy-2,2'-bipyridine-κN1,κN1')-","(4,4'-二甲氧基-2,2'-联吡啶-ΚN1,ΚN1')二溴化镍",,毕得,1g,D2,436.76,,solid
+2414-98-4,1269,magnesium ethoxide,乙醇镁,,adamas,25g,6-1,114.43,1.01,solid
+2417-72-3,1270,Methyl 4-(bromomethyl)benzoate,4-溴甲基苯甲酸甲酯,,adamas,5g,R9,229.07,1.47,solid
+2426-02-0,1271,"3,4,5,6-Tetrahydrophthalic anhydride","3,4,5,6-四氢苯酐",,adamas,25g,2-4,152.15,1.2,solid
+24280-93-1,1272,Mycophenolic acid,霉酚酸,,adamas,25g,3-2,320.34,1.23,solid
+2436-85-3,1273,"N,N-Dimethyl-2-naphthylamine","N,N-二甲基-2-萘胺",,adamas,1g,3-5,171.24,1.0279,solid
+2437-17-4,1274,6-Hydroxy-1-naphthoic Acid,6-羟基-1-萘甲酸,,adamas,2g,4-3-3,188.18,1.399,solid
+24388-23-6,1275,"(4,4,5,5-TETRAMETHYL-1,3,2-DIOXABOROLAN-2-YL)BENZENE","(4,4,5,5-四甲基-1,3,2-二氧杂硼烷-2-基)苯",,adamas,25g,2-4,204.07,0.99,solid
+24424-99-5,1276,Di-tert-butyl dicarbonate,二碳酸二叔丁酯,,adamas,100g,3-4B,218.25,0.95,liquid
+2446-83-5,1277,Diisopropyl azodicarboxylate,偶氮二甲酸二异丙酯,,adamas,100g,R3,202.21,1.027,liquid
+24470-78-8,1278,Isopropyltriphenylphosphonium iodide,碘化异丙基三苯膦,,adamas,25g,3-3,432.28,,solid
+2450-71-7,1279,PROPARgYLAMINE,炔丙胺,,adamas,5g,3-2,55.08,0.86,liquid
+24544-04-5,1280,"2,6-Diisopropylaniline","2,6-二异丙基苯胺",,麦克林,100ml,3-5,177.29,0.94,liquid
+246047-72-3,1281,grubbs catalyst 2ndgeneration,grubbs二代催化剂,,adamas,1g,D2,848.98,,solid
+246047-72-3,1282,"[1,3-bis(2,4,6-trimethylphenyl)imidazolidin-2-ylidene]dichloro(phenylmethylidene)ruthenium; tricyclohexylphosphine",grubbs 2 代催化剂,,adamas,250mg,R1,848.98,,solid
+24629-25-2,1283,(L-(+)-Isoleucinol;L-Isoleucinol),L-异亮氨醇,,adamas,25g;100g,D1-2A;R2,117.19,0.949,solid
+2466-76-4,1284,1-Acetylimidazole,1-乙酰基咪唑,,adamas,5g,4-2-1,110.11,1.2111,solid
+24772-63-2,1285,"1,8-Diiodooctane","1,8-二碘辛烷",,adamas,5g,R2,366.02,1.84,liquid
+247940-06-3,1286,2-(Dicyclohexylphosphino)biphenyl,2-(二环己基膦基)联苯,,绍远,5g,3-3,350.48,,solid
+24821-22-5,1287,"2,6-Bis(trifluoromethyl)benzoic acid","2,6-双(三氟甲基)苯甲酸",,adamas,0,1-4-5,258.12,1.527,solid
+2491-20-5,1288,L-Alanine methyl ester hydrochloride,丙氨酸甲酯盐酸盐,,adamas,5g,2-2,139.58,,solid
+249562-06-9,1289,2-Methyl-2-adamantyl acrylate,2-甲基-2-金刚烷醇丙烯酸酯,,TCI,5g,R1,220.31,1.07,liquid
+25015-63-8,1290,Pinacolborane,频哪醇硼烷,,adamas,100g,R2,127.98,0.882,liquid
+250285-32-6,1291,"1,3-Bis(2,6-diisopropylphenyl)imidazolium chloride","1,3-双(2,6-二异丙基苯基)氯化咪唑鎓",,毕得,5g,3-2,425.05,,solid
+2510-22-7,1292,4-Ethynylpyridine,4-乙炔基吡啶,,安耐吉,1g,R3,103.12,1.02,solid
+2510-23-8,1293,3-Ethynylpyridine,3-乙炔基吡啶,,安耐吉,5g,R7,103.12,1.02,solid
+2512-24-5,1294,N-tert-butyl-benzenesulfonamide,N-叔丁基苯磺酰胺,,安耐吉,5g,3-4,213.3,1.125,solid
+2516-47-4,1295,(Aminomethyl)cyclopropane,环丙基甲胺,,adamas,1g,3-2C,71.12,0.83,liquid
+25173-72-2,1296,"3-(3,4,5-Trimethoxyphenyl)propionic acid","3-(3,4,5-三甲氧基苯基)丙酸",,adamas,5g,1-4-3,240.25,1.169,solid
+25177-85-9,1297,Indane-2-carboxylic acid,2-茚羧酸,,adamas,5g,1-4-2,162.19,1.0281,solid
+2550-26-7,1298,Benzylacetone,苄基丙酮,,adamas,100ml,2-3,148.2,0.989,liquid
+25503-90-6,1299,1-Acetyl-4-piperidinecarboxylic acid,1-乙酰基-4-哌啶甲酸,,安耐吉,5g,1-4-1,171.19,1.1998,solid
+25637-16-5,1300,4-Bromo-tetrahydropyran,4-溴四氢吡喃,,安耐吉,5g,1-3-2,165.03,1.467,liquid
+2564-83-2,1301,TEMPO,"2,2,6,6-四甲基哌啶氧化物(TEMPO)",,adamas,25g,R6,156.25,1,solid
+256652-04-7,1302,"2-Naphthaleneboronic acid, pinacol ester",萘-2-硼酸频哪醇酯,,adamas,1g,1-2C,254.13,1.06,solid
+2567-29-5,1303,4-Bromomethylbiphenyl,4-溴甲基联苯,,安耐吉,5g,1-3-2,247.13,1.341,solid
+2568-33-4,1304,"3-Methyl-1,3-butanediol",异戊二醇,,adamas,100,2-2,104.15,0.976,solid
+25700-11-2,1305,2-(pyrazol-1-yl)pyridine,2-吡唑-1-基吡啶,,毕得,1g,gR-配体,145.16,1.16,solid
+25812-30-0,1306,gemfibrozil,吉非罗齐,,adamas,5g;25g;100g,1-5A;2-3b;3-2,250.33,1.1109,solid
+258278-25-0,1307,"1,3-bis[2,6-bis(1-methylethyl)phenyl]-4,5-dihydro-1H-imidazol-3-ium chloride","1,3-双(2,6-二异丙基苯基)咪唑翁盐酸盐",,毕得,5g,3-2,429.08,,solid
+2586-62-1,1308,1-Bromo-2-methylnaphthalene,1-溴-2-甲基萘,,adamas,5g,,221.09,1.418,liquid
+2592-95-2,1309,1-Hydroxybenzotrizole,1-羟基苯并三唑,,adamas,100g,4-2-3,135.12,1,solid
+25952-53-8,376,1-(3-Dimethylaminopropyl)-3-ethylcarbodiimide hydrochloride,1-乙基-(3-二甲基氨基丙基)碳酰二亚胺盐酸盐,EDCI,adamas,500g;100g;100 g,4-2;6-3;6-3,191.7,(0.877;0.88),solid
+25979-07-1,1310,tert-Butyldichlorophosphine,叔丁二氯化膦,,adamas,5g,R3,158.99,0.766,solid
+260-94-6,1311,Acridine,吖啶,,安耐吉,0,4-2-1,179.22,1.005,solid
+2613-89-0,1312,Phenylmalonic Acid,苯丙二酸,,adamas,25g,1-4-1,180.16,1.2933,solid
+262-20-4,1313,Phenoxathiin,吩恶噻,,adamas,1g,3-3B,200.26,1.278,solid
+2622-14-2,1314,Tricyclohexyl phosphine,三环己基磷,,adamas,5g,gR-配体,280.43,0.909,solid
+2623-87-2,1315,4-Bromobutyric acid,4-溴丁酸,,adamas,25g,1-3A,167.0,1.4397,solid
+26305-75-9,1316,Chlorotris(triphenylphosphine)cobalt(I),三(三苯基膦)氯化钴,,adamas,1g,gR-催化剂,881.24,,solid
+263163-17-3,1317,"1,3-di-tert-butylimidazol-1-ium tetrafluoroborate","1,3-二叔丁基咪唑四氟硼酸盐",,毕得,250mg,3-2,268.104,,solid
+26386-88-9,1318,Diphenylphosphoryl azide,叠氮磷酸二苯酯 (DPPA),,adamas,25g,R6,275.2,1.277,liquid
+2640520-10-9,1319,"(1S,2S)-N1,N2-dimethyl-1,2-bis(4-(trifluoromethyl)phenyl)ethane-1,2-diamine","(1S,2S)-1,2-乙烷二胺,N,N'-二甲基-1,2-双[4-(三氟甲基)苯基];(1S,2S)-N1,N2-二甲基-1,2-双(4-(三氟甲基)苯基)乙-1,2-二胺",,energy,0,R8,376.34,1.245,liquid
+2641594-78-5,1320,"2,2'-Bi-1H-imidazole, 1,1'-bis[4-(1,1-dimethylethyl)phenyl]-4,4',5,5'-tetrahydro-4,4'-bis(1-methylethyl)-, (4S,4'S)-","(4S,4'S)-1,1'-双(4-(叔丁基)苯基)-4,4'-二异丙基-4,4',5,5'-四氢-1H,1'H-2,2'-联咪唑",,乐妍,100mg,gL-R,486.73,1.04,solid
+2645354-83-0,1321,"Pyridine, 2-[(4S,5R)-4,5-dihydro-4,5-diphenyl-2-oxazolyl]-6-(diphenylmethyl)-","(4S,5R)-2-(6-二苯甲基吡啶-2-基)-4,5-二苯基-4,5-二氢恶唑",,BLD,250mg,R4,466.57,1.14,solid
+2672-58-4,1322,"Trimethyl 1,3,5-benzenetricarboxylate","三甲基1,3,5-苯三羟酸酯(1,3,5-三甲基苯)",,adamas,5g,2-4,252.22,1.241,solid
+2675-79-8,1323,"1-Bromo-3,4,5-trimethoxybenzene","5-溴-1,2,3-三甲氧基苯",,adamas,5g,1-3-4,247.09,1.5463,solid
+269410-03-9,1324,"4-(PHENYLCARBONYL)PHENYLBORONIC ACID, PINACOL ESTER",4-(苯基羰基)苯硼酸频那醇酯,,adamas,1g,2-4,308.18,1.11,solid
+2695-47-8,1325,6-Bromo-1-hexene,6-溴-1-己烯,,adamas,25g,R2,163.06,1.22,liquid
+2697181-89-6,1326,"2,2'-Bi-1H-imidazole, 1,1'-bis[3-(1,1-dimethylethyl)phenyl]-4,4',5,5'-tetrahydro-4,4'-bis(1-methylpropyl)-, (4S,4'S)-","(4S,4'S)-4,4'-二((R)-仲丁基)-1,1'-双(3-(叔丁基)苯基)-4,4',5,5'-四氢-1H,1'H-2,2'-双咪唑",,乐妍,100mg,gL-R,514.79,1.03,solid
+2697181-90-9,1327,"(4S,4'S)-4,4'-Di((S)-sec-butyl)-1,1'-bis(3,5-di-tert-butylphenyl)-4,4',5,5'-tetrahydro-1H,1'H-2,2'-biimidazole","(4S,4'S)-4,4'-二((S)-仲丁基)-1,1'-双(3,5-二叔丁基苯基)-4,4',5,5'-四氢1H,1'H-2,2'-双咪唑",,乐妍,100mg,gR-配体,627.0,0.9924,solid
+2700-22-3,1328,Benzylidenemalononitrile,苄烯丙二腈,,adamas,1g,3-4,154.17,1.1975,solid
+2706-90-3,1329,Perfluoropentanoic acid,九氟戊酸,,adamas,5g,1-4-2,264.05,1.713,liquid
+27129-86-8,1330,"3,5-Dimethylbenzyl bromide","3,5-二甲基溴苄",,安耐吉;adamas,5g;25g,1-1A;1-3-2,199.09,1.2949,solid
+271-89-6,1331,"2,3-Benzofuran","2,3-苯并呋喃",,adamas,25g,R1,118.14,1.095,liquid
+271-95-4,1332,"1,2-BENZISOXAZOLE","1,2-苯异唑",,TCI,5g,R2,119.12,1.174,solid
+27318-90-7,1333,"1,10-Phenanthroline-5,6-dione","1,10-邻二氮杂菲-5,6-二酮",,安耐吉,5g,gR-配体,210.19,1.444,solid
+27326-43-8,1334,"benzoic acid, 2-ethenyl-",2-乙烯苯甲酸,,adamas,250mg,1-4-5,148.16,1.158,solid
+2734-70-5,1335,"2,6-Dimethoxyaniline","2,6-二甲氧基苯胺",,adamas,5g,3-5,153.18,1.096,solid
+2739-97-1,1336,2-Pyridylacetonitrile,2-吡啶乙腈,,adamas,5g,4-2-1;4-2-3,118.14,1.059,liquid
+274-09-9,1337,"1,3-Benzodioxole",胡椒环,,adamas,100g,2-3-1,122.12,1.064,liquid
+2757082-39-4,1338,"Pyridine, 2-[(4S)-4,5-dihydro-4-phenyl-2-oxazolyl]-4-methoxy-6-methyl-","(S)-2-(4-甲氧基-6-甲基吡啶-2-基)-4-苯基-4,5-二氢噁唑",,BLD,250mg,R4,268.31,1.19,liquid
+2757082-72-5,1339,"Pyrimidine, 2-[(4R)-4-(1,1-dimethylethyl)-4,5-dihydro-2-oxazolyl]-","(R)-4-(叔丁基)-2-(嘧啶-2-基)-4,5-二氢恶唑",,adamas,100mg,R9,205.26,1.16,solid
+2757082-78-1,1340,"Quinoline, 2-[(4S)-4-(1,1-dimethylethyl)-4,5-dihydro-2-oxazolyl]-5,6,7,8-tetrahydro-","(S)-4-(叔丁基)-2-(5,6,7,8-四氢喹啉-2-基)-4,5-二氢恶唑",,BLD,250mg,R4,258.36,1.15,solid
+2757082-84-9,1341,"Pyrimidine, 2-[(4R)-4,5-dihydro-4-(phenylmethyl)-2-oxazolyl]-","(R)-4-苄基-2-(嘧啶-2-基)-4,5-二氢恶唑",,adamas,100mg,R9,239.27,1.23,liquid
+2757083-53-5,1342,"8H-Indeno[1,2-d]oxazole, 2-[6-(diphenylmethyl)-2-pyridinyl]-3a,8a-dihydro-, (3aR,8aS)-","(3AR,8AS)-2-(6-二苯甲基吡啶-2-基)-8,8A-二氢四氢-3AH-茚并[1,2-D]恶唑",,BLD,250mg,R4,402.49,1.22,solid
+275818-95-6,1343,Sodium difluoromethanesulfinate,二氟甲基亚磺酸钠,,adamas,1g,R1,140.08,,solid
+27607-77-8,1344,Trimethylsilyl trifluoromethanesulfonate,三氟甲磺酸三甲基硅酯,,adamas,100g,R2,222.26,1.228,liquid
+2766-74-7,1345,5-Chlorothiophenesulphonyl chloride,5-氯噻吩-2-磺酰氯,,安耐吉,25g,R2,217.09,1.623,solid
+27721-02-4,1346,"1,5-Bis(diphenylphosphino)pentane","1,5-双(二苯基膦)戊烷",,绍远,5g,3-3,440.5,,solid
+27757-85-3,1347,2-Thiophenemethylamine,2-噻吩甲胺,,adamas,5g,3-5,113.18,1.103,liquid
+2788-86-5,1348,2-(4-Chlorophenyl)oxirane,(±)-4-氯苯乙烯环氧化物,,adamas,1ml,2-3,154.59,1.283,liquid
+28020-73-7,1349,"2,6-Bis(2-benzimidazolyl)pyridine","2,6-双(2-苯并咪唑基)吡啶",,adamas,1g,gb,311.34,1.386,solid
+280566-45-2,1350,2-Chloro-6-trifluoromethylnicotinic acid,2-氯-6-三氟甲基烟酸,,adamas,250mg,1-4-4,225.55,1.603,solid
+280-57-9,1351,Triethylenediamine,三乙烯二胺,,毕得,500g,4-2,112.17,1.02,solid
+281-23-2,1352,Adamantane,金刚烷,,adamas,25g,1-5-2,136.23,1.07,solid
+2828438-18-0,1353,"1,10-Phenanthroline, 2-[(4R)-4,5-dihydro-4-(1-methylethyl)-2-oxazolyl]-","(R)-4-异丙基-2-(1,10-菲咯啉-2-基)-4,5-二氢恶唑",,BLD,250mg,gR-配体,291.35,1.28,solid
+2828440-25-9,1354,"2,2'-Bi-1H-imidazole, 1,1'-bis[3-(1,1-dimethylethyl)phenyl]-4,4',5,5'-tetrahydro-4,4'-bis(2-methylpropyl)-, (4S,4'S)-","(4S,4'S)-1,1'-双(3-(叔丁基)苯基)-4,4'-二异丁基-4,4',5,5'-四氢-1H,1'H-2,2'-联咪唑",,BLD;乐妍,250mg;100mg,gL-R;gR-配体,514.79,1.03,solid
+28308-00-1,1355,"Dichloro(N,N,N',N'-tetramethylethylenediamine)zinc","二氯(N,N,N'N'-四甲基乙烯胺)锌盐",,adamas,5g,D4,252.5,,solid
+2835-81-6,1356,DL-2-Aminobutyric acid,DL-2-氨基丁酸,,adamas,100g,3-5,103.12,1.23,solid
+28443-50-7,1357,2-Amino-5-chlorophenol,2-氨基-5-氯苯酚,,adamas,5g,4-3-2,143.57,1.2028,solid
+2855-19-8,1358,"1,2-Epoxydodecane","1,2-环氧十二烷",,adamas,5ml,2-3,184.32,0.844,liquid
+28562-68-7,1359,3-Methyloxetane-3-carboxylic acid,3-甲基-3-羧基-1-氧杂环丁烷,,adamas,1g,1-4-2,116.12,1.252,solid
+2857-97-8,1360,Bromotrimethylsilane,三甲基溴硅烷,,adamas,25g,3-2,153.09,1.16,liquid
+2859-78-1,1361,4-Bromoveratrole,"3,4-二甲氧基溴苯",,adamas,5g,1-3-3,217.06,1.509,solid
+286014-34-4,1362,"1,3-Diisopropylimidazolium tetrafluoroborate","1,3-二异丙基咪唑四氟硼酸盐",,毕得,250mg,3-2,240.05,,solid
+286014-38-8,1363,"1,3-Dicyclohexylimidazolium Tetrafluoroborate","1,3-二环己基咪唑四氟硼酸盐",,毕得,1g,3-2,320.18,,solid
+286014-42-4,1364,"1,3-bis(1-adamantyl)imidazolium tetrafluoroborate","1,3-双(1-金刚烷基)咪唑四氟硼酸盐",,毕得,250mg,3-2,424.33,,solid
+2861-28-1,1365,"3,4-(Methylenedioxy)phenylacetic acid",胡椒乙酸,,adamas,5g,1-4-2,180.16,1.2933,solid
+286-62-4,1366,cyclooctene oxide,"1,2-环氧环辛烷",,adamas,1ml,2-3,126.2,0.909,solid
+2867-59-6,1367,3-aminobutan-1-ol,3-氨基正丁醇,,adamas,5g,2-2,89.14,0.9132,liquid
+286-99-7,1368,"1,2-EPOXYCYCLODODECANE","1,2-环氧环十二烷",,adamas,1ml,2-3,182.3,0.947,liquid
+287192-97-6,1369,1-Boc-4-ethynylpiperidine,1-Boc-4-乙炔基哌啶,,adamas,1g,3-2,209.28,1.02,solid
+288-13-1,1370,Pyrazole,吡唑,,安耐吉,100g,4-2,68.08,1.4088,solid
+288-32-4,1371,Imidazole,咪唑,,adamas,100g;500g,3-1C;4-2-2,68.08,1.01,solid
+288-36-8,1372,"1H-1,2,3-Triazole","1,2,3-三氮唑",,adamas,5g,3-3,69.07,1.192,liquid
+288-42-6,1373,Oxazole,噁唑,,adamas,1g,3-3,69.06,1.05,liquid
+288-47-1,1374,Thiazole,噻唑,,adamas,5g,3-3,85.13,1.2,liquid
+288-88-0,1375,"1,2,4-Triazole","1,2,4-三氮唑",,adamas,25g,3-1B,69.07,1.15,solid
+28905-12-6,1376,BETA-D-gLUCOSE (CONTAINS ALPHA-D-gLUCOSE),BETA-葡萄糖,,adamas,10g,3-2,180.15588,1.562,solid
+28923-39-9,1377,"Nickel(II) bromide, dimethoxyethane adduct",乙二醇二甲醚溴化镍,,毕得;adamas,25g;5g,D2;D2-2A;gL-Cat,308.62,,solid
+2893-33-6,1378,"2,6-Pyridinedicarbonitrile","2,6-吡啶二甲腈",,adamas,5g;25g,3-3;3-4,129.12,1.25,solid
+2899-37-8,1379,L-Methioninol,L-蛋氨醇,,adamas,5g,R9,135.23,0.984,solid
+29046-78-4,1380,"NICKEL CHLORIDE, DIMETHOXYETHANE ADDUCT",氯化镍二甲氧基乙烷,,毕得,10g,gR-催化剂,219.72,,solid
+29079-00-3,1381,"(4-Ethynylbiphenyl;4-ETHYNYL-1,1'-BIPHENYL)",4-乙炔联苯,,adamas,5g,3-2,178.23,1.06,solid
+29082-91-5,1382,4-Methoxypyridine-2-carboxylic acid,4-甲氧基吡啶-2-甲酸,,adamas,1g,1-4-4,153.14,1.284,solid
+29166-72-1,1383,"2-tert-Butyl-1,1,3,3-tetramethylguanidine","2-叔丁基-1,1,3,3-四甲基胍",,adamas;毕得,10g;5g,3-2C;3-5,171.28,0.85,liquid
+2923-16-2,1384,potassium trifluoroacetate,三氟乙酸钾,,adamas,25g,6-2,152.11,1.49,solid
+2923-17-3,1385,lithium trifluoroacetate,三氟醋酸鋰,,adamas,1g,6-1,119.96,1.743,solid
+2923-18-4,1386,Sodium trifluoroacetate,三氟乙酸钠,,adamas,25g,1-4-1;6-2;gL-R,136.01,1.49,solid
+2923-28-6,1387,Silver trifluoromethanesulfonate,三氟甲烷磺酸银,,adamas,5g,D2,256.94,,solid
+2926-27-4,1388,Potassium trifluoromethanesulfonate,三氟甲磺酸钾,,adamas,5g,6-2,188.17,,solid
+2926-29-6,1389,Sodium Trifluoromethanesulfinate,三氟代甲烷亚磺酸钠,,adamas,5g,3-4,158.07,,solid
+2926-30-9,1390,Sodium trifluoromethanesulphonate,三氟甲磺酸钠,,adamas,5g,6-2,172.06,,solid
+292-64-8,1391,Cyclooctane,环辛烷,,adamas,25ml,1-5-2,112.21,0.834,liquid
+2935-90-2,1392,Methyl 3-Mercaptopropionate,3-巯基丙酸甲酯,,adamas,25g,2-4,120.17,1.085,solid
+2946-61-4,1393,(DIMETHYL PHENYLPHOSPHONITE;Phenyldimethoxyphosphine),二甲基苯基膦酸盐,,adamas,5g,2-1c;3-3,170.15,1.072,liquid
+2947-61-7,1394,4-Methylbenzyl cyanide,对甲基苯乙腈,,adamas,5ml,3-4,131.17,0.992,liquid
+2949-26-0,1395,2-Ethynyl-naphthalene,"1,1,3-三苯基-2-丙炔-1-醇",,安耐吉,5g,3-2,152.19,1.07,solid
+2966-50-9,1396,Silver trifluoroacetate,三氟乙酸银,,adamas,5g,D2,220.88,,solid
+2967-66-0,1397,Methyl 4-(trifluoromethyl)benzoate,4-三氟甲基苯甲酸甲酯,,adamas,5g;25g,2-4;R3,204.15,1.268,liquid
+2969-81-5,1398,Ethyl 4-bromobutyrate,4-溴丁酸乙酯,,adamas,25g,1-3-1,195.05,1.363,solid
+298-14-6,1399,Potassium bicarbonate,碳酸氢钾,,adamas,500g,6-2,100.12,2.17,solid
+29943-42-8,1400,Tetrahydro-4H-pyran-4-one,四氢吡喃酮,,adamas,25g,2-3,100.12,1.084,liquid
+2999-46-4,1401,Ethyl Isocyanoacetate,异氰基乙酸乙酯,,adamas,100g;0,R1;R7,113.11,1.035,liquid
+3001-72-7,1402,"1,5-diazabicyclo[4.3.0]non-5-ene","1,5-二氮杂双环[4.3.0]壬-5-烯",,毕得,25g,4-2-1,124.18,1.005,liquid
+300-57-2,1403,Allylbenzene,烯丙苯,,adamas,25g,3-4,118.18,0.892,solid
+301224-40-8,1404,Hoveyda-Grubbs II,"(1,3-双(2,4,6-三甲基苯基)-2-咪唑烷亚基)二氯(邻异丙氧基苯亚甲基)合钌",,adamas,250mg,R1,625.62,,solid
+301673-14-3,1405,N-Boc-4-iodopiperidine,N-Boc-4-碘哌啶,,adamas,25g,R2,311.16,1.5,solid
+3017-69-4,1406,1-Bromo-2-methyl-1-propene,1-溴-2-甲基-1-丙烯,,adamas,5g,R2,135.0,1.318,liquid
+302-72-7,1407,DL-Alanine,DL-丙氨酸,,adamas,25g,1-4-1,89.09,1.424,solid
+302-84-1,1408,DL-Serine,DL-丝氨酸,,adamas,25g,3-2,105.09,1.53,solid
+3030-47-5,1409,Pentamethyldiethylenetriamine,"N,N,N',N'',N''-五甲基二亚乙基三胺",,安耐吉,100ml,3-4,173.3,0.83,liquid
+3032-92-6,1410,4-Ethynylbenzonitrile,4-乙炔基苯甲腈,,安耐吉,5g,3-2,127.14,1.037,solid
+3034-86-4,1411,4-ETHYNYL-BENZOIC ACID METHYL ESTER,4-乙炔基苯甲酸甲酯,,安耐吉,5g,3-2,160.17,1.11,solid
+30483-75-1,1412,4-(4-bromophenyl)morpholine,4-(4-溴苯基)吗啉,,adamas,1g,1-3-4,242.11,1.433,solid
+30529-70-5,1413,2-Chloro-6-methylnicotinic Acid,2-氯-6-甲基烟酸,,adamas,1g,1-4-3,171.58,1.3246,solid
+3058-39-7,1414,4-Iodobenzonitrile,4-碘苯腈,,毕得,25g,1-2-3,229.02,1.9241,solid
+306960-77-0,1415,2-(Trifluoromethyl)pyrimidine-5-carboxylic acid,2-(三氟甲基)嘧啶-5-羧酸,,adamas,250mg,1-4-4,192.1,1.575,solid
+3070-71-1,1416,methyl 2-benzylprop-2-enoate,2-苄基丙烯酸甲酯,,adamas,5g,2-4,176.21,1.035,liquid
+308068-56-6,1417,"Carbon nanotube, single-walled",单壁碳纳米管,,adamas,5g,7-1,12.01,1.7,solid
+3087-36-3,1418,Titanium ethoxide,钛酸四乙酯,,energy;安耐吉,100g,2-5;D2,228.11,1.088,solid
+3094-87-9,1419,Ferrous acetate,醋酸亚铁,,adamas,5g,gR-催化剂,173.93,,solid
+30964-00-2,1420,6-Heptynoic acid,6-庚炔酸,,安耐吉,5g,3-2,126.15,0.997,liquid
+3109-63-5,1421,Tetrabutylammonium hexafluorophosphate,四丁基六氟磷酸铵,,安耐吉;adamas,100g,7-2;D1-4A,387.43,,solid
+311-28-4,1422,Tetrabutylammonium iodide,四丁基碘化铵,,毕得,100g,7-2,369.37,1.2,solid
+3112-85-4,1423,Methyl phenyl sulfone,苯甲砜,,adamas,1g,3-4,156.2,1.2474,solid
+312696-09-6,1424,NICKEL(II) BROMIDE 2-METHOXYETHYL ETHER&,溴化镍(II) 二乙二醇二甲醚复合物,,adamas,5g,gR-催化剂,352.67,,solid
+3130-75-4,1425,"4-(1,3-DIOXO-1,3-DIHYDRO-2H-ISOINDOL-2-YL)BUTANOIC ACID","4-(1,3-二氧代异吲哚啉-2-基)丁酸",,adamas,1g,R3,233.22,1.389,solid
+31519-62-7,1426,Pyrimidine-2-carboxylic acid,嘧啶-2-羧酸,,adamas,25g,1-5-1,124.1,1.403,solid
+31643-49-9,1427,4-Nitrophthalonitrile,4-硝基邻苯二甲腈,,adamas,5g,3-4,173.13,1.4553,solid
+3182-95-4,1428,L-Phenylalaninol,L-苯丙氨醇,,adamas;ernergy,25g;100g,2-2,151.21,1.0406,solid
+3195-24-2,1429,Diethyl Diallylmalonate,二烯丙基丙二酸二乙酯,,adamas,1g,3-4,240.3,0.994,liquid
+3196-73-4,1430,Methyl 3-aminopropionate hydrochloride,3-氨基丙酸甲酯盐酸盐,,adamas,100g,R3,139.58,,solid
+32149-57-8,1431,Magnesium tert-butoxide,叔丁醇镁,,安耐吉,25g,1-5-4,170.53,,solid
+3218-36-8,1432,4-Biphenylcarboxaldehyde,对苯基苯甲醛,,adamas,25g,4-3,182.22,1.107,solid
+32248-43-4,1433,Samarium(II) Iodide,碘化钐(II),,安耐吉,100ml,R3,404.17,0.922,solid
+3230-65-7,1434,"3,4-Dihydroisoquinoline","3,4-二氢异喹啉",,adamas,0,4-2-3,131.17,1.05,solid
+32315-10-9,1435,Triphosgene,三光气,,adamas,500g,R1,296.73,1.78,solid
+3238-40-2,1436,"Furan-2,5-dicarboxylic acid","2,5-呋喃二甲酸",,adamas,1g,1-4-4,156.09,1.74,solid
+3240-34-4,1437,(Diacetoxyiodo)benzene,碘苯二乙酸,,adamas,100g;25g,2-4,322.1,1.6865,solid
+32503-27-8,1438,Tetrabutylammonium hydrogen sulfate,四丁基硫酸氢铵,,安耐吉,25g,7-2,339.53,1.01,solid
+3264-82-2,1439,nickel(II) acetylacetonate,乙酰丙酮镍,,毕得,100g,D2,256.91,0.145,solid
+3282-30-2,1440,Pivaloyl chloride,特戊酰氯,,安耐吉,100g,1-5-3,120.58,0.98,liquid
+3288-99-1,1441,(4-tert-Butylphenyl)acetonitrile,4-叔丁基苯乙腈,,adamas,5g,R1,173.25,0.95,liquid
+32890-87-2,1442,"2,4-Bis(trifluoromethyl)benzoic acid","2,4-双(三氟甲基)苯甲酸",,adamas,1g,1-4-5,258.12,1.527,solid
+329-15-7,1443,4-(Trifluoromethyl)benzoyl chloride,4-三氟甲基苯甲酰氯,,adamas,25g,1-5-3,208.57,1.404,liquid
+329976-73-0,1444,Potassium benzyltrifluoroborate,苄基三氟硼酸钾,,energy,1g,2-4,198.03,,solid
+330-12-1,1445,4-(Trifluoromethoxy)benzoic acid,4-(三氟甲氧基)苯甲酸,,adamas,1g,1-4-4,206.12,1.4251,solid
+330-17-6,1446,4-(Trifluoromethylthio)benzoic acid,对三氟甲硫基苯甲酸,,adamas,1g,1-4-5,222.18,1.5,solid
+330680-46-1,1447,"Trimethyl 2,2':6',2''-terpyridine-4,4',4''-tricarboxylate","2,2':6',2''-三联吡啶-4,4',4''-三羧酸三甲酯",,adamas,100mg,2-4A,407.38,1.3,solid
+330793-38-9,1448,4-bromo-2-methoxybenzonitrile,4-溴-2-甲氧基苯腈,,adamas,1g,1-3-3,212.04,1.56,solid
+3315-91-1,1449,biphenyl-4-yl(bromo)magnesium,4-二苯基溴化镁,,安耐吉,100ml,R5,257.41,0.8,solid
+3317-61-1,1450,"5,5-dimethyl-1-pyrroline N-oxide","5,5-二甲基-1-吡咯啉-N-氧化物",,adamas;安耐吉,1g,L1;L2;L6,113.16,1.015,solid
+3317-67-7,1451,Cobalt(II) phthalocyanine,酞菁钴,,adamas,1g,gR-催化剂,571.46,0.677,solid
+333-27-7,1452,Methyl Trifluoromethanesulfonate,三氟甲烷磺酸甲酯,,安耐吉,10g,3-4,164.1,1.45,liquid
+3339-73-9,1453,3-Phthalimidopropionic acid,3-(N-苯二甲酰亚氨基)丙酸,,adamas,5g,1-4-3,219.19,1.448,solid
+33454-82-9,1454,Lithium trifluoromethanesulfonate,三氟甲磺酸锂,,毕得;adamas,25g,4-1c;6-1,156.01,1.9,solid
+33499-42-2,1455,"ethyl 2,4-dimethylbenzoate","2,4-二甲基苯甲酸乙酯",,adamas,25g,2-4,178.23,1.01,liquid
+33529-01-0,1456,1-hexylimidazole,N-己基咪唑,,adamas,1g,4-2-1,152.24,0.93,liquid
+33574-02-6,1457,(Iodomethyl-cyclopropane;(Iodomethyl)cyclopropane),(碘甲基)环丙烷,,安耐吉;adamas,5g;1g,R2;R8,182.0,1.954,solid
+3360-41-6,1458,4-Phenylbutanol,4-苯基丁醇,,adamas,25g,2-2,150.22,0.984,liquid
+33725-74-5,1459,tetrabutylammonium tetrahydroborate,四丁基硼氢化铵,,adamas,25g,7-2,257.31,,solid
+3375-31-3,1460,Palladium acetate,醋酸钯,,安耐吉,5g,D2,224.51,,solid
+3376-24-7,1461,N-tert-butyl-alpha-phenylnitrone,N-叔丁基-а-苯基硝酮,,adamas,1g,L1,177.24,0.99,solid
+3378-82-3,1462,1-Bromo-2-naphthaldehyde,1-溴-2-萘甲醛;1-溴-2-萘醛,,安耐吉,5g,4-3,235.08,1.552,solid
+3380-34-5,1463,Triclosan,三氯生,,adamas,25g,4-3-3,289.54,1.4214,solid
+33884-43-4,1464,"2-(2-Bromoethyl)-1,3-dioxane","2-(2-溴乙基)-1,3-二噁烷",,adamas,1g,R7,195.05,1.431,solid
+3396-11-0,1465,Cesium acetate,乙酸铯,,adamas,5g,4-1C;4-2C;6-1,191.95,2.33,solid
+3400-45-1,1466,Cyclopentanecarboxylic acid,环戊酸,,adamas,5g,1-4-3,114.14,1.053,liquid
+34040-64-7,1467,Methyl 4-(chloromethyl)benzoate,4-(氯甲基)苯甲酸甲酯,,adamas,25g,1-2-2,184.62,1.19,solid
+3433-80-5,1468,2-Bromobenzyl bromide,2-溴溴苄,,adamas,25g,1-3-2,249.93,1.8246,solid
+3435-51-6,1469,4-Cyanostyrene,4-氰基苯乙烯,,安耐吉,1g,L1,129.16,1.0746,liquid
+34683-73-3,1470,1-Chloro-6-iodohexane,1-氯-6-碘己烷,,adamas,1g,R2,246.52,1.623,liquid
+3470-98-2,1471,1-Butylpyrrolidin-2-one,1-丁基-2-吡咯烷酮,,adamas,100ml,2-3,141.21,0.96,liquid
+3485-84-5,1472,N-Vinylphthalimide,N-乙烯酞亚胺,,毕得,5g,3-4,173.17,1.402,solid
+34946-82-2,1473,Copper(II) trifluoromethanesulfonate,三氟甲磺酸铜,,毕得,25g,对,361.68,,solid
+3495-36-1,1474,Cesium formate,甲酸铯,,adamas,5g,4-1C,179.94,1.017,solid
+349-88-2,1475,4-Fluorobenzenesulfonyl Chloride,4-氟苯磺酰氯,,安耐吉,25g,1-5-4,194.61,1.467,solid
+35103-79-8,1476,Cesium hydroxide monohydrate,氢氧化铯一水合物,,adamas,25g,6-1,167.93,3.68,solid
+35132-20-8,1477,"(1R,2R)-(+)-1,2-Diphenylethylenediamine","(1R,2R)-(+)-1,2-二苯基乙二胺",,安耐吉,5g,3-5,212.29,1.0799,solid
+35144-39-9,1478,1-(4-methoxyphenyl)-2-methylpropan-2-ol,1-(4-甲氧基苯基)-2-甲基丙烷-2-醇,,adamas,1g,R8,180.25,1.019,solid
+35193-63-6,1479,"1,1'-Binaphthyl-2,2'-diyl hydrogenphosphate",联萘酚磷酸酯,,安耐吉,25g,2-4,348.29,1.49,solid
+35193-64-7,1480,"(S)-(+)-1,1'-binaphthyl-2,2'-diyl hydrogenphosphate",S-联萘酚磷酸酯,,安耐吉,0,gR-配体,348.29,1.49,solid
+35203-44-2,1481,1-propylimidazole,1-丙基咪唑,,adamas,5g,4-2-3,110.16,0.95,liquid
+352-11-4,1482,4-Fluorobenzyl chloride,对氟苄氯,,adamas,25g,1-2-2,144.57,1.207,liquid
+352-13-6,1483,4-Fluorophenylmagnesium bromide,4-氟苯基溴化镁,,安耐吉,100ml,R5,199.3,1.043,liquid
+352-34-1,1484,4-Fluoroiodobenzene,1-氟-4-碘苯,,adamas,5g,1-2-3,222.0,1.925,liquid
+354-08-5,1485,Bromodifluoroacetic acid,二氟溴乙酸,,adamas,100g,1-5-5,174.93,2.178,solid
+3558-24-5,1486,1-Methyl-2-phenylindole,1-甲基-2-苯基吲哚,,adamas,5g,4-2-2,207.27,1.088,solid
+35656-89-4,1487,4-(4-Bromophenyl)butyric Acid,4-(4-溴苯基)丁酸,,adamas,5g,1-4-3,243.1,1.463,solid
+35779-04-5,1488,1-tert-Butyl-4-iodobenzene,4-叔丁基碘苯,,adamas,5g,1-2-3,260.11,1.468,solid
+358-23-6,1489,Trifluoromethanesulfonic anhydride,三氟甲磺酸酐,,安耐吉;adamas,25g;100g,3-4,282.14,1.677,liquid
+35895-69-3,1490,Tetraethylammonium Trifluoromethanesulfonate,三氟甲基磺酸四乙基铵,,adamas,1g,7-2,279.32,,solid
+35895-70-6,1491,Tetra-n-butylammonium trifluoromethanesulfonate,四丁基三氟甲磺酸铵,,adamas,25g,7-2,391.53,,solid
+359-13-7,1492,"2,2-Difluoroethanol","2,2-二氟乙醇",,adamas,100g,2-2,82.05,1.296,liquid
+3597-91-9,1493,4-Biphenylmethanol,4-联苯甲醇,,adamas,25g,2-2,184.23,1.012,solid
+360-03-2,1494,"2,2-Difluoro-2-phenylacetic acid","α,α-二氟苯乙酸",,adamas,1g,1-4-2,172.13,1.338,solid
+36039-36-8,1495,Ibuprofen Alcohol,布洛芬杂质P,,麦克林,250mg,2-2,192.3,0.946,liquid
+3607-17-8,1496,(3-Bromopropyl)triphenylphosphonium bromide,(3-溴丙基)三苯基溴化膦,,adamas,25g,3-3,464.17,,solid
+3609-53-8,1497,Methyl 4-acetylbenzoate,4-乙酰基苯甲酸甲酯,,adamas,25g,2-4,178.18,1.1601,solid
+361342-51-0,1498,"(11bR)-2,6-Di-9-anthracenyl-4-hydroxy-dinaphtho[2,1-d:1渭,2渭-f][1,3,2]dioxaphosphepin-4-oxide","(11BR)-2,6-二-9-蒽基-4-羟基-二萘[2,1-D:1',2'-F][1,3,2]二氧磷酸-4-氧化物",,毕得,100mg,gR-配体,700.72,1.46,solid
+362-43-6,1499,"2',3'-O-Isopropylideneuridine","2',3'-异丙基脲",,adamas,5ml;5g,2-2;gL-R,284.27,1.2932,solid
+362-75-4,1500,"2',3'-O-Isopropylideneadenosine","2',3'-异丙叉腺苷",,adamas,25g,gL-R,307.31,1.237,solid
+36330-85-5,1501,Fenbufen,4-(联苯-4-基)-4-氧代丁酸,,adamas,25g,1-4-3,254.29,1.1565,solid
+36520-39-5,1502,Azetidine hydrochloride,氮杂环丁烷盐酸盐,,安耐吉,5g,R1,93.55,,solid
+366-18-7,1503,"(2,2'-Dipyridyl;2,2'-Bipyridine)","2,2'-联吡啶",,毕得;adamas,100g,3-3,156.18,1.1668,solid
+36635-61-7,1504,Tosylmethyl isocyanide,对甲基苯磺酰甲基异腈,,adamas,0,R8,195.24,1.2721,solid
+3663-80-7,1505,"1,4-Benzodioxan-2-carboxylic acid","1,4-苯并二噁烷-2-甲酸",,adamas,5g,1-4-1,180.16,1.379,solid
+368-48-9,1506,2-(Trifluoromethyl)pyridine,2-三氟甲基吡啶,,adamas;安耐吉,1g,3-1A;4-2-1;4-2-2,147.1,1.275,liquid
+36865-41-5,1507,1-Bromo-3-Methoxypropane,3-溴丙基甲基醚,,adamas,25g,1-3A,153.02,1.36,liquid
+3721-95-7,1508,Cyclobutanecarboxylic Acid,环丁基甲酸,,adamas,5g,1-4-3,100.12,1.047,liquid
+37222-66-5,1509,Potassium peroxomonosulfate,过氧单磺酸钾,,adamas,25g,6-2,346.29,1.12,solid
+3724-19-4,1510,3-(Pyridin-3-yl)propanoic acid,3-(3-吡啶基)丙酸,,adamas,5g,1-4-3,151.16,1.193,solid
+3728-43-6,1511,p-Tolyltrimethylsilane,三甲基对甲苯硅烷,,adamas,1g,3-2,164.32,0.865,solid
+37342-97-5,1512,bis(cyclopentadienyl)zirconium chloride hydride,氢氯二茂锆,,adamas,5g,D1,257.87,,solid
+373-96-6,1513,"2,2-Difluoropropionic acid","2,2-二氟丙酸",,adamas,1g,1-4-2,110.06,1.316,solid
+375-22-4,1514,Heptafluorobutyric acid,七氟丁酸,,adamas,25g,1-4-2,214.04,1.645,liquid
+37595-74-7,1515,N-Phenyl-bis(trifluoromethanesulfonimide),N-苯基双(三氟甲烷磺酰)亚胺,,adamas,1g,3-4,357.25,1.766,solid
+37622-90-5,1516,Ethyl pyrazole-4-carboxylate,4-吡唑甲酸乙酯,,adamas,5g,2-4,140.14,1.285,solid
+3770-50-1,1517,Ethyl indole-2-carboxylate,吲哚-2-羧酸乙酯,,adamas,5g,2-3,189.21,1.1596,solid
+37942-07-7,1518,"3,5-Di-tert-butylsalicylaldehyde","3,5-二叔丁基水杨醛",,安耐吉,25g,4-3,234.33,1.006,solid
+38078-09-0,1519,Diethylaminosulfur trifluoride,(二乙氨基)三氟化硫 (DAST),,adamas,100g,R7,161.19,1.22,liquid
+381-73-7,1520,Difluoroacetic acid,二氟乙酸,,安耐吉,5g,1-4-2,96.03,1.526,liquid
+38180-46-0,1521,3-Chloro-2-cyanopyridine,2-氰基-3-氯吡啶,,adamas,5g,1-2-1,138.55,1.33,solid
+38222-83-2,1522,"2,6-Di-tert-butyl-4-methylpyridine","2,6-二叔丁基-4-甲基吡啶",,安耐吉,5g,3-3,205.34,1.476,solid
+3839-22-3,1523,2-Cyanobenzoic acid,2-氰基苯甲酸,,adamas,1g,1-4-5,147.13,1.32,solid
+384-64-5,1524,3-(TRIFLUOROMETHYL)STYRENE,3-(三氟甲基)苯乙烯,,adamas,250mg,gL,172.15,1.161,liquid
+38496-18-3,1525,"2,6-dichloronicotinic acid","2,6-二氯烟酸",,adamas,5g,1-4-4,192.0,1.612,solid
+385-00-2,1526,"2,6-Difluorobenzoic Acid","2,6-二氟苯甲酸",,adamas,5g,1-4-2,158.1,1.3486,solid
+38542-94-8,1527,Ammonium trifluoromethanesulfonate,三氟甲烷磺酸铵,,adamas,25g,7-2,167.11,,solid
+3878-55-5,1528,mono-Methyl hydrogen succinate,琥珀酸单甲酯,,adamas,25g,1-4-1,132.11,1.0951,solid
+3900-93-4,1529,alpha-phenylcyclopentaneacetic acid,α-苯基环戊基乙酸,,adamas,5g,1-4-2,204.27,1.0404,solid
+39149-80-9,1530,tert-Butyl 2-Bromopropionate,2-溴丙酸叔丁酯,,安耐吉,5g,1-3-2;1-3A,209.08,1.26,liquid
+39207-65-3,1531,2-Isobutyrylcyclohexanone,2-(2-甲基-1-氧代丙烷)环己酮,,adamas,1g,2-2B,168.23,1.0076,solid
+392-56-3,1532,(Perfluorobenzene;hexafluorobenzene),六氟苯,,adamas,25ml;25g,1-5-2,186.05,1.612,liquid
+3943-74-6,1533,Methyl Vanillate,香草酸甲酯,,adamas,5g,2-4,182.17,1.2481,solid
+395083-14-4,1534,potassium trifluoro(prop-1-en-2-yl)boranuide,异丙烯基三氟硼酸钾,,adamas,25g,2-4,147.975,,solid
+396-30-5,1535,6-Fluoroquinoline,6-氟喹啉,,安耐吉,1g,4-2-2,147.15,1.209,liquid
+3964-56-5,1536,4-Bromo-2-chlorophenol,4-溴-2-氯苯酚,,adamas,25g,3964-56-5,207.45,1.617,solid
+39648-67-4,1537,"(R)-(-)-1,1'-Binaphthyl-2,2'-diyl hydrogenphosphate",R-联萘酚磷酸酯,,adamas,5g,2-2C,348.29,1.49,solid
+3972-65-4,1538,1-Bromo-4-(tert-butyl)benzene,1-溴-4-叔丁基苯,,安耐吉;adamas,5g;25g,1-2A;1-3-3,213.11,1.229,liquid
+3978-81-2,1539,4-Tert-butylpyridine,4-叔丁基吡啶,,安耐吉,5g,4-2-2,135.21,0.923,liquid
+398-36-7,1540,4-(TRIFLUOROMETHYL)-BIPHENYL,4-三氟甲基联苯,,adamas,100mg,R9,222.21,1.18,solid
+3984-34-7,1541,3-(4-Chlorobenzoyl)propionic acid,3-(4-氯苯甲酰)丙酸,,adamas,5g,1-4-3,212.63,1.2781,solid
+402-43-7,1542,4-Bromobenzotrifluoride,对溴三氟甲苯,,安耐吉,5g,1-3-4,225.01,1.607,liquid
+402-50-6,1543,4-(Trifluoromethyl)styrene,对三氟甲基苯乙烯,,毕得,1g,R8,172.15,1.165,liquid
+4025-67-6,1544,4-hydroxybenzenesulfonyl chloride,4-羟基苯磺酰氯,,安耐吉,5g,,192.62,1.546,solid
+4039-82-1,1545,Benzyl propargyl ether,苄基丙炔基醚,,adamas,5ml,3-2,146.19,1.011,liquid
+40400-13-3,1546,2-Iodobenzyl Bromide,邻碘溴苄,,adamas,5g,1-1A,296.93,2.105,solid
+4052-30-6,1547,4-Methylsulphonylbenzoic acid,4-甲砜基苯甲酸,,adamas,1g,1-4-4,200.21,1.4787,solid
+405-99-2,1548,4-Fluorostyrene,4-氟苯乙烯,,毕得;adamas,5g;25g,L2;R1,122.14,1.024,liquid
+406-81-5,1549,"4-Bromo-1,1,1trifluorobutane","1-溴-4,4,4-三氟丁烷",,adamas,1g,1-3-1,190.99,1.555,liquid
+407-14-7,1550,1-Bromo-4-(trifluoromethoxy)benzene,对三氟甲氧基溴苯,,adamas,5g,1-3-3,241.01,1.622,liquid
+40789-98-8,1551,3-Mercapto-2-butanone,3-巯基-2-丁酮,,adamas,5g,R6,104.17,1.035,liquid
+409312-96-5,1552,"(4S,4'S)-2,2'-(4,6-Dibenzofurandiyl)bis[4,5-dihydro-4-isopropyloxazole]","(4S,4'S)-2,2'-(4,6-二苯并呋喃二基)双[4,5-二氢-4-异丙基恶唑]",,BLD,250mg,gR-配体,390.47,1.3,solid
+40949-94-8,1553,Potassium bis(trimethylsilyl)amide,双(三甲基硅烷基)氨基钾(KHMDS),,安耐吉,100ml,R8,199.48,0.877,solid
+4105-38-8,1554,"2',3',5'-Tri-O-acetyluridine","2',3',5'-三乙酰尿苷",,adamas,5g,3-2,370.31,1.43,solid
+4111-54-0,1555,Lithium diisopropylamide,二异丙胺锂,,adamas,500ml,R3,109.14,0.864,liquid
+411235-57-9,1556,cyclopropylboronic acid,环丙基硼酸,,安耐吉,5g,R6,85.9,1.11,solid
+4119-41-9,1557,1-Iodo-3-phenylpropane,1-碘-3-苯基丙烷,,adamas,1g,1-2-3,246.09,1.53,solid
+4132-28-9,1558,"2,3,4,6-Tetra-O-benzyl-D-glucopyranose","2,3,4,6-四苄基-D-吡喃葡萄糖",,adamas,5g,2-2,540.65,1.22,solid
+4170-24-5,1559,2-Chlorobutyric Acid,2-氯丁酸,,adamas,5ml,1-2-1,122.55,1.19,solid
+4180-23-8,1560,trans-anethole,茴香烯,,adamas,25g,3-4,148.2,0.988,liquid
+41859-67-0,1561,Bezafibrate,苯扎贝特,,adamas,5g,L1,361.82,1.26,solid
+4200-06-0,1562,1-ETHYNYL-4-PHENOXYBENZENE,4-苯氧基苯乙炔,,adamas,1g,3-2,194.23,1.074,solid
+42017-89-0,1563,Fenofibric acid,非诺贝特酸,,adamas;安耐吉,25g,3-2,318.75,1.286,solid
+42152-46-5,1564,Copper(I) trifluoromethanesulfonate benzene complex,三氟甲基磺酸铜(I)合苯,,adamas,1g,D2-2A,503.34,,solid
+421-83-0,1565,Trifluoromethanesulfonyl chloride,三氟甲烷磺酰氯,,energy,10g,L1,168.52,1.583,liquid
+421-85-2,1566,Trifluoromethanesulfonamide,三氟甲烷磺胺,,adamas;安耐吉,10g;5g,3-4;R3,149.09,1.73,solid
+422-64-0,1567,Perfluoropropanoic acid,五氟丙酸,,adamas,25g,1-4-3,164.03,1.561,liquid
+42287-94-5,1568,3-(4-cyanophenyl)propanoic acid,4-氰基-3-苯基丙酸,,adamas,5g,1-4-3,175.18,1.21,solid
+423-39-2,1569,Perfluorobutyl iodide,全氟碘代丁烷,,adamas,25g,R2,345.93,2.01,liquid
+4248-19-5,1570,tert-Butyl carbamate,氨基甲酸叔丁酯,,adamas,5g,1-2c;4-4-1,117.15,1.1274,solid
+4286-55-9,1571,6-Bromo-1-hexanol,6-溴正己醇,,adamas,25g,R2,181.07,1.384,liquid
+428-76-2,1572,trifluoro(trifluoromethanesulfonylmethanesulfonyl)methane,双[(三氟代甲基)磺酰基]甲烷,,adamas,1g,3-4,280.17,1.832,solid
+429-06-1,1573,Tetraethylammonium tetrafluoroborate,四乙基四氟硼酸铵,,adamas;安耐吉;毕得,25g;100g,7-2;D-4A;D1-4A;gRa,217.06,1.23,solid
+42926-52-3,1574,2-Ethoxybenzoyl Chloride,邻乙氧基苯甲酰氯,,adamas,25g,R7,184.62,1.19,liquid
+429-41-4,1575,Tetrabutylammonium fluoride hydrate,四丁基氟化铵,,adamas;安耐吉,100g;500ml,7-2;R4,261.46,0.953,solid
+429-42-5,1576,Tetrabutylammonium Tetrafluoroborate,四丁基四氟硼酸铵,,adamas;安耐吉,100g;500g,7-2,329.27,,solid
+4294-57-9,1577,p-tolylmagnesium bromide,对甲苯基溴化镁,,安耐吉,100ml,R5,195.34,1.002,solid
+4298-52-6,1578,2-Ethynylthiophene,2-乙炔噻吩,,adamas,25g,3-2,108.16,1.08,liquid
+4301-14-8,1579,ethynylmagnesium bromide,乙炔基溴化镁,,adamas,500ml,R5,129.24,0.94,liquid
+431-35-6,1580,"3-Bromo-1,1,1-trifluoroacetone","3-溴-1,1,1-三氟丙酮",,adamas,5g,R3,190.95,1.839,liquid
+43217-31-8,1581,"9,10-bis(4-methylphenyl)anthracene","9,10-二-对二甲苯蒽",,adamas,250mg,gR,358.47,1.117,solid
+4324-37-2,1582,2-methoxypropanoic acid,2-甲氧基丙酸,,安耐吉,1g,1-4-2,104.1,1.085,solid
+4328-13-6,1583,Tetrahexylammonium Bromide,四己基溴化铵,,adamas,5g,7-2,434.58,1.0628,solid
+433-97-6,1584,2-(Trifluoromethyl)benzoic acid,邻三氟甲基苯甲酸,,adamas,5g,1-4-2,190.12,3.375,solid
+434-13-9,1585,Lithocholic Acid,石胆酸,,adamas,5g,3-2,376.57,1.0454,solid
+436799-32-5,1586,5-Bromo-2-(trifluoromethyl)pyridine,2-三氟甲基-5-溴吡啶,,adamas,1g,1-3-3,225.99,1.707,solid
+4376-18-5,1587,methyl hydrogen phthalate,邻苯二甲酸单甲酯,,adamas,5g,1-4-5,180.16,1.288,solid
+4392-24-9,1588,cinnamyl bromide,肉桂基溴,,adamas,5g,R3,197.07,1.332,solid
+4394-00-7,1589,2-(3-Trifluoromethylanilino)nicotinic Acid,氟尼酸,,adamas,5g,1-4-3,282.22,1.3935,solid
+4394-85-8,1590,4-Formylmorpholine,N-甲酰吗啉,,adamas,500g,4-3C,115.13,1.145,liquid
+4407-36-7,1591,3-Phenyl-2-propen-1-ol,3-苯基丙-2-烯-1-醇,,adamas,25g,2-2,134.18,1.044,solid
+4411-80-7,1592,"6,6'-Dimethyl-2,2'-dipyridyl","6,6'-二甲基-2,2'-联吡啶",,毕得,5g,gR-配体,184.24,1.06,solid
+4420-74-0,1593,Trimethoxysilylpropanethiol,巯丙基三甲氧基硅烷,,adamas,25g,R1,196.34,1.057,liquid
+4436-74-2,1594,trans-3-hexenedioic acid,"反式-2-丁烯-1,4-二甲酸",,安耐吉,5g,1-4-1,144.13,1.305,solid
+4442-79-9,1595,2-Cyclohexylethanol,2-环己基乙醇,,adamas,25g,2-2,128.21,0.919,liquid
+444575-98-8,1596,"(4S,4'S)-2,2'-[2-Phenyl-1-(phenylmethyl)ethylidene]bis[4- (1-methylethyl)-4,5-dihydrooxazole]","(4S,4'S)-2,2'-[2-苯基-1-(苯基甲基)亚乙基]双[4-异丙基-4,5-二氢恶唑]",,BLD,250mg,gL-R,418.57,1.1,solid
+4472-41-7,1597,"N,N-Dimethylformamide-d7","N,N-二甲基甲酰胺-d7",,adamas,0.5ml,R1,73.1,1.03,liquid
+447-53-0,1598,"1,2-Dihydronaphthalene",二氢孕酮,,adamas,1g,3-4,130.19,0.997,liquid
+4479-74-7,1599,6-(6-carboxypyridin-2-yl)pyridine-2-carboxylic acid,"[2,2'-联吡啶]-6,6'-二羧酸",,安耐吉,5g,1-4-3;1-5-1,244.2,1.469,solid
+448-61-3,1600,"2,4,6-Triphenylpyrylium tetrafluoroborate","2,4,6-三苯基吡喃四氟化硼盐",,安耐吉,5g,D2,396.19,,solid
+4521-28-2,1601,4-(4-Methoxyphenyl)butyric acid,4-(4-甲氧基苯基)丁酸,,安耐吉,25g,1-4-1,194.23,1.116,solid
+4525-33-1,1602,Dimethyl dicarbonate,二碳酸二甲酯,,adamas,5g,2-4,134.09,1.25,liquid
+4532-96-1,1603,1-isopropylimidazole,1-异丙基咪唑,,adamas,25g,491-36-1,110.16,0.97,liquid
+455-13-0,1604,4-Iodobenzotrifluoride,4-碘三氟甲苯,,adamas,5g,,272.01,1.851,liquid
+455-14-1,1605,4-Aminobenzotrifluoride,对三氟甲基苯胺,,adamas,5g,3-5;R7,161.12,1.283,liquid
+455-19-6,1606,4-(Trifluoromethyl)benzaldehyde,对三氟甲基苯甲醛,,adamas,25g,4-3,174.12,1.275,liquid
+455-24-3,1607,4-(Trifluoromethyl)benzoic acid,4-三氟甲基苯甲酸,,adamas,100g,1-4-5,190.12,1.3173,solid
+455-31-2,1608,(Difluoromethyl)benzene,( 二氟甲基)苯,,adamas,250mg,4-3a,128.12,1.138,liquid
+4559-70-0,1609,Diphenylphosphine oxide,二苯基磷氧,,adamas,5g,3-3,202.19,,solid
+456-22-4,1610,4-Fluoro benzoic acid,对氟苯甲酸,,adamas,25g,1-5-5,140.11,1.479,solid
+456-42-8,1611,3-Fluorobenzyl chloride,3-氟氯苄,,adamas,5g,1-2-2,144.57,1.194,solid
+456-55-3,1612,(Trifluoromethoxy)benzene,(三氟甲氧基)苯,,adamas,5g;25g,3-3B;4-3,162.11,1.226,liquid
+459-03-0,1613,(4-Fluorophenyl)acetone,4-氟苯基丙酮,,adamas,25g,2-3,152.17,1.139,liquid
+460-00-4,1614,4-Bromofluorobenzene,对氟溴苯,,adamas,25g,1-3-3,175.0,1.593,liquid
+460-37-7,1615,"1-IODO-3,3,3-TRIFLUOROPROPANE","1-碘-3,3,3-三氟丙烷",,,5g,R2,223.96,1.911,liquid
+461-17-6,1616,"1,1,1-Trifluoro-4-iodobutane","1,1,1-三氟-4-碘丁烷",,adamas,1g,R2,237.99,1.85,liquid
+46190-45-8,1617,methyl 4-(2-hydroxyethyl)benzoate,4-(2-羟乙基)苯甲酸甲酯,,adamas,250mg,2-2,180.2,1.143,liquid
+4619-18-5,1618,4-(4-chlorophenyl)butanoic acid,4-(4-氯苯基)丁酸,,安耐吉,5g,1-4-3,198.65,1.227,solid
+462-40-8,1619,1-IODO-3-FLUOROPROPANE,3-氟-1-碘代丙烷,,adamas,5g,R3,187.98,1.837,liquid
+462-72-6,1620,1-Bromo-4-fluorobutane,1-溴-4-氟丁烷,,adamas,1g,1-3-1,155.01,1.444,liquid
+463-40-1,1621,alpha-linolenic acid,亚麻酸,,adamas,5ml,R1,278.43,0.914,liquid
+46389-47-3,1622,"2,2’-Biypridine-nickeldibromide","(2,2'-联吡啶)二溴化镍(II)",,adamas,1g,gR-催化剂,376.71,,solid
+464-45-9,1623,L(-)-Borneol,右莰醇,,adamas,25g,2-2,154.25,0.8389,solid
+4648-54-8,1624,azidotrimethylsilane,叠氮三甲基硅,,安耐吉,25ml,R8,115.21,0.876,liquid
+4712-55-4,1625,DIPHENYL PHOSPHITE,亚磷酸二苯酯,,adamas,25ml,3-3,234.19,1.223,liquid
+4731-53-7,1626,Trioctylphosphine,三正辛基膦,,adamas,1g,gR-配体,370.64,0.831,solid
+4733-39-5,1627,Bathocuproine,"2,9-二甲基-4,7二苯基-1,10-菲啰啉",,安耐吉,1g,2-4A,360.45,1.2408,solid
+4753-59-7,1628,4-Bromobutyl acetate,4-溴丁基乙酸酯,,adamas,5g,1-3-1,195.05,1.348,liquid
+4771-80-6,1629,3-Cyclohexene-1-carboxylic acid,3-环己烯-1-甲酸,,毕得,25g,1-4-2,126.15,1.081,liquid
+480-63-7,1630,"2,4,6-Trimethylbenzoic Acid","2,4,6-三甲基苯甲酸",,adamas,5g,1-4-4;1-5-1,164.2,1.067,solid
+48165-50-0,1631,"Dibromo(1,10-phenanthroline-κN1,κN10)nickel","二溴(1,10-菲咯啉-ΚN1,ΚN10)镍",,毕得,1g,D2,400.73,,solid
+4837-38-1,1632,Cyclohexanesulfonyl chloride,环己烷磺酰氯,,安耐吉,5g,R3,182.67,1.259,liquid
+484-11-7,1633,Neocuproine,新铜试剂,,毕得,5g,3-3,208.26,1.1345,solid
+486422-08-6,1634,"benzenesulfonamide, 3-(4,4,5,5-tetramethyl-1,3,2-dioxaborolan-2-yl)-",苯磺酰胺-3-硼酸频哪醇酯,,energy,250mg,2-4,283.15,1.24,solid
+486-73-7,1635,Isoquinoline-1-carboxylic acid,异喹啉羧酸,,adamas,5g,1-4-4,173.17,0.932,solid
+488-93-7,1636,3-Furoic acid,3-糠酸,,adamas,1g,1-4-5,112.08,1.322,solid
+4891-38-7,1637,Methyl phenylpropiolate,苯基丙炔酸甲酯,,bider,5g,2-4,160.17,1.086,solid
+4897-84-1,1638,Methyl 4-bromobutyrate,4-溴丁酸甲酯,,adamas,25g,1-3-1,181.03,1.434,solid
+491-35-0,1639,4-methylquinoline,4-甲基喹啉,,adamas,5g,4-2-1;4-2-2,143.19,1.083,liquid
+491-36-1,1640,4-hydroxyquinazoline,4-羟基喹唑啉,,adamas,50g,4-2-2,146.15,1.2312,solid
+491-38-3,1641,CHROMONE,乙色唑,,adamas,1g,2-3,146.14,1.248,solid
+492-22-8,1642,Thioxanthen-9-one,9-噻吨酮,,adamas,5g,2-3,212.27,1.2247,solid
+492-37-5,1643,(DL-2-phenylpropionic acid;2-PHENYLPROPIONIC ACID),2-苯基丙酸,,安耐吉;adamas,25g;5g,1-4-2;1-5A,150.17,1.1,liquid
+492-38-6,1644,Atropic Acid,2-苯基丙烯酸,,adamas,25g,R1,148.16,1.0061,solid
+492-98-8,1645,"2,2'-bi-1H-imidazole",联咪唑,,adamas,5g,gR-配体,134.14,1.371,solid
+495-18-1,1646,Benzohydroxamic Acid,苯甲羟肟酸,,adamas,25g,R6,137.14,1.2528,solid
+495-76-1,1647,Piperonyl alcohol,胡椒醇,,adamas,5g,2-2,152.15,1.2143,solid
+496-11-7,1648,Indane,茚满,,adamas,25ml,1-5-2,118.18,0.965,liquid
+496-15-1,1649,Indoline,蜷ｲ蜩壼負,,adamas,100g,4-2-2,119.16,1.063,liquid
+49623-71-4,1650,"2,4,6-Triisopropylbenzoic acid",2，4，6-三异丙基苯甲酸,,adamas,5g;1g,1-2-1;1-4-5;1-4A;1-5-1;1-5A,248.36,0.984,solid
+497-19-8,1651,Sodium carbonate anhydrous,碳酸钠,,毕得,500g,6-2,105.99,2.53,solid
+497-25-6,1652,2-Oxazolidone,2-恶唑烷酮,,安耐吉,25g,4-4-1,87.08,1.2736,solid
+498-66-8,1653,Norbornene,降冰片烯,,安耐吉,100ml,3-4,94.15,0.955,solid
+50-00-0,1654,Formaldehyde,甲醛,,energy,500ml,R1,30.03,1.09,liquid
+500-73-2,1655,Phenyl Trifluoroacetate,三氟乙酸苯酯,,adamas,1g,2-4,190.12,1.276,liquid
+501-52-0,1656,3-Phenylpropionic Acid,氢化肉桂酸,,adamas,25g,1-4-3,150.17,1.071,solid
+501-53-1,1657,Benzyl chloroformate,氯甲酸苄酯,,adamas,500g,R1,170.59,1.212,liquid
+501-65-5,1658,Diphenylacetylene,二苯基乙炔,,安耐吉,5g,3-2,178.23,0.99,solid
+502-41-0,1659,Cycloheptanol,环庚醇,,adamas,1g,2-2,114.19,0.948,liquid
+502-42-1,1660,Cycloheptanone,环庚酮,,adamas,25g,2-3,112.17,0.951,liquid
+502-49-8,1661,Cyclooctanone,环辛酮,,adamas,5g,2-3,126.2,0.958,solid
+50340-79-9,1662,5-(methoxycarbonyl)thiophene-2-carboxylic acid,5-(甲氧羰基)-2-噻吩甲酸,,安耐吉,1g,,186.19,1.439,solid
+504-02-9,1663,"1,3-Cyclohexanedione","1,3-环己二酮",,安耐吉,100g,2-3,112.13,1.1,solid
+5044-39-3,1664,1-(4-bromophenyl)-1H-pyrrole,1-(4-溴苯基)吡咯,,adamas,1g,1-3-3,222.08,1.38,solid
+50555-04-9,1665,cinnamyl benzoate,(E)-苯甲酸肉桂酯,,adamas,1g,2-4,238.28,,solid
+5058-42-4,1666,IRON(III) ETHOXIDE,乙醇铁,,adamas,5g,gR-催化剂,191.03,0.87,solid
+506-59-2,1667,Dimethylamine hydrochloride,二甲胺盐酸盐,,adamas,100g,6-3,81.54,0.8949,solid
+50670-58-1,1668,"4'-bromo-[1,1'-biphenyl]-4-carboxaldehyde","4'-溴-[1,1'-联苯]-4-甲醛",,安耐吉,1g,R3,261.11,1.43,solid
+507-09-5,1669,Thioacetic acid,硫代乙酸,,adamas,25g,R3,76.12,1.065,liquid
+507-19-7,1670,2-Bromo-2-methylpropane,溴代叔丁烷,,adamas,100g;100ml,gL;R1,137.02,1.22,liquid
+507-20-0,1671,2-Chloro-2-methylpropane,氯代叔丁烷,,adamas,100ml,1-2-1,92.57,0.851,liquid
+507-36-8,1672,2-Bromo-2-methylbutane,2-溴 -2-甲基丁烷,,adamas,1g,R3,151.04,1.182,liquid
+507-70-0,1673,Borneol,冰片,,adamas,5g,2-2,154.25,1.011,solid
+50998-17-9,1674,6-Bromoquinoxaline,6-溴喹喔啉,,adamas,5g,1-3-3,209.04,1.656,solid
+51019-43-3,1675,D-(-)-O-acetyl mandelic acid,(-)-O-乙酰基-D-扁桃酸,,安耐吉,5g,1-4-3,194.19,1.259,solid
+5104-49-4,1676,Flurbiprofen,氟比洛芬,,adamas,5g,3-2,244.26,1.1795,solid
+51149-08-7,1677,"3,6-Dichloropyridazine-4-carboxylic acid","3,6-二氯哒嗪-4-甲酸",,adamas,1g,1-4-4,192.99,1.718,solid
+51364-51-3,1678,Tris(dibenzylideneacetone)dipalladium,三(二亚苄基丙酮)二钯(0),,adamas,5g,D2,915.71738,,solid
+51429-74-4,1679,Phosphomolybdic acid hydrate,磷钼酸水合物,,毕得,100g,5-2,1841.36,1.62,solid
+51-44-5,1680,"3,4-Dichlorobenzoic acid","3,4-二氯苯甲酸",,adamas,5g,1-4-5,191.01,1.441,solid
+516-05-2,1681,Methylmalonic Acid,甲基丙二酸,,安耐吉,25g,1-4-1,118.09,1.45,solid
+516-12-1,1682,N-Iodosuccinimide,N-碘代丁二酰亚胺 (NIS),,TCI;毕得,5g;100g,4-2-1;R9,224.98,2.245,solid
+5162-44-7,1683,4-Bromo-1-butene,4-溴-1-丁烯,,adamas,25g;5g,3-4;R7,135.0,1.33,liquid
+5176-27-2,1684,N-T-BOC-PYRROLE,1-吡咯甲酸叔丁酯,,adamas,1g,4-2-3,167.21,10,liquid
+51901-85-0,1685,"2-BROMO-1,3,2-BENZODIOXABOROLE",B-溴甲基氯甲基酯,,麦克林,1,gR-配体,198.81,1.67,solid
+5202-78-8,1686,N-VINYLACETAMIDE 97,N-乙烯基乙酰胺,,adamas,1g,R8,85.1,0.89,solid
+52244-70-9,1687,4-(4-Methoxyphenyl)-1-butanol,4-(4-甲氧基苯基)-1-丁醇,,adamas,5g,2-2,180.24,1.042,liquid
+523-27-3,1688,"9,10-Dibromoanthracene","9,10-二溴蒽",,毕得,500g,1-3,336.02,1.7167,solid
+52340-78-0,1689,"(R,R)-(+)-Hydrobenzoin",氢胺,,adamas,5g,3-3B,214.26,1.0781,solid
+524-38-9,1690,N-Hydroxyphthalimide,N-羟基邻苯二甲酰亚胺,,adamas,500g,3-1B,163.13,1.64,solid
+52522-40-4,1691,Tris(dibenzylideneacetone)dipalladium(0)-chloroform adduct,三(二亚苄基丙酮)二钯(0)-氯仿络合物,,adamas,1g,D-2,1023.01,,solid
+525-82-6,1692,Flavone,黄酮,,adamas,1g,2-3,222.24,1.1404,solid
+5263-87-6,1693,6-methoxyquinoline,6-甲氧基喹啉,,安耐吉,1g,4-2-3,159.18,1.15,liquid
+5270-94-0,1694,"4,6-dimethoxypyrimidine","4,6-二甲氧基嘧啶",,adamas,1g,4-2-2,140.14,1.131,solid
+5271-67-0,1695,2-Thiophenecarbonyl chloride,2-噻吩甲酰氯,,adamas,25g,L1,146.59,1.371,liquid
+5274-99-7,1696,1-benzoylpiperidine-4-carboxylic acid,1-苯甲酰基-4-哌啶甲酸,,adamas,5g,R6,233.26,1.248,solid
+527-60-6,1697,"2,4,6-Trimethylphenol","2,4,6-三甲基苯酚",,adamas,5g,4-3-2,136.19,0.9809,solid
+527-72-0,1698,2-Thiophenecarboxylic acid,噻吩-2-甲酸,,adamas,100g,1-5-1,128.15,1.42,solid
+52784-31-3,1699,3-Phenylcyclobutan-1-one,3-苯基环丁酮,,adamas,1g,2-3,146.19,,solid
+52898-32-5,1700,N-(3-Buten-1-yl)phthalimide,3-丁基-1-苯邻二甲酰亚胺,,adamas,100mg;250mg,2-3A;3-1C,201.22,1.195,solid
+52927-22-7,1701,6-Cyano-2-naphthol,6-氰基-2-萘酚,,adamas,5g,1-5C,169.18,1.28,solid
+530-48-3,1702,"1,1-Diphenylethylene","1,1-二苯乙烯",,adamas,1ml;25g,2-3a;R8,180.25,1.021,liquid
+530-48-3,1703,"1,1-Diphenylethylene","1,1-二苯基乙烯",,adamas,5g,R1,180.25,1.021,liquid
+530-62-1,1704,"1,1'-Carbonyldiimidazole","N,N'-羰基二咪唑",,adamas,100g,L1,162.15,1.303,solid
+53-16-7,375,Estrone,雌酚酮,,adamas,25g;5g;25g,2-3b;3-2;2-3b,270.37,1.236,solid
+532-27-4,1705,2-Chloroacetophenone,alpha-氯乙酰苯,,adamas,25g,5707-44-8,154.59,1.324,solid
+532-32-1,1706,Sodium benzoate,苯甲酸钠,,adamas,100g,6-2,144.10317,1.44,solid
+5332-24-1,1707,3-Bromoquinoline,3-溴喹啉,,adamas,5g,1-3-3,208.05,1.533,liquid
+533-58-4,1708,2-Iodophenol,2-碘苯酚,,adamas,25g,1-2-3,220.01,1.947,solid
+534-16-7,1709,Silver(I) carbonate,碳酸银,,adamas,5g,D-3,275.75,6.08,solid
+534-17-8,385,Cesium carbonate,碳酸铯,,adamas,25g,6-1,325.82,4.072,solid
+53473-36-2,1710,3-[4-(Trifluoromethyl)phenyl]propionic acid,3-(4-三氟甲基苯基)丙酸,,adamas,5g,1-4-3,218.17,1.307,solid
+536-25-4,1711,Methyl 3-amino-4-hydroxybenzoate,3-氨基-4-羟基苯甲酸甲酯,,安耐吉,1g,4-3-1,167.16,1.2917,solid
+536-59-4,1712,DIHYDRO CUMINYL ALCOHOL,紫苏醇,,adamas,25g,R1,152.23,0.96,solid
+536-74-3,1713,Phenylacetylene,苯乙炔,,adamas,100ml,R8,102.13,0.93,liquid
+536-75-4,1714,4-Ethylpyridine,4-乙基吡啶,,安耐吉,5ml,4-2-1,107.15,0.942,liquid
+536-90-3,1715,m-Anisidine,间氨基苯甲醚,,安耐吉;adamas,25g,3-5,123.15,1.096,liquid
+5369-19-7,1716,3-(tert-Butyl)aniline,3-叔丁基苯胺,,adamas,25g,3-5,149.23,0.942,liquid
+5370-25-2,1717,2-Acetyl-5-bromothiophene,2-乙酰基-5-溴噻吩,,adamas,5g,1-3-3,205.07,1.649,solid
+53774-20-2,377,2-methylbut-3-enoic acid,2-甲基-3-丁烯酸,,安耐吉,5g,R2,100.12,0.968,liquid
+53-86-1,1718,Indomethacin,吲哚美辛,,adamas,100g,3-2,357.79,1.2135,solid
+538-70-5,1719,"1,2-Dithiane-3-butanoic acid","1,2-Dithiane-3-butanoic acid",,安耐吉,100g,,206.33,1.209,solid
+538-75-0,1720,Dicyclohexylcarbodiimide,"N,N'-二环己基碳二亚胺 (DCC)",,adamas,500ml,4-2-2,206.33,1.247,solid
+5394-18-3,1721,N-(4-Bromobutyl)phthalimide,N-(4-溴丁基)邻苯二甲酰亚胺,,adamas,25g;5g,1-3;1-3-1,282.13,1.5271,solid
+5396-38-3,1722,4-tert-Butylanisole,4-叔丁基茴香醚,,adamas,5g,2-2,164.24,0.938,liquid
+5398-44-7,1723,"2,6-Dichloropyridine-4-carboxylic acid","2,6-二氯异烟酸",,adamas,5g,1-4-5,192.0,1.612,solid
+540-36-3,1724,"1,4-Difluorobenzene",对二氟苯,,adamas,5g,1-2-1,114.09,1.11,liquid
+540-38-5,1725,4-Iodophenol,4-碘苯酚,,adamas,25g,,220.01,1.8573,solid
+5406-18-8,1726,3-(4-Methoxyphenyl)propan-1-ol,3-(4-甲氧苯基)-1-丙醇,,adamas,5g,2-2,166.22,1.006,solid
+540-80-7,1727,tert-Butyl nitrite,亚硝酸叔丁酯,,adamas,25ml,R1,103.12,0.867,liquid
+541-16-2,1728,Di-tert-butyl malonate,丙二酸二叔丁酯,,adamas,100ml,2-2,216.27,0.966,liquid
+541-28-6,1729,1-Iodo-3-methylbutane,异戊基碘,,ADAMAS,1g,R7,198.05,1.497,liquid
+5414-21-1,1730,5-Bromovaleronitrile,5-溴戊腈,,adamas,25g;5g,1-3-1;3-5,162.03,1.388,liquid
+541-47-9,1731,3-Methylcrotonic Acid,"3,3-二甲基丙烯酸",,adamas,25g,1-4-3,100.12,0.969,solid
+541549-94-4,1732,"Oxazole, 2-benzo[b]thien-2-yl-4,5-dihydro-4-(1-methylethyl)-, (4S)-","(S)-2-(苯并[B]噻吩-2-基)-4-异丙基-4,5-二氢恶唑",,BLD,250mg,R4,245.34,1.24,solid
+54247-27-7,1733,Benzyl 6-Bromohexyl Ether,苄基6-溴己醚,,adamas,1g,1-3A,271.19,1.21,liquid
+542-91-6,1734,Diethylsilanealso,二乙基硅烷,,adamas,5ml,3-2;3-4A,88.22,0.681,liquid
+543-27-1,1735,Isobutyl chloroformate,氯甲酸异丁酯,,adamas,25g,1-5-6;R7,136.58,1.053,liquid
+544-92-3,1736,Copper(I) cyanide,氰化亚铜,,adamas,100g,D3,89.56,2.92,solid
+5454-83-1,1737,Methyl 5-bromovalerate,5-溴戊酸甲酯,,毕得,25g,L2,195.05,1.363,liquid
+5462-71-5,1738,4-Cyanophenylacetic acid,4-氰基苯乙酸,,adamas,0,1-4-2,161.16,1.26,solid
+546-68-9,1739,Titanium tetraisopropanolate,四异丙氧钛(IV),,麦克林,500ml,1-1A,284.22,0.96,liquid
+546-68-9,1740,Titanium tetraisopropanolate,钛酸四异丙酯,,安耐吉,100ml,D1,284.22,0.96,liquid
+5467-57-2,1741,2-Chloroquinoline-4-carboxylic Acid,2-氯喹林-4-羧酸,,adamas,1g,1-4-4,207.61,1.469,solid
+54678-23-8,1742,Copper(I) bromide-dimethyl sulfide complex,溴化亚铜与二甲基硫的络合物,,adamas;韶远,1g;5g,D2-2A;R1;打,205.58,,solid
+546-89-4,1743,Lithium acetate,乙酸锂,,adamas;安耐吉,0;5g,6-1,65.99,1.3,solid
+5469-26-1,1744,1-Bromopinacolone,1-溴频哪酮,,adamas,5g;1g,2-3;R3,179.05,1.331,liquid
+54879-20-8,1745,2-Bromo-3-methylaniline,2-溴-3-甲基苯胺,,adamas,25g,,186.05,1.489,liquid
+55120-76-8,1746,(Manganese bis(trifluoromethanesulfonate);(trifluoromethanesulfonyloxy)manganio trifluoromethanesulfonate),双(三氟甲磺酸)锰,,adamas,1g;5g,D2,355.09,,solid
+55-21-0,1747,Benzamide,苯甲酰胺,,安耐吉;adamas,25g,3-4C;3-5;4-4-1,121.14,1.341,solid
+55-22-1,1748,isonicotinic acid,异烟酸,,adamas,25g,1-4-4,123.11,1.47,solid
+552-45-4,1749,alpha-Chloro-o-xylene,2-甲基苄氯,,adamas,25g,1-2-2,140.61,1.063,liquid
+553-54-8,1750,Lithium benzoate,苯甲酸锂,,adamas,5g;0,1-4-5;6-1,128.05,1.35,solid
+5535-48-8,1751,Phenyl vinyl sulfone,苯基乙烯基砜,,毕得,5g,3-4,168.21,1.266,solid
+553-90-2,1752,Dimethyl oxalate,草酸二甲酯,,adamas,500g,2-4,118.09,1.148,solid
+553-91-3,1753,Lithium Oxalate,草酸锂,,adamas,25g,6-1,97.98,,solid
+554-13-2,1754,Lithium carbonate,碳酸锂,,毕得,100g,6-1,73.89,2.11,solid
+554-68-7,1755,Triethylamine hydrochloride,三乙胺盐酸盐,,adamas,100g,3-5;6-3,137.65,1.07,solid
+556-08-1,1756,4-Acetamidobenzoic acid,对乙酰氨基苯甲酸,,adamas,25g,1-4-5,179.17,1.2822,solid
+556-56-9,1757,Allyl iodide,烯丙基碘,,adamas,5g,R3,167.98,1.837,liquid
+55666-43-8,1758,tert-Butyl 3-bromopropionate,3-溴丙酸叔丁酯,,安耐吉,5g,R3,209.08,1.253,liquid
+556-82-1,1759,3-Methyl-2-buten-1-ol,异戊烯醇,,adamas,100ml,3-4,86.13,0.848,solid
+557-20-0,1760,Diethylzinc,二乙基锌,,安耐吉,100ml,4-3C,123.51,1.205,liquid
+557-21-1,1761,Zinc cyanide,氰化锌,,安耐吉,25g,5-1,117.43,1.85,solid
+557-34-6,1762,Zinc acetate,醋酸锌,,3A,100g,5-1,183.48,1.84,solid
+55758-02-6,1763,3-Bromo-2-cyanopyridine,3-溴-2-氰基吡啶,,adamas,5g,3-4,183.01,1.72,solid
+557-93-7,1764,2-Bromopropene,2-溴丙烯,,安耐吉,25g,R6,120.98,1.362,liquid
+558-13-4,1765,Tetrabromomethane,四溴化碳,,adamas,100g,1-3-2,331.63,3.42,solid
+558-17-8,1766,2-Iodo-2-methylpropane,碘代叔丁烷,,adamas,1g,gL-R,184.02,1.544,liquid
+558-30-5,1767,Isobutylene Oxide,甲基环氧丙烷,,adamas,25g,2-3-1,72.11,0.812,liquid
+55854-46-1,1768,5-Bromothiophenesulfonyl chloride,5-溴噻吩-2-磺酰氯,,安耐吉,5g,R1,261.54,1.985,solid
+5586-88-9,1769,4-Chlorophenylacetone,4-氯苯基丙酮,,adamas,5g,2-3,168.62,1.151,liquid
+5587-42-8,1770,"Imidazole, sodium derivative",咪唑钠,,adamas,100mg,4-2-1,90.06,,solid
+5588-84-1,1771,Triisopropoxyvanadium(V) oxide,三异丙氧基氧化钒,,麦克林,5g,R3,244.2,1.035,liquid
+5597-50-2,1772,Methyl 3-(4-hydroxyphenyl)propionate,对羟基苯丙酸甲酯,,adamas,100g,2-4,180.2,1.1272,solid
+5614-37-9,1773,Cyclopentyl methyl ether,环戊基甲醚,,adamas,100ml,溶剂柜,100.16,0.86,liquid
+56-24-6,1774,Trimethyltin hydroxide,三甲基氢氧化锡,,adamas,1g,D2,180.82,,solid
+563-47-3,1775,3-Chloro-2-methylpropene,3-氯-2-甲基-1-丙烯,,adamas,100g,R3,90.55,0.925,liquid
+56-34-8,1776,tetraethylammonium chloride,四乙基氯化铵,,adamas,25g,7-2,165.7,1.08,solid
+56-37-1,1777,Benzyltriethylammonium Chloride,苄基三乙基氯化铵,,安耐吉,500g,7-2,227.77,1.08,solid
+563-79-1,1778,"2,3-Dimethyl-2-butene","2,3-二甲基-2-丁烯",,安耐吉,100g,R3,84.16,0.708,liquid
+56-40-6,1779,glycine,甘氨酸,,adamas,25g,5-2-1,75.07,1.595,solid
+564483-18-7,1780,X-PHOS,"2-二环己基膦-2',4',6'-三异丙基联苯",,绍远,5g,3-3,476.72,,solid
+565-80-0,1781,"2,4-Dimethyl-3-pentanone","2,4-二甲基-3-戊酮",,adamas,25g,2-3,114.19,0.806,liquid
+56613-80-0,1782,D-Phenylglycinol,D-苯甘氨醇,,adamas,100g,2-2,137.18,1.063,solid
+5683-30-7,1783,3-(Trimethylsilyl) propionic acid,3-三甲基硅基丙酸,,adamas,5g,1-4-3,146.26,0.92,liquid
+570-02-5,1784,"2,4,6-Trimethoxybenzoic Acid","2,4,6-三甲氧基苯甲酸",,adamas,1g,1-4-4,212.2,1.219,solid
+5707-44-8,1785,4-Ethylbiphenyl,4-乙基联苯,,adamas,5g,1-1;1-5-2,182.26,0.99,solid
+57-13-6,1786,Urea,尿素,,adamas,100g,4-4-2,60.06,1.335,solid
+5713-61-1,1787,2-Thienylmagnesium bromide,苯硫基溴化镁,,安耐吉,100ml,R5,187.34062,1.011,liquid
+5720-07-0,1788,4-Methoxyphenylboronic acid,4-甲氧基苯硼酸,,adamas,25g,2-4,151.96,1.17,solid
+5728-52-9,1789,4-Biphenylacetic Acid,4-联苯乙酸,,adamas,25g,1-4-1,212.24,1.1035,solid
+574-19-6,1790,2'-Hydroxy-1'-acetonaphthone,1-乙酰基-2-萘酚,,毕得,5g,4-3-2,186.21,1.1032,solid
+574-66-3,1791,Benzophenone oxime,二苯甲酮肟,,adamas,25g;5g,2-1b;R3,197.23,1.0957,solid
+575-44-0,1792,"1,6-Dihydroxynaphtalene","1,6-二羟基萘",,adamas,125g,4-3-3,160.17,1.0924,solid
+576-15-8,1793,1-Acetylindole,1-乙酰吲哚,,adamas,100mg,2-4,159.18,1.387,solid
+57-63-6,1794,Ethynylestradiol,炔雌醇,,安耐吉;adamas,1g;5g,3-2;L6,296.41,1.0944,solid
+57-66-9,1795,Probenecid,丙磺舒,,希恩斯,5g,3-2,285.36,1.2483,solid
+5773-80-8,1796,6-Bromo-2-naphthoic Acid,6-溴-2-萘甲酸,,adamas,0,1-4-5,251.08,1.648,solid
+5781-53-3,1797,METHYL OXALYL CHLORIDE,草酰氯单甲酯,,adamas,25g,1-5-3,122.51,1.332,liquid
+57-83-0,1798,Progesterone,黄体酮,,安耐吉,5g,3-2,314.46,1.171,solid
+578-57-4,1799,1-bromo-2-methoxybenzene,2-溴苯甲醚,,adamas,0,1-3-3,187.03,1.502,liquid
+57-88-5,1800,Cholesterol,胆固醇,,adamas,25g,3-2,386.65,1.06,solid
+5798-75-4,1801,Ethyl 4-bromobenzoate,4-溴苯甲酸乙酯,,adamas,25g,1-3-4;2-4,229.07,1.403,liquid
+580-13-2,383,2-Bromonaphthalene,2-溴代萘,,adamas,5g,1-3-3,207.07,1.605,solid
+580-16-5,1802,6-Hydroxyquinoline,6-羟基喹啉,,adamas,25g,R7,145.16,1.1555,solid
+580-18-7,1803,3-Hydroxyquinoline,3-羟基喹啉,,adamas,5g,4-3-3,145.16,1.1555,solid
+5807-14-7,1804,"1,5,7-Triazabicyclo[4.4.0]dec-5-ene","1,5,7-三氮杂双环 [4.4.0] 癸烯-5-烯",,毕得,10g,4-2-2,139.2,1.28,solid
+581-43-1,1805,"2,6-Naphthalenediol","2,6-萘二酚",,adamas,5g,4-3-3,160.17,1.0924,solid
+5820-22-4,1806,Methallyl phenyl ether,甲烯丙基苯醚,,adamas,1g,3-4,148.2,0.964,liquid
+582-17-2,1807,"2,7-Dihydroxynaphthalene","2,7-二羟基萘",,adamas,25g,4-3-3,160.17,1.0924,solid
+582-25-2,1808,Potassium Benzoate,苯甲酸钾,,安耐吉,100g,6-2,160.21,1.558,solid
+5826-73-3,1809,"dimethyl 8,9,10-trinorborn-5-ene-2,3-dicarboxylate",驱蚊灵,,adamas,5g,3-4,210.23,1.041,solid
+583-52-8,1810,dipotassium oxalate,草酸钾,,adamas,1g,6-2,166.22,2.13,solid
+583-53-9,1811,"1,2-Dibromobenzene","1,2-二溴苯",,adamas,25g,1-3-3,235.9,1.956,liquid
+583-58-4,1812,"3,4-Lutidine","3,4-二甲基吡啶",,adamas,5ml;5g,4-2-1;4-2-2,107.15,0.95,liquid
+584-08-7,1813,Potassium carbonate,无水碳酸钾,,安耐吉;adamas,500g;100g,6-2,138.21,2.43,solid
+58479-61-1,1814,(tert-Butylchlorodiphenylsilane;tert-Butyl(chloro)diphenylsilane),叔丁基二苯基氯硅烷,,adamas,25g;100g,3-2,274.86,1.057,liquid
+58520-03-9,1815,"(1R,2R)-1,2-Bis(4-methoxyphenyl)ethylenediamine","(1R,2R)-1,2-双(4-甲氧苯基)乙二胺",,adamas,5g,R8,272.34,1.135,solid
+585-48-8,1816,"2,6-Di-tert-butylpyridine","2,6-二叔丁基吡啶",,adamas,5g,3-1C,191.31,0.852,liquid
+5856-62-2,1817,(S)-(+)-2-Amino-1-butanol,(S)-2-氨基-1-丁醇,,adamas,5g,2-2,89.14,0.944,liquid
+5856-63-3,1818,(R)-(-)-2-Amino-1-butanol,(R)-(-)-2-氨基-1-丁醇,,adamas,100g;1g,2-2,89.14,0.943,liquid
+5856-77-9,1819,"2,2-dimethyl-butyryl chloride","2,2-二甲基丁酰氯",,adamas,25g,5856-77-9,134.6,0.98,liquid
+585-71-7,1820,1-bromo-1-phenylethane,(1-溴乙基)苯,,adamas,5g,R9,185.06,1.356,liquid
+586-75-4,1821,4-Bromobenzoyl chloride,4-溴苯甲酰氯,,安耐吉;adamas,5g;100g,1-5-3;L2,219.46,1.6111,solid
+586-76-5,1822,4-Bromobenzoic acid,4-溴苯甲酸,,安耐吉,100g,1-5-5,201.02,1.894,solid
+586-77-6,1823,"4-Bromo-N,N-dimethylaniline","4-溴-N,N-二甲基苯胺",,adamas,100g,1-3-4,200.08,1.322,solid
+586-89-0,1824,4-Acetylbenzoic acid,4-乙酰基苯甲酸,,adamas,5g,1-4-4;1-4A,164.16,1.2132,solid
+586-96-9,1825,Nitrosobenzene,亚硝基苯,,adamas,1g,4-2-3;R3,107.11,1.1697,solid
+58794-09-5,1826,7-Bromoisoquinoline,7-溴异喹啉,,adamas,1g,1-3-3,208.05,1.564,solid
+588-63-6,1827,3-Phenoxypropyl bromide,(3-溴丙氧基)苯,,adamas,5g,1-3A,215.09,1.365,liquid
+589-06-0,1828,4-(4-Fluorophenyl)butyric acid,4-(4-氟苯基)丁酸,,adamas,1g,1-4-3,182.19,1.182,solid
+5891-21-4,1829,5-Chloro-2-pentanone,5-氯-2-戊酮,,adamas,25g,2-3,120.58,1.057,liquid
+589-87-7,1830,1-Bromo-4-iodobenzene,对溴碘苯,,adamas,5g,1-4-5,282.9,2.2236,solid
+589-93-5,1831,"2,5-Lutidine","2,5-二甲基吡啶",,安耐吉,25ml,,107.15,0.926,liquid
+590-29-4,1832,potassium formate,甲酸钾,,adamas,100g,6-2,84.12,1.56,solid
+590-67-0,1833,1-Methylcyclohexanol,1-甲基环己醇,,adamas,25g,2-2,114.19,0.919,liquid
+591-12-8,1834,alpha-Angelicalactone,α-当归内酯,,adamas,5g,3-4,98.1,1.092,liquid
+591-17-3,1835,3-Bromotoluene,间溴甲苯,,adamas,25g;5g,1-3-3,171.03,1.41,liquid
+591-20-8,1836,3-Bromophenol,间溴苯酚,,adamas,25g,4-2-3,173.01,1.63,solid
+591-22-0,1837,"3,5-Lutidine","3,5-二甲基吡啶",,TCI,25ml,,107.15,0.939,liquid
+591-50-4,1838,Iodobenzene,碘苯,,adamas,25g,1-2-3;1-2B,204.01,1.823,liquid
+591-51-5,1839,Phenyllithium,苯基锂,,安耐吉,100ml,L1,84.04,0.835,solid
+59163-91-6,1840,Iron(II) trifluoromethanesulfonate,三氟甲磺酸铁(II),,乐研,5g,gR-催化剂,353.98,,solid
+591-80-0,1841,Allylacetic acid,4-戊烯酸,,adamas,100g,R1,100.12,0.981,liquid
+592-57-4,1842,"1,3-Cyclohexadiene","1,3-环己二烯",,adamas,1g,R8,80.13,0.841,liquid
+5928-51-8,1843,3-(2-THIENYL)PROPIONIC ACID,3-(2-噻吩)丙酸,,adamas,5g,1-5A,156.2,1.2474,solid
+59337-92-7,1844,Methyl 3-chlorosulfonylthiophene-2-carboxylate,3-氯磺酰基-2-噻吩甲酸甲酯,,adamas;安耐吉,25g,3-4;3-5B,240.68,1.568,solid
+593-51-1,1845,Methylamine hydrochloride,甲胺盐酸盐,,安耐吉,100g,6-3,67.52,0.8306,solid
+593-60-2,1846,Vinyl bromide,溴乙烯,,adamas;安耐吉,100ml,L2;R5,106.95,1.517,liquid
+59473-45-9,1847,2-Iodobenzyl chloride,邻碘氯苄,,adamas,5g,1-2-2,252.48,1.7773,solid
+594823-67-3,1848,3-bromophenylboronic acid pinacol ester,3-溴苯硼酸频呐醇酯,,adamas,1g,2-4,282.97,1.29,solid
+59-48-3,1849,2-Oxindole,2-吲哚酮,,adamas,0,4-2-3,133.15,1.1475,solid
+5952-92-1,1850,1-Methyl-1H-pyrazole-4-carboxylic acid,1-甲基吡唑-4-甲酸,,adamas,1g,1-4-5,126.11,1.34,solid
+595-46-0,1851,Dimethylmalonic Acid,二甲基丙二酸,,安耐吉,25g,R6,132.11,1.5633,solid
+5970-45-6,1852,Zinc acetate dihydrate,"乙酸锌,二水",,general,500g,5-1,219.51,1.84,solid
+598-23-2,1853,3-Methyl-1-butyne,3-甲基-1-丁炔,,adamas,1g,R3,68.12,0.666,liquid
+598-32-3,1854,3-buten-2-ol,3-丁烯-2-醇,,adamas,25g,3-4,72.11,0.832,liquid
+5994-87-6,1855,Diphenylphosphinamide,二苯基次膦酰胺,,adamas,5g,3-3,217.2,1.2,solid
+601-75-2,1856,Ethylmalonic acid,乙基丙二酸,,adamas,10g,1-4-2,132.11,1.5633,solid
+6018-89-9,1857,Nickel acetate tetrahydrate,乙酸镍(II)四水合物,,毕得,100g,D2,248.84,1.798,solid
+602-09-5,1858,"1,1'-Bi-2-naphthol","1,1'-联-2-萘酚",,adamas,100g,4-3-1,286.32,1,solid
+60230-36-6,1859,"2,6-Difluorobenzenesulphonyl chloride","2,6-二氟苯磺酰氯",,adamas;安耐吉,25g;5g,1-5-3;3-4;R2,212.6,1.568,liquid
+602-56-2,1860,9-Phenylacridine,9-苯基吖啶,,毕得,5g,3-1,255.31,0.9418,solid
+60274-60-4,1861,1-Chloro-5-iodopentane,1-氯-5-碘戊烷,,adamas,5g,gL-R,232.49,1.663,liquid
+602-94-8,1862,Pentafluorobenzoic Acid,"2,3,4,5,6-五氟苯甲酸",,安耐吉,25g,1-4-4,212.07,1.944,solid
+60-33-3,1863,linolic acid,亚油酸,,安耐吉,25ml,3-2,280.45,0.902,liquid
+603-35-0,1864,Triphenylphosphine,三苯基膦,,adamas,500g,3-3,262.29,1.132,solid
+6034-46-4,1865,(S)-(-)-2-Acetoxypropionic Acid,(S)-(-)-2-乙酰氧基丙酸,,adamas,1g,1-4-2,132.11,1.162,liquid
+603-79-2,1866,"2,3-Dimethylbenzoic acid","2,3-二甲基苯甲酸",,安耐吉,5g,1-4-4,150.17,1.0937,solid
+6047-25-2,1867,Ferrous oxalate dihydrate,草酸亚铁二水合物,,毕得,100g,D3,177.88,2.28,solid
+605-03-8,1868,4-phenylquinoline,4-苯基喹啉,,安耐吉,1g,4-2-2,205.25,1.127,solid
+6057-60-9,1869,4-(4-BIPHENYLYL)BUTYRIC ACID,4-(4-联苯)丁酸,,安耐吉,1g,1-4-2,240.3,1.0752,solid
+606-43-9,1870,1-METHYL-2(1H)-QUINOLONE,1-甲基-2-喹啉酮,,adamas,250mg,4-2-2,159.18,1.1202,solid
+6068-72-0,1871,4-Cyanobenzoyl chloride,对氰基苯甲酰氯,,adamas,5g,1-5-3,165.58,1.2744,solid
+60804-74-2,1872,"Tris(2,2'-bipyridine)ruthenium(II) hexafluorophosphate","三(2,2'-联吡啶)钌二(六氟磷酸)盐",,,1g,gR-催化剂,859.55,,solid
+60871-84-3,1873,Nickel(II) trifluoromethanesulfonate,三氟甲磺酸镍(II),,毕得,25g,D2,356.83,,solid
+609-36-9,1874,DL-proline,DL-脯氨酸,,安耐吉,100g,1-4,115.13,1.1808,solid
+6097-07-0,1875,N-(4-PENTYNYL)PHTHALIMIDE 97,N-(4-戊炔基)酞酰亚胺,,adamas,1g,3-2,213.23,1.229,solid
+610-72-0,1876,"2,5-Dimethylbenzoic acid","2,5-二甲基苯甲酸",,安耐吉,5g,1-4-5,150.17,1.069,solid
+610-94-6,1877,Methyl 2-Bromobenzoate,邻溴苯甲酸甲酯,,adamas,100g,4-4-2,215.04,1.532,solid
+611-01-8,1878,"2,4-Dimethylbenzoic acid","2,4-二甲基苯甲酸",,adamas,5g,1-4-5,150.17,1.0937,solid
+611-19-8,1879,2-Chlorobenzyl chloride,2-氯苄氯,,adamas,25g,1-2-2,161.03,1.274,liquid
+611-20-1,1880,2-Cyanophenol,邻羟基苯甲腈,,adamas,500g,4-3,119.12,1.1052,solid
+611-73-4,1881,Benzoylformic Acid,苯甲酰甲酸,,安耐吉,5g,1-4-3,150.13,1.38,solid
+611-74-5,1882,"N,N-Dimethylbenzamide","N,N-二甲基苯甲酰胺",,adamas,25g,4-4-1,149.19,1.0753,solid
+611-95-0,1883,4-BROMOBENZHYDROL,4-苯甲酰苯甲酸,,adamas,1g,1-4-4,226.23,1.2022,solid
+6120-95-2,1884,1-Phenyl-1-cyclopropanecarboxylic acid,1-苯基-1-环丙羧酸,,adamas,1g,1-4-2,162.19,1.0613,solid
+612-19-1,1885,2-Ethylbenzoic acid,2-乙基苯甲酸,,,1g,1-4-4,150.17,1.114,solid
+612-57-7,1886,6-Chloroquinoline,6-氯喹啉,,adamas,1g,1-2-1,163.6,1.2108,solid
+612-75-9,1887,"3,3'-Dimethylbiphenyl","3,3'-二甲基联苯",,adamas,1ml,1-1,182.26,0.999,liquid
+612-96-4,1888,2-Phenylquinoline,2-苯基喹啉,,adamas,5g,4-2-3,205.25,1.1155,solid
+614-45-9,1889,tert-Butyl peroxybenzoate,过氧化苯甲酸叔丁酯,,adamas,25g,2-4,194.23,1.021,liquid
+614-47-1,1890,trans-chalcone,反-查耳酮,,adamas,25g,gL-R,208.26,1.0712,solid
+6147-53-1,1891,Cobalt(II) acetate tetrahydrate,"乙酸钴,四水合物",,毕得,100g,D2,249.08,1.71,solid
+6149-41-3,1892,methyl 3-hydroxypropanoate,3-羟基丙酸甲酯,,adamas,25g,2-2,104.1,1.105,solid
+615-37-2,1893,2-Iodotoluene,邻碘甲苯,,adamas,5g,1-2-3,218.04,1.713,liquid
+61-54-1,1894,Tryptamine,色胺,,安耐吉,25g,3-2,160.22,0.9787,solid
+6163-58-2,1895,Tri(o-tolyl)phosphine,三(邻甲苯基)膦,,毕得,100g,3-3,304.37,1.16,solid
+616-38-6,1896,Dimethyl Carbonate,碳酸二甲酯,,adamas,100g,2-4,90.08,1.069,liquid
+616-47-7,1897,1-Methylimidazole,N-甲基咪唑,,adamas,25g,4-2-1,82.1,1.03,liquid
+6165-68-0,1898,2-Thienylboronic acid,噻吩-2-硼酸,,adamas,5g,4-2,127.96,1.32,solid
+61676-62-8,1899,"2-Isopropoxy-4,4,5,5-tetramethyl-1,3,2-dioxaborolane",异丙氧基硼酸频哪醇酯,,adamas,25g,2-4,186.06,0.912,liquid
+6168-72-5,1900,DL-Alaninol,DL-氨基丙醇,,adamas,25g,2-2,75.11,0.943,liquid
+617-86-7,1901,Triethylsilane,三乙基硅烷,,adamas,100ml,3-2,116.28,0.728,liquid
+617-94-7,1902,2-Phenylpropan-2-ol,2-苯基-2-丙醇,,安耐吉,5g,2-2,136.19,0.973,solid
+619-42-1,1903,Methyl 4-Bromobenzoate,对溴苯甲酸甲酯,,麦克林;adamas,5g,1-3-3;gRc,215.04,1.689,solid
+619-44-3,1904,Methyl 4-iodobenzoate,4-碘苯甲酸甲酯,,adamas,25g,,262.04,2.02,solid
+619-45-4,1905,Methyl 4-Aminobenzoate,4-氨基苯甲酸甲酯,,adamas,25g,3-5,151.16,1.2023,solid
+619-58-9,1906,4-Iodobenzoic acid,4-碘苯甲酸,,adamas,5g,1-4-5,248.02,2.184,solid
+619-65-8,1907,4-Cyanobenzoic acid,4-氰基苯甲酸,,adamas,5g,1-4-5,147.13,1.3067,solid
+619-66-9,1908,4-Formylbenzoic acid,对醛基苯甲酸,,adamas,25g,1-5-1,150.13,1.2645,solid
+619-84-1,1909,4-Dimethylaminobenzoic Acid,4-二甲氨基苯甲酸,,adamas,25g,1-5-5,165.19,1.04,solid
+620-08-6,1910,4-Methoxypyridine,4-甲氧基吡啶,,adamas,25g,4-2-3,109.13,1.075,liquid
+620-20-2,1911,3-Chlorobenzyl chloride,3-氯氯苄,,adamas,25g,1-2-2,161.03,1.27,liquid
+620-93-9,1912,Di-p-tolylamine,"4,4'-二甲基二苯胺",,adamas,5g,3-5,197.28,1.0514,solid
+621-07-8,1913,"N,N-Dibenzylhydroxylamine","N,N-二苄基羟基胺",,adamas,100g,3-5,213.27,1.0439,solid
+621-23-8,1914,"1,3,5-Trimethoxybenzene","1,3,5-三甲氧基苯",,adamas,25g,4-3a,168.19,1.126,solid
+6216-63-3,1915,(S)-1-CBZ-2-HYDROXYMETHYLPYRROLIDINE,CBZ-脯氨醇,,安耐吉,5g,gRLW,235.28,1.196,liquid
+622-31-1,1916,syn-Benzaldoxime,α-苯甲醛肟,,adamas,5g,2-2,121.14,1.145,solid
+62-23-7,1917,4-Nitrobenzoic Acid,对硝基苯甲酸,,adamas,25g,1-5-1,167.12,1.61,solid
+622-39-9,1918,2-N-PROPYLPYRIDINE,毒芹分碱,,adamas,5ml,4-2-3,121.18,0.912,liquid
+622-46-8,1919,Phenyl carbamate,苯氨基甲酸酯,,adamas,1g,4-4-1,137.14,1.2528,solid
+622-47-9,1920,4-Methylphenylacetic acid,对甲基苯乙酸,,adamas,25g,1-4-5,150.17,1.0858,solid
+622-57-1,1921,N-Ethyl-p-toluidine,N-乙基对甲苯胺,,adamas,5ml,3-5,135.21,0.94,liquid
+622-58-2,1922,p-Tolyl isocyanate,对甲苯异氰酸酯,,安耐吉,5g;1g,R1,133.15,1.056,solid
+622-76-4,1923,1-Phenyl-1-butyne,1-苯基-1-丁炔,,adamas,5g,3-2a,130.19,0.916,liquid
+622-79-7,1924,Benzyl azide,苄基叠氮,,adamas,5g,R1,133.15,1.0655,solid
+622-97-9,1925,4-Methylstyrene,4-甲基苯乙烯,,adamas,0,R8,118.18,0.897,liquid
+623-00-7,1926,4-Bromobenzonitrile,4-溴苯腈,,毕得;adamas,100g;5g,1-3-3;gRc,182.02,1.562,solid
+623-05-2,1927,4-Hydroxybenzyl alcohol,对羟基苯甲醇,,adamas,100g,2-2,124.14,1.1006,solid
+623-12-1,1928,4-Chloroanisole,4-氯苯甲醚,,安耐吉,100g,1-2-1,142.58,1.164,liquid
+623-26-7,1929,"1,4-Dicyanobenzene",对苯二腈,,adamas,25g,3-4,128.13,1.3,solid
+623-42-7,1930,Methyl Butyrate,丁酸甲酯,,安耐吉,25ml,2-4,102.13,0.898,liquid
+623-47-2,1931,Ethyl Propiolate,丙炔酸乙酯,,adamas,10g,3-2,98.1,0.968,liquid
+623-53-0,1932,Ethyl methyl carbonate,碳酸甲乙酯,,adamas,100g,2-4,104.1,1.006,liquid
+624-18-0,1933,p-Phenylenediamine dihydrochloride,对苯二胺盐酸盐,,adamas,25g,3-5,181.06,,solid
+624-24-8,1934,Methyl Valerate,戊酸甲酯,,安耐吉,5ml,2-4,116.16,0.875,liquid
+624-48-6,1935,dimethyl maleate,顺丁烯二酸二甲酯,,adamas,25ml,3-4,144.13,1.152,liquid
+62-53-3,1936,Aniline,苯胺,,安耐吉,100ml,3-5,93.13,1.022,liquid
+625-35-4,1937,(E)-2-Butenoyl chloride,巴豆酰氯,,adamas,25g,R1,104.53,1.091,solid
+625-38-7,1938,Vinylacetic acid,乙烯基乙酸,,安耐吉,25g,1-4-2,86.09,1.013,liquid
+625-45-6,1939,Methoxyacetic acid,甲氧基乙酸,,安耐吉,25g,1-4-2,90.08,1.174,liquid
+626-55-1,1940,3-Pyridyl bromide,3-溴吡啶,,adamas,25g,1-3-4,158.0,1.64,liquid
+626-62-0,1941,Iodocyclohexane,碘环己烷,,adamas,5g,,210.06,1.624,solid
+627-18-9,1942,3-Bromo-1-propanol,3-溴-1-丙醇,,安耐吉,25g,R8,138.99,1.537,liquid
+627-27-0,1943,3-Buten-1-ol,3-丁烯-1-醇,,adamas,5ml;25ml,2-2;3-4,72.11,0.838,liquid
+627-32-7,1944,3-Iodopropanol,3-碘丙醇,,adamas,25g,R2,185.99,1.942,liquid
+627-37-2,1945,N-Allylmethylamine,N-甲基烯丙基胺,,adamas,5ml,3-4,71.12,0.741,liquid
+627-41-8,1946,Methyl Propargyl Ether,甲基丙炔基醚,,adamas,1ml,3-2,70.09,0.83,solid
+62-76-0,1947,Sodium oxalate,草酸钠,,adamas,100g,6-2,134.0,2.34,solid
+627-91-8,1948,adipic acid monomethyl ester,己二酸单甲酯,,adamas,25g,1-4-2,160.17,1.081,liquid
+628-17-1,1949,1-Iodopentane,1-碘戊烷,,adamas,25g,1-2-3,198.05,1.517,liquid
+628-41-1,1950,"Cyclohexa-1,4-diene","1,4-环己二烯",,adamas,5g,3-4,80.13,0.847,liquid
+628-71-7,1951,1-Heptyne,1-庚炔,,adamas,5ml,3-2a,96.17,0.733,liquid
+629-05-0,1952,Oct-1-yne,1-辛炔,,energy,10g,3-2,110.2,0.747,liquid
+629-09-4,1953,"1,6-Diiodohexane","1,6-二碘己烷",,adamas,5g,R2,337.97,2.05,liquid
+629-14-1,1954,Ethyleneglycol diethyl ether,乙二醇二乙醚,,adamas,100ml,4-3-2,118.17,0.842,liquid
+6292-59-7,1955,4-tert-Butylbenzenesulfonamide,4-叔丁基苯磺酰胺,,adamas,5g,3-4,213.3,1.152,solid
+629-27-6,1956,Octyl iodide,1-碘辛烷,,adamas,25g,1-2-3,240.12,1.33,liquid
+629-45-8,1957,Butyl disulfide,二丁基二硫,,adamas,25g,R3,178.36,0.938,liquid
+629-59-4,1958,Tetradecane,十四烷,,adamas,100ml,1-5-2,198.39,0.762,liquid
+630-18-2,1959,Trimethylacetonitrile,三甲基乙腈,,adamas,100ml,R2,83.13,0.752,liquid
+6302-65-4,1960,Methyl 4-Mercaptobenzoate,对硫氢基苯甲酸甲酯,,adamas,100mg,2-4,168.21,1.202,solid
+63038-27-7,1961,L-tert-Leucine methyl ester hydrochloride,L-叔亮氨酸甲酯盐酸盐,,adamas,100g,2-2,181.66,,solid
+63093-41-4,1962,ethyl pent-4-ynoate,4-戊炔酸乙酯,,adamas,1g,3-2,126.15,1,liquid
+631-36-7,1963,Tetraethylsilane,四乙基硅烷,,adamas,5g,3-2,144.33,0.761,liquid
+631-61-8,1964,Ammonium acetate,乙酸铵,,adamas,100g,7-2,77.08,1.07,solid
+632-46-2,1965,"2,6-Dimethylbenzoic acid","2,6-二甲基苯甲酸",,安耐吉,5g,1-4-4,150.17,1.0937,solid
+632-69-9,1966,Acid Red 94,酸性红 94,,TCI,5g,3-1,997.66,,solid
+63295-48-7,1967,iron(3+) ion tritriflate,三氟甲磺酸铁(III),,DB,5g,gR-催化剂,205.92,,solid
+634-97-9,1968,Pyrrole-2-carboxylic acid,吡咯-2-甲酸,,adamas,1g,1-4-5,111.1,0.862,solid
+635305-47-4,1969,3-Chlorophenylboronic acid pinacol ester,3-氯苯基硼 酸片呐醇 酯,,adamas,1g,2-4,238.52,1.1,solid
+635-46-1,1970,"1,2,3,4-Tetrahydroquinoline","1,2,3,4-四氢喹啉",,adamas,25g,4-2-3,133.19,1.061,liquid
+636-76-0,1971,3-Sulfamoyl-benzoic acid,间羧基苯磺酰胺,,adamas,1g,1-4-5,201.2,1.536,solid
+637-44-5,1972,Phenylpropiolic acid,3-苯基丙炔酸,,adamas,5g,1-4-1,146.14,1.1674,solid
+637-59-2,1973,3-Phenylpropyl Bromide,1-溴-3-苯基丙烷,,毕得;adamas,10g;25g,1-3-1,199.09,1.31,liquid
+637-69-4,1974,4-Methoxystyrene,4-甲氧基苯乙烯,,adamas,5g,L6,134.18,1.009,liquid
+637-81-0,1975,ethyl azidoacetate,叠氮乙酸乙酯,,adamas,5g,4-2-3;R1,129.12,1.12,liquid
+638-45-9,1976,1-Iodohexane,1-碘己烷,,adamas,5g,R2,212.07,1.437,liquid
+640-61-9,1977,N-Methyl-p-toluenesulfonamide,N-甲基对甲苯磺酰胺,,adamas,100g,3-4,185.24,1.34,solid
+64-18-6,1978,Formic acid,甲酸,,adamas,100g,1-4-1,46.03,1.22,liquid
+64-19-7,1979,Acetic acid,醋酸,,adamas,500ml,4-3C,60.05,1.049,liquid
+642491-11-0,1980,"Oxazole, 2,2'-[(phenylphosphinidene)di-2,1-phenylene]bis[4-(1,1-dimethylethyl)-4,5-dihydro-, (4S,4'S)- (9CI)","(4S,4'S)-2,2'-((苯基膦二基)双(2,1-亚苯基))双(4-(叔丁基)-4,5-二氢恶唑)",,BLD,250mg,R4,512.62,,solid
+64275-73-6,1981,cis-5-octen-1-ol,顺式5-辛烯-1-醇,,安耐吉,5g,3-4,128.21,0.849,liquid
+64407-07-4,1982,3-Cyanobenzyl chloride,3-(氯甲基)甲苯基氰,,adamas,5g,1-2-2,151.59,1.1976,solid
+64443-05-6,1983,Tetrakis(acetonitrile)copper(I) hexafluorophosphate,六氟磷酸四乙腈铜(I),,ADAMAS,5g,gR-催化剂,372.72,,solid
+644-97-3,1984,Phenyldichlorophosphine,苯基二氯膦,,adamas,100ml,R2,178.984,1.319,liquid
+644-98-4,1985,2-Isopropylpyridine,2-异丙基吡啶,,安耐吉,5ml,4-2-3,121.18,1.45,liquid
+645-36-3,1986,"2,2-Diethoxyethylamine",氨基乙醛缩二乙醇,,adamas,25g,3-5,133.19,0.916,liquid
+645-45-4,1987,Hydrocinnamoyl chloride,氢化肉桂酰氯,,adamas,25g,1-5-3,168.62,1.135,liquid
+6485-58-1,1988,Iodoethane-d5,碘乙烷-D5,,乐妍,250mg,R2,155.97,2.013,liquid
+65038-36-0,1989,"1,4-Bis(dicyclohexylphosphino)butane","1,4-双(二环己基膦)丁烷",,安耐吉,1g,3-3,450.66,,solid
+65094-22-6,1990,Diethyl (bromodifluoromethyl)phosphonate,溴氟甲基膦酸二乙酯,,adamas,5g,1-3A,267.01,1.503,liquid
+657408-07-6,1991,"2-Dicyclohexylphosphino-2',6'-dimethoxybiphenyl","2-双环己基膦-2',6'-二甲氧基联苯",,毕得,5g;0,2-2c;3-3,410.53,,solid
+65796-00-1,1992,4-(Trifluoromethoxy)benzyl chloride,4-三氟甲氧基氯苄,,adamas,1g,R2,210.58,1.34,liquid
+65-85-0,1993,Benzoic acid,苯甲酸,,安耐吉,100g,1-5-5,122.12,1.08,solid
+65864-64-4,1994,(difluoromethyl)trimethylsilane,(二氟甲基)三甲基-硅烷,,adamas,25g,R2,124.2,0.877,liquid
+6609-57-0,1995,2-Ethoxybenzonitrile,邻乙氧基苯腈,,adamas,25g,3-4,147.17,1.053,liquid
+6613-44-1,1996,"3,5-Dimethylbenzoyl chloride","3,5-二甲基苯甲酰氯",,adamas,25g,1-5-3,168.62,1.14,liquid
+661-36-9,1997,Tetramethylammonium tetrafluoroborate,四氟硼酸四烷基铵,,adamas,100g,7-2,160.95,,solid
+66176-39-4,1998,alpha-Bromo-p-toluenesulphonyl chloride,4-(溴甲基)苯磺酰氯,,安耐吉,25g,R3,269.54,1.6944,solid
+661-82-5,1999,3-CHLOROTETRAFLUOROPROPIONIC ACID,"3-氨基-1,2,4-三氮唑",,adamas,1g,1-4-2,180.49,1.63,liquid
+66-71-7,2000,o-Phenanthroline,邻菲罗啉,,毕得,25g,gR-配体,180.21,1.1836,solid
+667-27-6,2001,Ethyl bromodifluoroacetate,二氟溴乙酸乙酯,,adamas,5g;100g,1-3-1;2-4,202.98,1.583,liquid
+6674-22-2,2002,DBU,DBU,,adamas,0,4-2,152.24,1.019,liquid
+670-98-4,2003,Methyl benzenesulfinate,苯亚硫酸甲酯,,安耐吉,5g,2-4,156.2,1.194,liquid
+67237-53-0,2004,3-ethynylthiophene,3-乙炔基噻吩,,adamas,5g,R6,108.16,1.098,solid
+672-65-1,2005,1-Chloro-1-phenylethane,1-氯-1-苯乙烷,,adamas,25ml,1-2-2,140.61,1.06,liquid
+672-66-2,2006,Dimethylphenylphosphine,二甲基苯基膦,,adamas,1g,gR-配体,138.15,0.971,solid
+67292-34-6,2007,"[1,1'-Bis(diphenylphosphino)ferrocene]dichloronickel(II)","(1,1'-双(二苯基膦)二茂铁)二氯化镍",,ADAMAS,5g,gR-催化剂,677.94,,solid
+6737-42-4,2008,"1,3-Bis(diphenylphosphino)propane","1,3-双(二苯基膦)丙烷 (DPPP)",,毕得,5g,gR-配体,412.45,,solid
+6746-94-7,2009,Cyclopropylacetylene,环丙基乙炔,,adamas,25ml,3-2,66.1,0.7801,solid
+674783-97-2,2010,9-Mesityl-10-methylacridinium perchlorate,10-甲基-9-均三甲苯基吖啶高氯酸盐,,adamas,1g,3-1,411.88,,solid
+67490-21-5,2011,"2,4,6-tri-tert-butylpyrimidine","2,4,6-三叔丁基嘧啶",,adamas,5g,4-2-1,248.41,0.9,solid
+67-51-6,2012,"3,5-Dimethylpyrazole","3,5-二甲基吡唑",,adamas,100g,4-2-3,96.13,0.884,solid
+67-63-0,2013,isopropanol,异丙醇,,adamas,100ml,3-2A,60.1,0.785,liquid
+677-22-5,2014,tert-butylmagnesium chloride,叔丁基氯化镁,,adamas,100ml,R5,116.87,0.931,liquid
+680-15-9,2015,"(Methyl 2,2-difluoro-2-(fluorosulfonyl)acetate;Methyl fluorosulfonyldifluoroacetate)",氟磺酰基二氟乙酸甲酯,,adamas,5g;25g,2-3c;2-4;R1,192.11,1.509,liquid
+680-31-9,2016,Hexamethylphosphoric Triamide,六甲基磷酰三胺 (HMPA),,adamas,100g,3-4A,179.2,1.03,liquid
+68-19-9,2017,vitamin B12,维生素B12,,adamas,1g,gR-催化剂,1355.37,,solid
+68-22-4,2018,norethindrone,炔诺酮,,安耐吉,5g,3-2,298.43,1.0766,solid
+682-30-4,2019,Diethyl Vinylphosphonate,乙烯基膦酸二乙酯,,adamas;毕得,5g,3-4;R8,164.14,1.068,liquid
+6825-20-3,2020,"3,6-Dibromocarbazole","3,6-二溴咔唑",,adamas,25g,4-2-2,325.0,1.93,solid
+685-87-0,2021,Diethyl Bromomalonate,溴代丙二酸二乙酯,,adamas,25g,1-3-2,239.06,1.402,liquid
+68716-49-4,2022,"2-(4-bromophenyl)-4,4,5,5-tetramethyl-1,3,2-dioxaborolane",4-溴苯硼酸频呐醇酯,,adamas,5g,1-3-3,282.97,1.29,solid
+68737-65-5,2023,"(1R,2R)-N,N'-dimethyl-1,2-cyclohexanediamine","(1R,2R)-N,N'-二甲基-1,2-环己二胺",,adamas,1g,gR-配体,142.24,0.902,solid
+68858-20-8,2024,Fmoc-Val-OH,N-Fmoc-L-缬氨酸,,安耐吉,100g,2-2,339.39,1.227,solid
+68986-76-5,2025,Copper(I) thiophene-2-carboxylate,噻吩-2-甲酸亚铜,,adamas,1g,D2-2A,190.69,,solid
+6911-87-1,2026,4-Bromo-N-methylaniline,4-溴-N-甲基苯胺,,adamas,5g,1-3-4,186.05,1.482,liquid
+693-02-7,2027,1-Hexyne,1-己炔,,adamas;安耐吉,25ml;100ml,3-2;R7,82.14,0.715,liquid
+693-13-0,2028,"N,N'-diisopropylcarbodiimide","N,N-二异丙基碳二亚胺 (DIC)",,adamas,100ml,3-2C;3-5,126.2,0.815,solid
+69360-26-5,2029,2-Cyanobenzenesulfonyl chloride,2-氰基苯磺酰氯,,安耐吉,5g,R3,201.63,1.53,solid
+6940-76-7,2030,1-Chloro-3-iodopropane,1-氯-3-碘丙烷,,adamas,1g,,204.44,1.904,liquid
+694-53-1,2031,Phenylsilane,苯硅烷,,adamas,5g,3-2,108.21,0.877,liquid
+694-80-4,2032,2-Bromochlorobenzene,1-溴-2-氯苯,,adamas,5g,1-3-3,191.45,1.638,liquid
+694-85-9,2033,1-Methyl-2-pyridone,1-甲基-2-吡啶酮,,adamas,1g,4-2-3,109.13,1.129,solid
+69506-86-1,2034,"1H-Imidazole,1,1'-(1,4-butanediyl)bis-",双咪唑丁烷,,adamas,100mg,4-2-1,190.24,1.13,solid
+696-62-8,2035,4-Iodoanisole,4-碘苯甲醚,,毕得,100g,1-2-3,234.03,1.7904,solid
+6973-60-0,2036,N-Methylpyrrole-2-carboxylic acid,N-甲基-2-吡咯羧酸,,adamas,1g,1-4-4,125.13,1.25,solid
+69739-34-0,2037,Trifluoromethanesulfonic acid tert-butyldimethylsilyl ester,叔丁基二甲基硅基三氟甲磺酸酯,,安耐吉,25g,R3,264.34,1.151,liquid
+70-00-8,2038,Trifluridine,三氟胸苷,,adamas,100mg,3-2,296.2,1.4365,solid
+702-23-8,2039,4-Methoxyphenethyl alcohol,对甲氧基苯乙醇,,adamas,5g,2-2,152.19,1.058,solid
+70-23-5,2040,ethyl bromopyruvate,3-溴丙酮酸乙酯,,adamas,5g,1-3,195.01,1.554,solid
+7051-34-5,2041,Cyclopropylmethyl bromide,溴甲基环丙烷,,adamas,5g,R1,135.0,1.392,solid
+705-29-3,2042,"alpha'-Chloro-alpha,alpha,alpha-trifluoro-m-xylene",3-三氟甲基氯苄,,adamas,1g,1-2-2,194.58,1.254,solid
+705-31-7,2043,4'-Trifluoromethylphenyl acetylene,"4-乙炔基-α,α,α-三氟甲苯",,安耐吉;adamas,5g,3-2;R6,170.13,1.043,liquid
+70-55-3,2044,p-Toluenesulfonamide,对甲苯磺酰胺,,adamas,100g,3-4,171.22,1.2495,solid
+70557-99-2,2045,"Iodomethylboronic acid, pinacol ester",碘甲基硼酸频哪醇酯,,adamas,25g,L2,267.9,1.47,liquid
+705-76-0,2046,"3,5-Dimethoxybenzyl alcohol","3,5-二甲氧基苯甲醇",,安耐吉,100g,2-2,168.19,1.1322,solid
+708-06-5,2047,2-Hydroxy-1-naphthaldehyde,2-羟基-1-萘甲醛,,毕得,100g,4-3,172.18,1.1153,solid
+7087-68-5,2048,"N,N-Diisopropylethylamine","N,N-二异丙基乙胺 (DIPEA)",,adamas,500ml,3-5,129.24,0.742,liquid
+71071-46-0,2049,"4,4'-Bis(methoxycarbonly)-2,2'-bipyridine","2,2'-联吡啶-4,4'-二甲酸甲酯",,毕得,1g,gR-配体,272.26,1.254,solid
+7123-92-4,2050,norpseudopelleterine-N-oxyl,9-氮杂双环[3.3.1]壬烷-3-酮 N-氧自由基,,adamas,250mg,R7,154.19,,solid
+71-43-2,2051,Benzene,苯,,energy,0,溶剂柜,78.11,0.874,liquid
+71-48-7,2052,Cobalt(II) acetate,乙酸钴,,MACKLIN,5g,gR-催化剂,177.02,1.7043,solid
+7154-66-7,2053,2-Bromobenzoyl Chloride,2-溴苯甲酰氯,,adamas,5g,1-5-3,219.46,1.679,liquid
+716-39-2,2054,"2,3-Naphthalenedicarboxylic Anhydride",2，3-萘二酐,,adamas,25g,2-4,198.17,1.449,solid
+7164-98-9,2055,1-Phenylimidazole,1-苯基咪唑,,adamas,250mg,4-2-1,144.17,1.14,liquid
+717-74-8,2056,"1,3,5-Triisopropylbenzene","1,3,5-三异丙基苯",,adamas,100ml,1-5-2,204.35,0.845,liquid
+717-94-2,2057,"3-(3,5-Dimethoxyphenyl)propionic acid","3,5-二甲氧基苯基丙酸",,adamas,5g,1-4-3,210.23,1.159,solid
+7188-38-7,2058,tert-Butyl isocyanide,异氰酸叔丁酯,,adamas,5ml,R8,83.13,0.735,solid
+71-91-0,2059,Tetraethylammonium bromide,四乙基溴化铵,,毕得,100g,7-2,210.16,1.397,solid
+7223-50-9,2060,N-Propargylphthalimide,N-丙炔基邻苯二甲酸胺,,adamas,5g,3-2,185.18,1.318,solid
+7226-23-5,2061,"1,3-Dimethyl-3,4,5,6-tetrahydro-2(1H)-pyrimidinone","N,N-二甲基丙烯基脲",,毕得;安耐吉,100ml;100g,4-4-1,128.17,1.06,liquid
+72402-14-3,2062,"Methyl-2,3-O-isopropylidene-D-ribofuranoside","甲基-2,3-O-异亚丙基-D-呋喃核糖苷",,毕得,5g,3-2,204.22,1.23,liquid
+72-48-0,2063,Alizarin,"1,2-二羟基蒽醌",,adamas,25g,2-3,240.21,1.06,solid
+72914-19-3,2064,"4,4'-Di-tert-butyl-2,2'-dipyridyl","4,4'-二叔丁基-2,2'-联吡啶",,毕得,5g,gR-配体,268.4,0.977,solid
+73018-10-7,2065,2-mercaptopyridine,2-疏基吡啶,,adamas,100ml,3-1A,111.16,1.166,solid
+7311-34-4,2066,"3,5-Dimethoxybenzaldehyde","3,5-二甲氧基苯甲醛",,安耐吉,25g,4-3,166.17,1.1708,solid
+73183-34-3,2067,Bis(pinacolato)diboron,联硼酸频那醇酯,,adamas,100g;25g,R3;R9,253.94,0.98,solid
+7321-55-3,2068,Dimethylmalononitrile,二甲基丙二腈,,adamas,5g,gL,94.11,0.969,solid
+73-31-4,2069,Melatonin,褪黑素,,adamas,5g,3-2,232.28,1.1099,solid
+7335-27-5,2070,Ethyl 4-Chlorobenzoate,4-氯苯甲酸乙酯,,adamas,5g,1-2-1,184.62,1.187,solid
+73602-61-6,2071,Triethylamine trihydrofluoride,三乙胺三氢氟酸盐,,adamas,5g,3-5,161.21,0.989,liquid
+73776-25-7,2072,2-Chloroquinoline-3-carboxylic acid,2-氯-3-喹啉羧酸,,adamas,1g,1-4-5,207.61,1.469,solid
+741709-62-6,2073,2-CYANOPYRIDINE-4-BORONIC ACID PINACOL ESTER,2-氰基吡啶-4-硼酸频哪醇酯,,adamas,100mg,2-4,230.07,1.1,solid
+7439-96-5,2074,Manganese,锰,,adamas,25g,D3-1,54.94,7.3,solid
+7446-70-0,2075,Aluminum chloride,三氯化铝,,安耐吉,100g,D2,133.34,2.44,solid
+7447-39-4,2076,Copper(II) chloride,氯化铜(II),,adamas,100g,D-3,134.45,3.386,solid
+7447-39-4,2077,Copper(II) chloride,无水氯化铜,,阿拉丁,5g,D3,134.45,3.386,solid
+7447-41-8,2078,Lithium chloride,氯化锂,,adamas;百灵威,100g,6-1,42.39,2.06,solid
+7473-98-5,2079,2-Hydroxy-2-methylpropiophenone,2-羟基-2-甲基苯丙酮,,adamas,25g,2-2,164.2,1.077,liquid
+74-88-4,2080,Iodomethane,碘甲烷,,adamas,25g,1-2-3;R2,141.94,2.28,liquid
+74-95-3,2081,Dibromomethane,二溴甲烷,,adamas,25g,1-3-2,173.83,2.477,liquid
+74-96-4,2082,Bromoethane,溴乙烷,,安耐吉;adamas,500g;100g,R1;R2,108.97,1.46,liquid
+74-99-7,2083,Propyne,丙炔,,adamas,25ml,3-2,40.06,0.607,liquid
+75-16-1,2084,Methylmagnesium bromide,甲基溴化镁,,adamas;安耐吉,1000ml;500ml;100ml,R4;R5,119.24,1.035,liquid
+75-22-9,2085,Borane-trimethylamine complex,硼烷-三甲胺络合物,,adamas,5g,R6,72.95,0.81,solid
+75-26-3,2086,2-Bromopropane,溴代异丙烷,,adamas,100g,1-3-2,122.99,1.31,liquid
+75-30-9,2087,2-Iodopropane,碘代异丙烷,,adamas,25g,1-2-3,169.99,1.703,liquid
+75-30-9,2088,2-Iodopropane,2-碘代丙烷,,adamas,5g,gL-R,169.99,1.703,liquid
+7533-40-6,2089,L(+)-Leucinol,L-亮氨醇,,adamas,100g,2-2,117.19,0.917,solid
+75-36-5,2090,Acetyl chloride,乙酰氯,,安耐吉;adamas,100ml,1-5-3;R3,78.5,1.104,liquid
+75476-78-7,2091,"1H-INDENE, 5-BROMO-",5-溴-1H-茚,,adamas,250mg,75-62-7,195.06,1.523,solid
+7550-35-8,2092,Lithium bromide,溴化锂,,毕得,100g,7-2,86.85,1.57,solid
+7550-45-0,2093,Titanium tetrachloride,四氯化钛,,adamas,100g,R8,189.68,1.73,liquid
+7553-56-2,2094,Iodine,碘,,安耐吉,100g,D1,253.81,1.32,solid
+7558-79-4,2095,Sodium phosphate dibasic,磷酸氢二钠,,Titan,100g,6-2,141.96,1.064,solid
+75-59-2,2096,Tetramethylammonium hydroxide,四甲基氢氧化铵,,安耐吉,25g,7-2,91.15,0.866,liquid
+7560-83-0,2097,"N,N-Dicyclohexylmethylamine",N-甲基二环己基胺,,毕得,100ml,3-5,195.34,0.912,solid
+75-62-7,2098,Bromotrichloromethane,三氯溴甲烷,,adamas,5g,1-3-2,198.27,2.012,liquid
+75-64-9,2099,tert-Butylamine,叔丁胺,,安耐吉,500ml,3-5,73.14,0.696,liquid
+75-65-0,2100,tert-Butanol,叔丁醇,,adamas;energy,100nl;100ml,2-2,74.12,0.775,liquid
+75-66-1,2101,2-Methyl-2-propanethiol,叔丁硫醇(TBM),,adamas,25g,R1,90.19,0.8,liquid
+7568-92-5,2102,DL-2-Phenylglycinol,DL-苯甘氨醇,,安耐吉;adamas,25g,2-2,137.18,1.063,solid
+75-76-3,2103,Tetramethylsilane,四甲基硅烷,,安耐吉,15ml,R1,88.22,0.648,liquid
+75-77-4,2104,Chlorotrimethylsilane,三甲基氯硅烷,,adamas,25ml;100ml,3-2;3-4A;gRB,108.64,0.857,liquid
+75-84-3,2105,Neopentyl alcohol,新戊醇,,adamas,5g;25g,2-2;R6;R9,88.15,0.818,solid
+75-85-4,2106,tert-Amyl Alcohol,叔戊醇,,adamas,100ml,2-2,88.15,0.805,liquid
+7588-36-5,2107,methyl 5-methoxy-2-methyl-1H-indole-3-acetate,5-甲氧基-2-甲基-3-吲哚乙酸甲酯,,adamas,5g,2-3b,233.26,,solid
+75-89-8,2108,"2,2,2-Trifluoroethanol","2,2,2-三氟乙醇 (TFE)",,安耐吉,25g,2-2,100.04,1.391,liquid
+75-89-8,2109,"2,2,2-Trifluoroethanol","2,2,2-三氟乙醇",,adamas,100g,2-2,100.04,1.391,liquid
+75927-49-0,2110,Pinacol vinylboronate,乙烯基硼酸频哪醇酯,,安耐吉;adamas,5g;25g,3-2;R8,154.01,0.908,liquid
+75-94-5,2111,Trichlorovinylsilane,乙烯基三氯硅烷,,安耐吉,100g,3-2,161.49,1.27,liquid
+75-97-8,2112,Pinacolone,频哪酮,,安耐吉,100ml,2-3,100.16,0.801,liquid
+75-98-9,2113,Pivalic acid,三甲基乙酸,,安耐吉,25g,1-4-1,102.13,0.889,solid
+7601-54-9,2114,Sodium phosphate,磷酸三钠,,毕得,500g,4-2b,163.940671,2.536,solid
+7601-54-9,2115,(Trisodium phosphate;Sodium phosphate),无水磷酸三钠,,adamas;安耐吉,25g;500g,6-2,163.940671,2.536,solid
+76-04-0,2116,Chlorodifluoroacetic Acid,二氟氯乙酸,,adamas,5g,1-4-2,130.48,1.54,liquid
+76089-77-5,2117,Cerium(III) trifluoromethanesulfonate,三氟甲磺酸铈(III),,adamas;毕得,5g,D3,290.19,1.7,solid
+762-04-9,2118,Diethyl phosphite,亚磷酸二乙酯,,adamas,25ml,3-3,138.1,1.072,liquid
+7632-00-0,2119,sodium nitrite,亚硝酸钠,,3A,500g,6-2,69.0,2.17,solid
+763-32-6,2120,3-Methyl-3-buten-1-ol,3-甲基-3-丁烯-1-醇,,adamas,100ml,3-4,86.13,0.853,solid
+7646-69-7,2121,Sodium hydride,氢化钠,,安耐吉,100g,D4,24.0,1.2,solid
+7646-79-9,2122,Cobalt chloride,无水氯化钴(Ⅱ),,adamas,25g,gR-催化剂,129.84,3.35,solid
+7646-85-7,2123,Zinc chloride,氯化锌,,安耐吉,500g;25g,5-1;gRb,136.3,1.01,solid
+7646-93-7,2124,Potassium bisulfate,硫酸氢钾,,安耐吉,500g,6-2,136.16884,2.32,solid
+7647-15-6,2125,sodium bromide,溴化钠,,adamas,100g,6-2,102.89,3.203,solid
+7648-30-8,2126,Ethyl iododifluoroacetate,二氟碘乙酸乙酯,,adamas,1g,R8,249.98,1.7,liquid
+7664-41-7,2127,Ammonia,氨,,安耐吉,100ml,r3,17.03,1.023,liquid
+766-47-2,2128,2-Ethynyltoluene,2-乙炔基甲苯,,adamas,5g,3-2,116.16,0.922,solid
+766-49-4,2129,1-ETHYNYL-2-FLUOROBENZENE,1-乙炔基-2-氟苯,,adamas,5g,3-2,120.12,1.06,liquid
+766-77-8,2130,Dimethylphenylsilane,二甲基苯基硅烷,,adamas,25g,3-2,136.27,0.889,solid
+766-83-6,2131,3-Chlorophenylacetylene,3-氯苯乙炔,,安耐吉,5g,3-2;3-2c,136.58,1.109,liquid
+766-85-8,2132,1-iodo-3-methoxybenzene,3-碘苯甲醚,,毕得,5g,1-2-3,234.03,1.965,solid
+766-97-2,2133,4-Ethynyltoluene,4-甲苯基乙炔,,adamas,5g,3-2,116.16,0.916,solid
+766-98-3,2134,4-Fluorophenylacetylene,4-氟苯乙炔,,安耐吉,5g,3-2,120.12,1.048,solid
+767-00-0,2135,4-Cyanophenol,4-羟基苯甲腈,,adamas,100g,4-3-2,119.12,1.1871,solid
+7677-24-9,2136,Trimethylsilylcyanide(Trimethylsilylnitrile),三甲基氰硅烷,,adamas;毕得,25ml;100g;5g,3-2;R6;R8,99.21,0.793,liquid
+767-91-9,2137,1-ETHYNYL-2-METHOXYBENZENE,2-乙炔基苯甲醚,,安耐吉,5g,3-2,132.16,1.022,liquid
+7681-11-0,2138,potassium iodide,碘化钾,,adamas;adamaas,100g,6-2,166.0,1.7,solid
+768-11-6,2139,5-Bromobenzothiazole,5-溴苯并噻唑,,adamas,1g,1-3-3,214.08,1.748,solid
+7681-49-4,2140,Sodium fluoride,氟化钠,,adamas,25g,6-2,41.99,1.02,solid
+7681-65-4,2141,Copper(I) iodide,碘化亚铜,,安耐吉,25g,D-2,190.45,5.62,solid
+7681-82-5,2142,sodium iodide,碘化钠,,3A;adamas,100g,6-2,149.89,3.66,solid
+76823-03-5,2143,5-Carboxyfluorescein,5-羧基荧光素,,adamas,1g,3-2,376.32,1.73,solid
+768-32-1,2144,PHENYLTRIMETHYLSILANE,三甲基苯基硅烷,,adamas,5g,3-2,150.29,0.873,solid
+768-33-2,2145,Chlorodimethylphenylsilane,苯基二甲基氯硅烷,,乐妍,25g,R6,170.71,1.017,liquid
+768-56-9,2146,4-Phenyl-1-butene,4-苯基-1-丁烯,,adamas;安耐吉,5g;5ml,2-3a;3-4,132.2,0.88,liquid
+768-60-5,2147,(4-Methoxyphenylacetylene;4-Ethynylanisole),4-乙炔基苯甲醚,,毕得;adamas,5g;25g,3-2,132.16,1.019,solid
+7686-77-3,2148,3-Cyclopentene-1-carboxylic acid,3-环戊烯甲酸,,adamas,5g,1-4-2,112.13,1.084,liquid
+76-86-8,2149,Triphenylsilyl chloride,三苯基氯硅烷,,adamas,25g,3-2,294.85,1.14,solid
+768-70-7,2150,3-Ethynylanisole,3-乙炔基苯甲醚,,adamas,5g,3-2,132.16,1.04,liquid
+7688-25-7,2151,"1,4-Bis(diphenylphosphino)butane","1,4-双(二苯基膦)丁烷 (DPPB)",,adamas,25g,3-3,426.47,,solid
+768-90-1,2152,1-bromoadamantane,1-溴金刚烷,,adamas,5g,1-3-1,215.13,1.2686,solid
+768-95-6,2153,1-Adamantanol,1-金刚烷醇,,adamas,25g,2-2,152.23,0.8544,solid
+7697-29-2,2154,4-Chloro-3-methylbenzoic Acid,4-氯-3-甲基苯甲酸,,adamas,5g,1-4-4,170.59,1.31,solid
+769-92-6,2155,4-tert-Butylaniline,4-叔丁基苯胺,,adamas,25g,3-5,149.23,0.937,liquid
+7699-45-8,2156,Zinc bromide,溴化锌,,adamas,100g;5g,5-1;gRb,225.2,4.22,solid
+7705-08-0,2157,Ferric chloride,无水三氯化铁,,adamas,25g,gR-催化剂,162.2,2.804,solid
+770-71-8,2158,1-Adamantanemethanol,1-金刚烷甲醇,,ernergy;adamas,5g,2-2,166.26,0.8802,solid
+77095-51-3,2159,1-benzofuran-6-carboxylic acid,苯并呋喃-6-羧酸,,adamas,1g,1-4-4;R1,162.14,1.363,solid
+7718-54-9,2160,Nickle chloride,氯化镍,,adamas,25g,gR-催化剂,129.6,3.55,solid
+771-98-2,2161,1-Phenyl-1-cyclohexene,1-苯基-1-环己烯,,adamas,5g;1g,2-3A;2-5A,158.24,0.994,liquid
+7720-39-0,2162,2-Aminoimidazole,2-氨基咪唑,,adamas,100mg,3-5,83.09,1.313,solid
+7722-76-1,2163,Ammonium phosphate monobasic,磷酸二氢铵,,3A,100g,6-3,115.03,1.02,solid
+772-38-3,2164,4-(tert-Butyl)phenylacetylene,4-叔丁基苯基乙炔,,adamas,5g,3-2,158.24,0.877,liquid
+7727-15-3,2165,Aluminium bromide,溴化铝,,adamas,5g,gR-催化剂,266.69,3.205,solid
+7727-15-3,2166,Aluminium bromide,三溴化铝,,adamas,5g,R3,266.69,3.205,solid
+7727-21-1,2167,Potassium persulfate,过硫酸钾,,adamas,100g;0,4-1a;6-2,270.32,2.47,solid
+773-64-8,2168,Mesitylene-2-sulfonyl chloride,"2,4,6-三甲基苯磺酰氯",,安耐吉,25g,1-5-4,218.7,1.4386,solid
+773-99-9,2169,1-Naphthaleneethanol,1-萘乙醇,,adamas,25g,2-2,172.22,0.99,solid
+774-65-2,2170,BENZOIC ACID TERT-BUTYL ESTER,苯甲酸叔丁酯,,adamas,5g,2-4,178.23,1,liquid
+77-48-5,2171,"1,3-Dibromo-5,5-dimethylhydantoin",二溴海因,,adamas,25g,4-2-2,285.92,1,solid
+7751-38-4,2172,Diisopropyldichlorosilane,二异丙基二氯硅烷,,adamas,25g,3-2,185.17,1.026,liquid
+775304-57-9,2173,Ataluren,阿塔鲁伦,,adamas,1g,3-2,284.24,1.379,solid
+77-55-4,2174,1-Phenylcyclopentanecarboxylic acid,1-苯基-1-环戊烷甲酸,,adamas,5g,1-4-1,190.24,1.0486,solid
+7757-83-7,2175,Sodium sulfite,无水亚硫酸钠,,general,500g,6-2,126.04,2.63,solid
+7758-80-7,2176,Monosodium phosphate,无水磷酸二氢钠,,adamas,500,4-2b,119.98,,solid
+7758-88-5,2177,Cerium(III) fluoride,氟化铈,,adamas,5g,gR-催化剂,197.1112096,6.16,solid
+7758-89-6,388,Cuprous chloride,氯化亚铜,,毕得,100g,D3,99,1.15,solid
+7758-94-3,2178,Ferrous chloride,氯化亚铁,,adamas,5g,gR-催化剂,126.75,3.16,solid
+7758-98-7,2179,Copper(II) sulfate,硫酸铜,,3A,500g,5-2,159.61,3.603,solid
+7758-99-8,2180,Copper sulfate pentahydrate,"硫酸铜,五水合物",,adamas,500g,6-3,249.68,2.284,solid
+776-04-5,2181,2-(Trifluoromethyl)benzenesulfonyl chloride,2-(三氟甲基)苯-1-磺酰氯,,安耐吉,5g,R3,244.62,1.585,liquid
+776-75-0,2182,1-BENZOYLPIPERIDINE,苯酰氮苯烷,,adamas,1g,4-4-1,189.25,1.0356,solid
+776-76-1,2183,DIPHENYLMETHYLSILANE,二苯甲基硅烷,,adamas,25g,3-2,198.34,0.995,liquid
+7772-98-7,2184,Sodium thiosulfate,硫代硫酸钠,,毕得,500g,4-2a,158.11,1.01,solid
+7775-27-1,2185,Sodium persulfate,过硫酸钠,,安耐吉,500g,6-2,238.1,2.4,solid
+7775-41-9,2186,Silver fluoride,氟化银(I),,adamas,1g,D2,126.87,5.852,solid
+77758-51-1,2187,Methyl 5-hexynoate,5-己炔酸甲酯,,energy,5g,2-2A,126.15,0.96,liquid
+7778-53-2,2188,Potassium phosphate tribasic,磷酸三钾,,毕得,500g,6-2,212.266261,2.564,solid
+7782-61-8,2189,Ferric nitrate nonahydrate,硝酸铁(III) 九水合物,,阿拉丁,25g,D-3,404.0,1.68,solid
+7783-20-2,2190,Ammonium sulfate,硫酸铵,,安耐吉,500g,4-2c,132.14,1.77,solid
+7783-28-0,2191,Ammonium phosphate dibasic,磷酸氢二铵,,3A,500g,6-3,132.06,1.203,solid
+7783-90-6,2192,Silver chloride,氯化银,,adamas,5g,D2,143.32,5.56,solid
+7786-30-3,2193,Magnesium chloride,氯化镁,,adamas,25g,6-1,95.21,2.32,solid
+7787-60-2,2194,Bismuth Chloride,氯化铋,,adamas,25g;1g,D2,315.34,4.75,solid
+7787-69-1,2195,Caesium bromide,溴化铯,,adamas,1g,6-1,212.81,4.44,solid
+7787-70-4,2196,Cuprous bromide,溴化亚铜,,3A,100g,D3,143.45,4.71,solid
+7789-19-7,2197,Copper(II) fluoride,氟化铜,,adamas;3A,1g;5g,2-4c;D2-2A,101.54,4.23,solid
+7789-20-0,2198,Deuterium oxide,重水,,安耐吉,100g,4-4A;D1-3A,20.03,1.107,liquid
+7789-23-3,2199,Potassium fluoride,氟化钾,,adamas,500g,6-2,58.1,2.48,solid
+7789-24-4,2200,Lithium fluoride,氟化锂,,麦克林,25g,6-1,25.94,2.64,solid
+7789-43-7,2201,Cobalt(II) bromide,无水溴化钴,,毕得,25g,gR-催化剂,218.74,4.909,solid
+7789-45-9,2202,Copper(II) bromide,溴化铜,,adamas,25g,gR-催化剂,223.35,4.77,solid
+7789-48-2,2203,magnesium bromide,溴化镁,,adamas,250mg,6-1,184.11,3.72,solid
+7789-49-3,2204,Nickel(II) bromide trihydrate,溴化镍(II)三水合物,,安耐吉,5g,gR-催化剂,236.52,5.098,solid
+7789-60-8,2205,Phosphorus tribromide,三溴化磷,,安耐吉,500g,3-3,270.69,2.88,liquid
+7790-28-5,2206,Sodium periodate,高碘酸钠,,安耐吉;adamas,500g;100g,6-2,215.91,3.865,solid
+7790-86-5,2207,Cerous chloride,"氯化铈,无水",,毕得,25g,D1,246.48,3.97,solid
+7790-86-5,2208,CERIUM(III) CHLORIDE,三氯化铈,,阿拉丁,25g,gR-催化剂,246.48,3.97,solid
+7790-87-6,2209,Cerium(III) iodide,水合碘化铈,,毕得,1g,gR-催化剂,520.83,,solid
+7790-99-0,2210,Iodine monochloride,一氯化碘,,adamas,25g,1-2B;R1,162.36,3.24,solid
+7791-13-1,2211,Cobalt(II) chloride hexahydrate,"氯化钴,六水",,3A,100g,D4,147.85,3.35,solid
+7791-18-6,2212,Magnesium chloride hexahydrate,"氯化镁,六水",,安耐吉,500g,6-1,203.3,1.569,solid
+7791-20-0,2213,Nickel chloride hexahydrate,"氯化镍,六水",,adamas;安耐吉,100g,D2;D2-2A,237.69,1.92,solid
+7797-81-1,2214,"N-Hydroxy-1,8-naphthalimide","N-羟基-1,8-萘二甲酰亚胺",,adamas,5g,R9,213.19,1.2911,solid
+782495-18-5,2215,N-[(2S)-2-Pyrrolidinylmethyl]-trifluoromethanesulfonamide,N-[(2S)-2-吡咯烷甲基]-三氟甲磺酰胺,,adamas,100mg,D1-2A,232.22,1.377,solid
+78385-26-9,2216,3-Bromomethyl-3-methyloxetane,3-溴甲基-3-甲基-1-氧杂环丁烷,,adamas,1g,1-3A,165.03,1.438,solid
+78-39-7,2217,Triethyl Orthoacetate,原乙酸三乙酯,,安耐吉,500ml,4-1A,162.23,0.885,liquid
+784-50-9,2218,9-Fluorenone-2-carboxylic Acid,9-芴酮-2-羧酸,,adamas,250mg,1-4-5,224.21,1.2337,solid
+78-59-1,2219,Isophorone,异佛尔酮,,adamas,25g,3-4,138.21,0.923,liquid
+78-67-1,2220,"2,2'-azobis(2-methylpropionitrile)",偶氮二异丁腈,,安耐吉,25g,R3,164.21,1.11,solid
+78704-49-1,2221,(4-Chlorophenylethynyl)trimethylsilane,(4-氯苯乙炔基)三甲基硅烷,,adamas,1g,3-4A,208.76,1.03,solid
+78-70-6,2222,linalool,芳樟醇,,adamas,25ml,2-2,154.25,0.87,liquid
+787618-22-8,2223,"2-DICYCLOHEXYLPHOSPHINO-2',6'-DIISOPROPOXYBIPHENYL","2-双环已基膦-2 ',6'-二异丙氧基联苯",,毕得,5g,gR-配体,466.64,,solid
+787-69-9,2224,"4,4'-Diacetylbiphenyl","4,4'-二乙酰联苯",,adamas,1g,2-3,238.28,1.0981,solid
+78-80-8,2225,2-Methyl-1-buten-3-yne,2-甲基-1-丁烯-3-炔,,安耐吉;adamas,5ml,3-2;L6,66.1,0.695,liquid
+78888-18-3,2226,tert-Butyl N-allylcarbamate,N-烯丙基氨基甲酸叔丁酯,,adamas,25g,4-4-1,157.21,0.938,solid
+789-25-3,2227,Triphenylsilane,三苯基硅烷,,adamas,25g,R1,260.41,,solid
+79060-88-1,2228,"Sodium Tetrakis[3,5-bis(trifluoromethyl)phenyl]borate Hydrate","四(3,5-二(三氟甲基)苯基)硼酸钠",,adamas,5g,6-2,886.2,,solid
+791-31-1,2229,Triphenylsilanol,三苯基硅醇,,adamas,5g,3-2,276.4,1.13,solid
+791616-55-2,2230,"(R)-(-)-3,3'-BIS(TRIPHENYLSILYL)-1,1'-BINAPHTHYL-2,2'-DIYL HYDROgENPHOSPHATE, 95%","R-3,3'-二(三苯基硅基)联萘酚膦酸酯",,adamas,250mg,gR-配体,865.07,1.32,solid
+791616-63-2,2231,"(11bR)-4-hydroxy-2,6-bis[2,4,6-tris(1-methylethyl)phenyl]-dinaphtho[2,1-d:1',2'-f][1,3,2]dioxaphosphepin 4-oxide","(R)-3,3'-双(2,4,6-三异丙基苯基)-1,1'-联萘-2,2'-双磷酸氢酯",,adamas,5g,gR-配体,752.98,1.17,solid
+79-29-8,2232,"2,3-Dimethylbutane","2,3-二甲基丁烷",,adamas,5ml,1-5-2,86.18,0.662,liquid
+79-33-4,2233,L(+)-Lactic acid,L-乳酸,,adamas,2.5kg,溶剂柜,90.08,1.206,solid
+79-34-5,2234,"1,1,2,2-Tetrachloroethane","1,1,2,2-四氯乙烷",,安耐吉,100g,1-2-1,167.85,1.586,liquid
+79-37-8,2235,Oxalyl chloride,草酰氯,,安耐吉;adamas,25ml;100g,1-5-3;R4,126.93,1.5,liquid
+79397-50-5,2236,H-DL-PRO-OME HCL,DL-脯氨酸甲酯盐酸盐,,adamas,25g,L6,165.62,,solid
+79-44-7,2237,Dimethylcarbamoyl Chloride,二甲氨基甲酰氯,,adamas,100ml,1-5-3,107.54,1.168,liquid
+79839-49-9,2238,2-Bromoisophthalaldehyde,"2-溴苯-1,3-二甲醛",,adamas,25g,1-3-4,213.03,1.652,solid
+8000-41-7,2239,(alpha-terpineol;Terpineol),松油醇,,adamas,25g,2-2;3-4,154.25,0.934,liquid
+80029-43-2,2240,"1H-1,2,3-benzotriazol-1-ol hydrate",1-羟基苯并三唑水合物,,安耐吉,100g,3-1B,153.14,,solid
+80194-69-0,2241,5-(Trifluoromethyl)-2-pyridinecarboxylic acid,5-三氟甲基吡啶-2-羧酸,,adamas,5g,1-5-1,191.11,1.484,solid
+80-48-8,2242,Methyl p-Toluenesulfonate,对甲苯磺酸甲酯,,安耐吉,25g,3-4,186.23,1.234,solid
+80-70-6,2243,Tetramethylguanidine,四甲基胍 (Tmg),,adamas,100ml,4-2,115.18,0.916,liquid
+80-73-9,2244,"1,3-Dimethyl-2-imidazolidinone","1,3-二甲基-2-咪唑烷酮",,adamas,100ml,4-4-2,114.15,1.056,liquid
+80-97-7,2245,Dihydrocholesterol,二氢胆固醇,,therom,5g,3-2,388.68,0.9506,solid
+811-51-8,2246,sodium ethanethiolate,乙硫醇钠,,adamas,5g,6-2,85.12,,solid
+811-68-7,2247,trifluoromethanethiol silver,三氟甲烷硫醇银,,adamas,1g,D2,209.94,,solid
+81-23-2,2248,Dehydrocholic Acid,去氢胆酸,,adamas,5g,3-2,402.53,1.0687,solid
+81290-20-2,2249,Trimethyl(trifluoromethyl)silane,(三氟甲基)三甲硅烷,,adamas,25g,3-2,142.2,0.962,liquid
+81-30-1,2250,"1,4,5,8-Naphthalenetetracarboxylic dianhydride","1,4,5,8-萘四甲酸酐",,麦克林,25g,2-4,268.18,1.5122,solid
+813-77-4,2251,Dimethyl Phosphorochloridate,"O,O-二甲基磷酰氯",,adamas,5g,L2,144.49,1.34,liquid
+814-68-6,2252,Acryloyl Chloride,丙烯酰氯,,adamas,100g,R1,90.51,1.114,solid
+81-84-5,2253,"1,8-Naphthalic anhydride","1,8-萘二甲酸酐",,adamas,100g,2-4,198.17,1.2571,solid
+818-88-2,2254,SEBACIC ACID MONOMETHYL ESTER,癸二酸单甲酯,,adamas,5g,2-4,216.27,0.9825,solid
+821-09-0,2255,4-Penten-1-ol,4-戊烯-1-醇,,adamas,5g,2-2,86.13,0.834,liquid
+821-41-0,2256,5-Hexen-1-ol,5-己烯-1-醇,,adamas,5g,3-4,100.16,0.834,liquid
+824395-67-7,2257,"(+)-1,2-Bis((2S,5S)-2,5-diphenylphospholano)ethane","(+)-1,2-双((2S,5S)-2,5-二苯基膦)乙烷",,adamas,100mg,3-3,506.61,,solid
+824-94-2,2258,4-Methoxybenzylchloride,4-甲氧基氯苄,,adamas,100g;25g,gL-R;L2;R6,156.61,1.155,liquid
+824-98-6,2259,3-Methoxybenzyl Chloride,3-甲氧基氯苄,,adamas,5g,R2,156.61,1.078,solid
+826-55-1,2260,2-Phenylisobutyric Acid,2-甲基-2-苯基丙酸,,adamas,5g,1-4-2,164.2,1.089,solid
+82671-06-5,2261,"2,6-DICHLORO-5-FLUORONICOTINIC ACID","2,6-二氯-5-氟烟酸",,adamas,5g,1-4-5,209.99,,solid
+826-74-4,2262,1-Vinylnaphthalene,1-乙烯基萘,,安耐吉,10g,L6,154.21,1.04,solid
+827-52-1,2263,Cyclohexylbenzene,环己基苯,,adamas,25ml,1-5-2,160.26,0.95,liquid
+828-51-3,2264,1-Adamantanecarboxylic acid,1-金刚烷甲酸,,adamas,50g,1-4-1,180.24,0.9976,solid
+829-85-6,2265,Diphenylphosphine,二苯基膦,,adamas,100g,R7,186.19,1.07,liquid
+830-96-6,2266,3-Indolepropionic acid,3-吲哚丙酸,,adamas,25g,1-4-1,189.21,0.96,solid
+83-13-6,2267,Diethyl Phenylmalonate,苯基丙二酸二乙酯,,energy;adamas,100g,2-4,236.26,1.095,liquid
+83-33-0,2268,1-Indanone,1-茚酮,,安耐吉,25g,2-3,132.16,1.103,solid
+83-34-1,2269,3-Methylindole,3-甲基吲哚,,安耐吉,5g,4-2-2,131.17,1.0111,solid
+836-43-1,2270,4-Benzyloxybenzyl Alcohol,4-苄氧基苄醇,,adamas,5g,2-2,214.26,1.0781,solid
+84358-13-4,2271,N-BOC-4-Piperidinecarboxylic acid,1-Boc-4-哌啶甲酸,,adamas,5g,1-4-2,229.27,1.164,solid
+845714-30-9,2272,L-cyclohexylglycinol,L-环己基甘氨醇,,adamas,25g,2-2,143.23,0.999,solid
+84-58-2,2273,"2,3-Dichloro-5,6-dicyano-1,4-benzoquinone","2,3-二氯-5,6-二氰基苯醌(DDQ)",,adamas,5g,2-3,227.0,1.75,solid
+84-65-1,2274,Anthraquinone,蒽醌,,adamas,100g,R2,208.21,1.438,solid
+85017-82-9,2275,lithium(1+) ion hydrate bromide,一水合溴化锂,,adamas;安耐吉,100g,6-1;D2-4A,104.86,3.464,solid
+85331-33-5,2276,"2-Cyano-3,5-dichloropyridine","2-氰基-3,5-二氯吡啶",,adamas,5g,1-2-1,173.0,1.49,solid
+85342-65-0,2277,"4,5,6,7-tetrachloro-2-hydroxyisoindole-1,3-dione",N-羟基四氯邻苯二甲酰亚胺,,adamas,5g,R3,300.91,2.041,solid
+85-41-6,2278,Phthalimide,邻苯二甲酰亚胺,,安耐吉;百灵威,100g,4-4-2,147.13,1.21,solid
+85-44-9,2279,Phthalic anhydride,苯酐,,adamas,100g,2-4,148.12,1.53,solid
+85-46-1,2280,1-Naphthalenesulfonyl Chloride,1-萘磺酰氯,,安耐吉,5g,R3,226.68,1.3661,solid
+855-38-9,2281,Tris(4-methoxyphenyl)phosphine,三(4-甲氧基苯基)膦,,毕得,5g,gR-配体,352.36,1.1352,solid
+85698-56-2,2282,"4,4-DiMethylaMino-2,2-bipyridine","4,4‘-二甲氨基-2,2'-联吡啶",,adamas,100mg,gL,242.32,1.115,solid
+85711-13-3,2283,(2R)-2-amino-2-cyclohexylethanol,D-环己基甘氨醇,,adamas,5g,2-2,143.23,0.999,solid
+85977-52-2,2284,"(1S)-1,2,3,4-Tetrahydronaphthalene-1-carboxylic acid","(S)-1,2,3,4-四氢-1-萘甲酸",,adamas,1g,1-4-5,176.21,1.186,solid
+86308-26-1,2285,Hexylboronic acid pinacol ester,己基硼酸频哪酯,,adamas,1g,2-4,212.14,1.167,liquid
+86-52-2,2286,1-(Chloromethyl)naphthalene,1-(氯甲基)萘,,adamas,25g,1-2-2,176.64,1.18,solid
+865-33-8,2287,"Methanol, potassium salt",甲醇钾,,adamas,100g,6-2,70.13,0.95,liquid
+865-34-9,2288,Lithium methoxide,甲醇锂,,adamas,5g,6-1,37.97,0.85,solid
+865-47-4,2289,Potassium tert-butoxide,叔丁醇钾,,adamas;毕得,25g;100g,2-2;6-2;D2-3A,112.21,0.91,solid
+865-48-5,2290,Sodium tert-butoxide,叔丁醇钠,,adamas,500g;25g,6-2,96.1,1.104,solid
+865-50-9,2291,Iodomethane-d3,氘代碘甲烷,,adamas,5g,R7,144.96,2.33,liquid
+86-59-9,2292,8-Quinolinecarboxylic acid,8-喹啉羧酸,,安耐吉,5g,1-4-5,173.17,1.2427,solid
+866081-62-1,2293,"(R,R)-(-)-2,3-Bis(t-butylmethylphosphino)quinoxaline","(R,R)-(-)-2,3-双(T-叔丁基甲基磷)喹喔啉",,adamas,100mg,gR-配体,334.38,,solid
+866-97-7,2294,Tetrapentylammonium bromide,四戊基溴化铵,,adamas,5g,7-2,378.48,0.92333,solid
+86-74-8,2295,Carbazole,咔唑,,adamas,100g,4-2-3,167.21,1.1,solid
+868-85-9,2296,Dimethyl phosphite,亚磷酸二甲酯,,adamas,100ml,2-4,110.05,1.2,liquid
+870195-94-1,2297,"2-CHLOROPHENYLBORONIC ACID, PINACOL ESTER",2-氯苯硼酸频哪醇酯,,adamas,1g,2-4,238.52,1.1,liquid
+870-63-3,2298,"3,3-Dimethylallyl bromide",1-溴-3-甲基-2-丁烯,,adamas,25g,R2,149.03,1.29,liquid
+870987-63-6,2299,hexafluorophosphate,"(4,4'-二叔丁基-2,2'-联吡啶)二[3,5-二氟-2- [5-三氟甲基-2-吡啶基 - KN)苯基KC] IRID",,BLD,5g,gR-催化剂,1121.91,,solid
+87100-15-0,2300,Cyclohexylboronic acid pinacol ester,环己烷硼酸频那醇酯,,adamas,1g,2-4,210.12,0.93,liquid
+871126-33-9,2301,"1,3-Bis(1-adamantyl)-4,5-dihydroimidazolium chloride, min. 97%","1,3 - 双(1 - 金刚烷基)-4,5 - 二氢咪唑氯化物",,毕得,100mg,2-5c,375.0,,solid
+871-70-5,2302,Octadecanedioic Acid,十八烷二酸,,adamas,5g,1-4-3,314.46,0.998,solid
+87199-17-5,2303,4-Formylphenylboronic acid,4-甲酰基苯硼酸,,adamas,25g,2-4,149.94,1.24,solid
+872-05-9,2304,1-Decene,正癸烯,,adamas,25ml,3-4,140.27,0.741,liquid
+873-66-5,2305,TRANS-BETA-METHYLSTYRENE,甲基苯乙烯,,安耐吉,1g,L6,118.18,0.911,liquid
+873-73-4,2306,4-Chlorophenylacetylene,4-氯苯乙炔,,adamas,5g,3-2,136.58,1.24,solid
+873-77-8,2307,4-chlorophenylmagnesium bromide,4-氯苯基溴化镁,,安耐吉,100ml,R5,215.76,0.887,liquid
+87413-09-0,2308,Dess-martin periodinane,戴斯-马丁氧化剂,,adamas,100g,R2,424.14,1.369,solid
+874-61-3,2309,4-Oxocyclohexanecarboxylic acid,4-环己酮羧酸,,adamas,5g,1-4-3,142.15,1.233,solid
+874-86-2,2310,4-(Chloromethyl)benzonitrile,4-氰基苄氯,,adamas,25g,1-2-2,151.59,1.18,solid
+874-87-3,2311,4-(Methylthio)benzyl chloride,4-(甲基硫代)苄氯,,adamas,1g,R2,172.68,1.17,liquid
+874948-63-7,2312,(S)-TRIP,"(S)-3,3'-双(2,4,6-三异丙基苯基)-1,1'-二-2-萘酚环一磷酸酯",,毕得,250mg,gR-配体,752.96,1.17,solid
+875-30-9,2313,"1,3-Dimethylindole","1,3-二甲基吲哚",,adamas,250mg,2-3B,145.2,1.0472,solid
+876-08-4,2314,4-Chloromethylbenzoyl chloride,4-(氯甲基)苯甲酰氯,,adamas,25g,R2,189.04,1.2979,solid
+87-62-7,2315,"2,6-Dimethylaniline","2,6-二甲基苯胺",,adamas,25g,3-5,121.18,0.984,liquid
+878-00-2,2316,4-Acetoxybenzaldehyde,4-乙酰氧基苯甲醛,,adamas,5g,3-2A,164.16,1.168,solid
+880-52-4,2317,N-(1-Adamantyl)acetamide,乙酰金刚烷胺,,adamas,5g,4-4-1,193.29,0.9854,solid
+88-12-0,2318,N-Vinyl-2-pyrrolidone,N-乙烯基吡咯烷酮,,安耐吉,25g,3-4,111.14,1.04,liquid
+88-13-1,2319,3-Thiophenezoic acid,3-噻吩甲酸,,adamas,1g,1-4-5,128.15,1.305,solid
+88-14-2,2320,2-Furoic acid,糠酸,,adamas,100g,1-5-1,112.08,1.324,liquid
+88-15-3,2321,2-Acetylthiophene,2-乙酰基噻吩,,adamas,25g,2-3,126.18,1.168,liquid
+883-99-8,2322,methyl 3-hydroxy-2-naphthoate,3-羟基-2-萘甲酸甲酯,,adamas,25g,4-3-3,202.21,1.1868,solid
+885462-88-4,2323,"1,1'-spirobi[1H-indene]-7,7'-diamine, 2,2',3,3'-tetrahydro-, (1S)-","(S)- 1,1'-螺旋联茚-7,7'-二氨",,BLD,250mg,R4,250.34,,solid
+88-65-3,2324,2-Bromobenzoic aicd,2-溴苯甲酸,,adamas,100g,1-4,201.02,1.929,solid
+887144-94-7,2325,"1-(trifluoromethyl)-1,2-benziodoxol-3(1H)-one","1-(三氟甲基)-1,2-苯碘酰-3(1H)-酮",,毕得,5g,L2,316.02,,solid
+887144-97-0,2326,"1,3-Dihydro-3,3-dimethyl-1-(trifluoromethyl)-1,2-benziodoxole, Tognis Reagent","3,3-二甲基-1-(三氟甲基)-1,2-苯并碘氧杂戊环",,adamas,1g,R2,330.09,,solid
+887583-90-6,2327,(2-(Trifluoromethyl)-4-bromopyridine;4-BROMO-2-TRIFLUOROMETHYLPYRIDINE),2-三氟甲基-4-溴吡啶,,安耐吉;adamas,5g;1g,1-3-3;gRc;R3,225.99,1.707,liquid
+887757-25-7,2328,4-Bromo-3-cyanobenzoic acid,4-溴-3-氰基苯甲酸,,adamas,250mg,,226.03,1.82,solid
+89343-06-6,2329,Triisopropylsilylacetylene,三异丙基硅基乙炔,,adamas,5ml,3-2,182.38,0.813,solid
+89381-13-5,2330,2-AMINO CYCLOPENTANOL,2-氨基环戊醇,,安耐吉,5g,R9,101.15,1.0617,liquid
+89809-64-3,2331,5-Chloro-2-cyanopyridine,5-氯吡啶-2-甲腈,,adamas,25g,1-2-1,138.55,1.33,solid
+89972-77-0,2332,"4'-(4-Methylphenyl)-2,2':6',2''-terpyridine","4'-(4-甲基苯基)-2,2:6',2''-三联吡啶",,毕得,1g,gR-配体,323.39,1.149,solid
+90-04-0,2333,o-Anisidine,邻甲氧基苯胺,,adamas,25g,3-5,123.15,1.092,liquid
+9004-73-3,2334,Polymethylhydrosiloxane,聚(甲基氢硅氧烷),,adamas,100g,3-2,115.22574,1.006,liquid
+900-91-4,2335,"3,3,3-Triphenylpropionic Acid","3,3,3-三苯基丙酸",,adamas,5g,1-4-3,302.37,1.161,solid
+90224-73-0,2336,"5-bromo-2-methyl-1H-isoindole-1,3(2H)-dione",4-溴-N-甲基邻苯二甲酰亚胺,,源叶,1g,1-3-3,240.05,1.729,solid
+90-27-7,2337,2-phenylbutyric acid,2-苯基丁酸,,adamas,25g,1-4-1,164.2,0.62,solid
+90-41-5,2338,2-aminobiphenyl,邻氨基联苯,,安耐吉,5g,3-5,169.22,1.44,solid
+90-96-0,2339,"4,4'-Dimethoxybenzophenone","4,4'-二甲氧基二苯甲酮",,adamas,5g,2-3,242.27,1.1515,solid
+90965-06-3,2340,Dimethyl (1-diazo-2-oxopropyl)phosphonate,(1-重氮基-2-氧代丙基)膦酸二甲酯,,adamas,5g,R6;R8,192.11,1.28,liquid
+91-19-0,2341,Quinoxaline,喹喔啉,,安耐吉,25g,4-2-3,130.15,1.124,solid
+91-20-3,2342,Naphthalene,萘,,TCI,25g,1-5-2,128.17,0.99,solid
+91-21-4,2343,"1,2,3,4-Tetrahydroisoquinoline","1,2,3,4-四氢异喹啉",,安耐吉,5g,3-3A;4-2-2,133.19,1.064,liquid
+91-22-5,2344,Quinoline,喹啉,,安耐吉,100g,4-2-1,129.16,1.093,liquid
+91419-52-2,2345,1-Boc-4-cyanopiperidine,N-Boc-4-氰基哌啶,,adamas,1g,4-2-3,210.27,1.07,solid
+91-44-1,2346,7-Diethylamino-4-methylcoumarin,7-二乙氨基-4-甲基香豆素,,adamas,25g,3-2,231.29,1.122,solid
+91-56-5,2347,Isatin,靛红,,毕得,100g,2-3,147.13,1.3067,solid
+91-57-6,2348,2-Methylnaphthalene,2-甲基萘,,adamas,25g,1-5-2,142.2,1.01,solid
+91-59-8,2349,2-Naphthylamine,2-萘胺,,安耐吉,5g,3-5;3-5C,143.19,1.061,solid
+917-23-7,2350,TPP,四苯基卟啉,,energy,5g,4-2-2,614.74,1.5288,solid
+917-54-4,2351,Methyllithium,甲基锂,,安耐吉;adamas,100ml,R5,21.98,0.85,solid
+917-92-0,2352,"3,3-Dimethyl-1-butyne","3,3-二甲基-1-丁炔",,adamas,25ml,R1,82.14,0.667,liquid
+920-46-7,2353,Methacryloyl chloride,甲基丙烯酰氯,,安耐吉;adamas,25g,1-5-3;L6,104.53,1.08,liquid
+920-66-1,2354,"1,1,1,3,3,3-Hexafluoro-2-propanol",六氟异丙醇,,安耐吉,100g,2-2,168.04,1.596,liquid
+92149-07-0,2355,"4,7-Dimethoxy-1,10-phenanthroline","4,7-二甲氧基-1,10-菲咯啉",,毕得,1g,gR-配体,240.26,1.25,solid
+92-44-4,2356,"2,3-Dihydroxynaphthalene","2,3-二羟基萘",,adamas,25g,4-3-3,160.17,1.0924,solid
+92511-12-1,2357,tert-Butyl(4-iodobutoxy)dimethylsilane,叔丁基(4-碘丁氧基)二甲基硅烷,,adamas,1g,R2,314.28,1.214,liquid
+92-52-4,2358,Biphenyl,联苯,,安耐吉,100g,1-5-2,154.21,0.992,solid
+925-90-6,2359,Ethylmagnesium bromide,乙基溴化镁,,adamas,100ml;500ml,R4;R5,133.27,1.02,liquid
+92-66-0,2360,4-Bromobiphenyl,4-溴代联苯,,adamas,100g,75-62-7,233.1,0.9327,solid
+,2458,Carbon Nanotube,羧基化多壁碳纳米管,,adamas,5g,7-1,12.01,1.7,solid
+92-69-3,2361,4-Phenylphenol,对羟基联苯,,adamas,100g,4-3-3,170.21,1.0149,solid
+927-74-2,2362,3-Butyn-1-ol,3-丁炔-1-醇,,adamas;安耐吉,100ml;25ml,3-2,70.09,0.926,liquid
+92-82-0,2363,Phenazine,吩嗪,,安耐吉,5g,4-2-2,180.21,1.1836,solid
+92-85-3,2364,Thianthrene,噻蒽,,adamas,25g,3-3bb,216.32,1.442,solid
+928-90-5,2365,5-Hexyn-1-ol,5-己炔-1-醇,,adamas,5ml,3-2,98.14,0.89,liquid
+928-97-2,2366,TRANS-3-HEXEN-1-OL,反式-3-己烯-1-醇,,adamas,5g,2-3A,100.16,0.817,solid
+929097-93-8,2367,"S-4-oxide-4-hydroxy-2,6-di-1-naphthalenyl-Dinaphtho[2,1-d:1',2'-f][1,3,2]dioxaphosphepin","(S)-3,3'-双(1-萘基)-1,1'-联萘酚膦酸酯",,安耐吉,1g;250mg,gR-配体;R3,600.61,1.44,solid
+92-92-2,2368,4-Biphenylcarboxylic acid,4-苯基苯甲酸,,adamas,5g;25g,1-4-5,198.22,1.1184,solid
+93-15-2,2369,Methyl eugenol,丁香酚甲醚,,adamas,25ml,3-4,178.23,1.036,liquid
+931-87-3,2370,cyclooctene,环辛烯,,adamas,25ml,3-4,110.2,0.848,liquid
+932-87-6,2371,(Bromoethynyl)benzene,(溴乙炔)苯,,adamas,100mg,R7,181.03,1.51,liquid
+933992-49-5,2372,"(R)-4-Isopropyl-2-(quinolin-2-yl)-4,5-dihydrooxazole","(R)-4-异丙基-2-(喹啉-2-基)-4,5-二氢噁唑",,BLD,1g,3-3,240.3,1.18,solid
+934201-93-1,2373,"R-4-oxide-8,9,10,11,12,13,14,15-octahydro-4-hydroxy-2,6-di-9-phenanthrenyl-Dinaphtho[2,1-d:1',2'-f][1,3,2]dioxaphosphepin","(R)-3,3'-双(9-菲基)-5,5',6,6',7,7',8,8'-八氢-1,1'-联萘酚磷酸酯",,毕得,100mg,R3,708.79,1.4,solid
+934-60-1,2374,6-Methylpyridine-2-carboxylic Acid,6-甲基-2-吡啶甲酸,,安耐吉,25g,1-5-1,137.14,1.23,solid
+934664-41-2,2375,"1-Azetidinecarboxylic acid, 3-methylene-, 1,1-dimethylethyl ester",1-Boc-3-亚甲基氮杂环丁烷,,adamas,5ml,3-4,169.22,1.02,liquid
+935-02-4,2376,"2-Propynenitrile, 3-phenyl- (9CI)",3-苯基丙炔腈,,adamas,250mg,R1,127.14,1.09,solid
+935-13-7,2377,3-(2-Furyl)propanoic acid,3-(2-呋喃)丙酸,,adamas,1g,1-4-3,140.14,1.2127,solid
+935-28-4,2378,"2,6-diethylpyridine","2,6-二乙基吡啶",,adamas,1g,4-2-1,135.21,0.9354,solid
+93-58-3,2379,Methyl Benzoate,苯甲酸甲酯,,adamas,25g,2-4,136.15,1.088,liquid
+936727-05-8,2380,Lumacaftor (VX-809),鲁玛卡托,,adamas,250mg,3-2,452.41,1.51,solid
+937-14-4,2381,3-Chloroperoxybenzoic acid,间氯过氧苯甲酸,,adamas,100g,R6,172.57,0.56,solid
+937-41-7,2382,Phenyl Acrylate,丙烯酸苯酯,,adamas,分装,R2,148.16,1.076,liquid
+938-18-1,2383,"2,4,6-Trimethylbenzoyl chloride","2,4,6-三甲基苯甲酰氯",,adamas,25g,1-5-3,182.65,1.095,liquid
+938-33-0,2384,8-Methoxyquinoline,8-甲氧基喹啉,,adamas,1g,R1,159.18,1.034,solid
+93-89-0,2385,Ethyl benzoate,苯甲酸乙酯,,adamas,25g,2-4,150.17,1.045,liquid
+939-52-6,2386,4-Chlorobutyrophenone,4-氯苯丁酮,,adamas,5g,1-2-1,182.65,1.137,liquid
+93-97-0,2387,Benzoic anhydride,苯甲酸酐,,adamas,100g,2-4,226.23,1.199,solid
+93-99-2,2388,Phenyl Benzoate,苯甲酸苯酯,,adamas,5g,2-4,198.22,1.235,solid
+939-97-9,2389,4-tert-Butylbenzaldehyde,对叔丁基苯甲醛,,adamas,25g,4-3,162.23,0.97,solid
+939-99-1,2390,"alpha'-Chloro-alpha,alpha,alpha-trifluoro-p-xylene",4-(三氟甲基)氯苄,,adamas,5g,1-2-1,194.58,1.315,liquid
+94-02-0,2391,Ethyl Benzoylacetate,苯甲酰乙酸乙酯,,adamas,25g,2-4,192.21,1.11,liquid
+940-31-8,2392,DL-2-phenoxypropionic acid,苯氧丙酸,,adamas,5g,1-4-2,166.17,1.1708,solid
+94041-16-4,2393,"(1R)-[1,1'-binaphthalene]-2,2'-diylbis[1,1-diphenyl-1,1'-Phosphine oxide","(R)-[1,1'-联萘]-2,2'-二基双[1,1-二苯基氧膦]",,安耐吉,100mg,2-2C,654.69,1.3,solid
+941-55-9,2394,Tosyl azide,对甲苯磺酰叠氮,,安耐吉,100g,3-4,197.21,0.9,liquid
+94-36-0,2395,Benzoyl peroxide,过氧化苯甲酰,,adamas,25g,4-4-1,242.23,1.16,solid
+94-46-2,2396,Isoamyl Benzoate,苯甲酸异戊酯,,adamas,25g,4-2,192.25,0.99,liquid
+944836-21-9,2397,"Oxazole, 4-(1,1-dimethylethyl)-2-[2-(diphenylphosphino)-5-(trifluoromethyl)phenyl]-4,5-dihydro-, (4S)-","(S)-4-(叔丁基)-2-(2-(二苯基膦基)-5-(三氟甲基)苯基)-4,5-二氢噁唑",,乐妍,100mg,gR-配体,455.45,,solid
+94497-51-5,2398,Tamibarotene,他米巴罗汀,,adamas,250mg,3-2;L1,351.44,1.154,solid
+945-51-7,2399,Phenyl sulfoxide,二苯基亚砜,,,0,4-4-3,202.27,1.1833,solid
+947-84-2,2400,Biphenyl-2-carboxylic Acid,2-苯基苯甲酸,,安耐吉,5g,1-4-4,198.22,1.1184,solid
+948-65-2,2401,2-Phenylindole,2-苯基吲哚,,adamas,5g,4-2-3,193.24,1.1061,solid
+94928-86-6,2402,Tris(2-phenylpyridinato)iridium(III),"三[2-苯基吡啶-C2,N]铱(III)",,bld,1g,gR-催化剂,654.79,,solid
+94-93-9,2403,"N,N'-Bis(salicylidene)ethylenediamine","N,N'-二水杨醛乙二胺",,毕得,5g,gR-配体,268.31,1.1028,solid
+95-13-6,2404,Indene,茚,,adamas,100g,3-4,116.16,0.996,liquid
+95-15-8,2405,Thianaphthene,苯并噻吩,,adamas,1g,3-1B,134.2,1.149,solid
+951-78-0,2406,2'-deoxyuridine,2’-脱氧尿苷,,adamas,1g,3-2,228.2,1.3705,solid
+95-20-5,2407,2-Methylindole,2-甲基吲哚,,adamas,25g,4-2-2,131.17,1.07,solid
+95-45-4,2408,Dimethylglyoxime,二甲基乙二醛肟,,安耐吉;adamas,100g,2-3;4-2,116.12,1.2829,solid
+95464-05-4,2409,"1,1'-Bis(diphenylphosphino)ferrocene-palladium(II)dichloride dichloromethane complex","1,1'-双(二苯膦基)二茂铁二氯化钯(II)二氯甲烷复合物",,adamas,1g,D2,816.63,1,solid
+95-46-5,2410,2-Bromotoluene,邻溴甲苯,,adamas,100ml,1-3-3,171.03,1.422,liquid
+95-53-4,2411,o-Toluidine,邻甲苯胺,,安耐吉,100g,3-5,107.15,1.008,liquid
+95-54-5,2412,o-Phenylenediamine,邻苯二胺,,安耐吉,100g,3-5,108.14,1.27,solid
+95-55-6,2413,2-Aminophenol,邻氨基苯酚,,adamas,25g,4-3-1,109.13,1.328,solid
+95-56-7,2414,2-Bromophenol,2-溴苯酚,,adamas,25g,1-3-3,173.01,1.492,liquid
+95-68-1,2415,"2,4-Dimethylaniline","2,4-二甲基苯胺",,adamas,25g,3-5,121.18,0.98,liquid
+96-20-8,2416,2-AMINO-1-BUTANOL,2-氨基-1-丁醇,,adamas,25g,2-2,89.14,0.943,liquid
+96-31-1,2417,"1,3-Dimethylurea","1,3-二甲基脲",,adamas,100g,4-4-1,88.11,1.142,solid
+96-33-3,2418,Methyl acrylate,丙烯酸甲酯,,adamas,25ml;25g,2-4;R7,86.089,0.9,liquid
+96-37-7,2419,Methylcyclopentane,甲基环戊烷,,adamas,0,1-5-2,84.16,0.749,liquid
+96-49-1,2420,Ethylene Carbonate,碳酸乙烯酯,,adamas,25g,2-4,88.06,1.321,solid
+97240-79-4,2421,Topiramate,托吡酯,,adamas,25g,R6,339.36,1.336,solid
+97509-75-6,2422,2-Cyano-3-fluoropyridine,2-氰基-3-氟吡啶,,adamas,5g,3-4,122.1,1.24,solid
+97-61-0,2423,2-methylpentanoic acid,2-甲基戊酸,,adamas,25g,1-4-3,116.16,0.931,liquid
+97-95-0,2424,2-Ethyl-1-butanol,2-乙基-1-丁醇,,安耐吉,25ml,2-2,102.17,0.83,liquid
+97-99-4,2425,tetrahydrofurfuryl alcohol,四氢糠醇,,麦克林;安耐吉,100ml,2-2,102.13,1.054,liquid
+98-00-0,2426,Furfuryl Alcohol,糠醇,,adamas,25g,2-2,98.1,1.135,liquid
+98-31-7,2427,"3,4-Dichlorobenzenesulfonyl Chloride","3,4-二氯苯磺酰氯",,adamas,5g,1-2-1,245.51,1.572,liquid
+98327-87-8,2428,1.1'-Binaphthyl-2.2'-diphemyl phosphine,"1,1'-联萘-2,2'-双二苯膦 (BINAP)",,毕得,10g,3-3,622.69,,solid
+98-54-4,2429,4-tert-Butylphenol,对叔丁基苯酚,,安耐吉,200g,1-3-1,150.22,0.908,solid
+98577-44-7,2430,"1,1-Dibromo-2,2-bis(chloromethyl)cyclopropane","1,1-二溴-2,2-二(氯甲基)环丙烷",,adamas,100g,1-3-2,296.82,2.065,solid
+98-59-9,2431,(p-Toluenesulfonyl chloride;Tosyl chloride),对甲苯磺酰氯,,安耐吉;adamas,500g;100g,1-1A;1-5-6;R3,190.65,1.006,solid
+98-60-2,2432,4-Chlorobenzenesulfonyl Chloride,4-氯苯磺酰氯,,安耐吉,25g,1-5-4,211.07,1.5075,solid
+98-68-0,2433,4-Methoxybenzenesulfonyl chloride,对甲氧基苯磺酰氯,,安耐吉,25g,1-5-4,206.65,1.3836,solid
+98-73-7,2434,4-tert-Butylbenzoic Acid,对叔丁基苯甲酸,,adamas,25g;0,1-4-5;1-5-1,178.23,1.045,solid
+98-80-6,2435,Phenylboronic acid,苯硼酸,,adamas,5g,2-4,121.93,1.13,solid
+98-81-7,2436,alpha-Bromostyrene,alpha- 溴苯乙烯,,毕得,5g,R6,183.05,1.41,liquid
+98-82-8,2437,Cumene,异丙基苯,,adamas;安耐吉,100ml,1-5-2,120.19,0.864,liquid
+98-83-9,2438,2-Phenyl-1-propene,2-苯基-1-丙烯,,adamas,100ml,R3,118.18,0.909,liquid
+98-86-2,2439,Acetophenone,苯乙酮,,adamas;安耐吉,100ml,2-3,120.15,1.03,liquid
+98-89-5,2440,Cyelohexanecarboxylic acid,环己基甲酸,,adamas,25g,1-4-1,128.17,1.033,solid
+98-94-2,2441,"N,N-Dimethylcyclohexylamine","N,N-二甲基环己胺",,adamas,100ml,3-5,127.23,0.849,liquid
+98-98-6,2442,2-Picolinic acid,2-吡啶甲酸,,adamas,100g,1-5-1,123.11,1.3147,solid
+99199-60-7,2443,"6-fluoro-3,4-dihydro-2H-1-benzopyran-2-carboxylic acid",6-氟-色满-2-羧酸,,adamas,5g,1-4-1,196.18,1.364,solid
+994-30-9,2444,Chlorotriethylsilane,三乙基氯硅烷,,adamas,0,1-2-1,150.72,0.898,liquid
+994-49-0,2445,Hexaethyldisiloxane,六乙基二硅氧烷,,adamas,1g,3-4A,246.54,0.844,liquid
+996-70-3,2446,Tetrakis(dimethylamino)ethylene,四三(二甲胺基)乙烯,,麦克尔,1g,3-4,200.33,0.861,solid
+99768-12-4,2447,4-Methoxycarbonylphenylboronic,4-甲氧羰基苯硼酸,,bide,10g,2-4,179.97,1.25,solid
+998-30-1,2448,Triethoxysilane,三乙氧基硅烷,,安耐吉,25ml,3-2;3-4A,164.27,0.89,liquid
+998-40-3,2449,Tri-n-butylphosphine,三丁基膦,,adamas,25ml,R6,202.32,0.81,liquid
+99-90-1,2450,1-(4-bromophenyl)ethanone,4-溴苯乙酮,,adamas,5g,1-3,199.04,1.64,solid
+99-94-5,2451,p-Toluic Acid,对甲基苯甲酸,,毕得,5g,1-4-5,136.15,1.06,solid
+99-96-7,2452,4-Hydroxybenzoic acid,对羟基苯甲酸,,adamas,25g,1-4-4,138.12,1.46,solid
+99-98-9,2453,"N,N-Dimethyl-p-phenylenediamine","4-氨基-N,N-二甲基苯胺",,adamas,25g,3-5,136.19,1.09,solid
+99-99-0,2454,4-Nitrotoluene,对硝基甲苯,,安耐吉,25g,4-2-2,137.14,1.392,solid
+999-97-3,2455,"(1,1,1,3,3,3-hexamethyldisilazane;Hexamethyldisilazane)",六甲基二硅氮烷,,安耐吉;adamas,25ml;100g,3-2;3-5,161.39,0.774,liquid
+1122-58-3,374,,4-二甲氨基吡啶,DMAP,毕得,500 g,4-2,122.17,0.906,solid
+75-09-2,378,,二氯甲烷,CH2Cl2,,,,84.93,1.325,liquid
+141-78-6,379,,乙酸乙酯,EtOAc,,,,88.11,0.902,liquid
+68-12-2,380,,"N,N-二甲基甲酰胺",DMF,,,,73.09,0.94,liquid
+75-05-8,381,,乙腈,MeCN,,,,41.05,0.786,liquid
+717-74-8,382,,"1,3,5-三异丙基苯(内标,1mol/L in MeCN)",,,,,,,liquid
+59702-31-7,389,,"N-乙基-2,3-二酮哌嗪",,,,4-4-1,142.16,,solid
+920366-91-2,391,,"N1,N2-双(2-噻吩甲基)-乙二酰胺",,,,4-4-1,280.37,,solid
+127-19-5,392,,"N,N-二甲基乙酰胺",DMA,,,,87.12,0.937,liquid
+67-68-5,393,,二甲基亚砜,DMSO,,,,78.13,1.1,liquid
+123-91-1,394,,"1,4-二氧六环",,,,,88.11,1.034,liquid

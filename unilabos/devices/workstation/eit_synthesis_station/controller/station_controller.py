@@ -5,10 +5,10 @@ from pathlib import Path
 from typing import Any, Callable, Dict, List, Optional, Tuple
 from collections import OrderedDict
 
-from config.constants import TaskStatus,StationState,DeviceModuleStatus, ResourceCode, TraySpec,TRAY_CODE_DISPLAY_NAME
-from config.setting import Settings, configure_logging
-from driver.api_client import ApiClient
-from driver.exceptions import AuthorizationExpiredError, ValidationError
+from unilabos.devices.workstation.eit_synthesis_station.config.constants import TaskStatus,StationState,DeviceModuleStatus, ResourceCode, TraySpec,TRAY_CODE_DISPLAY_NAME
+from unilabos.devices.workstation.eit_synthesis_station.config.setting import Settings, configure_logging
+from unilabos.devices.workstation.eit_synthesis_station.driver.api_client import ApiClient
+from unilabos.devices.workstation.eit_synthesis_station.driver.exceptions import AuthorizationExpiredError, ValidationError
 import re
 import math
 
