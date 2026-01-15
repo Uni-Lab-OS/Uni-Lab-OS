@@ -1477,7 +1477,7 @@ class SynthesisStationController:
     def build_task_payload(self, params: Dict[str, Any], headers: List[str], 
                           data_rows: List[List[Any]], chemical_db: Dict[str, Any]) -> JsonDict:
         """
-        功能:3333333322222222222222222222222210.
+        功能:.
             将结构化的实验数据转换为 AddTask API Payload
         参数:
             params: 实验全局参数 (反应时间、温度等)

@@ -6,16 +6,17 @@ import pandas as pd
 import openpyxl
 from openpyxl import Workbook,load_workbook
 from openpyxl.worksheet.datavalidation import DataValidation
+from openpyxl.workbook.defined_name import DefinedName
 from openpyxl.styles import Font, Alignment
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple
 
 # 引入底层的控制器 (假设在同一目录下)
-from unilabos.devices.workstation.eit_synthesis_station.controller.station_controller import SynthesisStationController
-from unilabos.devices.workstation.eit_synthesis_station.config.setting import Settings, configure_logging
-from unilabos.devices.workstation.eit_synthesis_station.config.constants import ResourceCode, TRAY_CODE_DISPLAY_NAME, TraySpec
+from .controller.station_controller import SynthesisStationController
+from .config.setting import Settings, configure_logging
+from .config.constants import ResourceCode, TRAY_CODE_DISPLAY_NAME, TraySpec
 
-from unilabos.devices.workstation.eit_synthesis_station.driver.exceptions import ValidationError
+from .driver.exceptions import ValidationError,ApiError
 
 logger = logging.getLogger("StationManager")
 
@@ -33,6 +34,7 @@ class StationManager(SynthesisStationController):
         settings = settings or Settings.from_env()
         configure_logging(settings.log_level)
         super().__init__(settings)
+        self.chemical_list = {}
 
     # ---------- 1. 化合物库文件处理 ----------
     def export_chemical_list_to_file(self, output_path: str) -> None:
@@ -192,9 +194,9 @@ class StationManager(SynthesisStationController):
 
                 # 按内容切换字体，表头加粗
                 if idx == 0:
-                    cell.font = Font(name="宋体", bold=True) if _is_chinese(val_str) else Font(name="Arial", bold=True)
+                    cell.font = Font(name="微软雅黑", bold=True)
                 else:
-                    cell.font = Font(name="宋体") if _is_chinese(val_str) else Font(name="Arial")
+                    cell.font = Font(name="微软雅黑")
 
                 cell.alignment = align_center
 
@@ -276,14 +278,13 @@ class StationManager(SynthesisStationController):
 
         # 调用父类生成 Payload
         payload = self.build_batch_in_tray_payload(rows)
-        
+
         if not payload:
             logger.warning("生成的上料数据为空")
             return {}
             
         # 执行上料
-        return payload
-        # return self.batch_in_tray(payload)
+        return self.batch_in_tray(payload)
 
     def _generate_batch_in_tray_template(self, file_path: Path) -> None:
         """
@@ -351,9 +352,14 @@ class StationManager(SynthesisStationController):
             tray_sheet.cell(row=idx, column=1).value = option
         tray_sheet.sheet_state = "hidden"
 
+        # 定义命名区域, 避免跨 sheet 验证被 Excel 写成 x14 扩展
+        options_name = "tray_type_options"
+        options_ref  = f"validation_meta!$A$1:$A${len(tray_display)}"
+        wb.defined_names.add(DefinedName(options_name, attr_text=options_ref))
+
         dv_tray = DataValidation(
             type="list",
-            formula1=f"=validation_meta!$A$1:$A${len(tray_display)}",
+            formula1=f"={options_name}",
             showInputMessage=True,
         )
         ws.add_data_validation(dv_tray)
@@ -402,20 +408,14 @@ class StationManager(SynthesisStationController):
             if not name:
                 continue
 
+            # 小写后的列名
             chemical_db[name] = {
                 "chemical_id": _pick(row, "chemical_id"),
                 "molecular_weight": _pick(row, "molecular_weight", "mw"),
                 "physical_state": str(_pick(row, "physical_state", "state", default="") or "").strip().lower(),
-                # 统一把各种写法都接住（你原先 lower 后再用 'density (g/mL)' 是取不到的）
-                "density (g/mL)": _pick(
-                    row,
-                    "density (g/ml)",
-                    "density(g/ml)",
-                    "density_g_ml",
-                    "density",
-                    default=None,
-                ),
-                "fid": _pick(row, "fid"),
+                "density (g/mL)": _pick(row, "density (g/ml)", "density(g/ml)", "density_g_ml", "density", default=None),
+                "physical_form": str(_pick(row, "physical_form", default="") or "").strip().lower(),
+                "active_content": _pick(row, "active_content","active_content(mmol/ml or wt%)" ,"active_content(mol/l or wt%)", default="" ),
             }
 
         # 3. 读取任务模板 -> params(Dict), headers(List), data_rows(List[List])
@@ -515,12 +515,45 @@ class StationManager(SynthesisStationController):
         task_payload = self.build_task_payload(params, headers, data_rows, chemical_db)
 
         # 5. 提交任务信息到工站
-        resp = self.add_task(task_payload)
+        try:
+            resp = self.add_task(task_payload)
+        except ApiError as exc:
+            if getattr(exc, "code", None) == 409:
+                task_name = task_payload.get("task_name") or params.get("实验名称")
 
-        self._assert_success(resp,"创建任务")
+                dup_msg = (
+                    f"任务上传失败，请检查任务名称是否重复: {task_name}"
+                    if task_name
+                    else "任务名称重复，请修改任务/实验名称后重试"
+                )
+                logger.error(dup_msg)
+                # 重新抛出带提示的 ApiError
+                raise ApiError(code=exc.code, msg=dup_msg, payload=exc.payload) from exc
+            raise
 
         # 6. 提交任务信息到工站
         task_id = resp.get("task_id")
+
+        # 7. 回写任务ID到模板(实验ID)
+        try:
+            task_id_int = int(task_id)
+            updated = False
+            for r in range(1, ws.max_row + 1):
+                key_val = ws.cell(r, 1).value
+                if key_val is None:
+                    continue
+                if str(key_val).strip() == "实验ID":
+                    ws.cell(r, 2, value=task_id_int)
+                    updated = True
+                    break
+
+            if updated:
+                wb.save(t_path)
+                logger.info("已将任务ID写入模板文件: %s", t_path)
+            else:
+                logger.warning("未找到“实验ID”位置，未回写任务ID")
+        except Exception as exc:
+            logger.warning("任务ID回写失败: %s", exc)
 
         return task_id
 
@@ -540,8 +573,11 @@ class StationManager(SynthesisStationController):
 
         # --- 1. 定义左侧参数配置数据 (行2开始, A列和B列) ---
         left_params = [
-            ("反应设定", ""),
+            ("实验设定", ""),
             ("实验名称", "Auto_task"),
+            ("实验ID", 0),
+            ("反应设定", ""),
+            ("反应规模(mmol)", "0.2"),
             ("反应器类型", "heat"),
             ("反应时间(h)", 8),
             ("反应温度(°C)", 40),
@@ -557,12 +593,14 @@ class StationManager(SynthesisStationController):
             ("内标设定", ""),
             ("内标种类", "1,3,5-三异丙基苯(内标,1mol/L in MeCN)"),
             ("内标用量(μL/mg)", 100),
+            ("闪滤设定", ""),
             ("稀释液种类", "乙腈"),
             ("稀释量(μL)", 500),
             ("取样量(μL)", 2),
             ("加入内标后搅拌时间(min)", 5),
             ("", ""),  # 空行
         ]
+        left_param_rows = len(left_params)
 
         # --- 2. 设置第一行表头 (Row 1) ---
         ws.cell(row=1, column=3, value="实验编号").font = base_font
@@ -597,15 +635,17 @@ class StationManager(SynthesisStationController):
             row_idx = i + 1
             ws.cell(row=row_idx, column=3, value=i).font = base_font
 
-        # --- 5. 底部注释 (Row 23) ---
-        note_row = len(left_params) + 2  # 23
-        note_text = "注：试剂量支持单位：(mmol,g,mg,μL,mL）"
+        # --- 5. 底部注释 (跟随参数行, 预留一行空白) ---
+        note_row = left_param_rows + 2
+        note_text = "注：试剂量支持单位：(eq,mmol,g,mg,μL,mL）"
         ws.cell(row=note_row, column=1, value=note_text).font = base_font
         ws.merge_cells(start_row=note_row, start_column=1, end_row=note_row, end_column=2)
         ws.cell(row=note_row, column=1).alignment = center  # 合并后的单元格居中
 
-        # --- 6. 字体铺满 (A1:M25)  ---
-        for r in range(1, 26):
+        max_template_row = max(note_row, 25)
+
+        # --- 6. 字体铺满 (A1:M*)  ---
+        for r in range(1, max_template_row + 1):
             for c in range(1, 14):  # A..M
                 cell = ws.cell(r, c)
                 # 标题行的粗体不要覆盖
@@ -615,16 +655,24 @@ class StationManager(SynthesisStationController):
 
         # --- 7. 对齐 ---
         # C~L 整块都居中（含空白）
-        for r in range(1, 26):
+        for r in range(1, max_template_row + 1):
             for c in range(3, 13):  # C..L
                 ws.cell(r, c).alignment = center
 
-        # A 列：1~21 + 23 行居中（22/24/25 行保持默认）
-        for r in list(range(1, 22)) + [23]:
+        # A 列：参数行和注释行居中
+        a_rows = []
+        b_rows = []
+        for idx, (param_name, default_val) in enumerate(left_params):
+            row_idx = idx + 1
+            if param_name != "":
+                a_rows.append(row_idx)
+            if param_name != "" and default_val != "":
+                b_rows.append(row_idx)
+        for r in a_rows + [note_row]:
             ws.cell(r, 1).alignment = center
 
         # B 列：只有有值的参数行居中（标题行/空白行/合并后的 B 不处理）
-        for r in [2, 3, 4, 5, 6, 7, 8, 10, 11, 13, 14, 16, 17, 18, 19, 20, 21]:
+        for r in b_rows:
             ws.cell(r, 2).alignment = center
 
         # M 列：只有表头 M1 居中
@@ -656,8 +704,243 @@ class StationManager(SynthesisStationController):
         wb.save(path)
         logger.info(f"已生成任务模板: {path}")
 
-    # ---------- 4. 任务物料和站内物料对比 ----------
+    # ---------- 4. 物料核算 ----------
+    def check_resource_for_task(self, template_path: str, chemical_db_path: str) -> JsonDict:
+        """
+        功能:
+            读取实验模板与化学品库, 构建任务 Payload, 获取站内资源并比对是否满足实验需求。
+        参数:
+            template_path: 实验模板文件路径(xlsx/csv)。
+            chemical_db_path: 化学品库文件路径(xlsx/csv)。
+        返回:
+            Dict, analyze_resource_readiness 的结果, 包含需求、库存、缺失与冗余信息。
+        """
+        t_path = Path(template_path)
+        c_path = Path(chemical_db_path)
 
+        if not t_path.exists():
+            raise FileNotFoundError(f"未找到实验模板文件: {t_path}")
+        if not c_path.exists():
+            raise FileNotFoundError(f"未找到化学品库文件: {c_path}")
+
+        chem_df = pd.read_excel(c_path) if c_path.suffix.lower() in [".xlsx", ".xls"] else pd.read_csv(c_path)
+        chem_df.columns = [str(c).strip().lower() for c in chem_df.columns]
+
+        def _pick(row, *keys, default=None):
+            for k in keys:
+                if k in row and pd.notna(row[k]):
+                    return row[k]
+            return default
+
+        chemical_db: Dict[str, Dict[str, Any]] = {}
+        for _, r in chem_df.iterrows():
+            row = {k: r.get(k) for k in chem_df.columns}
+            name = str(_pick(row, "substance", "name", "chemical_name", default="") or "").strip()
+            if not name:
+                continue
+            chemical_db[name] = {
+                "chemical_id": _pick(row, "chemical_id"),
+                "molecular_weight": _pick(row, "molecular_weight", "mw"),
+                "physical_state": str(_pick(row, "physical_state", "state", default="") or "").strip().lower(),
+                "density (g/mL)": _pick(row, "density (g/ml)", "density(g/ml)", "density_g_ml", "density", default=None),
+                "physical_form": str(_pick(row, "physical_form", default="") or "").strip().lower(),
+                "active_content": _pick(row, "active_content","active_content(mmol/ml or wt%)" ,"active_content(mol/l or wt%)", default="" ),
+            }
+    
+        wb = load_workbook(t_path, data_only=True)
+        ws = wb.active
+
+        header_row = None
+        exp_no_col = None
+        for r in range(1, min(ws.max_row, 50) + 1):
+            for c in range(1, min(ws.max_column, 50) + 1):
+                v = ws.cell(r, c).value
+                if isinstance(v, str) and "实验编号" in v:
+                    header_row, exp_no_col = r, c
+                    break
+            if header_row is not None:
+                break
+        if header_row is None or exp_no_col is None:
+            raise ValidationError("模板中未找到'实验编号'表头")
+
+        params: Dict[str, Any] = {}
+        exp_name = ws.cell(1, 2).value
+        if exp_name is not None and str(exp_name).strip() != "":
+            params["实验名称"] = str(exp_name).strip()
+
+        for r in range(2, ws.max_row + 1):
+            key = ws.cell(r, 1).value
+            val = ws.cell(r, 2).value
+            if key is None:
+                continue
+            key_str = str(key).strip()
+            if key_str == "":
+                continue
+            if key_str.startswith("注：") or key_str.startswith("注"):
+                continue
+            if val is None or (isinstance(val, str) and val.strip() == ""):
+                continue
+            params[key_str] = val
+
+        raw_headers: List[Any] = []
+        for c in range(exp_no_col, ws.max_column + 1):
+            raw_headers.append(ws.cell(header_row, c).value)
+
+        headers: List[str] = []
+        reagent_idx = 0
+        for h in raw_headers:
+            s = "" if h is None else str(h).strip()
+            if s.startswith("试剂") and "量" not in s and s != "试剂名称":
+                reagent_idx += 1
+                headers.append(f"试剂名称_{reagent_idx}")
+                continue
+            if "试剂量" in s:
+                idx = reagent_idx if reagent_idx > 0 else (len([x for x in headers if "试剂量" in x]) + 1)
+                headers.append(f"试剂量_{idx}")
+                continue
+            headers.append(s)
+
+        data_rows: List[List[Any]] = []
+        for r in range(header_row + 1, ws.max_row + 1):
+            exp_no = ws.cell(r, exp_no_col).value
+            if exp_no is None or (isinstance(exp_no, str) and exp_no.strip() == ""):
+                if data_rows:
+                    break
+                else:
+                    continue
+            row_vals: List[Any] = []
+            for c in range(exp_no_col, ws.max_column + 1):
+                v = ws.cell(r, c).value
+                row_vals.append("" if v is None else v)
+            data_rows.append(row_vals)
+
+        task_payload = self.build_task_payload(params, headers, data_rows, chemical_db)
+        resource_rows = self.get_resource_info()
+        result = self.analyze_resource_readiness(task_payload, resource_rows, chemical_db)
+
+        return result
+
+    # ----- controller功能接口函数 -----
+    def device_init(self, device_id=None, *, poll_interval_s: float = 1.0, timeout_s: float = 600.0):
+        return super().device_init(device_id, poll_interval_s=poll_interval_s, timeout_s=timeout_s)
+
+    def start_task(self, task_id: int | None = None, *, check_glovebox_env: bool = True, water_limit_ppm: float = 10.0, oxygen_limit_ppm: float = 10.0):
+        return super().start_task(task_id, check_glovebox_env=check_glovebox_env, water_limit_ppm=water_limit_ppm, oxygen_limit_ppm=oxygen_limit_ppm)
+
+    def wait_task_with_ops(self, task_id: int | None = None, *, poll_interval_s: float = 2.0) -> int:
+        return super().wait_task_with_ops(task_id, poll_interval_s=poll_interval_s)
+
+    def batch_out_task_and_empty_trays(self, task_id: int | None = None, *, poll_interval_s: float = 1.0, ignore_missing: bool = True, timeout_s: float = 900.0, move_type: str = "main_out"):
+        return super().batch_out_task_and_empty_trays(task_id, poll_interval_s=poll_interval_s, ignore_missing=ignore_missing, timeout_s=timeout_s, move_type=move_type)
+
+    def submit_experiment_task(
+        self,
+        chemical_db_path: str,
+        # --- 1. 将原字典拆解为独立参数 (前端会自动渲染为独立的输入框) ---
+        task_name: str = "Unilab_Auto_Job",
+        reaction_type: str = "heat",
+        duration: float = 8.0,
+        temperature: float = 40.0,
+        stir_speed: int = 500,
+        target_temp: float = 30.0,
+        auto_magnet: bool = True,
+        fixed_order: bool = False,
+        # 选填参数
+        internal_std_name: str = "",
+        stir_time_after_std: float = 0.0,
+        diluent_name: str = "",
+        
+        # --- 2. 数据列表 (最后传入) ---
+        rows: list = None
+    ) -> JsonDict:
+        """
+        Unilab 流程编排专用接口 (扁平化参数版)
+        """
+        c_path = Path(chemical_db_path)
+        if not c_path.exists():
+            raise FileNotFoundError(f"未找到化学品库文件: {c_path}")
+
+        chem_df = pd.read_excel(c_path) if c_path.suffix.lower() in [".xlsx", ".xls"] else pd.read_csv(c_path)
+        chem_df.columns = [str(c).strip().lower() for c in chem_df.columns]
+        # 读取化学品库 -> Dict
+        def _pick(row, *keys, default=None):
+            for k in keys:
+                if k in row and pd.notna(row[k]):
+                    return row[k]
+            return default
+
+        chemical_db: Dict[str, Dict[str, Any]] = {}
+        for _, r in chem_df.iterrows():
+            row = {k: r.get(k) for k in chem_df.columns}
+            name = str(_pick(row, "substance", "name", "chemical_name", default="") or "").strip()
+            if not name:
+                continue
+
+            # 小写后的列名
+            chemical_db[name] = {
+                "chemical_id": _pick(row, "chemical_id"),
+                "molecular_weight": _pick(row, "molecular_weight", "mw"),
+                "physical_state": str(_pick(row, "physical_state", "state", default="") or "").strip().lower(),
+                "density (g/mL)": _pick(row, "density (g/ml)", "density(g/ml)", "density_g_ml", "density", default=None),
+                "physical_form": str(_pick(row, "physical_form", default="") or "").strip().lower(),
+                "active_content": _pick(row, "active_content","active_content(mmol/ml or wt%)" ,"active_content(mol/l or wt%)", default="" ),
+            }
+
+        # A. 在代码内部将分散的参数“收拢”回字典
+        params = {
+            "实验名称": task_name,
+            "反应器类型": reaction_type,
+            "反应时间(h)": duration,
+            "反应温度(°C)": temperature,
+            "转速(rpm)": stir_speed,
+            "搅拌后目标温度(°C)": target_temp,
+            "自动加磁子": "是" if auto_magnet else "否",
+            "固定加料顺序": "是" if fixed_order else "否",
+            "内标种类": internal_std_name,
+            "加入内标后搅拌时间(min)": stir_time_after_std,
+            "稀释液种类": diluent_name
+        }
+
+        # B. 定义标准表头协议
+        headers = [
+            "实验编号",
+            "试剂_1", "试剂量",
+            "试剂_2", "试剂量",
+            "试剂_3", "试剂量",
+            "试剂_4", "试剂量",
+            "试剂_5", "试剂量"
+        ]
+
+        # C. 处理 rows 数据
+        if rows is None:
+            rows = []
+
+        # D. 调用核心编译器
+        try:
+            task_payload = self.build_task_payload(params, headers, rows, chemical_db)
+        except AttributeError:
+            raise Exception("无法找到 build_task_payload 方法，请检查 StationController 定义")
+        
+        try:
+            resp = self.add_task(task_payload)
+        except ApiError as exc:
+            if getattr(exc, "code", None) == 409:
+                task_name = task_payload.get("task_name") or params.get("实验名称")
+
+                dup_msg = (
+                    f"任务上传失败，请检查任务名称是否重复: {task_name}"
+                    if task_name
+                    else "任务名称重复，请修改任务/实验名称后重试"
+                )
+                logger.error(dup_msg)
+                # 重新抛出带提示的 ApiError
+                raise ApiError(code=exc.code, msg=dup_msg, payload=exc.payload) from exc
+            raise
+
+        # E. 提交任务信息到工站
+        task_id = resp.get("task_id")
+
+        return task_id
 
 if __name__ == "__main__":
 
@@ -669,36 +952,34 @@ if __name__ == "__main__":
         #---------------提交任务流程-------------------
 
         # 0. 设定文件名称
+        task_tpl = Path("test_task.xlsx")       # 提交任务文件
+        chem_db = Path("chemical_list.xlsx")        # 化合物库文件
+        template_in = Path("batch_in_tray.xlsx")     # 上料文件
 
-        # 提交任务文件
-        task_tpl = Path("reaction_template_5.xlsx")
 
-        # 化合物库文件
-        chem_db = Path("chemical_list.xlsx")
+        # 1. 设备初始化
+        manager.device_init()
 
-        # 进料文件
-        template_in = Path("batch_in_tray.xlsx")
+        # 2. 工站化学品库和本地化学品库数据对齐
+        manager.align_chemicals_with_file(chem_db)
 
-        # 3. 本地化学品库去重整理
-        # manager.deduplicate_chemical_library_by_file(chem_db)
+        # 3. 上传任务到工站
+        manager.create_task_by_file(str(task_tpl), str(chem_db))
 
-        # 4. 本地化学品库数据完整性检验
-        # manager.check_chemical_library_by_file(chem_db)
-
-        # 5. 工站化学品库和本地化学品库数据对齐
-        # manager.align_chemicals_with_file(chem_db)
-
-        # 6. 上传任务到工站
-        # task_id = manager.create_task_by_file(str(task_tpl), str(chem_db))
-
-        # 4. 对比站内资源和任务文件json列出缺乏
-        # manager.check_resource_for_task(str(task_tpl), str(chem_db))
+        # 4. 进行物料核算
+        manager.check_resource_for_task(str(task_tpl), str(chem_db))
 
         # 5. 上料
-        # manager.batch_in_tray_by_file(str(template_in))
+        manager.batch_in_tray_by_file(str(template_in))
 
-        # # 7 . 开始任务
-        # resp = manager.start_task(task_id)
+        # 6. 开始任务
+        manager.start_task()
+
+        # 7. 等待任务完成并回传执行信息
+        manager.wait_task_with_ops()
+ 
+        # 8. 查询任务物料，并执行下料操作, 同时下料空托盘
+        manager.batch_out_task_and_empty_trays()
 
         #---------------工站状态查询-------------------
 
@@ -706,33 +987,30 @@ if __name__ == "__main__":
         # resource_info = manager.get_resource_info()
 
         # 2. 查询站内所有设设备状态
-        devices_info = manager.list_device_status()
-        print(devices_info)
+        # manager.list_device_status()
 
         # 3. 查询工站运行状态
-        station_info = manager.station_state()
+        # manager.station_state()
 
-        print(station_info)
         # 4. 查询手套箱状态
-        glovebox_info = manager.get_glovebox_env()
-        print(glovebox_info)
-
-        #---------------其他可执行动作-------------------
-
-        # 1. 登录
-        # manager.login()
-
-        # 2. 设备初始化
-        # manager.device_init()
-
+        # manager.get_glovebox_env()
         
     except Exception as e:
         logger.error(f"测试失败: {e}", exc_info=True)
 
         #————————————————额外功能————————————————————
 
+        # 2. 设备初始化
+        # manager.device_init()
+
         # # 获取站内所有化学品信息,导出到csv文件
         # manager.export_chemical_list_to_file("chemicals_list_export.csv")
 
         # # 通过csv进行化学品录入
         # manager.sync_chemicals_from_file("add_chemical_list.csv")
+
+        # 本地化学品库去重整理
+        # manager.deduplicate_chemical_library_by_file(chem_db)
+
+        # 1. 本地化学品库数据完整性检验
+        # manager.check_chemical_library_by_file(chem_db)
