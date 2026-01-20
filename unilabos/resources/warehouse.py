@@ -1,7 +1,7 @@
 from typing import Dict, Optional, List, Union
 from pylabrobot.resources import Coordinate
 from pylabrobot.resources.carrier import ResourceHolder, create_homogeneous_resources
-
+import uuid
 from unilabos.resources.itemized_carrier import ItemizedCarrier, ResourcePLR
 
 
@@ -58,6 +58,12 @@ def warehouse_factory(
         resource_size_z=resource_size_z,
         name_prefix=name,
     )
+
+    for site in _sites.values():
+        if not hasattr(site, "unilabos_uuid") or not site.unilabos_uuid:
+            # 建议使用基于名字的确定性 UUID (uuid5)，或者直接用 uuid4
+            site.unilabos_uuid = str(uuid.uuid4())
+
     len_x, len_y = (num_items_x, num_items_y) if num_items_z == 1 else (num_items_y, num_items_z) if num_items_x == 1 else (num_items_x, num_items_z)
 
     # 根据 layout 参数生成不同的排序方式
@@ -134,12 +140,15 @@ class WareHouse(ItemizedCarrier):
         return data
 
     def get_site_by_layer_position(self, row: int, col: int, layer: int) -> ResourceHolder:
-        if not (0 <= layer < 4 and 0 <= row < 4 and 0 <= col < 1):
-            raise ValueError("无效的位置: layer={}, row={}, col={}".format(layer, row, col))
+        if not (0 <= layer < self.num_items_z and 0 <= row < self.num_items_y and 0 <= col < self.num_items_x):
+            raise ValueError(f"无效的位置: layer={layer}, row={row}, col={col}")
+        
+        row_str = LETTERS[row]
+        col_str = f"{col + 1:02d}"
+        target_key = f"{row_str}{col_str}"
 
-        site_index = layer * 4 + row * 1 + col
-        return self.sites[site_index]
-
+        return self.get_item(target_key)
+    
     def add_rack_to_position(self, row: int, col: int, layer: int, rack) -> None:
         site = self.get_site_by_layer_position(row, col, layer)
         site.assign_child_resource(rack)

@@ -336,6 +336,9 @@ class ResourceTreeSet(object):
                 "tip_spot": "tip_spot",
                 "tube": "tube",
                 "bottle_carrier": "bottle_carrier",
+                "container": "container",       
+                "resource_holder": "resource_holder", 
+                "warehouse": "warehouse",
             }
             if source in replace_info:
                 return replace_info[source]
@@ -425,7 +428,8 @@ class ResourceTreeSet(object):
         for resource in resources:
             # 构建uuid列表
             uuid_list = []
-            build_uuid_mapping(resource, uuid_list, getattr(resource.parent, "unilabos_uuid", None))
+            parent_uuid = getattr(resource.parent, "unilabos_uuid", None) if resource.parent else None
+            build_uuid_mapping(resource, uuid_list, parent_uuid)
 
             serialized_data = resource.serialize()
             all_states = resource.serialize_all_state()
@@ -448,8 +452,18 @@ class ResourceTreeSet(object):
         from pylabrobot.utils.object_parsing import find_subclass
 
         # 类型映射
-        TYPE_MAP = {"plate": "Plate", "well": "Well", "deck": "Deck", "container": "RegularContainer", "tip_spot": "TipSpot"}
-
+        TYPE_MAP = {
+            "plate": "Plate", 
+            "well": "Well", 
+            "deck": "Deck", 
+            "container": "Container", 
+            "tip_spot": "TipSpot", 
+            "resource_holder": "ResourceHolder", 
+            "bottle_carrier": "BottleCarrier",
+            "plate": "Plate", 
+            "warehouse": "WareHouse",
+            }
+    
         def collect_node_data(node: ResourceDictInstance, name_to_uuid: dict, all_states: dict, name_to_extra: dict):
             """一次遍历收集 name_to_uuid, all_states 和 name_to_extra"""
             name_to_uuid[node.res_content.name] = node.res_content.uuid

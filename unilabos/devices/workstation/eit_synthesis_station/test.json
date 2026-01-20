@@ -2,8 +2,8 @@
     "nodes": [
         {
             "id": "eit_station",
-            "name": "eit",
-            "children": [],
+            "name": "eit_station",
+            "children": null,
             "parent": null,
             "type": "device",
             "class": "eit_stationmanager",
@@ -13,7 +13,39 @@
                 "z": 0
             },
             "config": {
+                "deck": {
+                    "data": {
+                        "_resource_child_name": "EIT_Synthesis_Station_Deck",
+                        "_resource_type": "unilabos.resources.eit_synthesis_station.decks:EIT_Synthesis_Station_Deck"
+                    }
+                },
+                "protocol_type": []
             }
+        },
+        {
+            "id": "EIT_Synthesis_Station_Deck",
+            "name": "EIT_Synthesis_Station_Deck",
+            "sample_id": null,
+            "children": [],
+            "parent": "eit_station",
+            "type": "deck",
+            "class": "",
+            "position": {
+                "x": 100,
+                "y": 100,
+                "z": 0
+            },
+            "config": {
+                "type": "EIT_Synthesis_Station_Deck",
+                "setup": true,
+                "rotation": {
+                    "x": 0,
+                    "y": 0,
+                    "z": 0,
+                    "type": "Rotation"
+                }
+            },
+            "data": {}
         }
     ],
     "links": []

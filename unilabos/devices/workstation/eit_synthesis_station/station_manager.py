@@ -30,7 +30,7 @@ class StationManager(SynthesisStationController):
         然后调用父类方法执行具体的业务逻辑。
     """
 
-    def __init__(self, settings: Optional[Settings] = None):
+    def __init__(self, settings: Optional[Settings] = None, **kwargs):
         settings = settings or Settings.from_env()
         configure_logging(settings.log_level)
         super().__init__(settings)

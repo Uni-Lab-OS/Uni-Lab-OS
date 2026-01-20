@@ -12,7 +12,7 @@ import pylabrobot
 from pylabrobot.resources import Resource as ResourcePLR
 from pylabrobot.resources import Well, ResourceHolder
 from pylabrobot.resources.coordinate import Coordinate
-
+import uuid
 
 LETTERS = "ABCDEFGHIJKLMNOPQRSTUVWXYZ"
 
@@ -88,6 +88,16 @@ class ItemizedCarrier(ResourcePLR):
       category=category,
       model=model,
     )
+
+    # 1. 即使 sites 为空，也强制初始化这些属性，防止 serialize 报错
+    self.child_locations: Dict[str, Coordinate] = {}
+    self.child_size: Dict[str, dict] = {}
+    self._ordering = {}
+        
+    # 2. 自动补全载架自身的 UUID
+    if not getattr(self, "unilabos_uuid", None):
+      self.unilabos_uuid = str(uuid.uuid4())
+
     self.num_items = len(sites)
     self.num_items_x, self.num_items_y, self.num_items_z = num_items_x, num_items_y, num_items_z
     self.invisible_slots = [] if invisible_slots is None else invisible_slots
@@ -95,19 +105,27 @@ class ItemizedCarrier(ResourcePLR):
 
     if isinstance(sites, dict):
       sites = sites or {}
-      self.sites: List[Optional[ResourcePLR]] = list(sites.values())
+      self.sites: List[Optional[ResourcePLR]] = [None] * len(sites)
       self._ordering = sites
       self.child_locations: Dict[str, Coordinate] = {}
       self.child_size: Dict[str, dict] = {}
+
       for spot, resource in sites.items():
         if resource is not None and getattr(resource, "location", None) is None:
           raise ValueError(f"resource {resource} has no location")
         if resource is not None:
+          if not getattr(resource, "unilabos_uuid", None):
+            resource.unilabos_uuid = str(uuid.uuid4())
           self.child_locations[spot] = resource.location
           self.child_size[spot] = {"width": resource._size_x, "height": resource._size_y, "depth": resource._size_z}
         else:
           self.child_locations[spot] = Coordinate.zero()
           self.child_size[spot] = {"width": 0, "height": 0, "depth": 0}
+          
+      for idx, (spot, resource) in enumerate(sites.items()):
+        if resource is not None:
+          self.assign_child_resource(resource, location=resource.location, spot=idx)
+
     elif isinstance(sites, list):
       # deserialize时走这里；还需要根据 self.sites 索引children
       self.child_locations = {site["label"]: Coordinate(**site["position"]) for site in sites}
