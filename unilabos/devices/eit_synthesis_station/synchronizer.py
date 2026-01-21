@@ -16,9 +16,9 @@ from unilabos.ros.nodes.base_device_node import ROS2DeviceNode
 import uuid
 
 # EIT 专用依赖
-from unilabos.devices.workstation.eit_synthesis_station.station_manager import StationManager
-from unilabos.devices.workstation.eit_synthesis_station.config.setting import Settings
-from unilabos.devices.workstation.eit_synthesis_station.config.constants import ResourceCode
+from unilabos.devices.eit_synthesis_station.manager.station_manager import SynthesisStationManager
+from unilabos.devices.eit_synthesis_station.config.setting import Settings
+from unilabos.devices.eit_synthesis_station.config.constants import ResourceCode
 from unilabos.resources.eit_synthesis_station import bottle_carriers, items
 from unilabos.resources.eit_synthesis_station.decks import EIT_Synthesis_Station_Deck
 from unilabos.resources.warehouse import WareHouse
@@ -61,7 +61,6 @@ def _force_inject_eit_types():
     except Exception as e:
         logger.debug(f"跳过 ResourceTracker 直接注入: {e}")
             
-
 _force_inject_eit_types()
 
 class EITResourceSynchronizer(ResourceSynchronizer):
@@ -98,40 +97,16 @@ class EITResourceSynchronizer(ResourceSynchronizer):
         int(ResourceCode.TEST_TUBE_MAGNET_TRAY_2ML): items.EIT_TEST_TUBE_MAGNET_2ML,
     }
 
-    TRAY_SPEC_STRINGS = {
-        "EIT_REAGENT_BOTTLE_TRAY_2ML": "2 mL试剂瓶托盘(201000730) [A1-F8]",
-        "EIT_REAGENT_BOTTLE_TRAY_8ML": "8 mL试剂瓶托盘(201000502) [A1-C4]",
-        "EIT_REAGENT_BOTTLE_TRAY_40ML": "40 mL试剂瓶托盘(201000503) [A1-B3]",
-        "EIT_REAGENT_BOTTLE_TRAY_125ML": "125 mL试剂瓶托盘(220000023) [A1-A2]",
-        "EIT_POWDER_BUCKET_TRAY_30ML": "30 mL粉桶托盘(201000600) [A1-B1]",
-        "EIT_TIP_TRAY_1ML": "1 mL Tip 头托盘(201000731) [1-96]",
-        "EIT_TIP_TRAY_5ML": "5 mL Tip 头托盘(201000512) [1-24]",
-        "EIT_TIP_TRAY_50UL": "50 μL Tip 头托盘(201000815) [1-96]",
-        "EIT_FLASH_FILTER_OUTER_BOTTLE_TRAY": "闪滤瓶外瓶托盘(201000728) [1-48]",
-        "EIT_FLASH_FILTER_INNER_BOTTLE_TRAY": "闪滤瓶内瓶托盘(201000727) [1-48]",
-        "EIT_REACTION_SEAL_CAP_TRAY": "反应密封盖托盘(201000712) [1-1]",
-        "EIT_TEST_TUBE_MAGNET_TRAY_2ML": "2 mL试管磁子托盘(201000711) [1-24]",
-        "EIT_REACTION_TUBE_TRAY_2ML": "2 mL反应试管托盘(201000726) [1-24]",
-    }
-
-    SUBSTANCE_TRAYS = {
-        "EIT_REAGENT_BOTTLE_TRAY_2ML", 
-        "EIT_REAGENT_BOTTLE_TRAY_8ML", 
-        "EIT_REAGENT_BOTTLE_TRAY_40ML", 
-        "EIT_REAGENT_BOTTLE_TRAY_125ML", 
-        "EIT_POWDER_BUCKET_TRAY_30ML"
-    }
-
     def __init__(self, workstation: 'EITWorkstation'):
         super().__init__(workstation)
-        self.manager: Optional[StationManager] = None
+        self.manager: Optional[SynthesisStationManager] = None
         self.initialize()
     
     def initialize(self) -> bool:
         """初始化 EIT Manager 并登录"""
         try:
             settings = Settings.from_env()
-            self.manager = StationManager(settings=settings)
+            self.manager = SynthesisStationManager(settings=settings)
             self.manager.login()
             return True
         except Exception as e:
@@ -279,86 +254,20 @@ class EITResourceSynchronizer(ResourceSynchronizer):
             return False
 
     def sync_to_external(self, resource: Resource) -> bool:
-        """
-        [虚拟 -> 硬件] 核心上料同步逻辑
-        将 UniLab 中的拖拽动作转换为 EIT 硬件识别的 Payload，支持物质托盘详情填充。
-        """
-        # --- 0. 防抖处理：防止 Transfer 和 Add 钩子同时触发导致的 1134 冲突 ---
-        now = time.time()
-        if hasattr(resource, "_last_sync_time") and (now - resource._last_sync_time < 2.0):
-            return True # 2秒内不重复同步同一资源
-        resource._last_sync_time = now
-
-        # --- 1. 坐标转换：将虚拟 Slot 解析为物理坐标 (例如 W-30 -> W-4-7) ---
+        """[虚拟 -> 硬件] 将本地操作同步到物理硬件"""
+        # 获取物理编码
         eit_code = getattr(resource, "unilabos_extra", {}).get("eit_layout_code")
         if not eit_code and resource.parent:
             eit_code = self.workstation._resolve_eit_code_by_slot(resource.parent)
         
-        if not eit_code:
-            logger.error(f"无法解析资源 {resource.name} 的物理坐标")
-            return False
+        if eit_code:
+            logger.info(f"同步至硬件: {resource.name} -> {eit_code}")
+            tray_type = getattr(resource, "description", None) or "2 mL试剂瓶托盘"
+            rows = [(eit_code, tray_type, "")] 
+            payload = self.manager.build_batch_in_tray_payload(rows)
+            # return self.manager.batch_in_tray(payload) is not None
+        return False
 
-        # --- 2. 获取硬件规格字符串 (处理 BottleCarrier 类名不匹配问题) ---
-        # 优先通过资源名称匹配，因为拖拽物料的 .name 通常是具体的类型
-        tray_type_text = self.TRAY_SPEC_STRINGS.get(resource.name) or \
-                         self.TRAY_SPEC_STRINGS.get(resource.__class__.__name__)
-        
-        # 兜底：如果映射表未命中，尝试从 description 属性安全获取
-        if not tray_type_text:
-            tray_type_text = getattr(resource, "description", None)
-            if not tray_type_text or "(" not in tray_type_text:
-                logger.error(f"不支持的托盘类型: {resource.name}，请在 TRAY_SPEC_STRINGS 中定义")
-                return False
-
-        # --- 3. 构造内容字符串 (Content) ---
-        content_parts = []
-        # 判断是否为物质类托盘 (试剂瓶/粉桶)
-        is_substance = any(kw in resource.name or kw in resource.__class__.__name__ 
-                          for kw in ["REAGENT", "POWDER", "BOTTLE"])
-
-        if is_substance and hasattr(resource, "children"):
-            # 遍历托盘下的每一个槽位 (ResourceHolder)
-            for site in resource.children:
-                if site.children: # 只有槽位里有瓶子时处理
-                    bottle = site.children[0]
-                    # 解析槽位名称中的坐标 (假设格式为 resourceholder_行_列)
-                    try:
-                        # 动态根据托盘类型确定列数，用于计算 A1/B2 坐标
-                        cols = 8 # 默认 8 列
-                        if "8 mL" in tray_type_text: cols = 4
-                        elif "40 mL" in tray_type_text: cols = 3
-                        elif "30 mL" in tray_type_text: cols = 2
-                        
-                        idx = resource.children.index(site)
-                        well_coord = f"{chr(65 + (idx // cols))}{ (idx % cols) + 1 }"
-                    except Exception:
-                        well_coord = site.name 
-
-                    sub_name = bottle.name
-                    # 安全获取数值：优先取元数据 value，若无则取 description，最后默认为 2mL
-                    val = getattr(bottle, "unilabos_extra", {}).get("value") or \
-                          getattr(bottle, "description", "2mL")
-                    
-                    content_parts.append(f"{well_coord}|{sub_name}|{val}")
-            
-            content_text = "; ".join(content_parts)
-        else:
-            # 非物质耗材类托盘 (吸头/反应管)：从规格中提取最大容量，例如 [1-96] 提取 96
-            import re
-            match = re.search(r"-(\d+)\]", tray_type_text)
-            content_text = match.group(1) if match else "96"
-
-        # --- 4. 调用控制器执行同步 ---
-        logger.info(f"同步至硬件: {resource.name} -> {eit_code} | 类型: {tray_type_text} | 内容: {content_text}")
-        rows = [(eit_code, tray_type_text, content_text)] 
-        payload = self.manager.build_batch_in_tray_payload(rows)
-        
-        if not payload:
-            logger.error(f"Payload 构建失败，硬件无法识别类型: {tray_type_text}")
-            return False
-            
-        return self.manager.batch_in_tray(payload) is not None
-       
     def handle_external_change(self, change_info: Dict[str, Any]) -> bool:
         """
         [Physical -> Virtual] 处理外部硬件触发的变更（如手动搬运托盘）。
@@ -416,9 +325,12 @@ class EITWorkstation(WorkstationBase):
     def resource_tree_add(self, resources: List[Resource]):
         """处理前端物料添加请求（上料）"""
         for res in resources:
-            # 同样增加判断，避免与 Transfer 重复触发
-            if not getattr(res, "_last_sync_time", 0):
-                self.resource_synchronizer.sync_to_external(res)
+            if res.parent:
+                eit_code = self._resolve_eit_code_by_slot(res.parent)
+                if eit_code:
+                    if not hasattr(res, "unilabos_extra"): res.unilabos_extra = {}
+                    res.unilabos_extra["eit_layout_code"] = eit_code
+                    self.resource_synchronizer.sync_to_external(res)
 
     def resource_tree_remove(self, resources: List[Resource]):
         """用户在前端删除物料时触发：执行物理下料"""
@@ -435,16 +347,16 @@ class EITWorkstation(WorkstationBase):
                 if parent_resource and parent_resource.name not in top_level_names:
                     logger.info(f"[EIT] 真正触发硬件下料动作: {eit_code}")
                     # 调用 API，move_type 默认为 0（普通移动/下料）
-                    self.manager.batch_out_tray([eit_code])
+                    # self.manager.batch_out_tray([eit_code])
                     processed_codes.add(eit_code)
 
 
     def resource_tree_transfer(self, old_parent: Optional[Resource], resource: Resource, new_parent: Resource):
         """处理跨设备拖入：例如从物料库拖到工站槽位"""
-        logger.info(f"[Transfer] 资源 {resource.name} 移入新槽位: {new_parent.name}")
-        if old_parent and not self.is_descendant_of_me(old_parent):
-            self.resource_synchronizer.sync_to_external(resource)
-
+        logger.info(f"[Transfer] 资源 {resource.name} 移入工站")
+        # 可以在此处执行预登记逻辑，或者直接调用 add 逻辑
+        self.resource_tree_add([resource])
+        
     def resource_tree_update(self, resources: List[Resource]):
         """处理前端拖拽或修改属性后的同步"""
         for res in resources:
@@ -470,7 +382,7 @@ class EITWorkstation(WorkstationBase):
         logger.info(f"收到前端批量进料请求，正在处理文件: {file_path}")
         
         try:
-            # 1. 直接调用 StationManager 已有的文件处理逻辑
+            # 1. 直接调用 SynthesisStationManager 已有的文件处理逻辑
             # 该方法会自动解析 CSV/Excel 并构建 Payload 发送给 API
             result = self.manager.batch_in_tray_by_file(file_path)
             
@@ -491,29 +403,55 @@ class EITWorkstation(WorkstationBase):
     def _resolve_eit_code_by_slot(self, slot: Resource) -> str:
         """[UniLab -> EIT] 将虚拟 Slot 反向解析为物理坐标字符串"""
         try:
-        # 如果 slot 的父节点是仓库，其名称现在已经是硬件编码格式
-            if slot.parent and slot.parent.name != "EIT_Synthesis_Station_Deck":
-                return slot.name
-            return ""
+            wh = slot.parent
+            if not wh or wh.name == "EIT_Synthesis_Station_Deck": 
+                # 如果解析到了 Deck 层级，说明槽位挂载层级有问题
+                # 或者该 slot 直接挂在了 Deck 上
+                return ""
+            
+            zone_name = wh.name
+            idx = wh.children.index(slot)
+            num_cols = getattr(wh, "num_items_x", 1) #
+            num_rows = getattr(wh, "num_items_y", 1) #
+
+            # 根据行数动态决定输出格式：多行则输出三段式，单行则输出两段式
+            if num_rows > 1:
+                row = (idx // num_cols) + 1
+                col = (idx % num_cols) + 1
+                return f"{zone_name}-{row}-{col}"
+            else:
+                return f"{zone_name}-{idx + 1}"
         except:
             return ""
         
     def _resolve_slot_by_eit_code(self, eit_code: str) -> Optional[Resource]:
         """使用 A01 命名规则精确定位 Slot"""
         try:
-            if not eit_code or '-' not in eit_code: 
-                return None
             
-            # 提取仓库名称 (W, T 等)
+            if not eit_code or '-' not in eit_code: return None
             parts = eit_code.split('-')
             zone_key = parts[0]
             
             wh = self.deck.get_resource(zone_key)
-            if not wh: 
+            if not wh: return None
+
+            num_cols = getattr(wh, "num_items_x", 1)
+            LETTERS = "ABCDEFGHIJKLMNOPQRSTUVWXYZ"
+
+            # 计算行列索引
+            if len(parts) == 2:
+                idx = int(parts[1]) - 1
+                row = idx // num_cols
+                col = idx % num_cols
+            elif len(parts) == 3:
+                row = int(parts[1]) - 1
+                col = int(parts[2]) - 1
+            else:
                 return None
 
-            # 由于槽位已被重命名为 W-1-1 这种格式，可以直接通过名称获取
-            return wh.get_resource(eit_code)
+            # 生成符合 warehouse_factory 规则的 A01 风格键值
+            target_key = f"{LETTERS[row]}{col + 1:02d}"
+            return wh.get_item(target_key)
             
         except Exception as e:
             logger.debug(f"坐标映射失败 {eit_code}: {e}")
