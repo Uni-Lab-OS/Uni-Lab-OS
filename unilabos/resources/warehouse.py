@@ -79,6 +79,8 @@ def warehouse_factory(
 
     if name_by_layout_code:
         def _layout_code_from_key(key: str) -> str:
+            if "-" in key:
+                return key
             row_letter = key[:1]
             col_str = key[1:]
             try:
@@ -93,8 +95,10 @@ def warehouse_factory(
                 return f"{name}-{col}"
             return f"{name}-{row}-{col}"
 
-        for key, site in zip(keys, _sites.values()):
-            site.name = _layout_code_from_key(key)
+        layout_keys = [_layout_code_from_key(key) for key in keys]
+        for key, site in zip(layout_keys, _sites.values()):
+            site.name = key
+        keys = layout_keys
 
     sites = {i: site for i, site in zip(keys, _sites.values())}
 
@@ -112,6 +116,7 @@ def warehouse_factory(
         sites=sites,
         category=category,
         model=model,
+        name_by_layout_code=name_by_layout_code,
     )
 
 
@@ -131,6 +136,7 @@ class WareHouse(ItemizedCarrier):
         category: str = "warehouse",
         model: Optional[str] = None,
         ordering_layout: str = "col-major",
+        name_by_layout_code: bool = False,
         **kwargs
     ):
         super().__init__(
@@ -152,11 +158,32 @@ class WareHouse(ItemizedCarrier):
         # 保存排序方式，供graphio.py的坐标映射使用
         # 使用独立属性避免与父类的layout冲突
         self.ordering_layout = ordering_layout
+        self.name_by_layout_code = name_by_layout_code
+
+    def _layout_code_from_key(self, key: str) -> str:
+        if "-" in key:
+            return key
+        row_letter = key[:1]
+        col_str = key[1:]
+        try:
+            row = LETTERS.index(row_letter) + 1
+        except ValueError:
+            row = 1
+        try:
+            col = int(col_str)
+        except ValueError:
+            col = 1
+        if self.num_items_y == 1:
+            return f"{self.name}-{col}"
+        return f"{self.name}-{row}-{col}"
 
     def serialize(self) -> dict:
         """序列化时保存 ordering_layout 属性"""
         data = super().serialize()
         data['ordering_layout'] = self.ordering_layout
+        if self.name_by_layout_code:
+            for site in data.get("sites", []):
+                site["label"] = self._layout_code_from_key(site.get("label", ""))
         return data
 
     def get_site_by_layer_position(self, row: int, col: int, layer: int) -> ResourceHolder:
@@ -166,6 +193,8 @@ class WareHouse(ItemizedCarrier):
         row_str = LETTERS[row]
         col_str = f"{col + 1:02d}"
         target_key = f"{row_str}{col_str}"
+        if self.name_by_layout_code:
+            target_key = self._layout_code_from_key(target_key)
 
         return self.get_item(target_key)
     

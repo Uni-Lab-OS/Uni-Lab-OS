@@ -125,11 +125,7 @@ class EITSynthesisResourceSynchronizer(ResourceSynchronizer):
                 deck._recursive_assign_uuid(deck)
 
             logger.info("正在上传 EIT Deck 到云端...")
-            ROS2DeviceNode.run_async_func(
-                self.workstation._ros_node.update_resource, 
-                True, 
-                **{"resources": [deck]}
-            )
+            self._update_resource_flattened([deck])
 
     def sync_from_external(self) -> bool:
         """[工站 -> 前端] 从 EIT 获取资源信息并更新 UniLab Deck"""
@@ -262,11 +258,7 @@ class EITSynthesisResourceSynchronizer(ResourceSynchronizer):
             elif changed_warehouses:
                 # 增量推送：仅发送发生变动的仓库对象，有效解决减少物料同步并减轻前端性能压力
                 logger.info(f"检测到 {len(changed_warehouses)} 个分区变动，执行增量更新上报")
-                ROS2DeviceNode.run_async_func(
-                    self.workstation._ros_node.update_resource, 
-                    True, 
-                    **{"resources": changed_warehouses}
-                )
+                self._update_resource_flattened(changed_warehouses)
             
             return True
         except Exception as e:
@@ -284,6 +276,117 @@ class EITSynthesisResourceSynchronizer(ResourceSynchronizer):
         except Exception as e:
             logger.error(f"执行物理上料失败: {e}")
             return False
+
+    def _update_resource_flattened(self, resources: List[Resource]) -> None:
+        """上传前扁平化资源树，移除仓库/托盘内的站位节点。"""
+        tree_dump = self._build_flattened_tree_dump(resources)
+        ROS2DeviceNode.run_async_func(
+            self.workstation._ros_node.update_resource,
+            True,
+            **{"resources": resources, "resource_tree_dump": tree_dump},
+        )
+
+    def _build_flattened_tree_dump(self, resources: List[Resource]) -> List[List[Dict[str, Any]]]:
+        tree_set = resource_tracker.ResourceTreeSet.from_plr_resources(resources)
+        tree_dump = tree_set.dump()
+        return self._flatten_resource_holder_nodes(tree_dump)
+
+    def _flatten_resource_holder_nodes(
+        self, tree_dump: List[List[Dict[str, Any]]]
+    ) -> List[List[Dict[str, Any]]]:
+        """扁平化 ResourceHolder 节点，保留布局坐标。"""
+        flattened_trees: List[List[Dict[str, Any]]] = []
+        for tree_nodes in tree_dump:
+            nodes_by_uuid = {node.get("uuid"): node for node in tree_nodes if node.get("uuid")}
+            children_map: Dict[Optional[str], List[str]] = {}
+            for node in tree_nodes:
+                node_uuid = node.get("uuid")
+                if not node_uuid:
+                    continue
+                parent_uuid = node.get("parent_uuid")
+                children_map.setdefault(parent_uuid, []).append(node_uuid)
+
+            def is_removable(node: Dict[str, Any]) -> bool:
+                if node.get("type") != "resource_holder":
+                    return False
+                parent_uuid = node.get("parent_uuid")
+                parent = nodes_by_uuid.get(parent_uuid)
+                if not parent:
+                    return False
+                return parent.get("type") in {"warehouse", "bottle_carrier"}
+
+            for node_uuid, node in list(nodes_by_uuid.items()):
+                if not is_removable(node):
+                    continue
+                parent_uuid = node.get("parent_uuid")
+                slot_label = node.get("name") or node.get("id")
+                reparented_children: List[Dict[str, Any]] = []
+                for child_uuid in children_map.get(node_uuid, []):
+                    child = nodes_by_uuid.get(child_uuid)
+                    if not child:
+                        continue
+                    child["parent_uuid"] = parent_uuid
+                    self._add_pose_offset(child.get("pose", {}), node.get("pose", {}))
+                    children_map.setdefault(parent_uuid, []).append(child_uuid)
+                    reparented_children.append(child)
+                if parent_uuid in children_map:
+                    children_map[parent_uuid] = [c for c in children_map[parent_uuid] if c != node_uuid]
+                parent_node = nodes_by_uuid.get(parent_uuid) if parent_uuid else None
+                if parent_node and slot_label:
+                    child_name = reparented_children[0].get("name") if reparented_children else None
+                    self._set_site_occupied(parent_node, slot_label, child_name)
+                nodes_by_uuid.pop(node_uuid, None)
+            flattened_trees.append(list(nodes_by_uuid.values()))
+        return flattened_trees
+
+    def _add_pose_offset(self, child_pose: Dict[str, Any], offset_pose: Dict[str, Any]) -> None:
+        for key in ("position", "position3d"):
+            child_pos = child_pose.get(key)
+            offset_pos = offset_pose.get(key)
+            if not isinstance(child_pos, dict) or not isinstance(offset_pos, dict):
+                continue
+            child_pos["x"] = float(child_pos.get("x", 0.0)) + float(offset_pos.get("x", 0.0))
+            child_pos["y"] = float(child_pos.get("y", 0.0)) + float(offset_pos.get("y", 0.0))
+            child_pos["z"] = float(child_pos.get("z", 0.0)) + float(offset_pos.get("z", 0.0))
+
+    def _set_site_occupied(self, parent_node: Dict[str, Any], slot_label: str, child_name: Optional[str]) -> None:
+        config = parent_node.get("config")
+        if not isinstance(config, dict):
+            return
+        sites = config.get("sites")
+        if not isinstance(sites, list):
+            return
+        label_candidates = [slot_label]
+        layout_label = self._layout_label_from_a01(parent_node, slot_label)
+        if layout_label and layout_label not in label_candidates:
+            label_candidates.append(layout_label)
+        for site in sites:
+            if site.get("label") in label_candidates:
+                site["occupied_by"] = child_name
+                break
+
+    def _layout_label_from_a01(self, parent_node: Dict[str, Any], slot_label: str) -> Optional[str]:
+        if not slot_label or "-" in slot_label:
+            return slot_label or None
+        row_letter = slot_label[:1]
+        col_str = slot_label[1:]
+        if not row_letter.isalpha() or not col_str.isdigit():
+            return None
+        try:
+            row = "ABCDEFGHIJKLMNOPQRSTUVWXYZ".index(row_letter.upper()) + 1
+            col = int(col_str)
+        except ValueError:
+            return None
+        parent_name = parent_node.get("name") or parent_node.get("id")
+        if not parent_name:
+            return None
+        config = parent_node.get("config")
+        num_items_y = None
+        if isinstance(config, dict):
+            num_items_y = config.get("num_items_y")
+        if num_items_y == 1:
+            return f"{parent_name}-{col}"
+        return f"{parent_name}-{row}-{col}"
 
     def sync_to_external(self, resource: Resource) -> bool:
         """[虚拟 -> 硬件] 将本地操作同步到物理硬件"""
@@ -445,7 +548,7 @@ class EITSynthesisWorkstation(WorkstationBase):
             return ""
         
     def _resolve_slot_by_eit_code(self, eit_code: str) -> Optional[Resource]:
-        """使用 A01 命名规则精确定位 Slot"""
+        """使用 layout_code 或 A01 命名规则精确定位 Slot"""
         try:
             
             if not eit_code or '-' not in eit_code: return None
@@ -454,6 +557,12 @@ class EITSynthesisWorkstation(WorkstationBase):
             
             wh = self.deck.get_resource(zone_key)
             if not wh: return None
+
+            if getattr(wh, "name_by_layout_code", False):
+                try:
+                    return wh.get_item(eit_code)
+                except Exception:
+                    pass
 
             num_cols = getattr(wh, "num_items_x", 1)
             LETTERS = "ABCDEFGHIJKLMNOPQRSTUVWXYZ"

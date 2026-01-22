@@ -93,8 +93,8 @@ def eit_warehouse_MSB(name: str) -> WareHouse:
     """创建eit MSB仓库"""
     return warehouse_factory(
         name=name,
-        num_items_x=1,
-        num_items_y=2,
+        num_items_x=2,
+        num_items_y=1,
         num_items_z=1,
         dx=10.0,
         dy=10.0,
@@ -115,8 +115,8 @@ def eit_warehouse_SC(name: str) -> WareHouse:
     """创建eit SC仓库 (SC区堆栈)"""
     return warehouse_factory(
         name=name,
-        num_items_x=1,
-        num_items_y=2,
+        num_items_x=2,
+        num_items_y=1,
         num_items_z=1,
         dx=10.0,
         dy=10.0,
@@ -137,8 +137,8 @@ def eit_warehouse_TS(name: str) -> WareHouse:
     """创建eit TS仓库 (TS区堆栈)"""
     return warehouse_factory(
         name=name,
-        num_items_x=1,
-        num_items_y=2,
+        num_items_x=2,
+        num_items_y=1,
         num_items_z=1,
         dx=10.0,
         dy=10.0,
@@ -203,8 +203,8 @@ def eit_warehouse_AS(name: str) -> WareHouse:
     """创建eit AS仓库 (AS区堆栈)"""
     return warehouse_factory(
         name=name,
-        num_items_x=1,
-        num_items_y=2,
+        num_items_x=2,
+        num_items_y=1,
         num_items_z=1,
         dx=10.0,
         dy=10.0,
