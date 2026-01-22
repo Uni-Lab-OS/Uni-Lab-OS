@@ -38,60 +38,60 @@ class EIT_Bottle(Bottle):
 
 def EIT_REAGENT_BOTTLE_2ML(name: str, **kwargs) -> EIT_Bottle:
     kwargs.update({"model": "502000353"})
-    res = EIT_Bottle(name=name, diameter=70.0, height=120.0, max_volume=2000.0, **kwargs)
+    res = EIT_Bottle(name=name, diameter=7.5, height=45.0, max_volume=2000.0, **kwargs)
     res.unilabos_uuid = str(uuid.uuid4())
     return res
 
 def EIT_REAGENT_BOTTLE_8ML(name: str, **kwargs) -> EIT_Bottle:
     kwargs.update({"model": "220000005"})
-    res = EIT_Bottle(name=name, diameter=70.0, height=120.0, max_volume=8000.0, **kwargs)
+    res = EIT_Bottle(name=name, diameter=15.0, height=60.0, max_volume=8000.0, **kwargs)
     res.unilabos_uuid = str(uuid.uuid4())
     return res
 
 def EIT_REAGENT_BOTTLE_40ML(name: str, **kwargs) -> EIT_Bottle:
     kwargs.update({"model": "220000092"})
-    res = EIT_Bottle(name=name, diameter=70.0, height=120.0, max_volume=40000.0, **kwargs)
+    res = EIT_Bottle(name=name, diameter=22.0, height=85.0, max_volume=40000.0, **kwargs)
     res.unilabos_uuid = str(uuid.uuid4())
     return res
 
 def EIT_REAGENT_BOTTLE_125ML(name: str, **kwargs) -> EIT_Bottle:
     kwargs.update({"model": "220000008"})
-    res = EIT_Bottle(name=name, diameter=70.0, height=120.0, max_volume=125000.0, **kwargs)
+    res = EIT_Bottle(name=name, diameter=34.0, height=120.0, max_volume=125000.0, **kwargs)
     res.unilabos_uuid = str(uuid.uuid4())
     return res
 
 def EIT_POWDER_BUCKET_30ML(name: str, **kwargs) -> EIT_Bottle:
     kwargs.update({"model": "201000816"})
-    res = EIT_Bottle(name=name, diameter=50.0, height=70.0, max_volume=30000.0, **kwargs)
+    res = EIT_Bottle(name=name, diameter=23.0, height=60.0, max_volume=30000.0, **kwargs)
     res.unilabos_uuid = str(uuid.uuid4())
     return res
 
 def EIT_FLASH_FILTER_INNER_BOTTLE(name: str, **kwargs) -> EIT_Bottle:
     kwargs.update({"model": "220000320"})
-    res = EIT_Bottle(name=name, diameter=50.0, height=70.0, max_volume=30000.0, **kwargs)
+    res = EIT_Bottle(name=name, diameter=8.0, height=55.0, max_volume=30000.0, **kwargs)
     res.unilabos_uuid = str(uuid.uuid4())
     return res
 
 def EIT_FLASH_FILTER_OUTER_BOTTLE(name: str, **kwargs) -> EIT_Bottle:
     kwargs.update({"model": "220000321"})
-    res = EIT_Bottle(name=name, diameter=60.0, height=80.0, max_volume=40000.0, **kwargs)
+    res = EIT_Bottle(name=name, diameter=9.0, height=60.0, max_volume=40000.0, **kwargs)
     res.unilabos_uuid = str(uuid.uuid4())
     return res
 
 def EIT_REACTION_SEAL_CAP(name: str, **kwargs) -> EIT_Bottle:
     kwargs.update({"model": "211009427"})
-    res = EIT_Bottle(name=name, diameter=20.0, height=15.0, max_volume=0.0, **kwargs)
+    res = EIT_Bottle(name=name, diameter=45.0, height=12.0, max_volume=0.0, **kwargs)
     res.unilabos_uuid = str(uuid.uuid4())
     return res
 
 def EIT_REACTION_TUBE_2ML(name: str, **kwargs) -> EIT_Bottle:
     kwargs.update({"model": "551000502"})
-    res = EIT_Bottle(name=name, diameter=16.0, height=60.0, max_volume=2000.0, **kwargs)
+    res = EIT_Bottle(name=name, diameter=11.0, height=45.0, max_volume=2000.0, **kwargs)
     res.unilabos_uuid = str(uuid.uuid4())
     return res
 
 def EIT_TEST_TUBE_MAGNET_2ML(name: str, **kwargs) -> EIT_Bottle:
     kwargs.update({"model": "220000322"})
-    res = EIT_Bottle(name=name, diameter=16.0, height=60.0, max_volume=2000.0, **kwargs)
+    res = EIT_Bottle(name=name, diameter=11.0, height=45.0, max_volume=2000.0, **kwargs)
     res.unilabos_uuid = str(uuid.uuid4())
     return res

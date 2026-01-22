@@ -20,8 +20,8 @@ class EIT_Synthesis_Station_Deck(Deck):
     def __init__(
         self,
         name: str = "Synthesis_Station_Deck",
-        size_x: float = 2700.0,
-        size_y: float = 1080.0,
+        size_x: float = 2800.0,
+        size_y: float = 1500.0,
         size_z: float = 1500.0,
         category: str = "deck",
         setup: bool = False,
@@ -55,16 +55,16 @@ class EIT_Synthesis_Station_Deck(Deck):
             "TS": eit_warehouse_TS("TS"),
         }
         self.warehouse_locations = {
-            "W": Coordinate(100.0, 100.0, 0.0), 
-            "N": Coordinate(100.0, 700.0, 0.0), 
-            "TB": Coordinate(100.0, 1300.0, 0.0),
-            "AS": Coordinate(1500.0, 100.0, 0.0),
-            "FF": Coordinate(1500.0, 400.0, 0.0),
-            "MS": Coordinate(1500.0, 700.0, 0.0),
-            "MSB": Coordinate(1500.0, 1000.0, 0.0),
-            "SC": Coordinate(1500.0, 1300.0, 0.0),
-            "T": Coordinate(2500.0, 100.0, 0.0),
-            "TS": Coordinate(2500.0, 400.0, 0.0),
+            "W": Coordinate(80.0, 80.0, 0.0),
+            "TB": Coordinate(80.0, 560.0, 0.0),
+            "N": Coordinate(80.0, 848.0, 0.0),
+            "AS": Coordinate(1400.0, 80.0, 0.0),
+            "FF": Coordinate(1400.0, 360.0, 0.0),
+            "MS": Coordinate(1400.0, 540.0, 0.0),
+            "MSB": Coordinate(1400.0, 720.0, 0.0),
+            "SC": Coordinate(2100.0, 720.0, 0.0),
+            "T": Coordinate(2100.0, 80.0, 0.0),
+            "TS": Coordinate(2100.0, 360.0, 0.0),
         }
 
         for zone_key, warehouse in self.warehouses.items():

@@ -4,6 +4,7 @@ EIT 合成工作站物料同步系统
 """
 
 import time
+import threading
 from typing import Dict, Any, List, Optional, Tuple
 from unilabos.devices.workstation.workstation_base import WorkstationBase, ResourceSynchronizer, WorkflowStatus
 from unilabos.utils.log import logger
@@ -63,7 +64,7 @@ def _force_inject_eit_types():
             
 _force_inject_eit_types()
 
-class EITResourceSynchronizer(ResourceSynchronizer):
+class EITSynthesisResourceSynchronizer(ResourceSynchronizer):
     """EIT 资源同步器：负责具体的 API 调用与数据转换"""
 
     # 1. 建立 ResourceCode 与载架工厂函数的映射
@@ -97,7 +98,7 @@ class EITResourceSynchronizer(ResourceSynchronizer):
         int(ResourceCode.TEST_TUBE_MAGNET_TRAY_2ML): items.EIT_TEST_TUBE_MAGNET_2ML,
     }
 
-    def __init__(self, workstation: 'EITWorkstation'):
+    def __init__(self, workstation: 'EITSynthesisWorkstation'):
         super().__init__(workstation)
         self.manager: Optional[SynthesisStationManager] = None
         self.initialize()
@@ -136,12 +137,13 @@ class EITResourceSynchronizer(ResourceSynchronizer):
             raw_data = self.manager.get_resource_info()
             if not raw_data: return True
 
+            # 保留原始 layout_code 作为唯一索引
             hardware_items = {item.get("layout_code"): item for item in raw_data} if raw_data else {}
             occupied_codes = set(hardware_items.keys())
             
             # 记录发生变化的仓库，用于增量上传
             changed_warehouses = [] 
-            # 获取是否已完成首次全量同步的标识（在 EITWorkstation 中定义）
+            # 获取是否已完成首次全量同步的标识（在 EITSynthesisWorkstation 中定义）
             is_first_sync = not getattr(self.workstation, "_first_full_sync_done", False)
 
             # 2. 安全地获取所有仓库资源
@@ -153,27 +155,54 @@ class EITResourceSynchronizer(ResourceSynchronizer):
             if not warehouses and is_first_sync:
                 logger.warning("Deck 上未发现 WareHouse 资源，请检查 Deck 是否正确执行了 setup() 初始化")
 
-            # 3. 核心比对逻辑：遍历本地所有已知槽位，与硬件状态对齐
+            # 3. 核心比对逻辑：以 EIT 原始 layout_code 为准定位槽位
+            #    这样前端展示的 layout_code 与 EIT 保持一致（两段式/三段式混用）
+            occupied_slots = {}
+            for eit_code in occupied_codes:
+                slot = self.workstation._resolve_slot_by_eit_code(eit_code)
+                if slot:
+                    occupied_slots[slot] = eit_code
+
             for wh in warehouses:
                 wh_changed = False
                 for slot in wh.children:
-                    # 将虚拟 Slot 解析为 EIT 物理编码 (如 W-1 或 W-1-1)
-                    eit_code = self.workstation._resolve_eit_code_by_slot(slot)
-                    if not eit_code: continue
-
-                    # 获取本地槽位当前挂载的物料（通常是 BottleCarrier）
+                    # 使用 EIT 原始 layout_code 匹配槽位
+                    eit_code = occupied_slots.get(slot)
                     current_child = slot.children[0] if slot.children else None
                     
                     # --- 情况 A：硬件端该位点有物料 (增加或更新) ---
-                    if eit_code in occupied_codes:
+                    if eit_code:
                         item = hardware_items[eit_code]
                         res_type = int(item.get("resource_type"))
+                        details = item.get("substance_details", [])
+                        tray_display_name = item.get("resource_type_name") or "EIT Tray"
+                        desired_tray_name = f"{tray_display_name}@{eit_code}"
                         
                         # 【增量优化】如果类型没变且非首次同步，跳过重建以减少前端卡顿
                         if not is_first_sync and current_child:
                             existing_type = getattr(current_child, "eit_resource_type", None)
                             if existing_type == res_type:
-                                continue 
+                                names_match = current_child.name == desired_tray_name
+                                if names_match and details and hasattr(current_child, "sites"):
+                                    for detail in details:
+                                        slot_idx = detail.get("slot")
+                                        if slot_idx is None or slot_idx >= len(current_child.sites):
+                                            continue
+                                        well_name = detail.get("well") or f"slot_{slot_idx + 1}"
+                                        substance_name = detail.get("substance") or well_name
+                                        desired_bottle_name = f"{substance_name}@{well_name}"
+                                        site = current_child.get_item(slot_idx)
+                                        child = site.children[0] if site and site.children else None
+                                        if not child or child.name != desired_bottle_name:
+                                            names_match = False
+                                            break
+                                if names_match:
+                                    # 保留已有的 eit_layout_code，避免覆盖原始格式
+                                    if not getattr(current_child, "unilabos_extra", None):
+                                        current_child.unilabos_extra = {}
+                                    current_child.unilabos_extra["eit_layout_code"] = eit_code
+                                    current_child.unilabos_extra["eit_resource_type"] = res_type
+                                    continue 
 
                         # 若类型不匹配或原槽位为空，清理旧物料并重建
                         if current_child:
@@ -182,9 +211,9 @@ class EITResourceSynchronizer(ResourceSynchronizer):
                         # 根据资源类型调用对应的载架工厂函数
                         factory_func = self.CARRIER_FACTORY.get(res_type)
                         if factory_func:
-                            new_carrier = factory_func(name=f"eit_tray_{eit_code}")
+                            new_carrier = factory_func(name=desired_tray_name)
                         else:
-                            new_carrier = Container(name=f"eit_tray_{eit_code}", size_x=127.8, size_y=85.5, size_z=20)
+                            new_carrier = Container(name=desired_tray_name, size_x=127.8, size_y=85.5, size_z=20)
                             new_carrier.description = item.get("resource_type_name")
                         
                         # 注入 UUID 与同步必需的元数据
@@ -194,16 +223,19 @@ class EITResourceSynchronizer(ResourceSynchronizer):
                             "eit_layout_code": eit_code,
                             "eit_resource_type": res_type
                         }
+                        new_carrier.description = tray_display_name
 
                         # 填充载架内部细节（例如试剂瓶/吸头等子物料）
-                        details = item.get("substance_details", [])
                         item_factory = self.TRAY_TO_ITEM_MAP.get(res_type)
                         if item_factory and hasattr(new_carrier, 'sites'):
                             for detail in details:
                                 slot_idx = detail.get("slot")
                                 if slot_idx < len(new_carrier.sites):
-                                    bottle = item_factory(name=f"{new_carrier.name}_well_{detail.get('well')}")
+                                    well_name = detail.get("well") or f"slot_{slot_idx + 1}"
+                                    substance_name = detail.get("substance") or well_name
+                                    bottle = item_factory(name=f"{substance_name}@{well_name}")
                                     bottle.unilabos_uuid = str(uuid.uuid4())
+                                    bottle.description = substance_name
                                     new_carrier.get_item(slot_idx).assign_child_resource(bottle)
                         
                         # 将新创建的物料挂载到虚拟槽位
@@ -212,7 +244,7 @@ class EITResourceSynchronizer(ResourceSynchronizer):
 
                     # --- 情况 B：硬件端该位点为空，但本地有物料 (检测到物料被移除/减少) ---
                     elif current_child:
-                        logger.info(f"[同步] 检测到硬件位点 {eit_code} 为空，同步移除本地物料")
+                        logger.info(f"[同步] 检测到硬件位点为空，同步移除本地物料")
                         # 执行逻辑移除，清空本地虚拟槽位
                         slot.unassign_child_resource(current_child)
                         wh_changed = True
@@ -277,7 +309,7 @@ class EITResourceSynchronizer(ResourceSynchronizer):
         # 触发全量状态更新以确保前端一致性
         return self.sync_from_external()
 
-class EITWorkstation(WorkstationBase):
+class EITSynthesisWorkstation(WorkstationBase):
     """EIT 工作站核心类：集成资源树钩子与状态监控"""
 
     def __init__(
@@ -289,13 +321,10 @@ class EITWorkstation(WorkstationBase):
         self.name = getattr(self, "device_id", "eit_station") 
         self.unilabos_uuid = getattr(self, "uuid", None)
         self.config = config or {}
-        self.resource_synchronizer = EITResourceSynchronizer(self)
+        self.resource_synchronizer = EITSynthesisResourceSynchronizer(self)
         self.manager = self.resource_synchronizer.manager
 
-    def batch_in_from_file(self, file_path: str = "unilabos/devices/workstation/eit_synthesis_station/batch_in_tray.xlsx"):
-        """批量进料接口，支持指定文件路径"""
-        return self.manager.batch_in_tray_by_file(file_path)
-   
+ 
     def post_init(self, ros_node: ROS2WorkstationNode):
         """初始化后上传 Deck 资源树"""
         self._ros_node = ros_node
@@ -321,12 +350,21 @@ class EITWorkstation(WorkstationBase):
             return {"connected": False}
 
     # ================= 资源树操作钩子 =================
+
+    def _get_eit_layout_code(self, res: Resource) -> str:
+        """优先使用物料自带的 layout_code，缺失时再回退到槽位反解"""
+        eit_code = getattr(res, "unilabos_extra", {}).get("eit_layout_code")
+        if eit_code:
+            return eit_code
+        if res.parent:
+            return self._resolve_eit_code_by_slot(res.parent)
+        return ""
     
     def resource_tree_add(self, resources: List[Resource]):
         """处理前端物料添加请求（上料）"""
         for res in resources:
             if res.parent:
-                eit_code = self._resolve_eit_code_by_slot(res.parent)
+                eit_code = self._get_eit_layout_code(res)
                 if eit_code:
                     if not hasattr(res, "unilabos_extra"): res.unilabos_extra = {}
                     res.unilabos_extra["eit_layout_code"] = eit_code
@@ -336,20 +374,27 @@ class EITWorkstation(WorkstationBase):
         """用户在前端删除物料时触发：执行物理下料"""
         top_level_names = {res.name for res in resources}
         processed_codes = set()
+        layout_list = []
 
         for res in resources:
-            eit_code = getattr(res, "unilabos_extra", {}).get("eit_layout_code")
-            if not eit_code and res.parent:
-                eit_code = self._resolve_eit_code_by_slot(res.parent)
+            eit_code = self._get_eit_layout_code(res)
             if eit_code and eit_code not in processed_codes:
                 # 只有当该资源是顶层或其父节点不在删除列表中时才处理
                 parent_resource = res.parent
                 if parent_resource and parent_resource.name not in top_level_names:
                     logger.info(f"[EIT] 真正触发硬件下料动作: {eit_code}")
-                    # 调用 API，move_type 默认为 0（普通移动/下料）
-                    # self.manager.batch_out_tray([eit_code])
+                    layout_list.append({"layout_code": eit_code})
                     processed_codes.add(eit_code)
 
+        if layout_list:
+            # 下料接口会阻塞等待设备空闲，需异步执行避免阻塞资源树回调导致超时
+            def _run_batch_out():
+                try:
+                    self.manager.batch_out_tray(layout_list)
+                except Exception as e:
+                    logger.error(f"[EIT] batch_out_tray 异步执行失败: {e}")
+
+            threading.Thread(target=_run_batch_out, daemon=True).start()
 
     def resource_tree_transfer(self, old_parent: Optional[Resource], resource: Resource, new_parent: Resource):
         """处理跨设备拖入：例如从物料库拖到工站槽位"""
@@ -361,7 +406,7 @@ class EITWorkstation(WorkstationBase):
         """处理前端拖拽或修改属性后的同步"""
         for res in resources:
             if res.parent:
-                new_eit_code = self._resolve_eit_code_by_slot(res.parent)
+                new_eit_code = self._get_eit_layout_code(res)
                 old_eit_code = getattr(res, "unilabos_extra", {}).get("eit_layout_code")
                 
                 if new_eit_code != old_eit_code:
@@ -372,31 +417,6 @@ class EITWorkstation(WorkstationBase):
                     # 2. 同步硬件动作
                     self.resource_synchronizer.sync_to_external(res)
 
-    def batch_in_from_file(self, file_path: str) -> Dict[str, Any]:
-        """
-        处理来自前端的批量进料请求
-        
-        Args:
-            file_path: 上传到服务器的进料表格路径 (.csv 或 .xlsx)
-        """
-        logger.info(f"收到前端批量进料请求，正在处理文件: {file_path}")
-        
-        try:
-            # 1. 直接调用 SynthesisStationManager 已有的文件处理逻辑
-            # 该方法会自动解析 CSV/Excel 并构建 Payload 发送给 API
-            result = self.manager.batch_in_tray_by_file(file_path)
-            
-            # 2. 操作完成后，触发一次全量同步，更新前端物料显示
-            if result:
-                logger.info("物理进料 API 调用成功，正在更新云端物料树...")
-                self.resource_synchronizer.sync_from_external()
-                # 重新上传 Deck 状态，确保前端 3D 视图刷新
-                self.resource_synchronizer._push_deck_to_cloud()
-                
-            return {"success": True, "result": result}
-        except Exception as e:
-            logger.error(f"批量进料失败: {e}")
-            return {"success": False, "error": str(e)}
 
     # ================= 动态坐标转换逻辑 =================
 

@@ -13,14 +13,14 @@ def warehouse_factory(
     num_items_x: int = 1,
     num_items_y: int = 4,
     num_items_z: int = 4,
-    dx: float = 137.0,
-    dy: float = 96.0,
+    dx: float = 350.0,
+    dy: float = 160.0,
     dz: float = 120.0,
     item_dx: float = 10.0,
     item_dy: float = 10.0,
     item_dz: float = 10.0,
-    resource_size_x: float = 127.0,
-    resource_size_y: float = 86.0,
+    resource_size_x: float = 340.0,
+    resource_size_y: float = 150.0,
     resource_size_z: float = 25.0,
     removed_positions: Optional[List[int]] = None,
     empty: bool = False,
@@ -28,6 +28,7 @@ def warehouse_factory(
     model: Optional[str] = None,
     col_offset: int = 0,  # 列起始偏移量，用于生成A05-D08等命名
     layout: str = "col-major",  # 新增：排序方式，"col-major"=列优先，"row-major"=行优先
+    name_by_layout_code: bool = False,
 ):
     # 创建位置坐标
     locations = []
@@ -75,6 +76,25 @@ def warehouse_factory(
     else:
         # 列优先顺序: A01,B01,C01,D01, A02,B02,C02,D02
         keys = [f"{LETTERS[j]}{i + 1 + col_offset:02d}" for i in range(len_x) for j in range(len_y)]
+
+    if name_by_layout_code:
+        def _layout_code_from_key(key: str) -> str:
+            row_letter = key[:1]
+            col_str = key[1:]
+            try:
+                row = LETTERS.index(row_letter) + 1
+            except ValueError:
+                row = 1
+            try:
+                col = int(col_str)
+            except ValueError:
+                col = 1
+            if num_items_y == 1:
+                return f"{name}-{col}"
+            return f"{name}-{row}-{col}"
+
+        for key, site in zip(keys, _sites.values()):
+            site.name = _layout_code_from_key(key)
 
     sites = {i: site for i, site in zip(keys, _sites.values())}
 

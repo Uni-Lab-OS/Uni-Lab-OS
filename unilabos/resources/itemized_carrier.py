@@ -79,6 +79,7 @@ class ItemizedCarrier(ResourcePLR):
     category: Optional[str] = "carrier",
     model: Optional[str] = None,
     invisible_slots: Optional[str] = None,
+    hide_label: bool = False,
   ):
     super().__init__(
       name=name,
@@ -101,6 +102,7 @@ class ItemizedCarrier(ResourcePLR):
     self.num_items = len(sites)
     self.num_items_x, self.num_items_y, self.num_items_z = num_items_x, num_items_y, num_items_z
     self.invisible_slots = [] if invisible_slots is None else invisible_slots
+    self.hide_label = hide_label
     self.layout = "z-y" if self.num_items_z > 1 and self.num_items_x == 1 else "x-z" if self.num_items_z > 1 and self.num_items_y == 1 else "x-y"
 
     if isinstance(sites, dict):
@@ -429,12 +431,14 @@ class ItemizedCarrier(ResourcePLR):
       "num_items_y": self.num_items_y,
       "num_items_z": self.num_items_z,
       "layout": self.layout,
+      "hide_label": self.hide_label,
       "sites": [{
         "label": str(identifier),
+        "hide_label": self.hide_label,
         "visible": False if identifier in self.invisible_slots else True,
         "occupied_by": self[identifier].name
                         if isinstance(self[identifier], ResourcePLR) and not isinstance(self[identifier], ResourceHolder) else
-                        self[identifier] if isinstance(self[identifier], str) else None,
+        self[identifier] if isinstance(self[identifier], str) else None,
         "position": {"x": location.x, "y": location.y, "z": location.z},
         "size": self.child_size[identifier],
         "content_type": ["bottle", "container", "tube", "bottle_carrier", "tip_rack"]
@@ -455,6 +459,7 @@ class BottleCarrier(ItemizedCarrier):
         category: str = "bottle_carrier",
         model: Optional[str] = None,
         invisible_slots: List[str] = None,
+        hide_label: bool = False,
         **kwargs,
     ):
         super().__init__(
@@ -466,4 +471,5 @@ class BottleCarrier(ItemizedCarrier):
             category=category,
             model=model,
             invisible_slots=invisible_slots,
+            hide_label=hide_label,
         )

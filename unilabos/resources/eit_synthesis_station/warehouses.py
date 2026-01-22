@@ -11,12 +11,16 @@ def eit_warehouse_W(name: str) -> WareHouse:
         dx=10.0,
         dy=10.0,
         dz=10.0,
-        item_dx=147.0,
-        item_dy=106.0,
-        item_dz=130.0,
+        item_dx=140.0,
+        item_dy=98.0,
+        item_dz=120.0,
+        resource_size_x=127.8,
+        resource_size_y=85.5,
+        resource_size_z=40.0,
         category="warehouse",
         col_offset=0,  # 从01开始: A01, A02, A03, A04
         layout="row-major",  # ⭐ 改为行优先排序
+        name_by_layout_code=True,
     )
 
 def eit_warehouse_TB(name: str) -> WareHouse:
@@ -29,12 +33,16 @@ def eit_warehouse_TB(name: str) -> WareHouse:
         dx=10.0,
         dy=10.0,
         dz=10.0,
-        item_dx=147.0,
-        item_dy=106.0,
-        item_dz=130.0,
+        item_dx=140.0,
+        item_dy=98.0,
+        item_dz=120.0,
+        resource_size_x=127.8,
+        resource_size_y=85.5,
+        resource_size_z=40.0,
         category="warehouse",
         col_offset=0, 
         layout="row-major",
+        name_by_layout_code=True,
     )
 
 def eit_warehouse_N(name: str) -> WareHouse:
@@ -47,12 +55,16 @@ def eit_warehouse_N(name: str) -> WareHouse:
         dx=10.0,
         dy=10.0,
         dz=10.0,
-        item_dx=147.0,
-        item_dy=106.0,
-        item_dz=130.0,
+        item_dx=140.0,
+        item_dy=98.0,
+        item_dz=120.0,
+        resource_size_x=127.8,
+        resource_size_y=85.5,
+        resource_size_z=40.0,
         category="warehouse",
         col_offset=0,
         layout="row-major",
+        name_by_layout_code=True,
     )
 
 def eit_warehouse_T(name: str) -> WareHouse:
@@ -65,12 +77,16 @@ def eit_warehouse_T(name: str) -> WareHouse:
         dx=10.0,
         dy=10.0,
         dz=10.0,
-        item_dx=147.0,
-        item_dy=106.0,
-        item_dz=130.0,
+        item_dx=140.0,
+        item_dy=98.0,
+        item_dz=120.0,
+        resource_size_x=127.8,
+        resource_size_y=85.5,
+        resource_size_z=40.0,
         category="warehouse",
         col_offset=0,
         layout="row-major",  # ⭐ 改为行优先排序
+        name_by_layout_code=True,
     )
 
 def eit_warehouse_MSB(name: str) -> WareHouse:
@@ -83,12 +99,16 @@ def eit_warehouse_MSB(name: str) -> WareHouse:
         dx=10.0,
         dy=10.0,
         dz=10.0,
-        item_dx=147.0,
-        item_dy=106.0,
-        item_dz=130.0,
+        item_dx=140.0,
+        item_dy=98.0,
+        item_dz=120.0,
+        resource_size_x=127.8,
+        resource_size_y=85.5,
+        resource_size_z=40.0,
         category="warehouse",
         col_offset=0,
         layout="row-major",  # ⭐ 改为行优先排序
+        name_by_layout_code=True,
     )
 
 def eit_warehouse_SC(name: str) -> WareHouse:
@@ -101,12 +121,16 @@ def eit_warehouse_SC(name: str) -> WareHouse:
         dx=10.0,
         dy=10.0,
         dz=10.0,
-        item_dx=147.0,
-        item_dy=106.0,
-        item_dz=130.0,
+        item_dx=140.0,
+        item_dy=98.0,
+        item_dz=120.0,
+        resource_size_x=127.8,
+        resource_size_y=85.5,
+        resource_size_z=40.0,
         category="warehouse",
         col_offset=0,
         layout="row-major",  # ⭐ 改为行优先排序
+        name_by_layout_code=True,
     )
 
 def eit_warehouse_TS(name: str) -> WareHouse:
@@ -119,12 +143,16 @@ def eit_warehouse_TS(name: str) -> WareHouse:
         dx=10.0,
         dy=10.0,
         dz=10.0,
-        item_dx=147.0,
-        item_dy=106.0,
-        item_dz=130.0,
+        item_dx=140.0,
+        item_dy=98.0,
+        item_dz=120.0,
+        resource_size_x=127.8,
+        resource_size_y=85.5,
+        resource_size_z=40.0,
         category="warehouse",
         col_offset=0,
         layout="row-major",  # ⭐ 改为行优先排序
+        name_by_layout_code=True,
     )
 
 def eit_warehouse_MS(name: str) -> WareHouse:
@@ -137,12 +165,16 @@ def eit_warehouse_MS(name: str) -> WareHouse:
         dx=10.0,
         dy=10.0,
         dz=10.0,
-        item_dx=147.0,
-        item_dy=106.0,
-        item_dz=130.0,
+        item_dx=140.0,
+        item_dy=98.0,
+        item_dz=120.0,
+        resource_size_x=127.8,
+        resource_size_y=85.5,
+        resource_size_z=40.0,
         category="warehouse",
         col_offset=0,
         layout="row-major",  # ⭐ 改为行优先排序
+        name_by_layout_code=True,
     )
 
 def eit_warehouse_FF(name: str) -> WareHouse:
@@ -155,12 +187,16 @@ def eit_warehouse_FF(name: str) -> WareHouse:
         dx=10.0,
         dy=10.0,
         dz=10.0,
-        item_dx=147.0,
-        item_dy=106.0,
-        item_dz=130.0,
+        item_dx=140.0,
+        item_dy=98.0,
+        item_dz=120.0,
+        resource_size_x=127.8,
+        resource_size_y=85.5,
+        resource_size_z=40.0,
         category="warehouse",
         col_offset=0,
         layout="row-major",  # ⭐ 改为行优先排序
+        name_by_layout_code=True,
     )
 
 def eit_warehouse_AS(name: str) -> WareHouse:
@@ -173,10 +209,14 @@ def eit_warehouse_AS(name: str) -> WareHouse:
         dx=10.0,
         dy=10.0,
         dz=10.0,
-        item_dx=147.0,
-        item_dy=106.0,
-        item_dz=130.0,
+        item_dx=140.0,
+        item_dy=98.0,
+        item_dz=120.0,
+        resource_size_x=127.8,
+        resource_size_y=85.5,
+        resource_size_z=40.0,
         category="warehouse",
         col_offset=0,
         layout="row-major",  # ⭐ 改为行优先排序
+        name_by_layout_code=True,
     )

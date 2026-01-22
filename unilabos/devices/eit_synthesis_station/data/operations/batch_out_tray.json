@@ -1,0 +1,15 @@
+{
+  "start_time": "2026-01-22T09:30:48.124811",
+  "end_time": "2026-01-22T09:39:51.344938",
+  "resources": [
+    {
+      "layout_code": "T-2-2",
+      "count": 24,
+      "resource_type": 201000512,
+      "resource_type_name": "5 mL Tip 头托盘",
+      "substance_details": [],
+      "task_id": null,
+      "dst_layout_code": "TB-2-1"
+    }
+  ]
+}
