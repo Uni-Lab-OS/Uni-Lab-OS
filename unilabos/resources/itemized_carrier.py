@@ -473,3 +473,13 @@ class BottleCarrier(ItemizedCarrier):
             invisible_slots=invisible_slots,
             hide_label=hide_label,
         )
+
+    def serialize(self):
+        data = super().serialize()
+        children = data.get("children")
+        if isinstance(children, list):
+            data["children"] = [
+                child for child in children
+                if child.get("category") != "resource_holder"
+            ]
+        return data

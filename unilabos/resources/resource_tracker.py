@@ -359,6 +359,11 @@ class ResourceTreeSet(object):
 
             uuid_list.append((uid, parent_uuid, extra))
             for child in res.children:
+                if (
+                    getattr(res, "category", None) == "bottle_carrier"
+                    and getattr(child, "category", None) == "resource_holder"
+                ):
+                    continue
                 build_uuid_mapping(child, uuid_list, uid)
 
         def resource_plr_inner(
