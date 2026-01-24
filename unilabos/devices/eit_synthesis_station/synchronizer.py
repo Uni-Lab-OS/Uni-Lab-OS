@@ -18,8 +18,6 @@ from unilabos.resources import resource_tracker
 from unilabos.utils import cls_creator
 from unilabos.ros.nodes.base_device_node import ROS2DeviceNode
 import uuid
-
-# EIT 专用依赖
 from unilabos.devices.eit_synthesis_station.manager.station_manager import SynthesisStationManager
 from unilabos.devices.eit_synthesis_station.config.setting import Settings
 from unilabos.devices.eit_synthesis_station.config.constants import ResourceCode, TRAY_CODE_DISPLAY_NAME, TraySpec
@@ -42,47 +40,37 @@ def normalize_layout_code(eit_code: Optional[str]) -> Optional[str]:
             normalized.append(part)
     return "-".join(normalized)
 
-def _force_inject_eit_types():
-    # 解决反序列化为 dict 的问题
-    # 注意：这里需要注册类名字符串和对应的类
-    mappings = {
-        "EIT_Synthesis_Station_Deck": EIT_Synthesis_Station_Deck,
-        "WareHouse": WareHouse,
-        "BottleCarrier": BottleCarrier,
-        "ResourceHolder": ResourceHolder,
-        "Container": Container,
-        "Well": Well,
-        "deck": EIT_Synthesis_Station_Deck,
-        "warehouse": WareHouse,
-        "bottle_carrier": BottleCarrier,
-        "resource_holder": ResourceHolder,
-        "container": Container, 
-        "well": Well,
-    }
-    
-    # 1. 注册到 unilabos 全局类创建器 (cls_creator)
-    # 确保传入的是 cls 类对象，而不是字符串
-    for key, cls in mappings.items():
-        if hasattr(cls_creator, 'register'):
-            cls_creator.register(key, cls)
-        elif hasattr(cls_creator, 'CLASS_MAP'):
-            cls_creator.CLASS_MAP[key] = cls
-            
-    # 2. 特别注意：某些版本的 UniLab 需要将 PLR 原生资源注册到特定的 ResourceTracker
-    # 如果报错依然存在，可以尝试直接注入到 ResourceTracker
-    try:
-        from unilabos.resources import resource_tracker
-        if hasattr(resource_tracker, 'ResourceTracker'):
-            for key, cls in mappings.items():
-                # 某些版本直接在类或实例上维护 CLASS_MAP
-                resource_tracker.ResourceTracker.CLASS_MAP[key] = cls
-    except Exception as e:
-        logger.debug(f"跳过 ResourceTracker 直接注入: {e}")
-            
-_force_inject_eit_types()
+_EIT_TYPE_MAPPINGS = {
+    "EIT_Synthesis_Station_Deck": EIT_Synthesis_Station_Deck,
+    "WareHouse": WareHouse,
+    "BottleCarrier": BottleCarrier,
+    "ResourceHolder": ResourceHolder,
+    "Container": Container,
+    "Well": Well,
+    "deck": EIT_Synthesis_Station_Deck,
+    "warehouse": WareHouse,
+    "bottle_carrier": BottleCarrier,
+    "resource_holder": ResourceHolder,
+    "container": Container,
+    "well": Well,
+}
+
+for key, cls in _EIT_TYPE_MAPPINGS.items():
+    if hasattr(cls_creator, "register"):
+        cls_creator.register(key, cls)
+    elif hasattr(cls_creator, "CLASS_MAP"):
+        cls_creator.CLASS_MAP[key] = cls
+
+try:
+    from unilabos.resources import resource_tracker as _resource_tracker
+    if hasattr(_resource_tracker, "ResourceTracker"):
+        for key, cls in _EIT_TYPE_MAPPINGS.items():
+            _resource_tracker.ResourceTracker.CLASS_MAP[key] = cls
+except Exception as e:
+    logger.debug(f"跳过 ResourceTracker 直接注入: {e}")
 
 class EITSynthesisResourceSynchronizer(ResourceSynchronizer):
-    """EIT 资源同步器：负责具体的 API 调用与数据转换"""
+    """EIT 资源同步器"""
 
     # 1. 建立 ResourceCode 与载架工厂函数的映射
     CARRIER_FACTORY = {
@@ -132,126 +120,12 @@ class EITSynthesisResourceSynchronizer(ResourceSynchronizer):
             logger.error(f"EIT Synchronizer 初始化失败: {e}")
             return False
 
-    def _push_deck_to_cloud(self):
-        """安全地将当前 Deck 状态推送到云端，处理 Loop 未启动的情况"""
-        if self.workstation and hasattr(self.workstation, "_ros_node"):
-            deck = self.workstation.deck
-            
-            if hasattr(deck, "_recursive_assign_uuid"):
-                deck._recursive_assign_uuid(deck)
-
-            logger.info("正在上传 EIT Deck 到云端...")
-            self._update_resource_flattened([deck])
-
-    def _load_chemical_name_map(self) -> Dict[str, str]:
-        """Load English-to-substance mapping from the local chemical sheet."""
-        if self._chemical_name_map is not None:
-            return self._chemical_name_map
-
-        mapping: Dict[str, str] = {}
-        sheet_path = Path(__file__).resolve().parent / "sheet" / "chemical_list.xlsx"
-        if not sheet_path.exists():
-            logger.warning(f"[同步→硬件] 未找到化学品映射表: {sheet_path}")
-            self._chemical_name_map = mapping
-            return mapping
-
-        try:
-            with zipfile.ZipFile(sheet_path) as zf:
-                shared = zf.read("xl/sharedStrings.xml")
-                sheet = zf.read("xl/worksheets/sheet1.xml")
-        except Exception as exc:
-            logger.warning(f"[同步→硬件] 读取化学品映射表失败: {exc}")
-            self._chemical_name_map = mapping
-            return mapping
-
-        ns = {"a": "http://schemas.openxmlformats.org/spreadsheetml/2006/main"}
-
-        try:
-            shared_root = ET.fromstring(shared)
-            strings = [
-                (si.find(".//a:t", ns).text if si.find(".//a:t", ns) is not None else "")
-                for si in shared_root.findall("a:si", ns)
-            ]
-        except Exception:
-            strings = []
-
-        sheet_root = ET.fromstring(sheet)
-        sheet_data = sheet_root.find(".//a:sheetData", ns)
-        if sheet_data is None:
-            self._chemical_name_map = mapping
-            return mapping
-
-        def _col_index(cell_ref: str) -> int:
-            letters = "".join(ch for ch in cell_ref if ch.isalpha()).upper()
-            idx = 0
-            for ch in letters:
-                idx = idx * 26 + (ord(ch) - ord("A") + 1)
-            return idx - 1
-
-        def _cell_value(cell: ET.Element) -> Optional[str]:
-            cell_type = cell.get("t")
-            if cell_type == "inlineStr":
-                inline = cell.find("a:is/a:t", ns)
-                return inline.text if inline is not None else None
-            value_node = cell.find("a:v", ns)
-            if value_node is None:
-                return None
-            text = value_node.text or ""
-            if cell_type == "s":
-                try:
-                    return strings[int(text)]
-                except Exception:
-                    return None
-            return text
-
-        header: Dict[int, str] = {}
-        english_idx = None
-        substance_idx = None
-        for row_idx, row in enumerate(sheet_data.findall("a:row", ns), start=1):
-            row_values: Dict[int, str] = {}
-            for cell in row.findall("a:c", ns):
-                ref = cell.get("r") or ""
-                if ref == "":
-                    continue
-                col_idx = _col_index(ref)
-                value = _cell_value(cell)
-                if value is None:
-                    continue
-                row_values[col_idx] = str(value).strip()
-
-            if not row_values:
-                continue
-
-            if row_idx == 1:
-                header = {idx: val for idx, val in row_values.items() if val != ""}
-                for idx, name in header.items():
-                    if name == "substance_english_name":
-                        english_idx = idx
-                    elif name == "substance":
-                        substance_idx = idx
-                if english_idx is None or substance_idx is None:
-                    logger.warning("[同步→硬件] 化学品映射表缺少 substance_english_name 或 substance 列")
-                    break
-                continue
-
-            if english_idx is None or substance_idx is None:
-                break
-            english = row_values.get(english_idx, "").strip()
-            substance = row_values.get(substance_idx, "").strip()
-            if english and substance:
-                mapping.setdefault(english, substance)
-                mapping.setdefault(english.lower(), substance)
-
-        self._chemical_name_map = mapping
-        return mapping
-
     def sync_from_external(self) -> bool:
         """[工站 -> 前端] 从 EIT 获取资源信息并更新 UniLab Deck"""
         try:
             raw_data = self.manager.get_resource_info()
             if not raw_data: return True
 
-            # 保留原始 layout_code 作为唯一索引
             hardware_items = {}
             if raw_data:
                 for item in raw_data:
@@ -268,8 +142,6 @@ class EITSynthesisResourceSynchronizer(ResourceSynchronizer):
             is_first_sync = not getattr(self.workstation, "_first_full_sync_done", False)
 
             # 2. 安全地获取所有仓库资源
-            # 修复点：通过名称列表过滤 Deck 的子资源，避免直接访问不存在的 .warehouses 属性
-            # EIT 仓库标准命名：W, N, TB, AS, FF, MS, MSB, SC, T, TS
             eit_zones = ["W", "N", "TB", "AS", "FF", "MS", "MSB", "SC", "T", "TS"]
             warehouses = [res for res in self.workstation.deck.children if res.name in eit_zones]
             
@@ -277,7 +149,6 @@ class EITSynthesisResourceSynchronizer(ResourceSynchronizer):
                 logger.warning("Deck 上未发现 WareHouse 资源，请检查 Deck 是否正确执行了 setup() 初始化")
 
             # 3. 核心比对逻辑：以 EIT 原始 layout_code 为准定位槽位
-            #    这样前端展示的 layout_code 与 EIT 保持一致（两段式/三段式混用）
             slot_index: Dict[str, ResourceHolder] = {}
             for wh in warehouses:
                 for slot in wh.children:
@@ -307,7 +178,6 @@ class EITSynthesisResourceSynchronizer(ResourceSynchronizer):
                 for slot in wh.children:
                     if not isinstance(slot, ResourceHolder):
                         continue
-                    # 使用 EIT 原始 layout_code 匹配槽位
                     slot_name = normalize_layout_code(getattr(slot, "name", None))
                     if not slot_name:
                         continue
@@ -327,13 +197,6 @@ class EITSynthesisResourceSynchronizer(ResourceSynchronizer):
                             existing_type = getattr(current_child, "eit_resource_type", None)
                             if existing_type == res_type:
                                 names_match = current_child.name == desired_tray_name
-                                if not names_match:
-                                    logger.info(
-                                        "[同步] 托盘名称不匹配: 槽位=%s 本地='%s' 硬件='%s'",
-                                        eit_code,
-                                        current_child.name,
-                                        desired_tray_name,
-                                    )
                                 if names_match and details and hasattr(current_child, "sites"):
                                     for detail in details:
                                         slot_idx = detail.get("slot")
@@ -428,7 +291,12 @@ class EITSynthesisResourceSynchronizer(ResourceSynchronizer):
             # 4. 执行云端推送策略
             if is_first_sync:
                 # 首次全量同步：必须发送整个 Deck 以初始化完整的仓库和槽位结构
-                self._push_deck_to_cloud()
+                if self.workstation and hasattr(self.workstation, "_ros_node"):
+                    deck = self.workstation.deck
+                    if hasattr(deck, "_recursive_assign_uuid"):
+                        deck._recursive_assign_uuid(deck)
+                    logger.info("正在上传 EIT Deck 到云端...")
+                    self._update_resource_flattened([deck])
                 self.workstation._first_full_sync_done = True
                 logger.info("EIT 首次全量同步上报完成")
             elif changed_warehouses:
@@ -441,36 +309,10 @@ class EITSynthesisResourceSynchronizer(ResourceSynchronizer):
             logger.error(f"同步 EIT 硬件状态异常: {e}")
             return False
         
-    def batch_in_tray(self, resource: Resource, target_eit_code: str) -> bool:
-        """[UniLab -> 工站] 物理上料动作"""    
-        try:
-            tray_type = resource.description or "2 mL试剂瓶托盘"
-            rows = [(target_eit_code, tray_type, "")] 
-            payload = self.manager.build_batch_in_tray_payload(rows)
-            resp = self.manager.batch_in_tray(payload)
-            return resp is not None
-        except Exception as e:
-            logger.error(f"执行物理上料失败: {e}")
-            return False
-
     def _update_resource_flattened(self, resources: List[Resource]) -> None:
         """上传前扁平化资源树，移除仓库/托盘内的站位节点。"""
-        tree_dump = self._build_flattened_tree_dump(resources)
-        ROS2DeviceNode.run_async_func(
-            self.workstation._ros_node.update_resource,
-            True,
-            **{"resources": resources, "resource_tree_dump": tree_dump},
-        )
-
-    def _build_flattened_tree_dump(self, resources: List[Resource]) -> List[List[Dict[str, Any]]]:
         tree_set = resource_tracker.ResourceTreeSet.from_plr_resources(resources)
         tree_dump = tree_set.dump()
-        return self._flatten_resource_holder_nodes(tree_dump)
-
-    def _flatten_resource_holder_nodes(
-        self, tree_dump: List[List[Dict[str, Any]]]
-    ) -> List[List[Dict[str, Any]]]:
-        """扁平化 ResourceHolder 节点，保留布局坐标。"""
         flattened_trees: List[List[Dict[str, Any]]] = []
         for tree_nodes in tree_dump:
             nodes_by_uuid = {node.get("uuid"): node for node in tree_nodes if node.get("uuid")}
@@ -482,17 +324,12 @@ class EITSynthesisResourceSynchronizer(ResourceSynchronizer):
                 parent_uuid = node.get("parent_uuid")
                 children_map.setdefault(parent_uuid, []).append(node_uuid)
 
-            def is_removable(node: Dict[str, Any]) -> bool:
+            for node_uuid, node in list(nodes_by_uuid.items()):
                 if node.get("type") != "resource_holder":
-                    return False
+                    continue
                 parent_uuid = node.get("parent_uuid")
                 parent = nodes_by_uuid.get(parent_uuid)
-                if not parent:
-                    return False
-                return parent.get("type") in {"warehouse", "bottle_carrier"}
-
-            for node_uuid, node in list(nodes_by_uuid.items()):
-                if not is_removable(node):
+                if not parent or parent.get("type") not in {"warehouse", "bottle_carrier"}:
                     continue
                 parent_uuid = node.get("parent_uuid")
                 slot_label = node.get("name") or node.get("id")
@@ -502,7 +339,16 @@ class EITSynthesisResourceSynchronizer(ResourceSynchronizer):
                     if not child:
                         continue
                     child["parent_uuid"] = parent_uuid
-                    self._add_pose_offset(child.get("pose", {}), node.get("pose", {}))
+                    child_pose = child.get("pose", {})
+                    offset_pose = node.get("pose", {})
+                    for key in ("position", "position3d"):
+                        child_pos = child_pose.get(key)
+                        offset_pos = offset_pose.get(key)
+                        if not isinstance(child_pos, dict) or not isinstance(offset_pos, dict):
+                            continue
+                        child_pos["x"] = float(child_pos.get("x", 0.0)) + float(offset_pos.get("x", 0.0))
+                        child_pos["y"] = float(child_pos.get("y", 0.0)) + float(offset_pos.get("y", 0.0))
+                        child_pos["z"] = float(child_pos.get("z", 0.0)) + float(offset_pos.get("z", 0.0))
                     children_map.setdefault(parent_uuid, []).append(child_uuid)
                     reparented_children.append(child)
                 if parent_uuid in children_map:
@@ -510,134 +356,46 @@ class EITSynthesisResourceSynchronizer(ResourceSynchronizer):
                 parent_node = nodes_by_uuid.get(parent_uuid) if parent_uuid else None
                 if parent_node and slot_label:
                     child_name = reparented_children[0].get("name") if reparented_children else None
-                    self._set_site_occupied(parent_node, slot_label, child_name)
+                    config = parent_node.get("config")
+                    if isinstance(config, dict):
+                        sites = config.get("sites")
+                        if isinstance(sites, list):
+                            label_candidates = [slot_label]
+                            layout_label = None
+                            if slot_label and "-" not in slot_label:
+                                row_letter = slot_label[:1]
+                                col_str = slot_label[1:]
+                                if row_letter.isalpha() and col_str.isdigit():
+                                    try:
+                                        row = "ABCDEFGHIJKLMNOPQRSTUVWXYZ".index(row_letter.upper()) + 1
+                                        col = int(col_str)
+                                    except ValueError:
+                                        row = None
+                                        col = None
+                                    if row is not None and col is not None:
+                                        parent_name = parent_node.get("name") or parent_node.get("id")
+                                        if parent_name:
+                                            num_items_y = config.get("num_items_y")
+                                            if num_items_y == 1:
+                                                layout_label = f"{parent_name}-{col}"
+                                            else:
+                                                layout_label = f"{parent_name}-{row}-{col}"
+                            if layout_label and layout_label not in label_candidates:
+                                label_candidates.append(layout_label)
+                            for site in sites:
+                                if site.get("label") in label_candidates:
+                                    site["occupied_by"] = child_name
+                                    break
                 nodes_by_uuid.pop(node_uuid, None)
             flattened_trees.append(list(nodes_by_uuid.values()))
-        return flattened_trees
-
-    def _add_pose_offset(self, child_pose: Dict[str, Any], offset_pose: Dict[str, Any]) -> None:
-        for key in ("position", "position3d"):
-            child_pos = child_pose.get(key)
-            offset_pos = offset_pose.get(key)
-            if not isinstance(child_pos, dict) or not isinstance(offset_pos, dict):
-                continue
-            child_pos["x"] = float(child_pos.get("x", 0.0)) + float(offset_pos.get("x", 0.0))
-            child_pos["y"] = float(child_pos.get("y", 0.0)) + float(offset_pos.get("y", 0.0))
-            child_pos["z"] = float(child_pos.get("z", 0.0)) + float(offset_pos.get("z", 0.0))
-
-    def _set_site_occupied(self, parent_node: Dict[str, Any], slot_label: str, child_name: Optional[str]) -> None:
-        config = parent_node.get("config")
-        if not isinstance(config, dict):
-            return
-        sites = config.get("sites")
-        if not isinstance(sites, list):
-            return
-        label_candidates = [slot_label]
-        layout_label = self._layout_label_from_a01(parent_node, slot_label)
-        if layout_label and layout_label not in label_candidates:
-            label_candidates.append(layout_label)
-        for site in sites:
-            if site.get("label") in label_candidates:
-                site["occupied_by"] = child_name
-                break
-
-    def _layout_label_from_a01(self, parent_node: Dict[str, Any], slot_label: str) -> Optional[str]:
-        if not slot_label or "-" in slot_label:
-            return slot_label or None
-        row_letter = slot_label[:1]
-        col_str = slot_label[1:]
-        if not row_letter.isalpha() or not col_str.isdigit():
-            return None
-        try:
-            row = "ABCDEFGHIJKLMNOPQRSTUVWXYZ".index(row_letter.upper()) + 1
-            col = int(col_str)
-        except ValueError:
-            return None
-        parent_name = parent_node.get("name") or parent_node.get("id")
-        if not parent_name:
-            return None
-        config = parent_node.get("config")
-        num_items_y = None
-        if isinstance(config, dict):
-            num_items_y = config.get("num_items_y")
-        if num_items_y == 1:
-            return f"{parent_name}-{col}"
-        return f"{parent_name}-{row}-{col}"
+        ROS2DeviceNode.run_async_func(
+            self.workstation._ros_node.update_resource,
+            True,
+            **{"resources": resources, "resource_tree_dump": flattened_trees},
+        )
 
     def sync_to_external(self, resource: Resource) -> bool:
         """[虚拟 -> 硬件] 组装 BatchInTray payload，补齐化学品与单位后同步。"""
-        def _safe_int(val: Any) -> Optional[int]:
-            if val is None:
-                return None
-            try:
-                return int(str(val).strip())
-            except Exception:
-                return None
-
-        def _parse_amount(text: Any) -> Tuple[Optional[float], Optional[str]]:
-            if text is None:
-                return None, None
-            if isinstance(text, (int, float)):
-                return float(text), None
-            match = re.search(r"([0-9]+(?:\\.[0-9]+)?)\\s*([a-zA-Zμµ]+)?", str(text))
-            if not match:
-                return None, None
-            value = float(match.group(1))
-            unit = match.group(2) or ""
-            unit = unit.replace("µ", "μ").strip()
-            return value, unit
-
-        def _normalize_amount(value: float, unit: Optional[str], amount_kind: str) -> float:
-            unit = (unit or "").lower()
-            if amount_kind == "volume":
-                if unit in ("l", "liter"):
-                    return value * 1000.0
-                if unit in ("μl", "ul"):
-                    return value / 1000.0
-                return value
-            if amount_kind == "weight":
-                if unit in ("kg", "kilogram"):
-                    return value * 1_000_000.0
-                if unit in ("g", "gram"):
-                    return value * 1000.0
-                return value
-            return value
-
-        def _well_to_slot_index(well: str, tray_spec: Optional[Tuple[int, int]]) -> Optional[int]:
-            if tray_spec is None:
-                return None
-            if not well or len(well) < 2:
-                return None
-            row_char = well[0].upper()
-            if not row_char.isalpha():
-                return None
-            try:
-                col_count, row_count = tray_spec
-                col_index = int(well[1:])
-                row_index = ord(row_char) - ord("A")
-                if col_index < 1 or col_index > col_count:
-                    return None
-                if row_index < 0 or row_index >= row_count:
-                    return None
-                return row_index * col_count + (col_index - 1)
-            except Exception:
-                return None
-
-        def _resolve_tray_code(carrier: Resource) -> Optional[int]:
-            code = _safe_int(getattr(carrier, "model", None))
-            if code is not None:
-                return code
-            extra = getattr(carrier, "unilabos_extra", {}) or {}
-            code = _safe_int(extra.get("eit_resource_type"))
-            if code is not None:
-                return code
-            desc = str(getattr(carrier, "description", "") or "").strip()
-            name = str(getattr(carrier, "name", "") or "").strip()
-            for key, label in TRAY_CODE_DISPLAY_NAME.items():
-                if desc == label or name == label:
-                    return int(key)
-            return None
-
         def _load_parameters(*sources: Any) -> Dict[str, Any]:
             for src in sources:
                 if not isinstance(src, dict):
@@ -660,26 +418,6 @@ class EITSynthesisResourceSynchronizer(ResourceSynchronizer):
                             return parsed
             return {}
 
-        def _get_serialized_state(resource_obj: Any) -> Dict[str, Any]:
-            if resource_obj is None:
-                return {}
-            for attr in ("serialize_state", "serialize_all_state"):
-                func = getattr(resource_obj, attr, None)
-                if not callable(func):
-                    continue
-                try:
-                    state = func()
-                except Exception:
-                    continue
-                if not isinstance(state, dict):
-                    continue
-                if attr == "serialize_all_state":
-                    name = getattr(resource_obj, "name", None)
-                    if isinstance(name, str) and isinstance(state.get(name), dict):
-                        return state[name]
-                return state
-            return {}
-
         def _get_liquids_from_source(source: Any) -> Optional[List[Any]]:
             if source is None:
                 return None
@@ -693,23 +431,17 @@ class EITSynthesisResourceSynchronizer(ResourceSynchronizer):
                 return liquids
             return None
 
-        def _has_chinese(text: str) -> bool:
-            return bool(re.search(r"[\u4e00-\u9fff]", text))
-
-        def _looks_like_well(text: str) -> bool:
-            return bool(re.match(r"^[A-Za-z]+\d+$", text))
-
         def _resolve_slot_label_from_name(name: Optional[str]) -> Optional[str]:
             if not name:
                 return None
             name = str(name).strip()
             if "@" in name:
                 left, right = [part.strip() for part in name.split("@", 1)]
-                if _looks_like_well(right):
+                if re.match(r"^[A-Za-z]+\d+$", right):
                     return right
-                if _looks_like_well(left):
+                if re.match(r"^[A-Za-z]+\d+$", left):
                     return left
-            if _looks_like_well(name):
+            if re.match(r"^[A-Za-z]+\d+$", name):
                 return name
             return None
 
@@ -776,6 +508,35 @@ class EITSynthesisResourceSynchronizer(ResourceSynchronizer):
             amount_kind: str,
             extra_sources: Optional[List[Dict[str, Any]]] = None,
         ) -> Tuple[Optional[float], Optional[float]]:
+            def _parse_amount(text: Any) -> Tuple[Optional[float], Optional[str]]:
+                if text is None:
+                    return None, None
+                if isinstance(text, (int, float)):
+                    return float(text), None
+                match = re.search(r"([0-9]+(?:\\.[0-9]+)?)\\s*([a-zA-Zμµ]+)?", str(text))
+                if not match:
+                    return None, None
+                value = float(match.group(1))
+                unit = match.group(2) or ""
+                unit = unit.replace("µ", "μ").strip()
+                return value, unit
+
+            def _normalize_amount(value: float, unit: Optional[str], amount_kind: str) -> float:
+                unit = (unit or "").lower()
+                if amount_kind == "volume":
+                    if unit in ("l", "liter"):
+                        return value * 1000.0
+                    if unit in ("μl", "ul"):
+                        return value / 1000.0
+                    return value
+                if amount_kind == "weight":
+                    if unit in ("kg", "kilogram"):
+                        return value * 1_000_000.0
+                    if unit in ("g", "gram"):
+                        return value * 1000.0
+                    return value
+                return value
+
             extra = getattr(bottle, "unilabos_extra", {}) or {}
             state = getattr(bottle, "_unilabos_state", {}) or {}
             data = getattr(bottle, "data", {}) or {}
@@ -858,30 +619,6 @@ class EITSynthesisResourceSynchronizer(ResourceSynchronizer):
                     return None, value
             return None, None
 
-        def _iter_bottles(carrier: Resource) -> List[Tuple[Optional[str], Optional[Resource]]]:
-            items: List[Tuple[Optional[str], Optional[Resource]]] = []
-            if hasattr(carrier, "sites"):
-                for idx in range(len(carrier.sites)):
-                    site = carrier.get_item(idx)
-                    slot_label = None
-                    bottle = None
-                    if isinstance(site, ResourceHolder):
-                        slot_label = getattr(site, "name", None)
-                        bottle = site.children[0] if site.children else site
-                    else:
-                        bottle = site
-                        slot_label = _resolve_slot_label_from_name(getattr(bottle, "name", None))
-                    items.append((slot_label, bottle))
-            for child in getattr(carrier, "children", []):
-                if isinstance(child, ResourceHolder):
-                    slot_label = getattr(child, "name", None)
-                    bottle = child.children[0] if child.children else child
-                    items.append((slot_label, bottle))
-                else:
-                    slot_label = _resolve_slot_label_from_name(getattr(child, "name", None))
-                    items.append((slot_label, child))
-            return items
-
         carrier = resource
         if getattr(resource, "category", None) != "bottle_carrier":
             if resource.parent and getattr(resource.parent, "category", None) == "bottle_carrier":
@@ -891,13 +628,31 @@ class EITSynthesisResourceSynchronizer(ResourceSynchronizer):
 
         extra = getattr(carrier, "unilabos_extra", {}) or {}
         eit_code = extra.get("update_resource_site") or extra.get("eit_layout_code")
-        if not eit_code and carrier.parent:
-            eit_code = self.workstation._resolve_eit_code_by_slot(carrier.parent)
         if not eit_code:
             logger.warning(f"[同步→硬件] 无法解析物理坐标，跳过: {carrier.name}")
             return False
 
-        tray_code = _resolve_tray_code(carrier)
+        tray_code = None
+        model_val = getattr(carrier, "model", None)
+        if model_val is not None:
+            try:
+                tray_code = int(str(model_val).strip())
+            except Exception:
+                tray_code = None
+        if tray_code is None:
+            extra_code = extra.get("eit_resource_type")
+            if extra_code is not None:
+                try:
+                    tray_code = int(str(extra_code).strip())
+                except Exception:
+                    tray_code = None
+        if tray_code is None:
+            desc = str(getattr(carrier, "description", "") or "").strip()
+            name = str(getattr(carrier, "name", "") or "").strip()
+            for key, label in TRAY_CODE_DISPLAY_NAME.items():
+                if desc == label or name == label:
+                    tray_code = int(key)
+                    break
         if tray_code is None:
             logger.warning(f"[同步→硬件] 无法解析托盘类型，跳过: {carrier.name}")
             return False
@@ -908,7 +663,6 @@ class EITSynthesisResourceSynchronizer(ResourceSynchronizer):
         except Exception:
             tray_spec = None
 
-        # tray_code -> (resource_type, with_cap, amount_kind, default_unit)
         tray_to_media = {
             int(ResourceCode.REAGENT_BOTTLE_TRAY_2ML): (str(int(ResourceCode.REAGENT_BOTTLE_2ML)), True, "volume", "mL"),
             int(ResourceCode.REAGENT_BOTTLE_TRAY_8ML): (str(int(ResourceCode.REAGENT_BOTTLE_8ML)), True, "volume", "mL"),
@@ -931,6 +685,7 @@ class EITSynthesisResourceSynchronizer(ResourceSynchronizer):
             if isinstance(child, ResourceHolder):
                 holder_by_slot[getattr(child, "name", "")] = child
 
+        name_map = self._chemical_name_map
         chem_cache: Dict[str, Tuple[Optional[int], Optional[str]]] = {}
 
         def _resolve_chemical(sub_name: str) -> Tuple[Optional[int], Optional[str]]:
@@ -941,8 +696,94 @@ class EITSynthesisResourceSynchronizer(ResourceSynchronizer):
             cached = chem_cache.get(raw_name)
             if cached is not None:
                 return cached
+            nonlocal name_map
+            if name_map is None:
+                name_map = {}
+                sheet_path = Path(__file__).resolve().parent / "sheet" / "chemical_list.xlsx"
+                if not sheet_path.exists():
+                    logger.warning(f"[同步→硬件] 未找到化学品映射表: {sheet_path}")
+                else:
+                    try:
+                        with zipfile.ZipFile(sheet_path) as zf:
+                            shared = zf.read("xl/sharedStrings.xml") if "xl/sharedStrings.xml" in zf.namelist() else None
+                            sheet = zf.read("xl/worksheets/sheet1.xml")
+                    except Exception as exc:
+                        logger.warning(f"[同步→硬件] 读取化学品映射表失败: {exc}")
+                    else:
+                        ns = {"a": "http://schemas.openxmlformats.org/spreadsheetml/2006/main"}
+                        if shared:
+                            try:
+                                shared_root = ET.fromstring(shared)
+                                strings = [
+                                    (si.find(".//a:t", ns).text if si.find(".//a:t", ns) is not None else "")
+                                    for si in shared_root.findall("a:si", ns)
+                                ]
+                            except Exception:
+                                strings = []
+                        else:
+                            strings = []
+                        sheet_root = ET.fromstring(sheet)
+                        sheet_data = sheet_root.find(".//a:sheetData", ns)
+                        if sheet_data is not None:
+                            header: Dict[int, str] = {}
+                            english_idx = None
+                            substance_idx = None
+                            for row_idx, row in enumerate(sheet_data.findall("a:row", ns), start=1):
+                                row_values: Dict[int, str] = {}
+                                for cell in row.findall("a:c", ns):
+                                    ref = cell.get("r") or ""
+                                    if ref == "":
+                                        continue
+                                    letters = "".join(ch for ch in ref if ch.isalpha()).upper()
+                                    col_idx = 0
+                                    for ch in letters:
+                                        col_idx = col_idx * 26 + (ord(ch) - ord("A") + 1)
+                                    col_idx -= 1
+                                    cell_type = cell.get("t")
+                                    if cell_type == "inlineStr":
+                                        inline = cell.find("a:is/a:t", ns)
+                                        value = inline.text if inline is not None else None
+                                    else:
+                                        value_node = cell.find("a:v", ns)
+                                        if value_node is None:
+                                            value = None
+                                        else:
+                                            text = value_node.text or ""
+                                            if cell_type == "s":
+                                                try:
+                                                    value = strings[int(text)]
+                                                except Exception:
+                                                    value = None
+                                            else:
+                                                value = text
+                                    if value is None:
+                                        continue
+                                    row_values[col_idx] = str(value).strip()
+
+                                if not row_values:
+                                    continue
+
+                                if row_idx == 1:
+                                    header = {idx: val for idx, val in row_values.items() if val != ""}
+                                    for idx, name in header.items():
+                                        if name == "substance_english_name":
+                                            english_idx = idx
+                                        elif name == "substance":
+                                            substance_idx = idx
+                                    if english_idx is None or substance_idx is None:
+                                        logger.warning("[同步→硬件] 化学品映射表缺少 substance_english_name 或 substance 列")
+                                        break
+                                    continue
+
+                                if english_idx is None or substance_idx is None:
+                                    break
+                                english = row_values.get(english_idx, "").strip()
+                                substance = row_values.get(substance_idx, "").strip()
+                                if english and substance:
+                                    name_map.setdefault(english, substance)
+                                    name_map.setdefault(english.lower(), substance)
+                self._chemical_name_map = name_map
             name = raw_name
-            name_map = self._load_chemical_name_map()
             mapped = name_map.get(name) or name_map.get(name.lower())
             if mapped:
                 name = mapped
@@ -963,7 +804,7 @@ class EITSynthesisResourceSynchronizer(ResourceSynchronizer):
             if chosen is None:
                 for item in candidates:
                     item_name = str(item.get("name") or "").strip()
-                    if item_name != "" and _has_chinese(item_name):
+                    if item_name != "" and re.search(r"[\u4e00-\u9fff]", item_name):
                         chosen = item
                         break
             if chosen is None and candidates:
@@ -979,7 +820,29 @@ class EITSynthesisResourceSynchronizer(ResourceSynchronizer):
 
         bottle_debug: List[Dict[str, Any]] = []
         seen_slots: set = set()
-        for slot_label, bottle in _iter_bottles(carrier):
+        bottle_items: List[Tuple[Optional[str], Optional[Resource]]] = []
+        if hasattr(carrier, "sites"):
+            for idx in range(len(carrier.sites)):
+                site = carrier.get_item(idx)
+                slot_label = None
+                bottle = None
+                if isinstance(site, ResourceHolder):
+                    slot_label = getattr(site, "name", None)
+                    bottle = site.children[0] if site.children else site
+                else:
+                    bottle = site
+                    slot_label = _resolve_slot_label_from_name(getattr(bottle, "name", None))
+                bottle_items.append((slot_label, bottle))
+        for child in getattr(carrier, "children", []):
+            if isinstance(child, ResourceHolder):
+                slot_label = getattr(child, "name", None)
+                bottle = child.children[0] if child.children else child
+                bottle_items.append((slot_label, bottle))
+            else:
+                slot_label = _resolve_slot_label_from_name(getattr(child, "name", None))
+                bottle_items.append((slot_label, child))
+
+        for slot_label, bottle in bottle_items:
             if not bottle:
                 continue
             bottle_extra = getattr(bottle, "unilabos_extra", {}) or {}
@@ -988,9 +851,23 @@ class EITSynthesisResourceSynchronizer(ResourceSynchronizer):
             if not slot_label:
                 slot_label = bottle_extra.get("well") or _resolve_slot_label_from_name(getattr(bottle, "name", None)) or ""
             slot_label = slot_label or ""
-            slot_idx = _well_to_slot_index(slot_label, tray_spec)
+            slot_idx = None
+            if tray_spec and slot_label and len(slot_label) > 1 and slot_label[0].isalpha():
+                try:
+                    col_count, row_count = tray_spec
+                    col_index = int(slot_label[1:])
+                    row_index = ord(slot_label[0].upper()) - ord("A")
+                    if 1 <= col_index <= col_count and 0 <= row_index < row_count:
+                        slot_idx = row_index * col_count + (col_index - 1)
+                except Exception:
+                    slot_idx = None
             if slot_idx is None:
-                slot_idx = _safe_int(bottle_extra.get("slot") or getattr(bottle, "slot", None))
+                slot_raw = bottle_extra.get("slot") or getattr(bottle, "slot", None)
+                if slot_raw is not None:
+                    try:
+                        slot_idx = int(str(slot_raw).strip())
+                    except Exception:
+                        slot_idx = None
             if slot_idx is None:
                 continue
             if slot_idx in seen_slots:
@@ -1001,7 +878,24 @@ class EITSynthesisResourceSynchronizer(ResourceSynchronizer):
             holder_extra = getattr(holder, "unilabos_extra", {}) or {} if holder else {}
             holder_state = getattr(holder, "_unilabos_state", {}) or {} if holder else {}
             holder_data = getattr(holder, "data", {}) or {} if holder else {}
-            bottle_state = _get_serialized_state(bottle)
+            bottle_state: Dict[str, Any] = {}
+            for attr in ("serialize_state", "serialize_all_state"):
+                func = getattr(bottle, attr, None)
+                if not callable(func):
+                    continue
+                try:
+                    state = func()
+                except Exception:
+                    continue
+                if not isinstance(state, dict):
+                    continue
+                if attr == "serialize_all_state":
+                    name = getattr(bottle, "name", None)
+                    if isinstance(name, str) and isinstance(state.get(name), dict):
+                        bottle_state = state[name]
+                        break
+                bottle_state = state
+                break
 
             bottle_debug.append({
                 "type": type(bottle).__name__,
@@ -1024,12 +918,28 @@ class EITSynthesisResourceSynchronizer(ResourceSynchronizer):
             if not substance and init_vol is None and init_wt is None:
                 continue
 
-            bottle_type = _safe_int(getattr(bottle, "model", None))
+            bottle_type = None
+            bottle_model = getattr(bottle, "model", None)
+            if bottle_model is not None:
+                try:
+                    bottle_type = int(str(bottle_model).strip())
+                except Exception:
+                    bottle_type = None
             resource_type = str(bottle_type) if bottle_type is not None else media_code
             resolved_substance = substance
             chemical_id = None
             if substance:
-                chemical_id, resolved_substance = _resolve_chemical(substance)
+                liquids_present = False
+                for source in (bottle_state, getattr(bottle, "data", None), getattr(bottle, "_unilabos_state", None)):
+                    liquids = _get_liquids_from_source(source)
+                    if liquids:
+                        liquids_present = True
+                        break
+                if not liquids_present:
+                    tracker = getattr(bottle, "tracker", None)
+                    liquids_present = bool(_get_liquids_from_source(tracker))
+                if liquids_present:
+                    chemical_id, resolved_substance = _resolve_chemical(substance)
             entry: Dict[str, Any] = {
                 "layout_code": f"{eit_code}:{slot_idx}",
                 "resource_type": resource_type,
@@ -1069,12 +979,12 @@ class EITSynthesisResourceSynchronizer(ResourceSynchronizer):
             "resource_list": resource_list,
         }]
         logger.info(f"[同步→硬件] BatchInTray payload: {resource_req_list}")
-        # try:
-        #     resp = self.manager.batch_in_tray(resource_req_list)
-        #     return resp is not None
-        # except Exception as e:
-        #     logger.error(f"[同步→硬件] BatchInTray 调用失败: {e}")
-        #     return False
+        try:
+            resp = self.manager.batch_in_tray(resource_req_list)
+            return resp is not None
+        except Exception as e:
+            logger.error(f"[同步→硬件] BatchInTray 调用失败: {e}")
+            return False
 
     def handle_external_change(self, change_info: Dict[str, Any]) -> bool:
         """
@@ -1128,13 +1038,11 @@ class EITSynthesisWorkstation(WorkstationBase):
     # ================= 资源树操作钩子 =================
 
     def _get_eit_layout_code(self, res: Resource) -> str:
-        """优先使用物料自带的 layout_code，缺失时再回退到槽位反解"""
+        """使用物料的 layout_code"""
         extra = getattr(res, "unilabos_extra", {}) or {}
         eit_code = extra.get("eit_layout_code") or extra.get("update_resource_site")
         if eit_code:
             return eit_code
-        if res.parent:
-            return self._resolve_eit_code_by_slot(res.parent)
         return ""
     
     def resource_tree_add(self, resources: List[Resource]):
@@ -1150,7 +1058,13 @@ class EITSynthesisWorkstation(WorkstationBase):
                 self.resource_synchronizer._update_resource_flattened([res])
 
     def resource_tree_remove(self, resources: List[Resource]):
-        """用户在前端删除物料时触发：执行物理下料"""
+        """处理资源删除时的同步（出库操作）
+
+        当 UniLab 前端删除物料时，需要将删除操作同步到 EIT 系统（出库）
+
+        Args:
+            resources: 要删除的资源列表
+        """
         top_level_names = {res.name for res in resources}
         processed_codes = set()
         layout_list = []
@@ -1158,7 +1072,6 @@ class EITSynthesisWorkstation(WorkstationBase):
         for res in resources:
             eit_code = self._get_eit_layout_code(res)
             if eit_code and eit_code not in processed_codes:
-                # 只有当该资源是顶层或其父节点不在删除列表中时才处理
                 parent_resource = res.parent
                 if parent_resource and parent_resource.name not in top_level_names:
                     logger.info(f"[EIT] 真正触发硬件下料动作: {eit_code}")
@@ -1166,7 +1079,6 @@ class EITSynthesisWorkstation(WorkstationBase):
                     processed_codes.add(eit_code)
 
         if layout_list:
-            # 下料接口会阻塞等待设备空闲，需异步执行避免阻塞资源树回调导致超时
             def _run_batch_out():
                 try:
                     self.manager.batch_out_tray(layout_list)
@@ -1176,13 +1088,27 @@ class EITSynthesisWorkstation(WorkstationBase):
             threading.Thread(target=_run_batch_out, daemon=True).start()
 
     def resource_tree_transfer(self, old_parent: Optional[Resource], resource: Resource, new_parent: Resource):
-        """处理跨设备拖入：例如从物料库拖到工站槽位"""
+        """处理资源在设备间迁移时的同步
+
+        当资源从一个设备迁移到 Workstation 时,只创建物料（不入库）
+        入库操作由后续的 resource_tree_add 完成
+
+        Args:
+            old_parent: 资源的原父节点（可能为 None）
+            resource: 要迁移的资源
+            new_parent: 资源的新父节点
+        """
         logger.info(f"[Transfer] 资源 {resource.name} 移入工站")
-        # 可以在此处执行预登记逻辑，或者直接调用 add 逻辑
         self.resource_tree_add([resource])
         
     def resource_tree_update(self, resources: List[Resource]):
-        """处理前端拖拽或修改属性后的同步"""
+        """处理资源更新时的同步（位置移动、属性修改等）
+
+        当 UniLab 前端更新物料信息时（如修改位置），需要将更新操作同步到 Bioyond 系统
+
+        Args:
+            resources: 要更新的资源列表
+        """
         for res in resources:
             if res.parent:
                 new_eit_code = self._get_eit_layout_code(res)
@@ -1195,62 +1121,3 @@ class EITSynthesisWorkstation(WorkstationBase):
                     res.unilabos_extra["eit_layout_code"] = new_eit_code
                     # 2. 同步硬件动作
                     self.resource_synchronizer.sync_to_external(res)
-
-
-    # ================= 动态坐标转换逻辑 =================
-
-    def _resolve_eit_code_by_slot(self, slot: Resource) -> str:
-        """[UniLab -> EIT] 将虚拟 Slot 反向解析为物理坐标字符串"""
-        try:
-            wh = slot.parent
-            if not wh or wh.name == "EIT_Synthesis_Station_Deck": 
-                # 如果解析到了 Deck 层级，说明槽位挂载层级有问题
-                # 或者该 slot 直接挂在了 Deck 上
-                return ""
-            
-            zone_name = wh.name
-            idx = wh.children.index(slot)
-            num_cols = getattr(wh, "num_items_x", 1) #
-            num_rows = getattr(wh, "num_items_y", 1) #
-
-            # 根据行数动态决定输出格式：多行则输出三段式，单行则输出两段式
-            if num_rows > 1:
-                row = (idx // num_cols) + 1
-                col = (idx % num_cols) + 1
-                return f"{zone_name}-{row}-{col}"
-            else:
-                return f"{zone_name}-{idx + 1}"
-        except:
-            return ""
-        
-    def _resolve_slot_by_eit_code(self, eit_code: str) -> Optional[Resource]:
-        """使用 layout_code 或 A01 命名规则精确定位 Slot"""
-        try:
-            
-            eit_code = normalize_layout_code(eit_code)
-            if not eit_code or '-' not in eit_code:
-                return None
-            parts = eit_code.split('-')
-            zone_key = parts[0]
-            
-            wh = self.deck.get_resource(zone_key)
-            if not wh: 
-                return None
-
-            # 3. 直接遍历仓库子资源进行名称匹配 (最可靠的方法)
-            # 这样可以避开 ItemizedCarrier 复杂的索引 Key 逻辑
-            for slot in wh.children:
-                if slot.name == eit_code:
-                    return slot
-            
-            # 4. 如果遍历没找到，尝试最后一次直接获取
-            try:
-                return wh.get_item(eit_code)
-            except:
-                pass
-
-            return None
-            
-        except Exception as e:
-            logger.debug(f"坐标映射失败 {eit_code}: {e}")
-            return None

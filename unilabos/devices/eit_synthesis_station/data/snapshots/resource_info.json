@@ -1,18 +1,18 @@
 {
-  "timestamp": "2026-01-22T14:59:06.632654",
+  "timestamp": "2026-01-24T16:00:52.594801",
   "resources": [
     {
-      "layout_code": "N-3",
-      "count": 12,
-      "resource_type": 201000727,
-      "resource_type_name": "闪滤瓶内瓶托盘",
+      "layout_code": "N-1",
+      "count": 1,
+      "resource_type": 201000712,
+      "resource_type_name": "反应密封盖托盘",
       "substance_details": []
     },
     {
-      "layout_code": "N-4",
-      "count": 12,
-      "resource_type": 201000711,
-      "resource_type_name": "2 mL试管磁子托盘",
+      "layout_code": "N-3",
+      "count": 48,
+      "resource_type": 201000727,
+      "resource_type_name": "闪滤瓶内瓶托盘",
       "substance_details": []
     },
     {
@@ -20,6 +20,34 @@
       "count": 24,
       "resource_type": 201000711,
       "resource_type_name": "2 mL试管磁子托盘",
+      "substance_details": []
+    },
+    {
+      "layout_code": "T-1-2",
+      "count": 96,
+      "resource_type": 201000731,
+      "resource_type_name": "1 mL Tip 头托盘",
+      "substance_details": []
+    },
+    {
+      "layout_code": "T-1-3",
+      "count": 24,
+      "resource_type": 201000512,
+      "resource_type_name": "5 mL Tip 头托盘",
+      "substance_details": []
+    },
+    {
+      "layout_code": "T-2-1",
+      "count": 96,
+      "resource_type": 201000815,
+      "resource_type_name": "50 μL Tip 头托盘",
+      "substance_details": []
+    },
+    {
+      "layout_code": "T-2-2",
+      "count": 0,
+      "resource_type": 201000815,
+      "resource_type_name": "50 μL Tip 头托盘",
       "substance_details": []
     },
     {
@@ -38,7 +66,7 @@
           "slot": 1,
           "well": "A2",
           "substance": "乙腈",
-          "value": "18mL"
+          "value": "120mL"
         }
       ]
     },
@@ -51,14 +79,28 @@
         {
           "slot": 0,
           "well": "A1",
-          "substance": "水",
-          "value": "25.97mL"
+          "substance": "N,N-二甲基乙酰胺",
+          "value": "120mL"
         },
         {
           "slot": 1,
           "well": "A2",
-          "substance": "乙酸乙酯",
-          "value": "80mL"
+          "substance": "N,N-二甲基甲酰胺-d7",
+          "value": "1mL"
+        }
+      ]
+    },
+    {
+      "layout_code": "W-1-4",
+      "count": 1,
+      "resource_type": 220000023,
+      "resource_type_name": "125 mL试剂瓶托盘",
+      "substance_details": [
+        {
+          "slot": 0,
+          "well": "A1",
+          "substance": "Ethanethiol",
+          "value": "30mL"
         }
       ]
     },
