@@ -4,6 +4,7 @@ EIT 合成工作站物料同步系统
 """
 
 import threading
+import time
 import re
 import json
 import zipfile
@@ -124,7 +125,14 @@ class EITSynthesisResourceSynchronizer(ResourceSynchronizer):
         """[工站 -> 前端] 从 EIT 获取资源信息并更新 UniLab Deck"""
         try:
             raw_data = self.manager.get_resource_info()
-            if not raw_data: return True
+            # 注意：raw_data == [] 也要继续往下走，以便把本地残留物料清掉
+            if raw_data is None:
+                return True
+            if not isinstance(raw_data, list):
+                logger.warning(f"get_resource_info 返回非 list: {type(raw_data)}")
+                return False
+            # raw_data 允许为空列表
+
 
             hardware_items = {}
             if raw_data:
@@ -135,6 +143,10 @@ class EITSynthesisResourceSynchronizer(ResourceSynchronizer):
                         item["layout_code"] = norm_code
                         hardware_items[norm_code] = item
             occupied_codes = set(hardware_items.keys())
+            # 观测工站事实状态，释放已完成的上料去重锁
+            if hasattr(self.workstation, "_observe_and_release_batchin_locks"):
+                self.workstation._observe_and_release_batchin_locks(hardware_items)
+
             
             # 记录发生变化的仓库，用于增量上传
             changed_warehouses = [] 
@@ -208,6 +220,9 @@ class EITSynthesisResourceSynchronizer(ResourceSynchronizer):
                                 if not getattr(current_child, "unilabos_extra", None):
                                     current_child.unilabos_extra = {}
                                 current_child.unilabos_extra["eit_layout_code"] = eit_code
+                                # 事实态覆盖：清理请求态字段，防止前端/逻辑判断被 update_resource_site 污染
+                                for k in ("update_resource_site", "eit_staging_code", "eit_last_requested_site", "eit_last_batch_in_tray_code"):
+                                    current_child.unilabos_extra.pop(k, None)
                                 current_child.unilabos_extra["eit_resource_type"] = res_type
                                 current_child.eit_resource_type = res_type
                                 if current_child.name != desired_tray_name:
@@ -985,14 +1000,33 @@ class EITSynthesisResourceSynchronizer(ResourceSynchronizer):
             "resource_list": resource_list,
         }]
         logger.info(f"[同步→硬件] BatchInTray payload: {resource_req_list}")
+        # 解析 tray_code 用于异常时释放去重锁（若解析不到也不影响执行）
+        tray_code = None
         try:
-            resp = self.manager.batch_in_tray(resource_req_list)
-            if resp is not None and hasattr(carrier, "unilabos_extra"):
-                carrier.unilabos_extra.pop("eit_staging_code", None)
-            return resp is not None
-        except Exception as e:
-            logger.error(f"[同步→硬件] BatchInTray 调用失败: {e}")
-            return False
+            if hasattr(self.workstation, "_resolve_tray_code"):
+                tray_code = self.workstation._resolve_tray_code(carrier)
+        except Exception:
+            tray_code = None
+
+        def _run_batch_in_tray():
+            try:
+                resp = self.manager.batch_in_tray(resource_req_list)
+                if resp is not None and hasattr(carrier, "unilabos_extra"):
+                    carrier.unilabos_extra.pop("eit_staging_code", None)
+                # 不在这里“释放锁”，锁由 sync_from_external 观测到离开入口后自动释放
+                return
+            except Exception as e:
+                logger.error(f"[同步→硬件] BatchInTray 后台执行失败: {e}")
+                # 后台执行失败：释放去重锁允许重试
+                try:
+                    if tray_code is not None and hasattr(self.workstation, "_release_batchin_lock"):
+                        self.workstation._release_batchin_lock(tray_code, eit_code)
+                except Exception as e2:
+                    logger.warning(f"[去重锁] 后台失败释放锁异常: {e2}")
+
+        threading.Thread(target=_run_batch_in_tray, daemon=True).start()
+        # 这里返回 True 表示“已派发/已受理”，避免阻塞 ROS 回调线程
+        return True
 
     def handle_external_change(self, change_info: Dict[str, Any]) -> bool:
         """
@@ -1017,8 +1051,19 @@ class EITSynthesisWorkstation(WorkstationBase):
         self.config = config or {}
         self.resource_synchronizer = EITSynthesisResourceSynchronizer(self)
         self.manager = self.resource_synchronizer.manager
+                # ========= 上料请求去重/锁 =========
+        # key: "<tray_code>|<staging_code>" -> {"ts": float, "tray_code": int, "staging_code": str}
+        self._batchin_lock = threading.Lock()
+        self._batchin_locks: Dict[str, Dict[str, Any]] = {}
+        # 默认锁 TTL：建议 5 分钟（覆盖一次完整上料耗时+网络抖动）
+        self._batchin_lock_ttl_s = int(self.config.get("batchin_lock_ttl_s", 300))
+                # ========= 回滚上报节流 =========
+        self._rollback_throttle_lock = threading.Lock()
+        # key: warehouse_name -> last_report_monotonic_ts
+        self._rollback_last_report_ts = {}
+        # 建议 0.2~0.5s，默认 0.3s
+        self._rollback_throttle_window_s = float(self.config.get("rollback_throttle_window_s", 0.3))
 
- 
     def post_init(self, ros_node: ROS2WorkstationNode):
         """初始化后上传 Deck 资源树"""
         self._ros_node = ros_node
@@ -1102,11 +1147,67 @@ class EITSynthesisWorkstation(WorkstationBase):
         eit_code = extra.get("eit_layout_code")
         eit_code = normalize_layout_code(eit_code) if eit_code else ""
         return eit_code or ""
- 
+
+    def _rollback_ui_virtual_tray(self, tray: Resource) -> None:
+        """
+        前端 add / update 产生的“请求态托盘”不应长期存在于资源树中。
+        这里将该托盘从本地 deck 结构中移除，并立刻上报受影响的仓库，以纠正云端/前端显示。
+        """
+        try:
+            # 1) 找到托盘所在仓库（用于增量上报纠偏）
+            wh = None
+            p = getattr(tray, "parent", None)
+            while p is not None:
+                if getattr(p, "category", None) == "warehouse":
+                    wh = p
+                    break
+                p = getattr(p, "parent", None)
+
+            # 2) 从父节点移除 tray
+            parent = getattr(tray, "parent", None)
+            if parent is not None:
+                # parent 可能是 ResourceHolder / Container
+                if hasattr(parent, "unassign_child_resource"):
+                    # ResourceHolder
+                    parent.unassign_child_resource(tray)
+                else:
+                    # 兜底：直接从 children 列表剔除
+                    if hasattr(parent, "children") and tray in parent.children:
+                        parent.children.remove(tray)
+                # 断开引用
+                tray.parent = None
+
+            # 3) 立即上报纠偏：让云端/前端回到“事实态”(由 sync_from_external 驱动)
+            if wh is not None:
+                wh_name = str(getattr(wh, "name", "") or "warehouse")
+                now = time.monotonic()
+                win = getattr(self, "_rollback_throttle_window_s", 0.3)
+
+                with self._rollback_throttle_lock:
+                    last = float(self._rollback_last_report_ts.get(wh_name, 0.0) or 0.0)
+                    if now - last < win:
+                        # 命中节流：跳过本次上报
+                        logger.debug(f"回滚纠偏上报节流命中: wh={wh_name}, dt={now-last:.3f}s")
+                        return
+                    self._rollback_last_report_ts[wh_name] = now
+
+                self.resource_synchronizer._update_resource_flattened([wh])
+
+            else:
+                # 找不到仓库时，保守上报整个 deck（该分支不做节流，发生频率应很低）
+                self.resource_synchronizer._update_resource_flattened([self.deck])
+
+        except Exception as e:
+            logger.warning(f"回滚前端虚拟托盘失败: {e}")
+
     def resource_tree_add(self, resources: List[Resource]):
-        """处理前端物料添加请求：仅当“进入过渡区入口位点”时触发上料（batch_in_tray）。"""
+        """
+        处理前端物料添加请求
+        - 仅当“进入过渡区入口位点”时触发上料（batch_in_tray）
+        - 不将该物料作为库存实体留在资源树里（立刻回滚并纠偏上报）
+        """
         for res in resources:
-            # 统一提升到托盘根对象（上料必须以托盘为单位）
+            # 统一提升到托盘根对象
             tray = res
             if getattr(res, "category", None) != "bottle_carrier":
                 if res.parent and getattr(res.parent, "category", None) == "bottle_carrier":
@@ -1115,29 +1216,43 @@ class EITSynthesisWorkstation(WorkstationBase):
                     tray = res.parent.parent
 
             if getattr(tray, "category", None) != "bottle_carrier":
-                continue  # 非托盘资源不处理上料
+                continue
 
             if not hasattr(tray, "unilabos_extra") or tray.unilabos_extra is None:
                 tray.unilabos_extra = {}
             extra = tray.unilabos_extra
 
-            new_site = self.get_slot_layout_code(tray)  # 优先 update_resource_site
+            new_site = self.get_slot_layout_code(tray)  # update_resource_site 优先
             old_site = normalize_layout_code(extra.get("eit_last_requested_site")) if extra.get("eit_last_requested_site") else ""
 
             old_in = self.is_staging_code(old_site)
             new_in = self.is_staging_code(new_site)
 
-            # 仅“非入口 -> 入口”触发上料
+            # 仅“非入口 -> 入口”触发上料（过渡区）
             if (not old_in) and new_in and new_site:
                 extra["eit_staging_code"] = new_site
                 logger.info(f"[EIT] add 进入入口位点，上料触发: {new_site}")
-                self.resource_synchronizer.sync_to_external(tray)
+                ok, reason = self._acquire_batchin_lock(tray, new_site)
+                if not ok:
+                    logger.info(f"[去重锁] add 上料触发被拦截: {tray.name} -> {new_site}, {reason}")
+                else:
+                    logger.info(f"[去重锁] add 上料触发通过: {tray.name} -> {new_site}, {reason}")
+                    success = self.resource_synchronizer.sync_to_external(tray)
+                    if success is False:
+                        # 若同步到硬件立刻失败，释放锁以允许重试
+                        tray_code = self._resolve_tray_code(tray)
+                        if tray_code is not None:
+                            self._release_batchin_lock(tray_code, new_site)
 
-            # 记录本次请求位置（用于后续 update 判断进入/离开入口）
+            else:
+                # 非过渡区 add：不触发硬件，仅视为一次“请求”，马上回滚
+                logger.info(f"非过渡区 add 仅记录请求，不入库: {tray.name} -> {new_site}")
+
+            # 记录本次请求位置（用于 update 判定）
             extra["eit_last_requested_site"] = new_site or old_site or ""
 
-            # 托盘资源：仍然上传扁平结构（保持现有行为）
-            self.resource_synchronizer._update_resource_flattened([tray])
+            # 关键：立即回滚 UI 虚拟托盘，避免前端长期残留
+            self._rollback_ui_virtual_tray(tray)
 
     def resource_tree_remove(self, resources: List[Resource]):
         """
@@ -1224,16 +1339,143 @@ class EITSynthesisWorkstation(WorkstationBase):
 
             # 仅“非入口 -> 入口”触发上料
             if (not old_in) and new_in and new_site:
-                # 幂等保护：同一入口短时间内重复触发时可直接跳过（可选但建议）
-                last_code = normalize_layout_code(extra.get("eit_last_batch_in_tray_code")) if extra.get("eit_last_batch_in_tray_code") else ""
-                if last_code == normalize_layout_code(new_site):
-                    logger.info(f"[EIT] update 入口位点重复触发已跳过: {new_site}")
+                extra["eit_staging_code"] = new_site
+                extra["eit_last_batch_in_tray_code"] = new_site
+
+                ok, reason = self._acquire_batchin_lock(tray, new_site)
+                if not ok:
+                    logger.info(f"[去重锁] update 上料触发被拦截: {tray.name} -> {new_site}, {reason}")
                 else:
-                    extra["eit_staging_code"] = new_site
-                    extra["eit_last_batch_in_tray_code"] = new_site
-                    logger.info(f"[EIT] update 进入入口位点，上料触发: {new_site}")
-                    self.resource_synchronizer.sync_to_external(tray)
+                    logger.info(f"[去重锁] update 上料触发通过: {tray.name} -> {new_site}, {reason}")
+                    success = self.resource_synchronizer.sync_to_external(tray)
+                    if success is False:
+                        tray_code = self._resolve_tray_code(tray)
+                        if tray_code is not None:
+                            self._release_batchin_lock(tray_code, new_site)
+
 
             # 无论是否入口，上报“本次请求位置”
             extra["eit_last_requested_site"] = new_site or old_site or ""
+
+            self._rollback_ui_virtual_tray(tray)
+
+    # ================= 上料请求去重/锁 =================
+
+    def _resolve_tray_code(self, carrier: Resource) -> Optional[int]:
+        """
+        尽量用与 sync_to_external 相同的策略解析 tray_code（EIT 的 resource_type）。
+        tray_code 将用于生成去重锁 key。
+        """
+        extra = getattr(carrier, "unilabos_extra", {}) or {}
+        if not isinstance(extra, dict):
+            extra = {}
+
+        # 1) model 优先（通常就是 tray_code）
+        model_val = getattr(carrier, "model", None)
+        if model_val is not None:
+            try:
+                return int(str(model_val).strip())
+            except Exception:
+                pass
+
+        # 2) extra 中常见字段
+        for k in ("eit_resource_type", "resource_type", "tray_code"):
+            if extra.get(k) is not None:
+                try:
+                    return int(str(extra.get(k)).strip())
+                except Exception:
+                    pass
+
+        # 3) 用 name/description 与 TRAY_CODE_DISPLAY_NAME 反查
+        desc = str(getattr(carrier, "description", "") or "").strip()
+        name = str(getattr(carrier, "name", "") or "").strip()
+        # name 可能是 "xxx@TB-2-1" 这种，去掉后缀
+        if "@" in name:
+            name = name.split("@", 1)[0].strip()
+
+        for key, label in TRAY_CODE_DISPLAY_NAME.items():
+            if desc == label or name == label:
+                try:
+                    return int(key)
+                except Exception:
+                    continue
+
+        return None
+
+    def _batchin_lock_key(self, tray_code: int, staging_code: str) -> str:
+        return f"{int(tray_code)}|{normalize_layout_code(staging_code) or staging_code}"
+
+    def _acquire_batchin_lock(self, tray: Resource, staging_code: str) -> Tuple[bool, str]:
+        """
+        获取上料去重锁：
+        - 同 tray_code + staging_code 在 TTL 内只允许触发一次
+        返回 (ok, reason)
+        """
+        staging_code = normalize_layout_code(staging_code) or staging_code
+        tray_code = self._resolve_tray_code(tray)
+
+        if tray_code is None:
+            # tray_code 解析不到时，不做硬拦截（避免误伤），但会在日志提示
+            return True, "tray_code_unresolved_skip_lock"
+
+        key = self._batchin_lock_key(tray_code, staging_code)
+        now = time.monotonic()
+        ttl = getattr(self, "_batchin_lock_ttl_s", 300)
+
+        with self._batchin_lock:
+            # 清理过期锁
+            expired = []
+            for k, meta in self._batchin_locks.items():
+                ts = float(meta.get("ts", 0.0) or 0.0)
+                if now - ts >= ttl:
+                    expired.append(k)
+            for k in expired:
+                self._batchin_locks.pop(k, None)
+
+            # 检查并获取
+            if key in self._batchin_locks:
+                meta = self._batchin_locks[key]
+                age = now - float(meta.get("ts", now))
+                return False, f"dedup_locked(age={age:.1f}s,key={key})"
+
+            self._batchin_locks[key] = {"ts": now, "tray_code": int(tray_code), "staging_code": staging_code}
+            return True, f"dedup_lock_acquired(key={key})"
+
+    def _release_batchin_lock(self, tray_code: int, staging_code: Optional[str] = None) -> None:
+        """释放锁：可按 (tray_code + staging_code) 精确释放，也可按 tray_code 批量释放。"""
+        with self._batchin_lock:
+            if staging_code:
+                key = self._batchin_lock_key(int(tray_code), staging_code)
+                self._batchin_locks.pop(key, None)
+                return
+
+            # 未指定 staging_code：释放该 tray_code 的所有锁
+            remove_keys = [k for k, v in self._batchin_locks.items() if int(v.get("tray_code", -1)) == int(tray_code)]
+            for k in remove_keys:
+                self._batchin_locks.pop(k, None)
+
+    def _observe_and_release_batchin_locks(self, hardware_items: Dict[str, Dict[str, Any]]) -> None:
+        """
+        从工站事实状态中释放锁：
+        - 当观察到某 tray_code 出现在“非入口位点”时，认为该上料流程已完成（至少已离开入口），释放该 tray_code 的锁
+        """
+        try:
+            for code, item in (hardware_items or {}).items():
+                # code 是 layout_code（已 normalize）
+                if self.is_staging_code(code):
+                    continue
+
+                rt = item.get("resource_type")
+                if rt is None:
+                    continue
+                try:
+                    tray_code = int(rt)
+                except Exception:
+                    continue
+
+                # 观测到 tray_code 已在非入口位点 -> 释放该 tray_code 所有锁
+                self._release_batchin_lock(tray_code)
+
+        except Exception as e:
+            logger.warning(f"[去重锁] 观测释放锁失败: {e}")
 
