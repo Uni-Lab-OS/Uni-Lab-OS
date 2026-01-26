@@ -192,14 +192,24 @@ class EITSynthesisResourceSynchronizer(ResourceSynchronizer):
                         tray_display_name = item.get("resource_type_name") or "EIT Tray"
                         desired_tray_name = f"{tray_display_name}@{eit_code}"
                         
-                        # 同类型托盘只做 rename/update，不因名称不同而重建
                         if current_child:
                             existing_type = getattr(current_child, "eit_resource_type", None)
+                            if existing_type is None:
+                                extra = getattr(current_child, "unilabos_extra", {}) or {}
+                                existing_type = extra.get("eit_resource_type")
+                            if existing_type is None:
+                                model_val = getattr(current_child, "model", None)
+                                if model_val is not None:
+                                    try:
+                                        existing_type = int(str(model_val).strip())
+                                    except Exception:
+                                        existing_type = None
                             if existing_type == res_type:
                                 if not getattr(current_child, "unilabos_extra", None):
                                     current_child.unilabos_extra = {}
                                 current_child.unilabos_extra["eit_layout_code"] = eit_code
                                 current_child.unilabos_extra["eit_resource_type"] = res_type
+                                current_child.eit_resource_type = res_type
                                 if current_child.name != desired_tray_name:
                                     current_child.name = desired_tray_name
                                 if details and hasattr(current_child, "sites"):
@@ -1035,39 +1045,108 @@ class EITSynthesisWorkstation(WorkstationBase):
 
     # ================= 资源树操作钩子 =================
 
-    def get_slot_layout_code(self, res: Resource) -> str:
-        slot = res if isinstance(res, ResourceHolder) else res.parent
-        if slot is None:
+    def is_staging_code(self, code: Optional[str]) -> bool:
+        """判断一个 layout_code 是否属于过渡区入口位点。"""
+        if not code:
+            return False
+        code = normalize_layout_code(code) or ""
+        # TB 仓库：全部视为入口（兼容 TB 或 TB-...）
+        if code == "TB" or code.startswith("TB-"):
+            return True
+        # W 仓库：W-1-1 ~ W-1-8
+        return bool(re.match(r"^W-1-[1-8]$", code))
+
+    def _derive_site_code_from_parent(self, res: Resource) -> str:
+        """从资源的 parent 链推导 slot 的 layout_code（尽量兼容 parent=WareHouse 的情况）。"""
+        # 情况1：parent 是 slot(ResourceHolder) —— slot.name 就是布局码
+        parent = getattr(res, "parent", None)
+        if parent is None:
             return ""
-        slot_name = normalize_layout_code(getattr(slot, "name", "") or "")
+        slot_name = normalize_layout_code(getattr(parent, "name", "") or "")
         if slot_name:
             return slot_name
-        return self._resolve_eit_code_by_slot(slot)
+        # 情况2：parent 不是 slot（可能直接是 WareHouse），尝试 resolve
+        try:
+            return self._resolve_eit_code_by_slot(parent) or ""
+        except Exception:
+            return ""
+
+    def get_slot_layout_code(self, res: Resource) -> str:
+        """
+        获取“前端请求挂载位置”的 layout_code。
+        优先使用 update_resource_site，其次从 parent 推导。
+        注意：这里不读取 eit_staging_code（staging_code 仅用于命令，不用于位置判断）。
+        """
+        extra = getattr(res, "unilabos_extra", {}) or {}
+        req = extra.get("update_resource_site")
+        req = normalize_layout_code(req) if req else ""
+        if req:
+            return req
+
+        return self._derive_site_code_from_parent(res)
 
     def is_in_staging(self, res: Resource) -> bool:
-        slot = res if isinstance(res, ResourceHolder) else res.parent
-        if slot is None or not slot.parent:
-            return False
-        warehouse = slot.parent
-        slot_code = normalize_layout_code(getattr(slot, "name", "") or "")
-        if getattr(warehouse, "name", "") == "TB":
-            return True
-        if getattr(warehouse, "name", "") == "W":
-            return bool(re.match(r"^W-1-[1-8]$", slot_code))
-        return False
+        """
+        判断资源“请求挂载位置”是否位于过渡区入口。
+        仅使用 update_resource_site / parent 推导的位置，不读取 eit_staging_code。
+        """
+        code = self.get_slot_layout_code(res)
+        return self.is_staging_code(code)
 
     def _get_eit_layout_code(self, res: Resource) -> str:
-        """优先使用硬件回写位置，其次使用前端更新位置或槽位推导。"""
+        """
+        获取“当前物理位置”(由 sync_from_external 回写)。
+        注意：这里 只 读取 eit_layout_code，不读取 update_resource_site。
+        """
         extra = getattr(res, "unilabos_extra", {}) or {}
-        eit_code = extra.get("eit_layout_code") or extra.get("update_resource_site")
-        if eit_code:
-            return eit_code
-        if res.parent:
-            return self._resolve_eit_code_by_slot(res.parent)
-        return ""
-    
+        eit_code = extra.get("eit_layout_code")
+        eit_code = normalize_layout_code(eit_code) if eit_code else ""
+        return eit_code or ""
+ 
     def resource_tree_add(self, resources: List[Resource]):
-        """处理前端物料添加请求（上料）"""
+        """处理前端物料添加请求：仅当“进入过渡区入口位点”时触发上料（batch_in_tray）。"""
+        for res in resources:
+            # 统一提升到托盘根对象（上料必须以托盘为单位）
+            tray = res
+            if getattr(res, "category", None) != "bottle_carrier":
+                if res.parent and getattr(res.parent, "category", None) == "bottle_carrier":
+                    tray = res.parent
+                elif res.parent and res.parent.parent and getattr(res.parent.parent, "category", None) == "bottle_carrier":
+                    tray = res.parent.parent
+
+            if getattr(tray, "category", None) != "bottle_carrier":
+                continue  # 非托盘资源不处理上料
+
+            if not hasattr(tray, "unilabos_extra") or tray.unilabos_extra is None:
+                tray.unilabos_extra = {}
+            extra = tray.unilabos_extra
+
+            new_site = self.get_slot_layout_code(tray)  # 优先 update_resource_site
+            old_site = normalize_layout_code(extra.get("eit_last_requested_site")) if extra.get("eit_last_requested_site") else ""
+
+            old_in = self.is_staging_code(old_site)
+            new_in = self.is_staging_code(new_site)
+
+            # 仅“非入口 -> 入口”触发上料
+            if (not old_in) and new_in and new_site:
+                extra["eit_staging_code"] = new_site
+                logger.info(f"[EIT] add 进入入口位点，上料触发: {new_site}")
+                self.resource_synchronizer.sync_to_external(tray)
+
+            # 记录本次请求位置（用于后续 update 判断进入/离开入口）
+            extra["eit_last_requested_site"] = new_site or old_site or ""
+
+            # 托盘资源：仍然上传扁平结构（保持现有行为）
+            self.resource_synchronizer._update_resource_flattened([tray])
+
+    def resource_tree_remove(self, resources: List[Resource]):
+        """
+        删除触发下料：只对托盘根对象执行 batch_out_tray。
+        子瓶/item 删除不触发硬件下料。
+        """
+        trays: List[Resource] = []
+        seen = set()
+
         for res in resources:
             tray = res
             if getattr(res, "category", None) != "bottle_carrier":
@@ -1075,45 +1154,33 @@ class EITSynthesisWorkstation(WorkstationBase):
                     tray = res.parent
                 elif res.parent and res.parent.parent and getattr(res.parent.parent, "category", None) == "bottle_carrier":
                     tray = res.parent.parent
-            if tray.parent and self.is_in_staging(tray):
-                staging_code = self.get_slot_layout_code(tray)
-                if staging_code:
-                    if not hasattr(tray, "unilabos_extra"):
-                        tray.unilabos_extra = {}
-                    tray.unilabos_extra["eit_staging_code"] = staging_code
-                    self.resource_synchronizer.sync_to_external(tray)
-            if getattr(res, "category", None) == "bottle_carrier":
-                self.resource_synchronizer._update_resource_flattened([res])
 
-    def resource_tree_remove(self, resources: List[Resource]):
-        """处理资源删除时的同步（出库操作）
+            if getattr(tray, "category", None) != "bottle_carrier":
+                continue
 
-        当 UniLab 前端删除物料时，需要将删除操作同步到 EIT 系统（出库）
+            tray_uuid = getattr(tray, "unilabos_uuid", None) or id(tray)
+            if tray_uuid in seen:
+                continue
+            seen.add(tray_uuid)
+            trays.append(tray)
 
-        Args:
-            resources: 要删除的资源列表
-        """
-        top_level_names = {res.name for res in resources}
-        processed_codes = set()
         layout_list = []
+        for tray in trays:
+            eit_code = self._get_eit_layout_code(tray)  # 只读 eit_layout_code
+            if eit_code:
+                logger.info(f"[EIT] 真正触发硬件下料动作: {eit_code}")
+                layout_list.append({"layout_code": eit_code})
 
-        for res in resources:
-            eit_code = self._get_eit_layout_code(res)
-            if eit_code and eit_code not in processed_codes:
-                parent_resource = res.parent
-                if parent_resource and parent_resource.name not in top_level_names:
-                    logger.info(f"[EIT] 真正触发硬件下料动作: {eit_code}")
-                    layout_list.append({"layout_code": eit_code})
-                    processed_codes.add(eit_code)
+        if not layout_list:
+            return
 
-        if layout_list:
-            def _run_batch_out():
-                try:
-                    self.manager.batch_out_tray(layout_list)
-                except Exception as e:
-                    logger.error(f"[EIT] batch_out_tray 异步执行失败: {e}")
+        def _run_batch_out():
+            try:
+                self.manager.batch_out_tray(layout_list)
+            except Exception as e:
+                logger.error(f"[EIT] batch_out_tray 异步执行失败: {e}")
 
-            threading.Thread(target=_run_batch_out, daemon=True).start()
+        threading.Thread(target=_run_batch_out, daemon=True).start()
 
     def resource_tree_transfer(self, old_parent: Optional[Resource], resource: Resource, new_parent: Resource):
         """处理资源在设备间迁移时的同步
@@ -1130,35 +1197,43 @@ class EITSynthesisWorkstation(WorkstationBase):
         self.resource_tree_add([resource])
         
     def resource_tree_update(self, resources: List[Resource]):
-        """处理资源更新时的同步（位置移动、属性修改等）
-
-        当 UniLab 前端更新物料信息时（如修改位置），需要将更新操作同步到 Bioyond 系统
-
-        Args:
-            resources: 要更新的资源列表
+        """
+        处理资源更新：除“进入过渡区入口”外，任何拖拽移动都不触发硬件动作。
         """
         for res in resources:
+            # 统一提升到托盘根对象
             tray = res
             if getattr(res, "category", None) != "bottle_carrier":
                 if res.parent and getattr(res.parent, "category", None) == "bottle_carrier":
                     tray = res.parent
                 elif res.parent and res.parent.parent and getattr(res.parent.parent, "category", None) == "bottle_carrier":
                     tray = res.parent.parent
-            if not tray.parent:
+
+            if getattr(tray, "category", None) != "bottle_carrier":
                 continue
-            extra = getattr(tray, "unilabos_extra", {}) or {}
-            old_staging_code = extra.get("eit_staging_code")
-            old_in_staging = bool(old_staging_code)
-            new_in_staging = self.is_in_staging(tray)
-            if not old_in_staging and new_in_staging:
-                staging_code = self.get_slot_layout_code(tray)
-                if staging_code:
-                    if not hasattr(tray, "unilabos_extra"):
-                        tray.unilabos_extra = {}
-                    tray.unilabos_extra["eit_staging_code"] = staging_code
-                    logger.info(f"[EIT] 进入入口位点，上料触发: {staging_code}")
+
+            if not hasattr(tray, "unilabos_extra") or tray.unilabos_extra is None:
+                tray.unilabos_extra = {}
+            extra = tray.unilabos_extra
+
+            new_site = self.get_slot_layout_code(tray)  # update_resource_site or parent-derived
+            old_site = normalize_layout_code(extra.get("eit_last_requested_site")) if extra.get("eit_last_requested_site") else ""
+
+            old_in = self.is_staging_code(old_site)
+            new_in = self.is_staging_code(new_site)
+
+            # 仅“非入口 -> 入口”触发上料
+            if (not old_in) and new_in and new_site:
+                # 幂等保护：同一入口短时间内重复触发时可直接跳过（可选但建议）
+                last_code = normalize_layout_code(extra.get("eit_last_batch_in_tray_code")) if extra.get("eit_last_batch_in_tray_code") else ""
+                if last_code == normalize_layout_code(new_site):
+                    logger.info(f"[EIT] update 入口位点重复触发已跳过: {new_site}")
+                else:
+                    extra["eit_staging_code"] = new_site
+                    extra["eit_last_batch_in_tray_code"] = new_site
+                    logger.info(f"[EIT] update 进入入口位点，上料触发: {new_site}")
                     self.resource_synchronizer.sync_to_external(tray)
-                continue
-            if old_in_staging and not new_in_staging:
-                if hasattr(tray, "unilabos_extra"):
-                    tray.unilabos_extra.pop("eit_staging_code", None)
+
+            # 无论是否入口，上报“本次请求位置”
+            extra["eit_last_requested_site"] = new_site or old_site or ""
+
