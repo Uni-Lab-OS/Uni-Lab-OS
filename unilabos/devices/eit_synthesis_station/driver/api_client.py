@@ -635,8 +635,6 @@ class ApiClient:
         """
         return self._request("POST", "/api/GetTaskOpInfo", json_body={"task_id": task_id})
     
-     # 34. 检查任务资源
-    
     # 34. 进行物料核算
     def check_task_resource(self, task_id: int) -> JsonDict:
         """
@@ -657,6 +655,32 @@ class ApiClient:
             else:
                 # 其他错误码继续抛出异常
                 raise
+
+    # 35. 单独控制W1货架
+    def single_control_w1_shelf(self, station: str, action: str, op: str, num: int) -> JsonDict:
+        """
+        功能:
+            单独控制W1货架的推出或复位操作
+        参数:
+            station: str, 站点编码, 例如 "FSY"
+            action: str, 动作类型, "home" 表示复位, "outside" 表示推出
+            op: str, 操作类型, 与action保持一致
+            num: int, 货架编号, 1表示W-1-1和W-1-2, 3表示W-1-3和W-1-4, 5表示W-1-5和W-1-6, 7表示W-1-7和W-1-8
+        返回:
+            Dict, 接口响应
+        """
+        if action not in ("home", "outside"):
+            raise ValidationError("action 必须是 'home' 或 'outside'")
+        if num not in (1, 3, 5, 7):
+            raise ValidationError("num 必须是 1, 3, 5 或 7")
+
+        body = {"action": action, "op": op, "num": num}
+        return self._request(
+            "POST",
+            "/api/SingleControlW1Shelf",
+            json_body=body,
+            params={"station": station},
+        )
 
 if __name__ == "__main__":
 

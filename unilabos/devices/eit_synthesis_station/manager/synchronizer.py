@@ -19,8 +19,8 @@ from unilabos.resources import resource_tracker
 from unilabos.utils import cls_creator
 from unilabos.ros.nodes.base_device_node import ROS2DeviceNode
 import uuid
-from unilabos.devices.eit_synthesis_station.manager.station_manager import SynthesisStationManager
-from unilabos.devices.eit_synthesis_station.config.setting import Settings
+from unilabos.devices.eit_synthesis_station.controller.station_controller import SynthesisStationController
+from unilabos.devices.eit_synthesis_station.config.setting import Settings, configure_logging
 from unilabos.devices.eit_synthesis_station.config.constants import ResourceCode, TRAY_CODE_DISPLAY_NAME, TraySpec
 from unilabos.resources.eit_synthesis_station import bottle_carriers, items
 from unilabos.resources.eit_synthesis_station.decks import EIT_Synthesis_Station_Deck
@@ -106,7 +106,7 @@ class EITSynthesisResourceSynchronizer(ResourceSynchronizer):
 
     def __init__(self, workstation: 'EITSynthesisWorkstation'):
         super().__init__(workstation)
-        self.manager: Optional[SynthesisStationManager] = None
+        self.controller: Optional[SynthesisStationController] = None
         self._chemical_name_map: Optional[Dict[str, str]] = None
         self.initialize()
     
@@ -114,8 +114,9 @@ class EITSynthesisResourceSynchronizer(ResourceSynchronizer):
         """初始化 EIT Manager 并登录"""
         try:
             settings = Settings.from_env()
-            self.manager = SynthesisStationManager(settings=settings)
-            self.manager.login()
+            configure_logging(settings.log_level)
+            self.controller = SynthesisStationController(settings=settings)
+            self.controller.login()
             return True
         except Exception as e:
             logger.error(f"EIT Synchronizer 初始化失败: {e}")
@@ -124,7 +125,7 @@ class EITSynthesisResourceSynchronizer(ResourceSynchronizer):
     def sync_from_external(self) -> bool:
         """[工站 -> 前端] 从 EIT 获取资源信息并更新 UniLab Deck"""
         try:
-            raw_data = self.manager.get_resource_info()
+            raw_data = self.controller.get_resource_info()
             # 注意：raw_data == [] 也要继续往下走，以便把本地残留物料清掉
             if raw_data is None:
                 return True
@@ -138,11 +139,12 @@ class EITSynthesisResourceSynchronizer(ResourceSynchronizer):
             if raw_data:
                 for item in raw_data:
                     raw_code = item.get("layout_code")
-                    norm_code = normalize_layout_code(raw_code)
+                    norm_code = normalize_layout_code(raw_code)   
                     if norm_code:
                         item["layout_code"] = norm_code
                         hardware_items[norm_code] = item
             occupied_codes = set(hardware_items.keys())
+
             # 观测工站事实状态，释放已完成的上料去重锁
             if hasattr(self.workstation, "_observe_and_release_batchin_locks"):
                 self.workstation._observe_and_release_batchin_locks(hardware_items)
@@ -809,7 +811,7 @@ class EITSynthesisResourceSynchronizer(ResourceSynchronizer):
             if mapped:
                 name = mapped
             try:
-                resp = self.manager.get_chemical_list(query_key=name, limit=10)
+                resp = self.controller.get_chemical_list(query_key=name, limit=10)
             except Exception as exc:
                 logger.warning(f"[同步→硬件] 化学品查询失败: {name}, err={exc}")
                 chem_cache[raw_name] = (None, name)
@@ -1010,7 +1012,7 @@ class EITSynthesisResourceSynchronizer(ResourceSynchronizer):
 
         def _run_batch_in_tray():
             try:
-                resp = self.manager.batch_in_tray(resource_req_list)
+                resp = self.controller.batch_in_tray(resource_req_list)
                 if resp is not None and hasattr(carrier, "unilabos_extra"):
                     carrier.unilabos_extra.pop("eit_staging_code", None)
                 # 不在这里“释放锁”，锁由 sync_from_external 观测到离开入口后自动释放
@@ -1050,7 +1052,7 @@ class EITSynthesisWorkstation(WorkstationBase):
         self.unilabos_uuid = getattr(self, "uuid", None)
         self.config = config or {}
         self.resource_synchronizer = EITSynthesisResourceSynchronizer(self)
-        self.manager = self.resource_synchronizer.manager
+        self.controller = self.resource_synchronizer.controller
                 # ========= 上料请求去重/锁 =========
         # key: "<tray_code>|<staging_code>" -> {"ts": float, "tray_code": int, "staging_code": str}
         self._batchin_lock = threading.Lock()
@@ -1076,8 +1078,8 @@ class EITSynthesisWorkstation(WorkstationBase):
     def station_status(self) -> Dict[str, Any]:
         """[状态上报] 对接底层控制器获取工站环境数据"""
         try:
-            env = self.manager.get_glovebox_env()
-            state = self.manager.station_state()
+            env = self.controller.get_glovebox_env()
+            state = self.controller.station_state()
             return {
                 "connected": True,
                 "station_state": state,
@@ -1291,7 +1293,7 @@ class EITSynthesisWorkstation(WorkstationBase):
 
         def _run_batch_out():
             try:
-                self.manager.batch_out_tray(layout_list)
+                self.controller.batch_out_tray(layout_list)
             except Exception as e:
                 logger.error(f"[EIT] batch_out_tray 异步执行失败: {e}")
 
@@ -1478,4 +1480,3 @@ class EITSynthesisWorkstation(WorkstationBase):
 
         except Exception as e:
             logger.warning(f"[去重锁] 观测释放锁失败: {e}")
-

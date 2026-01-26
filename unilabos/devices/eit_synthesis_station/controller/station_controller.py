@@ -10,7 +10,7 @@ from ..config.constants import TaskStatus,StationState,DeviceModuleStatus, Resou
 from ..config.setting import Settings, configure_logging
 from ..driver.api_client import ApiClient
 from ..driver.exceptions import AuthorizationExpiredError, ValidationError
-from ..utils.data_manager import DataManager
+from ..data.data_manager import DataManager
 import re
 import math
 
@@ -152,6 +152,7 @@ class SynthesisStationController:
         """
         功能:
             触发设备初始化, 然后轮询站点状态直到空闲。
+            初始化完成后自动检测W-1-1到W-1-4上的125mL溶剂瓶, 如有则执行复位操作。
         参数:
             device_id: 设备id列表, 当前忽略, 始终传空JSON。
             poll_interval_s: 轮询间隔秒数。
@@ -168,6 +169,10 @@ class SynthesisStationController:
             if state is not None:
                 if state == int(StationState.IDLE):
                     self._logger.info("设备初始化完成")
+
+                    # 初始化完成后检测W-1-1到W-1-4上的125mL溶剂瓶
+                    self._check_and_reset_w1_shelves()
+
                     return resp
             else:
                 self._logger.warning("无法解析站点状态, resp=%s", state)
@@ -176,6 +181,62 @@ class SynthesisStationController:
                 raise TimeoutError(f"设备初始化等待空闲超时, last_state={state}")
 
             time.sleep(poll_interval_s)
+
+    def _check_and_reset_w1_shelves(self) -> None:
+        """
+        功能:
+            检测W-1-1到W-1-4上是否有125mL溶剂瓶, 如有则自动执行复位操作
+        参数:
+            无
+        返回:
+            无
+        """
+        try:
+            self._logger.info("开始检测W-1-1到W-1-4上的125mL溶剂瓶")
+
+            # 获取资源信息
+            resources = self.get_resource_info()
+
+            # 定义需要检测的位置和对应的控制位置
+            check_positions = {
+                "W-1-1": "W-1-1",  # W-1-1和W-1-2由W-1-1控制
+                "W-1-2": "W-1-1",
+                "W-1-3": "W-1-3",  # W-1-3和W-1-4由W-1-3控制
+                "W-1-4": "W-1-3"
+            }
+
+            # 125mL试剂瓶托盘编码
+            bottle_125ml_tray_code = int(ResourceCode.REAGENT_BOTTLE_TRAY_125ML)
+
+            # 记录需要复位的控制位置
+            positions_to_reset = set()
+
+            # 遍历资源信息检查是否有125mL溶剂瓶
+            for resource in resources:
+                layout_code = resource.get("layout_code", "")
+                resource_type = resource.get("resource_type")
+
+                # 检查是否是目标位置且是125mL试剂瓶托盘
+                if layout_code in check_positions and resource_type == bottle_125ml_tray_code:
+                    control_position = check_positions[layout_code]
+                    positions_to_reset.add(control_position)
+                    self._logger.info("检测到%s位置有125mL溶剂瓶托盘", layout_code)
+
+            # 执行复位操作
+            if positions_to_reset:
+                self._logger.info("开始对检测到的货架执行复位操作")
+                for position in sorted(positions_to_reset):
+                    try:
+                        self._logger.info("正在复位%s货架", position)
+                        self.control_w1_shelf(position, "home")
+                        self._logger.info("%s货架复位成功", position)
+                    except Exception as e:
+                        self._logger.error("复位%s货架失败: %s", position, str(e))
+            else:
+                self._logger.info("W-1-1到W-1-4上未检测到125mL溶剂瓶, 无需复位")
+
+        except Exception as e:
+            self._logger.error("检测和复位W1货架时发生错误: %s", str(e))
 
     # ---------- 获取设备状态 ------------
     def station_state(self) -> int:
@@ -2191,6 +2252,41 @@ class SynthesisStationController:
         """
         return self._call_with_relogin(self._client.open_close_door, station, op, door_num)
 
+    # ---------- 控制W1货架 ----------
+    def control_w1_shelf(self, position: str, action: str, *, station: str = "FSY") -> JsonDict:
+        """
+        功能:
+            控制W1货架的推出或复位操作
+        参数:
+            position: str, 货架位置, 可选值: "W-1-1", "W-1-3", "W-1-5", "W-1-7"
+                     W-1-1 控制 W-1-1 和 W-1-2
+                     W-1-3 控制 W-1-3 和 W-1-4
+                     W-1-5 控制 W-1-5 和 W-1-6
+                     W-1-7 控制 W-1-7 和 W-1-8
+            action: str, 动作类型, "home" 表示复位, "outside" 表示推出
+            station: str, 站点编码, 默认 "FSY"
+        返回:
+            Dict, 接口响应
+        """
+        # 位置映射到num参数
+        position_map = {
+            "W-1-1": 1,
+            "W-1-3": 3,
+            "W-1-5": 5,
+            "W-1-7": 7
+        }
+
+        if position not in position_map:
+            raise ValidationError(f"position 必须是 {list(position_map.keys())} 之一")
+        if action not in ("home", "outside"):
+            raise ValidationError("action 必须是 'home' 或 'outside'")
+
+        num = position_map[position]
+        op = action  # op与action保持一致
+
+        self._logger.info("控制W1货架, position=%s, action=%s, station=%s", position, action, station)
+        return self._call_with_relogin(self._client.single_control_w1_shelf, station, action, op, num)
+
     # ---------- 任务模块 ----------  未完成
     def add_task(self, payload: JsonDict) -> JsonDict:
         resp = self._call_with_relogin(self._client.add_task, payload)
@@ -3818,11 +3914,11 @@ if __name__ == "__main__":
 
     controller = SynthesisStationController()
 
-    # #设备输初始化
-    # controller.device_init()
+    #设备输初始化
+    controller.device_init()
 
     #获取资源列表
-    # resource_info = controller.get_resource_info()
+    resource_info = controller.get_resource_info()
 
     # #获取工站内设备所有信息
     # device_info = controller.list_device_status()
@@ -3875,6 +3971,9 @@ if __name__ == "__main__":
 
     # out_path = Path("reaction_template.json")
     # out_path.write_text(json.dumps(result, ensure_ascii=False, indent=2), encoding="utf-8")
+
+    # 复位 W-1-1 和 W-1-2
+    # controller.control_w1_shelf("W-1-1", "home")
 
 
 

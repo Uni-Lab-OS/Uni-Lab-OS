@@ -241,7 +241,7 @@ class SynthesisStationManager(SynthesisStationController):
         
         logger.info(f"化学品对齐完成并回写文件: {path}")
 
-    # ----------- 2. 上料文件处理 -------------
+    # ----------- 2. 上料动作 -------------
     def batch_in_tray_by_file(self, file_path: str) -> JsonDict:
         """
         功能:
@@ -844,7 +844,7 @@ class SynthesisStationManager(SynthesisStationController):
 
         return result
 
-    # ------------5. Unilab 接口-------------
+    # ------------5. Unilab 接口（待修改）-------------
     def submit_experiment_task(
         self,
         chemical_db_path: str,
@@ -1013,7 +1013,13 @@ class SynthesisStationManager(SynthesisStationController):
 
     def batch_out_task_and_empty_trays(self, task_id: int | None = None, *, poll_interval_s: float = 1.0, ignore_missing: bool = True, timeout_s: float = 900.0, move_type: str = "main_out"):
         return super().batch_out_task_and_empty_trays(task_id, poll_interval_s=poll_interval_s, ignore_missing=ignore_missing, timeout_s=timeout_s, move_type=move_type)
-    
+
+    def batch_out_task_trays(self, task_id: int | None = None, *, poll_interval_s: float = 1.0, ignore_missing: bool = True, timeout_s: float = 900.0, move_type: str = "main_out"):
+        return super().batch_out_task_trays(task_id, poll_interval_s=poll_interval_s, ignore_missing=ignore_missing, timeout_s=timeout_s, move_type=move_type)
+
+    def batch_out_empty_trays(self, *, poll_interval_s: float = 1.0, ignore_missing: bool = True, timeout_s: float = 900.0, move_type: str = "main_out"):
+        return super().batch_out_empty_trays(poll_interval_s=poll_interval_s, ignore_missing=ignore_missing, timeout_s=timeout_s, move_type=move_type)
+
     def batch_out_tray(self, layout_list: list[dict], move_type: str = "main_out", *, task_id: int = None, poll_interval_s: float = 1.0, timeout_s: float = 900.0):
         return super().batch_out_tray(layout_list, move_type=move_type, task_id=task_id, poll_interval_s=poll_interval_s, timeout_s=timeout_s)
 

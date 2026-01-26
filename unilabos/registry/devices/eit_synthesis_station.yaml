@@ -3,7 +3,7 @@ eit_synthesis_station:
   - eit_synthesis_station
   class:
     action_value_mappings: {}
-    module: unilabos.devices.eit_synthesis_station.synchronizer:EITSynthesisWorkstation
+    module: unilabos.devices.eit_synthesis_station.manager.synchronizer:EITSynthesisWorkstation
     status_types: {}
     type: python
   config_info: []
