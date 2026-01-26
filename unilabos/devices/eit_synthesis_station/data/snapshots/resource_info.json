@@ -1,5 +1,5 @@
 {
-  "timestamp": "2026-01-26T18:47:09.145069",
+  "timestamp": "2026-01-26T19:58:02.992624",
   "resources": [
     {
       "layout_code": "N-1",
@@ -52,10 +52,17 @@
     },
     {
       "layout_code": "TB-2-1",
-      "count": 0,
-      "resource_type": 201000815,
-      "resource_type_name": "50 μL Tip 头托盘",
-      "substance_details": []
+      "count": 1,
+      "resource_type": 201000730,
+      "resource_type_name": "2 mL试剂瓶托盘",
+      "substance_details": [
+        {
+          "slot": 21,
+          "well": "C6",
+          "substance": "Ethanethiol",
+          "value": "1mL"
+        }
+      ]
     },
     {
       "layout_code": "W-1-1",

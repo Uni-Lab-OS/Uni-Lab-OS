@@ -15,6 +15,7 @@ from typing import Any, Dict, List, Optional, Tuple
 from ..controller.station_controller import SynthesisStationController
 from ..config.setting import Settings, configure_logging
 from ..config.constants import ResourceCode, TRAY_CODE_DISPLAY_NAME, TraySpec
+from .synchronizer import EITSynthesisWorkstation
 
 from ..driver.exceptions import ValidationError,ApiError
 
@@ -22,7 +23,7 @@ logger = logging.getLogger("StationManager")
 
 JsonDict = Dict[str, Any]
 
-class SynthesisStationManager(SynthesisStationController):
+class SynthesisStationManager(EITSynthesisWorkstation, SynthesisStationController):
     """
     功能:
         上层面向用户的管理器，继承自 SynthesisStationController。
@@ -30,10 +31,23 @@ class SynthesisStationManager(SynthesisStationController):
         然后调用父类方法执行具体的业务逻辑。
     """
 
-    def __init__(self, settings: Optional[Settings] = None):
+    def __init__(
+        self,
+        settings: Optional[Settings] = None,
+        config: Optional[Dict[str, Any]] = None,
+        deck: Optional[Any] = None,
+        **kwargs,
+    ):
         settings = settings or Settings.from_env()
         configure_logging(settings.log_level)
-        super().__init__(settings)
+        SynthesisStationController.__init__(self, settings)
+        EITSynthesisWorkstation.__init__(
+            self,
+            config=config,
+            deck=deck,
+            controller=self,
+            **kwargs,
+        )
 
     # ---------- 1. 化合物库文件处理 ----------
     def export_chemical_list_to_file(self, output_path: str) -> None:

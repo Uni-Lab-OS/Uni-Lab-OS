@@ -19,9 +19,9 @@ from unilabos.resources import resource_tracker
 from unilabos.utils import cls_creator
 from unilabos.ros.nodes.base_device_node import ROS2DeviceNode
 import uuid
-from unilabos.devices.eit_synthesis_station.controller.station_controller import SynthesisStationController
-from unilabos.devices.eit_synthesis_station.config.setting import Settings, configure_logging
-from unilabos.devices.eit_synthesis_station.config.constants import ResourceCode, TRAY_CODE_DISPLAY_NAME, TraySpec
+from ..controller.station_controller import SynthesisStationController
+from ..config.setting import Settings, configure_logging
+from ..config.constants import ResourceCode, TRAY_CODE_DISPLAY_NAME, TraySpec
 from unilabos.resources.eit_synthesis_station import bottle_carriers, items
 from unilabos.resources.eit_synthesis_station.decks import EIT_Synthesis_Station_Deck
 from unilabos.resources.warehouse import WareHouse
@@ -104,18 +104,23 @@ class EITSynthesisResourceSynchronizer(ResourceSynchronizer):
         int(ResourceCode.TEST_TUBE_MAGNET_TRAY_2ML): items.EIT_TEST_TUBE_MAGNET_2ML,
     }
 
-    def __init__(self, workstation: 'EITSynthesisWorkstation'):
+    def __init__(
+        self,
+        workstation: 'EITSynthesisWorkstation',
+        controller: Optional[SynthesisStationController] = None,
+    ):
         super().__init__(workstation)
-        self.controller: Optional[SynthesisStationController] = None
+        self.controller: Optional[SynthesisStationController] = controller
         self._chemical_name_map: Optional[Dict[str, str]] = None
         self.initialize()
     
     def initialize(self) -> bool:
         """初始化 EIT Manager 并登录"""
         try:
-            settings = Settings.from_env()
-            configure_logging(settings.log_level)
-            self.controller = SynthesisStationController(settings=settings)
+            if self.controller is None:
+                settings = Settings.from_env()
+                configure_logging(settings.log_level)
+                self.controller = SynthesisStationController(settings=settings)
             self.controller.login()
             return True
         except Exception as e:
@@ -722,7 +727,7 @@ class EITSynthesisResourceSynchronizer(ResourceSynchronizer):
             nonlocal name_map
             if name_map is None:
                 name_map = {}
-                sheet_path = Path(__file__).resolve().parent / "sheet" / "chemical_list.xlsx"
+                sheet_path = Path(__file__).resolve().parent.parent / "sheet" / "chemical_list.xlsx"
                 if not sheet_path.exists():
                     logger.warning(f"[同步→硬件] 未找到化学品映射表: {sheet_path}")
                 else:
@@ -1045,13 +1050,16 @@ class EITSynthesisWorkstation(WorkstationBase):
     def __init__(
             self, 
             config: Optional[Dict] = None, 
-            deck: Optional[Any] = None, 
+            deck: Optional[Any] = None,
+            controller: Optional[SynthesisStationController] = None,
             **kwargs):
         super().__init__(deck=deck, **kwargs)
         self.name = getattr(self, "device_id", "eit_station") 
         self.unilabos_uuid = getattr(self, "uuid", None)
         self.config = config or {}
-        self.resource_synchronizer = EITSynthesisResourceSynchronizer(self)
+        if controller is None and isinstance(self, SynthesisStationController):
+            controller = self
+        self.resource_synchronizer = EITSynthesisResourceSynchronizer(self, controller=controller)
         self.controller = self.resource_synchronizer.controller
                 # ========= 上料请求去重/锁 =========
         # key: "<tray_code>|<staging_code>" -> {"ts": float, "tray_code": int, "staging_code": str}
