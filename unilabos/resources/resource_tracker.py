@@ -339,6 +339,7 @@ class ResourceTreeSet(object):
                 "container": "container",       
                 "resource_holder": "resource_holder", 
                 "warehouse": "warehouse",
+                "electrode_sheet": "electrode_sheet",
             }
             if source in replace_info:
                 return replace_info[source]
@@ -1063,6 +1064,11 @@ class DeviceNodeResourceTracker(object):
         Args:
             resource: 资源对象（可以是dict或实例）
         """
+        try:
+            from pylabrobot.resources import Resource as ResourcePLR
+        except Exception:
+            ResourcePLR = None  # type: ignore
+
         root_uuids = {}
         for r in self.resources:
             res_uuid = r.get("uuid") if isinstance(r, dict) else getattr(r, "unilabos_uuid", None)
@@ -1078,8 +1084,21 @@ class DeviceNodeResourceTracker(object):
             res_uuid = getattr(resource, "unilabos_uuid", None)
         if res_uuid in root_uuids:
             old_res = root_uuids[res_uuid]
-            # self.remove_resource(old_res)
-            logger.warning(f"资源{resource}已存在，旧资源: {old_res}")
+
+            def _is_plr(obj) -> bool:
+                return ResourcePLR is not None and isinstance(obj, ResourcePLR)
+
+            # 优先保留 PLR 资源，避免 dict + PLR 重复导致冲突
+            if _is_plr(old_res) and not _is_plr(resource):
+                logger.warning(f"资源{resource}已存在（保留PLR实例），跳过新增，旧资源: {old_res}")
+                return
+            if _is_plr(resource) and not _is_plr(old_res):
+                logger.warning(f"资源{resource}已存在（替换为PLR实例），旧资源: {old_res}")
+                self.remove_resource(old_res)
+            else:
+                logger.warning(f"资源{resource}已存在（替换旧资源），旧资源: {old_res}")
+                self.remove_resource(old_res)
+
         self.resources.append(resource)
         # 递归收集uuid映射
         self._collect_uuid_mapping(resource)
