@@ -1,6 +1,10 @@
 """
 EIT 合成工作站物料同步系统
 实现 EIT 工站与 UniLab 前端的实时物料同步与控制钩子
+
+1) 从硬件侧拉取事实状态并更新前端资源树
+2) 将前端请求（上料/下料/位置变更）转换为硬件侧指令
+3) 做必要的去重、纠偏和数据清洗，避免前端状态漂移
 """
 
 import threading
@@ -28,6 +32,7 @@ from unilabos.resources.warehouse import WareHouse
 from unilabos.resources.itemized_carrier import BottleCarrier
 
 def normalize_layout_code(eit_code: Optional[str]) -> Optional[str]:
+    """归一化 layout_code：把数值段前导 0 去掉，保持层级结构不变。"""
     if not eit_code or "-" not in eit_code:
         return eit_code
     parts = eit_code.split("-")
@@ -56,6 +61,7 @@ _EIT_TYPE_MAPPINGS = {
     "well": Well,
 }
 
+# 运行时将 EIT 相关资源类型注册到类工厂中（兼容新旧实现）
 for key, cls in _EIT_TYPE_MAPPINGS.items():
     if hasattr(cls_creator, "register"):
         cls_creator.register(key, cls)
@@ -65,6 +71,7 @@ for key, cls in _EIT_TYPE_MAPPINGS.items():
 try:
     from unilabos.resources import resource_tracker as _resource_tracker
     if hasattr(_resource_tracker, "ResourceTracker"):
+        # ResourceTracker 也需要识别 EIT 资源类型
         for key, cls in _EIT_TYPE_MAPPINGS.items():
             _resource_tracker.ResourceTracker.CLASS_MAP[key] = cls
 except Exception as e:
@@ -110,7 +117,9 @@ class EITSynthesisResourceSynchronizer(ResourceSynchronizer):
         controller: Optional[SynthesisStationController] = None,
     ):
         super().__init__(workstation)
+        # 控制器由外部注入
         self.controller: Optional[SynthesisStationController] = controller
+        # 化学品名称映射缓存（英文名 -> 中文名）
         self._chemical_name_map: Optional[Dict[str, str]] = None
         self.initialize()
     
@@ -121,6 +130,7 @@ class EITSynthesisResourceSynchronizer(ResourceSynchronizer):
                 settings = Settings.from_env()
                 configure_logging(settings.log_level)
                 self.controller = SynthesisStationController(settings=settings)
+            # 登录硬件控制器
             self.controller.login()
             return True
         except Exception as e:
@@ -138,8 +148,7 @@ class EITSynthesisResourceSynchronizer(ResourceSynchronizer):
                 logger.warning(f"get_resource_info 返回非 list: {type(raw_data)}")
                 return False
             # raw_data 允许为空列表
-
-
+            # 将硬件侧列表转为以 layout_code 为 key 的索引
             hardware_items = {}
             if raw_data:
                 for item in raw_data:
@@ -160,7 +169,7 @@ class EITSynthesisResourceSynchronizer(ResourceSynchronizer):
             # 获取是否已完成首次全量同步的标识（在 EITSynthesisWorkstation 中定义）
             is_first_sync = not getattr(self.workstation, "_first_full_sync_done", False)
 
-            # 2. 安全地获取所有仓库资源
+            # 2. 安全地获取所有仓库资源（EIT 各分区）
             eit_zones = ["W", "N", "TB", "AS", "FF", "MS", "MSB", "SC", "T", "TS"]
             warehouses = [res for res in self.workstation.deck.children if res.name in eit_zones]
             
@@ -212,6 +221,7 @@ class EITSynthesisResourceSynchronizer(ResourceSynchronizer):
                         desired_tray_name = f"{tray_display_name}@{eit_code}"
                         
                         if current_child:
+                            # 已有物料，先判断类型是否一致
                             existing_type = getattr(current_child, "eit_resource_type", None)
                             if existing_type is None:
                                 extra = getattr(current_child, "unilabos_extra", {}) or {}
@@ -224,6 +234,7 @@ class EITSynthesisResourceSynchronizer(ResourceSynchronizer):
                                     except Exception:
                                         existing_type = None
                             if existing_type == res_type:
+                                # 同类型：仅更新元数据与子瓶信息（保持对象不变）
                                 if not getattr(current_child, "unilabos_extra", None):
                                     current_child.unilabos_extra = {}
                                 current_child.unilabos_extra["eit_layout_code"] = eit_code
@@ -235,6 +246,7 @@ class EITSynthesisResourceSynchronizer(ResourceSynchronizer):
                                 if current_child.name != desired_tray_name:
                                     current_child.name = desired_tray_name
                                 if details and hasattr(current_child, "sites"):
+                                    # 按明细同步托盘内部子物料（瓶/桶/试管等）
                                     item_factory = self.TRAY_TO_ITEM_MAP.get(res_type)
                                     for detail in details:
                                         slot_idx = detail.get("slot")
@@ -249,11 +261,13 @@ class EITSynthesisResourceSynchronizer(ResourceSynchronizer):
                                         else:
                                             child = site
                                         if child is None and item_factory:
+                                            # 缺失：创建子物料
                                             bottle = item_factory(name=desired_bottle_name)
                                             bottle.unilabos_uuid = str(uuid.uuid4())
                                             bottle.description = substance_name
                                             current_child[slot_idx] = bottle
                                         elif child and getattr(child, "name", None) != desired_bottle_name:
+                                            # 存在但名称不一致：修正名称与描述
                                             child.name = desired_bottle_name
                                             child.description = substance_name
                                 continue
@@ -270,6 +284,7 @@ class EITSynthesisResourceSynchronizer(ResourceSynchronizer):
                             except TypeError:
                                 new_carrier = factory_func(name=desired_tray_name)
                         else:
+                            # 未识别类型时，使用通用容器兜底
                             new_carrier = Container(name=desired_tray_name, size_x=127.8, size_y=85.5, size_z=20)
                             new_carrier.description = item.get("resource_type_name")
                         
@@ -337,6 +352,7 @@ class EITSynthesisResourceSynchronizer(ResourceSynchronizer):
         tree_dump = tree_set.dump()
         flattened_trees: List[List[Dict[str, Any]]] = []
         for tree_nodes in tree_dump:
+            # 用 uuid 索引节点，便于重挂载与删除
             nodes_by_uuid = {node.get("uuid"): node for node in tree_nodes if node.get("uuid")}
             children_map: Dict[Optional[str], List[str]] = {}
             for node in tree_nodes:
@@ -360,7 +376,9 @@ class EITSynthesisResourceSynchronizer(ResourceSynchronizer):
                     child = nodes_by_uuid.get(child_uuid)
                     if not child:
                         continue
+                    # 将子节点直接挂在仓库/托盘上
                     child["parent_uuid"] = parent_uuid
+                    # 位置坐标叠加：slot 的偏移 + 子节点局部坐标
                     child_pose = child.get("pose", {})
                     offset_pose = node.get("pose", {})
                     for key in ("position", "position3d"):
@@ -377,6 +395,7 @@ class EITSynthesisResourceSynchronizer(ResourceSynchronizer):
                     children_map[parent_uuid] = [c for c in children_map[parent_uuid] if c != node_uuid]
                 parent_node = nodes_by_uuid.get(parent_uuid) if parent_uuid else None
                 if parent_node and slot_label:
+                    # 将 slot 的占用信息同步到 parent.config.sites[].occupied_by
                     child_name = reparented_children[0].get("name") if reparented_children else None
                     config = parent_node.get("config")
                     if isinstance(config, dict):
@@ -410,6 +429,7 @@ class EITSynthesisResourceSynchronizer(ResourceSynchronizer):
                                     break
                 nodes_by_uuid.pop(node_uuid, None)
             flattened_trees.append(list(nodes_by_uuid.values()))
+        # ROS2 异步更新，避免阻塞主线程
         ROS2DeviceNode.run_async_func(
             self.workstation._ros_node.update_resource,
             True,
@@ -418,6 +438,7 @@ class EITSynthesisResourceSynchronizer(ResourceSynchronizer):
 
     def sync_to_external(self, resource: Resource) -> bool:
         """[虚拟 -> 硬件] 组装 BatchInTray payload，补齐化学品与单位后同步。"""
+        # ---- 内部工具函数：解析/清洗参数 ----
         def _load_parameters(*sources: Any) -> Dict[str, Any]:
             for src in sources:
                 if not isinstance(src, dict):
@@ -441,6 +462,7 @@ class EITSynthesisResourceSynchronizer(ResourceSynchronizer):
             return {}
 
         def _get_liquids_from_source(source: Any) -> Optional[List[Any]]:
+            """兼容多种数据结构提取 liquids 列表。"""
             if source is None:
                 return None
             if isinstance(source, dict):
@@ -454,6 +476,7 @@ class EITSynthesisResourceSynchronizer(ResourceSynchronizer):
             return None
 
         def _resolve_slot_label_from_name(name: Optional[str]) -> Optional[str]:
+            """从名称中解析 A1/B2 这种孔位标签。"""
             if not name:
                 return None
             name = str(name).strip()
@@ -472,6 +495,7 @@ class EITSynthesisResourceSynchronizer(ResourceSynchronizer):
             slot_label: Optional[str],
             extra_sources: Optional[List[Dict[str, Any]]] = None,
         ) -> Optional[str]:
+            """从各种字段/状态中推断化学品名称。"""
             extra = getattr(bottle, "unilabos_extra", {}) or {}
             state = getattr(bottle, "_unilabos_state", {}) or {}
             data = getattr(bottle, "data", {}) or {}
@@ -486,11 +510,13 @@ class EITSynthesisResourceSynchronizer(ResourceSynchronizer):
                 sources.extend([src for src in extra_sources if isinstance(src, dict)])
             params = _load_parameters(*sources)
             sources = [extra, params, state, data] + (extra_sources or [])
+            # 1) 明确字段优先
             for source in sources:
                 for key in ("substance", "material_name", "chemical_name", "material", "name"):
                     value = source.get(key)
                     if value:
                         return str(value).strip()
+            # 2) liquids 列表中的首项
             liquid_sources: List[Any] = [data, state, params] + (extra_sources or [])
             tracker = getattr(bottle, "tracker", None)
             if tracker is not None:
@@ -509,6 +535,7 @@ class EITSynthesisResourceSynchronizer(ResourceSynchronizer):
                         value = first.get(key)
                         if value:
                             return str(value).strip()
+            # 3) 兜底：extra / description / name
             for key in ("substance", "material_name", "chemical_name", "name"):
                 value = extra.get(key)
                 if value:
@@ -530,12 +557,13 @@ class EITSynthesisResourceSynchronizer(ResourceSynchronizer):
             amount_kind: str,
             extra_sources: Optional[List[Dict[str, Any]]] = None,
         ) -> Tuple[Optional[float], Optional[float]]:
+            """从多个字段中解析体积/重量；返回 (volume_mL, weight_mg)。"""
             def _parse_amount(text: Any) -> Tuple[Optional[float], Optional[str]]:
                 if text is None:
                     return None, None
                 if isinstance(text, (int, float)):
                     return float(text), None
-                match = re.search(r"([0-9]+(?:\\.[0-9]+)?)\\s*([a-zA-Zμµ]+)?", str(text))
+                match = re.search(r"([0-9]+(?:\.[0-9]+)?)\s*([a-zA-Zμµ]+)?", str(text))
                 if not match:
                     return None, None
                 value = float(match.group(1))
@@ -544,6 +572,7 @@ class EITSynthesisResourceSynchronizer(ResourceSynchronizer):
                 return value, unit
 
             def _normalize_amount(value: float, unit: Optional[str], amount_kind: str) -> float:
+                # 将单位统一到 mL 或 mg
                 unit = (unit or "").lower()
                 if amount_kind == "volume":
                     if unit in ("l", "liter"):
@@ -573,6 +602,7 @@ class EITSynthesisResourceSynchronizer(ResourceSynchronizer):
                 sources.extend([src for src in extra_sources if isinstance(src, dict)])
             params = _load_parameters(*sources)
             sources = [extra, params, state, data] + (extra_sources or [])
+            # 1) 明确字段优先（initial_volume/initial_weight）
             for source in sources:
                 for key in ("initial_volume", "initial_weight", "volume", "weight"):
                     if key in source:
@@ -585,6 +615,7 @@ class EITSynthesisResourceSynchronizer(ResourceSynchronizer):
                         if "volume" in key:
                             return val, None
                         return None, val
+            # 2) 带单位的通用字段
             for source in (params, extra, state, data, *(extra_sources or [])):
                 raw = source.get("value") or source.get("amount") or source.get("quantity")
                 unit = source.get("unit")
@@ -600,6 +631,7 @@ class EITSynthesisResourceSynchronizer(ResourceSynchronizer):
                     return value, None
                 if amount_kind == "weight":
                     return None, value
+            # 3) liquids 列表兜底
             liquid_sources: List[Any] = [data, state] + (extra_sources or [])
             tracker = getattr(bottle, "tracker", None)
             if tracker is not None:
@@ -641,6 +673,7 @@ class EITSynthesisResourceSynchronizer(ResourceSynchronizer):
                     return None, value
             return None, None
 
+        # 统一拿到托盘（bottle_carrier）对象
         carrier = resource
         if getattr(resource, "category", None) != "bottle_carrier":
             if resource.parent and getattr(resource.parent, "category", None) == "bottle_carrier":
@@ -660,6 +693,7 @@ class EITSynthesisResourceSynchronizer(ResourceSynchronizer):
             logger.warning(f"[同步→硬件] 非入口位点或缺少入口坐标，跳过: {carrier.name}")
             return False
 
+        # 解析托盘类型（resource_type）
         tray_code = None
         model_val = getattr(carrier, "model", None)
         if model_val is not None:
@@ -685,6 +719,7 @@ class EITSynthesisResourceSynchronizer(ResourceSynchronizer):
             logger.warning(f"[同步→硬件] 无法解析托盘类型，跳过: {carrier.name}")
             return False
 
+        # tray_spec 决定 slot_label -> slot_idx 的映射规则
         tray_spec = None
         try:
             tray_spec = getattr(TraySpec, ResourceCode(tray_code).name, None)
@@ -699,6 +734,7 @@ class EITSynthesisResourceSynchronizer(ResourceSynchronizer):
             int(ResourceCode.POWDER_BUCKET_TRAY_30ML): (str(int(ResourceCode.POWDER_BUCKET_30ML)), False, "weight", "mg"),
         }
 
+        # BatchInTray payload 的第一项是托盘本身
         resource_list: List[Dict[str, Any]] = [{
             "layout_code": f"{eit_code}:-1",
             "resource_type": str(tray_code),
@@ -848,6 +884,7 @@ class EITSynthesisResourceSynchronizer(ResourceSynchronizer):
 
         bottle_debug: List[Dict[str, Any]] = []
         seen_slots: set = set()
+        # 收集托盘内的所有子瓶/子物料
         bottle_items: List[Tuple[Optional[str], Optional[Resource]]] = []
         if hasattr(carrier, "sites"):
             for idx in range(len(carrier.sites)):
@@ -906,6 +943,7 @@ class EITSynthesisResourceSynchronizer(ResourceSynchronizer):
             holder_extra = getattr(holder, "unilabos_extra", {}) or {} if holder else {}
             holder_state = getattr(holder, "_unilabos_state", {}) or {} if holder else {}
             holder_data = getattr(holder, "data", {}) or {} if holder else {}
+            # 尝试从对象内序列化获取状态
             bottle_state: Dict[str, Any] = {}
             for attr in ("serialize_state", "serialize_all_state"):
                 func = getattr(bottle, attr, None)
@@ -956,6 +994,7 @@ class EITSynthesisResourceSynchronizer(ResourceSynchronizer):
             resource_type = str(bottle_type) if bottle_type is not None else media_code
             resolved_substance = substance
             chemical_id = None
+            # 若存在液体信息，再尝试对齐化学品库
             if substance:
                 liquids_present = False
                 for source in (bottle_state, getattr(bottle, "data", None), getattr(bottle, "_unilabos_state", None)):
@@ -1017,6 +1056,7 @@ class EITSynthesisResourceSynchronizer(ResourceSynchronizer):
 
         def _run_batch_in_tray():
             try:
+                # 后台执行，避免阻塞回调
                 resp = self.controller.batch_in_tray(resource_req_list)
                 if resp is not None and hasattr(carrier, "unilabos_extra"):
                     carrier.unilabos_extra.pop("eit_staging_code", None)
@@ -1061,13 +1101,13 @@ class EITSynthesisWorkstation(WorkstationBase):
             controller = self
         self.resource_synchronizer = EITSynthesisResourceSynchronizer(self, controller=controller)
         self.controller = self.resource_synchronizer.controller
-                # ========= 上料请求去重/锁 =========
+        # ========= 上料请求去重/锁 =========
         # key: "<tray_code>|<staging_code>" -> {"ts": float, "tray_code": int, "staging_code": str}
         self._batchin_lock = threading.Lock()
         self._batchin_locks: Dict[str, Dict[str, Any]] = {}
         # 默认锁 TTL：建议 5 分钟（覆盖一次完整上料耗时+网络抖动）
         self._batchin_lock_ttl_s = int(self.config.get("batchin_lock_ttl_s", 300))
-                # ========= 回滚上报节流 =========
+        # ========= 回滚上报节流 =========
         self._rollback_throttle_lock = threading.Lock()
         # key: warehouse_name -> last_report_monotonic_ts
         self._rollback_last_report_ts = {}
@@ -1079,6 +1119,7 @@ class EITSynthesisWorkstation(WorkstationBase):
         self._ros_node = ros_node
         # 首次同步工站状态
         self.resource_synchronizer.sync_from_external()
+        # 周期性同步工站事实状态（默认 30s）
         self._ros_node.create_timer(30.0, self.resource_synchronizer.sync_from_external)
         logger.info(f"EIT 工作站 {ros_node.device_id} 定时同步任务已通过 ROS Timer 启动")
 
@@ -1301,6 +1342,7 @@ class EITSynthesisWorkstation(WorkstationBase):
 
         def _run_batch_out():
             try:
+                # 异步执行，避免阻塞
                 self.controller.batch_out_tray(layout_list)
             except Exception as e:
                 logger.error(f"[EIT] batch_out_tray 异步执行失败: {e}")
@@ -1413,6 +1455,7 @@ class EITSynthesisWorkstation(WorkstationBase):
         return None
 
     def _batchin_lock_key(self, tray_code: int, staging_code: str) -> str:
+        """生成去重锁 key（tray_code + staging_code）。"""
         return f"{int(tray_code)}|{normalize_layout_code(staging_code) or staging_code}"
 
     def _acquire_batchin_lock(self, tray: Resource, staging_code: str) -> Tuple[bool, str]:
