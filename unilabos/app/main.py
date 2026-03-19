@@ -1,13 +1,13 @@
 import argparse
 import asyncio
 import os
+import platform
 import shutil
 import signal
 import sys
 import threading
 import time
 from typing import Dict, Any, List
-
 import networkx as nx
 import yaml
 
@@ -17,9 +17,9 @@ unilabos_dir = os.path.dirname(os.path.dirname(current_dir))
 if unilabos_dir not in sys.path:
     sys.path.append(unilabos_dir)
 
+from unilabos.app.utils import cleanup_for_restart
 from unilabos.utils.banner_print import print_status, print_unilab_banner
 from unilabos.config.config import load_config, BasicConfig, HTTPConfig
-from unilabos.app.utils import cleanup_for_restart
 
 # Global restart flags (used by ws_client and web/server)
 _restart_requested: bool = False
@@ -162,9 +162,21 @@ def parse_args():
         help="Complete registry information",
     )
     parser.add_argument(
+        "--check_mode",
+        action="store_true",
+        default=False,
+        help="Run in check mode for CI: validates registry imports and ensures no file changes",
+    )
+    parser.add_argument(
         "--no_update_feedback",
         action="store_true",
         help="Disable sending update feedback to server",
+    )
+    parser.add_argument(
+        "--test_mode",
+        action="store_true",
+        default=False,
+        help="Test mode: all actions simulate execution and return mock results without running real hardware",
     )
     # workflow upload subcommand
     workflow_parser = subparsers.add_parser(
@@ -199,6 +211,12 @@ def parse_args():
         default=False,
         help="Whether to publish the workflow (default: False)",
     )
+    workflow_parser.add_argument(
+        "--description",
+        type=str,
+        default="",
+        help="Workflow description, used when publishing the workflow",
+    )
     return parser
 
 
@@ -211,7 +229,10 @@ def main():
     args_dict = vars(args)
 
     # 环境检查 - 检查并自动安装必需的包 (可选)
-    if not args_dict.get("skip_env_check", False):
+    skip_env_check = args_dict.get("skip_env_check", False)
+    check_mode = args_dict.get("check_mode", False)
+
+    if not skip_env_check:
         from unilabos.utils.environment_check import check_environment
 
         if not check_environment(auto_install=True):
@@ -222,49 +243,75 @@ def main():
 
     # 加载配置文件，优先加载config，然后从env读取
     config_path = args_dict.get("config")
-    if os.getcwd().endswith("unilabos_data"):
-        working_dir = os.path.abspath(os.getcwd())
-    else:
-        working_dir = os.path.abspath(os.path.join(os.getcwd(), "unilabos_data"))
 
-    if args_dict.get("working_dir"):
-        working_dir = args_dict.get("working_dir", "")
-        if config_path and not os.path.exists(config_path):
-            config_path = os.path.join(working_dir, "local_config.py")
-            if not os.path.exists(config_path):
-                print_status(
-                    f"当前工作目录 {working_dir} 未找到local_config.py，请通过 --config 传入 local_config.py 文件路径",
-                    "error",
-                )
-                os._exit(1)
+    # === 解析 working_dir ===
+    # 规则1: working_dir 传入 → 检测 unilabos_data 子目录，已是则不修改
+    # 规则2: 仅 config_path 传入 → 用其父目录作为 working_dir
+    # 规则4: 两者都传入 → 各用各的，但 working_dir 仍做 unilabos_data 子目录检测
+    raw_working_dir = args_dict.get("working_dir")
+    if raw_working_dir:
+        working_dir = os.path.abspath(raw_working_dir)
     elif config_path and os.path.exists(config_path):
-        working_dir = os.path.dirname(config_path)
-    elif os.path.exists(working_dir) and os.path.exists(os.path.join(working_dir, "local_config.py")):
-        config_path = os.path.join(working_dir, "local_config.py")
-    elif not config_path and (
-        not os.path.exists(working_dir) or not os.path.exists(os.path.join(working_dir, "local_config.py"))
-    ):
-        print_status(f"未指定config路径，可通过 --config 传入 local_config.py 文件路径", "info")
-        print_status(f"您是否为第一次使用？并将当前路径 {working_dir} 作为工作目录？ (Y/n)", "info")
-        if input() != "n":
-            os.makedirs(working_dir, exist_ok=True)
-            config_path = os.path.join(working_dir, "local_config.py")
-            shutil.copy(
-                os.path.join(os.path.dirname(os.path.dirname(__file__)), "config", "example_config.py"), config_path
-            )
-            print_status(f"已创建 local_config.py 路径： {config_path}", "info")
+        working_dir = os.path.dirname(os.path.abspath(config_path))
+    else:
+        working_dir = os.path.abspath(os.getcwd())
+
+    # unilabos_data 子目录自动检测
+    if os.path.basename(working_dir) != "unilabos_data":
+        unilabos_data_sub = os.path.join(working_dir, "unilabos_data")
+        if os.path.isdir(unilabos_data_sub):
+            working_dir = unilabos_data_sub
+        elif not raw_working_dir and not (config_path and os.path.exists(config_path)):
+            # 未显式指定路径，默认使用 cwd/unilabos_data
+            working_dir = os.path.abspath(os.path.join(os.getcwd(), "unilabos_data"))
+
+    # === 解析 config_path ===
+    if config_path and not os.path.exists(config_path):
+        # config_path 传入但不存在，尝试在 working_dir 中查找
+        candidate = os.path.join(working_dir, "local_config.py")
+        if os.path.exists(candidate):
+            config_path = candidate
+            print_status(f"在工作目录中发现配置文件: {config_path}", "info")
         else:
+            print_status(
+                f"配置文件 {config_path} 不存在，工作目录 {working_dir} 中也未找到 local_config.py，"
+                f"请通过 --config 传入 local_config.py 文件路径",
+                "error",
+            )
             os._exit(1)
-    # 加载配置文件
+    elif not config_path:
+        # 规则3: 未传入 config_path，尝试 working_dir/local_config.py
+        candidate = os.path.join(working_dir, "local_config.py")
+        if os.path.exists(candidate):
+            config_path = candidate
+            print_status(f"发现本地配置文件: {config_path}", "info")
+        else:
+            print_status(f"未指定config路径，可通过 --config 传入 local_config.py 文件路径", "info")
+            print_status(f"您是否为第一次使用？并将当前路径 {working_dir} 作为工作目录？ (Y/n)", "info")
+            if check_mode or input() != "n":
+                os.makedirs(working_dir, exist_ok=True)
+                config_path = os.path.join(working_dir, "local_config.py")
+                shutil.copy(
+                    os.path.join(os.path.dirname(os.path.dirname(__file__)), "config", "example_config.py"),
+                    config_path,
+                )
+                print_status(f"已创建 local_config.py 路径： {config_path}", "info")
+            else:
+                os._exit(1)
+
+    # 加载配置文件 (check_mode 跳过)
     print_status(f"当前工作目录为 {working_dir}", "info")
-    load_config_from_file(config_path)
+    if not check_mode:
+        load_config_from_file(config_path)
 
     # 根据配置重新设置日志级别
     from unilabos.utils.log import configure_logger, logger
 
     if hasattr(BasicConfig, "log_level"):
         logger.info(f"Log level set to '{BasicConfig.log_level}' from config file.")
-    configure_logger(loglevel=BasicConfig.log_level, working_dir=working_dir)
+    file_path = configure_logger(loglevel=BasicConfig.log_level, working_dir=working_dir)
+    if file_path is not None:
+        logger.info(f"[LOG_FILE] {file_path}")
 
     if args.addr != parser.get_default("addr"):
         if args.addr == "test":
@@ -308,11 +355,15 @@ def main():
     BasicConfig.slave_no_host = args_dict.get("slave_no_host", False)
     BasicConfig.upload_registry = args_dict.get("upload_registry", False)
     BasicConfig.no_update_feedback = args_dict.get("no_update_feedback", False)
+    BasicConfig.test_mode = args_dict.get("test_mode", False)
+    if BasicConfig.test_mode:
+        print_status("启用测试模式：所有动作将模拟执行，不调用真实硬件", "warning")
     BasicConfig.communication_protocol = "websocket"
-    machine_name = os.popen("hostname").read().strip()
+    machine_name = platform.node()
     machine_name = "".join([c if c.isalnum() or c == "_" else "_" for c in machine_name])
     BasicConfig.machine_name = machine_name
     BasicConfig.vis_2d_enable = args_dict["2d_vis"]
+    BasicConfig.check_mode = check_mode
 
     from unilabos.resources.graphio import (
         read_node_link_json,
@@ -331,10 +382,14 @@ def main():
     # 显示启动横幅
     print_unilab_banner(args_dict)
 
-    # 注册表
-    lab_registry = build_registry(
-        args_dict["registry_path"], args_dict.get("complete_registry", False), BasicConfig.upload_registry
-    )
+    # 注册表 - check_mode 时强制启用 complete_registry
+    complete_registry = args_dict.get("complete_registry", False) or check_mode
+    lab_registry = build_registry(args_dict["registry_path"], complete_registry, BasicConfig.upload_registry)
+
+    # Check mode: complete_registry 完成后直接退出，git diff 检测由 CI workflow 执行
+    if check_mode:
+        print_status("Check mode: complete_registry 完成，退出", "info")
+        os._exit(0)
 
     if BasicConfig.upload_registry:
         # 设备注册到服务端 - 需要 ak 和 sk

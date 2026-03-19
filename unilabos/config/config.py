@@ -22,6 +22,8 @@ class BasicConfig:
     startup_json_path = None  # 填写绝对路径
     disable_browser = False  # 禁止浏览器自动打开
     port = 8002  # 本地HTTP服务
+    check_mode = False  # CI 检查模式，用于验证 registry 导入和文件一致性
+    test_mode = False  # 测试模式，所有动作不实际执行，返回模拟结果
     # 'TRACE', 'DEBUG', 'INFO', 'WARNING', 'ERROR', 'CRITICAL'
     log_level: Literal["TRACE", "DEBUG", "INFO", "WARNING", "ERROR", "CRITICAL"] = "DEBUG"
 
@@ -38,7 +40,7 @@ class BasicConfig:
 class WSConfig:
     reconnect_interval = 5  # 重连间隔（秒）
     max_reconnect_attempts = 999  # 最大重连次数
-    ping_interval = 30  # ping间隔（秒）
+    ping_interval = 20  # ping间隔（秒）
 
 
 # HTTP配置
@@ -144,5 +146,5 @@ def load_config(config_path=None):
             traceback.print_exc()
             exit(1)
     else:
-        config_path = os.path.join(os.path.dirname(__file__), "local_config.py")
+        config_path = os.path.join(os.path.dirname(__file__), "example_config.py")
         load_config(config_path)
