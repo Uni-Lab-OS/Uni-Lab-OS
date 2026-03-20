@@ -683,6 +683,7 @@ class ResourceTreeSet(object):
             # 设置 parent 引用并建立 children 关系
             if parent_instance:
                 instance.res_content.parent = parent_instance.res_content
+                instance.res_content.parent_uuid = parent_instance.res_content.uuid
                 # 将当前节点添加到父节点的 children 列表（避免重复添加）
                 if instance not in parent_instance.children:
                     parent_instance.children.append(instance)
@@ -835,6 +836,7 @@ class ResourceTreeSet(object):
                             if remote_material_name not in local_sub_children_map:
                                 # 引入整个子树
                                 remote_material.res_content.parent = local_sub_device.res_content
+                                remote_material.res_content.parent_uuid = local_sub_device.res_content.uuid
                                 local_sub_device.children.append(remote_material)
                                 added_count += 1
                             else:
@@ -858,6 +860,7 @@ class ResourceTreeSet(object):
                             remote_sub_name = remote_sub.res_content.name
                             if remote_sub_name not in local_material_children_map:
                                 remote_sub.res_content.parent = local_material.res_content
+                                remote_sub.res_content.parent_uuid = local_material.res_content.uuid
                                 local_material.children.append(remote_sub)
                                 added_count += 1
                             else:

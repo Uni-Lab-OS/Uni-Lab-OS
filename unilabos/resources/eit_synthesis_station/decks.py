@@ -1,4 +1,6 @@
-from os import name
+from __future__ import annotations
+from typing import Self
+
 from pylabrobot.resources import Deck, Coordinate, Rotation
 from unilabos.utils.log import logger
 import uuid
@@ -32,6 +34,20 @@ class EIT_Synthesis_Station_Deck(Deck):
             self.unilabos_uuid = str(uuid.uuid4())
         if setup:
             self.setup()
+
+    @classmethod
+    def deserialize(cls, data, allow_marshal=False) -> Self:
+        """反序列化时跳过 setup()，由序列化数据提供 children，避免双重挂载"""
+        data_modified = dict(data)
+        data_modified["setup"] = False
+        resource = super().deserialize(data_modified, allow_marshal=allow_marshal)
+        resource.warehouses = {}
+        resource.warehouse_locations = {}
+        for child in resource.children:
+            resource.warehouses[child.name] = child
+            if child.location is not None:
+                resource.warehouse_locations[child.name] = child.location
+        return resource
     
     def _recursive_assign_uuid(self, res):
         """递归为资源及其所有现有子资源分配 UUID"""

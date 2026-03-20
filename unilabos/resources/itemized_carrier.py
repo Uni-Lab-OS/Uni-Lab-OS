@@ -126,6 +126,7 @@ class ItemizedCarrier(ResourcePLR):
     self.child_locations: Dict[str, Coordinate] = {}
     self.child_size: Dict[str, dict] = {}
     self._ordering = {}
+    self._occupied_names: List[Optional[str]] = []
         
     # 2. 自动补全载架自身的 UUID
     if not getattr(self, "unilabos_uuid", None):
@@ -143,6 +144,10 @@ class ItemizedCarrier(ResourcePLR):
       self._ordering = sites
       self.child_locations: Dict[str, Coordinate] = {}
       self.child_size: Dict[str, dict] = {}
+      self._occupied_names = [
+        resource.name if resource is not None and not isinstance(resource, ResourceHolder) else None
+        for resource in sites.values()
+      ]
 
       for spot, resource in sites.items():
         if resource is not None and getattr(resource, "location", None) is None:
@@ -161,10 +166,11 @@ class ItemizedCarrier(ResourcePLR):
           self.assign_child_resource(resource, location=resource.location, spot=idx)
 
     elif isinstance(sites, list):
-      # deserialize时走这里；还需要根据 self.sites 索引children
+      # 反序列化时保留 occupied_by，后续真正的 child 会再挂回对应槽位。
       self.child_locations = {site["label"]: Coordinate(**site["position"]) for site in sites}
       self.child_size = {site["label"]: site["size"] for site in sites}
-      self.sites = [site["occupied_by"] for site in sites]
+      self.sites = [None] * len(sites)
+      self._occupied_names = [site.get("occupied_by") for site in sites]
       self._ordering = {site["label"]: site["position"] for site in sites}
     else:
       print("sites:", sites)
@@ -178,6 +184,86 @@ class ItemizedCarrier(ResourcePLR):
     """Return the number of sites on this carrier."""
     return len(self.sites)
 
+  def _extract_site_label(self, resource_name: Optional[str]) -> Optional[str]:
+    if resource_name is None:
+      return None
+    if resource_name in self.child_locations:
+      return resource_name
+    if "@" in resource_name:
+      candidate = resource_name.rsplit("@", 1)[-1].strip()
+      if candidate in self.child_locations:
+        return candidate
+    return None
+
+  def _normalize_resource_name(self, resource_name: Optional[str]) -> Optional[str]:
+    if resource_name is None:
+      return None
+    return "".join(resource_name.split())
+
+  def _extract_resource_base_name(self, resource_name: Optional[str]) -> Optional[str]:
+    if resource_name is None:
+      return None
+    return self._normalize_resource_name(resource_name.split("@", 1)[0])
+
+  def _build_occupied_name(self, resource_name: Optional[str], idx: int) -> Optional[str]:
+    if resource_name is None:
+      return None
+    if self._extract_site_label(resource_name) is not None:
+      return resource_name
+    site_labels = list(self.child_locations.keys())
+    if idx >= len(site_labels):
+      return resource_name
+    return f"{resource_name}@{site_labels[idx]}"
+
+  def _resolve_site_index(self, resource: ResourcePLR, location: Optional[Coordinate]) -> Optional[int]:
+    resource_name = getattr(resource, "name", None)
+    resource_label = self._extract_site_label(resource_name)
+    normalized_resource_name = self._normalize_resource_name(resource_name)
+    resource_base_name = self._extract_resource_base_name(resource_name)
+    site_locations = list(self.child_locations.values())
+    site_labels = list(self.child_locations.keys())
+
+    for i, occupied_name in enumerate(self._occupied_names):
+      if occupied_name == resource_name:
+        return i
+      if normalized_resource_name is not None and self._normalize_resource_name(occupied_name) == normalized_resource_name:
+        return i
+      occupied_label = self._extract_site_label(occupied_name)
+      if resource_label is not None and occupied_label == resource_label:
+        return i
+
+    if resource_label is not None:
+      for i, site_label in enumerate(site_labels):
+        if site_label == resource_label:
+          return i
+
+    if location is not None:
+      for i, site_location in enumerate(site_locations):
+        if (
+          abs(site_location.x - location.x) < 1e-6
+          and abs(site_location.y - location.y) < 1e-6
+          and abs(site_location.z - location.z) < 1e-6
+        ):
+          return i
+
+    if resource_base_name is not None:
+      matching_indices = [
+        i for i, occupied_name in enumerate(self._occupied_names)
+        if self._extract_resource_base_name(occupied_name) == resource_base_name
+      ]
+      if len(matching_indices) == 1:
+        return matching_indices[0]
+      for i in matching_indices:
+        if self.sites[i] is None or isinstance(self.sites[i], ResourceHolder):
+          return i
+      # setup() 已填充同名资源时，允许 reassign 覆盖已有的同 base_name 槽位
+      for i in matching_indices:
+        existing = self.sites[i]
+        if existing is not None and self._extract_resource_base_name(getattr(existing, "name", None)) == resource_base_name:
+          return i
+
+    return None
+
   def assign_child_resource(
     self,
     resource: ResourcePLR,
@@ -185,25 +271,26 @@ class ItemizedCarrier(ResourcePLR):
     reassign: bool = True,
     spot: Optional[int] = None,
   ):
-    idx = spot
-    # 如果只给 location，根据坐标和 deserialize 后的 self.sites（持有names）来寻找 resource 该摆放的位置
-    if spot is not None:
-      idx = spot
-    else:
-      for i, site in enumerate(self.sites):
-        site_location = list(self.child_locations.values())[i]
-        if type(site) == str and site == resource.name:
-          idx = i
-          break
-        if site_location == location:
-          idx = i
-          break
+    idx = spot if spot is not None else self._resolve_site_index(resource, location)
+    if idx is None:
+      raise ValueError(f"Cannot resolve destination site for resource '{resource.name}' on carrier '{self.name}'")
 
     if not reassign and self.sites[idx] is not None:
       raise ValueError(f"a site with index {idx} already exists")
+
+    old_resource = self.sites[idx]
+    if old_resource is not None and old_resource is not resource:
+      try:
+        super().unassign_child_resource(old_resource)
+      except Exception:
+        pass
+      self.sites[idx] = None
+
     location = list(self.child_locations.values())[idx]
     super().assign_child_resource(resource, location=location, reassign=reassign)
     self.sites[idx] = resource
+    if idx < len(self._occupied_names) and not isinstance(resource, ResourceHolder):
+      self._occupied_names[idx] = self._build_occupied_name(resource.name, idx)
 
   def assign_resource_to_site(self, resource: ResourcePLR, spot: int):
     if self.sites[spot] is not None and not isinstance(self.sites[spot], ResourceHolder):
@@ -215,6 +302,8 @@ class ItemizedCarrier(ResourcePLR):
     for spot, res in enumerate(self.sites):
       if res == resource:
         self.sites[spot] = None
+        if spot < len(self._occupied_names) and not isinstance(resource, ResourceHolder):
+          self._occupied_names[spot] = None
         found = True
         break
     if not found:
@@ -448,15 +537,35 @@ class ItemizedCarrier(ResourcePLR):
 
   def get_resources(self) -> List[ResourcePLR]:
     """Get all resources assigned to this carrier."""
-    return [resource for resource in self.sites.values() if resource is not None]
+    return [resource for resource in self.sites if resource is not None]
 
   def __eq__(self, other):
     return super().__eq__(other) and self.sites == other.sites
 
   def get_free_sites(self) -> List[int]:
-    return [spot for spot, resource in self.sites.items() if resource is None]
+    return [spot for spot, resource in enumerate(self.sites) if resource is None]
 
   def serialize(self):
+    serialized_sites = []
+    for idx, (identifier, location) in enumerate(self.child_locations.items()):
+      site_resource = self.sites[idx] if idx < len(self.sites) else None
+      occupied_name = (
+        self._occupied_names[idx]
+        if idx < len(self._occupied_names) and self._occupied_names[idx] is not None
+        else site_resource.name
+        if isinstance(site_resource, ResourcePLR) and not isinstance(site_resource, ResourceHolder)
+        else None
+      )
+      serialized_sites.append({
+        "label": str(identifier),
+        "hide_label": self.hide_label,
+        "visible": False if identifier in self.invisible_slots else True,
+        "occupied_by": occupied_name,
+        "position": {"x": location.x, "y": location.y, "z": location.z},
+        "size": self.child_size[identifier],
+        "content_type": ["bottle", "container", "tube", "bottle_carrier", "tip_rack"]
+      })
+
     return {
       **super().serialize(),
       "num_items_x": self.num_items_x,
@@ -464,17 +573,7 @@ class ItemizedCarrier(ResourcePLR):
       "num_items_z": self.num_items_z,
       "layout": self.layout,
       "hide_label": self.hide_label,
-      "sites": [{
-        "label": str(identifier),
-        "hide_label": self.hide_label,
-        "visible": False if identifier in self.invisible_slots else True,
-        "occupied_by": self[identifier].name
-                        if isinstance(self[identifier], ResourcePLR) and not isinstance(self[identifier], ResourceHolder) else
-        self[identifier] if isinstance(self[identifier], str) else None,
-        "position": {"x": location.x, "y": location.y, "z": location.z},
-        "size": self.child_size[identifier],
-        "content_type": ["bottle", "container", "tube", "bottle_carrier", "tip_rack"]
-      } for identifier, location in self.child_locations.items()]
+      "sites": serialized_sites
     }
 
 

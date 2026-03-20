@@ -220,3 +220,25 @@ def eit_warehouse_AS(name: str) -> WareHouse:
         layout="row-major",  # ⭐ 改为行优先排序
         name_by_layout_code=True,
     )
+
+def eit_warehouse_AGV(name: str) -> WareHouse:
+    """创建eit AGV仓库 (AGV槽位)"""
+    return warehouse_factory(
+        name=name,
+        num_items_x=4,
+        num_items_y=2,
+        num_items_z=1,
+        dx=10.0,
+        dy=10.0,
+        dz=10.0,
+        item_dx=140.0,
+        item_dy=98.0,
+        item_dz=120.0,
+        resource_size_x=127.8,
+        resource_size_y=85.5,
+        resource_size_z=40.0,
+        category="warehouse",
+        col_offset=0,
+        layout="row-major",  # ⭐ 改为行优先排序
+        name_by_layout_code=True,
+    )

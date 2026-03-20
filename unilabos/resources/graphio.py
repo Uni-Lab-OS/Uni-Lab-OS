@@ -620,6 +620,9 @@ def resource_plr_to_ulab(resource_plr: "ResourcePLR", parent_name: str = None, w
             "resource_holder": "resource_holder",
             "electrode_sheet": "electrode_sheet",
             "material_hole": "material_hole",
+            "material_plate": "material_plate",
+            "magazine_holder": "magazine_holder",
+            "resource_group": "resource_group",
         }
         if source in replace_info:
             return replace_info[source]

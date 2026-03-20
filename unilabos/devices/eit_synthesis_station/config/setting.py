@@ -1,7 +1,9 @@
 import logging
 import os
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from pathlib import Path
+
+from ..notification.notification_settings import NotificationSettings
 
 
 @dataclass
@@ -16,6 +18,8 @@ class Settings:
         timeout_s: requests 默认超时(秒).
         verify_ssl: https 场景是否校验证书, 内网调试可为 False.
         log_level: 日志级别字符串, 例如 "INFO".
+        auto_rename_on_duplicate: 任务名称重复(409)时是否自动追加时间戳后缀并重试,
+            格式为 "<原名称>_YYYYMMDD_HHmmss", 默认 True.
     返回:
         Settings.
     """
@@ -32,6 +36,12 @@ class Settings:
     enable_data_logging: bool = True
     task_retention_days: int = 90
 
+    # 任务提交配置
+    auto_rename_on_duplicate: bool = True   # 遇到 409 冲突时自动重命名任务, 追加 _YYYYMMDD_HHmmss 后缀
+
+    # 异常通知配置
+    notification: NotificationSettings = field(default_factory=NotificationSettings)
+
     @staticmethod
     def from_env() -> "Settings":
         """
@@ -44,7 +54,8 @@ class Settings:
         环境变量:
             SYN_STATION_BASE_URL, SYN_STATION_USERNAME, SYN_STATION_PASSWORD,
             SYN_STATION_TIMEOUT_S, SYN_STATION_VERIFY_SSL, SYN_STATION_LOG_LEVEL,
-            SYN_STATION_DATA_DIR, SYN_STATION_ENABLE_DATA_LOGGING, SYN_STATION_TASK_RETENTION_DAYS.
+            SYN_STATION_DATA_DIR, SYN_STATION_ENABLE_DATA_LOGGING,
+            SYN_STATION_TASK_RETENTION_DAYS, SYN_STATION_AUTO_RENAME_ON_DUPLICATE.
         """
         base_url = os.getenv("SYN_STATION_BASE_URL", Settings.base_url)
         username = os.getenv("SYN_STATION_USERNAME", Settings.username)
@@ -74,6 +85,13 @@ class Settings:
         except ValueError:
             task_retention_days = Settings.task_retention_days
 
+        # 任务提交配置
+        auto_rename_str = os.getenv("SYN_STATION_AUTO_RENAME_ON_DUPLICATE", str(Settings.auto_rename_on_duplicate))
+        auto_rename_on_duplicate = auto_rename_str.strip().lower() in ("1", "true", "yes", "y", "on")
+
+        # 异常通知配置
+        notification = NotificationSettings.from_env()
+
         return Settings(
             base_url=base_url,
             username=username,
@@ -84,6 +102,8 @@ class Settings:
             data_dir=data_dir,
             enable_data_logging=enable_data_logging,
             task_retention_days=task_retention_days,
+            auto_rename_on_duplicate=auto_rename_on_duplicate,
+            notification=notification,
         )
 
 

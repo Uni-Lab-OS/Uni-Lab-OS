@@ -656,7 +656,70 @@ class ApiClient:
                 # 其他错误码继续抛出异常
                 raise
 
-    # 35. 单独控制W1货架
+    # 35. 导出任务报告
+    def export_task_report(
+        self,
+        task_ids: List[int],
+        file_type: str = "excel",
+        *,
+        timeout_s: Optional[float] = 60,
+    ) -> bytes:
+        """
+        功能:
+            导出任务报告, 对应 ExportTaskReport. 返回二进制文件内容(Excel等)
+        参数:
+            task_ids: List[int], 需要导出的任务id列表
+            file_type: str, 文件类型, 默认 "excel"
+            timeout_s: Optional[float], 超时时间, 默认60秒
+        返回:
+            bytes, 文件二进制内容
+        """
+        if not task_ids:
+            raise ValidationError("task_ids 不能为空")
+
+        url = self._url("/api/ExportTaskReport")
+        timeout = timeout_s if timeout_s is not None else self._settings.timeout_s
+        json_body = {"task_ids": task_ids, "file_type": file_type}
+
+        headers: Dict[str, str] = {"Content-Type": "application/json"}
+        if self._access_token:
+            token_type = self._token_type or "Bearer"
+            headers["Authorization"] = f"{token_type} {self._access_token}"
+
+        self._logger.debug(
+            "HTTP request (file download), url=%s, json=%s",
+            url, self._mask_sensitive(json_body),
+        )
+
+        try:
+            resp = self._session.request(
+                method="POST",
+                url=url,
+                headers=headers,
+                json=json_body,
+                timeout=timeout,
+                verify=self._settings.verify_ssl,
+            )
+        except requests.Timeout as e:
+            raise RequestError(f"请求超时, url={url}") from e
+        except requests.RequestException as e:
+            raise RequestError(f"请求失败, url={url}, err={e}") from e
+
+        if resp.status_code == 401:
+            raise AuthorizationExpiredError("登录失效(401), 请重新登录.")
+        if resp.status_code >= 400:
+            raise RequestError(
+                f"HTTP错误, status={resp.status_code}, url={url}, body={resp.text}",
+                status_code=resp.status_code,
+            )
+
+        self._logger.debug(
+            "文件下载完成, url=%s, content_length=%s",
+            url, len(resp.content),
+        )
+        return resp.content
+
+    # 36. 单独控制W1货架
     def single_control_w1_shelf(self, station: str, action: str, op: str, num: int) -> JsonDict:
         """
         功能:

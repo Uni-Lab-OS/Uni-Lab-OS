@@ -160,25 +160,143 @@ TRAY_CODE_DISPLAY_NAME = {
     int(ResourceCode.REAGENT_BOTTLE_TRAY_125ML): "125 mL试剂瓶托盘",
 }
 
+# 耗材编码到标准中文名称映射.
+CONSUMABLE_CODE_DISPLAY_NAME = {
+    int(ResourceCode.TIP_50UL): "50 μL Tip头",
+    int(ResourceCode.TIP_1ML): "1 mL Tip头",
+    int(ResourceCode.TIP_5ML): "5 mL Tip头",
+    int(ResourceCode.TEST_TUBE_MAGNET_2ML): "2 mL反应管磁子",
+    int(ResourceCode.REACTION_TUBE_2ML): "2 mL反应管",
+    int(ResourceCode.REACTION_SEAL_CAP): "反应密封盖",
+    int(ResourceCode.FLASH_FILTER_INNER_BOTTLE): "闪滤瓶内瓶",
+    int(ResourceCode.FLASH_FILTER_OUTER_BOTTLE): "闪滤瓶外瓶",
+}
+
+# 耗材编码到托盘编码映射.
+CONSUMABLE_CODE_TO_TRAY_CODE = {
+    int(ResourceCode.TIP_50UL): int(ResourceCode.TIP_TRAY_50UL),
+    int(ResourceCode.TIP_1ML): int(ResourceCode.TIP_TRAY_1ML),
+    int(ResourceCode.TIP_5ML): int(ResourceCode.TIP_TRAY_5ML),
+    int(ResourceCode.TEST_TUBE_MAGNET_2ML): int(ResourceCode.TEST_TUBE_MAGNET_TRAY_2ML),
+    int(ResourceCode.REACTION_TUBE_2ML): int(ResourceCode.REACTION_TUBE_TRAY_2ML),
+    int(ResourceCode.REACTION_SEAL_CAP): int(ResourceCode.REACTION_SEAL_CAP_TRAY),
+    int(ResourceCode.FLASH_FILTER_INNER_BOTTLE): int(ResourceCode.FLASH_FILTER_INNER_BOTTLE_TRAY),
+    int(ResourceCode.FLASH_FILTER_OUTER_BOTTLE): int(ResourceCode.FLASH_FILTER_OUTER_BOTTLE_TRAY),
+}
+
+# 归一化后的耗材别名到耗材编码映射.
+CONSUMABLE_ALIAS_TO_CODE = {
+    # 50 μL Tip头
+    "50ul枪头": int(ResourceCode.TIP_50UL),
+    "50ul吸头": int(ResourceCode.TIP_50UL),
+    "50ultip": int(ResourceCode.TIP_50UL),
+    "50ultip头": int(ResourceCode.TIP_50UL),
+    "50ultip枪头": int(ResourceCode.TIP_50UL),
+    "50ultip吸头": int(ResourceCode.TIP_50UL),
+    # 1 mL Tip头
+    "1ml枪头": int(ResourceCode.TIP_1ML),
+    "1ml吸头": int(ResourceCode.TIP_1ML),
+    "1mltip": int(ResourceCode.TIP_1ML),
+    "1mltip头": int(ResourceCode.TIP_1ML),
+    "1mltip枪头": int(ResourceCode.TIP_1ML),
+    "1mltip吸头": int(ResourceCode.TIP_1ML),
+    # 5 mL Tip头
+    "5ml枪头": int(ResourceCode.TIP_5ML),
+    "5ml吸头": int(ResourceCode.TIP_5ML),
+    "5mltip": int(ResourceCode.TIP_5ML),
+    "5mltip头": int(ResourceCode.TIP_5ML),
+    "5mltip枪头": int(ResourceCode.TIP_5ML),
+    "5mltip吸头": int(ResourceCode.TIP_5ML),
+
+    # 反应管
+    "2ml反应管": int(ResourceCode.REACTION_TUBE_2ML),
+    "2ml反应试管": int(ResourceCode.REACTION_TUBE_2ML),
+    "反应管": int(ResourceCode.REACTION_TUBE_2ML),
+    "反应试管": int(ResourceCode.REACTION_TUBE_2ML),
+
+    # 磁子
+    "2ml反应管磁子": int(ResourceCode.TEST_TUBE_MAGNET_2ML),
+    "2ml试管磁子": int(ResourceCode.TEST_TUBE_MAGNET_2ML),
+    "反应管磁子": int(ResourceCode.TEST_TUBE_MAGNET_2ML),
+    "试管磁子": int(ResourceCode.TEST_TUBE_MAGNET_2ML),
+
+    # 反应密封盖
+    "反应密封盖": int(ResourceCode.REACTION_SEAL_CAP),
+    "反应盖板": int(ResourceCode.REACTION_SEAL_CAP),
+    "密封盖": int(ResourceCode.REACTION_SEAL_CAP),
+    
+    # 闪滤瓶
+    "闪滤瓶内瓶": int(ResourceCode.FLASH_FILTER_INNER_BOTTLE),
+    "闪滤内瓶": int(ResourceCode.FLASH_FILTER_INNER_BOTTLE),
+    "内瓶": int(ResourceCode.FLASH_FILTER_INNER_BOTTLE),
+    "闪滤瓶外瓶": int(ResourceCode.FLASH_FILTER_OUTER_BOTTLE),
+    "闪滤外瓶": int(ResourceCode.FLASH_FILTER_OUTER_BOTTLE),
+    "外瓶": int(ResourceCode.FLASH_FILTER_OUTER_BOTTLE),
+}
+
 class TraySpec:
     """
     功能:
         托盘规格，使用 (col, row) 数字表示；行按字母序 A=1, B=2 ... H=8，列保持原数字.
     """
 
-    REAGENT_BOTTLE_TRAY_2ML = (8, 6)   # 2 mL 试剂瓶托盘 
-    REAGENT_BOTTLE_TRAY_8ML = (4, 3)   # 8 mL 试剂瓶托盘 
-    REAGENT_BOTTLE_TRAY_40ML = (3, 2)  # 40 mL 试剂瓶托盘 
-    REAGENT_BOTTLE_TRAY_125ML = (2, 1)  # 125 mL 试剂瓶托盘 
-    REACTION_TUBE_TRAY_2ML = (6, 4)    # 2 mL 反应试管托盘 
-    TEST_TUBE_MAGNET_TRAY_2ML = (6, 4) # 2 mL 试管磁子托盘 
-    REACTION_SEAL_CAP_TRAY = (1, 1)    # 反应密封盖托盘 
-    FLASH_FILTER_INNER_BOTTLE_TRAY = (8, 6)  # 闪滤瓶内瓶托盘 
-    FLASH_FILTER_OUTER_BOTTLE_TRAY = (8, 6)  # 闪滤瓶外瓶托盘 
-    TIP_TRAY_50UL = (12, 8)   # 50 μL Tip 头托盘 
-    TIP_TRAY_1ML = (12, 8)    # 1 mL Tip 头托盘 
-    TIP_TRAY_5ML = (6, 4)     # 5 mL Tip 头托盘 
+    REAGENT_BOTTLE_TRAY_2ML = (8, 6)   # 2 mL 试剂瓶托盘
+    REAGENT_BOTTLE_TRAY_8ML = (4, 3)   # 8 mL 试剂瓶托盘
+    REAGENT_BOTTLE_TRAY_40ML = (3, 2)  # 40 mL 试剂瓶托盘
+    REAGENT_BOTTLE_TRAY_125ML = (2, 1)  # 125 mL 试剂瓶托盘
+    REACTION_TUBE_TRAY_2ML = (6, 4)    # 2 mL 反应试管托盘
+    TEST_TUBE_MAGNET_TRAY_2ML = (6, 4) # 2 mL 试管磁子托盘
+    REACTION_SEAL_CAP_TRAY = (1, 1)    # 反应密封盖托盘
+    FLASH_FILTER_INNER_BOTTLE_TRAY = (8, 6)  # 闪滤瓶内瓶托盘
+    FLASH_FILTER_OUTER_BOTTLE_TRAY = (8, 6)  # 闪滤瓶外瓶托盘
+    TIP_TRAY_50UL = (12, 8)   # 50 μL Tip 头托盘
+    TIP_TRAY_1ML = (12, 8)    # 1 mL Tip 头托盘
+    TIP_TRAY_5ML = (6, 4)     # 5 mL Tip 头托盘
     POWDER_BUCKET_TRAY_30ML = (1, 2)   # 30 mL 粉桶托盘
+
+
+# ===================== AGV 自动下料相关常量 =====================
+
+# 资源码到 AGV 物料类型名称的映射
+RESOURCE_CODE_TO_MATERIAL_TYPE = {
+    int(ResourceCode.REACTION_TUBE_TRAY_2ML): "REACTION_TUBE_TRAY_2ML",
+    int(ResourceCode.TEST_TUBE_MAGNET_TRAY_2ML): "TEST_TUBE_MAGNET_TRAY_2ML",
+    int(ResourceCode.REACTION_SEAL_CAP_TRAY): "REACTION_SEAL_CAP_TRAY",
+    int(ResourceCode.FLASH_FILTER_INNER_BOTTLE_TRAY): "FLASH_FILTER_INNER_BOTTLE_TRAY",
+    int(ResourceCode.FLASH_FILTER_OUTER_BOTTLE_TRAY): "FLASH_FILTER_OUTER_BOTTLE_TRAY",
+    int(ResourceCode.TIP_TRAY_50UL): "TIP_TRAY_50UL",
+    int(ResourceCode.TIP_TRAY_1ML): "TIP_TRAY_1ML",
+    int(ResourceCode.TIP_TRAY_5ML): "TIP_TRAY_5ML",
+    int(ResourceCode.POWDER_BUCKET_TRAY_30ML): "POWDER_BUCKET_TRAY_30ML",
+    int(ResourceCode.REAGENT_BOTTLE_TRAY_2ML): "REAGENT_BOTTLE_TRAY_2ML",
+    int(ResourceCode.REAGENT_BOTTLE_TRAY_8ML): "REAGENT_BOTTLE_TRAY_8ML",
+    int(ResourceCode.REAGENT_BOTTLE_TRAY_40ML): "REAGENT_BOTTLE_TRAY_40ML",
+    int(ResourceCode.REAGENT_BOTTLE_TRAY_125ML): "REAGENT_BOTTLE_TRAY_125ML",
+}
+
+# 合成工站下料位置(TB-x-x)到 AGV 托盘名称的映射
+TB_CODE_TO_SYNTHESIS_TRAY = {
+    "TB-1-1": "synthesis_station_tray_1-1",
+    "TB-1-2": "synthesis_station_tray_1-2",
+    "TB-1-3": "synthesis_station_tray_1-3",
+    "TB-1-4": "synthesis_station_tray_1-4",
+    "TB-2-1": "synthesis_station_tray_2-1",
+    "TB-2-2": "synthesis_station_tray_2-2",
+    "TB-2-3": "synthesis_station_tray_2-3",
+    "TB-2-4": "synthesis_station_tray_2-4",
+}
+
+# 货架托盘位置列表
+SHELF_TRAY_POSITIONS = [
+    "shelf_tray_1-1", "shelf_tray_1-2", "shelf_tray_1-3", "shelf_tray_1-4",
+    "shelf_tray_2-1", "shelf_tray_2-2", "shelf_tray_2-3", "shelf_tray_2-4",
+    "shelf_tray_3-1", "shelf_tray_3-2", "shelf_tray_3-3", "shelf_tray_3-4",
+]
+
+# 分析工站托盘位置列表
+ANALYSIS_STATION_TRAY_POSITIONS = [
+    "analysis_station_tray_1-2"
+]
 
 
 
