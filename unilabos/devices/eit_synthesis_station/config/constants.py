@@ -298,6 +298,18 @@ ANALYSIS_STATION_TRAY_POSITIONS = [
     "analysis_station_tray_1-2"
 ]
 
+# ===================== PLR 资源转移目标设备配置 =====================
+
+# 分析工站 ROS2 设备 ID（需与实际部署拓扑一致）
+ANALYSIS_STATION_DEVICE_ID = "eit_analysis_station"
+
+# 货架设备 ID（如果货架没有独立 ROS2 设备节点则设为 None）
+SHELF_DEVICE_ID: str | None = None
+
+# 目标设备资源路径（用于 get_resource_with_dir 获取挂载点）
+ANALYSIS_STATION_RESOURCE_PATH = "/eit_analysis_station/Analysis_Deck"
+SHELF_RESOURCE_PATH: str | None = None
+
 
 
 

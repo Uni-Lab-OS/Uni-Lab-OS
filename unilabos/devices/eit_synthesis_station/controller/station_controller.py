@@ -99,6 +99,10 @@ class SynthesisStationController:
         # 异常通知监控器 (惰性创建, 调用 start_notification_monitor 时初始化)
         self._notification_monitor = None
 
+        # 下料完成后的回调钩子，用于通知上层将 task_id 注入 PLR 资源
+        # 签名: callback(log_resources: List[Dict]) -> None
+        self._post_batch_out_callback = None
+
     @staticmethod
     def _collect_duplicate_texts(values: List[str]) -> List[str]:
         """
@@ -2457,9 +2461,118 @@ class SynthesisStationController:
             }
             self._data_manager.save_batch_out_tray_log(log_data)
 
+        # 通知上层将 task_id 注入 PLR 资源（手动 sync + stamp）
+        if self._post_batch_out_callback:
+            try:
+                self._post_batch_out_callback(log_resources)
+            except Exception as e:
+                self._logger.warning(f"post_batch_out_callback 失败: {e}")
+
         return resp
 
     # ---------- AGV 自动下料函数 ----------
+
+    def _read_tb_resources_from_deck(self) -> Optional[List[JsonDict]]:
+        """从 PLR Deck TB WareHouse 读取占用槽位信息。PLR 不可用时返回 None。"""
+        from pylabrobot.resources import ResourceHolder
+        from ..manager.synchronizer import normalize_layout_code
+
+        deck = getattr(self, "deck", None)
+        if deck is None:
+            return None
+        tb_wh = next((c for c in deck.children if c.name == "TB"), None)
+        if tb_wh is None:
+            return None
+
+        resources = []
+        for slot in tb_wh.children:
+            if not isinstance(slot, ResourceHolder) or not slot.children:
+                continue
+            carrier = slot.children[0]
+            extra = getattr(carrier, "unilabos_extra", {}) or {}
+            resources.append({
+                "dst_layout_code": extra.get("eit_layout_code") or normalize_layout_code(getattr(slot, "name", "")),
+                "resource_type": extra.get("eit_resource_type"),
+                "resource_type_name": getattr(carrier, "description", "") or carrier.name,
+                "task_id": extra.get("eit_task_id"),
+                "plr_resource": carrier,
+                "plr_resource_uuid": getattr(carrier, "unilabos_uuid", None),
+            })
+        return resources
+
+    def _transfer_plr_resources_after_agv(self, completed_tasks: List[JsonDict]) -> None:
+        """AGV 物理转运完成后，将 PLR 资源从合成站节点转移到目标设备节点。
+
+        参数:
+            completed_tasks: AGV 批次任务列表，每项包含 plr_resource, target_tray 等字段
+        """
+        import time
+        from ..config.constants import (
+            ANALYSIS_STATION_DEVICE_ID,
+            ANALYSIS_STATION_RESOURCE_PATH,
+            SHELF_DEVICE_ID,
+            SHELF_RESOURCE_PATH,
+        )
+
+        ros_node = getattr(self, "_ros_node", None)
+        if ros_node is None:
+            self._logger.debug("_ros_node 不可用，跳过 PLR 资源转移")
+            return
+
+        from unilabos.ros.nodes.base_device_node import ROS2DeviceNode
+
+        for task in completed_tasks:
+            plr_resource = task.get("plr_resource")
+            if plr_resource is None:
+                continue
+
+            target_tray = task.get("target_tray", "")
+            if target_tray.startswith("analysis_station"):
+                target_device_id = ANALYSIS_STATION_DEVICE_ID
+                target_resource_path = ANALYSIS_STATION_RESOURCE_PATH
+            elif target_tray.startswith("shelf"):
+                if SHELF_DEVICE_ID is None:
+                    self._logger.debug(f"货架设备未配置，跳过 PLR 转移: {target_tray}")
+                    continue
+                target_device_id = SHELF_DEVICE_ID
+                target_resource_path = SHELF_RESOURCE_PATH
+            else:
+                self._logger.debug(f"未知目标类型，跳过 PLR 转移: {target_tray}")
+                continue
+
+            try:
+                # 1. 获取目标设备的挂载资源
+                future = ROS2DeviceNode.run_async_func(
+                    ros_node.get_resource_with_dir,
+                    True,
+                    resource_id=target_resource_path,
+                    with_children=True,
+                )
+                while not future.done():
+                    time.sleep(0.1)
+                target_resource = future.result()
+
+                # 2. 执行跨节点资源转移
+                future = ROS2DeviceNode.run_async_func(
+                    ros_node.transfer_resource_to_another,
+                    True,
+                    plr_resources=[plr_resource],
+                    target_device_id=target_device_id,
+                    target_resources=[target_resource],
+                    sites=[target_tray],
+                )
+                while not future.done():
+                    time.sleep(0.1)
+                future.result()
+
+                self._logger.info(
+                    f"PLR 资源已转移: {plr_resource.name} -> {target_device_id}/{target_tray}"
+                )
+            except Exception as e:
+                self._logger.warning(
+                    f"PLR 资源转移失败 (不影响 AGV 转运): {plr_resource.name} -> {target_device_id}: {e}"
+                )
+
     def auto_unload_trays_to_agv(
         self,
         batch_out_file: Optional[str] = None,
@@ -2469,8 +2582,8 @@ class SynthesisStationController:
     ) -> JsonDict:
         """
         功能:
-            读取 batch_out_tray.json 中的下料信息, 调用 AGV 的 batch_transfer_materials
-            函数将托盘从合成工站转运到目标位置.
+            将过渡舱(TB区)的托盘通过 AGV 转运到目标位置(分析工站/货架).
+            优先从 PLR Deck TB WareHouse 读取托盘信息, 回退到 batch_out_tray.json.
             转运顺序规则:
               - 闪滤瓶外瓶托盘(检测物料)始终排在任务列表最前面, 优先进入前几批
               - 同一批次内, 分析工站任务也排在货架任务前面, AGV 在同一趟行程中先
@@ -2512,22 +2625,28 @@ class SynthesisStationController:
         agv_controller = AGVController()
         self._logger.info("已创建AGV控制器实例")
 
-        # 1. 确定文件路径
-        if batch_out_file is None:
-            if self._data_manager is None:
-                raise ValueError("数据管理器未启用, 请指定 batch_out_file 参数")
-            batch_out_path = self._data_manager.operations_dir / "batch_out_tray.json"
-        else:
-            batch_out_path = Path(batch_out_file)
+        # 1. 优先从 PLR Deck 读取 TB 区资源；回退到 JSON 文件
+        resources = self._read_tb_resources_from_deck()
+        data_source = "PLR Deck"
+        if resources is None:
+            data_source = "JSON"
+            self._logger.info("PLR Deck 不可用, 回退到 batch_out_tray.json")
+            if batch_out_file is None:
+                if self._data_manager is None:
+                    raise ValueError("数据管理器未启用, 请指定 batch_out_file 参数")
+                batch_out_path = self._data_manager.operations_dir / "batch_out_tray.json"
+            else:
+                batch_out_path = Path(batch_out_file)
 
-        # 2. 读取下料信息
-        if not batch_out_path.exists():
-            raise FileNotFoundError(f"下料信息文件不存在: {batch_out_path}")
+            if not batch_out_path.exists():
+                raise FileNotFoundError(f"下料信息文件不存在: {batch_out_path}")
 
-        with batch_out_path.open("r", encoding="utf-8") as f:
-            batch_out_data = json.load(f)
+            with batch_out_path.open("r", encoding="utf-8") as f:
+                batch_out_data = json.load(f)
+            resources = batch_out_data.get("resources", [])
 
-        resources = batch_out_data.get("resources", [])
+        self._logger.info(f"数据源: {data_source}, 共 {len(resources)} 条资源")
+
         if len(resources) == 0:
             self._logger.warning("下料信息为空, 无需转运")
             return {
@@ -2538,7 +2657,7 @@ class SynthesisStationController:
                 "errors": [],
             }
 
-        # 3. 构建转运任务列表, 分析工站任务单独收集后拼在最前面,
+        # 2. 构建转运任务列表, 分析工站任务单独收集后拼在最前面,
         #    保证跨批次优先分配给前几批, 批次内也保持分析站先于货架
         analysis_tasks: list = []   # 闪滤瓶外瓶托盘 -> 分析工站
         shelf_tasks: list = []      # 其余托盘       -> 货架
@@ -2551,12 +2670,13 @@ class SynthesisStationController:
             dst_layout_code = resource.get("dst_layout_code", "")
             resource_type = resource.get("resource_type")
             resource_type_name = resource.get("resource_type_name", "")
+            plr_resource = resource.get("plr_resource")  # PLR 模式下有值
 
             # 跳过空资源
             if resource_type is None or dst_layout_code == "":
                 continue
 
-            # 3.1 映射源托盘位置: dst_layout_code (TB-x-x) -> synthesis_station_tray_x-x
+            # 2.1 映射源托盘位置: dst_layout_code (TB-x-x) -> synthesis_station_tray_x-x
             source_tray = TB_CODE_TO_SYNTHESIS_TRAY.get(dst_layout_code)
             if source_tray is None:
                 error_msg = f"无法映射下料位置 {dst_layout_code} 到合成工站托盘"
@@ -2564,14 +2684,14 @@ class SynthesisStationController:
                 errors.append(error_msg)
                 continue
 
-            # 3.2 映射物料类型: resource_type -> material_type 名称
+            # 2.2 映射物料类型: resource_type -> material_type 名称
             material_type = RESOURCE_CODE_TO_MATERIAL_TYPE.get(resource_type)
             if material_type is None:
                 self._logger.warning(
                     f"未知的资源类型 {resource_type} ({resource_type_name}), 使用 None"
                 )
 
-            # 3.3 按物料类型分流: 闪滤瓶外瓶托盘 -> 分析工站, 其余 -> 货架
+            # 2.3 按物料类型分流: 闪滤瓶外瓶托盘 -> 分析工站, 其余 -> 货架
             if resource_type == int(ResourceCode.FLASH_FILTER_OUTER_BOTTLE_TRAY):
                 # 检测物料(闪滤瓶外瓶托盘) -> 分析工站
                 if analysis_position_index >= len(ANALYSIS_STATION_TRAY_POSITIONS):
@@ -2585,6 +2705,7 @@ class SynthesisStationController:
                     "source_tray": source_tray,
                     "target_tray": target_tray,
                     "material_type": material_type,
+                    "plr_resource": plr_resource,
                 })
                 # 记录分析任务的 task_id
                 raw_task_id = resource.get("task_id")
@@ -2607,6 +2728,7 @@ class SynthesisStationController:
                     "source_tray": source_tray,
                     "target_tray": target_tray,
                     "material_type": material_type,
+                    "plr_resource": plr_resource,
                 })
                 self._logger.info(
                     f"[货架] 任务: {source_tray} -> {target_tray}, "
@@ -2741,6 +2863,9 @@ class SynthesisStationController:
                 if result:
                     transferred_count += len(batch_tasks)
                     self._logger.info(f"第 {batch_num} 批转运成功")
+
+                    # AGV 物理转运完成后，将 PLR 资源转移到目标设备节点
+                    self._transfer_plr_resources_after_agv(batch_tasks)
 
                     # 兜底: 正常情况下 analysis_submitted 已由 on_station_delivered 回调置 True.
                     #   若回调未执行(极端异常), 此处作为最后保障.

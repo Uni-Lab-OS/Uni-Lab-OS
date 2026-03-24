@@ -1069,6 +1069,9 @@ class EITSynthesisWorkstation(WorkstationBase):
             controller = self
         self.resource_synchronizer = EITSynthesisResourceSynchronizer(self, controller=controller)
         self.controller = self.resource_synchronizer.controller
+        # 注册下料完成回调：将 task_id 注入 TB 区 PLR 资源
+        if self.controller:
+            self.controller._post_batch_out_callback = self._stamp_task_id_on_tb_resources
                 # ========= 上料请求去重/锁 =========
         # key: "<tray_code>|<staging_code>" -> {"ts": float, "tray_code": int, "staging_code": str}
         self._batchin_lock = threading.Lock()
@@ -1097,6 +1100,47 @@ class EITSynthesisWorkstation(WorkstationBase):
                 logger.info("异常通知邮件监控已启动")
         except Exception as e:
             logger.warning(f"异常通知监控启动失败, 不影响主流程: {e}")
+
+    def _stamp_task_id_on_tb_resources(self, log_resources: List[Dict[str, Any]]) -> None:
+        """batch_out_tray 完成后，手动 sync 并将 task_id 注入 TB 区 PLR 资源。"""
+        # 1. 手动触发 sync，确保 TB 槽位已被硬件状态填充
+        if self.resource_synchronizer:
+            self.resource_synchronizer.sync_from_external()
+
+        # 2. 构建 dst_layout_code -> task_id 映射
+        task_id_map: Dict[str, Any] = {}
+        for res in log_resources:
+            dst_code = normalize_layout_code(res.get("dst_layout_code"))
+            task_id = res.get("task_id")
+            if dst_code and task_id is not None:
+                task_id_map[dst_code] = task_id
+
+        if not task_id_map:
+            return
+
+        # 3. 在 TB warehouse 的 PLR 资源上注入 task_id
+        tb_wh = next((c for c in self.deck.children if c.name == "TB"), None)
+        if tb_wh is None:
+            logger.warning("找不到 TB 仓库，无法注入 task_id")
+            return
+
+        stamped = False
+        for slot in tb_wh.children:
+            if not isinstance(slot, ResourceHolder):
+                continue
+            slot_name = normalize_layout_code(getattr(slot, "name", None))
+            if slot_name not in task_id_map or not slot.children:
+                continue
+            carrier = slot.children[0]
+            if not hasattr(carrier, "unilabos_extra") or carrier.unilabos_extra is None:
+                carrier.unilabos_extra = {}
+            carrier.unilabos_extra["eit_task_id"] = task_id_map[slot_name]
+            logger.info(f"已为 TB 资源 {carrier.name} 注入 task_id={task_id_map[slot_name]}")
+            stamped = True
+
+        # 4. 增量上报 TB 仓库（含 task_id）
+        if stamped:
+            self.resource_synchronizer._update_resource_flattened([tb_wh])
 
     @property
     def station_status(self) -> Dict[str, Any]:
