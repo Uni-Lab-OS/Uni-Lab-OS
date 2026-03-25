@@ -172,20 +172,51 @@ eit_synthesis_station:
       add_reagent_list:
         feedback: {}
         goal: {}
-        goal_default: {}
+        goal_default:
+          formulation: null
         handles: {}
+        placeholder_keys:
+          formulation: unilabos_formulation
         result: {}
         schema:
-          description: ''
+          description: 批量添加试剂（前端统一使用 formulation 输入）
           properties:
             feedback: {}
             goal:
               properties:
-                experiments:
+                formulation:
                   items:
                     properties:
                       experiment_no:
                         type: integer
+                      liquids:
+                        items:
+                          properties:
+                            name:
+                              type: string
+                            unit:
+                              type: string
+                            volume:
+                              type: number
+                          required:
+                          - name
+                          - volume
+                          type: object
+                        type: array
+                      materials:
+                        items:
+                          properties:
+                            mass:
+                              type: number
+                            name:
+                              type: string
+                            unit:
+                              type: string
+                          required:
+                          - name
+                          - mass
+                          type: object
+                        type: array
                       reagents:
                         items:
                           properties:
@@ -198,15 +229,12 @@ eit_synthesis_station:
                           required:
                           - name
                           - amount
-                          - unit
                           type: object
-                    required:
-                    - experiment_no
-                    - reagents
+                        type: array
                     type: object
                   type: array
               required:
-              - experiments
+              - formulation
               type: object
             result: {}
           required:
@@ -662,6 +690,53 @@ eit_synthesis_station:
           title: device_init参数
           type: object
         type: UniLabJsonCommand
+      execute_batch_in_payload:
+        feedback: {}
+        goal: {}
+        goal_default:
+          batch_in_payload: null
+        handles:
+          input:
+          - data_key: batch_in_payload
+            data_source: handle
+            data_type: array
+            handler_key: batch_in_payload
+            io_type: source
+            label: 单轮上料 payload 列表
+            required: true
+          - data_key: transfer_result
+            data_source: handle
+            data_type: object
+            handler_key: transfer_result
+            io_type: source
+            label: AGV 转运结果（用于保证执行顺序）
+            required: false
+        result:
+          success: success
+        schema:
+          description: 执行手套箱单轮本地上料 payload。必须在 AGV 转运完成后才能调用。
+          properties:
+            feedback: {}
+            goal:
+              properties:
+                batch_in_payload:
+                  items:
+                    type: object
+                  type: array
+              required:
+              - batch_in_payload
+              type: object
+            result:
+              properties:
+                success:
+                  description: 上料执行是否成功
+                  type: boolean
+              type: object
+          required:
+          - goal
+          title: execute_batch_in_payload参数
+          type: object
+        type: UniLabJsonCommand
       execute_task:
         feedback: {}
         goal: {}
@@ -707,6 +782,52 @@ eit_synthesis_station:
           required:
           - goal
           title: poll_analysis_run参数
+          type: object
+        type: UniLabJsonCommand
+      prepare_batch_in_with_agv_manifest:
+        feedback: {}
+        goal: {}
+        goal_default:
+          file_path: null
+        handles:
+          output:
+          - data_key: manifest
+            data_source: executor
+            data_type: object
+            handler_key: manifest
+            io_type: sink
+            label: 上料 manifest（含 transfer_tasks + batch_in_payload）
+          - data_key: batch_in_payload
+            data_source: executor
+            data_type: array
+            handler_key: batch_in_payload
+            io_type: sink
+            label: 单轮上料 payload 列表
+        result:
+          batch_in_payload: batch_in_payload
+          manifest: manifest
+        schema:
+          description: 生成供 UniLab 编排层使用的上料 manifest。
+          properties:
+            feedback: {}
+            goal:
+              properties:
+                file_path:
+                  type: string
+              required: []
+              type: object
+            result:
+              properties:
+                batch_in_payload:
+                  description: 单轮上料 payload 列表
+                  type: array
+                manifest:
+                  description: 标准 AGV 转运 manifest，包含 transfer_tasks 和 batch_in_payload
+                  type: object
+              type: object
+          required:
+          - goal
+          title: prepare_batch_in_with_agv_manifest参数
           type: object
         type: UniLabJsonCommand
       run_analysis:
@@ -836,6 +957,43 @@ eit_synthesis_station:
           required:
           - goal
           title: submit_experiment_task参数
+          type: object
+        type: UniLabJsonCommand
+      unload_task_and_empty_trays_return_manifest:
+        feedback: {}
+        goal: {}
+        goal_default:
+          task_id: null
+        handles:
+          output:
+          - data_key: manifest
+            data_source: executor
+            data_type: object
+            handler_key: manifest
+            io_type: sink
+            label: 下料 manifest（含 transfer_tasks）
+        result:
+          manifest: manifest
+        schema:
+          description: 执行手套箱本地下料并返回 AGV manifest。task_id 为空时自动选择最近完成的任务。
+          properties:
+            feedback: {}
+            goal:
+              properties:
+                task_id:
+                  description: 任务 ID，为空时自动选择最近完成的任务
+                  type: integer
+              required: []
+              type: object
+            result:
+              properties:
+                manifest:
+                  description: 标准 AGV 下料 manifest，包含 transfer_tasks 和 analysis_task_ids
+                  type: object
+              type: object
+          required:
+          - goal
+          title: unload_task_and_empty_trays_return_manifest参数
           type: object
         type: UniLabJsonCommand
       wait_task_with_ops:

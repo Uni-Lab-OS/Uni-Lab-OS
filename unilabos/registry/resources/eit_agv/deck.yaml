@@ -1,0 +1,14 @@
+EIT_AGV_Deck:
+  category:
+  - deck
+  - EIT
+  - eit_agv
+  class:
+    module: unilabos.resources.eit_agv.decks:EIT_AGV_Deck
+    type: pylabrobot
+  description: EIT AGV Deck
+  handles: []
+  icon: ''
+  init_param_schema: {}
+  registry_type: resource
+  version: 1.0.0

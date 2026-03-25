@@ -192,7 +192,32 @@ class EITSynthesisResourceSynchronizer(ResourceSynchronizer):
                     # --- 情况 A：硬件端该位点有物料 (增加或更新) ---
                     if eit_code:
                         item = hardware_items[eit_code]
-                        res_type = int(item.get("resource_type"))
+                        raw_res_type = item.get("resource_type")
+                        if raw_res_type is None:
+                            # tray_item 缺失导致 resource_type 为 None，尝试保留已有物料或用通用 Container 兜底
+                            tray_display_name = item.get("resource_type_name") or "EIT Tray"
+                            desired_tray_name = f"{tray_display_name}@{eit_code}"
+                            if current_child:
+                                # 已有物料，只更新名称，不破坏已有结构
+                                if current_child.name != desired_tray_name:
+                                    current_child.name = desired_tray_name
+                            else:
+                                # 无已有物料且无法确定类型，用通用 Container 兜底
+                                from pylabrobot.resources import Container as _Container
+                                fallback = _Container(
+                                    name=desired_tray_name,
+                                    size_x=127.8, size_y=85.5, size_z=40.0,
+                                )
+                                fallback.unilabos_uuid = str(uuid.uuid4())
+                                fallback.description = f"type unknown @ {eit_code}"
+                                slot.assign_child_resource(fallback)
+                            logger.debug(f"layout_code={eit_code} 的 resource_type 为 None，保留已有物料或兜底处理")
+                            continue
+                        try:
+                            res_type = int(raw_res_type)
+                        except (ValueError, TypeError):
+                            logger.warning(f"layout_code={eit_code} 的 resource_type={raw_res_type!r} 无法转为 int，跳过")
+                            continue
                         details = item.get("substance_details", [])
                         tray_display_name = item.get("resource_type_name") or "EIT Tray"
                         desired_tray_name = f"{tray_display_name}@{eit_code}"
@@ -418,6 +443,13 @@ class EITSynthesisResourceSynchronizer(ResourceSynchronizer):
             None.
         """
         ros_node = self.workstation._ros_node
+        # 与 ROS2DeviceNode.update_resource 保持一致：根节点若缺少 parent_uuid，
+        # 必须回挂到当前设备 uuid，避免 host 侧以 mount_uuid=None 上传到云端。
+        for tree_nodes in resource_tree_dump:
+            for node in tree_nodes:
+                if not node.get("parent_uuid"):
+                    node["parent_uuid"] = ros_node.uuid
+
         request = SerialCommand.Request()
         # 直接上报扁平化结果, 保持前端所需的资源树结构.
         request.command = json.dumps({"data": {"data": resource_tree_dump}, "action": "update"})

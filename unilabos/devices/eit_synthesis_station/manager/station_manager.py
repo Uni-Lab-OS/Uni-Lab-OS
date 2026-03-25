@@ -279,6 +279,7 @@ class SynthesisStationManager(EITSynthesisWorkstation, SynthesisStationControlle
         功能:
             直接调用底层 AddTask 接口提交 payload。
         """
+        logger.info("发送给工站的 AddTask payload: %s", payload)
         return SynthesisStationController.add_task(self, payload)
 
     # ---------- 前端工作流接口 ----------
@@ -608,28 +609,70 @@ class SynthesisStationManager(EITSynthesisWorkstation, SynthesisStationControlle
     def add_reagent_list(
         self,
         *,
-        experiments: List[JsonDict],
+        experiments: Optional[List[JsonDict]] = None,
+        formulation: Optional[List[JsonDict]] = None,
     ) -> JsonDict:
         """
         功能:
             一次入队多个实验编号的配方（顺序与 Excel 中各实验试剂从左到右一致）。
+            兼容前端批量配方输入（formulation/materials/liquids）风格。
         参数:
             experiments: 每项形如 {"experiment_no": 1, "reagents": [{"name": "...", "amount": 1.0, "unit": "mmol"}, ...]}。
+            formulation: 前端配方列表，每项形如
+                {"experiment_no": 1, "materials": [{"name": "...", "mass": 1.0, "unit": "g"}]}
+                或 {"liquids": [{"name": "...", "volume": 50, "unit": "uL"}]}。
         返回:
             Dict, 当前入队试剂/磁子总条数。
         """
         if getattr(self, "_workflow_deferred", False) is False:
             raise ValidationError("请先调用 begin_task 初始化编排上下文")
-        for block in experiments:
+
+        normalized_experiments: List[JsonDict] = []
+
+        for idx, block in enumerate(experiments or [], start=1):
+            exp_no = int(block.get("experiment_no", idx))
+            normalized_experiments.append({
+                "experiment_no": exp_no,
+                "reagents": block.get("reagents") or [],
+            })
+
+        for idx, item in enumerate(formulation or [], start=1):
+            exp_no = int(item.get("experiment_no", item.get("experimentNo", idx)))
+            reagent_list = item.get("reagents") or item.get("materials") or item.get("liquids") or []
+            normalized_reagents: List[JsonDict] = []
+            for reagent in reagent_list:
+                amount_value = reagent.get("amount")
+                if amount_value is None:
+                    amount_value = reagent.get("mass", reagent.get("volume"))
+                normalized_reagents.append({
+                    "name": reagent.get("name"),
+                    "amount": amount_value,
+                    "unit": reagent.get("unit", "g"),
+                })
+            normalized_experiments.append({"experiment_no": exp_no, "reagents": normalized_reagents})
+
+        if not normalized_experiments:
+            raise ValidationError("add_reagent_list 至少需要 experiments 或 formulation 其中一种输入")
+
+        logger.info("add_reagent_list 归一化结果: %s", normalized_experiments)
+
+        for block in normalized_experiments:
             exp_no = int(block["experiment_no"])
             for r in block.get("reagents") or []:
-                self._get_workflow_chemical_info(str(r["name"]).strip())
+                reagent_name = str(r.get("name", "")).strip()
+                if not reagent_name:
+                    raise ValidationError("add_reagent_list 的试剂 name 不能为空")
+                amount_value = r.get("amount")
+                if amount_value is None:
+                    raise ValidationError(f"试剂 {reagent_name} 缺少 amount/mass/volume 字段")
+                reagent_unit = str(r.get("unit", "g")).strip() or "g"
+                self._get_workflow_chemical_info(reagent_name)
                 self._workflow_reagent_queue.append({
                     "op": "reagent",
                     "experiment_no": exp_no,
-                    "name": str(r["name"]).strip(),
-                    "amount": float(r["amount"]),
-                    "unit": str(r["unit"]).strip(),
+                    "name": reagent_name,
+                    "amount": float(amount_value),
+                    "unit": reagent_unit,
                 })
         return {"queued_reagents": len(self._workflow_reagent_queue)}
 
@@ -753,7 +796,6 @@ class SynthesisStationManager(EITSynthesisWorkstation, SynthesisStationControlle
         self._workflow_build_params["取样量(μL)"] = float(sampling_volume_ul)
         self._workflow_build_params["闪滤实验编号"] = str(filter_experiment_numbers).strip()
         return {"workflow_build_params": dict(self._workflow_build_params)}
-
 
     def add_task(
         self,
@@ -1895,6 +1937,155 @@ class SynthesisStationManager(EITSynthesisWorkstation, SynthesisStationControlle
 
         return resp
 
+    def prepare_batch_in_with_agv_manifest(
+        self,
+        file_path: str = None,
+        *,
+        chamber_capacity: int = 8,
+    ) -> JsonDict:
+        """
+        功能:
+            将 batch_in_tray.xlsx 转换为面向 UniLab 编排的标准上料 manifest。
+            不再支持多轮上料：超过 chamber_capacity 行的记录只取前 chamber_capacity 行。
+        参数:
+            file_path: 上料文件路径, 默认为 sheet/batch_in_tray.xlsx
+            chamber_capacity: 过渡舱单轮最大容纳托盘数, 默认 8（不暴露给前端）
+        返回:
+            Dict, 包含 manifest、batch_in_payload 等信息。
+        """
+        if file_path is None:
+            file_path = str(MODULE_ROOT / "sheet" / "batch_in_tray.xlsx")
+
+        try:
+            all_records = self._read_batch_in_records(file_path)
+        except FileNotFoundError:
+            return {
+                "success": False,
+                "manifest_type": "eit_synthesis_batch_in",
+                "total_trays": 0,
+                "rounds": [],
+                "errors": ["上料文件不存在"],
+                "message": "上料文件不存在",
+                "manifest": {},
+                "batch_in_payload": [],
+            }
+
+        if not all_records:
+            logger.warning("上料记录为空")
+            return {
+                "success": False,
+                "manifest_type": "eit_synthesis_batch_in",
+                "total_trays": 0,
+                "rounds": [],
+                "errors": ["上料记录为空"],
+                "message": "上料记录为空",
+                "manifest": {},
+                "batch_in_payload": [],
+            }
+
+        # 取消多轮：超过 chamber_capacity 行只取前 chamber_capacity 行
+        if len(all_records) > chamber_capacity:
+            logger.warning(
+                "上料记录 %d 行超过上限 %d，只取前 %d 行",
+                len(all_records), chamber_capacity, chamber_capacity,
+            )
+            all_records = all_records[:chamber_capacity]
+
+        total_records = len(all_records)
+        all_errors: List[str] = []
+
+        # 单轮校验
+        validate_errors = self._validate_agv_transfer_round_records(
+            all_records, round_num=1,
+        )
+        if validate_errors:
+            all_errors.extend(validate_errors)
+            return {
+                "success": False,
+                "manifest_type": "eit_synthesis_batch_in",
+                "total_trays": total_records,
+                "rounds": [{"round_num": 1, "success": False, "phase": "validate_round", "errors": validate_errors}],
+                "errors": all_errors,
+                "message": "上料记录校验失败",
+                "manifest": {},
+                "batch_in_payload": [],
+            }
+
+        # 单轮构建 AGV 转运任务
+        round_tasks, build_errors = self._build_agv_transfer_tasks(all_records)
+        all_errors.extend(build_errors)
+        if build_errors:
+            return {
+                "success": False,
+                "manifest_type": "eit_synthesis_batch_in",
+                "total_trays": total_records,
+                "rounds": [{"round_num": 1, "success": False, "phase": "build_agv_tasks", "errors": build_errors}],
+                "errors": all_errors,
+                "message": "构建 AGV 转运任务失败",
+                "manifest": {},
+                "batch_in_payload": [],
+            }
+
+        # 构建手套箱上料 payload
+        round_rows = [
+            (r["position"], r["tray_type"], r["content"])
+            for r in all_records
+        ]
+        payload = self.build_batch_in_tray_payload(round_rows)
+
+        round_result = {
+            "round_num": 1,
+            "success": True,
+            "manifest_type": "eit_synthesis_batch_in_round",
+            "requires_outer_door_open": True,
+            "record_range": [1, total_records],
+            "transfer_tasks": round_tasks,
+            "batch_in_payload": payload,
+            "batch_in_rows": round_rows,
+            "records": all_records,
+            "loaded_count": len(round_rows),
+        }
+
+        return {
+            "success": True,
+            "manifest_type": "eit_synthesis_batch_in",
+            "total_trays": total_records,
+            "rounds": [round_result],
+            "errors": all_errors,
+            "message": "已生成上料 manifest",
+            # 顶层快捷字段：前端 handles 直接引用
+            "manifest": round_result,
+            "batch_in_payload": payload,
+        }
+
+    def execute_batch_in_payload(
+        self,
+        batch_in_payload: List[JsonDict],
+        *,
+        task_id: Optional[int] = None,
+        poll_interval_s: float = 1.0,
+        timeout_s: float = 900.0,
+    ) -> JsonDict:
+        """
+        功能:
+            执行单轮手套箱本地上料 payload，不再由该函数负责 AGV 转运。
+        参数:
+            batch_in_payload: 标准 batch_in_tray payload。
+            task_id: 可选任务 ID，仅用于日志记录。
+            poll_interval_s: 轮询间隔。
+            timeout_s: 超时时间。
+        返回:
+            Dict, batch_in_tray 接口响应。
+        """
+        if not isinstance(batch_in_payload, list) or len(batch_in_payload) == 0:
+            raise ValidationError("batch_in_payload 不能为空")
+        return self.batch_in_tray(
+            batch_in_payload,
+            task_id=task_id,
+            poll_interval_s=poll_interval_s,
+            timeout_s=timeout_s,
+        )
+
     def batch_in_tray_with_agv_transfer(
         self,
         file_path: str = None,
@@ -1904,204 +2095,137 @@ class SynthesisStationManager(EITSynthesisWorkstation, SynthesisStationControlle
     ) -> JsonDict:
         """
         功能:
-            根据 batch_in_tray.xlsx 中的信息, 分轮次(每轮最多 chamber_capacity 个托盘)
-            执行: 开过渡舱门 -> AGV 转运 -> 机器人上料.
-            全部轮次结束后 AGV 前往充电站.
-            当总托盘数 <= chamber_capacity 时, 行为与旧版本一致(单轮).
+            兼容旧脚本入口：根据上料文件执行“开门 -> AGV 转运 -> 手套箱上料”。
+            新的前端/调度接口推荐改为先调用 `prepare_batch_in_with_agv_manifest`,
+            再分别调用 AGV `transfer_manifest` 与手套箱 `execute_batch_in_payload`。
         参数:
             file_path: 上料文件路径, 默认为 sheet/batch_in_tray.xlsx
             block: 是否阻塞等待 AGV 转运完成
             chamber_capacity: 过渡舱单次最大容纳托盘数, 默认 8
         返回:
-            Dict, 包含多轮次的聚合结果:
-                - success: bool, 是否全部轮次成功
-                - total_trays: int, 总托盘数
-                - transferred_trays: int, 成功转运的托盘数
-                - loaded_trays: int, 成功上料的托盘数
-                - rounds: List[Dict], 每轮次详情
-                - charging_result: Dict, AGV 充电结果
-                - errors: List[str], 所有错误信息
-                - message: str, 结果摘要
+            Dict, 包含多轮次的聚合结果。
         """
-        # 0. 默认文件路径
-        if file_path is None:
-            file_path = str(MODULE_ROOT / "sheet" / "batch_in_tray.xlsx")
-
-        # 1. 一次性读取全部记录
-        try:
-            all_records = self._read_batch_in_records(file_path)
-        except FileNotFoundError:
+        manifest = self.prepare_batch_in_with_agv_manifest(
+            file_path,
+            chamber_capacity=chamber_capacity,
+        )
+        if not manifest.get("success"):
             return {
                 "success": False,
-                "total_trays": 0,
+                "total_trays": manifest.get("total_trays", 0),
                 "transferred_trays": 0,
                 "loaded_trays": 0,
-                "rounds": [],
+                "rounds": manifest.get("rounds", []),
                 "charging_result": None,
-                "errors": ["上料文件不存在"],
-                "message": "上料文件不存在",
+                "errors": manifest.get("errors", []),
+                "message": manifest.get("message", "生成上料 manifest 失败"),
             }
 
-        if not all_records:
-            logger.warning("上料记录为空")
-            return {
-                "success": False,
-                "total_trays": 0,
-                "transferred_trays": 0,
-                "loaded_trays": 0,
-                "rounds": [],
-                "charging_result": None,
-                "errors": ["上料记录为空"],
-                "message": "上料记录为空",
-            }
-
-        # 2. 创建 AGV 控制器(仅创建一次)
         import sys
         sys.path.append(str(Path(__file__).resolve().parent.parent.parent))
         from eit_agv.controller.agv_controller import AGVController
         agv_controller = AGVController()
 
-        # 3. 按 chamber_capacity 分轮
-        total_records = len(all_records)
+        total_records = int(manifest.get("total_trays", 0))
         rounds_result: List[JsonDict] = []
         all_errors: List[str] = []
         total_transferred = 0
         total_loaded = 0
         overall_success = True
 
-        for round_start in range(0, total_records, chamber_capacity):
-            round_end = min(round_start + chamber_capacity, total_records)
-            round_num = round_start // chamber_capacity + 1
-            round_records = all_records[round_start:round_end]
-
-            round_validate_errors = self._validate_agv_transfer_round_records(
-                round_records,
-                round_num=round_num,
-            )
-            if round_validate_errors:
-                all_errors.extend(round_validate_errors)
-                logger.error(f"第 {round_num} 轮上料记录校验失败, 终止后续操作")
-                rounds_result.append({
-                    "round_num": round_num,
-                    "success": False,
-                    "phase": "validate_round",
-                    "errors": round_validate_errors,
-                })
-                overall_success = False
-                break
-
+        for round_manifest in manifest.get("rounds", []):
+            round_num = int(round_manifest.get("round_num", len(rounds_result) + 1))
+            record_range = round_manifest.get("record_range") or ["?", "?"]
             logger.info(
                 f"===== 第 {round_num} 轮上料开始 "
-                f"(记录 {round_start + 1}~{round_end}/{total_records}) ====="
+                f"(记录 {record_range[0]}~{record_range[1]}/{total_records}) ====="
             )
 
-            # 3a. 打开过渡舱外门
             door_errors = self._ensure_outer_door_open()
             if door_errors:
                 all_errors.extend(door_errors)
-                logger.error(f"第 {round_num} 轮开门失败, 终止后续操作")
-                rounds_result.append({
-                    "round_num": round_num,
-                    "success": False,
-                    "phase": "open_door",
-                    "errors": door_errors,
-                })
+                rounds_result.append(
+                    {
+                        "round_num": round_num,
+                        "success": False,
+                        "phase": "open_door",
+                        "errors": door_errors,
+                    }
+                )
                 overall_success = False
                 break
 
-            # 3b. AGV 转运本轮托盘(内部按 4 个一批)
-            round_tasks, build_errors = self._build_agv_transfer_tasks(round_records)
-            all_errors.extend(build_errors)
-            if build_errors:
-                logger.error(f"第 {round_num} 轮 AGV 任务构建失败, 终止后续操作")
-                rounds_result.append({
-                    "round_num": round_num,
-                    "success": False,
-                    "phase": "build_agv_tasks",
-                    "errors": build_errors,
-                })
-                overall_success = False
-                break
-
+            round_tasks = round_manifest.get("transfer_tasks") or []
             transferred = 0
             batches: List[JsonDict] = []
             if round_tasks:
-                transferred, batches, transfer_errors = (
-                    self._execute_agv_transfer_batches(
-                        round_tasks, agv_controller, block=block
-                    )
+                agv_result = agv_controller.transfer_manifest(
+                    round_manifest,
+                    block=block,
+                    auto_run_analysis=False,
                 )
+                transferred = int(agv_result.get("transferred_trays", 0))
+                batches = agv_result.get("batches", [])
+                transfer_errors = agv_result.get("errors", [])
                 total_transferred += transferred
                 all_errors.extend(transfer_errors)
 
                 if transfer_errors:
-                    logger.error(f"第 {round_num} 轮 AGV 转运失败, 终止后续操作")
-                    rounds_result.append({
-                        "round_num": round_num,
-                        "success": False,
-                        "phase": "agv_transfer",
-                        "transferred": transferred,
-                        "batches": batches,
-                        "errors": transfer_errors,
-                    })
+                    rounds_result.append(
+                        {
+                            "round_num": round_num,
+                            "success": False,
+                            "phase": "agv_transfer",
+                            "transferred": transferred,
+                            "batches": batches,
+                            "errors": transfer_errors,
+                        }
+                    )
                     overall_success = False
                     break
 
-            # 3c. AGV 转运完成后先回充电站等待, 机器人上料期间 AGV 充电
-            try:
-                charging_result = agv_controller.go_to_charging_station()
-                if charging_result is not None:
-                    logger.info(f"第 {round_num} 轮 AGV 已返回充电站")
-                else:
-                    logger.warning(f"第 {round_num} 轮 AGV 返回充电站失败")
-            except Exception as e:
-                logger.warning(f"第 {round_num} 轮 AGV 返回充电站异常: {e}, 继续执行上料")
-
-            # 3d. 执行本轮上料(机器人将托盘从过渡舱搬到工位)
-            round_rows = [
-                (r["position"], r["tray_type"], r["content"])
-                for r in round_records
-            ]
-            payload = self.build_batch_in_tray_payload(round_rows)
+            round_rows = round_manifest.get("batch_in_rows") or []
+            payload = round_manifest.get("batch_in_payload") or []
 
             in_tray_result = None
             if payload:
                 try:
-                    in_tray_result = self.batch_in_tray(payload)
+                    in_tray_result = self.execute_batch_in_payload(payload)
                     total_loaded += len(round_rows)
                     logger.info(f"第 {round_num} 轮上料完成")
                 except Exception as e:
                     error_msg = f"第 {round_num} 轮上料异常: {e}"
                     logger.error(error_msg)
                     all_errors.append(error_msg)
-                    rounds_result.append({
-                        "round_num": round_num,
-                        "success": False,
-                        "phase": "in_tray",
-                        "transferred": transferred,
-                        "batches": batches,
-                        "in_tray_result": None,
-                        "errors": [error_msg],
-                    })
+                    rounds_result.append(
+                        {
+                            "round_num": round_num,
+                            "success": False,
+                            "phase": "in_tray",
+                            "transferred": transferred,
+                            "batches": batches,
+                            "in_tray_result": None,
+                            "errors": [error_msg],
+                        }
+                    )
                     overall_success = False
                     break
             else:
                 logger.warning(f"第 {round_num} 轮上料 payload 为空, 跳过上料")
 
-            # 本轮成功
-            rounds_result.append({
-                "round_num": round_num,
-                "success": True,
-                "phase": "completed",
-                "transferred": transferred,
-                "batches": batches,
-                "in_tray_result": in_tray_result,
-                "loaded_count": len(round_rows),
-            })
-
+            rounds_result.append(
+                {
+                    "round_num": round_num,
+                    "success": True,
+                    "phase": "completed",
+                    "transferred": transferred,
+                    "batches": batches,
+                    "in_tray_result": in_tray_result,
+                    "loaded_count": len(round_rows),
+                }
+            )
             logger.info(f"===== 第 {round_num} 轮上料完成 =====")
 
-        # 4. 确保 AGV 在充电站(正常流程中每轮转运后已回充电站, 此处为保底)
         final_charging_result = None
         try:
             final_charging_result = agv_controller.go_to_charging_station()
@@ -2112,9 +2236,7 @@ class SynthesisStationManager(EITSynthesisWorkstation, SynthesisStationControlle
         except Exception as e:
             logger.error(f"AGV 返回充电站时发生异常: {e}")
 
-        # 5. 聚合返回
         overall_success = overall_success and len(all_errors) == 0
-
         return {
             "success": overall_success,
             "total_trays": total_records,

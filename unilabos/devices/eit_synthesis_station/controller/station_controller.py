@@ -9,6 +9,7 @@ from datetime import datetime
 from ..config.constants import (
     CONSUMABLE_CODE_DISPLAY_NAME,
     CONSUMABLE_CODE_TO_TRAY_CODE,
+    ITEM_CODE_TO_TRAY_CODE,
     TaskStatus,
     StationState,
     DeviceModuleStatus,
@@ -696,6 +697,19 @@ class SynthesisStationController:
             media_items = group.get("media_items", [])
 
             tray_code = self._get_tray_code(tray_item)
+
+            # 当 tray_item 缺失（API 无 slot=-1 记录）时，尝试从 media_items 反推 tray_code
+            if tray_code is None and media_items:
+                for media in media_items:
+                    item_type = self._safe_int(media.get("resource_type"))
+                    if item_type is not None and item_type in ITEM_CODE_TO_TRAY_CODE:
+                        tray_code = ITEM_CODE_TO_TRAY_CODE[item_type]
+                        self._logger.debug(
+                            "layout_code=%s 缺少 tray_item，从 media resource_type=%s 反推 tray_code=%s",
+                            layout_prefix, item_type, tray_code,
+                        )
+                        break
+
             tray_name = self._get_tray_name(tray_code)
             tray_spec = self._get_tray_spec(tray_code) if tray_code is not None else None
 
@@ -2014,11 +2028,11 @@ class SynthesisStationController:
         """
         功能:
             将上料记录列表转换为 AGV 转运任务列表.
-            从 record 的 position / tray_type / shelf_position 字段解析出
-            source_tray, target_tray, material_type 三元组.
+            从 record 的 position / tray_type / shelf_position / content 字段解析出
+            source_tray, target_tray, material_type, tray_display_name, substance_details.
         参数:
             records: List[Dict], 由 _iter_batch_in_records 返回的记录列表,
-                     每条需含 position, tray_type, shelf_position 字段.
+                     每条需含 position, tray_type, shelf_position, content 字段.
         返回:
             Tuple[List[Dict], List[str]]:
                 - transfer_tasks: 有效的 AGV 转运任务列表
@@ -2039,6 +2053,7 @@ class SynthesisStationController:
             position = record["position"]
             tray_type_text = record["tray_type"]
             shelf_position = record["shelf_position"]
+            content = record.get("content", "")
 
             # 跳过没有 shelf_position 的行
             if not shelf_position:
@@ -2098,21 +2113,94 @@ class SynthesisStationController:
                     f"未知的资源类型 {tray_type_code} ({tray_type_name}), 使用 None"
                 )
 
+            # 解析 tray_display_name（托盘中文显示名称）
+            tray_display_name = TRAY_CODE_DISPLAY_NAME.get(tray_type_code, material_type or f"未知托盘({tray_type_code})")
+
+            # 解析 substance_details（物料详细信息：试剂名、坑位、用量）
+            substance_details = self._parse_content_to_substance_details(
+                content, tray_type_code,
+            )
+
             # 构建转运任务
             task = {
                 "source_tray": source_tray,
                 "target_tray": target_tray,
                 "material_type": material_type,
+                "tray_display_name": tray_display_name,
+                "substance_details": substance_details,
             }
             target_tray_to_position[target_tray] = position
             source_tray_to_shelf_position[source_tray] = shelf_position
             transfer_tasks.append(task)
             self._logger.info(
                 f"转运任务: {source_tray} -> {target_tray}, "
-                f"物料类型: {material_type}"
+                f"物料类型: {material_type}, "
+                f"显示名: {tray_display_name}, "
+                f"试剂数: {len(substance_details)}"
             )
 
         return transfer_tasks, errors
+
+    def _parse_content_to_substance_details(
+        self,
+        content: str,
+        tray_type_code: int,
+    ) -> List[Dict[str, str]]:
+        """
+        功能:
+            解析上料 content 列，提取试剂/物料详细信息列表。
+            content 格式有两种：
+            1. 含试剂的托盘: "A1|无水碳酸钾|2000mg;B1|碳酸铯|2000mg"
+            2. 耗材托盘: "24" (纯数字，表示数量)
+        参数:
+            content: 上料表格 content 列原始文本。
+            tray_type_code: 托盘类型代码（整数）。
+        返回:
+            List[Dict[str, str]], 每条包含 well、substance、amount 字段。
+            耗材托盘返回空列表（无试剂信息）。
+        """
+        from ..config.constants import ResourceCode
+
+        if not content or not content.strip():
+            return []
+
+        content = str(content).strip()
+
+        # 判断是否为纯耗材类型（content 为纯数字, 表示数量）
+        no_substance_codes = {
+            int(ResourceCode.TIP_TRAY_50UL), int(ResourceCode.TIP_TRAY_1ML),
+            int(ResourceCode.TIP_TRAY_5ML),
+            int(ResourceCode.REACTION_SEAL_CAP_TRAY),
+            int(ResourceCode.FLASH_FILTER_INNER_BOTTLE_TRAY),
+            int(ResourceCode.FLASH_FILTER_OUTER_BOTTLE_TRAY),
+            int(ResourceCode.REACTION_TUBE_TRAY_2ML),
+            int(ResourceCode.TEST_TUBE_MAGNET_TRAY_2ML),
+        }
+        if tray_type_code in no_substance_codes:
+            # 耗材托盘：content 为数量，如 "24"
+            qty = self._safe_int(content)
+            if qty is not None and qty > 0:
+                return [{"well": "", "substance": f"×{qty}", "amount": ""}]
+            return []
+
+        # 含试剂的托盘: 解析 "A1|无水碳酸钾|2000mg;B1|碳酸铯|2000mg"
+        details: List[Dict[str, str]] = []
+        entries = [seg.strip() for seg in content.split(";") if seg.strip()]
+        for seg in entries:
+            parts = [p.strip() for p in seg.split("|")]
+            if len(parts) >= 3:
+                details.append({
+                    "well": parts[0],
+                    "substance": parts[1],
+                    "amount": parts[2],
+                })
+            elif len(parts) == 2:
+                details.append({
+                    "well": parts[0],
+                    "substance": parts[1],
+                    "amount": "",
+                })
+        return details
 
     def _ensure_outer_door_open(self) -> List[str]:
         """
@@ -2498,13 +2586,6 @@ class SynthesisStationController:
         from pathlib import Path
         import json
         import sys
-        from ..config.constants import (
-            ResourceCode,
-            RESOURCE_CODE_TO_MATERIAL_TYPE,
-            TB_CODE_TO_SYNTHESIS_TRAY,
-            SHELF_TRAY_POSITIONS,
-            ANALYSIS_STATION_TRAY_POSITIONS,
-        )
 
         # 创建AGV控制器实例
         sys.path.append(str(Path(__file__).resolve().parent.parent.parent))
@@ -2538,294 +2619,12 @@ class SynthesisStationController:
                 "errors": [],
             }
 
-        # 3. 构建转运任务列表, 分析工站任务单独收集后拼在最前面,
-        #    保证跨批次优先分配给前几批, 批次内也保持分析站先于货架
-        analysis_tasks: list = []   # 闪滤瓶外瓶托盘 -> 分析工站
-        shelf_tasks: list = []      # 其余托盘       -> 货架
-        analysis_task_ids: set = set()  # 分析任务的 task_id 集合
-        shelf_position_index = 0
-        analysis_position_index = 0
-        errors = []
-
-        for resource in resources:
-            dst_layout_code = resource.get("dst_layout_code", "")
-            resource_type = resource.get("resource_type")
-            resource_type_name = resource.get("resource_type_name", "")
-
-            # 跳过空资源
-            if resource_type is None or dst_layout_code == "":
-                continue
-
-            # 3.1 映射源托盘位置: dst_layout_code (TB-x-x) -> synthesis_station_tray_x-x
-            source_tray = TB_CODE_TO_SYNTHESIS_TRAY.get(dst_layout_code)
-            if source_tray is None:
-                error_msg = f"无法映射下料位置 {dst_layout_code} 到合成工站托盘"
-                self._logger.error(error_msg)
-                errors.append(error_msg)
-                continue
-
-            # 3.2 映射物料类型: resource_type -> material_type 名称
-            material_type = RESOURCE_CODE_TO_MATERIAL_TYPE.get(resource_type)
-            if material_type is None:
-                self._logger.warning(
-                    f"未知的资源类型 {resource_type} ({resource_type_name}), 使用 None"
-                )
-
-            # 3.3 按物料类型分流: 闪滤瓶外瓶托盘 -> 分析工站, 其余 -> 货架
-            if resource_type == int(ResourceCode.FLASH_FILTER_OUTER_BOTTLE_TRAY):
-                # 检测物料(闪滤瓶外瓶托盘) -> 分析工站
-                if analysis_position_index >= len(ANALYSIS_STATION_TRAY_POSITIONS):
-                    error_msg = f"分析工站托盘位置已用尽, 无法放置 {resource_type_name}"
-                    self._logger.error(error_msg)
-                    errors.append(error_msg)
-                    continue
-                target_tray = ANALYSIS_STATION_TRAY_POSITIONS[analysis_position_index]
-                analysis_position_index += 1
-                analysis_tasks.append({
-                    "source_tray": source_tray,
-                    "target_tray": target_tray,
-                    "material_type": material_type,
-                })
-                # 记录分析任务的 task_id
-                raw_task_id = resource.get("task_id")
-                if raw_task_id is not None:
-                    analysis_task_ids.add(raw_task_id)
-                self._logger.info(
-                    f"[分析工站] 任务: {source_tray} -> {target_tray}, "
-                    f"物料类型: {material_type} ({resource_type_name})"
-                )
-            else:
-                # 其它托盘 -> 货架
-                if shelf_position_index >= len(SHELF_TRAY_POSITIONS):
-                    error_msg = f"货架托盘位置已用尽, 无法放置 {resource_type_name}"
-                    self._logger.error(error_msg)
-                    errors.append(error_msg)
-                    continue
-                target_tray = SHELF_TRAY_POSITIONS[shelf_position_index]
-                shelf_position_index += 1
-                shelf_tasks.append({
-                    "source_tray": source_tray,
-                    "target_tray": target_tray,
-                    "material_type": material_type,
-                })
-                self._logger.info(
-                    f"[货架] 任务: {source_tray} -> {target_tray}, "
-                    f"物料类型: {material_type} ({resource_type_name})"
-                )
-
-        # 分析工站任务置于列表头部, 确保:
-        #   - 托盘数 <= 4 时, 同批次内先卸分析站再卸货架
-        #   - 托盘数 > 4 时, 分析工站托盘优先进入前几批
-        transfer_tasks_all = analysis_tasks + shelf_tasks
-
-        if len(transfer_tasks_all) == 0:
-            self._logger.warning("没有有效的转运任务")
-            return {
-                "success": False,
-                "total_trays": len(resources),
-                "transferred_trays": 0,
-                "batches": [],
-                "errors": errors,
-            }
-
-        self._logger.info(
-            f"转运任务汇总: 分析工站 {len(analysis_tasks)} 个, "
-            f"货架 {len(shelf_tasks)} 个, 合计 {len(transfer_tasks_all)} 个"
+        manifest = self.build_unload_transfer_manifest(resources)
+        return agv_controller.transfer_manifest(
+            manifest,
+            block=block,
+            auto_run_analysis=auto_run_analysis,
         )
-
-        # 4. 分批处理: AGV 一次最多转运 4 个托盘,
-        #    同一批次内分析工站任务已排在前面, AGV 将先卸货到分析站再卸货到货架
-        batch_size = 4
-        batches_result = []
-        transferred_count = 0
-        analysis_submitted = False   # 分析任务是否已提交
-        analysis_results = {}        # 分析任务提交结果
-
-        for batch_index in range(0, len(transfer_tasks_all), batch_size):
-            batch_tasks = transfer_tasks_all[batch_index:batch_index + batch_size]
-            batch_num = batch_index // batch_size + 1
-
-            self._logger.info(f"开始执行第 {batch_num} 批转运, 共 {len(batch_tasks)} 个托盘")
-
-            try:
-                # 计算本批次中属于分析工站任务的局部索引
-                batch_end = min(batch_index + batch_size, len(transfer_tasks_all))
-                batch_analysis_local_indices = set(
-                    i - batch_index for i in range(batch_index, batch_end)
-                    if i < len(analysis_tasks)
-                )
-
-                # 确定分析工站 station_id(从分析站托盘名反推)
-                analysis_station_id = None
-                if batch_analysis_local_indices:
-                    sample_tray = batch_tasks[min(batch_analysis_local_indices)]["target_tray"]
-                    analysis_station_id = agv_controller._get_station_from_tray(sample_tray)
-
-                def _on_station_delivered(station_id, task_indices):
-                    """
-                    功能:
-                        batch_transfer_materials Phase 2 某站点卸货完成后的异步回调.
-                        仅当卸货站点为分析工站且分析尚未提交时, 立即提交分析任务,
-                        无需等待后续货架转运完成.
-                    参数:
-                        station_id: 刚完成卸货的站点 ID (str)
-                        task_indices: 该站点对应的批次内任务局部索引列表 (list[int])
-                    返回:
-                        None
-                    """
-                    nonlocal analysis_submitted
-
-                    # 只关心分析工站的回调
-                    if station_id != analysis_station_id:
-                        return
-
-                    # 防止重复提交
-                    if analysis_submitted:
-                        return
-
-                    analysis_submitted = True
-                    self._logger.info(
-                        "分析站卸货完成 (回调触发), 立即提交分析任务: %s",
-                        analysis_task_ids
-                    )
-
-                    from unilabos.devices.eit_analysis_station.controller.analysis_controller import (
-                        AnalysisStationController,
-                    )
-                    analysis_ctrl = AnalysisStationController()
-
-                    for tid in sorted(analysis_task_ids):
-                        task_id_str = str(tid)
-                        self._logger.info("正在提交分析任务, task_id=%s", task_id_str)
-                        try:
-                            ar = analysis_ctrl.run_analysis(task_id=task_id_str)
-                            analysis_results[task_id_str] = ar
-                            self._logger.info(
-                                "分析任务提交完成, task_id=%s, 结果: %s",
-                                task_id_str, ar
-                            )
-                        except Exception as e:
-                            error_msg = (
-                                f"分析任务提交失败, task_id={task_id_str}: {str(e)}"
-                            )
-                            self._logger.error(error_msg)
-                            analysis_results[task_id_str] = {
-                                "success": False,
-                                "error": error_msg,
-                            }
-
-                # 仅当本批次含分析工站任务且尚未提交时才挂载回调
-                should_attach_callback = (
-                    auto_run_analysis
-                    and len(analysis_task_ids) > 0
-                    and not analysis_submitted
-                    and len(batch_analysis_local_indices) > 0
-                    and analysis_station_id is not None
-                )
-
-                result = agv_controller.batch_transfer_materials(
-                    batch_tasks,
-                    block=block,
-                    on_station_delivered=(
-                        _on_station_delivered if should_attach_callback else None
-                    ),
-                )
-
-                batch_result = {
-                    "batch_num": batch_num,
-                    "tasks": batch_tasks,
-                    "success": result,
-                }
-                batches_result.append(batch_result)
-
-                if result:
-                    transferred_count += len(batch_tasks)
-                    self._logger.info(f"第 {batch_num} 批转运成功")
-
-                    # 兜底: 正常情况下 analysis_submitted 已由 on_station_delivered 回调置 True.
-                    #   若回调未执行(极端异常), 此处作为最后保障.
-                    if (auto_run_analysis
-                            and len(analysis_task_ids) > 0
-                            and not analysis_submitted
-                            and transferred_count >= len(analysis_tasks)):
-                        analysis_submitted = True
-                        self._logger.warning(
-                            "兜底路径触发分析提交 (回调未正常执行), task_ids=%s",
-                            analysis_task_ids
-                        )
-                        from unilabos.devices.eit_analysis_station.controller.analysis_controller import (
-                            AnalysisStationController,
-                        )
-                        analysis_ctrl = AnalysisStationController()
-
-                        for tid in sorted(analysis_task_ids):
-                            task_id_str = str(tid)
-                            self._logger.info("正在提交分析任务 (兜底), task_id=%s", task_id_str)
-                            try:
-                                ar = analysis_ctrl.run_analysis(task_id=task_id_str)
-                                analysis_results[task_id_str] = ar
-                                self._logger.info(
-                                    "分析任务提交完成 (兜底), task_id=%s, 结果: %s",
-                                    task_id_str, ar
-                                )
-                            except Exception as e:
-                                error_msg = (
-                                    f"分析任务提交失败 (兜底), task_id={task_id_str}: {str(e)}"
-                                )
-                                self._logger.error(error_msg)
-                                analysis_results[task_id_str] = {
-                                    "success": False,
-                                    "error": error_msg,
-                                }
-                else:
-                    error_msg = f"第 {batch_num} 批转运失败"
-                    self._logger.error(error_msg)
-                    errors.append(error_msg)
-                    # 立即停止后续批次
-                    break
-
-            except Exception as e:
-                error_msg = f"第 {batch_num} 批转运异常: {str(e)}"
-                self._logger.error(error_msg)
-                errors.append(error_msg)
-                batches_result.append(
-                    {
-                        "batch_num": batch_num,
-                        "tasks": batch_tasks,
-                        "success": False,
-                        "error": str(e),
-                    }
-                )
-                # 立即停止后续批次
-                break
-
-        # 5. 返回结果
-        success = transferred_count == len(transfer_tasks_all) and len(errors) == 0
-
-        # 6. 如果所有任务成功完成, 让AGV返回充电站
-        if success:
-            self._logger.info("所有转运任务已完成, 正在让AGV返回充电站")
-            try:
-                charge_result = agv_controller.go_to_charging_station(block=block)
-                if charge_result is not None:
-                    self._logger.info("AGV已成功返回充电站")
-                else:
-                    error_msg = "AGV返回充电站失败"
-                    self._logger.warning(error_msg)
-                    errors.append(error_msg)
-            except Exception as e:
-                error_msg = f"AGV返回充电站异常: {str(e)}"
-                self._logger.error(error_msg)
-                errors.append(error_msg)
-
-        return {
-            "success": success,
-            "total_trays": len(resources),
-            "transferred_trays": transferred_count,
-            "batches": batches_result,
-            "errors": errors,
-            "analysis_results": analysis_results,
-        }
 
     def get_task_tray_mapping(self, task_id: int) -> JsonDict:
         """
@@ -2896,81 +2695,122 @@ class SynthesisStationController:
         self._logger.debug("可用资源为0的托盘数量=%s", len(empty_trays))
         return empty_trays
 
-    def batch_out_task_and_empty_trays(self, task_id: Optional[int] = None, *, poll_interval_s: float = 1.0, ignore_missing: bool = True, timeout_s: float = 900.0, move_type: str = "main_out") -> JsonDict:
+    def _resolve_completed_task_id_for_unload(self, task_id: Optional[int]) -> int:
         """
         功能:
-            汇总指定或自动选择的已完成任务涉及托盘与当前空托盘, 校验存在性后执行批量下料
+            为下料流程解析目标任务 ID；未传入时自动选择最近完成的任务。
         参数:
-            task_id: 任务 id, None 时自动选择最近完成的任务
-            poll_interval_s: 轮询空闲状态的时间间隔(秒)
-            ignore_missing: True 时忽略未在资源列表中的托盘并记录 warning, False 时抛错终止
-            timeout_s: 等待空闲的超时时间(秒)
-            move_type: 下料方式, 默认 "main_out"
+            task_id: 可选任务 ID。
         返回:
-            Dict, 执行 batch_out_tray 的接口响应
+            int, 目标任务 ID。
         """
-        self.wait_idle(stage="等待任务结束", poll_interval_s=poll_interval_s, timeout_s=timeout_s)   #等待任务结束后再提取托盘信息，否则会提取不到
+        if task_id is not None:
+            return int(task_id)
 
-        target_task_id = task_id
-        if target_task_id is None:
-            tasks_resp = self.get_task_list(sort="desc", offset=0, limit=50)
-            task_list = tasks_resp.get("task_list") or tasks_resp.get("result", {}).get("task_list") or tasks_resp.get("data", {}).get("task_list")
-            completed_ids: List[int] = []
-            if isinstance(task_list, list):
-                for item in task_list:
-                    cur_id = item.get("task_id")
-                    cur_status = item.get("status")
-                    if isinstance(cur_id, int) and cur_status == int(TaskStatus.COMPLETED):
-                        completed_ids.append(cur_id)
-            if len(completed_ids) == 0:
-                raise ValidationError("未找到下料的已完成任务")
-            target_task_id = max(completed_ids)
-            self._logger.info("未传入 task_id, 自动选择最近完成的任务: %s", target_task_id)
+        tasks_resp = self.get_task_list(sort="desc", offset=0, limit=50)
+        task_list = (
+            tasks_resp.get("task_list")
+            or tasks_resp.get("result", {}).get("task_list")
+            or tasks_resp.get("data", {}).get("task_list")
+        )
+        completed_ids: List[int] = []
+        if isinstance(task_list, list):
+            for item in task_list:
+                cur_id = item.get("task_id")
+                cur_status = item.get("status")
+                if isinstance(cur_id, int) and cur_status == int(TaskStatus.COMPLETED):
+                    completed_ids.append(cur_id)
 
+        if len(completed_ids) == 0:
+            raise ValidationError("未找到下料的已完成任务")
+
+        target_task_id = max(completed_ids)
+        self._logger.info("未传入 task_id, 自动选择最近完成的任务: %s", target_task_id)
+        return target_task_id
+
+    @staticmethod
+    def _is_excluded_unload_code(code: Any) -> bool:
+        """
+        功能:
+            判断下料位置是否应按前缀规则排除。
+        参数:
+            code: 任意位置编码对象。
+        返回:
+            bool, True 表示应排除。
+        """
+        if code is None:
+            return False
+        text = str(code).strip().upper()
+        return any(text.startswith(prefix) for prefix in ("MSB", "MS", "AS", "TS"))
+
+    def _build_task_and_empty_unload_plan(
+        self,
+        task_id: Optional[int] = None,
+        *,
+        poll_interval_s: float = 1.0,
+        ignore_missing: bool = True,
+        timeout_s: float = 900.0,
+    ) -> Tuple[int, List[JsonDict], List[JsonDict], JsonDict]:
+        """
+        功能:
+            构建“任务托盘 + 空托盘”下料计划，并同步生成供 AGV 消费的 manifest 资源明细。
+        参数:
+            task_id: 任务 ID；为空时自动选择最近完成任务。
+            poll_interval_s: 轮询空闲间隔。
+            ignore_missing: 是否忽略资源列表中不存在的位置。
+            timeout_s: 等待空闲超时。
+        返回:
+            Tuple[target_task_id, layout_list, manifest_resources, summary]
+        """
+        self.wait_idle(stage="等待任务结束", poll_interval_s=poll_interval_s, timeout_s=timeout_s)
+
+        target_task_id = self._resolve_completed_task_id_for_unload(task_id)
         self._logger.info("准备下料")
 
         mapping = self.get_task_tray_mapping(target_task_id)
         reaction_trays = mapping.get("reaction_trays") or []
         sampling_trays = mapping.get("sampling_trays") or []
 
-        skip_prefixes = ("MSB", "MS", "AS", "TS")
-
-        def _is_excluded_code(code: Any) -> bool:
-            if code is None:
-                return False
-            text = str(code).strip().upper()
-            return any(text.startswith(prefix) for prefix in skip_prefixes)
-
         raw_task_tray_codes = {(code or "").strip() for code in reaction_trays if (code or "").strip()}
         raw_task_tray_codes |= {(code or "").strip() for code in sampling_trays if (code or "").strip()}
 
         empty_trays = self.list_empty_trays()
-        raw_empty_codes = {str(item.get("layout_code")).strip() for item in empty_trays if item.get("layout_code")}
+        raw_empty_codes = {
+            str(item.get("layout_code")).strip()
+            for item in empty_trays
+            if item.get("layout_code")
+        }
 
-        excluded_codes = {code for code in (raw_task_tray_codes | raw_empty_codes) if _is_excluded_code(code)}
+        excluded_codes = {
+            code
+            for code in (raw_task_tray_codes | raw_empty_codes)
+            if self._is_excluded_unload_code(code)
+        }
         if excluded_codes:
             self._logger.info("按前缀规则忽略托盘: %s", sorted(excluded_codes))
 
         task_tray_codes = {code for code in raw_task_tray_codes if code not in excluded_codes}
         empty_codes = {code for code in raw_empty_codes if code not in excluded_codes}
-
         target_codes = {*(task_tray_codes or []), *empty_codes}
         target_codes = {str(code).strip() for code in target_codes if str(code).strip()}
 
-        # 提前获取资源列表, 供磁子托盘特殊处理与后续校验共用
         resource_rows = self.get_resource_info()
-        existing_codes = {str(row.get("layout_code") or "").strip() for row in resource_rows if row.get("layout_code")}
+        resource_map = {
+            str(row.get("layout_code") or "").strip(): row
+            for row in resource_rows
+            if row.get("layout_code")
+        }
+        existing_codes = set(resource_map.keys())
 
-        # 对 2 mL 试管磁子托盘进行特殊处理: 磁子数量不等于满载量(24)即视为已使用, 纳入下料
         magnet_type = int(ResourceCode.TEST_TUBE_MAGNET_TRAY_2ML)
-        magnet_full_count = TraySpec.TEST_TUBE_MAGNET_TRAY_2ML[0] * TraySpec.TEST_TUBE_MAGNET_TRAY_2ML[1]  # 6*4=24
+        magnet_full_count = TraySpec.TEST_TUBE_MAGNET_TRAY_2ML[0] * TraySpec.TEST_TUBE_MAGNET_TRAY_2ML[1]
         used_magnet_codes: set[str] = set()
         for row in resource_rows:
             if row.get("resource_type") == magnet_type:
                 row_count = row.get("count")
                 if isinstance(row_count, int) and row_count != magnet_full_count:
                     layout_code = str(row.get("layout_code") or "").strip()
-                    if layout_code and not _is_excluded_code(layout_code):
+                    if layout_code and not self._is_excluded_unload_code(layout_code):
                         used_magnet_codes.add(layout_code)
 
         if used_magnet_codes:
@@ -2985,7 +2825,6 @@ class SynthesisStationController:
             raise ValidationError(f"任务 {target_task_id} 未找到需要下料的托盘位置")
 
         missing_codes = sorted(code for code in target_codes if code not in existing_codes)
-
         if missing_codes:
             if ignore_missing:
                 self._logger.warning("下料位置未在资源列表, 已忽略: %s", missing_codes)
@@ -2998,6 +2837,38 @@ class SynthesisStationController:
 
         empty_set = {code for code in empty_codes if code}
         empty_only = sorted(empty_set - task_tray_codes)
+        default_dst_positions = [
+            "TB-2-1", "TB-2-2", "TB-2-3", "TB-2-4",
+            "TB-1-1", "TB-1-2", "TB-1-3", "TB-1-4",
+        ]
+
+        layout_list: List[JsonDict] = []
+        manifest_resources: List[JsonDict] = []
+        for index, code in enumerate(sorted(target_codes)):
+            if index >= len(default_dst_positions):
+                raise ValidationError(f"下料位置不足, 最多支持 {len(default_dst_positions)} 个托盘下料")
+
+            dst_layout_code = default_dst_positions[index]
+            layout_item: JsonDict = {
+                "layout_code": code,
+                "dst_layout_code": dst_layout_code,
+            }
+            if code in task_tray_codes:
+                layout_item["task_id"] = target_task_id
+            layout_list.append(layout_item)
+
+            resource_row = resource_map.get(code, {})
+            manifest_resources.append(
+                {
+                    "layout_code": code,
+                    "count": resource_row.get("count", 0),
+                    "resource_type": resource_row.get("resource_type"),
+                    "resource_type_name": resource_row.get("resource_type_name", ""),
+                    "substance_details": resource_row.get("substance_details", []),
+                    "task_id": layout_item.get("task_id"),
+                    "dst_layout_code": dst_layout_code,
+                }
+            )
 
         self._logger.info(
             "准备批量下料 task_id=%s  任务托盘=%s  空托盘=%s  实际下料位置=%s",
@@ -3007,13 +2878,202 @@ class SynthesisStationController:
             sorted(target_codes),
         )
 
-        # 构造新的 layout_list 格式，任务托盘附上 task_id，空托盘不附
-        layout_list = []
-        for code in sorted(target_codes):
-            item = {"layout_code": code}
-            if code in task_tray_codes:
-                item["task_id"] = target_task_id
-            layout_list.append(item)
+        summary = {
+            "task_id": target_task_id,
+            "task_tray_codes": sorted(task_tray_codes),
+            "empty_tray_codes": empty_only,
+            "target_codes": sorted(target_codes),
+            "excluded_codes": sorted(excluded_codes),
+            "missing_codes": missing_codes,
+            "used_magnet_codes": sorted(used_magnet_codes),
+        }
+        return target_task_id, layout_list, manifest_resources, summary
+
+    def build_unload_transfer_manifest(self, resources: List[JsonDict]) -> JsonDict:
+        """
+        功能:
+            将手套箱下料明细转换为 AGV 可消费的标准转运 manifest。
+        参数:
+            resources: 下料资源明细列表，字段格式与 batch_out_tray 日志一致。
+        返回:
+            Dict, 包含 transfer_tasks、analysis_task_ids 等标准化信息。
+        """
+        from ..config.constants import (
+            ResourceCode,
+            RESOURCE_CODE_TO_MATERIAL_TYPE,
+            TB_CODE_TO_SYNTHESIS_TRAY,
+            SHELF_TRAY_POSITIONS,
+            ANALYSIS_STATION_TRAY_POSITIONS,
+            TRAY_CODE_DISPLAY_NAME,
+        )
+
+        analysis_tasks: List[JsonDict] = []
+        shelf_tasks: List[JsonDict] = []
+        analysis_task_ids: set[str] = set()
+        shelf_position_index = 0
+        analysis_position_index = 0
+        errors: List[str] = []
+
+        for resource in resources:
+            dst_layout_code = str(resource.get("dst_layout_code") or "").strip()
+            resource_type = resource.get("resource_type")
+            resource_type_name = resource.get("resource_type_name", "")
+
+            if resource_type is None or dst_layout_code == "":
+                continue
+
+            source_tray = TB_CODE_TO_SYNTHESIS_TRAY.get(dst_layout_code)
+            if source_tray is None:
+                error_msg = f"无法映射下料位置 {dst_layout_code} 到合成工站托盘"
+                self._logger.error(error_msg)
+                errors.append(error_msg)
+                continue
+
+            material_type = RESOURCE_CODE_TO_MATERIAL_TYPE.get(resource_type)
+            if material_type is None:
+                self._logger.warning(
+                    "未知的资源类型 %s (%s), 使用 None",
+                    resource_type,
+                    resource_type_name,
+                )
+
+            # 生成 tray_display_name 和 substance_details 供 AGV Deck 显示
+            tray_display_name = TRAY_CODE_DISPLAY_NAME.get(
+                resource_type, resource_type_name or (material_type or "")
+            )
+            raw_substance_details = resource.get("substance_details") or []
+            # 将下料资源中的 substance_details 转换为上料格式 (well/substance/amount)
+            substance_details = []
+            for sd in raw_substance_details:
+                if isinstance(sd, dict):
+                    substance_details.append({
+                        "well": sd.get("well", sd.get("slot", "")),
+                        "substance": sd.get("substance", sd.get("name", "")),
+                        "amount": sd.get("amount", sd.get("value", "")),
+                    })
+
+            if resource_type == int(ResourceCode.FLASH_FILTER_OUTER_BOTTLE_TRAY):
+                if analysis_position_index >= len(ANALYSIS_STATION_TRAY_POSITIONS):
+                    error_msg = f"分析工站托盘位置已用尽, 无法放置 {resource_type_name}"
+                    self._logger.error(error_msg)
+                    errors.append(error_msg)
+                    continue
+
+                target_tray = ANALYSIS_STATION_TRAY_POSITIONS[analysis_position_index]
+                analysis_position_index += 1
+                analysis_tasks.append(
+                    {
+                        "source_tray": source_tray,
+                        "target_tray": target_tray,
+                        "material_type": material_type,
+                        "tray_display_name": tray_display_name,
+                        "substance_details": substance_details,
+                    }
+                )
+                raw_task_id = resource.get("task_id")
+                if raw_task_id is not None:
+                    analysis_task_ids.add(str(raw_task_id))
+            else:
+                if shelf_position_index >= len(SHELF_TRAY_POSITIONS):
+                    error_msg = f"货架托盘位置已用尽, 无法放置 {resource_type_name}"
+                    self._logger.error(error_msg)
+                    errors.append(error_msg)
+                    continue
+
+                target_tray = SHELF_TRAY_POSITIONS[shelf_position_index]
+                shelf_position_index += 1
+                shelf_tasks.append(
+                    {
+                        "source_tray": source_tray,
+                        "target_tray": target_tray,
+                        "material_type": material_type,
+                        "tray_display_name": tray_display_name,
+                        "substance_details": substance_details,
+                    }
+                )
+
+        transfer_tasks = analysis_tasks + shelf_tasks
+        success = len(transfer_tasks) > 0 and len(errors) == 0
+        return {
+            "manifest_type": "eit_synthesis_unload",
+            "source_device": "eit_synthesis_station",
+            "transfer_tasks": transfer_tasks,
+            "analysis_task_ids": sorted(analysis_task_ids),
+            "analysis_tasks_count": len(analysis_tasks),
+            "shelf_tasks_count": len(shelf_tasks),
+            "total_trays": len(resources),
+            "resources": resources,
+            "errors": errors,
+            "success": success,
+            "message": "已生成 AGV 下料 manifest" if success else "生成 AGV 下料 manifest 时存在错误",
+        }
+
+    def unload_task_and_empty_trays_return_manifest(
+        self,
+        task_id: Optional[int] = None,
+        *,
+        poll_interval_s: float = 1.0,
+        ignore_missing: bool = True,
+        timeout_s: float = 900.0,
+        move_type: str = "main_out",
+    ) -> JsonDict:
+        """
+        功能:
+            执行手套箱本地下料(任务托盘 + 空托盘)，并返回标准 AGV manifest。
+            适合前端先调用该函数，再将返回值传给 AGV 的 `transfer_manifest`。
+        参数:
+            task_id: 任务 ID；为空时自动选择最近完成任务。
+            poll_interval_s: 等待任务结束轮询间隔。
+            ignore_missing: 是否忽略资源列表中不存在的位置。
+            timeout_s: 等待任务结束超时。
+            move_type: 下料方式。
+        返回:
+            Dict, 包含 batch_out_result 与 AGV manifest。
+        """
+        target_task_id, layout_list, manifest_resources, summary = self._build_task_and_empty_unload_plan(
+            task_id,
+            poll_interval_s=poll_interval_s,
+            ignore_missing=ignore_missing,
+            timeout_s=timeout_s,
+        )
+        batch_out_result = self.batch_out_tray(
+            layout_list,
+            move_type=move_type,
+            task_id=None,
+            poll_interval_s=poll_interval_s,
+            timeout_s=timeout_s,
+        )
+        manifest = self.build_unload_transfer_manifest(manifest_resources)
+        manifest.update(
+            {
+                "task_id": target_task_id,
+                "layout_list": layout_list,
+                "selection": summary,
+                "batch_out_result": batch_out_result,
+                "message": "手套箱下料完成，已返回 AGV manifest",
+            }
+        )
+        return manifest
+
+    def batch_out_task_and_empty_trays(self, task_id: Optional[int] = None, *, poll_interval_s: float = 1.0, ignore_missing: bool = True, timeout_s: float = 900.0, move_type: str = "main_out") -> JsonDict:
+        """
+        功能:
+            汇总指定或自动选择的已完成任务涉及托盘与当前空托盘, 校验存在性后执行批量下料
+        参数:
+            task_id: 任务 id, None 时自动选择最近完成的任务
+            poll_interval_s: 轮询空闲状态的时间间隔(秒)
+            ignore_missing: True 时忽略未在资源列表中的托盘并记录 warning, False 时抛错终止
+            timeout_s: 等待空闲的超时时间(秒)
+            move_type: 下料方式, 默认 "main_out"
+        返回:
+            Dict, 执行 batch_out_tray 的接口响应
+        """
+        _, layout_list, _, _ = self._build_task_and_empty_unload_plan(
+            task_id,
+            poll_interval_s=poll_interval_s,
+            ignore_missing=ignore_missing,
+            timeout_s=timeout_s,
+        )
 
         resp = self.batch_out_tray(
             layout_list,

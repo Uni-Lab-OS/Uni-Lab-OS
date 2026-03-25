@@ -24,7 +24,7 @@ class EIT_Synthesis_Station_Deck(Deck):
         name: str = "Synthesis_Station_Deck",
         size_x: float = 2800.0,
         size_y: float = 1500.0,
-        size_z: float = 1500.0,
+        size_z: float = 0.0,
         category: str = "deck",
         setup: bool = False,
         **kwargs
@@ -37,16 +37,26 @@ class EIT_Synthesis_Station_Deck(Deck):
 
     @classmethod
     def deserialize(cls, data, allow_marshal=False) -> Self:
-        """反序列化时跳过 setup()，由序列化数据提供 children，避免双重挂载"""
+        """
+        反序列化时默认跳过 setup()，由序列化数据提供 children，避免双重挂载。
+
+        兼容设备图中仅声明空 deck + setup=true 的场景：如果反序列化后没有任何子资源，
+        且原始数据请求 setup，则补跑一次 setup()，确保首次启动能自动生成 WareHouse。
+        """
         data_modified = dict(data)
+        requested_setup = bool(data_modified.get("setup", False))
         data_modified["setup"] = False
         resource = super().deserialize(data_modified, allow_marshal=allow_marshal)
-        resource.warehouses = {}
-        resource.warehouse_locations = {}
-        for child in resource.children:
-            resource.warehouses[child.name] = child
-            if child.location is not None:
-                resource.warehouse_locations[child.name] = child.location
+        if not resource.children and requested_setup:
+            logger.info("EIT Deck 反序列化后无子资源，按 setup=True 补执行初始化")
+            resource.setup()
+        else:
+            resource.warehouses = {}
+            resource.warehouse_locations = {}
+            for child in resource.children:
+                resource.warehouses[child.name] = child
+                if child.location is not None:
+                    resource.warehouse_locations[child.name] = child.location
         return resource
     
     def _recursive_assign_uuid(self, res):

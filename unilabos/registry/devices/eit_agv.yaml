@@ -1,0 +1,163 @@
+eit_agv:
+  category:
+  - robot_agv
+  - eit_agv
+  class:
+    action_value_mappings:
+      auto-send:
+        feedback: {}
+        goal: {}
+        goal_default:
+          cmd: null
+          ex_data: ''
+          obj: receive_socket
+        handles: {}
+        placeholder_keys: {}
+        result: {}
+        schema:
+          description: AGV底层通信命令发送函数。通过TCP socket连接向AGV发送底层控制命令，支持pose（位置）、status（状态）、nav（导航）等命令类型。用于获取AGV当前位置坐标、运行状态或发送导航指令。该函数封装了AGV的通信协议，将命令转换为十六进制数据包并处理响应解析。
+          properties:
+            feedback: {}
+            goal:
+              properties:
+                cmd:
+                  type: string
+                ex_data:
+                  default: ''
+                  type: string
+                obj:
+                  default: receive_socket
+                  type: string
+              required:
+              - cmd
+              type: object
+            result: {}
+          required:
+          - goal
+          title: send参数
+          type: object
+        type: UniLabJsonCommand
+      send_nav_task:
+        feedback: {}
+        goal:
+          command: command
+        goal_default:
+          command: ''
+        handles: {}
+        result:
+          success: success
+        schema:
+          description: ''
+          properties:
+            feedback:
+              properties:
+                status:
+                  type: string
+              required:
+              - status
+              title: SendCmd_Feedback
+              type: object
+            goal:
+              properties:
+                command:
+                  type: string
+              required:
+              - command
+              title: SendCmd_Goal
+              type: object
+            result:
+              properties:
+                return_info:
+                  type: string
+                success:
+                  type: boolean
+              required:
+              - return_info
+              - success
+              title: SendCmd_Result
+              type: object
+          required:
+          - goal
+          title: SendCmd
+          type: object
+        type: SendCmd
+      transfer_manifest:
+        feedback: {}
+        goal: {}
+        goal_default:
+          manifest: null
+        handles:
+          input:
+          - data_key: manifest
+            data_source: handle
+            data_type: object
+            handler_key: manifest
+            io_type: source
+            label: 上游设备输出的转运 manifest
+            required: true
+          output:
+          - data_key: transfer_result
+            data_source: executor
+            data_type: object
+            handler_key: transfer_result
+            io_type: sink
+            label: AGV 转运执行结果
+        result:
+          transfer_result: transfer_result
+        schema:
+          description: 执行标准化转运 manifest，供 UniLab 编排层调用。
+          properties:
+            feedback: {}
+            goal:
+              properties:
+                manifest:
+                  type: object
+              required:
+              - manifest
+              type: object
+            result:
+              properties:
+                transfer_result:
+                  description: 转运执行结果，包含 success、transferred_trays、batches 等
+                  type: object
+              type: object
+          required:
+          - goal
+          title: transfer_manifest参数
+          type: object
+        type: UniLabJsonCommand
+    module: unilabos.devices.eit_agv.controller.agv_controller:UniLabAGVController
+    status_types:
+      current_station: str
+      status: str
+    type: python
+  config_info: []
+  description: EIT AGV自动导引车设备。复用SEER AGV驱动，用于EIT场景下的托盘搬运、站间转运与导航任务执行。
+  handles: []
+  icon: ''
+  init_param_schema:
+    config:
+      properties:
+        arm_ip:
+          type: string
+        arm_port:
+          type: integer
+        arm_timeout:
+          type: integer
+        deck:
+          type: object
+        protocol_type:
+          type: array
+      required: []
+      type: object
+    data:
+      properties:
+        current_station:
+          type: string
+        status:
+          type: string
+      required:
+      - status
+      - current_station
+      type: object
+  version: 1.0.0
