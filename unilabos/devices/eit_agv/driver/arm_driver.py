@@ -19,20 +19,20 @@ class ArmDriver:
         AGV机械臂驱动类, 提供托盘搬运和物料转移所需的核心功能
     """
 
-    def __init__(self, ip=None, port=None, timeout=60000):
+    def __init__(self, ip=None, port=None, timeout=None):
         """
         功能:
             初始化机械臂驱动
         参数:
             ip: 机械臂IP地址, 默认使用配置文件中的值
             port: 机械臂端口, 默认使用配置文件中的值
-            timeout: socket超时时间, 单位毫秒, 默认60000ms(60秒)
+            timeout: socket超时时间, 单位毫秒, 默认使用配置文件中的值
         """
         self.robot = DucoCobot(ip, port, timeout)
         self.is_connected = False
-        self.ip = ip
-        self.port = port
-        self.timeout = timeout
+        self.ip = self.robot.ip
+        self.port = self.robot.port
+        self.timeout = self.robot.timeout
         self.current_gripper = "gripper_type_a"  # 当前安装的夹爪名称,目前夹爪有问题，先默认是type as
 
         # 运动参数最大值配置

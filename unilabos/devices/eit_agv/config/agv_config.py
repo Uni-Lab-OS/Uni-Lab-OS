@@ -5,9 +5,9 @@ AGV驱动配置文件
 """
 
 # AGV控制器连接配置
-AGV_HOST = "192.168.1.5"
-AGV_PORT = 19204  # 查询命令端口
-AGV_PORT_NAVIGATION = 19206  # 路径导航命令端口
+AGV_HOST = "127.0.0.1"
+AGV_PORT = 6103  # 查询命令端口
+AGV_PORT_NAVIGATION = 6108  # 路径导航命令端口
 AGV_TIMEOUT = 3.0
 
 # 协议常量

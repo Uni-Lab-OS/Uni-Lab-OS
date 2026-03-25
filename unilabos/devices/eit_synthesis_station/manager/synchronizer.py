@@ -192,7 +192,32 @@ class EITSynthesisResourceSynchronizer(ResourceSynchronizer):
                     # --- 情况 A：硬件端该位点有物料 (增加或更新) ---
                     if eit_code:
                         item = hardware_items[eit_code]
-                        res_type = int(item.get("resource_type"))
+                        raw_res_type = item.get("resource_type")
+                        if raw_res_type is None:
+                            # tray_item 缺失导致 resource_type 为 None，尝试保留已有物料或用通用 Container 兜底
+                            tray_display_name = item.get("resource_type_name") or "EIT Tray"
+                            desired_tray_name = f"{tray_display_name}@{eit_code}"
+                            if current_child:
+                                # 已有物料，只更新名称，不破坏已有结构
+                                if current_child.name != desired_tray_name:
+                                    current_child.name = desired_tray_name
+                            else:
+                                # 无已有物料且无法确定类型，用通用 Container 兜底
+                                from pylabrobot.resources import Container as _Container
+                                fallback = _Container(
+                                    name=desired_tray_name,
+                                    size_x=127.8, size_y=85.5, size_z=40.0,
+                                )
+                                fallback.unilabos_uuid = str(uuid.uuid4())
+                                fallback.description = f"type unknown @ {eit_code}"
+                                slot.assign_child_resource(fallback)
+                            logger.debug(f"layout_code={eit_code} 的 resource_type 为 None，保留已有物料或兜底处理")
+                            continue
+                        try:
+                            res_type = int(raw_res_type)
+                        except (ValueError, TypeError):
+                            logger.warning(f"layout_code={eit_code} 的 resource_type={raw_res_type!r} 无法转为 int，跳过")
+                            continue
                         details = item.get("substance_details", [])
                         tray_display_name = item.get("resource_type_name") or "EIT Tray"
                         desired_tray_name = f"{tray_display_name}@{eit_code}"
@@ -418,6 +443,13 @@ class EITSynthesisResourceSynchronizer(ResourceSynchronizer):
             None.
         """
         ros_node = self.workstation._ros_node
+        # 与 ROS2DeviceNode.update_resource 保持一致：根节点若缺少 parent_uuid，
+        # 必须回挂到当前设备 uuid，避免 host 侧以 mount_uuid=None 上传到云端。
+        for tree_nodes in resource_tree_dump:
+            for node in tree_nodes:
+                if not node.get("parent_uuid"):
+                    node["parent_uuid"] = ros_node.uuid
+
         request = SerialCommand.Request()
         # 直接上报扁平化结果, 保持前端所需的资源树结构.
         request.command = json.dumps({"data": {"data": resource_tree_dump}, "action": "update"})
@@ -1069,9 +1101,6 @@ class EITSynthesisWorkstation(WorkstationBase):
             controller = self
         self.resource_synchronizer = EITSynthesisResourceSynchronizer(self, controller=controller)
         self.controller = self.resource_synchronizer.controller
-        # 注册下料完成回调：将 task_id 注入 TB 区 PLR 资源
-        if self.controller:
-            self.controller._post_batch_out_callback = self._stamp_task_id_on_tb_resources
                 # ========= 上料请求去重/锁 =========
         # key: "<tray_code>|<staging_code>" -> {"ts": float, "tray_code": int, "staging_code": str}
         self._batchin_lock = threading.Lock()
@@ -1100,47 +1129,6 @@ class EITSynthesisWorkstation(WorkstationBase):
                 logger.info("异常通知邮件监控已启动")
         except Exception as e:
             logger.warning(f"异常通知监控启动失败, 不影响主流程: {e}")
-
-    def _stamp_task_id_on_tb_resources(self, log_resources: List[Dict[str, Any]]) -> None:
-        """batch_out_tray 完成后，手动 sync 并将 task_id 注入 TB 区 PLR 资源。"""
-        # 1. 手动触发 sync，确保 TB 槽位已被硬件状态填充
-        if self.resource_synchronizer:
-            self.resource_synchronizer.sync_from_external()
-
-        # 2. 构建 dst_layout_code -> task_id 映射
-        task_id_map: Dict[str, Any] = {}
-        for res in log_resources:
-            dst_code = normalize_layout_code(res.get("dst_layout_code"))
-            task_id = res.get("task_id")
-            if dst_code and task_id is not None:
-                task_id_map[dst_code] = task_id
-
-        if not task_id_map:
-            return
-
-        # 3. 在 TB warehouse 的 PLR 资源上注入 task_id
-        tb_wh = next((c for c in self.deck.children if c.name == "TB"), None)
-        if tb_wh is None:
-            logger.warning("找不到 TB 仓库，无法注入 task_id")
-            return
-
-        stamped = False
-        for slot in tb_wh.children:
-            if not isinstance(slot, ResourceHolder):
-                continue
-            slot_name = normalize_layout_code(getattr(slot, "name", None))
-            if slot_name not in task_id_map or not slot.children:
-                continue
-            carrier = slot.children[0]
-            if not hasattr(carrier, "unilabos_extra") or carrier.unilabos_extra is None:
-                carrier.unilabos_extra = {}
-            carrier.unilabos_extra["eit_task_id"] = task_id_map[slot_name]
-            logger.info(f"已为 TB 资源 {carrier.name} 注入 task_id={task_id_map[slot_name]}")
-            stamped = True
-
-        # 4. 增量上报 TB 仓库（含 task_id）
-        if stamped:
-            self.resource_synchronizer._update_resource_flattened([tb_wh])
 
     @property
     def station_status(self) -> Dict[str, Any]:

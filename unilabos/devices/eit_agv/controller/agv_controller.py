@@ -5,9 +5,12 @@
     提供基于配置文件的坐标管理和运动控制
 """
 
+import json
 import logging
 import time
 import threading
+from unilabos.ros.nodes.base_device_node import ROS2DeviceNode
+from unilabos.utils.import_manager import get_class
 from ..driver.arm_driver import ArmDriver
 from ..driver.agv_driver import AGVDriver, AGVDriverConfig
 from ..utils.position_manager import PositionManager
@@ -34,14 +37,14 @@ class AGVController:
         所有动作方法会自动检查并连接机械臂
     """
 
-    def __init__(self, ip=None, port=None, timeout=180000):
+    def __init__(self, ip=None, port=None, timeout=None):
         """
         功能:
             初始化AGV控制器
         参数:
             ip: 机械臂IP地址, 默认使用配置文件中的值
             port: 机械臂端口, 默认使用配置文件中的值
-            timeout: socket超时时间, 单位毫秒, 默认180000ms(180秒)
+            timeout: socket超时时间, 单位毫秒, 默认使用配置文件中的值
         """
         self.arm = ArmDriver(ip, port, timeout)
         self.position_manager = PositionManager()
@@ -2076,9 +2079,16 @@ class AGVController:
             logger.info(f"应用物料偏移到过渡点Z值: transition_z_offset={transition_z_offset}mm")
 
         # 执行取托盘流程(使用过渡点Z偏移量)
-        return self.pick_tray(tray_name, descend_z=None, lift_z=None, transition_z_offset=transition_z_offset, block=block)
+        result = self.pick_tray(tray_name, descend_z=None, lift_z=None, transition_z_offset=transition_z_offset, block=block)
 
-    def put_tray_with_material(self, tray_name, material_type=None, block=True):
+        # 从车载位取走物料 → 清空 Deck 对应槽位
+        if result and tray_name.startswith("agv_tray_"):
+            self._update_agv_deck_slot(tray_name, material_type=None)
+
+        return result
+
+    def put_tray_with_material(self, tray_name, material_type=None, block=True,
+                              *, substance_details=None, tray_display_name=None):
         """
         功能:
             根据物料类型放托盘, 自动调整放置高度
@@ -2086,6 +2096,8 @@ class AGVController:
             tray_name: 托盘位置名称
             material_type: 物料类型名称, 为None时使用默认参数
             block: 是否阻塞执行
+            substance_details: 物料中包含的试剂详情列表（用于 AGV Deck 显示）
+            tray_display_name: 托盘中文显示名称（用于 AGV Deck 显示）
         返回:
             bool, True表示放置成功
         """
@@ -2115,7 +2127,17 @@ class AGVController:
             logger.info(f"应用物料偏移到过渡点Z值: transition_z_offset={transition_z_offset}mm")
 
         # 执行放托盘流程(使用过渡点Z偏移量)
-        return self.put_tray(tray_name, descend_z=None, lift_z=None, transition_z_offset=transition_z_offset, block=block)
+        result = self.put_tray(tray_name, descend_z=None, lift_z=None, transition_z_offset=transition_z_offset, block=block)
+
+        # 物料放到车载位 → 更新 Deck 对应槽位
+        if result and tray_name.startswith("agv_tray_"):
+            self._update_agv_deck_slot(
+                tray_name, material_type=material_type,
+                substance_details=substance_details,
+                tray_display_name=tray_display_name,
+            )
+
+        return result
 
     def transfer_material(self, source_tray, target_tray, material_type=None, block=True):
         """
@@ -2252,7 +2274,11 @@ class AGVController:
                         return False
 
                     logger.info(f"任务{task_idx+1}: 放置到AGV货架{agv_tray}")
-                    success = self.put_tray_with_material(agv_tray, material_type, block)
+                    success = self.put_tray_with_material(
+                        agv_tray, material_type, block,
+                        substance_details=task.get("substance_details"),
+                        tray_display_name=task.get("tray_display_name"),
+                    )
                     if not success:
                         logger.error(f"放置物料到{agv_tray}失败")
                         return False
@@ -2332,6 +2358,211 @@ class AGVController:
         except Exception as e:
             logger.error(f"批量物料转运失败: {e}")
             return False
+
+    def transfer_manifest(
+        self,
+        manifest,
+        *,
+        block=True,
+        auto_run_analysis=True,
+        go_to_charging_station_after=True,
+        batch_size=4,
+    ):
+        """
+        功能:
+            执行标准化转运 manifest。
+            manifest 由上游设备或 UniLab 编排层生成，至少需包含 transfer_tasks 字段。
+        参数:
+            manifest: Dict, 需包含 transfer_tasks 列表。
+            block: 是否阻塞等待。
+            auto_run_analysis: 是否在分析站卸货后自动提交分析任务。
+            go_to_charging_station_after: 任务完成后是否返回充电站。
+            batch_size: 每批最大托盘数，默认 4。
+        返回:
+            Dict, 包含批次结果、分析提交结果与错误信息。
+        """
+        if not isinstance(manifest, dict):
+            return {
+                "success": False,
+                "total_trays": 0,
+                "transferred_trays": 0,
+                "batches": [],
+                "errors": ["manifest 必须为 dict"],
+                "analysis_results": {},
+            }
+
+        transfer_tasks_all = manifest.get("transfer_tasks") or []
+        if not isinstance(transfer_tasks_all, list):
+            return {
+                "success": False,
+                "total_trays": 0,
+                "transferred_trays": 0,
+                "batches": [],
+                "errors": ["manifest.transfer_tasks 必须为 list"],
+                "analysis_results": {},
+            }
+
+        if len(transfer_tasks_all) == 0:
+            logger.warning("manifest 中没有有效的转运任务")
+            return {
+                "success": True,
+                "total_trays": 0,
+                "transferred_trays": 0,
+                "batches": [],
+                "errors": list(manifest.get("errors", [])),
+                "analysis_results": {},
+            }
+
+        if batch_size <= 0:
+            batch_size = 4
+
+        errors = list(manifest.get("errors", []))
+        batches_result = []
+        transferred_count = 0
+        analysis_submitted = False
+        analysis_results = {}
+        analysis_task_ids = {
+            str(task_id).strip()
+            for task_id in (manifest.get("analysis_task_ids") or [])
+            if str(task_id).strip()
+        }
+        analysis_tasks_count = int(manifest.get("analysis_tasks_count", 0) or 0)
+
+        for batch_index in range(0, len(transfer_tasks_all), batch_size):
+            batch_tasks = transfer_tasks_all[batch_index:batch_index + batch_size]
+            batch_num = batch_index // batch_size + 1
+            logger.info(f"开始执行 manifest 第 {batch_num} 批转运, 共 {len(batch_tasks)} 个托盘")
+
+            batch_analysis_local_indices = set()
+            analysis_station_id = None
+            if analysis_task_ids and analysis_tasks_count > 0:
+                batch_end = min(batch_index + batch_size, len(transfer_tasks_all))
+                batch_analysis_local_indices = {
+                    i - batch_index for i in range(batch_index, batch_end)
+                    if i < analysis_tasks_count
+                }
+                if batch_analysis_local_indices:
+                    sample_tray = batch_tasks[min(batch_analysis_local_indices)].get("target_tray")
+                    if sample_tray:
+                        analysis_station_id = self._get_station_from_tray(sample_tray)
+
+            def _on_station_delivered(station_id, task_indices):
+                nonlocal analysis_submitted
+                if station_id != analysis_station_id or analysis_submitted:
+                    return
+
+                analysis_submitted = True
+                logger.info("分析站卸货完成(回调触发), 立即提交分析任务: %s", sorted(analysis_task_ids))
+
+                from unilabos.devices.eit_analysis_station.controller.analysis_controller import (
+                    AnalysisStationController,
+                )
+                analysis_ctrl = AnalysisStationController()
+
+                for tid in sorted(analysis_task_ids):
+                    try:
+                        analysis_results[tid] = analysis_ctrl.run_analysis(task_id=tid)
+                        logger.info("分析任务提交完成, task_id=%s", tid)
+                    except Exception as exc:
+                        error_msg = f"分析任务提交失败, task_id={tid}: {exc}"
+                        logger.error(error_msg)
+                        analysis_results[tid] = {"success": False, "error": error_msg}
+
+            should_attach_callback = (
+                auto_run_analysis
+                and len(analysis_task_ids) > 0
+                and not analysis_submitted
+                and len(batch_analysis_local_indices) > 0
+                and analysis_station_id is not None
+            )
+
+            try:
+                result = self.batch_transfer_materials(
+                    batch_tasks,
+                    block=block,
+                    on_station_delivered=_on_station_delivered if should_attach_callback else None,
+                )
+            except Exception as exc:
+                error_msg = f"第 {batch_num} 批 manifest 转运异常: {exc}"
+                logger.error(error_msg)
+                errors.append(error_msg)
+                batches_result.append(
+                    {
+                        "batch_num": batch_num,
+                        "tasks": batch_tasks,
+                        "success": False,
+                        "error": str(exc),
+                    }
+                )
+                break
+
+            batch_result = {
+                "batch_num": batch_num,
+                "tasks": batch_tasks,
+                "success": result,
+            }
+            batches_result.append(batch_result)
+
+            if result:
+                transferred_count += len(batch_tasks)
+                logger.info(f"第 {batch_num} 批 manifest 转运成功")
+
+                if (
+                    auto_run_analysis
+                    and len(analysis_task_ids) > 0
+                    and not analysis_submitted
+                    and transferred_count >= analysis_tasks_count
+                ):
+                    analysis_submitted = True
+                    logger.warning("分析回调未触发，走兜底路径提交分析任务: %s", sorted(analysis_task_ids))
+                    from unilabos.devices.eit_analysis_station.controller.analysis_controller import (
+                        AnalysisStationController,
+                    )
+                    analysis_ctrl = AnalysisStationController()
+                    for tid in sorted(analysis_task_ids):
+                        try:
+                            analysis_results[tid] = analysis_ctrl.run_analysis(task_id=tid)
+                            logger.info("分析任务提交完成(兜底), task_id=%s", tid)
+                        except Exception as exc:
+                            error_msg = f"分析任务提交失败(兜底), task_id={tid}: {exc}"
+                            logger.error(error_msg)
+                            analysis_results[tid] = {"success": False, "error": error_msg}
+            else:
+                error_msg = f"第 {batch_num} 批 manifest 转运失败"
+                logger.error(error_msg)
+                errors.append(error_msg)
+                break
+
+        success = transferred_count == len(transfer_tasks_all) and len(errors) == 0
+        charging_result = None
+        if success and go_to_charging_station_after:
+            try:
+                charging_result = self.go_to_charging_station(block=block)
+                if charging_result is not None:
+                    logger.info("manifest 转运完成, AGV 已返回充电站")
+                else:
+                    error_msg = "manifest 转运完成, 但 AGV 返回充电站失败"
+                    logger.warning(error_msg)
+                    errors.append(error_msg)
+                    success = False
+            except Exception as exc:
+                error_msg = f"manifest 转运后返回充电站异常: {exc}"
+                logger.error(error_msg)
+                errors.append(error_msg)
+                success = False
+
+        # pick/put 已实时更新 Deck，无需额外同步
+
+        return {
+            "success": success,
+            "manifest_type": manifest.get("manifest_type", "generic_transfer"),
+            "total_trays": len(transfer_tasks_all),
+            "transferred_trays": transferred_count,
+            "batches": batches_result,
+            "errors": errors,
+            "analysis_results": analysis_results,
+            "charging_result": charging_result,
+        }
 
     def batch_transfer_cycle_test(self, transfer_tasks, cycle_count=1, block=True):
         """
@@ -4826,6 +5057,561 @@ def main():
             print("无效的选项, 请重新输入")
 
     print("\n程序已退出")
+
+
+class UniLabAGVController(AGVController):
+    """
+    UniLabOS 注册表适配层。
+
+    说明：
+    - 兼容设备图中传入的 arm_ip/arm_port/arm_timeout/deck/protocol_type 配置。
+    - 对外保留 send_nav_task/status 接口，便于复用现有 registry schema。
+    """
+
+    def __init__(
+        self,
+        arm_ip=None,
+        arm_port=None,
+        arm_timeout=None,
+        deck=None,
+        protocol_type=None,
+        **kwargs,
+    ):
+        super().__init__(ip=arm_ip, port=arm_port, timeout=arm_timeout)
+        self.deck = deck
+        self.protocol_type = protocol_type or []
+        self._extra_config = kwargs
+
+    # ---------- agv_tray_N → WareHouse ResourceHolder 名称映射 ----------
+    # agv_tray_1 → AGV-1, agv_tray_2 → AGV-2 ...（与 eit_warehouse_AGV 的 name_by_layout_code 命名一致）
+    _TRAY_NAME_TO_SLOT_NAME = {
+        f"agv_tray_{i}": f"AGV-{i}" for i in range(1, 5)
+    }
+
+    def post_init(self, ros_node) -> None:
+        """节点初始化完成后，构建 AGV Deck 实例并首次上报。"""
+        self._ros_node = ros_node
+        try:
+            deck = self.deck
+            if isinstance(deck, dict):
+                deck_ref = deck.get("data", deck)
+                child_name = deck_ref.get("_resource_child_name")
+                if child_name:
+                    try:
+                        deck = ros_node.resource_tracker.figure_resource({"name": child_name})
+                    except Exception:
+                        deck = None
+                if deck is None and isinstance(deck_ref, dict) and deck_ref.get("_resource_type"):
+                    deck_cls = get_class(deck_ref["_resource_type"])
+                    deck = deck_cls(name=child_name or "EIT_AGV_Deck", setup=True)
+                self.deck = deck
+            if deck is None or isinstance(deck, dict):
+                return
+        except Exception as exc:
+            logger.error(f"AGV Deck 构建失败: {exc}")
+            return
+
+        # 首次上报 Deck（扁平化，空 ResourceHolder 不显示）
+        # 物料状态由 pick/put 操作实时追踪更新，不需要定时同步 shelf
+        try:
+            self._upload_agv_deck_flattened()
+            logger.info("AGV 车载 Deck 首次上报完成（扁平化，空槽位不显示）")
+        except Exception as exc:
+            logger.error(f"AGV Deck 首次上报失败: {exc}")
+
+    # ---------- AGV 车载 Deck 物料运行时追踪 ----------
+    # 物料类型名称 → 载架工厂函数（与手套箱 TB 区同源）
+    _AGV_CARRIER_FACTORY = None
+
+    @classmethod
+    def _get_carrier_factory(cls):
+        """延迟加载 CARRIER_FACTORY，返回 {枚举名字符串: factory_func} 映射。"""
+        if cls._AGV_CARRIER_FACTORY is not None:
+            return cls._AGV_CARRIER_FACTORY
+        try:
+            from unilabos.resources.eit_synthesis_station import bottle_carriers
+            cls._AGV_CARRIER_FACTORY = {
+                "REAGENT_BOTTLE_TRAY_2ML":        bottle_carriers.EIT_REAGENT_BOTTLE_TRAY_2ML,
+                "REAGENT_BOTTLE_TRAY_8ML":        bottle_carriers.EIT_REAGENT_BOTTLE_TRAY_8ML,
+                "REAGENT_BOTTLE_TRAY_40ML":       bottle_carriers.EIT_REAGENT_BOTTLE_TRAY_40ML,
+                "REAGENT_BOTTLE_TRAY_125ML":      bottle_carriers.EIT_REAGENT_BOTTLE_TRAY_125ML,
+                "POWDER_BUCKET_TRAY_30ML":        bottle_carriers.EIT_POWDER_BUCKET_TRAY_30ML,
+                "TIP_TRAY_1ML":                   bottle_carriers.EIT_TIP_TRAY_1ML,
+                "TIP_TRAY_5ML":                   bottle_carriers.EIT_TIP_TRAY_5ML,
+                "TIP_TRAY_50UL":                  bottle_carriers.EIT_TIP_TRAY_50UL,
+                "REACTION_TUBE_TRAY_2ML":         bottle_carriers.EIT_REACTION_TUBE_TRAY_2ML,
+                "TEST_TUBE_MAGNET_TRAY_2ML":      bottle_carriers.EIT_TEST_TUBE_MAGNET_TRAY_2ML,
+                "REACTION_SEAL_CAP_TRAY":         bottle_carriers.EIT_REACTION_SEAL_CAP_TRAY,
+                "FLASH_FILTER_INNER_BOTTLE_TRAY": bottle_carriers.EIT_FLASH_FILTER_INNER_BOTTLE_TRAY,
+                "FLASH_FILTER_OUTER_BOTTLE_TRAY": bottle_carriers.EIT_FLASH_FILTER_OUTER_BOTTLE_TRAY,
+            }
+        except Exception as exc:
+            logger.warning(f"加载 CARRIER_FACTORY 失败，将退化为 Container: {exc}")
+            cls._AGV_CARRIER_FACTORY = {}
+        return cls._AGV_CARRIER_FACTORY
+
+    def _upload_agv_deck_flattened(self) -> None:
+        """
+        使用与 Synthesis Station 相同的资源树扁平化逻辑上报 AGV Deck。
+
+        扁平化效果：
+        - 有 Carrier 子节点的 ResourceHolder → Carrier 直接挂到 WareHouse 下（前端可见）
+        - 无 Carrier 子节点的 ResourceHolder → 被移除（前端不显示，与 TB 区一致）
+        """
+        deck = getattr(self, "deck", None)
+        if deck is None or isinstance(deck, dict):
+            return
+        if not hasattr(self, "_ros_node"):
+            return
+
+        try:
+            if hasattr(deck, "_recursive_assign_uuid"):
+                deck._recursive_assign_uuid(deck)
+
+            from unilabos.resources import resource_tracker
+            import json
+
+            tree_set = resource_tracker.ResourceTreeSet.from_plr_resources([deck])
+            tree_dump = tree_set.dump()
+
+            # ---- 扁平化：移除空的 resource_holder 节点 ----
+            # 与 EITSynthesisResourceSynchronizer._update_resource_flattened 同源逻辑
+            flattened_trees = []
+            for tree_nodes in tree_dump:
+                nodes_by_uuid = {node.get("uuid"): node for node in tree_nodes if node.get("uuid")}
+                children_map = {}
+                for node in tree_nodes:
+                    node_uuid = node.get("uuid")
+                    if not node_uuid:
+                        continue
+                    parent_uuid = node.get("parent_uuid")
+                    children_map.setdefault(parent_uuid, []).append(node_uuid)
+
+                for node_uuid, node in list(nodes_by_uuid.items()):
+                    if node.get("type") != "resource_holder":
+                        continue
+                    parent_uuid = node.get("parent_uuid")
+                    parent = nodes_by_uuid.get(parent_uuid)
+                    if not parent or parent.get("type") not in {"warehouse", "bottle_carrier"}:
+                        continue
+                    # 将此 ResourceHolder 的子节点重新挂到其父节点下
+                    slot_label = node.get("name") or node.get("id")
+                    for child_uuid in children_map.get(node_uuid, []):
+                        child = nodes_by_uuid.get(child_uuid)
+                        if not child:
+                            continue
+                        child["parent_uuid"] = parent_uuid
+                        # 坐标叠加
+                        child_pose = child.get("pose", {})
+                        offset_pose = node.get("pose", {})
+                        for key in ("position", "position3d"):
+                            child_pos = child_pose.get(key)
+                            offset_pos = offset_pose.get(key)
+                            if not isinstance(child_pos, dict) or not isinstance(offset_pos, dict):
+                                continue
+                            child_pos["x"] = float(child_pos.get("x", 0.0)) + float(offset_pos.get("x", 0.0))
+                            child_pos["y"] = float(child_pos.get("y", 0.0)) + float(offset_pos.get("y", 0.0))
+                            child_pos["z"] = float(child_pos.get("z", 0.0)) + float(offset_pos.get("z", 0.0))
+                        children_map.setdefault(parent_uuid, []).append(child_uuid)
+
+                    # 更新父节点 sites 中的 occupied_by
+                    parent_node = nodes_by_uuid.get(parent_uuid) if parent_uuid else None
+                    reparented_children = [nodes_by_uuid.get(c) for c in children_map.get(node_uuid, []) if nodes_by_uuid.get(c)]
+                    if parent_node and slot_label:
+                        child_name = reparented_children[0].get("name") if reparented_children else None
+                        config = parent_node.get("config")
+                        if isinstance(config, dict):
+                            sites = config.get("sites")
+                            if isinstance(sites, list):
+                                for site in sites:
+                                    if site.get("label") == slot_label:
+                                        site["occupied_by"] = child_name
+                                        break
+
+                    # 从父节点的子列表中移除此 ResourceHolder
+                    if parent_uuid in children_map:
+                        children_map[parent_uuid] = [c for c in children_map[parent_uuid] if c != node_uuid]
+                    # 移除此 ResourceHolder 节点
+                    nodes_by_uuid.pop(node_uuid, None)
+
+                flattened_trees.append(list(nodes_by_uuid.values()))
+
+            # 根节点挂到设备 uuid
+            for tree_nodes in flattened_trees:
+                for node in tree_nodes:
+                    if not node.get("parent_uuid"):
+                        node["parent_uuid"] = self._ros_node.uuid
+
+            from unilabos.ros.nodes.base_device_node import SerialCommand
+            request = SerialCommand.Request()
+            request.command = json.dumps({"data": {"data": flattened_trees}, "action": "update"})
+
+            async def _do_upload():
+                response = await self._ros_node._resource_clients["c2s_update_resource_tree"].call_async(request)
+                try:
+                    uuid_maps = json.loads(response.response)
+                    self._ros_node.resource_tracker.loop_update_uuid([deck], uuid_maps)
+                except Exception as exc:
+                    logger.error(f"AGV Deck 更新 uuid 失败: {exc}")
+
+            ROS2DeviceNode.run_async_func(_do_upload, True)
+        except Exception as exc:
+            logger.error(f"AGV Deck 扁平化上报失败: {exc}")
+            import traceback
+            logger.debug(traceback.format_exc())
+
+    def _ensure_agv_warehouse_slot_holders(self, agv_wh) -> None:
+        """
+        确保 AGV WareHouse 内部存在 ResourceHolder 槽位对象。
+
+        背景：
+        - 某些从序列化数据恢复的 WareHouse 只有 sites/child_locations 元数据
+        - 此时 agv_wh.children 可能为空，导致运行时同步找不到 AGV-1~AGV-4
+        """
+        from pylabrobot.resources import ResourceHolder
+        import uuid as uuid_mod
+
+        child_locations = getattr(agv_wh, "child_locations", None)
+        if not isinstance(child_locations, dict) or not child_locations:
+            return
+
+        child_size = getattr(agv_wh, "child_size", {}) or {}
+        sites = getattr(agv_wh, "sites", None)
+        if not isinstance(sites, list):
+            return
+
+        for idx, slot_name in enumerate(child_locations.keys()):
+            existing = sites[idx] if idx < len(sites) else None
+            if isinstance(existing, ResourceHolder):
+                continue
+            if existing is not None:
+                continue
+
+            size = child_size.get(slot_name, {})
+            slot_holder = ResourceHolder(
+                name=slot_name,
+                size_x=float(size.get("width", 127.8)),
+                size_y=float(size.get("height", 85.5)),
+                size_z=float(size.get("depth", 40.0)),
+            )
+            slot_holder.unilabos_uuid = str(uuid_mod.uuid4())
+            agv_wh.assign_child_resource(slot_holder, location=child_locations[slot_name], spot=idx)
+
+    def _get_agv_target_slot(self, agv_wh, slot_name: str):
+        """兼容 setup() 新建与反序列化恢复两种场景，返回目标 ResourceHolder。"""
+        from pylabrobot.resources import ResourceHolder
+
+        for slot in getattr(agv_wh, "children", []):
+            if isinstance(slot, ResourceHolder) and getattr(slot, "name", "") == slot_name:
+                return slot
+
+        self._ensure_agv_warehouse_slot_holders(agv_wh)
+
+        for slot in getattr(agv_wh, "children", []):
+            if isinstance(slot, ResourceHolder) and getattr(slot, "name", "") == slot_name:
+                return slot
+
+        sites = getattr(agv_wh, "sites", None)
+        child_locations = getattr(agv_wh, "child_locations", None)
+        if isinstance(sites, list) and isinstance(child_locations, dict):
+            for idx, candidate_name in enumerate(child_locations.keys()):
+                if candidate_name != slot_name or idx >= len(sites):
+                    continue
+                slot = sites[idx]
+                if isinstance(slot, ResourceHolder):
+                    return slot
+
+        return None
+
+    def _update_agv_deck_slot(
+        self,
+        tray_name: str,
+        material_type: str = None,
+        *,
+        substance_details: list[dict[str, str]] = None,
+        tray_display_name: str = None,
+        upload: bool = True,
+    ) -> None:
+        """
+        更新 AGV Deck 上指定槽位的物料状态并上报前端。
+
+        设计：
+        - tray_name: "agv_tray_1" ~ "agv_tray_4"
+        - material_type: 物料类型名称（如 "FLASH_FILTER_OUTER_BOTTLE_TRAY"），为 None 表示清空
+        - substance_details: 物料中包含的试剂详情列表，每条含 well/substance/amount 字段
+        - tray_display_name: 托盘中文显示名称（如 "30 mL粉桶托盘"），用于前端显示
+        - 通过 _TRAY_NAME_TO_SLOT_NAME 映射到 WareHouse 内的 ResourceHolder 名
+        - 上报使用扁平化逻辑（与 Synthesis Station 一致，空 ResourceHolder 不显示）
+        """
+        try:
+            deck = getattr(self, "deck", None)
+            if deck is None or isinstance(deck, dict):
+                return
+
+            from pylabrobot.resources import ResourceHolder, Container
+            import uuid as uuid_mod
+
+            # 映射 agv_tray_N → AGV-N
+            slot_name = self._TRAY_NAME_TO_SLOT_NAME.get(tray_name)
+            if not slot_name:
+                logger.warning(f"未知的 AGV tray 名称: {tray_name}（仅支持 agv_tray_1~4）")
+                return
+
+            # 在 WareHouse("AGV") 下查找对应 ResourceHolder
+            agv_wh = deck.warehouses.get("AGV") if hasattr(deck, "warehouses") else None
+            if agv_wh is None:
+                # fallback: 在 children 中查找
+                for child in deck.children:
+                    if getattr(child, "name", "") == "AGV":
+                        agv_wh = child
+                        break
+            if agv_wh is None:
+                logger.warning("AGV Deck 中未找到 WareHouse('AGV')")
+                return
+
+            target_slot = self._get_agv_target_slot(agv_wh, slot_name)
+            if target_slot is None:
+                available_slots = list(getattr(agv_wh, "child_locations", {}).keys())
+                logger.warning(f"AGV WareHouse 未找到槽位: {slot_name}，可用槽位: {available_slots}")
+                return
+
+            current_child = target_slot.children[0] if target_slot.children else None
+
+            if material_type is not None:
+                # 放置物料
+                # 优先使用中文显示名称，与工站前端一致（如 "30 mL粉桶托盘@AGV-1"）
+                display_name = tray_display_name or material_type
+                desired_name = f"{display_name}@{slot_name}"
+
+                # 如果已有同类型物料，跳过
+                if current_child is not None:
+                    existing_type = getattr(current_child, "_agv_material_type", None)
+                    if existing_type == material_type:
+                        return
+                    # 类型变了，先卸载
+                    target_slot.unassign_child_resource(current_child)
+
+                # 创建新物料（使用与手套箱 TB 区同源的载架工厂）
+                carrier_factory = self._get_carrier_factory()
+                factory_func = carrier_factory.get(material_type)
+                if factory_func:
+                    try:
+                        new_carrier = factory_func(name=desired_name, prefill_items=False)
+                    except TypeError:
+                        new_carrier = factory_func(name=desired_name)
+                else:
+                    new_carrier = Container(
+                        name=desired_name,
+                        size_x=127.8, size_y=85.5, size_z=20.0,
+                    )
+                new_carrier.unilabos_uuid = str(uuid_mod.uuid4())
+                new_carrier.description = material_type
+                new_carrier._agv_material_type = material_type
+
+                # 填充子物料（试剂信息），使前端显示与工站一致
+                if substance_details:
+                    self._fill_carrier_substance_items(
+                        new_carrier, substance_details, material_type,
+                    )
+
+                target_slot.assign_child_resource(new_carrier)
+                logger.info(
+                    f"AGV Deck 槽位 {slot_name} 放置物料: {display_name}"
+                    f" (试剂数: {len(substance_details) if substance_details else 0})"
+                )
+            else:
+                # 清空物料
+                if current_child is not None:
+                    target_slot.unassign_child_resource(current_child)
+                    logger.info(f"AGV Deck 槽位 {slot_name} 物料已移除")
+                else:
+                    return  # 本来就是空的，不需要上报
+
+            # 扁平化上报
+            if upload and hasattr(self, "_ros_node"):
+                self._upload_agv_deck_flattened()
+
+        except Exception as exc:
+            logger.error(f"AGV Deck 槽位 {tray_name} 更新失败: {exc}")
+            import traceback
+            logger.debug(traceback.format_exc())
+
+    def _fill_carrier_substance_items(
+        self,
+        carrier,
+        substance_details: list[dict[str, str]],
+        material_type: str,
+    ) -> None:
+        """
+        功能:
+            在载架(Carrier)中填充子物料(试剂瓶/粉桶等)，使前端 Deck 显示：
+                ▼ 30 mL粉桶托盘@AGV-1
+                    无水碳酸钾@A1
+                    碳酸铯@B1
+        参数:
+            carrier: pylabrobot 载架资源对象。
+            substance_details: 试剂详情列表, 每条含 well/substance/amount。
+            material_type: 物料类型名称。
+        """
+        import uuid as uuid_mod
+
+        if not substance_details:
+            return
+
+        try:
+            from pylabrobot.resources import Container
+
+            # 获取载架的 sites（ResourceHolder 子节点）列表
+            sites = getattr(carrier, "children", [])
+            sites_by_name = {}
+            for site in sites:
+                site_name = getattr(site, "name", "")
+                if site_name:
+                    sites_by_name[site_name] = site
+
+            # 尝试解析 well → site 索引的映射
+            tray_spec = self._get_tray_spec_for_material(material_type)
+
+            for detail in substance_details:
+                well = detail.get("well", "")
+                substance = detail.get("substance", "")
+                amount = detail.get("amount", "")
+
+                if not substance or not well:
+                    continue
+
+                # 构建子物料显示名称，如 "无水碳酸钾@A1"
+                item_name = f"{substance}@{well}"
+                if amount:
+                    item_desc = f"{substance} {amount}"
+                else:
+                    item_desc = substance
+
+                # 尝试找到对应 site 并放置
+                slot_index = self._well_to_slot_index_simple(well, tray_spec)
+                placed = False
+
+                if slot_index is not None and slot_index < len(sites):
+                    site = sites[slot_index]
+                    if not site.children:
+                        try:
+                            item = Container(
+                                name=item_name,
+                                size_x=10.0, size_y=10.0, size_z=10.0,
+                            )
+                            item.unilabos_uuid = str(uuid_mod.uuid4())
+                            item.description = item_desc
+                            site.assign_child_resource(item)
+                            placed = True
+                        except Exception as place_exc:
+                            logger.debug(f"放置子物料 {item_name} 到 site[{slot_index}] 失败: {place_exc}")
+
+                if not placed:
+                    logger.debug(f"子物料 {item_name} 无法定位到载架 site，跳过（不影响转运）")
+
+        except Exception as exc:
+            logger.warning(f"填充载架子物料失败（不影响转运）: {exc}")
+
+    @staticmethod
+    def _get_tray_spec_for_material(material_type: str):
+        """根据 material_type 名称返回 (col, row) 规格, 用于 well 到 slot 索引转换。"""
+        try:
+            from unilabos.devices.eit_synthesis_station.config.constants import TraySpec
+            spec_map = {
+                "REAGENT_BOTTLE_TRAY_2ML": TraySpec.REAGENT_BOTTLE_TRAY_2ML,
+                "REAGENT_BOTTLE_TRAY_8ML": TraySpec.REAGENT_BOTTLE_TRAY_8ML,
+                "REAGENT_BOTTLE_TRAY_40ML": TraySpec.REAGENT_BOTTLE_TRAY_40ML,
+                "REAGENT_BOTTLE_TRAY_125ML": TraySpec.REAGENT_BOTTLE_TRAY_125ML,
+                "POWDER_BUCKET_TRAY_30ML": TraySpec.POWDER_BUCKET_TRAY_30ML,
+                "REACTION_TUBE_TRAY_2ML": TraySpec.REACTION_TUBE_TRAY_2ML,
+                "TEST_TUBE_MAGNET_TRAY_2ML": TraySpec.TEST_TUBE_MAGNET_TRAY_2ML,
+                "FLASH_FILTER_INNER_BOTTLE_TRAY": TraySpec.FLASH_FILTER_INNER_BOTTLE_TRAY,
+                "FLASH_FILTER_OUTER_BOTTLE_TRAY": TraySpec.FLASH_FILTER_OUTER_BOTTLE_TRAY,
+                "TIP_TRAY_50UL": TraySpec.TIP_TRAY_50UL,
+                "TIP_TRAY_1ML": TraySpec.TIP_TRAY_1ML,
+                "TIP_TRAY_5ML": TraySpec.TIP_TRAY_5ML,
+            }
+            return spec_map.get(material_type)
+        except Exception:
+            return None
+
+    @staticmethod
+    def _well_to_slot_index_simple(well: str, tray_spec) -> int:
+        """
+        简易 well 到 slot_index 转换: A1→0, A2→1, B1→col_count, ...
+        与 SynthesisStationController._well_to_slot_index 同源逻辑。
+        """
+        if not well or tray_spec is None:
+            return None
+        well = str(well).strip().upper()
+        if not well:
+            return None
+        row_char = well[0]
+        col_str = well[1:]
+        if not row_char.isalpha() or not col_str.isdigit():
+            return None
+        row = ord(row_char) - ord("A")
+        col = int(col_str) - 1
+        col_count = tray_spec[0]
+        return row * col_count + col
+
+    @property
+    def status(self) -> str:
+        nav_status = self.query_nav_task_status()
+        if not nav_status:
+            return "UNKNOWN"
+        return str(nav_status.get("task_status_name", "UNKNOWN"))
+
+    def get_current_station(self) -> str:
+        station_info = self.query_current_station()
+        if not station_info:
+            return ""
+        return str(station_info.get("station_id", ""))
+
+    def send_nav_task(self, command: str):
+        """
+        兼容旧 AGV registry 的导航接口。
+
+        支持两种输入：
+        - 直接传站点 ID，例如 "CP6"
+        - 传 JSON 字符串，例如 {"target":"CP6"}
+        """
+        target = str(command).strip()
+        if target.startswith("{"):
+            try:
+                payload = json.loads(target)
+                target = str(payload.get("target", "")).strip()
+            except Exception as ex:
+                return {
+                    "success": False,
+                    "return_info": json.dumps(
+                        {"suc": False, "msg": f"导航参数解析失败: {ex}"},
+                        ensure_ascii=False,
+                    ),
+                }
+
+        if not target:
+            return {
+                "success": False,
+                "return_info": json.dumps(
+                    {"suc": False, "msg": "目标站点不能为空"},
+                    ensure_ascii=False,
+                ),
+            }
+
+        result = self.navigate_to_station(target)
+        success = bool(result)
+        return {
+            "success": success,
+            "return_info": json.dumps(
+                {
+                    "suc": success,
+                    "target": target,
+                    "result": result or {},
+                },
+                ensure_ascii=False,
+            ),
+        }
 
 
 if __name__ == "__main__":

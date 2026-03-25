@@ -16,24 +16,26 @@ from thrift.protocol import TBinaryProtocol
 from .gen_py.robot import RPCRobot
 from .gen_py.robot.ttypes import StateRobot, StateProgram, OperationMode, TaskState, Op, RealTimeControlData, PointOp, MoveJogTaskParam, TrajTimeParam
 from .gen_py.robot.ttypes import RobotStatus, IOStatus, EAxisParam, ReachabilityParam, EAxissInfo, PathOffsetResult
+from ...config.arm_config import ARM_HOST, ARM_PORT, ARM_TIMEOUT
 
 class DucoCobot:
-    def __init__(self, ip=None, port=None, timeout=60000):
+    def __init__(self, ip=None, port=None, timeout=None):
         """
         功能:
             初始化机械臂连接
         参数:
             ip: 机械臂IP地址, 默认使用配置文件中的ARM_HOST
             port: 机械臂端口, 默认使用配置文件中的ARM_PORT
-            timeout: socket超时时间, 单位毫秒, 默认60000ms(60秒)
+            timeout: socket超时时间, 单位毫秒, 默认使用配置文件中的ARM_TIMEOUT
         """
-        # 如果未指定参数, 使用配置文件中的默认值
-        self.ip = "192.168.1.10"
-        self.port = 7003
+        # 兼容设备图中的占位空值("", 0), 自动回退到配置文件默认值
+        self.ip = ARM_HOST if ip in (None, "") else ip
+        self.port = ARM_PORT if port in (None, 0) else port
+        self.timeout = ARM_TIMEOUT if timeout in (None, 0) else timeout
 
         self.transport = TSocket.TSocket(self.ip, self.port)
         # 设置socket超时时间, 避免长时间运动时连接断开
-        self.transport.setTimeout(timeout)
+        self.transport.setTimeout(int(self.timeout))
         self.protocol = TBinaryProtocol.TBinaryProtocol(self.transport)
         self.client = RPCRobot.Client(self.protocol)
 

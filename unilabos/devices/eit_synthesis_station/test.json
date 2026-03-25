@@ -30,8 +30,8 @@
             "type": "device",
             "class": "eit_agv",
             "position": {
-                "x": 420,
-                "y": 520,
+                "x": 0,
+                "y": 0,
                 "z": 0
             },
             "config": {
@@ -56,8 +56,8 @@
             "type": "deck",
             "class": "",
             "position": {
-                "x": 100,
-                "y": 100,
+                "x": 2000,
+                "y": 2000,
                 "z": 0
             },
             "config": {
@@ -81,8 +81,8 @@
             "type": "deck",
             "class": "",
             "position": {
-                "x": 520,
-                "y": 620,
+                "x": 200,
+                "y": -600,
                 "z": 0
             },
             "config": {
