@@ -1576,14 +1576,19 @@ class BaseROS2DeviceNode(Node, Generic[T]):
                 decision = await self._handle_device_exception(wrapped, action_name, task_id, job_id)
 
             action = decision.get("action", "abort")
+            self.get_logger().info(f"[DEBUG] 用户决策 action={action}, reason={decision.get('reason', '')}")
 
             if action == "retry":
+                self.get_logger().info(f"[DEBUG] 执行 retry，重新执行动作")
                 continue
             if action == "skip":
+                self.get_logger().info(f"[DEBUG] 执行 skip，跳过动作")
                 return {"status": "skipped", "reason": decision.get("reason", "user_skip")}
             if action == "manual_fix":
+                self.get_logger().info(f"[DEBUG] 执行 manual_fix，重新执行动作")
                 continue
             if action == "abort":
+                self.get_logger().info(f"[DEBUG] 执行 abort，终止任务")
                 raise exc
 
             # 自定义 action: 找 handler
@@ -1649,8 +1654,11 @@ class BaseROS2DeviceNode(Node, Generic[T]):
         ws_client = self._get_ws_client()
         ws_client.publish_device_exception_alarm(alarm_data)
 
+        self.get_logger().info(f"[DEBUG] 开始等待用户决策: task_id={task_id}")
         try:
-            return await self._wait_for_user_decision(task_id, exc)
+            decision = await self._wait_for_user_decision(task_id, exc)
+            self.get_logger().info(f"[DEBUG] _handle_device_exception 收到决策: {decision}")
+            return decision
         except asyncio.TimeoutError:
             self.get_logger().warning(
                 f"[DeviceException] 用户决策超时,默认 abort: {action_name}"
@@ -1664,18 +1672,27 @@ class BaseROS2DeviceNode(Node, Generic[T]):
         key = f"{task_id}:{exc.message[:32]}"
         self._pending_decisions[key] = fut
         try:
-            return await asyncio.wait_for(fut, timeout=self._user_decision_timeout)
+            result = await asyncio.wait_for(fut, timeout=self._user_decision_timeout)
+            self.get_logger().info(f"[DEBUG] _wait_for_user_decision 返回: {result}")
+            return result
         finally:
             self._pending_decisions.pop(key, None)
 
     def handle_user_decision(self, task_id: str, decision: dict):
         """由 ws_client 在收到 device_exception_decision 时调用"""
+        self.get_logger().info(f"[DEBUG] 收到用户决策: task_id={task_id}, decision={decision}")
         for key in list(self._pending_decisions.keys()):
             if key.startswith(f"{task_id}:"):
                 fut = self._pending_decisions[key]
                 if not fut.done():
-                    fut.set_result(decision)
+                    self.get_logger().info(f"[DEBUG] 设置 Future 结果: key={key}")
+                    # 使用 call_soon_threadsafe 确保跨线程安全地设置结果
+                    fut.get_loop().call_soon_threadsafe(fut.set_result, decision)
+                else:
+                    self.get_logger().warning(f"[DEBUG] Future 已完成: key={key}")
                 break
+        else:
+            self.get_logger().warning(f"[DEBUG] 未找到匹配的 pending_decision, task_id={task_id}, 当前 keys={list(self._pending_decisions.keys())}")
 
     def _get_ws_client(self):
         """获取通信客户端(单例),节点无法直接持有 ws_client 时通过工厂取得"""

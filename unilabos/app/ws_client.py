@@ -1113,6 +1113,7 @@ class MessageProcessor:
             "reason": data.get("reason", ""),
             "extra": data.get("extra", {}),
         }
+        logger.info(f"[DEBUG] 收到异常决策消息: task_id={task_id}, device_id={device_id}, action={decision['action']}")
         host_node = HostNode.get_instance(0)
         if host_node is None:
             logger.warning(f"[MessageProcessor] HostNode 未就绪,丢弃决策 task_id={task_id}")
@@ -1125,6 +1126,7 @@ class MessageProcessor:
         if not hasattr(base_node, "handle_user_decision"):
             logger.warning(f"[MessageProcessor] 设备 {device_id} 节点不支持异常决策")
             return
+        logger.info(f"[DEBUG] 调用设备节点的 handle_user_decision")
         base_node.handle_user_decision(task_id, decision)
 
     async def _send_action_state_response(
