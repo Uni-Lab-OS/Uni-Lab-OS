@@ -1,0 +1,97 @@
+{
+  "nodes": [
+    {
+      "id": "host_node",
+      "uuid": "3595839c-8645-43b4-9c65-8ae920dedf94",
+      "name": "host_node",
+      "description": "",
+      "schema": {},
+      "model": {},
+      "icon": "",
+      "parent_uuid": "",
+      "type": "device",
+      "class": "host_node",
+      "pose": {
+        "size": {
+          "depth": 0.0,
+          "width": 0.0,
+          "height": 0.0
+        },
+        "scale": {
+          "x": 0.0,
+          "y": 0.0,
+          "z": 0.0
+        },
+        "layout": "x-y",
+        "position": {
+          "x": 0.0,
+          "y": 0.0,
+          "z": 0.0
+        },
+        "position3d": {
+          "x": 0.0,
+          "y": 0.0,
+          "z": 0.0
+        },
+        "rotation": {
+          "x": 0.0,
+          "y": 0.0,
+          "z": 0.0
+        },
+        "cross_section_type": "rectangle",
+        "extra": null
+      },
+      "config": {},
+      "data": {},
+      "extra": {},
+      "machine_name": ""
+    },
+    {
+      "id": "fault_injection_device",
+      "uuid": "bf68a169-bfff-4f37-9b92-e09dd0cb46f4",
+      "name": "fault_injection_device",
+      "description": "",
+      "schema": {},
+      "model": {},
+      "icon": "",
+      "parent_uuid": null,
+      "type": "device",
+      "class": "fault_injection_device",
+      "pose": {
+        "size": {
+          "depth": 0.0,
+          "width": 0.0,
+          "height": 0.0
+        },
+        "scale": {
+          "x": 0.0,
+          "y": 0.0,
+          "z": 0.0
+        },
+        "layout": "x-y",
+        "position": {
+          "x": 0.0,
+          "y": 0.0,
+          "z": 0.0
+        },
+        "position3d": {
+          "x": 0.0,
+          "y": 0.0,
+          "z": 0.0
+        },
+        "rotation": {
+          "x": 0.0,
+          "y": 0.0,
+          "z": 0.0
+        },
+        "cross_section_type": "rectangle",
+        "extra": null
+      },
+      "config": {},
+      "data": {},
+      "extra": {},
+      "machine_name": "bogon"
+    }
+  ],
+  "mount_uuid": ""
+}

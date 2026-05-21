@@ -835,6 +835,14 @@ class HostNode(BaseROS2DeviceNode):
         action_client: ActionClient = self._action_clients[action_id]
         goal_msg = convert_to_ros_msg(action_client._action_type.Goal(), action_kwargs)
 
+        # 把当前 job 上下文写到目标 device_node,异常处理时 alarm 才能携带 task_id/job_id
+        target_wrapper = self.devices_instances.get(device_id)
+        if target_wrapper is not None and getattr(target_wrapper, "_ros_node", None) is not None:
+            target_wrapper._ros_node._current_job_context = {
+                "task_id": item.task_id,
+                "job_id": item.job_id,
+            }
+
         # self.lab_logger().trace(f"[Host Node] Sending goal for {action_id}: {str(goal_msg)[:1000]}")
         self.lab_logger().trace(f"[Host Node] Sending goal for {action_id}: {action_kwargs}")
         self.lab_logger().trace(f"[Host Node] Sending goal for {action_id}: {goal_msg}")

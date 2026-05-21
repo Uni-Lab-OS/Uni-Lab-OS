@@ -665,6 +665,10 @@ class MessageProcessor:
                 await self._handle_device_manage(message_data, "remove")
             elif message_type == "request_restart":
                 await self._handle_request_restart(message_data)
+            elif message_type == "device_exception_decision":
+                await self._on_device_exception_decision(message_data)
+            elif message_type == "host_node_ready_response":
+                await self._handle_host_ready_response(message_data)
             else:
                 logger.debug(f"[MessageProcessor] Unknown message type: {message_type}")
 
@@ -1100,6 +1104,29 @@ class MessageProcessor:
         cleanup_thread.start()
         logger.info(f"[MessageProcessor] Restart cleanup scheduled")
 
+    async def _on_device_exception_decision(self, data: Dict[str, Any]):
+        """处理后端转发的用户决策,路由到对应 device_node.handle_user_decision"""
+        task_id = data.get("task_id", "")
+        device_id = data.get("device_id", "")
+        decision = {
+            "action": data.get("action", "abort"),
+            "reason": data.get("reason", ""),
+            "extra": data.get("extra", {}),
+        }
+        host_node = HostNode.get_instance(0)
+        if host_node is None:
+            logger.warning(f"[MessageProcessor] HostNode 未就绪,丢弃决策 task_id={task_id}")
+            return
+        wrapper = host_node.devices_instances.get(device_id)
+        if wrapper is None:
+            logger.warning(f"[MessageProcessor] 设备 {device_id} 未找到,丢弃决策 task_id={task_id}")
+            return
+        base_node = getattr(wrapper, "_ros_node", None) or wrapper
+        if not hasattr(base_node, "handle_user_decision"):
+            logger.warning(f"[MessageProcessor] 设备 {device_id} 节点不支持异常决策")
+            return
+        base_node.handle_user_decision(task_id, decision)
+
     async def _send_action_state_response(
         self, device_id: str, action_name: str, task_id: str, job_id: str, typ: str, free: bool, need_more: int
     ):
@@ -1520,6 +1547,19 @@ class WebSocketClient(BaseCommunicationClient):
         self.message_processor.send_message(message)
 
         logger.trace(f"[WebSocketClient] Job status published: {job_log} - {status}")
+
+    def publish_device_exception_alarm(self, alarm_data: dict) -> None:
+        """上行: 推送设备异常报警到后端"""
+        if self.is_disabled or not self.is_connected():
+            logger.warning(
+                f"[WebSocketClient] 未连接,无法推送设备异常: {alarm_data.get('device_id')} - {alarm_data.get('action_name')}"
+            )
+            return
+        message = {"action": "device_exception_alarm", "data": alarm_data}
+        self.message_processor.send_message(message)
+        logger.info(
+            f"[WebSocketClient] device_exception_alarm: {alarm_data.get('device_id')} {alarm_data.get('exception_type')}"
+        )
 
     def send_ping(self, ping_id: str, timestamp: float) -> None:
         """发送ping消息"""

@@ -418,6 +418,10 @@ class BaseROS2DeviceNode(Node, Generic[T]):
             max_workers=max(len(action_value_mappings), 1), thread_name_prefix=f"ROSDevice{self.device_id}"
         )
 
+        # 设备异常处理：等待用户决策的 Future 表
+        self._pending_decisions: Dict[str, asyncio.Future] = {}
+        self._user_decision_timeout: float = 300.0
+
         self._append_resource_lock = RclpyAsyncMutex(name=f"AR:{device_id}")
 
         # 创建资源管理客户端
@@ -1522,6 +1526,162 @@ class BaseROS2DeviceNode(Node, Generic[T]):
             obj = getattr(instance, attr_name)
             return obj, get_type_hints(obj)
 
+    # ================================================================
+    # 设备异常处理 - 用户决策回环
+    # ================================================================
+
+    async def _execute_with_exception_handling(
+        self,
+        action_func,
+        action_name: str,
+        task_id: str,
+        job_id: str,
+        action_kwargs: dict,
+        max_user_iterations: int = 10,
+    ) -> Any:
+        """带异常处理 + 用户决策回环的动作执行主循环
+
+        - DeviceException 抛出 → 推送报警 → 等待决策 → 分支
+        - 其他异常 → 包装为 UNKNOWN DeviceException 后同样流程
+        - 通用 action: retry/skip/manual_fix/abort
+        - 自定义 action: 在 exc.suggested_actions 中查 handler,按 then 决定下一步
+        """
+        from unilabos.devices.exceptions import DeviceException, UserAction
+
+        iteration = 0
+        exc: Optional[DeviceException] = None
+        while True:
+            iteration += 1
+            if iteration > max_user_iterations:
+                raise DeviceException(
+                    f"动作 {action_name} 异常处理超过 {max_user_iterations} 轮,强制终止"
+                )
+
+            try:
+                return await action_func(**action_kwargs)
+            except DeviceException as e:
+                exc = e
+                decision = await self._handle_device_exception(e, action_name, task_id, job_id)
+            except Exception as e:
+                wrapped = DeviceException(
+                    f"未预期异常: {type(e).__name__}: {e}",
+                    suggested_actions=[
+                        UserAction("retry", "重试", "重新执行"),
+                        UserAction("abort", "终止", "终止任务"),
+                    ],
+                    cause=e,
+                )
+                wrapped.traceback_str = traceback.format_exc()
+                exc = wrapped
+                decision = await self._handle_device_exception(wrapped, action_name, task_id, job_id)
+
+            action = decision.get("action", "abort")
+
+            if action == "retry":
+                continue
+            if action == "skip":
+                return {"status": "skipped", "reason": decision.get("reason", "user_skip")}
+            if action == "manual_fix":
+                continue
+            if action == "abort":
+                raise exc
+
+            # 自定义 action: 找 handler
+            matched: Optional[UserAction] = None
+            for ua in (exc.suggested_actions if isinstance(exc, DeviceException) else []):
+                if ua.action == action:
+                    matched = ua
+                    break
+
+            if matched is None or matched.handler is None:
+                self.get_logger().warning(
+                    f"未知决策 action={action} 且无 handler,fallback 为 abort"
+                )
+                raise exc
+
+            try:
+                handler_result = await matched.handler(exception=exc, decision=decision)
+            except DeviceException as he:
+                # handler 自身抛 DeviceException → 进入下一轮决策
+                exc = he
+                # 直接发起一次决策,然后回到主循环顶端按新决策处理
+                next_decision = await self._handle_device_exception(he, action_name, task_id, job_id)
+                # 把新决策塞回 action_func 重试前先处理:简化做法 — 复用 continue 让外层捕获
+                # 由于外层 try 已不再进入,这里手动处理 next_decision
+                action = next_decision.get("action", "abort")
+                if action == "retry" or action == "manual_fix":
+                    continue
+                if action == "skip":
+                    return {"status": "skipped", "reason": next_decision.get("reason", "user_skip")}
+                if action == "abort":
+                    raise he
+                # 自定义 action 继续套用主循环逻辑:这里简化为 abort
+                raise he
+
+            then = matched.then
+            if then == "retry":
+                continue
+            if then == "skip":
+                return {"status": "skipped", "reason": f"after_{action}"}
+            if then == "continue":
+                return handler_result
+            continue
+
+    async def _handle_device_exception(
+        self,
+        exc,
+        action_name: str,
+        task_id: str,
+        job_id: str,
+    ) -> dict:
+        """推送异常报警并等待用户决策,超时默认 abort"""
+        alarm_data = exc.to_alarm_dict(
+            device_id=self.device_id,
+            device_uuid=self.uuid,
+            action_name=action_name,
+            task_id=task_id,
+            job_id=job_id,
+        )
+        self.get_logger().error(
+            f"[DeviceException] {action_name} 抛出 {type(exc).__name__}: {exc.message}"
+        )
+
+        ws_client = self._get_ws_client()
+        ws_client.publish_device_exception_alarm(alarm_data)
+
+        try:
+            return await self._wait_for_user_decision(task_id, exc)
+        except asyncio.TimeoutError:
+            self.get_logger().warning(
+                f"[DeviceException] 用户决策超时,默认 abort: {action_name}"
+            )
+            return {"action": "abort", "reason": "user_decision_timeout"}
+
+    async def _wait_for_user_decision(self, task_id: str, exc) -> dict:
+        """通过 Future 阻塞等待用户决策"""
+        loop = asyncio.get_event_loop()
+        fut: asyncio.Future = loop.create_future()
+        key = f"{task_id}:{exc.message[:32]}"
+        self._pending_decisions[key] = fut
+        try:
+            return await asyncio.wait_for(fut, timeout=self._user_decision_timeout)
+        finally:
+            self._pending_decisions.pop(key, None)
+
+    def handle_user_decision(self, task_id: str, decision: dict):
+        """由 ws_client 在收到 device_exception_decision 时调用"""
+        for key in list(self._pending_decisions.keys()):
+            if key.startswith(f"{task_id}:"):
+                fut = self._pending_decisions[key]
+                if not fut.done():
+                    fut.set_result(decision)
+                break
+
+    def _get_ws_client(self):
+        """获取通信客户端(单例),节点无法直接持有 ws_client 时通过工厂取得"""
+        from unilabos.app.communication import CommunicationClientFactory
+        return CommunicationClientFactory.get_client()
+
     def _create_execute_callback(self, action_name, action_value_mapping):
         """创建动作执行回调函数"""
 
@@ -1626,7 +1786,58 @@ class BaseROS2DeviceNode(Node, Generic[T]):
             time_start = time.time()
             time_overall = 100
             future = None
-            if not error_skip:
+            # ──── 异常处理新路径:启用时走 _execute_with_exception_handling ────
+            from unilabos.registry.decorators import is_exception_handling_enabled, get_action_timeout
+            use_exception_handling = (not error_skip) and is_exception_handling_enabled(ACTION)
+            if use_exception_handling:
+                action_timeout = get_action_timeout(ACTION)
+                ctx = getattr(self, "_current_job_context", None) or {}
+                task_id = (getattr(goal, "task_id", "") or "") or ctx.get("task_id", "") or ""
+                job_id = (getattr(goal, "job_id", "") or "") or ctx.get("job_id", "") or ""
+                self.get_logger().warn(
+                    f"[DEBUG-EXC-CTX] action={ACTION.__name__} task_id={task_id!r} job_id={job_id!r} ctx={ctx!r}"
+                )
+
+                async def _wrapped_action(**kwargs):
+                    if asyncio.iscoroutinefunction(ACTION):
+                        return await ACTION(**kwargs)
+                    loop = asyncio.get_event_loop()
+                    import functools as _ft
+                    return await loop.run_in_executor(
+                        self._executor, _ft.partial(ACTION, **kwargs)
+                    )
+
+                async def _wrapped_with_timeout(**kwargs):
+                    # 同步函数 + timeout:由框架层用 wait_for 包装,捕获 TimeoutError 转 TimeoutException
+                    if action_timeout is not None and not asyncio.iscoroutinefunction(ACTION):
+                        try:
+                            return await asyncio.wait_for(
+                                _wrapped_action(**kwargs), timeout=action_timeout
+                            )
+                        except asyncio.TimeoutError as e:
+                            from unilabos.devices.exceptions import TimeoutException
+                            raise TimeoutException(
+                                f"动作 {ACTION.__name__} 执行超时 (>{action_timeout}s)",
+                                cause=e,
+                            )
+                    return await _wrapped_action(**kwargs)
+
+                try:
+                    action_return_value = await self._execute_with_exception_handling(
+                        action_func=_wrapped_with_timeout,
+                        action_name=ACTION.__name__,
+                        task_id=task_id,
+                        job_id=job_id,
+                        action_kwargs=action_kwargs,
+                    )
+                    execution_success = True
+                except Exception as _:
+                    execution_error = traceback.format_exc()
+                    execution_success = False
+                    error(
+                        f"动作 {ACTION.__name__} 异常处理后仍失败\n{traceback.format_exc()}"
+                    )
+            elif not error_skip:
                 # 将阻塞操作放入线程池执行
                 if asyncio.iscoroutinefunction(ACTION):
                     try:
@@ -2066,6 +2277,27 @@ class BaseROS2DeviceNode(Node, Generic[T]):
                                 )
                                 raise JsonCommandInitError(f"ResourceSlot列表参数转换失败: {arg_name}")
 
+            # 启用异常处理时，走用户决策回环；并且因当前线程通常无 asyncio loop，
+            # 提交到 ROS2DeviceNode._asyncio_loop 上跑（与 @action wrapper case B 一致）
+            from unilabos.registry.decorators import is_exception_handling_enabled
+            if is_exception_handling_enabled(function):
+                target_loop = ROS2DeviceNode.get_asyncio_loop()
+                if target_loop is not None and target_loop.is_running():
+                    ctx = getattr(self, "_current_job_context", None) or {}
+                    self.get_logger().warn(
+                        f"[DEBUG-EXC-CTX-JSON] action={function_name} ctx={ctx!r}"
+                    )
+                    cfuture = asyncio.run_coroutine_threadsafe(
+                        self._execute_with_exception_handling(
+                            action_func=function,
+                            action_name=function_name,
+                            task_id=ctx.get("task_id", "") or "",
+                            job_id=ctx.get("job_id", "") or "",
+                            action_kwargs=function_args,
+                        ),
+                        target_loop,
+                    )
+                    return cfuture.result()
             return await function(**function_args)
         except KeyError as ex:
             raise JsonCommandInitError(
