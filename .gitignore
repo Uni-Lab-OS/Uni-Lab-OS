@@ -250,5 +250,6 @@ local_test2.py
 ros-humble-unilabos-msgs-0.9.13-h6403a04_5.tar.bz2
 *.bz2
 test_config.py
+.history/
 
 .history/

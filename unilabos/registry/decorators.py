@@ -344,6 +344,9 @@ def action(
     parent: bool = False,
     node_type: Optional["NodeType"] = None,
     feedback_interval: Optional[float] = None,
+    timeout: Optional[float] = None,
+    exception_handling: bool = True,
+    default_on_user_timeout: str = "abort",
 ):
     """
     动作方法装饰器
@@ -376,6 +379,10 @@ def action(
         parent: 若为 True，当方法参数为空 (*args, **kwargs) 时，通过 MRO 从父类获取真实方法参数
         node_type: 动作的节点类型 (NodeType.ILAB / NodeType.MANUAL_CONFIRM)。
                    不填写时不写入注册表。
+        timeout: 动作超时秒数。None 表示不限时；协程函数超时后自动转换为
+                 TimeoutException 走异常处理流程
+        exception_handling: 是否启用异常处理 + 用户决策回环 (默认 True)
+        default_on_user_timeout: 用户决策超时时默认动作 ("abort"/"retry"/"skip")
     """
 
     def decorator(func: F) -> F:
@@ -384,10 +391,50 @@ def action(
         if _asyncio.iscoroutinefunction(func):
             @wraps(func)
             async def wrapper(*args, **kwargs):
-                return await func(*args, **kwargs)
+                # 未设置 timeout：保持透传
+                if timeout is None:
+                    return await func(*args, **kwargs)
+                # 设置 timeout：用 asyncio.wait_for 包裹。
+                # 当前线程若没有 running asyncio loop（rclpy executor 驱动场景），
+                # 退化为把协程提交到 ROS2DeviceNode._asyncio_loop 上跑并同步等结果。
+                try:
+                    _asyncio.get_running_loop()
+                    has_running_loop = True
+                except RuntimeError:
+                    has_running_loop = False
+
+                try:
+                    if has_running_loop:
+                        return await _asyncio.wait_for(func(*args, **kwargs), timeout=timeout)
+                    from unilabos.ros.nodes.base_device_node import ROS2DeviceNode
+                    target_loop = ROS2DeviceNode.get_asyncio_loop()
+                    if target_loop is None or not target_loop.is_running():
+                        # 没有可用 asyncio loop，降级为直接 await，不做 timeout
+                        return await func(*args, **kwargs)
+                    cfuture = _asyncio.run_coroutine_threadsafe(
+                        _asyncio.wait_for(func(*args, **kwargs), timeout=timeout),
+                        target_loop,
+                    )
+                    return cfuture.result()
+                except _asyncio.TimeoutError as e:
+                    # 延迟 import 避免循环依赖
+                    from unilabos.devices.exceptions import TimeoutException
+                    # 采集设备快照（self 在 args[0]），失败不影响异常抛出
+                    snapshot = {}
+                    if args and hasattr(args[0], "_get_device_snapshot"):
+                        try:
+                            snapshot = args[0]._get_device_snapshot()
+                        except Exception:
+                            pass
+                    raise TimeoutException(
+                        f"动作 {func.__name__} 执行超时 (>{timeout}s)",
+                        device_snapshot=snapshot,
+                        cause=e,
+                    )
         else:
             @wraps(func)
             def wrapper(*args, **kwargs):
+                # 同步函数：保持透传，超时由框架层 run_in_executor 包装处理
                 return func(*args, **kwargs)
 
         # action_type 为哨兵值 => 用户没传, 视为 None (UniLabJsonCommand)
@@ -411,7 +458,17 @@ def action(
             meta["feedback_interval"] = feedback_interval
         if node_type is not None:
             meta["node_type"] = node_type.value if isinstance(node_type, NodeType) else str(node_type)
+        # 异常处理相关元数据：沿用 "不为默认值才加" 原则
+        if timeout is not None:
+            meta["timeout"] = timeout
+        if exception_handling is not True:
+            meta["exception_handling"] = exception_handling
+        if default_on_user_timeout != "abort":
+            meta["default_on_user_timeout"] = default_on_user_timeout
         wrapper._action_registry_meta = meta  # type: ignore[attr-defined]
+        # 框架层快速判断标记
+        wrapper._exception_handling = exception_handling  # type: ignore[attr-defined]
+        wrapper._action_timeout = timeout  # type: ignore[attr-defined]
 
         # 设置 _is_always_free 保持与旧 @always_free 装饰器兼容
         if always_free:
@@ -430,6 +487,16 @@ def get_action_meta(func) -> Optional[Dict[str, Any]]:
 def has_action_decorator(func) -> bool:
     """检查函数是否带有 @action 装饰器"""
     return hasattr(func, "_action_registry_meta")
+
+
+def get_action_timeout(func) -> Optional[float]:
+    """获取动作的超时秒数 (None 表示不限时)"""
+    return getattr(func, "_action_timeout", None)
+
+
+def is_exception_handling_enabled(func) -> bool:
+    """该动作是否启用异常处理流程"""
+    return getattr(func, "_exception_handling", False)
 
 
 # ---------------------------------------------------------------------------
