@@ -75,6 +75,7 @@ class DeviceException(Exception):
     def _default_actions(self) -> List[UserAction]:
         return [
             UserAction("retry", "重试", "重新执行当前操作"),
+            UserAction("skip", "跳过", "跳过当前操作继续执行"),
             UserAction("abort", "终止任务", "停止当前任务"),
         ]
 
@@ -112,6 +113,7 @@ class TimeoutException(DeviceException):
     def _default_actions(self):
         return [
             UserAction("retry", "重试", "延长超时时间再次尝试"),
+            UserAction("skip", "跳过", "跳过当前操作继续执行"),
             UserAction("manual_fix", "手动干预", "现场检查后继续"),
             UserAction("abort", "终止任务", "停止当前任务"),
         ]
@@ -136,6 +138,7 @@ class ModbusConnectionError(DeviceException):
     def _default_actions(self):
         return [
             UserAction("retry", "重试连接", "重新建立 Modbus 连接"),
+            UserAction("skip", "跳过", "跳过当前操作继续执行"),
             UserAction("manual_fix", "手动检查", "检查网络和电源后继续"),
             UserAction("abort", "终止任务", "停止当前任务"),
         ]

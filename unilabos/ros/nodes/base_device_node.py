@@ -1567,6 +1567,7 @@ class BaseROS2DeviceNode(Node, Generic[T]):
                     f"未预期异常: {type(e).__name__}: {e}",
                     suggested_actions=[
                         UserAction("retry", "重试", "重新执行"),
+                        UserAction("skip", "跳过", "跳过当前操作继续执行"),
                         UserAction("abort", "终止", "终止任务"),
                     ],
                     cause=e,

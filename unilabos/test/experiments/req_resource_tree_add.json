@@ -2,7 +2,7 @@
   "nodes": [
     {
       "id": "host_node",
-      "uuid": "8ff1ba54-44d2-4f41-962c-bad5ec53e1dd",
+      "uuid": "be3f7191-61f4-4079-8103-88d71e6ced67",
       "name": "host_node",
       "description": "",
       "schema": {},
@@ -48,7 +48,7 @@
     },
     {
       "id": "fault_injection_device",
-      "uuid": "f82f5d3c-07e1-4f08-b6e9-e3198a3a942f",
+      "uuid": "0ddf4573-9433-4413-9c31-116a6491cb24",
       "name": "fault_injection_device",
       "description": "",
       "schema": {},
@@ -90,7 +90,7 @@
       "config": {},
       "data": {},
       "extra": {},
-      "machine_name": "bogon"
+      "machine_name": "LiXinyu_local"
     }
   ],
   "mount_uuid": ""
