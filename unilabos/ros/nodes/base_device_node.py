@@ -2052,6 +2052,12 @@ class BaseROS2DeviceNode(Node, Generic[T]):
                         attr_name,
                         get_result_info_str(execution_error, execution_success, action_return_value),
                     )
+                elif attr_name == "status":
+                    # 如果 action_return_value 包含 status 字段（如 skipped），则使用它
+                    if isinstance(action_return_value, dict) and "status" in action_return_value:
+                        setattr(result_msg, attr_name, action_return_value["status"])
+                    else:
+                        setattr(result_msg, attr_name, "success" if execution_success else "failed")
 
             self.lab_logger().trace(f"动作 {action_name} 完成并返回结果")
             return result_msg

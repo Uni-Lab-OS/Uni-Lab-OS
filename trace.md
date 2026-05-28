@@ -52,3 +52,30 @@ fut.get_loop().call_soon_threadsafe(fut.set_result, decision)
 
 **知识点**：asyncio.Future 必须在创建它的事件循环中设置结果，跨线程必须用 `call_soon_threadsafe`。
 
+### EARS — Fix (2026-05-28 11:27)
+<!-- concepts: status-propagation, workflow-display, edge-backend-frontend -->
+**问题**：用户点击"跳过"操作后，工作流中的 action 块仍然显示绿色边框（success），而不是灰色边框（skipped）。
+
+**根本原因**：跳过状态在多个层级被覆盖或未正确传递
+1. **Edge 侧**：`base_device_node.py:1587` 正确返回 `{"status": "skipped"}`
+2. **HostNode 层**：`host_node.py:943` 硬编码 `status = "success"`，忽略了 `result_data` 中的 status 字段
+3. **WebSocket 层**：`ws_client.py:1513` 只处理 `["success", "failed"]`，不包含 `"skipped"`，导致任务未被标记为完成
+
+**解决方案**：
+```python
+# 1. host_node.py:943 - 优先读取 result_data 中的 status
+result_data = convert_from_ros_msg(result_msg)
+status = result_data.get("status", "success")  # 之前硬编码为 "success"
+
+# 2. ws_client.py:1513 - 将 skipped 加入最终状态列表
+if status in ["success", "failed", "skipped"]:  # 之前只有 success 和 failed
+    self.queue_processor.handle_job_completed(item.job_id, status)
+```
+
+**修改文件**：
+- `unilabos/ros/nodes/presets/host_node.py:943`
+- `unilabos/app/ws_client.py:1513`
+- `Uni-Lab-Cloud/web/src/app/@enterprise/(new)/laboratory/[uuid]/workflow/[workflowid]/components/basic-node.tsx:153`（前端样式已修改）
+
+**知识点**：状态传递链路中任何一层的硬编码或遗漏都会导致状态丢失。需要追踪完整的数据流：Edge → HostNode → WebSocket → Backend → Frontend。
+
