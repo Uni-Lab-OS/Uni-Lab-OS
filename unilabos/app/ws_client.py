@@ -59,6 +59,7 @@ class QueueItem:
     action_name: str
     task_id: str
     job_id: str
+    notebook_id: str
     device_action_key: str
     next_run_time: float = 0  # 下次执行时间戳
     retry_count: int = 0  # 重试次数
@@ -71,6 +72,7 @@ class JobInfo:
     job_id: str
     task_id: str
     device_id: str
+    notebook_id: str
     action_name: str
     device_action_key: str
     status: JobStatus
@@ -539,7 +541,10 @@ class MessageProcessor:
                 self.reconnect_count += 1
                 backoff = WSConfig.reconnect_interval
                 logger.info(
-                    f"[MessageProcessor] 即将在 {backoff} 秒后重连 (已尝试 {self.reconnect_count}/{WSConfig.max_reconnect_attempts})"
+                    "[MessageProcessor] 即将在 %s 秒后重连 (已尝试 %s/%s)",
+                    backoff,
+                    self.reconnect_count,
+                    WSConfig.max_reconnect_attempts,
                 )
                 await asyncio.sleep(backoff)
             else:
@@ -707,6 +712,7 @@ class MessageProcessor:
         action_name = data.get("action_name", "")
         task_id = data.get("task_id", "")
         job_id = data.get("job_id", "")
+        notebook_id = data.get("notebook_id", "")
 
         if not all([device_id, action_name, task_id, job_id]):
             logger.error("[MessageProcessor] Missing required fields in query_action_state")
@@ -722,6 +728,7 @@ class MessageProcessor:
             job_id=job_id,
             task_id=task_id,
             device_id=device_id,
+            notebook_id=notebook_id,
             action_name=action_name,
             device_action_key=device_action_key,
             status=JobStatus.QUEUE,
@@ -736,13 +743,27 @@ class MessageProcessor:
         if can_start_immediately:
             # 可以立即开始
             await self._send_action_state_response(
-                device_id, action_name, task_id, job_id, "query_action_status", True, 0
+                device_id,
+                action_name,
+                task_id,
+                job_id,
+                "query_action_status",
+                True,
+                0,
+                notebook_id=notebook_id,
             )
             logger.trace(f"[MessageProcessor] Job {job_log} can start immediately")
         else:
             # 需要排队
             await self._send_action_state_response(
-                device_id, action_name, task_id, job_id, "query_action_status", False, 10
+                device_id,
+                action_name,
+                task_id,
+                job_id,
+                "query_action_status",
+                False,
+                10,
+                notebook_id=notebook_id,
             )
             logger.trace(f"[MessageProcessor] Job {job_log} queued")
 
@@ -772,6 +793,7 @@ class MessageProcessor:
                         job_id=req.job_id,
                         task_id=req.task_id,
                         device_id=req.device_id,
+                        notebook_id=req.notebook_id,
                         action_name=action_name,
                         device_action_key=device_action_key,
                         status=JobStatus.QUEUE,
@@ -779,10 +801,15 @@ class MessageProcessor:
                         always_free=True,
                     )
                     self.device_manager.add_queue_request(job_info)
+                    existing_job = job_info
                     logger.info(f"[MessageProcessor] Job {job_log} always_free, auto-registered from direct job_start")
                 else:
                     logger.error(f"[MessageProcessor] Job {job_log} not registered (missing query_action_state)")
                     return
+
+            if existing_job and req.notebook_id and not existing_job.notebook_id:
+                existing_job.notebook_id = req.notebook_id
+            notebook_id = req.notebook_id or (existing_job.notebook_id if existing_job else "")
 
             success = self.device_manager.start_job(req.job_id)
             if not success:
@@ -799,6 +826,7 @@ class MessageProcessor:
                 action_name=req.action,
                 task_id=req.task_id,
                 job_id=req.job_id,
+                notebook_id=notebook_id,
                 device_action_key=device_action_key,
             )
 
@@ -838,6 +866,7 @@ class MessageProcessor:
                             "job_id": req.job_id,
                             "task_id": req.task_id,
                             "device_id": req.device_id,
+                            "notebook_id": queue_item.notebook_id,
                             "action_name": req.action,
                             "status": "failed",
                             "feedback_data": {},
@@ -859,6 +888,7 @@ class MessageProcessor:
                             "query_action_status",
                             True,
                             0,
+                            notebook_id=next_job.notebook_id,
                         )
                         next_job_log = format_job_log(
                             next_job.job_id, next_job.task_id, next_job.device_id, next_job.action_name
@@ -1008,10 +1038,15 @@ class MessageProcessor:
 
                     success = host_node.notify_resource_tree_update(dev_id, act, item_list)
 
-                    if success:
+                    if success is True:
                         logger.info(
                             f"[MessageProcessor] Resource tree {act} completed for device {dev_id}, "
                             f"items: {len(item_list)}"
+                        )
+                    elif success is None:
+                        logger.info(
+                            f"[MessageProcessor] Resource tree {act} skipped for device {dev_id}: "
+                            "在线增加设备暂不支持"
                         )
                     else:
                         logger.warning(f"[MessageProcessor] Resource tree {act} failed for device {dev_id}")
@@ -1036,6 +1071,11 @@ class MessageProcessor:
 
         for item in device_list:
             target_node_id = item.get("target_node_id", "host_node")
+            if action == "add":
+                logger.info(
+                    f"[DeviceManage] 在线增加设备暂不支持，跳过 add_device: {item.get('id', '')}"
+                )
+                continue
 
             def _notify(target_id: str, act: str, cfg: ResourceDictType):
                 try:
@@ -1130,7 +1170,15 @@ class MessageProcessor:
         base_node.handle_user_decision(task_id, decision)
 
     async def _send_action_state_response(
-        self, device_id: str, action_name: str, task_id: str, job_id: str, typ: str, free: bool, need_more: int
+        self,
+        device_id: str,
+        action_name: str,
+        task_id: str,
+        job_id: str,
+        typ: str,
+        free: bool,
+        need_more: int,
+        notebook_id: str = "",
     ):
         """发送动作状态响应"""
         message = {
@@ -1141,6 +1189,7 @@ class MessageProcessor:
                 "action_name": action_name,
                 "task_id": task_id,
                 "job_id": job_id,
+                "notebook_id": notebook_id,
                 "free": free,
                 "need_more": need_more + 1,
             },
@@ -1223,6 +1272,7 @@ class QueueProcessor:
                             action_name=timeout_job.action_name,
                             task_id=timeout_job.task_id,
                             job_id=timeout_job.job_id,
+                            notebook_id=timeout_job.notebook_id,
                             device_action_key=timeout_job.device_action_key,
                         )
                         # 发布超时失败状态，这会触发正常的job完成流程
@@ -1281,6 +1331,7 @@ class QueueProcessor:
                     "action_name": job_info.action_name,
                     "task_id": job_info.task_id,
                     "job_id": job_info.job_id,
+                    "notebook_id": job_info.notebook_id,
                     "free": False,
                     "need_more": 10 + 1,
                 },
@@ -1320,6 +1371,7 @@ class QueueProcessor:
                     "action_name": job_info.action_name,
                     "task_id": job_info.task_id,
                     "job_id": job_info.job_id,
+                    "notebook_id": job_info.notebook_id,
                     "free": False,
                     "need_more": 10 + 1,
                 },
@@ -1365,12 +1417,15 @@ class QueueProcessor:
                     "action_name": next_job.action_name,
                     "task_id": next_job.task_id,
                     "job_id": next_job.job_id,
+                    "notebook_id": next_job.notebook_id,
                     "free": True,
                     "need_more": 0,
                 },
             }
             self.message_processor.send_message(message)
-            # next_job_log = format_job_log(next_job.job_id, next_job.task_id, next_job.device_id, next_job.action_name)
+            # next_job_log = format_job_log(
+            #     next_job.job_id, next_job.task_id, next_job.device_id, next_job.action_name
+            # )
             # logger.debug(f"[QueueProcessor] Notified next job {next_job_log} can start")
 
             # 立即触发下一轮状态检查
@@ -1539,6 +1594,7 @@ class WebSocketClient(BaseCommunicationClient):
                 "job_id": item.job_id,
                 "task_id": item.task_id,
                 "device_id": item.device_id,
+                "notebook_id": item.notebook_id,
                 "action_name": item.action_name,
                 "status": status,
                 "feedback_data": feedback_data,
