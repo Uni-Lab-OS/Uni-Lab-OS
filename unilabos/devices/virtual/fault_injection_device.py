@@ -96,8 +96,6 @@ class FaultInjectionDevice:
         self.logger.warning("[fault_injection] 抛出 ModbusConnectionError")
         raise ModbusConnectionError(
             message="Modbus 端口连接失败 (模拟)",
-            device_id=self.device_id,
-            action_name="raise_modbus_error",
             device_snapshot={"port": "/dev/ttyUSB0", "baudrate": 9600},
         )
 
@@ -108,8 +106,6 @@ class FaultInjectionDevice:
         self.logger.warning("[fault_injection] 抛出 EmergencyStopError")
         raise EmergencyStopError(
             message="急停按钮已触发 (模拟)",
-            device_id=self.device_id,
-            action_name="raise_emergency_stop",
         )
 
     # ----------- @action: PLC 步序超时 -----------
@@ -119,8 +115,6 @@ class FaultInjectionDevice:
         self.logger.warning("[fault_injection] 抛出 PLCStepTimeout")
         raise PLCStepTimeout(
             message="PLC 步序 step_5 长时间未变化 (模拟)",
-            device_id=self.device_id,
-            action_name="raise_plc_step_timeout",
             device_snapshot={"current_step": 5, "elapsed_seconds": 120},
         )
 
@@ -131,8 +125,6 @@ class FaultInjectionDevice:
         self.logger.warning("[fault_injection] 抛出 SensorError")
         raise SensorError(
             message="温度传感器读数异常 (模拟)",
-            device_id=self.device_id,
-            action_name="raise_sensor_error",
             device_snapshot={"sensor": "temp_1", "value": -999.0},
         )
 
@@ -143,8 +135,6 @@ class FaultInjectionDevice:
         self.logger.warning("[fault_injection] 抛出 TipPickupError")
         raise TipPickupError(
             message=f"tip {self._tip_index} 取头失败 (模拟)",
-            device_id=self.device_id,
-            action_name="raise_tip_pickup_error",
             device_snapshot={"tip_index": self._tip_index},
             suggested_actions=[
                 UserAction(action="retry", label="重试当前 tip"),
@@ -156,4 +146,75 @@ class FaultInjectionDevice:
                 UserAction(action="skip", label="跳过此步骤"),
                 UserAction(action="abort", label="中止任务"),
             ],
+        )
+
+    # =========== 同步版本驱动函数（用于 simple backend 测试） ===========
+
+    # =========== 同步版本驱动函数（注意：同步函数不支持异常处理回环）===========
+    #
+    # 重要说明：框架的 DeviceException 异常处理机制（上报 alarm → 前端弹窗 → 用户决策）
+    # 只对异步函数生效。同步函数抛出异常后只会被记录到日志，不会触发前端弹窗。
+    #
+    # 如果需要测试异常处理，请使用上面的异步版本（run_ok、raise_modbus_error 等）。
+    # 以下同步版本仅用于演示同步函数的写法。
+
+    @action(description="同步版本：正常调用", exception_handling=True)
+    def run_ok_sync(self) -> SimpleResult:
+        """同步版本的正常调用，不使用 async/await"""
+        self.logger.info("[fault_injection] run_ok_sync 正常执行（同步）")
+        import time
+        time.sleep(0.2)
+        return {"success": True, "message": "ok (sync)"}
+
+    @action(description="同步版本：模拟长耗时触发超时", timeout=2.0, exception_handling=True)
+    def run_long_sync(self, duration: float = 5.0) -> SimpleResult:
+        """同步版本：sleep duration 秒。当 duration > timeout(2s) 时触发 TimeoutException。"""
+        self.logger.info(f"[fault_injection] run_long_sync sleep {duration}s")
+        import time
+        time.sleep(duration)
+        return {"success": True, "message": f"slept {duration}s (sync)"}
+
+    @action(description="同步版本：抛出 ModbusConnectionError", exception_handling=True)
+    def raise_modbus_error_sync(self) -> SimpleResult:
+        """同步版本的 Modbus 异常（注意：不会触发前端弹窗）"""
+        self.logger.warning("[fault_injection] 抛出 ModbusConnectionError（同步）")
+        raise ModbusConnectionError(
+            message="Modbus 端口连接失败 (模拟-同步)",
+            device_snapshot={"port": "/dev/ttyUSB0", "baudrate": 9600},
+        )
+
+    @action(description="同步版本：抛出 SensorError", exception_handling=True)
+    def raise_sensor_error_sync(self) -> SimpleResult:
+        """同步版本的传感器异常（注意：不会触发前端弹窗）"""
+        self.logger.warning("[fault_injection] 抛出 SensorError（同步）")
+        raise SensorError(
+            message="温度传感器读数异常 (模拟-同步)",
+            device_snapshot={"sensor": "temp_1", "value": -999.0},
+        )
+
+    @action(description="同步版本：抛出 TipPickupError", exception_handling=True)
+    def raise_tip_pickup_error_sync(self) -> SimpleResult:
+        """同步版本的取头失败异常（注意：不会触发前端弹窗）"""
+        self.logger.warning("[fault_injection] 抛出 TipPickupError（同步）")
+        raise TipPickupError(
+            message=f"tip {self._tip_index} 取头失败 (模拟-同步)",
+            device_snapshot={"tip_index": self._tip_index},
+            suggested_actions=[
+                UserAction(action="retry", label="重试当前 tip"),
+                UserAction(
+                    action="use_next_tip",
+                    label="使用下一个 tip",
+                    handler=self._use_next_tip,
+                ),
+                UserAction(action="skip", label="跳过此步骤"),
+                UserAction(action="abort", label="中止任务"),
+            ],
+        )
+
+    @action(description="同步版本：抛出 EmergencyStopError", exception_handling=True)
+    def raise_emergency_stop_sync(self) -> SimpleResult:
+        """同步版本的急停异常（注意：不会触发前端弹窗）"""
+        self.logger.warning("[fault_injection] 抛出 EmergencyStopError（同步）")
+        raise EmergencyStopError(
+            message="急停按钮已触发 (模拟-同步)",
         )
