@@ -220,3 +220,4 @@ class FaultInjectionDevice:
         )
 
 # unilab --graph unilabos/test/experiments/fault_injection.json --config unilabos/test/experiments/fault_injection_config.py --ak a3d111bb-571a-4548-aa5d-c58ccca64466 --sk c2450c73-e84c-4319-b25f-b5cc4d575e7e --upload_registry --addr http://127.0.0.1:48197/api/v1
+# unilab --graph unilabos/test/experiments/fault_injection.json --ak 27a95f0d-d332-4782-8aa9-ce1de6899bb4 --sk ddd976e9-f1b4-452c-9165-ceb8007aa7a6 --upload_registry --addr test --disable_browser
