@@ -30,7 +30,15 @@ def initialize_device_from_dict(device_id, device_config: ResourceDictInstance) 
         if len(device_class_config) == 0:
             raise DeviceClassInvalid(f"Device [{device_id}] class cannot be an empty string. {device_config}")
         if device_class_config not in lab_registry.device_type_registry:
-            raise DeviceClassInvalid(f"Device [{device_id}] class {device_class_config} not found. {device_config}")
+            # Plan 09 Task 7: graph 可能引用 community 变体 id(community.<id>);
+            # 若带前缀的 id 未注册,回退到归一化后的本地 id。
+            from unilabos.registry.community_alias import normalize_community_class
+
+            normalized = normalize_community_class(device_class_config)
+            if normalized in lab_registry.device_type_registry:
+                device_class_config = normalized
+            else:
+                raise DeviceClassInvalid(f"Device [{device_id}] class {device_class_config} not found. {device_config}")
         device_class_config = lab_registry.device_type_registry[device_class_config]["class"]
     elif isinstance(device_class_config, dict):
         raise DeviceClassInvalid(f"Device [{device_id}] class config should be type 'str' but 'dict' got. {device_config}")
