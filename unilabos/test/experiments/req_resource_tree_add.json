@@ -2,7 +2,7 @@
   "nodes": [
     {
       "id": "host_node",
-      "uuid": "8ff1ba54-44d2-4f41-962c-bad5ec53e1dd",
+      "uuid": "2eb25cbc-a9ce-4767-a15e-03d626487954",
       "name": "host_node",
       "description": "",
       "schema": {},
@@ -48,7 +48,7 @@
     },
     {
       "id": "fault_injection_device",
-      "uuid": "f82f5d3c-07e1-4f08-b6e9-e3198a3a942f",
+      "uuid": "360ade99-b610-497a-bc8f-28181ca9e2da",
       "name": "fault_injection_device",
       "description": "",
       "schema": {},

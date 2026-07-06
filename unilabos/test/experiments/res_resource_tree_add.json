@@ -1,2 +1,2 @@
 200
-{"code":0,"data":[{"uuid":"8ff1ba54-44d2-4f41-962c-bad5ec53e1dd","cloud_uuid":"38b63f19-888a-46db-9832-26f0232b6b32","id":"host_node","name":"host_node"},{"uuid":"f82f5d3c-07e1-4f08-b6e9-e3198a3a942f","cloud_uuid":"048bcec1-09a1-4ebc-a7a7-830f764c2258","id":"fault_injection_device","name":"fault_injection_device"}]}
+{"code":0,"data":[{"uuid":"360ade99-b610-497a-bc8f-28181ca9e2da","cloud_uuid":"048bcec1-09a1-4ebc-a7a7-830f764c2258","id":"fault_injection_device","name":"fault_injection_device"},{"uuid":"2eb25cbc-a9ce-4767-a15e-03d626487954","cloud_uuid":"38b63f19-888a-46db-9832-26f0232b6b32","id":"host_node","name":"host_node"}]}

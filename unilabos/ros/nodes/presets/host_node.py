@@ -940,13 +940,17 @@ class HostNode(BaseROS2DeviceNode):
                 return_info = serialize_result_info("Job was cancelled", False, {})
             else:
                 result_data = convert_from_ros_msg(result_msg)
-                status = "success"
+                # 优先检查 result_data 中的 status 字段（支持 skipped 等状态）
+                status = result_data.get("status", "success")
                 return_info_str = result_data.get("return_info")
                 if return_info_str is not None:
                     try:
                         return_info = json.loads(return_info_str)
-                        # 适配后端的一些额外处理
+                        # 检查 return_value 中是否有 status 字段（跳过操作会返回 {"status": "skipped"}）
                         return_value = return_info.get("return_value")
+                        if isinstance(return_value, dict) and "status" in return_value:
+                            status = return_value["status"]
+                        # 适配后端的一些额外处理
                         if isinstance(return_value, dict):
                             unilabos_samples = return_value.pop(RETURN_UNILABOS_SAMPLES, None)
                             if isinstance(unilabos_samples, list) and unilabos_samples:
@@ -957,7 +961,7 @@ class HostNode(BaseROS2DeviceNode):
                                 )
                                 return_info["samples"] = unilabos_samples
                         suc = return_info.get("suc", False)
-                        if not suc:
+                        if not suc and status == "success":
                             status = "failed"
                     except json.JSONDecodeError:
                         status = "failed"
@@ -1699,7 +1703,9 @@ class HostNode(BaseROS2DeviceNode):
         else:
             self.lab_logger().warning("⚠️ 收到无效的Pong响应（缺少ping_id）")
 
-    def notify_resource_tree_update(self, device_id: str, action: str, resource_uuid_list: List[str]) -> bool:
+    def notify_resource_tree_update(
+        self, device_id: str, action: str, resource_uuid_list: List[str]
+    ) -> Optional[bool]:
         """
         通知设备节点更新资源树
 
@@ -1709,13 +1715,14 @@ class HostNode(BaseROS2DeviceNode):
             resource_uuid_list: 资源UUIDs
 
         Returns:
-            bool: 操作是否成功
+            True if the update completed, False if it failed, None if it was intentionally skipped.
         """
         try:
-            # 检查设备是否存在
             if device_id not in self.devices_names:
-                self.lab_logger().error(f"[Host Node-Resource] Device {device_id} not found in devices_names")
-                return False
+                self.lab_logger().info(
+                    f"[Host Node-Resource] 在线增加设备暂不支持，跳过设备 {device_id} 的资源树 {action} 更新"
+                )
+                return None
 
             namespace = self.devices_names[device_id]
             device_key = f"{namespace}/{device_id}"

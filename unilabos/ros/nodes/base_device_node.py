@@ -45,6 +45,7 @@ from unilabos.resources.graphio import (
 )
 from unilabos.resources.plr_additional_res_reg import register
 from unilabos.ros.msgs.message_converter import (
+    String,
     convert_to_ros_msg,
     convert_from_ros_msg_with_mapping,
     convert_to_ros_msg_with_mapping,
@@ -250,7 +251,8 @@ class PropertyPublisher:
     ):
         self.node = node
         self.name = name
-        self.msg_type = msg_type
+        self.msg_type = self._normalize_msg_type(msg_type)
+        self.original_msg_type = msg_type
         self.get_method = get_method
         self.timer_period = initial_period
         self.print_publish = print_publish
@@ -258,15 +260,35 @@ class PropertyPublisher:
 
         self._value = None
         try:
-            self.publisher_ = node.create_publisher(msg_type, f"{name}", qos)
+            self.publisher_ = node.create_publisher(self.msg_type, f"{name}", qos)
         except Exception as e:
             self.node.lab_logger().error(
-                f"StatusError, DeviceId: {self.node.device_id} 创建发布者 {name} 失败，可能由于注册表有误，类型: {msg_type}，错误: {e}"
+                f"StatusError, DeviceId: {self.node.device_id} 创建发布者 {name} 失败，"
+                f"可能由于注册表有误，类型: {msg_type}，错误: {e}"
             )
+            self.msg_type = String
+            try:
+                self.publisher_ = node.create_publisher(self.msg_type, f"{name}", qos)
+                self.node.lab_logger().warning(
+                    f"属性 {name} 的发布类型已降级为 String，原始类型: {msg_type}"
+                )
+            except Exception:
+                self.publisher_ = None
         self.timer = node.create_timer(self.timer_period, self.publish_property)
         self.__loop = ROS2DeviceNode.get_asyncio_loop()
-        str_msg_type = str(msg_type)[8:-2]
+        str_msg_type = str(self.msg_type)[8:-2]
         self.node.lab_logger().trace(f"发布属性: {name}, 类型: {str_msg_type}, 周期: {initial_period}秒, QoS: {qos}")
+
+    @staticmethod
+    def _normalize_msg_type(msg_type):
+        if msg_type in (dict, list, tuple, set) or msg_type in ("dict", "list", "tuple", "set"):
+            return String
+        return msg_type
+
+    def _normalize_value(self, value):
+        if self.msg_type is String and isinstance(value, (dict, list, tuple, set)):
+            return json.dumps(value, ensure_ascii=False, cls=TypeEncoder)
+        return value
 
     def get_property(self):
         if asyncio.iscoroutinefunction(self.get_method):
@@ -302,12 +324,16 @@ class PropertyPublisher:
                 pass
                 # self.node.lab_logger().trace(f"【.publish_property】发布 {self.msg_type}: {value}")
             if value is not None:
+                if self.publisher_ is None:
+                    return
+                value = self._normalize_value(value)
                 msg = convert_to_ros_msg(self.msg_type, value)
                 self.publisher_.publish(msg)
                 # self.node.lab_logger().trace(f"【.publish_property】属性 {self.name} 发布成功")
         except Exception as e:
+            topic = getattr(self.publisher_, "topic", self.name)
             self.node.lab_logger().error(
-                f"【.publish_property】发布属性 {self.publisher_.topic} 出错: {str(e)}\n{traceback.format_exc()}"
+                f"【.publish_property】发布属性 {topic} 出错: {str(e)}\n{traceback.format_exc()}"
             )
 
     def change_frequency(self, period):
@@ -1567,6 +1593,7 @@ class BaseROS2DeviceNode(Node, Generic[T]):
                     f"未预期异常: {type(e).__name__}: {e}",
                     suggested_actions=[
                         UserAction("retry", "重试", "重新执行"),
+                        UserAction("skip", "跳过", "跳过当前操作继续执行"),
                         UserAction("abort", "终止", "终止任务"),
                     ],
                     cause=e,
@@ -1576,19 +1603,19 @@ class BaseROS2DeviceNode(Node, Generic[T]):
                 decision = await self._handle_device_exception(wrapped, action_name, task_id, job_id)
 
             action = decision.get("action", "abort")
-            self.get_logger().info(f"[DEBUG] 用户决策 action={action}, reason={decision.get('reason', '')}")
+            self.lab_logger().debug(f"用户决策 action={action}, reason={decision.get('reason', '')}")
 
             if action == "retry":
-                self.get_logger().info(f"[DEBUG] 执行 retry，重新执行动作")
+                self.lab_logger().debug("执行 retry，重新执行动作")
                 continue
             if action == "skip":
-                self.get_logger().info(f"[DEBUG] 执行 skip，跳过动作")
+                self.lab_logger().debug("执行 skip，跳过动作")
                 return {"status": "skipped", "reason": decision.get("reason", "user_skip")}
             if action == "manual_fix":
-                self.get_logger().info(f"[DEBUG] 执行 manual_fix，重新执行动作")
+                self.lab_logger().debug("执行 manual_fix，重新执行动作")
                 continue
             if action == "abort":
-                self.get_logger().info(f"[DEBUG] 执行 abort，终止任务")
+                self.lab_logger().debug("执行 abort，终止任务")
                 raise exc
 
             # 自定义 action: 找 handler
@@ -1599,7 +1626,7 @@ class BaseROS2DeviceNode(Node, Generic[T]):
                     break
 
             if matched is None or matched.handler is None:
-                self.get_logger().warning(
+                self.lab_logger().warning(
                     f"未知决策 action={action} 且无 handler,fallback 为 abort"
                 )
                 raise exc
@@ -1647,20 +1674,20 @@ class BaseROS2DeviceNode(Node, Generic[T]):
             task_id=task_id,
             job_id=job_id,
         )
-        self.get_logger().error(
+        self.lab_logger().error(
             f"[DeviceException] {action_name} 抛出 {type(exc).__name__}: {exc.message}"
         )
 
         ws_client = self._get_ws_client()
         ws_client.publish_device_exception_alarm(alarm_data)
 
-        self.get_logger().info(f"[DEBUG] 开始等待用户决策: task_id={task_id}")
+        self.lab_logger().debug(f"开始等待用户决策: task_id={task_id}")
         try:
             decision = await self._wait_for_user_decision(task_id, exc)
-            self.get_logger().info(f"[DEBUG] _handle_device_exception 收到决策: {decision}")
+            self.lab_logger().debug(f"_handle_device_exception 收到决策: {decision}")
             return decision
         except asyncio.TimeoutError:
-            self.get_logger().warning(
+            self.lab_logger().warning(
                 f"[DeviceException] 用户决策超时,默认 abort: {action_name}"
             )
             return {"action": "abort", "reason": "user_decision_timeout"}
@@ -1673,26 +1700,28 @@ class BaseROS2DeviceNode(Node, Generic[T]):
         self._pending_decisions[key] = fut
         try:
             result = await asyncio.wait_for(fut, timeout=self._user_decision_timeout)
-            self.get_logger().info(f"[DEBUG] _wait_for_user_decision 返回: {result}")
+            self.lab_logger().debug(f"_wait_for_user_decision 返回: {result}")
             return result
         finally:
             self._pending_decisions.pop(key, None)
 
     def handle_user_decision(self, task_id: str, decision: dict):
         """由 ws_client 在收到 device_exception_decision 时调用"""
-        self.get_logger().info(f"[DEBUG] 收到用户决策: task_id={task_id}, decision={decision}")
+        self.lab_logger().debug(f"收到用户决策: task_id={task_id}, decision={decision}")
         for key in list(self._pending_decisions.keys()):
             if key.startswith(f"{task_id}:"):
                 fut = self._pending_decisions[key]
                 if not fut.done():
-                    self.get_logger().info(f"[DEBUG] 设置 Future 结果: key={key}")
+                    self.lab_logger().debug(f"设置 Future 结果: key={key}")
                     # 使用 call_soon_threadsafe 确保跨线程安全地设置结果
                     fut.get_loop().call_soon_threadsafe(fut.set_result, decision)
                 else:
-                    self.get_logger().warning(f"[DEBUG] Future 已完成: key={key}")
+                    self.lab_logger().warning(f"Future 已完成: key={key}")
                 break
         else:
-            self.get_logger().warning(f"[DEBUG] 未找到匹配的 pending_decision, task_id={task_id}, 当前 keys={list(self._pending_decisions.keys())}")
+            self.lab_logger().warning(
+                f"未找到匹配的 pending_decision, task_id={task_id}, 当前 keys={list(self._pending_decisions.keys())}"
+            )
 
     def _get_ws_client(self):
         """获取通信客户端(单例),节点无法直接持有 ws_client 时通过工厂取得"""
@@ -1811,8 +1840,8 @@ class BaseROS2DeviceNode(Node, Generic[T]):
                 ctx = getattr(self, "_current_job_context", None) or {}
                 task_id = (getattr(goal, "task_id", "") or "") or ctx.get("task_id", "") or ""
                 job_id = (getattr(goal, "job_id", "") or "") or ctx.get("job_id", "") or ""
-                self.get_logger().warn(
-                    f"[DEBUG-EXC-CTX] action={ACTION.__name__} task_id={task_id!r} job_id={job_id!r} ctx={ctx!r}"
+                self.lab_logger().debug(
+                    f"异常处理上下文 action={ACTION.__name__} task_id={task_id!r} job_id={job_id!r} ctx={ctx!r}"
                 )
 
                 async def _wrapped_action(**kwargs):
@@ -1949,8 +1978,14 @@ class BaseROS2DeviceNode(Node, Generic[T]):
                     _poll_future = Future()
 
                     def _on_sync_done(fut):
-                        if not _poll_future.done():
-                            _poll_future.set_result(None)
+                        async def _wake():
+                            if not _poll_future.done():
+                                _poll_future.set_result(None)
+
+                        # ThreadPoolExecutor callbacks run outside the rclpy executor.
+                        # Wake the awaiting action coroutine from the executor thread;
+                        # otherwise it may only resume when the executor naturally wakes up.
+                        rclpy.get_global_executor().create_task(_wake())
 
                     future.add_done_callback(_on_sync_done)
                     await _poll_future
@@ -2051,6 +2086,12 @@ class BaseROS2DeviceNode(Node, Generic[T]):
                         attr_name,
                         get_result_info_str(execution_error, execution_success, action_return_value),
                     )
+                elif attr_name == "status":
+                    # 如果 action_return_value 包含 status 字段（如 skipped），则使用它
+                    if isinstance(action_return_value, dict) and "status" in action_return_value:
+                        setattr(result_msg, attr_name, action_return_value["status"])
+                    else:
+                        setattr(result_msg, attr_name, "success" if execution_success else "failed")
 
             self.lab_logger().trace(f"动作 {action_name} 完成并返回结果")
             return result_msg
