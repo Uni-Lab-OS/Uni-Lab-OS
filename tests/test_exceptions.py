@@ -1,5 +1,5 @@
 """设备异常体系单测"""
-from unilabos.devices.exceptions import (
+from unilabos.utils.exception import (
     DeviceException,
     DeviceExceptionCategory,
     DeviceExceptionSeverity,

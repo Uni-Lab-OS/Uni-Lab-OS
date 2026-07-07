@@ -431,7 +431,7 @@ def action(
                     return cfuture.result()
                 except _asyncio.TimeoutError as e:
                     # 延迟 import 避免循环依赖
-                    from unilabos.devices.exceptions import TimeoutException
+                    from unilabos.utils.exception import TimeoutException
                     # 采集设备快照（self 在 args[0]），失败不影响异常抛出
                     snapshot = {}
                     if args and hasattr(args[0], "_get_device_snapshot"):

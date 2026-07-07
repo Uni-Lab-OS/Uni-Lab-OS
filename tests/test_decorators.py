@@ -12,7 +12,7 @@ import asyncio
 
 import pytest
 
-from unilabos.devices.exceptions import TimeoutException
+from unilabos.utils.exception import TimeoutException
 from unilabos.registry.decorators import (
     action,
     get_action_meta,

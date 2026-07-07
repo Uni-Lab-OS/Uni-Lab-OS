@@ -79,3 +79,14 @@ if status in ["success", "failed", "skipped"]:  # 之前只有 success 和 faile
 
 **知识点**：状态传递链路中任何一层的硬编码或遗漏都会导致状态丢失。需要追踪完整的数据流：Edge → HostNode → WebSocket → Backend → Frontend。
 
+
+### EARS — Session Start (2026-07-06 15:42)
+<!-- concepts: exception-handling, project-structure, module-organization -->
+- Task: 评估 unilabos/devices/exceptions.py 放在项目中的合适位置
+- Why: 用户希望重构异常处理相关文件的存放位置，让代码结构更合理，便于后续开发
+
+
+### EARS — Progress (2026-07-06 15:50)
+<!-- concepts: exception-handling, module-organization, refactoring -->
+把 `unilabos/devices/exceptions.py` (框架级异常, 220 行) 合并到 `unilabos/utils/exception.py` (原本只有 DeviceClassInvalid 一个类), 让框架级异常和加载期异常 (DeviceClassInvalid) 集中管理。已删除旧文件, 正在批量改 6 处 import。发现 DeviceClassInvalid 在 host_node.py:650 和 initialize_device.py:31/33/36 有 4 处实际使用点, 保留而非删除。方案理由: devices/ 目录本是驱动层, 框架级异常放这里违反分层, utils/ 才是框架基础设施的正确归属。
+

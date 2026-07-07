@@ -12,7 +12,7 @@ from typing import Any, Dict, List, Optional
 
 from typing_extensions import TypedDict
 
-from unilabos.devices.exceptions import (
+from unilabos.utils.exception import (
     EmergencyStopError,
     ModbusConnectionError,
     PLCStepTimeout,

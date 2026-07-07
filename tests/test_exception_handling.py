@@ -12,7 +12,7 @@ from unittest.mock import MagicMock
 
 import pytest
 
-from unilabos.devices.exceptions import (
+from unilabos.utils.exception import (
     DeviceException,
     ModbusConnectionError,
     TipPickupError,

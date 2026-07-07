@@ -1572,7 +1572,7 @@ class BaseROS2DeviceNode(Node, Generic[T]):
         - 通用 action: retry/skip/manual_fix/abort
         - 自定义 action: 在 exc.suggested_actions 中查 handler,按 then 决定下一步
         """
-        from unilabos.devices.exceptions import DeviceException, UserAction
+        from unilabos.utils.exception import DeviceException, UserAction
 
         iteration = 0
         exc: Optional[DeviceException] = None
@@ -1861,7 +1861,7 @@ class BaseROS2DeviceNode(Node, Generic[T]):
                                 _wrapped_action(**kwargs), timeout=action_timeout
                             )
                         except asyncio.TimeoutError as e:
-                            from unilabos.devices.exceptions import TimeoutException
+                            from unilabos.utils.exception import TimeoutException
                             raise TimeoutException(
                                 f"动作 {ACTION.__name__} 执行超时 (>{action_timeout}s)",
                                 cause=e,
