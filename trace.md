@@ -90,3 +90,49 @@ if status in ["success", "failed", "skipped"]:  # 之前只有 success 和 faile
 <!-- concepts: exception-handling, module-organization, refactoring -->
 把 `unilabos/devices/exceptions.py` (框架级异常, 220 行) 合并到 `unilabos/utils/exception.py` (原本只有 DeviceClassInvalid 一个类), 让框架级异常和加载期异常 (DeviceClassInvalid) 集中管理。已删除旧文件, 正在批量改 6 处 import。发现 DeviceClassInvalid 在 host_node.py:650 和 initialize_device.py:31/33/36 有 4 处实际使用点, 保留而非删除。方案理由: devices/ 目录本是驱动层, 框架级异常放这里违反分层, utils/ 才是框架基础设施的正确归属。
 
+
+### EARS — Progress (2026-07-07 16:32)
+<!-- concepts: exception-handling, exec-loop-refactor, decision-loop -->
+- Step 0 主体完成：`base_device_node.py` 三个 helper (`_execute_with_exception_handling` / `_handle_device_exception` / `_wait_for_user_decision`) 已删除，压平为一个 `_run_action_with_decision_loop` 方法（for-except 循环 + alarm 上报 + Future 等待 + 决策分派 一体化）
+- 关键设计决定：
+  - `except Exception` 统一捕获，判类型时用 `isinstance(exc, DeviceException)` 分派 alarm 序列化格式（DeviceException 走 `to_alarm_dict()`，其他 Exception 走内联兜底 dict）
+  - **不再 wrap 成 DeviceException**：普通 Exception 直接进入决策流，`raise`（裸抛）保留原始 traceback
+  - handler 抛错不 catch —— 让它自然冒泡回 for-except 顶端（删除了原本手抄的 `next_decision` 分派逻辑）
+  - `handle_user_decision` (public ws 回调) 和 `_get_ws_client` 保留不动
+- 待处理：line 1872 / 2349 两处调用点需改名（`_execute_with_exception_handling` → `_run_action_with_decision_loop`），`tests/test_exception_handling.py` 的 FakeNode 需同步压平
+
+### EARS — Progress (2026-07-07 16:32)
+<!-- concepts: exception-handling, exec-loop-refactor -->
+- Step 0 base_device_node.py 4 处 edit 全部完成，非 thrashing 而是有序推进：
+  1. helper 三合一压平（1555-1725 → `_run_action_with_decision_loop`）
+  2. 传统 ROS action server 调用点改名（原 line 1872）
+  3. JSON command 调用点改名（原 line 2349）
+  4. 注释里 `_execute_with_exception_handling` 提及改名（原 line 1835）
+- grep 确认全库无残留 `_execute_with_exception_handling` / `_handle_device_exception` / `_wait_for_user_decision`（tests 里还有 FakeNode 自己的定义，那是独立复刻，下一步同步）
+
+### EARS — Progress (2026-07-07 16:42)
+<!-- concepts: exception-handling, error-policy, registry-propagation, ws-protocol -->
+按 `action-timeout-reporting_9983aa0d.plan.md` 推进 Step 1-5:
+- Step 1: 新建 `unilabos/registry/action_policy.py`(ErrorPolicy / ErrorPolicyOption TypedDict + normalize_error_policy 剔除 callable handler + collect_option_handlers 保留 handler 映射)
+- Step 2: `@action` 加 `execution_timeout` / `error_policy`,写入 `_action_registry_meta`;handler 单独挂 `_action_error_policy` 到 wrapper(callable 不进 registry cache)
+- Step 3: AST scanner `_CACHE_VERSION` 升到 4;action_args setdefault 补齐;error_policy.options 里的 handler 字段被剔除(AST 阶段 handler 会被解析为 import 字符串)
+- Step 4: registry.py 新增 `_apply_exception_meta` 辅助函数,统一给 UniLabJsonCommand 和 ROS Action 两条构建路径注入 timeout/execution_timeout/exception_handling/default_on_user_timeout/error_policy
+- Step 5(进行中): ws_client 协议迁移 `device_exception_decision` -> `job_error_decision`
+- 29 个测试仍全绿
+
+### EARS — Progress (2026-07-07 16:52)
+<!-- concepts: exception-handling, decision-loop, error-policy, ws-protocol, suc-type -->
+Step 5-7 完成:
+- Step 5: ws_client 协议 `device_exception_alarm` -> `job_error_decision_required` (上行), `device_exception_decision` -> `job_error_decision` (下行);同步更新 base_device_node 调用点和 test mocks
+- Step 6: `_run_action_with_decision_loop` 扩参 (error_policy + option_handlers),从 policy 读 max_retries/decision_timeout_seconds/default_on_decision_timeout/allow_retry/allow_skip/options;alarm 的 category/severity 也走 policy 兜底。两条调用点(传统 ROS action + JSON command)都传入 `normalize_error_policy(ACTION._action_error_policy)` 与 `collect_option_handlers(...)`。
+- 新增 4 个测试覆盖:max_retries 覆盖、default_on_decision_timeout=skip 场景、policy.options + option_handlers 装配 handler、allow_skip=False 时 skip 语义仍生效
+- 关键教训:`DeviceException.__init__` 用 `suggested_actions or self._default_actions()`,`[]` 是 falsy,子类实例默认永远非空,想验证 fallback 分支必须用非 DeviceException
+- Step 7 起步:`serialize_result_info` / `get_result_info_str` 加 `suc_type` 可选 kwarg,只有非空才写入 dict(保持旧字段兼容)
+- 33 个测试全绿
+
+### EARS — Progress (2026-07-07 17:54)
+<!-- concepts: error-policy, fault-injection-driver, decision-loop -->
+- fault_injection_device.py 新增 `raise_with_policy_options` @action + `shutdown` / `manual_check` 两个 @not_action fallback,专门覆盖 `error_policy.options` **声明式**决策路径(优先级 2,当前测试驱动此前 0 覆盖)
+- 关键前提确认:`_run_action_with_decision_loop` 里 options 三级优先级 = 实例 suggested_actions > policy.options > 兜底。要触发 policy 路径,必须抛**非 DeviceException**(用 `ValueError` 干净),否则 `DeviceException._default_actions()` 永远非空,policy.options 被吞
+- 覆盖了 `fallback_action` 字符串映射 + `then=continue`(fallback 结果直接作为 action 结果)与 `then=retry`(fallback 后重跑原 action)两种典型行为,搭配 `max_retries=5` / `decision_timeout_seconds=120` / `default_on_decision_timeout=abort` 三个 policy 级参数
+- 用户澄清:此前误以为 `fault_injection_device.py` 是按 `action-timeout-reporting_9983aa0d.plan.md` 写的,实际是按 `02_decorator_based_plan.md`(DeviceException + UserAction 方案)。两套 API 并存,协议名相同 (`job_error_decision_required` / `job_error_decision`)

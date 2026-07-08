@@ -219,5 +219,63 @@ class FaultInjectionDevice:
             message="急停按钮已触发 (模拟-同步)",
         )
 
+    # =========== error_policy.options 声明式选项专用测试 ===========
+    #
+    # 关键点:抛普通 Exception(非 DeviceException),也不带 suggested_actions,
+    # decision loop 优先级会跳过实例式,直接使用 @action(error_policy=...).options,
+    # 前端弹窗按钮完全由 policy 决定,fallback_action 字符串映射到本 driver 上的方法名。
+
+    @action(
+        description="声明式 options 测试:普通异常由 error_policy 提供多种自定义按钮",
+        error_policy={
+            "allow_retry": True,
+            "allow_skip": True,
+            "severity": "error",
+            "category": "parameter",
+            "max_retries": 5,
+            "decision_timeout_seconds": 120,
+            "default_on_decision_timeout": "abort",
+            "options": [
+                {
+                    "action": "shutdown",
+                    "label": "关机",
+                    "description": "调用 shutdown fallback 后作为 action 结果直接返回",
+                    "fallback_action": "shutdown",
+                    "then": "continue",   # fallback 结果直接作为 action 结果,不再重试
+                },
+                {
+                    "action": "manual_fix",
+                    "label": "现场处理",
+                    "description": "调用 manual_check fallback,完成后重试原 action",
+                    "fallback_action": "manual_check",
+                    "then": "retry",      # fallback 完成后重跑原 action
+                },
+            ],
+        },
+    )
+    async def raise_with_policy_options(self) -> SimpleResult:
+        """专门测试 error_policy.options 声明式选项。
+
+        预期前端弹窗按钮:重试 / 跳过 / 关机 / 现场处理
+        - 重试: Edge 重跑本方法,继续 raise ValueError,再次弹窗
+        - 跳过: return_info.suc=True, suc_type=user_bypass_error
+        - 关机: 调 self.shutdown() → then=continue → 直接以其返回值结束
+        - 现场处理: 调 self.manual_check() → then=retry → 重跑本方法
+        """
+        self.logger.warning("[fault_injection] 抛 ValueError,交给 error_policy.options 决策")
+        raise ValueError("参数越界 (模拟-policy)")
+
+    @not_action
+    async def shutdown(self, **kwargs) -> Dict[str, Any]:
+        """error_policy.options.fallback_action='shutdown' 目标方法"""
+        self.logger.info("[fault_injection] shutdown fallback 执行")
+        return {"success": True, "fallback": "shutdown", "shutdown": True}
+
+    @not_action
+    async def manual_check(self, **kwargs) -> Dict[str, Any]:
+        """error_policy.options.fallback_action='manual_check' 目标方法"""
+        self.logger.info("[fault_injection] manual_check fallback 执行")
+        return {"success": True, "fallback": "manual_check"}
+
 # unilab --graph unilabos/test/experiments/fault_injection.json --config unilabos/test/experiments/fault_injection_config.py --ak a3d111bb-571a-4548-aa5d-c58ccca64466 --sk c2450c73-e84c-4319-b25f-b5cc4d575e7e --upload_registry --addr http://127.0.0.1:48197/api/v1
 # unilab --graph unilabos/test/experiments/fault_injection.json --ak 27a95f0d-d332-4782-8aa9-ce1de6899bb4 --sk ddd976e9-f1b4-452c-9165-ceb8007aa7a6 --upload_registry --addr test --disable_browser

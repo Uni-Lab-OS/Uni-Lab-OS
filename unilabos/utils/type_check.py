@@ -1,7 +1,7 @@
 import collections.abc
 import json
 from collections import OrderedDict
-from typing import get_origin, get_args
+from typing import get_origin, get_args, Optional
 
 import yaml
 
@@ -68,7 +68,7 @@ class ResultInfoEncoder(json.JSONEncoder):
             return str(obj)
 
 
-def get_result_info_str(error: str, suc: bool, return_value=None) -> str:
+def get_result_info_str(error: str, suc: bool, return_value=None, *, suc_type: Optional[str] = None) -> str:
     """
     序列化任务执行结果信息
 
@@ -76,22 +76,21 @@ def get_result_info_str(error: str, suc: bool, return_value=None) -> str:
         error: 错误信息字符串
         suc: 是否成功的布尔值
         return_value: 返回值，可以是任何类型
+        suc_type: 成功语义标签（如 "user_bypass_error"），仅在非默认值时写入,
+                  用于上层区分"正常成功"与"用户跳过异常成功"等场景
 
     Returns:
         JSON字符串格式的结果信息
     """
-    # 请在返回的字典中使用 unilabos_samples进行返回
-    # samples = None
-    # if isinstance(return_value, dict):
-    #     if "samples" in return_value and type(return_value["samples"]) in [list, tuple] and type(return_value["samples"][0]) == dict:
-    #         samples = return_value.pop("samples")
     result_info = {"error": error, "suc": suc, "return_value": return_value}
+    if suc_type:
+        result_info["suc_type"] = suc_type
 
     return json.dumps(result_info, ensure_ascii=False, cls=ResultInfoEncoder)
 
 
 
-def serialize_result_info(error: str, suc: bool, return_value=None) -> dict:
+def serialize_result_info(error: str, suc: bool, return_value=None, *, suc_type: Optional[str] = None) -> dict:
     """
     序列化任务执行结果信息
 
@@ -99,10 +98,13 @@ def serialize_result_info(error: str, suc: bool, return_value=None) -> dict:
         error: 错误信息字符串
         suc: 是否成功的布尔值
         return_value: 返回值，可以是任何类型
+        suc_type: 成功语义标签（如 "user_bypass_error"），仅在非默认值时写入
 
     Returns:
         JSON字符串格式的结果信息
     """
     result_info = {"error": error, "suc": suc, "return_value": return_value}
+    if suc_type:
+        result_info["suc_type"] = suc_type
 
     return json.loads(json.dumps(result_info, ensure_ascii=False, cls=ResultInfoEncoder))

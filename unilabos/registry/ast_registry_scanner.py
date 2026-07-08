@@ -33,7 +33,7 @@ from typing import Any, Dict, List, Optional, Tuple, Union
 
 MAX_SCAN_DEPTH = 10      # 最大目录递归深度
 MAX_SCAN_FILES = 1000    # 最大扫描文件数量
-_CACHE_VERSION = 3       # 缓存格式版本号，格式变更时递增
+_CACHE_VERSION = 4       # 缓存格式版本号，格式变更时递增
 _DEVICE_ID_RE = re.compile(r"^[A-Za-z0-9_]+$")
 
 # 合法的装饰器来源模块
@@ -845,6 +845,19 @@ def _extract_class_body(
             action_args.setdefault("description", "")
             action_args.setdefault("auto_prefix", False)
             action_args.setdefault("parent", False)
+            action_args.setdefault("timeout", None)
+            action_args.setdefault("exception_handling", True)
+            action_args.setdefault("default_on_user_timeout", "abort")
+            action_args.setdefault("execution_timeout", None)
+            action_args.setdefault("error_policy", None)
+            # AST 提取时 error_policy.options[*].handler 会被解析为 import 字符串
+            # 而不是可调用对象,注册表里剔除,避免误导消费方
+            ep = action_args.get("error_policy")
+            if isinstance(ep, dict) and isinstance(ep.get("options"), list):
+                ep["options"] = [
+                    {k: v for k, v in opt.items() if k != "handler"}
+                    for opt in ep["options"] if isinstance(opt, dict)
+                ]
             method_params = _extract_method_params(item, import_map)
             return_type = _get_annotation_str(item.returns, import_map)
             is_async = isinstance(item, ast.AsyncFunctionDef)

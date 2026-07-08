@@ -963,6 +963,11 @@ class HostNode(BaseROS2DeviceNode):
                         suc = return_info.get("suc", False)
                         if not suc and status == "success":
                             status = "failed"
+                        if return_info.get("suc_type") == "user_bypass_error":
+                            self.lab_logger().warning(
+                                f"[Host Node] Job {job_id[:8]} ({action_id}) 用户跳过异常继续："
+                                f"return_value={return_value}"
+                            )
                     except json.JSONDecodeError:
                         status = "failed"
                         return_info = serialize_result_info("", False, result_data)

@@ -781,8 +781,8 @@ class MessageProcessor:
                 await self._handle_device_manage(message_data, "remove")
             elif message_type == "request_restart":
                 await self._handle_request_restart(message_data)
-            elif message_type == "device_exception_decision":
-                await self._on_device_exception_decision(message_data)
+            elif message_type == "job_error_decision":
+                await self._on_job_error_decision(message_data)
             elif message_type == "host_node_ready_response":
                 await self._handle_host_ready_response(message_data)
             else:
@@ -1331,7 +1331,7 @@ class MessageProcessor:
         cleanup_thread.start()
         logger.info(f"[MessageProcessor] Restart cleanup scheduled")
 
-    async def _on_device_exception_decision(self, data: Dict[str, Any]):
+    async def _on_job_error_decision(self, data: Dict[str, Any]):
         """处理后端转发的用户决策,路由到对应 device_node.handle_user_decision"""
         task_id = data.get("task_id", "")
         device_id = data.get("device_id", "")
@@ -1960,17 +1960,21 @@ class WebSocketClient(BaseCommunicationClient):
 
         logger.trace(f"[WebSocketClient] Job status published: {job_log} - {status}")
 
-    def publish_device_exception_alarm(self, alarm_data: dict) -> None:
-        """上行: 推送设备异常报警到后端"""
+    def publish_job_error_decision_required(self, alarm_data: dict) -> None:
+        """上行: 推送需要用户处理的设备异常到后端
+
+        后端应据此在通知抽屉里生成 biz_type=device_exception 通知,并把
+        `suggested_actions` 展示给用户;用户点击后回传 `job_error_decision`。
+        """
         if self.is_disabled or not self.is_connected():
             logger.warning(
                 f"[WebSocketClient] 未连接,无法推送设备异常: {alarm_data.get('device_id')} - {alarm_data.get('action_name')}"
             )
             return
-        message = {"action": "device_exception_alarm", "data": alarm_data}
+        message = {"action": "job_error_decision_required", "data": alarm_data}
         self.message_processor.send_message(message)
         logger.info(
-            f"[WebSocketClient] device_exception_alarm: {alarm_data.get('device_id')} {alarm_data.get('exception_type')}"
+            f"[WebSocketClient] job_error_decision_required: {alarm_data.get('device_id')} {alarm_data.get('exception_type')}"
         )
 
     def send_ping(self, ping_id: str, timestamp: float) -> None:

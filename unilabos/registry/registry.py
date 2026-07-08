@@ -830,6 +830,25 @@ class Registry:
         # --- action_value_mappings ---
         action_value_mappings: Dict[str, Any] = {}
 
+        def _apply_exception_meta(entry: Dict[str, Any], action_args: Optional[Dict[str, Any]]) -> None:
+            """把 @action 上的异常处理相关 meta 透传到 registry entry.
+
+            这些字段在 base_device_node._run_action_with_decision_loop 里被消费。
+            规则:非默认值才写入,保持 entry 精简。
+            """
+            if not action_args:
+                return
+            if action_args.get("timeout") is not None:
+                entry["timeout"] = action_args["timeout"]
+            if action_args.get("execution_timeout") is not None:
+                entry["execution_timeout"] = action_args["execution_timeout"]
+            if action_args.get("exception_handling") is False:
+                entry["exception_handling"] = False
+            if action_args.get("default_on_user_timeout") not in (None, "abort"):
+                entry["default_on_user_timeout"] = action_args["default_on_user_timeout"]
+            if action_args.get("error_policy"):
+                entry["error_policy"] = action_args["error_policy"]
+
         def _build_json_command_entry(method_name, method_info, action_args=None):
             """构建 UniLabJsonCommand 类型的 action entry"""
             is_async = method_info.get("is_async", False)
@@ -906,6 +925,7 @@ class Registry:
             nt = normalize_enum_value((action_args or {}).get("node_type"), NodeType)
             if nt:
                 entry["node_type"] = nt
+            _apply_exception_meta(entry, action_args)
             return action_name, entry
 
         # 1) auto- actions
@@ -1042,6 +1062,7 @@ class Registry:
             nt = normalize_enum_value(action_args.get("node_type"), NodeType)
             if nt:
                 action_entry["node_type"] = nt
+            _apply_exception_meta(action_entry, action_args)
             goal_schema_for_docs = action_entry.get("schema", {}).get("properties", {}).get("goal", {})
             self._apply_docstring_param_metadata(
                 goal_schema_for_docs,

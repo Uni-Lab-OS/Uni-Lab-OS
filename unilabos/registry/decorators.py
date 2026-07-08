@@ -360,6 +360,8 @@ def action(
     timeout: Optional[float] = None,
     exception_handling: bool = True,
     default_on_user_timeout: str = "abort",
+    execution_timeout: Optional[float] = None,
+    error_policy: Optional[Dict[str, Any]] = None,
 ):
     """
     动作方法装饰器
@@ -396,6 +398,11 @@ def action(
                  TimeoutException 走异常处理流程
         exception_handling: 是否启用异常处理 + 用户决策回环 (默认 True)
         default_on_user_timeout: 用户决策超时时默认动作 ("abort"/"retry"/"skip")
+        execution_timeout: 动作执行超时秒数 (业务层),超时后作为一种异常进入
+                           error_policy 决策流程。与 timeout 的区别:timeout 是
+                           asyncio.wait_for 硬超时;execution_timeout 允许通过
+                           sync_uncancellable=True 保留同步线程继续跑。
+        error_policy: 错误处理策略,详见 unilabos.registry.action_policy.ErrorPolicy
     """
 
     def decorator(func: F) -> F:
@@ -478,10 +485,20 @@ def action(
             meta["exception_handling"] = exception_handling
         if default_on_user_timeout != "abort":
             meta["default_on_user_timeout"] = default_on_user_timeout
+        if execution_timeout is not None:
+            meta["execution_timeout"] = execution_timeout
+        if error_policy:
+            from unilabos.registry.action_policy import normalize_error_policy
+            normalized = normalize_error_policy(error_policy)
+            if normalized:
+                meta["error_policy"] = normalized
         wrapper._action_registry_meta = meta  # type: ignore[attr-defined]
         # 框架层快速判断标记
         wrapper._exception_handling = exception_handling  # type: ignore[attr-defined]
         wrapper._action_timeout = timeout  # type: ignore[attr-defined]
+        wrapper._action_execution_timeout = execution_timeout  # type: ignore[attr-defined]
+        # error_policy 里的 handler 是 callable,无法进 registry cache,单独挂在 wrapper 上
+        wrapper._action_error_policy = error_policy  # type: ignore[attr-defined]
 
         # 设置 _is_always_free 保持与旧 @always_free 装饰器兼容
         if always_free:

@@ -1556,157 +1556,167 @@ class BaseROS2DeviceNode(Node, Generic[T]):
     # 设备异常处理 - 用户决策回环
     # ================================================================
 
-    async def _execute_with_exception_handling(
+    async def _run_action_with_decision_loop(
         self,
         action_func,
         action_name: str,
         task_id: str,
         job_id: str,
         action_kwargs: dict,
-        max_user_iterations: int = 10,
+        max_iterations: int = 10,
+        error_policy: Optional[dict] = None,
+        option_handlers: Optional[dict] = None,
     ) -> Any:
-        """带异常处理 + 用户决策回环的动作执行主循环
+        """带异常处理 + 用户决策回环的动作执行主循环 (压平版)
 
-        - DeviceException 抛出 → 推送报警 → 等待决策 → 分支
-        - 其他异常 → 包装为 UNKNOWN DeviceException 后同样流程
-        - 通用 action: retry/skip/manual_fix/abort
-        - 自定义 action: 在 exc.suggested_actions 中查 handler,按 then 决定下一步
+        - 抛任意 Exception → 上报 alarm → 等待决策 → retry / skip / manual_fix / abort / custom
+        - 决策来源优先级：exc.suggested_actions（实例式）> error_policy.options（声明式）> 兜底 [retry, skip, abort]
+        - 自定义 action 通过 exc.suggested_actions 找 handler；handler 在**下一轮 try 开头**执行，
+          其抛错被同一个 except 抓住自然重走决策（不用手抄分派）
+
+        error_policy 覆盖（None 时全部走默认）：
+          - max_retries → max_iterations
+          - decision_timeout_seconds → 决策等待秒数
+          - default_on_decision_timeout → 决策超时的默认 action（abort/retry/skip）
+          - allow_retry / allow_skip → 是否在兜底 options 里保留 retry / skip
+          - options → 声明式追加选项（与 option_handlers 里的 callable 对齐）
         """
         from unilabos.utils.exception import DeviceException, UserAction
 
-        iteration = 0
-        exc: Optional[DeviceException] = None
-        while True:
-            iteration += 1
-            if iteration > max_user_iterations:
-                raise DeviceException(
-                    f"动作 {action_name} 异常处理超过 {max_user_iterations} 轮,强制终止"
-                )
+        policy = error_policy or {}
+        opt_handlers = option_handlers or {}
+        max_iter = int(policy.get("max_retries", max_iterations))
+        decision_timeout = float(policy.get("decision_timeout_seconds", self._user_decision_timeout))
+        default_on_timeout = str(policy.get("default_on_decision_timeout", "abort"))
+        allow_retry = bool(policy.get("allow_retry", True))
+        allow_skip = bool(policy.get("allow_skip", True))
+        policy_options = policy.get("options") or []
 
+        def _build_fallback_actions():
+            """根据 policy 构造兜底 suggested_actions"""
+            items = []
+            if allow_retry:
+                items.append(UserAction("retry", "重试", "重新执行"))
+            if allow_skip:
+                items.append(UserAction("skip", "跳过", "跳过当前操作继续执行"))
+            for opt in policy_options:
+                if not isinstance(opt, dict):
+                    continue
+                act_key = opt.get("action")
+                if not isinstance(act_key, str) or act_key in ("retry", "skip", "abort"):
+                    continue
+                items.append(UserAction(
+                    action=act_key,
+                    label=opt.get("label", act_key),
+                    description=opt.get("description", ""),
+                    handler=opt_handlers.get(act_key),
+                    then=opt.get("then", "retry"),
+                ))
+            items.append(UserAction("abort", "终止", "终止任务"))
+            return items
+
+        # None 或 (handler_fn, prev_exc, decision, then)：下一轮 try 顶端要先跑的 handler
+        pending_handler = None
+
+        for _ in range(1, max_iter + 1):
             try:
+                # 有 pending handler：先跑它，抛错会被本 except 抓住自然重走决策
+                if pending_handler is not None:
+                    hfunc, prev_exc, decision, then = pending_handler
+                    pending_handler = None
+                    handler_result = await hfunc(exception=prev_exc, decision=decision)
+                    if then == "continue":
+                        return handler_result
+                    if then == "skip":
+                        return {"status": "skipped", "reason": f"after_{decision.get('action')}"}
+                    # then == "retry"(默认) 或未知：落到下面执行原 action
                 return await action_func(**action_kwargs)
-            except DeviceException as e:
-                exc = e
-                decision = await self._handle_device_exception(e, action_name, task_id, job_id)
-            except Exception as e:
-                wrapped = DeviceException(
-                    f"未预期异常: {type(e).__name__}: {e}",
-                    suggested_actions=[
-                        UserAction("retry", "重试", "重新执行"),
-                        UserAction("skip", "跳过", "跳过当前操作继续执行"),
-                        UserAction("abort", "终止", "终止任务"),
-                    ],
-                    cause=e,
+            except Exception as exc:
+                # 决策 options 来源优先级：实例 > policy 声明式 > 兜底
+                if isinstance(exc, DeviceException) and exc.suggested_actions:
+                    suggested = exc.suggested_actions
+                else:
+                    suggested = _build_fallback_actions()
+
+                # 构造 alarm dict：DeviceException 走原生序列化，其他 Exception 走兜底格式
+                if isinstance(exc, DeviceException):
+                    alarm_data = exc.to_alarm_dict(
+                        device_id=self.device_id,
+                        device_uuid=self.uuid,
+                        action_name=action_name,
+                        task_id=task_id,
+                        job_id=job_id,
+                    )
+                else:
+                    alarm_data = {
+                        "device_id": self.device_id,
+                        "device_uuid": self.uuid,
+                        "action_name": action_name,
+                        "task_id": task_id,
+                        "job_id": job_id,
+                        "exception_type": type(exc).__name__,
+                        "category": policy.get("category", "unknown"),
+                        "severity": policy.get("severity", "error"),
+                        "error_message": f"{type(exc).__name__}: {exc}",
+                        "suggested_actions": [
+                            {"action": a.action, "label": a.label, "description": a.description}
+                            for a in suggested
+                        ],
+                        "device_snapshot": {},
+                        "traceback": traceback.format_exc(),
+                        "require_confirmation": True,
+                    }
+
+                self.lab_logger().error(
+                    f"[Exception] {action_name} 抛出 {type(exc).__name__}: {exc}"
                 )
-                wrapped.traceback_str = traceback.format_exc()
-                exc = wrapped
-                decision = await self._handle_device_exception(wrapped, action_name, task_id, job_id)
+                self._get_ws_client().publish_job_error_decision_required(alarm_data)
 
-            action = decision.get("action", "abort")
-            self.lab_logger().debug(f"用户决策 action={action}, reason={decision.get('reason', '')}")
+                # 等待用户决策（Future 阻塞 + 超时兜底 abort）
+                loop = asyncio.get_event_loop()
+                fut: asyncio.Future = loop.create_future()
+                key = f"{task_id}:{str(exc)[:32]}"
+                self._pending_decisions[key] = fut
+                try:
+                    decision = await asyncio.wait_for(fut, timeout=decision_timeout)
+                except asyncio.TimeoutError:
+                    self.lab_logger().warning(
+                        f"[Exception] 用户决策超时,默认 {default_on_timeout}: {action_name}"
+                    )
+                    decision = {"action": default_on_timeout, "reason": "user_decision_timeout"}
+                finally:
+                    self._pending_decisions.pop(key, None)
 
-            if action == "retry":
-                self.lab_logger().debug("执行 retry，重新执行动作")
-                continue
-            if action == "skip":
-                self.lab_logger().debug("执行 skip，跳过动作")
-                return {"status": "skipped", "reason": decision.get("reason", "user_skip")}
-            if action == "manual_fix":
-                self.lab_logger().debug("执行 manual_fix，重新执行动作")
-                continue
-            if action == "abort":
-                self.lab_logger().debug("执行 abort，终止任务")
-                raise exc
-
-            # 自定义 action: 找 handler
-            matched: Optional[UserAction] = None
-            for ua in (exc.suggested_actions if isinstance(exc, DeviceException) else []):
-                if ua.action == action:
-                    matched = ua
-                    break
-
-            if matched is None or matched.handler is None:
-                self.lab_logger().warning(
-                    f"未知决策 action={action} 且无 handler,fallback 为 abort"
+                action = decision.get("action", "abort")
+                self.lab_logger().debug(
+                    f"用户决策 action={action}, reason={decision.get('reason', '')}"
                 )
-                raise exc
 
-            try:
-                handler_result = await matched.handler(exception=exc, decision=decision)
-            except DeviceException as he:
-                # handler 自身抛 DeviceException → 进入下一轮决策
-                exc = he
-                # 直接发起一次决策,然后回到主循环顶端按新决策处理
-                next_decision = await self._handle_device_exception(he, action_name, task_id, job_id)
-                # 把新决策塞回 action_func 重试前先处理:简化做法 — 复用 continue 让外层捕获
-                # 由于外层 try 已不再进入,这里手动处理 next_decision
-                action = next_decision.get("action", "abort")
-                if action == "retry" or action == "manual_fix":
+                if action in ("retry", "manual_fix"):
                     continue
                 if action == "skip":
-                    return {"status": "skipped", "reason": next_decision.get("reason", "user_skip")}
+                    return {"status": "skipped", "reason": decision.get("reason", "user_skip")}
                 if action == "abort":
-                    raise he
-                # 自定义 action 继续套用主循环逻辑:这里简化为 abort
-                raise he
+                    raise
 
-            then = matched.then
-            if then == "retry":
+                # 自定义 action：从 suggested 中找 handler，登记为 pending 让下一轮 try 开头跑
+                matched = next((ua for ua in suggested if ua.action == action), None)
+                if matched is None or matched.handler is None:
+                    self.lab_logger().warning(
+                        f"未知决策 action={action} 且无 handler,fallback 为 abort"
+                    )
+                    raise
+                pending_handler = (
+                    matched.handler, exc, decision, getattr(matched, "then", "retry") or "retry",
+                )
                 continue
-            if then == "skip":
-                return {"status": "skipped", "reason": f"after_{action}"}
-            if then == "continue":
-                return handler_result
-            continue
 
-    async def _handle_device_exception(
-        self,
-        exc,
-        action_name: str,
-        task_id: str,
-        job_id: str,
-    ) -> dict:
-        """推送异常报警并等待用户决策,超时默认 abort"""
-        alarm_data = exc.to_alarm_dict(
-            device_id=self.device_id,
-            device_uuid=self.uuid,
-            action_name=action_name,
-            task_id=task_id,
-            job_id=job_id,
+        raise DeviceException(
+            f"动作 {action_name} 异常处理超过 {max_iter} 轮,强制终止"
         )
-        self.lab_logger().error(
-            f"[DeviceException] {action_name} 抛出 {type(exc).__name__}: {exc.message}"
-        )
-
-        ws_client = self._get_ws_client()
-        ws_client.publish_device_exception_alarm(alarm_data)
-
-        self.lab_logger().debug(f"开始等待用户决策: task_id={task_id}")
-        try:
-            decision = await self._wait_for_user_decision(task_id, exc)
-            self.lab_logger().debug(f"_handle_device_exception 收到决策: {decision}")
-            return decision
-        except asyncio.TimeoutError:
-            self.lab_logger().warning(
-                f"[DeviceException] 用户决策超时,默认 abort: {action_name}"
-            )
-            return {"action": "abort", "reason": "user_decision_timeout"}
-
-    async def _wait_for_user_decision(self, task_id: str, exc) -> dict:
-        """通过 Future 阻塞等待用户决策"""
-        loop = asyncio.get_event_loop()
-        fut: asyncio.Future = loop.create_future()
-        key = f"{task_id}:{exc.message[:32]}"
-        self._pending_decisions[key] = fut
-        try:
-            result = await asyncio.wait_for(fut, timeout=self._user_decision_timeout)
-            self.lab_logger().debug(f"_wait_for_user_decision 返回: {result}")
-            return result
-        finally:
-            self._pending_decisions.pop(key, None)
 
     def handle_user_decision(self, task_id: str, decision: dict):
-        """由 ws_client 在收到 device_exception_decision 时调用"""
+        """由 ws_client 在收到 job_error_decision 时调用"""
         self.lab_logger().debug(f"收到用户决策: task_id={task_id}, decision={decision}")
         for key in list(self._pending_decisions.keys()):
             if key.startswith(f"{task_id}:"):
@@ -1832,11 +1842,18 @@ class BaseROS2DeviceNode(Node, Generic[T]):
             time_start = time.time()
             time_overall = 100
             future = None
-            # ──── 异常处理新路径:启用时走 _execute_with_exception_handling ────
+            # ──── 异常处理新路径:启用时走 _run_action_with_decision_loop ────
             from unilabos.registry.decorators import is_exception_handling_enabled, get_action_timeout
+            from unilabos.registry.action_policy import collect_option_handlers
             use_exception_handling = (not error_skip) and is_exception_handling_enabled(ACTION)
             if use_exception_handling:
                 action_timeout = get_action_timeout(ACTION)
+                # 声明式 error_policy 及其 callable handler 映射 (原始对象挂在 wrapper 上,含 handler)
+                _raw_policy = getattr(ACTION, "_action_error_policy", None)
+                option_handlers = collect_option_handlers(_raw_policy)
+                # 传给 loop 的 policy 剔除 handler,与 registry 中的持久化版本一致
+                from unilabos.registry.action_policy import normalize_error_policy
+                error_policy_dict = normalize_error_policy(_raw_policy)
                 ctx = getattr(self, "_current_job_context", None) or {}
                 task_id = (getattr(goal, "task_id", "") or "") or ctx.get("task_id", "") or ""
                 job_id = (getattr(goal, "job_id", "") or "") or ctx.get("job_id", "") or ""
@@ -1869,12 +1886,14 @@ class BaseROS2DeviceNode(Node, Generic[T]):
                     return await _wrapped_action(**kwargs)
 
                 try:
-                    action_return_value = await self._execute_with_exception_handling(
+                    action_return_value = await self._run_action_with_decision_loop(
                         action_func=_wrapped_with_timeout,
                         action_name=ACTION.__name__,
                         task_id=task_id,
                         job_id=job_id,
                         action_kwargs=action_kwargs,
+                        error_policy=error_policy_dict,
+                        option_handlers=option_handlers,
                     )
                     execution_success = True
                 except Exception as _:
@@ -2081,10 +2100,22 @@ class BaseROS2DeviceNode(Node, Generic[T]):
                 if attr_name in ["success", "reached_goal"]:
                     setattr(result_msg, attr_name, execution_success)
                 elif attr_name == "return_info":
+                    # skip 分支返回 {"status": "skipped", ...} 时标记 suc_type=user_bypass_error,
+                    # 让 host_node / 后端能区分"正常成功"与"用户跳过异常成功"
+                    _suc_type = None
+                    if (
+                        execution_success
+                        and isinstance(action_return_value, dict)
+                        and action_return_value.get("status") == "skipped"
+                    ):
+                        _suc_type = "user_bypass_error"
                     setattr(
                         result_msg,
                         attr_name,
-                        get_result_info_str(execution_error, execution_success, action_return_value),
+                        get_result_info_str(
+                            execution_error, execution_success, action_return_value,
+                            suc_type=_suc_type,
+                        ),
                     )
                 elif attr_name == "status":
                     # 如果 action_return_value 包含 status 字段（如 skipped），则使用它
@@ -2345,13 +2376,20 @@ class BaseROS2DeviceNode(Node, Generic[T]):
                     self.get_logger().warn(
                         f"[DEBUG-EXC-CTX-JSON] action={function_name} ctx={ctx!r}"
                     )
+                    from unilabos.registry.action_policy import (
+                        collect_option_handlers,
+                        normalize_error_policy,
+                    )
+                    _raw_policy = getattr(function, "_action_error_policy", None)
                     cfuture = asyncio.run_coroutine_threadsafe(
-                        self._execute_with_exception_handling(
+                        self._run_action_with_decision_loop(
                             action_func=function,
                             action_name=function_name,
                             task_id=ctx.get("task_id", "") or "",
                             job_id=ctx.get("job_id", "") or "",
                             action_kwargs=function_args,
+                            error_policy=normalize_error_policy(_raw_policy),
+                            option_handlers=collect_option_handlers(_raw_policy),
                         ),
                         target_loop,
                     )
