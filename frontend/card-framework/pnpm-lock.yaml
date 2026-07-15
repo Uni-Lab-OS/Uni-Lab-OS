@@ -18,6 +18,12 @@ importers:
         specifier: ^2.1.0
         version: 2.1.9
 
+  packages/card-adapters:
+    dependencies:
+      '@labos/card-sdk':
+        specifier: workspace:*
+        version: link:../card-sdk
+
   packages/card-runtime:
     dependencies:
       '@labos/card-sdk':
