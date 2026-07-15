@@ -1,0 +1,15 @@
+{
+  "name": "labos-card-framework",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "build": "pnpm -r build",
+    "test": "pnpm -r test",
+    "typecheck": "pnpm -r typecheck"
+  },
+  "devDependencies": {
+    "typescript": "^5.6.3",
+    "vitest": "^2.1.0",
+    "tsup": "^8.3.0"
+  }
+}
