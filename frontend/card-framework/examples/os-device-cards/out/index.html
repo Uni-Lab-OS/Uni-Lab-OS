@@ -1,0 +1,1967 @@
+<!doctype html><html lang="zh"><head><meta charset="utf-8"><title>OS 设备卡 · Gallery</title><style>
+:root{color-scheme:dark}
+*{box-sizing:border-box}
+body{margin:0;background:#0b1120;color:#e2e8f0;font:14px/1.5 -apple-system,'Segoe UI',system-ui,sans-serif}
+.card{background:linear-gradient(180deg,#111a2e,#0e1626);border:1px solid #1e2a44;border-radius:16px;padding:18px 18px 16px;width:360px;box-shadow:0 8px 30px rgba(0,0,0,.35)}
+.card h3{margin:0;font-size:15px;font-weight:650;letter-spacing:.2px;color:#f1f5f9;font-family:'Cascadia Mono',ui-monospace,monospace;word-break:break-all}
+.chip{display:inline-block;margin-top:6px;padding:2px 9px;border-radius:999px;background:#16233c;color:#7dd3fc;font-size:11px;border:1px solid #24344f}
+.desc{margin:8px 0 14px;color:#94a3b8;font-size:12px;max-height:34px;overflow:hidden}
+.section-title{font-size:11px;text-transform:uppercase;letter-spacing:.08em;color:#64748b;margin:12px 0 8px}
+.grid{display:grid;grid-template-columns:1fr 1fr;gap:8px}
+.metric{background:#0c1425;border:1px solid #1c2a45;border-radius:10px;padding:8px 10px;min-width:0}
+.metric-label{font-size:11px;color:#8aa0c0;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+.metric-value{font-size:18px;font-weight:600;font-variant-numeric:tabular-nums;color:#f8fafc;font-family:ui-monospace,monospace}
+.unit{font-size:11px;color:#7c8db0;margin-left:3px}
+.bar{height:4px;background:#1c2a45;border-radius:3px;margin-top:6px;overflow:hidden}
+.bar span{display:block;height:100%;background:linear-gradient(90deg,#38bdf8,#818cf8)}
+.badge{display:inline-block;padding:2px 10px;border-radius:6px;font-size:12px;font-weight:600;color:var(--c);background:color-mix(in srgb,var(--c) 16%,transparent);border:1px solid color-mix(in srgb,var(--c) 35%,transparent)}
+.dot{width:12px;height:12px;border-radius:50%;margin-top:4px}
+.dot.on{background:#34d399;box-shadow:0 0 8px #34d39988}.dot.off{background:#475569}
+.actions{display:flex;flex-direction:column;gap:6px;margin-top:4px}
+.action{display:flex;align-items:center;gap:6px;flex-wrap:wrap}
+.action button{background:#1d4ed8;color:#fff;border:0;border-radius:8px;padding:6px 12px;font-size:12px;font-weight:600;cursor:pointer;font-family:ui-monospace,monospace}
+.action button:hover{background:#2563eb}
+.param{display:flex;align-items:center;gap:4px;font-size:11px;color:#8aa0c0}
+.param input{width:64px;background:#0c1425;border:1px solid #24344f;border-radius:6px;color:#e2e8f0;padding:3px 6px;font-size:11px}
+.more{font-size:11px;color:#64748b}
+.empty{color:#64748b;font-size:12px;font-style:italic}
+
+body{padding:28px}
+h1{font-size:20px;margin:0 0 4px;font-family:ui-monospace,monospace}
+.sub{color:#64748b;margin:0 0 22px;font-size:13px}
+.gal{display:grid;grid-template-columns:repeat(auto-fill,360px);gap:18px;justify-content:center}
+</style></head><body>
+<h1>Uni-Lab-OS 设备特色卡 · card-framework</h1>
+<p class="sub">60 个设备类 · schema 由 registry YAML 离线抽取(与 OsAdapter 映射一致)· 卡片自动生成 · mock 数据</p>
+<div class="gal"><div class="card" data-device="Qone_nmr">
+    <h3>Qone_nmr</h3>
+    <span class="chip">Qone_nmr</span>
+    <div class="desc">Oxford NMR设备驱动，支持CSV字符串到TXT文件的批量转换功能，并监测对应.nmr文件的大小变化以确认结果生成完成</div>
+    <div class="section-title">遥测 / 状态 · 1</div><div class="grid"><div class="metric">
+    <div class="metric-label">status</div>
+    <div class="badge" style="--c:#fbbf24">busy</div>
+  </div></div>
+    <div class="section-title">控制 · 5</div><div class="actions"><div class="action">
+    <button onclick="window.__toast&&window.__toast('abort')">abort</button>
+    
+  </div><div class="action">
+    <button onclick="window.__toast&&window.__toast('auto-monitor_folder_for_new_content')">auto-monitor_folder_for_new_content</button>
+    <label class="param"><span>check_interval</span><input type="text" placeholder="string"/></label><label class="param"><span>expected_count</span><input type="text" placeholder="string"/></label><label class="param"><span>monitor_dir</span><input type="text" placeholder="string"/></label><span class="more">+1</span>
+  </div><div class="action">
+    <button onclick="window.__toast&&window.__toast('auto-strings_to_txt')">auto-strings_to_txt</button>
+    <label class="param"><span>output_dir</span><input type="text" placeholder="string"/></label><label class="param"><span>string_list</span><input type="text" placeholder="string"/></label><label class="param"><span>txt_encoding</span><input type="text" placeholder="string"/></label>
+  </div><div class="action">
+    <button onclick="window.__toast&&window.__toast('get_status')">get_status</button>
+    
+  </div><div class="action">
+    <button onclick="window.__toast&&window.__toast('start')">start</button>
+    <label class="param"><span>string</span><input type="text" placeholder="string"/></label>
+  </div></div>
+  </div><div class="card" data-device="bioyond_cell">
+    <h3>bioyond_cell</h3>
+    <span class="chip">bioyond_cell</span>
+    
+    <div class="section-title">遥测 / 状态 · 1</div><div class="grid"><div class="metric">
+    <div class="metric-label">device_id</div>
+    <div class="badge" style="--c:#34d399">ok</div>
+  </div></div>
+    <div class="section-title">控制 · 29</div><div class="actions"><div class="action">
+    <button onclick="window.__toast&&window.__toast('auto-auto_batch_outbound_from_xlsx')">auto-auto_batch_outbound_from_xlsx</button>
+    <label class="param"><span>xlsx_path</span><input type="text" placeholder="string"/></label>
+  </div><div class="action">
+    <button onclick="window.__toast&&window.__toast('auto-auto_feeding4to3')">auto-auto_feeding4to3</button>
+    <label class="param"><span>WH3_x1_y1_z3_1_materialId</span><input type="text" placeholder="string"/></label><label class="param"><span>WH3_x1_y1_z3_1_materialType</span><input type="text" placeholder="string"/></label><label class="param"><span>WH3_x1_y1_z3_1_quantity</span><input type="number" placeholder="number"/></label><span class="more">+103</span>
+  </div><div class="action">
+    <button onclick="window.__toast&&window.__toast('auto-create_and_inbound_materials')">auto-create_and_inbound_materials</button>
+    <label class="param"><span>material_names</span><input type="text" placeholder="array"/></label><label class="param"><span>type_id</span><input type="text" placeholder="string"/></label><label class="param"><span>warehouse_name</span><input type="text" placeholder="string"/></label>
+  </div><div class="action">
+    <button onclick="window.__toast&&window.__toast('auto-create_material')">auto-create_material</button>
+    <label class="param"><span>location_name_or_id</span><input type="text" placeholder="string"/></label><label class="param"><span>material_name</span><input type="text" placeholder="string"/></label><label class="param"><span>type_id</span><input type="text" placeholder="string"/></label><span class="more">+1</span>
+  </div><div class="action">
+    <button onclick="window.__toast&&window.__toast('auto-create_materials')">auto-create_materials</button>
+    <label class="param"><span>mappings</span><input type="text" placeholder="object"/></label>
+  </div><div class="action">
+    <button onclick="window.__toast&&window.__toast('auto-create_orders')">auto-create_orders</button>
+    <label class="param"><span>xlsx_path</span><input type="text" placeholder="string"/></label>
+  </div><span class="more">…还有 23 个动作</span></div>
+  </div><div class="card" data-device="bioyond_dispensing_station">
+    <h3>bioyond_dispensing_station</h3>
+    <span class="chip">workstation,bioyond,bioyond_dispensing_station</span>
+    
+    
+    <div class="section-title">控制 · 13</div><div class="actions"><div class="action">
+    <button onclick="window.__toast&&window.__toast('auto-brief_step_parameters')">auto-brief_step_parameters</button>
+    <label class="param"><span>data</span><input type="text" placeholder="object"/></label>
+  </div><div class="action">
+    <button onclick="window.__toast&&window.__toast('auto-process_order_finish_report')">auto-process_order_finish_report</button>
+    <label class="param"><span>report_request</span><input type="text" placeholder="string"/></label><label class="param"><span>used_materials</span><input type="text" placeholder="string"/></label>
+  </div><div class="action">
+    <button onclick="window.__toast&&window.__toast('auto-project_order_report')">auto-project_order_report</button>
+    <label class="param"><span>order_id</span><input type="text" placeholder="string"/></label>
+  </div><div class="action">
+    <button onclick="window.__toast&&window.__toast('auto-query_resource_by_name')">auto-query_resource_by_name</button>
+    <label class="param"><span>material_name</span><input type="text" placeholder="string"/></label>
+  </div><div class="action">
+    <button onclick="window.__toast&&window.__toast('auto-workflow_sample_locations')">auto-workflow_sample_locations</button>
+    <label class="param"><span>workflow_id</span><input type="text" placeholder="string"/></label>
+  </div><div class="action">
+    <button onclick="window.__toast&&window.__toast('batch_create_90_10_vial_feeding_tasks')">batch_create_90_10_vial_feeding_tasks</button>
+    <label class="param"><span>delay_time</span><input type="text" placeholder="string"/></label><label class="param"><span>hold_m_name</span><input type="text" placeholder="string"/></label><label class="param"><span>liquid_material_name</span><input type="text" placeholder="string"/></label><span class="more">+3</span>
+  </div><span class="more">…还有 7 个动作</span></div>
+  </div><div class="card" data-device="cameracontroller_device">
+    <h3>cameracontroller_device</h3>
+    <span class="chip">cameraSII</span>
+    <div class="desc">Uni-Lab-OS 摄像头驱动（Linux USB 摄像头版，无 PTZ）</div>
+    <div class="section-title">遥测 / 状态 · 1</div><div class="grid"><div class="metric">
+    <div class="metric-label">status</div>
+    <div class="badge" style="--c:#fbbf24">busy</div>
+  </div></div>
+    <div class="section-title">控制 · 2</div><div class="actions"><div class="action">
+    <button onclick="window.__toast&&window.__toast('auto-start')">auto-start</button>
+    <label class="param"><span>config</span><input type="text" placeholder="object"/></label>
+  </div><div class="action">
+    <button onclick="window.__toast&&window.__toast('auto-stop')">auto-stop</button>
+    
+  </div></div>
+  </div><div class="card" data-device="hplc.agilent">
+    <h3>hplc.agilent</h3>
+    <span class="chip">characterization_chromatic</span>
+    <div class="desc">安捷伦高效液相色谱（HPLC）分析设备，用于复杂化合物的分离、检测和定量分析。该设备通过UI自动化技术控制安捷伦ChemStation软件，实现全自动的样品分析流程。具备序列启动、设备状态监控、数据文件提取、结果处理等功能。支持多样品批量处理和实时状态反馈，适用于药物分析、环境检测、食品安全、化学研究等需要高精度色谱分</div>
+    <div class="section-title">遥测 / 状态 · 7</div><div class="grid"><div class="metric">
+      <div class="metric-label">could_run</div>
+      <div class="dot on"></div>
+    </div><div class="metric">
+    <div class="metric-label">device_status</div>
+    <div class="badge" style="--c:#60a5fa">ready</div>
+  </div><div class="metric">
+      <div class="metric-label">driver_init_ok</div>
+      <div class="dot off"></div>
+    </div><div class="metric">
+    <div class="metric-label">finish_status</div>
+    <div class="badge" style="--c:#60a5fa">ready</div>
+  </div><div class="metric">
+      <div class="metric-label">is_running</div>
+      <div class="dot off"></div>
+    </div><div class="metric">
+    <div class="metric-label">status_text</div>
+    <div class="badge" style="--c:#34d399">ok</div>
+  </div><div class="metric">
+      <div class="metric-label">success</div>
+      <div class="dot on"></div>
+    </div></div>
+    <div class="section-title">控制 · 6</div><div class="actions"><div class="action">
+    <button onclick="window.__toast&&window.__toast('auto-check_status')">auto-check_status</button>
+    
+  </div><div class="action">
+    <button onclick="window.__toast&&window.__toast('auto-extract_data_from_txt')">auto-extract_data_from_txt</button>
+    <label class="param"><span>file_path</span><input type="text" placeholder="string"/></label>
+  </div><div class="action">
+    <button onclick="window.__toast&&window.__toast('auto-start_sequence')">auto-start_sequence</button>
+    <label class="param"><span>params</span><input type="text" placeholder="string"/></label><label class="param"><span>resource</span><input type="text" placeholder="object"/></label><label class="param"><span>wf_name</span><input type="text" placeholder="string"/></label>
+  </div><div class="action">
+    <button onclick="window.__toast&&window.__toast('auto-try_close_sub_device')">auto-try_close_sub_device</button>
+    <label class="param"><span>device_name</span><input type="text" placeholder="string"/></label>
+  </div><div class="action">
+    <button onclick="window.__toast&&window.__toast('auto-try_open_sub_device')">auto-try_open_sub_device</button>
+    <label class="param"><span>device_name</span><input type="text" placeholder="string"/></label>
+  </div><div class="action">
+    <button onclick="window.__toast&&window.__toast('execute_command_from_outer')">execute_command_from_outer</button>
+    <label class="param"><span>command</span><input type="text" placeholder="string"/></label>
+  </div></div>
+  </div><div class="card" data-device="hplc.agilent-zhida">
+    <h3>hplc.agilent-zhida</h3>
+    <span class="chip">characterization_chromatic</span>
+    <div class="desc">智达高效液相色谱（HPLC）分析设备，用于实验室样品的分离、检测和定量分析。该设备通过TCP socket与HPLC控制系统通信，支持远程控制和状态监控。具备自动进样、梯度洗脱、多检测器数据采集等功能，可执行复杂的色谱分析方法。适用于化学分析、药物检测、环境监测、生物样品分析等需要高精度分离分析的实验室应用场景。</div>
+    <div class="section-title">遥测 / 状态 · 2</div><div class="grid"><div class="metric">
+    <div class="metric-label">methods</div>
+    <div class="badge" style="--c:#94a3b8">idle</div>
+  </div><div class="metric">
+    <div class="metric-label">status</div>
+    <div class="badge" style="--c:#fbbf24">busy</div>
+  </div></div>
+    <div class="section-title">控制 · 5</div><div class="actions"><div class="action">
+    <button onclick="window.__toast&&window.__toast('abort')">abort</button>
+    
+  </div><div class="action">
+    <button onclick="window.__toast&&window.__toast('auto-close')">auto-close</button>
+    
+  </div><div class="action">
+    <button onclick="window.__toast&&window.__toast('auto-connect')">auto-connect</button>
+    
+  </div><div class="action">
+    <button onclick="window.__toast&&window.__toast('get_methods')">get_methods</button>
+    
+  </div><div class="action">
+    <button onclick="window.__toast&&window.__toast('start')">start</button>
+    <label class="param"><span>string</span><input type="text" placeholder="string"/></label>
+  </div></div>
+  </div><div class="card" data-device="raman.home_made">
+    <h3>raman.home_made</h3>
+    <span class="chip">characterization_optic</span>
+    <div class="desc">拉曼光谱分析设备，用于物质的分子结构和化学成分表征。该设备集成激光器和CCD检测器，通过串口通信控制激光功率和光谱采集。具备背景扣除、多次平均、自动数据处理等功能，支持高精度的拉曼光谱测量。适用于材料表征、化学分析、质量控制、研究开发等需要分子指纹识别和结构分析的实验应用。</div>
+    
+    <div class="section-title">控制 · 5</div><div class="actions"><div class="action">
+    <button onclick="window.__toast&&window.__toast('auto-ccd_time')">auto-ccd_time</button>
+    <label class="param"><span>int_time</span><input type="text" placeholder="string"/></label>
+  </div><div class="action">
+    <button onclick="window.__toast&&window.__toast('auto-laser_on_power')">auto-laser_on_power</button>
+    <label class="param"><span>output_voltage_laser</span><input type="text" placeholder="string"/></label>
+  </div><div class="action">
+    <button onclick="window.__toast&&window.__toast('auto-raman_without_background')">auto-raman_without_background</button>
+    <label class="param"><span>int_time</span><input type="text" placeholder="string"/></label><label class="param"><span>laser_power</span><input type="text" placeholder="string"/></label>
+  </div><div class="action">
+    <button onclick="window.__toast&&window.__toast('auto-raman_without_background_average')">auto-raman_without_background_average</button>
+    <label class="param"><span>average</span><input type="text" placeholder="string"/></label><label class="param"><span>int_time</span><input type="text" placeholder="string"/></label><label class="param"><span>laser_power</span><input type="text" placeholder="string"/></label><span class="more">+1</span>
+  </div><div class="action">
+    <button onclick="window.__toast&&window.__toast('raman_cmd')">raman_cmd</button>
+    <label class="param"><span>command</span><input type="text" placeholder="string"/></label>
+  </div></div>
+  </div><div class="card" data-device="separator.chinwe">
+    <h3>separator.chinwe</h3>
+    <span class="chip">separator,chinwe</span>
+    <div class="desc">ChinWe 简易工作站控制器 (3泵, 2电机, 1传感器)</div>
+    <div class="section-title">遥测 / 状态 · 3</div><div class="grid"><div class="metric">
+      <div class="metric-label">is_connected</div>
+      <div class="dot off"></div>
+    </div><div class="metric">
+      <div class="metric-label">sensor_level</div>
+      <div class="dot on"></div>
+    </div><div class="metric">
+      <div class="metric-label">sensor_rssi</div>
+      <div class="metric-value">76.0</div>
+      <div class="bar"><span style="width:76%"></span></div>
+    </div></div>
+    <div class="section-title">控制 · 12</div><div class="actions"><div class="action">
+    <button onclick="window.__toast&&window.__toast('auto-connect')">auto-connect</button>
+    
+  </div><div class="action">
+    <button onclick="window.__toast&&window.__toast('auto-disconnect')">auto-disconnect</button>
+    
+  </div><div class="action">
+    <button onclick="window.__toast&&window.__toast('auto-execute_command_from_outer')">auto-execute_command_from_outer</button>
+    <label class="param"><span>command_dict</span><input type="text" placeholder="object"/></label>
+  </div><div class="action">
+    <button onclick="window.__toast&&window.__toast('motor_rotate_quarter')">motor_rotate_quarter</button>
+    <label class="param"><span>direction</span><input type="text" placeholder="string"/></label><label class="param"><span>motor_id</span><input type="number" placeholder="integer"/></label><label class="param"><span>speed</span><input type="number" placeholder="integer"/></label>
+  </div><div class="action">
+    <button onclick="window.__toast&&window.__toast('motor_run_continuous')">motor_run_continuous</button>
+    <label class="param"><span>direction</span><input type="text" placeholder="string"/></label><label class="param"><span>motor_id</span><input type="number" placeholder="integer"/></label><label class="param"><span>speed</span><input type="number" placeholder="integer"/></label>
+  </div><div class="action">
+    <button onclick="window.__toast&&window.__toast('motor_stop')">motor_stop</button>
+    <label class="param"><span>motor_id</span><input type="number" placeholder="integer"/></label>
+  </div><span class="more">…还有 6 个动作</span></div>
+  </div><div class="card" data-device="coincellassemblyworkstation_device">
+    <h3>coincellassemblyworkstation_device</h3>
+    <span class="chip">coin_cell_workstation</span>
+    
+    <div class="section-title">遥测 / 状态 · 19</div><div class="grid"><div class="metric">
+      <div class="metric-label">data_assembly_coin_cell_num</div>
+      <div class="metric-value">10.0</div>
+      <div class="bar"><span style="width:10%"></span></div>
+    </div><div class="metric">
+      <div class="metric-label">data_assembly_pressure</div>
+      <div class="metric-value">34.0</div>
+      <div class="bar"><span style="width:34%"></span></div>
+    </div><div class="metric">
+      <div class="metric-label">data_assembly_time</div>
+      <div class="metric-value">51.0</div>
+      <div class="bar"><span style="width:51%"></span></div>
+    </div><div class="metric">
+      <div class="metric-label">data_axis_x_pos</div>
+      <div class="metric-value">61.0</div>
+      <div class="bar"><span style="width:61%"></span></div>
+    </div><div class="metric">
+      <div class="metric-label">data_axis_y_pos</div>
+      <div class="metric-value">65.0</div>
+      <div class="bar"><span style="width:65%"></span></div>
+    </div><div class="metric">
+      <div class="metric-label">data_axis_z_pos</div>
+      <div class="metric-value">47.0</div>
+      <div class="bar"><span style="width:47%"></span></div>
+    </div><div class="metric">
+    <div class="metric-label">data_coin_cell_code</div>
+    <div class="badge" style="--c:#94a3b8">idle</div>
+  </div><div class="metric">
+      <div class="metric-label">data_coin_num</div>
+      <div class="metric-value">98.0</div>
+      <div class="bar"><span style="width:98%"></span></div>
+    </div><div class="metric">
+    <div class="metric-label">data_electrolyte_code</div>
+    <div class="badge" style="--c:#fbbf24">busy</div>
+  </div><div class="metric">
+      <div class="metric-label">data_electrolyte_volume</div>
+      <div class="metric-value">17.0</div>
+      <div class="bar"><span style="width:17%"></span></div>
+    </div><div class="metric">
+      <div class="metric-label">data_glove_box_o2_content</div>
+      <div class="metric-value">43.0</div>
+      <div class="bar"><span style="width:43%"></span></div>
+    </div><div class="metric">
+      <div class="metric-label">data_glove_box_pressure</div>
+      <div class="metric-value">79.0</div>
+      <div class="bar"><span style="width:79%"></span></div>
+    </div><div class="metric">
+      <div class="metric-label">data_glove_box_water_content</div>
+      <div class="metric-value">77.0</div>
+      <div class="bar"><span style="width:77%"></span></div>
+    </div><div class="metric">
+      <div class="metric-label">data_open_circuit_voltage</div>
+      <div class="metric-value">52.0</div>
+      <div class="bar"><span style="width:52%"></span></div>
+    </div><div class="metric">
+      <div class="metric-label">data_pole_weight</div>
+      <div class="metric-value">25.0</div>
+      <div class="bar"><span style="width:25%"></span></div>
+    </div><div class="metric">
+      <div class="metric-label">request_rec_msg_status</div>
+      <div class="dot on"></div>
+    </div><div class="metric">
+      <div class="metric-label">request_send_msg_status</div>
+      <div class="dot on"></div>
+    </div><div class="metric">
+    <div class="metric-label">sys_mode</div>
+    <div class="badge" style="--c:#34d399">running</div>
+  </div><div class="metric">
+    <div class="metric-label">sys_status</div>
+    <div class="badge" style="--c:#60a5fa">ready</div>
+  </div></div>
+    <div class="section-title">控制 · 20</div><div class="actions"><div class="action">
+    <button onclick="window.__toast&&window.__toast('auto-change_hole_sheet_to_2')">auto-change_hole_sheet_to_2</button>
+    <label class="param"><span>hole</span><input type="text" placeholder="object"/></label>
+  </div><div class="action">
+    <button onclick="window.__toast&&window.__toast('auto-fill_plate')">auto-fill_plate</button>
+    
+  </div><div class="action">
+    <button onclick="window.__toast&&window.__toast('auto-fun_wuliao_test')">auto-fun_wuliao_test</button>
+    
+  </div><div class="action">
+    <button onclick="window.__toast&&window.__toast('auto-func_allpack_cmd')">auto-func_allpack_cmd</button>
+    <label class="param"><span>assembly_pressure</span><input type="number" placeholder="integer"/></label><label class="param"><span>assembly_type</span><input type="number" placeholder="integer"/></label><label class="param"><span>elec_num</span><input type="text" placeholder="string"/></label><span class="more">+3</span>
+  </div><div class="action">
+    <button onclick="window.__toast&&window.__toast('auto-func_allpack_cmd_simp')">auto-func_allpack_cmd_simp</button>
+    <label class="param"><span>assembly_pressure</span><input type="number" placeholder="integer"/></label><label class="param"><span>assembly_type</span><input type="number" placeholder="integer"/></label><label class="param"><span>battery_clean_ignore</span><input type="text" placeholder="boolean"/></label><span class="more">+15</span>
+  </div><div class="action">
+    <button onclick="window.__toast&&window.__toast('auto-func_get_csv_export_status')">auto-func_get_csv_export_status</button>
+    
+  </div><span class="more">…还有 14 个动作</span></div>
+  </div><div class="card" data-device="gas_source.mock">
+    <h3>gas_source.mock</h3>
+    <span class="chip">gas_handler</span>
+    <div class="desc">模拟气体源设备，用于系统测试和开发调试。该设备模拟真实气体源的开关控制和状态监测功能，支持气体供应的启停操作。提供与真实气体源相同的接口和状态反馈，便于在没有实际硬件的情况下进行系统集成测试和算法验证。适用于气路系统调试、软件开发和实验流程验证等场景。</div>
+    <div class="section-title">遥测 / 状态 · 1</div><div class="grid"><div class="metric">
+    <div class="metric-label">status</div>
+    <div class="badge" style="--c:#fbbf24">busy</div>
+  </div></div>
+    <div class="section-title">控制 · 5</div><div class="actions"><div class="action">
+    <button onclick="window.__toast&&window.__toast('auto-is_closed')">auto-is_closed</button>
+    
+  </div><div class="action">
+    <button onclick="window.__toast&&window.__toast('auto-is_open')">auto-is_open</button>
+    
+  </div><div class="action">
+    <button onclick="window.__toast&&window.__toast('close')">close</button>
+    
+  </div><div class="action">
+    <button onclick="window.__toast&&window.__toast('open')">open</button>
+    
+  </div><div class="action">
+    <button onclick="window.__toast&&window.__toast('set_status')">set_status</button>
+    <label class="param"><span>string</span><input type="text" placeholder="string"/></label>
+  </div></div>
+  </div><div class="card" data-device="vacuum_pump.mock">
+    <h3>vacuum_pump.mock</h3>
+    <span class="chip">vacuum_and_purge,gas_handler</span>
+    <div class="desc">模拟真空泵设备，用于系统测试和开发调试。该设备模拟真实真空泵的抽气功能和状态控制，支持真空系统的启停操作和状态监测。提供与真实真空泵相同的接口和控制逻辑，便于在没有实际硬件的情况下进行真空系统的集成测试。适用于真空工艺调试、软件开发和实验流程验证等场景。</div>
+    <div class="section-title">遥测 / 状态 · 1</div><div class="grid"><div class="metric">
+    <div class="metric-label">status</div>
+    <div class="badge" style="--c:#fbbf24">busy</div>
+  </div></div>
+    <div class="section-title">控制 · 5</div><div class="actions"><div class="action">
+    <button onclick="window.__toast&&window.__toast('auto-is_closed')">auto-is_closed</button>
+    
+  </div><div class="action">
+    <button onclick="window.__toast&&window.__toast('auto-is_open')">auto-is_open</button>
+    
+  </div><div class="action">
+    <button onclick="window.__toast&&window.__toast('close')">close</button>
+    
+  </div><div class="action">
+    <button onclick="window.__toast&&window.__toast('open')">open</button>
+    
+  </div><div class="action">
+    <button onclick="window.__toast&&window.__toast('set_status')">set_status</button>
+    <label class="param"><span>string</span><input type="text" placeholder="string"/></label>
+  </div></div>
+  </div><div class="card" data-device="hotel.thermo_orbitor_rs2_hotel">
+    <h3>hotel.thermo_orbitor_rs2_hotel</h3>
+    <span class="chip">hotel</span>
+    <div class="desc">Thermo Orbitor RS2 Hotel容器设备，用于实验室样品的存储和管理。该设备通过HotelContainer类实现容器的旋转控制和状态监控，主要用于存储实验样品、试剂瓶或其他实验器具，支持旋转功能以便于样品的自动化存取。适用于需要有序存储和快速访问大量样品的实验室自动化场景。</div>
+    <div class="section-title">遥测 / 状态 · 1</div><div class="grid"><div class="metric">
+    <div class="metric-label">rotation</div>
+    <div class="badge" style="--c:#94a3b8">idle</div>
+  </div></div>
+    <div class="empty">无动作</div>
+  </div><div class="card" data-device="xyz_stepper_controller">
+    <h3>xyz_stepper_controller</h3>
+    <span class="chip">laiyu_liquid_test</span>
+    <div class="desc">新XYZ控制器</div>
+    <div class="section-title">遥测 / 状态 · 1</div><div class="grid"><div class="metric">
+    <div class="metric-label">all_positions</div>
+    <div class="badge" style="--c:#94a3b8">idle</div>
+  </div></div>
+    <div class="section-title">控制 · 18</div><div class="actions"><div class="action">
+    <button onclick="window.__toast&&window.__toast('auto-degrees_to_steps')">auto-degrees_to_steps</button>
+    <label class="param"><span>degrees</span><input type="number" placeholder="number"/></label>
+  </div><div class="action">
+    <button onclick="window.__toast&&window.__toast('auto-emergency_stop')">auto-emergency_stop</button>
+    <label class="param"><span>axis</span><input type="text" placeholder="object"/></label>
+  </div><div class="action">
+    <button onclick="window.__toast&&window.__toast('auto-enable_all_axes')">auto-enable_all_axes</button>
+    <label class="param"><span>enable</span><input type="text" placeholder="boolean"/></label>
+  </div><div class="action">
+    <button onclick="window.__toast&&window.__toast('auto-enable_motor')">auto-enable_motor</button>
+    <label class="param"><span>axis</span><input type="text" placeholder="object"/></label><label class="param"><span>enable</span><input type="text" placeholder="boolean"/></label>
+  </div><div class="action">
+    <button onclick="window.__toast&&window.__toast('auto-home_all_axes')">auto-home_all_axes</button>
+    
+  </div><div class="action">
+    <button onclick="window.__toast&&window.__toast('auto-home_axis')">auto-home_axis</button>
+    <label class="param"><span>axis</span><input type="text" placeholder="object"/></label>
+  </div><span class="more">…还有 12 个动作</span></div>
+  </div><div class="card" data-device="liquid_handler">
+    <h3>liquid_handler</h3>
+    <span class="chip">liquid_handler</span>
+    <div class="desc">Liquid handler device controlled by pylabrobot</div>
+    
+    <div class="section-title">控制 · 29</div><div class="actions"><div class="action">
+    <button onclick="window.__toast&&window.__toast('add_liquid')">add_liquid</button>
+    <label class="param"><span>asp_vols</span><input type="text" placeholder="array"/></label><label class="param"><span>blow_out_air_volume</span><input type="text" placeholder="array"/></label><label class="param"><span>dis_vols</span><input type="text" placeholder="array"/></label><span class="more">+13</span>
+  </div><div class="action">
+    <button onclick="window.__toast&&window.__toast('aspirate')">aspirate</button>
+    <label class="param"><span>blow_out_air_volume</span><input type="text" placeholder="array"/></label><label class="param"><span>flow_rates</span><input type="text" placeholder="array"/></label><label class="param"><span>liquid_height</span><input type="text" placeholder="array"/></label><span class="more">+5</span>
+  </div><div class="action">
+    <button onclick="window.__toast&&window.__toast('auto-create_protocol')">auto-create_protocol</button>
+    <label class="param"><span>none_keys</span><input type="text" placeholder="array"/></label><label class="param"><span>protocol_author</span><input type="text" placeholder="string"/></label><label class="param"><span>protocol_date</span><input type="text" placeholder="string"/></label><span class="more">+4</span>
+  </div><div class="action">
+    <button onclick="window.__toast&&window.__toast('auto-custom_delay')">auto-custom_delay</button>
+    <label class="param"><span>msg</span><input type="text" placeholder="string"/></label><label class="param"><span>seconds</span><input type="text" placeholder="string"/></label>
+  </div><div class="action">
+    <button onclick="window.__toast&&window.__toast('auto-iter_tips')">auto-iter_tips</button>
+    <label class="param"><span>tip_racks</span><input type="text" placeholder="array"/></label>
+  </div><div class="action">
+    <button onclick="window.__toast&&window.__toast('auto-set_group')">auto-set_group</button>
+    <label class="param"><span>group_name</span><input type="text" placeholder="string"/></label><label class="param"><span>volumes</span><input type="text" placeholder="array"/></label><label class="param"><span>wells</span><input type="text" placeholder="array"/></label>
+  </div><span class="more">…还有 23 个动作</span></div>
+  </div><div class="card" data-device="liquid_handler.biomek">
+    <h3>liquid_handler.biomek</h3>
+    <span class="chip">liquid_handler</span>
+    <div class="desc">Biomek液体处理器设备，基于pylabrobot控制</div>
+    <div class="section-title">遥测 / 状态 · 1</div><div class="grid"><div class="metric">
+    <div class="metric-label">success</div>
+    <div class="badge" style="--c:#94a3b8">idle</div>
+  </div></div>
+    <div class="section-title">控制 · 10</div><div class="actions"><div class="action">
+    <button onclick="window.__toast&&window.__toast('auto-create_resource')">auto-create_resource</button>
+    <label class="param"><span>bind_location</span><input type="text" placeholder="object"/></label><label class="param"><span>bind_parent_id</span><input type="text" placeholder="string"/></label><label class="param"><span>liquid_input_slot</span><input type="text" placeholder="array"/></label><span class="more">+5</span>
+  </div><div class="action">
+    <button onclick="window.__toast&&window.__toast('auto-deserialize')">auto-deserialize</button>
+    <label class="param"><span>allow_marshal</span><input type="text" placeholder="boolean"/></label><label class="param"><span>data</span><input type="text" placeholder="object"/></label>
+  </div><div class="action">
+    <button onclick="window.__toast&&window.__toast('auto-instrument_setup_biomek')">auto-instrument_setup_biomek</button>
+    <label class="param"><span>class_name</span><input type="text" placeholder="string"/></label><label class="param"><span>id</span><input type="text" placeholder="string"/></label><label class="param"><span>liquid_input_wells</span><input type="text" placeholder="array"/></label><span class="more">+4</span>
+  </div><div class="action">
+    <button onclick="window.__toast&&window.__toast('create_protocol')">create_protocol</button>
+    <label class="param"><span>none_keys</span><input type="text" placeholder="array"/></label><label class="param"><span>protocol_author</span><input type="text" placeholder="string"/></label><label class="param"><span>protocol_date</span><input type="text" placeholder="string"/></label><span class="more">+4</span>
+  </div><div class="action">
+    <button onclick="window.__toast&&window.__toast('incubation_biomek')">incubation_biomek</button>
+    <label class="param"><span>time</span><input type="number" placeholder="integer"/></label>
+  </div><div class="action">
+    <button onclick="window.__toast&&window.__toast('move_biomek')">move_biomek</button>
+    <label class="param"><span>sources</span><input type="text" placeholder="string"/></label><label class="param"><span>targets</span><input type="text" placeholder="string"/></label>
+  </div><span class="more">…还有 4 个动作</span></div>
+  </div><div class="card" data-device="liquid_handler.laiyu">
+    <h3>liquid_handler.laiyu</h3>
+    <span class="chip">liquid_handler</span>
+    <div class="desc">Laiyu液体处理器设备，基于pylabrobot控制</div>
+    
+    <div class="section-title">控制 · 7</div><div class="actions"><div class="action">
+    <button onclick="window.__toast&&window.__toast('add_liquid')">add_liquid</button>
+    <label class="param"><span>asp_vols</span><input type="text" placeholder="array"/></label><label class="param"><span>blow_out_air_volume</span><input type="text" placeholder="array"/></label><label class="param"><span>dis_vols</span><input type="text" placeholder="array"/></label><span class="more">+13</span>
+  </div><div class="action">
+    <button onclick="window.__toast&&window.__toast('aspirate')">aspirate</button>
+    <label class="param"><span>blow_out_air_volume</span><input type="text" placeholder="array"/></label><label class="param"><span>flow_rates</span><input type="text" placeholder="array"/></label><label class="param"><span>liquid_height</span><input type="text" placeholder="array"/></label><span class="more">+5</span>
+  </div><div class="action">
+    <button onclick="window.__toast&&window.__toast('auto-transfer_liquid')">auto-transfer_liquid</button>
+    <label class="param"><span>asp_flow_rates</span><input type="text" placeholder="array"/></label><label class="param"><span>asp_vols</span><input type="text" placeholder="string"/></label><label class="param"><span>blow_out_air_volume</span><input type="text" placeholder="array"/></label><span class="more">+18</span>
+  </div><div class="action">
+    <button onclick="window.__toast&&window.__toast('dispense')">dispense</button>
+    <label class="param"><span>blow_out_air_volume</span><input type="text" placeholder="array"/></label><label class="param"><span>flow_rates</span><input type="text" placeholder="array"/></label><label class="param"><span>offsets</span><input type="text" placeholder="array"/></label><span class="more">+4</span>
+  </div><div class="action">
+    <button onclick="window.__toast&&window.__toast('drop_tips')">drop_tips</button>
+    <label class="param"><span>allow_nonzero_volume</span><input type="text" placeholder="boolean"/></label><label class="param"><span>offsets</span><input type="text" placeholder="array"/></label><label class="param"><span>tip_spots</span><input type="text" placeholder="array"/></label><span class="more">+1</span>
+  </div><div class="action">
+    <button onclick="window.__toast&&window.__toast('mix')">mix</button>
+    <label class="param"><span>height_to_bottom</span><input type="number" placeholder="number"/></label><label class="param"><span>mix_rate</span><input type="number" placeholder="number"/></label><label class="param"><span>mix_time</span><input type="number" placeholder="integer"/></label><span class="more">+4</span>
+  </div><span class="more">…还有 1 个动作</span></div>
+  </div><div class="card" data-device="liquid_handler.prcxi">
+    <h3>liquid_handler.prcxi</h3>
+    <span class="chip">liquid_handler</span>
+    <div class="desc">prcxi液体处理器设备，基于pylabrobot控制</div>
+    <div class="section-title">遥测 / 状态 · 1</div><div class="grid"><div class="metric">
+      <div class="metric-label">reset_ok</div>
+      <div class="dot off"></div>
+    </div></div>
+    <div class="section-title">控制 · 24</div><div class="actions"><div class="action">
+    <button onclick="window.__toast&&window.__toast('add_liquid')">add_liquid</button>
+    <label class="param"><span>asp_vols</span><input type="text" placeholder="array"/></label><label class="param"><span>blow_out_air_volume</span><input type="text" placeholder="array"/></label><label class="param"><span>dis_vols</span><input type="text" placeholder="array"/></label><span class="more">+13</span>
+  </div><div class="action">
+    <button onclick="window.__toast&&window.__toast('aspirate')">aspirate</button>
+    <label class="param"><span>blow_out_air_volume</span><input type="text" placeholder="array"/></label><label class="param"><span>flow_rates</span><input type="text" placeholder="array"/></label><label class="param"><span>liquid_height</span><input type="text" placeholder="array"/></label><span class="more">+5</span>
+  </div><div class="action">
+    <button onclick="window.__toast&&window.__toast('auto-create_protocol')">auto-create_protocol</button>
+    <label class="param"><span>none_keys</span><input type="text" placeholder="array"/></label><label class="param"><span>protocol_author</span><input type="text" placeholder="string"/></label><label class="param"><span>protocol_date</span><input type="text" placeholder="string"/></label><span class="more">+4</span>
+  </div><div class="action">
+    <button onclick="window.__toast&&window.__toast('auto-custom_delay')">auto-custom_delay</button>
+    <label class="param"><span>msg</span><input type="text" placeholder="string"/></label><label class="param"><span>seconds</span><input type="text" placeholder="string"/></label>
+  </div><div class="action">
+    <button onclick="window.__toast&&window.__toast('auto-heater_action')">auto-heater_action</button>
+    <label class="param"><span>temperature</span><input type="number" placeholder="number"/></label><label class="param"><span>time</span><input type="number" placeholder="integer"/></label>
+  </div><div class="action">
+    <button onclick="window.__toast&&window.__toast('auto-iter_tips')">auto-iter_tips</button>
+    <label class="param"><span>tip_racks</span><input type="text" placeholder="array"/></label>
+  </div><span class="more">…还有 18 个动作</span></div>
+  </div><div class="card" data-device="liquid_handler.revvity">
+    <h3>liquid_handler.revvity</h3>
+    <span class="chip">liquid_handler</span>
+    
+    <div class="section-title">遥测 / 状态 · 2</div><div class="grid"><div class="metric">
+    <div class="metric-label">status</div>
+    <div class="badge" style="--c:#fbbf24">busy</div>
+  </div><div class="metric">
+      <div class="metric-label">success</div>
+      <div class="dot on"></div>
+    </div></div>
+    <div class="section-title">控制 · 1</div><div class="actions"><div class="action">
+    <button onclick="window.__toast&&window.__toast('run')">run</button>
+    <label class="param"><span>params</span><input type="text" placeholder="string"/></label><label class="param"><span>resource</span><input type="text" placeholder="object"/></label><label class="param"><span>wf_name</span><input type="text" placeholder="string"/></label>
+  </div></div>
+  </div><div class="card" data-device="neware_battery_test_system">
+    <h3>neware_battery_test_system</h3>
+    <span class="chip">neware_battery_test_system,neware,battery_test</span>
+    <div class="desc">新威电池测试系统驱动，提供720个通道的电池测试状态监控、物料管理和CSV批量提交功能。支持TCP通信实现远程控制，包含完整的物料管理系统（2盘电池状态映射），以及从CSV文件批量提交测试任务的能力。</div>
+    <div class="section-title">遥测 / 状态 · 5</div><div class="grid"><div class="metric">
+    <div class="metric-label">channel_status</div>
+    <div class="badge" style="--c:#34d399">ok</div>
+  </div><div class="metric">
+    <div class="metric-label">connection_info</div>
+    <div class="badge" style="--c:#fbbf24">busy</div>
+  </div><div class="metric">
+    <div class="metric-label">device_summary</div>
+    <div class="badge" style="--c:#60a5fa">ready</div>
+  </div><div class="metric">
+    <div class="metric-label">status</div>
+    <div class="badge" style="--c:#fbbf24">busy</div>
+  </div><div class="metric">
+      <div class="metric-label">total_channels</div>
+      <div class="metric-value">21.0</div>
+      <div class="bar"><span style="width:21%"></span></div>
+    </div></div>
+    <div class="section-title">控制 · 11</div><div class="actions"><div class="action">
+    <button onclick="window.__toast&&window.__toast('auto-print_status_summary')">auto-print_status_summary</button>
+    
+  </div><div class="action">
+    <button onclick="window.__toast&&window.__toast('auto-test_connection')">auto-test_connection</button>
+    
+  </div><div class="action">
+    <button onclick="window.__toast&&window.__toast('debug_resource_names')">debug_resource_names</button>
+    
+  </div><div class="action">
+    <button onclick="window.__toast&&window.__toast('export_status_json')">export_status_json</button>
+    <label class="param"><span>filepath</span><input type="text" placeholder="string"/></label>
+  </div><div class="action">
+    <button onclick="window.__toast&&window.__toast('get_device_summary')">get_device_summary</button>
+    
+  </div><div class="action">
+    <button onclick="window.__toast&&window.__toast('get_plate_status')">get_plate_status</button>
+    <label class="param"><span>plate_num</span><input type="number" placeholder="integer"/></label>
+  </div><span class="more">…还有 5 个动作</span></div>
+  </div><div class="card" data-device="opcua_example">
+    <h3>opcua_example</h3>
+    <span class="chip">opcua_example</span>
+    
+    
+    <div class="section-title">控制 · 6</div><div class="actions"><div class="action">
+    <button onclick="window.__toast&&window.__toast('auto-disconnect')">auto-disconnect</button>
+    
+  </div><div class="action">
+    <button onclick="window.__toast&&window.__toast('auto-load_config')">auto-load_config</button>
+    <label class="param"><span>config_path</span><input type="text" placeholder="string"/></label>
+  </div><div class="action">
+    <button onclick="window.__toast&&window.__toast('auto-refresh_node_values')">auto-refresh_node_values</button>
+    
+  </div><div class="action">
+    <button onclick="window.__toast&&window.__toast('auto-set_node_value')">auto-set_node_value</button>
+    <label class="param"><span>name</span><input type="text" placeholder="string"/></label><label class="param"><span>value</span><input type="text" placeholder="string"/></label>
+  </div><div class="action">
+    <button onclick="window.__toast&&window.__toast('auto-start_node_refresh')">auto-start_node_refresh</button>
+    
+  </div><div class="action">
+    <button onclick="window.__toast&&window.__toast('auto-stop_node_refresh')">auto-stop_node_refresh</button>
+    
+  </div></div>
+  </div><div class="card" data-device="opsky_ATR30007">
+    <h3>opsky_ATR30007</h3>
+    <span class="chip">characterization_optic,opsky_ATR30007</span>
+    <div class="desc">OPSKY ATR30007 光纤拉曼模块，提供单一入口大函数以执行一次完整流程。</div>
+    
+    <div class="section-title">控制 · 5</div><div class="actions"><div class="action">
+    <button onclick="window.__toast&&window.__toast('auto-ensure_connected')">auto-ensure_connected</button>
+    <label class="param"><span>client</span><input type="text" placeholder="string"/></label><label class="param"><span>ip</span><input type="text" placeholder="string"/></label><label class="param"><span>name</span><input type="text" placeholder="string"/></label><span class="more">+1</span>
+  </div><div class="action">
+    <button onclick="window.__toast&&window.__toast('auto-run_once')">auto-run_once</button>
+    <label class="param"><span>integration_time</span><input type="text" placeholder="string"/></label><label class="param"><span>laser_power</span><input type="text" placeholder="string"/></label><label class="param"><span>norm_max</span><input type="text" placeholder="string"/></label><span class="more">+3</span>
+  </div><div class="action">
+    <button onclick="window.__toast&&window.__toast('auto-safe_read')">auto-safe_read</button>
+    <label class="param"><span>client</span><input type="text" placeholder="string"/></label><label class="param"><span>delay</span><input type="text" placeholder="string"/></label><label class="param"><span>func</span><input type="text" placeholder="string"/></label><span class="more">+2</span>
+  </div><div class="action">
+    <button onclick="window.__toast&&window.__toast('auto-safe_write')">auto-safe_write</button>
+    <label class="param"><span>client</span><input type="text" placeholder="string"/></label><label class="param"><span>delay</span><input type="text" placeholder="string"/></label><label class="param"><span>func</span><input type="text" placeholder="string"/></label><span class="more">+2</span>
+  </div><div class="action">
+    <button onclick="window.__toast&&window.__toast('auto-wait_with_quit_check')">auto-wait_with_quit_check</button>
+    <label class="param"><span>addr_quit</span><input type="text" placeholder="string"/></label><label class="param"><span>robot</span><input type="text" placeholder="string"/></label><label class="param"><span>seconds</span><input type="text" placeholder="string"/></label>
+  </div></div>
+  </div><div class="card" data-device="rotavap.one">
+    <h3>rotavap.one</h3>
+    <span class="chip">organic_miscellaneous</span>
+    <div class="desc">旋转蒸发仪设备，用于有机化学实验中的溶剂回收和浓缩操作。该设备通过串口通信控制，集成旋转和真空泵功能，支持定时控制和自动化操作。具备旋转速度调节、真空度控制、温度管理等功能，实现高效的溶剂蒸发和回收。适用于有机合成、天然产物提取、药物制备等需要溶剂去除和浓缩的实验室应用场景。</div>
+    
+    <div class="section-title">控制 · 5</div><div class="actions"><div class="action">
+    <button onclick="window.__toast&&window.__toast('auto-cmd_write')">auto-cmd_write</button>
+    <label class="param"><span>cmd</span><input type="text" placeholder="string"/></label>
+  </div><div class="action">
+    <button onclick="window.__toast&&window.__toast('auto-main_loop')">auto-main_loop</button>
+    
+  </div><div class="action">
+    <button onclick="window.__toast&&window.__toast('auto-set_pump_time')">auto-set_pump_time</button>
+    <label class="param"><span>time</span><input type="text" placeholder="string"/></label>
+  </div><div class="action">
+    <button onclick="window.__toast&&window.__toast('auto-set_rotate_time')">auto-set_rotate_time</button>
+    <label class="param"><span>time</span><input type="text" placeholder="string"/></label>
+  </div><div class="action">
+    <button onclick="window.__toast&&window.__toast('set_timer')">set_timer</button>
+    <label class="param"><span>command</span><input type="text" placeholder="string"/></label>
+  </div></div>
+  </div><div class="card" data-device="separator.homemade">
+    <h3>separator.homemade</h3>
+    <span class="chip">organic_miscellaneous</span>
+    <div class="desc">液-液分离器设备，基于自制Grbl控制器的自动化分离系统。该设备集成搅拌、沉降、阀门控制和电导率传感器，通过串口通信实现精确的分离操作控制。支持自动搅拌、分层沉降、基于传感器反馈的智能分液等功能。适用于有机化学中的萃取分离、相分离、液-液提取等需要精确分离控制的实验应用。</div>
+    
+    <div class="section-title">控制 · 5</div><div class="actions"><div class="action">
+    <button onclick="window.__toast&&window.__toast('auto-read_sensor_loop')">auto-read_sensor_loop</button>
+    
+  </div><div class="action">
+    <button onclick="window.__toast&&window.__toast('auto-valve_open')">auto-valve_open</button>
+    <label class="param"><span>condition</span><input type="text" placeholder="string"/></label><label class="param"><span>value</span><input type="text" placeholder="string"/></label>
+  </div><div class="action">
+    <button onclick="window.__toast&&window.__toast('auto-write')">auto-write</button>
+    <label class="param"><span>data</span><input type="text" placeholder="string"/></label>
+  </div><div class="action">
+    <button onclick="window.__toast&&window.__toast('stir')">stir</button>
+    <label class="param"><span>event</span><input type="text" placeholder="string"/></label><label class="param"><span>settling_time</span><input type="text" placeholder="string"/></label><label class="param"><span>stir_speed</span><input type="number" placeholder="number"/></label><span class="more">+4</span>
+  </div><div class="action">
+    <button onclick="window.__toast&&window.__toast('valve_open_cmd')">valve_open_cmd</button>
+    <label class="param"><span>command</span><input type="text" placeholder="string"/></label>
+  </div></div>
+  </div><div class="card" data-device="post_process_station">
+    <h3>post_process_station</h3>
+    <span class="chip">post_process_station</span>
+    <div class="desc">后处理站</div>
+    <div class="section-title">遥测 / 状态 · 1</div><div class="grid"><div class="metric">
+    <div class="metric-label">cache_stats</div>
+    <div class="badge" style="--c:#fbbf24">busy</div>
+  </div></div>
+    <div class="section-title">控制 · 9</div><div class="actions"><div class="action">
+    <button onclick="window.__toast&&window.__toast('auto-load_config')">auto-load_config</button>
+    <label class="param"><span>config_path</span><input type="text" placeholder="string"/></label>
+  </div><div class="action">
+    <button onclick="window.__toast&&window.__toast('auto-print_cache_stats')">auto-print_cache_stats</button>
+    
+  </div><div class="action">
+    <button onclick="window.__toast&&window.__toast('auto-set_node_value')">auto-set_node_value</button>
+    <label class="param"><span>name</span><input type="text" placeholder="string"/></label><label class="param"><span>value</span><input type="text" placeholder="string"/></label>
+  </div><div class="action">
+    <button onclick="window.__toast&&window.__toast('disconnect')">disconnect</button>
+    <label class="param"><span>command</span><input type="text" placeholder="string"/></label>
+  </div><div class="action">
+    <button onclick="window.__toast&&window.__toast('read_node')">read_node</button>
+    <label class="param"><span>command</span><input type="text" placeholder="string"/></label>
+  </div><div class="action">
+    <button onclick="window.__toast&&window.__toast('trigger_cleaning_action')">trigger_cleaning_action</button>
+    <label class="param"><span>acetone_inner_wall_cleaning_count</span><input type="number" placeholder="integer"/></label><label class="param"><span>acetone_inner_wall_cleaning_injection</span><input type="number" placeholder="number"/></label><label class="param"><span>acetone_inner_wall_cleaning_waste_time</span><input type="number" placeholder="integer"/></label><span class="more">+37</span>
+  </div><span class="more">…还有 3 个动作</span></div>
+  </div><div class="card" data-device="solenoid_valve">
+    <h3>solenoid_valve</h3>
+    <span class="chip">pump_and_valve</span>
+    <div class="desc">电磁阀控制设备，用于精确的流体路径控制和开关操作。该设备通过串口通信控制电磁阀的开关状态，支持远程操作和状态监测。具备快速响应、可靠密封、状态反馈等特性，广泛应用于流体输送、样品进样、路径切换等需要精确流体控制的实验室自动化应用。</div>
+    <div class="section-title">遥测 / 状态 · 2</div><div class="grid"><div class="metric">
+    <div class="metric-label">status</div>
+    <div class="badge" style="--c:#fbbf24">busy</div>
+  </div><div class="metric">
+    <div class="metric-label">valve_position</div>
+    <div class="badge" style="--c:#34d399">running</div>
+  </div></div>
+    <div class="section-title">控制 · 7</div><div class="actions"><div class="action">
+    <button onclick="window.__toast&&window.__toast('auto-close')">auto-close</button>
+    
+  </div><div class="action">
+    <button onclick="window.__toast&&window.__toast('auto-is_closed')">auto-is_closed</button>
+    
+  </div><div class="action">
+    <button onclick="window.__toast&&window.__toast('auto-is_open')">auto-is_open</button>
+    
+  </div><div class="action">
+    <button onclick="window.__toast&&window.__toast('auto-open')">auto-open</button>
+    
+  </div><div class="action">
+    <button onclick="window.__toast&&window.__toast('auto-read_data')">auto-read_data</button>
+    
+  </div><div class="action">
+    <button onclick="window.__toast&&window.__toast('auto-send_command')">auto-send_command</button>
+    <label class="param"><span>command</span><input type="text" placeholder="string"/></label>
+  </div><span class="more">…还有 1 个动作</span></div>
+  </div><div class="card" data-device="solenoid_valve.mock">
+    <h3>solenoid_valve.mock</h3>
+    <span class="chip">pump_and_valve</span>
+    <div class="desc">模拟电磁阀设备，用于系统测试和开发调试。该设备模拟真实电磁阀的开关操作和状态变化，提供与实际设备相同的控制接口和反馈机制。支持流体路径的虚拟控制，便于在没有实际硬件的情况下进行流体系统的集成测试和算法验证。适用于系统开发、流程调试和培训演示等场景。</div>
+    <div class="section-title">遥测 / 状态 · 2</div><div class="grid"><div class="metric">
+    <div class="metric-label">status</div>
+    <div class="badge" style="--c:#fbbf24">busy</div>
+  </div><div class="metric">
+    <div class="metric-label">valve_position</div>
+    <div class="badge" style="--c:#34d399">running</div>
+  </div></div>
+    <div class="section-title">控制 · 5</div><div class="actions"><div class="action">
+    <button onclick="window.__toast&&window.__toast('auto-is_closed')">auto-is_closed</button>
+    
+  </div><div class="action">
+    <button onclick="window.__toast&&window.__toast('auto-is_open')">auto-is_open</button>
+    
+  </div><div class="action">
+    <button onclick="window.__toast&&window.__toast('auto-set_valve_position')">auto-set_valve_position</button>
+    <label class="param"><span>position</span><input type="text" placeholder="string"/></label>
+  </div><div class="action">
+    <button onclick="window.__toast&&window.__toast('close')">close</button>
+    
+  </div><div class="action">
+    <button onclick="window.__toast&&window.__toast('open')">open</button>
+    
+  </div></div>
+  </div><div class="card" data-device="syringe_pump_with_valve.runze.SY03B-T06">
+    <h3>syringe_pump_with_valve.runze.SY03B-T06</h3>
+    <span class="chip">pump_and_valve</span>
+    <div class="desc">润泽精密注射泵设备，集成阀门控制的高精度流体输送系统。该设备通过串口通信控制，支持多种运行模式和精确的体积控制。具备可变速度控制、精密定位、阀门切换、实时状态监控等功能。适用于微量液体输送、精密进样、流速控制、化学反应进料等需要高精度流体操作的实验室自动化应用。</div>
+    <div class="section-title">遥测 / 状态 · 9</div><div class="grid"><div class="metric">
+      <div class="metric-label">max_velocity</div>
+      <div class="metric-value">75.0</div>
+      <div class="bar"><span style="width:75%"></span></div>
+    </div><div class="metric">
+      <div class="metric-label">mode</div>
+      <div class="metric-value">30.0</div>
+      <div class="bar"><span style="width:30%"></span></div>
+    </div><div class="metric">
+    <div class="metric-label">plunger_position</div>
+    <div class="badge" style="--c:#fbbf24">busy</div>
+  </div><div class="metric">
+      <div class="metric-label">position</div>
+      <div class="metric-value">7.0</div>
+      <div class="bar"><span style="width:7%"></span></div>
+    </div><div class="metric">
+    <div class="metric-label">status</div>
+    <div class="badge" style="--c:#fbbf24">busy</div>
+  </div><div class="metric">
+    <div class="metric-label">valve_position</div>
+    <div class="badge" style="--c:#34d399">running</div>
+  </div><div class="metric">
+    <div class="metric-label">velocity_end</div>
+    <div class="badge" style="--c:#94a3b8">idle</div>
+  </div><div class="metric">
+    <div class="metric-label">velocity_grade</div>
+    <div class="badge" style="--c:#34d399">running</div>
+  </div><div class="metric">
+    <div class="metric-label">velocity_init</div>
+    <div class="badge" style="--c:#60a5fa">ready</div>
+  </div></div>
+    <div class="section-title">控制 · 18</div><div class="actions"><div class="action">
+    <button onclick="window.__toast&&window.__toast('auto-close')">auto-close</button>
+    
+  </div><div class="action">
+    <button onclick="window.__toast&&window.__toast('auto-initialize')">auto-initialize</button>
+    
+  </div><div class="action">
+    <button onclick="window.__toast&&window.__toast('auto-list')">auto-list</button>
+    
+  </div><div class="action">
+    <button onclick="window.__toast&&window.__toast('auto-pull_plunger')">auto-pull_plunger</button>
+    <label class="param"><span>volume</span><input type="number" placeholder="number"/></label>
+  </div><div class="action">
+    <button onclick="window.__toast&&window.__toast('auto-push_plunger')">auto-push_plunger</button>
+    <label class="param"><span>volume</span><input type="number" placeholder="number"/></label>
+  </div><div class="action">
+    <button onclick="window.__toast&&window.__toast('auto-query_aux_input_status_1')">auto-query_aux_input_status_1</button>
+    
+  </div><span class="more">…还有 12 个动作</span></div>
+  </div><div class="card" data-device="syringe_pump_with_valve.runze.SY03B-T08">
+    <h3>syringe_pump_with_valve.runze.SY03B-T08</h3>
+    <span class="chip">pump_and_valve</span>
+    <div class="desc">润泽精密注射泵设备，集成阀门控制的高精度流体输送系统。该设备通过串口通信控制，支持多种运行模式和精确的体积控制。具备可变速度控制、精密定位、阀门切换、实时状态监控等功能。适用于微量液体输送、精密进样、流速控制、化学反应进料等需要高精度流体操作的实验室自动化应用。</div>
+    <div class="section-title">遥测 / 状态 · 9</div><div class="grid"><div class="metric">
+      <div class="metric-label">max_velocity</div>
+      <div class="metric-value">75.0</div>
+      <div class="bar"><span style="width:75%"></span></div>
+    </div><div class="metric">
+      <div class="metric-label">mode</div>
+      <div class="metric-value">30.0</div>
+      <div class="bar"><span style="width:30%"></span></div>
+    </div><div class="metric">
+    <div class="metric-label">plunger_position</div>
+    <div class="badge" style="--c:#fbbf24">busy</div>
+  </div><div class="metric">
+      <div class="metric-label">position</div>
+      <div class="metric-value">7.0</div>
+      <div class="bar"><span style="width:7%"></span></div>
+    </div><div class="metric">
+    <div class="metric-label">status</div>
+    <div class="badge" style="--c:#fbbf24">busy</div>
+  </div><div class="metric">
+    <div class="metric-label">valve_position</div>
+    <div class="badge" style="--c:#34d399">running</div>
+  </div><div class="metric">
+    <div class="metric-label">velocity_end</div>
+    <div class="badge" style="--c:#94a3b8">idle</div>
+  </div><div class="metric">
+    <div class="metric-label">velocity_grade</div>
+    <div class="badge" style="--c:#34d399">running</div>
+  </div><div class="metric">
+    <div class="metric-label">velocity_init</div>
+    <div class="badge" style="--c:#60a5fa">ready</div>
+  </div></div>
+    <div class="section-title">控制 · 18</div><div class="actions"><div class="action">
+    <button onclick="window.__toast&&window.__toast('auto-close')">auto-close</button>
+    
+  </div><div class="action">
+    <button onclick="window.__toast&&window.__toast('auto-initialize')">auto-initialize</button>
+    
+  </div><div class="action">
+    <button onclick="window.__toast&&window.__toast('auto-list')">auto-list</button>
+    
+  </div><div class="action">
+    <button onclick="window.__toast&&window.__toast('auto-pull_plunger')">auto-pull_plunger</button>
+    <label class="param"><span>volume</span><input type="number" placeholder="number"/></label>
+  </div><div class="action">
+    <button onclick="window.__toast&&window.__toast('auto-push_plunger')">auto-push_plunger</button>
+    <label class="param"><span>volume</span><input type="number" placeholder="number"/></label>
+  </div><div class="action">
+    <button onclick="window.__toast&&window.__toast('auto-query_aux_input_status_1')">auto-query_aux_input_status_1</button>
+    
+  </div><span class="more">…还有 12 个动作</span></div>
+  </div><div class="card" data-device="reaction_station.bioyond">
+    <h3>reaction_station.bioyond</h3>
+    <span class="chip">work_station,reaction_station_bioyond</span>
+    <div class="desc">Bioyond反应站</div>
+    <div class="section-title">遥测 / 状态 · 1</div><div class="grid"><div class="metric">
+    <div class="metric-label">workflow_sequence</div>
+    <div class="badge" style="--c:#fbbf24">busy</div>
+  </div></div>
+    <div class="section-title">控制 · 25</div><div class="actions"><div class="action">
+    <button onclick="window.__toast&&window.__toast('add_time_constraint')">add_time_constraint</button>
+    <label class="param"><span>duration</span><input type="number" placeholder="integer"/></label><label class="param"><span>end_point</span><input type="number" placeholder="integer"/></label><label class="param"><span>end_step_key</span><input type="text" placeholder="string"/></label><span class="more">+2</span>
+  </div><div class="action">
+    <button onclick="window.__toast&&window.__toast('auto-clear_workflows')">auto-clear_workflows</button>
+    
+  </div><div class="action">
+    <button onclick="window.__toast&&window.__toast('auto-create_order')">auto-create_order</button>
+    <label class="param"><span>json_str</span><input type="text" placeholder="string"/></label>
+  </div><div class="action">
+    <button onclick="window.__toast&&window.__toast('auto-hard_delete_merged_workflows')">auto-hard_delete_merged_workflows</button>
+    <label class="param"><span>workflow_ids</span><input type="text" placeholder="array"/></label>
+  </div><div class="action">
+    <button onclick="window.__toast&&window.__toast('auto-merge_workflow_with_parameters')">auto-merge_workflow_with_parameters</button>
+    <label class="param"><span>json_str</span><input type="text" placeholder="string"/></label>
+  </div><div class="action">
+    <button onclick="window.__toast&&window.__toast('auto-process_temperature_cutoff_report')">auto-process_temperature_cutoff_report</button>
+    <label class="param"><span>report_request</span><input type="text" placeholder="string"/></label>
+  </div><span class="more">…还有 19 个动作</span></div>
+  </div><div class="card" data-device="reaction_station.reactor">
+    <h3>reaction_station.reactor</h3>
+    <span class="chip">reactor,reaction_station_bioyond</span>
+    <div class="desc">反应站子设备-反应器</div>
+    
+    <div class="section-title">控制 · 1</div><div class="actions"><div class="action">
+    <button onclick="window.__toast&&window.__toast('auto-update_metrics')">auto-update_metrics</button>
+    <label class="param"><span>payload</span><input type="text" placeholder="object"/></label>
+  </div></div>
+  </div><div class="card" data-device="agv.SEER">
+    <h3>agv.SEER</h3>
+    <span class="chip">robot_agv</span>
+    <div class="desc">SEER AGV自动导引车设备，用于实验室内物料和设备的自主移动运输。该AGV通过TCP socket与导航系统通信，具备精确的定位和路径规划能力。支持实时位置监控、状态查询和导航任务执行，可在预设的实验室环境中自主移动至指定位置。适用于样品运输、设备转移、多工位协作等实验室自动化物流场景。</div>
+    <div class="section-title">遥测 / 状态 · 2</div><div class="grid"><div class="metric">
+    <div class="metric-label">pose</div>
+    <div class="badge" style="--c:#34d399">running</div>
+  </div><div class="metric">
+    <div class="metric-label">status</div>
+    <div class="badge" style="--c:#fbbf24">busy</div>
+  </div></div>
+    <div class="section-title">控制 · 2</div><div class="actions"><div class="action">
+    <button onclick="window.__toast&&window.__toast('auto-send')">auto-send</button>
+    <label class="param"><span>cmd</span><input type="text" placeholder="string"/></label><label class="param"><span>ex_data</span><input type="text" placeholder="string"/></label><label class="param"><span>obj</span><input type="text" placeholder="string"/></label>
+  </div><div class="action">
+    <button onclick="window.__toast&&window.__toast('send_nav_task')">send_nav_task</button>
+    <label class="param"><span>command</span><input type="text" placeholder="string"/></label>
+  </div></div>
+  </div><div class="card" data-device="robotic_arm.SCARA_with_slider.moveit.virtual">
+    <h3>robotic_arm.SCARA_with_slider.moveit.virtual</h3>
+    <span class="chip">robot_arm</span>
+    <div class="desc">机械臂与滑块运动系统，基于MoveIt2运动规划框架的多自由度机械臂控制设备。该系统集成机械臂和线性滑块，通过ROS2和MoveIt2实现精确的轨迹规划和协调运动控制。支持笛卡尔空间和关节空间的运动规划、碰撞检测、逆运动学求解等功能。适用于复杂的pick-and-place操作、精密装配、多工位协作等需要高精度多轴协调</div>
+    
+    <div class="section-title">控制 · 8</div><div class="actions"><div class="action">
+    <button onclick="window.__toast&&window.__toast('auto-check_tf_update_actions')">auto-check_tf_update_actions</button>
+    
+  </div><div class="action">
+    <button onclick="window.__toast&&window.__toast('auto-moveit_joint_task')">auto-moveit_joint_task</button>
+    <label class="param"><span>joint_names</span><input type="text" placeholder="string"/></label><label class="param"><span>joint_positions</span><input type="text" placeholder="string"/></label><label class="param"><span>move_group</span><input type="text" placeholder="string"/></label><span class="more">+2</span>
+  </div><div class="action">
+    <button onclick="window.__toast&&window.__toast('auto-moveit_task')">auto-moveit_task</button>
+    <label class="param"><span>cartesian</span><input type="text" placeholder="string"/></label><label class="param"><span>move_group</span><input type="text" placeholder="string"/></label><label class="param"><span>offsets</span><input type="text" placeholder="string"/></label><span class="more">+5</span>
+  </div><div class="action">
+    <button onclick="window.__toast&&window.__toast('auto-resource_manager')">auto-resource_manager</button>
+    <label class="param"><span>parent_link</span><input type="text" placeholder="string"/></label><label class="param"><span>resource</span><input type="text" placeholder="string"/></label>
+  </div><div class="action">
+    <button onclick="window.__toast&&window.__toast('auto-wait_for_resource_action')">auto-wait_for_resource_action</button>
+    
+  </div><div class="action">
+    <button onclick="window.__toast&&window.__toast('pick_and_place')">pick_and_place</button>
+    <label class="param"><span>command</span><input type="text" placeholder="string"/></label>
+  </div><span class="more">…还有 2 个动作</span></div>
+  </div><div class="card" data-device="robotic_arm.UR">
+    <h3>robotic_arm.UR</h3>
+    <span class="chip">robot_arm</span>
+    <div class="desc">Universal Robots机械臂设备，用于实验室精密操作和自动化作业。该设备集成了UR机械臂本体、Robotiq夹爪和RTDE通信接口，支持六自由度精确运动控制和力觉反馈。具备实时位置监控、状态反馈、轨迹规划等功能，可执行复杂的多点位运动任务。适用于样品抓取、精密装配、实验器具操作等需要高精度和高重复性的实验室自</div>
+    <div class="section-title">遥测 / 状态 · 4</div><div class="grid"><div class="metric">
+    <div class="metric-label">arm_pose</div>
+    <div class="badge" style="--c:#fbbf24">busy</div>
+  </div><div class="metric">
+    <div class="metric-label">arm_status</div>
+    <div class="badge" style="--c:#34d399">ok</div>
+  </div><div class="metric">
+      <div class="metric-label">gripper_pose</div>
+      <div class="metric-value">93.0</div>
+      <div class="bar"><span style="width:93%"></span></div>
+    </div><div class="metric">
+    <div class="metric-label">gripper_status</div>
+    <div class="badge" style="--c:#94a3b8">idle</div>
+  </div></div>
+    <div class="section-title">控制 · 5</div><div class="actions"><div class="action">
+    <button onclick="window.__toast&&window.__toast('auto-arm_init')">auto-arm_init</button>
+    
+  </div><div class="action">
+    <button onclick="window.__toast&&window.__toast('auto-load_pose_data')">auto-load_pose_data</button>
+    <label class="param"><span>data</span><input type="text" placeholder="string"/></label>
+  </div><div class="action">
+    <button onclick="window.__toast&&window.__toast('auto-load_pose_file')">auto-load_pose_file</button>
+    <label class="param"><span>file</span><input type="text" placeholder="string"/></label>
+  </div><div class="action">
+    <button onclick="window.__toast&&window.__toast('auto-reload_pose')">auto-reload_pose</button>
+    
+  </div><div class="action">
+    <button onclick="window.__toast&&window.__toast('move_pos_task')">move_pos_task</button>
+    <label class="param"><span>command</span><input type="text" placeholder="string"/></label>
+  </div></div>
+  </div><div class="card" data-device="robotic_arm.elite">
+    <h3>robotic_arm.elite</h3>
+    <span class="chip">robot_arm</span>
+    <div class="desc">Elite robot arm</div>
+    <div class="section-title">遥测 / 状态 · 2</div><div class="grid"><div class="metric">
+    <div class="metric-label">actual_joint_positions</div>
+    <div class="badge" style="--c:#fbbf24">busy</div>
+  </div><div class="metric">
+    <div class="metric-label">arm_pose</div>
+    <div class="badge" style="--c:#fbbf24">busy</div>
+  </div></div>
+    <div class="section-title">控制 · 8</div><div class="actions"><div class="action">
+    <button onclick="window.__toast&&window.__toast('auto-close')">auto-close</button>
+    
+  </div><div class="action">
+    <button onclick="window.__toast&&window.__toast('auto-modbus_close')">auto-modbus_close</button>
+    
+  </div><div class="action">
+    <button onclick="window.__toast&&window.__toast('auto-modbus_read_holding_registers')">auto-modbus_read_holding_registers</button>
+    <label class="param"><span>quantity</span><input type="text" placeholder="string"/></label><label class="param"><span>start_addr</span><input type="text" placeholder="string"/></label><label class="param"><span>unit_id</span><input type="text" placeholder="string"/></label>
+  </div><div class="action">
+    <button onclick="window.__toast&&window.__toast('auto-modbus_task')">auto-modbus_task</button>
+    <label class="param"><span>job_id</span><input type="text" placeholder="string"/></label>
+  </div><div class="action">
+    <button onclick="window.__toast&&window.__toast('auto-modbus_write_single_register')">auto-modbus_write_single_register</button>
+    <label class="param"><span>register_addr</span><input type="text" placeholder="string"/></label><label class="param"><span>unit_id</span><input type="text" placeholder="string"/></label><label class="param"><span>value</span><input type="text" placeholder="string"/></label>
+  </div><div class="action">
+    <button onclick="window.__toast&&window.__toast('auto-parse_success_response')">auto-parse_success_response</button>
+    <label class="param"><span>response</span><input type="text" placeholder="string"/></label>
+  </div><span class="more">…还有 2 个动作</span></div>
+  </div><div class="card" data-device="gripper.misumi_rz">
+    <h3>gripper.misumi_rz</h3>
+    <span class="chip">robot_gripper</span>
+    <div class="desc">Misumi RZ系列电子夹爪设备，集成旋转和抓取双重功能的精密夹爪系统。该设备通过Modbus RTU协议与控制系统通信，支持位置、速度、力矩的精确控制。具备高精度的位置反馈、实时状态监控和故障检测功能。适用于需要精密抓取和旋转操作的实验室自动化场景，如样品管理、精密装配、器件操作等应用。</div>
+    <div class="section-title">遥测 / 状态 · 1</div><div class="grid"><div class="metric">
+    <div class="metric-label">status</div>
+    <div class="badge" style="--c:#fbbf24">busy</div>
+  </div></div>
+    <div class="section-title">控制 · 15</div><div class="actions"><div class="action">
+    <button onclick="window.__toast&&window.__toast('auto-data_loop')">auto-data_loop</button>
+    
+  </div><div class="action">
+    <button onclick="window.__toast&&window.__toast('auto-data_reader')">auto-data_reader</button>
+    
+  </div><div class="action">
+    <button onclick="window.__toast&&window.__toast('auto-gripper_move')">auto-gripper_move</button>
+    <label class="param"><span>force</span><input type="text" placeholder="string"/></label><label class="param"><span>pos</span><input type="text" placeholder="string"/></label><label class="param"><span>speed</span><input type="text" placeholder="string"/></label>
+  </div><div class="action">
+    <button onclick="window.__toast&&window.__toast('auto-init_gripper')">auto-init_gripper</button>
+    
+  </div><div class="action">
+    <button onclick="window.__toast&&window.__toast('auto-modbus_crc')">auto-modbus_crc</button>
+    <label class="param"><span>data</span><input type="text" placeholder="object"/></label>
+  </div><div class="action">
+    <button onclick="window.__toast&&window.__toast('auto-move_and_rotate')">auto-move_and_rotate</button>
+    <label class="param"><span>grasp_F</span><input type="text" placeholder="string"/></label><label class="param"><span>grasp_pos</span><input type="text" placeholder="string"/></label><label class="param"><span>grasp_v</span><input type="text" placeholder="string"/></label><span class="more">+3</span>
+  </div><span class="more">…还有 9 个动作</span></div>
+  </div><div class="card" data-device="gripper.mock">
+    <h3>gripper.mock</h3>
+    <span class="chip">robot_gripper</span>
+    <div class="desc">模拟夹爪设备，用于系统测试和开发调试。该设备模拟真实夹爪的位置、速度、力矩等物理特性，支持虚拟的抓取和移动操作。提供与真实夹爪相同的接口和状态反馈，便于在没有实际硬件的情况下进行系统集成测试和算法验证。适用于软件开发、系统调试和培训演示等场景。</div>
+    <div class="section-title">遥测 / 状态 · 4</div><div class="grid"><div class="metric">
+      <div class="metric-label">position</div>
+      <div class="metric-value">7.0</div>
+      <div class="bar"><span style="width:7%"></span></div>
+    </div><div class="metric">
+    <div class="metric-label">status</div>
+    <div class="badge" style="--c:#fbbf24">busy</div>
+  </div><div class="metric">
+      <div class="metric-label">torque</div>
+      <div class="metric-value">80.0</div>
+      <div class="bar"><span style="width:80%"></span></div>
+    </div><div class="metric">
+      <div class="metric-label">velocity</div>
+      <div class="metric-value">19.0</div>
+      <div class="bar"><span style="width:19%"></span></div>
+    </div></div>
+    <div class="section-title">控制 · 2</div><div class="actions"><div class="action">
+    <button onclick="window.__toast&&window.__toast('auto-edit_id')">auto-edit_id</button>
+    <label class="param"><span>params</span><input type="text" placeholder="string"/></label><label class="param"><span>resource</span><input type="text" placeholder="object"/></label><label class="param"><span>wf_name</span><input type="text" placeholder="string"/></label>
+  </div><div class="action">
+    <button onclick="window.__toast&&window.__toast('push_to')">push_to</button>
+    <label class="param"><span>command</span><input type="text" placeholder="object"/></label>
+  </div></div>
+  </div><div class="card" data-device="linear_motion.grbl">
+    <h3>linear_motion.grbl</h3>
+    <span class="chip">robot_linear_motion</span>
+    <div class="desc">Grbl数控机床（CNC）设备，用于实验室精密加工和三轴定位操作。该设备基于Grbl固件，通过串口通信控制步进电机实现X、Y、Z三轴的精确运动。支持绝对定位、轨迹规划、主轴控制和实时状态监控。具备安全限位保护和运动平滑控制功能。适用于精密钻孔、铣削、雕刻、样品制备等需要高精度定位和加工的实验室应用场景。</div>
+    <div class="section-title">遥测 / 状态 · 3</div><div class="grid"><div class="metric">
+    <div class="metric-label">position</div>
+    <div class="badge" style="--c:#fbbf24">busy</div>
+  </div><div class="metric">
+      <div class="metric-label">spindle_speed</div>
+      <div class="metric-value">64.0</div>
+      <div class="bar"><span style="width:64%"></span></div>
+    </div><div class="metric">
+    <div class="metric-label">status</div>
+    <div class="badge" style="--c:#fbbf24">busy</div>
+  </div></div>
+    <div class="section-title">控制 · 7</div><div class="actions"><div class="action">
+    <button onclick="window.__toast&&window.__toast('auto-initialize')">auto-initialize</button>
+    
+  </div><div class="action">
+    <button onclick="window.__toast&&window.__toast('auto-list')">auto-list</button>
+    
+  </div><div class="action">
+    <button onclick="window.__toast&&window.__toast('auto-set_position')">auto-set_position</button>
+    <label class="param"><span>position</span><input type="text" placeholder="object"/></label>
+  </div><div class="action">
+    <button onclick="window.__toast&&window.__toast('auto-stop_operation')">auto-stop_operation</button>
+    
+  </div><div class="action">
+    <button onclick="window.__toast&&window.__toast('auto-wait_error')">auto-wait_error</button>
+    
+  </div><div class="action">
+    <button onclick="window.__toast&&window.__toast('move_through_points')">move_through_points</button>
+    <label class="param"><span>behavior_tree</span><input type="text" placeholder="string"/></label><label class="param"><span>poses</span><input type="text" placeholder="array"/></label>
+  </div><span class="more">…还有 1 个动作</span></div>
+  </div><div class="card" data-device="linear_motion.toyo_xyz.sim">
+    <h3>linear_motion.toyo_xyz.sim</h3>
+    <span class="chip">robot_linear_motion</span>
+    <div class="desc">东洋XYZ三轴运动平台，基于MoveIt2运动规划框架的精密定位设备。该设备通过ROS2和MoveIt2实现三维空间的精确运动控制，支持复杂轨迹规划、多点定位、速度控制等功能。具备高精度定位、平稳运动、实时轨迹监控等特性。适用于精密加工、样品定位、检测扫描、自动化装配等需要高精度三维运动控制的实验室和工业应用场景。</div>
+    
+    <div class="section-title">控制 · 8</div><div class="actions"><div class="action">
+    <button onclick="window.__toast&&window.__toast('auto-check_tf_update_actions')">auto-check_tf_update_actions</button>
+    
+  </div><div class="action">
+    <button onclick="window.__toast&&window.__toast('auto-moveit_joint_task')">auto-moveit_joint_task</button>
+    <label class="param"><span>joint_names</span><input type="text" placeholder="string"/></label><label class="param"><span>joint_positions</span><input type="text" placeholder="string"/></label><label class="param"><span>move_group</span><input type="text" placeholder="string"/></label><span class="more">+2</span>
+  </div><div class="action">
+    <button onclick="window.__toast&&window.__toast('auto-moveit_task')">auto-moveit_task</button>
+    <label class="param"><span>cartesian</span><input type="text" placeholder="string"/></label><label class="param"><span>move_group</span><input type="text" placeholder="string"/></label><label class="param"><span>offsets</span><input type="text" placeholder="string"/></label><span class="more">+5</span>
+  </div><div class="action">
+    <button onclick="window.__toast&&window.__toast('auto-resource_manager')">auto-resource_manager</button>
+    <label class="param"><span>parent_link</span><input type="text" placeholder="string"/></label><label class="param"><span>resource</span><input type="text" placeholder="string"/></label>
+  </div><div class="action">
+    <button onclick="window.__toast&&window.__toast('auto-wait_for_resource_action')">auto-wait_for_resource_action</button>
+    
+  </div><div class="action">
+    <button onclick="window.__toast&&window.__toast('pick_and_place')">pick_and_place</button>
+    <label class="param"><span>command</span><input type="text" placeholder="string"/></label>
+  </div><span class="more">…还有 2 个动作</span></div>
+  </div><div class="card" data-device="motor.iCL42">
+    <h3>motor.iCL42</h3>
+    <span class="chip">robot_linear_motion</span>
+    <div class="desc">iCL42步进电机驱动器，用于实验室设备的精密线性运动控制。该设备通过串口通信控制iCL42型步进电机驱动器，支持多种运动模式和精确的位置、速度控制。具备位置反馈、运行状态监控和故障检测功能。适用于自动进样器、样品传送、精密定位平台等需要准确线性运动控制的实验室自动化设备。</div>
+    <div class="section-title">遥测 / 状态 · 3</div><div class="grid"><div class="metric">
+      <div class="metric-label">is_executing_run</div>
+      <div class="dot on"></div>
+    </div><div class="metric">
+      <div class="metric-label">motor_position</div>
+      <div class="metric-value">56.0</div>
+      <div class="bar"><span style="width:56%"></span></div>
+    </div><div class="metric">
+      <div class="metric-label">success</div>
+      <div class="dot on"></div>
+    </div></div>
+    <div class="section-title">控制 · 4</div><div class="actions"><div class="action">
+    <button onclick="window.__toast&&window.__toast('auto-execute_run_motor')">auto-execute_run_motor</button>
+    <label class="param"><span>mode</span><input type="text" placeholder="string"/></label><label class="param"><span>position</span><input type="number" placeholder="number"/></label><label class="param"><span>velocity</span><input type="number" placeholder="integer"/></label>
+  </div><div class="action">
+    <button onclick="window.__toast&&window.__toast('auto-init_device')">auto-init_device</button>
+    
+  </div><div class="action">
+    <button onclick="window.__toast&&window.__toast('auto-run_motor')">auto-run_motor</button>
+    <label class="param"><span>mode</span><input type="text" placeholder="string"/></label><label class="param"><span>position</span><input type="number" placeholder="number"/></label><label class="param"><span>velocity</span><input type="number" placeholder="integer"/></label>
+  </div><div class="action">
+    <button onclick="window.__toast&&window.__toast('execute_command_from_outer')">execute_command_from_outer</button>
+    <label class="param"><span>command</span><input type="text" placeholder="string"/></label>
+  </div></div>
+  </div><div class="card" data-device="solid_dispenser.laiyu">
+    <h3>solid_dispenser.laiyu</h3>
+    <span class="chip">solid_dispenser</span>
+    <div class="desc">来渝固体粉末自动分装设备，用于实验室化学试剂的精确称量和分装。该设备通过Modbus RTU协议与控制系统通信，集成了精密天平、三轴运动平台、粉筒管理系统等组件。支持多种粉末试剂的自动拿取、精确称量、定点分装和归位操作。具备高精度称量、位置控制和批量处理能力，适用于化学合成、药物研发、材料制备等需要精确固体试剂配制的实</div>
+    <div class="section-title">遥测 / 状态 · 1</div><div class="grid"><div class="metric">
+    <div class="metric-label">status</div>
+    <div class="badge" style="--c:#fbbf24">busy</div>
+  </div></div>
+    <div class="section-title">控制 · 9</div><div class="actions"><div class="action">
+    <button onclick="window.__toast&&window.__toast('add_powder_tube')">add_powder_tube</button>
+    <label class="param"><span>compound_mass</span><input type="number" placeholder="number"/></label><label class="param"><span>powder_tube_number</span><input type="number" placeholder="integer"/></label><label class="param"><span>target_tube_position</span><input type="text" placeholder="string"/></label>
+  </div><div class="action">
+    <button onclick="window.__toast&&window.__toast('auto-calculate_crc')">auto-calculate_crc</button>
+    <label class="param"><span>data</span><input type="text" placeholder="object"/></label>
+  </div><div class="action">
+    <button onclick="window.__toast&&window.__toast('auto-send_command')">auto-send_command</button>
+    <label class="param"><span>command</span><input type="text" placeholder="object"/></label>
+  </div><div class="action">
+    <button onclick="window.__toast&&window.__toast('discharge')">discharge</button>
+    <label class="param"><span>float_in</span><input type="number" placeholder="number"/></label>
+  </div><div class="action">
+    <button onclick="window.__toast&&window.__toast('move_to_plate')">move_to_plate</button>
+    <label class="param"><span>string</span><input type="text" placeholder="string"/></label>
+  </div><div class="action">
+    <button onclick="window.__toast&&window.__toast('move_to_xyz')">move_to_xyz</button>
+    <label class="param"><span>x</span><input type="number" placeholder="number"/></label><label class="param"><span>y</span><input type="number" placeholder="number"/></label><label class="param"><span>z</span><input type="number" placeholder="number"/></label>
+  </div><span class="more">…还有 3 个动作</span></div>
+  </div><div class="card" data-device="chiller">
+    <h3>chiller</h3>
+    <span class="chip">temperature</span>
+    <div class="desc">实验室制冷设备，用于精确的温度控制和冷却操作。该设备通过Modbus RTU协议与控制系统通信，支持精确的温度设定和监控。具备快速降温、恒温控制和温度保持功能，广泛应用于需要低温环境的化学反应、样品保存、结晶操作等实验场景。提供稳定可靠的冷却性能，确保实验过程的温度精度。</div>
+    
+    <div class="section-title">控制 · 5</div><div class="actions"><div class="action">
+    <button onclick="window.__toast&&window.__toast('auto-build_modbus_frame')">auto-build_modbus_frame</button>
+    <label class="param"><span>device_address</span><input type="number" placeholder="integer"/></label><label class="param"><span>function_code</span><input type="number" placeholder="integer"/></label><label class="param"><span>register_address</span><input type="number" placeholder="integer"/></label><span class="more">+1</span>
+  </div><div class="action">
+    <button onclick="window.__toast&&window.__toast('auto-convert_temperature_to_modbus_value')">auto-convert_temperature_to_modbus_value</button>
+    <label class="param"><span>decimal_points</span><input type="number" placeholder="integer"/></label><label class="param"><span>temperature</span><input type="number" placeholder="number"/></label>
+  </div><div class="action">
+    <button onclick="window.__toast&&window.__toast('auto-modbus_crc')">auto-modbus_crc</button>
+    <label class="param"><span>data</span><input type="text" placeholder="object"/></label>
+  </div><div class="action">
+    <button onclick="window.__toast&&window.__toast('auto-stop')">auto-stop</button>
+    
+  </div><div class="action">
+    <button onclick="window.__toast&&window.__toast('set_temperature')">set_temperature</button>
+    <label class="param"><span>command</span><input type="text" placeholder="string"/></label>
+  </div></div>
+  </div><div class="card" data-device="heaterstirrer.dalong">
+    <h3>heaterstirrer.dalong</h3>
+    <span class="chip">temperature</span>
+    <div class="desc">大龙加热搅拌器，集成加热和搅拌双重功能的实验室设备。该设备通过串口通信控制，支持精确的温度调节、搅拌速度控制和安全保护功能。具备实时温度监测、目标温度设定、安全温度报警等特性。适用于化学合成、样品制备、反应控制等需要同时进行加热和搅拌的实验操作，提供稳定均匀的反应环境。</div>
+    <div class="section-title">遥测 / 状态 · 5</div><div class="grid"><div class="metric">
+    <div class="metric-label">status</div>
+    <div class="badge" style="--c:#fbbf24">busy</div>
+  </div><div class="metric">
+      <div class="metric-label">stir_speed</div>
+      <div class="metric-value">41.0</div>
+      <div class="bar"><span style="width:41%"></span></div>
+    </div><div class="metric">
+      <div class="metric-label">temp</div>
+      <div class="metric-value">4.0</div>
+      <div class="bar"><span style="width:4%"></span></div>
+    </div><div class="metric">
+      <div class="metric-label">temp_target</div>
+      <div class="metric-value">16.0</div>
+      <div class="bar"><span style="width:16%"></span></div>
+    </div><div class="metric">
+      <div class="metric-label">temp_warning</div>
+      <div class="metric-value">62.0</div>
+      <div class="bar"><span style="width:62%"></span></div>
+    </div></div>
+    <div class="section-title">控制 · 6</div><div class="actions"><div class="action">
+    <button onclick="window.__toast&&window.__toast('auto-close')">auto-close</button>
+    
+  </div><div class="action">
+    <button onclick="window.__toast&&window.__toast('auto-set_stir_speed')">auto-set_stir_speed</button>
+    <label class="param"><span>speed</span><input type="number" placeholder="number"/></label>
+  </div><div class="action">
+    <button onclick="window.__toast&&window.__toast('auto-set_temp_inner')">auto-set_temp_inner</button>
+    <label class="param"><span>temp</span><input type="number" placeholder="number"/></label><label class="param"><span>type</span><input type="text" placeholder="string"/></label>
+  </div><div class="action">
+    <button onclick="window.__toast&&window.__toast('heatchill')">heatchill</button>
+    <label class="param"><span>pressure</span><input type="text" placeholder="string"/></label><label class="param"><span>purpose</span><input type="text" placeholder="string"/></label><label class="param"><span>reflux_solvent</span><input type="text" placeholder="string"/></label><span class="more">+7</span>
+  </div><div class="action">
+    <button onclick="window.__toast&&window.__toast('set_temp_target')">set_temp_target</button>
+    <label class="param"><span>command</span><input type="text" placeholder="string"/></label>
+  </div><div class="action">
+    <button onclick="window.__toast&&window.__toast('set_temp_warning')">set_temp_warning</button>
+    <label class="param"><span>command</span><input type="text" placeholder="string"/></label>
+  </div></div>
+  </div><div class="card" data-device="tempsensor">
+    <h3>tempsensor</h3>
+    <span class="chip">temperature</span>
+    <div class="desc">高精度温度传感器设备，用于实验室环境和设备的温度监测。该传感器通过Modbus RTU协议与控制系统通信，提供实时准确的温度数据。具备高精度测量、报警温度设定、数据稳定性好等特点。适用于反应器监控、环境温度监测、设备保护等需要精确温度测量的实验场景，为实验安全和数据可靠性提供保障。</div>
+    <div class="section-title">遥测 / 状态 · 1</div><div class="grid"><div class="metric">
+      <div class="metric-label">value</div>
+      <div class="metric-value">86.0</div>
+      <div class="bar"><span style="width:86%"></span></div>
+    </div></div>
+    <div class="section-title">控制 · 5</div><div class="actions"><div class="action">
+    <button onclick="window.__toast&&window.__toast('auto-build_modbus_request')">auto-build_modbus_request</button>
+    <label class="param"><span>device_id</span><input type="text" placeholder="string"/></label><label class="param"><span>function_code</span><input type="text" placeholder="string"/></label><label class="param"><span>register_address</span><input type="text" placeholder="string"/></label><span class="more">+1</span>
+  </div><div class="action">
+    <button onclick="window.__toast&&window.__toast('auto-calculate_crc')">auto-calculate_crc</button>
+    <label class="param"><span>data</span><input type="text" placeholder="string"/></label>
+  </div><div class="action">
+    <button onclick="window.__toast&&window.__toast('auto-read_modbus_response')">auto-read_modbus_response</button>
+    <label class="param"><span>response</span><input type="text" placeholder="string"/></label>
+  </div><div class="action">
+    <button onclick="window.__toast&&window.__toast('auto-send_prototype_command')">auto-send_prototype_command</button>
+    <label class="param"><span>command</span><input type="text" placeholder="string"/></label>
+  </div><div class="action">
+    <button onclick="window.__toast&&window.__toast('set_warning')">set_warning</button>
+    <label class="param"><span>command</span><input type="text" placeholder="string"/></label>
+  </div></div>
+  </div><div class="card" data-device="virtual_centrifuge">
+    <h3>virtual_centrifuge</h3>
+    <span class="chip">virtual_device</span>
+    <div class="desc">Virtual Centrifuge for CentrifugeProtocol Testing</div>
+    <div class="section-title">遥测 / 状态 · 12</div><div class="grid"><div class="metric">
+    <div class="metric-label">centrifuge_state</div>
+    <div class="badge" style="--c:#60a5fa">ready</div>
+  </div><div class="metric">
+      <div class="metric-label">current_speed</div>
+      <div class="metric-value">79.0</div>
+      <div class="bar"><span style="width:79%"></span></div>
+    </div><div class="metric">
+      <div class="metric-label">current_temp</div>
+      <div class="metric-value">67.0</div>
+      <div class="bar"><span style="width:67%"></span></div>
+    </div><div class="metric">
+      <div class="metric-label">max_speed</div>
+      <div class="metric-value">81.0</div>
+      <div class="bar"><span style="width:81%"></span></div>
+    </div><div class="metric">
+      <div class="metric-label">max_temp</div>
+      <div class="metric-value">71.0</div>
+      <div class="bar"><span style="width:71%"></span></div>
+    </div><div class="metric">
+    <div class="metric-label">message</div>
+    <div class="badge" style="--c:#fbbf24">busy</div>
+  </div><div class="metric">
+      <div class="metric-label">min_temp</div>
+      <div class="metric-value">61.0</div>
+      <div class="bar"><span style="width:61%"></span></div>
+    </div><div class="metric">
+      <div class="metric-label">progress</div>
+      <div class="metric-value">17.0</div>
+      <div class="bar"><span style="width:17%"></span></div>
+    </div><div class="metric">
+    <div class="metric-label">status</div>
+    <div class="badge" style="--c:#fbbf24">busy</div>
+  </div><div class="metric">
+      <div class="metric-label">target_speed</div>
+      <div class="metric-value">65.0</div>
+      <div class="bar"><span style="width:65%"></span></div>
+    </div><div class="metric">
+      <div class="metric-label">target_temp</div>
+      <div class="metric-value">27.0</div>
+      <div class="bar"><span style="width:27%"></span></div>
+    </div><div class="metric">
+      <div class="metric-label">time_remaining</div>
+      <div class="metric-value">98.0</div>
+      <div class="bar"><span style="width:98%"></span></div>
+    </div></div>
+    <div class="section-title">控制 · 3</div><div class="actions"><div class="action">
+    <button onclick="window.__toast&&window.__toast('auto-cleanup')">auto-cleanup</button>
+    
+  </div><div class="action">
+    <button onclick="window.__toast&&window.__toast('auto-initialize')">auto-initialize</button>
+    
+  </div><div class="action">
+    <button onclick="window.__toast&&window.__toast('centrifuge')">centrifuge</button>
+    <label class="param"><span>speed</span><input type="number" placeholder="number"/></label><label class="param"><span>temp</span><input type="number" placeholder="number"/></label><label class="param"><span>time</span><input type="number" placeholder="number"/></label><span class="more">+1</span>
+  </div></div>
+  </div><div class="card" data-device="virtual_column">
+    <h3>virtual_column</h3>
+    <span class="chip">virtual_device</span>
+    <div class="desc">Virtual Column Chromatography Device for RunColumn Protocol Testing</div>
+    <div class="section-title">遥测 / 状态 · 11</div><div class="grid"><div class="metric">
+      <div class="metric-label">column_diameter</div>
+      <div class="metric-value">56.0</div>
+      <div class="bar"><span style="width:56%"></span></div>
+    </div><div class="metric">
+      <div class="metric-label">column_length</div>
+      <div class="metric-value">27.0</div>
+      <div class="bar"><span style="width:27%"></span></div>
+    </div><div class="metric">
+    <div class="metric-label">column_state</div>
+    <div class="badge" style="--c:#fbbf24">busy</div>
+  </div><div class="metric">
+      <div class="metric-label">current_flow_rate</div>
+      <div class="metric-value">84.0</div>
+      <div class="bar"><span style="width:84%"></span></div>
+    </div><div class="metric">
+    <div class="metric-label">current_phase</div>
+    <div class="badge" style="--c:#34d399">ok</div>
+  </div><div class="metric">
+    <div class="metric-label">current_status</div>
+    <div class="badge" style="--c:#fbbf24">busy</div>
+  </div><div class="metric">
+      <div class="metric-label">final_volume</div>
+      <div class="metric-value">40.0</div>
+      <div class="bar"><span style="width:40%"></span></div>
+    </div><div class="metric">
+      <div class="metric-label">max_flow_rate</div>
+      <div class="metric-value">11.0</div>
+      <div class="bar"><span style="width:11%"></span></div>
+    </div><div class="metric">
+      <div class="metric-label">processed_volume</div>
+      <div class="metric-value">50.0</div>
+      <div class="bar"><span style="width:50%"></span></div>
+    </div><div class="metric">
+      <div class="metric-label">progress</div>
+      <div class="metric-value">17.0</div>
+      <div class="bar"><span style="width:17%"></span></div>
+    </div><div class="metric">
+    <div class="metric-label">status</div>
+    <div class="badge" style="--c:#fbbf24">busy</div>
+  </div></div>
+    <div class="section-title">控制 · 3</div><div class="actions"><div class="action">
+    <button onclick="window.__toast&&window.__toast('auto-cleanup')">auto-cleanup</button>
+    
+  </div><div class="action">
+    <button onclick="window.__toast&&window.__toast('auto-initialize')">auto-initialize</button>
+    
+  </div><div class="action">
+    <button onclick="window.__toast&&window.__toast('run_column')">run_column</button>
+    <label class="param"><span>column</span><input type="text" placeholder="string"/></label><label class="param"><span>from_vessel</span><input type="text" placeholder="object"/></label><label class="param"><span>pct1</span><input type="text" placeholder="string"/></label><span class="more">+6</span>
+  </div></div>
+  </div><div class="card" data-device="virtual_filter">
+    <h3>virtual_filter</h3>
+    <span class="chip">virtual_device</span>
+    <div class="desc">Virtual Filter for FilterProtocol Testing</div>
+    <div class="section-title">遥测 / 状态 · 9</div><div class="grid"><div class="metric">
+    <div class="metric-label">current_status</div>
+    <div class="badge" style="--c:#fbbf24">busy</div>
+  </div><div class="metric">
+      <div class="metric-label">current_temp</div>
+      <div class="metric-value">67.0</div>
+      <div class="bar"><span style="width:67%"></span></div>
+    </div><div class="metric">
+      <div class="metric-label">filtered_volume</div>
+      <div class="metric-value">1.0</div>
+      <div class="bar"><span style="width:1%"></span></div>
+    </div><div class="metric">
+      <div class="metric-label">max_stir_speed</div>
+      <div class="metric-value">63.0</div>
+      <div class="bar"><span style="width:63%"></span></div>
+    </div><div class="metric">
+      <div class="metric-label">max_temp</div>
+      <div class="metric-value">71.0</div>
+      <div class="bar"><span style="width:71%"></span></div>
+    </div><div class="metric">
+      <div class="metric-label">max_volume</div>
+      <div class="metric-value">92.0</div>
+      <div class="bar"><span style="width:92%"></span></div>
+    </div><div class="metric">
+    <div class="metric-label">message</div>
+    <div class="badge" style="--c:#fbbf24">busy</div>
+  </div><div class="metric">
+      <div class="metric-label">progress</div>
+      <div class="metric-value">17.0</div>
+      <div class="bar"><span style="width:17%"></span></div>
+    </div><div class="metric">
+    <div class="metric-label">status</div>
+    <div class="badge" style="--c:#fbbf24">busy</div>
+  </div></div>
+    <div class="section-title">控制 · 3</div><div class="actions"><div class="action">
+    <button onclick="window.__toast&&window.__toast('auto-cleanup')">auto-cleanup</button>
+    
+  </div><div class="action">
+    <button onclick="window.__toast&&window.__toast('auto-initialize')">auto-initialize</button>
+    
+  </div><div class="action">
+    <button onclick="window.__toast&&window.__toast('filter')">filter</button>
+    <label class="param"><span>continue_heatchill</span><input type="text" placeholder="boolean"/></label><label class="param"><span>filtrate_vessel</span><input type="text" placeholder="object"/></label><label class="param"><span>stir</span><input type="text" placeholder="boolean"/></label><span class="more">+4</span>
+  </div></div>
+  </div><div class="card" data-device="virtual_gas_source">
+    <h3>virtual_gas_source</h3>
+    <span class="chip">virtual_device</span>
+    <div class="desc">Virtual gas source</div>
+    <div class="section-title">遥测 / 状态 · 1</div><div class="grid"><div class="metric">
+    <div class="metric-label">status</div>
+    <div class="badge" style="--c:#fbbf24">busy</div>
+  </div></div>
+    <div class="section-title">控制 · 7</div><div class="actions"><div class="action">
+    <button onclick="window.__toast&&window.__toast('auto-cleanup')">auto-cleanup</button>
+    
+  </div><div class="action">
+    <button onclick="window.__toast&&window.__toast('auto-initialize')">auto-initialize</button>
+    
+  </div><div class="action">
+    <button onclick="window.__toast&&window.__toast('auto-is_closed')">auto-is_closed</button>
+    
+  </div><div class="action">
+    <button onclick="window.__toast&&window.__toast('auto-is_open')">auto-is_open</button>
+    
+  </div><div class="action">
+    <button onclick="window.__toast&&window.__toast('close')">close</button>
+    
+  </div><div class="action">
+    <button onclick="window.__toast&&window.__toast('open')">open</button>
+    
+  </div><span class="more">…还有 1 个动作</span></div>
+  </div><div class="card" data-device="virtual_heatchill">
+    <h3>virtual_heatchill</h3>
+    <span class="chip">virtual_device</span>
+    <div class="desc">Virtual HeatChill for HeatChillProtocol Testing</div>
+    <div class="section-title">遥测 / 状态 · 9</div><div class="grid"><div class="metric">
+      <div class="metric-label">is_stirring</div>
+      <div class="dot on"></div>
+    </div><div class="metric">
+      <div class="metric-label">max_stir_speed</div>
+      <div class="metric-value">63.0</div>
+      <div class="bar"><span style="width:63%"></span></div>
+    </div><div class="metric">
+      <div class="metric-label">max_temp</div>
+      <div class="metric-value">71.0</div>
+      <div class="bar"><span style="width:71%"></span></div>
+    </div><div class="metric">
+      <div class="metric-label">min_temp</div>
+      <div class="metric-value">61.0</div>
+      <div class="bar"><span style="width:61%"></span></div>
+    </div><div class="metric">
+    <div class="metric-label">operation_mode</div>
+    <div class="badge" style="--c:#fbbf24">busy</div>
+  </div><div class="metric">
+      <div class="metric-label">progress</div>
+      <div class="metric-value">17.0</div>
+      <div class="bar"><span style="width:17%"></span></div>
+    </div><div class="metric">
+      <div class="metric-label">remaining_time</div>
+      <div class="metric-value">100.0</div>
+      <div class="bar"><span style="width:100%"></span></div>
+    </div><div class="metric">
+    <div class="metric-label">status</div>
+    <div class="badge" style="--c:#fbbf24">busy</div>
+  </div><div class="metric">
+      <div class="metric-label">stir_speed</div>
+      <div class="metric-value">41.0</div>
+      <div class="bar"><span style="width:41%"></span></div>
+    </div></div>
+    <div class="section-title">控制 · 5</div><div class="actions"><div class="action">
+    <button onclick="window.__toast&&window.__toast('auto-cleanup')">auto-cleanup</button>
+    
+  </div><div class="action">
+    <button onclick="window.__toast&&window.__toast('auto-initialize')">auto-initialize</button>
+    
+  </div><div class="action">
+    <button onclick="window.__toast&&window.__toast('heat_chill')">heat_chill</button>
+    <label class="param"><span>pressure</span><input type="text" placeholder="string"/></label><label class="param"><span>purpose</span><input type="text" placeholder="string"/></label><label class="param"><span>reflux_solvent</span><input type="text" placeholder="string"/></label><span class="more">+7</span>
+  </div><div class="action">
+    <button onclick="window.__toast&&window.__toast('heat_chill_start')">heat_chill_start</button>
+    <label class="param"><span>purpose</span><input type="text" placeholder="string"/></label><label class="param"><span>temp</span><input type="number" placeholder="number"/></label><label class="param"><span>vessel</span><input type="text" placeholder="object"/></label>
+  </div><div class="action">
+    <button onclick="window.__toast&&window.__toast('heat_chill_stop')">heat_chill_stop</button>
+    <label class="param"><span>vessel</span><input type="text" placeholder="object"/></label>
+  </div></div>
+  </div><div class="card" data-device="virtual_multiway_valve">
+    <h3>virtual_multiway_valve</h3>
+    <span class="chip">virtual_device</span>
+    <div class="desc">Virtual 8-Way Valve for flow direction control</div>
+    <div class="section-title">遥测 / 状态 · 7</div><div class="grid"><div class="metric">
+    <div class="metric-label">current_port</div>
+    <div class="badge" style="--c:#94a3b8">idle</div>
+  </div><div class="metric">
+      <div class="metric-label">current_position</div>
+      <div class="metric-value">67.0</div>
+      <div class="bar"><span style="width:67%"></span></div>
+    </div><div class="metric">
+    <div class="metric-label">flow_path</div>
+    <div class="badge" style="--c:#34d399">ok</div>
+  </div><div class="metric">
+    <div class="metric-label">status</div>
+    <div class="badge" style="--c:#fbbf24">busy</div>
+  </div><div class="metric">
+      <div class="metric-label">target_position</div>
+      <div class="metric-value">94.0</div>
+      <div class="bar"><span style="width:94%"></span></div>
+    </div><div class="metric">
+      <div class="metric-label">valve_position</div>
+      <div class="metric-value">30.0</div>
+      <div class="bar"><span style="width:30%"></span></div>
+    </div><div class="metric">
+    <div class="metric-label">valve_state</div>
+    <div class="badge" style="--c:#34d399">running</div>
+  </div></div>
+    <div class="section-title">控制 · 11</div><div class="actions"><div class="action">
+    <button onclick="window.__toast&&window.__toast('auto-close')">auto-close</button>
+    
+  </div><div class="action">
+    <button onclick="window.__toast&&window.__toast('auto-is_at_port')">auto-is_at_port</button>
+    <label class="param"><span>port_number</span><input type="number" placeholder="integer"/></label>
+  </div><div class="action">
+    <button onclick="window.__toast&&window.__toast('auto-is_at_position')">auto-is_at_position</button>
+    <label class="param"><span>position</span><input type="number" placeholder="integer"/></label>
+  </div><div class="action">
+    <button onclick="window.__toast&&window.__toast('auto-is_at_pump_position')">auto-is_at_pump_position</button>
+    
+  </div><div class="action">
+    <button onclick="window.__toast&&window.__toast('auto-open')">auto-open</button>
+    
+  </div><div class="action">
+    <button onclick="window.__toast&&window.__toast('auto-reset')">auto-reset</button>
+    
+  </div><span class="more">…还有 5 个动作</span></div>
+  </div><div class="card" data-device="virtual_rotavap">
+    <h3>virtual_rotavap</h3>
+    <span class="chip">virtual_device</span>
+    <div class="desc">Virtual Rotary Evaporator for EvaporateProtocol Testing</div>
+    <div class="section-title">遥测 / 状态 · 11</div><div class="grid"><div class="metric">
+      <div class="metric-label">current_temp</div>
+      <div class="metric-value">67.0</div>
+      <div class="bar"><span style="width:67%"></span></div>
+    </div><div class="metric">
+      <div class="metric-label">evaporated_volume</div>
+      <div class="metric-value">92.0</div>
+      <div class="bar"><span style="width:92%"></span></div>
+    </div><div class="metric">
+      <div class="metric-label">max_rotation_speed</div>
+      <div class="metric-value">6.0</div>
+      <div class="bar"><span style="width:6%"></span></div>
+    </div><div class="metric">
+      <div class="metric-label">max_temp</div>
+      <div class="metric-value">71.0</div>
+      <div class="bar"><span style="width:71%"></span></div>
+    </div><div class="metric">
+    <div class="metric-label">message</div>
+    <div class="badge" style="--c:#fbbf24">busy</div>
+  </div><div class="metric">
+      <div class="metric-label">progress</div>
+      <div class="metric-value">17.0</div>
+      <div class="bar"><span style="width:17%"></span></div>
+    </div><div class="metric">
+      <div class="metric-label">remaining_time</div>
+      <div class="metric-value">100.0</div>
+      <div class="bar"><span style="width:100%"></span></div>
+    </div><div class="metric">
+      <div class="metric-label">rotation_speed</div>
+      <div class="metric-value">57.0</div>
+      <div class="bar"><span style="width:57%"></span></div>
+    </div><div class="metric">
+    <div class="metric-label">rotavap_state</div>
+    <div class="badge" style="--c:#fbbf24">busy</div>
+  </div><div class="metric">
+    <div class="metric-label">status</div>
+    <div class="badge" style="--c:#fbbf24">busy</div>
+  </div><div class="metric">
+      <div class="metric-label">vacuum_pressure</div>
+      <div class="metric-value">93.0</div>
+      <div class="bar"><span style="width:93%"></span></div>
+    </div></div>
+    <div class="section-title">控制 · 3</div><div class="actions"><div class="action">
+    <button onclick="window.__toast&&window.__toast('auto-cleanup')">auto-cleanup</button>
+    
+  </div><div class="action">
+    <button onclick="window.__toast&&window.__toast('auto-initialize')">auto-initialize</button>
+    
+  </div><div class="action">
+    <button onclick="window.__toast&&window.__toast('evaporate')">evaporate</button>
+    <label class="param"><span>pressure</span><input type="number" placeholder="number"/></label><label class="param"><span>solvent</span><input type="text" placeholder="string"/></label><label class="param"><span>stir_speed</span><input type="number" placeholder="number"/></label><span class="more">+3</span>
+  </div></div>
+  </div><div class="card" data-device="virtual_sample_demo">
+    <h3>virtual_sample_demo</h3>
+    <span class="chip">virtual_device</span>
+    <div class="desc">Virtual sample tracking demo device</div>
+    <div class="section-title">遥测 / 状态 · 1</div><div class="grid"><div class="metric">
+    <div class="metric-label">status</div>
+    <div class="badge" style="--c:#fbbf24">busy</div>
+  </div></div>
+    <div class="section-title">控制 · 3</div><div class="actions"><div class="action">
+    <button onclick="window.__toast&&window.__toast('analyze_readings')">analyze_readings</button>
+    <label class="param"><span>readings</span><input type="text" placeholder="array"/></label><label class="param"><span>samples</span><input type="text" placeholder="array"/></label>
+  </div><div class="action">
+    <button onclick="window.__toast&&window.__toast('measure_samples')">measure_samples</button>
+    <label class="param"><span>concentrations</span><input type="text" placeholder="array"/></label>
+  </div><div class="action">
+    <button onclick="window.__toast&&window.__toast('split_and_measure')">split_and_measure</button>
+    <label class="param"><span>split_count</span><input type="number" placeholder="integer"/></label><label class="param"><span>volumes</span><input type="text" placeholder="array"/></label>
+  </div></div>
+  </div><div class="card" data-device="virtual_separator">
+    <h3>virtual_separator</h3>
+    <span class="chip">virtual_device</span>
+    <div class="desc">Virtual Separator for SeparateProtocol Testing</div>
+    <div class="section-title">遥测 / 状态 · 9</div><div class="grid"><div class="metric">
+      <div class="metric-label">has_phases</div>
+      <div class="dot on"></div>
+    </div><div class="metric">
+    <div class="metric-label">message</div>
+    <div class="badge" style="--c:#fbbf24">busy</div>
+  </div><div class="metric">
+      <div class="metric-label">phase_separation</div>
+      <div class="dot off"></div>
+    </div><div class="metric">
+      <div class="metric-label">progress</div>
+      <div class="metric-value">17.0</div>
+      <div class="bar"><span style="width:17%"></span></div>
+    </div><div class="metric">
+    <div class="metric-label">separator_state</div>
+    <div class="badge" style="--c:#34d399">ok</div>
+  </div><div class="metric">
+      <div class="metric-label">settling_time</div>
+      <div class="metric-value">86.0</div>
+      <div class="bar"><span style="width:86%"></span></div>
+    </div><div class="metric">
+    <div class="metric-label">status</div>
+    <div class="badge" style="--c:#fbbf24">busy</div>
+  </div><div class="metric">
+      <div class="metric-label">stir_speed</div>
+      <div class="metric-value">41.0</div>
+      <div class="bar"><span style="width:41%"></span></div>
+    </div><div class="metric">
+      <div class="metric-label">volume</div>
+      <div class="metric-value">2.0</div>
+      <div class="bar"><span style="width:2%"></span></div>
+    </div></div>
+    <div class="section-title">控制 · 3</div><div class="actions"><div class="action">
+    <button onclick="window.__toast&&window.__toast('auto-cleanup')">auto-cleanup</button>
+    
+  </div><div class="action">
+    <button onclick="window.__toast&&window.__toast('auto-initialize')">auto-initialize</button>
+    
+  </div><div class="action">
+    <button onclick="window.__toast&&window.__toast('separate')">separate</button>
+    <label class="param"><span>from_vessel</span><input type="text" placeholder="object"/></label><label class="param"><span>product_phase</span><input type="text" placeholder="string"/></label><label class="param"><span>product_vessel</span><input type="text" placeholder="object"/></label><span class="more">+14</span>
+  </div></div>
+  </div><div class="card" data-device="virtual_solenoid_valve">
+    <h3>virtual_solenoid_valve</h3>
+    <span class="chip">virtual_device</span>
+    <div class="desc">Virtual Solenoid Valve for simple on/off flow control</div>
+    <div class="section-title">遥测 / 状态 · 4</div><div class="grid"><div class="metric">
+      <div class="metric-label">is_open</div>
+      <div class="dot on"></div>
+    </div><div class="metric">
+    <div class="metric-label">status</div>
+    <div class="badge" style="--c:#fbbf24">busy</div>
+  </div><div class="metric">
+    <div class="metric-label">valve_position</div>
+    <div class="badge" style="--c:#34d399">running</div>
+  </div><div class="metric">
+    <div class="metric-label">valve_state</div>
+    <div class="badge" style="--c:#34d399">running</div>
+  </div></div>
+    <div class="section-title">控制 · 9</div><div class="actions"><div class="action">
+    <button onclick="window.__toast&&window.__toast('auto-cleanup')">auto-cleanup</button>
+    
+  </div><div class="action">
+    <button onclick="window.__toast&&window.__toast('auto-initialize')">auto-initialize</button>
+    
+  </div><div class="action">
+    <button onclick="window.__toast&&window.__toast('auto-is_closed')">auto-is_closed</button>
+    
+  </div><div class="action">
+    <button onclick="window.__toast&&window.__toast('auto-reset')">auto-reset</button>
+    
+  </div><div class="action">
+    <button onclick="window.__toast&&window.__toast('auto-toggle')">auto-toggle</button>
+    
+  </div><div class="action">
+    <button onclick="window.__toast&&window.__toast('close')">close</button>
+    
+  </div><span class="more">…还有 3 个动作</span></div>
+  </div><div class="card" data-device="virtual_solid_dispenser">
+    <h3>virtual_solid_dispenser</h3>
+    <span class="chip">virtual_device</span>
+    <div class="desc">Virtual Solid Dispenser for Add Protocol Testing - supports mass and molar additions</div>
+    <div class="section-title">遥测 / 状态 · 4</div><div class="grid"><div class="metric">
+    <div class="metric-label">current_reagent</div>
+    <div class="badge" style="--c:#fbbf24">busy</div>
+  </div><div class="metric">
+      <div class="metric-label">dispensed_amount</div>
+      <div class="metric-value">28.0</div>
+      <div class="bar"><span style="width:28%"></span></div>
+    </div><div class="metric">
+    <div class="metric-label">status</div>
+    <div class="badge" style="--c:#fbbf24">busy</div>
+  </div><div class="metric">
+      <div class="metric-label">total_operations</div>
+      <div class="metric-value">60.0</div>
+      <div class="bar"><span style="width:60%"></span></div>
+    </div></div>
+    <div class="section-title">控制 · 6</div><div class="actions"><div class="action">
+    <button onclick="window.__toast&&window.__toast('add_solid')">add_solid</button>
+    <label class="param"><span>amount</span><input type="text" placeholder="string"/></label><label class="param"><span>equiv</span><input type="text" placeholder="string"/></label><label class="param"><span>event</span><input type="text" placeholder="string"/></label><span class="more">+12</span>
+  </div><div class="action">
+    <button onclick="window.__toast&&window.__toast('auto-cleanup')">auto-cleanup</button>
+    
+  </div><div class="action">
+    <button onclick="window.__toast&&window.__toast('auto-find_solid_reagent_bottle')">auto-find_solid_reagent_bottle</button>
+    <label class="param"><span>reagent_name</span><input type="text" placeholder="string"/></label>
+  </div><div class="action">
+    <button onclick="window.__toast&&window.__toast('auto-initialize')">auto-initialize</button>
+    
+  </div><div class="action">
+    <button onclick="window.__toast&&window.__toast('auto-parse_mass_string')">auto-parse_mass_string</button>
+    <label class="param"><span>mass_str</span><input type="text" placeholder="string"/></label>
+  </div><div class="action">
+    <button onclick="window.__toast&&window.__toast('auto-parse_mol_string')">auto-parse_mol_string</button>
+    <label class="param"><span>mol_str</span><input type="text" placeholder="string"/></label>
+  </div></div>
+  </div><div class="card" data-device="virtual_stirrer">
+    <h3>virtual_stirrer</h3>
+    <span class="chip">virtual_device</span>
+    <div class="desc">Virtual Stirrer for StirProtocol Testing</div>
+    <div class="section-title">遥测 / 状态 · 9</div><div class="grid"><div class="metric">
+      <div class="metric-label">current_speed</div>
+      <div class="metric-value">79.0</div>
+      <div class="bar"><span style="width:79%"></span></div>
+    </div><div class="metric">
+    <div class="metric-label">current_vessel</div>
+    <div class="badge" style="--c:#34d399">running</div>
+  </div><div class="metric">
+    <div class="metric-label">device_info</div>
+    <div class="badge" style="--c:#fbbf24">busy</div>
+  </div><div class="metric">
+      <div class="metric-label">is_stirring</div>
+      <div class="dot on"></div>
+    </div><div class="metric">
+      <div class="metric-label">max_speed</div>
+      <div class="metric-value">81.0</div>
+      <div class="bar"><span style="width:81%"></span></div>
+    </div><div class="metric">
+      <div class="metric-label">min_speed</div>
+      <div class="metric-value">38.0</div>
+      <div class="bar"><span style="width:38%"></span></div>
+    </div><div class="metric">
+    <div class="metric-label">operation_mode</div>
+    <div class="badge" style="--c:#fbbf24">busy</div>
+  </div><div class="metric">
+      <div class="metric-label">remaining_time</div>
+      <div class="metric-value">100.0</div>
+      <div class="bar"><span style="width:100%"></span></div>
+    </div><div class="metric">
+    <div class="metric-label">status</div>
+    <div class="badge" style="--c:#fbbf24">busy</div>
+  </div></div>
+    <div class="section-title">控制 · 5</div><div class="actions"><div class="action">
+    <button onclick="window.__toast&&window.__toast('auto-cleanup')">auto-cleanup</button>
+    
+  </div><div class="action">
+    <button onclick="window.__toast&&window.__toast('auto-initialize')">auto-initialize</button>
+    
+  </div><div class="action">
+    <button onclick="window.__toast&&window.__toast('start_stir')">start_stir</button>
+    <label class="param"><span>purpose</span><input type="text" placeholder="string"/></label><label class="param"><span>stir_speed</span><input type="number" placeholder="number"/></label><label class="param"><span>vessel</span><input type="text" placeholder="object"/></label>
+  </div><div class="action">
+    <button onclick="window.__toast&&window.__toast('stir')">stir</button>
+    <label class="param"><span>event</span><input type="text" placeholder="string"/></label><label class="param"><span>settling_time</span><input type="text" placeholder="string"/></label><label class="param"><span>stir_speed</span><input type="number" placeholder="number"/></label><span class="more">+4</span>
+  </div><div class="action">
+    <button onclick="window.__toast&&window.__toast('stop_stir')">stop_stir</button>
+    <label class="param"><span>vessel</span><input type="text" placeholder="object"/></label>
+  </div></div>
+  </div><div class="card" data-device="virtual_transfer_pump">
+    <h3>virtual_transfer_pump</h3>
+    <span class="chip">virtual_device</span>
+    <div class="desc">Virtual Transfer Pump for TransferProtocol Testing (Syringe-style)</div>
+    <div class="section-title">遥测 / 状态 · 6</div><div class="grid"><div class="metric">
+      <div class="metric-label">current_volume</div>
+      <div class="metric-value">88.0</div>
+      <div class="bar"><span style="width:88%"></span></div>
+    </div><div class="metric">
+      <div class="metric-label">max_velocity</div>
+      <div class="metric-value">75.0</div>
+      <div class="bar"><span style="width:75%"></span></div>
+    </div><div class="metric">
+      <div class="metric-label">position</div>
+      <div class="metric-value">7.0</div>
+      <div class="bar"><span style="width:7%"></span></div>
+    </div><div class="metric">
+      <div class="metric-label">remaining_capacity</div>
+      <div class="metric-value">2.0</div>
+      <div class="bar"><span style="width:2%"></span></div>
+    </div><div class="metric">
+    <div class="metric-label">status</div>
+    <div class="badge" style="--c:#fbbf24">busy</div>
+  </div><div class="metric">
+      <div class="metric-label">transfer_rate</div>
+      <div class="metric-value">62.0</div>
+      <div class="bar"><span style="width:62%"></span></div>
+    </div></div>
+    <div class="section-title">控制 · 14</div><div class="actions"><div class="action">
+    <button onclick="window.__toast&&window.__toast('auto-aspirate')">auto-aspirate</button>
+    <label class="param"><span>velocity</span><input type="number" placeholder="number"/></label><label class="param"><span>volume</span><input type="number" placeholder="number"/></label>
+  </div><div class="action">
+    <button onclick="window.__toast&&window.__toast('auto-cleanup')">auto-cleanup</button>
+    
+  </div><div class="action">
+    <button onclick="window.__toast&&window.__toast('auto-dispense')">auto-dispense</button>
+    <label class="param"><span>velocity</span><input type="number" placeholder="number"/></label><label class="param"><span>volume</span><input type="number" placeholder="number"/></label>
+  </div><div class="action">
+    <button onclick="window.__toast&&window.__toast('auto-empty_syringe')">auto-empty_syringe</button>
+    <label class="param"><span>velocity</span><input type="number" placeholder="number"/></label>
+  </div><div class="action">
+    <button onclick="window.__toast&&window.__toast('auto-fill_syringe')">auto-fill_syringe</button>
+    <label class="param"><span>velocity</span><input type="number" placeholder="number"/></label>
+  </div><div class="action">
+    <button onclick="window.__toast&&window.__toast('auto-initialize')">auto-initialize</button>
+    
+  </div><span class="more">…还有 8 个动作</span></div>
+  </div><div class="card" data-device="virtual_vacuum_pump">
+    <h3>virtual_vacuum_pump</h3>
+    <span class="chip">virtual_device</span>
+    <div class="desc">Virtual vacuum pump</div>
+    <div class="section-title">遥测 / 状态 · 1</div><div class="grid"><div class="metric">
+    <div class="metric-label">status</div>
+    <div class="badge" style="--c:#fbbf24">busy</div>
+  </div></div>
+    <div class="section-title">控制 · 7</div><div class="actions"><div class="action">
+    <button onclick="window.__toast&&window.__toast('auto-cleanup')">auto-cleanup</button>
+    
+  </div><div class="action">
+    <button onclick="window.__toast&&window.__toast('auto-initialize')">auto-initialize</button>
+    
+  </div><div class="action">
+    <button onclick="window.__toast&&window.__toast('auto-is_closed')">auto-is_closed</button>
+    
+  </div><div class="action">
+    <button onclick="window.__toast&&window.__toast('auto-is_open')">auto-is_open</button>
+    
+  </div><div class="action">
+    <button onclick="window.__toast&&window.__toast('close')">close</button>
+    
+  </div><div class="action">
+    <button onclick="window.__toast&&window.__toast('open')">open</button>
+    
+  </div><span class="more">…还有 1 个动作</span></div>
+  </div><div class="card" data-device="workstation">
+    <h3>workstation</h3>
+    <span class="chip">work_station</span>
+    <div class="desc">Workstation</div>
+    
+    <div class="section-title">控制 · 26</div><div class="actions"><div class="action">
+    <button onclick="window.__toast&&window.__toast('AGVTransferProtocol')">AGVTransferProtocol</button>
+    <label class="param"><span>from_repo</span><input type="text" placeholder="object"/></label><label class="param"><span>from_repo_position</span><input type="text" placeholder="string"/></label><label class="param"><span>to_repo</span><input type="text" placeholder="object"/></label><span class="more">+1</span>
+  </div><div class="action">
+    <button onclick="window.__toast&&window.__toast('AddProtocol')">AddProtocol</button>
+    <label class="param"><span>amount</span><input type="text" placeholder="string"/></label><label class="param"><span>equiv</span><input type="text" placeholder="string"/></label><label class="param"><span>event</span><input type="text" placeholder="string"/></label><span class="more">+12</span>
+  </div><div class="action">
+    <button onclick="window.__toast&&window.__toast('AdjustPHProtocol')">AdjustPHProtocol</button>
+    <label class="param"><span>ph_value</span><input type="number" placeholder="number"/></label><label class="param"><span>reagent</span><input type="text" placeholder="string"/></label><label class="param"><span>vessel</span><input type="text" placeholder="object"/></label>
+  </div><div class="action">
+    <button onclick="window.__toast&&window.__toast('CentrifugeProtocol')">CentrifugeProtocol</button>
+    <label class="param"><span>speed</span><input type="number" placeholder="number"/></label><label class="param"><span>temp</span><input type="number" placeholder="number"/></label><label class="param"><span>time</span><input type="number" placeholder="number"/></label><span class="more">+1</span>
+  </div><div class="action">
+    <button onclick="window.__toast&&window.__toast('CleanProtocol')">CleanProtocol</button>
+    <label class="param"><span>repeats</span><input type="number" placeholder="integer"/></label><label class="param"><span>solvent</span><input type="text" placeholder="string"/></label><label class="param"><span>temp</span><input type="number" placeholder="number"/></label><span class="more">+2</span>
+  </div><div class="action">
+    <button onclick="window.__toast&&window.__toast('CleanVesselProtocol')">CleanVesselProtocol</button>
+    <label class="param"><span>repeats</span><input type="number" placeholder="integer"/></label><label class="param"><span>solvent</span><input type="text" placeholder="string"/></label><label class="param"><span>temp</span><input type="number" placeholder="number"/></label><span class="more">+2</span>
+  </div><span class="more">…还有 20 个动作</span></div>
+  </div><div class="card" data-device="xrd_d7mate">
+    <h3>xrd_d7mate</h3>
+    <span class="chip">xrd_d7mate</span>
+    <div class="desc">XRD D7-Mate X射线衍射分析设备，通过TCP通信实现远程控制与状态监控，支持自动模式控制、上样流程、数据获取、下样流程和高压电源控制等功能。</div>
+    <div class="section-title">遥测 / 状态 · 3</div><div class="grid"><div class="metric">
+    <div class="metric-label">current_acquire_data</div>
+    <div class="badge" style="--c:#60a5fa">ready</div>
+  </div><div class="metric">
+    <div class="metric-label">sample_request</div>
+    <div class="badge" style="--c:#fbbf24">busy</div>
+  </div><div class="metric">
+    <div class="metric-label">sample_status</div>
+    <div class="badge" style="--c:#fbbf24">busy</div>
+  </div></div>
+    <div class="section-title">控制 · 14</div><div class="actions"><div class="action">
+    <button onclick="window.__toast&&window.__toast('auto-close')">auto-close</button>
+    
+  </div><div class="action">
+    <button onclick="window.__toast&&window.__toast('auto-connect')">auto-connect</button>
+    
+  </div><div class="action">
+    <button onclick="window.__toast&&window.__toast('auto-start_from_string')">auto-start_from_string</button>
+    <label class="param"><span>params</span><input type="text" placeholder="string"/></label>
+  </div><div class="action">
+    <button onclick="window.__toast&&window.__toast('get_current_acquire_data')">get_current_acquire_data</button>
+    
+  </div><div class="action">
+    <button onclick="window.__toast&&window.__toast('get_sample_down')">get_sample_down</button>
+    <label class="param"><span>int_input</span><input type="number" placeholder="integer"/></label>
+  </div><div class="action">
+    <button onclick="window.__toast&&window.__toast('get_sample_request')">get_sample_request</button>
+    
+  </div><span class="more">…还有 8 个动作</span></div>
+  </div><div class="card" data-device="zhida_gcms">
+    <h3>zhida_gcms</h3>
+    <span class="chip">zhida_gcms</span>
+    <div class="desc">智达气相色谱-质谱联用（GC-MS）分析设备，通过 TCP 通信实现远程控制与状态监控，支持方法管理与任务启动等功能。</div>
+    <div class="section-title">遥测 / 状态 · 3</div><div class="grid"><div class="metric">
+    <div class="metric-label">methods</div>
+    <div class="badge" style="--c:#94a3b8">idle</div>
+  </div><div class="metric">
+    <div class="metric-label">status</div>
+    <div class="badge" style="--c:#fbbf24">busy</div>
+  </div><div class="metric">
+    <div class="metric-label">version</div>
+    <div class="badge" style="--c:#34d399">ok</div>
+  </div></div>
+    <div class="section-title">控制 · 9</div><div class="actions"><div class="action">
+    <button onclick="window.__toast&&window.__toast('abort')">abort</button>
+    
+  </div><div class="action">
+    <button onclick="window.__toast&&window.__toast('auto-close')">auto-close</button>
+    
+  </div><div class="action">
+    <button onclick="window.__toast&&window.__toast('auto-connect')">auto-connect</button>
+    
+  </div><div class="action">
+    <button onclick="window.__toast&&window.__toast('get_methods')">get_methods</button>
+    
+  </div><div class="action">
+    <button onclick="window.__toast&&window.__toast('get_status')">get_status</button>
+    
+  </div><div class="action">
+    <button onclick="window.__toast&&window.__toast('get_version')">get_version</button>
+    
+  </div><span class="more">…还有 3 个动作</span></div>
+  </div></div><script>window.__toast=function(a){var t=document.createElement('div');t.textContent='▶ '+a+'(...)';t.style.cssText='position:fixed;bottom:20px;left:50%;transform:translateX(-50%);background:#1d4ed8;color:#fff;padding:8px 16px;border-radius:8px;font:13px monospace;z-index:99';document.body.appendChild(t);setTimeout(function(){t.remove()},1500)}</script></body></html>

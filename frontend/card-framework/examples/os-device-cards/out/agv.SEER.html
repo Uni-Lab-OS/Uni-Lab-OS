@@ -1,0 +1,46 @@
+<!doctype html><html lang="zh"><head><meta charset="utf-8"><title>agv.SEER</title><style>
+:root{color-scheme:dark}
+*{box-sizing:border-box}
+body{margin:0;background:#0b1120;color:#e2e8f0;font:14px/1.5 -apple-system,'Segoe UI',system-ui,sans-serif}
+.card{background:linear-gradient(180deg,#111a2e,#0e1626);border:1px solid #1e2a44;border-radius:16px;padding:18px 18px 16px;width:360px;box-shadow:0 8px 30px rgba(0,0,0,.35)}
+.card h3{margin:0;font-size:15px;font-weight:650;letter-spacing:.2px;color:#f1f5f9;font-family:'Cascadia Mono',ui-monospace,monospace;word-break:break-all}
+.chip{display:inline-block;margin-top:6px;padding:2px 9px;border-radius:999px;background:#16233c;color:#7dd3fc;font-size:11px;border:1px solid #24344f}
+.desc{margin:8px 0 14px;color:#94a3b8;font-size:12px;max-height:34px;overflow:hidden}
+.section-title{font-size:11px;text-transform:uppercase;letter-spacing:.08em;color:#64748b;margin:12px 0 8px}
+.grid{display:grid;grid-template-columns:1fr 1fr;gap:8px}
+.metric{background:#0c1425;border:1px solid #1c2a45;border-radius:10px;padding:8px 10px;min-width:0}
+.metric-label{font-size:11px;color:#8aa0c0;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+.metric-value{font-size:18px;font-weight:600;font-variant-numeric:tabular-nums;color:#f8fafc;font-family:ui-monospace,monospace}
+.unit{font-size:11px;color:#7c8db0;margin-left:3px}
+.bar{height:4px;background:#1c2a45;border-radius:3px;margin-top:6px;overflow:hidden}
+.bar span{display:block;height:100%;background:linear-gradient(90deg,#38bdf8,#818cf8)}
+.badge{display:inline-block;padding:2px 10px;border-radius:6px;font-size:12px;font-weight:600;color:var(--c);background:color-mix(in srgb,var(--c) 16%,transparent);border:1px solid color-mix(in srgb,var(--c) 35%,transparent)}
+.dot{width:12px;height:12px;border-radius:50%;margin-top:4px}
+.dot.on{background:#34d399;box-shadow:0 0 8px #34d39988}.dot.off{background:#475569}
+.actions{display:flex;flex-direction:column;gap:6px;margin-top:4px}
+.action{display:flex;align-items:center;gap:6px;flex-wrap:wrap}
+.action button{background:#1d4ed8;color:#fff;border:0;border-radius:8px;padding:6px 12px;font-size:12px;font-weight:600;cursor:pointer;font-family:ui-monospace,monospace}
+.action button:hover{background:#2563eb}
+.param{display:flex;align-items:center;gap:4px;font-size:11px;color:#8aa0c0}
+.param input{width:64px;background:#0c1425;border:1px solid #24344f;border-radius:6px;color:#e2e8f0;padding:3px 6px;font-size:11px}
+.more{font-size:11px;color:#64748b}
+.empty{color:#64748b;font-size:12px;font-style:italic}
+ body{display:flex;align-items:center;justify-content:center;min-height:100vh;padding:24px}</style></head><body><div class="card" data-device="agv.SEER">
+    <h3>agv.SEER</h3>
+    <span class="chip">robot_agv</span>
+    <div class="desc">SEER AGV自动导引车设备，用于实验室内物料和设备的自主移动运输。该AGV通过TCP socket与导航系统通信，具备精确的定位和路径规划能力。支持实时位置监控、状态查询和导航任务执行，可在预设的实验室环境中自主移动至指定位置。适用于样品运输、设备转移、多工位协作等实验室自动化物流场景。</div>
+    <div class="section-title">遥测 / 状态 · 2</div><div class="grid"><div class="metric">
+    <div class="metric-label">pose</div>
+    <div class="badge" style="--c:#34d399">running</div>
+  </div><div class="metric">
+    <div class="metric-label">status</div>
+    <div class="badge" style="--c:#fbbf24">busy</div>
+  </div></div>
+    <div class="section-title">控制 · 2</div><div class="actions"><div class="action">
+    <button onclick="window.__toast&&window.__toast('auto-send')">auto-send</button>
+    <label class="param"><span>cmd</span><input type="text" placeholder="string"/></label><label class="param"><span>ex_data</span><input type="text" placeholder="string"/></label><label class="param"><span>obj</span><input type="text" placeholder="string"/></label>
+  </div><div class="action">
+    <button onclick="window.__toast&&window.__toast('send_nav_task')">send_nav_task</button>
+    <label class="param"><span>command</span><input type="text" placeholder="string"/></label>
+  </div></div>
+  </div><script>window.__toast=function(a){var t=document.createElement('div');t.textContent='▶ '+a+'(...)';t.style.cssText='position:fixed;bottom:20px;left:50%;transform:translateX(-50%);background:#1d4ed8;color:#fff;padding:8px 16px;border-radius:8px;font:13px monospace;z-index:99';document.body.appendChild(t);setTimeout(function(){t.remove()},1500)}</script></body></html>

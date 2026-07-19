@@ -1,0 +1,76 @@
+<!doctype html><html lang="zh"><head><meta charset="utf-8"><title>virtual_multiway_valve</title><style>
+:root{color-scheme:dark}
+*{box-sizing:border-box}
+body{margin:0;background:#0b1120;color:#e2e8f0;font:14px/1.5 -apple-system,'Segoe UI',system-ui,sans-serif}
+.card{background:linear-gradient(180deg,#111a2e,#0e1626);border:1px solid #1e2a44;border-radius:16px;padding:18px 18px 16px;width:360px;box-shadow:0 8px 30px rgba(0,0,0,.35)}
+.card h3{margin:0;font-size:15px;font-weight:650;letter-spacing:.2px;color:#f1f5f9;font-family:'Cascadia Mono',ui-monospace,monospace;word-break:break-all}
+.chip{display:inline-block;margin-top:6px;padding:2px 9px;border-radius:999px;background:#16233c;color:#7dd3fc;font-size:11px;border:1px solid #24344f}
+.desc{margin:8px 0 14px;color:#94a3b8;font-size:12px;max-height:34px;overflow:hidden}
+.section-title{font-size:11px;text-transform:uppercase;letter-spacing:.08em;color:#64748b;margin:12px 0 8px}
+.grid{display:grid;grid-template-columns:1fr 1fr;gap:8px}
+.metric{background:#0c1425;border:1px solid #1c2a45;border-radius:10px;padding:8px 10px;min-width:0}
+.metric-label{font-size:11px;color:#8aa0c0;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+.metric-value{font-size:18px;font-weight:600;font-variant-numeric:tabular-nums;color:#f8fafc;font-family:ui-monospace,monospace}
+.unit{font-size:11px;color:#7c8db0;margin-left:3px}
+.bar{height:4px;background:#1c2a45;border-radius:3px;margin-top:6px;overflow:hidden}
+.bar span{display:block;height:100%;background:linear-gradient(90deg,#38bdf8,#818cf8)}
+.badge{display:inline-block;padding:2px 10px;border-radius:6px;font-size:12px;font-weight:600;color:var(--c);background:color-mix(in srgb,var(--c) 16%,transparent);border:1px solid color-mix(in srgb,var(--c) 35%,transparent)}
+.dot{width:12px;height:12px;border-radius:50%;margin-top:4px}
+.dot.on{background:#34d399;box-shadow:0 0 8px #34d39988}.dot.off{background:#475569}
+.actions{display:flex;flex-direction:column;gap:6px;margin-top:4px}
+.action{display:flex;align-items:center;gap:6px;flex-wrap:wrap}
+.action button{background:#1d4ed8;color:#fff;border:0;border-radius:8px;padding:6px 12px;font-size:12px;font-weight:600;cursor:pointer;font-family:ui-monospace,monospace}
+.action button:hover{background:#2563eb}
+.param{display:flex;align-items:center;gap:4px;font-size:11px;color:#8aa0c0}
+.param input{width:64px;background:#0c1425;border:1px solid #24344f;border-radius:6px;color:#e2e8f0;padding:3px 6px;font-size:11px}
+.more{font-size:11px;color:#64748b}
+.empty{color:#64748b;font-size:12px;font-style:italic}
+ body{display:flex;align-items:center;justify-content:center;min-height:100vh;padding:24px}</style></head><body><div class="card" data-device="virtual_multiway_valve">
+    <h3>virtual_multiway_valve</h3>
+    <span class="chip">virtual_device</span>
+    <div class="desc">Virtual 8-Way Valve for flow direction control</div>
+    <div class="section-title">遥测 / 状态 · 7</div><div class="grid"><div class="metric">
+    <div class="metric-label">current_port</div>
+    <div class="badge" style="--c:#94a3b8">idle</div>
+  </div><div class="metric">
+      <div class="metric-label">current_position</div>
+      <div class="metric-value">67.0</div>
+      <div class="bar"><span style="width:67%"></span></div>
+    </div><div class="metric">
+    <div class="metric-label">flow_path</div>
+    <div class="badge" style="--c:#34d399">ok</div>
+  </div><div class="metric">
+    <div class="metric-label">status</div>
+    <div class="badge" style="--c:#fbbf24">busy</div>
+  </div><div class="metric">
+      <div class="metric-label">target_position</div>
+      <div class="metric-value">94.0</div>
+      <div class="bar"><span style="width:94%"></span></div>
+    </div><div class="metric">
+      <div class="metric-label">valve_position</div>
+      <div class="metric-value">30.0</div>
+      <div class="bar"><span style="width:30%"></span></div>
+    </div><div class="metric">
+    <div class="metric-label">valve_state</div>
+    <div class="badge" style="--c:#34d399">running</div>
+  </div></div>
+    <div class="section-title">控制 · 11</div><div class="actions"><div class="action">
+    <button onclick="window.__toast&&window.__toast('auto-close')">auto-close</button>
+    
+  </div><div class="action">
+    <button onclick="window.__toast&&window.__toast('auto-is_at_port')">auto-is_at_port</button>
+    <label class="param"><span>port_number</span><input type="number" placeholder="integer"/></label>
+  </div><div class="action">
+    <button onclick="window.__toast&&window.__toast('auto-is_at_position')">auto-is_at_position</button>
+    <label class="param"><span>position</span><input type="number" placeholder="integer"/></label>
+  </div><div class="action">
+    <button onclick="window.__toast&&window.__toast('auto-is_at_pump_position')">auto-is_at_pump_position</button>
+    
+  </div><div class="action">
+    <button onclick="window.__toast&&window.__toast('auto-open')">auto-open</button>
+    
+  </div><div class="action">
+    <button onclick="window.__toast&&window.__toast('auto-reset')">auto-reset</button>
+    
+  </div><span class="more">…还有 5 个动作</span></div>
+  </div><script>window.__toast=function(a){var t=document.createElement('div');t.textContent='▶ '+a+'(...)';t.style.cssText='position:fixed;bottom:20px;left:50%;transform:translateX(-50%);background:#1d4ed8;color:#fff;padding:8px 16px;border-radius:8px;font:13px monospace;z-index:99';document.body.appendChild(t);setTimeout(function(){t.remove()},1500)}</script></body></html>

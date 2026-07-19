@@ -1,0 +1,258 @@
+<!doctype html>
+<!-- SPDX-License-Identifier: GPL-3.0-or-later -->
+<!-- ParamGrid 样板:schema 驱动的 Excel 式批量参数网格。行=参数,列=样品。
+     交互:单击选 / 拖拽框选 / Shift 扩选 / 点行头列头左上角全选 /
+           填充选区 / 应用至整行 / Ctrl+D 向下填充 / Delete 复位 / 双击或输入编辑。
+     数据源:liquid_handler.laiyu :: transfer_liquid 的真实参数子集(number/integer/enum/boolean)。 -->
+<html lang="zh">
+<head>
+<meta charset="utf-8">
+<title>ParamGrid · 批量参数编辑</title>
+<style>
+:root{
+  --bg:#f6f7f9;--panel:#fff;--line:#e3e6ea;--line2:#eef1f4;--head:#f2f4f7;
+  --ink:#1f2733;--muted:#6b7684;--accent:#2563eb;--accent-bg:#e8f0fe;--accent-line:#2563eb;
+  --req:#e11d48;--chip:#eef2f7;--chip-ink:#5b6675;--ok:#059669;
+}
+*{box-sizing:border-box}
+body{margin:0;background:var(--bg);color:var(--ink);font:13px/1.45 -apple-system,'Segoe UI',system-ui,sans-serif}
+.wrap{max-width:1500px;margin:0 auto;padding:22px}
+.head{display:flex;align-items:baseline;gap:12px;margin-bottom:4px}
+.head h1{font-size:18px;margin:0;font-weight:650}
+.head .path{font:12px ui-monospace,monospace;color:var(--muted)}
+.sub{color:var(--muted);margin:0 0 16px;font-size:12px}
+.toolbar{display:flex;align-items:center;gap:10px;flex-wrap:wrap;background:var(--panel);border:1px solid var(--line);border-radius:10px;padding:10px 12px;margin-bottom:12px}
+.toolbar .selinfo{font:12px ui-monospace,monospace;color:var(--muted);min-width:120px}
+.toolbar input[type=text]{width:120px;border:1px solid var(--line);border-radius:7px;padding:5px 8px;font:13px ui-monospace,monospace}
+.btn{border:1px solid var(--line);background:#fff;color:var(--ink);border-radius:7px;padding:6px 12px;font-size:12px;font-weight:600;cursor:pointer}
+.btn:hover{border-color:#c8ccd2;background:#fafbfc}
+.btn.primary{background:var(--accent);border-color:var(--accent);color:#fff}
+.btn.primary:hover{background:#1d4ed8}
+.btn.ghost{background:transparent;border-color:transparent;color:var(--muted)}
+.spacer{flex:1}
+.grid-shell{background:var(--panel);border:1px solid var(--line);border-radius:12px;overflow:auto;max-height:74vh}
+table{border-collapse:separate;border-spacing:0;width:max-content;min-width:100%}
+th,td{border-right:1px solid var(--line2);border-bottom:1px solid var(--line2);padding:0}
+thead th{position:sticky;top:0;z-index:3;background:var(--head);font-weight:600;color:var(--muted);
+  height:34px;min-width:78px;text-align:center;font-size:12px;cursor:pointer;user-select:none}
+thead th:hover{background:#e9edf2}
+.corner{position:sticky;left:0;top:0;z-index:5;background:var(--head);min-width:170px;cursor:pointer}
+.rowhead{position:sticky;left:0;z-index:2;background:var(--panel);min-width:170px;max-width:170px;
+  text-align:left;padding:6px 10px;cursor:pointer;user-select:none}
+.rowhead:hover{background:#f7f9fb}
+.rowhead .rl{display:flex;align-items:center;gap:6px}
+.rowhead .name{font-weight:600;font-size:12.5px}
+.rowhead .req{color:var(--req);font-weight:700}
+.rowhead .meta{display:flex;gap:6px;margin-top:3px}
+.chip{font:10px ui-monospace,monospace;background:var(--chip);color:var(--chip-ink);border-radius:5px;padding:1px 6px}
+.chip.unit{background:#eaf6ef;color:#1a7a4b}
+.cell{height:34px;min-width:78px;text-align:right;padding:0 10px;cursor:cell;user-select:none;
+  font:13px ui-monospace,monospace;white-space:nowrap;position:relative}
+.cell.enum,.cell.bool{text-align:center}
+.cell .en{color:#3730a3}
+.cell .tg{display:inline-block;width:30px;height:16px;border-radius:9px;background:#cfd4db;position:relative;vertical-align:middle;transition:background .12s}
+.cell .tg.on{background:var(--ok)}
+.cell .tg::after{content:'';position:absolute;top:2px;left:2px;width:12px;height:12px;border-radius:50%;background:#fff;transition:left .12s}
+.cell .tg.on::after{left:16px}
+/* 选区 */
+.cell.sel{background:var(--accent-bg)}
+.cell.sel-t{box-shadow:inset 0 2px 0 var(--accent-line)}
+.cell.sel-b{box-shadow:inset 0 -2px 0 var(--accent-line)}
+.cell.sel-l{box-shadow:inset 2px 0 0 var(--accent-line)}
+.cell.sel-r{box-shadow:inset -2px 0 0 var(--accent-line)}
+.cell.sel-t.sel-l{box-shadow:inset 2px 0 0 var(--accent-line),inset 0 2px 0 var(--accent-line)}
+.cell.sel-t.sel-r{box-shadow:inset -2px 0 0 var(--accent-line),inset 0 2px 0 var(--accent-line)}
+.cell.sel-b.sel-l{box-shadow:inset 2px 0 0 var(--accent-line),inset 0 -2px 0 var(--accent-line)}
+.cell.sel-b.sel-r{box-shadow:inset -2px 0 0 var(--accent-line),inset 0 -2px 0 var(--accent-line)}
+.cell.active{outline:2px solid var(--accent-line);outline-offset:-2px;background:#dbe7fe;z-index:1}
+.cell .ed{position:absolute;inset:0;width:100%;height:100%;border:0;padding:0 10px;font:13px ui-monospace,monospace;
+  text-align:inherit;background:#fff;outline:2px solid var(--accent-line);outline-offset:-2px}
+.hint{color:var(--muted);font-size:12px;margin-top:10px;line-height:1.7}
+.kbd{font:11px ui-monospace,monospace;background:#eef1f4;border:1px solid var(--line);border-radius:4px;padding:1px 5px}
+</style>
+</head>
+<body>
+<div class="wrap">
+  <div class="head">
+    <h1>批量参数编辑</h1>
+    <span class="path">liquid_handler.laiyu :: transfer_liquid</span>
+  </div>
+  <p class="sub">行 = 参数(由 action schema 生成)· 列 = 样品 · Excel 式框选批量修改 · card-framework ParamGrid 样板</p>
+
+  <div class="toolbar">
+    <span class="selinfo" id="selinfo">未选择</span>
+    <input type="text" id="fillval" placeholder="填充值">
+    <button class="btn primary" id="fillbtn">填充选区</button>
+    <button class="btn" id="rowbtn">应用至整行</button>
+    <button class="btn" id="downbtn">向下填充 ⌃D</button>
+    <button class="btn ghost" id="clearbtn">复位选区</button>
+    <span class="spacer"></span>
+    <button class="btn" id="addcol">+ 样品列</button>
+    <button class="btn primary" id="save">保存任务</button>
+  </div>
+
+  <div class="grid-shell"><table id="grid"></table></div>
+
+  <p class="hint">
+    <span class="kbd">单击</span> 选 · <span class="kbd">拖拽</span> 框选 · <span class="kbd">Shift+单击</span> 扩选 ·
+    <span class="kbd">点行头/列头</span> 整行整列 · <span class="kbd">双击/直接输入</span> 编辑 ·
+    <span class="kbd">Enter</span> 提交并下移 · <span class="kbd">Ctrl/⌘+Enter</span> 编辑值填满选区 ·
+    <span class="kbd">⌃D</span> 向下填充 · <span class="kbd">Delete</span> 复位 · 布尔单元格单击直接切换(选区内则整体切换)
+  </p>
+</div>
+
+<script>
+// —— schema(真实 transfer_liquid 参数子集,展现全部单元格类型)——
+const PARAMS = [
+  {key:'asp_vols',       label:'吸液体积',   type:'number',  unit:'µL',    required:true,  default:100},
+  {key:'dis_vols',       label:'排液体积',   type:'number',  unit:'µL',    required:true,  default:100},
+  {key:'asp_flow_rates', label:'吸液流速',   type:'number',  unit:'µL/s',  default:50},
+  {key:'dis_flow_rates', label:'排液流速',   type:'number',  unit:'µL/s',  default:50},
+  {key:'liquid_height',  label:'液面高度',   type:'number',  unit:'mm',    default:2},
+  {key:'mix_rate',       label:'混合转速',   type:'integer', unit:'rpm',   default:500},
+  {key:'mix_vol',        label:'混合体积',   type:'integer', unit:'µL',    default:50},
+  {key:'mix_times',      label:'混合次数',   type:'integer',               default:3},
+  {key:'mix_stage',      label:'混合阶段',   type:'enum', enum:['none','before','after','both'], default:'none'},
+  {key:'spread',         label:'铺展模式',   type:'enum', enum:['wide','tight','custom'], default:'wide'},
+  {key:'is_96_well',     label:'96 孔板',    type:'boolean', default:false},
+  {key:'touch_tip',      label:'触壁',       type:'boolean', default:false},
+];
+let NCOLS = 12;
+const NROWS = PARAMS.length;
+
+// —— 数据(默认值预填)——
+const data = PARAMS.map(p => Array.from({length:NCOLS}, () => p.default));
+
+// —— 选区状态 ——
+let anchor = null, active = null, selecting = false;
+function sel(){ if(!active||!anchor) return null;
+  return {r0:Math.min(anchor.r,active.r),r1:Math.max(anchor.r,active.r),c0:Math.min(anchor.c,active.c),c1:Math.max(anchor.c,active.c)}; }
+function inSel(r,c){ const s=sel(); return s && r>=s.r0&&r<=s.r1&&c>=s.c0&&c<=s.c1; }
+
+// —— 类型处理 ——
+function coerce(p, raw){
+  if(p.type==='number'){ const n=parseFloat(raw); return isNaN(n)?p.default:n; }
+  if(p.type==='integer'){ const n=parseInt(raw,10); return isNaN(n)?p.default:Math.round(n); }
+  if(p.type==='boolean'){ return raw===true||raw==='true'||raw==='1'||raw==='✓'||raw==='是'; }
+  if(p.type==='enum'){ return p.enum.includes(raw)?raw:undefined; }
+  return String(raw);
+}
+function cellHTML(p, v){
+  if(p.type==='boolean') return `<span class="tg ${v?'on':''}"></span>`;
+  if(p.type==='enum') return `<span class="en">${v}</span>`;
+  return v;
+}
+
+// —— 渲染表格骨架 ——
+const grid = document.getElementById('grid');
+function build(){
+  let h = '<thead><tr><th class="corner" id="corner">参数 \\ 样品</th>';
+  for(let c=0;c<NCOLS;c++) h += `<th data-c="${c}">S${c+1}</th>`;
+  h += '</tr></thead><tbody>';
+  PARAMS.forEach((p,r)=>{
+    h += `<tr><td class="rowhead" data-r="${r}"><div class="rl"><span class="name">${p.label}</span>${p.required?'<span class="req">*</span>':''}</div>`
+       + `<div class="meta"><span class="chip">${p.type}</span>${p.unit?`<span class="chip unit">${p.unit}</span>`:''}</div></td>`;
+    for(let c=0;c<NCOLS;c++){
+      const cls = p.type==='enum'?'enum':p.type==='boolean'?'bool':'';
+      h += `<td class="cell ${cls}" data-r="${r}" data-c="${c}">${cellHTML(p,data[r][c])}</td>`;
+    }
+    h += '</tr>';
+  });
+  grid.innerHTML = h + '</tbody>';
+}
+build();
+
+function cellAt(r,c){ return grid.querySelector(`td.cell[data-r="${r}"][data-c="${c}"]`); }
+function renderCell(r,c){ const el=cellAt(r,c); if(el) el.innerHTML=cellHTML(PARAMS[r],data[r][c]); }
+
+// —— 选区高亮 ——
+function paint(){
+  grid.querySelectorAll('td.cell').forEach(el=>el.className='cell '+(PARAMS[+el.dataset.r].type==='enum'?'enum':PARAMS[+el.dataset.r].type==='boolean'?'bool':''));
+  const s=sel(); const info=document.getElementById('selinfo');
+  if(!s){ info.textContent='未选择'; return; }
+  for(let r=s.r0;r<=s.r1;r++) for(let c=s.c0;c<=s.c1;c++){
+    const el=cellAt(r,c); if(!el) continue; el.classList.add('sel');
+    if(r===s.r0)el.classList.add('sel-t'); if(r===s.r1)el.classList.add('sel-b');
+    if(c===s.c0)el.classList.add('sel-l'); if(c===s.c1)el.classList.add('sel-r');
+  }
+  const a=cellAt(active.r,active.c); if(a)a.classList.add('active');
+  const n=(s.r1-s.r0+1)*(s.c1-s.c0+1);
+  info.textContent = n===1 ? `${PARAMS[active.r].label} · S${active.c+1}` : `已选 ${s.r1-s.r0+1}×${s.c1-s.c0+1} = ${n} 格`;
+}
+
+// —— 设值 / 填充 ——
+function setVal(r,c,raw){ const v=coerce(PARAMS[r],raw); if(v===undefined) return; data[r][c]=v; renderCell(r,c); }
+function fillSel(raw){ const s=sel(); if(!s) return; for(let r=s.r0;r<=s.r1;r++) for(let c=s.c0;c<=s.c1;c++) setVal(r,c,raw); paint(); }
+function fillDown(){ const s=sel(); if(!s) return; for(let c=s.c0;c<=s.c1;c++){ const top=data[s.r0][c]; for(let r=s.r0+1;r<=s.r1;r++) setVal(r,c,top); } paint(); }
+function resetSel(){ const s=sel(); if(!s) return; for(let r=s.r0;r<=s.r1;r++) for(let c=s.c0;c<=s.c1;c++){ data[r][c]=PARAMS[r].default; renderCell(r,c);} paint(); }
+function applyRow(){ if(!active) return; const r=active.r, v=data[r][active.c]; for(let c=0;c<NCOLS;c++) setVal(r,c,v); paint(); }
+
+// —— 编辑器 ——
+let editing=false;
+function edit(r,c,seed){
+  if(editing) return; const p=PARAMS[r];
+  if(p.type==='boolean'){ toggle(r,c); return; }
+  editing=true; const el=cellAt(r,c); let ed;
+  if(p.type==='enum'){ ed=document.createElement('select'); ed.className='ed';
+    p.enum.forEach(o=>{const op=document.createElement('option');op.value=o;op.textContent=o;if(o===data[r][c])op.selected=true;ed.appendChild(op);});
+  } else { ed=document.createElement('input'); ed.className='ed'; ed.type=(p.type==='number'||p.type==='integer')?'number':'text'; ed.value=(seed!=null?seed:data[r][c]); }
+  el.appendChild(ed); ed.focus(); if(ed.select)ed.select();
+  const commit=(fill,move)=>{ if(!editing)return; editing=false; const val=ed.value;
+    if(fill){ fillSel(val); } else { setVal(r,c,val); } ed.remove(); paint();
+    if(move){ active={r:Math.min(r+1,NROWS-1),c}; if(!(window.event&&window.event.shiftKey)) anchor={...active}; paint(); } };
+  ed.addEventListener('keydown',e=>{ e.stopPropagation();
+    if(e.key==='Enter'){ commit((e.ctrlKey||e.metaKey), true); }
+    else if(e.key==='Escape'){ editing=false; ed.remove(); paint(); }
+    else if(e.key==='Tab'){ e.preventDefault(); commit(false,false); active={r,c:Math.min(c+1,NCOLS-1)}; anchor={...active}; paint(); } });
+  ed.addEventListener('blur',()=>commit(false,false));
+}
+function toggle(r,c){ const nv=!data[r][c];
+  if(inSel(r,c) && (()=>{const s=sel();return (s.r1-s.r0+1)*(s.c1-s.c0+1)>1;})()){ fillSel(nv); } else { data[r][c]=nv; renderCell(r,c); }
+  paint(); }
+
+// —— 鼠标交互 ——
+let moved=false;
+grid.addEventListener('mousedown',e=>{
+  const cell=e.target.closest('td.cell'); const rh=e.target.closest('.rowhead'); const th=e.target.closest('thead th[data-c]'); const corner=e.target.closest('#corner');
+  if(corner){ anchor={r:0,c:0}; active={r:NROWS-1,c:NCOLS-1}; paint(); return; }
+  if(th){ const c=+th.dataset.c; anchor={r:0,c}; active={r:NROWS-1,c}; paint(); return; }
+  if(rh){ const r=+rh.dataset.r; anchor={r,c:0}; active={r,c:NCOLS-1}; paint(); return; }
+  if(!cell) return;
+  const r=+cell.dataset.r, c=+cell.dataset.c; moved=false;
+  if(e.shiftKey && anchor){ active={r,c}; } else { anchor={r,c}; active={r,c}; }
+  selecting=true; paint(); e.preventDefault();
+});
+grid.addEventListener('mousemove',e=>{ if(!selecting) return; const cell=e.target.closest('td.cell'); if(!cell) return;
+  const r=+cell.dataset.r,c=+cell.dataset.c; if(r!==active.r||c!==active.c){ moved=true; active={r,c}; paint(); } });
+window.addEventListener('mouseup',e=>{ if(!selecting) return; selecting=false;
+  const cell=e.target.closest && e.target.closest('td.cell');
+  if(!moved && cell){ const r=+cell.dataset.r,c=+cell.dataset.c; if(PARAMS[r].type==='boolean') toggle(r,c); } });
+grid.addEventListener('dblclick',e=>{ const cell=e.target.closest('td.cell'); if(!cell)return; edit(+cell.dataset.r,+cell.dataset.c); });
+
+// —— 键盘 ——
+window.addEventListener('keydown',e=>{
+  if(editing||!active) return;
+  const mv=(dr,dc)=>{ active={r:Math.max(0,Math.min(NROWS-1,active.r+dr)),c:Math.max(0,Math.min(NCOLS-1,active.c+dc))}; if(!e.shiftKey)anchor={...active}; paint(); e.preventDefault(); };
+  if(e.key==='ArrowDown')mv(1,0); else if(e.key==='ArrowUp')mv(-1,0);
+  else if(e.key==='ArrowRight')mv(0,1); else if(e.key==='ArrowLeft')mv(0,-1);
+  else if(e.key==='Enter'){ edit(active.r,active.c); e.preventDefault(); }
+  else if((e.ctrlKey||e.metaKey)&&e.key.toLowerCase()==='d'){ fillDown(); e.preventDefault(); }
+  else if(e.key==='Delete'||e.key==='Backspace'){ resetSel(); e.preventDefault(); }
+  else if(e.key.length===1 && !e.ctrlKey && !e.metaKey){ edit(active.r,active.c,e.key); e.preventDefault(); }
+});
+
+// —— 工具栏 ——
+document.getElementById('fillbtn').onclick=()=>fillSel(document.getElementById('fillval').value);
+document.getElementById('rowbtn').onclick=applyRow;
+document.getElementById('downbtn').onclick=fillDown;
+document.getElementById('clearbtn').onclick=resetSel;
+document.getElementById('save').onclick=()=>{ const t=document.createElement('div');
+  t.textContent='✓ 已保存 '+NCOLS+' 个样品 × '+NROWS+' 参数'; t.style.cssText='position:fixed;bottom:22px;left:50%;transform:translateX(-50%);background:#059669;color:#fff;padding:9px 18px;border-radius:8px;font:13px sans-serif;z-index:9';
+  document.body.appendChild(t); setTimeout(()=>t.remove(),1600); };
+document.getElementById('addcol').onclick=()=>{ NCOLS++; data.forEach((row,r)=>row.push(PARAMS[r].default)); build(); anchor=active=null; paint(); };
+
+// 初始选中一块,便于直观展示批量
+anchor={r:0,c:0}; active={r:2,c:4}; paint();
+</script>
+</body>
+</html>

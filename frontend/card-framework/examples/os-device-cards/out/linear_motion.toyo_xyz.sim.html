@@ -1,0 +1,52 @@
+<!doctype html><html lang="zh"><head><meta charset="utf-8"><title>linear_motion.toyo_xyz.sim</title><style>
+:root{color-scheme:dark}
+*{box-sizing:border-box}
+body{margin:0;background:#0b1120;color:#e2e8f0;font:14px/1.5 -apple-system,'Segoe UI',system-ui,sans-serif}
+.card{background:linear-gradient(180deg,#111a2e,#0e1626);border:1px solid #1e2a44;border-radius:16px;padding:18px 18px 16px;width:360px;box-shadow:0 8px 30px rgba(0,0,0,.35)}
+.card h3{margin:0;font-size:15px;font-weight:650;letter-spacing:.2px;color:#f1f5f9;font-family:'Cascadia Mono',ui-monospace,monospace;word-break:break-all}
+.chip{display:inline-block;margin-top:6px;padding:2px 9px;border-radius:999px;background:#16233c;color:#7dd3fc;font-size:11px;border:1px solid #24344f}
+.desc{margin:8px 0 14px;color:#94a3b8;font-size:12px;max-height:34px;overflow:hidden}
+.section-title{font-size:11px;text-transform:uppercase;letter-spacing:.08em;color:#64748b;margin:12px 0 8px}
+.grid{display:grid;grid-template-columns:1fr 1fr;gap:8px}
+.metric{background:#0c1425;border:1px solid #1c2a45;border-radius:10px;padding:8px 10px;min-width:0}
+.metric-label{font-size:11px;color:#8aa0c0;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+.metric-value{font-size:18px;font-weight:600;font-variant-numeric:tabular-nums;color:#f8fafc;font-family:ui-monospace,monospace}
+.unit{font-size:11px;color:#7c8db0;margin-left:3px}
+.bar{height:4px;background:#1c2a45;border-radius:3px;margin-top:6px;overflow:hidden}
+.bar span{display:block;height:100%;background:linear-gradient(90deg,#38bdf8,#818cf8)}
+.badge{display:inline-block;padding:2px 10px;border-radius:6px;font-size:12px;font-weight:600;color:var(--c);background:color-mix(in srgb,var(--c) 16%,transparent);border:1px solid color-mix(in srgb,var(--c) 35%,transparent)}
+.dot{width:12px;height:12px;border-radius:50%;margin-top:4px}
+.dot.on{background:#34d399;box-shadow:0 0 8px #34d39988}.dot.off{background:#475569}
+.actions{display:flex;flex-direction:column;gap:6px;margin-top:4px}
+.action{display:flex;align-items:center;gap:6px;flex-wrap:wrap}
+.action button{background:#1d4ed8;color:#fff;border:0;border-radius:8px;padding:6px 12px;font-size:12px;font-weight:600;cursor:pointer;font-family:ui-monospace,monospace}
+.action button:hover{background:#2563eb}
+.param{display:flex;align-items:center;gap:4px;font-size:11px;color:#8aa0c0}
+.param input{width:64px;background:#0c1425;border:1px solid #24344f;border-radius:6px;color:#e2e8f0;padding:3px 6px;font-size:11px}
+.more{font-size:11px;color:#64748b}
+.empty{color:#64748b;font-size:12px;font-style:italic}
+ body{display:flex;align-items:center;justify-content:center;min-height:100vh;padding:24px}</style></head><body><div class="card" data-device="linear_motion.toyo_xyz.sim">
+    <h3>linear_motion.toyo_xyz.sim</h3>
+    <span class="chip">robot_linear_motion</span>
+    <div class="desc">东洋XYZ三轴运动平台，基于MoveIt2运动规划框架的精密定位设备。该设备通过ROS2和MoveIt2实现三维空间的精确运动控制，支持复杂轨迹规划、多点定位、速度控制等功能。具备高精度定位、平稳运动、实时轨迹监控等特性。适用于精密加工、样品定位、检测扫描、自动化装配等需要高精度三维运动控制的实验室和工业应用场景。</div>
+    
+    <div class="section-title">控制 · 8</div><div class="actions"><div class="action">
+    <button onclick="window.__toast&&window.__toast('auto-check_tf_update_actions')">auto-check_tf_update_actions</button>
+    
+  </div><div class="action">
+    <button onclick="window.__toast&&window.__toast('auto-moveit_joint_task')">auto-moveit_joint_task</button>
+    <label class="param"><span>joint_names</span><input type="text" placeholder="string"/></label><label class="param"><span>joint_positions</span><input type="text" placeholder="string"/></label><label class="param"><span>move_group</span><input type="text" placeholder="string"/></label><span class="more">+2</span>
+  </div><div class="action">
+    <button onclick="window.__toast&&window.__toast('auto-moveit_task')">auto-moveit_task</button>
+    <label class="param"><span>cartesian</span><input type="text" placeholder="string"/></label><label class="param"><span>move_group</span><input type="text" placeholder="string"/></label><label class="param"><span>offsets</span><input type="text" placeholder="string"/></label><span class="more">+5</span>
+  </div><div class="action">
+    <button onclick="window.__toast&&window.__toast('auto-resource_manager')">auto-resource_manager</button>
+    <label class="param"><span>parent_link</span><input type="text" placeholder="string"/></label><label class="param"><span>resource</span><input type="text" placeholder="string"/></label>
+  </div><div class="action">
+    <button onclick="window.__toast&&window.__toast('auto-wait_for_resource_action')">auto-wait_for_resource_action</button>
+    
+  </div><div class="action">
+    <button onclick="window.__toast&&window.__toast('pick_and_place')">pick_and_place</button>
+    <label class="param"><span>command</span><input type="text" placeholder="string"/></label>
+  </div><span class="more">…还有 2 个动作</span></div>
+  </div><script>window.__toast=function(a){var t=document.createElement('div');t.textContent='▶ '+a+'(...)';t.style.cssText='position:fixed;bottom:20px;left:50%;transform:translateX(-50%);background:#1d4ed8;color:#fff;padding:8px 16px;border-radius:8px;font:13px monospace;z-index:99';document.body.appendChild(t);setTimeout(function(){t.remove()},1500)}</script></body></html>
