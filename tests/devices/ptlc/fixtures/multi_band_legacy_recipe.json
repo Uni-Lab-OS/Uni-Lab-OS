@@ -1,0 +1,19 @@
+{
+  "name": "multi-band-complete-ptlc",
+  "sample_id": "sample-multi-001",
+  "stages": [
+    {"name": "spotting", "enabled": true, "params": {"band": 1}},
+    {"name": "before_photo", "enabled": true, "params": {}},
+    {
+      "name": "develop",
+      "enabled": true,
+      "params": {"tank_id": 2, "group_id": 1}
+    },
+    {"name": "scrape", "enabled": true, "params": {"band": 1}},
+    {"name": "collect", "enabled": true, "params": {"band": 1}},
+    {"name": "scrape", "enabled": true, "params": {"band": 2}},
+    {"name": "collect", "enabled": true, "params": {"band": 2}},
+    {"name": "scrape", "enabled": true, "params": {"band": 3}},
+    {"name": "collect", "enabled": true, "params": {"band": 3}}
+  ]
+}

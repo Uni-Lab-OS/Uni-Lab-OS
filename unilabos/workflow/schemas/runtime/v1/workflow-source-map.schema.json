@@ -1,0 +1,21 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://unilab.dev/contracts/runtime/v1/workflow-source-map.schema.json",
+  "title": "Uni-Lab Workflow Source Map",
+  "type": "array",
+  "items": { "$ref": "#/$defs/span" },
+  "$defs": {
+    "span": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["node_id", "start_line", "start_column", "end_line", "end_column"],
+      "properties": {
+        "node_id": { "type": "string", "minLength": 1 },
+        "start_line": { "type": "integer", "minimum": 1 },
+        "start_column": { "type": "integer", "minimum": 1 },
+        "end_line": { "type": "integer", "minimum": 1 },
+        "end_column": { "type": "integer", "minimum": 1 }
+      }
+    }
+  }
+}

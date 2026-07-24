@@ -7,7 +7,14 @@ setup(
     version='0.11.3',
     packages=find_packages(),
     include_package_data=True,
-    install_requires=['setuptools'],
+    package_data={
+        'unilabos.workflow': ['schemas/runtime/v1/*.schema.json'],
+    },
+    install_requires=[
+        'jsonschema>=4.26,<5',
+        'rfc8785>=0.1.4,<0.2',
+        'setuptools',
+    ],
     zip_safe=True,
     author="The unilabos developers",
     maintainer='Junhan Chang, Xuwznln',

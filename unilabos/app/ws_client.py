@@ -20,7 +20,7 @@ import ssl as ssl_module
 import copy
 from queue import Queue, Empty
 from dataclasses import dataclass, field
-from typing import Optional, Dict, Any, List, Tuple
+from typing import Optional, Dict, Any, List, Mapping, Tuple
 from urllib.parse import urlparse
 from enum import Enum
 
@@ -29,8 +29,12 @@ from typing_extensions import TypedDict
 from unilabos.app.model import JobAddReq
 from unilabos.resources.resource_tracker import ResourceDictType
 from unilabos.ros.nodes.presets.host_node import HostNode
-from unilabos.scheduler.dag_model import DagNode, DagValidationError, TaskDag
+from unilabos.scheduler.dag_model import DagNode, DagValidationError, NodeState, TaskDag
 from unilabos.scheduler.task_dag_runner import TaskDagRunner
+from unilabos.scheduler.resource_lock import ResourceLockManager
+from unilabos.runtime.event_store import SQLiteEventJournal
+from unilabos.runtime.reconcile import reconcile_unknown_fence
+from unilabos.runtime.paths import default_runtime_db_path
 from unilabos.utils.type_check import serialize_result_info
 from unilabos.app.communication import BaseCommunicationClient
 from unilabos.config.config import WSConfig, HTTPConfig, BasicConfig
@@ -383,13 +387,44 @@ class DeviceActionManager:
 class MessageProcessor:
     """消息处理线程 - 处理WebSocket消息，划分任务执行和任务队列"""
 
-    def __init__(self, websocket_url: str, send_queue: Queue, device_manager: DeviceActionManager):
+    def __init__(
+        self,
+        websocket_url: str,
+        send_queue: Queue,
+        device_manager: DeviceActionManager,
+        *,
+        resource_lock_manager: Optional[ResourceLockManager] = None,
+        journal: Optional[SQLiteEventJournal] = None,
+        runtime_drivers: Optional[Mapping[str, Any]] = None,
+    ):
         self.websocket_url = websocket_url
         self.send_queue = send_queue
         self.device_manager = device_manager
         self.queue_processor = None  # 延迟设置
         self.websocket_client = None  # 延迟设置
         self.session_id = str(uuid.uuid4())[:6]  # 产生一个随机的session_id
+
+        runtime_epoch = (
+            resource_lock_manager.runtime_epoch
+            if resource_lock_manager is not None
+            else journal.runtime_epoch
+            if journal is not None
+            else uuid.uuid4().hex
+        )
+        # One authority per OS process: every TaskDagRunner shares these objects,
+        # so separate runs contend on the same live resource leases and journal.
+        self._resource_lock_manager = resource_lock_manager or ResourceLockManager(
+            runtime_epoch=runtime_epoch
+        )
+        self._runtime_journal = journal
+        self._runtime_recovery_initialized = False
+        # Optional generic runtime drivers are selected only by concrete device
+        # id.  Profiles own action names and driver configuration; this core
+        # path contains no device-family branches.
+        self._runtime_drivers = dict(runtime_drivers or {})
+        self._runtime_driver_tasks: Dict[
+            Tuple[str, str], asyncio.Task[Any]
+        ] = {}
 
         # task_dag 驱动器注册表：task_id -> TaskDagRunner（整张 DAG 下沉本地执行）
         self._task_dag_runners: Dict[str, TaskDagRunner] = {}
@@ -650,6 +685,8 @@ class MessageProcessor:
                 await self._handle_task_dag(message_data)
             elif message_type == "cancel_action" or message_type == "cancel_task":
                 await self._handle_cancel_action(message_data)
+            elif message_type == "reconcile_run":
+                await self._handle_reconcile_run(message_data)
             elif message_type == "add_material":
                 # noinspection PyTypeChecker
                 await self._handle_resource_tree_update(message_data, "add")
@@ -981,6 +1018,7 @@ class MessageProcessor:
             if runner is not None:
                 logger.info(f"[MessageProcessor] Cancel task_dag {task_id}: 停止走图并清理设备残余")
                 runner.cancel()
+                self._cancel_runtime_driver_tasks(task_id)
                 return
 
             self._cancel_all_jobs_for_task(task_id)
@@ -993,6 +1031,8 @@ class MessageProcessor:
         既服务于外部 cancel_task（非 DAG 任务），也作为 task_dag 走图终止（失败/取消）
         后的 on_cancel_remaining 设备清理回调，复用 DeviceActionManager.cancel_jobs_by_task_id。
         """
+        self._cancel_runtime_driver_tasks(task_id)
+
         # 先通知HostNode取消所有ROS2 actions
         # 需要先获取所有相关job_ids
         jobs_to_cancel = []
@@ -1051,11 +1091,22 @@ class MessageProcessor:
             logger.info(f"[MessageProcessor] task_dag {task_id} 已在执行，忽略重复下发")
             return
 
+        if self._runtime_journal is None:
+            runtime_path = default_runtime_db_path()
+            runtime_path.parent.mkdir(parents=True, exist_ok=True)
+            self._runtime_journal = SQLiteEventJournal(
+                runtime_path,
+                runtime_epoch=self._resource_lock_manager.runtime_epoch,
+            )
+        self._restore_runtime_fences_once()
+
         runner = TaskDagRunner(
             dag,
             lambda node: self._start_dag_node(node, dag),
             on_cancel_remaining=lambda: self._cancel_all_jobs_for_task(task_id),
             loop=self._loop,
+            resource_lock_manager=self._resource_lock_manager,
+            journal=self._runtime_journal,
         )
         self._task_dag_runners[task_id] = runner
         logger.info(
@@ -1063,10 +1114,79 @@ class MessageProcessor:
         )
         asyncio.ensure_future(self._run_task_dag(task_id, runner))
 
+    async def _handle_reconcile_run(self, data: Dict[str, Any]) -> None:
+        """Resolve an unknown lease only inside the execution OS authority."""
+
+        if self._runtime_journal is None:
+            runtime_path = default_runtime_db_path()
+            runtime_path.parent.mkdir(parents=True, exist_ok=True)
+            self._runtime_journal = SQLiteEventJournal(
+                runtime_path,
+                runtime_epoch=self._resource_lock_manager.runtime_epoch,
+            )
+        self._restore_runtime_fences_once()
+        run_id = str(data.get("run_id") or "")
+        lease_id = str(data.get("lease_id") or "")
+        result = await reconcile_unknown_fence(
+            journal=self._runtime_journal,
+            lock_manager=self._resource_lock_manager,
+            run_id=run_id,
+            lease_id=lease_id,
+            resolution=str(data.get("resolution") or ""),
+            actor=str(data.get("actor") or ""),
+            reason=str(data.get("reason") or ""),
+        )
+        ack: Dict[str, Any] = {
+            "request_id": str(data.get("request_id") or ""),
+            "run_id": run_id,
+            "lease_id": lease_id,
+            "status": result.status,
+        }
+        if result.code:
+            ack["code"] = result.code
+        if result.node_id:
+            ack["node_id"] = result.node_id
+        if result.terminal:
+            ack["terminal"] = result.terminal
+        self.send_message({"action": "reconcile_ack", "data": ack})
+
+    def _restore_runtime_fences_once(self) -> None:
+        """Reinstall persisted unknown fences before accepting new work."""
+
+        if self._runtime_recovery_initialized or self._runtime_journal is None:
+            return
+        for run_id in self._runtime_journal.list_incomplete_run_ids():
+            self._runtime_journal.reconcile_restart(
+                run_id,
+                dispatch=lambda _node_id: None,
+                lock_manager=self._resource_lock_manager,
+            )
+        self._runtime_recovery_initialized = True
+
     async def _run_task_dag(self, task_id: str, runner: TaskDagRunner):
         """驱动单张 DAG 走完并善后：无论成功/失败/取消，最终从注册表摘除。"""
         try:
             result = await runner.run()
+            for node_id, state in result.items():
+                if state != NodeState.SKIPPED:
+                    continue
+                node = runner.dag.nodes[node_id]
+                self.send_message(
+                    {
+                        "action": "job_status",
+                        "data": {
+                            "job_id": node_id,
+                            "task_id": task_id,
+                            "device_id": node.device_id,
+                            "notebook_id": runner.dag.notebook_id,
+                            "action_name": node.action,
+                            "status": "skipped",
+                            "feedback_data": {},
+                            "return_info": None,
+                            "timestamp": time.time(),
+                        },
+                    }
+                )
             summary = ", ".join(f"{nid}={st.value}" for nid, st in result.items())
             logger.info(f"[MessageProcessor] task_dag {task_id} 走图结束: {summary}")
         except Exception:
@@ -1080,6 +1200,21 @@ class MessageProcessor:
         node_id 即 job_id，幂等键 (task_id, node_id)。不 await —— 入队/send_goal 是副作用，
         节点终态由 publish_job_status 经 notify_task_dag_terminal 回流，而非此处返回。
         """
+        runtime_driver = self._runtime_drivers.get(node.device_id)
+        if runtime_driver is not None:
+            key = (dag.task_id, node.node_id)
+            task = asyncio.ensure_future(
+                self._run_runtime_driver(node, dag, runtime_driver)
+            )
+            self._runtime_driver_tasks[key] = task
+            task.add_done_callback(
+                lambda completed, task_key=key: self._forget_runtime_driver_task(
+                    task_key,
+                    completed,
+                )
+            )
+            return
+
         payload = {
             "device_id": node.device_id,
             "action": node.action,
@@ -1093,6 +1228,144 @@ class MessageProcessor:
             "server_info": dag.server_info,
         }
         asyncio.ensure_future(self._start_dag_node_guarded(dag.task_id, node.node_id, payload))
+
+    def _forget_runtime_driver_task(
+        self,
+        key: Tuple[str, str],
+        completed: asyncio.Task[Any],
+    ) -> None:
+        if self._runtime_driver_tasks.get(key) is completed:
+            self._runtime_driver_tasks.pop(key, None)
+
+    def _cancel_runtime_driver_tasks(self, task_id: str) -> None:
+        for (run_id, _node_id), task in tuple(
+            self._runtime_driver_tasks.items()
+        ):
+            if run_id == task_id and not task.done():
+                task.cancel()
+
+    async def _run_runtime_driver(
+        self,
+        node: DagNode,
+        dag: TaskDag,
+        runtime_driver: Any,
+    ) -> None:
+        """Execute one DAG node through a profile-installed generic driver."""
+
+        try:
+            result = await runtime_driver.run_macro(
+                node.action,
+                inputs=node.action_args,
+            )
+            terminal = str(getattr(result, "terminal", "failed") or "failed")
+            outputs = getattr(result, "outputs", {})
+            if not isinstance(outputs, Mapping):
+                outputs = {"result": outputs}
+            normalized = terminal.strip().lower()
+            is_success = normalized in {"success", "succeeded"}
+            error = str(getattr(result, "error", "") or "")
+            physical_state = str(
+                getattr(
+                    result,
+                    "physical_state",
+                    "confirmed" if is_success else "unknown",
+                )
+                or ("confirmed" if is_success else "unknown")
+            )
+            reconcile_required = bool(
+                getattr(
+                    result,
+                    "reconcile_required",
+                    not is_success and physical_state == "unknown",
+                )
+            )
+            if normalized not in {
+                "success",
+                "succeeded",
+                "failed",
+                "cancelled",
+                "canceled",
+            }:
+                terminal = "failed"
+                error = error or f"runtime driver returned invalid terminal: {normalized}"
+                physical_state = "unknown"
+                reconcile_required = True
+            return_info = serialize_result_info(error, is_success, dict(outputs))
+            return_info.update(
+                {
+                    "physical_state": physical_state,
+                    "reconcile_required": reconcile_required,
+                }
+            )
+            self._report_runtime_driver_terminal(
+                node=node,
+                dag=dag,
+                status=terminal,
+                return_info=return_info,
+            )
+        except asyncio.CancelledError:
+            self._report_runtime_driver_terminal(
+                node=node,
+                dag=dag,
+                status="cancelled",
+                return_info={
+                    **serialize_result_info(
+                        "runtime driver cancelled before physical confirmation",
+                        False,
+                        {},
+                    ),
+                    "physical_state": "unknown",
+                    "reconcile_required": True,
+                },
+            )
+        except Exception as exc:  # noqa: BLE001 - physical work may have started
+            error = str(exc) or exc.__class__.__name__
+            logger.exception(
+                "[MessageProcessor] runtime driver failed: task=%s node=%s",
+                dag.task_id,
+                node.node_id,
+            )
+            self._report_runtime_driver_terminal(
+                node=node,
+                dag=dag,
+                status="failed",
+                return_info={
+                    **serialize_result_info(error, False, {}),
+                    "physical_state": "unknown",
+                    "reconcile_required": True,
+                },
+            )
+
+    def _report_runtime_driver_terminal(
+        self,
+        *,
+        node: DagNode,
+        dag: TaskDag,
+        status: str,
+        return_info: dict[str, Any],
+    ) -> None:
+        self.notify_task_dag_terminal(
+            dag.task_id,
+            node.node_id,
+            status,
+            return_info=return_info,
+        )
+        self.send_message(
+            {
+                "action": "job_status",
+                "data": {
+                    "job_id": node.node_id,
+                    "task_id": dag.task_id,
+                    "device_id": node.device_id,
+                    "notebook_id": dag.notebook_id,
+                    "action_name": node.action,
+                    "status": status,
+                    "feedback_data": {},
+                    "return_info": return_info,
+                    "timestamp": time.time(),
+                },
+            }
+        )
 
     async def _start_dag_node_guarded(self, task_id: str, job_id: str, payload: Dict[str, Any]) -> None:
         """包裹 _handle_job_start：兜底保证任何逃逸异常都回终态，杜绝节点 future 永久悬挂。
@@ -1109,7 +1382,14 @@ class MessageProcessor:
             )
             self.notify_task_dag_terminal(task_id, job_id, "failed")
 
-    def notify_task_dag_terminal(self, task_id: str, job_id: str, status: str) -> None:
+    def notify_task_dag_terminal(
+        self,
+        task_id: str,
+        job_id: str,
+        status: str,
+        *,
+        return_info: Optional[dict] = None,
+    ) -> None:
         """由 publish_job_status 终态时**跨线程**回调：把节点终态回流对应 DAG 驱动器。
 
         非 task_dag 的普通 job（task_id 不在注册表）为 no-op，故对既有 job_start 路径零影响。
@@ -1117,7 +1397,10 @@ class MessageProcessor:
         runner = self._task_dag_runners.get(task_id)
         if runner is None:
             return
-        runner.notify_terminal(job_id, status)
+        if return_info is None:
+            runner.notify_terminal(job_id, status)
+        else:
+            runner.notify_terminal(job_id, status, return_info=return_info)
 
     async def _handle_resource_tree_update(self, resource_uuid_list: List[WSResourceChatData], action: str):
         """处理资源树更新消息（add_material/update_material/remove_material）"""
@@ -1288,7 +1571,7 @@ class MessageProcessor:
 
         cleanup_thread = threading.Thread(target=do_cleanup, name="RestartCleanupThread", daemon=True)
         cleanup_thread.start()
-        logger.info(f"[MessageProcessor] Restart cleanup scheduled")
+        logger.info("[MessageProcessor] Restart cleanup scheduled")
 
     async def _send_action_state_response(
         self,
@@ -1497,7 +1780,11 @@ class WebSocketClient(BaseCommunicationClient):
     - 队列处理线程：定时给发送队列推送消息，管理任务状态
     """
 
-    def __init__(self):
+    def __init__(
+        self,
+        *,
+        runtime_drivers: Optional[Mapping[str, Any]] = None,
+    ):
         super().__init__()
         self.is_disabled = False
         self.client_id = f"{uuid.uuid4()}"
@@ -1512,7 +1799,12 @@ class WebSocketClient(BaseCommunicationClient):
             self.websocket_url = ""  # 默认空字符串，避免None
 
         # 两个核心线程
-        self.message_processor = MessageProcessor(self.websocket_url, self.send_queue, self.device_manager)
+        self.message_processor = MessageProcessor(
+            self.websocket_url,
+            self.send_queue,
+            self.device_manager,
+            runtime_drivers=runtime_drivers,
+        )
         self.queue_processor = QueueProcessor(self.device_manager, self.message_processor)
 
         # running状态debounce缓存: {job_id: (last_send_timestamp, last_feedback_data)}
@@ -1782,7 +2074,12 @@ class WebSocketClient(BaseCommunicationClient):
             self.queue_processor.handle_job_completed(item.job_id, status)
 
             # task_dag 节点终态回流：非 DAG 任务为 no-op，故对普通 job_start 零影响
-            self.message_processor.notify_task_dag_terminal(item.task_id, item.job_id, status)
+            self.message_processor.notify_task_dag_terminal(
+                item.task_id,
+                item.job_id,
+                status,
+                return_info=return_info,
+            )
 
             cached_status = self.get_cached_job_start_response_status(item.job_id, item.task_id)
             if cached_status in ["success", "failed"]:

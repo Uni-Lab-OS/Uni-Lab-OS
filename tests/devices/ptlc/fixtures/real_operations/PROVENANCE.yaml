@@ -1,0 +1,15 @@
+source_repository: pTLC_platformUI
+source_ref: origin/codex/ui-upper-next
+files:
+  - source_path: eit_ptlc/config/operation/02_develop/develop_execute.yaml
+    fixture_path: 02_develop/develop_execute.yaml
+    git_blob: 0be22c347ba8a3b0feb78763b4dc6936bb92a99a
+  - source_path: eit_ptlc/config/operation/02_develop/develop_prepare.yaml
+    fixture_path: 02_develop/develop_prepare.yaml
+    git_blob: 4c8b1fc07fd9cccdcf42be6b9671ed1674bfd511
+  - source_path: eit_ptlc/config/operation/02_develop/develop_standby.yaml
+    fixture_path: 02_develop/develop_standby.yaml
+    git_blob: ddaeb98256462cf5615ae377e0b71d9e306c0775
+  - source_path: eit_ptlc/config/operation/08_rail/rail_move_safe.yaml
+    fixture_path: 08_rail/rail_move_safe.yaml
+    git_blob: cb2cbd4168284f5001b243e42f31d10a2dc956d5

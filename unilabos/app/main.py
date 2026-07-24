@@ -171,6 +171,13 @@ def parse_args():
         help="Path to Python code directory for AST-based device/resource scanning",
     )
     parser.add_argument(
+        "--profile",
+        type=str,
+        default=None,
+        action="append",
+        help="Path to a generic Runtime Profile YAML (repeatable)",
+    )
+    parser.add_argument(
         "--working_dir",
         type=str,
         default=None,
@@ -717,6 +724,8 @@ def main():
         BasicConfig.sk = args_dict.get("sk", "")
         print_status("传入了sk参数，优先采用传入参数！", "info")
     BasicConfig.working_dir = working_dir
+    if args_dict.get("profile") is not None:
+        BasicConfig.runtime_profile_paths = list(args_dict["profile"])
 
     # package 子命令：在配置/鉴权就绪后尽早处理，不进入设备 bootstrap
     if args_dict.get("command") in ("package", "pkg"):

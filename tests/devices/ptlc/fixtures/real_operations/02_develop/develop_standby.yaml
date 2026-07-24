@@ -1,0 +1,23 @@
+schema: ptlc.script/v1
+kind: operation
+name: develop_standby
+label: 展开-T1物理就位 (地轨到展开区)
+ui:
+  role: helper
+  hidden: true
+# T1 预告命中后的物理就位: 地轨提前到展开区(位5), 机械臂留在 P1 安全位待命 —
+# 压缩 T2 排液完成开盖后板在蒸气/干燥环境中的取板等待。rail_move_safe 自带
+# P1 安全门 (不在位即停, 操作员回位再续); 同位重复下发由 PLC 幂等吸收。
+vars: []
+resources:
+- robot
+- station:rail
+body:
+- op: comment
+  text: 'T1 物理就位: 地轨到展开区(位5); 机械臂不预伸 (留 P1 安全位, 取板序列自带进近)'
+- op: run_script
+  script: rail_move_safe
+  inputs:
+    target:
+      lit: 5
+  outputs: {}

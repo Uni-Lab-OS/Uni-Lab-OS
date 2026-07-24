@@ -584,7 +584,18 @@ def normalize_ast_action_handles(handles_raw: Any) -> Dict[str, Any]:
             "label": h.get("label", ""),
         }
         _FIELD_ENUM_MAP = {"side": Side, "data_source": DataSource}
-        for opt_key in ("side", "data_key", "data_source", "description", "io_type"):
+        for opt_key in (
+            "side",
+            "data_key",
+            "data_source",
+            "description",
+            "io_type",
+            "domain",
+            "required",
+            "schema_ref",
+            "binding",
+            "same_identity_as",
+        ):
             val = h.get(opt_key)
             if val is not None:
                 if opt_key in _FIELD_ENUM_MAP:
@@ -606,6 +617,29 @@ def normalize_ast_action_handles(handles_raw: Any) -> Dict[str, Any]:
     # Always include output (empty list when no outputs) to match YAML
     result["output"] = output_list
     return result
+
+
+def normalize_ast_action_contract(contract_raw: Any) -> Dict[str, Any]:
+    """Strip constructor markers and normalize v2 contract enums from AST data."""
+
+    if not isinstance(contract_raw, dict):
+        return {}
+
+    def normalize(value: Any, key: str = "") -> Any:
+        if isinstance(value, dict):
+            return {
+                nested_key: normalize(nested_value, nested_key)
+                for nested_key, nested_value in value.items()
+                if nested_key != "_call"
+            }
+        if isinstance(value, list):
+            return [normalize(item) for item in value]
+        if key in {"execution_kind", "material_mode"} and isinstance(value, str):
+            return value.rsplit(".", 1)[-1].lower()
+        return value
+
+    normalized = normalize(contract_raw)
+    return normalized if isinstance(normalized, dict) else {}
 
 
 # ---------------------------------------------------------------------------

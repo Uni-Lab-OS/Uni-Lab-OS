@@ -23,6 +23,9 @@ from typing import Any
 from unilabos.app.local_bridge.schedule_ws import ScheduleSession
 from unilabos.scheduler.dag_executor import DagExecutor
 from unilabos.scheduler.dag_model import TERMINAL_STATES, DagNode, NodeState, TaskDag
+from unilabos.scheduler.resource_lock import ResourceLockManager
+from unilabos.runtime.event_store import SQLiteEventJournal
+from unilabos.runtime.reconcile import reconcile_unknown_fence
 
 logger = logging.getLogger(__name__)
 
@@ -32,6 +35,7 @@ _STATE_TO_STATUS: dict[NodeState, str] = {
     NodeState.SUCCESS: "success",
     NodeState.FAILED: "failed",
     NodeState.CANCELLED: "cancelled",
+    NodeState.SKIPPED: "skipped",
 }
 
 
@@ -49,9 +53,22 @@ class OfflineOS:
         results: dict[str, NodeState] | None = None,
         *,
         model_device_lock: bool = True,
+        resource_lock_manager: ResourceLockManager | None = None,
+        journal: SQLiteEventJournal | None = None,
     ) -> None:
         self.results = results or {}
         self.model_device_lock = model_device_lock
+        runtime_epoch = (
+            resource_lock_manager.runtime_epoch
+            if resource_lock_manager is not None
+            else journal.runtime_epoch
+            if journal is not None
+            else "offline"
+        )
+        self._resource_lock_manager = resource_lock_manager or ResourceLockManager(
+            runtime_epoch=runtime_epoch
+        )
+        self._journal = journal
         self._session: ScheduleSession | None = None
         self._locks: dict[str, asyncio.Lock] = {}
         self._executors: dict[str, DagExecutor] = {}
@@ -76,13 +93,48 @@ class OfflineOS:
             await self._start_task(data)
         elif action == "cancel_task":
             self._cancel_task(data.get("task_id", ""))
+        elif action == "reconcile_run":
+            await self._reconcile_run(data)
         else:
             logger.debug("[offline_os] 忽略下行 action=%s", action)
+
+    async def _reconcile_run(self, data: dict[str, Any]) -> None:
+        result = await reconcile_unknown_fence(
+            journal=self._journal,
+            lock_manager=self._resource_lock_manager,
+            run_id=str(data.get("run_id") or ""),
+            lease_id=str(data.get("lease_id") or ""),
+            resolution=str(data.get("resolution") or ""),
+            actor=str(data.get("actor") or ""),
+            reason=str(data.get("reason") or ""),
+        )
+        if self._session is None:
+            return
+        ack: dict[str, Any] = {
+            "request_id": str(data.get("request_id") or ""),
+            "run_id": str(data.get("run_id") or ""),
+            "lease_id": str(data.get("lease_id") or ""),
+            "status": result.status,
+        }
+        if result.code:
+            ack["code"] = result.code
+        if result.node_id:
+            ack["node_id"] = result.node_id
+        if result.terminal:
+            ack["terminal"] = result.terminal
+        await self._session.handle_incoming(
+            {"action": "reconcile_ack", "data": ack}
+        )
 
     async def _start_task(self, payload: dict[str, Any]) -> None:
         """解析 F002 task_dag，起后台协程用 DagExecutor 走图（不阻塞下发方）。"""
         dag = TaskDag.from_message(payload)
-        executor = DagExecutor(dag, self._make_submit(dag))
+        executor = DagExecutor(
+            dag,
+            self._make_submit(dag),
+            resource_lock_manager=self._resource_lock_manager,
+            journal=self._journal,
+        )
         self._dags[dag.task_id] = dag
         self._executors[dag.task_id] = executor
         self._tasks[dag.task_id] = asyncio.ensure_future(self._run(dag.task_id, executor))

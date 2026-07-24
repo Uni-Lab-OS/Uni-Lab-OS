@@ -1,0 +1,263 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://unilab.dev/contracts/runtime/v1/canonical-workflow.schema.json",
+  "title": "Uni-Lab Canonical Workflow v2",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["schema_version", "revision_id", "workflow_id", "invocations"],
+  "properties": {
+    "schema_version": { "const": "2" },
+    "revision_id": { "type": "string", "minLength": 1 },
+    "workflow_id": { "type": "string", "minLength": 1 },
+    "parameters": {
+      "type": ["array", "null"],
+      "items": { "$ref": "#/$defs/workflowParameter" }
+    },
+    "invocations": {
+      "type": "array",
+      "items": { "$ref": "#/$defs/actionInvocation" }
+    },
+    "control_edges": {
+      "type": "array",
+      "items": { "$ref": "#/$defs/controlEdge" }
+    },
+    "data_edges": {
+      "type": "array",
+      "items": { "$ref": "#/$defs/dataEdge" }
+    },
+    "material_edges": {
+      "type": "array",
+      "items": { "$ref": "#/$defs/materialEdge" }
+    },
+    "constraint_edges": {
+      "type": "array",
+      "items": { "$ref": "#/$defs/constraintEdge" }
+    },
+    "resource_holds": {
+      "type": "array",
+      "items": { "$ref": "#/$defs/resourceHold" }
+    },
+    "layout": { "type": "object" },
+    "source_map": { "$ref": "#/$defs/legacySourceMap" },
+    "source_artifact": {
+      "oneOf": [
+        { "type": "null" },
+        { "$ref": "#/$defs/sourceArtifact" }
+      ]
+    }
+  },
+  "$defs": {
+    "jsonValue": {
+      "oneOf": [
+        { "type": "null" },
+        { "type": "boolean" },
+        { "type": "number" },
+        { "type": "string" },
+        { "type": "array", "items": { "$ref": "#/$defs/jsonValue" } },
+        {
+          "type": "object",
+          "additionalProperties": { "$ref": "#/$defs/jsonValue" }
+        }
+      ]
+    },
+    "workflowParameter": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["name", "type", "required"],
+      "properties": {
+        "name": { "type": "string", "pattern": "^[A-Za-z_][A-Za-z0-9_]*$" },
+        "type": { "enum": ["string", "integer", "number", "boolean"] },
+        "required": { "type": "boolean" },
+        "default": { "$ref": "#/$defs/jsonValue" },
+        "title": { "type": "string" },
+        "description": { "type": "string" }
+      }
+    },
+    "binding": {
+      "oneOf": [
+        {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["kind", "value"],
+          "properties": {
+            "kind": { "const": "literal" },
+            "value": { "$ref": "#/$defs/jsonValue" }
+          }
+        },
+        {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["kind", "parameter"],
+          "properties": {
+            "kind": { "const": "runtime_parameter" },
+            "parameter": { "type": "string", "minLength": 1 },
+            "default": { "$ref": "#/$defs/jsonValue" }
+          }
+        },
+        {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["kind", "node_id", "output"],
+          "properties": {
+            "kind": { "const": "node_output" },
+            "node_id": { "type": "string", "minLength": 1 },
+            "output": { "type": "string", "minLength": 1 }
+          }
+        },
+        {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["kind", "node_id"],
+          "properties": {
+            "kind": { "const": "node_result" },
+            "node_id": { "type": "string", "minLength": 1 }
+          }
+        },
+        {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["kind", "expression"],
+          "properties": {
+            "kind": { "const": "expression" },
+            "expression": { "type": "object" },
+            "variables": {
+              "type": "object",
+              "additionalProperties": { "$ref": "#/$defs/binding" }
+            }
+          }
+        },
+        {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["kind", "branch_node_id", "true_value", "false_value"],
+          "properties": {
+            "kind": { "const": "conditional" },
+            "branch_node_id": { "type": "string", "minLength": 1 },
+            "true_value": { "$ref": "#/$defs/binding" },
+            "false_value": { "$ref": "#/$defs/binding" }
+          }
+        }
+      ]
+    },
+    "actionInvocation": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["node_id", "action_ref"],
+      "properties": {
+        "node_id": { "type": "string", "minLength": 1 },
+        "action_ref": { "type": "string", "minLength": 1 },
+        "node_type": { "type": "string" },
+        "name": { "type": "string" },
+        "description": { "type": "string" },
+        "input_bindings": {
+          "type": "object",
+          "additionalProperties": { "$ref": "#/$defs/binding" }
+        },
+        "output_schema": { "type": "object" },
+        "material_bindings": { "type": "object" },
+        "resource_claims": { "type": "array", "items": { "type": "object" } },
+        "effects": { "type": "array", "items": { "type": "object" } },
+        "estimated_duration_s": { "type": "number", "minimum": 0 },
+        "control": { "type": "object" },
+        "cleanup_for": {
+          "type": "array",
+          "items": { "type": "string", "minLength": 1 }
+        }
+      }
+    },
+    "controlEdge": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["source", "target"],
+      "properties": {
+        "source": { "type": "string", "minLength": 1 },
+        "target": { "type": "string", "minLength": 1 },
+        "edge_id": { "type": "string" },
+        "branch": { "type": ["string", "null"] }
+      }
+    },
+    "dataEdge": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["edge_id", "source", "source_output", "target", "target_input"],
+      "properties": {
+        "edge_id": { "type": "string" },
+        "source": { "type": "string", "minLength": 1 },
+        "source_output": { "type": "string", "minLength": 1 },
+        "target": { "type": "string", "minLength": 1 },
+        "target_input": { "type": "string", "minLength": 1 }
+      }
+    },
+    "materialEdge": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["edge_id", "source", "source_port", "target", "target_port", "material_ref"],
+      "properties": {
+        "edge_id": { "type": "string" },
+        "source": { "type": "string", "minLength": 1 },
+        "source_port": { "type": "string", "minLength": 1 },
+        "target": { "type": "string", "minLength": 1 },
+        "target_port": { "type": "string", "minLength": 1 },
+        "material_ref": { "type": "string", "minLength": 1 }
+      }
+    },
+    "constraintEdge": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["edge_id", "source", "target", "constraint_type"],
+      "properties": {
+        "edge_id": { "type": "string" },
+        "source": { "type": "string", "minLength": 1 },
+        "target": { "type": "string", "minLength": 1 },
+        "constraint_type": { "type": "string", "minLength": 1 },
+        "parameters": { "type": "object" }
+      }
+    },
+    "resourceHold": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["hold_id", "resource_ref", "scope", "acquire_node_id", "release_node_id"],
+      "properties": {
+        "hold_id": { "type": "string", "minLength": 1 },
+        "resource_ref": { "type": "string", "minLength": 1 },
+        "scope": { "enum": ["until_handoff", "workflow_block"] },
+        "acquire_node_id": { "type": "string", "minLength": 1 },
+        "release_node_id": { "type": "string", "minLength": 1 }
+      }
+    },
+    "legacySourceMap": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "entries": {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "additionalProperties": false,
+            "properties": {
+              "node_id": { "type": "string" },
+              "line": { "type": "integer", "minimum": 0 },
+              "column": { "type": "integer", "minimum": 0 },
+              "source_step_index": { "type": ["integer", "null"], "minimum": 0 },
+              "compiled_node_ids": {
+                "type": "array",
+                "items": { "type": "string" }
+              }
+            }
+          }
+        }
+      }
+    },
+    "sourceArtifact": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["format", "text", "uri", "content_hash"],
+      "properties": {
+        "format": { "type": "string", "minLength": 1 },
+        "text": { "type": "string", "minLength": 1 },
+        "uri": { "type": "string", "minLength": 1 },
+        "content_hash": { "type": "string", "minLength": 1 }
+      }
+    }
+  }
+}

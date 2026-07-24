@@ -1,0 +1,54 @@
+{
+  "feature_name": "F004-quick-debug-alpha",
+  "created_at": "2026-07-21",
+  "tasks": [
+    {
+      "id": "T01",
+      "name": "ActionContract v2 与 Canonical 最小合同",
+      "layer": "model/schema",
+      "description": "以测试先行扩展 decorator，建立 typed ports、bindings、WorkflowRevision 与兼容 adapter",
+      "status": "completed",
+      "notes": "ActionContract v2、Canonical、Python binding 与 v1 compatibility tests 已通过"
+    },
+    {
+      "id": "T02",
+      "name": "TaskDag runtime binding 与 Layer A",
+      "layer": "scheduler",
+      "description": "实现 result materialization、统一 resource lease 与确定性 ready policy",
+      "status": "completed",
+      "notes": "OS 进程级共享 ResourceLockManager 已接入 DagExecutor/TaskDagRunner/MessageProcessor/OfflineOS"
+    },
+    {
+      "id": "T03",
+      "name": "控制流、journal 与时间线",
+      "layer": "scheduler/runtime",
+      "description": "实现 pTLC 所需控制流、SQLite journal/reconcile、EstimatedTimeline 与 ObservedGantt",
+      "status": "completed",
+      "notes": "branch/fork/join、SQLite journal/reconcile、Estimated/Observed timeline 自动化测试已通过"
+    },
+    {
+      "id": "T04",
+      "name": "pTLC macro 与 Recipe adapter",
+      "layer": "device/bridge",
+      "description": "用 fake PLC/golden trace 接入五类 macro、资源映射与 legacy/os 安全切换",
+      "status": "completed",
+      "notes": "真实 14/12-operation 工作流、五类 macro fake PLC golden、Recipe -> 通用 Workflow/TaskDag、可独立安装的装饰器 ptlc_station 包与 host_node.manual_confirm 复用均已通过"
+    },
+    {
+      "id": "T05",
+      "name": "Quick Debug API 与跨端集成",
+      "layer": "bridge",
+      "description": "local bridge 暴露同构 runtime/event/timeline 接口并支持共享前端 E2E",
+      "status": "completed",
+      "notes": "仅暴露设备无关 Runtime API；共享 Kernel Workbench 的 local/cloud unit/E2E 及 Workflow 参数表单已通过"
+    },
+    {
+      "id": "T06",
+      "name": "Harness 验证与验收审计",
+      "layer": "verify",
+      "description": "import、pytest、property tests、跨端 E2E 和 AC-1 至 AC-7 全部通过",
+      "status": "in_progress",
+      "notes": "OS 353、Templates 18、pTLC legacy 73、Cloud Kernel 28、mock E2E 16、real E2E 3 均已通过；Python Code/Registry/Profile importer/截图已验收。文件原子保存、panel-runtime 完整抽取和真机 smoke 仍属后续门禁"
+    }
+  ]
+}

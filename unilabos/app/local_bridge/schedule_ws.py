@@ -24,10 +24,12 @@ import asyncio
 import inspect
 import json
 import logging
+import uuid
 from collections.abc import Awaitable, Callable
 from typing import Any
 
 from unilabos.scheduler.dag_model import TERMINAL_STATES, NodeState, TaskDag
+from unilabos.scheduler.dag_wire import serialize_task_dag
 
 logger = logging.getLogger(__name__)
 
@@ -40,6 +42,7 @@ _STATUS_TO_NODE_STATE: dict[str, NodeState] = {
     "success": NodeState.SUCCESS,
     "failed": NodeState.FAILED,
     "cancelled": NodeState.CANCELLED,
+    "skipped": NodeState.SKIPPED,
 }
 
 # 视为 OS「就绪」的 action（ws_client 连上后 publish_host_ready 上报）
@@ -48,58 +51,57 @@ _HOST_READY_ACTIONS = frozenset({"host_ready", "host_node_ready", "ready", "host
 JobStatusCallback = Callable[[dict[str, Any]], Awaitable[None] | None]
 
 
-def serialize_task_dag(dag: TaskDag) -> dict[str, Any]:
-    """把 TaskDag 反序列化回 F002 task_dag 载荷（OS 面线格式）。
-
-    是 build_task_dag_payload 的逆——后者做 UI 别名归一，此处只做纯 dataclass→dict，
-    字段名严格是 F002 契约名，供下发 OS。
-    """
-    return {
-        "task_id": dag.task_id,
-        "notebook_id": dag.notebook_id,
-        "server_info": dict(dag.server_info),
-        "nodes": [
-            {
-                "node_id": node.node_id,
-                "device_id": node.device_id,
-                "action": node.action,
-                "action_type": node.action_type,
-                "action_args": dict(node.action_args),
-                "sample_material": dict(node.sample_material),
-                "always_free": node.always_free,
-            }
-            for node in dag.nodes.values()
-        ],
-        "edges": [
-            {"source_node_uuid": e.source_node_uuid, "target_node_uuid": e.target_node_uuid}
-            for e in dag.edges
-        ],
-    }
-
-
 class RunHandle:
     """一次 task_dag 下发的运行句柄：维护逐节点 NodeState，全终态时 done 置位。"""
 
     def __init__(self, dag: TaskDag) -> None:
         self.dag = dag
         self.task_id = dag.task_id
-        self.node_states: dict[str, NodeState] = {
+        self.node_states: dict[str, NodeState | str] = {
             node_id: NodeState.PENDING for node_id in dag.nodes
         }
         self.done: asyncio.Event = asyncio.Event()
+        self.dispatch_state = "pending"
 
-    def apply_status(self, node_id: str, status: str) -> None:
+    def apply_status(
+        self,
+        node_id: str,
+        status: str,
+        *,
+        return_info: dict[str, Any] | None = None,
+    ) -> None:
         """按 job_status.status 更新单节点态；全部进入终态则置 done。"""
         state = _STATUS_TO_NODE_STATE.get(status)
         if state is None:
             logger.debug("[schedule_ws] 忽略未知 status: %s (node=%s)", status, node_id)
             return
+        self.dispatch_state = "accepted"
         if node_id not in self.node_states:
             logger.debug("[schedule_ws] job_status 指向未知节点: %s", node_id)
             return
-        self.node_states[node_id] = state
+        terminal_info = return_info or {}
+        is_physically_unknown = (
+            str(terminal_info.get("physical_state") or "").lower() == "unknown"
+            or bool(terminal_info.get("reconcile_required"))
+        )
+        if state in {NodeState.FAILED, NodeState.CANCELLED} and is_physically_unknown:
+            self.node_states[node_id] = "reconciling"
+        else:
+            self.node_states[node_id] = state
         if all(s in TERMINAL_STATES for s in self.node_states.values()):
             self.done.set()
+        else:
+            self.done.clear()
+
+    def mark_cancel_requested(self, job_id: str = "") -> None:
+        """Project a request without fabricating a physical terminal."""
+
+        for node_id, state in self.node_states.items():
+            if job_id and node_id != job_id:
+                continue
+            if state not in TERMINAL_STATES:
+                self.node_states[node_id] = "cancel_requested"
+        self.done.clear()
 
     def mark_all_cancelled(self) -> None:
         """取消任务：未终态节点标为 cancelled，并置 done。"""
@@ -107,6 +109,19 @@ class RunHandle:
             if state not in TERMINAL_STATES:
                 self.node_states[node_id] = NodeState.CANCELLED
         self.done.set()
+
+    def resolve_reconciling(self, node_id: str, terminal: str) -> None:
+        """Apply the OS-audited physical resolution to one projected node."""
+
+        state = _STATUS_TO_NODE_STATE.get(terminal)
+        if self.node_states.get(node_id) != "reconciling" or state not in {
+            NodeState.FAILED,
+            NodeState.CANCELLED,
+        }:
+            return
+        self.node_states[node_id] = state
+        if all(item in TERMINAL_STATES for item in self.node_states.values()):
+            self.done.set()
 
     @property
     def finished(self) -> bool:
@@ -138,6 +153,7 @@ class ScheduleSession:
         self.session_id = session_id
         self._runs: dict[str, RunHandle] = {}
         self._job_status_cbs: list[JobStatusCallback] = []
+        self._reconcile_waiters: dict[str, asyncio.Future[dict[str, Any]]] = {}
         self.host_ready: asyncio.Event = asyncio.Event()
 
     def on_job_status(self, cb: JobStatusCallback) -> None:
@@ -173,7 +189,14 @@ class ScheduleSession:
             return existing
         handle = RunHandle(dag)
         self._runs[task_id] = handle
-        await self._send({"action": "task_dag", "data": serialize_task_dag(dag)})
+        try:
+            await self._send(
+                {"action": "task_dag", "data": serialize_task_dag(dag)}
+            )
+        except Exception:
+            handle.dispatch_state = "unknown"
+            raise
+        handle.dispatch_state = "accepted"
         logger.info(
             "[schedule_ws] 已下发 task_dag %s：%d 节点 / %d 边",
             task_id,
@@ -189,9 +212,51 @@ class ScheduleSession:
             data["job_id"] = job_id
         await self._send({"action": "cancel_task", "data": data})
         run = self._runs.get(task_id)
-        if run is not None and not job_id:
-            run.mark_all_cancelled()
+        if run is not None:
+            run.mark_cancel_requested(job_id)
         logger.info("[schedule_ws] 已下发 cancel_task %s job=%s", task_id, job_id or "-")
+
+    async def reconcile_run(
+        self,
+        run_id: str,
+        decision: dict[str, str],
+    ) -> dict[str, str]:
+        """Ask the execution OS to resolve a physical fence and await its ack."""
+
+        request_id = uuid.uuid4().hex
+        loop = asyncio.get_running_loop()
+        waiter: asyncio.Future[dict[str, Any]] = loop.create_future()
+        self._reconcile_waiters[request_id] = waiter
+        try:
+            await self._send(
+                {
+                    "action": "reconcile_run",
+                    "data": {
+                        "request_id": request_id,
+                        "run_id": run_id,
+                        **decision,
+                    },
+                }
+            )
+            ack = await asyncio.wait_for(waiter, timeout=10.0)
+        finally:
+            self._reconcile_waiters.pop(request_id, None)
+        if ack.get("status") != "reconciled":
+            raise RuntimeError(str(ack.get("code") or "reconcile rejected"))
+        handle = self._runs.get(run_id)
+        if handle is not None:
+            handle.resolve_reconciling(
+                str(ack.get("node_id") or ""),
+                str(ack.get("terminal") or ""),
+            )
+            if handle.finished:
+                states = tuple(handle.node_states.values())
+                if NodeState.FAILED in states:
+                    return {"id": run_id, "status": "failed"}
+                if NodeState.CANCELLED in states:
+                    return {"id": run_id, "status": "cancelled"}
+                return {"id": run_id, "status": "completed"}
+        return {"id": run_id, "status": "reconciled"}
 
     async def handle_incoming(self, message: dict[str, Any]) -> None:
         """喂入一条 OS 回来的报文。仅处理桥关心的 job_status / host_ready，其余忽略。"""
@@ -203,11 +268,21 @@ class ScheduleSession:
         data = data if isinstance(data, dict) else {}
         if action == "job_status":
             await self._on_job_status(data)
+        elif action == "reconcile_ack":
+            self._on_reconcile_ack(data)
         elif action in _HOST_READY_ACTIONS:
             self.host_ready.set()
             logger.info("[schedule_ws] OS 已就绪 (action=%s)", action)
         else:
             logger.debug("[schedule_ws] 忽略报文 action=%s", action)
+
+    def _on_reconcile_ack(self, data: dict[str, Any]) -> None:
+        request_id = str(data.get("request_id") or "")
+        waiter = self._reconcile_waiters.get(request_id)
+        if waiter is None or waiter.done():
+            logger.debug("[schedule_ws] 忽略未知 reconcile ack: %s", request_id)
+            return
+        waiter.set_result(data)
 
     async def _on_job_status(self, data: dict[str, Any]) -> None:
         """更新逐节点状态表并触发回调。node_id == job_id（F002 §1.1）。
@@ -220,7 +295,12 @@ class ScheduleSession:
         status = data.get("status", "")
         run = self._runs.get(task_id)
         if run is not None and node_id:
-            run.apply_status(node_id, status)
+            return_info = data.get("return_info")
+            run.apply_status(
+                node_id,
+                status,
+                return_info=return_info if isinstance(return_info, dict) else None,
+            )
         for cb in self._job_status_cbs:
             try:
                 result = cb(data)

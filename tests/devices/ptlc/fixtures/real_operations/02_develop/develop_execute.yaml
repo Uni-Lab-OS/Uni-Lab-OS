@@ -1,0 +1,184 @@
+schema: ptlc.script/v1
+kind: operation
+name: develop_execute
+label: 展开-执行
+ui:
+  role: station_phase
+  station: develop
+  phase: execute
+  primary: true
+  order: 23
+vars:
+- name: tank
+  scope: local
+  type: INT
+  io: in
+  default: 1
+  comment: 目标缸号 1-8
+- name: auto_drain
+  scope: local
+  type: BOOL
+  io: in
+  default: false
+  comment: 液位自动触发排液 (false=人工HITL门; 上机验证前默认关)
+  ui:
+    label: 自动排液
+    group: 展开控制
+- name: dry_duration_s
+  scope: local
+  type: FLOAT
+  io: in
+  default: 0.0
+  comment: 排液后原位干燥时长秒 (0=跳过; 直透 PLC Tank_Dry_S; 气源=压缩空气, 挥发/氧敏感样品慎开)
+  ui:
+    label: 原位干燥时长(s)
+    group: 展开控制
+    min: 0.0
+    max: 1800.0
+- name: wl_result
+  scope: local
+  type: DICT
+  io: var
+  default: {}
+  comment: develop.wait_level 返回 (status/front_percent/threshold/elapsed_s)
+- name: ref_result
+  scope: local
+  type: DICT
+  io: var
+  default: {}
+  comment: develop.capture_reference 返回 (ok/has_ref/elapsed_s)
+resources:
+- station:develop
+- robot
+- station:rail
+body:
+- op: comment
+  text: "execute: 展开等待 + 排液闭环。run 起点先自动采集干板参考 (板已入缸/几何定型, 前沿距 ROI 尚远; 参考是板专属基线, 每 run 重拍)。auto_drain=true 走液位双阈值自动触发 (T1物理就位 / T2自动排液), false 保持人工 HITL 门。优先级: 检测 > HITL > 硬上限 (spec 2026-07-13-waterlevel-auto-drain + 2026-07-16 语义修正: 前沿未到为正常等待不降级)。排液恒走 develop.drain (PLC L2 code 50), 由 PLC 等 Tank_Drain_Done/Tank_State=98。排液终态 Tank_State=98 (盖关待取板), 开盖在 unload 段 just-in-time。"
+- op: call
+  action: develop.capture_reference
+  args:
+    target_tank:
+      var: tank
+  assign:
+    var: ref_result
+  mode: RUN
+- op: if
+  cond:
+    binop: ==
+    left:
+      field:
+        var: ref_result
+      name: ok
+    right:
+      lit: false
+  then:
+  - op: comment
+    text: "参考采集失败 (通道不可达/超时): 本次液位检测不可用, 退化人工门 (spec 0716 决策 D1); 单门合并告知+确认, 确认后直接排液"
+  - op: human
+    kind: confirm
+    on_cancel: raise
+    prompt:
+      lit: 参考图采集失败, 本次液位检测不可用; 展开完成后确认开始 PLC L2 排液
+  - op: call
+    action: develop.drain
+    args:
+      target_tank:
+        var: tank
+      dry_duration_s:
+        var: dry_duration_s
+    mode: RUN
+  else:
+  - op: if
+    cond:
+      var: auto_drain
+    then:
+    - op: comment
+      text: "T1 等待: front_percent >= trigger_percent_t2 - t1_offset 即预告; degraded/hard_cap 时跳过物理就位"
+    - op: call
+      action: develop.wait_level
+      args:
+        target_tank:
+          var: tank
+        stage:
+          lit: t1
+      assign:
+        var: wl_result
+      mode: RUN
+    - op: if
+      cond:
+        binop: ==
+        left:
+          field:
+            var: wl_result
+          name: status
+        right:
+          lit: reached
+      then:
+      - op: run_script
+        script: develop_standby
+        inputs: {}
+        outputs: {}
+      - op: comment
+        text: "T2 等待: 硬上限 = 总预算 3600s 扣除 T1 段已耗 (max 兜零, 防负值触参数下限拒绝)"
+      - op: call
+        action: develop.wait_level
+        args:
+          target_tank:
+            var: tank
+          stage:
+            lit: t2
+          hard_cap_s:
+            call: max
+            args:
+            - lit: 0.0
+            - binop: '-'
+              left:
+                lit: 3600.0
+              right:
+                field:
+                  var: wl_result
+                name: elapsed_s
+        assign:
+          var: wl_result
+        mode: RUN
+    - op: if
+      cond:
+        binop: ==
+        left:
+          field:
+            var: wl_result
+          name: status
+        right:
+          lit: degraded
+      then:
+      - op: comment
+        text: "检测降级 (掉流/陈旧/前沿无效持续): 升级 HITL 人决定; 人介入后硬上限不再自动开火"
+      - op: human
+        kind: confirm
+        on_cancel: raise
+        prompt:
+          lit: 液位检测异常 (数据陈旧/掉流/前沿无效), 人工确认后开始 PLC L2 排液?
+    - op: comment
+      text: "reached/hard_cap/人已确认 → 排液; hard_cap 为无人介入时的兜底直排 (宁欠展开不过展开)"
+    - op: call
+      action: develop.drain
+      args:
+        target_tank:
+          var: tank
+        dry_duration_s:
+          var: dry_duration_s
+      mode: RUN
+    else:
+    - op: human
+      kind: confirm
+      on_cancel: raise
+      prompt:
+        lit: 展开完成? 确认开始 PLC L2 排液
+    - op: call
+      action: develop.drain
+      args:
+        target_tank:
+          var: tank
+        dry_duration_s:
+          var: dry_duration_s
+      mode: RUN

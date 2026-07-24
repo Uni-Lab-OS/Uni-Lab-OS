@@ -4,8 +4,8 @@
 WorkflowDAGPanel.onMessageCallback 契约）：
 - fetch_graph → 下行 {code:0, data:{action:'fetch_graph', data:{nodes,edges}}}，
   节点带 uuid/pose.position（供 handleNodesToWorkflowReactFlow 渲染）
-- run_workflow → demo 图经 workflow_to_dag 构 TaskDag 交 schedule_ws 下发（OS 面收 F002
-  task_dag），并回 {code:0, data:{action:'run_workflow', data:<task_id>}}
+- run_workflow → demo 图适配为 Canonical 后委托 RuntimeService 下发（OS 面收 F002
+  task_dag），并回 {code:0, data:{action:'run_workflow', data:<opaque_run_id>}}
 - job_status 回流 → 翻译成 {code:0, data:{action:'workflow_update', code:0,
   data:{node_uuid, job_status, task_status, header, msg}}}；node_uuid==job_id
 - task_status 仅在整张 DAG 全终态时为 'end'，否则 'running'
@@ -22,6 +22,7 @@ import asyncio
 from typing import Any
 
 from unilabos.app.local_bridge.schedule_ws import ScheduleSession
+from unilabos.app.local_bridge.server import LocalBridgeServer
 from unilabos.app.local_bridge.workflow_ws import (
     FETCH_GRAPH,
     RUN_WORKFLOW,
@@ -102,15 +103,15 @@ def test_run_workflow_submits_task_dag_and_acks() -> None:
         dag_msg = os_side.received[0]
         assert dag_msg["action"] == "task_dag"
         payload = dag_msg["data"]
-        # 每次运行铸唯一 task_id（uuid + 递增序号）——首次为 wf1-1
-        assert payload["task_id"] == "wf1-1"
+        run_id = payload["task_id"]
+        assert isinstance(run_id, str) and run_id
         assert {n["node_id"] for n in payload["nodes"]} == {"n1", "n2"}
         assert {n["device_id"] for n in payload["nodes"]} == {"pump_1", "stirrer_1"}
         assert payload["edges"] == [{"source_node_uuid": "n1", "target_node_uuid": "n2"}]
-        # panel 面收到 run_workflow ack，data == 铸出的 task_id
+        # panel ack 与 RuntimeService 下发的 opaque run_id 必须是同一标识。
         assert panel_side.received[-1] == {
             "code": 0,
-            "data": {"action": RUN_WORKFLOW, "data": "wf1-1"},
+            "data": {"action": RUN_WORKFLOW, "data": run_id},
         }
 
     asyncio.run(scenario())
@@ -120,15 +121,23 @@ def test_rerun_workflow_dispatches_fresh_task() -> None:
     """重跑同一 panel 工作流应真下发（新 task_id），而非命中旧终态句柄静默空操作。"""
 
     async def scenario() -> None:
-        workflow, _panel, schedule, os_side = _make_session(uuid="wf1")
+        workflow, panel_side, schedule, os_side = _make_session(uuid="wf1")
         await workflow.handle_incoming({"action": RUN_WORKFLOW})
-        await _emit_job_status(schedule, "wf1-1", "n1", "success")
-        await _emit_job_status(schedule, "wf1-1", "n2", "success")
-        # 二次运行：必须再下发一条 task_dag，且 task_id 不同（wf1-2）
+        first_run_id = os_side.received[0]["data"]["task_id"]
+        first_ack_id = panel_side.received[-1]["data"]["data"]
+        assert isinstance(first_run_id, str) and first_run_id
+        assert first_ack_id == first_run_id
+        await _emit_job_status(schedule, first_run_id, "n1", "success")
+        await _emit_job_status(schedule, first_run_id, "n2", "success")
+
+        # 二次运行必须由 RuntimeService 返回一个新的 opaque run_id。
         await workflow.handle_incoming({"action": RUN_WORKFLOW})
         assert len(os_side.received) == 2
-        assert os_side.received[0]["data"]["task_id"] == "wf1-1"
-        assert os_side.received[1]["data"]["task_id"] == "wf1-2"
+        second_run_id = os_side.received[1]["data"]["task_id"]
+        second_ack_id = panel_side.received[-1]["data"]["data"]
+        assert isinstance(second_run_id, str) and second_run_id
+        assert second_ack_id == second_run_id
+        assert second_run_id != first_run_id
 
     asyncio.run(scenario())
 
@@ -210,8 +219,10 @@ def test_closed_session_deregisters_callback() -> None:
         tid = workflow._task_id  # noqa: SLF001
         panel_side.received.clear()
         workflow.close()
-        # 回调已注销，schedule 的回调列表应为空
-        assert schedule._job_status_cbs == []  # noqa: SLF001
+        # 只注销短生命周期的 panel 回调；RuntimeService 的长期投影回调必须保留。
+        callbacks = schedule._job_status_cbs  # noqa: SLF001
+        assert workflow._on_os_job_status not in callbacks  # noqa: SLF001
+        assert workflow._runtime_service._on_job_status in callbacks  # noqa: SLF001
         # 断开后的回流不应再推此 panel
         await _emit_job_status(schedule, tid, "n1", "running")
         assert panel_side.received == []
@@ -277,3 +288,14 @@ def test_extract_uuid() -> None:
     assert _extract_uuid("/ws/workflow/abc123?access_token_v2=xxx") == "abc123"
     assert _extract_uuid("/ws/workflow/") == ""
     assert _extract_uuid("/nope") == ""
+
+
+def test_local_bridge_http_and_workflow_ws_share_one_runtime_service() -> None:
+    """纯装配验证：两个 UI transport 解析到同一个 RuntimeService 对象。"""
+
+    server = LocalBridgeServer(offline=True)
+    state = server._get_local_api_state()  # noqa: SLF001
+
+    assert state is not None
+    assert server._api_server._get_state() is state  # noqa: SLF001
+    assert server._workflow_server._get_runtime_service() is state.runtime_service  # noqa: SLF001

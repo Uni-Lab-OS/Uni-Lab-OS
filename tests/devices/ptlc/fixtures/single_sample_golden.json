@@ -1,0 +1,30 @@
+{
+  "sample_id": "sample-001",
+  "recipe": [
+    {"macro": "spotting", "params": {"band": 1}},
+    {"macro": "before_photo", "params": {}},
+    {"macro": "develop", "params": {"target_tank": 2, "group_id": 1}},
+    {"macro": "scrape", "params": {"band": 1}},
+    {"macro": "collect", "params": {"band": 1}}
+  ],
+  "plc_trace": [
+    ["start_stage", "Sampling"],
+    ["await_stage_done", "Sampling"],
+    ["send_recipe_params", {"scrape_PhotoMode": 1}],
+    ["start_stage", "scrape"],
+    ["await_stage_step", "scrape", 15],
+    ["confirm_stage", "scrape"],
+    ["await_stage_done", "scrape"],
+    ["start_stage", "Expand"],
+    ["await_stage_done", "Expand"],
+    ["trigger_drain", 2],
+    ["await_drain_done", 2],
+    ["send_recipe_params", {"scrape_PhotoMode": 0}],
+    ["start_stage", "scrape"],
+    ["await_stage_step", "scrape", 15],
+    ["confirm_stage", "scrape"],
+    ["await_stage_done", "scrape"],
+    ["start_stage", "collect"],
+    ["await_stage_done", "collect"]
+  ]
+}

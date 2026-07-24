@@ -6,7 +6,7 @@
 - POST /api/workflow/build-graph → WorkflowJson（{name,nodes,edges}）；含环 → 400 detail
 - POST /api/run                  → RunStatus（run_id + node_statuses 全 idle + OS 面收 F002 task_dag）
 - GET  /api/run/{id}             → RunStatus（node_statuses 随 job_status 推进；终态 completed/failed）
-- POST /api/run/{id}/cancel      → RunStatus（OS 面收 cancel_task，节点标 cancelled）
+- POST /api/run/{id}/cancel      → RunStatus（OS 面收 cancel_task，等待 OS 确认终态）
 - 未知 run → 404；OS 未连入 → 503
 
 用 FastAPI TestClient（同步）驱动 HTTP；用内存 ScheduleSession（send→内存 OS 面）顶替真实
@@ -19,6 +19,7 @@ from __future__ import annotations
 import asyncio
 from typing import Any
 
+import pytest
 from fastapi.testclient import TestClient
 
 from unilabos.app.local_bridge.local_api import (
@@ -30,6 +31,18 @@ from unilabos.app.local_bridge.local_api import (
 )
 from unilabos.app.local_bridge.schedule_ws import ScheduleSession
 from unilabos.scheduler.dag_model import NodeState
+
+
+ACTION_CATALOG: dict[str, dict[str, Any]] = {
+    "pump_1.pump_liquid": {
+        "inputs": {"volume": {"type": "number"}},
+        "outputs": {},
+    },
+    "stirrer_1.stir": {
+        "inputs": {"seconds": {"type": "integer"}},
+        "outputs": {},
+    },
+}
 
 
 class FakeTransport:
@@ -46,7 +59,7 @@ def _make_client() -> tuple[TestClient, LocalApiState, FakeTransport]:
     """接线：ScheduleSession(→OS 面) + LocalApiState + FastAPI app（TestClient）。"""
     os_side = FakeTransport()
     schedule = ScheduleSession(os_side.send)
-    state = LocalApiState(schedule)
+    state = LocalApiState(schedule, action_catalog=ACTION_CATALOG)
     app = create_app(lambda: state)
     return TestClient(app), state, os_side
 
@@ -113,6 +126,63 @@ def test_stack_status_shape() -> None:
     assert payload["stacks"] == {}
 
 
+def test_runtime_actions_projects_generic_catalog_in_stable_order() -> None:
+    os_side = FakeTransport()
+    schedule = ScheduleSession(os_side.send)
+    state = LocalApiState(
+        schedule,
+        action_catalog={
+            "zeta_station.finish": {
+                "inputs": {"sample": {"required": True, "type": "string"}},
+                "label": "Finish sample",
+                "outputs": {},
+            },
+            "alpha_camera.capture": {
+                "inputs": {
+                    "exposure_ms": {
+                        "default": 125,
+                        "type": "number",
+                    }
+                },
+                "label": "Capture image",
+                "outputs": {"image": {"type": "string"}},
+            },
+        },
+    )
+    client = TestClient(create_app(lambda: state))
+
+    response = client.get("/api/runtime/local/actions")
+
+    assert response.status_code == 200
+    assert response.json() == {
+        "schema_version": "runtime/v1",
+        "actions": [
+            {
+                "action_ref": "alpha_camera.capture",
+                "input_schema": {
+                    "exposure_ms": {
+                        "default": 125,
+                        "type": "number",
+                    }
+                },
+                "label": "Capture image",
+                "output_schema": {"image": {"type": "string"}},
+            },
+            {
+                "action_ref": "zeta_station.finish",
+                "input_schema": {
+                    "sample": {
+                        "required": True,
+                        "type": "string",
+                    }
+                },
+                "label": "Finish sample",
+                "output_schema": {},
+            },
+        ],
+    }
+
+
 def test_build_graph_returns_workflow_json() -> None:
     client, _state, _os = _make_client()
     resp = client.post("/api/workflow/build-graph", json=_demo_request())
@@ -130,7 +200,8 @@ def test_build_graph_rejects_cycle_with_400_detail() -> None:
     req["edges"].append({"id": "e2", "source": "n2", "target": "n1"})
     resp = client.post("/api/workflow/build-graph", json=req)
     assert resp.status_code == 400
-    assert "含环" in resp.json()["detail"]
+    detail = resp.json()["detail"]
+    assert "含环" in detail or "cycle" in detail.lower()
 
 
 def test_run_submits_task_dag_and_returns_idle_statuses() -> None:
@@ -184,7 +255,7 @@ def test_run_failed_reaches_failed_status() -> None:
     assert status["error"]
 
 
-def test_cancel_sends_cancel_task_and_marks_cancelled() -> None:
+def test_cancel_sends_request_without_claiming_terminal() -> None:
     client, _state, os_side = _make_client()
     built = client.post("/api/workflow/build-graph", json=_demo_request()).json()
     run_id = client.post("/api/run", json={"workflow": built}).json()["run_id"]
@@ -192,11 +263,90 @@ def test_cancel_sends_cancel_task_and_marks_cancelled() -> None:
     resp = client.post(f"/api/run/{run_id}/cancel")
     assert resp.status_code == 200
     payload = resp.json()
-    assert payload["status"] == "cancelled"
-    assert payload["node_statuses"] == {"n1": "cancelled", "n2": "cancelled"}
+    assert payload["status"] == "cancel_requested"
+    assert payload["node_statuses"] == {
+        "n1": "cancel_requested",
+        "n2": "cancel_requested",
+    }
+    handle = _state._schedule.get_run(run_id)
+    assert handle is not None
+    assert not handle.finished
     # OS 面收到 cancel_task
     assert os_side.received[0]["action"] == "cancel_task"
     assert os_side.received[0]["data"] == {"task_id": run_id}
+
+
+def test_cancel_converges_after_all_os_nodes_confirm_safe() -> None:
+    client, state, _os = _make_client()
+    built = client.post("/api/workflow/build-graph", json=_demo_request()).json()
+    run_id = client.post("/api/run", json={"workflow": built}).json()["run_id"]
+    client.post(f"/api/run/{run_id}/cancel")
+    confirmed_safe = {
+        "physical_state": "confirmed_safe",
+        "reconcile_required": False,
+    }
+
+    _emit_job_status(
+        state._schedule,
+        run_id,
+        "n1",
+        "cancelled",
+        return_info=confirmed_safe,
+    )
+    pending = client.get(f"/api/run/{run_id}").json()
+    assert pending["status"] == "cancel_requested"
+    assert pending["node_statuses"] == {
+        "n1": "cancelled",
+        "n2": "cancel_requested",
+    }
+
+    _emit_job_status(
+        state._schedule,
+        run_id,
+        "n2",
+        "cancelled",
+        return_info=confirmed_safe,
+    )
+    done = client.get(f"/api/run/{run_id}").json()
+    assert done["status"] == "cancelled"
+    assert done["node_statuses"] == {"n1": "cancelled", "n2": "cancelled"}
+    handle = state._schedule.get_run(run_id)
+    assert handle is not None
+    assert handle.finished
+
+
+@pytest.mark.parametrize("terminal_status", ["cancelled", "failed"])
+def test_cancel_with_unknown_physical_state_is_not_safe_completion(
+    terminal_status: str,
+) -> None:
+    client, state, _os = _make_client()
+    built = client.post("/api/workflow/build-graph", json=_demo_request()).json()
+    run_id = client.post("/api/run", json={"workflow": built}).json()["run_id"]
+    _emit_job_status(state._schedule, run_id, "n1", "success")
+    client.post(f"/api/run/{run_id}/cancel")
+
+    _emit_job_status(
+        state._schedule,
+        run_id,
+        "n2",
+        terminal_status,
+        return_info={
+            "error": "transport disconnected",
+            "physical_state": "unknown",
+            "reconcile_required": True,
+        },
+    )
+
+    payload = client.get(f"/api/run/{run_id}").json()
+    assert payload["status"] == "reconciling"
+    assert payload["node_statuses"] == {
+        "n1": "success",
+        "n2": "reconciling",
+    }
+    assert payload["status"] not in {"completed", "cancelled"}
+    handle = state._schedule.get_run(run_id)
+    assert handle is not None
+    assert not handle.finished
 
 
 def test_unknown_run_returns_404() -> None:

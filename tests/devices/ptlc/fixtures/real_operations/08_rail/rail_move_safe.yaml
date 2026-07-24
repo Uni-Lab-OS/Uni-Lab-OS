@@ -1,0 +1,29 @@
+schema: ptlc.script/v1
+kind: operation
+name: rail_move_safe
+label: 地轨-安全移动 (先校验机械臂在安全位再移动)
+ui:
+  role: helper
+  hidden: true
+# 通用件: 地轨移动会带着机械臂整体平移, 移动前必须保证机械臂在安全位 (P1=robot-main.home),
+#   否则伸展姿态随地轨平移有碰撞风险。断言式: 不在安全位则 require_anchor 失败停流程,
+#   由操作员手动回安全位再续 (符合 RUN 不自动 home 的安全准则, 见 robot_startup_check)。
+vars:
+  - {name: target, scope: local, type: INT, io: in, default: 1, comment: 地轨目标位 1上样/2拍照/3收集/4工具/5展开/6仓库}
+resources: [robot, station:rail]
+body:
+  - {op: comment, text: 校验机械臂在安全位 P1 (=robot-main.home); 不在则 anchor 失败停流程, 操作员手动回位再续}
+  - op: call
+    action: robot.require_anchor
+    args:
+      point_id: {lit: P1}
+      joint_tol_deg: {lit: 2.0}
+      pos_tol_mm: {lit: 5.0}
+      rot_tol_deg: {lit: 5.0}
+    mode: RUN
+  - {op: comment, text: 安全位确认 -> 移动地轨到目标位}
+  - op: call
+    action: rail.move
+    args:
+      Rail_Target_Position: {var: target}
+    mode: RUN

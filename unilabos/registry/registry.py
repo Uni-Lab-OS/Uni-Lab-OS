@@ -50,6 +50,7 @@ from unilabos.registry.utils import (
     detect_placeholder_keys,
     normalize_ast_handles,
     normalize_ast_action_handles,
+    normalize_ast_action_contract,
     wrap_action_schema,
     preserve_field_descriptions,
     resolve_method_params_via_import,
@@ -980,6 +981,9 @@ class Registry:
             nt = normalize_enum_value((action_args or {}).get("node_type"), NodeType)
             if nt:
                 entry["node_type"] = nt
+            raw_contract = (action_args or {}).get("contract")
+            if raw_contract:
+                entry["contract"] = normalize_ast_action_contract(raw_contract)
             return action_name, entry
 
         # 1) auto- actions
@@ -1118,6 +1122,9 @@ class Registry:
             nt = normalize_enum_value(action_args.get("node_type"), NodeType)
             if nt:
                 action_entry["node_type"] = nt
+            raw_contract = action_args.get("contract")
+            if raw_contract:
+                action_entry["contract"] = normalize_ast_action_contract(raw_contract)
             goal_schema_for_docs = action_entry.get("schema", {}).get("properties", {}).get("goal", {})
             self._apply_docstring_param_metadata(
                 goal_schema_for_docs,

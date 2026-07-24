@@ -26,12 +26,21 @@ class NodeState(str, Enum):
     SUCCESS = "success"
     FAILED = "failed"
     CANCELLED = "cancelled"
+    SKIPPED = "skipped"
 
 
 # 终态集合：进入其一后节点不再流转
 TERMINAL_STATES: frozenset[NodeState] = frozenset(
-    {NodeState.SUCCESS, NodeState.FAILED, NodeState.CANCELLED}
+    {NodeState.SUCCESS, NodeState.FAILED, NodeState.CANCELLED, NodeState.SKIPPED}
 )
+
+
+class EdgeState(str, Enum):
+    """Runtime selection state for a control edge."""
+
+    PENDING = "pending"
+    TAKEN = "taken"
+    SKIPPED = "skipped"
 
 
 class DagValidationError(ValueError):
@@ -54,6 +63,29 @@ class DagNode:
     sample_material: dict[str, str] = field(default_factory=dict)
     # 可选；缺省由 registry 决定，OS 不强依赖此字段
     always_free: bool = False
+    node_type: str = "action"
+    estimated_duration_s: float = 0.0
+    input_bindings: dict[str, Any] = field(default_factory=dict)
+    input_schema: dict[str, Any] = field(default_factory=dict)
+    output_schema: dict[str, Any] = field(default_factory=dict)
+    material_bindings: dict[str, Any] = field(default_factory=dict)
+    resource_claims: list[dict[str, Any]] = field(default_factory=list)
+    # Internal compiler directive: release an acquire node's retained claim
+    # only after this node reaches a confirmed SUCCESS terminal.
+    resource_releases: list[dict[str, str]] = field(default_factory=list)
+    resource_dependencies: list[dict[str, str]] = field(default_factory=list)
+    effects: list[dict[str, Any]] = field(default_factory=list)
+    control: dict[str, Any] = field(default_factory=dict)
+    cleanup_for: list[str] = field(default_factory=list)
+    source_node_id: str = ""
+    origin_edge_ids: list[str] = field(default_factory=list)
+    idempotency_key: str = ""
+    canonical_index: int = 0
+    # Runtime-only admission metadata. These fields are not part of the wire
+    # contract; DagExecutor fills them when Layer-A locking is enabled.
+    ready_since_seq: int = 0
+    admission_state: str = "pending"
+    lease_request: Any = None
 
     @property
     def device_action_key(self) -> str:
@@ -85,6 +117,22 @@ class DagNode:
             action_args=dict(d.get("action_args") or {}),
             sample_material=dict(d.get("sample_material") or {}),
             always_free=bool(d.get("always_free", False)),
+            node_type=str(d.get("node_type", "action") or "action"),
+            estimated_duration_s=float(d.get("estimated_duration_s", 0) or 0),
+            input_bindings=dict(d.get("input_bindings") or {}),
+            input_schema=dict(d.get("input_schema") or {}),
+            output_schema=dict(d.get("output_schema") or {}),
+            material_bindings=dict(d.get("material_bindings") or {}),
+            resource_claims=list(d.get("resource_claims") or []),
+            resource_releases=list(d.get("resource_releases") or []),
+            resource_dependencies=list(d.get("resource_dependencies") or []),
+            effects=list(d.get("effects") or []),
+            control=dict(d.get("control") or {}),
+            cleanup_for=[str(item) for item in d.get("cleanup_for") or []],
+            source_node_id=str(d.get("source_node_id", "") or ""),
+            origin_edge_ids=list(d.get("origin_edge_ids") or []),
+            idempotency_key=str(d.get("idempotency_key", "") or ""),
+            canonical_index=int(d.get("canonical_index", 0) or 0),
         )
 
 
@@ -94,6 +142,11 @@ class DagEdge:
 
     source_node_uuid: str
     target_node_uuid: str
+    branch: str | None = None
+    # Control edges activate their target. A data-only dependency constrains
+    # readiness but must not resurrect a node whose enclosing branch was
+    # skipped. Legacy TaskDag payloads default to activating edges.
+    activates: bool = True
 
     @classmethod
     def from_dict(cls, d: dict[str, Any]) -> "DagEdge":
@@ -105,7 +158,12 @@ class DagEdge:
             raise DagValidationError(
                 f"边缺少 source_node_uuid/target_node_uuid: {d!r}"
             )
-        return cls(source_node_uuid=str(src), target_node_uuid=str(tgt))
+        return cls(
+            source_node_uuid=str(src),
+            target_node_uuid=str(tgt),
+            branch=str(d["branch"]) if d.get("branch") is not None else None,
+            activates=bool(d.get("activates", True)),
+        )
 
 
 @dataclass
@@ -117,6 +175,8 @@ class TaskDag:
     server_info: dict[str, Any]
     nodes: dict[str, DagNode]  # node_id -> DagNode
     edges: list[DagEdge]
+    workflow_revision_hash: str = ""
+    runtime_parameters: dict[str, Any] = field(default_factory=dict)
 
     @classmethod
     def from_message(cls, data: dict[str, Any]) -> "TaskDag":
@@ -166,6 +226,8 @@ class TaskDag:
             server_info=dict(data.get("server_info") or {}),
             nodes=nodes,
             edges=edges,
+            workflow_revision_hash=str(data.get("workflow_revision_hash", "") or ""),
+            runtime_parameters=dict(data.get("runtime_parameters") or {}),
         )
         dag._assert_acyclic()  # 解析期即拒环（I5）
         return dag

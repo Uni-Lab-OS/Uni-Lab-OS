@@ -12,8 +12,8 @@ DeviceActionManager.enqueue_job（每设备锁/幂等/串行 I3）→ HostNode.s
 - cancel()：停止 DagExecutor 调度后继，并把未决 future 一律解析为 CANCELLED，
   避免被取消的设备任务永不回终态而使 run() 悬挂。
 
-DagExecutor 只管依赖偏序（I1/I2），同设备互斥由注入栈的 DeviceActionManager
-天然保证（I3）。本层不复制互斥逻辑。见
+DagExecutor 通过注入的共享 ResourceLockManager 负责统一业务资源 admission；
+DeviceActionManager 只保留兼容队列、幂等和通信安全串行。本层不复制锁逻辑。见
 docs/features/F002-os-local-dag-executor/interface-design.md §三。
 """
 
@@ -22,10 +22,13 @@ from __future__ import annotations
 import asyncio
 import logging
 from collections.abc import Callable
-from typing import Optional
+from typing import Any, Optional
 
 from unilabos.scheduler.dag_executor import DagExecutor, DagWalk, OnTerminalFn
 from unilabos.scheduler.dag_model import DagNode, NodeState, TaskDag
+from unilabos.scheduler.resource_lock import ResourceLockManager
+from unilabos.scheduler.result_store import NodeExecutionResult, ResultEnvelope
+from unilabos.runtime.event_store import SQLiteEventJournal
 
 logger = logging.getLogger(__name__)
 
@@ -37,8 +40,18 @@ CancelRemainingFn = Callable[[], None]
 
 
 def _status_to_state(status: str) -> NodeState:
-    """把 ws 的 job_status 字符串映射为 NodeState（成功/失败二态）。"""
-    return NodeState.SUCCESS if status == "success" else NodeState.FAILED
+    """把 ws 的 job_status 字符串映射为完整 NodeState。"""
+
+    normalized = status.strip().lower()
+    aliases = {
+        "succeeded": NodeState.SUCCESS,
+        "success": NodeState.SUCCESS,
+        "failed": NodeState.FAILED,
+        "cancelled": NodeState.CANCELLED,
+        "canceled": NodeState.CANCELLED,
+        "skipped": NodeState.SKIPPED,
+    }
+    return aliases.get(normalized, NodeState.FAILED)
 
 
 class TaskDagRunner:
@@ -53,6 +66,8 @@ class TaskDagRunner:
         on_cancel_remaining: Optional[CancelRemainingFn] = None,
         loop: Optional[asyncio.AbstractEventLoop] = None,
         walk: Optional[DagWalk] = None,
+        resource_lock_manager: Optional[ResourceLockManager] = None,
+        journal: Optional[SQLiteEventJournal] = None,
     ) -> None:
         self.dag = dag
         self._on_start_node = on_start_node
@@ -61,7 +76,12 @@ class TaskDagRunner:
         self._pending: dict[str, asyncio.Future] = {}  # node_id(=job_id) -> future
         self._cancelled = False
         self._executor = DagExecutor(
-            dag, self._submit, on_node_terminal=on_node_terminal, walk=walk
+            dag,
+            self._submit,
+            on_node_terminal=on_node_terminal,
+            walk=walk,
+            resource_lock_manager=resource_lock_manager,
+            journal=journal,
         )
 
     async def run(self) -> dict[str, NodeState]:
@@ -75,7 +95,8 @@ class TaskDagRunner:
             self._resolve_all_pending(NodeState.CANCELLED)
         # 任一节点非 SUCCESS -> fail-fast，清理仍在设备侧运行/排队的本 task 任务
         if self._on_cancel_remaining is not None and any(
-            st != NodeState.SUCCESS for st in result.values()
+            st in {NodeState.FAILED, NodeState.CANCELLED}
+            for st in result.values()
         ):
             try:
                 self._on_cancel_remaining()
@@ -83,7 +104,7 @@ class TaskDagRunner:
                 logger.exception("TaskDagRunner on_cancel_remaining 清理失败，忽略")
         return result
 
-    async def _submit(self, node: DagNode) -> NodeState:
+    async def _submit(self, node: DagNode) -> NodeState | NodeExecutionResult:
         """DagExecutor 注入点：登记 future -> 触发入队/起跑 -> 等终态。"""
         loop = self._loop or asyncio.get_running_loop()
         fut: asyncio.Future = loop.create_future()
@@ -95,21 +116,52 @@ class TaskDagRunner:
             return NodeState.CANCELLED
         try:
             self._on_start_node(node)
-        except Exception:  # noqa: BLE001 —— 单节点起跑失败即置该节点 FAILED
+        except Exception as exc:  # noqa: BLE001 —— 起跑异常后物理状态不确定
             logger.exception("TaskDagRunner on_start_node 失败，节点 %s 置 FAILED", node.node_id)
             self._pending.pop(node.node_id, None)
-            return NodeState.FAILED
+            return NodeExecutionResult(
+                state=NodeState.FAILED,
+                terminal_info={
+                    "error": str(exc) or exc.__class__.__name__,
+                    "physical_state": "unknown",
+                    "reconcile_required": True,
+                },
+            )
         return await fut
 
-    def notify_terminal(self, job_id: str, status: str | NodeState) -> None:
+    def notify_terminal(
+        self,
+        job_id: str,
+        status: str | NodeState,
+        *,
+        return_info: dict[str, Any] | None = None,
+    ) -> None:
         """由 publish_job_status 终态时**跨线程**回调，解析对应节点 future。"""
         state = status if isinstance(status, NodeState) else _status_to_state(status)
+        terminal_info = dict(return_info or {})
+        result: NodeState | NodeExecutionResult = state
+        if state == NodeState.SUCCESS:
+            raw_outputs = terminal_info.get("return_value", {})
+            if isinstance(raw_outputs, dict):
+                outputs = raw_outputs
+            else:
+                outputs = {"result": raw_outputs}
+            result = NodeExecutionResult(
+                state=state,
+                envelope=ResultEnvelope(outputs=outputs),
+                terminal_info=terminal_info,
+            )
+        elif terminal_info:
+            result = NodeExecutionResult(
+                state=state,
+                terminal_info=terminal_info,
+            )
         loop = self._loop
         if loop is None:
             # run() 尚未起跑：直接同线程解析
-            self._resolve(job_id, state)
+            self._resolve(job_id, result)
             return
-        loop.call_soon_threadsafe(self._resolve, job_id, state)
+        loop.call_soon_threadsafe(self._resolve, job_id, result)
 
     def cancel(self) -> None:
         """外部取消（cancel_task）：停止调度后继，未决节点解析为 CANCELLED。
@@ -120,16 +172,38 @@ class TaskDagRunner:
         self._executor.cancel()
         loop = self._loop
         if loop is None:
-            self._resolve_all_pending(NodeState.CANCELLED)
+            self._resolve_all_pending(
+                NodeExecutionResult(
+                    state=NodeState.CANCELLED,
+                    terminal_info={
+                        "error": "cancel requested before device confirmation",
+                        "physical_state": "unknown",
+                        "reconcile_required": True,
+                    },
+                )
+            )
         else:
-            loop.call_soon_threadsafe(self._resolve_all_pending, NodeState.CANCELLED)
+            loop.call_soon_threadsafe(
+                self._resolve_all_pending,
+                NodeExecutionResult(
+                    state=NodeState.CANCELLED,
+                    terminal_info={
+                        "error": "cancel requested before device confirmation",
+                        "physical_state": "unknown",
+                        "reconcile_required": True,
+                    },
+                ),
+            )
 
-    def _resolve(self, job_id: str, state: NodeState) -> None:
+    def _resolve(self, job_id: str, state: NodeState | NodeExecutionResult) -> None:
         fut = self._pending.pop(job_id, None)
         if fut is None or fut.done():
             return
         fut.set_result(state)
 
-    def _resolve_all_pending(self, state: NodeState) -> None:
+    def _resolve_all_pending(
+        self,
+        state: NodeState | NodeExecutionResult,
+    ) -> None:
         for job_id in list(self._pending):
             self._resolve(job_id, state)

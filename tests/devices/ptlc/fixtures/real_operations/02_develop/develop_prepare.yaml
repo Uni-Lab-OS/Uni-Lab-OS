@@ -1,0 +1,86 @@
+schema: ptlc.script/v1
+kind: operation
+name: develop_prepare
+label: 展开-准备
+ui:
+  role: station_phase
+  station: develop
+  phase: prepare
+  primary: true
+  order: 21
+vars:
+- name: tank
+  scope: local
+  type: INT
+  io: in
+  default: 1
+  comment: 目标缸号 1-8
+resources:
+- station:develop
+body:
+- op: comment
+  text: "prepare: 展缸初始化 (按目标缸号; 周期内一次)"
+- op: call
+  action: develop.init
+  args:
+    target_tank:
+      var: tank
+  mode: RUN
+- op: comment
+  text: "prepare: 放板缸回原点 (让位, 准备接收机器人放板)"
+- op: call
+  action: develop.plate_retract
+  args:
+    target_tank:
+      var: tank
+  mode: RUN
+- op: comment
+  text: "prepare: 清洗管路 (真空与冲洗并发; try/finally 保证异常也关泵)"
+- op: try
+  body:
+  - op: call
+    action: pump.vacuum_on
+    mode: RUN
+  - op: call
+    action: develop.clean_line
+    args:
+      target_tank:
+        var: tank
+    mode: RUN
+  finally:
+  - op: call
+    action: pump.vacuum_off
+    mode: RUN
+- op: comment
+  text: "prepare: 润洗展缸 (注液无真空 -> 抽吸开真空; 抽吸段 try/finally 关泵)"
+- op: call
+  action: develop.rinse_fill
+  args:
+    target_tank:
+      var: tank
+    solvent_volume_ml:
+      lit: 0.1
+  mode: RUN
+- op: try
+  body:
+  - op: call
+    action: pump.vacuum_on
+    mode: RUN
+  - op: call
+    action: develop.rinse_suction
+    args:
+      target_tank:
+        var: tank
+    mode: RUN
+  finally:
+  - op: call
+    action: pump.vacuum_off
+    mode: RUN
+- op: comment
+  text: "prepare: 预置上液 (板进入前完成目标液位; 无真空)"
+- op: call
+  action: develop.fill
+  args:
+    target_tank:
+      var: tank
+  mode: RUN

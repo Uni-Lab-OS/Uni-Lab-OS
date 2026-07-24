@@ -15,6 +15,7 @@ from __future__ import annotations
 import asyncio
 from typing import Any
 
+import unilabos.app.local_bridge.offline_os as offline_os_module
 from unilabos.app.local_bridge.offline_os import OfflineOS
 from unilabos.app.local_bridge.schedule_ws import ScheduleSession
 from unilabos.app.local_bridge.server import LocalBridgeServer, build_offline_session
@@ -139,6 +140,139 @@ def test_server_real_mode_state_none_until_os_connects() -> None:
     server._adopt_session(session)  # noqa: SLF001
     assert server._get_schedule_session() is session  # noqa: SLF001
     assert server._get_local_api_state() is not None  # noqa: SLF001
+
+
+def test_offline_adapter_reports_skipped_nodes_as_terminal_job_status(
+    monkeypatch,
+) -> None:
+    class SnapshotExecutor:
+        def __init__(self, dag, submit, **_kwargs) -> None:
+            self.dag = dag
+
+        def cancel(self) -> None:
+            return None
+
+        async def run(self) -> dict[str, NodeState]:
+            return {
+                "branch": NodeState.SUCCESS,
+                "selected": NodeState.SUCCESS,
+                "not-selected": NodeState.SKIPPED,
+                "join": NodeState.SUCCESS,
+            }
+
+    monkeypatch.setattr(offline_os_module, "DagExecutor", SnapshotExecutor)
+
+    async def scenario() -> None:
+        schedule, _offline = build_offline_session()
+        dag = TaskDag.from_message(
+            {
+                "task_id": "adapter-skipped",
+                "nodes": [
+                    {
+                        "node_id": "branch",
+                        "device_id": "generic-router",
+                        "action": "choose",
+                        "node_type": "branch",
+                    },
+                    {
+                        "node_id": "selected",
+                        "device_id": "generic-worker-a",
+                        "action": "execute",
+                    },
+                    {
+                        "node_id": "not-selected",
+                        "device_id": "generic-worker-b",
+                        "action": "execute",
+                    },
+                    {
+                        "node_id": "join",
+                        "device_id": "generic-join",
+                        "action": "join",
+                        "node_type": "join",
+                    },
+                ],
+                "edges": [
+                    {
+                        "source_node_uuid": "branch",
+                        "target_node_uuid": "selected",
+                        "branch": "yes",
+                    },
+                    {
+                        "source_node_uuid": "branch",
+                        "target_node_uuid": "not-selected",
+                        "branch": "no",
+                    },
+                    {
+                        "source_node_uuid": "selected",
+                        "target_node_uuid": "join",
+                    },
+                    {
+                        "source_node_uuid": "not-selected",
+                        "target_node_uuid": "join",
+                    },
+                ],
+            }
+        )
+        handle = await schedule.submit_dag(dag)
+        for _ in range(12):
+            await asyncio.sleep(0)
+
+        assert handle.finished
+        assert handle.node_states == {
+            "branch": NodeState.SUCCESS,
+            "selected": NodeState.SUCCESS,
+            "not-selected": NodeState.SKIPPED,
+            "join": NodeState.SUCCESS,
+        }
+
+    asyncio.run(scenario())
+
+
+def test_offline_binding_preflight_failure_returns_terminal_job_status() -> None:
+    async def scenario() -> None:
+        schedule, _offline = build_offline_session()
+        dag = TaskDag.from_message(
+            {
+                "task_id": "adapter-binding-failed",
+                "nodes": [
+                    {
+                        "node_id": "source",
+                        "device_id": "generic-source",
+                        "action": "measure",
+                        "output_schema": {"reading": {"type": "number"}},
+                    },
+                    {
+                        "node_id": "consumer",
+                        "device_id": "generic-consumer",
+                        "action": "consume",
+                        "input_bindings": {
+                            "amount": {
+                                "kind": "node_output",
+                                "node_id": "source",
+                                "output": "reading",
+                            }
+                        },
+                        "input_schema": {"amount": {"type": "number"}},
+                    },
+                ],
+                "edges": [
+                    {
+                        "source_node_uuid": "source",
+                        "target_node_uuid": "consumer",
+                    }
+                ],
+            }
+        )
+        handle = await schedule.submit_dag(dag)
+        await asyncio.wait_for(handle.wait(), timeout=1)
+
+        assert handle.finished
+        assert handle.node_states == {
+            "source": NodeState.SUCCESS,
+            "consumer": NodeState.FAILED,
+        }
+
+    asyncio.run(scenario())
 
 
 def _make_noop_send():

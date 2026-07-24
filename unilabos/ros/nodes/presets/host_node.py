@@ -1710,15 +1710,23 @@ class HostNode(BaseROS2DeviceNode):
     @action(always_free=True, node_type=NodeType.MANUAL_CONFIRM, placeholder_keys={
         "assignee_user_ids": PLACEHOLDER_MANUAL_CONFIRM
     }, goal_default={
+        "prompt": "",
         "timeout_seconds": 3600,
         "assignee_user_ids": []
     })
-    def manual_confirm(self, timeout_seconds: int, assignee_user_ids: list[str], **kwargs) -> dict:
+    def manual_confirm(
+        self,
+        prompt: str = "",
+        timeout_seconds: int = 3600,
+        assignee_user_ids: list[str] | None = None,
+        **kwargs,
+    ) -> dict:
         """
+        prompt: 人工确认提示语
         timeout_seconds: 超时时间（秒），默认3600秒
         修改的结果无效，是只读的
         """
-        return kwargs
+        return {"prompt": prompt, **kwargs}
 
     @action(
         description="申请扣减物料并挂载（接收服务端已扣减的单个根物料，挂载到目标设备的目标物料上）",

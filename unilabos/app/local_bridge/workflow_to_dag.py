@@ -70,6 +70,27 @@ def _node_to_f002(raw: dict[str, Any]) -> dict[str, Any]:
         else {},
         "always_free": always_free,
     }
+    # Canonical/TaskDag v2 fields are transparent generic wire data.  Add them
+    # only when supplied so the legacy F002 payload remains byte-shape stable.
+    v2_fields = (
+        "node_type",
+        "estimated_duration_s",
+        "input_bindings",
+        "input_schema",
+        "output_schema",
+        "material_bindings",
+        "resource_claims",
+        "effects",
+        "source_node_id",
+        "origin_edge_ids",
+        "idempotency_key",
+        "canonical_index",
+    )
+    for field_name in v2_fields:
+        if field_name in raw:
+            node[field_name] = raw[field_name]
+        elif field_name in inner:
+            node[field_name] = inner[field_name]
     return node
 
 
@@ -79,7 +100,10 @@ def _edge_to_f002(raw: dict[str, Any]) -> dict[str, Any]:
         raise DagValidationError(f"边必须是对象，收到 {type(raw).__name__}")
     source = _first_present(raw, "source_node_uuid", "source")
     target = _first_present(raw, "target_node_uuid", "target")
-    return {"source_node_uuid": source, "target_node_uuid": target}
+    edge = {"source_node_uuid": source, "target_node_uuid": target}
+    if raw.get("branch") is not None:
+        edge["branch"] = str(raw["branch"])
+    return edge
 
 
 def build_task_dag_payload(
@@ -89,6 +113,7 @@ def build_task_dag_payload(
     task_id: str,
     notebook_id: str = "",
     server_info: dict[str, Any] | None = None,
+    workflow_revision_hash: str = "",
 ) -> dict[str, Any]:
     """把 UI 图归一为 F002 task_dag 载荷（§1.1 的 data 段），不做解析校验。
 
@@ -104,13 +129,16 @@ def build_task_dag_payload(
     if not isinstance(edges, list):
         raise DagValidationError("edges 必须是列表")
 
-    return {
+    payload = {
         "task_id": task_id,
         "notebook_id": notebook_id,
         "server_info": dict(server_info or {}),
         "nodes": [_node_to_f002(n) for n in nodes],
         "edges": [_edge_to_f002(e) for e in edges],
     }
+    if workflow_revision_hash:
+        payload["workflow_revision_hash"] = workflow_revision_hash
+    return payload
 
 
 def workflow_to_task_dag(
@@ -120,6 +148,7 @@ def workflow_to_task_dag(
     task_id: str,
     notebook_id: str = "",
     server_info: dict[str, Any] | None = None,
+    workflow_revision_hash: str = "",
 ) -> TaskDag:
     """UI 图 → 校验后的 F002 TaskDag（含解析期拒环）。
 
@@ -131,5 +160,6 @@ def workflow_to_task_dag(
         task_id=task_id,
         notebook_id=notebook_id,
         server_info=server_info,
+        workflow_revision_hash=workflow_revision_hash,
     )
     return TaskDag.from_message(payload)

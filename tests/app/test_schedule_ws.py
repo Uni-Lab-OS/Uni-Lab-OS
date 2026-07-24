@@ -5,7 +5,7 @@
 - job_status 回流按 (task_id, node_id) 收敛逐节点 NodeState（node_id==job_id）
 - 全部节点终态时 RunHandle.done 置位
 - on_job_status 回调按序收到每条 job_status data
-- cancel_task 下发 F002 cancel 报文，未终态节点标 cancelled
+- cancel_task 只下发 F002 cancel 报文，等待 OS 回流后才形成终态
 - 任务级幂等：同 task_id 重复 submit 复用句柄、不重复下发
 - host_ready 报文置位 session.host_ready
 
@@ -19,6 +19,8 @@ from __future__ import annotations
 
 import asyncio
 from typing import Any
+
+import pytest
 
 from unilabos.app.local_bridge.schedule_ws import (
     RunHandle,
@@ -91,21 +93,32 @@ def test_submit_dag_sends_f002_task_dag() -> None:
         msg = fake.received[0]
         assert msg["action"] == "task_dag"
         payload = msg["data"]
-        assert payload["task_id"] == "t1"
-        assert {n["node_id"] for n in payload["nodes"]} == {"a", "b"}
-        node_a = next(n for n in payload["nodes"] if n["node_id"] == "a")
-        assert set(node_a) == {
-            "node_id",
-            "device_id",
-            "action",
-            "action_type",
-            "action_args",
-            "sample_material",
-            "always_free",
+        assert payload == {
+            "task_id": "t1",
+            "notebook_id": "",
+            "server_info": {},
+            "nodes": [
+                {
+                    "node_id": "a",
+                    "device_id": "pump",
+                    "action": "add",
+                    "action_type": "",
+                    "action_args": {"v": 5},
+                    "sample_material": {},
+                    "always_free": False,
+                },
+                {
+                    "node_id": "b",
+                    "device_id": "stir",
+                    "action": "stir",
+                    "action_type": "",
+                    "action_args": {},
+                    "sample_material": {},
+                    "always_free": False,
+                },
+            ],
+            "edges": [{"source_node_uuid": "a", "target_node_uuid": "b"}],
         }
-        assert node_a["device_id"] == "pump"
-        assert node_a["action_args"] == {"v": 5}
-        assert payload["edges"] == [{"source_node_uuid": "a", "target_node_uuid": "b"}]
         return handle
 
     handle = asyncio.run(scenario())
@@ -165,8 +178,8 @@ def test_on_job_status_callback_receives_each() -> None:
     assert asyncio.run(scenario()) == [("a", "running"), ("a", "success")]
 
 
-def test_cancel_task_sends_f002_and_marks_cancelled() -> None:
-    """cancel_task 下发 F002 cancel 报文；未终态节点标 cancelled 并 done。"""
+def test_cancel_task_marks_request_without_synthesizing_terminal() -> None:
+    """取消请求只标记请求中，不得替设备制造 cancelled/done。"""
 
     async def scenario() -> None:
         session, fake = _make_session()
@@ -178,8 +191,89 @@ def test_cancel_task_sends_f002_and_marks_cancelled() -> None:
         cancel_msg = fake.received[-1]
         assert cancel_msg == {"action": "cancel_task", "data": {"task_id": "t1"}}
         assert handle.node_states["a"] == NodeState.SUCCESS
-        assert handle.node_states["b"] == NodeState.CANCELLED
+        assert handle.node_states["b"] == "cancel_requested"
+        assert not handle.finished
+
+    asyncio.run(scenario())
+
+
+def test_cancelled_converges_only_after_os_confirms_physical_safety() -> None:
+    """OS 回 cancelled 且物理状态确认安全后，取消才成为终态。"""
+
+    async def scenario() -> None:
+        session, fake = _make_session()
+        handle = await session.submit_dag(_two_node_dag())
+        await fake.emit_job_status("t1", "a", "success")
+        await session.cancel_task("t1")
+        assert not handle.finished
+
+        await fake.emit_job_status(
+            "t1",
+            "b",
+            "cancelled",
+            return_info={
+                "physical_state": "confirmed_safe",
+                "reconcile_required": False,
+            },
+        )
+
+        assert handle.node_states == {
+            "a": NodeState.SUCCESS,
+            "b": NodeState.CANCELLED,
+        }
         assert handle.finished
+
+    asyncio.run(scenario())
+
+
+@pytest.mark.parametrize("terminal_status", ["cancelled", "failed"])
+def test_ambiguous_physical_terminal_remains_reconciling(
+    terminal_status: str,
+) -> None:
+    """OS 逻辑终态但物理状态未知时，桥保持 reconciling 且不置 done。"""
+
+    async def scenario() -> None:
+        session, fake = _make_session()
+        handle = await session.submit_dag(_two_node_dag())
+        await fake.emit_job_status("t1", "a", "success")
+        await session.cancel_task("t1")
+
+        await fake.emit_job_status(
+            "t1",
+            "b",
+            terminal_status,
+            return_info={
+                "error": "transport disconnected",
+                "physical_state": "unknown",
+                "reconcile_required": True,
+            },
+        )
+
+        assert handle.node_states["b"] == "reconciling"
+        assert not handle.finished
+
+    asyncio.run(scenario())
+
+
+def test_cancel_task_does_not_call_mark_all_cancelled(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """journal/OS 才是终态权威；bridge cancel 不得批量伪造 cancelled。"""
+
+    async def scenario() -> None:
+        session, _fake = _make_session()
+        handle = await session.submit_dag(_two_node_dag())
+        calls = 0
+
+        def record_mark_all_cancelled() -> None:
+            nonlocal calls
+            calls += 1
+
+        monkeypatch.setattr(handle, "mark_all_cancelled", record_mark_all_cancelled)
+        await session.cancel_task("t1")
+
+        assert calls == 0
+        assert not handle.finished
 
     asyncio.run(scenario())
 

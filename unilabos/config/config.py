@@ -2,7 +2,7 @@ import base64
 import traceback
 import os
 import importlib.util
-from typing import Optional, Literal
+from typing import Literal
 from unilabos.utils import logger
 
 
@@ -25,6 +25,11 @@ class BasicConfig:
     check_mode = False  # CI 检查模式，用于验证 registry 导入和文件一致性
     test_mode = False  # 测试模式，所有动作不实际执行，返回模拟结果
     extra_resource = False  # 是否加载lab_开头的额外资源
+    # Generic Runtime Profiles are optional.  A Python config may provide a
+    # callable that resolves each Profile connection_ref to a live transport.
+    runtime_profile_paths: list[str] = []
+    runtime_connections: dict[str, object] = {}
+    runtime_connection_resolver = None
     # 'TRACE', 'DEBUG', 'INFO', 'WARNING', 'ERROR', 'CRITICAL'
     log_level: Literal["TRACE", "DEBUG", "INFO", "WARNING", "ERROR", "CRITICAL"] = "DEBUG"
 
@@ -113,11 +118,11 @@ def _update_config_from_env():
 
             current_value = getattr(matched_cls, matched_field)
             attr_type = type(current_value)
-            if attr_type == bool:
+            if attr_type is bool:
                 value = env_value.lower() in ("true", "1", "yes")
-            elif attr_type == int:
+            elif attr_type is int:
                 value = int(env_value)
-            elif attr_type == float:
+            elif attr_type is float:
                 value = float(env_value)
             else:
                 value = env_value
@@ -147,7 +152,7 @@ def load_config(config_path=None):
             _update_config_from_module(module)
             logger.info(f"[ENV] 配置文件 {config_path} 加载成功")
             _update_config_from_env()
-        except Exception as e:
+        except Exception:
             logger.error(f"[ENV] 加载配置文件 {config_path} 失败")
             traceback.print_exc()
             exit(1)

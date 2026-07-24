@@ -148,6 +148,11 @@ class _ActionHandleBase(BaseModel):
     data_source: Optional[str] = None
     description: Optional[str] = None
     io_type: Optional[str] = None  # source/sink (dataflow) or target/source (device-style)
+    domain: Optional[str] = None
+    required: Optional[bool] = None
+    schema_ref: Optional[str] = None
+    binding: Optional[str] = None
+    same_identity_as: Optional[str] = None
 
     def to_registry_dict(self) -> Dict[str, Any]:
         return self.model_dump(by_alias=True, exclude_none=True)
@@ -357,6 +362,7 @@ def action(
     parent: bool = False,
     node_type: Optional["NodeType"] = None,
     feedback_interval: Optional[float] = None,
+    contract: Optional[Any] = None,
 ):
     """
     动作方法装饰器
@@ -389,10 +395,55 @@ def action(
         parent: 若为 True，当方法参数为空 (*args, **kwargs) 时，通过 MRO 从父类获取真实方法参数
         node_type: 动作的节点类型 (NodeType.ILAB / NodeType.MANUAL_CONFIRM)。
                    不填写时不写入注册表。
+        contract: 可选的 ActionContract v2；不填写时保持 v1 元数据完全不变。
     """
 
     def decorator(func: F) -> F:
         import asyncio as _asyncio
+
+        resolved_contract = None
+        if contract is not None:
+            from .action_contract import (
+                ActionContract,
+                ActionContractValidationError,
+            )
+
+            input_keys = [
+                handle.key
+                for handle in handles or []
+                if isinstance(handle, ActionInputHandle)
+            ]
+            output_keys = [
+                handle.key
+                for handle in handles or []
+                if isinstance(handle, ActionOutputHandle)
+            ]
+            duplicates = sorted(
+                {key for key in input_keys if input_keys.count(key) > 1}
+                | {key for key in output_keys if output_keys.count(key) > 1}
+            )
+            if duplicates:
+                raise ActionContractValidationError(
+                    "duplicate action port(s): " + ", ".join(duplicates)
+                )
+            resolved_contract = ActionContract.model_validate(contract)
+            material_ports = {
+                handle.key
+                for handle in handles or []
+                if handle.domain == "material" or handle.data_type == "resource"
+            }
+            invalid_effect_ports = sorted(
+                {
+                    effect.port
+                    for effect in resolved_contract.effects
+                    if effect.port not in material_ports
+                }
+            )
+            if invalid_effect_ports:
+                raise ActionContractValidationError(
+                    "material effect references unknown material port(s): "
+                    + ", ".join(invalid_effect_ports)
+                )
 
         if _asyncio.iscoroutinefunction(func):
             @wraps(func)
@@ -424,6 +475,8 @@ def action(
             meta["feedback_interval"] = feedback_interval
         if node_type is not None:
             meta["node_type"] = node_type.value if isinstance(node_type, NodeType) else str(node_type)
+        if resolved_contract is not None:
+            meta["contract"] = resolved_contract.model_dump(mode="json", exclude_none=True)
         wrapper._action_registry_meta = meta  # type: ignore[attr-defined]
 
         # 设置 _is_always_free 保持与旧 @always_free 装饰器兼容

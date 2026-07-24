@@ -1,0 +1,61 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://unilab.dev/contracts/runtime/v1/workflow-revision.schema.json",
+  "title": "Uni-Lab Workflow Authoring Revision",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "revision_id",
+    "parent_revision_id",
+    "schema_version",
+    "content_hash",
+    "canonical_ir",
+    "python_source",
+    "source_map",
+    "authoring_surface",
+    "diagnostics",
+    "view_metadata",
+    "created_at"
+  ],
+  "properties": {
+    "revision_id": { "type": "string", "minLength": 1 },
+    "parent_revision_id": { "type": ["string", "null"], "minLength": 1 },
+    "schema_version": { "const": "runtime/v1" },
+    "content_hash": { "type": "string", "pattern": "^[a-f0-9]{64}$" },
+    "canonical_ir": {
+      "$ref": "https://unilab.dev/contracts/runtime/v1/canonical-workflow.schema.json"
+    },
+    "python_source": { "type": "string" },
+    "source_map": {
+      "$ref": "https://unilab.dev/contracts/runtime/v1/workflow-source-map.schema.json"
+    },
+    "authoring_surface": { "enum": ["code", "graph", "ai", "import"] },
+    "diagnostics": {
+      "type": "array",
+      "items": { "$ref": "#/$defs/diagnostic" }
+    },
+    "view_metadata": { "type": "object" },
+    "created_at": { "type": "string", "format": "date-time" }
+  },
+  "$defs": {
+    "diagnostic": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["severity", "code", "message"],
+      "properties": {
+        "severity": { "enum": ["info", "warning", "error"] },
+        "code": { "type": "string", "minLength": 1 },
+        "message": { "type": "string", "minLength": 1 },
+        "node_id": { "type": "string", "minLength": 1 },
+        "start_line": { "type": "integer", "minimum": 1 },
+        "start_column": { "type": "integer", "minimum": 1 },
+        "end_line": { "type": "integer", "minimum": 1 },
+        "end_column": { "type": "integer", "minimum": 1 }
+      },
+      "anyOf": [
+        { "required": ["node_id"] },
+        { "required": ["start_line", "start_column", "end_line", "end_column"] }
+      ]
+    }
+  }
+}

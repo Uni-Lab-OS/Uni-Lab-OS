@@ -10,6 +10,11 @@
 from abc import ABC, abstractmethod
 from typing import Optional
 from unilabos.config.config import BasicConfig
+from unilabos.runtime.profile_composition import build_runtime_drivers
+from unilabos.runtime.profile_loader import (
+    discover_driver_catalog,
+    load_profiles,
+)
 from unilabos.utils import logger
 
 
@@ -145,7 +150,7 @@ class CommunicationClientFactory:
             return cls._create_websocket_client()
         else:
             logger.error(f"[CommunicationFactory] Unsupported protocol: {protocol}")
-            logger.warning(f"[CommunicationFactory] Falling back to WebSocket")
+            logger.warning("[CommunicationFactory] Falling back to WebSocket")
             return cls._create_websocket_client()
 
     @classmethod
@@ -171,7 +176,39 @@ class CommunicationClientFactory:
         try:
             from unilabos.app.ws_client import WebSocketClient
 
-            return WebSocketClient()
+            profile_paths = list(
+                getattr(BasicConfig, "runtime_profile_paths", []) or []
+            )
+            if not profile_paths:
+                return WebSocketClient()
+            connection_resolver = getattr(
+                BasicConfig,
+                "runtime_connection_resolver",
+                None,
+            )
+            if connection_resolver is None:
+                connections = getattr(BasicConfig, "runtime_connections", {})
+                if not isinstance(connections, dict):
+                    raise ValueError("runtime_connections must be a mapping")
+                if not connections:
+                    raise ValueError(
+                        "runtime_connection_resolver or runtime_connections is "
+                        "required when Profiles are configured"
+                    )
+
+                def connection_resolver(connection_ref: str):
+                    return connections.get(connection_ref)
+            driver_catalog = discover_driver_catalog()
+            profiles = load_profiles(
+                profile_paths,
+                driver_catalog=driver_catalog,
+            )
+            runtime_drivers = build_runtime_drivers(
+                profiles,
+                driver_catalog,
+                connection_resolver,
+            )
+            return WebSocketClient(runtime_drivers=runtime_drivers)
         except Exception as e:
             logger.error(f"[CommunicationFactory] Failed to create WebSocket client: {str(e)}")
             raise

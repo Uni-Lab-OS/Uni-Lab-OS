@@ -1,9 +1,10 @@
 """workflow_ws — 桥的实现 A（云端 panel）UI 面 WS 服务器（路径 /ws/workflow/{uuid}）。
 
 uni-lab-cloud 的 WorkflowDAGPanel/WorkflowStepsPanel 经 useWorkflowWebSocket 连入本路径。
-桥在此扮演「工作流后端」：解析 WorkflowWSActionType，把工作流图经 workflow_to_dag 翻译成
-F002 task_dag 交 schedule_ws.ScheduleSession 下发真实 OS；把 OS 回流的 job_status
-翻译成 panel 的 workflow_update 报文推回。单一事实源——执行仍在 OS，桥只做协议翻译。
+桥在此扮演「工作流传输适配器」：解析 WorkflowWSActionType，把旧工作流图归一为
+Canonical WorkflowRevision 后交唯一 RuntimeService；把 OS 回流的 job_status 翻译成
+panel 的 workflow_update 报文推回。单一事实源——执行和编译均在 OS RuntimeService，
+桥只做旧 UI 协议翻译。
 
 上行（panel→桥，见 src/services/workflowService.ts）：
 - {"action": "fetch_graph",  "msg_uuid": ...}
@@ -37,8 +38,9 @@ import logging
 from collections.abc import Awaitable, Callable
 from typing import Any
 
-from unilabos.app.local_bridge.schedule_ws import RunHandle, ScheduleSession
-from unilabos.app.local_bridge.workflow_to_dag import workflow_to_task_dag
+from unilabos.app.local_bridge.schedule_ws import ScheduleSession
+from unilabos.runtime.service import RuntimeService
+from unilabos.workflow.submission import workflow_submission_to_revision
 
 logger = logging.getLogger(__name__)
 
@@ -54,6 +56,17 @@ WORKFLOW_UPDATE = "workflow_update"
 # WorkflowStatusEnum（src/types/workflow.ts）：Running='running' / Finished='end'
 TASK_STATUS_RUNNING = "running"
 TASK_STATUS_END = "end"
+
+_DEMO_ACTION_CATALOG: dict[str, dict[str, Any]] = {
+    "pump_1.pump_liquid": {
+        "inputs": {"volume": {"type": "number"}},
+        "outputs": {},
+    },
+    "stirrer_1.stir": {
+        "inputs": {"seconds": {"type": "integer"}},
+        "outputs": {},
+    },
+}
 
 
 def build_demo_graph() -> dict[str, Any]:
@@ -97,6 +110,80 @@ def build_demo_graph() -> dict[str, Any]:
             "source_handle_uuid": "",
             "target_handle_uuid": "",
         },
+    ]
+    return {"nodes": nodes, "edges": edges}
+
+
+def _current_legacy_graph(runtime_service: Any) -> dict[str, Any]:
+    """Project the Runtime-owned current revision for the legacy panel.
+
+    The panel graph is render-only.  Execution always resubmits the lossless
+    Canonical payload stored beside it; this adapter must never reconstruct an
+    executable workflow from the visual projection.
+    """
+
+    workflow = runtime_service.get_workflow()
+    revision = workflow.get("revision") if isinstance(workflow, dict) else None
+    if not isinstance(revision, dict):
+        raise RuntimeError("Runtime workflow projection is missing revision")
+    canonical = revision.get("canonical")
+    if not isinstance(canonical, dict):
+        raise RuntimeError("Runtime workflow projection is missing canonical")
+
+    projected_nodes = revision.get("nodes")
+    projected_nodes = projected_nodes if isinstance(projected_nodes, list) else []
+    projected_by_id = {
+        str(item.get("id") or ""): item
+        for item in projected_nodes
+        if isinstance(item, dict) and item.get("id")
+    }
+    nodes: list[dict[str, Any]] = []
+    for raw in canonical.get("invocations", []):
+        if not isinstance(raw, dict):
+            continue
+        node_id = str(raw.get("node_id") or "")
+        action_ref = str(raw.get("action_ref") or "")
+        device_id, separator, action = action_ref.rpartition(".")
+        if not node_id or not separator:
+            continue
+        projected = projected_by_id.get(node_id, {})
+        literal_args = {
+            str(name): binding.get("value")
+            for name, binding in (raw.get("input_bindings") or {}).items()
+            if isinstance(binding, dict) and binding.get("kind") == "literal"
+        }
+        nodes.append(
+            {
+                "uuid": node_id,
+                "id": node_id,
+                "node_id": node_id,
+                "name": str(
+                    projected.get("label")
+                    or raw.get("name")
+                    or action
+                    or node_id
+                ),
+                "device_id": device_id,
+                "action": action,
+                "action_type": str(raw.get("node_type") or ""),
+                "action_args": literal_args,
+                "input_bindings": dict(raw.get("input_bindings") or {}),
+                "pose": {"position": {"x": 0, "y": 0}},
+            }
+        )
+
+    projected_edges = revision.get("edges")
+    projected_edges = projected_edges if isinstance(projected_edges, list) else []
+    edges = [
+        {
+            "uuid": str(item.get("id") or f"legacy-edge-{index + 1}"),
+            "source_node_uuid": str(item.get("source") or ""),
+            "target_node_uuid": str(item.get("target") or ""),
+            "source_handle_uuid": "",
+            "target_handle_uuid": "",
+        }
+        for index, item in enumerate(projected_edges)
+        if isinstance(item, dict) and item.get("source") and item.get("target")
     ]
     return {"nodes": nodes, "edges": edges}
 
@@ -145,7 +232,7 @@ class WorkflowSession:
     """单个云端 panel 连接的工作流会话（传输无关，便于 hermetic 测试）。
 
     - handle_incoming(message)：喂入 panel 上行报文（fetch_graph/run_workflow/stop_workflow）
-    - 内部经注入的 ScheduleSession 下发 task_dag / 取消，并注册 job_status 回调翻译回流
+    - 内部经注入的 RuntimeService 编译、下发及取消，并注册 job_status 回调翻译回流
 
     每会话在 ScheduleSession 上注册唯一回调，按 self._task_id 动态过滤（避免多次运行累积回调）。
     """
@@ -156,12 +243,23 @@ class WorkflowSession:
         schedule_session: ScheduleSession,
         *,
         uuid: str = "",
+        runtime_service: Any | None = None,
     ) -> None:
         self._send = send
         self._schedule = schedule_session
         self.uuid = uuid
         self._task_id = ""
-        self._run_seq = 0
+        if runtime_service is None:
+            runtime_service = RuntimeService(
+                schedule_session,
+                action_catalog=_DEMO_ACTION_CATALOG,
+            )
+            runtime_service.set_workflow_revision(
+                workflow_submission_to_revision(
+                    {"name": self.uuid or "workflow", **build_demo_graph()}
+                )
+            )
+        self._runtime_service = runtime_service
         self._schedule.on_job_status(self._on_os_job_status)
 
     def close(self) -> None:
@@ -184,33 +282,38 @@ class WorkflowSession:
             logger.debug("[workflow_ws] 忽略上行 action=%s", action)
 
     async def _on_fetch_graph(self) -> None:
-        """回 demo 图——panel 按 fetch_graph 走 handleNodesToWorkflowReactFlow 渲染。"""
-        graph = build_demo_graph()
+        """Return the current Runtime-owned graph as a legacy render view."""
+        graph = _current_legacy_graph(self._runtime_service)
         await self._send({"code": 0, "data": {"action": FETCH_GRAPH, "data": graph}})
         logger.info("[workflow_ws] 已回 fetch_graph（uuid=%s）", self.uuid or "-")
 
-    async def _on_run_workflow(self) -> RunHandle:
-        """demo 图经 workflow_to_dag 构 TaskDag 交 schedule_ws 下发，并回 run_workflow ack。
-
-        每次运行铸唯一 task_id（uuid + 递增序号）：submit_dag 任务级幂等，若复用 panel 的
-        稳定 uuid 作 task_id，再次运行会命中已终态的旧句柄而静默不下发（重跑变空操作）。
-        故每次运行用新 task_id 保证真下发；self._task_id 记为当前，回流与 stop 均按此命中。
-        """
-        graph = build_demo_graph()
-        self._run_seq += 1
-        task_id = f"{self.uuid or 'workflow'}-{self._run_seq}"
-        dag = workflow_to_task_dag(graph["nodes"], graph["edges"], task_id=task_id)
-        self._task_id = task_id
-        run = await self._schedule.submit_dag(dag)
-        await self._send({"code": 0, "data": {"action": RUN_WORKFLOW, "data": task_id}})
-        logger.info("[workflow_ws] 已下发 run_workflow task_id=%s", task_id)
-        return run
+    async def _on_run_workflow(self) -> dict[str, str]:
+        """Run the exact current Canonical revision through RuntimeService."""
+        workflow = self._runtime_service.get_workflow()
+        revision = workflow.get("revision") if isinstance(workflow, dict) else None
+        canonical = revision.get("canonical") if isinstance(revision, dict) else None
+        if not isinstance(canonical, dict):
+            raise RuntimeError("Runtime workflow projection is missing canonical")
+        accepted = await self._runtime_service.start_run(
+            {
+                "source": {
+                    "format": "canonical_workflow_v2",
+                    "payload": canonical,
+                }
+            }
+        )
+        self._task_id = str(accepted["id"])
+        await self._send(
+            {"code": 0, "data": {"action": RUN_WORKFLOW, "data": self._task_id}}
+        )
+        logger.info("[workflow_ws] 已下发 run_workflow task_id=%s", self._task_id)
+        return accepted
 
     async def _on_stop_workflow(self, task_id_data: Any) -> None:
-        """stop_workflow→schedule_ws.cancel_task，并回 stop_workflow 确认。"""
+        """stop_workflow→RuntimeService.cancel_run，并回 stop_workflow 确认。"""
         task_id = task_id_data if isinstance(task_id_data, str) and task_id_data else self._task_id
         if task_id:
-            await self._schedule.cancel_task(task_id)
+            await self._runtime_service.cancel_run(task_id)
         await self._send({"code": 0, "data": {"action": STOP_WORKFLOW}})
         logger.info("[workflow_ws] 已下发 stop_workflow task_id=%s", task_id or "-")
 
@@ -236,8 +339,11 @@ class WorkflowWSServer:
         get_schedule_session: Callable[[], ScheduleSession | None],
         host: str = "127.0.0.1",
         port: int = 8891,
+        *,
+        get_runtime_service: Callable[[], Any | None] | None = None,
     ) -> None:
         self._get_schedule = get_schedule_session
+        self._get_runtime_service = get_runtime_service
         self.host = host
         self.port = port
         self._server: Any = None
@@ -274,7 +380,17 @@ class WorkflowWSServer:
         async def send(msg: dict[str, Any]) -> None:
             await websocket.send(json.dumps(msg, ensure_ascii=False))
 
-        session = WorkflowSession(send, schedule, uuid=uuid)
+        runtime_service = (
+            self._get_runtime_service()
+            if self._get_runtime_service is not None
+            else None
+        )
+        session = WorkflowSession(
+            send,
+            schedule,
+            uuid=uuid,
+            runtime_service=runtime_service,
+        )
         logger.info("[workflow_ws] panel 已连入 (uuid=%s)", uuid or "-")
         try:
             async for raw in websocket:
