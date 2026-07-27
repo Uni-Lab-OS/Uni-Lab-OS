@@ -76,6 +76,10 @@ journal 和 debugger。它不能实现一套“更简单”的前端专用 sched
 `--profile`。`-g/--graph` 只允许与 `--offline` 一起使用；真实模式必须接受
 `unilab -g` 所在 OS 的内存快照。默认只允许 loopback。
 
+调试/E2E 可以额外设置 `--offline-node-delay SECONDS`，为每个模拟设备节点加入
+非阻塞执行时长，以确定性观察 `running → pause_pending → paused` 和运行中急停。
+该参数只允许用于 `--offline`，默认 `0`，不得据此给真实设备路径增加测试延时。
+
 ## 文件导航
 
 - `server.py`：两个传输面的组合入口和 shared runtime 装配。

@@ -55,6 +55,7 @@ def build_offline_session(
     *,
     resource_lock_manager: ResourceLockManager | None = None,
     journal: SQLiteEventJournal | None = None,
+    node_delay_seconds: float = 0.0,
 ) -> tuple[ScheduleSession, OfflineOS]:
     """装配离线执行核：ScheduleSession(send→OfflineOS.receive) + OfflineOS.bind(session)。
 
@@ -65,6 +66,7 @@ def build_offline_session(
         results=results,
         resource_lock_manager=resource_lock_manager,
         journal=journal,
+        node_delay_seconds=node_delay_seconds,
     )
     session = ScheduleSession(offline.receive, session_id="offline")
     offline.bind(session)
@@ -90,6 +92,7 @@ class LocalBridgeServer:
         profiles: dict[str, LoadedProfile] | None = None,
         graph_path: str | Path | None = None,
         workflow_libraries: list[tuple[str, str | Path]] | None = None,
+        offline_node_delay: float = 0.0,
     ) -> None:
         require_loopback_runtime_host(host)
         if graph_path is not None and not offline:
@@ -97,6 +100,8 @@ class LocalBridgeServer:
                 "--graph belongs to the execution OS; only --offline bridge "
                 "may load it directly"
             )
+        if offline_node_delay and not offline:
+            raise ValueError("--offline-node-delay requires --offline")
         self.host = host
         self.offline = offline
         self._session: ScheduleSession | None = None
@@ -139,6 +144,7 @@ class LocalBridgeServer:
             self._session, self._offline_os = build_offline_session(
                 resource_lock_manager=self._resource_lock_manager,
                 journal=self._journal,
+                node_delay_seconds=offline_node_delay,
             )
             self._local_api_state = self._build_local_api_state(self._session)
             logger.info("[bridge] 离线模式：进程内 OfflineOS 顶替 OS 面")
@@ -233,6 +239,16 @@ def _parse_args(argv: list[str] | None = None) -> argparse.Namespace:
         help="离线自足模式：进程内 OfflineOS 顶替 OS 面（无真实 OS 亦可驱动 UI）",
     )
     parser.add_argument(
+        "--offline-node-delay",
+        type=float,
+        default=0.0,
+        metavar="SECONDS",
+        help=(
+            "仅 --offline：每个模拟设备节点的非阻塞执行时长；"
+            "用于演示和测试可观测的 running/pause_pending 状态"
+        ),
+    )
+    parser.add_argument(
         "-g",
         "--graph",
         help=(
@@ -259,6 +275,7 @@ async def _amain(argv: list[str] | None = None) -> None:
         profiles=profiles,
         graph_path=args.graph,
         workflow_libraries=workflow_libraries,
+        offline_node_delay=args.offline_node_delay,
     )
     logger.info(
         "[bridge] 启动：schedule=ws://%s:%d /api/v1/ws/schedule | api=http://%s:%d/api",

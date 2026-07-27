@@ -61,6 +61,7 @@ class DebugController:
         self._pause_after_node: str | None = None
         self._paused_before_node: str | None = None
         self._run_to_node: str | None = None
+        self._stop_reason: str | None = None
         self._bypass_breakpoints_once: set[str] = set()
         self._status = "pause_pending" if self._pause_requested else "running"
         self._version = 1
@@ -78,6 +79,7 @@ class DebugController:
             "startNodeId": self._start_node_id,
             "pausedBeforeNodeId": self._paused_before_node,
             "runToNodeId": self._run_to_node,
+            "stopReason": self._stop_reason,
             "stateVersion": self._version,
             "semantics": "global_quiescent_v2",
         }
@@ -232,6 +234,16 @@ class DebugController:
             return self.projection()
 
         if command in {"terminate", "emergency_stop"}:
+            self._stop_reason = command
+            self._bump()
+            self._emit(
+                (
+                    "debug.emergency_stop_requested"
+                    if command == "emergency_stop"
+                    else "debug.terminate_requested"
+                ),
+                self.projection(),
+            )
             self._terminated = True
             self._paused = False
             self._pause_requested = False

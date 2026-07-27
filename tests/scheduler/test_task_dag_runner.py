@@ -11,6 +11,7 @@ from __future__ import annotations
 import asyncio
 
 from unilabos.scheduler.dag_model import NodeState, TaskDag
+from unilabos.scheduler.debug_controller import DebugController
 from unilabos.scheduler.task_dag_runner import TaskDagRunner
 
 from tests.scheduler.fake_scheduler import settle
@@ -208,3 +209,117 @@ def test_runner_cancel_resolves_pending():
     result = asyncio.run(scenario())
     assert result["A"] == NodeState.CANCELLED
     assert "B" not in stack.started  # 后继绝不调度
+
+
+def test_debug_terminate_resolves_callback_future_and_cleans_once():
+    """调试终止不能只停 admission；已派发 callback future 也必须收敛。"""
+    dag = _dag(
+        [_node("A", "d1"), _node("B", "d2")],
+        [_edge("A", "B")],
+        task_id="debug-terminate",
+    )
+    holder = {}
+    stack = FakeStack(lambda: holder["r"])
+    debugger = DebugController(
+        run_id=dag.task_id,
+        node_ids=set(dag.nodes),
+    )
+    runner = TaskDagRunner(
+        dag,
+        stack.on_start_node,
+        on_cancel_remaining=stack.cancel_remaining,
+        debug_controller=debugger,
+    )
+    holder["r"] = runner
+
+    async def scenario():
+        run_task = asyncio.ensure_future(runner.run())
+        await settle()
+        assert stack.running == {"A"}
+        projection = await runner.debug_command("terminate")
+        result = await asyncio.wait_for(run_task, timeout=1)
+        return projection, result
+
+    projection, result = asyncio.run(scenario())
+    assert projection["stopReason"] == "terminate"
+    assert result == {
+        "A": NodeState.CANCELLED,
+        "B": NodeState.CANCELLED,
+    }
+    assert stack.cancel_remaining_called == 1
+
+
+def test_debug_emergency_stop_triggers_immediate_run_scoped_cleanup_once():
+    """急停先触发设备清理，再令 pending future/调度图收敛，且不重复清理。"""
+    dag = _dag(
+        [_node("A", "d1"), _node("B", "d2")],
+        [_edge("A", "B")],
+        task_id="debug-emergency-stop",
+    )
+    holder = {}
+    stack = FakeStack(lambda: holder["r"])
+    debugger = DebugController(
+        run_id=dag.task_id,
+        node_ids=set(dag.nodes),
+    )
+    runner = TaskDagRunner(
+        dag,
+        stack.on_start_node,
+        on_cancel_remaining=stack.cancel_remaining,
+        debug_controller=debugger,
+    )
+    holder["r"] = runner
+
+    async def scenario():
+        run_task = asyncio.ensure_future(runner.run())
+        await settle()
+        projection = await runner.debug_command("emergency_stop")
+        assert stack.cancel_remaining_called == 1
+        result = await asyncio.wait_for(run_task, timeout=1)
+        return projection, result
+
+    projection, result = asyncio.run(scenario())
+    assert projection["stopReason"] == "emergency_stop"
+    assert result == {
+        "A": NodeState.CANCELLED,
+        "B": NodeState.CANCELLED,
+    }
+    assert stack.cancel_remaining_called == 1
+
+
+def test_emergency_cleanup_failure_is_retried_during_run_convergence():
+    dag = _dag(
+        [_node("A", "d1")],
+        [],
+        task_id="debug-emergency-retry",
+    )
+    holder = {}
+    stack = FakeStack(lambda: holder["r"])
+    attempts = 0
+
+    def flaky_cleanup() -> None:
+        nonlocal attempts
+        attempts += 1
+        if attempts == 1:
+            raise RuntimeError("transient cleanup failure")
+
+    runner = TaskDagRunner(
+        dag,
+        stack.on_start_node,
+        on_cancel_remaining=flaky_cleanup,
+        debug_controller=DebugController(
+            run_id=dag.task_id,
+            node_ids=set(dag.nodes),
+        ),
+    )
+    holder["r"] = runner
+
+    async def scenario():
+        run_task = asyncio.ensure_future(runner.run())
+        await settle()
+        await runner.debug_command("emergency_stop")
+        return await asyncio.wait_for(run_task, timeout=1)
+
+    result = asyncio.run(scenario())
+    assert result == {"A": NodeState.CANCELLED}
+    assert attempts == 2

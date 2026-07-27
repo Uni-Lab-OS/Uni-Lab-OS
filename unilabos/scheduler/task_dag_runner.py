@@ -77,6 +77,7 @@ class TaskDagRunner:
         self._loop = loop
         self._pending: dict[str, asyncio.Future] = {}  # node_id(=job_id) -> future
         self._cancelled = False
+        self._cancel_remaining_called = False
         self._executor = DagExecutor(
             dag,
             self._submit,
@@ -101,10 +102,7 @@ class TaskDagRunner:
             st in {NodeState.FAILED, NodeState.CANCELLED}
             for st in result.values()
         ):
-            try:
-                self._on_cancel_remaining()
-            except Exception:  # noqa: BLE001 —— 清理失败不应改变已定终态
-                logger.exception("TaskDagRunner on_cancel_remaining 清理失败，忽略")
+            self._cancel_remaining_once()
         return result
 
     async def _submit(self, node: DagNode) -> NodeState | NodeExecutionResult:
@@ -203,7 +201,20 @@ class TaskDagRunner:
         command: str,
         payload: dict[str, Any] | None = None,
     ) -> dict[str, Any]:
-        return await self._executor.debug_command(command, payload)
+        normalized = command.strip().lower()
+        projection = await self._executor.debug_command(command, payload)
+        if normalized in {"terminate", "emergency_stop"}:
+            # DagExecutor.cancel() stops new admissions, while this runner owns
+            # the callback-backed futures for already-dispatched device work.
+            # Resolve them here so the run cannot hang waiting for a callback
+            # that cancellation intentionally suppresses.
+            if normalized == "emergency_stop":
+                # Emergency stop is run-scoped in debugger v1.  Trigger the
+                # injected device cleanup immediately; it is idempotently
+                # guarded because run() performs the same safety cleanup.
+                self._cancel_remaining_once()
+            self.cancel()
+        return projection
 
     def debug_projection(self) -> dict[str, Any]:
         return self._executor.debug_projection()
@@ -220,3 +231,15 @@ class TaskDagRunner:
     ) -> None:
         for job_id in list(self._pending):
             self._resolve(job_id, state)
+
+    def _cancel_remaining_once(self) -> None:
+        if self._on_cancel_remaining is None or self._cancel_remaining_called:
+            return
+        self._cancel_remaining_called = True
+        try:
+            self._on_cancel_remaining()
+        except Exception:  # noqa: BLE001 —— 清理失败不应改变已定终态
+            # Emergency stop calls this eagerly.  Leave the cleanup retryable
+            # so run() can make one more attempt during terminal convergence.
+            self._cancel_remaining_called = False
+            logger.exception("TaskDagRunner on_cancel_remaining 清理失败，忽略")

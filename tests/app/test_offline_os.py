@@ -104,6 +104,56 @@ def test_offline_cancel_marks_all_cancelled() -> None:
     asyncio.run(scenario())
 
 
+def test_offline_debug_terminate_interrupts_observable_running_node() -> None:
+    async def scenario() -> tuple[dict[str, NodeState], dict[str, Any]]:
+        schedule, _offline = build_offline_session(node_delay_seconds=1.0)
+        dag = TaskDag.from_message(
+            {
+                "task_id": "offline-debug-terminate",
+                "nodes": [
+                    {
+                        "node_id": "n1",
+                        "device_id": "dev_1",
+                        "action": "act",
+                    },
+                    {
+                        "node_id": "n2",
+                        "device_id": "dev_2",
+                        "action": "act",
+                    },
+                ],
+                "edges": [
+                    {
+                        "source_node_uuid": "n1",
+                        "target_node_uuid": "n2",
+                    }
+                ],
+                "debug": {"breakpoints": []},
+            }
+        )
+        handle = await schedule.submit_dag(dag)
+        for _ in range(50):
+            if handle.node_states["n1"] == NodeState.RUNNING:
+                break
+            await asyncio.sleep(0)
+        assert handle.node_states["n1"] == NodeState.RUNNING
+
+        command = await schedule.debug_command(
+            dag.task_id,
+            "terminate",
+            {},
+        )
+        await asyncio.wait_for(handle.wait(), timeout=0.5)
+        return dict(handle.node_states), command
+
+    states, command = asyncio.run(scenario())
+    assert states == {
+        "n1": NodeState.CANCELLED,
+        "n2": NodeState.CANCELLED,
+    }
+    assert command["debug"]["stopReason"] == "terminate"
+
+
 def test_build_offline_session_wires_send_to_offline() -> None:
     session, offline = build_offline_session()
     assert isinstance(session, ScheduleSession)

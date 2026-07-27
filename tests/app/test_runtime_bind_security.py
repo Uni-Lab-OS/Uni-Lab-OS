@@ -34,6 +34,11 @@ def test_bridge_graph_flag_is_only_for_offline_execution_os() -> None:
         LocalBridgeServer(graph_path="graph.json")
 
 
+def test_offline_node_delay_is_rejected_for_real_os_bridge() -> None:
+    with pytest.raises(ValueError, match="requires --offline"):
+        LocalBridgeServer(offline_node_delay=0.1)
+
+
 @pytest.mark.parametrize("host", ["127.0.0.1", "localhost", "::1"])
 @pytest.mark.parametrize(
     "build_server",

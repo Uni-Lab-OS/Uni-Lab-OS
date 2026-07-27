@@ -4,6 +4,8 @@ from __future__ import annotations
 
 import asyncio
 
+import pytest
+
 from unilabos.scheduler.dag_executor import DagExecutor
 from unilabos.scheduler.dag_model import NodeState, TaskDag
 from unilabos.scheduler.debug_controller import DebugController
@@ -238,3 +240,111 @@ def test_continue_stops_at_two_breakpoints_in_order() -> None:
         ("breakpoint-1", ["start"]),
         ("breakpoint-2", ["start", "breakpoint-1"]),
     ]
+
+
+def test_pause_drains_inflight_before_stopping_next_admission() -> None:
+    async def scenario() -> tuple[list[str], dict[str, NodeState], list[str]]:
+        dag = _dag()
+        dispatched: list[str] = []
+        release_first = asyncio.Event()
+        first_started = asyncio.Event()
+
+        async def submit(node) -> NodeState:
+            dispatched.append(node.node_id)
+            if node.node_id == "first":
+                first_started.set()
+                await release_first.wait()
+            return NodeState.SUCCESS
+
+        debugger = DebugController(
+            run_id=dag.task_id,
+            node_ids=set(dag.nodes),
+        )
+        executor = DagExecutor(dag, submit, debug_controller=debugger)
+        run_task = asyncio.create_task(executor.run())
+        await first_started.wait()
+
+        projection = await executor.debug_command("pause")
+        assert projection["status"] == "pause_pending"
+        assert dispatched == ["first"]
+
+        release_first.set()
+        await _settle()
+        assert debugger.projection()["status"] == "paused"
+        assert debugger.projection()["pausedBeforeNodeId"] == "second"
+        assert dispatched == ["first"]
+
+        await executor.debug_command("continue")
+        states = await run_task
+        return dispatched, states, [
+            debugger.projection()["status"],
+            debugger.projection()["semantics"],
+        ]
+
+    dispatched, states, projection = asyncio.run(scenario())
+    assert dispatched == ["first", "second"]
+    assert states == {
+        "first": NodeState.SUCCESS,
+        "second": NodeState.SUCCESS,
+    }
+    assert projection == ["completed", "global_quiescent_v2"]
+
+
+@pytest.mark.parametrize("command", ["step", "step_over", "step_into"])
+def test_each_v1_step_command_admits_exactly_one_node(command: str) -> None:
+    async def scenario() -> tuple[list[str], str | None]:
+        dag = _dag()
+        dispatched: list[str] = []
+
+        async def submit(node) -> NodeState:
+            dispatched.append(node.node_id)
+            return NodeState.SUCCESS
+
+        debugger = DebugController(
+            run_id=dag.task_id,
+            node_ids=set(dag.nodes),
+            config={"pause_on_start": True},
+        )
+        executor = DagExecutor(dag, submit, debug_controller=debugger)
+        run_task = asyncio.create_task(executor.run())
+        await _settle()
+
+        await executor.debug_command(command)
+        await _settle()
+        assert debugger.projection()["status"] == "paused"
+        paused_before = debugger.projection()["pausedBeforeNodeId"]
+
+        await executor.debug_command("terminate")
+        await run_task
+        return dispatched, paused_before
+
+    assert asyncio.run(scenario()) == (["first"], "second")
+
+
+@pytest.mark.parametrize(
+    ("command", "event_type"),
+    [
+        ("terminate", "debug.terminate_requested"),
+        ("emergency_stop", "debug.emergency_stop_requested"),
+    ],
+)
+def test_stop_commands_keep_their_reason_in_projection_and_events(
+    command: str,
+    event_type: str,
+) -> None:
+    async def scenario() -> tuple[dict, list[str]]:
+        events: list[str] = []
+        debugger = DebugController(
+            run_id="stop-reason",
+            node_ids={"first"},
+            config={"pause_on_start": True},
+            on_event=lambda name, _payload: events.append(name),
+        )
+        projection = await debugger.command(command)
+        return projection, events
+
+    projection, events = asyncio.run(scenario())
+    assert projection["status"] == "terminated"
+    assert projection["stopReason"] == command
+    assert event_type in events
+    assert "debug.terminated" in events

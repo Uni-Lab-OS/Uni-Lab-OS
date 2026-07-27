@@ -18,6 +18,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import math
 from typing import Any
 
 from unilabos.app.local_bridge.schedule_ws import ScheduleSession
@@ -28,6 +29,7 @@ from unilabos.scheduler.debug_controller import (
     DebugController,
 )
 from unilabos.scheduler.resource_lock import ResourceLockManager
+from unilabos.scheduler.result_store import NodeExecutionResult
 from unilabos.runtime.event_store import SQLiteEventJournal
 from unilabos.runtime.reconcile import reconcile_unknown_fence
 
@@ -59,9 +61,13 @@ class OfflineOS:
         model_device_lock: bool = True,
         resource_lock_manager: ResourceLockManager | None = None,
         journal: SQLiteEventJournal | None = None,
+        node_delay_seconds: float = 0.0,
     ) -> None:
+        if not math.isfinite(node_delay_seconds) or node_delay_seconds < 0:
+            raise ValueError("node_delay_seconds must be a finite non-negative number")
         self.results = results or {}
         self.model_device_lock = model_device_lock
+        self.node_delay_seconds = float(node_delay_seconds)
         runtime_epoch = (
             resource_lock_manager.runtime_epoch
             if resource_lock_manager is not None
@@ -78,6 +84,8 @@ class OfflineOS:
         self._executors: dict[str, DagExecutor] = {}
         self._dags: dict[str, TaskDag] = {}
         self._tasks: dict[str, asyncio.Task] = {}
+        self._cancel_events: dict[str, asyncio.Event] = {}
+        self._stop_reasons: dict[str, str] = {}
         self.received: list[dict[str, Any]] = []  # 观测量（供断言）
         # 每 device_action_key 的实时/峰值在跑数——供 I3 串行断言（==1 即从不重叠）
         self._key_running: dict[str, int] = {}
@@ -160,6 +168,7 @@ class OfflineOS:
         )
         self._dags[dag.task_id] = dag
         self._executors[dag.task_id] = executor
+        self._cancel_events[dag.task_id] = asyncio.Event()
         self._tasks[dag.task_id] = asyncio.ensure_future(self._run(dag.task_id, executor))
         logger.info("[offline_os] 已受理 task_dag %s（%d 节点）", dag.task_id, len(dag.nodes))
 
@@ -184,6 +193,12 @@ class OfflineOS:
             except (DebugCommandError, ValueError) as exc:
                 ack.update({"status": "rejected", "code": str(exc)})
             else:
+                command = str(data.get("command") or "").strip().lower()
+                if command in {"terminate", "emergency_stop"}:
+                    self._stop_reasons[run_id] = command
+                    cancel_event = self._cancel_events.get(run_id)
+                    if cancel_event is not None:
+                        cancel_event.set()
                 ack.update({"status": "accepted", "debug": projection})
         if self._session is not None:
             await self._session.handle_incoming(
@@ -214,6 +229,10 @@ class OfflineOS:
         executor = self._executors.get(task_id)
         if executor is not None:
             executor.cancel()
+            self._stop_reasons[task_id] = "cancel_task"
+            cancel_event = self._cancel_events.get(task_id)
+            if cancel_event is not None:
+                cancel_event.set()
             logger.info("[offline_os] 已取消 task_dag %s", task_id)
 
     async def _run(self, task_id: str, executor: DagExecutor) -> None:
@@ -223,9 +242,11 @@ class OfflineOS:
         finally:
             self._executors.pop(task_id, None)
             self._tasks.pop(task_id, None)
+            self._cancel_events.pop(task_id, None)
         # fail-fast/取消使部分节点未经 submit 即落终态（无 job_status），补发以令桥收敛
         dag = self._dags.get(task_id)
         if dag is None:
+            self._stop_reasons.pop(task_id, None)
             return
         for node_id, state in snapshot.items():
             if self._bridge_terminal(task_id, node_id):
@@ -236,6 +257,7 @@ class OfflineOS:
                     await self._emit(dag, dag.nodes[node_id], status)
                 except Exception:  # noqa: BLE001 —— 兜底补发失败不得让后台任务异常未被回收
                     logger.exception("[offline_os] 补发 job_status 失败（node=%s）", node_id)
+        self._stop_reasons.pop(task_id, None)
 
     def _bridge_terminal(self, task_id: str, node_id: str) -> bool:
         """桥侧该节点是否已达终态（避免对已收到终态的节点重复补发）。"""
@@ -247,7 +269,7 @@ class OfflineOS:
     def _make_submit(self, dag: TaskDag):
         """构 DagExecutor 注入的 submit：每设备锁串行 + 回发 running/终态 job_status。"""
 
-        async def submit(node: DagNode) -> NodeState:
+        async def submit(node: DagNode) -> NodeState | NodeExecutionResult:
             key = node.device_action_key
             lock: asyncio.Lock | None = None
             if self.model_device_lock and not node.always_free:
@@ -260,7 +282,30 @@ class OfflineOS:
             )
             try:
                 await self._emit(dag, node, "running")
-                await asyncio.sleep(0)  # 让出一次，使 running 态可观测（非 time.sleep）
+                cancel_event = self._cancel_events[dag.task_id]
+                if self.node_delay_seconds > 0:
+                    try:
+                        await asyncio.wait_for(
+                            cancel_event.wait(),
+                            timeout=self.node_delay_seconds,
+                        )
+                    except TimeoutError:
+                        pass
+                else:
+                    await asyncio.sleep(0)  # 让出一次，使 running 态可观测（非 time.sleep）
+                if cancel_event.is_set():
+                    await self._emit(dag, node, "cancelled")
+                    return NodeExecutionResult(
+                        state=NodeState.CANCELLED,
+                        terminal_info={
+                            "physical_state": "confirmed",
+                            "reconcile_required": False,
+                            "stop_reason": self._stop_reasons.get(
+                                dag.task_id,
+                                "cancel_task",
+                            ),
+                        },
+                    )
                 state = self.results.get(node.node_id, NodeState.SUCCESS)
                 await self._emit(dag, node, _STATE_TO_STATUS[state])
                 return state

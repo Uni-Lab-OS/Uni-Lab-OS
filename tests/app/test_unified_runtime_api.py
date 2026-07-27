@@ -121,6 +121,7 @@ def _client(
     *,
     results: dict[str, NodeState] | None = None,
     action_catalog: dict[str, dict[str, Any]] | None = None,
+    node_delay_seconds: float = 0.0,
 ) -> tuple[TestClient, LocalApiState]:
     journal = SQLiteEventJournal(
         tmp_path / "runtime.sqlite",
@@ -131,6 +132,7 @@ def _client(
         results=results,
         resource_lock_manager=locks,
         journal=journal,
+        node_delay_seconds=node_delay_seconds,
     )
     schedule = ScheduleSession(offline.receive, session_id="unified-api-test")
     offline.bind(schedule)
@@ -158,6 +160,7 @@ def _wait_for(
         last = response.json()
         if predicate(last):
             return last
+        time.sleep(0.01)
     raise AssertionError(f"run projection did not settle: {last}")
 
 
@@ -326,6 +329,26 @@ def test_edit_validate_run_step_breakpoint_and_event_sequence(tmp_path: Path) ->
         assert stepped_nodes["inspect"] == "skipped"
         assert client.post(
             f"/api/v1/runtime/runs/{run_id}/commands",
+            json={"command": "step_into", "payload": {}},
+        ).status_code == 200
+        _wait_for(
+            client,
+            run_id,
+            lambda run: (
+                run.get("debug", {}).get("status") == "paused"
+                and run.get("debug", {}).get("pausedBeforeNodeId") == "join"
+                and next(
+                    node
+                    for node in client.get(
+                        f"/api/v1/runtime/runs/{run_id}/nodes"
+                    ).json()["items"]
+                    if node["nodeId"] == "dose"
+                )["state"]
+                == "success"
+            ),
+        )
+        assert client.post(
+            f"/api/v1/runtime/runs/{run_id}/commands",
             json={"command": "continue", "payload": {}},
         ).status_code == 200
         terminal = _wait_for(
@@ -380,6 +403,155 @@ def test_edit_validate_run_step_breakpoint_and_event_sequence(tmp_path: Path) ->
             replayed_event = websocket.receive_json()
             assert replayed_event["seq"] == 1
             assert replayed_event["runId"] == run_id
+
+
+def test_pause_during_running_drains_current_node_before_next_admission(
+    tmp_path: Path,
+) -> None:
+    client, _state = _client(tmp_path, node_delay_seconds=0.15)
+    with client:
+        created = client.post(
+            "/api/v1/runtime/runs",
+            json={
+                "source": {
+                    "format": "workflow_revision_v2",
+                    "revision": _revision("rev-pause-running"),
+                },
+                "debug": {
+                    "pause_on_start": True,
+                    "breakpoints": [],
+                },
+            },
+        )
+        assert created.status_code == 200
+        run_id = created.json()["id"]
+        _wait_for(
+            client,
+            run_id,
+            lambda run: run.get("debug", {}).get("status") == "paused",
+        )
+
+        assert client.post(
+            f"/api/v1/runtime/runs/{run_id}/commands",
+            json={"command": "continue", "payload": {}},
+        ).status_code == 200
+        _wait_for(
+            client,
+            run_id,
+            lambda _run: next(
+                node
+                for node in client.get(
+                    f"/api/v1/runtime/runs/{run_id}/nodes"
+                ).json()["items"]
+                if node["nodeId"] == "measure"
+            )["state"]
+            == "running",
+        )
+
+        paused = client.post(
+            f"/api/v1/runtime/runs/{run_id}/commands",
+            json={"command": "pause", "payload": {}},
+        )
+        assert paused.status_code == 200
+        assert paused.json()["debug"]["status"] == "pause_pending"
+        projection = _wait_for(
+            client,
+            run_id,
+            lambda run: (
+                run.get("debug", {}).get("status") == "paused"
+                and run.get("debug", {}).get("pausedBeforeNodeId") == "branch"
+            ),
+        )
+        assert projection["debug"]["pausedBeforeNodeId"] == "branch"
+        states = {
+            node["nodeId"]: node["state"]
+            for node in client.get(
+                f"/api/v1/runtime/runs/{run_id}/nodes"
+            ).json()["items"]
+        }
+        assert states["measure"] == "success"
+        assert states["branch"] == "pending"
+
+        assert client.post(
+            f"/api/v1/runtime/runs/{run_id}/commands",
+            json={"command": "continue", "payload": {}},
+        ).status_code == 200
+        assert _wait_for(
+            client,
+            run_id,
+            lambda run: run["status"] == "completed",
+            attempts=100,
+        )["status"] == "completed"
+
+
+def test_terminate_and_emergency_stop_are_distinct_run_scoped_events(
+    tmp_path: Path,
+) -> None:
+    client, _state = _client(tmp_path, node_delay_seconds=0.15)
+    expected_events = {
+        "terminate": "debug.terminate_requested",
+        "emergency_stop": "debug.emergency_stop_requested",
+    }
+    with client:
+        for command, event_type in expected_events.items():
+            created = client.post(
+                "/api/v1/runtime/runs",
+                json={
+                    "source": {
+                        "format": "workflow_revision_v2",
+                        "revision": _revision(f"rev-{command}"),
+                    },
+                    "debug": {
+                        "pause_on_start": True,
+                        "breakpoints": [],
+                    },
+                },
+            )
+            assert created.status_code == 200
+            run_id = created.json()["id"]
+            _wait_for(
+                client,
+                run_id,
+                lambda run: run.get("debug", {}).get("status") == "paused",
+            )
+            if command == "emergency_stop":
+                assert client.post(
+                    f"/api/v1/runtime/runs/{run_id}/commands",
+                    json={"command": "continue", "payload": {}},
+                ).status_code == 200
+                _wait_for(
+                    client,
+                    run_id,
+                    lambda _run: next(
+                        node
+                        for node in client.get(
+                            f"/api/v1/runtime/runs/{run_id}/nodes"
+                        ).json()["items"]
+                        if node["nodeId"] == "measure"
+                    )["state"]
+                    == "running",
+                )
+
+            stopped = client.post(
+                f"/api/v1/runtime/runs/{run_id}/commands",
+                json={"command": command, "payload": {}},
+            )
+            assert stopped.status_code == 200
+            assert stopped.json()["debug"]["stopReason"] == command
+            assert _wait_for(
+                client,
+                run_id,
+                lambda run: run["status"] == "cancelled",
+            )["status"] == "cancelled"
+            events = client.get(
+                f"/api/v1/runtime/runs/{run_id}/events?after_seq=0"
+            ).json()["events"]
+            assert any(event["type"] == event_type for event in events)
+            assert any(
+                event["type"] == "debug.cancelled"
+                and event["payload"]["stopReason"] == command
+                for event in events
+            )
 
 
 def test_authoring_api_roundtrips_control_dag_with_exact_device_ids(

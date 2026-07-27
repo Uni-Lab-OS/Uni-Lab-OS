@@ -48,7 +48,12 @@ Result + SQLite journal     ← authoritative projection
 - `step` 只放行一个逻辑 ready 节点，在其终态后再次暂停。
 - v1 的 `step_over` 和 `step_into` 是 `step` 的显式别名。
 - `run_to` 在目标即将 admission 时暂停。
-- `terminate`/`emergency_stop` 结束 debug admission；实际设备取消/急停仍必须走上层安全路径。
+- `terminate` 结束 debug admission，并由 `TaskDagRunner` 解开已派发节点的 callback
+  future，随后通过设备清理回调取消当前 run 的剩余动作。
+- `emergency_stop` 同样只作用于当前 run，但会立即触发一次幂等的设备清理回调；
+  它不是全站硬件急停或安全继电器的替代品。
+- 两者分别产生 `debug.terminate_requested` 与
+  `debug.emergency_stop_requested`，最终仍以节点/run 的权威终态为准。
 - `start_node_id` 创建 run 后不可修改；断点可以用 `set_breakpoints` 更新。
 
 调试控制必须在资源 admission 之前。把断点判断挪到 `submit()` 后会造成设备已经动作却被
@@ -80,4 +85,5 @@ UNILAB_PY=/home/changjunhan/.micromamba/envs/unilab/bin/python
 ```
 
 至少覆盖：拒环、完整控制 DAG、起始点可达性、breakpoint-before-admission、并发节点 drain、
-恰好一个节点的 step、分支 skip、失败/取消、资源互斥、事件原子性和重启恢复。
+恰好一个节点的三种 step、运行中 pause drain、terminate/emergency stop 的 callback
+收敛与区分事件、分支 skip、失败/取消、资源互斥、事件原子性和重启恢复。
