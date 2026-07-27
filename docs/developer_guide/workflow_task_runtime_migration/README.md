@@ -22,7 +22,7 @@ unchanged. Completed phases accumulate on
 
 | Phase | Purpose | Status |
 |---|---|---|
-| 00 | Baseline, decisions, manifests, test evidence | in progress |
+| 00 | Baseline, decisions, manifests, test evidence | complete |
 | 01 | Backend-aligned Workflow/WorkflowTask contract | not planned in detail |
 | 02 | Canonical Workflow and Python/JSON authoring | not planned in detail |
 | 03 | Node-centric control-DAG scheduler | not planned in detail |
