@@ -11,8 +11,6 @@ from typing import Any, Mapping
 import yaml
 from pydantic import ValidationError
 
-from unilabos.registry.action_catalog import scan_decorated_device_package
-
 from unilabos.workflow.canonical import (
     ActionInvocation,
     ControlEdge,
@@ -354,6 +352,10 @@ class ProfileLoader:
         # @device/@action declarations are the registry-owned source of truth.
         decorated_root = profile_path.parent / profile_id
         if decorated_root.is_dir():
+            from unilabos.registry.action_catalog import (
+                scan_decorated_device_package,
+            )
+
             decorated_actions = scan_decorated_device_package(decorated_root)
             duplicates = sorted(set(action_catalog) & set(decorated_actions))
             if duplicates:

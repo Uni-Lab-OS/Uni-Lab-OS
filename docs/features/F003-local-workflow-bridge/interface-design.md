@@ -1,5 +1,12 @@
 # 接口 / 协议 / 设计: 本地工作流桥（local_bridge）
 
+> **退役声明（2026-07-26）**
+> 本文是 F003 原“三面 bridge”的历史设计档案。旧 Cloud panel
+> `/ws/workflow/{uuid}`、8891、`workflow_ws.py` 已从代码和运行时完全删除；以下实现 A
+> 章节仅用于说明当时为何存在，不能作为恢复兼容入口的依据。当前接口以
+> [README.md](README.md) 和
+> [local_bridge README](../../../unilabos/app/local_bridge/README.md) 为准。
+
 > **Author: HUMAN 定义 / CLAUDE 补充示例**
 > Claude 实现时严格遵循，不自行发挥接口风格。
 > OS 面契约严格镜像 F002 `interface-design.md`（`task_dag`/`job_status`），保证"接口和后端一致"。

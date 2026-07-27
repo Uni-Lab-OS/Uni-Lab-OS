@@ -11,6 +11,7 @@ from unilabos.workflow.bindings import (
     ConditionalBinding,
     ExpressionBinding,
     LiteralValue,
+    NodeOutputRef,
     NodeResultRef,
     RuntimeParameterRef,
 )
@@ -196,16 +197,23 @@ class StructuredOperationTreeCodec:
                     f"expression references undeclared variable {name!r}"
                 )
             return self._variables[name]
+        if (
+            set(expression) == {"field", "name"}
+            and isinstance(expression.get("field"), Mapping)
+            and set(expression["field"]) == {"var"}
+        ):
+            source = self._variables.get(str(expression["field"]["var"]))
+            if isinstance(source, NodeResultRef):
+                return NodeOutputRef(
+                    node_id=source.node_id,
+                    output=str(expression["name"]),
+                )
         variables: dict[str, Any] = {}
         for name in sorted(_variable_names(expression)):
             source = self._variables.get(name)
             if source is None:
                 raise OperationTreeCompileError(
                     f"expression references undeclared variable {name!r}"
-                )
-            if isinstance(source, ExpressionBinding):
-                raise OperationTreeCompileError(
-                    "nested expression variable bindings are not supported"
                 )
             variables[name] = source
         return ExpressionBinding(
@@ -435,34 +443,83 @@ class StructuredOperationTreeCodec:
             str(input_name): self._binding_for_expression(expression)
             for input_name, expression in (node.get("inputs") or {}).items()
         }
+        module = str(node.get("module") or "")
+        symbol = str(node.get("callable") or "")
+        marker_control: dict[str, Any] = {
+            "name": f"subworkflow::{name}",
+        }
+        if module and symbol:
+            marker_control["callable"] = {
+                "module": module,
+                "name": symbol,
+                "inputs": {
+                    input_name: binding.model_dump(
+                        mode="json",
+                        exclude_none=True,
+                    )
+                    for input_name, binding in supplied.items()
+                },
+                "outputs": {},
+            }
+        marker_index = len(self._invocations)
+        marker = ActionInvocation(
+            node_id=self._new_id("group"),
+            action_ref="os_control.group",
+            node_type="group",
+            control=marker_control,
+        )
+        marker_exits = self._append_invocation(marker, incoming)
         self._variables = self._initial_variables(
             document,
             inputs=supplied,
             is_root=False,
         )
         self._script_stack.append(name)
-        before = len(self._invocations)
+        source_entry_start = len(self._source_entries)
         try:
-            exits = self._compile_block(document.get("body", []), incoming=incoming)
+            exits = self._compile_block(
+                document.get("body", []),
+                incoming=marker_exits,
+            )
             child_variables = self._variables
+            child_returns = {
+                str(output_name): self._binding_for_expression(expression)
+                for output_name, expression in (
+                    document.get("returns") or {}
+                ).items()
+            }
         finally:
             self._script_stack.pop()
             self._variables = caller_variables
+        call_outputs: dict[str, Any] = {}
         for child_name, target in (node.get("outputs") or {}).items():
             if not isinstance(target, Mapping) or not target.get("var"):
                 raise OperationTreeCompileError("run_script output target is invalid")
-            source = child_variables.get(str(child_name))
+            source = child_returns.get(
+                str(child_name),
+                child_variables.get(str(child_name)),
+            )
             target_name = str(target["var"])
             if source is None or target_name not in self._variables:
                 raise OperationTreeCompileError("run_script output is unresolved")
             self._variables[target_name] = source
-        compiled_ids = [item.node_id for item in self._invocations[before:]]
-        self._source_entries.append(
-            SourceMapEntry(
-                node_id=compiled_ids[0] if compiled_ids else "",
-                compiled_node_ids=compiled_ids,
+            call_outputs[str(child_name)] = {
+                "target": target_name,
+                "binding": source.model_dump(mode="json", exclude_none=True),
+            }
+        if "callable" in marker_control:
+            marker_control["callable"]["outputs"] = call_outputs
+            self._invocations[marker_index] = marker.model_copy(
+                update={"control": marker_control}
             )
-        )
+        # Imported child line numbers belong to another file. In the composite
+        # source every expanded child maps to the visible function-call line.
+        call_line = int(node.get("_source_line") or 0)
+        call_column = int(node.get("_source_column") or 0)
+        for index in range(source_entry_start, len(self._source_entries)):
+            self._source_entries[index] = self._source_entries[index].model_copy(
+                update={"line": call_line, "column": call_column}
+            )
         return exits
 
     def _compile_try(

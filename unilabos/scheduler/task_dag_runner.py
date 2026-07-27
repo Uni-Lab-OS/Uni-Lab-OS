@@ -28,6 +28,7 @@ from unilabos.scheduler.dag_executor import DagExecutor, DagWalk, OnTerminalFn
 from unilabos.scheduler.dag_model import DagNode, NodeState, TaskDag
 from unilabos.scheduler.resource_lock import ResourceLockManager
 from unilabos.scheduler.result_store import NodeExecutionResult, ResultEnvelope
+from unilabos.scheduler.debug_controller import DebugController
 from unilabos.runtime.event_store import SQLiteEventJournal
 
 logger = logging.getLogger(__name__)
@@ -68,6 +69,7 @@ class TaskDagRunner:
         walk: Optional[DagWalk] = None,
         resource_lock_manager: Optional[ResourceLockManager] = None,
         journal: Optional[SQLiteEventJournal] = None,
+        debug_controller: Optional[DebugController] = None,
     ) -> None:
         self.dag = dag
         self._on_start_node = on_start_node
@@ -82,6 +84,7 @@ class TaskDagRunner:
             walk=walk,
             resource_lock_manager=resource_lock_manager,
             journal=journal,
+            debug_controller=debug_controller,
         )
 
     async def run(self) -> dict[str, NodeState]:
@@ -194,6 +197,16 @@ class TaskDagRunner:
                     },
                 ),
             )
+
+    async def debug_command(
+        self,
+        command: str,
+        payload: dict[str, Any] | None = None,
+    ) -> dict[str, Any]:
+        return await self._executor.debug_command(command, payload)
+
+    def debug_projection(self) -> dict[str, Any]:
+        return self._executor.debug_projection()
 
     def _resolve(self, job_id: str, state: NodeState | NodeExecutionResult) -> None:
         fut = self._pending.pop(job_id, None)

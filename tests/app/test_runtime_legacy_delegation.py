@@ -5,11 +5,8 @@ from __future__ import annotations
 import asyncio
 from typing import Any
 
-import pytest
-
 from unilabos.app.local_bridge.local_api import LocalApiState
 from unilabos.app.local_bridge.schedule_ws import ScheduleSession
-from unilabos.app.local_bridge.workflow_ws import RUN_WORKFLOW, WorkflowSession
 
 
 ACTION_CATALOG: dict[str, dict[str, Any]] = {
@@ -127,38 +124,3 @@ def test_legacy_local_api_run_adapts_then_delegates_to_runtime_service() -> None
     assert response["run_id"] == "runtime-local-1"
     assert response["status"] == "pending"
     assert os_side.received == [], "legacy HTTP bridge must not dispatch TaskDag itself"
-
-
-def test_legacy_workflow_session_run_delegates_to_runtime_service() -> None:
-    async def scenario() -> None:
-        os_side = RecordingTransport()
-        panel_side = RecordingTransport()
-        schedule = ScheduleSession(os_side.send)
-        runtime = RecordingRuntimeService(run_id="runtime-ws-1")
-        try:
-            workflow = WorkflowSession(
-                panel_side.send,
-                schedule,
-                uuid="panel-1",
-                runtime_service=runtime,
-            )
-        except TypeError as exc:
-            pytest.fail(
-                "WorkflowSession must accept the shared RuntimeService dependency: "
-                f"{exc}",
-                pytrace=False,
-            )
-
-        await workflow.handle_incoming({"action": RUN_WORKFLOW})
-
-        assert len(runtime.start_calls) == 1
-        payload = _assert_canonical_source(runtime.start_calls[0])
-        assert [node["node_id"] for node in payload["invocations"]] == ["n1", "n2"]
-        assert workflow._task_id == "runtime-ws-1"  # noqa: SLF001
-        assert panel_side.received[-1] == {
-            "code": 0,
-            "data": {"action": RUN_WORKFLOW, "data": "runtime-ws-1"},
-        }
-        assert os_side.received == [], "legacy WS bridge must not dispatch TaskDag itself"
-
-    asyncio.run(scenario())

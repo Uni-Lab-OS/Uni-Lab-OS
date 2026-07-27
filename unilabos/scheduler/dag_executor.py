@@ -32,6 +32,11 @@ from unilabos.scheduler.result_store import (
     validate_result_outputs,
 )
 from unilabos.scheduler.ready_policy import DeterministicReadyPolicy
+from unilabos.scheduler.debug_controller import DebugController
+from unilabos.scheduler.python_fallback import (
+    python_fallback_lease_request,
+    validate_python_fallback_dag,
+)
 from unilabos.scheduler.resource_lock import (
     LeaseRequest,
     ResolvedResourceClaim,
@@ -64,7 +69,13 @@ class DagWalk:
     - resume：以 completed 初始化，已完成节点视作 SUCCESS 并预满足后继依赖（I4）。
     """
 
-    def __init__(self, dag: TaskDag, *, completed: Iterable[str] = ()) -> None:
+    def __init__(
+        self,
+        dag: TaskDag,
+        *,
+        completed: Iterable[str] = (),
+        start_node_id: str | None = None,
+    ) -> None:
         self.dag = dag
         self.indeg: dict[str, int] = dag.build_indegree()
         self.adj: dict[str, list[str]] = dag.adjacency()
@@ -79,9 +90,39 @@ class DagWalk:
         for index, edge in enumerate(dag.edges):
             self.incoming[edge.target_node_uuid].append(index)
             self.outgoing[edge.source_node_uuid].append(index)
+        self.start_node_id = start_node_id or None
+        self.initial_skipped: tuple[str, ...] = ()
+        if self.start_node_id is not None:
+            if self.start_node_id not in dag.nodes:
+                raise ValueError(f"UNKNOWN_START_NODE: {self.start_node_id}")
+            reachable: set[str] = set()
+            pending = [self.start_node_id]
+            while pending:
+                current = pending.pop()
+                if current in reachable:
+                    continue
+                reachable.add(current)
+                pending.extend(self.adj[current])
+            skipped = set(dag.nodes) - reachable
+            self.initial_skipped = tuple(
+                node_id for node_id in dag.nodes if node_id in skipped
+            )
+            for node_id in self.initial_skipped:
+                self.states[node_id] = NodeState.SKIPPED
+            # The selected start is a new execution boundary. Incoming edges
+            # from outside the reachable subgraph must not suppress it.
+            self.indeg = {node_id: 0 for node_id in dag.nodes}
+            for edge_index, edge in enumerate(dag.edges):
+                if (
+                    edge.source_node_uuid in reachable
+                    and edge.target_node_uuid in reachable
+                ):
+                    self.indeg[edge.target_node_uuid] += 1
+                else:
+                    self.edge_states[edge_index] = EdgeState.SKIPPED
         # resume：把已完成节点直接置 SUCCESS 并释放其对后继的约束
         for nid in completed:
-            if nid in self.states and self.states[nid] != NodeState.SUCCESS:
+            if nid in self.states and self.states[nid] == NodeState.PENDING:
                 self._apply_success(nid)
 
     def ready(self) -> list[str]:
@@ -213,17 +254,30 @@ class DagExecutor:
         resource_lock_manager: Optional[ResourceLockManager] = None,
         journal: Optional[SQLiteEventJournal] = None,
         runtime_parameters: Optional[dict[str, Any]] = None,
+        debug_controller: Optional[DebugController] = None,
     ) -> None:
         self.dag = dag
         self._submit = submit
         self._on_terminal = on_node_terminal
-        self.walk = walk if walk is not None else DagWalk(dag)
+        self.walk = (
+            walk
+            if walk is not None
+            else DagWalk(
+                dag,
+                start_node_id=str(dag.debug.get("start_node_id") or "") or None,
+            )
+        )
         self._lock_manager = resource_lock_manager
         self._ready_policy = (
             DeterministicReadyPolicy(lock_manager=resource_lock_manager)
             if resource_lock_manager is not None
             else None
         )
+        if resource_lock_manager is not None:
+            validate_python_fallback_dag(
+                dag,
+                lock_manager=resource_lock_manager,
+            )
         self._journal = journal
         self._runtime_parameters = dict(
             dag.runtime_parameters
@@ -236,20 +290,51 @@ class DagExecutor:
         self._leases: dict[str, ResourceLease] = {}
         self._terminal_payloads: dict[str, dict[str, Any]] = {}
         self._ready_sequence = 0
+        self._debug_controller = debug_controller
 
     def cancel(self) -> None:
         """外部取消（对应 cancel_task）：停止调度后继，已在跑节点由上层取消。"""
         self._cancelled = True
+        if self._debug_controller is not None:
+            self._debug_controller.cancel_wait()
         if self._lock_manager is not None:
             self._lock_manager.notify_waiters()
+
+    async def debug_command(
+        self,
+        command: str,
+        payload: dict[str, Any] | None = None,
+    ) -> dict[str, Any]:
+        if self._debug_controller is None:
+            raise ValueError("DEBUG_NOT_ENABLED")
+        projection = await self._debug_controller.command(command, payload)
+        if command.strip().lower() in {"terminate", "emergency_stop"}:
+            self.cancel()
+        return projection
+
+    def debug_projection(self) -> dict[str, Any]:
+        if self._debug_controller is None:
+            return {"enabled": False, "status": "disabled"}
+        return self._debug_controller.projection()
 
     async def run(self) -> dict[str, NodeState]:
         """走完整张图，返回每节点终态快照。无环则有限步终止（I6）。"""
         inflight: dict[str, asyncio.Task] = {}
         try:
+            for node_id in self.walk.initial_skipped:
+                await self._finalize_node(node_id, NodeState.SKIPPED)
+                self._notify_terminal(node_id, NodeState.SKIPPED)
             while not self.walk.is_done() and not self._cancelled:
                 # 1) Layer-A admission 后提交本轮可运行节点。未获 lease 的节点保持 READY。
-                admitted = await self._admit_ready(self.walk.ready())
+                ready_ids = self.walk.ready()
+                if self._debug_controller is not None:
+                    ready_ids = await self._debug_controller.select_ready(
+                        ready_ids,
+                        has_inflight=bool(inflight),
+                    )
+                admitted = await self._admit_ready(ready_ids)
+                if self._debug_controller is not None:
+                    self._debug_controller.on_admitted(admitted)
                 for nid in admitted:
                     self.walk.mark_running(nid)
                     inflight[nid] = asyncio.ensure_future(self._run_node(nid))
@@ -305,6 +390,8 @@ class DagExecutor:
                     else:
                         self.walk.on_failed(nid)
                     await self._finalize_node(nid, status)
+                    if self._debug_controller is not None:
+                        self._debug_controller.on_terminal(nid)
                     if status == NodeState.SUCCESS:
                         await self._release_resource_holds(nid)
                     self._notify_terminal(nid, status)
@@ -314,6 +401,8 @@ class DagExecutor:
                         await self._run_failure_cleanups(nid)
                         snapshot = self.walk.snapshot()
                         self._record_run_terminal(snapshot)
+                        if self._debug_controller is not None:
+                            self._debug_controller.on_run_terminal("failed")
                         return snapshot
         finally:
             if inflight:
@@ -323,6 +412,15 @@ class DagExecutor:
             self.walk.cancel_remaining()
         snapshot = self.walk.snapshot()
         self._record_run_terminal(snapshot)
+        if self._debug_controller is not None:
+            terminal = (
+                "cancelled"
+                if NodeState.CANCELLED in snapshot.values()
+                else "failed"
+                if NodeState.FAILED in snapshot.values()
+                else "completed"
+            )
+            self._debug_controller.on_run_terminal(terminal)
         return snapshot
 
     async def _run_failure_cleanups(self, failed_node_id: str) -> None:
@@ -351,18 +449,19 @@ class DagExecutor:
                     node,
                     run_id=self.dag.task_id,
                 )
-                admitted = await self._ready_policy.admit([node])
-                if not admitted:
-                    self.walk.states[node.node_id] = NodeState.FAILED
-                    self._terminal_payloads[node.node_id] = {
-                        "error": "safety cleanup resource lease was not acquired",
-                        "primary_failure": failed_node_id,
-                        "physical_state": "unknown",
-                    }
-                    await self._finalize_node(node.node_id, NodeState.FAILED)
-                    self._notify_terminal(node.node_id, NodeState.FAILED)
-                    continue
-                self._leases[node.node_id] = admitted[0].lease
+                if node.lease_request.claims:
+                    admitted = await self._ready_policy.admit([node])
+                    if not admitted:
+                        self.walk.states[node.node_id] = NodeState.FAILED
+                        self._terminal_payloads[node.node_id] = {
+                            "error": "safety cleanup resource lease was not acquired",
+                            "primary_failure": failed_node_id,
+                            "physical_state": "unknown",
+                        }
+                        await self._finalize_node(node.node_id, NodeState.FAILED)
+                        self._notify_terminal(node.node_id, NodeState.FAILED)
+                        continue
+                    self._leases[node.node_id] = admitted[0].lease
             self.walk.states[node.node_id] = NodeState.RUNNING
             self.walk.dispatched_nodes.add(node.node_id)
             cleanup_id, cleanup_status = await self._run_node(node.node_id)
@@ -442,7 +541,7 @@ class DagExecutor:
                 self.walk.states[node_id] = NodeState.READY
             if (
                 node.device_id == "os_control"
-                and node.node_type in {"branch", "join"}
+                and node.node_type in {"branch", "join", "group"}
                 and node.action == node.node_type
             ):
                 # Structured control nodes are evaluated by the OS kernel. They
@@ -457,6 +556,10 @@ class DagExecutor:
                 node,
                 run_id=self.dag.task_id,
             )
+            if not node.lease_request.claims:
+                node.admission_state = "admitted"
+                internal_node_ids.append(node_id)
+                continue
             if self._journal is not None and node_id not in self._leases:
                 existing_events = {
                     event.type
@@ -517,49 +620,10 @@ class DagExecutor:
         *,
         run_id: str | None = None,
     ) -> LeaseRequest:
-        claims: list[ResolvedResourceClaim] = []
-        for raw_claim in node.resource_claims:
-            if isinstance(raw_claim, ResolvedResourceClaim):
-                claims.append(raw_claim)
-                continue
-            resource_id = (
-                raw_claim.get("resource_id")
-                or raw_claim.get("resource_uuid")
-                or raw_claim.get("resource_ref")
-            )
-            if not resource_id:
-                # Canonical compiler should normally resolve an instance UUID. This
-                # conservative fallback keeps an unresolved type mutually exclusive
-                # instead of silently running it unlocked.
-                selector = str(raw_claim.get("selector") or "")
-                resource_type = str(raw_claim.get("resource_type") or "resource")
-                if selector == "bound_device":
-                    resource_id = f"device:{node.device_id}"
-                else:
-                    resource_id = f"{resource_type}:{selector or 'unresolved'}"
-            claims.append(
-                ResolvedResourceClaim(
-                    resource_id=str(resource_id),
-                    quantity=int(raw_claim.get("quantity", 1) or 1),
-                    mode=str(raw_claim.get("mode", "exclusive") or "exclusive"),
-                    scope=str(raw_claim.get("scope", "action") or "action"),
-                )
-            )
-        if not claims:
-            claims.append(
-                ResolvedResourceClaim(
-                    resource_id=f"device:{node.device_id}",
-                    quantity=1,
-                    mode="exclusive",
-                    scope="action",
-                )
-            )
-        holder_id = (
-            f"{run_id}:{node.node_id}"
-            if run_id is not None
-            else node.node_id
+        return python_fallback_lease_request(
+            node,
+            run_id=run_id,
         )
-        return LeaseRequest(holder_id=holder_id, claims=tuple(claims))
 
     @staticmethod
     def _serialize_claims(
@@ -568,6 +632,7 @@ class DagExecutor:
         return [
             {
                 "resource_id": claim.resource_id,
+                "resource_kind": claim.resource_kind,
                 "quantity": claim.quantity,
                 "mode": claim.mode,
                 "scope": claim.scope,
@@ -612,6 +677,14 @@ class DagExecutor:
             node.node_type == "join"
             and node.device_id == "os_control"
             and node.action == "join"
+        ):
+            self.results[node_id] = ResultEnvelope(outputs={})
+            self._terminal_payloads[node_id] = {}
+            return node_id, NodeState.SUCCESS
+        if (
+            node.node_type == "group"
+            and node.device_id == "os_control"
+            and node.action == "group"
         ):
             self.results[node_id] = ResultEnvelope(outputs={})
             self._terminal_payloads[node_id] = {}

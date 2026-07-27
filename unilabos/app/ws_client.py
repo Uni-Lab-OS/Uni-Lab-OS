@@ -27,10 +27,15 @@ from enum import Enum
 from typing_extensions import TypedDict
 
 from unilabos.app.model import JobAddReq
-from unilabos.resources.resource_tracker import ResourceDictType
+from unilabos.resources.material_state import CurrentMaterialState
+from unilabos.resources.resource_tracker import (
+    ResourceDictType,
+    ResourceTreeSet,
+)
 from unilabos.ros.nodes.presets.host_node import HostNode
 from unilabos.scheduler.dag_model import DagNode, DagValidationError, NodeState, TaskDag
 from unilabos.scheduler.task_dag_runner import TaskDagRunner
+from unilabos.scheduler.debug_controller import DebugCommandError, DebugController
 from unilabos.scheduler.resource_lock import ResourceLockManager
 from unilabos.runtime.event_store import SQLiteEventJournal
 from unilabos.runtime.reconcile import reconcile_unknown_fence
@@ -679,6 +684,13 @@ class MessageProcessor:
                 await self._handle_query_action_state(message_data)
             elif message_type == "query_action_lock":
                 await self._handle_query_action_lock(message_data)
+            elif message_type == "query_material_snapshot":
+                if self.websocket_client:
+                    self.websocket_client.publish_material_snapshot(
+                        request_id=str(
+                            (message_data or {}).get("request_id") or ""
+                        )
+                    )
             elif message_type == "job_start":
                 await self._handle_job_start(message_data)
             elif message_type == "task_dag":
@@ -687,6 +699,8 @@ class MessageProcessor:
                 await self._handle_cancel_action(message_data)
             elif message_type == "reconcile_run":
                 await self._handle_reconcile_run(message_data)
+            elif message_type == "debug_command":
+                await self._handle_debug_command(message_data)
             elif message_type == "add_material":
                 # noinspection PyTypeChecker
                 await self._handle_resource_tree_update(message_data, "add")
@@ -1100,19 +1114,73 @@ class MessageProcessor:
             )
         self._restore_runtime_fences_once()
 
-        runner = TaskDagRunner(
-            dag,
-            lambda node: self._start_dag_node(node, dag),
-            on_cancel_remaining=lambda: self._cancel_all_jobs_for_task(task_id),
-            loop=self._loop,
-            resource_lock_manager=self._resource_lock_manager,
-            journal=self._runtime_journal,
-        )
+        try:
+            debug_controller = (
+                DebugController(
+                    run_id=task_id,
+                    node_ids=set(dag.nodes),
+                    config=dag.debug,
+                    on_event=lambda event_type, payload: self.send_message(
+                        {
+                            "action": "debug_event",
+                            "data": {
+                                "run_id": task_id,
+                                "type": event_type,
+                                "payload": payload,
+                            },
+                        }
+                    ),
+                )
+                if dag.debug
+                else None
+            )
+            runner = TaskDagRunner(
+                dag,
+                lambda node: self._start_dag_node(node, dag),
+                on_cancel_remaining=lambda: self._cancel_all_jobs_for_task(task_id),
+                loop=self._loop,
+                resource_lock_manager=self._resource_lock_manager,
+                journal=self._runtime_journal,
+                debug_controller=debug_controller,
+            )
+        except DebugCommandError as exc:
+            logger.error(
+                "[MessageProcessor] task_dag %s 调试配置非法: %s",
+                task_id,
+                exc,
+            )
+            return
         self._task_dag_runners[task_id] = runner
         logger.info(
             f"[MessageProcessor] 起跑 task_dag {task_id}: {len(dag.nodes)} 节点 / {len(dag.edges)} 边"
         )
         asyncio.ensure_future(self._run_task_dag(task_id, runner))
+
+    async def _handle_debug_command(self, data: Dict[str, Any]) -> None:
+        """Apply a run-scoped debugger command inside the execution authority."""
+
+        run_id = str(data.get("run_id") or "")
+        request_id = str(data.get("request_id") or "")
+        runner = self._task_dag_runners.get(run_id)
+        ack: Dict[str, Any] = {
+            "request_id": request_id,
+            "run_id": run_id,
+        }
+        if runner is None:
+            ack.update({"status": "rejected", "code": "RUN_NOT_ACTIVE"})
+        else:
+            try:
+                projection = await runner.debug_command(
+                    str(data.get("command") or ""),
+                    data.get("payload")
+                    if isinstance(data.get("payload"), dict)
+                    else {},
+                )
+            except (DebugCommandError, ValueError) as exc:
+                ack.update({"status": "rejected", "code": str(exc)})
+            else:
+                ack.update({"status": "accepted", "debug": projection})
+        self.send_message({"action": "debug_ack", "data": ack})
 
     async def _handle_reconcile_run(self, data: Dict[str, Any]) -> None:
         """Resolve an unknown lease only inside the execution OS authority."""
@@ -1472,6 +1540,8 @@ class MessageProcessor:
                             f"[MessageProcessor] Resource tree {act} completed for device {dev_id}, "
                             f"items: {len(item_list)}"
                         )
+                        if self.websocket_client:
+                            self.websocket_client.publish_material_snapshot()
                     elif success is None:
                         logger.info(
                             f"[MessageProcessor] Resource tree {act} skipped for device {dev_id}: "
@@ -1816,6 +1886,7 @@ class WebSocketClient(BaseCommunicationClient):
         self._job_start_cache_lock = threading.RLock()
         self._job_start_cache_ttl_seconds: float = 24 * 60 * 60
         self._job_start_cache_max_entries: int = 1024
+        self._material_state: CurrentMaterialState | None = None
 
         # 设置相互引用
         self.message_processor.set_queue_processor(self.queue_processor)
@@ -1823,6 +1894,48 @@ class WebSocketClient(BaseCommunicationClient):
         self.queue_processor.set_websocket_client(self)
 
         logger.info(f"[WebSocketClient] Client_id: {self.client_id}")
+
+    def bind_material_state(
+        self,
+        resources: ResourceTreeSet,
+        *,
+        source_id: str = "os-current",
+    ) -> None:
+        """绑定 ``unilab -g`` 加载并由 OS 持续维护的 ResourceTreeSet。"""
+
+        if self._material_state is None:
+            self._material_state = CurrentMaterialState(
+                resources,
+                source_id=source_id,
+            )
+        else:
+            self._material_state.replace(
+                resources,
+                source_id=source_id,
+            )
+
+    def publish_material_snapshot(self, *, request_id: str = "") -> bool:
+        """把 OS 当前内存物料树发布给 local bridge 的只读缓存。"""
+
+        if self._material_state is None:
+            logger.debug("[WebSocketClient] 当前未绑定物料状态，跳过快照")
+            return False
+        snapshot = self._material_state.snapshot()
+        if request_id:
+            snapshot["request_id"] = request_id
+        queued = self.message_processor.send_message(
+            {
+                "action": "material_snapshot",
+                "data": snapshot,
+            }
+        )
+        if queued:
+            logger.debug(
+                "[WebSocketClient] 已发布物料快照 revision=%s nodes=%s",
+                snapshot["revision"],
+                len(snapshot["nodes"]),
+            )
+        return queued
 
     def _build_websocket_url(self) -> Optional[str]:
         """构建 schedule 通道的 WebSocket 连接 URL
@@ -2279,5 +2392,6 @@ class WebSocketClient(BaseCommunicationClient):
         # 服务端会先收到 report_action_lock、再收到 host_node_ready。
         # 启动时全部 free，重连时按 DeviceActionManager 反映正在运行/排队的 busy，实现锁状态对齐。
         self.report_all_action_locks()
+        self.publish_material_snapshot()
         self.message_processor.send_message(message)
         logger.info(f"[WebSocketClient] Host node ready signal published with {len(devices)} devices")

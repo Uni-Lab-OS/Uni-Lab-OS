@@ -27,6 +27,7 @@ _BUILTIN_ACTIONS: dict[str, dict[str, Any]] = {
         "outputs": {"branch": {"type": "string", "required": True}},
     },
     "os_control.join": {"inputs": {}, "outputs": {}},
+    "os_control.group": {"inputs": {}, "outputs": {}},
     "host_node.manual_confirm": {
         "inputs": {
             "prompt": {"type": "string", "default": ""},

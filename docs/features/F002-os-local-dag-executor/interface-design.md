@@ -1,5 +1,10 @@
 # 接口 / 协议 / 设计: OS 本地 DAG 执行器
 
+> **当前边界（2026-07-26）**
+> F002 的 `task_dag`/`job_status` schedule wire 仍有效。旧 Cloud panel
+> `/ws/workflow/{uuid}` 和 8891 已从 local bridge 删除；前端只通过 `:8014` 的统一
+> `unilab/v1` 访问执行器。下文仍提及 Cloud panel 的段落属于历史设计背景。
+
 > **Author: HUMAN 定义 / CLAUDE 补充示例**
 > Claude 实现时严格遵循，不自行发挥接口风格。
 > 契约字段严格镜像 backend `uni-lab-backend` 现有模型，保证"接口和后端一致"。
@@ -78,7 +83,9 @@ backend `EdgeImpl.OnJobStatus`（`pkg/core/schedule/lab/edge/edge_msg.go:64`）�
 
 ### 1.4 端点
 
-沿用现有边云 WebSocket 隧道（`ws_client.py`），无新端点。前端沿用 `/ws/workflow/{uuid}`。
+OS 与 backend/bridge 继续沿用现有 schedule WebSocket 隧道（`ws_client.py`），无新增
+OS wire 端点。前端不直接使用该 wire，而通过 local bridge `:8014` 的统一 `unilab/v1`
+接口访问。
 
 ---
 
@@ -128,12 +135,11 @@ backend `EdgeImpl.OnJobStatus`（`pkg/core/schedule/lab/edge/edge_msg.go:64`）�
   可用开关与现有逐节点模式并存（灰度）。
 - **不改** `OnJobStatus` / `JobData` / `cancel_task`。
 
-### 3.2 前端（`Uni-Lab-Cloud`）— 复用两个既有 panel，零契约改动
-- `WorkflowDAGPanel`（registry id `workflow-dag`，`web/src/panels/WorkflowDAGPanel.tsx`）：DAG 视图。
-- `WorkflowStepsPanel`（registry id `workflow-steps`，`web/src/panels/WorkflowStepsPanel.tsx`）：步骤/线性视图。
-- 二者经 `/ws/workflow/{uuid}` 订阅逐节点状态；因上行 `job_status` 契约不变，
-  **逐节点 running/success/failed 渲染无需改动**。触发执行沿用 `WorkflowWSActionType.RunWorkflow`，
-  停止沿用 `StopWorkflow`（`web/src/types/workflow.ts:178`）。
+### 3.2 前端（当前）
+
+- `uni-lab-fe` 的 workflow editor 使用 `@unilab/services` 的统一 typed port。
+- 完整图经 `/api/v1/runtime/runs` 创建运行，节点/事件经统一 v1 投影读取和订阅。
+- Cloud 工作流画布与旧 panel WS 不再保留；不得为了兼容旧组件绕过统一 runtime。
 
 ---
 

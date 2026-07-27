@@ -1,4 +1,4 @@
-"""local_api — 桥的实现 B（SZLab local_ui）UI 面 HTTP 服务器（FastAPI，:8014）。
+"""local_api — 统一前端 HTTP/WS v1 服务器（FastAPI，:8014）。
 
 unilabos_local_ui（React 19 + React Flow 本地联调工作台）经 vite `/api` 代理连入本服务。
 桥在此扮演「本地联调传输适配器」：把 local_ui 的工作流图归一为 Canonical source，
@@ -25,23 +25,59 @@ node_statuses 以 node.id 为键——F002 node_id == local_ui node.id，故 app
 
 from __future__ import annotations
 
+import asyncio
 import logging
-from collections.abc import Callable, Mapping
+from collections.abc import Awaitable, Callable, Mapping
 from dataclasses import dataclass, field
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
 from unilabos.app.local_bridge.bind_security import require_loopback_runtime_host
+from unilabos.app.local_bridge.material_api import (
+    InvalidMaterialQuery,
+    MaterialGraphCatalog,
+)
+from unilabos.app.local_bridge.material_models import MaterialModelRegistry
 from unilabos.app.local_bridge.schedule_ws import RunHandle, ScheduleSession
 from unilabos.scheduler.dag_model import DagValidationError, NodeState
 from unilabos.scheduler.resource_lock import ResourceLockManager
 from unilabos.workflow.submission import (
     workflow_submission_to_revision,
 )
+from unilabos.workflow.from_python_script import WorkflowSourceResolver
 from unilabos.runtime.event_store import SQLiteEventJournal
-from unilabos.runtime.profile_loader import LoadedProfile
 from unilabos.runtime.service import RuntimeConflictError, RuntimeService
+from unilabos.runtime.workflow_store import (
+    WorkflowDocumentStore,
+    WorkflowRevisionConflict,
+)
+
+if TYPE_CHECKING:
+    from unilabos.runtime.profile_loader import LoadedProfile
 
 logger = logging.getLogger(__name__)
+
+_LOCAL_DEMO_ACTION_CATALOG: dict[str, dict[str, Any]] = {
+    "balance-1.measure": {
+        "label": "称量",
+        "inputs": {},
+        "outputs": {"mass": {"type": "number"}},
+    },
+    "pump-1.dose": {
+        "label": "加液",
+        "inputs": {"volume": {"type": "number", "default": 5}},
+        "outputs": {"delivered": {"type": "number"}},
+    },
+    "heater-1.heat": {
+        "label": "加热",
+        "inputs": {"temperature": {"type": "number", "default": 60}},
+        "outputs": {},
+    },
+    "camera-1.inspect": {
+        "label": "检测",
+        "inputs": {},
+        "outputs": {"passed": {"type": "boolean"}},
+    },
+}
 
 # NodeState → NodeRunStatus（main.tsx NodeRunStatus 字面量）
 _NODE_STATE_TO_RUN_STATUS: dict[NodeState, str] = {
@@ -129,8 +165,8 @@ class RunRecord:
 def build_demo_preset() -> dict[str, Any]:
     """返回 demo PresetPayload——本地桥无真实注册表时的可拖拽动作集。
 
-    动作与 workflow_ws.build_demo_graph 的设备/动作对齐（pump_1/pump_liquid、stirrer_1/stir），
-    使两套 UI 演示同一批设备动作。default_config 镜像 local_ui DEFAULT_CONFIG。
+    仅供 legacy local_ui 兼容路由。统一前端从 v1 action catalog 读取真实动作；
+    default_config 镜像 local_ui DEFAULT_CONFIG。
     """
     return {
         "id": "local_bridge_demo",
@@ -187,7 +223,7 @@ def build_demo_preset() -> dict[str, Any]:
 
 
 class LocalApiState:
-    """实现 B 的协议翻译核（传输无关，便于 hermetic 测）。
+    """统一 API 的协议投影核（传输无关，便于 hermetic 测）。
 
     注入已就绪 ScheduleSession；在其上注册唯一 job_status 回调，把回流按 task_id(==run_id)
     路由到对应 RunRecord 并累积 log_events。对外暴露 build_graph / start_run / get_run /
@@ -203,6 +239,13 @@ class LocalApiState:
         profiles: Mapping[str, LoadedProfile] | None = None,
         resource_lock_manager: ResourceLockManager | None = None,
         runtime_service: Any | None = None,
+        workflow_store: WorkflowDocumentStore | None = None,
+        material_catalog: MaterialGraphCatalog | None = None,
+        material_model_registry: MaterialModelRegistry | None = None,
+        material_refresh: (
+            Callable[[], Awaitable[dict[str, Any]]] | None
+        ) = None,
+        workflow_source_resolver: WorkflowSourceResolver | None = None,
     ) -> None:
         self._schedule = schedule_session
         self._journal = journal
@@ -210,8 +253,23 @@ class LocalApiState:
         self._action_catalog: dict[str, Mapping[str, Any]] = {}
         for profile in self._profiles.values():
             self._action_catalog.update(profile.action_catalog)
-        self._action_catalog.update(action_catalog or {})
+        self._action_catalog.update(
+            _LOCAL_DEMO_ACTION_CATALOG
+            if action_catalog is None and not self._profiles
+            else action_catalog or {}
+        )
         self._runs: dict[str, RunRecord] = {}
+        self._material_catalog = material_catalog
+        self._material_refresh = material_refresh
+        self._workflow_source_resolver = workflow_source_resolver
+        self._material_model_registry = (
+            material_model_registry
+            or (
+                material_catalog.model_registry
+                if material_catalog is not None
+                else None
+            )
+        )
         self._active_workflow: dict[str, Any] | None = None
         self._seq = 0
         self._schedule.on_job_status(self._on_os_job_status)
@@ -221,6 +279,7 @@ class LocalApiState:
             action_catalog=self._action_catalog,
             profiles=self._profiles,
             resource_lock_manager=resource_lock_manager,
+            workflow_store=workflow_store,
         )
         if runtime_service is None:
             self._runtime_service.set_workflow_revision(
@@ -232,6 +291,24 @@ class LocalApiState:
         """Expose the shared service to another transport adapter."""
 
         return self._runtime_service
+
+    @property
+    def material_catalog(self) -> MaterialGraphCatalog | None:
+        """向 HTTP 传输层暴露设备图只读投影。"""
+
+        return self._material_catalog
+
+    @property
+    def material_model_registry(self) -> MaterialModelRegistry | None:
+        """暴露 OS 启动时登记的本地模型，与物料图是否加载无关。"""
+
+        return self._material_model_registry
+
+    async def refresh_material_catalog(self) -> None:
+        """真实 OS 模式下，从执行 OS 查询最新内存快照。"""
+
+        if self._material_refresh is not None:
+            await self._material_refresh()
 
     def build_graph(self, request: dict[str, Any]) -> dict[str, Any]:
         """校验 + 归一 local_ui 工作流请求，返回 WorkflowJson。含环/缺字段抛 DagValidationError。
@@ -304,16 +381,37 @@ class LocalApiState:
     ) -> dict[str, Any] | None:
         """Return the current workflow as the shared RuntimeClient projection."""
 
-        workflow = self._runtime_service.get_workflow()
         if workflow_id is None:
-            return workflow
-        definition = workflow.get("definition")
-        active_id = (
-            str(definition.get("id"))
-            if isinstance(definition, Mapping) and definition.get("id")
-            else ""
+            return self._runtime_service.get_workflow()
+        return self._runtime_service.get_workflow(workflow_id)
+
+    def save_runtime_workflow(
+        self,
+        workflow_id: str,
+        body: dict[str, Any],
+    ) -> dict[str, Any]:
+        revision = body.get("revision")
+        if not isinstance(revision, dict):
+            raise DagValidationError("revision must be an object")
+        if str(revision.get("workflow_id") or "") != workflow_id:
+            raise DagValidationError("workflow_id does not match path")
+        expected = body.get("expectedRevisionId")
+        return self._runtime_service.save_workflow(
+            revision,
+            expected_revision_id=str(expected) if expected is not None else None,
         )
-        return workflow if workflow_id == active_id else None
+
+    def validate_runtime_workflow(self, body: dict[str, Any]) -> dict[str, Any]:
+        revision = body.get("revision")
+        if not isinstance(revision, dict):
+            raise DagValidationError("revision must be an object")
+        parameters = body.get("parameters")
+        if parameters is not None and not isinstance(parameters, dict):
+            raise DagValidationError("parameters must be an object")
+        return self._runtime_service.validate_workflow(
+            revision,
+            parameters=parameters,
+        )
 
     def runtime_actions(self) -> dict[str, Any]:
         """Project the generic OS action catalog for authoring clients."""
@@ -340,6 +438,11 @@ class LocalApiState:
             "actions": actions,
         }
 
+    def runtime_capabilities(self) -> dict[str, Any]:
+        """Expose the active execution boundary for dispatch negotiation."""
+
+        return self._runtime_service.get_capabilities()
+
     async def start_runtime_run(self, body: dict[str, Any]) -> dict[str, Any]:
         """Delegate generic source submission to the OS RuntimeService."""
 
@@ -348,8 +451,26 @@ class LocalApiState:
     def get_runtime_run(self, run_id: str) -> dict[str, Any] | None:
         return self._runtime_service.get_run(run_id)
 
-    def runtime_events(self, run_id: str) -> list[dict[str, Any]] | None:
-        return self._runtime_service.get_events(run_id)
+    def runtime_events(
+        self,
+        run_id: str,
+        *,
+        after_sequence: int = 0,
+        public_names: bool = False,
+    ) -> list[dict[str, Any]] | None:
+        if after_sequence == 0 and not public_names:
+            return self._runtime_service.get_events(run_id)
+        return self._runtime_service.get_events(
+            run_id,
+            after_sequence=after_sequence,
+            public_names=public_names,
+        )
+
+    def runtime_nodes(self, run_id: str) -> list[dict[str, Any]] | None:
+        return self._runtime_service.get_nodes(run_id)
+
+    def runtime_node(self, run_id: str, node_id: str) -> dict[str, Any] | None:
+        return self._runtime_service.get_node(run_id, node_id)
 
     def runtime_timeline(self, run_id: str) -> dict[str, Any] | None:
         return self._runtime_service.get_timeline(run_id)
@@ -361,6 +482,13 @@ class LocalApiState:
         self, run_id: str, body: dict[str, Any]
     ) -> dict[str, Any]:
         return await self._runtime_service.reconcile_run(run_id, body)
+
+    async def runtime_debug_command(
+        self,
+        run_id: str,
+        body: dict[str, Any],
+    ) -> dict[str, Any]:
+        return await self._runtime_service.debug_command(run_id, body)
 
     def get_run(self, run_id: str) -> dict[str, Any] | None:
         """GET /api/run/{id}：返回当前 RunStatus；无此 run 则 None（路由转 404）。"""
@@ -488,16 +616,18 @@ def create_app(get_state: Callable[[], LocalApiState | None]) -> Any:
 
     延迟 import fastapi（未装不拖累其余桥面）。路由只做请求解码 + 调 LocalApiState + 错误转码。
     """
-    from fastapi import Body, FastAPI, HTTPException
+    from fastapi import Body, FastAPI, HTTPException, WebSocket, WebSocketDisconnect
     from fastapi.middleware.cors import CORSMiddleware
+    from fastapi.responses import FileResponse
 
-    app = FastAPI(title="Uni-Lab 本地桥（实现 B）", version="1.0")
+    app = FastAPI(title="Uni-Lab OS Local API", version="1.0")
     app.add_middleware(
         CORSMiddleware,
         allow_origin_regex=(
-            r"^http://(?:localhost|127\.0\.0\.1|\[::1\])(?::\d{1,5})?$"
+            r"^(?:null|http://(?:localhost|127\.0\.0\.1|\[::1\])"
+            r"(?::\d{1,5})?)$"
         ),
-        allow_methods=["GET", "POST", "OPTIONS"],
+        allow_methods=["GET", "POST", "PUT", "OPTIONS"],
         allow_headers=["Authorization", "Content-Type"],
     )
 
@@ -518,6 +648,145 @@ def create_app(get_state: Callable[[], LocalApiState | None]) -> Any:
                 detail="INVALID_AUTHORING_ENVELOPE",
             )
         return payload
+
+    def _problem(
+        status: int,
+        code: str,
+        detail: str,
+        *,
+        run_id: str | None = None,
+    ) -> HTTPException:
+        payload: dict[str, Any] = {
+            "type": f"https://unilab.local/problems/{code.lower()}",
+            "title": code,
+            "status": status,
+            "detail": detail,
+            "code": code,
+        }
+        if run_id is not None:
+            payload["runId"] = run_id
+        return HTTPException(status_code=status, detail=payload)
+
+    def _require_material_catalog() -> MaterialGraphCatalog:
+        state = get_state()
+        catalog = state.material_catalog if state is not None else None
+        if catalog is None or not catalog.is_available:
+            raise _problem(
+                503,
+                "MATERIAL_GRAPH_UNAVAILABLE",
+                (
+                    "OS session is unavailable or has not published its "
+                    "current in-memory material snapshot"
+                ),
+            )
+        return catalog
+
+    async def _refresh_material_catalog() -> None:
+        state = get_state()
+        if state is None:
+            raise _problem(
+                503,
+                "MATERIAL_GRAPH_UNAVAILABLE",
+                "OS session is unavailable",
+            )
+        try:
+            await state.refresh_material_catalog()
+        except (TimeoutError, RuntimeError) as exc:
+            raise _problem(
+                503,
+                "MATERIAL_GRAPH_UNAVAILABLE",
+                f"Unable to refresh OS material snapshot: {exc}",
+            ) from exc
+
+    def _require_material_model_registry() -> MaterialModelRegistry:
+        state = get_state()
+        registry = (
+            state.material_model_registry if state is not None else None
+        )
+        if registry is None:
+            raise _problem(
+                503,
+                "MATERIAL_MODELS_UNAVAILABLE",
+                "OS session is unavailable or local models were not registered",
+            )
+        return registry
+
+    @app.get("/health")
+    async def health() -> Any:
+        return {"status": "ok"}
+
+    @app.get("/api/v1/materials")
+    async def api_v1_materials(
+        page: int = 1,
+        page_size: int = 20,
+        name: str | None = None,
+        code: str | None = None,
+        resource_template_uuid: str | None = None,
+    ) -> Any:
+        await _refresh_material_catalog()
+        try:
+            result = _require_material_catalog().list_materials(
+                page=page,
+                page_size=page_size,
+                name=name,
+                code=code,
+                resource_template_uuid=resource_template_uuid,
+            )
+        except InvalidMaterialQuery as exc:
+            raise _problem(
+                400,
+                "INVALID_MATERIAL_QUERY",
+                str(exc),
+            ) from exc
+        return {"code": 0, "data": result, "message": "success"}
+
+    @app.get("/api/v1/materials/{material_uuid}")
+    async def api_v1_material(material_uuid: str) -> Any:
+        await _refresh_material_catalog()
+        try:
+            material = _require_material_catalog().get_material(
+                material_uuid
+            )
+        except InvalidMaterialQuery as exc:
+            raise _problem(
+                400,
+                "INVALID_MATERIAL_UUID",
+                str(exc),
+            ) from exc
+        if material is None:
+            raise _problem(
+                404,
+                "MATERIAL_NOT_FOUND",
+                material_uuid,
+            )
+        return {"code": 0, "data": material, "message": "success"}
+
+    @app.get("/api/v1/material-models")
+    async def api_v1_material_models() -> Any:
+        models = _require_material_model_registry().list_models()
+        return {
+            "code": 0,
+            "data": {"items": models, "total": len(models)},
+            "message": "success",
+        }
+
+    @app.get("/api/v1/material-models/assets/{asset_path:path}")
+    async def api_v1_material_model_asset(asset_path: str) -> Any:
+        try:
+            path = _require_material_model_registry().resolve_asset(asset_path)
+        except ValueError as exc:
+            raise _problem(
+                400,
+                "INVALID_MATERIAL_MODEL_PATH",
+                str(exc),
+            ) from exc
+        if not path.is_file():
+            raise _problem(
+                404,
+                "MATERIAL_MODEL_ASSET_NOT_FOUND",
+                asset_path,
+            )
+        return FileResponse(path)
 
     @app.get("/api/preset")
     async def api_preset() -> Any:
@@ -540,6 +809,7 @@ def create_app(get_state: Callable[[], LocalApiState | None]) -> Any:
             return compile_authoring_revision(
                 request,
                 action_catalog=state._action_catalog,
+                workflow_source_resolver=state._workflow_source_resolver,
             )
         except ValueError as exc:
             raise HTTPException(status_code=422, detail=str(exc)) from exc
@@ -557,6 +827,7 @@ def create_app(get_state: Callable[[], LocalApiState | None]) -> Any:
             return generate_python_revision(
                 request,
                 action_catalog=state._action_catalog,
+                workflow_source_resolver=state._workflow_source_resolver,
             )
         except ValueError as exc:
             raise HTTPException(status_code=422, detail=str(exc)) from exc
@@ -679,11 +950,234 @@ def create_app(get_state: Callable[[], LocalApiState | None]) -> Any:
         except RuntimeConflictError as exc:
             raise HTTPException(status_code=409, detail=str(exc)) from exc
 
+    # Unified frontend contract.  The older /api/runtime/local routes above
+    # remain compatibility aliases while the migrating frontend uses only v1.
+    @app.get("/api/v1/workflows/{workflow_id}/graph")
+    async def api_v1_workflow_graph(workflow_id: str) -> Any:
+        workflow = _require_state().runtime_workflow(workflow_id)
+        if workflow is None:
+            raise _problem(404, "WORKFLOW_NOT_FOUND", workflow_id)
+        return workflow
+
+    @app.put("/api/v1/workflows/{workflow_id}/graph")
+    async def api_v1_save_workflow(
+        workflow_id: str,
+        payload: dict[str, Any] = Body(...),
+    ) -> Any:
+        try:
+            return _require_state().save_runtime_workflow(workflow_id, payload)
+        except WorkflowRevisionConflict as exc:
+            raise _problem(409, "WORKFLOW_REVISION_CONFLICT", str(exc)) from exc
+        except DagValidationError as exc:
+            raise _problem(422, "INVALID_WORKFLOW", str(exc)) from exc
+
+    @app.post("/api/v1/workflows:validate")
+    async def api_v1_validate_workflow(
+        payload: dict[str, Any] = Body(...),
+    ) -> Any:
+        try:
+            return _require_state().validate_runtime_workflow(payload)
+        except DagValidationError as exc:
+            raise _problem(422, "INVALID_WORKFLOW", str(exc)) from exc
+
+    @app.get("/api/v1/workflow-node-templates")
+    async def api_v1_node_templates() -> Any:
+        catalog = _require_state().runtime_actions()
+        return {
+            "schemaVersion": "workflow-node-templates/v1",
+            "items": [
+                {
+                    "id": action["action_ref"],
+                    "kind": "action",
+                    "label": action["label"],
+                    "inputSchema": action["input_schema"],
+                    "outputSchema": action["output_schema"],
+                }
+                for action in catalog["actions"]
+            ]
+            + [
+                {
+                    "id": "os_control.branch",
+                    "kind": "branch",
+                    "label": "条件分支",
+                    "inputSchema": {
+                        "condition": {"type": "boolean", "required": True}
+                    },
+                    "outputSchema": {"branch": {"type": "string"}},
+                },
+                {
+                    "id": "os_control.join",
+                    "kind": "join",
+                    "label": "分支汇合",
+                    "inputSchema": {},
+                    "outputSchema": {},
+                },
+            ],
+        }
+
+    @app.get("/api/v1/runtime/capabilities")
+    async def api_v1_runtime_capabilities() -> Any:
+        return _require_state().runtime_capabilities()
+
+    @app.post("/api/v1/runtime/runs")
+    async def api_v1_start_run(
+        payload: dict[str, Any] = Body(...),
+    ) -> Any:
+        try:
+            return await _require_state().start_runtime_run(payload)
+        except DagValidationError as exc:
+            raise _problem(422, "INVALID_RUN_REQUEST", str(exc)) from exc
+
+    @app.get("/api/v1/runtime/runs/{run_id}")
+    async def api_v1_run(run_id: str) -> Any:
+        run = _require_state().get_runtime_run(run_id)
+        if run is None:
+            raise _problem(404, "RUN_NOT_FOUND", run_id, run_id=run_id)
+        return run
+
+    @app.get("/api/v1/runtime/runs/{run_id}/nodes")
+    async def api_v1_run_nodes(run_id: str) -> Any:
+        nodes = _require_state().runtime_nodes(run_id)
+        if nodes is None:
+            raise _problem(404, "RUN_NOT_FOUND", run_id, run_id=run_id)
+        return {"items": nodes}
+
+    @app.get("/api/v1/runtime/runs/{run_id}/nodes/{node_id}")
+    async def api_v1_run_node(run_id: str, node_id: str) -> Any:
+        node = _require_state().runtime_node(run_id, node_id)
+        if node is None:
+            raise _problem(
+                404,
+                "RUN_NODE_NOT_FOUND",
+                f"{run_id}/{node_id}",
+                run_id=run_id,
+            )
+        return node
+
+    @app.get("/api/v1/runtime/runs/{run_id}/events")
+    async def api_v1_run_events(run_id: str, after_seq: int = 0) -> Any:
+        events = _require_state().runtime_events(
+            run_id,
+            after_sequence=max(0, after_seq),
+            public_names=True,
+        )
+        if events is None:
+            raise _problem(404, "RUN_NOT_FOUND", run_id, run_id=run_id)
+        return {
+            "events": events,
+            "nextSeq": max(
+                [after_seq, *(int(event["seq"]) for event in events)]
+            ),
+        }
+
+    @app.get("/api/v1/runtime/runs/{run_id}/timeline")
+    async def api_v1_run_timeline(run_id: str) -> Any:
+        timeline = _require_state().runtime_timeline(run_id)
+        if timeline is None:
+            raise _problem(404, "RUN_NOT_FOUND", run_id, run_id=run_id)
+        return timeline
+
+    @app.post("/api/v1/runtime/runs/{run_id}/cancel")
+    async def api_v1_cancel_run(run_id: str) -> Any:
+        try:
+            result = await _require_state().cancel_runtime_run(run_id)
+        except RuntimeConflictError as exc:
+            raise _problem(409, "RUN_CONFLICT", str(exc), run_id=run_id) from exc
+        if result is None:
+            raise _problem(404, "RUN_NOT_FOUND", run_id, run_id=run_id)
+        return result
+
+    @app.post("/api/v1/runtime/runs/{run_id}/commands")
+    async def api_v1_run_command(
+        run_id: str,
+        payload: dict[str, Any] = Body(...),
+    ) -> Any:
+        try:
+            return await _require_state().runtime_debug_command(run_id, payload)
+        except KeyError as exc:
+            raise _problem(404, "RUN_NOT_FOUND", run_id, run_id=run_id) from exc
+        except (RuntimeConflictError, DagValidationError) as exc:
+            raise _problem(
+                409,
+                "DEBUG_COMMAND_REJECTED",
+                str(exc),
+                run_id=run_id,
+            ) from exc
+
+    @app.post("/api/v1/runtime/runs/{run_id}/reconcile")
+    async def api_v1_reconcile_run(
+        run_id: str,
+        payload: dict[str, Any] = Body(...),
+    ) -> Any:
+        try:
+            return await _require_state().reconcile_runtime_run(run_id, payload)
+        except KeyError as exc:
+            raise _problem(404, "RUN_NOT_FOUND", run_id, run_id=run_id) from exc
+        except RuntimeConflictError as exc:
+            raise _problem(409, "RUN_CONFLICT", str(exc), run_id=run_id) from exc
+
+    async def api_v1_runtime_events(websocket) -> None:
+        state = get_state()
+        if state is None:
+            await websocket.close(code=1013, reason="OS session unavailable")
+            return
+        run_id = str(websocket.query_params.get("run_id") or "")
+        try:
+            after_sequence = max(
+                0,
+                int(websocket.query_params.get("after_seq") or "0"),
+            )
+        except ValueError:
+            await websocket.close(code=1008, reason="invalid after_seq")
+            return
+        if not run_id or state.get_runtime_run(run_id) is None:
+            await websocket.close(code=1008, reason="run not found")
+            return
+        await websocket.accept()
+        try:
+            while True:
+                events = state.runtime_events(
+                    run_id,
+                    after_sequence=after_sequence,
+                    public_names=True,
+                ) or []
+                for event in events:
+                    await websocket.send_json(event)
+                    after_sequence = max(after_sequence, int(event["seq"]))
+                try:
+                    message = await asyncio.wait_for(
+                        websocket.receive_json(),
+                        timeout=0.15,
+                    )
+                except asyncio.TimeoutError:
+                    continue
+                if isinstance(message, dict) and message.get("action") == "subscribe":
+                    requested_run = str(message.get("runId") or run_id)
+                    if state.get_runtime_run(requested_run) is None:
+                        await websocket.send_json(
+                            {
+                                "type": "problem",
+                                "code": "RUN_NOT_FOUND",
+                                "runId": requested_run,
+                            }
+                        )
+                        continue
+                    run_id = requested_run
+                    after_sequence = max(0, int(message.get("afterSeq") or 0))
+        except WebSocketDisconnect:
+            return
+
+    # FastAPI must see the concrete WebSocket class, otherwise an unannotated
+    # parameter is treated as a required query value.  Assign the annotation
+    # after definition so FastAPI remains an optional, delayed dependency.
+    api_v1_runtime_events.__annotations__["websocket"] = WebSocket
+    app.websocket("/api/v1/runtime/events")(api_v1_runtime_events)
+
     return app
 
 
 class LocalApiServer:
-    """实现 B UI 面 HTTP 服务器薄壳：uvicorn 起 FastAPI（延迟 import，未装不影响其余桥面）。
+    """统一 UI HTTP/WS 服务器薄壳。
 
     传入 get_state 解析已就绪 LocalApiState；server.py 组合入口在 OS 连入后注入。
     """
@@ -707,7 +1201,7 @@ class LocalApiServer:
         config = uvicorn.Config(app, host=self.host, port=self.port, log_level="info")
         self._server = uvicorn.Server(config)
         logger.info(
-            "[local_api] 实现 B UI 面 HTTP 已监听 http://%s:%d/api",
+            "[local_api] 统一 HTTP/WS API 已监听 http://%s:%d/api",
             self.host,
             self.port,
         )
@@ -717,4 +1211,4 @@ class LocalApiServer:
         if self._server is not None:
             self._server.should_exit = True
             self._server = None
-            logger.info("[local_api] 实现 B UI 面 HTTP 已停止")
+            logger.info("[local_api] 统一 HTTP/WS API 已停止")

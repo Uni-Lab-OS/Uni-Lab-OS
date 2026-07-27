@@ -177,6 +177,7 @@ class TaskDag:
     edges: list[DagEdge]
     workflow_revision_hash: str = ""
     runtime_parameters: dict[str, Any] = field(default_factory=dict)
+    debug: dict[str, Any] = field(default_factory=dict)
 
     @classmethod
     def from_message(cls, data: dict[str, Any]) -> "TaskDag":
@@ -228,6 +229,7 @@ class TaskDag:
             edges=edges,
             workflow_revision_hash=str(data.get("workflow_revision_hash", "") or ""),
             runtime_parameters=dict(data.get("runtime_parameters") or {}),
+            debug=dict(data.get("debug") or {}),
         )
         dag._assert_acyclic()  # 解析期即拒环（I5）
         return dag

@@ -196,6 +196,24 @@ class SQLiteEventJournal:
         )
 
     @_journal_locked
+    def append_runtime_event(
+        self,
+        *,
+        run_id: str,
+        event_type: str,
+        node_id: Optional[str] = None,
+        payload: Optional[dict[str, Any]] = None,
+    ) -> None:
+        """Append a transport/debug event without mutating terminal truth."""
+
+        self._append_event(
+            run_id=run_id,
+            event_type=event_type,
+            node_id=node_id,
+            payload=payload,
+        )
+
+    @_journal_locked
     def commit_node_terminal(
         self,
         *,
@@ -656,9 +674,14 @@ class SQLiteEventJournal:
         ]
 
     @_journal_locked
-    def list_events(self, run_id: str) -> list[RunEvent]:
+    def list_events(self, run_id: str, *, after_sequence: int = 0) -> list[RunEvent]:
         rows = self._db.execute(
-            "SELECT * FROM run_event WHERE run_id=? ORDER BY sequence", (run_id,)
+            """
+            SELECT * FROM run_event
+            WHERE run_id=? AND sequence>?
+            ORDER BY sequence
+            """,
+            (run_id, after_sequence),
         ).fetchall()
         return [
             RunEvent(
@@ -879,6 +902,7 @@ class SQLiteEventJournal:
                     or raw.get("resource_ref")
                     or "resource:unresolved"
                 ),
+                resource_kind=str(raw.get("resource_kind") or "device"),
                 quantity=int(raw.get("quantity", 1) or 1),
                 mode=str(raw.get("mode", "exclusive") or "exclusive"),
                 scope=str(raw.get("scope", "action") or "action"),
@@ -904,42 +928,21 @@ class SQLiteEventJournal:
         dag: Any | None,
         lock_manager: Any,
     ) -> Any | None:
-        from unilabos.scheduler.resource_lock import ResolvedResourceClaim
+        from unilabos.scheduler.python_fallback import (
+            python_fallback_lease_request,
+        )
 
-        raw_claims: list[dict[str, Any]] = []
-        if dag is not None and node_id in dag.nodes:
-            node = dag.nodes[node_id]
-            raw_claims = list(node.resource_claims or [])
-            if not raw_claims:
-                raw_claims = [
-                    {
-                        "resource_id": f"device:{node.device_id}",
-                        "quantity": 1,
-                        "mode": "exclusive",
-                        "scope": "action",
-                    }
-                ]
-        if not raw_claims:
+        if dag is None or node_id not in dag.nodes:
             return None
 
-        claims = tuple(
-            ResolvedResourceClaim(
-                resource_id=str(
-                    raw.get("resource_id")
-                    or raw.get("resource_uuid")
-                    or raw.get("resource_ref")
-                    or "resource:unresolved"
-                ),
-                quantity=int(raw.get("quantity", 1) or 1),
-                mode=str(raw.get("mode", "exclusive") or "exclusive"),
-                scope=str(raw.get("scope", "action") or "action"),
-            )
-            for raw in raw_claims
+        request = python_fallback_lease_request(
+            dag.nodes[node_id],
+            run_id=run_id,
         )
         reason = "runtime restarted before terminal certainty"
         return lock_manager.install_unknown(
             holder_id=self._run_scoped_holder(run_id, node_id),
-            claims=claims,
+            claims=request.claims,
             reason=reason,
         )
 
@@ -973,6 +976,7 @@ class SQLiteEventJournal:
         return [
             {
                 "resource_id": claim.resource_id,
+                "resource_kind": claim.resource_kind,
                 "quantity": claim.quantity,
                 "mode": claim.mode,
                 "scope": claim.scope,

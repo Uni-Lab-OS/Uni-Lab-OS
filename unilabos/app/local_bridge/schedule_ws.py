@@ -49,6 +49,11 @@ _STATUS_TO_NODE_STATE: dict[str, NodeState] = {
 _HOST_READY_ACTIONS = frozenset({"host_ready", "host_node_ready", "ready", "host_info"})
 
 JobStatusCallback = Callable[[dict[str, Any]], Awaitable[None] | None]
+DebugEventCallback = Callable[[dict[str, Any]], Awaitable[None] | None]
+MaterialSnapshotCallback = Callable[
+    [dict[str, Any]],
+    Awaitable[None] | None,
+]
 
 
 class RunHandle:
@@ -62,6 +67,10 @@ class RunHandle:
         }
         self.done: asyncio.Event = asyncio.Event()
         self.dispatch_state = "pending"
+        self.debug: dict[str, Any] = {
+            "enabled": bool(dag.debug),
+            "status": "pending" if dag.debug else "disabled",
+        }
 
     def apply_status(
         self,
@@ -154,6 +163,13 @@ class ScheduleSession:
         self._runs: dict[str, RunHandle] = {}
         self._job_status_cbs: list[JobStatusCallback] = []
         self._reconcile_waiters: dict[str, asyncio.Future[dict[str, Any]]] = {}
+        self._debug_waiters: dict[str, asyncio.Future[dict[str, Any]]] = {}
+        self._debug_event_cbs: list[DebugEventCallback] = []
+        self._material_snapshot_waiters: dict[
+            str,
+            asyncio.Future[dict[str, Any]],
+        ] = {}
+        self._material_snapshot_cbs: list[MaterialSnapshotCallback] = []
         self.host_ready: asyncio.Event = asyncio.Event()
 
     def on_job_status(self, cb: JobStatusCallback) -> None:
@@ -171,6 +187,28 @@ class ScheduleSession:
             self._job_status_cbs.remove(cb)
         except ValueError:
             logger.debug("[schedule_ws] off_job_status: 回调未注册，忽略")
+
+    def on_debug_event(self, cb: DebugEventCallback) -> None:
+        self._debug_event_cbs.append(cb)
+
+    def off_debug_event(self, cb: DebugEventCallback) -> None:
+        try:
+            self._debug_event_cbs.remove(cb)
+        except ValueError:
+            logger.debug("[schedule_ws] off_debug_event: 回调未注册，忽略")
+
+    def on_material_snapshot(self, cb: MaterialSnapshotCallback) -> None:
+        """注册 OS 当前内存物料快照观察者。"""
+
+        self._material_snapshot_cbs.append(cb)
+
+    def off_material_snapshot(self, cb: MaterialSnapshotCallback) -> None:
+        try:
+            self._material_snapshot_cbs.remove(cb)
+        except ValueError:
+            logger.debug(
+                "[schedule_ws] off_material_snapshot: 回调未注册，忽略"
+            )
 
     def get_run(self, task_id: str) -> RunHandle | None:
         return self._runs.get(task_id)
@@ -216,6 +254,31 @@ class ScheduleSession:
             run.mark_cancel_requested(job_id)
         logger.info("[schedule_ws] 已下发 cancel_task %s job=%s", task_id, job_id or "-")
 
+    async def request_material_snapshot(
+        self,
+        *,
+        timeout: float = 5.0,
+    ) -> dict[str, Any]:
+        """向执行 OS 查询当前 ResourceTreeSet 快照。
+
+        HTTP 读取前主动查询，确保 bridge 不会把自己的缓存误当作物料权威。
+        """
+
+        request_id = uuid.uuid4().hex
+        loop = asyncio.get_running_loop()
+        waiter: asyncio.Future[dict[str, Any]] = loop.create_future()
+        self._material_snapshot_waiters[request_id] = waiter
+        try:
+            await self._send(
+                {
+                    "action": "query_material_snapshot",
+                    "data": {"request_id": request_id},
+                }
+            )
+            return await asyncio.wait_for(waiter, timeout=timeout)
+        finally:
+            self._material_snapshot_waiters.pop(request_id, None)
+
     async def reconcile_run(
         self,
         run_id: str,
@@ -258,8 +321,43 @@ class ScheduleSession:
                 return {"id": run_id, "status": "completed"}
         return {"id": run_id, "status": "reconciled"}
 
+    async def debug_command(
+        self,
+        run_id: str,
+        command: str,
+        payload: dict[str, Any] | None = None,
+    ) -> dict[str, Any]:
+        handle = self._runs.get(run_id)
+        if handle is None:
+            raise RuntimeError("RUN_NOT_ACTIVE")
+        request_id = uuid.uuid4().hex
+        loop = asyncio.get_running_loop()
+        waiter: asyncio.Future[dict[str, Any]] = loop.create_future()
+        self._debug_waiters[request_id] = waiter
+        try:
+            await self._send(
+                {
+                    "action": "debug_command",
+                    "data": {
+                        "request_id": request_id,
+                        "run_id": run_id,
+                        "command": command,
+                        "payload": dict(payload or {}),
+                    },
+                }
+            )
+            ack = await asyncio.wait_for(waiter, timeout=10.0)
+        finally:
+            self._debug_waiters.pop(request_id, None)
+        if ack.get("status") != "accepted":
+            raise RuntimeError(str(ack.get("code") or "DEBUG_COMMAND_REJECTED"))
+        projection = ack.get("debug")
+        if isinstance(projection, dict):
+            handle.debug = dict(projection)
+        return {"id": run_id, "debug": dict(handle.debug)}
+
     async def handle_incoming(self, message: dict[str, Any]) -> None:
-        """喂入一条 OS 回来的报文。仅处理桥关心的 job_status / host_ready，其余忽略。"""
+        """喂入一条 OS 回来的报文并更新桥的只读投影。"""
         if not isinstance(message, dict):
             logger.debug("[schedule_ws] 丢弃非对象报文: %r", message)
             return
@@ -270,11 +368,34 @@ class ScheduleSession:
             await self._on_job_status(data)
         elif action == "reconcile_ack":
             self._on_reconcile_ack(data)
+        elif action == "debug_ack":
+            self._on_debug_ack(data)
+        elif action == "debug_event":
+            await self._on_debug_event(data)
+        elif action == "material_snapshot":
+            await self._on_material_snapshot(data)
         elif action in _HOST_READY_ACTIONS:
             self.host_ready.set()
             logger.info("[schedule_ws] OS 已就绪 (action=%s)", action)
         else:
             logger.debug("[schedule_ws] 忽略报文 action=%s", action)
+
+    async def _on_material_snapshot(self, data: dict[str, Any]) -> None:
+        if data.get("schema") != "unilab/material-snapshot-v1":
+            logger.warning("[schedule_ws] 拒绝未知物料快照 schema")
+            return
+        for cb in tuple(self._material_snapshot_cbs):
+            try:
+                result = cb(data)
+                if inspect.isawaitable(result):
+                    await result
+            except Exception:  # noqa: BLE001
+                logger.exception("[schedule_ws] material snapshot 回调异常")
+                return
+        request_id = str(data.get("request_id") or "")
+        waiter = self._material_snapshot_waiters.get(request_id)
+        if waiter is not None and not waiter.done():
+            waiter.set_result(data)
 
     def _on_reconcile_ack(self, data: dict[str, Any]) -> None:
         request_id = str(data.get("request_id") or "")
@@ -284,11 +405,33 @@ class ScheduleSession:
             return
         waiter.set_result(data)
 
+    def _on_debug_ack(self, data: dict[str, Any]) -> None:
+        request_id = str(data.get("request_id") or "")
+        waiter = self._debug_waiters.get(request_id)
+        if waiter is None or waiter.done():
+            logger.debug("[schedule_ws] 忽略未知 debug ack: %s", request_id)
+            return
+        waiter.set_result(data)
+
+    async def _on_debug_event(self, data: dict[str, Any]) -> None:
+        run_id = str(data.get("run_id") or "")
+        handle = self._runs.get(run_id)
+        payload = data.get("payload")
+        if handle is not None and isinstance(payload, dict):
+            handle.debug = dict(payload)
+        for cb in self._debug_event_cbs:
+            try:
+                result = cb(data)
+                if inspect.isawaitable(result):
+                    await result
+            except Exception:  # noqa: BLE001
+                logger.exception("[schedule_ws] debug_event 回调异常")
+
     async def _on_job_status(self, data: dict[str, Any]) -> None:
         """更新逐节点状态表并触发回调。node_id == job_id（F002 §1.1）。
 
         回调可为同步或异步——异步回调（返回 awaitable）会被 await，
-        使 UI 面（如 workflow_ws）能在同一时序内 await 推送，保证测试可判定。
+        使统一 Runtime 投影能在同一时序内 await 更新，保证测试可判定。
         """
         task_id = data.get("task_id", "")
         node_id = data.get("job_id", "")

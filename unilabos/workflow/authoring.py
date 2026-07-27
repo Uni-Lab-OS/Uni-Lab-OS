@@ -10,7 +10,6 @@ from __future__ import annotations
 from collections.abc import Callable, Mapping
 from typing import Any, TypeVar
 
-
 WorkflowFunction = TypeVar("WorkflowFunction", bound=Callable[..., Any])
 
 
@@ -46,6 +45,30 @@ class _HostNodeAuthoringHandle:
 host_node = _HostNodeAuthoringHandle()
 
 
+class _DeviceAuthoringHandle:
+    """Compile-only handle for device ids that are not Python identifiers."""
+
+    def __init__(self, device_id: str):
+        self.device_id = device_id
+
+    def __getattr__(self, action: str) -> Callable[..., Any]:
+        def invoke(**_kwargs: Any) -> Any:
+            raise RuntimeError(
+                "workflow authoring calls are compile-only: "
+                f"{self.device_id}.{action}"
+            )
+
+        return invoke
+
+
+def device(device_id: str) -> _DeviceAuthoringHandle:
+    """Address an exact OS device id, for example ``device("pump-1").dose``."""
+
+    if not device_id:
+        raise ValueError("device_id must be non-empty")
+    return _DeviceAuthoringHandle(device_id)
+
+
 class _CompileOnlyBlock:
     """Marker used by the AST compiler; entering it at runtime is forbidden."""
 
@@ -69,4 +92,19 @@ def parallel() -> _CompileOnlyBlock:
     return _CompileOnlyBlock()
 
 
-__all__ = ["group", "host_node", "parallel", "workflow_definition"]
+def workflow_output(**values: Any) -> Any:
+    """Name values returned to a statically compiled parent workflow."""
+
+    if len(values) == 1:
+        return next(iter(values.values()))
+    return tuple(values.values())
+
+
+__all__ = [
+    "device",
+    "group",
+    "host_node",
+    "parallel",
+    "workflow_definition",
+    "workflow_output",
+]

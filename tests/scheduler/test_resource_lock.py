@@ -70,6 +70,29 @@ def test_unknown_lease_is_not_released_automatically() -> None:
     asyncio.run(scenario())
 
 
+def test_default_python_manager_rejects_non_device_claim_kinds() -> None:
+    api = _api()
+
+    async def scenario() -> None:
+        manager = api.ResourceLockManager(runtime_epoch="epoch-1")
+        request = api.LeaseRequest(
+            holder_id="holder-a",
+            claims=(
+                api.ResolvedResourceClaim(
+                    resource_id="material-1",
+                    resource_kind="material",
+                ),
+            ),
+        )
+        with pytest.raises(
+            ValueError,
+            match="unsupported resource kind",
+        ):
+            await manager.acquire_all(request)
+
+    asyncio.run(scenario())
+
+
 @given(st.lists(st.sampled_from(["device", "material", "slot", "tank"]), unique=True))
 def test_claim_input_order_never_changes_lease_order(keys: list[str]) -> None:
     api = _api()

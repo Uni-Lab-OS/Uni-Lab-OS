@@ -1,14 +1,13 @@
-"""Production composition contracts for generic Runtime Profiles and legacy UI.
+"""Production composition contracts for generic Runtime Profiles.
 
 These tests deliberately exercise composition boundaries instead of pTLC-specific
-routes.  A Profile is data, and every UI transport must observe and run the same
-Canonical workflow owned by the one RuntimeService.
+routes. A Profile is data, and the unified API observes the Canonical workflow
+owned by the one RuntimeService.
 """
 
 from __future__ import annotations
 
 import asyncio
-import json
 from typing import Any
 
 import pytest
@@ -16,7 +15,6 @@ import pytest
 import unilabos.app.communication as communication_module
 from unilabos.app.communication import CommunicationClientFactory
 from unilabos.app.local_bridge.server import LocalBridgeServer
-from unilabos.app.local_bridge.workflow_ws import FETCH_GRAPH, RUN_WORKFLOW
 from unilabos.config.config import BasicConfig
 from unilabos.workflow.submission import workflow_submission_to_revision
 
@@ -74,34 +72,8 @@ class CurrentWorkflowRuntime:
         return {"id": "runtime-current-1", "status": "pending"}
 
 
-class ScriptedWorkflowWebSocket:
-    """Hermetic websocket that drives one fetch followed by one run."""
-
-    def __init__(self) -> None:
-        self.path = "/ws/workflow/operator-session"
-        self.sent: list[dict[str, Any]] = []
-        self._incoming = iter(
-            [
-                json.dumps({"action": FETCH_GRAPH}),
-                json.dumps({"action": RUN_WORKFLOW}),
-            ]
-        )
-
-    def __aiter__(self) -> ScriptedWorkflowWebSocket:
-        return self
-
-    async def __anext__(self) -> str:
-        try:
-            return next(self._incoming)
-        except StopIteration as exc:
-            raise StopAsyncIteration from exc
-
-    async def send(self, raw: str) -> None:
-        self.sent.append(json.loads(raw))
-
-
-def test_production_workflow_ws_fetches_and_runs_shared_current_canonical() -> None:
-    """The server injection path must never replace current state with demo DAG."""
+def test_production_unified_api_uses_shared_current_canonical() -> None:
+    """The unified API injection path must not replace current state."""
 
     async def scenario() -> None:
         server = LocalBridgeServer(offline=True)
@@ -110,36 +82,11 @@ def test_production_workflow_ws_fetches_and_runs_shared_current_canonical() -> N
         runtime = CurrentWorkflowRuntime()
         state._runtime_service = runtime  # noqa: SLF001 - exercise server composition
 
-        # Both production UI adapters resolve the exact same service object.
+        # The only production UI adapter resolves the shared service object.
         assert server._api_server._get_state().runtime_service is runtime  # noqa: SLF001
-        assert server._workflow_server._get_runtime_service() is runtime  # noqa: SLF001
-
-        websocket = ScriptedWorkflowWebSocket()
-        await server._workflow_server._serve_connection(  # noqa: SLF001
-            websocket,
-            websocket.path,
-        )
-
-        fetched = websocket.sent[0]["data"]["data"]
-        fetched_node_ids = {
-            str(node.get("id") or node.get("uuid") or "")
-            for node in fetched["nodes"]
-        }
-        assert fetched_node_ids == {"operator-selected-dose"}
-        assert "n1" not in fetched_node_ids, "production fetch must not leak demo DAG"
-
-        assert runtime.start_calls == [
-            {
-                "source": {
-                    "format": "canonical_workflow_v2",
-                    "payload": runtime.canonical,
-                }
-            }
-        ]
-        assert websocket.sent[-1] == {
-            "code": 0,
-            "data": {"action": RUN_WORKFLOW, "data": "runtime-current-1"},
-        }
+        current = state.runtime_workflow()
+        assert current is not None
+        assert current["revision"]["canonical"] == runtime.canonical
 
     asyncio.run(scenario())
 
@@ -222,4 +169,3 @@ def test_cli_profile_uses_generic_configured_connections_without_callable_resolv
         ("STATION_BUS_A", station_transport),
         ("UNKNOWN_BUS", None),
     ]
-

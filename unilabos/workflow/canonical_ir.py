@@ -21,6 +21,7 @@ from .canonical import WorkflowRevision
 from .contracts import validate_workflow_revision
 from .from_python_script import (
     PythonWorkflowCompileError,
+    WorkflowSourceResolver,
     compile_python_script,
 )
 
@@ -222,6 +223,7 @@ def compile_authoring_revision(
     request: Mapping[str, Any],
     *,
     action_catalog: Mapping[str, Mapping[str, Any]],
+    workflow_source_resolver: WorkflowSourceResolver | None = None,
 ) -> AuthoringResult:
     """Compile Python through the AST-only compiler into an unapplied candidate."""
 
@@ -267,6 +269,7 @@ def compile_authoring_revision(
                 name: dict(definition) for name, definition in action_catalog.items()
             },
             source_artifact=_source_artifact(source, source_uri),
+            workflow_source_resolver=workflow_source_resolver,
         )
         candidate = _candidate(
             base_revision_id=base_revision_id,

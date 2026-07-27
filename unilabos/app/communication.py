@@ -8,7 +8,7 @@
 """
 
 from abc import ABC, abstractmethod
-from typing import Optional
+from typing import TYPE_CHECKING, Optional
 from unilabos.config.config import BasicConfig
 from unilabos.runtime.profile_composition import build_runtime_drivers
 from unilabos.runtime.profile_loader import (
@@ -16,6 +16,9 @@ from unilabos.runtime.profile_loader import (
     load_profiles,
 )
 from unilabos.utils import logger
+
+if TYPE_CHECKING:
+    from unilabos.resources.resource_tracker import ResourceTreeSet
 
 
 class BaseCommunicationClient(ABC):
@@ -106,6 +109,20 @@ class BaseCommunicationClient(ABC):
         设置pong消息订阅（可选实现）
         """
         pass
+
+    def bind_material_state(
+        self,
+        resources: "ResourceTreeSet",
+        *,
+        source_id: str = "os-current",
+    ) -> None:
+        """绑定 OS 当前内存物料树。
+
+        非本地 schedule transport 可以保持默认空实现；实现不得复制或接管
+        ResourceTreeSet 的写权威。
+        """
+
+        del resources, source_id
 
     @property
     def is_connected(self) -> bool:

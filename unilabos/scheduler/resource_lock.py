@@ -13,6 +13,7 @@ class ResolvedResourceClaim:
     """A concrete runtime resource request resolved from an action contract."""
 
     resource_id: str
+    resource_kind: str = "device"
     quantity: int = 1
     mode: str = "exclusive"
     scope: str = "action"
@@ -20,6 +21,10 @@ class ResolvedResourceClaim:
     def __post_init__(self) -> None:
         if not self.resource_id:
             raise ValueError("resource_id must not be empty")
+        if self.resource_kind not in {"device", "material", "slot"}:
+            raise ValueError(
+                f"unsupported resource_kind: {self.resource_kind}"
+            )
         if self.quantity < 1:
             raise ValueError("claim quantity must be positive")
         if self.mode not in {"exclusive", "shared"}:
@@ -60,16 +65,25 @@ class ResourceLockManager:
     under one mutex, so a rejected request leaves no partial ownership behind.
     """
 
-    def __init__(self, *, runtime_epoch: str) -> None:
+    def __init__(
+        self,
+        *,
+        runtime_epoch: str,
+        supported_resource_kinds: frozenset[str] = frozenset({"device"}),
+    ) -> None:
         if not runtime_epoch:
             raise ValueError("runtime_epoch must not be empty")
+        if not supported_resource_kinds:
+            raise ValueError("supported_resource_kinds must not be empty")
         self.runtime_epoch = runtime_epoch
+        self.supported_resource_kinds = frozenset(supported_resource_kinds)
         self._guard = asyncio.Lock()
         self._changed = asyncio.Event()
         self._leases: dict[str, ResourceLease] = {}
         self._holders_by_resource: dict[str, set[str]] = {}
 
     async def acquire_all(self, request: LeaseRequest) -> Optional[ResourceLease]:
+        self.validate_request(request)
         claims = tuple(
             sorted(
                 request.claims,
@@ -98,6 +112,22 @@ class ResourceLockManager:
                     lease.lease_id
                 )
             return lease
+
+    def validate_request(self, request: LeaseRequest) -> None:
+        """Fail closed when the active engine cannot own a claim kind."""
+
+        unsupported = sorted(
+            {
+                claim.resource_kind
+                for claim in request.claims
+                if claim.resource_kind not in self.supported_resource_kinds
+            }
+        )
+        if unsupported:
+            raise ValueError(
+                "unsupported resource kind for this lock manager: "
+                f"{unsupported[0]}"
+            )
 
     def _conflicts(self, requested: ResolvedResourceClaim) -> bool:
         lease_ids = self._holders_by_resource.get(requested.resource_id, set())
@@ -232,6 +262,9 @@ class ResourceLockManager:
         synchronous method intentionally does not enter the asyncio mutex.
         """
 
+        self.validate_request(
+            LeaseRequest(holder_id=holder_id, claims=claims)
+        )
         restored = ResourceLease(
             lease_id=lease_id or str(uuid.uuid4()),
             holder_id=holder_id,

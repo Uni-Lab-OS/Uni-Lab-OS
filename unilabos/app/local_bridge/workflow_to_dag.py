@@ -1,16 +1,14 @@
-"""共享翻译核：两套 UI 的工作流图 → F002 TaskDag。
+"""Legacy HTTP 工作流图 → F002 TaskDag 的兼容翻译核。
 
-这是实现 A（云端 panel）与实现 B（SZLab local_ui）唯一共享的业务逻辑：
-把各 UI 的 nodes/edges 归一为 F002 契约字段，产出 task_dag 载荷，再交
+本模块只服务尚未迁移的 local HTTP 输入：把 nodes/edges 归一为 F002 契约字段，产出 task_dag 载荷，再交
 unilabos.scheduler.dag_model.TaskDag.from_message 解析与校验（含解析期拒环 = F002 I5）。
 
 字段对齐 F002 interface-design.md §1.1：
 - node → {node_id, device_id, action, action_type, action_args, sample_material, always_free}
 - edge → {source_node_uuid, target_node_uuid}
 
-两套 UI 的原生字段名不同，本模块统一做别名归一，避免两面各写一套翻译：
-- 实现 A（云端）: 节点直接带 node_id/device_id/action/action_args；边带 source/target。
-- 实现 B（SZLab）: 节点形如 {id, data:{method, deviceId, params}}；边带 source/target。
+兼容输入可为扁平 `{node_id, device_id, action, action_args}` 或嵌套
+`{id, data:{method, deviceId, params}}`；统一前端不得再新增此处别名。
 """
 
 from __future__ import annotations
@@ -152,7 +150,7 @@ def workflow_to_task_dag(
 ) -> TaskDag:
     """UI 图 → 校验后的 F002 TaskDag（含解析期拒环）。
 
-    是两套 UI 面（workflow_ws / local_api）触发运行时的统一入口。
+    是 legacy local_api 输入进入 Canonical/TaskDag 兼容路径的入口。
     """
     payload = build_task_dag_payload(
         nodes,

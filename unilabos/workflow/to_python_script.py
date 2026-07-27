@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import copy
+import keyword
 from collections.abc import Mapping
 from typing import Any
 
@@ -18,8 +19,7 @@ from .canonical_ir import (
     _source_spans,
     safe_python_identifier,
 )
-from .from_python_script import compile_python_script
-
+from .from_python_script import WorkflowSourceResolver, compile_python_script
 
 _GENERATION_FIELDS = frozenset({"base_revision_id", "canonical_ir", "source_uri"})
 
@@ -37,17 +37,27 @@ def _require_request(request: Mapping[str, Any]) -> tuple[str, str]:
 def _binding_source(
     binding: Mapping[str, Any],
     variables: Mapping[str, str],
+    binding_aliases: Mapping[tuple[str, str | None], str] | None = None,
 ) -> str:
+    aliases = binding_aliases or {}
     kind = binding.get("kind")
     if kind == "literal":
         return repr(binding.get("value"))
     if kind == "runtime_parameter":
         return safe_python_identifier(str(binding.get("parameter") or "parameter"))
     if kind == "node_result":
-        return variables.get(str(binding.get("node_id")), "None")
+        node_id = str(binding.get("node_id"))
+        return aliases.get(
+            (node_id, None),
+            variables.get(node_id, "None"),
+        )
     if kind == "node_output":
-        base = variables.get(str(binding.get("node_id")), "None")
+        node_id = str(binding.get("node_id"))
         output = safe_python_identifier(str(binding.get("output") or "value"))
+        alias = aliases.get((node_id, str(binding.get("output") or "value")))
+        if alias is not None:
+            return alias
+        base = variables.get(node_id, "None")
         return f"{base}.{output}"
     if kind == "expression":
         expression_variables = binding.get("variables")
@@ -59,6 +69,7 @@ def _binding_source(
                 else {}
             ),
             node_variables=variables,
+            binding_aliases=aliases,
         )
     # Complex bindings remain visible and non-executable instead of disappearing.
     return f"binding_literal({copy.deepcopy(dict(binding))!r})"
@@ -69,6 +80,7 @@ def _expression_source(
     *,
     variables: Mapping[str, Any],
     node_variables: Mapping[str, str],
+    binding_aliases: Mapping[tuple[str, str | None], str] | None = None,
 ) -> str:
     """Render the compiler's closed expression IR back to safe Python."""
 
@@ -80,13 +92,18 @@ def _expression_source(
         name = str(expression["var"])
         binding = variables.get(name)
         if isinstance(binding, Mapping):
-            return _binding_source(binding, node_variables)
+            return _binding_source(
+                binding,
+                node_variables,
+                binding_aliases,
+            )
         return safe_python_identifier(name, "value")
     if set(expression) == {"field", "name"}:
         base = _expression_source(
             expression["field"],
             variables=variables,
             node_variables=node_variables,
+            binding_aliases=binding_aliases,
         )
         return f"{base}.{safe_python_identifier(str(expression['name']), 'field')}"
     if set(expression) == {"index", "key"}:
@@ -94,11 +111,13 @@ def _expression_source(
             expression["index"],
             variables=variables,
             node_variables=node_variables,
+            binding_aliases=binding_aliases,
         )
         key = _expression_source(
             expression["key"],
             variables=variables,
             node_variables=node_variables,
+            binding_aliases=binding_aliases,
         )
         return f"{base}[{key}]"
     if set(expression) == {"binop", "left", "right"}:
@@ -125,11 +144,13 @@ def _expression_source(
             expression["left"],
             variables=variables,
             node_variables=node_variables,
+            binding_aliases=binding_aliases,
         )
         right = _expression_source(
             expression["right"],
             variables=variables,
             node_variables=node_variables,
+            binding_aliases=binding_aliases,
         )
         return f"({left} {operator} {right})"
     if set(expression) == {"unop", "operand"}:
@@ -138,6 +159,7 @@ def _expression_source(
             expression["operand"],
             variables=variables,
             node_variables=node_variables,
+            binding_aliases=binding_aliases,
         )
         if operator == "not":
             return f"(not {operand})"
@@ -151,6 +173,7 @@ def _expression_source(
                 item,
                 variables=variables,
                 node_variables=node_variables,
+                binding_aliases=binding_aliases,
             )
             for item in expression["args"]
         )
@@ -161,9 +184,14 @@ def _expression_source(
 def _call_source(
     invocation: ActionInvocation,
     variables: Mapping[str, str],
+    binding_aliases: Mapping[tuple[str, str | None], str] | None = None,
 ) -> str:
     argument_values = {
-        name: _binding_source(binding.model_dump(mode="json"), variables)
+        name: _binding_source(
+            binding.model_dump(mode="json"),
+            variables,
+            binding_aliases,
+        )
         for name, binding in invocation.input_bindings.items()
     }
     if invocation.node_type == "manual_confirm":
@@ -175,7 +203,21 @@ def _call_source(
         f"{safe_python_identifier(name, 'parameter')}={value}"
         for name, value in sorted(argument_values.items())
     )
-    return f"{invocation.action_ref}({arguments})"
+    owner, separator, action = invocation.action_ref.rpartition(".")
+    if (
+        not separator
+        or not action.isidentifier()
+        or keyword.iskeyword(action)
+    ):
+        raise ValueError(
+            f"action ref cannot be represented in Python: {invocation.action_ref}"
+        )
+    owner_source = (
+        owner
+        if owner.isidentifier() and not keyword.iskeyword(owner)
+        else f"device({owner!r})"
+    )
+    return f"{owner_source}.{action}({arguments})"
 
 
 def _variable_names(revision: WorkflowRevision) -> dict[str, str]:
@@ -248,6 +290,7 @@ def _emit_invocation(
     lines: list[str],
     spans: list[dict[str, Any]],
     variables: Mapping[str, str],
+    binding_aliases: Mapping[tuple[str, str | None], str],
     diagnostics: list[dict[str, Any]],
 ) -> None:
     line_number = len(lines) + 1
@@ -257,7 +300,7 @@ def _emit_invocation(
         "manual_confirm",
     }
     if supported:
-        call = _call_source(invocation, variables)
+        call = _call_source(invocation, variables, binding_aliases)
         variable = variables.get(invocation.node_id)
         lines.append(f"{indent}{variable + ' = ' if variable else ''}{call}")
     else:
@@ -315,14 +358,18 @@ def _python_projection(
     lines = [
         (
             "from unilabos.workflow.authoring import "
-            "group, parallel, workflow_definition"
+            "device, group, parallel, workflow_definition"
         ),
         "",
         "# Generated from Canonical IR; edit and compile before applying.",
-        f"@workflow_definition(workflow_id={revision.workflow_id!r}, "
-        f"revision={revision.revision_id!r})",
-        f"def {safe_python_identifier(revision.workflow_id)}"
-        f"({_parameter_source(revision)}) -> None:",
+        (
+            f"@workflow_definition(workflow_id={revision.workflow_id!r}, "
+            f"revision={revision.revision_id!r})"
+        ),
+        (
+            f"def {safe_python_identifier(revision.workflow_id)}"
+            f"({_parameter_source(revision)}) -> None:"
+        ),
         '    """Generated deterministically from Canonical workflow IR."""',
     ]
     spans: list[dict[str, Any]] = []
@@ -350,6 +397,79 @@ def _python_projection(
             and len(compiled) > len(scope_by_marker.get(entry.node_id, []))
         ):
             scope_by_marker[entry.node_id] = compiled
+
+    callable_groups: dict[str, Mapping[str, Any]] = {}
+    for invocation in invocations:
+        if invocation.node_type != "group":
+            continue
+        raw_callable = invocation.control.get("callable")
+        if (
+            isinstance(raw_callable, Mapping)
+            and isinstance(raw_callable.get("module"), str)
+            and isinstance(raw_callable.get("name"), str)
+            and raw_callable["module"]
+            and raw_callable["name"]
+        ):
+            callable_groups[invocation.node_id] = raw_callable
+    top_level_callable_groups = {
+        node_id
+        for node_id in callable_groups
+        if not any(
+            node_id in scope_by_marker.get(parent_id, [])[1:]
+            for parent_id in callable_groups
+            if parent_id != node_id
+        )
+    }
+    imports_by_module: dict[str, set[str]] = {}
+    for node_id in top_level_callable_groups:
+        callable_metadata = callable_groups[node_id]
+        imports_by_module.setdefault(
+            str(callable_metadata["module"]),
+            set(),
+        ).add(str(callable_metadata["name"]))
+    import_lines: list[str] = []
+    for module, names in sorted(imports_by_module.items()):
+        ordered_names = sorted(names)
+        if len(ordered_names) == 1:
+            import_lines.append(
+                f"from {module} import {ordered_names[0]}"
+            )
+        else:
+            import_lines.append(f"from {module} import (")
+            import_lines.extend(f"    {name}," for name in ordered_names)
+            import_lines.append(")")
+    if import_lines:
+        lines[1:1] = [*import_lines, ""]
+
+    binding_aliases: dict[tuple[str, str | None], str] = {}
+    call_targets: dict[str, list[str]] = {}
+    for node_id in top_level_callable_groups:
+        raw_outputs = callable_groups[node_id].get("outputs")
+        targets: list[str] = []
+        if isinstance(raw_outputs, Mapping):
+            for raw_output in raw_outputs.values():
+                if not isinstance(raw_output, Mapping):
+                    continue
+                target = safe_python_identifier(
+                    str(raw_output.get("target") or "result"),
+                    "result",
+                )
+                binding = raw_output.get("binding")
+                if not isinstance(binding, Mapping):
+                    continue
+                kind = binding.get("kind")
+                binding_node_id = str(binding.get("node_id") or "")
+                if kind == "node_result" and binding_node_id:
+                    binding_aliases[(binding_node_id, None)] = target
+                elif kind == "node_output" and binding_node_id:
+                    binding_aliases[
+                        (
+                            binding_node_id,
+                            str(binding.get("output") or "value"),
+                        )
+                    ] = target
+                targets.append(target)
+        call_targets[node_id] = targets
 
     cleanup_by_start: dict[str, tuple[list[str], str]] = {}
     for cleanup in invocations:
@@ -474,6 +594,7 @@ def _python_projection(
                         lines=lines,
                         spans=spans,
                         variables=variables,
+                        binding_aliases=binding_aliases,
                         diagnostics=diagnostics,
                     )
                     position = max(node_ids.index(item) for item in consumed) + 1
@@ -481,6 +602,59 @@ def _python_projection(
 
             if invocation.node_type == "group":
                 scope = marker_scope(node_id, node_ids)
+                callable_metadata = callable_groups.get(node_id)
+                if (
+                    node_id in top_level_callable_groups
+                    and callable_metadata is not None
+                ):
+                    raw_inputs = callable_metadata.get("inputs")
+                    arguments = ", ".join(
+                        (
+                            f"{safe_python_identifier(str(name), 'parameter')}="
+                            f"{_binding_source(binding, variables, binding_aliases)}"
+                        )
+                        for name, binding in sorted(
+                            (
+                                (name, binding)
+                                for name, binding in (
+                                    raw_inputs.items()
+                                    if isinstance(raw_inputs, Mapping)
+                                    else []
+                                )
+                                if isinstance(binding, Mapping)
+                            ),
+                            key=lambda item: str(item[0]),
+                        )
+                    )
+                    call = (
+                        f"{safe_python_identifier(str(callable_metadata['name']))}"
+                        f"({arguments})"
+                    )
+                    targets = call_targets.get(node_id, [])
+                    if len(targets) == 1:
+                        call = f"{targets[0]} = {call}"
+                    elif len(targets) > 1:
+                        call = f"{', '.join(targets)} = {call}"
+                    line_number = len(lines) + 1
+                    _control_span(
+                        node_id=node_id,
+                        indent=indent,
+                        lines=lines,
+                        spans=spans,
+                        source=call,
+                    )
+                    for child_id in scope[1:]:
+                        spans.append(
+                            {
+                                "node_id": child_id,
+                                "start_line": line_number,
+                                "start_column": len(indent) + 1,
+                                "end_line": line_number,
+                                "end_column": len(lines[-1]) + 1,
+                            }
+                        )
+                    position = max(node_ids.index(item) for item in scope) + 1
+                    continue
                 name = str(invocation.control.get("name") or "group")
                 _control_span(
                     node_id=node_id,
@@ -506,6 +680,7 @@ def _python_projection(
                         lines=lines,
                         spans=spans,
                         variables=variables,
+                        binding_aliases=binding_aliases,
                         diagnostics=diagnostics,
                     )
                     position += 1
@@ -518,6 +693,13 @@ def _python_projection(
                     source="with parallel():",
                 )
                 emit_sequence(scope[1:-1], f"{indent}    ")
+                _control_span(
+                    node_id=scope[-1],
+                    indent=indent,
+                    lines=lines,
+                    spans=spans,
+                    source=f"# join: {scope[-1]}",
+                )
                 position = max(node_ids.index(item) for item in scope) + 1
                 continue
 
@@ -530,6 +712,7 @@ def _python_projection(
                         lines=lines,
                         spans=spans,
                         variables=variables,
+                        binding_aliases=binding_aliases,
                         diagnostics=diagnostics,
                     )
                     position += 1
@@ -541,6 +724,7 @@ def _python_projection(
                     else _binding_source(
                         condition.model_dump(mode="json"),
                         variables,
+                        binding_aliases,
                     )
                 )
                 _control_span(
@@ -584,6 +768,13 @@ def _python_projection(
                 if false_body:
                     lines.append(f"{indent}else:")
                     emit_sequence(false_body, f"{indent}    ")
+                _control_span(
+                    node_id=join_id,
+                    indent=indent,
+                    lines=lines,
+                    spans=spans,
+                    source=f"# join: {join_id}",
+                )
                 position = max(node_ids.index(item) for item in scope) + 1
                 continue
 
@@ -605,6 +796,7 @@ def _python_projection(
                     lines=lines,
                     spans=spans,
                     variables=variables,
+                    binding_aliases=binding_aliases,
                     diagnostics=diagnostics,
                 )
                 position += 1
@@ -616,6 +808,7 @@ def _python_projection(
                 lines=lines,
                 spans=spans,
                 variables=variables,
+                binding_aliases=binding_aliases,
                 diagnostics=diagnostics,
             )
             position += 1
@@ -631,6 +824,7 @@ def _verified_python_source(
     revision: WorkflowRevision,
     *,
     action_catalog: Mapping[str, Mapping[str, Any]],
+    workflow_source_resolver: WorkflowSourceResolver | None,
 ) -> str | None:
     """Reuse an AST-verified source artifact only when it represents this IR."""
 
@@ -644,6 +838,7 @@ def _verified_python_source(
                 name: dict(definition) for name, definition in action_catalog.items()
             },
             source_artifact=artifact,
+            workflow_source_resolver=workflow_source_resolver,
         )
     except (TypeError, ValueError):
         return None
@@ -656,6 +851,7 @@ def generate_python_revision(
     request: Mapping[str, Any],
     *,
     action_catalog: Mapping[str, Mapping[str, Any]],
+    workflow_source_resolver: WorkflowSourceResolver | None = None,
 ) -> dict[str, Any]:
     """Project Canonical IR to readable Python without applying or executing it."""
 
@@ -664,6 +860,7 @@ def generate_python_revision(
     python_source = _verified_python_source(
         revision,
         action_catalog=action_catalog,
+        workflow_source_resolver=workflow_source_resolver,
     )
     if python_source is None:
         python_source, spans, diagnostics = _python_projection(revision)

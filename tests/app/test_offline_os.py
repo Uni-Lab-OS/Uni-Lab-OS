@@ -127,6 +127,7 @@ def test_server_offline_mode_state_ready_immediately() -> None:
     # 离线模式构造即就绪：UI 面可解析到 session 与 LocalApiState
     assert server._get_schedule_session() is not None  # noqa: SLF001
     assert server._get_local_api_state() is not None  # noqa: SLF001
+    assert not hasattr(server, "_workflow_server")
 
 
 def test_server_real_mode_state_none_until_os_connects() -> None:

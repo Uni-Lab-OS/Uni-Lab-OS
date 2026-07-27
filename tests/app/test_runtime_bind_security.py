@@ -22,6 +22,16 @@ def test_runtime_bind_defaults_to_ipv4_loopback() -> None:
     assert args.host == "127.0.0.1"
     assert bridge.host == "127.0.0.1"
     assert local_api.host == "127.0.0.1"
+    assert not hasattr(args, "workflow_port")
+    assert not hasattr(bridge, "_workflow_server")
+
+
+def test_bridge_graph_flag_is_only_for_offline_execution_os() -> None:
+    args = _parse_args(["--offline", "-g", "graph.json"])
+
+    assert args.graph == "graph.json"
+    with pytest.raises(ValueError, match="belongs to the execution OS"):
+        LocalBridgeServer(graph_path="graph.json")
 
 
 @pytest.mark.parametrize("host", ["127.0.0.1", "localhost", "::1"])

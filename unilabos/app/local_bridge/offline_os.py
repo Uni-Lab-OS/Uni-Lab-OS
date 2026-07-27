@@ -23,6 +23,10 @@ from typing import Any
 from unilabos.app.local_bridge.schedule_ws import ScheduleSession
 from unilabos.scheduler.dag_executor import DagExecutor
 from unilabos.scheduler.dag_model import TERMINAL_STATES, DagNode, NodeState, TaskDag
+from unilabos.scheduler.debug_controller import (
+    DebugCommandError,
+    DebugController,
+)
 from unilabos.scheduler.resource_lock import ResourceLockManager
 from unilabos.runtime.event_store import SQLiteEventJournal
 from unilabos.runtime.reconcile import reconcile_unknown_fence
@@ -95,6 +99,8 @@ class OfflineOS:
             self._cancel_task(data.get("task_id", ""))
         elif action == "reconcile_run":
             await self._reconcile_run(data)
+        elif action == "debug_command":
+            await self._debug_command(data)
         else:
             logger.debug("[offline_os] 忽略下行 action=%s", action)
 
@@ -129,16 +135,79 @@ class OfflineOS:
     async def _start_task(self, payload: dict[str, Any]) -> None:
         """解析 F002 task_dag，起后台协程用 DagExecutor 走图（不阻塞下发方）。"""
         dag = TaskDag.from_message(payload)
+        controller = (
+            DebugController(
+                run_id=dag.task_id,
+                node_ids=set(dag.nodes),
+                config=dag.debug,
+                on_event=lambda event_type, event_payload: asyncio.ensure_future(
+                    self._emit_debug_event(
+                        dag.task_id,
+                        event_type,
+                        event_payload,
+                    )
+                ),
+            )
+            if dag.debug
+            else None
+        )
         executor = DagExecutor(
             dag,
             self._make_submit(dag),
             resource_lock_manager=self._resource_lock_manager,
             journal=self._journal,
+            debug_controller=controller,
         )
         self._dags[dag.task_id] = dag
         self._executors[dag.task_id] = executor
         self._tasks[dag.task_id] = asyncio.ensure_future(self._run(dag.task_id, executor))
         logger.info("[offline_os] 已受理 task_dag %s（%d 节点）", dag.task_id, len(dag.nodes))
+
+    async def _debug_command(self, data: dict[str, Any]) -> None:
+        run_id = str(data.get("run_id") or "")
+        request_id = str(data.get("request_id") or "")
+        executor = self._executors.get(run_id)
+        ack: dict[str, Any] = {
+            "request_id": request_id,
+            "run_id": run_id,
+        }
+        if executor is None:
+            ack.update({"status": "rejected", "code": "RUN_NOT_ACTIVE"})
+        else:
+            try:
+                projection = await executor.debug_command(
+                    str(data.get("command") or ""),
+                    data.get("payload")
+                    if isinstance(data.get("payload"), dict)
+                    else {},
+                )
+            except (DebugCommandError, ValueError) as exc:
+                ack.update({"status": "rejected", "code": str(exc)})
+            else:
+                ack.update({"status": "accepted", "debug": projection})
+        if self._session is not None:
+            await self._session.handle_incoming(
+                {"action": "debug_ack", "data": ack}
+            )
+
+    async def _emit_debug_event(
+        self,
+        run_id: str,
+        event_type: str,
+        payload: dict[str, Any],
+    ) -> None:
+        if self._session is None:
+            return
+        await self._session.handle_incoming(
+            {
+                "action": "debug_event",
+                "data": {
+                    "run_id": run_id,
+                    "type": event_type,
+                    "payload": payload,
+                },
+            }
+        )
 
     def _cancel_task(self, task_id: str) -> None:
         """cancel_task：停止对应 executor 调度后继（未决节点由收敛兜底落 cancelled）。"""

@@ -4,16 +4,23 @@ from __future__ import annotations
 
 import uuid
 from collections.abc import Mapping
-from typing import Any, Protocol
+from typing import TYPE_CHECKING, Any, Protocol
 
 from unilabos.runtime.estimated_timeline import (
     EstimatedTimelineBuilder,
     ObservedGanttBuilder,
 )
 from unilabos.runtime.event_store import SQLiteEventJournal
-from unilabos.runtime.profile_loader import LoadedProfile, ProfileValidationError
+from unilabos.runtime.workflow_store import (
+    WorkflowDocumentStore,
+    WorkflowRevisionConflict,
+)
 from unilabos.scheduler.dag_model import DagValidationError, NodeState, TaskDag
 from unilabos.scheduler.dag_wire import serialize_task_dag
+from unilabos.scheduler.python_fallback import (
+    python_fallback_capabilities,
+    validate_python_fallback_dag,
+)
 from unilabos.scheduler.resource_lock import ResourceLockManager
 from unilabos.workflow.bindings import binding_node_dependencies, matches_json_type
 from unilabos.workflow.canonical import (
@@ -25,6 +32,9 @@ from unilabos.workflow.dag_compile import (
     compile_workflow_revision,
     materialize_action_contracts,
 )
+
+if TYPE_CHECKING:
+    from unilabos.runtime.profile_loader import LoadedProfile
 
 
 class RuntimeSchedule(Protocol):
@@ -41,6 +51,15 @@ class RuntimeSchedule(Protocol):
         run_id: str,
         decision: dict[str, str],
     ) -> dict[str, str]: ...
+
+    def on_debug_event(self, callback: Any) -> None: ...
+
+    async def debug_command(
+        self,
+        run_id: str,
+        command: str,
+        payload: dict[str, Any] | None = None,
+    ) -> dict[str, Any]: ...
 
 
 class RuntimeConflictError(RuntimeError):
@@ -118,6 +137,7 @@ class RuntimeService:
         action_catalog: Mapping[str, Mapping[str, Any]] | None = None,
         profiles: Mapping[str, LoadedProfile] | None = None,
         resource_lock_manager: ResourceLockManager | None = None,
+        workflow_store: WorkflowDocumentStore | None = None,
     ) -> None:
         self._schedule = schedule
         self._journal = journal
@@ -132,11 +152,22 @@ class RuntimeService:
         del resource_lock_manager
         self._active_runs: dict[str, Any] = {}
         self._memory_submissions: dict[str, dict[str, Any]] = {}
+        self._memory_events: dict[str, list[dict[str, Any]]] = {}
+        self._memory_sequence = 0
+        self._workflow_store = workflow_store
         self._workflow: dict[str, Any] = {
             "definition": {"id": "quick-debug", "name": "Quick Debug"},
             "revision": {"id": "quick-debug-empty", "nodes": [], "edges": []},
         }
         self._schedule.on_job_status(self._on_job_status)
+        on_debug_event = getattr(self._schedule, "on_debug_event", None)
+        if callable(on_debug_event):
+            on_debug_event(self._on_debug_event)
+
+    def get_capabilities(self) -> dict[str, Any]:
+        """Describe the active Python engine without implying Layer-B support."""
+
+        return python_fallback_capabilities()
 
     def set_workflow_revision(
         self,
@@ -153,8 +184,93 @@ class RuntimeService:
             )
         self._workflow = self._revision_projection(revision)
 
-    def get_workflow(self) -> dict[str, Any]:
+    def get_workflow(self, workflow_id: str | None = None) -> dict[str, Any] | None:
+        if workflow_id is not None and self._workflow_store is not None:
+            stored = self._workflow_store.load(workflow_id)
+            if stored is not None:
+                return self._revision_projection(stored)
+        if workflow_id is not None:
+            definition = self._workflow.get("definition")
+            current_id = (
+                str(definition.get("id") or "")
+                if isinstance(definition, Mapping)
+                else ""
+            )
+            if current_id != workflow_id:
+                return None
         return self._workflow
+
+    def save_workflow(
+        self,
+        revision_payload: dict[str, Any],
+        *,
+        expected_revision_id: str | None = None,
+    ) -> dict[str, Any]:
+        try:
+            revision = WorkflowRevision.model_validate(revision_payload)
+            revision = revalidate_workflow_revision(revision)
+            executable = materialize_action_contracts(
+                revision,
+                action_catalog=self._action_catalog,
+            )
+            dag = compile_workflow_revision(
+                executable,
+                task_id="workflow-validation",
+                action_catalog=self._action_catalog,
+            )
+            validate_python_fallback_dag(dag)
+        except (ValueError, WorkflowCompileError) as exc:
+            raise DagValidationError(str(exc)) from exc
+        if self._workflow_store is not None:
+            try:
+                revision = self._workflow_store.save(
+                    revision,
+                    expected_revision_id=expected_revision_id,
+                )
+            except WorkflowRevisionConflict:
+                raise
+        self.set_workflow_revision(revision)
+        return self._revision_projection(revision)
+
+    def validate_workflow(
+        self,
+        revision_payload: dict[str, Any],
+        *,
+        parameters: dict[str, Any] | None = None,
+    ) -> dict[str, Any]:
+        try:
+            revision = WorkflowRevision.model_validate(revision_payload)
+            normalized = _normalize_workflow_parameters(revision, parameters)
+            executable = materialize_action_contracts(
+                revision,
+                action_catalog=self._action_catalog,
+            )
+            dag = compile_workflow_revision(
+                executable,
+                task_id="workflow-validation",
+                action_catalog=self._action_catalog,
+                runtime_parameters=normalized,
+            )
+            validate_python_fallback_dag(dag)
+        except (ValueError, DagValidationError, WorkflowCompileError) as exc:
+            code, _, message = str(exc).partition(":")
+            return {
+                "valid": False,
+                "issues": [
+                    {
+                        "code": code if message else "INVALID_WORKFLOW",
+                        "message": message.strip() if message else str(exc),
+                        "severity": "error",
+                    }
+                ],
+            }
+        return {
+            "valid": True,
+            "issues": [],
+            "workflowRevisionHash": dag.workflow_revision_hash,
+            "nodeCount": len(dag.nodes),
+            "edgeCount": len(dag.edges),
+        }
 
     async def start_run(self, body: dict[str, Any]) -> dict[str, str]:
         revision = self._parse_source(body)
@@ -174,8 +290,33 @@ class RuntimeService:
                 action_catalog=self._action_catalog,
                 runtime_parameters=normalized_parameters,
             )
+            validate_python_fallback_dag(dag)
         except WorkflowCompileError as exc:
             raise DagValidationError(f"{exc.code}: {exc}") from exc
+        debug = body.get("debug")
+        if debug is not None:
+            if not isinstance(debug, Mapping):
+                raise DagValidationError("debug must be an object")
+            breakpoints = [str(item) for item in debug.get("breakpoints") or []]
+            unknown = sorted(set(breakpoints) - set(dag.nodes))
+            if unknown:
+                raise DagValidationError(
+                    f"UNKNOWN_BREAKPOINT_NODE: {unknown[0]}"
+                )
+            start_node_id = str(debug.get("start_node_id") or "")
+            if start_node_id and start_node_id not in dag.nodes:
+                raise DagValidationError(
+                    f"UNKNOWN_START_NODE: {start_node_id}"
+                )
+            dag.debug = {
+                "pause_on_start": bool(debug.get("pause_on_start", False)),
+                "breakpoints": breakpoints,
+                **(
+                    {"start_node_id": start_node_id}
+                    if start_node_id
+                    else {}
+                ),
+            }
 
         source = dict(body["source"])
         profile_ref = str(body.get("profile_ref") or "")
@@ -194,6 +335,13 @@ class RuntimeService:
                 "compiled_dag": compiled_dag,
                 "status": "pending",
             }
+            self._append_runtime_event(
+                run_id=run_id,
+                event_type="run.submitted",
+                payload={
+                    "workflowRevisionHash": dag.workflow_revision_hash,
+                },
+            )
 
         try:
             handle = await self._schedule.submit_dag(dag)
@@ -212,9 +360,13 @@ class RuntimeService:
             executable_revision,
             content_hash=dag.workflow_revision_hash,
         )
-        return {"id": run_id, "status": "pending"}
+        return {
+            "id": run_id,
+            "status": "pending",
+            "workflowRevisionHash": dag.workflow_revision_hash,
+        }
 
-    def get_run(self, run_id: str) -> dict[str, str] | None:
+    def get_run(self, run_id: str) -> dict[str, Any] | None:
         submission = (
             self._journal.load_run_submission(run_id)
             if self._journal is not None
@@ -227,16 +379,28 @@ class RuntimeService:
                 persisted_status = submission.status
                 has_unknown = self._journal.has_open_unknown_fence(run_id)
                 if persisted_status in {"completed", "failed", "cancelled"}:
-                    return {
+                    result: dict[str, Any] = {
                         "id": run_id,
                         "status": "reconciling" if has_unknown else persisted_status,
                     }
+                    if (
+                        getattr(handle, "debug", None)
+                        and handle.debug.get("enabled") is True
+                    ):
+                        result["debug"] = dict(handle.debug)
+                    return result
                 if status in {"completed", "failed", "cancelled"}:
                     # Live transport projection is not allowed to outrun the
                     # durable executor-owned terminal event.
                     status = "reconciling" if has_unknown else "running"
             self._set_status(run_id, status)
-            return {"id": run_id, "status": status}
+            result = {"id": run_id, "status": status}
+            if (
+                getattr(handle, "debug", None)
+                and handle.debug.get("enabled") is True
+            ):
+                result["debug"] = dict(handle.debug)
+            return result
         if submission is not None:
             status = submission.status
             if (
@@ -251,20 +415,89 @@ class RuntimeService:
             return None
         return {"id": run_id, "status": str(memory["status"])}
 
-    def get_events(self, run_id: str) -> list[dict[str, Any]] | None:
+    def get_events(
+        self,
+        run_id: str,
+        *,
+        after_sequence: int = 0,
+        public_names: bool = False,
+    ) -> list[dict[str, Any]] | None:
         if self.get_run(run_id) is None:
             return None
         if self._journal is None:
-            return []
+            return [
+                dict(event)
+                for event in self._memory_events.get(run_id, [])
+                if int(event["seq"]) > after_sequence
+            ]
         return [
             {
-                "type": event.type,
+                "seq": event.sequence,
+                "runId": event.run_id,
+                "type": (
+                    self._public_event_type(event.type)
+                    if public_names
+                    else event.type
+                ),
                 "nodeId": event.node_id,
                 "timestamp": event.timestamp,
                 "payload": event.payload,
             }
-            for event in self._journal.list_events(run_id)
+            for event in self._journal.list_events(
+                run_id,
+                after_sequence=after_sequence,
+            )
         ]
+
+    def get_nodes(self, run_id: str) -> list[dict[str, Any]] | None:
+        dag = self._load_dag(run_id)
+        if dag is None:
+            return None
+        handle = self._active_runs.get(run_id) or self._schedule.get_run(run_id)
+        result: list[dict[str, Any]] = []
+        for node_id, node in dag.nodes.items():
+            state: Any = (
+                handle.node_states.get(node_id, NodeState.PENDING)
+                if handle is not None
+                else NodeState.PENDING
+            )
+            projection = (
+                self._journal.load_node_projection(run_id, node_id)
+                if self._journal is not None
+                else None
+            )
+            if projection is not None:
+                # The executor-owned journal is the durable source of truth.
+                # Schedule transports can legitimately lag for OS-internal
+                # control nodes (branch/join) and skipped branch nodes because
+                # those nodes never produce a physical-device status message.
+                # Never let that lag overwrite a committed terminal result.
+                state = {
+                    "succeeded": "success",
+                    "failed": "failed",
+                    "cancelled": "cancelled",
+                    "skipped": "skipped",
+                    "running": "running",
+                }.get(projection.state, projection.state)
+            result.append(
+                {
+                    "nodeId": node_id,
+                    "sourceNodeId": node.source_node_id or node_id,
+                    "nodeType": node.node_type,
+                    "deviceId": node.device_id,
+                    "action": node.action,
+                    "state": state.value if isinstance(state, NodeState) else str(state),
+                    "result": projection.result if projection is not None else {},
+                    "attempt": projection.attempt if projection is not None else 0,
+                }
+            )
+        return result
+
+    def get_node(self, run_id: str, node_id: str) -> dict[str, Any] | None:
+        nodes = self.get_nodes(run_id)
+        if nodes is None:
+            return None
+        return next((node for node in nodes if node["nodeId"] == node_id), None)
 
     def get_timeline(self, run_id: str) -> dict[str, Any] | None:
         dag = self._load_dag(run_id)
@@ -316,6 +549,28 @@ class RuntimeService:
         await self._schedule.cancel_task(run_id)
         self._set_status(run_id, "cancel_requested")
         return {"id": run_id, "status": "cancel_requested"}
+
+    async def debug_command(
+        self,
+        run_id: str,
+        body: dict[str, Any],
+    ) -> dict[str, Any]:
+        if self.get_run(run_id) is None:
+            raise KeyError(run_id)
+        if self._schedule.get_run(run_id) is None:
+            raise RuntimeConflictError("RUN_NOT_ACTIVE")
+        command = str(body.get("command") or "")
+        payload = body.get("payload")
+        if payload is not None and not isinstance(payload, Mapping):
+            raise DagValidationError("debug command payload must be an object")
+        try:
+            return await self._schedule.debug_command(
+                run_id,
+                command,
+                dict(payload or {}),
+            )
+        except (RuntimeError, TimeoutError) as exc:
+            raise RuntimeConflictError(str(exc)) from exc
 
     async def reconcile_run(
         self,
@@ -371,9 +626,11 @@ class RuntimeService:
             raise DagValidationError("source 必须是对象")
         source_format = str(source.get("format") or "")
         payload = source.get("payload")
+        if payload is None and source_format == "workflow_revision_v2":
+            payload = source.get("revision")
         if not _is_record(payload):
             raise DagValidationError("source.payload 必须是对象")
-        if source_format == "canonical_workflow_v2":
+        if source_format in {"canonical_workflow_v2", "workflow_revision_v2"}:
             try:
                 return WorkflowRevision.model_validate(payload)
             except ValueError as exc:
@@ -390,7 +647,7 @@ class RuntimeService:
                     payload,
                     parameters=dict(body.get("parameters") or {}),
                 )
-            except ProfileValidationError as exc:
+            except ValueError as exc:
                 raise DagValidationError(str(exc)) from exc
         if source_format == "profile_workflow":
             profile_ref = str(body.get("profile_ref") or "")
@@ -417,7 +674,7 @@ class RuntimeService:
                 try:
                     return by_name[name]
                 except KeyError as exc:
-                    raise ProfileValidationError(
+                    raise ValueError(
                         f"workflow dependency is missing: {name}"
                     ) from exc
 
@@ -428,7 +685,7 @@ class RuntimeService:
                     resolver=resolve_dependency,
                     source_artifact=source.get("artifact"),
                 )
-            except ProfileValidationError as exc:
+            except ValueError as exc:
                 raise DagValidationError(str(exc)) from exc
         raise DagValidationError(f"不支持的 source.format: {source_format or '-'}")
 
@@ -461,6 +718,89 @@ class RuntimeService:
         handle = self._active_runs.get(run_id)
         if handle is not None:
             self._set_status(run_id, _run_status(handle))
+        feedback = data.get("feedback_data")
+        return_info = data.get("return_info")
+        status = str(data.get("status") or "")
+        if isinstance(feedback, Mapping) and feedback:
+            self._append_runtime_event(
+                run_id=run_id,
+                event_type="node.feedback",
+                node_id=str(data.get("job_id") or "") or None,
+                payload=dict(feedback),
+            )
+        if status in {"success", "failed", "cancelled"} and isinstance(
+            return_info, Mapping
+        ):
+            self._append_runtime_event(
+                run_id=run_id,
+                event_type=(
+                    "node.result" if status == "success" else "node.exception"
+                ),
+                node_id=str(data.get("job_id") or "") or None,
+                payload=dict(return_info),
+            )
+
+    def _on_debug_event(self, data: dict[str, Any]) -> None:
+        run_id = str(data.get("run_id") or "")
+        event_type = str(data.get("type") or "debug.state_changed")
+        payload = data.get("payload")
+        self._append_runtime_event(
+            run_id=run_id,
+            event_type=event_type,
+            node_id=(
+                str(payload.get("pausedBeforeNodeId") or "") or None
+                if isinstance(payload, Mapping)
+                else None
+            ),
+            payload=dict(payload) if isinstance(payload, Mapping) else {},
+        )
+
+    def _append_runtime_event(
+        self,
+        *,
+        run_id: str,
+        event_type: str,
+        node_id: str | None = None,
+        payload: dict[str, Any] | None = None,
+    ) -> None:
+        if not run_id:
+            return
+        if self._journal is not None:
+            self._journal.append_runtime_event(
+                run_id=run_id,
+                event_type=event_type,
+                node_id=node_id,
+                payload=payload,
+            )
+            return
+        self._memory_sequence += 1
+        self._memory_events.setdefault(run_id, []).append(
+            {
+                "seq": self._memory_sequence,
+                "runId": run_id,
+                "type": event_type,
+                "nodeId": node_id,
+                "timestamp": 0.0,
+                "payload": dict(payload or {}),
+            }
+        )
+
+    @staticmethod
+    def _public_event_type(event_type: str) -> str:
+        aliases = {
+            "run_submitted": "run.created",
+            "run_status_changed": "run.status",
+            "run_completed": "run.status",
+            "run_failed": "run.status",
+            "run_cancelled": "run.status",
+            "node_started": "node.started",
+            "node_succeeded": "node.result",
+            "node_success": "node.result",
+            "node_failed": "node.exception",
+            "node_cancelled": "node.cancelled",
+            "node_skipped": "node.skipped",
+        }
+        return aliases.get(event_type, event_type)
 
     @staticmethod
     def _revision_projection(

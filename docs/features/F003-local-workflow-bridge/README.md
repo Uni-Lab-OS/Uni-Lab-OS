@@ -1,34 +1,60 @@
-# F003 本地工作流桥（两套前端直连 OS 本地 DAG 执行，替代 Go 后端）
+# F003 OS 本地工作流桥
 
-> 基于 Harness Engineering 方法论，为 OS（Python/ROS2）定制。
-> Agent 行为宪法: `docs/agent-workflow.md`
-> 团队协作 SOP: 主仓 `product_designs/team_collaboration/`
+> 本目录保留 F003 最初“两套前端、三面 bridge”的需求与验收档案。当前运行时边界以本文和
+> `unilabos/app/local_bridge/README.md` 为准；历史文档中的 Cloud panel WS 不再代表现状。
 
-## 一句话
+## 当前结论
 
-在**不启动 Go 后端**（本环境 Redis/Nacos/MQTT/Docker 均不可用）的前提下，用一个
-**本地桥（local_bridge）** 充当后端的"翻译面"，让两套前端都能把**整张工作流 DAG**
-下发给 OS 本地执行（复用 F002 的 `task_dag` 真实路径），并接收 OS 回流的真实 `job_status`：
+`local_bridge` 让 `uni-lab-fe` 通过统一 `unilab/v1` 接口把完整工作流 DAG 交给 OS，
+并把 OS 的权威运行状态投影回前端。它不复制 scheduler、debugger、workflow store 或
+物料事实源。
 
-- **实现 A**：uni-lab-cloud 的两个工作流 panel（`WorkflowDAGPanel` + `WorkflowStepsPanel`）
-  经桥的 `/ws/workflow/{uuid}` 面驱动，**panel 组件零改动**。
-- **实现 B**：SZLab `unilabos_local_ui`（Vite + React 19 + React Flow）经桥的 `/api/*` 面驱动。
+2026-07-26 起：
 
-两套 UI 只是不同协议的翻译面，最终都走同一条 F002 `task_dag` 执行路径 —— 单一事实源，
-不复制执行逻辑。
-
-## 文件职责分工
-
-| 文件 | 谁写 | 说明 |
-|------|------|------|
-| `requirement.md` | **HUMAN** | 需求规格：用户故事、验收标准 |
-| `feature-list.json` | **HUMAN** 定义 / **CLAUDE** 改状态 | 子任务拆分与进度 |
-| `interface-design.md` | **HUMAN** 定义 / **CLAUDE** 补充 | 桥三面接口 + 与 F002 契约对齐 |
-| `progress.md` | **CLAUDE** | 实现进度记录 |
-| `checklist.md` | **CLAUDE** | 验证检查清单 |
+- 旧 Cloud panel `/ws/workflow/{uuid}`、端口 8891、`workflow_ws.py` 及其测试均已删除，
+  不保留兼容入口，也不得重新引入。
+- bridge 只保留两个网络面：OS schedule WS `:8890` 与统一 HTTP/WS API `:8014`。
+- `uni-lab-fe` 内部工作流引擎和 `@unilab/services` 是唯一前端调用面；Cloud 工作流
+  画布不再迁移。
+- `/api/run`、`/api/runtime/local/*` 仅是尚未清理的 legacy HTTP 兼容路由，新组件不得使用。
 
 ## 与 F002 的关系
 
-F002 已把整张 DAG 的**本地执行**做完（`task_dag` 下行 → `DagExecutor`/`TaskDagRunner`
-本地并发走图 → `job_status` 上行）。F003 只补**前端到 OS 之间的桥**这一段：把两套前端
-各自的协议翻译成 F002 冻结的 `task_dag`/`job_status` 契约，不改 F002 任何执行逻辑。
+F002 负责整张 DAG 的本地执行：`task_dag` 下行，`DagExecutor`/`TaskDagRunner` 本地走图，
+`job_status` 上行。F003 只负责把统一 v1 API 映射到这条既有路径，不改变执行语义：
+
+```text
+uni-lab-fe
+  -> :8014 unilab/v1
+  -> LocalApiState / authoritative runtime
+  -> :8890 schedule session
+  -> OS DagExecutor
+```
+
+物料读取复用同一条 schedule session，但事实源不是 bridge：`unilab -g/--graph` 启动时
+建立 OS 的当前 `ResourceTreeSet`，OS 内部可继续修改它；bridge 只缓存其只读快照，并在
+每次 material GET 前主动向 OS 刷新。
+
+## 文档职责
+
+| 文件 | 作用 |
+|---|---|
+| `requirement.md` | F003 原始需求档案，包含已退役的 Cloud panel 验收目标 |
+| `interface-design.md` | 原三面协议设计档案；首页退役声明优先于旧章节 |
+| `feature-list.json` | 历史任务与当时验证证据，不作为当前接口清单 |
+| `progress.md` / `checklist.md` | 历史实现与验收记录 |
+| [local_bridge README](../../../unilabos/app/local_bridge/README.md) | 当前启动方式、端口和文件职责 |
+| [Material API](../../../unilabos/app/local_bridge/MATERIAL_API.md) | 当前物料内存权威与 OS/backend 对照 |
+| [runtime README](../../../unilabos/runtime/README.md) | 当前运行投影和事件 journal |
+| [scheduler README](../../../unilabos/scheduler/README.md) | executor、断点和单步语义 |
+
+## 不能做
+
+- 不能恢复 8891、`workflow_ws.py` 或 `/ws/workflow/{uuid}`。
+- 不能由 bridge 或前端裁剪 DAG 来实现起始点；OS 必须收到完整图并权威产生 `skipped`。
+- 不能在资源申请或设备入队后才命中断点。
+- 不能把 WebSocket/HTTP 成功当作节点成功。
+- 不能让 offline 模式复制或简化 executor/debugger。
+- 不能让 bridge 从 graph 文件反复读取“当前物料”；运行时权威只能是 OS 内存中的
+  `ResourceTreeSet`。
+- 不能用系统 Python；一律使用 `unilab` Python 3.11 环境。

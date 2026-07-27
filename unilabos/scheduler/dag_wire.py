@@ -81,4 +81,6 @@ def serialize_task_dag(dag: TaskDag) -> dict[str, Any]:
         serialized["workflow_revision_hash"] = dag.workflow_revision_hash
     if dag.runtime_parameters:
         serialized["runtime_parameters"] = dict(dag.runtime_parameters)
+    if dag.debug:
+        serialized["debug"] = dict(dag.debug)
     return serialized

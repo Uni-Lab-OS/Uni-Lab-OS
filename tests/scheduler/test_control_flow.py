@@ -193,6 +193,32 @@ def test_executor_fork_join_waits_for_both_active_branches() -> None:
     assert len(dispatched) == len(set(dispatched))
 
 
+def test_group_marker_completes_in_kernel_without_device_dispatch() -> None:
+    api = _control_api()
+    group = _node("nested", "group")
+    group.update({"device_id": "os_control", "action": "group"})
+    dag = _dag(
+        [group, _node("inside")],
+        [{"source_node_uuid": "nested", "target_node_uuid": "inside"}],
+    )
+    dispatched: list[str] = []
+
+    async def dispatch(node) -> NodeExecutionResult:
+        dispatched.append(node.node_id)
+        return NodeExecutionResult(
+            state=NodeState.SUCCESS,
+            envelope=ResultEnvelope(outputs={}),
+        )
+
+    states = asyncio.run(api.DagExecutor(dag, dispatch).run())
+
+    assert states == {
+        "nested": NodeState.SUCCESS,
+        "inside": NodeState.SUCCESS,
+    }
+    assert dispatched == ["inside"]
+
+
 def test_all_skipped_join_propagates_skip_without_deadlock() -> None:
     api = _control_api()
     dag = _dag(

@@ -55,6 +55,7 @@ class ResourceClaimTemplate(BaseModel):
 
     resource_type: str = Field(min_length=1)
     selector: str = Field(min_length=1)
+    resource_kind: Literal["device", "material", "slot"] = "device"
     quantity: int = Field(default=1, ge=1)
     scope: Literal[
         "action",

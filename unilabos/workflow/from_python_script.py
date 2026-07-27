@@ -1,9 +1,9 @@
 import ast
 import re
-from collections.abc import Mapping
-from typing import Dict, List, Any, Tuple, Optional
+from collections.abc import Callable, Mapping
+from dataclasses import dataclass
+from typing import Any, Dict, List, Optional, Tuple
 
-from .common import WorkflowGraph, RegistryAdapter
 from .bindings import Binding, LiteralValue, NodeOutputRef, RuntimeParameterRef
 from .canonical import (
     ActionInvocation,
@@ -18,6 +18,16 @@ from .canonical import (
 Json = Dict[str, Any]
 STATIC_RANGE_EXPANSION_LIMIT = 1_000
 MAX_COMPILED_NODES = 10_000
+WorkflowSourceResolver = Callable[[str, str], str | None]
+
+
+@dataclass(frozen=True)
+class _ImportedWorkflow:
+    workflow_id: str
+    module: str
+    symbol: str
+    document: dict[str, Any]
+    outputs: tuple[str, ...]
 
 
 class PythonWorkflowCompileError(ValueError):
@@ -44,6 +54,8 @@ class DeviceMethodConverter:
     """
 
     def __init__(self, device_registry: Optional[Dict[str, Any]] = None):
+        from .common import RegistryAdapter, WorkflowGraph
+
         self.graph = WorkflowGraph()
         self.variable_sources: Dict[
             str, Dict[str, Any]
@@ -304,11 +316,28 @@ class DeviceMethodConverter:
 
 
 def _canonical_action_ref(call: ast.Call) -> str:
-    if not isinstance(call.func, ast.Attribute) or not isinstance(
-        call.func.value, ast.Name
+    if not isinstance(call.func, ast.Attribute):
+        raise ValueError(
+            "workflow calls must use owner.action(...) or device(...).action(...)"
+        )
+    owner = call.func.value
+    if isinstance(owner, ast.Name):
+        return f"{owner.id}.{call.func.attr}"
+    if (
+        isinstance(owner, ast.Call)
+        and isinstance(owner.func, ast.Name)
+        and owner.func.id == "device"
+        and len(owner.args) == 1
+        and not owner.keywords
+        and isinstance(owner.args[0], ast.Constant)
+        and isinstance(owner.args[0].value, str)
+        and owner.args[0].value
     ):
-        raise ValueError("workflow calls must use owner.action(...) syntax")
-    return f"{call.func.value.id}.{call.func.attr}"
+        return f"{owner.args[0].value}.{call.func.attr}"
+    raise ValueError(
+        "workflow calls must use owner.action(...) or "
+        "device('exact-device-id').action(...)"
+    )
 
 
 def _canonical_binding(
@@ -462,6 +491,139 @@ def _workflow_function_parameters(
         parameters.append(WorkflowParameter(**values))
         bindings[argument.arg] = RuntimeParameterRef(parameter=argument.arg)
     return parameters, bindings
+
+
+def _workflow_return_spec(
+    function: ast.FunctionDef,
+) -> tuple[tuple[str, ast.expr], ...]:
+    """Read named final outputs without treating return as executable code."""
+
+    statements = [
+        statement
+        for statement in function.body
+        if not (
+            isinstance(statement, ast.Expr)
+            and isinstance(statement.value, ast.Constant)
+            and isinstance(statement.value.value, str)
+        )
+    ]
+    nested_returns = [
+        node
+        for statement in statements
+        for node in ast.walk(statement)
+        if isinstance(node, ast.Return)
+    ]
+    if not nested_returns:
+        return ()
+    if (
+        len(nested_returns) != 1
+        or not isinstance(statements[-1], ast.Return)
+        or nested_returns[0] is not statements[-1]
+    ):
+        raise ValueError("workflow return must be one final top-level statement")
+    value = nested_returns[0].value
+    if value is None:
+        return ()
+    if (
+        isinstance(value, ast.Call)
+        and isinstance(value.func, ast.Name)
+        and value.func.id == "workflow_output"
+    ):
+        if value.args or any(keyword.arg is None for keyword in value.keywords):
+            raise ValueError(
+                "workflow_output requires named arguments without unpacking"
+            )
+        names = [
+            str(keyword.arg)
+            for keyword in value.keywords
+            if keyword.arg is not None
+        ]
+        if not names or len(set(names)) != len(names):
+            raise ValueError("workflow_output names must be non-empty and unique")
+        return tuple(
+            (str(keyword.arg), keyword.value)
+            for keyword in value.keywords
+            if keyword.arg is not None
+        )
+    expressions = list(value.elts) if isinstance(value, ast.Tuple) else [value]
+    if not expressions or any(not isinstance(item, ast.Name) for item in expressions):
+        raise ValueError(
+            "workflow return must use workflow_output(name=value)"
+        )
+    names = tuple(item.id for item in expressions if isinstance(item, ast.Name))
+    if len(set(names)) != len(names):
+        raise ValueError("workflow return values must be unique")
+    return tuple(
+        (item.id, item)
+        for item in expressions
+        if isinstance(item, ast.Name)
+    )
+
+
+def _workflow_return_names(function: ast.FunctionDef) -> tuple[str, ...]:
+    return tuple(name for name, _ in _workflow_return_spec(function))
+
+
+def _workflow_executable_body(function: ast.FunctionDef) -> list[ast.stmt]:
+    outputs = _workflow_return_names(function)
+    if not outputs:
+        return list(function.body)
+    return list(function.body[:-1])
+
+
+def _workflow_raw_parameters(
+    function: ast.FunctionDef,
+    *,
+    parameter_ui: Mapping[str, Mapping[str, Any]],
+) -> tuple[list[WorkflowParameter], list[dict[str, Any]]]:
+    parameters, _ = _workflow_function_parameters(
+        function,
+        parameter_ui=parameter_ui,
+    )
+    parameter_names = {parameter.name for parameter in parameters}
+    assigned_names = {
+        target.id
+        for node in ast.walk(function)
+        if isinstance(node, ast.Assign) and isinstance(node.value, ast.Call)
+        for target in node.targets
+        if isinstance(target, ast.Name)
+    }
+    rebound = sorted(assigned_names & parameter_names)
+    if rebound:
+        raise ValueError(f"workflow parameter cannot be rebound: {rebound[0]}")
+    output_names = set(_workflow_return_names(function))
+    type_map = {
+        "string": "STRING",
+        "integer": "INT",
+        "number": "FLOAT",
+        "boolean": "BOOL",
+    }
+    raw_parameters: list[dict[str, Any]] = []
+    for parameter in parameters:
+        raw: dict[str, Any] = {
+            "name": parameter.name,
+            "scope": "local",
+            "type": type_map[parameter.type],
+            "io": "in",
+        }
+        if "default" in parameter.model_fields_set:
+            raw["default"] = parameter.default
+        if parameter.title != parameter.name:
+            raw["ui"] = {"label": parameter.title}
+        if parameter.description:
+            raw["comment"] = parameter.description
+        raw_parameters.append(raw)
+    for name in sorted((assigned_names | output_names) - parameter_names):
+        raw_parameters.append(
+            {
+                "name": name,
+                "scope": "local",
+                "type": "DICT",
+                "io": "out" if name in output_names else "var",
+                "default": {},
+            }
+        )
+    return parameters, raw_parameters
 
 
 _PYTHON_EXPRESSION_BINARY_OPERATORS: dict[type[ast.operator | ast.cmpop], str] = {
@@ -688,15 +850,95 @@ def _located_python_call_operation(
         raise PythonWorkflowCompileError(str(error), node=statement) from error
 
 
+def _python_subworkflow_operation(
+    call: ast.Call,
+    *,
+    workflow: _ImportedWorkflow,
+    assignment: ast.expr | None,
+    statement: ast.stmt,
+    static_values: Mapping[str, Any],
+) -> dict[str, Any]:
+    if call.args:
+        raise ValueError("subworkflow calls require named arguments")
+    if any(keyword.arg is None for keyword in call.keywords):
+        raise ValueError("subworkflow calls do not support **kwargs")
+    input_definitions = {
+        str(raw["name"]): raw
+        for raw in workflow.document.get("vars", [])
+        if isinstance(raw, Mapping) and raw.get("io") == "in" and raw.get("name")
+    }
+    keywords = {
+        str(keyword.arg): keyword.value
+        for keyword in call.keywords
+        if keyword.arg is not None
+    }
+    unknown = sorted(set(keywords) - set(input_definitions))
+    if unknown:
+        raise ValueError(
+            f"subworkflow {workflow.workflow_id!r} has no input {unknown[0]!r}"
+        )
+    missing = sorted(
+        name
+        for name, definition in input_definitions.items()
+        if "default" not in definition and name not in keywords
+    )
+    if missing:
+        raise ValueError(
+            f"subworkflow {workflow.workflow_id!r} requires input {missing[0]!r}"
+        )
+
+    targets: tuple[str, ...] = ()
+    if assignment is not None:
+        expressions = (
+            list(assignment.elts)
+            if isinstance(assignment, (ast.Tuple, ast.List))
+            else [assignment]
+        )
+        if any(not isinstance(item, ast.Name) for item in expressions):
+            raise ValueError(
+                "subworkflow assignment requires simple variable names"
+            )
+        targets = tuple(
+            item.id for item in expressions if isinstance(item, ast.Name)
+        )
+    if len(targets) != len(workflow.outputs):
+        if workflow.outputs:
+            raise ValueError(
+                f"subworkflow {workflow.workflow_id!r} returns "
+                f"{len(workflow.outputs)} value(s)"
+            )
+        raise ValueError(
+            f"subworkflow {workflow.workflow_id!r} does not return a value"
+        )
+    return {
+        "op": "run_script",
+        "script": workflow.workflow_id,
+        "module": workflow.module,
+        "callable": workflow.symbol,
+        "inputs": {
+            name: _python_expression(value, static_values=static_values)
+            for name, value in keywords.items()
+        },
+        "outputs": {
+            output: {"var": target}
+            for output, target in zip(workflow.outputs, targets)
+        },
+        "_source_line": statement.lineno,
+        "_source_column": statement.col_offset,
+    }
+
+
 def _python_block_operations(
     statements: list[ast.stmt],
     *,
     action_catalog: Mapping[str, Mapping[str, Any]],
+    imported_workflows: Mapping[str, _ImportedWorkflow] | None = None,
     static_values: Mapping[str, Any] | None = None,
     node_budget: list[int] | None = None,
 ) -> list[dict[str, Any]]:
     operations: list[dict[str, Any]] = []
     values = dict(static_values or {})
+    subworkflows = dict(imported_workflows or {})
     budget = node_budget if node_budget is not None else [MAX_COMPILED_NODES]
 
     def consume_nodes(count: int) -> None:
@@ -714,6 +956,21 @@ def _python_block_operations(
         ):
             continue
         if isinstance(statement, ast.Expr) and isinstance(statement.value, ast.Call):
+            if (
+                isinstance(statement.value.func, ast.Name)
+                and statement.value.func.id in subworkflows
+            ):
+                consume_nodes(1)
+                operations.append(
+                    _python_subworkflow_operation(
+                        statement.value,
+                        workflow=subworkflows[statement.value.func.id],
+                        assignment=None,
+                        statement=statement,
+                        static_values=values,
+                    )
+                )
+                continue
             consume_nodes(1)
             operations.append(
                 _located_python_call_operation(
@@ -727,9 +984,30 @@ def _python_block_operations(
             continue
         if isinstance(statement, ast.Assign) and isinstance(statement.value, ast.Call):
             if len(statement.targets) != 1 or not isinstance(
-                statement.targets[0], ast.Name
+                statement.targets[0], (ast.Name, ast.Tuple, ast.List)
             ):
-                raise ValueError("workflow assignments require one simple variable")
+                raise ValueError(
+                    "workflow assignments require one simple target"
+                )
+            if (
+                isinstance(statement.value.func, ast.Name)
+                and statement.value.func.id in subworkflows
+            ):
+                consume_nodes(1)
+                operations.append(
+                    _python_subworkflow_operation(
+                        statement.value,
+                        workflow=subworkflows[statement.value.func.id],
+                        assignment=statement.targets[0],
+                        statement=statement,
+                        static_values=values,
+                    )
+                )
+                continue
+            if not isinstance(statement.targets[0], ast.Name):
+                raise ValueError(
+                    "action assignments require one simple variable"
+                )
             consume_nodes(1)
             operations.append(
                 _located_python_call_operation(
@@ -750,12 +1028,14 @@ def _python_block_operations(
                     "then": _python_block_operations(
                         statement.body,
                         action_catalog=action_catalog,
+                        imported_workflows=subworkflows,
                         static_values=values,
                         node_budget=budget,
                     ),
                     "else": _python_block_operations(
                         statement.orelse,
                         action_catalog=action_catalog,
+                        imported_workflows=subworkflows,
                         static_values=values,
                         node_budget=budget,
                     ),
@@ -787,12 +1067,14 @@ def _python_block_operations(
                     "body": _python_block_operations(
                         statement.body,
                         action_catalog=action_catalog,
+                        imported_workflows=subworkflows,
                         static_values=values,
                         node_budget=budget,
                     ),
                     "finally": _python_block_operations(
                         statement.finalbody,
                         action_catalog=action_catalog,
+                        imported_workflows=subworkflows,
                         static_values=values,
                         node_budget=budget,
                     ),
@@ -810,6 +1092,7 @@ def _python_block_operations(
                     _python_block_operations(
                         statement.body,
                         action_catalog=action_catalog,
+                        imported_workflows=subworkflows,
                         static_values=iteration_values,
                         node_budget=budget,
                     )
@@ -847,6 +1130,7 @@ def _python_block_operations(
                         "body": _python_block_operations(
                             statement.body,
                             action_catalog=action_catalog,
+                            imported_workflows=subworkflows,
                             static_values=values,
                             node_budget=budget,
                         ),
@@ -865,6 +1149,7 @@ def _python_block_operations(
                         "body": _python_block_operations(
                             statement.body,
                             action_catalog=action_catalog,
+                            imported_workflows=subworkflows,
                             static_values=values,
                             node_budget=budget,
                         ),
@@ -881,64 +1166,28 @@ def _python_block_operations(
     return operations
 
 
-def _compile_workflow_function(
+def _workflow_document(
     function: ast.FunctionDef,
     *,
     action_catalog: Mapping[str, Mapping[str, Any]],
     fallback_workflow_id: str,
     fallback_revision_id: str,
-    source_artifact: WorkflowSourceArtifact | None,
-) -> WorkflowRevision:
+    imported_workflows: Mapping[str, _ImportedWorkflow],
+) -> tuple[
+    dict[str, Any],
+    str,
+    str,
+    list[WorkflowParameter],
+    tuple[str, ...],
+]:
     workflow_id, revision_id, parameter_ui = _workflow_decorator_values(
         function,
         fallback_workflow_id=fallback_workflow_id,
         fallback_revision_id=fallback_revision_id,
     )
-    parameters, _ = _workflow_function_parameters(
+    parameters, raw_parameters = _workflow_raw_parameters(
         function,
         parameter_ui=parameter_ui,
-    )
-    parameter_names = {parameter.name for parameter in parameters}
-    assigned_names = {
-        target.id
-        for node in ast.walk(function)
-        if isinstance(node, ast.Assign) and isinstance(node.value, ast.Call)
-        for target in node.targets
-        if isinstance(target, ast.Name)
-    }
-    rebound = sorted(assigned_names & parameter_names)
-    if rebound:
-        raise ValueError(f"workflow parameter cannot be rebound: {rebound[0]}")
-    type_map = {
-        "string": "STRING",
-        "integer": "INT",
-        "number": "FLOAT",
-        "boolean": "BOOL",
-    }
-    raw_parameters: list[dict[str, Any]] = []
-    for parameter in parameters:
-        raw: dict[str, Any] = {
-            "name": parameter.name,
-            "scope": "local",
-            "type": type_map[parameter.type],
-            "io": "in",
-        }
-        if "default" in parameter.model_fields_set:
-            raw["default"] = parameter.default
-        if parameter.title != parameter.name:
-            raw["ui"] = {"label": parameter.title}
-        if parameter.description:
-            raw["comment"] = parameter.description
-        raw_parameters.append(raw)
-    raw_parameters.extend(
-        {
-            "name": name,
-            "scope": "local",
-            "type": "DICT",
-            "io": "var",
-            "default": {},
-        }
-        for name in sorted(assigned_names)
     )
     document = {
         "schema": "unilab.python/v1",
@@ -946,13 +1195,145 @@ def _compile_workflow_function(
         "name": workflow_id,
         "vars": raw_parameters,
         "body": _python_block_operations(
-            list(function.body),
+            _workflow_executable_body(function),
             action_catalog=action_catalog,
+            imported_workflows=imported_workflows,
         ),
+        "returns": {
+            name: _python_expression(expression)
+            for name, expression in _workflow_return_spec(function)
+        },
     }
+    return (
+        document,
+        workflow_id,
+        revision_id,
+        parameters,
+        _workflow_return_names(function),
+    )
+
+
+def _workflow_function_from_module(
+    tree: ast.Module,
+    *,
+    expected_symbol: str | None,
+) -> ast.FunctionDef:
+    functions = [
+        item for item in tree.body if isinstance(item, ast.FunctionDef)
+    ]
+    if expected_symbol is None:
+        if len(functions) != 1:
+            raise ValueError("workflow source must contain exactly one function")
+        return functions[0]
+    matches = [item for item in functions if item.name == expected_symbol]
+    if len(matches) != 1:
+        raise ValueError(
+            f"imported workflow module must define {expected_symbol!r}"
+        )
+    return matches[0]
+
+
+def _resolve_imported_workflows(
+    tree: ast.Module,
+    *,
+    action_catalog: Mapping[str, Mapping[str, Any]],
+    workflow_source_resolver: WorkflowSourceResolver | None,
+    documents: dict[str, dict[str, Any]],
+    cache: dict[tuple[str, str], _ImportedWorkflow],
+    stack: tuple[tuple[str, str], ...],
+) -> dict[str, _ImportedWorkflow]:
+    if workflow_source_resolver is None:
+        return {}
+    imported: dict[str, _ImportedWorkflow] = {}
+    for statement in tree.body:
+        if not isinstance(statement, ast.ImportFrom) or not statement.module:
+            continue
+        for alias in statement.names:
+            source = workflow_source_resolver(statement.module, alias.name)
+            if source is None:
+                continue
+            key = (statement.module, alias.name)
+            local_name = alias.asname or alias.name
+            if key in stack:
+                chain = " -> ".join(
+                    symbol for _, symbol in (*stack, key)
+                )
+                raise ValueError(f"recursive subworkflow import: {chain}")
+            workflow = cache.get(key)
+            if workflow is None:
+                imported_tree = ast.parse(source)
+                imported_function = _workflow_function_from_module(
+                    imported_tree,
+                    expected_symbol=alias.name,
+                )
+                nested = _resolve_imported_workflows(
+                    imported_tree,
+                    action_catalog=action_catalog,
+                    workflow_source_resolver=workflow_source_resolver,
+                    documents=documents,
+                    cache=cache,
+                    stack=(*stack, key),
+                )
+                (
+                    document,
+                    workflow_id,
+                    _,
+                    _,
+                    outputs,
+                ) = _workflow_document(
+                    imported_function,
+                    action_catalog=action_catalog,
+                    fallback_workflow_id=alias.name,
+                    fallback_revision_id="imported",
+                    imported_workflows=nested,
+                )
+                existing = documents.get(workflow_id)
+                if existing is not None and existing != document:
+                    raise ValueError(
+                        f"conflicting imported workflow {workflow_id!r}"
+                    )
+                documents[workflow_id] = document
+                workflow = _ImportedWorkflow(
+                    workflow_id=workflow_id,
+                    module=statement.module,
+                    symbol=alias.name,
+                    document=document,
+                    outputs=outputs,
+                )
+                cache[key] = workflow
+            imported[local_name] = workflow
+    return imported
+
+
+def _compile_workflow_function(
+    function: ast.FunctionDef,
+    *,
+    action_catalog: Mapping[str, Mapping[str, Any]],
+    fallback_workflow_id: str,
+    fallback_revision_id: str,
+    source_artifact: WorkflowSourceArtifact | None,
+    imported_workflows: Mapping[str, _ImportedWorkflow],
+    imported_documents: Mapping[str, Mapping[str, Any]],
+) -> WorkflowRevision:
+    (
+        document,
+        _,
+        revision_id,
+        _,
+        _,
+    ) = _workflow_document(
+        function,
+        action_catalog=action_catalog,
+        fallback_workflow_id=fallback_workflow_id,
+        fallback_revision_id=fallback_revision_id,
+        imported_workflows=imported_workflows,
+    )
     from .operation_tree import compile_operation_tree
 
-    revision = compile_operation_tree(document)
+    revision = compile_operation_tree(
+        document,
+        resolver=lambda name: imported_documents[name],
+    )
     return revision.model_copy(
         update={
             "revision_id": revision_id,
@@ -968,6 +1349,7 @@ def _compile_python_script(
     workflow_id: str = "python-workflow",
     revision_id: str = "draft",
     source_artifact: WorkflowSourceArtifact | Mapping[str, Any] | None = None,
+    workflow_source_resolver: WorkflowSourceResolver | None = None,
 ) -> WorkflowRevision:
     """Compile compact, declarative Python calls to a Canonical revision.
 
@@ -1001,12 +1383,23 @@ def _compile_python_script(
             for item in tree.body
         ):
             raise ValueError("workflow source must contain exactly one function")
+        imported_documents: dict[str, dict[str, Any]] = {}
+        imported_workflows = _resolve_imported_workflows(
+            tree,
+            action_catalog=action_catalog,
+            workflow_source_resolver=workflow_source_resolver,
+            documents=imported_documents,
+            cache={},
+            stack=(),
+        )
         return _compile_workflow_function(
             functions[0],
             action_catalog=action_catalog,
             fallback_workflow_id=workflow_id,
             fallback_revision_id=revision_id,
             source_artifact=artifact,
+            imported_workflows=imported_workflows,
+            imported_documents=imported_documents,
         )
     parameters: list[WorkflowParameter] | None = None
     workflow_parameter_names: set[str] = set()
@@ -1110,7 +1503,8 @@ def _compile_python_script(
             return
         else:
             raise ValueError(
-                "workflow source only supports action calls, assignments, and finite for loops"
+                "workflow source only supports action calls, assignments, "
+                "and finite for loops"
             )
         emit_call(
             call,
@@ -1140,6 +1534,7 @@ def compile_python_script(
     workflow_id: str = "python-workflow",
     revision_id: str = "draft",
     source_artifact: WorkflowSourceArtifact | Mapping[str, Any] | None = None,
+    workflow_source_resolver: WorkflowSourceResolver | None = None,
 ) -> WorkflowRevision:
     """Compile Python authoring source without leaking parser/runtime errors."""
 
@@ -1150,6 +1545,7 @@ def compile_python_script(
             workflow_id=workflow_id,
             revision_id=revision_id,
             source_artifact=source_artifact,
+            workflow_source_resolver=workflow_source_resolver,
         )
     except PythonWorkflowCompileError:
         raise

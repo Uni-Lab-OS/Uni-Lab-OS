@@ -987,6 +987,14 @@ def main():
     # 获取通信客户端（仅支持WebSocket）
     if BasicConfig.is_host_mode:
         comm_client = get_communication_client()
+        comm_client.bind_material_state(
+            resource_tree_set,
+            source_id=(
+                os.path.basename(file_path)
+                if file_path is not None
+                else "os-current"
+            ),
+        )
         if "websocket" in args_dict["app_bridges"]:
             args_dict["bridges"].append(comm_client)
 
