@@ -112,6 +112,54 @@ ResourceDict（`unilabos/resources/resource_tracker.py`）是全系统唯一内�
 6. **契约登记**：在 `unilab-edge-ui/docs/protocol/cloud-mapping.md` §6 拆装表登记
    新字段的云端表化归属与拆装规则。
 
+## Workflow Task Runtime Invariants
+
+### Backend-Aligned Identity and Naming
+
+- `Workflow` is an editable static definition. `WorkflowTask` is one immutable
+  execution snapshot. `WorkflowNodeJob` is one attempt to execute one node in a
+  task. Never use `/api/v1/workflows` to submit or address a running task.
+- Mirror the Backend model directly:
+  - model types use names such as `WorkflowNode` and `WorkflowTask`;
+  - persistent tables use singular snake case such as `workflow_node` and
+    `workflow_task`;
+  - entity primary keys are exposed as `uuid`;
+  - relationships use `workflow_uuid`, `workflow_task_uuid`,
+    `workflow_node_uuid`, `source_node_uuid`, and `target_node_uuid`;
+  - path and local identity variables use `workflow_uuid`, `task_uuid`,
+    `node_uuid`, `edge_uuid`, and `job_uuid`.
+- Do not introduce or retain parallel execution identities such as `run_id`,
+  `task_id`, `node_id`, `job_id`, camel-case wire aliases, or
+  `/api/v1/runtime/runs`. Never default `task_uuid` to `workflow_uuid`.
+
+### Runtime Authority
+
+- Node execution state and node result are the only mutable persisted workflow
+  execution facts. Workflow edges are immutable graph topology; their
+  active/inactive/unresolved resolution is derived inside the scheduler from
+  topology, node state, and node result.
+- Branch selection belongs in the branch node result. A skipped node must carry
+  a stable reason. Do not create a second persisted edge execution state.
+- Exactly one scheduler owns readiness, admission, node terminal state, and
+  task completion. Bridges, HTTP handlers, WebSocket sessions, device drivers,
+  and frontend projections must not implement another DAG walker or debugger.
+- Transport acceptance, dispatch acknowledgement, HTTP success, and WebSocket
+  delivery are not node terminal results. An uncertain physical action must
+  remain fenced until explicit query/reconciliation establishes its state.
+
+### Migration and Verification
+
+- Run Python tests, migration tools, and local servers only with the `unilab`
+  Python 3.11 environment. On this host the guaranteed interpreter is
+  `/home/changjunhan/.micromamba/envs/unilab/bin/python`.
+- Preserve the reviewed Edge Scheduler, HostLink, Inventory, and action-policy
+  tests while migrating the current workflow/scheduler/runtime tests. Never
+  delete, weaken, permanently skip, or xfail a contract test to make a
+  migration phase pass.
+- New workflow execution code and tests use Backend-aligned identity names
+  immediately; no compatibility adapter is maintained for the old Run
+  vocabulary.
+
 ## Licensing
 
 - Framework code: GPL-3.0
