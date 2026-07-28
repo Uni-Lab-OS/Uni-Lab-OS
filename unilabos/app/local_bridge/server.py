@@ -23,6 +23,7 @@ from __future__ import annotations
 import argparse
 import asyncio
 import logging
+import os
 import uuid
 from pathlib import Path
 
@@ -31,6 +32,9 @@ from unilabos.app.local_bridge.local_api import LocalApiServer, LocalApiState
 from unilabos.app.local_bridge.material_api import MaterialGraphCatalog
 from unilabos.app.local_bridge.material_models import MaterialModelRegistry
 from unilabos.app.local_bridge.offline_os import OfflineOS
+from unilabos.app.local_bridge.resource_template_api import (
+    ResourceTemplateProxy,
+)
 from unilabos.app.local_bridge.schedule_ws import ScheduleSession, ScheduleWSServer
 from unilabos.scheduler.dag_model import NodeState
 from unilabos.scheduler.resource_lock import ResourceLockManager
@@ -93,6 +97,8 @@ class LocalBridgeServer:
         graph_path: str | Path | None = None,
         workflow_libraries: list[tuple[str, str | Path]] | None = None,
         offline_node_delay: float = 0.0,
+        execution_http_url: str = "http://127.0.0.1:8002",
+        internal_api_token: str | None = None,
     ) -> None:
         require_loopback_runtime_host(host)
         if graph_path is not None and not offline:
@@ -139,6 +145,10 @@ class LocalBridgeServer:
             else None
         )
         self._workflow_store = WorkflowDocumentStore(workflow_root)
+        self._resource_template_proxy = ResourceTemplateProxy(
+            execution_http_url,
+            internal_token=internal_api_token,
+        )
 
         if offline:
             self._session, self._offline_os = build_offline_session(
@@ -152,7 +162,10 @@ class LocalBridgeServer:
         self._schedule_server = ScheduleWSServer(host=host, port=schedule_port)
         self._schedule_server.on_session(self._adopt_session)
         self._api_server = LocalApiServer(
-            self._get_local_api_state, host=host, port=api_port
+            self._get_local_api_state,
+            host=host,
+            port=api_port,
+            resource_template_proxy=self._resource_template_proxy,
         )
 
     def _adopt_session(self, session: ScheduleSession) -> None:
@@ -212,6 +225,20 @@ def _parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     parser.add_argument("--host", default="127.0.0.1", help="监听地址")
     parser.add_argument("--schedule-port", type=int, default=DEFAULT_SCHEDULE_PORT, help="OS 面 WS 端口")
     parser.add_argument("--api-port", type=int, default=DEFAULT_API_PORT, help="统一 HTTP/WS API 端口")
+    parser.add_argument(
+        "--execution-http-url",
+        default="http://127.0.0.1:8002",
+        help=(
+            "OS Registry 内部 HTTP 地址；显式配置，不根据统一 API 端口推算"
+        ),
+    )
+    parser.add_argument(
+        "--internal-api-token",
+        default=os.environ.get("UNILABOS_INTERNAL_API_TOKEN"),
+        help=(
+            "OS 内部 API token；默认读取 UNILABOS_INTERNAL_API_TOKEN"
+        ),
+    )
     parser.add_argument(
         "--journal-path",
         default=str(default_runtime_db_path()),
@@ -276,6 +303,8 @@ async def _amain(argv: list[str] | None = None) -> None:
         graph_path=args.graph,
         workflow_libraries=workflow_libraries,
         offline_node_delay=args.offline_node_delay,
+        execution_http_url=args.execution_http_url,
+        internal_api_token=args.internal_api_token,
     )
     logger.info(
         "[bridge] 启动：schedule=ws://%s:%d /api/v1/ws/schedule | api=http://%s:%d/api",

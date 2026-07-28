@@ -1,10 +1,12 @@
 # Local Material API 与 backend 对照
 
-本文记录 2026-07-26 当前代码的真实能力。对照源为：
+本文记录 2026-07-28 当前代码的真实能力。对照源为：
 
 - OS：`unilabos/app/main.py`、`app/ws_client.py`、
   `resources/material_state.py`、`app/local_bridge/local_api.py`、
-  `material_api.py`、`material_models.py`、`schedule_ws.py`、`server.py`；
+  `material_api.py`、`material_models.py`、`resource_template_api.py`、
+  `app/web/resource_templates.py`、`registry/template_catalog.py`、
+  `schedule_ws.py`、`server.py`；
 - Go backend：`internal/http/handler/resource.go`、
   `internal/service/resource/`、`internal/repository/resource.go`、
   `internal/model/resource.go`、`internal/model/state.go`。
@@ -21,8 +23,9 @@ OS 与 backend 可服从同一前端 typed port 和 capability matrix，但当�
 - backend 是 PostgreSQL/GORM 上的模板、material、relative position、site、物质与状态行
   CRUD；
 - 路径同为 `/api/v1/materials` 不等于返回语义相同；
-- 前端当前只可对 OS 声明 `material.readGraph`，只可对 backend 声明
-  `material.readTemplates`；
+- 前端当前可对 OS 声明 `material.readGraph` 与
+  `material.readTemplates`；Go backend 的现有模板接口尚未满足本轮统一目录
+  contract，因此当前 profile 不声明模板能力；
 - revision、幂等键、原子聚合命令、失败补偿和 edge/backend 同步没有统一之前，两端都
   不得声明前端 Material Graph 写能力。
 
@@ -39,6 +42,9 @@ OS 与 backend 可服从同一前端 typed port 和 capability matrix，但当�
 | `GET /api/v1/materials/{uuid}` | 稳定 UUID | 单个聚合投影行 | 按 ID 读取 |
 | `GET /api/v1/material-models` | 无 | 已登记模型清单 | 模型能力发现 |
 | `GET /api/v1/material-models/assets/{path}` | 登记根内相对路径 | XACRO/URDF/mesh 等文件 | 同源安全资源读取 |
+| `GET /api/v1/resource-templates` | 可选 `refresh=true` | 全量轻量模板目录、revision、stale | Edge Registry 模板发现 |
+| `GET /api/v1/resource-templates/{uuid}` | 可选 `refresh=true` | 懒加载详情、geometry/layout/config/assets | 模板详情 |
+| `GET /api/v1/resource-templates/{uuid}/assets/{key}` | 可选 `Range` | 显式登记的模板资源 | 同源安全资源读取 |
 
 `page >= 1`，`1 <= page_size <= 100`。列表支持大小写无关的 name/code 包含过滤和模板 UUID
 精确过滤。
@@ -61,6 +67,18 @@ material problem 通过 FastAPI `HTTPException.detail` 返回结构化对象，�
 - `MATERIAL_MODELS_UNAVAILABLE`：模型 registry 未进入就绪 state；
 - `INVALID_MATERIAL_MODEL_PATH`：资源路径逃逸模型根；
 - `MATERIAL_MODEL_ASSET_NOT_FOUND`：资源不存在。
+
+模板公共接口错误统一为根级
+`{error:{code,message,retryable}}`，常见 code：
+
+- `CATALOG_UNAVAILABLE`：Registry server 不可达且 bridge 没有缓存；
+- `TEMPLATE_NOT_FOUND`：UUID 不存在或模板不是 public；
+- `TEMPLATE_ASSET_NOT_FOUND`：资源 key 未声明、越界或文件不存在；
+- `INVALID_CATALOG_RESPONSE`：上游未遵守目录 contract。
+
+目录有缓存且发生可重试上游错误时仍返回 200，但 `data.stale=true`，并把 summary/detail
+中的 `creation.available` 统一设为 false。目录和详情支持 ETag；bridge 用 5 秒 TTL
+减少重复请求，过期后使用 `If-None-Match` 重验证。
 
 ### OS 投影语义
 
@@ -102,7 +120,7 @@ site CRUD、物质记录、state history、统一 undo/redo 命令。
 |---|---|---|---|
 | material 列表/详情 | `GET /materials[/{uuid}]`，聚合只读投影 | `GET /materials[/{uuid}]`，数据库 material 行 | 路径相同，语义不同 |
 | material 创建/替换/删除 | 无 | `POST /materials`、`PUT/DELETE /materials/{uuid}` | 不兼容 |
-| resource template | 无 | `/resource-templates` CRUD 与 handles | backend 可供 `readTemplates` |
+| resource template | Registry 全量 summary、懒详情、ETag、stale、显式 asset | `/resource-templates` CRUD 与 handles | 路径相同，当前 contract 不同 |
 | 静态相对位姿 | 聚合在 `config.placement` | `/materials/{uuid}/relative-position` CRUD | 需 adapter，非同一字段 |
 | Site | 聚合在 `config.sites`，只读 | material 下 create/list/order；`/sites/{uuid}` get/update/delete | backend 为独立持久化实体 |
 | 当前物质/历史 | 无 | `/materials/{uuid}/current-substance`、`substance-history` | backend only |
@@ -190,6 +208,33 @@ GET /api/v1/material-models/assets/{path}
   -> FileResponse
 ```
 
+template 请求：
+
+```text
+GET :8014/api/v1/resource-templates[/{uuid}]
+  -> local_api.py
+  -> ResourceTemplateProxy
+  -> TTL cache; expired entry adds If-None-Match
+  -> GET :8002/internal/v1/resource-templates[/{uuid}]
+  -> loopback/token authorization
+  -> ResourceTemplateCatalog(lab_registry)
+  -> already-built device_type_registry/resource_type_registry
+  -> stable summary or lazy normalized detail
+  -> ETag/revision back through bridge
+  -> {code,data,message}
+
+upstream temporarily unavailable
+  -> cached entry exists: stale=true + disable creation
+  -> no cached entry: structured 503 CATALOG_UNAVAILABLE
+```
+
+模板 asset 只能来自 YAML `catalog.assets` 显式键；internal route 将相对路径限制在该
+YAML 所在目录，bridge 只转发允许的内容/Range header。设备默认 internal、resource
+默认 public；当前仅 `liquid_handler.prcxi` 设备被显式公开。
+
+该链路不经过 schedule WS，也不读取 `-g` 图。Registry 模板描述“可以创建什么”，
+Material Graph 描述“OS 内存里当前有什么”，二者不能互相充当 fallback。
+
 本调用链没有 repository/database 写层，这是有意的。OS 内部修改通过 ResourceTreeSet 的
 设备/资源路径发生；HTTP API 保持只读。若未来需要前端写入，先定义 OS 与 backend 都能实现
 的聚合命令、revision、幂等和补偿，再决定权威端；不能在 `material_api.py` 增加 JSON 写回。
@@ -229,3 +274,6 @@ Site 放置由 service 校验允许模板、唯一占用、自引用和环路等
 - 是否所有 asset path 都限制在 registry root？
 - 是否没有设备名、测试图或相机特例？
 - 是否同时运行 OS material API test 与前端真实 material E2E？
+- 模板是否来自已构建 Registry，而非当前图、Cloud 残留或前端静态数组？
+- device 是否仍默认 internal，asset 是否仍限定在显式声明目录？
+- ETag/revision 是否稳定，stale 是否禁用创建且无缓存时 fail closed？

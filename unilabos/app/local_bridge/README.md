@@ -8,6 +8,7 @@ WebSocket，但不拥有 DAG 调度、调试、节点终态或可变物料状态
 | 面 | 默认地址 | 用途 |
 |---|---|---|
 | OS schedule WS | `127.0.0.1:8890/api/v1/ws/schedule` | `task_dag` 下发，`job_status`/Material snapshot 回流 |
+| Registry internal HTTP | `127.0.0.1:8002/internal/v1` | bridge 读取已构建 Registry 的模板目录 |
 | Unified HTTP/WS | `127.0.0.1:8014` | 新前端使用的 `unilab/v1` |
 
 旧 Cloud panel `/ws/workflow/{id}` 与 8891 listener 已完全删除。8890 是 OS 内部
@@ -33,6 +34,31 @@ OS 路由与 Go backend 的逐项语义、字段差异和内部调用链见
 [`MATERIAL_API.md`](MATERIAL_API.md)。尤其注意：两边的
 `GET /api/v1/materials` 路径相同，但 OS 返回前端可还原的聚合视图，backend 当前返回
 持久化 material 行；二者不具备自动可替换的写语义。
+
+## Edge 模板目录
+
+模板目录与当前物料图是两套不同的只读投影：
+
+```text
+GET /api/v1/resource-templates
+GET /api/v1/resource-templates/{template_uuid}
+GET /api/v1/resource-templates/{template_uuid}/assets/{asset_key}
+```
+
+- 列表一次返回所有轻量 summary；搜索和设备/耗材过滤由前端本地完成。
+- 详情按 UUID 懒加载，才包含 geometry、container layout、configuration 和显式资源。
+- Registry 的 resource 默认公开；device 默认内部，仅显式
+  `catalog.visibility: public` 的设备进入目录。
+- UUID、content hash、catalog revision 和 ETag 都是稳定、可验证的内容身份。
+- bridge 默认从 `--execution-http-url http://127.0.0.1:8002` 读取内部接口，
+  不依赖 schedule WS 是否已建立。
+- 内存缓存 TTL 为 5 秒。超时后带 ETag 重验证；上游临时不可用且已有缓存时返回
+  `stale: true` 并禁用所有创建动作，没有缓存则返回结构化 503。
+- 可选 `--internal-api-token` 与 OS 的 `UNILABOS_INTERNAL_API_TOKEN` 配套。
+
+公共成功响应仍使用 `{code,data,message}`；错误使用根级
+`{error:{code,message,retryable}}`。`refresh=true` 可用于明确发起重验证。
+浏览器只连接 8014，不能直接连接 8002。
 
 ## Unified v1 工作流接口
 
@@ -73,7 +99,8 @@ journal 和 debugger。它不能实现一套“更简单”的前端专用 sched
 来代替 contract test 明确注入的结果。
 
 可选参数包括 `--host`、`--schedule-port`、`--api-port`、`--journal-path`、
-`--profile`。`-g/--graph` 只允许与 `--offline` 一起使用；真实模式必须接受
+`--profile`、`--execution-http-url`、`--internal-api-token`。
+`-g/--graph` 只允许与 `--offline` 一起使用；真实模式必须接受
 `unilab -g` 所在 OS 的内存快照。默认只允许 loopback。
 
 调试/E2E 可以额外设置 `--offline-node-delay SECONDS`，为每个模拟设备节点加入
@@ -90,6 +117,8 @@ journal 和 debugger。它不能实现一套“更简单”的前端专用 sched
 - `bind_security.py`：loopback 监听安全检查。
 - `material_api.py`：OS 图到只读 Material Aggregate 行的投影。
 - `material_models.py`：本地模型登记、公开元数据与安全资源路径解析。
+- `resource_template_api.py`：Registry internal HTTP 客户端、ETag/TTL 缓存、
+  stale 降级和资源转发。
 - `MATERIAL_API.md`：OS/backend 物料接口与调用链对照。
 
 ## 绝对不能做
@@ -105,6 +134,10 @@ journal 和 debugger。它不能实现一套“更简单”的前端专用 sched
 - 不能把只读 Material Graph 投影扩展成第二个物料数据库。
 - 不能组合 backend 行级 CRUD 来伪装具备 revision/幂等/补偿的统一写命令。
 - 不能把当前图中的 Well/TipSpot 兼容投影固化为长期领域 Site。
+- 不能从当前 Material Graph 反推模板，也不能把模板目录并入 Material Graph store。
+- 不能恢复 Cloud/前端静态模板作为 Edge fallback。
+- 不能在 stale 目录或 unresolved 模板上开放创建。
+- 不能让模板目录依赖 schedule WS，或由 bridge 再扫描一遍 Registry YAML。
 
 ## 验证
 
@@ -120,7 +153,11 @@ UNILAB_PY=/home/changjunhan/.micromamba/envs/unilab/bin/python
 物料接口修改至少运行：
 
 ```bash
-"$UNILAB_PY" -m pytest tests/app/test_material_api.py
+PYTEST_DISABLE_PLUGIN_AUTOLOAD=1 "$UNILAB_PY" -m pytest \
+  tests/app/test_material_api.py \
+  tests/registry/test_template_catalog.py \
+  tests/app/test_resource_template_internal_api.py \
+  tests/app/test_resource_template_proxy.py
 ```
 
 然后运行前端 material E2E，验证真实图、模型与 mesh 子资源，而不是只检查 HTTP 200。

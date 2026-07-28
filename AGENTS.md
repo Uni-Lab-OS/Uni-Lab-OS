@@ -228,6 +228,32 @@ only at the boundary.
   authoritative geometry/model metadata; it must not send case-specific camera
   coordinates, UI colors, or Pascal scene overrides.
 
+### Resource Template Catalog
+
+- The loaded Registry is the only Edge template authority. Device/resource YAML
+  may add declarative `catalog` metadata, but `template_catalog.py` must project
+  the already-built Registry; it must not scan a second directory or derive
+  templates from the current `-g` Material Graph.
+- Public identity is UUID5 of
+  `unilabos:resource-template:v1:{source_namespace}:{kind}:{key}`. It is
+  independent of file path, load order, display name, and process lifetime.
+- Resources are public by default; devices are internal by default and require
+  an explicit `catalog.visibility: public`. Never publish driver module paths,
+  action schemas, credentials, host paths, or arbitrary Registry internals.
+- The internal Registry API is loopback-only on the OS web server. The browser
+  consumes only the `local_bridge` projection on `:8014`; keep the bridge URL
+  to the execution server explicit and do not discover it from a schedule WS.
+- List responses contain lightweight summaries. Geometry, container layout,
+  configuration and declared assets are lazy detail data. Assets must be
+  explicitly named and confined beneath their declaration YAML directory.
+- ETag/revision and the bridge's short-lived memory cache are read
+  optimizations, not a second catalog authority. If the execution server is
+  temporarily unavailable, cached data may be returned with `stale=true`, but
+  all creation metadata must be disabled. No cache means a structured 503.
+- Template catalog and current Material Graph are separate domains. A template
+  describes a type that could be instantiated; it is never evidence that an
+  instance exists in OS memory.
+
 ## Absolutely Forbidden
 
 - Do not run OS tests, migrations, compilers, or servers with system Python.
@@ -256,6 +282,11 @@ only at the boundary.
   asset-root traversal checks.
 - Do not hard-code one experiment graph's camera, occupancy, dimensions, or
   model transform into a supposedly generic contract.
+- Do not restore frontend-bundled/Cloud template JSON as a fallback for Edge,
+  publish all devices by default, or couple catalog availability to a schedule
+  WebSocket session.
+- Do not treat an ETag cache hit or stale cached catalog as permission to
+  create a device/resource.
 
 ## Workflow-Focused Verification
 
@@ -274,6 +305,13 @@ must verify list/detail pagination, stable ids, declared site geometry, model
 registry startup, asset traversal rejection, and frontend real-OS 2D/2.5D/3D/
 Split integration. Do not modify the frontend or backend fixture to hide a
 contract mismatch.
+
+Template catalog changes must also run
+`tests/registry/test_template_catalog.py`,
+`tests/app/test_resource_template_internal_api.py`, and
+`tests/app/test_resource_template_proxy.py`. Verify public visibility defaults,
+stable UUID/revision, lazy details, asset confinement, ETag revalidation,
+cache isolation and fail-closed stale behavior.
 
 For contract changes, add tests for both the canonical/runtime layer and the v1
 HTTP/WS projection. Test complete control-flow DAGs, source-map round trips,

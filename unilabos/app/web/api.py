@@ -29,6 +29,7 @@ from unilabos.app.model import (
 from unilabos.app.web.utils.host_utils import get_host_node_info
 from unilabos.registry.registry import lab_registry
 from unilabos.utils.type_check import NoAliasDumper
+from unilabos.app.web.resource_templates import resource_template_router
 
 # 创建API路由器
 api = APIRouter()
@@ -1336,6 +1337,11 @@ def setup_api_routes(app):
     """设置API路由"""
     app.include_router(admin, prefix="/admin/v1", tags=["admin"])
     app.include_router(api, prefix="/api/v1", tags=["api"])
+    app.include_router(
+        resource_template_router,
+        prefix="/internal/v1",
+        tags=["internal-resource-templates"],
+    )
 
     # 启动广播任务
     @app.on_event("startup")

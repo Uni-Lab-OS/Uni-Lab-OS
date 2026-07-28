@@ -7039,6 +7039,15 @@ liquid_handler.laiyu:
       type: object
   version: 1.0.0
 liquid_handler.prcxi:
+  catalog:
+    visibility: public
+    display_name: PRCXI 液体工作站
+    category:
+    - liquid_handler
+    tags:
+    - 移液
+    - 自动化
+    icon: liquid-handler
   category:
   - liquid_handler
   class:

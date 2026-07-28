@@ -37,6 +37,10 @@ from unilabos.app.local_bridge.material_api import (
     MaterialGraphCatalog,
 )
 from unilabos.app.local_bridge.material_models import MaterialModelRegistry
+from unilabos.app.local_bridge.resource_template_api import (
+    ResourceTemplateProxy,
+    ResourceTemplateProxyError,
+)
 from unilabos.app.local_bridge.schedule_ws import RunHandle, ScheduleSession
 from unilabos.scheduler.dag_model import DagValidationError, NodeState
 from unilabos.scheduler.resource_lock import ResourceLockManager
@@ -611,14 +615,28 @@ def build_stack_status() -> dict[str, Any]:
     return {"success": True, "schema": "local_bridge", "stacks": {}}
 
 
-def create_app(get_state: Callable[[], LocalApiState | None]) -> Any:
+def create_app(
+    get_state: Callable[[], LocalApiState | None],
+    resource_template_proxy: ResourceTemplateProxy | None = None,
+) -> Any:
     """建 FastAPI app。get_state() 返回已就绪 LocalApiState（OS 未连入时返回 None）。
 
     延迟 import fastapi（未装不拖累其余桥面）。路由只做请求解码 + 调 LocalApiState + 错误转码。
     """
-    from fastapi import Body, FastAPI, HTTPException, WebSocket, WebSocketDisconnect
+    from fastapi import (
+        Body,
+        FastAPI,
+        HTTPException,
+        Request,
+        WebSocket,
+        WebSocketDisconnect,
+    )
     from fastapi.middleware.cors import CORSMiddleware
-    from fastapi.responses import FileResponse
+    from fastapi.responses import FileResponse, JSONResponse, Response
+
+    # ``from __future__ import annotations`` 会把局部导入的 Request 写成前向
+    # 引用；FastAPI 在装饰器注册时从模块 globals 解析它。
+    globals()["Request"] = Request
 
     app = FastAPI(title="Uni-Lab OS Local API", version="1.0")
     app.add_middleware(
@@ -628,7 +646,18 @@ def create_app(get_state: Callable[[], LocalApiState | None]) -> Any:
             r"(?::\d{1,5})?)$"
         ),
         allow_methods=["GET", "POST", "PUT", "OPTIONS"],
-        allow_headers=["Authorization", "Content-Type"],
+        allow_headers=[
+            "Authorization",
+            "Content-Type",
+            "If-None-Match",
+            "Range",
+        ],
+        expose_headers=[
+            "Accept-Ranges",
+            "Content-Range",
+            "ETag",
+            "Warning",
+        ],
     )
 
     def _require_state() -> Any:
@@ -636,6 +665,38 @@ def create_app(get_state: Callable[[], LocalApiState | None]) -> Any:
         if state is None:
             raise HTTPException(status_code=503, detail="OS 未连入，调度会话尚未就绪")
         return state
+
+    def _template_proxy_error(exc: ResourceTemplateProxyError) -> JSONResponse:
+        return JSONResponse(
+            {
+                "error": {
+                    "code": exc.code,
+                    "message": str(exc),
+                    "retryable": exc.retryable,
+                }
+            },
+            status_code=exc.status,
+        )
+
+    def _template_headers(
+        *,
+        etag: str,
+        stale: bool,
+    ) -> dict[str, str]:
+        headers = {"ETag": etag}
+        if stale:
+            headers["Warning"] = (
+                '299 Uni-Lab "stale resource-template catalog; '
+                'OS Registry is unavailable"'
+            )
+        return headers
+
+    def _public_etag_matches(request: Request, etag: str) -> bool:
+        candidates = {
+            item.strip()
+            for item in request.headers.get("If-None-Match", "").split(",")
+        }
+        return "*" in candidates or etag in candidates
 
     def _authoring_payload(
         payload: Any,
@@ -714,6 +775,97 @@ def create_app(get_state: Callable[[], LocalApiState | None]) -> Any:
     @app.get("/health")
     async def health() -> Any:
         return {"status": "ok"}
+
+    @app.get("/api/v1/resource-templates")
+    async def api_v1_resource_templates(
+        request: Request,
+        refresh: bool = False,
+    ) -> Any:
+        if resource_template_proxy is None:
+            return _template_proxy_error(
+                ResourceTemplateProxyError(
+                    "CATALOG_UNAVAILABLE",
+                    "local_bridge 未配置 OS Registry 内部地址",
+                )
+            )
+        try:
+            result = await resource_template_proxy.list_templates(
+                force=refresh,
+            )
+        except ResourceTemplateProxyError as exc:
+            return _template_proxy_error(exc)
+        headers = _template_headers(etag=result.etag, stale=result.stale)
+        if (
+            not refresh
+            and not result.stale
+            and _public_etag_matches(request, result.etag)
+        ):
+            return Response(status_code=304, headers=headers)
+        return JSONResponse(
+            {"code": 0, "data": result.data, "message": "success"},
+            headers=headers,
+        )
+
+    @app.get("/api/v1/resource-templates/{template_uuid}")
+    async def api_v1_resource_template(
+        template_uuid: str,
+        request: Request,
+        refresh: bool = False,
+    ) -> Any:
+        if resource_template_proxy is None:
+            return _template_proxy_error(
+                ResourceTemplateProxyError(
+                    "CATALOG_UNAVAILABLE",
+                    "local_bridge 未配置 OS Registry 内部地址",
+                )
+            )
+        try:
+            result = await resource_template_proxy.get_template(
+                template_uuid,
+                force=refresh,
+            )
+        except ResourceTemplateProxyError as exc:
+            return _template_proxy_error(exc)
+        headers = _template_headers(etag=result.etag, stale=result.stale)
+        if (
+            not refresh
+            and not result.stale
+            and _public_etag_matches(request, result.etag)
+        ):
+            return Response(status_code=304, headers=headers)
+        return JSONResponse(
+            {"code": 0, "data": result.data, "message": "success"},
+            headers=headers,
+        )
+
+    @app.get(
+        "/api/v1/resource-templates/{template_uuid}/assets/{asset_key}",
+    )
+    async def api_v1_resource_template_asset(
+        template_uuid: str,
+        asset_key: str,
+        request: Request,
+    ) -> Any:
+        if resource_template_proxy is None:
+            return _template_proxy_error(
+                ResourceTemplateProxyError(
+                    "CATALOG_UNAVAILABLE",
+                    "local_bridge 未配置 OS Registry 内部地址",
+                )
+            )
+        try:
+            result = await resource_template_proxy.get_asset(
+                template_uuid,
+                asset_key,
+                range_header=request.headers.get("Range"),
+            )
+        except ResourceTemplateProxyError as exc:
+            return _template_proxy_error(exc)
+        return Response(
+            content=result.content,
+            status_code=result.status,
+            headers=result.headers,
+        )
 
     @app.get("/api/v1/materials")
     async def api_v1_materials(
@@ -1187,17 +1339,22 @@ class LocalApiServer:
         get_state: Callable[[], LocalApiState | None],
         host: str = "127.0.0.1",
         port: int = 8014,
+        resource_template_proxy: ResourceTemplateProxy | None = None,
     ) -> None:
         require_loopback_runtime_host(host)
         self._get_state = get_state
         self.host = host
         self.port = port
+        self._resource_template_proxy = resource_template_proxy
         self._server: Any = None
 
     async def start(self) -> None:
         import uvicorn
 
-        app = create_app(self._get_state)
+        app = create_app(
+            self._get_state,
+            resource_template_proxy=self._resource_template_proxy,
+        )
         config = uvicorn.Config(app, host=self.host, port=self.port, log_level="info")
         self._server = uvicorn.Server(config)
         logger.info(
