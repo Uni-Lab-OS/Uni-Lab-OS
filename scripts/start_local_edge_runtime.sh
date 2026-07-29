@@ -130,12 +130,15 @@ wait_until() {
   local expression="$3"
   local deadline=$((SECONDS + ready_timeout))
 
-  until http_json_matches "${url}" "${expression}"; do
+  while true; do
     if [[ -n "${bridge_pid}" ]] && ! kill -0 "${bridge_pid}" 2>/dev/null; then
       fail "local bridge exited before ${label} became ready"
     fi
     if [[ -n "${os_pid}" ]] && ! kill -0 "${os_pid}" 2>/dev/null; then
       fail "Uni-Lab-OS exited before ${label} became ready"
+    fi
+    if http_json_matches "${url}" "${expression}"; then
+      return
     fi
     if (( SECONDS >= deadline )); then
       fail "timed out waiting for ${label}: ${url}"
@@ -190,4 +193,28 @@ catalog_url="http://127.0.0.1:${api_port}/api/runtime/local/actions"
 wait_until "Runtime Action Catalog" "${catalog_url}" "catalog"
 echo "[edge-runtime] ready: ${catalog_url}"
 
-wait -n "${bridge_pid}" "${os_pid}"
+# macOS still ships Bash 3.2, which does not implement ``wait -n``. Poll both
+# supervised children so the same launcher works on macOS and Linux. Any child
+# exit is unexpected while the runtime is serving and terminates its peer via
+# the EXIT trap.
+while kill -0 "${bridge_pid}" 2>/dev/null && kill -0 "${os_pid}" 2>/dev/null; do
+  sleep 1
+done
+
+child_status=1
+if ! kill -0 "${bridge_pid}" 2>/dev/null; then
+  if wait "${bridge_pid}"; then
+    child_status=1
+  else
+    child_status=$?
+  fi
+  echo "[edge-runtime] local bridge exited (status=${child_status})" >&2
+else
+  if wait "${os_pid}"; then
+    child_status=1
+  else
+    child_status=$?
+  fi
+  echo "[edge-runtime] Uni-Lab-OS exited (status=${child_status})" >&2
+fi
+exit "${child_status}"

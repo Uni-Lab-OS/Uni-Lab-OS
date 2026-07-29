@@ -42,6 +42,10 @@ local_bridge :8014/:8890 ready
   → Edge 才被视为可运行
 ```
 
+脚本的进程监督兼容 macOS 自带 Bash 3.2，不要求 Homebrew Bash。不要在该入口重新使用
+Bash 4.3 才支持的 `wait -n`，否则脚本会在服务就绪后立即退出，并通过清理钩子同时关闭
+bridge 与 OS。
+
 `GET /health` 只表示 bridge 进程存活；schedule WS 显示“已连接”也只表示传输建立，
 两者都不能证明动作已注册。联调前应检查：
 
