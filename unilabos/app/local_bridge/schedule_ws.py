@@ -180,6 +180,14 @@ class ScheduleSession:
             str,
             asyncio.Future[dict[str, Any]],
         ] = {}
+        self._material_create_waiters: dict[
+            str,
+            asyncio.Future[dict[str, Any]],
+        ] = {}
+        self._material_undo_waiters: dict[
+            str,
+            asyncio.Future[dict[str, Any]],
+        ] = {}
         self._material_snapshot_cbs: list[MaterialSnapshotCallback] = []
         self._host_ready_cbs: list[HostReadyCallback] = []
         self._runtime_actions_changed_cbs: list[
@@ -325,6 +333,78 @@ class ScheduleSession:
         finally:
             self._material_snapshot_waiters.pop(request_id, None)
 
+    async def create_material(
+        self,
+        template: dict[str, Any],
+        command: dict[str, Any],
+        *,
+        timeout: float = 10.0,
+    ) -> dict[str, Any]:
+        """把模板创建命令交给持有 ResourceTreeSet 的执行 OS。"""
+
+        request_id = uuid.uuid4().hex
+        loop = asyncio.get_running_loop()
+        waiter: asyncio.Future[dict[str, Any]] = loop.create_future()
+        self._material_create_waiters[request_id] = waiter
+        try:
+            await self._send(
+                {
+                    "action": "create_material",
+                    "data": {
+                        "request_id": request_id,
+                        "template": template,
+                        "command": command,
+                    },
+                }
+            )
+            ack = await asyncio.wait_for(waiter, timeout=timeout)
+        finally:
+            self._material_create_waiters.pop(request_id, None)
+        if ack.get("status") != "created":
+            raise RuntimeError(
+                str(ack.get("detail") or ack.get("code") or "create rejected")
+            )
+        snapshot = ack.get("snapshot")
+        if not isinstance(snapshot, dict):
+            raise TypeError("material create ack has no snapshot")
+        await self._on_material_snapshot(snapshot)
+        return ack
+
+    async def undo_create_material(
+        self,
+        command: dict[str, Any],
+        *,
+        timeout: float = 10.0,
+    ) -> dict[str, Any]:
+        """把创建补偿命令交给持有 ResourceTreeSet 的执行 OS。"""
+
+        request_id = uuid.uuid4().hex
+        loop = asyncio.get_running_loop()
+        waiter: asyncio.Future[dict[str, Any]] = loop.create_future()
+        self._material_undo_waiters[request_id] = waiter
+        try:
+            await self._send(
+                {
+                    "action": "undo_create_material",
+                    "data": {
+                        "request_id": request_id,
+                        "command": command,
+                    },
+                }
+            )
+            ack = await asyncio.wait_for(waiter, timeout=timeout)
+        finally:
+            self._material_undo_waiters.pop(request_id, None)
+        if ack.get("status") != "undone":
+            raise RuntimeError(
+                str(ack.get("detail") or ack.get("code") or "undo rejected")
+            )
+        snapshot = ack.get("snapshot")
+        if not isinstance(snapshot, dict):
+            raise TypeError("material undo ack has no snapshot")
+        await self._on_material_snapshot(snapshot)
+        return ack
+
     async def reconcile_run(
         self,
         run_id: str,
@@ -420,6 +500,10 @@ class ScheduleSession:
             await self._on_debug_event(data)
         elif action == "material_snapshot":
             await self._on_material_snapshot(data)
+        elif action == "material_create_ack":
+            self._on_material_create_ack(data)
+        elif action == "material_undo_create_ack":
+            self._on_material_undo_ack(data)
         elif action == "report_action_lock":
             await self._on_action_locks(data)
         elif action == "ping":
@@ -520,6 +604,28 @@ class ScheduleSession:
         waiter = self._reconcile_waiters.get(request_id)
         if waiter is None or waiter.done():
             logger.debug("[schedule_ws] 忽略未知 reconcile ack: %s", request_id)
+            return
+        waiter.set_result(data)
+
+    def _on_material_create_ack(self, data: dict[str, Any]) -> None:
+        request_id = str(data.get("request_id") or "")
+        waiter = self._material_create_waiters.get(request_id)
+        if waiter is None or waiter.done():
+            logger.debug(
+                "[schedule_ws] 忽略未知 material create ack: %s",
+                request_id,
+            )
+            return
+        waiter.set_result(data)
+
+    def _on_material_undo_ack(self, data: dict[str, Any]) -> None:
+        request_id = str(data.get("request_id") or "")
+        waiter = self._material_undo_waiters.get(request_id)
+        if waiter is None or waiter.done():
+            logger.debug(
+                "[schedule_ws] 忽略未知 material undo ack: %s",
+                request_id,
+            )
             return
         waiter.set_result(data)
 

@@ -7,17 +7,20 @@ import json
 import uuid
 from pathlib import Path
 
+import httpx
 from fastapi.testclient import TestClient
 
 from unilabos.app.local_bridge.local_api import LocalApiState, create_app
 from unilabos.app.local_bridge.material_api import MaterialGraphCatalog
 from unilabos.app.local_bridge.material_models import MaterialModelRegistry
 from unilabos.app.local_bridge.offline_os import OfflineOS
+from unilabos.app.local_bridge.resource_template_api import (
+    ResourceTemplateProxy,
+)
 from unilabos.app.local_bridge.schedule_ws import ScheduleSession
 from unilabos.app.ws_client import WebSocketClient
 from unilabos.resources.material_state import CurrentMaterialState
 from unilabos.resources.resource_tracker import ResourceTreeSet
-
 
 REPOSITORY_ROOT = Path(__file__).resolve().parents[2]
 EXPERIMENT_ROOT = REPOSITORY_ROOT / "unilabos" / "test" / "experiments"
@@ -176,6 +179,85 @@ def test_material_list_filters_pages_and_detail_use_backend_contract() -> None:
         )
         assert by_template.status_code == 200
         assert by_template.json()["data"]["total"] >= 1
+
+
+def test_registry_template_create_is_idempotent_and_compensatable() -> None:
+    catalog = MaterialGraphCatalog(EXPERIMENT_ROOT / "plr_test.json")
+    offline = OfflineOS()
+    schedule = ScheduleSession(offline.receive, session_id="offline")
+    offline.bind(schedule)
+
+    def undo_create(material_uuid: str, command: dict) -> None:
+        catalog.undo_create(
+            material_uuid=material_uuid,
+            creation_operation_id=command["creation_operation_id"],
+            expected_revision=command["expected_revision"],
+            idempotency_key=command["idempotency_key"],
+        )
+
+    state = LocalApiState(
+        schedule,
+        material_catalog=catalog,
+        material_create=catalog.create_material,
+        material_undo_create=undo_create,
+    )
+    template_uuid = "3b7372ea-c2b1-49f8-b910-f74738faf031"
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        assert request.url.path.endswith(template_uuid)
+        return httpx.Response(
+            200,
+            json=_create_plate_template(template_uuid),
+            headers={"ETag": '"template-create-1"'},
+            request=request,
+        )
+
+    proxy = ResourceTemplateProxy(
+        "http://127.0.0.1:8002",
+        transport=httpx.MockTransport(handler),
+    )
+    command = {
+        "template_id": template_uuid,
+        "name": "Registry Plate",
+        "placement": {"kind": "unplaced"},
+        "initial_contents": [],
+        "expected_revision": catalog.list_materials(
+            page_size=100
+        )["items"][0]["revision"],
+        "idempotency_key": "create-registry-plate",
+    }
+
+    with TestClient(create_app(lambda: state, proxy)) as client:
+        created = client.post("/api/v1/materials", json=command)
+        replay = client.post("/api/v1/materials", json=command)
+
+        assert created.status_code == 200
+        assert replay.status_code == 200
+        result = created.json()["data"]
+        assert replay.json()["data"] == result
+        aggregate = result["aggregates"][0]
+        assert aggregate["resource_template_uuid"] == template_uuid
+        assert aggregate["name"] == "Registry Plate"
+        assert aggregate["config"]["placement"] == {"kind": "unplaced"}
+        assert len(aggregate["config"]["sites"]) == 4
+        assert client.get(
+            "/api/v1/materials?page_size=100"
+        ).json()["data"]["total"] == 9
+
+        undo_payload = {
+            "creation_operation_id": result["creation_operation_id"],
+            "expected_revision": aggregate["revision"],
+            "idempotency_key": "undo-registry-plate",
+        }
+        undo_path = (
+            f"/api/v1/materials/{result['primary_material_id']}"
+            "/undo-create"
+        )
+        assert client.post(undo_path, json=undo_payload).status_code == 200
+        assert client.post(undo_path, json=undo_payload).status_code == 200
+        assert client.get(
+            "/api/v1/materials?page_size=100"
+        ).json()["data"]["total"] == 8
 
 
 def test_material_query_reports_structured_errors_and_health_is_public() -> None:
@@ -442,3 +524,107 @@ def test_os_schedule_client_answers_material_snapshot_query() -> None:
     assert message["data"]["request_id"] == "snapshot-request"
     assert message["data"]["schema"] == "unilab/material-snapshot-v1"
     assert message["data"]["nodes"]
+
+
+def test_os_schedule_client_creates_and_compensates_resource_tree() -> None:
+    payload = json.loads(
+        (EXPERIMENT_ROOT / "plr_test.json").read_text(encoding="utf-8")
+    )
+    resources = ResourceTreeSet.from_raw_dict_list(payload["nodes"])
+    client = WebSocketClient()
+    client.bind_material_state(resources, source_id="plr_test.json")
+    template_uuid = "3b7372ea-c2b1-49f8-b910-f74738faf031"
+    command = {
+        "template_id": template_uuid,
+        "name": "Schedule Registry Plate",
+        "placement": {"kind": "unplaced"},
+        "initial_contents": [],
+        "expected_revision": CurrentMaterialState(
+            resources,
+            source_id="plr_test.json",
+        ).snapshot()["revision"],
+        "idempotency_key": "schedule-create-plate",
+    }
+
+    asyncio.run(
+        client.message_processor._process_message(  # noqa: SLF001
+            "create_material",
+            {
+                "request_id": "create-request",
+                "template": _create_plate_template(template_uuid),
+                "command": command,
+            },
+        )
+    )
+    created = client.send_queue.get_nowait()
+
+    assert created["action"] == "material_create_ack"
+    create_data = created["data"]
+    assert create_data["status"] == "created"
+    assert any(
+        node["name"] == "Schedule Registry Plate"
+        for node in create_data["snapshot"]["nodes"]
+    )
+
+    asyncio.run(
+        client.message_processor._process_message(  # noqa: SLF001
+            "undo_create_material",
+            {
+                "request_id": "undo-request",
+                "command": {
+                    "source_node_id": create_data["source_node_id"],
+                    "creation_operation_id": create_data[
+                        "creation_operation_id"
+                    ],
+                    "expected_revision": create_data["snapshot"][
+                        "revision"
+                    ],
+                    "idempotency_key": "schedule-undo-plate",
+                },
+            },
+        )
+    )
+    undone = client.send_queue.get_nowait()
+
+    assert undone["action"] == "material_undo_create_ack"
+    assert undone["data"]["status"] == "undone"
+    assert all(
+        node["name"] != "Schedule Registry Plate"
+        for node in undone["data"]["snapshot"]["nodes"]
+    )
+
+
+def _create_plate_template(template_uuid: str) -> dict:
+    return {
+        "uuid": template_uuid,
+        "key": "plate-4",
+        "source_namespace": "unilabos",
+        "kind": "resource",
+        "display_name": "四孔板",
+        "status": "ready",
+        "content_hash": "template-create-1",
+        "creation": {
+            "mode": "resource-tree",
+            "available": True,
+            "reason": None,
+        },
+        "geometry": {
+            "dimensions_mm": {"x": 127, "y": 85, "z": 15},
+        },
+        "container_layout": {
+            "type": "grid",
+            "container_kind": "well",
+            "rows": ["A", "B"],
+            "columns": 2,
+            "column_labels": [1, 2],
+            "geometry": {
+                "dimensions_mm": {"x": 8, "y": 8, "z": 10},
+                "depth_mm": 10,
+                "shape": "circle",
+                "max_volume_ul": 200,
+                "pitch_mm": {"x": 9, "y": -9},
+                "offset_mm": {"x": 10, "y": 20, "z": 2},
+                "first_key": "A1",
+            },
+        },
+    }

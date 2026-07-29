@@ -81,8 +81,8 @@ def test_catalog_applies_visibility_and_stable_identity() -> None:
     )
     assert device["creation"] == {
         "mode": "dynamic-device",
-        "available": False,
-        "reason": "当前 Edge 尚未开放动态设备创建",
+        "available": True,
+        "reason": None,
     }
     serialized = repr(result)
     assert "/private/" not in serialized
@@ -99,6 +99,11 @@ def test_resource_detail_normalizes_geometry_and_grid_without_contents() -> None
 
     detail = catalog.get_template(summary["uuid"])
 
+    assert detail["creation"] == {
+        "mode": "resource-tree",
+        "available": True,
+        "reason": None,
+    }
     assert detail["geometry"]["dimensions_mm"] == {
         "x": 127.0,
         "y": 85.0,

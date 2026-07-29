@@ -64,12 +64,15 @@ curl -fsS http://127.0.0.1:8014/api/runtime/local/actions
 ```text
 GET /api/v1/materials
 GET /api/v1/materials/{material_uuid}
+POST /api/v1/materials
+POST /api/v1/materials/{material_uuid}/undo-create
 GET /api/v1/material-models
 GET /api/v1/material-models/assets/{asset_path}
 ```
 
-这是给前端 `material.readGraph` 使用的**只读聚合投影**。Material GET 会通过 schedule
-通道向 OS 查询当前内存快照；bridge 只原子替换投影缓存，不重读启动文件，也不拥有写入口。
+Material GET 是给前端 `material.readGraph` 使用的聚合投影，会通过 schedule 通道向 OS
+查询当前内存快照。模板创建与创建补偿带幂等键和 revision，通过同一 schedule 会话交给
+持有 `ResourceTreeSet` 的 OS；bridge 只原子替换返回的投影缓存，不重读或写回启动文件。
 OS 未连入或尚未发布快照时返回明确的 503，不能用空图或旧文件冒充当前状态。
 
 OS 路由与 Go backend 的逐项语义、字段差异和内部调用链见
@@ -79,7 +82,7 @@ OS 路由与 Go backend 的逐项语义、字段差异和内部调用链见
 
 ## Edge 模板目录
 
-模板目录与当前物料图是两套不同的只读投影：
+模板目录与当前物料图是两个不同的领域：
 
 ```text
 GET /api/v1/resource-templates
@@ -183,7 +186,7 @@ journal 和 debugger。它不能实现一套“更简单”的前端专用 sched
 - `workflow_to_dag.py`：旧 UI 图形状到冻结 `TaskDag` wire 的边界转换。
 - `offline_os.py`：复用 OS executor 的进程内对端。
 - `bind_security.py`：loopback 监听安全检查。
-- `material_api.py`：OS 图到只读 Material Aggregate 行的投影。
+- `material_api.py`：OS 图到 Material Aggregate 行的投影及离线权威命令。
 - `material_models.py`：本地模型登记、公开元数据与安全资源路径解析。
 - `resource_template_api.py`：Registry internal HTTP 客户端、ETag/TTL 缓存、
   stale 降级和资源转发。
@@ -201,7 +204,7 @@ journal 和 debugger。它不能实现一套“更简单”的前端专用 sched
 - 不能默认监听 `0.0.0.0` 或绕过 loopback 检查。
 - 不能恢复 8891、`workflow_ws.py` 或 `/ws/workflow/{uuid}`。
 - 不能从运行中的 graph 文件重读并覆盖 OS 内存状态。
-- 不能把只读 Material Graph 投影扩展成第二个物料数据库。
+- 不能把 Material Graph 投影扩展成第二个物料数据库。
 - 不能组合 backend 行级 CRUD 来伪装具备 revision/幂等/补偿的统一写命令。
 - 不能把当前图中的 Well/TipSpot 兼容投影固化为长期领域 Site。
 - 不能从当前 Material Graph 反推模板，也不能把模板目录并入 Material Graph store。

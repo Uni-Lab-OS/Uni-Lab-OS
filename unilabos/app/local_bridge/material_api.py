@@ -1,9 +1,11 @@
-"""把 OS 设备图投影为统一的只读 Material API。
+"""把 OS 设备图投影为统一 Material API。
 
 本地桥不维护第二份物料数据库，而是缓存 OS 通过 schedule 通道发布的
 当前内存物料快照，并将物料粒度节点投影为与 Backend API 相同的
 ``GET /api/v1/materials`` 数据行。PLR Well 和 TipSpot 子节点只作为
 渲染/详情数据，转换为所属物料的 Site，避免在前端生成数百个顶层节点。
+离线模式下该 catalog 是进程内权威，可执行带幂等/revision/补偿的模板创建；
+真实模式的写命令始终经 schedule 交给 OS 的 ResourceTreeSet。
 """
 
 from __future__ import annotations
@@ -21,7 +23,10 @@ from pathlib import Path
 from typing import Any
 
 from unilabos.app.local_bridge.material_models import MaterialModelRegistry
-
+from unilabos.resources.material_authoring import (
+    MaterialAuthoringError,
+    build_material_nodes,
+)
 
 _INTERNAL_SITE_TYPES = {"tipspot", "tip_spot", "well"}
 _SBS_FOOTPRINT_MM = (127.76, 85.48, 0.0)
@@ -38,8 +43,12 @@ class InvalidMaterialQuery(ValueError):
     """Material API 查询参数不符合统一契约。"""
 
 
+class MaterialMutationConflict(RuntimeError):
+    """Material Graph 写命令与当前 revision/创建操作冲突。"""
+
+
 class MaterialGraphCatalog:
-    """缓存 OS 当前内存物料快照，并提供只读 Material API 投影。
+    """缓存 OS 当前内存物料快照，并提供 Material API 投影。
 
     ``graph_path`` 仅保留为测试/离线模式的一次性启动输入。构造完成后不会再次
     读取文件；真实 OS 模式通过 ``replace_snapshot`` 接收 ResourceTreeSet 的当前
@@ -58,6 +67,8 @@ class MaterialGraphCatalog:
         self._nodes: list[dict[str, Any]] | None = None
         self._revision = 0
         self._modified_at = ""
+        self._creation_by_idempotency_key: dict[str, tuple[str, str]] = {}
+        self._undo_by_idempotency_key: set[str] = set()
         if graph_path is not None:
             source_path = Path(graph_path).expanduser().resolve()
             if not source_path.is_file():
@@ -194,6 +205,172 @@ class MaterialGraphCatalog:
             None,
         )
 
+    def create_material(
+        self,
+        template: Mapping[str, Any],
+        command: Mapping[str, Any],
+    ) -> dict[str, Any]:
+        """在离线权威快照中执行幂等创建，并返回统一创建结果。"""
+
+        idempotency_key = str(
+            command.get("idempotency_key") or ""
+        ).strip()
+        if not idempotency_key:
+            raise MaterialAuthoringError("idempotency_key is required")
+        with self._lock:
+            if self._nodes is None:
+                raise MaterialGraphUnavailable(
+                    "OS has not published its current material snapshot"
+                )
+            cached = self._creation_by_idempotency_key.get(
+                idempotency_key
+            )
+            if cached is None:
+                try:
+                    expected_revision = int(
+                        command.get("expected_revision")
+                    )
+                except (TypeError, ValueError) as exc:
+                    raise MaterialAuthoringError(
+                        "expected_revision must be an integer"
+                    ) from exc
+                if expected_revision != self._revision:
+                    raise MaterialMutationConflict(
+                        f"expected revision {expected_revision}, "
+                        f"current revision is {self._revision}"
+                    )
+                existing_names = [
+                    str(row["name"]) for row in self._material_rows()
+                ]
+                created_nodes, source_node_id = build_material_nodes(
+                    template,
+                    command,
+                    existing_names=existing_names,
+                )
+                operation_id = str(
+                    uuid.uuid5(
+                        uuid.NAMESPACE_URL,
+                        (
+                            f"unilabos:{self.graph_path.name}:"
+                            f"material-create:{idempotency_key}"
+                        ),
+                    )
+                )
+                for node in created_nodes:
+                    config = _record(node.get("config"))
+                    config["creation_operation_id"] = operation_id
+                    node["config"] = config
+                self._nodes.extend(created_nodes)
+                self._revision = _positive_revision(0, self._nodes)
+                self._modified_at = _utc_now()
+                cached = (source_node_id, operation_id)
+                self._creation_by_idempotency_key[
+                    idempotency_key
+                ] = cached
+            source_node_id, operation_id = cached
+            material = self._material_by_source_node_id(source_node_id)
+            if material is None:
+                raise MaterialMutationConflict(
+                    "idempotent create result no longer exists"
+                )
+            return {
+                "aggregates": [material],
+                "primary_material_id": material["uuid"],
+                "creation_operation_id": operation_id,
+                "edge_sync_state": "synced",
+            }
+
+    def undo_create(
+        self,
+        *,
+        material_uuid: str,
+        creation_operation_id: str,
+        expected_revision: int,
+        idempotency_key: str,
+    ) -> None:
+        """按创建操作补偿删除整棵新资源树。"""
+
+        if not idempotency_key.strip():
+            raise MaterialAuthoringError("idempotency_key is required")
+        with self._lock:
+            if idempotency_key in self._undo_by_idempotency_key:
+                return
+            if self._nodes is None:
+                raise MaterialGraphUnavailable(
+                    "OS has not published its current material snapshot"
+                )
+            if expected_revision != self._revision:
+                raise MaterialMutationConflict(
+                    f"expected revision {expected_revision}, "
+                    f"current revision is {self._revision}"
+                )
+            material = self.get_material(material_uuid)
+            if material is None:
+                raise MaterialMutationConflict("material does not exist")
+            source_node_id = str(
+                _record(material.get("meta_data")).get("source_node_id")
+                or ""
+            )
+            matching = [
+                node
+                for node in self._nodes
+                if (
+                    str(
+                        _record(node.get("config")).get(
+                            "creation_operation_id"
+                        )
+                        or ""
+                    )
+                    == creation_operation_id
+                )
+            ]
+            if not matching or source_node_id not in {
+                str(node.get("id") or "") for node in matching
+            }:
+                raise MaterialMutationConflict(
+                    "creation operation does not own this material"
+                )
+            self._nodes = [
+                node for node in self._nodes if node not in matching
+            ]
+            self._revision = _positive_revision(0, self._nodes)
+            self._modified_at = _utc_now()
+            self._undo_by_idempotency_key.add(idempotency_key)
+
+    def _material_by_source_node_id(
+        self,
+        source_node_id: str,
+    ) -> dict[str, Any] | None:
+        return next(
+            (
+                row
+                for row in self._material_rows()
+                if _record(row.get("meta_data")).get("source_node_id")
+                == source_node_id
+            ),
+            None,
+        )
+
+    def creation_result(
+        self,
+        *,
+        source_node_id: str,
+        creation_operation_id: str,
+    ) -> dict[str, Any]:
+        """把 OS 创建回执中的源节点投影成统一 API 结果。"""
+
+        material = self._material_by_source_node_id(source_node_id)
+        if material is None:
+            raise MaterialMutationConflict(
+                "created material is missing from the OS snapshot"
+            )
+        return {
+            "aggregates": [material],
+            "primary_material_id": material["uuid"],
+            "creation_operation_id": creation_operation_id,
+            "edge_sync_state": "synced",
+        }
+
     def _material_rows(self) -> list[dict[str, Any]]:
         with self._lock:
             raw_nodes = copy.deepcopy(self._nodes)
@@ -285,16 +462,24 @@ def _project_material_row(
         or str(resource_config.get("type") or "")
         or source_type
     )
-    template_uuid = _stable_uuid(
-        graph_path,
-        "resource-template",
-        template_key,
+    template_uuid = str(
+        resource_config.get("resource_template_uuid")
+        or _stable_uuid(
+            graph_path,
+            "resource-template",
+            template_key,
+        )
     )
     parent_node_id = _optional_string(node.get("parent"))
     pose = _pose(node)
 
     parent_node = nodes_by_id.get(parent_node_id or "")
-    if parent_node_id and _is_deck_slot_node(parent_node or {}):
+    declared_placement = _record(
+        resource_config.get("material_placement")
+    )
+    if declared_placement.get("kind") == "unplaced":
+        placement: dict[str, Any] = {"kind": "unplaced"}
+    elif parent_node_id and _is_deck_slot_node(parent_node or {}):
         deck_node_id = _optional_string(parent_node.get("parent"))
         if deck_node_id and deck_node_id in material_node_ids:
             placement = {
@@ -310,7 +495,7 @@ def _project_material_row(
         else:
             placement = {"kind": "world", "pose": pose}
     elif parent_node_id and parent_node_id in material_node_ids:
-        placement: dict[str, Any] = {
+        placement = {
             "kind": "parent",
             "parentId": material_uuid_by_node_id[parent_node_id],
             "anchor": {"kind": "root"},
@@ -842,6 +1027,10 @@ def _positive_revision(value: Any, nodes: list[dict[str, Any]]) -> int:
         separators=(",", ":"),
     )
     return max(zlib.crc32(source.encode("utf-8")), 1)
+
+
+def _utc_now() -> str:
+    return datetime.now(tz=timezone.utc).isoformat().replace("+00:00", "Z")
 
 
 def _canonical_uuid(value: str, *, field: str) -> str:

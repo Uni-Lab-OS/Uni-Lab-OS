@@ -303,11 +303,11 @@ class ResourceTemplateCatalog:
             "content_hash": content_hash,
             "creation": {
                 "mode": creation_mode,
-                "available": False,
+                "available": status == "ready",
                 "reason": (
-                    "当前 Edge 尚未开放动态设备创建"
-                    if kind == "device"
-                    else "当前 Edge 尚未开放物料创建"
+                    None
+                    if status == "ready"
+                    else "模板尚未解析完成，无法创建"
                 ),
             },
         }

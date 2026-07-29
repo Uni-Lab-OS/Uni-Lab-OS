@@ -67,6 +67,10 @@ material problem 通过 FastAPI `HTTPException.detail` 返回结构化对象，�
 - `MATERIAL_MODELS_UNAVAILABLE`：模型 registry 未进入就绪 state；
 - `INVALID_MATERIAL_MODEL_PATH`：资源路径逃逸模型根；
 - `MATERIAL_MODEL_ASSET_NOT_FOUND`：资源不存在。
+- `INVALID_MATERIAL_CREATE`：模板创建命令缺字段或不满足本地创建约束；
+- `TEMPLATE_CREATION_UNAVAILABLE`：模板 stale、未解析完成或 Registry 禁止创建；
+- `MATERIAL_CREATE_CONFLICT`：幂等结果或当前图状态冲突；
+- `MATERIAL_UNDO_CREATE_CONFLICT`：revision 或创建操作所有权冲突。
 
 模板公共接口错误统一为根级
 `{error:{code,message,retryable}}`，常见 code：
@@ -85,7 +89,7 @@ material problem 通过 FastAPI `HTTPException.detail` 返回结构化对象，�
 图文件只在 OS 启动时读取。真实运行中的权威是 `ResourceTreeSet`：
 
 1. `unilab -g` 解析图并将同一个对象交给 backend/HostNode 和 `CurrentMaterialState`；
-2. OS 内部资源操作可以修改该对象；
+2. OS 内部资源操作以及带幂等键的模板创建/补偿命令可以修改该对象；
 3. Material GET 通过 schedule 请求当前快照；
 4. bridge 原子替换只读 `MaterialGraphCatalog` 缓存后完成投影。
 
@@ -191,6 +195,26 @@ FastAPI route in local_api.py
   -> success envelope
 ```
 
+material 创建与补偿：
+
+```text
+POST /api/v1/materials
+  -> force-refresh Registry template detail; stale/unresolved fails closed
+  -> ScheduleSession.create_material()
+  -> create_material over schedule WS
+  -> CurrentMaterialState.create_material()
+  -> mutate the bound ResourceTreeSet
+  -> material_create_ack with authoritative snapshot
+  -> MaterialGraphCatalog.replace_snapshot()
+  -> CreateMaterialResult
+
+POST /api/v1/materials/{uuid}/undo-create
+  -> validate expected_revision + creation_operation_id + idempotency_key
+  -> undo_create_material over schedule WS
+  -> remove the operation-owned ResourceTreeSet subtree
+  -> material_undo_create_ack with authoritative snapshot
+```
+
 offline bridge 可使用 `--offline -g graph.json`。此时 bridge 作为进程内执行 OS，只在启动时
 读取一次图文件，后续同样使用内存 catalog；真实模式若给 bridge 单独传 `--graph` 会
 fail closed，避免出现第二个图权威。
@@ -235,9 +259,9 @@ YAML 所在目录，bridge 只转发允许的内容/Range header。设备默认 
 该链路不经过 schedule WS，也不读取 `-g` 图。Registry 模板描述“可以创建什么”，
 Material Graph 描述“OS 内存里当前有什么”，二者不能互相充当 fallback。
 
-本调用链没有 repository/database 写层，这是有意的。OS 内部修改通过 ResourceTreeSet 的
-设备/资源路径发生；HTTP API 保持只读。若未来需要前端写入，先定义 OS 与 backend 都能实现
-的聚合命令、revision、幂等和补偿，再决定权威端；不能在 `material_api.py` 增加 JSON 写回。
+本调用链没有 repository/database 写层，这是有意的。创建和补偿是聚合命令，带幂等键、
+revision 与创建操作所有权，真实模式只修改 OS 持有的 `ResourceTreeSet`；离线模式修改
+进程内离线权威。`material_api.py` 从不写回 graph JSON，也不维护第二份 Material 数据库。
 
 ## Backend 内部调用链
 

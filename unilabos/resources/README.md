@@ -16,12 +16,14 @@ unilab -g/--graph <graph.json>
 graph 文件是启动输入，不是运行时数据库。启动后不得通过定时读取文件、文件时间戳或
 bridge 自己的副本覆盖 OS 当前状态。
 
-`CurrentMaterialState` 位于 `material_state.py`，职责只有：
+`CurrentMaterialState` 位于 `material_state.py`，职责包括：
 
 - 绑定当前 `ResourceTreeSet`，不深拷贝出第二棵可写图。
 - 按请求将当前节点序列化为 `unilab/material-snapshot-v1`。
 - 过滤 `host_node` 等运行时内部节点，并把 parent 规范化为来源节点 ID。
-- 为只读投影计算 revision；它不是持久化层，也不提供前端写入口。
+- 为读取投影计算 revision；它不是持久化层，只接受下述受控聚合命令。
+- 接受经 local bridge 校验的模板创建/补偿命令，在同一个 `ResourceTreeSet` 上执行
+  幂等、revision 保护的子树增删。
 
 OS 内部更新节点后，读取下一份 snapshot 就会看到新状态。主动推送用于降低延迟，但一致性
 不依赖每一次推送都成功：前端 material GET 会经 local bridge 再向 OS 请求当前快照。
@@ -38,6 +40,12 @@ uni-lab-fe GET /api/v1/materials
   -> :8890 material_snapshot
   -> MaterialGraphCatalog.replace_snapshot()
   -> 只读 MaterialAggregate HTTP 响应
+
+uni-lab-fe POST /api/v1/materials
+  -> Registry template detail
+  -> schedule create_material
+  -> CurrentMaterialState.create_material(ResourceTreeSet)
+  -> authoritative snapshot + MaterialAggregate
 ```
 
 离线调试时可以运行 `local_bridge --offline -g <graph.json>`。此时 bridge 也只在启动时读取
@@ -47,7 +55,7 @@ uni-lab-fe GET /api/v1/materials
 ## 修改约束
 
 - 所有 OS 内部修改必须落在当前 `ResourceTreeSet`，不能另建 material store 分叉。
-- 前端和 local bridge 对物料保持只读；Site 的增删不从前端发起。
+- 当前前端写能力只开放模板创建及其补偿；Site 增删和其他图写命令仍不开放。
 - 高频 joint/pose 状态不要写回静态相对位置，也不要让 React Flow 查询随其高频重渲染。
 - 快照 schema 变化时，必须同步更新 `local_bridge/material_api.py`、services 契约测试和
   [Material API 对照](../app/local_bridge/MATERIAL_API.md)。

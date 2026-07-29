@@ -26,10 +26,14 @@ import logging
 import os
 import uuid
 from pathlib import Path
+from typing import Any
 
 from unilabos.app.local_bridge.bind_security import require_loopback_runtime_host
 from unilabos.app.local_bridge.local_api import LocalApiServer, LocalApiState
-from unilabos.app.local_bridge.material_api import MaterialGraphCatalog
+from unilabos.app.local_bridge.material_api import (
+    MaterialGraphCatalog,
+    MaterialMutationConflict,
+)
 from unilabos.app.local_bridge.material_models import MaterialModelRegistry
 from unilabos.app.local_bridge.offline_os import OfflineOS
 from unilabos.app.local_bridge.resource_template_api import (
@@ -201,6 +205,55 @@ class LocalBridgeServer:
         session.on_material_snapshot(
             self._material_catalog.replace_snapshot
         )
+
+        async def create_material(
+            template: dict[str, Any],
+            command: dict[str, Any],
+        ) -> dict[str, Any]:
+            if session.session_id == "offline":
+                return self._material_catalog.create_material(
+                    template,
+                    command,
+                )
+            ack = await session.create_material(template, command)
+            return self._material_catalog.creation_result(
+                source_node_id=str(ack.get("source_node_id") or ""),
+                creation_operation_id=str(
+                    ack.get("creation_operation_id") or ""
+                ),
+            )
+
+        async def undo_create_material(
+            material_uuid: str,
+            command: dict[str, Any],
+        ) -> None:
+            if session.session_id == "offline":
+                self._material_catalog.undo_create(
+                    material_uuid=material_uuid,
+                    creation_operation_id=str(
+                        command.get("creation_operation_id") or ""
+                    ),
+                    expected_revision=int(
+                        command.get("expected_revision") or 0
+                    ),
+                    idempotency_key=str(
+                        command.get("idempotency_key") or ""
+                    ),
+                )
+                return
+            material = self._material_catalog.get_material(material_uuid)
+            if material is None:
+                raise MaterialMutationConflict("material does not exist")
+            meta_data = material.get("meta_data")
+            source_node_id = (
+                str(meta_data.get("source_node_id") or "")
+                if isinstance(meta_data, dict)
+                else ""
+            )
+            await session.undo_create_material(
+                {**command, "source_node_id": source_node_id}
+            )
+
         state = LocalApiState(
             session,
             journal=self._journal,
@@ -215,6 +268,8 @@ class LocalBridgeServer:
                 if session.session_id == "offline"
                 else session.request_material_snapshot
             ),
+            material_create=create_material,
+            material_undo_create=undo_create_material,
             workflow_source_resolver=(
                 None
                 if self._workflow_source_library is None

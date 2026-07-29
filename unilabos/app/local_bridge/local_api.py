@@ -35,6 +35,8 @@ from unilabos.app.local_bridge.bind_security import require_loopback_runtime_hos
 from unilabos.app.local_bridge.material_api import (
     InvalidMaterialQuery,
     MaterialGraphCatalog,
+    MaterialGraphUnavailable,
+    MaterialMutationConflict,
 )
 from unilabos.app.local_bridge.material_models import MaterialModelRegistry
 from unilabos.app.local_bridge.resource_template_api import (
@@ -42,6 +44,7 @@ from unilabos.app.local_bridge.resource_template_api import (
     ResourceTemplateProxyError,
 )
 from unilabos.app.local_bridge.schedule_ws import RunHandle, ScheduleSession
+from unilabos.resources.material_authoring import MaterialAuthoringError
 from unilabos.runtime.event_store import SQLiteEventJournal
 from unilabos.runtime.service import RuntimeConflictError, RuntimeService
 from unilabos.runtime.workflow_store import (
@@ -249,6 +252,20 @@ class LocalApiState:
         material_refresh: (
             Callable[[], Awaitable[dict[str, Any]]] | None
         ) = None,
+        material_create: (
+            Callable[
+                [Mapping[str, Any], Mapping[str, Any]],
+                Awaitable[dict[str, Any]] | dict[str, Any],
+            ]
+            | None
+        ) = None,
+        material_undo_create: (
+            Callable[
+                [str, Mapping[str, Any]],
+                Awaitable[None] | None,
+            ]
+            | None
+        ) = None,
         workflow_source_resolver: WorkflowSourceResolver | None = None,
     ) -> None:
         self._schedule = schedule_session
@@ -271,6 +288,8 @@ class LocalApiState:
         self._runs: dict[str, RunRecord] = {}
         self._material_catalog = material_catalog
         self._material_refresh = material_refresh
+        self._material_create = material_create
+        self._material_undo_create = material_undo_create
         self._workflow_source_resolver = workflow_source_resolver
         self._material_model_registry = (
             material_model_registry
@@ -319,6 +338,37 @@ class LocalApiState:
 
         if self._material_refresh is not None:
             await self._material_refresh()
+
+    async def create_material(
+        self,
+        template: Mapping[str, Any],
+        command: Mapping[str, Any],
+    ) -> dict[str, Any]:
+        """把创建命令交给当前 OS 权威实现。"""
+
+        if self._material_create is None:
+            raise MaterialGraphUnavailable(
+                "current OS session does not support Material create"
+            )
+        result = self._material_create(template, command)
+        if isinstance(result, Awaitable):
+            return await result
+        return result
+
+    async def undo_create_material(
+        self,
+        material_uuid: str,
+        command: Mapping[str, Any],
+    ) -> None:
+        """把创建补偿命令交给当前 OS 权威实现。"""
+
+        if self._material_undo_create is None:
+            raise MaterialGraphUnavailable(
+                "current OS session does not support Material undo create"
+            )
+        result = self._material_undo_create(material_uuid, command)
+        if isinstance(result, Awaitable):
+            await result
 
     def build_graph(self, request: dict[str, Any]) -> dict[str, Any]:
         """校验 + 归一 local_ui 工作流请求，返回 WorkflowJson。含环/缺字段抛 DagValidationError。
@@ -950,6 +1000,104 @@ def create_app(
             ) from exc
         return {"code": 0, "data": result, "message": "success"}
 
+    @app.post("/api/v1/materials")
+    async def api_v1_create_material(
+        payload: dict[str, Any] = Body(...),
+    ) -> Any:
+        required_fields = {
+            "template_id",
+            "name",
+            "placement",
+            "initial_contents",
+            "expected_revision",
+            "idempotency_key",
+        }
+        allowed_fields = {*required_fields, "config"}
+        if (
+            not isinstance(payload, dict)
+            or not required_fields.issubset(payload)
+            or not set(payload).issubset(allowed_fields)
+        ):
+            raise _problem(
+                422,
+                "INVALID_MATERIAL_CREATE",
+                (
+                    "create payload must contain template_id, name, "
+                    "placement, initial_contents, expected_revision "
+                    "and idempotency_key"
+                ),
+            )
+        if resource_template_proxy is None:
+            raise _problem(
+                503,
+                "CATALOG_UNAVAILABLE",
+                "local_bridge 未配置 OS Registry 内部地址",
+            )
+        template_id = str(payload.get("template_id") or "")
+        try:
+            template_result = await resource_template_proxy.get_template(
+                template_id,
+                force=True,
+            )
+        except ResourceTemplateProxyError as exc:
+            return _template_proxy_error(exc)
+        template = template_result.data
+        creation = (
+            template.get("creation")
+            if isinstance(template.get("creation"), Mapping)
+            else {}
+        )
+        if (
+            template_result.stale
+            or template.get("status") != "ready"
+            or creation.get("available") is not True
+        ):
+            raise _problem(
+                409,
+                "TEMPLATE_CREATION_UNAVAILABLE",
+                str(
+                    creation.get("reason")
+                    or template.get("status_reason")
+                    or "template creation is unavailable"
+                ),
+            )
+        try:
+            result = await _require_state().create_material(
+                template,
+                payload,
+            )
+        except MaterialGraphUnavailable as exc:
+            raise _problem(
+                503,
+                "MATERIAL_GRAPH_UNAVAILABLE",
+                str(exc),
+            ) from exc
+        except MaterialAuthoringError as exc:
+            raise _problem(
+                422,
+                "INVALID_MATERIAL_CREATE",
+                str(exc),
+            ) from exc
+        except MaterialMutationConflict as exc:
+            raise _problem(
+                409,
+                "MATERIAL_CREATE_CONFLICT",
+                str(exc),
+            ) from exc
+        except TimeoutError as exc:
+            raise _problem(
+                503,
+                "MATERIAL_CREATE_TIMEOUT",
+                str(exc),
+            ) from exc
+        except RuntimeError as exc:
+            raise _problem(
+                409,
+                "MATERIAL_CREATE_REJECTED",
+                str(exc),
+            ) from exc
+        return {"code": 0, "data": result, "message": "success"}
+
     @app.get("/api/v1/materials/{material_uuid}")
     async def api_v1_material(material_uuid: str) -> Any:
         await _refresh_material_catalog()
@@ -970,6 +1118,67 @@ def create_app(
                 material_uuid,
             )
         return {"code": 0, "data": material, "message": "success"}
+
+    @app.post("/api/v1/materials/{material_uuid}/undo-create")
+    async def api_v1_undo_create_material(
+        material_uuid: str,
+        payload: dict[str, Any] = Body(...),
+    ) -> Any:
+        if not isinstance(payload, dict) or set(payload) != {
+            "creation_operation_id",
+            "expected_revision",
+            "idempotency_key",
+        }:
+            raise _problem(
+                422,
+                "INVALID_MATERIAL_UNDO_CREATE",
+                (
+                    "undo payload must contain creation_operation_id, "
+                    "expected_revision and idempotency_key"
+                ),
+            )
+        try:
+            await _require_state().undo_create_material(
+                material_uuid,
+                payload,
+            )
+        except InvalidMaterialQuery as exc:
+            raise _problem(
+                400,
+                "INVALID_MATERIAL_UUID",
+                str(exc),
+            ) from exc
+        except MaterialGraphUnavailable as exc:
+            raise _problem(
+                503,
+                "MATERIAL_GRAPH_UNAVAILABLE",
+                str(exc),
+            ) from exc
+        except MaterialAuthoringError as exc:
+            raise _problem(
+                422,
+                "INVALID_MATERIAL_UNDO_CREATE",
+                str(exc),
+            ) from exc
+        except MaterialMutationConflict as exc:
+            raise _problem(
+                409,
+                "MATERIAL_UNDO_CREATE_CONFLICT",
+                str(exc),
+            ) from exc
+        except TimeoutError as exc:
+            raise _problem(
+                503,
+                "MATERIAL_UNDO_CREATE_TIMEOUT",
+                str(exc),
+            ) from exc
+        except RuntimeError as exc:
+            raise _problem(
+                409,
+                "MATERIAL_UNDO_CREATE_REJECTED",
+                str(exc),
+            ) from exc
+        return {"code": 0, "data": {}, "message": "success"}
 
     @app.get("/api/v1/material-models")
     async def api_v1_material_models() -> Any:

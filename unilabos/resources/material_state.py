@@ -8,11 +8,16 @@ from __future__ import annotations
 
 import json
 import threading
+import uuid
 import zlib
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
+from unilabos.resources.material_authoring import (
+    MaterialAuthoringError,
+    build_material_nodes,
+)
 from unilabos.resources.resource_tracker import ResourceTreeSet
 
 
@@ -28,6 +33,9 @@ class CurrentMaterialState:
         self._lock = threading.RLock()
         self._resources = resources
         self._source_id = Path(source_id).name or "os-current"
+        self._creation_by_idempotency_key: dict[str, tuple[str, str]] = {}
+        self._creation_source_by_operation: dict[str, str] = {}
+        self._undo_idempotency_keys: set[str] = set()
 
     def replace(
         self,
@@ -41,6 +49,139 @@ class CurrentMaterialState:
             self._resources = resources
             if source_id is not None:
                 self._source_id = Path(source_id).name or "os-current"
+            self._creation_by_idempotency_key.clear()
+            self._creation_source_by_operation.clear()
+            self._undo_idempotency_keys.clear()
+
+    def create_material(
+        self,
+        template: dict[str, Any],
+        command: dict[str, Any],
+    ) -> dict[str, Any]:
+        """在唯一 ResourceTreeSet 权威中执行幂等模板实例化。"""
+
+        idempotency_key = str(
+            command.get("idempotency_key") or ""
+        ).strip()
+        if not idempotency_key:
+            raise MaterialAuthoringError("idempotency_key is required")
+        with self._lock:
+            cached = self._creation_by_idempotency_key.get(
+                idempotency_key
+            )
+            if cached is None:
+                try:
+                    expected_revision = int(
+                        command.get("expected_revision")
+                    )
+                except (TypeError, ValueError) as exc:
+                    raise MaterialAuthoringError(
+                        "expected_revision must be an integer"
+                    ) from exc
+                current_revision = int(self.snapshot()["revision"])
+                if expected_revision != current_revision:
+                    raise MaterialAuthoringError(
+                        f"expected revision {expected_revision}, "
+                        f"current revision is {current_revision}"
+                    )
+                nodes, source_node_id = build_material_nodes(
+                    template,
+                    command,
+                    existing_names=[
+                        node.res_content.name
+                        for node in self._resources.all_nodes
+                    ],
+                )
+                operation_id = str(
+                    uuid.uuid5(
+                        uuid.NAMESPACE_URL,
+                        (
+                            f"unilabos:{self._source_id}:"
+                            f"material-create:{idempotency_key}"
+                        ),
+                    )
+                )
+                for node in nodes:
+                    config = (
+                        node.get("config")
+                        if isinstance(node.get("config"), dict)
+                        else {}
+                    )
+                    config["creation_operation_id"] = operation_id
+                    node["config"] = config
+                created = ResourceTreeSet.from_raw_dict_list(nodes)
+                self._resources.trees.extend(created.trees)
+                cached = (source_node_id, operation_id)
+                self._creation_by_idempotency_key[
+                    idempotency_key
+                ] = cached
+                self._creation_source_by_operation[
+                    operation_id
+                ] = source_node_id
+            source_node_id, operation_id = cached
+            if source_node_id not in {
+                node.res_content.id for node in self._resources.all_nodes
+            }:
+                raise MaterialAuthoringError(
+                    "idempotent create result no longer exists"
+                )
+            return {
+                "source_node_id": source_node_id,
+                "creation_operation_id": operation_id,
+                "snapshot": self.snapshot(),
+            }
+
+    def undo_create_material(
+        self,
+        command: dict[str, Any],
+    ) -> dict[str, Any]:
+        """按 revision 和创建操作幂等补偿删除新建资源树。"""
+
+        idempotency_key = str(
+            command.get("idempotency_key") or ""
+        ).strip()
+        if not idempotency_key:
+            raise MaterialAuthoringError("idempotency_key is required")
+        with self._lock:
+            if idempotency_key in self._undo_idempotency_keys:
+                return {"snapshot": self.snapshot()}
+            try:
+                expected_revision = int(command.get("expected_revision"))
+            except (TypeError, ValueError) as exc:
+                raise MaterialAuthoringError(
+                    "expected_revision must be an integer"
+                ) from exc
+            current_revision = int(self.snapshot()["revision"])
+            if expected_revision != current_revision:
+                raise MaterialAuthoringError(
+                    f"expected revision {expected_revision}, "
+                    f"current revision is {current_revision}"
+                )
+            operation_id = str(
+                command.get("creation_operation_id") or ""
+            ).strip()
+            source_node_id = str(
+                command.get("source_node_id") or ""
+            ).strip()
+            if (
+                not operation_id
+                or self._creation_source_by_operation.get(operation_id)
+                != source_node_id
+            ):
+                raise MaterialAuthoringError(
+                    "creation operation does not own this material"
+                )
+            remaining = [
+                tree
+                for tree in self._resources.trees
+                if tree.root_node.res_content.id != source_node_id
+            ]
+            if len(remaining) == len(self._resources.trees):
+                raise MaterialAuthoringError("material does not exist")
+            self._resources.trees[:] = remaining
+            self._creation_source_by_operation.pop(operation_id, None)
+            self._undo_idempotency_keys.add(idempotency_key)
+            return {"snapshot": self.snapshot()}
 
     def snapshot(self) -> dict[str, Any]:
         """从当前 ResourceTreeSet 生成 schedule wire 快照。

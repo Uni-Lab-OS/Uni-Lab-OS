@@ -691,6 +691,10 @@ class MessageProcessor:
                             (message_data or {}).get("request_id") or ""
                         )
                     )
+            elif message_type == "create_material":
+                await self._handle_material_create(message_data)
+            elif message_type == "undo_create_material":
+                await self._handle_material_undo_create(message_data)
             elif message_type == "job_start":
                 await self._handle_job_start(message_data)
             elif message_type == "task_dag":
@@ -725,6 +729,66 @@ class MessageProcessor:
         except Exception as e:
             logger.error(f"[MessageProcessor] Error processing message {message_type}: {str(e)}")
             logger.error(traceback.format_exc())
+
+    async def _handle_material_create(
+        self,
+        message_data: Dict[str, Any],
+    ) -> None:
+        request_id = str(message_data.get("request_id") or "")
+        ack: dict[str, Any] = {"request_id": request_id}
+        try:
+            if self.websocket_client is None:
+                raise RuntimeError("WebSocket client is unavailable")
+            template = message_data.get("template")
+            command = message_data.get("command")
+            if not isinstance(template, dict) or not isinstance(command, dict):
+                raise ValueError("template and command must be objects")
+            result = self.websocket_client.create_material(
+                template,
+                command,
+            )
+            ack.update({"status": "created", **result})
+        except Exception as exc:  # noqa: BLE001
+            logger.exception("[MessageProcessor] Material create failed")
+            ack.update(
+                {
+                    "status": "rejected",
+                    "code": "MATERIAL_CREATE_REJECTED",
+                    "detail": str(exc),
+                }
+            )
+        if self.websocket_client is not None:
+            self.send_message(
+                {"action": "material_create_ack", "data": ack}
+            )
+
+    async def _handle_material_undo_create(
+        self,
+        message_data: Dict[str, Any],
+    ) -> None:
+        request_id = str(message_data.get("request_id") or "")
+        ack: dict[str, Any] = {"request_id": request_id}
+        try:
+            if self.websocket_client is None:
+                raise RuntimeError("WebSocket client is unavailable")
+            command = message_data.get("command")
+            if not isinstance(command, dict):
+                raise ValueError("command must be an object")
+            result = self.websocket_client.undo_create_material(command)
+            ack.update({"status": "undone", **result})
+        except Exception as exc:  # noqa: BLE001
+            logger.exception("[MessageProcessor] Material undo create failed")
+            ack.update(
+                {
+                    "status": "rejected",
+                    "code": "MATERIAL_UNDO_CREATE_REJECTED",
+                    "detail": str(exc),
+                }
+            )
+        if self.websocket_client is not None:
+            self.send_message(
+                {"action": "material_undo_create_ack", "data": ack}
+            )
 
     def _handle_pong(self, pong_data: Dict[str, Any]):
         """处理pong响应"""
@@ -1936,6 +2000,27 @@ class WebSocketClient(BaseCommunicationClient):
                 len(snapshot["nodes"]),
             )
         return queued
+
+    def create_material(
+        self,
+        template: dict[str, Any],
+        command: dict[str, Any],
+    ) -> dict[str, Any]:
+        """在当前 OS ResourceTreeSet 中创建模板实例。"""
+
+        if self._material_state is None:
+            raise RuntimeError("当前未绑定物料状态")
+        return self._material_state.create_material(template, command)
+
+    def undo_create_material(
+        self,
+        command: dict[str, Any],
+    ) -> dict[str, Any]:
+        """补偿删除由当前会话创建的 Material 资源树。"""
+
+        if self._material_state is None:
+            raise RuntimeError("当前未绑定物料状态")
+        return self._material_state.undo_create_material(command)
 
     def _build_websocket_url(self) -> Optional[str]:
         """构建 schedule 通道的 WebSocket 连接 URL
