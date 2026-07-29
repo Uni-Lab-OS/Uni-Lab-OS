@@ -143,6 +143,7 @@ class HostNode(BaseROS2DeviceNode):
     _instance: ClassVar[Optional["HostNode"]] = None
     _ready_event: ClassVar[threading.Event] = threading.Event()
     _shutting_down: ClassVar[bool] = False  # Flag to signal shutdown to background threads
+    _ACTION_SERVER_WAIT_TIMEOUT_SECONDS = 10.0
     _background_threads: ClassVar[List[threading.Thread]] = []  # Track all background threads for cleanup
     _device_action_status: ClassVar[collections.defaultdict[str, DeviceActionStatus]] = collections.defaultdict(
         DeviceActionStatus
@@ -931,7 +932,13 @@ class HostNode(BaseROS2DeviceNode):
         # self.lab_logger().trace(f"[Host Node] Sending goal for {action_id}: {str(goal_msg)[:1000]}")
         self.lab_logger().trace(f"[Host Node] Sending goal for {action_id}: {action_kwargs}")
         self.lab_logger().trace(f"[Host Node] Sending goal for {action_id}: {goal_msg}")
-        action_client.wait_for_server()
+        if not action_client.wait_for_server(
+            timeout_sec=self._ACTION_SERVER_WAIT_TIMEOUT_SECONDS
+        ):
+            raise TimeoutError(
+                f"ActionServer {action_id} was not available within "
+                f"{self._ACTION_SERVER_WAIT_TIMEOUT_SECONDS:.0f}s"
+            )
         goal_uuid_obj = UUID(uuid=list(u.bytes))
 
         future = action_client.send_goal_async(

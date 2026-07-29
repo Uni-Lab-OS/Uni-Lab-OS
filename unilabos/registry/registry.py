@@ -76,6 +76,22 @@ from msgcenterpy.instances.ros2_instance import ROS2MessageInstance
 _module_hash_cache: Dict[str, Optional[str]] = {}
 
 
+def _native_empty_in_action(action_config: Dict[str, Any]) -> Dict[str, Any]:
+    """保留 AST 生成的业务 schema，同时固定使用原生 EmptyIn 传输。"""
+
+    configured = copy.deepcopy(action_config)
+    configured.update(
+        {
+            "type": EmptyIn,
+            "goal": {},
+            "feedback": {},
+            "result": {},
+            "goal_default": {},
+        }
+    )
+    return configured
+
+
 @singleton
 class Registry:
     """
@@ -187,7 +203,9 @@ class Registry:
         ast_actions = ast_entry.get("class", {}).get("action_value_mappings", {})
 
         # 取出 AST 生成的 action entries, 补充特定覆写
-        test_latency_action = ast_actions.get("auto-test_latency", {})
+        test_latency_action = _native_empty_in_action(
+            ast_actions.get("auto-test_latency", {})
+        )
         test_resource_action = ast_actions.get("auto-test_resource", {})
         manual_confirm_action = ast_actions.get("manual_confirm", {})
         apply_deduct_resource_action = ast_actions.get("apply_deduct_resource", {})
