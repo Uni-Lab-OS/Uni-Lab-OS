@@ -138,6 +138,16 @@ payloads are never action authorities.
 The application-level `ping`/`pong` used by `host_node.test_latency` belongs to
 the schedule wire and is separate from WebSocket keepalive frames.
 
+Real Edge deployments must couple `local_bridge` and `unilab` with
+`scripts/start_local_edge_runtime.sh`, or preserve its exact invariants:
+start the loopback bridge first, explicitly point bridge
+`--execution-http-url` at the same port passed to `unilab --port`, connect OS
+to the selected schedule WS, and require
+`GET /api/runtime/local/actions` to report `available=true` before declaring
+the runtime ready. `/health` and an established schedule WebSocket prove only
+transport liveness. Never hard-code a test graph in this generic startup path;
+the deployment must explicitly select its device graph.
+
 ### Authoring Safety
 
 - Python workflows are parsed and compiled from AST through

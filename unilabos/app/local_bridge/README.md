@@ -14,6 +14,44 @@ WebSocket，但不拥有 DAG 调度、调试、节点终态或可变物料状态
 旧 Cloud panel `/ws/workflow/{id}` 与 8891 listener 已完全删除。8890 是 OS 内部
 schedule wire，不是 UI 接口；前端只使用 8014 上的统一 v1。
 
+## 推荐启动方式
+
+真实 Edge 必须同时启动 `local_bridge` 和 `unilab`，并让 bridge 的
+`--execution-http-url` 精确指向 `unilab --port`。仓库提供统一编排脚本，graph 必须由
+部署显式选择，脚本不会用测试设备图兜底：
+
+```bash
+UNILAB_PYTHON=/path/to/python \
+UNILAB_COMMAND=/path/to/unilab \
+UNILAB_CONFIG=/path/to/local_config.py \
+UNILAB_WORKING_DIR=/path/to/data \
+scripts/start_local_edge_runtime.sh /path/to/device-graph.json
+```
+
+需要仿真硬件时额外设置 `UNILAB_TEST_MODE=1`；需要跳过依赖检查时设置
+`UNILAB_SKIP_ENV_CHECK=1`。端口可通过 `UNILAB_OS_PORT`、`UNILAB_API_PORT` 和
+`UNILAB_SCHEDULE_PORT` 覆盖，但全部通信仍固定在 loopback。
+
+脚本按以下顺序启动并监督两个进程：
+
+```text
+local_bridge :8014/:8890 ready
+  → unilab --port :8002 连接 schedule WS
+  → bridge 从 :8002/internal/v1/runtime-actions 同步合同
+  → :8014/api/runtime/local/actions 返回 available=true
+  → Edge 才被视为可运行
+```
+
+`GET /health` 只表示 bridge 进程存活；schedule WS 显示“已连接”也只表示传输建立，
+两者都不能证明动作已注册。联调前应检查：
+
+```bash
+curl -fsS http://127.0.0.1:8014/api/runtime/local/actions
+```
+
+响应必须为 `available: true`，且工作流使用的每个 `action_ref` 都出现在 `actions` 中。
+如果设备动作缺失，应更正 Edge 启动时选择的 graph 或 Registry，而不能由前端补造动作。
+
 ## 本地物料接口
 
 真实 OS 通过既有 `unilab -g/--graph` 选择设备图，并在内存中以同一个
