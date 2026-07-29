@@ -4,6 +4,7 @@ import json
 import threading
 import time
 import traceback
+from collections.abc import Mapping
 
 from unilabos.utils.tools import fast_dumps_str as _fast_dumps_str, fast_loads as _fast_loads
 from typing import (
@@ -84,6 +85,54 @@ if TYPE_CHECKING:
     from pylabrobot.resources import Resource as ResourcePLR
 
 T = TypeVar("T")
+
+_ACTION_FAILURE_STATUSES = frozenset(
+    {
+        "all_timeout",
+        "cancelled",
+        "canceled",
+        "error",
+        "failed",
+        "failure",
+        "timeout",
+        "timed_out",
+    }
+)
+
+
+def _action_return_failure(return_value: Any) -> str:
+    """识别驱动正常返回值中显式声明的业务失败。
+
+    ROS action future 正常完成只说明调用链没有抛异常，不代表设备操作成功。
+    Uni-Lab 驱动约定允许用 ``success=False`` 返回结构化错误；少数既有动作
+    （例如 ``host_node.test_latency``）则用 ``status=all_timeout`` 表达失败。
+    这些结果必须进入 ``return_info.suc=False``，供 OS 调度终态和前端投影使用。
+    """
+
+    if not isinstance(return_value, Mapping):
+        return ""
+
+    explicit_success = return_value.get("success")
+    status = return_value.get("status")
+    normalized_status = (
+        status.strip().lower() if isinstance(status, str) else ""
+    )
+    if explicit_success is not False and normalized_status not in _ACTION_FAILURE_STATUSES:
+        return ""
+
+    detail = next(
+        (
+            str(return_value[key]).strip()
+            for key in ("error", "message", "return_info")
+            if return_value.get(key) not in (None, "")
+        ),
+        "",
+    )
+    if detail:
+        return detail
+    if normalized_status:
+        return f"动作返回失败状态: {normalized_status}"
+    return "动作返回 success=False"
 
 
 class RclpyAsyncMutex:
@@ -2228,8 +2277,9 @@ class BaseROS2DeviceNode(Node, Generic[T]):
                     execution_success = False
                     action_return_value = _raw_result
                 elif not execution_error:
-                    execution_success = True
                     action_return_value = _raw_result
+                    execution_error = _action_return_failure(action_return_value)
+                    execution_success = not execution_error
 
             # 清理 feedback timer
             if _feedback_timer is not None:

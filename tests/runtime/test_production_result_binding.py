@@ -160,3 +160,82 @@ def test_publish_job_status_forwards_return_info_to_dag_runner(monkeypatch) -> N
     )
 
     assert received == [("measure", "success", return_info)]
+
+
+def test_publish_job_status_preserves_first_failed_terminal(monkeypatch) -> None:
+    processor = MessageProcessor(
+        "ws://terminal-precedence-test",
+        Queue(),
+        DeviceActionManager(),
+    )
+    received: list[tuple[str, str, dict[str, Any] | None]] = []
+    sent: list[dict[str, Any]] = []
+    cached_status = ""
+
+    class RecordingRunner:
+        def notify_terminal(
+            self,
+            job_id: str,
+            status: str,
+            *,
+            return_info: dict[str, Any] | None = None,
+        ) -> None:
+            received.append((job_id, status, return_info))
+
+    class NoHost:
+        @staticmethod
+        def get_instance(_index: int) -> None:
+            return None
+
+    def get_cached_status(*_args: Any) -> str:
+        return cached_status
+
+    def cache_response(
+        _item: QueueItem,
+        _message: dict[str, Any],
+        status: str,
+    ) -> None:
+        nonlocal cached_status
+        cached_status = status
+
+    processor._task_dag_runners["terminal-precedence"] = RecordingRunner()  # noqa: SLF001
+    monkeypatch.setattr(ws_module, "HostNode", NoHost)
+    item = QueueItem(
+        task_type="job_call_back_status",
+        device_id="host_node",
+        action_name="test_latency",
+        task_id="terminal-precedence",
+        job_id="latency",
+        notebook_id="",
+        device_action_key="/devices/host_node/test_latency",
+    )
+    publisher = SimpleNamespace(
+        is_disabled=False,
+        _job_running_last_sent={},
+        queue_processor=SimpleNamespace(handle_job_completed=lambda *_args: None),
+        message_processor=processor,
+        get_cached_job_start_response_status=get_cached_status,
+        cache_job_start_response=cache_response,
+        is_connected=lambda: True,
+    )
+    processor.send_message = lambda message: sent.append(message) or True
+
+    failed_info = serialize_result_info("all ping requests timed out", False, {})
+    WebSocketClient.publish_job_status(
+        publisher,
+        {},
+        item,
+        "failed",
+        failed_info,
+    )
+    WebSocketClient.publish_job_status(
+        publisher,
+        {},
+        item,
+        "success",
+        serialize_result_info("", True, {}),
+    )
+
+    assert cached_status == "failed"
+    assert received == [("latency", "failed", failed_info)]
+    assert [message["data"]["status"] for message in sent] == ["failed"]

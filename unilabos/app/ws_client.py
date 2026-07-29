@@ -2177,6 +2177,16 @@ class WebSocketClient(BaseCommunicationClient):
         if status in ["success", "failed"]:
             self._job_running_last_sent.pop(item.job_id, None)
 
+            cached_status = self.get_cached_job_start_response_status(item.job_id, item.task_id)
+            if cached_status in ["success", "failed"]:
+                # 同一节点的首个权威终态不可被迟到/重复回调覆盖。尤其不能让一个
+                # 已上报的设备失败随后被迟到的 success 染绿。
+                logger.warning(
+                    f"[WebSocketClient] Skipped duplicate terminal job status for {job_log}: "
+                    f"cached={cached_status}, incoming={status}"
+                )
+                return
+
             host_node = HostNode.get_instance(0)
             if host_node:
                 try:
@@ -2193,17 +2203,6 @@ class WebSocketClient(BaseCommunicationClient):
                 status,
                 return_info=return_info,
             )
-
-            cached_status = self.get_cached_job_start_response_status(item.job_id, item.task_id)
-            if cached_status in ["success", "failed"]:
-                # 断线重连时，旧 READY 占位可能在结果已回放后触发 timeout failed。
-                # 已有终态时不允许重复终态覆盖缓存或再次发送，success 也不允许被 failed 降级。
-                if cached_status == "success" or cached_status == status:
-                    logger.warning(
-                        f"[WebSocketClient] Skipped duplicate terminal job status for {job_log}: "
-                        f"cached={cached_status}, incoming={status}"
-                    )
-                    return
 
         # running状态按job_id做debounce，内容变化时仍然上报
         if status == "running":
