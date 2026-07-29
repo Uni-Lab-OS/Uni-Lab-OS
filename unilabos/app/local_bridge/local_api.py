@@ -42,17 +42,17 @@ from unilabos.app.local_bridge.resource_template_api import (
     ResourceTemplateProxyError,
 )
 from unilabos.app.local_bridge.schedule_ws import RunHandle, ScheduleSession
-from unilabos.scheduler.dag_model import DagValidationError, NodeState
-from unilabos.scheduler.resource_lock import ResourceLockManager
-from unilabos.workflow.submission import (
-    workflow_submission_to_revision,
-)
-from unilabos.workflow.from_python_script import WorkflowSourceResolver
 from unilabos.runtime.event_store import SQLiteEventJournal
 from unilabos.runtime.service import RuntimeConflictError, RuntimeService
 from unilabos.runtime.workflow_store import (
     WorkflowDocumentStore,
     WorkflowRevisionConflict,
+)
+from unilabos.scheduler.dag_model import DagValidationError, NodeState
+from unilabos.scheduler.resource_lock import ResourceLockManager
+from unilabos.workflow.from_python_script import WorkflowSourceResolver
+from unilabos.workflow.submission import (
+    workflow_submission_to_revision,
 )
 
 if TYPE_CHECKING:
@@ -254,14 +254,20 @@ class LocalApiState:
         self._schedule = schedule_session
         self._journal = journal
         self._profiles = dict(profiles or {})
-        self._action_catalog: dict[str, Mapping[str, Any]] = {}
+        self._profile_action_catalog: dict[str, Mapping[str, Any]] = {}
         for profile in self._profiles.values():
-            self._action_catalog.update(profile.action_catalog)
-        self._action_catalog.update(
+            self._profile_action_catalog.update(profile.action_catalog)
+        self._external_action_catalog: dict[str, Mapping[str, Any]] = dict(
             _LOCAL_DEMO_ACTION_CATALOG
             if action_catalog is None and not self._profiles
             else action_catalog or {}
         )
+        self._action_catalog: dict[str, Mapping[str, Any]] = {
+            **self._profile_action_catalog,
+            **self._external_action_catalog,
+        }
+        self._action_catalog_revision: str | None = None
+        self._action_catalog_error: str | None = None
         self._runs: dict[str, RunRecord] = {}
         self._material_catalog = material_catalog
         self._material_refresh = material_refresh
@@ -440,7 +446,39 @@ class LocalApiState:
         return {
             "schema_version": "runtime/v1",
             "actions": actions,
+            "available": self._action_catalog_error is None,
+            "revision": self._action_catalog_revision,
+            "error": self._action_catalog_error,
         }
+
+    def replace_runtime_action_catalog(
+        self,
+        action_catalog: Mapping[str, Mapping[str, Any]],
+        *,
+        revision: str,
+    ) -> None:
+        """Install one live-OS catalog for all future validation and runs."""
+
+        self._external_action_catalog = {
+            str(action_ref): dict(definition)
+            for action_ref, definition in action_catalog.items()
+        }
+        self._action_catalog = {
+            **self._profile_action_catalog,
+            **self._external_action_catalog,
+        }
+        self._action_catalog_revision = revision
+        self._action_catalog_error = None
+        self._runtime_service.replace_action_catalog(self._action_catalog)
+
+    def mark_runtime_action_catalog_unavailable(self, message: str) -> None:
+        """Fail closed after OS reconnect/catalog load failure."""
+
+        self._external_action_catalog = {}
+        self._action_catalog = dict(self._profile_action_catalog)
+        self._action_catalog_revision = None
+        self._action_catalog_error = message
+        self._runtime_service.replace_action_catalog(self._action_catalog)
 
     def runtime_capabilities(self) -> dict[str, Any]:
         """Expose the active execution boundary for dispatch negotiation."""

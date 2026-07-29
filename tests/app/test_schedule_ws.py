@@ -304,6 +304,77 @@ def test_host_ready_sets_event() -> None:
     asyncio.run(scenario())
 
 
+def test_application_ping_replies_with_correlated_pong() -> None:
+    """test_latency 的应用层 ping 必须由当前 schedule server 应答。"""
+
+    async def scenario() -> None:
+        fake = FakeOS()
+        session = ScheduleSession(
+            fake.send,
+            session_id="latency-test",
+            clock=lambda: 456.75,
+        )
+        fake.bind(session)
+
+        await session.handle_incoming(
+            {
+                "action": "ping",
+                "data": {
+                    "ping_id": "ping-1",
+                    "client_timestamp": 123.5,
+                },
+            }
+        )
+
+        assert fake.received == [
+            {
+                "action": "pong",
+                "data": {
+                    "ping_id": "ping-1",
+                    "client_timestamp": 123.5,
+                    "server_timestamp": 456.75,
+                },
+            }
+        ]
+
+    asyncio.run(scenario())
+
+
+def test_application_ping_rejects_malformed_payload() -> None:
+    async def scenario() -> None:
+        session, fake = _make_session()
+
+        await session.handle_incoming(
+            {"action": "ping", "data": {"client_timestamp": 123.5}}
+        )
+        await session.handle_incoming(
+            {"action": "ping", "data": {"ping_id": "ping-2"}}
+        )
+
+        assert fake.received == []
+
+    asyncio.run(scenario())
+
+
+def test_host_ready_callbacks_are_awaited() -> None:
+    async def scenario() -> None:
+        session, _fake = _make_session()
+        observed: list[str] = []
+
+        async def callback(data: dict[str, Any]) -> None:
+            await asyncio.sleep(0)
+            observed.append(str(data["status"]))
+
+        session.on_host_ready(callback)
+        await session.handle_incoming(
+            {"action": "host_node_ready", "data": {"status": "ready"}}
+        )
+
+        assert observed == ["ready"]
+
+    asyncio.run(scenario())
+
+
 def test_unknown_status_ignored() -> None:
     """未知 status 不改变节点态、不误触发 done。"""
 

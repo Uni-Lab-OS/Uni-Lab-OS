@@ -122,6 +122,14 @@ must not be reintroduced. `task_dag`/`job_status` remains the OS schedule wire,
 not a frontend API. Keep public field spelling and casing stable; translate
 only at the boundary.
 
+Runtime Action Catalog entries come from the current HostNode instance mappings
+through loopback-only `GET /internal/v1/runtime-actions`. The local bridge
+refreshes them after `host_ready` and must clear the prior live catalog if
+refresh fails. Profiles may contribute explicit contracts, but frontend files,
+demo catalogs, stale caches, and workflow payloads are never action authorities.
+The application-level `ping`/`pong` used by `host_node.test_latency` belongs to
+the schedule wire and is separate from WebSocket keepalive frames.
+
 ### Authoring Safety
 
 - Python workflows are parsed and compiled from AST through
@@ -287,6 +295,9 @@ only at the boundary.
   WebSocket session.
 - Do not treat an ETag cache hit or stale cached catalog as permission to
   create a device/resource.
+- Do not hard-code a Registry method into the frontend or demo action catalog
+  to bypass `ACTION_NOT_FOUND`, or retain a live Action Catalog across a failed
+  OS reconnect.
 
 ## Workflow-Focused Verification
 

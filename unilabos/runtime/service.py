@@ -169,6 +169,17 @@ class RuntimeService:
 
         return python_fallback_capabilities()
 
+    def replace_action_catalog(
+        self,
+        action_catalog: Mapping[str, Mapping[str, Any]],
+    ) -> None:
+        """Atomically replace contracts used by future validation/compilation."""
+
+        self._action_catalog = {
+            str(action_ref): dict(definition)
+            for action_ref, definition in action_catalog.items()
+        }
+
     def set_workflow_revision(
         self,
         revision: WorkflowRevision,

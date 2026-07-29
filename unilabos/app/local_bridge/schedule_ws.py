@@ -24,6 +24,7 @@ import asyncio
 import inspect
 import json
 import logging
+import time
 import uuid
 from collections.abc import Awaitable, Callable
 from typing import Any
@@ -51,6 +52,10 @@ _HOST_READY_ACTIONS = frozenset({"host_ready", "host_node_ready", "ready", "host
 JobStatusCallback = Callable[[dict[str, Any]], Awaitable[None] | None]
 DebugEventCallback = Callable[[dict[str, Any]], Awaitable[None] | None]
 MaterialSnapshotCallback = Callable[
+    [dict[str, Any]],
+    Awaitable[None] | None,
+]
+HostReadyCallback = Callable[
     [dict[str, Any]],
     Awaitable[None] | None,
 ]
@@ -157,9 +162,11 @@ class ScheduleSession:
         send: Callable[[dict[str, Any]], Awaitable[None]],
         *,
         session_id: str = "",
+        clock: Callable[[], float] = time.time,
     ) -> None:
         self._send = send
         self.session_id = session_id
+        self._clock = clock
         self._runs: dict[str, RunHandle] = {}
         self._job_status_cbs: list[JobStatusCallback] = []
         self._reconcile_waiters: dict[str, asyncio.Future[dict[str, Any]]] = {}
@@ -170,6 +177,7 @@ class ScheduleSession:
             asyncio.Future[dict[str, Any]],
         ] = {}
         self._material_snapshot_cbs: list[MaterialSnapshotCallback] = []
+        self._host_ready_cbs: list[HostReadyCallback] = []
         self.host_ready: asyncio.Event = asyncio.Event()
 
     def on_job_status(self, cb: JobStatusCallback) -> None:
@@ -209,6 +217,17 @@ class ScheduleSession:
             logger.debug(
                 "[schedule_ws] off_material_snapshot: 回调未注册，忽略"
             )
+
+    def on_host_ready(self, cb: HostReadyCallback) -> None:
+        """注册真实 OS 就绪观察者，用于刷新会话级能力。"""
+
+        self._host_ready_cbs.append(cb)
+
+    def off_host_ready(self, cb: HostReadyCallback) -> None:
+        try:
+            self._host_ready_cbs.remove(cb)
+        except ValueError:
+            logger.debug("[schedule_ws] off_host_ready: 回调未注册，忽略")
 
     def get_run(self, task_id: str) -> RunHandle | None:
         return self._runs.get(task_id)
@@ -374,11 +393,42 @@ class ScheduleSession:
             await self._on_debug_event(data)
         elif action == "material_snapshot":
             await self._on_material_snapshot(data)
+        elif action == "ping":
+            await self._reply_pong(data)
         elif action in _HOST_READY_ACTIONS:
             self.host_ready.set()
             logger.info("[schedule_ws] OS 已就绪 (action=%s)", action)
+            for cb in tuple(self._host_ready_cbs):
+                try:
+                    result = cb(data)
+                    if inspect.isawaitable(result):
+                        await result
+                except Exception:  # noqa: BLE001
+                    logger.exception("[schedule_ws] host_ready 回调异常")
         else:
             logger.debug("[schedule_ws] 忽略报文 action=%s", action)
+
+    async def _reply_pong(self, data: dict[str, Any]) -> None:
+        """应答 HostNode.test_latency 使用的应用层 ping。"""
+
+        ping_id = data.get("ping_id")
+        client_timestamp = data.get("client_timestamp")
+        if not isinstance(ping_id, str) or not ping_id:
+            logger.warning("[schedule_ws] 忽略缺少 ping_id 的应用层 ping")
+            return
+        if not isinstance(client_timestamp, (int, float)):
+            logger.warning("[schedule_ws] 忽略 client_timestamp 非数字的应用层 ping")
+            return
+        await self._send(
+            {
+                "action": "pong",
+                "data": {
+                    "ping_id": ping_id,
+                    "client_timestamp": client_timestamp,
+                    "server_timestamp": self._clock(),
+                },
+            }
+        )
 
     async def _on_material_snapshot(self, data: dict[str, Any]) -> None:
         if data.get("schema") != "unilab/material-snapshot-v1":

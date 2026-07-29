@@ -156,6 +156,9 @@ def test_runtime_actions_projects_generic_catalog_in_stable_order() -> None:
     assert response.status_code == 200
     assert response.json() == {
         "schema_version": "runtime/v1",
+        "available": True,
+        "revision": None,
+        "error": None,
         "actions": [
             {
                 "action_ref": "alpha_camera.capture",

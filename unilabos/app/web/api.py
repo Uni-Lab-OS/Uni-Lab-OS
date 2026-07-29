@@ -4,32 +4,33 @@ API模块
 提供API路由和处理函数
 """
 
-from fastapi import APIRouter, WebSocket, WebSocketDisconnect
 import asyncio
 
 import yaml
+from fastapi import APIRouter, WebSocket, WebSocketDisconnect
 
-from unilabos.app.web.controller import (
-    devices,
-    job_add,
-    job_info,
-    get_online_devices,
-    get_device_actions,
-    get_action_schema,
-    get_all_available_actions,
-)
 from unilabos.app.model import (
+    JobAddReq,
+    JobAddResp,
+    JobData,
+    JobStatusResp,
     Resp,
     RespCode,
-    JobStatusResp,
-    JobAddResp,
-    JobAddReq,
-    JobData,
 )
+from unilabos.app.web.controller import (
+    devices,
+    get_action_schema,
+    get_all_available_actions,
+    get_device_actions,
+    get_online_devices,
+    job_add,
+    job_info,
+)
+from unilabos.app.web.resource_templates import resource_template_router
+from unilabos.app.web.runtime_actions import runtime_action_router
 from unilabos.app.web.utils.host_utils import get_host_node_info
 from unilabos.registry.registry import lab_registry
 from unilabos.utils.type_check import NoAliasDumper
-from unilabos.app.web.resource_templates import resource_template_router
 
 # 创建API路由器
 api = APIRouter()
@@ -1341,6 +1342,11 @@ def setup_api_routes(app):
         resource_template_router,
         prefix="/internal/v1",
         tags=["internal-resource-templates"],
+    )
+    app.include_router(
+        runtime_action_router,
+        prefix="/internal/v1",
+        tags=["internal-runtime-actions"],
     )
 
     # 启动广播任务

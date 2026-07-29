@@ -35,13 +35,17 @@ from unilabos.app.local_bridge.offline_os import OfflineOS
 from unilabos.app.local_bridge.resource_template_api import (
     ResourceTemplateProxy,
 )
+from unilabos.app.local_bridge.runtime_action_api import (
+    RuntimeActionCatalogProxy,
+    RuntimeActionCatalogProxyError,
+)
 from unilabos.app.local_bridge.schedule_ws import ScheduleSession, ScheduleWSServer
-from unilabos.scheduler.dag_model import NodeState
-from unilabos.scheduler.resource_lock import ResourceLockManager
 from unilabos.runtime.event_store import SQLiteEventJournal
 from unilabos.runtime.paths import default_runtime_db_path
 from unilabos.runtime.profile_loader import LoadedProfile, load_profiles
 from unilabos.runtime.workflow_store import WorkflowDocumentStore
+from unilabos.scheduler.dag_model import NodeState
+from unilabos.scheduler.resource_lock import ResourceLockManager
 from unilabos.workflow.source_library import (
     WorkflowSourceLibrary,
     parse_workflow_library,
@@ -99,6 +103,7 @@ class LocalBridgeServer:
         offline_node_delay: float = 0.0,
         execution_http_url: str = "http://127.0.0.1:8002",
         internal_api_token: str | None = None,
+        runtime_action_proxy: RuntimeActionCatalogProxy | None = None,
     ) -> None:
         require_loopback_runtime_host(host)
         if graph_path is not None and not offline:
@@ -149,6 +154,13 @@ class LocalBridgeServer:
             execution_http_url,
             internal_token=internal_api_token,
         )
+        self._runtime_action_proxy = (
+            runtime_action_proxy
+            or RuntimeActionCatalogProxy(
+                execution_http_url,
+                internal_token=internal_api_token,
+            )
+        )
 
         if offline:
             self._session, self._offline_os = build_offline_session(
@@ -179,9 +191,10 @@ class LocalBridgeServer:
         session.on_material_snapshot(
             self._material_catalog.replace_snapshot
         )
-        return LocalApiState(
+        state = LocalApiState(
             session,
             journal=self._journal,
+            action_catalog=None if session.session_id == "offline" else {},
             profiles=self._profiles,
             resource_lock_manager=self._resource_lock_manager,
             workflow_store=self._workflow_store,
@@ -198,6 +211,38 @@ class LocalBridgeServer:
                 else self._workflow_source_library.resolver
             ),
         )
+        if session.session_id != "offline":
+            state.mark_runtime_action_catalog_unavailable(
+                "等待 Edge Runtime 动作目录"
+            )
+
+            async def refresh_runtime_actions(_data: dict[str, object]) -> None:
+                if self._session is not session:
+                    return
+                try:
+                    actions, revision = await self._runtime_action_proxy.fetch(
+                        force=True
+                    )
+                except RuntimeActionCatalogProxyError as exc:
+                    state.mark_runtime_action_catalog_unavailable(str(exc))
+                    logger.error(
+                        "[bridge] Runtime 动作目录同步失败 (%s): %s",
+                        exc.code,
+                        exc,
+                    )
+                    return
+                state.replace_runtime_action_catalog(
+                    actions,
+                    revision=revision,
+                )
+                logger.info(
+                    "[bridge] Runtime 动作目录已同步：%d actions，revision=%s",
+                    len(actions),
+                    revision[:12],
+                )
+
+            session.on_host_ready(refresh_runtime_actions)
+        return state
 
     def _get_schedule_session(self) -> ScheduleSession | None:
         return self._session

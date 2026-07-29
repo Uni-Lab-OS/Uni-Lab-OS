@@ -8,7 +8,7 @@ WebSocket，但不拥有 DAG 调度、调试、节点终态或可变物料状态
 | 面 | 默认地址 | 用途 |
 |---|---|---|
 | OS schedule WS | `127.0.0.1:8890/api/v1/ws/schedule` | `task_dag` 下发，`job_status`/Material snapshot 回流 |
-| Registry internal HTTP | `127.0.0.1:8002/internal/v1` | bridge 读取已构建 Registry 的模板目录 |
+| OS internal HTTP | `127.0.0.1:8002/internal/v1` | bridge 读取当前动作合同与已构建 Registry 模板目录 |
 | Unified HTTP/WS | `127.0.0.1:8014` | 新前端使用的 `unilab/v1` |
 
 旧 Cloud panel `/ws/workflow/{id}` 与 8891 listener 已完全删除。8890 是 OS 内部
@@ -59,6 +59,27 @@ GET /api/v1/resource-templates/{template_uuid}/assets/{asset_key}
 公共成功响应仍使用 `{code,data,message}`；错误使用根级
 `{error:{code,message,retryable}}`。`refresh=true` 可用于明确发起重验证。
 浏览器只连接 8014，不能直接连接 8002。
+
+## Edge Runtime 动作目录
+
+真实模式下，统一 Runtime 不能使用 demo 动作目录，也不能根据工作流内容猜测动作。OS 在
+HostNode 就绪后，从当前内存 `_action_value_mappings` 投影：
+
+```text
+GET :8002/internal/v1/runtime-actions
+  → host_ready
+  → bridge 原子替换内存 Action Catalog
+  → GET :8014/api/runtime/local/actions
+```
+
+目录项以设备实例 ID 组成 `action_ref`，例如 `host_node.test_latency`。输入、输出、
+resource claims、effects 与 timing 都来自 Registry action schema/contract。OS 重连时强制
+重新验证 ETag；同步失败后立即清空上一会话的 live catalog，仅保留显式 Profile 合同并将
+目录标记为不可用。不能用 stale catalog 许可新工作流运行。
+
+`host_node.test_latency` 还使用 schedule WS 上的应用层 `ping`/`pong`。bridge 只回显
+`ping_id`、`client_timestamp` 并写入接收时的 `server_timestamp`；畸形 ping 被拒绝。
+这与 WebSocket 自身的 keepalive ping 不属于同一协议。
 
 ## Unified v1 工作流接口
 
@@ -119,6 +140,8 @@ journal 和 debugger。它不能实现一套“更简单”的前端专用 sched
 - `material_models.py`：本地模型登记、公开元数据与安全资源路径解析。
 - `resource_template_api.py`：Registry internal HTTP 客户端、ETag/TTL 缓存、
   stale 降级和资源转发。
+- `runtime_action_api.py`：当前 OS Runtime Action Catalog 客户端、严格响应校验与
+  会话重验证。
 - `MATERIAL_API.md`：OS/backend 物料接口与调用链对照。
 
 ## 绝对不能做
@@ -138,6 +161,9 @@ journal 和 debugger。它不能实现一套“更简单”的前端专用 sched
 - 不能恢复 Cloud/前端静态模板作为 Edge fallback。
 - 不能在 stale 目录或 unresolved 模板上开放创建。
 - 不能让模板目录依赖 schedule WS，或由 bridge 再扫描一遍 Registry YAML。
+- 不能把 Registry 已存在的方法硬编码进前端或 demo catalog 来绕过
+  `ACTION_NOT_FOUND`。
+- 不能在 OS 重连或动作目录同步失败后继续使用上一会话的 live Action Catalog。
 
 ## 验证
 
