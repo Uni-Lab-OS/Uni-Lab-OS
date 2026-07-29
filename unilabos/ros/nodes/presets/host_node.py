@@ -132,6 +132,16 @@ class TestLatencyReturn(TypedDict):
     status: str
 
 
+def _execution_goal_uuid(task_id: str, job_id: str) -> UUID:
+    """为一次运行中的节点生成稳定且跨运行隔离的 ROS Goal UUID。"""
+
+    execution_id = uuid.uuid5(
+        uuid.NAMESPACE_URL,
+        f"unilabos:execution-goal:v1:{task_id}:{job_id}",
+    )
+    return UUID(uuid=list(execution_id.bytes))
+
+
 @device(id="host_node", category=[], description="Host Node", icon="icon_device.webp")
 class HostNode(BaseROS2DeviceNode):
     """
@@ -891,7 +901,6 @@ class HostNode(BaseROS2DeviceNode):
             action_kwargs: 动作参数
             server_info: 服务器发送信息，包含发送时间戳等
         """
-        u = uuid.UUID(item.job_id)
         device_id = item.device_id
         action_name = item.action_name
 
@@ -939,7 +948,9 @@ class HostNode(BaseROS2DeviceNode):
                 f"ActionServer {action_id} was not available within "
                 f"{self._ACTION_SERVER_WAIT_TIMEOUT_SECONDS:.0f}s"
             )
-        goal_uuid_obj = UUID(uuid=list(u.bytes))
+        # Canonical node_id/job_id 会在不同 run 中复用；ROS Goal UUID 必须把
+        # task_id 纳入身份，否则重复运行同一工作流会被 ActionServer 拒绝。
+        goal_uuid_obj = _execution_goal_uuid(item.task_id, item.job_id)
 
         future = action_client.send_goal_async(
             goal_msg,
@@ -1078,6 +1089,20 @@ class HostNode(BaseROS2DeviceNode):
         goal_handle = future.result()
         if not goal_handle.accepted:
             self.lab_logger().warning(f"[Host Node] Goal {item.action_name} ({item.job_id}) rejected")
+            return_info = serialize_result_info(
+                f"ActionServer rejected goal: {action_id}",
+                False,
+                {},
+            )
+            return_info.update(
+                {
+                    "physical_state": "confirmed",
+                    "reconcile_required": False,
+                }
+            )
+            for bridge in self.bridges:
+                if hasattr(bridge, "publish_job_status"):
+                    bridge.publish_job_status({}, item, "failed", return_info)
             return
 
         self.lab_logger().info(f"[Host Node] Goal {action_id} ({item.job_id}) accepted")
