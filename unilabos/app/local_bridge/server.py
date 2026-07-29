@@ -161,6 +161,7 @@ class LocalBridgeServer:
                 internal_token=internal_api_token,
             )
         )
+        self._runtime_action_sync_task: asyncio.Task[None] | None = None
 
         if offline:
             self._session, self._offline_os = build_offline_session(
@@ -182,8 +183,17 @@ class LocalBridgeServer:
 
     def _adopt_session(self, session: ScheduleSession) -> None:
         """OS 连入（真实模式）：接管为当前 session 并据此建唯一 LocalApiState。"""
+        self._cancel_runtime_action_sync()
         self._session = session
         self._local_api_state = self._build_local_api_state(session)
+        if session.session_id != "offline":
+            # 不把动作目录同步完全押在单次 host_node_ready 消息上。OS 的 WS
+            # 与内部 HTTP 服务并行启动时，HTTP 可能短暂晚于 WS 就绪；连接后立即
+            # 尝试并在可恢复错误上退避重试，避免 UI 已连接但目录永久为空。
+            self._schedule_runtime_action_sync(
+                session,
+                self._local_api_state,
+            )
         logger.info("[bridge] 已接管 OS 连入的调度会话，UI 面就绪")
 
     def _build_local_api_state(self, session: ScheduleSession) -> LocalApiState:
@@ -217,32 +227,111 @@ class LocalBridgeServer:
             )
 
             async def refresh_runtime_actions(_data: dict[str, object]) -> None:
-                if self._session is not session:
-                    return
-                try:
-                    actions, revision = await self._runtime_action_proxy.fetch(
-                        force=True
-                    )
-                except RuntimeActionCatalogProxyError as exc:
-                    state.mark_runtime_action_catalog_unavailable(str(exc))
-                    logger.error(
-                        "[bridge] Runtime 动作目录同步失败 (%s): %s",
-                        exc.code,
-                        exc,
-                    )
-                    return
-                state.replace_runtime_action_catalog(
-                    actions,
-                    revision=revision,
+                # host_node_ready 是一次明确的目录边界：取消连接阶段的旧重试，
+                # 立即强制刷新。若此刻 HTTP 仍未就绪，后台继续重试而不阻塞 WS。
+                self._cancel_runtime_action_sync()
+                retryable = await self._refresh_runtime_action_catalog(
+                    session,
+                    state,
                 )
-                logger.info(
-                    "[bridge] Runtime 动作目录已同步：%d actions，revision=%s",
-                    len(actions),
-                    revision[:12],
-                )
+                if retryable:
+                    self._schedule_runtime_action_sync(
+                        session,
+                        state,
+                        initial_delay=0.25,
+                    )
 
             session.on_host_ready(refresh_runtime_actions)
         return state
+
+    async def _refresh_runtime_action_catalog(
+        self,
+        session: ScheduleSession,
+        state: LocalApiState,
+        *,
+        background: bool = False,
+    ) -> bool:
+        """刷新一次动作目录；返回失败是否可重试。"""
+
+        if self._session is not session or self._local_api_state is not state:
+            return False
+        try:
+            actions, revision = await self._runtime_action_proxy.fetch(force=True)
+        except RuntimeActionCatalogProxyError as exc:
+            if self._session is not session or self._local_api_state is not state:
+                return False
+            state.mark_runtime_action_catalog_unavailable(str(exc))
+            log = logger.debug if background else logger.error
+            log(
+                "[bridge] Runtime 动作目录同步失败 (%s, retryable=%s): %s",
+                exc.code,
+                exc.retryable,
+                exc,
+            )
+            return exc.retryable
+        if self._session is not session or self._local_api_state is not state:
+            return False
+        state.replace_runtime_action_catalog(
+            actions,
+            revision=revision,
+        )
+        logger.info(
+            "[bridge] Runtime 动作目录已同步：%d actions，revision=%s",
+            len(actions),
+            revision[:12],
+        )
+        return False
+
+    def _schedule_runtime_action_sync(
+        self,
+        session: ScheduleSession,
+        state: LocalApiState,
+        *,
+        initial_delay: float = 0.0,
+    ) -> None:
+        """后台同步动作目录；仅对可恢复错误做有上限的指数退避。"""
+
+        existing = self._runtime_action_sync_task
+        if existing is not None and not existing.done():
+            return
+        try:
+            loop = asyncio.get_running_loop()
+        except RuntimeError:
+            # 仅白盒同步装配测试会在事件循环外调用 _adopt_session；真实服务器
+            # 的 on_session 始终运行在 Schedule WS 的事件循环中。
+            return
+
+        async def sync_until_ready() -> None:
+            delay = initial_delay
+            while self._session is session and self._local_api_state is state:
+                if delay > 0:
+                    await asyncio.sleep(delay)
+                retryable = await self._refresh_runtime_action_catalog(
+                    session,
+                    state,
+                    background=True,
+                )
+                if not retryable:
+                    return
+                delay = min(10.0, max(0.25, delay * 2))
+
+        task = loop.create_task(
+            sync_until_ready(),
+            name=f"runtime-action-sync:{session.session_id}",
+        )
+        self._runtime_action_sync_task = task
+
+        def clear_completed(completed: asyncio.Task[None]) -> None:
+            if self._runtime_action_sync_task is completed:
+                self._runtime_action_sync_task = None
+
+        task.add_done_callback(clear_completed)
+
+    def _cancel_runtime_action_sync(self) -> None:
+        task = self._runtime_action_sync_task
+        self._runtime_action_sync_task = None
+        if task is not None and not task.done():
+            task.cancel()
 
     def _get_schedule_session(self) -> ScheduleSession | None:
         return self._session
@@ -258,6 +347,7 @@ class LocalBridgeServer:
         )
 
     async def stop(self) -> None:
+        self._cancel_runtime_action_sync()
         await asyncio.gather(
             self._schedule_server.stop(),
             self._api_server.stop(),

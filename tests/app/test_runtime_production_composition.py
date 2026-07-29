@@ -96,8 +96,14 @@ def test_production_unified_api_uses_shared_current_canonical() -> None:
 
 
 class RecordingRuntimeActionProxy:
-    def __init__(self, *, fail: bool = False) -> None:
+    def __init__(
+        self,
+        *,
+        fail: bool = False,
+        fail_attempts: int = 0,
+    ) -> None:
         self.fail = fail
+        self.fail_attempts = fail_attempts
         self.calls = 0
 
     async def fetch(
@@ -107,7 +113,7 @@ class RecordingRuntimeActionProxy:
     ) -> tuple[dict[str, dict[str, Any]], str]:
         assert force is True
         self.calls += 1
-        if self.fail:
+        if self.fail or self.calls <= self.fail_attempts:
             raise RuntimeActionCatalogProxyError(
                 "ACTION_CATALOG_UNAVAILABLE",
                 "OS action endpoint unavailable",
@@ -151,9 +157,15 @@ def test_real_bridge_installs_live_catalog_after_host_ready() -> None:
             ],
             "control_edges": [],
         }
-        assert state.validate_runtime_workflow(
-            {"revision": revision}
-        )["valid"] is False
+        unavailable = state.validate_runtime_workflow({"revision": revision})
+        assert unavailable["valid"] is False
+        assert unavailable["issues"] == [
+            {
+                "code": "ACTION_CATALOG_UNAVAILABLE",
+                "message": "等待 Edge Runtime 动作目录",
+                "severity": "error",
+            }
+        ]
 
         await session.handle_incoming(
             {"action": "host_node_ready", "data": {"status": "ready"}}
@@ -163,9 +175,9 @@ def test_real_bridge_installs_live_catalog_after_host_ready() -> None:
         assert proxy.calls == 1
         assert catalog["available"] is True
         assert catalog["revision"] == "runtime-revision-1"
-        assert [
-            action["action_ref"] for action in catalog["actions"]
-        ] == ["host_node.test_latency"]
+        assert [action["action_ref"] for action in catalog["actions"]] == [
+            "host_node.test_latency"
+        ]
         assert state.validate_runtime_workflow(
             {"revision": revision}
         )["valid"] is True
@@ -197,6 +209,39 @@ def test_real_bridge_catalog_failure_stays_fail_closed() -> None:
         assert catalog["available"] is False
         assert catalog["actions"] == []
         assert catalog["error"] == "OS action endpoint unavailable"
+
+    asyncio.run(scenario())
+
+
+def test_real_bridge_retries_catalog_when_http_starts_after_ws() -> None:
+    async def scenario() -> None:
+        proxy = RecordingRuntimeActionProxy(fail_attempts=1)
+        server = LocalBridgeServer(
+            offline=False,
+            runtime_action_proxy=proxy,  # type: ignore[arg-type]
+        )
+
+        async def send(_message: dict[str, Any]) -> None:
+            return None
+
+        session = ScheduleSession(send, session_id="real-edge")
+        server._adopt_session(session)  # noqa: SLF001
+        state = server._get_local_api_state()  # noqa: SLF001
+        assert state is not None
+
+        # 不依赖第二次 host_node_ready：连接阶段第一次 HTTP 拉取失败后，
+        # Bridge 应自行退避重试并最终安装真实目录。
+        for _ in range(100):
+            if state.runtime_actions()["available"]:
+                break
+            await asyncio.sleep(0.01)
+
+        catalog = state.runtime_actions()
+        assert proxy.calls == 2
+        assert catalog["available"] is True
+        assert [action["action_ref"] for action in catalog["actions"]] == [
+            "host_node.test_latency"
+        ]
 
     asyncio.run(scenario())
 

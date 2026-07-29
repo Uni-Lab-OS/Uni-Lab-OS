@@ -352,6 +352,7 @@ class LocalApiState:
 
         body = {workflow: WorkflowJson, ...config}；run_id 即 TaskDag.task_id（回流按此命中）。
         """
+        self._require_runtime_action_catalog()
         workflow = body.get("workflow") or {}
         name = str(workflow.get("name") or "workflow")
         nodes = workflow.get("nodes") or []
@@ -400,6 +401,7 @@ class LocalApiState:
         workflow_id: str,
         body: dict[str, Any],
     ) -> dict[str, Any]:
+        self._require_runtime_action_catalog()
         revision = body.get("revision")
         if not isinstance(revision, dict):
             raise DagValidationError("revision must be an object")
@@ -418,6 +420,17 @@ class LocalApiState:
         parameters = body.get("parameters")
         if parameters is not None and not isinstance(parameters, dict):
             raise DagValidationError("parameters must be an object")
+        if self._action_catalog_error is not None:
+            return {
+                "valid": False,
+                "issues": [
+                    {
+                        "code": "ACTION_CATALOG_UNAVAILABLE",
+                        "message": self._action_catalog_error,
+                        "severity": "error",
+                    }
+                ],
+            }
         return self._runtime_service.validate_workflow(
             revision,
             parameters=parameters,
@@ -480,6 +493,12 @@ class LocalApiState:
         self._action_catalog_error = message
         self._runtime_service.replace_action_catalog(self._action_catalog)
 
+    def _require_runtime_action_catalog(self) -> None:
+        if self._action_catalog_error is not None:
+            raise DagValidationError(
+                f"ACTION_CATALOG_UNAVAILABLE: {self._action_catalog_error}"
+            )
+
     def runtime_capabilities(self) -> dict[str, Any]:
         """Expose the active execution boundary for dispatch negotiation."""
 
@@ -488,6 +507,7 @@ class LocalApiState:
     async def start_runtime_run(self, body: dict[str, Any]) -> dict[str, Any]:
         """Delegate generic source submission to the OS RuntimeService."""
 
+        self._require_runtime_action_catalog()
         return await self._runtime_service.start_run(body)
 
     def get_runtime_run(self, run_id: str) -> dict[str, Any] | None:
@@ -996,6 +1016,7 @@ def create_app(
             fields={"base_revision_id", "python_source", "source_uri"},
         )
         try:
+            state._require_runtime_action_catalog()
             return compile_authoring_revision(
                 request,
                 action_catalog=state._action_catalog,
@@ -1014,6 +1035,7 @@ def create_app(
             fields={"base_revision_id", "canonical_ir", "source_uri"},
         )
         try:
+            state._require_runtime_action_catalog()
             return generate_python_revision(
                 request,
                 action_catalog=state._action_catalog,
@@ -1032,6 +1054,7 @@ def create_app(
             fields={"base_revision_id", "candidate"},
         )
         try:
+            state._require_runtime_action_catalog()
             return validate_authoring_revision(
                 request,
                 action_catalog=state._action_catalog,
