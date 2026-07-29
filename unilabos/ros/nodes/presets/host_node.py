@@ -1,4 +1,5 @@
 import collections
+import copy
 import json
 import threading
 import time
@@ -551,6 +552,29 @@ class HostNode(BaseROS2DeviceNode):
                 except Exception as e:
                     self.lab_logger().warning(f"[Host Node] publish_action_locks failed: {e}")
 
+    def _update_remote_action_mappings(
+        self,
+        device_id: str,
+        action_mappings: Dict[str, Any],
+    ) -> List[Tuple[str, str]]:
+        """保存远程设备动作映射，并返回本次真正新增的动作。
+
+        远程节点可能先被 ROS discovery 发现、稍后才通过 node_info_update
+        回传 Registry。只写 ``_action_value_mappings`` 会让服务端永远收不到
+        这些延迟出现的动作；但重注册时也不能把已有 busy 动作误报为 free。
+        因此这里只返回相对旧映射新增的 action。
+        """
+
+        previous_actions = set(
+            self._action_value_mappings.get(device_id, {}).keys()
+        )
+        self._action_value_mappings[device_id] = action_mappings
+        return [
+            (device_id, str(action_name))
+            for action_name in action_mappings
+            if action_name not in previous_actions
+        ]
+
     def _create_action_clients_for_device(self, device_id: str, namespace: str) -> None:
         """
         为设备创建所有必要的ActionClient
@@ -921,19 +945,49 @@ class HostNode(BaseROS2DeviceNode):
         self, device_id: str, action_name: str, action_kwargs: Dict[str, Any]
     ) -> Dict[str, Any]:
         """
-        根据注册表 handles 的 output 定义构建测试模式的模拟返回值
+        根据动作 result schema 与 output handles 构建合同内的模拟返回值。
 
-        根据 data_key 中 @flatten 的层数决定嵌套数组层数，叶子值为空字典。
-        例如: "vessel" → {}, "plate.@flatten" → [{}], "a.@flatten.@flatten" → [[{}]]
+        测试模式也必须遵守真实动作的输出合同，不能注入 ``test_mode``、
+        ``action_name`` 等框架私有字段。否则 Runtime 会正确地把模拟成功拒绝为
+        OUTPUT_SCHEMA_MISMATCH，所有设备动作的 E2E 都无法继续。
         """
-        mock_return: Dict[str, Any] = {"test_mode": True, "action_name": action_name}
         action_mappings = self._action_value_mappings.get(device_id, {})
         action_mapping = action_mappings.get(action_name, {})
+        schema = action_mapping.get("schema", {})
+        schema_properties = (
+            schema.get("properties", {})
+            if isinstance(schema, dict)
+            else {}
+        )
+        result_schema = (
+            schema_properties.get("result", {})
+            if isinstance(schema_properties, dict)
+            else {}
+        )
+        output_properties = (
+            result_schema.get("properties", {})
+            if isinstance(result_schema, dict)
+            else {}
+        )
+        if not isinstance(output_properties, dict):
+            output_properties = {}
+        mock_return: Dict[str, Any] = {
+            str(output_name): HostNode._test_mode_value_from_schema(
+                output_schema,
+            )
+            for output_name, output_schema in output_properties.items()
+            if isinstance(output_schema, dict)
+        }
+
         handles = action_mapping.get("handles", {})
         if isinstance(handles, dict):
             for output_handle in handles.get("output", []):
+                if not isinstance(output_handle, dict):
+                    continue
                 data_key = output_handle.get("data_key", "")
                 handler_key = output_handle.get("handler_key", "")
+                if handler_key not in output_properties:
+                    continue
                 # 根据 @flatten 层数构建嵌套数组，叶子为空字典
                 flatten_count = data_key.count("@flatten")
                 value: Any = {}
@@ -941,6 +995,56 @@ class HostNode(BaseROS2DeviceNode):
                     value = [value]
                 mock_return[handler_key] = value
         return mock_return
+
+    @classmethod
+    def _test_mode_value_from_schema(cls, schema: Dict[str, Any]) -> Any:
+        """为 JSON Schema 字段生成类型正确、无业务含义的确定性值。"""
+
+        if "default" in schema and schema["default"] is not None:
+            return copy.deepcopy(schema["default"])
+        enum_values = schema.get("enum")
+        if isinstance(enum_values, list) and enum_values:
+            return copy.deepcopy(enum_values[0])
+        schema_type = schema.get("type")
+        if isinstance(schema_type, list):
+            schema_type = next(
+                (item for item in schema_type if item != "null"),
+                "null",
+            )
+        if not schema_type:
+            variants = schema.get("anyOf") or schema.get("oneOf")
+            if isinstance(variants, list):
+                first_variant = next(
+                    (
+                        item
+                        for item in variants
+                        if isinstance(item, dict)
+                        and item.get("type") != "null"
+                    ),
+                    {},
+                )
+                return cls._test_mode_value_from_schema(first_variant)
+        if schema_type == "string":
+            return ""
+        if schema_type == "number":
+            return 0.0
+        if schema_type == "integer":
+            return 0
+        if schema_type == "boolean":
+            return False
+        if schema_type == "array":
+            return []
+        if schema_type == "object":
+            properties = schema.get("properties", {})
+            required = schema.get("required", [])
+            if not isinstance(properties, dict) or not isinstance(required, list):
+                return {}
+            return {
+                str(name): cls._test_mode_value_from_schema(definition)
+                for name, definition in properties.items()
+                if name in required and isinstance(definition, dict)
+            }
+        return None
 
     def _handle_test_mode_result(
         self, item: "QueueItem", action_id: str, mock_return: Dict[str, Any]
@@ -1350,6 +1454,7 @@ class HostNode(BaseROS2DeviceNode):
             from unilabos.app.web.client import HTTPClient, http_client
 
             info = json.loads(request.command)
+            new_action_pairs: List[Tuple[str, str]] = []
             if "SYNC_SLAVE_NODE_INFO" in info:
                 info = info["SYNC_SLAVE_NODE_INFO"]
                 machine_name = info["machine_name"]
@@ -1363,7 +1468,12 @@ class HostNode(BaseROS2DeviceNode):
                         self._slave_registry_configs[registry_name].get("class", {}).get("action_value_mappings", {})
                     )
                     if action_mappings:
-                        self._action_value_mappings[edge_device_id] = action_mappings
+                        new_action_pairs.extend(
+                            self._update_remote_action_mappings(
+                                edge_device_id,
+                                action_mappings,
+                            )
+                        )
                         self.lab_logger().info(
                             f"[Host Node] Loaded {len(action_mappings)} action mappings "
                             f"for remote device {edge_device_id} (registry: {registry_name})"
@@ -1395,7 +1505,12 @@ class HostNode(BaseROS2DeviceNode):
                                     .get("action_value_mappings", {})
                                 )
                                 if action_mappings:
-                                    self._action_value_mappings[device_id] = action_mappings
+                                    new_action_pairs.extend(
+                                        self._update_remote_action_mappings(
+                                            device_id,
+                                            action_mappings,
+                                        )
+                                    )
                                     self.lab_logger().info(
                                         f"[Host Node] Stored {len(action_mappings)} action mappings "
                                         f"for remote device {device_id} (class: {class_name})"
@@ -1413,6 +1528,7 @@ class HostNode(BaseROS2DeviceNode):
                     except Exception as e:
                         self.lab_logger().error(f"[Host Node] Failed to merge slave devices_config: {e}")
 
+            self._report_action_locks_free(new_action_pairs)
             self.lab_logger().debug(f"[Host Node] Node info update: {info}")
             response.response = "OK"
         except Exception as e:

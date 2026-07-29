@@ -246,6 +246,96 @@ def test_real_bridge_retries_catalog_when_http_starts_after_ws() -> None:
     asyncio.run(scenario())
 
 
+def test_real_bridge_polls_http_for_devices_registered_after_host_ready() -> None:
+    class ExpandingRuntimeActionProxy:
+        def __init__(self) -> None:
+            self.calls = 0
+
+        async def fetch(
+            self,
+            *,
+            force: bool = False,
+        ) -> tuple[dict[str, dict[str, Any]], str]:
+            assert force is True
+            self.calls += 1
+            actions = {
+                "host_node.test_latency": {
+                    "inputs": {},
+                    "outputs": {"status": {"type": "string"}},
+                }
+            }
+            revision = "runtime-revision-host-only"
+            if self.calls >= 2:
+                actions["PLR_STATION.add_liquid"] = {
+                    "inputs": {"volume": {"type": "number"}},
+                    "outputs": {},
+                }
+                revision = "runtime-revision-with-device"
+            return actions, revision
+
+    async def scenario() -> None:
+        proxy = ExpandingRuntimeActionProxy()
+        server = LocalBridgeServer(
+            offline=False,
+            runtime_action_proxy=proxy,  # type: ignore[arg-type]
+        )
+
+        async def send(_message: dict[str, Any]) -> None:
+            return None
+
+        session = ScheduleSession(send, session_id="real-edge")
+        server._adopt_session(session)  # noqa: SLF001
+        state = server._get_local_api_state()  # noqa: SLF001
+        assert state is not None
+
+        await session.handle_incoming(
+            {"action": "host_node_ready", "data": {"status": "ready"}}
+        )
+        assert proxy.calls == 1
+
+        await session.handle_incoming(
+            {
+                "action": "report_action_lock",
+                "data": {
+                    "locks": [
+                        {
+                            "device_id": "PLR_STATION",
+                            "action_name": "add_liquid",
+                            "free": True,
+                        }
+                    ]
+                },
+            }
+        )
+        # A later busy/free transition for the same action is not a catalog
+        # invalidation and must not cause another HTTP fetch.
+        await session.handle_incoming(
+            {
+                "action": "report_action_lock",
+                "data": {
+                    "locks": [
+                        {
+                            "device_id": "PLR_STATION",
+                            "action_name": "add_liquid",
+                            "free": False,
+                        }
+                    ]
+                },
+            }
+        )
+
+        catalog = state.runtime_actions()
+        assert proxy.calls == 2
+        assert catalog["revision"] == "runtime-revision-with-device"
+        assert {
+            item["action_ref"] for item in catalog["actions"]
+        } == {
+            "PLR_STATION.add_liquid",
+            "host_node.test_latency",
+        }
+    asyncio.run(scenario())
+
+
 def test_cli_profile_uses_generic_configured_connections_without_callable_resolver(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:

@@ -63,7 +63,8 @@ GET /api/v1/resource-templates/{template_uuid}/assets/{asset_key}
 ## Edge Runtime 动作目录
 
 真实模式下，统一 Runtime 不能使用 demo 动作目录，也不能根据工作流内容猜测动作。OS 在
-HostNode 就绪后，从当前内存 `_action_value_mappings` 投影：
+HostNode 就绪后，将当前 Graph 的设备实例 ID 与 Registry 动作合同组合，并用已经成功
+初始化/发现的 `_action_value_mappings` 覆盖同名合同：
 
 ```text
 GET :8002/internal/v1/runtime-actions
@@ -73,9 +74,13 @@ GET :8002/internal/v1/runtime-actions
 ```
 
 目录项以设备实例 ID 组成 `action_ref`，例如 `host_node.test_latency`。输入、输出、
-resource claims、effects 与 timing 都来自 Registry action schema/contract。OS 重连时强制
-重新验证 ETag；同步失败后立即清空上一会话的 live catalog，仅保留显式 Profile 合同并将
-目录标记为不可用。不能用 stale catalog 许可新工作流运行。
+resource claims、effects 与 timing 都来自 Registry action schema/contract。设备驱动
+初始化失败、正在启动或暂时离线只能影响 capability/status，不能让已配置实例的编写合同
+从目录消失。OS 重连时强制重新验证 ETag；延迟注册的远程 action 首次出现在既有
+`report_action_lock` 报文时，仅把它当作目录失效提示，再从 HTTP 读取完整 schema。
+已知 action 的 busy/free 翻转不重复拉取目录。同步失败后立即清空上一会话的 live
+catalog，仅保留显式 Profile 合同并将目录标记为不可用。不能用 stale catalog 许可
+新工作流运行。
 
 `host_node.test_latency` 还使用 schedule WS 上的应用层 `ping`/`pong`。bridge 只回显
 `ping_id`、`client_timestamp` 并写入接收时的 `server_timestamp`；畸形 ping 被拒绝。

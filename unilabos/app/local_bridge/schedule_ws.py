@@ -59,6 +59,10 @@ HostReadyCallback = Callable[
     [dict[str, Any]],
     Awaitable[None] | None,
 ]
+RuntimeActionsChangedCallback = Callable[
+    [dict[str, Any]],
+    Awaitable[None] | None,
+]
 
 
 class RunHandle:
@@ -178,6 +182,10 @@ class ScheduleSession:
         ] = {}
         self._material_snapshot_cbs: list[MaterialSnapshotCallback] = []
         self._host_ready_cbs: list[HostReadyCallback] = []
+        self._runtime_actions_changed_cbs: list[
+            RuntimeActionsChangedCallback
+        ] = []
+        self._known_runtime_actions: set[str] = set()
         self.host_ready: asyncio.Event = asyncio.Event()
 
     def on_job_status(self, cb: JobStatusCallback) -> None:
@@ -228,6 +236,25 @@ class ScheduleSession:
             self._host_ready_cbs.remove(cb)
         except ValueError:
             logger.debug("[schedule_ws] off_host_ready: 回调未注册，忽略")
+
+    def on_runtime_actions_changed(
+        self,
+        cb: RuntimeActionsChangedCallback,
+    ) -> None:
+        """新 action 首次出现在锁上报时，通知 HTTP 目录投影失效。"""
+
+        self._runtime_actions_changed_cbs.append(cb)
+
+    def off_runtime_actions_changed(
+        self,
+        cb: RuntimeActionsChangedCallback,
+    ) -> None:
+        try:
+            self._runtime_actions_changed_cbs.remove(cb)
+        except ValueError:
+            logger.debug(
+                "[schedule_ws] off_runtime_actions_changed: 回调未注册，忽略"
+            )
 
     def get_run(self, task_id: str) -> RunHandle | None:
         return self._runs.get(task_id)
@@ -393,6 +420,8 @@ class ScheduleSession:
             await self._on_debug_event(data)
         elif action == "material_snapshot":
             await self._on_material_snapshot(data)
+        elif action == "report_action_lock":
+            await self._on_action_locks(data)
         elif action == "ping":
             await self._reply_pong(data)
         elif action in _HOST_READY_ACTIONS:
@@ -407,6 +436,45 @@ class ScheduleSession:
                     logger.exception("[schedule_ws] host_ready 回调异常")
         else:
             logger.debug("[schedule_ws] 忽略报文 action=%s", action)
+
+    async def _on_action_locks(self, data: dict[str, Any]) -> None:
+        """把既有锁协议用作 HTTP Runtime Action Catalog 的失效提示。
+
+        action schema 仍只从 OS internal HTTP 读取。锁的 busy/free 翻转很频繁，
+        只有当前 schedule 会话第一次见到的新 device+action 才触发刷新。
+        """
+
+        locks = data.get("locks")
+        if not isinstance(locks, list):
+            return
+        new_actions: list[str] = []
+        for lock in locks:
+            if not isinstance(lock, dict):
+                continue
+            device_id = str(lock.get("device_id") or "")
+            action_name = str(lock.get("action_name") or "")
+            if not device_id or not action_name:
+                continue
+            action_ref = f"{device_id}.{action_name}"
+            if action_ref in self._known_runtime_actions:
+                continue
+            self._known_runtime_actions.add(action_ref)
+            new_actions.append(action_ref)
+        if not new_actions:
+            return
+        event = {
+            "action_refs": sorted(new_actions),
+            "machine_name": data.get("machine_name"),
+        }
+        for cb in tuple(self._runtime_actions_changed_cbs):
+            try:
+                result = cb(event)
+                if inspect.isawaitable(result):
+                    await result
+            except Exception:  # noqa: BLE001
+                logger.exception(
+                    "[schedule_ws] runtime actions changed 回调异常"
+                )
 
     async def _reply_pong(self, data: dict[str, Any]) -> None:
         """应答 HostNode.test_latency 使用的应用层 ping。"""

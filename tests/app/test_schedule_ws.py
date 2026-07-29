@@ -375,6 +375,57 @@ def test_host_ready_callbacks_are_awaited() -> None:
     asyncio.run(scenario())
 
 
+def test_action_lock_notifies_only_for_new_runtime_actions() -> None:
+    async def scenario() -> None:
+        session, _fake = _make_session()
+        observed: list[list[str]] = []
+
+        async def callback(data: dict[str, Any]) -> None:
+            observed.append(list(data["action_refs"]))
+
+        session.on_runtime_actions_changed(callback)
+        await session.handle_incoming(
+            {
+                "action": "report_action_lock",
+                "data": {
+                    "locks": [
+                        {
+                            "device_id": "PLR_STATION",
+                            "action_name": "add_liquid",
+                            "free": True,
+                        }
+                    ]
+                },
+            }
+        )
+        await session.handle_incoming(
+            {
+                "action": "report_action_lock",
+                "data": {
+                    "locks": [
+                        {
+                            "device_id": "PLR_STATION",
+                            "action_name": "add_liquid",
+                            "free": False,
+                        },
+                        {
+                            "device_id": "PLR_STATION",
+                            "action_name": "aspirate",
+                            "free": True,
+                        },
+                    ]
+                },
+            }
+        )
+
+        assert observed == [
+            ["PLR_STATION.add_liquid"],
+            ["PLR_STATION.aspirate"],
+        ]
+
+    asyncio.run(scenario())
+
+
 def test_unknown_status_ignored() -> None:
     """未知 status 不改变节点态、不误触发 done。"""
 

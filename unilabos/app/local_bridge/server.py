@@ -242,6 +242,7 @@ class LocalBridgeServer:
                     )
 
             session.on_host_ready(refresh_runtime_actions)
+            session.on_runtime_actions_changed(refresh_runtime_actions)
         return state
 
     async def _refresh_runtime_action_catalog(
@@ -270,6 +271,12 @@ class LocalBridgeServer:
             )
             return exc.retryable
         if self._session is not session or self._local_api_state is not state:
+            return False
+        current = state.runtime_actions()
+        if (
+            current["available"] is True
+            and current["revision"] == revision
+        ):
             return False
         state.replace_runtime_action_catalog(
             actions,

@@ -122,11 +122,19 @@ must not be reintroduced. `task_dag`/`job_status` remains the OS schedule wire,
 not a frontend API. Keep public field spelling and casing stable; translate
 only at the boundary.
 
-Runtime Action Catalog entries come from the current HostNode instance mappings
-through loopback-only `GET /internal/v1/runtime-actions`. The local bridge
-refreshes them after `host_ready` and must clear the prior live catalog if
-refresh fails. Profiles may contribute explicit contracts, but frontend files,
-demo catalogs, stale caches, and workflow payloads are never action authorities.
+Runtime Action Catalog entries come from current Graph instance IDs combined
+with their Registry contracts; live HostNode instance mappings override those
+contracts once available. Driver initialization/online state is capability
+state and must not erase a configured instance's authoring contract. The
+loopback-only `GET /internal/v1/runtime-actions` exposes this merged snapshot.
+The local bridge refreshes it after `host_ready`; a genuinely new action first
+seen in the existing `report_action_lock` wire invalidates the projection and
+causes another ETag-guarded HTTP fetch. Busy/free flips for known actions must
+not refetch schemas. HostNode must report only genuinely new remote actions as
+free; re-registration must never reset an existing busy lock. The bridge must
+clear the prior live catalog if refresh fails. Profiles may contribute explicit
+contracts, but frontend files, demo catalogs, stale caches, and workflow
+payloads are never action authorities.
 The application-level `ping`/`pong` used by `host_node.test_latency` belongs to
 the schedule wire and is separate from WebSocket keepalive frames.
 
@@ -143,6 +151,10 @@ the schedule wire and is separate from WebSocket keepalive frames.
   comment/location so code, DAG, breakpoints, and diagnostics remain aligned.
 - Never manufacture a successful diagnostic, revision id, source map, or action
   catalog entry to make a client accept invalid source.
+- `--test_mode` may skip physical dispatch, but its successful return value
+  must still conform to the selected action's Registry result schema. Never add
+  undeclared framework metadata such as `test_mode` or `action_name` to device
+  outputs; expose simulation state through logs/capabilities instead.
 
 ### Start Point and Breakpoint Semantics
 
