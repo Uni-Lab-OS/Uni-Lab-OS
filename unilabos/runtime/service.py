@@ -621,10 +621,19 @@ class RuntimeService:
                 str(result.get("code") or "execution OS rejected reconcile")
             )
         projected = self.get_run(run_id)
-        if projected is not None and projected["status"] != "reconciling":
+        if projected is not None and projected["status"] in {
+            "completed",
+            "failed",
+            "cancelled",
+        }:
             return projected
         if result_status in {"completed", "failed", "cancelled"}:
             return {"id": run_id, "status": result_status}
+        # The execution authority has durably resolved and released the
+        # unknown fence.  A stale persisted run projection can still say
+        # ``pending`` after a process restart because no live schedule handle
+        # exists to advance that old run.  Do not let that unrelated
+        # projection hide a successful reconcile acknowledgement.
         return {"id": run_id, "status": "reconciled"}
 
     def _parse_source(self, body: dict[str, Any]) -> WorkflowRevision:

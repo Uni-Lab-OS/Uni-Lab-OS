@@ -9,8 +9,8 @@ from typing import Any
 
 import pytest
 
-from unilabos.app.local_bridge.server import build_offline_session
 from unilabos.app.local_bridge.schedule_ws import ScheduleSession
+from unilabos.app.local_bridge.server import build_offline_session
 from unilabos.app.ws_client import DeviceActionManager, MessageProcessor
 from unilabos.runtime.event_store import SQLiteEventJournal
 from unilabos.runtime.service import RuntimeService
@@ -161,6 +161,45 @@ def test_runtime_service_delegates_reconcile_without_touching_bridge_lock_manage
         event.type == "reconcile_resolved"
         for event in bridge_journal.list_events(run_id)
     )
+
+
+def test_reconcile_ack_is_not_hidden_by_stale_pending_projection(
+    tmp_path: Path,
+) -> None:
+    run_id = "stale-pending-run"
+    journal = SQLiteEventJournal(
+        tmp_path / "stale-pending.sqlite",
+        runtime_epoch="bridge-epoch",
+    )
+    journal.record_run_submission(
+        run_id=run_id,
+        source={"format": "canonical_workflow_v2", "payload": {}},
+        profile_ref="",
+        compiled_dag=serialize_task_dag(_dag(run_id)),
+        status="pending",
+    )
+
+    class ReconciledSchedule:
+        def on_job_status(self, _callback: Any) -> None:
+            return None
+
+        def get_run(self, _task_id: str) -> None:
+            return None
+
+        async def reconcile_run(
+            self,
+            requested_run_id: str,
+            _decision: dict[str, str],
+        ) -> dict[str, str]:
+            return {"id": requested_run_id, "status": "reconciled"}
+
+    service = RuntimeService(ReconciledSchedule(), journal=journal)
+
+    result = asyncio.run(
+        service.reconcile_run(run_id, _decision("stale-lease"))
+    )
+
+    assert result == {"id": run_id, "status": "reconciled"}
 
 
 def test_schedule_session_sends_reconcile_command_and_waits_for_os_ack() -> None:
