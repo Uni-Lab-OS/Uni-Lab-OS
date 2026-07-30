@@ -29,6 +29,8 @@ def validate_graph(
     templates: Mapping[str, Dict[str, Any]],
     handles: Mapping[str, Dict[str, Any]],
     effective_params: Mapping[str, Dict[str, Any]],
+    workflow_meta_data: Mapping[str, Any],
+    node_meta_data: Mapping[str, Dict[str, Any]],
 ) -> None:
     """在写事务内校验一份完整替换图。"""
 
@@ -102,6 +104,16 @@ def validate_graph(
     _validate_edge_cycles(enabled, enabled_edges)
     for node_uuid, node in enabled.items():
         param = effective_params[node_uuid]
+        bindings = _validated_input_bindings(
+            node,
+            node_meta_data[node_uuid],
+            workflow_meta_data,
+            handles,
+        )
+        for handle_uuid in bindings:
+            available_data_keys[node_uuid].append(
+                _handle_data_key(handles[handle_uuid])
+            )
         template_uuid = node.workflow_node_template_uuid
         if template_uuid is not None:
             schema = _parse_schema(templates[template_uuid].get("schema"))
@@ -131,6 +143,7 @@ def validate_graph(
             param,
             handles.values(),
             connected_inputs,
+            bindings,
         )
         _validate_execution_policy(node.execution_policy)
         if _node_kind(node, templates) == "device_action":
@@ -253,6 +266,7 @@ def _validate_required_handles(
     param: Mapping[str, Any],
     handles: Iterable[Dict[str, Any]],
     incoming: Mapping[tuple[str, str], str],
+    bindings: Mapping[str, Dict[str, Any]],
 ) -> None:
     template_uuid = node.workflow_node_template_uuid
     if template_uuid is None:
@@ -266,13 +280,73 @@ def _validate_required_handles(
         data_key = _final_target_data_key(_handle_data_key(handle))
         has_default = data_key in param and param[data_key] is not None
         has_edge = (node.uuid, str(handle["uuid"])) in incoming
-        if handle.get("required") and not has_default and not has_edge:
+        has_binding = str(handle["uuid"]) in bindings
+        provider_count = sum((has_default, has_edge, has_binding))
+        if provider_count > 1:
+            raise GraphValidationError(f"输入 {data_key!r} 存在多个 Provider")
+        if handle.get("required") and provider_count != 1:
             raise GraphValidationError(f"缺少必填输入 {data_key!r}")
         if has_default and not _declared_type_matches(
             param[data_key],
             handle.get("type"),
         ):
             raise GraphValidationError(f"输入 {data_key!r} 的类型不正确")
+
+
+def _validated_input_bindings(
+    node: WorkflowNodeWrite,
+    meta_data: Mapping[str, Any],
+    workflow_meta_data: Mapping[str, Any],
+    handles: Mapping[str, Dict[str, Any]],
+) -> Dict[str, Dict[str, Any]]:
+    if node.workflow_node_template_uuid is None:
+        # 无模板节点没有可投影的类型化 Handle；保留其受保护元数据，
+        # 但不把它解释为 Action 输入 Provider。
+        return {}
+    unilab = meta_data.get("unilab", {})
+    if not isinstance(unilab, dict):
+        raise GraphValidationError("Node meta_data.unilab 必须是对象")
+    raw_bindings = unilab.get("input_bindings", {})
+    if not isinstance(raw_bindings, dict):
+        raise GraphValidationError("input_bindings 必须是对象")
+
+    workflow_unilab = workflow_meta_data.get("unilab", {})
+    if not isinstance(workflow_unilab, dict):
+        raise GraphValidationError("Workflow meta_data.unilab 必须是对象")
+    input_contract = workflow_unilab.get("input_contract", {})
+    if not isinstance(input_contract, dict):
+        raise GraphValidationError("input_contract 必须是对象")
+    parameters = input_contract.get("parameters", [])
+    if not isinstance(parameters, list):
+        raise GraphValidationError("input_contract.parameters 必须是数组")
+    parameter_names = [
+        item.get("name")
+        for item in parameters
+        if isinstance(item, dict) and isinstance(item.get("name"), str)
+    ]
+
+    result: Dict[str, Dict[str, Any]] = {}
+    for handle_uuid, raw_binding in raw_bindings.items():
+        handle = handles.get(handle_uuid)
+        if (
+            handle is None
+            or handle.get("workflow_node_template_uuid")
+            != node.workflow_node_template_uuid
+            or handle.get("io_type") != "target"
+        ):
+            raise GraphValidationError("input_binding 未引用本节点的目标 Handle")
+        if not isinstance(raw_binding, dict):
+            raise GraphValidationError("input_binding 必须是对象")
+        parameter = raw_binding.get("parameter")
+        if not isinstance(parameter, str) or not parameter:
+            raise GraphValidationError("input_binding.parameter 无效")
+        if parameter_names.count(parameter) != 1:
+            raise GraphValidationError("input_binding 必须唯一引用 Workflow 参数")
+        source = raw_binding.get("source")
+        if source is not None and source != "workflow_input":
+            raise GraphValidationError("input_binding.source 无效")
+        result[handle_uuid] = dict(raw_binding)
+    return result
 
 
 def _validate_execution_policy(policy: Mapping[str, Any]) -> None:
@@ -395,6 +469,10 @@ def _validate_schema_value(
         raise GraphValidationError(f"{path} 不在 JSON Schema enum 中")
 
     if isinstance(value, dict):
+        if len(value) < schema.get("minProperties", 0):
+            raise GraphValidationError(f"{path} 少于 minProperties")
+        if "maxProperties" in schema and len(value) > schema["maxProperties"]:
+            raise GraphValidationError(f"{path} 多于 maxProperties")
         if not ignore_required:
             for name in schema.get("required", []):
                 if name not in value:
@@ -551,7 +629,13 @@ def _json_type_matches(value: Any, declared_type: Any) -> bool:
     if expected == "boolean":
         return isinstance(value, bool)
     if expected == "integer":
-        return isinstance(value, int) and not isinstance(value, bool)
+        return (
+            isinstance(value, int)
+            and not isinstance(value, bool)
+            or isinstance(value, float)
+            and math.isfinite(value)
+            and value.is_integer()
+        )
     if expected == "number":
         return _is_number(value)
     if expected == "string":
@@ -575,7 +659,18 @@ def _declared_type_matches(value: Any, declared_type: Any) -> bool:
         "list": "array",
         "map": "object",
     }
-    return _json_type_matches(value, aliases.get(expected, expected))
+    normalized = aliases.get(expected, expected)
+    if normalized not in {
+        "null",
+        "boolean",
+        "integer",
+        "number",
+        "string",
+        "array",
+        "object",
+    }:
+        return True
+    return _json_type_matches(value, normalized)
 
 
 def _is_number(value: Any) -> bool:

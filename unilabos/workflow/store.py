@@ -534,6 +534,7 @@ class WorkflowStore:
         edges: List[WorkflowEdgeWrite],
         advance_revision: bool,
         protect_reserved_metadata: bool = False,
+        semantic_workflow_meta_data: Optional[Dict[str, Any]] = None,
     ) -> int:
         workflow = self.get_workflow(workflow_uuid, conn=conn)
         if workflow["revision"] != expected_revision:
@@ -592,6 +593,21 @@ class WorkflowStore:
         effective_params = {
             node.uuid: self._graph_node_param(conn, node) for node in nodes
         }
+        effective_node_meta_data: Dict[str, Dict[str, Any]] = {}
+        for node in nodes:
+            existing_node = conn.execute(
+                "SELECT meta_data FROM workflow_node WHERE uuid = ?",
+                (node.uuid,),
+            ).fetchone()
+            effective_node_meta_data[node.uuid] = self._protected_metadata(
+                node.meta_data,
+                (
+                    existing_node["meta_data"]
+                    if existing_node is not None
+                    else None
+                ),
+                enabled=protect_reserved_metadata,
+            )
         try:
             validate_graph(
                 nodes=nodes,
@@ -599,6 +615,12 @@ class WorkflowStore:
                 templates=templates,
                 handles=handles,
                 effective_params=effective_params,
+                workflow_meta_data=(
+                    semantic_workflow_meta_data
+                    if semantic_workflow_meta_data is not None
+                    else workflow["meta_data"]
+                ),
+                node_meta_data=effective_node_meta_data,
             )
         except MissingTemplateError as exc:
             raise StoreNotFound(str(exc)) from exc
@@ -1175,6 +1197,9 @@ class WorkflowStore:
                     or graph_workflow.get("revision") != expected_revision
                 ):
                     raise StoreConflict("Candidate Workflow 身份或版本不匹配")
+                candidate_meta = graph_workflow.get("meta_data")
+                if not isinstance(candidate_meta, dict):
+                    raise StoreConflict("Candidate Workflow meta_data 必须是对象")
                 nodes = [
                     WorkflowNodeWrite.model_validate(item)
                     for item in graph.get("nodes", [])
@@ -1191,24 +1216,21 @@ class WorkflowStore:
                     edges=edges,
                     advance_revision=True,
                     protect_reserved_metadata=False,
+                    semantic_workflow_meta_data=candidate_meta,
                 )
-                candidate_meta = graph_workflow.get("meta_data")
-                if not isinstance(candidate_meta, dict):
-                    raise StoreConflict("Candidate Workflow meta_data 无效")
                 workflow_meta = dict(workflow["meta_data"])
+                workflow_meta.pop("unilab", None)
                 if "unilab" in candidate_meta:
-                    if candidate_meta["unilab"] is None:
-                        workflow_meta.pop("unilab", None)
-                    else:
+                    if candidate_meta["unilab"] is not None:
                         workflow_meta["unilab"] = candidate_meta["unilab"]
-                    conn.execute(
-                        """
-                        UPDATE workflow
-                        SET meta_data = ?, update_time = ?
-                        WHERE uuid = ? AND deleted_at IS NULL
-                        """,
-                        (_json(workflow_meta), now, workflow_uuid),
-                    )
+                conn.execute(
+                    """
+                    UPDATE workflow
+                    SET meta_data = ?, update_time = ?
+                    WHERE uuid = ? AND deleted_at IS NULL
+                    """,
+                    (_json(workflow_meta), now, workflow_uuid),
+                )
             elif kind == "source_only":
                 resulting_revision = expected_revision
             else:

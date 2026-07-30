@@ -60,6 +60,7 @@ _ERRORS = {
     "internal_error": (500, "本地工作流服务出现错误，请重试或查看日志"),
 }
 _HASH_TOKEN = re.compile(r"sha256:[0-9a-f]{64}\Z")
+_NO_EXPECTED_HASH = object()
 
 
 class WorkflowError(RuntimeError):
@@ -340,11 +341,24 @@ class WorkflowService:
         run_mode: str,
         target_node_uuid: Optional[str],
     ) -> Tuple[Dict[str, Any], List[Dict[str, Any]]]:
-        enabled = {
-            node["uuid"]: node
-            for node in graph["nodes"]
-            if not node["disabled"] and node["type"] != "group"
+        templates = {
+            template["uuid"]: template
+            for template in graph.get("node_templates", [])
         }
+        enabled: Dict[str, Dict[str, Any]] = {}
+        node_kinds: Dict[str, str] = {}
+        for node in graph["nodes"]:
+            template = templates.get(node.get("workflow_node_template_uuid"))
+            raw_kind = (
+                template.get("node_type")
+                if template is not None
+                else node["type"]
+            )
+            kind = self._executor_kind(raw_kind)
+            if node["disabled"] or kind == "group":
+                continue
+            enabled[node["uuid"]] = node
+            node_kinds[node["uuid"]] = kind
         if run_mode == "single_node":
             selected = target_node_uuid
             if selected is None:
@@ -392,7 +406,7 @@ class WorkflowService:
         jobs: List[Dict[str, Any]] = []
         for index, node_uuid in enumerate(ordered):
             node = enabled[node_uuid]
-            kind = self._executor_kind(node["type"])
+            kind = node_kinds[node_uuid]
             policy = node.get("execution_policy") or {}
             planned_nodes.append(
                 {
@@ -433,8 +447,11 @@ class WorkflowService:
     def _executor_kind(node_type: str) -> str:
         aliases = {
             "ILab": "device_action",
+            "ilab": "device_action",
             "device": "device_action",
             "action": "device_action",
+            "resource_action": "device_action",
+            "py_script": "script",
         }
         kind = aliases.get(node_type, node_type)
         if kind not in {
@@ -442,6 +459,7 @@ class WorkflowService:
             "compute",
             "condition",
             "script",
+            "group",
             "tool_call",
             "manual_confirm",
         }:
@@ -539,7 +557,11 @@ class WorkflowService:
             except UnicodeEncodeError:
                 raise WorkflowError("invalid_input") from None
             try:
-                self._atomic_write(registration, encoded)
+                self._atomic_write(
+                    registration,
+                    encoded,
+                    expected_hash=current_hash,
+                )
             except OSError:
                 raise WorkflowError("internal_error") from None
             source = self._read_source(registration)
@@ -597,6 +619,11 @@ class WorkflowService:
                         self._atomic_write(
                             registration,
                             recovery_source.encode("utf-8"),
+                            expected_hash=(
+                                source["draft_hash"]
+                                if source is not None
+                                else None
+                            ),
                         )
                         source = self._read_source(registration)
                         assert source is not None
@@ -765,7 +792,7 @@ class WorkflowService:
                     event_data={
                         "workflow_uuid": workflow_uuid,
                         "cause": "applied",
-                        "draft_hash": actual_hash,
+                        "draft_hash": normalized_hash,
                         "candidate_hash": None,
                     },
                 )
@@ -782,7 +809,11 @@ class WorkflowService:
                     or latest["draft_hash"] != actual_hash
                 ):
                     raise WorkflowError("draft_hash_conflict")
-                self._atomic_write(registration, normalized_bytes)
+                self._atomic_write(
+                    registration,
+                    normalized_bytes,
+                    expected_hash=actual_hash,
+                )
                 written = self._read_source(registration)
                 assert written is not None
                 self.store.settle_writeback(
@@ -863,10 +894,33 @@ class WorkflowService:
             "update_time": _mtime_rfc3339(target),
         }
 
+    def source_signature(
+        self,
+        registration: Dict[str, Any],
+    ) -> Tuple[Any, ...]:
+        """返回无需读取文件内容的稳定性签名，供 Draft 监视器去抖。"""
+
+        root, target = self._source_path(registration)
+        self._assert_contained_regular_target(root, target, allow_missing=True)
+        try:
+            stat_result = target.stat()
+        except FileNotFoundError:
+            return ("missing",)
+        return (
+            "file",
+            stat_result.st_dev,
+            stat_result.st_ino,
+            stat_result.st_size,
+            stat_result.st_mtime_ns,
+            stat_result.st_ctime_ns,
+        )
+
     def _atomic_write(
         self,
         registration: Dict[str, Any],
         content: bytes,
+        *,
+        expected_hash: Any = _NO_EXPECTED_HASH,
     ) -> None:
         root, target = self._source_path(registration)
         self._assert_contained_regular_target(root, target, allow_missing=True)
@@ -883,15 +937,82 @@ class WorkflowService:
                 stream.write(content)
                 stream.flush()
                 os.fsync(stream.fileno())
-            os.replace(temporary_path, target)
-            directory_fd = os.open(target.parent, os.O_RDONLY)
-            try:
-                os.fsync(directory_fd)
-            finally:
-                os.close(directory_fd)
+            if expected_hash is _NO_EXPECTED_HASH:
+                os.replace(temporary_path, target)
+            else:
+                self._compare_and_replace(
+                    target=target,
+                    temporary_path=temporary_path,
+                    expected_hash=expected_hash,
+                )
+            self._fsync_directory(target.parent)
         finally:
             if temporary_path.exists():
                 temporary_path.unlink()
+
+    @staticmethod
+    def _compare_and_replace(
+        *,
+        target: Path,
+        temporary_path: Path,
+        expected_hash: Optional[str],
+    ) -> None:
+        """先原子占有旧路径，再安装新文件，避免比较后的覆盖窗口。"""
+
+        backup_descriptor, backup_name = tempfile.mkstemp(
+            prefix=f".{target.name}.",
+            suffix=".cas",
+            dir=target.parent,
+        )
+        os.close(backup_descriptor)
+        backup_path = Path(backup_name)
+        backup_path.unlink()
+        claimed = False
+
+        def restore_claimed() -> None:
+            if not claimed or not backup_path.exists():
+                return
+            try:
+                os.link(backup_path, target)
+            except FileExistsError:
+                # 外部写者已重新建立目标路径；绝不能覆盖它。
+                pass
+            finally:
+                backup_path.unlink()
+
+        try:
+            try:
+                os.replace(target, backup_path)
+                claimed = True
+            except FileNotFoundError:
+                claimed = False
+
+            actual_hash = (
+                _sha256(backup_path.read_bytes()) if claimed else None
+            )
+            if actual_hash != expected_hash:
+                restore_claimed()
+                raise WorkflowConflict("draft_hash_conflict")
+
+            try:
+                os.link(temporary_path, target)
+            except FileExistsError:
+                restore_claimed()
+                raise WorkflowConflict("draft_hash_conflict") from None
+            temporary_path.unlink()
+            if claimed and backup_path.exists():
+                backup_path.unlink()
+        except Exception:
+            restore_claimed()
+            raise
+
+    @staticmethod
+    def _fsync_directory(directory: Path) -> None:
+        directory_fd = os.open(directory, os.O_RDONLY)
+        try:
+            os.fsync(directory_fd)
+        finally:
+            os.close(directory_fd)
 
     @staticmethod
     def _source_path(
