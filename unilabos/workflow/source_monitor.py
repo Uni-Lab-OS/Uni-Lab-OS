@@ -53,15 +53,8 @@ class WorkflowSourceMonitor:
     def _run(self) -> None:
         while not self._stop_event.is_set():
             registrations = self._service.store.list_source_registrations()
-            active = {
-                registration["workflow_uuid"]
-                for registration in registrations
-            }
-            known = (
-                set(self._processed)
-                | set(self._pending)
-                | set(self._retries)
-            )
+            active = {registration["workflow_uuid"] for registration in registrations}
+            known = set(self._processed) | set(self._pending) | set(self._retries)
             for workflow_uuid in known - active:
                 self._processed.pop(workflow_uuid, None)
                 self._pending.pop(workflow_uuid, None)
@@ -86,19 +79,21 @@ class WorkflowSourceMonitor:
                     if now - pending[1] < self._settle_seconds:
                         continue
                     retry = self._retries.get(workflow_uuid)
-                    if (
-                        retry is not None
-                        and retry[0] == signature
-                        and now < retry[1]
-                    ):
+                    if retry is not None and retry[0] == signature and now < retry[1]:
                         continue
-                    self._service.reconcile_registered_source(
-                        workflow_uuid
-                    )
-                    latest_signature = self._service.source_signature(
-                        registration
-                    )
-                    if latest_signature == signature:
+                    self._service.reconcile_registered_source(workflow_uuid)
+                    latest_signature = self._service.source_signature(registration)
+                    if self._service.source_reconciliation_pending(workflow_uuid):
+                        self._processed.pop(workflow_uuid, None)
+                        self._pending[workflow_uuid] = (
+                            latest_signature,
+                            time.monotonic(),
+                        )
+                        self._schedule_retry(
+                            workflow_uuid,
+                            latest_signature,
+                        )
+                    elif latest_signature == signature:
                         self._processed[workflow_uuid] = signature
                         self._pending.pop(workflow_uuid, None)
                         self._retries.pop(workflow_uuid, None)

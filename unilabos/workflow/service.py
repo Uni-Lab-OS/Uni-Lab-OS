@@ -322,7 +322,9 @@ class WorkflowService:
 
     def get_graph(self, workflow_uuid: str) -> Dict[str, Any]:
         identity = self.get_workflow(workflow_uuid)["uuid"]
-        return self.store.get_graph(identity)
+        return self._validated_applied_backend_graph(
+            self.store.get_graph(identity),
+        )
 
     def save_graph(
         self,
@@ -740,7 +742,7 @@ class WorkflowService:
             workflow = self._get_authoring_workflow(workflow_uuid)
             registration = self._registration(workflow_uuid)
             source = self._read_source(registration)
-            graph = self.store.get_graph(workflow_uuid)
+            graph = self.get_graph(workflow_uuid)
             record = self.store.get_authoring_record(workflow_uuid)
             return self._authoring_aggregate(
                 workflow=workflow,
@@ -786,7 +788,7 @@ class WorkflowService:
             assert source is not None
             if source["draft_hash"] != _sha256(encoded):
                 raise WorkflowConflict("draft_hash_conflict")
-            applied_graph = self.store.get_graph(workflow_uuid)
+            applied_graph = self.get_graph(workflow_uuid)
             compilation = self._compile(
                 workflow=workflow,
                 graph=applied_graph,
@@ -893,7 +895,7 @@ class WorkflowService:
             candidate: Optional[Dict[str, Any]] = None
             diagnostics: List[Dict[str, Any]] = []
             if source is not None:
-                applied_graph = self.store.get_graph(workflow_uuid)
+                applied_graph = self.get_graph(workflow_uuid)
                 compilation = self._compile(
                     workflow=workflow,
                     graph=applied_graph,
@@ -980,7 +982,7 @@ class WorkflowService:
             if source is None:
                 raise WorkflowConflict("draft_hash_conflict")
 
-            applied_graph = self.store.get_graph(workflow_uuid)
+            applied_graph = self.get_graph(workflow_uuid)
             compilation = self._compile(
                 workflow=workflow,
                 graph=applied_graph,
@@ -1136,7 +1138,7 @@ class WorkflowService:
                     authoring = self.get_authoring(workflow_uuid)
                 except Exception:  # noqa: BLE001 - 使用已知事实降级
                     try:
-                        fallback_graph = self.store.get_graph(workflow_uuid)
+                        fallback_graph = self.get_graph(workflow_uuid)
                         fallback_workflow = fallback_graph["workflow"]
                         fallback_record = self.store.get_authoring_record(workflow_uuid)
                     except Exception:  # noqa: BLE001 - 使用提交时事实降级
@@ -1243,6 +1245,14 @@ class WorkflowService:
             "draft_hash": _sha256(raw),
             "update_time": _mtime_rfc3339(stat_result.st_mtime),
         }
+
+    def source_reconciliation_pending(self, workflow_uuid: str) -> bool:
+        """Tell the source monitor whether a successful call still needs retry."""
+
+        workflow_uuid = self._get_authoring_workflow(workflow_uuid)["uuid"]
+        with self._authoring_lock(workflow_uuid):
+            record = self.store.get_authoring_record(workflow_uuid)
+            return record["writeback_status"] == "pending"
 
     def source_signature(
         self,
@@ -1753,6 +1763,7 @@ class WorkflowService:
         compilation: CandidateCompilation,
         applied_graph: Dict[str, Any],
     ) -> Optional[Dict[str, Any]]:
+        applied_graph = self._validated_applied_backend_graph(applied_graph)
         if not compilation.valid:
             return None
         assert compilation.graph is not None
@@ -1909,6 +1920,10 @@ class WorkflowService:
             [projected["workflow"]],
             _WORKFLOW_REQUIRED_READ_FIELDS,
         )
+        try:
+            cls._require_backend_entity_types(projected)
+        except (AttributeError, KeyError, TypeError, ValueError):
+            raise WorkflowError("candidate_invalid") from None
         return projected
 
     @classmethod
@@ -1945,7 +1960,7 @@ class WorkflowService:
                 _HANDLE_TEMPLATE_REQUIRED_READ_FIELDS,
                 error_code="internal_error",
             )
-            cls._require_applied_entity_types(applied)
+            cls._require_backend_entity_types(applied)
             return applied
         except WorkflowError:
             raise
@@ -1953,8 +1968,8 @@ class WorkflowService:
             raise WorkflowError("internal_error") from None
 
     @staticmethod
-    def _require_applied_entity_types(applied: Dict[str, Any]) -> None:
-        """Enforce the frozen Backend JSON types on authority-owned entities."""
+    def _require_backend_entity_types(graph: Dict[str, Any]) -> None:
+        """Enforce the frozen Backend JSON types on a complete graph."""
 
         def exact(entity: Dict[str, Any], fields: set[str], expected: type) -> None:
             if any(type(entity[field]) is not expected for field in fields):
@@ -1981,7 +1996,7 @@ class WorkflowService:
                 if field in entity:
                     uuids(entity, {field})
 
-        workflow = applied["workflow"]
+        workflow = graph["workflow"]
         uuids(workflow, {"uuid"})
         exact(workflow, {"create_time", "update_time", "name"}, str)
         exact(workflow, {"meta_data"}, dict)
@@ -1991,7 +2006,7 @@ class WorkflowService:
         if type(revision) is not int or not 1 <= revision <= (1 << 63) - 1:
             raise ValueError
 
-        for node in applied["nodes"]:
+        for node in graph["nodes"]:
             uuids(node, {"uuid", "workflow_uuid"})
             optional_uuids(
                 node,
@@ -2025,7 +2040,7 @@ class WorkflowService:
                 str,
             )
 
-        for edge in applied["edges"]:
+        for edge in graph["edges"]:
             uuids(
                 edge,
                 {
@@ -2040,7 +2055,7 @@ class WorkflowService:
             exact(edge, {"meta_data"}, dict)
             optional(edge, {"description"}, str)
 
-        for template in applied["node_templates"]:
+        for template in graph["node_templates"]:
             uuids(template, {"uuid", "resource_template_uuid"})
             exact(
                 template,
@@ -2078,7 +2093,7 @@ class WorkflowService:
                 str,
             )
 
-        for handle in applied["handle_templates"]:
+        for handle in graph["handle_templates"]:
             uuids(handle, {"uuid", "workflow_node_template_uuid"})
             exact(
                 handle,
