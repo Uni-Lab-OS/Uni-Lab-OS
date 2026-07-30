@@ -13,13 +13,13 @@ from fastapi.testclient import TestClient
 
 
 @pytest.fixture()
-def client(tmp_path, monkeypatch):
+def client(tmp_path_factory, monkeypatch):
     """创建使用独立 workspace 的公开 OS FastAPI app。"""
 
     from unilabos.config.config import BasicConfig
 
-    working_dir = tmp_path / "unilabos_data"
-    working_dir.mkdir()
+    working_dir = tmp_path_factory.getbasetemp() / "phase01-independent-workspace"
+    working_dir.mkdir(exist_ok=True)
     monkeypatch.setattr(BasicConfig, "working_dir", str(working_dir))
     server = importlib.reload(importlib.import_module("unilabos.app.web.server"))
     with TestClient(server.setup_server()) as test_client:
