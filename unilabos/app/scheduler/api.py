@@ -28,9 +28,7 @@ import asyncio
 import json
 import queue as queue_mod
 import time
-from typing import Any, Dict, List, Optional
-
-from typing import Callable
+from typing import Any, Callable, Dict, List, Optional
 
 from fastapi import APIRouter, FastAPI, HTTPException, Request
 from fastapi.middleware.cors import CORSMiddleware
@@ -125,6 +123,8 @@ def create_scheduler_router(
     get_backend: Optional[Callable[[], Any]] = None,
     get_device_state: Optional[Callable[[], Any]] = None,
     get_history: Optional[Callable[[], Any]] = None,
+    *,
+    include_execution_shaped_workflow_routes: bool = True,
 ) -> APIRouter:
     """调度器 REST 路由（可挂独立 app，也可挂主进程 web server）。
 
@@ -172,32 +172,40 @@ def create_scheduler_router(
             ),
         }
 
-    @router.post("/workflows")
-    def submit_workflow(body: WorkflowSubmitIn) -> Dict[str, Any]:
-        spec = spec_from_dict(body.model_dump())
-        try:
-            return _sched().submit_workflow(spec)
-        except WorkflowCycleError as exc:
-            raise HTTPException(status_code=422, detail=str(exc)) from exc
-        except ValueError as exc:
-            raise HTTPException(status_code=409, detail=str(exc)) from exc
+    if include_execution_shaped_workflow_routes:
 
-    @router.get("/workflows")
-    def all_workflows() -> Dict[str, Any]:
-        return _sched().snapshot()
+        @router.post("/workflows")
+        def submit_workflow(body: WorkflowSubmitIn) -> Dict[str, Any]:
+            spec = spec_from_dict(body.model_dump())
+            try:
+                return _sched().submit_workflow(spec)
+            except WorkflowCycleError as exc:
+                raise HTTPException(status_code=422, detail=str(exc)) from exc
+            except ValueError as exc:
+                raise HTTPException(status_code=409, detail=str(exc)) from exc
 
-    @router.get("/workflows/{workflow_id}")
-    def workflow_detail(workflow_id: str) -> Dict[str, Any]:
-        snap = _sched().workflow_snapshot(workflow_id)
-        if snap is None:
-            raise HTTPException(status_code=404, detail=f"workflow {workflow_id} not found")
-        return snap
+        @router.get("/workflows")
+        def all_workflows() -> Dict[str, Any]:
+            return _sched().snapshot()
 
-    @router.post("/workflows/{workflow_id}/cancel")
-    def cancel_workflow(workflow_id: str) -> Dict[str, Any]:
-        if not _sched().cancel_workflow(workflow_id):
-            raise HTTPException(status_code=404, detail=f"workflow {workflow_id} not found")
-        return {"workflow_id": workflow_id, "state": "canceled"}
+        @router.get("/workflows/{workflow_id}")
+        def workflow_detail(workflow_id: str) -> Dict[str, Any]:
+            snap = _sched().workflow_snapshot(workflow_id)
+            if snap is None:
+                raise HTTPException(
+                    status_code=404,
+                    detail=f"workflow {workflow_id} not found",
+                )
+            return snap
+
+        @router.post("/workflows/{workflow_id}/cancel")
+        def cancel_workflow(workflow_id: str) -> Dict[str, Any]:
+            if not _sched().cancel_workflow(workflow_id):
+                raise HTTPException(
+                    status_code=404,
+                    detail=f"workflow {workflow_id} not found",
+                )
+            return {"workflow_id": workflow_id, "state": "canceled"}
 
     @router.post("/jobs/{job_id}/finish")
     def finish_job(job_id: str, body: JobFinishIn) -> Dict[str, Any]:

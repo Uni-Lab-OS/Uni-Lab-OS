@@ -1,0 +1,1391 @@
+"""SQLite authority for Backend-shaped Workflow and Authoring facts."""
+
+from __future__ import annotations
+
+import json
+import sqlite3
+import threading
+from contextlib import contextmanager
+from datetime import datetime, timezone
+from pathlib import Path
+from typing import Any, Callable, Dict, Iterable, Iterator, List, Optional, Tuple
+
+from unilabos.workflow.models import WorkflowEdgeWrite, WorkflowNodeWrite
+
+
+def utc_now() -> str:
+    return datetime.now(timezone.utc).isoformat().replace("+00:00", "Z")
+
+
+def _json(value: Any) -> str:
+    return json.dumps(
+        value,
+        ensure_ascii=False,
+        separators=(",", ":"),
+        sort_keys=True,
+    )
+
+
+def _load(value: Optional[str], fallback: Any) -> Any:
+    if value is None or value == "":
+        return fallback
+    return json.loads(value)
+
+
+class StoreNotFound(LookupError):
+    pass
+
+
+class StoreConflict(RuntimeError):
+    pass
+
+
+class StoreRevisionConflict(StoreConflict):
+    pass
+
+
+_SCHEMA = """
+PRAGMA foreign_keys = ON;
+
+CREATE TABLE IF NOT EXISTS workflow (
+    uuid TEXT PRIMARY KEY,
+    create_time TEXT NOT NULL,
+    update_time TEXT NOT NULL,
+    deleted_at TEXT,
+    description TEXT,
+    meta_data TEXT NOT NULL,
+    name TEXT NOT NULL,
+    tags TEXT NOT NULL,
+    revision INTEGER NOT NULL DEFAULT 1
+);
+
+CREATE TABLE IF NOT EXISTS workflow_node_template (
+    uuid TEXT PRIMARY KEY,
+    create_time TEXT NOT NULL,
+    update_time TEXT NOT NULL,
+    deleted_at TEXT,
+    description TEXT,
+    meta_data TEXT NOT NULL,
+    authority_id TEXT NOT NULL,
+    resource_template_uuid TEXT NOT NULL,
+    name TEXT NOT NULL,
+    display_name TEXT NOT NULL,
+    class TEXT,
+    goal TEXT NOT NULL,
+    goal_default TEXT NOT NULL,
+    feedback TEXT NOT NULL,
+    result TEXT NOT NULL,
+    schema TEXT,
+    type TEXT NOT NULL,
+    icon TEXT,
+    header TEXT,
+    footer TEXT,
+    node_type TEXT NOT NULL
+);
+CREATE INDEX IF NOT EXISTS ix_workflow_node_template_authority
+    ON workflow_node_template(authority_id);
+
+CREATE TABLE IF NOT EXISTS workflow_handle_template (
+    uuid TEXT PRIMARY KEY,
+    create_time TEXT NOT NULL,
+    update_time TEXT NOT NULL,
+    deleted_at TEXT,
+    description TEXT,
+    meta_data TEXT NOT NULL,
+    authority_id TEXT NOT NULL,
+    workflow_node_template_uuid TEXT NOT NULL,
+    handle_key TEXT NOT NULL,
+    io_type TEXT NOT NULL,
+    display_name TEXT NOT NULL,
+    type TEXT NOT NULL,
+    required INTEGER NOT NULL,
+    data_source TEXT,
+    data_key TEXT
+);
+CREATE INDEX IF NOT EXISTS ix_workflow_handle_template_node
+    ON workflow_handle_template(workflow_node_template_uuid);
+CREATE INDEX IF NOT EXISTS ix_workflow_handle_template_authority
+    ON workflow_handle_template(authority_id);
+
+CREATE TABLE IF NOT EXISTS workflow_node (
+    uuid TEXT PRIMARY KEY,
+    create_time TEXT NOT NULL,
+    update_time TEXT NOT NULL,
+    deleted_at TEXT,
+    description TEXT,
+    meta_data TEXT NOT NULL,
+    workflow_uuid TEXT NOT NULL,
+    workflow_node_template_uuid TEXT,
+    parent_uuid TEXT,
+    material_uuid TEXT,
+    name TEXT NOT NULL,
+    status TEXT NOT NULL,
+    type TEXT NOT NULL,
+    icon TEXT,
+    pose TEXT NOT NULL,
+    param TEXT NOT NULL,
+    footer TEXT,
+    action_name TEXT,
+    action_type TEXT,
+    execution_policy TEXT NOT NULL,
+    disabled INTEGER NOT NULL,
+    minimized INTEGER NOT NULL,
+    script TEXT,
+    FOREIGN KEY(workflow_uuid) REFERENCES workflow(uuid)
+);
+CREATE INDEX IF NOT EXISTS ix_workflow_node_workflow
+    ON workflow_node(workflow_uuid);
+
+CREATE TABLE IF NOT EXISTS workflow_edge (
+    uuid TEXT PRIMARY KEY,
+    create_time TEXT NOT NULL,
+    update_time TEXT NOT NULL,
+    deleted_at TEXT,
+    description TEXT,
+    meta_data TEXT NOT NULL,
+    workflow_uuid TEXT NOT NULL,
+    source_node_uuid TEXT NOT NULL,
+    target_node_uuid TEXT NOT NULL,
+    source_handle_uuid TEXT NOT NULL,
+    target_handle_uuid TEXT NOT NULL,
+    FOREIGN KEY(workflow_uuid) REFERENCES workflow(uuid)
+);
+CREATE INDEX IF NOT EXISTS ix_workflow_edge_workflow
+    ON workflow_edge(workflow_uuid);
+
+CREATE TABLE IF NOT EXISTS workflow_task (
+    uuid TEXT PRIMARY KEY,
+    create_time TEXT NOT NULL,
+    update_time TEXT NOT NULL,
+    deleted_at TEXT,
+    description TEXT,
+    meta_data TEXT NOT NULL,
+    workflow_uuid TEXT NOT NULL,
+    status TEXT NOT NULL,
+    workflow_snapshot TEXT NOT NULL,
+    execution_plan TEXT NOT NULL,
+    run_mode TEXT NOT NULL,
+    target_node_uuid TEXT,
+    control_status TEXT NOT NULL,
+    cleanup_status TEXT NOT NULL,
+    trace_context TEXT NOT NULL,
+    input TEXT NOT NULL,
+    output TEXT NOT NULL,
+    error_info TEXT NOT NULL,
+    timeout_at TEXT,
+    attention_reason TEXT,
+    terminal_ghost_detected_at TEXT,
+    reconciliation_resume_control_status TEXT,
+    started_at TEXT,
+    finished_at TEXT,
+    FOREIGN KEY(workflow_uuid) REFERENCES workflow(uuid)
+);
+CREATE INDEX IF NOT EXISTS ix_workflow_task_workflow
+    ON workflow_task(workflow_uuid);
+CREATE INDEX IF NOT EXISTS ix_workflow_task_status
+    ON workflow_task(status);
+
+CREATE TABLE IF NOT EXISTS workflow_node_job (
+    uuid TEXT PRIMARY KEY,
+    create_time TEXT NOT NULL,
+    update_time TEXT NOT NULL,
+    deleted_at TEXT,
+    description TEXT,
+    meta_data TEXT NOT NULL,
+    workflow_task_uuid TEXT NOT NULL,
+    workflow_node_uuid TEXT NOT NULL,
+    material_uuid TEXT,
+    edge_agent_uuid TEXT,
+    edge_command_uuid TEXT,
+    job_access_token_hash TEXT NOT NULL DEFAULT '',
+    feedback_sequence INTEGER NOT NULL,
+    topological_index INTEGER NOT NULL,
+    executor_kind TEXT NOT NULL,
+    execution_policy TEXT NOT NULL,
+    execution_timeout_seconds INTEGER NOT NULL,
+    status TEXT NOT NULL,
+    attempt INTEGER NOT NULL,
+    param TEXT NOT NULL,
+    feedback_data TEXT NOT NULL,
+    return_info TEXT NOT NULL,
+    control_data TEXT NOT NULL,
+    error_info TEXT NOT NULL,
+    dispatch_deadline_at TEXT,
+    execution_deadline_at TEXT,
+    cancel_command_uuid TEXT,
+    cancel_ack_deadline_at TEXT,
+    cancel_complete_deadline_at TEXT,
+    uncertainty_reason TEXT,
+    started_at TEXT,
+    finished_at TEXT,
+    FOREIGN KEY(workflow_task_uuid) REFERENCES workflow_task(uuid)
+);
+CREATE INDEX IF NOT EXISTS ix_workflow_node_job_task
+    ON workflow_node_job(workflow_task_uuid);
+CREATE INDEX IF NOT EXISTS ix_workflow_node_job_node
+    ON workflow_node_job(workflow_node_uuid);
+
+CREATE TABLE IF NOT EXISTS workflow_source_registration (
+    workflow_uuid TEXT PRIMARY KEY,
+    package_id TEXT NOT NULL,
+    package_root TEXT NOT NULL,
+    relative_path TEXT NOT NULL,
+    source_uri TEXT NOT NULL,
+    create_time TEXT NOT NULL,
+    update_time TEXT NOT NULL,
+    FOREIGN KEY(workflow_uuid) REFERENCES workflow(uuid)
+);
+
+CREATE TABLE IF NOT EXISTS workflow_authoring (
+    workflow_uuid TEXT PRIMARY KEY,
+    observed_draft_hash TEXT,
+    draft_update_time TEXT,
+    diagnostics TEXT NOT NULL,
+    candidate_hash TEXT,
+    candidate TEXT,
+    applied_source TEXT,
+    writeback_status TEXT NOT NULL DEFAULT 'settled',
+    writeback_source TEXT,
+    writeback_expected_hash TEXT,
+    update_time TEXT NOT NULL,
+    FOREIGN KEY(workflow_uuid) REFERENCES workflow(uuid)
+);
+
+CREATE TABLE IF NOT EXISTS frontend_event (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    event TEXT NOT NULL,
+    data TEXT NOT NULL,
+    create_time TEXT NOT NULL
+);
+"""
+
+
+class WorkflowStore:
+    """One connection-owned SQLite Workflow authority.
+
+    Store methods serialize transactions with one re-entrant process lock.
+    Workflow-specific orchestration locks live in ``WorkflowService`` so file
+    and database operations share the same critical section.
+    """
+
+    def __init__(self, db_path: str | Path):
+        self.path = str(db_path)
+        if self.path != ":memory:":
+            Path(self.path).parent.mkdir(parents=True, exist_ok=True)
+        self._lock = threading.RLock()
+        self._conn = sqlite3.connect(self.path, check_same_thread=False)
+        self._conn.row_factory = sqlite3.Row
+        with self._lock:
+            self._conn.execute("PRAGMA journal_mode = WAL")
+            self._conn.execute("PRAGMA synchronous = NORMAL")
+            self._conn.executescript(_SCHEMA)
+            self._conn.commit()
+
+    def close(self) -> None:
+        with self._lock:
+            self._conn.close()
+
+    @contextmanager
+    def transaction(self) -> Iterator[sqlite3.Connection]:
+        with self._lock:
+            self._conn.execute("BEGIN IMMEDIATE")
+            try:
+                yield self._conn
+            except BaseException:
+                self._conn.rollback()
+                raise
+            else:
+                self._conn.commit()
+
+    # Workflow and Graph -------------------------------------------------
+
+    def create_workflow(
+        self,
+        *,
+        workflow_uuid: str,
+        name: str,
+        tags: List[Any],
+        description: Optional[str],
+        meta_data: Dict[str, Any],
+    ) -> Dict[str, Any]:
+        now = utc_now()
+        try:
+            with self.transaction() as conn:
+                conn.execute(
+                    """
+                    INSERT INTO workflow(
+                        uuid, create_time, update_time, deleted_at,
+                        description, meta_data, name, tags, revision
+                    ) VALUES (?, ?, ?, NULL, ?, ?, ?, ?, 1)
+                    """,
+                    (
+                        workflow_uuid,
+                        now,
+                        now,
+                        description,
+                        _json(meta_data),
+                        name,
+                        _json(tags),
+                    ),
+                )
+        except sqlite3.IntegrityError as exc:
+            raise StoreConflict(f"workflow {workflow_uuid} already exists") from exc
+        return self.get_workflow(workflow_uuid)
+
+    def get_workflow(
+        self,
+        workflow_uuid: str,
+        *,
+        conn: Optional[sqlite3.Connection] = None,
+    ) -> Dict[str, Any]:
+        database = conn or self._conn
+        with self._lock:
+            row = database.execute(
+                "SELECT * FROM workflow WHERE uuid = ? AND deleted_at IS NULL",
+                (workflow_uuid,),
+            ).fetchone()
+        if row is None:
+            raise StoreNotFound(f"workflow {workflow_uuid} not found")
+        return self._workflow_row(row)
+
+    def list_workflows(
+        self,
+        *,
+        page: int,
+        page_size: int,
+        name: str = "",
+    ) -> Dict[str, Any]:
+        where = "deleted_at IS NULL"
+        values: List[Any] = []
+        if name:
+            where += " AND name LIKE ?"
+            values.append(f"%{name}%")
+        offset = (page - 1) * page_size
+        with self._lock:
+            total = self._conn.execute(
+                f"SELECT COUNT(*) FROM workflow WHERE {where}",
+                values,
+            ).fetchone()[0]
+            rows = self._conn.execute(
+                f"""
+                SELECT * FROM workflow WHERE {where}
+                ORDER BY create_time DESC, uuid
+                LIMIT ? OFFSET ?
+                """,
+                (*values, page_size, offset),
+            ).fetchall()
+        return {
+            "items": [self._workflow_row(row) for row in rows],
+            "total": total,
+            "page": page,
+            "page_size": page_size,
+        }
+
+    def update_workflow(
+        self,
+        workflow_uuid: str,
+        *,
+        name: str,
+        tags: List[Any],
+        description: Optional[str],
+        meta_data: Dict[str, Any],
+    ) -> Dict[str, Any]:
+        with self.transaction() as conn:
+            self.get_workflow(workflow_uuid, conn=conn)
+            conn.execute(
+                """
+                UPDATE workflow
+                SET name = ?, tags = ?, description = ?, meta_data = ?,
+                    update_time = ?
+                WHERE uuid = ? AND deleted_at IS NULL
+                """,
+                (
+                    name,
+                    _json(tags),
+                    description,
+                    _json(meta_data),
+                    utc_now(),
+                    workflow_uuid,
+                ),
+            )
+        return self.get_workflow(workflow_uuid)
+
+    def delete_workflow(self, workflow_uuid: str) -> None:
+        now = utc_now()
+        with self.transaction() as conn:
+            self.get_workflow(workflow_uuid, conn=conn)
+            conn.execute(
+                "UPDATE workflow SET deleted_at = ?, update_time = ? WHERE uuid = ?",
+                (now, now, workflow_uuid),
+            )
+            conn.execute(
+                "UPDATE workflow_node SET deleted_at = ?, update_time = ? "
+                "WHERE workflow_uuid = ? AND deleted_at IS NULL",
+                (now, now, workflow_uuid),
+            )
+            conn.execute(
+                "UPDATE workflow_edge SET deleted_at = ?, update_time = ? "
+                "WHERE workflow_uuid = ? AND deleted_at IS NULL",
+                (now, now, workflow_uuid),
+            )
+
+    def get_graph(
+        self,
+        workflow_uuid: str,
+        *,
+        conn: Optional[sqlite3.Connection] = None,
+    ) -> Dict[str, Any]:
+        database = conn or self._conn
+        workflow = self.get_workflow(workflow_uuid, conn=database)
+        with self._lock:
+            node_rows = database.execute(
+                """
+                SELECT * FROM workflow_node
+                WHERE workflow_uuid = ? AND deleted_at IS NULL
+                ORDER BY create_time, uuid
+                """,
+                (workflow_uuid,),
+            ).fetchall()
+            edge_rows = database.execute(
+                """
+                SELECT * FROM workflow_edge
+                WHERE workflow_uuid = ? AND deleted_at IS NULL
+                ORDER BY create_time, uuid
+                """,
+                (workflow_uuid,),
+            ).fetchall()
+            template_uuids = [
+                row["workflow_node_template_uuid"]
+                for row in node_rows
+                if row["workflow_node_template_uuid"]
+            ]
+            node_templates: List[Dict[str, Any]] = []
+            handle_templates: List[Dict[str, Any]] = []
+            if template_uuids:
+                marks = ",".join("?" for _ in template_uuids)
+                template_rows = database.execute(
+                    f"""
+                    SELECT * FROM workflow_node_template
+                    WHERE uuid IN ({marks}) AND deleted_at IS NULL
+                    ORDER BY create_time, uuid
+                    """,
+                    template_uuids,
+                ).fetchall()
+                handle_rows = database.execute(
+                    f"""
+                    SELECT * FROM workflow_handle_template
+                    WHERE workflow_node_template_uuid IN ({marks})
+                      AND deleted_at IS NULL
+                    ORDER BY create_time, uuid
+                    """,
+                    template_uuids,
+                ).fetchall()
+                node_templates = [
+                    self._node_template_row(row) for row in template_rows
+                ]
+                handle_templates = [
+                    self._handle_template_row(row) for row in handle_rows
+                ]
+        return {
+            "workflow": workflow,
+            "nodes": [self._node_row(row) for row in node_rows],
+            "edges": [self._edge_row(row) for row in edge_rows],
+            "node_templates": node_templates,
+            "handle_templates": handle_templates,
+        }
+
+    def save_graph(
+        self,
+        workflow_uuid: str,
+        *,
+        revision: int,
+        nodes: List[WorkflowNodeWrite],
+        edges: List[WorkflowEdgeWrite],
+    ) -> Dict[str, Any]:
+        with self.transaction() as conn:
+            self._reconcile_graph(
+                conn,
+                workflow_uuid=workflow_uuid,
+                expected_revision=revision,
+                nodes=nodes,
+                edges=edges,
+                advance_revision=True,
+            )
+        return self.get_graph(workflow_uuid)
+
+    def _reconcile_graph(
+        self,
+        conn: sqlite3.Connection,
+        *,
+        workflow_uuid: str,
+        expected_revision: int,
+        nodes: List[WorkflowNodeWrite],
+        edges: List[WorkflowEdgeWrite],
+        advance_revision: bool,
+    ) -> int:
+        workflow = self.get_workflow(workflow_uuid, conn=conn)
+        if workflow["revision"] != expected_revision:
+            raise StoreRevisionConflict(
+                f"workflow revision {workflow['revision']} does not match "
+                f"expected {expected_revision}"
+            )
+        node_by_uuid = {node.uuid: node for node in nodes}
+        edge_by_uuid = {edge.uuid: edge for edge in edges}
+        if len(node_by_uuid) != len(nodes):
+            raise StoreConflict("duplicate workflow node UUID")
+        if len(edge_by_uuid) != len(edges):
+            raise StoreConflict("duplicate workflow edge UUID")
+        for edge in edges:
+            if (
+                edge.source_node_uuid not in node_by_uuid
+                or edge.target_node_uuid not in node_by_uuid
+            ):
+                raise StoreConflict(
+                    f"edge {edge.uuid} references a node outside the submitted graph"
+                )
+        now = utc_now()
+        for node in nodes:
+            self._upsert_node(conn, workflow_uuid, node, now)
+        for edge in edges:
+            self._upsert_edge(conn, workflow_uuid, edge, now)
+        self._soft_delete_omitted(
+            conn,
+            table="workflow_edge",
+            workflow_uuid=workflow_uuid,
+            retained=edge_by_uuid,
+            now=now,
+        )
+        self._soft_delete_omitted(
+            conn,
+            table="workflow_node",
+            workflow_uuid=workflow_uuid,
+            retained=node_by_uuid,
+            now=now,
+        )
+        next_revision = expected_revision + 1 if advance_revision else expected_revision
+        conn.execute(
+            "UPDATE workflow SET revision = ?, update_time = ? "
+            "WHERE uuid = ? AND deleted_at IS NULL",
+            (next_revision, now, workflow_uuid),
+        )
+        return next_revision
+
+    def _upsert_node(
+        self,
+        conn: sqlite3.Connection,
+        workflow_uuid: str,
+        node: WorkflowNodeWrite,
+        now: str,
+    ) -> None:
+        existing = conn.execute(
+            "SELECT workflow_uuid, create_time FROM workflow_node WHERE uuid = ?",
+            (node.uuid,),
+        ).fetchone()
+        if existing is not None and existing["workflow_uuid"] != workflow_uuid:
+            raise StoreConflict(
+                f"workflow node {node.uuid} belongs to another workflow"
+            )
+        values = (
+            node.description,
+            _json(node.meta_data),
+            workflow_uuid,
+            node.workflow_node_template_uuid,
+            node.parent_uuid,
+            node.material_uuid,
+            node.name,
+            node.status,
+            node.type,
+            node.icon,
+            _json(node.pose),
+            _json(self._graph_node_param(conn, node)),
+            node.footer,
+            node.action_name,
+            node.action_type,
+            _json(node.execution_policy),
+            int(node.disabled),
+            int(node.minimized),
+            node.script,
+        )
+        if existing is None:
+            conn.execute(
+                """
+                INSERT INTO workflow_node(
+                    uuid, create_time, update_time, deleted_at, description,
+                    meta_data, workflow_uuid, workflow_node_template_uuid,
+                    parent_uuid, material_uuid, name, status, type, icon, pose,
+                    param, footer, action_name, action_type, execution_policy,
+                    disabled, minimized, script
+                ) VALUES (?, ?, ?, NULL, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?,
+                          ?, ?, ?, ?, ?, ?)
+                """,
+                (node.uuid, now, now, *values),
+            )
+            return
+        conn.execute(
+            """
+            UPDATE workflow_node
+            SET update_time = ?, deleted_at = NULL, description = ?,
+                meta_data = ?, workflow_uuid = ?,
+                workflow_node_template_uuid = ?, parent_uuid = ?,
+                material_uuid = ?, name = ?, status = ?, type = ?, icon = ?,
+                pose = ?, param = ?, footer = ?, action_name = ?,
+                action_type = ?, execution_policy = ?, disabled = ?,
+                minimized = ?, script = ?
+            WHERE uuid = ?
+            """,
+            (now, *values, node.uuid),
+        )
+
+    @staticmethod
+    def _graph_node_param(
+        conn: sqlite3.Connection,
+        node: WorkflowNodeWrite,
+    ) -> Dict[str, Any]:
+        if node.param is not None:
+            return node.param
+        if node.workflow_node_template_uuid is None:
+            return {}
+        template = conn.execute(
+            """
+            SELECT goal_default, goal
+            FROM workflow_node_template
+            WHERE uuid = ? AND deleted_at IS NULL
+            """,
+            (node.workflow_node_template_uuid,),
+        ).fetchone()
+        if template is None:
+            return {}
+        for field in ("goal_default", "goal"):
+            fallback = _load(template[field], {})
+            if isinstance(fallback, dict) and fallback:
+                return fallback
+        return {}
+
+    def _upsert_edge(
+        self,
+        conn: sqlite3.Connection,
+        workflow_uuid: str,
+        edge: WorkflowEdgeWrite,
+        now: str,
+    ) -> None:
+        existing = conn.execute(
+            "SELECT workflow_uuid FROM workflow_edge WHERE uuid = ?",
+            (edge.uuid,),
+        ).fetchone()
+        if existing is not None and existing["workflow_uuid"] != workflow_uuid:
+            raise StoreConflict(
+                f"workflow edge {edge.uuid} belongs to another workflow"
+            )
+        values = (
+            edge.description,
+            _json(edge.meta_data),
+            workflow_uuid,
+            edge.source_node_uuid,
+            edge.target_node_uuid,
+            edge.source_handle_uuid,
+            edge.target_handle_uuid,
+        )
+        if existing is None:
+            conn.execute(
+                """
+                INSERT INTO workflow_edge(
+                    uuid, create_time, update_time, deleted_at, description,
+                    meta_data, workflow_uuid, source_node_uuid,
+                    target_node_uuid, source_handle_uuid, target_handle_uuid
+                ) VALUES (?, ?, ?, NULL, ?, ?, ?, ?, ?, ?, ?)
+                """,
+                (edge.uuid, now, now, *values),
+            )
+            return
+        conn.execute(
+            """
+            UPDATE workflow_edge
+            SET update_time = ?, deleted_at = NULL, description = ?,
+                meta_data = ?, workflow_uuid = ?, source_node_uuid = ?,
+                target_node_uuid = ?, source_handle_uuid = ?,
+                target_handle_uuid = ?
+            WHERE uuid = ?
+            """,
+            (now, *values, edge.uuid),
+        )
+
+    @staticmethod
+    def _soft_delete_omitted(
+        conn: sqlite3.Connection,
+        *,
+        table: str,
+        workflow_uuid: str,
+        retained: Iterable[str],
+        now: str,
+    ) -> None:
+        retained_values = list(retained)
+        if retained_values:
+            marks = ",".join("?" for _ in retained_values)
+            conn.execute(
+                f"""
+                UPDATE {table}
+                SET deleted_at = ?, update_time = ?
+                WHERE workflow_uuid = ? AND deleted_at IS NULL
+                  AND uuid NOT IN ({marks})
+                """,
+                (now, now, workflow_uuid, *retained_values),
+            )
+        else:
+            conn.execute(
+                f"""
+                UPDATE {table}
+                SET deleted_at = ?, update_time = ?
+                WHERE workflow_uuid = ? AND deleted_at IS NULL
+                """,
+                (now, now, workflow_uuid),
+            )
+
+    # Task and Job -------------------------------------------------------
+
+    def create_task_with_jobs(
+        self,
+        *,
+        workflow_uuid: str,
+        task_uuid: str,
+        run_mode: str,
+        target_node_uuid: Optional[str],
+        input_value: Dict[str, Any],
+        description: Optional[str],
+        meta_data: Dict[str, Any],
+        plan_builder: Callable[
+            [Dict[str, Any]], Tuple[Dict[str, Any], List[Dict[str, Any]]]
+        ],
+    ) -> Dict[str, Any]:
+        now = utc_now()
+        with self.transaction() as conn:
+            graph = self.get_graph(workflow_uuid, conn=conn)
+            plan, jobs = plan_builder(graph)
+            control_status = "paused" if run_mode == "step" else "active"
+            conn.execute(
+                """
+                INSERT INTO workflow_task(
+                    uuid, create_time, update_time, deleted_at, description,
+                    meta_data, workflow_uuid, status, workflow_snapshot,
+                    execution_plan, run_mode, target_node_uuid, control_status,
+                    cleanup_status, trace_context, input, output, error_info
+                ) VALUES (?, ?, ?, NULL, ?, ?, ?, 'pending', ?, ?, ?, ?, ?,
+                          'none', '{}', ?, '{}', '[]')
+                """,
+                (
+                    task_uuid,
+                    now,
+                    now,
+                    description,
+                    _json(meta_data),
+                    workflow_uuid,
+                    _json(graph),
+                    _json(plan),
+                    run_mode,
+                    target_node_uuid,
+                    control_status,
+                    _json(input_value),
+                ),
+            )
+            for job in jobs:
+                conn.execute(
+                    """
+                    INSERT INTO workflow_node_job(
+                        uuid, create_time, update_time, deleted_at, description,
+                        meta_data, workflow_task_uuid, workflow_node_uuid,
+                        material_uuid, feedback_sequence, topological_index,
+                        executor_kind, execution_policy,
+                        execution_timeout_seconds, status, attempt, param,
+                        feedback_data, return_info, control_data, error_info
+                    ) VALUES (?, ?, ?, NULL, NULL, '{}', ?, ?, ?, 0, ?, ?, ?,
+                              ?, 'pending', 1, ?, '{}', '{}', '{}', '[]')
+                    """,
+                    (
+                        job["uuid"],
+                        now,
+                        now,
+                        task_uuid,
+                        job["workflow_node_uuid"],
+                        job.get("material_uuid"),
+                        job["topological_index"],
+                        job["executor_kind"],
+                        _json(job.get("execution_policy") or {}),
+                        int(job.get("execution_timeout_seconds") or 0),
+                        _json(job.get("param") or {}),
+                    ),
+                )
+        return self.get_task(task_uuid)
+
+    def get_task(self, task_uuid: str) -> Dict[str, Any]:
+        with self._lock:
+            row = self._conn.execute(
+                "SELECT * FROM workflow_task WHERE uuid = ? AND deleted_at IS NULL",
+                (task_uuid,),
+            ).fetchone()
+        if row is None:
+            raise StoreNotFound(f"workflow task {task_uuid} not found")
+        return self._task_row(row)
+
+    def list_tasks(
+        self,
+        *,
+        page: int,
+        page_size: int,
+        workflow_uuid: Optional[str] = None,
+        status: str = "",
+        cleanup_status: str = "",
+    ) -> Dict[str, Any]:
+        clauses = ["deleted_at IS NULL"]
+        values: List[Any] = []
+        for field, value in (
+            ("workflow_uuid", workflow_uuid),
+            ("status", status),
+            ("cleanup_status", cleanup_status),
+        ):
+            if value:
+                clauses.append(f"{field} = ?")
+                values.append(value)
+        where = " AND ".join(clauses)
+        offset = (page - 1) * page_size
+        with self._lock:
+            total = self._conn.execute(
+                f"SELECT COUNT(*) FROM workflow_task WHERE {where}",
+                values,
+            ).fetchone()[0]
+            rows = self._conn.execute(
+                f"""
+                SELECT * FROM workflow_task WHERE {where}
+                ORDER BY create_time DESC, uuid
+                LIMIT ? OFFSET ?
+                """,
+                (*values, page_size, offset),
+            ).fetchall()
+        return {
+            "items": [self._task_row(row) for row in rows],
+            "total": total,
+            "page": page,
+            "page_size": page_size,
+        }
+
+    def list_jobs(self, task_uuid: str) -> List[Dict[str, Any]]:
+        self.get_task(task_uuid)
+        with self._lock:
+            rows = self._conn.execute(
+                """
+                SELECT * FROM workflow_node_job
+                WHERE workflow_task_uuid = ? AND deleted_at IS NULL
+                ORDER BY topological_index, create_time, uuid
+                """,
+                (task_uuid,),
+            ).fetchall()
+        return [self._job_row(row) for row in rows]
+
+    def get_job(self, job_uuid: str) -> Dict[str, Any]:
+        with self._lock:
+            row = self._conn.execute(
+                """
+                SELECT * FROM workflow_node_job
+                WHERE uuid = ? AND deleted_at IS NULL
+                """,
+                (job_uuid,),
+            ).fetchone()
+        if row is None:
+            raise StoreNotFound(f"workflow node job {job_uuid} not found")
+        return self._job_row(row)
+
+    # Authoring ----------------------------------------------------------
+
+    def register_source(
+        self,
+        *,
+        workflow_uuid: str,
+        package_id: str,
+        package_root: str,
+        relative_path: str,
+        source_uri: str,
+    ) -> Dict[str, Any]:
+        now = utc_now()
+        with self.transaction() as conn:
+            self.get_workflow(workflow_uuid, conn=conn)
+            conn.execute(
+                """
+                INSERT INTO workflow_source_registration(
+                    workflow_uuid, package_id, package_root, relative_path,
+                    source_uri, create_time, update_time
+                ) VALUES (?, ?, ?, ?, ?, ?, ?)
+                ON CONFLICT(workflow_uuid) DO UPDATE SET
+                    package_id = excluded.package_id,
+                    package_root = excluded.package_root,
+                    relative_path = excluded.relative_path,
+                    source_uri = excluded.source_uri,
+                    update_time = excluded.update_time
+                """,
+                (
+                    workflow_uuid,
+                    package_id,
+                    package_root,
+                    relative_path,
+                    source_uri,
+                    now,
+                    now,
+                ),
+            )
+            conn.execute(
+                """
+                INSERT INTO workflow_authoring(
+                    workflow_uuid, diagnostics, update_time
+                ) VALUES (?, '[]', ?)
+                ON CONFLICT(workflow_uuid) DO NOTHING
+                """,
+                (workflow_uuid, now),
+            )
+        return self.get_source_registration(workflow_uuid)
+
+    def get_source_registration(self, workflow_uuid: str) -> Dict[str, Any]:
+        with self._lock:
+            row = self._conn.execute(
+                """
+                SELECT * FROM workflow_source_registration
+                WHERE workflow_uuid = ?
+                """,
+                (workflow_uuid,),
+            ).fetchone()
+        if row is None:
+            raise StoreNotFound(
+                f"authoring source for workflow {workflow_uuid} is not registered"
+            )
+        return dict(row)
+
+    def get_authoring_record(self, workflow_uuid: str) -> Dict[str, Any]:
+        with self._lock:
+            row = self._conn.execute(
+                "SELECT * FROM workflow_authoring WHERE workflow_uuid = ?",
+                (workflow_uuid,),
+            ).fetchone()
+        if row is None:
+            return {
+                "workflow_uuid": workflow_uuid,
+                "observed_draft_hash": None,
+                "draft_update_time": None,
+                "diagnostics": [],
+                "candidate_hash": None,
+                "candidate": None,
+                "applied_source": None,
+                "writeback_status": "settled",
+                "writeback_source": None,
+                "writeback_expected_hash": None,
+                "update_time": None,
+            }
+        result = dict(row)
+        result["diagnostics"] = _load(result["diagnostics"], [])
+        result["candidate"] = _load(result["candidate"], None)
+        result["applied_source"] = _load(result["applied_source"], None)
+        return result
+
+    def record_draft_compilation(
+        self,
+        *,
+        workflow_uuid: str,
+        draft_hash: Optional[str],
+        draft_update_time: Optional[str],
+        diagnostics: List[Dict[str, Any]],
+        candidate_hash: Optional[str],
+        candidate: Optional[Dict[str, Any]],
+        event_data: Dict[str, Any],
+    ) -> int:
+        now = utc_now()
+        with self.transaction() as conn:
+            self.get_workflow(workflow_uuid, conn=conn)
+            conn.execute(
+                """
+                INSERT INTO workflow_authoring(
+                    workflow_uuid, observed_draft_hash, draft_update_time,
+                    diagnostics, candidate_hash, candidate, update_time
+                ) VALUES (?, ?, ?, ?, ?, ?, ?)
+                ON CONFLICT(workflow_uuid) DO UPDATE SET
+                    observed_draft_hash = excluded.observed_draft_hash,
+                    draft_update_time = excluded.draft_update_time,
+                    diagnostics = excluded.diagnostics,
+                    candidate_hash = excluded.candidate_hash,
+                    candidate = excluded.candidate,
+                    update_time = excluded.update_time
+                """,
+                (
+                    workflow_uuid,
+                    draft_hash,
+                    draft_update_time,
+                    _json(diagnostics),
+                    candidate_hash,
+                    _json(candidate) if candidate is not None else None,
+                    now,
+                ),
+            )
+            return self._append_event(
+                conn,
+                event="workflow.authoring.changed",
+                data=event_data,
+                now=now,
+            )
+
+    def apply_authoring_candidate(
+        self,
+        *,
+        workflow_uuid: str,
+        expected_revision: int,
+        candidate: Dict[str, Any],
+        applied_source: Dict[str, Any],
+        event_data: Dict[str, Any],
+    ) -> int:
+        changeset = candidate["changeset"]
+        kind = changeset["kind"]
+        graph = candidate["graph"]
+        now = utc_now()
+        with self.transaction() as conn:
+            workflow = self.get_workflow(workflow_uuid, conn=conn)
+            if workflow["revision"] != expected_revision:
+                raise StoreRevisionConflict(
+                    "workflow revision changed before apply"
+                )
+            if kind == "graph":
+                nodes = [
+                    WorkflowNodeWrite.model_validate(item)
+                    for item in graph.get("nodes", [])
+                ]
+                edges = [
+                    WorkflowEdgeWrite.model_validate(item)
+                    for item in graph.get("edges", [])
+                ]
+                resulting_revision = self._reconcile_graph(
+                    conn,
+                    workflow_uuid=workflow_uuid,
+                    expected_revision=expected_revision,
+                    nodes=nodes,
+                    edges=edges,
+                    advance_revision=True,
+                )
+            elif kind == "source_only":
+                resulting_revision = expected_revision
+            else:
+                raise StoreConflict(f"unsupported Authoring changeset kind {kind!r}")
+            applied_source = {
+                **applied_source,
+                "workflow_revision": resulting_revision,
+                "update_time": now,
+            }
+            conn.execute(
+                """
+                UPDATE workflow_authoring
+                SET diagnostics = '[]', candidate_hash = NULL,
+                    candidate = NULL, applied_source = ?,
+                    writeback_status = 'pending',
+                    writeback_source = ?,
+                    writeback_expected_hash = observed_draft_hash,
+                    update_time = ?
+                WHERE workflow_uuid = ?
+                """,
+                (
+                    _json(applied_source),
+                    applied_source["python_source"],
+                    now,
+                    workflow_uuid,
+                ),
+            )
+            self._append_event(
+                conn,
+                event="workflow.authoring.changed",
+                data={
+                    **event_data,
+                    "workflow_revision": resulting_revision,
+                },
+                now=now,
+            )
+            return resulting_revision
+
+    def settle_writeback(
+        self,
+        *,
+        workflow_uuid: str,
+        observed_draft_hash: str,
+        draft_update_time: str,
+        event_data: Optional[Dict[str, Any]] = None,
+    ) -> None:
+        with self.transaction() as conn:
+            now = utc_now()
+            conn.execute(
+                """
+                UPDATE workflow_authoring
+                SET observed_draft_hash = ?, draft_update_time = ?,
+                    writeback_status = 'settled', writeback_source = NULL,
+                    writeback_expected_hash = NULL, update_time = ?
+                WHERE workflow_uuid = ?
+                """,
+                (
+                    observed_draft_hash,
+                    draft_update_time,
+                    now,
+                    workflow_uuid,
+                ),
+            )
+            if event_data is not None:
+                self._append_event(
+                    conn,
+                    event="workflow.authoring.changed",
+                    data=event_data,
+                    now=now,
+                )
+
+    def mark_writeback_pending(self, workflow_uuid: str) -> None:
+        with self.transaction() as conn:
+            conn.execute(
+                """
+                UPDATE workflow_authoring
+                SET writeback_status = 'pending', update_time = ?
+                WHERE workflow_uuid = ?
+                """,
+                (utc_now(), workflow_uuid),
+            )
+
+    # Events and diagnostics --------------------------------------------
+
+    def list_events(
+        self,
+        *,
+        after_id: int = 0,
+        limit: int = 200,
+    ) -> List[Dict[str, Any]]:
+        with self._lock:
+            rows = self._conn.execute(
+                """
+                SELECT * FROM frontend_event
+                WHERE id > ?
+                ORDER BY id
+                LIMIT ?
+                """,
+                (after_id, limit),
+            ).fetchall()
+        return [
+            {
+                "id": row["id"],
+                "event": row["event"],
+                "data": _load(row["data"], {}),
+                "create_time": row["create_time"],
+            }
+            for row in rows
+        ]
+
+    @staticmethod
+    def _append_event(
+        conn: sqlite3.Connection,
+        *,
+        event: str,
+        data: Dict[str, Any],
+        now: str,
+    ) -> int:
+        cursor = conn.execute(
+            "INSERT INTO frontend_event(event, data, create_time) VALUES (?, ?, ?)",
+            (event, _json(data), now),
+        )
+        return int(cursor.lastrowid)
+
+    def count_rows(self, table: str, *, include_deleted: bool = False) -> int:
+        allowed = {
+            "workflow",
+            "workflow_node",
+            "workflow_edge",
+            "workflow_task",
+            "workflow_node_job",
+            "workflow_authoring",
+            "frontend_event",
+        }
+        if table not in allowed:
+            raise ValueError(f"unsupported table {table!r}")
+        where = "" if include_deleted or table in {
+            "workflow_authoring",
+            "frontend_event",
+        } else " WHERE deleted_at IS NULL"
+        with self._lock:
+            return int(
+                self._conn.execute(f"SELECT COUNT(*) FROM {table}{where}").fetchone()[0]
+            )
+
+    # Row projections ----------------------------------------------------
+
+    @staticmethod
+    def _base(row: sqlite3.Row) -> Dict[str, Any]:
+        result: Dict[str, Any] = {
+            "uuid": row["uuid"],
+            "create_time": row["create_time"],
+            "update_time": row["update_time"],
+            "meta_data": _load(row["meta_data"], {}),
+        }
+        if row["description"] is not None:
+            result["description"] = row["description"]
+        return result
+
+    @classmethod
+    def _workflow_row(cls, row: sqlite3.Row) -> Dict[str, Any]:
+        return {
+            **cls._base(row),
+            "name": row["name"],
+            "tags": _load(row["tags"], []),
+            "revision": row["revision"],
+        }
+
+    @classmethod
+    def _node_row(cls, row: sqlite3.Row) -> Dict[str, Any]:
+        result = {
+            **cls._base(row),
+            "workflow_uuid": row["workflow_uuid"],
+            "name": row["name"],
+            "status": row["status"],
+            "type": row["type"],
+            "pose": _load(row["pose"], {}),
+            "param": _load(row["param"], {}),
+            "execution_policy": _load(row["execution_policy"], {}),
+            "disabled": bool(row["disabled"]),
+            "minimized": bool(row["minimized"]),
+        }
+        cls._add_optional(
+            result,
+            row,
+            "workflow_node_template_uuid",
+            "parent_uuid",
+            "material_uuid",
+            "icon",
+            "footer",
+            "action_name",
+            "action_type",
+            "script",
+        )
+        return result
+
+    @classmethod
+    def _edge_row(cls, row: sqlite3.Row) -> Dict[str, Any]:
+        return {
+            **cls._base(row),
+            "source_node_uuid": row["source_node_uuid"],
+            "target_node_uuid": row["target_node_uuid"],
+            "source_handle_uuid": row["source_handle_uuid"],
+            "target_handle_uuid": row["target_handle_uuid"],
+        }
+
+    @classmethod
+    def _node_template_row(cls, row: sqlite3.Row) -> Dict[str, Any]:
+        return {
+            **cls._base(row),
+            "resource_template_uuid": row["resource_template_uuid"],
+            "name": row["name"],
+            "display_name": row["display_name"],
+            "class": row["class"],
+            "goal": _load(row["goal"], {}),
+            "goal_default": _load(row["goal_default"], {}),
+            "feedback": _load(row["feedback"], {}),
+            "result": _load(row["result"], {}),
+            "schema": row["schema"],
+            "type": row["type"],
+            "icon": row["icon"],
+            "header": row["header"],
+            "footer": row["footer"],
+            "node_type": row["node_type"],
+        }
+
+    @classmethod
+    def _handle_template_row(cls, row: sqlite3.Row) -> Dict[str, Any]:
+        return {
+            **cls._base(row),
+            "workflow_node_template_uuid": row[
+                "workflow_node_template_uuid"
+            ],
+            "handle_key": row["handle_key"],
+            "io_type": row["io_type"],
+            "display_name": row["display_name"],
+            "type": row["type"],
+            "required": bool(row["required"]),
+            "data_source": row["data_source"],
+            "data_key": row["data_key"],
+        }
+
+    @classmethod
+    def _task_row(cls, row: sqlite3.Row) -> Dict[str, Any]:
+        result = {
+            **cls._base(row),
+            "workflow_uuid": row["workflow_uuid"],
+            "status": row["status"],
+            "workflow_snapshot": _load(row["workflow_snapshot"], {}),
+            "execution_plan": _load(row["execution_plan"], {}),
+            "run_mode": row["run_mode"],
+            "control_status": row["control_status"],
+            "cleanup_status": row["cleanup_status"],
+            "trace_context": _load(row["trace_context"], {}),
+            "input": _load(row["input"], {}),
+            "output": _load(row["output"], {}),
+            "error_info": _load(row["error_info"], []),
+        }
+        cls._add_optional(
+            result,
+            row,
+            "target_node_uuid",
+            "timeout_at",
+            "attention_reason",
+            "terminal_ghost_detected_at",
+            "reconciliation_resume_control_status",
+            "started_at",
+            "finished_at",
+        )
+        return result
+
+    @classmethod
+    def _job_row(cls, row: sqlite3.Row) -> Dict[str, Any]:
+        result = {
+            **cls._base(row),
+            "workflow_task_uuid": row["workflow_task_uuid"],
+            "workflow_node_uuid": row["workflow_node_uuid"],
+            "feedback_sequence": row["feedback_sequence"],
+            "topological_index": row["topological_index"],
+            "executor_kind": row["executor_kind"],
+            "execution_policy": _load(row["execution_policy"], {}),
+            "execution_timeout_seconds": row["execution_timeout_seconds"],
+            "status": row["status"],
+            "attempt": row["attempt"],
+            "param": _load(row["param"], {}),
+            "feedback_data": _load(row["feedback_data"], {}),
+            "return_info": _load(row["return_info"], {}),
+            "control_data": _load(row["control_data"], {}),
+            "error_info": _load(row["error_info"], []),
+        }
+        cls._add_optional(
+            result,
+            row,
+            "material_uuid",
+            ("edge_agent_uuid", "edge_uuid"),
+            "edge_command_uuid",
+            "dispatch_deadline_at",
+            "execution_deadline_at",
+            "cancel_command_uuid",
+            "cancel_ack_deadline_at",
+            "cancel_complete_deadline_at",
+            "uncertainty_reason",
+            "started_at",
+            "finished_at",
+        )
+        return result
+
+    @staticmethod
+    def _add_optional(
+        result: Dict[str, Any],
+        row: sqlite3.Row,
+        *fields: str | Tuple[str, str],
+    ) -> None:
+        for field in fields:
+            column, output = field if isinstance(field, tuple) else (field, field)
+            value = row[column]
+            if value is not None:
+                result[output] = value
+
+
+__all__ = [
+    "StoreConflict",
+    "StoreNotFound",
+    "StoreRevisionConflict",
+    "WorkflowStore",
+    "utc_now",
+]

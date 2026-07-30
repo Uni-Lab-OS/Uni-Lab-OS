@@ -10,10 +10,11 @@ from fastapi import FastAPI, Request
 from fastapi.middleware.cors import CORSMiddleware
 from starlette.responses import Response
 
-from unilabos.utils.fastapi.log_adapter import setup_fastapi_logging
-from unilabos.utils.log import info, error
 from unilabos.app.web.api import setup_api_routes
 from unilabos.app.web.pages import setup_web_pages
+from unilabos.config.config import BasicConfig
+from unilabos.utils.fastapi.log_adapter import setup_fastapi_logging
+from unilabos.utils.log import error, info
 
 # 创建FastAPI应用
 app = FastAPI(
@@ -26,6 +27,7 @@ app = FastAPI(
 
 # 创建页面路由
 pages = None
+workflow_routes_mounted = False
 
 # noinspection PyTypeChecker
 app.add_middleware(
@@ -33,7 +35,12 @@ app.add_middleware(
     allow_origins=["*"],
     allow_credentials=True,
     allow_methods=["GET", "POST", "PUT", "DELETE", "PATCH", "OPTIONS"],
-    allow_headers=["Authorization", "Content-Type", "Accept"],
+    allow_headers=[
+        "Authorization",
+        "Content-Type",
+        "Accept",
+        "Last-Event-ID",
+    ],
 )
 
 
@@ -74,7 +81,7 @@ def setup_server() -> FastAPI:
     Returns:
         FastAPI: 配置好的FastAPI应用实例
     """
-    global pages
+    global pages, workflow_routes_mounted
 
     # 创建页面路由
     if pages is None:
@@ -82,6 +89,19 @@ def setup_server() -> FastAPI:
 
     # 设置API路由
     setup_api_routes(app)
+
+    # Backend-shaped Workflow authority. BasicConfig.working_dir is fixed
+    # before the web server starts and owns workflow.db for this workspace.
+    if not workflow_routes_mounted and BasicConfig.working_dir:
+        try:
+            from unilabos.app.workflow_api import install_workflow_api
+            from unilabos.workflow.composition import setup_workflow_service
+
+            workflow_service = setup_workflow_service(BasicConfig.working_dir)
+            install_workflow_api(app, workflow_service)
+            workflow_routes_mounted = True
+        except Exception as e:  # noqa: BLE001 - keep unrelated web surfaces alive
+            error(f"[Web] 挂载 Workflow authority 路由失败: {str(e)}")
 
     # Edge 调度器/仓储路由（--edge_scheduler 未启用时端点返回 503/不挂载）
     try:
@@ -92,10 +112,18 @@ def setup_server() -> FastAPI:
             get_inventory_service,
         )
 
-        app.include_router(create_scheduler_router(get_edge_scheduler, get_edge_backend))
+        app.include_router(
+            create_scheduler_router(
+                get_edge_scheduler,
+                get_edge_backend,
+                include_execution_shaped_workflow_routes=False,
+            )
+        )
         inventory_service = get_inventory_service()
         if inventory_service is not None:
-            from unilabos.app.scheduler.inventory.api import create_router as create_inventory_router
+            from unilabos.app.scheduler.inventory.api import (
+                create_router as create_inventory_router,
+            )
             from unilabos.app.scheduler.inventory.layout import create_lab_router
 
             app.include_router(create_inventory_router(inventory_service))
@@ -129,6 +157,7 @@ def start_server(host: str = "0.0.0.0", port: int = 8002, open_browser: bool = T
     """
     import threading
     import time
+
     from uvicorn import Config, Server
 
     # 设置服务器
