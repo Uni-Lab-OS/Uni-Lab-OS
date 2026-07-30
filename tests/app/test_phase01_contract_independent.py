@@ -22,8 +22,17 @@ def client(tmp_path_factory, monkeypatch):
     working_dir.mkdir(exist_ok=True)
     monkeypatch.setattr(BasicConfig, "working_dir", str(working_dir))
     server = importlib.reload(importlib.import_module("unilabos.app.web.server"))
-    with TestClient(server.setup_server()) as test_client:
-        yield test_client
+    try:
+        with TestClient(server.setup_server()) as test_client:
+            yield test_client
+    finally:
+        try:
+            composition = importlib.import_module("unilabos.workflow.composition")
+        except ModuleNotFoundError:
+            # Phase 00 红测基点尚无 Workflow composition；目标分支必须执行公开清理 seam。
+            pass
+        else:
+            composition.reset_workflow_service_for_test()
 
 
 def _assert_backend_error(response, status: int, code: str) -> None:
