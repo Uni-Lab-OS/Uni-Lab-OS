@@ -28,6 +28,13 @@ class _BackendModel(BaseModel):
 HashToken = Annotated[str, Field(pattern=r"^sha256:[0-9a-f]{64}$")]
 _SIGNED_DECIMAL = re.compile(r"[+-]?[0-9]+\Z")
 _INT64_MAX = (1 << 63) - 1
+_GO_WHITE_SPACE = (
+    "\t\n\v\f\r "
+    "\u0085\u00a0\u1680"
+    "\u2000\u2001\u2002\u2003\u2004\u2005"
+    "\u2006\u2007\u2008\u2009\u200a"
+    "\u2028\u2029\u202f\u205f\u3000"
+)
 
 
 class WorkflowCreateRequest(_BackendModel):
@@ -245,7 +252,19 @@ def create_workflow_router(service: WorkflowService) -> APIRouter:
         ),
     ) -> Response:
         try:
-            cursor_text = (last_event_id or "").strip()
+            raw_cursor = next(
+                (
+                    value
+                    for name, value in request.scope["headers"]
+                    if name.lower() == b"last-event-id"
+                ),
+                None,
+            )
+            cursor_text = (
+                raw_cursor.decode("utf-8")
+                if raw_cursor is not None
+                else (last_event_id or "")
+            ).strip(_GO_WHITE_SPACE)
             if not cursor_text:
                 cursor = 0
             elif not _SIGNED_DECIMAL.fullmatch(cursor_text):
@@ -254,7 +273,7 @@ def create_workflow_router(service: WorkflowService) -> APIRouter:
                 cursor = int(cursor_text, 10)
             if not 0 <= cursor <= _INT64_MAX:
                 raise ValueError
-        except ValueError:
+        except (UnicodeError, ValueError):
             cursor = -1
         if cursor == -1:
             return JSONResponse(

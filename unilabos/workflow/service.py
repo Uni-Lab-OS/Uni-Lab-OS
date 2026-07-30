@@ -116,6 +116,59 @@ _HANDLE_TEMPLATE_READ_FIELDS = {
     "data_source",
     "data_key",
 }
+_WORKFLOW_REQUIRED_READ_FIELDS = _WORKFLOW_READ_FIELDS - {"description"}
+_NODE_REQUIRED_READ_FIELDS = {
+    "uuid",
+    "create_time",
+    "update_time",
+    "meta_data",
+    "workflow_uuid",
+    "name",
+    "status",
+    "type",
+    "pose",
+    "param",
+    "execution_policy",
+    "disabled",
+    "minimized",
+}
+_EDGE_REQUIRED_READ_FIELDS = {
+    "uuid",
+    "create_time",
+    "update_time",
+    "meta_data",
+    "source_node_uuid",
+    "target_node_uuid",
+    "source_handle_uuid",
+    "target_handle_uuid",
+}
+_NODE_TEMPLATE_REQUIRED_READ_FIELDS = {
+    "uuid",
+    "create_time",
+    "update_time",
+    "meta_data",
+    "resource_template_uuid",
+    "name",
+    "display_name",
+    "goal",
+    "goal_default",
+    "feedback",
+    "result",
+    "type",
+    "node_type",
+}
+_HANDLE_TEMPLATE_REQUIRED_READ_FIELDS = {
+    "uuid",
+    "create_time",
+    "update_time",
+    "meta_data",
+    "workflow_node_template_uuid",
+    "handle_key",
+    "io_type",
+    "display_name",
+    "type",
+    "required",
+}
 
 
 class WorkflowError(RuntimeError):
@@ -815,10 +868,7 @@ class WorkflowService:
                             ),
                         )
                         source = self._read_source(registration)
-                        if source is None or source["draft_hash"] != recovery_hash:
-                            self.store.clear_writeback_pending(workflow_uuid)
-                            record = self.store.get_authoring_record(workflow_uuid)
-                        else:
+                        if source is not None and source["draft_hash"] == recovery_hash:
                             self.store.settle_writeback(
                                 workflow_uuid=workflow_uuid,
                                 observed_draft_hash=source["draft_hash"],
@@ -834,16 +884,6 @@ class WorkflowService:
                             return self.get_authoring(workflow_uuid)
                     except (OSError, UnicodeError, WorkflowError):
                         pass
-            if (
-                record["writeback_status"] == "pending"
-                and source is not None
-                and source["draft_hash"] != record["writeback_expected_hash"]
-            ):
-                # canonical 已由外部 authority 推进，不能再恢复旧写回。
-                # 只清除 recovery marker；observed hash 必须等本次编译
-                # 成功后由 record_draft_compilation 原子推进。
-                self.store.clear_writeback_pending(workflow_uuid)
-                record = self.store.get_authoring_record(workflow_uuid)
             actual_hash = source["draft_hash"] if source is not None else None
             if actual_hash == record["observed_draft_hash"] and not (
                 actual_hash is None and record.get("candidate") is not None
@@ -1783,6 +1823,31 @@ class WorkflowService:
         cls._require_candidate_graph_containers(graph)
         projected = cls._backend_graph_projection(graph)
         applied = cls._backend_graph_projection(applied_graph)
+        cls._require_backend_read_fields(
+            [applied["workflow"]],
+            _WORKFLOW_REQUIRED_READ_FIELDS,
+            error_code="internal_error",
+        )
+        cls._require_backend_read_fields(
+            applied["nodes"],
+            _NODE_REQUIRED_READ_FIELDS,
+            error_code="internal_error",
+        )
+        cls._require_backend_read_fields(
+            applied["edges"],
+            _EDGE_REQUIRED_READ_FIELDS,
+            error_code="internal_error",
+        )
+        cls._require_backend_read_fields(
+            applied["node_templates"],
+            _NODE_TEMPLATE_REQUIRED_READ_FIELDS,
+            error_code="internal_error",
+        )
+        cls._require_backend_read_fields(
+            applied["handle_templates"],
+            _HANDLE_TEMPLATE_REQUIRED_READ_FIELDS,
+            error_code="internal_error",
+        )
         applied_workflow = applied["workflow"]
         workflow_uuid = applied_workflow["uuid"]
         timestamp = applied_workflow["update_time"]
@@ -1813,21 +1878,7 @@ class WorkflowService:
             )
         cls._require_backend_read_fields(
             nodes,
-            {
-                "uuid",
-                "create_time",
-                "update_time",
-                "meta_data",
-                "workflow_uuid",
-                "name",
-                "status",
-                "type",
-                "pose",
-                "param",
-                "execution_policy",
-                "disabled",
-                "minimized",
-            },
+            _NODE_REQUIRED_READ_FIELDS,
         )
 
         edges = []
@@ -1847,16 +1898,7 @@ class WorkflowService:
             )
         cls._require_backend_read_fields(
             edges,
-            {
-                "uuid",
-                "create_time",
-                "update_time",
-                "meta_data",
-                "source_node_uuid",
-                "target_node_uuid",
-                "source_handle_uuid",
-                "target_handle_uuid",
-            },
+            _EDGE_REQUIRED_READ_FIELDS,
         )
 
         projected["workflow"] = {
@@ -1878,21 +1920,7 @@ class WorkflowService:
             timestamp=timestamp,
             uuid_fields={"uuid", "resource_template_uuid"},
             allowed_fields=_NODE_TEMPLATE_READ_FIELDS,
-            required_fields={
-                "uuid",
-                "create_time",
-                "update_time",
-                "meta_data",
-                "resource_template_uuid",
-                "name",
-                "display_name",
-                "goal",
-                "goal_default",
-                "feedback",
-                "result",
-                "type",
-                "node_type",
-            },
+            required_fields=_NODE_TEMPLATE_REQUIRED_READ_FIELDS,
         )
         projected["handle_templates"] = cls._hydrate_backend_catalog_entities(
             projected["handle_templates"],
@@ -1900,30 +1928,11 @@ class WorkflowService:
             timestamp=timestamp,
             uuid_fields={"uuid", "workflow_node_template_uuid"},
             allowed_fields=_HANDLE_TEMPLATE_READ_FIELDS,
-            required_fields={
-                "uuid",
-                "create_time",
-                "update_time",
-                "meta_data",
-                "workflow_node_template_uuid",
-                "handle_key",
-                "io_type",
-                "display_name",
-                "type",
-                "required",
-            },
+            required_fields=_HANDLE_TEMPLATE_REQUIRED_READ_FIELDS,
         )
         cls._require_backend_read_fields(
             [projected["workflow"]],
-            {
-                "uuid",
-                "create_time",
-                "update_time",
-                "meta_data",
-                "name",
-                "tags",
-                "revision",
-            },
+            _WORKFLOW_REQUIRED_READ_FIELDS,
         )
         return projected
 
@@ -1988,9 +1997,14 @@ class WorkflowService:
     def _require_backend_read_fields(
         entities: List[Dict[str, Any]],
         required_fields: set[str],
+        *,
+        error_code: str = "candidate_invalid",
     ) -> None:
-        if any(not required_fields.issubset(item) for item in entities):
-            raise WorkflowError("candidate_invalid")
+        if any(
+            not isinstance(item, dict) or not required_fields.issubset(item)
+            for item in entities
+        ):
+            raise WorkflowError(error_code)
 
     @classmethod
     def _post_commit_candidate_graph(
