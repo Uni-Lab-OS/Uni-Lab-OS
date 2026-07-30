@@ -178,7 +178,20 @@ def _seed_template_catalog(store: WorkflowStore) -> None:
             )
 
 
-def _changeset(applied_graph: dict[str, Any]) -> dict[str, Any]:
+def _source_only_changeset() -> dict[str, Any]:
+    return {
+        "kind": "source_only",
+        "created_node_uuids": [],
+        "updated_node_uuids": [],
+        "deleted_node_uuids": [],
+        "created_edge_uuids": [],
+        "updated_edge_uuids": [],
+        "deleted_edge_uuids": [],
+        "reserved_metadata_changed": False,
+    }
+
+
+def _delete_graph_changeset(applied_graph: dict[str, Any]) -> dict[str, Any]:
     return {
         "kind": "graph",
         "created_node_uuids": [],
@@ -194,16 +207,16 @@ def _changeset(applied_graph: dict[str, Any]) -> dict[str, Any]:
 def _compilation(
     *,
     graph: dict[str, Any],
-    applied_graph: dict[str, Any],
     python_source: str,
     compiler_version: str,
+    changeset: dict[str, Any],
 ) -> CandidateCompilation:
     return CandidateCompilation(
         diagnostics=[],
         graph=graph,
         normalized_python_source=python_source,
         source_map=[],
-        changeset=_changeset(applied_graph),
+        changeset=changeset,
         compiler_version=compiler_version,
         template_catalog_fingerprint=CATALOG_FINGERPRINT,
     )
@@ -277,9 +290,9 @@ class ExtraCatalogCompiler:
             )
         return _compilation(
             graph=graph,
-            applied_graph=applied_graph,
             python_source=python_source,
             compiler_version=self.compiler_version,
+            changeset=_source_only_changeset(),
         )
 
 
@@ -299,9 +312,34 @@ class EmptyCatalogCompiler:
         del workflow_uuid, workflow_revision, source_uri
         return _compilation(
             graph=_empty_graph(applied_graph),
-            applied_graph=applied_graph,
             python_source=python_source,
             compiler_version=self.compiler_version,
+            changeset=_delete_graph_changeset(applied_graph),
+        )
+
+
+class EmptyNodeGraphCompiler:
+    compiler_version = "phase-01-review-round-6-empty-node-graph"
+    template_catalog_fingerprint = CATALOG_FINGERPRINT
+
+    def compile(
+        self,
+        *,
+        workflow_uuid: str,
+        workflow_revision: int,
+        python_source: str,
+        source_uri: str,
+        applied_graph: dict[str, Any],
+    ) -> CandidateCompilation:
+        del workflow_uuid, workflow_revision, source_uri
+        graph = _empty_graph(applied_graph)
+        graph["node_templates"] = deepcopy(applied_graph["node_templates"])
+        graph["handle_templates"] = deepcopy(applied_graph["handle_templates"])
+        return _compilation(
+            graph=graph,
+            python_source=python_source,
+            compiler_version=self.compiler_version,
+            changeset=_delete_graph_changeset(applied_graph),
         )
 
 
@@ -321,9 +359,9 @@ class MalformedCatalogCompiler:
         del workflow_uuid, workflow_revision, source_uri
         return _compilation(
             graph=_malformed_catalog_graph(applied_graph),
-            applied_graph=applied_graph,
             python_source=python_source,
             compiler_version=self.compiler_version,
+            changeset=_source_only_changeset(),
         )
 
 
@@ -352,9 +390,9 @@ class ApplyRevalidationCompiler:
         )
         return _compilation(
             graph=graph,
-            applied_graph=applied_graph,
             python_source=python_source,
             compiler_version=self.compiler_version,
+            changeset=_source_only_changeset(),
         )
 
 
@@ -463,14 +501,17 @@ def test_explicit_empty_candidate_catalog_is_not_filled_from_applied_graph(
     with TestClient(create_workflow_app(workflow_service)) as client:
         response = _save_draft(client, revision=revision)
 
+    aggregate = response.json()["data"]
     assert response.status_code == 200
-    graph = response.json()["data"]["candidate"]["graph"]
-    assert (
-        graph["nodes"],
-        graph["edges"],
-        graph["node_templates"],
-        graph["handle_templates"],
-    ) == ([], [], [], [])
+    assert aggregate["state"] == "draft_invalid"
+    assert aggregate["candidate"] is None
+    assert aggregate["draft"]["diagnostics"] == [
+        {
+            "severity": "error",
+            "code": "candidate_invalid",
+            "message": "工作流校验失败，请检查节点、连线和输入输出",
+        }
+    ]
 
 
 def test_draft_hydration_failure_is_saved_as_successful_invalid_aggregate(
@@ -560,14 +601,14 @@ def test_apply_revalidation_failure_uses_candidate_invalid_422(
     }
 
 
-def test_valid_empty_catalog_candidate_still_applies(
+def test_valid_empty_node_graph_with_authority_catalog_still_applies(
     store: WorkflowStore,
     tmp_path: Path,
 ) -> None:
     workflow_service, revision = _authoring_service(
         store,
         tmp_path,
-        compiler=EmptyCatalogCompiler(),
+        compiler=EmptyNodeGraphCompiler(),
         with_catalog_graph=True,
     )
 

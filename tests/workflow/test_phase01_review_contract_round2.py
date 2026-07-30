@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+from copy import deepcopy
 from pathlib import Path
 from typing import Any
 
@@ -252,18 +253,49 @@ class GraphCompiler:
         applied_graph: dict[str, Any],
     ) -> CandidateCompilation:
         del python_source, source_uri
+        workflow_meta_data = deepcopy(applied_graph["workflow"]["meta_data"])
+        workflow_meta_data.pop("unilab", None)
+        if "unilab" in self.workflow_meta_data:
+            workflow_meta_data["unilab"] = deepcopy(self.workflow_meta_data["unilab"])
         graph = {
             "workflow": {
                 **applied_graph["workflow"],
                 "uuid": workflow_uuid,
                 "revision": workflow_revision,
-                "meta_data": self.workflow_meta_data,
+                "meta_data": workflow_meta_data,
             },
             "nodes": [node.model_dump() for node in self.nodes],
             "edges": [edge.model_dump() for edge in self.edges],
-            "node_templates": [],
-            "handle_templates": [],
+            "node_templates": deepcopy(applied_graph["node_templates"]),
+            "handle_templates": deepcopy(applied_graph["handle_templates"]),
         }
+        candidate_nodes = {node.uuid: node.model_dump() for node in self.nodes}
+        applied_nodes = {
+            node["uuid"]: WorkflowNodeWrite.model_validate(node).model_dump()
+            for node in applied_graph["nodes"]
+        }
+        candidate_edges = {edge.uuid: edge.model_dump() for edge in self.edges}
+        applied_edges = {
+            edge["uuid"]: WorkflowEdgeWrite.model_validate(edge).model_dump()
+            for edge in applied_graph["edges"]
+        }
+        created_node_uuids = sorted(set(candidate_nodes) - set(applied_nodes))
+        updated_node_uuids = sorted(
+            uuid
+            for uuid in set(candidate_nodes) & set(applied_nodes)
+            if candidate_nodes[uuid] != applied_nodes[uuid]
+        )
+        deleted_node_uuids = sorted(set(applied_nodes) - set(candidate_nodes))
+        created_edge_uuids = sorted(set(candidate_edges) - set(applied_edges))
+        updated_edge_uuids = sorted(
+            uuid
+            for uuid in set(candidate_edges) & set(applied_edges)
+            if candidate_edges[uuid] != applied_edges[uuid]
+        )
+        deleted_edge_uuids = sorted(set(applied_edges) - set(candidate_edges))
+        reserved_metadata_changed = workflow_meta_data.get("unilab") != applied_graph[
+            "workflow"
+        ]["meta_data"].get("unilab")
         return CandidateCompilation(
             diagnostics=[],
             graph=graph,
@@ -271,13 +303,13 @@ class GraphCompiler:
             source_map=[],
             changeset={
                 "kind": "graph",
-                "created_node_uuids": [node.uuid for node in self.nodes],
-                "updated_node_uuids": [],
-                "deleted_node_uuids": [],
-                "created_edge_uuids": [edge.uuid for edge in self.edges],
-                "updated_edge_uuids": [],
-                "deleted_edge_uuids": [],
-                "reserved_metadata_changed": True,
+                "created_node_uuids": created_node_uuids,
+                "updated_node_uuids": updated_node_uuids,
+                "deleted_node_uuids": deleted_node_uuids,
+                "created_edge_uuids": created_edge_uuids,
+                "updated_edge_uuids": updated_edge_uuids,
+                "deleted_edge_uuids": deleted_edge_uuids,
+                "reserved_metadata_changed": reserved_metadata_changed,
             },
             compiler_version=self.compiler_version,
             template_catalog_fingerprint=self.template_catalog_fingerprint,
@@ -321,7 +353,7 @@ class SourceOnlyCompiler:
         )
 
 
-def _apply_compiler_candidate(
+def _save_compiler_draft(
     tmp_path: Path,
     *,
     store: WorkflowStore,
@@ -339,6 +371,27 @@ def _apply_compiler_candidate(
             description=None,
             meta_data=initial_meta_data,
         )
+    revision = 1
+    if isinstance(compiler, GraphCompiler) and compiler.nodes:
+        service.save_graph(
+            WORKFLOW_UUID,
+            revision=revision,
+            nodes=[
+                node.model_copy(
+                    update={
+                        "param": (
+                            {"value": 0}
+                            if node.workflow_node_template_uuid == TARGET_TEMPLATE_UUID
+                            else {}
+                        ),
+                        "meta_data": {},
+                    }
+                )
+                for node in compiler.nodes
+            ],
+            edges=[],
+        )
+        revision = 2
     package_root = tmp_path / "package"
     package_root.mkdir()
     service.register_editable_source(
@@ -351,14 +404,30 @@ def _apply_compiler_candidate(
         WORKFLOW_UUID,
         python_source="build()",
         expected_draft_hash=None,
-        expected_workflow_revision=1,
+        expected_workflow_revision=revision,
+    )
+    return service, aggregate
+
+
+def _apply_compiler_candidate(
+    tmp_path: Path,
+    *,
+    store: WorkflowStore,
+    compiler: GraphCompiler | SourceOnlyCompiler,
+    initial_meta_data: dict[str, Any] | None = None,
+) -> tuple[WorkflowService, dict[str, Any]]:
+    service, aggregate = _save_compiler_draft(
+        tmp_path,
+        store=store,
+        compiler=compiler,
+        initial_meta_data=initial_meta_data,
     )
     candidate = aggregate["candidate"]
     assert candidate is not None
     applied = service.apply_authoring(
         WORKFLOW_UUID,
         expected_draft_hash=aggregate["draft"]["draft_hash"],
-        expected_workflow_revision=1,
+        expected_workflow_revision=aggregate["workflow_revision"],
         expected_candidate_hash=candidate["candidate_hash"],
     )
     return service, applied
@@ -387,7 +456,7 @@ def test_required_handle_accepts_one_workflow_input_binding(
         compiler=compiler,
     )
 
-    assert applied["apply_result"]["workflow_revision"] == 2
+    assert applied["apply_result"]["workflow_revision"] == 3
     bindings = applied["authoring"]["applied_graph"]["nodes"][0]["meta_data"]
     assert bindings == _binding("temperature")
 
@@ -431,14 +500,15 @@ def test_same_target_handle_rejects_ambiguous_providers(
         edges=[_edge()] if "edge" in providers else [],
     )
 
-    with pytest.raises(WorkflowError) as failure:
-        _apply_compiler_candidate(
-            tmp_path,
-            store=store,
-            compiler=compiler,
-        )
+    _, aggregate = _save_compiler_draft(
+        tmp_path,
+        store=store,
+        compiler=compiler,
+    )
 
-    assert failure.value.code == "candidate_invalid"
+    assert aggregate["state"] == "draft_invalid"
+    assert aggregate["candidate"] is None
+    assert aggregate["draft"]["diagnostics"][0]["code"] == "candidate_invalid"
 
 
 @pytest.mark.parametrize(
@@ -464,14 +534,15 @@ def test_input_binding_references_exactly_one_contract_parameter(
         edges=[],
     )
 
-    with pytest.raises(WorkflowError) as failure:
-        _apply_compiler_candidate(
-            tmp_path,
-            store=store,
-            compiler=compiler,
-        )
+    _, aggregate = _save_compiler_draft(
+        tmp_path,
+        store=store,
+        compiler=compiler,
+    )
 
-    assert failure.value.code == "candidate_invalid"
+    assert aggregate["state"] == "draft_invalid"
+    assert aggregate["candidate"] is None
+    assert aggregate["draft"]["diagnostics"][0]["code"] == "candidate_invalid"
 
 
 @pytest.mark.parametrize(

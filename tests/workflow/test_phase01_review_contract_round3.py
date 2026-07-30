@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from concurrent.futures import ThreadPoolExecutor
+from copy import deepcopy
 from pathlib import Path
 from threading import Barrier
 from typing import Any
@@ -18,7 +19,6 @@ from unilabos.workflow.models import (
 )
 from unilabos.workflow.service import (
     WorkflowConflict,
-    WorkflowError,
     WorkflowService,
 )
 from unilabos.workflow.store import WorkflowStore
@@ -227,6 +227,25 @@ class GraphCompiler:
         applied_graph: dict[str, Any],
     ) -> CandidateCompilation:
         del source_uri
+        workflow_meta_data = deepcopy(applied_graph["workflow"]["meta_data"])
+        workflow_meta_data.pop("unilab", None)
+        if "unilab" in self.workflow_meta_data:
+            workflow_meta_data["unilab"] = deepcopy(self.workflow_meta_data["unilab"])
+        candidate_nodes = {node.uuid: node.model_dump() for node in self.nodes}
+        applied_nodes = {
+            node["uuid"]: WorkflowNodeWrite.model_validate(node).model_dump()
+            for node in applied_graph["nodes"]
+        }
+        created_node_uuids = sorted(set(candidate_nodes) - set(applied_nodes))
+        updated_node_uuids = sorted(
+            uuid
+            for uuid in set(candidate_nodes) & set(applied_nodes)
+            if candidate_nodes[uuid] != applied_nodes[uuid]
+        )
+        deleted_node_uuids = sorted(set(applied_nodes) - set(candidate_nodes))
+        reserved_metadata_changed = workflow_meta_data.get("unilab") != applied_graph[
+            "workflow"
+        ]["meta_data"].get("unilab")
         return CandidateCompilation(
             diagnostics=[],
             graph={
@@ -234,24 +253,24 @@ class GraphCompiler:
                     **applied_graph["workflow"],
                     "uuid": workflow_uuid,
                     "revision": workflow_revision,
-                    "meta_data": self.workflow_meta_data,
+                    "meta_data": workflow_meta_data,
                 },
                 "nodes": [node.model_dump() for node in self.nodes],
                 "edges": [],
-                "node_templates": [],
-                "handle_templates": [],
+                "node_templates": deepcopy(applied_graph["node_templates"]),
+                "handle_templates": deepcopy(applied_graph["handle_templates"]),
             },
             normalized_python_source=python_source,
             source_map=[],
             changeset={
                 "kind": "graph",
-                "created_node_uuids": [node.uuid for node in self.nodes],
-                "updated_node_uuids": [],
-                "deleted_node_uuids": [],
+                "created_node_uuids": created_node_uuids,
+                "updated_node_uuids": updated_node_uuids,
+                "deleted_node_uuids": deleted_node_uuids,
                 "created_edge_uuids": [],
                 "updated_edge_uuids": [],
                 "deleted_edge_uuids": [],
-                "reserved_metadata_changed": True,
+                "reserved_metadata_changed": reserved_metadata_changed,
             },
             compiler_version=self.compiler_version,
             template_catalog_fingerprint=self.template_catalog_fingerprint,
@@ -307,7 +326,7 @@ def _register_source(
     return package_root / "workflows" / "review.py"
 
 
-def _apply_graph_candidate(
+def _save_graph_draft(
     *,
     store: WorkflowStore,
     tmp_path: Path,
@@ -315,20 +334,25 @@ def _apply_graph_candidate(
 ) -> dict[str, Any]:
     service = WorkflowService(store, compiler=compiler)
     _create_workflow(service)
+    revision = 1
+    if compiler.nodes:
+        service.save_graph(
+            WORKFLOW_UUID,
+            revision=revision,
+            nodes=[
+                node.model_copy(update={"meta_data": {}}) for node in compiler.nodes
+            ],
+            edges=[],
+        )
+        revision = 2
     _register_source(service, tmp_path)
     aggregate = service.save_draft(
         WORKFLOW_UUID,
         python_source="build()\n",
         expected_draft_hash=None,
-        expected_workflow_revision=1,
+        expected_workflow_revision=revision,
     )
-    assert aggregate["candidate"] is not None
-    return service.apply_authoring(
-        WORKFLOW_UUID,
-        expected_draft_hash=aggregate["draft"]["draft_hash"],
-        expected_workflow_revision=1,
-        expected_candidate_hash=aggregate["candidate"]["candidate_hash"],
-    )
+    return aggregate
 
 
 @pytest.mark.parametrize(
@@ -361,14 +385,15 @@ def test_disabled_node_still_validates_nonempty_input_bindings(
         workflow_meta_data=_input_contract(["known"]),
     )
 
-    with pytest.raises(WorkflowError) as failure:
-        _apply_graph_candidate(
-            store=store,
-            tmp_path=tmp_path,
-            compiler=compiler,
-        )
+    aggregate = _save_graph_draft(
+        store=store,
+        tmp_path=tmp_path,
+        compiler=compiler,
+    )
 
-    assert failure.value.code == "candidate_invalid"
+    assert aggregate["state"] == "draft_invalid"
+    assert aggregate["candidate"] is None
+    assert aggregate["draft"]["diagnostics"][0]["code"] == "candidate_invalid"
 
 
 def test_node_without_template_rejects_nonempty_input_bindings(
@@ -388,14 +413,15 @@ def test_node_without_template_rejects_nonempty_input_bindings(
         workflow_meta_data=_input_contract(["known"]),
     )
 
-    with pytest.raises(WorkflowError) as failure:
-        _apply_graph_candidate(
-            store=store,
-            tmp_path=tmp_path,
-            compiler=compiler,
-        )
+    aggregate = _save_graph_draft(
+        store=store,
+        tmp_path=tmp_path,
+        compiler=compiler,
+    )
 
-    assert failure.value.code == "candidate_invalid"
+    assert aggregate["state"] == "draft_invalid"
+    assert aggregate["candidate"] is None
+    assert aggregate["draft"]["diagnostics"][0]["code"] == "candidate_invalid"
 
 
 def test_draft_put_never_pairs_external_draft_b_with_candidate_a(

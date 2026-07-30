@@ -87,14 +87,14 @@ class GraphCompiler:
                     "uuid": workflow_uuid,
                     "revision": workflow_revision,
                     "meta_data": {
-                        "color": "candidate-only",
+                        **applied_graph["workflow"]["meta_data"],
                         "unilab": POST_COMMIT_RESERVED,
                     },
                 },
                 "nodes": [],
                 "edges": [],
-                "node_templates": [],
-                "handle_templates": [],
+                "node_templates": applied_graph["node_templates"],
+                "handle_templates": applied_graph["handle_templates"],
             },
             normalized_python_source=(
                 python_source if python_source.endswith("\n") else python_source + "\n"

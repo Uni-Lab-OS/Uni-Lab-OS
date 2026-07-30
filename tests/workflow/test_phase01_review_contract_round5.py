@@ -187,7 +187,7 @@ class WriteShapeGraphCompiler:
             normalized_python_source=python_source,
             source_map=[],
             changeset={
-                "kind": "graph",
+                "kind": "source_only",
                 "created_node_uuids": [],
                 "updated_node_uuids": [],
                 "deleted_node_uuids": [],
@@ -328,7 +328,7 @@ def test_apply_accepts_server_hydrated_write_shape_candidate(
         )
 
     assert response.status_code == 200
-    assert response.json()["data"]["apply_result"]["workflow_revision"] == 3
+    assert response.json()["data"]["apply_result"]["workflow_revision"] == 2
 
 
 @pytest.mark.parametrize("run_mode", ["NORMAL", " normal "])

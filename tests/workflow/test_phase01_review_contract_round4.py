@@ -196,7 +196,7 @@ class BackendReadGraphCompiler:
             normalized_python_source=python_source,
             source_map=[],
             changeset={
-                "kind": "graph",
+                "kind": "source_only",
                 "created_node_uuids": [],
                 "updated_node_uuids": [],
                 "deleted_node_uuids": [],
@@ -305,8 +305,8 @@ def test_apply_accepts_backend_read_dto_fields_from_candidate_graph(
 
     assert response.status_code == 200
     data = response.json()["data"]
-    assert data["apply_result"]["workflow_revision"] == 3
-    assert data["authoring"]["applied_graph"]["workflow"]["revision"] == 3
+    assert data["apply_result"]["workflow_revision"] == 2
+    assert data["authoring"]["applied_graph"]["workflow"]["revision"] == 2
 
 
 def test_single_node_without_target_selects_first_topological_root(

@@ -79,7 +79,11 @@ class EmptyGraphCompiler:
             normalized_python_source=python_source,
             source_map=[],
             changeset={
-                "kind": "graph",
+                "kind": (
+                    "graph"
+                    if applied_graph["nodes"] or applied_graph["edges"]
+                    else "source_only"
+                ),
                 "created_node_uuids": [],
                 "updated_node_uuids": [],
                 "deleted_node_uuids": [node["uuid"] for node in applied_graph["nodes"]],

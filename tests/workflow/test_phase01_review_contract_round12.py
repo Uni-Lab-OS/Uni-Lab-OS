@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import json
 from copy import deepcopy
 from pathlib import Path
 from typing import Any
@@ -207,17 +208,9 @@ class Round12Compiler:
         workflow_revision: int,
         applied_graph: dict[str, Any],
     ) -> dict[str, Any]:
-        applied_workflow = applied_graph["workflow"]
+        del workflow_uuid, workflow_revision
         return {
-            "workflow": {
-                "uuid": workflow_uuid,
-                "create_time": applied_workflow["create_time"],
-                "update_time": applied_workflow["update_time"],
-                "meta_data": {"candidate": {"round": 12}},
-                "name": "valid round 12 candidate",
-                "tags": ["stable", {"nested": [1, None, True]}],
-                "revision": workflow_revision,
-            },
+            "workflow": deepcopy(applied_graph["workflow"]),
             "nodes": [
                 {
                     "uuid": NODE_UUID,
@@ -226,7 +219,7 @@ class Round12Compiler:
                     "status": "idle",
                     "type": "compute",
                     "pose": {"x": 1.25},
-                    "param": {"input": [1, {"deep": True}]},
+                    "param": {"input": 1},
                     "execution_policy": {"retry": {"maximum": 0}},
                     "disabled": False,
                     "minimized": False,
@@ -239,12 +232,12 @@ class Round12Compiler:
                     "status": "idle",
                     "type": "compute",
                     "pose": {"x": 2.5},
-                    "param": {"input": [2, {"deep": True}]},
+                    "param": {},
                     "execution_policy": {"retry": {"maximum": 0}},
                     "disabled": False,
                     "minimized": False,
                     "meta_data": {"node": {"round": 12}},
-                }
+                },
             ],
             "edges": [
                 {
@@ -256,43 +249,8 @@ class Round12Compiler:
                     "meta_data": {"edge": {"round": 12}},
                 }
             ],
-            "node_templates": [
-                {
-                    "uuid": NODE_TEMPLATE_UUID,
-                    "meta_data": {"template": {"round": 12}},
-                    "resource_template_uuid": RESOURCE_TEMPLATE_UUID,
-                    "name": "source",
-                    "display_name": "Source",
-                    "goal": {"input": {"type": "number"}},
-                    "goal_default": {"input": 12},
-                    "feedback": {"progress": {"type": "number"}},
-                    "result": {"output": {"type": "number"}},
-                    "type": "action",
-                    "node_type": "compute",
-                }
-            ],
-            "handle_templates": [
-                {
-                    "uuid": SOURCE_HANDLE_UUID,
-                    "meta_data": {"handle": {"round": 12}},
-                    "workflow_node_template_uuid": NODE_TEMPLATE_UUID,
-                    "handle_key": "result",
-                    "io_type": "source",
-                    "display_name": "Result",
-                    "type": "number",
-                    "required": False,
-                },
-                {
-                    "uuid": TARGET_HANDLE_UUID,
-                    "meta_data": {},
-                    "workflow_node_template_uuid": NODE_TEMPLATE_UUID,
-                    "handle_key": "input",
-                    "io_type": "target",
-                    "display_name": "Input",
-                    "type": "number",
-                    "required": True,
-                },
-            ],
+            "node_templates": deepcopy(applied_graph["node_templates"]),
+            "handle_templates": deepcopy(applied_graph["handle_templates"]),
         }
 
     @staticmethod
@@ -388,7 +346,11 @@ def _node() -> WorkflowNodeWrite:
     )
 
 
-def _seed_template_catalog(store: WorkflowStore) -> None:
+def _seed_template_catalog(
+    store: WorkflowStore,
+    *,
+    legal_deep_json: bool = False,
+) -> None:
     timestamp = "2026-07-31T00:00:00Z"
     with store.transaction() as connection:
         connection.execute(
@@ -433,18 +395,46 @@ def _seed_template_catalog(store: WorkflowStore) -> None:
                     required,
                 ),
             )
+        if legal_deep_json:
+            deep_json = json.dumps(DEEP_JSON_OBJECT)
+            connection.execute(
+                """
+                UPDATE workflow_node_template
+                SET meta_data = ?, goal = ?, goal_default = ?, feedback = ?,
+                    result = ?
+                WHERE uuid = ?
+                """,
+                (
+                    deep_json,
+                    deep_json,
+                    deep_json,
+                    deep_json,
+                    deep_json,
+                    NODE_TEMPLATE_UUID,
+                ),
+            )
+            connection.execute(
+                """
+                UPDATE workflow_handle_template
+                SET meta_data = ?, type = 'any'
+                WHERE workflow_node_template_uuid = ?
+                """,
+                (deep_json, NODE_TEMPLATE_UUID),
+            )
 
 
 def _create_workflow(
     service: WorkflowService,
     *,
     name: str = "phase 01 review round 12",
+    tags: list[Any] | None = None,
+    meta_data: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     return service.create_workflow(
         name=name,
-        tags=[],
+        tags=[] if tags is None else tags,
         description=None,
-        meta_data={},
+        meta_data={} if meta_data is None else meta_data,
         workflow_uuid=WORKFLOW_UUID,
     )
 
@@ -456,8 +446,13 @@ def _authoring_service(
     compiler: Any,
 ) -> tuple[WorkflowService, int]:
     service = WorkflowService(store, compiler=compiler)
-    _create_workflow(service)
-    _seed_template_catalog(store)
+    legal_deep_json = isinstance(compiler, Round12Compiler) and compiler.legal_deep_json
+    _create_workflow(
+        service,
+        tags=[deepcopy(DEEP_JSON_OBJECT)] if legal_deep_json else [],
+        meta_data=deepcopy(DEEP_JSON_OBJECT) if legal_deep_json else {},
+    )
+    _seed_template_catalog(store, legal_deep_json=legal_deep_json)
     service.save_graph(
         WORKFLOW_UUID,
         revision=1,

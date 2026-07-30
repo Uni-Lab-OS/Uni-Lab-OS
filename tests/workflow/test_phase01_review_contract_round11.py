@@ -113,58 +113,28 @@ class CatalogCandidateCompiler:
         source_uri: str,
         applied_graph: dict[str, Any],
     ) -> CandidateCompilation:
-        del source_uri
-        applied_workflow = applied_graph["workflow"]
-        graph = {
-            "workflow": {
-                "uuid": workflow_uuid,
-                "create_time": applied_workflow["create_time"],
-                "update_time": applied_workflow["update_time"],
+        del workflow_uuid, workflow_revision, source_uri
+        graph = deepcopy(applied_graph)
+        graph["workflow"]["description"] = None
+        graph["nodes"] = []
+        graph["edges"] = []
+        graph["node_templates"][0].update(
+            {
                 "description": None,
-                "meta_data": {"round": 11},
-                "name": "valid round 11 candidate",
-                "tags": ["stable", 1, None, {"nested": True}],
-                "revision": workflow_revision,
-            },
-            "nodes": [],
-            "edges": [],
-            "node_templates": [
-                {
-                    "uuid": NODE_TEMPLATE_UUID,
-                    "description": None,
-                    "meta_data": {"catalog": "valid"},
-                    "resource_template_uuid": RESOURCE_TEMPLATE_UUID,
-                    "name": "source",
-                    "display_name": "Source",
-                    "class": None,
-                    "goal": {},
-                    "goal_default": {},
-                    "feedback": {},
-                    "result": {},
-                    "schema": None,
-                    "type": "action",
-                    "icon": None,
-                    "header": None,
-                    "footer": None,
-                    "node_type": "compute",
-                }
-            ],
-            "handle_templates": [
-                {
-                    "uuid": HANDLE_TEMPLATE_UUID,
-                    "description": None,
-                    "meta_data": {"catalog": "valid"},
-                    "workflow_node_template_uuid": NODE_TEMPLATE_UUID,
-                    "handle_key": "result",
-                    "io_type": "source",
-                    "display_name": "Result",
-                    "type": "number",
-                    "required": False,
-                    "data_source": None,
-                    "data_key": None,
-                }
-            ],
-        }
+                "class": None,
+                "schema": None,
+                "icon": None,
+                "header": None,
+                "footer": None,
+            }
+        )
+        graph["handle_templates"][0].update(
+            {
+                "description": None,
+                "data_source": None,
+                "data_key": None,
+            }
+        )
         if self.entity_kind is not None:
             assert self.field is not None
             entity = (
@@ -275,9 +245,9 @@ def _authoring_service(
     service = WorkflowService(store, compiler=compiler)
     service.create_workflow(
         name="phase 01 review round 11",
-        tags=[],
+        tags=["stable", 1, None, {"nested": True}],
         description=None,
-        meta_data={},
+        meta_data={"round": 11},
         workflow_uuid=WORKFLOW_UUID,
     )
     _seed_template_catalog(store)

@@ -82,7 +82,7 @@ class EmptyGraphCompiler:
             normalized_python_source=python_source,
             source_map=[],
             changeset={
-                "kind": "graph",
+                "kind": "source_only",
                 "created_node_uuids": [],
                 "updated_node_uuids": [],
                 "deleted_node_uuids": [],
