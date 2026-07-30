@@ -28,11 +28,17 @@ NODE_B_UUID = "bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb"
 EDGE_UUID = "eeeeeeee-eeee-4eee-8eee-eeeeeeeeeeee"
 SOURCE_HANDLE_UUID = "11111111-aaaa-4aaa-8aaa-111111111111"
 TARGET_HANDLE_UUID = "22222222-bbbb-4bbb-8bbb-222222222222"
+TEMPLATE_A_UUID = "33333333-aaaa-4aaa-8aaa-333333333333"
+TEMPLATE_B_UUID = "44444444-bbbb-4bbb-8bbb-444444444444"
+RESOURCE_TEMPLATE_UUID = "55555555-5555-4555-8555-555555555555"
 
 
 def _node(node_uuid: str, name: str) -> WorkflowNodeWrite:
     return WorkflowNodeWrite(
         uuid=node_uuid,
+        workflow_node_template_uuid=(
+            TEMPLATE_A_UUID if node_uuid == NODE_A_UUID else TEMPLATE_B_UUID
+        ),
         name=name,
         status="idle",
         type="compute",
@@ -56,9 +62,70 @@ def _edge() -> WorkflowEdgeWrite:
     )
 
 
+def _seed_template_catalog(store: WorkflowStore) -> None:
+    timestamp = "2026-07-30T00:00:00Z"
+    with store.transaction() as connection:
+        for template_uuid, name in (
+            (TEMPLATE_A_UUID, "source"),
+            (TEMPLATE_B_UUID, "target"),
+        ):
+            connection.execute(
+                """
+                INSERT INTO workflow_node_template(
+                    uuid, create_time, update_time, meta_data, authority_id,
+                    resource_template_uuid, name, display_name, goal,
+                    goal_default, feedback, result, type, node_type
+                ) VALUES (?, ?, ?, '{}', 'os-local', ?, ?, ?, '{}', '{}',
+                          '{}', '{}', 'action', 'compute')
+                """,
+                (
+                    template_uuid,
+                    timestamp,
+                    timestamp,
+                    RESOURCE_TEMPLATE_UUID,
+                    name,
+                    name,
+                ),
+            )
+        for handle_uuid, template_uuid, key, io_type in (
+            (
+                SOURCE_HANDLE_UUID,
+                TEMPLATE_A_UUID,
+                "result",
+                "source",
+            ),
+            (
+                TARGET_HANDLE_UUID,
+                TEMPLATE_B_UUID,
+                "value",
+                "target",
+            ),
+        ):
+            connection.execute(
+                """
+                INSERT INTO workflow_handle_template(
+                    uuid, create_time, update_time, meta_data, authority_id,
+                    workflow_node_template_uuid, handle_key, io_type,
+                    display_name, type, required, data_key
+                ) VALUES (?, ?, ?, '{}', 'os-local', ?, ?, ?, ?, 'any', 0, ?)
+                """,
+                (
+                    handle_uuid,
+                    timestamp,
+                    timestamp,
+                    template_uuid,
+                    key,
+                    io_type,
+                    key,
+                    key,
+                ),
+            )
+
+
 @pytest.fixture()
 def store(tmp_path: Path) -> WorkflowStore:
     opened = WorkflowStore(tmp_path / "workflow.db")
+    _seed_template_catalog(opened)
     yield opened
     opened.close()
 
@@ -190,6 +257,7 @@ def test_task_snapshot_and_pending_jobs_are_created_in_one_transaction(
 def test_workflow_graph_task_and_jobs_survive_store_restart(tmp_path: Path) -> None:
     db_path = tmp_path / "workflow.db"
     first = WorkflowStore(db_path)
+    _seed_template_catalog(first)
     service = WorkflowService(first)
     service.create_workflow(
         name="restart",

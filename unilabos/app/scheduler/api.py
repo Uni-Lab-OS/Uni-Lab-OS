@@ -124,7 +124,7 @@ def create_scheduler_router(
     get_device_state: Optional[Callable[[], Any]] = None,
     get_history: Optional[Callable[[], Any]] = None,
     *,
-    include_execution_shaped_workflow_routes: bool = True,
+    include_execution_shaped_workflow_routes: bool = False,
 ) -> APIRouter:
     """调度器 REST 路由（可挂独立 app，也可挂主进程 web server）。
 
@@ -410,6 +410,8 @@ def create_app(
     scheduler: Optional[EdgeScheduler] = None,
     device_state: Any = None,
     history: Any = None,
+    *,
+    include_execution_shaped_workflow_routes: bool = False,
 ) -> FastAPI:
     app = FastAPI(title="Uni-Lab Edge Scheduler", version="0.1.0")
     # 静态站点（如 GitHub Pages 上的 unilab-edge-ui）直连本地端口需要跨域放行
@@ -427,6 +429,9 @@ def create_app(
             lambda: app.state.scheduler,
             get_device_state=lambda: app.state.device_state,
             get_history=lambda: app.state.history,
+            include_execution_shaped_workflow_routes=(
+                include_execution_shaped_workflow_routes
+            ),
         )
     )
     return app

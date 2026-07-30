@@ -10,6 +10,11 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Callable, Dict, Iterable, Iterator, List, Optional, Tuple
 
+from unilabos.workflow.graph_validation import (
+    GraphValidationError,
+    MissingTemplateError,
+    validate_graph,
+)
 from unilabos.workflow.models import WorkflowEdgeWrite, WorkflowNodeWrite
 
 
@@ -235,6 +240,10 @@ CREATE TABLE IF NOT EXISTS workflow_source_registration (
     update_time TEXT NOT NULL,
     FOREIGN KEY(workflow_uuid) REFERENCES workflow(uuid)
 );
+CREATE UNIQUE INDEX IF NOT EXISTS ux_workflow_source_registration_path
+    ON workflow_source_registration(package_root, relative_path);
+CREATE UNIQUE INDEX IF NOT EXISTS ux_workflow_source_registration_uri
+    ON workflow_source_registration(source_uri);
 
 CREATE TABLE IF NOT EXISTS workflow_authoring (
     workflow_uuid TEXT PRIMARY KEY,
@@ -501,6 +510,7 @@ class WorkflowStore:
         revision: int,
         nodes: List[WorkflowNodeWrite],
         edges: List[WorkflowEdgeWrite],
+        protect_reserved_metadata: bool = False,
     ) -> Dict[str, Any]:
         with self.transaction() as conn:
             self._reconcile_graph(
@@ -510,6 +520,7 @@ class WorkflowStore:
                 nodes=nodes,
                 edges=edges,
                 advance_revision=True,
+                protect_reserved_metadata=protect_reserved_metadata,
             )
         return self.get_graph(workflow_uuid)
 
@@ -522,6 +533,7 @@ class WorkflowStore:
         nodes: List[WorkflowNodeWrite],
         edges: List[WorkflowEdgeWrite],
         advance_revision: bool,
+        protect_reserved_metadata: bool = False,
     ) -> int:
         workflow = self.get_workflow(workflow_uuid, conn=conn)
         if workflow["revision"] != expected_revision:
@@ -543,11 +555,72 @@ class WorkflowStore:
                 raise StoreConflict(
                     f"edge {edge.uuid} references a node outside the submitted graph"
                 )
+        template_uuids = sorted(
+            {
+                node.workflow_node_template_uuid
+                for node in nodes
+                if node.workflow_node_template_uuid is not None
+            }
+        )
+        templates: Dict[str, Dict[str, Any]] = {}
+        handles: Dict[str, Dict[str, Any]] = {}
+        if template_uuids:
+            marks = ",".join("?" for _ in template_uuids)
+            template_rows = conn.execute(
+                f"""
+                SELECT * FROM workflow_node_template
+                WHERE uuid IN ({marks}) AND deleted_at IS NULL
+                """,
+                template_uuids,
+            ).fetchall()
+            templates = {
+                row["uuid"]: self._node_template_row(row)
+                for row in template_rows
+            }
+            handle_rows = conn.execute(
+                f"""
+                SELECT * FROM workflow_handle_template
+                WHERE workflow_node_template_uuid IN ({marks})
+                  AND deleted_at IS NULL
+                """,
+                template_uuids,
+            ).fetchall()
+            handles = {
+                row["uuid"]: self._handle_template_row(row)
+                for row in handle_rows
+            }
+        effective_params = {
+            node.uuid: self._graph_node_param(conn, node) for node in nodes
+        }
+        try:
+            validate_graph(
+                nodes=nodes,
+                edges=edges,
+                templates=templates,
+                handles=handles,
+                effective_params=effective_params,
+            )
+        except MissingTemplateError as exc:
+            raise StoreNotFound(str(exc)) from exc
+        except GraphValidationError as exc:
+            raise StoreConflict(str(exc)) from exc
         now = utc_now()
         for node in nodes:
-            self._upsert_node(conn, workflow_uuid, node, now)
+            self._upsert_node(
+                conn,
+                workflow_uuid,
+                node,
+                now,
+                protect_reserved_metadata=protect_reserved_metadata,
+            )
         for edge in edges:
-            self._upsert_edge(conn, workflow_uuid, edge, now)
+            self._upsert_edge(
+                conn,
+                workflow_uuid,
+                edge,
+                now,
+                protect_reserved_metadata=protect_reserved_metadata,
+            )
         self._soft_delete_omitted(
             conn,
             table="workflow_edge",
@@ -576,18 +649,26 @@ class WorkflowStore:
         workflow_uuid: str,
         node: WorkflowNodeWrite,
         now: str,
+        *,
+        protect_reserved_metadata: bool,
     ) -> None:
         existing = conn.execute(
-            "SELECT workflow_uuid, create_time FROM workflow_node WHERE uuid = ?",
+            "SELECT workflow_uuid, create_time, meta_data "
+            "FROM workflow_node WHERE uuid = ?",
             (node.uuid,),
         ).fetchone()
         if existing is not None and existing["workflow_uuid"] != workflow_uuid:
             raise StoreConflict(
                 f"workflow node {node.uuid} belongs to another workflow"
             )
+        meta_data = self._protected_metadata(
+            node.meta_data,
+            existing["meta_data"] if existing is not None else None,
+            enabled=protect_reserved_metadata,
+        )
         values = (
             node.description,
-            _json(node.meta_data),
+            _json(meta_data),
             workflow_uuid,
             node.workflow_node_template_uuid,
             node.parent_uuid,
@@ -667,18 +748,25 @@ class WorkflowStore:
         workflow_uuid: str,
         edge: WorkflowEdgeWrite,
         now: str,
+        *,
+        protect_reserved_metadata: bool,
     ) -> None:
         existing = conn.execute(
-            "SELECT workflow_uuid FROM workflow_edge WHERE uuid = ?",
+            "SELECT workflow_uuid, meta_data FROM workflow_edge WHERE uuid = ?",
             (edge.uuid,),
         ).fetchone()
         if existing is not None and existing["workflow_uuid"] != workflow_uuid:
             raise StoreConflict(
                 f"workflow edge {edge.uuid} belongs to another workflow"
             )
+        meta_data = self._protected_metadata(
+            edge.meta_data,
+            existing["meta_data"] if existing is not None else None,
+            enabled=protect_reserved_metadata,
+        )
         values = (
             edge.description,
-            _json(edge.meta_data),
+            _json(meta_data),
             workflow_uuid,
             edge.source_node_uuid,
             edge.target_node_uuid,
@@ -708,6 +796,22 @@ class WorkflowStore:
             """,
             (now, *values, edge.uuid),
         )
+
+    @staticmethod
+    def _protected_metadata(
+        submitted: Dict[str, Any],
+        existing_json: Optional[str],
+        *,
+        enabled: bool,
+    ) -> Dict[str, Any]:
+        result = dict(submitted)
+        if not enabled:
+            return result
+        result.pop("unilab", None)
+        existing = _load(existing_json, {}) if existing_json is not None else {}
+        if isinstance(existing, dict) and "unilab" in existing:
+            result["unilab"] = existing["unilab"]
+        return result
 
     @staticmethod
     def _soft_delete_omitted(
@@ -904,40 +1008,43 @@ class WorkflowStore:
         source_uri: str,
     ) -> Dict[str, Any]:
         now = utc_now()
-        with self.transaction() as conn:
-            self.get_workflow(workflow_uuid, conn=conn)
-            conn.execute(
-                """
-                INSERT INTO workflow_source_registration(
-                    workflow_uuid, package_id, package_root, relative_path,
-                    source_uri, create_time, update_time
-                ) VALUES (?, ?, ?, ?, ?, ?, ?)
-                ON CONFLICT(workflow_uuid) DO UPDATE SET
-                    package_id = excluded.package_id,
-                    package_root = excluded.package_root,
-                    relative_path = excluded.relative_path,
-                    source_uri = excluded.source_uri,
-                    update_time = excluded.update_time
-                """,
-                (
-                    workflow_uuid,
-                    package_id,
-                    package_root,
-                    relative_path,
-                    source_uri,
-                    now,
-                    now,
-                ),
-            )
-            conn.execute(
-                """
-                INSERT INTO workflow_authoring(
-                    workflow_uuid, diagnostics, update_time
-                ) VALUES (?, '[]', ?)
-                ON CONFLICT(workflow_uuid) DO NOTHING
-                """,
-                (workflow_uuid, now),
-            )
+        try:
+            with self.transaction() as conn:
+                self.get_workflow(workflow_uuid, conn=conn)
+                conn.execute(
+                    """
+                    INSERT INTO workflow_source_registration(
+                        workflow_uuid, package_id, package_root, relative_path,
+                        source_uri, create_time, update_time
+                    ) VALUES (?, ?, ?, ?, ?, ?, ?)
+                    ON CONFLICT(workflow_uuid) DO UPDATE SET
+                        package_id = excluded.package_id,
+                        package_root = excluded.package_root,
+                        relative_path = excluded.relative_path,
+                        source_uri = excluded.source_uri,
+                        update_time = excluded.update_time
+                    """,
+                    (
+                        workflow_uuid,
+                        package_id,
+                        package_root,
+                        relative_path,
+                        source_uri,
+                        now,
+                        now,
+                    ),
+                )
+                conn.execute(
+                    """
+                    INSERT INTO workflow_authoring(
+                        workflow_uuid, diagnostics, update_time
+                    ) VALUES (?, '[]', ?)
+                    ON CONFLICT(workflow_uuid) DO NOTHING
+                    """,
+                    (workflow_uuid, now),
+                )
+        except sqlite3.IntegrityError as exc:
+            raise StoreConflict("工作流源码身份已被占用") from exc
         return self.get_source_registration(workflow_uuid)
 
     def get_source_registration(self, workflow_uuid: str) -> Dict[str, Any]:
@@ -954,6 +1061,20 @@ class WorkflowStore:
                 f"authoring source for workflow {workflow_uuid} is not registered"
             )
         return dict(row)
+
+    def list_source_registrations(self) -> List[Dict[str, Any]]:
+        with self._lock:
+            rows = self._conn.execute(
+                """
+                SELECT registration.*
+                FROM workflow_source_registration AS registration
+                JOIN workflow
+                  ON workflow.uuid = registration.workflow_uuid
+                WHERE workflow.deleted_at IS NULL
+                ORDER BY registration.workflow_uuid
+                """
+            ).fetchall()
+        return [dict(row) for row in rows]
 
     def get_authoring_record(self, workflow_uuid: str) -> Dict[str, Any]:
         with self._lock:
@@ -1046,6 +1167,14 @@ class WorkflowStore:
                     "workflow revision changed before apply"
                 )
             if kind == "graph":
+                graph_workflow = graph.get("workflow")
+                if not isinstance(graph_workflow, dict):
+                    raise StoreConflict("Candidate 缺少 Workflow 根对象")
+                if (
+                    graph_workflow.get("uuid") != workflow_uuid
+                    or graph_workflow.get("revision") != expected_revision
+                ):
+                    raise StoreConflict("Candidate Workflow 身份或版本不匹配")
                 nodes = [
                     WorkflowNodeWrite.model_validate(item)
                     for item in graph.get("nodes", [])
@@ -1061,7 +1190,25 @@ class WorkflowStore:
                     nodes=nodes,
                     edges=edges,
                     advance_revision=True,
+                    protect_reserved_metadata=False,
                 )
+                candidate_meta = graph_workflow.get("meta_data")
+                if not isinstance(candidate_meta, dict):
+                    raise StoreConflict("Candidate Workflow meta_data 无效")
+                workflow_meta = dict(workflow["meta_data"])
+                if "unilab" in candidate_meta:
+                    if candidate_meta["unilab"] is None:
+                        workflow_meta.pop("unilab", None)
+                    else:
+                        workflow_meta["unilab"] = candidate_meta["unilab"]
+                    conn.execute(
+                        """
+                        UPDATE workflow
+                        SET meta_data = ?, update_time = ?
+                        WHERE uuid = ? AND deleted_at IS NULL
+                        """,
+                        (_json(workflow_meta), now, workflow_uuid),
+                    )
             elif kind == "source_only":
                 resulting_revision = expected_revision
             else:

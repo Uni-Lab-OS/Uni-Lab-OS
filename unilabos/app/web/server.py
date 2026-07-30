@@ -90,14 +90,13 @@ def setup_server() -> FastAPI:
     # 设置API路由
     setup_api_routes(app)
 
-    # Backend-shaped Workflow authority. BasicConfig.working_dir is fixed
-    # before the web server starts and owns workflow.db for this workspace.
+    # Backend-shaped Workflow authority 统一拥有本工作区的 workflow.db。
     if not workflow_routes_mounted and BasicConfig.working_dir:
         try:
             from unilabos.app.workflow_api import install_workflow_api
-            from unilabos.workflow.composition import setup_workflow_service
+            from unilabos.workflow.composition import compose_workflow_runtime
 
-            workflow_service = setup_workflow_service(BasicConfig.working_dir)
+            workflow_service = compose_workflow_runtime(BasicConfig.working_dir)
             install_workflow_api(app, workflow_service)
             workflow_routes_mounted = True
         except Exception as e:  # noqa: BLE001 - keep unrelated web surfaces alive

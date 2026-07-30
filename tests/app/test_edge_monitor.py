@@ -195,7 +195,9 @@ class TestMonitorApi:
 
         from unilabos.app.scheduler.api import create_app
 
-        client = TestClient(create_app())
+        client = TestClient(
+            create_app(include_execution_shaped_workflow_routes=True)
+        )
         body = {
             "workflow_id": "wf-snap",
             "nodes": [{"id": "A", "device_id": "d1", "action_name": "run", "action_type": "goal"}],

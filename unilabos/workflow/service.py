@@ -142,12 +142,14 @@ class WorkflowService:
     ) -> Dict[str, Any]:
         try:
             identity = validate_uuid(workflow_uuid or str(uuid4()))
+            public_meta_data = dict(meta_data)
+            public_meta_data.pop("unilab", None)
             return self.store.create_workflow(
                 workflow_uuid=identity,
                 name=name,
                 tags=tags,
                 description=description,
-                meta_data=meta_data,
+                meta_data=public_meta_data,
             )
         except (ValueError, ValidationError):
             raise WorkflowError("invalid_input") from None
@@ -179,24 +181,31 @@ class WorkflowService:
         description: Optional[str],
         meta_data: Dict[str, Any],
     ) -> Dict[str, Any]:
-        with self._authoring_lock(workflow_uuid):
-            self.get_workflow(workflow_uuid)
+        current = self.get_workflow(workflow_uuid)
+        identity = current["uuid"]
+        with self._authoring_lock(identity):
+            current = self.get_workflow(identity)
+            public_meta_data = dict(meta_data)
+            public_meta_data.pop("unilab", None)
+            if "unilab" in current["meta_data"]:
+                public_meta_data["unilab"] = current["meta_data"]["unilab"]
             return self.store.update_workflow(
-                workflow_uuid,
+                identity,
                 name=name,
                 tags=tags,
                 description=description,
-                meta_data=meta_data,
+                meta_data=public_meta_data,
             )
 
     def delete_workflow(self, workflow_uuid: str) -> None:
-        with self._authoring_lock(workflow_uuid):
-            self.get_workflow(workflow_uuid)
-            self.store.delete_workflow(workflow_uuid)
+        identity = self.get_workflow(workflow_uuid)["uuid"]
+        with self._authoring_lock(identity):
+            self.get_workflow(identity)
+            self.store.delete_workflow(identity)
 
     def get_graph(self, workflow_uuid: str) -> Dict[str, Any]:
-        self.get_workflow(workflow_uuid)
-        return self.store.get_graph(workflow_uuid)
+        identity = self.get_workflow(workflow_uuid)["uuid"]
+        return self.store.get_graph(identity)
 
     def save_graph(
         self,
@@ -206,8 +215,9 @@ class WorkflowService:
         nodes: List[WorkflowNodeWrite | Dict[str, Any]],
         edges: List[WorkflowEdgeWrite | Dict[str, Any]],
     ) -> Dict[str, Any]:
-        with self._authoring_lock(workflow_uuid):
-            self.get_workflow(workflow_uuid)
+        identity = self.get_workflow(workflow_uuid)["uuid"]
+        with self._authoring_lock(identity):
+            self.get_workflow(identity)
             try:
                 node_values = [
                     item
@@ -222,15 +232,18 @@ class WorkflowService:
                     for item in edges
                 ]
                 return self.store.save_graph(
-                    workflow_uuid,
+                    identity,
                     revision=revision,
                     nodes=node_values,
                     edges=edge_values,
+                    protect_reserved_metadata=True,
                 )
             except ValidationError:
                 raise WorkflowError("invalid_input") from None
             except StoreRevisionConflict:
                 raise WorkflowConflict("workflow_revision_conflict") from None
+            except StoreNotFound:
+                raise WorkflowError("not_found") from None
             except StoreConflict:
                 raise WorkflowError("invalid_input") from None
 
@@ -246,7 +259,7 @@ class WorkflowService:
         description: Optional[str],
         meta_data: Dict[str, Any],
     ) -> Dict[str, Any]:
-        self.get_workflow(workflow_uuid)
+        workflow_uuid = self.get_workflow(workflow_uuid)["uuid"]
         if run_mode not in {"normal", "step", "single_node"}:
             raise WorkflowError("invalid_input")
         if target_node_uuid is not None:
@@ -281,8 +294,8 @@ class WorkflowService:
 
     def get_workflow_task(self, task_uuid: str) -> Dict[str, Any]:
         try:
-            validate_uuid(task_uuid)
-            return self.store.get_task(task_uuid)
+            identity = validate_uuid(task_uuid)
+            return self.store.get_task(identity)
         except (ValueError, StoreNotFound):
             raise WorkflowError("not_found") from None
 
@@ -310,13 +323,13 @@ class WorkflowService:
         )
 
     def list_workflow_node_jobs(self, task_uuid: str) -> List[Dict[str, Any]]:
-        self.get_workflow_task(task_uuid)
-        return self.store.list_jobs(task_uuid)
+        identity = self.get_workflow_task(task_uuid)["uuid"]
+        return self.store.list_jobs(identity)
 
     def get_workflow_node_job(self, job_uuid: str) -> Dict[str, Any]:
         try:
-            validate_uuid(job_uuid)
-            return self.store.get_job(job_uuid)
+            identity = validate_uuid(job_uuid)
+            return self.store.get_job(identity)
         except (ValueError, StoreNotFound):
             raise WorkflowError("not_found") from None
 
@@ -445,16 +458,26 @@ class WorkflowService:
         package_root: str | Path,
         relative_path: str,
     ) -> Dict[str, Any]:
+        workflow_uuid = self._get_authoring_workflow(workflow_uuid)["uuid"]
         with self._authoring_lock(workflow_uuid):
             self._get_authoring_workflow(workflow_uuid)
-            root = Path(package_root).resolve(strict=True)
+            raw_root = Path(os.path.abspath(package_root))
+            if self._path_contains_symlink(raw_root):
+                raise WorkflowError("invalid_input")
+            try:
+                root = raw_root.resolve(strict=True)
+            except OSError:
+                raise WorkflowError("invalid_input") from None
             if not root.is_dir() or not package_id:
                 raise WorkflowError("invalid_input")
             relative = PurePosixPath(relative_path)
             if (
                 relative.is_absolute()
-                or not relative.parts
+                or len(relative.parts) != 2
                 or any(part in {"", ".", ".."} for part in relative.parts)
+                or relative.parts[0] != "workflows"
+                or relative.suffix != ".py"
+                or not relative.stem
             ):
                 raise WorkflowError("invalid_input")
             target = root.joinpath(*relative.parts)
@@ -464,15 +487,19 @@ class WorkflowService:
                 allow_missing=True,
             )
             source_uri = f"package://{package_id}/{relative.as_posix()}"
-            return self.store.register_source(
-                workflow_uuid=workflow_uuid,
-                package_id=package_id,
-                package_root=str(root),
-                relative_path=relative.as_posix(),
-                source_uri=source_uri,
-            )
+            try:
+                return self.store.register_source(
+                    workflow_uuid=workflow_uuid,
+                    package_id=package_id,
+                    package_root=str(root),
+                    relative_path=relative.as_posix(),
+                    source_uri=source_uri,
+                )
+            except StoreConflict:
+                raise WorkflowConflict("invalid_input") from None
 
     def get_authoring(self, workflow_uuid: str) -> Dict[str, Any]:
+        workflow_uuid = self._get_authoring_workflow(workflow_uuid)["uuid"]
         with self._authoring_lock(workflow_uuid):
             workflow = self._get_authoring_workflow(workflow_uuid)
             registration = self._registration(workflow_uuid)
@@ -496,6 +523,7 @@ class WorkflowService:
         expected_workflow_revision: int,
     ) -> Dict[str, Any]:
         self._validate_hash(expected_draft_hash, nullable=True)
+        workflow_uuid = self._get_authoring_workflow(workflow_uuid)["uuid"]
         with self._authoring_lock(workflow_uuid):
             workflow = self._get_authoring_workflow(workflow_uuid)
             registration = self._registration(workflow_uuid)
@@ -553,6 +581,7 @@ class WorkflowService:
         self,
         workflow_uuid: str,
     ) -> Dict[str, Any]:
+        workflow_uuid = self._get_authoring_workflow(workflow_uuid)["uuid"]
         with self._authoring_lock(workflow_uuid):
             workflow = self._get_authoring_workflow(workflow_uuid)
             registration = self._registration(workflow_uuid)
@@ -653,6 +682,7 @@ class WorkflowService:
     ) -> Dict[str, Any]:
         self._validate_hash(expected_draft_hash, nullable=False)
         self._validate_hash(expected_candidate_hash, nullable=False)
+        workflow_uuid = self._get_authoring_workflow(workflow_uuid)["uuid"]
         with self._authoring_lock(workflow_uuid):
             workflow = self._get_authoring_workflow(workflow_uuid)
             registration = self._registration(workflow_uuid)
@@ -746,6 +776,12 @@ class WorkflowService:
 
             warnings: List[Dict[str, str]] = []
             try:
+                latest = self._read_source(registration)
+                if (
+                    latest is None
+                    or latest["draft_hash"] != actual_hash
+                ):
+                    raise WorkflowError("draft_hash_conflict")
                 self._atomic_write(registration, normalized_bytes)
                 written = self._read_source(registration)
                 assert written is not None
@@ -861,9 +897,25 @@ class WorkflowService:
     def _source_path(
         registration: Dict[str, Any],
     ) -> Tuple[Path, Path]:
-        root = Path(registration["package_root"]).resolve(strict=True)
+        stored_root = Path(registration["package_root"])
+        if WorkflowService._path_contains_symlink(stored_root):
+            raise WorkflowError("invalid_input")
+        try:
+            root = stored_root.resolve(strict=True)
+        except OSError:
+            raise WorkflowError("invalid_input") from None
         relative = PurePosixPath(registration["relative_path"])
         return root, root.joinpath(*relative.parts)
+
+    @staticmethod
+    def _path_contains_symlink(path: Path) -> bool:
+        absolute = Path(os.path.abspath(path))
+        current = Path(absolute.anchor)
+        for part in absolute.parts[1:]:
+            current = current / part
+            if current.is_symlink():
+                return True
+        return False
 
     @staticmethod
     def _assert_contained_regular_target(
@@ -875,8 +927,16 @@ class WorkflowService:
         if target.is_symlink():
             raise WorkflowError("invalid_input")
         try:
+            relative = target.relative_to(root)
+            current = root
+            for part in relative.parts[:-1]:
+                current = current / part
+                if current.is_symlink():
+                    raise WorkflowError("invalid_input")
             resolved = target.resolve(strict=False)
             resolved.relative_to(root)
+        except WorkflowError:
+            raise
         except (OSError, ValueError):
             raise WorkflowError("invalid_input") from None
         if target.exists() and not target.is_file():
