@@ -15,11 +15,11 @@ from unilabos.config.config import BasicConfig
 
 
 @pytest.fixture()
-def client(tmp_path, monkeypatch):
+def client(tmp_path_factory, monkeypatch):
     """使用真实组合根构造一个隔离 workspace 的公共 HTTP app。"""
 
-    working_dir = tmp_path / "unilabos_data"
-    working_dir.mkdir()
+    working_dir = tmp_path_factory.getbasetemp() / "phase01-independent-workspace"
+    working_dir.mkdir(exist_ok=True)
     monkeypatch.setattr(BasicConfig, "working_dir", str(working_dir))
     monkeypatch.setattr(
         web_server,
