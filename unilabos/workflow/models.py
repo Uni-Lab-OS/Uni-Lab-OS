@@ -234,6 +234,23 @@ class CandidateCompilation(BaseModel):
         )
 
 
+class CandidateDiagnostic(BaseModel):
+    """One stable compiler diagnostic exposed by the Authoring contract."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    severity: str
+    code: str
+    message: str
+
+    @field_validator("severity", "code", "message")
+    @classmethod
+    def _required_text(cls, value: str) -> str:
+        if not isinstance(value, str) or not value.strip():
+            raise ValueError("diagnostic text must not be blank")
+        return value
+
+
 class CandidateSourceMapEntry(BaseModel):
     """One exact D-077 Python-source range."""
 
@@ -312,6 +329,7 @@ class CandidateChangeset(BaseModel):
 __all__ = [
     "CandidateChangeset",
     "CandidateCompilation",
+    "CandidateDiagnostic",
     "CandidateSourceMapEntry",
     "JsonArray",
     "JsonObject",

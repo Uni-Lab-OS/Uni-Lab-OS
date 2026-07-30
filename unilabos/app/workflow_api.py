@@ -5,12 +5,14 @@ from __future__ import annotations
 import asyncio
 import json
 import re
+import sys
 from typing import Annotated, Any, Dict, List, Optional
 
 from fastapi import APIRouter, FastAPI, Header, Query, Request
 from fastapi.exception_handlers import request_validation_exception_handler
 from fastapi.exceptions import RequestValidationError
 from fastapi.responses import JSONResponse, Response, StreamingResponse
+from fastapi.routing import APIRoute
 from pydantic import BaseModel, ConfigDict, Field, field_validator
 
 from unilabos.workflow.models import (
@@ -33,6 +35,8 @@ class _BackendModel(BaseModel):
 HashToken = Annotated[str, Field(pattern=r"^sha256:[0-9a-f]{64}$")]
 _SIGNED_DECIMAL = re.compile(r"[+-]?[0-9]+\Z")
 _INT64_MAX = (1 << 63) - 1
+_MAX_BACKEND_JSON_DEPTH = 10_000
+_BACKEND_JSON_RECURSION_LIMIT = (_MAX_BACKEND_JSON_DEPTH * 2) + 100
 _GO_WHITE_SPACE = (
     "\t\n\v\f\r "
     "\u0085\u00a0\u1680"
@@ -40,6 +44,63 @@ _GO_WHITE_SPACE = (
     "\u2006\u2007\u2008\u2009\u200a"
     "\u2028\u2029\u202f\u205f\u3000"
 )
+
+
+def _ensure_backend_json_recursion_budget() -> None:
+    """Let stdlib JSON mirror Go's frozen 10,000-level nesting boundary."""
+
+    if sys.getrecursionlimit() < _BACKEND_JSON_RECURSION_LIMIT:
+        sys.setrecursionlimit(_BACKEND_JSON_RECURSION_LIMIT)
+
+
+def _check_backend_json_depth(body: bytes) -> None:
+    depth = 0
+    in_string = False
+    escaped = False
+    for byte in body:
+        if in_string:
+            if escaped:
+                escaped = False
+            elif byte == ord("\\"):
+                escaped = True
+            elif byte == ord('"'):
+                in_string = False
+            continue
+        if byte == ord('"'):
+            in_string = True
+        elif byte in (ord("{"), ord("[")):
+            depth += 1
+            if depth > _MAX_BACKEND_JSON_DEPTH:
+                raise ValueError("JSON nesting exceeds the Backend limit")
+        elif byte in (ord("}"), ord("]")):
+            depth -= 1
+
+
+class _BackendJSONRoute(APIRoute):
+    """Preload JSON with the frozen Backend depth and error-envelope rules."""
+
+    def get_route_handler(self):
+        route_handler = super().get_route_handler()
+
+        async def backend_json_route_handler(request: Request) -> Response:
+            content_type = request.headers.get("content-type", "")
+            mime = content_type.split(";", 1)[0].strip().lower()
+            if mime == "application/json" or mime.endswith("+json"):
+                body = await request.body()
+                try:
+                    _check_backend_json_depth(body)
+                    request._json = json.loads(body)
+                except (
+                    json.JSONDecodeError,
+                    OverflowError,
+                    RecursionError,
+                    UnicodeError,
+                    ValueError,
+                ):
+                    return _error(WorkflowError("invalid_input"))
+            return await route_handler(request)
+
+        return backend_json_route_handler
 
 
 def _parse_non_negative_int64_decimal(value: str) -> int:
@@ -155,7 +216,12 @@ def format_sse_event(event: Dict[str, Any]) -> str:
 def create_workflow_router(service: WorkflowService) -> APIRouter:
     """Build the public Workflow router around one injected authority."""
 
-    router = APIRouter(prefix="/api/v1", tags=["workflow"])
+    _ensure_backend_json_recursion_budget()
+    router = APIRouter(
+        prefix="/api/v1",
+        tags=["workflow"],
+        route_class=_BackendJSONRoute,
+    )
 
     @router.post("/workflows")
     def create_workflow(body: WorkflowCreateRequest) -> JSONResponse:

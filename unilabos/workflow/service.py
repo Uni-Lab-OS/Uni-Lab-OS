@@ -21,9 +21,11 @@ from uuid import uuid4
 
 from pydantic import ValidationError
 
+from unilabos.workflow.graph_validation import GraphValidationError, validate_graph
 from unilabos.workflow.models import (
     CandidateChangeset,
     CandidateCompilation,
+    CandidateDiagnostic,
     CandidateSourceMapEntry,
     WorkflowEdgeWrite,
     WorkflowNodeWrite,
@@ -1005,6 +1007,8 @@ class WorkflowService:
                 registration=registration,
                 python_source=source["python_source"],
             )
+            if not self._normalize_candidate_diagnostics(compilation):
+                raise WorkflowError("candidate_invalid")
             if not compilation.valid:
                 if any(
                     str(item.get("severity", "")).lower() == "error"
@@ -1780,21 +1784,7 @@ class WorkflowService:
         applied_graph: Dict[str, Any],
     ) -> Optional[Dict[str, Any]]:
         applied_graph = self._validated_applied_backend_graph(applied_graph)
-        try:
-            if not isinstance(compilation.diagnostics, list) or any(
-                not isinstance(item, dict) for item in compilation.diagnostics
-            ):
-                raise ValueError
-            for diagnostic in compilation.diagnostics:
-                normalize_json_object(diagnostic)
-        except ValueError:
-            compilation.diagnostics = [
-                {
-                    "severity": "error",
-                    "code": "candidate_invalid",
-                    "message": _ERRORS["candidate_invalid"][1],
-                }
-            ]
+        if not self._normalize_candidate_diagnostics(compilation):
             return None
         if not compilation.valid:
             return None
@@ -1813,22 +1803,29 @@ class WorkflowService:
             changeset = CandidateChangeset.model_validate(
                 compilation.changeset,
             ).model_dump()
+            self._validate_candidate_bundle_semantics(
+                graph=graph,
+                applied_graph=applied_graph,
+                source_map=source_map,
+                changeset=changeset,
+            )
             compiler_version = compilation.compiler_version
             if not compiler_version.strip():
                 raise ValueError
             template_catalog_fingerprint = compilation.template_catalog_fingerprint
             if _HASH_TOKEN.fullmatch(template_catalog_fingerprint) is None:
                 raise ValueError
-        except (TypeError, ValidationError, ValueError, WorkflowError) as error:
+        except (
+            GraphValidationError,
+            KeyError,
+            TypeError,
+            ValidationError,
+            ValueError,
+            WorkflowError,
+        ) as error:
             if isinstance(error, WorkflowError) and error.code != "candidate_invalid":
                 raise
-            compilation.diagnostics.append(
-                {
-                    "severity": "error",
-                    "code": "candidate_invalid",
-                    "message": _ERRORS["candidate_invalid"][1],
-                }
-            )
+            self._set_candidate_invalid_diagnostic(compilation)
             return None
         bundle = {
             "base_workflow_revision": workflow_revision,
@@ -1843,19 +1840,183 @@ class WorkflowService:
         try:
             canonical_bundle = _canonical_json(bundle)
         except (TypeError, UnicodeError, ValueError):
-            compilation.diagnostics.append(
-                {
-                    "severity": "error",
-                    "code": "candidate_invalid",
-                    "message": _ERRORS["candidate_invalid"][1],
-                }
-            )
+            self._set_candidate_invalid_diagnostic(compilation)
             return None
         return {
             "candidate_hash": _sha256(canonical_bundle),
             **bundle,
             "update_time": utc_now(),
         }
+
+    @staticmethod
+    def _set_candidate_invalid_diagnostic(
+        compilation: CandidateCompilation,
+    ) -> None:
+        compilation.diagnostics = [
+            {
+                "severity": "error",
+                "code": "candidate_invalid",
+                "message": _ERRORS["candidate_invalid"][1],
+            }
+        ]
+
+    @classmethod
+    def _normalize_candidate_diagnostics(
+        cls,
+        compilation: CandidateCompilation,
+    ) -> bool:
+        try:
+            if not isinstance(compilation.diagnostics, list):
+                raise ValueError
+            compilation.diagnostics = [
+                CandidateDiagnostic.model_validate(item).model_dump()
+                for item in compilation.diagnostics
+            ]
+        except (TypeError, ValidationError, ValueError):
+            cls._set_candidate_invalid_diagnostic(compilation)
+            return False
+        return True
+
+    @staticmethod
+    def _semantic_node(node: Dict[str, Any]) -> Dict[str, Any]:
+        return WorkflowNodeWrite.model_validate(
+            {
+                field: node[field]
+                for field in WorkflowNodeWrite.model_fields
+                if field in node
+            }
+        ).model_dump()
+
+    @staticmethod
+    def _semantic_edge(edge: Dict[str, Any]) -> Dict[str, Any]:
+        return WorkflowEdgeWrite.model_validate(
+            {
+                field: edge[field]
+                for field in WorkflowEdgeWrite.model_fields
+                if field in edge
+            }
+        ).model_dump()
+
+    @classmethod
+    def _validate_candidate_bundle_semantics(
+        cls,
+        *,
+        graph: Dict[str, Any],
+        applied_graph: Dict[str, Any],
+        source_map: List[Dict[str, Any]],
+        changeset: Dict[str, Any],
+    ) -> None:
+        """Prove that one compiler bundle describes its complete graph exactly."""
+
+        workflow = graph["workflow"]
+        applied_workflow = applied_graph["workflow"]
+        for field in _WORKFLOW_READ_FIELDS - {"meta_data"}:
+            if workflow.get(field) != applied_workflow.get(field):
+                raise ValueError("Candidate changed an unsupported Workflow field")
+
+        workflow_meta = dict(workflow["meta_data"])
+        applied_meta = dict(applied_workflow["meta_data"])
+        reserved_changed = workflow_meta.pop("unilab", None) != applied_meta.pop(
+            "unilab",
+            None,
+        )
+        if workflow_meta != applied_meta:
+            raise ValueError("Candidate changed non-authoring Workflow metadata")
+
+        for field in ("node_templates", "handle_templates"):
+            candidate_entities = sorted(graph[field], key=lambda item: item["uuid"])
+            applied_entities = sorted(
+                applied_graph[field],
+                key=lambda item: item["uuid"],
+            )
+            if candidate_entities != applied_entities:
+                raise ValueError("Candidate catalog projection is not authoritative")
+
+        nodes = [cls._semantic_node(item) for item in graph["nodes"]]
+        edges = [cls._semantic_edge(item) for item in graph["edges"]]
+        candidate_nodes = {item["uuid"]: item for item in nodes}
+        candidate_edges = {item["uuid"]: item for item in edges}
+        if len(candidate_nodes) != len(nodes) or len(candidate_edges) != len(edges):
+            raise ValueError("Candidate graph contains duplicate UUIDs")
+
+        templates = {item["uuid"]: item for item in graph["node_templates"]}
+        handles = {item["uuid"]: item for item in graph["handle_templates"]}
+        validate_graph(
+            nodes=[
+                WorkflowNodeWrite.model_validate(item)
+                for item in candidate_nodes.values()
+            ],
+            edges=[
+                WorkflowEdgeWrite.model_validate(item)
+                for item in candidate_edges.values()
+            ],
+            templates=templates,
+            handles=handles,
+            effective_params={
+                uuid: item["param"] or {} for uuid, item in candidate_nodes.items()
+            },
+            workflow_meta_data=workflow["meta_data"],
+            node_meta_data={
+                uuid: item["meta_data"] for uuid, item in candidate_nodes.items()
+            },
+        )
+
+        if any(
+            entry["workflow_node_uuid"] not in candidate_nodes for entry in source_map
+        ):
+            raise ValueError("Source map references a Node outside the Candidate")
+
+        applied_nodes = {
+            item["uuid"]: cls._semantic_node(item) for item in applied_graph["nodes"]
+        }
+        applied_edges = {
+            item["uuid"]: cls._semantic_edge(item) for item in applied_graph["edges"]
+        }
+        expected = {
+            "created_node_uuids": set(candidate_nodes) - set(applied_nodes),
+            "updated_node_uuids": {
+                uuid
+                for uuid in set(candidate_nodes) & set(applied_nodes)
+                if candidate_nodes[uuid] != applied_nodes[uuid]
+            },
+            "deleted_node_uuids": set(applied_nodes) - set(candidate_nodes),
+            "created_edge_uuids": set(candidate_edges) - set(applied_edges),
+            "updated_edge_uuids": {
+                uuid
+                for uuid in set(candidate_edges) & set(applied_edges)
+                if candidate_edges[uuid] != applied_edges[uuid]
+            },
+            "deleted_edge_uuids": set(applied_edges) - set(candidate_edges),
+        }
+        node_fields = (
+            "created_node_uuids",
+            "updated_node_uuids",
+            "deleted_node_uuids",
+        )
+        edge_fields = (
+            "created_edge_uuids",
+            "updated_edge_uuids",
+            "deleted_edge_uuids",
+        )
+        for fields in (node_fields, edge_fields):
+            values = [changeset[field] for field in fields]
+            if any(len(value) != len(set(value)) for value in values):
+                raise ValueError("Changeset contains duplicate UUIDs")
+            if any(
+                set(values[left]) & set(values[right])
+                for left in range(len(values))
+                for right in range(left + 1, len(values))
+            ):
+                raise ValueError("Changeset lifecycle UUID sets overlap")
+        if any(set(changeset[field]) != expected[field] for field in expected):
+            raise ValueError("Changeset does not describe the Candidate graph")
+        if changeset["reserved_metadata_changed"] is not reserved_changed:
+            raise ValueError("Changeset reserved metadata flag is inaccurate")
+
+        graph_changed = reserved_changed or any(expected.values())
+        expected_kind = "graph" if graph_changed else "source_only"
+        if changeset["kind"] != expected_kind:
+            raise ValueError("Changeset kind does not match graph semantics")
 
     @staticmethod
     def _backend_graph_projection(
