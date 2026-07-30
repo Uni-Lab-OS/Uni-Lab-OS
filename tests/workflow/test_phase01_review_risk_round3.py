@@ -388,10 +388,14 @@ def test_apply_detects_old_file_descriptor_write_during_cas_install(
         **kwargs: Any,
     ) -> None:
         source_as_path = Path(source)
+        destination_as_path = Path(destination)
         if (
-            Path(destination) == source_path
-            and source_as_path.suffix == ".tmp"
-        ):
+            destination_as_path == source_path
+            or (
+                destination_as_path == Path(source_path.name)
+                and kwargs.get("dst_dir_fd") is not None
+            )
+        ) and source_as_path.suffix == ".tmp":
             install_entered.set()
             if not allow_install.wait(timeout=2):
                 raise TimeoutError("test did not release CAS install")
