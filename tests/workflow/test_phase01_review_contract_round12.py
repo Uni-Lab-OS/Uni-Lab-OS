@@ -16,6 +16,7 @@ from unilabos.workflow.store import WorkflowStore
 
 WORKFLOW_UUID = "11111111-1111-4111-8111-111111111111"
 NODE_UUID = "20000000-0000-4000-8000-000000000001"
+SECOND_NODE_UUID = "20000000-0000-4000-8000-000000000002"
 EDGE_UUID = "30000000-0000-4000-8000-000000000001"
 NODE_TEMPLATE_UUID = "40000000-0000-4000-8000-000000000001"
 RESOURCE_TEMPLATE_UUID = "50000000-0000-4000-8000-000000000001"
@@ -230,13 +231,26 @@ class Round12Compiler:
                     "disabled": False,
                     "minimized": False,
                     "meta_data": {"node": {"round": 12}},
+                },
+                {
+                    "uuid": SECOND_NODE_UUID,
+                    "workflow_node_template_uuid": NODE_TEMPLATE_UUID,
+                    "name": "candidate target node",
+                    "status": "idle",
+                    "type": "compute",
+                    "pose": {"x": 2.5},
+                    "param": {"input": [2, {"deep": True}]},
+                    "execution_policy": {"retry": {"maximum": 0}},
+                    "disabled": False,
+                    "minimized": False,
+                    "meta_data": {"node": {"round": 12}},
                 }
             ],
             "edges": [
                 {
                     "uuid": EDGE_UUID,
                     "source_node_uuid": NODE_UUID,
-                    "target_node_uuid": NODE_UUID,
+                    "target_node_uuid": SECOND_NODE_UUID,
                     "source_handle_uuid": SOURCE_HANDLE_UUID,
                     "target_handle_uuid": TARGET_HANDLE_UUID,
                     "meta_data": {"edge": {"round": 12}},
@@ -296,7 +310,7 @@ class Round12Compiler:
             }
         return {
             "kind": "graph",
-            "created_node_uuids": [],
+            "created_node_uuids": [SECOND_NODE_UUID],
             "updated_node_uuids": [NODE_UUID],
             "deleted_node_uuids": [],
             "created_edge_uuids": [EDGE_UUID],
