@@ -7,20 +7,13 @@
 import json
 import subprocess
 import sys
-from contextlib import contextmanager
+import threading
 from pathlib import Path
 
 import pytest
 
 from unilabos.registry.init_enforce import validate_init_param_enforce
-from unilabos.registry.registry import lab_registry
-from unilabos.resources.resource_tracker import ResourceDictInstance
-from unilabos.ros.initialize_device import initialize_device_from_dict
-from unilabos.utils.exception import DeviceClassInvalid
 
-DRIVER_MODULE = (
-    "tests.registry.fixtures.initializer_drivers:JsonConfiguredDevice"
-)
 PACKAGE_FIXTURE = (
     Path(__file__).resolve().parents[1]
     / "registry"
@@ -28,8 +21,22 @@ PACKAGE_FIXTURE = (
     / "external_variant_pkg"
 )
 
+ROS_SCENARIO_SCRIPT = """
+import json
+import sys
+from contextlib import contextmanager
 
-def _entry(*, channels, deck_name, port):
+import rclpy
+
+from unilabos.registry.registry import lab_registry
+from unilabos.resources.resource_tracker import ResourceDictInstance
+from unilabos.ros.initialize_device import initialize_device_from_dict
+from unilabos.utils.exception import DeviceClassInvalid
+
+DRIVER_MODULE = "tests.registry.fixtures.initializer_drivers:JsonConfiguredDevice"
+
+
+def entry(*, channels, deck_name, port):
     return {
         "class": {
             "module": DRIVER_MODULE,
@@ -57,28 +64,26 @@ def _entry(*, channels, deck_name, port):
     }
 
 
-def _device_config(registry_key, *, name):
-    return ResourceDictInstance.get_resource_instance_from_dict(
-        {
-            "name": name,
-            "type": "device",
-            "class": registry_key,
-            "config": {
-                "backend_type": "runtime-value-must-not-win",
-                "backend_params": {
-                    "host": "10.0.0.2",
-                    "port": 1234,
-                },
-                "deck_name": "runtime-deck",
-                "channels": 1,
-                "name": name,
+def device_config(registry_key, *, name):
+    return ResourceDictInstance.get_resource_instance_from_dict({
+        "name": name,
+        "type": "device",
+        "class": registry_key,
+        "config": {
+            "backend_type": "runtime-value-must-not-win",
+            "backend_params": {
+                "host": "10.0.0.2",
+                "port": 1234,
             },
-        }
-    )
+            "deck_name": "runtime-deck",
+            "channels": 1,
+            "name": name,
+        },
+    })
 
 
 @contextmanager
-def _registered(entries):
+def registered(entries):
     missing = object()
     previous = {
         key: lab_registry.device_type_registry.get(key, missing)
@@ -95,23 +100,129 @@ def _registered(entries):
                 lab_registry.device_type_registry[key] = value
 
 
-@pytest.fixture
-def rclpy_runtime():
-    import rclpy
+def observe_driver(node):
+    driver = node.driver_instance
+    return {
+        "backend_host": driver.backend.host,
+        "backend_port": driver.backend.port,
+        "deck_name": driver.deck.name,
+        "channels": driver.channels,
+        "name": driver.name,
+    }
 
-    started_here = not rclpy.ok()
-    if started_here:
-        rclpy.init()
+
+scenario = sys.argv[1]
+if scenario == "exact":
+    registry_key = "community.vendor.model_384"
+    node = None
+    rclpy.init()
     try:
-        yield
+        with registered({
+            registry_key: entry(
+                channels=384,
+                deck_name="runtime-deck-384",
+                port=4321,
+            )
+        }):
+            node = initialize_device_from_dict(
+                "lh_runtime",
+                device_config(registry_key, name="lh_runtime"),
+            )
+            payload = observe_driver(node)
     finally:
-        if started_here and rclpy.ok():
-            rclpy.shutdown()
+        if node is not None:
+            node.ros_node_instance.destroy_node()
+        rclpy.shutdown()
+elif scenario == "alias":
+    registry_key = "community.vendor.model_a"
+    with registered({
+        registry_key: entry(
+            channels=8,
+            deck_name="model-a-deck",
+            port=4008,
+        )
+    }):
+        try:
+            initialize_device_from_dict(
+                "lh_alias",
+                device_config("vendor.model_a", name="lh_alias"),
+            )
+        except DeviceClassInvalid as exc:
+            payload = {
+                "error_type": type(exc).__name__,
+                "mentions_missing_key": "vendor.model_a not found" in str(exc),
+            }
+        else:
+            raise AssertionError("stripped alias unexpectedly initialized")
+elif scenario == "variants":
+    entries = {
+        "community.vendor.model_a": entry(
+            channels=8,
+            deck_name="model-a-deck",
+            port=4008,
+        ),
+        "community.vendor.model_b": entry(
+            channels=96,
+            deck_name="model-b-deck",
+            port=4096,
+        ),
+    }
+    nodes = []
+    rclpy.init()
+    try:
+        with registered(entries):
+            for registry_key, name in (
+                ("community.vendor.model_a", "lh_a"),
+                ("community.vendor.model_b", "lh_b"),
+            ):
+                nodes.append(
+                    initialize_device_from_dict(
+                        name,
+                        device_config(registry_key, name=name),
+                    )
+                )
+            payload = {
+                registry_key: observe_driver(node)
+                for registry_key, node in zip(entries, nodes)
+            }
+    finally:
+        for node in nodes:
+            node.ros_node_instance.destroy_node()
+        rclpy.shutdown()
+else:
+    raise AssertionError(f"unknown scenario: {scenario}")
+
+print(json.dumps(payload))
+"""
 
 
-def _destroy_device(node):
-    if node is not None:
-        node.ros_node_instance.destroy_node()
+def _run_ros_scenario(name):
+    result = subprocess.run(
+        [sys.executable, "-c", ROS_SCENARIO_SCRIPT, name],
+        cwd=Path(__file__).resolve().parents[2],
+        capture_output=True,
+        check=False,
+        text=True,
+        timeout=60,
+    )
+
+    assert result.returncode == 0, result.stderr
+    return json.loads(result.stdout.strip().splitlines()[-1])
+
+
+def _live_ros_asyncio_threads():
+    return [
+        thread.name
+        for thread in threading.enumerate()
+        if thread.is_alive() and thread.name == "ROS2DeviceNode"
+    ]
+
+
+@pytest.fixture(autouse=True)
+def assert_no_ros_asyncio_thread_leak():
+    yield
+
+    assert _live_ros_asyncio_threads() == []
 
 
 def test_init_param_enforce_rejects_removed_class_init_factory_dsl():
@@ -128,78 +239,44 @@ def test_init_param_enforce_rejects_removed_class_init_factory_dsl():
         )
 
 
-def test_exact_community_key_builds_driver_from_merged_json(rclpy_runtime):
-    registry_key = "community.vendor.model_384"
-    node = None
-    with _registered(
-        {registry_key: _entry(channels=384, deck_name="runtime-deck-384", port=4321)}
-    ):
-        try:
-            node = initialize_device_from_dict(
-                "lh_runtime",
-                _device_config(registry_key, name="lh_runtime"),
-            )
-
-            assert node is not None
-            driver = node.driver_instance
-            assert driver.backend.host == "10.0.0.2"
-            assert driver.backend.port == 4321
-            assert driver.deck.name == "runtime-deck-384"
-            assert driver.channels == 384
-            assert driver.name == "lh_runtime"
-        finally:
-            _destroy_device(node)
+def test_exact_community_key_builds_driver_from_merged_json():
+    assert _run_ros_scenario("exact") == {
+        "backend_host": "10.0.0.2",
+        "backend_port": 4321,
+        "deck_name": "runtime-deck-384",
+        "channels": 384,
+        "name": "lh_runtime",
+    }
 
 
 def test_initialize_requires_exact_registry_key_without_alias_fallback():
-    registry_key = "community.vendor.model_a"
-    with _registered(
-        {registry_key: _entry(channels=8, deck_name="model-a-deck", port=4008)}
-    ):
-        with pytest.raises(DeviceClassInvalid, match="vendor.model_a not found"):
-            initialize_device_from_dict(
-                "lh_alias",
-                _device_config("vendor.model_a", name="lh_alias"),
-            )
-
-
-def test_shared_driver_supports_two_json_enforced_variants(rclpy_runtime):
-    entries = {
-        "community.vendor.model_a": _entry(
-            channels=8,
-            deck_name="model-a-deck",
-            port=4008,
-        ),
-        "community.vendor.model_b": _entry(
-            channels=96,
-            deck_name="model-b-deck",
-            port=4096,
-        ),
+    assert _run_ros_scenario("alias") == {
+        "error_type": "DeviceClassInvalid",
+        "mentions_missing_key": True,
     }
-    nodes = []
-    with _registered(entries):
-        try:
-            for registry_key, name in (
-                ("community.vendor.model_a", "lh_a"),
-                ("community.vendor.model_b", "lh_b"),
-            ):
-                node = initialize_device_from_dict(
-                    name,
-                    _device_config(registry_key, name=name),
-                )
-                assert node is not None
-                nodes.append(node)
 
-            first, second = (node.driver_instance for node in nodes)
-            assert first.channels == 8
-            assert first.backend.port == 4008
-            assert first.deck.name == "model-a-deck"
-            assert second.channels == 96
-            assert second.backend.port == 4096
-            assert second.deck.name == "model-b-deck"
-        finally:
-            for node in nodes:
-                _destroy_device(node)
+
+def test_shared_driver_supports_two_json_enforced_variants():
+    assert _run_ros_scenario("variants") == {
+        "community.vendor.model_a": {
+            "backend_host": "10.0.0.2",
+            "backend_port": 4008,
+            "deck_name": "model-a-deck",
+            "channels": 8,
+            "name": "lh_a",
+        },
+        "community.vendor.model_b": {
+            "backend_host": "10.0.0.2",
+            "backend_port": 4096,
+            "deck_name": "model-b-deck",
+            "channels": 96,
+            "name": "lh_b",
+        },
+    }
+
+
+def test_ros_construction_scenarios_leave_no_asyncio_thread_in_pytest():
+    assert _live_ros_asyncio_threads() == []
 
 
 def test_fixture_discovery_load_and_initialization_form_one_complete_chain():
@@ -271,6 +348,7 @@ print(json.dumps({
         capture_output=True,
         check=False,
         text=True,
+        timeout=60,
     )
 
     assert result.returncode == 0, result.stderr
