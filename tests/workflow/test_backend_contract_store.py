@@ -165,7 +165,7 @@ def test_graph_revision_conflict_is_atomic_and_reconcile_preserves_uuid(
             nodes=[_node(NODE_A_UUID, "stale overwrite")],
             edges=[],
         )
-    assert conflict.value.code == "workflow_revision_conflict"
+    assert conflict.value.code == "conflict"
     after_conflict = service.get_graph(WORKFLOW_UUID)
     assert after_conflict["workflow"]["revision"] == 2
     assert after_conflict["nodes"][0]["name"] == "first"

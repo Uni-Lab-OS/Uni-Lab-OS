@@ -46,14 +46,7 @@ WORKFLOW_RESERVED = {
     "output_contract": {"version": 1, "outputs": []},
     "output_bindings": {},
 }
-NODE_RESERVED = {
-    "input_bindings": {
-        B_TARGET_NUMBER: {
-            "source": "workflow_input",
-            "parameter": "temperature",
-        }
-    }
-}
+NODE_RESERVED = {"input_bindings": {}}
 
 
 @pytest.fixture()
