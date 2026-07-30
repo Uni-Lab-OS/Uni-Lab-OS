@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-import json
 import sqlite3
 import threading
 from contextlib import contextmanager
@@ -15,6 +14,7 @@ from unilabos.workflow.graph_validation import (
     MissingTemplateError,
     validate_graph,
 )
+from unilabos.workflow.json_codec import decode_json_bytes, encode_json
 from unilabos.workflow.models import WorkflowEdgeWrite, WorkflowNodeWrite
 
 
@@ -23,19 +23,13 @@ def utc_now() -> str:
 
 
 def _json(value: Any) -> str:
-    return json.dumps(
-        value,
-        allow_nan=False,
-        ensure_ascii=False,
-        separators=(",", ":"),
-        sort_keys=True,
-    )
+    return encode_json(value, sort_keys=True).decode("utf-8")
 
 
 def _load(value: Optional[str], fallback: Any) -> Any:
     if value is None or value == "":
         return fallback
-    return json.loads(value)
+    return decode_json_bytes(value.encode("utf-8"))
 
 
 class StoreNotFound(LookupError):

@@ -4,7 +4,6 @@ from __future__ import annotations
 
 import fcntl
 import hashlib
-import json
 import os
 import re
 import signal
@@ -12,7 +11,7 @@ import stat
 import struct
 import threading
 from collections import defaultdict
-from collections.abc import Iterator
+from collections.abc import Iterable, Iterator
 from contextlib import contextmanager, suppress
 from datetime import datetime, timezone
 from pathlib import Path, PurePosixPath
@@ -22,6 +21,7 @@ from uuid import uuid4
 from pydantic import ValidationError
 
 from unilabos.workflow.graph_validation import GraphValidationError, validate_graph
+from unilabos.workflow.json_codec import encode_json
 from unilabos.workflow.models import (
     CandidateChangeset,
     CandidateCompilation,
@@ -212,13 +212,44 @@ def _sha256(data: bytes) -> str:
 
 
 def _canonical_json(value: Any) -> bytes:
-    return json.dumps(
-        value,
-        allow_nan=False,
-        ensure_ascii=False,
-        separators=(",", ":"),
-        sort_keys=True,
-    ).encode("utf-8")
+    return encode_json(value, sort_keys=True)
+
+
+def _strict_json_equal(left: Any, right: Any) -> bool:
+    """Compare JSON values without Python's bool/int/float aliases."""
+
+    if type(left) is not type(right):
+        return False
+    if isinstance(left, dict):
+        return left.keys() == right.keys() and all(
+            _strict_json_equal(value, right[key]) for key, value in left.items()
+        )
+    if isinstance(left, list):
+        return len(left) == len(right) and all(
+            _strict_json_equal(left_item, right_item)
+            for left_item, right_item in zip(left, right, strict=True)
+        )
+    return bool(left == right)
+
+
+def _source_ranges_fit(
+    python_source: str,
+    ranges: Iterable[Dict[str, Any]],
+) -> bool:
+    """Return whether every 1-based range endpoint fits the exact source."""
+
+    lines = python_source.splitlines()
+    if not lines:
+        lines = [""]
+
+    def position_fits(line: int, column: int) -> bool:
+        return line <= len(lines) and column <= len(lines[line - 1]) + 1
+
+    return all(
+        position_fits(item["start_line"], item["start_column"])
+        and position_fits(item["end_line"], item["end_column"])
+        for item in ranges
+    )
 
 
 def _mtime_rfc3339(timestamp: float) -> str:
@@ -818,6 +849,7 @@ class WorkflowService:
                 draft_hash=source["draft_hash"],
                 compilation=compilation,
                 applied_graph=applied_graph,
+                draft_python_source=source["python_source"],
             )
             event_data = {
                 "workflow_uuid": workflow_uuid,
@@ -926,6 +958,7 @@ class WorkflowService:
                     draft_hash=source["draft_hash"],
                     compilation=compilation,
                     applied_graph=applied_graph,
+                    draft_python_source=source["python_source"],
                 )
             cause = (
                 "recovered"
@@ -1007,7 +1040,10 @@ class WorkflowService:
                 registration=registration,
                 python_source=source["python_source"],
             )
-            if not self._normalize_candidate_diagnostics(compilation):
+            if not self._normalize_candidate_diagnostics(
+                compilation,
+                python_source=source["python_source"],
+            ):
                 raise WorkflowError("candidate_invalid")
             if not compilation.valid:
                 if any(
@@ -1021,6 +1057,7 @@ class WorkflowService:
                 draft_hash=source["draft_hash"],
                 compilation=compilation,
                 applied_graph=applied_graph,
+                draft_python_source=source["python_source"],
             )
             if revalidated is None:
                 raise WorkflowError("candidate_invalid")
@@ -1031,6 +1068,15 @@ class WorkflowService:
                 raise WorkflowConflict("template_catalog_conflict")
             if revalidated["candidate_hash"] != candidate["candidate_hash"]:
                 raise WorkflowConflict("candidate_hash_conflict")
+
+            latest_source = self._read_source(registration)
+            if (
+                latest_source is None
+                or latest_source["draft_hash"] != expected_draft_hash
+            ):
+                raise WorkflowConflict("draft_hash_conflict")
+            if self._catalog_fingerprint() != candidate["template_catalog_fingerprint"]:
+                raise WorkflowConflict("template_catalog_conflict")
 
             normalized_source = candidate["normalized_python_source"]
             normalized_bytes = normalized_source.encode("utf-8")
@@ -1782,9 +1828,13 @@ class WorkflowService:
         draft_hash: str,
         compilation: CandidateCompilation,
         applied_graph: Dict[str, Any],
+        draft_python_source: str,
     ) -> Optional[Dict[str, Any]]:
         applied_graph = self._validated_applied_backend_graph(applied_graph)
-        if not self._normalize_candidate_diagnostics(compilation):
+        if not self._normalize_candidate_diagnostics(
+            compilation,
+            python_source=draft_python_source,
+        ):
             return None
         if not compilation.valid:
             return None
@@ -1800,6 +1850,11 @@ class WorkflowService:
                 CandidateSourceMapEntry.model_validate(item).model_dump()
                 for item in compilation.source_map
             ]
+            if not _source_ranges_fit(
+                compilation.normalized_python_source,
+                source_map,
+            ):
+                raise ValueError
             changeset = CandidateChangeset.model_validate(
                 compilation.changeset,
             ).model_dump()
@@ -1864,6 +1919,8 @@ class WorkflowService:
     def _normalize_candidate_diagnostics(
         cls,
         compilation: CandidateCompilation,
+        *,
+        python_source: str,
     ) -> bool:
         try:
             if not isinstance(compilation.diagnostics, list):
@@ -1874,6 +1931,13 @@ class WorkflowService:
                 )
                 for item in compilation.diagnostics
             ]
+            source_ranges = [
+                item["source_range"]
+                for item in compilation.diagnostics
+                if item.get("source_range") is not None
+            ]
+            if not _source_ranges_fit(python_source, source_ranges):
+                raise ValueError
         except (TypeError, ValidationError, ValueError):
             cls._set_candidate_invalid_diagnostic(compilation)
             return False
@@ -1913,16 +1977,19 @@ class WorkflowService:
         workflow = graph["workflow"]
         applied_workflow = applied_graph["workflow"]
         for field in _WORKFLOW_READ_FIELDS - {"meta_data"}:
-            if workflow.get(field) != applied_workflow.get(field):
+            if not _strict_json_equal(
+                workflow.get(field),
+                applied_workflow.get(field),
+            ):
                 raise ValueError("Candidate changed an unsupported Workflow field")
 
         workflow_meta = dict(workflow["meta_data"])
         applied_meta = dict(applied_workflow["meta_data"])
-        reserved_changed = workflow_meta.pop("unilab", None) != applied_meta.pop(
-            "unilab",
-            None,
+        reserved_changed = not _strict_json_equal(
+            workflow_meta.pop("unilab", None),
+            applied_meta.pop("unilab", None),
         )
-        if workflow_meta != applied_meta:
+        if not _strict_json_equal(workflow_meta, applied_meta):
             raise ValueError("Candidate changed non-authoring Workflow metadata")
 
         for field in ("node_templates", "handle_templates"):
@@ -1931,7 +1998,7 @@ class WorkflowService:
                 applied_graph[field],
                 key=lambda item: item["uuid"],
             )
-            if candidate_entities != applied_entities:
+            if not _strict_json_equal(candidate_entities, applied_entities):
                 raise ValueError("Candidate catalog projection is not authoritative")
 
         nodes = [cls._semantic_node(item) for item in graph["nodes"]]
@@ -1979,14 +2046,20 @@ class WorkflowService:
             "updated_node_uuids": {
                 uuid
                 for uuid in set(candidate_nodes) & set(applied_nodes)
-                if candidate_nodes[uuid] != applied_nodes[uuid]
+                if not _strict_json_equal(
+                    candidate_nodes[uuid],
+                    applied_nodes[uuid],
+                )
             },
             "deleted_node_uuids": set(applied_nodes) - set(candidate_nodes),
             "created_edge_uuids": set(candidate_edges) - set(applied_edges),
             "updated_edge_uuids": {
                 uuid
                 for uuid in set(candidate_edges) & set(applied_edges)
-                if candidate_edges[uuid] != applied_edges[uuid]
+                if not _strict_json_equal(
+                    candidate_edges[uuid],
+                    applied_edges[uuid],
+                )
             },
             "deleted_edge_uuids": set(applied_edges) - set(candidate_edges),
         }

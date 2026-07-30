@@ -13,6 +13,8 @@ from uuid import UUID
 
 from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 
+from unilabos.workflow.json_codec import MAX_BACKEND_JSON_DEPTH
+
 JsonObject = Dict[str, Any]
 JsonArray = List[Any]
 
@@ -21,44 +23,36 @@ def validate_json_value(value: Any) -> Any:
     """Return a recursively valid, finite JSON value."""
 
     active: set[int] = set()
-
-    def walk(item: Any) -> None:
+    stack: list[tuple[Any, int, bool]] = [(value, 0, False)]
+    while stack:
+        item, depth, leaving = stack.pop()
+        if leaving:
+            active.remove(id(item))
+            continue
         if item is None or isinstance(item, (bool, int, str)):
-            return
+            continue
         if isinstance(item, float):
             if not math.isfinite(item):
                 raise ValueError("JSON numbers must be finite")
-            return
-        if isinstance(item, dict):
+            continue
+        if isinstance(item, (dict, list)):
+            if depth + 1 > MAX_BACKEND_JSON_DEPTH:
+                raise ValueError("JSON value is nested too deeply")
             identity = id(item)
             if identity in active:
                 raise ValueError("JSON values must not contain cycles")
             active.add(identity)
-            try:
+            stack.append((item, depth, True))
+            if isinstance(item, dict):
                 for key, child in item.items():
                     if not isinstance(key, str):
                         raise ValueError("JSON object keys must be strings")
-                    walk(child)
-            finally:
-                active.remove(identity)
-            return
-        if isinstance(item, list):
-            identity = id(item)
-            if identity in active:
-                raise ValueError("JSON values must not contain cycles")
-            active.add(identity)
-            try:
+                    stack.append((child, depth + 1, False))
+            else:
                 for child in item:
-                    walk(child)
-            finally:
-                active.remove(identity)
-            return
+                    stack.append((child, depth + 1, False))
+            continue
         raise ValueError(f"{type(item).__name__} is not a JSON value")
-
-    try:
-        walk(value)
-    except RecursionError:
-        raise ValueError("JSON value is nested too deeply") from None
     return value
 
 
@@ -228,7 +222,7 @@ class CandidateCompilation(BaseModel):
             and isinstance(self.diagnostics, list)
             and all(isinstance(item, dict) for item in self.diagnostics)
             and not any(
-                str(item.get("severity", "")).lower() == "error"
+                str(item.get("severity", "")).strip().lower() == "error"
                 for item in self.diagnostics
             )
         )
@@ -264,7 +258,14 @@ class CandidateDiagnostic(BaseModel):
     message: str
     source_range: Optional[DiagnosticSourceRange] = None
 
-    @field_validator("severity", "code", "message")
+    @field_validator("severity")
+    @classmethod
+    def _normalized_severity(cls, value: str) -> str:
+        if not isinstance(value, str) or not value.strip():
+            raise ValueError("diagnostic text must not be blank")
+        return value.strip()
+
+    @field_validator("code", "message")
     @classmethod
     def _required_text(cls, value: str) -> str:
         if not isinstance(value, str) or not value.strip():

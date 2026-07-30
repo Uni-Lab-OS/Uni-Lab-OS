@@ -5,7 +5,6 @@ from __future__ import annotations
 import asyncio
 import json
 import re
-import sys
 from typing import Annotated, Any, Dict, List, Optional
 
 from fastapi import APIRouter, FastAPI, Header, Query, Request
@@ -15,6 +14,7 @@ from fastapi.responses import JSONResponse, Response, StreamingResponse
 from fastapi.routing import APIRoute
 from pydantic import BaseModel, ConfigDict, Field, field_validator
 
+from unilabos.workflow.json_codec import decode_json_bytes, encode_json
 from unilabos.workflow.models import (
     WorkflowEdgeWrite,
     WorkflowNodeWrite,
@@ -35,8 +35,6 @@ class _BackendModel(BaseModel):
 HashToken = Annotated[str, Field(pattern=r"^sha256:[0-9a-f]{64}$")]
 _SIGNED_DECIMAL = re.compile(r"[+-]?[0-9]+\Z")
 _INT64_MAX = (1 << 63) - 1
-_MAX_BACKEND_JSON_DEPTH = 10_000
-_BACKEND_JSON_RECURSION_LIMIT = (_MAX_BACKEND_JSON_DEPTH * 2) + 100
 _GO_WHITE_SPACE = (
     "\t\n\v\f\r "
     "\u0085\u00a0\u1680"
@@ -44,36 +42,6 @@ _GO_WHITE_SPACE = (
     "\u2006\u2007\u2008\u2009\u200a"
     "\u2028\u2029\u202f\u205f\u3000"
 )
-
-
-def _ensure_backend_json_recursion_budget() -> None:
-    """Let stdlib JSON mirror Go's frozen 10,000-level nesting boundary."""
-
-    if sys.getrecursionlimit() < _BACKEND_JSON_RECURSION_LIMIT:
-        sys.setrecursionlimit(_BACKEND_JSON_RECURSION_LIMIT)
-
-
-def _check_backend_json_depth(body: bytes) -> None:
-    depth = 0
-    in_string = False
-    escaped = False
-    for byte in body:
-        if in_string:
-            if escaped:
-                escaped = False
-            elif byte == ord("\\"):
-                escaped = True
-            elif byte == ord('"'):
-                in_string = False
-            continue
-        if byte == ord('"'):
-            in_string = True
-        elif byte in (ord("{"), ord("[")):
-            depth += 1
-            if depth > _MAX_BACKEND_JSON_DEPTH:
-                raise ValueError("JSON nesting exceeds the Backend limit")
-        elif byte in (ord("}"), ord("]")):
-            depth -= 1
 
 
 class _BackendJSONRoute(APIRoute):
@@ -88,12 +56,9 @@ class _BackendJSONRoute(APIRoute):
             if mime == "application/json" or mime.endswith("+json"):
                 body = await request.body()
                 try:
-                    _check_backend_json_depth(body)
-                    request._json = json.loads(body)
+                    request._json = decode_json_bytes(body)
                 except (
-                    json.JSONDecodeError,
                     OverflowError,
-                    RecursionError,
                     UnicodeError,
                     ValueError,
                 ):
@@ -187,12 +152,19 @@ class ApplyRequest(_StrictModel):
     expected_candidate_hash: HashToken
 
 
-def _success(data: Any, *, status: int = 200) -> JSONResponse:
-    return JSONResponse(status_code=status, content={"code": 0, "data": data})
+class _BackendJSONResponse(JSONResponse):
+    """Render deeply nested Backend JSON without process-global recursion state."""
+
+    def render(self, content: Any) -> bytes:
+        return encode_json(content)
 
 
-def _error(error: WorkflowError) -> JSONResponse:
-    return JSONResponse(
+def _success(data: Any, *, status: int = 200) -> _BackendJSONResponse:
+    return _BackendJSONResponse(status_code=status, content={"code": 0, "data": data})
+
+
+def _error(error: WorkflowError) -> _BackendJSONResponse:
+    return _BackendJSONResponse(
         status_code=error.status,
         content={
             "code": error.status,
@@ -216,7 +188,6 @@ def format_sse_event(event: Dict[str, Any]) -> str:
 def create_workflow_router(service: WorkflowService) -> APIRouter:
     """Build the public Workflow router around one injected authority."""
 
-    _ensure_backend_json_recursion_budget()
     router = APIRouter(
         prefix="/api/v1",
         tags=["workflow"],

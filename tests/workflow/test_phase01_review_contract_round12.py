@@ -150,10 +150,10 @@ class Round12Compiler:
         source_map: Any = [
             {
                 "workflow_node_uuid": NODE_UUID,
-                "start_line": 10,
+                "start_line": 1,
                 "start_column": 1,
-                "end_line": 15,
-                "end_column": 2,
+                "end_line": 1,
+                "end_column": 1,
             }
         ]
         changeset: Any = self._changeset(self.changeset_kind)
