@@ -136,6 +136,10 @@ class InternalErrorCandidateService(WorkflowService):
 class CursorSafeEventService(WorkflowService):
     """Keep an accepted cursor from reaching SQLite while the stream is sampled."""
 
+    def __init__(self, store: WorkflowStore) -> None:
+        super().__init__(store)
+        self.seen_after_ids: list[int] = []
+
     def list_events(
         self,
         *,
@@ -143,6 +147,7 @@ class CursorSafeEventService(WorkflowService):
         limit: int = 200,
     ) -> dict[str, Any]:
         del limit
+        self.seen_after_ids.append(after_id)
         return {"items": [], "after_id": after_id}
 
 
@@ -332,14 +337,14 @@ def test_well_formed_missing_resource_uuid_path_remains_404(
     "last_event_id",
     [
         "1_0",
-        " 10",
-        "10 ",
+        "not-an-integer",
+        "-1",
         "9223372036854775808",
     ],
     ids=[
         "underscore",
-        "leading-whitespace",
-        "trailing-whitespace",
+        "invalid-text",
+        "negative",
         "greater-than-int64-max",
     ],
 )
@@ -347,30 +352,60 @@ def test_last_event_id_rejects_text_outside_frozen_parse_int64(
     store: WorkflowStore,
     last_event_id: str,
 ) -> None:
+    service = CursorSafeEventService(store)
     messages = _get_events_through_asgi(
-        create_workflow_app(CursorSafeEventService(store)),
+        create_workflow_app(service),
         last_event_id=last_event_id,
     )
 
-    assert _response_status(messages) == 400
-    assert _response_json(messages) == INVALID_EVENT_CURSOR
+    assert {
+        "status": _response_status(messages),
+        "body": _response_json(messages),
+        "seen_after_ids": service.seen_after_ids,
+    } == {
+        "status": 400,
+        "body": INVALID_EVENT_CURSOR,
+        "seen_after_ids": [],
+    }
 
 
 @pytest.mark.parametrize(
-    "last_event_id",
-    ["10", INT64_MAX],
-    ids=["ordinary-integer", "int64-max"],
+    ("last_event_id", "expected_cursor"),
+    [
+        ("", 0),
+        ("   ", 0),
+        (" 10", 10),
+        ("10 ", 10),
+        ("10", 10),
+        (INT64_MAX, 9223372036854775807),
+    ],
+    ids=[
+        "explicit-empty",
+        "whitespace-only",
+        "leading-whitespace",
+        "trailing-whitespace",
+        "ordinary-integer",
+        "int64-max",
+    ],
 )
 def test_last_event_id_accepts_frozen_non_negative_int64_controls(
     store: WorkflowStore,
     last_event_id: str,
+    expected_cursor: int,
 ) -> None:
+    service = CursorSafeEventService(store)
     messages = _get_events_through_asgi(
-        create_workflow_app(CursorSafeEventService(store)),
+        create_workflow_app(service),
         last_event_id=last_event_id,
     )
 
-    assert _response_status(messages) == 200
+    assert {
+        "status": _response_status(messages),
+        "first_after_ids": service.seen_after_ids[:1],
+    } == {
+        "status": 200,
+        "first_after_ids": [expected_cursor],
+    }
 
 
 @pytest.mark.parametrize(
