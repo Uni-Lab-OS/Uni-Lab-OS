@@ -1317,6 +1317,18 @@ class WorkflowStore:
                 (utc_now(), workflow_uuid),
             )
 
+    def clear_writeback_pending(self, workflow_uuid: str) -> None:
+        with self.transaction() as conn:
+            conn.execute(
+                """
+                UPDATE workflow_authoring
+                SET writeback_status = 'settled', writeback_source = NULL,
+                    writeback_expected_hash = NULL, update_time = ?
+                WHERE workflow_uuid = ?
+                """,
+                (utc_now(), workflow_uuid),
+            )
+
     # Events and diagnostics --------------------------------------------
 
     def list_events(

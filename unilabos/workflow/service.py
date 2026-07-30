@@ -215,8 +215,12 @@ class WorkflowService:
 
     def get_workflow(self, workflow_uuid: str) -> Dict[str, Any]:
         try:
-            return self.store.get_workflow(validate_uuid(workflow_uuid))
-        except (ValueError, StoreNotFound):
+            identity = validate_uuid(workflow_uuid)
+        except ValueError:
+            raise WorkflowError("invalid_input") from None
+        try:
+            return self.store.get_workflow(identity)
+        except StoreNotFound:
             raise WorkflowError("not_found") from None
 
     def list_workflows(
@@ -354,8 +358,11 @@ class WorkflowService:
     def get_workflow_task(self, task_uuid: str) -> Dict[str, Any]:
         try:
             identity = validate_uuid(task_uuid)
+        except ValueError:
+            raise WorkflowError("invalid_input") from None
+        try:
             return self.store.get_task(identity)
-        except (ValueError, StoreNotFound):
+        except StoreNotFound:
             raise WorkflowError("not_found") from None
 
     def list_workflow_tasks(
@@ -408,8 +415,11 @@ class WorkflowService:
     def get_workflow_node_job(self, job_uuid: str) -> Dict[str, Any]:
         try:
             identity = validate_uuid(job_uuid)
+        except ValueError:
+            raise WorkflowError("invalid_input") from None
+        try:
             return self.store.get_job(identity)
-        except (ValueError, StoreNotFound):
+        except StoreNotFound:
             raise WorkflowError("not_found") from None
 
     def _build_execution_plan(
@@ -768,6 +778,26 @@ class WorkflowService:
             registration = self._registration(workflow_uuid)
             source = self._read_source(registration)
             record = self.store.get_authoring_record(workflow_uuid)
+            applied_source = record.get("applied_source")
+            if (
+                record["writeback_status"] == "pending"
+                and source is not None
+                and applied_source is not None
+                and source["draft_hash"] == applied_source["source_hash"]
+            ):
+                self.store.settle_writeback(
+                    workflow_uuid=workflow_uuid,
+                    observed_draft_hash=source["draft_hash"],
+                    draft_update_time=source["update_time"],
+                    event_data={
+                        "workflow_uuid": workflow_uuid,
+                        "cause": "recovered",
+                        "workflow_revision": workflow["revision"],
+                        "draft_hash": source["draft_hash"],
+                        "candidate_hash": None,
+                    },
+                )
+                return self.get_authoring(workflow_uuid)
             if record["writeback_status"] == "pending" and (
                 source is None
                 or source["draft_hash"] == record["writeback_expected_hash"]
@@ -799,6 +829,16 @@ class WorkflowService:
                         return self.get_authoring(workflow_uuid)
                     except (OSError, UnicodeError, WorkflowError):
                         pass
+            if (
+                record["writeback_status"] == "pending"
+                and source is not None
+                and source["draft_hash"] != record["writeback_expected_hash"]
+            ):
+                # canonical 已由外部 authority 推进，不能再恢复旧写回。
+                # 只清除 recovery marker；observed hash 必须等本次编译
+                # 成功后由 record_draft_compilation 原子推进。
+                self.store.clear_writeback_pending(workflow_uuid)
+                record = self.store.get_authoring_record(workflow_uuid)
             actual_hash = source["draft_hash"] if source is not None else None
             if actual_hash == record["observed_draft_hash"] and not (
                 actual_hash is None and record.get("candidate") is not None
@@ -992,6 +1032,8 @@ class WorkflowService:
                 written = self._read_source(registration)
                 assert written is not None
                 response_source = written
+                if written["draft_hash"] != normalized_hash:
+                    raise WorkflowConflict("draft_hash_conflict")
             except Exception:  # noqa: BLE001 - 主事务已提交
                 # 主事务已经提交。之后任何文件系统、数据库或聚合错误
                 # 都只能降级为可恢复警告，不能把成功伪装成失败。
@@ -1097,8 +1139,12 @@ class WorkflowService:
         workflow_uuid: str,
     ) -> Dict[str, Any]:
         try:
-            return self.store.get_workflow(validate_uuid(workflow_uuid))
-        except (ValueError, StoreNotFound):
+            identity = validate_uuid(workflow_uuid)
+        except ValueError:
+            raise WorkflowError("invalid_input") from None
+        try:
+            return self.store.get_workflow(identity)
+        except StoreNotFound:
             raise WorkflowError("workflow_not_found") from None
 
     def _registration(self, workflow_uuid: str) -> Dict[str, Any]:
@@ -1670,7 +1716,9 @@ class WorkflowService:
                 compilation.graph,
                 applied_graph=applied_graph,
             )
-        except (KeyError, TypeError, ValueError, ValidationError, WorkflowError):
+        except (ValidationError, WorkflowError) as error:
+            if isinstance(error, WorkflowError) and error.code != "candidate_invalid":
+                raise
             compilation.diagnostics.append(
                 {
                     "severity": "error",

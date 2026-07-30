@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+import re
 from typing import Annotated, Any, Dict, List, Optional
 
 from fastapi import APIRouter, FastAPI, Header, Query, Request
@@ -25,6 +26,8 @@ class _BackendModel(BaseModel):
 
 
 HashToken = Annotated[str, Field(pattern=r"^sha256:[0-9a-f]{64}$")]
+_SIGNED_DECIMAL = re.compile(r"[+-]?[0-9]+\Z")
+_INT64_MAX = (1 << 63) - 1
 
 
 class WorkflowCreateRequest(_BackendModel):
@@ -39,7 +42,7 @@ class WorkflowUpdateRequest(WorkflowCreateRequest):
 
 
 class GraphWriteRequest(_BackendModel):
-    revision: int = Field(ge=1)
+    revision: int = Field(ge=1, strict=True)
     nodes: List[WorkflowNodeWrite] = Field(default_factory=list)
     edges: List[WorkflowEdgeWrite] = Field(default_factory=list)
 
@@ -56,12 +59,12 @@ class WorkflowTaskCreateRequest(_BackendModel):
 class DraftWriteRequest(_StrictModel):
     python_source: str
     expected_draft_hash: Optional[HashToken]
-    expected_workflow_revision: int = Field(ge=1)
+    expected_workflow_revision: int = Field(ge=1, strict=True)
 
 
 class ApplyRequest(_StrictModel):
     expected_draft_hash: HashToken
-    expected_workflow_revision: int = Field(ge=1)
+    expected_workflow_revision: int = Field(ge=1, strict=True)
     expected_candidate_hash: HashToken
 
 
@@ -234,10 +237,17 @@ def create_workflow_router(service: WorkflowService) -> APIRouter:
         ),
     ) -> Response:
         try:
-            cursor = int(last_event_id or "0")
+            if last_event_id is None:
+                cursor = 0
+            elif not _SIGNED_DECIMAL.fullmatch(last_event_id):
+                raise ValueError
+            else:
+                cursor = int(last_event_id, 10)
+            if not 0 <= cursor <= _INT64_MAX:
+                raise ValueError
         except ValueError:
             cursor = -1
-        if cursor < 0:
+        if cursor == -1:
             return JSONResponse(
                 status_code=400,
                 content={

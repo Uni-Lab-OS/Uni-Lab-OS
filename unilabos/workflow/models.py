@@ -44,8 +44,8 @@ class WorkflowNodeWrite(BaseModel):
     action_name: Optional[str] = None
     action_type: Optional[str] = None
     execution_policy: JsonObject = Field(default_factory=dict)
-    disabled: bool = False
-    minimized: bool = False
+    disabled: bool = Field(default=False, strict=True)
+    minimized: bool = Field(default=False, strict=True)
     script: Optional[str] = None
     description: Optional[str] = None
     meta_data: JsonObject = Field(default_factory=dict)
