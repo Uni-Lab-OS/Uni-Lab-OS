@@ -290,7 +290,9 @@ def test_apply_store_transaction_never_calls_catalog_authority_guard(
 
         apply_thread.join(timeout=3)
         catalog_thread.join(timeout=3)
-        workers_cleaned_up = not apply_thread.is_alive() and not catalog_thread.is_alive()
+        workers_cleaned_up = (
+            not apply_thread.is_alive() and not catalog_thread.is_alive()
+        )
     finally:
         begin_store_read.set()
         if apply_thread.is_alive() or catalog_thread.is_alive():

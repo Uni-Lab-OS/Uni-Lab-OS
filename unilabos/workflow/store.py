@@ -1,4 +1,4 @@
-"""SQLite authority for Backend-shaped Workflow and Authoring facts."""
+"""Backend-shaped Workflow 与 Authoring 事实的 SQLite Authority。"""
 
 from __future__ import annotations
 
@@ -273,11 +273,10 @@ CREATE TABLE IF NOT EXISTS frontend_event (
 
 
 class WorkflowStore:
-    """One connection-owned SQLite Workflow authority.
+    """由单一连接持有的 SQLite Workflow Authority。
 
-    Store methods serialize transactions with one re-entrant process lock.
-    Workflow-specific orchestration locks live in ``WorkflowService`` so file
-    and database operations share the same critical section.
+    Store 方法用一个进程内可重入锁串行化事务。Workflow 专属编排锁由
+    ``WorkflowService`` 持有，使文件与数据库操作共享同一临界区。
     """
 
     def __init__(self, db_path: str | Path):
@@ -309,7 +308,7 @@ class WorkflowStore:
             else:
                 self._conn.commit()
 
-    # Workflow and Graph -------------------------------------------------
+    # Workflow 与 Graph --------------------------------------------------
 
     def create_workflow(
         self,
@@ -861,7 +860,7 @@ class WorkflowStore:
                 (now, now, workflow_uuid),
             )
 
-    # Task and Job -------------------------------------------------------
+    # Task 与 Job --------------------------------------------------------
 
     def create_task_with_jobs(
         self,
@@ -1180,7 +1179,6 @@ class WorkflowStore:
         candidate: Dict[str, Any],
         applied_source: Dict[str, Any],
         event_data: Dict[str, Any],
-        authority_guard: Callable[[], None],
     ) -> int:
         changeset = candidate["changeset"]
         kind = changeset["kind"]
@@ -1213,8 +1211,6 @@ class WorkflowStore:
                 raise StoreAuthoringConflict("template_catalog_conflict")
             if authoring["candidate_hash"] != expected_candidate_hash:
                 raise StoreAuthoringConflict("candidate_hash_conflict")
-            # SQLite 写锁建立线性化点后，再核对文件与 Catalog Authority。
-            authority_guard()
             if kind == "graph":
                 graph_workflow = graph.get("workflow")
                 if not isinstance(graph_workflow, dict):
@@ -1312,27 +1308,36 @@ class WorkflowStore:
         self,
         *,
         workflow_uuid: str,
+        expected_writeback_source: str,
+        expected_writeback_hash: str,
         observed_draft_hash: str,
         draft_update_time: str,
         event_data: Optional[Dict[str, Any]] = None,
-    ) -> None:
+    ) -> bool:
         with self.transaction() as conn:
             now = utc_now()
-            conn.execute(
+            updated = conn.execute(
                 """
                 UPDATE workflow_authoring
                 SET observed_draft_hash = ?, draft_update_time = ?,
                     writeback_status = 'settled', writeback_source = NULL,
                     writeback_expected_hash = NULL, update_time = ?
                 WHERE workflow_uuid = ?
+                  AND writeback_status = 'pending'
+                  AND writeback_source = ?
+                  AND writeback_expected_hash = ?
                 """,
                 (
                     observed_draft_hash,
                     draft_update_time,
                     now,
                     workflow_uuid,
+                    expected_writeback_source,
+                    expected_writeback_hash,
                 ),
             )
+            if updated.rowcount != 1:
+                return False
             if event_data is not None:
                 self._append_event(
                     conn,
@@ -1340,19 +1345,34 @@ class WorkflowStore:
                     data=event_data,
                     now=now,
                 )
+            return True
 
-    def mark_writeback_pending(self, workflow_uuid: str) -> None:
+    def mark_writeback_pending(
+        self,
+        *,
+        workflow_uuid: str,
+        expected_writeback_source: str,
+        expected_writeback_hash: str,
+    ) -> bool:
         with self.transaction() as conn:
-            conn.execute(
+            updated = conn.execute(
                 """
                 UPDATE workflow_authoring
                 SET writeback_status = 'pending', update_time = ?
                 WHERE workflow_uuid = ?
+                  AND writeback_source = ?
+                  AND writeback_expected_hash = ?
                 """,
-                (utc_now(), workflow_uuid),
+                (
+                    utc_now(),
+                    workflow_uuid,
+                    expected_writeback_source,
+                    expected_writeback_hash,
+                ),
             )
+            return updated.rowcount == 1
 
-    # Events and diagnostics --------------------------------------------
+    # 事件与诊断 --------------------------------------------------------
 
     def list_events(
         self,
@@ -1421,7 +1441,7 @@ class WorkflowStore:
                 self._conn.execute(f"SELECT COUNT(*) FROM {table}{where}").fetchone()[0]
             )
 
-    # Row projections ----------------------------------------------------
+    # 行投影 ------------------------------------------------------------
 
     @staticmethod
     def _base(row: sqlite3.Row) -> Dict[str, Any]:

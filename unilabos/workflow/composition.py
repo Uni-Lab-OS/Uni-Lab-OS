@@ -1,4 +1,4 @@
-"""Process composition for the workspace-local Workflow authority."""
+"""工作区本地 Workflow Authority 的进程级组合根。"""
 
 from __future__ import annotations
 

@@ -513,12 +513,12 @@ def test_apply_returns_success_after_post_commit_sqlite_operational_error(
             del args, kwargs
             raise OSError("deterministic local writeback failure")
 
-        def fail_mark_once(workflow_uuid: str) -> None:
+        def fail_mark_once(**kwargs: Any) -> None:
             nonlocal failed
             if not failed:
                 failed = True
                 raise sqlite3.OperationalError("database is locked")
-            original_mark(workflow_uuid)
+            original_mark(**kwargs)
 
         restore.extend(
             [

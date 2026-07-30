@@ -1,4 +1,4 @@
-"""Application service for the local Backend-shaped Workflow authority."""
+"""本地 Backend-shaped Workflow Authority 的应用服务。"""
 
 from __future__ import annotations
 
@@ -179,7 +179,7 @@ _HANDLE_TEMPLATE_REQUIRED_READ_FIELDS = {
 
 
 class WorkflowError(RuntimeError):
-    """Stable frontend-facing Workflow failure."""
+    """面向前端的稳定 Workflow 错误。"""
 
     def __init__(self, code: str):
         status, message = _ERRORS[code]
@@ -250,7 +250,7 @@ def _mtime_rfc3339(timestamp: float) -> str:
 
 
 class WorkflowService:
-    """Coordinates SQLite facts, package Draft files, and compiler state."""
+    """协调 SQLite 事实、package Draft 文件与编译器状态。"""
 
     def __init__(
         self,
@@ -263,7 +263,7 @@ class WorkflowService:
         self._locks_guard = threading.Lock()
         self._authoring_locks: Dict[str, threading.RLock] = {}
 
-    # Workflow and Graph -------------------------------------------------
+    # Workflow 与 Graph --------------------------------------------------
 
     def create_workflow(
         self,
@@ -399,7 +399,7 @@ class WorkflowService:
             except StoreConflict:
                 raise WorkflowError("invalid_input") from None
 
-    # WorkflowTask and WorkflowNodeJob ----------------------------------
+    # WorkflowTask 与 WorkflowNodeJob -----------------------------------
 
     def create_workflow_task(
         self,
@@ -892,14 +892,21 @@ class WorkflowService:
             source = self._read_source(registration)
             record = self._store.get_authoring_record(workflow_uuid)
             applied_source = record.get("applied_source")
+            writeback_marker_valid = (
+                record.get("writeback_source") is not None
+                and record.get("writeback_expected_hash") is not None
+            )
             if (
                 record["writeback_status"] == "pending"
+                and writeback_marker_valid
                 and source is not None
                 and applied_source is not None
                 and source["draft_hash"] == applied_source["source_hash"]
             ):
                 self._store.settle_writeback(
                     workflow_uuid=workflow_uuid,
+                    expected_writeback_source=record["writeback_source"],
+                    expected_writeback_hash=record["writeback_expected_hash"],
                     observed_draft_hash=source["draft_hash"],
                     draft_update_time=source["update_time"],
                     event_data={
@@ -911,9 +918,13 @@ class WorkflowService:
                     },
                 )
                 return self.get_authoring(workflow_uuid)
-            if record["writeback_status"] == "pending" and (
-                source is None
-                or source["draft_hash"] == record["writeback_expected_hash"]
+            if (
+                record["writeback_status"] == "pending"
+                and writeback_marker_valid
+                and (
+                    source is None
+                    or source["draft_hash"] == record["writeback_expected_hash"]
+                )
             ):
                 recovery_source = record.get("writeback_source")
                 if recovery_source is not None:
@@ -931,6 +942,10 @@ class WorkflowService:
                         if source is not None and source["draft_hash"] == recovery_hash:
                             self._store.settle_writeback(
                                 workflow_uuid=workflow_uuid,
+                                expected_writeback_source=record["writeback_source"],
+                                expected_writeback_hash=record[
+                                    "writeback_expected_hash"
+                                ],
                                 observed_draft_hash=source["draft_hash"],
                                 draft_update_time=source["update_time"],
                                 event_data={
@@ -945,8 +960,13 @@ class WorkflowService:
                     except (OSError, UnicodeError, WorkflowError):
                         return self.get_authoring(workflow_uuid)
             actual_hash = source["draft_hash"] if source is not None else None
-            if actual_hash == record["observed_draft_hash"] and not (
-                actual_hash is None and record.get("candidate") is not None
+            invalid_writeback_marker = (
+                record["writeback_status"] == "pending" and not writeback_marker_valid
+            )
+            if (
+                actual_hash == record["observed_draft_hash"]
+                and not invalid_writeback_marker
+                and not (actual_hash is None and record.get("candidate") is not None)
             ):
                 return self.get_authoring(workflow_uuid)
 
@@ -1015,7 +1035,7 @@ class WorkflowService:
             source = self._read_source(registration)
             actual_hash = source["draft_hash"] if source is not None else None
 
-            # D-079 fixes this exact conflict order.
+            # D-079 固定了这里的冲突顺序。
             if actual_hash != expected_draft_hash:
                 raise WorkflowConflict("draft_hash_conflict")
             if workflow["revision"] != expected_workflow_revision:
@@ -1122,7 +1142,6 @@ class WorkflowService:
                         "draft_hash": normalized_hash,
                         "candidate_hash": None,
                     },
-                    authority_guard=validate_authorities,
                 )
             except StoreAuthoringConflict as error:
                 raise WorkflowConflict(error.code) from None
@@ -1150,7 +1169,11 @@ class WorkflowService:
             def mark_pending_best_effort() -> None:
                 for _attempt in range(2):
                     try:
-                        self._store.mark_writeback_pending(workflow_uuid)
+                        self._store.mark_writeback_pending(
+                            workflow_uuid=workflow_uuid,
+                            expected_writeback_source=normalized_source,
+                            expected_writeback_hash=actual_hash,
+                        )
                         return
                     except Exception:  # noqa: BLE001 - 提交后只能尽力恢复
                         continue
@@ -1180,6 +1203,8 @@ class WorkflowService:
                     try:
                         self._store.settle_writeback(
                             workflow_uuid=workflow_uuid,
+                            expected_writeback_source=normalized_source,
+                            expected_writeback_hash=actual_hash,
                             observed_draft_hash=written["draft_hash"],
                             draft_update_time=written["update_time"],
                         )
@@ -1269,7 +1294,7 @@ class WorkflowService:
             "after_id": after_id,
         }
 
-    # Authoring internals ------------------------------------------------
+    # Authoring 内部实现 -------------------------------------------------
 
     def _get_authoring_workflow(
         self,
@@ -1337,7 +1362,7 @@ class WorkflowService:
         }
 
     def source_reconciliation_pending(self, workflow_uuid: str) -> bool:
-        """Tell the source monitor whether a successful call still needs retry."""
+        """告知源码监视器一次成功调用后是否仍需重试。"""
 
         workflow_uuid = self._get_authoring_workflow(workflow_uuid)["uuid"]
         with self._authoring_lock(workflow_uuid):
@@ -1623,7 +1648,7 @@ class WorkflowService:
 
     @staticmethod
     def _drain_lease_break_signal() -> bool:
-        """Synchronously consume the thread-directed lease notification."""
+        """同步消费发给当前线程的 lease 通知。"""
 
         observed = False
         while True:
@@ -1996,7 +2021,7 @@ class WorkflowService:
         source_map: List[Dict[str, Any]],
         changeset: Dict[str, Any],
     ) -> None:
-        """Prove that one compiler bundle describes its complete graph exactly."""
+        """证明编译器 bundle 精确描述了完整工作流图。"""
 
         workflow = graph["workflow"]
         applied_workflow = applied_graph["workflow"]
@@ -2121,7 +2146,7 @@ class WorkflowService:
     def _backend_graph_projection(
         graph: Dict[str, Any],
     ) -> Dict[str, Any]:
-        """Project one Candidate through Backend JSON omitempty semantics."""
+        """按 Backend JSON omitempty 语义投影 Candidate。"""
 
         def omit_none(value: Any) -> Any:
             if not isinstance(value, dict):
@@ -2147,7 +2172,7 @@ class WorkflowService:
         *,
         applied_graph: Dict[str, Any],
     ) -> Dict[str, Any]:
-        """Hydrate compiler write entities into the frozen Backend read shape."""
+        """把编译器写实体补全为冻结的 Backend 读取形状。"""
 
         applied = cls._validated_applied_backend_graph(applied_graph)
         cls._require_candidate_graph_containers(graph)
@@ -2251,7 +2276,7 @@ class WorkflowService:
         cls,
         graph: Dict[str, Any],
     ) -> Dict[str, Any]:
-        """Validate the authority-owned graph before inspecting a Candidate."""
+        """检查 Candidate 前先校验 Authority 持有的工作流图。"""
 
         try:
             applied = cls._backend_graph_projection(graph)
@@ -2289,7 +2314,7 @@ class WorkflowService:
 
     @staticmethod
     def _require_backend_entity_types(graph: Dict[str, Any]) -> None:
-        """Enforce the frozen Backend JSON types on a complete graph."""
+        """在完整工作流图上强制执行冻结的 Backend JSON 类型。"""
 
         def exact(entity: Dict[str, Any], fields: set[str], expected: type) -> None:
             if any(type(entity[field]) is not expected for field in fields):
