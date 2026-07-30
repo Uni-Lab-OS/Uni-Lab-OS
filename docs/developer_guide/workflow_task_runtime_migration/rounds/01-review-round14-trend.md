@@ -1,6 +1,6 @@
 # Phase 01 Core：Round 14 趋势与策略报告
 
-状态：**实现与本地测试门已通过，独立终审尚未完成，禁止合并**。
+状态：**补充修正与本地全量测试已通过，精确 SHA 复审尚未完成，禁止合并**。
 
 统计范围：本报告把 Round 14 视为 legacy-named `migration/01-backend-contract`
 合并轮次内的第十四次审查修复循环。生产实现只统计 `unilabos/`；测试、文档和
@@ -33,25 +33,64 @@ Round 14 从候选 `3d30c591cc9d765d1f81cd2fbfc1427946674ba7` 开始。只读风
 都只新增测试文件，没有修改 production、既有测试或 Backend，也没有
 skip/xfail。
 
+第一版实现形成候选
+`21d7f181a6f00d219695a372136b264325146d0f`，并通过当时的整仓测试
+（`844 passed, 3 skipped`）。三名独立 reviewer 对该精确 SHA 的结论不是全绿：
+
+| 评审维度 | subagent | 结论 | blocker |
+|---|---|---|---|
+| 决策与合同 | `/root/round14_spec_reviewer` | PASS | 0 |
+| 仓库规范与模块设计 | `/root/round14_design_reviewer` | FAIL | 2 |
+| 回归、事务、恢复与安全 | `/root/round14_risk_reviewer` | FAIL | 3 |
+
+两份失败评审的发现存在一项重叠，归并为 4 类问题：
+
+1. Apply 最终检查与 SQLite 提交之间仍有跨 `WorkflowService` 实例的 Draft
+   竞态；
+2. Candidate proof 和 graph `uniqueItems` 的严格 JSON 比较仍递归，超深合法
+   JSON 会触发裸 `500`；
+3. source range 错把 Python form-feed 等字符当换行，且没有遵循 AST 的
+   1-based UTF-8 byte column 与尾换行 EOF 语义；
+4. composition 与 source monitor 直接穿透 `WorkflowService.store`，Store
+   被意外暴露为公共依赖。
+
+针对失败评审，两名原独立测试作者在各自 worktree 又提交了补充红测：
+
+| 测试维度 | subagent | 源测试 commit | 引入 commit | 第一版实现上的红测 |
+|---|---|---|---|---|
+| 跨 Service Apply 竞态 | `/root/phase01_adversarial_tests` | `d397e040990b1926722a393620f6cbfb2820a1d6` | `0c1d1ee` | `1 failed` |
+| 深层 proof 与源码坐标 | `/root/phase01_contract_tests` | `ba0fa09c0e18900b3bade162f9f67c02aad067a9` | `9a75570` | `8 failed` |
+
+补充提交只新增测试文件，共 9 个失败用例；没有修改 production、既有测试、
+Backend，也没有 skip/xfail。失败评审的 reviewer 必须在最终精确 SHA 上确认
+修正，旧结论不能复用。
+
 ## 2. 实现结果
 
-实现 commit：
-`ad71e7c`（`fix(workflow): close round 14 authority races`）。
+实现 commits：
+
+- `ad71e7c`（`fix(workflow): close round 14 authority races`）；
+- `bb32c37`（`fix(workflow): linearize authoring apply`）。
 
 本轮完成：
 
-- Apply 在打开 SQLite 事务前再次读取实际 Draft bytes 和当前 Catalog
-  fingerprint；编译窗口内任一 Authority 变化均以稳定 `409` 拒绝，且图、
-  revision、Applied Source、Candidate 和事件无副作用；
-- Candidate graph proof 改为递归、JSON 类型严格的等价比较；
+- Apply 不仅在事务前检查 Authority，还在 `BEGIN IMMEDIATE` 建立 SQLite 写锁
+  后，对持久 Draft/Candidate/Catalog 三 token 做 CAS，并在同一线性化窗口内
+  再检查实际 Draft bytes 与 Catalog；跨 Service 更新要么先提交并使旧 Apply
+  返回稳定 `409`，要么等待旧 Apply 原子提交，不再丢失新 Draft；
+- Candidate graph proof、source-only proof 和 graph `uniqueItems` 共用迭代式、
+  JSON 类型严格的等价/规范化实现，不受 Python recursion limit 影响；
 - raw Workflow HTTP seam 使用有限、非递归 JSON decoder，拒绝非有限数字，
   包括位于未来/忽略字段中的非法 token；
 - HTTP response、Workflow store 和 Candidate hash 使用同一非递归 JSON
   codec，不再修改 `sys.setrecursionlimit()`，同时保留 10,000 层上限；
 - diagnostic range 绑定输入 Draft，source-map range 绑定
-  `normalized_python_source`，Draft 保存和 Apply revalidation 都 fail closed；
+  `normalized_python_source`；范围按 Python AST 的 1-based UTF-8 byte column
+  校验，只把 `CRLF`/`CR`/`LF` 当物理换行，并接受尾换行后的 EOF 位置；
 - diagnostic severity 去除外围空白，`" error "` 不能再绕过 Candidate
   阻断；
+- `WorkflowService` 不再公开 Store；composition、启动恢复和 source monitor
+  只依赖 Service 的领域方法，持久实现边界重新收口；
 - Round 12 的“合法 Candidate”fixture 从实际越界的 source-map 改为真实合法
   范围；测试目的和断言没有弱化。
 
@@ -66,12 +105,15 @@ skip/xfail。
 
 | 指标 | 文件数 | 新增文件 | 新增行 | 删除行 | 净增 | 变动量 |
 |---|---:|---:|---:|---:|---:|---:|
-| Production `unilabos/` | 5 | 1 | 361 | 97 | 264 | 458 |
-| Tests | 3 | 2 | 906 | 3 | 903 | 909 |
+| Production `unilabos/` | 8 | 1 | 483 | 146 | 337 | 629 |
+| Tests | 9 | 4 | 1,727 | 46 | 1,681 | 1,773 |
 
-测试新增行与 production 新增行之比约为 `2.51:1`。新 production 文件是
+测试新增行与 production 新增行之比约为 `3.58:1`。新 production 文件是
 `unilabos/workflow/json_codec.py`。测试文件数包括一处既有 Round 12 fixture
-校正；两份新的独立 Round 14 测试文件分别保留其来源提交。
+校正、4 份保留独立来源提交的 Round 14 测试文件，以及因 Store 私有化而改为
+显式白盒访问的既有持久层测试。相对第一版报告，复审反馈新增了 162 行、
+删除了 89 行 production，实现增长集中在事务 CAS、迭代比较、精确源码坐标和
+Service 边界；补充测试新增 821 行、删除 43 行。
 
 近五次修复循环的 production 变化如下：
 
@@ -81,20 +123,20 @@ skip/xfail。
 | Round 11 | 2 | 0 | 45 | 35 | 10 |
 | Round 12 | 5 | 0 | 301 | 20 | 281 |
 | Round 13 | 3 | 0 | 300 | 31 | 269 |
-| Round 14 | 5 | 1 | 361 | 97 | 264 |
+| Round 14 | 8 | 1 | 483 | 146 | 337 |
 
-Round 14 的净增没有显著扩大，但变动重新横跨 HTTP、DTO、Service 和 Store。
-原因不是增加业务功能，而是移除一个进程全局 workaround，并把统一的 JSON
-边界下沉为可复用模块。
+Round 14 的最终净增比第一版报告增加 73 行，并横跨 HTTP、DTO、Service、
+Store、composition 和 monitor。原因不是增加业务功能，而是第一版“事务前最终
+检查”仍不足以构成线性化点，同时要移除进程全局 workaround、下沉统一 JSON
+边界并收回泄漏的 Store seam。
 
 ## 4. 当前验证证据
 
 | 门禁 | 结果 |
 |---|---|
-| Round 14 两份独立测试 | `17 passed` |
-| Round 12～14、风险回归与公共 API 组合 | `179 passed` |
-| Workflow 子树与 Phase 01 独立 app tests | `447 passed` |
-| 完整仓库 `tests/` | `844 passed, 3 skipped` |
+| Round 14 四份独立测试 | `26 passed` |
+| Workflow 子树与 Phase 01 独立 app tests | `456 passed` |
+| 完整仓库 `tests/` | `853 passed, 3 skipped` |
 | 10,000/10,001 层 JSON 控制 | 10,000 接受并往返；10,001 拒绝 |
 | 随机 JSON codec 对照 | 1,000 个标准库对照样本往返通过 |
 | Ruff `E/F/I/B`、format、`git diff --check` | 通过 |
@@ -105,26 +147,32 @@ Round 14 的净增没有显著扩大，但变动重新横跨 HTTP、DTO、Servic
 
 ## 5. 问题趋势判断
 
-实现缺陷正在减少，但尚不能宣布审查已经收敛：
+实现缺陷总体在减少，但首次终审证明第一版尚未收敛：
 
 - Round 14 的 7 类入口问题中，6 类已完整关闭；
 - 第 7 类中的 severity fail-closed 缺陷已关闭，但 D-030 repair payload 的字段
   和嵌套结构仍是 1 个明确设计缺口；
-- 新发现已从普通 CRUD/响应形状转向 Authority 时间窗口、类型系统和进程全局
-  状态，说明 happy path 已较稳定，剩余风险更少但更深、更跨层；
-- 本轮需要 361 行新增 production 代码和 97 行删除代码，表明仍存在架构性
-  workaround 清理，不能仅凭用例数量下降判断已经稳定；
+- 首次三方终审新发现 4 类问题，补充红测新增 9 个失败；其中 3 类是原风险的更深
+  边界（事务线性化、递归深度、AST 坐标），1 类是模块 seam 泄漏，而不是新增
+  业务范围；
+- 新发现已从普通 CRUD/响应形状转向 Authority 线性化、结构深度、精确字符编码
+  与依赖方向，说明 happy path 已较稳定，剩余问题数量更少但验证成本更高；
+- 最终需要 483 行新增 production 代码和 146 行删除代码，表明仍有架构性
+  workaround 与边界清理，不能只凭最初用例数量下降判断稳定；
+- 补充红测现已全部转绿，Workflow 子树由 `447` 增至 `456` 个通过用例，说明
+  新问题已被转化为可重复回归资产，而不是继续漂移的口头风险；
 - 只有固定当前最终 SHA 后的三方独立评审不再发现新的 blocking 类别，才能把
   Phase 01 core 判为收敛。
 
-因此当前趋势是：**已知实现问题显著减少，问题发现深度继续增加；数量进入收敛，
-但终审前仍未到可合并平台期。**
+因此当前趋势是：**问题总量继续减少，但终审仍在挖出更深的同源边界；补充红测
+已使这些问题可控，是否进入可合并平台期取决于最终精确 SHA 复审。**
 
 ## 6. 下一步策略调整
 
-1. 固定包含本报告的候选 SHA，分别进行决策/合同、仓库规范与模块设计、回归/
-   事务/恢复/安全三方独立评审。任何 production 修复都会使相关评审失效并触发
-   受影响测试、全量门禁和复审。
+1. 固定包含本报告的候选 SHA，在干净 worktree 重跑整仓测试和 lint/diff 门禁，
+   再由原三名 reviewer 分别复审决策/合同、模块设计、事务/恢复/安全，明确确认
+   首次 4 类 blocker 的处置。任何代码修复都会使相关评审失效并触发受影响测试、
+   全量门禁和再次复审。
 2. 如果终审没有新增 blocker，停止继续堆叠 Phase 01 review round，按门禁把
    `migration/01-backend-contract` 合入
    `integration/workflow-task-runtime`；未经用户授权不 push。
