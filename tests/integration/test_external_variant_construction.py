@@ -1,150 +1,192 @@
-"""Plan 09 Task 6 (integration): class.init is resolved and fed to the real device
-construction machinery, building the shared Python class with a factory backend.
+"""当前 registry 初始化合同的集成测试。
 
-- Creator-level test exercises resolve_init_kwargs -> DeviceClassCreator ->
-  create_instance_from_config -> cls(**kwargs) (the exact surface T6 touches).
-- ROS-level test goes through _instantiate_device_node under an rclpy context and
-  asserts the wrapped node's driver_instance got the factory-built backend.
+社区设备使用完整 registry key；registry 只强制 JSON 形式的初始化参数，
+富对象由驱动自身根据这些参数构造。
 """
+
+from contextlib import contextmanager
 
 import pytest
 
-ENTRY = {
-    "class": {
-        "module": "tests.registry.fixtures.initializer_drivers:SharedDevice",
-        "type": "python",
-        "init": {
-            "kwargs": {
-                "backend": {
-                    "factory": "tests.registry.fixtures.initializer_drivers:MockBackend",
-                    "kwargs": {"host": "${config.host}", "port": "${config.port}"},
+from unilabos.registry.init_enforce import validate_init_param_enforce
+from unilabos.registry.registry import lab_registry
+from unilabos.resources.resource_tracker import ResourceDictInstance
+from unilabos.ros.initialize_device import initialize_device_from_dict
+from unilabos.utils.exception import DeviceClassInvalid
+
+DRIVER_MODULE = (
+    "tests.registry.fixtures.initializer_drivers:JsonConfiguredDevice"
+)
+
+
+def _entry(*, channels, deck_name, port):
+    return {
+        "class": {
+            "module": DRIVER_MODULE,
+            "type": "python",
+            "status_types": {},
+            "action_value_mappings": {},
+        },
+        "init_param_schema": {
+            "config": {
+                "type": "object",
+                "properties": {
+                    "backend_type": {"type": "string"},
+                    "backend_params": {"type": "object"},
+                    "deck_name": {"type": "string"},
+                    "channels": {"type": "integer"},
                 },
-                "deck": {
-                    "factory": "tests.registry.fixtures.initializer_drivers:MockDeck",
-                    "kwargs": {"name": "runtime-deck"},
-                },
-                "name": "${node.id}",
-                "channels": 384,
             }
         },
-        "status_types": {},
-        "action_value_mappings": {},
-    }
-}
-NODE = {"id": "lh-runtime", "name": "Runtime LH"}
-CONFIG = {"host": "10.0.0.2", "port": 1234}
-
-
-@pytest.mark.integration
-def test_class_init_built_via_real_creator():
-    """resolve_init_kwargs output flows through the real DeviceClassCreator."""
-    from unilabos.registry.initializer import resolve_init_kwargs
-    from unilabos.resources.resource_tracker import DeviceNodeResourceTracker
-    from unilabos.ros.utils.driver_creator import DeviceClassCreator
-    from tests.registry.fixtures.initializer_drivers import SharedDevice
-
-    resolved = resolve_init_kwargs(ENTRY, node=NODE, config=CONFIG)
-    creator = DeviceClassCreator(SharedDevice, children=[], resource_tracker=DeviceNodeResourceTracker())
-    device = creator.create_instance(resolved["kwargs"])
-
-    assert isinstance(device, SharedDevice)
-    assert device.backend.host == "10.0.0.2"
-    assert device.backend.port == 1234
-    assert device.deck.name == "runtime-deck"
-    assert device.name == "lh-runtime"
-    assert device.channels == 384
-
-
-@pytest.mark.integration
-def test_class_init_via_instantiate_device_node(ros_context):
-    """Full edge path: registry entry with class.init -> _instantiate_device_node ->
-    ROS2DeviceNode whose driver_instance is the factory-constructed SharedDevice."""
-    from unilabos.registry.registry import lab_registry
-    from unilabos.resources.resource_tracker import ResourceDictInstance
-    from unilabos.ros.initialize_device import _instantiate_device_node
-
-    lab_registry.device_type_registry["vendor.lh.model_a"] = dict(ENTRY)
-    try:
-        device_config = ResourceDictInstance.get_resource_instance_from_dict({
-            "name": "lh_runtime",  # ROS2 node name: no hyphens
-            "type": "device",
-            "class": "vendor.lh.model_a",
-            "config": CONFIG,
-        })
-        node = _instantiate_device_node("lh_runtime", device_config, "vendor.lh.model_a")
-        assert node is not None
-        driver = getattr(node, "driver_instance", None)
-        assert driver is not None
-        assert driver.backend.host == "10.0.0.2"
-        assert driver.backend.port == 1234
-        assert driver.deck.name == "runtime-deck"
-        assert driver.channels == 384
-        assert driver.name == "lh_runtime"  # ${node.id} injected
-    finally:
-        lab_registry.device_type_registry.pop("vendor.lh.model_a", None)
-
-
-# --- Plan 09 T6: real pylabrobot LiquidHandler via class.init (F) -----------------
-
-PLR_ENTRY = {
-    "class": {
-        "module": "pylabrobot.liquid_handling.liquid_handler:LiquidHandler",
-        "type": "python",
-        "init": {
-            "kwargs": {
-                "backend": {
-                    "factory": "pylabrobot.liquid_handling.backends.chatterbox:LiquidHandlerChatterboxBackend",
-                    "kwargs": {"num_channels": 8},
-                },
-                "deck": {
-                    "factory": "pylabrobot.resources:Deck",
-                    "kwargs": {"size_x": 100.0, "size_y": 100.0, "size_z": 10.0},
-                },
-                "name": "${node.id}",
-            }
+        "init_param_enforce": {
+            "backend_type": "mock",
+            "backend_params": {"port": port},
+            "deck_name": deck_name,
+            "channels": channels,
         },
-        "status_types": {},
-        "action_value_mappings": {},
     }
-}
 
 
-@pytest.mark.integration
-def test_pylabrobot_liquidhandler_built_via_class_init():
-    """Two registry entries can share pylabrobot LiquidHandler but pick different
-    backends via class.init — proven by constructing a real LiquidHandler."""
-    pytest.importorskip("pylabrobot")
-    from unilabos.registry.initializer import build_instance_from_registry_entry
-
-    lh = build_instance_from_registry_entry(PLR_ENTRY, node={"id": "lh_plr", "name": "LH"}, config={})
-
-    from pylabrobot.liquid_handling.liquid_handler import LiquidHandler
-
-    assert isinstance(lh, LiquidHandler)
-    assert lh.backend.num_channels == 8
-    assert lh.name == "lh_plr"
-
-
-@pytest.mark.integration
-def test_pylabrobot_via_instantiate_device_node(ros_context):
-    """Full edge path for a pylabrobot driver (goes through PyLabRobotCreator)."""
-    pytest.importorskip("pylabrobot")
-    from unilabos.registry.registry import lab_registry
-    from unilabos.resources.resource_tracker import ResourceDictInstance
-    from unilabos.ros.initialize_device import _instantiate_device_node
-
-    lab_registry.device_type_registry["pylabrobot.lh.chatterbox"] = dict(PLR_ENTRY)
-    try:
-        device_config = ResourceDictInstance.get_resource_instance_from_dict({
-            "name": "lh_plr_node",
+def _device_config(registry_key, *, name):
+    return ResourceDictInstance.get_resource_instance_from_dict(
+        {
+            "name": name,
             "type": "device",
-            "class": "pylabrobot.lh.chatterbox",
-            "config": {},
-        })
-        node = _instantiate_device_node("lh_plr_node", device_config, "pylabrobot.lh.chatterbox")
-        assert node is not None
-        driver = getattr(node, "driver_instance", None)
-        assert driver is not None
-        assert driver.backend.num_channels == 8
+            "class": registry_key,
+            "config": {
+                "backend_type": "runtime-value-must-not-win",
+                "backend_params": {
+                    "host": "10.0.0.2",
+                    "port": 1234,
+                },
+                "deck_name": "runtime-deck",
+                "channels": 1,
+                "name": name,
+            },
+        }
+    )
+
+
+@contextmanager
+def _registered(entries):
+    missing = object()
+    previous = {
+        key: lab_registry.device_type_registry.get(key, missing)
+        for key in entries
+    }
+    lab_registry.device_type_registry.update(entries)
+    try:
+        yield
     finally:
-        lab_registry.device_type_registry.pop("pylabrobot.lh.chatterbox", None)
+        for key, value in previous.items():
+            if value is missing:
+                lab_registry.device_type_registry.pop(key, None)
+            else:
+                lab_registry.device_type_registry[key] = value
+
+
+@pytest.fixture
+def rclpy_runtime():
+    import rclpy
+
+    started_here = not rclpy.ok()
+    if started_here:
+        rclpy.init()
+    try:
+        yield
+    finally:
+        if started_here and rclpy.ok():
+            rclpy.shutdown()
+
+
+def _destroy_device(node):
+    if node is not None:
+        node.ros_node_instance.destroy_node()
+
+
+def test_init_param_enforce_rejects_removed_class_init_factory_dsl():
+    with pytest.raises(ValueError, match="不支持 class.init"):
+        validate_init_param_enforce(
+            "community.vendor.model_a",
+            {"config": {"type": "object"}},
+            {
+                "backend": {
+                    "factory": "vendor.drivers:Backend",
+                    "kwargs": {"host": "${config.host}"},
+                }
+            },
+        )
+
+
+def test_exact_community_key_builds_driver_from_merged_json(rclpy_runtime):
+    registry_key = "community.vendor.model_384"
+    node = None
+    with _registered(
+        {registry_key: _entry(channels=384, deck_name="runtime-deck-384", port=4321)}
+    ):
+        try:
+            node = initialize_device_from_dict(
+                "lh_runtime",
+                _device_config(registry_key, name="lh_runtime"),
+            )
+
+            assert node is not None
+            driver = node.driver_instance
+            assert driver.backend.host == "10.0.0.2"
+            assert driver.backend.port == 4321
+            assert driver.deck.name == "runtime-deck-384"
+            assert driver.channels == 384
+            assert driver.name == "lh_runtime"
+        finally:
+            _destroy_device(node)
+
+
+def test_initialize_requires_exact_registry_key_without_alias_fallback():
+    registry_key = "community.vendor.model_a"
+    with _registered(
+        {registry_key: _entry(channels=8, deck_name="model-a-deck", port=4008)}
+    ):
+        with pytest.raises(DeviceClassInvalid, match="vendor.model_a not found"):
+            initialize_device_from_dict(
+                "lh_alias",
+                _device_config("vendor.model_a", name="lh_alias"),
+            )
+
+
+def test_shared_driver_supports_two_json_enforced_variants(rclpy_runtime):
+    entries = {
+        "community.vendor.model_a": _entry(
+            channels=8,
+            deck_name="model-a-deck",
+            port=4008,
+        ),
+        "community.vendor.model_b": _entry(
+            channels=96,
+            deck_name="model-b-deck",
+            port=4096,
+        ),
+    }
+    nodes = []
+    with _registered(entries):
+        try:
+            for registry_key, name in (
+                ("community.vendor.model_a", "lh_a"),
+                ("community.vendor.model_b", "lh_b"),
+            ):
+                node = initialize_device_from_dict(
+                    name,
+                    _device_config(registry_key, name=name),
+                )
+                assert node is not None
+                nodes.append(node)
+
+            first, second = (node.driver_instance for node in nodes)
+            assert first.channels == 8
+            assert first.backend.port == 4008
+            assert first.deck.name == "model-a-deck"
+            assert second.channels == 96
+            assert second.backend.port == 4096
+            assert second.deck.name == "model-b-deck"
+        finally:
+            for node in nodes:
+                _destroy_device(node)
