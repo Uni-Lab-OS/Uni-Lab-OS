@@ -9,8 +9,6 @@ import importlib
 from uuid import uuid4
 
 import pytest
-
-pytest.importorskip("fastapi")
 from fastapi.testclient import TestClient
 
 
