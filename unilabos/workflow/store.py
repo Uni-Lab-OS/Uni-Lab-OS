@@ -1439,27 +1439,32 @@ class WorkflowStore:
 
     @classmethod
     def _node_template_row(cls, row: sqlite3.Row) -> Dict[str, Any]:
-        return {
+        result = {
             **cls._base(row),
             "resource_template_uuid": row["resource_template_uuid"],
             "name": row["name"],
             "display_name": row["display_name"],
-            "class": row["class"],
             "goal": _load(row["goal"], {}),
             "goal_default": _load(row["goal_default"], {}),
             "feedback": _load(row["feedback"], {}),
             "result": _load(row["result"], {}),
-            "schema": row["schema"],
             "type": row["type"],
-            "icon": row["icon"],
-            "header": row["header"],
-            "footer": row["footer"],
             "node_type": row["node_type"],
         }
+        cls._add_optional(
+            result,
+            row,
+            "class",
+            "schema",
+            "icon",
+            "header",
+            "footer",
+        )
+        return result
 
     @classmethod
     def _handle_template_row(cls, row: sqlite3.Row) -> Dict[str, Any]:
-        return {
+        result = {
             **cls._base(row),
             "workflow_node_template_uuid": row[
                 "workflow_node_template_uuid"
@@ -1469,9 +1474,9 @@ class WorkflowStore:
             "display_name": row["display_name"],
             "type": row["type"],
             "required": bool(row["required"]),
-            "data_source": row["data_source"],
-            "data_key": row["data_key"],
         }
+        cls._add_optional(result, row, "data_source", "data_key")
+        return result
 
     @classmethod
     def _task_row(cls, row: sqlite3.Row) -> Dict[str, Any]:

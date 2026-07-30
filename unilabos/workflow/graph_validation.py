@@ -50,6 +50,8 @@ def validate_graph(
     _validate_parent_cycles(nodes)
 
     for edge in edges:
+        if edge.source_node_uuid == edge.target_node_uuid:
+            raise GraphValidationError("节点不能连接到自身")
         if (
             edge.source_node_uuid not in node_by_uuid
             or edge.target_node_uuid not in node_by_uuid
@@ -68,6 +70,15 @@ def validate_graph(
             handles,
         )
 
+    bindings_by_node = {
+        node.uuid: _validated_input_bindings(
+            node,
+            node_meta_data[node.uuid],
+            workflow_meta_data,
+            handles,
+        )
+        for node in nodes
+    }
     enabled = {
         node.uuid: node
         for node in nodes
@@ -104,12 +115,7 @@ def validate_graph(
     _validate_edge_cycles(enabled, enabled_edges)
     for node_uuid, node in enabled.items():
         param = effective_params[node_uuid]
-        bindings = _validated_input_bindings(
-            node,
-            node_meta_data[node_uuid],
-            workflow_meta_data,
-            handles,
-        )
+        bindings = bindings_by_node[node_uuid]
         for handle_uuid in bindings:
             available_data_keys[node_uuid].append(
                 _handle_data_key(handles[handle_uuid])
@@ -299,16 +305,16 @@ def _validated_input_bindings(
     workflow_meta_data: Mapping[str, Any],
     handles: Mapping[str, Dict[str, Any]],
 ) -> Dict[str, Dict[str, Any]]:
-    if node.workflow_node_template_uuid is None:
-        # 无模板节点没有可投影的类型化 Handle；保留其受保护元数据，
-        # 但不把它解释为 Action 输入 Provider。
-        return {}
     unilab = meta_data.get("unilab", {})
     if not isinstance(unilab, dict):
         raise GraphValidationError("Node meta_data.unilab 必须是对象")
     raw_bindings = unilab.get("input_bindings", {})
     if not isinstance(raw_bindings, dict):
         raise GraphValidationError("input_bindings 必须是对象")
+    if not raw_bindings:
+        return {}
+    if node.workflow_node_template_uuid is None:
+        raise GraphValidationError("无模板节点不能声明 input_bindings")
 
     workflow_unilab = workflow_meta_data.get("unilab", {})
     if not isinstance(workflow_unilab, dict):

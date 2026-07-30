@@ -60,6 +60,29 @@ class WorkflowNodeWrite(BaseModel):
     def _valid_uuid(cls, value: Optional[str]) -> Optional[str]:
         return None if value is None else validate_uuid(value)
 
+    @field_validator("name", "status", "type")
+    @classmethod
+    def _required_text(cls, value: str) -> str:
+        normalized = value.strip()
+        if not normalized:
+            raise ValueError("value must not be blank")
+        return normalized
+
+    @field_validator(
+        "icon",
+        "footer",
+        "action_name",
+        "action_type",
+        "script",
+        "description",
+    )
+    @classmethod
+    def _optional_text(cls, value: Optional[str]) -> Optional[str]:
+        if value is None:
+            return None
+        normalized = value.strip()
+        return normalized or None
+
 
 class WorkflowEdgeWrite(BaseModel):
     """Complete WorkflowEdge payload used by full-graph reconciliation."""
@@ -84,6 +107,14 @@ class WorkflowEdgeWrite(BaseModel):
     @classmethod
     def _valid_uuid(cls, value: str) -> str:
         return validate_uuid(value)
+
+    @field_validator("description")
+    @classmethod
+    def _optional_text(cls, value: Optional[str]) -> Optional[str]:
+        if value is None:
+            return None
+        normalized = value.strip()
+        return normalized or None
 
 
 class CandidateCompilation(BaseModel):

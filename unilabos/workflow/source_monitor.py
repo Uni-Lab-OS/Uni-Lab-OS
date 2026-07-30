@@ -16,8 +16,8 @@ class WorkflowSourceMonitor:
         self,
         service: WorkflowService,
         *,
-        interval_seconds: float = 0.05,
-        settle_seconds: float = 0.05,
+        interval_seconds: float = 0.25,
+        settle_seconds: float = 0.1,
     ):
         self._service = service
         self._interval_seconds = interval_seconds
@@ -26,17 +26,14 @@ class WorkflowSourceMonitor:
         self._thread: Optional[threading.Thread] = None
         self._processed: Dict[str, Tuple[Any, ...]] = {}
         self._pending: Dict[str, Tuple[Tuple[Any, ...], float]] = {}
+        self._retries: Dict[
+            str,
+            Tuple[Tuple[Any, ...], float, float],
+        ] = {}
 
     def start(self) -> None:
         if self._thread is not None:
             return
-        for registration in self._service.store.list_source_registrations():
-            try:
-                self._processed[registration["workflow_uuid"]] = (
-                    self._service.source_signature(registration)
-                )
-            except (OSError, RuntimeError, WorkflowError):
-                continue
         self._thread = threading.Thread(
             target=self._run,
             name="workflow-source-monitor",
@@ -60,9 +57,15 @@ class WorkflowSourceMonitor:
                 registration["workflow_uuid"]
                 for registration in registrations
             }
-            for workflow_uuid in set(self._processed) - active:
+            known = (
+                set(self._processed)
+                | set(self._pending)
+                | set(self._retries)
+            )
+            for workflow_uuid in known - active:
                 self._processed.pop(workflow_uuid, None)
                 self._pending.pop(workflow_uuid, None)
+                self._retries.pop(workflow_uuid, None)
             for registration in registrations:
                 if self._stop_event.is_set():
                     return
@@ -72,13 +75,22 @@ class WorkflowSourceMonitor:
                     signature = self._service.source_signature(registration)
                     if self._processed.get(workflow_uuid) == signature:
                         self._pending.pop(workflow_uuid, None)
+                        self._retries.pop(workflow_uuid, None)
                         continue
                     now = time.monotonic()
                     pending = self._pending.get(workflow_uuid)
                     if pending is None or pending[0] != signature:
                         self._pending[workflow_uuid] = (signature, now)
+                        self._retries.pop(workflow_uuid, None)
                         continue
                     if now - pending[1] < self._settle_seconds:
+                        continue
+                    retry = self._retries.get(workflow_uuid)
+                    if (
+                        retry is not None
+                        and retry[0] == signature
+                        and now < retry[1]
+                    ):
                         continue
                     self._service.reconcile_registered_source(
                         workflow_uuid
@@ -89,18 +101,47 @@ class WorkflowSourceMonitor:
                     if latest_signature == signature:
                         self._processed[workflow_uuid] = signature
                         self._pending.pop(workflow_uuid, None)
+                        self._retries.pop(workflow_uuid, None)
                     else:
                         self._pending[workflow_uuid] = (
                             latest_signature,
                             time.monotonic(),
                         )
-                except (OSError, RuntimeError, WorkflowError):
-                    # 单个无效 Draft 不得终止其他工作流的监视。
-                    if signature is not None:
+                        self._retries.pop(workflow_uuid, None)
+                except WorkflowError as exc:
+                    # 文件内容错误只在签名变化后重试；编译器和目录等
+                    # 暂态故障则使用有上限的指数退避。
+                    if signature is not None and exc.code in {
+                        "invalid_input",
+                        "workflow_not_found",
+                    }:
                         self._processed[workflow_uuid] = signature
                         self._pending.pop(workflow_uuid, None)
+                        self._retries.pop(workflow_uuid, None)
+                    elif signature is not None:
+                        self._schedule_retry(workflow_uuid, signature)
+                    continue
+                except (OSError, RuntimeError):
+                    if signature is not None:
+                        self._schedule_retry(workflow_uuid, signature)
                     continue
             self._stop_event.wait(self._interval_seconds)
+
+    def _schedule_retry(
+        self,
+        workflow_uuid: str,
+        signature: Tuple[Any, ...],
+    ) -> None:
+        previous = self._retries.get(workflow_uuid)
+        minimum = max(0.02, self._interval_seconds * 4)
+        delay = minimum
+        if previous is not None and previous[0] == signature:
+            delay = min(previous[2] * 2, 1.0)
+        self._retries[workflow_uuid] = (
+            signature,
+            time.monotonic() + delay,
+            delay,
+        )
 
 
 __all__ = ["WorkflowSourceMonitor"]
