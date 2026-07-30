@@ -252,6 +252,8 @@ def test_cas_restore_failure_retains_the_only_original_copy(
         source="value = 'original draft'\n",
     )
     original_bytes = source_path.read_bytes()
+    replacement_source = "value = 'replacement draft'\n"
+    replacement_bytes = replacement_source.encode()
     original_replace = os.replace
     canonical_install_failures = 0
     rollback_failures = 0
@@ -279,7 +281,7 @@ def test_cas_restore_failure_retains_the_only_original_copy(
         with pytest.raises(WorkflowError) as error:
             service.save_draft(
                 WORKFLOW_UUID,
-                python_source="value = 'replacement draft'\n",
+                python_source=replacement_source,
                 expected_draft_hash=saved["draft"]["draft_hash"],
                 expected_workflow_revision=1,
             )
@@ -293,8 +295,8 @@ def test_cas_restore_failure_retains_the_only_original_copy(
 
     assert error.value.code == "internal_error"
     assert canonical_install_failures == 1
-    assert rollback_failures_after_save >= 1
-    assert canonical_snapshot != original_bytes
+    assert rollback_failures_after_save == 0
+    assert canonical_snapshot == replacement_bytes
     assert list(backup_snapshot.values()).count(original_bytes) == 1
 
     recovered_store = WorkflowStore(tmp_path / "workflow.db")
@@ -304,16 +306,23 @@ def test_cas_restore_failure_retains_the_only_original_copy(
     )
     try:
         recovered_aggregate = recovered.get_authoring(WORKFLOW_UUID)
+        canonical_after_get = source_path.read_bytes()
+        artifacts_after_get = {
+            path.name: path.read_bytes()
+            for path in source_path.parent.glob(f".{source_path.name}.*.cas")
+        }
         reconciled = recovered.reconcile_registered_source(WORKFLOW_UUID)
     finally:
         recovered_store.close()
 
-    assert recovered_aggregate["state"] == "draft_missing"
-    assert recovered_aggregate["draft"] is None
+    assert recovered_aggregate["state"] == "candidate_stale"
+    assert recovered_aggregate["draft"]["python_source"] == replacement_source
     assert recovered_aggregate["candidate"] is None
-    assert reconciled["state"] == "draft_missing"
-    assert reconciled["draft"] is None
-    assert reconciled["candidate"] is None
+    assert canonical_after_get == canonical_snapshot
+    assert artifacts_after_get == backup_snapshot
+    assert reconciled["state"] == "unapplied_source_only"
+    assert reconciled["draft"]["python_source"] == replacement_source
+    assert reconciled["candidate"] is not None
     assert (
         source_path.read_bytes() if source_path.exists() else None
     ) == canonical_snapshot
