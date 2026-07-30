@@ -37,14 +37,7 @@ def compose_workflow_runtime(
             compiler=compiler,
         )
         _database_path = database_path
-        for registration in _service.store.list_source_registrations():
-            try:
-                _service.reconcile_registered_source(
-                    registration["workflow_uuid"]
-                )
-            except (OSError, RuntimeError):
-                # 一个损坏或暂不可编译的 Draft 不阻塞进程启动。
-                continue
+        _service.recover_registered_sources()
         _monitor = WorkflowSourceMonitor(_service)
         _monitor.start()
         return _service
@@ -72,7 +65,7 @@ def reset_workflow_service_for_test() -> None:
         if _monitor is not None:
             _monitor.stop()
         if _service is not None:
-            _service.store.close()
+            _service.close()
         _monitor = None
         _service = None
         _database_path = None

@@ -156,7 +156,7 @@ def test_graph_revision_conflict_is_atomic_and_reconcile_preserves_uuid(
     )
     assert first["workflow"]["revision"] == 2
     assert [node["uuid"] for node in first["nodes"]] == [NODE_A_UUID]
-    assert service.store.count_rows("workflow_task") == 0
+    assert service._store.count_rows("workflow_task") == 0
 
     with pytest.raises(WorkflowConflict) as conflict:
         service.save_graph(
@@ -196,8 +196,8 @@ def test_graph_revision_conflict_is_atomic_and_reconcile_preserves_uuid(
     assert reconciled["workflow"]["revision"] == 4
     assert [node["uuid"] for node in reconciled["nodes"]] == [NODE_B_UUID]
     assert reconciled["edges"] == []
-    assert service.store.count_rows("workflow_node", include_deleted=True) == 2
-    assert service.store.count_rows("workflow_edge", include_deleted=True) == 1
+    assert service._store.count_rows("workflow_node", include_deleted=True) == 2
+    assert service._store.count_rows("workflow_edge", include_deleted=True) == 1
 
 
 def test_task_snapshot_and_pending_jobs_are_created_in_one_transaction(
@@ -326,7 +326,7 @@ def test_phase_01_does_not_invent_unfrozen_task_input_shape(
         )
 
     assert failure.value.code == "invalid_input"
-    assert service.store.count_rows("workflow_task") == 0
+    assert service._store.count_rows("workflow_task") == 0
 
 
 def test_workspace_composition_owns_one_fixed_workflow_database(
@@ -338,7 +338,7 @@ def test_workspace_composition_owns_one_fixed_workflow_database(
         second = setup_workflow_service(working_dir)
 
         assert first is second
-        assert Path(first.store.path) == working_dir / "workflow.db"
+        assert Path(first._store.path) == working_dir / "workflow.db"
         assert (working_dir / "workflow.db").is_file()
         with pytest.raises(RuntimeError):
             setup_workflow_service(tmp_path / "another_workspace")

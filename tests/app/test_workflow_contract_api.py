@@ -62,9 +62,7 @@ class FakeAuthoringCompiler:
             )
 
         normalized = (
-            python_source
-            if python_source.endswith("\n")
-            else python_source + "\n"
+            python_source if python_source.endswith("\n") else python_source + "\n"
         )
         if "source_only" in python_source:
             graph = applied_graph
@@ -176,14 +174,12 @@ def test_main_composition_can_hide_execution_shaped_scheduler_workflows() -> Non
         include_execution_shaped_workflow_routes=False,
     )
     routes = {
-        (route.path, ",".join(sorted(route.methods or [])))
-        for route in router.routes
+        (route.path, ",".join(sorted(route.methods or []))) for route in router.routes
     }
 
     assert not any(path == "/api/v1/workflows" for path, _methods in routes)
     assert not any(
-        path.startswith("/api/v1/workflows/{workflow_id}")
-        for path, _methods in routes
+        path.startswith("/api/v1/workflows/{workflow_id}") for path, _methods in routes
     )
     assert any(path == "/api/v1/health" for path, _methods in routes)
 
@@ -245,9 +241,7 @@ def test_backend_envelope_graph_revision_and_task_snapshot(client) -> None:
     task = created.json()["data"]
     assert task["workflow_uuid"] == WORKFLOW_UUID
     assert task["workflow_snapshot"]["workflow"]["revision"] == 2
-    jobs = test_client.get(
-        f"/api/v1/workflow-tasks/{task['uuid']}/jobs"
-    ).json()["data"]
+    jobs = test_client.get(f"/api/v1/workflow-tasks/{task['uuid']}/jobs").json()["data"]
     assert len(jobs) == 1
     assert jobs[0]["workflow_node_uuid"] == NODE_UUID
     assert "node_id" not in jobs[0]
@@ -325,7 +319,7 @@ def test_authoring_missing_draft_invalid_save_and_apply_three_token_flow(
     assert data["authoring"]["candidate"] is None
     assert data["authoring"]["applied_graph"]["nodes"][0]["uuid"] == NODE_UUID
 
-    assert service.store.count_rows("workflow_task") == 0
+    assert service._store.count_rows("workflow_task") == 0
 
 
 def test_source_only_apply_retains_workflow_revision(client) -> None:
@@ -391,8 +385,7 @@ def test_committed_apply_reports_source_writeback_as_warning(
         {
             "code": "draft_writeback_pending",
             "message": (
-                "工作流已应用，但本地源码同步失败；"
-                "OS 已保留可恢复的源码记录。"
+                "工作流已应用，但本地源码同步失败；OS 已保留可恢复的源码记录。"
             ),
         }
     ]
@@ -402,9 +395,10 @@ def test_committed_apply_reports_source_writeback_as_warning(
     monkeypatch.undo()
     recovered = service.reconcile_registered_source(WORKFLOW_UUID)
     assert recovered["state"] == "applied"
-    assert service.store.get_authoring_record(WORKFLOW_UUID)[
-        "writeback_status"
-    ] == "settled"
+    assert (
+        service._store.get_authoring_record(WORKFLOW_UUID)["writeback_status"]
+        == "settled"
+    )
     assert service.list_events(after_id=0)["items"][-1]["data"]["cause"] == (
         "recovered"
     )
@@ -445,9 +439,7 @@ def test_authoring_conflict_order_and_error_envelopes(client) -> None:
         },
     )
     assert stale_revision.status_code == 409
-    assert stale_revision.json()["error"]["code"] == (
-        "workflow_revision_conflict"
-    )
+    assert stale_revision.json()["error"]["code"] == ("workflow_revision_conflict")
 
 
 def test_malformed_tokens_and_event_cursor_use_frozen_error_shapes(
@@ -591,8 +583,9 @@ def test_authoring_candidate_and_event_survive_store_restart(
     aggregate = reopened.get_authoring(WORKFLOW_UUID)
     assert aggregate["state"] == "unapplied_graph"
     assert aggregate["draft"]["draft_hash"] == saved["draft"]["draft_hash"]
-    assert aggregate["candidate"]["candidate_hash"] == (
-        saved["candidate"]["candidate_hash"]
+    assert (
+        aggregate["candidate"]["candidate_hash"]
+        == (saved["candidate"]["candidate_hash"])
     )
     assert reopened.list_events(after_id=0)["items"] == [event]
     assert reopened.list_events(after_id=event["id"])["items"] == []

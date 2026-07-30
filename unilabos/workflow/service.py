@@ -21,7 +21,7 @@ from uuid import uuid4
 from pydantic import ValidationError
 
 from unilabos.workflow.graph_validation import GraphValidationError, validate_graph
-from unilabos.workflow.json_codec import encode_json
+from unilabos.workflow.json_codec import encode_json, strict_json_equal
 from unilabos.workflow.models import (
     CandidateChangeset,
     CandidateCompilation,
@@ -34,6 +34,7 @@ from unilabos.workflow.models import (
     validate_uuid,
 )
 from unilabos.workflow.store import (
+    StoreAuthoringConflict,
     StoreConflict,
     StoreNotFound,
     StoreRevisionConflict,
@@ -215,35 +216,23 @@ def _canonical_json(value: Any) -> bytes:
     return encode_json(value, sort_keys=True)
 
 
-def _strict_json_equal(left: Any, right: Any) -> bool:
-    """Compare JSON values without Python's bool/int/float aliases."""
-
-    if type(left) is not type(right):
-        return False
-    if isinstance(left, dict):
-        return left.keys() == right.keys() and all(
-            _strict_json_equal(value, right[key]) for key, value in left.items()
-        )
-    if isinstance(left, list):
-        return len(left) == len(right) and all(
-            _strict_json_equal(left_item, right_item)
-            for left_item, right_item in zip(left, right, strict=True)
-        )
-    return bool(left == right)
-
-
 def _source_ranges_fit(
     python_source: str,
     ranges: Iterable[Dict[str, Any]],
 ) -> bool:
-    """Return whether every 1-based range endpoint fits the exact source."""
+    """检查每个从 1 开始的范围端点是否落在原始源码内。"""
 
-    lines = python_source.splitlines()
-    if not lines:
-        lines = [""]
+    try:
+        line_byte_lengths = [
+            len(line.encode("utf-8")) for line in re.split(r"\r\n|\r|\n", python_source)
+        ]
+    except UnicodeEncodeError:
+        return False
 
     def position_fits(line: int, column: int) -> bool:
-        return line <= len(lines) and column <= len(lines[line - 1]) + 1
+        return (
+            line <= len(line_byte_lengths) and column <= line_byte_lengths[line - 1] + 1
+        )
 
     return all(
         position_fits(item["start_line"], item["start_column"])
@@ -269,7 +258,7 @@ class WorkflowService:
         *,
         compiler: Optional[AuthoringCompiler] = None,
     ):
-        self.store = store
+        self._store = store
         self.compiler = compiler
         self._locks_guard = threading.Lock()
         self._authoring_locks: Dict[str, threading.RLock] = {}
@@ -294,7 +283,7 @@ class WorkflowService:
             meta_data = normalize_json_object(meta_data)
             public_meta_data = dict(meta_data)
             public_meta_data.pop("unilab", None)
-            return self.store.create_workflow(
+            return self._store.create_workflow(
                 workflow_uuid=identity,
                 name=name,
                 tags=tags,
@@ -312,7 +301,7 @@ class WorkflowService:
         except ValueError:
             raise WorkflowError("invalid_input") from None
         try:
-            return self.store.get_workflow(identity)
+            return self._store.get_workflow(identity)
         except StoreNotFound:
             raise WorkflowError("not_found") from None
 
@@ -324,7 +313,7 @@ class WorkflowService:
         name: str = "",
     ) -> Dict[str, Any]:
         page, page_size = self._normalize_page(page, page_size)
-        return self.store.list_workflows(page=page, page_size=page_size, name=name)
+        return self._store.list_workflows(page=page, page_size=page_size, name=name)
 
     def update_workflow(
         self,
@@ -350,7 +339,7 @@ class WorkflowService:
             public_meta_data.pop("unilab", None)
             if "unilab" in current["meta_data"]:
                 public_meta_data["unilab"] = current["meta_data"]["unilab"]
-            return self.store.update_workflow(
+            return self._store.update_workflow(
                 identity,
                 name=name,
                 tags=tags,
@@ -362,12 +351,12 @@ class WorkflowService:
         identity = self.get_workflow(workflow_uuid)["uuid"]
         with self._authoring_lock(identity):
             self.get_workflow(identity)
-            self.store.delete_workflow(identity)
+            self._store.delete_workflow(identity)
 
     def get_graph(self, workflow_uuid: str) -> Dict[str, Any]:
         identity = self.get_workflow(workflow_uuid)["uuid"]
         return self._validated_applied_backend_graph(
-            self.store.get_graph(identity),
+            self._store.get_graph(identity),
         )
 
     def save_graph(
@@ -394,7 +383,7 @@ class WorkflowService:
                     else WorkflowEdgeWrite.model_validate(item)
                     for item in edges
                 ]
-                return self.store.save_graph(
+                return self._store.save_graph(
                     identity,
                     revision=revision,
                     nodes=node_values,
@@ -442,7 +431,7 @@ class WorkflowService:
             raise WorkflowError("invalid_input")
         description = self._optional_text(description)
         try:
-            return self.store.create_task_with_jobs(
+            return self._store.create_task_with_jobs(
                 workflow_uuid=workflow_uuid,
                 task_uuid=str(uuid4()),
                 run_mode=run_mode,
@@ -465,7 +454,7 @@ class WorkflowService:
         except ValueError:
             raise WorkflowError("invalid_input") from None
         try:
-            return self.store.get_task(identity)
+            return self._store.get_task(identity)
         except StoreNotFound:
             raise WorkflowError("not_found") from None
 
@@ -504,7 +493,7 @@ class WorkflowService:
             "requires_attention",
         }:
             raise WorkflowError("invalid_input")
-        return self.store.list_tasks(
+        return self._store.list_tasks(
             page=page,
             page_size=page_size,
             workflow_uuid=workflow_uuid,
@@ -514,7 +503,7 @@ class WorkflowService:
 
     def list_workflow_node_jobs(self, task_uuid: str) -> List[Dict[str, Any]]:
         identity = self.get_workflow_task(task_uuid)["uuid"]
-        return self.store.list_jobs(identity)
+        return self._store.list_jobs(identity)
 
     def get_workflow_node_job(self, job_uuid: str) -> Dict[str, Any]:
         try:
@@ -522,7 +511,7 @@ class WorkflowService:
         except ValueError:
             raise WorkflowError("invalid_input") from None
         try:
-            return self.store.get_job(identity)
+            return self._store.get_job(identity)
         except StoreNotFound:
             raise WorkflowError("not_found") from None
 
@@ -775,7 +764,7 @@ class WorkflowService:
             )
             source_uri = f"package://{package_id}/{relative.as_posix()}"
             try:
-                return self.store.register_source(
+                return self._store.register_source(
                     workflow_uuid=workflow_uuid,
                     package_id=package_id,
                     package_root=str(root),
@@ -785,6 +774,25 @@ class WorkflowService:
             except StoreConflict:
                 raise WorkflowConflict("invalid_input") from None
 
+    def list_registered_sources(self) -> List[Dict[str, Any]]:
+        """返回 Draft 监视与启动恢复所需的已注册源码。"""
+
+        return self._store.list_source_registrations()
+
+    def recover_registered_sources(self) -> None:
+        """启动时逐一恢复已注册源码，隔离单个损坏 Draft。"""
+
+        for registration in self.list_registered_sources():
+            try:
+                self.reconcile_registered_source(registration["workflow_uuid"])
+            except (OSError, RuntimeError):
+                continue
+
+    def close(self) -> None:
+        """关闭由该 Service 独占的 Workflow 持久存储。"""
+
+        self._store.close()
+
     def get_authoring(self, workflow_uuid: str) -> Dict[str, Any]:
         workflow_uuid = self._get_authoring_workflow(workflow_uuid)["uuid"]
         with self._authoring_lock(workflow_uuid):
@@ -792,7 +800,7 @@ class WorkflowService:
             registration = self._registration(workflow_uuid)
             source = self._read_source(registration)
             graph = self.get_graph(workflow_uuid)
-            record = self.store.get_authoring_record(workflow_uuid)
+            record = self._store.get_authoring_record(workflow_uuid)
             return self._authoring_aggregate(
                 workflow=workflow,
                 graph=graph,
@@ -860,7 +868,7 @@ class WorkflowService:
                     candidate["candidate_hash"] if candidate is not None else None
                 ),
             }
-            self.store.record_draft_compilation(
+            self._store.record_draft_compilation(
                 workflow_uuid=workflow_uuid,
                 draft_hash=source["draft_hash"],
                 draft_update_time=source["update_time"],
@@ -882,7 +890,7 @@ class WorkflowService:
             workflow = self._get_authoring_workflow(workflow_uuid)
             registration = self._registration(workflow_uuid)
             source = self._read_source(registration)
-            record = self.store.get_authoring_record(workflow_uuid)
+            record = self._store.get_authoring_record(workflow_uuid)
             applied_source = record.get("applied_source")
             if (
                 record["writeback_status"] == "pending"
@@ -890,7 +898,7 @@ class WorkflowService:
                 and applied_source is not None
                 and source["draft_hash"] == applied_source["source_hash"]
             ):
-                self.store.settle_writeback(
+                self._store.settle_writeback(
                     workflow_uuid=workflow_uuid,
                     observed_draft_hash=source["draft_hash"],
                     draft_update_time=source["update_time"],
@@ -921,7 +929,7 @@ class WorkflowService:
                         )
                         source = self._read_source(registration)
                         if source is not None and source["draft_hash"] == recovery_hash:
-                            self.store.settle_writeback(
+                            self._store.settle_writeback(
                                 workflow_uuid=workflow_uuid,
                                 observed_draft_hash=source["draft_hash"],
                                 draft_update_time=source["update_time"],
@@ -967,7 +975,7 @@ class WorkflowService:
                 and record["update_time"] is not None
                 else "external_draft_changed"
             )
-            self.store.record_draft_compilation(
+            self._store.record_draft_compilation(
                 workflow_uuid=workflow_uuid,
                 draft_hash=actual_hash,
                 draft_update_time=(
@@ -1013,7 +1021,7 @@ class WorkflowService:
             if workflow["revision"] != expected_workflow_revision:
                 raise WorkflowConflict("workflow_revision_conflict")
 
-            record = self.store.get_authoring_record(workflow_uuid)
+            record = self._store.get_authoring_record(workflow_uuid)
             candidate = record.get("candidate")
             current_catalog = self._catalog_fingerprint()
             if (
@@ -1069,14 +1077,20 @@ class WorkflowService:
             if revalidated["candidate_hash"] != candidate["candidate_hash"]:
                 raise WorkflowConflict("candidate_hash_conflict")
 
-            latest_source = self._read_source(registration)
-            if (
-                latest_source is None
-                or latest_source["draft_hash"] != expected_draft_hash
-            ):
-                raise WorkflowConflict("draft_hash_conflict")
-            if self._catalog_fingerprint() != candidate["template_catalog_fingerprint"]:
-                raise WorkflowConflict("template_catalog_conflict")
+            def validate_authorities() -> None:
+                latest_source = self._read_source(registration)
+                if (
+                    latest_source is None
+                    or latest_source["draft_hash"] != expected_draft_hash
+                ):
+                    raise WorkflowConflict("draft_hash_conflict")
+                if (
+                    self._catalog_fingerprint()
+                    != candidate["template_catalog_fingerprint"]
+                ):
+                    raise WorkflowConflict("template_catalog_conflict")
+
+            validate_authorities()
 
             normalized_source = candidate["normalized_python_source"]
             normalized_bytes = normalized_source.encode("utf-8")
@@ -1092,9 +1106,14 @@ class WorkflowService:
             }
             previous_revision = workflow["revision"]
             try:
-                resulting_revision = self.store.apply_authoring_candidate(
+                resulting_revision = self._store.apply_authoring_candidate(
                     workflow_uuid=workflow_uuid,
                     expected_revision=previous_revision,
+                    expected_draft_hash=expected_draft_hash,
+                    expected_candidate_hash=expected_candidate_hash,
+                    expected_catalog_fingerprint=candidate[
+                        "template_catalog_fingerprint"
+                    ],
                     candidate=candidate,
                     applied_source=applied_source,
                     event_data={
@@ -1103,7 +1122,10 @@ class WorkflowService:
                         "draft_hash": normalized_hash,
                         "candidate_hash": None,
                     },
+                    authority_guard=validate_authorities,
                 )
+            except StoreAuthoringConflict as error:
+                raise WorkflowConflict(error.code) from None
             except StoreRevisionConflict:
                 raise WorkflowConflict("workflow_revision_conflict") from None
             except (StoreConflict, ValidationError):
@@ -1128,7 +1150,7 @@ class WorkflowService:
             def mark_pending_best_effort() -> None:
                 for _attempt in range(2):
                     try:
-                        self.store.mark_writeback_pending(workflow_uuid)
+                        self._store.mark_writeback_pending(workflow_uuid)
                         return
                     except Exception:  # noqa: BLE001 - 提交后只能尽力恢复
                         continue
@@ -1156,7 +1178,7 @@ class WorkflowService:
                 settled = False
                 for _attempt in range(2):
                     try:
-                        self.store.settle_writeback(
+                        self._store.settle_writeback(
                             workflow_uuid=workflow_uuid,
                             observed_draft_hash=written["draft_hash"],
                             draft_update_time=written["update_time"],
@@ -1206,7 +1228,9 @@ class WorkflowService:
                     try:
                         fallback_graph = self.get_graph(workflow_uuid)
                         fallback_workflow = fallback_graph["workflow"]
-                        fallback_record = self.store.get_authoring_record(workflow_uuid)
+                        fallback_record = self._store.get_authoring_record(
+                            workflow_uuid
+                        )
                     except Exception:  # noqa: BLE001 - 使用提交时事实降级
                         fallback_graph = self._post_commit_candidate_graph(
                             candidate["graph"],
@@ -1241,7 +1265,7 @@ class WorkflowService:
         if after_id < 0 or not 1 <= limit <= 1000:
             raise WorkflowError("invalid_input")
         return {
-            "items": self.store.list_events(after_id=after_id, limit=limit),
+            "items": self._store.list_events(after_id=after_id, limit=limit),
             "after_id": after_id,
         }
 
@@ -1256,13 +1280,13 @@ class WorkflowService:
         except ValueError:
             raise WorkflowError("invalid_input") from None
         try:
-            return self.store.get_workflow(identity)
+            return self._store.get_workflow(identity)
         except StoreNotFound:
             raise WorkflowError("workflow_not_found") from None
 
     def _registration(self, workflow_uuid: str) -> Dict[str, Any]:
         try:
-            return self.store.get_source_registration(workflow_uuid)
+            return self._store.get_source_registration(workflow_uuid)
         except StoreNotFound:
             raise WorkflowError("workflow_not_found") from None
 
@@ -1317,7 +1341,7 @@ class WorkflowService:
 
         workflow_uuid = self._get_authoring_workflow(workflow_uuid)["uuid"]
         with self._authoring_lock(workflow_uuid):
-            record = self.store.get_authoring_record(workflow_uuid)
+            record = self._store.get_authoring_record(workflow_uuid)
             return record["writeback_status"] == "pending"
 
     def source_signature(
@@ -1977,7 +2001,7 @@ class WorkflowService:
         workflow = graph["workflow"]
         applied_workflow = applied_graph["workflow"]
         for field in _WORKFLOW_READ_FIELDS - {"meta_data"}:
-            if not _strict_json_equal(
+            if not strict_json_equal(
                 workflow.get(field),
                 applied_workflow.get(field),
             ):
@@ -1985,11 +2009,11 @@ class WorkflowService:
 
         workflow_meta = dict(workflow["meta_data"])
         applied_meta = dict(applied_workflow["meta_data"])
-        reserved_changed = not _strict_json_equal(
+        reserved_changed = not strict_json_equal(
             workflow_meta.pop("unilab", None),
             applied_meta.pop("unilab", None),
         )
-        if not _strict_json_equal(workflow_meta, applied_meta):
+        if not strict_json_equal(workflow_meta, applied_meta):
             raise ValueError("Candidate changed non-authoring Workflow metadata")
 
         for field in ("node_templates", "handle_templates"):
@@ -1998,7 +2022,7 @@ class WorkflowService:
                 applied_graph[field],
                 key=lambda item: item["uuid"],
             )
-            if not _strict_json_equal(candidate_entities, applied_entities):
+            if not strict_json_equal(candidate_entities, applied_entities):
                 raise ValueError("Candidate catalog projection is not authoritative")
 
         nodes = [cls._semantic_node(item) for item in graph["nodes"]]
@@ -2046,7 +2070,7 @@ class WorkflowService:
             "updated_node_uuids": {
                 uuid
                 for uuid in set(candidate_nodes) & set(applied_nodes)
-                if not _strict_json_equal(
+                if not strict_json_equal(
                     candidate_nodes[uuid],
                     applied_nodes[uuid],
                 )
@@ -2056,7 +2080,7 @@ class WorkflowService:
             "updated_edge_uuids": {
                 uuid
                 for uuid in set(candidate_edges) & set(applied_edges)
-                if not _strict_json_equal(
+                if not strict_json_equal(
                     candidate_edges[uuid],
                     applied_edges[uuid],
                 )

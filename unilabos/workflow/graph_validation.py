@@ -8,6 +8,7 @@ import re
 from collections import defaultdict
 from typing import Any, Dict, Iterable, List, Mapping
 
+from unilabos.workflow.json_codec import encode_json, strict_json_equal
 from unilabos.workflow.models import WorkflowEdgeWrite, WorkflowNodeWrite
 
 _MAX_SCHEMA_DEPTH = 64
@@ -89,10 +90,7 @@ def validate_graph(
     connected_inputs: Dict[tuple[str, str], str] = {}
     available_data_keys: Dict[str, List[str]] = defaultdict(list)
     for edge in edges:
-        if (
-            edge.source_node_uuid not in enabled
-            or edge.target_node_uuid not in enabled
-        ):
+        if edge.source_node_uuid not in enabled or edge.target_node_uuid not in enabled:
             continue
         source_handle = handles[edge.source_handle_uuid]
         target_handle = handles[edge.target_handle_uuid]
@@ -159,9 +157,7 @@ def validate_graph(
 
 def _validate_parent_cycles(nodes: Iterable[WorkflowNodeWrite]) -> None:
     parents = {
-        node.uuid: node.parent_uuid
-        for node in nodes
-        if node.parent_uuid is not None
+        node.uuid: node.parent_uuid for node in nodes if node.parent_uuid is not None
     }
     for start in parents:
         visited: set[str] = set()
@@ -683,12 +679,12 @@ def _is_number(value: Any) -> bool:
     return isinstance(value, (int, float)) and not isinstance(value, bool)
 
 
-def _canonical_json(value: Any) -> str:
-    return json.dumps(value, sort_keys=True, separators=(",", ":"))
+def _canonical_json(value: Any) -> bytes:
+    return encode_json(value, sort_keys=True)
 
 
 def _json_equal(left: Any, right: Any) -> bool:
-    return _canonical_json(left) == _canonical_json(right)
+    return strict_json_equal(left, right)
 
 
 __all__ = [

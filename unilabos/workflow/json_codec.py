@@ -1,4 +1,4 @@
-"""Bounded, non-recursive JSON codec for the public Workflow HTTP seam."""
+"""公共 Workflow HTTP 边界使用的有界非递归 JSON 编解码器。"""
 
 from __future__ import annotations
 
@@ -20,7 +20,7 @@ def decode_json_bytes(
     *,
     max_depth: int = MAX_BACKEND_JSON_DEPTH,
 ) -> Any:
-    """Decode one UTF-8 JSON value without changing Python's recursion limit."""
+    """在不修改 Python 递归上限的情况下解码一个 UTF-8 JSON 值。"""
 
     text = body.decode("utf-8")
     length = len(text)
@@ -172,7 +172,7 @@ def decode_json_bytes(
 
 
 def encode_json(value: Any, *, sort_keys: bool = False) -> bytes:
-    """Encode a finite JSON value without recursive container traversal."""
+    """以非递归方式编码一个有限 JSON 值。"""
 
     output: list[str] = []
     stack: list[tuple[str, Any]] = [("value", value)]
@@ -218,8 +218,30 @@ def encode_json(value: Any, *, sort_keys: bool = False) -> bytes:
     return "".join(output).encode("utf-8")
 
 
+def strict_json_equal(left: Any, right: Any) -> bool:
+    """迭代比较 JSON 值，并区分 bool、int 与 float。"""
+
+    pending = [(left, right)]
+    while pending:
+        left_item, right_item = pending.pop()
+        if type(left_item) is not type(right_item):
+            return False
+        if isinstance(left_item, dict):
+            if left_item.keys() != right_item.keys():
+                return False
+            pending.extend((value, right_item[key]) for key, value in left_item.items())
+        elif isinstance(left_item, list):
+            if len(left_item) != len(right_item):
+                return False
+            pending.extend(zip(left_item, right_item, strict=True))
+        elif left_item != right_item:
+            return False
+    return True
+
+
 __all__ = [
     "MAX_BACKEND_JSON_DEPTH",
     "decode_json_bytes",
     "encode_json",
+    "strict_json_equal",
 ]

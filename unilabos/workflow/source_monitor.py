@@ -52,7 +52,7 @@ class WorkflowSourceMonitor:
 
     def _run(self) -> None:
         while not self._stop_event.is_set():
-            registrations = self._service.store.list_source_registrations()
+            registrations = self._service.list_registered_sources()
             active = {registration["workflow_uuid"] for registration in registrations}
             known = set(self._processed) | set(self._pending) | set(self._retries)
             for workflow_uuid in known - active:

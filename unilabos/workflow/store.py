@@ -44,6 +44,14 @@ class StoreRevisionConflict(StoreConflict):
     pass
 
 
+class StoreAuthoringConflict(StoreConflict):
+    """Apply 事务提交前发生了 Authoring 前置条件冲突。"""
+
+    def __init__(self, code: str):
+        super().__init__(code)
+        self.code = code
+
+
 _SCHEMA = """
 PRAGMA foreign_keys = ON;
 
@@ -1166,18 +1174,47 @@ class WorkflowStore:
         *,
         workflow_uuid: str,
         expected_revision: int,
+        expected_draft_hash: str,
+        expected_candidate_hash: str,
+        expected_catalog_fingerprint: str,
         candidate: Dict[str, Any],
         applied_source: Dict[str, Any],
         event_data: Dict[str, Any],
+        authority_guard: Callable[[], None],
     ) -> int:
         changeset = candidate["changeset"]
         kind = changeset["kind"]
         graph = candidate["graph"]
         now = utc_now()
         with self.transaction() as conn:
+            authoring = conn.execute(
+                """
+                SELECT observed_draft_hash, candidate_hash, candidate
+                FROM workflow_authoring
+                WHERE workflow_uuid = ?
+                """,
+                (workflow_uuid,),
+            ).fetchone()
+            if (
+                authoring is None
+                or authoring["observed_draft_hash"] != expected_draft_hash
+            ):
+                raise StoreAuthoringConflict("draft_hash_conflict")
             workflow = self.get_workflow(workflow_uuid, conn=conn)
             if workflow["revision"] != expected_revision:
                 raise StoreRevisionConflict("workflow revision changed before apply")
+            stored_candidate = _load(authoring["candidate"], None)
+            if not isinstance(stored_candidate, dict):
+                raise StoreAuthoringConflict("candidate_not_ready")
+            if (
+                stored_candidate.get("template_catalog_fingerprint")
+                != expected_catalog_fingerprint
+            ):
+                raise StoreAuthoringConflict("template_catalog_conflict")
+            if authoring["candidate_hash"] != expected_candidate_hash:
+                raise StoreAuthoringConflict("candidate_hash_conflict")
+            # SQLite 写锁建立线性化点后，再核对文件与 Catalog Authority。
+            authority_guard()
             if kind == "graph":
                 graph_workflow = graph.get("workflow")
                 if not isinstance(graph_workflow, dict):
@@ -1563,6 +1600,7 @@ class WorkflowStore:
 
 
 __all__ = [
+    "StoreAuthoringConflict",
     "StoreConflict",
     "StoreNotFound",
     "StoreRevisionConflict",

@@ -415,7 +415,7 @@ def test_apply_detects_old_file_descriptor_write_during_cas_install(
     assert source_path.read_text(encoding="utf-8") == external_source
     assert result["authoring"]["draft"]["python_source"] == external_source
     assert result["authoring"]["state"] == "applied_source_stale"
-    record = service.store.get_authoring_record(WORKFLOW_UUID)
+    record = service._store.get_authoring_record(WORKFLOW_UUID)
     assert record["writeback_status"] == "pending"
 
 
@@ -640,7 +640,7 @@ def test_source_read_fails_closed_when_parent_becomes_symlink_after_check(
         "_assert_contained_regular_target",
         check_then_swap,
     )
-    registration = service.store.get_source_registration(WORKFLOW_UUID)
+    registration = service._store.get_source_registration(WORKFLOW_UUID)
 
     with pytest.raises(WorkflowError) as error:
         if read_operation == "aggregate":

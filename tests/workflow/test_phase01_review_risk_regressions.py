@@ -41,9 +41,7 @@ class DeterministicCompiler:
     ) -> CandidateCompilation:
         del workflow_uuid, workflow_revision, source_uri
         normalized = (
-            python_source
-            if python_source.endswith("\n")
-            else python_source + "\n"
+            python_source if python_source.endswith("\n") else python_source + "\n"
         )
         return CandidateCompilation(
             diagnostics=[],
@@ -172,8 +170,7 @@ def test_composed_runtime_reconciles_all_sources_and_watches_external_drafts(
             for workflow_uuid in sources
         },
         lambda aggregates: all(
-            aggregate["candidate"] is not None
-            for aggregate in aggregates.values()
+            aggregate["candidate"] is not None for aggregate in aggregates.values()
         ),
     )
     assert set(startup) == set(sources)
@@ -194,8 +191,7 @@ def test_composed_runtime_reconciles_all_sources_and_watches_external_drafts(
         lambda aggregate: (
             aggregate["draft"]["python_source"] == changed_source
             and aggregate["candidate"] is not None
-            and aggregate["candidate"]["draft_hash"]
-            == aggregate["draft"]["draft_hash"]
+            and aggregate["candidate"]["draft_hash"] == aggregate["draft"]["draft_hash"]
         ),
     )
     events = runtime_service.list_events(after_id=cursor)["items"]
@@ -238,7 +234,7 @@ def test_server_startup_uses_composed_workflow_runtime(
         assert calls == [working_dir]
     finally:
         composition.reset_workflow_service_for_test()
-        service.store.close()
+        service._store.close()
 
 
 @pytest.mark.parametrize("collision", ["physical_path", "source_uri"])
@@ -274,9 +270,7 @@ def test_one_source_identity_can_belong_to_only_one_workflow(
         )
     assert conflict.value.code == "invalid_input"
     assert service.get_authoring(WORKFLOW_A_UUID)["draft"] is None
-    assert first["source_uri"] == (
-        "package://risk_review_package/workflows/shared.py"
-    )
+    assert first["source_uri"] == ("package://risk_review_package/workflows/shared.py")
     with pytest.raises(WorkflowError) as unregistered:
         service.get_authoring(WORKFLOW_B_UUID)
     assert unregistered.value.code == "workflow_not_found"
@@ -304,7 +298,7 @@ def test_apply_does_not_overwrite_external_change_after_sqlite_commit(
     )
     source_path = package_root / "workflows" / "apply.py"
     external_source = "value = 'newer external draft'\n"
-    commit_candidate = service.store.apply_authoring_candidate
+    commit_candidate = service._store.apply_authoring_candidate
 
     def commit_then_change_draft(**kwargs):
         revision = commit_candidate(**kwargs)
@@ -312,7 +306,7 @@ def test_apply_does_not_overwrite_external_change_after_sqlite_commit(
         return revision
 
     monkeypatch.setattr(
-        service.store,
+        service._store,
         "apply_authoring_candidate",
         commit_then_change_draft,
     )
@@ -328,8 +322,7 @@ def test_apply_does_not_overwrite_external_change_after_sqlite_commit(
         {
             "code": "draft_writeback_pending",
             "message": (
-                "工作流已应用，但本地源码同步失败；"
-                "OS 已保留可恢复的源码记录。"
+                "工作流已应用，但本地源码同步失败；OS 已保留可恢复的源码记录。"
             ),
         }
     ]
