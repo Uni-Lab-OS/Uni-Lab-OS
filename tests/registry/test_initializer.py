@@ -1,89 +1,64 @@
-"""Plan 09 Task 3: initializer resolver."""
+"""Registry-owned initialization parameters are JSON data, not factories."""
 
-from unilabos.registry.initializer import build_instance_from_registry_entry, resolve_init_kwargs
+import pytest
 
+from unilabos.registry.init_enforce import (
+    merge_init_param_enforce,
+    validate_init_param_enforce,
+)
 
-def test_build_instance_from_registry_entry_constructs_nested_factories():
-    entry = {
-        "class": {
-            "module": "tests.registry.fixtures.initializer_drivers:SharedDevice",
-            "init": {
-                "kwargs": {
-                    "backend": {
-                        "factory": "tests.registry.fixtures.initializer_drivers:MockBackend",
-                        "kwargs": {
-                            "host": "${config.host}",
-                            "port": "${config.port}",
-                        },
-                    },
-                    "deck": {
-                        "factory": "tests.registry.fixtures.initializer_drivers:MockDeck",
-                        "kwargs": {
-                            "name": "opentrons-flex",
-                        },
-                    },
-                    "name": "${node.id}",
-                    "channels": 96,
-                }
-            },
-        }
+CONFIG_SCHEMA = {
+    "config": {
+        "type": "object",
+        "required": ["channels"],
+        "properties": {
+            "channels": {"type": "integer"},
+            "transport": {"type": "object"},
+        },
     }
-    node = {"id": "lh1", "name": "Liquid Handler 1"}
-    config = {"host": "127.0.0.1", "port": 31950}
-
-    device = build_instance_from_registry_entry(entry, node=node, config=config)
-
-    assert device.name == "lh1"
-    assert device.channels == 96
-    assert device.backend.host == "127.0.0.1"
-    assert device.backend.port == 31950
-    assert device.deck.name == "opentrons-flex"
+}
 
 
-def test_build_instance_from_registry_entry_supports_explicit_constant_value():
-    entry = {
-        "class": {
-            "module": "tests.registry.fixtures.initializer_drivers:MockDeck",
-            "init": {
-                "kwargs": {
-                    "name": {"value": "constant-deck"},
-                }
-            },
-        }
+def test_merge_init_param_enforce_applies_registry_values_recursively():
+    runtime_config = {
+        "channels": 1,
+        "transport": {"host": "127.0.0.1", "port": 9000},
+    }
+    enforced = {
+        "channels": 96,
+        "transport": {"port": 5000},
     }
 
-    deck = build_instance_from_registry_entry(entry, node={"id": "deck1"}, config={})
+    merged = merge_init_param_enforce(runtime_config, enforced)
 
-    assert deck.name == "constant-deck"
-
-
-def test_resolve_init_kwargs_builds_factories_without_device_class():
-    """Task 6: resolve init kwargs (factory objects + placeholders) without building the device."""
-    entry = {
-        "class": {
-            "module": "tests.registry.fixtures.initializer_drivers:SharedDevice",
-            "init": {
-                "kwargs": {
-                    "backend": {
-                        "factory": "tests.registry.fixtures.initializer_drivers:MockBackend",
-                        "kwargs": {"host": "${config.host}", "port": "${config.port}"},
-                    },
-                    "name": "${node.id}",
-                    "channels": 384,
-                }
-            },
-        }
+    assert merged == {
+        "channels": 96,
+        "transport": {"host": "127.0.0.1", "port": 5000},
     }
-    resolved = resolve_init_kwargs(
-        entry, node={"id": "lh-runtime", "name": "Runtime LH"}, config={"host": "10.0.0.2", "port": 1234}
+    assert runtime_config["channels"] == 1
+    assert enforced["transport"]["port"] == 5000
+
+
+def test_validate_init_param_enforce_accepts_json_config():
+    validate_init_param_enforce(
+        "vendor.lh.model_a",
+        CONFIG_SCHEMA,
+        {"channels": 8, "transport": {"kind": "mock"}},
     )
-    assert resolved["args"] == []
-    kwargs = resolved["kwargs"]
-    assert kwargs["name"] == "lh-runtime"
-    assert kwargs["channels"] == 384
-    assert kwargs["backend"].host == "10.0.0.2"  # MockBackend built, device class NOT built
-    assert kwargs["backend"].port == 1234
 
 
-def test_resolve_init_kwargs_empty_when_no_init():
-    assert resolve_init_kwargs({"class": {"module": "x:Y"}}, node={"id": "a"}, config={}) == {"args": [], "kwargs": {}}
+@pytest.mark.parametrize(
+    "legacy_value",
+    [
+        {"channels": 8, "backend": {"factory": "example:Backend"}},
+        {"channels": 8, "name": "${node.id}"},
+        {"channels": 8, "deck": {"value": "model-a"}},
+    ],
+)
+def test_validate_init_param_enforce_rejects_class_init_dsl(legacy_value):
+    with pytest.raises(ValueError, match="不支持"):
+        validate_init_param_enforce(
+            "vendor.lh.model_a",
+            CONFIG_SCHEMA,
+            legacy_value,
+        )
