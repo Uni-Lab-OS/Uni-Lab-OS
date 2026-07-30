@@ -4,7 +4,10 @@ from pathlib import Path
 import pytest
 
 from unilabos.registry.registry import lab_registry
-from unilabos.resources.bioyond.decks import BIOYOND_PolymerReactionStation_Deck
+from unilabos.resources.bioyond.decks import (
+    BIOYOND_PolymerPreparationStation_Deck,
+    BIOYOND_PolymerReactionStation_Deck,
+)
 from unilabos.resources.graphio import resource_bioyond_to_plr
 from unilabos.resources.resource_tracker import ResourceTreeSet
 
@@ -39,20 +42,55 @@ def bioyond_materials_liquidhandling_1() -> list[dict]:
 
 
 @pytest.mark.parametrize(
-    "materials_fixture",
+    ("materials_fixture", "deck_type", "expected_parents"),
     [
-        "bioyond_materials_reaction",
-        "bioyond_materials_liquidhandling_1",
+        (
+            "bioyond_materials_reaction",
+            BIOYOND_PolymerReactionStation_Deck,
+            {
+                "ODA": "堆栈1左",
+                "MPDA": "堆栈1左",
+                "NMP": "站内试剂存放堆栈",
+                "PGME": "站内试剂存放堆栈",
+                "0917": "堆栈1左",
+            },
+        ),
+        (
+            "bioyond_materials_liquidhandling_1",
+            BIOYOND_PolymerPreparationStation_Deck,
+            {
+                "NMP": "试剂堆栈",
+                "NMP_2": "试剂堆栈",
+                "NMP_3": "试剂堆栈",
+                "1010": "粉末堆栈",
+            },
+        ),
     ],
 )
-def test_resourcetreeset_from_plr(materials_fixture, request) -> None:
+def test_resourcetreeset_from_plr(
+    materials_fixture,
+    deck_type,
+    expected_parents,
+    request,
+) -> None:
     materials = request.getfixturevalue(materials_fixture)
-    deck = BIOYOND_PolymerReactionStation_Deck("test_deck")
-    resource_bioyond_to_plr(materials, type_mapping=type_mapping, deck=deck)
-    print(deck.summary())
+    deck = deck_type("test_deck", setup=True)
+    converted = resource_bioyond_to_plr(
+        materials,
+        type_mapping=type_mapping,
+        deck=deck,
+    )
 
     resource_trees = ResourceTreeSet.from_plr_resources([deck])
     dumped_trees = resource_trees.dump()
 
+    assert len(converted) == len(materials)
     assert len(dumped_trees) == 1
     assert dumped_trees[0][0]["name"] == deck.name
+
+    nodes_by_name = {node["name"]: node for node in dumped_trees[0]}
+    nodes_by_uuid = {node["uuid"]: node for node in dumped_trees[0]}
+    for material_name, parent_name in expected_parents.items():
+        material_node = nodes_by_name[material_name]
+        assert material_node["type"] == "bottle_carrier"
+        assert nodes_by_uuid[material_node["parent_uuid"]]["name"] == parent_name
