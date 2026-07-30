@@ -252,41 +252,29 @@ def test_cas_restore_failure_retains_the_only_original_copy(
         source="value = 'original draft'\n",
     )
     original_bytes = source_path.read_bytes()
-    original_write = WorkflowService._write_regular_fd
-    write_calls = 0
-    replacement_failures = 0
-    restore_failures = 0
+    original_replace = os.replace
+    canonical_install_failures = 0
+    rollback_failures = 0
 
-    def fail_after_replacement_write(
-        descriptor: int,
-        content: bytes,
+    def fail_canonical_install_and_rollback(
+        source: str | bytes | os.PathLike[str] | os.PathLike[bytes],
+        destination: str | bytes | os.PathLike[str] | os.PathLike[bytes],
+        *args: Any,
+        **kwargs: Any,
     ) -> None:
-        nonlocal replacement_failures, write_calls
-        write_calls += 1
-        original_write(descriptor, content)
-        if write_calls == 2:
-            replacement_failures += 1
-            raise OSError("deterministic replacement finalization failure")
+        nonlocal canonical_install_failures, rollback_failures
+        source_name = Path(os.fsdecode(source)).name
+        destination_name = Path(os.fsdecode(destination)).name
+        if destination_name == source_path.name and source_name.endswith(".cas"):
+            rollback_failures += 1
+            raise OSError("deterministic backup rollback failure")
+        if destination_name == source_path.name and canonical_install_failures == 0:
+            original_replace(source, destination, *args, **kwargs)
+            canonical_install_failures += 1
+            raise OSError("deterministic canonical install finalization failure")
+        original_replace(source, destination, *args, **kwargs)
 
-    def fail_restore(
-        descriptor: int,
-        content: bytes,
-    ) -> None:
-        nonlocal restore_failures
-        del descriptor, content
-        restore_failures += 1
-        raise OSError("deterministic backup restore failure")
-
-    monkeypatch.setattr(
-        WorkflowService,
-        "_write_regular_fd",
-        staticmethod(fail_after_replacement_write),
-    )
-    monkeypatch.setattr(
-        WorkflowService,
-        "_restore_regular_fd",
-        staticmethod(fail_restore),
-    )
+    monkeypatch.setattr(os, "replace", fail_canonical_install_and_rollback)
     try:
         with pytest.raises(WorkflowError) as error:
             service.save_draft(
@@ -300,17 +288,14 @@ def test_cas_restore_failure_retains_the_only_original_copy(
 
     backup_paths = sorted(source_path.parent.glob(f".{source_path.name}.*.cas"))
     backup_snapshot = {path.name: path.read_bytes() for path in backup_paths}
-    surviving_contents = [
-        path.read_bytes()
-        for path in ([source_path] if source_path.exists() else []) + backup_paths
-    ]
+    canonical_snapshot = source_path.read_bytes() if source_path.exists() else None
+    rollback_failures_after_save = rollback_failures
 
     assert error.value.code == "internal_error"
-    assert write_calls == 2
-    assert replacement_failures == 1
-    assert restore_failures >= 1
-    assert original_bytes in surviving_contents
-    assert source_path.exists() or backup_paths
+    assert canonical_install_failures == 1
+    assert rollback_failures_after_save >= 1
+    assert canonical_snapshot != original_bytes
+    assert list(backup_snapshot.values()).count(original_bytes) == 1
 
     recovered_store = WorkflowStore(tmp_path / "workflow.db")
     recovered = WorkflowService(
@@ -325,9 +310,14 @@ def test_cas_restore_failure_retains_the_only_original_copy(
 
     assert recovered_aggregate["state"] == "draft_missing"
     assert recovered_aggregate["draft"] is None
+    assert recovered_aggregate["candidate"] is None
     assert reconciled["state"] == "draft_missing"
     assert reconciled["draft"] is None
-    assert not source_path.exists()
+    assert reconciled["candidate"] is None
+    assert (
+        source_path.read_bytes() if source_path.exists() else None
+    ) == canonical_snapshot
+    assert rollback_failures == rollback_failures_after_save
     assert {
         path.name: path.read_bytes()
         for path in source_path.parent.glob(f".{source_path.name}.*.cas")
