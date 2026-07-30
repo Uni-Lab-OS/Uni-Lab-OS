@@ -42,7 +42,7 @@ class WorkflowUpdateRequest(WorkflowCreateRequest):
 
 
 class GraphWriteRequest(_BackendModel):
-    revision: int = Field(ge=1, strict=True)
+    revision: int = Field(ge=1, le=_INT64_MAX, strict=True)
     nodes: List[WorkflowNodeWrite] = Field(default_factory=list)
     edges: List[WorkflowEdgeWrite] = Field(default_factory=list)
 
@@ -59,12 +59,20 @@ class WorkflowTaskCreateRequest(_BackendModel):
 class DraftWriteRequest(_StrictModel):
     python_source: str
     expected_draft_hash: Optional[HashToken]
-    expected_workflow_revision: int = Field(ge=1, strict=True)
+    expected_workflow_revision: int = Field(
+        ge=1,
+        le=_INT64_MAX,
+        strict=True,
+    )
 
 
 class ApplyRequest(_StrictModel):
     expected_draft_hash: HashToken
-    expected_workflow_revision: int = Field(ge=1, strict=True)
+    expected_workflow_revision: int = Field(
+        ge=1,
+        le=_INT64_MAX,
+        strict=True,
+    )
     expected_candidate_hash: HashToken
 
 
@@ -237,12 +245,13 @@ def create_workflow_router(service: WorkflowService) -> APIRouter:
         ),
     ) -> Response:
         try:
-            if last_event_id is None:
+            cursor_text = (last_event_id or "").strip()
+            if not cursor_text:
                 cursor = 0
-            elif not _SIGNED_DECIMAL.fullmatch(last_event_id):
+            elif not _SIGNED_DECIMAL.fullmatch(cursor_text):
                 raise ValueError
             else:
-                cursor = int(last_event_id, 10)
+                cursor = int(cursor_text, 10)
             if not 0 <= cursor <= _INT64_MAX:
                 raise ValueError
         except ValueError:

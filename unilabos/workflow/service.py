@@ -805,28 +805,33 @@ class WorkflowService:
                 recovery_source = record.get("writeback_source")
                 if recovery_source is not None:
                     try:
+                        recovery_bytes = recovery_source.encode("utf-8")
+                        recovery_hash = _sha256(recovery_bytes)
                         self._atomic_write(
                             registration,
-                            recovery_source.encode("utf-8"),
+                            recovery_bytes,
                             expected_hash=(
                                 source["draft_hash"] if source is not None else None
                             ),
                         )
                         source = self._read_source(registration)
-                        assert source is not None
-                        self.store.settle_writeback(
-                            workflow_uuid=workflow_uuid,
-                            observed_draft_hash=source["draft_hash"],
-                            draft_update_time=source["update_time"],
-                            event_data={
-                                "workflow_uuid": workflow_uuid,
-                                "cause": "recovered",
-                                "workflow_revision": workflow["revision"],
-                                "draft_hash": source["draft_hash"],
-                                "candidate_hash": None,
-                            },
-                        )
-                        return self.get_authoring(workflow_uuid)
+                        if source is None or source["draft_hash"] != recovery_hash:
+                            self.store.clear_writeback_pending(workflow_uuid)
+                            record = self.store.get_authoring_record(workflow_uuid)
+                        else:
+                            self.store.settle_writeback(
+                                workflow_uuid=workflow_uuid,
+                                observed_draft_hash=source["draft_hash"],
+                                draft_update_time=source["update_time"],
+                                event_data={
+                                    "workflow_uuid": workflow_uuid,
+                                    "cause": "recovered",
+                                    "workflow_revision": workflow["revision"],
+                                    "draft_hash": source["draft_hash"],
+                                    "candidate_hash": None,
+                                },
+                            )
+                            return self.get_authoring(workflow_uuid)
                     except (OSError, UnicodeError, WorkflowError):
                         pass
             if (
@@ -1775,6 +1780,7 @@ class WorkflowService:
     ) -> Dict[str, Any]:
         """Hydrate compiler write entities into the frozen Backend read shape."""
 
+        cls._require_candidate_graph_containers(graph)
         projected = cls._backend_graph_projection(graph)
         applied = cls._backend_graph_projection(applied_graph)
         applied_workflow = applied["workflow"]
@@ -1920,6 +1926,25 @@ class WorkflowService:
             },
         )
         return projected
+
+    @staticmethod
+    def _require_candidate_graph_containers(graph: Dict[str, Any]) -> None:
+        workflow = graph.get("workflow")
+        if workflow is not None and not isinstance(workflow, dict):
+            raise WorkflowError("candidate_invalid")
+        for field in (
+            "nodes",
+            "edges",
+            "node_templates",
+            "handle_templates",
+        ):
+            entities = graph.get(field)
+            if entities is None:
+                continue
+            if not isinstance(entities, list) or any(
+                not isinstance(item, dict) for item in entities
+            ):
+                raise WorkflowError("candidate_invalid")
 
     @staticmethod
     def _hydrate_backend_catalog_entities(
