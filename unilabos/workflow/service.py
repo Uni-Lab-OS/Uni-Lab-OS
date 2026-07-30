@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import fcntl
 import hashlib
 import json
 import os
@@ -93,8 +94,7 @@ class AuthoringCompiler(Protocol):
         python_source: str,
         source_uri: str,
         applied_graph: Dict[str, Any],
-    ) -> CandidateCompilation:
-        ...
+    ) -> CandidateCompilation: ...
 
 
 def _sha256(data: bytes) -> str:
@@ -269,6 +269,7 @@ class WorkflowService:
         meta_data: Dict[str, Any],
     ) -> Dict[str, Any]:
         workflow_uuid = self.get_workflow(workflow_uuid)["uuid"]
+        run_mode = run_mode.strip().lower() or "normal"
         if run_mode not in {"normal", "step", "single_node"}:
             raise WorkflowError("invalid_input")
         if target_node_uuid is not None:
@@ -276,11 +277,11 @@ class WorkflowService:
                 target_node_uuid = validate_uuid(target_node_uuid)
             except ValueError:
                 raise WorkflowError("invalid_input") from None
-        # P0-2 has not frozen the root input vocabulary yet. Mirror the
-        # Backend baseline's current empty Task input instead of persisting an
-        # invented local representation.
+        # P0-2 已冻结合同；生产 schema/compiler 属于 Phase 02。本阶段镜像
+        # Backend baseline 的空 Task input，不提前持久化未实现的解释。
         if input_value:
             raise WorkflowError("invalid_input")
+        description = self._optional_text(description)
         try:
             return self.store.create_task_with_jobs(
                 workflow_uuid=workflow_uuid,
@@ -368,13 +369,22 @@ class WorkflowService:
         target_node_uuid: Optional[str],
     ) -> Tuple[Dict[str, Any], List[Dict[str, Any]]]:
         templates = {
-            template["uuid"]: template
-            for template in graph.get("node_templates", [])
+            template["uuid"]: template for template in graph.get("node_templates", [])
         }
         handles = {
-            handle["uuid"]: handle
-            for handle in graph.get("handle_templates", [])
+            handle["uuid"]: handle for handle in graph.get("handle_templates", [])
         }
+        graph_nodes = graph["nodes"]
+        graph_edges = graph["edges"]
+        if run_mode == "single_node" and target_node_uuid is not None:
+            selected_node = next(
+                (node for node in graph_nodes if node["uuid"] == target_node_uuid),
+                None,
+            )
+            if selected_node is None or selected_node["disabled"]:
+                raise StoreConflict("single_node target is not enabled")
+            graph_nodes = [selected_node]
+            graph_edges = []
 
         def stable_key(node_uuid: str) -> Tuple[str, str]:
             node = enabled[node_uuid]
@@ -382,34 +392,21 @@ class WorkflowService:
 
         enabled: Dict[str, Dict[str, Any]] = {}
         node_kinds: Dict[str, str] = {}
-        for node in graph["nodes"]:
+        for node in graph_nodes:
             template = templates.get(node.get("workflow_node_template_uuid"))
             raw_kind = (
-                template.get("node_type")
-                if template is not None
-                else node["type"]
+                template.get("node_type") if template is not None else node["type"]
             )
             kind = self._executor_kind(raw_kind)
             if node["disabled"] or kind == "group":
                 continue
             enabled[node["uuid"]] = node
             node_kinds[node["uuid"]] = kind
-        if run_mode == "single_node":
-            selected = target_node_uuid
-            if selected is None:
-                selected = (
-                    min(enabled, key=stable_key)
-                    if enabled
-                    else None
-                )
-            if selected not in enabled:
-                raise StoreConflict("single_node target is not enabled")
-            enabled = {selected: enabled[selected]}
 
         indegree = {node_uuid: 0 for node_uuid in enabled}
         outgoing: Dict[str, List[str]] = defaultdict(list)
         planned_edges: List[Dict[str, Any]] = []
-        for edge in graph["edges"]:
+        for edge in graph_edges:
             source = edge["source_node_uuid"]
             target = edge["target_node_uuid"]
             if source not in enabled or target not in enabled:
@@ -436,11 +433,7 @@ class WorkflowService:
             planned_edges.append(planned_edge)
 
         available = sorted(
-            (
-                node_uuid
-                for node_uuid, degree in indegree.items()
-                if degree == 0
-            ),
+            (node_uuid for node_uuid, degree in indegree.items() if degree == 0),
             key=stable_key,
         )
         ordered: List[str] = []
@@ -454,12 +447,24 @@ class WorkflowService:
                     available.sort(key=stable_key)
         if len(ordered) != len(enabled):
             raise StoreConflict("workflow graph contains a cycle")
+        if run_mode == "single_node":
+            if target_node_uuid is None:
+                if not ordered:
+                    raise StoreConflict("workflow has no enabled nodes")
+                target_node_uuid = ordered[0]
+            if target_node_uuid not in enabled:
+                raise StoreConflict("single_node target is not enabled")
+            ordered = [target_node_uuid]
+            enabled = {target_node_uuid: enabled[target_node_uuid]}
+            planned_edges = []
 
         planned_nodes: List[Dict[str, Any]] = []
         jobs: List[Dict[str, Any]] = []
         for index, node_uuid in enumerate(ordered):
             node = enabled[node_uuid]
             kind = node_kinds[node_uuid]
+            if kind == "script":
+                raise StoreConflict("script executor is not configured")
             policy = node.get("execution_policy") or {}
             template_uuid = node.get("workflow_node_template_uuid")
             template = templates.get(template_uuid)
@@ -468,8 +473,7 @@ class WorkflowService:
                     handle
                     for handle in handles.values()
                     if template_uuid is not None
-                    and handle.get("workflow_node_template_uuid")
-                    == template_uuid
+                    and handle.get("workflow_node_template_uuid") == template_uuid
                     and handle.get("io_type") == "target"
                 ),
                 key=lambda item: item["uuid"],
@@ -478,8 +482,7 @@ class WorkflowService:
                 handle["uuid"]
                 for handle in handles.values()
                 if template_uuid is not None
-                and handle.get("workflow_node_template_uuid")
-                == template_uuid
+                and handle.get("workflow_node_template_uuid") == template_uuid
                 and handle.get("io_type") == "source"
             )
             planned_node: Dict[str, Any] = {
@@ -513,14 +516,10 @@ class WorkflowService:
                 {
                     "uuid": str(uuid4()),
                     "workflow_node_uuid": node_uuid,
-                    "material_uuid": node.get("material_uuid"),
                     "topological_index": index,
                     "executor_kind": kind,
                     "execution_policy": policy,
-                    "execution_timeout_seconds": policy.get(
-                        "execution_timeout_seconds",
-                        policy.get("timeout_seconds", 0),
-                    ),
+                    "execution_timeout_seconds": 0,
                     "param": node.get("param") or {},
                 }
             )
@@ -531,15 +530,11 @@ class WorkflowService:
         }
         if target_node_uuid is not None:
             plan["target_node_uuid"] = target_node_uuid
-        elif run_mode == "single_node" and ordered:
-            plan["target_node_uuid"] = ordered[0]
         return plan, jobs
 
     @staticmethod
     def _handle_data_key(handle: Dict[str, Any]) -> str:
-        return str(
-            handle.get("data_key") or handle.get("handle_key") or ""
-        ).strip()
+        return str(handle.get("data_key") or handle.get("handle_key") or "").strip()
 
     @staticmethod
     def _final_target_data_key(data_key: str) -> str:
@@ -554,15 +549,15 @@ class WorkflowService:
 
     @staticmethod
     def _executor_kind(node_type: str) -> str:
+        normalized = node_type.strip().lower()
         aliases = {
-            "ILab": "device_action",
             "ilab": "device_action",
             "device": "device_action",
             "action": "device_action",
             "resource_action": "device_action",
             "py_script": "script",
         }
-        kind = aliases.get(node_type, node_type)
+        kind = aliases.get(normalized, normalized)
         if kind not in {
             "device_action",
             "compute",
@@ -731,9 +726,7 @@ class WorkflowService:
                             registration,
                             recovery_source.encode("utf-8"),
                             expected_hash=(
-                                source["draft_hash"]
-                                if source is not None
-                                else None
+                                source["draft_hash"] if source is not None else None
                             ),
                         )
                         source = self._read_source(registration)
@@ -754,12 +747,8 @@ class WorkflowService:
                     except (OSError, UnicodeError, WorkflowError):
                         pass
             actual_hash = source["draft_hash"] if source is not None else None
-            if (
-                actual_hash == record["observed_draft_hash"]
-                and not (
-                    actual_hash is None
-                    and record.get("candidate") is not None
-                )
+            if actual_hash == record["observed_draft_hash"] and not (
+                actual_hash is None and record.get("candidate") is not None
             ):
                 return self.get_authoring(workflow_uuid)
 
@@ -802,9 +791,7 @@ class WorkflowService:
                     "workflow_revision": workflow["revision"],
                     "draft_hash": actual_hash,
                     "candidate_hash": (
-                        candidate["candidate_hash"]
-                        if candidate is not None
-                        else None
+                        candidate["candidate_hash"] if candidate is not None else None
                     ),
                 },
             )
@@ -938,10 +925,7 @@ class WorkflowService:
 
             try:
                 latest = self._read_source(registration)
-                if (
-                    latest is None
-                    or latest["draft_hash"] != actual_hash
-                ):
+                if latest is None or latest["draft_hash"] != actual_hash:
                     raise WorkflowError("draft_hash_conflict")
                 self._atomic_write(
                     registration,
@@ -972,9 +956,19 @@ class WorkflowService:
                 if not settled:
                     mark_pending_best_effort()
 
+            fallback_meta_data = dict(workflow["meta_data"])
+            candidate_workflow = candidate["graph"].get("workflow") or {}
+            candidate_meta_data = candidate_workflow.get("meta_data") or {}
+            if (
+                isinstance(candidate_meta_data, dict)
+                and "unilab" in candidate_meta_data
+            ):
+                fallback_meta_data["unilab"] = candidate_meta_data["unilab"]
             fallback_workflow = {
                 **workflow,
                 "revision": resulting_revision,
+                "meta_data": fallback_meta_data,
+                "update_time": utc_now(),
             }
             fallback_applied_source = {
                 **applied_source,
@@ -994,13 +988,21 @@ class WorkflowService:
             try:
                 authoring = self.get_authoring(workflow_uuid)
             except Exception:  # noqa: BLE001 - 主事务已提交
-                warn_writeback()
                 try:
                     authoring = self.get_authoring(workflow_uuid)
                 except Exception:  # noqa: BLE001 - 使用已知事实降级
+                    try:
+                        fallback_graph = self.store.get_graph(workflow_uuid)
+                        fallback_workflow = fallback_graph["workflow"]
+                        fallback_record = self.store.get_authoring_record(workflow_uuid)
+                    except Exception:  # noqa: BLE001 - 使用提交时事实降级
+                        fallback_graph = self._post_commit_candidate_graph(
+                            candidate["graph"],
+                            workflow=fallback_workflow,
+                        )
                     authoring = self._authoring_aggregate(
                         workflow=fallback_workflow,
-                        graph=candidate["graph"],
+                        graph=fallback_graph,
                         registration=registration,
                         source=response_source,
                         record=fallback_record,
@@ -1061,6 +1063,10 @@ class WorkflowService:
             if source_parent is None:
                 return None
             parent_fd, filename = source_parent
+            self._recover_missing_target(
+                parent_fd,
+                filename,
+            )
             try:
                 descriptor = os.open(
                     filename,
@@ -1204,123 +1210,242 @@ class WorkflowService:
         temporary_name: str,
         expected_hash: Optional[str],
     ) -> None:
-        """原子占有旧路径，并在安装后复核其 inode 内容。"""
+        """在内核独占 lease 下更新同一 inode，避免旧句柄成为孤儿。"""
 
-        backup_name = f".{target_name}.{uuid4().hex}.cas"
-        claimed = False
+        target_descriptor = -1
+        temporary_descriptor = -1
         backup_descriptor = -1
-
-        def restore_claimed() -> None:
-            if not claimed:
-                return
+        backup_name = f".{target_name}.{uuid4().hex}.cas"
+        backup_created = False
+        modified = False
+        original = b""
+        try:
             try:
-                target_stat = os.stat(
+                target_descriptor = os.open(
                     target_name,
+                    os.O_RDWR | os.O_CLOEXEC | os.O_NOFOLLOW,
                     dir_fd=parent_fd,
-                    follow_symlinks=False,
                 )
             except FileNotFoundError:
-                target_stat = None
-            try:
-                temporary_stat = os.stat(
-                    temporary_name,
-                    dir_fd=parent_fd,
-                    follow_symlinks=False,
-                )
-            except FileNotFoundError:
-                temporary_stat = None
-
-            target_is_candidate = (
-                target_stat is not None
-                and temporary_stat is not None
-                and target_stat.st_dev == temporary_stat.st_dev
-                and target_stat.st_ino == temporary_stat.st_ino
-            )
-            if target_is_candidate:
-                os.unlink(target_name, dir_fd=parent_fd)
-                target_stat = None
-            if target_stat is None:
-                # 外部写者已重建路径时，绝不能覆盖其内容。
-                with suppress(FileExistsError):
+                if expected_hash is not None:
+                    raise WorkflowConflict("draft_hash_conflict") from None
+                try:
                     os.link(
-                        backup_name,
+                        temporary_name,
                         target_name,
                         src_dir_fd=parent_fd,
                         dst_dir_fd=parent_fd,
                         follow_symlinks=False,
                     )
+                except FileExistsError:
+                    raise WorkflowConflict("draft_hash_conflict") from None
+                os.unlink(temporary_name, dir_fd=parent_fd)
+                return
 
-        try:
-            try:
-                os.replace(
-                    target_name,
-                    backup_name,
-                    src_dir_fd=parent_fd,
-                    dst_dir_fd=parent_fd,
-                )
-                claimed = True
-            except FileNotFoundError:
-                claimed = False
-
-            if claimed:
-                backup_descriptor = os.open(
-                    backup_name,
-                    os.O_RDONLY | os.O_CLOEXEC | os.O_NOFOLLOW,
-                    dir_fd=parent_fd,
-                )
-                actual_hash = WorkflowService._hash_regular_fd(
-                    backup_descriptor
-                )
-            else:
-                actual_hash = None
-            if actual_hash != expected_hash:
-                restore_claimed()
+            if expected_hash is None:
                 raise WorkflowConflict("draft_hash_conflict")
-
             try:
-                os.link(
-                    temporary_name,
-                    target_name,
-                    src_dir_fd=parent_fd,
-                    dst_dir_fd=parent_fd,
-                    follow_symlinks=False,
+                fcntl.fcntl(
+                    target_descriptor,
+                    fcntl.F_SETLEASE,
+                    fcntl.F_WRLCK,
                 )
-            except FileExistsError:
-                restore_claimed()
+            except (AttributeError, OSError):
+                # 无法证明没有预打开的读写句柄时必须失败关闭。
                 raise WorkflowConflict("draft_hash_conflict") from None
 
-            if claimed:
-                installed_hash = WorkflowService._hash_regular_fd(
-                    backup_descriptor
-                )
-                if installed_hash != actual_hash:
-                    restore_claimed()
-                    raise WorkflowConflict("draft_hash_conflict")
+            original = WorkflowService._read_regular_fd(target_descriptor)
+            if _sha256(original) != expected_hash:
+                raise WorkflowConflict("draft_hash_conflict")
+            if not WorkflowService._target_matches_fd(
+                parent_fd,
+                target_name,
+                target_descriptor,
+            ):
+                raise WorkflowConflict("draft_hash_conflict")
+
+            temporary_descriptor = os.open(
+                temporary_name,
+                os.O_RDONLY | os.O_CLOEXEC | os.O_NOFOLLOW,
+                dir_fd=parent_fd,
+            )
+            replacement = WorkflowService._read_regular_fd(temporary_descriptor)
+
+            backup_descriptor = os.open(
+                backup_name,
+                (os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_CLOEXEC | os.O_NOFOLLOW),
+                0o600,
+                dir_fd=parent_fd,
+            )
+            backup_created = True
+            WorkflowService._write_regular_fd(
+                backup_descriptor,
+                original,
+            )
+            os.close(backup_descriptor)
+            backup_descriptor = -1
+            os.fsync(parent_fd)
+
+            modified = True
+            WorkflowService._write_regular_fd(
+                target_descriptor,
+                replacement,
+            )
+            if not WorkflowService._target_matches_fd(
+                parent_fd,
+                target_name,
+                target_descriptor,
+            ) or WorkflowService._hash_regular_fd(target_descriptor) != _sha256(
+                replacement
+            ):
+                raise WorkflowConflict("draft_hash_conflict")
 
             os.unlink(temporary_name, dir_fd=parent_fd)
+            os.unlink(backup_name, dir_fd=parent_fd)
+            backup_created = False
+            os.fsync(parent_fd)
         except Exception:
-            restore_claimed()
+            restored = False
+            if modified:
+                try:
+                    WorkflowService._restore_regular_fd(
+                        target_descriptor,
+                        original,
+                    )
+                    restored = WorkflowService._target_matches_fd(
+                        parent_fd,
+                        target_name,
+                        target_descriptor,
+                    )
+                except OSError:
+                    restored = False
+            if backup_created and restored:
+                with suppress(OSError):
+                    os.unlink(backup_name, dir_fd=parent_fd)
+                    backup_created = False
+            elif (
+                backup_created
+                and modified
+                and WorkflowService._target_matches_fd(
+                    parent_fd,
+                    target_name,
+                    target_descriptor,
+                )
+            ):
+                # 回滚失败时，不能把候选内容伪装成一次失败前的 Draft。
+                # 删除当前 inode 的目录项并保留已 fsync 的 `.cas`；后续
+                # 读取会从该唯一原稿副本恢复。
+                with suppress(OSError):
+                    os.unlink(target_name, dir_fd=parent_fd)
+            if backup_created:
+                with suppress(OSError):
+                    os.fsync(parent_fd)
             raise
         finally:
             if backup_descriptor >= 0:
                 os.close(backup_descriptor)
-            if claimed:
-                with suppress(FileNotFoundError):
-                    os.unlink(backup_name, dir_fd=parent_fd)
+            if temporary_descriptor >= 0:
+                os.close(temporary_descriptor)
+            if target_descriptor >= 0:
+                os.close(target_descriptor)
 
     @staticmethod
-    def _hash_regular_fd(descriptor: int) -> str:
+    def _target_matches_fd(
+        parent_fd: int,
+        target_name: str,
+        descriptor: int,
+    ) -> bool:
+        try:
+            target_stat = os.stat(
+                target_name,
+                dir_fd=parent_fd,
+                follow_symlinks=False,
+            )
+        except FileNotFoundError:
+            return False
+        descriptor_stat = os.fstat(descriptor)
+        return (
+            stat.S_ISREG(target_stat.st_mode)
+            and target_stat.st_dev == descriptor_stat.st_dev
+            and target_stat.st_ino == descriptor_stat.st_ino
+        )
+
+    @staticmethod
+    def _read_regular_fd(descriptor: int) -> bytes:
         stat_result = os.fstat(descriptor)
         if not stat.S_ISREG(stat_result.st_mode):
             raise WorkflowError("invalid_input")
         os.lseek(descriptor, 0, os.SEEK_SET)
-        digest = hashlib.sha256()
+        chunks = []
         while True:
             chunk = os.read(descriptor, 1024 * 1024)
             if not chunk:
                 break
-            digest.update(chunk)
-        return f"sha256:{digest.hexdigest()}"
+            chunks.append(chunk)
+        return b"".join(chunks)
+
+    @staticmethod
+    def _write_regular_fd(descriptor: int, content: bytes) -> None:
+        os.lseek(descriptor, 0, os.SEEK_SET)
+        offset = 0
+        while offset < len(content):
+            written = os.write(descriptor, content[offset:])
+            if written <= 0:
+                raise OSError("short write while replacing Workflow Draft")
+            offset += written
+        os.ftruncate(descriptor, len(content))
+        os.fsync(descriptor)
+
+    @staticmethod
+    def _restore_regular_fd(descriptor: int, content: bytes) -> None:
+        WorkflowService._write_regular_fd(descriptor, content)
+
+    @staticmethod
+    def _hash_regular_fd(descriptor: int) -> str:
+        return _sha256(WorkflowService._read_regular_fd(descriptor))
+
+    @staticmethod
+    def _recover_missing_target(
+        parent_fd: int,
+        target_name: str,
+    ) -> None:
+        try:
+            os.stat(
+                target_name,
+                dir_fd=parent_fd,
+                follow_symlinks=False,
+            )
+            return
+        except FileNotFoundError:
+            pass
+        prefix = f".{target_name}."
+        backups = []
+        for name in os.listdir(parent_fd):
+            if not name.startswith(prefix) or not name.endswith(".cas"):
+                continue
+            try:
+                backup_stat = os.stat(
+                    name,
+                    dir_fd=parent_fd,
+                    follow_symlinks=False,
+                )
+            except FileNotFoundError:
+                continue
+            if stat.S_ISREG(backup_stat.st_mode):
+                backups.append((backup_stat.st_mtime_ns, name))
+        if not backups:
+            return
+        backup_name = max(backups)[1]
+        try:
+            os.replace(
+                backup_name,
+                target_name,
+                src_dir_fd=parent_fd,
+                dst_dir_fd=parent_fd,
+            )
+            os.fsync(parent_fd)
+        except OSError:
+            raise WorkflowError("internal_error") from None
 
     @classmethod
     @contextmanager
@@ -1341,17 +1466,10 @@ class WorkflowService:
         ):
             raise WorkflowError("invalid_input")
 
-        root_fd = cls._open_directory_chain(
-            Path(registration["package_root"])
-        )
+        root_fd = cls._open_directory_chain(Path(registration["package_root"]))
         parent_fd = -1
         try:
-            flags = (
-                os.O_RDONLY
-                | os.O_DIRECTORY
-                | os.O_CLOEXEC
-                | os.O_NOFOLLOW
-            )
+            flags = os.O_RDONLY | os.O_DIRECTORY | os.O_CLOEXEC | os.O_NOFOLLOW
             try:
                 parent_fd = os.open(
                     relative.parts[0],
@@ -1382,12 +1500,7 @@ class WorkflowService:
     @staticmethod
     def _open_directory_chain(path: Path) -> int:
         absolute = Path(os.path.abspath(path))
-        flags = (
-            os.O_RDONLY
-            | os.O_DIRECTORY
-            | os.O_CLOEXEC
-            | os.O_NOFOLLOW
-        )
+        flags = os.O_RDONLY | os.O_DIRECTORY | os.O_CLOEXEC | os.O_NOFOLLOW
         try:
             current_fd = os.open(absolute.anchor, flags)
             for part in absolute.parts[1:]:
@@ -1495,23 +1608,60 @@ class WorkflowService:
     ) -> Optional[Dict[str, Any]]:
         if not compilation.valid:
             return None
+        assert compilation.graph is not None
+        graph = self._backend_graph_projection(compilation.graph)
         bundle = {
             "base_workflow_revision": workflow_revision,
             "draft_hash": draft_hash,
-            "graph": compilation.graph,
+            "graph": graph,
             "normalized_python_source": compilation.normalized_python_source,
             "source_map": compilation.source_map,
             "changeset": compilation.changeset,
             "compiler_version": compilation.compiler_version,
-            "template_catalog_fingerprint": (
-                compilation.template_catalog_fingerprint
-            ),
+            "template_catalog_fingerprint": (compilation.template_catalog_fingerprint),
         }
         return {
             "candidate_hash": _sha256(_canonical_json(bundle)),
             **bundle,
             "update_time": utc_now(),
         }
+
+    @staticmethod
+    def _backend_graph_projection(
+        graph: Dict[str, Any],
+    ) -> Dict[str, Any]:
+        """Project one Candidate through Backend JSON omitempty semantics."""
+
+        def omit_none(value: Any) -> Any:
+            if not isinstance(value, dict):
+                return value
+            return {key: item for key, item in value.items() if item is not None}
+
+        return {
+            "workflow": omit_none(graph.get("workflow") or {}),
+            "nodes": [omit_none(item) for item in (graph.get("nodes") or [])],
+            "edges": [omit_none(item) for item in (graph.get("edges") or [])],
+            "node_templates": [
+                omit_none(item) for item in (graph.get("node_templates") or [])
+            ],
+            "handle_templates": [
+                omit_none(item) for item in (graph.get("handle_templates") or [])
+            ],
+        }
+
+    @classmethod
+    def _post_commit_candidate_graph(
+        cls,
+        graph: Dict[str, Any],
+        *,
+        workflow: Dict[str, Any],
+    ) -> Dict[str, Any]:
+        projected = cls._backend_graph_projection(graph)
+        projected["workflow"] = {
+            **projected["workflow"],
+            **workflow,
+        }
+        return projected
 
     def _authoring_aggregate(
         self,
@@ -1548,8 +1698,7 @@ class WorkflowService:
             candidate_current = (
                 record["observed_draft_hash"] == source["draft_hash"]
                 and stored_candidate["draft_hash"] == source["draft_hash"]
-                and stored_candidate["base_workflow_revision"]
-                == workflow["revision"]
+                and stored_candidate["base_workflow_revision"] == workflow["revision"]
                 and catalog_matches
             )
             if candidate_current:
@@ -1563,8 +1712,7 @@ class WorkflowService:
         elif candidate_stale:
             state = "candidate_stale"
         elif any(
-            str(item.get("severity", "")).lower() == "error"
-            for item in diagnostics
+            str(item.get("severity", "")).lower() == "error" for item in diagnostics
         ):
             state = "draft_invalid"
         elif candidate is not None:

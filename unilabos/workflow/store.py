@@ -489,9 +489,7 @@ class WorkflowStore:
                     """,
                     template_uuids,
                 ).fetchall()
-                node_templates = [
-                    self._node_template_row(row) for row in template_rows
-                ]
+                node_templates = [self._node_template_row(row) for row in template_rows]
                 handle_templates = [
                     self._handle_template_row(row) for row in handle_rows
                 ]
@@ -575,8 +573,7 @@ class WorkflowStore:
                 template_uuids,
             ).fetchall()
             templates = {
-                row["uuid"]: self._node_template_row(row)
-                for row in template_rows
+                row["uuid"]: self._node_template_row(row) for row in template_rows
             }
             handle_rows = conn.execute(
                 f"""
@@ -587,8 +584,7 @@ class WorkflowStore:
                 template_uuids,
             ).fetchall()
             handles = {
-                row["uuid"]: self._handle_template_row(row)
-                for row in handle_rows
+                row["uuid"]: self._handle_template_row(row) for row in handle_rows
             }
         effective_params = {
             node.uuid: self._graph_node_param(conn, node) for node in nodes
@@ -601,11 +597,7 @@ class WorkflowStore:
             ).fetchone()
             effective_node_meta_data[node.uuid] = self._protected_metadata(
                 node.meta_data,
-                (
-                    existing_node["meta_data"]
-                    if existing_node is not None
-                    else None
-                ),
+                (existing_node["meta_data"] if existing_node is not None else None),
                 enabled=protect_reserved_metadata,
             )
         try:
@@ -886,7 +878,9 @@ class WorkflowStore:
         with self.transaction() as conn:
             graph = self.get_graph(workflow_uuid, conn=conn)
             plan, jobs = plan_builder(graph)
-            control_status = "paused" if run_mode == "step" else "active"
+            effective_run_mode = str(plan["run_mode"])
+            effective_target = plan.get("target_node_uuid")
+            control_status = "paused" if effective_run_mode == "step" else "active"
             conn.execute(
                 """
                 INSERT INTO workflow_task(
@@ -906,8 +900,8 @@ class WorkflowStore:
                     workflow_uuid,
                     _json(graph),
                     _json(plan),
-                    run_mode,
-                    target_node_uuid,
+                    effective_run_mode,
+                    effective_target,
                     control_status,
                     _json(input_value),
                 ),
@@ -1185,9 +1179,7 @@ class WorkflowStore:
         with self.transaction() as conn:
             workflow = self.get_workflow(workflow_uuid, conn=conn)
             if workflow["revision"] != expected_revision:
-                raise StoreRevisionConflict(
-                    "workflow revision changed before apply"
-                )
+                raise StoreRevisionConflict("workflow revision changed before apply")
             if kind == "graph":
                 graph_workflow = graph.get("workflow")
                 if not isinstance(graph_workflow, dict):
@@ -1201,11 +1193,23 @@ class WorkflowStore:
                 if not isinstance(candidate_meta, dict):
                     raise StoreConflict("Candidate Workflow meta_data 必须是对象")
                 nodes = [
-                    WorkflowNodeWrite.model_validate(item)
+                    WorkflowNodeWrite.model_validate(
+                        {
+                            field: item[field]
+                            for field in WorkflowNodeWrite.model_fields
+                            if field in item
+                        }
+                    )
                     for item in graph.get("nodes", [])
                 ]
                 edges = [
-                    WorkflowEdgeWrite.model_validate(item)
+                    WorkflowEdgeWrite.model_validate(
+                        {
+                            field: item[field]
+                            for field in WorkflowEdgeWrite.model_fields
+                            if field in item
+                        }
+                    )
                     for item in graph.get("edges", [])
                 ]
                 resulting_revision = self._reconcile_graph(
@@ -1367,10 +1371,16 @@ class WorkflowStore:
         }
         if table not in allowed:
             raise ValueError(f"unsupported table {table!r}")
-        where = "" if include_deleted or table in {
-            "workflow_authoring",
-            "frontend_event",
-        } else " WHERE deleted_at IS NULL"
+        where = (
+            ""
+            if include_deleted
+            or table
+            in {
+                "workflow_authoring",
+                "frontend_event",
+            }
+            else " WHERE deleted_at IS NULL"
+        )
         with self._lock:
             return int(
                 self._conn.execute(f"SELECT COUNT(*) FROM {table}{where}").fetchone()[0]
@@ -1466,9 +1476,7 @@ class WorkflowStore:
     def _handle_template_row(cls, row: sqlite3.Row) -> Dict[str, Any]:
         result = {
             **cls._base(row),
-            "workflow_node_template_uuid": row[
-                "workflow_node_template_uuid"
-            ],
+            "workflow_node_template_uuid": row["workflow_node_template_uuid"],
             "handle_key": row["handle_key"],
             "io_type": row["io_type"],
             "display_name": row["display_name"],

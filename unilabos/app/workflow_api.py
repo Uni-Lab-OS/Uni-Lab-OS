@@ -7,6 +7,7 @@ import json
 from typing import Annotated, Any, Dict, List, Optional
 
 from fastapi import APIRouter, FastAPI, Header, Query, Request
+from fastapi.exception_handlers import request_validation_exception_handler
 from fastapi.exceptions import RequestValidationError
 from fastapi.responses import JSONResponse, Response, StreamingResponse
 from pydantic import BaseModel, ConfigDict, Field
@@ -19,10 +20,14 @@ class _StrictModel(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
 
+class _BackendModel(BaseModel):
+    model_config = ConfigDict(extra="ignore")
+
+
 HashToken = Annotated[str, Field(pattern=r"^sha256:[0-9a-f]{64}$")]
 
 
-class WorkflowCreateRequest(_StrictModel):
+class WorkflowCreateRequest(_BackendModel):
     name: str
     tags: List[Any] = Field(default_factory=list)
     description: Optional[str] = None
@@ -33,13 +38,13 @@ class WorkflowUpdateRequest(WorkflowCreateRequest):
     pass
 
 
-class GraphWriteRequest(_StrictModel):
+class GraphWriteRequest(_BackendModel):
     revision: int = Field(ge=1)
     nodes: List[WorkflowNodeWrite] = Field(default_factory=list)
     edges: List[WorkflowEdgeWrite] = Field(default_factory=list)
 
 
-class WorkflowTaskCreateRequest(_StrictModel):
+class WorkflowTaskCreateRequest(_BackendModel):
     workflow_uuid: str
     run_mode: str = "normal"
     target_node_uuid: Optional[str] = None
@@ -83,11 +88,7 @@ def format_sse_event(event: Dict[str, Any]) -> str:
         ensure_ascii=False,
         separators=(",", ":"),
     )
-    return (
-        f"id: {event['id']}\n"
-        f"event: {event['event']}\n"
-        f"data: {payload}\n\n"
-    )
+    return f"id: {event['id']}\nevent: {event['event']}\ndata: {payload}\n\n"
 
 
 def create_workflow_router(service: WorkflowService) -> APIRouter:
@@ -121,9 +122,7 @@ def create_workflow_router(service: WorkflowService) -> APIRouter:
         workflow_uuid: str,
         body: WorkflowUpdateRequest,
     ) -> JSONResponse:
-        return _success(
-            service.update_workflow(workflow_uuid, **body.model_dump())
-        )
+        return _success(service.update_workflow(workflow_uuid, **body.model_dump()))
 
     @router.delete("/workflows/{workflow_uuid}", status_code=204)
     def delete_workflow(workflow_uuid: str) -> Response:
@@ -244,9 +243,7 @@ def create_workflow_router(service: WorkflowService) -> APIRouter:
                 content={
                     "error": {
                         "code": "invalid_input",
-                        "message": (
-                            "Last-Event-ID must be a non-negative integer"
-                        ),
+                        "message": ("Last-Event-ID must be a non-negative integer"),
                     }
                 },
             )
@@ -290,10 +287,18 @@ def install_workflow_api(app: FastAPI, service: WorkflowService) -> None:
 
     @app.exception_handler(RequestValidationError)
     async def validation_error_handler(
-        _request: Request,
-        _error_value: RequestValidationError,
+        request: Request,
+        error: RequestValidationError,
     ) -> JSONResponse:
-        return _error(WorkflowError("invalid_input"))
+        workflow_prefixes = (
+            "/api/v1/workflows",
+            "/api/v1/workflow-tasks",
+            "/api/v1/workflow-node-jobs",
+            "/api/v1/events",
+        )
+        if request.url.path.startswith(workflow_prefixes):
+            return _error(WorkflowError("invalid_input"))
+        return await request_validation_exception_handler(request, error)
 
     app.include_router(create_workflow_router(service))
 

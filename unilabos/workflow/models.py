@@ -28,7 +28,7 @@ def validate_uuid(value: str) -> str:
 class WorkflowNodeWrite(BaseModel):
     """Complete WorkflowNode payload used by full-graph reconciliation."""
 
-    model_config = ConfigDict(extra="forbid")
+    model_config = ConfigDict(extra="ignore")
 
     uuid: str
     workflow_node_template_uuid: Optional[str] = None
@@ -87,7 +87,7 @@ class WorkflowNodeWrite(BaseModel):
 class WorkflowEdgeWrite(BaseModel):
     """Complete WorkflowEdge payload used by full-graph reconciliation."""
 
-    model_config = ConfigDict(extra="forbid")
+    model_config = ConfigDict(extra="ignore")
 
     uuid: str
     source_node_uuid: str
