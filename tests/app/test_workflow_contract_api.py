@@ -227,8 +227,8 @@ def test_backend_envelope_graph_revision_and_task_snapshot(client) -> None:
     assert conflict.json() == {
         "code": 409,
         "error": {
-            "code": "workflow_revision_conflict",
-            "message": "工作流已在其他位置更新，请刷新并重新确认本次修改",
+            "code": "conflict",
+            "message": "资源已发生冲突，请刷新后重试",
         },
     }
 
