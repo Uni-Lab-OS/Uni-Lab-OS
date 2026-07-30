@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import fcntl
 import os
 import sqlite3
 import threading
@@ -165,25 +166,6 @@ def _apply_saved(
     )
 
 
-def _directory_for_fd(value: object) -> Path | None:
-    if not isinstance(value, int):
-        return None
-    try:
-        return Path(os.readlink(f"/proc/self/fd/{value}")).resolve()
-    except OSError:
-        return None
-
-
-def _dirfd_path(
-    value: str | bytes | os.PathLike[str] | os.PathLike[bytes],
-    *,
-    directory_fd: object,
-) -> Path:
-    path = Path(os.fsdecode(value))
-    parent = _directory_for_fd(directory_fd)
-    return parent / path if parent is not None else path
-
-
 def test_apply_preserves_old_fd_write_at_cas_finalization(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
@@ -197,32 +179,25 @@ def test_apply_preserves_old_fd_write_at_cas_finalization(
         package_root,
         source="value = 'candidate'",
     )
-    finalization_entered = threading.Event()
-    allow_finalization = threading.Event()
-    original_unlink = os.unlink
+    lease_entered = threading.Event()
+    allow_lease = threading.Event()
+    original_fcntl = fcntl.fcntl
     outcome: dict[str, Any] = {}
 
-    def gated_unlink(
-        path: str | bytes | os.PathLike[str] | os.PathLike[bytes],
-        *args: Any,
-        **kwargs: Any,
-    ) -> None:
-        absolute_path = _dirfd_path(
-            path,
-            directory_fd=kwargs.get("dir_fd"),
-        )
-        if (
-            absolute_path.parent == source_path.parent
-            and absolute_path.suffix == ".cas"
-        ):
-            finalization_entered.set()
-            if not allow_finalization.wait(timeout=2):
-                raise TimeoutError("test did not release CAS finalization")
-        original_unlink(path, *args, **kwargs)
+    def gated_fcntl(
+        descriptor: int,
+        command: int,
+        argument: int = 0,
+    ) -> int:
+        if command == fcntl.F_SETLEASE and argument == fcntl.F_WRLCK:
+            lease_entered.set()
+            if not allow_lease.wait(timeout=2):
+                raise TimeoutError("test did not release lease acquisition")
+        return original_fcntl(descriptor, command, argument)
 
     monkeypatch.setattr(
-        "unilabos.workflow.service.os.unlink",
-        gated_unlink,
+        "unilabos.workflow.service.fcntl.fcntl",
+        gated_fcntl,
     )
     descriptor = os.open(source_path, os.O_RDWR)
 
@@ -236,16 +211,16 @@ def test_apply_preserves_old_fd_write_at_cas_finalization(
     thread.start()
     external_source = "value = 'external write during finalization'\n"
     try:
-        assert finalization_entered.wait(timeout=1)
+        assert lease_entered.wait(timeout=1)
         external_bytes = external_source.encode("utf-8")
         os.lseek(descriptor, 0, os.SEEK_SET)
         os.write(descriptor, external_bytes)
         os.ftruncate(descriptor, len(external_bytes))
         os.fsync(descriptor)
-        allow_finalization.set()
+        allow_lease.set()
         thread.join(timeout=2)
     finally:
-        allow_finalization.set()
+        allow_lease.set()
         os.close(descriptor)
         thread.join(timeout=2)
 
@@ -277,45 +252,40 @@ def test_cas_restore_failure_retains_the_only_original_copy(
         source="value = 'original draft'\n",
     )
     original_bytes = source_path.read_bytes()
-    original_link = os.link
-    install_conflicts = 0
+    original_write = WorkflowService._write_regular_fd
+    write_calls = 0
+    replacement_failures = 0
     restore_failures = 0
 
-    def conflicting_link(
-        source: str | bytes | os.PathLike[str] | os.PathLike[bytes],
-        destination: str | bytes | os.PathLike[str] | os.PathLike[bytes],
-        *args: Any,
-        **kwargs: Any,
+    def fail_after_replacement_write(
+        descriptor: int,
+        content: bytes,
     ) -> None:
-        nonlocal install_conflicts, restore_failures
-        source_name = Path(os.fsdecode(source))
-        destination_path = _dirfd_path(
-            destination,
-            directory_fd=kwargs.get("dst_dir_fd"),
-        )
-        if destination_path == source_path and source_name.suffix == ".tmp":
-            install_conflicts += 1
-            destination_fd = kwargs.get("dst_dir_fd")
-            assert isinstance(destination_fd, int)
-            intruder = os.open(
-                destination,
-                os.O_WRONLY | os.O_CREAT | os.O_EXCL,
-                0o600,
-                dir_fd=destination_fd,
-            )
-            os.close(intruder)
-            try:
-                original_link(source, destination, *args, **kwargs)
-            finally:
-                os.unlink(destination, dir_fd=destination_fd)
-        if destination_path == source_path and source_name.suffix == ".cas":
-            restore_failures += 1
-            raise OSError("deterministic backup restore failure")
-        original_link(source, destination, *args, **kwargs)
+        nonlocal replacement_failures, write_calls
+        write_calls += 1
+        original_write(descriptor, content)
+        if write_calls == 2:
+            replacement_failures += 1
+            raise OSError("deterministic replacement finalization failure")
+
+    def fail_restore(
+        descriptor: int,
+        content: bytes,
+    ) -> None:
+        nonlocal restore_failures
+        del descriptor, content
+        restore_failures += 1
+        raise OSError("deterministic backup restore failure")
 
     monkeypatch.setattr(
-        "unilabos.workflow.service.os.link",
-        conflicting_link,
+        WorkflowService,
+        "_write_regular_fd",
+        staticmethod(fail_after_replacement_write),
+    )
+    monkeypatch.setattr(
+        WorkflowService,
+        "_restore_regular_fd",
+        staticmethod(fail_restore),
     )
     try:
         with pytest.raises(WorkflowError) as error:
@@ -335,10 +305,27 @@ def test_cas_restore_failure_retains_the_only_original_copy(
     ]
 
     assert error.value.code == "internal_error"
-    assert install_conflicts == 1
+    assert write_calls == 2
+    assert replacement_failures == 1
     assert restore_failures >= 1
     assert original_bytes in surviving_contents
     assert source_path.exists() or backup_paths
+
+    recovered_store = WorkflowStore(tmp_path / "workflow.db")
+    recovered = WorkflowService(
+        recovered_store,
+        compiler=SourceOnlyCompiler(),
+    )
+    try:
+        recovered_aggregate = recovered.get_authoring(WORKFLOW_UUID)
+        reconciled = recovered.reconcile_registered_source(WORKFLOW_UUID)
+    finally:
+        recovered_store.close()
+
+    original_source = original_bytes.decode("utf-8")
+    assert recovered_aggregate["draft"]["python_source"] == original_source
+    assert reconciled["draft"]["python_source"] == original_source
+    assert source_path.read_bytes() == original_bytes
 
 
 def test_graph_apply_fallback_uses_post_commit_facts_without_writeback_warning(

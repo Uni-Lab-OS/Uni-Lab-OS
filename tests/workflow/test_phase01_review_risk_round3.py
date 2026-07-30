@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import fcntl
 import hashlib
 import os
 import sqlite3
@@ -376,34 +377,25 @@ def test_apply_detects_old_file_descriptor_write_during_cas_install(
     package_root = tmp_path / "package"
     package_root.mkdir()
     source_path, saved = _save_candidate(service, package_root)
-    install_entered = threading.Event()
-    allow_install = threading.Event()
-    original_link = os.link
+    lease_entered = threading.Event()
+    allow_lease = threading.Event()
+    original_fcntl = fcntl.fcntl
     outcome: dict[str, Any] = {}
 
-    def gated_link(
-        source: str | bytes | os.PathLike[str] | os.PathLike[bytes],
-        destination: str | bytes | os.PathLike[str] | os.PathLike[bytes],
-        *args: Any,
-        **kwargs: Any,
-    ) -> None:
-        source_as_path = Path(source)
-        destination_as_path = Path(destination)
-        if (
-            destination_as_path == source_path
-            or (
-                destination_as_path == Path(source_path.name)
-                and kwargs.get("dst_dir_fd") is not None
-            )
-        ) and source_as_path.suffix == ".tmp":
-            install_entered.set()
-            if not allow_install.wait(timeout=2):
-                raise TimeoutError("test did not release CAS install")
-        original_link(source, destination, *args, **kwargs)
+    def gated_fcntl(
+        descriptor: int,
+        command: int,
+        argument: int = 0,
+    ) -> int:
+        if command == fcntl.F_SETLEASE and argument == fcntl.F_WRLCK:
+            lease_entered.set()
+            if not allow_lease.wait(timeout=2):
+                raise TimeoutError("test did not release lease acquisition")
+        return original_fcntl(descriptor, command, argument)
 
     monkeypatch.setattr(
-        "unilabos.workflow.service.os.link",
-        gated_link,
+        "unilabos.workflow.service.fcntl.fcntl",
+        gated_fcntl,
     )
     descriptor = os.open(source_path, os.O_RDWR)
 
@@ -417,15 +409,15 @@ def test_apply_detects_old_file_descriptor_write_during_cas_install(
     thread.start()
     external_source = "value = 'external old fd wins'\n"
     try:
-        assert install_entered.wait(timeout=1)
+        assert lease_entered.wait(timeout=1)
         os.lseek(descriptor, 0, os.SEEK_SET)
         os.write(descriptor, external_source.encode("utf-8"))
         os.ftruncate(descriptor, len(external_source.encode("utf-8")))
         os.fsync(descriptor)
-        allow_install.set()
+        allow_lease.set()
         thread.join(timeout=2)
     finally:
-        allow_install.set()
+        allow_lease.set()
         os.close(descriptor)
         thread.join(timeout=2)
 
@@ -581,7 +573,10 @@ def test_apply_returns_success_after_post_commit_sqlite_operational_error(
         assert record["applied_source"] is not None
         assert record["candidate"] is None
         assert result["apply_result"]["workflow_revision"] == 1
-        assert result["apply_result"]["warnings"] == [WRITEBACK_WARNING]
+        expected_warnings = (
+            [] if failure_stage == "final_aggregate" else [WRITEBACK_WARNING]
+        )
+        assert result["apply_result"]["warnings"] == expected_warnings
         assert result["authoring"]["applied_source"] is not None
     finally:
         store.close()
