@@ -70,6 +70,52 @@ _NO_EXPECTED_HASH = object()
 _F_SETOWN_EX = getattr(fcntl, "F_SETOWN_EX", 15)
 _F_OWNER_TID = 0
 _LEASE_BREAK_SIGNAL = signal.SIGRTMAX
+_WORKFLOW_READ_FIELDS = {
+    "uuid",
+    "create_time",
+    "update_time",
+    "meta_data",
+    "name",
+    "tags",
+    "revision",
+    "description",
+}
+_NODE_TEMPLATE_READ_FIELDS = {
+    "uuid",
+    "create_time",
+    "update_time",
+    "meta_data",
+    "resource_template_uuid",
+    "name",
+    "display_name",
+    "goal",
+    "goal_default",
+    "feedback",
+    "result",
+    "type",
+    "node_type",
+    "description",
+    "class",
+    "schema",
+    "icon",
+    "header",
+    "footer",
+}
+_HANDLE_TEMPLATE_READ_FIELDS = {
+    "uuid",
+    "create_time",
+    "update_time",
+    "meta_data",
+    "workflow_node_template_uuid",
+    "handle_key",
+    "io_type",
+    "display_name",
+    "type",
+    "required",
+    "description",
+    "data_source",
+    "data_key",
+}
 
 
 class WorkflowError(RuntimeError):
@@ -1224,8 +1270,6 @@ class WorkflowService:
         backup_name = f".{target_name}.{uuid4().hex}.cas"
         backup_created = False
         replacement_attempted = False
-        replacement_installed = False
-        external_target_changed = False
         lease_held = False
         previous_signal_mask: Optional[set[signal.Signals]] = None
         try:
@@ -1318,7 +1362,6 @@ class WorkflowService:
                 src_dir_fd=parent_fd,
                 dst_dir_fd=parent_fd,
             )
-            replacement_installed = True
             os.fsync(parent_fd)
             if WorkflowService._drain_lease_break_signal():
                 raise WorkflowConflict("draft_hash_conflict")
@@ -1331,7 +1374,6 @@ class WorkflowService:
                 or WorkflowService._hash_regular_fd(temporary_descriptor)
                 != replacement_hash
             ):
-                external_target_changed = True
                 raise WorkflowConflict("draft_hash_conflict")
 
             fcntl.fcntl(
@@ -1351,7 +1393,6 @@ class WorkflowService:
                 or WorkflowService._hash_regular_fd(temporary_descriptor)
                 != replacement_hash
             ):
-                external_target_changed = True
                 raise WorkflowConflict("draft_hash_conflict")
 
             with suppress(OSError):
@@ -1359,39 +1400,11 @@ class WorkflowService:
                 backup_created = False
                 os.fsync(parent_fd)
         except Exception:
-            installed_now = (
-                replacement_attempted
-                and temporary_descriptor >= 0
-                and WorkflowService._target_matches_fd(
-                    parent_fd,
-                    target_name,
-                    temporary_descriptor,
-                )
-            )
-            replacement_installed = replacement_installed or installed_now
-            if replacement_installed and backup_created and not external_target_changed:
-                try:
-                    os.replace(
-                        backup_name,
-                        target_name,
-                        src_dir_fd=parent_fd,
-                        dst_dir_fd=parent_fd,
-                    )
-                    backup_created = False
-                    replacement_installed = False
-                    os.fsync(parent_fd)
-                except OSError:
-                    # 候选不能在失败后冒充已保存 Draft。保留完整、已
-                    # fsync 的 `.cas` 原稿，供显式人工/Git 恢复。
-                    if WorkflowService._target_matches_fd(
-                        parent_fd,
-                        target_name,
-                        temporary_descriptor,
-                    ):
-                        with suppress(OSError):
-                            os.unlink(target_name, dir_fd=parent_fd)
-                            os.fsync(parent_fd)
-            elif backup_created:
+            # os.replace() 一旦被调用，异常路径便无法证明 canonical
+            # 仍是本进程发布的 inode；外部 authority 可能已经原地写入
+            # 或再次原子替换。此时绝不能用历史 `.cas` 覆盖或删除它。
+            # 保留 fsync 过的原稿 artifact，只允许显式人工/Git 恢复。
+            if backup_created and not replacement_attempted:
                 with suppress(OSError):
                     os.unlink(backup_name, dir_fd=parent_fd)
                     backup_created = False
@@ -1652,10 +1665,20 @@ class WorkflowService:
         if not compilation.valid:
             return None
         assert compilation.graph is not None
-        graph = self._backend_candidate_graph(
-            compilation.graph,
-            applied_graph=applied_graph,
-        )
+        try:
+            graph = self._backend_candidate_graph(
+                compilation.graph,
+                applied_graph=applied_graph,
+            )
+        except (KeyError, TypeError, ValueError, ValidationError, WorkflowError):
+            compilation.diagnostics.append(
+                {
+                    "severity": "error",
+                    "code": "candidate_invalid",
+                    "message": _ERRORS["candidate_invalid"][1],
+                }
+            )
+            return None
         bundle = {
             "base_workflow_revision": workflow_revision,
             "draft_hash": draft_hash,
@@ -1783,19 +1806,24 @@ class WorkflowService:
         )
 
         projected["workflow"] = {
-            **applied_workflow,
-            **projected["workflow"],
-            "uuid": workflow_uuid,
-            "create_time": applied_workflow["create_time"],
-            "update_time": timestamp,
+            key: value
+            for key, value in {
+                **applied_workflow,
+                **projected["workflow"],
+                "uuid": workflow_uuid,
+                "create_time": applied_workflow["create_time"],
+                "update_time": timestamp,
+            }.items()
+            if key in _WORKFLOW_READ_FIELDS
         }
         projected["nodes"] = nodes
         projected["edges"] = edges
         projected["node_templates"] = cls._hydrate_backend_catalog_entities(
-            projected["node_templates"] or applied["node_templates"],
+            projected["node_templates"],
             persisted=applied_node_templates,
             timestamp=timestamp,
             uuid_fields={"uuid", "resource_template_uuid"},
+            allowed_fields=_NODE_TEMPLATE_READ_FIELDS,
             required_fields={
                 "uuid",
                 "create_time",
@@ -1813,10 +1841,11 @@ class WorkflowService:
             },
         )
         projected["handle_templates"] = cls._hydrate_backend_catalog_entities(
-            projected["handle_templates"] or applied["handle_templates"],
+            projected["handle_templates"],
             persisted=applied_handle_templates,
             timestamp=timestamp,
             uuid_fields={"uuid", "workflow_node_template_uuid"},
+            allowed_fields=_HANDLE_TEMPLATE_READ_FIELDS,
             required_fields={
                 "uuid",
                 "create_time",
@@ -1851,11 +1880,16 @@ class WorkflowService:
         persisted: Dict[str, Dict[str, Any]],
         timestamp: str,
         uuid_fields: set[str],
+        allowed_fields: set[str],
         required_fields: set[str],
     ) -> List[Dict[str, Any]]:
         hydrated = []
         for item in entities:
-            value = {key: child for key, child in item.items() if child is not None}
+            value = {
+                key: child
+                for key, child in item.items()
+                if key in allowed_fields and child is not None
+            }
             for field in uuid_fields:
                 try:
                     value[field] = validate_uuid(value[field])
