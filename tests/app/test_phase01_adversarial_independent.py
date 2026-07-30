@@ -4,33 +4,25 @@
 私有 helper 或数据库结构。
 """
 
+import importlib
 from uuid import uuid4
 
 import pytest
-from fastapi import FastAPI
 from fastapi.testclient import TestClient
 
-from unilabos.app.web import server as web_server
 from unilabos.config.config import BasicConfig
 
 
 @pytest.fixture()
-def client(tmp_path_factory, monkeypatch):
+def client(tmp_path_factory):
     """使用真实组合根构造一个隔离 workspace 的公共 HTTP app。"""
 
     working_dir = tmp_path_factory.getbasetemp() / "phase01-independent-workspace"
     working_dir.mkdir(exist_ok=True)
-    monkeypatch.setattr(BasicConfig, "working_dir", str(working_dir))
-    monkeypatch.setattr(
-        web_server,
-        "app",
-        FastAPI(
-            docs_url="/api/docs",
-            redoc_url="/api/redoc",
-            openapi_url="/api/openapi.json",
-        ),
+    BasicConfig.working_dir = str(working_dir)
+    web_server = importlib.reload(
+        importlib.import_module("unilabos.app.web.server"),
     )
-    monkeypatch.setattr(web_server, "pages", None)
 
     with TestClient(web_server.setup_server()) as test_client:
         yield test_client
@@ -66,7 +58,7 @@ def test_apply_rejects_client_owned_candidate_and_graph_payload(client):
         },
     )
 
-    _assert_backend_error(response, status=422, code="invalid_input")
+    _assert_backend_error(response, status=400, code="invalid_input")
 
 
 def test_runtime_run_route_is_absent_and_events_is_the_sse_seam(client):
@@ -79,4 +71,10 @@ def test_runtime_run_route_is_absent_and_events_is_the_sse_seam(client):
         "/api/v1/events",
         headers={"Last-Event-ID": "not-a-non-negative-integer"},
     )
-    _assert_backend_error(response, status=400, code="invalid_input")
+    assert response.status_code == 400
+    assert response.json() == {
+        "error": {
+            "code": "invalid_input",
+            "message": "Last-Event-ID must be a non-negative integer",
+        }
+    }
