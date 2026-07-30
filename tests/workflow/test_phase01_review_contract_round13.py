@@ -90,8 +90,7 @@ class Round13Compiler:
         )
         diagnostics = (
             self.revalidation_diagnostics
-            if self.compile_count > 1
-            and self.revalidation_diagnostics is not None
+            if self.compile_count > 1 and self.revalidation_diagnostics is not None
             else self.diagnostics
         )
         graph, changeset, source_map = self._bundle(
@@ -716,9 +715,7 @@ def test_draft_malformed_diagnostics_use_stable_candidate_invalid_aggregate(
     tmp_path: Path,
     diagnostics: Any,
 ) -> None:
-    diagnostic_payload = (
-        diagnostics if isinstance(diagnostics, list) else [diagnostics]
-    )
+    diagnostic_payload = diagnostics if isinstance(diagnostics, list) else [diagnostics]
     if diagnostics == {}:
         diagnostic_payload = {}
     service, revision = _authoring_service(
@@ -864,9 +861,7 @@ def test_raw_http_depth_1100_legal_json_mirrors_frozen_backend(
     service = WorkflowService(store)
     nested = '{"level":' * 1100 + "0" + "}" * 1100
     body = (
-        '{"name":"deep valid","tags":[],"description":null,"meta_data":'
-        + nested
-        + "}"
+        '{"name":"deep valid","tags":[],"description":null,"meta_data":' + nested + "}"
     )
 
     with TestClient(
