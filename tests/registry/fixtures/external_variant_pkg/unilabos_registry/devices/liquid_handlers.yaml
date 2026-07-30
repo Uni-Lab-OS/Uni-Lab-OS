@@ -4,22 +4,38 @@ vendor.lh.model_a:
   implementation:
     family: vendor.liquid_handler
     variant: model_a
-    class_ref: tests.registry.fixtures.initializer_drivers:SharedDevice
+    class_ref: tests.registry.fixtures.initializer_drivers:JsonConfiguredDevice
+  init_param_schema:
+    config:
+      type: object
+      properties:
+        backend_type:
+          type: string
+        backend_params:
+          type: object
+          properties:
+            host:
+              type: string
+            port:
+              type: integer
+          required: [host, port]
+        deck_name:
+          type: string
+        name:
+          type: string
+        channels:
+          type: integer
+          minimum: 1
+      required: [backend_type, backend_params, deck_name, name, channels]
+  init_param_enforce:
+    backend_type: mock
+    backend_params:
+      port: 4008
+    deck_name: model-a-deck
+    channels: 8
   class:
-    module: tests.registry.fixtures.initializer_drivers:SharedDevice
-    init:
-      kwargs:
-        backend:
-          factory: tests.registry.fixtures.initializer_drivers:MockBackend
-          kwargs:
-            host: ${config.host}
-            port: ${config.port}
-        deck:
-          factory: tests.registry.fixtures.initializer_drivers:MockDeck
-          kwargs:
-            name: model-a-deck
-        name: ${node.id}
-        channels: 8
+    module: tests.registry.fixtures.initializer_drivers:JsonConfiguredDevice
+    type: python
     action_value_mappings:
       $ref: ../contracts/liquid_handler.yaml#/actions
     status_types:
@@ -31,22 +47,38 @@ vendor.lh.model_b:
   implementation:
     family: vendor.liquid_handler
     variant: model_b
-    class_ref: tests.registry.fixtures.initializer_drivers:SharedDevice
+    class_ref: tests.registry.fixtures.initializer_drivers:JsonConfiguredDevice
+  init_param_schema:
+    config:
+      type: object
+      properties:
+        backend_type:
+          type: string
+        backend_params:
+          type: object
+          properties:
+            host:
+              type: string
+            port:
+              type: integer
+          required: [host, port]
+        deck_name:
+          type: string
+        name:
+          type: string
+        channels:
+          type: integer
+          minimum: 1
+      required: [backend_type, backend_params, deck_name, name, channels]
+  init_param_enforce:
+    backend_type: mock
+    backend_params:
+      port: 4096
+    deck_name: model-b-deck
+    channels: 96
   class:
-    module: tests.registry.fixtures.initializer_drivers:SharedDevice
-    init:
-      kwargs:
-        backend:
-          factory: tests.registry.fixtures.initializer_drivers:MockBackend
-          kwargs:
-            host: ${config.host}
-            port: ${config.port}
-        deck:
-          factory: tests.registry.fixtures.initializer_drivers:MockDeck
-          kwargs:
-            name: model-b-deck
-        name: ${node.id}
-        channels: 96
+    module: tests.registry.fixtures.initializer_drivers:JsonConfiguredDevice
+    type: python
     action_value_mappings:
       $ref: ../contracts/liquid_handler.yaml#/actions
     status_types:
