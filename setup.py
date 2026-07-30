@@ -9,6 +9,7 @@ setup(
     include_package_data=True,
     package_data={
         'unilabos.workflow': ['schemas/runtime/v1/*.schema.json'],
+        'unilabos.app.local_bridge': ['shapes/*.yaml'],
     },
     install_requires=[
         'jsonschema>=4.26,<5',

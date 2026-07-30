@@ -40,6 +40,7 @@ from unilabos.app.local_bridge.material_api import (
     MaterialMutationConflict,
 )
 from unilabos.app.local_bridge.material_models import MaterialModelRegistry
+from unilabos.app.local_bridge.material_shapes import MaterialShapeRegistry
 from unilabos.app.local_bridge.resource_template_api import (
     ResourceTemplateProxy,
     ResourceTemplateProxyError,
@@ -250,6 +251,7 @@ class LocalApiState:
         workflow_store: WorkflowDocumentStore | None = None,
         material_catalog: MaterialGraphCatalog | None = None,
         material_model_registry: MaterialModelRegistry | None = None,
+        material_shape_registry: MaterialShapeRegistry | None = None,
         material_refresh: (
             Callable[[], Awaitable[dict[str, Any]]] | None
         ) = None,
@@ -301,6 +303,7 @@ class LocalApiState:
                 else None
             )
         )
+        self._material_shape_registry = material_shape_registry
         self._active_workflow: dict[str, Any] | None = None
         self._seq = 0
         self._schedule.on_job_status(self._on_os_job_status)
@@ -335,6 +338,12 @@ class LocalApiState:
         """暴露 OS 启动时登记的本地模型，与物料图是否加载无关。"""
 
         return self._material_model_registry
+
+    @property
+    def material_shape_registry(self) -> MaterialShapeRegistry | None:
+        """暴露 OS 与设备包声明的 2.5D 外形，同样与物料图无关。"""
+
+        return self._material_shape_registry
 
     async def refresh_material_catalog(self) -> None:
         """真实 OS 模式下，从执行 OS 查询最新内存快照。"""
@@ -901,6 +910,19 @@ def create_app(
             )
         return registry
 
+    def _require_material_shape_registry() -> MaterialShapeRegistry:
+        state = get_state()
+        registry = (
+            state.material_shape_registry if state is not None else None
+        )
+        if registry is None:
+            raise _problem(
+                503,
+                "MATERIAL_SHAPES_UNAVAILABLE",
+                "OS session is unavailable or local shapes were not registered",
+            )
+        return registry
+
     @app.get("/health")
     async def health() -> Any:
         return {"status": "ok"}
@@ -1227,6 +1249,15 @@ def create_app(
         return {
             "code": 0,
             "data": {"items": models, "total": len(models)},
+            "message": "success",
+        }
+
+    @app.get("/api/v1/material-shapes")
+    async def api_v1_material_shapes() -> Any:
+        shapes = _require_material_shape_registry().list_shapes()
+        return {
+            "code": 0,
+            "data": {"items": shapes, "total": len(shapes)},
             "message": "success",
         }
 

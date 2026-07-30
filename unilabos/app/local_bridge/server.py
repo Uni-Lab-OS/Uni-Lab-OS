@@ -40,6 +40,7 @@ from unilabos.app.local_bridge.material_api import (
     MaterialMutationConflict,
 )
 from unilabos.app.local_bridge.material_models import MaterialModelRegistry
+from unilabos.app.local_bridge.material_shapes import MaterialShapeRegistry
 from unilabos.app.local_bridge.offline_os import OfflineOS
 from unilabos.app.local_bridge.resource_template_api import (
     ResourceTemplateProxy,
@@ -139,6 +140,8 @@ class LocalBridgeServer:
         # 模型是 OS 本地能力，不依赖本次是否选择了 Material Graph。
         # 在桥启动时一次性登记并校验，确保 Electron 随后可直接加载。
         self._material_model_registry = MaterialModelRegistry()
+        # 2.5D 外形同理：由 OS 通用清单 + 设备包 shape_manifest 组成，前端只解释。
+        self._material_shape_registry = MaterialShapeRegistry()
         self._material_catalog = MaterialGraphCatalog(
             graph_path if offline else None,
             model_registry=self._material_model_registry,
@@ -278,6 +281,7 @@ class LocalBridgeServer:
             workflow_store=self._workflow_store,
             material_catalog=self._material_catalog,
             material_model_registry=self._material_model_registry,
+            material_shape_registry=self._material_shape_registry,
             material_refresh=(
                 None
                 if session.session_id == "offline"

@@ -1,0 +1,121 @@
+# Uni-Lab-OS 自带的通用 2.5D 外形，与设备包的 shape_manifest.yaml 同一格式
+# （Uni-Lab-SZLab/schemas/shape-manifest-v1.schema.json）。
+#
+# 这里只放跨实验室通用的器皿与耗材轮廓；具体机器的外形由各自设备包声明。
+# 匹配用 category_contains，命中不到就退回实心包围盒。
+schema_version: 1
+bundle:
+  id: unilabos-core
+  display_name: Uni-Lab-OS 通用外形
+
+shapes:
+  - id: labware
+    display_name: 通用板式耗材
+    applies_to:
+      - category_contains: plate
+      - category_contains: tip-rack
+      - category_contains: tiprack
+      - category_contains: labware
+    units: ratio
+    note: 包围盒 + 一道分层线 + 顶面外框，孔位由实例位点画出。
+    parts:
+      - { type: box, style: plain, from: [0.0, 0.0, 0.0], to: [1.0, 1.0, 1.0] }
+      - { type: edge, style: hairline, from: [0.0, 0.0, 0.28], to: [1.0, 0.0, 0.28] }
+      - { type: rect, style: rim, from: [0.035, 0.055], to: [0.965, 0.945], z: 1.0, radius: 0.055 }
+      - { type: sites, generator: site-markers }
+
+  - id: stack
+    display_name: 通用板仓 / 堆栈塔
+    applies_to:
+      - category_contains: hotel
+      - category_contains: stacker
+      - category_contains: plate-stack
+      - category_contains: labware-stack
+      - category_contains: storage-tower
+    note: 立柱 + 每个位点一层层板；没有位点时按高度推算若干空层。
+    parts:
+      - { type: sites, generator: stack-shelves }
+
+  - id: beaker
+    display_name: 通用烧杯
+    applies_to:
+      - category_contains: beaker
+    units: ratio
+    shadow: round
+    note: 直筒杯身 + 底部圆角 + 杯口鹰嘴。
+    parts:
+      - type: lathe
+        style: glass
+        center: [0.5, 0.5]
+        d: 1.0
+        z: [0.0, 1.0]
+        spout: true
+        mouth: true
+        rim: true
+        rings:
+          - { z: 0.0, r: 0.93 }
+          - { z: 0.02, r: 1.0 }
+          - { z: 1.0, r: 1.0 }
+
+  - id: bottle
+    display_name: 通用样品瓶 / 细颈瓶
+    applies_to:
+      - category_contains: vial
+      - category_contains: bottle
+      - category_contains: flask
+    units: ratio
+    shadow: round
+    note: 圆润收肩 + 细颈 + 小旋盖，肩部曲线按余弦采样 7 段。
+    parts:
+      - type: lathe
+        style: glass
+        center: [0.5, 0.5]
+        d: 1.0
+        z: [0.0, 1.0]
+        mouth: true
+        ribs: 9
+        rings:
+          - { z: 0.0, r: 0.93 }
+          - { z: 0.02, r: 1.0 }
+          - { z: 0.58, r: 1.0 }
+          - { z: 0.6, r: 0.986712 }
+          - { z: 0.62, r: 0.947514 }
+          - { z: 0.64, r: 0.88437 }
+          - { z: 0.66, r: 0.80045 }
+          - { z: 0.68, r: 0.699959 }
+          - { z: 0.7, r: 0.587936 }
+          - { z: 0.72, r: 0.47 }
+          - { z: 0.76, r: 0.47 }
+          - { z: 0.76, r: 0.53 }
+          - { z: 1.0, r: 0.53 }
+        cap:
+          - { z: 0.76, r: 0.53 }
+          - { z: 1.0, r: 0.53 }
+
+  - id: capped_bottle
+    display_name: 通用试剂瓶（大旋盖）
+    applies_to:
+      - category_contains: reagent
+    units: ratio
+    shadow: round
+    note: 短瓶身 + 与瓶身近乎同径的高旋盖，肩部按余弦采样 4 段。
+    parts:
+      - type: lathe
+        style: glass
+        center: [0.5, 0.5]
+        d: 1.0
+        z: [0.0, 1.0]
+        mouth: true
+        ribs: 9
+        rings:
+          - { z: 0.0, r: 0.93 }
+          - { z: 0.02, r: 1.0 }
+          - { z: 0.5, r: 1.0 }
+          - { z: 0.515, r: 0.984776 }
+          - { z: 0.53, r: 0.941421 }
+          - { z: 0.545, r: 0.876537 }
+          - { z: 0.56, r: 0.8 }
+          - { z: 1.0, r: 0.8 }
+        cap:
+          - { z: 0.56, r: 0.8 }
+          - { z: 1.0, r: 0.8 }

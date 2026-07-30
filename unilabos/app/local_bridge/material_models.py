@@ -1,16 +1,21 @@
 """OS 本地物料模型登记表与安全资源解析。
 
-模型文件随 Uni-Lab-OS Python 包分发。桥启动并加载物料图时一次性校验
-入口文件与模型目录，随后 Material API 只返回稳定的同源 URL；浏览器不会
-直接接触宿主机路径。
+模型文件随 Uni-Lab-OS Python 包分发，也可由已安装设备包通过
+``unilabos.model_bundles`` entry point 提供。桥启动并加载物料图时一次性
+校验入口文件与模型目录，随后 Material API 只返回稳定的同源 URL；浏览器
+不会直接接触宿主机路径。
 """
 
 from __future__ import annotations
 
+import importlib.metadata as metadata
+import importlib.resources as resources
 import logging
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any
+from typing import Any, Mapping
+
+import yaml
 
 
 logger = logging.getLogger(__name__)
@@ -109,8 +114,137 @@ _MODEL_DEFINITIONS = (
 )
 
 
+def _prefer_web_representation(
+    representations: Mapping[str, Any],
+) -> tuple[str, str] | None:
+    """Pick web representation first, then kinematics/collision."""
+
+    for name in ("web", "kinematics", "collision"):
+        raw = representations.get(name)
+        if not isinstance(raw, Mapping):
+            continue
+        entry = str(raw.get("entry") or "").strip()
+        fmt = str(raw.get("format") or "").strip().casefold()
+        if entry and fmt:
+            return entry, fmt
+    return None
+
+
+def _load_bundle_models() -> tuple[
+    dict[str, LocalMaterialModel],
+    dict[str, Path],
+]:
+    """Discover installed ``unilabos.model_bundles`` and register present assets."""
+
+    registrations: dict[str, LocalMaterialModel] = {}
+    asset_index: dict[str, Path] = {}
+    entry_points = metadata.entry_points()
+    selected = (
+        entry_points.select(group="unilabos.model_bundles")
+        if hasattr(entry_points, "select")
+        else entry_points.get("unilabos.model_bundles", [])
+    )
+    for entry_point in selected:
+        try:
+            provider = entry_point.load()
+            descriptor = provider() if callable(provider) else provider
+        except Exception as exc:  # pragma: no cover - plugin isolation
+            logger.warning(
+                "[material-models] 跳过损坏的 model_bundle %s: %s",
+                entry_point.name,
+                exc,
+            )
+            continue
+        if not isinstance(descriptor, Mapping):
+            logger.warning(
+                "[material-models] model_bundle %s 未返回 mapping",
+                entry_point.name,
+            )
+            continue
+        package_name = str(descriptor.get("package") or "").strip()
+        manifest_name = str(
+            descriptor.get("manifest") or "model_manifest.yaml"
+        ).strip()
+        if not package_name:
+            continue
+        try:
+            package_root = Path(str(resources.files(package_name)))
+            manifest_text = (
+                resources.files(package_name)
+                .joinpath(manifest_name)
+                .read_text(encoding="utf-8")
+            )
+            manifest = yaml.safe_load(manifest_text) or {}
+        except Exception as exc:
+            logger.warning(
+                "[material-models] 无法读取 bundle %s/%s: %s",
+                package_name,
+                manifest_name,
+                exc,
+            )
+            continue
+        if not isinstance(manifest, Mapping):
+            continue
+        bundle = manifest.get("bundle") if isinstance(manifest.get("bundle"), Mapping) else {}
+        bundle_id = str(bundle.get("id") or entry_point.name).strip() or entry_point.name
+        models = manifest.get("models")
+        if not isinstance(models, list):
+            continue
+        skipped = 0
+        registered = 0
+        for model in models:
+            if not isinstance(model, Mapping):
+                continue
+            key = str(model.get("key") or "").strip()
+            representations = model.get("representations")
+            if not key or not isinstance(representations, Mapping):
+                continue
+            preferred = _prefer_web_representation(representations)
+            if preferred is None:
+                skipped += 1
+                continue
+            entry, fmt = preferred
+            absolute = (package_root / entry).resolve()
+            try:
+                absolute.relative_to(package_root.resolve())
+            except ValueError:
+                skipped += 1
+                continue
+            if not absolute.is_file():
+                skipped += 1
+                continue
+            applies = model.get("applies_to")
+            tokens: list[str] = []
+            if isinstance(applies, list):
+                for rule in applies:
+                    if not isinstance(rule, Mapping):
+                        continue
+                    klass = str(rule.get("class") or "").strip()
+                    if klass:
+                        tokens.append(klass.replace("-", "_").casefold())
+            if not tokens:
+                tokens.append(key.replace("-", "_").casefold())
+            public_rel = f"bundles/{bundle_id}/{entry}".replace("\\", "/")
+            asset_index[public_rel] = absolute
+            registrations[f"{bundle_id}:{key}"] = LocalMaterialModel(
+                key=f"{bundle_id}:{key}",
+                relative_path=public_rel,
+                format=fmt,
+                match_tokens=tuple(tokens),
+            )
+            registered += 1
+        logger.info(
+            "[material-models] bundle=%s registered=%d skipped_missing=%d root=%s",
+            bundle_id,
+            registered,
+            skipped,
+            package_root,
+        )
+    return registrations, asset_index
+
+
 class MaterialModelRegistry:
-    """登记 OS 包内模型，并把设备身份解析为可公开的模型快照。"""
+    """登记 OS 与设备包模型，并把设备身份解析为可公开的模型快照。"""
 
     def __init__(self, asset_root: str | Path | None = None) -> None:
         package_root = Path(__file__).resolve().parents[2]
@@ -125,25 +259,46 @@ class MaterialModelRegistry:
             )
 
         registrations: dict[str, LocalMaterialModel] = {}
+        asset_index: dict[str, Path] = {}
         for definition in _MODEL_DEFINITIONS:
-            entry = self.resolve_asset(definition.relative_path)
+            entry = (self.asset_root / definition.relative_path).resolve()
+            try:
+                entry.relative_to(self.asset_root)
+            except ValueError as exc:
+                raise ValueError(
+                    "Material model asset path escapes asset root"
+                ) from exc
             if not entry.is_file():
                 raise FileNotFoundError(
                     f"Material model entry does not exist: {entry}"
                 )
             if definition.instance_relative_path:
-                instance_entry = self.resolve_asset(
-                    definition.instance_relative_path
-                )
+                instance_entry = (
+                    self.asset_root / definition.instance_relative_path
+                ).resolve()
+                try:
+                    instance_entry.relative_to(self.asset_root)
+                except ValueError as exc:
+                    raise ValueError(
+                        "Material model asset path escapes asset root"
+                    ) from exc
                 if not instance_entry.is_file():
                     raise FileNotFoundError(
                         "Material instance model entry does not exist: "
                         f"{instance_entry}"
                     )
+                asset_index[definition.instance_relative_path] = instance_entry
+            asset_index[definition.relative_path] = entry
             registrations[definition.key] = definition
+
+        bundle_models, bundle_assets = _load_bundle_models()
+        registrations.update(bundle_models)
+        asset_index.update(bundle_assets)
+
         self._registrations = registrations
+        self._asset_index = asset_index
         logger.info(
-            "[material-models] 已登记 %d 个 OS 本地模型，资源根目录=%s",
+            "[material-models] 已登记 %d 个模型（含设备包 bundle），OS 资源根=%s",
             len(registrations),
             self.asset_root,
         )
@@ -174,6 +329,12 @@ class MaterialModelRegistry:
             )
             for model in self._registrations.values()
         ]
+        if not matches:
+            return {
+                "path": "",
+                "format": "none",
+                "attachPoints": [],
+            }
         best_score, best_model = max(matches, key=lambda item: item[0])
         if best_score:
             return best_model.public_snapshot()
@@ -186,7 +347,12 @@ class MaterialModelRegistry:
     def resolve_asset(self, relative_path: str) -> Path:
         """把公开相对路径解析到模型根，并拒绝目录穿越。"""
 
-        candidate = (self.asset_root / relative_path).resolve()
+        normalized = relative_path.replace("\\", "/").lstrip("/")
+        indexed = self._asset_index.get(normalized)
+        if indexed is not None:
+            return indexed
+
+        candidate = (self.asset_root / normalized).resolve()
         try:
             candidate.relative_to(self.asset_root)
         except ValueError as exc:
