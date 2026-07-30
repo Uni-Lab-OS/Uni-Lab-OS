@@ -25,6 +25,7 @@ def utc_now() -> str:
 def _json(value: Any) -> str:
     return json.dumps(
         value,
+        allow_nan=False,
         ensure_ascii=False,
         separators=(",", ":"),
         sort_keys=True,

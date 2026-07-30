@@ -11,9 +11,14 @@ from fastapi import APIRouter, FastAPI, Header, Query, Request
 from fastapi.exception_handlers import request_validation_exception_handler
 from fastapi.exceptions import RequestValidationError
 from fastapi.responses import JSONResponse, Response, StreamingResponse
-from pydantic import BaseModel, ConfigDict, Field
+from pydantic import BaseModel, ConfigDict, Field, field_validator
 
-from unilabos.workflow.models import WorkflowEdgeWrite, WorkflowNodeWrite
+from unilabos.workflow.models import (
+    WorkflowEdgeWrite,
+    WorkflowNodeWrite,
+    normalize_json_array,
+    normalize_json_object,
+)
 from unilabos.workflow.service import WorkflowError, WorkflowService
 
 
@@ -61,6 +66,16 @@ class WorkflowCreateRequest(_BackendModel):
     description: Optional[str] = None
     meta_data: Dict[str, Any] = Field(default_factory=dict)
 
+    @field_validator("tags", mode="before")
+    @classmethod
+    def _json_array(cls, value: Any) -> List[Any]:
+        return normalize_json_array(value)
+
+    @field_validator("meta_data", mode="before")
+    @classmethod
+    def _json_object(cls, value: Any) -> Dict[str, Any]:
+        return normalize_json_object(value)
+
 
 class WorkflowUpdateRequest(WorkflowCreateRequest):
     pass
@@ -71,6 +86,11 @@ class GraphWriteRequest(_BackendModel):
     nodes: List[WorkflowNodeWrite] = Field(default_factory=list)
     edges: List[WorkflowEdgeWrite] = Field(default_factory=list)
 
+    @field_validator("nodes", "edges", mode="before")
+    @classmethod
+    def _json_array(cls, value: Any) -> List[Any]:
+        return [] if value is None else value
+
 
 class WorkflowTaskCreateRequest(_BackendModel):
     workflow_uuid: str
@@ -79,6 +99,11 @@ class WorkflowTaskCreateRequest(_BackendModel):
     input: Dict[str, Any] = Field(default_factory=dict)
     description: Optional[str] = None
     meta_data: Dict[str, Any] = Field(default_factory=dict)
+
+    @field_validator("input", "meta_data", mode="before")
+    @classmethod
+    def _json_object(cls, value: Any) -> Dict[str, Any]:
+        return normalize_json_object(value)
 
 
 class DraftWriteRequest(_StrictModel):

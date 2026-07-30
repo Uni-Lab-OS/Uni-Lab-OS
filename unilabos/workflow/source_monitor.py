@@ -67,8 +67,18 @@ class WorkflowSourceMonitor:
                 try:
                     signature = self._service.source_signature(registration)
                     if self._processed.get(workflow_uuid) == signature:
-                        self._pending.pop(workflow_uuid, None)
-                        self._retries.pop(workflow_uuid, None)
+                        if not self._service.source_reconciliation_pending(
+                            workflow_uuid
+                        ):
+                            self._pending.pop(workflow_uuid, None)
+                            self._retries.pop(workflow_uuid, None)
+                            continue
+                        self._processed.pop(workflow_uuid, None)
+                        self._pending[workflow_uuid] = (
+                            signature,
+                            time.monotonic(),
+                        )
+                        self._schedule_retry(workflow_uuid, signature)
                         continue
                     now = time.monotonic()
                     pending = self._pending.get(workflow_uuid)

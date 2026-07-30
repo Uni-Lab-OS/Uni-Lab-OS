@@ -22,9 +22,13 @@ from uuid import uuid4
 from pydantic import ValidationError
 
 from unilabos.workflow.models import (
+    CandidateChangeset,
     CandidateCompilation,
+    CandidateSourceMapEntry,
     WorkflowEdgeWrite,
     WorkflowNodeWrite,
+    normalize_json_array,
+    normalize_json_object,
     validate_uuid,
 )
 from unilabos.workflow.store import (
@@ -208,6 +212,7 @@ def _sha256(data: bytes) -> str:
 def _canonical_json(value: Any) -> bytes:
     return json.dumps(
         value,
+        allow_nan=False,
         ensure_ascii=False,
         separators=(",", ":"),
         sort_keys=True,
@@ -252,6 +257,8 @@ class WorkflowService:
             if not name:
                 raise ValueError("workflow name must not be blank")
             identity = validate_uuid(workflow_uuid or str(uuid4()))
+            tags = normalize_json_array(tags)
+            meta_data = normalize_json_object(meta_data)
             public_meta_data = dict(meta_data)
             public_meta_data.pop("unilab", None)
             return self.store.create_workflow(
@@ -299,10 +306,14 @@ class WorkflowService:
         identity = current["uuid"]
         with self._authoring_lock(identity):
             current = self.get_workflow(identity)
-            name = name.strip()
-            if not name:
-                raise WorkflowError("invalid_input")
-            public_meta_data = dict(meta_data)
+            try:
+                name = name.strip()
+                if not name:
+                    raise ValueError("workflow name must not be blank")
+                tags = normalize_json_array(tags)
+                public_meta_data = dict(normalize_json_object(meta_data))
+            except (AttributeError, TypeError, ValueError):
+                raise WorkflowError("invalid_input") from None
             public_meta_data.pop("unilab", None)
             if "unilab" in current["meta_data"]:
                 public_meta_data["unilab"] = current["meta_data"]["unilab"]
@@ -387,6 +398,11 @@ class WorkflowService:
                 target_node_uuid = validate_uuid(target_node_uuid)
             except ValueError:
                 raise WorkflowError("invalid_input") from None
+        try:
+            input_value = normalize_json_object(input_value)
+            meta_data = normalize_json_object(meta_data)
+        except ValueError:
+            raise WorkflowError("invalid_input") from None
         # P0-2 已冻结合同；生产 schema/compiler 属于 Phase 02。本阶段镜像
         # Backend baseline 的空 Task input，不提前持久化未实现的解释。
         if input_value:
@@ -1751,7 +1767,7 @@ class WorkflowService:
             value = self.compiler.template_catalog_fingerprint
         except Exception:
             raise WorkflowError("template_catalog_unavailable") from None
-        if not isinstance(value, str) or not value:
+        if not isinstance(value, str) or _HASH_TOKEN.fullmatch(value) is None:
             raise WorkflowError("template_catalog_unavailable")
         return value
 
@@ -1764,6 +1780,22 @@ class WorkflowService:
         applied_graph: Dict[str, Any],
     ) -> Optional[Dict[str, Any]]:
         applied_graph = self._validated_applied_backend_graph(applied_graph)
+        try:
+            if not isinstance(compilation.diagnostics, list) or any(
+                not isinstance(item, dict) for item in compilation.diagnostics
+            ):
+                raise ValueError
+            for diagnostic in compilation.diagnostics:
+                normalize_json_object(diagnostic)
+        except ValueError:
+            compilation.diagnostics = [
+                {
+                    "severity": "error",
+                    "code": "candidate_invalid",
+                    "message": _ERRORS["candidate_invalid"][1],
+                }
+            ]
+            return None
         if not compilation.valid:
             return None
         assert compilation.graph is not None
@@ -1772,7 +1804,22 @@ class WorkflowService:
                 compilation.graph,
                 applied_graph=applied_graph,
             )
-        except (ValidationError, WorkflowError) as error:
+            if not isinstance(compilation.source_map, list):
+                raise ValueError
+            source_map = [
+                CandidateSourceMapEntry.model_validate(item).model_dump()
+                for item in compilation.source_map
+            ]
+            changeset = CandidateChangeset.model_validate(
+                compilation.changeset,
+            ).model_dump()
+            compiler_version = compilation.compiler_version
+            if not compiler_version.strip():
+                raise ValueError
+            template_catalog_fingerprint = compilation.template_catalog_fingerprint
+            if _HASH_TOKEN.fullmatch(template_catalog_fingerprint) is None:
+                raise ValueError
+        except (TypeError, ValidationError, ValueError, WorkflowError) as error:
             if isinstance(error, WorkflowError) and error.code != "candidate_invalid":
                 raise
             compilation.diagnostics.append(
@@ -1788,13 +1835,24 @@ class WorkflowService:
             "draft_hash": draft_hash,
             "graph": graph,
             "normalized_python_source": compilation.normalized_python_source,
-            "source_map": compilation.source_map,
-            "changeset": compilation.changeset,
-            "compiler_version": compilation.compiler_version,
-            "template_catalog_fingerprint": (compilation.template_catalog_fingerprint),
+            "source_map": source_map,
+            "changeset": changeset,
+            "compiler_version": compiler_version,
+            "template_catalog_fingerprint": template_catalog_fingerprint,
         }
+        try:
+            canonical_bundle = _canonical_json(bundle)
+        except (TypeError, UnicodeError, ValueError):
+            compilation.diagnostics.append(
+                {
+                    "severity": "error",
+                    "code": "candidate_invalid",
+                    "message": _ERRORS["candidate_invalid"][1],
+                }
+            )
+            return None
         return {
-            "candidate_hash": _sha256(_canonical_json(bundle)),
+            "candidate_hash": _sha256(canonical_bundle),
             **bundle,
             "update_time": utc_now(),
         }
@@ -1924,6 +1982,8 @@ class WorkflowService:
             cls._require_backend_entity_types(projected)
         except (AttributeError, KeyError, TypeError, ValueError):
             raise WorkflowError("candidate_invalid") from None
+        if projected["workflow"]["revision"] != applied_workflow["revision"]:
+            raise WorkflowError("candidate_invalid")
         return projected
 
     @classmethod
@@ -2001,6 +2061,8 @@ class WorkflowService:
         exact(workflow, {"create_time", "update_time", "name"}, str)
         exact(workflow, {"meta_data"}, dict)
         exact(workflow, {"tags"}, list)
+        normalize_json_object(workflow["meta_data"])
+        normalize_json_array(workflow["tags"])
         optional(workflow, {"description"}, str)
         revision = workflow["revision"]
         if type(revision) is not int or not 1 <= revision <= (1 << 63) - 1:
@@ -2026,6 +2088,8 @@ class WorkflowService:
                 {"meta_data", "pose", "param", "execution_policy"},
                 dict,
             )
+            for field in ("meta_data", "pose", "param", "execution_policy"):
+                normalize_json_object(node[field])
             exact(node, {"disabled", "minimized"}, bool)
             optional(
                 node,
@@ -2053,6 +2117,7 @@ class WorkflowService:
             )
             exact(edge, {"create_time", "update_time"}, str)
             exact(edge, {"meta_data"}, dict)
+            normalize_json_object(edge["meta_data"])
             optional(edge, {"description"}, str)
 
         for template in graph["node_templates"]:
@@ -2080,6 +2145,14 @@ class WorkflowService:
                 },
                 dict,
             )
+            for field in (
+                "meta_data",
+                "goal",
+                "goal_default",
+                "feedback",
+                "result",
+            ):
+                normalize_json_object(template[field])
             optional(
                 template,
                 {
@@ -2108,6 +2181,7 @@ class WorkflowService:
                 str,
             )
             exact(handle, {"meta_data"}, dict)
+            normalize_json_object(handle["meta_data"])
             exact(handle, {"required"}, bool)
             optional(
                 handle,

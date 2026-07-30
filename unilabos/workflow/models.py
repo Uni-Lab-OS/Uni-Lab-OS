@@ -7,13 +7,79 @@ boundary, and never carry legacy Run identifiers.
 
 from __future__ import annotations
 
-from typing import Any, Dict, List, Optional
+import math
+from typing import Any, Dict, List, Literal, Optional
 from uuid import UUID
 
-from pydantic import BaseModel, ConfigDict, Field, field_validator
+from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 
 JsonObject = Dict[str, Any]
 JsonArray = List[Any]
+
+
+def validate_json_value(value: Any) -> Any:
+    """Return a recursively valid, finite JSON value."""
+
+    active: set[int] = set()
+
+    def walk(item: Any) -> None:
+        if item is None or isinstance(item, (bool, int, str)):
+            return
+        if isinstance(item, float):
+            if not math.isfinite(item):
+                raise ValueError("JSON numbers must be finite")
+            return
+        if isinstance(item, dict):
+            identity = id(item)
+            if identity in active:
+                raise ValueError("JSON values must not contain cycles")
+            active.add(identity)
+            try:
+                for key, child in item.items():
+                    if not isinstance(key, str):
+                        raise ValueError("JSON object keys must be strings")
+                    walk(child)
+            finally:
+                active.remove(identity)
+            return
+        if isinstance(item, list):
+            identity = id(item)
+            if identity in active:
+                raise ValueError("JSON values must not contain cycles")
+            active.add(identity)
+            try:
+                for child in item:
+                    walk(child)
+            finally:
+                active.remove(identity)
+            return
+        raise ValueError(f"{type(item).__name__} is not a JSON value")
+
+    try:
+        walk(value)
+    except RecursionError:
+        raise ValueError("JSON value is nested too deeply") from None
+    return value
+
+
+def normalize_json_object(value: Any) -> JsonObject:
+    """Mirror Backend JSONObject: explicit null becomes an empty object."""
+
+    normalized = {} if value is None else value
+    if not isinstance(normalized, dict):
+        raise ValueError("value is not a JSON object")
+    validate_json_value(normalized)
+    return normalized
+
+
+def normalize_json_array(value: Any) -> JsonArray:
+    """Mirror Backend JSONArray: explicit null becomes an empty array."""
+
+    normalized = [] if value is None else value
+    if not isinstance(normalized, list):
+        raise ValueError("value is not a JSON array")
+    validate_json_value(normalized)
+    return normalized
 
 
 def validate_uuid(value: str) -> str:
@@ -49,6 +115,24 @@ class WorkflowNodeWrite(BaseModel):
     script: Optional[str] = None
     description: Optional[str] = None
     meta_data: JsonObject = Field(default_factory=dict)
+
+    @field_validator(
+        "pose",
+        "execution_policy",
+        "meta_data",
+        mode="before",
+    )
+    @classmethod
+    def _json_object(cls, value: Any) -> JsonObject:
+        return normalize_json_object(value)
+
+    @field_validator("param")
+    @classmethod
+    def _optional_json_object(
+        cls,
+        value: Optional[JsonObject],
+    ) -> Optional[JsonObject]:
+        return None if value is None else normalize_json_object(value)
 
     @field_validator(
         "uuid",
@@ -97,6 +181,11 @@ class WorkflowEdgeWrite(BaseModel):
     description: Optional[str] = None
     meta_data: JsonObject = Field(default_factory=dict)
 
+    @field_validator("meta_data", mode="before")
+    @classmethod
+    def _json_object(cls, value: Any) -> JsonObject:
+        return normalize_json_object(value)
+
     @field_validator(
         "uuid",
         "source_node_uuid",
@@ -122,11 +211,11 @@ class CandidateCompilation(BaseModel):
 
     model_config = ConfigDict(extra="forbid")
 
-    diagnostics: List[JsonObject] = Field(default_factory=list)
+    diagnostics: Any = Field(default_factory=list)
     graph: Optional[JsonObject] = None
     normalized_python_source: Optional[str] = None
-    source_map: List[JsonObject] = Field(default_factory=list)
-    changeset: Optional[JsonObject] = None
+    source_map: Any = Field(default_factory=list)
+    changeset: Optional[Any] = None
     compiler_version: str
     template_catalog_fingerprint: str
 
@@ -136,6 +225,8 @@ class CandidateCompilation(BaseModel):
             self.graph is not None
             and self.normalized_python_source is not None
             and self.changeset is not None
+            and isinstance(self.diagnostics, list)
+            and all(isinstance(item, dict) for item in self.diagnostics)
             and not any(
                 str(item.get("severity", "")).lower() == "error"
                 for item in self.diagnostics
@@ -143,11 +234,91 @@ class CandidateCompilation(BaseModel):
         )
 
 
+class CandidateSourceMapEntry(BaseModel):
+    """One exact D-077 Python-source range."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    workflow_node_uuid: str
+    start_line: int = Field(ge=1, strict=True)
+    start_column: int = Field(ge=1, strict=True)
+    end_line: int = Field(ge=1, strict=True)
+    end_column: int = Field(ge=1, strict=True)
+
+    @field_validator("workflow_node_uuid")
+    @classmethod
+    def _valid_uuid(cls, value: str) -> str:
+        return validate_uuid(value)
+
+    @model_validator(mode="after")
+    def _ordered_range(self) -> CandidateSourceMapEntry:
+        if (self.end_line, self.end_column) < (
+            self.start_line,
+            self.start_column,
+        ):
+            raise ValueError("source range end precedes its start")
+        return self
+
+
+class CandidateChangeset(BaseModel):
+    """The complete graph/source-only changeset frozen by D-077."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    kind: Literal["graph", "source_only"]
+    created_node_uuids: List[str]
+    updated_node_uuids: List[str]
+    deleted_node_uuids: List[str]
+    created_edge_uuids: List[str]
+    updated_edge_uuids: List[str]
+    deleted_edge_uuids: List[str]
+    reserved_metadata_changed: bool = Field(strict=True)
+
+    @field_validator(
+        "created_node_uuids",
+        "updated_node_uuids",
+        "deleted_node_uuids",
+        "created_edge_uuids",
+        "updated_edge_uuids",
+        "deleted_edge_uuids",
+        mode="before",
+    )
+    @classmethod
+    def _uuid_array(cls, value: Any) -> List[str]:
+        if not isinstance(value, list):
+            raise ValueError("changeset UUID collection must be an array")
+        result = []
+        for item in value:
+            if not isinstance(item, str):
+                raise ValueError("changeset UUID must be a string")
+            result.append(validate_uuid(item))
+        return result
+
+    @model_validator(mode="after")
+    def _source_only_has_no_graph_changes(self) -> CandidateChangeset:
+        if self.kind == "source_only" and (
+            self.created_node_uuids
+            or self.updated_node_uuids
+            or self.deleted_node_uuids
+            or self.created_edge_uuids
+            or self.updated_edge_uuids
+            or self.deleted_edge_uuids
+            or self.reserved_metadata_changed
+        ):
+            raise ValueError("source-only changeset must not contain graph changes")
+        return self
+
+
 __all__ = [
+    "CandidateChangeset",
     "CandidateCompilation",
+    "CandidateSourceMapEntry",
     "JsonArray",
     "JsonObject",
     "WorkflowEdgeWrite",
     "WorkflowNodeWrite",
+    "normalize_json_array",
+    "normalize_json_object",
+    "validate_json_value",
     "validate_uuid",
 ]
