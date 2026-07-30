@@ -1,14 +1,16 @@
-import pytest
 import json
-import os
+from pathlib import Path
 
+import pytest
+
+from unilabos.registry.registry import lab_registry
+from unilabos.resources.bioyond.decks import BIOYOND_PolymerReactionStation_Deck
 from unilabos.resources.graphio import resource_bioyond_to_plr
 from unilabos.resources.resource_tracker import ResourceTreeSet
-from unilabos.registry.registry import lab_registry
-
-from unilabos.resources.bioyond.decks import BIOYOND_PolymerReactionStation_Deck
 
 lab_registry.setup()
+
+FIXTURE_DIR = Path(__file__).parent
 
 
 type_mapping = {
@@ -24,44 +26,33 @@ type_mapping = {
 
 @pytest.fixture
 def bioyond_materials_reaction() -> list[dict]:
-    print("加载 BioYond 物料数据...")
-    print(os.getcwd())
-    with open("bioyond_materials_reaction.json", "r", encoding="utf-8") as f:
+    with (FIXTURE_DIR / "bioyond_materials_reaction.json").open(encoding="utf-8") as f:
         data = json.load(f)
-    print(f"加载了 {len(data)} 条物料数据")
     return data
 
 
 @pytest.fixture
 def bioyond_materials_liquidhandling_1() -> list[dict]:
-    print("加载 BioYond 物料数据...")
-    print(os.getcwd())
-    with open("bioyond_materials_liquidhandling_1.json", "r", encoding="utf-8") as f:
+    with (FIXTURE_DIR / "bioyond_materials_liquidhandling_1.json").open(encoding="utf-8") as f:
         data = json.load(f)
-    print(f"加载了 {len(data)} 条物料数据")
     return data
 
 
-@pytest.fixture
-def bioyond_materials_liquidhandling_2() -> list[dict]:
-    print("加载 BioYond 物料数据...")
-    print(os.getcwd())
-    with open("bioyond_materials_liquidhandling_2.json", "r", encoding="utf-8") as f:
-        data = json.load(f)
-    print(f"加载了 {len(data)} 条物料数据")
-    return data
-
-
-@pytest.mark.parametrize("materials_fixture", [
-    "bioyond_materials_reaction",
-    "bioyond_materials_liquidhandling_1",
-])
-def test_resourcetreeset_from_plr(materials_fixture, request) -> list[dict]:
+@pytest.mark.parametrize(
+    "materials_fixture",
+    [
+        "bioyond_materials_reaction",
+        "bioyond_materials_liquidhandling_1",
+    ],
+)
+def test_resourcetreeset_from_plr(materials_fixture, request) -> None:
     materials = request.getfixturevalue(materials_fixture)
     deck = BIOYOND_PolymerReactionStation_Deck("test_deck")
-    output = resource_bioyond_to_plr(materials, type_mapping=type_mapping, deck=deck)
+    resource_bioyond_to_plr(materials, type_mapping=type_mapping, deck=deck)
     print(deck.summary())
 
-    r = ResourceTreeSet.from_plr_resources([deck])
-    print(r.dump())
-    # json.dump(deck.serialize(), open("test.json", "w", encoding="utf-8"), indent=4)
+    resource_trees = ResourceTreeSet.from_plr_resources([deck])
+    dumped_trees = resource_trees.dump()
+
+    assert len(dumped_trees) == 1
+    assert dumped_trees[0][0]["name"] == deck.name
