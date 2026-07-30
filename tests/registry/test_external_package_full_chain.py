@@ -25,10 +25,24 @@ def test_external_package_discover_and_setup_load(monkeypatch):
 
     a = reg.device_type_registry["vendor.lh.model_a"]
     b = reg.device_type_registry["vendor.lh.model_b"]
-    assert a["class"]["module"].endswith(":SharedDevice")
-    assert b["class"]["module"].endswith(":SharedDevice")
+    assert a["class"]["module"].endswith(":JsonConfiguredDevice")
+    assert b["class"]["module"].endswith(":JsonConfiguredDevice")
+    assert "init" not in a["class"]
+    assert "init" not in b["class"]
     assert a["implementation"]["variant"] == "model_a"
     assert b["implementation"]["variant"] == "model_b"
+    assert a["init_param_enforce"] == {
+        "backend_type": "mock",
+        "backend_params": {"port": 4008},
+        "deck_name": "model-a-deck",
+        "channels": 8,
+    }
+    assert b["init_param_enforce"] == {
+        "backend_type": "mock",
+        "backend_params": {"port": 4096},
+        "deck_name": "model-b-deck",
+        "channels": 96,
+    }
     assert "setup" in a["class"]["action_value_mappings"]
     assert "initialized" in b["class"]["status_types"]
     assert paths[0] in reg.registry_paths
