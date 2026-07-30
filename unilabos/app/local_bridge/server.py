@@ -28,8 +28,13 @@ import uuid
 from pathlib import Path
 from typing import Any
 
+from unilabos.app.device_catalog import device_catalog_from_action_catalog
 from unilabos.app.local_bridge.bind_security import require_loopback_runtime_host
-from unilabos.app.local_bridge.local_api import LocalApiServer, LocalApiState
+from unilabos.app.local_bridge.local_api import (
+    LOCAL_DEMO_ACTION_CATALOG,
+    LocalApiServer,
+    LocalApiState,
+)
 from unilabos.app.local_bridge.material_api import (
     MaterialGraphCatalog,
     MaterialMutationConflict,
@@ -68,6 +73,7 @@ def build_offline_session(
     resource_lock_manager: ResourceLockManager | None = None,
     journal: SQLiteEventJournal | None = None,
     node_delay_seconds: float = 0.0,
+    device_catalog: dict[str, object] | None = None,
 ) -> tuple[ScheduleSession, OfflineOS]:
     """装配离线执行核：ScheduleSession(send→OfflineOS.receive) + OfflineOS.bind(session)。
 
@@ -79,6 +85,7 @@ def build_offline_session(
         resource_lock_manager=resource_lock_manager,
         journal=journal,
         node_delay_seconds=node_delay_seconds,
+        device_catalog=device_catalog,
     )
     session = ScheduleSession(offline.receive, session_id="offline")
     offline.bind(session)
@@ -168,10 +175,18 @@ class LocalBridgeServer:
         self._runtime_action_sync_task: asyncio.Task[None] | None = None
 
         if offline:
+            offline_actions: dict[str, dict[str, object]] = {}
+            for profile in self._profiles.values():
+                offline_actions.update(profile.action_catalog)
+            if not offline_actions:
+                offline_actions.update(LOCAL_DEMO_ACTION_CATALOG)
             self._session, self._offline_os = build_offline_session(
                 resource_lock_manager=self._resource_lock_manager,
                 journal=self._journal,
                 node_delay_seconds=offline_node_delay,
+                device_catalog=device_catalog_from_action_catalog(
+                    offline_actions
+                ),
             )
             self._local_api_state = self._build_local_api_state(self._session)
             logger.info("[bridge] 离线模式：进程内 OfflineOS 顶替 OS 面")

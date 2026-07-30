@@ -178,7 +178,11 @@ class RuntimeService:
         self,
         action_catalog: Mapping[str, Mapping[str, Any]],
     ) -> None:
-        """Atomically replace contracts used by future validation/compilation."""
+        """Atomically replace contracts used by future validation/compilation.
+
+        Already-submitted runs retain their immutable compiled TaskDag.  The
+        replacement only affects later validate/compile/run operations.
+        """
 
         self._action_catalog = {
             str(action_ref): dict(definition)

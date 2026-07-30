@@ -29,6 +29,7 @@ from unilabos.app.local_bridge.local_api import (
     node_statuses_of,
     overall_status_of,
 )
+from unilabos.app.local_bridge.offline_os import OfflineOS
 from unilabos.app.local_bridge.schedule_ws import ScheduleSession
 from unilabos.scheduler.dag_model import NodeState
 
@@ -184,6 +185,125 @@ def test_runtime_actions_projects_generic_catalog_in_stable_order() -> None:
             },
         ],
     }
+
+
+def test_edge_device_catalog_populates_ui_and_single_action_runtime() -> None:
+    edge_catalog = {
+        "schema": "unilab/device-catalog-v1",
+        "timestamp": 1,
+        "machine_name": "Edge A",
+        "devices": [
+            {
+                "device_id": "robot",
+                "device_key": "/cell/robot",
+                "namespace": "/cell",
+                "machine_name": "六轴机械臂",
+                "is_online": True,
+                "actions": [
+                    {
+                        "action_name": "home",
+                        "action_ref": "robot.home",
+                        "label": "回零",
+                        "type_name": "UniLabJsonCommand",
+                        "input_schema": {
+                            "speed": {
+                                "type": "integer",
+                                "default": 20,
+                            }
+                        },
+                        "output_schema": {},
+                        "contract": {},
+                        "is_busy": False,
+                    }
+                ],
+            }
+        ],
+    }
+    offline = OfflineOS(device_catalog=edge_catalog)
+    schedule = ScheduleSession(offline.receive)
+    offline.bind(schedule)
+    state = LocalApiState(
+        schedule,
+        action_catalog={
+            "robot.home": {
+                "label": "回零",
+                "inputs": {
+                    "speed": {
+                        "type": "integer",
+                        "default": 20,
+                    }
+                },
+                "outputs": {},
+            }
+        },
+    )
+    client = TestClient(create_app(lambda: state))
+
+    response = client.get("/api/v1/devices")
+
+    assert response.status_code == 200
+    assert response.json()["items"] == [
+        {
+            "id": "robot",
+            "deviceKey": "/cell/robot",
+            "namespace": "/cell",
+            "name": "六轴机械臂",
+            "online": True,
+            "actions": [
+                {
+                    "id": "home",
+                    "actionRef": "robot.home",
+                    "name": "回零",
+                    "typeName": "UniLabJsonCommand",
+                    "inputSchema": {
+                        "speed": {
+                            "type": "integer",
+                            "default": 20,
+                        }
+                    },
+                    "outputSchema": {},
+                    "busy": False,
+                }
+            ],
+        }
+    ]
+
+    run = client.post(
+        "/api/v1/runtime/runs",
+        json={
+            "source": {
+                "format": "workflow_revision_v2",
+                "revision": {
+                    "schema_version": "2",
+                    "revision_id": "device-debug-rev",
+                    "workflow_id": "device-debug",
+                    "invocations": [
+                        {
+                            "node_id": "action",
+                            "action_ref": "robot.home",
+                            "name": "回零",
+                            "input_bindings": {
+                                "speed": {
+                                    "kind": "literal",
+                                    "value": 25,
+                                }
+                            },
+                        }
+                    ],
+                    "control_edges": [],
+                },
+            }
+        },
+    )
+
+    assert run.status_code == 200
+    task_dag = next(
+        message
+        for message in offline.received
+        if message["action"] == "task_dag"
+    )
+    assert task_dag["data"]["nodes"][0]["device_id"] == "robot"
+    assert task_dag["data"]["nodes"][0]["action"] == "home"
 
 
 def test_build_graph_returns_workflow_json() -> None:

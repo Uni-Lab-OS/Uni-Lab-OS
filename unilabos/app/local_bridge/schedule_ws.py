@@ -29,6 +29,10 @@ import uuid
 from collections.abc import Awaitable, Callable
 from typing import Any
 
+from unilabos.app.device_catalog import (
+    DEVICE_CATALOG_SCHEMA,
+    apply_action_locks,
+)
 from unilabos.scheduler.dag_model import TERMINAL_STATES, NodeState, TaskDag
 from unilabos.scheduler.dag_wire import serialize_task_dag
 
@@ -64,6 +68,10 @@ RuntimeActionsChangedCallback = Callable[
     Awaitable[None] | None,
 ]
 RunTerminalCallback = Callable[
+    [dict[str, Any]],
+    Awaitable[None] | None,
+]
+DeviceCatalogCallback = Callable[
     [dict[str, Any]],
     Awaitable[None] | None,
 ]
@@ -199,6 +207,12 @@ class ScheduleSession:
         ] = []
         self._run_terminal_cbs: list[RunTerminalCallback] = []
         self._known_runtime_actions: set[str] = set()
+        self._device_catalog_waiters: dict[
+            str,
+            asyncio.Future[dict[str, Any]],
+        ] = {}
+        self._device_catalog_cbs: list[DeviceCatalogCallback] = []
+        self._device_catalog: dict[str, Any] | None = None
         self.host_ready: asyncio.Event = asyncio.Event()
 
     def on_job_status(self, cb: JobStatusCallback) -> None:
@@ -279,6 +293,23 @@ class ScheduleSession:
             logger.debug(
                 "[schedule_ws] off_runtime_actions_changed: 回调未注册，忽略"
             )
+
+    def on_device_catalog(self, cb: DeviceCatalogCallback) -> None:
+        """注册 Edge 设备与动作目录观察者。"""
+
+        self._device_catalog_cbs.append(cb)
+
+    def off_device_catalog(self, cb: DeviceCatalogCallback) -> None:
+        try:
+            self._device_catalog_cbs.remove(cb)
+        except ValueError:
+            logger.debug(
+                "[schedule_ws] off_device_catalog: 回调未注册，忽略"
+            )
+
+    @property
+    def device_catalog(self) -> dict[str, Any] | None:
+        return self._device_catalog
 
     def get_run(self, task_id: str) -> RunHandle | None:
         return self._runs.get(task_id)
@@ -421,6 +452,28 @@ class ScheduleSession:
         await self._on_material_snapshot(snapshot)
         return ack
 
+    async def request_device_catalog(
+        self,
+        *,
+        timeout: float = 5.0,
+    ) -> dict[str, Any]:
+        """向执行 Edge 查询当前设备与动作目录。"""
+
+        request_id = uuid.uuid4().hex
+        loop = asyncio.get_running_loop()
+        waiter: asyncio.Future[dict[str, Any]] = loop.create_future()
+        self._device_catalog_waiters[request_id] = waiter
+        try:
+            await self._send(
+                {
+                    "action": "query_device_catalog",
+                    "data": {"request_id": request_id},
+                }
+            )
+            return await asyncio.wait_for(waiter, timeout=timeout)
+        finally:
+            self._device_catalog_waiters.pop(request_id, None)
+
     async def reconcile_run(
         self,
         run_id: str,
@@ -522,6 +575,8 @@ class ScheduleSession:
             self._on_material_create_ack(data)
         elif action == "material_undo_create_ack":
             self._on_material_undo_ack(data)
+        elif action == "device_catalog":
+            await self._on_device_catalog(data)
         elif action == "report_action_lock":
             await self._on_action_locks(data)
         elif action == "ping":
@@ -549,10 +604,16 @@ class ScheduleSession:
         locks = data.get("locks")
         if not isinstance(locks, list):
             return
+        projected_locks = [
+            lock for lock in locks if isinstance(lock, dict)
+        ]
+        updated = apply_action_locks(self._device_catalog, projected_locks)
+        if updated is not None:
+            self._device_catalog = updated
+            await self._notify_device_catalog(updated)
+
         new_actions: list[str] = []
-        for lock in locks:
-            if not isinstance(lock, dict):
-                continue
+        for lock in projected_locks:
             device_id = str(lock.get("device_id") or "")
             action_name = str(lock.get("action_name") or "")
             if not device_id or not action_name:
@@ -616,6 +677,29 @@ class ScheduleSession:
         waiter = self._material_snapshot_waiters.get(request_id)
         if waiter is not None and not waiter.done():
             waiter.set_result(data)
+
+    async def _on_device_catalog(self, data: dict[str, Any]) -> None:
+        if data.get("schema") != DEVICE_CATALOG_SCHEMA:
+            logger.warning("[schedule_ws] 拒绝未知设备目录 schema")
+            return
+        if not isinstance(data.get("devices"), list):
+            logger.warning("[schedule_ws] 拒绝缺少 devices 的设备目录")
+            return
+        self._device_catalog = data
+        await self._notify_device_catalog(data)
+        request_id = str(data.get("request_id") or "")
+        waiter = self._device_catalog_waiters.get(request_id)
+        if waiter is not None and not waiter.done():
+            waiter.set_result(data)
+
+    async def _notify_device_catalog(self, data: dict[str, Any]) -> None:
+        for cb in tuple(self._device_catalog_cbs):
+            try:
+                result = cb(data)
+                if inspect.isawaitable(result):
+                    await result
+            except Exception:  # noqa: BLE001
+                logger.exception("[schedule_ws] device catalog 回调异常")
 
     def _on_reconcile_ack(self, data: dict[str, Any]) -> None:
         request_id = str(data.get("request_id") or "")

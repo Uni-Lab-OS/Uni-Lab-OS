@@ -31,6 +31,7 @@ from collections.abc import Awaitable, Callable, Mapping
 from dataclasses import dataclass, field
 from typing import TYPE_CHECKING, Any
 
+from unilabos.app.device_catalog import public_device_catalog
 from unilabos.app.local_bridge.bind_security import require_loopback_runtime_host
 from unilabos.app.local_bridge.material_api import (
     InvalidMaterialQuery,
@@ -63,7 +64,7 @@ if TYPE_CHECKING:
 
 logger = logging.getLogger(__name__)
 
-_LOCAL_DEMO_ACTION_CATALOG: dict[str, dict[str, Any]] = {
+LOCAL_DEMO_ACTION_CATALOG: dict[str, dict[str, Any]] = {
     "balance-1.measure": {
         "label": "称量",
         "inputs": {},
@@ -275,7 +276,7 @@ class LocalApiState:
         for profile in self._profiles.values():
             self._profile_action_catalog.update(profile.action_catalog)
         self._external_action_catalog: dict[str, Mapping[str, Any]] = dict(
-            _LOCAL_DEMO_ACTION_CATALOG
+            LOCAL_DEMO_ACTION_CATALOG
             if action_catalog is None and not self._profiles
             else action_catalog or {}
         )
@@ -285,6 +286,7 @@ class LocalApiState:
         }
         self._action_catalog_revision: str | None = None
         self._action_catalog_error: str | None = None
+        self._edge_device_catalog: dict[str, Any] | None = None
         self._runs: dict[str, RunRecord] = {}
         self._material_catalog = material_catalog
         self._material_refresh = material_refresh
@@ -302,6 +304,7 @@ class LocalApiState:
         self._active_workflow: dict[str, Any] | None = None
         self._seq = 0
         self._schedule.on_job_status(self._on_os_job_status)
+        self._schedule.on_device_catalog(self._on_edge_device_catalog)
         self._runtime_service = runtime_service or RuntimeService(
             schedule_session,
             journal=journal,
@@ -369,6 +372,24 @@ class LocalApiState:
         result = self._material_undo_create(material_uuid, command)
         if isinstance(result, Awaitable):
             await result
+
+    async def refresh_device_catalog(self) -> None:
+        """Ask the connected Edge for its current device/action snapshot."""
+
+        await self._schedule.request_device_catalog()
+
+    def device_catalog(self) -> dict[str, Any] | None:
+        if self._edge_device_catalog is None:
+            return None
+        return public_device_catalog(self._edge_device_catalog)
+
+    def _on_edge_device_catalog(self, snapshot: dict[str, Any]) -> None:
+        """Replace the Edge-owned UI projection.
+
+        Runtime compilation keeps using the independently versioned internal
+        action catalog installed by ``replace_runtime_action_catalog``.
+        """
+        self._edge_device_catalog = snapshot
 
     def build_graph(self, request: dict[str, Any]) -> dict[str, Any]:
         """校验 + 归一 local_ui 工作流请求，返回 WorkflowJson。含环/缺字段抛 DagValidationError。
@@ -974,6 +995,26 @@ def create_app(
             status_code=result.status,
             headers=result.headers,
         )
+
+    @app.get("/api/v1/devices")
+    async def api_v1_devices() -> Any:
+        state = _require_state()
+        try:
+            await state.refresh_device_catalog()
+        except (TimeoutError, RuntimeError) as exc:
+            raise _problem(
+                503,
+                "DEVICE_CATALOG_UNAVAILABLE",
+                f"Unable to refresh Edge device catalog: {exc}",
+            ) from exc
+        catalog = state.device_catalog()
+        if catalog is None:
+            raise _problem(
+                503,
+                "DEVICE_CATALOG_UNAVAILABLE",
+                "Edge has not reported a device catalog",
+            )
+        return catalog
 
     @app.get("/api/v1/materials")
     async def api_v1_materials(

@@ -17,6 +17,7 @@ bind(session) 后经 session.handle_incoming 把 job_status 回喂桥（OS→桥
 from __future__ import annotations
 
 import asyncio
+import copy
 import logging
 import math
 from typing import Any
@@ -62,12 +63,14 @@ class OfflineOS:
         resource_lock_manager: ResourceLockManager | None = None,
         journal: SQLiteEventJournal | None = None,
         node_delay_seconds: float = 0.0,
+        device_catalog: dict[str, Any] | None = None,
     ) -> None:
         if not math.isfinite(node_delay_seconds) or node_delay_seconds < 0:
             raise ValueError("node_delay_seconds must be a finite non-negative number")
         self.results = results or {}
         self.model_device_lock = model_device_lock
         self.node_delay_seconds = float(node_delay_seconds)
+        self.device_catalog = copy.deepcopy(device_catalog)
         runtime_epoch = (
             resource_lock_manager.runtime_epoch
             if resource_lock_manager is not None
@@ -109,8 +112,22 @@ class OfflineOS:
             await self._reconcile_run(data)
         elif action == "debug_command":
             await self._debug_command(data)
+        elif action == "query_device_catalog":
+            await self._publish_device_catalog(
+                request_id=str(data.get("request_id") or "")
+            )
         else:
             logger.debug("[offline_os] 忽略下行 action=%s", action)
+
+    async def _publish_device_catalog(self, *, request_id: str) -> None:
+        if self._session is None or self.device_catalog is None:
+            return
+        snapshot = copy.deepcopy(self.device_catalog)
+        if request_id:
+            snapshot["request_id"] = request_id
+        await self._session.handle_incoming(
+            {"action": "device_catalog", "data": snapshot}
+        )
 
     async def _reconcile_run(self, data: dict[str, Any]) -> None:
         result = await reconcile_unknown_fence(

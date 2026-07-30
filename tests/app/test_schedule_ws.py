@@ -178,6 +178,71 @@ def test_on_job_status_callback_receives_each() -> None:
     assert asyncio.run(scenario()) == [("a", "running"), ("a", "success")]
 
 
+def test_device_catalog_query_and_action_lock_updates_projection() -> None:
+    async def scenario() -> None:
+        session, fake = _make_session()
+        seen: list[bool] = []
+        session.on_device_catalog(
+            lambda catalog: seen.append(
+                bool(catalog["devices"][0]["actions"][0]["is_busy"])
+            )
+        )
+
+        query = asyncio.create_task(
+            session.request_device_catalog(timeout=1)
+        )
+        await asyncio.sleep(0)
+        request = fake.received[-1]
+        assert request["action"] == "query_device_catalog"
+        await session.handle_incoming(
+            {
+                "action": "device_catalog",
+                "data": {
+                    "schema": "unilab/device-catalog-v1",
+                    "request_id": request["data"]["request_id"],
+                    "timestamp": 1,
+                    "devices": [
+                        {
+                            "device_id": "robot",
+                            "actions": [
+                                {
+                                    "action_name": "home",
+                                    "action_ref": "robot.home",
+                                    "is_busy": False,
+                                }
+                            ],
+                        }
+                    ],
+                },
+            }
+        )
+        result = await query
+        assert result["devices"][0]["device_id"] == "robot"
+
+        await session.handle_incoming(
+            {
+                "action": "report_action_lock",
+                "data": {
+                    "locks": [
+                        {
+                            "device_id": "robot",
+                            "action_name": "home",
+                            "free": False,
+                        }
+                    ]
+                },
+            }
+        )
+
+        assert seen == [False, True]
+        assert session.device_catalog is not None
+        assert session.device_catalog["devices"][0]["actions"][0][
+            "is_busy"
+        ] is True
+
+    asyncio.run(scenario())
+
+
 def test_cancel_task_marks_request_without_synthesizing_terminal() -> None:
     """取消请求只标记请求中，不得替设备制造 cancelled/done。"""
 

@@ -26,6 +26,7 @@ from enum import Enum
 
 from typing_extensions import TypedDict
 
+from unilabos.app.device_catalog import build_device_catalog
 from unilabos.app.model import JobAddReq
 from unilabos.resources.material_state import CurrentMaterialState
 from unilabos.resources.resource_tracker import (
@@ -695,6 +696,13 @@ class MessageProcessor:
                 await self._handle_material_create(message_data)
             elif message_type == "undo_create_material":
                 await self._handle_material_undo_create(message_data)
+            elif message_type == "query_device_catalog":
+                if self.websocket_client:
+                    self.websocket_client.publish_device_catalog(
+                        request_id=str(
+                            (message_data or {}).get("request_id") or ""
+                        )
+                    )
             elif message_type == "job_start":
                 await self._handle_job_start(message_data)
             elif message_type == "task_dag":
@@ -2047,6 +2055,38 @@ class WebSocketClient(BaseCommunicationClient):
             raise RuntimeError("当前未绑定物料状态")
         return self._material_state.undo_create_material(command)
 
+    def publish_device_catalog(self, *, request_id: str = "") -> bool:
+        """把 Edge 当前设备与可调用动作完整上报给 local bridge。"""
+
+        if self.is_disabled or not self.is_connected():
+            return False
+        host_node = HostNode.get_instance(0)
+        if host_node is None:
+            logger.debug("[WebSocketClient] Host node 未就绪，跳过设备目录上报")
+            return False
+        catalog = build_device_catalog(
+            host_node,
+            machine_name=BasicConfig.machine_name,
+            is_action_busy=lambda device_id, action_name: (
+                self.device_manager.is_action_busy(
+                    f"/devices/{device_id}/{action_name}"
+                )
+            ),
+            request_id=request_id,
+        )
+        queued = self.message_processor.send_message(
+            {
+                "action": "device_catalog",
+                "data": catalog,
+            }
+        )
+        if queued:
+            logger.info(
+                "[WebSocketClient] device_catalog sent for %d device(s)",
+                len(catalog["devices"]),
+            )
+        return queued
+
     def _build_websocket_url(self) -> Optional[str]:
         """构建 schedule 通道的 WebSocket 连接 URL
 
@@ -2497,9 +2537,10 @@ class WebSocketClient(BaseCommunicationClient):
                 "devices": devices,
             },
         }
-        # 先上报全量锁快照，再发 host_ready：借助发送队列 FIFO 顺序，
-        # 服务端会先收到 report_action_lock、再收到 host_node_ready。
+        # 先上报设备/动作目录与全量锁快照，再发 host_ready：借助发送队列
+        # FIFO 顺序，桥先建立目录投影，再应用动作忙闲状态。
         # 启动时全部 free，重连时按 DeviceActionManager 反映正在运行/排队的 busy，实现锁状态对齐。
+        self.publish_device_catalog()
         self.report_all_action_locks()
         self.publish_material_snapshot()
         self.message_processor.send_message(message)
