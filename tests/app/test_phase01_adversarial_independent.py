@@ -7,8 +7,6 @@
 from uuid import uuid4
 
 import pytest
-
-pytest.importorskip("fastapi")
 from fastapi import FastAPI
 from fastapi.testclient import TestClient
 
