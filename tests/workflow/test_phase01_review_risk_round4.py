@@ -299,6 +299,7 @@ def test_cas_restore_failure_retains_the_only_original_copy(
         store.close()
 
     backup_paths = sorted(source_path.parent.glob(f".{source_path.name}.*.cas"))
+    backup_snapshot = {path.name: path.read_bytes() for path in backup_paths}
     surviving_contents = [
         path.read_bytes()
         for path in ([source_path] if source_path.exists() else []) + backup_paths
@@ -322,10 +323,15 @@ def test_cas_restore_failure_retains_the_only_original_copy(
     finally:
         recovered_store.close()
 
-    original_source = original_bytes.decode("utf-8")
-    assert recovered_aggregate["draft"]["python_source"] == original_source
-    assert reconciled["draft"]["python_source"] == original_source
-    assert source_path.read_bytes() == original_bytes
+    assert recovered_aggregate["state"] == "draft_missing"
+    assert recovered_aggregate["draft"] is None
+    assert reconciled["state"] == "draft_missing"
+    assert reconciled["draft"] is None
+    assert not source_path.exists()
+    assert {
+        path.name: path.read_bytes()
+        for path in source_path.parent.glob(f".{source_path.name}.*.cas")
+    } == backup_snapshot
 
 
 def test_graph_apply_fallback_uses_post_commit_facts_without_writeback_warning(
