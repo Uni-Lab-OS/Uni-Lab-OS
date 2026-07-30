@@ -24,10 +24,7 @@ WORKFLOW_UUID = "11111111-1111-4111-8111-111111111111"
 CATALOG_FINGERPRINT = "sha256:" + ("e" * 64)
 WRITEBACK_WARNING = {
     "code": "draft_writeback_pending",
-    "message": (
-        "工作流已应用，但本地源码同步失败；"
-        "OS 已保留可恢复的源码记录。"
-    ),
+    "message": ("工作流已应用，但本地源码同步失败；OS 已保留可恢复的源码记录。"),
 }
 
 
@@ -99,11 +96,7 @@ class TransientCompiler:
 
     @property
     def template_catalog_fingerprint(self) -> str:
-        if (
-            self.armed
-            and self.failure_point == "catalog"
-            and not self.failed
-        ):
+        if self.armed and self.failure_point == "catalog" and not self.failed:
             self.failed = True
             self.failure_observed.set()
             raise RuntimeError("transient catalog failure")
@@ -129,11 +122,7 @@ class TransientCompiler:
         del workflow_uuid, workflow_revision, source_uri
         with self._lock:
             self.call_times.append(time.monotonic())
-        if (
-            self.armed
-            and self.failure_point == "compiler"
-            and not self.failed
-        ):
+        if self.armed and self.failure_point == "compiler" and not self.failed:
             self.failed = True
             self.failure_observed.set()
             raise RuntimeError("transient compiler failure")
@@ -364,9 +353,7 @@ def test_monitor_positive_control_observes_change_after_start(
 
     assert aggregate["draft"]["python_source"] == changed_source
     events = runtime_service.list_events(after_id=cursor)["items"]
-    assert [event["data"]["cause"] for event in events] == [
-        "external_draft_changed"
-    ]
+    assert [event["data"]["cause"] for event in events] == ["external_draft_changed"]
 
 
 def test_apply_detects_old_file_descriptor_write_during_cas_install(
