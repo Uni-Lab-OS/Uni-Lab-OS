@@ -20,6 +20,7 @@ def _catalog() -> dict:
         {
             "host_node": {
                 "test_latency": {
+                    "type": "UniLabJsonCommand",
                     "schema": {
                         "properties": {
                             "goal": {
@@ -79,6 +80,7 @@ def test_internal_runtime_catalog_projects_current_instance_contracts() -> None:
         "required": True,
     }
     assert actions["host_node.test_latency"]["timing"] == {"estimated_duration_s": 1}
+    assert actions["host_node.test_latency"]["action_type"] == "UniLabJsonCommand"
 
 
 def test_internal_runtime_catalog_supports_etag() -> None:
@@ -112,6 +114,7 @@ def test_configured_graph_actions_survive_driver_initialization_failure(
     monkeypatch,
 ) -> None:
     configured_action = {
+        "type": "UniLabJsonCommand",
         "schema": {
             "properties": {
                 "goal": {
@@ -174,4 +177,5 @@ def test_configured_graph_actions_survive_driver_initialization_failure(
     assert actions["PLR_STATION.transfer"]["inputs"] == {
         "volume": {"type": "number"}
     }
+    assert actions["PLR_STATION.transfer"]["action_type"] == "UniLabJsonCommand"
     assert "host_node.test_latency" in actions

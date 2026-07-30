@@ -9,6 +9,24 @@ from typing import Any
 from unilabos.registry.registry import Registry
 
 
+def _action_type_name(raw_entry: Mapping[str, Any]) -> str:
+    """Return the registry-owned ROS action transport name."""
+
+    raw_type = raw_entry.get("action_type", raw_entry.get("type"))
+    if raw_type is None:
+        return ""
+    type_name = getattr(raw_type, "__name__", None)
+    if isinstance(type_name, str) and type_name:
+        return type_name
+    value = str(raw_type).strip()
+    if value.startswith("<class '") and value.endswith("'>"):
+        value = value[8:-2]
+    for separator in (":", "/", "."):
+        if separator in value:
+            value = value.rsplit(separator, 1)[-1]
+    return value
+
+
 def _parameter_schema(
     raw_schema: Mapping[str, Any],
     section: str,
@@ -60,6 +78,7 @@ def action_catalog_from_runtime_mappings(
                 continue
             contract = dict(raw_entry.get("contract") or {})
             catalog[f"{device_id}.{action_name}"] = {
+                "action_type": _action_type_name(raw_entry),
                 "inputs": _parameter_schema(schema, "goal"),
                 "outputs": _parameter_schema(schema, "result"),
                 "contract": contract,
@@ -95,6 +114,7 @@ def action_catalog_from_device_registry(
             schema = raw_entry.get("schema") or {}
             contract = dict(raw_entry.get("contract") or {})
             catalog[f"{device_id}.{action_name}"] = {
+                "action_type": _action_type_name(raw_entry),
                 "inputs": (
                     _parameter_schema(schema, "goal")
                     if isinstance(schema, Mapping)

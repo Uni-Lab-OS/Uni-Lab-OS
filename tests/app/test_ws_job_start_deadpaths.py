@@ -17,6 +17,7 @@ from queue import Queue
 
 import unilabos.app.ws_client as ws
 from unilabos.app.ws_client import DeviceActionManager, MessageProcessor
+from unilabos.scheduler.dag_model import NodeState, TaskDag
 
 
 class _FakeWSClient:
@@ -132,3 +133,67 @@ def test_start_dag_node_guarded_normal_return_does_not_resolve(monkeypatch):
     asyncio.run(mp._start_dag_node_guarded("t1", "n4", _payload("n4")))
 
     assert rec.terminals == []  # 未被兜底解析
+
+
+def test_task_dag_reports_fail_fast_cancelled_descendants(monkeypatch):
+    """未派发后继由 OS 走图权威回 cancelled，bridge 才能收敛整张 run。"""
+
+    mp, _ = _mp()
+    dag = TaskDag.from_message(
+        {
+            "task_id": "t-fail-fast",
+            "nodes": [
+                {"node_id": "first", "device_id": "d1", "action": "run"},
+                {"node_id": "later", "device_id": "d2", "action": "run"},
+            ],
+            "edges": [
+                {
+                    "source_node_uuid": "first",
+                    "target_node_uuid": "later",
+                }
+            ],
+        }
+    )
+
+    class _SnapshotRunner:
+        def __init__(self) -> None:
+            self.dag = dag
+            self.dispatched_node_ids = frozenset({"first"})
+
+        async def run(self):
+            return {
+                "first": NodeState.FAILED,
+                "later": NodeState.CANCELLED,
+            }
+
+    runner = _SnapshotRunner()
+    mp._task_dag_runners[dag.task_id] = runner
+    sent: list[dict] = []
+    monkeypatch.setattr(mp, "send_message", sent.append)
+
+    asyncio.run(mp._run_task_dag(dag.task_id, runner))
+
+    assert sent == [
+        {
+            "action": "job_status",
+            "data": {
+                "job_id": "later",
+                "task_id": dag.task_id,
+                "device_id": "d2",
+                "notebook_id": "",
+                "action_name": "run",
+                "status": "cancelled",
+                "feedback_data": {},
+                "return_info": None,
+                "timestamp": sent[0]["data"]["timestamp"],
+            },
+        },
+        {
+            "action": "run_terminal",
+            "data": {
+                "run_id": dag.task_id,
+                "status": "failed",
+                "timestamp": sent[1]["data"]["timestamp"],
+            },
+        },
+    ]

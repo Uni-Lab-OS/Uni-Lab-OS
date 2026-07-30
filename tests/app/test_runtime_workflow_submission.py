@@ -19,6 +19,7 @@ from unilabos.workflow.dag_compile import (
 
 ACTION_CATALOG: dict[str, dict[str, Any]] = {
     "generic-router.choose": {
+        "action_type": "UniLabJsonCommand",
         "inputs": {"reading": {"type": "number"}},
         "outputs": {"branch": {"type": "string"}},
         "timing": {"estimated_duration_s": 2.0},
@@ -33,6 +34,7 @@ ACTION_CATALOG: dict[str, dict[str, Any]] = {
         "effects": [{"op": "observe", "resource_id": "routing-cell-1"}],
     },
     "generic-worker.execute": {
+        "action_type": "UniLabJsonCommand",
         "inputs": {},
         "outputs": {"completed": {"type": "boolean"}},
         "resource_claims": [],
@@ -157,6 +159,7 @@ def test_runtime_service_compiles_catalog_contract_and_ignores_forged_fields() -
         "effects"
     ]
     assert first_route["estimated_duration_s"] == 2.0
+    assert first_route["action_type"] == "UniLabJsonCommand"
     assert first_route["source_node_id"] == "route"
     assert first_route["canonical_index"] == 0
     assert first_route == second_route

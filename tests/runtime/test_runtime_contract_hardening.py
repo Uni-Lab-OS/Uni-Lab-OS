@@ -20,6 +20,7 @@ from unilabos.workflow.dag_compile import compile_workflow_revision
 
 ACTION_CATALOG: dict[str, dict[str, Any]] = {
     "station.measure": {
+        "action_type": "UniLabJsonCommand",
         "inputs": {"reading": {"type": "number"}},
         "outputs": {"reading": {"type": "number"}},
         "contract": {
@@ -103,6 +104,9 @@ def test_projected_canonical_revalidates_to_the_projected_execution_hash() -> No
     assert projected_revision.invocations[0].output_schema == {
         "reading": {"type": "number"}
     }
+    assert schedule.submitted[0].nodes["measure"].action_type == (
+        "UniLabJsonCommand"
+    )
 
 
 def test_compile_boundary_deeply_revalidates_a_mutated_frozen_revision() -> None:

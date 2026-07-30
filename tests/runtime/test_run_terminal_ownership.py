@@ -138,7 +138,17 @@ def test_runtime_service_status_projection_never_writes_run_terminal_events(
         if event.type in {"run_completed", "run_failed", "run_cancelled"}
     ] == []
 
-    journal.record_run_terminal(run_id=run_id, terminal="completed")
+    asyncio.run(
+        schedule.handle_incoming(
+            {
+                "action": "run_terminal",
+                "data": {
+                    "run_id": run_id,
+                    "status": "completed",
+                },
+            }
+        )
+    )
     assert service.get_run(run_id) == {"id": run_id, "status": "completed"}
     assert service.get_run(run_id) == {"id": run_id, "status": "completed"}
 

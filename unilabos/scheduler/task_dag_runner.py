@@ -105,6 +105,12 @@ class TaskDagRunner:
             self._cancel_remaining_once()
         return result
 
+    @property
+    def dispatched_node_ids(self) -> frozenset[str]:
+        """Return nodes whose physical dispatch path was entered."""
+
+        return frozenset(self._executor.walk.dispatched_nodes)
+
     async def _submit(self, node: DagNode) -> NodeState | NodeExecutionResult:
         """DagExecutor 注入点：登记 future -> 触发入队/起跑 -> 等终态。"""
         loop = self._loop or asyncio.get_running_loop()
@@ -143,10 +149,21 @@ class TaskDagRunner:
         result: NodeState | NodeExecutionResult = state
         if state == NodeState.SUCCESS:
             raw_outputs = terminal_info.get("return_value", {})
+            node = self.dag.nodes.get(job_id)
+            declared_outputs = node.output_schema if node is not None else {}
+            # HostNode/device return values also carry transport and diagnostic
+            # metadata.  Only names owned by the compiled action contract are
+            # workflow outputs; the complete payload remains in terminal_info.
             if isinstance(raw_outputs, dict):
-                outputs = raw_outputs
-            else:
+                outputs = {
+                    name: raw_outputs[name]
+                    for name in declared_outputs
+                    if name in raw_outputs
+                }
+            elif "result" in declared_outputs:
                 outputs = {"result": raw_outputs}
+            else:
+                outputs = {}
             result = NodeExecutionResult(
                 state=state,
                 envelope=ResultEnvelope(outputs=outputs),

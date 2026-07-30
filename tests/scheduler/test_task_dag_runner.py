@@ -184,7 +184,74 @@ def test_runner_fail_fast_triggers_cancel_remaining():
     result = asyncio.run(scenario())
     assert result["B"] == NodeState.FAILED
     assert "D" not in stack.started  # D 绝不起跑
+    assert runner.dispatched_node_ids == frozenset({"A", "B", "C"})
     assert stack.cancel_remaining_called == 1
+
+
+def test_runner_keeps_undeclared_device_metadata_out_of_workflow_outputs():
+    """设备返回的诊断字段保留在 terminal_info，但不能污染无输出动作的契约。"""
+    dag = _dag([_node("A", "d1", output_schema={})], [])
+    holder = {}
+    stack = FakeStack(lambda: holder["r"])
+    runner = TaskDagRunner(dag, stack.on_start_node)
+    holder["r"] = runner
+
+    async def scenario():
+        run_task = asyncio.ensure_future(runner.run())
+        await settle()
+        runner.notify_terminal(
+            "A",
+            "success",
+            return_info={
+                "return_value": {
+                    "success": True,
+                    "message": "physical action completed",
+                }
+            },
+        )
+        return await run_task
+
+    result = asyncio.run(scenario())
+    assert result == {"A": NodeState.SUCCESS}
+    assert runner._executor.results["A"].outputs == {}  # noqa: SLF001
+
+
+def test_runner_projects_only_declared_workflow_outputs():
+    """有输出契约时只投影声明字段，忽略同一返回对象中的设备元数据。"""
+    dag = _dag(
+        [
+            _node(
+                "A",
+                "d1",
+                output_schema={"reading": {"type": "number", "required": True}},
+            )
+        ],
+        [],
+    )
+    holder = {}
+    stack = FakeStack(lambda: holder["r"])
+    runner = TaskDagRunner(dag, stack.on_start_node)
+    holder["r"] = runner
+
+    async def scenario():
+        run_task = asyncio.ensure_future(runner.run())
+        await settle()
+        runner.notify_terminal(
+            "A",
+            "success",
+            return_info={
+                "return_value": {
+                    "reading": 1.25,
+                    "success": True,
+                    "message": "measurement completed",
+                }
+            },
+        )
+        return await run_task
+
+    result = asyncio.run(scenario())
+    assert result == {"A": NodeState.SUCCESS}
+    assert runner._executor.results["A"].outputs == {"reading": 1.25}  # noqa: SLF001
 
 
 def test_runner_cancel_resolves_pending():

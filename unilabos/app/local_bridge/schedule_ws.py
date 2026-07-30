@@ -63,6 +63,10 @@ RuntimeActionsChangedCallback = Callable[
     [dict[str, Any]],
     Awaitable[None] | None,
 ]
+RunTerminalCallback = Callable[
+    [dict[str, Any]],
+    Awaitable[None] | None,
+]
 
 
 class RunHandle:
@@ -193,6 +197,7 @@ class ScheduleSession:
         self._runtime_actions_changed_cbs: list[
             RuntimeActionsChangedCallback
         ] = []
+        self._run_terminal_cbs: list[RunTerminalCallback] = []
         self._known_runtime_actions: set[str] = set()
         self.host_ready: asyncio.Event = asyncio.Event()
 
@@ -211,6 +216,17 @@ class ScheduleSession:
             self._job_status_cbs.remove(cb)
         except ValueError:
             logger.debug("[schedule_ws] off_job_status: 回调未注册，忽略")
+
+    def on_run_terminal(self, cb: RunTerminalCallback) -> None:
+        """Observe the executor-owned terminal declaration from the OS."""
+
+        self._run_terminal_cbs.append(cb)
+
+    def off_run_terminal(self, cb: RunTerminalCallback) -> None:
+        try:
+            self._run_terminal_cbs.remove(cb)
+        except ValueError:
+            logger.debug("[schedule_ws] off_run_terminal: 回调未注册，忽略")
 
     def on_debug_event(self, cb: DebugEventCallback) -> None:
         self._debug_event_cbs.append(cb)
@@ -492,6 +508,8 @@ class ScheduleSession:
         data = data if isinstance(data, dict) else {}
         if action == "job_status":
             await self._on_job_status(data)
+        elif action == "run_terminal":
+            await self._on_run_terminal(data)
         elif action == "reconcile_ack":
             self._on_reconcile_ack(data)
         elif action == "debug_ack":
@@ -675,6 +693,32 @@ class ScheduleSession:
                     await result
             except Exception:  # noqa: BLE001 —— 单个回调异常不得中断状态收敛
                 logger.exception("[schedule_ws] job_status 回调异常")
+
+    async def _on_run_terminal(self, data: dict[str, Any]) -> None:
+        """Forward one validated executor-owned run terminal declaration."""
+
+        run_id = str(data.get("run_id") or data.get("task_id") or "")
+        terminal = str(data.get("status") or data.get("terminal") or "")
+        if not run_id or terminal not in {"completed", "failed", "cancelled"}:
+            logger.debug(
+                "[schedule_ws] 忽略非法 run_terminal: run_id=%s status=%s",
+                run_id,
+                terminal,
+            )
+            return
+        if run_id not in self._runs:
+            logger.debug("[schedule_ws] run_terminal 指向未知运行: %s", run_id)
+            return
+        normalized = dict(data)
+        normalized["run_id"] = run_id
+        normalized["status"] = terminal
+        for cb in self._run_terminal_cbs:
+            try:
+                result = cb(normalized)
+                if inspect.isawaitable(result):
+                    await result
+            except Exception:  # noqa: BLE001
+                logger.exception("[schedule_ws] run_terminal 回调异常")
 
 
 class ScheduleWSServer:

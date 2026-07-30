@@ -298,6 +298,7 @@ def compile_workflow_revision(
                 "node_id": invocation.node_id,
                 "device_id": owner,
                 "action": action_name,
+                "action_type": str(action_info.get("action_type") or ""),
                 "node_type": invocation.node_type,
                 "input_bindings": {
                     name: _binding_payload(binding)

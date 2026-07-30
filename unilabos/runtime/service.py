@@ -40,6 +40,8 @@ if TYPE_CHECKING:
 class RuntimeSchedule(Protocol):
     def on_job_status(self, callback: Any) -> None: ...
 
+    def on_run_terminal(self, callback: Any) -> None: ...
+
     async def submit_dag(self, dag: TaskDag) -> Any: ...
 
     def get_run(self, task_id: str) -> Any | None: ...
@@ -160,6 +162,9 @@ class RuntimeService:
             "revision": {"id": "quick-debug-empty", "nodes": [], "edges": []},
         }
         self._schedule.on_job_status(self._on_job_status)
+        on_run_terminal = getattr(self._schedule, "on_run_terminal", None)
+        if callable(on_run_terminal):
+            on_run_terminal(self._on_run_terminal)
         on_debug_event = getattr(self._schedule, "on_debug_event", None)
         if callable(on_debug_event):
             on_debug_event(self._on_debug_event)
@@ -759,6 +764,36 @@ class RuntimeService:
                 node_id=str(data.get("job_id") or "") or None,
                 payload=dict(return_info),
             )
+        elif status in {"cancelled", "skipped"}:
+            self._append_runtime_event(
+                run_id=run_id,
+                event_type=f"node.{status}",
+                node_id=str(data.get("job_id") or "") or None,
+                payload={},
+            )
+
+    def _on_run_terminal(self, data: dict[str, Any]) -> None:
+        """Persist the terminal declaration authored by the OS executor."""
+
+        run_id = str(data.get("run_id") or data.get("task_id") or "")
+        terminal = str(data.get("status") or data.get("terminal") or "")
+        if not run_id or terminal not in {"completed", "failed", "cancelled"}:
+            return
+        if self._journal is not None:
+            if self._journal.load_run_submission(run_id) is None:
+                return
+            self._journal.record_run_terminal(run_id=run_id, terminal=terminal)
+            return
+        memory = self._memory_submissions.get(run_id)
+        if memory is None:
+            return
+        if memory["status"] in {"completed", "failed", "cancelled"}:
+            return
+        memory["status"] = terminal
+        self._append_runtime_event(
+            run_id=run_id,
+            event_type=f"run_{terminal}",
+        )
 
     def _on_debug_event(self, data: dict[str, Any]) -> None:
         run_id = str(data.get("run_id") or "")

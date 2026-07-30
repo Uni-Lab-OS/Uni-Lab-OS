@@ -1299,8 +1299,13 @@ class MessageProcessor:
         """驱动单张 DAG 走完并善后：无论成功/失败/取消，最终从注册表摘除。"""
         try:
             result = await runner.run()
+            dispatched_node_ids = runner.dispatched_node_ids
             for node_id, state in result.items():
-                if state != NodeState.SKIPPED:
+                is_logical_terminal = state == NodeState.SKIPPED or (
+                    state == NodeState.CANCELLED
+                    and node_id not in dispatched_node_ids
+                )
+                if not is_logical_terminal:
                     continue
                 node = runner.dag.nodes[node_id]
                 self.send_message(
@@ -1312,13 +1317,33 @@ class MessageProcessor:
                             "device_id": node.device_id,
                             "notebook_id": runner.dag.notebook_id,
                             "action_name": node.action,
-                            "status": "skipped",
+                            "status": state.value,
                             "feedback_data": {},
                             "return_info": None,
                             "timestamp": time.time(),
                         },
                     }
                 )
+            states = tuple(result.values())
+            if NodeState.FAILED in states:
+                terminal = "failed"
+            elif NodeState.CANCELLED in states:
+                terminal = "cancelled"
+            else:
+                terminal = "completed"
+            # DagExecutor has already committed this terminal in the OS-owned
+            # journal.  Transport the authoritative declaration so a
+            # split-process bridge can durably project the same terminal.
+            self.send_message(
+                {
+                    "action": "run_terminal",
+                    "data": {
+                        "run_id": task_id,
+                        "status": terminal,
+                        "timestamp": time.time(),
+                    },
+                }
+            )
             summary = ", ".join(f"{nid}={st.value}" for nid, st in result.items())
             logger.info(f"[MessageProcessor] task_dag {task_id} 走图结束: {summary}")
         except Exception:
