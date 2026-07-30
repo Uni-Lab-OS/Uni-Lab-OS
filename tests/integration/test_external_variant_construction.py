@@ -4,7 +4,11 @@
 富对象由驱动自身根据这些参数构造。
 """
 
+import json
+import subprocess
+import sys
 from contextlib import contextmanager
+from pathlib import Path
 
 import pytest
 
@@ -16,6 +20,12 @@ from unilabos.utils.exception import DeviceClassInvalid
 
 DRIVER_MODULE = (
     "tests.registry.fixtures.initializer_drivers:JsonConfiguredDevice"
+)
+PACKAGE_FIXTURE = (
+    Path(__file__).resolve().parents[1]
+    / "registry"
+    / "fixtures"
+    / "external_variant_pkg"
 )
 
 
@@ -190,3 +200,111 @@ def test_shared_driver_supports_two_json_enforced_variants(rclpy_runtime):
         finally:
             for node in nodes:
                 _destroy_device(node)
+
+
+def test_fixture_discovery_load_and_initialization_form_one_complete_chain():
+    script = """
+import json
+import sys
+from pathlib import Path
+
+import rclpy
+
+from unilabos.app.package_cli import discover_registry_paths_from_project
+from unilabos.registry.registry import build_registry
+from unilabos.resources.resource_tracker import ResourceDictInstance
+from unilabos.ros.initialize_device import initialize_device_from_dict
+
+package_dir = Path(sys.argv[1]).resolve()
+registry_roots = discover_registry_paths_from_project(package_dir)
+registry = build_registry(
+    devices_dirs=[str(package_dir)],
+    external_only=True,
+)
+
+rclpy.init()
+nodes = []
+observed = {}
+try:
+    for registry_key, name in (
+        ("vendor.lh.model_a", "lh_a"),
+        ("vendor.lh.model_b", "lh_b"),
+    ):
+        device_config = ResourceDictInstance.get_resource_instance_from_dict({
+            "name": name,
+            "type": "device",
+            "class": registry_key,
+            "config": {
+                "backend_type": "runtime-must-not-win",
+                "backend_params": {"host": "10.0.0.2", "port": 1},
+                "deck_name": "runtime-deck",
+                "channels": 1,
+                "name": name,
+            },
+        })
+        node = initialize_device_from_dict(name, device_config)
+        nodes.append(node)
+        driver = node.driver_instance
+        entry = registry.device_type_registry[registry_key]
+        observed[registry_key] = {
+            "class_init_present": "init" in entry["class"],
+            "enforce": entry["init_param_enforce"],
+            "backend_host": driver.backend.host,
+            "backend_port": driver.backend.port,
+            "deck_name": driver.deck.name,
+            "channels": driver.channels,
+            "name": driver.name,
+        }
+finally:
+    for node in nodes:
+        node.ros_node_instance.destroy_node()
+    rclpy.shutdown()
+
+print(json.dumps({
+    "registry_roots": [str(path) for path in registry_roots],
+    "observed": observed,
+}))
+"""
+    result = subprocess.run(
+        [sys.executable, "-c", script, str(PACKAGE_FIXTURE)],
+        cwd=Path(__file__).resolve().parents[2],
+        capture_output=True,
+        check=False,
+        text=True,
+    )
+
+    assert result.returncode == 0, result.stderr
+    payload = json.loads(result.stdout.strip().splitlines()[-1])
+    assert payload["registry_roots"] == [
+        str(PACKAGE_FIXTURE / "unilabos_registry")
+    ]
+    assert payload["observed"] == {
+        "vendor.lh.model_a": {
+            "class_init_present": False,
+            "enforce": {
+                "backend_type": "mock",
+                "backend_params": {"port": 4008},
+                "deck_name": "model-a-deck",
+                "channels": 8,
+            },
+            "backend_host": "10.0.0.2",
+            "backend_port": 4008,
+            "deck_name": "model-a-deck",
+            "channels": 8,
+            "name": "lh_a",
+        },
+        "vendor.lh.model_b": {
+            "class_init_present": False,
+            "enforce": {
+                "backend_type": "mock",
+                "backend_params": {"port": 4096},
+                "deck_name": "model-b-deck",
+                "channels": 96,
+            },
+            "backend_host": "10.0.0.2",
+            "backend_port": 4096,
+            "deck_name": "model-b-deck",
+            "channels": 96,
+            "name": "lh_b",
+        },
+    }

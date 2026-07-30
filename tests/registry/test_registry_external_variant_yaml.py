@@ -1,7 +1,7 @@
-"""Plan 09 Task 4: registry loads multiple variants sharing one class, with $ref.
+"""Registry 从目录化 YAML 加载当前 JSON-enforced 设备变体。
 
-Adapted to real Registry: @singleton + load_device_types(DIR) + needs executor +
-device_type_registry stores runtime data (status_types may become class objects).
+两个变体共享驱动类与 $ref 合同；初始化差异只存在于顶层
+``init_param_enforce``，不得存在 ``class.init``。
 """
 
 from concurrent.futures import ThreadPoolExecutor
@@ -22,13 +22,24 @@ def test_registry_loads_multiple_variants_sharing_same_class():
     a = reg.device_type_registry["vendor.lh.model_a"]
     b = reg.device_type_registry["vendor.lh.model_b"]
 
-    assert a["class"]["module"].endswith(":SharedDevice")
-    assert b["class"]["module"].endswith(":SharedDevice")
+    assert a["class"]["module"].endswith(":JsonConfiguredDevice")
+    assert b["class"]["module"].endswith(":JsonConfiguredDevice")
     assert a["implementation"]["variant"] == "model_a"
     assert b["implementation"]["variant"] == "model_b"
-    # class.init preserved (not stripped during normalization)
-    assert a["class"]["init"]["kwargs"]["channels"] == 8
-    assert b["class"]["init"]["kwargs"]["channels"] == 96
+    assert "init" not in a["class"]
+    assert "init" not in b["class"]
+    assert a["init_param_enforce"] == {
+        "backend_type": "mock",
+        "backend_params": {"port": 4008},
+        "deck_name": "model-a-deck",
+        "channels": 8,
+    }
+    assert b["init_param_enforce"] == {
+        "backend_type": "mock",
+        "backend_params": {"port": 4096},
+        "deck_name": "model-b-deck",
+        "channels": 96,
+    }
     # $ref expanded into the shared contract
     assert "setup" in a["class"]["action_value_mappings"]
     assert "initialized" in b["class"]["status_types"]
