@@ -1,6 +1,6 @@
 # Phase 01 Core：Round 14 趋势与策略报告
 
-状态：**补充修正与本地全量测试已通过，精确 SHA 复审尚未完成，禁止合并**。
+状态：**第二次复审修正与本地全量测试已通过，新精确 SHA 复审尚未完成，禁止合并**。
 
 统计范围：本报告把 Round 14 视为 legacy-named `migration/01-backend-contract`
 合并轮次内的第十四次审查修复循环。生产实现只统计 `unilabos/`；测试、文档和
@@ -65,19 +65,51 @@ skip/xfail。
 Backend，也没有 skip/xfail。失败评审的 reviewer 必须在最终精确 SHA 上确认
 修正，旧结论不能复用。
 
+修正后形成第二个精确候选
+`bab0d65a5b6734f860863561a9c230ea1d96e57f`，其整仓门禁为
+`853 passed, 3 skipped`。三名 reviewer 再次独立检查整个 Round 14 差异，三方
+均判定 FAIL，并收敛到相同的 2 类 blocker：
+
+1. Store 在 `BEGIN IMMEDIATE` 和自身 RLock 内调用 Service 提供的
+   `authority_guard`；该回调读取文件和 Catalog，形成
+   `SQLite -> Catalog` / `Catalog -> SQLite` 的确定性锁反转，也违反 D-076
+   “compiler/catalog 重验证必须在打开 Apply 事务前完成”的顺序；
+2. 旧 Apply 提交后，若另一 Store 连接先保存新 Draft，旧 Apply 的无 CAS
+   `mark_writeback_pending` 或 `settle_writeback` 会污染/覆盖新 Draft marker，
+   产生无恢复载荷的永久 pending 或 `candidate_stale`。
+
+第二次 reviewer 还要求历史遗留的
+`pending + writeback_source=NULL + writeback_expected_hash=NULL` 不能被
+`actual_hash == observed_hash` 的快速返回永久保留。
+
+两名独立测试作者再次在不同 worktree 冻结红测：
+
+| 测试维度 | subagent | 源测试 commit | 引入 commit | 第二候选上的红测 |
+|---|---|---|---|---|
+| Store/Catalog 锁反转 | `/root/phase01_adversarial_tests` | `17ba8fd6c4c7986d4247efec6e3f788cf3fbff66` | `c26f4ec` | `1 failed` |
+| 陈旧 mark/settle 与坏 marker 恢复 | `/root/phase01_contract_tests` | `3bd7743ef33b138ab64f510cf36ac28d1b9bdf3f`, `29bc0349a62e92f1c2a7a01cff2a699238037cdd` | `da55763`, `5811280` | `3 failed` |
+
+两个新测试文件只包含有界并发与恢复测试，worker 均能在失败路径回收；没有修改
+production、Backend，没有 skip/xfail。
+
 ## 2. 实现结果
 
 实现 commits：
 
 - `ad71e7c`（`fix(workflow): close round 14 authority races`）；
-- `bb32c37`（`fix(workflow): linearize authoring apply`）。
+- `bb32c37`（`fix(workflow): linearize authoring apply`）；
+- `9b3a938`（`fix(workflow): bind writeback recovery tokens`）。
 
 本轮完成：
 
-- Apply 不仅在事务前检查 Authority，还在 `BEGIN IMMEDIATE` 建立 SQLite 写锁
-  后，对持久 Draft/Candidate/Catalog 三 token 做 CAS，并在同一线性化窗口内
-  再检查实际 Draft bytes 与 Catalog；跨 Service 更新要么先提交并使旧 Apply
-  返回稳定 `409`，要么等待旧 Apply 原子提交，不再丢失新 Draft；
+- Apply 按 D-076 在打开事务前完成实际 Draft 与 Catalog 的最后重验证；SQLite
+  事务只对自身持久 Draft/Candidate/Catalog token 做 CAS，不再回调文件、
+  compiler 或 Catalog，Store 锁序不再依赖外部实现；
+- 跨 Service/Store 更新若先提交，会使旧 Apply 的 DB token CAS 返回稳定
+  `409`；若新 Draft 在旧 Apply 提交后取得 Authority，旧 Apply 的 settle/mark
+  只能按原 recovery source/hash 做 CAS，失配即无操作，不会污染新 Candidate；
+- reconcile 会识别 `pending` 但缺少 recovery source/hash 的历史坏 marker，
+  重新按实际 Draft 投影并清除永久重试状态；
 - Candidate graph proof、source-only proof 和 graph `uniqueItems` 共用迭代式、
   JSON 类型严格的等价/规范化实现，不受 Python recursion limit 影响；
 - raw Workflow HTTP seam 使用有限、非递归 JSON decoder，拒绝非有限数字，
@@ -105,15 +137,16 @@ Backend，也没有 skip/xfail。失败评审的 reviewer 必须在最终精确 
 
 | 指标 | 文件数 | 新增文件 | 新增行 | 删除行 | 净增 | 变动量 |
 |---|---:|---:|---:|---:|---:|---:|
-| Production `unilabos/` | 8 | 1 | 483 | 146 | 337 | 629 |
-| Tests | 9 | 4 | 1,727 | 46 | 1,681 | 1,773 |
+| Production `unilabos/` | 8 | 1 | 562 | 180 | 382 | 742 |
+| Tests | 11 | 6 | 2,505 | 48 | 2,457 | 2,553 |
 
-测试新增行与 production 新增行之比约为 `3.58:1`。新 production 文件是
+测试新增行与 production 新增行之比约为 `4.46:1`。新 production 文件是
 `unilabos/workflow/json_codec.py`。测试文件数包括一处既有 Round 12 fixture
-校正、4 份保留独立来源提交的 Round 14 测试文件，以及因 Store 私有化而改为
+校正、6 份保留独立来源提交的 Round 14 测试文件，以及因 Store 私有化而改为
 显式白盒访问的既有持久层测试。相对第一版报告，复审反馈新增了 162 行、
 删除了 89 行 production，实现增长集中在事务 CAS、迭代比较、精确源码坐标和
-Service 边界；补充测试新增 821 行、删除 43 行。
+Service 边界。相对第二候选，第二次复审修正新增 84 行、删除 39 行
+production；独立测试新增 778 行、删除 2 行。
 
 近五次修复循环的 production 变化如下：
 
@@ -123,20 +156,21 @@ Service 边界；补充测试新增 821 行、删除 43 行。
 | Round 11 | 2 | 0 | 45 | 35 | 10 |
 | Round 12 | 5 | 0 | 301 | 20 | 281 |
 | Round 13 | 3 | 0 | 300 | 31 | 269 |
-| Round 14 | 8 | 1 | 483 | 146 | 337 |
+| Round 14 | 8 | 1 | 562 | 180 | 382 |
 
-Round 14 的最终净增比第一版报告增加 73 行，并横跨 HTTP、DTO、Service、
-Store、composition 和 monitor。原因不是增加业务功能，而是第一版“事务前最终
-检查”仍不足以构成线性化点，同时要移除进程全局 workaround、下沉统一 JSON
-边界并收回泄漏的 Store seam。
+Round 14 的当前净增比第一版报告增加 118 行，并横跨 HTTP、DTO、Service、
+Store、composition 和 monitor。原因不是增加业务功能，而是第一次事务修正把
+外部 Authority 检查错误地带入 Store 锁内，第二次复审又证明提交后恢复动作也
+必须绑定 Apply generation；这些差异同时移除了进程全局 workaround、下沉统一
+JSON 边界并收回泄漏的 Store seam。
 
 ## 4. 当前验证证据
 
 | 门禁 | 结果 |
 |---|---|
-| Round 14 四份独立测试 | `26 passed` |
-| Workflow 子树与 Phase 01 独立 app tests | `456 passed` |
-| 完整仓库 `tests/` | `853 passed, 3 skipped` |
+| Round 14 六份独立测试 | `30 passed` |
+| Workflow 子树与 Phase 01 独立 app tests | `460 passed` |
+| 完整仓库 `tests/` | `857 passed, 3 skipped` |
 | 10,000/10,001 层 JSON 控制 | 10,000 接受并往返；10,001 拒绝 |
 | 随机 JSON codec 对照 | 1,000 个标准库对照样本往返通过 |
 | Ruff `E/F/I/B`、format、`git diff --check` | 通过 |
@@ -147,7 +181,7 @@ Store、composition 和 monitor。原因不是增加业务功能，而是第一�
 
 ## 5. 问题趋势判断
 
-实现缺陷总体在减少，但首次终审证明第一版尚未收敛：
+实现缺陷总体在减少，但两次终审都证明上一候选尚未收敛：
 
 - Round 14 的 7 类入口问题中，6 类已完整关闭；
 - 第 7 类中的 severity fail-closed 缺陷已关闭，但 D-030 repair payload 的字段
@@ -155,24 +189,29 @@ Store、composition 和 monitor。原因不是增加业务功能，而是第一�
 - 首次三方终审新发现 4 类问题，补充红测新增 9 个失败；其中 3 类是原风险的更深
   边界（事务线性化、递归深度、AST 坐标），1 类是模块 seam 泄漏，而不是新增
   业务范围；
+- 第二次三方终审的新发现从 4 类降为 2 类，且三方独立结论完全重合：Store
+  锁序与 post-commit marker 归属。它们都属于 Apply 生命周期协调，没有增加
+  DTO、路由或产品能力范围；
 - 新发现已从普通 CRUD/响应形状转向 Authority 线性化、结构深度、精确字符编码
   与依赖方向，说明 happy path 已较稳定，剩余问题数量更少但验证成本更高；
-- 最终需要 483 行新增 production 代码和 146 行删除代码，表明仍有架构性
+- 当前需要 562 行新增 production 代码和 180 行删除代码，表明仍有架构性
   workaround 与边界清理，不能只凭最初用例数量下降判断稳定；
-- 补充红测现已全部转绿，Workflow 子树由 `447` 增至 `456` 个通过用例，说明
+- 补充红测现已全部转绿，Workflow 子树由 `447` 增至 `460` 个通过用例，说明
   新问题已被转化为可重复回归资产，而不是继续漂移的口头风险；
 - 只有固定当前最终 SHA 后的三方独立评审不再发现新的 blocking 类别，才能把
   Phase 01 core 判为收敛。
 
-因此当前趋势是：**问题总量继续减少，但终审仍在挖出更深的同源边界；补充红测
-已使这些问题可控，是否进入可合并平台期取决于最终精确 SHA 复审。**
+因此当前趋势是：**问题类别从首次复审的 4 类降到第二次的 2 类，且已集中到同一
+Apply 生命周期，数量和范围都在收敛；但连续两次精确评审仍发现 blocker，只有
+新候选三方全绿才可判定进入可合并平台期。**
 
 ## 6. 下一步策略调整
 
 1. 固定包含本报告的候选 SHA，在干净 worktree 重跑整仓测试和 lint/diff 门禁，
    再由原三名 reviewer 分别复审决策/合同、模块设计、事务/恢复/安全，明确确认
-   首次 4 类 blocker 的处置。任何代码修复都会使相关评审失效并触发受影响测试、
-   全量门禁和再次复审。
+   首次 4 类和第二次 2 类 blocker 的处置，尤其验证 Store 事务内无外部回调、
+   post-commit CAS 失配无副作用以及坏 marker 可恢复。任何代码修复都会使相关
+   评审失效并触发受影响测试、全量门禁和再次复审。
 2. 如果终审没有新增 blocker，停止继续堆叠 Phase 01 review round，按门禁把
    `migration/01-backend-contract` 合入
    `integration/workflow-task-runtime`；未经用户授权不 push。
