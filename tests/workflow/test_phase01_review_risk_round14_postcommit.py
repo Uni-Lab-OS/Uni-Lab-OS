@@ -366,3 +366,89 @@ def test_stale_settle_cannot_replace_new_draft_marker(
         "after_restart": expected_authority,
         "restart_state": "unapplied_source_only",
     }
+
+
+def test_reconcile_clears_malformed_pending_for_already_projected_new_draft(
+    tmp_path: Path,
+) -> None:
+    database_path = tmp_path / "workflow.db"
+    seed_store: WorkflowStore | None = WorkflowStore(database_path)
+    restart_store: WorkflowStore | None = None
+    try:
+        seed_service, source_path = _seed_authoring(seed_store, tmp_path)
+        saved = seed_service.save_draft(
+            WORKFLOW_UUID,
+            python_source=NEW_SOURCE,
+            expected_draft_hash=None,
+            expected_workflow_revision=1,
+        )
+        assert saved["candidate"] is not None
+        settled_authority = _authority(seed_store, seed_service, source_path)
+
+        with seed_store.transaction() as connection:
+            connection.execute(
+                """
+                UPDATE workflow_authoring
+                SET writeback_status = 'pending',
+                    writeback_source = NULL,
+                    writeback_expected_hash = NULL
+                WHERE workflow_uuid = ?
+                """,
+                (WORKFLOW_UUID,),
+            )
+        malformed_authority = _authority(seed_store, seed_service, source_path)
+
+        seed_store.close()
+        seed_store = None
+        restart_store = WorkflowStore(database_path)
+        restart_service = WorkflowService(
+            restart_store,
+            compiler=SourceOnlyCompiler(),
+        )
+        reconciled = restart_service.reconcile_registered_source(WORKFLOW_UUID)
+        after_reconcile = _authority(
+            restart_store,
+            restart_service,
+            source_path,
+        )
+    finally:
+        if seed_store is not None:
+            seed_store.close()
+        if restart_store is not None:
+            restart_store.close()
+
+    expected_marker = {
+        "observed_draft_hash": saved["draft"]["draft_hash"],
+        "candidate_hash": saved["candidate"]["candidate_hash"],
+        "candidate_draft_hash": saved["draft"]["draft_hash"],
+        "writeback_status": "settled",
+        "writeback_source": None,
+        "writeback_expected_hash": None,
+    }
+    expected_authority = {
+        "state": "unapplied_source_only",
+        "draft_hash": saved["draft"]["draft_hash"],
+        "candidate_hash": saved["candidate"]["candidate_hash"],
+        "marker": expected_marker,
+        "reconciliation_pending": False,
+        "canonical": NEW_SOURCE.encode(),
+    }
+    malformed_marker = {
+        **expected_marker,
+        "writeback_status": "pending",
+    }
+    assert {
+        "settled_authority": settled_authority,
+        "malformed_authority": malformed_authority,
+        "reconciled_state": reconciled["state"],
+        "after_reconcile": after_reconcile,
+    } == {
+        "settled_authority": expected_authority,
+        "malformed_authority": {
+            **expected_authority,
+            "marker": malformed_marker,
+            "reconciliation_pending": True,
+        },
+        "reconciled_state": "unapplied_source_only",
+        "after_reconcile": expected_authority,
+    }
