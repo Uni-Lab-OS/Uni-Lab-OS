@@ -1869,7 +1869,9 @@ class WorkflowService:
             if not isinstance(compilation.diagnostics, list):
                 raise ValueError
             compilation.diagnostics = [
-                CandidateDiagnostic.model_validate(item).model_dump()
+                CandidateDiagnostic.model_validate(item).model_dump(
+                    exclude_none=True,
+                )
                 for item in compilation.diagnostics
             ]
         except (TypeError, ValidationError, ValueError):

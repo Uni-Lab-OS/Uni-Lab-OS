@@ -234,6 +234,26 @@ class CandidateCompilation(BaseModel):
         )
 
 
+class DiagnosticSourceRange(BaseModel):
+    """One optional source range attached to a compiler diagnostic."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    start_line: int = Field(ge=1, strict=True)
+    start_column: int = Field(ge=1, strict=True)
+    end_line: int = Field(ge=1, strict=True)
+    end_column: int = Field(ge=1, strict=True)
+
+    @model_validator(mode="after")
+    def _ordered_range(self) -> DiagnosticSourceRange:
+        if (self.end_line, self.end_column) < (
+            self.start_line,
+            self.start_column,
+        ):
+            raise ValueError("source range end precedes its start")
+        return self
+
+
 class CandidateDiagnostic(BaseModel):
     """One stable compiler diagnostic exposed by the Authoring contract."""
 
@@ -242,6 +262,7 @@ class CandidateDiagnostic(BaseModel):
     severity: str
     code: str
     message: str
+    source_range: Optional[DiagnosticSourceRange] = None
 
     @field_validator("severity", "code", "message")
     @classmethod
@@ -331,6 +352,7 @@ __all__ = [
     "CandidateCompilation",
     "CandidateDiagnostic",
     "CandidateSourceMapEntry",
+    "DiagnosticSourceRange",
     "JsonArray",
     "JsonObject",
     "WorkflowEdgeWrite",
