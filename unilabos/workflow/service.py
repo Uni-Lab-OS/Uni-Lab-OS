@@ -7,7 +7,9 @@ import hashlib
 import json
 import os
 import re
+import signal
 import stat
+import struct
 import threading
 from collections import defaultdict
 from collections.abc import Iterator
@@ -65,6 +67,9 @@ _ERRORS = {
 }
 _HASH_TOKEN = re.compile(r"sha256:[0-9a-f]{64}\Z")
 _NO_EXPECTED_HASH = object()
+_F_SETOWN_EX = getattr(fcntl, "F_SETOWN_EX", 15)
+_F_OWNER_TID = 0
+_LEASE_BREAK_SIGNAL = signal.SIGRTMAX
 
 
 class WorkflowError(RuntimeError):
@@ -269,7 +274,7 @@ class WorkflowService:
         meta_data: Dict[str, Any],
     ) -> Dict[str, Any]:
         workflow_uuid = self.get_workflow(workflow_uuid)["uuid"]
-        run_mode = run_mode.strip().lower() or "normal"
+        run_mode = "normal" if run_mode == "" else run_mode
         if run_mode not in {"normal", "step", "single_node"}:
             raise WorkflowError("invalid_input")
         if target_node_uuid is not None:
@@ -672,9 +677,10 @@ class WorkflowService:
             assert source is not None
             if source["draft_hash"] != _sha256(encoded):
                 raise WorkflowConflict("draft_hash_conflict")
+            applied_graph = self.store.get_graph(workflow_uuid)
             compilation = self._compile(
                 workflow=workflow,
-                graph=self.store.get_graph(workflow_uuid),
+                graph=applied_graph,
                 registration=registration,
                 python_source=source["python_source"],
             )
@@ -682,6 +688,7 @@ class WorkflowService:
                 workflow_revision=workflow["revision"],
                 draft_hash=source["draft_hash"],
                 compilation=compilation,
+                applied_graph=applied_graph,
             )
             event_data = {
                 "workflow_uuid": workflow_uuid,
@@ -755,9 +762,10 @@ class WorkflowService:
             candidate: Optional[Dict[str, Any]] = None
             diagnostics: List[Dict[str, Any]] = []
             if source is not None:
+                applied_graph = self.store.get_graph(workflow_uuid)
                 compilation = self._compile(
                     workflow=workflow,
-                    graph=self.store.get_graph(workflow_uuid),
+                    graph=applied_graph,
                     registration=registration,
                     python_source=source["python_source"],
                 )
@@ -766,6 +774,7 @@ class WorkflowService:
                     workflow_revision=workflow["revision"],
                     draft_hash=source["draft_hash"],
                     compilation=compilation,
+                    applied_graph=applied_graph,
                 )
             cause = (
                 "recovered"
@@ -840,9 +849,10 @@ class WorkflowService:
             if source is None:
                 raise WorkflowConflict("draft_hash_conflict")
 
+            applied_graph = self.store.get_graph(workflow_uuid)
             compilation = self._compile(
                 workflow=workflow,
-                graph=self.store.get_graph(workflow_uuid),
+                graph=applied_graph,
                 registration=registration,
                 python_source=source["python_source"],
             )
@@ -857,6 +867,7 @@ class WorkflowService:
                 workflow_revision=workflow["revision"],
                 draft_hash=source["draft_hash"],
                 compilation=compilation,
+                applied_graph=applied_graph,
             )
             if revalidated is None:
                 raise WorkflowError("candidate_invalid")
@@ -1063,10 +1074,6 @@ class WorkflowService:
             if source_parent is None:
                 return None
             parent_fd, filename = source_parent
-            self._recover_missing_target(
-                parent_fd,
-                filename,
-            )
             try:
                 descriptor = os.open(
                     filename,
@@ -1210,15 +1217,17 @@ class WorkflowService:
         temporary_name: str,
         expected_hash: Optional[str],
     ) -> None:
-        """在内核独占 lease 下更新同一 inode，避免旧句柄成为孤儿。"""
+        """在可安全中断的 lease 下执行 fsync 后的原子 CAS replace。"""
 
         target_descriptor = -1
         temporary_descriptor = -1
-        backup_descriptor = -1
         backup_name = f".{target_name}.{uuid4().hex}.cas"
         backup_created = False
-        modified = False
-        original = b""
+        replacement_attempted = False
+        replacement_installed = False
+        external_target_changed = False
+        lease_held = False
+        previous_signal_mask: Optional[set[signal.Signals]] = None
         try:
             try:
                 target_descriptor = os.open(
@@ -1245,12 +1254,31 @@ class WorkflowService:
             if expected_hash is None:
                 raise WorkflowConflict("draft_hash_conflict")
             try:
+                previous_signal_mask = signal.pthread_sigmask(
+                    signal.SIG_BLOCK,
+                    {_LEASE_BREAK_SIGNAL},
+                )
+                fcntl.fcntl(
+                    target_descriptor,
+                    _F_SETOWN_EX,
+                    struct.pack(
+                        "ii",
+                        _F_OWNER_TID,
+                        threading.get_native_id(),
+                    ),
+                )
+                fcntl.fcntl(
+                    target_descriptor,
+                    fcntl.F_SETSIG,
+                    _LEASE_BREAK_SIGNAL,
+                )
                 fcntl.fcntl(
                     target_descriptor,
                     fcntl.F_SETLEASE,
                     fcntl.F_WRLCK,
                 )
-            except (AttributeError, OSError):
+                lease_held = True
+            except (AttributeError, OSError, ValueError):
                 # 无法证明没有预打开的读写句柄时必须失败关闭。
                 raise WorkflowConflict("draft_hash_conflict") from None
 
@@ -1269,85 +1297,142 @@ class WorkflowService:
                 os.O_RDONLY | os.O_CLOEXEC | os.O_NOFOLLOW,
                 dir_fd=parent_fd,
             )
-            replacement = WorkflowService._read_regular_fd(temporary_descriptor)
+            replacement_hash = WorkflowService._hash_regular_fd(temporary_descriptor)
 
-            backup_descriptor = os.open(
+            os.link(
+                target_name,
                 backup_name,
-                (os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_CLOEXEC | os.O_NOFOLLOW),
-                0o600,
-                dir_fd=parent_fd,
+                src_dir_fd=parent_fd,
+                dst_dir_fd=parent_fd,
+                follow_symlinks=False,
             )
             backup_created = True
-            WorkflowService._write_regular_fd(
-                backup_descriptor,
-                original,
-            )
-            os.close(backup_descriptor)
-            backup_descriptor = -1
             os.fsync(parent_fd)
-
-            modified = True
-            WorkflowService._write_regular_fd(
-                target_descriptor,
-                replacement,
-            )
-            if not WorkflowService._target_matches_fd(
-                parent_fd,
-                target_name,
-                target_descriptor,
-            ) or WorkflowService._hash_regular_fd(target_descriptor) != _sha256(
-                replacement
-            ):
+            if WorkflowService._drain_lease_break_signal():
                 raise WorkflowConflict("draft_hash_conflict")
 
-            os.unlink(temporary_name, dir_fd=parent_fd)
-            os.unlink(backup_name, dir_fd=parent_fd)
-            backup_created = False
+            replacement_attempted = True
+            os.replace(
+                temporary_name,
+                target_name,
+                src_dir_fd=parent_fd,
+                dst_dir_fd=parent_fd,
+            )
+            replacement_installed = True
             os.fsync(parent_fd)
+            if WorkflowService._drain_lease_break_signal():
+                raise WorkflowConflict("draft_hash_conflict")
+            if (
+                not WorkflowService._target_matches_fd(
+                    parent_fd,
+                    target_name,
+                    temporary_descriptor,
+                )
+                or WorkflowService._hash_regular_fd(temporary_descriptor)
+                != replacement_hash
+            ):
+                external_target_changed = True
+                raise WorkflowConflict("draft_hash_conflict")
+
+            fcntl.fcntl(
+                target_descriptor,
+                fcntl.F_SETLEASE,
+                fcntl.F_UNLCK,
+            )
+            lease_held = False
+            if WorkflowService._drain_lease_break_signal():
+                raise WorkflowConflict("draft_hash_conflict")
+            if (
+                not WorkflowService._target_matches_fd(
+                    parent_fd,
+                    target_name,
+                    temporary_descriptor,
+                )
+                or WorkflowService._hash_regular_fd(temporary_descriptor)
+                != replacement_hash
+            ):
+                external_target_changed = True
+                raise WorkflowConflict("draft_hash_conflict")
+
+            with suppress(OSError):
+                os.unlink(backup_name, dir_fd=parent_fd)
+                backup_created = False
+                os.fsync(parent_fd)
         except Exception:
-            restored = False
-            if modified:
-                try:
-                    WorkflowService._restore_regular_fd(
-                        target_descriptor,
-                        original,
-                    )
-                    restored = WorkflowService._target_matches_fd(
-                        parent_fd,
-                        target_name,
-                        target_descriptor,
-                    )
-                except OSError:
-                    restored = False
-            if backup_created and restored:
-                with suppress(OSError):
-                    os.unlink(backup_name, dir_fd=parent_fd)
-                    backup_created = False
-            elif (
-                backup_created
-                and modified
+            installed_now = (
+                replacement_attempted
+                and temporary_descriptor >= 0
                 and WorkflowService._target_matches_fd(
                     parent_fd,
                     target_name,
-                    target_descriptor,
+                    temporary_descriptor,
                 )
-            ):
-                # 回滚失败时，不能把候选内容伪装成一次失败前的 Draft。
-                # 删除当前 inode 的目录项并保留已 fsync 的 `.cas`；后续
-                # 读取会从该唯一原稿副本恢复。
+            )
+            replacement_installed = replacement_installed or installed_now
+            if replacement_installed and backup_created and not external_target_changed:
+                try:
+                    os.replace(
+                        backup_name,
+                        target_name,
+                        src_dir_fd=parent_fd,
+                        dst_dir_fd=parent_fd,
+                    )
+                    backup_created = False
+                    replacement_installed = False
+                    os.fsync(parent_fd)
+                except OSError:
+                    # 候选不能在失败后冒充已保存 Draft。保留完整、已
+                    # fsync 的 `.cas` 原稿，供显式人工/Git 恢复。
+                    if WorkflowService._target_matches_fd(
+                        parent_fd,
+                        target_name,
+                        temporary_descriptor,
+                    ):
+                        with suppress(OSError):
+                            os.unlink(target_name, dir_fd=parent_fd)
+                            os.fsync(parent_fd)
+            elif backup_created:
                 with suppress(OSError):
-                    os.unlink(target_name, dir_fd=parent_fd)
-            if backup_created:
-                with suppress(OSError):
+                    os.unlink(backup_name, dir_fd=parent_fd)
+                    backup_created = False
                     os.fsync(parent_fd)
             raise
         finally:
-            if backup_descriptor >= 0:
-                os.close(backup_descriptor)
+            if lease_held and target_descriptor >= 0:
+                with suppress(OSError):
+                    fcntl.fcntl(
+                        target_descriptor,
+                        fcntl.F_SETLEASE,
+                        fcntl.F_UNLCK,
+                    )
+            if previous_signal_mask is not None:
+                with suppress(OSError, ValueError):
+                    WorkflowService._drain_lease_break_signal()
+                signal.pthread_sigmask(
+                    signal.SIG_SETMASK,
+                    previous_signal_mask,
+                )
             if temporary_descriptor >= 0:
                 os.close(temporary_descriptor)
             if target_descriptor >= 0:
                 os.close(target_descriptor)
+
+    @staticmethod
+    def _drain_lease_break_signal() -> bool:
+        """Synchronously consume the thread-directed lease notification."""
+
+        observed = False
+        while True:
+            try:
+                notification = signal.sigtimedwait(
+                    {_LEASE_BREAK_SIGNAL},
+                    0,
+                )
+            except InterruptedError:
+                continue
+            if notification is None:
+                return observed
+            observed = True
 
     @staticmethod
     def _target_matches_fd(
@@ -1403,49 +1488,6 @@ class WorkflowService:
     @staticmethod
     def _hash_regular_fd(descriptor: int) -> str:
         return _sha256(WorkflowService._read_regular_fd(descriptor))
-
-    @staticmethod
-    def _recover_missing_target(
-        parent_fd: int,
-        target_name: str,
-    ) -> None:
-        try:
-            os.stat(
-                target_name,
-                dir_fd=parent_fd,
-                follow_symlinks=False,
-            )
-            return
-        except FileNotFoundError:
-            pass
-        prefix = f".{target_name}."
-        backups = []
-        for name in os.listdir(parent_fd):
-            if not name.startswith(prefix) or not name.endswith(".cas"):
-                continue
-            try:
-                backup_stat = os.stat(
-                    name,
-                    dir_fd=parent_fd,
-                    follow_symlinks=False,
-                )
-            except FileNotFoundError:
-                continue
-            if stat.S_ISREG(backup_stat.st_mode):
-                backups.append((backup_stat.st_mtime_ns, name))
-        if not backups:
-            return
-        backup_name = max(backups)[1]
-        try:
-            os.replace(
-                backup_name,
-                target_name,
-                src_dir_fd=parent_fd,
-                dst_dir_fd=parent_fd,
-            )
-            os.fsync(parent_fd)
-        except OSError:
-            raise WorkflowError("internal_error") from None
 
     @classmethod
     @contextmanager
@@ -1605,11 +1647,15 @@ class WorkflowService:
         workflow_revision: int,
         draft_hash: str,
         compilation: CandidateCompilation,
+        applied_graph: Dict[str, Any],
     ) -> Optional[Dict[str, Any]]:
         if not compilation.valid:
             return None
         assert compilation.graph is not None
-        graph = self._backend_graph_projection(compilation.graph)
+        graph = self._backend_candidate_graph(
+            compilation.graph,
+            applied_graph=applied_graph,
+        )
         bundle = {
             "base_workflow_revision": workflow_revision,
             "draft_hash": draft_hash,
@@ -1648,6 +1694,196 @@ class WorkflowService:
                 omit_none(item) for item in (graph.get("handle_templates") or [])
             ],
         }
+
+    @classmethod
+    def _backend_candidate_graph(
+        cls,
+        graph: Dict[str, Any],
+        *,
+        applied_graph: Dict[str, Any],
+    ) -> Dict[str, Any]:
+        """Hydrate compiler write entities into the frozen Backend read shape."""
+
+        projected = cls._backend_graph_projection(graph)
+        applied = cls._backend_graph_projection(applied_graph)
+        applied_workflow = applied["workflow"]
+        workflow_uuid = applied_workflow["uuid"]
+        timestamp = applied_workflow["update_time"]
+        applied_nodes = {item["uuid"]: item for item in applied["nodes"]}
+        applied_edges = {item["uuid"]: item for item in applied["edges"]}
+        applied_node_templates = {
+            item["uuid"]: item for item in applied["node_templates"]
+        }
+        applied_handle_templates = {
+            item["uuid"]: item for item in applied["handle_templates"]
+        }
+
+        nodes = []
+        for item in projected["nodes"]:
+            value = WorkflowNodeWrite.model_validate(item).model_dump(
+                exclude_none=True,
+            )
+            persisted = applied_nodes.get(value["uuid"], {})
+            nodes.append(
+                {
+                    "uuid": value["uuid"],
+                    "create_time": persisted.get("create_time", timestamp),
+                    "update_time": persisted.get("update_time", timestamp),
+                    "meta_data": value.get("meta_data", {}),
+                    "workflow_uuid": workflow_uuid,
+                    **value,
+                }
+            )
+        cls._require_backend_read_fields(
+            nodes,
+            {
+                "uuid",
+                "create_time",
+                "update_time",
+                "meta_data",
+                "workflow_uuid",
+                "name",
+                "status",
+                "type",
+                "pose",
+                "param",
+                "execution_policy",
+                "disabled",
+                "minimized",
+            },
+        )
+
+        edges = []
+        for item in projected["edges"]:
+            value = WorkflowEdgeWrite.model_validate(item).model_dump(
+                exclude_none=True,
+            )
+            persisted = applied_edges.get(value["uuid"], {})
+            edges.append(
+                {
+                    "uuid": value["uuid"],
+                    "create_time": persisted.get("create_time", timestamp),
+                    "update_time": persisted.get("update_time", timestamp),
+                    "meta_data": value.get("meta_data", {}),
+                    **value,
+                }
+            )
+        cls._require_backend_read_fields(
+            edges,
+            {
+                "uuid",
+                "create_time",
+                "update_time",
+                "meta_data",
+                "source_node_uuid",
+                "target_node_uuid",
+                "source_handle_uuid",
+                "target_handle_uuid",
+            },
+        )
+
+        projected["workflow"] = {
+            **applied_workflow,
+            **projected["workflow"],
+            "uuid": workflow_uuid,
+            "create_time": applied_workflow["create_time"],
+            "update_time": timestamp,
+        }
+        projected["nodes"] = nodes
+        projected["edges"] = edges
+        projected["node_templates"] = cls._hydrate_backend_catalog_entities(
+            projected["node_templates"] or applied["node_templates"],
+            persisted=applied_node_templates,
+            timestamp=timestamp,
+            uuid_fields={"uuid", "resource_template_uuid"},
+            required_fields={
+                "uuid",
+                "create_time",
+                "update_time",
+                "meta_data",
+                "resource_template_uuid",
+                "name",
+                "display_name",
+                "goal",
+                "goal_default",
+                "feedback",
+                "result",
+                "type",
+                "node_type",
+            },
+        )
+        projected["handle_templates"] = cls._hydrate_backend_catalog_entities(
+            projected["handle_templates"] or applied["handle_templates"],
+            persisted=applied_handle_templates,
+            timestamp=timestamp,
+            uuid_fields={"uuid", "workflow_node_template_uuid"},
+            required_fields={
+                "uuid",
+                "create_time",
+                "update_time",
+                "meta_data",
+                "workflow_node_template_uuid",
+                "handle_key",
+                "io_type",
+                "display_name",
+                "type",
+                "required",
+            },
+        )
+        cls._require_backend_read_fields(
+            [projected["workflow"]],
+            {
+                "uuid",
+                "create_time",
+                "update_time",
+                "meta_data",
+                "name",
+                "tags",
+                "revision",
+            },
+        )
+        return projected
+
+    @staticmethod
+    def _hydrate_backend_catalog_entities(
+        entities: List[Dict[str, Any]],
+        *,
+        persisted: Dict[str, Dict[str, Any]],
+        timestamp: str,
+        uuid_fields: set[str],
+        required_fields: set[str],
+    ) -> List[Dict[str, Any]]:
+        hydrated = []
+        for item in entities:
+            value = {key: child for key, child in item.items() if child is not None}
+            for field in uuid_fields:
+                try:
+                    value[field] = validate_uuid(value[field])
+                except (KeyError, ValueError):
+                    raise WorkflowError("candidate_invalid") from None
+            previous = persisted.get(value["uuid"], {})
+            hydrated.append(
+                {
+                    "uuid": value["uuid"],
+                    "create_time": previous.get("create_time", timestamp),
+                    "update_time": previous.get("update_time", timestamp),
+                    "meta_data": value.get("meta_data", {}),
+                    **value,
+                }
+            )
+        WorkflowService._require_backend_read_fields(
+            hydrated,
+            required_fields,
+        )
+        return hydrated
+
+    @staticmethod
+    def _require_backend_read_fields(
+        entities: List[Dict[str, Any]],
+        required_fields: set[str],
+    ) -> None:
+        if any(not required_fields.issubset(item) for item in entities):
+            raise WorkflowError("candidate_invalid")
 
     @classmethod
     def _post_commit_candidate_graph(

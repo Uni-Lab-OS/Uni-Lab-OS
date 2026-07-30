@@ -296,7 +296,10 @@ def install_workflow_api(app: FastAPI, service: WorkflowService) -> None:
             "/api/v1/workflow-node-jobs",
             "/api/v1/events",
         )
-        if request.url.path.startswith(workflow_prefixes):
+        if any(
+            request.url.path == prefix or request.url.path.startswith(f"{prefix}/")
+            for prefix in workflow_prefixes
+        ):
             return _error(WorkflowError("invalid_input"))
         return await request_validation_exception_handler(request, error)
 
