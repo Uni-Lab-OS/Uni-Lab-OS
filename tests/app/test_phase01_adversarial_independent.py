@@ -24,8 +24,17 @@ def client(tmp_path_factory):
         importlib.import_module("unilabos.app.web.server"),
     )
 
-    with TestClient(web_server.setup_server()) as test_client:
-        yield test_client
+    try:
+        with TestClient(web_server.setup_server()) as test_client:
+            yield test_client
+    finally:
+        try:
+            composition = importlib.import_module("unilabos.workflow.composition")
+        except ModuleNotFoundError as exc:
+            if exc.name != "unilabos.workflow.composition":
+                raise
+        else:
+            composition.reset_workflow_service_for_test()
 
 
 def _assert_backend_error(response, *, status: int, code: str) -> dict:
