@@ -7,7 +7,6 @@ from unilabos.registry.init_enforce import (
     validate_init_param_enforce,
 )
 
-
 CONFIG_SCHEMA = {
     "config": {
         "type": "object",
