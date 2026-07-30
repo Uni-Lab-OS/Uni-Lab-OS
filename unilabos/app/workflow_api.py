@@ -37,6 +37,24 @@ _GO_WHITE_SPACE = (
 )
 
 
+def _parse_non_negative_int64_decimal(value: str) -> int:
+    """Match Go strconv.ParseInt(value, 10, 64) for an SSE cursor."""
+
+    if _SIGNED_DECIMAL.fullmatch(value) is None:
+        raise ValueError
+    negative = value.startswith("-")
+    digits = value[1:] if value[:1] in {"+", "-"} else value
+    significant = digits.lstrip("0") or "0"
+    if negative and significant != "0":
+        raise ValueError
+    maximum = str(_INT64_MAX)
+    if len(significant) > len(maximum) or (
+        len(significant) == len(maximum) and significant > maximum
+    ):
+        raise ValueError
+    return int(significant, 10)
+
+
 class WorkflowCreateRequest(_BackendModel):
     name: str
     tags: List[Any] = Field(default_factory=list)
@@ -267,12 +285,8 @@ def create_workflow_router(service: WorkflowService) -> APIRouter:
             ).strip(_GO_WHITE_SPACE)
             if not cursor_text:
                 cursor = 0
-            elif not _SIGNED_DECIMAL.fullmatch(cursor_text):
-                raise ValueError
             else:
-                cursor = int(cursor_text, 10)
-            if not 0 <= cursor <= _INT64_MAX:
-                raise ValueError
+                cursor = _parse_non_negative_int64_decimal(cursor_text)
         except (UnicodeError, ValueError):
             cursor = -1
         if cursor == -1:

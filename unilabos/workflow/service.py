@@ -883,7 +883,7 @@ class WorkflowService:
                             )
                             return self.get_authoring(workflow_uuid)
                     except (OSError, UnicodeError, WorkflowError):
-                        pass
+                        return self.get_authoring(workflow_uuid)
             actual_hash = source["draft_hash"] if source is not None else None
             if actual_hash == record["observed_draft_hash"] and not (
                 actual_hash is None and record.get("candidate") is not None
@@ -1820,34 +1820,9 @@ class WorkflowService:
     ) -> Dict[str, Any]:
         """Hydrate compiler write entities into the frozen Backend read shape."""
 
+        applied = cls._validated_applied_backend_graph(applied_graph)
         cls._require_candidate_graph_containers(graph)
         projected = cls._backend_graph_projection(graph)
-        applied = cls._backend_graph_projection(applied_graph)
-        cls._require_backend_read_fields(
-            [applied["workflow"]],
-            _WORKFLOW_REQUIRED_READ_FIELDS,
-            error_code="internal_error",
-        )
-        cls._require_backend_read_fields(
-            applied["nodes"],
-            _NODE_REQUIRED_READ_FIELDS,
-            error_code="internal_error",
-        )
-        cls._require_backend_read_fields(
-            applied["edges"],
-            _EDGE_REQUIRED_READ_FIELDS,
-            error_code="internal_error",
-        )
-        cls._require_backend_read_fields(
-            applied["node_templates"],
-            _NODE_TEMPLATE_REQUIRED_READ_FIELDS,
-            error_code="internal_error",
-        )
-        cls._require_backend_read_fields(
-            applied["handle_templates"],
-            _HANDLE_TEMPLATE_REQUIRED_READ_FIELDS,
-            error_code="internal_error",
-        )
         applied_workflow = applied["workflow"]
         workflow_uuid = applied_workflow["uuid"]
         timestamp = applied_workflow["update_time"]
@@ -1935,6 +1910,195 @@ class WorkflowService:
             _WORKFLOW_REQUIRED_READ_FIELDS,
         )
         return projected
+
+    @classmethod
+    def _validated_applied_backend_graph(
+        cls,
+        graph: Dict[str, Any],
+    ) -> Dict[str, Any]:
+        """Validate the authority-owned graph before inspecting a Candidate."""
+
+        try:
+            applied = cls._backend_graph_projection(graph)
+            cls._require_backend_read_fields(
+                [applied["workflow"]],
+                _WORKFLOW_REQUIRED_READ_FIELDS,
+                error_code="internal_error",
+            )
+            cls._require_backend_read_fields(
+                applied["nodes"],
+                _NODE_REQUIRED_READ_FIELDS,
+                error_code="internal_error",
+            )
+            cls._require_backend_read_fields(
+                applied["edges"],
+                _EDGE_REQUIRED_READ_FIELDS,
+                error_code="internal_error",
+            )
+            cls._require_backend_read_fields(
+                applied["node_templates"],
+                _NODE_TEMPLATE_REQUIRED_READ_FIELDS,
+                error_code="internal_error",
+            )
+            cls._require_backend_read_fields(
+                applied["handle_templates"],
+                _HANDLE_TEMPLATE_REQUIRED_READ_FIELDS,
+                error_code="internal_error",
+            )
+            cls._require_applied_entity_types(applied)
+            return applied
+        except WorkflowError:
+            raise
+        except (AttributeError, KeyError, TypeError, ValueError):
+            raise WorkflowError("internal_error") from None
+
+    @staticmethod
+    def _require_applied_entity_types(applied: Dict[str, Any]) -> None:
+        """Enforce the frozen Backend JSON types on authority-owned entities."""
+
+        def exact(entity: Dict[str, Any], fields: set[str], expected: type) -> None:
+            if any(type(entity[field]) is not expected for field in fields):
+                raise ValueError
+
+        def optional(
+            entity: Dict[str, Any],
+            fields: set[str],
+            expected: type,
+        ) -> None:
+            if any(
+                field in entity and type(entity[field]) is not expected
+                for field in fields
+            ):
+                raise ValueError
+
+        def uuids(entity: Dict[str, Any], fields: set[str]) -> None:
+            exact(entity, fields, str)
+            for field in fields:
+                validate_uuid(entity[field])
+
+        def optional_uuids(entity: Dict[str, Any], fields: set[str]) -> None:
+            for field in fields:
+                if field in entity:
+                    uuids(entity, {field})
+
+        workflow = applied["workflow"]
+        uuids(workflow, {"uuid"})
+        exact(workflow, {"create_time", "update_time", "name"}, str)
+        exact(workflow, {"meta_data"}, dict)
+        exact(workflow, {"tags"}, list)
+        optional(workflow, {"description"}, str)
+        revision = workflow["revision"]
+        if type(revision) is not int or not 1 <= revision <= (1 << 63) - 1:
+            raise ValueError
+
+        for node in applied["nodes"]:
+            uuids(node, {"uuid", "workflow_uuid"})
+            optional_uuids(
+                node,
+                {
+                    "workflow_node_template_uuid",
+                    "parent_uuid",
+                    "material_uuid",
+                },
+            )
+            exact(
+                node,
+                {"create_time", "update_time", "name", "status", "type"},
+                str,
+            )
+            exact(
+                node,
+                {"meta_data", "pose", "param", "execution_policy"},
+                dict,
+            )
+            exact(node, {"disabled", "minimized"}, bool)
+            optional(
+                node,
+                {
+                    "description",
+                    "icon",
+                    "footer",
+                    "action_name",
+                    "action_type",
+                    "script",
+                },
+                str,
+            )
+
+        for edge in applied["edges"]:
+            uuids(
+                edge,
+                {
+                    "uuid",
+                    "source_node_uuid",
+                    "target_node_uuid",
+                    "source_handle_uuid",
+                    "target_handle_uuid",
+                },
+            )
+            exact(edge, {"create_time", "update_time"}, str)
+            exact(edge, {"meta_data"}, dict)
+            optional(edge, {"description"}, str)
+
+        for template in applied["node_templates"]:
+            uuids(template, {"uuid", "resource_template_uuid"})
+            exact(
+                template,
+                {
+                    "create_time",
+                    "update_time",
+                    "name",
+                    "display_name",
+                    "type",
+                    "node_type",
+                },
+                str,
+            )
+            exact(
+                template,
+                {
+                    "meta_data",
+                    "goal",
+                    "goal_default",
+                    "feedback",
+                    "result",
+                },
+                dict,
+            )
+            optional(
+                template,
+                {
+                    "description",
+                    "class",
+                    "schema",
+                    "icon",
+                    "header",
+                    "footer",
+                },
+                str,
+            )
+
+        for handle in applied["handle_templates"]:
+            uuids(handle, {"uuid", "workflow_node_template_uuid"})
+            exact(
+                handle,
+                {
+                    "create_time",
+                    "update_time",
+                    "handle_key",
+                    "io_type",
+                    "display_name",
+                    "type",
+                },
+                str,
+            )
+            exact(handle, {"meta_data"}, dict)
+            exact(handle, {"required"}, bool)
+            optional(
+                handle,
+                {"description", "data_source", "data_key"},
+                str,
+            )
 
     @staticmethod
     def _require_candidate_graph_containers(graph: Dict[str, Any]) -> None:
