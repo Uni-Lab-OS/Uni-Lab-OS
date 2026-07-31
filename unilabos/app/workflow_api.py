@@ -4,8 +4,10 @@ from __future__ import annotations
 
 import asyncio
 import json
+import logging
 import re
-from typing import Annotated, Any, Dict, List, Optional
+from collections.abc import Callable
+from typing import Annotated, Any, Dict, List, Optional, Protocol
 
 from fastapi import APIRouter, FastAPI, Header, Query, Request
 from fastapi.exception_handlers import request_validation_exception_handler
@@ -14,14 +16,27 @@ from fastapi.responses import JSONResponse, Response, StreamingResponse
 from fastapi.routing import APIRoute
 from pydantic import BaseModel, ConfigDict, Field, field_validator
 
+from unilabos.workflow.candidate_validation import validate_candidate_bundle
 from unilabos.workflow.json_codec import decode_json_bytes, encode_json
 from unilabos.workflow.models import (
+    CandidateChangeset,
+    CandidateCompilation,
+    CandidateDiagnostic,
+    CandidateSourceMapEntry,
     WorkflowEdgeWrite,
     WorkflowNodeWrite,
     normalize_json_array,
     normalize_json_object,
+    validate_json_value,
+    validate_uuid,
 )
 from unilabos.workflow.service import WorkflowError, WorkflowService
+from unilabos.workflow.source_coordinates import (
+    require_utf8_text,
+    source_ranges_fit,
+)
+
+_LOGGER = logging.getLogger(__name__)
 
 
 class _StrictModel(BaseModel):
@@ -170,9 +185,62 @@ class DraftWriteRequest(_StrictModel):
         strict=True,
     )
 
+    @field_validator("python_source")
+    @classmethod
+    def _utf8_source(cls, value: str) -> str:
+        return require_utf8_text(value)
+
 
 class ApplyRequest(_StrictModel):
     candidate_hash: HashToken
+
+
+class _AuthoringTransformRequest(_StrictModel):
+    workflow_uuid: str
+    revision: int = Field(ge=1, le=_INT64_MAX, strict=True)
+    source_uri: str
+
+    @field_validator("workflow_uuid")
+    @classmethod
+    def _workflow_uuid(cls, value: str) -> str:
+        return validate_uuid(value)
+
+    @field_validator("source_uri")
+    @classmethod
+    def _source_uri(cls, value: str) -> str:
+        require_utf8_text(value)
+        if not value.strip():
+            raise ValueError("source_uri must not be blank")
+        return value
+
+    @field_validator("python_source", check_fields=False)
+    @classmethod
+    def _python_source(cls, value: str) -> str:
+        return require_utf8_text(value)
+
+
+class AuthoringCompileRequest(_AuthoringTransformRequest):
+    python_source: str
+    applied_graph: Dict[str, Any]
+
+
+class AuthoringGeneratePythonRequest(_AuthoringTransformRequest):
+    graph: Dict[str, Any]
+
+
+class AuthoringValidateRequest(_AuthoringTransformRequest):
+    graph: Dict[str, Any]
+    python_source: str
+
+
+class AuthoringTransform(Protocol):
+    """02D production engine 的三个只读操作。"""
+
+    def compile(self, **values: Any) -> CandidateCompilation: ...
+
+    def generate_python(self, **values: Any) -> CandidateCompilation: ...
+
+    def validate(self, **values: Any) -> CandidateCompilation: ...
 
 
 class _BackendJSONResponse(JSONResponse):
@@ -199,6 +267,137 @@ def _error(error: WorkflowError) -> _BackendJSONResponse:
     )
 
 
+def _diagnostic_ranges(
+    diagnostics: List[Dict[str, Any]],
+) -> List[Dict[str, Any]]:
+    ranges: List[Dict[str, Any]] = []
+    for item in diagnostics:
+        source_range = item.get("source_range")
+        if source_range is not None:
+            ranges.append(source_range)
+        ranges.extend(item.get("occurrence_ranges") or [])
+        for alternative in item.get("repair_alternatives") or []:
+            ranges.append(alternative["retained_range"])
+            ranges.extend(
+                replacement["source_range"]
+                for replacement in alternative["replacements"]
+            )
+    return ranges
+
+
+def _transform_data(
+    result: Any,
+    *,
+    input_source: Optional[str],
+    workflow_uuid: str,
+    revision: int,
+    base_graph: Dict[str, Any],
+    require_unchanged_graph: bool,
+) -> Dict[str, Any]:
+    """把 engine 结果收紧为唯一公开 DTO，拒绝内部或越界值。"""
+
+    compilation = CandidateCompilation.model_validate(result)
+    if not isinstance(compilation.diagnostics, list):
+        raise ValueError("diagnostics must be an array")
+    diagnostics = [
+        CandidateDiagnostic.model_validate(item).model_dump(exclude_none=True)
+        for item in compilation.diagnostics
+    ]
+    ranges = _diagnostic_ranges(diagnostics)
+    if ranges and (input_source is None or not source_ranges_fit(input_source, ranges)):
+        raise ValueError("diagnostic range is outside the request source")
+
+    if not isinstance(compilation.source_map, list):
+        raise ValueError("source_map must be an array")
+    source_map = [
+        CandidateSourceMapEntry.model_validate(item).model_dump()
+        for item in compilation.source_map
+    ]
+    normalized_source = compilation.normalized_python_source
+    graph = compilation.graph
+    changeset: Optional[Dict[str, Any]] = None
+    has_error = any(item["severity"].strip().lower() == "error" for item in diagnostics)
+
+    if graph is None:
+        if (
+            not diagnostics
+            or not has_error
+            or normalized_source is not None
+            or source_map
+            or compilation.changeset is not None
+        ):
+            raise ValueError("invalid failed transform result")
+    else:
+        if has_error or not isinstance(normalized_source, str):
+            raise ValueError("invalid successful transform result")
+        validate_json_value(graph)
+        require_utf8_text(normalized_source)
+        if not source_ranges_fit(normalized_source, source_map):
+            raise ValueError("source map is outside normalized source")
+        changeset = CandidateChangeset.model_validate(
+            compilation.changeset
+        ).model_dump()
+        graph = validate_candidate_bundle(
+            graph=graph,
+            base_graph=base_graph,
+            workflow_uuid=workflow_uuid,
+            revision=revision,
+            source_map=source_map,
+            changeset=changeset,
+            require_unchanged_graph=require_unchanged_graph,
+        )
+
+    compiler_version = compilation.compiler_version
+    fingerprint = compilation.template_catalog_fingerprint
+    if not isinstance(compiler_version, str) or not compiler_version.strip():
+        raise ValueError("compiler_version must not be blank")
+    require_utf8_text(compiler_version)
+    if (
+        not isinstance(fingerprint, str)
+        or re.fullmatch(r"sha256:[0-9a-f]{64}", fingerprint) is None
+    ):
+        raise ValueError("invalid template catalog fingerprint")
+
+    return {
+        "diagnostics": diagnostics,
+        "graph": graph,
+        "normalized_python_source": normalized_source,
+        "source_map": source_map,
+        "changeset": changeset,
+        "compiler_version": compiler_version,
+        "template_catalog_fingerprint": fingerprint,
+    }
+
+
+def _transform_response(
+    operation: Callable[[], Any],
+    *,
+    input_source: Optional[str],
+    workflow_uuid: str,
+    revision: int,
+    base_graph: Dict[str, Any],
+    require_unchanged_graph: bool = False,
+) -> _BackendJSONResponse:
+    try:
+        data = _transform_data(
+            operation(),
+            input_source=input_source,
+            workflow_uuid=workflow_uuid,
+            revision=revision,
+            base_graph=base_graph,
+            require_unchanged_graph=require_unchanged_graph,
+        )
+        if any(
+            item["code"] == "template_catalog_unavailable"
+            for item in data["diagnostics"]
+        ):
+            return _error(WorkflowError("template_catalog_unavailable"))
+        return _success(data)
+    except Exception:  # noqa: BLE001 - HTTP 边界不得泄漏 engine/adapter 内部异常
+        _LOGGER.exception("Authoring pure transform 失败")
+        return _error(WorkflowError("internal_error"))
+
+
 def format_sse_event(event: Dict[str, Any]) -> str:
     payload = json.dumps(
         event["data"],
@@ -206,6 +405,74 @@ def format_sse_event(event: Dict[str, Any]) -> str:
         separators=(",", ":"),
     )
     return f"id: {event['id']}\nevent: {event['event']}\ndata: {payload}\n\n"
+
+
+def create_authoring_transform_router(
+    engine: AuthoringTransform,
+) -> APIRouter:
+    """创建仅含 D-040 三个纯转换操作的 OS-only router。"""
+
+    router = APIRouter(
+        prefix="/api/v1/authoring",
+        tags=["authoring-transform"],
+        route_class=_BackendJSONRoute,
+    )
+
+    @router.post("/compile")
+    def compile_authoring(body: AuthoringCompileRequest) -> JSONResponse:
+        values = {
+            "workflow_uuid": body.workflow_uuid,
+            "workflow_revision": body.revision,
+            "python_source": body.python_source,
+            "source_uri": body.source_uri,
+            "applied_graph": body.applied_graph,
+        }
+        return _transform_response(
+            lambda: engine.compile(**values),
+            input_source=body.python_source,
+            workflow_uuid=body.workflow_uuid,
+            revision=body.revision,
+            base_graph=body.applied_graph,
+        )
+
+    @router.post("/generate-python")
+    def generate_authoring_python(
+        body: AuthoringGeneratePythonRequest,
+    ) -> JSONResponse:
+        values = {
+            "workflow_uuid": body.workflow_uuid,
+            "workflow_revision": body.revision,
+            "graph": body.graph,
+            "source_uri": body.source_uri,
+        }
+        return _transform_response(
+            lambda: engine.generate_python(**values),
+            input_source=None,
+            workflow_uuid=body.workflow_uuid,
+            revision=body.revision,
+            base_graph=body.graph,
+            require_unchanged_graph=True,
+        )
+
+    @router.post("/validate")
+    def validate_authoring(body: AuthoringValidateRequest) -> JSONResponse:
+        values = {
+            "workflow_uuid": body.workflow_uuid,
+            "workflow_revision": body.revision,
+            "graph": body.graph,
+            "python_source": body.python_source,
+            "source_uri": body.source_uri,
+        }
+        return _transform_response(
+            lambda: engine.validate(**values),
+            input_source=body.python_source,
+            workflow_uuid=body.workflow_uuid,
+            revision=body.revision,
+            base_graph=body.graph,
+            require_unchanged_graph=True,
+        )
+
+    return router
 
 
 def create_workflow_router(service: WorkflowService) -> APIRouter:
@@ -410,9 +677,7 @@ def create_workflow_router(service: WorkflowService) -> APIRouter:
     return router
 
 
-def install_workflow_api(app: FastAPI, service: WorkflowService) -> None:
-    """Install error mapping and routes into an OS FastAPI application."""
-
+def _install_error_handlers(app: FastAPI) -> None:
     @app.exception_handler(WorkflowError)
     async def workflow_error_handler(
         _request: Request,
@@ -430,6 +695,7 @@ def install_workflow_api(app: FastAPI, service: WorkflowService) -> None:
             "/api/v1/workflow-tasks",
             "/api/v1/workflow-node-jobs",
             "/api/v1/events",
+            "/api/v1/authoring",
         )
         if any(
             request.url.path == prefix or request.url.path.startswith(f"{prefix}/")
@@ -438,7 +704,23 @@ def install_workflow_api(app: FastAPI, service: WorkflowService) -> None:
             return _error(WorkflowError("invalid_input"))
         return await request_validation_exception_handler(request, error)
 
+
+def install_workflow_api(app: FastAPI, service: WorkflowService) -> None:
+    """Install error mapping and routes into an OS FastAPI application."""
+
+    _install_error_handlers(app)
+
     app.include_router(create_workflow_router(service))
+
+
+def install_authoring_transform_api(
+    app: FastAPI,
+    engine: AuthoringTransform,
+) -> None:
+    """把 pure Authoring router 安装到显式选择的 OS application。"""
+
+    _install_error_handlers(app)
+    app.include_router(create_authoring_transform_router(engine))
 
 
 def create_workflow_app(service: WorkflowService) -> FastAPI:
@@ -449,9 +731,23 @@ def create_workflow_app(service: WorkflowService) -> FastAPI:
     return app
 
 
+def create_authoring_transform_app(engine: AuthoringTransform) -> FastAPI:
+    """创建只暴露三个 pure transform 的 focused application。"""
+
+    app = FastAPI(title="Uni-Lab Authoring Transform", version="0.1.0")
+    install_authoring_transform_api(app, engine)
+    return app
+
+
 __all__ = [
+    "AuthoringCompileRequest",
+    "AuthoringGeneratePythonRequest",
+    "AuthoringValidateRequest",
+    "create_authoring_transform_app",
+    "create_authoring_transform_router",
     "create_workflow_app",
     "create_workflow_router",
     "format_sse_event",
+    "install_authoring_transform_api",
     "install_workflow_api",
 ]

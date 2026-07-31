@@ -458,7 +458,7 @@ def test_source_map_accepts_eof_position_after_trailing_newline(
     assert aggregate["draft"]["diagnostics"] == []
 
 
-def test_source_map_uses_one_based_utf8_byte_columns(
+def test_source_map_uses_one_based_utf16_code_unit_columns(
     tmp_path: Path,
 ) -> None:
     python_source = "变量=1\n"
@@ -469,7 +469,7 @@ def test_source_map_uses_one_based_utf8_byte_columns(
                 start_line=1,
                 start_column=1,
                 end_line=1,
-                end_column=9,
+                end_column=5,
             )
         ],
     )

@@ -12,7 +12,7 @@ import stat
 import struct
 import threading
 from collections import defaultdict
-from collections.abc import Iterable, Iterator
+from collections.abc import Iterator
 from contextlib import AbstractContextManager, contextmanager, suppress
 from datetime import datetime, timezone
 from pathlib import Path, PurePosixPath
@@ -34,6 +34,7 @@ from unilabos.workflow.models import (
     normalize_json_object,
     validate_uuid,
 )
+from unilabos.workflow.source_coordinates import source_ranges_fit
 from unilabos.workflow.store import (
     StoreAuthoringConflict,
     StoreConflict,
@@ -227,31 +228,6 @@ def _sha256(data: bytes) -> str:
 
 def _canonical_json(value: Any) -> bytes:
     return encode_json(value, sort_keys=True)
-
-
-def _source_ranges_fit(
-    python_source: str,
-    ranges: Iterable[Dict[str, Any]],
-) -> bool:
-    """检查每个从 1 开始的范围端点是否落在原始源码内。"""
-
-    try:
-        line_byte_lengths = [
-            len(line.encode("utf-8")) for line in re.split(r"\r\n|\r|\n", python_source)
-        ]
-    except UnicodeEncodeError:
-        return False
-
-    def position_fits(line: int, column: int) -> bool:
-        return (
-            line <= len(line_byte_lengths) and column <= line_byte_lengths[line - 1] + 1
-        )
-
-    return all(
-        position_fits(item["start_line"], item["start_column"])
-        and position_fits(item["end_line"], item["end_column"])
-        for item in ranges
-    )
 
 
 def _mtime_rfc3339(timestamp: float) -> str:
@@ -1809,7 +1785,7 @@ class WorkflowService:
                 CandidateSourceMapEntry.model_validate(item).model_dump()
                 for item in compilation.source_map
             ]
-            if not _source_ranges_fit(
+            if not source_ranges_fit(
                 compilation.normalized_python_source,
                 source_map,
             ):
@@ -1901,7 +1877,7 @@ class WorkflowService:
                         replacement["source_range"]
                         for replacement in alternative["replacements"]
                     )
-            if not _source_ranges_fit(python_source, source_ranges):
+            if not source_ranges_fit(python_source, source_ranges):
                 raise ValueError
         except (TypeError, ValidationError, ValueError):
             cls._set_candidate_invalid_diagnostic(compilation)
