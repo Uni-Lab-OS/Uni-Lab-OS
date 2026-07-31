@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import fcntl
 import hashlib
+import logging
 import os
 import re
 import signal
@@ -12,10 +13,10 @@ import struct
 import threading
 from collections import defaultdict
 from collections.abc import Iterable, Iterator
-from contextlib import AbstractContextManager, ExitStack, contextmanager, suppress
+from contextlib import AbstractContextManager, contextmanager, suppress
 from datetime import datetime, timezone
 from pathlib import Path, PurePosixPath
-from typing import Any, Dict, List, Optional, Protocol, Tuple
+from typing import Any, Dict, List, Optional, Protocol, Tuple, runtime_checkable
 from uuid import uuid4
 
 from pydantic import ValidationError
@@ -42,6 +43,7 @@ from unilabos.workflow.store import (
     utc_now,
 )
 
+_LOGGER = logging.getLogger(__name__)
 _ERRORS = {
     "invalid_input": (400, "提交内容格式不正确"),
     "not_found": (404, "请求的资源不存在"),
@@ -201,9 +203,6 @@ class AuthoringCompiler(Protocol):
     compiler_version: str
     template_catalog_fingerprint: str
 
-    def catalog_snapshot(self) -> AbstractContextManager[str]:
-        """返回在上下文退出前保持稳定的 Catalog fingerprint。"""
-
     def compile(
         self,
         *,
@@ -213,6 +212,13 @@ class AuthoringCompiler(Protocol):
         source_uri: str,
         applied_graph: Dict[str, Any],
     ) -> CandidateCompilation: ...
+
+
+@runtime_checkable
+class CatalogSnapshotProvider(Protocol):
+    """可变 Catalog 编译器提供的可选稳定快照能力。"""
+
+    def catalog_snapshot(self) -> AbstractContextManager[str]: ...
 
 
 def _sha256(data: bytes) -> str:
@@ -1734,29 +1740,45 @@ class WorkflowService:
 
         if self.compiler is None:
             raise WorkflowError("template_catalog_unavailable")
-        snapshot_factory = getattr(self.compiler, "catalog_snapshot", None)
-        if snapshot_factory is None:
+        if not isinstance(self.compiler, CatalogSnapshotProvider):
             # 兼容既有不可变、无状态编译器 Adapter。
             yield self._catalog_fingerprint()
             return
-        if not callable(snapshot_factory):
-            raise WorkflowError("template_catalog_unavailable")
 
-        stack = ExitStack()
         try:
-            snapshot = snapshot_factory()
-            value = stack.enter_context(snapshot)
-            fingerprint = self._validate_catalog_fingerprint(value)
-        except WorkflowError:
-            stack.close()
-            raise
+            snapshot = self.compiler.catalog_snapshot()
+            value = snapshot.__enter__()
         except Exception:
-            stack.close()
             raise WorkflowError("template_catalog_unavailable") from None
+
+        try:
+            fingerprint = self._validate_catalog_fingerprint(value)
+        except BaseException as error:
+            self._release_catalog_snapshot(snapshot, error)
+            raise
+
         try:
             yield fingerprint
-        finally:
-            stack.close()
+        except BaseException as error:
+            self._release_catalog_snapshot(snapshot, error)
+            raise
+        else:
+            self._release_catalog_snapshot(snapshot, None)
+
+    @staticmethod
+    def _release_catalog_snapshot(
+        snapshot: AbstractContextManager[str],
+        error: BaseException | None,
+    ) -> None:
+        """释放 snapshot，但不遮蔽业务异常或已经提交的成功结果。"""
+
+        error_type = type(error) if error is not None else None
+        traceback = error.__traceback__ if error is not None else None
+        try:
+            # cleanup-only guard 不得通过返回 True 吞掉 Apply 异常。
+            snapshot.__exit__(error_type, error, traceback)
+        except Exception:
+            _LOGGER.exception("Catalog snapshot guard 释放失败")
 
     def _issue_candidate(
         self,
