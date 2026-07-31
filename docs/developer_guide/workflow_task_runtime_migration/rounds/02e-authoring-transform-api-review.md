@@ -135,4 +135,3 @@ warning 仅为既有 FastAPI TestClient/httpx 弃用提示及一次既有 escape
    `git diff --check`；
 4. 由同一 `round02e_review` reviewer 对精确新 SHA 确认 blocking 关闭；
 5. 确认过程中不得新增 02G composition，也不得修改 Backend/Frontend。
-
