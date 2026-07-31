@@ -350,7 +350,7 @@ class WorkflowStore:
         with self._catalog_lock:
             yield
 
-    def read_template_catalog(
+    def _read_template_catalog_rows(
         self,
         authority_id: str,
         *,

@@ -230,7 +230,7 @@ class TemplateCatalog:
                     authority_id=authority.authority_id,
                     retained=retained_nodes,
                 )
-                _, node_rows, handle_rows = self._store.read_template_catalog(
+                _, node_rows, handle_rows = self._store._read_template_catalog_rows(
                     authority.authority_id,
                     conn=conn,
                 )
@@ -265,8 +265,8 @@ class TemplateCatalog:
     ) -> Iterator[TemplateCatalogSnapshot]:
         with self._store.catalog_guard():
             try:
-                metadata, node_rows, handle_rows = self._store.read_template_catalog(
-                    authority.authority_id
+                metadata, node_rows, handle_rows = (
+                    self._store._read_template_catalog_rows(authority.authority_id)
                 )
             except sqlite3.Error:
                 raise TemplateCatalogMismatch("/authority/catalog") from None
@@ -315,12 +315,23 @@ class TemplateCatalog:
             assert node.requested_uuid is not None
             template_uuid = node.requested_uuid
             historical = conn.execute(
-                "SELECT * FROM workflow_node_template WHERE uuid = ?",
-                (template_uuid,),
+                """
+                SELECT * FROM workflow_node_template
+                WHERE authority_id = ? AND uuid = ?
+                """,
+                (authority.authority_id, template_uuid),
             ).fetchone()
+            collision = conn.execute(
+                """
+                SELECT 1 FROM workflow_node_template
+                WHERE authority_id <> ? AND uuid = ?
+                """,
+                (authority.authority_id, template_uuid),
+            ).fetchone()
+            if collision is not None:
+                raise TemplateCatalogImportError("/node_templates/uuid")
             if historical is not None and (
-                historical["authority_id"] != authority.authority_id
-                or historical["resource_template_uuid"] != resource_template_uuid
+                historical["resource_template_uuid"] != resource_template_uuid
                 or _business_name(historical["name"]) != normalized_name
             ):
                 raise TemplateCatalogImportError("/node_templates/uuid")
@@ -328,8 +339,11 @@ class TemplateCatalog:
                 _soft_delete_node(conn, authority.authority_id, active["uuid"])
 
         existing = conn.execute(
-            "SELECT uuid, create_time FROM workflow_node_template WHERE uuid = ?",
-            (template_uuid,),
+            """
+            SELECT uuid, create_time FROM workflow_node_template
+            WHERE authority_id = ? AND uuid = ?
+            """,
+            (authority.authority_id, template_uuid),
         ).fetchone()
         now = utc_now()
         values = _node_sql_values(authority.authority_id, node.fields)
@@ -355,9 +369,9 @@ class TemplateCatalog:
                     name = ?, display_name = ?, class = ?, goal = ?,
                     goal_default = ?, feedback = ?, result = ?, schema = ?,
                     type = ?, icon = ?, header = ?, footer = ?, node_type = ?
-                WHERE uuid = ?
+                WHERE authority_id = ? AND uuid = ?
                 """,
-                (now, *values, template_uuid),
+                (now, *values, authority.authority_id, template_uuid),
             )
         return template_uuid
 
@@ -395,12 +409,23 @@ class TemplateCatalog:
             assert handle.requested_uuid is not None
             handle_uuid = handle.requested_uuid
             historical = conn.execute(
-                "SELECT * FROM workflow_handle_template WHERE uuid = ?",
-                (handle_uuid,),
+                """
+                SELECT * FROM workflow_handle_template
+                WHERE authority_id = ? AND uuid = ?
+                """,
+                (authority.authority_id, handle_uuid),
             ).fetchone()
+            collision = conn.execute(
+                """
+                SELECT 1 FROM workflow_handle_template
+                WHERE authority_id <> ? AND uuid = ?
+                """,
+                (authority.authority_id, handle_uuid),
+            ).fetchone()
+            if collision is not None:
+                raise TemplateCatalogImportError("/handle_templates/uuid")
             if historical is not None and (
-                historical["authority_id"] != authority.authority_id
-                or historical["workflow_node_template_uuid"] != node_uuid
+                historical["workflow_node_template_uuid"] != node_uuid
                 or _business_name(historical["handle_key"]) != normalized_key
                 or historical["io_type"] != io_type
             ):
@@ -409,8 +434,11 @@ class TemplateCatalog:
                 _soft_delete_handle(conn, authority.authority_id, active["uuid"])
 
         existing = conn.execute(
-            "SELECT uuid FROM workflow_handle_template WHERE uuid = ?",
-            (handle_uuid,),
+            """
+            SELECT uuid FROM workflow_handle_template
+            WHERE authority_id = ? AND uuid = ?
+            """,
+            (authority.authority_id, handle_uuid),
         ).fetchone()
         now = utc_now()
         values = _handle_sql_values(authority.authority_id, node_uuid, handle.fields)
@@ -435,9 +463,9 @@ class TemplateCatalog:
                     workflow_node_template_uuid = ?, handle_key = ?, io_type = ?,
                     display_name = ?, type = ?, required = ?, data_source = ?,
                     data_key = ?
-                WHERE uuid = ?
+                WHERE authority_id = ? AND uuid = ?
                 """,
-                (now, *values, handle_uuid),
+                (now, *values, authority.authority_id, handle_uuid),
             )
         return handle_uuid
 
@@ -644,7 +672,7 @@ def _json_object(value: object, path: str) -> dict[str, Any]:
 
 
 def _business_name(value: str) -> str:
-    return value.strip().casefold()
+    return value.strip().lower()
 
 
 def _node_sql_values(authority_id: str, fields: Mapping[str, Any]) -> tuple[Any, ...]:
@@ -780,7 +808,11 @@ def _fingerprint(
         "node_templates": [_semantic_node(row) for row in node_rows],
         "handle_templates": [_semantic_handle(row) for row in handle_rows],
     }
-    digest = hashlib.sha256(encode_json(payload, sort_keys=True)).hexdigest()
+    try:
+        canonical = encode_json(payload, sort_keys=True)
+    except (TypeError, ValueError):
+        raise TemplateCatalogMismatch("/authority/catalog") from None
+    digest = hashlib.sha256(canonical).hexdigest()
     return f"sha256:{digest}"
 
 
@@ -794,14 +826,31 @@ def _validate_persisted_rows(
     for row in node_rows:
         if row.get("authority_id") != authority.authority_id:
             raise TemplateCatalogMismatch("/node_templates/authority")
+        if row.get("deleted_at") is not None:
+            raise TemplateCatalogMismatch("/node_templates/deleted_at")
         _persisted_uuid(row.get("uuid"), "/node_templates/uuid")
         resource_uuid = _persisted_uuid(
             row.get("resource_template_uuid"),
             "/node_templates/resource_template_uuid",
         )
-        name = row.get("name")
-        if not isinstance(name, str) or not name.strip():
-            raise TemplateCatalogMismatch("/node_templates/name")
+        for column in (
+            "create_time",
+            "update_time",
+            "name",
+            "display_name",
+            "type",
+            "node_type",
+        ):
+            _persisted_required_string(
+                row.get(column),
+                f"/node_templates/{column}",
+            )
+        for column in _NODE_OPTIONAL_STRINGS:
+            _persisted_optional_string(
+                row.get(column),
+                f"/node_templates/{column}",
+            )
+        name = row["name"]
         node_uuid = row["uuid"]
         node_key = (resource_uuid, _business_name(name))
         if node_uuid in node_uuids or node_key in node_keys:
@@ -817,6 +866,8 @@ def _validate_persisted_rows(
     for row in handle_rows:
         if row.get("authority_id") != authority.authority_id:
             raise TemplateCatalogMismatch("/handle_templates/authority")
+        if row.get("deleted_at") is not None:
+            raise TemplateCatalogMismatch("/handle_templates/deleted_at")
         handle_uuid = _persisted_uuid(
             row.get("uuid"),
             "/handle_templates/uuid",
@@ -827,10 +878,24 @@ def _validate_persisted_rows(
         )
         if parent_uuid not in node_uuids:
             raise TemplateCatalogMismatch("/handle_templates/parent")
-        handle_key = row.get("handle_key")
+        for column in (
+            "create_time",
+            "update_time",
+            "handle_key",
+            "display_name",
+            "type",
+        ):
+            _persisted_required_string(
+                row.get(column),
+                f"/handle_templates/{column}",
+            )
+        for column in _HANDLE_OPTIONAL_STRINGS:
+            _persisted_optional_string(
+                row.get(column),
+                f"/handle_templates/{column}",
+            )
+        handle_key = row["handle_key"]
         io_type = row.get("io_type")
-        if not isinstance(handle_key, str) or not handle_key.strip():
-            raise TemplateCatalogMismatch("/handle_templates/handle_key")
         if io_type not in ("source", "target"):
             raise TemplateCatalogMismatch("/handle_templates/io_type")
         identity = (parent_uuid, _business_name(handle_key), io_type)
@@ -838,7 +903,8 @@ def _validate_persisted_rows(
             raise TemplateCatalogMismatch("/handle_templates/business_key")
         handle_uuids.add(handle_uuid)
         handle_keys.add(identity)
-        if row.get("required") not in (0, 1, False, True):
+        required = row.get("required")
+        if type(required) is not int or required not in (0, 1):
             raise TemplateCatalogMismatch("/handle_templates/required")
         if not isinstance(_decode_column(row.get("meta_data")), dict):
             raise TemplateCatalogMismatch("/handle_templates/meta_data")
@@ -854,6 +920,18 @@ def _persisted_uuid(value: object, path: str) -> str:
     if normalized != value:
         raise TemplateCatalogMismatch(path)
     return normalized
+
+
+def _persisted_required_string(value: object, path: str) -> str:
+    if not isinstance(value, str) or not value.strip():
+        raise TemplateCatalogMismatch(path)
+    return value
+
+
+def _persisted_optional_string(value: object, path: str) -> str | None:
+    if value is not None and not isinstance(value, str):
+        raise TemplateCatalogMismatch(path)
+    return value
 
 
 def _semantic_node(row: Mapping[str, Any]) -> dict[str, Any]:
