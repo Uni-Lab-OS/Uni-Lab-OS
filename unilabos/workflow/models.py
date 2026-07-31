@@ -8,6 +8,7 @@ boundary, and never carry legacy Run identifiers.
 from __future__ import annotations
 
 import math
+from copy import deepcopy
 from typing import Any, Dict, List, Literal, Optional
 from uuid import UUID
 
@@ -83,6 +84,15 @@ def validate_uuid(value: str) -> str:
     if parsed.int == 0:
         raise ValueError("UUID must not be nil")
     return str(parsed)
+
+
+def resolve_template_root_param(goal_default: Any, goal: Any) -> JsonObject:
+    """复用 Backend 根 param 的 goal_default -> goal -> {} 回退。"""
+
+    for candidate in (goal_default, goal):
+        if isinstance(candidate, dict) and candidate:
+            return deepcopy(normalize_json_object(candidate))
+    return {}
 
 
 class WorkflowNodeWrite(BaseModel):
@@ -248,6 +258,32 @@ class DiagnosticSourceRange(BaseModel):
         return self
 
 
+class NodeUUIDReplacement(BaseModel):
+    """一个可机器应用的 UUID anchor 替换。"""
+
+    model_config = ConfigDict(extra="forbid")
+
+    source_range: DiagnosticSourceRange
+    replacement_uuid: str
+
+    @field_validator("replacement_uuid")
+    @classmethod
+    def _uuid4(cls, value: str) -> str:
+        normalized = validate_uuid(value)
+        if UUID(normalized).version != 4:
+            raise ValueError("replacement UUID must be UUIDv4")
+        return normalized
+
+
+class DuplicateNodeUUIDRepair(BaseModel):
+    """保留一个 anchor identity，替换其余冲突 occurrence。"""
+
+    model_config = ConfigDict(extra="forbid")
+
+    retained_range: DiagnosticSourceRange
+    replacements: List[NodeUUIDReplacement]
+
+
 class CandidateDiagnostic(BaseModel):
     """One stable compiler diagnostic exposed by the Authoring contract."""
 
@@ -257,6 +293,9 @@ class CandidateDiagnostic(BaseModel):
     code: str
     message: str
     source_range: Optional[DiagnosticSourceRange] = None
+    duplicate_uuid: Optional[str] = None
+    occurrence_ranges: Optional[List[DiagnosticSourceRange]] = None
+    repair_alternatives: Optional[List[DuplicateNodeUUIDRepair]] = None
 
     @field_validator("severity")
     @classmethod
@@ -271,6 +310,64 @@ class CandidateDiagnostic(BaseModel):
         if not isinstance(value, str) or not value.strip():
             raise ValueError("diagnostic text must not be blank")
         return value
+
+    @model_validator(mode="after")
+    def _duplicate_uuid_contract(self) -> CandidateDiagnostic:
+        structured = (
+            self.duplicate_uuid,
+            self.occurrence_ranges,
+            self.repair_alternatives,
+        )
+        if self.code != "DUPLICATE_NODE_UUID":
+            if any(item is not None for item in structured):
+                raise ValueError("duplicate UUID fields require DUPLICATE_NODE_UUID")
+            return self
+        if any(item is None for item in structured):
+            raise ValueError("duplicate UUID diagnostic is incomplete")
+        assert self.duplicate_uuid is not None
+        assert self.occurrence_ranges is not None
+        assert self.repair_alternatives is not None
+        self.duplicate_uuid = validate_uuid(self.duplicate_uuid)
+        occurrence_keys = [_source_range_key(item) for item in self.occurrence_ranges]
+        if len(occurrence_keys) < 2 or len(set(occurrence_keys)) != len(
+            occurrence_keys
+        ):
+            raise ValueError("duplicate UUID occurrences must be unique")
+        retained_keys = [
+            _source_range_key(item.retained_range) for item in self.repair_alternatives
+        ]
+        if set(retained_keys) != set(occurrence_keys) or len(retained_keys) != len(
+            occurrence_keys
+        ):
+            raise ValueError("duplicate UUID repairs must cover every retained range")
+        replacement_uuids: list[str] = []
+        for alternative in self.repair_alternatives:
+            retained_key = _source_range_key(alternative.retained_range)
+            replacement_keys = [
+                _source_range_key(item.source_range)
+                for item in alternative.replacements
+            ]
+            if (
+                set(replacement_keys) != set(occurrence_keys) - {retained_key}
+                or len(replacement_keys) != len(occurrence_keys) - 1
+            ):
+                raise ValueError("duplicate UUID repair replacements are incomplete")
+            for replacement in alternative.replacements:
+                if replacement.replacement_uuid == self.duplicate_uuid:
+                    raise ValueError("replacement UUID must be fresh")
+                replacement_uuids.append(replacement.replacement_uuid)
+        if len(replacement_uuids) != len(set(replacement_uuids)):
+            raise ValueError("replacement UUIDs must be distinct")
+        return self
+
+
+def _source_range_key(value: DiagnosticSourceRange) -> tuple[int, int, int, int]:
+    return (
+        value.start_line,
+        value.start_column,
+        value.end_line,
+        value.end_column,
+    )
 
 
 class CandidateSourceMapEntry(BaseModel):
@@ -360,6 +457,7 @@ __all__ = [
     "WorkflowNodeWrite",
     "normalize_json_array",
     "normalize_json_object",
+    "resolve_template_root_param",
     "validate_json_value",
     "validate_uuid",
 ]

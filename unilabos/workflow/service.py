@@ -221,13 +221,6 @@ class CatalogSnapshotProvider(Protocol):
     def catalog_snapshot(self) -> AbstractContextManager[str]: ...
 
 
-@runtime_checkable
-class ReferencedCatalogProjectionCompiler(Protocol):
-    """声明 Candidate 只投影 snapshot 中被 Node 引用的 Catalog 实体。"""
-
-    catalog_projection_policy: str
-
-
 def _sha256(data: bytes) -> str:
     return f"sha256:{hashlib.sha256(data).hexdigest()}"
 
@@ -1104,8 +1097,6 @@ class WorkflowService:
                 fallback_meta_data["unilab"] = candidate_meta_data["unilab"]
             fallback_workflow = {
                 **workflow,
-                "name": candidate_workflow.get("name", workflow["name"]),
-                "description": candidate_workflow.get("description"),
                 "revision": resulting_revision,
                 "meta_data": fallback_meta_data,
                 "update_time": utc_now(),
@@ -1899,11 +1890,17 @@ class WorkflowService:
                 )
                 for item in compilation.diagnostics
             ]
-            source_ranges = [
-                item["source_range"]
-                for item in compilation.diagnostics
-                if item.get("source_range") is not None
-            ]
+            source_ranges = []
+            for item in compilation.diagnostics:
+                if item.get("source_range") is not None:
+                    source_ranges.append(item["source_range"])
+                source_ranges.extend(item.get("occurrence_ranges") or [])
+                for alternative in item.get("repair_alternatives") or []:
+                    source_ranges.append(alternative["retained_range"])
+                    source_ranges.extend(
+                        replacement["source_range"]
+                        for replacement in alternative["replacements"]
+                    )
             if not _source_ranges_fit(python_source, source_ranges):
                 raise ValueError
         except (TypeError, ValidationError, ValueError):
@@ -1931,8 +1928,9 @@ class WorkflowService:
             }
         ).model_dump()
 
+    @classmethod
     def _validate_candidate_bundle_semantics(
-        self,
+        cls,
         *,
         graph: Dict[str, Any],
         applied_graph: Dict[str, Any],
@@ -1943,23 +1941,12 @@ class WorkflowService:
 
         workflow = graph["workflow"]
         applied_workflow = applied_graph["workflow"]
-        for field in _WORKFLOW_READ_FIELDS - {
-            "meta_data",
-            "name",
-            "description",
-        }:
+        for field in _WORKFLOW_READ_FIELDS - {"meta_data"}:
             if not strict_json_equal(
                 workflow.get(field),
                 applied_workflow.get(field),
             ):
                 raise ValueError("Candidate changed an unsupported Workflow field")
-        workflow_fields_changed = any(
-            not strict_json_equal(
-                workflow.get(field),
-                applied_workflow.get(field),
-            )
-            for field in ("name", "description")
-        )
 
         workflow_meta = dict(workflow["meta_data"])
         applied_meta = dict(applied_workflow["meta_data"])
@@ -1970,8 +1957,17 @@ class WorkflowService:
         if not strict_json_equal(workflow_meta, applied_meta):
             raise ValueError("Candidate changed non-authoring Workflow metadata")
 
-        nodes = [self._semantic_node(item) for item in graph["nodes"]]
-        edges = [self._semantic_edge(item) for item in graph["edges"]]
+        for field in ("node_templates", "handle_templates"):
+            candidate_entities = sorted(graph[field], key=lambda item: item["uuid"])
+            applied_entities = sorted(
+                applied_graph[field],
+                key=lambda item: item["uuid"],
+            )
+            if not strict_json_equal(candidate_entities, applied_entities):
+                raise ValueError("Candidate catalog projection is not authoritative")
+
+        nodes = [cls._semantic_node(item) for item in graph["nodes"]]
+        edges = [cls._semantic_edge(item) for item in graph["edges"]]
         candidate_nodes = {item["uuid"]: item for item in nodes}
         candidate_edges = {item["uuid"]: item for item in edges}
         if len(candidate_nodes) != len(nodes) or len(candidate_edges) != len(edges):
@@ -1979,40 +1975,6 @@ class WorkflowService:
 
         templates = {item["uuid"]: item for item in graph["node_templates"]}
         handles = {item["uuid"]: item for item in graph["handle_templates"]}
-        if len(templates) != len(graph["node_templates"]) or len(handles) != len(
-            graph["handle_templates"]
-        ):
-            raise ValueError("Candidate catalog contains duplicate UUIDs")
-        compiler = self.compiler
-        uses_referenced_snapshot = (
-            isinstance(compiler, ReferencedCatalogProjectionCompiler)
-            and compiler.catalog_projection_policy == "referenced_snapshot"
-        )
-        if uses_referenced_snapshot:
-            referenced_templates = {
-                item["workflow_node_template_uuid"]
-                for item in candidate_nodes.values()
-                if item.get("workflow_node_template_uuid") is not None
-            }
-            if set(templates) != referenced_templates or any(
-                item.get("workflow_node_template_uuid") not in referenced_templates
-                for item in handles.values()
-            ):
-                raise ValueError(
-                    "Candidate catalog is not the referenced snapshot projection"
-                )
-        else:
-            for field in ("node_templates", "handle_templates"):
-                candidate_entities = sorted(
-                    graph[field],
-                    key=lambda item: item["uuid"],
-                )
-                applied_entities = sorted(
-                    applied_graph[field],
-                    key=lambda item: item["uuid"],
-                )
-                if not strict_json_equal(candidate_entities, applied_entities):
-                    raise ValueError("Legacy compiler changed its catalog projection")
         validate_graph(
             nodes=[
                 WorkflowNodeWrite.model_validate(item)
@@ -2039,10 +2001,10 @@ class WorkflowService:
             raise ValueError("Source map references a Node outside the Candidate")
 
         applied_nodes = {
-            item["uuid"]: self._semantic_node(item) for item in applied_graph["nodes"]
+            item["uuid"]: cls._semantic_node(item) for item in applied_graph["nodes"]
         }
         applied_edges = {
-            item["uuid"]: self._semantic_edge(item) for item in applied_graph["edges"]
+            item["uuid"]: cls._semantic_edge(item) for item in applied_graph["edges"]
         }
         expected = {
             "created_node_uuids": set(candidate_nodes) - set(applied_nodes),
@@ -2091,9 +2053,7 @@ class WorkflowService:
         if changeset["reserved_metadata_changed"] is not reserved_changed:
             raise ValueError("Changeset reserved metadata flag is inaccurate")
 
-        graph_changed = (
-            workflow_fields_changed or reserved_changed or any(expected.values())
-        )
+        graph_changed = reserved_changed or any(expected.values())
         expected_kind = "graph" if graph_changed else "source_only"
         if changeset["kind"] != expected_kind:
             raise ValueError("Changeset kind does not match graph semantics")

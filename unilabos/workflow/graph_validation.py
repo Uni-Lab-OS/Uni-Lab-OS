@@ -150,8 +150,9 @@ def validate_graph(
             bindings,
         )
         _validate_execution_policy(node.execution_policy)
-        # D-092: executor 选择属于 Scheduler admission；固定 selector 写入保留
-        # executor_binding，未绑定 selector 不得被迫滥用 material_uuid。
+        if _node_kind(node, templates) == "device_action":
+            if node.material_uuid is None:
+                raise GraphValidationError("设备动作节点必须绑定 material_uuid")
 
 
 def _validate_parent_cycles(nodes: Iterable[WorkflowNodeWrite]) -> None:

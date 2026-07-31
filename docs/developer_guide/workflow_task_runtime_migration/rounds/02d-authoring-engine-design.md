@@ -83,9 +83,12 @@ severity, code, message, source_range（能够定位源码时）
 compiler version 仍存在。编程错误（错误的 Python 参数类型、非 UUID workflow identity）
 可以抛 `TypeError`/`ValueError`，Catalog 持久层损坏继续使用 02C 的稳定错误。
 
-给定相同 workflow UUID/revision、source/graph 和 Catalog fingerprint，三条转换必须产生
-字节等价的 normalized source、排序、source map、changeset 和 diagnostics。禁止时间戳、
-随机数、进程 hash、文件系统顺序或 import 执行影响结果。
+给定相同 workflow UUID/revision、已完整持有 UUID anchor 的 source/graph 和 Catalog
+fingerprint，三条转换必须产生字节等价的 normalized source、排序、source map、
+changeset 和 diagnostics。新 persisted Node 和 duplicate-anchor repair 依 D-029/D-030 分配
+真实 UUIDv4；调用方必须先写回返回的 normalized source，再依 anchor 获得稳定
+identity。除这两类明确的 UUIDv4 分配外，禁止时间戳、进程 hash、文件系统顺序或
+import 执行影响结果。
 
 ## 4. Python 模块合同
 
@@ -145,9 +148,14 @@ fixed selector 只写
 `meta_data.unilab.executor_binding={"mode":"fixed","device_id":"..."}`，不滥用
 `material_uuid` 或增加 Backend 顶层字段。
 
-已存在的 anchor 保持 UUID。无 anchor 的新语句以 workflow UUID、规范语句结构和同结构
-出现序号生成稳定 UUIDv5，并在 normalized source 中补上 anchor。重复、nil、格式错误、
-不紧邻 persisted construct 或同时锚定两个 construct 的 comment 均阻止 Candidate。
+已存在的 anchor 保持 UUID。无 anchor 的新语句分配真实 UUIDv4，并在 normalized
+source 中补上 anchor。nil、任何类 anchor 但非精确规范格式、不紧邻 persisted
+construct 或同时锚定两个 construct 的 comment 均阻止 Candidate。
+
+重复 anchor 使用 `DUPLICATE_NODE_UUID` diagnostic，显式携带 `duplicate_uuid`、每个
+`occurrence_ranges` 和 `repair_alternatives`。每个 alternative 用 `retained_range` 命名保留
+历史 identity 的 occurrence，并为其余 occurrence 提供 `source_range + replacement_uuid`
+的新 UUIDv4。该 DTO 是显式 closed model，不用任意 `details` 逃逸字段。
 
 Edge UUID 由 workflow UUID、两端 Node UUID 和两端 Handle UUID 生成稳定 UUIDv5。数据
 Edge 直接连接真实 source/target Handle。source-order dependency 只使用 Catalog 中双方

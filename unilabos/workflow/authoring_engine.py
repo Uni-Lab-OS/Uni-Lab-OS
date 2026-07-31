@@ -16,7 +16,7 @@ from contextlib import contextmanager
 from contextvars import ContextVar
 from dataclasses import dataclass, field
 from typing import Any, Never
-from uuid import UUID, uuid5
+from uuid import UUID, uuid4, uuid5
 
 from unilabos.registry.annotation_schema import (
     NO_DEFAULT,
@@ -41,6 +41,7 @@ from unilabos.workflow.models import (
     CandidateCompilation,
     WorkflowEdgeWrite,
     WorkflowNodeWrite,
+    resolve_template_root_param,
     validate_json_value,
     validate_uuid,
 )
@@ -53,8 +54,9 @@ from unilabos.workflow.schema import (
 _COMPILER_VERSION = "unilab-authoring/v1"
 _ZERO_FINGERPRINT = "sha256:" + "0" * 64
 _ANCHOR = re.compile(
-    r"^#\s*unilab:node_uuid=([^\s#]+)\s*$",
+    r"^# unilab:node_uuid=([^\s#]+)$",
 )
+_ANCHOR_LIKE = re.compile(r"^#\s*unilab:node_uuid")
 _AUTHORING_MODULE = "unilabos.workflow.authoring"
 _DEVICE = f"{_AUTHORING_MODULE}:device"
 _GROUP = f"{_AUTHORING_MODULE}:group"
@@ -76,11 +78,15 @@ class _AuthoringFailure(ValueError):
         message: str,
         *,
         node: ast.AST | None = None,
+        source_range: dict[str, int] | None = None,
+        fields: dict[str, Any] | None = None,
     ) -> None:
         super().__init__(message)
         self.code = code
         self.message = message
         self.node = node
+        self.source_range = source_range
+        self.fields = fields or {}
 
 
 def _fail(
@@ -126,7 +132,11 @@ def _diagnostic(error: _AuthoringFailure, source: str) -> dict[str, Any]:
         "severity": "error",
         "code": error.code,
         "message": error.message,
+        **error.fields,
     }
+    if error.source_range is not None:
+        item["source_range"] = error.source_range
+        return item
     node = error.node
     if node is None:
         return item
@@ -217,34 +227,19 @@ class _BuildState:
     anchors: dict[int, str]
     anchor_lines: set[int]
     input_names: set[str]
+    applied_nodes: dict[str, dict[str, Any]]
+    catalog: _CatalogIndex
     nodes: list[_NodeState] = field(default_factory=list)
     edges: list[dict[str, Any]] = field(default_factory=list)
     results: dict[str, _NodeState] = field(default_factory=dict)
     used_anchors: set[int] = field(default_factory=set)
-    allocated_occurrences: dict[str, int] = field(default_factory=dict)
-
-    @property
-    def applied_nodes(self) -> dict[str, dict[str, Any]]:
-        return {
-            str(item.get("uuid")): item
-            for item in self.applied_graph.get("nodes", [])
-            if isinstance(item, dict)
-        }
 
     def node_uuid(self, statement: ast.stmt) -> str:
         anchor_line = statement.lineno - 1
         if anchor_line in self.anchors:
             self.used_anchors.add(anchor_line)
             return self.anchors[anchor_line]
-        structural = ast.dump(statement, include_attributes=False)
-        occurrence = self.allocated_occurrences.get(structural, 0)
-        self.allocated_occurrences[structural] = occurrence + 1
-        return str(
-            uuid5(
-                UUID(self.workflow_uuid),
-                f"authoring-node:{structural}:{occurrence}",
-            )
-        )
+        return str(uuid4())
 
 
 class _CatalogIndex:
@@ -292,7 +287,6 @@ class WorkflowAuthoringEngine:
     """把一个稳定 Template Catalog snapshot 深化为三个纯 Authoring transform。"""
 
     compiler_version = _COMPILER_VERSION
-    catalog_projection_policy = "referenced_snapshot"
 
     def __init__(
         self,
@@ -536,6 +530,7 @@ def _compile_with_snapshot(
     python_source: str,
     source_uri: str,
     applied_graph: dict[str, Any],
+    prove_normalized: bool = True,
 ) -> CandidateCompilation:
     del source_uri
     try:
@@ -569,6 +564,8 @@ def _compile_with_snapshot(
             anchors=anchors,
             anchor_lines=anchor_lines,
             input_names={item["name"] for item in input_contract["parameters"]},
+            applied_nodes={item["uuid"]: item for item in applied["nodes"]},
+            catalog=_CatalogIndex(snapshot),
         )
         executable, return_statement = _function_body(function)
         if executable == [None]:
@@ -602,6 +599,25 @@ def _compile_with_snapshot(
         )
         _validate_built_graph(graph)
         normalized, source_map = _render_graph(graph)
+        if prove_normalized:
+            proof = _compile_with_snapshot(
+                snapshot=snapshot,
+                workflow_uuid=workflow_uuid,
+                workflow_revision=workflow_revision,
+                python_source=normalized,
+                source_uri="authoring://normalized-proof",
+                applied_graph=graph,
+                prove_normalized=False,
+            )
+            if (
+                not proof.valid
+                or not _semantic_graph_equal(proof.graph, graph)
+                or proof.normalized_python_source != normalized
+            ):
+                _fail(
+                    "round_trip_mismatch",
+                    "规范 Python 不能回编译为等价 Candidate graph",
+                )
         changeset = _changeset(graph, applied)
         return CandidateCompilation(
             diagnostics=[],
@@ -660,6 +676,37 @@ def _require_graph_identity(
     workflow = graph.get("workflow")
     if not isinstance(workflow, dict):
         _fail("candidate_invalid", "Candidate graph 缺少 Workflow")
+    required_workflow_fields = {
+        "uuid",
+        "create_time",
+        "update_time",
+        "meta_data",
+        "name",
+        "tags",
+        "revision",
+    }
+    if not required_workflow_fields.issubset(workflow):
+        _fail("candidate_invalid", "Candidate Workflow 读取字段不完整")
+    if (
+        not isinstance(workflow["create_time"], str)
+        or not workflow["create_time"]
+        or not isinstance(workflow["update_time"], str)
+        or not workflow["update_time"]
+        or not isinstance(workflow["meta_data"], dict)
+        or not isinstance(workflow["name"], str)
+        or not workflow["name"].strip()
+        or not isinstance(workflow["tags"], list)
+        or (
+            workflow.get("description") is not None
+            and not isinstance(workflow.get("description"), str)
+        )
+    ):
+        _fail("candidate_invalid", "Candidate Workflow 读取形状不正确")
+    try:
+        validate_json_value(workflow["meta_data"])
+        validate_json_value(workflow["tags"])
+    except (TypeError, ValueError):
+        _fail("candidate_invalid", "Candidate Workflow JSON 字段不正确")
     if (
         workflow.get("uuid") != workflow_uuid
         or workflow.get("revision") != workflow_revision
@@ -671,6 +718,8 @@ def _require_graph_identity(
     for key in ("nodes", "edges", "node_templates", "handle_templates"):
         if not isinstance(graph.get(key), list):
             _fail("candidate_invalid", f"Candidate graph {key} 必须是数组")
+        if any(not isinstance(item, dict) for item in graph[key]):
+            _fail("candidate_invalid", f"Candidate graph {key} 成员必须是对象")
     return _detached(graph)
 
 
@@ -837,6 +886,13 @@ def _workflow_declaration(
             "workflow_definition 只接受命名 literal",
             node=decorator,
         )
+    keyword_names = [str(item.arg) for item in decorator.keywords]
+    if len(keyword_names) != len(set(keyword_names)):
+        _fail(
+            "invalid_workflow_declaration",
+            "workflow_definition 命名字段不能重复",
+            node=decorator,
+        )
     raw = {item.arg: item.value for item in decorator.keywords if item.arg}
     if set(raw) - {"workflow_uuid", "displayname", "description"} or not {
         "workflow_uuid",
@@ -959,9 +1015,18 @@ def _workflow_parameters(
         _fail(error.code, error.message, node=function)
 
 
+def _token_source_range(token: tokenize.TokenInfo) -> dict[str, int]:
+    return {
+        "start_line": token.start[0],
+        "start_column": token.start[1] + 1,
+        "end_line": token.end[0],
+        "end_column": token.end[1] + 1,
+    }
+
+
 def _source_anchors(source: str) -> tuple[dict[int, str], set[int]]:
     anchors: dict[int, str] = {}
-    seen_uuids: set[str] = set()
+    occurrences: dict[str, list[dict[str, int]]] = {}
     try:
         tokens = tokenize.generate_tokens(io.StringIO(source).readline)
         for token in tokens:
@@ -969,24 +1034,68 @@ def _source_anchors(source: str) -> tuple[dict[int, str], set[int]]:
                 continue
             match = _ANCHOR.fullmatch(token.string)
             if match is None:
+                if _ANCHOR_LIKE.match(token.string):
+                    raise _AuthoringFailure(
+                        "invalid_node_anchor",
+                        "Node UUID anchor 必须使用唯一规范格式",
+                        source_range=_token_source_range(token),
+                    )
                 continue
             try:
                 node_uuid = validate_uuid(match.group(1))
             except (TypeError, ValueError):
-                _fail(
+                raise _AuthoringFailure(
                     "invalid_node_anchor",
                     "Node UUID anchor 必须是非 nil UUID",
+                    source_range=_token_source_range(token),
                 )
             line = token.start[0]
-            if line in anchors or node_uuid in seen_uuids:
-                _fail(
+            if line in anchors:
+                raise _AuthoringFailure(
                     "invalid_node_anchor",
-                    "Node UUID anchor 不能重复",
+                    "同一源码行不能声明多个 Node UUID anchor",
+                    source_range=_token_source_range(token),
                 )
             anchors[line] = node_uuid
-            seen_uuids.add(node_uuid)
+            occurrences.setdefault(node_uuid, []).append(_token_source_range(token))
     except (IndentationError, tokenize.TokenError):
         _fail("python_syntax_error", "Python source token 不完整")
+    for node_uuid, source_ranges in occurrences.items():
+        if len(source_ranges) < 2:
+            continue
+        allocated: set[str] = set()
+        alternatives = []
+        for retained_index, retained_range in enumerate(source_ranges):
+            replacements = []
+            for occurrence_index, source_range in enumerate(source_ranges):
+                if occurrence_index == retained_index:
+                    continue
+                replacement_uuid = str(uuid4())
+                while replacement_uuid in allocated:
+                    replacement_uuid = str(uuid4())
+                allocated.add(replacement_uuid)
+                replacements.append(
+                    {
+                        "source_range": source_range,
+                        "replacement_uuid": replacement_uuid,
+                    }
+                )
+            alternatives.append(
+                {
+                    "retained_range": retained_range,
+                    "replacements": replacements,
+                }
+            )
+        raise _AuthoringFailure(
+            "DUPLICATE_NODE_UUID",
+            f"Node UUID {node_uuid} 在源码中重复，必须选择一个保留 identity",
+            source_range=source_ranges[0],
+            fields={
+                "duplicate_uuid": node_uuid,
+                "occurrence_ranges": source_ranges,
+                "repair_alternatives": alternatives,
+            },
+        )
     return anchors, set(anchors)
 
 
@@ -1159,8 +1268,7 @@ def _parse_action(
             "Action keyword 不能重复",
             node=call,
         )
-    catalog = _CatalogIndex(state.snapshot)
-    template, handles = catalog.action(
+    template, handles = state.catalog.action(
         selector.class_identity,
         call.func.attr,
         node=call,
@@ -1170,9 +1278,10 @@ def _parse_action(
     applied = state.applied_nodes.get(node_uuid, {})
     meta_data = _node_metadata(applied.get("meta_data"), selector)
     input_bindings: dict[str, dict[str, str]] = {}
-    param = _detached(template.get("goal_default") or {})
-    if not isinstance(param, dict):
-        param = {}
+    param = resolve_template_root_param(
+        template.get("goal_default"),
+        template.get("goal"),
+    )
     pending_edges: list[dict[str, Any]] = []
     input_names = state.input_names
     for keyword_node in call.keywords:
@@ -1259,6 +1368,9 @@ def _parse_group(
             "group 只接受 name keyword",
             node=context,
         )
+    keyword_names = [str(item.arg) for item in context.keywords]
+    if len(keyword_names) != len(set(keyword_names)):
+        _fail("invalid_group", "group 命名字段不能重复", node=context)
     keywords = {item.arg: item.value for item in context.keywords if item.arg}
     if set(keywords) != {"name"}:
         _fail(
@@ -1272,7 +1384,7 @@ def _parse_group(
     group_name = name_node.value.strip()
     if not group_name:
         _fail("invalid_group", "group name 不能为空", node=name_node)
-    template, handles = _CatalogIndex(state.snapshot).group(node=statement)
+    template, handles = state.catalog.group(node=statement)
     group_uuid = state.node_uuid(statement)
     applied = state.applied_nodes.get(group_uuid, {})
     meta_data = _node_metadata(applied.get("meta_data"), None)
@@ -1859,6 +1971,7 @@ def _generate_with_snapshot(
             python_source=source,
             source_uri="authoring://round-trip-proof",
             applied_graph=candidate,
+            prove_normalized=False,
         )
         if (
             not recompiled.valid
@@ -2004,23 +2117,6 @@ def _render_graph(graph: dict[str, Any]) -> tuple[str, list[dict[str, Any]]]:
 
     selectors, selector_by_node = _render_selectors(nodes, templates)
     needs = _annotation_import_needs(input_contract)
-    emitter = _Emitter()
-    if needs["typing"]:
-        emitter.emit(f"from typing import {', '.join(sorted(needs['typing']))}")
-    if needs["field"]:
-        emitter.emit("from pydantic import Field")
-    device_imports: dict[str, set[str]] = {}
-    for class_identity, _device_id in selectors:
-        module, symbol = class_identity.rsplit(":", 1)
-        device_imports.setdefault(module, set()).add(symbol)
-    for module in sorted(device_imports):
-        emitter.emit(
-            f"from {module} import {', '.join(sorted(device_imports[module]))}"
-        )
-    if needs["json_value"]:
-        emitter.emit("from unilabos.registry.annotations import JSONValue")
-    if needs["resource_slot"]:
-        emitter.emit("from unilabos.registry.placeholder_type import ResourceSlot")
     markers = {"workflow_definition", "workflow_output"}
     if selectors:
         markers.add("device")
@@ -2030,13 +2126,42 @@ def _render_graph(graph: dict[str, Any]) -> tuple[str, list[dict[str, Any]]]:
         markers.add("group")
     if any(len(layer) > 1 for layer in root_layers):
         markers.add("parallel")
+
+    emitter = _Emitter()
+    if needs["typing"]:
+        emitter.emit(f"from typing import {', '.join(sorted(needs['typing']))}")
+    if needs["field"]:
+        emitter.emit("from pydantic import Field")
+    reserved_import_names = {
+        *needs["typing"],
+        *markers,
+        "Field",
+        "JSONValue",
+        "ResourceSlot",
+    }
+    class_import_names: dict[str, str] = {}
+    for class_identity in sorted({key[0] for key in selectors}):
+        module, symbol = class_identity.rsplit(":", 1)
+        imported_name = symbol
+        suffix = 2
+        while imported_name in reserved_import_names:
+            imported_name = f"{symbol}_{suffix}"
+            suffix += 1
+        reserved_import_names.add(imported_name)
+        class_import_names[class_identity] = imported_name
+        alias = "" if imported_name == symbol else f" as {imported_name}"
+        emitter.emit(f"from {module} import {symbol}{alias}")
+    if needs["json_value"]:
+        emitter.emit("from unilabos.registry.annotations import JSONValue")
+    if needs["resource_slot"]:
+        emitter.emit("from unilabos.registry.placeholder_type import ResourceSlot")
     emitter.emit(
         "from unilabos.workflow.authoring import " + ", ".join(sorted(markers))
     )
     emitter.emit()
     emitter.emit()
     for (class_identity, device_id), local_name in selectors.items():
-        symbol = class_identity.rsplit(":", 1)[1]
+        symbol = class_import_names[class_identity]
         argument = "" if device_id is None else repr(device_id)
         emitter.emit(f"{local_name}: {symbol} = device({argument})")
     if selectors:
@@ -2201,9 +2326,7 @@ def _render_selectors(
     dict[tuple[str, str | None], str],
     dict[str, str],
 ]:
-    selectors: dict[tuple[str, str | None], str] = {}
-    by_node: dict[str, str] = {}
-    used: set[str] = set()
+    selector_key_by_node: dict[str, tuple[str, str | None]] = {}
     for node in nodes:
         if _is_group_node(node, templates):
             continue
@@ -2234,17 +2357,25 @@ def _render_selectors(
                 _fail("candidate_invalid", "executor_binding 不符合固定 selector 合同")
             device_id = executor["device_id"]
         key = (class_identity, device_id)
-        local = selectors.get(key)
-        if local is None:
-            base = _snake_case(class_identity.rsplit(":", 1)[1], "device")
-            local = base
-            suffix = 2
-            while local in used:
-                local = f"{base}_{suffix}"
-                suffix += 1
-            used.add(local)
-            selectors[key] = local
-        by_node[node["uuid"]] = local
+        selector_key_by_node[node["uuid"]] = key
+
+    selectors: dict[tuple[str, str | None], str] = {}
+    used: set[str] = set()
+    for class_identity, device_id in sorted(
+        set(selector_key_by_node.values()),
+        key=lambda item: (item[0], item[1] is not None, item[1] or ""),
+    ):
+        base = _snake_case(class_identity.rsplit(":", 1)[1], "device")
+        local = base
+        suffix = 2
+        while local in used:
+            local = f"{base}_{suffix}"
+            suffix += 1
+        used.add(local)
+        selectors[(class_identity, device_id)] = local
+    by_node = {
+        node_uuid: selectors[key] for node_uuid, key in selector_key_by_node.items()
+    }
     return selectors, by_node
 
 
