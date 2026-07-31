@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import ctypes
+import hashlib
 import multiprocessing
 import os
 import threading
@@ -14,6 +15,7 @@ from uuid import UUID
 import pytest
 
 from unilabos.workflow import composition, source_discovery
+from unilabos.workflow.models import CandidateCompilation
 from unilabos.workflow.service import (
     WorkflowConflict,
     WorkflowError,
@@ -40,6 +42,40 @@ START_FAILURE = "Round 02F 注入的 monitor start 主失败"
 STOP_FAILURE = "Round 02F 注入的 monitor stop 清理失败"
 RECOVERY_FAILURE = "Round 02F 注入的 startup recovery 主失败"
 CLOSE_FAILURE = "Round 02F 注入的 Service.close 清理失败"
+
+
+class SourceOnlyCompiler:
+    compiler_version = "round-02f-cas-read-budget-v1"
+    template_catalog_fingerprint = f"sha256:{'b' * 64}"
+
+    def compile(
+        self,
+        *,
+        workflow_uuid: str,
+        workflow_revision: int,
+        python_source: str,
+        source_uri: str,
+        applied_graph: dict[str, Any],
+    ) -> CandidateCompilation:
+        del workflow_uuid, workflow_revision, source_uri
+        return CandidateCompilation(
+            diagnostics=[],
+            graph=applied_graph,
+            normalized_python_source=python_source,
+            source_map=[],
+            changeset={
+                "kind": "source_only",
+                "created_node_uuids": [],
+                "updated_node_uuids": [],
+                "deleted_node_uuids": [],
+                "created_edge_uuids": [],
+                "updated_edge_uuids": [],
+                "deleted_edge_uuids": [],
+                "reserved_metadata_changed": False,
+            },
+            compiler_version=self.compiler_version,
+            template_catalog_fingerprint=self.template_catalog_fingerprint,
+        )
 
 
 @pytest.fixture(autouse=True)
@@ -796,3 +832,116 @@ def test_service_rejects_external_source_larger_than_eight_mib_without_event(
         events_after,
     ) == ("draft_missing", expected_outcomes, True, events_before)
     assert events_before == []
+
+
+def test_save_draft_cas_bounds_target_temporary_and_published_source_reads(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    store = WorkflowStore(tmp_path / "workflow.db")
+    service = WorkflowService(store, compiler=SourceOnlyCompiler())
+    package_root = tmp_path / "package"
+    source = package_root / "workflows" / "demo.py"
+    source.parent.mkdir(parents=True)
+    source.write_text("value = 'initial'\n", encoding="utf-8")
+    service.create_workflow(
+        name="CAS source read budget contract",
+        tags=[],
+        description=None,
+        meta_data={},
+        workflow_uuid=WORKFLOW_A_UUID,
+    )
+    service.register_editable_source(
+        workflow_uuid=WORKFLOW_A_UUID,
+        package_id="cas_read_budget_contract",
+        package_root=package_root,
+        relative_path="workflows/demo.py",
+    )
+    baseline = service.get_authoring(WORKFLOW_A_UUID)
+    read_observations: list[tuple[int, int | None]] = []
+    original_read_regular_fd = WorkflowService._read_regular_fd
+
+    def observe_regular_read(
+        descriptor: int,
+        *,
+        byte_limit: int | None = None,
+    ) -> bytes:
+        read_observations.append((os.fstat(descriptor).st_size, byte_limit))
+        return original_read_regular_fd(descriptor, byte_limit=byte_limit)
+
+    monkeypatch.setattr(
+        WorkflowService,
+        "_read_regular_fd",
+        staticmethod(observe_regular_read),
+    )
+    original_atomic_write = service._atomic_write
+    grow_before_cas = False
+    oversized_bytes = b"E" * (SOURCE_BYTE_LIMIT + 1)
+
+    def atomic_write_after_optional_growth(*args: Any, **kwargs: Any) -> None:
+        if grow_before_cas:
+            source.write_bytes(oversized_bytes)
+        original_atomic_write(*args, **kwargs)
+
+    monkeypatch.setattr(
+        service,
+        "_atomic_write",
+        atomic_write_after_optional_growth,
+    )
+    phase_a = service.save_draft(
+        WORKFLOW_A_UUID,
+        python_source="value = 'bounded successful save'\n",
+        expected_draft_hash=baseline["draft"]["draft_hash"],
+        expected_workflow_revision=1,
+    )
+    successful_read_observations = tuple(read_observations)
+    read_observations.clear()
+    record_before_conflict = store.get_authoring_record(WORKFLOW_A_UUID)
+    events_before_conflict = service.list_events(after_id=0)["items"]
+    grow_before_cas = True
+    conflict: WorkflowConflict | None = None
+    try:
+        service.save_draft(
+            WORKFLOW_A_UUID,
+            python_source="value = 'must not replace external growth'\n",
+            expected_draft_hash=phase_a["draft"]["draft_hash"],
+            expected_workflow_revision=1,
+        )
+    except WorkflowConflict as error:
+        conflict = error
+    conflict_read_observations = tuple(read_observations)
+    record_after_conflict = store.get_authoring_record(WORKFLOW_A_UUID)
+    events_after_conflict = service.list_events(after_id=0)["items"]
+    canonical_size = source.stat().st_size
+    with source.open("rb") as stream:
+        canonical_hash = hashlib.file_digest(stream, "sha256").hexdigest()
+    remaining_names = sorted(path.name for path in source.parent.iterdir())
+    store.close()
+
+    expected_limit = SOURCE_BYTE_LIMIT
+    assert successful_read_observations
+    assert conflict_read_observations
+    assert (
+        conflict.code if conflict is not None else None,
+        canonical_size,
+        canonical_hash,
+        remaining_names,
+        record_after_conflict == record_before_conflict,
+        events_after_conflict,
+    ) == (
+        "draft_hash_conflict",
+        len(oversized_bytes),
+        hashlib.sha256(oversized_bytes).hexdigest(),
+        [source.name],
+        True,
+        events_before_conflict,
+    )
+    successful_limits = [limit for _size, limit in successful_read_observations]
+    conflict_limits = [limit for _size, limit in conflict_read_observations]
+    assert successful_limits == [expected_limit] * len(successful_limits) and (
+        conflict_limits == [expected_limit] * len(conflict_limits)
+    ), (
+        "每次 CAS target/temporary/published source read 都必须显式受 8 MiB 限制；"
+        f"successful={successful_read_observations!r}, "
+        f"target_growth={conflict_read_observations!r}"
+    )
