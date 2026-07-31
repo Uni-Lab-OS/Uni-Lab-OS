@@ -183,18 +183,22 @@ def transfer(...) -> {
     {
       "name": "sample",
       "schema": {"$slot": "ResourceSlot"},
-      "title": "转移后样品"
+      "title": "转移后样品",
+      "implicit": false
     },
     {
       "name": "transferred_volume",
-      "schema": {"type": "number", "minimum": 0}
+      "schema": {"type": "number", "minimum": 0},
+      "implicit": false
     }
   ]
 }
 ```
 
-显式 result record 不写 `implicit`；D-068 的隐式同名 ResourceSlot output 由未来
-Registry/Catalog 投影在本 parser 之后合成。
+显式 result record 的输入 descriptor 不主动写 `implicit`；既有
+`parse_output_contract` canonical Authority 会为它物化 `implicit: false`。
+D-068 的隐式同名 ResourceSlot output 由未来 Registry/Catalog 投影在本 parser
+之后合成。
 
 `AllowedResourceTemplates` 仍只保存 defining module 中的静态
 `module:symbol` identity。本轮不解析 UUID。
