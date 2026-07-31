@@ -1,6 +1,6 @@
 # Phase 01A：单工作区 Authority 与单向 Authoring 设计
 
-状态：**最终风险评审发现 Catalog/Store 锁序反转，正在按本节快照合同修正；本文件是 Round 14 旧并发/writeback 方案的替代契约。**
+状态：**Catalog/Store 锁序修正已实现并通过完整测试，等待最终风险复审；本文件是 Round 14 旧并发/writeback 方案的替代契约。**
 
 基线：`2a394737ec7a36f8710e0af27472953451c308bc`
 
