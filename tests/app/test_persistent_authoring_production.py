@@ -200,7 +200,7 @@ def test_real_server_uses_one_real_engine_for_all_authoring_paths(
             json={
                 "workflow_uuid": WORKFLOW_UUID,
                 "revision": startup["workflow_revision"],
-                "source_uri": startup["provenance"]["source_uri"],
+                "source_uri": startup["draft"]["source_uri"],
                 "python_source": startup["draft"]["python_source"],
                 "applied_graph": startup["applied_graph"],
             },
