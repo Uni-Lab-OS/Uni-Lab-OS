@@ -7,7 +7,10 @@ from copy import deepcopy
 from dataclasses import dataclass, fields, is_dataclass
 from typing import Any, Protocol
 
-from unilabos.workflow.graph_validation import declared_handle_type_matches
+from unilabos.workflow.graph_validation import (
+    declared_handle_type_matches,
+    workflow_schema_matches_handle_type,
+)
 from unilabos.workflow.models import validate_uuid
 from unilabos.workflow.schema import (
     WorkflowSchemaError,
@@ -259,7 +262,7 @@ def _closed_resolved_slot(value: Any) -> ResolvedResourceSlot:
 def _validate_graph_bindings(
     graph: Mapping[str, Any],
     contract: Mapping[str, Any],
-) -> dict[str, dict[str, str]]:
+) -> dict[str, dict[str, Any]]:
     graph_nodes = graph.get("nodes")
     graph_handles = graph.get("handle_templates")
     if type(graph_nodes) is not list or type(graph_handles) is not list:
@@ -271,9 +274,9 @@ def _validate_graph_bindings(
         if handle["uuid"] in handles:
             raise TaskInputError()
         handles[handle["uuid"]] = handle
-    parameter_names = {parameter["name"] for parameter in contract["parameters"]}
+    parameters = {parameter["name"]: parameter for parameter in contract["parameters"]}
 
-    bindings: dict[str, dict[str, str]] = {}
+    bindings: dict[str, dict[str, Any]] = {}
     seen_nodes: set[str] = set()
     for node in graph_nodes:
         if type(node) is not dict or type(node.get("uuid")) is not str:
@@ -306,11 +309,13 @@ def _validate_graph_bindings(
                 type(raw_binding) is not dict
                 or set(raw_binding) != {"parameter"}
                 or type(raw_binding.get("parameter")) is not str
-                or raw_binding["parameter"] not in parameter_names
+                or raw_binding["parameter"] not in parameters
             ):
                 raise TaskInputError()
+            parameter = parameters[raw_binding["parameter"]]
             bindings[f"{node_uuid}:{handle_uuid}"] = {
-                "parameter": raw_binding["parameter"]
+                "parameter": raw_binding["parameter"],
+                "schema": deepcopy(parameter["schema"]),
             }
     return bindings
 
@@ -320,7 +325,7 @@ def _bind_active_plan(
     execution_plan: Mapping[str, Any],
     jobs: Sequence[Mapping[str, Any]],
     *,
-    bindings: Mapping[str, Mapping[str, str]],
+    bindings: Mapping[str, Mapping[str, Any]],
     resolved_input: Mapping[str, Any],
 ) -> tuple[dict[str, Any], list[dict[str, Any]]]:
     plan = deepcopy(execution_plan)
@@ -401,6 +406,11 @@ def _bind_active_plan(
             binding_value = (
                 resolved_input[binding["parameter"]] if binding is not None else None
             )
+            if binding is not None and not workflow_schema_matches_handle_type(
+                binding["schema"],
+                handle.get("type"),
+            ):
+                raise TaskInputError()
             if has_static and not declared_handle_type_matches(
                 raw_param[data_key],
                 handle.get("type"),
