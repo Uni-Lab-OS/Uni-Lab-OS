@@ -12,16 +12,57 @@ MAX_BACKEND_JSON_DEPTH = 10_000
 
 _JSON_NUMBER = re.compile(r"-?(?:0|[1-9][0-9]*)(?:\.[0-9]+)?(?:[eE][+-]?[0-9]+)?")
 _JSON_WHITESPACE = " \t\r\n"
+_JSON_INTEGER_CHUNK_DIGITS = 9
+_JSON_INTEGER_CHUNK_BASE = 10**_JSON_INTEGER_CHUNK_DIGITS
 _MISSING = object()
+
+
+def _decode_json_integer(raw: str) -> int:
+    """分块解码任意位数的 JSON integer，不改变解释器全局限制。"""
+
+    negative = raw.startswith("-")
+    digits = raw[1:] if negative else raw
+    first_width = len(digits) % _JSON_INTEGER_CHUNK_DIGITS
+    if first_width == 0:
+        first_width = _JSON_INTEGER_CHUNK_DIGITS
+    value = int(digits[:first_width])
+    for offset in range(first_width, len(digits), _JSON_INTEGER_CHUNK_DIGITS):
+        value = value * _JSON_INTEGER_CHUNK_BASE + int(
+            digits[offset : offset + _JSON_INTEGER_CHUNK_DIGITS]
+        )
+    return -value if negative else value
+
+
+def _encode_json_integer(value: int) -> str:
+    """分块编码任意位数的 JSON integer，不改变解释器全局限制。"""
+
+    if value == 0:
+        return "0"
+    negative = value < 0
+    remaining = -value if negative else value
+    chunks: list[int] = []
+    while remaining:
+        remaining, chunk = divmod(remaining, _JSON_INTEGER_CHUNK_BASE)
+        chunks.append(chunk)
+    parts = [str(chunks.pop())]
+    while chunks:
+        parts.append(f"{chunks.pop():0{_JSON_INTEGER_CHUNK_DIGITS}d}")
+    encoded = "".join(parts)
+    return f"-{encoded}" if negative else encoded
 
 
 def decode_json_bytes(
     body: bytes,
     *,
     max_depth: int = MAX_BACKEND_JSON_DEPTH,
+    max_integer_digits: int | None = None,
 ) -> Any:
     """在不修改 Python 递归上限的情况下解码一个 UTF-8 JSON 值。"""
 
+    if max_integer_digits is not None and (
+        type(max_integer_digits) is not int or max_integer_digits < 1
+    ):
+        raise ValueError("JSON integer digit limit must be a positive integer")
     text = body.decode("utf-8")
     length = len(text)
     position = 0
@@ -98,7 +139,10 @@ def decode_json_bytes(
             if not math.isfinite(value):
                 raise ValueError("JSON numbers must be finite")
         else:
-            value = int(raw)
+            digit_count = len(raw) - int(raw.startswith("-"))
+            if max_integer_digits is not None and digit_count > max_integer_digits:
+                raise ValueError("JSON integer exceeds the external digit limit")
+            value = _decode_json_integer(raw)
         deliver(value)
         return match.end()
 
@@ -186,7 +230,7 @@ def encode_json(value: Any, *, sort_keys: bool = False) -> bytes:
         elif type(item) is bool:
             output.append("true" if item else "false")
         elif type(item) is int:
-            output.append(str(item))
+            output.append(_encode_json_integer(item))
         elif type(item) is float:
             if not math.isfinite(item):
                 raise ValueError("JSON numbers must be finite")
