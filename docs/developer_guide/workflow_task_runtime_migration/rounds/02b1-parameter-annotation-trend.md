@@ -127,14 +127,15 @@ Parameter Annotation 目标：159 passed
 02A Schema/route 累计：212 passed
 Registry：185 passed
 Workflow：644 passed
-正式 tests：1215 passed, 3 skipped, 19 warnings
+正式 tests：1215 passed, 3 skipped, 18 warnings
 Ruff E/F/I：passed
 Ruff format --check：passed
 git diff --check：passed
 ```
 
-warnings 均来自既有 FastAPI、ROS test class、SOCKS 可选依赖与 lifespan
-deprecated 提示；没有本轮新增 warning。
+warnings 均来自既有 FastAPI、ROS test class 与 lifespan deprecated 提示；
+没有本轮新增 warning。前一次全量额外触发 1 个既有 SOCKS 可选依赖提示，因此
+warning 计数在 18～19 间波动，不影响测试结论。
 
 ## 5. 问题趋势
 
