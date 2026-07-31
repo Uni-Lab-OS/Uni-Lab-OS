@@ -113,6 +113,21 @@ Catalog snapshot 是 OS 内部编译器 Adapter 的窄 Interface，不进入 HTT
 或锁定 Catalog。这样既保留“Catalog 在 Apply 线性化点稳定”的语义，也避免一条
 路径持 Catalog 后访问 Store、另一条路径持 Store 后访问 Catalog 所形成的环锁。
 
+snapshot guard 的退出是 cleanup-only 合同：不得吞掉 Apply body 的异常，也不得
+抛出新的异常。Service 必须对违反合同的 Adapter 做防御：
+
+- guard 进入失败发生在 Store 之前，映射为
+  `503 template_catalog_unavailable`；
+- body 已有 Draft/Catalog/Store 冲突或回滚异常时，退出失败只记录诊断，原异常
+  继续传播；
+- Store 已提交后，退出失败只记录诊断，Apply 仍返回成功结果。不得向客户端返回
+  一个暗示可以重试的失败，因为 Candidate 已消费、Applied Source 已持久化。
+
+该防御不把 guard cleanup failure 变成业务 warning，也不改变 Apply `warnings=[]`
+的公共合同；它是编译器 Adapter 的可观测实现故障。可选 snapshot 能力必须与主
+`AuthoringCompiler` Protocol 分开表达，以便不可变/无状态测试 Adapter 的
+fingerprint fallback 与静态 Interface 一致。
+
 coding-agent、Git 或编辑器不受 OS 文件锁约束，因此不能要求文件系统与 SQLite
 共享一个墙钟提交瞬间。在线性化点之后发生的外部写入定义为后续的新 dirty Draft
 编辑：Apply 可以提交刚才验证的不可变 Candidate，OS 必须保留外部文件，随后通过

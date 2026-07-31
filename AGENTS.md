@@ -854,6 +854,14 @@ ResourceDict（`unilabos/resources/resource_tracker.py`）是全系统唯一内�
   callback. The transaction writes the complete graph, applied source, source
   map, and new revision. Source-only Apply updates authoring state without
   advancing graph revision.
+- Treat the Catalog snapshot guard as a cleanup-only internal capability. Its
+  exit must neither suppress an Apply body exception nor raise a new exception.
+  Service adapters must defend against a broken guard: preserve the original
+  conflict or rollback exception while unwinding, and preserve the successful
+  Apply response if Store has already committed. Log the guard cleanup failure
+  for operator diagnosis; never turn a committed Apply into an ambiguous HTTP
+  failure. Guard entry failures remain `template_catalog_unavailable` before
+  Store is entered.
 - Create a local WorkflowTask and copy its exact `workflow_snapshot` in the
   same database transaction. The Scheduler consumes only the snapshot and
   never reads or compiles the live draft file.
