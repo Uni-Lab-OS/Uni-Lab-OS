@@ -843,16 +843,19 @@ ResourceDict（`unilabos/resources/resource_tracker.py`）是全系统唯一内�
   not change the persisted graph, create a WorkflowTask, or replace the last
   applied source association unless compilation succeeds and the candidate is
   explicitly applied through the OS Authoring Apply Interface.
-- Explicit local Apply checks Workflow revision and draft source hash, then
-  writes the complete graph, normalized applied source, source map, and new
-  revision in one SQLite transaction. Source-only Apply updates authoring state
-  without advancing graph revision.
+- Explicit local Apply accepts one opaque server-issued Candidate hash. It
+  resolves the bound Workflow revision and Draft hash on the server, checks
+  that the Candidate's normalized source has already been materialized as the
+  package Draft, then writes the complete graph, applied source, source map,
+  and new revision in one SQLite transaction. Source-only Apply updates
+  authoring state without advancing graph revision.
 - Create a local WorkflowTask and copy its exact `workflow_snapshot` in the
   same database transaction. The Scheduler consumes only the snapshot and
   never reads or compiles the live draft file.
-- After database commit, normalized source may be written back to the editable
-  file. Failure makes the Draft stale and recoverable from
-  `workflow_authoring`; it does not invalidate the committed Workflow.
+- Apply never writes the editable file after database commit. If normalized
+  source differs from the current Draft, require the caller to accept the full
+  diff and save that source through Draft PUT before Apply. Applied Source and
+  the materialized Draft bytes therefore agree at commit time.
 - Persisted graphs remain independently readable and executable without a
   current draft file. Missing or stale Drafts are authoring-state conditions,
   not runtime dependencies.
@@ -892,6 +895,11 @@ ResourceDict（`unilabos/resources/resource_tracker.py`）是全系统唯一内�
   history. Set `BasicConfig.working_dir` once at startup to the workspace's
   ignored `unilabos_data` child; never hot-switch it or inherit the legacy
   `~/.unilabos/*.db` Scheduler defaults.
+- Run exactly one OS Workflow Authority process for one `working_dir`. Acquire
+  a non-blocking process lease before opening `workflow.db`; reject a second OS
+  process for the same workspace instead of supporting concurrent Store/schema
+  initialization. One Authority may manage and execute many Workflows, and
+  per-Workflow Authoring locks remain independent.
 - A registered editable package's version-controlled `workflows/*.py` is the
   only Authoring Draft. Do not create another editable
   `working_dir/workflows/<uuid>/workflow.py`. Keep `workflow.db`, logs, package
@@ -903,10 +911,10 @@ ResourceDict（`unilabos/resources/resource_tracker.py`）是全系统唯一内�
   paths, traversal, symlinks, and non-regular files. A compiler declaration or
   blind `.py` scan is not a durable source-identity registry.
 - The package file is authority for Draft saves and external coding-agent/Git
-  edits; SQLite is authority for Apply and execution. Reconcile file-first Draft
-  changes into derived Candidate/event state, but commit Apply to SQLite before
-  an explicitly accepted normalized-source writeback. Never let failure on one
-  side roll the other authority back to stale content.
+  edits; SQLite is authority for Apply and execution. Reconcile file-first
+  Draft changes into derived Candidate/event state. Materialize an explicitly
+  accepted normalized source through Draft PUT before Apply; Apply itself is a
+  pure SQLite transaction and has no post-commit file writeback.
 - Reconcile registered sources at startup. A missing or renamed package file
   produces nullable Draft/Candidate state without deleting the Applied
   Workflow, and Authoring GET must not recreate it. Restore only the registered
@@ -931,15 +939,16 @@ ResourceDict（`unilabos/resources/resource_tracker.py`）是全系统唯一内�
   Matching Draft writes save even invalid source and compile it for diagnostics;
   they never Apply, advance Workflow revision, create a WorkflowTask, or
   dispatch a device.
-- Authoring Apply accepts only the expected Draft hash, Workflow revision, and
-  opaque server-issued Candidate hash. Never accept a client-provided graph,
-  reserved metadata, normalized source, source map, compiler version, or
+- Authoring Apply accepts only one opaque server-issued `candidate_hash`.
+  Never accept separate client-provided Draft/revision tokens, graph, reserved
+  metadata, normalized source, source map, compiler version, or
   template-catalog data in the Apply request.
-- Bind Candidate hash to the complete graph-semantic Apply bundle, normalized
-  source/source map, compiler version, and authority-scoped catalog
-  fingerprint. Recheck all three tokens and revalidate the server-owned
-  Candidate under the per-Workflow lock before the atomic SQLite transaction.
-  Apply does not create or run a WorkflowTask.
+- Bind Candidate hash to the Draft hash, Workflow base revision, complete
+  graph-semantic Apply bundle, normalized source/source map, compiler version,
+  and authority-scoped catalog fingerprint. Resolve and recheck those
+  server-owned facts under the per-Workflow lock, require the normalized source
+  to equal the current Draft bytes, and revalidate the Candidate before the
+  atomic SQLite transaction. Apply does not create or run a WorkflowTask.
 - Authoring GET and successful Draft PUT return one self-consistent aggregate
   containing current Backend-shaped Applied Graph, nullable Draft, nullable
   current Candidate, nullable Applied Source, Workflow revision, hashes,
@@ -951,8 +960,8 @@ ResourceDict（`unilabos/resources/resource_tracker.py`）是全系统唯一内�
   `workflow_node_uuid`, never legacy Node IDs.
 - Persisting invalid Python is a successful Draft PUT with Chinese diagnostics
   and no Candidate. Apply returns its graph/source-only result plus the complete
-  post-Apply aggregate. A post-commit Draft writeback failure is a success
-  warning, not a failed Apply.
+  post-Apply aggregate. Its `warnings` collection is empty because Apply has no
+  post-commit Draft writeback.
 - Keep the Backend `code/data/error` envelope. Authoring errors use the specific
   machine codes fixed in D-079 and directly displayable Chinese messages, do not
   embed source or Candidate payloads, and preserve dirty frontend state.
