@@ -55,9 +55,14 @@ def decode_json_bytes(
     body: bytes,
     *,
     max_depth: int = MAX_BACKEND_JSON_DEPTH,
+    max_integer_digits: int | None = None,
 ) -> Any:
     """在不修改 Python 递归上限的情况下解码一个 UTF-8 JSON 值。"""
 
+    if max_integer_digits is not None and (
+        type(max_integer_digits) is not int or max_integer_digits < 1
+    ):
+        raise ValueError("JSON integer digit limit must be a positive integer")
     text = body.decode("utf-8")
     length = len(text)
     position = 0
@@ -134,6 +139,9 @@ def decode_json_bytes(
             if not math.isfinite(value):
                 raise ValueError("JSON numbers must be finite")
         else:
+            digit_count = len(raw) - int(raw.startswith("-"))
+            if max_integer_digits is not None and digit_count > max_integer_digits:
+                raise ValueError("JSON integer exceeds the external digit limit")
             value = _decode_json_integer(raw)
         deliver(value)
         return match.end()

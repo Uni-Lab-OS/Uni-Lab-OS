@@ -468,7 +468,13 @@ def parse_value_schema(raw: Any) -> WorkflowValueSchema:
     )
 
 
-def _validate_json_value(value: Any, *, path: str) -> Any:
+def _validate_json_value(
+    value: Any,
+    *,
+    code: str,
+    path: str,
+    message: str,
+) -> Any:
     active: set[int] = set()
     stack: list[tuple[Any, str, int, bool]] = [(value, path, 0, False)]
     while stack:
@@ -480,22 +486,22 @@ def _validate_json_value(value: Any, *, path: str) -> Any:
             continue
         if type(item) is float:
             if not math.isfinite(item):
-                _fail("invalid_value", item_path, _INVALID_VALUE)
+                _fail(code, item_path, message)
             continue
         if type(item) not in {dict, list}:
-            _fail("invalid_value", item_path, _INVALID_VALUE)
+            _fail(code, item_path, message)
         if depth + 1 > MAX_BACKEND_JSON_DEPTH:
-            _fail("invalid_value", item_path, _INVALID_VALUE)
+            _fail(code, item_path, message)
         identity = id(item)
         if identity in active:
-            _fail("invalid_value", item_path, _INVALID_VALUE)
+            _fail(code, item_path, message)
         active.add(identity)
         stack.append((item, item_path, depth, True))
         if type(item) is dict:
             entries = list(item.items())
             for key, child in reversed(entries):
                 if type(key) is not str:
-                    _fail("invalid_value", item_path, _INVALID_VALUE)
+                    _fail(code, item_path, message)
                 stack.append((child, _pointer(item_path, key), depth + 1, False))
         else:
             for index in range(len(item) - 1, -1, -1):
@@ -563,7 +569,7 @@ def _normalize_with_schema(
     if kind == "object":
         if type(value) is not dict:
             _fail("invalid_value", path, _INVALID_VALUE)
-        return _validate_json_value(value, path=path)
+        return value
     if kind == "array":
         if type(value) is not list:
             _fail("invalid_value", path, _INVALID_VALUE)
@@ -590,7 +596,19 @@ def normalize_value(schema: WorkflowValueSchema, raw_value: Any) -> Any:
 
     if not isinstance(schema, WorkflowValueSchema):
         _fail("invalid_schema", "", _INVALID_SCHEMA)
-    return _normalize_with_schema(schema._canonical_dict(), raw_value, path="")
+    normalized = _normalize_with_schema(
+        schema._canonical_dict(),
+        raw_value,
+        path="",
+    )
+    if type(normalized) not in {dict, list}:
+        return normalized
+    return _validate_json_value(
+        normalized,
+        code="invalid_value",
+        path="",
+        message=_INVALID_VALUE,
+    )
 
 
 def _normalize_name(value: Any, *, path: str) -> str:
@@ -777,8 +795,14 @@ def parse_input_contract(raw: Any) -> WorkflowInputContract:
         if has_default:
             item["default"] = default
         normalized.append(item)
-    return WorkflowInputContract._from_canonical(
+    canonical = _validate_json_value(
         {"version": 1, "parameters": normalized},
+        code="invalid_contract",
+        path="",
+        message=_INVALID_CONTRACT,
+    )
+    return WorkflowInputContract._from_canonical(
+        canonical,
         token=_CANONICAL_CONSTRUCTOR_TOKEN,
     )
 
@@ -848,8 +872,14 @@ def parse_output_contract(raw: Any) -> WorkflowOutputContract:
             )
         item["implicit"] = implicit
         normalized.append(item)
-    return WorkflowOutputContract._from_canonical(
+    canonical = _validate_json_value(
         {"version": 1, "outputs": normalized},
+        code="invalid_contract",
+        path="",
+        message=_INVALID_CONTRACT,
+    )
+    return WorkflowOutputContract._from_canonical(
+        canonical,
         token=_CANONICAL_CONSTRUCTOR_TOKEN,
     )
 

@@ -35,6 +35,8 @@ class _BackendModel(BaseModel):
 HashToken = Annotated[str, Field(pattern=r"^sha256:[0-9a-f]{64}$")]
 _SIGNED_DECIMAL = re.compile(r"[+-]?[0-9]+\Z")
 _INT64_MAX = (1 << 63) - 1
+_WORKFLOW_JSON_BODY_LIMIT = 8 * 1024 * 1024
+_WORKFLOW_JSON_INTEGER_DIGITS = 4096
 _GO_WHITE_SPACE = (
     "\t\n\v\f\r "
     "\u0085\u00a0\u1680"
@@ -42,6 +44,28 @@ _GO_WHITE_SPACE = (
     "\u2006\u2007\u2008\u2009\u200a"
     "\u2028\u2029\u202f\u205f\u3000"
 )
+
+
+async def _read_limited_body(request: Request) -> bytes:
+    """增量读取公共 Workflow JSON，并在超限 chunk 后立即停止。"""
+
+    content_length = request.headers.get("content-length")
+    if content_length is not None:
+        try:
+            declared_length = int(content_length, 10)
+        except ValueError:
+            raise ValueError("invalid Content-Length") from None
+        if declared_length < 0 or declared_length > _WORKFLOW_JSON_BODY_LIMIT:
+            raise ValueError("Workflow JSON body exceeds the public limit")
+
+    body = bytearray()
+    async for chunk in request.stream():
+        if len(body) + len(chunk) > _WORKFLOW_JSON_BODY_LIMIT:
+            raise ValueError("Workflow JSON body exceeds the public limit")
+        body.extend(chunk)
+    payload = bytes(body)
+    request._body = payload
+    return payload
 
 
 class _BackendJSONRoute(APIRoute):
@@ -54,9 +78,12 @@ class _BackendJSONRoute(APIRoute):
             content_type = request.headers.get("content-type", "")
             mime = content_type.split(";", 1)[0].strip().lower()
             if mime == "application/json" or mime.endswith("+json"):
-                body = await request.body()
                 try:
-                    request._json = decode_json_bytes(body)
+                    body = await _read_limited_body(request)
+                    request._json = decode_json_bytes(
+                        body,
+                        max_integer_digits=_WORKFLOW_JSON_INTEGER_DIGITS,
+                    )
                 except (
                     OverflowError,
                     UnicodeError,
