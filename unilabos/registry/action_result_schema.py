@@ -236,7 +236,8 @@ def _parse_dataclass_decorator(
         name = getattr(keyword, "arg", None)
         value = getattr(keyword, "value", None)
         if (
-            name not in {"frozen", "kw_only", "slots"}
+            type(name) is not str
+            or name not in {"frozen", "kw_only", "slots"}
             or name in seen
             or not isinstance(value, ast.Constant)
             or getattr(value, "value", None) is not True
