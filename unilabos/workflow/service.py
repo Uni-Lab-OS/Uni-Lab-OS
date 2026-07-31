@@ -895,6 +895,7 @@ class WorkflowService:
             writeback_marker_valid = (
                 record.get("writeback_source") is not None
                 and record.get("writeback_expected_hash") is not None
+                and record.get("writeback_generation") is not None
             )
             if (
                 record["writeback_status"] == "pending"
@@ -907,6 +908,7 @@ class WorkflowService:
                     workflow_uuid=workflow_uuid,
                     expected_writeback_source=record["writeback_source"],
                     expected_writeback_hash=record["writeback_expected_hash"],
+                    expected_writeback_generation=record["writeback_generation"],
                     observed_draft_hash=source["draft_hash"],
                     draft_update_time=source["update_time"],
                     event_data={
@@ -945,6 +947,9 @@ class WorkflowService:
                                 expected_writeback_source=record["writeback_source"],
                                 expected_writeback_hash=record[
                                     "writeback_expected_hash"
+                                ],
+                                expected_writeback_generation=record[
+                                    "writeback_generation"
                                 ],
                                 observed_draft_hash=source["draft_hash"],
                                 draft_update_time=source["update_time"],
@@ -1126,7 +1131,10 @@ class WorkflowService:
             }
             previous_revision = workflow["revision"]
             try:
-                resulting_revision = self._store.apply_authoring_candidate(
+                (
+                    resulting_revision,
+                    writeback_generation,
+                ) = self._store.apply_authoring_candidate(
                     workflow_uuid=workflow_uuid,
                     expected_revision=previous_revision,
                     expected_draft_hash=expected_draft_hash,
@@ -1169,11 +1177,15 @@ class WorkflowService:
             def mark_pending_best_effort() -> None:
                 for _attempt in range(2):
                     try:
-                        self._store.mark_writeback_pending(
+                        marker_owned = self._store.mark_writeback_pending(
                             workflow_uuid=workflow_uuid,
                             expected_writeback_source=normalized_source,
                             expected_writeback_hash=actual_hash,
+                            expected_writeback_generation=writeback_generation,
                         )
+                        if not marker_owned:
+                            # 新 Apply/Draft 已接管 marker，旧 generation 不再重试。
+                            return
                         return
                     except Exception:  # noqa: BLE001 - 提交后只能尽力恢复
                         continue
@@ -1201,13 +1213,18 @@ class WorkflowService:
                 settled = False
                 for _attempt in range(2):
                     try:
-                        self._store.settle_writeback(
+                        marker_owned = self._store.settle_writeback(
                             workflow_uuid=workflow_uuid,
                             expected_writeback_source=normalized_source,
                             expected_writeback_hash=actual_hash,
+                            expected_writeback_generation=writeback_generation,
                             observed_draft_hash=written["draft_hash"],
                             draft_update_time=written["update_time"],
                         )
+                        if not marker_owned:
+                            # 新 generation 已接管；陈旧 settle 无需恢复。
+                            settled = True
+                            break
                         settled = True
                         break
                     except Exception:  # noqa: BLE001 - 主事务已提交

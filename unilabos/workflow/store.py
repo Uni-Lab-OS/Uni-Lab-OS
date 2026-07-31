@@ -8,6 +8,7 @@ from contextlib import contextmanager
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Callable, Dict, Iterable, Iterator, List, Optional, Tuple
+from uuid import uuid4
 
 from unilabos.workflow.graph_validation import (
     GraphValidationError,
@@ -259,6 +260,7 @@ CREATE TABLE IF NOT EXISTS workflow_authoring (
     writeback_status TEXT NOT NULL DEFAULT 'settled',
     writeback_source TEXT,
     writeback_expected_hash TEXT,
+    writeback_generation TEXT,
     update_time TEXT NOT NULL,
     FOREIGN KEY(workflow_uuid) REFERENCES workflow(uuid)
 );
@@ -290,7 +292,26 @@ class WorkflowStore:
             self._conn.execute("PRAGMA journal_mode = WAL")
             self._conn.execute("PRAGMA synchronous = NORMAL")
             self._conn.executescript(_SCHEMA)
-            self._conn.commit()
+            self._conn.execute("BEGIN IMMEDIATE")
+            try:
+                columns = {
+                    row["name"]
+                    for row in self._conn.execute(
+                        "PRAGMA table_info(workflow_authoring)"
+                    ).fetchall()
+                }
+                if "writeback_generation" not in columns:
+                    self._conn.execute(
+                        """
+                        ALTER TABLE workflow_authoring
+                        ADD COLUMN writeback_generation TEXT
+                        """
+                    )
+            except BaseException:
+                self._conn.rollback()
+                raise
+            else:
+                self._conn.commit()
 
     def close(self) -> None:
         with self._lock:
@@ -1112,6 +1133,7 @@ class WorkflowStore:
                 "writeback_status": "settled",
                 "writeback_source": None,
                 "writeback_expected_hash": None,
+                "writeback_generation": None,
                 "update_time": None,
             }
         result = dict(row)
@@ -1149,6 +1171,7 @@ class WorkflowStore:
                     writeback_status = 'settled',
                     writeback_source = NULL,
                     writeback_expected_hash = NULL,
+                    writeback_generation = NULL,
                     update_time = excluded.update_time
                 """,
                 (
@@ -1179,12 +1202,13 @@ class WorkflowStore:
         candidate: Dict[str, Any],
         applied_source: Dict[str, Any],
         event_data: Dict[str, Any],
-    ) -> int:
+    ) -> Tuple[int, str]:
         changeset = candidate["changeset"]
         kind = changeset["kind"]
         graph = candidate["graph"]
         now = utc_now()
         with self.transaction() as conn:
+            writeback_generation = str(uuid4())
             authoring = conn.execute(
                 """
                 SELECT observed_draft_hash, candidate_hash, candidate
@@ -1283,12 +1307,14 @@ class WorkflowStore:
                     writeback_status = 'pending',
                     writeback_source = ?,
                     writeback_expected_hash = observed_draft_hash,
+                    writeback_generation = ?,
                     update_time = ?
                 WHERE workflow_uuid = ?
                 """,
                 (
                     _json(applied_source),
                     applied_source["python_source"],
+                    writeback_generation,
                     now,
                     workflow_uuid,
                 ),
@@ -1302,7 +1328,7 @@ class WorkflowStore:
                 },
                 now=now,
             )
-            return resulting_revision
+            return resulting_revision, writeback_generation
 
     def settle_writeback(
         self,
@@ -1310,6 +1336,7 @@ class WorkflowStore:
         workflow_uuid: str,
         expected_writeback_source: str,
         expected_writeback_hash: str,
+        expected_writeback_generation: str,
         observed_draft_hash: str,
         draft_update_time: str,
         event_data: Optional[Dict[str, Any]] = None,
@@ -1321,11 +1348,13 @@ class WorkflowStore:
                 UPDATE workflow_authoring
                 SET observed_draft_hash = ?, draft_update_time = ?,
                     writeback_status = 'settled', writeback_source = NULL,
-                    writeback_expected_hash = NULL, update_time = ?
+                    writeback_expected_hash = NULL,
+                    writeback_generation = NULL, update_time = ?
                 WHERE workflow_uuid = ?
                   AND writeback_status = 'pending'
                   AND writeback_source = ?
                   AND writeback_expected_hash = ?
+                  AND writeback_generation = ?
                 """,
                 (
                     observed_draft_hash,
@@ -1334,6 +1363,7 @@ class WorkflowStore:
                     workflow_uuid,
                     expected_writeback_source,
                     expected_writeback_hash,
+                    expected_writeback_generation,
                 ),
             )
             if updated.rowcount != 1:
@@ -1353,6 +1383,7 @@ class WorkflowStore:
         workflow_uuid: str,
         expected_writeback_source: str,
         expected_writeback_hash: str,
+        expected_writeback_generation: str,
     ) -> bool:
         with self.transaction() as conn:
             updated = conn.execute(
@@ -1362,12 +1393,14 @@ class WorkflowStore:
                 WHERE workflow_uuid = ?
                   AND writeback_source = ?
                   AND writeback_expected_hash = ?
+                  AND writeback_generation = ?
                 """,
                 (
                     utc_now(),
                     workflow_uuid,
                     expected_writeback_source,
                     expected_writeback_hash,
+                    expected_writeback_generation,
                 ),
             )
             return updated.rowcount == 1
