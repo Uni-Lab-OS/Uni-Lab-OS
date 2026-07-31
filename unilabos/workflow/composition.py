@@ -138,24 +138,23 @@ def reset_workflow_service_for_test() -> None:
     global _database_path, _monitor, _owner_pid, _service, _workspace_lease_fd
     with _lock:
         lease_owned = _owner_pid == os.getpid()
+        if _monitor is not None:
+            # 监视线程未退出时必须保留 Service 与租约，允许稍后重试停机。
+            _monitor.stop()
         try:
-            if _monitor is not None:
-                _monitor.stop()
+            if _service is not None:
+                _service.close()
         finally:
-            try:
-                if _service is not None:
-                    _service.close()
-            finally:
-                _monitor = None
-                _service = None
-                _database_path = None
-                _owner_pid = None
-                lease_descriptor = _workspace_lease_fd
-                _workspace_lease_fd = None
-                _release_workspace_lease(
-                    lease_descriptor,
-                    unlock=lease_owned,
-                )
+            _monitor = None
+            _service = None
+            _database_path = None
+            _owner_pid = None
+            lease_descriptor = _workspace_lease_fd
+            _workspace_lease_fd = None
+            _release_workspace_lease(
+                lease_descriptor,
+                unlock=lease_owned,
+            )
 
 
 __all__ = [
