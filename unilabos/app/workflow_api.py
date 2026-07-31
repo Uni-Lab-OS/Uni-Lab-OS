@@ -69,7 +69,7 @@ async def _read_limited_body(request: Request) -> bytes:
 
 
 class _BackendJSONRoute(APIRoute):
-    """Bound body routes, then preload JSON with the frozen Backend rules."""
+    """限制有请求体的路由，再按冻结 Backend 规则预载 JSON。"""
 
     def get_route_handler(self):
         route_handler = super().get_route_handler()
