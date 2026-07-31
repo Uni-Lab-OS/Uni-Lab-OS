@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import ctypes
 import multiprocessing
 import os
 import threading
@@ -13,7 +14,11 @@ from uuid import UUID
 import pytest
 
 from unilabos.workflow import composition, source_discovery
-from unilabos.workflow.service import WorkflowConflict, WorkflowService
+from unilabos.workflow.service import (
+    WorkflowConflict,
+    WorkflowError,
+    WorkflowService,
+)
 from unilabos.workflow.source_discovery import (
     SourceDeclarationError,
     load_editable_package_manifest,
@@ -640,3 +645,154 @@ def test_startup_service_close_failure_retains_primary_error_and_lease(
     assert close_calls == 2
     assert lease_while_failed == ("rejected", LEASE_REJECTION)
     assert lease_after_retry == ("opened", "")
+
+
+def _exchange_directories(first: Path, second: Path) -> None:
+    """用 Linux renameat2(RENAME_EXCHANGE) 原子交换两个普通目录。"""
+
+    libc = ctypes.CDLL(None, use_errno=True)
+    renameat2 = libc.renameat2
+    renameat2.argtypes = [
+        ctypes.c_int,
+        ctypes.c_char_p,
+        ctypes.c_int,
+        ctypes.c_char_p,
+        ctypes.c_uint,
+    ]
+    renameat2.restype = ctypes.c_int
+    at_fdcwd = -100
+    rename_exchange = 2
+    result = renameat2(
+        at_fdcwd,
+        os.fsencode(first),
+        at_fdcwd,
+        os.fsencode(second),
+        rename_exchange,
+    )
+    if result != 0:
+        error_number = ctypes.get_errno()
+        raise OSError(error_number, os.strerror(error_number))
+
+
+def test_registration_rejects_regular_root_replaced_after_successful_load(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    working_dir = tmp_path / "unilabos_data"
+    selected = tmp_path / "selected"
+    replacement = tmp_path / "replacement"
+    _write_manifest_package(selected)
+    _write_manifest_package(replacement)
+    seed_store = WorkflowStore(working_dir / "workflow.db")
+    seed_service = WorkflowService(seed_store)
+    seed_service.create_workflow(
+        name="root replacement contract",
+        tags=[],
+        description=None,
+        meta_data={},
+        workflow_uuid=WORKFLOW_A_UUID,
+    )
+    before = seed_service.list_registered_sources()
+    seed_store.close()
+    original_load = source_discovery.load_editable_package_manifest
+    load_completed = False
+
+    def load_then_replace(package_root: str | Path) -> Any:
+        nonlocal load_completed
+        manifest = original_load(package_root)
+        load_completed = True
+        _exchange_directories(selected, replacement)
+        assert not selected.is_symlink()
+        assert selected.is_dir()
+        return manifest
+
+    monkeypatch.setattr(
+        source_discovery,
+        "load_editable_package_manifest",
+        load_then_replace,
+    )
+    caught: SourceDeclarationError | None = None
+    visible_after_attempt: WorkflowService | None = None
+    try:
+        composition.compose_workflow_runtime(
+            working_dir,
+            editable_package_roots=(selected,),
+        )
+    except SourceDeclarationError as error:
+        caught = error
+    finally:
+        visible_after_attempt = composition.get_workflow_service()
+        composition.reset_workflow_service_for_test()
+    after = _registration_snapshot(working_dir)
+
+    observed_code = caught.code if caught is not None else None
+    assert (
+        load_completed,
+        observed_code,
+        visible_after_attempt is None,
+        after,
+    ) == (True, "invalid_package_root", True, before)
+    assert before == []
+
+
+def test_service_rejects_external_source_larger_than_eight_mib_without_event(
+    tmp_path: Path,
+) -> None:
+    store = WorkflowStore(tmp_path / "workflow.db")
+    service = WorkflowService(store)
+    package_root = tmp_path / "package"
+    package_root.mkdir()
+    service.create_workflow(
+        name="source read budget contract",
+        tags=[],
+        description=None,
+        meta_data={},
+        workflow_uuid=WORKFLOW_A_UUID,
+    )
+    service.register_editable_source(
+        workflow_uuid=WORKFLOW_A_UUID,
+        package_id="source_budget_contract",
+        package_root=package_root,
+        relative_path="workflows/demo.py",
+    )
+    baseline = service.get_authoring(WORKFLOW_A_UUID)
+    record_before = store.get_authoring_record(WORKFLOW_A_UUID)
+    events_before = service.list_events(after_id=0)["items"]
+    source = package_root / "workflows" / "demo.py"
+    source.parent.mkdir()
+    source.write_bytes(b"x" * (SOURCE_BYTE_LIMIT + 1))
+    outcomes: dict[str, tuple[Any, ...]] = {}
+    try:
+        for name, operation in (
+            ("get_authoring", lambda: service.get_authoring(WORKFLOW_A_UUID)),
+            (
+                "reconcile",
+                lambda: service.reconcile_registered_source(WORKFLOW_A_UUID),
+            ),
+        ):
+            try:
+                aggregate = operation()
+            except WorkflowError as error:
+                outcomes[name] = ("error", error.code, str(error))
+            else:
+                draft = aggregate.get("draft")
+                returned_length = (
+                    len(draft["python_source"]) if isinstance(draft, dict) else None
+                )
+                outcomes[name] = ("returned", returned_length)
+        record_after = store.get_authoring_record(WORKFLOW_A_UUID)
+        events_after = service.list_events(after_id=0)["items"]
+    finally:
+        store.close()
+
+    expected_outcomes = {
+        "get_authoring": ("error", "invalid_input", "提交内容格式不正确"),
+        "reconcile": ("error", "invalid_input", "提交内容格式不正确"),
+    }
+    assert (
+        baseline["state"],
+        outcomes,
+        record_after == record_before,
+        events_after,
+    ) == ("draft_missing", expected_outcomes, True, events_before)
+    assert events_before == []
