@@ -23,6 +23,8 @@ Catalog projection 与 02D Workflow Compiler 的共同上游。
 唯一对外 seam：
 
 ```python
+from unilabos.registry.action_contract_schema import parse_action_contract
+
 parse_action_contract(
     module: ast.Module,
     action: ast.FunctionDef | ast.AsyncFunctionDef,
