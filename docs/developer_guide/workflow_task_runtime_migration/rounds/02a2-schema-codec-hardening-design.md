@@ -2,7 +2,7 @@
 
 日期：2026-07-31
 
-状态：**设计冻结，等待独立回归测试先行。**
+状态：**修复候选已通过测试，等待合同 reviewer 复审。**
 
 分支：`migration/02a2-schema-codec-hardening`
 
