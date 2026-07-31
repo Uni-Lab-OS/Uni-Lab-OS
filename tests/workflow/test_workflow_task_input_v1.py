@@ -1128,8 +1128,19 @@ def test_required_handle_rejects_nullable_none_and_dependency_only_edge(
             _node(SOURCE_NODE_UUID, template_uuid=SOURCE_TEMPLATE_UUID),
             _node(TARGET_NODE_UUID, template_uuid=TARGET_TEMPLATE_UUID),
         ],
-        edges=[_edge(dependency_only=True)],
+        edges=[_edge()],
     )
+    # Graph PUT 应正确拒绝 dependency-only Edge 冒充 required input provider；
+    # 这里模拟旧版本/恶意持久化事实，专门验证 Task transaction 会再次 fail closed。
+    with store.transaction() as connection:
+        connection.execute(
+            """
+            UPDATE workflow_edge
+            SET source_handle_uuid = ?
+            WHERE uuid = ?
+            """,
+            (DEPENDENCY_SOURCE_HANDLE_UUID, EDGE_UUID),
+        )
 
     with pytest.raises(WorkflowError) as edge_failure:
         _create_task(service)
