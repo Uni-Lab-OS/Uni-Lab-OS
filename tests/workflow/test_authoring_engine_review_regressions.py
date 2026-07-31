@@ -122,6 +122,46 @@ def test_generate_python_is_invariant_to_graph_node_array_order(
 
 
 @pytest.mark.parametrize(
+    ("fixed_device_id", "expected_executor_binding"),
+    [
+        (None, None),
+        (
+            "reactor-1",
+            {"mode": "fixed", "device_id": "reactor-1"},
+        ),
+    ],
+    ids=["unbound", "fixed"],
+)
+def test_device_action_selector_does_not_require_preadmitted_material(
+    tmp_path: Path,
+    fixed_device_id: str | None,
+    expected_executor_binding: dict[str, str] | None,
+) -> None:
+    imports = _catalog_imports()
+    for item in imports:
+        if item.template["type"] == "action":
+            item.template["node_type"] = "device_action"
+
+    with _opened_engine(tmp_path / "device-action.db", imports=imports) as context:
+        result = _compile(
+            context.engine,
+            _source(fixed_device_id=fixed_device_id),
+        )
+
+    assert result.valid, result.diagnostics
+    assert result.graph is not None
+    for node_uuid in (PREPARE_NODE_UUID, ANALYZE_NODE_UUID):
+        node = _node_by_uuid(result.graph, node_uuid)
+        assert node.get("material_uuid") is None
+        assert "device_id" not in node
+        unilab = node["meta_data"]["unilab"]
+        if expected_executor_binding is None:
+            assert "executor_binding" not in unilab
+        else:
+            assert unilab["executor_binding"] == expected_executor_binding
+
+
+@pytest.mark.parametrize(
     "malformed_anchor",
     [
         "# unilab:node_uuid=",
