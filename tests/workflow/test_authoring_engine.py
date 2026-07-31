@@ -498,8 +498,16 @@ def test_compile_returns_backend_identity_contracts_bindings_and_catalog(
     assert unilab["output_contract"] == {
         "version": 1,
         "outputs": [
-            {"name": "sample", "schema": {"$slot": "ResourceSlot"}},
-            {"name": "report", "schema": {"type": "string"}},
+            {
+                "name": "sample",
+                "schema": {"$slot": "ResourceSlot"},
+                "implicit": False,
+            },
+            {
+                "name": "report",
+                "schema": {"type": "string"},
+                "implicit": False,
+            },
         ],
     }
     assert unilab["output_bindings"] == {

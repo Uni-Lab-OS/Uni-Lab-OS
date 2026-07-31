@@ -327,7 +327,13 @@ def test_workflow_input_can_be_the_explicit_root_output_binding(
     unilab = result.graph["workflow"]["meta_data"]["unilab"]
     assert unilab["output_contract"] == {
         "version": 1,
-        "outputs": [{"name": "sample", "schema": {"$slot": "ResourceSlot"}}],
+        "outputs": [
+            {
+                "name": "sample",
+                "schema": {"$slot": "ResourceSlot"},
+                "implicit": False,
+            }
+        ],
     }
     assert unilab["output_bindings"] == {
         "sample": {"kind": "workflow_input", "parameter": "sample"}
