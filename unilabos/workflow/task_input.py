@@ -7,6 +7,7 @@ from copy import deepcopy
 from dataclasses import dataclass, fields, is_dataclass
 from typing import Any, Protocol
 
+from unilabos.workflow.graph_validation import declared_handle_type_matches
 from unilabos.workflow.models import validate_uuid
 from unilabos.workflow.schema import (
     WorkflowSchemaError,
@@ -400,6 +401,16 @@ def _bind_active_plan(
             binding_value = (
                 resolved_input[binding["parameter"]] if binding is not None else None
             )
+            if has_static and not declared_handle_type_matches(
+                raw_param[data_key],
+                handle.get("type"),
+            ):
+                raise TaskInputError()
+            if has_binding and not declared_handle_type_matches(
+                binding_value,
+                handle.get("type"),
+            ):
+                raise TaskInputError()
             if handle.get("required") and (
                 provider_count != 1 or (has_binding and binding_value is None)
             ):

@@ -287,7 +287,7 @@ def _validate_required_handles(
             raise GraphValidationError(f"输入 {data_key!r} 存在多个 Provider")
         if handle.get("required") and provider_count != 1:
             raise GraphValidationError(f"缺少必填输入 {data_key!r}")
-        if has_default and not _declared_type_matches(
+        if has_default and not declared_handle_type_matches(
             param[data_key],
             handle.get("type"),
         ):
@@ -648,7 +648,9 @@ def _json_type_matches(value: Any, declared_type: Any) -> bool:
     return False
 
 
-def _declared_type_matches(value: Any, declared_type: Any) -> bool:
+def declared_handle_type_matches(value: Any, declared_type: Any) -> bool:
+    """按 Catalog Handle 的有限 JSON type/alias 判断一个 provider 值。"""
+
     expected = str(declared_type or "").strip().lower()
     if value is None or expected in {"", "any", "default"}:
         return True
@@ -687,6 +689,7 @@ def _json_equal(left: Any, right: Any) -> bool:
 
 
 __all__ = [
+    "declared_handle_type_matches",
     "GraphValidationError",
     "MissingTemplateError",
     "validate_graph",
