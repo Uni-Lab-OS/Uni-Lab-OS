@@ -1,10 +1,10 @@
 # Phase 01A：单工作区 Authority 与单向 Authoring 设计
 
-状态：**Catalog/Store 锁序修正已实现并通过完整测试，等待最终风险复审；本文件是 Round 14 旧并发/writeback 方案的替代契约。**
+状态：**Catalog/Store 锁序和 guard 退出语义均已实现并通过完整测试，等待最终复审；本文件是 Round 14 旧并发/writeback 方案的替代契约。**
 
 基线：`2a394737ec7a36f8710e0af27472953451c308bc`
 
-修正分支：`migration/01a6-catalog-store-lock-order`
+修正分支：`migration/01a7-catalog-guard-exit`
 
 Backend 仍是只读合同参考。本轮只修改 Uni-Lab-OS；前端实现必须使用独立 FE
 分支。
