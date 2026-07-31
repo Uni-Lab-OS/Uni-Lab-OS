@@ -174,6 +174,18 @@ default 必须是 `ast.literal_eval` 可求值且属于 JSON/ResourceSlot 允许
   validator 判断；
 - tuple/set、计算表达式、Name、Call、comprehension 等不执行并拒绝。
 
+Authoring AST 是不可信源码输入，并且规范化输出必须能由标准
+`ast.unparse()` 确定性生成。所有 literal 位置（`Literal`、default、Field 约束及
+嵌套 JSON default）中的 integer 按其 canonical 十进制绝对值最多接受 4096 位：
+
+- 这是源码解析与规范化的工作预算，不是新的 Workflow integer 类型或持久值上限；
+- 直接 `WorkflowInputContract` 与内部 canonical JSON 继续接受任意有限 Python
+  integer；
+- 不调用或修改 `sys.set_int_max_str_digits`；
+- 十六进制、八进制和二进制源码同样按 canonical 十进制位数判断，不能绕过预算；
+- 超预算稳定返回 `AnnotationSchemaError`，不得把 `ast.unparse` 的 `ValueError`
+  泄漏给 caller。
+
 presentation 独立解析：
 
 - Field 和 doc metadata 各自 trim；
@@ -197,6 +209,10 @@ render 从 canonical descriptor 生成一个 `ast.expr`，不得读取原 AST：
 - `AllowedResourceTemplates` 保留声明顺序并排在 Field 前；
 - `ast.unparse(render(...))` 再 parse 必须得到同一 canonical descriptor 和
   resource symbol identities。
+
+`Literal` 和 canonical Schema enum 的唯一性检查必须保留声明顺序，且不能依赖
+Python numeric hash 均匀性。可预测的 integer hash collision 也不得让解析退化为
+O(n²)；不通过新增未经决策的 enum 成员数上限规避该要求。
 
 import 排序、alias 分配与完整函数/module render 属于 Authoring engine round；
 本轮只 render annotation expression。
