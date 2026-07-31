@@ -10,6 +10,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Callable, Dict, Iterable, Iterator, List, Optional, Tuple
 
+from unilabos.workflow.catalog_keys import normalize_catalog_business_name
 from unilabos.workflow.graph_validation import (
     GraphValidationError,
     MissingTemplateError,
@@ -299,6 +300,73 @@ CREATE TABLE IF NOT EXISTS frontend_event (
 """
 
 
+def _legacy_catalog_has_duplicate_business_key(
+    conn: sqlite3.Connection,
+) -> bool:
+    """在创建 active 唯一索引前只读审计旧 Catalog 数据。"""
+
+    tables = {
+        row["name"]
+        for row in conn.execute("SELECT name FROM sqlite_master WHERE type = 'table'")
+    }
+    checks: tuple[
+        tuple[str, set[str], str, Callable[[sqlite3.Row], tuple[str, ...]]],
+        ...,
+    ] = (
+        (
+            "workflow_node_template",
+            {"authority_id", "resource_template_uuid", "name", "deleted_at"},
+            """
+            SELECT authority_id, resource_template_uuid, name
+            FROM workflow_node_template
+            WHERE deleted_at IS NULL
+            """,
+            lambda row: (
+                row["authority_id"],
+                row["resource_template_uuid"],
+                normalize_catalog_business_name(row["name"]),
+            ),
+        ),
+        (
+            "workflow_handle_template",
+            {
+                "authority_id",
+                "workflow_node_template_uuid",
+                "handle_key",
+                "io_type",
+                "deleted_at",
+            },
+            """
+            SELECT authority_id, workflow_node_template_uuid, handle_key, io_type
+            FROM workflow_handle_template
+            WHERE deleted_at IS NULL
+            """,
+            lambda row: (
+                row["authority_id"],
+                row["workflow_node_template_uuid"],
+                normalize_catalog_business_name(row["handle_key"]),
+                row["io_type"],
+            ),
+        ),
+    )
+    for table, required_columns, query, business_key in checks:
+        if table not in tables:
+            continue
+        columns = {row["name"] for row in conn.execute(f"PRAGMA table_info({table})")}
+        if not required_columns.issubset(columns):
+            continue
+        observed: set[tuple[str, ...]] = set()
+        for row in conn.execute(query):
+            try:
+                key = business_key(row)
+            except (AttributeError, TypeError):
+                return True
+            if key in observed:
+                return True
+            observed.add(key)
+    return False
+
+
 class WorkflowStore:
     """由单一连接持有的 SQLite Workflow Authority。
 
@@ -321,6 +389,8 @@ class WorkflowStore:
                 self._conn.execute(
                     f"PRAGMA busy_timeout = {_STORE_SQLITE_BUSY_TIMEOUT_MS}"
                 )
+                if _legacy_catalog_has_duplicate_business_key(self._conn):
+                    raise StoreConflict("legacy_catalog_business_key_conflict")
                 self._conn.execute("PRAGMA journal_mode = WAL")
                 self._conn.execute("PRAGMA synchronous = NORMAL")
                 self._conn.executescript(_SCHEMA)
@@ -1416,16 +1486,21 @@ class WorkflowStore:
                 )
                 workflow_meta = dict(workflow["meta_data"])
                 workflow_meta.pop("unilab", None)
-                if "unilab" in candidate_meta:
-                    if candidate_meta["unilab"] is not None:
-                        workflow_meta["unilab"] = candidate_meta["unilab"]
+                if "unilab" in candidate_meta and candidate_meta["unilab"] is not None:
+                    workflow_meta["unilab"] = candidate_meta["unilab"]
                 conn.execute(
                     """
                     UPDATE workflow
-                    SET meta_data = ?, update_time = ?
+                    SET meta_data = ?, name = ?, description = ?, update_time = ?
                     WHERE uuid = ? AND deleted_at IS NULL
                     """,
-                    (_json(workflow_meta), now, workflow_uuid),
+                    (
+                        _json(workflow_meta),
+                        graph_workflow["name"],
+                        graph_workflow.get("description"),
+                        now,
+                        workflow_uuid,
+                    ),
                 )
             elif kind == "source_only":
                 resulting_revision = expected_revision

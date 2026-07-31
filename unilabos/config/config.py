@@ -10,6 +10,10 @@ class BasicConfig:
     ak = ""
     sk = ""
     working_dir = ""
+    # Workflow Authoring 必须由部署显式选择 Graph Authority；None 时不挂载。
+    workflow_graph_authority = None
+    # 仅扫描明确声明的可编辑 package 根目录，不从工作区猜测。
+    workflow_editable_package_roots = ()
     config_path = ""
     is_host_mode = True
     slave_no_host = False  # 是否跳过rclient.wait_for_service()

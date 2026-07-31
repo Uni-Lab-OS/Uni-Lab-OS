@@ -264,7 +264,6 @@ class ExtraCatalogCompiler:
         graph["workflow"].update(
             {
                 "description": None,
-                "frontend_only": "must be discarded",
             }
         )
         for template in graph["node_templates"]:
@@ -276,7 +275,6 @@ class ExtraCatalogCompiler:
                     "icon": None,
                     "header": None,
                     "footer": None,
-                    "frontend_only": "must be discarded",
                 }
             )
         for handle in graph["handle_templates"]:
@@ -285,7 +283,6 @@ class ExtraCatalogCompiler:
                     "description": None,
                     "data_source": None,
                     "data_key": None,
-                    "frontend_only": "must be discarded",
                 }
             )
         return _compilation(
@@ -484,10 +481,9 @@ def test_candidate_catalog_entities_use_exact_backend_read_dto_fields(
         else candidate_graph[entity_kind][0]
     )
     assert set(entity) == expected_fields
-    assert "frontend_only" not in entity
 
 
-def test_explicit_empty_candidate_catalog_is_not_filled_from_applied_graph(
+def test_empty_graph_uses_canonical_empty_catalog_projection_and_applies(
     store: WorkflowStore,
     tmp_path: Path,
 ) -> None:
@@ -499,19 +495,24 @@ def test_explicit_empty_candidate_catalog_is_not_filled_from_applied_graph(
     )
 
     with TestClient(create_workflow_app(workflow_service)) as client:
-        response = _save_draft(client, revision=revision)
+        draft_response = _save_draft(client, revision=revision)
+        aggregate = draft_response.json()["data"]
+        candidate = aggregate["candidate"]
+        apply_response = client.post(
+            f"/api/v1/workflows/{WORKFLOW_UUID}/authoring/apply",
+            json={"candidate_hash": candidate["candidate_hash"]},
+        )
 
-    aggregate = response.json()["data"]
-    assert response.status_code == 200
-    assert aggregate["state"] == "draft_invalid"
-    assert aggregate["candidate"] is None
-    assert aggregate["draft"]["diagnostics"] == [
-        {
-            "severity": "error",
-            "code": "candidate_invalid",
-            "message": "工作流校验失败，请检查节点、连线和输入输出",
-        }
-    ]
+    assert draft_response.status_code == 200
+    assert aggregate["state"] == "unapplied_graph"
+    assert candidate["graph"]["nodes"] == []
+    assert candidate["graph"]["edges"] == []
+    assert candidate["graph"]["node_templates"] == []
+    assert candidate["graph"]["handle_templates"] == []
+    assert apply_response.status_code == 200
+    assert apply_response.json()["data"]["apply_result"]["workflow_revision"] == (
+        revision + 1
+    )
 
 
 def test_draft_hydration_failure_is_saved_as_successful_invalid_aggregate(
@@ -597,7 +598,7 @@ def test_apply_revalidation_failure_uses_candidate_invalid_422(
     }
 
 
-def test_valid_empty_node_graph_with_authority_catalog_still_applies(
+def test_empty_node_graph_with_unreferenced_catalog_is_saved_invalid(
     store: WorkflowStore,
     tmp_path: Path,
 ) -> None:
@@ -611,12 +612,14 @@ def test_valid_empty_node_graph_with_authority_catalog_still_applies(
     with TestClient(create_workflow_app(workflow_service)) as client:
         draft_response = _save_draft(client, revision=revision)
         aggregate = draft_response.json()["data"]
-        response = client.post(
-            f"/api/v1/workflows/{WORKFLOW_UUID}/authoring/apply",
-            json={"candidate_hash": aggregate["candidate"]["candidate_hash"]},
-        )
 
-    assert response.status_code == 200
-    assert response.json()["data"]["apply_result"]["workflow_revision"] == (
-        revision + 1
-    )
+    assert draft_response.status_code == 200
+    assert aggregate["state"] == "draft_invalid"
+    assert aggregate["candidate"] is None
+    assert aggregate["draft"]["diagnostics"] == [
+        {
+            "severity": "error",
+            "code": "candidate_invalid",
+            "message": "工作流校验失败，请检查节点、连线和输入输出",
+        }
+    ]

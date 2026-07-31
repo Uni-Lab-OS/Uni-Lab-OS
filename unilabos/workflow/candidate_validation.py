@@ -367,6 +367,61 @@ def _changeset_expected(
     return expected, reserved_changed, workflow_changed
 
 
+def _validate_workflow_authoring_boundary(
+    candidate: dict[str, Any],
+    base: dict[str, Any],
+) -> None:
+    """只允许源码拥有的 Workflow 字段越过 Candidate 边界。"""
+
+    for field in ("uuid", "create_time", "update_time", "tags", "revision"):
+        if not strict_json_equal(candidate.get(field), base.get(field)):
+            raise CandidateBundleError(
+                "Candidate changed a non-authoring Workflow field"
+            )
+    candidate_meta = dict(candidate["meta_data"])
+    base_meta = dict(base["meta_data"])
+    candidate_meta.pop("unilab", None)
+    base_meta.pop("unilab", None)
+    if not strict_json_equal(candidate_meta, base_meta):
+        raise CandidateBundleError("Candidate changed non-authoring Workflow metadata")
+
+
+def _validate_retained_catalog_projection(
+    *,
+    candidate_templates: dict[str, dict[str, Any]],
+    candidate_handles: dict[str, dict[str, Any]],
+    base_templates: dict[str, dict[str, Any]],
+    base_handles: dict[str, dict[str, Any]],
+) -> None:
+    """已在 applied graph 中出现的 Catalog 实体必须保持 Authority 投影。"""
+
+    retained_templates = set(candidate_templates) & set(base_templates)
+    if any(
+        not strict_json_equal(
+            candidate_templates[template_uuid],
+            base_templates[template_uuid],
+        )
+        for template_uuid in retained_templates
+    ):
+        raise CandidateBundleError("Candidate changed retained Catalog projection")
+
+    candidate_retained_handles = {
+        uuid: value
+        for uuid, value in candidate_handles.items()
+        if value["workflow_node_template_uuid"] in retained_templates
+    }
+    base_retained_handles = {
+        uuid: value
+        for uuid, value in base_handles.items()
+        if value["workflow_node_template_uuid"] in retained_templates
+    }
+    if not strict_json_equal(
+        candidate_retained_handles,
+        base_retained_handles,
+    ):
+        raise CandidateBundleError("Candidate changed retained Handle projection")
+
+
 def validate_candidate_bundle(
     *,
     graph: Any,
@@ -397,11 +452,12 @@ def validate_candidate_bundle(
         workflow_uuid=workflow_uuid,
         revision=revision,
     )
-    _validate_workflow(
+    base_workflow = _validate_workflow(
         base["workflow"],
         workflow_uuid=workflow_uuid,
         revision=revision,
     )
+    _validate_workflow_authoring_boundary(workflow, base_workflow)
     nodes, nodes_by_uuid = _validate_nodes(
         candidate["nodes"],
         workflow_uuid=workflow_uuid,
@@ -411,6 +467,8 @@ def validate_candidate_bundle(
     handles = _validate_handle_templates(candidate["handle_templates"])
     _validate_nodes(base["nodes"], workflow_uuid=workflow_uuid)
     _validate_edges(base["edges"])
+    base_templates = _validate_node_templates(base["node_templates"])
+    base_handles = _validate_handle_templates(base["handle_templates"])
 
     referenced_templates = {
         node.workflow_node_template_uuid
@@ -424,6 +482,12 @@ def validate_candidate_bundle(
         for handle in handles.values()
     ):
         raise CandidateBundleError("Candidate Handle parent is outside projection")
+    _validate_retained_catalog_projection(
+        candidate_templates=templates,
+        candidate_handles=handles,
+        base_templates=base_templates,
+        base_handles=base_handles,
+    )
 
     validate_graph(
         nodes=nodes,

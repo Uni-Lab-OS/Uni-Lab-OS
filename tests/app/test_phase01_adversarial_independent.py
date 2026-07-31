@@ -14,12 +14,26 @@ from unilabos.config.config import BasicConfig
 
 
 @pytest.fixture()
-def client(tmp_path_factory):
+def client(tmp_path_factory, monkeypatch):
     """使用真实组合根构造一个隔离 workspace 的公共 HTTP app。"""
 
     working_dir = tmp_path_factory.getbasetemp() / "phase01-independent-workspace"
     working_dir.mkdir(exist_ok=True)
-    BasicConfig.working_dir = str(working_dir)
+    from unilabos.workflow.catalog import CatalogAuthority
+
+    monkeypatch.setattr(BasicConfig, "working_dir", str(working_dir))
+    monkeypatch.setattr(
+        BasicConfig,
+        "workflow_graph_authority",
+        CatalogAuthority(authority_id="phase01-adversarial", kind="local"),
+        raising=False,
+    )
+    monkeypatch.setattr(
+        BasicConfig,
+        "workflow_editable_package_roots",
+        (),
+        raising=False,
+    )
     web_server = importlib.reload(
         importlib.import_module("unilabos.app.web.server"),
     )

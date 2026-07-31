@@ -17,10 +17,23 @@ def client(tmp_path_factory, monkeypatch):
     """创建使用独立 workspace 的公开 OS FastAPI app。"""
 
     from unilabos.config.config import BasicConfig
+    from unilabos.workflow.catalog import CatalogAuthority
 
     working_dir = tmp_path_factory.getbasetemp() / "phase01-independent-workspace"
     working_dir.mkdir(exist_ok=True)
     monkeypatch.setattr(BasicConfig, "working_dir", str(working_dir))
+    monkeypatch.setattr(
+        BasicConfig,
+        "workflow_graph_authority",
+        CatalogAuthority(authority_id="phase01-independent", kind="local"),
+        raising=False,
+    )
+    monkeypatch.setattr(
+        BasicConfig,
+        "workflow_editable_package_roots",
+        (),
+        raising=False,
+    )
     server = importlib.reload(importlib.import_module("unilabos.app.web.server"))
     try:
         with TestClient(server.setup_server()) as test_client:
@@ -44,7 +57,9 @@ def _assert_backend_error(response, status: int, code: str) -> None:
 
 
 def _request_properties(openapi: dict, path: str, method: str) -> set[str]:
-    schema = openapi["paths"][path][method]["requestBody"]["content"]["application/json"]["schema"]
+    schema = openapi["paths"][path][method]["requestBody"]["content"][
+        "application/json"
+    ]["schema"]
     while "$ref" in schema:
         schema = openapi["components"]["schemas"][schema["$ref"].rsplit("/", 1)[-1]]
     return set(schema.get("properties", {}))
@@ -140,10 +155,10 @@ def test_authoring_and_global_events_replace_old_execution_contract(client):
         "workflow_not_found",
     )
     _assert_backend_error(
-            client.post(
-                f"/api/v1/workflows/{unknown_uuid}/authoring/apply",
-                json={"candidate_hash": token},
-            ),
+        client.post(
+            f"/api/v1/workflows/{unknown_uuid}/authoring/apply",
+            json={"candidate_hash": token},
+        ),
         404,
         "workflow_not_found",
     )

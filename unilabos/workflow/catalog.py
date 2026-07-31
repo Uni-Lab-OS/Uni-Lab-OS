@@ -16,6 +16,9 @@ from types import MappingProxyType
 from typing import Any, Literal
 from uuid import UUID, uuid4
 
+from unilabos.workflow.catalog_keys import (
+    normalize_catalog_business_name as _business_name,
+)
 from unilabos.workflow.json_codec import decode_json_bytes, encode_json
 from unilabos.workflow.store import WorkflowStore, utc_now
 
@@ -669,10 +672,6 @@ def _json_object(value: object, path: str) -> dict[str, Any]:
     if not isinstance(normalized, dict):
         raise TemplateCatalogImportError(path)
     return normalized
-
-
-def _business_name(value: str) -> str:
-    return value.strip().lower()
 
 
 def _node_sql_values(authority_id: str, fields: Mapping[str, Any]) -> tuple[Any, ...]:

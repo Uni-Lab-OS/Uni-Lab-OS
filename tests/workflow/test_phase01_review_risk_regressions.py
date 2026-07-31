@@ -217,8 +217,10 @@ def test_server_startup_uses_composed_workflow_runtime(
     )
     calls: list[Path] = []
 
-    def fake_compose(configured_working_dir: str | Path):
+    def fake_compose(configured_working_dir: str | Path, **values: Any):
         calls.append(Path(configured_working_dir))
+        assert values["authority"].authority_id == "phase01-server"
+        assert values["editable_package_roots"] == ()
         return service
 
     monkeypatch.setattr(
@@ -228,6 +230,20 @@ def test_server_startup_uses_composed_workflow_runtime(
         raising=False,
     )
     monkeypatch.setattr(BasicConfig, "working_dir", str(working_dir))
+    from unilabos.workflow.catalog import CatalogAuthority
+
+    monkeypatch.setattr(
+        BasicConfig,
+        "workflow_graph_authority",
+        CatalogAuthority(authority_id="phase01-server", kind="local"),
+        raising=False,
+    )
+    monkeypatch.setattr(
+        BasicConfig,
+        "workflow_editable_package_roots",
+        (),
+        raising=False,
+    )
     server = importlib.reload(importlib.import_module("unilabos.app.web.server"))
     try:
         server.setup_server()

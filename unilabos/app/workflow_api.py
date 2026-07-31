@@ -723,6 +723,20 @@ def install_authoring_transform_api(
     app.include_router(create_authoring_transform_router(engine))
 
 
+def install_composed_workflow_authoring_api(
+    app: FastAPI,
+    service: WorkflowService,
+    engine: AuthoringTransform,
+) -> None:
+    """完整构造 production Authoring 路由后，以一次 app mutation 安装。"""
+
+    router = APIRouter()
+    router.include_router(create_workflow_router(service))
+    router.include_router(create_authoring_transform_router(engine))
+    _install_error_handlers(app)
+    app.include_router(router)
+
+
 def create_workflow_app(service: WorkflowService) -> FastAPI:
     """Create a focused application used by composition and contract tests."""
 
@@ -749,5 +763,6 @@ __all__ = [
     "create_workflow_router",
     "format_sse_event",
     "install_authoring_transform_api",
+    "install_composed_workflow_authoring_api",
     "install_workflow_api",
 ]

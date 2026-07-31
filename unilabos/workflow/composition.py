@@ -10,6 +10,8 @@ import threading
 from collections.abc import Iterable
 from pathlib import Path
 
+from unilabos.workflow.authoring_engine import WorkflowAuthoringEngine
+from unilabos.workflow.catalog import CatalogAuthority, TemplateCatalog
 from unilabos.workflow.service import AuthoringCompiler, WorkflowService
 from unilabos.workflow.source_discovery import register_editable_package_sources
 from unilabos.workflow.source_monitor import WorkflowSourceMonitor
@@ -22,6 +24,7 @@ _monitor: WorkflowSourceMonitor | None = None
 _owner_pid: int | None = None
 _workspace_lease_fd: int | None = None
 _compiler: AuthoringCompiler | None = None
+_authority: CatalogAuthority | None = None
 _editable_package_roots: tuple[Path, ...] = ()
 _ready = False
 
@@ -38,6 +41,7 @@ def _retain_runtime(
     *,
     database_path: Path,
     compiler: AuthoringCompiler | None,
+    authority: CatalogAuthority | None,
     editable_package_roots: tuple[Path, ...],
     owner_pid: int,
     lease_descriptor: int,
@@ -45,11 +49,13 @@ def _retain_runtime(
 ) -> None:
     """发布 ready Authority，或保留失败 cleanup 的独占 ownership。"""
 
-    global _compiler, _database_path, _editable_package_roots, _monitor, _ready
+    global _authority, _compiler, _database_path, _editable_package_roots
+    global _monitor, _ready
     global _owner_pid, _service, _workspace_lease_fd
     _service = service
     _database_path = database_path
     _compiler = compiler
+    _authority = authority
     _editable_package_roots = editable_package_roots
     _monitor = monitor
     _owner_pid = owner_pid
@@ -60,11 +66,13 @@ def _retain_runtime(
 def _clear_runtime() -> None:
     """清除已确认关闭的进程内引用；lease 由调用方显式释放。"""
 
-    global _compiler, _database_path, _editable_package_roots, _monitor, _ready
+    global _authority, _compiler, _database_path, _editable_package_roots
+    global _monitor, _ready
     global _owner_pid, _service, _workspace_lease_fd
     _service = None
     _database_path = None
     _compiler = None
+    _authority = None
     _editable_package_roots = ()
     _monitor = None
     _owner_pid = None
@@ -117,10 +125,17 @@ def compose_workflow_runtime(
     working_dir: str | Path,
     *,
     compiler: AuthoringCompiler | None = None,
+    authority: CatalogAuthority | None = None,
     editable_package_roots: Iterable[str | Path] = (),
 ) -> WorkflowService:
     """装配工作区唯一的 Workflow authority、启动恢复和 Draft 监视。"""
 
+    if compiler is not None and authority is not None:
+        raise ValueError("compiler 与 authority 只能选择一种生产组合方式")
+    if authority is not None and not isinstance(authority, CatalogAuthority):
+        raise TypeError("authority 必须是 CatalogAuthority")
+    if authority is not None and authority.kind != "local":
+        raise ValueError("persistent Workflow runtime 只支持 local Graph Authority")
     resolved_working_dir = Path(working_dir).resolve()
     database_path = resolved_working_dir / "workflow.db"
     configured_roots = _configured_package_roots(editable_package_roots)
@@ -132,7 +147,11 @@ def compose_workflow_runtime(
                 raise RuntimeError(
                     "Workflow authority cannot switch working_dir at runtime"
                 )
-            if compiler is not _compiler:
+            if authority != _authority:
+                raise RuntimeError(
+                    "Workflow authority cannot switch graph authority at runtime"
+                )
+            if authority is None and compiler is not _compiler:
                 raise RuntimeError(
                     "Workflow authority cannot switch compiler at runtime"
                 )
@@ -150,10 +169,14 @@ def compose_workflow_runtime(
         new_monitor: WorkflowSourceMonitor | None = None
         published = False
         try:
-            new_service = WorkflowService(
-                WorkflowStore(database_path),
-                compiler=compiler,
-            )
+            store = WorkflowStore(database_path)
+            runtime_compiler = compiler
+            if authority is not None:
+                runtime_compiler = WorkflowAuthoringEngine(
+                    catalog=TemplateCatalog(store),
+                    authority=authority,
+                )
+            new_service = WorkflowService(store, compiler=runtime_compiler)
             register_editable_package_sources(
                 new_service,
                 configured_roots,
@@ -166,7 +189,8 @@ def compose_workflow_runtime(
                 new_service,
                 new_monitor,
                 database_path=database_path,
-                compiler=compiler,
+                compiler=runtime_compiler,
+                authority=authority,
                 editable_package_roots=configured_roots,
                 owner_pid=os.getpid(),
                 lease_descriptor=lease_descriptor,
@@ -191,7 +215,8 @@ def compose_workflow_runtime(
                     new_service,
                     new_monitor,
                     database_path=database_path,
-                    compiler=compiler,
+                    compiler=runtime_compiler,
+                    authority=authority,
                     editable_package_roots=configured_roots,
                     owner_pid=os.getpid(),
                     lease_descriptor=lease_descriptor,
@@ -210,6 +235,7 @@ def setup_workflow_service(
     working_dir: str | Path,
     *,
     compiler: AuthoringCompiler | None = None,
+    authority: CatalogAuthority | None = None,
     editable_package_roots: Iterable[str | Path] = (),
 ) -> WorkflowService:
     """兼容旧装配调用；所有入口统一进入完整运行时组合。"""
@@ -217,6 +243,7 @@ def setup_workflow_service(
     return compose_workflow_runtime(
         working_dir,
         compiler=compiler,
+        authority=authority,
         editable_package_roots=editable_package_roots,
     )
 
@@ -230,7 +257,8 @@ def get_workflow_service() -> WorkflowService | None:
 def reset_workflow_service_for_test() -> None:
     """停止监视器并关闭测试使用的进程级单例。"""
 
-    global _compiler, _database_path, _editable_package_roots, _monitor, _ready
+    global _authority, _compiler, _database_path, _editable_package_roots
+    global _monitor, _ready
     global _owner_pid, _service, _workspace_lease_fd
     with _lock:
         lease_owned = _owner_pid == os.getpid()
@@ -244,6 +272,7 @@ def reset_workflow_service_for_test() -> None:
         _service = None
         _database_path = None
         _compiler = None
+        _authority = None
         _editable_package_roots = ()
         _ready = False
         _owner_pid = None
