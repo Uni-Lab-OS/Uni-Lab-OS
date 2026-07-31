@@ -2,6 +2,10 @@
 
 from __future__ import annotations
 
+import errno
+import fcntl
+import os
+import stat
 import threading
 from pathlib import Path
 from typing import Optional
@@ -14,6 +18,49 @@ _lock = threading.Lock()
 _service: Optional[WorkflowService] = None
 _database_path: Optional[Path] = None
 _monitor: Optional[WorkflowSourceMonitor] = None
+_owner_pid: Optional[int] = None
+_workspace_lease_fd: Optional[int] = None
+
+
+def _acquire_workspace_lease(working_dir: Path) -> int:
+    """在打开数据库前取得工作区唯一 OS Authority 的进程锁。"""
+
+    working_dir.mkdir(parents=True, exist_ok=True)
+    lease_path = working_dir / ".workflow-authority.lock"
+    descriptor = os.open(
+        lease_path,
+        os.O_RDWR | os.O_CREAT | os.O_CLOEXEC | os.O_NOFOLLOW,
+        0o600,
+    )
+    try:
+        if not stat.S_ISREG(os.fstat(descriptor).st_mode):
+            raise RuntimeError("Workflow Authority 租约路径不是普通文件")
+        try:
+            fcntl.flock(descriptor, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        except OSError as error:
+            if error.errno not in {errno.EACCES, errno.EAGAIN}:
+                raise
+            raise RuntimeError(
+                "当前工作区已由另一个 OS Workflow Authority 占用"
+            ) from None
+        return descriptor
+    except BaseException:
+        os.close(descriptor)
+        raise
+
+
+def _release_workspace_lease(
+    descriptor: Optional[int],
+    *,
+    unlock: bool = True,
+) -> None:
+    if descriptor is None:
+        return
+    try:
+        if unlock:
+            fcntl.flock(descriptor, fcntl.LOCK_UN)
+    finally:
+        os.close(descriptor)
 
 
 def compose_workflow_runtime(
@@ -23,24 +70,52 @@ def compose_workflow_runtime(
 ) -> WorkflowService:
     """装配工作区唯一的 Workflow authority、启动恢复和 Draft 监视。"""
 
-    global _database_path, _monitor, _service
-    database_path = Path(working_dir).resolve() / "workflow.db"
+    global _database_path, _monitor, _owner_pid, _service, _workspace_lease_fd
+    resolved_working_dir = Path(working_dir).resolve()
+    database_path = resolved_working_dir / "workflow.db"
     with _lock:
         if _service is not None:
+            if _owner_pid != os.getpid():
+                raise RuntimeError("当前工作区已由另一个 OS Workflow Authority 占用")
             if database_path != _database_path:
                 raise RuntimeError(
                     "Workflow authority cannot switch working_dir at runtime"
                 )
             return _service
-        _service = WorkflowService(
-            WorkflowStore(database_path),
-            compiler=compiler,
-        )
-        _database_path = database_path
-        _service.recover_registered_sources()
-        _monitor = WorkflowSourceMonitor(_service)
-        _monitor.start()
-        return _service
+        lease_descriptor = _acquire_workspace_lease(resolved_working_dir)
+        new_service: Optional[WorkflowService] = None
+        new_monitor: Optional[WorkflowSourceMonitor] = None
+        try:
+            new_service = WorkflowService(
+                WorkflowStore(database_path),
+                compiler=compiler,
+            )
+            new_monitor = WorkflowSourceMonitor(new_service)
+            _service = new_service
+            _database_path = database_path
+            _monitor = new_monitor
+            _owner_pid = os.getpid()
+            _workspace_lease_fd = lease_descriptor
+            new_service.recover_registered_sources()
+            new_monitor.start()
+        except BaseException:
+            try:
+                if new_monitor is not None:
+                    new_monitor.stop()
+            finally:
+                try:
+                    if new_service is not None:
+                        new_service.close()
+                finally:
+                    _service = None
+                    _database_path = None
+                    _monitor = None
+                    _owner_pid = None
+                    _workspace_lease_fd = None
+                    _release_workspace_lease(lease_descriptor)
+            raise
+
+        return new_service
 
 
 def setup_workflow_service(
@@ -60,15 +135,27 @@ def get_workflow_service() -> Optional[WorkflowService]:
 def reset_workflow_service_for_test() -> None:
     """停止监视器并关闭测试使用的进程级单例。"""
 
-    global _database_path, _monitor, _service
+    global _database_path, _monitor, _owner_pid, _service, _workspace_lease_fd
     with _lock:
-        if _monitor is not None:
-            _monitor.stop()
-        if _service is not None:
-            _service.close()
-        _monitor = None
-        _service = None
-        _database_path = None
+        lease_owned = _owner_pid == os.getpid()
+        try:
+            if _monitor is not None:
+                _monitor.stop()
+        finally:
+            try:
+                if _service is not None:
+                    _service.close()
+            finally:
+                _monitor = None
+                _service = None
+                _database_path = None
+                _owner_pid = None
+                lease_descriptor = _workspace_lease_fd
+                _workspace_lease_fd = None
+                _release_workspace_lease(
+                    lease_descriptor,
+                    unlock=lease_owned,
+                )
 
 
 __all__ = [

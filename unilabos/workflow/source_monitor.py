@@ -67,18 +67,8 @@ class WorkflowSourceMonitor:
                 try:
                     signature = self._service.source_signature(registration)
                     if self._processed.get(workflow_uuid) == signature:
-                        if not self._service.source_reconciliation_pending(
-                            workflow_uuid
-                        ):
-                            self._pending.pop(workflow_uuid, None)
-                            self._retries.pop(workflow_uuid, None)
-                            continue
-                        self._processed.pop(workflow_uuid, None)
-                        self._pending[workflow_uuid] = (
-                            signature,
-                            time.monotonic(),
-                        )
-                        self._schedule_retry(workflow_uuid, signature)
+                        self._pending.pop(workflow_uuid, None)
+                        self._retries.pop(workflow_uuid, None)
                         continue
                     now = time.monotonic()
                     pending = self._pending.get(workflow_uuid)
@@ -93,17 +83,7 @@ class WorkflowSourceMonitor:
                         continue
                     self._service.reconcile_registered_source(workflow_uuid)
                     latest_signature = self._service.source_signature(registration)
-                    if self._service.source_reconciliation_pending(workflow_uuid):
-                        self._processed.pop(workflow_uuid, None)
-                        self._pending[workflow_uuid] = (
-                            latest_signature,
-                            time.monotonic(),
-                        )
-                        self._schedule_retry(
-                            workflow_uuid,
-                            latest_signature,
-                        )
-                    elif latest_signature == signature:
+                    if latest_signature == signature:
                         self._processed[workflow_uuid] = signature
                         self._pending.pop(workflow_uuid, None)
                         self._retries.pop(workflow_uuid, None)

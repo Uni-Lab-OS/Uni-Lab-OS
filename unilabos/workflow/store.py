@@ -2,14 +2,13 @@
 
 from __future__ import annotations
 
+import hashlib
 import sqlite3
 import threading
 from contextlib import contextmanager
 from datetime import datetime, timezone
 from pathlib import Path
-from time import monotonic, sleep
 from typing import Any, Callable, Dict, Iterable, Iterator, List, Optional, Tuple
-from uuid import uuid4
 
 from unilabos.workflow.graph_validation import (
     GraphValidationError,
@@ -19,9 +18,6 @@ from unilabos.workflow.graph_validation import (
 from unilabos.workflow.json_codec import decode_json_bytes, encode_json
 from unilabos.workflow.models import WorkflowEdgeWrite, WorkflowNodeWrite
 
-_STORE_INITIALIZATION_BUSY_TIMEOUT_SECONDS = 5.0
-_STORE_INITIALIZATION_SQLITE_BUSY_TIMEOUT_MS = 100
-_STORE_INITIALIZATION_RETRY_INTERVAL_SECONDS = 0.01
 _STORE_SQLITE_BUSY_TIMEOUT_MS = 5000
 
 
@@ -263,10 +259,6 @@ CREATE TABLE IF NOT EXISTS workflow_authoring (
     candidate_hash TEXT,
     candidate TEXT,
     applied_source TEXT,
-    writeback_status TEXT NOT NULL DEFAULT 'settled',
-    writeback_source TEXT,
-    writeback_expected_hash TEXT,
-    writeback_generation TEXT,
     update_time TEXT NOT NULL,
     FOREIGN KEY(workflow_uuid) REFERENCES workflow(uuid)
 );
@@ -288,9 +280,6 @@ class WorkflowStore:
     """
 
     def __init__(self, db_path: str | Path):
-        initialization_deadline = (
-            monotonic() + _STORE_INITIALIZATION_BUSY_TIMEOUT_SECONDS
-        )
         self.path = str(db_path)
         if self.path != ":memory:":
             Path(self.path).parent.mkdir(parents=True, exist_ok=True)
@@ -298,118 +287,16 @@ class WorkflowStore:
         self._conn = sqlite3.connect(self.path, check_same_thread=False)
         self._conn.row_factory = sqlite3.Row
         try:
-            # SQLite 有界 busy 重试统一覆盖线程与进程间的 WAL/schema 竞争，
-            # 不用进程全局锁阻塞无关数据库。
             with self._lock:
-                initialization_busy_timeout_ms = (
-                    _STORE_INITIALIZATION_SQLITE_BUSY_TIMEOUT_MS
-                )
                 self._conn.execute(
-                    f"PRAGMA busy_timeout = {initialization_busy_timeout_ms}"
+                    f"PRAGMA busy_timeout = {_STORE_SQLITE_BUSY_TIMEOUT_MS}"
                 )
-                self._retry_initialization(
-                    lambda: self._conn.execute("PRAGMA journal_mode = WAL"),
-                    deadline=initialization_deadline,
-                )
-                self._retry_initialization(
-                    lambda: self._conn.execute("PRAGMA synchronous = NORMAL"),
-                    deadline=initialization_deadline,
-                )
-                self._retry_initialization(
-                    lambda: self._conn.executescript(_SCHEMA),
-                    deadline=initialization_deadline,
-                )
-                self._retry_initialization(
-                    lambda: self._conn.execute("BEGIN IMMEDIATE"),
-                    deadline=initialization_deadline,
-                )
-                try:
-                    columns = {
-                        row["name"]
-                        for row in self._conn.execute(
-                            "PRAGMA table_info(workflow_authoring)"
-                        ).fetchall()
-                    }
-                    if "writeback_generation" not in columns:
-                        self._conn.execute(
-                            """
-                            ALTER TABLE workflow_authoring
-                            ADD COLUMN writeback_generation TEXT
-                            """
-                        )
-                    legacy_markers = self._conn.execute(
-                        """
-                        SELECT workflow_uuid
-                        FROM workflow_authoring
-                        WHERE writeback_status = 'pending'
-                          AND writeback_source IS NOT NULL
-                          AND writeback_expected_hash IS NOT NULL
-                          AND writeback_generation IS NULL
-                        """
-                    ).fetchall()
-                    for marker in legacy_markers:
-                        self._conn.execute(
-                            """
-                            UPDATE workflow_authoring
-                            SET writeback_generation = ?
-                            WHERE workflow_uuid = ?
-                              AND writeback_status = 'pending'
-                              AND writeback_source IS NOT NULL
-                              AND writeback_expected_hash IS NOT NULL
-                              AND writeback_generation IS NULL
-                            """,
-                            (str(uuid4()), marker["workflow_uuid"]),
-                        )
-                except BaseException:
-                    self._conn.rollback()
-                    raise
-                else:
-                    self._conn.commit()
-                    self._conn.execute(
-                        f"PRAGMA busy_timeout = {_STORE_SQLITE_BUSY_TIMEOUT_MS}"
-                    )
+                self._conn.execute("PRAGMA journal_mode = WAL")
+                self._conn.execute("PRAGMA synchronous = NORMAL")
+                self._conn.executescript(_SCHEMA)
         except BaseException:
             self._conn.close()
             raise
-
-    def _retry_initialization(
-        self,
-        operation: Callable[[], object],
-        *,
-        deadline: float,
-    ) -> None:
-        while True:
-            try:
-                operation()
-                return
-            except sqlite3.OperationalError as error:
-                error_code = getattr(error, "sqlite_errorcode", None)
-                base_error_code = (
-                    error_code & 0xFF if isinstance(error_code, int) else None
-                )
-                busy_message = str(error).lower() in {
-                    "database is locked",
-                    "database table is locked",
-                }
-                if (
-                    base_error_code
-                    not in {
-                        sqlite3.SQLITE_BUSY,
-                        sqlite3.SQLITE_LOCKED,
-                    }
-                    and not busy_message
-                ):
-                    raise
-                remaining = deadline - monotonic()
-                if remaining <= 0:
-                    raise
-                self._conn.rollback()
-                sleep(
-                    min(
-                        _STORE_INITIALIZATION_RETRY_INTERVAL_SECONDS,
-                        remaining,
-                    )
-                )
 
     def close(self) -> None:
         with self._lock:
@@ -1228,10 +1115,6 @@ class WorkflowStore:
                 "candidate_hash": None,
                 "candidate": None,
                 "applied_source": None,
-                "writeback_status": "settled",
-                "writeback_source": None,
-                "writeback_expected_hash": None,
-                "writeback_generation": None,
                 "update_time": None,
             }
         result = dict(row)
@@ -1266,10 +1149,6 @@ class WorkflowStore:
                     diagnostics = excluded.diagnostics,
                     candidate_hash = excluded.candidate_hash,
                     candidate = excluded.candidate,
-                    writeback_status = 'settled',
-                    writeback_source = NULL,
-                    writeback_expected_hash = NULL,
-                    writeback_generation = NULL,
                     update_time = excluded.update_time
                 """,
                 (
@@ -1293,20 +1172,10 @@ class WorkflowStore:
         self,
         *,
         workflow_uuid: str,
-        expected_revision: int,
-        expected_draft_hash: str,
-        expected_candidate_hash: str,
-        expected_catalog_fingerprint: str,
-        candidate: Dict[str, Any],
-        applied_source: Dict[str, Any],
-        event_data: Dict[str, Any],
-    ) -> Tuple[int, str]:
-        changeset = candidate["changeset"]
-        kind = changeset["kind"]
-        graph = candidate["graph"]
+        candidate_hash: str,
+    ) -> int:
         now = utc_now()
         with self.transaction() as conn:
-            writeback_generation = str(uuid4())
             authoring = conn.execute(
                 """
                 SELECT observed_draft_hash, candidate_hash, candidate
@@ -1315,24 +1184,32 @@ class WorkflowStore:
                 """,
                 (workflow_uuid,),
             ).fetchone()
-            if (
-                authoring is None
-                or authoring["observed_draft_hash"] != expected_draft_hash
-            ):
-                raise StoreAuthoringConflict("draft_hash_conflict")
-            workflow = self.get_workflow(workflow_uuid, conn=conn)
-            if workflow["revision"] != expected_revision:
-                raise StoreRevisionConflict("workflow revision changed before apply")
+            if authoring is None:
+                raise StoreAuthoringConflict("candidate_not_ready")
             stored_candidate = _load(authoring["candidate"], None)
             if not isinstance(stored_candidate, dict):
                 raise StoreAuthoringConflict("candidate_not_ready")
-            if (
-                stored_candidate.get("template_catalog_fingerprint")
-                != expected_catalog_fingerprint
-            ):
-                raise StoreAuthoringConflict("template_catalog_conflict")
-            if authoring["candidate_hash"] != expected_candidate_hash:
+            if authoring["candidate_hash"] != candidate_hash:
                 raise StoreAuthoringConflict("candidate_hash_conflict")
+            expected_draft_hash = stored_candidate["draft_hash"]
+            expected_revision = stored_candidate["base_workflow_revision"]
+            if authoring["observed_draft_hash"] != expected_draft_hash:
+                raise StoreAuthoringConflict("draft_hash_conflict")
+            normalized_source = stored_candidate["normalized_python_source"]
+            normalized_hash = (
+                "sha256:"
+                + hashlib.sha256(normalized_source.encode("utf-8")).hexdigest()
+            )
+            if normalized_hash != expected_draft_hash:
+                raise StoreConflict("Candidate 规范化源码尚未物化")
+
+            workflow = self.get_workflow(workflow_uuid, conn=conn)
+            if workflow["revision"] != expected_revision:
+                raise StoreRevisionConflict("workflow revision changed before apply")
+
+            changeset = stored_candidate["changeset"]
+            kind = changeset["kind"]
+            graph = stored_candidate["graph"]
             if kind == "graph":
                 graph_workflow = graph.get("workflow")
                 if not isinstance(graph_workflow, dict):
@@ -1393,7 +1270,13 @@ class WorkflowStore:
             else:
                 raise StoreConflict(f"unsupported Authoring changeset kind {kind!r}")
             applied_source = {
-                **applied_source,
+                "python_source": normalized_source,
+                "source_hash": stored_candidate["draft_hash"],
+                "source_map": stored_candidate["source_map"],
+                "compiler_version": stored_candidate["compiler_version"],
+                "template_catalog_fingerprint": stored_candidate[
+                    "template_catalog_fingerprint"
+                ],
                 "workflow_revision": resulting_revision,
                 "update_time": now,
             }
@@ -1402,17 +1285,11 @@ class WorkflowStore:
                 UPDATE workflow_authoring
                 SET diagnostics = '[]', candidate_hash = NULL,
                     candidate = NULL, applied_source = ?,
-                    writeback_status = 'pending',
-                    writeback_source = ?,
-                    writeback_expected_hash = observed_draft_hash,
-                    writeback_generation = ?,
                     update_time = ?
                 WHERE workflow_uuid = ?
                 """,
                 (
                     _json(applied_source),
-                    applied_source["python_source"],
-                    writeback_generation,
                     now,
                     workflow_uuid,
                 ),
@@ -1421,87 +1298,15 @@ class WorkflowStore:
                 conn,
                 event="workflow.authoring.changed",
                 data={
-                    **event_data,
+                    "workflow_uuid": workflow_uuid,
+                    "cause": "applied",
                     "workflow_revision": resulting_revision,
+                    "draft_hash": stored_candidate["draft_hash"],
+                    "candidate_hash": None,
                 },
                 now=now,
             )
-            return resulting_revision, writeback_generation
-
-    def settle_writeback(
-        self,
-        *,
-        workflow_uuid: str,
-        expected_writeback_source: str,
-        expected_writeback_hash: str,
-        expected_writeback_generation: str,
-        observed_draft_hash: str,
-        draft_update_time: str,
-        event_data: Optional[Dict[str, Any]] = None,
-    ) -> bool:
-        with self.transaction() as conn:
-            now = utc_now()
-            updated = conn.execute(
-                """
-                UPDATE workflow_authoring
-                SET observed_draft_hash = ?, draft_update_time = ?,
-                    writeback_status = 'settled', writeback_source = NULL,
-                    writeback_expected_hash = NULL,
-                    writeback_generation = NULL, update_time = ?
-                WHERE workflow_uuid = ?
-                  AND writeback_status = 'pending'
-                  AND writeback_source = ?
-                  AND writeback_expected_hash = ?
-                  AND writeback_generation = ?
-                """,
-                (
-                    observed_draft_hash,
-                    draft_update_time,
-                    now,
-                    workflow_uuid,
-                    expected_writeback_source,
-                    expected_writeback_hash,
-                    expected_writeback_generation,
-                ),
-            )
-            if updated.rowcount != 1:
-                return False
-            if event_data is not None:
-                self._append_event(
-                    conn,
-                    event="workflow.authoring.changed",
-                    data=event_data,
-                    now=now,
-                )
-            return True
-
-    def mark_writeback_pending(
-        self,
-        *,
-        workflow_uuid: str,
-        expected_writeback_source: str,
-        expected_writeback_hash: str,
-        expected_writeback_generation: str,
-    ) -> bool:
-        with self.transaction() as conn:
-            updated = conn.execute(
-                """
-                UPDATE workflow_authoring
-                SET writeback_status = 'pending', update_time = ?
-                WHERE workflow_uuid = ?
-                  AND writeback_source = ?
-                  AND writeback_expected_hash = ?
-                  AND writeback_generation = ?
-                """,
-                (
-                    utc_now(),
-                    workflow_uuid,
-                    expected_writeback_source,
-                    expected_writeback_hash,
-                    expected_writeback_generation,
-                ),
-            )
-            return updated.rowcount == 1
+            return resulting_revision
 
     # 事件与诊断 --------------------------------------------------------
 

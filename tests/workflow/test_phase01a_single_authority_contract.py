@@ -211,9 +211,9 @@ def test_apply_rejects_candidate_not_materialized_as_draft(tmp_path: Path) -> No
             f"/api/v1/workflows/{WORKFLOW_UUID}/authoring/apply",
             json={"candidate_hash": saved["candidate"]["candidate_hash"]},
         )
-        authoring = client.get(
-            f"/api/v1/workflows/{WORKFLOW_UUID}/authoring"
-        ).json()["data"]
+        authoring = client.get(f"/api/v1/workflows/{WORKFLOW_UUID}/authoring").json()[
+            "data"
+        ]
 
     assert response.status_code == 409
     assert response.json() == {
@@ -225,8 +225,9 @@ def test_apply_rejects_candidate_not_materialized_as_draft(tmp_path: Path) -> No
     }
     assert draft_path.read_bytes() == original_bytes
     assert authoring["workflow_revision"] == 1
-    assert authoring["candidate"]["candidate_hash"] == (
-        saved["candidate"]["candidate_hash"]
+    assert (
+        authoring["candidate"]["candidate_hash"]
+        == (saved["candidate"]["candidate_hash"])
     )
 
 
@@ -266,9 +267,7 @@ def test_materialized_apply_does_not_open_any_file_for_writing(
             patch.setattr(os, "open", reject_file_write)
             response = client.post(
                 f"/api/v1/workflows/{WORKFLOW_UUID}/authoring/apply",
-                json={
-                    "candidate_hash": materialized["candidate"]["candidate_hash"]
-                },
+                json={"candidate_hash": materialized["candidate"]["candidate_hash"]},
             )
 
         final_bytes = draft_path.read_bytes()

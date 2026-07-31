@@ -5,7 +5,6 @@ from __future__ import annotations
 import fcntl
 import hashlib
 import os
-import sqlite3
 import threading
 import time
 from collections.abc import Callable
@@ -16,18 +15,12 @@ import pytest
 
 from unilabos.workflow import composition
 from unilabos.workflow.models import CandidateCompilation
-from unilabos.workflow.service import WorkflowError, WorkflowService
+from unilabos.workflow.service import WorkflowConflict, WorkflowError, WorkflowService
 from unilabos.workflow.source_monitor import WorkflowSourceMonitor
 from unilabos.workflow.store import WorkflowStore
 
 WORKFLOW_UUID = "11111111-1111-4111-8111-111111111111"
 CATALOG_FINGERPRINT = "sha256:" + ("e" * 64)
-WRITEBACK_WARNING = {
-    "code": "draft_writeback_pending",
-    "message": ("工作流已应用，但本地源码同步失败；OS 已保留可恢复的源码记录。"),
-}
-
-
 def _hash(source: str) -> str:
     return f"sha256:{hashlib.sha256(source.encode('utf-8')).hexdigest()}"
 
@@ -241,18 +234,6 @@ def _save_candidate(
     return source_path, saved
 
 
-def _apply_saved(
-    service: WorkflowService,
-    saved: dict[str, Any],
-) -> dict[str, Any]:
-    return service.apply_authoring(
-        WORKFLOW_UUID,
-        expected_draft_hash=saved["draft"]["draft_hash"],
-        expected_workflow_revision=1,
-        expected_candidate_hash=saved["candidate"]["candidate_hash"],
-    )
-
-
 def test_monitor_reconciles_change_between_startup_scan_and_monitor_start(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
@@ -356,7 +337,7 @@ def test_monitor_positive_control_observes_change_after_start(
     assert [event["data"]["cause"] for event in events] == ["external_draft_changed"]
 
 
-def test_apply_detects_old_file_descriptor_write_during_cas_install(
+def test_draft_put_detects_old_file_descriptor_write_during_cas_install(
     service: WorkflowService,
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
@@ -386,13 +367,18 @@ def test_apply_detects_old_file_descriptor_write_during_cas_install(
     )
     descriptor = os.open(source_path, os.O_RDWR)
 
-    def apply() -> None:
+    def save_replacement() -> None:
         try:
-            outcome["result"] = _apply_saved(service, saved)
+            outcome["result"] = service.save_draft(
+                WORKFLOW_UUID,
+                python_source="value = 'replacement'\n",
+                expected_draft_hash=saved["draft"]["draft_hash"],
+                expected_workflow_revision=1,
+            )
         except Exception as exc:  # noqa: BLE001 - 后台异常由主测试断言
             outcome["error"] = exc
 
-    thread = threading.Thread(target=apply, name="apply-old-file-descriptor")
+    thread = threading.Thread(target=save_replacement, name="draft-old-file-descriptor")
     thread.start()
     external_source = "value = 'external old fd wins'\n"
     try:
@@ -409,14 +395,9 @@ def test_apply_detects_old_file_descriptor_write_during_cas_install(
         thread.join(timeout=2)
 
     assert not thread.is_alive()
-    assert "error" not in outcome
-    result = outcome["result"]
-    assert result["apply_result"]["warnings"] == [WRITEBACK_WARNING]
+    assert isinstance(outcome.get("error"), WorkflowConflict)
+    assert outcome["error"].code == "draft_hash_conflict"
     assert source_path.read_text(encoding="utf-8") == external_source
-    assert result["authoring"]["draft"]["python_source"] == external_source
-    assert result["authoring"]["state"] == "applied_source_stale"
-    record = service._store.get_authoring_record(WORKFLOW_UUID)
-    assert record["writeback_status"] == "pending"
 
 
 @pytest.mark.parametrize("failure_point", ["compiler", "catalog"])
@@ -466,138 +447,6 @@ def test_monitor_retries_unchanged_source_after_transient_failure_with_backoff(
     assert aggregate["draft"]["python_source"] == changed_source
     assert len(events) == 1
     assert events[0]["data"]["cause"] == "external_draft_changed"
-
-
-@pytest.mark.parametrize(
-    "failure_stage",
-    ["settle_writeback", "mark_writeback_pending", "final_aggregate"],
-)
-def test_apply_returns_success_after_post_commit_sqlite_operational_error(
-    tmp_path: Path,
-    monkeypatch: pytest.MonkeyPatch,
-    failure_stage: str,
-) -> None:
-    database_path = tmp_path / f"{failure_stage}.db"
-    store = WorkflowStore(database_path)
-    workflow_service = WorkflowService(
-        store,
-        compiler=DeterministicCompiler(),
-    )
-    package_root = tmp_path / f"package-{failure_stage}"
-    package_root.mkdir()
-    source_path, saved = _save_candidate(
-        workflow_service,
-        package_root,
-    )
-    restore: list[tuple[Any, str, Any]] = []
-
-    if failure_stage == "settle_writeback":
-        original = store.settle_writeback
-        failed = False
-
-        def fail_settle_once(**kwargs: Any) -> None:
-            nonlocal failed
-            if not failed:
-                failed = True
-                raise sqlite3.OperationalError("database is locked")
-            original(**kwargs)
-
-        restore.append((store, "settle_writeback", original))
-        monkeypatch.setattr(store, "settle_writeback", fail_settle_once)
-    elif failure_stage == "mark_writeback_pending":
-        original_atomic_write = workflow_service._atomic_write
-        original_mark = store.mark_writeback_pending
-        failed = False
-
-        def fail_writeback(*args: Any, **kwargs: Any) -> None:
-            del args, kwargs
-            raise OSError("deterministic local writeback failure")
-
-        def fail_mark_once(**kwargs: Any) -> None:
-            nonlocal failed
-            if not failed:
-                failed = True
-                raise sqlite3.OperationalError("database is locked")
-            original_mark(**kwargs)
-
-        restore.extend(
-            [
-                (workflow_service, "_atomic_write", original_atomic_write),
-                (store, "mark_writeback_pending", original_mark),
-            ]
-        )
-        monkeypatch.setattr(
-            workflow_service,
-            "_atomic_write",
-            fail_writeback,
-        )
-        monkeypatch.setattr(store, "mark_writeback_pending", fail_mark_once)
-    else:
-        original = workflow_service.get_authoring
-        failed = False
-
-        def fail_aggregate_once(workflow_uuid: str) -> dict[str, Any]:
-            nonlocal failed
-            if not failed:
-                failed = True
-                raise sqlite3.OperationalError("database is locked")
-            return original(workflow_uuid)
-
-        restore.append((workflow_service, "get_authoring", original))
-        monkeypatch.setattr(
-            workflow_service,
-            "get_authoring",
-            fail_aggregate_once,
-        )
-
-    try:
-        try:
-            result = _apply_saved(workflow_service, saved)
-        finally:
-            for owner, name, original in restore:
-                monkeypatch.setattr(owner, name, original)
-        record = store.get_authoring_record(WORKFLOW_UUID)
-        assert record["applied_source"] is not None
-        assert record["candidate"] is None
-        assert result["apply_result"]["workflow_revision"] == 1
-        expected_warnings = (
-            [] if failure_stage == "final_aggregate" else [WRITEBACK_WARNING]
-        )
-        assert result["apply_result"]["warnings"] == expected_warnings
-        assert result["authoring"]["applied_source"] is not None
-    finally:
-        store.close()
-
-    recovered_store = WorkflowStore(database_path)
-    recovered = WorkflowService(
-        recovered_store,
-        compiler=DeterministicCompiler(),
-    )
-    try:
-        recovered.reconcile_registered_source(WORKFLOW_UUID)
-        recovered_record = recovered_store.get_authoring_record(WORKFLOW_UUID)
-        aggregate = recovered.get_authoring(WORKFLOW_UUID)
-    finally:
-        recovered_store.close()
-
-    assert recovered_record["writeback_status"] == "settled"
-    assert aggregate["state"] == "applied"
-    assert source_path.read_text(encoding="utf-8") == "value = 'candidate'\n"
-
-
-def test_apply_positive_control_returns_success_without_warning(
-    service: WorkflowService,
-    tmp_path: Path,
-) -> None:
-    package_root = tmp_path / "package"
-    package_root.mkdir()
-    source_path, saved = _save_candidate(service, package_root)
-
-    result = _apply_saved(service, saved)
-
-    assert result["apply_result"]["warnings"] == []
-    assert result["authoring"]["state"] == "applied"
-    assert source_path.read_text(encoding="utf-8") == "value = 'candidate'\n"
 
 
 @pytest.mark.parametrize("read_operation", ["aggregate", "signature"])

@@ -143,13 +143,7 @@ class DraftWriteRequest(_StrictModel):
 
 
 class ApplyRequest(_StrictModel):
-    expected_draft_hash: HashToken
-    expected_workflow_revision: int = Field(
-        ge=1,
-        le=_INT64_MAX,
-        strict=True,
-    )
-    expected_candidate_hash: HashToken
+    candidate_hash: HashToken
 
 
 class _BackendJSONResponse(JSONResponse):
@@ -317,9 +311,7 @@ def create_workflow_router(service: WorkflowService) -> APIRouter:
         return _success(
             service.apply_authoring(
                 workflow_uuid,
-                expected_draft_hash=body.expected_draft_hash,
-                expected_workflow_revision=body.expected_workflow_revision,
-                expected_candidate_hash=body.expected_candidate_hash,
+                candidate_hash=body.candidate_hash,
             )
         )
 

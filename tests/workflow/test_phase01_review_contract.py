@@ -459,15 +459,13 @@ def test_authoring_apply_commits_candidate_reserved_metadata_with_graph(
         )
         saved = service.save_draft(
             WORKFLOW_UUID,
-            python_source="build()",
+            python_source="build()\n",
             expected_draft_hash=None,
             expected_workflow_revision=1,
         )
         applied = service.apply_authoring(
             WORKFLOW_UUID,
-            expected_draft_hash=saved["draft"]["draft_hash"],
-            expected_workflow_revision=1,
-            expected_candidate_hash=saved["candidate"]["candidate_hash"],
+            candidate_hash=saved["candidate"]["candidate_hash"],
         )
     finally:
         store.close()

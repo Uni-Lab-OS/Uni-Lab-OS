@@ -210,36 +210,6 @@ def test_draft_revision_rejects_strict_json_integer_above_int64(
     assert response.json() == INVALID_INPUT
 
 
-@pytest.mark.parametrize(
-    "revision",
-    [INT64_MAX_PLUS_ONE, VERY_LARGE_REVISION],
-    ids=["int64-max-plus-one", "much-larger-than-int64"],
-)
-def test_apply_revision_rejects_strict_json_integer_above_int64(
-    store: WorkflowStore,
-    tmp_path: Path,
-    revision: int,
-) -> None:
-    service = _authoring_service(store, tmp_path)
-
-    with TestClient(create_workflow_app(service)) as client:
-        draft = _save_draft(
-            client,
-            expected_workflow_revision=1,
-        ).json()["data"]
-        response = client.post(
-            f"/api/v1/workflows/{WORKFLOW_UUID}/authoring/apply",
-            json={
-                "expected_draft_hash": draft["draft"]["draft_hash"],
-                "expected_workflow_revision": revision,
-                "expected_candidate_hash": draft["candidate"]["candidate_hash"],
-            },
-        )
-
-    assert response.status_code == 400
-    assert response.json() == INVALID_INPUT
-
-
 def test_graph_revision_accepts_int64_max_as_business_conflict_control(
     store: WorkflowStore,
 ) -> None:
@@ -266,30 +236,6 @@ def test_draft_revision_accepts_int64_max_as_business_conflict_control(
         response = _save_draft(
             client,
             expected_workflow_revision=INT64_MAX,
-        )
-
-    assert response.status_code == 409
-    assert response.json() == AUTHORING_REVISION_CONFLICT
-
-
-def test_apply_revision_accepts_int64_max_as_business_conflict_control(
-    store: WorkflowStore,
-    tmp_path: Path,
-) -> None:
-    service = _authoring_service(store, tmp_path)
-
-    with TestClient(create_workflow_app(service)) as client:
-        draft = _save_draft(
-            client,
-            expected_workflow_revision=1,
-        ).json()["data"]
-        response = client.post(
-            f"/api/v1/workflows/{WORKFLOW_UUID}/authoring/apply",
-            json={
-                "expected_draft_hash": draft["draft"]["draft_hash"],
-                "expected_workflow_revision": INT64_MAX,
-                "expected_candidate_hash": draft["candidate"]["candidate_hash"],
-            },
         )
 
     assert response.status_code == 409

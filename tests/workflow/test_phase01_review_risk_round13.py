@@ -24,8 +24,8 @@ RESOURCE_TEMPLATE_UUID = "50000000-0000-4000-8000-000000000001"
 SOURCE_HANDLE_UUID = "60000000-0000-4000-8000-000000000001"
 TARGET_HANDLE_UUID = "60000000-0000-4000-8000-000000000002"
 CATALOG_FINGERPRINT = f"sha256:{'d' * 64}"
-SOURCE = "build()"
-NORMALIZED_SOURCE = "build()\n"
+SOURCE = "build()\n"
+NORMALIZED_SOURCE = SOURCE
 
 CANDIDATE_INVALID = {
     "code": 422,
@@ -409,11 +409,7 @@ def _apply_candidate(client: TestClient, aggregate: dict[str, Any]) -> Any:
     assert candidate is not None
     return client.post(
         f"/api/v1/workflows/{WORKFLOW_UUID}/authoring/apply",
-        json={
-            "expected_draft_hash": aggregate["draft"]["draft_hash"],
-            "expected_workflow_revision": 2,
-            "expected_candidate_hash": candidate["candidate_hash"],
-        },
+        json={"candidate_hash": candidate["candidate_hash"]},
     )
 
 
@@ -678,9 +674,7 @@ def _raw_body(
     assert candidate is not None
     return (
         "{"
-        f'"expected_draft_hash":"{saved["draft"]["draft_hash"]}",'
-        '"expected_workflow_revision":2,'
-        f'"expected_candidate_hash":"{candidate["candidate_hash"]}",'
+        f'"candidate_hash":"{candidate["candidate_hash"]}",'
         f'"unexpected":{deep}'
         "}"
     ).encode()

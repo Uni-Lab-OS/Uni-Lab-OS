@@ -389,11 +389,7 @@ def _save_draft(client: TestClient, *, revision: int) -> Any:
 def _apply(client: TestClient, aggregate: dict[str, Any]) -> Any:
     return client.post(
         f"/api/v1/workflows/{WORKFLOW_UUID}/authoring/apply",
-        json={
-            "expected_draft_hash": aggregate["draft"]["draft_hash"],
-            "expected_workflow_revision": aggregate["workflow_revision"],
-            "expected_candidate_hash": aggregate["candidate"]["candidate_hash"],
-        },
+        json={"candidate_hash": aggregate["candidate"]["candidate_hash"]},
     )
 
 

@@ -457,36 +457,6 @@ def test_draft_expected_workflow_revision_requires_strict_json_integer(
 
 
 @pytest.mark.parametrize(
-    "revision",
-    [True, "1", 1.0],
-    ids=["boolean", "string", "float"],
-)
-def test_apply_expected_workflow_revision_requires_strict_json_integer(
-    store: WorkflowStore,
-    tmp_path: Path,
-    revision: Any,
-) -> None:
-    service = _authoring_service(store, tmp_path)
-
-    with TestClient(create_workflow_app(service)) as client:
-        draft = _save_draft(
-            client,
-            expected_workflow_revision=1,
-        ).json()["data"]
-        response = client.post(
-            f"/api/v1/workflows/{WORKFLOW_UUID}/authoring/apply",
-            json={
-                "expected_draft_hash": draft["draft"]["draft_hash"],
-                "expected_workflow_revision": revision,
-                "expected_candidate_hash": draft["candidate"]["candidate_hash"],
-            },
-        )
-
-    assert response.status_code == 400
-    assert response.json() == INVALID_INPUT
-
-
-@pytest.mark.parametrize(
     ("field", "value"),
     [
         ("disabled", 1),
@@ -542,11 +512,7 @@ def test_strict_integer_and_boolean_json_controls_succeed(
         draft = draft_response.json()["data"]
         apply_response = client.post(
             f"/api/v1/workflows/{WORKFLOW_UUID}/authoring/apply",
-            json={
-                "expected_draft_hash": draft["draft"]["draft_hash"],
-                "expected_workflow_revision": 2,
-                "expected_candidate_hash": draft["candidate"]["candidate_hash"],
-            },
+            json={"candidate_hash": draft["candidate"]["candidate_hash"]},
         )
 
     assert {

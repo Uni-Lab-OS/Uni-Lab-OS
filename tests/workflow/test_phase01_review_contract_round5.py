@@ -320,11 +320,7 @@ def test_apply_accepts_server_hydrated_write_shape_candidate(
         candidate = aggregate["candidate"]
         response = client.post(
             f"/api/v1/workflows/{WORKFLOW_UUID}/authoring/apply",
-            json={
-                "expected_draft_hash": aggregate["draft"]["draft_hash"],
-                "expected_workflow_revision": 2,
-                "expected_candidate_hash": candidate["candidate_hash"],
-            },
+            json={"candidate_hash": candidate["candidate_hash"]},
         )
 
     assert response.status_code == 200

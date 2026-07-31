@@ -140,14 +140,10 @@ def test_authoring_and_global_events_replace_old_execution_contract(client):
         "workflow_not_found",
     )
     _assert_backend_error(
-        client.post(
-            f"/api/v1/workflows/{unknown_uuid}/authoring/apply",
-            json={
-                "expected_draft_hash": token,
-                "expected_workflow_revision": 1,
-                "expected_candidate_hash": token,
-            },
-        ),
+            client.post(
+                f"/api/v1/workflows/{unknown_uuid}/authoring/apply",
+                json={"candidate_hash": token},
+            ),
         404,
         "workflow_not_found",
     )

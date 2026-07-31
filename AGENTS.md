@@ -93,23 +93,22 @@ WorkflowTask/runtime migration:
 - The existing `migration/01-backend-contract` work is one legacy-named round.
   It must pass this same gate before merge; after merge, continue 01E and later
   slices on fresh round branches.
-- Before implementation, assign at least two independent test-author subagents:
-  one for frozen/spec contract tests and one for adversarial/regression tests.
-  Give them separate Git worktrees and `test/<round>-*` branches so they do not
-  edit one shared checkout or see/overwrite each other's work. Each must commit
-  tests that fail for the intended missing behavior before implementation.
-- Bring the independent test commits onto the round branch without squashing
-  their provenance. The implementation must make both suites pass; do not
-  weaken, delete, skip, or xfail an independently authored test merely to make
-  the gate green.
+- Before implementation, assign exactly one independent test-author subagent
+  for that round. Give it a separate Git worktree and `test/<round>-*` branch.
+  Do not run another subagent concurrently. It must commit tests that fail for
+  the intended missing behavior before implementation.
+- Bring the independent test commit onto the round branch without squashing
+  its provenance. The implementation must make that suite pass; do not weaken,
+  delete, skip, or xfail an independently authored test merely to make the gate
+  green.
 - Before review, run the round-target tests, the complete repository test
   suite, configured lint/static checks, and `git diff --check`. Every test must
   pass; a partial suite is not merge evidence.
-- Pin review to the exact tested commit SHA. Then assign at least three
-  independent review subagents that did not author the implementation:
-  one for decision/spec compliance, one for repository standards and module
-  design, and one for regression, transaction, recovery, and security risk.
-  Reviewers must inspect code and tests, not only test output.
+- Pin review to the exact tested commit SHA. A review round uses exactly one
+  independent review subagent that did not author the implementation or that
+  round's tests. Rotate decision/spec, module-design, and regression/security
+  perspectives across sequential review rounds; never run reviewers
+  concurrently. Reviewers must inspect code and tests, not only test output.
 - A round may merge only after every blocking review finding is fixed, all
   affected tests and the full gate are rerun, and the relevant reviewers
   confirm the fixes. Any code change after the reviewed SHA invalidates the

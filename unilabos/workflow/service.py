@@ -59,6 +59,10 @@ _ERRORS = {
         409,
         "预览结果已变化，请重新检查 DAG 和源码差异",
     ),
+    "candidate_not_materialized": (
+        409,
+        "请先接受并保存规范化源码，再应用工作流",
+    ),
     "template_catalog_conflict": (
         409,
         "设备动作模板已更新，请重新编译并检查工作流",
@@ -891,87 +895,9 @@ class WorkflowService:
             registration = self._registration(workflow_uuid)
             source = self._read_source(registration)
             record = self._store.get_authoring_record(workflow_uuid)
-            applied_source = record.get("applied_source")
-            writeback_marker_valid = (
-                record.get("writeback_source") is not None
-                and record.get("writeback_expected_hash") is not None
-                and record.get("writeback_generation") is not None
-            )
-            if (
-                record["writeback_status"] == "pending"
-                and writeback_marker_valid
-                and source is not None
-                and applied_source is not None
-                and source["draft_hash"] == applied_source["source_hash"]
-            ):
-                self._store.settle_writeback(
-                    workflow_uuid=workflow_uuid,
-                    expected_writeback_source=record["writeback_source"],
-                    expected_writeback_hash=record["writeback_expected_hash"],
-                    expected_writeback_generation=record["writeback_generation"],
-                    observed_draft_hash=source["draft_hash"],
-                    draft_update_time=source["update_time"],
-                    event_data={
-                        "workflow_uuid": workflow_uuid,
-                        "cause": "recovered",
-                        "workflow_revision": workflow["revision"],
-                        "draft_hash": source["draft_hash"],
-                        "candidate_hash": None,
-                    },
-                )
-                return self.get_authoring(workflow_uuid)
-            if (
-                record["writeback_status"] == "pending"
-                and writeback_marker_valid
-                and (
-                    source is None
-                    or source["draft_hash"] == record["writeback_expected_hash"]
-                )
-            ):
-                recovery_source = record.get("writeback_source")
-                if recovery_source is not None:
-                    try:
-                        recovery_bytes = recovery_source.encode("utf-8")
-                        recovery_hash = _sha256(recovery_bytes)
-                        self._atomic_write(
-                            registration,
-                            recovery_bytes,
-                            expected_hash=(
-                                source["draft_hash"] if source is not None else None
-                            ),
-                        )
-                        source = self._read_source(registration)
-                        if source is not None and source["draft_hash"] == recovery_hash:
-                            self._store.settle_writeback(
-                                workflow_uuid=workflow_uuid,
-                                expected_writeback_source=record["writeback_source"],
-                                expected_writeback_hash=record[
-                                    "writeback_expected_hash"
-                                ],
-                                expected_writeback_generation=record[
-                                    "writeback_generation"
-                                ],
-                                observed_draft_hash=source["draft_hash"],
-                                draft_update_time=source["update_time"],
-                                event_data={
-                                    "workflow_uuid": workflow_uuid,
-                                    "cause": "recovered",
-                                    "workflow_revision": workflow["revision"],
-                                    "draft_hash": source["draft_hash"],
-                                    "candidate_hash": None,
-                                },
-                            )
-                            return self.get_authoring(workflow_uuid)
-                    except (OSError, UnicodeError, WorkflowError):
-                        return self.get_authoring(workflow_uuid)
             actual_hash = source["draft_hash"] if source is not None else None
-            invalid_writeback_marker = (
-                record["writeback_status"] == "pending" and not writeback_marker_valid
-            )
-            if (
-                actual_hash == record["observed_draft_hash"]
-                and not invalid_writeback_marker
-                and not (actual_hash is None and record.get("candidate") is not None)
+            if actual_hash == record["observed_draft_hash"] and not (
+                actual_hash is None and record.get("candidate") is not None
             ):
                 return self.get_authoring(workflow_uuid)
 
@@ -1027,33 +953,15 @@ class WorkflowService:
         self,
         workflow_uuid: str,
         *,
-        expected_draft_hash: str,
-        expected_workflow_revision: int,
-        expected_candidate_hash: str,
+        candidate_hash: str,
     ) -> Dict[str, Any]:
-        self._validate_hash(expected_draft_hash, nullable=False)
-        self._validate_hash(expected_candidate_hash, nullable=False)
+        self._validate_hash(candidate_hash, nullable=False)
         workflow_uuid = self._get_authoring_workflow(workflow_uuid)["uuid"]
         with self._authoring_lock(workflow_uuid):
             workflow = self._get_authoring_workflow(workflow_uuid)
             registration = self._registration(workflow_uuid)
-            source = self._read_source(registration)
-            actual_hash = source["draft_hash"] if source is not None else None
-
-            # D-079 固定了这里的冲突顺序。
-            if actual_hash != expected_draft_hash:
-                raise WorkflowConflict("draft_hash_conflict")
-            if workflow["revision"] != expected_workflow_revision:
-                raise WorkflowConflict("workflow_revision_conflict")
-
             record = self._store.get_authoring_record(workflow_uuid)
             candidate = record.get("candidate")
-            current_catalog = self._catalog_fingerprint()
-            if (
-                candidate is not None
-                and candidate["template_catalog_fingerprint"] != current_catalog
-            ):
-                raise WorkflowConflict("template_catalog_conflict")
             if candidate is None:
                 if any(
                     str(item.get("severity", "")).lower() == "error"
@@ -1061,10 +969,17 @@ class WorkflowService:
                 ):
                     raise WorkflowError("draft_invalid")
                 raise WorkflowConflict("candidate_not_ready")
-            if candidate["candidate_hash"] != expected_candidate_hash:
+            if candidate["candidate_hash"] != candidate_hash:
                 raise WorkflowConflict("candidate_hash_conflict")
-            if source is None:
+
+            source = self._read_source(registration)
+            if source is None or source["draft_hash"] != candidate["draft_hash"]:
                 raise WorkflowConflict("draft_hash_conflict")
+            if workflow["revision"] != candidate["base_workflow_revision"]:
+                raise WorkflowConflict("workflow_revision_conflict")
+            current_catalog = self._catalog_fingerprint()
+            if candidate["template_catalog_fingerprint"] != current_catalog:
+                raise WorkflowConflict("template_catalog_conflict")
 
             applied_graph = self.get_graph(workflow_uuid)
             compilation = self._compile(
@@ -1102,24 +1017,27 @@ class WorkflowService:
             if revalidated["candidate_hash"] != candidate["candidate_hash"]:
                 raise WorkflowConflict("candidate_hash_conflict")
 
-            def validate_authorities() -> None:
-                latest_source = self._read_source(registration)
-                if (
-                    latest_source is None
-                    or latest_source["draft_hash"] != expected_draft_hash
-                ):
-                    raise WorkflowConflict("draft_hash_conflict")
-                if (
-                    self._catalog_fingerprint()
-                    != candidate["template_catalog_fingerprint"]
-                ):
-                    raise WorkflowConflict("template_catalog_conflict")
-
-            validate_authorities()
-
             normalized_source = candidate["normalized_python_source"]
             normalized_bytes = normalized_source.encode("utf-8")
             normalized_hash = _sha256(normalized_bytes)
+            if (
+                source["python_source"] != normalized_source
+                or source["draft_hash"] != normalized_hash
+            ):
+                raise WorkflowConflict("candidate_not_materialized")
+
+            # 编译可能阻塞；在打开 SQLite Apply 事务前最后重读外部 Authority。
+            latest_source = self._read_source(registration)
+            if (
+                latest_source is None
+                or latest_source["draft_hash"] != candidate["draft_hash"]
+            ):
+                raise WorkflowConflict("draft_hash_conflict")
+            if latest_source["python_source"] != normalized_source:
+                raise WorkflowConflict("candidate_not_materialized")
+            if self._catalog_fingerprint() != candidate["template_catalog_fingerprint"]:
+                raise WorkflowConflict("template_catalog_conflict")
+
             applied_source = {
                 "python_source": normalized_source,
                 "source_hash": normalized_hash,
@@ -1131,25 +1049,9 @@ class WorkflowService:
             }
             previous_revision = workflow["revision"]
             try:
-                (
-                    resulting_revision,
-                    writeback_generation,
-                ) = self._store.apply_authoring_candidate(
+                resulting_revision = self._store.apply_authoring_candidate(
                     workflow_uuid=workflow_uuid,
-                    expected_revision=previous_revision,
-                    expected_draft_hash=expected_draft_hash,
-                    expected_candidate_hash=expected_candidate_hash,
-                    expected_catalog_fingerprint=candidate[
-                        "template_catalog_fingerprint"
-                    ],
-                    candidate=candidate,
-                    applied_source=applied_source,
-                    event_data={
-                        "workflow_uuid": workflow_uuid,
-                        "cause": "applied",
-                        "draft_hash": normalized_hash,
-                        "candidate_hash": None,
-                    },
+                    candidate_hash=candidate_hash,
                 )
             except StoreAuthoringConflict as error:
                 raise WorkflowConflict(error.code) from None
@@ -1157,80 +1059,6 @@ class WorkflowService:
                 raise WorkflowConflict("workflow_revision_conflict") from None
             except (StoreConflict, ValidationError):
                 raise WorkflowError("candidate_invalid") from None
-
-            warnings: List[Dict[str, str]] = []
-            response_source = source
-
-            def warn_writeback() -> None:
-                if warnings:
-                    return
-                warnings.append(
-                    {
-                        "code": "draft_writeback_pending",
-                        "message": (
-                            "工作流已应用，但本地源码同步失败；"
-                            "OS 已保留可恢复的源码记录。"
-                        ),
-                    }
-                )
-
-            def mark_pending_best_effort() -> None:
-                for _attempt in range(2):
-                    try:
-                        marker_owned = self._store.mark_writeback_pending(
-                            workflow_uuid=workflow_uuid,
-                            expected_writeback_source=normalized_source,
-                            expected_writeback_hash=actual_hash,
-                            expected_writeback_generation=writeback_generation,
-                        )
-                        if not marker_owned:
-                            # 新 Apply/Draft 已接管 marker，旧 generation 不再重试。
-                            return
-                        return
-                    except Exception:  # noqa: BLE001 - 提交后只能尽力恢复
-                        continue
-
-            try:
-                latest = self._read_source(registration)
-                if latest is None or latest["draft_hash"] != actual_hash:
-                    raise WorkflowError("draft_hash_conflict")
-                self._atomic_write(
-                    registration,
-                    normalized_bytes,
-                    expected_hash=actual_hash,
-                )
-                written = self._read_source(registration)
-                assert written is not None
-                response_source = written
-                if written["draft_hash"] != normalized_hash:
-                    raise WorkflowConflict("draft_hash_conflict")
-            except Exception:  # noqa: BLE001 - 主事务已提交
-                # 主事务已经提交。之后任何文件系统、数据库或聚合错误
-                # 都只能降级为可恢复警告，不能把成功伪装成失败。
-                warn_writeback()
-                mark_pending_best_effort()
-            else:
-                settled = False
-                for _attempt in range(2):
-                    try:
-                        marker_owned = self._store.settle_writeback(
-                            workflow_uuid=workflow_uuid,
-                            expected_writeback_source=normalized_source,
-                            expected_writeback_hash=actual_hash,
-                            expected_writeback_generation=writeback_generation,
-                            observed_draft_hash=written["draft_hash"],
-                            draft_update_time=written["update_time"],
-                        )
-                        if not marker_owned:
-                            # 新 generation 已接管；陈旧 settle 无需恢复。
-                            settled = True
-                            break
-                        settled = True
-                        break
-                    except Exception:  # noqa: BLE001 - 主事务已提交
-                        warn_writeback()
-                if not settled:
-                    mark_pending_best_effort()
 
             fallback_meta_data = dict(workflow["meta_data"])
             candidate_workflow = candidate["graph"].get("workflow") or {}
@@ -1252,11 +1080,7 @@ class WorkflowService:
                 "update_time": utc_now(),
             }
             fallback_record = {
-                "observed_draft_hash": (
-                    response_source["draft_hash"]
-                    if response_source is not None
-                    else None
-                ),
+                "observed_draft_hash": source["draft_hash"],
                 "diagnostics": [],
                 "candidate": None,
                 "applied_source": fallback_applied_source,
@@ -1282,7 +1106,7 @@ class WorkflowService:
                         workflow=fallback_workflow,
                         graph=fallback_graph,
                         registration=registration,
-                        source=response_source,
+                        source=source,
                         record=fallback_record,
                     )
 
@@ -1293,7 +1117,7 @@ class WorkflowService:
                     "workflow_revision": resulting_revision,
                     "applied_candidate_hash": candidate["candidate_hash"],
                     "applied_source_hash": normalized_hash,
-                    "warnings": warnings,
+                    "warnings": [],
                 },
                 "authoring": authoring,
             }
@@ -1377,14 +1201,6 @@ class WorkflowService:
             "draft_hash": _sha256(raw),
             "update_time": _mtime_rfc3339(stat_result.st_mtime),
         }
-
-    def source_reconciliation_pending(self, workflow_uuid: str) -> bool:
-        """告知源码监视器一次成功调用后是否仍需重试。"""
-
-        workflow_uuid = self._get_authoring_workflow(workflow_uuid)["uuid"]
-        with self._authoring_lock(workflow_uuid):
-            record = self._store.get_authoring_record(workflow_uuid)
-            return record["writeback_status"] == "pending"
 
     def source_signature(
         self,

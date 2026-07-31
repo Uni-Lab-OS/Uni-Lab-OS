@@ -424,11 +424,18 @@ def _apply_compiler_candidate(
     )
     candidate = aggregate["candidate"]
     assert candidate is not None
+    if aggregate["draft"]["python_source"] != candidate["normalized_python_source"]:
+        aggregate = service.save_draft(
+            WORKFLOW_UUID,
+            python_source=candidate["normalized_python_source"],
+            expected_draft_hash=aggregate["draft"]["draft_hash"],
+            expected_workflow_revision=aggregate["workflow_revision"],
+        )
+        candidate = aggregate["candidate"]
+        assert candidate is not None
     applied = service.apply_authoring(
         WORKFLOW_UUID,
-        expected_draft_hash=aggregate["draft"]["draft_hash"],
-        expected_workflow_revision=aggregate["workflow_revision"],
-        expected_candidate_hash=candidate["candidate_hash"],
+        candidate_hash=candidate["candidate_hash"],
     )
     return service, applied
 

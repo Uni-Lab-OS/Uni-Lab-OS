@@ -27,8 +27,8 @@ SOURCE_HANDLE_UUID = "60000000-0000-4000-8000-000000000001"
 TARGET_HANDLE_UUID = "60000000-0000-4000-8000-000000000002"
 CATALOG_C1 = f"sha256:{'1' * 64}"
 CATALOG_C2 = f"sha256:{'2' * 64}"
-SOURCE = "build()"
-NORMALIZED_SOURCE = "build()\n"
+SOURCE = "build()\n"
+NORMALIZED_SOURCE = SOURCE
 CANDIDATE_INVALID_DIAGNOSTIC = {
     "severity": "error",
     "code": "candidate_invalid",
@@ -257,7 +257,6 @@ def _authority_snapshot(
         "candidate_hash": record["candidate_hash"],
         "applied_source": record["applied_source"],
         "diagnostics": record["diagnostics"],
-        "writeback_status": record["writeback_status"],
         "events": service.list_events(after_id=0)["items"],
     }
 
@@ -272,9 +271,7 @@ def _start_apply(
         try:
             outcome["result"] = service.apply_authoring(
                 WORKFLOW_UUID,
-                expected_draft_hash=saved["draft"]["draft_hash"],
-                expected_workflow_revision=2,
-                expected_candidate_hash=saved["candidate"]["candidate_hash"],
+                candidate_hash=saved["candidate"]["candidate_hash"],
             )
         except WorkflowError as error:
             outcome["error"] = {

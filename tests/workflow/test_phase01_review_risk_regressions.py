@@ -276,61 +276,6 @@ def test_one_source_identity_can_belong_to_only_one_workflow(
     assert unregistered.value.code == "workflow_not_found"
 
 
-def test_apply_does_not_overwrite_external_change_after_sqlite_commit(
-    service: WorkflowService,
-    tmp_path: Path,
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    package_root = tmp_path / "package"
-    package_root.mkdir()
-    _create_workflow(service, WORKFLOW_A_UUID)
-    _register(
-        service,
-        workflow_uuid=WORKFLOW_A_UUID,
-        package_root=package_root,
-        relative_path="workflows/apply.py",
-    )
-    saved = service.save_draft(
-        WORKFLOW_A_UUID,
-        python_source="value = 'candidate'",
-        expected_draft_hash=None,
-        expected_workflow_revision=1,
-    )
-    source_path = package_root / "workflows" / "apply.py"
-    external_source = "value = 'newer external draft'\n"
-    commit_candidate = service._store.apply_authoring_candidate
-
-    def commit_then_change_draft(**kwargs):
-        revision = commit_candidate(**kwargs)
-        source_path.write_text(external_source, encoding="utf-8")
-        return revision
-
-    monkeypatch.setattr(
-        service._store,
-        "apply_authoring_candidate",
-        commit_then_change_draft,
-    )
-    result = service.apply_authoring(
-        WORKFLOW_A_UUID,
-        expected_draft_hash=saved["draft"]["draft_hash"],
-        expected_workflow_revision=1,
-        expected_candidate_hash=saved["candidate"]["candidate_hash"],
-    )
-
-    assert result["apply_result"]["workflow_revision"] == 1
-    assert result["apply_result"]["warnings"] == [
-        {
-            "code": "draft_writeback_pending",
-            "message": (
-                "工作流已应用，但本地源码同步失败；OS 已保留可恢复的源码记录。"
-            ),
-        }
-    ]
-    assert source_path.read_text(encoding="utf-8") == external_source
-    assert result["authoring"]["draft"]["python_source"] == external_source
-    assert result["authoring"]["state"] == "applied_source_stale"
-
-
 @pytest.mark.parametrize("symlink_location", ["package_root", "relative_parent"])
 def test_source_registration_rejects_every_symlinked_parent(
     service: WorkflowService,

@@ -247,7 +247,7 @@ def test_backend_envelope_graph_revision_and_task_snapshot(client) -> None:
     assert "node_id" not in jobs[0]
 
 
-def test_authoring_missing_draft_invalid_save_and_apply_three_token_flow(
+def test_authoring_missing_draft_invalid_save_and_single_token_apply_flow(
     client,
 ) -> None:
     test_client, service, package_root = client
@@ -278,7 +278,7 @@ def test_authoring_missing_draft_invalid_save_and_apply_three_token_flow(
     valid = test_client.put(
         f"/api/v1/workflows/{WORKFLOW_UUID}/authoring/draft",
         json={
-            "python_source": "result = build()",
+            "python_source": "result = build()\n",
             "expected_draft_hash": invalid_aggregate["draft"]["draft_hash"],
             "expected_workflow_revision": 1,
         },
@@ -292,9 +292,7 @@ def test_authoring_missing_draft_invalid_save_and_apply_three_token_flow(
     rejected_bundle = test_client.post(
         f"/api/v1/workflows/{WORKFLOW_UUID}/authoring/apply",
         json={
-            "expected_draft_hash": aggregate["draft"]["draft_hash"],
-            "expected_workflow_revision": 1,
-            "expected_candidate_hash": aggregate["candidate"]["candidate_hash"],
+            "candidate_hash": aggregate["candidate"]["candidate_hash"],
             "candidate": aggregate["candidate"],
         },
     )
@@ -303,11 +301,7 @@ def test_authoring_missing_draft_invalid_save_and_apply_three_token_flow(
 
     applied = test_client.post(
         f"/api/v1/workflows/{WORKFLOW_UUID}/authoring/apply",
-        json={
-            "expected_draft_hash": aggregate["draft"]["draft_hash"],
-            "expected_workflow_revision": 1,
-            "expected_candidate_hash": aggregate["candidate"]["candidate_hash"],
-        },
+        json={"candidate_hash": aggregate["candidate"]["candidate_hash"]},
     )
     assert applied.status_code == 200
     data = applied.json()["data"]
@@ -327,7 +321,7 @@ def test_source_only_apply_retains_workflow_revision(client) -> None:
     saved = test_client.put(
         f"/api/v1/workflows/{WORKFLOW_UUID}/authoring/draft",
         json={
-            "python_source": "source_only = True",
+            "python_source": "source_only = True\n",
             "expected_draft_hash": None,
             "expected_workflow_revision": 1,
         },
@@ -335,11 +329,7 @@ def test_source_only_apply_retains_workflow_revision(client) -> None:
 
     applied = test_client.post(
         f"/api/v1/workflows/{WORKFLOW_UUID}/authoring/apply",
-        json={
-            "expected_draft_hash": saved["draft"]["draft_hash"],
-            "expected_workflow_revision": 1,
-            "expected_candidate_hash": saved["candidate"]["candidate_hash"],
-        },
+        json={"candidate_hash": saved["candidate"]["candidate_hash"]},
     )
 
     assert applied.status_code == 200
@@ -351,65 +341,12 @@ def test_source_only_apply_retains_workflow_revision(client) -> None:
     assert result["authoring"]["applied_graph"]["nodes"] == []
 
 
-def test_committed_apply_reports_source_writeback_as_warning(
-    client,
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    test_client, service, _package_root = client
-    saved = test_client.put(
-        f"/api/v1/workflows/{WORKFLOW_UUID}/authoring/draft",
-        json={
-            "python_source": "result = build()",
-            "expected_draft_hash": None,
-            "expected_workflow_revision": 1,
-        },
-    ).json()["data"]
-
-    def fail_writeback(*_args, **_kwargs) -> None:
-        raise OSError("simulated writeback failure")
-
-    monkeypatch.setattr(service, "_atomic_write", fail_writeback)
-    applied = test_client.post(
-        f"/api/v1/workflows/{WORKFLOW_UUID}/authoring/apply",
-        json={
-            "expected_draft_hash": saved["draft"]["draft_hash"],
-            "expected_workflow_revision": 1,
-            "expected_candidate_hash": saved["candidate"]["candidate_hash"],
-        },
-    )
-
-    assert applied.status_code == 200
-    data = applied.json()["data"]
-    assert data["apply_result"]["workflow_revision"] == 2
-    assert data["apply_result"]["warnings"] == [
-        {
-            "code": "draft_writeback_pending",
-            "message": (
-                "工作流已应用，但本地源码同步失败；OS 已保留可恢复的源码记录。"
-            ),
-        }
-    ]
-    assert data["authoring"]["candidate"] is None
-    assert data["authoring"]["applied_graph"]["nodes"][0]["uuid"] == NODE_UUID
-
-    monkeypatch.undo()
-    recovered = service.reconcile_registered_source(WORKFLOW_UUID)
-    assert recovered["state"] == "applied"
-    assert (
-        service._store.get_authoring_record(WORKFLOW_UUID)["writeback_status"]
-        == "settled"
-    )
-    assert service.list_events(after_id=0)["items"][-1]["data"]["cause"] == (
-        "recovered"
-    )
-
-
 def test_authoring_conflict_order_and_error_envelopes(client) -> None:
     test_client, service, package_root = client
     saved = test_client.put(
         f"/api/v1/workflows/{WORKFLOW_UUID}/authoring/draft",
         json={
-            "python_source": "result = build()",
+            "python_source": "result = build()\n",
             "expected_draft_hash": None,
             "expected_workflow_revision": 1,
         },
@@ -419,24 +356,22 @@ def test_authoring_conflict_order_and_error_envelopes(client) -> None:
     source_path.write_text("external = change()\n", encoding="utf-8")
     response = test_client.post(
         f"/api/v1/workflows/{WORKFLOW_UUID}/authoring/apply",
-        json={
-            "expected_draft_hash": saved["draft"]["draft_hash"],
-            "expected_workflow_revision": 999,
-            "expected_candidate_hash": saved["candidate"]["candidate_hash"],
-        },
+        json={"candidate_hash": saved["candidate"]["candidate_hash"]},
     )
     assert response.status_code == 409
     assert response.json()["error"]["code"] == "draft_hash_conflict"
 
     refreshed = service.reconcile_registered_source(WORKFLOW_UUID)
     assert refreshed["draft"]["python_source"] == "external = change()\n"
+    service.save_graph(
+        WORKFLOW_UUID,
+        revision=1,
+        nodes=[],
+        edges=[],
+    )
     stale_revision = test_client.post(
         f"/api/v1/workflows/{WORKFLOW_UUID}/authoring/apply",
-        json={
-            "expected_draft_hash": refreshed["draft"]["draft_hash"],
-            "expected_workflow_revision": 999,
-            "expected_candidate_hash": refreshed["candidate"]["candidate_hash"],
-        },
+        json={"candidate_hash": refreshed["candidate"]["candidate_hash"]},
     )
     assert stale_revision.status_code == 409
     assert stale_revision.json()["error"]["code"] == ("workflow_revision_conflict")
@@ -449,7 +384,7 @@ def test_malformed_tokens_and_event_cursor_use_frozen_error_shapes(
     invalid_draft = test_client.put(
         f"/api/v1/workflows/{WORKFLOW_UUID}/authoring/draft",
         json={
-            "python_source": "result = build()",
+            "python_source": "result = build()\n",
             "expected_draft_hash": "not-a-hash",
             "expected_workflow_revision": 1,
         },
@@ -481,7 +416,7 @@ def test_authoring_event_is_durable_small_and_replayable(client) -> None:
     saved = test_client.put(
         f"/api/v1/workflows/{WORKFLOW_UUID}/authoring/draft",
         json={
-            "python_source": "result = build()",
+            "python_source": "result = build()\n",
             "expected_draft_hash": None,
             "expected_workflow_revision": 1,
         },
@@ -514,18 +449,14 @@ def test_deleted_source_does_not_delete_applied_workflow(client) -> None:
     saved = test_client.put(
         f"/api/v1/workflows/{WORKFLOW_UUID}/authoring/draft",
         json={
-            "python_source": "result = build()",
+            "python_source": "result = build()\n",
             "expected_draft_hash": None,
             "expected_workflow_revision": 1,
         },
     ).json()["data"]
     test_client.post(
         f"/api/v1/workflows/{WORKFLOW_UUID}/authoring/apply",
-        json={
-            "expected_draft_hash": saved["draft"]["draft_hash"],
-            "expected_workflow_revision": 1,
-            "expected_candidate_hash": saved["candidate"]["candidate_hash"],
-        },
+        json={"candidate_hash": saved["candidate"]["candidate_hash"]},
     )
 
     (package_root / "workflows" / "demo.py").unlink()

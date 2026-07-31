@@ -331,11 +331,7 @@ def test_apply_revalidation_rejects_diagnostic_range_outside_saved_draft(
         aggregate = draft_response.json()["data"]
         apply_response = client.post(
             f"/api/v1/workflows/{WORKFLOW_UUID}/authoring/apply",
-            json={
-                "expected_draft_hash": aggregate["draft"]["draft_hash"],
-                "expected_workflow_revision": 1,
-                "expected_candidate_hash": aggregate["candidate"]["candidate_hash"],
-            },
+            json={"candidate_hash": aggregate["candidate"]["candidate_hash"]},
         )
         graph = client.get(f"/api/v1/workflows/{WORKFLOW_UUID}/graph").json()["data"]
 

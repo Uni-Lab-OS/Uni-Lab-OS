@@ -584,11 +584,7 @@ def test_apply_revalidation_failure_uses_candidate_invalid_422(
         aggregate = draft_response.json()["data"]
         response = client.post(
             f"/api/v1/workflows/{WORKFLOW_UUID}/authoring/apply",
-            json={
-                "expected_draft_hash": aggregate["draft"]["draft_hash"],
-                "expected_workflow_revision": revision,
-                "expected_candidate_hash": aggregate["candidate"]["candidate_hash"],
-            },
+            json={"candidate_hash": aggregate["candidate"]["candidate_hash"]},
         )
 
     assert response.status_code == 422
@@ -617,11 +613,7 @@ def test_valid_empty_node_graph_with_authority_catalog_still_applies(
         aggregate = draft_response.json()["data"]
         response = client.post(
             f"/api/v1/workflows/{WORKFLOW_UUID}/authoring/apply",
-            json={
-                "expected_draft_hash": aggregate["draft"]["draft_hash"],
-                "expected_workflow_revision": revision,
-                "expected_candidate_hash": aggregate["candidate"]["candidate_hash"],
-            },
+            json={"candidate_hash": aggregate["candidate"]["candidate_hash"]},
         )
 
     assert response.status_code == 200

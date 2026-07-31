@@ -12,15 +12,11 @@ from typing import Any
 import pytest
 
 from unilabos.workflow.models import CandidateCompilation
-from unilabos.workflow.service import WorkflowError, WorkflowService
+from unilabos.workflow.service import WorkflowConflict, WorkflowError, WorkflowService
 from unilabos.workflow.store import WorkflowStore
 
 WORKFLOW_UUID = "11111111-1111-4111-8111-111111111111"
 CATALOG_FINGERPRINT = "sha256:" + ("f" * 64)
-WRITEBACK_WARNING = {
-    "code": "draft_writeback_pending",
-    "message": ("工作流已应用，但本地源码同步失败；OS 已保留可恢复的源码记录。"),
-}
 POST_COMMIT_RESERVED = {
     "input_contract": {"version": 1, "parameters": []},
     "output_contract": {"version": 1, "outputs": []},
@@ -158,15 +154,22 @@ def _apply_saved(
     service: WorkflowService,
     saved: dict[str, Any],
 ) -> dict[str, Any]:
+    candidate = saved["candidate"]
+    if saved["draft"]["python_source"] != candidate["normalized_python_source"]:
+        saved = service.save_draft(
+            WORKFLOW_UUID,
+            python_source=candidate["normalized_python_source"],
+            expected_draft_hash=saved["draft"]["draft_hash"],
+            expected_workflow_revision=1,
+        )
+        candidate = saved["candidate"]
     return service.apply_authoring(
         WORKFLOW_UUID,
-        expected_draft_hash=saved["draft"]["draft_hash"],
-        expected_workflow_revision=1,
-        expected_candidate_hash=saved["candidate"]["candidate_hash"],
+        candidate_hash=candidate["candidate_hash"],
     )
 
 
-def test_apply_preserves_old_fd_write_at_cas_finalization(
+def test_draft_put_preserves_old_fd_write_at_cas_finalization(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -201,13 +204,18 @@ def test_apply_preserves_old_fd_write_at_cas_finalization(
     )
     descriptor = os.open(source_path, os.O_RDWR)
 
-    def apply() -> None:
+    def save_replacement() -> None:
         try:
-            outcome["result"] = _apply_saved(service, saved)
+            outcome["result"] = service.save_draft(
+                WORKFLOW_UUID,
+                python_source="value = 'replacement'\n",
+                expected_draft_hash=saved["draft"]["draft_hash"],
+                expected_workflow_revision=1,
+            )
         except Exception as exc:  # noqa: BLE001 - 后台异常由主测试断言
             outcome["error"] = exc
 
-    thread = threading.Thread(target=apply, name="apply-cas-finalization")
+    thread = threading.Thread(target=save_replacement, name="draft-cas-finalization")
     thread.start()
     external_source = "value = 'external write during finalization'\n"
     try:
@@ -226,16 +234,13 @@ def test_apply_preserves_old_fd_write_at_cas_finalization(
 
     try:
         assert not thread.is_alive()
-        assert "error" not in outcome
-        result = outcome["result"]
+        assert isinstance(outcome.get("error"), WorkflowConflict)
+        assert outcome["error"].code == "draft_hash_conflict"
         aggregate = service.get_authoring(WORKFLOW_UUID)
-        record = store.get_authoring_record(WORKFLOW_UUID)
     finally:
         store.close()
 
-    assert result["apply_result"]["warnings"] == [WRITEBACK_WARNING]
     assert aggregate["draft"]["python_source"] == external_source
-    assert record["writeback_status"] == "pending"
 
 
 def test_cas_restore_failure_retains_the_only_original_copy(
@@ -333,7 +338,7 @@ def test_cas_restore_failure_retains_the_only_original_copy(
     } == backup_snapshot
 
 
-def test_graph_apply_fallback_uses_post_commit_facts_without_writeback_warning(
+def test_graph_apply_fallback_uses_post_commit_facts(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -344,7 +349,7 @@ def test_graph_apply_fallback_uses_post_commit_facts_without_writeback_warning(
     source_path, saved = _save_candidate(
         service,
         package_root,
-        source="build()",
+        source="build()\n",
         meta_data={"color": "before"},
     )
 
@@ -362,7 +367,6 @@ def test_graph_apply_fallback_uses_post_commit_facts_without_writeback_warning(
     try:
         result = _apply_saved(service, saved)
         persisted_graph = service.get_graph(WORKFLOW_UUID)
-        record = store.get_authoring_record(WORKFLOW_UUID)
     finally:
         store.close()
 
@@ -377,7 +381,6 @@ def test_graph_apply_fallback_uses_post_commit_facts_without_writeback_warning(
         ),
         "applied_graph_is_persisted": applied_graph == persisted_graph,
         "meta_data": applied_graph["workflow"]["meta_data"],
-        "writeback_status": record["writeback_status"],
         "draft_source": source_path.read_text(encoding="utf-8"),
     }
     assert observed == {
@@ -388,6 +391,5 @@ def test_graph_apply_fallback_uses_post_commit_facts_without_writeback_warning(
             "color": "before",
             "unilab": POST_COMMIT_RESERVED,
         },
-        "writeback_status": "settled",
         "draft_source": "build()\n",
     }

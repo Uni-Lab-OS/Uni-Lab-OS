@@ -516,9 +516,7 @@ def test_authoring_revision_conflict_keeps_specific_error_code(
     with pytest.raises(WorkflowConflict) as failure:
         workflow_service.apply_authoring(
             WORKFLOW_UUID,
-            expected_draft_hash=aggregate["draft"]["draft_hash"],
-            expected_workflow_revision=1,
-            expected_candidate_hash=aggregate["candidate"]["candidate_hash"],
+            candidate_hash=aggregate["candidate"]["candidate_hash"],
         )
 
     assert failure.value.code == "workflow_revision_conflict"

@@ -296,11 +296,7 @@ def test_apply_accepts_backend_read_dto_fields_from_candidate_graph(
         candidate = aggregate["candidate"]
         response = client.post(
             f"/api/v1/workflows/{WORKFLOW_UUID}/authoring/apply",
-            json={
-                "expected_draft_hash": aggregate["draft"]["draft_hash"],
-                "expected_workflow_revision": 2,
-                "expected_candidate_hash": candidate["candidate_hash"],
-            },
+            json={"candidate_hash": candidate["candidate_hash"]},
         )
 
     assert response.status_code == 200
@@ -587,9 +583,7 @@ def test_authoring_apply_request_remains_closed(
         response = client.post(
             f"/api/v1/workflows/{WORKFLOW_UUID}/authoring/apply",
             json={
-                "expected_draft_hash": f"sha256:{'a' * 64}",
-                "expected_workflow_revision": 1,
-                "expected_candidate_hash": f"sha256:{'b' * 64}",
+                "candidate_hash": f"sha256:{'b' * 64}",
                 "frontend_only": True,
             },
         )

@@ -1,4 +1,4 @@
-"""Phase 01 第二轮 Authoring monitor 与 writeback 并发风险回归测试。"""
+"""Phase 01 第二轮 Authoring monitor 与 Draft CAS 并发风险回归测试。"""
 
 from __future__ import annotations
 
@@ -12,7 +12,7 @@ import pytest
 
 from unilabos.workflow import composition
 from unilabos.workflow.models import CandidateCompilation
-from unilabos.workflow.service import WorkflowService
+from unilabos.workflow.service import WorkflowConflict, WorkflowService
 from unilabos.workflow.source_monitor import WorkflowSourceMonitor
 from unilabos.workflow.store import WorkflowStore
 
@@ -305,7 +305,7 @@ def test_composition_isolates_bad_registered_drafts_and_keeps_monitoring(
     assert repaired["candidate"]["draft_hash"] == repaired["draft"]["draft_hash"]
 
 
-def test_apply_writeback_rechecks_after_final_compare_before_replace(
+def test_draft_put_rechecks_after_final_compare_before_replace(
     service,
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
@@ -327,14 +327,14 @@ def test_apply_writeback_rechecks_after_final_compare_before_replace(
         expected_workflow_revision=1,
     )
     original_atomic_write = workflow_service._atomic_write
-    writeback_entered = threading.Event()
-    allow_writeback = threading.Event()
+    save_entered = threading.Event()
+    allow_save = threading.Event()
     outcome: dict[str, Any] = {}
 
     def blocked_atomic_write(*args, **kwargs):
-        writeback_entered.set()
-        if not allow_writeback.wait(timeout=2):
-            raise TimeoutError("test did not release writeback")
+        save_entered.set()
+        if not allow_save.wait(timeout=2):
+            raise TimeoutError("test did not release Draft save")
         return original_atomic_write(*args, **kwargs)
 
     monkeypatch.setattr(
@@ -343,47 +343,36 @@ def test_apply_writeback_rechecks_after_final_compare_before_replace(
         blocked_atomic_write,
     )
 
-    def apply_candidate() -> None:
+    def save_replacement() -> None:
         try:
-            outcome["result"] = workflow_service.apply_authoring(
+            outcome["result"] = workflow_service.save_draft(
                 WORKFLOW_A_UUID,
+                python_source="value = 'replacement'\n",
                 expected_draft_hash=saved["draft"]["draft_hash"],
                 expected_workflow_revision=1,
-                expected_candidate_hash=saved["candidate"]["candidate_hash"],
             )
         except Exception as exc:  # noqa: BLE001 - 后台异常由主测试断言
             outcome["error"] = exc
 
-    apply_thread = threading.Thread(
-        target=apply_candidate,
-        name="apply-writeback-race",
+    save_thread = threading.Thread(
+        target=save_replacement,
+        name="draft-save-race",
     )
-    apply_thread.start()
+    save_thread.start()
     try:
-        assert writeback_entered.wait(timeout=1)
+        assert save_entered.wait(timeout=1)
         external_source = "value = 'newer external draft'\n"
         source_path.write_text(external_source, encoding="utf-8")
-        allow_writeback.set()
-        apply_thread.join(timeout=2)
+        allow_save.set()
+        save_thread.join(timeout=2)
     finally:
-        allow_writeback.set()
-        apply_thread.join(timeout=2)
+        allow_save.set()
+        save_thread.join(timeout=2)
 
-    assert not apply_thread.is_alive()
-    assert "error" not in outcome
-    result = outcome["result"]
+    assert not save_thread.is_alive()
+    assert isinstance(outcome.get("error"), WorkflowConflict)
+    assert outcome["error"].code == "draft_hash_conflict"
     assert source_path.read_text(encoding="utf-8") == external_source
-    assert result["apply_result"]["warnings"] == [
-        {
-            "code": "draft_writeback_pending",
-            "message": (
-                "工作流已应用，但本地源码同步失败；"
-                "OS 已保留可恢复的源码记录。"
-            ),
-        }
-    ]
-    assert result["authoring"]["draft"]["python_source"] == external_source
-    assert result["authoring"]["state"] == "applied_source_stale"
 
 
 def test_reset_waits_for_monitor_exit_before_closing_store(
