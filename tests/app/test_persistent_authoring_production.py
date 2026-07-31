@@ -317,3 +317,83 @@ def test_real_server_uses_one_real_engine_for_all_authoring_paths(
 
     assert composition.get_workflow_service() is service
     assert service.compiler is engine
+
+
+def test_persistent_candidate_round_trips_through_production_pure_generate(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    working_dir = tmp_path / "unilabos_data"
+    selected_root = tmp_path / "editable"
+    selected_root.mkdir()
+    _write_declared_package(selected_root, _source().replace("= 3,", "= 4,"))
+    _seed_production_authority(working_dir)
+    _configure_production(
+        monkeypatch,
+        working_dir=working_dir,
+        authority=LOCAL_AUTHORITY,
+        roots=(selected_root,),
+    )
+    app = _reload_server().setup_server()
+
+    with TestClient(app) as client:
+        aggregate_response = client.get(f"/api/v1/workflows/{WORKFLOW_UUID}/authoring")
+        assert aggregate_response.status_code == 200, aggregate_response.text
+        aggregate = aggregate_response.json()["data"]
+        assert aggregate["candidate"] is not None
+
+        candidate_graph = aggregate["candidate"]["graph"]
+        template_uuids = {item["uuid"] for item in candidate_graph["node_templates"]}
+        handle_uuids = {item["uuid"] for item in candidate_graph["handle_templates"]}
+        caller_template_uuids = {item.template["uuid"] for item in _catalog_imports()}
+        caller_handle_uuids = {
+            handle["uuid"] for item in _catalog_imports() for handle in item.handles
+        }
+        assert template_uuids.isdisjoint(caller_template_uuids)
+        assert handle_uuids.isdisjoint(caller_handle_uuids)
+        assert all(
+            edge["source_handle_uuid"] in handle_uuids
+            and edge["target_handle_uuid"] in handle_uuids
+            for edge in candidate_graph["edges"]
+        )
+        unilab = candidate_graph["workflow"]["meta_data"]["unilab"]
+        assert all(
+            binding["source_handle_uuid"] in handle_uuids
+            for binding in unilab["output_bindings"].values()
+            if binding["kind"] == "node_output"
+        )
+        assert all(
+            handle_uuid in handle_uuids
+            for node in candidate_graph["nodes"]
+            for handle_uuid in node["meta_data"]["unilab"]["input_bindings"]
+        )
+        candidate_cycles = next(
+            item
+            for item in unilab["input_contract"]["parameters"]
+            if item["name"] == "cycles"
+        )
+        assert candidate_cycles["default"] == 4
+        generated_response = client.post(
+            "/api/v1/authoring/generate-python",
+            json={
+                "workflow_uuid": WORKFLOW_UUID,
+                "revision": aggregate["workflow_revision"],
+                "source_uri": aggregate["draft"]["source_uri"],
+                "graph": candidate_graph,
+            },
+        )
+
+    assert generated_response.status_code == 200, generated_response.text
+    generated = generated_response.json()["data"]
+    assert generated["diagnostics"] == []
+    assert generated["graph"] is not None
+    assert generated["graph"] == candidate_graph
+    assert generated["changeset"]["kind"] == "source_only"
+    cycles = next(
+        item
+        for item in generated["graph"]["workflow"]["meta_data"]["unilab"][
+            "input_contract"
+        ]["parameters"]
+        if item["name"] == "cycles"
+    )
+    assert cycles["default"] == 4
