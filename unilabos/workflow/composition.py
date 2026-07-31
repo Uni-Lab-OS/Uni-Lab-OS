@@ -7,19 +7,69 @@ import fcntl
 import os
 import stat
 import threading
+from collections.abc import Iterable
 from pathlib import Path
-from typing import Optional
 
 from unilabos.workflow.service import AuthoringCompiler, WorkflowService
+from unilabos.workflow.source_discovery import register_editable_package_sources
 from unilabos.workflow.source_monitor import WorkflowSourceMonitor
 from unilabos.workflow.store import WorkflowStore
 
 _lock = threading.Lock()
-_service: Optional[WorkflowService] = None
-_database_path: Optional[Path] = None
-_monitor: Optional[WorkflowSourceMonitor] = None
-_owner_pid: Optional[int] = None
-_workspace_lease_fd: Optional[int] = None
+_service: WorkflowService | None = None
+_database_path: Path | None = None
+_monitor: WorkflowSourceMonitor | None = None
+_owner_pid: int | None = None
+_workspace_lease_fd: int | None = None
+_compiler: AuthoringCompiler | None = None
+_editable_package_roots: tuple[Path, ...] = ()
+_ready = False
+
+
+def _configured_package_roots(
+    roots: Iterable[str | Path],
+) -> tuple[Path, ...]:
+    return tuple(Path(os.path.abspath(root)) for root in roots)
+
+
+def _retain_runtime(
+    service: WorkflowService,
+    monitor: WorkflowSourceMonitor | None,
+    *,
+    database_path: Path,
+    compiler: AuthoringCompiler | None,
+    editable_package_roots: tuple[Path, ...],
+    owner_pid: int,
+    lease_descriptor: int,
+    ready: bool,
+) -> None:
+    """发布 ready Authority，或保留失败 cleanup 的独占 ownership。"""
+
+    global _compiler, _database_path, _editable_package_roots, _monitor, _ready
+    global _owner_pid, _service, _workspace_lease_fd
+    _service = service
+    _database_path = database_path
+    _compiler = compiler
+    _editable_package_roots = editable_package_roots
+    _monitor = monitor
+    _owner_pid = owner_pid
+    _workspace_lease_fd = lease_descriptor
+    _ready = ready
+
+
+def _clear_runtime() -> None:
+    """清除已确认关闭的进程内引用；lease 由调用方显式释放。"""
+
+    global _compiler, _database_path, _editable_package_roots, _monitor, _ready
+    global _owner_pid, _service, _workspace_lease_fd
+    _service = None
+    _database_path = None
+    _compiler = None
+    _editable_package_roots = ()
+    _monitor = None
+    _owner_pid = None
+    _workspace_lease_fd = None
+    _ready = False
 
 
 def _acquire_workspace_lease(working_dir: Path) -> int:
@@ -50,7 +100,7 @@ def _acquire_workspace_lease(working_dir: Path) -> int:
 
 
 def _release_workspace_lease(
-    descriptor: Optional[int],
+    descriptor: int | None,
     *,
     unlock: bool = True,
 ) -> None:
@@ -66,13 +116,14 @@ def _release_workspace_lease(
 def compose_workflow_runtime(
     working_dir: str | Path,
     *,
-    compiler: Optional[AuthoringCompiler] = None,
+    compiler: AuthoringCompiler | None = None,
+    editable_package_roots: Iterable[str | Path] = (),
 ) -> WorkflowService:
     """装配工作区唯一的 Workflow authority、启动恢复和 Draft 监视。"""
 
-    global _database_path, _monitor, _owner_pid, _service, _workspace_lease_fd
     resolved_working_dir = Path(working_dir).resolve()
     database_path = resolved_working_dir / "workflow.db"
+    configured_roots = _configured_package_roots(editable_package_roots)
     with _lock:
         if _service is not None:
             if _owner_pid != os.getpid():
@@ -81,38 +132,75 @@ def compose_workflow_runtime(
                 raise RuntimeError(
                     "Workflow authority cannot switch working_dir at runtime"
                 )
+            if compiler is not _compiler:
+                raise RuntimeError(
+                    "Workflow authority cannot switch compiler at runtime"
+                )
+            if configured_roots != _editable_package_roots:
+                raise RuntimeError(
+                    "Workflow authority cannot switch editable packages at runtime"
+                )
+            if not _ready:
+                raise RuntimeError(
+                    "Workflow authority startup cleanup must complete before retry"
+                )
             return _service
         lease_descriptor = _acquire_workspace_lease(resolved_working_dir)
-        new_service: Optional[WorkflowService] = None
-        new_monitor: Optional[WorkflowSourceMonitor] = None
+        new_service: WorkflowService | None = None
+        new_monitor: WorkflowSourceMonitor | None = None
+        published = False
         try:
             new_service = WorkflowService(
                 WorkflowStore(database_path),
                 compiler=compiler,
             )
-            new_monitor = WorkflowSourceMonitor(new_service)
-            _service = new_service
-            _database_path = database_path
-            _monitor = new_monitor
-            _owner_pid = os.getpid()
-            _workspace_lease_fd = lease_descriptor
+            register_editable_package_sources(
+                new_service,
+                configured_roots,
+            )
             new_service.recover_registered_sources()
+            new_monitor = WorkflowSourceMonitor(new_service)
+            # Reconciliation 已完成，可以读取一致 baseline；monitor 从空签名集启动，
+            # 会捕获此发布点与线程启动之间发生的变化。
+            _retain_runtime(
+                new_service,
+                new_monitor,
+                database_path=database_path,
+                compiler=compiler,
+                editable_package_roots=configured_roots,
+                owner_pid=os.getpid(),
+                lease_descriptor=lease_descriptor,
+                ready=True,
+            )
+            published = True
             new_monitor.start()
-        except BaseException:
-            try:
-                if new_monitor is not None:
-                    new_monitor.stop()
-            finally:
+        except BaseException as startup_error:
+            cleanup_error: BaseException | None = None
+            if new_monitor is not None:
                 try:
-                    if new_service is not None:
-                        new_service.close()
-                finally:
-                    _service = None
-                    _database_path = None
-                    _monitor = None
-                    _owner_pid = None
-                    _workspace_lease_fd = None
-                    _release_workspace_lease(lease_descriptor)
+                    new_monitor.stop()
+                except BaseException as error:  # noqa: BLE001 - 保留租约需捕获停机失败
+                    cleanup_error = error
+            if cleanup_error is None and new_service is not None:
+                try:
+                    new_service.close()
+                except BaseException as error:  # noqa: BLE001 - 保留租约需捕获关闭失败
+                    cleanup_error = error
+            if cleanup_error is not None and new_service is not None:
+                _retain_runtime(
+                    new_service,
+                    new_monitor,
+                    database_path=database_path,
+                    compiler=compiler,
+                    editable_package_roots=configured_roots,
+                    owner_pid=os.getpid(),
+                    lease_descriptor=lease_descriptor,
+                    ready=False,
+                )
+                raise startup_error from cleanup_error
+            if published:
+                _clear_runtime()
+            _release_workspace_lease(lease_descriptor)
             raise
 
         return new_service
@@ -121,21 +209,29 @@ def compose_workflow_runtime(
 def setup_workflow_service(
     working_dir: str | Path,
     *,
-    compiler: Optional[AuthoringCompiler] = None,
+    compiler: AuthoringCompiler | None = None,
+    editable_package_roots: Iterable[str | Path] = (),
 ) -> WorkflowService:
     """兼容旧装配调用；所有入口统一进入完整运行时组合。"""
 
-    return compose_workflow_runtime(working_dir, compiler=compiler)
+    return compose_workflow_runtime(
+        working_dir,
+        compiler=compiler,
+        editable_package_roots=editable_package_roots,
+    )
 
 
-def get_workflow_service() -> Optional[WorkflowService]:
+def get_workflow_service() -> WorkflowService | None:
+    if not _ready or _owner_pid != os.getpid():
+        return None
     return _service
 
 
 def reset_workflow_service_for_test() -> None:
     """停止监视器并关闭测试使用的进程级单例。"""
 
-    global _database_path, _monitor, _owner_pid, _service, _workspace_lease_fd
+    global _compiler, _database_path, _editable_package_roots, _monitor, _ready
+    global _owner_pid, _service, _workspace_lease_fd
     with _lock:
         lease_owned = _owner_pid == os.getpid()
         if _monitor is not None:
@@ -147,6 +243,9 @@ def reset_workflow_service_for_test() -> None:
         _monitor = None
         _service = None
         _database_path = None
+        _compiler = None
+        _editable_package_roots = ()
+        _ready = False
         _owner_pid = None
         lease_descriptor = _workspace_lease_fd
         _workspace_lease_fd = None

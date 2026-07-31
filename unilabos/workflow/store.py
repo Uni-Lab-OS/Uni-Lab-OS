@@ -312,6 +312,8 @@ class WorkflowStore:
             Path(self.path).parent.mkdir(parents=True, exist_ok=True)
         self._catalog_lock = threading.RLock()
         self._lock = threading.RLock()
+        self._source_registration_conn: Optional[sqlite3.Connection] = None
+        self._source_registration_owner: Optional[int] = None
         self._conn = sqlite3.connect(self.path, check_same_thread=False)
         self._conn.row_factory = sqlite3.Row
         try:
@@ -1112,6 +1114,62 @@ class WorkflowStore:
 
     # Authoring ----------------------------------------------------------
 
+    @contextmanager
+    def source_registration_batch(self) -> Iterator[None]:
+        """让既有单 source Store Interface 共享一个原子 transaction。"""
+
+        if self._source_registration_conn is not None:
+            raise StoreConflict("工作流源码注册批次不能嵌套")
+        with self.transaction() as conn:
+            self._source_registration_conn = conn
+            self._source_registration_owner = threading.get_ident()
+            try:
+                yield
+            finally:
+                self._source_registration_conn = None
+                self._source_registration_owner = None
+
+    @staticmethod
+    def _upsert_source_registration(
+        conn: sqlite3.Connection,
+        registration: Dict[str, str],
+        *,
+        now: str,
+    ) -> None:
+        workflow_uuid = registration["workflow_uuid"]
+        conn.execute(
+            """
+            INSERT INTO workflow_source_registration(
+                workflow_uuid, package_id, package_root, relative_path,
+                source_uri, create_time, update_time
+            ) VALUES (?, ?, ?, ?, ?, ?, ?)
+            ON CONFLICT(workflow_uuid) DO UPDATE SET
+                package_id = excluded.package_id,
+                package_root = excluded.package_root,
+                relative_path = excluded.relative_path,
+                source_uri = excluded.source_uri,
+                update_time = excluded.update_time
+            """,
+            (
+                workflow_uuid,
+                registration["package_id"],
+                registration["package_root"],
+                registration["relative_path"],
+                registration["source_uri"],
+                now,
+                now,
+            ),
+        )
+        conn.execute(
+            """
+            INSERT INTO workflow_authoring(
+                workflow_uuid, diagnostics, update_time
+            ) VALUES (?, '[]', ?)
+            ON CONFLICT(workflow_uuid) DO NOTHING
+            """,
+            (workflow_uuid, now),
+        )
+
     def register_source(
         self,
         *,
@@ -1121,45 +1179,55 @@ class WorkflowStore:
         relative_path: str,
         source_uri: str,
     ) -> Dict[str, Any]:
+        registration = {
+            "workflow_uuid": workflow_uuid,
+            "package_id": package_id,
+            "package_root": package_root,
+            "relative_path": relative_path,
+            "source_uri": source_uri,
+        }
+        if self._source_registration_owner == threading.get_ident():
+            assert self._source_registration_conn is not None
+            try:
+                self.get_workflow(
+                    workflow_uuid,
+                    conn=self._source_registration_conn,
+                )
+                self._upsert_source_registration(
+                    self._source_registration_conn,
+                    registration,
+                    now=utc_now(),
+                )
+            except sqlite3.IntegrityError as exc:
+                raise StoreConflict("工作流源码身份已被占用") from exc
+            return self.get_source_registration(workflow_uuid)
+        return self.register_sources([registration])[0]
+
+    def register_sources(
+        self,
+        registrations: List[Dict[str, str]],
+    ) -> List[Dict[str, Any]]:
+        """在一个 SQLite transaction 中注册完整 source declaration 批次。"""
+
+        if not registrations:
+            return []
         now = utc_now()
         try:
             with self.transaction() as conn:
-                self.get_workflow(workflow_uuid, conn=conn)
-                conn.execute(
-                    """
-                    INSERT INTO workflow_source_registration(
-                        workflow_uuid, package_id, package_root, relative_path,
-                        source_uri, create_time, update_time
-                    ) VALUES (?, ?, ?, ?, ?, ?, ?)
-                    ON CONFLICT(workflow_uuid) DO UPDATE SET
-                        package_id = excluded.package_id,
-                        package_root = excluded.package_root,
-                        relative_path = excluded.relative_path,
-                        source_uri = excluded.source_uri,
-                        update_time = excluded.update_time
-                    """,
-                    (
-                        workflow_uuid,
-                        package_id,
-                        package_root,
-                        relative_path,
-                        source_uri,
-                        now,
-                        now,
-                    ),
-                )
-                conn.execute(
-                    """
-                    INSERT INTO workflow_authoring(
-                        workflow_uuid, diagnostics, update_time
-                    ) VALUES (?, '[]', ?)
-                    ON CONFLICT(workflow_uuid) DO NOTHING
-                    """,
-                    (workflow_uuid, now),
-                )
+                for registration in registrations:
+                    workflow_uuid = registration["workflow_uuid"]
+                    self.get_workflow(workflow_uuid, conn=conn)
+                    self._upsert_source_registration(
+                        conn,
+                        registration,
+                        now=now,
+                    )
         except sqlite3.IntegrityError as exc:
             raise StoreConflict("工作流源码身份已被占用") from exc
-        return self.get_source_registration(workflow_uuid)
+        return [
+            self.get_source_registration(registration["workflow_uuid"])
+            for registration in registrations
+        ]
 
     def get_source_registration(self, workflow_uuid: str) -> Dict[str, Any]:
         with self._lock:

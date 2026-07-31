@@ -45,6 +45,7 @@ from unilabos.workflow.store import (
 )
 
 _LOGGER = logging.getLogger(__name__)
+AUTHORING_SOURCE_BYTE_LIMIT = 8 * 1024 * 1024
 _ERRORS = {
     "invalid_input": (400, "提交内容格式不正确"),
     "not_found": (404, "请求的资源不存在"),
@@ -763,6 +764,13 @@ class WorkflowService:
             except StoreConflict:
                 raise WorkflowConflict("invalid_input") from None
 
+    @contextmanager
+    def editable_source_registration_batch(self) -> Iterator[None]:
+        """让多个既有单 source Interface 共享一个 Store transaction。"""
+
+        with self._store.source_registration_batch():
+            yield
+
     def list_registered_sources(self) -> List[Dict[str, Any]]:
         """返回 Draft 监视与启动恢复所需的已注册源码。"""
 
@@ -822,6 +830,8 @@ class WorkflowService:
                 encoded = python_source.encode("utf-8")
             except UnicodeEncodeError:
                 raise WorkflowError("invalid_input") from None
+            if len(encoded) > AUTHORING_SOURCE_BYTE_LIMIT:
+                raise WorkflowError("invalid_input")
             try:
                 self._atomic_write(
                     registration,
@@ -1186,12 +1196,13 @@ class WorkflowService:
                 stat_result = os.fstat(descriptor)
                 if not stat.S_ISREG(stat_result.st_mode):
                     raise WorkflowError("invalid_input")
-                with os.fdopen(descriptor, "rb") as stream:
-                    descriptor = -1
-                    try:
-                        raw = stream.read()
-                    except OSError:
-                        raise WorkflowError("invalid_input") from None
+                try:
+                    raw = self._read_regular_fd(
+                        descriptor,
+                        byte_limit=AUTHORING_SOURCE_BYTE_LIMIT,
+                    )
+                except OSError:
+                    raise WorkflowError("invalid_input") from None
             finally:
                 if descriptor >= 0:
                     os.close(descriptor)
@@ -1248,6 +1259,8 @@ class WorkflowService:
         *,
         expected_hash: Any = _NO_EXPECTED_HASH,
     ) -> None:
+        if len(content) > AUTHORING_SOURCE_BYTE_LIMIT:
+            raise WorkflowError("invalid_input")
         root, target = self._source_path(registration)
         self._assert_contained_regular_target(root, target, allow_missing=True)
         # 先以目录 FD 安全地创建（如有需要）固定的 workflows 目录。
@@ -1378,7 +1391,10 @@ class WorkflowService:
                 # 无法证明没有预打开的读写句柄时必须失败关闭。
                 raise WorkflowConflict("draft_hash_conflict") from None
 
-            original = WorkflowService._read_regular_fd(target_descriptor)
+            original = WorkflowService._read_regular_fd(
+                target_descriptor,
+                byte_limit=AUTHORING_SOURCE_BYTE_LIMIT,
+            )
             if _sha256(original) != expected_hash:
                 raise WorkflowConflict("draft_hash_conflict")
             if not WorkflowService._target_matches_fd(
@@ -1393,7 +1409,10 @@ class WorkflowService:
                 os.O_RDONLY | os.O_CLOEXEC | os.O_NOFOLLOW,
                 dir_fd=parent_fd,
             )
-            replacement_hash = WorkflowService._hash_regular_fd(temporary_descriptor)
+            replacement_hash = WorkflowService._hash_regular_fd(
+                temporary_descriptor,
+                byte_limit=AUTHORING_SOURCE_BYTE_LIMIT,
+            )
 
             os.link(
                 target_name,
@@ -1423,7 +1442,10 @@ class WorkflowService:
                     target_name,
                     temporary_descriptor,
                 )
-                or WorkflowService._hash_regular_fd(temporary_descriptor)
+                or WorkflowService._hash_regular_fd(
+                    temporary_descriptor,
+                    byte_limit=AUTHORING_SOURCE_BYTE_LIMIT,
+                )
                 != replacement_hash
             ):
                 raise WorkflowConflict("draft_hash_conflict")
@@ -1442,7 +1464,10 @@ class WorkflowService:
                     target_name,
                     temporary_descriptor,
                 )
-                or WorkflowService._hash_regular_fd(temporary_descriptor)
+                or WorkflowService._hash_regular_fd(
+                    temporary_descriptor,
+                    byte_limit=AUTHORING_SOURCE_BYTE_LIMIT,
+                )
                 != replacement_hash
             ):
                 raise WorkflowConflict("draft_hash_conflict")
@@ -1451,7 +1476,7 @@ class WorkflowService:
                 os.unlink(backup_name, dir_fd=parent_fd)
                 backup_created = False
                 os.fsync(parent_fd)
-        except Exception:
+        except Exception as error:
             # os.replace() 一旦被调用，异常路径便无法证明 canonical
             # 仍是本进程发布的 inode；外部 authority 可能已经原地写入
             # 或再次原子替换。此时绝不能用历史 `.cas` 覆盖或删除它。
@@ -1461,6 +1486,8 @@ class WorkflowService:
                     os.unlink(backup_name, dir_fd=parent_fd)
                     backup_created = False
                     os.fsync(parent_fd)
+            if isinstance(error, WorkflowError) and error.code == "invalid_input":
+                raise WorkflowConflict("draft_hash_conflict") from None
             raise
         finally:
             if lease_held and target_descriptor >= 0:
@@ -1521,21 +1548,40 @@ class WorkflowService:
         )
 
     @staticmethod
-    def _read_regular_fd(descriptor: int) -> bytes:
+    def _read_regular_fd(
+        descriptor: int,
+        *,
+        byte_limit: int,
+    ) -> bytes:
         stat_result = os.fstat(descriptor)
-        if not stat.S_ISREG(stat_result.st_mode):
+        if not stat.S_ISREG(stat_result.st_mode) or (
+            byte_limit < 0 or stat_result.st_size > byte_limit
+        ):
             raise WorkflowError("invalid_input")
         os.lseek(descriptor, 0, os.SEEK_SET)
-        chunks = []
+        chunks = bytearray()
         while True:
-            chunk = os.read(descriptor, 1024 * 1024)
+            remaining = byte_limit + 1 - len(chunks)
+            if remaining <= 0:
+                raise WorkflowError("invalid_input")
+            read_size = min(1024 * 1024, remaining)
+            chunk = os.read(descriptor, read_size)
             if not chunk:
                 break
-            chunks.append(chunk)
-        return b"".join(chunks)
+            chunks.extend(chunk)
+            if len(chunks) > byte_limit:
+                raise WorkflowError("invalid_input")
+        return bytes(chunks)
 
     @staticmethod
-    def _write_regular_fd(descriptor: int, content: bytes) -> None:
+    def _write_regular_fd(
+        descriptor: int,
+        content: bytes,
+        *,
+        byte_limit: int,
+    ) -> None:
+        if byte_limit < 0 or len(content) > byte_limit:
+            raise WorkflowError("invalid_input")
         os.lseek(descriptor, 0, os.SEEK_SET)
         offset = 0
         while offset < len(content):
@@ -1547,12 +1593,26 @@ class WorkflowService:
         os.fsync(descriptor)
 
     @staticmethod
-    def _restore_regular_fd(descriptor: int, content: bytes) -> None:
-        WorkflowService._write_regular_fd(descriptor, content)
+    def _restore_regular_fd(
+        descriptor: int,
+        content: bytes,
+        *,
+        byte_limit: int,
+    ) -> None:
+        WorkflowService._write_regular_fd(
+            descriptor,
+            content,
+            byte_limit=byte_limit,
+        )
 
     @staticmethod
-    def _hash_regular_fd(descriptor: int) -> str:
-        return _sha256(WorkflowService._read_regular_fd(descriptor))
+    def _hash_regular_fd(descriptor: int, *, byte_limit: int) -> str:
+        return _sha256(
+            WorkflowService._read_regular_fd(
+                descriptor,
+                byte_limit=byte_limit,
+            )
+        )
 
     @classmethod
     @contextmanager
