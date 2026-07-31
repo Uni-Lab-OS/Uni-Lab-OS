@@ -6,7 +6,7 @@
 
 基线：`1111380acd9e57be1f56223d9aa74a7ff5cb1304`
 
-已测实现候选：`a54c402`
+最终已测 production 候选：`c0d5874`
 
 上游交付跟踪：
 
@@ -92,7 +92,7 @@ git diff --check：
 
 | 指标 | 本轮前 | 实现候选 |
 |---|---:|---:|
-| 02A 已知 blocking | 1 | 0（等待独立复审确认） |
+| 02A 已知 blocking | 1 | 0（三名独立 reviewer 已确认） |
 | 新增产品状态/DTO | 0 | 0 |
 | 新增 non-blocking | 0 | 0 |
 | 保留 non-blocking | NB-01 | NB-01 |
@@ -113,6 +113,44 @@ route-local 的 MIME 绕过；本轮没有发现新的架构分支。
 
 - 本轮未覆盖前端，也未进行 FE-OS 联调；
 - 未修改 Backend；
-- 候选尚不能合并：仍需三名顺序独立 reviewer 在固定 SHA 上确认；
+- 候选已经通过三名顺序独立 reviewer，可以合并完整 02A lineage；
 - 完整 02A 合并后，继续完成生产 Annotation、Catalog、compiler、transform 和
   `generate-python`；这些 OS Interface 可合并后，才触发独立 FE 分支。
+
+## 7. 最终评审闭环
+
+第一次三名顺序评审中：
+
+1. 风险 reviewer 确认 B-07 为 `accepted-fixed`；
+2. 合同 reviewer 确认 D-101、D-117、route shape、错误信封和 Apply 单 token
+   均一致；
+3. 模块 reviewer 确认 B-01～B-07 未重开，但发现本轮改写的 class docstring
+   仍是英文，记为 Standards blocking S-03。
+
+主执行者把该 docstring 改为准确的简体中文，形成新 production SHA `c0d5874`，
+并重新运行：
+
+```text
+Schema/route 目标：212 passed
+Workflow 累积：644 passed
+正式完整 tests：1056 passed, 3 skipped
+Ruff、format、diff-check：通过
+```
+
+production SHA 改变后没有沿用旧评审，而是重新顺序执行三名 reviewer：
+
+| 顺序 | 评审 | 结果 |
+|---:|---|---|
+| 1/3 | 最终风险确认 | B-07、S-03 `accepted-fixed`，0 blocking |
+| 2/3 | 合同确认 | D-101/D-117/错误信封/Apply 无变化，0 blocking |
+| 3/3 | 模块安全确认 | B-01～B-07 均关闭，S-03 已修复，0 blocking |
+
+最终保留三个不阻塞合并的 follow-up：
+
+- NB-01：raw ASGI `Content-Length` 词法偏宽；
+- NB-M01：FastAPI/Starlette 依赖升级时必须运行 body/cache 兼容门；
+- NB-M02：D-117 新顶层 Authoring router 必须复用同一 route class，并增加
+  OpenAPI `requestBody` 动态盘点。
+
+问题趋势仍是收敛：本轮新增的唯一 Standards finding 已在同轮关闭，没有引入新的
+产品语义、并发模型或持久状态。
