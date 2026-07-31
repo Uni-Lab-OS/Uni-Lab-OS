@@ -50,6 +50,13 @@ from unilabos.workflow.schema import (
     parse_input_contract,
     parse_output_contract,
 )
+from unilabos.workflow.source_coordinates import (
+    codepoint_offset_to_utf16_column,
+    require_utf8_text,
+    source_lines,
+    utf8_offset_to_utf16_column,
+    utf16_length,
+)
 
 _COMPILER_VERSION = "unilab-authoring/v1"
 _ZERO_FINGERPRINT = "sha256:" + "0" * 64
@@ -140,17 +147,28 @@ def _diagnostic(error: _AuthoringFailure, source: str) -> dict[str, Any]:
     node = error.node
     if node is None:
         return item
-    lines = source.splitlines() or [""]
+    lines = source_lines(source)
     start_line = min(max(int(getattr(node, "lineno", 1)), 1), len(lines))
-    start_column = max(int(getattr(node, "col_offset", 0)) + 1, 1)
+    start_offset = max(int(getattr(node, "col_offset", 0)), 0)
+    start_column = utf8_offset_to_utf16_column(
+        lines[start_line - 1],
+        min(start_offset, len(lines[start_line - 1].encode("utf-8"))),
+    )
     end_line = min(
         max(int(getattr(node, "end_lineno", start_line)), start_line),
         len(lines),
     )
-    end_column = max(
-        int(getattr(node, "end_col_offset", len(lines[end_line - 1]))) + 1,
-        start_column,
+    end_line_bytes = lines[end_line - 1].encode("utf-8")
+    end_offset = max(
+        int(getattr(node, "end_col_offset", len(end_line_bytes))),
+        0,
     )
+    end_column = utf8_offset_to_utf16_column(
+        lines[end_line - 1],
+        min(end_offset, len(end_line_bytes)),
+    )
+    if end_line == start_line:
+        end_column = max(end_column, start_column)
     item["source_range"] = {
         "start_line": start_line,
         "start_column": start_column,
@@ -161,11 +179,23 @@ def _diagnostic(error: _AuthoringFailure, source: str) -> dict[str, Any]:
 
 
 def _syntax_diagnostic(error: SyntaxError, source: str) -> dict[str, Any]:
-    lines = source.splitlines() or [""]
+    lines = source_lines(source)
     line = min(max(int(error.lineno or 1), 1), len(lines))
-    column = max(int(error.offset or 1), 1)
+    start_offset = min(max(int(error.offset or 1) - 1, 0), len(lines[line - 1]))
+    column = codepoint_offset_to_utf16_column(lines[line - 1], start_offset)
     end_line = min(max(int(error.end_lineno or line), line), len(lines))
-    end_column = max(int(error.end_offset or column), column)
+    raw_end_offset = int(error.end_offset or 0)
+    end_offset = (
+        min(max(raw_end_offset - 1, 0), len(lines[end_line - 1]))
+        if raw_end_offset > 0
+        else start_offset
+    )
+    end_column = codepoint_offset_to_utf16_column(
+        lines[end_line - 1],
+        end_offset,
+    )
+    if end_line == line:
+        end_column = max(end_column, column)
     return {
         "severity": "error",
         "code": "python_syntax_error",
@@ -520,6 +550,8 @@ def _programming_source(source: str, source_uri: str) -> None:
         raise TypeError("Python source 与 source_uri 必须是字符串")
     if not source_uri.strip():
         raise ValueError("source_uri 不能为空")
+    require_utf8_text(source)
+    require_utf8_text(source_uri)
 
 
 def _compile_with_snapshot(
@@ -1015,18 +1047,28 @@ def _workflow_parameters(
         _fail(error.code, error.message, node=function)
 
 
-def _token_source_range(token: tokenize.TokenInfo) -> dict[str, int]:
+def _token_source_range(
+    token: tokenize.TokenInfo,
+    lines: Sequence[str],
+) -> dict[str, int]:
     return {
         "start_line": token.start[0],
-        "start_column": token.start[1] + 1,
+        "start_column": codepoint_offset_to_utf16_column(
+            lines[token.start[0] - 1],
+            token.start[1],
+        ),
         "end_line": token.end[0],
-        "end_column": token.end[1] + 1,
+        "end_column": codepoint_offset_to_utf16_column(
+            lines[token.end[0] - 1],
+            token.end[1],
+        ),
     }
 
 
 def _source_anchors(source: str) -> tuple[dict[int, str], set[int]]:
     anchors: dict[int, str] = {}
     occurrences: dict[str, list[dict[str, int]]] = {}
+    lines = source_lines(source)
     try:
         tokens = tokenize.generate_tokens(io.StringIO(source).readline)
         for token in tokens:
@@ -1038,7 +1080,7 @@ def _source_anchors(source: str) -> tuple[dict[int, str], set[int]]:
                     raise _AuthoringFailure(
                         "invalid_node_anchor",
                         "Node UUID anchor 必须使用唯一规范格式",
-                        source_range=_token_source_range(token),
+                        source_range=_token_source_range(token, lines),
                     )
                 continue
             try:
@@ -1047,17 +1089,19 @@ def _source_anchors(source: str) -> tuple[dict[int, str], set[int]]:
                 raise _AuthoringFailure(
                     "invalid_node_anchor",
                     "Node UUID anchor 必须是非 nil UUID",
-                    source_range=_token_source_range(token),
+                    source_range=_token_source_range(token, lines),
                 )
             line = token.start[0]
             if line in anchors:
                 raise _AuthoringFailure(
                     "invalid_node_anchor",
                     "同一源码行不能声明多个 Node UUID anchor",
-                    source_range=_token_source_range(token),
+                    source_range=_token_source_range(token, lines),
                 )
             anchors[line] = node_uuid
-            occurrences.setdefault(node_uuid, []).append(_token_source_range(token))
+            occurrences.setdefault(node_uuid, []).append(
+                _token_source_range(token, lines)
+            )
     except (IndentationError, tokenize.TokenError):
         _fail("python_syntax_error", "Python source token 不完整")
     for node_uuid, source_ranges in occurrences.items():
@@ -2071,9 +2115,9 @@ class _Emitter:
             {
                 "workflow_node_uuid": node_uuid,
                 "start_line": start,
-                "start_column": len(indent) + 1,
+                "start_column": utf16_length(indent) + 1,
                 "end_line": end,
-                "end_column": len(indent) + len(construct) + 1,
+                "end_column": utf16_length(f"{indent}{construct}") + 1,
             }
         )
 
