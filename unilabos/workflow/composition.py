@@ -141,20 +141,19 @@ def reset_workflow_service_for_test() -> None:
         if _monitor is not None:
             # 监视线程未退出时必须保留 Service 与租约，允许稍后重试停机。
             _monitor.stop()
-        try:
-            if _service is not None:
-                _service.close()
-        finally:
-            _monitor = None
-            _service = None
-            _database_path = None
-            _owner_pid = None
-            lease_descriptor = _workspace_lease_fd
-            _workspace_lease_fd = None
-            _release_workspace_lease(
-                lease_descriptor,
-                unlock=lease_owned,
-            )
+        if _service is not None:
+            # Store 未确认关闭时同样保留组合根与租约，避免第二 Authority 进入。
+            _service.close()
+        _monitor = None
+        _service = None
+        _database_path = None
+        _owner_pid = None
+        lease_descriptor = _workspace_lease_fd
+        _workspace_lease_fd = None
+        _release_workspace_lease(
+            lease_descriptor,
+            unlock=lease_owned,
+        )
 
 
 __all__ = [
