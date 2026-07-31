@@ -51,28 +51,23 @@ D-093～D-099 关闭。三者已经足以
 
 ```text
 test/<round>-contract
-test/<round>-adversarial
 ```
 
-禁止多个 subagent 在同一个工作目录并发编辑同一批文件。测试 commit 合入实现分支
-时保留作者和 commit provenance，不 squash。
+每个时刻只允许一个 subagent 工作。测试 commit 合入实现分支时保留作者和 commit
+provenance，不 squash。
 
 ### 1.2 独立测试 subagent
 
-每轮至少安排两名互相独立的测试作者，且测试先于实现：
-
-1. **合同测试 subagent**：只依据冻结 Backend、`decisions.md` 和该轮验收条件，
-   编写 route/DTO/state/transaction 合同测试；
-2. **对抗与回归测试 subagent**：独立检查高京现状和老 OS 行为，编写 conflict、
-   restart、atomicity、invalid input、旧 alias 拒绝和附近模块回归测试。
+每轮先安排一名独立测试作者，只依据冻结 Backend、`decisions.md` 和该轮验收
+条件编写 route/DTO/state/transaction 合同及必要对抗回归测试。只有测试提交并
+停止后，主执行者才开始实现；不得让另一个 subagent 与其并行。
 
 要求：
 
-- 两名测试作者使用不同 worktree，不共享未提交测试实现；
-- 每组新测试必须先在未实现状态下按预期失败；
+- 新测试必须先在未实现状态下按预期失败；
 - 测试失败原因必须是缺失行为，而不是 import、fixture 或环境错误；
 - 实现阶段不得为了变绿而削弱断言、删除测试、添加 skip/xfail；
-- 若两组测试互相冲突，先依据决策或冻结 Backend 解决合同冲突，再开始实现。
+- 若测试与既有合同冲突，先依据决策或冻结 Backend 解决合同冲突，再开始实现。
 
 ### 1.3 全量测试门
 
@@ -87,14 +82,13 @@ test/<round>-adversarial
 
 ### 1.4 多 subagent 独立评审
 
-全量测试通过后，锁定候选 commit SHA，再安排至少三名没有编写本轮实现的独立
-review subagent：
+全量测试通过后，锁定候选 commit SHA，再安排至少两名没有编写本轮实现的独立
+review subagent 串行评审；任一时刻只能运行一名：
 
 1. **合同评审**：检查冻结 Backend、P0/P1/P2 决策、路由、DTO、状态机和错误边界；
 2. **代码与模块评审**：检查仓库规范、deep module Interface、重复逻辑、可测试性
-   和维护 locality；
-3. **回归与安全评审**：检查 transaction、CAS、restart、recovery、并发、
-   filesystem containment、数据迁移和旧路径泄漏。
+   和维护 locality，并承担回归与安全检查，包括 transaction、CAS、restart、
+   recovery、并发、filesystem containment、数据迁移和旧路径泄漏。
 
 评审者必须同时阅读 production diff 和 tests，不能只认可测试输出。每项 finding
 必须记录为：
@@ -114,10 +108,10 @@ accepted-fixed | rejected-with-evidence | non-blocking-follow-up
 
 只有全部满足才能本地 merge 到 `integration/workflow-task-runtime`：
 
-- 两名或以上独立测试 subagent 的测试已纳入；
+- 一名独立测试 subagent 的先行测试已纳入；
 - targeted、Phase 累积和完整仓库测试全部通过；
 - lint、静态检查和 `git diff --check` 通过；
-- 三名或以上独立 review subagent 完成评审；
+- 两名或以上独立 review subagent 已按顺序完成评审；
 - 所有 blocking finding 已修复并复审；
 - migration ledger 记录 branch、tested SHA、测试命令/结果、测试作者、评审者和
   finding disposition；
