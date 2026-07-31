@@ -11,7 +11,6 @@ import pytest
 from fastapi.testclient import TestClient
 
 from tests.workflow.test_authoring_engine import (
-    AUTHORITY,
     WORKFLOW_UUID,
     _catalog_imports,
     _source,
@@ -19,9 +18,25 @@ from tests.workflow.test_authoring_engine import (
 from unilabos.config.config import BasicConfig
 from unilabos.workflow import composition
 from unilabos.workflow.authoring_engine import WorkflowAuthoringEngine
-from unilabos.workflow.catalog import TemplateCatalog
+from unilabos.workflow.catalog import CatalogAuthority, TemplateCatalog
 from unilabos.workflow.service import WorkflowService
 from unilabos.workflow.store import WorkflowStore
+
+LOCAL_AUTHORITY = CatalogAuthority(authority_id="production-local", kind="local")
+BACKEND_AUTHORITY = CatalogAuthority(
+    authority_id="production-backend",
+    kind="backend",
+)
+AUTHORING_ROUTES = {
+    "/api/v1/authoring/compile": "post",
+    "/api/v1/authoring/generate-python": "post",
+    "/api/v1/authoring/validate": "post",
+    "/api/v1/workflows/{workflow_uuid}/authoring": "get",
+    "/api/v1/workflows/{workflow_uuid}/authoring/draft": "put",
+    "/api/v1/workflows/{workflow_uuid}/authoring/apply": "post",
+    "/api/v1/events": "get",
+}
+_HTTP_METHODS = {"get", "put", "post", "delete", "patch", "options", "head"}
 
 
 @pytest.fixture(autouse=True)
@@ -66,7 +81,12 @@ def _seed_production_authority(working_dir: Path) -> None:
             meta_data={"owner": "keep"},
             workflow_uuid=WORKFLOW_UUID,
         )
-        TemplateCatalog(store).replace(AUTHORITY, _catalog_imports())
+        local_imports = _catalog_imports()
+        for item in local_imports:
+            item.template.pop("uuid")
+            for handle in item.handles:
+                handle.pop("uuid")
+        TemplateCatalog(store).replace(LOCAL_AUTHORITY, local_imports)
     finally:
         store.close()
 
@@ -97,13 +117,37 @@ def _reload_server() -> Any:
     return importlib.reload(importlib.import_module("unilabos.app.web.server"))
 
 
+def _assert_authoring_routes_absent(schema: dict[str, Any]) -> None:
+    assert not set(AUTHORING_ROUTES) & set(schema["paths"])
+
+
+def _assert_authoring_routes_unique(app: Any) -> None:
+    with warnings.catch_warnings(record=True) as openapi_warnings:
+        warnings.simplefilter("always")
+        schema = app.openapi()
+    operations = []
+    for path, expected_method in AUTHORING_ROUTES.items():
+        path_item = schema["paths"][path]
+        assert set(path_item) & _HTTP_METHODS == {expected_method}
+        operations.append(path_item[expected_method]["operationId"])
+    assert len(operations) == 7
+    assert len(set(operations)) == 7
+    assert not [
+        item
+        for item in openapi_warnings
+        if "Duplicate Operation ID" in str(item.message)
+        and any(operation in str(item.message) for operation in operations)
+    ]
+
+
 @pytest.mark.parametrize(
     "authority",
     [
         None,
         {"authority_id": "production-local", "kind": "guessed-local"},
+        BACKEND_AUTHORITY,
     ],
-    ids=["missing", "invalid-kind"],
+    ids=["missing", "invalid-kind", "backend"],
 )
 def test_production_authoring_is_not_mounted_without_valid_explicit_authority(
     tmp_path: Path,
@@ -119,14 +163,65 @@ def test_production_authoring_is_not_mounted_without_valid_explicit_authority(
     )
     server = _reload_server()
 
-    paths = server.setup_server().openapi()["paths"]
+    schema = server.setup_server().openapi()
 
-    assert "/api/v1/authoring/compile" not in paths
-    assert "/api/v1/authoring/generate-python" not in paths
-    assert "/api/v1/authoring/validate" not in paths
-    assert "/api/v1/workflows/{workflow_uuid}/authoring" not in paths
-    assert "/api/v1/workflows/{workflow_uuid}/authoring/draft" not in paths
-    assert "/api/v1/workflows/{workflow_uuid}/authoring/apply" not in paths
+    _assert_authoring_routes_absent(schema)
+    assert composition.get_workflow_service() is None
+
+
+def test_direct_backend_authority_rejection_does_not_publish_or_retain_lease(
+    tmp_path: Path,
+) -> None:
+    working_dir = tmp_path / "unilabos_data"
+
+    with pytest.raises((TypeError, ValueError, RuntimeError)):
+        composition.compose_workflow_runtime(
+            working_dir,
+            authority=BACKEND_AUTHORITY,
+        )
+    assert composition.get_workflow_service() is None
+
+    replacement = composition.compose_workflow_runtime(
+        working_dir,
+        authority=LOCAL_AUTHORITY,
+    )
+    assert replacement is composition.get_workflow_service()
+
+
+def test_authoring_routes_install_atomically_and_retry_after_pure_router_failure(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from unilabos.app import workflow_api
+
+    working_dir = tmp_path / "unilabos_data"
+    _configure_production(
+        monkeypatch,
+        working_dir=working_dir,
+        authority=LOCAL_AUTHORITY,
+        roots=(),
+    )
+    original_create_pure_router = workflow_api.create_authoring_transform_router
+
+    def fail_pure_router(_engine: Any) -> Any:
+        raise RuntimeError("injected pure router construction failure")
+
+    monkeypatch.setattr(
+        workflow_api,
+        "create_authoring_transform_router",
+        fail_pure_router,
+    )
+    server = _reload_server()
+    app = server.setup_server()
+    _assert_authoring_routes_absent(app.openapi())
+
+    monkeypatch.setattr(
+        workflow_api,
+        "create_authoring_transform_router",
+        original_create_pure_router,
+    )
+    assert server.setup_server() is app
+    _assert_authoring_routes_unique(app)
 
 
 def test_real_server_uses_one_real_engine_for_all_authoring_paths(
@@ -141,39 +236,14 @@ def test_real_server_uses_one_real_engine_for_all_authoring_paths(
     _configure_production(
         monkeypatch,
         working_dir=working_dir,
-        authority=AUTHORITY,
+        authority=LOCAL_AUTHORITY,
         roots=(selected_root,),
     )
     server = _reload_server()
     app = server.setup_server()
     assert server.setup_server() is app
 
-    with warnings.catch_warnings(record=True) as openapi_warnings:
-        warnings.simplefilter("always")
-        schema = app.openapi()
-    expected_routes = {
-        "/api/v1/authoring/compile": "post",
-        "/api/v1/authoring/generate-python": "post",
-        "/api/v1/authoring/validate": "post",
-        "/api/v1/workflows/{workflow_uuid}/authoring": "get",
-        "/api/v1/workflows/{workflow_uuid}/authoring/draft": "put",
-        "/api/v1/workflows/{workflow_uuid}/authoring/apply": "post",
-        "/api/v1/events": "get",
-    }
-    http_methods = {"get", "put", "post", "delete", "patch", "options", "head"}
-    operations = []
-    for path, expected_method in expected_routes.items():
-        path_item = schema["paths"][path]
-        assert set(path_item) & http_methods == {expected_method}
-        operations.append(path_item[expected_method]["operationId"])
-    assert len(operations) == 7
-    assert len(set(operations)) == 7
-    assert not [
-        item
-        for item in openapi_warnings
-        if "Duplicate Operation ID" in str(item.message)
-        and any(operation in str(item.message) for operation in operations)
-    ]
+    _assert_authoring_routes_unique(app)
 
     service = composition.get_workflow_service()
     assert service is not None

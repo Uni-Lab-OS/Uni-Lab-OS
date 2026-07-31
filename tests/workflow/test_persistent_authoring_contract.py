@@ -378,7 +378,7 @@ def _legacy_catalog_database(path: Path, conflict: str) -> None:
                     "{}",
                     "legacy-authority",
                     RESOURCE_TEMPLATE_UUID,
-                    " Duplicate " if index == 0 else "duplicate",
+                    "\tÄction\u2003" if index == 0 else " äction\n",
                     "Duplicate",
                     None,
                     "{}",
@@ -407,7 +407,7 @@ def _legacy_catalog_database(path: Path, conflict: str) -> None:
                         "{}",
                         "legacy-authority",
                         "30000000-0000-4000-8000-000000000000",
-                        " Result " if index == 0 else "result",
+                        "\tÄesult\u2003" if index == 0 else " äesult\n",
                         "source",
                         "Result",
                         "string",
@@ -421,24 +421,49 @@ def _legacy_catalog_database(path: Path, conflict: str) -> None:
         connection.close()
 
 
+def _legacy_database_snapshot(path: Path) -> dict[str, Any]:
+    connection = sqlite3.connect(path)
+    try:
+        return {
+            "schema": connection.execute(
+                """
+                SELECT type, name, tbl_name, sql
+                FROM sqlite_master
+                ORDER BY type, name
+                """
+            ).fetchall(),
+            "node_rows": connection.execute(
+                "SELECT * FROM workflow_node_template ORDER BY uuid"
+            ).fetchall(),
+            "handle_rows": connection.execute(
+                "SELECT * FROM workflow_handle_template ORDER BY uuid"
+            ).fetchall(),
+        }
+    finally:
+        connection.close()
+
+
 @pytest.mark.parametrize("conflict", ["node", "handle"])
-def test_legacy_duplicate_active_business_key_has_stable_non_destructive_error(
+def test_legacy_unicode_duplicate_business_key_has_stable_zero_change_error(
     tmp_path: Path,
     conflict: str,
 ) -> None:
     database_path = tmp_path / f"legacy-{conflict}.db"
     _legacy_catalog_database(database_path, conflict)
+    before = _legacy_database_snapshot(database_path)
 
     try:
-        WorkflowStore(database_path)
+        opened = WorkflowStore(database_path)
     except BaseException as error:  # noqa: BLE001 - public migration error audit
         captured = error
     else:  # pragma: no cover - RED branch must not silently select a duplicate
+        opened.close()
         pytest.fail("legacy duplicate active Catalog key must fail startup")
 
     assert isinstance(captured, StoreConflict)
     assert not isinstance(captured, sqlite3.IntegrityError)
     assert str(captured) == "legacy_catalog_business_key_conflict"
+    assert _legacy_database_snapshot(database_path) == before
     connection = sqlite3.connect(database_path)
     try:
         table = f"workflow_{conflict}_template"
