@@ -1,10 +1,10 @@
 # Phase 01A：单工作区 Authority 与单向 Authoring 设计
 
-状态：**实现已完成并通过本地门禁，等待顺序独立评审；本文件是 Round 14 旧并发/writeback 方案的替代契约。**
+状态：**第一轮 Spec 评审发现事务入口前竞态，正在按本节线性化合同进行修正；本文件是 Round 14 旧并发/writeback 方案的替代契约。**
 
 基线：`2a394737ec7a36f8710e0af27472953451c308bc`
 
-分支：`migration/01a-single-authority-authoring`
+修正分支：`migration/01a2-draft-linearization`
 
 Backend 仍是只读合同参考。本轮只修改 Uni-Lab-OS；前端实现必须使用独立 FE
 分支。
@@ -92,12 +92,23 @@ Apply 在每 Workflow 锁内依次执行：
 2. 校验请求 token 命中当前 Candidate；
 3. 校验 Candidate 内部 Draft hash、base revision 和 Catalog fingerprint；
 4. 重新编译并验证 server-owned Candidate proof；
-5. 校验 normalized source 已物化到实际 Draft；
-6. 在一个 SQLite 事务内提交完整 graph、Applied Source、revision 和 SSE event；
-7. 返回 Apply result 和完整 Authoring aggregate。
+5. 获取 SQLite 写事务，并在修改任何数据库状态前，最后一次读取实际 Draft 和
+   Catalog；
+6. 以第 5 步为 Apply 线性化点，校验 normalized source 已物化到实际 Draft，并
+   再次校验 Catalog fingerprint；
+7. 在已获取的同一事务内提交完整 graph、Applied Source、revision 和 SSE event；
+8. 返回 Apply result 和完整 Authoring aggregate。
 
-第 6 步以后不允许 Draft 文件 I/O，也不允许“尽力 settle/mark/recover”。Apply
-提交的 Applied Source 必须与第 5 步已经存在的 Draft bytes 完全相同。
+第 6 步以后不允许为了完成 Apply 再读取或写入 Draft，也不允许“尽力
+settle/mark/recover”。在线性化点之前完成的外部写入必须参与校验，不匹配时返回
+现有 `draft_hash_conflict`、`candidate_not_materialized` 或
+`template_catalog_conflict`，且事务不产生任何状态变化。
+
+coding-agent、Git 或编辑器不受 OS 文件锁约束，因此不能要求文件系统与 SQLite
+共享一个墙钟提交瞬间。在线性化点之后发生的外部写入定义为后续的新 dirty Draft
+编辑：Apply 可以提交刚才验证的不可变 Candidate，OS 必须保留外部文件，随后通过
+返回 aggregate 和 source monitor 将 Applied Source 投影为 stale。不得为了恢复
+“瞬时相等”覆盖外部文件或重新引入 writeback marker。
 
 新增稳定冲突：
 

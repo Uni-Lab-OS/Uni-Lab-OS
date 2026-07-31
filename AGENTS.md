@@ -845,16 +845,21 @@ ResourceDict（`unilabos/resources/resource_tracker.py`）是全系统唯一内�
 - Explicit local Apply accepts one opaque server-issued Candidate hash. It
   resolves the bound Workflow revision and Draft hash on the server, checks
   that the Candidate's normalized source has already been materialized as the
-  package Draft, then writes the complete graph, applied source, source map,
-  and new revision in one SQLite transaction. Source-only Apply updates
-  authoring state without advancing graph revision.
+  package Draft, then opens one SQLite write transaction. After that
+  transaction has begun and before any graph mutation, it rechecks the actual
+  Draft and Catalog and uses that check as the Apply linearization point. The
+  transaction writes the complete graph, applied source, source map, and new
+  revision. Source-only Apply updates authoring state without advancing graph
+  revision.
 - Create a local WorkflowTask and copy its exact `workflow_snapshot` in the
   same database transaction. The Scheduler consumes only the snapshot and
   never reads or compiles the live draft file.
-- Apply never writes the editable file after database commit. If normalized
-  source differs from the current Draft, require the caller to accept the full
-  diff and save that source through Draft PUT before Apply. Applied Source and
-  the materialized Draft bytes therefore agree at commit time.
+- Apply never writes the editable file. If normalized source differs from the
+  current Draft at the in-transaction linearization point, require the caller
+  to accept the full diff and save that source through Draft PUT before Apply.
+  An uncontrolled external write after that point is a later dirty Draft edit;
+  it must be preserved and projected as stale rather than rolled back or
+  overwritten.
 - Persisted graphs remain independently readable and executable without a
   current draft file. Missing or stale Drafts are authoring-state conditions,
   not runtime dependencies.
@@ -912,8 +917,9 @@ ResourceDict（`unilabos/resources/resource_tracker.py`）是全系统唯一内�
 - The package file is authority for Draft saves and external coding-agent/Git
   edits; SQLite is authority for Apply and execution. Reconcile file-first
   Draft changes into derived Candidate/event state. Materialize an explicitly
-  accepted normalized source through Draft PUT before Apply; Apply itself is a
-  pure SQLite transaction and has no post-commit file writeback.
+  accepted normalized source through Draft PUT before Apply. Apply performs
+  only a final read-only Draft/Catalog validation inside its SQLite write
+  transaction and has no Draft mutation or post-commit file writeback.
 - Reconcile registered sources at startup. A missing or renamed package file
   produces nullable Draft/Candidate state without deleting the Applied
   Workflow, and Authoring GET must not recreate it. Restore only the registered
@@ -945,9 +951,11 @@ ResourceDict（`unilabos/resources/resource_tracker.py`）是全系统唯一内�
 - Bind Candidate hash to the Draft hash, Workflow base revision, complete
   graph-semantic Apply bundle, normalized source/source map, compiler version,
   and authority-scoped catalog fingerprint. Resolve and recheck those
-  server-owned facts under the per-Workflow lock, require the normalized source
-  to equal the current Draft bytes, and revalidate the Candidate before the
-  atomic SQLite transaction. Apply does not create or run a WorkflowTask.
+  server-owned facts under the per-Workflow lock, revalidate the Candidate,
+  then begin the atomic SQLite write transaction. Before mutating the graph,
+  perform the final actual-Draft and Catalog check inside that transaction and
+  require normalized source to equal those Draft bytes. Apply does not create
+  or run a WorkflowTask.
 - Authoring GET and successful Draft PUT return one self-consistent aggregate
   containing current Backend-shaped Applied Graph, nullable Draft, nullable
   current Candidate, nullable Applied Source, Workflow revision, hashes,
