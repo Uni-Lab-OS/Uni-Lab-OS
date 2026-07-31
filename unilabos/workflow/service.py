@@ -1026,7 +1026,7 @@ class WorkflowService:
             ):
                 raise WorkflowConflict("candidate_not_materialized")
 
-            # 编译可能阻塞；在打开 SQLite Apply 事务前最后重读外部 Authority。
+            # 编译可能阻塞；先在事务外快速拒绝已经发生的外部变化。
             latest_source = self._read_source(registration)
             if (
                 latest_source is None
@@ -1048,10 +1048,29 @@ class WorkflowService:
                 ],
             }
             previous_revision = workflow["revision"]
+
+            def validate_apply_linearization() -> None:
+                """在 SQLite 写事务内确定 Apply 与外部 Draft 编辑的先后顺序。"""
+
+                linearized_source = self._read_source(registration)
+                if (
+                    linearized_source is None
+                    or linearized_source["draft_hash"] != candidate["draft_hash"]
+                ):
+                    raise WorkflowConflict("draft_hash_conflict")
+                if linearized_source["python_source"] != normalized_source:
+                    raise WorkflowConflict("candidate_not_materialized")
+                if (
+                    self._catalog_fingerprint()
+                    != candidate["template_catalog_fingerprint"]
+                ):
+                    raise WorkflowConflict("template_catalog_conflict")
+
             try:
                 resulting_revision = self._store.apply_authoring_candidate(
                     workflow_uuid=workflow_uuid,
                     candidate_hash=candidate_hash,
+                    validate_external_state=validate_apply_linearization,
                 )
             except StoreAuthoringConflict as error:
                 raise WorkflowConflict(error.code) from None

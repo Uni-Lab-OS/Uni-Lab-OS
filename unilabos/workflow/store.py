@@ -1173,6 +1173,7 @@ class WorkflowStore:
         *,
         workflow_uuid: str,
         candidate_hash: str,
+        validate_external_state: Callable[[], None],
     ) -> int:
         now = utc_now()
         with self.transaction() as conn:
@@ -1206,6 +1207,9 @@ class WorkflowStore:
             workflow = self.get_workflow(workflow_uuid, conn=conn)
             if workflow["revision"] != expected_revision:
                 raise StoreRevisionConflict("workflow revision changed before apply")
+
+            # SQLite 写事务已经取得；外部校验通过的时刻就是 Apply 线性化点。
+            validate_external_state()
 
             changeset = stored_candidate["changeset"]
             kind = changeset["kind"]
