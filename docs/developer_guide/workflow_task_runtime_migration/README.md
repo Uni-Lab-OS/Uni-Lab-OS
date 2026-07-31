@@ -25,7 +25,7 @@ test-author/full-suite/independent-review gate in the concrete execution plan.
 |---|---|---|
 | 00 | Baseline, decisions, manifests, test evidence | complete |
 | 01 | Backend-aligned Workflow/WorkflowTask contract | complete |
-| 02 | Canonical Workflow and Python/JSON authoring | in progress; 02A complete, 02B production caller pending |
+| 02 | Canonical Workflow and Python/JSON authoring | in progress; 02A/02B complete, 02C next |
 | 03 | Node-centric control-DAG scheduler | not planned in detail |
 | 04 | Durable node/job/event runtime and reconciliation | not planned in detail |
 | 05 | Run-scoped debugger semantics | not planned in detail |
