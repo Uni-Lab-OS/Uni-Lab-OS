@@ -77,6 +77,21 @@ tests/app/test_runtime_service_boundary.py
 tests/app/test_unified_runtime_api.py
 ```
 
+These three paths are source ownership records, not direct-copy instructions.
+The post-P0-1 reassessment in
+[FE–OS 交互迁移矩阵](fe_os_interaction_migration_matrix.md#旧版-os-测试清单修正)
+splits their useful behavior across replacement tests:
+
+- old public Canonical assertions move to Phase 02 compiler-invariant tests,
+  while Phase 01 uses new Backend-shaped Graph/Task/Authoring contract tests;
+- runtime planning, dispatch, unknown-state, and recovery behavior moves to
+  Phases 03 and 04; and
+- the old unified Run API is superseded by Phase 01 shared-route tests,
+  Phase 04 runtime tests, Phase 05 debugger tests, and Phase 08 real FE E2E.
+
+No `/api/v1/runtime/runs`, `run_id`, or Canonical public-wire assertion from
+these files is eligible for direct migration.
+
 ### Phase 02: authoring, canonical workflow, and registry
 
 ```text

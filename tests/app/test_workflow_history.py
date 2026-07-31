@@ -179,7 +179,13 @@ class TestHistoryApi:
 
         history = WorkflowHistoryStore()
         scheduler = EdgeScheduler(dispatcher=RecordingDispatcher(), history=history)
-        return TestClient(create_app(scheduler, history=history))
+        return TestClient(
+            create_app(
+                scheduler,
+                history=history,
+                include_execution_shaped_workflow_routes=True,
+            )
+        )
 
     def _run_one(self, client, workflow_id="wf-api"):
         body = {

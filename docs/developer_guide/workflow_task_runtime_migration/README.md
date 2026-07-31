@@ -14,17 +14,18 @@ The migration uses phase gates:
 6. close the phase before planning the next one.
 
 The reviewed source branch `feat/edge-networking-and-scheduler` remains
-unchanged. Completed phases accumulate on
-`integration/workflow-task-runtime`; active work is isolated on
-`migration/NN-*`.
+unchanged. Completed rounds accumulate on
+`integration/workflow-task-runtime`; every mergeable plan slice runs on a
+fresh `migration/<round>-<topic>` branch and passes the independent
+test-author/full-suite/multi-review gate in the concrete execution plan.
 
 ## Status
 
 | Phase | Purpose | Status |
 |---|---|---|
 | 00 | Baseline, decisions, manifests, test evidence | complete |
-| 01 | Backend-aligned Workflow/WorkflowTask contract | not planned in detail |
-| 02 | Canonical Workflow and Python/JSON authoring | not planned in detail |
+| 01 | Backend-aligned Workflow/WorkflowTask contract | in progress; contract core implemented |
+| 02 | Canonical Workflow and Python/JSON authoring | concrete plan ready; implementation not started |
 | 03 | Node-centric control-DAG scheduler | not planned in detail |
 | 04 | Durable node/job/event runtime and reconciliation | not planned in detail |
 | 05 | Run-scoped debugger semantics | not planned in detail |
@@ -33,15 +34,22 @@ unchanged. Completed phases accumulate on
 | 08 | Frontend and Cloud integration | not planned in detail |
 | 09 | Cleanup, security, complete regression, and release | not planned in detail |
 
-Only the current phase is expanded. Later phase details are deliberately
-deferred until their entry grill.
+Only the current phase and the immediately unblocked next phase are expanded.
+Later phase details are deliberately deferred until their entry grill.
 
 ## Ledger
 
 - [Baseline](00-baseline.md)
+- [Phase 01 engineering plan](01-backend-contract-plan.md)
+- [Phase 01 收尾与 Phase 02 Authoring/Schema 具体执行计划](02-authoring-schema-plan.md)
 - [Decisions](decisions.md)
+- [Decision status audit](decision_status_audit.md)
+- [Backend design comparison](backend_design_comparison.md)
+- [旧版 FE–OS 交互迁移矩阵](fe_os_interaction_migration_matrix.md)
 - [Migration manifest](migration-manifest.md)
 - [Test inventory](test-inventory.md)
+- [每轮测试与评审门禁记录模板](round-gate-template.md)
+- [当前 01 Backend contract 门禁记录（待完成）](rounds/01-backend-contract.md)
 
 ## Lifecycle
 
