@@ -368,6 +368,28 @@ def workflow(*, value: list[int]):
     }
 
 
+@pytest.mark.parametrize(
+    "delete_statement",
+    [
+        pytest.param("del container[(list := key)]", id="subscript"),
+        pytest.param("del (list := container).member", id="attribute"),
+        pytest.param(
+            "del list, container[(list := key)]",
+            id="mixed-shadow-wins",
+        ),
+    ],
+)
+def test_delete_target_evaluation_keeps_named_expression_builtin_shadow(
+    delete_statement: str,
+) -> None:
+    source = f"{delete_statement}\ndef workflow(*, value: list[int]):\n    pass\n"
+    _, scope = _resolve(source)
+
+    assert "list" in scope.annotation_bindings
+    with pytest.raises(AnnotationSchemaError):
+        _parse_workflow_value(source)
+
+
 def test_action_result_parser_uses_the_same_builtin_shadow_barrier() -> None:
     _, scope = _resolve(
         """
@@ -420,6 +442,64 @@ from trusted_contract import Token
 def mutate_if_called():
     global Token
     Token = "evil"
+"""
+    )
+
+    assert scope.import_identities["Token"] == "trusted_contract:Token"
+    assert scope.annotation_bindings["Token"] == "trusted_contract:Token"
+
+
+@pytest.mark.parametrize(
+    "nested_class_source",
+    [
+        pytest.param(
+            """
+class Outer:
+    class Inner:
+        global Token
+        Token = "evil"
+""",
+            id="one-level",
+        ),
+        pytest.param(
+            """
+class Outer:
+    class Middle:
+        class Inner:
+            global Token
+            Token = "evil"
+""",
+            id="multiple-levels",
+        ),
+        pytest.param(
+            """
+class Outer:
+    if flag:
+        class Inner:
+            global Token
+            Token = "evil"
+""",
+            id="compound",
+        ),
+    ],
+)
+def test_nested_class_global_binding_invalidates_module_import_proof(
+    nested_class_source: str,
+) -> None:
+    _, scope = _resolve(f"from trusted_contract import Token\n{nested_class_source}")
+
+    assert "Token" not in scope.import_identities
+    assert "Token" in scope.annotation_bindings
+
+
+def test_nested_class_inside_function_body_does_not_run_at_module_import() -> None:
+    _, scope = _resolve(
+        """
+from trusted_contract import Token
+def mutate_if_called():
+    class Inner:
+        global Token
+        Token = "evil"
 """
     )
 

@@ -138,6 +138,73 @@ def _target_names(target: object, path: str) -> set[str]:
     _fail(path)
 
 
+def _delete_target_effects(
+    target: object,
+    path: str,
+) -> tuple[set[str], set[str]]:
+    """区分真正删除的名字与 target 求值时产生的绑定。"""
+
+    if not isinstance(target, ast.expr):
+        _fail(path)
+    if isinstance(target, ast.Name):
+        return {_local_name(getattr(target, "id", None), path)}, set()
+    if isinstance(target, (ast.Tuple, ast.List)):
+        elements = _node_list(getattr(target, "elts", None), ast.expr, path)
+        deleted: set[str] = set()
+        evaluated: set[str] = set()
+        for index, element in enumerate(elements):
+            child_deleted, child_evaluated = _delete_target_effects(
+                element,
+                f"{path}/elts/{index}",
+            )
+            deleted.update(child_deleted)
+            evaluated.update(child_evaluated)
+        return deleted, evaluated
+    if isinstance(target, ast.Starred):
+        return _delete_target_effects(
+            getattr(target, "value", None),
+            f"{path}/value",
+        )
+    if isinstance(target, ast.Attribute):
+        return set(), _expression_bindings(
+            getattr(target, "value", None),
+            f"{path}/value",
+        )
+    if isinstance(target, ast.Subscript):
+        evaluated = _expression_bindings(
+            getattr(target, "value", None),
+            f"{path}/value",
+        )
+        evaluated.update(
+            _expression_bindings(getattr(target, "slice", None), f"{path}/slice")
+        )
+        return set(), evaluated
+    _fail(path)
+
+
+def _delete_effects(
+    statement: ast.Delete,
+    path: str,
+) -> tuple[set[str], set[str]]:
+    targets = _node_list(
+        getattr(statement, "targets", None),
+        ast.expr,
+        f"{path}/targets",
+    )
+    if not targets:
+        _fail(path)
+    deleted: set[str] = set()
+    evaluated: set[str] = set()
+    for index, target in enumerate(targets):
+        target_deleted, target_evaluated = _delete_target_effects(
+            target,
+            f"{path}/targets/{index}",
+        )
+        deleted.update(target_deleted)
+        evaluated.update(target_evaluated)
+    return deleted, evaluated
+
+
 class _NamedExpressionBindings(ast.NodeVisitor):
     """收集当前会执行表达式中的 ``:=`` 模块绑定。"""
 
@@ -366,6 +433,7 @@ class _ClassGlobalDeclarations(ast.NodeVisitor):
     def __init__(self, path: str) -> None:
         self.path = path
         self.names: set[str] = set()
+        self.nested_bindings: set[str] = set()
 
     def visit_Global(self, node: ast.Global) -> None:
         names = getattr(node, "names", None)
@@ -381,7 +449,7 @@ class _ClassGlobalDeclarations(ast.NodeVisitor):
         return None
 
     def visit_ClassDef(self, node: ast.ClassDef) -> None:
-        return None
+        self.nested_bindings.update(_class_global_bindings(node, self.path))
 
     def visit_Lambda(self, node: ast.Lambda) -> None:
         return None
@@ -393,12 +461,12 @@ def _class_global_bindings(statement: ast.ClassDef, path: str) -> set[str]:
     for child in body:
         declarations.visit(child)
     if not declarations.names:
-        return set()
+        return declarations.nested_bindings
 
     possible: set[str] = set()
     for index, child in enumerate(body):
         possible.update(_possible_bindings(child, f"{path}/body/{index}"))
-    return declarations.names & possible
+    return (declarations.names & possible) | declarations.nested_bindings
 
 
 def _possible_bindings(statement: ast.stmt, path: str) -> set[str]:
@@ -643,22 +711,31 @@ def resolve_module_scope(
             definitions[local_name] = statement
             shadowed_names.add(local_name)
             continue
-        possible_bindings = _possible_bindings(statement, path)
-        for local_name in possible_bindings:
-            if isinstance(statement, ast.Delete):
+        if isinstance(statement, ast.Delete):
+            deleted_names, evaluated_names = _delete_effects(statement, path)
+            for local_name in deleted_names:
                 _clear_binding(
                     local_name,
                     import_identities,
                     definitions,
                     shadowed_names,
                 )
-            else:
+            for local_name in evaluated_names:
                 _shadow_binding(
                     local_name,
                     import_identities,
                     definitions,
                     shadowed_names,
                 )
+            continue
+        possible_bindings = _possible_bindings(statement, path)
+        for local_name in possible_bindings:
+            _shadow_binding(
+                local_name,
+                import_identities,
+                definitions,
+                shadowed_names,
+            )
 
     return ResolvedModuleScope._from_bindings(
         resolved_module_name,

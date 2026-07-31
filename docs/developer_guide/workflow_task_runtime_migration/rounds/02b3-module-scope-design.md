@@ -66,7 +66,7 @@ resolver 顺序读取且只直接读取 `ast.Module.body`。任一本地名在�
 | `from __future__ import annotations` | 不产生普通模块绑定 |
 | 顶层 class/function/async function | 用本地名建立 definition 证明 |
 | Assign/AnnAssign/AugAssign/NamedExpr | 撤销旧证明，并保留 builtin 遮蔽状态 |
-| 无条件顶层 `del` | 撤销旧证明与遮蔽；该名重新遵循 Python builtin lookup |
+| 无条件顶层 `del` | 真正删除的 Name 清除旧状态；Attribute/Subscript target 求值中的 NamedExpr 保留遮蔽 |
 | 解构目标 | 递归撤销所有实际绑定名 |
 | `if/while/for/with/try/match` | 其中任何可能绑定的名称都按不确定处理并撤销旧证明 |
 | 后续无条件 import/definition | 可重新建立被撤销名称的证明 |
@@ -78,8 +78,9 @@ resolver 顺序读取且只直接读取 `ast.Module.body`。任一本地名在�
 函数体在定义时不执行，其中的 import、赋值和 `global` 不表示“模块加载后已经
 发生”的静态顶层证明。class body 则会在 class statement 求值时立即执行：普通
 class-local 绑定仍不影响模块，但 class code block 直接声明为 `global` 且可能被
-assign/import/del 的名称会保守撤销模块证明。嵌套 function/class 的独立 lexical
-scope 不参与这项 class-global 盘点。定义表达式阶段会真正求值的 decorator、base、
+assign/import/del 的名称会保守撤销模块证明。nested class statement 的 body 也会在
+外层 class body 执行期立即执行，因此递归盘点；嵌套 function/async function/lambda
+body 未被调用时不执行，继续跳过。定义表达式阶段会真正求值的 decorator、base、
 default、annotation 等位置中的 NamedExpr 也按可能绑定处理。
 
 ## 4. 失败关闭合同
@@ -151,6 +152,10 @@ identity，该测试立即失败。
 发现 class body `global` 的加载期写入语义。修复阶段再增加 15 个回归 case，目标集
 增至 69 个；同时验证 `ClassDef`/`FunctionDef` 的 forged body 容器会稳定失败关闭，
 并让 Parameter 与 Action Result parser 共用同一 builtin shadow barrier。
+
+第一次修复确认又发现 Delete target 求值中的 NamedExpr 与 nested class body 两个
+相邻真实语义；第二次修复再增加 7 个 case，最终目标集增至 76 个，并对同一 Delete
+中“删除 Name”和“求值重新绑定 Name”采用保守的 shadow-wins 规则。
 
 ## 7. 停止线
 
