@@ -27,6 +27,7 @@ from unilabos.workflow.models import CandidateCompilation
 
 SOURCE_URI = "package://lab/workflows/round02e.py"
 OTHER_WORKFLOW_UUID = "10000000-0000-4000-8000-000000000002"
+OUTSIDE_NODE_UUID = "20000000-0000-4000-8000-000000000099"
 FINGERPRINT = "sha256:" + "e" * 64
 HTTP_BODY_LIMIT = 8 * 1024 * 1024
 EXTERNAL_INTEGER_DIGITS = 4096
@@ -55,17 +56,58 @@ INTERNAL_ERROR = {
 }
 
 
-def _changeset() -> dict[str, Any]:
+def _changeset(
+    *,
+    kind: Literal["graph", "source_only"] = "source_only",
+    created_node_uuids: list[str] | None = None,
+    updated_node_uuids: list[str] | None = None,
+    deleted_node_uuids: list[str] | None = None,
+) -> dict[str, Any]:
     return {
-        "kind": "source_only",
-        "created_node_uuids": [],
-        "updated_node_uuids": [],
-        "deleted_node_uuids": [],
+        "kind": kind,
+        "created_node_uuids": created_node_uuids or [],
+        "updated_node_uuids": updated_node_uuids or [],
+        "deleted_node_uuids": deleted_node_uuids or [],
         "created_edge_uuids": [],
         "updated_edge_uuids": [],
         "deleted_edge_uuids": [],
         "reserved_metadata_changed": False,
     }
+
+
+def _candidate_node(
+    *,
+    name: str = "candidate node",
+) -> dict[str, Any]:
+    """一个不依赖 Template Catalog 的 Backend-shaped compute Node。"""
+
+    return {
+        "uuid": PREPARE_NODE_UUID,
+        "workflow_node_template_uuid": None,
+        "parent_uuid": None,
+        "material_uuid": None,
+        "name": name,
+        "status": "idle",
+        "type": "compute",
+        "icon": None,
+        "pose": {},
+        "param": {},
+        "footer": None,
+        "action_name": None,
+        "action_type": None,
+        "execution_policy": {},
+        "disabled": False,
+        "minimized": False,
+        "script": None,
+        "description": None,
+        "meta_data": {},
+    }
+
+
+def _graph_with_node(*, name: str = "candidate node") -> dict[str, Any]:
+    graph = _empty_graph()
+    graph["nodes"] = [_candidate_node(name=name)]
+    return graph
 
 
 def _diagnostic_result(
@@ -103,9 +145,20 @@ class RecordingTransformEngine:
             "valid",
             "diagnostic",
             "catalog-unavailable",
+            "compile-created-mismatch",
+            "compile-deleted-mismatch",
+            "compile-updated-mismatch",
+            "foreign-source-map",
+            "invalid-graph-field",
+            "invalid-graph-root",
+            "invalid-node-field",
             "internal-error",
             "invalid-dto",
             "invalid-range",
+            "source-only-graph-mutated",
+            "source-only-nonempty",
+            "workflow-revision-mismatch",
+            "workflow-uuid-mismatch",
         ] = "valid",
     ) -> None:
         self.mode = mode
@@ -145,16 +198,53 @@ class RecordingTransformEngine:
                 },
             )
 
-        graph = values.get("applied_graph", values.get("graph"))
+        graph = deepcopy(values.get("applied_graph", values.get("graph")))
         source = values.get("python_source", "")
+        source_map: list[dict[str, Any]] = []
+        changeset = _changeset()
+        if self.mode == "invalid-graph-root":
+            graph = {"canonical_private": "root graph secret"}
+        elif self.mode == "invalid-graph-field":
+            graph["workflow"]["canonical_private"] = "workflow secret"
+        elif self.mode == "invalid-node-field":
+            graph["nodes"][0]["canonical_private"] = "node secret"
+        elif self.mode == "workflow-uuid-mismatch":
+            graph["workflow"]["uuid"] = OTHER_WORKFLOW_UUID
+        elif self.mode == "workflow-revision-mismatch":
+            graph["workflow"]["revision"] = 8
+        elif self.mode == "foreign-source-map":
+            source_map = [
+                {
+                    "workflow_node_uuid": OUTSIDE_NODE_UUID,
+                    "start_line": 1,
+                    "start_column": 1,
+                    "end_line": 1,
+                    "end_column": 2,
+                }
+            ]
+        elif self.mode == "compile-created-mismatch":
+            graph["nodes"] = [_candidate_node()]
+            changeset = _changeset(kind="graph")
+        elif self.mode == "compile-updated-mismatch":
+            graph["nodes"][0]["name"] = "updated without changeset"
+            changeset = _changeset(kind="graph")
+        elif self.mode == "compile-deleted-mismatch":
+            graph["nodes"] = []
+            changeset = _changeset(kind="graph")
+        elif self.mode == "source-only-graph-mutated":
+            graph["workflow"]["name"] = "mutated despite source_only"
+        elif self.mode == "source-only-nonempty":
+            changeset = _changeset(
+                created_node_uuids=[PREPARE_NODE_UUID],
+            )
         return CandidateCompilation(
             diagnostics=[],
-            graph=deepcopy(graph),
+            graph=graph,
             normalized_python_source=(
                 source if source.endswith("\n") else source + "\n"
             ),
-            source_map=[],
-            changeset=_changeset(),
+            source_map=source_map,
+            changeset=changeset,
             compiler_version=self.compiler_version,
             template_catalog_fingerprint=self.template_catalog_fingerprint,
         )
@@ -419,7 +509,11 @@ def test_invalid_json_or_non_utf8_encodable_source_is_400_before_engine(
     ("source", "graph", "expected_code"),
     [
         ("syntax error", _empty_graph(), "python_syntax_error"),
-        ("valid source", {"not_five_sets": True}, "template_catalog_mismatch"),
+        (
+            "valid source",
+            {"canonical_private": "untrusted request graph"},
+            "template_catalog_mismatch",
+        ),
     ],
     ids=["syntax", "semantic-graph"],
 )
@@ -474,6 +568,140 @@ def test_internal_or_illegal_engine_result_is_sanitized_500(
     assert response.status_code == 500
     assert response.json() == INTERNAL_ERROR
     assert "secret database password" not in response.text
+    assert len(engine.calls) == 1
+
+
+def _assert_sanitized_internal_error(response: Any, *secrets: str) -> None:
+    assert response.status_code == 500
+    assert response.json() == INTERNAL_ERROR
+    for secret in secrets:
+        assert secret not in response.text
+
+
+@pytest.mark.parametrize(
+    ("mode", "applied_graph", "secret"),
+    [
+        ("invalid-graph-root", _empty_graph(), "root graph secret"),
+        ("invalid-graph-field", _empty_graph(), "workflow secret"),
+        ("invalid-node-field", _graph_with_node(), "node secret"),
+    ],
+    ids=["non-five-set-root", "unknown-workflow-field", "unknown-node-field"],
+)
+def test_engine_graph_shape_or_private_field_is_sanitized_500(
+    mode: Literal[
+        "invalid-graph-root",
+        "invalid-graph-field",
+        "invalid-node-field",
+    ],
+    applied_graph: dict[str, Any],
+    secret: str,
+) -> None:
+    engine = RecordingTransformEngine(mode)
+
+    with TestClient(_transform_app(engine)) as client:
+        response = client.post(
+            "/api/v1/authoring/compile",
+            json=_compile_body(applied_graph=applied_graph),
+        )
+
+    _assert_sanitized_internal_error(response, "canonical_private", secret)
+    assert len(engine.calls) == 1
+
+
+@pytest.mark.parametrize(
+    ("mode", "foreign_identity"),
+    [
+        ("workflow-uuid-mismatch", OTHER_WORKFLOW_UUID),
+        ("workflow-revision-mismatch", '"revision":8'),
+    ],
+    ids=["workflow-uuid", "workflow-revision"],
+)
+def test_engine_graph_request_identity_mismatch_is_sanitized_500(
+    mode: Literal["workflow-uuid-mismatch", "workflow-revision-mismatch"],
+    foreign_identity: str,
+) -> None:
+    engine = RecordingTransformEngine(mode)
+
+    with TestClient(_transform_app(engine)) as client:
+        response = client.post(
+            "/api/v1/authoring/compile",
+            json=_compile_body(),
+        )
+
+    _assert_sanitized_internal_error(response, foreign_identity)
+    assert len(engine.calls) == 1
+
+
+def test_source_map_node_must_belong_to_candidate_graph() -> None:
+    engine = RecordingTransformEngine("foreign-source-map")
+
+    with TestClient(_transform_app(engine)) as client:
+        response = client.post(
+            "/api/v1/authoring/compile",
+            json=_compile_body(python_source="x\n"),
+        )
+
+    _assert_sanitized_internal_error(response, OUTSIDE_NODE_UUID)
+    assert len(engine.calls) == 1
+
+
+@pytest.mark.parametrize(
+    ("mode", "applied_graph"),
+    [
+        ("compile-created-mismatch", _empty_graph()),
+        ("compile-updated-mismatch", _graph_with_node(name="before update")),
+        ("compile-deleted-mismatch", _graph_with_node()),
+    ],
+    ids=["created", "updated", "deleted"],
+)
+def test_compile_changeset_must_equal_actual_graph_lifecycle(
+    mode: Literal[
+        "compile-created-mismatch",
+        "compile-updated-mismatch",
+        "compile-deleted-mismatch",
+    ],
+    applied_graph: dict[str, Any],
+) -> None:
+    engine = RecordingTransformEngine(mode)
+
+    with TestClient(_transform_app(engine)) as client:
+        response = client.post(
+            "/api/v1/authoring/compile",
+            json=_compile_body(applied_graph=applied_graph),
+        )
+
+    _assert_sanitized_internal_error(response, "updated without changeset")
+    assert len(engine.calls) == 1
+
+
+@pytest.mark.parametrize(
+    ("path", "body"),
+    [
+        ("/api/v1/authoring/generate-python", _generate_body()),
+        ("/api/v1/authoring/validate", _validate_body()),
+    ],
+    ids=["generate-python", "validate"],
+)
+@pytest.mark.parametrize(
+    "mode",
+    ["source-only-nonempty", "source-only-graph-mutated"],
+    ids=["nonempty-changeset", "changed-graph"],
+)
+def test_generate_and_validate_require_empty_source_only_changeset_and_same_graph(
+    path: str,
+    body: dict[str, Any],
+    mode: Literal["source-only-nonempty", "source-only-graph-mutated"],
+) -> None:
+    engine = RecordingTransformEngine(mode)
+
+    with TestClient(_transform_app(engine)) as client:
+        response = client.post(path, json=body)
+
+    _assert_sanitized_internal_error(
+        response,
+        "mutated despite source_only",
+        PREPARE_NODE_UUID,
+    )
     assert len(engine.calls) == 1
 
 
