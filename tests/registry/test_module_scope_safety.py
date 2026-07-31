@@ -176,6 +176,44 @@ def test_invalid_root_shapes_and_module_names_fail_closed(
             "/module/body/0",
             id="if-body-none",
         ),
+        pytest.param(
+            ast.ClassDef(
+                name="Result",
+                bases=[],
+                keywords=[],
+                body=None,
+                decorator_list=[],
+            ),
+            "/module/body/0",
+            id="class-body-none",
+        ),
+        pytest.param(
+            ast.ClassDef(
+                name="Result",
+                bases=[],
+                keywords=[],
+                body=(),
+                decorator_list=[],
+            ),
+            "/module/body/0",
+            id="class-body-tuple",
+        ),
+        pytest.param(
+            ast.FunctionDef(
+                name="execute",
+                args=ast.arguments(
+                    posonlyargs=[],
+                    args=[],
+                    kwonlyargs=[],
+                    kw_defaults=[],
+                    defaults=[],
+                ),
+                body=[None],
+                decorator_list=[],
+            ),
+            "/module/body/0",
+            id="function-body-non-statement",
+        ),
     ],
 )
 def test_forged_statement_shapes_never_leak_python_container_errors(
@@ -230,6 +268,10 @@ def test_resolved_scope_and_both_public_mappings_are_read_only() -> None:
         scope.definitions["Other"] = tree.body[1]
     with pytest.raises(TypeError):
         del scope.definitions["Result"]
+    with pytest.raises(TypeError):
+        scope.annotation_bindings["Other"] = "contracts:Other"
+    with pytest.raises(TypeError):
+        del scope.annotation_bindings["Imported"]
     with pytest.raises(AttributeError):
         scope.module_name = "changed.module"
 
@@ -302,7 +344,9 @@ def test_repeated_resolution_is_deterministic_and_has_no_cross_call_state() -> N
 
     assert dict(first.import_identities) == dict(second.import_identities)
     assert list(first.definitions) == list(second.definitions)
+    assert dict(first.annotation_bindings) == dict(second.annotation_bindings)
     assert first.definitions["Result"] is tree.body[1]
     assert second.definitions["Result"] is tree.body[1]
     assert first.import_identities is not second.import_identities
     assert first.definitions is not second.definitions
+    assert first.annotation_bindings is not second.annotation_bindings

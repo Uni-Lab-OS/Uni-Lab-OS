@@ -10,6 +10,7 @@ from typing import Any, Never, Self
 
 _ERROR_MESSAGE = "模块作用域不符合 Workflow 静态解析合同"
 _RESOLVED_SCOPE_TOKEN = object()
+_SHADOWED_BINDING = "<shadowed>"
 
 DefinitionNode = ast.ClassDef | ast.FunctionDef | ast.AsyncFunctionDef
 
@@ -31,6 +32,7 @@ class ResolvedModuleScope:
     module_name: str
     import_identities: Mapping[str, str]
     definitions: Mapping[str, DefinitionNode]
+    annotation_bindings: Mapping[str, str]
 
     def __new__(cls, *_args: Any, **_kwargs: Any) -> Never:
         raise TypeError("请通过 resolve_module_scope 创建 ResolvedModuleScope")
@@ -41,6 +43,7 @@ class ResolvedModuleScope:
         module_name: str,
         import_identities: dict[str, str],
         definitions: dict[str, DefinitionNode],
+        shadowed_names: set[str],
         *,
         token: object,
     ) -> Self:
@@ -57,6 +60,15 @@ class ResolvedModuleScope:
             scope,
             "definitions",
             MappingProxyType(dict(definitions)),
+        )
+        annotation_bindings = dict(import_identities)
+        annotation_bindings.update(
+            (name, _SHADOWED_BINDING) for name in sorted(shadowed_names)
+        )
+        object.__setattr__(
+            scope,
+            "annotation_bindings",
+            MappingProxyType(annotation_bindings),
         )
         return scope
 
@@ -278,6 +290,7 @@ def _pattern_names(pattern: object, path: str) -> set[str]:
 
 
 def _definition_header_bindings(statement: DefinitionNode, path: str) -> set[str]:
+    _statement_list(getattr(statement, "body", None), f"{path}/body")
     names: set[str] = set()
     decorators = _node_list(
         getattr(statement, "decorator_list", None),
@@ -345,6 +358,47 @@ def _definition_header_bindings(statement: DefinitionNode, path: str) -> set[str
         _expression_bindings(getattr(statement, "returns", None), f"{path}/returns")
     )
     return names
+
+
+class _ClassGlobalDeclarations(ast.NodeVisitor):
+    """收集一个 class code block 直接所属的 ``global`` 声明。"""
+
+    def __init__(self, path: str) -> None:
+        self.path = path
+        self.names: set[str] = set()
+
+    def visit_Global(self, node: ast.Global) -> None:
+        names = getattr(node, "names", None)
+        if type(names) is not list or not names:
+            _fail(self.path)
+        for name in names:
+            self.names.add(_local_name(name, self.path))
+
+    def visit_FunctionDef(self, node: ast.FunctionDef) -> None:
+        return None
+
+    def visit_AsyncFunctionDef(self, node: ast.AsyncFunctionDef) -> None:
+        return None
+
+    def visit_ClassDef(self, node: ast.ClassDef) -> None:
+        return None
+
+    def visit_Lambda(self, node: ast.Lambda) -> None:
+        return None
+
+
+def _class_global_bindings(statement: ast.ClassDef, path: str) -> set[str]:
+    body = _statement_list(getattr(statement, "body", None), f"{path}/body")
+    declarations = _ClassGlobalDeclarations(f"{path}/body")
+    for child in body:
+        declarations.visit(child)
+    if not declarations.names:
+        return set()
+
+    possible: set[str] = set()
+    for index, child in enumerate(body):
+        possible.update(_possible_bindings(child, f"{path}/body/{index}"))
+    return declarations.names & possible
 
 
 def _possible_bindings(statement: ast.stmt, path: str) -> set[str]:
@@ -502,13 +556,25 @@ def _possible_bindings(statement: ast.stmt, path: str) -> set[str]:
     _fail(path)
 
 
-def _forget(
+def _clear_binding(
     name: str,
     import_identities: dict[str, str],
     definitions: dict[str, DefinitionNode],
+    shadowed_names: set[str],
 ) -> None:
     import_identities.pop(name, None)
     definitions.pop(name, None)
+    shadowed_names.discard(name)
+
+
+def _shadow_binding(
+    name: str,
+    import_identities: dict[str, str],
+    definitions: dict[str, DefinitionNode],
+    shadowed_names: set[str],
+) -> None:
+    _clear_binding(name, import_identities, definitions, shadowed_names)
+    shadowed_names.add(name)
 
 
 def resolve_module_scope(
@@ -525,34 +591,79 @@ def resolve_module_scope(
 
     import_identities: dict[str, str] = {}
     definitions: dict[str, DefinitionNode] = {}
+    shadowed_names: set[str] = set()
     for index, statement in enumerate(body):
         path = f"/module/body/{index}"
         if isinstance(statement, ast.Import):
             bindings = _import_bindings(statement, path)
             for local_name, identity in bindings.items():
-                _forget(local_name, import_identities, definitions)
+                _clear_binding(
+                    local_name,
+                    import_identities,
+                    definitions,
+                    shadowed_names,
+                )
                 import_identities[local_name] = identity
             continue
         if isinstance(statement, ast.ImportFrom):
             bindings = _from_import_bindings(statement, path)
             for local_name, identity in bindings.items():
-                _forget(local_name, import_identities, definitions)
+                _clear_binding(
+                    local_name,
+                    import_identities,
+                    definitions,
+                    shadowed_names,
+                )
                 import_identities[local_name] = identity
             continue
         if isinstance(statement, (ast.ClassDef, ast.FunctionDef, ast.AsyncFunctionDef)):
             header_bindings = _definition_header_bindings(statement, path)
             for local_name in header_bindings:
-                _forget(local_name, import_identities, definitions)
+                _shadow_binding(
+                    local_name,
+                    import_identities,
+                    definitions,
+                    shadowed_names,
+                )
+            if isinstance(statement, ast.ClassDef):
+                for local_name in _class_global_bindings(statement, path):
+                    _shadow_binding(
+                        local_name,
+                        import_identities,
+                        definitions,
+                        shadowed_names,
+                    )
             local_name = _local_name(getattr(statement, "name", None), path)
-            _forget(local_name, import_identities, definitions)
+            _clear_binding(
+                local_name,
+                import_identities,
+                definitions,
+                shadowed_names,
+            )
             definitions[local_name] = statement
+            shadowed_names.add(local_name)
             continue
-        for local_name in _possible_bindings(statement, path):
-            _forget(local_name, import_identities, definitions)
+        possible_bindings = _possible_bindings(statement, path)
+        for local_name in possible_bindings:
+            if isinstance(statement, ast.Delete):
+                _clear_binding(
+                    local_name,
+                    import_identities,
+                    definitions,
+                    shadowed_names,
+                )
+            else:
+                _shadow_binding(
+                    local_name,
+                    import_identities,
+                    definitions,
+                    shadowed_names,
+                )
 
     return ResolvedModuleScope._from_bindings(
         resolved_module_name,
         import_identities,
         definitions,
+        shadowed_names,
         token=_RESOLVED_SCOPE_TOKEN,
     )

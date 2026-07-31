@@ -8,6 +8,16 @@ from typing import Any
 
 import pytest
 
+from unilabos.registry.action_result_schema import (
+    ActionResultSchemaError,
+    parse_action_result_declaration,
+)
+from unilabos.registry.annotation_schema import (
+    NO_DEFAULT,
+    AnnotationSchemaError,
+    parse_parameter_annotation,
+)
+
 _MODULE_NAME = "unilabos.registry.module_scope"
 
 
@@ -24,6 +34,24 @@ def _resolve(
 ) -> tuple[ast.Module, Any]:
     tree = ast.parse(source)
     return tree, _api().resolve_module_scope(tree, module_name=module_name)
+
+
+def _parse_workflow_value(source: str) -> Any:
+    tree = ast.parse(source)
+    scope = _api().resolve_module_scope(
+        tree,
+        module_name="lab.workflows.transfer",
+    )
+    function = scope.definitions["workflow"]
+    assert isinstance(function, ast.FunctionDef)
+    parameter = function.args.kwonlyargs[0]
+    assert parameter.annotation is not None
+    return parse_parameter_annotation(
+        parameter.arg,
+        parameter.annotation,
+        default=NO_DEFAULT,
+        imports=scope.annotation_bindings,
+    )
 
 
 def test_absolute_imports_follow_python_binding_names_and_static_identities() -> None:
@@ -45,6 +73,7 @@ from contracts.results import Other
         "ImportedResult": "contracts.results:Result",
         "Other": "contracts.results:Other",
     }
+    assert dict(scope.annotation_bindings) == dict(scope.import_identities)
     assert "annotations" not in scope.import_identities
     assert dict(scope.definitions) == {}
 
@@ -196,6 +225,7 @@ def test_possible_compound_statement_binding_removes_an_unconditional_proof(
 
     assert "Token" not in scope.import_identities
     assert "Token" not in scope.definitions
+    assert "Token" in scope.annotation_bindings
 
 
 def test_conditional_import_or_definition_never_establishes_a_proven_binding() -> None:
@@ -232,6 +262,8 @@ class Result:
 
     assert dict(scope.import_identities) == {"Imported": "final:Imported"}
     assert dict(scope.definitions) == {"Result": tree.body[-1]}
+    assert scope.annotation_bindings["Imported"] == "final:Imported"
+    assert "Result" in scope.annotation_bindings
 
 
 def test_nested_lexical_scopes_cannot_supply_or_shadow_module_identities() -> None:
@@ -293,3 +325,103 @@ finally:
     )
 
     assert dict(scope.import_identities) == {"Token": "trusted:Token"}
+
+
+@pytest.mark.parametrize(
+    "shadowing_source",
+    [
+        pytest.param("list = attacker", id="assign"),
+        pytest.param("list: object = attacker", id="annassign"),
+        pytest.param("(list := attacker)", id="named-expression"),
+        pytest.param("if flag:\n    list = attacker", id="conditional"),
+        pytest.param("class list:\n    pass", id="class-definition"),
+        pytest.param("def list():\n    pass", id="function-definition"),
+    ],
+)
+def test_annotation_binding_view_blocks_shadowed_builtin_names(
+    shadowing_source: str,
+) -> None:
+    source = f"{shadowing_source}\ndef workflow(*, value: list[int]):\n    pass\n"
+    _, scope = _resolve(source)
+
+    assert "list" not in scope.import_identities
+    assert "list" in scope.annotation_bindings
+    with pytest.raises(AnnotationSchemaError) as caught:
+        _parse_workflow_value(source)
+
+    assert caught.value.code == "invalid_annotation"
+
+
+def test_unconditional_delete_restores_builtin_lookup_after_local_shadow() -> None:
+    source = """
+list = attacker
+del list
+def workflow(*, value: list[int]):
+    pass
+"""
+    _, scope = _resolve(source)
+
+    assert "list" not in scope.annotation_bindings
+    assert _parse_workflow_value(source).to_dict()["schema"] == {
+        "type": "array",
+        "items": {"type": "integer"},
+    }
+
+
+def test_action_result_parser_uses_the_same_builtin_shadow_barrier() -> None:
+    _, scope = _resolve(
+        """
+from typing import TypedDict
+list = attacker
+class Result(TypedDict):
+    values: list[int]
+"""
+    )
+    declaration = scope.definitions["Result"]
+    assert isinstance(declaration, ast.ClassDef)
+
+    with pytest.raises(ActionResultSchemaError) as caught:
+        parse_action_result_declaration(
+            declaration,
+            imports=scope.annotation_bindings,
+        )
+
+    assert caught.value.code == "invalid_action_result"
+
+
+@pytest.mark.parametrize(
+    "class_body",
+    [
+        pytest.param('global Token\nToken = "evil"', id="assign"),
+        pytest.param(
+            "global Token\nfrom evil_contract import Token",
+            id="import",
+        ),
+        pytest.param("global Token\ndel Token", id="delete"),
+    ],
+)
+def test_class_body_global_binding_invalidates_module_import_proof(
+    class_body: str,
+) -> None:
+    indented_body = "\n".join(f"    {line}" for line in class_body.splitlines())
+    _, scope = _resolve(
+        f"from trusted_contract import Token\nclass Container:\n{indented_body}\n"
+    )
+
+    assert "Token" not in scope.import_identities
+    assert "Token" not in scope.definitions
+    assert "Token" in scope.annotation_bindings
+
+
+def test_function_body_global_binding_is_not_an_import_time_module_proof() -> None:
+    _, scope = _resolve(
+        """
+from trusted_contract import Token
+def mutate_if_called():
+    global Token
+    Token = "evil"
+"""
+    )
+
+    assert scope.import_identities["Token"] == "trusted_contract:Token"
+    assert scope.annotation_bindings["Token"] == "trusted_contract:Token"

@@ -38,14 +38,20 @@ resolve_module_scope(
 - `module_name`：定义该 AST 的稳定 dotted module name；
 - `import_identities`：只读的 `local_name -> static identity`；
 - `definitions`：只读的 `local_name -> 顶层定义 AST`。
+- `annotation_bindings`：可直接交给 02B1/02B2 parser 的只读绑定视图；它保留
+  真正 import identity，并用不可匹配的内部标记阻断本地或不确定绑定回退为 builtin。
 
 `definitions` 的 key 保持本地名，使 caller 可以直接以 return annotation 的
 `ast.Name.id` 查找 `ClassDef`。同模块完整 identity 唯一派生为
 `f"{scope.module_name}:{local_name}"`，但不会伪装成一个真正 import 放进
 `import_identities`。
 
-一次调用会复制两个结果映射；不同调用不共享可变容器。定义 AST 保留输入节点
+一次调用会复制三个结果映射；不同调用不共享可变容器。定义 AST 保留输入节点
 identity，resolver 不复制、不修改源 AST。
+
+`import_identities` 始终只包含真正 import，不能用伪 identity 污染审计结果；
+`annotation_bindings` 才是 parser-consumption seam。这个区分保留了 import 事实与
+失败关闭解析环境两个不同语义。
 
 ## 3. 绑定证明规则
 
@@ -59,7 +65,8 @@ resolver 顺序读取且只直接读取 `ast.Module.body`。任一本地名在�
 | `from package import Symbol as local` | `local -> package:Symbol` |
 | `from __future__ import annotations` | 不产生普通模块绑定 |
 | 顶层 class/function/async function | 用本地名建立 definition 证明 |
-| Assign/AnnAssign/AugAssign/NamedExpr/del | 撤销目标名的旧 import/definition 证明 |
+| Assign/AnnAssign/AugAssign/NamedExpr | 撤销旧证明，并保留 builtin 遮蔽状态 |
+| 无条件顶层 `del` | 撤销旧证明与遮蔽；该名重新遵循 Python builtin lookup |
 | 解构目标 | 递归撤销所有实际绑定名 |
 | `if/while/for/with/try/match` | 其中任何可能绑定的名称都按不确定处理并撤销旧证明 |
 | 后续无条件 import/definition | 可重新建立被撤销名称的证明 |
@@ -68,9 +75,12 @@ resolver 顺序读取且只直接读取 `ast.Module.body`。任一本地名在�
 `if True`、循环次数或异常路径当作可求值常量折叠。这个限制会拒绝一部分理论上可
 运行的 Python，但不会把不确定 identity 错认证为 Catalog/Schema Authority。
 
-函数体和类体形成嵌套 lexical scope：其中的 import、定义、赋值和 `global`
-声明都不表示“模块加载后已经发生”的静态顶层证明。定义表达式阶段会真正求值的
-decorator、base、default、annotation 等位置中的 NamedExpr 则按可能绑定处理。
+函数体在定义时不执行，其中的 import、赋值和 `global` 不表示“模块加载后已经
+发生”的静态顶层证明。class body 则会在 class statement 求值时立即执行：普通
+class-local 绑定仍不影响模块，但 class code block 直接声明为 `global` 且可能被
+assign/import/del 的名称会保守撤销模块证明。嵌套 function/class 的独立 lexical
+scope 不参与这项 class-global 盘点。定义表达式阶段会真正求值的 decorator、base、
+default、annotation 等位置中的 NamedExpr 也按可能绑定处理。
 
 ## 4. 失败关闭合同
 
@@ -113,7 +123,7 @@ scope = resolve_module_scope(tree, module_name=module_name)
 declaration = scope.definitions[return_annotation.id]
 results = parse_action_result_declaration(
     declaration,
-    imports=scope.import_identities,
+    imports=scope.annotation_bindings,
 )
 ```
 
@@ -136,6 +146,11 @@ results = parse_action_result_declaration(
 关键删除测试把一个可信顶层 `Result` import 与函数内恶意同名 import 放在同一
 模块。若删掉本模块并恢复旧 `ast.walk()` 方案，恶意 nested identity 会覆盖可信
 identity，该测试立即失败。
+
+最终 reviewer 发现初版只删除 proof、没有保留 opaque/ambiguous shadow 状态，并
+发现 class body `global` 的加载期写入语义。修复阶段再增加 15 个回归 case，目标集
+增至 69 个；同时验证 `ClassDef`/`FunctionDef` 的 forged body 容器会稳定失败关闭，
+并让 Parameter 与 Action Result parser 共用同一 builtin shadow barrier。
 
 ## 7. 停止线
 
