@@ -2454,6 +2454,12 @@ class WorkflowService:
                 candidate_stale = True
 
         applied_source = record.get("applied_source")
+        applied_source_current = (
+            applied_source is not None
+            and source is not None
+            and applied_source["workflow_revision"] == workflow["revision"]
+            and applied_source["source_hash"] == source["draft_hash"]
+        )
         if source is None:
             state = "draft_missing"
         elif candidate_stale:
@@ -2462,17 +2468,15 @@ class WorkflowService:
             str(item.get("severity", "")).lower() == "error" for item in diagnostics
         ):
             state = "draft_invalid"
+        elif applied_source is not None and not applied_source_current:
+            state = "applied_source_stale"
         elif candidate is not None:
             state = (
                 "unapplied_source_only"
                 if candidate["changeset"]["kind"] == "source_only"
                 else "unapplied_graph"
             )
-        elif (
-            applied_source is not None
-            and applied_source["workflow_revision"] == workflow["revision"]
-            and applied_source["source_hash"] == source["draft_hash"]
-        ):
+        elif applied_source_current:
             state = "applied"
         else:
             state = "applied_source_stale"
