@@ -49,7 +49,11 @@ def _source(
 ) -> str:
     default_source = "" if default is _ABSENT else f" = {default}"
     import_source = "\n".join(imports)
-    return f"{import_source}\n\ndef workflow(value: {annotation}{default_source}):\n    pass\n"
+    return (
+        f"{import_source}\n\n"
+        f"def workflow(value: {annotation}{default_source}):\n"
+        "    pass\n"
+    )
 
 
 def _extract_parameter(source: str, name: str = "value") -> _ExtractedParameter:
