@@ -45,6 +45,7 @@ from unilabos.workflow.store import (
 )
 
 _LOGGER = logging.getLogger(__name__)
+AUTHORING_SOURCE_BYTE_LIMIT = 8 * 1024 * 1024
 _ERRORS = {
     "invalid_input": (400, "提交内容格式不正确"),
     "not_found": (404, "请求的资源不存在"),
@@ -829,6 +830,8 @@ class WorkflowService:
                 encoded = python_source.encode("utf-8")
             except UnicodeEncodeError:
                 raise WorkflowError("invalid_input") from None
+            if len(encoded) > AUTHORING_SOURCE_BYTE_LIMIT:
+                raise WorkflowError("invalid_input")
             try:
                 self._atomic_write(
                     registration,
@@ -1193,12 +1196,13 @@ class WorkflowService:
                 stat_result = os.fstat(descriptor)
                 if not stat.S_ISREG(stat_result.st_mode):
                     raise WorkflowError("invalid_input")
-                with os.fdopen(descriptor, "rb") as stream:
-                    descriptor = -1
-                    try:
-                        raw = stream.read()
-                    except OSError:
-                        raise WorkflowError("invalid_input") from None
+                try:
+                    raw = self._read_regular_fd(
+                        descriptor,
+                        byte_limit=AUTHORING_SOURCE_BYTE_LIMIT,
+                    )
+                except OSError:
+                    raise WorkflowError("invalid_input") from None
             finally:
                 if descriptor >= 0:
                     os.close(descriptor)
@@ -1528,18 +1532,32 @@ class WorkflowService:
         )
 
     @staticmethod
-    def _read_regular_fd(descriptor: int) -> bytes:
+    def _read_regular_fd(
+        descriptor: int,
+        *,
+        byte_limit: int | None = None,
+    ) -> bytes:
         stat_result = os.fstat(descriptor)
-        if not stat.S_ISREG(stat_result.st_mode):
+        if not stat.S_ISREG(stat_result.st_mode) or (
+            byte_limit is not None and stat_result.st_size > byte_limit
+        ):
             raise WorkflowError("invalid_input")
         os.lseek(descriptor, 0, os.SEEK_SET)
-        chunks = []
+        chunks = bytearray()
         while True:
-            chunk = os.read(descriptor, 1024 * 1024)
+            read_size = 1024 * 1024
+            if byte_limit is not None:
+                remaining = byte_limit + 1 - len(chunks)
+                if remaining <= 0:
+                    raise WorkflowError("invalid_input")
+                read_size = min(read_size, remaining)
+            chunk = os.read(descriptor, read_size)
             if not chunk:
                 break
-            chunks.append(chunk)
-        return b"".join(chunks)
+            chunks.extend(chunk)
+            if byte_limit is not None and len(chunks) > byte_limit:
+                raise WorkflowError("invalid_input")
+        return bytes(chunks)
 
     @staticmethod
     def _write_regular_fd(descriptor: int, content: bytes) -> None:

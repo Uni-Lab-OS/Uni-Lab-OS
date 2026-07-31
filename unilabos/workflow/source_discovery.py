@@ -5,6 +5,8 @@ from __future__ import annotations
 import os
 import re
 import stat
+from collections.abc import Iterator
+from contextlib import contextmanager
 from dataclasses import dataclass
 from pathlib import Path, PurePosixPath
 from typing import Any, Protocol
@@ -22,11 +24,14 @@ from yaml.events import (
 from yaml.nodes import MappingNode
 
 from unilabos.workflow.models import validate_uuid
-from unilabos.workflow.service import WorkflowConflict, WorkflowError
+from unilabos.workflow.service import (
+    AUTHORING_SOURCE_BYTE_LIMIT,
+    WorkflowConflict,
+    WorkflowError,
+)
 
 _PACKAGE_NAME = re.compile(r"[A-Za-z_][A-Za-z0-9_]*\Z")
 _MANIFEST_BYTE_LIMIT = 1024 * 1024
-_SOURCE_BYTE_LIMIT = 8 * 1024 * 1024
 _YAML_DEPTH_LIMIT = 32
 _WORKFLOW_ENTRY_LIMIT = 1024
 _YAML_SCALAR_BYTE_LIMIT = 1024 * 1024
@@ -59,6 +64,7 @@ class _WorkflowSourceDeclaration:
 class _EditablePackageManifest:
     package_id: str
     package_root: Path
+    package_root_identity: tuple[int, int]
     workflows: tuple[_WorkflowSourceDeclaration, ...]
 
 
@@ -318,6 +324,11 @@ def load_editable_package_manifest(
         source_root_fd = _open_child_directory(root_fd, package_id, missing_ok=False)
         assert source_root_fd is not None
         try:
+            source_root_metadata = os.fstat(source_root_fd)
+            source_root_identity = (
+                source_root_metadata.st_dev,
+                source_root_metadata.st_ino,
+            )
             declarations = tuple(
                 _source_declaration(item, package_id=package_id) for item in workflows
             )
@@ -340,7 +351,7 @@ def load_editable_package_manifest(
                         content = _read_regular_at(
                             workflows_fd,
                             filename,
-                            byte_limit=_SOURCE_BYTE_LIMIT,
+                            byte_limit=AUTHORING_SOURCE_BYTE_LIMIT,
                             missing_ok=True,
                             error_code="invalid_workflow_source",
                         )
@@ -365,6 +376,7 @@ def load_editable_package_manifest(
     return _EditablePackageManifest(
         package_id=package_id,
         package_root=selected_root / package_id,
+        package_root_identity=source_root_identity,
         workflows=declarations,
     )
 
@@ -390,6 +402,45 @@ def _registration_rows(
         for manifest in manifests
         for declaration in manifest.workflows
     )
+
+
+@contextmanager
+def _pinned_package_roots(
+    manifests: tuple[_EditablePackageManifest, ...],
+) -> Iterator[tuple[tuple[_EditablePackageManifest, int], ...]]:
+    """把 loader 验证过的 package directory identity 固定到注册结束。"""
+
+    pinned: list[tuple[_EditablePackageManifest, int]] = []
+    try:
+        for manifest in manifests:
+            descriptor = _open_directory_chain(manifest.package_root)
+            pinned.append((manifest, descriptor))
+            metadata = os.fstat(descriptor)
+            if (metadata.st_dev, metadata.st_ino) != manifest.package_root_identity:
+                raise SourceDeclarationError("invalid_package_root")
+        yield tuple(pinned)
+    finally:
+        for _manifest, descriptor in pinned:
+            os.close(descriptor)
+
+
+def _assert_pinned_package_roots(
+    pinned: tuple[tuple[_EditablePackageManifest, int], ...],
+) -> None:
+    """在 registration transaction 提交前再次证明路径仍指向同一目录。"""
+
+    for manifest, descriptor in pinned:
+        current_descriptor = _open_directory_chain(manifest.package_root)
+        try:
+            expected = os.fstat(descriptor)
+            current = os.fstat(current_descriptor)
+            if (current.st_dev, current.st_ino) != (
+                expected.st_dev,
+                expected.st_ino,
+            ):
+                raise SourceDeclarationError("invalid_package_root")
+        finally:
+            os.close(current_descriptor)
 
 
 def _preflight_existing_identity(
@@ -469,10 +520,17 @@ def register_editable_package_sources(
     rows = _registration_rows(manifests)
     _preflight_existing_identity(service, rows)
     batch = getattr(service, "editable_source_registration_batch", None)
-    if callable(batch):
-        with batch():
-            return tuple(service.register_editable_source(**row) for row in rows)
-    return tuple(service.register_editable_source(**row) for row in rows)
+    with _pinned_package_roots(manifests) as pinned:
+        if callable(batch):
+            with batch():
+                registered = tuple(
+                    service.register_editable_source(**row) for row in rows
+                )
+                _assert_pinned_package_roots(pinned)
+                return registered
+        registered = tuple(service.register_editable_source(**row) for row in rows)
+        _assert_pinned_package_roots(pinned)
+        return registered
 
 
 __all__ = [
