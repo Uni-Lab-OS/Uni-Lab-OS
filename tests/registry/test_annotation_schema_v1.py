@@ -1100,10 +1100,10 @@ def test_parser_neither_imports_modules_nor_executes_author_expressions(
         calls.append("called")
         raise AssertionError("parser 不得 import、eval、exec 或执行作者表达式")
 
-    monkeypatch.setattr(builtins, "__import__", _forbidden)
     monkeypatch.setattr(builtins, "eval", _forbidden)
     monkeypatch.setattr(builtins, "exec", _forbidden)
     monkeypatch.setattr(importlib, "import_module", _forbidden)
+    monkeypatch.setattr(builtins, "__import__", _forbidden)
 
     parameter = api.parse_parameter_annotation(
         valid.name,
