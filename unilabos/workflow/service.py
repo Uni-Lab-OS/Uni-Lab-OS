@@ -12,7 +12,7 @@ import struct
 import threading
 from collections import defaultdict
 from collections.abc import Iterable, Iterator
-from contextlib import contextmanager, suppress
+from contextlib import AbstractContextManager, ExitStack, contextmanager, suppress
 from datetime import datetime, timezone
 from pathlib import Path, PurePosixPath
 from typing import Any, Dict, List, Optional, Protocol, Tuple
@@ -200,6 +200,9 @@ class WorkflowConflict(WorkflowError):
 class AuthoringCompiler(Protocol):
     compiler_version: str
     template_catalog_fingerprint: str
+
+    def catalog_snapshot(self) -> AbstractContextManager[str]:
+        """返回在上下文退出前保持稳定的 Catalog fingerprint。"""
 
     def compile(
         self,
@@ -1049,7 +1052,7 @@ class WorkflowService:
             }
             previous_revision = workflow["revision"]
 
-            def validate_apply_linearization() -> None:
+            def validate_draft_linearization() -> None:
                 """在 SQLite 写事务内确定 Apply 与外部 Draft 编辑的先后顺序。"""
 
                 linearized_source = self._read_source(registration)
@@ -1060,18 +1063,17 @@ class WorkflowService:
                     raise WorkflowConflict("draft_hash_conflict")
                 if linearized_source["python_source"] != normalized_source:
                     raise WorkflowConflict("candidate_not_materialized")
-                if (
-                    self._catalog_fingerprint()
-                    != candidate["template_catalog_fingerprint"]
-                ):
-                    raise WorkflowConflict("template_catalog_conflict")
 
             try:
-                resulting_revision = self._store.apply_authoring_candidate(
-                    workflow_uuid=workflow_uuid,
-                    candidate_hash=candidate_hash,
-                    validate_external_state=validate_apply_linearization,
-                )
+                # 可变 Catalog 的 guard 必须先于 Store 事务获取并保持到事务结束。
+                with self._catalog_snapshot() as catalog_fingerprint:
+                    if catalog_fingerprint != candidate["template_catalog_fingerprint"]:
+                        raise WorkflowConflict("template_catalog_conflict")
+                    resulting_revision = self._store.apply_authoring_candidate(
+                        workflow_uuid=workflow_uuid,
+                        candidate_hash=candidate_hash,
+                        validate_draft_state=validate_draft_linearization,
+                    )
             except StoreAuthoringConflict as error:
                 raise WorkflowConflict(error.code) from None
             except StoreRevisionConflict:
@@ -1718,9 +1720,43 @@ class WorkflowService:
             value = self.compiler.template_catalog_fingerprint
         except Exception:
             raise WorkflowError("template_catalog_unavailable") from None
+        return self._validate_catalog_fingerprint(value)
+
+    @staticmethod
+    def _validate_catalog_fingerprint(value: Any) -> str:
         if not isinstance(value, str) or _HASH_TOKEN.fullmatch(value) is None:
             raise WorkflowError("template_catalog_unavailable")
         return value
+
+    @contextmanager
+    def _catalog_snapshot(self) -> Iterator[str]:
+        """取得 Catalog→Store 顺序所需的稳定内部快照。"""
+
+        if self.compiler is None:
+            raise WorkflowError("template_catalog_unavailable")
+        snapshot_factory = getattr(self.compiler, "catalog_snapshot", None)
+        if snapshot_factory is None:
+            # 兼容既有不可变、无状态编译器 Adapter。
+            yield self._catalog_fingerprint()
+            return
+        if not callable(snapshot_factory):
+            raise WorkflowError("template_catalog_unavailable")
+
+        stack = ExitStack()
+        try:
+            snapshot = snapshot_factory()
+            value = stack.enter_context(snapshot)
+            fingerprint = self._validate_catalog_fingerprint(value)
+        except WorkflowError:
+            stack.close()
+            raise
+        except Exception:
+            stack.close()
+            raise WorkflowError("template_catalog_unavailable") from None
+        try:
+            yield fingerprint
+        finally:
+            stack.close()
 
     def _issue_candidate(
         self,
