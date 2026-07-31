@@ -41,6 +41,9 @@ class _CanonicalValue:
     def __setattr__(self, _name: str, _value: Any) -> Never:
         raise AttributeError("Workflow canonical value 不可修改")
 
+    def __delattr__(self, _name: str) -> Never:
+        raise AttributeError("Workflow canonical value 不可修改")
+
     def __eq__(self, other: object) -> bool:
         return type(self) is type(other) and self._payload == other._payload
 
