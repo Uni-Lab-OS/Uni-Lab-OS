@@ -6,9 +6,10 @@
 
 基线：`ca6083b`
 
-候选：`64f3fc3`
+当前 production/test 候选：`a75e8fe`
 
-状态：**实现与正式测试完成，等待三名独立 reviewer 依次关闭门禁。**
+状态：**四个 review blocking 已修复且正式测试全绿，等待三名独立 reviewer
+针对新 SHA 依次复核。**
 
 ## 1. 本轮交付
 
@@ -30,12 +31,20 @@
 本轮没有接入旧 Registry scanner，没有修改 HTTP、Catalog、SQLite、前端或
 Backend。Action result record 继续留给 02B2。
 
+模块安全评审后又完成以下本轮接口内 hardening：
+
+- `ParsedParameter` 改为只能由 parser 构造，普通 caller 不能伪造 nominal
+  合法、内部非法的值；
+- 深 literal AST 的 `RecursionError` 被稳定投影为 `AnnotationSchemaError`；
+- annotation 与 canonical Schema 两层 enum 判重都从 O(n²) 改为保序 O(n)；
+- 新增构造器补齐 `-> None`。
+
 ## 2. 代码与测试增量
 
 | 类别 | 文件数 | 新增行 | 删除行 |
 |---|---:|---:|---:|
-| 生产代码 | 2 | 649 | 0 |
-| 独立合同测试 | 1 | 1126 | 0 |
+| 生产代码 | 3 | 674 | 1 |
+| 独立合同/安全测试 | 2 | 1377 | 0 |
 | 实现前设计 | 1 | 243 | 0 |
 
 测试代码明显多于生产代码，是因为有限语法的价值主要来自闭合拒绝矩阵：测试不仅
@@ -68,14 +77,34 @@ Backend。Action result record 继续留给 02B2。
 
 这不是产品并发或注解合同缺陷，也没有通过放宽断言解决。
 
+模块安全 reviewer 随后在首个候选 `097d0df` 复现 4 个 blocking。独立测试作者
+在该旧候选新增 12 个安全用例，得到：
+
+```text
+11 failed, 1 passed
+M-01 parser-only 构造：6 failed
+M-02 深 literal 稳定错误：2 failed
+M-03 宽 Literal 复杂度：1 failed
+S-01 构造器返回类型：2 failed
+宽 Literal duplicate 既有行为：1 passed
+```
+
+修复候选 `a75e8fe` 没有添加 enum cap，也没有弱化原 127 个用例：
+
+```text
+139 passed
+1000 → 4000 个 unique Literal 的增长守护通过
+4000 个成员完整保序
+```
+
 ## 4. 门禁结果
 
 ```text
-Parameter Annotation 目标：127 passed
+Parameter Annotation 目标：139 passed
 02A Schema/route 累计：212 passed
-Registry：153 passed
+Registry：165 passed
 Workflow：644 passed
-正式 tests：1183 passed, 3 skipped, 19 warnings
+正式 tests：1195 passed, 3 skipped, 19 warnings
 Ruff E/F/I：passed
 Ruff format --check：passed
 git diff --check：passed
@@ -95,20 +124,26 @@ deprecated 提示；没有本轮新增 warning。
 |---|---:|---:|---:|
 | 独立测试冻结 | 0 个产品问题 | 0 | 0 |
 | 首次实现验证 | 1 个测试基础设施问题 | 1 | 0 |
-| 回归与正式门禁 | 0 个产品回归 | 0 | 0 |
+| 合同评审 | 0 blocking、1 follow-up | 0 | 0 blocking |
+| 模块安全评审 | 4 blocking | 4 | 0 |
+| 新候选正式门禁 | 0 个产品回归 | 0 | 0 |
 
-相对 02A4 曾由 reviewer 新发现 1 个 blocking Standards 问题，本轮在正式测试
-候选阶段尚无 blocking 产品问题。当前证据支持“问题面继续收敛”，而不是迁移在
-不断制造新的交互状态或 Authority。
+问题数并非单调下降：首个全绿候选之后，第二名 reviewer 又发现了 4 个自动测试
+未覆盖的问题。但这些问题全部位于一个模块内部，分别属于构造不变量、异常隔离、
+算法复杂度和类型标注；没有新增 Authority、持久状态、HTTP 交互或 FE 状态。
+
+修复后 blocking 从 4 降到 0，正式测试从 1183 增长到 1195。当前趋势应表述为：
+**边界审查仍能发现局部 hardening 问题，但问题被测试化并关闭，体系结构问题面没有
+扩张。** 是否允许合并仍以三个 reviewer 对 `a75e8fe` 的复核为准。
 
 ## 6. 策略调整
 
 1. 继续保持 Parameter Annotation 是深模块：后续 compiler 与 Registry
    复用它，不各自实现类型猜测。
-2. 02B1 合并前依次做合同、模块安全、最终风险三轮独立评审；同时只运行一名
-   subagent。
-3. reviewer 若发现 blocking，修复后必须在新 production SHA 上重新跑正式门禁
-   并逐个复核，不能沿用旧评审结论。
+2. 三名 reviewer 对新 SHA 重新依次确认；旧候选的通过结论不直接继承，同时仍只
+   运行一名 subagent。
+3. 把性能问题作为 Interface 行为测试，不新增未经决策的 enum 数量 cap；以后遇到
+   同类问题先优化整条调用链，而不是只优化外层 parser。
 4. 02B2 只增加 Action result record，不趁机接旧 Registry 或 HTTP，继续缩小
    每轮变更半径。
 5. Catalog identity resolution、完整 compiler/transform/generate-python 各自
