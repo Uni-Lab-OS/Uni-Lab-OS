@@ -90,7 +90,11 @@ def _is_import(
     qualified_name: str,
     imports: Mapping[str, str],
 ) -> bool:
-    return isinstance(node, ast.Name) and imports.get(node.id) == qualified_name
+    return (
+        isinstance(node, ast.Name)
+        and type(getattr(node, "id", None)) is str
+        and imports.get(node.id) == qualified_name
+    )
 
 
 def _annotation_error_path(
@@ -123,6 +127,8 @@ def _parse_field(
         )
     except AnnotationSchemaError as error:
         _fail(_annotation_error_path(field_path, error))
+    except (AttributeError, IndexError, TypeError):
+        _fail(f"{field_path}/annotation")
     return (
         parsed.to_dict(),
         (name, parsed.resource_templates),
@@ -141,32 +147,39 @@ def _class_fields(
     templates: list[tuple[str, tuple[ResourceTemplateSymbol, ...]]] = []
     names: set[str] = set()
 
+    if type(getattr(declaration, "body", None)) is not list:
+        _fail("/return")
     for body_index, statement in enumerate(declaration.body):
         if (
             body_index == 0
             and isinstance(statement, ast.Expr)
-            and isinstance(statement.value, ast.Constant)
-            and type(statement.value.value) is str
+            and isinstance(getattr(statement, "value", None), ast.Constant)
+            and type(getattr(statement.value, "value", None)) is str
         ):
             continue
         if len(declaration.body) == 1 and isinstance(statement, ast.Pass):
             continue
         if not isinstance(statement, ast.AnnAssign):
             _fail(f"/return/body/{body_index}")
+        target = getattr(statement, "target", None)
+        annotation = getattr(statement, "annotation", None)
         if (
-            not isinstance(statement.target, ast.Name)
-            or statement.simple != 1
+            not isinstance(target, ast.Name)
+            or type(getattr(target, "id", None)) is not str
+            or not isinstance(annotation, ast.expr)
+            or getattr(statement, "simple", None) != 1
+            or not hasattr(statement, "value")
             or statement.value is not None
         ):
             _fail(f"/return/body/{body_index}")
         field_index = len(descriptors)
-        name = statement.target.id
+        name = target.id
         if name in names:
             _fail(f"/return/fields/{field_index}/name")
         names.add(name)
         descriptor, symbols = _parse_field(
             name,
-            statement.annotation,
+            annotation,
             field_index=field_index,
             imports=imports,
         )
@@ -205,19 +218,28 @@ def _parse_dataclass_decorator(
 ) -> None:
     if (
         not isinstance(decorator, ast.Call)
-        or not _is_import(decorator.func, _DATACLASS, imports)
+        or not _is_import(
+            getattr(decorator, "func", ast.AST()),
+            _DATACLASS,
+            imports,
+        )
+        or type(getattr(decorator, "args", None)) is not list
         or decorator.args
+        or type(getattr(decorator, "keywords", None)) is not list
     ):
         _fail("/return/decorators/0")
 
     seen: set[str] = set()
     for keyword in decorator.keywords:
-        name = keyword.arg
+        if not isinstance(keyword, ast.keyword):
+            _fail("/return/decorators/0")
+        name = getattr(keyword, "arg", None)
+        value = getattr(keyword, "value", None)
         if (
             name not in {"frozen", "kw_only", "slots"}
             or name in seen
-            or not isinstance(keyword.value, ast.Constant)
-            or keyword.value.value is not True
+            or not isinstance(value, ast.Constant)
+            or getattr(value, "value", None) is not True
         ):
             _fail("/return/decorators/0")
         seen.add(name)
@@ -256,6 +278,9 @@ def _parse_class(
     list[dict[str, Any]],
     list[tuple[str, tuple[ResourceTemplateSymbol, ...]]],
 ]:
+    for attribute in ("bases", "keywords", "body", "decorator_list"):
+        if type(getattr(declaration, attribute, None)) is not list:
+            _fail("/return")
     if declaration.bases:
         return _parse_typed_dict(declaration, imports=imports)
     return _parse_dataclass(declaration, imports=imports)
@@ -269,23 +294,30 @@ def _parse_compat_dict(
     list[dict[str, Any]],
     list[tuple[str, tuple[ResourceTemplateSymbol, ...]]],
 ]:
-    if not declaration.keys and not declaration.values:
+    keys = getattr(declaration, "keys", None)
+    values = getattr(declaration, "values", None)
+    if type(keys) is not list or type(values) is not list:
         _fail("/return")
-    field_count = max(len(declaration.keys), len(declaration.values))
+    if not keys and not values:
+        _fail("/return")
+    field_count = max(len(keys), len(values))
     descriptors: list[dict[str, Any]] = []
     templates: list[tuple[str, tuple[ResourceTemplateSymbol, ...]]] = []
     names: set[str] = set()
     for index in range(field_count):
-        key = declaration.keys[index] if index < len(declaration.keys) else None
-        if not isinstance(key, ast.Constant) or type(key.value) is not str:
+        key = keys[index] if index < len(keys) else None
+        if (
+            not isinstance(key, ast.Constant)
+            or type(getattr(key, "value", None)) is not str
+        ):
             _fail(f"/return/fields/{index}/name")
         name = key.value
         if name in names:
             _fail(f"/return/fields/{index}/name")
         names.add(name)
-        if index >= len(declaration.values):
+        if index >= len(values):
             _fail(f"/return/fields/{index}/annotation")
-        value = declaration.values[index]
+        value = values[index]
         if not isinstance(value, ast.expr):
             _fail(f"/return/fields/{index}/annotation")
         descriptor, symbols = _parse_field(
@@ -323,7 +355,10 @@ def parse_action_result_declaration(
 
     if not isinstance(imports, Mapping):
         _fail("/return")
-    if isinstance(declaration, ast.Constant) and declaration.value is None:
+    if (
+        isinstance(declaration, ast.Constant)
+        and getattr(declaration, "value", object()) is None
+    ):
         return _canonical_results([], [])
     if isinstance(declaration, ast.Dict):
         descriptors, templates = _parse_compat_dict(
