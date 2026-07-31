@@ -17,15 +17,15 @@ The reviewed source branch `feat/edge-networking-and-scheduler` remains
 unchanged. Completed rounds accumulate on
 `integration/workflow-task-runtime`; every mergeable plan slice runs on a
 fresh `migration/<round>-<topic>` branch and passes the independent
-test-author/full-suite/multi-review gate in the concrete execution plan.
+test-author/full-suite/independent-review gate in the concrete execution plan.
 
 ## Status
 
 | Phase | Purpose | Status |
 |---|---|---|
 | 00 | Baseline, decisions, manifests, test evidence | complete |
-| 01 | Backend-aligned Workflow/WorkflowTask contract | in progress; contract core implemented |
-| 02 | Canonical Workflow and Python/JSON authoring | concrete plan ready; implementation not started |
+| 01 | Backend-aligned Workflow/WorkflowTask contract | complete |
+| 02 | Canonical Workflow and Python/JSON authoring | in progress; 02A/02B complete, 02C next |
 | 03 | Node-centric control-DAG scheduler | not planned in detail |
 | 04 | Durable node/job/event runtime and reconciliation | not planned in detail |
 | 05 | Run-scoped debugger semantics | not planned in detail |
@@ -36,6 +36,13 @@ test-author/full-suite/multi-review gate in the concrete execution plan.
 
 Only the current phase and the immediately unblocked next phase are expanded.
 Later phase details are deliberately deferred until their entry grill.
+
+The lettered slices in the concrete plan are the engineering rounds. Historical
+02A/02B hardening sub-rounds remain in Git for provenance, but new work does not
+invent a numbered sub-round as a substitute for closing the active slice. After
+each round passes its gate, write its Chinese trend/strategy report and proceed
+directly to the next planned slice without a separate consent stop. A real
+decision blocker or an expansion of authority still stops execution.
 
 ## Ledger
 

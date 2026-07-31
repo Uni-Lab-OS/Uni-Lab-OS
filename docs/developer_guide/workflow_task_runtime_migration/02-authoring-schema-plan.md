@@ -46,6 +46,12 @@ D-093～D-099 关闭。三者已经足以
 | 02G | `migration/02g-persistent-authoring` |
 | 02H | `migration/02h-task-input-preflight` |
 
+工程 Round 直接使用上述字母切片。历史上已经合并的 02A1～02A4、02B1～02B3
+只保留为评审修复 provenance，不再据此自动发明新的数字子轮次。由于 02B 的三个
+底层 Module 已分别合并但 production caller 尚未闭合，本次使用一次性的
+`migration/02b-annotation-schema-completion` 收尾分支；它仍记作 **Round 02B**，
+不是 02B4。
+
 每一轮的基点必须是上一轮已经通过门禁并合入 integration 后的 commit。
 测试 subagent 使用独立 worktree 和独立测试分支：
 
@@ -80,10 +86,10 @@ provenance，不 squash。
 
 “测试通过”只指以上全部通过。只运行新测试或只运行目标目录不能作为合并证据。
 
-### 1.4 多 subagent 独立评审
+### 1.4 独立评审
 
-全量测试通过后，锁定候选 commit SHA，再安排至少两名没有编写本轮实现的独立
-review subagent 串行评审；任一时刻只能运行一名：
+全量测试通过后，锁定候选 commit SHA，再安排恰好一名没有编写本轮实现或测试的
+独立 review subagent。评审必须同时覆盖：
 
 1. **合同评审**：检查冻结 Backend、P0/P1/P2 决策、路由、DTO、状态机和错误边界；
 2. **代码与模块评审**：检查仓库规范、deep module Interface、重复逻辑、可测试性
@@ -111,7 +117,7 @@ accepted-fixed | rejected-with-evidence | non-blocking-follow-up
 - 一名独立测试 subagent 的先行测试已纳入；
 - targeted、Phase 累积和完整仓库测试全部通过；
 - lint、静态检查和 `git diff --check` 通过；
-- 两名或以上独立 review subagent 已按顺序完成评审；
+- 一名独立 review subagent 已完成合同、模块与风险评审；
 - 所有 blocking finding 已修复并复审；
 - migration ledger 记录 branch、tested SHA、测试命令/结果、测试作者、评审者和
   finding disposition；
@@ -470,6 +476,21 @@ tests/registry/test_annotation_schema_v1.py
 
 测试需覆盖 D-088～D-091 的 accepted/rejected matrix 和 deterministic render。
 
+Round 02B 只有在 production Action Contract caller 闭合后才结束。收尾 Interface
+必须从一个真实 defining module AST 和 Action function AST 出发，依次复用：
+
+```text
+resolve_module_scope
+  -> parse_parameter_annotation
+  -> parse_action_result_declaration
+  -> canonical Action input/output contracts
+```
+
+它必须处理 framework-owned 参数排除、Python default 对齐、D-088 doc metadata、
+return `Name` 到同模块 result declaration 的静态解析，以及所有下游错误的稳定定位。
+本 Round 不解析 Catalog UUID、不合成 implicit ResourceSlot output，也不改旧 Registry
+发布形状；02C/02D 分别消费其 canonical 结果完成 Catalog 与 Workflow Compiler。
+
 提交建议：
 
 ```text
@@ -775,8 +796,7 @@ git diff --check
 
 Phase 01 完成：
 
-- 当前 core、01E、01F 和 01G 均在独立分支通过至少两名测试 subagent 和三名
-  review subagent 的门禁；
+- 当前 core、01E、01F 和 01G 均在独立分支通过当时适用的独立测试与评审门禁；
 - 冻结 Graph/Node/Edge/Task/Job/Task command Interface 通过 parity 测试；
 - Task snapshot、Job、command 和 Authoring state restart 后仍一致；
 - 新模块不存在旧 Run public vocabulary；

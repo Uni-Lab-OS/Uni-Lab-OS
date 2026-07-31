@@ -2938,27 +2938,25 @@ Never stack a later round on an unmerged round branch. The existing
 `migration/01-backend-contract` branch is treated as one legacy-named round and
 must pass this decision before it may merge.
 
-Before implementation, assign at least two independent test-author subagents in
-separate Git worktrees and `test/<round>-*` branches:
+Before implementation, assign exactly one independent test-author subagent in
+a separate Git worktree and `test/<round>-*` branch. That author covers the
+accepted-decision contract plus adversarial, regression, restart, concurrency,
+and invalid-input risks appropriate to the round. Never run a second subagent
+concurrently.
 
-1. one writes frozen-Backend and accepted-decision contract tests; and
-2. one writes adversarial, regression, restart, concurrency, and invalid-input
-   tests appropriate to the round.
-
-Each author commits tests that first fail for the intended missing behavior.
-Merge those commits into the implementation branch without squashing their
-provenance. Implementation must make both suites pass; it may not weaken,
+The author commits tests that first fail for the intended missing behavior.
+Merge that commit into the implementation branch without squashing its
+provenance. Implementation must make that suite pass; it may not weaken,
 delete, skip, or xfail an independently authored test merely to obtain a green
 gate.
 
 On one pinned candidate commit, run the round-target tests, cumulative phase
 tests, the complete repository suite, configured lint/static checks, and
-`git diff --check`. After all pass, assign at least three independent review
-subagents who did not author the implementation:
-
-1. decision and frozen-Interface compliance;
-2. repository standards and module design; and
-3. regression, transaction, recovery, concurrency, and security risk.
+`git diff --check`. After all pass, assign exactly one independent review
+subagent who did not author the implementation or the round's tests. That
+reviewer covers decision and frozen-Interface compliance, repository standards
+and Module design, plus relevant regression, transaction, recovery,
+concurrency, and security risk.
 
 Every reviewer inspects production code and tests at the exact tested SHA.
 Every blocking finding is fixed, the affected and complete gates are rerun, and
@@ -2971,6 +2969,13 @@ identities, findings and disposition, and final merge commit. Only after that
 record is complete may the round merge locally into
 `integration/workflow-task-runtime`. Preserve reviewable commits, do not
 squash migration provenance, and do not push without explicit authorization.
+
+The lettered plan slice is the engineering-round identity. Historical numbered
+hardening rounds retain their provenance, but new work closes the active slice
+instead of automatically minting another numbered sub-round. After a round is
+merged and its Chinese trend/strategy report is recorded, continue directly to
+the next planned slice without a separate consent stop unless a decision is
+blocked or the work would expand authority.
 
 ## D-097: OS persists Backend-shaped Sites separately from Material composition
 
