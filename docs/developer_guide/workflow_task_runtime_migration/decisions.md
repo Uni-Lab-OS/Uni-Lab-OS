@@ -3202,3 +3202,44 @@ explicit contract. The remaining P0-4 decisions still own legacy
 `@action(handles=...)` precedence/retirement, exact catalog field projection,
 Action default/null behavior, mutation/Site declarations, and runtime result
 normalization.
+
+## D-101: bound untrusted Workflow JSON without narrowing canonical integers
+
+> **Status: REFINES D-043, D-083, D-086, and D-096.**
+
+The OS public Workflow HTTP adapter applies one explicit resource budget before
+business validation:
+
+- a JSON request body is at most 8 MiB (`8 * 1024 * 1024` bytes);
+- one external JSON integer token contains at most 4096 decimal digits,
+  excluding its optional minus sign; and
+- the existing maximum nesting depth of 10000 counts the complete JSON
+  document, including every object and array wrapper.
+
+Reject a declared oversized body before reading it. For chunked or missing
+`Content-Length`, read the request stream incrementally and stop as soon as the
+byte budget is exceeded. Check an integer token's digit count after lexical
+recognition but before constructing a Python bigint. All three failures use the
+frozen `400 invalid_input` envelope and create no Workflow, Candidate, Task, or
+other side effect.
+
+The 4096-digit boundary is an untrusted transport budget, not a new Workflow
+value type or persistent numeric constraint. Trusted internal canonical JSON
+continues to encode and decode arbitrary finite Python integers through the
+chunked codec, without changing `sys.set_int_max_str_digits`. The public
+adapter passes the external digit budget into that same decoder; do not fork a
+second JSON parser.
+
+Apply the complete-value depth rule to every Schema operation. A standalone
+normalized value counts its own list/object root. A Contract canonical payload
+counts its envelope, descriptor collections, descriptors, and embedded
+defaults. Therefore a `list[object]` item or opaque Input default may have less
+remaining subtree depth than the same object used as a standalone value. Reject
+the complete value before returning it, using `invalid_value` for
+`normalize_value` and `invalid_contract` for a Contract, with the full JSON
+Pointer of the first over-budget container. A parser-created canonical value
+must always be consumable by `to_dict()` under the same depth limit.
+
+These limits protect the single OS event loop from adversarial conversion work
+while retaining D-083's internal mathematical-integer semantics. They do not
+modify Backend code or claim a new shared Backend product field.

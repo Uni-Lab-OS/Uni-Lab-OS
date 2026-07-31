@@ -2,7 +2,7 @@
 
 ## Scope and evidence rule
 
-This is a status audit of D-001 through D-100. It does not introduce
+This is a status audit of D-001 through D-101. It does not introduce
 another product design. Its purpose is to distinguish historical decisions,
 closed decisions, remaining contract decisions, and ordinary implementation
 work before phase 01 starts.
@@ -11,7 +11,7 @@ The evidence order is:
 
 1. the frozen Backend frontend contract at
    `uni-lab-backend@09609a27e652c9e56ede636a2883a4fd241e4400`;
-2. later product decisions in `decisions.md`, especially D-058 through D-100,
+2. later product decisions in `decisions.md`, especially D-058 through D-101,
    plus the D-096 implementation-round gate;
 3. the current Gaojing OS implementation, which is implementation evidence but
    is not allowed to redefine the target contract.
@@ -60,6 +60,9 @@ There are three different populations in the ledger:
    Task/Job contention handling, and the frontend-visible 400/404/409 boundary.
 8. D-100 closes the first P0-4 subdecision: Action input annotations and named
    result records are the typed contract source.
+9. D-101 freezes the OS public Workflow JSON resource budget while preserving
+   arbitrary trusted canonical integers and makes nesting depth a
+   complete-document/value limit.
 
 The complete Workflow migration still has five decision groups that need a
 contract-level answer:
@@ -117,7 +120,7 @@ D-037 through D-038, D-040 through D-042, D-045 through D-046, D-053,
 D-056 through D-058 retain
 their effective rules subject to the replacements above.
 
-## 2. D-059 through D-100 deferral closure
+## 2. D-059 through D-101 deferral closure
 
 Later ResourceSlot decisions are cumulative. A phrase such as “decided
 separately” in an earlier item is not automatically an open blocker.
@@ -173,7 +176,7 @@ D-002 still protects the reviewed target tests. Excluding Backend's Edge
 protocol from parity does not authorize deleting Gaojing's Scheduler, HostLink,
 Inventory, or action-policy behavior (`AGENTS.md:660-663`).
 
-## 4. Early decisions that require D-059 through D-100 refinement
+## 4. Early decisions that require D-059 through D-101 refinement
 
 ### 4.1 D-027/D-028 parity has a deliberate D-059 route-level exception
 
@@ -341,7 +344,9 @@ syntax, symbolic ResourceTemplate restrictions, and enum syntax. D-092 closes
 the deterministic normalized Workflow form, template-annotated dynamic/fixed
 device selectors, AST/Catalog validation, Action-result typing projection, and
 frontend/IDE semantic completion while reusing that one vocabulary for D-060
-input and D-066 output contracts. P0-2 has no remaining contract question.
+input and D-066 output contracts. D-101 adds only an OS transport resource
+budget and complete-value depth accounting; trusted canonical integer semantics
+remain unchanged. P0-2 has no remaining contract question.
 
 ### P0-3: freeze Material Authority identity and lookup ownership
 
