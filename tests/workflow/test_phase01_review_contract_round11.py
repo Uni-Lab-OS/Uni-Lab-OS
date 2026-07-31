@@ -116,48 +116,54 @@ class CatalogCandidateCompiler:
         del workflow_uuid, workflow_revision, source_uri
         graph = deepcopy(applied_graph)
         graph["workflow"]["description"] = None
-        graph["nodes"] = []
-        graph["edges"] = []
-        graph["node_templates"][0].update(
-            {
-                "description": None,
-                "class": None,
-                "schema": None,
-                "icon": None,
-                "header": None,
-                "footer": None,
-            }
-        )
-        graph["handle_templates"][0].update(
-            {
-                "description": None,
-                "data_source": None,
-                "data_key": None,
-            }
-        )
+        empty_graph = self.entity_kind in {None, "workflow"}
+        if empty_graph:
+            graph["nodes"] = []
+            graph["edges"] = []
+            graph["node_templates"] = []
+            graph["handle_templates"] = []
+        else:
+            graph["node_templates"][0].update(
+                {
+                    "description": None,
+                    "class": None,
+                    "schema": None,
+                    "icon": None,
+                    "header": None,
+                    "footer": None,
+                }
+            )
+            graph["handle_templates"][0].update(
+                {
+                    "description": None,
+                    "data_source": None,
+                    "data_key": None,
+                }
+            )
         if self.entity_kind is not None:
             assert self.field is not None
-            entity = (
-                graph["workflow"]
-                if self.entity_kind == "workflow"
-                else graph[self.entity_kind][0]
-            )
+            entity = graph["workflow"] if empty_graph else graph[self.entity_kind][0]
             entity[self.field] = self.value
+        changeset = {
+            "kind": "graph" if empty_graph else "source_only",
+            "created_node_uuids": [],
+            "updated_node_uuids": [],
+            "deleted_node_uuids": (
+                [node["uuid"] for node in applied_graph["nodes"]] if empty_graph else []
+            ),
+            "created_edge_uuids": [],
+            "updated_edge_uuids": [],
+            "deleted_edge_uuids": (
+                [edge["uuid"] for edge in applied_graph["edges"]] if empty_graph else []
+            ),
+            "reserved_metadata_changed": False,
+        }
         return CandidateCompilation(
             diagnostics=[],
             graph=graph,
             normalized_python_source=python_source,
             source_map=[],
-            changeset={
-                "kind": "graph",
-                "created_node_uuids": [],
-                "updated_node_uuids": [],
-                "deleted_node_uuids": [node["uuid"] for node in applied_graph["nodes"]],
-                "created_edge_uuids": [],
-                "updated_edge_uuids": [],
-                "deleted_edge_uuids": [edge["uuid"] for edge in applied_graph["edges"]],
-                "reserved_metadata_changed": False,
-            },
+            changeset=changeset,
             compiler_version=self.compiler_version,
             template_catalog_fingerprint=self.template_catalog_fingerprint,
         )
@@ -518,7 +524,7 @@ def test_invalid_candidate_backend_dto_type_is_saved_as_draft_diagnostic(
     }
 
 
-def test_candidate_accepts_nullable_and_empty_backend_dto_boundaries(
+def test_candidate_accepts_nullable_workflow_and_canonical_empty_arrays(
     store: WorkflowStore,
     tmp_path: Path,
 ) -> None:
@@ -535,8 +541,6 @@ def test_candidate_accepts_nullable_and_empty_backend_dto_boundaries(
     aggregate = payload["data"]
     candidate = aggregate["candidate"]
     graph = candidate["graph"]
-    node_template = graph["node_templates"][0]
-    handle_template = graph["handle_templates"][0]
     assert {
         "status": response.status_code,
         "envelope_code": payload["code"],
@@ -545,19 +549,11 @@ def test_candidate_accepts_nullable_and_empty_backend_dto_boundaries(
         "workflow_revision": graph["workflow"]["revision"],
         "workflow_tags": graph["workflow"]["tags"],
         "workflow_meta_data": graph["workflow"]["meta_data"],
-        "node_json_objects": [
-            node_template["goal"],
-            node_template["goal_default"],
-            node_template["feedback"],
-            node_template["result"],
-        ],
-        "required": handle_template["required"],
-        "nullable_fields_present": {
-            key
-            for entity in (graph["workflow"], node_template, handle_template)
-            for key, value in entity.items()
-            if value is None
-        },
+        "description_present": "description" in graph["workflow"],
+        "nodes": graph["nodes"],
+        "edges": graph["edges"],
+        "node_templates": graph["node_templates"],
+        "handle_templates": graph["handle_templates"],
     } == {
         "status": 200,
         "envelope_code": 0,
@@ -566,7 +562,9 @@ def test_candidate_accepts_nullable_and_empty_backend_dto_boundaries(
         "workflow_revision": revision,
         "workflow_tags": ["stable", 1, None, {"nested": True}],
         "workflow_meta_data": {"round": 11},
-        "node_json_objects": [{}, {}, {}, {}],
-        "required": False,
-        "nullable_fields_present": set(),
+        "description_present": False,
+        "nodes": [],
+        "edges": [],
+        "node_templates": [],
+        "handle_templates": [],
     }
