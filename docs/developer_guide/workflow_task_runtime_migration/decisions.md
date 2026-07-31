@@ -3208,7 +3208,9 @@ normalization.
 > **Status: REFINES D-043, D-083, D-086, and D-096.**
 
 The OS public Workflow HTTP adapter applies one explicit resource budget before
-business validation:
+business validation. The body byte budget applies to every Workflow route that
+declares a request body, regardless of the caller-supplied `Content-Type`;
+JSON-specific integer and depth budgets apply when decoding JSON:
 
 - a JSON request body is at most 8 MiB (`8 * 1024 * 1024` bytes);
 - one external JSON integer token contains at most 4096 decimal digits,
