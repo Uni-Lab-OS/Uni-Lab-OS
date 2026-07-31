@@ -11,12 +11,15 @@ from typing import Any, Never, Self
 
 from unilabos.workflow.schema import (
     WorkflowInputContract,
+    WorkflowOutputContract,
     WorkflowSchemaError,
     parse_input_contract,
+    parse_output_contract,
 )
 
 NO_DEFAULT = object()
 _PARSED_PARAMETER_TOKEN = object()
+_PARSED_RESULT_TOKEN = object()
 
 _ANNOTATED = "typing:Annotated"
 _DICT = "typing:Dict"
@@ -83,6 +86,41 @@ class ParsedParameter:
         """返回与内部 canonical contract 不共享容器的 descriptor。"""
 
         return self._contract.to_dict()["parameters"][0]
+
+
+@dataclass(frozen=True, slots=True, init=False)
+class ParsedResult:
+    """一个不可变的 canonical 显式结果字段及其待解析模板 symbol。"""
+
+    _contract: WorkflowOutputContract
+    resource_templates: tuple[ResourceTemplateSymbol, ...]
+
+    def __new__(cls, *_args: Any, **_kwargs: Any) -> Never:
+        raise TypeError("请通过 parse_result_annotation 创建 ParsedResult")
+
+    @classmethod
+    def _from_canonical(
+        cls,
+        contract: WorkflowOutputContract,
+        resource_templates: tuple[ResourceTemplateSymbol, ...],
+        *,
+        token: object,
+    ) -> Self:
+        if token is not _PARSED_RESULT_TOKEN:
+            raise TypeError("ParsedResult 只能由模块内 parser 创建")
+        result = object.__new__(cls)
+        object.__setattr__(result, "_contract", contract)
+        object.__setattr__(
+            result,
+            "resource_templates",
+            resource_templates,
+        )
+        return result
+
+    def to_dict(self) -> dict[str, Any]:
+        """返回与内部 canonical contract 不共享容器的 output descriptor。"""
+
+        return self._contract.to_dict()["outputs"][0]
 
 
 def _fail(
@@ -538,6 +576,44 @@ def parse_parameter_annotation(
         contract,
         templates,
         token=_PARSED_PARAMETER_TOKEN,
+    )
+
+
+def parse_result_annotation(
+    name: str,
+    annotation: ast.expr,
+    *,
+    imports: Mapping[str, str],
+) -> ParsedResult:
+    """把一个源码结果字段静态解析为 canonical v1 output。"""
+
+    if not isinstance(annotation, ast.expr):
+        _fail("/annotation")
+    if not isinstance(imports, Mapping):
+        _fail("/imports")
+
+    schema, title, description, templates = _parse_annotation(
+        annotation,
+        imports,
+    )
+    descriptor: dict[str, Any] = {
+        "name": name,
+        "schema": schema,
+    }
+    if title is not None:
+        descriptor["title"] = title
+    if description is not None:
+        descriptor["description"] = description
+
+    try:
+        contract = parse_output_contract({"version": 1, "outputs": [descriptor]})
+    except WorkflowSchemaError as error:
+        path = error.path or "/"
+        _fail(path, code=error.code)
+    return ParsedResult._from_canonical(
+        contract,
+        templates,
+        token=_PARSED_RESULT_TOKEN,
     )
 
 
