@@ -95,6 +95,13 @@ CREATE TABLE IF NOT EXISTS workflow_node_template (
 );
 CREATE INDEX IF NOT EXISTS ix_workflow_node_template_authority
     ON workflow_node_template(authority_id);
+CREATE UNIQUE INDEX IF NOT EXISTS ux_workflow_node_template_authority_key_active
+    ON workflow_node_template(
+        authority_id,
+        resource_template_uuid,
+        LOWER(TRIM(name))
+    )
+    WHERE deleted_at IS NULL;
 
 CREATE TABLE IF NOT EXISTS workflow_handle_template (
     uuid TEXT PRIMARY KEY,
@@ -117,6 +124,22 @@ CREATE INDEX IF NOT EXISTS ix_workflow_handle_template_node
     ON workflow_handle_template(workflow_node_template_uuid);
 CREATE INDEX IF NOT EXISTS ix_workflow_handle_template_authority
     ON workflow_handle_template(authority_id);
+CREATE UNIQUE INDEX IF NOT EXISTS ux_workflow_handle_template_authority_key_active
+    ON workflow_handle_template(
+        authority_id,
+        workflow_node_template_uuid,
+        LOWER(TRIM(handle_key)),
+        io_type
+    )
+    WHERE deleted_at IS NULL;
+
+CREATE TABLE IF NOT EXISTS workflow_template_catalog (
+    authority_id TEXT PRIMARY KEY,
+    authority_kind TEXT NOT NULL
+        CHECK (authority_kind IN ('local', 'backend')),
+    fingerprint TEXT NOT NULL,
+    update_time TEXT NOT NULL
+);
 
 CREATE TABLE IF NOT EXISTS workflow_node (
     uuid TEXT PRIMARY KEY,
@@ -283,6 +306,7 @@ class WorkflowStore:
         self.path = str(db_path)
         if self.path != ":memory:":
             Path(self.path).parent.mkdir(parents=True, exist_ok=True)
+        self._catalog_lock = threading.RLock()
         self._lock = threading.RLock()
         self._conn = sqlite3.connect(self.path, check_same_thread=False)
         self._conn.row_factory = sqlite3.Row
@@ -313,6 +337,69 @@ class WorkflowStore:
                 raise
             else:
                 self._conn.commit()
+
+    @contextmanager
+    def catalog_guard(self) -> Iterator[None]:
+        """串行化 Catalog replace 与 compiler read snapshot。
+
+        Catalog 调用者必须先取得此 guard，再进入 ``transaction``，从而保持
+        全局 ``Catalog -> Store`` 锁顺序。同一 Store 上的所有 Catalog facade
+        共享这一把锁。
+        """
+
+        with self._catalog_lock:
+            yield
+
+    def read_template_catalog(
+        self,
+        authority_id: str,
+        *,
+        conn: sqlite3.Connection | None = None,
+        include_deleted: bool = False,
+    ) -> tuple[
+        dict[str, Any] | None,
+        list[dict[str, Any]],
+        list[dict[str, Any]],
+    ]:
+        """读取一个 authority 的 Catalog metadata 与持久行。
+
+        该方法只提供 SQLite 事实，不做 availability、kind 或 fingerprint 判定；
+        这些属于 ``TemplateCatalog`` deep module。
+        """
+
+        database = conn or self._conn
+        deleted_clause = "" if include_deleted else " AND deleted_at IS NULL"
+        with self._lock:
+            metadata_row = database.execute(
+                """
+                SELECT authority_id, authority_kind, fingerprint, update_time
+                FROM workflow_template_catalog
+                WHERE authority_id = ?
+                """,
+                (authority_id,),
+            ).fetchone()
+            node_rows = database.execute(
+                f"""
+                SELECT * FROM workflow_node_template
+                WHERE authority_id = ?{deleted_clause}
+                ORDER BY uuid
+                """,
+                (authority_id,),
+            ).fetchall()
+            handle_rows = database.execute(
+                f"""
+                SELECT * FROM workflow_handle_template
+                WHERE authority_id = ?{deleted_clause}
+                ORDER BY workflow_node_template_uuid, uuid
+                """,
+                (authority_id,),
+            ).fetchall()
+        metadata = dict(metadata_row) if metadata_row is not None else None
+        return (
+            metadata,
+            [dict(row) for row in node_rows],
+            [dict(row) for row in handle_rows],
+        )
 
     # Workflow 与 Graph --------------------------------------------------
 
