@@ -4,9 +4,7 @@ from __future__ import annotations
 
 import keyword
 import math
-from copy import deepcopy
-from dataclasses import dataclass
-from typing import Any, Never
+from typing import Any, Never, Self
 
 from unilabos.workflow.json_codec import (
     MAX_BACKEND_JSON_DEPTH,
@@ -19,6 +17,7 @@ _INVALID_SCHEMA = "工作流值 Schema 不符合版本 1 合同"
 _INVALID_CONTRACT = "工作流输入输出合同格式不正确"
 _INVALID_VALUE = "工作流值不符合声明的 Schema"
 _MISSING = object()
+_CANONICAL_CONSTRUCTOR_TOKEN = object()
 
 
 class WorkflowSchemaError(ValueError):
@@ -31,34 +30,63 @@ class WorkflowSchemaError(ValueError):
         self.message = message
 
 
-@dataclass(frozen=True, slots=True)
-class WorkflowValueSchema:
+class _CanonicalValue:
+    """由 parser 独占构造、以不可变 JSON 字节持有的 canonical value。"""
+
+    __slots__ = ("_payload",)
+
+    def __new__(cls, *_args: Any, **_kwargs: Any) -> Self:
+        raise TypeError("请通过 Workflow Schema parser 创建 canonical value")
+
+    def __setattr__(self, _name: str, _value: Any) -> Never:
+        raise AttributeError("Workflow canonical value 不可修改")
+
+    def __eq__(self, other: object) -> bool:
+        return type(self) is type(other) and self._payload == other._payload
+
+    def __hash__(self) -> int:
+        return hash(self._payload)
+
+    @classmethod
+    def _from_canonical(
+        cls,
+        data: dict[str, Any],
+        *,
+        token: object,
+    ) -> Self:
+        if token is not _CANONICAL_CONSTRUCTOR_TOKEN:
+            raise TypeError("canonical value 只能由模块内 parser 创建")
+        value = object.__new__(cls)
+        object.__setattr__(value, "_payload", encode_json(data))
+        return value
+
+    def _canonical_dict(self) -> dict[str, Any]:
+        data = decode_json_bytes(self._payload)
+        assert isinstance(data, dict)
+        return data
+
+    def to_dict(self) -> dict[str, Any]:
+        """返回不与对象或其他 dump 共享容器的 canonical JSON。"""
+
+        return self._canonical_dict()
+
+
+class WorkflowValueSchema(_CanonicalValue):
     """已规范化、不可变的版本 1 值 Schema。"""
 
-    _data: dict[str, Any]
-
-    def to_dict(self) -> dict[str, Any]:
-        return deepcopy(self._data)
+    __slots__ = ()
 
 
-@dataclass(frozen=True, slots=True)
-class WorkflowInputContract:
+class WorkflowInputContract(_CanonicalValue):
     """有序、闭合的版本 1 Workflow Input Contract。"""
 
-    _data: dict[str, Any]
-
-    def to_dict(self) -> dict[str, Any]:
-        return deepcopy(self._data)
+    __slots__ = ()
 
 
-@dataclass(frozen=True, slots=True)
-class WorkflowOutputContract:
+class WorkflowOutputContract(_CanonicalValue):
     """有序、闭合的版本 1 Workflow Output Contract。"""
 
-    _data: dict[str, Any]
-
-    def to_dict(self) -> dict[str, Any]:
-        return deepcopy(self._data)
+    __slots__ = ()
 
 
 def _fail(code: str, path: str, message: str) -> Never:
@@ -280,6 +308,7 @@ def _parse_nullable(raw: dict[str, Any], *, path: str) -> dict[str, Any]:
         members[base_index],
         path=_pointer(any_of_path, base_index),
         allow_array=True,
+        allow_nullable=False,
     )
     return {"anyOf": [base, {"type": "null"}]}
 
@@ -369,6 +398,7 @@ def _parse_typed_schema(
             raw["items"],
             path=_pointer(path, "items"),
             allow_array=False,
+            allow_nullable=False,
         )
         for field in ("minItems", "maxItems"):
             if field in raw:
@@ -400,6 +430,7 @@ def _parse_schema_dict(
     *,
     path: str,
     allow_array: bool,
+    allow_nullable: bool,
 ) -> dict[str, Any]:
     schema = _require_object(
         raw,
@@ -410,7 +441,7 @@ def _parse_schema_dict(
     if not schema:
         _fail("invalid_schema", path, _INVALID_SCHEMA)
     if "anyOf" in schema:
-        if not allow_array:
+        if not allow_nullable:
             _fail("invalid_schema", _pointer(path, "anyOf"), _INVALID_SCHEMA)
         return _parse_nullable(schema, path=path)
     if "$slot" in schema:
@@ -423,8 +454,14 @@ def _parse_schema_dict(
 def parse_value_schema(raw: Any) -> WorkflowValueSchema:
     """校验并规范化一个闭合的 Workflow v1 值 Schema。"""
 
-    return WorkflowValueSchema(
-        _parse_schema_dict(raw, path="", allow_array=True),
+    return WorkflowValueSchema._from_canonical(
+        _parse_schema_dict(
+            raw,
+            path="",
+            allow_array=True,
+            allow_nullable=True,
+        ),
+        token=_CANONICAL_CONSTRUCTOR_TOKEN,
     )
 
 
@@ -550,7 +587,7 @@ def normalize_value(schema: WorkflowValueSchema, raw_value: Any) -> Any:
 
     if not isinstance(schema, WorkflowValueSchema):
         _fail("invalid_schema", "", _INVALID_SCHEMA)
-    return _normalize_with_schema(schema._data, raw_value, path="")
+    return _normalize_with_schema(schema._canonical_dict(), raw_value, path="")
 
 
 def _normalize_name(value: Any, *, path: str) -> str:
@@ -574,11 +611,12 @@ def _normalize_presentation(value: Any, *, path: str) -> str:
 
 
 def _schema_is_nullable(schema: WorkflowValueSchema) -> bool:
-    return "anyOf" in schema._data
+    return "anyOf" in schema._canonical_dict()
 
 
 def _schema_base(schema: WorkflowValueSchema) -> dict[str, Any]:
-    return schema._data["anyOf"][0] if _schema_is_nullable(schema) else schema._data
+    data = schema._canonical_dict()
+    return data["anyOf"][0] if "anyOf" in data else data
 
 
 def _normalize_default(
@@ -682,12 +720,14 @@ def parse_input_contract(raw: Any) -> WorkflowInputContract:
             )
 
         schema_path = _pointer(path, "schema")
-        schema = WorkflowValueSchema(
+        schema = WorkflowValueSchema._from_canonical(
             _parse_schema_dict(
                 descriptor["schema"],
                 path=schema_path,
                 allow_array=True,
-            )
+                allow_nullable=True,
+            ),
+            token=_CANONICAL_CONSTRUCTOR_TOKEN,
         )
         has_default = "default" in descriptor
         default_path = _pointer(path, "default")
@@ -732,9 +772,12 @@ def parse_input_contract(raw: Any) -> WorkflowInputContract:
                 path=_pointer(path, "description"),
             )
         if has_default:
-            item["default"] = deepcopy(default)
+            item["default"] = default
         normalized.append(item)
-    return WorkflowInputContract({"version": 1, "parameters": normalized})
+    return WorkflowInputContract._from_canonical(
+        {"version": 1, "parameters": normalized},
+        token=_CANONICAL_CONSTRUCTOR_TOKEN,
+    )
 
 
 def parse_output_contract(raw: Any) -> WorkflowOutputContract:
@@ -770,12 +813,14 @@ def parse_output_contract(raw: Any) -> WorkflowOutputContract:
         if name in names:
             _fail("invalid_contract", name_path, _INVALID_CONTRACT)
         names.add(name)
-        schema = WorkflowValueSchema(
+        schema = WorkflowValueSchema._from_canonical(
             _parse_schema_dict(
                 descriptor["schema"],
                 path=_pointer(path, "schema"),
                 allow_array=True,
-            )
+                allow_nullable=True,
+            ),
+            token=_CANONICAL_CONSTRUCTOR_TOKEN,
         )
         implicit = descriptor.get("implicit", False)
         if type(implicit) is not bool:
@@ -800,7 +845,10 @@ def parse_output_contract(raw: Any) -> WorkflowOutputContract:
             )
         item["implicit"] = implicit
         normalized.append(item)
-    return WorkflowOutputContract({"version": 1, "outputs": normalized})
+    return WorkflowOutputContract._from_canonical(
+        {"version": 1, "outputs": normalized},
+        token=_CANONICAL_CONSTRUCTOR_TOKEN,
+    )
 
 
 __all__ = [
