@@ -16,7 +16,11 @@ from unilabos.workflow.graph_validation import (
     validate_graph,
 )
 from unilabos.workflow.json_codec import decode_json_bytes, encode_json
-from unilabos.workflow.models import WorkflowEdgeWrite, WorkflowNodeWrite
+from unilabos.workflow.models import (
+    WorkflowEdgeWrite,
+    WorkflowNodeWrite,
+    resolve_template_root_param,
+)
 
 _STORE_SQLITE_BUSY_TIMEOUT_MS = 5000
 
@@ -845,11 +849,10 @@ class WorkflowStore:
         ).fetchone()
         if template is None:
             return {}
-        for field in ("goal_default", "goal"):
-            fallback = _load(template[field], {})
-            if isinstance(fallback, dict) and fallback:
-                return fallback
-        return {}
+        return resolve_template_root_param(
+            _load(template["goal_default"], {}),
+            _load(template["goal"], {}),
+        )
 
     def _upsert_edge(
         self,

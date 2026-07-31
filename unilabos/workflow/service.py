@@ -1890,11 +1890,17 @@ class WorkflowService:
                 )
                 for item in compilation.diagnostics
             ]
-            source_ranges = [
-                item["source_range"]
-                for item in compilation.diagnostics
-                if item.get("source_range") is not None
-            ]
+            source_ranges = []
+            for item in compilation.diagnostics:
+                if item.get("source_range") is not None:
+                    source_ranges.append(item["source_range"])
+                source_ranges.extend(item.get("occurrence_ranges") or [])
+                for alternative in item.get("repair_alternatives") or []:
+                    source_ranges.append(alternative["retained_range"])
+                    source_ranges.extend(
+                        replacement["source_range"]
+                        for replacement in alternative["replacements"]
+                    )
             if not _source_ranges_fit(python_source, source_ranges):
                 raise ValueError
         except (TypeError, ValidationError, ValueError):
