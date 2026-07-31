@@ -16,6 +16,7 @@ from fastapi.responses import JSONResponse, Response, StreamingResponse
 from fastapi.routing import APIRoute
 from pydantic import BaseModel, ConfigDict, Field, field_validator
 
+from unilabos.workflow.candidate_validation import validate_candidate_bundle
 from unilabos.workflow.json_codec import decode_json_bytes, encode_json
 from unilabos.workflow.models import (
     CandidateChangeset,
@@ -288,6 +289,10 @@ def _transform_data(
     result: Any,
     *,
     input_source: Optional[str],
+    workflow_uuid: str,
+    revision: int,
+    base_graph: Dict[str, Any],
+    require_unchanged_graph: bool,
 ) -> Dict[str, Any]:
     """把 engine 结果收紧为唯一公开 DTO，拒绝内部或越界值。"""
 
@@ -332,6 +337,15 @@ def _transform_data(
         changeset = CandidateChangeset.model_validate(
             compilation.changeset
         ).model_dump()
+        graph = validate_candidate_bundle(
+            graph=graph,
+            base_graph=base_graph,
+            workflow_uuid=workflow_uuid,
+            revision=revision,
+            source_map=source_map,
+            changeset=changeset,
+            require_unchanged_graph=require_unchanged_graph,
+        )
 
     compiler_version = compilation.compiler_version
     fingerprint = compilation.template_catalog_fingerprint
@@ -359,9 +373,20 @@ def _transform_response(
     operation: Callable[[], Any],
     *,
     input_source: Optional[str],
+    workflow_uuid: str,
+    revision: int,
+    base_graph: Dict[str, Any],
+    require_unchanged_graph: bool = False,
 ) -> _BackendJSONResponse:
     try:
-        data = _transform_data(operation(), input_source=input_source)
+        data = _transform_data(
+            operation(),
+            input_source=input_source,
+            workflow_uuid=workflow_uuid,
+            revision=revision,
+            base_graph=base_graph,
+            require_unchanged_graph=require_unchanged_graph,
+        )
         if any(
             item["code"] == "template_catalog_unavailable"
             for item in data["diagnostics"]
@@ -405,6 +430,9 @@ def create_authoring_transform_router(
         return _transform_response(
             lambda: engine.compile(**values),
             input_source=body.python_source,
+            workflow_uuid=body.workflow_uuid,
+            revision=body.revision,
+            base_graph=body.applied_graph,
         )
 
     @router.post("/generate-python")
@@ -420,6 +448,10 @@ def create_authoring_transform_router(
         return _transform_response(
             lambda: engine.generate_python(**values),
             input_source=None,
+            workflow_uuid=body.workflow_uuid,
+            revision=body.revision,
+            base_graph=body.graph,
+            require_unchanged_graph=True,
         )
 
     @router.post("/validate")
@@ -434,6 +466,10 @@ def create_authoring_transform_router(
         return _transform_response(
             lambda: engine.validate(**values),
             input_source=body.python_source,
+            workflow_uuid=body.workflow_uuid,
+            revision=body.revision,
+            base_graph=body.graph,
+            require_unchanged_graph=True,
         )
 
     return router
