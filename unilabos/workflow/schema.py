@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import keyword
 import math
+from itertools import pairwise
 from typing import Any, Never, Self
 
 from unilabos.workflow.json_codec import (
@@ -163,6 +164,21 @@ def _enum_equal(kind: str, left: Any, right: Any) -> bool:
     return type(left) is type(right) and left == right
 
 
+def _first_duplicate_enum_index(
+    kind: str,
+    values: list[Any],
+) -> int | None:
+    ordered = sorted(enumerate(values), key=lambda item: item[1])
+    duplicate_index: int | None = None
+    for left, right in pairwise(ordered):
+        if not _enum_equal(kind, left[1], right[1]):
+            continue
+        current_index = max(left[0], right[0])
+        if duplicate_index is None or current_index < duplicate_index:
+            duplicate_index = current_index
+    return duplicate_index
+
+
 def _check_numeric_bound(
     kind: str,
     value: Any,
@@ -253,7 +269,6 @@ def _normalize_enum(
     if not isinstance(raw, list) or not raw:
         _fail("invalid_schema", path, _INVALID_SCHEMA)
     normalized: list[Any] = []
-    seen: set[Any] = set()
     for index, value in enumerate(raw):
         item_path = _pointer(path, index)
         member = _normalize_scalar(
@@ -263,9 +278,6 @@ def _normalize_enum(
             path=item_path,
             message=_INVALID_SCHEMA,
         )
-        if member in seen:
-            _fail("invalid_schema", item_path, _INVALID_SCHEMA)
-        seen.add(member)
         _validate_constraints(
             schema,
             member,
@@ -275,6 +287,13 @@ def _normalize_enum(
             check_enum=False,
         )
         normalized.append(member)
+    duplicate_index = _first_duplicate_enum_index(kind, normalized)
+    if duplicate_index is not None:
+        _fail(
+            "invalid_schema",
+            _pointer(path, duplicate_index),
+            _INVALID_SCHEMA,
+        )
     return normalized
 
 

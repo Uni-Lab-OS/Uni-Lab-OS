@@ -4,8 +4,10 @@ from __future__ import annotations
 
 import ast
 import math
+from collections.abc import Mapping
 from dataclasses import dataclass
-from typing import Any, Mapping, Never, Self
+from itertools import pairwise
+from typing import Any, Never, Self
 
 from unilabos.workflow.schema import (
     WorkflowInputContract,
@@ -26,6 +28,8 @@ _OPTIONAL = "typing:Optional"
 _RESOURCE_SLOT = "unilabos.registry.placeholder_type:ResourceSlot"
 _RESOURCE_TEMPLATES = "unilabos.registry.annotations:AllowedResourceTemplates"
 _ERROR_MESSAGE = "参数注解不符合 Workflow 版本 1 合同"
+_AUTHORING_INTEGER_DIGITS = 4096
+_AUTHORING_INTEGER_LIMIT = 10**_AUTHORING_INTEGER_DIGITS
 
 
 class AnnotationSchemaError(ValueError):
@@ -122,9 +126,26 @@ def _subscript_members(node: ast.Subscript) -> list[ast.expr]:
 
 def _literal_value(node: ast.expr, *, path: str) -> Any:
     try:
-        return ast.literal_eval(node)
+        value = ast.literal_eval(node)
     except (RecursionError, TypeError, ValueError):
         _fail(path)
+    pending = [value]
+    while pending:
+        item = pending.pop()
+        if type(item) is int:
+            if abs(item) >= _AUTHORING_INTEGER_LIMIT:
+                _fail(path)
+        elif type(item) in {list, tuple, set}:
+            pending.extend(item)
+        elif type(item) is dict:
+            pending.extend(item.keys())
+            pending.extend(item.values())
+    return value
+
+
+def _has_duplicate(values: list[Any]) -> bool:
+    ordered = sorted(values)
+    return any(left == right for left, right in pairwise(ordered))
 
 
 def _parse_literal(
@@ -158,14 +179,9 @@ def _parse_literal(
     else:
         _fail(path)
 
-    normalized: list[Any] = []
-    seen: set[Any] = set()
-    for value in values:
-        if value in seen:
-            _fail(path)
-        seen.add(value)
-        normalized.append(value)
-    return {"type": kind, "enum": normalized}
+    if _has_duplicate(values):
+        _fail(path)
+    return {"type": kind, "enum": values}
 
 
 def _parse_nullable(
