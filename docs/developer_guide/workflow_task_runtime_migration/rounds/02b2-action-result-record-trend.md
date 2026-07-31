@@ -6,7 +6,7 @@
 
 基线：`5b7534d`
 
-当前 production/test 候选：`5327323`
+当前 production/test 候选：`9806d9a`
 
 状态：**独立 RED、实现和正式测试全绿，等待合同、模块安全、最终风险三名
 reviewer 顺序复核。**
@@ -32,11 +32,11 @@ SQLite、前端或 Backend。
 
 | 类别 | 文件数 | 新增行 | 删除行 |
 |---|---:|---:|---:|
-| 生产代码 | 2 | 451 | 0 |
-| 独立合同/安全测试 | 4 | 1452 | 0 |
+| 生产代码 | 2 | 452 | 0 |
+| 独立合同/安全测试 | 5 | 1526 | 0 |
 | 设计与 canonical 示例 | 1 | 265 | 0 |
 
-新增生产代码中 375 行属于 result declaration 的闭合形状 parser，76 行属于 02B1
+新增生产代码中 376 行属于 result declaration 的闭合形状 parser，76 行属于 02B1
 共享 annotation 深模块的单字段 output seam。测试约为生产代码的 3.2 倍，主要用于
 冻结三种接受形状和对应的拒绝矩阵，而不是重复测试业务实现。
 
@@ -78,15 +78,30 @@ annotation parser 的输入边界重定位 `AttributeError`、`IndexError`、`Ty
 104 passed
 ```
 
+合同 reviewer 对 `5327323` 重新复核时，又发现手工
+`ast.keyword(arg=[])` 会在 dataclass option set membership 中泄漏不可哈希
+`TypeError`。独立 test author 用 list/dict 两种不可哈希 name 冻结 2 个 RED：
+
+```text
+2 failed
+统一首因：TypeError: unhashable type
+```
+
+最终候选在 membership 前要求 keyword name 是 exact `str`，两个用例转绿：
+
+```text
+106 passed
+```
+
 ## 4. 门禁结果
 
 ```text
-02B2 Action result：104 passed
+02B2 Action result：106 passed
 02B1 Annotation：167 passed
-Registry：297 passed
+Registry：299 passed
 02A Schema/route：212 passed
 Workflow：644 passed
-正式 tests：1327 passed, 3 skipped, 18 warnings
+正式 tests：1329 passed, 3 skipped, 19 warnings
 Ruff：passed
 Ruff format --check：passed
 git diff --check：passed
@@ -106,15 +121,22 @@ deprecated 提示；没有本轮新增 warning。
 | 首个合同评审 | 1 blocking、1 follow-up | 1 | 0 |
 | forged AST 独立 RED | 0 个新增产品问题 | 0 | 0 |
 | `5327323` 正式全量 | 0 个产品回归 | 0 | 0 |
+| `5327323` 合同复核 | 1 blocking、1 follow-up | 1 | 0 |
+| forged decorator 独立 RED | 0 个新增产品问题 | 0 | 0 |
+| `9806d9a` 正式全量 | 0 个产品回归 | 0 | 0 |
 
 canonical 示例最初省略了 `implicit: false`。独立 test author 在写测试时指出既有
 `parse_output_contract` 必然物化该字段；设计文档已校正，没有修改 02A Authority
 或生产行为。
 
-与 02B1 的七个 blocking 相比，02B2 当前发现并关闭 1 个 blocking，问题数量和
-范围都在下降。该问题没有扩张业务模型，只补全公开纯 AST seam 的失败关闭边界。
-但“目标与正式全绿”仍不能等价于可合并：375 行闭合 parser 需要三名 reviewer
-重新针对 `5327323` 检查错误优先级、宽字段复杂度、parser-only 构造和三种声明
+与 02B1 的七个 blocking 相比，02B2 当前发现并关闭 2 个 blocking，问题数量和
+范围仍在下降。两个问题没有扩张业务模型，都属于公开纯 AST seam 的失败关闭边界；
+第二个还是第一个 shape-validation 修复的相邻不可哈希属性遗漏。当前策略需要从
+“补已知 shape”调整为“对进入 membership/lookup/iteration 的每个 AST 属性先做
+exact type guard”。
+
+“目标与正式全绿”仍不能等价于可合并：376 行闭合 parser 需要三名 reviewer
+重新针对 `9806d9a` 检查错误优先级、宽字段复杂度、parser-only 构造和三种声明
 是否真正同构。
 
 ## 6. 策略调整
