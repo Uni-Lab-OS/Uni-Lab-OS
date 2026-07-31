@@ -19,7 +19,6 @@ from unilabos.workflow.graph_validation import (
 from unilabos.workflow.json_codec import decode_json_bytes, encode_json
 from unilabos.workflow.models import WorkflowEdgeWrite, WorkflowNodeWrite
 
-_STORE_INITIALIZATION_LOCK = threading.Lock()
 _STORE_INITIALIZATION_BUSY_TIMEOUT_SECONDS = 5.0
 _STORE_INITIALIZATION_SQLITE_BUSY_TIMEOUT_MS = 100
 _STORE_INITIALIZATION_RETRY_INTERVAL_SECONDS = 0.01
@@ -289,6 +288,9 @@ class WorkflowStore:
     """
 
     def __init__(self, db_path: str | Path):
+        initialization_deadline = (
+            monotonic() + _STORE_INITIALIZATION_BUSY_TIMEOUT_SECONDS
+        )
         self.path = str(db_path)
         if self.path != ":memory:":
             Path(self.path).parent.mkdir(parents=True, exist_ok=True)
@@ -296,12 +298,9 @@ class WorkflowStore:
         self._conn = sqlite3.connect(self.path, check_same_thread=False)
         self._conn.row_factory = sqlite3.Row
         try:
-            # 线程锁减少同进程竞争；有界 busy 重试覆盖进入迁移事务前的
-            # 跨进程 WAL 与 schema 初始化竞争。
-            with _STORE_INITIALIZATION_LOCK, self._lock:
-                initialization_deadline = (
-                    monotonic() + _STORE_INITIALIZATION_BUSY_TIMEOUT_SECONDS
-                )
+            # SQLite 有界 busy 重试统一覆盖线程与进程间的 WAL/schema 竞争，
+            # 不用进程全局锁阻塞无关数据库。
+            with self._lock:
                 initialization_busy_timeout_ms = (
                     _STORE_INITIALIZATION_SQLITE_BUSY_TIMEOUT_MS
                 )
