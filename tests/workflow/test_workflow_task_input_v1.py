@@ -381,6 +381,17 @@ def _replace_node_param(
         )
 
 
+def _replace_target_handle_type(
+    store: WorkflowStore,
+    handle_type: str,
+) -> None:
+    with store.transaction() as connection:
+        connection.execute(
+            "UPDATE workflow_handle_template SET type = ? WHERE uuid = ?",
+            (handle_type, TARGET_HANDLE_UUID),
+        )
+
+
 @pytest.mark.parametrize("include_contract", [False, True], ids=["absent", "empty"])
 def test_absent_or_empty_contract_keeps_legacy_empty_task_success(
     store: WorkflowStore,
@@ -1086,6 +1097,132 @@ def test_persisted_static_provider_must_match_the_real_target_handle_type(
 
     assert failure.value.code == "invalid_input"
     _assert_no_tasks(service)
+
+
+@pytest.mark.parametrize(
+    ("handle_type", "schema", "value"),
+    [
+        ("str", {"type": "integer"}, 1),
+        ("ResourceSlot", {"type": "string"}, "not-a-slot"),
+        ("list[str]", {"type": "object"}, {"not": "a-list"}),
+        ("dict", {"type": "string"}, "not-an-object"),
+        ("json", {"type": "array", "items": {"type": "string"}}, ["not-object"]),
+        ("list[int]", {"type": "array", "items": {"type": "string"}}, ["one"]),
+        ("list[float]", {"type": "array", "items": {"type": "boolean"}}, [True]),
+        ("list[bool]", {"type": "array", "items": {"type": "integer"}}, [1]),
+    ],
+    ids=[
+        "str-vs-integer",
+        "resource-slot-vs-string",
+        "string-list-vs-object",
+        "dict-vs-string",
+        "json-vs-list",
+        "integer-list-vs-string-list",
+        "float-list-vs-boolean-list",
+        "boolean-list-vs-integer-list",
+    ],
+)
+def test_known_v1_handle_vocabulary_rejects_incompatible_binding_values(
+    store: WorkflowStore,
+    handle_type: str,
+    schema: dict[str, Any],
+    value: Any,
+) -> None:
+    service = _create_workflow(
+        store,
+        contract=_input_contract(_parameter("value", schema)),
+    )
+    _seed_template_catalog(store)
+    _save_graph(
+        store,
+        nodes=[
+            _node(
+                TARGET_NODE_UUID,
+                template_uuid=TARGET_TEMPLATE_UUID,
+                bindings={TARGET_HANDLE_UUID: {"parameter": "value"}},
+            )
+        ],
+    )
+    _replace_target_handle_type(store, handle_type)
+
+    with pytest.raises(WorkflowError) as failure:
+        _create_task(service, {"value": value})
+
+    assert failure.value.code == "invalid_input"
+    _assert_no_tasks(service)
+
+
+@pytest.mark.parametrize(
+    ("handle_type", "schema", "value"),
+    [
+        ("str", {"type": "string"}, "value"),
+        ("string", {"type": "string"}, "value"),
+        ("dict", {"type": "object"}, {"nested": [1]}),
+        ("json", {"type": "object"}, {"nested": [1]}),
+        ("list[str]", {"type": "array", "items": {"type": "string"}}, ["a", "a"]),
+    ],
+    ids=["str", "string", "dict", "json", "string-list"],
+)
+def test_known_v1_handle_vocabulary_accepts_compatible_binding_values(
+    store: WorkflowStore,
+    handle_type: str,
+    schema: dict[str, Any],
+    value: Any,
+) -> None:
+    service = _create_workflow(
+        store,
+        contract=_input_contract(_parameter("value", schema)),
+    )
+    _seed_template_catalog(store)
+    _save_graph(
+        store,
+        nodes=[
+            _node(
+                TARGET_NODE_UUID,
+                template_uuid=TARGET_TEMPLATE_UUID,
+                bindings={TARGET_HANDLE_UUID: {"parameter": "value"}},
+            )
+        ],
+    )
+    _replace_target_handle_type(store, handle_type)
+
+    task = _create_task(service, {"value": value})
+    job = service.list_workflow_node_jobs(task["uuid"])[0]
+
+    assert job["param"]["volume"] == value
+
+
+def test_resource_slot_handle_accepts_only_the_canonical_resolved_slot(
+    store: WorkflowStore,
+) -> None:
+    _create_workflow(
+        store,
+        contract=_input_contract(_parameter("value", _slot_schema())),
+    )
+    _seed_template_catalog(store)
+    _save_graph(
+        store,
+        nodes=[
+            _node(
+                TARGET_NODE_UUID,
+                template_uuid=TARGET_TEMPLATE_UUID,
+                bindings={TARGET_HANDLE_UUID: {"parameter": "value"}},
+            )
+        ],
+    )
+    _replace_target_handle_type(store, "ResourceSlot")
+    resolver = _RecordingResolver()
+    service = _service_with_resolver(store, resolver)
+
+    task = _create_task(service, {"value": {"uuid": MATERIAL_A_UUID}})
+    job = service.list_workflow_node_jobs(task["uuid"])[0]
+    canonical = {
+        "uuid": MATERIAL_A_UUID,
+        "resource_template_uuid": RESOURCE_TEMPLATE_UUID,
+    }
+
+    assert task["input"]["value"] == canonical
+    assert job["param"]["volume"] == canonical
 
 
 @pytest.mark.parametrize("provider", ["static", "edge"], ids=["static", "edge"])
