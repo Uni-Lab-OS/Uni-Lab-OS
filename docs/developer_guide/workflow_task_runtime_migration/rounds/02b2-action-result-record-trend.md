@@ -6,7 +6,7 @@
 
 基线：`5b7534d`
 
-当前 production/test 候选：`3c8dd02`
+当前 production/test 候选：`5327323`
 
 状态：**独立 RED、实现和正式测试全绿，等待合同、模块安全、最终风险三名
 reviewer 顺序复核。**
@@ -32,11 +32,11 @@ SQLite、前端或 Backend。
 
 | 类别 | 文件数 | 新增行 | 删除行 |
 |---|---:|---:|---:|
-| 生产代码 | 2 | 416 | 0 |
-| 独立合同/安全测试 | 3 | 1348 | 0 |
+| 生产代码 | 2 | 451 | 0 |
+| 独立合同/安全测试 | 4 | 1452 | 0 |
 | 设计与 canonical 示例 | 1 | 265 | 0 |
 
-新增生产代码中 340 行属于 result declaration 的闭合形状 parser，76 行属于 02B1
+新增生产代码中 375 行属于 result declaration 的闭合形状 parser，76 行属于 02B1
 共享 annotation 深模块的单字段 output seam。测试约为生产代码的 3.2 倍，主要用于
 冻结三种接受形状和对应的拒绝矩阵，而不是重复测试业务实现。
 
@@ -60,15 +60,33 @@ SQLite、前端或 Backend。
 
 既有 02B1 Annotation 167 个用例继续全绿。
 
+首个合同 reviewer 在 `3c8dd02` 发现公共 AST seam 对 forged node container/field
+泄漏裸 `TypeError` 或 `AttributeError`。独立 test author 新增 5 个用例，在旧候选
+得到：
+
+```text
+5 failed
+3 个首因：裸 TypeError
+2 个首因：裸 AttributeError
+```
+
+最终候选显式验证 AST list container 和 required field，并只在委托给共享
+annotation parser 的输入边界重定位 `AttributeError`、`IndexError`、`TypeError`。
+它没有增加顶层 `except Exception`，也不捕获资源耗尽或进程控制异常：
+
+```text
+104 passed
+```
+
 ## 4. 门禁结果
 
 ```text
-02B2 Action result：99 passed
+02B2 Action result：104 passed
 02B1 Annotation：167 passed
-Registry：292 passed
+Registry：297 passed
 02A Schema/route：212 passed
 Workflow：644 passed
-正式 tests：1322 passed, 3 skipped, 19 warnings
+正式 tests：1327 passed, 3 skipped, 18 warnings
 Ruff：passed
 Ruff format --check：passed
 git diff --check：passed
@@ -85,25 +103,28 @@ deprecated 提示；没有本轮新增 warning。
 | 独立 RED | 0 个产品问题 | 0 | 0 |
 | canonical 示例核对 | 1 个文档遗漏 | 1 | 0 |
 | 首版实现与目标门禁 | 0 个产品回归 | 0 | 0 |
-| 正式全量 | 0 个产品回归 | 0 | 0 |
+| 首个合同评审 | 1 blocking、1 follow-up | 1 | 0 |
+| forged AST 独立 RED | 0 个新增产品问题 | 0 | 0 |
+| `5327323` 正式全量 | 0 个产品回归 | 0 | 0 |
 
 canonical 示例最初省略了 `implicit: false`。独立 test author 在写测试时指出既有
 `parse_output_contract` 必然物化该字段；设计文档已校正，没有修改 02A Authority
 或生产行为。
 
-与 02B1 的多轮对抗 hardening 相比，02B2 当前没有发现新的产品 blocking，问题数量
-和范围都在下降。但“首版全绿”还不能等价于可合并：340 行闭合 parser 仍需要
-reviewer 独立检查错误优先级、宽字段复杂度、parser-only 构造和三种声明是否真正
-同构。
+与 02B1 的七个 blocking 相比，02B2 当前发现并关闭 1 个 blocking，问题数量和
+范围都在下降。该问题没有扩张业务模型，只补全公开纯 AST seam 的失败关闭边界。
+但“目标与正式全绿”仍不能等价于可合并：375 行闭合 parser 需要三名 reviewer
+重新针对 `5327323` 检查错误优先级、宽字段复杂度、parser-only 构造和三种声明
+是否真正同构。
 
 ## 6. 策略调整
 
 1. reviewer 必须执行 deletion test：确认三种声明的公共部分全部下沉到
    `parse_result_annotation`，没有在 340 行模块中复制类型系统。
-2. 模块安全 reviewer 重点检查 class body/error path 的分支复杂度，以及宽字段表
-   是否存在隐藏 O(n²)。
-3. 最终风险 reviewer 重点尝试 AST 手工构造的不等长 dict、重复字段、伪造 class
-   shape 和异常泄漏；发现 blocking 必须先新增独立 RED。
+2. 模块安全 reviewer 重点检查显式 shape validation 是否足够局部、是否意外吞掉
+   非输入异常，以及宽字段表是否存在隐藏 O(n²)。
+3. 最终风险 reviewer 继续尝试不等长 dict、缺字段 class/decorator/annotation、
+   重复字段和异常泄漏；发现 blocking 必须先新增独立 RED。
 4. 02B1 NB-01 仍未关闭。下一轮 production caller 接线前，先实现真实 module AST、
    module-scope、shadow-aware 的 import/definition resolver，不能复用旧
    `ast.walk()` map。
