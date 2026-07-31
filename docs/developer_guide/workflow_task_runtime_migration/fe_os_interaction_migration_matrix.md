@@ -14,7 +14,7 @@
 | `Uni-Lab-OS/uni-lab-fe` | `0fd39af3014b29035ee8e2280b9d753b2b9f96a2` | 旧版前端行为和测试依据 |
 | `Uni-Lab-OS/Uni-Lab-OS` | `f5c10733e7e37218ab5c660ecef9c41bb94c72ab` | 旧版 OS bridge、runtime 行为和测试依据 |
 | `Uni-Lab-OS/uni-lab-backend` | 冻结版本 `09609a27e652c9e56ede636a2883a4fd241e4400` | 共享前端合同权威 |
-| 目标 `deepmodeling/Uni-Lab-OS` | `aca11d64508b482d7800340cbdd8c0e8da058efd`（02C candidate；计划分支 `docs/phase-02h-cross-repo-plan`） | 2026-08-01 计划复核基线；Phase 01、02A、02B 已完成，02C 待合入 integration |
+| 目标 `deepmodeling/Uni-Lab-OS` | `01380449868ccf334f4da1a28c7f6f946fb540d1`（`integration/workflow-task-runtime`） | 2026-08-01 的 02H 执行基线；Phase 01、02A～02G 已完成，02H 交付证据见本轮 trend |
 
 目标仓库中的约束决策如下：
 
@@ -105,7 +105,7 @@ delivery Issue。设计 Grill 结束、历史 Decision 关闭或本地测试通�
 | `validateWorkflow(...)` | `POST /workflows:validate`，携带 Canonical 和 parameters | 持久编辑使用 Draft diagnostics 和 Apply revalidation；非持久 Candidate 可以使用 D-040 `/authoring/validate` | 旧路由已取代，能力语义迁移 | OS 02E/02G；UI1 Authoring |
 | `compilePythonWorkflow(...)` | `POST /authoring/compile`，使用 `base_revision_id`、客户端 `source_uri` 和 Canonical 输出 | 保留纯转换路由，但 wire model 改为 `workflow_uuid`、整数 `revision`、稳定 Node/Edge UUID 和 Backend-shaped Graph；持久编辑通过 Workflow-scoped 路由保存完整 Draft | 语义迁移 | OS 02D/02E；UI1 Authoring |
 | `generatePythonWorkflow(...)` | `POST /authoring/generate-python`，输入 Canonical | 保留纯转换路由，输入完整 Backend-shaped Candidate Graph，输出确定性的 normalized source | 语义迁移 | OS 02D/02E；UI1 Authoring |
-| `validateAuthoringCandidate(...)` | 浏览器把完整旧 Candidate 回传给 OS | 非持久调用方可继续使用纯验证；持久 Apply 只发送 `expected_draft_hash`、`expected_workflow_revision` 和 `expected_candidate_hash`，绝不携带 Candidate 内容 | 拆分迁移；旧持久流程已取代 | OS 02G；UI1 Authoring |
+| `validateAuthoringCandidate(...)` | 浏览器把完整旧 Candidate 回传给 OS | 非持久调用方可继续使用纯验证；持久 Apply 只发送一个 opaque `candidate_hash`，服务端重新编译并校验 Draft、Workflow revision 和 Catalog fingerprint，绝不携带 Candidate 内容 | 拆分迁移；旧持久流程已取代 | OS 02G；UI1 Authoring |
 | `createRun(request)` | `POST /runtime/runs`，发送完整 Canonical revision 和旧 debug 字段 | 普通执行使用 `POST /workflow-tasks`；OS-only 调试使用独立 `POST /debug/workflow-tasks` 和非空 `start_node_uuids`/`breakpoint_node_uuids`；两者都由 OS 对 persisted Graph 建立 snapshot/plan | 旧路由已取代，能力语义迁移 | 02H/R1/R2；UI1 Runtime；DBG |
 | `getRun(runId)` | `GET /runtime/runs/{run_id}` | `GET /workflow-tasks/{task_uuid}` | 语义迁移 | R1；UI1 Runtime |
 | `listRunNodes(runId)` | `GET .../runs/{id}/nodes` | `GET /workflow-tasks/{task_uuid}/jobs` | 语义迁移 | R1；UI1 Runtime |
@@ -315,7 +315,7 @@ Core Decision；其 delivery Issue 以 `Uni-Lab-OS/Uni-Lab-Core#133` 为主父�
 
 | 切片 | OS delivery | 前端 delivery | Scheduler/设备 delivery | 联调与 Spec 落位 |
 |---|---|---|---|---|
-| **02H Input preflight** | ordered contract、严格规范化、snapshot、Job param binding；ResourceSlot resolver seam | 仅同步最终 Task input DTO/错误展示，不提前做 Material selector | 无 | OS round spec；真实 OS API 覆盖 scalar/default/null/409 revision，不单独设置跨仓接受门 |
+| **02H Input preflight** | ordered contract、严格规范化、snapshot、Job param binding；ResourceSlot resolver seam | 仅同步最终 Task input DTO/错误展示，不提前做 Material selector | 无 | OS round spec；真实 OS API 覆盖 scalar/default/null、ResourceSlot injected 404/409 分类和 production fail-closed，不单独设置跨仓接受门 |
 | **A1 Action typed contract** | D-100～D-108：参数/具名结果、真实 Backend Handles、material port、variable selector、默认值、结果归一化；退役 `@action(handles=...)` | Catalog 驱动端口、参数表单和 selector；删除字段名/ordinal 猜测 | 无 | `Uni-Lab-OS/Uni-Lab-Core#135` 下保持 active Decision，分别创建 OS/FE children；联调验证 Catalog fingerprint、Python/JSON round-trip 和 UI 投影 |
 | **I1 Workflow I/O** | Input/Output Contract、input/output bindings、Executable Node Contract 和 schema/codec | Workflow input/output 编辑、校验和 Task 表单 | 无 | `Uni-Lab-OS/Uni-Lab-Core#133`；协议冻结后分别写 OS/FE implementation spec，联调 contract/default/ResourceSlot codec |
 | **C1 Composite authoring** | persistent Composite Invocation、稳定 boundary Handles/mappings、transparent/gated 声明 | Composite node、边界端口、映射和模式编辑 | 无 | `Uni-Lab-OS/Uni-Lab-Core#136`；依赖 A1/I1，做保存/刷新/生成 Python 往返联调 |

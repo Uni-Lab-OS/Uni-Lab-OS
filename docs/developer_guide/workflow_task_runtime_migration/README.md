@@ -25,7 +25,7 @@ test-author/full-suite/independent-review gate in the concrete execution plan.
 |---|---|---|
 | 00 | Baseline, decisions, manifests, test evidence | complete |
 | 01 | Backend-aligned Workflow/WorkflowTask contract | complete |
-| 02 | Canonical Workflow and Python/JSON authoring；02H closes generic Task input preflight only | in progress; 02A/02B complete, 02C candidate pending final gate/merge |
+| 02 | Canonical Workflow and Python/JSON authoring；02H closes generic Task input preflight only | complete；02A～02H 已通过各自 round gate |
 | 02H+ | Action、Material、runtime、scheduler/device、subworkflow/output、frontend、debugger 和 integration functional slices | planned by functional owner in the FE–OS matrix |
 | 03～09 | Historical source-inventory buckets | superseded as an execution order; retained only for migration provenance |
 
