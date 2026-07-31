@@ -1,10 +1,10 @@
 # Phase 01A：单工作区 Authority 与单向 Authoring 设计
 
-状态：**第一轮 Spec 评审发现事务入口前竞态，正在按本节线性化合同进行修正；本文件是 Round 14 旧并发/writeback 方案的替代契约。**
+状态：**最终风险评审发现 Catalog/Store 锁序反转，正在按本节快照合同修正；本文件是 Round 14 旧并发/writeback 方案的替代契约。**
 
 基线：`2a394737ec7a36f8710e0af27472953451c308bc`
 
-修正分支：`migration/01a2-draft-linearization`
+修正分支：`migration/01a6-catalog-store-lock-order`
 
 Backend 仍是只读合同参考。本轮只修改 Uni-Lab-OS；前端实现必须使用独立 FE
 分支。
@@ -92,17 +92,26 @@ Apply 在每 Workflow 锁内依次执行：
 2. 校验请求 token 命中当前 Candidate；
 3. 校验 Candidate 内部 Draft hash、base revision 和 Catalog fingerprint；
 4. 重新编译并验证 server-owned Candidate proof；
-5. 获取 SQLite 写事务，并在修改任何数据库状态前，最后一次读取实际 Draft 和
-   Catalog；
-6. 以第 5 步为 Apply 线性化点，校验 normalized source 已物化到实际 Draft，并
-   再次校验 Catalog fingerprint；
-7. 在已获取的同一事务内提交完整 graph、Applied Source、revision 和 SSE event；
-8. 返回 Apply result 和完整 Authoring aggregate。
+5. 获取稳定的 Catalog snapshot/guard，并再次校验其 fingerprint；
+6. 在持有 Catalog guard 时获取 SQLite 写事务，并在修改任何数据库状态前，最后
+   一次读取实际 Draft；
+7. 以第 6 步的 Draft 校验为 Apply 线性化点，校验 normalized source 已物化到
+   实际 Draft；Catalog guard 必须持续到事务结束，因此同一时刻的 fingerprint
+   仍等于 Candidate；
+8. 在已获取的同一事务内提交完整 graph、Applied Source、revision 和 SSE event；
+9. 返回 Apply result 和完整 Authoring aggregate。
 
-第 6 步以后不允许为了完成 Apply 再读取或写入 Draft，也不允许“尽力
+第 7 步以后不允许为了完成 Apply 再读取或写入 Draft，也不允许“尽力
 settle/mark/recover”。在线性化点之前完成的外部写入必须参与校验，不匹配时返回
 现有 `draft_hash_conflict`、`candidate_not_materialized` 或
 `template_catalog_conflict`，且事务不产生任何状态变化。
+
+Catalog snapshot 是 OS 内部编译器 Adapter 的窄 Interface，不进入 HTTP DTO。
+可变 Catalog 的 Adapter 必须提供在上下文退出前保持目录稳定的 snapshot guard；
+不可变、无状态的编译器可以退化为一次 fingerprint 快照。所有可变实现必须遵循
+唯一锁序 `Catalog → Store`。Store 事务回调只允许读取 Draft，不得重新读取、解析
+或锁定 Catalog。这样既保留“Catalog 在 Apply 线性化点稳定”的语义，也避免一条
+路径持 Catalog 后访问 Store、另一条路径持 Store 后访问 Catalog 所形成的环锁。
 
 coding-agent、Git 或编辑器不受 OS 文件锁约束，因此不能要求文件系统与 SQLite
 共享一个墙钟提交瞬间。在线性化点之后发生的外部写入定义为后续的新 dirty Draft
