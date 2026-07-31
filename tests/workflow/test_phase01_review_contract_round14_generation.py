@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import sqlite3
 import threading
 from copy import deepcopy
 from pathlib import Path
@@ -335,4 +336,79 @@ def test_stale_settle_cannot_clear_new_apply_generation_with_same_source_pair(
             "reconciliation_pending": False,
             "canonical": NORMALIZED_SOURCE,
         },
+    }
+
+
+def test_store_adds_writeback_generation_without_losing_legacy_row(
+    tmp_path: Path,
+) -> None:
+    database_path = tmp_path / "legacy-workflow.db"
+    legacy = sqlite3.connect(database_path)
+    try:
+        legacy.executescript(
+            """
+            CREATE TABLE workflow_authoring (
+                workflow_uuid TEXT PRIMARY KEY,
+                observed_draft_hash TEXT,
+                draft_update_time TEXT,
+                diagnostics TEXT NOT NULL,
+                candidate_hash TEXT,
+                candidate TEXT,
+                applied_source TEXT,
+                writeback_status TEXT NOT NULL DEFAULT 'settled',
+                writeback_source TEXT,
+                writeback_expected_hash TEXT,
+                update_time TEXT NOT NULL
+            );
+
+            INSERT INTO workflow_authoring (
+                workflow_uuid, observed_draft_hash, draft_update_time,
+                diagnostics, candidate_hash, candidate, applied_source,
+                writeback_status, writeback_source,
+                writeback_expected_hash, update_time
+            ) VALUES (
+                '11111111-1111-4111-8111-111111111111',
+                'sha256:observed', '2026-07-31T01:02:03Z', '[]',
+                NULL, NULL, NULL, 'pending', 'normalized_source()',
+                'sha256:expected', '2026-07-31T01:02:04Z'
+            );
+            """
+        )
+        legacy.commit()
+    finally:
+        legacy.close()
+
+    store = WorkflowStore(database_path)
+    store.close()
+
+    migrated = sqlite3.connect(database_path)
+    try:
+        columns = {
+            row[1] for row in migrated.execute("PRAGMA table_info(workflow_authoring)")
+        }
+        legacy_row = migrated.execute(
+            """
+            SELECT workflow_uuid, observed_draft_hash, diagnostics,
+                   writeback_status, writeback_source,
+                   writeback_expected_hash, update_time
+            FROM workflow_authoring
+            """
+        ).fetchone()
+    finally:
+        migrated.close()
+
+    assert {
+        "writeback_generation_added": "writeback_generation" in columns,
+        "legacy_row": legacy_row,
+    } == {
+        "writeback_generation_added": True,
+        "legacy_row": (
+            WORKFLOW_UUID,
+            "sha256:observed",
+            "[]",
+            "pending",
+            "normalized_source()",
+            "sha256:expected",
+            "2026-07-31T01:02:04Z",
+        ),
     }
