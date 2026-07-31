@@ -2056,7 +2056,8 @@ def _render_graph(graph: dict[str, Any]) -> tuple[str, list[dict[str, Any]]]:
         emitter.emit(f"def {function_name}(")
         emitter.emit("    *,")
         for parameter in parameters:
-            declaration = f"{parameter['name']}: {_annotation_source(parameter['schema'], parameter)}"
+            annotation = _annotation_source(parameter["schema"], parameter)
+            declaration = f"{parameter['name']}: {annotation}"
             if not parameter["required"]:
                 declaration += f" = {parameter['default']!r}"
             emitter.emit(f"    {declaration},")
@@ -2115,9 +2116,12 @@ def _render_graph(graph: dict[str, Any]) -> tuple[str, list[dict[str, Any]]]:
         parts = []
         for output in output_contract["outputs"]:
             name = output["name"]
-            parts.append(
-                f"{name}={_output_expression(output_bindings[name], node_by_uuid, handles)}"
+            expression = _output_expression(
+                output_bindings[name],
+                node_by_uuid,
+                handles,
             )
+            parts.append(f"{name}={expression}")
         emitter.emit(f"{body_indent}return workflow_output({', '.join(parts)})")
     elif not nodes:
         emitter.emit(f"{body_indent}pass")

@@ -67,7 +67,12 @@ def sequential(*, sample: ResourceSlot):
 def _group_source() -> str:
     return f'''from lab.devices import Reactor
 from unilabos.registry.placeholder_type import ResourceSlot
-from unilabos.workflow.authoring import device, group, workflow_definition, workflow_output
+from unilabos.workflow.authoring import (
+    device,
+    group,
+    workflow_definition,
+    workflow_output,
+)
 
 
 reactor: Reactor = device()
@@ -91,7 +96,13 @@ def grouped(*, sample: ResourceSlot):
 def _parallel_source() -> str:
     return f'''from lab.devices import Reactor
 from unilabos.registry.placeholder_type import ResourceSlot
-from unilabos.workflow.authoring import device, group, parallel, workflow_definition, workflow_output
+from unilabos.workflow.authoring import (
+    device,
+    group,
+    parallel,
+    workflow_definition,
+    workflow_output,
+)
 
 
 reactor: Reactor = device()
@@ -120,7 +131,12 @@ def parallel_preparation(*, sample: ResourceSlot):
 def _sequential_groups_source() -> str:
     return f'''from lab.devices import Reactor
 from unilabos.registry.placeholder_type import ResourceSlot
-from unilabos.workflow.authoring import device, group, workflow_definition, workflow_output
+from unilabos.workflow.authoring import (
+    device,
+    group,
+    workflow_definition,
+    workflow_output,
+)
 
 
 reactor: Reactor = device()
