@@ -647,23 +647,24 @@ def test_facade_never_imports_executes_compiles_or_reflects_author_source(
     def forbidden(*_args: object, **_kwargs: object) -> Any:
         raise AssertionError("静态 Action Contract facade 不得使用运行时执行或反射")
 
-    monkeypatch.setattr(builtins, "__import__", forbidden)
-    monkeypatch.setattr(builtins, "eval", forbidden)
-    monkeypatch.setattr(builtins, "exec", forbidden)
-    monkeypatch.setattr(builtins, "compile", forbidden)
-    monkeypatch.setattr(importlib, "import_module", forbidden)
-    monkeypatch.setattr(inspect, "signature", forbidden)
-    monkeypatch.setattr(typing, "get_type_hints", forbidden)
-    monkeypatch.setattr(dataclasses, "fields", forbidden)
-    monkeypatch.setattr(dataclasses, "is_dataclass", forbidden)
+    with monkeypatch.context() as guarded:
+        guarded.setattr(builtins, "eval", forbidden)
+        guarded.setattr(builtins, "exec", forbidden)
+        guarded.setattr(builtins, "compile", forbidden)
+        guarded.setattr(importlib, "import_module", forbidden)
+        guarded.setattr(inspect, "signature", forbidden)
+        guarded.setattr(typing, "get_type_hints", forbidden)
+        guarded.setattr(dataclasses, "fields", forbidden)
+        guarded.setattr(dataclasses, "is_dataclass", forbidden)
+        guarded.setattr(builtins, "__import__", forbidden)
 
-    contract = api.parse_action_contract(
-        module,
-        action,
-        module_name=_MODULE_DOTTED_NAME,
-    )
+        contract = api.parse_action_contract(
+            module,
+            action,
+            module_name=_MODULE_DOTTED_NAME,
+        )
 
-    assert contract.to_dict()["output_contract"]["outputs"][0]["name"] == "value"
+        assert contract.to_dict()["output_contract"]["outputs"][0]["name"] == "value"
 
 
 @pytest.mark.parametrize(
