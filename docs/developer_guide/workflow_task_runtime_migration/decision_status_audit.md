@@ -2,7 +2,7 @@
 
 ## Scope and evidence rule
 
-This is a status audit of D-001 through D-101. It does not introduce
+This is a status audit of D-001 through D-102. It does not introduce
 another product design. Its purpose is to distinguish historical decisions,
 closed decisions, remaining contract decisions, and ordinary implementation
 work before phase 01 starts.
@@ -11,7 +11,7 @@ The evidence order is:
 
 1. the frozen Backend frontend contract at
    `uni-lab-backend@09609a27e652c9e56ede636a2883a4fd241e4400`;
-2. later product decisions in `decisions.md`, especially D-058 through D-101,
+2. later product decisions in `decisions.md`, especially D-058 through D-102,
    plus the D-096 implementation-round gate;
 3. the current Gaojing OS implementation, which is implementation evidence but
    is not allowed to redefine the target contract.
@@ -63,6 +63,9 @@ There are three different populations in the ledger:
 9. D-101 freezes the OS public Workflow JSON resource budget while preserving
    arbitrary trusted canonical integers and makes nesting depth a
    complete-document/value limit.
+10. D-102 freezes all OS Authoring source coordinates as one-based,
+    end-exclusive UTF-16 code-unit ranges and closes the compiler/Monaco
+    interoperability ambiguity.
 
 The complete Workflow migration still has five decision groups that need a
 contract-level answer:
@@ -120,7 +123,7 @@ D-037 through D-038, D-040 through D-042, D-045 through D-046, D-053,
 D-056 through D-058 retain
 their effective rules subject to the replacements above.
 
-## 2. D-059 through D-101 deferral closure
+## 2. D-059 through D-102 deferral closure
 
 Later ResourceSlot decisions are cumulative. A phrase such as “decided
 separately” in an earlier item is not automatically an open blocker.

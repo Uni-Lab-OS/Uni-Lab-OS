@@ -3250,3 +3250,23 @@ must always be consumable by `to_dict()` under the same depth limit.
 These limits protect the single OS event loop from adversarial conversion work
 while retaining D-083's internal mathematical-integer semantics. They do not
 modify Backend code or claim a new shared Backend product field.
+
+## D-102：Authoring 源码坐标统一为一基 UTF-16 code unit
+
+所有 OS Authoring HTTP response、persistent Authoring aggregate、diagnostic、
+duplicate-anchor repair 和 source map 的行列坐标使用同一个公开合同：行号与列号均从
+`1` 开始，列以 UTF-16 code unit 计数，结束位置为 end-exclusive。制表符只计一个
+code unit；不得按编辑器渲染后的视觉宽度展开。这个合同与 Monaco/JavaScript 字符串
+坐标直接对齐，Frontend 不再猜测 Python byte offset 或 Unicode code point。
+
+Compiler 内部必须在产生公开 DTO 前完成坐标转换：CPython AST 的
+`col_offset/end_col_offset` 是 UTF-8 byte offset，先在对应源码行上验证并切分 UTF-8
+字节前缀，再换算成 UTF-16 code unit；`tokenize` 与 `SyntaxError` 的字符位置同样按
+源码行换算。生成 normalized source 的 source map 也使用相同 helper。禁止在 HTTP
+adapter、persistent Service 和 Frontend 各自维护一套近似转换。
+
+源码必须能无损编码为 UTF-8。含未配对 surrogate 的请求属于 malformed request，
+返回冻结的 `400 invalid_input` envelope；不得把它保存为 Draft、传入 compiler 或返回
+不可编码的 JSON。范围验证按 UTF-16 长度检查端点，中文和非 BMP emoji 必须有显式
+回归测试。该决定只统一已有 Authoring SourceRange 的表示，不增加新字段，也不改变
+Backend 模型或 Backend 代码。
