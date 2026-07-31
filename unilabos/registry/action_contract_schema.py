@@ -218,11 +218,11 @@ def _validate_action_shape(
     arguments = getattr(action, "args", None)
     if not isinstance(arguments, ast.arguments):
         _fail("/parameters")
-    _argument_list(
+    positional_only = _argument_list(
         getattr(arguments, "posonlyargs", None),
         "/parameters/positional_only",
     )
-    _argument_list(
+    positional = _argument_list(
         getattr(arguments, "args", None),
         "/parameters/positional",
     )
@@ -238,6 +238,13 @@ def _validate_action_shape(
         getattr(arguments, "kw_defaults", None),
         len(keyword_only),
     )
+
+    seen_names: set[str] = set()
+    for index, argument in enumerate(positional_only + positional + keyword_only):
+        name = getattr(argument, "arg", None)
+        if type(name) is not str or not name or name in seen_names:
+            _fail(f"/parameters/{index}/name")
+        seen_names.add(name)
 
 
 def _parse_parameters(
@@ -333,6 +340,11 @@ def _parse_parameters(
                 code="invalid_annotation",
                 message=error.message,
             )
+        except RecursionError:
+            _fail(
+                f"/parameters/{parameter_index}/annotation",
+                code="invalid_annotation",
+            )
         except (AttributeError, IndexError, KeyError, TypeError):
             _fail(f"/parameters/{parameter_index}/annotation")
         descriptors.append(parsed.to_dict())
@@ -380,6 +392,8 @@ def _parse_results(
             code="invalid_action_result",
             message=error.message,
         )
+    except RecursionError:
+        _fail("/return", code="invalid_action_result")
     except (AttributeError, IndexError, KeyError, TypeError):
         _fail("/return", code="invalid_action_result")
     try:
@@ -408,6 +422,8 @@ def parse_action_contract(
         scope = resolve_module_scope(module, module_name=module_name)
     except ModuleScopeError as error:
         _fail(error.path, code=error.code, message=error.message)
+    except RecursionError:
+        _fail("/module")
 
     is_method = _action_context(module, action)
     input_contract, input_templates = _parse_parameters(

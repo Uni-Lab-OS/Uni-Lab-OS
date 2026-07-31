@@ -17,7 +17,7 @@ The reviewed source branch `feat/edge-networking-and-scheduler` remains
 unchanged. Completed rounds accumulate on
 `integration/workflow-task-runtime`; every mergeable plan slice runs on a
 fresh `migration/<round>-<topic>` branch and passes the independent
-test-author/full-suite/multi-review gate in the concrete execution plan.
+test-author/full-suite/independent-review gate in the concrete execution plan.
 
 ## Status
 
