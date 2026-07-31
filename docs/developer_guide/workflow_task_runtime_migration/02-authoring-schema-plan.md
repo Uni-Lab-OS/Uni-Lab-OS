@@ -1,5 +1,18 @@
 # Phase 01 收尾与 Phase 02 Authoring/Schema 具体执行计划
 
+## 2026-08-01 Phase 02H 边界更新
+
+本计划保留 Phase 01 和 02A～02G 的工程 provenance。Phase 02H 及之后的仓库
+owner、跨仓依赖、Spec 生命周期和联调门，以
+[FE–OS 交互迁移矩阵与 Phase 02H 起整体计划](fe_os_interaction_migration_matrix.md#5-phase-02h-起整体交付计划)
+为准。
+
+原计划同时要求 02H 完成完整 ResourceSlot Material authority，又在第 8 节把
+local Material authority 排除在外。修正后的 02H 只关闭通用 Task Input Contract
+preflight 和 ResourceSlot resolver seam；显式 ResourceSlot 的 production lookup、
+Reservation、Claim、Disposition 与删除保护进入 M1，MaterialSource 自动选择和创建
+进入 M2。P0-4/P0-5 和 D-102～D-116 的“设计已关闭”不得误读为实现或跨仓接受完成。
+
 ## 结论
 
 现在可以直接执行本计划。
@@ -15,13 +28,17 @@ D-093～D-099 关闭。三者已经足以
 4. 接通三个纯 Authoring 路由和 Workflow-scoped 持久 Authoring；
 5. 注册具体 package source，并在启动和文件变化时执行恢复/重新编译。
 
-本计划不得越过以下尚未关闭的停止线：
+本计划的实现停止线按最新功能索引解释为：
 
-- P0-4 关闭前，不发布 action-side ResourceSlot Handle 或隐式输出；
-- P0-5 关闭前，不承诺最终 `WorkflowTask.output` 的外部 ResourceSlot JSON、
-  失败 Task partial result 或 REST/SSE 投影；
-- P1-1/P1-2/P2 仍分别约束完整 debugger、Conditional Join 和
-  `tool_call` executor。
+- action-side ResourceSlot Handle、隐式输出和具名结果由后续 A1 delivery 实现，
+  不因 P0-4 的历史设计票关闭而并入 02A～02H；
+- 最终 `WorkflowTask.output` 的 external ResourceSlot JSON 和 REST/SSE 投影由
+  后续 O1 delivery 实现；失败 Task 不暴露 partial output；
+- Debugger 按 D-112～D-116、`Uni-Lab-OS/Uni-Lab-Core#131` 和
+  `Uni-Lab-OS/Uni-Lab-Core#137` 进入后续 delivery；
+- Conditional Join 只允许实现 `Uni-Lab-OS/Uni-Lab-Core#132` 已冻结的临时 `compute` 方案；正式
+  Backend Join 继续延期；
+- `tool_call` executor 继续由 `Uni-Lab-OS/Uni-Lab-Core#138` 整体延期。
 
 ## 1. 每轮分支、测试与评审硬门禁
 
@@ -218,9 +235,9 @@ normalize_task_input(contract, raw_input, resource_resolver) -> dict
 validate_output_value(contract, raw_output, resource_resolver) -> dict
 ```
 
-P0-5 未关闭期间，`validate_output_value` 先通过明确的 unresolved
-external-output 结果停止；`normalize_task_input` 使用 D-093～D-099 已冻结的
-production Material resolver。内部实现隐藏：
+O1 未实现期间，`validate_output_value` 先通过明确的 unresolved
+external-output 结果停止；02H 的 `normalize_task_input` 只依赖 ResourceSlot
+resolver port，production Material resolver 由后续 M1 装配。内部实现隐藏：
 
 - D-082 finite type vocabulary；
 - D-083 strict typing 和唯一 numeric widening；
@@ -256,8 +273,9 @@ parse_action_result_record(ast_node, imports) -> list[OutputFieldSchema]
 - D-100 `TypedDict`、frozen dataclass 和非推荐内联字典 Action 输出归一化；
 - 不支持 annotation 的 fail-closed diagnostic。
 
-P0-4 关闭前，该模块可以按 D-100 解析 Action 参数和结果记录，但 Registry
-不得据此发布完整 ResourceSlot input/output Handle 合同。
+02B 可以按 D-100 解析 Action 参数和结果记录，但 Registry 不在 Phase 02
+据此发布完整 ResourceSlot input/output Handle 合同；该 projection 由后续 A1
+独立实现并联调。
 
 ### 4.4 `WorkflowAuthoringEngine`
 
@@ -282,8 +300,9 @@ snapshot，不能在编译期间同步、创建或替换 template UUID。
 - production adapter：从 `workflow.db` 的 authority-scoped template 表读取；
 - test adapter：构造小型 in-memory snapshot。
 
-Catalog sync 是独立写操作。P0-4 关闭前只允许迁移已确定的 scalar/action
-合同和已有真实 Handle，不推断或发布 ResourceSlot Handle。
+Catalog sync 是独立写操作。Phase 02 只允许迁移已确定的 scalar/action
+合同和已有真实 Handle，不推断或发布 ResourceSlot Handle；完整 Material port
+projection 由后续 A1 独立实现。
 
 ## 5. Phase 01 收尾切片
 
@@ -690,7 +709,7 @@ tests/app/test_workflow_contract_api.py
 feat(workflow): compose production persistent authoring
 ```
 
-### 02H — Task input preflight 的可实施部分
+### 02H — Task input contract preflight
 
 实现分支：`migration/02h-task-input-preflight`。
 
@@ -712,19 +731,24 @@ tests/workflow/test_workflow_task_input_v1.py
 - 根据真实 Handle UUID 把 Workflow input binding 投影到 Task-scoped Job
   `param`，不改 persisted Node `param`。
 
-P0-3 已解锁，必须完整实现：
+本轮还必须冻结但不接入 production Material authority：
 
-- non-null ResourceSlot 由接收 `POST /workflow-tasks` 的同一 OS authority
-  本地 Material module 解析；
-- canonical snapshot 固定为 `{uuid, resource_template_uuid}`；
-- 结构、类型或模板不匹配返回 400，缺失或软删除返回 404，稳定不可运行返回
-  409；
-- Reservation 瞬时争用不撤销已创建 Task：Task 保持 pending，Reservation
-  全有或全无并由协调器重试；
-- `active/consumed/discarded/quarantined/reconciling` 是 Material disposition；
-  `reserved/in_use` 从 Reservation/Claim 派生；
-- Material 使用软删除；存在有效 Reservation、Claim、不确定执行结果或活跃
-  关系时以 409 `material_in_use` 拒绝删除。
+- `normalize_task_input(..., resource_resolver)` 的 resolver port；
+- ResourceSlot canonical snapshot `{uuid, resource_template_uuid}` 的 schema-level
+  合同；
+- 400/404/409 的 domain error 分类和 injected resolver 合同测试；
+- 缺少 production Material Module 时，非空 ResourceSlot 请求不得成功创建
+  Task/Job，不得回退到旧 Inventory、远程 authority 或字段名 heuristic。
+
+以下内容移入后续 M1，不再作为 02H 或 Phase 02 的退出证据：
+
+- local Material/Site durable store 和 production lookup；
+- Task Material Reservation、Job Execution Claim 和 sole coordinator retry；
+- Material disposition、软删除与 `material_in_use` 保护；
+- runtime Material projection、Mutation Session 和 ChangeSet commit。
+
+MaterialSource 的自动创建/选择、CandidateSiteSet 和 Admission 分配原子边界进入
+M2，并受 `Uni-Lab-OS/Uni-Lab-Core#140～#146` 的 active protocol Decisions 约束。
 
 提交建议：
 
@@ -811,6 +835,7 @@ Phase 02 完成：
 - public Interface 中没有 Canonical DTO；
 - package source 显式注册、启动恢复和 watcher lifecycle 可用；
 - scalar/opaque/list Task input 在 Task/Job 创建前严格验证并快照；
-- ResourceSlot runtime/material 已按 D-093～D-099 完整实现；action
-  projection 和 external output 路径明确停在 P0-4/P0-5，不存在猜测实现；
+- ResourceSlot resolver seam、canonical shape 和失败分类已有独立合同测试；
+  production Material authority、action projection 和 external output 分别由后续
+  M1、A1 和 O1 负责，不存在旧 Inventory fallback 或猜测实现；
 - 迁移清单中的 Phase 02 旧测试均已被迁移、替代或保留明确后续 owner。

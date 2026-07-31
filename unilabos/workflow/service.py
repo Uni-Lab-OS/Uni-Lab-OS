@@ -43,6 +43,13 @@ from unilabos.workflow.store import (
     WorkflowStore,
     utc_now,
 )
+from unilabos.workflow.task_input import (
+    PreparedTaskInput,
+    ResourceSlotResolver,
+    TaskInputError,
+    UnconfiguredResourceSlotResolver,
+    preflight_task_input,
+)
 
 _LOGGER = logging.getLogger(__name__)
 AUTHORING_SOURCE_BYTE_LIMIT = 8 * 1024 * 1024
@@ -256,9 +263,15 @@ class WorkflowService:
         store: WorkflowStore,
         *,
         compiler: Optional[AuthoringCompiler] = None,
+        resource_resolver: Optional[ResourceSlotResolver] = None,
     ):
         self._store = store
         self.compiler = compiler
+        self._resource_resolver = (
+            resource_resolver
+            if resource_resolver is not None
+            else UnconfiguredResourceSlotResolver()
+        )
         self._locks_guard = threading.Lock()
         self._authoring_locks: Dict[str, threading.RLock] = {}
 
@@ -424,10 +437,6 @@ class WorkflowService:
             meta_data = normalize_json_object(meta_data)
         except ValueError:
             raise WorkflowError("invalid_input") from None
-        # P0-2 已冻结合同；生产 schema/compiler 属于 Phase 02。本阶段镜像
-        # Backend baseline 的空 Task input，不提前持久化未实现的解释。
-        if input_value:
-            raise WorkflowError("invalid_input")
         description = self._optional_text(description)
         try:
             return self._store.create_task_with_jobs(
@@ -435,15 +444,17 @@ class WorkflowService:
                 task_uuid=str(uuid4()),
                 run_mode=run_mode,
                 target_node_uuid=target_node_uuid,
-                input_value={},
                 description=description,
                 meta_data=meta_data,
-                plan_builder=lambda graph: self._build_execution_plan(
+                plan_builder=lambda graph: self._prepare_task_input(
                     graph,
                     run_mode=run_mode,
                     target_node_uuid=target_node_uuid,
+                    input_value=input_value,
                 ),
             )
+        except TaskInputError as error:
+            raise WorkflowError(error.code) from None
         except StoreConflict:
             raise WorkflowError("invalid_input") from None
 
@@ -684,6 +695,27 @@ class WorkflowService:
         if target_node_uuid is not None:
             plan["target_node_uuid"] = target_node_uuid
         return plan, jobs
+
+    def _prepare_task_input(
+        self,
+        graph: Dict[str, Any],
+        *,
+        run_mode: str,
+        target_node_uuid: Optional[str],
+        input_value: Dict[str, Any],
+    ) -> PreparedTaskInput:
+        plan, jobs = self._build_execution_plan(
+            graph,
+            run_mode=run_mode,
+            target_node_uuid=target_node_uuid,
+        )
+        return preflight_task_input(
+            graph=graph,
+            raw_input=input_value,
+            execution_plan=plan,
+            jobs=jobs,
+            resource_resolver=self._resource_resolver,
+        )
 
     @staticmethod
     def _handle_data_key(handle: Dict[str, Any]) -> str:

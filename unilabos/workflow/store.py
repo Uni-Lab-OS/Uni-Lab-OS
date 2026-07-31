@@ -22,6 +22,7 @@ from unilabos.workflow.models import (
     WorkflowNodeWrite,
     resolve_template_root_param,
 )
+from unilabos.workflow.task_input import PreparedTaskInput
 
 _STORE_SQLITE_BUSY_TIMEOUT_MS = 5000
 
@@ -1037,17 +1038,16 @@ class WorkflowStore:
         task_uuid: str,
         run_mode: str,
         target_node_uuid: Optional[str],
-        input_value: Dict[str, Any],
         description: Optional[str],
         meta_data: Dict[str, Any],
-        plan_builder: Callable[
-            [Dict[str, Any]], Tuple[Dict[str, Any], List[Dict[str, Any]]]
-        ],
+        plan_builder: Callable[[Dict[str, Any]], PreparedTaskInput],
     ) -> Dict[str, Any]:
         now = utc_now()
         with self.transaction() as conn:
             graph = self.get_graph(workflow_uuid, conn=conn)
-            plan, jobs = plan_builder(graph)
+            prepared = plan_builder(graph)
+            plan = prepared.execution_plan
+            jobs = prepared.jobs
             effective_run_mode = str(plan["run_mode"])
             effective_target = plan.get("target_node_uuid")
             control_status = "paused" if effective_run_mode == "step" else "active"
@@ -1073,7 +1073,7 @@ class WorkflowStore:
                     effective_run_mode,
                     effective_target,
                     control_status,
-                    _json(input_value),
+                    encode_json(prepared.resolved_input).decode("utf-8"),
                 ),
             )
             for job in jobs:

@@ -287,7 +287,7 @@ def _validate_required_handles(
             raise GraphValidationError(f"输入 {data_key!r} 存在多个 Provider")
         if handle.get("required") and provider_count != 1:
             raise GraphValidationError(f"缺少必填输入 {data_key!r}")
-        if has_default and not _declared_type_matches(
+        if has_default and not declared_handle_type_matches(
             param[data_key],
             handle.get("type"),
         ):
@@ -648,30 +648,117 @@ def _json_type_matches(value: Any, declared_type: Any) -> bool:
     return False
 
 
-def _declared_type_matches(value: Any, declared_type: Any) -> bool:
-    expected = str(declared_type or "").strip().lower()
-    if value is None or expected in {"", "any", "default"}:
+_HANDLE_SCALAR_TYPES = {
+    "str": "string",
+    "string": "string",
+    "int": "integer",
+    "integer": "integer",
+    "float": "number",
+    "double": "number",
+    "number": "number",
+    "bool": "boolean",
+    "boolean": "boolean",
+    "dict": "object",
+    "map": "object",
+    "object": "object",
+    "json": "object",
+    "null": "null",
+}
+
+
+def _handle_type_shape(declared_type: Any) -> tuple[str, str | None] | None:
+    raw = str(declared_type or "").strip().lower()
+    if raw in {"", "any", "default"}:
+        return "any", None
+    if raw == "resourceslot":
+        return "slot", None
+    if raw in {"array", "list"}:
+        return "array", None
+    if raw.startswith("list[") and raw.endswith("]"):
+        item = raw[5:-1].strip()
+        if item == "resourceslot":
+            return "array", "slot"
+        normalized_item = _HANDLE_SCALAR_TYPES.get(item)
+        return ("array", normalized_item) if normalized_item is not None else None
+    normalized = _HANDLE_SCALAR_TYPES.get(raw)
+    return ("scalar", normalized) if normalized is not None else None
+
+
+def _resource_slot_reference_matches(value: Any) -> bool:
+    return type(value) is dict and type(value.get("uuid")) is str
+
+
+def _resource_slot_handle_value_matches(value: Any) -> bool:
+    if _resource_slot_reference_matches(value):
         return True
-    aliases = {
-        "float": "number",
-        "double": "number",
-        "int": "integer",
-        "bool": "boolean",
-        "list": "array",
-        "map": "object",
-    }
-    normalized = aliases.get(expected, expected)
-    if normalized not in {
-        "null",
-        "boolean",
-        "integer",
-        "number",
-        "string",
-        "array",
-        "object",
-    }:
+    return (
+        type(value) is list
+        and bool(value)
+        and all(_resource_slot_reference_matches(item) for item in value)
+    )
+
+
+def _handle_item_matches(value: Any, item_type: str) -> bool:
+    if item_type == "slot":
+        return _resource_slot_reference_matches(value)
+    return _json_type_matches(value, item_type)
+
+
+def declared_handle_type_matches(value: Any, declared_type: Any) -> bool:
+    """按 Catalog Handle 的完整 v1 vocabulary 判断一个 provider 值。"""
+
+    if value is None:
         return True
-    return _json_type_matches(value, normalized)
+    shape = _handle_type_shape(declared_type)
+    if shape is None or shape[0] == "any":
+        return True
+    kind, item_type = shape
+    if kind == "slot":
+        return _resource_slot_handle_value_matches(value)
+    if kind == "scalar":
+        assert item_type is not None
+        return _json_type_matches(value, item_type)
+    if type(value) is not list:
+        return False
+    if item_type is None:
+        return True
+    return all(_handle_item_matches(item, item_type) for item in value)
+
+
+def workflow_schema_matches_handle_type(
+    schema: Mapping[str, Any],
+    declared_type: Any,
+) -> bool:
+    """证明 v1 Workflow schema 可为一个 Catalog Handle 供应非空值。"""
+
+    shape = _handle_type_shape(declared_type)
+    if shape is None or shape[0] == "any":
+        return True
+    if "anyOf" in schema:
+        members = schema.get("anyOf")
+        if type(members) is not list or not members:
+            return False
+        schema = members[0]
+    kind, item_type = shape
+    if kind == "slot":
+        return schema.get("$slot") == "ResourceSlot"
+    if kind == "scalar":
+        assert item_type is not None
+        actual = schema.get("type")
+        return actual == item_type or (item_type == "number" and actual == "integer")
+    if schema.get("type") != "array":
+        return False
+    if item_type is None:
+        return True
+    items = schema.get("items")
+    if type(items) is not dict:
+        return False
+    if item_type == "slot":
+        return items.get("$slot") == "ResourceSlot"
+    actual_item = items.get("type")
+    return actual_item == item_type or (
+        item_type == "number" and actual_item == "integer"
+    )
 
 
 def _is_number(value: Any) -> bool:
@@ -687,7 +774,9 @@ def _json_equal(left: Any, right: Any) -> bool:
 
 
 __all__ = [
+    "declared_handle_type_matches",
     "GraphValidationError",
     "MissingTemplateError",
     "validate_graph",
+    "workflow_schema_matches_handle_type",
 ]

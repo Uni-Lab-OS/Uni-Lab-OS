@@ -1,18 +1,20 @@
-# 旧版 FE–OS 交互迁移矩阵
+# FE–OS 交互迁移矩阵与 Phase 02H 起整体计划
 
 ## 状态与范围
 
-本文档盘点 `/home/changjunhan/Uni-Lab-Core` 下现有的工作流编写、执行、
-实时通信和调试交互。它是一份实现迁移地图，不代表可以保留旧版公共合同。
+本文档盘点旧版工作流编写、执行、实时通信和调试交互，并给出从 Phase 02H
+开始的 OS、前端、Scheduler/设备和跨仓联调整体计划。它是 OS 仓库中的实现迁移
+地图，不代表可以保留旧版公共合同，也不取代 Core Wayfinder 的工作状态和跨仓
+决策权威。
 
 2026-07-30 检查的代码依据如下：
 
 | 仓库 | 检查版本 | 作用 |
 |---|---|---|
-| `Uni-Lab-Core/uni-lab-fe` | `0fd39af` | 旧版前端行为和测试依据 |
-| `Uni-Lab-Core/Uni-Lab-OS` | `f5c1073` | 旧版 OS bridge、runtime 行为和测试依据 |
-| `uni-lab-backend-github` | 冻结版本 `09609a2` | 共享前端合同权威 |
-| 目标 `Uni-Lab-OS` | 分支 `migration/01-backend-contract` | 唯一实现写入范围 |
+| `Uni-Lab-OS/uni-lab-fe` | `0fd39af3014b29035ee8e2280b9d753b2b9f96a2` | 旧版前端行为和测试依据 |
+| `Uni-Lab-OS/Uni-Lab-OS` | `f5c10733e7e37218ab5c660ecef9c41bb94c72ab` | 旧版 OS bridge、runtime 行为和测试依据 |
+| `Uni-Lab-OS/uni-lab-backend` | 冻结版本 `09609a27e652c9e56ede636a2883a4fd241e4400` | 共享前端合同权威 |
+| 目标 `deepmodeling/Uni-Lab-OS` | `01380449868ccf334f4da1a28c7f6f946fb540d1`（`integration/workflow-task-runtime`） | 2026-08-01 的 02H 执行基线；Phase 01、02A～02G 已完成，02H 交付证据见本轮 trend |
 
 目标仓库中的约束决策如下：
 
@@ -34,6 +36,40 @@
   只有冻结 Backend 的前端接口属于 parity 范围；
 - [D-073～D-081](decisions.md#d-073-persistent-authoring-is-a-workflow-scoped-os-only-resource)：
   持久 Authoring 必须是 Workflow-scoped、服务端持有、CAS 保护并通过 SSE 失效通知。
+
+后续功能合同由 Core Wayfinder 的功能索引继续承载：Authoring/source 为
+`Uni-Lab-OS/Uni-Lab-Core#128`、`Uni-Lab-OS/Uni-Lab-Core#129`，前端交互为
+`Uni-Lab-OS/Uni-Lab-Core#130`，Debugger 为 `Uni-Lab-OS/Uni-Lab-Core#131`，
+Conditional Join 为 `Uni-Lab-OS/Uni-Lab-Core#132`，Workflow I/O 为
+`Uni-Lab-OS/Uni-Lab-Core#133`，Material/Site 为 `Uni-Lab-OS/Uni-Lab-Core#134`，
+Action typed contract 为 `Uni-Lab-OS/Uni-Lab-Core#135`，subworkflow/Task output 为
+`Uni-Lab-OS/Uni-Lab-Core#136`，Tool Call 为 `Uni-Lab-OS/Uni-Lab-Core#138`。
+MaterialSource 及其分配边界继续由 `Uni-Lab-OS/Uni-Lab-Core#140～#146` 细化，
+`Uni-Lab-OS/Uni-Lab-Core#148` 明确延期。
+
+本工作树的 `decisions.md` 目前只包含较早账本；D-102～D-116 在完成
+`Uni-Lab-OS/Uni-Lab-Core#2` 的不可变 source publication 前，不应靠个人工作树路径
+作为团队证据。实施票必须引用 Core Issue、Feishu revision 或
+`owner/repo@<full-sha>:<path>`。
+
+## 文档定位与 Spec 生命周期
+
+Wayfinder 管工作状态和跨仓依赖，spec 按知识阶段逐步落位。不得先在某个实现仓库
+写一份“最终跨仓合同”，再让其他仓库被动追随。
+
+| 时机 | 要写的 spec | 位置 | 推进条件 |
+|---|---|---|---|
+| Intake / Grill | 问题、Outcome、非目标、候选方案、Fog、依赖 | Core Map 或对应功能目录下的跨仓 Decision Issue；`stage:protocol-definition` | 决策边界和 owner 已明确；尚不创建猜测性的生产接口 |
+| 协议冻结、准备实施 | wire/state machine、authority、原子边界、错误、幂等和兼容停止线 | 同一 Core Decision 的 Decision 段；同步更新 Feishu Protocol 草案及 revision | 各消费仓确认；创建 owning repo delivery children 后进入 `stage:implementation` |
+| 仓库实施开始 | 模块 seam、文件影响面、事务、迁移步骤、独立 RED 测试和本仓 gate | OS：`docs/developer_guide/workflow_task_runtime_migration/rounds/<slice>-design.md`；前端：`docs/migration/workflow/<slice>.md`；Scheduler 同理放其 `docs/`，并由各自 delivery Issue 引用 | spec 只解释本仓实现，不重定义 Core 合同；一个 mergeable slice 一张 delivery Issue |
+| 联调开始前 | 真实拓扑、fixture、HTTP/SSE 时序、重启/冲突场景、各仓候选 full SHA、通过标准 | Core integration gate Issue；可执行 E2E 放 Core，仓库局部合同测试留在 owning repo | 所有必需 delivery children 已合入候选 SHA；Decision 进入 `stage:testing` |
+| 接受 | 最终 Protocol、Implementation mapping、Testing evidence、已知限制 | Feishu 对应 Protocol/Implementation/Testing 页面及 revision；Core 记录 submodule pin 和 CI/evidence URL | 实现、跨仓 E2E、Feishu 和 Core pin 一致后进入 `stage:accepted` 并关闭 Decision |
+| 迁移清理前 | 长期维护接口和不变量 | 各 owning repo 的正式 Interface/module 文档与 `AGENTS.md`；不留在本临时目录 | 替代测试存在，旧路由/DTO 删除，临时迁移目录可移除 |
+
+每个 active Decision 只能有一个 `stage:*`。Core 只拥有跨仓 Decision、Map、
+integration gate 和 submodule pin；OS、前端、Scheduler/设备适配分别拥有自己的
+delivery Issue。设计 Grill 结束、历史 Decision 关闭或本地测试通过，都不等于
+`stage:accepted`。
 
 ## 结论
 
@@ -57,33 +93,33 @@
 ## 1. FE service 与公共路由迁移
 
 旧版公共端口集中在
-[packages/services/src/workflow.ts](/home/changjunhan/Uni-Lab-Core/uni-lab-fe/packages/services/src/workflow.ts:4)，
+[packages/services/src/workflow.ts](https://github.com/Uni-Lab-OS/uni-lab-fe/blob/0fd39af3014b29035ee8e2280b9d753b2b9f96a2/packages/services/src/workflow.ts#L4)，
 并由
-[createServices.ts](/home/changjunhan/Uni-Lab-Core/uni-lab-fe/packages/services/src/createServices.ts:23)
+[createServices.ts](https://github.com/Uni-Lab-OS/uni-lab-fe/blob/0fd39af3014b29035ee8e2280b9d753b2b9f96a2/packages/services/src/createServices.ts#L23)
 为所有 authority 装配。
 
-| 旧版 FE 操作 | 旧路由或数据形态 | 新操作 | 处置 | 归属阶段 |
+| 旧版 FE 操作 | 旧路由或数据形态 | 新操作 | 处置 | 当前切片 |
 |---|---|---|---|---|
-| `getWorkflow(workflowId)` | `GET /workflows/{id}/graph`，返回前端自定义的 `WorkflowDocument.revision.canonical` | 共享 Graph 消费方使用冻结 Backend Graph；OS 双视图编辑器通常通过一个 Workflow-scoped Authoring aggregate 完整恢复状态 | 语义迁移 | OS 01/02；FE 08 |
-| `saveWorkflow(...)` | `PUT .../graph`，携带 Canonical revision 和可选字符串 revision ID | 共享完整 Graph PUT 携带整数 `revision`、Backend Node write 和 Backend Edge write；OS 双视图 Authoring 必须通过 Draft/Candidate/Apply 保持源码同步，不能把 Canonical JSON 当作持久化事实 | 拆分迁移 | OS 01/02；FE 08 |
-| `validateWorkflow(...)` | `POST /workflows:validate`，携带 Canonical 和 parameters | 持久编辑使用 Draft diagnostics 和 Apply revalidation；非持久 Candidate 可以使用 D-040 `/authoring/validate` | 旧路由已取代，能力语义迁移 | OS 02；FE 08 |
-| `compilePythonWorkflow(...)` | `POST /authoring/compile`，使用 `base_revision_id`、客户端 `source_uri` 和 Canonical 输出 | 保留纯转换路由，但 wire model 改为 `workflow_uuid`、整数 `revision`、稳定 Node/Edge UUID 和 Backend-shaped Graph；持久编辑通过 Workflow-scoped 路由保存完整 Draft | 语义迁移 | OS 02；FE 08 |
-| `generatePythonWorkflow(...)` | `POST /authoring/generate-python`，输入 Canonical | 保留纯转换路由，输入完整 Backend-shaped Candidate Graph，输出确定性的 normalized source | 语义迁移 | OS 02；FE 08 |
-| `validateAuthoringCandidate(...)` | 浏览器把完整旧 Candidate 回传给 OS | 非持久调用方可继续使用纯验证；持久 Apply 只发送 `expected_draft_hash`、`expected_workflow_revision` 和 `expected_candidate_hash`，绝不携带 Candidate 内容 | 拆分迁移；旧持久流程已取代 | OS 01/02；FE 08 |
-| `createRun(request)` | `POST /runtime/runs`，发送完整 Canonical revision 和旧 debug 字段 | `POST /workflow-tasks` 发送 `workflow_uuid`、`run_mode`、可选 `target_node_uuid`、`input`、description 和 metadata；OS 对已持久化 Graph 建立快照并预创建 Jobs | 旧路由已取代，能力语义迁移 | OS 01/03/04；FE 08 |
-| `getRun(runId)` | `GET /runtime/runs/{run_id}` | `GET /workflow-tasks/{task_uuid}` | 语义迁移 | OS 01/04；FE 08 |
-| `listRunNodes(runId)` | `GET .../runs/{id}/nodes` | `GET /workflow-tasks/{task_uuid}/jobs` | 语义迁移 | OS 01/04；FE 08 |
-| `listRunEvents(runId, cursor)` | Task-scoped REST event page | 不存在 Task-scoped event 路由；相关全局 SSE 到达后，通过 REST 重新获取 Task/Jobs | 已取代 | OS 01/04；FE 08 |
-| `command(runId, command, payload)` | `POST .../runs/{id}/commands`，随后获取 Run | `POST /workflow-tasks/{task_uuid}/commands`，携带 `type`、可选 `target_node_uuid`、必填 `idempotency_key`、description 和 metadata；成功响应为 command record | 语义迁移 | OS 01/04；FE 08 |
-| `cancelRun(runId)` | 独立的 `POST .../runs/{id}/cancel` | Task command `{type:"cancel", idempotency_key:...}` | 旧路由已取代 | OS 01/04；FE 08 |
-| `subscribeRunEvents(...)` | 每个 Run 独立的 `/runtime/events` WebSocket；失败后轮询 Run events | 统一使用全局 `GET /events` SSE，支持单调递增 `id`、`Last-Event-ID`、客户端去重和 REST 状态恢复 | 已取代并使用新实现替换 | OS 01/04；FE 08 |
-| `dispose()` | 关闭 Run socket 和轮询 timer | 释放共享 SSE subscription/service | 直接保留生命周期意图 | FE 08 |
+| `getWorkflow(workflowId)` | `GET /workflows/{id}/graph`，返回前端自定义的 `WorkflowDocument.revision.canonical` | 共享 Graph 消费方使用冻结 Backend Graph；OS 双视图编辑器通常通过一个 Workflow-scoped Authoring aggregate 完整恢复状态 | 语义迁移 | OS 02D～02G；UI1 Authoring |
+| `saveWorkflow(...)` | `PUT .../graph`，携带 Canonical revision 和可选字符串 revision ID | 共享完整 Graph PUT 携带整数 `revision`、Backend Node write 和 Backend Edge write；OS 双视图 Authoring 必须通过 Draft/Candidate/Apply 保持源码同步，不能把 Canonical JSON 当作持久化事实 | 拆分迁移 | OS 02G；UI1 Authoring |
+| `validateWorkflow(...)` | `POST /workflows:validate`，携带 Canonical 和 parameters | 持久编辑使用 Draft diagnostics 和 Apply revalidation；非持久 Candidate 可以使用 D-040 `/authoring/validate` | 旧路由已取代，能力语义迁移 | OS 02E/02G；UI1 Authoring |
+| `compilePythonWorkflow(...)` | `POST /authoring/compile`，使用 `base_revision_id`、客户端 `source_uri` 和 Canonical 输出 | 保留纯转换路由，但 wire model 改为 `workflow_uuid`、整数 `revision`、稳定 Node/Edge UUID 和 Backend-shaped Graph；持久编辑通过 Workflow-scoped 路由保存完整 Draft | 语义迁移 | OS 02D/02E；UI1 Authoring |
+| `generatePythonWorkflow(...)` | `POST /authoring/generate-python`，输入 Canonical | 保留纯转换路由，输入完整 Backend-shaped Candidate Graph，输出确定性的 normalized source | 语义迁移 | OS 02D/02E；UI1 Authoring |
+| `validateAuthoringCandidate(...)` | 浏览器把完整旧 Candidate 回传给 OS | 非持久调用方可继续使用纯验证；持久 Apply 只发送一个 opaque `candidate_hash`，服务端重新编译并校验 Draft、Workflow revision 和 Catalog fingerprint，绝不携带 Candidate 内容 | 拆分迁移；旧持久流程已取代 | OS 02G；UI1 Authoring |
+| `createRun(request)` | `POST /runtime/runs`，发送完整 Canonical revision 和旧 debug 字段 | 普通执行使用 `POST /workflow-tasks`；OS-only 调试使用独立 `POST /debug/workflow-tasks` 和非空 `start_node_uuids`/`breakpoint_node_uuids`；两者都由 OS 对 persisted Graph 建立 snapshot/plan | 旧路由已取代，能力语义迁移 | 02H/R1/R2；UI1 Runtime；DBG |
+| `getRun(runId)` | `GET /runtime/runs/{run_id}` | `GET /workflow-tasks/{task_uuid}` | 语义迁移 | R1；UI1 Runtime |
+| `listRunNodes(runId)` | `GET .../runs/{id}/nodes` | `GET /workflow-tasks/{task_uuid}/jobs` | 语义迁移 | R1；UI1 Runtime |
+| `listRunEvents(runId, cursor)` | Task-scoped REST event page | 不存在 Task-scoped event 路由；相关全局 SSE 到达后，通过 REST 重新获取一致的 Task/Jobs/debug projection | 已取代 | R1；UI1 Runtime |
+| `command(runId, command, payload)` | `POST .../runs/{id}/commands`，随后获取 Run | 普通命令使用 `POST /workflow-tasks/{task_uuid}/commands`；Hold/step family 使用独立 debug command route；成功响应只表示接受，随后重新补读 projection | 语义迁移 | R1/DBG；UI1 Runtime/Debug |
+| `cancelRun(runId)` | 独立的 `POST .../runs/{id}/cancel` | Task command `{type:"cancel", idempotency_key:...}` | 旧路由已取代 | R1；UI1 Runtime |
+| `subscribeRunEvents(...)` | 每个 Run 独立的 `/runtime/events` WebSocket；失败后轮询 Run events | 统一使用全局 `GET /events` SSE，支持单调递增 `id`、`Last-Event-ID`、客户端去重和 REST 状态恢复 | 已取代并使用新实现替换 | R1；UI1 Runtime |
+| `dispose()` | 关闭 Run socket 和轮询 timer | 释放共享 SSE subscription/service | 直接保留生命周期意图 | UI1 Runtime |
 
 旧方法的完整定义位于
-[workflow.ts:168](/home/changjunhan/Uni-Lab-Core/uni-lab-fe/packages/services/src/workflow.ts:168)。
+[workflow.ts:168](https://github.com/Uni-Lab-OS/uni-lab-fe/blob/0fd39af3014b29035ee8e2280b9d753b2b9f96a2/packages/services/src/workflow.ts#L168)。
 冻结共享路由的依据是 Backend `09609a2` 中的
 `internal/http/handler/workflow.go`；目标仓库已经实现的路由位于
-[workflow_api.py](/home/gaojing/Uni-Lab-OS/unilabos/app/workflow_api.py:96)。
+[workflow_api.py](https://github.com/deepmodeling/Uni-Lab-OS/blob/1d84efc77f6cd87622e4663c383ce168c5b586fa/unilabos/app/workflow_api.py#L96)。
 
 ### DTO 处置
 
@@ -97,14 +133,14 @@
 | `WorkflowRunNode` | 替换为 `WorkflowNodeJob` 及其 Backend 字段 |
 | `WorkflowRunEvent` | 替换为按类型区分的全局 SSE frame；不得假设所有事件都有 `runId/nodeId` |
 | `WorkflowRunRequest` | 删除；Task 创建绝不携带 DAG |
-| 旧 debugger command union | 共享 command 仅包括 `step`、`pause`、`resume` 和 `cancel`；其他操作等待 P1-1 |
+| 旧 debugger command union | 普通 command 仍只有 `step`、`pause`、`resume` 和 `cancel`；OS-only launch/Hold/step-family 只走 D-112～D-116 的独立 debug Interface，不保留旧 alias |
 
 旧 `unwrap()` 同时接受裸对象和 `data` envelope
-（[workflow.ts:376](/home/changjunhan/Uni-Lab-Core/uni-lab-fe/packages/services/src/workflow.ts:376)）。
+（[workflow.ts:376](https://github.com/Uni-Lab-OS/uni-lab-fe/blob/0fd39af3014b29035ee8e2280b9d753b2b9f96a2/packages/services/src/workflow.ts#L376)）。
 这种宽松 fallback 会掩盖合同漂移，必须删除。新 port 应严格解析
 `{"code":0,"data":...}` 和标准 error envelope。
 
-[realtime.ts](/home/changjunhan/Uni-Lab-Core/uni-lab-fe/packages/services/src/realtime.ts:30)
+[realtime.ts](https://github.com/Uni-Lab-OS/uni-lab-fe/blob/0fd39af3014b29035ee8e2280b9d753b2b9f96a2/packages/services/src/realtime.ts#L30)
 中的 device-status socket 是独立的旧版设备投影。删除 Workflow realtime WebSocket
 时，不得把这个设备通道静默改造成 WorkflowTask 通道，也不得在它自己的归属阶段前
 一并删除。
@@ -113,7 +149,7 @@
 
 当前没有独立的权威 Workflow store。Authoring、Run、Node、event 和 debugger
 状态全部保存在一个
-[WorkflowPanel](/home/changjunhan/Uni-Lab-Core/uni-lab-fe/packages/workflow-editor/src/components/WorkflowPanel.tsx:56)
+[WorkflowPanel](https://github.com/Uni-Lab-OS/uni-lab-fe/blob/0fd39af3014b29035ee8e2280b9d753b2b9f96a2/packages/workflow-editor/src/components/WorkflowPanel.tsx#L56)
 的 `useState/useRef` 中。现有依赖注入边界可以保留，但其后的 port 和 controller
 必须替换。
 
@@ -128,27 +164,27 @@
 | 700 ms compile/validate 后更新 Canvas，并称为自动应用 | debounce 可以刷新未应用预览，但只有 Apply 能修改 Applied Workflow | 语义迁移 |
 | Save 先验证 Canonical、保存 Graph，再选择性覆盖浏览器选中的源文件 | 产品操作拆分为 Draft Save 和显式 Apply；normalized package-source writeback 只能由 OS 执行 | 语义迁移；浏览器写入已取代 |
 | Run 发送完整的当前 Canonical 文档 | 有效的 dirty Draft 必须先 Apply，之后才能依据持久 Workflow UUID 创建 Task | 语义迁移 |
-| 前端根据一个 start node 计算可执行子图 | 前端可以预览范围，但 Task plan 和 Jobs 由 OS 决定；P1-1 将单起始点替换为非空 start frontier | 延后语义迁移 |
-| runtime 颜色依赖旧 node state 和一个 `pausedBeforeNodeId` | 分别渲染 Job status、Task control status、Breakpoint Hold、disabled 和 out-of-scope | 延后至 04/05/08 |
-| output panel 读取旧 `node.result` 和 Run events | 读取 Job result/error 投影和最终 `WorkflowTask.output` | 被 P0-5 阻塞 |
+| 前端根据一个 start node 计算可执行子图 | 前端只预览非空 `start_node_uuids` 的范围；实际 scope、Task plan、Jobs 和 `out_of_scope_node_uuids` 由 OS debug projection 决定 | DBG/UI1 语义迁移 |
+| runtime 颜色依赖旧 node state 和一个 `pausedBeforeNodeId` | 分别渲染 Job status、Task control status、Breakpoint Hold、disabled 和 out-of-scope | R1/DBG/UI1 |
+| output panel 读取旧 `node.result` 和 Run events | 读取 Job result/error 投影和最终 `WorkflowTask.output` | O1/UI1；禁止 partial output |
 | UUID 丢失时按 action/type/ordinal 猜测映射 | 删除 identity 猜测；Phase 02 通过稳定 source anchor 保留 Node UUID | 已取代 |
 | 纯前端 `useWorkflowDebug` 模拟执行状态 | 删除；渲染持久 Task/Job/Hold 投影 | 已取代 |
-| 根据参数字段名猜测 Material reference | 使用已冻结的 P0-3 Material 合同和待冻结的 P0-4 Action ResourceSlot 合同替换 | 仅被 P0-4 阻塞 |
+| 根据参数字段名猜测 Material reference | 使用 A1 的真实 material Handles 和 M1/M2 的 ResourceSlot/selector 合同替换 | A1/M1/M2/UI1；禁止 heuristic |
 
 主要消费位置：
 
 - 状态和 service 调用：
-  [WorkflowPanel.tsx:76](/home/changjunhan/Uni-Lab-Core/uni-lab-fe/packages/workflow-editor/src/components/WorkflowPanel.tsx:76)；
+  [WorkflowPanel.tsx:76](https://github.com/Uni-Lab-OS/uni-lab-fe/blob/0fd39af3014b29035ee8e2280b9d753b2b9f96a2/packages/workflow-editor/src/components/WorkflowPanel.tsx#L76)；
 - Run 刷新和订阅：
-  [WorkflowPanel.tsx:192](/home/changjunhan/Uni-Lab-Core/uni-lab-fe/packages/workflow-editor/src/components/WorkflowPanel.tsx:192)；
+  [WorkflowPanel.tsx:192](https://github.com/Uni-Lab-OS/uni-lab-fe/blob/0fd39af3014b29035ee8e2280b9d753b2b9f96a2/packages/workflow-editor/src/components/WorkflowPanel.tsx#L192)；
 - compile/validate 循环：
-  [WorkflowPanel.tsx:475](/home/changjunhan/Uni-Lab-Core/uni-lab-fe/packages/workflow-editor/src/components/WorkflowPanel.tsx:475)；
+  [WorkflowPanel.tsx:475](https://github.com/Uni-Lab-OS/uni-lab-fe/blob/0fd39af3014b29035ee8e2280b9d753b2b9f96a2/packages/workflow-editor/src/components/WorkflowPanel.tsx#L475)；
 - 保存和浏览器文件回写：
-  [WorkflowPanel.tsx:661](/home/changjunhan/Uni-Lab-Core/uni-lab-fe/packages/workflow-editor/src/components/WorkflowPanel.tsx:661)；
+  [WorkflowPanel.tsx:661](https://github.com/Uni-Lab-OS/uni-lab-fe/blob/0fd39af3014b29035ee8e2280b9d753b2b9f96a2/packages/workflow-editor/src/components/WorkflowPanel.tsx#L661)；
 - 旧执行提交和 command：
-  [WorkflowPanel.tsx:755](/home/changjunhan/Uni-Lab-Core/uni-lab-fe/packages/workflow-editor/src/components/WorkflowPanel.tsx:755)；
+  [WorkflowPanel.tsx:755](https://github.com/Uni-Lab-OS/uni-lab-fe/blob/0fd39af3014b29035ee8e2280b9d753b2b9f96a2/packages/workflow-editor/src/components/WorkflowPanel.tsx#L755)；
 - Canonical 投影和 identity 猜测：
-  [canonicalWorkflow.ts](/home/changjunhan/Uni-Lab-Core/uni-lab-fe/packages/workflow-editor/src/utils/canonicalWorkflow.ts:14)。
+  [canonicalWorkflow.ts](https://github.com/Uni-Lab-OS/uni-lab-fe/blob/0fd39af3014b29035ee8e2280b9d753b2b9f96a2/packages/workflow-editor/src/utils/canonicalWorkflow.ts#L14)。
 
 编辑器不应继续在单体 Panel 中逐个替换调用，而应拆出三个 controller 边界：
 
@@ -156,8 +192,8 @@
    双 CAS、Apply 三 token CAS、冲突比较和外部失效通知；
 2. `WorkflowTaskController`：Task 创建、Task/Job 状态恢复、全局 SSE 路由和普通
    command；
-3. `WorkflowDebugController`：launch configuration 和 Hold 投影；仅在 P1-1
-   以及 Phase 05 完成后加入。
+3. `WorkflowDebugController`：launch configuration、Hold 和 composite-stop
+   projection；在 R1/R2、Claims、O1 和 D-112～D-116 OS delivery 完成后加入。
 
 这是模块边界要求，不强制使用某一种 FE 状态管理库。
 
@@ -167,18 +203,18 @@
 
 | 旧版源码 | 可保留的行为 | 拒绝或已取代的部分 | 目标阶段 |
 |---|---|---|---|
-| [local_api.py](/home/changjunhan/Uni-Lab-Core/Uni-Lab-OS/unilabos/app/local_bridge/local_api.py:232) | 薄 composition seam、验证和错误处理经验、现有 Authoring/runtime fixture | `/workflows:validate`、Canonical Graph DTO、`/runtime/runs`、独立 cancel/reconcile、每个 Run 的 events 以及 `/runtime/events` WebSocket | 拆分至 01/02/04/05 |
-| [runtime/service.py](/home/changjunhan/Uni-Lab-Core/Uni-Lab-OS/unilabos/runtime/service.py:131) | compile-to-plan 编排、dispatch unknown 处理、持久状态优先于 transport 投影、取消保护、reconciliation 和 debug 验证 | `run_id`、Canonical submission、Run projection 和旧公共 command vocabulary | 拆分至 03/04/05 |
-| [event_store.py](/home/changjunhan/Uni-Lab-Core/Uni-Lab-OS/unilabos/runtime/event_store.py:106) | terminal/effect/outbox/cursor 原子提交、持久排序、启动恢复 | 使用 `run_id`/旧 node projection 的表，以及旧 Run event wire schema | 语义迁移至 04 |
-| [workflow_store.py](/home/changjunhan/Uni-Lab-Core/Uni-Lab-OS/unilabos/runtime/workflow_store.py:24) | revision conflict 经验和重启持久性测试 | `~/.unilabos/workflows` 下每个 Canonical 一个文件的 authority | 由 01/02 和 D-081 取代 |
-| [schedule_ws.py](/home/changjunhan/Uni-Lab-Core/Uni-Lab-OS/unilabos/app/local_bridge/schedule_ws.py:72) | 内部 submit/cancel/debug transport 行为和迟到事件处理 | 前端公共 parity、Run projection，以及复制 Backend Edge protocol 的要求 | 语义迁移至 04/06 |
-| [offline_os.py](/home/changjunhan/Uni-Lab-Core/Uni-Lab-OS/unilabos/app/local_bridge/offline_os.py:48) | 确定性执行、debug、cancel 测试行为 | 公共 fake Run authority | 作为 03/04/05/06 的语义 fixture 来源 |
+| [local_api.py](https://github.com/Uni-Lab-OS/Uni-Lab-OS/blob/f5c10733e7e37218ab5c660ecef9c41bb94c72ab/unilabos/app/local_bridge/local_api.py#L232) | 薄 composition seam、验证和错误处理经验、现有 Authoring/runtime fixture | `/workflows:validate`、Canonical Graph DTO、`/runtime/runs`、独立 cancel/reconcile、每个 Run 的 events 以及 `/runtime/events` WebSocket | 拆分至 01/02/04/05 |
+| [runtime/service.py](https://github.com/Uni-Lab-OS/Uni-Lab-OS/blob/f5c10733e7e37218ab5c660ecef9c41bb94c72ab/unilabos/runtime/service.py#L131) | compile-to-plan 编排、dispatch unknown 处理、持久状态优先于 transport 投影、取消保护、reconciliation 和 debug 验证 | `run_id`、Canonical submission、Run projection 和旧公共 command vocabulary | 拆分至 03/04/05 |
+| [event_store.py](https://github.com/Uni-Lab-OS/Uni-Lab-OS/blob/f5c10733e7e37218ab5c660ecef9c41bb94c72ab/unilabos/runtime/event_store.py#L106) | terminal/effect/outbox/cursor 原子提交、持久排序、启动恢复 | 使用 `run_id`/旧 node projection 的表，以及旧 Run event wire schema | 语义迁移至 04 |
+| [workflow_store.py](https://github.com/Uni-Lab-OS/Uni-Lab-OS/blob/f5c10733e7e37218ab5c660ecef9c41bb94c72ab/unilabos/runtime/workflow_store.py#L24) | revision conflict 经验和重启持久性测试 | `~/.unilabos/workflows` 下每个 Canonical 一个文件的 authority | 由 01/02 和 D-081 取代 |
+| [schedule_ws.py](https://github.com/Uni-Lab-OS/Uni-Lab-OS/blob/f5c10733e7e37218ab5c660ecef9c41bb94c72ab/unilabos/app/local_bridge/schedule_ws.py#L72) | 内部 submit/cancel/debug transport 行为和迟到事件处理 | 前端公共 parity、Run projection，以及复制 Backend Edge protocol 的要求 | 语义迁移至 04/06 |
+| [offline_os.py](https://github.com/Uni-Lab-OS/Uni-Lab-OS/blob/f5c10733e7e37218ab5c660ecef9c41bb94c72ab/unilabos/app/local_bridge/offline_os.py#L48) | 确定性执行、debug、cancel 测试行为 | 公共 fake Run authority | 作为 03/04/05/06 的语义 fixture 来源 |
 | `unilabos/workflow/{authoring,canonical,canonical_ir,contracts,dag_compile}.py` | no-exec AST parsing、normalization、source map、控制流和参数行为 | 公共 Canonical DTO 和旧字符串 identity | 语义迁移至 02/03 |
 
 旧 bridge 路由集中在
-[local_api.py:1218](/home/changjunhan/Uni-Lab-Core/Uni-Lab-OS/unilabos/app/local_bridge/local_api.py:1218)
+[local_api.py:1218](https://github.com/Uni-Lab-OS/Uni-Lab-OS/blob/f5c10733e7e37218ab5c660ecef9c41bb94c72ab/unilabos/app/local_bridge/local_api.py#L1218)
 至
-[local_api.py:1596](/home/changjunhan/Uni-Lab-Core/Uni-Lab-OS/unilabos/app/local_bridge/local_api.py:1596)。
+[local_api.py:1596](https://github.com/Uni-Lab-OS/Uni-Lab-OS/blob/f5c10733e7e37218ab5c660ecef9c41bb94c72ab/unilabos/app/local_bridge/local_api.py#L1596)。
 替代实现不得在新接口旁继续挂载这些路由。
 
 以下 runtime 语义值得通过替代测试保留：
@@ -197,16 +233,16 @@
 
 | 测试来源 | 新处置 |
 |---|---|
-| [services workflow tests](/home/changjunhan/Uni-Lab-Core/uni-lab-fe/packages/services/src/workflow.test.ts:25) | 使用严格 Graph、Authoring、Task、Job、Task command 和全局 SSE 合同测试，替代 Canonical/Run 路由断言 |
-| [canonicalWorkflow tests](/home/changjunhan/Uni-Lab-Core/uni-lab-fe/packages/workflow-editor/src/utils/canonicalWorkflow.test.ts:13) | 迁移有价值的 Graph/view 投影断言；删除猜测 identity 的 remap；多起点和控制流用例延后至 P1-1/P1-2 |
-| [debugControls tests](/home/changjunhan/Uni-Lab-Core/uni-lab-fe/packages/workflow-editor/src/utils/debugControls.test.ts:31) | 按四种共享 Task command 重写；P1-1 关闭后再加入 Hold |
-| [workflow-runtime E2E](/home/changjunhan/Uni-Lab-Core/uni-lab-fe/e2e/workflow-runtime.spec.ts:5) | 拆分为持久 Authoring、普通 Task 执行和 debugger 套件；删除所有旧路由断言 |
-| [workflow import/persistence E2E](/home/changjunhan/Uni-Lab-Core/uni-lab-fe/e2e/workflow-import-persistence.spec.ts:6) | 保留选择恢复；Python 流程改为已保存 Draft、未应用预览和显式 Apply |
-| [workflow cloud import E2E](/home/changjunhan/Uni-Lab-Core/uni-lab-fe/e2e/workflow-cloud-import.spec.ts:7) | 迁移为显式服务端 import 和 Backend Graph；删除浏览器 source authority 以及旧 validate/Run 路由 |
-| [debug action E2E](/home/changjunhan/Uni-Lab-Core/uni-lab-fe/e2e/workflow-debug-actions.spec.ts:38) | 迁移普通 `pause/step/resume/cancel`；其余旧操作延后至 P1-1，不保留 alias |
-| [debug scenario E2E](/home/changjunhan/Uni-Lab-Core/uni-lab-fe/e2e/workflow-debug-scenarios.spec.ts:41) | 保留 Code/DAG 视觉同步意图；用 Task/Jobs/SSE 和 P1-1 launch/Hold 语义替换 Run/events |
-| [unsaved guard E2E](/home/changjunhan/Uni-Lab-Core/uni-lab-fe/e2e/workflow-unsaved-guard.spec.ts:3) | 保留并加强：外部 SSE 失效通知或 CAS conflict 不得替换或清除 dirty buffer |
-| [layout isolation E2E](/home/changjunhan/Uni-Lab-Core/uni-lab-fe/e2e/workflow-layout-isolation.spec.ts:5) | 原样保留；它不是 API 迁移测试 |
+| [services workflow tests](https://github.com/Uni-Lab-OS/uni-lab-fe/blob/0fd39af3014b29035ee8e2280b9d753b2b9f96a2/packages/services/src/workflow.test.ts#L25) | 使用严格 Graph、Authoring、Task、Job、Task command 和全局 SSE 合同测试，替代 Canonical/Run 路由断言 |
+| [canonicalWorkflow tests](https://github.com/Uni-Lab-OS/uni-lab-fe/blob/0fd39af3014b29035ee8e2280b9d753b2b9f96a2/packages/workflow-editor/src/utils/canonicalWorkflow.test.ts#L13) | 迁移有价值的 Graph/view 投影断言；删除猜测 identity 的 remap；多起点按 DBG，临时 Conditional Join 按 J1 分别进入 |
+| [debugControls tests](https://github.com/Uni-Lab-OS/uni-lab-fe/blob/0fd39af3014b29035ee8e2280b9d753b2b9f96a2/packages/workflow-editor/src/utils/debugControls.test.ts#L31) | 按四种共享 Task command 重写；独立增加 D-112～D-116 的 launch/Hold/step-family 合同测试 |
+| [workflow-runtime E2E](https://github.com/Uni-Lab-OS/uni-lab-fe/blob/0fd39af3014b29035ee8e2280b9d753b2b9f96a2/e2e/workflow-runtime.spec.ts#L5) | 拆分为持久 Authoring、普通 Task 执行和 debugger 套件；删除所有旧路由断言 |
+| [workflow import/persistence E2E](https://github.com/Uni-Lab-OS/uni-lab-fe/blob/0fd39af3014b29035ee8e2280b9d753b2b9f96a2/e2e/workflow-import-persistence.spec.ts#L6) | 保留选择恢复；Python 流程改为已保存 Draft、未应用预览和显式 Apply |
+| [workflow cloud import E2E](https://github.com/Uni-Lab-OS/uni-lab-fe/blob/0fd39af3014b29035ee8e2280b9d753b2b9f96a2/e2e/workflow-cloud-import.spec.ts#L7) | 迁移为显式服务端 import 和 Backend Graph；删除浏览器 source authority 以及旧 validate/Run 路由 |
+| [debug action E2E](https://github.com/Uni-Lab-OS/uni-lab-fe/blob/0fd39af3014b29035ee8e2280b9d753b2b9f96a2/e2e/workflow-debug-actions.spec.ts#L38) | 迁移普通 `pause/step/resume/cancel`，并用独立 debug Interface 覆盖 launch/Hold/step family；不保留 alias |
+| [debug scenario E2E](https://github.com/Uni-Lab-OS/uni-lab-fe/blob/0fd39af3014b29035ee8e2280b9d753b2b9f96a2/e2e/workflow-debug-scenarios.spec.ts#L41) | 保留 Code/DAG 视觉同步意图；用 Task/Jobs/SSE 和 D-112～D-116 launch/Hold/composite projection 替换 Run/events |
+| [unsaved guard E2E](https://github.com/Uni-Lab-OS/uni-lab-fe/blob/0fd39af3014b29035ee8e2280b9d753b2b9f96a2/e2e/workflow-unsaved-guard.spec.ts#L3) | 保留并加强：外部 SSE 失效通知或 CAS conflict 不得替换或清除 dirty buffer |
+| [layout isolation E2E](https://github.com/Uni-Lab-OS/uni-lab-fe/blob/0fd39af3014b29035ee8e2280b9d753b2b9f96a2/e2e/workflow-layout-isolation.spec.ts#L5) | 原样保留；它不是 API 迁移测试 |
 
 持久 Authoring 必须新增以下 E2E 覆盖：
 
@@ -238,45 +274,133 @@ tests/app/test_unified_runtime_api.py
 |---|---|
 | `test_workflow_revision_contract.py` | 旧公共 Canonical 合同已取代；有价值的 compiler invariant 转为 Phase 02 测试，公共 wire 断言由 Phase 01 Graph/Task/Authoring 合同测试替换 |
 | `test_runtime_service_boundary.py` | planning/dispatch/recovery 语义拆分至 Phase 03 和 04；不保留任何 Run DTO 或路由 |
-| `test_unified_runtime_api.py` | 旧公共路由由 Phase 01 共享路由测试、Phase 04 runtime 行为测试、Phase 05 debugger 测试和 Phase 08 真实 FE E2E 替换 |
+| `test_unified_runtime_api.py` | 旧公共路由由共享 route 测试、R1 runtime 行为测试、DBG 测试和 UI1 真实 FE E2E 替换 |
 
 Phase 04 下其余 source-only runtime 测试仍是有价值的行为依据，但所有
 Run/table/route 断言都必须语义转换为 Task/Job/event identity。
 
-## 5. 可执行阶段计划
+## 5. Phase 02H 起整体交付计划
 
-| 顺序 | 交付内容 | 进入条件 | 退出证据 |
-|---:|---|---|---|
-| 1 | 完成 Phase 01 冻结共享接口：个体 Node/Edge 管理和普通 Task command | P0-1 已关闭 | 冻结 Backend parity 测试通过；新模块中没有旧公共 vocabulary |
-| 2 | 实现 Phase 02 生产 compiler、template catalog import、package source discovery 和 D-040 Backend-shaped 纯转换 | Phase 01 已关闭；P0-2 已关闭；完整 action ResourceSlot projection 仍需 P0-4 | 稳定 UUID/source-map round trip；真实 package Draft 注册；无公共 Canonical wire DTO |
-| 3 | 深化 scheduler，使其消费不可变 Task snapshot 并更新预创建 Jobs | Phase 02 compiler/plan seam 可用；P0-3 已关闭，完整 action input 仍需 P0-4 | 无 Run alias 的 Task/Job 状态测试通过 |
-| 4 | 迁移 journal、outbox、recovery、reconciliation、feedback 和前端 runtime SSE 投影 | Phase 03 Node scheduler 完成 | 基于 Task/Job identity 的 restart/unknown/cancel/replay 测试通过 |
-| 5 | 先实现普通 debugger，再实现 P1-1 launch/Hold 扩展 | Phase 04 durable runtime 完成；完整 debugger 需要 P1-1 关闭 | Task command 和 Hold E2E 通过；前端不持有 debugger authority |
-| 6 | 在前端合同之后集成 device execution 行为 | Phase 04/05 runtime seam 完成 | 真实和 fake driver parity、安全 cancel/recovery 测试通过 |
-| 7 | 集成 Material authority 和 ResourceSlot 流程 | P0-3 已关闭；Action projection 需 P0-4 关闭 | 结构化 Material E2E 通过；无字段名 heuristic |
-| 8 | 替换 FE port、拆分 Panel controller、迁移 UI，并执行真实 OS E2E | 对应 OS slice 完成；P0-2/P0-3 决策已关闭，完整产品闭环仍需实现它们并关闭 P0-4/P0-5；完整 debugger 需要 P1-1 | 产品 FE 中没有旧路由、DTO、WebSocket 或客户端文件 authority |
-| 9 | 替代测试存在后删除已取代的 bridge 代码和 fixture | 所有替代测试套件通过 | 全仓测试通过；清单中没有未处置条目 |
+旧 Phase 03～09 只保留为历史来源分类，不再作为执行顺序。Material 不能等到
+Scheduler 和 device execution 之后才实现，前端也不能等所有 OS 功能结束后一次性
+迁移。上文各表的“归属阶段”列按历史 provenance 阅读；实际 owner、依赖和接受门
+以本节为准。
 
-### Phase 01 立即实施项
+### 5.1 Phase 02H 边界修正
 
-当前目标已经实现 Graph GET/full PUT、Task 创建和查询、Authoring
-GET/Draft/Apply 以及全局 SSE。在开始替换 FE 前，Phase 01 仍需完成：
+Phase 02H 只关闭 Task Input Contract 的通用 preflight：
 
-1. 镜像冻结 Backend 的个体 WorkflowNode 和 WorkflowEdge 管理接口；
-2. 实现 `POST /workflow-tasks/{task_uuid}/commands`，包括冻结的幂等和错误行为；
-3. 为以上接口补充 route/DTO parity 测试；
-4. 证明后续 Graph 修改不会改变既有 Task snapshot 和预创建 Job；
-5. 执行阶段测试和完整 baseline gate；
-6. merge 前更新阶段 ledger。
+- 从 persisted Workflow metadata 读取 ordered Input Contract；
+- 完成 unknown/missing/default/null/type/constraint 校验；
+- 规范化 scalar、opaque object 及其 list；
+- 在创建任何 Task/Job 前拒绝无效输入；
+- 将 resolved input 写入 `WorkflowTask.input` 和 immutable snapshot；
+- 通过真实 Handle UUID 把 Workflow input binding 投影到 Task-scoped Job
+  `param`，不修改 persisted Node `param`；
+- 定义 ResourceSlot resolver port 和失败分类的仓库内合同测试，但不在缺少
+  production Material Module 时宣称非空 ResourceSlot 已可执行。
 
-不得为了临时解锁旧 FE 而增加 `/runtime/runs` 适配器。所需 OS slice 完成后，
-FE 必须直接面向最终 port 实现。
+原计划把完整 Material lookup、Reservation、Claim、Disposition 和删除保护同时
+写进 02H，却又在“不在本计划内”排除了 local Material authority。这一矛盾按如下
+方式消解：显式 ResourceSlot 的 production 解析和 Task Reservation 移入 M1；
+MaterialSource 自动选择和创建移入 M2。M1 完成前，带 ResourceSlot 的 Task 不得部分
+持久化、不得使用旧 Inventory fallback，也不得被当成 02H 退出证据。
+
+02H 是 OS repository-local delivery。若它不改变已冻结的共享 wire contract，不新建
+Core Decision；其 delivery Issue 以 `Uni-Lab-OS/Uni-Lab-Core#133` 为主父项并
+链接 `Uni-Lab-OS/Uni-Lab-Core#134`。本轮实现前写
+`rounds/02h-task-input-preflight-design.md`，先由独立测试作者提交 RED，再进入实现。
+
+### 5.2 功能切片、仓库 owner 与联调门
+
+| 切片 | OS delivery | 前端 delivery | Scheduler/设备 delivery | 联调与 Spec 落位 |
+|---|---|---|---|---|
+| **02H Input preflight** | ordered contract、严格规范化、snapshot、Job param binding；ResourceSlot resolver seam | 仅同步最终 Task input DTO/错误展示，不提前做 Material selector | 无 | OS round spec；真实 OS API 覆盖 scalar/default/null、ResourceSlot injected 404/409 分类和 production fail-closed，不单独设置跨仓接受门 |
+| **A1 Action typed contract** | D-100～D-108：参数/具名结果、真实 Backend Handles、material port、variable selector、默认值、结果归一化；退役 `@action(handles=...)` | Catalog 驱动端口、参数表单和 selector；删除字段名/ordinal 猜测 | 无 | `Uni-Lab-OS/Uni-Lab-Core#135` 下保持 active Decision，分别创建 OS/FE children；联调验证 Catalog fingerprint、Python/JSON round-trip 和 UI 投影 |
+| **I1 Workflow I/O** | Input/Output Contract、input/output bindings、Executable Node Contract 和 schema/codec | Workflow input/output 编辑、校验和 Task 表单 | 无 | `Uni-Lab-OS/Uni-Lab-Core#133`；协议冻结后分别写 OS/FE implementation spec，联调 contract/default/ResourceSlot codec |
+| **C1 Composite authoring** | persistent Composite Invocation、稳定 boundary Handles/mappings、transparent/gated 声明 | Composite node、边界端口、映射和模式编辑 | 无 | `Uni-Lab-OS/Uni-Lab-Core#136`；依赖 A1/I1，做保存/刷新/生成 Python 往返联调 |
+| **M1 Material/Site authority foundation** | Material、Site、Warehouse、Disposition、软删除、Task Reservation、Job Claim、幂等 ChangeSet 的持久权威；显式 ResourceSlot production resolver | 只消费已冻结 Material/ResourceSlot DTO；不拥有分配、锁或错误分类 | Claim 中的 device identity/可用性 adapter；不拥有 Material 真值 | `Uni-Lab-OS/Uni-Lab-Core#134` 下创建或复用 active implementation Decision；OS spec 先冻结 schema/transaction/lock order，Core integration spec 覆盖争用、重启和 400/404/409 |
+| **M2 MaterialSource admission v1** | 非执行 MaterialSource declaration node；单一固定 template、可选具体 Material、一个 ResourceSlot 输出；创建/选择/Reservation 全有或全无 | MaterialSource、SiteSelector、CandidateSiteSet 编辑；进度/Site occupancy 等 `Uni-Lab-OS/Uni-Lab-Core#145` | Scheduler 只接收稳定 Site UUID 集合；不解析前端索引语法 | `Uni-Lab-OS/Uni-Lab-Core#140`、`Uni-Lab-OS/Uni-Lab-Core#141`、`Uni-Lab-OS/Uni-Lab-Core#142` 仍处 `stage:protocol-definition` 时只写 Core/Feishu Protocol spec；冻结并建 delivery children 后才写各仓 implementation spec。`Uni-Lab-OS/Uni-Lab-Core#143～#146` 未冻结部分不得占位实现；`Uni-Lab-OS/Uni-Lab-Core#148` 延期 |
+| **R1 Durable runtime kernel** | Task/Job 状态机、journal/outbox、command 幂等、feedback、unknown/reconcile、重启恢复、唯一 `workflow.runtime.changed` invalidation | `WorkflowTaskController`：先连 SSE、读取一致 REST snapshot、重连/去重/补水；不消费 event patch | transport session 只是执行投影，不成为终态权威 | `Uni-Lab-OS/Uni-Lab-Core#130` 下建立 runtime interaction Decision/children；联调 spec 明确 HTTP/SSE 时序、cursor、OS restart 和 partial-read failure |
+| **R2 Admission、ExecutionPlan 与 sole coordinator** | 从 immutable Task snapshot 生成计划；derived Edge resolution；资源 readiness；完整 Reservation 后 admission；ready Job dispatch 前完整 Claim | 展示 pending/等待原因；不得运行 DAG walker 或乐观写终态 | 若外部 Scheduler 参与，只接收 versioned plan/约束并返回建议；OS coordinator 保留唯一 readiness/admission/terminal owner | Core 对跨 OS/Scheduler 边界建 Decision；OS 与 Scheduler 各自 delivery spec；Core E2E 验证 duplicate request、contention、restart 和单一 owner |
+| **D1 Device execution 与 result commit** | RobotCommand、Mutation Session、baseline/增量 ChangeSet、显式和隐式结果归一化、Fenced Claim/reconciliation | 展示 running、reconciling、结果和可行动错误 | device adapter/driver 实现厂商协议和 query/reconcile，不解释 Workflow graph | Core integration gate 固定 fake 与真实 driver fixture；OS/设备各自仓库写实现 spec；未知物理结果不得被 HTTP success 覆盖 |
+| **O1 Composite runtime 与 Task output** | Planner lowering；transparent/completion-gated readiness；Composite 本身无 Job；成功时原子写完整 Task output，其他状态为 `{}` | 展示 composite frame、真实内部 Job 和最终 output；不展示 partial output | 无新增 owner | `Uni-Lab-OS/Uni-Lab-Core#136`；联调覆盖 transparent frame、gated completion、ResourceSlot output 和 SSE/REST rehydration |
+| **UI1 前端纵向迁移** | 提供最终 Authoring、Catalog、Task/Job、Material 和 debug Interface | 按 `AuthoringController → TaskController → Material projection → DebugController` 分批迁移；删除浏览器 source authority、Run DTO、Workflow WebSocket 和 fallback | 无 | 每个后端 slice 合入候选 SHA 后立即建立对应 FE delivery，不等“Phase 08”；前端 spec 放 `docs/migration/workflow/`，每批都有真实 OS Playwright gate |
+| **DBG Debugger** | D-112～D-116：debug launch/projection、durable Holds、scoped permits、causal step fences、冻结 source/composite projection | launch/frontier/breakpoint、Hold scope、step/continue/step-over/out、三类未执行状态和固定文案 | Claim/admission 继续服从 R2，不给 debugger 第二个 scheduler | 使用 `deepmodeling/Uni-Lab-OS#299`、`Uni-Lab-OS/uni-lab-fe#1` 和 `Uni-Lab-OS/Uni-Lab-Core#137`；Core spec 覆盖 multi-start、branch-local、composite、SSE restart、OS restart、409 stale snapshot |
+| **J1 Conditional Join** | 只实现已冻结的临时 `compute` Join、最多 16 输入、确定性 codec/round-trip 和 runtime lowering | 对应临时 Join 编辑与错误展示 | Scheduler 消费 lowering 后计划，不拥有 Join 语法 | `Uni-Lab-OS/Uni-Lab-Core#132` 建 delivery children 和联调测试；正式 Backend Join 继续延期，不把临时表示写成长期公共扩展 |
+| **X1 退役与接受** | 删除 `/runtime/runs`、Run identity、旧 scheduler authority、parallel history/monitor truth 和已取代 bridge | 删除 Run DTO、旧 socket、轮询 fallback、客户端文件 authority 和 identity heuristics | 删除被新 plan/claim 合同取代的兼容锁或桥 | Core integration Issue 记录各仓 full SHA、CI、E2E artifact、submodule pin；更新 Feishu Protocol/Implementation/Testing 后才 `stage:accepted` |
+
+Tool Call `Uni-Lab-OS/Uni-Lab-Core#138` 整体延期；`manual_confirmation` 仍属于
+R1 的共享 Runtime 行为，不得因 Tool Call 延期而阻塞。Material 进度/Site
+occupancy UI 必须等待 `Uni-Lab-OS/Uni-Lab-Core#145`，Backend 预分配后交给 OS
+的跨 Authority 事务必须等待 `Uni-Lab-OS/Uni-Lab-Core#144`，
+`apply_deduct_resource` 的去留必须等待 `Uni-Lab-OS/Uni-Lab-Core#146`。
+
+### 5.3 推荐依赖与并行关系
+
+```text
+02H
+ ├─ A1 ──┐
+ ├─ I1 ── C1
+ ├─ M1 ── M2
+ └─ R1
+          │
+A1 + I1 + C1 + M1 + R1
+          ▼
+         R2 ── D1 ── O1 ── DBG
+          └─────────────── J1
+
+UI1 随每条已稳定 Interface 纵向进入；X1 只能最后执行。
+```
+
+M1 和 R1 可以在 02H 后并行；M2 受 active protocol Decision 阻塞。R2 可以先对
+纯 scalar Action 建立执行链，但任何消费 ResourceSlot 的成功路径必须等 M1；
+任何自动选择 Material 的成功路径必须再等 M2。Debugger 在 R1/R2、Claims、
+Composite runtime 和一致 projection 全部可用之后进入真实联调。
+
+### 5.4 Wayfinder 落票规则
+
+1. `Uni-Lab-OS/Uni-Lab-Core#1` 只维护 Outcome、功能顺序、Frontier、Blocked 和 Fog，不塞入每个仓库
+   的文件清单。
+2. 每个跨仓合同只在对应功能目录下保留一个 active Decision；历史 D-001～D-116
+   目录票只作 provenance，不能作为“已实现”票复用。
+3. OS、前端、Scheduler/设备各自创建 repository-local delivery child；跨仓依赖
+   使用 native dependency 或完整 Issue URL，不能用裸跨仓 `#number`。
+4. 每个 delivery child 只覆盖一个 mergeable slice，并链接本仓 implementation
+   spec、测试 commit、PR/full SHA 和 CI。D-096 的独立测试作者、完整 suite、精确
+   SHA review 和不 squash provenance 继续适用于 OS migration round。
+5. Core integration gate 只在协议已冻结且 delivery children 明确后创建；进入
+   `stage:testing` 时固定候选 full SHA，任何代码变化都使对应 review/E2E 证据失效。
+6. 只有 merged delivery、跨仓 E2E、Feishu 接受版本和 Core submodule pin 一致，
+   才把 Decision 标为 `stage:accepted` 并关闭。
+
+### 5.5 当前落票清单
+
+| 功能 | Primary Wayfinder 位置 | 需要的 delivery / integration ticket |
+|---|---|---|
+| 02H | `Uni-Lab-OS/Uni-Lab-Core#133`；关联 `Uni-Lab-OS/Uni-Lab-Core#134` | 一个 `deepmodeling/Uni-Lab-OS` delivery；共享 wire 不变时不新增 Core Decision |
+| A1 | `Uni-Lab-OS/Uni-Lab-Core#135` | 一个 OS child、一个 `Uni-Lab-OS/uni-lab-fe` child、一个 Catalog/editor integration gate |
+| I1 | `Uni-Lab-OS/Uni-Lab-Core#133` | 分开的 OS/FE children；不能和 C1 合成一个不可独立合并的 delivery |
+| C1、O1 | `Uni-Lab-OS/Uni-Lab-Core#136` | authoring、runtime/output 分成两轮 OS delivery；各自配 FE child，O1 另有 runtime E2E |
+| M1 | `Uni-Lab-OS/Uni-Lab-Core#134` | 历史 D-093～D-099 不重新打开；在功能目录下建立 active implementation Decision，再挂 OS child 和 contention/restart integration gate |
+| M2 | `Uni-Lab-OS/Uni-Lab-Core#140`、`Uni-Lab-OS/Uni-Lab-Core#141`、`Uni-Lab-OS/Uni-Lab-Core#142` | 保持各自 Decision 身份；协议冻结后按 MaterialSource、Admission Reservation、Deck/Warehouse 分开建 delivery，互相用 dependency 连接 |
+| R1、UI1 Runtime | `Uni-Lab-OS/Uni-Lab-Core#130` | OS runtime child、FE services/controller child、HTTP/SSE integration gate |
+| R2 | 资源 Admission 主挂 `Uni-Lab-OS/Uni-Lab-Core#134`，控制流关联 `Uni-Lab-OS/Uni-Lab-Core#132` | 若接入外部 Scheduler，先建跨 OS/Scheduler Decision，再分别建 OS 与 `Uni-Lab-OS/uni-lab-scheduler` children |
+| D1 | 结果合同主挂 `Uni-Lab-OS/Uni-Lab-Core#135`，Material effect 关联 `Uni-Lab-OS/Uni-Lab-Core#134` | OS runtime/adapter delivery 与设备 package delivery 分开；Core gate 固定 fake/real driver fixture |
+| DBG | `Uni-Lab-OS/Uni-Lab-Core#131` | 复用 `deepmodeling/Uni-Lab-OS#299`、`Uni-Lab-OS/uni-lab-fe#1` 和 `Uni-Lab-OS/Uni-Lab-Core#137`，不另造平行 Debugger umbrella |
+| J1 | `Uni-Lab-OS/Uni-Lab-Core#132` | OS compiler/runtime child、FE editor child和临时 Join integration gate |
+| X1 | `Uni-Lab-OS/Uni-Lab-Core#126`、`Uni-Lab-OS/Uni-Lab-Core#2`、`Uni-Lab-OS/Uni-Lab-Core#125` | Core cleanup/acceptance gate；记录各仓 full SHA、submodule pin、Feishu revision 和删除旧接口的替代测试 |
+
+`Uni-Lab-OS/Uni-Lab-Core#1` 的 Frontier 只需要按上述顺序指向当前第一个未阻塞的
+Decision/delivery；不要把整张实现表复制进 Map body。若一个功能同时关联两个目录，
+选择唯一 primary parent，另一个使用完整 Issue URL 关联，避免双重状态权威。
 
 ## 6. 完成条件
 
 只有满足以下全部条件，FE–OS 交互迁移才算完成：
 
-- 本矩阵每一项都已实现、由替代测试明确取代，或仍由一个未关闭阶段负责；
+- 本矩阵每一项都已实现、由替代测试明确取代，或仍由一个明确 owner、依赖和
+  `stage:*` 的 active Issue 负责；
 - 产品 FE 中不存在 `/api/v1/runtime/runs`、`/api/v1/runtime/events`、
   `run_id`、`WorkflowRun` 或公共 Canonical-v2 identity；
 - 新 OS 公共模块中不存在旧 Run 路由或 wire alias；
@@ -286,4 +410,11 @@ FE 必须直接面向最终 port 实现。
 - Task 创建绝不携带 DAG，并且始终对当前 Applied Graph 建立快照；
 - 普通 Task command 保持幂等，并返回冻结的 command record；
 - dirty buffer conflict 和外部修改行为通过真实 browser-to-OS E2E；
-- 迁移后的 E2E 使用真实 OS 接口，不依赖旧 local bridge mock 或兼容路由。
+- 迁移后的 E2E 使用真实 OS 接口，不依赖旧 local bridge mock 或兼容路由；
+- ResourceSlot 成功路径使用 production Material Module、完整 Task Reservation 和
+  Job Claim，不依赖旧 Inventory 或字段名 heuristic；
+- Composite、Task output、Debugger 和临时 Conditional Join 均有对应的 OS/FE
+  delivery 证据及 Core integration gate；
+- 相关跨仓 Decision 已同步 Feishu Protocol/Implementation/Testing revision，Core
+  已固定通过 E2E 的各仓 full SHA/submodule pin，并进入 `stage:accepted`；
+- 长期合同已迁入正式 Interface/module 文档，本临时目录只保留可删除的迁移 provenance。
