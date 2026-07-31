@@ -1038,6 +1038,56 @@ def test_persisted_binding_identity_and_shape_fail_closed_at_task_preflight(
     _assert_no_tasks(service)
 
 
+def test_binding_value_must_match_the_real_target_handle_type(
+    store: WorkflowStore,
+) -> None:
+    service = _create_workflow(
+        store,
+        contract=_input_contract(_parameter("amount", {"type": "string"})),
+    )
+    _seed_template_catalog(store)
+    _save_graph(
+        store,
+        nodes=[
+            _node(
+                TARGET_NODE_UUID,
+                template_uuid=TARGET_TEMPLATE_UUID,
+                bindings={TARGET_HANDLE_UUID: {"parameter": "amount"}},
+            )
+        ],
+    )
+
+    with pytest.raises(WorkflowError) as failure:
+        _create_task(service, {"amount": "not-a-number"})
+
+    assert failure.value.code == "invalid_input"
+    _assert_no_tasks(service)
+
+
+def test_persisted_static_provider_must_match_the_real_target_handle_type(
+    store: WorkflowStore,
+) -> None:
+    service = _create_workflow(store)
+    _seed_template_catalog(store)
+    _save_graph(
+        store,
+        nodes=[
+            _node(
+                TARGET_NODE_UUID,
+                template_uuid=TARGET_TEMPLATE_UUID,
+                param={"volume": 1},
+            )
+        ],
+    )
+    _replace_node_param(store, TARGET_NODE_UUID, {"volume": "not-a-number"})
+
+    with pytest.raises(WorkflowError) as failure:
+        _create_task(service)
+
+    assert failure.value.code == "invalid_input"
+    _assert_no_tasks(service)
+
+
 @pytest.mark.parametrize("provider", ["static", "edge"], ids=["static", "edge"])
 def test_multiple_handle_providers_are_rejected_at_task_preflight(
     store: WorkflowStore,
