@@ -75,6 +75,9 @@ class DraftLinearizationCompiler:
         normalized_source = (
             python_source if python_source.endswith("\n") else python_source + "\n"
         )
+        node_already_applied = any(
+            node.get("uuid") == NODE_UUID for node in applied_graph["nodes"]
+        )
         return CandidateCompilation(
             diagnostics=[],
             graph={
@@ -117,8 +120,8 @@ class DraftLinearizationCompiler:
                 }
             ],
             changeset={
-                "kind": "graph",
-                "created_node_uuids": [NODE_UUID],
+                "kind": "source_only" if node_already_applied else "graph",
+                "created_node_uuids": [] if node_already_applied else [NODE_UUID],
                 "updated_node_uuids": [],
                 "deleted_node_uuids": [],
                 "created_edge_uuids": [],
@@ -159,6 +162,36 @@ def _authoring_client(
             yield client, package_root / "workflows" / "demo.py", database_path
     finally:
         store.close()
+
+
+@contextmanager
+def _monitored_authoring_client(
+    tmp_path: Path,
+    compiler: DraftLinearizationCompiler,
+) -> Iterator[tuple[TestClient, Path]]:
+    working_dir = tmp_path / "unilabos_data"
+    package_root = tmp_path / "package"
+    package_root.mkdir()
+    reset_workflow_service_for_test()
+    service = compose_workflow_runtime(working_dir, compiler=compiler)
+    service.create_workflow(
+        name="Phase 01A3 Applied Source stale 投影",
+        tags=[],
+        description=None,
+        meta_data={},
+        workflow_uuid=WORKFLOW_UUID,
+    )
+    service.register_editable_source(
+        workflow_uuid=WORKFLOW_UUID,
+        package_id="phase_01a3_contract",
+        package_root=package_root,
+        relative_path="workflows/demo.py",
+    )
+    try:
+        with TestClient(create_workflow_app(service)) as client:
+            yield client, package_root / "workflows" / "demo.py"
+    finally:
+        reset_workflow_service_for_test()
 
 
 def _save_materialized_candidate(client: TestClient) -> dict[str, Any]:
@@ -269,6 +302,48 @@ def test_事务线性化点拒绝竞争期间发生的外部_draft_替换(tmp_pa
     assert apply_response.json()["error"]["code"] == "draft_hash_conflict"
     assert after["workflow_revision"] == before["workflow_revision"] == 1
     assert after["applied_source"] == before["applied_source"] is None
+    assert preserved_source == external_source
+
+
+def test_apply_后外部替换保留_applied_revision_并投影_source_stale(
+    tmp_path: Path,
+) -> None:
+    compiler = DraftLinearizationCompiler()
+    with _monitored_authoring_client(tmp_path, compiler) as (client, draft_path):
+        saved = _save_materialized_candidate(client)
+        apply_response = client.post(
+            f"/api/v1/workflows/{WORKFLOW_UUID}/authoring/apply",
+            json={"candidate_hash": saved["candidate"]["candidate_hash"]},
+        )
+        assert apply_response.status_code == 200
+        applied = apply_response.json()["data"]["authoring"]
+
+        external_source = b"result = externally_edited_after_apply()\n"
+        _atomic_replace(draft_path, external_source)
+
+        deadline = time.monotonic() + 3
+        while time.monotonic() < deadline:
+            aggregate = _get_authoring(client)
+            if (
+                aggregate["draft"]["python_source"] == external_source.decode("utf-8")
+                and aggregate["candidate"] is not None
+                and aggregate["candidate"]["draft_hash"]
+                == aggregate["draft"]["draft_hash"]
+            ):
+                break
+            threading.Event().wait(0.02)
+        else:
+            pytest.fail(
+                "Authoring GET 未在限定时间内投影外部 Draft 的新 Candidate："
+                f"{aggregate!r}"
+            )
+
+        preserved_source = draft_path.read_bytes()
+
+    assert aggregate["state"] == "applied_source_stale"
+    assert aggregate["workflow_revision"] == applied["workflow_revision"] == 2
+    assert aggregate["applied_source"] == applied["applied_source"]
+    assert aggregate["draft"]["python_source"] == external_source.decode("utf-8")
     assert preserved_source == external_source
 
 
