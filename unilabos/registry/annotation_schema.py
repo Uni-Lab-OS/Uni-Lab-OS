@@ -127,7 +127,7 @@ def _subscript_members(node: ast.Subscript) -> list[ast.expr]:
 def _literal_value(node: ast.expr, *, path: str) -> Any:
     try:
         value = ast.literal_eval(node)
-    except (RecursionError, TypeError, ValueError):
+    except (OverflowError, RecursionError, TypeError, ValueError):
         _fail(path)
     pending = [value]
     while pending:
