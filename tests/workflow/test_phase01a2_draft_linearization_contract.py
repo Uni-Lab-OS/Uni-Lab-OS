@@ -305,7 +305,7 @@ def test_事务线性化点拒绝竞争期间发生的外部_draft_替换(tmp_pa
     assert preserved_source == external_source
 
 
-def test_apply_后外部替换保留_applied_revision_并投影_source_stale(
+def test_apply_后外部替换保留_stale_applied_source_并投影_source_only_candidate(
     tmp_path: Path,
 ) -> None:
     compiler = DraftLinearizationCompiler()
@@ -340,9 +340,14 @@ def test_apply_后外部替换保留_applied_revision_并投影_source_stale(
 
         preserved_source = draft_path.read_bytes()
 
-    assert aggregate["state"] == "applied_source_stale"
+    assert aggregate["state"] == "unapplied_source_only"
     assert aggregate["workflow_revision"] == applied["workflow_revision"] == 2
     assert aggregate["applied_source"] == applied["applied_source"]
+    assert (
+        aggregate["applied_source"]["source_hash"] != aggregate["draft"]["draft_hash"]
+    )
+    assert aggregate["candidate"] is not None
+    assert aggregate["candidate"]["draft_hash"] == aggregate["draft"]["draft_hash"]
     assert aggregate["draft"]["python_source"] == external_source.decode("utf-8")
     assert preserved_source == external_source
 
