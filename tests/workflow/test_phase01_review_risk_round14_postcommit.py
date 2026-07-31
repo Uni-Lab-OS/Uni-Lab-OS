@@ -60,7 +60,7 @@ class ApplyCommittedBarrierStore(WorkflowStore):
         self.apply_committed = threading.Event()
         self.release_post_commit = threading.Event()
 
-    def apply_authoring_candidate(self, **kwargs: Any) -> int:
+    def apply_authoring_candidate(self, **kwargs: Any) -> tuple[int, str]:
         resulting_revision = super().apply_authoring_candidate(**kwargs)
         self.apply_committed.set()
         if not self.release_post_commit.wait(timeout=3):

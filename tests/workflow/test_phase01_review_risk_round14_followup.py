@@ -74,7 +74,7 @@ class ApplyEntryBarrierStore(WorkflowStore):
         self.apply_transaction_entered = threading.Event()
         self.release_apply_transaction = threading.Event()
 
-    def apply_authoring_candidate(self, **kwargs: Any) -> int:
+    def apply_authoring_candidate(self, **kwargs: Any) -> tuple[int, str]:
         self.apply_transaction_entered.set()
         if not self.release_apply_transaction.wait(timeout=3):
             raise TimeoutError("test did not release Authoring Apply transaction")

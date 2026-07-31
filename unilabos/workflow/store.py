@@ -18,6 +18,8 @@ from unilabos.workflow.graph_validation import (
 from unilabos.workflow.json_codec import decode_json_bytes, encode_json
 from unilabos.workflow.models import WorkflowEdgeWrite, WorkflowNodeWrite
 
+_STORE_INITIALIZATION_LOCK = threading.Lock()
+
 
 def utc_now() -> str:
     return datetime.now(timezone.utc).isoformat().replace("+00:00", "Z")
@@ -288,7 +290,9 @@ class WorkflowStore:
         self._lock = threading.RLock()
         self._conn = sqlite3.connect(self.path, check_same_thread=False)
         self._conn.row_factory = sqlite3.Row
-        with self._lock:
+        # 同一进程中的多个 Store 可能同时打开旧数据库；初始化串行化后，
+        # SQLite 的迁移事务再负责跨连接、跨进程互斥。
+        with _STORE_INITIALIZATION_LOCK, self._lock:
             self._conn.execute("PRAGMA journal_mode = WAL")
             self._conn.execute("PRAGMA synchronous = NORMAL")
             self._conn.executescript(_SCHEMA)
@@ -306,6 +310,29 @@ class WorkflowStore:
                         ALTER TABLE workflow_authoring
                         ADD COLUMN writeback_generation TEXT
                         """
+                    )
+                legacy_markers = self._conn.execute(
+                    """
+                    SELECT workflow_uuid
+                    FROM workflow_authoring
+                    WHERE writeback_status = 'pending'
+                      AND writeback_source IS NOT NULL
+                      AND writeback_expected_hash IS NOT NULL
+                      AND writeback_generation IS NULL
+                    """
+                ).fetchall()
+                for marker in legacy_markers:
+                    self._conn.execute(
+                        """
+                        UPDATE workflow_authoring
+                        SET writeback_generation = ?
+                        WHERE workflow_uuid = ?
+                          AND writeback_status = 'pending'
+                          AND writeback_source IS NOT NULL
+                          AND writeback_expected_hash IS NOT NULL
+                          AND writeback_generation IS NULL
+                        """,
+                        (str(uuid4()), marker["workflow_uuid"]),
                     )
             except BaseException:
                 self._conn.rollback()

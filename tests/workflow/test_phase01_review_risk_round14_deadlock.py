@@ -31,7 +31,7 @@ class ApplyTransactionProbeStore(WorkflowStore):
         self.apply_transaction_active = threading.Event()
         self._apply_call = threading.local()
 
-    def apply_authoring_candidate(self, **kwargs: Any) -> int:
+    def apply_authoring_candidate(self, **kwargs: Any) -> tuple[int, str]:
         self._apply_call.active = True
         try:
             return super().apply_authoring_candidate(**kwargs)
