@@ -25,17 +25,14 @@ test-author/full-suite/independent-review gate in the concrete execution plan.
 |---|---|---|
 | 00 | Baseline, decisions, manifests, test evidence | complete |
 | 01 | Backend-aligned Workflow/WorkflowTask contract | complete |
-| 02 | Canonical Workflow and Python/JSON authoring | in progress; 02A/02B complete, 02C next |
-| 03 | Node-centric control-DAG scheduler | not planned in detail |
-| 04 | Durable node/job/event runtime and reconciliation | not planned in detail |
-| 05 | Run-scoped debugger semantics | not planned in detail |
-| 06 | HostLink and device execution integration | not planned in detail |
-| 07 | Material authority, leases, reservations, and ledger | not planned in detail |
-| 08 | Frontend and Cloud integration | not planned in detail |
-| 09 | Cleanup, security, complete regression, and release | not planned in detail |
+| 02 | Canonical Workflow and Python/JSON authoring；02H closes generic Task input preflight only | in progress; 02A/02B complete, 02C candidate pending final gate/merge |
+| 02H+ | Action、Material、runtime、scheduler/device、subworkflow/output、frontend、debugger 和 integration functional slices | planned by functional owner in the FE–OS matrix |
+| 03～09 | Historical source-inventory buckets | superseded as an execution order; retained only for migration provenance |
 
-Only the current phase and the immediately unblocked next phase are expanded.
-Later phase details are deliberately deferred until their entry grill.
+Only the current phase and the immediately unblocked next repository-local
+slice are expanded into implementation detail. Cross-repository work after
+02H follows the functional Wayfinder hierarchy and writes repository specs only
+when the corresponding protocol and delivery child reach their entry gate.
 
 The lettered slices in the concrete plan are the engineering rounds. Historical
 02A/02B hardening sub-rounds remain in Git for provenance, but new work does not
@@ -52,7 +49,7 @@ decision blocker or an expansion of authority still stops execution.
 - [Decisions](decisions.md)
 - [Decision status audit](decision_status_audit.md)
 - [Backend design comparison](backend_design_comparison.md)
-- [旧版 FE–OS 交互迁移矩阵](fe_os_interaction_migration_matrix.md)
+- [FE–OS 交互迁移矩阵与 Phase 02H 起整体计划](fe_os_interaction_migration_matrix.md)
 - [Migration manifest](migration-manifest.md)
 - [Test inventory](test-inventory.md)
 - [每轮测试与评审门禁记录模板](round-gate-template.md)

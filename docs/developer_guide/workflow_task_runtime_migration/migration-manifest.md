@@ -3,6 +3,12 @@
 This is a phase-level inventory, not a promise to copy paths byte-for-byte.
 Exact destination paths are confirmed only when the owning phase is entered.
 
+The `Owning phase` column preserves the original source-inventory buckets. From
+Phase 02H onward it is not an execution order: actual OS/frontend/Scheduler
+ownership, dependencies, Spec timing, integration gates, and Wayfinder issue
+placement are defined by
+[the FE–OS interaction matrix and Phase 02H+ plan](fe_os_interaction_migration_matrix.md#5-phase-02h-起整体交付计划).
+
 | Capability/source | Source commit | Mode | Owning phase | Initial disposition |
 |---|---|---|---:|---|
 | Backend Workflow/Task frontend Interface | `09609a2` (frozen, read-only) | semantic | 01 | mirror frozen frontend paths/DTOs/behavior; documents 10-12 are historical only |
