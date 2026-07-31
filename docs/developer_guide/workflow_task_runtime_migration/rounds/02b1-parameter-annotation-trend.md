@@ -6,10 +6,10 @@
 
 基线：`ca6083b`
 
-当前 production/test 候选：`a75e8fe`
+当前 production/test 候选：`c591f94`
 
-状态：**四个 review blocking 已修复且正式测试全绿，等待三名独立 reviewer
-针对新 SHA 依次复核。**
+状态：**六个 review blocking 已测试化并修复，正式测试全绿；等待三名独立
+reviewer 针对最终 production/test SHA 依次复核。**
 
 ## 1. 本轮交付
 
@@ -36,16 +36,20 @@ Backend。Action result record 继续留给 02B2。
 - `ParsedParameter` 改为只能由 parser 构造，普通 caller 不能伪造 nominal
   合法、内部非法的值；
 - 深 literal AST 的 `RecursionError` 被稳定投影为 `AnnotationSchemaError`；
-- annotation 与 canonical Schema 两层 enum 判重都从 O(n²) 改为保序 O(n)；
+- annotation 与 canonical Schema 两层 enum 判重改为不依赖 hash 均匀性的
+  保序 O(n log n)，可预测 integer hash collision 不再造成 O(n²) 退化；
 - 新增构造器补齐 `-> None`。
+- 所有 Authoring literal 位置增加 4096 位 canonical 十进制 integer 工作预算，
+  保证 parse → render → `ast.unparse` 闭包；这不是持久 Workflow integer
+  类型上限，也不修改进程全局 integer 转换限制。
 
 ## 2. 代码与测试增量
 
 | 类别 | 文件数 | 新增行 | 删除行 |
 |---|---:|---:|---:|
-| 生产代码 | 3 | 674 | 1 |
-| 独立合同/安全测试 | 2 | 1377 | 0 |
-| 实现前设计 | 1 | 243 | 0 |
+| 生产代码 | 3 | 710 | 2 |
+| 独立合同/安全/风险测试 | 3 | 1820 | 0 |
+| 实现前设计与决策补充 | 1 | 259 | 0 |
 
 测试代码明显多于生产代码，是因为有限语法的价值主要来自闭合拒绝矩阵：测试不仅
 证明接受什么，也证明遇到动态表达式、非冻结 import identity、任意 Union、
@@ -97,14 +101,33 @@ S-01 构造器返回类型：2 failed
 4000 个成员完整保序
 ```
 
+最终风险 reviewer 随后发现上述 O(n) 修复仍依赖 Python integer hash，恶意碰撞
+可使两层判重重新退化为 O(n²)；同时约 4 KB 的合法十六进制 integer 可通过
+parser，却会令后续 `ast.unparse` 泄漏标准库 `ValueError`。独立测试作者在旧候选
+新增 20 个风险用例，得到：
+
+```text
+7 failed, 13 passed
+integer hash collision 增长守护：2 failed
+4097 位及非十进制绕过的 Authoring integer 预算：5 failed
+4096 位边界、可信 canonical 大整数与全局配置不变：13 passed
+```
+
+最终候选改用排序后相邻比较，保留原声明顺序且不增加 enum cap；所有 literal
+位置统一执行 4096 位 Authoring 工作预算。三个测试文件合并验证：
+
+```text
+159 passed
+```
+
 ## 4. 门禁结果
 
 ```text
-Parameter Annotation 目标：139 passed
+Parameter Annotation 目标：159 passed
 02A Schema/route 累计：212 passed
-Registry：165 passed
+Registry：185 passed
 Workflow：644 passed
-正式 tests：1195 passed, 3 skipped, 19 warnings
+正式 tests：1215 passed, 3 skipped, 19 warnings
 Ruff E/F/I：passed
 Ruff format --check：passed
 git diff --check：passed
@@ -126,24 +149,29 @@ deprecated 提示；没有本轮新增 warning。
 | 首次实现验证 | 1 个测试基础设施问题 | 1 | 0 |
 | 合同评审 | 0 blocking、1 follow-up | 0 | 0 blocking |
 | 模块安全评审 | 4 blocking | 4 | 0 |
-| 新候选正式门禁 | 0 个产品回归 | 0 | 0 |
+| 第一轮修复后复核 | 0 blocking、1 follow-up | 0 | 0 blocking |
+| 最终风险评审 | 2 blocking | 2 | 0 |
+| 最终候选正式门禁 | 0 个产品回归 | 0 | 0 |
 
-问题数并非单调下降：首个全绿候选之后，第二名 reviewer 又发现了 4 个自动测试
-未覆盖的问题。但这些问题全部位于一个模块内部，分别属于构造不变量、异常隔离、
-算法复杂度和类型标注；没有新增 Authority、持久状态、HTTP 交互或 FE 状态。
+问题数并非单调下降：首个全绿候选之后，模块安全 reviewer 发现 4 个问题；第一轮
+修复再次全绿后，最终风险 reviewer 又发现 2 个对抗输入问题。后一轮说明“平均输入
+更快”不能代替“最坏输入有界”，parse 通过也不能代替 parse/render/unparse 闭包。
+这些问题仍全部位于共享深模块和既有 canonical Schema 内，没有新增 Authority、
+持久状态、HTTP 交互或 FE 状态。
 
-修复后 blocking 从 4 降到 0，正式测试从 1183 增长到 1195。当前趋势应表述为：
-**边界审查仍能发现局部 hardening 问题，但问题被测试化并关闭，体系结构问题面没有
-扩张。** 是否允许合并仍以三个 reviewer 对 `a75e8fe` 的复核为准。
+两轮修复后累计 blocking 从 6 降到 0，正式测试从 1183 增长到 1215。当前趋势
+应表述为：**问题发现不是单调下降，但新增问题越来越集中于同一深模块的对抗边界，
+均已先测试化再关闭，体系结构与跨组件问题面没有扩张。** 是否允许合并仍以三个
+reviewer 对 `c591f94` 的顺序复核为准。
 
 ## 6. 策略调整
 
 1. 继续保持 Parameter Annotation 是深模块：后续 compiler 与 Registry
    复用它，不各自实现类型猜测。
-2. 三名 reviewer 对新 SHA 重新依次确认；旧候选的通过结论不直接继承，同时仍只
-   运行一名 subagent。
-3. 把性能问题作为 Interface 行为测试，不新增未经决策的 enum 数量 cap；以后遇到
-   同类问题先优化整条调用链，而不是只优化外层 parser。
+2. 三名 reviewer 对最终 production/test SHA `c591f94` 重新依次确认；旧候选的
+   通过结论不直接继承，同时仍只运行一名 subagent。
+3. 把最坏复杂度和 parse/render/unparse 闭包作为 Interface 行为测试；不新增未经
+   决策的 enum 数量 cap，也不修改进程全局 integer 转换限制。
 4. 02B2 只增加 Action result record，不趁机接旧 Registry 或 HTTP，继续缩小
    每轮变更半径。
 5. Catalog identity resolution、完整 compiler/transform/generate-python 各自
