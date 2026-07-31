@@ -1,6 +1,6 @@
 # Phase 02A：Workflow v1 Contract 与严格值 Schema 设计
 
-状态：**设计冻结，等待独立测试先行。**
+状态：**实现候选已通过测试，等待顺序独立评审。**
 
 分支：`migration/02a-schema-v1`
 
