@@ -1,6 +1,6 @@
 # Phase 01 Core：Round 14 趋势与策略报告
 
-状态：**第四次复审修正与本地全量测试已通过，新精确 SHA 复审尚未完成，禁止合并**。
+状态：**第五次复审修正与本地全量测试已通过，新精确 SHA 复审尚未完成，禁止合并**。
 
 统计范围：本报告把 Round 14 视为 legacy-named `migration/01-backend-contract`
 合并轮次内的第十四次审查修复循环。生产实现只统计 `unilabos/`；测试、文档和
@@ -142,6 +142,30 @@ skip/xfail。合并到父分支后的共同 RED 为 `3 failed, 1 passed`；并�
 调度概率，但独立重复循环在第二次即复现 `database is locked`，修正后连续
 30 次通过。
 
+第四次修正后形成第五个精确候选
+`c96d3518e493a9dbfd1645c3247d138976157f1b`，其干净 worktree 门禁为
+`863 passed, 3 skipped`。模块设计 reviewer 判定 FAIL；其余两名 reviewer 因
+精确 SHA 已失效而中止，必须在新 SHA 上从头复审。本次仍是 1 类初始化互斥
+blocker，但边界从同进程多连接推进到跨进程：
+
+- `_STORE_INITIALIZATION_LOCK` 只能保护当前进程；
+- 跨进程竞争发生在 `BEGIN IMMEDIATE` 之前的
+  `PRAGMA journal_mode = WAL`，SQLite 迁移事务尚未取得锁；
+- 6 进程 barrier 探针出现 2 个 `database is locked`，4 进程探针出现 1 个，
+  因此“迁移事务负责跨进程互斥”的旧注释与事实不符。
+
+两名独立测试作者从第五候选建立不同 worktree，分别冻结压力合同和确定性 busy
+窗口：
+
+| 测试维度 | subagent | 源测试 commit | 引入 commit | 第五候选上的红测 |
+|---|---|---|---|---|
+| 两轮、每轮四进程同时升级同一旧库 | `/root/phase01_contract_tests` | `ec9160694d4257bc5c756e0e56b63b232d9cbca1` | `35f8e65` | `1 failed` |
+| DELETE-mode 旧库被另一进程持有写锁 | `/root/round14_schema_adversarial_tests` | `796aee6bea9f9b9fc93c7150eabb3fe57212fbb8` | `47d13ea` | `1 failed` |
+
+两份提交只新增 2 个有界 multiprocessing 测试；每个 worker 都有
+join/terminate/kill 回收路径。共同 RED 为 `2 failed`：压力合同至少有一个进程
+返回锁错误；确定性用例证明 opener 没有等待 300ms 锁释放便立即失败。
+
 ## 2. 实现结果
 
 实现 commits：
@@ -150,7 +174,8 @@ skip/xfail。合并到父分支后的共同 RED 为 `3 failed, 1 passed`；并�
 - `bb32c37`（`fix(workflow): linearize authoring apply`）；
 - `9b3a938`（`fix(workflow): bind writeback recovery tokens`）；
 - `f39493c`（`fix(workflow): version writeback generations`）；
-- `5d686e1`（`fix(workflow): recover legacy writeback generations`）。
+- `5d686e1`（`fix(workflow): recover legacy writeback generations`）；
+- `4338b53`（`fix(workflow): wait for store initialization locks`）。
 
 本轮完成：
 
@@ -170,7 +195,10 @@ skip/xfail。合并到父分支后的共同 RED 为 `3 failed, 1 passed`；并�
   已有 generation 不被覆盖，缺 source/hash 的真正 malformed marker 保持
   generation 为空；
 - 同一进程中的 Store 初始化被串行化，SQLite 独占事务继续提供数据库迁移互斥；
-  并发打开旧库不再在 WAL/schema 初始化处泄漏 `database is locked`；
+  初始化进入独占事务前对 SQLite BUSY/LOCKED 做总计 5 秒的有界重试，覆盖跨进程
+  WAL/schema 竞争；
+- 初始化重试使用 100ms SQLite busy 窗口，成功后恢复正常 5 秒 busy timeout，
+  不降低运行期事务的等待语义；非锁错误立即透传，构造失败显式关闭连接；
 - Candidate graph proof、source-only proof 和 graph `uniqueItems` 共用迭代式、
   JSON 类型严格的等价/规范化实现，不受 Python recursion limit 影响；
 - raw Workflow HTTP seam 使用有限、非递归 JSON decoder，拒绝非有限数字，
@@ -198,18 +226,19 @@ skip/xfail。合并到父分支后的共同 RED 为 `3 failed, 1 passed`；并�
 
 | 指标 | 文件数 | 新增文件 | 新增行 | 删除行 | 净增 | 变动量 |
 |---|---:|---:|---:|---:|---:|---:|
-| Production `unilabos/` | 8 | 1 | 644 | 185 | 459 | 829 |
-| Tests | 14 | 9 | 3,420 | 48 | 3,372 | 3,468 |
+| Production `unilabos/` | 8 | 1 | 719 | 188 | 531 | 907 |
+| Tests | 16 | 11 | 3,883 | 48 | 3,835 | 3,931 |
 
-测试新增行与 production 新增行之比约为 `5.31:1`。新 production 文件是
+测试新增行与 production 新增行之比约为 `5.40:1`。新 production 文件是
 `unilabos/workflow/json_codec.py`。测试文件数包括一处既有 Round 12 fixture
-校正、9 份保留独立来源提交的 Round 14 测试文件，以及因 Store 私有化而改为
+校正、11 份保留独立来源提交的 Round 14 测试文件，以及因 Store 私有化而改为
 显式白盒访问的既有持久层测试。相对第一版报告，复审反馈新增了 162 行、
 删除了 89 行 production，实现增长集中在事务 CAS、迭代比较、精确源码坐标和
 Service 边界。相对第二候选，第二次复审修正新增 84 行、删除 39 行
 production；独立测试新增 778 行、删除 2 行。相对第三候选，ABA 修正新增
 57 行、删除 7 行 production，并新增 414 行独立测试。相对第四候选，升级兼容
-修正新增 28 行、删除 1 行 production，并新增 501 行独立测试。
+修正新增 28 行、删除 1 行 production，并新增 501 行独立测试。相对第五候选，
+跨进程初始化修正新增 75 行、删除 3 行 production，并新增 463 行独立测试。
 
 近五次修复循环的 production 变化如下：
 
@@ -219,23 +248,25 @@ production；独立测试新增 778 行、删除 2 行。相对第三候选，AB
 | Round 11 | 2 | 0 | 45 | 35 | 10 |
 | Round 12 | 5 | 0 | 301 | 20 | 281 |
 | Round 13 | 3 | 0 | 300 | 31 | 269 |
-| Round 14 | 8 | 1 | 644 | 185 | 459 |
+| Round 14 | 8 | 1 | 719 | 188 | 531 |
 
-Round 14 的当前净增比第一版报告增加 195 行，并横跨 HTTP、DTO、Service、
+Round 14 的当前净增比第一版报告增加 267 行，并横跨 HTTP、DTO、Service、
 Store、composition 和 monitor。原因不是增加业务功能，而是第一次事务修正把
 外部 Authority 检查错误地带入 Store 锁内，第二次复审又证明提交后恢复动作也
 必须绑定 Apply generation，第三次复审进一步证明内容 token 不能冒充 generation
 identity，第四次复审又补齐了 generation 引入前的持久数据升级语义；这些差异
-同时移除了进程全局 workaround、下沉统一 JSON 边界并收回泄漏的 Store seam。
+还必须覆盖第五次复审发现的事务前跨进程锁窗口。它们同时移除了进程全局
+workaround、下沉统一 JSON 边界并收回泄漏的 Store seam。
 
 ## 4. 当前验证证据
 
 | 门禁 | 结果 |
 |---|---|
-| Round 14 九份独立测试 | `36 passed` |
-| Workflow 子树与 Phase 01 独立 app tests | `466 passed` |
-| 完整仓库 `tests/` | `863 passed, 3 skipped` |
+| Round 14 十一份独立测试 | `38 passed` |
+| Workflow 子树与 Phase 01 独立 app tests | `468 passed` |
+| 完整仓库 `tests/` | `865 passed, 3 skipped` |
 | 并发旧 schema 初始化重复控制 | 修正前第 2 次复现锁错误；修正后连续 `30 passed` |
+| 跨进程初始化重复控制 | 两份 multiprocessing 测试连续 `10 × 2 passed` |
 | 10,000/10,001 层 JSON 控制 | 10,000 接受并往返；10,001 拒绝 |
 | 随机 JSON codec 对照 | 1,000 个标准库对照样本往返通过 |
 | Ruff `E/F/I/B`、format、`git diff --check` | 通过 |
@@ -246,7 +277,7 @@ identity，第四次复审又补齐了 generation 引入前的持久数据升级
 
 ## 5. 问题趋势判断
 
-实现缺陷总体在减少，但四次终审都证明上一候选尚未收敛：
+实现缺陷总体在减少，但五次终审都证明上一候选尚未收敛：
 
 - Round 14 的 7 类入口问题中，6 类已完整关闭；
 - 第 7 类中的 severity fail-closed 缺陷已关闭，但 D-030 repair payload 的字段
@@ -262,27 +293,32 @@ identity，第四次复审又补齐了 generation 引入前的持久数据升级
 - 第四次终审仍是 1 类问题，但已进一步收窄为 generation 引入时的旧数据迁移
   语义和初始化互斥；它不是新的产品接口或运行时能力，而是第三次修正的升级态
   完整性；
+- 第五次终审仍是初始化互斥这一类问题，只把验证边界从线程/连接推进到进程；
+  没有新增 DTO、路由、产品状态或 Authority；
 - 新发现已从普通 CRUD/响应形状转向 Authority 线性化、结构深度、精确字符编码
   与依赖方向，说明 happy path 已较稳定，剩余问题数量更少但验证成本更高；
-- 当前需要 644 行新增 production 代码和 185 行删除代码，表明仍有架构性
+- 当前需要 719 行新增 production 代码和 188 行删除代码，表明仍有架构性
   workaround 与边界清理，不能只凭最初用例数量下降判断稳定；
-- 补充红测现已全部转绿，Workflow 子树由 `447` 增至 `466` 个通过用例，说明
+- 补充红测现已全部转绿，Workflow 子树由 `447` 增至 `468` 个通过用例，说明
   新问题已被转化为可重复回归资产，而不是继续漂移的口头风险；
 - 只有固定当前最终 SHA 后的三方独立评审不再发现新的 blocking 类别，才能把
   Phase 01 core 判为收敛。
 
-因此当前趋势是：**问题类别按 `4 -> 2 -> 1 -> 1` 变化；最新一次数量没有继续
-下降，但范围已从在线 Apply generation identity 收窄到该字段的旧数据升级态，
-没有扩展产品范围。问题仍在收敛，但连续四次精确评审都发现 blocker，只有新候选
-三方全绿才可判定进入可合并平台期。**
+因此当前趋势是：**问题类别按 `4 -> 2 -> 1 -> 1 -> 1` 变化；最近两次数量没有
+继续下降，但范围已从在线 Apply generation identity 依次收窄到旧数据升级态和
+事务前跨进程锁窗口，没有扩展产品范围。问题仍在收敛，但连续五次精确评审都发现
+blocker，只有新候选三方全绿才可判定进入可合并平台期。**
 
 ## 6. 下一步策略调整
 
 1. 固定包含本报告的候选 SHA，在干净 worktree 重跑整仓测试和 lint/diff 门禁，
    再由原三名 reviewer 分别复审决策/合同、模块设计、事务/恢复/安全，明确确认
-   首次 4 类、第二次 2 类、第三次 ABA 和第四次旧数据升级 blocker 的处置，
+   首次 4 类、第二次 2 类、第三次 ABA、第四次旧数据升级和第五次跨进程初始化
+   blocker 的处置，
    尤其验证 Store 事务内无外部回调、generation CAS 失配无副作用、结构完整的
-   旧 marker 可恢复、malformed marker 不被伪造修复，以及并发/重复初始化幂等。
+   旧 marker 可恢复、malformed marker 不被伪造修复、线程与进程并发初始化
+   幂等、有界重试只吞 BUSY/LOCKED、成功后恢复运行期 busy timeout、失败时关闭
+   连接。
    任何代码修复都会使全部评审失效并触发受影响测试、全量门禁和再次复审。
 2. 如果终审没有新增 blocker，停止继续堆叠 Phase 01 review round，按门禁把
    `migration/01-backend-contract` 合入
@@ -290,7 +326,8 @@ identity，第四次复审又补齐了 generation 引入前的持久数据升级
 3. D-030 的 duplicate UUID repair wire DTO 在 Phase 02 production compiler 或
    前端 quick-fix 接入前单独冻结。它不得由测试或实现猜测字段名。
 4. 后续所有持久 schema 变更在实现前增加“旧库完整行、旧库坏行、部分迁移、
-   重复启动、并发启动”五项兼容矩阵，避免只验证列存在而遗漏恢复语义。
+   重复启动、同进程并发、跨进程锁占用”六项兼容矩阵，避免只验证列存在或线程
+   并发而遗漏恢复和进程互斥语义。
 5. Phase 01 合并后立即创建独立前端分支
    `migration/08a-workflow-contract-seam`，先迁移 `packages/services` 的最终
    Workflow Graph/Task/Job/Authoring DTO、严格 envelope 和全局 SSE transport；
