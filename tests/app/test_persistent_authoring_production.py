@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import importlib
+import warnings
 from pathlib import Path
 from typing import Any
 
@@ -147,23 +148,32 @@ def test_real_server_uses_one_real_engine_for_all_authoring_paths(
     app = server.setup_server()
     assert server.setup_server() is app
 
-    route_counts: dict[tuple[str, str], int] = {}
-    for route in app.routes:
-        for method in getattr(route, "methods", set()):
-            key = (method, route.path)
-            route_counts[key] = route_counts.get(key, 0) + 1
+    with warnings.catch_warnings(record=True) as openapi_warnings:
+        warnings.simplefilter("always")
+        schema = app.openapi()
     expected_routes = {
-        ("POST", "/api/v1/authoring/compile"),
-        ("POST", "/api/v1/authoring/generate-python"),
-        ("POST", "/api/v1/authoring/validate"),
-        ("GET", "/api/v1/workflows/{workflow_uuid}/authoring"),
-        ("PUT", "/api/v1/workflows/{workflow_uuid}/authoring/draft"),
-        ("POST", "/api/v1/workflows/{workflow_uuid}/authoring/apply"),
-        ("GET", "/api/v1/events"),
+        "/api/v1/authoring/compile": "post",
+        "/api/v1/authoring/generate-python": "post",
+        "/api/v1/authoring/validate": "post",
+        "/api/v1/workflows/{workflow_uuid}/authoring": "get",
+        "/api/v1/workflows/{workflow_uuid}/authoring/draft": "put",
+        "/api/v1/workflows/{workflow_uuid}/authoring/apply": "post",
+        "/api/v1/events": "get",
     }
-    assert {key: route_counts.get(key) for key in expected_routes} == {
-        key: 1 for key in expected_routes
-    }
+    http_methods = {"get", "put", "post", "delete", "patch", "options", "head"}
+    operations = []
+    for path, expected_method in expected_routes.items():
+        path_item = schema["paths"][path]
+        assert set(path_item) & http_methods == {expected_method}
+        operations.append(path_item[expected_method]["operationId"])
+    assert len(operations) == 7
+    assert len(set(operations)) == 7
+    assert not [
+        item
+        for item in openapi_warnings
+        if "Duplicate Operation ID" in str(item.message)
+        and any(operation in str(item.message) for operation in operations)
+    ]
 
     service = composition.get_workflow_service()
     assert service is not None
