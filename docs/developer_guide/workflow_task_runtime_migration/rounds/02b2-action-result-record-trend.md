@@ -8,8 +8,8 @@
 
 当前 production/test 候选：`9806d9a`
 
-状态：**独立 RED、实现和正式测试全绿，等待合同、模块安全、最终风险三名
-reviewer 顺序复核。**
+状态：**独立 test subagent、实现、正式测试与唯一独立 review
+subagent 均已通过；0 blocking，允许合并。**
 
 ## 1. 本轮交付
 
@@ -124,6 +124,7 @@ deprecated 提示；没有本轮新增 warning。
 | `5327323` 合同复核 | 1 blocking、1 follow-up | 1 | 0 |
 | forged decorator 独立 RED | 0 个新增产品问题 | 0 | 0 |
 | `9806d9a` 正式全量 | 0 个产品回归 | 0 | 0 |
+| `9806d9a` 唯一最终 review | 0 blocking、1 follow-up | 0 | 0 blocking |
 
 canonical 示例最初省略了 `implicit: false`。独立 test author 在写测试时指出既有
 `parse_output_contract` 必然物化该字段；设计文档已校正，没有修改 02A Authority
@@ -135,23 +136,21 @@ canonical 示例最初省略了 `implicit: false`。独立 test author 在写测
 “补已知 shape”调整为“对进入 membership/lookup/iteration 的每个 AST 属性先做
 exact type guard”。
 
-“目标与正式全绿”仍不能等价于可合并：376 行闭合 parser 需要三名 reviewer
-重新针对 `9806d9a` 检查错误优先级、宽字段复杂度、parser-only 构造和三种声明
-是否真正同构。
+唯一最终 reviewer 已针对 `9806d9a` 完成 deletion test、parser-only/
+dump/symbol isolation、25 个相邻 forged shape、异常 locality 和宽表时间/
+内存增长检查；结论 0 blocking。宽表从 256 增至 1024 字段时，
+时间与峰值内存分别增长约 3.94 倍和 4.07 倍，未见隐藏 O(n²)。
 
 ## 6. 策略调整
 
-1. reviewer 必须执行 deletion test：确认三种声明的公共部分全部下沉到
-   `parse_result_annotation`，没有在 340 行模块中复制类型系统。
-2. 模块安全 reviewer 重点检查显式 shape validation 是否足够局部、是否意外吞掉
-   非输入异常，以及宽字段表是否存在隐藏 O(n²)。
-3. 最终风险 reviewer 继续尝试不等长 dict、缺字段 class/decorator/annotation、
-   重复字段和异常泄漏；发现 blocking 必须先新增独立 RED。
-4. 02B1 NB-01 仍未关闭。下一轮 production caller 接线前，先实现真实 module AST、
+1. 后续每轮按用户更新后的门禁执行：1 个独立 test subagent + 1 个独立
+   review subagent；production/test SHA 变化后该 review 失效。
+2. 02B1 NB-01 仍未关闭。下一轮 production caller 接线前，先实现真实 module AST、
    module-scope、shadow-aware 的 import/definition resolver，不能复用旧
    `ast.walk()` map。
-5. Catalog identity、compiler、transform、generate-python 继续拆成独立 round；
+3. Catalog identity、compiler、transform、generate-python 继续拆成独立 round；
    这些 production Interface 可合并后才启动前端单编辑权实现与 FE-OS 联调。
+4. 本轮合并后停止；不自行开启 02B3，等待用户明确同意。
 
 ## 7. 前端与 Backend 覆盖
 
