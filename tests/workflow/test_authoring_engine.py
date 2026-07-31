@@ -25,6 +25,7 @@ from unilabos.workflow.models import (
     CandidateDiagnostic,
     CandidateSourceMapEntry,
 )
+from unilabos.workflow.service import WorkflowService
 from unilabos.workflow.store import WorkflowStore
 
 _AUTHORING_IMPORT_ERROR: ModuleNotFoundError | None = None
@@ -898,6 +899,80 @@ def test_generate_python_and_validate_are_pure_public_transforms(
     assert validated.valid
     assert validated.graph == compiled.graph
     assert validated.normalized_python_source == compiled.normalized_python_source
+
+
+def test_workflow_output_import_alias_normalizes_to_the_canonical_marker(
+    engine_context: EngineContext,
+) -> None:
+    source = (
+        _source()
+        .replace(
+            "device, workflow_definition, workflow_output",
+            "device, workflow_definition, workflow_output as output",
+        )
+        .replace("return workflow_output(", "return output(")
+    )
+
+    result = _compile(engine_context.engine, source)
+
+    assert result.valid and result.normalized_python_source is not None
+    assert "return workflow_output(" in result.normalized_python_source
+
+
+def test_production_engine_persists_new_catalog_nodes_through_authoring_apply(
+    tmp_path: Path,
+) -> None:
+    with _opened_engine(tmp_path / "service.db") as context:
+        service = WorkflowService(context.store, compiler=context.engine)
+        workflow = service.create_workflow(
+            workflow_uuid=WORKFLOW_UUID,
+            name="Persisted workflow",
+            tags=[],
+            description="Persisted description",
+            meta_data={"owner": "keep"},
+        )
+        package_root = tmp_path / "package"
+        package_root.mkdir()
+        service.register_editable_source(
+            workflow_uuid=WORKFLOW_UUID,
+            package_id="lab",
+            package_root=package_root,
+            relative_path="workflows/sample.py",
+        )
+
+        first = service.save_draft(
+            WORKFLOW_UUID,
+            python_source=_source(),
+            expected_draft_hash=None,
+            expected_workflow_revision=workflow["revision"],
+        )
+        assert first["candidate"] is not None
+        normalized = first["candidate"]["normalized_python_source"]
+        materialized = service.save_draft(
+            WORKFLOW_UUID,
+            python_source=normalized,
+            expected_draft_hash=first["draft"]["draft_hash"],
+            expected_workflow_revision=workflow["revision"],
+        )
+        assert materialized["candidate"] is not None
+
+        service.apply_authoring(
+            WORKFLOW_UUID,
+            candidate_hash=materialized["candidate"]["candidate_hash"],
+        )
+        graph = service.get_graph(WORKFLOW_UUID)
+
+        assert graph["workflow"]["revision"] == 2
+        assert graph["workflow"]["name"] == "Sample preparation"
+        assert graph["workflow"]["description"] == "Prepare and analyze one sample."
+        assert {node["uuid"] for node in graph["nodes"]} == {
+            PREPARE_NODE_UUID,
+            ANALYZE_NODE_UUID,
+        }
+        assert {item["uuid"] for item in graph["node_templates"]} == {
+            PREPARE_TEMPLATE_UUID,
+            ANALYZE_TEMPLATE_UUID,
+        }
 
 
 def test_validate_rejects_a_source_graph_semantic_mismatch(

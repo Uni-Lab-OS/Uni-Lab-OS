@@ -117,6 +117,32 @@ def parallel_preparation(*, sample: ResourceSlot):
 '''
 
 
+def _sequential_groups_source() -> str:
+    return f'''from lab.devices import Reactor
+from unilabos.registry.placeholder_type import ResourceSlot
+from unilabos.workflow.authoring import device, group, workflow_definition, workflow_output
+
+
+reactor: Reactor = device()
+
+
+@workflow_definition(
+    workflow_uuid="{WORKFLOW_UUID}",
+    displayname="Sequential groups",
+)
+def sequential_groups(*, sample: ResourceSlot):
+    # unilab:node_uuid={GROUP_A_NODE_UUID}
+    with group(name="Preparation"):
+        # unilab:node_uuid={PREPARE_NODE_UUID}
+        prepared = reactor.prepare(sample=sample, cycles=1, note=None)
+    # unilab:node_uuid={GROUP_B_NODE_UUID}
+    with group(name="Analysis"):
+        # unilab:node_uuid={ANALYZE_NODE_UUID}
+        analyzed = reactor.analyze(prepared=prepared.prepared, label="sequential")
+    return workflow_output(report=analyzed.report)
+'''
+
+
 def _workflow_input_output_source() -> str:
     return f'''from unilabos.registry.placeholder_type import ResourceSlot
 from unilabos.workflow.authoring import workflow_definition, workflow_output
@@ -392,6 +418,43 @@ def test_generate_compile_generate_has_one_deterministic_source(
     assert second.valid
     assert second.normalized_python_source == first.normalized_python_source
     ast.parse(second.normalized_python_source)
+
+
+def test_generate_keeps_dependent_groups_sequential(
+    engine_context: EngineContext,
+) -> None:
+    compiled = _compile(engine_context.engine, _sequential_groups_source())
+    assert compiled.valid and compiled.graph is not None
+
+    generated = engine_context.engine.generate_python(
+        workflow_uuid=WORKFLOW_UUID,
+        workflow_revision=7,
+        graph=compiled.graph,
+        source_uri="package://lab/workflows/sequential-groups.py",
+    )
+
+    assert generated.valid and generated.normalized_python_source is not None
+    assert "with parallel():" not in generated.normalized_python_source
+    assert generated.normalized_python_source.count("with group(") == 2
+
+
+def test_generate_is_independent_of_candidate_node_array_order(
+    engine_context: EngineContext,
+) -> None:
+    compiled = _compile(engine_context.engine, _parallel_source())
+    assert compiled.valid and compiled.graph is not None
+    reordered = deepcopy(compiled.graph)
+    reordered["nodes"].reverse()
+
+    generated = engine_context.engine.generate_python(
+        workflow_uuid=WORKFLOW_UUID,
+        workflow_revision=7,
+        graph=reordered,
+        source_uri="package://lab/workflows/reordered.py",
+    )
+
+    assert generated.valid
+    assert generated.normalized_python_source == compiled.normalized_python_source
 
 
 def test_equivalent_author_source_is_source_only_against_applied_graph(

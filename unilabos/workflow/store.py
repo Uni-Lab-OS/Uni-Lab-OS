@@ -1351,10 +1351,16 @@ class WorkflowStore:
                 conn.execute(
                     """
                     UPDATE workflow
-                    SET meta_data = ?, update_time = ?
+                    SET name = ?, description = ?, meta_data = ?, update_time = ?
                     WHERE uuid = ? AND deleted_at IS NULL
                     """,
-                    (_json(workflow_meta), now, workflow_uuid),
+                    (
+                        graph_workflow["name"],
+                        graph_workflow.get("description"),
+                        _json(workflow_meta),
+                        now,
+                        workflow_uuid,
+                    ),
                 )
             elif kind == "source_only":
                 resulting_revision = expected_revision

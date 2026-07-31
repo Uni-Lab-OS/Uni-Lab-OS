@@ -10,6 +10,8 @@ import threading
 from pathlib import Path
 from typing import Optional
 
+from unilabos.workflow.authoring_engine import WorkflowAuthoringEngine
+from unilabos.workflow.catalog import CatalogAuthority, TemplateCatalog
 from unilabos.workflow.service import AuthoringCompiler, WorkflowService
 from unilabos.workflow.source_monitor import WorkflowSourceMonitor
 from unilabos.workflow.store import WorkflowStore
@@ -20,6 +22,10 @@ _database_path: Optional[Path] = None
 _monitor: Optional[WorkflowSourceMonitor] = None
 _owner_pid: Optional[int] = None
 _workspace_lease_fd: Optional[int] = None
+_LOCAL_CATALOG_AUTHORITY = CatalogAuthority(
+    authority_id="os-local",
+    kind="local",
+)
 
 
 def _acquire_workspace_lease(working_dir: Path) -> int:
@@ -83,12 +89,20 @@ def compose_workflow_runtime(
                 )
             return _service
         lease_descriptor = _acquire_workspace_lease(resolved_working_dir)
+        new_store: Optional[WorkflowStore] = None
         new_service: Optional[WorkflowService] = None
         new_monitor: Optional[WorkflowSourceMonitor] = None
         try:
+            new_store = WorkflowStore(database_path)
+            effective_compiler = compiler
+            if effective_compiler is None:
+                effective_compiler = WorkflowAuthoringEngine(
+                    catalog=TemplateCatalog(new_store),
+                    authority=_LOCAL_CATALOG_AUTHORITY,
+                )
             new_service = WorkflowService(
-                WorkflowStore(database_path),
-                compiler=compiler,
+                new_store,
+                compiler=effective_compiler,
             )
             new_monitor = WorkflowSourceMonitor(new_service)
             _service = new_service
@@ -106,6 +120,8 @@ def compose_workflow_runtime(
                 try:
                     if new_service is not None:
                         new_service.close()
+                    elif new_store is not None:
+                        new_store.close()
                 finally:
                     _service = None
                     _database_path = None
