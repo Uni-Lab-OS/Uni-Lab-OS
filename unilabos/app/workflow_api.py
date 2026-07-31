@@ -35,7 +35,7 @@ class _BackendModel(BaseModel):
 HashToken = Annotated[str, Field(pattern=r"^sha256:[0-9a-f]{64}$")]
 _SIGNED_DECIMAL = re.compile(r"[+-]?[0-9]+\Z")
 _INT64_MAX = (1 << 63) - 1
-_WORKFLOW_JSON_BODY_LIMIT = 8 * 1024 * 1024
+_WORKFLOW_BODY_LIMIT = 8 * 1024 * 1024
 _WORKFLOW_JSON_INTEGER_DIGITS = 4096
 _GO_WHITE_SPACE = (
     "\t\n\v\f\r "
@@ -47,7 +47,7 @@ _GO_WHITE_SPACE = (
 
 
 async def _read_limited_body(request: Request) -> bytes:
-    """增量读取公共 Workflow JSON，并在超限 chunk 后立即停止。"""
+    """增量读取公共 Workflow 请求体，并在超限 chunk 后立即停止。"""
 
     content_length = request.headers.get("content-length")
     if content_length is not None:
@@ -55,13 +55,13 @@ async def _read_limited_body(request: Request) -> bytes:
             declared_length = int(content_length, 10)
         except ValueError:
             raise ValueError("invalid Content-Length") from None
-        if declared_length < 0 or declared_length > _WORKFLOW_JSON_BODY_LIMIT:
-            raise ValueError("Workflow JSON body exceeds the public limit")
+        if declared_length < 0 or declared_length > _WORKFLOW_BODY_LIMIT:
+            raise ValueError("Workflow body exceeds the public limit")
 
     body = bytearray()
     async for chunk in request.stream():
-        if len(body) + len(chunk) > _WORKFLOW_JSON_BODY_LIMIT:
-            raise ValueError("Workflow JSON body exceeds the public limit")
+        if len(body) + len(chunk) > _WORKFLOW_BODY_LIMIT:
+            raise ValueError("Workflow body exceeds the public limit")
         body.extend(chunk)
     payload = bytes(body)
     request._body = payload
@@ -69,21 +69,23 @@ async def _read_limited_body(request: Request) -> bytes:
 
 
 class _BackendJSONRoute(APIRoute):
-    """Preload JSON with the frozen Backend depth and error-envelope rules."""
+    """Bound body routes, then preload JSON with the frozen Backend rules."""
 
     def get_route_handler(self):
         route_handler = super().get_route_handler()
+        expects_body = self.body_field is not None
 
         async def backend_json_route_handler(request: Request) -> Response:
-            content_type = request.headers.get("content-type", "")
-            mime = content_type.split(";", 1)[0].strip().lower()
-            if mime == "application/json" or mime.endswith("+json"):
+            if expects_body:
+                content_type = request.headers.get("content-type", "")
+                mime = content_type.split(";", 1)[0].strip().lower()
                 try:
                     body = await _read_limited_body(request)
-                    request._json = decode_json_bytes(
-                        body,
-                        max_integer_digits=_WORKFLOW_JSON_INTEGER_DIGITS,
-                    )
+                    if mime == "application/json" or mime.endswith("+json"):
+                        request._json = decode_json_bytes(
+                            body,
+                            max_integer_digits=_WORKFLOW_JSON_INTEGER_DIGITS,
+                        )
                 except (
                     OverflowError,
                     UnicodeError,
