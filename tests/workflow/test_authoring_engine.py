@@ -11,6 +11,7 @@ from dataclasses import dataclass
 from importlib import import_module
 from pathlib import Path
 from typing import Any
+from uuid import UUID
 
 import pytest
 
@@ -815,7 +816,7 @@ def test_anchor_preserves_node_identity_and_non_authoring_metadata(
     assert changeset.created_node_uuids == []
 
 
-def test_missing_anchor_gets_a_stable_uuid_and_normalized_anchor(
+def test_missing_anchor_gets_uuid4_then_normalized_anchor_preserves_identity(
     engine_context: EngineContext,
 ) -> None:
     source = _source().replace(
@@ -824,23 +825,30 @@ def test_missing_anchor_gets_a_stable_uuid_and_normalized_anchor(
     )
 
     first = _compile(engine_context.engine, source)
-    second = _compile(engine_context.engine, source)
 
     assert first.valid and first.graph is not None
-    assert second.valid and second.graph is not None
     allocated = next(
         node["uuid"]
         for node in first.graph["nodes"]
         if node["workflow_node_template_uuid"] == ANALYZE_TEMPLATE_UUID
     )
     assert allocated != ANALYZE_NODE_UUID
-    assert allocated == next(
-        node["uuid"]
-        for node in second.graph["nodes"]
-        if node["workflow_node_template_uuid"] == ANALYZE_TEMPLATE_UUID
-    )
+    assert UUID(allocated).version == 4
     assert first.normalized_python_source is not None
     assert f"# unilab:node_uuid={allocated}" in first.normalized_python_source
+
+    reapplied = _compile(
+        engine_context.engine,
+        first.normalized_python_source,
+        graph=first.graph,
+    )
+
+    assert reapplied.valid and reapplied.graph is not None
+    assert allocated == next(
+        node["uuid"]
+        for node in reapplied.graph["nodes"]
+        if node["workflow_node_template_uuid"] == ANALYZE_TEMPLATE_UUID
+    )
 
 
 def test_syntax_and_dynamic_python_fail_with_deterministic_diagnostics(
