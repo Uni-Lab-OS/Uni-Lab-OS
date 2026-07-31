@@ -5,7 +5,7 @@ from __future__ import annotations
 import ast
 import math
 from dataclasses import dataclass
-from typing import Any, Mapping, Never
+from typing import Any, Mapping, Never, Self
 
 from unilabos.workflow.schema import (
     WorkflowInputContract,
@@ -14,6 +14,7 @@ from unilabos.workflow.schema import (
 )
 
 NO_DEFAULT = object()
+_PARSED_PARAMETER_TOKEN = object()
 
 _ANNOTATED = "typing:Annotated"
 _DICT = "typing:Dict"
@@ -30,7 +31,7 @@ _ERROR_MESSAGE = "参数注解不符合 Workflow 版本 1 合同"
 class AnnotationSchemaError(ValueError):
     """可稳定投影为编译诊断的参数注解错误。"""
 
-    def __init__(self, code: str, path: str, message: str):
+    def __init__(self, code: str, path: str, message: str) -> None:
         super().__init__(message)
         self.code = code
         self.path = path
@@ -45,12 +46,34 @@ class ResourceTemplateSymbol:
     qualified_name: str
 
 
-@dataclass(frozen=True, slots=True)
+@dataclass(frozen=True, slots=True, init=False)
 class ParsedParameter:
     """一个不可变的 canonical 参数合同及其待解析模板 symbol。"""
 
     _contract: WorkflowInputContract
     resource_templates: tuple[ResourceTemplateSymbol, ...]
+
+    def __new__(cls, *_args: Any, **_kwargs: Any) -> Never:
+        raise TypeError("请通过 parse_parameter_annotation 创建 ParsedParameter")
+
+    @classmethod
+    def _from_canonical(
+        cls,
+        contract: WorkflowInputContract,
+        resource_templates: tuple[ResourceTemplateSymbol, ...],
+        *,
+        token: object,
+    ) -> Self:
+        if token is not _PARSED_PARAMETER_TOKEN:
+            raise TypeError("ParsedParameter 只能由模块内 parser 创建")
+        parameter = object.__new__(cls)
+        object.__setattr__(parameter, "_contract", contract)
+        object.__setattr__(
+            parameter,
+            "resource_templates",
+            resource_templates,
+        )
+        return parameter
 
     def to_dict(self) -> dict[str, Any]:
         """返回与内部 canonical contract 不共享容器的 descriptor。"""
@@ -100,7 +123,7 @@ def _subscript_members(node: ast.Subscript) -> list[ast.expr]:
 def _literal_value(node: ast.expr, *, path: str) -> Any:
     try:
         return ast.literal_eval(node)
-    except (TypeError, ValueError):
+    except (RecursionError, TypeError, ValueError):
         _fail(path)
 
 
@@ -136,16 +159,11 @@ def _parse_literal(
         _fail(path)
 
     normalized: list[Any] = []
+    seen: set[Any] = set()
     for value in values:
-        if kind == "number":
-            duplicate = any(value == current for current in normalized)
-        else:
-            duplicate = any(
-                type(value) is type(current) and value == current
-                for current in normalized
-            )
-        if duplicate:
+        if value in seen:
             _fail(path)
+        seen.add(value)
         normalized.append(value)
     return {"type": kind, "enum": normalized}
 
@@ -500,7 +518,11 @@ def parse_parameter_annotation(
     except WorkflowSchemaError as error:
         path = error.path or "/"
         _fail(path, code=error.code)
-    return ParsedParameter(contract, templates)
+    return ParsedParameter._from_canonical(
+        contract,
+        templates,
+        token=_PARSED_PARAMETER_TOKEN,
+    )
 
 
 def _constant(value: Any) -> ast.Constant:

@@ -253,6 +253,7 @@ def _normalize_enum(
     if not isinstance(raw, list) or not raw:
         _fail("invalid_schema", path, _INVALID_SCHEMA)
     normalized: list[Any] = []
+    seen: set[Any] = set()
     for index, value in enumerate(raw):
         item_path = _pointer(path, index)
         member = _normalize_scalar(
@@ -262,8 +263,9 @@ def _normalize_enum(
             path=item_path,
             message=_INVALID_SCHEMA,
         )
-        if any(_enum_equal(kind, member, current) for current in normalized):
+        if member in seen:
             _fail("invalid_schema", item_path, _INVALID_SCHEMA)
+        seen.add(member)
         _validate_constraints(
             schema,
             member,

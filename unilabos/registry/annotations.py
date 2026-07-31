@@ -15,5 +15,5 @@ class AllowedResourceTemplates:
 
     resource_templates: tuple[object, ...]
 
-    def __init__(self, *resource_templates: object):
+    def __init__(self, *resource_templates: object) -> None:
         object.__setattr__(self, "resource_templates", tuple(resource_templates))
