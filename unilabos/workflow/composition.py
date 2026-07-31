@@ -134,6 +134,8 @@ def compose_workflow_runtime(
         raise ValueError("compiler 与 authority 只能选择一种生产组合方式")
     if authority is not None and not isinstance(authority, CatalogAuthority):
         raise TypeError("authority 必须是 CatalogAuthority")
+    if authority is not None and authority.kind != "local":
+        raise ValueError("persistent Workflow runtime 只支持 local Graph Authority")
     resolved_working_dir = Path(working_dir).resolve()
     database_path = resolved_working_dir / "workflow.db"
     configured_roots = _configured_package_roots(editable_package_roots)

@@ -10,6 +10,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Callable, Dict, Iterable, Iterator, List, Optional, Tuple
 
+from unilabos.workflow.catalog_keys import normalize_catalog_business_name
 from unilabos.workflow.graph_validation import (
     GraphValidationError,
     MissingTemplateError,
@@ -308,17 +309,23 @@ def _legacy_catalog_has_duplicate_business_key(
         row["name"]
         for row in conn.execute("SELECT name FROM sqlite_master WHERE type = 'table'")
     }
-    checks = (
+    checks: tuple[
+        tuple[str, set[str], str, Callable[[sqlite3.Row], tuple[str, ...]]],
+        ...,
+    ] = (
         (
             "workflow_node_template",
             {"authority_id", "resource_template_uuid", "name", "deleted_at"},
             """
-            SELECT 1 FROM workflow_node_template
+            SELECT authority_id, resource_template_uuid, name
+            FROM workflow_node_template
             WHERE deleted_at IS NULL
-            GROUP BY authority_id, resource_template_uuid, LOWER(TRIM(name))
-            HAVING COUNT(*) > 1
-            LIMIT 1
             """,
+            lambda row: (
+                row["authority_id"],
+                row["resource_template_uuid"],
+                normalize_catalog_business_name(row["name"]),
+            ),
         ),
         (
             "workflow_handle_template",
@@ -330,21 +337,33 @@ def _legacy_catalog_has_duplicate_business_key(
                 "deleted_at",
             },
             """
-            SELECT 1 FROM workflow_handle_template
+            SELECT authority_id, workflow_node_template_uuid, handle_key, io_type
+            FROM workflow_handle_template
             WHERE deleted_at IS NULL
-            GROUP BY authority_id, workflow_node_template_uuid,
-                     LOWER(TRIM(handle_key)), io_type
-            HAVING COUNT(*) > 1
-            LIMIT 1
             """,
+            lambda row: (
+                row["authority_id"],
+                row["workflow_node_template_uuid"],
+                normalize_catalog_business_name(row["handle_key"]),
+                row["io_type"],
+            ),
         ),
     )
-    for table, required_columns, query in checks:
+    for table, required_columns, query, business_key in checks:
         if table not in tables:
             continue
         columns = {row["name"] for row in conn.execute(f"PRAGMA table_info({table})")}
-        if required_columns.issubset(columns) and conn.execute(query).fetchone():
-            return True
+        if not required_columns.issubset(columns):
+            continue
+        observed: set[tuple[str, ...]] = set()
+        for row in conn.execute(query):
+            try:
+                key = business_key(row)
+            except (AttributeError, TypeError):
+                return True
+            if key in observed:
+                return True
+            observed.add(key)
     return False
 
 

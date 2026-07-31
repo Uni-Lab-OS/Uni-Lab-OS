@@ -94,14 +94,13 @@ def setup_server() -> FastAPI:
     if not workflow_routes_mounted and BasicConfig.working_dir:
         try:
             from unilabos.app.workflow_api import (
-                install_authoring_transform_api,
-                install_workflow_api,
+                install_composed_workflow_authoring_api,
             )
             from unilabos.workflow.catalog import CatalogAuthority
             from unilabos.workflow.composition import compose_workflow_runtime
 
             authority = BasicConfig.workflow_graph_authority
-            if not isinstance(authority, CatalogAuthority):
+            if not isinstance(authority, CatalogAuthority) or authority.kind != "local":
                 raise TypeError("未配置有效的 Workflow Graph Authority")
             editable_package_roots = BasicConfig.workflow_editable_package_roots
             if not isinstance(editable_package_roots, tuple):
@@ -113,8 +112,11 @@ def setup_server() -> FastAPI:
             )
             if workflow_service.compiler is None:
                 raise RuntimeError("Workflow Authoring engine 未完成组合")
-            install_workflow_api(app, workflow_service)
-            install_authoring_transform_api(app, workflow_service.compiler)
+            install_composed_workflow_authoring_api(
+                app,
+                workflow_service,
+                workflow_service.compiler,
+            )
             workflow_routes_mounted = True
         except Exception as e:  # noqa: BLE001 - keep unrelated web surfaces alive
             error(f"[Web] 挂载 Workflow authority 路由失败: {str(e)}")
@@ -159,7 +161,9 @@ def setup_server() -> FastAPI:
     return app
 
 
-def start_server(host: str = "0.0.0.0", port: int = 8002, open_browser: bool = True) -> bool:
+def start_server(
+    host: str = "0.0.0.0", port: int = 8002, open_browser: bool = True
+) -> bool:
     """
     启动服务器
 
@@ -200,7 +204,9 @@ def start_server(host: str = "0.0.0.0", port: int = 8002, open_browser: bool = T
     server = Server(config)
 
     # 启动服务器线程
-    server_thread = threading.Thread(target=server.run, daemon=True, name="uvicorn_server")
+    server_thread = threading.Thread(
+        target=server.run, daemon=True, name="uvicorn_server"
+    )
     server_thread.start()
 
     # info("[Web] Server started, monitoring for restart requests...")
@@ -209,7 +215,10 @@ def start_server(host: str = "0.0.0.0", port: int = 8002, open_browser: bool = T
     import unilabos.app.main as main_module
 
     while server_thread.is_alive():
-        if hasattr(main_module, "_restart_requested") and main_module._restart_requested:
+        if (
+            hasattr(main_module, "_restart_requested")
+            and main_module._restart_requested
+        ):
             info(
                 f"[Web] Restart requested via WebSocket, reason: {getattr(main_module, '_restart_reason', 'unknown')}"
             )
