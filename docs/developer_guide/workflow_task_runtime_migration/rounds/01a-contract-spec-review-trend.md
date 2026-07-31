@@ -147,7 +147,18 @@ scope creep。
 与 SQLite 具备不存在的共同事务。它保留外部 coding-agent/Git 编辑能力，也避免把
 刚删除的 writeback 复杂度重新引入。
 
-## 7. 前端覆盖结论
+## 7. 本轮门禁
+
+| 门禁 | 结果 |
+|---|---|
+| 独立 Spec reviewer | 1 blocking，1 non-blocking |
+| 完整仓库 `tests/` | `833 passed, 3 skipped` |
+| `git diff --check` | 通过 |
+
+本轮没有修改 Production 或 Tests，因此没有新增 lint/format 检查范围。3 个 skip
+均为既有条件测试；本轮没有新增 skip、xfail 或测试删除。
+
+## 8. 前端覆盖结论
 
 本轮没有前端变更。前端独立分支和 FE–OS 联调仍需等待 OS Authoring 候选完成修正、
 顺序评审和合并。Backend 不得修改。
