@@ -7,6 +7,7 @@ import threading
 from contextlib import contextmanager
 from datetime import datetime, timezone
 from pathlib import Path
+from time import monotonic, sleep
 from typing import Any, Callable, Dict, Iterable, Iterator, List, Optional, Tuple
 from uuid import uuid4
 
@@ -19,6 +20,10 @@ from unilabos.workflow.json_codec import decode_json_bytes, encode_json
 from unilabos.workflow.models import WorkflowEdgeWrite, WorkflowNodeWrite
 
 _STORE_INITIALIZATION_LOCK = threading.Lock()
+_STORE_INITIALIZATION_BUSY_TIMEOUT_SECONDS = 5.0
+_STORE_INITIALIZATION_SQLITE_BUSY_TIMEOUT_MS = 100
+_STORE_INITIALIZATION_RETRY_INTERVAL_SECONDS = 0.01
+_STORE_SQLITE_BUSY_TIMEOUT_MS = 5000
 
 
 def utc_now() -> str:
@@ -290,55 +295,122 @@ class WorkflowStore:
         self._lock = threading.RLock()
         self._conn = sqlite3.connect(self.path, check_same_thread=False)
         self._conn.row_factory = sqlite3.Row
-        # 同一进程中的多个 Store 可能同时打开旧数据库；初始化串行化后，
-        # SQLite 的迁移事务再负责跨连接、跨进程互斥。
-        with _STORE_INITIALIZATION_LOCK, self._lock:
-            self._conn.execute("PRAGMA journal_mode = WAL")
-            self._conn.execute("PRAGMA synchronous = NORMAL")
-            self._conn.executescript(_SCHEMA)
-            self._conn.execute("BEGIN IMMEDIATE")
-            try:
-                columns = {
-                    row["name"]
-                    for row in self._conn.execute(
-                        "PRAGMA table_info(workflow_authoring)"
-                    ).fetchall()
-                }
-                if "writeback_generation" not in columns:
-                    self._conn.execute(
+        try:
+            # 线程锁减少同进程竞争；有界 busy 重试覆盖进入迁移事务前的
+            # 跨进程 WAL 与 schema 初始化竞争。
+            with _STORE_INITIALIZATION_LOCK, self._lock:
+                initialization_deadline = (
+                    monotonic() + _STORE_INITIALIZATION_BUSY_TIMEOUT_SECONDS
+                )
+                initialization_busy_timeout_ms = (
+                    _STORE_INITIALIZATION_SQLITE_BUSY_TIMEOUT_MS
+                )
+                self._conn.execute(
+                    f"PRAGMA busy_timeout = {initialization_busy_timeout_ms}"
+                )
+                self._retry_initialization(
+                    lambda: self._conn.execute("PRAGMA journal_mode = WAL"),
+                    deadline=initialization_deadline,
+                )
+                self._retry_initialization(
+                    lambda: self._conn.execute("PRAGMA synchronous = NORMAL"),
+                    deadline=initialization_deadline,
+                )
+                self._retry_initialization(
+                    lambda: self._conn.executescript(_SCHEMA),
+                    deadline=initialization_deadline,
+                )
+                self._retry_initialization(
+                    lambda: self._conn.execute("BEGIN IMMEDIATE"),
+                    deadline=initialization_deadline,
+                )
+                try:
+                    columns = {
+                        row["name"]
+                        for row in self._conn.execute(
+                            "PRAGMA table_info(workflow_authoring)"
+                        ).fetchall()
+                    }
+                    if "writeback_generation" not in columns:
+                        self._conn.execute(
+                            """
+                            ALTER TABLE workflow_authoring
+                            ADD COLUMN writeback_generation TEXT
+                            """
+                        )
+                    legacy_markers = self._conn.execute(
                         """
-                        ALTER TABLE workflow_authoring
-                        ADD COLUMN writeback_generation TEXT
-                        """
-                    )
-                legacy_markers = self._conn.execute(
-                    """
-                    SELECT workflow_uuid
-                    FROM workflow_authoring
-                    WHERE writeback_status = 'pending'
-                      AND writeback_source IS NOT NULL
-                      AND writeback_expected_hash IS NOT NULL
-                      AND writeback_generation IS NULL
-                    """
-                ).fetchall()
-                for marker in legacy_markers:
-                    self._conn.execute(
-                        """
-                        UPDATE workflow_authoring
-                        SET writeback_generation = ?
-                        WHERE workflow_uuid = ?
-                          AND writeback_status = 'pending'
+                        SELECT workflow_uuid
+                        FROM workflow_authoring
+                        WHERE writeback_status = 'pending'
                           AND writeback_source IS NOT NULL
                           AND writeback_expected_hash IS NOT NULL
                           AND writeback_generation IS NULL
-                        """,
-                        (str(uuid4()), marker["workflow_uuid"]),
+                        """
+                    ).fetchall()
+                    for marker in legacy_markers:
+                        self._conn.execute(
+                            """
+                            UPDATE workflow_authoring
+                            SET writeback_generation = ?
+                            WHERE workflow_uuid = ?
+                              AND writeback_status = 'pending'
+                              AND writeback_source IS NOT NULL
+                              AND writeback_expected_hash IS NOT NULL
+                              AND writeback_generation IS NULL
+                            """,
+                            (str(uuid4()), marker["workflow_uuid"]),
+                        )
+                except BaseException:
+                    self._conn.rollback()
+                    raise
+                else:
+                    self._conn.commit()
+                    self._conn.execute(
+                        f"PRAGMA busy_timeout = {_STORE_SQLITE_BUSY_TIMEOUT_MS}"
                     )
-            except BaseException:
+        except BaseException:
+            self._conn.close()
+            raise
+
+    def _retry_initialization(
+        self,
+        operation: Callable[[], object],
+        *,
+        deadline: float,
+    ) -> None:
+        while True:
+            try:
+                operation()
+                return
+            except sqlite3.OperationalError as error:
+                error_code = getattr(error, "sqlite_errorcode", None)
+                base_error_code = (
+                    error_code & 0xFF if isinstance(error_code, int) else None
+                )
+                busy_message = str(error).lower() in {
+                    "database is locked",
+                    "database table is locked",
+                }
+                if (
+                    base_error_code
+                    not in {
+                        sqlite3.SQLITE_BUSY,
+                        sqlite3.SQLITE_LOCKED,
+                    }
+                    and not busy_message
+                ):
+                    raise
+                remaining = deadline - monotonic()
+                if remaining <= 0:
+                    raise
                 self._conn.rollback()
-                raise
-            else:
-                self._conn.commit()
+                sleep(
+                    min(
+                        _STORE_INITIALIZATION_RETRY_INTERVAL_SECONDS,
+                        remaining,
+                    )
+                )
 
     def close(self) -> None:
         with self._lock:
