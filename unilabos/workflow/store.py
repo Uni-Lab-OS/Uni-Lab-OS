@@ -299,6 +299,55 @@ CREATE TABLE IF NOT EXISTS frontend_event (
 """
 
 
+def _legacy_catalog_has_duplicate_business_key(
+    conn: sqlite3.Connection,
+) -> bool:
+    """在创建 active 唯一索引前只读审计旧 Catalog 数据。"""
+
+    tables = {
+        row["name"]
+        for row in conn.execute("SELECT name FROM sqlite_master WHERE type = 'table'")
+    }
+    checks = (
+        (
+            "workflow_node_template",
+            {"authority_id", "resource_template_uuid", "name", "deleted_at"},
+            """
+            SELECT 1 FROM workflow_node_template
+            WHERE deleted_at IS NULL
+            GROUP BY authority_id, resource_template_uuid, LOWER(TRIM(name))
+            HAVING COUNT(*) > 1
+            LIMIT 1
+            """,
+        ),
+        (
+            "workflow_handle_template",
+            {
+                "authority_id",
+                "workflow_node_template_uuid",
+                "handle_key",
+                "io_type",
+                "deleted_at",
+            },
+            """
+            SELECT 1 FROM workflow_handle_template
+            WHERE deleted_at IS NULL
+            GROUP BY authority_id, workflow_node_template_uuid,
+                     LOWER(TRIM(handle_key)), io_type
+            HAVING COUNT(*) > 1
+            LIMIT 1
+            """,
+        ),
+    )
+    for table, required_columns, query in checks:
+        if table not in tables:
+            continue
+        columns = {row["name"] for row in conn.execute(f"PRAGMA table_info({table})")}
+        if required_columns.issubset(columns) and conn.execute(query).fetchone():
+            return True
+    return False
+
+
 class WorkflowStore:
     """由单一连接持有的 SQLite Workflow Authority。
 
@@ -321,6 +370,8 @@ class WorkflowStore:
                 self._conn.execute(
                     f"PRAGMA busy_timeout = {_STORE_SQLITE_BUSY_TIMEOUT_MS}"
                 )
+                if _legacy_catalog_has_duplicate_business_key(self._conn):
+                    raise StoreConflict("legacy_catalog_business_key_conflict")
                 self._conn.execute("PRAGMA journal_mode = WAL")
                 self._conn.execute("PRAGMA synchronous = NORMAL")
                 self._conn.executescript(_SCHEMA)
@@ -1416,16 +1467,21 @@ class WorkflowStore:
                 )
                 workflow_meta = dict(workflow["meta_data"])
                 workflow_meta.pop("unilab", None)
-                if "unilab" in candidate_meta:
-                    if candidate_meta["unilab"] is not None:
-                        workflow_meta["unilab"] = candidate_meta["unilab"]
+                if "unilab" in candidate_meta and candidate_meta["unilab"] is not None:
+                    workflow_meta["unilab"] = candidate_meta["unilab"]
                 conn.execute(
                     """
                     UPDATE workflow
-                    SET meta_data = ?, update_time = ?
+                    SET meta_data = ?, name = ?, description = ?, update_time = ?
                     WHERE uuid = ? AND deleted_at IS NULL
                     """,
-                    (_json(workflow_meta), now, workflow_uuid),
+                    (
+                        _json(workflow_meta),
+                        graph_workflow["name"],
+                        graph_workflow.get("description"),
+                        now,
+                        workflow_uuid,
+                    ),
                 )
             elif kind == "source_only":
                 resulting_revision = expected_revision

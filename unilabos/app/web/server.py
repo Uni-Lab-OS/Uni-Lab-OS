@@ -93,11 +93,28 @@ def setup_server() -> FastAPI:
     # Backend-shaped Workflow authority 统一拥有本工作区的 workflow.db。
     if not workflow_routes_mounted and BasicConfig.working_dir:
         try:
-            from unilabos.app.workflow_api import install_workflow_api
+            from unilabos.app.workflow_api import (
+                install_authoring_transform_api,
+                install_workflow_api,
+            )
+            from unilabos.workflow.catalog import CatalogAuthority
             from unilabos.workflow.composition import compose_workflow_runtime
 
-            workflow_service = compose_workflow_runtime(BasicConfig.working_dir)
+            authority = BasicConfig.workflow_graph_authority
+            if not isinstance(authority, CatalogAuthority):
+                raise TypeError("未配置有效的 Workflow Graph Authority")
+            editable_package_roots = BasicConfig.workflow_editable_package_roots
+            if not isinstance(editable_package_roots, tuple):
+                raise TypeError("Workflow editable package roots 必须是 tuple")
+            workflow_service = compose_workflow_runtime(
+                BasicConfig.working_dir,
+                authority=authority,
+                editable_package_roots=editable_package_roots,
+            )
+            if workflow_service.compiler is None:
+                raise RuntimeError("Workflow Authoring engine 未完成组合")
             install_workflow_api(app, workflow_service)
+            install_authoring_transform_api(app, workflow_service.compiler)
             workflow_routes_mounted = True
         except Exception as e:  # noqa: BLE001 - keep unrelated web surfaces alive
             error(f"[Web] 挂载 Workflow authority 路由失败: {str(e)}")
