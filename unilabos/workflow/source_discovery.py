@@ -11,12 +11,27 @@ from typing import Any, Protocol
 
 import yaml
 from yaml.constructor import ConstructorError
-from yaml.events import AliasEvent, MappingStartEvent, ScalarEvent, SequenceStartEvent
+from yaml.events import (
+    AliasEvent,
+    CollectionEndEvent,
+    DocumentStartEvent,
+    MappingStartEvent,
+    ScalarEvent,
+    SequenceStartEvent,
+)
 from yaml.nodes import MappingNode
 
 from unilabos.workflow.models import validate_uuid
+from unilabos.workflow.service import WorkflowConflict, WorkflowError
 
 _PACKAGE_NAME = re.compile(r"[A-Za-z_][A-Za-z0-9_]*\Z")
+_MANIFEST_BYTE_LIMIT = 1024 * 1024
+_SOURCE_BYTE_LIMIT = 8 * 1024 * 1024
+_YAML_DEPTH_LIMIT = 32
+_WORKFLOW_ENTRY_LIMIT = 1024
+_YAML_SCALAR_BYTE_LIMIT = 1024 * 1024
+_DIRECTORY_FLAGS = os.O_RDONLY | os.O_DIRECTORY | os.O_CLOEXEC | os.O_NOFOLLOW
+_FILE_FLAGS = os.O_RDONLY | os.O_CLOEXEC | os.O_NOFOLLOW | os.O_NONBLOCK
 _ERROR_MESSAGES = {
     "invalid_package_root": "editable package 根目录无效",
     "invalid_manifest": "package.yaml 声明格式不正确",
@@ -35,19 +50,19 @@ class SourceDeclarationError(RuntimeError):
 
 
 @dataclass(frozen=True)
-class WorkflowSourceDeclaration:
+class _WorkflowSourceDeclaration:
     workflow_uuid: str
     relative_path: str
 
 
 @dataclass(frozen=True)
-class EditablePackageManifest:
+class _EditablePackageManifest:
     package_id: str
     package_root: Path
-    workflows: tuple[WorkflowSourceDeclaration, ...]
+    workflows: tuple[_WorkflowSourceDeclaration, ...]
 
 
-class EditableSourceRegistrar(Protocol):
+class _EditableSourceRegistrar(Protocol):
     def register_editable_source(
         self,
         *,
@@ -94,6 +109,8 @@ class _ClosedSafeLoader(yaml.SafeLoader):
 
 
 def _contains_symlink(path: Path) -> bool:
+    """静态快速拒绝；真正的 identity/竞态保护由 directory FD 提供。"""
+
     absolute = Path(os.path.abspath(path))
     current = Path(absolute.anchor)
     for part in absolute.parts[1:]:
@@ -103,55 +120,101 @@ def _contains_symlink(path: Path) -> bool:
     return False
 
 
-def _regular_file_bytes(path: Path, *, missing_ok: bool) -> bytes | None:
+def _open_directory_chain(path: Path) -> int:
+    absolute = Path(os.path.abspath(path))
+    current = -1
     try:
-        metadata = path.lstat()
+        current = os.open(absolute.anchor, _DIRECTORY_FLAGS)
+        for part in absolute.parts[1:]:
+            next_descriptor = os.open(part, _DIRECTORY_FLAGS, dir_fd=current)
+            os.close(current)
+            current = next_descriptor
+        return current
+    except (OSError, TypeError, ValueError):
+        if current >= 0:
+            os.close(current)
+        raise SourceDeclarationError("invalid_package_root") from None
+
+
+def _read_regular_at(
+    parent_fd: int,
+    name: str,
+    *,
+    byte_limit: int,
+    missing_ok: bool,
+    error_code: str,
+) -> bytes | None:
+    descriptor = -1
+    try:
+        descriptor = os.open(name, _FILE_FLAGS, dir_fd=parent_fd)
     except FileNotFoundError:
         if missing_ok:
             return None
-        raise SourceDeclarationError("invalid_manifest") from None
-    except OSError:
-        raise SourceDeclarationError("invalid_workflow_source") from None
-    if not stat.S_ISREG(metadata.st_mode):
-        raise SourceDeclarationError("invalid_workflow_source")
-    descriptor = -1
+        raise SourceDeclarationError(error_code) from None
+    except (OSError, TypeError, ValueError):
+        raise SourceDeclarationError(error_code) from None
     try:
-        descriptor = os.open(path, os.O_RDONLY | os.O_CLOEXEC | os.O_NOFOLLOW)
-        opened = os.fstat(descriptor)
-        if not stat.S_ISREG(opened.st_mode):
-            raise SourceDeclarationError("invalid_workflow_source")
-        with os.fdopen(descriptor, "rb") as stream:
-            descriptor = -1
-            return stream.read()
+        metadata = os.fstat(descriptor)
+        if not stat.S_ISREG(metadata.st_mode) or metadata.st_size > byte_limit:
+            raise SourceDeclarationError(error_code)
+        chunks = bytearray()
+        while len(chunks) <= byte_limit:
+            chunk = os.read(descriptor, min(64 * 1024, byte_limit + 1 - len(chunks)))
+            if not chunk:
+                break
+            chunks.extend(chunk)
+        if len(chunks) > byte_limit:
+            raise SourceDeclarationError(error_code)
+        return bytes(chunks)
     except SourceDeclarationError:
         raise
-    except OSError:
-        code = "invalid_manifest" if not missing_ok else "invalid_workflow_source"
-        raise SourceDeclarationError(code) from None
+    except (OSError, OverflowError, ValueError):
+        raise SourceDeclarationError(error_code) from None
     finally:
-        if descriptor >= 0:
-            os.close(descriptor)
+        os.close(descriptor)
 
 
 def _load_closed_yaml(raw: bytes) -> dict[str, Any]:
     try:
         text = raw.decode("utf-8")
         document_count = 0
+        depth = 0
+        node_count = 0
         for event in yaml.parse(text):
             if isinstance(event, AliasEvent):
                 raise SourceDeclarationError("invalid_manifest")
+            if isinstance(event, (MappingStartEvent, SequenceStartEvent)):
+                depth += 1
+                node_count += 1
+                if depth > _YAML_DEPTH_LIMIT:
+                    raise SourceDeclarationError("invalid_manifest")
+            elif isinstance(event, CollectionEndEvent):
+                depth -= 1
+            elif isinstance(event, ScalarEvent):
+                node_count += 1
+                if len(event.value.encode("utf-8")) > _YAML_SCALAR_BYTE_LIMIT:
+                    raise SourceDeclarationError("invalid_manifest")
             if isinstance(
                 event, (MappingStartEvent, SequenceStartEvent, ScalarEvent)
             ) and (event.anchor is not None or event.tag is not None):
                 raise SourceDeclarationError("invalid_manifest")
-            if isinstance(event, yaml.events.DocumentStartEvent):
+            if isinstance(event, DocumentStartEvent):
                 document_count += 1
-        if document_count != 1:
+            if node_count > (_WORKFLOW_ENTRY_LIMIT * 8 + 32):
+                raise SourceDeclarationError("invalid_manifest")
+        if document_count != 1 or depth != 0:
             raise SourceDeclarationError("invalid_manifest")
         value = yaml.load(text, Loader=_ClosedSafeLoader)
     except SourceDeclarationError:
         raise
-    except (UnicodeError, yaml.YAMLError):
+    except (
+        MemoryError,
+        OverflowError,
+        RecursionError,
+        UnicodeError,
+        ValueError,
+        yaml.YAMLError,
+    ):
         raise SourceDeclarationError("invalid_manifest") from None
     if not isinstance(value, dict):
         raise SourceDeclarationError("invalid_manifest")
@@ -162,7 +225,7 @@ def _source_declaration(
     raw: Any,
     *,
     package_id: str,
-) -> WorkflowSourceDeclaration:
+) -> _WorkflowSourceDeclaration:
     if not isinstance(raw, dict) or set(raw) != {"workflow_uuid", "source"}:
         raise SourceDeclarationError("invalid_workflow_source")
     raw_uuid = raw["workflow_uuid"]
@@ -173,9 +236,7 @@ def _source_declaration(
         workflow_uuid = validate_uuid(raw_uuid)
     except (TypeError, ValueError):
         raise SourceDeclarationError("invalid_workflow_source") from None
-    if workflow_uuid != raw_uuid:
-        raise SourceDeclarationError("invalid_workflow_source")
-    if "\\" in source:
+    if workflow_uuid != raw_uuid or "\\" in source or "\x00" in source:
         raise SourceDeclarationError("invalid_workflow_source")
     path = PurePosixPath(source)
     if (
@@ -188,112 +249,234 @@ def _source_declaration(
         or not path.stem
     ):
         raise SourceDeclarationError("invalid_workflow_source")
-    return WorkflowSourceDeclaration(
+    return _WorkflowSourceDeclaration(
         workflow_uuid=workflow_uuid,
         relative_path=PurePosixPath(*path.parts[1:]).as_posix(),
     )
 
 
+def _open_child_directory(parent_fd: int, name: str, *, missing_ok: bool) -> int | None:
+    try:
+        return os.open(name, _DIRECTORY_FLAGS, dir_fd=parent_fd)
+    except FileNotFoundError:
+        if missing_ok:
+            return None
+        raise SourceDeclarationError("invalid_package_root") from None
+    except (OSError, TypeError, ValueError):
+        raise SourceDeclarationError("invalid_package_root") from None
+
+
 def load_editable_package_manifest(
     package_root: str | Path,
-) -> EditablePackageManifest:
-    """读取并完全验证一个显式选择的 editable package declaration。"""
+) -> _EditablePackageManifest:
+    """从固定 directory identity 读取并验证一个 editable package。"""
 
-    supplied_root = Path(os.path.abspath(package_root))
-    if _contains_symlink(supplied_root):
-        raise SourceDeclarationError("invalid_package_root")
+    selected_root = Path(os.path.abspath(package_root))
     try:
-        root = supplied_root.resolve(strict=True)
-    except OSError:
+        selected_identity = selected_root.lstat()
+    except (OSError, TypeError, ValueError):
         raise SourceDeclarationError("invalid_package_root") from None
-    if not root.is_dir():
+    if not stat.S_ISDIR(selected_identity.st_mode) or _contains_symlink(selected_root):
         raise SourceDeclarationError("invalid_package_root")
 
-    raw = _regular_file_bytes(root / "package.yaml", missing_ok=False)
-    assert raw is not None
-    manifest = _load_closed_yaml(raw)
-    if set(manifest) != {"package", "workflows"}:
-        raise SourceDeclarationError("invalid_manifest")
-    package = manifest["package"]
-    workflows = manifest["workflows"]
-    if not isinstance(package, dict) or set(package) != {"name"}:
-        raise SourceDeclarationError("invalid_package")
-    package_id = package["name"]
-    if not isinstance(package_id, str) or _PACKAGE_NAME.fullmatch(package_id) is None:
-        raise SourceDeclarationError("invalid_package")
-    if not isinstance(workflows, list) or not workflows:
-        raise SourceDeclarationError("invalid_manifest")
-
-    source_root = root / package_id
-    if _contains_symlink(source_root):
-        raise SourceDeclarationError("invalid_package_root")
+    root_fd = _open_directory_chain(selected_root)
     try:
-        resolved_source_root = source_root.resolve(strict=True)
-        resolved_source_root.relative_to(root)
-    except (OSError, ValueError):
-        raise SourceDeclarationError("invalid_package_root") from None
-    if not resolved_source_root.is_dir():
-        raise SourceDeclarationError("invalid_package_root")
-
-    declarations = tuple(
-        _source_declaration(item, package_id=package_id) for item in workflows
-    )
-    workflow_ids = [item.workflow_uuid for item in declarations]
-    relative_paths = [item.relative_path for item in declarations]
-    if len(workflow_ids) != len(set(workflow_ids)) or len(relative_paths) != len(
-        set(relative_paths)
-    ):
-        raise SourceDeclarationError("duplicate_workflow_source")
-
-    for declaration in declarations:
-        target = resolved_source_root.joinpath(
-            *PurePosixPath(declaration.relative_path).parts
+        opened_identity = os.fstat(root_fd)
+        if (selected_identity.st_dev, selected_identity.st_ino) != (
+            opened_identity.st_dev,
+            opened_identity.st_ino,
+        ):
+            raise SourceDeclarationError("invalid_package_root")
+        raw = _read_regular_at(
+            root_fd,
+            "package.yaml",
+            byte_limit=_MANIFEST_BYTE_LIMIT,
+            missing_ok=False,
+            error_code="invalid_manifest",
         )
-        try:
-            target.relative_to(resolved_source_root)
-        except ValueError:
-            raise SourceDeclarationError("invalid_workflow_source") from None
-        for parent in target.parents:
-            if parent == resolved_source_root:
-                break
-            if parent.exists() and parent.is_symlink():
-                raise SourceDeclarationError("invalid_workflow_source")
-        content = _regular_file_bytes(target, missing_ok=True)
-        if content is not None:
-            try:
-                content.decode("utf-8")
-            except UnicodeError:
-                raise SourceDeclarationError("invalid_workflow_source") from None
+        assert raw is not None
+        manifest = _load_closed_yaml(raw)
+        if set(manifest) != {"package", "workflows"}:
+            raise SourceDeclarationError("invalid_manifest")
+        package = manifest["package"]
+        workflows = manifest["workflows"]
+        if not isinstance(package, dict) or set(package) != {"name"}:
+            raise SourceDeclarationError("invalid_package")
+        package_id = package["name"]
+        if (
+            not isinstance(package_id, str)
+            or _PACKAGE_NAME.fullmatch(package_id) is None
+        ):
+            raise SourceDeclarationError("invalid_package")
+        if (
+            not isinstance(workflows, list)
+            or not workflows
+            or len(workflows) > _WORKFLOW_ENTRY_LIMIT
+        ):
+            raise SourceDeclarationError("invalid_manifest")
 
-    return EditablePackageManifest(
+        source_root_fd = _open_child_directory(root_fd, package_id, missing_ok=False)
+        assert source_root_fd is not None
+        try:
+            declarations = tuple(
+                _source_declaration(item, package_id=package_id) for item in workflows
+            )
+            workflow_ids = [item.workflow_uuid for item in declarations]
+            relative_paths = [item.relative_path for item in declarations]
+            if len(workflow_ids) != len(set(workflow_ids)) or len(
+                relative_paths
+            ) != len(set(relative_paths)):
+                raise SourceDeclarationError("duplicate_workflow_source")
+
+            workflows_fd = _open_child_directory(
+                source_root_fd,
+                "workflows",
+                missing_ok=True,
+            )
+            if workflows_fd is not None:
+                try:
+                    for declaration in declarations:
+                        filename = PurePosixPath(declaration.relative_path).name
+                        content = _read_regular_at(
+                            workflows_fd,
+                            filename,
+                            byte_limit=_SOURCE_BYTE_LIMIT,
+                            missing_ok=True,
+                            error_code="invalid_workflow_source",
+                        )
+                        if content is not None:
+                            try:
+                                content.decode("utf-8")
+                            except UnicodeError:
+                                raise SourceDeclarationError(
+                                    "invalid_workflow_source"
+                                ) from None
+                finally:
+                    os.close(workflows_fd)
+        finally:
+            os.close(source_root_fd)
+    except SourceDeclarationError:
+        raise
+    except (MemoryError, OSError, OverflowError, RecursionError, TypeError, ValueError):
+        raise SourceDeclarationError("invalid_manifest") from None
+    finally:
+        os.close(root_fd)
+
+    return _EditablePackageManifest(
         package_id=package_id,
-        package_root=resolved_source_root,
+        package_root=selected_root / package_id,
         workflows=declarations,
     )
 
 
-def register_editable_package_sources(
-    service: EditableSourceRegistrar,
-    package_root: str | Path,
-) -> tuple[dict[str, Any], ...]:
-    """验证完整 manifest 后，按声明顺序调用既有 Service Interface。"""
+def _manifest_roots(
+    package_root: str | Path | tuple[str | Path, ...],
+) -> tuple[str | Path, ...]:
+    if isinstance(package_root, (str, Path)):
+        return (package_root,)
+    return tuple(package_root)
 
-    manifest = load_editable_package_manifest(package_root)
+
+def _registration_rows(
+    manifests: tuple[_EditablePackageManifest, ...],
+) -> tuple[dict[str, Any], ...]:
     return tuple(
-        service.register_editable_source(
-            workflow_uuid=declaration.workflow_uuid,
-            package_id=manifest.package_id,
-            package_root=manifest.package_root,
-            relative_path=declaration.relative_path,
-        )
+        {
+            "workflow_uuid": declaration.workflow_uuid,
+            "package_id": manifest.package_id,
+            "package_root": manifest.package_root,
+            "relative_path": declaration.relative_path,
+        }
+        for manifest in manifests
         for declaration in manifest.workflows
     )
 
 
+def _preflight_existing_identity(
+    service: Any,
+    rows: tuple[dict[str, Any], ...],
+) -> None:
+    list_sources = getattr(service, "list_registered_sources", None)
+    get_workflow = getattr(service, "get_workflow", None)
+    if not callable(list_sources) or not callable(get_workflow):
+        return
+
+    existing = list_sources()
+    existing_by_workflow = {item["workflow_uuid"]: item for item in existing}
+    physical_owner = {
+        (Path(item["package_root"]), item["relative_path"]): item["workflow_uuid"]
+        for item in existing
+    }
+    uri_owner = {item["source_uri"]: item["workflow_uuid"] for item in existing}
+    package_roots: dict[str, Path] = {}
+    for item in existing:
+        root = Path(item["package_root"])
+        prior = package_roots.setdefault(item["package_id"], root)
+        if prior != root:
+            raise WorkflowConflict("invalid_input")
+
+    new_workflow_ids: set[str] = set()
+    new_physical: set[tuple[Path, str]] = set()
+    new_uris: set[str] = set()
+    for row in rows:
+        workflow_uuid = row["workflow_uuid"]
+        package_id = row["package_id"]
+        package_root = Path(row["package_root"])
+        relative_path = row["relative_path"]
+        physical = (package_root, relative_path)
+        source_uri = f"package://{package_id}/{relative_path}"
+        if (
+            workflow_uuid in new_workflow_ids
+            or physical in new_physical
+            or source_uri in new_uris
+        ):
+            raise WorkflowConflict("invalid_input")
+        new_workflow_ids.add(workflow_uuid)
+        new_physical.add(physical)
+        new_uris.add(source_uri)
+
+        try:
+            get_workflow(workflow_uuid)
+        except WorkflowError as error:
+            if error.code == "not_found":
+                raise WorkflowError("workflow_not_found") from None
+            raise
+        current = existing_by_workflow.get(workflow_uuid)
+        if current is not None and (
+            current["package_id"] != package_id
+            or Path(current["package_root"]) != package_root
+            or current["relative_path"] != relative_path
+        ):
+            raise WorkflowConflict("invalid_input")
+        if physical_owner.get(physical, workflow_uuid) != workflow_uuid:
+            raise WorkflowConflict("invalid_input")
+        if uri_owner.get(source_uri, workflow_uuid) != workflow_uuid:
+            raise WorkflowConflict("invalid_input")
+        prior_root = package_roots.setdefault(package_id, package_root)
+        if prior_root != package_root:
+            raise WorkflowConflict("invalid_input")
+
+
+def register_editable_package_sources(
+    service: _EditableSourceRegistrar,
+    package_root: str | Path | tuple[str | Path, ...],
+) -> tuple[dict[str, Any], ...]:
+    """全量预检一个或多个 package 后，以单批次注册声明。"""
+
+    manifests = tuple(
+        load_editable_package_manifest(root) for root in _manifest_roots(package_root)
+    )
+    rows = _registration_rows(manifests)
+    _preflight_existing_identity(service, rows)
+    batch = getattr(service, "editable_source_registration_batch", None)
+    if callable(batch):
+        with batch():
+            return tuple(service.register_editable_source(**row) for row in rows)
+    return tuple(service.register_editable_source(**row) for row in rows)
+
+
 __all__ = [
-    "EditablePackageManifest",
     "SourceDeclarationError",
-    "WorkflowSourceDeclaration",
     "load_editable_package_manifest",
     "register_editable_package_sources",
 ]

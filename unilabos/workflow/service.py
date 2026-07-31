@@ -763,6 +763,13 @@ class WorkflowService:
             except StoreConflict:
                 raise WorkflowConflict("invalid_input") from None
 
+    @contextmanager
+    def editable_source_registration_batch(self) -> Iterator[None]:
+        """让多个既有单 source Interface 共享一个 Store transaction。"""
+
+        with self._store.source_registration_batch():
+            yield
+
     def list_registered_sources(self) -> List[Dict[str, Any]]:
         """返回 Draft 监视与启动恢复所需的已注册源码。"""
 
