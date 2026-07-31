@@ -6,9 +6,9 @@
 
 基线：`ca6083b`
 
-当前 production/test 候选：`c591f94`
+当前 production/test 候选：`4469953`
 
-状态：**六个 review blocking 已测试化并修复，正式测试全绿；等待三名独立
+状态：**七个 review blocking 已测试化并修复，正式测试全绿；等待三名独立
 reviewer 针对最终 production/test SHA 依次复核。**
 
 ## 1. 本轮交付
@@ -36,6 +36,8 @@ Backend。Action result record 继续留给 02B2。
 - `ParsedParameter` 改为只能由 parser 构造，普通 caller 不能伪造 nominal
   合法、内部非法的值；
 - 深 literal AST 的 `RecursionError` 被稳定投影为 `AnnotationSchemaError`；
+- `ast.literal_eval` 的数值转换 `OverflowError` 同样被稳定隔离，非法 complex
+  表达式不会泄漏标准库异常；
 - annotation 与 canonical Schema 两层 enum 判重改为不依赖 hash 均匀性的
   保序 O(n log n)，可预测 integer hash collision 不再造成 O(n²) 退化；
 - 新增构造器补齐 `-> None`。
@@ -48,7 +50,7 @@ Backend。Action result record 继续留给 02B2。
 | 类别 | 文件数 | 新增行 | 删除行 |
 |---|---:|---:|---:|
 | 生产代码 | 3 | 710 | 2 |
-| 独立合同/安全/风险测试 | 3 | 1820 | 0 |
+| 独立合同/安全/风险测试 | 4 | 1973 | 0 |
 | 实现前设计与决策补充 | 1 | 259 | 0 |
 
 测试代码明显多于生产代码，是因为有限语法的价值主要来自闭合拒绝矩阵：测试不仅
@@ -120,22 +122,40 @@ integer hash collision 增长守护：2 failed
 159 passed
 ```
 
+三名 reviewer 首次针对 `c591f94` 顺序复核时，合同与模块安全均为 0 blocking，
+最终风险 reviewer 又发现 `ast.literal_eval` 会在预算检查前，对“较大 integer
+加减 complex”泄漏裸 `OverflowError`。这类表达式本来就不在 v1 JSON literal
+集合中，但必须由公共 seam 稳定拒绝。独立测试作者新增 8 个用例，覆盖四类 literal
+位置与正负运算，在旧候选得到：
+
+```text
+8 failed, 0 passed
+统一首因：OverflowError: int too large to convert to float
+```
+
+用例使用 1024 位十进制整数，明确低于 4096 位预算。最终候选 `4469953` 将该标准库
+异常投影为原有 `AnnotationSchemaError`，没有接受 complex，也没有改变整数预算：
+
+```text
+167 passed
+```
+
 ## 4. 门禁结果
 
 ```text
-Parameter Annotation 目标：159 passed
+Parameter Annotation 目标：167 passed
 02A Schema/route 累计：212 passed
-Registry：185 passed
+Registry：193 passed
 Workflow：644 passed
-正式 tests：1215 passed, 3 skipped, 18 warnings
+正式 tests：1223 passed, 3 skipped, 19 warnings
 Ruff E/F/I：passed
 Ruff format --check：passed
 git diff --check：passed
 ```
 
-warnings 均来自既有 FastAPI、ROS test class 与 lifespan deprecated 提示；
-没有本轮新增 warning。前一次全量额外触发 1 个既有 SOCKS 可选依赖提示，因此
-warning 计数在 18～19 间波动，不影响测试结论。
+warnings 均来自既有 FastAPI、ROS test class、SOCKS 可选依赖与 lifespan
+deprecated 提示；没有本轮新增 warning。不同全量运行中 SOCKS 提示可能不触发，
+因此 warning 计数在 18～19 间波动，不影响测试结论。
 
 ## 5. 问题趋势
 
@@ -152,24 +172,27 @@ warning 计数在 18～19 间波动，不影响测试结论。
 | 模块安全评审 | 4 blocking | 4 | 0 |
 | 第一轮修复后复核 | 0 blocking、1 follow-up | 0 | 0 blocking |
 | 最终风险评审 | 2 blocking | 2 | 0 |
-| 最终候选正式门禁 | 0 个产品回归 | 0 | 0 |
+| `c591f94` 合同/模块复核 | 0 blocking、1 follow-up | 0 | 0 blocking |
+| `c591f94` 最终风险复核 | 1 blocking | 1 | 0 |
+| `4469953` 正式门禁 | 0 个产品回归 | 0 | 0 |
 
 问题数并非单调下降：首个全绿候选之后，模块安全 reviewer 发现 4 个问题；第一轮
-修复再次全绿后，最终风险 reviewer 又发现 2 个对抗输入问题。后一轮说明“平均输入
-更快”不能代替“最坏输入有界”，parse 通过也不能代替 parse/render/unparse 闭包。
-这些问题仍全部位于共享深模块和既有 canonical Schema 内，没有新增 Authority、
-持久状态、HTTP 交互或 FE 状态。
+修复再次全绿后，最终风险 reviewer 发现 2 个对抗输入问题；三名 reviewer 对下一
+候选顺序复核时，第三名又发现 1 个同一 literal seam 的异常隔离遗漏。这说明“平均
+输入更快”不能代替“最坏输入有界”，parse 通过也不能代替
+parse/render/unparse 闭包，而正常测试全绿也不能代替对标准库失败面的审查。
 
-两轮修复后累计 blocking 从 6 降到 0，正式测试从 1183 增长到 1215。当前趋势
-应表述为：**问题发现不是单调下降，但新增问题越来越集中于同一深模块的对抗边界，
-均已先测试化再关闭，体系结构与跨组件问题面没有扩张。** 是否允许合并仍以三个
-reviewer 对 `c591f94` 的顺序复核为准。
+这些问题仍全部位于共享深模块和既有 canonical Schema 内，没有新增 Authority、
+持久状态、HTTP 交互或 FE 状态。三轮修复后累计 blocking 从 7 降到 0，正式测试
+从 1183 增长到 1223。当前趋势应表述为：**问题发现不是单调下降，但新增问题已经
+收敛到同一个 literal seam 的异常映射，均已先测试化再关闭，体系结构与跨组件问题
+面没有扩张。** 是否允许合并仍以三个 reviewer 对 `4469953` 的顺序复核为准。
 
 ## 6. 策略调整
 
 1. 继续保持 Parameter Annotation 是深模块：后续 compiler 与 Registry
    复用它，不各自实现类型猜测。
-2. 三名 reviewer 对最终 production/test SHA `c591f94` 重新依次确认；旧候选的
+2. 三名 reviewer 对最终 production/test SHA `4469953` 重新依次确认；旧候选的
    通过结论不直接继承，同时仍只运行一名 subagent。
 3. 把最坏复杂度和 parse/render/unparse 闭包作为 Interface 行为测试；不新增未经
    决策的 enum 数量 cap，也不修改进程全局 integer 转换限制。
