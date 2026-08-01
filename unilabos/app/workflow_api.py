@@ -801,7 +801,7 @@ def create_workflow_template_catalog_router(
             parsed_page = _parse_catalog_integer(page)
             parsed_page_size = _parse_catalog_integer(page_size)
             resource_uuid = (
-                validate_uuid(resource_template_uuid)
+                str(UUID(resource_template_uuid))
                 if resource_template_uuid not in (None, "")
                 else None
             )

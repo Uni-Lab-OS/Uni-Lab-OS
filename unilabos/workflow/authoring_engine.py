@@ -2006,6 +2006,7 @@ def _validate_built_graph(graph: dict[str, Any]) -> None:
         effective_params={node.uuid: node.param or {} for node in nodes},
         workflow_meta_data=graph["workflow"].get("meta_data") or {},
         node_meta_data={node.uuid: node.meta_data for node in nodes},
+        validate_input_binding_schema=True,
     )
 
 

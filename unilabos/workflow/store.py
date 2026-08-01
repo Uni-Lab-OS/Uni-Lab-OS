@@ -1125,19 +1125,10 @@ class WorkflowStore:
         result = dict(submitted)
         if not enabled:
             return result
-        submitted_unilab = result.pop("unilab", None)
+        result.pop("unilab", None)
         existing = _load(existing_json, {}) if existing_json is not None else {}
         if isinstance(existing, dict) and "unilab" in existing:
             result["unilab"] = existing["unilab"]
-        elif (
-            isinstance(submitted_unilab, dict) and "input_bindings" in submitted_unilab
-        ):
-            # A newly created Node may bind its target Handles to an already
-            # persisted Workflow input contract.  The ordinary graph route
-            # cannot invent that contract or create any other compiler-owned
-            # Node metadata (for example executor_binding); graph validation
-            # below checks the closed binding shape and schema compatibility.
-            result["unilab"] = {"input_bindings": submitted_unilab["input_bindings"]}
         return result
 
     @staticmethod
@@ -1730,6 +1721,7 @@ class WorkflowStore:
                     advance_revision=True,
                     protect_reserved_metadata=False,
                     semantic_workflow_meta_data=candidate_meta,
+                    validate_input_binding_schema=True,
                 )
                 workflow_meta = dict(workflow["meta_data"])
                 workflow_meta.pop("unilab", None)

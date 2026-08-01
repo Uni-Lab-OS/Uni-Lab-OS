@@ -467,9 +467,7 @@ def test_ordinary_binding_with_extra_fields_is_stripped_without_contract_change(
         )
 
         assert saved["nodes"][0]["meta_data"] == {"caller": "preserved"}
-        assert saved["workflow"]["meta_data"]["unilab"]["input_contract"] == (
-            contract
-        )
+        assert saved["workflow"]["meta_data"]["unilab"]["input_contract"] == (contract)
     finally:
         store.close()
 
@@ -502,9 +500,7 @@ def test_ordinary_incompatible_binding_is_stripped_without_contract_change(
         )
 
         assert saved["nodes"][0]["meta_data"] == {"caller": "preserved"}
-        assert saved["workflow"]["meta_data"]["unilab"]["input_contract"] == (
-            contract
-        )
+        assert saved["workflow"]["meta_data"]["unilab"]["input_contract"] == (contract)
     finally:
         store.close()
 

@@ -123,9 +123,9 @@ def test_ordinary_graph_put_cannot_create_node_owned_metadata_on_a_new_edge(
         )
 
         assert saved["edges"][0]["meta_data"] == {"caller": "preserved"}
-        assert service.get_graph(ORDINARY_WORKFLOW_UUID)["edges"][0][
-            "meta_data"
-        ] == {"caller": "preserved"}
+        assert service.get_graph(ORDINARY_WORKFLOW_UUID)["edges"][0]["meta_data"] == {
+            "caller": "preserved"
+        }
     finally:
         store.close()
 
@@ -274,6 +274,4 @@ def test_compatible_python_candidate_bindings_remain_valid(
         node for node in compiled.graph["nodes"] if node["name"] == "analyzed"
     )
     if case == "nullable-and-resource-slot":
-        assert ANALYZE_LABEL_TARGET in analyze["meta_data"]["unilab"][
-            "input_bindings"
-        ]
+        assert ANALYZE_LABEL_TARGET in analyze["meta_data"]["unilab"]["input_bindings"]

@@ -8,13 +8,12 @@ boundary, and never carry legacy Run identifiers.
 from __future__ import annotations
 
 import math
-from copy import deepcopy
 from typing import Any, Dict, List, Literal, Optional
 from uuid import UUID
 
 from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 
-from unilabos.workflow.json_codec import MAX_BACKEND_JSON_DEPTH
+from unilabos.workflow.json_codec import MAX_BACKEND_JSON_DEPTH, clone_json
 
 JsonObject = Dict[str, Any]
 JsonArray = List[Any]
@@ -91,7 +90,7 @@ def resolve_template_root_param(goal_default: Any, goal: Any) -> JsonObject:
 
     for candidate in (goal_default, goal):
         if isinstance(candidate, dict) and candidate:
-            return deepcopy(normalize_json_object(candidate))
+            return clone_json(normalize_json_object(candidate))
     return {}
 
 

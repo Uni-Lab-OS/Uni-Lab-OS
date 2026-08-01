@@ -212,9 +212,9 @@ def test_deep_contract_survives_apply_save_read_and_task_without_aliasing(
             expected_workflow_revision=1,
         )
         trusted_graph = service.get_graph(WORKFLOW_UUID)
-        assert trusted_graph["nodes"][0]["meta_data"]["unilab"][
-            "input_bindings"
-        ] == {HANDLE_TEMPLATE_UUID: {"parameter": "payload"}}
+        assert trusted_graph["nodes"][0]["meta_data"]["unilab"]["input_bindings"] == {
+            HANDLE_TEMPLATE_UUID: {"parameter": "payload"}
+        }
 
         current = service.get_workflow(WORKFLOW_UUID)
         current_unilab = current["meta_data"]["unilab"]
@@ -354,9 +354,7 @@ def test_none_param_uses_deep_template_fallback_without_recursion_or_aliasing(
             ],
             edges=[],
         )
-        assert _deep_leaf(saved["nodes"][0]["param"]) == (
-            f"{fallback_field}-original"
-        )
+        assert _deep_leaf(saved["nodes"][0]["param"]) == (f"{fallback_field}-original")
         _replace_deep_leaf(
             saved["nodes"][0]["param"],
             f"{fallback_field}-save-response-mutated",
