@@ -479,6 +479,8 @@ class SQLiteMaterialAdapter:
                     ).fetchone()
                     if occupant is None:
                         raise MaterialNotFound("site occupant material not found")
+                    if occupied_material_uuid == material_uuid:
+                        raise MaterialConflict("site placement would create a cycle")
                     if (
                         allowed_resource_template_uuids
                         and occupant["resource_template_uuid"]
