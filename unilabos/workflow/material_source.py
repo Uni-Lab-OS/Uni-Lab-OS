@@ -11,6 +11,7 @@ from unilabos.resources.authority import (
     MaterialError,
     MaterialNotFound,
     MaterialRecord,
+    RuntimeAuthorityUnitOfWork,
     SiteRecord,
 )
 
@@ -18,11 +19,26 @@ from unilabos.resources.authority import (
 class MaterialSourceStaticAuthority(Protocol):
     """MaterialSource Preview/Save 所需的最小只读 authority port。"""
 
-    def get_material(self, material_uuid: str) -> MaterialRecord: ...
+    def get_material(
+        self,
+        material_uuid: str,
+        *,
+        uow: RuntimeAuthorityUnitOfWork | None = None,
+    ) -> MaterialRecord: ...
 
-    def get_site(self, site_uuid: str) -> SiteRecord: ...
+    def get_site(
+        self,
+        site_uuid: str,
+        *,
+        uow: RuntimeAuthorityUnitOfWork | None = None,
+    ) -> SiteRecord: ...
 
-    def list_sites(self, material_uuid: str) -> Sequence[SiteRecord]: ...
+    def list_sites(
+        self,
+        material_uuid: str,
+        *,
+        uow: RuntimeAuthorityUnitOfWork | None = None,
+    ) -> Sequence[SiteRecord]: ...
 
 
 class MaterialSourceAuthorityError(RuntimeError):
@@ -36,6 +52,8 @@ class MaterialSourceAuthorityError(RuntimeError):
 def validate_material_source_authority(
     graph: Mapping[str, Any],
     authority: MaterialSourceStaticAuthority | None,
+    *,
+    uow: RuntimeAuthorityUnitOfWork | None = None,
 ) -> None:
     """证明每个 canonical MaterialSource selector 的静态位置可行性。"""
 
@@ -60,7 +78,7 @@ def validate_material_source_authority(
             "MaterialSource 静态 authority 未配置",
         )
     for selector in authority_selectors:
-        _validate_selector_authority(selector, authority)
+        _validate_selector_authority(selector, authority, uow=uow)
 
 
 def _selector_has_authority_shape(selector: Mapping[str, Any]) -> bool:
@@ -129,6 +147,8 @@ def _canonical_uuid(value: Any) -> bool:
 def _validate_selector_authority(
     selector: Mapping[str, Any],
     authority: MaterialSourceStaticAuthority,
+    *,
+    uow: RuntimeAuthorityUnitOfWork | None,
 ) -> None:
     mount = selector.get("mount")
     mount_uuid = mount.get("uuid") if isinstance(mount, Mapping) else None
@@ -139,18 +159,20 @@ def _validate_selector_authority(
             "MaterialSource selector 不符合 authority 查询合同",
         )
 
-    mount_material = _get_material(authority, mount_uuid)
+    mount_material = _get_material(authority, mount_uuid, uow=uow)
     if mount_material.deleted_at is not None:
         _not_found()
 
     site_uuid = selector.get("site")
     slot_range = selector.get("slot_range")
     if isinstance(site_uuid, str):
-        selected_sites = (_get_site(authority, site_uuid),)
+        selected_sites = (_get_site(authority, site_uuid, uow=uow),)
     elif isinstance(slot_range, list):
-        selected_sites = tuple(_get_site(authority, item) for item in slot_range)
+        selected_sites = tuple(
+            _get_site(authority, item, uow=uow) for item in slot_range
+        )
     else:
-        selected_sites = _list_sites(authority, mount_uuid)
+        selected_sites = _list_sites(authority, mount_uuid, uow=uow)
 
     for site in selected_sites:
         if site.deleted_at is not None:
@@ -175,7 +197,7 @@ def _validate_selector_authority(
             "invalid_material_source",
             "MaterialSource selector 不符合 authority 查询合同",
         )
-    fixed_material = _get_material(authority, fixed_material_uuid)
+    fixed_material = _get_material(authority, fixed_material_uuid, uow=uow)
     if (
         fixed_material.deleted_at is not None
         or fixed_material.resource_template_uuid != template_uuid
@@ -190,9 +212,15 @@ def _validate_selector_authority(
 def _get_material(
     authority: MaterialSourceStaticAuthority,
     material_uuid: str,
+    *,
+    uow: RuntimeAuthorityUnitOfWork | None,
 ) -> MaterialRecord:
     try:
-        material = authority.get_material(material_uuid)
+        material = (
+            authority.get_material(material_uuid)
+            if uow is None
+            else authority.get_material(material_uuid, uow=uow)
+        )
     except MaterialNotFound:
         _not_found()
     except MaterialAuthorityUnavailable:
@@ -209,9 +237,15 @@ def _get_material(
 def _get_site(
     authority: MaterialSourceStaticAuthority,
     site_uuid: str,
+    *,
+    uow: RuntimeAuthorityUnitOfWork | None,
 ) -> SiteRecord:
     try:
-        site = authority.get_site(site_uuid)
+        site = (
+            authority.get_site(site_uuid)
+            if uow is None
+            else authority.get_site(site_uuid, uow=uow)
+        )
     except MaterialNotFound:
         _not_found()
     except MaterialAuthorityUnavailable:
@@ -228,9 +262,15 @@ def _get_site(
 def _list_sites(
     authority: MaterialSourceStaticAuthority,
     mount_uuid: str,
+    *,
+    uow: RuntimeAuthorityUnitOfWork | None,
 ) -> tuple[SiteRecord, ...]:
     try:
-        sites = authority.list_sites(mount_uuid)
+        sites = (
+            authority.list_sites(mount_uuid)
+            if uow is None
+            else authority.list_sites(mount_uuid, uow=uow)
+        )
     except MaterialNotFound:
         _not_found()
     except MaterialAuthorityUnavailable:

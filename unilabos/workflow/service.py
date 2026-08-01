@@ -398,6 +398,22 @@ class WorkflowService:
             self._store.get_graph(identity),
         )
 
+    def _validate_material_source_commit(
+        self,
+        graph: Dict[str, Any],
+        uow: Any,
+    ) -> None:
+        """在 Store 写事务内复核 MaterialSource 的 durable facts。"""
+
+        try:
+            validate_material_source_authority(
+                graph,
+                self._material_source_authority,
+                uow=uow,
+            )
+        except MaterialSourceAuthorityError as error:
+            raise StoreAuthoringConflict(error.code) from None
+
     def save_graph(
         self,
         workflow_uuid: str,
@@ -422,10 +438,6 @@ class WorkflowService:
                     else WorkflowEdgeWrite.model_validate(item)
                     for item in edges
                 ]
-                validate_material_source_authority(
-                    {"nodes": [item.model_dump() for item in node_values]},
-                    self._material_source_authority,
-                )
                 return self._store.save_graph(
                     identity,
                     revision=revision,
@@ -433,6 +445,7 @@ class WorkflowService:
                     edges=edge_values,
                     protect_reserved_metadata=True,
                     validate_input_binding_schema=True,
+                    commit_validator=self._validate_material_source_commit,
                 )
             except ValidationError:
                 raise WorkflowError("invalid_input") from None
@@ -1246,6 +1259,7 @@ class WorkflowService:
                         workflow_uuid=workflow_uuid,
                         candidate_hash=candidate_hash,
                         validate_draft_state=validate_draft_linearization,
+                        commit_validator=self._validate_material_source_commit,
                     )
             except StoreAuthoringConflict as error:
                 raise WorkflowConflict(error.code) from None

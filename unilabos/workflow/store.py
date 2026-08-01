@@ -26,6 +26,7 @@ from unilabos.workflow.models import (
 from unilabos.workflow.task_input import PreparedTaskInput
 
 _STORE_SQLITE_BUSY_TIMEOUT_MS = 5000
+GraphCommitValidator = Callable[[Dict[str, Any], sqlite3.Connection], None]
 
 
 def utc_now() -> str:
@@ -817,6 +818,7 @@ class WorkflowStore:
         edges: List[WorkflowEdgeWrite],
         protect_reserved_metadata: bool = False,
         validate_input_binding_schema: bool = False,
+        commit_validator: GraphCommitValidator | None = None,
     ) -> Dict[str, Any]:
         with self.transaction() as conn:
             self._reconcile_graph(
@@ -828,6 +830,7 @@ class WorkflowStore:
                 advance_revision=True,
                 protect_reserved_metadata=protect_reserved_metadata,
                 validate_input_binding_schema=validate_input_binding_schema,
+                commit_validator=commit_validator,
             )
         return self.get_graph(workflow_uuid)
 
@@ -843,6 +846,7 @@ class WorkflowStore:
         protect_reserved_metadata: bool = False,
         semantic_workflow_meta_data: Optional[Dict[str, Any]] = None,
         validate_input_binding_schema: bool = False,
+        commit_validator: GraphCommitValidator | None = None,
     ) -> int:
         workflow = self.get_workflow(workflow_uuid, conn=conn)
         if workflow["revision"] != expected_revision:
@@ -932,6 +936,25 @@ class WorkflowStore:
             raise StoreAuthoringConflict(exc.code) from exc
         except GraphValidationError as exc:
             raise StoreConflict(str(exc)) from exc
+        if commit_validator is not None:
+            commit_validator(
+                {
+                    "workflow": {
+                        **workflow,
+                        "meta_data": effective_workflow_meta_data,
+                    },
+                    "nodes": [
+                        {
+                            **node.model_dump(),
+                            "meta_data": effective_node_meta_data[node.uuid],
+                            "param": effective_params[node.uuid],
+                        }
+                        for node in nodes
+                    ],
+                    "edges": [edge.model_dump() for edge in edges],
+                },
+                conn,
+            )
         now = utc_now()
         for node in nodes:
             self._upsert_node(
@@ -1659,6 +1682,7 @@ class WorkflowStore:
         workflow_uuid: str,
         candidate_hash: str,
         validate_draft_state: Callable[[], None],
+        commit_validator: GraphCommitValidator | None = None,
     ) -> int:
         now = utc_now()
         with self.transaction() as conn:
@@ -1741,6 +1765,7 @@ class WorkflowStore:
                     protect_reserved_metadata=False,
                     semantic_workflow_meta_data=candidate_meta,
                     validate_input_binding_schema=True,
+                    commit_validator=commit_validator,
                 )
                 workflow_meta = dict(workflow["meta_data"])
                 workflow_meta.pop("unilab", None)
@@ -1761,6 +1786,8 @@ class WorkflowStore:
                     ),
                 )
             elif kind == "source_only":
+                if commit_validator is not None:
+                    commit_validator(graph, conn)
                 resulting_revision = expected_revision
             else:
                 raise StoreConflict(f"unsupported Authoring changeset kind {kind!r}")
