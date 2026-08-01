@@ -13,8 +13,8 @@ from pathlib import Path
 from typing import Any
 
 import pytest
-from unilabos.material import MaterialConflict, MaterialModule
-from unilabos.material.sqlite import SQLiteMaterialAdapter
+from unilabos.resources.authority import MaterialConflict, MaterialModule
+from unilabos.resources.authority.sqlite import SQLiteMaterialAdapter
 
 MATERIAL_UUID = "50000000-0000-4000-8000-000000000017"
 SECOND_MATERIAL_UUID = "50000000-0000-4000-8000-000000000018"
@@ -97,3 +97,40 @@ def test_business_material_barcode_is_unique_case_insensitively(
         assert _observable_material(
             materials.get_material(MATERIAL_UUID)
         ) == EXPECTED_INITIAL_MATERIAL
+
+
+def test_distinct_business_materials_may_share_empty_barcode(
+    tmp_path: Path,
+) -> None:
+    database_path = tmp_path / "workflow.db"
+
+    with _open_material_module(database_path) as materials:
+        first = materials.create_business_material(
+            material_uuid=MATERIAL_UUID,
+            resource_template_uuid=RESOURCE_TEMPLATE_UUID,
+            barcode="",
+        )
+        second = materials.create_business_material(
+            material_uuid=SECOND_MATERIAL_UUID,
+            resource_template_uuid=RESOURCE_TEMPLATE_UUID,
+            barcode="",
+        )
+
+        assert _observable_material(first) == {
+            "uuid": MATERIAL_UUID,
+            "resource_template_uuid": RESOURCE_TEMPLATE_UUID,
+            "parent_uuid": None,
+            "barcode": "",
+            "disposition": "active",
+            "version": 1,
+            "deleted_at": None,
+        }
+        assert _observable_material(second) == {
+            "uuid": SECOND_MATERIAL_UUID,
+            "resource_template_uuid": RESOURCE_TEMPLATE_UUID,
+            "parent_uuid": None,
+            "barcode": "",
+            "disposition": "active",
+            "version": 1,
+            "deleted_at": None,
+        }
