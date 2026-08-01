@@ -54,9 +54,9 @@ reviewer 对后续 OS 加固候选最终确认 Standards/Spec 均无 blocking，
 | finding RED 与修复 | 主代理 | OS `77e79f5`；FE `7afd411` | duplicate legacy Handle 与 FE multi-instance/provider diagnostic 先 RED 后转绿 |
 | 同一 reviewer 最终复核 | `/root/a1_action_catalog_reviewer` | OS `77e79f53c868a28fb7a18a64b64a3d170611e66c`；FE `7afd4119308a96d432f5c2a9b1e482f34f8d3bed` | 0 blocking；允许 non-squash 本地合入 |
 | OS 加固首轮独立 RED | 唯一 test-author，`/root/test_a1_review_fixes` | 原始 `039e7a6`；合入 `c60121a` | 冻结 Backend-shaped HTTP、Registry identity、ROS result flow 与 rollback 缺口 |
-| OS 加固首轮实现 | 主代理 | `734ccd8` | 关闭首批 catalog/HTTP/result/identity 问题；复审仍有 5 blocking |
+| OS 加固首轮实现与复审 | 主代理；`/root/review_a1_action_catalog` | `734ccd8` | 关闭首批 catalog/HTTP/result/identity 问题；`CHANGES_REQUIRED`；5 blocking |
 | OS 加固二轮独立 RED | 同一 test-author | 原始 `1f95aab`、`79fef87`、`1025406`；合入 `79b88c8`、`4eb884d`、`012fb72` | 冻结 authority、双 Registry snapshot、deep JSON 与真实 Candidate result flow |
-| OS 加固二轮实现与复审 | 主代理；`/root/review_a1_action_catalog` | `e0173374bb3a6f83f4a728bcd8c2e1d24415f5e5` | 关闭前轮主体问题；精确复审发现 4 类 remaining blocker |
+| OS 加固二轮实现与复审 | 主代理；`/root/review_a1_action_catalog` | `e0173374bb3a6f83f4a728bcd8c2e1d24415f5e5` | 关闭前轮主体问题；`CHANGES_REQUIRED`；4 类 blocking |
 | OS 加固三轮独立 RED | 同一 test-author | 原始 `d030d29`、`a37565e`；合入 `e565650`、`b644237` | `8 RED/22 GREEN`，并纠正 3 条旧 authority 断言；纠正后在旧候选上保持 RED |
 | OS 加固最终实现 | 主代理 | `93ec0f3b515ef00e8ee1aefe3e0e5d68706b5860` | optional nil UUID、reserved metadata、Candidate binding typing、deep template default 全部关闭 |
 | OS 加固最终复核 | `/root/review_a1_action_catalog` | `93ec0f3b515ef00e8ee1aefe3e0e5d68706b5860` | `ACCEPT`；0 blocking；低层 adversarial validation opt-out 为 non-blocking |
