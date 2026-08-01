@@ -4,8 +4,10 @@ from __future__ import annotations
 
 import sqlite3
 from collections.abc import Iterator, Mapping, Sequence
+from concurrent.futures import ThreadPoolExecutor
 from contextlib import contextmanager
 from pathlib import Path
+from threading import Barrier
 from types import MappingProxyType
 from typing import Any
 
@@ -216,6 +218,22 @@ def _post_task(
         "/api/v1/workflow-tasks",
         json={"workflow_uuid": workflow_uuid, "input": input_value},
     )
+
+
+def _concurrent_http_task_request(
+    service: WorkflowService,
+    barrier: Barrier,
+) -> Any:
+    with TestClient(
+        create_workflow_app(service),
+        raise_server_exceptions=False,
+    ) as client:
+        barrier.wait(timeout=10)
+        return _post_task(
+            client,
+            workflow_uuid=SINGLE_WORKFLOW_UUID,
+            input_value={"sample": {"uuid": MATERIAL_A_UUID}},
+        )
 
 
 def _publish_typed_action_catalog(
@@ -652,6 +670,203 @@ def test_task_create_contention_is_all_or_none_and_blocks_dispatch(
             assert store.get_job(blocked_job["uuid"])["status"] == "pending"
     finally:
         store.close()
+
+
+def test_concurrent_http_clients_create_one_complete_material_reservation(
+    tmp_path: Path,
+) -> None:
+    working_dir = tmp_path / "unilabos_data"
+    working_dir.mkdir()
+    database_path = working_dir / "workflow.db"
+    client_count = 6
+    composition.reset_workflow_service_for_test()
+    with _open_authority(database_path) as (store, materials):
+        _create_material(materials, MATERIAL_A_UUID)
+        _seed_workflow(
+            store,
+            workflow_uuid=SINGLE_WORKFLOW_UUID,
+            node_uuid=SINGLE_NODE_UUID,
+            parameters=(_resource_slot_parameter("sample"),),
+        )
+
+    try:
+        service = composition.compose_workflow_runtime(working_dir)
+        barrier = Barrier(client_count)
+        with ThreadPoolExecutor(max_workers=client_count) as executor:
+            futures = [
+                executor.submit(
+                    _concurrent_http_task_request,
+                    service,
+                    barrier,
+                )
+                for _ in range(client_count)
+            ]
+            responses = [future.result(timeout=20) for future in futures]
+
+        assert [response.status_code for response in responses] == [201] * client_count
+        tasks = [response.json()["data"] for response in responses]
+        assert len({task["uuid"] for task in tasks}) == client_count
+        assert {task["status"] for task in tasks} == {"pending"}
+        jobs = {
+            task["uuid"]: service.list_workflow_node_jobs(task["uuid"])[0]
+            for task in tasks
+        }
+    finally:
+        composition.reset_workflow_service_for_test()
+
+    reservations = {
+        task["uuid"]: _reservation_snapshot(database_path, task["uuid"])
+        for task in tasks
+    }
+    complete_task_uuids = [
+        task_uuid
+        for task_uuid, (headers, members) in reservations.items()
+        if len(headers) == 1 and len(members) == 1
+    ]
+    assert len(complete_task_uuids) == 1
+    winner_uuid = complete_task_uuids[0]
+    assert reservations[winner_uuid][1][0][1:] == (
+        MATERIAL_A_UUID,
+        MATERIAL_A_UUID,
+        1,
+        None,
+    )
+    losing_task_uuids = sorted(set(reservations) - {winner_uuid})
+    assert len(losing_task_uuids) == client_count - 1
+    assert all(reservations[task_uuid] == ([], []) for task_uuid in losing_task_uuids)
+
+    store = WorkflowStore(database_path)
+    try:
+        coordinator = WorkflowRuntimeCoordinator(store)
+        assert (
+            coordinator.transition_job(
+                jobs[winner_uuid]["uuid"],
+                "dispatched",
+            )["status"]
+            == "dispatched"
+        )
+        for task_uuid in losing_task_uuids:
+            job_uuid = jobs[task_uuid]["uuid"]
+            with pytest.raises(StoreConflict):
+                coordinator.transition_job(job_uuid, "dispatched")
+            assert store.get_job(job_uuid)["status"] == "pending"
+    finally:
+        store.close()
+
+
+@pytest.mark.parametrize(
+    ("first_root_uuid", "second_root_uuid", "expected_first_members"),
+    [
+        pytest.param(
+            MATERIAL_A_UUID,
+            MATERIAL_B_UUID,
+            [
+                (MATERIAL_A_UUID, MATERIAL_A_UUID, 1),
+                (MATERIAL_B_UUID, MATERIAL_A_UUID, 2),
+            ],
+            id="ancestor-then-descendant",
+        ),
+        pytest.param(
+            MATERIAL_B_UUID,
+            MATERIAL_A_UUID,
+            [(MATERIAL_B_UUID, MATERIAL_B_UUID, 2)],
+            id="descendant-then-ancestor",
+        ),
+    ],
+)
+def test_task_reservation_conflicts_across_material_composition_in_both_directions(
+    tmp_path: Path,
+    first_root_uuid: str,
+    second_root_uuid: str,
+    expected_first_members: list[tuple[str, str, int]],
+) -> None:
+    database_path = tmp_path / "workflow.db"
+    with _open_authority(database_path) as (store, materials):
+        _create_material(materials, MATERIAL_A_UUID)
+        _create_material(materials, MATERIAL_B_UUID)
+        with store.transaction() as uow:
+            # SQLite 仅用于构造尚无 public writer 的 Material composition fixture；
+            # Reservation 获取、冲突判断与 dispatch gate 全部走 public seam。
+            updated = uow.execute(
+                """
+                UPDATE material
+                SET parent_uuid = ?, version = version + 1,
+                    update_time = '2026-08-02T00:00:00Z'
+                WHERE uuid = ? AND deleted_at IS NULL
+                """,
+                (MATERIAL_A_UUID, MATERIAL_B_UUID),
+            )
+            assert updated.rowcount == 1
+            child = materials.get_material(MATERIAL_B_UUID, uow=uow)
+            assert (child.parent_uuid, child.version) == (MATERIAL_A_UUID, 2)
+
+        _seed_workflow(
+            store,
+            workflow_uuid=SINGLE_WORKFLOW_UUID,
+            node_uuid=SINGLE_NODE_UUID,
+            parameters=(_resource_slot_parameter("sample"),),
+        )
+        material_authority = MaterialResourceSlotResolver(materials)
+        service = WorkflowService(
+            store,
+            resource_resolver=material_authority,
+            material_reservations=material_authority,
+        )
+        coordinator = WorkflowRuntimeCoordinator(
+            store,
+            material_reservations=material_authority,
+        )
+
+        first_task = service.create_workflow_task(
+            workflow_uuid=SINGLE_WORKFLOW_UUID,
+            run_mode="normal",
+            target_node_uuid=None,
+            input_value={"sample": {"uuid": first_root_uuid}},
+            description=None,
+            meta_data={},
+        )
+        second_task = service.create_workflow_task(
+            workflow_uuid=SINGLE_WORKFLOW_UUID,
+            run_mode="normal",
+            target_node_uuid=None,
+            input_value={"sample": {"uuid": second_root_uuid}},
+            description=None,
+            meta_data={},
+        )
+        assert first_task["status"] == second_task["status"] == "pending"
+
+        first_headers, first_members = _reservation_snapshot(
+            database_path,
+            first_task["uuid"],
+        )
+        assert len(first_headers) == 1
+        assert [
+            (row[1], row[2], row[3]) for row in first_members
+        ] == expected_first_members
+        assert all(row[0] == first_headers[0][0] for row in first_members)
+        assert _reservation_snapshot(database_path, second_task["uuid"]) == ([], [])
+
+        with store.transaction() as uow:
+            assert materials.has_complete_task_reservation(
+                uow,
+                task_uuid=first_task["uuid"],
+                root_material_uuids=(first_root_uuid,),
+            )
+            assert not materials.has_complete_task_reservation(
+                uow,
+                task_uuid=second_task["uuid"],
+                root_material_uuids=(second_root_uuid,),
+            )
+
+        first_job = service.list_workflow_node_jobs(first_task["uuid"])[0]
+        second_job = service.list_workflow_node_jobs(second_task["uuid"])[0]
+        assert (
+            coordinator.transition_job(first_job["uuid"], "dispatched")["status"]
+            == "dispatched"
+        )
+        with pytest.raises(StoreConflict):
+            coordinator.transition_job(second_job["uuid"], "dispatched")
+        assert store.get_job(second_job["uuid"])["status"] == "pending"
 
 
 def test_task_job_and_reservation_roll_back_together_on_job_insert_failure(
