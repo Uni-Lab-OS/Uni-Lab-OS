@@ -323,6 +323,94 @@ CREATE TABLE IF NOT EXISTS frontend_event (
     data TEXT NOT NULL,
     create_time TEXT NOT NULL
 );
+
+CREATE TABLE IF NOT EXISTS workflow_runtime_journal (
+    sequence INTEGER PRIMARY KEY AUTOINCREMENT,
+    workflow_task_uuid TEXT NOT NULL,
+    workflow_node_job_uuid TEXT,
+    workflow_task_command_uuid TEXT,
+    kind TEXT NOT NULL CHECK (
+        kind IN (
+            'task_transition',
+            'job_transition',
+            'command_consumed',
+            'feedback_committed',
+            'uncertainty_opened',
+            'uncertainty_resolved',
+            'startup_recovered'
+        )
+    ),
+    from_status TEXT,
+    to_status TEXT,
+    data TEXT NOT NULL DEFAULT '{}'
+        CHECK (json_valid(data) AND json_type(data) = 'object'),
+    create_time TEXT NOT NULL,
+    FOREIGN KEY(workflow_task_uuid)
+        REFERENCES workflow_task(uuid) ON DELETE CASCADE,
+    FOREIGN KEY(workflow_node_job_uuid)
+        REFERENCES workflow_node_job(uuid) ON DELETE CASCADE,
+    FOREIGN KEY(workflow_task_command_uuid)
+        REFERENCES workflow_task_command(uuid) ON DELETE CASCADE
+);
+CREATE INDEX IF NOT EXISTS ix_workflow_runtime_journal_task_sequence
+    ON workflow_runtime_journal(workflow_task_uuid, sequence);
+CREATE INDEX IF NOT EXISTS ix_workflow_runtime_journal_job_sequence
+    ON workflow_runtime_journal(workflow_node_job_uuid, sequence);
+
+CREATE TABLE IF NOT EXISTS workflow_task_step_permit (
+    workflow_task_command_uuid TEXT PRIMARY KEY,
+    workflow_task_uuid TEXT NOT NULL,
+    target_node_uuid TEXT,
+    status TEXT NOT NULL CHECK (status IN ('available', 'consumed')),
+    create_time TEXT NOT NULL,
+    consumed_at TEXT,
+    FOREIGN KEY(workflow_task_command_uuid)
+        REFERENCES workflow_task_command(uuid) ON DELETE CASCADE,
+    FOREIGN KEY(workflow_task_uuid)
+        REFERENCES workflow_task(uuid) ON DELETE CASCADE
+);
+CREATE INDEX IF NOT EXISTS ix_workflow_task_step_permit_available
+    ON workflow_task_step_permit(
+        workflow_task_uuid,
+        status,
+        create_time,
+        workflow_task_command_uuid
+    );
+
+CREATE TABLE IF NOT EXISTS workflow_node_job_feedback_history (
+    uuid TEXT PRIMARY KEY,
+    create_time TEXT NOT NULL,
+    update_time TEXT NOT NULL,
+    deleted_at TEXT,
+    description TEXT,
+    meta_data TEXT NOT NULL DEFAULT '{}'
+        CHECK (json_valid(meta_data) AND json_type(meta_data) = 'object'),
+    workflow_node_job_uuid TEXT NOT NULL,
+    sequence INTEGER NOT NULL CHECK (sequence > 0),
+    feedback_type TEXT NOT NULL CHECK (LENGTH(TRIM(feedback_type)) > 0),
+    data TEXT NOT NULL CHECK (json_valid(data) AND json_type(data) = 'object'),
+    observed_at TEXT NOT NULL,
+    received_at TEXT NOT NULL,
+    published_at TEXT,
+    idempotency_key TEXT NOT NULL
+        CHECK (LENGTH(TRIM(idempotency_key)) > 0),
+    FOREIGN KEY(workflow_node_job_uuid)
+        REFERENCES workflow_node_job(uuid) ON DELETE CASCADE
+);
+CREATE UNIQUE INDEX IF NOT EXISTS ux_workflow_node_job_feedback_sequence_active
+    ON workflow_node_job_feedback_history(workflow_node_job_uuid, sequence)
+    WHERE deleted_at IS NULL;
+CREATE UNIQUE INDEX IF NOT EXISTS ux_workflow_node_job_feedback_idempotency_active
+    ON workflow_node_job_feedback_history(
+        workflow_node_job_uuid,
+        idempotency_key
+    )
+    WHERE deleted_at IS NULL;
+CREATE INDEX IF NOT EXISTS ix_workflow_node_job_feedback_sequence
+    ON workflow_node_job_feedback_history(
+        workflow_node_job_uuid,
+        sequence
+    );
 """
 
 
@@ -1284,6 +1372,34 @@ class WorkflowStore:
             raise StoreNotFound(f"workflow node job {job_uuid} not found")
         return self._job_row(row)
 
+    def list_job_feedback(
+        self,
+        job_uuid: str,
+        *,
+        after_sequence: int,
+        limit: int,
+    ) -> Dict[str, Any]:
+        self.get_job(job_uuid)
+        with self._lock:
+            rows = self._conn.execute(
+                """
+                SELECT * FROM workflow_node_job_feedback_history
+                WHERE workflow_node_job_uuid = ?
+                  AND deleted_at IS NULL
+                  AND sequence > ?
+                ORDER BY sequence
+                LIMIT ?
+                """,
+                (job_uuid, after_sequence, limit + 1),
+            ).fetchall()
+        has_more = len(rows) > limit
+        selected = rows[:limit]
+        return {
+            "items": [self._job_feedback_row(row) for row in selected],
+            "next_cursor": (selected[-1]["sequence"] if selected else after_sequence),
+            "has_more": has_more,
+        }
+
     # Authoring ----------------------------------------------------------
 
     @contextmanager
@@ -1697,6 +1813,9 @@ class WorkflowStore:
             "workflow_task",
             "workflow_task_command",
             "workflow_node_job",
+            "workflow_node_job_feedback_history",
+            "workflow_runtime_journal",
+            "workflow_task_step_permit",
             "workflow_authoring",
             "frontend_event",
         }
@@ -1709,6 +1828,8 @@ class WorkflowStore:
             in {
                 "workflow_authoring",
                 "frontend_event",
+                "workflow_runtime_journal",
+                "workflow_task_step_permit",
             }
             else " WHERE deleted_at IS NULL"
         )
@@ -1894,6 +2015,21 @@ class WorkflowStore:
             "started_at",
             "finished_at",
         )
+        return result
+
+    @classmethod
+    def _job_feedback_row(cls, row: sqlite3.Row) -> Dict[str, Any]:
+        result = {
+            **cls._base(row),
+            "workflow_node_job_uuid": row["workflow_node_job_uuid"],
+            "sequence": row["sequence"],
+            "feedback_type": row["feedback_type"],
+            "data": _load(row["data"], {}),
+            "observed_at": row["observed_at"],
+            "received_at": row["received_at"],
+            "idempotency_key": row["idempotency_key"],
+        }
+        cls._add_optional(result, row, "published_at")
         return result
 
     @staticmethod

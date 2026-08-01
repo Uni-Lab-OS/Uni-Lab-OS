@@ -131,6 +131,17 @@ def _parse_non_negative_int64_decimal(value: str) -> int:
     return int(significant, 10)
 
 
+def _parse_positive_decimal(value: str, *, maximum: int) -> int:
+    """Match Go strconv.Atoi followed by a positive bounded range check."""
+
+    if _SIGNED_DECIMAL.fullmatch(value) is None:
+        raise ValueError
+    parsed = int(value, 10)
+    if parsed < 1 or parsed > maximum:
+        raise ValueError
+    return parsed
+
+
 class WorkflowCreateRequest(_BackendModel):
     name: str
     tags: List[Any] = Field(default_factory=list)
@@ -611,6 +622,31 @@ def create_workflow_router(service: WorkflowService) -> APIRouter:
     @router.get("/workflow-tasks/{task_uuid}/jobs")
     def list_workflow_node_jobs(task_uuid: str) -> JSONResponse:
         return _success(service.list_workflow_node_jobs(task_uuid))
+
+    @router.get("/workflow-node-jobs/{job_uuid}/feedback")
+    def list_workflow_node_job_feedback(
+        job_uuid: str,
+        after_sequence: str = Query(default=""),
+        limit: str = Query(default=""),
+    ) -> JSONResponse:
+        try:
+            after_text = after_sequence.strip(_GO_WHITE_SPACE)
+            limit_text = limit.strip(_GO_WHITE_SPACE)
+            parsed_after = (
+                _parse_non_negative_int64_decimal(after_text) if after_text else 0
+            )
+            parsed_limit = (
+                _parse_positive_decimal(limit_text, maximum=500) if limit_text else 100
+            )
+        except ValueError:
+            raise WorkflowError("invalid_input") from None
+        return _success(
+            service.list_workflow_node_job_feedback(
+                job_uuid,
+                after_sequence=parsed_after,
+                limit=parsed_limit,
+            )
+        )
 
     @router.get("/workflow-node-jobs/{job_uuid}")
     def get_workflow_node_job(job_uuid: str) -> JSONResponse:

@@ -14,7 +14,8 @@
 | `Uni-Lab-OS/uni-lab-fe` | `0fd39af3014b29035ee8e2280b9d753b2b9f96a2` | 旧版前端行为和测试依据 |
 | `Uni-Lab-OS/Uni-Lab-OS` | `f5c10733e7e37218ab5c660ecef9c41bb94c72ab` | 旧版 OS bridge、runtime 行为和测试依据 |
 | `Uni-Lab-OS/uni-lab-backend` | 冻结版本 `09609a27e652c9e56ede636a2883a4fd241e4400` | 共享前端合同权威 |
-| 目标 `deepmodeling/Uni-Lab-OS` | R1A 候选 `c98ff55df10e90094b159187a06589d813963d1d`；integration 基线 `92f71a14bad8e00b1d8d64136cbd1153d1041395` | 2026-08-01 本地状态；Phase 01、02A～02H、02G1 已合入 integration，R1A 已过独立 review 并允许本地 non-squash 合并，实际 merge SHA 记录在 OS #302；均未获授权 push |
+| 目标 `deepmodeling/Uni-Lab-OS` | R1B 候选 `6cc9390623b21061d31800a36f653e7d82750b62`；integration 基线 `d461b93450dfbaf36957562938ba4df108aabfbf` | 2026-08-01 本地状态；Phase 01、02A～02H、02G1 和 R1A 已合入 integration；R1B 已过完整门禁与独立 review，等待本地 non-squash 合并；均未获授权 push |
+| 目标 `Uni-Lab-OS/uni-lab-fe` | FE-D117 候选 `c779d473a2553c07b5e0a8551649567085501c28`；FE integration `e67feb1d751d3ea872d3cf75c5696020a75918d6` | FE-D117 Authoring 单写权威已本地合入；它不包含 UI1 Runtime Task/Job controller；未获授权 push |
 
 目标仓库中的约束决策如下：
 
@@ -49,15 +50,28 @@ MaterialSource 及其分配边界继续由 `Uni-Lab-OS/Uni-Lab-Core#140～#146` 
 
 当前迁移快照必须按功能而不是旧 phase 编号解读：
 
-- **OS 已完成**：02H Task input preflight、02G1 本地 Authoring authority 回环，以及
-  R1A `WorkflowTaskCommand` 的 Backend-shaped HTTP/Service/SQLite 持久入口；
-- **OS 待完成**：R1B command 消费、Task/Job durable state machine、journal/outbox、
-  reconciliation、restart recovery 和 `workflow.runtime.changed`；
-- **前端待完成**：UI1 Runtime services/`WorkflowTaskController`、command 操作和 SSE
-  rehydration；前端 D117 由独立 delivery 处理，本轮不声明其完成状态；
+- **OS 已完成**：02H Task input preflight、02G1 本地 Authoring authority 回环、R1A
+  command durable ingress，以及 R1B command 消费、Task/Job 状态机、journal/outbox、
+  feedback history、unknown/reconcile、restart recovery 和唯一
+  `workflow.runtime.changed` invalidation；R1B 候选已过 review，尚待本地合并；
+- **前端已完成**：FE-D117 已关闭 Authoring 单写权威和真实浏览器 delivery gate；
+  该结果只属于 Authoring，不代表 Runtime 已迁移；
+- **前端待完成**：UI1 Runtime services/`WorkflowTaskController`、command 操作、feedback
+  补读和 SSE rehydration；
 - **联调待完成**：R1B 与 UI1 Runtime 都有候选 full SHA 后，才建立并执行真实 OS 的
-  HTTP/SSE integration gate。R1A 是 pending-only OS slice，不能单独把 Core Decision
+  HTTP/SSE integration gate。R1A/R1B 的 OS-only 完成不能单独把 Core Decision
   `Uni-Lab-OS/Uni-Lab-Core#150` 推进到 `stage:testing`。
+
+### 当前 Interface 迁移状态
+
+| 功能 Interface | OS | 前端 | 联调 |
+|---|---|---|---|
+| `POST/GET /api/v1/workflow-tasks` 与 `GET .../jobs` | 已按 Backend DTO 持久化 Task、snapshot、预创建 Job；02H 完成 input preflight | UI1 Runtime 尚未接入 | 待真实 FE→OS Task create/read gate |
+| `POST .../workflow-tasks/{uuid}/commands` | R1A 完成 durable ingress；R1B 完成 FIFO consumption、result、pause/resume/step permit/cancel | command service/controller 尚未接入 | 待重放、terminal race 和 cancel rehydration E2E |
+| `GET /api/v1/workflow-node-jobs/{uuid}/feedback` | R1B 完成 sequence cursor、双键幂等 history、summary 与 restart persistence | feedback 补读尚未接入 | 待分页、SSE invalidation 后补读 E2E |
+| `GET /api/v1/events` 的 `workflow.runtime.changed` | R1B 完成同事务 outbox、全局 cursor/replay，payload 仅有 `workflow_task_uuid` | Runtime SSE reconnect/去重/coherent rehydration 尚未接入 | 待先连 SSE、再读 snapshot、partial-read failure 和 OS restart E2E |
+| Workflow-scoped Authoring aggregate/Draft/Apply | OS 02G1 已完成本地 authority 回环 | FE-D117 已本地合入 `e67feb1d` | Authoring delivery 已有 5 项 Playwright；最终 Core/Feishu 接受仍随 X1 统一 pin |
+| DAG readiness/admission 与 device result | R2/D1 未开始；R1B 明确不 dispatch | 只能展示 durable projection，不得自行推进状态 | 必须等待 R2/D1，不能用 R1B kernel 冒充可执行闭环 |
 
 本工作树的 `decisions.md` 目前只包含较早账本；D-102～D-116 在完成
 `Uni-Lab-OS/Uni-Lab-Core#2` 的不可变 source publication 前，不应靠个人工作树路径
@@ -122,8 +136,8 @@ delivery Issue。设计 Grill 结束、历史 Decision 关闭或本地测试通�
 | `getRun(runId)` | `GET /runtime/runs/{run_id}` | `GET /workflow-tasks/{task_uuid}` | 语义迁移 | R1；UI1 Runtime |
 | `listRunNodes(runId)` | `GET .../runs/{id}/nodes` | `GET /workflow-tasks/{task_uuid}/jobs` | 语义迁移 | R1；UI1 Runtime |
 | `listRunEvents(runId, cursor)` | Task-scoped REST event page | 不存在 Task-scoped event 路由；相关全局 SSE 到达后，通过 REST 重新获取一致的 Task/Jobs/debug projection | 已取代 | R1；UI1 Runtime |
-| `command(runId, command, payload)` | `POST .../runs/{id}/commands`，随后获取 Run | 普通命令使用 `POST /workflow-tasks/{task_uuid}/commands`；Hold/step family 使用独立 debug command route；成功响应只表示接受，随后重新补读 projection | 语义迁移 | R1A OS pending ingress 已完成；R1B consumption、DBG 和 UI1 Runtime/Debug 待办 |
-| `cancelRun(runId)` | 独立的 `POST .../runs/{id}/cancel` | Task command `{type:"cancel", idempotency_key:...}` | 旧路由已取代 | R1A OS pending ingress 已完成；R1B 状态推进和 UI1 Runtime 待办 |
+| `command(runId, command, payload)` | `POST .../runs/{id}/commands`，随后获取 Run | 普通命令使用 `POST /workflow-tasks/{task_uuid}/commands`；Hold/step family 使用独立 debug command route；成功响应只表示接受，随后重新补读 projection | 语义迁移 | R1A ingress 与 R1B consumption 已完成；DBG 和 UI1 Runtime/Debug 待办 |
+| `cancelRun(runId)` | 独立的 `POST .../runs/{id}/cancel` | Task command `{type:"cancel", idempotency_key:...}` | 旧路由已取代 | R1A ingress 与 R1B durable cancel 已完成；UI1 Runtime 待办 |
 | `subscribeRunEvents(...)` | 每个 Run 独立的 `/runtime/events` WebSocket；失败后轮询 Run events | 统一使用全局 `GET /events` SSE，支持单调递增 `id`、`Last-Event-ID`、客户端去重和 REST 状态恢复 | 已取代并使用新实现替换 | R1；UI1 Runtime |
 | `dispose()` | 关闭 Run socket 和轮询 timer | 释放共享 SSE subscription/service | 直接保留生命周期意图 | UI1 Runtime |
 
@@ -334,7 +348,7 @@ Core Decision；其 delivery Issue 以 `Uni-Lab-OS/Uni-Lab-Core#133` 为主父�
 | **M1 Material/Site authority foundation** | Material、Site、Warehouse、Disposition、软删除、Task Reservation、Job Claim、幂等 ChangeSet 的持久权威；显式 ResourceSlot production resolver | 只消费已冻结 Material/ResourceSlot DTO；不拥有分配、锁或错误分类 | Claim 中的 device identity/可用性 adapter；不拥有 Material 真值 | `Uni-Lab-OS/Uni-Lab-Core#134` 下创建或复用 active implementation Decision；OS spec 先冻结 schema/transaction/lock order，Core integration spec 覆盖争用、重启和 400/404/409 |
 | **M2 MaterialSource admission v1** | 非执行 MaterialSource declaration node；单一固定 template、可选具体 Material、一个 ResourceSlot 输出；创建/选择/Reservation 全有或全无 | MaterialSource、SiteSelector、CandidateSiteSet 编辑；进度/Site occupancy 等 `Uni-Lab-OS/Uni-Lab-Core#145` | Scheduler 只接收稳定 Site UUID 集合；不解析前端索引语法 | `Uni-Lab-OS/Uni-Lab-Core#140`、`Uni-Lab-OS/Uni-Lab-Core#141`、`Uni-Lab-OS/Uni-Lab-Core#142` 仍处 `stage:protocol-definition` 时只写 Core/Feishu Protocol spec；冻结并建 delivery children 后才写各仓 implementation spec。`Uni-Lab-OS/Uni-Lab-Core#143～#146` 未冻结部分不得占位实现；`Uni-Lab-OS/Uni-Lab-Core#148` 延期 |
 | **R1A Task command durable ingress** | 已完成四种共享 command 的 Backend-shaped 201 envelope、Handler UUID binding、pending record、SQLite 约束、同 Task key 幂等/冲突和重启持久化；不消费 command | 无；只冻结前端未来要消费的 wire，不在本轮改 FE | 无 | Core Decision `Uni-Lab-OS/Uni-Lab-Core#150`；OS delivery `deepmodeling/Uni-Lab-OS#302`；本仓 spec/trend 位于 `rounds/r1a-*`，因为无浏览器界面不单设 E2E gate |
-| **R1B Durable runtime kernel** | 消费 pending command；Task/Job 状态机、journal/outbox、feedback、unknown/reconcile、重启恢复、唯一 `workflow.runtime.changed` invalidation | `WorkflowTaskController`：先连 SSE、读取一致 REST snapshot、重连/去重/补水；不消费 event patch | transport session 只是执行投影，不成为终态权威 | 继续由 Core #150 管跨仓合同；分别建立 OS/FE delivery，二者候选冻结后写 Core integration spec，明确 HTTP/SSE 时序、cursor、OS restart 和 partial-read failure |
+| **R1B Durable runtime kernel** | 已完成候选 `6cc9390`：FIFO command、Task/Job 状态机、journal/outbox、feedback、unknown/reconcile、重启恢复、唯一 `workflow.runtime.changed`；不含 DAG/device | `WorkflowTaskController`：先连 SSE、读取一致 REST snapshot、重连/去重/补水；不消费 event patch，尚待 delivery | transport session 只是执行投影，不成为终态权威 | Core #150；OS delivery `deepmodeling/Uni-Lab-OS#303` 已过本地 gate/review；FE child 与 Core HTTP/SSE integration gate 仍待创建/执行 |
 | **R2 Admission、ExecutionPlan 与 sole coordinator** | 从 immutable Task snapshot 生成计划；derived Edge resolution；资源 readiness；完整 Reservation 后 admission；ready Job dispatch 前完整 Claim | 展示 pending/等待原因；不得运行 DAG walker 或乐观写终态 | 若外部 Scheduler 参与，只接收 versioned plan/约束并返回建议；OS coordinator 保留唯一 readiness/admission/terminal owner | Core 对跨 OS/Scheduler 边界建 Decision；OS 与 Scheduler 各自 delivery spec；Core E2E 验证 duplicate request、contention、restart 和单一 owner |
 | **D1 Device execution 与 result commit** | RobotCommand、Mutation Session、baseline/增量 ChangeSet、显式和隐式结果归一化、Fenced Claim/reconciliation | 展示 running、reconciling、结果和可行动错误 | device adapter/driver 实现厂商协议和 query/reconcile，不解释 Workflow graph | Core integration gate 固定 fake 与真实 driver fixture；OS/设备各自仓库写实现 spec；未知物理结果不得被 HTTP success 覆盖 |
 | **O1 Composite runtime 与 Task output** | Planner lowering；transparent/completion-gated readiness；Composite 本身无 Job；成功时原子写完整 Task output，其他状态为 `{}` | 展示 composite frame、真实内部 Job 和最终 output；不展示 partial output | 无新增 owner | `Uni-Lab-OS/Uni-Lab-Core#136`；联调覆盖 transparent frame、gated completion、ResourceSlot output 和 SSE/REST rehydration |
@@ -366,8 +380,9 @@ A1 + I1 + C1 + M1 + R1B
 UI1 随每条已稳定 Interface 纵向进入；X1 只能最后执行。
 ```
 
-M1 和 R1A/R1B 可以在 02H 后与其他不冲突切片并行；R1A 已完成，但 R1B 仍是 R2
-和 UI1 Runtime 真实联调的前置。M2 受 active protocol Decision 阻塞。R2 可以先对
+M1 和 R1A/R1B 可以在 02H 后与其他不冲突切片并行；R1A/R1B OS delivery 已完成，
+下一 Runtime 顺序是 UI1 Runtime delivery 与 Core HTTP/SSE 联调；R2 仍依赖 A1、I1、
+C1 和 M1 的可执行合同。M2 受 active protocol Decision 阻塞。R2 可以先对
 纯 scalar Action 建立执行链，但任何消费 ResourceSlot 的成功路径必须等 M1；
 任何自动选择 Material 的成功路径必须再等 M2。Debugger 在 R1/R2、Claims、
 Composite runtime 和一致 projection 全部可用之后进入真实联调。
@@ -398,7 +413,7 @@ Composite runtime 和一致 projection 全部可用之后进入真实联调。
 | C1、O1 | `Uni-Lab-OS/Uni-Lab-Core#136` | authoring、runtime/output 分成两轮 OS delivery；各自配 FE child，O1 另有 runtime E2E |
 | M1 | `Uni-Lab-OS/Uni-Lab-Core#134` | 历史 D-093～D-099 不重新打开；在功能目录下建立 active implementation Decision，再挂 OS child 和 contention/restart integration gate |
 | M2 | `Uni-Lab-OS/Uni-Lab-Core#140`、`Uni-Lab-OS/Uni-Lab-Core#141`、`Uni-Lab-OS/Uni-Lab-Core#142` | 保持各自 Decision 身份；协议冻结后按 MaterialSource、Admission Reservation、Deck/Warehouse 分开建 delivery，互相用 dependency 连接 |
-| R1、UI1 Runtime | 功能目录 `Uni-Lab-OS/Uni-Lab-Core#130`；active Decision `Uni-Lab-OS/Uni-Lab-Core#150` | R1A OS child `deepmodeling/Uni-Lab-OS#302` 已完成本地候选；R1B OS child、FE services/controller child 和 HTTP/SSE integration gate 待创建/执行 |
+| R1、UI1 Runtime | 功能目录 `Uni-Lab-OS/Uni-Lab-Core#130`；active Decision `Uni-Lab-OS/Uni-Lab-Core#150` | R1A OS child `deepmodeling/Uni-Lab-OS#302` 已本地合并；R1B OS child `deepmodeling/Uni-Lab-OS#303` 已过候选 gate/review；FE services/controller child 和 HTTP/SSE integration gate 待创建/执行 |
 | R2 | 资源 Admission 主挂 `Uni-Lab-OS/Uni-Lab-Core#134`，控制流关联 `Uni-Lab-OS/Uni-Lab-Core#132` | 若接入外部 Scheduler，先建跨 OS/Scheduler Decision，再分别建 OS 与 `Uni-Lab-OS/uni-lab-scheduler` children |
 | D1 | 结果合同主挂 `Uni-Lab-OS/Uni-Lab-Core#135`，Material effect 关联 `Uni-Lab-OS/Uni-Lab-Core#134` | OS runtime/adapter delivery 与设备 package delivery 分开；Core gate 固定 fake/real driver fixture |
 | DBG | `Uni-Lab-OS/Uni-Lab-Core#131` | 复用 `deepmodeling/Uni-Lab-OS#299`、`Uni-Lab-OS/uni-lab-fe#1` 和 `Uni-Lab-OS/Uni-Lab-Core#137`，不另造平行 Debugger umbrella |
