@@ -465,6 +465,32 @@ class SQLiteMaterialAdapter:
                         raise MaterialInvalidInput(
                             "occupied material template is not allowed by site"
                         )
+                    would_cycle = active_uow.execute(
+                        """
+                        WITH RECURSIVE
+                        edges(source_uuid, target_uuid) AS (
+                            SELECT parent_uuid, uuid
+                            FROM material
+                            WHERE parent_uuid IS NOT NULL AND deleted_at IS NULL
+                            UNION ALL
+                            SELECT material_uuid, occupied_material_uuid
+                            FROM site
+                            WHERE occupied_material_uuid IS NOT NULL
+                              AND deleted_at IS NULL
+                        ),
+                        reachable(uuid) AS (
+                            SELECT ?
+                            UNION
+                            SELECT edges.target_uuid
+                            FROM edges
+                            JOIN reachable ON edges.source_uuid = reachable.uuid
+                        )
+                        SELECT 1 FROM reachable WHERE uuid = ? LIMIT 1
+                        """,
+                        (occupied_material_uuid, material_uuid),
+                    ).fetchone()
+                    if would_cycle is not None:
+                        raise MaterialConflict("site placement would create a cycle")
 
                 active_uow.execute(
                     """

@@ -226,11 +226,14 @@ class MaterialModule:
             if occupied_material_uuid is not None
             else None
         )
+        canonical_material_uuid = _canonical_uuid(material_uuid, "material_uuid")
+        if canonical_occupant_uuid == canonical_material_uuid:
+            raise MaterialInvalidInput("a Material cannot occupy its own Site")
         return self._adapter.create_site(
             site_uuid=_canonical_uuid(site_uuid, "site_uuid"),
             description=description,
             meta_data=_json_object(meta_data, "meta_data"),
-            material_uuid=_canonical_uuid(material_uuid, "material_uuid"),
+            material_uuid=canonical_material_uuid,
             name=name.strip(),
             sort_order=sort_order,
             allowed_resource_template_uuids=tuple(sorted(allowed_templates)),
