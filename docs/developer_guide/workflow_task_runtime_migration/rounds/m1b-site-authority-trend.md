@@ -5,7 +5,7 @@
 ## 1. Round 结论
 
 M1B 已完成 Backend-shaped Site create/read 纵向切片。固定行为候选
-`fcfcc1412b61b20c7ae85078c986182a761ad394` 通过独立 RED、目标测试、完整仓库测试、
+`a2e5146ba09ffe64317cc60d7a4001f1b08afe05` 通过独立 RED、目标测试、完整仓库测试、
 changed-files Ruff/format、compileall、diff check，以及同一独立 reviewer 的 Standards/Spec
 精确 SHA 复审。最终结论为 **Standards 0B/0NB、Spec 0B/0NB**。
 
@@ -29,10 +29,10 @@ reconciliation、REST/SSE 或前端读模型；M1 与 M2 决策仍处于实现�
 | 实现分支 | `migration/m1b-site-authority` |
 | 控制面 | Core `#155`、OS delivery `#6` |
 | 唯一指定的独立 test-author | `/root/test_m1b_review_fixes` |
-| 唯一独立 reviewer | `/root/review_m1b_site_authority` |
+| 唯一独立 reviewer | `/root/review_m1b_site_authority`，全过程同一人 |
 | 首次完整候选 | `c7a218ffb8da65d6222599124ae4b8fb52ab0532` |
 | 首次复核候选 | `21f9b6f241ac06026538cd84619afe6490833425` |
-| 固定行为候选 | `fcfcc1412b61b20c7ae85078c986182a761ad394` |
+| 固定行为候选 | `a2e5146ba09ffe64317cc60d7a4001f1b08afe05` |
 | 最终行为 review | Standards `0B/0NB`；Spec `0B/0NB`；ACCEPT |
 
 tests-first 提交均保留在可审查历史中，没有 squash、删除、skip 或 xfail：
@@ -45,45 +45,50 @@ tests-first 提交均保留在可审查历史中，没有 squash、删除、skip
 | 首轮 finding 回归 | `bce62180443105fe985b40e0c6cbb33759941db0` | `45a34a203cdbe13d8003f3e6f93297dfdd710690` | borrowed UoW fault injection 与 projection/error 边界 RED |
 | 独立 test-author 事务/数值 RED | `d7a14e6e7862c0e58a2121577fbd4e6fa122100c` | `bbf8e9706908834979a56b31eca2f9dba19e51e3` | `3 failed`：borrowed UoW partial write、geometry/sort overflow |
 | 独立 test-author 错误优先级 RED | `f46943183189b7c77aabf8e2c87b4bec45f273d0` | `5c8ef80d21491de688d4175a8dae858ede6d57d4` | `1 failed`：未知相同 owner/occupant 错报 conflict；Site zero-write |
+| 独立 test-author self-cycle 优先级 RED | `e81df7bf0caa0863eccad9506362d863ddc41469` | `8dde31a0034aaae31b2ea14bbd5ee744a9d6786b` | `1 failed`：已有 owner 自占用被 allowlist mismatch 覆盖；Site zero-write |
 
-`45a34a2` 是 round 分支上的补充 finding 回归，不代表第二名独立 test-author；D-096
+`45a34a2` 是 round 分支上的补充 finding 回归，不代表第二名独立 test-author。D-096
 门禁中唯一被指定、与实现及 reviewer 隔离的 test-author 是
-`/root/test_m1b_review_fixes`。其 `d7a14e6` 经 cherry-pick 成为 `bbf8e97`，其
-`f469431` 经 cherry-pick 成为 `5c8ef80`；后者的 tree、parent 与 stable patch-id 已由
-reviewer 核对一致。reviewer 未参与实现或测试编写，所有角色串行运行。
+`/root/test_m1b_review_fixes`；其 tests-only 提交为 `d7a14e6`、`f469431` 与 `e81df7b`，
+对应 migration 提交为 `bbf8e97`、`5c8ef80` 与 `8dde31a`。测试注释本地化原提交
+`8a1f5cba1ae8e659b9882e949209cb3c32e78249` 只修正文案，不改变 fixture、断言或行为。
+reviewer 未参与实现或测试编写；行为变更后均由同一
+`/root/review_m1b_site_authority` 重新检查精确 SHA。
 
 ## 3. 最终门禁证据
 
-固定行为 SHA：`fcfcc1412b61b20c7ae85078c986182a761ad394`。
+固定行为 SHA：`a2e5146ba09ffe64317cc60d7a4001f1b08afe05`。
 
 | 门禁 | 结果 |
 |---|---:|
-| `test_material_module_review_fixes.py` + `test_material_module_v1.py` | `34 passed` |
-| `pytest -q -rs tests/` | `2102 passed, 4 skipped, 39 warnings` |
-| changed-files Ruff `E/F/I --ignore E501` | passed |
-| changed-files Ruff format | passed，6 files |
+| `test_material_module_review_fixes.py` + `test_material_module_v1.py` | `35 passed` |
+| M1B + WorkflowStore Backend contract + R1B durable kernel | `241 passed, 1 warning` |
+| `pytest -q tests` | `2103 passed, 4 skipped, 38 warnings` |
+| changed-files Ruff `E/F/I` | passed |
+| changed-files Ruff format | passed，5 files |
 | changed production `compileall` | passed |
-| `git diff 46cf364..fcfcc14 --check` | passed |
+| `git diff 46cf364..a2e5146 --check` | passed |
 | exact worktree | clean |
 
 四个 skip 是三个需显式环境变量开启的 networking slow tests，以及一个需显式 Phoenix
-executable 的 integration test。39 个 warning 来自既有 TestClient、pytest collection、SOCKS
-optional dependency 与 FastAPI lifespan deprecation；本轮没有新增 waiver。
+executable 的 integration test。38 个 warning 来自既有 TestClient、pytest collection 与
+FastAPI lifespan deprecation；本轮没有新增 waiver。
 
 ## 4. Reviewer finding disposition
 
-同一 reviewer 对 `c7a218f`、`21f9b6f`、`fcfcc14` 串行复核：
+同一 reviewer 对 `c7a218f`、`21f9b6f`、`fcfcc14`、`a2e5146` 串行复核：
 
 | Finding | disposition | 证据 |
 |---|---|---|
 | borrowed UoW 下 Site/allowlist 可能 partial write | resolved | `45a34a2` + `a912f99`；adapter 内 savepoint，fault 后 outer UoW 可继续且 Site 不存在 |
 | 超大 geometry/sort 数字泄露 `OverflowError` | resolved | `bbf8e97` + `21f9b6f`；统一 `MaterialInvalidInput`、zero-write |
 | 相同未知 owner/occupant 在 authority lookup 前误报 cycle | resolved | `5c8ef80` + `fcfcc14`；先验证 owner 存在，已有 owner self-cycle 仍报 `MaterialConflict` |
+| 已有 owner self-cycle 被 allowlist mismatch 覆盖 | resolved | `8dde31a` + `a2e5146`；owner/occupant lookup 后先判 self-cycle，再校验 allowlist |
 | 新增英文 docstring/comment 违反仓库约定 | resolved | `fcfcc14`；改为简体中文 |
 
-最终 reviewer 明确给出 Standards `0B/0NB`、Spec `0B/0NB` 和 ACCEPT。此 ledger 只增加
-迁移证据，不修改 production/tests tree；合并前由同一 reviewer 做 ledger-only final
-confirmation。
+最终 reviewer 对 `a2e5146` 明确给出 Standards `0B/0NB`、Spec `0B/0NB` 和 ACCEPT。五种
+missing/existing self/allowlist 组合均通过 public Module 验证并保持 zero-write。此 ledger
+只修正迁移证据，不修改已受测 production/tests tree。
 
 ## 5. 架构影响与停止线
 
@@ -100,8 +105,9 @@ MaterialModule validates Backend-shaped Site command
 - SQLite savepoint 只深化 borrowed UoW 内的 repository 原子性，不获得 outer transaction
   ownership；
 - `sort_order` 是 owner-local 稳定排序字段，不是 Site identity；
-- M2A 可以消费此 Site authority 作为只读校验 port，但本轮没有提前写 MaterialSource schema
-  或分配逻辑。
+- M2 `MaterialSource`、selector 和分配逻辑继续 deferred；本轮没有其 schema、DTO、占位或
+  feature flag。
 
 下一步必须先把 M1B 非 squash 本地合入最新 `integration/workflow-task-runtime`，再从更新后的
-integration 新开后续 round；不得继续在本分支堆叠 M2A。
+integration 新开 M1C ResourceSlot resolver round；不得继续在本分支堆叠后续实现，也不得
+提前进入 M2。
