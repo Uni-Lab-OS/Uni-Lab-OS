@@ -22,8 +22,9 @@ from unilabos.resources.authority import (
     ResourceTemplateIdentity,
 )
 from unilabos.resources.authority.sqlite import SQLiteMaterialAdapter
+from unilabos.workflow import composition
 from unilabos.workflow.models import WorkflowNodeWrite
-from unilabos.workflow.service import WorkflowService
+from unilabos.workflow.service import WorkflowError, WorkflowService
 from unilabos.workflow.store import WorkflowStore
 
 MATERIAL_UUID = "5abcdef0-1234-4abc-8def-000000000017"
@@ -64,12 +65,17 @@ def _open_authority(
         coordinator.close()
 
 
-def _create_active_material(materials: MaterialModule) -> MaterialRecord:
+def _create_active_material(
+    materials: MaterialModule,
+    *,
+    uow: Any | None = None,
+) -> MaterialRecord:
     return materials.create_business_material(
         material_uuid=MATERIAL_UUID,
         resource_template_uuid=RESOURCE_TEMPLATE_UUID,
         barcode="M1C-ACTIVE-017",
         name="M1C active material",
+        uow=uow,
     )
 
 
@@ -137,6 +143,12 @@ class _AuthorityResourceSlotResolver:
             material_uuid=material_uuid,
             allowed_resource_template_uuids=allowed_resource_template_uuids,
         )
+
+
+def _production_resource_resolver(materials: MaterialModule) -> Any:
+    from unilabos.workflow.material_resolver import MaterialResourceSlotResolver
+
+    return MaterialResourceSlotResolver(materials)
 
 
 def _resolve(
@@ -460,3 +472,151 @@ def test_workflow_http_errors_are_stable_and_zero_task_job_write(
                 )
             ]
         )
+
+
+@pytest.mark.parametrize(
+    ("case", "expected_status", "expected_code"),
+    [
+        pytest.param("active", 201, None, id="success"),
+        pytest.param("template-mismatch", 400, "invalid_input", id="400"),
+        pytest.param("missing", 404, "not_found", id="404"),
+        pytest.param("non-runnable", 409, "conflict", id="409"),
+    ],
+)
+def test_production_resolver_is_injectable_into_workflow_service(
+    tmp_path: Path,
+    case: str,
+    expected_status: int,
+    expected_code: str | None,
+) -> None:
+    with _open_authority(tmp_path / "workflow.db") as (store, durable_materials):
+        if case in {"active", "template-mismatch"}:
+            _create_active_material(durable_materials)
+        materials = (
+            _material_module(
+                _ReadOnlyMaterialAdapter(_material_record(disposition="consumed"))
+            )
+            if case == "non-runnable"
+            else durable_materials
+        )
+        allowed = (
+            (SECOND_RESOURCE_TEMPLATE_UUID,)
+            if case == "template-mismatch"
+            else (RESOURCE_TEMPLATE_UUID,)
+        )
+        _seed_workflow(store, allowed_resource_template_uuids=allowed)
+        service = WorkflowService(
+            store,
+            resource_resolver=_production_resource_resolver(materials),
+        )
+        external_uuid = (
+            MISSING_MATERIAL_UUID if case == "missing" else MATERIAL_UUID.upper()
+        )
+
+        with TestClient(
+            create_workflow_app(service),
+            raise_server_exceptions=False,
+        ) as client:
+            response = client.post(
+                "/api/v1/workflow-tasks",
+                json={
+                    "workflow_uuid": WORKFLOW_UUID,
+                    "input": {"sample": {"uuid": external_uuid}},
+                },
+            )
+
+        assert response.status_code == expected_status
+        if case == "active":
+            task = response.json()
+            assert task["input"] == {
+                "sample": {
+                    "uuid": MATERIAL_UUID,
+                    "resource_template_uuid": RESOURCE_TEMPLATE_UUID,
+                }
+            }
+            assert len(service.list_workflow_node_jobs(task["uuid"])) == 1
+        else:
+            assert (
+                service.list_workflow_tasks(workflow_uuid=WORKFLOW_UUID)["total"] == 0
+            )
+            assert response.json()["error"]["code"] == expected_code
+
+
+@pytest.mark.parametrize(
+    ("case", "expected_code"),
+    [
+        pytest.param("active", None, id="success"),
+        pytest.param("missing", "not_found", id="missing-zero-write"),
+        pytest.param("template-mismatch", "invalid_input", id="mismatch-zero-write"),
+    ],
+)
+def test_composition_defaults_to_durable_resource_slot_resolver(
+    tmp_path: Path,
+    case: str,
+    expected_code: str | None,
+) -> None:
+    working_dir = tmp_path / "unilabos_data"
+    working_dir.mkdir()
+    database_path = working_dir / "workflow.db"
+    composition.reset_workflow_service_for_test()
+    with _open_authority(database_path) as (store, materials):
+        if case in {"active", "template-mismatch"}:
+            _create_active_material(materials)
+        allowed = (
+            (SECOND_RESOURCE_TEMPLATE_UUID,)
+            if case == "template-mismatch"
+            else (RESOURCE_TEMPLATE_UUID,)
+        )
+        _seed_workflow(store, allowed_resource_template_uuids=allowed)
+
+    try:
+        service = composition.compose_workflow_runtime(working_dir)
+        external_uuid = (
+            MISSING_MATERIAL_UUID if case == "missing" else MATERIAL_UUID.upper()
+        )
+        if case == "active":
+            task = _create_task(service, {"uuid": external_uuid})
+            assert task["input"] == {
+                "sample": {
+                    "uuid": MATERIAL_UUID,
+                    "resource_template_uuid": RESOURCE_TEMPLATE_UUID,
+                }
+            }
+            assert len(service.list_workflow_node_jobs(task["uuid"])) == 1
+        else:
+            with pytest.raises(WorkflowError) as failure:
+                _create_task(service, {"uuid": external_uuid})
+
+            assert (
+                service.list_workflow_tasks(workflow_uuid=WORKFLOW_UUID)["total"] == 0
+            )
+            assert failure.value.code == expected_code
+    finally:
+        composition.reset_workflow_service_for_test()
+
+    assert composition.get_workflow_service() is None
+
+
+class _RollbackSentinel(RuntimeError):
+    pass
+
+
+def test_production_resolver_borrows_workflow_task_unit_of_work(
+    tmp_path: Path,
+) -> None:
+    with _open_authority(tmp_path / "workflow.db") as (store, materials):
+        resolver = _production_resource_resolver(materials)
+
+        with pytest.raises(_RollbackSentinel), store.transaction() as uow:
+            _create_active_material(materials, uow=uow)
+
+            identity = resolver.resolve(
+                material_uuid=MATERIAL_UUID,
+                allowed_resource_template_uuids=(RESOURCE_TEMPLATE_UUID,),
+            )
+
+            _assert_identity(identity)
+            raise _RollbackSentinel
+
+        with pytest.raises(MaterialNotFound):
+            materials.get_material(MATERIAL_UUID)
