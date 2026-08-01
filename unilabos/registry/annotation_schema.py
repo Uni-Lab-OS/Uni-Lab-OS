@@ -630,7 +630,6 @@ def _render_schema(schema: dict[str, Any]) -> ast.expr:
         )
     if "$slot" in schema:
         return ast.Name(id="ResourceSlot", ctx=ast.Load())
-
     kind = schema["type"]
     if "enum" in schema:
         values = [_constant(value) for value in schema["enum"]]

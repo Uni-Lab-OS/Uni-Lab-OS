@@ -374,7 +374,13 @@ def _parse_typed_schema(
         _fail("invalid_schema", type_path, _INVALID_SCHEMA)
 
     allowed_by_kind = {
-        "string": {"type", "enum", "minLength", "maxLength"},
+        "string": {
+            "type",
+            "enum",
+            "minLength",
+            "maxLength",
+            "x-unilabos-editor-control",
+        },
         "integer": {"type", "enum", "minimum", "maximum"},
         "number": {"type", "enum", "minimum", "maximum"},
         "boolean": {"type", "enum"},
@@ -403,6 +409,15 @@ def _parse_typed_schema(
         ):
             _fail("invalid_schema", _pointer(path, "maximum"), _INVALID_SCHEMA)
     elif kind == "string":
+        if "x-unilabos-editor-control" in raw:
+            control = raw["x-unilabos-editor-control"]
+            if control != "site_selector":
+                _fail(
+                    "invalid_schema",
+                    _pointer(path, "x-unilabos-editor-control"),
+                    _INVALID_SCHEMA,
+                )
+            result["x-unilabos-editor-control"] = control
         for field in ("minLength", "maxLength"):
             if field in raw:
                 result[field] = _check_length_bound(

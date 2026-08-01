@@ -503,6 +503,13 @@ def _compile_workspace(source: WorkspaceSource) -> PackageCatalog:
                     _validate_definition_metadata(
                         args, relative, node.lineno, diagnostics
                     )
+                    action_records = _action_records(
+                        tree,
+                        node,
+                        module_name=module,
+                        imports=imports,
+                        diagnostics=diagnostics,
+                    )
                     ids = _definition_ids(args, relative, node.lineno, diagnostics)
                     for definition_id in ids:
                         devices.append(
@@ -515,6 +522,7 @@ def _compile_workspace(source: WorkspaceSource) -> PackageCatalog:
                                 relative=relative,
                                 file_digest=file_digest,
                                 imports=imports,
+                                actions=action_records,
                             )
                         )
 
@@ -966,7 +974,12 @@ def _parameter_records(
 
 
 def _action_records(
-    node: ast.ClassDef, imports: dict[str, str]
+    module_ast: ast.Module,
+    node: ast.ClassDef,
+    *,
+    module_name: str,
+    imports: dict[str, str],
+    diagnostics: list[PackageDiagnostic],
 ) -> list[dict[str, Any]]:
     actions: list[dict[str, Any]] = []
     for item in node.body:
@@ -975,14 +988,57 @@ def _action_records(
         decorator = _find_decorator(item, imports, _REGISTRY_DECORATORS, "action")
         if decorator is None:
             continue
+        # 每次都通过模块解析，使测试和下游嵌入方只能观察到唯一公共 parser
+        # 接缝，避免复制 parser。
+        from unilabos.registry import action_contract_schema
+
+        try:
+            parsed = action_contract_schema.parse_action_contract(
+                module_ast,
+                item,
+                module_name=module_name,
+            )
+            decorator_values = _decorator_args(decorator)
+            schema = parsed.to_action_schema(
+                action_name=item.name,
+                description=str(decorator_values.get("description") or ""),
+            )
+            defaults = action_contract_schema.validate_legacy_action_assertions(
+                schema,
+                action_name=item.name,
+                goal_default=decorator_values.get("goal_default"),
+                handles=decorator_values.get("handles"),
+            )
+        except action_contract_schema.ActionContractError as error:
+            diagnostics.append(
+                PackageDiagnostic(
+                    code=error.code,
+                    severity="error",
+                    message=error.message,
+                    path=f"/actions/{item.name}{error.path}",
+                    line=item.lineno,
+                )
+            )
+            continue
+        except action_contract_schema.ActionCompatibilityError as error:
+            diagnostics.append(
+                PackageDiagnostic(
+                    code=error.code,
+                    severity="error",
+                    message=error.message,
+                    path=error.path,
+                    line=item.lineno,
+                )
+            )
+            continue
         actions.append(
             {
-                "decorator": _decorator_args(decorator),
+                "decorator": decorator_values,
                 "docstring": ast.get_docstring(item) or "",
                 "is_async": isinstance(item, ast.AsyncFunctionDef),
                 "name": item.name,
-                "parameters": _parameter_records(item),
-                "return_type": ast.unparse(item.returns) if item.returns else "Any",
+                "schema": schema,
+                "goal_default": defaults,
             }
         )
     return sorted(actions, key=lambda item: item["name"])
@@ -1049,6 +1105,7 @@ def _device_record(
     relative: str,
     file_digest: str,
     imports: dict[str, str],
+    actions: list[dict[str, Any]],
 ) -> DefinitionRecord:
     init_node = next(
         (
@@ -1060,7 +1117,7 @@ def _device_record(
         None,
     )
     details = {
-        "actions": _action_records(node, imports),
+        "actions": actions,
         "device_type": args.get("device_type", "python"),
         "handles": args.get("handles", []),
         "hardware_interface": args.get("hardware_interface"),

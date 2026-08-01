@@ -6,7 +6,7 @@ import asyncio
 import json
 import logging
 import re
-from collections.abc import Callable
+from collections.abc import Callable, Mapping
 from typing import Annotated, Any, Dict, List, Optional, Protocol
 from uuid import UUID
 
@@ -18,6 +18,11 @@ from fastapi.routing import APIRoute
 from pydantic import BaseModel, ConfigDict, Field, field_validator
 
 from unilabos.workflow.candidate_validation import validate_candidate_bundle
+from unilabos.workflow.catalog import (
+    CatalogAuthority,
+    TemplateCatalog,
+    TemplateCatalogUnavailable,
+)
 from unilabos.workflow.json_codec import decode_json_bytes, encode_json
 from unilabos.workflow.models import (
     CandidateChangeset,
@@ -748,6 +753,148 @@ def create_workflow_router(service: WorkflowService) -> APIRouter:
     return router
 
 
+def create_workflow_template_catalog_router(
+    catalog: TemplateCatalog,
+    authority: CatalogAuthority,
+) -> APIRouter:
+    """以 Backend DTO 形状公开同一份持久 TemplateCatalog snapshot。"""
+
+    if not isinstance(catalog, TemplateCatalog):
+        raise TypeError("catalog 必须是 TemplateCatalog")
+    if not isinstance(authority, CatalogAuthority):
+        raise TypeError("authority 必须是 CatalogAuthority")
+    router = APIRouter(prefix="/api/v1")
+
+    def read_snapshot() -> tuple[str, list[dict[str, Any]], list[dict[str, Any]]]:
+        try:
+            with catalog.snapshot(authority) as snapshot:
+                return (
+                    snapshot.fingerprint,
+                    [_detached_catalog_value(item) for item in snapshot.node_templates],
+                    [
+                        _detached_catalog_value(item)
+                        for item in snapshot.handle_templates
+                    ],
+                )
+        except TemplateCatalogUnavailable:
+            raise WorkflowError("template_catalog_unavailable") from None
+
+    def envelope(fingerprint: str) -> dict[str, Any]:
+        return {
+            "authority": {
+                "authority_id": authority.authority_id,
+                "kind": authority.kind,
+            },
+            "catalog_fingerprint": fingerprint,
+        }
+
+    @router.get("/workflow-node-templates")
+    def list_workflow_node_templates() -> JSONResponse:
+        fingerprint, nodes, _handles = read_snapshot()
+        items = [_workflow_node_template_summary(item) for item in nodes]
+        return _success(
+            {
+                **envelope(fingerprint),
+                "items": items,
+                "total": len(items),
+                "page": 1,
+                "page_size": len(items),
+            }
+        )
+
+    @router.get("/workflow-node-templates/{template_uuid}")
+    def get_workflow_node_template(template_uuid: str) -> JSONResponse:
+        fingerprint, nodes, handles = read_snapshot()
+        template = next(
+            (item for item in nodes if item.get("uuid") == template_uuid),
+            None,
+        )
+        if template is None:
+            return _template_catalog_not_found()
+        owned_handles = [
+            item
+            for item in handles
+            if item.get("workflow_node_template_uuid") == template_uuid
+        ]
+        return _success(
+            {
+                **envelope(fingerprint),
+                "template": template,
+                "handles": owned_handles,
+            }
+        )
+
+    @router.get("/workflow-node-templates/{template_uuid}/handles")
+    def list_workflow_node_template_handles(template_uuid: str) -> JSONResponse:
+        fingerprint, nodes, handles = read_snapshot()
+        if not any(item.get("uuid") == template_uuid for item in nodes):
+            return _template_catalog_not_found()
+        return _success(
+            {
+                **envelope(fingerprint),
+                "items": [
+                    item
+                    for item in handles
+                    if item.get("workflow_node_template_uuid") == template_uuid
+                ],
+            }
+        )
+
+    @router.get("/workflow-handle-templates/{handle_uuid}")
+    def get_workflow_handle_template(handle_uuid: str) -> JSONResponse:
+        fingerprint, _nodes, handles = read_snapshot()
+        handle = next(
+            (item for item in handles if item.get("uuid") == handle_uuid),
+            None,
+        )
+        if handle is None:
+            return _template_catalog_not_found()
+        return _success({**envelope(fingerprint), "handle": handle})
+
+    return router
+
+
+def _workflow_node_template_summary(template: Mapping[str, Any]) -> dict[str, Any]:
+    unilab = template.get("meta_data", {}).get("unilab", {})
+    resource = unilab.get("resource_template") if isinstance(unilab, Mapping) else None
+    if not isinstance(resource, Mapping):
+        resource = {
+            "uuid": template["resource_template_uuid"],
+            "name": template["resource_template_uuid"],
+            "display_name": template["resource_template_uuid"],
+        }
+    return {
+        "uuid": template["uuid"],
+        "name": template["name"],
+        "display_name": template["display_name"],
+        "type": template["type"],
+        "node_type": template["node_type"],
+        "resource_template": {
+            "uuid": resource["uuid"],
+            "name": resource["name"],
+            "display_name": resource["display_name"],
+        },
+    }
+
+
+def _detached_catalog_value(value: Any) -> Any:
+    if isinstance(value, Mapping):
+        return {str(key): _detached_catalog_value(item) for key, item in value.items()}
+    if isinstance(value, (list, tuple)):
+        return [_detached_catalog_value(item) for item in value]
+    return value
+
+
+def _template_catalog_not_found() -> _BackendJSONResponse:
+    return _BackendJSONResponse(
+        status_code=404,
+        content={
+            "code": 404,
+            "error": {"code": "not_found", "message": "资源不存在"},
+        },
+    )
+
+
 def _install_error_handlers(app: FastAPI) -> None:
     @app.exception_handler(WorkflowError)
     async def workflow_error_handler(
@@ -798,10 +945,22 @@ def install_composed_workflow_authoring_api(
     app: FastAPI,
     service: WorkflowService,
     engine: AuthoringTransform,
+    *,
+    template_catalog: TemplateCatalog | None = None,
+    catalog_authority: CatalogAuthority | None = None,
 ) -> None:
     """完整构造 production Authoring 路由后，以一次 app mutation 安装。"""
 
+    if (template_catalog is None) != (catalog_authority is None):
+        raise ValueError("TemplateCatalog 与 CatalogAuthority 必须同时配置")
     router = APIRouter()
+    if template_catalog is not None and catalog_authority is not None:
+        router.include_router(
+            create_workflow_template_catalog_router(
+                template_catalog,
+                catalog_authority,
+            )
+        )
     router.include_router(create_workflow_router(service))
     router.include_router(create_authoring_transform_router(engine))
     _install_error_handlers(app)
@@ -830,6 +989,7 @@ __all__ = [
     "AuthoringValidateRequest",
     "create_authoring_transform_app",
     "create_authoring_transform_router",
+    "create_workflow_template_catalog_router",
     "create_workflow_app",
     "create_workflow_router",
     "format_sse_event",

@@ -33,7 +33,6 @@ _NODE_JSON_OBJECTS = ("meta_data", "goal", "goal_default", "feedback", "result")
 _NODE_OPTIONAL_STRINGS = (
     "description",
     "class",
-    "schema",
     "icon",
     "header",
     "footer",
@@ -43,6 +42,7 @@ _NODE_INPUT_FIELDS = {
     *_NODE_REQUIRED_STRINGS,
     *_NODE_JSON_OBJECTS,
     *_NODE_OPTIONAL_STRINGS,
+    "schema",
     "create_time",
     "update_time",
     "deleted_at",
@@ -109,6 +109,54 @@ class CatalogAuthority:
             or self.kind not in ("local", "backend")
         ):
             raise TemplateCatalogImportError("/authority")
+
+
+class LocalResourceTemplateIdentityResolver:
+    """为 local Graph Authority 持久分配 ResourceTemplate UUID。"""
+
+    def __init__(self, store: WorkflowStore, authority: CatalogAuthority) -> None:
+        if authority.kind != "local":
+            raise TemplateCatalogImportError("/authority/kind")
+        self._store = store
+        self._authority = authority
+
+    def __call__(self, source_identity: str) -> str:
+        if (
+            not isinstance(source_identity, str)
+            or not source_identity
+            or source_identity.strip() != source_identity
+        ):
+            raise TemplateCatalogImportError("/resource_templates/source_identity")
+        with self._store.catalog_guard():
+            with self._store.transaction() as conn:
+                row = conn.execute(
+                    """
+                    SELECT resource_template_uuid
+                    FROM workflow_resource_template_identity
+                    WHERE authority_id = ? AND source_identity = ?
+                    """,
+                    (self._authority.authority_id, source_identity),
+                ).fetchone()
+                if row is not None:
+                    return str(row["resource_template_uuid"])
+                identity = str(uuid4())
+                now = utc_now()
+                conn.execute(
+                    """
+                    INSERT INTO workflow_resource_template_identity(
+                        authority_id, source_identity, resource_template_uuid,
+                        create_time, update_time
+                    ) VALUES (?, ?, ?, ?, ?)
+                    """,
+                    (
+                        self._authority.authority_id,
+                        source_identity,
+                        identity,
+                        now,
+                        now,
+                    ),
+                )
+                return identity
 
 
 @dataclass(frozen=True)
@@ -569,7 +617,16 @@ def _normalize_node_fields(
         fields[key] = _json_object(values.get(key, default), f"{path}/{key}")
     for key in _NODE_OPTIONAL_STRINGS:
         fields[key] = _optional_string(values.get(key), f"{path}/{key}")
+    fields["schema"] = _schema_value(values.get("schema"), f"{path}/schema")
     return fields, requested_uuid
+
+
+def _schema_value(value: object, path: str) -> str | dict[str, Any] | None:
+    if value is None or isinstance(value, str):
+        return value
+    if isinstance(value, Mapping):
+        return _json_object(value, path)
+    raise TemplateCatalogImportError(path)
 
 
 def _normalize_handle_fields(
@@ -687,7 +744,7 @@ def _node_sql_values(authority_id: str, fields: Mapping[str, Any]) -> tuple[Any,
         _encode_json(fields["goal_default"]),
         _encode_json(fields["feedback"]),
         _encode_json(fields["result"]),
-        fields["schema"],
+        _persisted_schema(fields["schema"]),
         fields["type"],
         fields["icon"],
         fields["header"],
@@ -718,6 +775,12 @@ def _handle_sql_values(
 
 def _encode_json(value: Any) -> str:
     return encode_json(value, sort_keys=True).decode("utf-8")
+
+
+def _persisted_schema(value: Any) -> str | None:
+    if value is None or isinstance(value, str):
+        return value
+    return _encode_json(value)
 
 
 def _soft_delete_node(
@@ -849,6 +912,7 @@ def _validate_persisted_rows(
                 row.get(column),
                 f"/node_templates/{column}",
             )
+        _decode_schema(row.get("schema"))
         name = row["name"]
         node_uuid = row["uuid"]
         node_key = (resource_uuid, _business_name(name))
@@ -946,7 +1010,7 @@ def _semantic_node(row: Mapping[str, Any]) -> dict[str, Any]:
         "goal_default": _decode_column(row["goal_default"]),
         "feedback": _decode_column(row["feedback"]),
         "result": _decode_column(row["result"]),
-        "schema": row["schema"],
+        "schema": _decode_schema(row["schema"]),
         "type": row["type"],
         "icon": row["icon"],
         "header": row["header"],
@@ -978,6 +1042,19 @@ def _decode_column(value: Any) -> Any:
         return decode_json_bytes(value.encode("utf-8"))
     except (UnicodeError, ValueError):
         raise TemplateCatalogMismatch("/authority/catalog") from None
+
+
+def _decode_schema(value: Any) -> Any:
+    if value is None:
+        return None
+    if not isinstance(value, str):
+        raise TemplateCatalogMismatch("/node_templates/schema")
+    if not value.startswith("{"):
+        return value
+    decoded = _decode_column(value)
+    if not isinstance(decoded, dict):
+        raise TemplateCatalogMismatch("/node_templates/schema")
+    return decoded
 
 
 def _make_snapshot(
@@ -1053,6 +1130,7 @@ def _freeze_json(value: Any) -> Any:
 
 __all__ = [
     "CatalogAuthority",
+    "LocalResourceTemplateIdentityResolver",
     "NodeTemplateImport",
     "TemplateCatalog",
     "TemplateCatalogError",

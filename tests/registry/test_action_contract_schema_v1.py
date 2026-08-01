@@ -531,6 +531,49 @@ def test_missing_or_dynamic_return_declarations_fail_closed(
     )
 
 
+@pytest.mark.parametrize(
+    "return_annotation",
+    [
+        pytest.param("dict[int, str]", id="non-string-key"),
+        pytest.param("dict[str, int]", id="non-json-value"),
+        pytest.param("dict[Any, Any]", id="open-key"),
+    ],
+)
+def test_only_explicit_opaque_json_mapping_results_are_closed_empty(
+    return_annotation: str,
+) -> None:
+    module, action = _module_and_action(
+        "from typing import Any\n"
+        f"def action(value: int) -> {return_annotation}:\n"
+        "    pass\n"
+    )
+
+    _assert_action_error(
+        lambda: _api().parse_action_contract(
+            module,
+            action,
+            module_name=_MODULE_DOTTED_NAME,
+        ),
+        code="invalid_action_result",
+        path="/return",
+    )
+
+
+def test_json_value_mapping_result_is_a_closed_empty_opaque_result() -> None:
+    contract = _parse(
+        """
+        from unilabos.registry.annotations import JSONValue
+        def action(value: int) -> dict[str, JSONValue]:
+            pass
+        """
+    )
+
+    assert contract.to_dict()["output_contract"] == {
+        "version": 1,
+        "outputs": [],
+    }
+
+
 def test_forged_module_container_is_reported_as_a_stable_scope_error() -> None:
     module, action = _module_and_action("def action(value: int) -> None:\n    pass\n")
     module.body = tuple(module.body)  # type: ignore[assignment]
@@ -687,16 +730,6 @@ def test_facade_never_imports_executes_compiles_or_reflects_author_source(
             "invalid_annotation",
             "/parameters/0/annotation",
             id="legacy-string-annotation-guess-is-gone",
-        ),
-        pytest.param(
-            """
-            @action(handles={"answer": {"type": "str"}})
-            def action(value: int) -> dict:
-                return {"answer": value}
-            """,
-            "invalid_action_result",
-            "/return",
-            id="runtime-handle-example-does-not-create-results",
         ),
         pytest.param(
             """

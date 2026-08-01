@@ -273,8 +273,14 @@ def _validate_node_templates(values: Any) -> dict[str, dict[str, Any]]:
         )
         _optional_text(
             entity,
-            {"description", "class", "schema", "icon", "header", "footer"},
+            {"description", "class", "icon", "header", "footer"},
         )
+        schema = entity.get("schema")
+        if schema is not None:
+            if type(schema) not in {str, dict}:
+                raise CandidateBundleError("Candidate schema field is invalid")
+            if type(schema) is dict:
+                normalize_json_object(schema)
         for field in ("meta_data", "goal", "goal_default", "feedback", "result"):
             normalize_json_object(entity[field])
         result[template_uuid] = entity

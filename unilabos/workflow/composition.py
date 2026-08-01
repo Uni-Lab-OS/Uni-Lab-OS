@@ -7,11 +7,15 @@ import fcntl
 import os
 import stat
 import threading
-from collections.abc import Iterable
+from collections.abc import Callable, Iterable, Mapping
 from pathlib import Path
 
 from unilabos.workflow.authoring_engine import WorkflowAuthoringEngine
-from unilabos.workflow.catalog import CatalogAuthority, TemplateCatalog
+from unilabos.workflow.catalog import (
+    CatalogAuthority,
+    LocalResourceTemplateIdentityResolver,
+    TemplateCatalog,
+)
 from unilabos.workflow.runtime import (
     WorkflowRuntimeCoordinator,
     WorkflowRuntimeWorker,
@@ -135,6 +139,8 @@ def compose_workflow_runtime(
     compiler: AuthoringCompiler | None = None,
     authority: CatalogAuthority | None = None,
     editable_package_roots: Iterable[str | Path] = (),
+    registry_snapshot: Mapping[str, object] | None = None,
+    resource_template_identity_resolver: Callable[[str], str] | None = None,
 ) -> WorkflowService:
     """装配工作区唯一的 Workflow authority、启动恢复和 Draft 监视。"""
 
@@ -144,6 +150,19 @@ def compose_workflow_runtime(
         raise TypeError("authority 必须是 CatalogAuthority")
     if authority is not None and authority.kind != "local":
         raise ValueError("persistent Workflow runtime 只支持 local Graph Authority")
+    if registry_snapshot is None and resource_template_identity_resolver is not None:
+        raise ValueError("ResourceTemplate resolver 缺少 Registry snapshot")
+    if registry_snapshot is not None and authority is None:
+        raise ValueError("Registry Catalog 发布需要显式 Graph Authority")
+    if registry_snapshot is not None and compiler is not None:
+        raise ValueError("Registry Catalog 发布不能使用外部 compiler")
+    if (
+        registry_snapshot is not None
+        and resource_template_identity_resolver is None
+        and authority is not None
+        and authority.kind != "local"
+    ):
+        raise ValueError("Backend Registry Catalog 发布需要显式 identity resolver")
     resolved_working_dir = Path(working_dir).resolve()
     database_path = resolved_working_dir / "workflow.db"
     configured_roots = _configured_package_roots(editable_package_roots)
@@ -174,17 +193,37 @@ def compose_workflow_runtime(
             return _service
         lease_descriptor = _acquire_workspace_lease(resolved_working_dir)
         new_service: WorkflowService | None = None
+        new_store: WorkflowStore | None = None
         new_monitor: WorkflowSourceMonitor | None = None
         new_runtime_worker: WorkflowRuntimeWorker | None = None
         published = False
         try:
             store = WorkflowStore(database_path)
+            new_store = store
             runtime_coordinator = WorkflowRuntimeCoordinator(store)
             runtime_coordinator.recover_startup()
             runtime_compiler = compiler
             if authority is not None:
+                catalog = TemplateCatalog(store)
+                if registry_snapshot is not None:
+                    from unilabos.registry.catalog_consumer import (
+                        workflow_template_imports_from_registry_snapshot,
+                    )
+
+                    identity_resolver = resource_template_identity_resolver
+                    if identity_resolver is None:
+                        identity_resolver = LocalResourceTemplateIdentityResolver(
+                            store,
+                            authority,
+                        )
+                    templates = workflow_template_imports_from_registry_snapshot(
+                        registry_snapshot,
+                        authority_id=authority.authority_id,
+                        resource_template_identity_resolver=identity_resolver,
+                    )
+                    catalog.replace(authority, templates)
                 runtime_compiler = WorkflowAuthoringEngine(
-                    catalog=TemplateCatalog(store),
+                    catalog=catalog,
                     authority=authority,
                 )
             new_service = WorkflowService(store, compiler=runtime_compiler)
@@ -232,6 +271,11 @@ def compose_workflow_runtime(
                     new_service.close()
                 except BaseException as error:  # noqa: BLE001 - 保留租约需捕获关闭失败
                     cleanup_error = error
+            elif cleanup_error is None and new_store is not None:
+                try:
+                    new_store.close()
+                except BaseException as error:  # noqa: BLE001 - 保留租约需捕获关闭失败
+                    cleanup_error = error
             if cleanup_error is not None and new_service is not None:
                 _retain_runtime(
                     new_service,
@@ -260,6 +304,8 @@ def setup_workflow_service(
     compiler: AuthoringCompiler | None = None,
     authority: CatalogAuthority | None = None,
     editable_package_roots: Iterable[str | Path] = (),
+    registry_snapshot: Mapping[str, object] | None = None,
+    resource_template_identity_resolver: Callable[[str], str] | None = None,
 ) -> WorkflowService:
     """兼容旧装配调用；所有入口统一进入完整运行时组合。"""
 
@@ -268,6 +314,8 @@ def setup_workflow_service(
         compiler=compiler,
         authority=authority,
         editable_package_roots=editable_package_roots,
+        registry_snapshot=registry_snapshot,
+        resource_template_identity_resolver=resource_template_identity_resolver,
     )
 
 
