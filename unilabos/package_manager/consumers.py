@@ -15,7 +15,9 @@ def register_package_catalog(registry: Any, catalog: PackageCatalog) -> None:
         if record.fqid in registry.device_type_registry:
             raise ValueError(f"Registry definition 重复: {record.fqid}")
         entry = registry._build_device_entry_from_ast(
-            record.fqid, _device_ast_metadata(record)
+            record.fqid,
+            _device_ast_metadata(record),
+            allow_definition_imports=False,
         )
         entry["source_fqid"] = record.fqid
         entry["content_hash"] = record.content_hash

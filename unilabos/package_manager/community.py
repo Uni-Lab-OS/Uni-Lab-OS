@@ -117,8 +117,13 @@ def resolve_graph_packages(
         return CommunityPackageResolution(classes=classes)
 
     namespaces = sorted({_community_namespace(item) for item in unresolved_classes})
-    cache_root = Path(working_dir).resolve() / _CACHE_DIR
+    working_root = Path(working_dir).resolve()
+    cache_root = working_root / _CACHE_DIR
+    if cache_root.is_symlink():
+        raise CommunityPackageError("community package cache root 不得是 symlink")
     cache_root.mkdir(parents=True, exist_ok=True)
+    if cache_root.resolve().parent != working_root:
+        raise CommunityPackageError("community package cache root 路径逃逸")
     index = _load_index(cache_root)
     current = []
     for namespace, info in sorted(index.get("packages", {}).items()):
@@ -150,28 +155,28 @@ def resolve_graph_packages(
     for namespace in namespaces:
         item = by_namespace.get(namespace)
         if item is not None:
-            source, package_dependencies = _cache_remote_item(
+            source = _cache_remote_item(
                 namespace,
                 item,
                 cache_root=cache_root,
                 port=port,
             )
-            index.setdefault("packages", {})[namespace] = {
-                "version": _item_version(item),
-                "artifact_digest": source.expected_digest,
-                "wheel": source.wheel.resolve().relative_to(cache_root).as_posix(),
-                "dependencies": package_dependencies,
-            }
         else:
-            source, package_dependencies = _cached_source(
-                namespace, index, cache_root=cache_root
-            )
+            source = _cached_source(namespace, index, cache_root=cache_root)
         catalog = compile_package_source(source)
         if catalog.namespace != namespace:
             raise CommunityPackageError(
                 f"community namespace 与 wheel Catalog 不一致: "
                 f"{namespace} != {catalog.namespace}"
             )
+        package_dependencies = list(catalog.distribution.dependencies)
+        if item is not None:
+            index.setdefault("packages", {})[namespace] = {
+                "version": _item_version(item),
+                "artifact_digest": source.expected_digest,
+                "wheel": source.wheel.resolve().relative_to(cache_root).as_posix(),
+                "dependencies": package_dependencies,
+            }
         sources.append(source)
         catalogs.append(catalog)
         dependencies.extend(package_dependencies)
@@ -217,7 +222,7 @@ def _cache_remote_item(
     *,
     cache_root: Path,
     port: CommunityResolvePort | None,
-) -> tuple[CachedArchiveSource, list[str]]:
+) -> CachedArchiveSource:
     package_info = item.get("package_info") or item
     digest = str(
         package_info.get("artifact_digest") or package_info.get("sha256") or ""
@@ -242,7 +247,7 @@ def _cache_remote_item(
         source = CachedArchiveSource(target, digest)
         try:
             compile_package_source(source)
-            return source, list(package_info.get("dependencies") or [])
+            return source
         except (PackageCompileError, ValueError):
             target.unlink(missing_ok=True)
     with tempfile.TemporaryDirectory(dir=cache_root, prefix="download-") as temporary:
@@ -251,10 +256,7 @@ def _cache_remote_item(
         source = CachedArchiveSource(downloaded, digest)
         compile_package_source(source)
         shutil.copy2(downloaded, target)
-    return (
-        CachedArchiveSource(target, digest),
-        list(package_info.get("dependencies") or []),
-    )
+    return CachedArchiveSource(target, digest)
 
 
 def _cached_source(
@@ -262,7 +264,7 @@ def _cached_source(
     index: dict[str, Any],
     *,
     cache_root: Path,
-) -> tuple[CachedArchiveSource, list[str]]:
+) -> CachedArchiveSource:
     _validate_namespace(namespace)
     item = index.get("packages", {}).get(namespace)
     if not isinstance(item, dict):
@@ -280,7 +282,7 @@ def _cached_source(
             f"community package {namespace} 的 cache index 路径逃逸"
         )
     source = CachedArchiveSource(wheel, str(item.get("artifact_digest") or ""))
-    return source, list(item.get("dependencies") or [])
+    return source
 
 
 def _community_namespace(class_name: str) -> str:

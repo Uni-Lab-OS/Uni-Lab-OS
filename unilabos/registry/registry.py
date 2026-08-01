@@ -901,7 +901,9 @@ class Registry:
     # AST-based 注册表条目构建
     # ------------------------------------------------------------------
 
-    def _build_device_entry_from_ast(self, device_id: str, ast_meta: dict) -> Dict[str, Any]:
+    def _build_device_entry_from_ast(
+        self, device_id: str, ast_meta: dict, *, allow_definition_imports: bool = True
+    ) -> Dict[str, Any]:
         """
         Build a device registry entry from AST-scanned metadata.
         Uses only string types -- no module imports required (except for TypedDict resolution).
@@ -1073,7 +1075,7 @@ class Registry:
             result_override = dict(action_args.get("result", {}))
             goal_default_override = dict(action_args.get("goal_default", {}))
 
-            if action_args.get("parent"):
+            if action_args.get("parent") and allow_definition_imports:
                 # @action(parent=True): 直接通过 import class + MRO 获取父类方法签名
                 goal = resolve_method_params_via_import(module_str, method_name)
             else:

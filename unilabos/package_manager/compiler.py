@@ -572,6 +572,9 @@ def _compile_workspace(source: WorkspaceSource) -> PackageCatalog:
                 )
                 if workflow_decorator is not None:
                     args = _decorator_args(workflow_decorator)
+                    _validate_definition_metadata(
+                        args, relative, node.lineno, diagnostics
+                    )
                     declared_uuid = declared_workflows.get(relative)
                     # 目录中的 decorator 不是持久 source identity。只有
                     # package.yaml 显式登记的 Draft 才进入 PackageCatalog。
