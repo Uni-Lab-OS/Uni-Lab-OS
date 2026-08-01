@@ -9,6 +9,7 @@ from dataclasses import dataclass
 from typing import Any, Literal, Protocol
 
 from unilabos.observability.config import ObservabilitySettings
+from unilabos.observability.runtime import runtime_tracing
 
 _LOGGER = logging.getLogger(__name__)
 
@@ -140,6 +141,8 @@ class ObservabilityGateway:
                 await asyncio.to_thread(self._process_adapter.start)
                 if not await self._trace_adapter.health():
                     raise ObservabilityUnavailable("Phoenix 健康检查未通过")
+                # Phoenix 就绪后再创建 exporter，避免启动期丢失或阻断主运行时。
+                await asyncio.to_thread(runtime_tracing.start, self.settings)
                 self._mark_ready()
                 _LOGGER.info("Phoenix trace 日志服务已就绪")
             except Exception as exc:  # noqa: BLE001 - 可观测性不能阻断主运行时
@@ -152,6 +155,10 @@ class ObservabilityGateway:
                 return
             self._closed = True
             try:
+                await asyncio.to_thread(
+                    runtime_tracing.stop,
+                    self.settings.shutdown_timeout_seconds,
+                )
                 await self._trace_adapter.close()
             finally:
                 await asyncio.to_thread(self._process_adapter.stop)

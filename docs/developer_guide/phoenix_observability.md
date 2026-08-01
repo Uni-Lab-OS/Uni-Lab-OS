@@ -29,7 +29,7 @@ class ObservabilityConfig:
 - Phoenix gRPC：`127.0.0.1:4317`
 - SQLite：`<BasicConfig.working_dir>/observability/phoenix/phoenix.sqlite3`
 - Phoenix 日志：`<BasicConfig.working_dir>/observability/phoenix/phoenix.log`
-- Phoenix 自身遥测和外部资源加载：关闭
+- Phoenix 自身遥测、外部资源加载、模型与代码沙箱提供商：关闭
 
 也可以通过现有配置环境变量机制设置，例如：
 
@@ -92,11 +92,37 @@ trace 详情按 `trace_id` 查询 spans，支持 `limit` 和 `cursor`。Electron
 Phoenix 的管理 Interface，也不应直接读取 SQLite。即使 Uni-Lab-OS 主服务器监听
 `0.0.0.0`，observability 路由也只接受来自 loopback 的请求。
 
+## Scheduler、ROS2 与驱动 Trace
+
+启用 observability 后，Uni-Lab-OS 自身使用同一 Phoenix project 上报以下业务 span：
+
+- `workflow.node.dispatch`：Scheduler 下发节点动作；
+- `ros2.action.send_goal`、`ros2.action.goal_response`、`ros2.action.result`、
+  `ros2.action.cancel`：HostNode 的 ROS Action 生命周期；
+- `ros2.action.execute`：设备 ActionServer 接收并执行 goal；
+- `device.driver.execute`：真正调用设备驱动方法，包括同步线程池和异步方法。
+
+span 只记录 WorkflowTask、WorkflowNodeJob、WorkflowNode、设备、动作和 ROS goal 的
+稳定标识及结果状态，不记录完整动作参数、物料树、token 或密码。高频 feedback 不为
+每条消息创建 span，避免 trace 放大。
+
+Host 与设备在同一进程时，通过 `job_id = ROS goal UUID` 的本地 context map 传递
+W3C `traceparent/tracestate`。远端 `UniLabJsonCommand` 把 carrier 放在已有的
+`unilabos_param.trace_context` 中；原生 ROS Action 的 Goal 没有统一扩展字段，因此
+Host 会先调用设备私有的 `_register_trace_context` ROS service，收到确认后再发送
+goal。旧设备没有该 service 或 trace 注册超时时仅丢失远端父子关系，动作仍正常发送。
+
+side-channel 只接受 node job UUID、task UUID、动作名和 W3C carrier，拒绝未知字段，
+待消费 context 有数量和 60 秒 TTL 上限。同步驱动进入 `ThreadPoolExecutor` 时显式
+复制/恢复 trace context，保证驱动 span 与 ROS span 保持父子关系。
+
 ## 降级行为
 
 Phoenix 未安装、端口不可用或数据库迁移失败时，Uni-Lab-OS 继续启动并执行设备与
 Workflow。`status` 返回 `state: "degraded"` 和可展示的 `last_error`；上报与查询返回
-`503 observability_unavailable`。禁用时状态为 `disabled`。
+`503 observability_unavailable`。只有 Phoenix OTEL Adapter 缺失或初始化失败时，OS
+内部 span 自动退化为 no-op，Electron 的上报、查询和 Phoenix `ready` 状态不受影响。
+禁用时状态为 `disabled`。
 
 Phoenix 采用 Elastic License 2.0。它作为可选独立进程运行，没有将 Phoenix 源码复制
 到 GPL-3.0 的 Uni-Lab-OS 中；产品分发前仍需完成许可证合规审核。

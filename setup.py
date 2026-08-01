@@ -11,6 +11,7 @@ setup(
     extras_require={
         'observability': [
             'arize-phoenix==17.5.0',
+            'arize-phoenix-otel==0.16.1',
             # Phoenix 17.5.0 尚未兼容 pydantic-ai 2.x，但上游元数据未设置上界。
             'pydantic-ai-slim==1.107.1',
         ],

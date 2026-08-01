@@ -37,6 +37,16 @@ from unilabos_msgs.action import SendCmd, StrSingleInput
 from unilabos_msgs.srv._serial_command import SerialCommand_Request, SerialCommand_Response
 
 from unilabos.config.config import BasicConfig
+from unilabos.observability import runtime as runtime_tracing
+from unilabos.observability.runtime import (
+    TRACE_CONTEXT_KEY,
+    TRACE_CONTEXT_SERVICE_SUFFIX,
+    decode_job_trace_context,
+    fail_open_span,
+    normalize_trace_context,
+    safe_capture_context,
+    safe_submit,
+)
 from unilabos.registry.decorators import get_topic_config
 from unilabos.registry.action_policy import (
     ActionDecisionOutcome,
@@ -92,6 +102,8 @@ if TYPE_CHECKING:
     from pylabrobot.resources import Resource as ResourcePLR
 
 T = TypeVar("T")
+_JOB_CONTEXT_TTL_SECONDS = 60.0
+_MAX_PENDING_JOB_CONTEXTS = 2048
 
 
 class RclpyAsyncMutex:
@@ -469,7 +481,7 @@ class BaseROS2DeviceNode(Node, Generic[T]):
         # 跨设备动作类型探测缓存（key: "<clean_device_id>/<function_name>"，value: 原生 Action 类型或 None）
         self._remote_action_type_cache: Dict[str, Any] = {}
         # HostNode 在发送 goal 前按 job UUID 注入上下文；action server 消费后立即删除。
-        self._job_contexts: Dict[str, Dict[str, str]] = {}
+        self._job_contexts: Dict[str, Dict[str, Any]] = {}
         self._job_contexts_lock = threading.Lock()
         # decision_id -> {event, decision, job_id}。服务端审批结果按 decision_id 精确唤醒。
         self._pending_action_error_decisions: Dict[str, Dict[str, Any]] = {}
@@ -761,6 +773,12 @@ class BaseROS2DeviceNode(Node, Generic[T]):
                 SerialCommand,
                 f"/srv{self.namespace}/s2c_device_manage",
                 self.s2c_device_manage,  # type: ignore
+                callback_group=self.callback_group,
+            ),
+            TRACE_CONTEXT_SERVICE_SUFFIX: self.create_service(
+                SerialCommand,
+                f"/srv{self.namespace}/{TRACE_CONTEXT_SERVICE_SUFFIX}",
+                self._register_trace_context_service,
                 callback_group=self.callback_group,
             ),
         }
@@ -1533,6 +1551,7 @@ class BaseROS2DeviceNode(Node, Generic[T]):
             "function_args": action_kwargs,
             JSON_UNILABOS_PARAM: {
                 PARAM_SAMPLE_UUIDS: sample_uuids or {},
+                TRACE_CONTEXT_KEY: safe_capture_context(runtime_tracing),
             },
         }
         goal = convert_to_ros_msg(
@@ -2093,7 +2112,13 @@ class BaseROS2DeviceNode(Node, Generic[T]):
             obj = getattr(instance, attr_name)
             return obj, get_type_hints(obj)
 
-    def register_job_context(self, job_id: str, task_id: str, action_name: str) -> None:
+    def register_job_context(
+        self,
+        job_id: str,
+        task_id: str,
+        action_name: str,
+        trace_context: Optional[Dict[str, str]] = None,
+    ) -> None:
         """Register HostNode context before the ROS goal with UUID=job_id is sent."""
 
         if not job_id:
@@ -2103,21 +2128,99 @@ class BaseROS2DeviceNode(Node, Generic[T]):
                 "job_id": job_id,
                 "task_id": task_id,
                 "action_name": action_name,
+                TRACE_CONTEXT_KEY: normalize_trace_context(trace_context),
+                "registered_at": time.monotonic(),
             }
+            self._prune_job_contexts_locked()
 
-    def _consume_job_context(self, goal_handle: ServerGoalHandle, action_name: str) -> Dict[str, str]:
+    def _prune_job_contexts_locked(self) -> None:
+        now = time.monotonic()
+        stale_job_ids = [
+            job_id
+            for job_id, context in self._job_contexts.items()
+            if now - float(context.get("registered_at", now))
+            > _JOB_CONTEXT_TTL_SECONDS
+        ]
+        for job_id in stale_job_ids:
+            self._job_contexts.pop(job_id, None)
+        overflow = len(self._job_contexts) - _MAX_PENDING_JOB_CONTEXTS
+        if overflow > 0:
+            oldest = sorted(
+                self._job_contexts,
+                key=lambda job_id: float(
+                    self._job_contexts[job_id].get("registered_at", 0.0)
+                ),
+            )
+            for job_id in oldest[:overflow]:
+                self._job_contexts.pop(job_id, None)
+
+    def _register_trace_context_service(
+        self,
+        request: SerialCommand_Request,
+        response: SerialCommand_Response,
+    ) -> SerialCommand_Response:
+        """在原生 ROS Action goal 到达前登记其 W3C parent context。"""
+
+        try:
+            payload = decode_job_trace_context(request.command)
+            self.register_job_context(
+                payload["node_job_uuid"],
+                payload["task_uuid"],
+                payload["action_name"],
+                trace_context=payload[TRACE_CONTEXT_KEY],
+            )
+            response.response = json.dumps({"accepted": True})
+        except Exception as exc:  # noqa: BLE001 - 无效 trace 不影响后续业务 goal
+            self.lab_logger().warning(
+                f"拒绝无效 trace context：{type(exc).__name__}"
+            )
+            response.response = json.dumps(
+                {"accepted": False, "error": "invalid_trace_context"}
+            )
+        return response
+
+    def _consume_job_context(
+        self,
+        goal_handle: ServerGoalHandle,
+        action_name: str,
+    ) -> Dict[str, Any]:
         job_id = ""
         try:
             job_id = str(uuid.UUID(bytes=bytes(goal_handle.goal_id.uuid)))
         except (AttributeError, TypeError, ValueError):
             pass
         with self._job_contexts_lock:
+            self._prune_job_contexts_locked()
             context = self._job_contexts.pop(job_id, {}) if job_id else {}
+        trace_context = normalize_trace_context(context.get(TRACE_CONTEXT_KEY))
+        if not trace_context:
+            trace_context = self._trace_context_from_goal_request(goal_handle)
         return {
             "job_id": context.get("job_id", job_id),
             "task_id": context.get("task_id", ""),
             "action_name": context.get("action_name", action_name),
+            TRACE_CONTEXT_KEY: trace_context,
         }
+
+    @staticmethod
+    def _trace_context_from_goal_request(
+        goal_handle: ServerGoalHandle,
+    ) -> Dict[str, str]:
+        """从 UniLabJsonCommand 的系统参数中读取远端 W3C carrier。"""
+
+        command = getattr(getattr(goal_handle, "request", None), "string", None)
+        if not isinstance(command, str) or not command.startswith("{"):
+            return {}
+        try:
+            payload = json.loads(command)
+        except (TypeError, ValueError):
+            return {}
+        if not isinstance(payload, dict):
+            return {}
+        system_parameters = payload.get(JSON_UNILABOS_PARAM)
+        if not isinstance(system_parameters, dict):
+            return {}
+        return normalize_trace_context(system_parameters.get(TRACE_CONTEXT_KEY))
 
     def _resolve_runtime_error_policy(
         self,
@@ -2347,7 +2450,11 @@ class BaseROS2DeviceNode(Node, Generic[T]):
     def _create_execute_callback(self, action_name, action_value_mapping):
         """创建动作执行回调函数"""
 
-        async def execute_callback(goal_handle: ServerGoalHandle):
+        async def _execute_callback_body(
+            goal_handle: ServerGoalHandle,
+            job_context: Dict[str, Any],
+            driver_parent_context: Dict[str, str],
+        ):
             # 初始化结果信息变量
             execution_error = ""
             execution_success = False
@@ -2379,7 +2486,6 @@ class BaseROS2DeviceNode(Node, Generic[T]):
             action_kwargs = convert_from_ros_msg_with_mapping(goal, action_value_mapping["goal"])
             self.lab_logger().debug(f"任务 {ACTION.__name__} 接收到原始目标: {str(action_kwargs)[:1000]}")
             self.lab_logger().trace(f"任务 {ACTION.__name__} 接收到原始目标: {action_kwargs}")
-            job_context = self._consume_job_context(goal_handle, action_name)
             error_policy, report_action_name = self._resolve_runtime_error_policy(
                 action_name,
                 action_value_mapping,
@@ -2387,10 +2493,40 @@ class BaseROS2DeviceNode(Node, Generic[T]):
                 action_kwargs,
             )
 
+            driver_trace_attributes = {
+                "workflow.node_job.uuid": job_context.get("job_id", ""),
+                "workflow.task.uuid": job_context.get("task_id", ""),
+                "device.id": getattr(self, "device_id", ""),
+                "device.action.name": job_context.get("action_name", action_name),
+                "driver.method.name": getattr(ACTION, "__name__", action_name),
+            }
+
+            def _run_sync_action():
+                with fail_open_span(
+                    runtime_tracing,
+                    "device.driver.execute",
+                    parent=driver_parent_context,
+                    attributes=driver_trace_attributes,
+                ):
+                    return ACTION(**action_kwargs)
+
+            async def _run_async_action():
+                with fail_open_span(
+                    runtime_tracing,
+                    "device.driver.execute",
+                    parent=driver_parent_context,
+                    attributes=driver_trace_attributes,
+                ):
+                    return await ACTION(**action_kwargs)
+
             async def _retry_action_once():
                 if asyncio.iscoroutinefunction(ACTION):
-                    return await ACTION(**action_kwargs)
-                retry_future = self._executor.submit(ACTION, **action_kwargs)
+                    return await _run_async_action()
+                retry_future = safe_submit(
+                    runtime_tracing,
+                    self._executor,
+                    _run_sync_action,
+                )
                 while not retry_future.done():
                     await self.sleep(0.02)
                 return retry_future.result()
@@ -2488,7 +2624,10 @@ class BaseROS2DeviceNode(Node, Generic[T]):
                                     f"异步任务 {ACTION.__name__} 报错了\n{traceback.format_exc()}\n原始输入：{action_kwargs}"
                                 )
 
-                        future = ROS2DeviceNode.run_async_func(ACTION, trace_error=False, **action_kwargs)
+                        future = ROS2DeviceNode.run_async_func(
+                            _run_async_action,
+                            trace_error=False,
+                        )
                         future.add_done_callback(_handle_future_exception)
                     except Exception as e:
                         execution_error = traceback.format_exc()
@@ -2496,7 +2635,11 @@ class BaseROS2DeviceNode(Node, Generic[T]):
                         self.lab_logger().error(f"创建异步任务失败: {traceback.format_exc()}")
                 else:
                     self.lab_logger().trace(f"同步执行动作 {ACTION}")
-                    future = self._executor.submit(ACTION, **action_kwargs)
+                    future = safe_submit(
+                        runtime_tracing,
+                        self._executor,
+                        _run_sync_action,
+                    )
 
                     def _handle_future_exception(fut: Future):
                         nonlocal execution_error, execution_success, action_return_value
@@ -2701,6 +2844,35 @@ class BaseROS2DeviceNode(Node, Generic[T]):
 
             self.lab_logger().trace(f"动作 {action_name} 完成并返回结果")
             return result_msg
+
+        async def execute_callback(goal_handle: ServerGoalHandle):
+            job_context = self._consume_job_context(goal_handle, action_name)
+            parent_trace_context = normalize_trace_context(
+                job_context.get(TRACE_CONTEXT_KEY)
+            )
+            driver_parent_context = parent_trace_context
+            with fail_open_span(
+                runtime_tracing,
+                "ros2.action.execute",
+                parent=parent_trace_context,
+                attributes={
+                    "workflow.node_job.uuid": job_context.get("job_id", ""),
+                    "workflow.task.uuid": job_context.get("task_id", ""),
+                    "device.id": getattr(self, "device_id", ""),
+                    "device.action.name": job_context.get(
+                        "action_name", action_name
+                    ),
+                    "ros.goal.uuid": job_context.get("job_id", ""),
+                },
+            ):
+                captured_context = safe_capture_context(runtime_tracing)
+                if captured_context:
+                    driver_parent_context = captured_context
+                return await _execute_callback_body(
+                    goal_handle,
+                    job_context,
+                    driver_parent_context,
+                )
 
         return execute_callback
 

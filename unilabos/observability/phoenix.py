@@ -128,6 +128,7 @@ class PhoenixProcessAdapter:
             "PHOENIX_TELEMETRY_ENABLED": "false",
             "PHOENIX_ALLOW_EXTERNAL_RESOURCES": "false",
             "PHOENIX_ALLOWED_PROVIDERS": "NONE",
+            "PHOENIX_ALLOWED_SANDBOX_PROVIDERS": "NONE",
             "PYTHONUNBUFFERED": "1",
         }
 

@@ -13,6 +13,7 @@ from fastapi.testclient import TestClient
 from unilabos.app.observability_api import create_observability_app
 from unilabos.observability.config import ObservabilitySettings
 from unilabos.observability.gateway import ObservabilityGateway
+from unilabos.observability.runtime import runtime_tracing, start_runtime_span
 
 PHOENIX_EXECUTABLE = os.environ.get("UNILABOS_PHOENIX_EXECUTABLE", "")
 
@@ -24,7 +25,9 @@ def _build_otlp_protobuf(trace_id: bytes, span_id: bytes, now_ns: int) -> bytes:
     python_executable = str(Path(PHOENIX_EXECUTABLE).parent / python_name)
     script = """
 import sys
-from opentelemetry.proto.collector.trace.v1.trace_service_pb2 import ExportTraceServiceRequest
+from opentelemetry.proto.collector.trace.v1.trace_service_pb2 import (
+    ExportTraceServiceRequest,
+)
 from opentelemetry.proto.trace.v1.trace_pb2 import Span, Status
 
 request = ExportTraceServiceRequest()
@@ -82,6 +85,17 @@ def test_real_phoenix_sqlite_otlp_and_query(tmp_path: Path) -> None:
         status = client.get("/api/v1/observability/status")
         assert status.json()["data"]["state"] == "ready"
 
+        with start_runtime_span(
+            "ros2.integration.smoke",
+            attributes={
+                "workflow.node_job.uuid": ("11111111-1111-4111-8111-111111111111"),
+                "device.action.name": "move",
+            },
+        ) as runtime_span:
+            assert runtime_span is not None
+            runtime_trace_id = f"{runtime_span.get_span_context().trace_id:032x}"
+        assert runtime_tracing.force_flush(10.0)
+
         exported = client.post(
             "/api/v1/observability/otlp/v1/traces",
             content=otlp_protobuf,
@@ -96,10 +110,10 @@ def test_real_phoenix_sqlite_otlp_and_query(tmp_path: Path) -> None:
                 params={"include_spans": "true"},
             )
             assert traces.status_code == 200
-            if any(
-                item.get("trace_id") == trace_id.hex()
-                for item in traces.json()["data"]["traces"]
-            ):
+            returned_trace_ids = {
+                item.get("trace_id") for item in traces.json()["data"]["traces"]
+            }
+            if {trace_id.hex(), runtime_trace_id} <= returned_trace_ids:
                 break
             if time.monotonic() >= deadline:
                 pytest.fail("Phoenix 未在期限内返回刚上报的 trace")
@@ -109,6 +123,11 @@ def test_real_phoenix_sqlite_otlp_and_query(tmp_path: Path) -> None:
         assert detail.status_code == 200
         assert detail.json()["data"]["spans"][0]["name"] == (
             "electron.integration.smoke"
+        )
+        runtime_detail = client.get(f"/api/v1/observability/traces/{runtime_trace_id}")
+        assert runtime_detail.status_code == 200
+        assert runtime_detail.json()["data"]["spans"][0]["name"] == (
+            "ros2.integration.smoke"
         )
 
     assert settings.database_path.is_file()

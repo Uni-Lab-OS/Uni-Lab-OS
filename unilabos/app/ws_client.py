@@ -68,6 +68,8 @@ class QueueItem:
     device_action_key: str
     next_run_time: float = 0  # 下次执行时间戳
     retry_count: int = 0  # 重试次数
+    # 仅允许 W3C traceparent/tracestate；不得放动作参数或凭据。
+    trace_context: Dict[str, str] = field(default_factory=dict)
 
 
 @dataclass
@@ -89,6 +91,7 @@ class JobInfo:
     action_args: Dict[str, Any] = field(default_factory=dict)
     sample_material: Dict[str, Any] = field(default_factory=dict)
     server_info: Optional[Dict[str, Any]] = None
+    trace_context: Dict[str, str] = field(default_factory=dict)
 
     def update_timestamp(self):
         """更新最后更新时间"""

@@ -89,6 +89,8 @@ def test_process_adapter_builds_explicit_sqlite_environment(tmp_path: Path) -> N
     assert env["PHOENIX_DEFAULT_RETENTION_POLICY_DAYS"] == "30"
     assert env["PHOENIX_TELEMETRY_ENABLED"] == "false"
     assert env["PHOENIX_ALLOW_EXTERNAL_RESOURCES"] == "false"
+    assert env["PHOENIX_ALLOWED_PROVIDERS"] == "NONE"
+    assert env["PHOENIX_ALLOWED_SANDBOX_PROVIDERS"] == "NONE"
     assert settings.database_path.parent.is_dir()
     assert adapter.managed is False
 

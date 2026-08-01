@@ -19,7 +19,6 @@ from importlib import import_module
 from typing import Any, Iterator, Mapping
 
 import pytest
-from unilabos_msgs.action import StrSingleInput
 
 from unilabos.app.scheduler import backend as backend_module
 from unilabos.app.scheduler.backend import JobExecutionBackend
@@ -30,7 +29,7 @@ from unilabos.ros.nodes import base_device_node as device_module
 from unilabos.ros.nodes.base_device_node import BaseROS2DeviceNode
 from unilabos.ros.nodes.presets import host_node as host_module
 from unilabos.ros.nodes.presets.host_node import HostNode
-
+from unilabos_msgs.action import StrSingleInput
 
 TRACE_ID = "0123456789abcdef0123456789abcdef"
 ROOT_SPAN_ID = "0123456789abcdef"
@@ -38,9 +37,7 @@ ROOT_CARRIER = {
     "traceparent": f"00-{TRACE_ID}-{ROOT_SPAN_ID}-01",
     "tracestate": "unilab=test",
 }
-TRACEPARENT_RE = re.compile(
-    r"^00-[0-9a-f]{32}-[0-9a-f]{16}-[0-9a-f]{2}$"
-)
+TRACEPARENT_RE = re.compile(r"^00-[0-9a-f]{32}-[0-9a-f]{16}-[0-9a-f]{2}$")
 
 
 @dataclass(frozen=True)
@@ -56,8 +53,8 @@ class _RecordingRuntimeTracing:
 
     def __init__(self) -> None:
         self.spans: list[_RecordedSpan] = []
-        self._current: contextvars.ContextVar[dict[str, str]] = (
-            contextvars.ContextVar("test_trace_carrier", default={})
+        self._current: contextvars.ContextVar[dict[str, str]] = contextvars.ContextVar(
+            "test_trace_carrier", default={}
         )
         self._span_counter = 1
 
@@ -92,9 +89,7 @@ class _RecordingRuntimeTracing:
             self._current.reset(token)
 
     @contextmanager
-    def attach_context(
-        self, carrier: Mapping[str, str] | None
-    ) -> Iterator[None]:
+    def attach_context(self, carrier: Mapping[str, str] | None) -> Iterator[None]:
         token = self._current.set(dict(carrier or {}))
         try:
             yield
@@ -243,9 +238,7 @@ def test_host_passes_child_context_to_local_device(
             action_name: str,
             trace_context: Mapping[str, str] | None = None,
         ) -> None:
-            registered.append(
-                (job_id, task_id, action_name, dict(trace_context or {}))
-            )
+            registered.append((job_id, task_id, action_name, dict(trace_context or {})))
 
     client = _FakeActionClient()
     host = _FakeHostForSendGoal(client, TargetNode())
