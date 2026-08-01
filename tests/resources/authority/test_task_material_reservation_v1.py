@@ -20,9 +20,15 @@ from unilabos.resources.authority import (
 )
 from unilabos.resources.authority.sqlite import SQLiteMaterialAdapter
 from unilabos.workflow import composition
+from unilabos.workflow.catalog import (
+    CatalogAuthority,
+    NodeTemplateImport,
+    TemplateCatalog,
+)
+from unilabos.workflow.material_resolver import MaterialResourceSlotResolver
 from unilabos.workflow.models import WorkflowNodeWrite
 from unilabos.workflow.runtime import WorkflowRuntimeCoordinator
-from unilabos.workflow.service import WorkflowService
+from unilabos.workflow.service import WorkflowError, WorkflowService
 from unilabos.workflow.store import StoreConflict, WorkflowStore
 
 RESOURCE_TEMPLATE_UUID = "2abcdef0-1234-4abc-8def-000000000017"
@@ -36,6 +42,11 @@ SINGLE_WORKFLOW_UUID = "10000000-0000-4000-8000-000000000002"
 SINGLE_NODE_UUID = "20000000-0000-4000-8000-000000000002"
 MULTI_WORKFLOW_UUID = "10000000-0000-4000-8000-000000000003"
 MULTI_NODE_UUID = "20000000-0000-4000-8000-000000000003"
+ACTION_WORKFLOW_UUID = "10000000-0000-4000-8000-000000000004"
+ACTION_NODE_UUID = "20000000-0000-4000-8000-000000000004"
+ACTION_DEVICE_TEMPLATE_UUID = "2abcdef0-1234-4abc-8def-000000000099"
+CALLER_TEMPLATE_UUID = "2abcdef0-1234-4abc-8def-000000000098"
+ACTION_AUTHORITY = CatalogAuthority(authority_id="m1d-local", kind="local")
 
 
 def _resource_templates() -> Mapping[str, object]:
@@ -205,6 +216,224 @@ def _post_task(
         "/api/v1/workflow-tasks",
         json={"workflow_uuid": workflow_uuid, "input": input_value},
     )
+
+
+def _publish_typed_action_catalog(
+    store: WorkflowStore,
+) -> tuple[str, str]:
+    snapshot = TemplateCatalog(store).replace(
+        ACTION_AUTHORITY,
+        [
+            NodeTemplateImport(
+                template={
+                    "description": "Consume one concrete sample",
+                    "meta_data": {"source": "@action"},
+                    "resource_template_uuid": ACTION_DEVICE_TEMPLATE_UUID,
+                    "name": "consume_sample",
+                    "display_name": "Consume sample",
+                    "class": "m1d.actions:Consumer",
+                    "goal": {},
+                    "goal_default": {},
+                    "feedback": {},
+                    "result": {},
+                    "schema": None,
+                    "type": "action",
+                    "icon": None,
+                    "header": None,
+                    "footer": None,
+                    "node_type": "device_action",
+                },
+                handles=[
+                    {
+                        "description": "Concrete business Material root",
+                        "meta_data": {
+                            "unilab": {
+                                "value_schema": {"$slot": "ResourceSlot"},
+                                "editor_control": "material_port",
+                                "allowed_resource_template_uuids": [
+                                    RESOURCE_TEMPLATE_UUID
+                                ],
+                                "implicit_passthrough": False,
+                            }
+                        },
+                        "handle_key": "sample",
+                        "io_type": "target",
+                        "display_name": "Sample",
+                        "type": "ResourceSlot",
+                        "required": True,
+                        "data_source": "goal",
+                        "data_key": "sample",
+                    }
+                ],
+            )
+        ],
+    )
+    node_template = snapshot.node_templates[0]
+    target_handle = snapshot.handle_templates[0]
+    assert target_handle["workflow_node_template_uuid"] == node_template["uuid"]
+    unilab_meta = target_handle["meta_data"]["unilab"]
+    assert unilab_meta["value_schema"]["$slot"] == "ResourceSlot"
+    assert unilab_meta["editor_control"] == "material_port"
+    assert tuple(unilab_meta["allowed_resource_template_uuids"]) == (
+        RESOURCE_TEMPLATE_UUID,
+    )
+    assert unilab_meta["implicit_passthrough"] is False
+    return str(node_template["uuid"]), str(target_handle["uuid"])
+
+
+def _save_action_literal_workflow(
+    store: WorkflowStore,
+    *,
+    node_template_uuid: str,
+    revision: int,
+    sample: dict[str, str],
+) -> None:
+    store.save_graph(
+        ACTION_WORKFLOW_UUID,
+        revision=revision,
+        nodes=[
+            WorkflowNodeWrite(
+                uuid=ACTION_NODE_UUID,
+                workflow_node_template_uuid=node_template_uuid,
+                name="consume_sample",
+                status="idle",
+                type="device",
+                pose={},
+                param={"sample": sample},
+                action_name="consume_sample",
+                execution_policy={},
+                disabled=False,
+                minimized=False,
+                meta_data={},
+            )
+        ],
+        edges=[],
+    )
+
+
+def _create_action_literal_task(service: WorkflowService) -> dict[str, Any]:
+    return service.create_workflow_task(
+        workflow_uuid=ACTION_WORKFLOW_UUID,
+        run_mode="normal",
+        target_node_uuid=None,
+        input_value={},
+        description=None,
+        meta_data={},
+    )
+
+
+def test_typed_action_literal_is_canonicalized_reserved_and_dispatch_guarded(
+    tmp_path: Path,
+) -> None:
+    database_path = tmp_path / "workflow.db"
+    with _open_authority(database_path) as (store, materials):
+        _create_material(materials, MATERIAL_A_UUID)
+        node_template_uuid, target_handle_uuid = _publish_typed_action_catalog(store)
+        store.create_workflow(
+            workflow_uuid=ACTION_WORKFLOW_UUID,
+            name="M1D typed Action literal",
+            tags=[],
+            description=None,
+            meta_data={},
+        )
+        _save_action_literal_workflow(
+            store,
+            node_template_uuid=node_template_uuid,
+            revision=1,
+            sample={"uuid": MATERIAL_A_UUID.upper()},
+        )
+
+        saved_graph = store.get_graph(ACTION_WORKFLOW_UUID)
+        saved_target = next(
+            handle
+            for handle in saved_graph["handle_templates"]
+            if handle["uuid"] == target_handle_uuid
+        )
+        assert saved_target["io_type"] == "target"
+        assert saved_target["type"] == "ResourceSlot"
+        assert saved_target["meta_data"]["unilab"]["value_schema"] == {
+            "$slot": "ResourceSlot"
+        }
+
+        material_authority = MaterialResourceSlotResolver(materials)
+        service = WorkflowService(
+            store,
+            resource_resolver=material_authority,
+            material_reservations=material_authority,
+        )
+        coordinator = WorkflowRuntimeCoordinator(
+            store,
+            material_reservations=material_authority,
+        )
+
+        winner = _create_action_literal_task(service)
+        winner_job = service.list_workflow_node_jobs(winner["uuid"])[0]
+        with store.transaction() as uow:
+            assert materials.has_complete_task_reservation(
+                uow,
+                task_uuid=winner["uuid"],
+                root_material_uuids=(MATERIAL_A_UUID,),
+            )
+
+        canonical_slot = {
+            "uuid": MATERIAL_A_UUID,
+            "resource_template_uuid": RESOURCE_TEMPLATE_UUID,
+        }
+        frozen_node = next(
+            node
+            for node in winner["workflow_snapshot"]["nodes"]
+            if node["uuid"] == ACTION_NODE_UUID
+        )
+        planned_node = next(
+            node
+            for node in winner["execution_plan"]["nodes"]
+            if node["uuid"] == ACTION_NODE_UUID
+        )
+        assert frozen_node["param"] == {"sample": canonical_slot}
+        assert planned_node["param"] == {"sample": canonical_slot}
+        assert winner_job["param"] == {"sample": canonical_slot}
+
+        contender = _create_action_literal_task(service)
+        contender_job = service.list_workflow_node_jobs(contender["uuid"])[0]
+        assert contender["status"] == "pending"
+        assert _reservation_snapshot(database_path, contender["uuid"]) == ([], [])
+        with store.transaction() as uow:
+            assert not materials.has_complete_task_reservation(
+                uow,
+                task_uuid=contender["uuid"],
+                root_material_uuids=(MATERIAL_A_UUID,),
+            )
+
+        assert (
+            coordinator.transition_job(winner_job["uuid"], "dispatched")["status"]
+            == "dispatched"
+        )
+        with pytest.raises(StoreConflict):
+            coordinator.transition_job(contender_job["uuid"], "dispatched")
+        assert store.get_job(contender_job["uuid"])["status"] == "pending"
+
+        current_revision = store.get_graph(ACTION_WORKFLOW_UUID)["workflow"]["revision"]
+        _save_action_literal_workflow(
+            store,
+            node_template_uuid=node_template_uuid,
+            revision=current_revision,
+            sample={
+                "uuid": MATERIAL_A_UUID,
+                "resource_template_uuid": CALLER_TEMPLATE_UUID,
+            },
+        )
+        before_invalid = service.list_workflow_tasks(
+            workflow_uuid=ACTION_WORKFLOW_UUID
+        )["total"]
+
+        with pytest.raises(WorkflowError) as failure:
+            _create_action_literal_task(service)
+
+        assert failure.value.code == "invalid_input"
+        assert (
+            service.list_workflow_tasks(workflow_uuid=ACTION_WORKFLOW_UUID)["total"]
+            == before_invalid
+        )
 
 
 def test_public_reservation_primitive_is_complete_deterministic_and_idempotent(
