@@ -65,18 +65,22 @@ revision、Applied Source、authoring record 或 event 写入前完成证明。�
 
 错误合同保持关闭且不回显敏感 UUID/driver exception：
 
-- `invalid_material_source`：selector/framework 形态错误；
+- `invalid_material_source`：closed selector/Node shape 错误；
 - `not_found`：Material/Site 不存在或已删除；
-- `material_source_conflict`：owner、template、occupancy 或兼容 Site 冲突；
+- `material_source_conflict`：Site owner/template、不存在兼容 Site，或固定 `existing`
+  Material 的模板/当前位置冲突；
 - `material_authority_unavailable`：authority 未配置、不可用或抛出未知普通异常；
-- `template_catalog_mismatch`、`material_flow_fan_out`：identity/物料链静态合同失败。
+- `template_catalog_mismatch`：framework aggregate 或双向 identity 错误；
+- `material_flow_fan_out`：ResourceSlot 输出存在多个消费者。
 
 `KeyboardInterrupt`、`SystemExit` 等控制异常不会被吞掉。
 
 ## 2. 独立测试 provenance
 
-本轮唯一 test-author：`/root/test_m2a_material_source_schema`。所有 tests-only tracer 均在独立
-worktree/branch 上先于对应生产实现；原始提交与迁移分支保留提交具有相同 stable patch-id：
+本轮唯一 test-author：`/root/test_m2a_material_source_schema`。所有 tests-only 提交均来自独立
+worktree/branch；针对缺失行为的 RED tracer 均先于对应生产实现。stale Apply 提交是加入时既有
+行为已经满足的补充 GREEN guard，不宣称 test-first RED。原始提交与迁移分支保留提交具有相同
+stable patch-id：
 
 | tracer | 原始 tests-only commit | 迁移分支保留 commit |
 |---|---|---|
@@ -89,7 +93,7 @@ worktree/branch 上先于对应生产实现；原始提交与迁移分支保留�
 | D-067 template compatibility | `f1273c08dc64fc19d5e315171248b2d285a12793` | `eceb582a0a20dbcb5bf8130e8988e8876969a655` |
 | production composition | `f42747c3dc2716e77eef05c110a8ef6cf0f9464c` | `a49d486fead44e3ba4642f76c5b31c0be8aef9a6` |
 | public contract hardening | `5fd146188eaf0a90102908f4baaa3e80917a052e` | `dec063cd19aafa3ca33023d04aebaecb148ebed5` |
-| stale Apply authority facts | `f598e65a6edb7c36c2b2af809322fc1274fd6926` | `d745ee7caddc9e5ca80431dd37cdbe0faae04ef7` |
+| stale Apply authority facts（补充 GREEN guard） | `f598e65a6edb7c36c2b2af809322fc1274fd6926` | `d745ee7caddc9e5ca80431dd37cdbe0faae04ef7` |
 | 首轮 review validation/redaction | `d07962fc48be684f68dcdf5446ace5e586fd24c8` | `b1418f3c7a608c4fb00818d99049592625cb0b1e` |
 | Store UoW/rollback | `d2acc4beb643b528b13dae50c32002061c9eacaf` | `10141e7f544f38ebaf34b58ada744f84d19e23c6` |
 | production 双向 identity | `283cc967bd11b82a11ba3a8a57644ee01cf72a85` | `8be75568ca33c246ed28bec6a1b1e0dad1f6d8f9` |
