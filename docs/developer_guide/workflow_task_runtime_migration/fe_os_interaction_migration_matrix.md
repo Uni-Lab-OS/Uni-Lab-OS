@@ -46,7 +46,9 @@ Conditional Join 为 `Uni-Lab-OS/Uni-Lab-Core#132`，Workflow I/O 为
 Action typed contract 为 `Uni-Lab-OS/Uni-Lab-Core#135`，subworkflow/Task output 为
 `Uni-Lab-OS/Uni-Lab-Core#136`，Tool Call 为 `Uni-Lab-OS/Uni-Lab-Core#138`。
 MaterialSource 及其分配边界继续由 `Uni-Lab-OS/Uni-Lab-Core#140～#146` 细化，
-`Uni-Lab-OS/Uni-Lab-Core#148` 明确延期。
+`Uni-Lab-OS/Uni-Lab-Core#148` 明确延期。设备 Action 锁检测与人工安全确认后的
+强制解锁由 `Uni-Lab-OS/Uni-Lab-Core#160` 冻结跨仓合同，交付票分别为
+`Uni-Lab-OS/Uni-Lab-OS#13` 和 `Uni-Lab-OS/uni-lab-fe#18`。
 
 当前迁移快照必须按功能而不是旧 phase 编号解读：
 
@@ -76,6 +78,12 @@ MaterialSource 及其分配边界继续由 `Uni-Lab-OS/Uni-Lab-Core#140～#146` 
   参数表单继续复用。浏览器使用 `GET /api/v1/devices` 消费 Edge-owned
   `device-catalog/v1`，不再读取 `/api/v1/workflow-node-templates`；该投影不等于 A1
   持久 typed Workflow Catalog，也不提供 D1 单节点执行；
+- **设备 Action 锁检测与手动解锁已有受测候选**：OS `feat/device-manual-unlock`
+  将完整 `currentJobId` holder 投影到 `GET /api/v1/devices`，并提供 holder CAS 保护的
+  `POST /api/v1/devices/{device_id}/actions/{action_name}/commands`；FE
+  `integration/fe-os-migration` 复用现有设备列表、动作目录和参数面板，增加锁标识、
+  holder 展示与必须确认物理安全的解锁对话框。能力仅在 local-python Edge 启用，
+  holder 缺失时 fail closed，成功后必须重新 GET 目录，不做乐观解锁；
 - **Authoring 文件导入已迁移**：UI1E 不恢复旧 `WorkflowToolbar` 或文件
   authority，而是在 `PersistentWorkflowAuthoringPanel` 恢复“导入 Python/导入
   JSON”。Python 继续走 Draft PUT 双 CAS；同 Workflow 的
@@ -110,6 +118,7 @@ MaterialSource 及其分配边界继续由 `Uni-Lab-OS/Uni-Lab-Core#140～#146` 
 | Debugger 起点/断点配置投影 | OS-only debug launch/projection 仍由 `deepmodeling/Uni-Lab-OS#299` 实现；普通 Task Interface 不接受调试配置 | UI1B 在最新活跃 FE 基线上直接复用原 `WorkflowNodeCard` 按钮、DAG overlay、右键/双击与 CodeMirror marker；配置只进入当前前端会话预览，不调用旧 Run/WS 接口 | 真实 OS Playwright 已覆盖设置、取消、DAG/gutter 同步和普通 Task 请求隔离；多起点、durable Hold 和真实 debug launch 仍归 FE #1 / Core #6/#137 |
 | Workflow-scoped Authoring aggregate/Draft/Apply 与文件导入 | OS 02G1 已完成本地 authority 回环；UI1E 复用现有 aggregate、generate-python、Draft/Apply Interface，OS 无新增路由 | FE-D117 完成单写权；FE `95c072077b193cafaeb3c6d4977c10f22af911fb` 在原持久面板恢复 Python/JSON 导入，复用原文件 hook、CodeMirror、DAG 和完整 diff；不支持的 Canonical/Cloud/跨 Workflow JSON fail closed | 真实 OS 导入 E2E 3/3，其中 Python 与 JSON 均完成 Candidate→Apply，跨 Workflow 无写入；9 张截图、三份网络账本、console/page error 0；原 Authoring/runtime 真实 OS 回归 7/7 |
 | live 设备/动作目录、A1 Catalog 与单节点执行 | OS local bridge 已公开 Edge-owned `GET /api/v1/devices`（`device-catalog/v1`）供现有设备目录读取；当前 Edge/OS health 为 `GET /api/v1/health`；不恢复旧 `/workflow-node-templates` 或 local bridge 单节点 Run。持久 typed Workflow Catalog/执行仍分别归 A1/D1 | FE `95c072077b193cafaeb3c6d4977c10f22af911fb` 在未改写原 UI 的前提下把 `LaboratoryService` 切到 `/api/v1/devices`，保留 `id/deviceKey/namespace/name/online/actions/typeName/busy/schema`；health 对齐 `/api/v1/health`，旧 `/health` 和 node-template route 为 0。设备动作仍只预览参数，执行按钮 fail closed 并移交 WorkflowTask | 基于 OS `ba16ebd23695e6beb52eee1472cb34b055587804` 的 Edge `18002`→schedule WS `8890`→bridge `8014`→真实浏览器 E2E 通过 1/1，6 张截图、0 个旧 route、0 个 console/page error；这是 live directory 读取 gate，不接受 A1 fingerprint/editor 或 D1 result commit |
+| 设备 Action 锁检测与手动解锁 | OS 候选把每个 `device+action` 的完整 holder 作为 `currentJobId` 加入 `device-catalog/v1`；公共 command 使用 `expectedJobId` 做 compare-and-release，holder 变化返回 `409 DEVICE_LOCK_CHANGED`，已解锁幂等返回 `already_unlocked`；先原子隔离 active/queue，再请求 driver cancel，迟到终态不得覆盖 `cancelled`；同时补齐 FE 所需 `GET /api/v1/health`，保留 `/health` | FE 候选只扩展现有设备 UI/service：列表、设备头、指标和动作卡片显示锁；仅 local-python capability 且 holder 完整时显示“手动解锁”；对话框显示完整 Action/holder 并要求物理安全确认；请求中防重复，成功后重新 `GET /api/v1/devices`，不本地改写为空闲 | Core #160 / OS #13 / FE #18。真实 Edge→bridge→浏览器 E2E 通过 1/1：先以 Workflow runtime 创建真实 holder，再提交精确 `force_unlock` body，最后目录为 `busy=false/currentJobId=null`；9 张截图、console/page error 0。候选分支待 review/合并，不等于 `stage:accepted` |
 | DAG readiness/admission 与 device result | R2/D1 未开始；R1B 明确不 dispatch | 只能展示 durable projection，不得自行推进状态 | 必须等待 R2/D1，不能用 R1B kernel 冒充可执行闭环 |
 
 本工作树的 `decisions.md` 目前只包含较早账本；D-102～D-116 在完成
