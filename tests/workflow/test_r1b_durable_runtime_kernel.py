@@ -5,9 +5,12 @@ from __future__ import annotations
 import asyncio
 import importlib
 import json
+import multiprocessing
 import sqlite3
+import threading
 import time
 from collections.abc import Iterator
+from contextlib import contextmanager
 from datetime import datetime
 from pathlib import Path
 from typing import Any
@@ -18,8 +21,10 @@ from fastapi import FastAPI
 from fastapi.testclient import TestClient
 
 from unilabos.app.workflow_api import create_workflow_app
+from unilabos.workflow import composition
 from unilabos.workflow.composition import (
     compose_workflow_runtime,
+    get_workflow_service,
     reset_workflow_service_for_test,
 )
 from unilabos.workflow.models import WorkflowNodeWrite
@@ -481,6 +486,53 @@ def test_cancel_updates_many_jobs_atomically_with_one_runtime_event(
     assert _journal(store, task["uuid"])[-1]["kind"] == "command_consumed"
 
 
+def test_running_cancel_without_active_job_journals_two_legal_task_transitions(
+    service: WorkflowService,
+    store: WorkflowStore,
+) -> None:
+    coordinator = _coordinator(store)
+    task, jobs = _create_task(service, node_count=1)
+    coordinator.start_task(task["uuid"])
+    _create_command(service, task["uuid"], "cancel", "cancel-finished-inline")
+
+    coordinator.consume_next_command(task["uuid"])
+
+    updated = service.get_workflow_task(task["uuid"])
+    assert updated["status"] == "canceled"
+    assert updated["control_status"] == "paused"
+    assert service.get_workflow_node_job(jobs[0]["uuid"])["status"] == "canceled"
+    task_transitions = [
+        (row["from_status"], row["to_status"])
+        for row in _journal(store, task["uuid"])
+        if row["kind"] == "task_transition"
+    ]
+    assert task_transitions[-2:] == [
+        ("running", "canceling"),
+        ("canceling", "canceled"),
+    ]
+
+
+def test_running_cancel_with_active_job_pauses_control_and_stays_canceling(
+    service: WorkflowService,
+    store: WorkflowStore,
+) -> None:
+    coordinator = _coordinator(store)
+    task, jobs = _create_task(service, node_count=1)
+    coordinator.start_task(task["uuid"])
+    coordinator.transition_job(jobs[0]["uuid"], "dispatched")
+    _create_command(service, task["uuid"], "cancel", "cancel-active")
+
+    coordinator.consume_next_command(task["uuid"])
+
+    updated = service.get_workflow_task(task["uuid"])
+    assert updated["status"] == "canceling"
+    assert updated["control_status"] == "paused"
+    assert updated["cleanup_status"] == "canceling"
+    assert service.get_workflow_node_job(jobs[0]["uuid"])["status"] == (
+        "cancel_requested"
+    )
+
+
 def test_step_command_creates_one_durable_available_permit_without_job_mutation(
     service: WorkflowService,
     store: WorkflowStore,
@@ -651,6 +703,54 @@ def test_feedback_http_uses_backend_error_envelope(
     assert response.json()["error"]["code"] == expected_code
 
 
+@pytest.mark.parametrize(
+    "query",
+    [
+        pytest.param("?after_sequence=1.0", id="decimal-cursor"),
+        pytest.param("?limit=1.0", id="decimal-limit"),
+        pytest.param(
+            f"?after_sequence={1 << 63}",
+            id="cursor-overflow",
+        ),
+    ],
+)
+def test_feedback_http_rejects_non_backend_integer_spellings_before_job_lookup(
+    client: TestClient,
+    query: str,
+) -> None:
+    response = client.get(f"/api/v1/workflow-node-jobs/{uuid4()}/feedback{query}")
+
+    assert response.status_code == 400
+    assert response.json()["error"]["code"] == "invalid_input"
+
+
+def test_feedback_http_empty_trimmed_query_uses_defaults_and_accepts_boundaries(
+    client: TestClient,
+    service: WorkflowService,
+) -> None:
+    _task, jobs = _create_task(service, node_count=1)
+    route = f"/api/v1/workflow-node-jobs/{jobs[0]['uuid']}/feedback"
+
+    empty = client.get(f"{route}?after_sequence=&limit=")
+    trimmed = client.get(f"{route}?after_sequence=%20&limit=%20")
+    boundary = client.get(
+        route,
+        params={"after_sequence": (1 << 63) - 1, "limit": 500},
+    )
+
+    assert empty.status_code == trimmed.status_code == boundary.status_code == 200
+    assert (
+        empty.json()["data"]
+        == trimmed.json()["data"]
+        == {
+            "items": [],
+            "next_cursor": 0,
+            "has_more": False,
+        }
+    )
+    assert boundary.json()["data"]["next_cursor"] == (1 << 63) - 1
+
+
 def test_unknown_open_and_last_resolution_restore_saved_control_state(
     service: WorkflowService,
     store: WorkflowStore,
@@ -686,6 +786,28 @@ def test_unknown_open_and_last_resolution_restore_saved_control_state(
     assert service.get_workflow_node_job(jobs[0]["uuid"])["status"] == "running"
     assert service.get_workflow_node_job(jobs[1]["uuid"])["status"] == "failed"
     assert store.get_task_command(pause["uuid"])["status"] == "succeeded"
+
+
+def test_partial_reconcile_points_attention_at_a_remaining_unknown_job(
+    service: WorkflowService,
+    store: WorkflowStore,
+) -> None:
+    coordinator = _coordinator(store)
+    task, jobs = _create_task(service, node_count=2)
+    coordinator.start_task(task["uuid"])
+    for job, reason in zip(jobs, ("reason-a", "reason-b"), strict=True):
+        coordinator.transition_job(job["uuid"], "dispatched")
+        coordinator.mark_job_unknown(job["uuid"], reason)
+
+    coordinator.resolve_job_uncertainty(
+        jobs[1]["uuid"],
+        "failed",
+        reason="operator resolved B first",
+    )
+
+    waiting = service.get_workflow_task(task["uuid"])
+    assert waiting["control_status"] == "waiting_reconciliation"
+    assert waiting["attention_reason"] == "reason-a"
 
 
 def test_cancel_with_unknown_job_keeps_attention_until_explicit_reconcile(
@@ -819,6 +941,74 @@ def test_state_journal_and_exact_runtime_outbox_commit_or_rollback_together(
     assert service.get_workflow_task(task["uuid"]) == before
     assert _journal(store, task["uuid"]) == journal
     assert _runtime_events(service) == events
+
+
+def test_runtime_timestamps_follow_transaction_linearization_order(
+    service: WorkflowService,
+    store: WorkflowStore,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    module = _runtime_module()
+    coordinator = module.WorkflowRuntimeCoordinator(store)
+    task, jobs = _create_task(service, node_count=1)
+    coordinator.start_task(task["uuid"])
+    job_uuid = jobs[0]["uuid"]
+    first_transition_waiting = threading.Event()
+    allow_first_transition = threading.Event()
+    original_transaction = store.transaction
+    allocated: list[str] = []
+    allocation_lock = threading.Lock()
+
+    def ordered_now() -> str:
+        with allocation_lock:
+            value = f"2026-08-01T00:00:0{len(allocated) + 1}Z"
+            allocated.append(value)
+            return value
+
+    @contextmanager
+    def gated_transaction() -> Iterator[sqlite3.Connection]:
+        if threading.current_thread().name == "delayed-running-transition":
+            first_transition_waiting.set()
+            assert allow_first_transition.wait(timeout=2)
+        with original_transaction() as connection:
+            yield connection
+
+    monkeypatch.setattr(module, "utc_now", ordered_now)
+    monkeypatch.setattr(store, "transaction", gated_transaction)
+    thread_errors: list[BaseException] = []
+
+    def transition_to_running() -> None:
+        try:
+            coordinator.transition_job(job_uuid, "running")
+        except BaseException as error:  # noqa: BLE001 - 回传线程断言证据
+            thread_errors.append(error)
+
+    delayed = threading.Thread(
+        target=transition_to_running,
+        name="delayed-running-transition",
+    )
+    delayed.start()
+    assert first_transition_waiting.wait(timeout=2)
+    coordinator.transition_job(job_uuid, "dispatched")
+    allow_first_transition.set()
+    delayed.join(timeout=2)
+
+    assert not delayed.is_alive()
+    assert thread_errors == []
+    transitions = [
+        row for row in _journal(store, task["uuid"]) if row["kind"] == "job_transition"
+    ][-2:]
+    assert [(row["from_status"], row["to_status"]) for row in transitions] == [
+        ("pending", "dispatched"),
+        ("dispatched", "running"),
+    ]
+    assert [row["create_time"] for row in transitions] == sorted(
+        row["create_time"] for row in transitions
+    )
+    assert (
+        service.get_workflow_node_job(job_uuid)["update_time"]
+        == transitions[-1]["create_time"]
+    )
 
 
 async def _read_sse_until_runtime_event(
@@ -1040,5 +1230,90 @@ def test_production_composition_recovers_before_ready_and_keeps_single_worker(
             "execution_unknown"
         )
         assert len(_runtime_events(replacement, after_id=cursor)) == 1
+    finally:
+        reset_workflow_service_for_test()
+
+
+def _try_compose_in_second_process(working_dir: str, outcome: Any) -> None:
+    try:
+        compose_workflow_runtime(working_dir)
+    except RuntimeError as error:
+        outcome.put(("rejected", str(error)))
+    except Exception as error:  # noqa: BLE001 - 子进程错误必须返回父进程
+        outcome.put(("unexpected_error", type(error).__name__, str(error)))
+    else:
+        outcome.put(("opened", ""))
+    finally:
+        reset_workflow_service_for_test()
+
+
+def _second_process_result(working_dir: Path) -> tuple[str, ...]:
+    context = multiprocessing.get_context("spawn")
+    outcome = context.Queue()
+    process = context.Process(
+        target=_try_compose_in_second_process,
+        args=(str(working_dir), outcome),
+    )
+    process.start()
+    process.join(timeout=8)
+    if process.is_alive():
+        process.terminate()
+        process.join(timeout=5)
+        pytest.fail("第二个 Workflow runtime authority 未在限定时间内退出")
+    result = outcome.get(timeout=2)
+    outcome.close()
+    outcome.join_thread()
+    return result
+
+
+def test_runtime_worker_stop_failure_retains_service_store_and_workspace_lease(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    working_dir = tmp_path / "unilabos_data"
+
+    class FailFirstStopWorker:
+        instances: list[FailFirstStopWorker] = []
+
+        def __init__(self, coordinator: Any) -> None:
+            del coordinator
+            self.stop_calls = 0
+            self.started = False
+            self.__class__.instances.append(self)
+
+        def start(self) -> None:
+            self.started = True
+
+        def stop(self) -> None:
+            self.stop_calls += 1
+
+        def join(self, timeout: float | None = None) -> None:
+            del timeout
+
+        def is_alive(self) -> bool:
+            return (
+                self.started
+                and self is self.__class__.instances[0]
+                and self.stop_calls < 2
+            )
+
+    reset_workflow_service_for_test()
+    monkeypatch.setattr(composition, "WorkflowRuntimeWorker", FailFirstStopWorker)
+    service = compose_workflow_runtime(working_dir)
+
+    with pytest.raises(RuntimeError, match="runtime worker 未能停止"):
+        reset_workflow_service_for_test()
+
+    assert get_workflow_service() is service
+    assert service.list_workflows()["items"] == []
+    assert _second_process_result(working_dir) == (
+        "rejected",
+        "当前工作区已由另一个 OS Workflow Authority 占用",
+    )
+
+    reset_workflow_service_for_test()
+    replacement = compose_workflow_runtime(working_dir)
+    try:
+        assert replacement is not service
     finally:
         reset_workflow_service_for_test()

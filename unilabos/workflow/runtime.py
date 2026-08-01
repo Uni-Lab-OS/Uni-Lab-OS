@@ -222,8 +222,8 @@ class WorkflowRuntimeCoordinator:
         *,
         error_info: Optional[list[Any]] = None,
     ) -> Dict[str, Any]:
-        now = utc_now()
         with self._store.transaction() as connection:
+            now = utc_now()
             row = self._task_row(connection, task_uuid)
             source = row["status"]
             self._require_transition(TASK_TRANSITIONS, source, status)
@@ -271,8 +271,8 @@ class WorkflowRuntimeCoordinator:
                 job_uuid,
                 reason or "execution outcome unknown",
             )
-        now = utc_now()
         with self._store.transaction() as connection:
+            now = utc_now()
             row = self._job_row(connection, job_uuid)
             source = row["status"]
             if source == "execution_unknown":
@@ -327,8 +327,8 @@ class WorkflowRuntimeCoordinator:
         reason = reason.strip() if isinstance(reason, str) else ""
         if not reason:
             raise StoreConflict("execution uncertainty requires a reason")
-        now = utc_now()
         with self._store.transaction() as connection:
+            now = utc_now()
             job = self._job_row(connection, job_uuid)
             source = job["status"]
             self._require_transition(JOB_TRANSITIONS, source, "execution_unknown")
@@ -386,8 +386,8 @@ class WorkflowRuntimeCoordinator:
         reason = reason.strip() if isinstance(reason, str) else ""
         if not reason:
             raise StoreConflict("reconciliation requires a reason")
-        now = utc_now()
         with self._store.transaction() as connection:
+            now = utc_now()
             job = self._job_row(connection, job_uuid)
             source = job["status"]
             self._require_transition(JOB_TRANSITIONS, source, status)
@@ -466,6 +466,26 @@ class WorkflowRuntimeCoordinator:
                         task_uuid,
                     ),
                 )
+            else:
+                remaining = connection.execute(
+                    """
+                    SELECT uncertainty_reason FROM workflow_node_job
+                    WHERE workflow_task_uuid = ? AND deleted_at IS NULL
+                      AND status = 'execution_unknown'
+                    ORDER BY topological_index, create_time, uuid
+                    LIMIT 1
+                    """,
+                    (task_uuid,),
+                ).fetchone()
+                assert remaining is not None
+                connection.execute(
+                    """
+                    UPDATE workflow_task
+                    SET attention_reason = ?, update_time = ?
+                    WHERE uuid = ?
+                    """,
+                    (remaining["uncertainty_reason"], now, task_uuid),
+                )
             self._append_journal(
                 connection,
                 task_uuid=task_uuid,
@@ -480,8 +500,8 @@ class WorkflowRuntimeCoordinator:
             return self._project_job(self._job_row(connection, job_uuid))
 
     def consume_next_command(self, task_uuid: str) -> Optional[Dict[str, Any]]:
-        now = utc_now()
         with self._store.transaction() as connection:
+            now = utc_now()
             task = self._task_row(connection, task_uuid)
             command = connection.execute(
                 """
@@ -708,10 +728,32 @@ class WorkflowRuntimeCoordinator:
         else:
             next_status = "canceled"
             cleanup = "settled"
+        journal_source = task["status"]
+        if journal_source == "running":
+            self._append_journal(
+                connection,
+                task_uuid=task_uuid,
+                kind="task_transition",
+                from_status="running",
+                to_status="canceling",
+                now=now,
+            )
+            journal_source = "canceling"
         connection.execute(
             """
             UPDATE workflow_task
-            SET status = ?, cleanup_status = ?, update_time = ?,
+            SET status = ?, cleanup_status = ?,
+                control_status = CASE
+                    WHEN control_status = 'waiting_reconciliation'
+                    THEN control_status
+                    ELSE 'paused'
+                END,
+                reconciliation_resume_control_status = CASE
+                    WHEN control_status = 'waiting_reconciliation'
+                    THEN 'paused'
+                    ELSE reconciliation_resume_control_status
+                END,
+                update_time = ?,
                 finished_at = CASE
                     WHEN ? = 'canceled' THEN COALESCE(finished_at, ?)
                     ELSE finished_at
@@ -720,12 +762,12 @@ class WorkflowRuntimeCoordinator:
             """,
             (next_status, cleanup, now, next_status, now, task_uuid),
         )
-        if task["status"] != next_status:
+        if journal_source != next_status:
             self._append_journal(
                 connection,
                 task_uuid=task_uuid,
                 kind="task_transition",
-                from_status=task["status"],
+                from_status=journal_source,
                 to_status=next_status,
                 now=now,
             )
@@ -777,8 +819,8 @@ class WorkflowRuntimeCoordinator:
         if not normalized:
             raise StoreConflict("feedback batch must not be empty")
         normalized.sort(key=lambda item: (item["sequence"], item["idempotency_key"]))
-        now = utc_now()
         with self._store.transaction() as connection:
+            now = utc_now()
             job = self._job_row(connection, job_uuid)
             if job["status"] in _JOB_TERMINAL:
                 raise StoreConflict("terminal job cannot accept feedback")
@@ -878,8 +920,8 @@ class WorkflowRuntimeCoordinator:
         )
 
     def recover_startup(self) -> Dict[str, int]:
-        now = utc_now()
         with self._store.transaction() as connection:
+            now = utc_now()
             jobs = connection.execute(
                 """
                 SELECT * FROM workflow_node_job
