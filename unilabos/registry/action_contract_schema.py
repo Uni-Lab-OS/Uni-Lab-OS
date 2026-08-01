@@ -297,7 +297,13 @@ def _validate_legacy_handles(
                 "action_handle_contract_conflict",
                 f"/actions/{action_name}/handles/{index}",
             )
-        actual[(io_type, key)] = (
+        identity = (io_type, key)
+        if identity in actual:
+            _compatibility_fail(
+                "action_handle_contract_conflict",
+                f"/actions/{action_name}/handles/{index}",
+            )
+        actual[identity] = (
             str(values.get("data_type") or ""),
             str(values.get("data_source") or default_source).lower(),
             str(values.get("data_key") or key),

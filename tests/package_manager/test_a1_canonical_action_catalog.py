@@ -63,7 +63,13 @@ def plate_96():
     return None
 """.strip(),
     )
-    if legacy_handles not in {"none", "equivalent", "conflict"}:
+    if legacy_handles not in {
+        "none",
+        "equivalent",
+        "conflict",
+        "duplicate_equivalent",
+        "duplicate_conflict",
+    }:
         raise ValueError("unknown legacy_handles fixture")
     if legacy_default not in {"none", "equivalent", "conflict"}:
         raise ValueError("unknown legacy_default fixture")
@@ -88,6 +94,14 @@ def plate_96():
             f'data_source="goal", data_key="{data_key}"),'
             for key, value_type, data_key in inputs
         ]
+        if legacy_handles == "duplicate_equivalent":
+            rendered.insert(0, rendered[0])
+        elif legacy_handles == "duplicate_conflict":
+            rendered.insert(
+                0,
+                'ActionInputHandle(key="sample", data_type="string", '
+                'label="sample", data_source="goal", data_key="wrong_sample"),',
+            )
         rendered.extend(
             "ActionOutputHandle("
             f'key="{key}", data_type="{value_type}", label="{key}", '
@@ -495,10 +509,15 @@ def test_legacy_scanner_uses_the_same_parser_and_does_not_type_auto_actions(
     assert "schema" not in class_meta["auto_methods"]["health"]
 
 
+@pytest.mark.parametrize(
+    "legacy_handles",
+    ["conflict", "duplicate_equivalent", "duplicate_conflict"],
+)
 def test_legacy_handle_conflict_fails_the_whole_catalog_compile(
     tmp_path: Path,
+    legacy_handles: str,
 ) -> None:
-    _write_package(tmp_path, legacy_handles="conflict")
+    _write_package(tmp_path, legacy_handles=legacy_handles)
 
     with pytest.raises(PackageCompileError) as caught:
         compile_package_source(WorkspaceSource(tmp_path))
@@ -568,10 +587,15 @@ def test_conflicting_legacy_goal_default_fails_the_whole_catalog_compile(
     )
 
 
+@pytest.mark.parametrize(
+    "legacy_handles",
+    ["conflict", "duplicate_equivalent", "duplicate_conflict"],
+)
 def test_legacy_registry_diagnostic_blocks_the_complete_template_projection(
     tmp_path: Path,
+    legacy_handles: str,
 ) -> None:
-    _write_package(tmp_path, legacy_handles="conflict")
+    _write_package(tmp_path, legacy_handles=legacy_handles)
     scanner = importlib.import_module("unilabos.registry.ast_registry_scanner")
     from concurrent.futures import ThreadPoolExecutor
 
