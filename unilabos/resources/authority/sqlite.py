@@ -13,6 +13,8 @@ from typing import Any, Iterator, Protocol
 from .models import (
     MaterialAuthorityUnavailable,
     MaterialConflict,
+    MaterialInvalidInput,
+    MaterialNotFound,
     MaterialRecord,
     RuntimeAuthorityUnitOfWork,
     SiteRecord,
@@ -433,6 +435,37 @@ class SQLiteMaterialAdapter:
     ) -> SiteRecord:
         try:
             with self._with_uow(uow) as active_uow:
+                owner = active_uow.execute(
+                    """
+                    SELECT resource_template_uuid
+                    FROM material
+                    WHERE uuid = ? AND deleted_at IS NULL
+                    """,
+                    (material_uuid,),
+                ).fetchone()
+                if owner is None:
+                    raise MaterialNotFound("site owner material not found")
+
+                if occupied_material_uuid is not None:
+                    occupant = active_uow.execute(
+                        """
+                        SELECT resource_template_uuid
+                        FROM material
+                        WHERE uuid = ? AND deleted_at IS NULL
+                        """,
+                        (occupied_material_uuid,),
+                    ).fetchone()
+                    if occupant is None:
+                        raise MaterialNotFound("site occupant material not found")
+                    if (
+                        allowed_resource_template_uuids
+                        and occupant["resource_template_uuid"]
+                        not in allowed_resource_template_uuids
+                    ):
+                        raise MaterialInvalidInput(
+                            "occupied material template is not allowed by site"
+                        )
+
                 active_uow.execute(
                     """
                     INSERT INTO site(
