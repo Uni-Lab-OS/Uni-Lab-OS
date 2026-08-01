@@ -12,8 +12,13 @@ import sqlite3
 import threading
 import time
 import uuid
+from collections.abc import Callable, Iterator, Mapping
 from contextlib import contextmanager
-from typing import Any, Callable, Dict, Iterator, List, Optional
+from datetime import datetime, timezone
+from pathlib import Path
+from types import MappingProxyType
+from typing import Any
+from uuid import UUID
 
 from unilabos.app.scheduler.inventory.domain import (
     ACTIVE_INSTANCE_STATES,
@@ -22,9 +27,15 @@ from unilabos.app.scheduler.inventory.domain import (
     InstanceState,
     InsufficientStock,
     InvariantViolation,
+    MaterialAuthorityUnavailable,
+    MaterialConflict,
+    MaterialInvalidInput,
+    MaterialNotFound,
+    MaterialRecord,
     MaterialRequirement,
     NotFound,
     ReservationState,
+    ResourceTemplateIdentity,
     VersionConflict,
     check_instance_transition,
     check_lot_invariants,
@@ -33,6 +44,70 @@ from unilabos.app.scheduler.inventory.domain import (
 from unilabos.app.scheduler.inventory.store import InventoryStore
 
 _ACTIVE_STATES_TUPLE = tuple(s.value for s in ACTIVE_INSTANCE_STATES)
+
+
+def _canonical_uuid(value: str, field: str) -> str:
+    if not isinstance(value, str):
+        raise MaterialInvalidInput(f"{field} must be a UUID string")
+    try:
+        parsed = UUID(value)
+    except (ValueError, AttributeError) as exc:
+        raise MaterialInvalidInput(f"{field} must be a valid UUID") from exc
+    if parsed.int == 0:
+        raise MaterialInvalidInput(f"{field} must not be nil")
+    return str(parsed)
+
+
+def _json_object(value: Mapping[str, Any] | None, field: str) -> dict[str, Any]:
+    if value is None:
+        return {}
+    if not isinstance(value, Mapping):
+        raise MaterialInvalidInput(f"{field} must be a JSON object")
+    try:
+        encoded = json.dumps(
+            dict(value),
+            allow_nan=False,
+            ensure_ascii=False,
+            separators=(",", ":"),
+            sort_keys=True,
+        )
+        decoded = json.loads(encoded)
+    except (TypeError, ValueError) as exc:
+        raise MaterialInvalidInput(f"{field} must be a JSON object") from exc
+    return decoded
+
+
+def _stored_json_object(value: str) -> dict[str, Any]:
+    try:
+        decoded = json.loads(value)
+    except (TypeError, ValueError) as exc:
+        raise MaterialAuthorityUnavailable(
+            "material JSON field is not an object"
+        ) from exc
+    if not isinstance(decoded, dict):
+        raise MaterialAuthorityUnavailable("material JSON field is not an object")
+    return decoded
+
+
+def _material_record(row: Mapping[str, Any]) -> MaterialRecord:
+    return MaterialRecord(
+        uuid=row["uuid"],
+        create_time=row["create_time"],
+        update_time=row["update_time"],
+        deleted_at=row["deleted_at"],
+        description=row["description"],
+        meta_data=_stored_json_object(row["meta_data"]),
+        resource_template_uuid=row["resource_template_uuid"],
+        parent_uuid=row["parent_uuid"],
+        klass=row["class"],
+        barcode=row["barcode"],
+        name=row["name"],
+        config=_stored_json_object(row["config"]),
+        data=_stored_json_object(row["data"]),
+        disposition=row["disposition"],
+        material_kind=row["material_kind"],
+        version=row["version"],
+    )
 
 
 class InventoryService:
@@ -45,6 +120,7 @@ class InventoryService:
         lab_id: str = "edge-lab",
         time_fn: Callable[[], float] = time.time,
         monitor: Any = None,
+        resource_templates: Mapping[str, ResourceTemplateIdentity] | None = None,
     ):
         self.store = store
         self.edge_id = edge_id
@@ -54,14 +130,73 @@ class InventoryService:
         self._monitor = monitor
         # 事务内暂存的监控事件（提交成功才发布，回滚即丢弃）
         self._tx_local = threading.local()
+        canonical_templates: dict[str, ResourceTemplateIdentity] = {}
+        for key, identity in (resource_templates or {}).items():
+            if not isinstance(identity, ResourceTemplateIdentity):
+                raise MaterialInvalidInput(
+                    "resource_templates must contain ResourceTemplateIdentity values"
+                )
+            canonical_key = _canonical_uuid(key, "resource_template key")
+            canonical_identity_uuid = _canonical_uuid(
+                identity.uuid,
+                "resource_template identity uuid",
+            )
+            if canonical_key != canonical_identity_uuid:
+                raise MaterialInvalidInput(
+                    "resource_template key must match identity uuid"
+                )
+            material_class = identity.material_class.strip()
+            if not material_class:
+                raise MaterialInvalidInput("resource_template class must not be blank")
+            canonical_templates[canonical_key] = ResourceTemplateIdentity(
+                uuid=canonical_identity_uuid,
+                material_class=material_class,
+            )
+        self._resource_templates = MappingProxyType(canonical_templates)
+
+    @classmethod
+    def open(
+        cls,
+        *,
+        working_dir: str | Path,
+        resource_templates: Mapping[str, ResourceTemplateIdentity],
+        edge_id: str = "edge-default",
+        lab_id: str = "edge-lab",
+        time_fn: Callable[[], float] = time.time,
+        monitor: Any = None,
+    ) -> InventoryService:
+        """Open the one ``inventory.db`` owned by a workspace."""
+
+        resolved_working_dir = Path(working_dir).resolve()
+        resolved_working_dir.mkdir(parents=True, exist_ok=True)
+        return cls(
+            InventoryStore(str(resolved_working_dir / "inventory.db")),
+            edge_id=edge_id,
+            lab_id=lab_id,
+            time_fn=time_fn,
+            monitor=monitor,
+            resource_templates=resource_templates,
+        )
+
+    def close(self) -> None:
+        """Close the InventoryService-owned durable store."""
+
+        self.store.close()
 
     def _now_ms(self) -> int:
         return int(self._time_fn() * 1000)
 
+    def _now_iso(self) -> str:
+        return (
+            datetime.fromtimestamp(self._time_fn(), timezone.utc)
+            .isoformat()
+            .replace("+00:00", "Z")
+        )
+
     @contextmanager
     def _tx(self) -> Iterator[sqlite3.Connection]:
         """业务事务 + 监控事件缓冲：commit 成功后才把 material 事件发到总线."""
-        events: List[Dict[str, Any]] = []
+        events: list[dict[str, Any]] = []
         self._tx_local.events = events
         store = self.store
         try:
@@ -74,7 +209,7 @@ class InventoryService:
             for data in events:
                 try:
                     self._monitor.emit("material", data.pop("event_type"), data)
-                except Exception:  # noqa: BLE001 - 监控故障不影响业务
+                except Exception:  # noqa: BLE001, S110 - 监控故障不影响业务
                     pass
 
     # ------------------------------------------------------------------
@@ -89,20 +224,35 @@ class InventoryService:
         aggregate_id: str,
         aggregate_version: int,
         event_type: str,
-        payload: Dict[str, Any],
+        payload: dict[str, Any],
         causation_id: str = "",
         actor: str = "",
         reason: str = "",
     ) -> None:
         """同事务写 ledger + outbox."""
         InventoryStore.tx_insert_ledger(
-            conn, now_ms, event_type, aggregate_type, aggregate_id, payload,
-            actor=actor, reason=reason, causation_id=causation_id,
+            conn,
+            now_ms,
+            event_type,
+            aggregate_type,
+            aggregate_id,
+            payload,
+            actor=actor,
+            reason=reason,
+            causation_id=causation_id,
         )
         InventoryStore.tx_insert_outbox(
-            conn, new_event_id(now_ms), self.edge_id, self.lab_id,
-            aggregate_type, aggregate_id, aggregate_version, event_type,
-            now_ms, causation_id, payload,
+            conn,
+            new_event_id(now_ms),
+            self.edge_id,
+            self.lab_id,
+            aggregate_type,
+            aggregate_id,
+            aggregate_version,
+            event_type,
+            now_ms,
+            causation_id,
+            payload,
         )
         # 事务缓冲监控事件：commit 成功后由 _tx 发布到 material 通道
         buffered = getattr(self._tx_local, "events", None)
@@ -120,15 +270,19 @@ class InventoryService:
             )
 
     @staticmethod
-    def _tx_get_lot(conn: sqlite3.Connection, lot_id: str) -> Dict[str, Any]:
-        row = conn.execute("SELECT * FROM inventory_lot WHERE lot_id = ?", (lot_id,)).fetchone()
+    def _tx_get_lot(conn: sqlite3.Connection, lot_id: str) -> dict[str, Any]:
+        row = conn.execute(
+            "SELECT * FROM inventory_lot WHERE lot_id = ?", (lot_id,)
+        ).fetchone()
         if row is None:
             raise NotFound(f"lot {lot_id} not found")
         return dict(row)
 
     @staticmethod
-    def _tx_get_instance(conn: sqlite3.Connection, edge_uuid: str) -> Dict[str, Any]:
-        row = conn.execute("SELECT * FROM material_instance WHERE edge_uuid = ?", (edge_uuid,)).fetchone()
+    def _tx_get_instance(conn: sqlite3.Connection, edge_uuid: str) -> dict[str, Any]:
+        row = conn.execute(
+            "SELECT * FROM material_instance WHERE edge_uuid = ?", (edge_uuid,)
+        ).fetchone()
         if row is None:
             raise NotFound(f"instance {edge_uuid} not found")
         return dict(row)
@@ -136,16 +290,18 @@ class InventoryService:
     def _tx_update_lot_quantities(
         self,
         conn: sqlite3.Connection,
-        lot: Dict[str, Any],
+        lot: dict[str, Any],
         d_total: float = 0.0,
         d_available: float = 0.0,
         d_reserved: float = 0.0,
-    ) -> Dict[str, Any]:
+    ) -> dict[str, Any]:
         total = lot["quantity_total"] + d_total
         available = lot["quantity_available"] + d_available
         reserved = lot["quantity_reserved"] + d_reserved
         # 浮点残余归零
-        total, available, reserved = (0.0 if abs(v) < 1e-9 else v for v in (total, available, reserved))
+        total, available, reserved = (
+            0.0 if abs(v) < 1e-9 else v for v in (total, available, reserved)
+        )
         check_lot_invariants(total, available, reserved)
         new_version = lot["version"] + 1
         conn.execute(
@@ -154,16 +310,20 @@ class InventoryService:
             (total, available, reserved, new_version, lot["lot_id"]),
         )
         lot = dict(lot)
-        lot.update(quantity_total=total, quantity_available=available,
-                   quantity_reserved=reserved, version=new_version)
+        lot.update(
+            quantity_total=total,
+            quantity_available=available,
+            quantity_reserved=reserved,
+            version=new_version,
+        )
         return lot
 
     def _tx_set_instance_status(
         self,
         conn: sqlite3.Connection,
-        instance: Dict[str, Any],
+        instance: dict[str, Any],
         target: InstanceState,
-    ) -> Dict[str, Any]:
+    ) -> dict[str, Any]:
         check_instance_transition(InstanceState(instance["status"]), target)
         new_version = instance["version"] + 1
         conn.execute(
@@ -175,6 +335,109 @@ class InventoryService:
         return instance
 
     # ------------------------------------------------------------------
+    # Material authority
+    # ------------------------------------------------------------------
+
+    def create_material(
+        self,
+        *,
+        material_uuid: str,
+        resource_template_uuid: str,
+        barcode: str,
+        name: str,
+        description: str | None = None,
+        meta_data: Mapping[str, Any] | None = None,
+        config: Mapping[str, Any] | None = None,
+        data: Mapping[str, Any] | None = None,
+    ) -> MaterialRecord:
+        """Create one Backend-aligned business Material."""
+
+        canonical_material_uuid = _canonical_uuid(material_uuid, "material_uuid")
+        canonical_template_uuid = _canonical_uuid(
+            resource_template_uuid,
+            "resource_template_uuid",
+        )
+        template = self._resource_templates.get(canonical_template_uuid)
+        if template is None:
+            raise MaterialInvalidInput("resource_template_uuid is not registered")
+        if not isinstance(barcode, str):
+            raise MaterialInvalidInput("barcode must be a string")
+        if not isinstance(name, str) or not name.strip():
+            raise MaterialInvalidInput("name must be a non-blank string")
+        if description is not None and not isinstance(description, str):
+            raise MaterialInvalidInput("description must be a string or null")
+        normalized_meta_data = _json_object(meta_data, "meta_data")
+        normalized_config = _json_object(config, "config")
+        normalized_data = _json_object(data, "data")
+        now_iso = self._now_iso()
+        now_ms = self._now_ms()
+        try:
+            with self._tx() as conn:
+                conn.execute(
+                    """
+                    INSERT INTO material(
+                        uuid, create_time, update_time, deleted_at,
+                        description, meta_data, resource_template_uuid,
+                        parent_uuid, class, barcode, name, config, data,
+                        disposition, material_kind, version
+                    ) VALUES (?, ?, ?, NULL, ?, ?, ?, NULL, ?, ?, ?, ?, ?,
+                              'active', 'business', 1)
+                    """,
+                    (
+                        canonical_material_uuid,
+                        now_iso,
+                        now_iso,
+                        description,
+                        json.dumps(normalized_meta_data, ensure_ascii=False),
+                        canonical_template_uuid,
+                        template.material_class,
+                        barcode,
+                        name.strip(),
+                        json.dumps(normalized_config, ensure_ascii=False),
+                        json.dumps(normalized_data, ensure_ascii=False),
+                    ),
+                )
+                row = conn.execute(
+                    "SELECT * FROM material WHERE uuid = ? AND deleted_at IS NULL",
+                    (canonical_material_uuid,),
+                ).fetchone()
+                if row is None:
+                    raise MaterialAuthorityUnavailable(
+                        "created material is not readable"
+                    )
+                self._emit(
+                    conn,
+                    now_ms,
+                    "material",
+                    canonical_material_uuid,
+                    1,
+                    "material.created",
+                    {"material": _material_record(dict(row)).to_dict()},
+                )
+        except sqlite3.IntegrityError:
+            raise MaterialConflict(
+                "material identity or barcode already exists"
+            ) from None
+        except sqlite3.Error:
+            raise MaterialAuthorityUnavailable("failed to create material") from None
+        return _material_record(dict(row))
+
+    def get_material(self, material_uuid: str) -> MaterialRecord:
+        """Read one non-deleted Backend-aligned Material."""
+
+        canonical_material_uuid = _canonical_uuid(material_uuid, "material_uuid")
+        try:
+            row = self.store.query_one(
+                "SELECT * FROM material WHERE uuid = ? AND deleted_at IS NULL",
+                (canonical_material_uuid,),
+            )
+        except sqlite3.Error:
+            raise MaterialAuthorityUnavailable("failed to read material") from None
+        if row is None:
+            raise MaterialNotFound(f"material {canonical_material_uuid} not found")
+        return _material_record(row)
+
+    # ------------------------------------------------------------------
     # template / 品类模板
     # ------------------------------------------------------------------
 
@@ -183,11 +446,11 @@ class InventoryService:
         template_id: str,
         name: str = "",
         category: str = "",
-        spec: Optional[Dict[str, Any]] = None,
+        spec: dict[str, Any] | None = None,
         actor: str = "",
         causation_id: str = "",
-        expected_version: Optional[int] = None,
-    ) -> Dict[str, Any]:
+        expected_version: int | None = None,
+    ) -> dict[str, Any]:
         """新建或更新资源模板；更新使用乐观版本并产生 ledger/outbox."""
         template_id = template_id.strip()
         if not template_id:
@@ -226,7 +489,9 @@ class InventoryService:
                         name if name != "" else current["name"],
                         category if category != "" else current["category"],
                         json.dumps(
-                            spec if spec is not None else json.loads(current["spec_json"]),
+                            spec
+                            if spec is not None
+                            else json.loads(current["spec_json"]),
                             ensure_ascii=False,
                         ),
                         version,
@@ -260,8 +525,8 @@ class InventoryService:
         template_id: str,
         actor: str = "",
         causation_id: str = "",
-        expected_version: Optional[int] = None,
-    ) -> Dict[str, Any]:
+        expected_version: int | None = None,
+    ) -> dict[str, Any]:
         """删除无批次/实例引用的模板；有引用时拒绝，避免悬空领域对象."""
         now = self._now_ms()
         with self._tx() as conn:
@@ -273,10 +538,12 @@ class InventoryService:
             current = dict(row)
             self._tx_check_version(current, expected_version)
             lot_count = conn.execute(
-                "SELECT COUNT(*) FROM inventory_lot WHERE template_id = ?", (template_id,)
+                "SELECT COUNT(*) FROM inventory_lot WHERE template_id = ?",
+                (template_id,),
             ).fetchone()[0]
             instance_count = conn.execute(
-                "SELECT COUNT(*) FROM material_instance WHERE template_id = ?", (template_id,)
+                "SELECT COUNT(*) FROM material_instance WHERE template_id = ?",
+                (template_id,),
             ).fetchone()[0]
             if lot_count or instance_count:
                 raise CommandRejected(
@@ -314,34 +581,58 @@ class InventoryService:
         warehouse_zone_id: str = "",
         actor: str = "",
         causation_id: str = "",
-    ) -> Dict[str, Any]:
+    ) -> dict[str, Any]:
         """批次入库（数量层）；lot_id 已存在则追加数量."""
         if quantity <= 0:
             raise InvariantViolation(f"inbound quantity must be > 0, got {quantity}")
         now = self._now_ms()
         lot_id = lot_id or f"lot-{uuid.uuid4().hex[:16]}"
         with self._tx() as conn:
-            row = conn.execute("SELECT * FROM inventory_lot WHERE lot_id = ?", (lot_id,)).fetchone()
+            row = conn.execute(
+                "SELECT * FROM inventory_lot WHERE lot_id = ?", (lot_id,)
+            ).fetchone()
             if row is None:
                 conn.execute(
                     "INSERT INTO inventory_lot(lot_id, template_id, batch_no, unit, quantity_total, "
                     "quantity_available, quantity_reserved, expiry, quarantined, warehouse_zone_id, "
                     "created_at, version) VALUES (?,?,?,?,?,?,0,?,0,?,?,1)",
-                    (lot_id, template_id, batch_no, unit, quantity, quantity, expiry,
-                     warehouse_zone_id, now),
+                    (
+                        lot_id,
+                        template_id,
+                        batch_no,
+                        unit,
+                        quantity,
+                        quantity,
+                        expiry,
+                        warehouse_zone_id,
+                        now,
+                    ),
                 )
                 lot = self._tx_get_lot(conn, lot_id)
                 event_type = "lot.created"
             else:
-                lot = self._tx_update_lot_quantities(conn, dict(row), d_total=quantity, d_available=quantity)
+                lot = self._tx_update_lot_quantities(
+                    conn, dict(row), d_total=quantity, d_available=quantity
+                )
                 event_type = "lot.inbound"
             self._emit(
-                conn, now, "lot", lot_id, lot["version"], event_type,
-                {"template_id": template_id, "quantity": quantity, "unit": unit,
-                 "batch_no": batch_no, "expiry": expiry,
-                 "quantity_total": lot["quantity_total"],
-                 "quantity_available": lot["quantity_available"]},
-                causation_id=causation_id, actor=actor,
+                conn,
+                now,
+                "lot",
+                lot_id,
+                lot["version"],
+                event_type,
+                {
+                    "template_id": template_id,
+                    "quantity": quantity,
+                    "unit": unit,
+                    "batch_no": batch_no,
+                    "expiry": expiry,
+                    "quantity_total": lot["quantity_total"],
+                    "quantity_available": lot["quantity_available"],
+                },
+                causation_id=causation_id,
+                actor=actor,
             )
         return lot
 
@@ -356,7 +647,7 @@ class InventoryService:
         slot_id: str = "",
         actor: str = "",
         causation_id: str = "",
-    ) -> Dict[str, Any]:
+    ) -> dict[str, Any]:
         """实例登记（实体层）.
 
         edge_uuid 由 Edge 生成且永久稳定；cloud UUID 只写入 legacy_cloud_id 映射，
@@ -386,12 +677,20 @@ class InventoryService:
                     (barcode, *_ACTIVE_STATES_TUPLE),
                 ).fetchone()
                 if dup is not None:
-                    raise DuplicateBarcode(f"barcode {barcode} already active on {dup['edge_uuid']}")
+                    raise DuplicateBarcode(
+                        f"barcode {barcode} already active on {dup['edge_uuid']}"
+                    )
             conn.execute(
                 "INSERT INTO material_instance(edge_uuid, legacy_cloud_id, lot_id, template_id, "
                 "barcode, status, version) VALUES (?,?,?,?,?,?,1)",
-                (edge_uuid, legacy_cloud_id, lot_id, template_id, barcode,
-                 InstanceState.WAREHOUSE.value),
+                (
+                    edge_uuid,
+                    legacy_cloud_id,
+                    lot_id,
+                    template_id,
+                    barcode,
+                    InstanceState.WAREHOUSE.value,
+                ),
             )
             if parent_uuid:
                 conn.execute(
@@ -402,10 +701,22 @@ class InventoryService:
                     (parent_uuid, slot_id, edge_uuid),
                 )
             self._emit(
-                conn, now, "instance", edge_uuid, 1, "instance.registered",
-                {"template_id": template_id, "lot_id": lot_id, "barcode": barcode,
-                 "legacy_cloud_id": legacy_cloud_id, "parent_uuid": parent_uuid, "slot_id": slot_id},
-                causation_id=causation_id, actor=actor,
+                conn,
+                now,
+                "instance",
+                edge_uuid,
+                1,
+                "instance.registered",
+                {
+                    "template_id": template_id,
+                    "lot_id": lot_id,
+                    "barcode": barcode,
+                    "legacy_cloud_id": legacy_cloud_id,
+                    "parent_uuid": parent_uuid,
+                    "slot_id": slot_id,
+                },
+                causation_id=causation_id,
+                actor=actor,
             )
             inst = self._tx_get_instance(conn, edge_uuid)
         return inst
@@ -417,18 +728,18 @@ class InventoryService:
     def reserve_workflow(
         self,
         workflow_id: str,
-        node_requirements: Dict[str, List[MaterialRequirement]],
+        node_requirements: dict[str, list[MaterialRequirement]],
         attempt: int = 1,
         actor: str = "",
         causation_id: str = "",
-    ) -> Dict[str, Any]:
+    ) -> dict[str, Any]:
         """整 DAG 预留（all-or-nothing，单事务）.
 
         每个节点一行 reservation；任一节点不足则整体回滚并抛 InsufficientStock。
         (workflow_id, node_id, attempt) 幂等：已有 active/consumed 预留的节点跳过。
         """
         now = self._now_ms()
-        created: List[str] = []
+        created: list[str] = []
         with self._tx() as conn:
             for node_id, requirements in node_requirements.items():
                 if not requirements:
@@ -439,33 +750,57 @@ class InventoryService:
                     (workflow_id, node_id, attempt),
                 ).fetchone()
                 if existing is not None and existing["status"] in (
-                    ReservationState.ACTIVE.value, ReservationState.CONSUMED.value,
+                    ReservationState.ACTIVE.value,
+                    ReservationState.CONSUMED.value,
                 ):
                     continue  # 幂等重放
-                amounts = self._tx_allocate(conn, now, workflow_id, node_id, requirements,
-                                            actor, causation_id)
+                amounts = self._tx_allocate(
+                    conn, now, workflow_id, node_id, requirements, actor, causation_id
+                )
                 reservation_id = f"rsv-{uuid.uuid4().hex[:16]}"
                 if existing is not None:
                     conn.execute(
                         "UPDATE inventory_reservation SET status = ?, amounts_json = ?, "
                         "version = version + 1 WHERE workflow_id = ? AND node_id = ? AND attempt = ?",
-                        (ReservationState.ACTIVE.value, json.dumps(amounts), workflow_id,
-                         node_id, attempt),
+                        (
+                            ReservationState.ACTIVE.value,
+                            json.dumps(amounts),
+                            workflow_id,
+                            node_id,
+                            attempt,
+                        ),
                     )
                     reservation_id = existing["reservation_id"]
                 else:
                     conn.execute(
                         "INSERT INTO inventory_reservation(reservation_id, workflow_id, node_id, "
                         "attempt, status, amounts_json, created_at, version) VALUES (?,?,?,?,?,?,?,1)",
-                        (reservation_id, workflow_id, node_id, attempt,
-                         ReservationState.ACTIVE.value, json.dumps(amounts), now),
+                        (
+                            reservation_id,
+                            workflow_id,
+                            node_id,
+                            attempt,
+                            ReservationState.ACTIVE.value,
+                            json.dumps(amounts),
+                            now,
+                        ),
                     )
                 created.append(node_id)
                 self._emit(
-                    conn, now, "reservation", reservation_id, 1, "reservation.created",
-                    {"workflow_id": workflow_id, "node_id": node_id, "attempt": attempt,
-                     "amounts": amounts},
-                    causation_id=causation_id, actor=actor,
+                    conn,
+                    now,
+                    "reservation",
+                    reservation_id,
+                    1,
+                    "reservation.created",
+                    {
+                        "workflow_id": workflow_id,
+                        "node_id": node_id,
+                        "attempt": attempt,
+                        "amounts": amounts,
+                    },
+                    causation_id=causation_id,
+                    actor=actor,
                 )
         return {"workflow_id": workflow_id, "reserved_nodes": created}
 
@@ -475,12 +810,12 @@ class InventoryService:
         now: int,
         workflow_id: str,
         node_id: str,
-        requirements: List[MaterialRequirement],
+        requirements: list[MaterialRequirement],
         actor: str,
         causation_id: str,
-    ) -> Dict[str, Any]:
+    ) -> dict[str, Any]:
         """事务内为一个节点分配预留：FIFO 扣 lot available→reserved；实例置 RESERVED."""
-        amounts: Dict[str, Any] = {"lots": {}, "instances": []}
+        amounts: dict[str, Any] = {"lots": {}, "instances": []}
         for req in requirements:
             if req.is_instance_requirement():
                 inst = self._tx_resolve_instance(conn, req)
@@ -491,9 +826,15 @@ class InventoryService:
                 inst = self._tx_set_instance_status(conn, inst, InstanceState.RESERVED)
                 amounts["instances"].append(inst["edge_uuid"])
                 self._emit(
-                    conn, now, "instance", inst["edge_uuid"], inst["version"], "instance.reserved",
+                    conn,
+                    now,
+                    "instance",
+                    inst["edge_uuid"],
+                    inst["version"],
+                    "instance.reserved",
                     {"workflow_id": workflow_id, "node_id": node_id},
-                    causation_id=causation_id, actor=actor,
+                    causation_id=causation_id,
+                    actor=actor,
                 )
             elif req.quantity > 0:
                 remaining = req.quantity
@@ -504,15 +845,29 @@ class InventoryService:
                     take = min(lot["quantity_available"], remaining)
                     if take <= 0:
                         continue
-                    lot = self._tx_update_lot_quantities(conn, lot, d_available=-take, d_reserved=take)
-                    amounts["lots"][lot["lot_id"]] = amounts["lots"].get(lot["lot_id"], 0.0) + take
+                    lot = self._tx_update_lot_quantities(
+                        conn, lot, d_available=-take, d_reserved=take
+                    )
+                    amounts["lots"][lot["lot_id"]] = (
+                        amounts["lots"].get(lot["lot_id"], 0.0) + take
+                    )
                     remaining -= take
                     self._emit(
-                        conn, now, "lot", lot["lot_id"], lot["version"], "lot.reserved",
-                        {"workflow_id": workflow_id, "node_id": node_id, "quantity": take,
-                         "quantity_available": lot["quantity_available"],
-                         "quantity_reserved": lot["quantity_reserved"]},
-                        causation_id=causation_id, actor=actor,
+                        conn,
+                        now,
+                        "lot",
+                        lot["lot_id"],
+                        lot["version"],
+                        "lot.reserved",
+                        {
+                            "workflow_id": workflow_id,
+                            "node_id": node_id,
+                            "quantity": take,
+                            "quantity_available": lot["quantity_available"],
+                            "quantity_reserved": lot["quantity_reserved"],
+                        },
+                        causation_id=causation_id,
+                        actor=actor,
                     )
                 if remaining > 1e-9:
                     raise InsufficientStock(
@@ -522,10 +877,13 @@ class InventoryService:
         return amounts
 
     @staticmethod
-    def _tx_resolve_instance(conn: sqlite3.Connection, req: MaterialRequirement) -> Dict[str, Any]:
+    def _tx_resolve_instance(
+        conn: sqlite3.Connection, req: MaterialRequirement
+    ) -> dict[str, Any]:
         if req.instance_uuid:
             row = conn.execute(
-                "SELECT * FROM material_instance WHERE edge_uuid = ?", (req.instance_uuid,)
+                "SELECT * FROM material_instance WHERE edge_uuid = ?",
+                (req.instance_uuid,),
             ).fetchone()
         else:
             placeholders = ",".join("?" for _ in _ACTIVE_STATES_TUPLE)
@@ -539,10 +897,11 @@ class InventoryService:
 
     def _tx_candidate_lots(
         self, conn: sqlite3.Connection, req: MaterialRequirement
-    ) -> List[Dict[str, Any]]:
+    ) -> list[dict[str, Any]]:
         if req.lot_id:
             row = conn.execute(
-                "SELECT * FROM inventory_lot WHERE lot_id = ? AND quarantined = 0", (req.lot_id,)
+                "SELECT * FROM inventory_lot WHERE lot_id = ? AND quarantined = 0",
+                (req.lot_id,),
             ).fetchone()
             return [dict(row)] if row is not None else []
         # FIFO：created_at 升序，同毫秒按插入序（rowid）
@@ -562,7 +921,7 @@ class InventoryService:
         slot_id: str = "",
         actor: str = "",
         causation_id: str = "",
-    ) -> Dict[str, Any]:
+    ) -> dict[str, Any]:
         """节点开始：预留 → 实际消费（lot reserved/total 扣减；实例 deploy 上台）.
 
         幂等：已 consumed 直接返回；无预留（无物料节点）no-op。
@@ -578,7 +937,10 @@ class InventoryService:
                 return {"status": "no_reservation"}
             rsv = dict(row)
             if rsv["status"] == ReservationState.CONSUMED.value:
-                return {"status": "already_consumed", "reservation_id": rsv["reservation_id"]}
+                return {
+                    "status": "already_consumed",
+                    "reservation_id": rsv["reservation_id"],
+                }
             if rsv["status"] != ReservationState.ACTIVE.value:
                 raise CommandRejected(
                     f"reservation {rsv['reservation_id']} in {rsv['status']}, cannot consume"
@@ -586,12 +948,24 @@ class InventoryService:
             amounts = json.loads(rsv["amounts_json"])
             for lot_id, qty in amounts.get("lots", {}).items():
                 lot = self._tx_get_lot(conn, lot_id)
-                lot = self._tx_update_lot_quantities(conn, lot, d_total=-qty, d_reserved=-qty)
+                lot = self._tx_update_lot_quantities(
+                    conn, lot, d_total=-qty, d_reserved=-qty
+                )
                 self._emit(
-                    conn, now, "lot", lot_id, lot["version"], "lot.consumed",
-                    {"workflow_id": workflow_id, "node_id": node_id, "quantity": qty,
-                     "quantity_total": lot["quantity_total"]},
-                    causation_id=causation_id, actor=actor,
+                    conn,
+                    now,
+                    "lot",
+                    lot_id,
+                    lot["version"],
+                    "lot.consumed",
+                    {
+                        "workflow_id": workflow_id,
+                        "node_id": node_id,
+                        "quantity": qty,
+                        "quantity_total": lot["quantity_total"],
+                    },
+                    causation_id=causation_id,
+                    actor=actor,
                 )
             for inst_uuid in amounts.get("instances", []):
                 inst = self._tx_get_instance(conn, inst_uuid)
@@ -599,10 +973,20 @@ class InventoryService:
                 if parent_uuid:
                     self._tx_upsert_relation(conn, parent_uuid, slot_id, inst_uuid)
                 self._emit(
-                    conn, now, "instance", inst_uuid, inst["version"], "instance.deployed",
-                    {"workflow_id": workflow_id, "node_id": node_id,
-                     "parent_uuid": parent_uuid, "slot_id": slot_id},
-                    causation_id=causation_id, actor=actor,
+                    conn,
+                    now,
+                    "instance",
+                    inst_uuid,
+                    inst["version"],
+                    "instance.deployed",
+                    {
+                        "workflow_id": workflow_id,
+                        "node_id": node_id,
+                        "parent_uuid": parent_uuid,
+                        "slot_id": slot_id,
+                    },
+                    causation_id=causation_id,
+                    actor=actor,
                 )
             conn.execute(
                 "UPDATE inventory_reservation SET status = ?, version = version + 1 "
@@ -610,12 +994,21 @@ class InventoryService:
                 (ReservationState.CONSUMED.value, rsv["reservation_id"]),
             )
             self._emit(
-                conn, now, "reservation", rsv["reservation_id"], rsv["version"] + 1,
+                conn,
+                now,
+                "reservation",
+                rsv["reservation_id"],
+                rsv["version"] + 1,
                 "reservation.consumed",
                 {"workflow_id": workflow_id, "node_id": node_id, "attempt": attempt},
-                causation_id=causation_id, actor=actor,
+                causation_id=causation_id,
+                actor=actor,
             )
-        return {"status": "consumed", "reservation_id": rsv["reservation_id"], "amounts": amounts}
+        return {
+            "status": "consumed",
+            "reservation_id": rsv["reservation_id"],
+            "amounts": amounts,
+        }
 
     def release_reservation(
         self,
@@ -625,7 +1018,7 @@ class InventoryService:
         reason: str = "",
         actor: str = "",
         causation_id: str = "",
-    ) -> Dict[str, Any]:
+    ) -> dict[str, Any]:
         """释放未消费的预留：lot reserved→available，实例 RESERVED→WAREHOUSE。幂等."""
         now = self._now_ms()
         with self._tx() as conn:
@@ -638,20 +1031,41 @@ class InventoryService:
                 return {"status": "no_reservation"}
             rsv = dict(row)
             if rsv["status"] != ReservationState.ACTIVE.value:
-                return {"status": f"noop_{rsv['status']}", "reservation_id": rsv["reservation_id"]}
-            self._tx_release_amounts(conn, now, workflow_id, node_id, json.loads(rsv["amounts_json"]),
-                                     reason, actor, causation_id)
+                return {
+                    "status": f"noop_{rsv['status']}",
+                    "reservation_id": rsv["reservation_id"],
+                }
+            self._tx_release_amounts(
+                conn,
+                now,
+                workflow_id,
+                node_id,
+                json.loads(rsv["amounts_json"]),
+                reason,
+                actor,
+                causation_id,
+            )
             conn.execute(
                 "UPDATE inventory_reservation SET status = ?, version = version + 1 "
                 "WHERE reservation_id = ?",
                 (ReservationState.RELEASED.value, rsv["reservation_id"]),
             )
             self._emit(
-                conn, now, "reservation", rsv["reservation_id"], rsv["version"] + 1,
+                conn,
+                now,
+                "reservation",
+                rsv["reservation_id"],
+                rsv["version"] + 1,
                 "reservation.released",
-                {"workflow_id": workflow_id, "node_id": node_id, "attempt": attempt,
-                 "reason": reason},
-                causation_id=causation_id, actor=actor, reason=reason,
+                {
+                    "workflow_id": workflow_id,
+                    "node_id": node_id,
+                    "attempt": attempt,
+                    "reason": reason,
+                },
+                causation_id=causation_id,
+                actor=actor,
+                reason=reason,
             )
         return {"status": "released", "reservation_id": rsv["reservation_id"]}
 
@@ -661,28 +1075,48 @@ class InventoryService:
         now: int,
         workflow_id: str,
         node_id: str,
-        amounts: Dict[str, Any],
+        amounts: dict[str, Any],
         reason: str,
         actor: str,
         causation_id: str,
     ) -> None:
         for lot_id, qty in amounts.get("lots", {}).items():
             lot = self._tx_get_lot(conn, lot_id)
-            lot = self._tx_update_lot_quantities(conn, lot, d_available=qty, d_reserved=-qty)
+            lot = self._tx_update_lot_quantities(
+                conn, lot, d_available=qty, d_reserved=-qty
+            )
             self._emit(
-                conn, now, "lot", lot_id, lot["version"], "lot.released",
-                {"workflow_id": workflow_id, "node_id": node_id, "quantity": qty,
-                 "quantity_available": lot["quantity_available"]},
-                causation_id=causation_id, actor=actor, reason=reason,
+                conn,
+                now,
+                "lot",
+                lot_id,
+                lot["version"],
+                "lot.released",
+                {
+                    "workflow_id": workflow_id,
+                    "node_id": node_id,
+                    "quantity": qty,
+                    "quantity_available": lot["quantity_available"],
+                },
+                causation_id=causation_id,
+                actor=actor,
+                reason=reason,
             )
         for inst_uuid in amounts.get("instances", []):
             inst = self._tx_get_instance(conn, inst_uuid)
             if inst["status"] == InstanceState.RESERVED.value:
                 inst = self._tx_set_instance_status(conn, inst, InstanceState.WAREHOUSE)
                 self._emit(
-                    conn, now, "instance", inst_uuid, inst["version"], "instance.released",
+                    conn,
+                    now,
+                    "instance",
+                    inst_uuid,
+                    inst["version"],
+                    "instance.released",
                     {"workflow_id": workflow_id, "node_id": node_id},
-                    causation_id=causation_id, actor=actor, reason=reason,
+                    causation_id=causation_id,
+                    actor=actor,
+                    reason=reason,
                 )
 
     def quarantine_reservation(
@@ -693,7 +1127,7 @@ class InventoryService:
         reason: str = "node_failed",
         actor: str = "",
         causation_id: str = "",
-    ) -> Dict[str, Any]:
+    ) -> dict[str, Any]:
         """节点失败但物料已物理使用：实例转 QUARANTINED（人工复核），lot 不虚假加回."""
         now = self._now_ms()
         with self._tx() as conn:
@@ -706,16 +1140,35 @@ class InventoryService:
                 return {"status": "no_reservation"}
             rsv = dict(row)
             if rsv["status"] != ReservationState.CONSUMED.value:
-                return {"status": f"noop_{rsv['status']}", "reservation_id": rsv["reservation_id"]}
+                return {
+                    "status": f"noop_{rsv['status']}",
+                    "reservation_id": rsv["reservation_id"],
+                }
             amounts = json.loads(rsv["amounts_json"])
             for inst_uuid in amounts.get("instances", []):
                 inst = self._tx_get_instance(conn, inst_uuid)
-                if inst["status"] in (InstanceState.BENCH.value, InstanceState.IN_USE.value):
-                    inst = self._tx_set_instance_status(conn, inst, InstanceState.QUARANTINED)
+                if inst["status"] in (
+                    InstanceState.BENCH.value,
+                    InstanceState.IN_USE.value,
+                ):
+                    inst = self._tx_set_instance_status(
+                        conn, inst, InstanceState.QUARANTINED
+                    )
                     self._emit(
-                        conn, now, "instance", inst_uuid, inst["version"], "instance.quarantined",
-                        {"workflow_id": workflow_id, "node_id": node_id, "reason": reason},
-                        causation_id=causation_id, actor=actor, reason=reason,
+                        conn,
+                        now,
+                        "instance",
+                        inst_uuid,
+                        inst["version"],
+                        "instance.quarantined",
+                        {
+                            "workflow_id": workflow_id,
+                            "node_id": node_id,
+                            "reason": reason,
+                        },
+                        causation_id=causation_id,
+                        actor=actor,
+                        reason=reason,
                     )
             conn.execute(
                 "UPDATE inventory_reservation SET status = ?, version = version + 1 "
@@ -723,25 +1176,42 @@ class InventoryService:
                 (ReservationState.QUARANTINED.value, rsv["reservation_id"]),
             )
             self._emit(
-                conn, now, "reservation", rsv["reservation_id"], rsv["version"] + 1,
+                conn,
+                now,
+                "reservation",
+                rsv["reservation_id"],
+                rsv["version"] + 1,
                 "reservation.quarantined",
-                {"workflow_id": workflow_id, "node_id": node_id, "attempt": attempt,
-                 "reason": reason},
-                causation_id=causation_id, actor=actor, reason=reason,
+                {
+                    "workflow_id": workflow_id,
+                    "node_id": node_id,
+                    "attempt": attempt,
+                    "reason": reason,
+                },
+                causation_id=causation_id,
+                actor=actor,
+                reason=reason,
             )
         return {"status": "quarantined", "reservation_id": rsv["reservation_id"]}
 
     def release_workflow(
-        self, workflow_id: str, reason: str = "workflow_cancelled",
-        actor: str = "", causation_id: str = "",
-    ) -> Dict[str, Any]:
+        self,
+        workflow_id: str,
+        reason: str = "workflow_cancelled",
+        actor: str = "",
+        causation_id: str = "",
+    ) -> dict[str, Any]:
         """cancel/restart：释放该 workflow 全部 active 预留（依据 DB 状态，不依赖内存）."""
-        released: List[str] = []
+        released: list[str] = []
         for rsv in self.store.reservations_for_workflow(workflow_id):
             if rsv["status"] == ReservationState.ACTIVE.value:
                 self.release_reservation(
-                    workflow_id, rsv["node_id"], rsv["attempt"],
-                    reason=reason, actor=actor, causation_id=causation_id,
+                    workflow_id,
+                    rsv["node_id"],
+                    rsv["attempt"],
+                    reason=reason,
+                    actor=actor,
+                    causation_id=causation_id,
                 )
                 released.append(rsv["node_id"])
         return {"workflow_id": workflow_id, "released_nodes": released}
@@ -774,9 +1244,14 @@ class InventoryService:
         )
 
     def deploy_instance(
-        self, edge_uuid: str, parent_uuid: str = "", slot_id: str = "",
-        actor: str = "", causation_id: str = "", expected_version: Optional[int] = None,
-    ) -> Dict[str, Any]:
+        self,
+        edge_uuid: str,
+        parent_uuid: str = "",
+        slot_id: str = "",
+        actor: str = "",
+        causation_id: str = "",
+        expected_version: int | None = None,
+    ) -> dict[str, Any]:
         now = self._now_ms()
         with self._tx() as conn:
             inst = self._tx_get_instance(conn, edge_uuid)
@@ -785,16 +1260,27 @@ class InventoryService:
             if parent_uuid:
                 self._tx_upsert_relation(conn, parent_uuid, slot_id, edge_uuid)
             self._emit(
-                conn, now, "instance", edge_uuid, inst["version"], "instance.deployed",
+                conn,
+                now,
+                "instance",
+                edge_uuid,
+                inst["version"],
+                "instance.deployed",
                 {"parent_uuid": parent_uuid, "slot_id": slot_id},
-                causation_id=causation_id, actor=actor,
+                causation_id=causation_id,
+                actor=actor,
             )
         return inst
 
     def move_instance(
-        self, edge_uuid: str, parent_uuid: str, slot_id: str = "",
-        actor: str = "", causation_id: str = "", expected_version: Optional[int] = None,
-    ) -> Dict[str, Any]:
+        self,
+        edge_uuid: str,
+        parent_uuid: str,
+        slot_id: str = "",
+        actor: str = "",
+        causation_id: str = "",
+        expected_version: int | None = None,
+    ) -> dict[str, Any]:
         """move/transfer：只改物理层级关系，不改任何库存数量."""
         now = self._now_ms()
         with self._tx() as conn:
@@ -810,11 +1296,20 @@ class InventoryService:
                 (new_version, edge_uuid),
             )
             self._emit(
-                conn, now, "instance", edge_uuid, new_version, "instance.moved",
-                {"from_parent": old["parent_uuid"] if old else "",
-                 "from_slot": old["slot_id"] if old else "",
-                 "to_parent": parent_uuid, "to_slot": slot_id},
-                causation_id=causation_id, actor=actor,
+                conn,
+                now,
+                "instance",
+                edge_uuid,
+                new_version,
+                "instance.moved",
+                {
+                    "from_parent": old["parent_uuid"] if old else "",
+                    "from_slot": old["slot_id"] if old else "",
+                    "to_parent": parent_uuid,
+                    "to_slot": slot_id,
+                },
+                causation_id=causation_id,
+                actor=actor,
             )
             inst = self._tx_get_instance(conn, edge_uuid)
         return inst
@@ -824,8 +1319,8 @@ class InventoryService:
         edge_uuid: str,
         actor: str = "",
         causation_id: str = "",
-        expected_version: Optional[int] = None,
-    ) -> Dict[str, Any]:
+        expected_version: int | None = None,
+    ) -> dict[str, Any]:
         """解除物理父关系；实例与库存数量保持不变，重复 detach 为幂等 no-op."""
         now = self._now_ms()
         with self._tx() as conn:
@@ -860,9 +1355,14 @@ class InventoryService:
         return inst
 
     def set_instance_parent(
-        self, edge_uuid: str, parent_uuid: str = "", slot_id: Optional[str] = None,
-        actor: str = "", causation_id: str = "", expected_version: Optional[int] = None,
-    ) -> Dict[str, Any]:
+        self,
+        edge_uuid: str,
+        parent_uuid: str = "",
+        slot_id: str | None = None,
+        actor: str = "",
+        causation_id: str = "",
+        expected_version: int | None = None,
+    ) -> dict[str, Any]:
         """设置/清除父物料（云端 parent_material_uuid ≡ 资源树 parent_uuid，单一父）。
 
         资源只有一个父层级：父物料 + 可选具名位（slot_id = PLR site 名，
@@ -883,7 +1383,8 @@ class InventoryService:
             self._tx_check_version(inst, expected_version)
             old_parent = inst.get("parent_uuid", "")
             old_rel = conn.execute(
-                "SELECT slot_id FROM resource_relation WHERE child_uuid = ?", (edge_uuid,)
+                "SELECT slot_id FROM resource_relation WHERE child_uuid = ?",
+                (edge_uuid,),
             ).fetchone()
             old_slot = old_rel["slot_id"] if old_rel else ""
             if parent_uuid == old_parent and new_slot == old_slot:
@@ -893,7 +1394,8 @@ class InventoryService:
                     raise CommandRejected("instance cannot be its own parent")
                 parent = conn.execute(
                     "SELECT edge_uuid, status, parent_uuid FROM material_instance "
-                    "WHERE edge_uuid = ?", (parent_uuid,),
+                    "WHERE edge_uuid = ?",
+                    (parent_uuid,),
                 ).fetchone()
                 if parent is None:
                     raise NotFound(f"parent instance {parent_uuid} not found")
@@ -926,30 +1428,57 @@ class InventoryService:
                     "DELETE FROM resource_relation WHERE child_uuid = ?", (edge_uuid,)
                 )
             self._emit(
-                conn, now, "instance", edge_uuid, new_version, "instance.parent_changed",
-                {"from_parent": old_parent, "parent_uuid": parent_uuid,
-                 "from_slot": old_slot, "slot_id": new_slot},
-                causation_id=causation_id, actor=actor,
+                conn,
+                now,
+                "instance",
+                edge_uuid,
+                new_version,
+                "instance.parent_changed",
+                {
+                    "from_parent": old_parent,
+                    "parent_uuid": parent_uuid,
+                    "from_slot": old_slot,
+                    "slot_id": new_slot,
+                },
+                causation_id=causation_id,
+                actor=actor,
             )
             inst = self._tx_get_instance(conn, edge_uuid)
         return inst
 
     def consume_instance(
-        self, edge_uuid: str, actor: str = "", causation_id: str = "",
-        expected_version: Optional[int] = None,
-    ) -> Dict[str, Any]:
+        self,
+        edge_uuid: str,
+        actor: str = "",
+        causation_id: str = "",
+        expected_version: int | None = None,
+    ) -> dict[str, Any]:
         return self._terminal_instance_op(
-            edge_uuid, InstanceState.CONSUMED, "instance.consumed", "",
-            actor, causation_id, expected_version,
+            edge_uuid,
+            InstanceState.CONSUMED,
+            "instance.consumed",
+            "",
+            actor,
+            causation_id,
+            expected_version,
         )
 
     def discard_instance(
-        self, edge_uuid: str, reason: str = "", actor: str = "", causation_id: str = "",
-        expected_version: Optional[int] = None,
-    ) -> Dict[str, Any]:
+        self,
+        edge_uuid: str,
+        reason: str = "",
+        actor: str = "",
+        causation_id: str = "",
+        expected_version: int | None = None,
+    ) -> dict[str, Any]:
         return self._terminal_instance_op(
-            edge_uuid, InstanceState.DISCARDED, "instance.discarded", reason,
-            actor, causation_id, expected_version,
+            edge_uuid,
+            InstanceState.DISCARDED,
+            "instance.discarded",
+            reason,
+            actor,
+            causation_id,
+            expected_version,
         )
 
     def _terminal_instance_op(
@@ -960,15 +1489,17 @@ class InventoryService:
         reason: str,
         actor: str,
         causation_id: str,
-        expected_version: Optional[int],
-    ) -> Dict[str, Any]:
+        expected_version: int | None,
+    ) -> dict[str, Any]:
         """终态操作：删除物理关系（remove 真正持久化）+ 状态迁移."""
         now = self._now_ms()
         with self._tx() as conn:
             inst = self._tx_get_instance(conn, edge_uuid)
             self._tx_check_version(inst, expected_version)
             inst = self._tx_set_instance_status(conn, inst, target)
-            conn.execute("DELETE FROM resource_relation WHERE child_uuid = ?", (edge_uuid,))
+            conn.execute(
+                "DELETE FROM resource_relation WHERE child_uuid = ?", (edge_uuid,)
+            )
             # 终态实例不再是任何物料的组成部分（历史保留在 ledger）
             conn.execute(
                 "UPDATE material_instance SET parent_uuid = '' WHERE edge_uuid = ?",
@@ -976,8 +1507,16 @@ class InventoryService:
             )
             inst["parent_uuid"] = ""
             self._emit(
-                conn, now, "instance", edge_uuid, inst["version"], event_type,
-                {"reason": reason}, causation_id=causation_id, actor=actor, reason=reason,
+                conn,
+                now,
+                "instance",
+                edge_uuid,
+                inst["version"],
+                event_type,
+                {"reason": reason},
+                causation_id=causation_id,
+                actor=actor,
+                reason=reason,
             )
         return inst
 
@@ -988,8 +1527,8 @@ class InventoryService:
         reason: str,
         actor: str,
         causation_id: str = "",
-        expected_version: Optional[int] = None,
-    ) -> Dict[str, Any]:
+        expected_version: int | None = None,
+    ) -> dict[str, Any]:
         """人工盘点调整：必须带 reason + actor（审计），调整 total 并同步 available."""
         if not reason or not actor:
             raise CommandRejected("adjust requires both reason and actor for audit")
@@ -999,32 +1538,47 @@ class InventoryService:
             self._tx_check_version(lot, expected_version)
             delta = new_total - lot["quantity_total"]
             # available 跟随 total 变化；不允许把 total 调到低于已预留量
-            lot = self._tx_update_lot_quantities(conn, lot, d_total=delta, d_available=delta)
+            lot = self._tx_update_lot_quantities(
+                conn, lot, d_total=delta, d_available=delta
+            )
             self._emit(
-                conn, now, "lot", lot_id, lot["version"], "lot.adjusted",
-                {"delta": delta, "new_total": lot["quantity_total"],
-                 "quantity_available": lot["quantity_available"], "reason": reason},
-                causation_id=causation_id, actor=actor, reason=reason,
+                conn,
+                now,
+                "lot",
+                lot_id,
+                lot["version"],
+                "lot.adjusted",
+                {
+                    "delta": delta,
+                    "new_total": lot["quantity_total"],
+                    "quantity_available": lot["quantity_available"],
+                    "reason": reason,
+                },
+                causation_id=causation_id,
+                actor=actor,
+                reason=reason,
             )
         return lot
 
     def update_content(
-        self, instance_uuid: str, state: Dict[str, Any],
-        actor: str = "", causation_id: str = "",
-        expected_version: Optional[int] = None,
+        self,
+        instance_uuid: str,
+        state: dict[str, Any],
+        actor: str = "",
+        causation_id: str = "",
+        expected_version: int | None = None,
         event_type: str = "content.updated",
-    ) -> Dict[str, Any]:
+    ) -> dict[str, Any]:
         """更新内容物状态（substance_content）."""
         now = self._now_ms()
         with self._tx() as conn:
             self._tx_get_instance(conn, instance_uuid)
             row = conn.execute(
-                "SELECT * FROM substance_content WHERE instance_uuid = ?", (instance_uuid,)
+                "SELECT * FROM substance_content WHERE instance_uuid = ?",
+                (instance_uuid,),
             ).fetchone()
             if row is None and expected_version not in (None, 0):
-                raise VersionConflict(
-                    f"expected version {expected_version}, current 0"
-                )
+                raise VersionConflict(f"expected version {expected_version}, current 0")
             if row is not None:
                 self._tx_check_version(dict(row), expected_version)
             version = (row["version"] + 1) if row is not None else 1
@@ -1035,8 +1589,15 @@ class InventoryService:
                 (instance_uuid, json.dumps(state, ensure_ascii=False), version),
             )
             self._emit(
-                conn, now, "content", instance_uuid, version, event_type,
-                {"state": state}, causation_id=causation_id, actor=actor,
+                conn,
+                now,
+                "content",
+                instance_uuid,
+                version,
+                event_type,
+                {"state": state},
+                causation_id=causation_id,
+                actor=actor,
             )
         return {"instance_uuid": instance_uuid, "version": version, "state": state}
 
@@ -1045,8 +1606,8 @@ class InventoryService:
         instance_uuid: str,
         actor: str = "",
         causation_id: str = "",
-        expected_version: Optional[int] = None,
-    ) -> Dict[str, Any]:
+        expected_version: int | None = None,
+    ) -> dict[str, Any]:
         """清空内容物但保留行与递增版本，避免 optimistic version 回退."""
         return self.update_content(
             instance_uuid,
@@ -1058,7 +1619,7 @@ class InventoryService:
         )
 
     @staticmethod
-    def _tx_check_version(row: Dict[str, Any], expected_version: Optional[int]) -> None:
+    def _tx_check_version(row: dict[str, Any], expected_version: int | None) -> None:
         """乐观并发：expected_version 不匹配直接 reject（禁止 Last-Write-Wins）."""
         if expected_version is not None and row["version"] != expected_version:
             raise VersionConflict(

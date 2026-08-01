@@ -10,12 +10,60 @@ from __future__ import annotations
 import json
 import sqlite3
 import threading
+from collections.abc import Iterator
 from contextlib import contextmanager
-from typing import Any, Dict, Iterator, List, Optional
+from typing import Any
 
 SCHEMA_VERSION = 3
 
+_UNICODE_CASEFOLD_COLLATION = "UNICODE_CASEFOLD"
+
+
+def _unicode_casefold(left: str, right: str) -> int:
+    left_folded = left.casefold()
+    right_folded = right.casefold()
+    return (left_folded > right_folded) - (left_folded < right_folded)
+
+
 _SCHEMA = """
+CREATE TABLE IF NOT EXISTS material (
+    uuid TEXT PRIMARY KEY,
+    create_time TEXT NOT NULL,
+    update_time TEXT NOT NULL,
+    deleted_at TEXT,
+    description TEXT,
+    meta_data TEXT NOT NULL DEFAULT '{}'
+        CHECK (json_valid(meta_data) AND json_type(meta_data) = 'object'),
+    resource_template_uuid TEXT NOT NULL,
+    parent_uuid TEXT,
+    class TEXT NOT NULL CHECK (LENGTH(TRIM(class)) > 0),
+    barcode TEXT NOT NULL DEFAULT '',
+    name TEXT NOT NULL CHECK (LENGTH(TRIM(name)) > 0),
+    config TEXT NOT NULL DEFAULT '{}'
+        CHECK (json_valid(config) AND json_type(config) = 'object'),
+    data TEXT NOT NULL DEFAULT '{}'
+        CHECK (json_valid(data) AND json_type(data) = 'object'),
+    disposition TEXT
+        CHECK (disposition IS NULL OR disposition IN (
+            'active', 'consumed', 'discarded', 'quarantined', 'reconciling'
+        )),
+    material_kind TEXT NOT NULL
+        CHECK (material_kind IN ('business', 'device')),
+    version INTEGER NOT NULL DEFAULT 1 CHECK (version > 0),
+    FOREIGN KEY(parent_uuid) REFERENCES material(uuid) ON DELETE RESTRICT,
+    CHECK (
+        (material_kind = 'business' AND disposition IS NOT NULL)
+        OR (material_kind = 'device' AND disposition IS NULL)
+    )
+);
+CREATE UNIQUE INDEX IF NOT EXISTS ux_material_barcode_active_nonempty
+    ON material(barcode COLLATE UNICODE_CASEFOLD)
+    WHERE deleted_at IS NULL AND barcode <> '';
+CREATE INDEX IF NOT EXISTS ix_material_template_active
+    ON material(resource_template_uuid) WHERE deleted_at IS NULL;
+CREATE INDEX IF NOT EXISTS ix_material_parent_active
+    ON material(parent_uuid) WHERE deleted_at IS NULL;
+
 CREATE TABLE IF NOT EXISTS resource_template (
     template_id   TEXT PRIMARY KEY,
     name          TEXT NOT NULL DEFAULT '',
@@ -129,8 +177,12 @@ CREATE TABLE IF NOT EXISTS sync_cursor (
 # 「父 + 具名位」时存在（slot_id = PLR site 名 ↔ 云端 sites.label，uuid 仅后端索引），
 # 且 relation.parent_uuid 恒等于本列（_tx_upsert_relation 同步维护）。
 # 空串表示顶层物料；单父由列语义天然保证（树形父）。
-_SCHEMA_V3_ADD_PARENT = "ALTER TABLE material_instance ADD COLUMN parent_uuid TEXT NOT NULL DEFAULT ''"
-_SCHEMA_V3_INDEX = "CREATE INDEX IF NOT EXISTS idx_instance_parent ON material_instance(parent_uuid)"
+_SCHEMA_V3_ADD_PARENT = (
+    "ALTER TABLE material_instance ADD COLUMN parent_uuid TEXT NOT NULL DEFAULT ''"
+)
+_SCHEMA_V3_INDEX = (
+    "CREATE INDEX IF NOT EXISTS idx_instance_parent ON material_instance(parent_uuid)"
+)
 
 # v2：实验室操作系统布局层（元信息 / 分区 / 2D 摆放）。
 # 只增表不改旧表，v1 库可原地升级。
@@ -177,6 +229,10 @@ class InventoryStore:
         self._lock = threading.RLock()
         self._conn = sqlite3.connect(path, check_same_thread=False)
         self._conn.row_factory = sqlite3.Row
+        self._conn.create_collation(
+            _UNICODE_CASEFOLD_COLLATION,
+            _unicode_casefold,
+        )
         self._conn.execute("PRAGMA foreign_keys = ON")
         if path != ":memory:":
             self._conn.execute("PRAGMA journal_mode = WAL")
@@ -193,7 +249,8 @@ class InventoryStore:
             if current < 3:
                 # ALTER 前先查列（半途中断的迁移可安全重放）
                 cols = {
-                    r[1] for r in self._conn.execute(
+                    r[1]
+                    for r in self._conn.execute(
                         "PRAGMA table_info(material_instance)"
                     ).fetchall()
                 }
@@ -225,35 +282,41 @@ class InventoryStore:
 
     # -- 只读 helper ---------------------------------------------------------
 
-    def query_one(self, sql: str, params: tuple = ()) -> Optional[Dict[str, Any]]:
+    def query_one(self, sql: str, params: tuple = ()) -> dict[str, Any] | None:
         with self._lock:
             row = self._conn.execute(sql, params).fetchone()
         return dict(row) if row is not None else None
 
-    def query_all(self, sql: str, params: tuple = ()) -> List[Dict[str, Any]]:
+    def query_all(self, sql: str, params: tuple = ()) -> list[dict[str, Any]]:
         with self._lock:
             rows = self._conn.execute(sql, params).fetchall()
         return [dict(r) for r in rows]
 
     # -- 常用读 -------------------------------------------------------------
 
-    def get_lot(self, lot_id: str) -> Optional[Dict[str, Any]]:
+    def get_lot(self, lot_id: str) -> dict[str, Any] | None:
         return self.query_one("SELECT * FROM inventory_lot WHERE lot_id = ?", (lot_id,))
 
-    def get_instance(self, edge_uuid: str) -> Optional[Dict[str, Any]]:
-        return self.query_one("SELECT * FROM material_instance WHERE edge_uuid = ?", (edge_uuid,))
+    def get_instance(self, edge_uuid: str) -> dict[str, Any] | None:
+        return self.query_one(
+            "SELECT * FROM material_instance WHERE edge_uuid = ?", (edge_uuid,)
+        )
 
-    def find_instance_by_barcode_active(self, barcode: str, active_states: tuple) -> Optional[Dict[str, Any]]:
+    def find_instance_by_barcode_active(
+        self, barcode: str, active_states: tuple
+    ) -> dict[str, Any] | None:
         placeholders = ",".join("?" for _ in active_states)
         return self.query_one(
             f"SELECT * FROM material_instance WHERE barcode = ? AND status IN ({placeholders})",
             (barcode, *active_states),
         )
 
-    def find_instance_by_legacy_cloud_id(self, cloud_id: str) -> Optional[Dict[str, Any]]:
-        return self.query_one("SELECT * FROM material_instance WHERE legacy_cloud_id = ?", (cloud_id,))
+    def find_instance_by_legacy_cloud_id(self, cloud_id: str) -> dict[str, Any] | None:
+        return self.query_one(
+            "SELECT * FROM material_instance WHERE legacy_cloud_id = ?", (cloud_id,)
+        )
 
-    def lots_by_template_fifo(self, template_id: str) -> List[Dict[str, Any]]:
+    def lots_by_template_fifo(self, template_id: str) -> list[dict[str, Any]]:
         """FIFO：按 created_at 升序（同毫秒按 rowid 插入序）返回可用批次."""
         return self.query_all(
             "SELECT * FROM inventory_lot WHERE template_id = ? AND quarantined = 0 "
@@ -261,43 +324,54 @@ class InventoryStore:
             (template_id,),
         )
 
-    def get_reservation(self, workflow_id: str, node_id: str, attempt: int) -> Optional[Dict[str, Any]]:
+    def get_reservation(
+        self, workflow_id: str, node_id: str, attempt: int
+    ) -> dict[str, Any] | None:
         return self.query_one(
             "SELECT * FROM inventory_reservation WHERE workflow_id = ? AND node_id = ? AND attempt = ?",
             (workflow_id, node_id, attempt),
         )
 
-    def reservations_for_workflow(self, workflow_id: str) -> List[Dict[str, Any]]:
+    def reservations_for_workflow(self, workflow_id: str) -> list[dict[str, Any]]:
         return self.query_all(
             "SELECT * FROM inventory_reservation WHERE workflow_id = ? ORDER BY created_at ASC, reservation_id ASC",
             (workflow_id,),
         )
 
-    def get_relation(self, child_uuid: str) -> Optional[Dict[str, Any]]:
-        return self.query_one("SELECT * FROM resource_relation WHERE child_uuid = ?", (child_uuid,))
-
-    def children_of(self, parent_uuid: str) -> List[Dict[str, Any]]:
-        return self.query_all(
-            "SELECT * FROM resource_relation WHERE parent_uuid = ? ORDER BY slot_id ASC", (parent_uuid,)
+    def get_relation(self, child_uuid: str) -> dict[str, Any] | None:
+        return self.query_one(
+            "SELECT * FROM resource_relation WHERE child_uuid = ?", (child_uuid,)
         )
 
-    def get_content(self, instance_uuid: str) -> Optional[Dict[str, Any]]:
-        return self.query_one("SELECT * FROM substance_content WHERE instance_uuid = ?", (instance_uuid,))
+    def children_of(self, parent_uuid: str) -> list[dict[str, Any]]:
+        return self.query_all(
+            "SELECT * FROM resource_relation WHERE parent_uuid = ? ORDER BY slot_id ASC",
+            (parent_uuid,),
+        )
 
-    def component_children_of(self, parent_uuid: str) -> List[Dict[str, Any]]:
+    def get_content(self, instance_uuid: str) -> dict[str, Any] | None:
+        return self.query_one(
+            "SELECT * FROM substance_content WHERE instance_uuid = ?", (instance_uuid,)
+        )
+
+    def component_children_of(self, parent_uuid: str) -> list[dict[str, Any]]:
         """组成父子（material_instance.parent_uuid）下的直接子物料；与 site 放置无关."""
         return self.query_all(
             "SELECT * FROM material_instance WHERE parent_uuid = ? ORDER BY edge_uuid ASC",
             (parent_uuid,),
         )
 
-    def get_processed_command(self, command_id: str) -> Optional[Dict[str, Any]]:
-        return self.query_one("SELECT * FROM processed_command WHERE command_id = ?", (command_id,))
+    def get_processed_command(self, command_id: str) -> dict[str, Any] | None:
+        return self.query_one(
+            "SELECT * FROM processed_command WHERE command_id = ?", (command_id,)
+        )
 
     # -- 实验室布局（lab_meta / lab_zone / lab_placement） --------------------
 
     def get_meta(self, key: str, default: str = "") -> str:
-        row = self.query_one("SELECT meta_value FROM lab_meta WHERE meta_key = ?", (key,))
+        row = self.query_one(
+            "SELECT meta_value FROM lab_meta WHERE meta_key = ?", (key,)
+        )
         return str(row["meta_value"]) if row else default
 
     def set_meta(self, key: str, value: str) -> None:
@@ -308,29 +382,36 @@ class InventoryStore:
                 (key, value),
             )
 
-    def list_zones(self) -> List[Dict[str, Any]]:
+    def list_zones(self) -> list[dict[str, Any]]:
         return self.query_all("SELECT * FROM lab_zone ORDER BY zone_id ASC")
 
-    def list_placements(self, zone_id: str = "") -> List[Dict[str, Any]]:
+    def list_placements(self, zone_id: str = "") -> list[dict[str, Any]]:
         if zone_id:
             return self.query_all(
-                "SELECT * FROM lab_placement WHERE zone_id = ? ORDER BY subject_id ASC", (zone_id,)
+                "SELECT * FROM lab_placement WHERE zone_id = ? ORDER BY subject_id ASC",
+                (zone_id,),
             )
         return self.query_all("SELECT * FROM lab_placement ORDER BY subject_id ASC")
 
-    def get_placement(self, subject_id: str) -> Optional[Dict[str, Any]]:
-        return self.query_one("SELECT * FROM lab_placement WHERE subject_id = ?", (subject_id,))
+    def get_placement(self, subject_id: str) -> dict[str, Any] | None:
+        return self.query_one(
+            "SELECT * FROM lab_placement WHERE subject_id = ?", (subject_id,)
+        )
 
     # -- outbox / cursor -----------------------------------------------------
 
-    def pending_outbox(self, after_sequence: int, limit: int = 100) -> List[Dict[str, Any]]:
+    def pending_outbox(
+        self, after_sequence: int, limit: int = 100
+    ) -> list[dict[str, Any]]:
         return self.query_all(
             "SELECT * FROM sync_outbox WHERE sequence > ? ORDER BY sequence ASC LIMIT ?",
             (after_sequence, limit),
         )
 
     def get_cursor(self, name: str = "cloud") -> int:
-        row = self.query_one("SELECT acked_sequence FROM sync_cursor WHERE cursor_name = ?", (name,))
+        row = self.query_one(
+            "SELECT acked_sequence FROM sync_cursor WHERE cursor_name = ?", (name,)
+        )
         return int(row["acked_sequence"]) if row else 0
 
     def set_cursor(self, name: str, acked_sequence: int, now_ms: int) -> None:
@@ -355,7 +436,7 @@ class InventoryStore:
         op_type: str,
         aggregate_type: str,
         aggregate_id: str,
-        delta: Dict[str, Any],
+        delta: dict[str, Any],
         actor: str = "",
         reason: str = "",
         causation_id: str = "",
@@ -363,8 +444,16 @@ class InventoryStore:
         conn.execute(
             "INSERT INTO inventory_ledger(occurred_at, op_type, aggregate_type, aggregate_id, "
             "delta_json, actor, reason, causation_id) VALUES (?,?,?,?,?,?,?,?)",
-            (occurred_at, op_type, aggregate_type, aggregate_id,
-             json.dumps(delta, ensure_ascii=False), actor, reason, causation_id),
+            (
+                occurred_at,
+                op_type,
+                aggregate_type,
+                aggregate_id,
+                json.dumps(delta, ensure_ascii=False),
+                actor,
+                reason,
+                causation_id,
+            ),
         )
 
     @staticmethod
@@ -379,13 +468,23 @@ class InventoryStore:
         event_type: str,
         occurred_at: int,
         causation_id: str,
-        payload: Dict[str, Any],
+        payload: dict[str, Any],
     ) -> int:
         cur = conn.execute(
             "INSERT INTO sync_outbox(event_id, edge_id, lab_id, aggregate_type, aggregate_id, "
             "aggregate_version, event_type, occurred_at, causation_id, payload_json) "
             "VALUES (?,?,?,?,?,?,?,?,?,?)",
-            (event_id, edge_id, lab_id, aggregate_type, aggregate_id, aggregate_version,
-             event_type, occurred_at, causation_id, json.dumps(payload, ensure_ascii=False)),
+            (
+                event_id,
+                edge_id,
+                lab_id,
+                aggregate_type,
+                aggregate_id,
+                aggregate_version,
+                event_type,
+                occurred_at,
+                causation_id,
+                json.dumps(payload, ensure_ascii=False),
+            ),
         )
         return int(cur.lastrowid or 0)

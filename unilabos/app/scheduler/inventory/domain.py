@@ -9,8 +9,7 @@ from __future__ import annotations
 import uuid
 from dataclasses import dataclass, field
 from enum import Enum
-from typing import Any, Dict, List, Optional
-
+from typing import Any
 
 # ---------------------------------------------------------------------------
 # 领域错误
@@ -59,6 +58,36 @@ class CommandRejected(InventoryError):
     code = "command_rejected"
 
 
+class MaterialError(InventoryError):
+    """Material public error 基类。"""
+
+    code = "material_error"
+
+
+class MaterialInvalidInput(MaterialError):
+    """调用者提交了无效的 Material identity 或字段。"""
+
+    code = "invalid_input"
+
+
+class MaterialNotFound(MaterialError):
+    """未找到可见的 Material。"""
+
+    code = "not_found"
+
+
+class MaterialConflict(MaterialError):
+    """Material identity 或持久约束冲突。"""
+
+    code = "conflict"
+
+
+class MaterialAuthorityUnavailable(MaterialError):
+    """Material durable store 无法完成请求。"""
+
+    code = "material_authority_unavailable"
+
+
 # ---------------------------------------------------------------------------
 # 状态机
 # ---------------------------------------------------------------------------
@@ -66,7 +95,7 @@ class CommandRejected(InventoryError):
 
 class LotState(str, Enum):
     AVAILABLE = "available"
-    RESERVED = "reserved"      # 全部数量都被预留
+    RESERVED = "reserved"  # 全部数量都被预留
     DEPLETED = "depleted"
     QUARANTINED = "quarantined"
 
@@ -74,7 +103,7 @@ class LotState(str, Enum):
 class InstanceState(str, Enum):
     WAREHOUSE = "warehouse"
     RESERVED = "reserved"
-    BENCH = "bench"            # 已上台（deploy）
+    BENCH = "bench"  # 已上台（deploy）
     IN_USE = "in_use"
     CONSUMED = "consumed"
     DISCARDED = "discarded"
@@ -83,23 +112,43 @@ class InstanceState(str, Enum):
 
 class ReservationState(str, Enum):
     ACTIVE = "active"
-    CONSUMED = "consumed"      # 预留已转为实际消费
+    CONSUMED = "consumed"  # 预留已转为实际消费
     RELEASED = "released"
     QUARANTINED = "quarantined"  # 节点失败但物理已使用，转人工复核
 
 
 #: instance 状态机允许的迁移（from -> {to}）
-INSTANCE_TRANSITIONS: Dict[InstanceState, set] = {
-    InstanceState.WAREHOUSE: {InstanceState.RESERVED, InstanceState.BENCH, InstanceState.DISCARDED,
-                              InstanceState.QUARANTINED},
-    InstanceState.RESERVED: {InstanceState.WAREHOUSE, InstanceState.BENCH, InstanceState.QUARANTINED},
-    InstanceState.BENCH: {InstanceState.IN_USE, InstanceState.WAREHOUSE, InstanceState.CONSUMED,
-                          InstanceState.DISCARDED, InstanceState.QUARANTINED},
-    InstanceState.IN_USE: {InstanceState.BENCH, InstanceState.CONSUMED, InstanceState.DISCARDED,
-                           InstanceState.QUARANTINED},
+INSTANCE_TRANSITIONS: dict[InstanceState, set] = {
+    InstanceState.WAREHOUSE: {
+        InstanceState.RESERVED,
+        InstanceState.BENCH,
+        InstanceState.DISCARDED,
+        InstanceState.QUARANTINED,
+    },
+    InstanceState.RESERVED: {
+        InstanceState.WAREHOUSE,
+        InstanceState.BENCH,
+        InstanceState.QUARANTINED,
+    },
+    InstanceState.BENCH: {
+        InstanceState.IN_USE,
+        InstanceState.WAREHOUSE,
+        InstanceState.CONSUMED,
+        InstanceState.DISCARDED,
+        InstanceState.QUARANTINED,
+    },
+    InstanceState.IN_USE: {
+        InstanceState.BENCH,
+        InstanceState.CONSUMED,
+        InstanceState.DISCARDED,
+        InstanceState.QUARANTINED,
+    },
     InstanceState.CONSUMED: set(),
     InstanceState.DISCARDED: set(),
-    InstanceState.QUARANTINED: {InstanceState.WAREHOUSE, InstanceState.DISCARDED},  # 人工复核后放行/报废
+    InstanceState.QUARANTINED: {
+        InstanceState.WAREHOUSE,
+        InstanceState.DISCARDED,
+    },  # 人工复核后放行/报废
 }
 
 #: active（占用 barcode / 占用库存）的实例状态
@@ -114,10 +163,14 @@ ACTIVE_INSTANCE_STATES = {
 
 def check_instance_transition(current: InstanceState, target: InstanceState) -> None:
     if target not in INSTANCE_TRANSITIONS[current]:
-        raise CommandRejected(f"instance transition {current.value} -> {target.value} not allowed")
+        raise CommandRejected(
+            f"instance transition {current.value} -> {target.value} not allowed"
+        )
 
 
-def lot_state_for(total: float, available: float, reserved: float, quarantined: bool) -> LotState:
+def lot_state_for(
+    total: float, available: float, reserved: float, quarantined: bool
+) -> LotState:
     """根据数量推导 lot 状态（状态是数量的函数，不单独维护）."""
     if quarantined:
         return LotState.QUARANTINED
@@ -146,6 +199,58 @@ def check_lot_invariants(total: float, available: float, reserved: float) -> Non
 # ---------------------------------------------------------------------------
 
 
+@dataclass(frozen=True, slots=True)
+class ResourceTemplateIdentity:
+    """Registry/PackageCatalog 提供给 InventoryService 的最小 identity。"""
+
+    uuid: str
+    material_class: str
+
+
+@dataclass(frozen=True, slots=True)
+class MaterialRecord:
+    """Backend-field-aligned durable Material projection。"""
+
+    uuid: str
+    create_time: str
+    update_time: str
+    deleted_at: str | None
+    description: str | None
+    meta_data: dict[str, Any]
+    resource_template_uuid: str
+    parent_uuid: str | None
+    klass: str
+    barcode: str
+    name: str
+    config: dict[str, Any]
+    data: dict[str, Any]
+    disposition: str | None
+    material_kind: str
+    version: int
+
+    def to_dict(self) -> dict[str, Any]:
+        """投影为 Backend exact-baseline 的结构化 Material 字段。"""
+
+        return {
+            "uuid": self.uuid,
+            "create_time": self.create_time,
+            "update_time": self.update_time,
+            "deleted_at": self.deleted_at,
+            "description": self.description,
+            "meta_data": dict(self.meta_data),
+            "resource_template_uuid": self.resource_template_uuid,
+            "parent_uuid": self.parent_uuid,
+            "class": self.klass,
+            "barcode": self.barcode,
+            "name": self.name,
+            "config": dict(self.config),
+            "data": dict(self.data),
+            "disposition": self.disposition,
+            "material_kind": self.material_kind,
+            "version": self.version,
+        }
+
+
 @dataclass
 class MaterialRequirement:
     """一个节点对物料的需求（挂在 WorkflowNode 上，可选字段）.
@@ -164,7 +269,7 @@ class MaterialRequirement:
     def is_instance_requirement(self) -> bool:
         return bool(self.instance_uuid or self.barcode)
 
-    def to_dict(self) -> Dict[str, Any]:
+    def to_dict(self) -> dict[str, Any]:
         return {
             "template_id": self.template_id,
             "lot_id": self.lot_id,
@@ -175,13 +280,15 @@ class MaterialRequirement:
         }
 
     @classmethod
-    def from_dict(cls, data: Dict[str, Any]) -> "MaterialRequirement":
+    def from_dict(cls, data: dict[str, Any]) -> MaterialRequirement:
         return cls(
             template_id=str(data.get("template_id") or data.get("templateId") or ""),
             lot_id=str(data.get("lot_id") or data.get("lotId") or ""),
             quantity=float(data.get("quantity") or 0.0),
             unit=str(data.get("unit") or ""),
-            instance_uuid=str(data.get("instance_uuid") or data.get("instanceUuid") or ""),
+            instance_uuid=str(
+                data.get("instance_uuid") or data.get("instanceUuid") or ""
+            ),
             barcode=str(data.get("barcode") or ""),
         )
 
@@ -199,10 +306,10 @@ class OutboxEvent:
     event_type: str
     occurred_at: int  # 毫秒
     causation_id: str
-    payload: Dict[str, Any] = field(default_factory=dict)
+    payload: dict[str, Any] = field(default_factory=dict)
     sequence: int = 0
 
-    def to_dict(self) -> Dict[str, Any]:
+    def to_dict(self) -> dict[str, Any]:
         return {
             "event_id": self.event_id,
             "edge_id": self.edge_id,
@@ -232,9 +339,11 @@ def idempotency_key(workflow_id: str, node_id: str, attempt: int) -> str:
 # 需求聚合 --------------------------------------------------------------------
 
 
-def aggregate_lot_requirements(requirements: List[MaterialRequirement]) -> Dict[str, float]:
+def aggregate_lot_requirements(
+    requirements: list[MaterialRequirement],
+) -> dict[str, float]:
     """按 (lot_id 或 template:xxx) 汇总数量型需求，用于整 DAG 预留."""
-    totals: Dict[str, float] = {}
+    totals: dict[str, float] = {}
     for req in requirements:
         if req.is_instance_requirement() or req.quantity <= 0:
             continue
