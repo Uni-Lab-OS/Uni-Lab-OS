@@ -46,6 +46,14 @@ class ResourceTemplateIdentity:
 
 
 @dataclass(frozen=True, slots=True)
+class ResourceSlotResolution:
+    """Material Authority 对 concrete ResourceSlot 的最小解析结果。"""
+
+    uuid: str
+    resource_template_uuid: str
+
+
+@dataclass(frozen=True, slots=True)
 class MaterialRecord:
     """一个 Backend-field-aligned durable Material projection。"""
 
@@ -153,6 +161,8 @@ class RuntimeAuthorityCoordinator(Protocol):
     def transaction(
         self,
     ) -> AbstractContextManager[RuntimeAuthorityUnitOfWork]: ...
+
+    def current_unit_of_work(self) -> RuntimeAuthorityUnitOfWork | None: ...
 
 
 class MaterialAdapter(Protocol):

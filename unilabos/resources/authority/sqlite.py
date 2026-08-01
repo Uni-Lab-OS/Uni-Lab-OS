@@ -43,6 +43,8 @@ class _SQLiteRuntimeAuthorityCoordinator(Protocol):
 
     def owns_unit_of_work(self, uow: RuntimeAuthorityUnitOfWork) -> bool: ...
 
+    def current_unit_of_work(self) -> RuntimeAuthorityUnitOfWork | None: ...
+
 
 _SCHEMA_STATEMENTS = (
     """
@@ -291,6 +293,10 @@ class _StandaloneRuntimeAuthority:
         with self._lock:
             return uow is self._connection and self._connection.in_transaction
 
+    def current_unit_of_work(self) -> RuntimeAuthorityUnitOfWork | None:
+        with self._lock:
+            return self._connection if self._connection.in_transaction else None
+
     def close(self) -> None:
         with self._lock:
             self._connection.close()
@@ -357,6 +363,9 @@ class SQLiteMaterialAdapter:
                     "unit of work does not belong to Material Authority"
                 )
             return _BorrowedUnitOfWork(uow)
+        current_uow = self._coordinator.current_unit_of_work()
+        if current_uow is not None:
+            return _BorrowedUnitOfWork(current_uow)
         return self._coordinator.transaction()
 
     def create_business_material(

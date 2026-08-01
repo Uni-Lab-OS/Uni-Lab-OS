@@ -543,6 +543,12 @@ class WorkflowStore:
         with self._lock:
             return uow is self._conn and self._conn.in_transaction
 
+    def current_unit_of_work(self) -> sqlite3.Connection | None:
+        """返回当前线程可重入借用的活动 runtime-authority UoW。"""
+
+        with self._lock:
+            return self._conn if self._conn.in_transaction else None
+
     @contextmanager
     def catalog_guard(self) -> Iterator[None]:
         """串行化 Catalog replace 与 compiler read snapshot。
