@@ -10,8 +10,11 @@ import threading
 from collections.abc import Iterable
 from pathlib import Path
 
+from unilabos.resources.authority import MaterialModule
+from unilabos.resources.authority.sqlite import SQLiteMaterialAdapter
 from unilabos.workflow.authoring_engine import WorkflowAuthoringEngine
 from unilabos.workflow.catalog import CatalogAuthority, TemplateCatalog
+from unilabos.workflow.material_resolver import MaterialResourceSlotResolver
 from unilabos.workflow.runtime import (
     WorkflowRuntimeCoordinator,
     WorkflowRuntimeWorker,
@@ -187,7 +190,17 @@ def compose_workflow_runtime(
                     catalog=TemplateCatalog(store),
                     authority=authority,
                 )
-            new_service = WorkflowService(store, compiler=runtime_compiler)
+            material_module = MaterialModule(
+                SQLiteMaterialAdapter.from_runtime_authority(store),
+                # Concrete ResourceSlot resolution reads the durable Material
+                # identity only; template discovery remains outside M1C.
+                resource_templates={},
+            )
+            new_service = WorkflowService(
+                store,
+                compiler=runtime_compiler,
+                resource_resolver=MaterialResourceSlotResolver(material_module),
+            )
             register_editable_package_sources(
                 new_service,
                 configured_roots,
