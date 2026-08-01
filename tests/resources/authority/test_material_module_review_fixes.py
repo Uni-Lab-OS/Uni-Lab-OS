@@ -9,6 +9,7 @@ from types import MappingProxyType
 import pytest
 
 from unilabos.resources.authority import (
+    MaterialConflict,
     MaterialError,
     MaterialInvalidInput,
     MaterialModule,
@@ -159,5 +160,30 @@ def test_site_create_reports_missing_shared_owner_and_occupant_before_self_occup
         with pytest.raises(MaterialNotFound):
             materials.get_site(SITE_UUID)
         assert type(caught_error) is MaterialNotFound
+    finally:
+        coordinator.close()
+
+
+def test_site_create_reports_existing_self_occupancy_before_allowlist_mismatch(
+    tmp_path: Path,
+) -> None:
+    coordinator = WorkflowStore(tmp_path / "workflow.db")
+    try:
+        materials = _material_module(coordinator)
+        _create_owner(materials)
+        arguments = _site_arguments()
+        arguments["occupied_material_uuid"] = MATERIAL_UUID
+        arguments["allowed_resource_template_uuids"] = [SECOND_RESOURCE_TEMPLATE_UUID]
+
+        caught_error: MaterialError | None = None
+        try:
+            materials.create_site(**arguments)
+        except MaterialError as error:
+            caught_error = error
+
+        assert caught_error is not None
+        with pytest.raises(MaterialNotFound):
+            materials.get_site(SITE_UUID)
+        assert type(caught_error) is MaterialConflict
     finally:
         coordinator.close()
