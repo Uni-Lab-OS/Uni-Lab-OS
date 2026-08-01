@@ -28,8 +28,8 @@ reconciliation、REST/SSE 或前端读模型；M1 与 M2 决策仍处于实现�
 | 基线 | `integration/workflow-task-runtime@46cf3649b9b6ff7b89765da81106148ac0f4209a` |
 | 实现分支 | `migration/m1b-site-authority` |
 | 控制面 | Core `#155`、OS delivery `#6` |
-| 唯一独立 test-author | `/root/m1_audit`，全过程同一人 |
-| 唯一独立 reviewer | `/root/m1_reviewer`，全过程同一人 |
+| 唯一指定的独立 test-author | `/root/test_m1b_review_fixes` |
+| 唯一独立 reviewer | `/root/review_m1b_site_authority`，全过程同一人 |
 | 首次完整候选 | `c7a218ffb8da65d6222599124ae4b8fb52ab0532` |
 | 首次复核候选 | `21f9b6f241ac06026538cd84619afe6490833425` |
 | 固定行为候选 | `a2e5146ba09ffe64317cc60d7a4001f1b08afe05` |
@@ -47,10 +47,13 @@ tests-first 提交均保留在可审查历史中，没有 squash、删除、skip
 | 独立 test-author 错误优先级 RED | `f46943183189b7c77aabf8e2c87b4bec45f273d0` | `5c8ef80d21491de688d4175a8dae858ede6d57d4` | `1 failed`：未知相同 owner/occupant 错报 conflict；Site zero-write |
 | 独立 test-author self-cycle 优先级 RED | `e81df7bf0caa0863eccad9506362d863ddc41469` | `8dde31a0034aaae31b2ea14bbd5ee744a9d6786b` | `1 failed`：已有 owner 自占用被 allowlist mismatch 覆盖；Site zero-write |
 
-以上 RED 与 reviewer finding 回归均由同一 `/root/m1_audit` 在 tests-only branch/worktree
-完成；测试注释本地化原提交 `8a1f5cba1ae8e659b9882e949209cb3c32e78249` 只修正文案，
-不改变 fixture、断言或行为。reviewer 未参与实现或测试编写；行为变更后均由同一 reviewer
-重新检查精确 SHA。
+`45a34a2` 是 round 分支上的补充 finding 回归，不代表第二名独立 test-author。D-096
+门禁中唯一被指定、与实现及 reviewer 隔离的 test-author 是
+`/root/test_m1b_review_fixes`；其 tests-only 提交为 `d7a14e6`、`f469431` 与 `e81df7b`，
+对应 migration 提交为 `bbf8e97`、`5c8ef80` 与 `8dde31a`。测试注释本地化原提交
+`8a1f5cba1ae8e659b9882e949209cb3c32e78249` 只修正文案，不改变 fixture、断言或行为。
+reviewer 未参与实现或测试编写；行为变更后均由同一
+`/root/review_m1b_site_authority` 重新检查精确 SHA。
 
 ## 3. 最终门禁证据
 
