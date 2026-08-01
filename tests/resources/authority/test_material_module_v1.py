@@ -37,6 +37,7 @@ SECOND_MATERIAL_CLASS = "Microplate"
 MATERIAL_NAME = "Sample 17"
 SECOND_MATERIAL_NAME = "Sample 18"
 SITE_UUID = "60000000-0000-4000-8000-000000000017"
+SECOND_SITE_UUID = "60000000-0000-4000-8000-000000000018"
 
 EXPECTED_INITIAL_MATERIAL = {
     "uuid": MATERIAL_UUID,
@@ -112,13 +113,15 @@ def _create_site_with_references(
     material_uuid: str,
     occupied_material_uuid: str | None,
     allowed_resource_template_uuids: list[str],
+    site_uuid: str = SITE_UUID,
+    name: str = "A1",
 ) -> Any:
     return materials.create_site(
-        site_uuid=SITE_UUID,
+        site_uuid=site_uuid,
         description="Reference validation site",
         meta_data={"slice": "m1b-references"},
         material_uuid=material_uuid,
-        name="A1",
+        name=name,
         sort_order=0,
         allowed_resource_template_uuids=allowed_resource_template_uuids,
         occupied_material_uuid=occupied_material_uuid,
@@ -128,6 +131,21 @@ def _create_site_with_references(
         depth=1.0,
         length=1.0,
         width=1.0,
+    )
+
+
+def _create_placement_materials(materials: MaterialModule) -> None:
+    materials.create_business_material(
+        material_uuid=MATERIAL_UUID,
+        resource_template_uuid=RESOURCE_TEMPLATE_UUID,
+        barcode="OWNER-PLACEMENT-017",
+        name="Placement owner",
+    )
+    materials.create_business_material(
+        material_uuid=SECOND_MATERIAL_UUID,
+        resource_template_uuid=SECOND_RESOURCE_TEMPLATE_UUID,
+        barcode="OCCUPANT-PLACEMENT-018",
+        name="Placement occupant",
     )
 
 
@@ -670,3 +688,142 @@ def test_site_create_rejects_invalid_authority_references_without_side_effects(
             material_uuid: reopened_materials.get_material(material_uuid).to_dict()
             for material_uuid in material_snapshot
         } == material_snapshot
+
+
+def test_site_rejects_owner_as_its_own_occupant_without_write(
+    tmp_path: Path,
+) -> None:
+    database_path = tmp_path / "workflow.db"
+    with _open_material_module(database_path) as materials:
+        _create_placement_materials(materials)
+        owner_projection = materials.get_material(MATERIAL_UUID).to_dict()
+
+        with pytest.raises(MaterialInvalidInput) as error:
+            _create_site_with_references(
+                materials,
+                material_uuid=MATERIAL_UUID,
+                occupied_material_uuid=MATERIAL_UUID,
+                allowed_resource_template_uuids=[RESOURCE_TEMPLATE_UUID],
+            )
+
+        assert error.type is MaterialInvalidInput
+        with pytest.raises(MaterialNotFound):
+            materials.get_site(SITE_UUID)
+        assert materials.get_material(MATERIAL_UUID).to_dict() == owner_projection
+
+    with _open_material_module(database_path) as reopened_materials:
+        with pytest.raises(MaterialNotFound):
+            reopened_materials.get_site(SITE_UUID)
+        assert (
+            reopened_materials.get_material(MATERIAL_UUID).to_dict() == owner_projection
+        )
+
+
+@pytest.mark.parametrize(
+    ("first_placement", "rejected_placement"),
+    [
+        pytest.param(
+            {
+                "material_uuid": MATERIAL_UUID,
+                "occupied_material_uuid": SECOND_MATERIAL_UUID,
+                "allowed_resource_template_uuids": [SECOND_RESOURCE_TEMPLATE_UUID],
+                "name": "A1",
+            },
+            {
+                "material_uuid": MATERIAL_UUID,
+                "occupied_material_uuid": SECOND_MATERIAL_UUID,
+                "allowed_resource_template_uuids": [SECOND_RESOURCE_TEMPLATE_UUID],
+                "name": "B1",
+            },
+            id="occupant-already-placed",
+        ),
+        pytest.param(
+            {
+                "material_uuid": MATERIAL_UUID,
+                "occupied_material_uuid": SECOND_MATERIAL_UUID,
+                "allowed_resource_template_uuids": [SECOND_RESOURCE_TEMPLATE_UUID],
+                "name": "A1",
+            },
+            {
+                "material_uuid": SECOND_MATERIAL_UUID,
+                "occupied_material_uuid": MATERIAL_UUID,
+                "allowed_resource_template_uuids": [RESOURCE_TEMPLATE_UUID],
+                "name": "B1",
+            },
+            id="placement-cycle",
+        ),
+        pytest.param(
+            {
+                "material_uuid": MATERIAL_UUID,
+                "occupied_material_uuid": None,
+                "allowed_resource_template_uuids": [],
+                "name": "Ä1",
+            },
+            {
+                "material_uuid": MATERIAL_UUID,
+                "occupied_material_uuid": None,
+                "allowed_resource_template_uuids": [],
+                "name": "ä1",
+            },
+            id="unicode-casefold-owner-name",
+        ),
+    ],
+)
+def test_site_rejects_conflicting_second_placement_and_preserves_first(
+    tmp_path: Path,
+    first_placement: dict[str, Any],
+    rejected_placement: dict[str, Any],
+) -> None:
+    database_path = tmp_path / "workflow.db"
+    with _open_material_module(database_path) as materials:
+        _create_placement_materials(materials)
+        first = _create_site_with_references(
+            materials,
+            site_uuid=SITE_UUID,
+            **first_placement,
+        )
+        first_projection = first.to_dict()
+
+        with pytest.raises(MaterialConflict) as error:
+            _create_site_with_references(
+                materials,
+                site_uuid=SECOND_SITE_UUID,
+                **rejected_placement,
+            )
+
+        assert error.type is MaterialConflict
+        assert materials.get_site(SITE_UUID).to_dict() == first_projection
+        with pytest.raises(MaterialNotFound):
+            materials.get_site(SECOND_SITE_UUID)
+
+    with _open_material_module(database_path) as reopened_materials:
+        assert reopened_materials.get_site(SITE_UUID).to_dict() == first_projection
+        with pytest.raises(MaterialNotFound):
+            reopened_materials.get_site(SECOND_SITE_UUID)
+
+
+def test_empty_site_template_allowlist_accepts_any_registered_occupant(
+    tmp_path: Path,
+) -> None:
+    from unilabos.resources.authority import SiteRecord
+
+    database_path = tmp_path / "workflow.db"
+    with _open_material_module(database_path) as materials:
+        _create_placement_materials(materials)
+
+        created = _create_site_with_references(
+            materials,
+            material_uuid=MATERIAL_UUID,
+            occupied_material_uuid=SECOND_MATERIAL_UUID,
+            allowed_resource_template_uuids=[],
+        )
+        projection = created.to_dict()
+
+        assert isinstance(created, SiteRecord)
+        assert projection["material_uuid"] == MATERIAL_UUID
+        assert projection["occupied_material_uuid"] == SECOND_MATERIAL_UUID
+        assert projection["allowed_resource_template_uuids"] == []
+        assert materials.get_site(SITE_UUID).to_dict() == projection
+
+    with _open_material_module(database_path) as reopened_materials:
+        assert reopened_materials.get_site(SITE_UUID).to_dict() == projection
