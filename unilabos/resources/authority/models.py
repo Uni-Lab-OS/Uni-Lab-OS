@@ -54,6 +54,16 @@ class ResourceSlotResolution:
 
 
 @dataclass(frozen=True, slots=True)
+class MaterialReservationOutcome:
+    """Task 对一个完整 Material 集合的原子预留结果。"""
+
+    acquired: bool
+    reservation_uuid: str | None
+    set_fingerprint: str
+    material_uuids: tuple[str, ...]
+
+
+@dataclass(frozen=True, slots=True)
 class MaterialRecord:
     """一个 Backend-field-aligned durable Material projection。"""
 
@@ -225,3 +235,21 @@ class MaterialAdapter(Protocol):
         *,
         uow: RuntimeAuthorityUnitOfWork | None = None,
     ) -> tuple[SiteRecord, ...]: ...
+
+    def reserve_task_materials(
+        self,
+        *,
+        reservation_uuid: str,
+        task_uuid: str,
+        root_material_uuids: tuple[str, ...],
+        now: str,
+        uow: RuntimeAuthorityUnitOfWork,
+    ) -> MaterialReservationOutcome: ...
+
+    def has_complete_task_reservation(
+        self,
+        *,
+        task_uuid: str,
+        root_material_uuids: tuple[str, ...],
+        uow: RuntimeAuthorityUnitOfWork,
+    ) -> bool: ...

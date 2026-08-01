@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import hashlib
 import json
 import sqlite3
 import threading
@@ -16,6 +17,7 @@ from .models import (
     MaterialInvalidInput,
     MaterialNotFound,
     MaterialRecord,
+    MaterialReservationOutcome,
     RuntimeAuthorityUnitOfWork,
     SiteRecord,
 )
@@ -143,6 +145,49 @@ CREATE INDEX IF NOT EXISTS ix_site_material_order_active
     ON site(material_uuid, sort_order, create_time, uuid)
     WHERE deleted_at IS NULL
 """,
+    """
+CREATE TABLE IF NOT EXISTS material_reservation (
+    uuid TEXT PRIMARY KEY,
+    workflow_task_uuid TEXT NOT NULL,
+    set_fingerprint TEXT NOT NULL,
+    status TEXT NOT NULL CHECK (status IN ('active', 'released')),
+    create_time TEXT NOT NULL,
+    released_at TEXT,
+    FOREIGN KEY(workflow_task_uuid) REFERENCES workflow_task(uuid) ON DELETE CASCADE,
+    CHECK (
+        (status = 'active' AND released_at IS NULL)
+        OR (status = 'released' AND released_at IS NOT NULL)
+    )
+)
+""",
+    """
+CREATE UNIQUE INDEX IF NOT EXISTS ux_material_reservation_task_active
+    ON material_reservation(workflow_task_uuid)
+    WHERE status = 'active'
+""",
+    """
+CREATE TABLE IF NOT EXISTS material_reservation_member (
+    reservation_uuid TEXT NOT NULL,
+    material_uuid TEXT NOT NULL,
+    root_material_uuid TEXT NOT NULL,
+    acquired_version INTEGER NOT NULL CHECK (acquired_version > 0),
+    released_at TEXT,
+    PRIMARY KEY(reservation_uuid, material_uuid),
+    FOREIGN KEY(reservation_uuid) REFERENCES material_reservation(uuid)
+        ON DELETE CASCADE,
+    FOREIGN KEY(material_uuid) REFERENCES material(uuid) ON DELETE RESTRICT,
+    FOREIGN KEY(root_material_uuid) REFERENCES material(uuid) ON DELETE RESTRICT
+)
+""",
+    """
+CREATE UNIQUE INDEX IF NOT EXISTS ux_material_reservation_member_active
+    ON material_reservation_member(material_uuid)
+    WHERE released_at IS NULL
+""",
+    """
+CREATE INDEX IF NOT EXISTS ix_material_reservation_member_root
+    ON material_reservation_member(root_material_uuid)
+""",
 )
 
 
@@ -228,6 +273,91 @@ def _read_site(
     return _site_record(
         row,
         tuple(allowed_row["resource_template_uuid"] for allowed_row in allowed_rows),
+    )
+
+
+def _reservation_fingerprint(material_uuids: tuple[str, ...]) -> str:
+    payload = json.dumps(
+        list(material_uuids),
+        ensure_ascii=False,
+        separators=(",", ":"),
+    ).encode("utf-8")
+    return f"sha256:{hashlib.sha256(payload).hexdigest()}"
+
+
+def _active_reservation_outcome(
+    uow: RuntimeAuthorityUnitOfWork,
+    task_uuid: str,
+) -> MaterialReservationOutcome | None:
+    header = uow.execute(
+        """
+        SELECT uuid, set_fingerprint
+        FROM material_reservation
+        WHERE workflow_task_uuid = ? AND status = 'active'
+        """,
+        (task_uuid,),
+    ).fetchone()
+    if header is None:
+        return None
+    rows = uow.execute(
+        """
+        SELECT material_uuid, root_material_uuid
+        FROM material_reservation_member
+        WHERE reservation_uuid = ? AND released_at IS NULL
+        ORDER BY material_uuid
+        """,
+        (header["uuid"],),
+    ).fetchall()
+    material_uuids = tuple(row["material_uuid"] for row in rows)
+    return MaterialReservationOutcome(
+        acquired=True,
+        reservation_uuid=header["uuid"],
+        set_fingerprint=header["set_fingerprint"],
+        material_uuids=material_uuids,
+    )
+
+
+def _expand_reservation_roots(
+    uow: RuntimeAuthorityUnitOfWork,
+    root_material_uuids: tuple[str, ...],
+) -> tuple[tuple[str, str, int], ...]:
+    members: dict[str, tuple[str, int]] = {}
+    for root_uuid in root_material_uuids:
+        rows = uow.execute(
+            """
+            WITH RECURSIVE subtree(uuid) AS (
+                SELECT uuid
+                FROM material
+                WHERE uuid = ? AND deleted_at IS NULL
+                UNION
+                SELECT child.uuid
+                FROM material AS child
+                JOIN subtree ON child.parent_uuid = subtree.uuid
+                WHERE child.deleted_at IS NULL
+            )
+            SELECT material.uuid, material.material_kind,
+                   material.disposition, material.version
+            FROM material
+            JOIN subtree ON subtree.uuid = material.uuid
+            ORDER BY material.uuid
+            """,
+            (root_uuid,),
+        ).fetchall()
+        if not rows or all(row["uuid"] != root_uuid for row in rows):
+            raise MaterialNotFound(f"material {root_uuid} not found")
+        for row in rows:
+            if row["material_kind"] != "business":
+                raise MaterialInvalidInput(
+                    "Material reservation requires business Materials"
+                )
+            if row["disposition"] != "active":
+                raise MaterialConflict("Material is not runnable")
+            existing = members.get(row["uuid"])
+            if existing is None or root_uuid < existing[0]:
+                members[row["uuid"]] = (root_uuid, int(row["version"]))
+    return tuple(
+        (material_uuid, root_uuid, version)
+        for material_uuid, (root_uuid, version) in sorted(members.items())
     )
 
 
@@ -610,6 +740,182 @@ class SQLiteMaterialAdapter:
         if any(site is None for site in sites):
             raise MaterialAuthorityUnavailable("listed site is not readable")
         return tuple(site for site in sites if site is not None)
+
+    def reserve_task_materials(
+        self,
+        *,
+        reservation_uuid: str,
+        task_uuid: str,
+        root_material_uuids: tuple[str, ...],
+        now: str,
+        uow: RuntimeAuthorityUnitOfWork,
+    ) -> MaterialReservationOutcome:
+        """在借用的 Task transaction 内写入一个 all-or-none Reservation。"""
+
+        try:
+            with self._with_uow(uow) as active_uow:
+                task = active_uow.execute(
+                    """
+                    SELECT 1 FROM workflow_task
+                    WHERE uuid = ? AND deleted_at IS NULL
+                    """,
+                    (task_uuid,),
+                ).fetchone()
+                if task is None:
+                    raise MaterialNotFound(f"workflow task {task_uuid} not found")
+
+                members = _expand_reservation_roots(
+                    active_uow,
+                    root_material_uuids,
+                )
+                material_uuids = tuple(member[0] for member in members)
+                fingerprint = _reservation_fingerprint(material_uuids)
+                existing = _active_reservation_outcome(active_uow, task_uuid)
+                if existing is not None:
+                    if (
+                        existing.set_fingerprint != fingerprint
+                        or existing.material_uuids != material_uuids
+                    ):
+                        raise MaterialConflict(
+                            "task already owns a different Material reservation"
+                        )
+                    return existing
+
+                active_uow.execute("SAVEPOINT unilab_task_material_reservation")
+                try:
+                    active_uow.execute(
+                        """
+                        INSERT INTO material_reservation(
+                            uuid, workflow_task_uuid, set_fingerprint,
+                            status, create_time, released_at
+                        ) VALUES (?, ?, ?, 'active', ?, NULL)
+                        """,
+                        (reservation_uuid, task_uuid, fingerprint, now),
+                    )
+                    for material_uuid, root_uuid, acquired_version in members:
+                        active_uow.execute(
+                            """
+                            INSERT INTO material_reservation_member(
+                                reservation_uuid, material_uuid,
+                                root_material_uuid, acquired_version, released_at
+                            ) VALUES (?, ?, ?, ?, NULL)
+                            """,
+                            (
+                                reservation_uuid,
+                                material_uuid,
+                                root_uuid,
+                                acquired_version,
+                            ),
+                        )
+                except sqlite3.IntegrityError:
+                    try:
+                        active_uow.execute(
+                            "ROLLBACK TO SAVEPOINT unilab_task_material_reservation"
+                        )
+                    finally:
+                        active_uow.execute(
+                            "RELEASE SAVEPOINT unilab_task_material_reservation"
+                        )
+                    marks = ",".join("?" for _ in material_uuids)
+                    conflict = active_uow.execute(
+                        f"""
+                        SELECT 1
+                        FROM material_reservation_member
+                        WHERE released_at IS NULL
+                          AND material_uuid IN ({marks})
+                        LIMIT 1
+                        """,
+                        material_uuids,
+                    ).fetchone()
+                    if conflict is None:
+                        raise MaterialConflict(
+                            "Material reservation violates durable constraints"
+                        ) from None
+                    return MaterialReservationOutcome(
+                        acquired=False,
+                        reservation_uuid=None,
+                        set_fingerprint=fingerprint,
+                        material_uuids=material_uuids,
+                    )
+                except BaseException:
+                    try:
+                        active_uow.execute(
+                            "ROLLBACK TO SAVEPOINT unilab_task_material_reservation"
+                        )
+                    finally:
+                        active_uow.execute(
+                            "RELEASE SAVEPOINT unilab_task_material_reservation"
+                        )
+                    raise
+                else:
+                    active_uow.execute(
+                        "RELEASE SAVEPOINT unilab_task_material_reservation"
+                    )
+                    return MaterialReservationOutcome(
+                        acquired=True,
+                        reservation_uuid=reservation_uuid,
+                        set_fingerprint=fingerprint,
+                        material_uuids=material_uuids,
+                    )
+        except MaterialConflict:
+            raise
+        except (MaterialInvalidInput, MaterialNotFound):
+            raise
+        except sqlite3.Error:
+            raise MaterialAuthorityUnavailable(
+                "failed to reserve task Materials"
+            ) from None
+
+    def has_complete_task_reservation(
+        self,
+        *,
+        task_uuid: str,
+        root_material_uuids: tuple[str, ...],
+        uow: RuntimeAuthorityUnitOfWork,
+    ) -> bool:
+        """检查活动 header、完整 members 与 acquired version。"""
+
+        try:
+            with self._with_uow(uow) as active_uow:
+                existing = _active_reservation_outcome(active_uow, task_uuid)
+                if existing is None:
+                    return False
+                members = _expand_reservation_roots(
+                    active_uow,
+                    root_material_uuids,
+                )
+                expected_material_uuids = tuple(member[0] for member in members)
+                if (
+                    not existing.material_uuids
+                    or existing.material_uuids != expected_material_uuids
+                ):
+                    return False
+                if existing.set_fingerprint != _reservation_fingerprint(
+                    expected_material_uuids
+                ):
+                    return False
+                marks = ",".join("?" for _ in existing.material_uuids)
+                valid_count = active_uow.execute(
+                    f"""
+                    SELECT COUNT(*)
+                    FROM material_reservation_member AS member
+                    JOIN material
+                      ON material.uuid = member.material_uuid
+                     AND material.deleted_at IS NULL
+                     AND material.material_kind = 'business'
+                     AND material.disposition = 'active'
+                     AND material.version = member.acquired_version
+                    WHERE member.reservation_uuid = ?
+                      AND member.released_at IS NULL
+                      AND member.material_uuid IN ({marks})
+                    """,
+                    (existing.reservation_uuid, *existing.material_uuids),
+                ).fetchone()[0]
+                return int(valid_count) == len(existing.material_uuids)
+        except sqlite3.Error:
+            raise MaterialAuthorityUnavailable(
+                "failed to check task Material reservation"
+            ) from None
 
 
 class _BorrowedUnitOfWork:
