@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-from collections.abc import Callable
 from contextlib import AbstractContextManager
 from dataclasses import dataclass
 from typing import Any, Protocol
@@ -94,12 +93,6 @@ class RuntimeAuthorityUnitOfWork(Protocol):
     """调用者已经打开的 runtime-authority transaction capability。"""
 
     def execute(self, statement: str, parameters: tuple[Any, ...] = ()) -> Any: ...
-
-    def create_collation(
-        self,
-        name: str,
-        comparison: Callable[[str, str], int],
-    ) -> None: ...
 
 
 class RuntimeAuthorityCoordinator(Protocol):

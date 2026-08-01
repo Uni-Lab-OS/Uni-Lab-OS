@@ -5,20 +5,41 @@ from __future__ import annotations
 import json
 import sqlite3
 import threading
+from collections.abc import Callable
 from contextlib import AbstractContextManager, contextmanager
 from pathlib import Path
-from typing import Any, Iterator
+from typing import Any, Iterator, Protocol
 
 from .models import (
     MaterialAuthorityUnavailable,
     MaterialConflict,
     MaterialRecord,
-    RuntimeAuthorityCoordinator,
     RuntimeAuthorityUnitOfWork,
 )
 
 _SQLITE_BUSY_TIMEOUT_MS = 5000
 _UNICODE_CASEFOLD_COLLATION = "UNICODE_CASEFOLD"
+
+
+class _SQLiteRuntimeAuthorityUnitOfWork(RuntimeAuthorityUnitOfWork, Protocol):
+    """SQLite adapter 安装 connection-local capability 的内部 seam。"""
+
+    def create_collation(
+        self,
+        name: str,
+        comparison: Callable[[str, str], int],
+    ) -> None: ...
+
+
+class _SQLiteRuntimeAuthorityCoordinator(Protocol):
+    """SQLite adapter 所需的 transaction 与 authority-affinity capability。"""
+
+    def transaction(
+        self,
+    ) -> AbstractContextManager[_SQLiteRuntimeAuthorityUnitOfWork]: ...
+
+    def owns_unit_of_work(self, uow: RuntimeAuthorityUnitOfWork) -> bool: ...
+
 
 _SCHEMA_STATEMENTS = (
     """
@@ -145,6 +166,10 @@ class _StandaloneRuntimeAuthority:
             else:
                 self._connection.commit()
 
+    def owns_unit_of_work(self, uow: RuntimeAuthorityUnitOfWork) -> bool:
+        with self._lock:
+            return uow is self._connection and self._connection.in_transaction
+
     def close(self) -> None:
         with self._lock:
             self._connection.close()
@@ -154,11 +179,11 @@ class SQLiteMaterialAdapter:
     """把 Material repository 装配到一个 runtime-authority coordinator。"""
 
     def __init__(self, database_path: str | Path):
-        coordinator: RuntimeAuthorityCoordinator | None = None
+        coordinator: _SQLiteRuntimeAuthorityCoordinator | None = None
         try:
             coordinator = _StandaloneRuntimeAuthority(database_path)
             self._configure(coordinator, owned=True)
-        except (OSError, sqlite3.Error):
+        except (OSError, ValueError, sqlite3.Error):
             if coordinator is not None:
                 coordinator.close()
             raise MaterialAuthorityUnavailable(
@@ -168,7 +193,7 @@ class SQLiteMaterialAdapter:
     @classmethod
     def from_runtime_authority(
         cls,
-        coordinator: RuntimeAuthorityCoordinator,
+        coordinator: _SQLiteRuntimeAuthorityCoordinator,
     ) -> SQLiteMaterialAdapter:
         """绑定已有 coordinator；adapter 不取得 connection/close ownership。"""
 
@@ -183,7 +208,7 @@ class SQLiteMaterialAdapter:
 
     def _configure(
         self,
-        coordinator: RuntimeAuthorityCoordinator,
+        coordinator: _SQLiteRuntimeAuthorityCoordinator,
         *,
         owned: bool,
     ) -> None:
@@ -206,6 +231,10 @@ class SQLiteMaterialAdapter:
         uow: RuntimeAuthorityUnitOfWork | None,
     ) -> AbstractContextManager[RuntimeAuthorityUnitOfWork]:
         if uow is not None:
+            if not self._coordinator.owns_unit_of_work(uow):
+                raise MaterialAuthorityUnavailable(
+                    "unit of work does not belong to Material Authority"
+                )
             return _BorrowedUnitOfWork(uow)
         return self._coordinator.transaction()
 
