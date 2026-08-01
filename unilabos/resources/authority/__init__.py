@@ -18,6 +18,7 @@ from .models import (
     MaterialInvalidInput,
     MaterialNotFound,
     MaterialRecord,
+    ResourceSlotResolution,
     ResourceTemplateIdentity,
     RuntimeAuthorityUnitOfWork,
     SiteRecord,
@@ -165,6 +166,54 @@ class MaterialModule:
             raise MaterialNotFound(f"material {canonical_uuid} not found")
         return material
 
+    def resolve_resource_slot(
+        self,
+        *,
+        material_uuid: str,
+        allowed_resource_template_uuids: tuple[str, ...] | None,
+        uow: RuntimeAuthorityUnitOfWork | None = None,
+    ) -> ResourceSlotResolution:
+        """把 concrete ResourceSlot 解析为 authority-owned identity。"""
+
+        canonical_uuid = _canonical_uuid(material_uuid, "material_uuid")
+        allowed_templates: set[str] | None = None
+        if allowed_resource_template_uuids is not None:
+            if type(allowed_resource_template_uuids) is not tuple:
+                raise MaterialInvalidInput(
+                    "allowed_resource_template_uuids must be a UUID tuple or null"
+                )
+            allowed_templates = {
+                _canonical_uuid(value, "allowed_resource_template_uuid")
+                for value in allowed_resource_template_uuids
+            }
+
+        material = self._adapter.get_material(canonical_uuid, uow=uow)
+        if material is None:
+            raise MaterialNotFound(f"material {canonical_uuid} not found")
+        if not isinstance(material, MaterialRecord):
+            raise MaterialInvalidInput("material adapter returned an invalid identity")
+        if material.deleted_at is not None:
+            raise MaterialNotFound(f"material {canonical_uuid} not found")
+        resolved_uuid = _canonical_uuid(material.uuid, "material.uuid")
+        if resolved_uuid != canonical_uuid:
+            raise MaterialInvalidInput("material adapter returned an invalid identity")
+        template_uuid = _canonical_uuid(
+            material.resource_template_uuid,
+            "material.resource_template_uuid",
+        )
+        if material.material_kind != "business":
+            raise MaterialInvalidInput("ResourceSlot requires a business Material")
+        if material.disposition != "active":
+            raise MaterialConflict("Material is not runnable")
+        if allowed_templates is not None and template_uuid not in allowed_templates:
+            raise MaterialInvalidInput(
+                "Material template is not allowed by ResourceSlot"
+            )
+        return ResourceSlotResolution(
+            uuid=resolved_uuid,
+            resource_template_uuid=template_uuid,
+        )
+
     def create_site(
         self,
         *,
@@ -269,6 +318,7 @@ __all__ = [
     "MaterialModule",
     "MaterialNotFound",
     "MaterialRecord",
+    "ResourceSlotResolution",
     "ResourceTemplateIdentity",
     "SiteRecord",
 ]
