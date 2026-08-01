@@ -5,6 +5,13 @@ class BasicConfig:
     sk = ""  # 实验室网页给您提供的sk代码，您可以在配置文件中指定，也可以通过运行unilabos时以 --sk 传入，优先按照传入参数解析
 
 
+class ObservabilityConfig:
+    # 安装 `pip install -e '.[observability]'` 后设为 True，Uni-Lab-OS 会自动启动 Phoenix。
+    enabled = False
+    project_name = "uni-lab-electron"
+    retention_days = 30
+
+
 # WebSocket配置，一般无需调整
 class WSConfig:
     reconnect_interval = 5  # 重连间隔（秒）

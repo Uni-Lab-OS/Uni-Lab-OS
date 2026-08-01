@@ -1,0 +1,114 @@
+"""显式开启的真实 Phoenix OSS 冒烟测试。"""
+
+from __future__ import annotations
+
+import os
+import subprocess
+import time
+from pathlib import Path
+
+import pytest
+from fastapi.testclient import TestClient
+
+from unilabos.app.observability_api import create_observability_app
+from unilabos.observability.config import ObservabilitySettings
+from unilabos.observability.gateway import ObservabilityGateway
+
+PHOENIX_EXECUTABLE = os.environ.get("UNILABOS_PHOENIX_EXECUTABLE", "")
+
+
+def _build_otlp_protobuf(trace_id: bytes, span_id: bytes, now_ns: int) -> bytes:
+    """使用 Phoenix 所在环境的官方 OTLP proto 生成测试载荷。"""
+
+    python_name = "python.exe" if os.name == "nt" else "python"
+    python_executable = str(Path(PHOENIX_EXECUTABLE).parent / python_name)
+    script = """
+import sys
+from opentelemetry.proto.collector.trace.v1.trace_service_pb2 import ExportTraceServiceRequest
+from opentelemetry.proto.trace.v1.trace_pb2 import Span, Status
+
+request = ExportTraceServiceRequest()
+resource_spans = request.resource_spans.add()
+scope_spans = resource_spans.scope_spans.add()
+scope_spans.scope.name = "uni-lab-electron-integration"
+span = scope_spans.spans.add()
+span.trace_id = bytes.fromhex(sys.argv[1])
+span.span_id = bytes.fromhex(sys.argv[2])
+span.name = "electron.integration.smoke"
+span.kind = Span.SPAN_KIND_INTERNAL
+span.start_time_unix_nano = int(sys.argv[3])
+span.end_time_unix_nano = int(sys.argv[3]) + 1_000_000
+span.status.code = Status.STATUS_CODE_OK
+sys.stdout.buffer.write(request.SerializeToString())
+"""
+    completed = subprocess.run(
+        [python_executable, "-c", script, trace_id.hex(), span_id.hex(), str(now_ns)],
+        check=True,
+        capture_output=True,
+    )
+    return completed.stdout
+
+
+@pytest.mark.skipif(
+    not PHOENIX_EXECUTABLE,
+    reason="需要通过 UNILABOS_PHOENIX_EXECUTABLE 显式指定真实 Phoenix",
+)
+def test_real_phoenix_sqlite_otlp_and_query(tmp_path: Path) -> None:
+    trace_id = bytes.fromhex("0123456789abcdef0123456789abcdef")
+    span_id = bytes.fromhex("0123456789abcdef")
+    now_ns = time.time_ns()
+    settings = ObservabilitySettings(
+        enabled=True,
+        auto_start=True,
+        host="127.0.0.1",
+        port=16006,
+        grpc_port=14317,
+        project_name="uni-lab-electron-integration",
+        working_dir=tmp_path / "phoenix",
+        retention_days=1,
+        startup_timeout_seconds=60.0,
+        request_timeout_seconds=10.0,
+        shutdown_timeout_seconds=10.0,
+        max_ingest_bytes=1024 * 1024,
+        phoenix_executable=PHOENIX_EXECUTABLE,
+    )
+    gateway = ObservabilityGateway(settings)
+    otlp_protobuf = _build_otlp_protobuf(trace_id, span_id, now_ns)
+
+    with TestClient(
+        create_observability_app(gateway),
+        client=("127.0.0.1", 31000),
+    ) as client:
+        status = client.get("/api/v1/observability/status")
+        assert status.json()["data"]["state"] == "ready"
+
+        exported = client.post(
+            "/api/v1/observability/otlp/v1/traces",
+            content=otlp_protobuf,
+            headers={"Content-Type": "application/x-protobuf"},
+        )
+        assert exported.status_code == 200
+
+        deadline = time.monotonic() + 15
+        while True:
+            traces = client.get(
+                "/api/v1/observability/traces",
+                params={"include_spans": "true"},
+            )
+            assert traces.status_code == 200
+            if any(
+                item.get("trace_id") == trace_id.hex()
+                for item in traces.json()["data"]["traces"]
+            ):
+                break
+            if time.monotonic() >= deadline:
+                pytest.fail("Phoenix 未在期限内返回刚上报的 trace")
+            time.sleep(0.25)
+
+        detail = client.get(f"/api/v1/observability/traces/{trace_id.hex()}")
+        assert detail.status_code == 200
+        assert detail.json()["data"]["spans"][0]["name"] == (
+            "electron.integration.smoke"
+        )
+
+    assert settings.database_path.is_file()

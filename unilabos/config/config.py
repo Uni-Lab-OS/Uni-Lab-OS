@@ -58,6 +58,26 @@ class HTTPConfig:
     schedule_addr = ""
 
 
+class ObservabilityConfig:
+    """Electron trace 日志与 Arize Phoenix OSS 配置。"""
+
+    enabled = False
+    auto_start = True
+    host = "127.0.0.1"
+    port = 6006
+    grpc_port = 4317
+    project_name = "uni-lab-electron"
+    # 空值时使用 BasicConfig.working_dir/observability/phoenix。
+    working_dir = ""
+    retention_days = 30
+    startup_timeout_seconds = 60.0
+    request_timeout_seconds = 10.0
+    shutdown_timeout_seconds = 10.0
+    max_ingest_bytes = 8 * 1024 * 1024
+    # 空值时从 PATH 查找 phoenix；可填写绝对路径。
+    phoenix_executable = ""
+
+
 # host-slave TCP 请求通路（HostLink）：物料查询走 host 本地事实源（云端物料已下线），
 # 并承载在线监控与 ROS 组网协助；是 host-slave 逐步从 ROS2 迁到 TCP/IP 组网的第一步。
 class HostLinkConfig:
