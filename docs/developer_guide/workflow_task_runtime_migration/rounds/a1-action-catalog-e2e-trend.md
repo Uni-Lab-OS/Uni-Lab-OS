@@ -10,13 +10,14 @@ FE integration 基线：`12d8d990f6f25c1740b9dd11b0fd69936f32cf3b`
 
 最终已审查候选：
 
-- OS：`77e79f53c868a28fb7a18a64b64a3d170611e66c`；
+- OS：`93ec0f3b515ef00e8ee1aefe3e0e5d68706b5860`；
 - FE：`7afd4119308a96d432f5c2a9b1e482f34f8d3bed`；
 - SZLab 固定 fixture：`975e9b12282aeb68282022631d4ff5e30af3f0e9`。
 
 状态：**`@action → PackageCatalog → Registry canonical record →
 TemplateCatalog → HTTP → 原 Persistent Workflow 编辑器` 已形成 production E2E；唯一独立
-reviewer 最终确认 Standards/Spec 均无 blocking，允许 non-squash 本地合入。**
+reviewer 对后续 OS 加固候选最终确认 Standards/Spec 均无 blocking，允许 non-squash 本地
+合入。此前以 `77e79f5` 为最终 OS 候选的结论已被本报告后续复审记录取代。**
 
 ## 1. 本轮交付
 
@@ -52,9 +53,17 @@ reviewer 最终确认 Standards/Spec 均无 blocking，允许 non-squash 本地�
 | 精确候选复审 | `/root/a1_action_catalog_reviewer` | OS `75b4ab0`；FE `6826f66` | Standards 0B；Spec 2B；保留 S-NB01 |
 | finding RED 与修复 | 主代理 | OS `77e79f5`；FE `7afd411` | duplicate legacy Handle 与 FE multi-instance/provider diagnostic 先 RED 后转绿 |
 | 同一 reviewer 最终复核 | `/root/a1_action_catalog_reviewer` | OS `77e79f53c868a28fb7a18a64b64a3d170611e66c`；FE `7afd4119308a96d432f5c2a9b1e482f34f8d3bed` | 0 blocking；允许 non-squash 本地合入 |
+| OS 加固首轮独立 RED | 唯一 test-author，`/root/test_a1_review_fixes` | 原始 `039e7a6`；合入 `c60121a` | 冻结 Backend-shaped HTTP、Registry identity、ROS result flow 与 rollback 缺口 |
+| OS 加固首轮实现与复审 | 主代理；`/root/review_a1_action_catalog` | `734ccd8` | 关闭首批 catalog/HTTP/result/identity 问题；`CHANGES_REQUIRED`；5 blocking |
+| OS 加固二轮独立 RED | 同一 test-author | 原始 `1f95aab`、`79fef87`、`1025406`；合入 `79b88c8`、`4eb884d`、`012fb72` | 冻结 authority、双 Registry snapshot、deep JSON 与真实 Candidate result flow |
+| OS 加固二轮实现与复审 | 主代理；`/root/review_a1_action_catalog` | `e0173374bb3a6f83f4a728bcd8c2e1d24415f5e5` | 关闭前轮主体问题；`CHANGES_REQUIRED`；4 类 blocking |
+| OS 加固三轮独立 RED | 同一 test-author | 原始 `d030d29`、`a37565e`；合入 `e565650`、`b644237` | `8 RED/22 GREEN`，并纠正 3 条旧 authority 断言；纠正后在旧候选上保持 RED |
+| OS 加固最终实现 | 主代理 | `93ec0f3b515ef00e8ee1aefe3e0e5d68706b5860` | optional nil UUID、reserved metadata、Candidate binding typing、deep template default 全部关闭 |
+| OS 加固最终复核 | `/root/review_a1_action_catalog` | `93ec0f3b515ef00e8ee1aefe3e0e5d68706b5860` | `ACCEPT`；0 blocking；低层 adversarial validation opt-out 为 non-blocking |
 
-独立测试提交没有 squash；没有删除、skip、xfail 或放宽独立测试。Finding 回归是在初始
-独立测试之后追加的精确边界用例。
+独立测试提交没有 squash；没有删除、skip 或 xfail。三条旧 ordinary binding 断言由同一
+test-author 按最终 authority 合同修正，并在修正前候选上证明为 RED；其余 Finding 回归是在
+初始独立测试之后追加的精确边界用例。
 
 ## 3. Finding 收敛
 
@@ -80,11 +89,33 @@ malformed/ROS fail-closed、真实 Handle UUID、409 rehydrate、ResourceSlot/�
 
 同一 reviewer 在最终精确 SHA 上确认两项 blocker 与伴随诊断问题全部关闭。
 
+随后针对已验收 OS 候选进行独立加固复审，发现并关闭以下问题：
+
+1. NodeTemplate 列表的 optional nil UUID 必须匹配冻结 Backend：query 返回 200/空集合，
+   path identity 仍返回 400；同时补齐空 UUID、TrimSpace、int64 和稳定排序矩阵；
+2. production composition 必须同时持有完成态 Device Registry 与 Resource Registry snapshot；
+   缺失 resource snapshot 且无显式 resolver 时在打开数据库前 fail closed，不能从 Action
+   声明反向自授权；
+3. ordinary Graph PUT 对新旧 Node/Edge 均不能创建 compiler-owned `unilab` metadata；
+   `input_contract`/`input_bindings`/`executor_binding` 仍只由 trusted Candidate Apply 写入；
+4. Python compile、public validate、Candidate bundle 和 semantic Apply 共用 Workflow parameter
+   到 target Handle 的类型兼容证明；nullable、integer→number、ResourceSlot 和 array 正向控制
+   继续通过；
+5. Task input、plan、Job param 与 template `goal_default → goal` 回退全部改用公共非递归 JSON
+   codec clone；深度超过 Python recursion limit、但仍处于 Backend JSON budget 内的值可以
+   save/read/Task round trip 且无 alias。
+
+最终 reviewer 接受保留一个低层
+`validate_input_binding_schema=False` adversarial seam：production Service、Engine、Candidate 和
+Apply 调用点均显式启用严格检查；该 opt-out 仅用于构造损坏 snapshot，证明 Task preflight
+仍 fail closed。后续可收紧命名或可见性，不阻塞 A1。
+
 ## 4. 最终门禁
 
 ```text
-A1 OS focused：                 198 passed
-OS 完整 tests/：                2139 passed, 4 skipped, 43 warnings
+A1 OS focused：                 683 passed
+OS 加固 finding/round3：        30 passed
+OS 完整 tests/：                2178 passed, 4 skipped, 49 warnings
 Workflow editor：              68 passed
 FE 全仓单测：                   passed
 FE 全仓 typecheck：            passed
@@ -95,15 +126,18 @@ SZLab catalog/workspace：      6 passed
 精确 SHA workflow debug E2E：  8 passed
 修改文件 Ruff E/F/I：          passed
 Ruff format --check：          passed
+修改 Python 文件 py_compile：   passed
 git diff --check：             passed
-独立 reviewer：                Standards 0B；Spec 0B；S-NB01 retained
+OS 加固独立 reviewer：         ACCEPT；0 blocking；1 low-level seam non-blocking
 ```
 
-精确 SHA browser gate 使用 Core
+历史 browser gate 使用 Core
 `12ef72cc9a72e77581dae3e9eda7b6828ddee674`、OS
 `77e79f53c868a28fb7a18a64b64a3d170611e66c`、FE
 `7afd4119308a96d432f5c2a9b1e482f34f8d3bed`。真实 SZLab fixture 固定为
-`975e9b12282aeb68282022631d4ff5e30af3f0e9`。
+`975e9b12282aeb68282022631d4ff5e30af3f0e9`。`77e79f5 → 93ec0f3` 只加固 OS
+HTTP、authority validation 与 JSON clone，不修改 FE/SZLab；最终 OS 精确候选另行通过上述
+683 focused、2178 full tests 与独立复审。
 
 仓库正式完整门是 `pytest tests`，已执行并通过。裸仓根 `pytest` 还会额外收集既有硬件/
 示例脚本并尝试 Modbus、Camera 等外部依赖，不属于本轮新增失败。
@@ -122,4 +156,5 @@ Python/JSON/DAG round trip 不漂移。
 ## 6. 交付状态
 
 production/test 候选已经完整门禁和同一独立 reviewer 最终确认。趋势报告只记录审查事实，
-不改变已审查代码；本轮历史须 non-squash 合入 OS/FE 各自 integration。没有 push。
+不改变已审查代码；OS 最终行为候选是 `93ec0f3`，后续 ledger-only 提交不得改动
+`unilabos/` 或 `tests/`。本轮历史须 non-squash 合入 OS/FE 各自 integration。没有 push。

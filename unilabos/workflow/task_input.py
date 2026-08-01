@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 from collections.abc import Mapping, Sequence
-from copy import deepcopy
 from dataclasses import dataclass, fields, is_dataclass
 from typing import Any, Protocol
 
@@ -11,6 +10,7 @@ from unilabos.workflow.graph_validation import (
     declared_handle_type_matches,
     workflow_schema_matches_handle_type,
 )
+from unilabos.workflow.json_codec import clone_json
 from unilabos.workflow.models import validate_uuid
 from unilabos.workflow.schema import (
     WorkflowSchemaError,
@@ -104,7 +104,7 @@ def preflight_task_input(
     except (KeyError, TypeError, ValueError, WorkflowSchemaError):
         raise TaskInputError("invalid_input") from None
     return PreparedTaskInput(
-        resolved_input=deepcopy(resolved_input),
+        resolved_input=clone_json(resolved_input),
         execution_plan=bound_plan,
         jobs=bound_jobs,
     )
@@ -151,7 +151,7 @@ def _resolve_input_values(
         if not supplied:
             if parameter["required"]:
                 raise TaskInputError()
-            raw_value = deepcopy(parameter["default"])
+            raw_value = clone_json(parameter["default"])
         else:
             raw_value = raw_input[name]
         value_schema = parse_value_schema(parameter["schema"])
@@ -196,7 +196,7 @@ def _resolve_slots(
             )
             for item in value
         ]
-    return deepcopy(value)
+    return clone_json(value)
 
 
 def _resolve_one_slot(
@@ -315,7 +315,7 @@ def _validate_graph_bindings(
             parameter = parameters[raw_binding["parameter"]]
             bindings[f"{node_uuid}:{handle_uuid}"] = {
                 "parameter": raw_binding["parameter"],
-                "schema": deepcopy(parameter["schema"]),
+                "schema": clone_json(parameter["schema"]),
             }
     return bindings
 
@@ -328,8 +328,8 @@ def _bind_active_plan(
     bindings: Mapping[str, Mapping[str, Any]],
     resolved_input: Mapping[str, Any],
 ) -> tuple[dict[str, Any], list[dict[str, Any]]]:
-    plan = deepcopy(execution_plan)
-    bound_jobs = deepcopy(list(jobs))
+    plan = clone_json(execution_plan)
+    bound_jobs = clone_json(list(jobs))
     if type(plan) is not dict or type(plan.get("nodes")) is not list:
         raise TaskInputError()
     graph_nodes = {
@@ -382,8 +382,8 @@ def _bind_active_plan(
         raw_param = graph_node.get("param", {})
         if type(raw_param) is not dict:
             raise TaskInputError()
-        plan_param = deepcopy(raw_param)
-        job_param = deepcopy(raw_param)
+        plan_param = clone_json(raw_param)
+        job_param = clone_json(raw_param)
         template_uuid = graph_node.get("workflow_node_template_uuid")
         target_handles = [
             handle
@@ -426,8 +426,8 @@ def _bind_active_plan(
             ):
                 raise TaskInputError()
             if binding is not None:
-                plan_param[data_key] = deepcopy(binding_value)
-                job_param[data_key] = deepcopy(binding_value)
+                plan_param[data_key] = clone_json(binding_value)
+                job_param[data_key] = clone_json(binding_value)
         planned_node["param"] = plan_param
         job_by_node[node_uuid]["param"] = job_param
     return plan, bound_jobs

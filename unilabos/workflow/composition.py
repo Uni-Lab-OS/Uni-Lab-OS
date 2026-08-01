@@ -15,7 +15,7 @@ from unilabos.resources.authority.sqlite import SQLiteMaterialAdapter
 from unilabos.workflow.authoring_engine import WorkflowAuthoringEngine
 from unilabos.workflow.catalog import (
     CatalogAuthority,
-    LocalResourceTemplateIdentityResolver,
+    LocalResourceTemplateIdentityIndex,
     TemplateCatalog,
 )
 from unilabos.workflow.material_resolver import MaterialResourceSlotResolver
@@ -46,6 +46,30 @@ def _configured_package_roots(
     roots: Iterable[str | Path],
 ) -> tuple[Path, ...]:
     return tuple(Path(os.path.abspath(root)) for root in roots)
+
+
+def _registry_resource_template_identities(
+    registry_snapshot: Mapping[str, object],
+    resource_registry_snapshot: Mapping[str, object],
+) -> tuple[str, ...]:
+    """冻结 production Registry 中可被模板投影引用的 source identities。"""
+
+    identities: set[str] = set()
+    for registry_key, raw_device in registry_snapshot.items():
+        if not isinstance(registry_key, str) or not isinstance(raw_device, Mapping):
+            continue
+        owner = raw_device.get("source_fqid") or registry_key
+        if isinstance(owner, str) and owner:
+            identities.add(owner)
+
+    for raw_resource in resource_registry_snapshot.values():
+        if not isinstance(raw_resource, Mapping):
+            continue
+        class_info = raw_resource.get("class")
+        module = class_info.get("module") if isinstance(class_info, Mapping) else None
+        if isinstance(module, str) and module:
+            identities.add(module)
+    return tuple(sorted(identities))
 
 
 def _retain_runtime(
@@ -164,6 +188,7 @@ def compose_workflow_runtime(
     authority: CatalogAuthority | None = None,
     editable_package_roots: Iterable[str | Path] = (),
     registry_snapshot: Mapping[str, object] | None = None,
+    resource_registry_snapshot: Mapping[str, object] | None = None,
     resource_template_identity_resolver: Callable[[str], str] | None = None,
 ) -> WorkflowService:
     """装配工作区唯一的 Workflow authority、启动恢复和 Draft 监视。"""
@@ -176,6 +201,8 @@ def compose_workflow_runtime(
         raise ValueError("persistent Workflow runtime 只支持 local Graph Authority")
     if registry_snapshot is None and resource_template_identity_resolver is not None:
         raise ValueError("ResourceTemplate resolver 缺少 Registry snapshot")
+    if registry_snapshot is None and resource_registry_snapshot is not None:
+        raise ValueError("Resource Registry snapshot 缺少 Device Registry snapshot")
     if registry_snapshot is not None and authority is None:
         raise ValueError("Registry Catalog 发布需要显式 Graph Authority")
     if registry_snapshot is not None and compiler is not None:
@@ -183,10 +210,16 @@ def compose_workflow_runtime(
     if (
         registry_snapshot is not None
         and resource_template_identity_resolver is None
-        and authority is not None
-        and authority.kind != "local"
+        and resource_registry_snapshot is None
     ):
-        raise ValueError("Backend Registry Catalog 发布需要显式 identity resolver")
+        from unilabos.registry.catalog_consumer import (
+            RegistryTemplateProjectionError,
+        )
+
+        raise RegistryTemplateProjectionError(
+            "template_catalog_mismatch",
+            "/resource_registry",
+        )
     resolved_working_dir = Path(working_dir).resolve()
     database_path = resolved_working_dir / "workflow.db"
     configured_roots = _configured_package_roots(editable_package_roots)
@@ -241,17 +274,31 @@ def compose_workflow_runtime(
                     )
 
                     identity_resolver = resource_template_identity_resolver
+                    identity_index: LocalResourceTemplateIdentityIndex | None = None
                     if identity_resolver is None:
-                        identity_resolver = LocalResourceTemplateIdentityResolver(
+                        identity_index = LocalResourceTemplateIdentityIndex(
                             store,
                             authority,
+                            _registry_resource_template_identities(
+                                registry_snapshot,
+                                resource_registry_snapshot,
+                            ),
                         )
+                        identity_resolver = identity_index
                     templates = workflow_template_imports_from_registry_snapshot(
                         registry_snapshot,
                         authority_id=authority.authority_id,
                         resource_template_identity_resolver=identity_resolver,
                     )
-                    catalog.replace(authority, templates)
+                    catalog.replace(
+                        authority,
+                        templates,
+                        resource_template_identities=(
+                            identity_index.assignments
+                            if identity_index is not None
+                            else None
+                        ),
+                    )
                 runtime_compiler = WorkflowAuthoringEngine(
                     catalog=catalog,
                     authority=authority,
@@ -353,6 +400,7 @@ def setup_workflow_service(
     authority: CatalogAuthority | None = None,
     editable_package_roots: Iterable[str | Path] = (),
     registry_snapshot: Mapping[str, object] | None = None,
+    resource_registry_snapshot: Mapping[str, object] | None = None,
     resource_template_identity_resolver: Callable[[str], str] | None = None,
 ) -> WorkflowService:
     """兼容旧装配调用；所有入口统一进入完整运行时组合。"""
@@ -363,6 +411,7 @@ def setup_workflow_service(
         authority=authority,
         editable_package_roots=editable_package_roots,
         registry_snapshot=registry_snapshot,
+        resource_registry_snapshot=resource_registry_snapshot,
         resource_template_identity_resolver=resource_template_identity_resolver,
     )
 

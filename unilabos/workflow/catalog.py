@@ -111,52 +111,89 @@ class CatalogAuthority:
             raise TemplateCatalogImportError("/authority")
 
 
-class LocalResourceTemplateIdentityResolver:
-    """为 local Graph Authority 持久分配 ResourceTemplate UUID。"""
+class LocalResourceTemplateIdentityIndex:
+    """基于完成态 Registry 的只读双向 ResourceTemplate 身份索引。"""
 
-    def __init__(self, store: WorkflowStore, authority: CatalogAuthority) -> None:
+    def __init__(
+        self,
+        store: WorkflowStore,
+        authority: CatalogAuthority,
+        known_source_identities: Sequence[str],
+    ) -> None:
         if authority.kind != "local":
             raise TemplateCatalogImportError("/authority/kind")
         self._store = store
         self._authority = authority
+        supplied_identities = tuple(known_source_identities)
+        if any(
+            not isinstance(identity, str)
+            or not identity
+            or identity.strip() != identity
+            for identity in supplied_identities
+        ):
+            raise TemplateCatalogImportError("/resource_templates/source_identity")
+        known = tuple(sorted(set(supplied_identities)))
+        self._known = frozenset(known)
+        self._by_source: dict[str, str] = {}
+        self._by_uuid: dict[str, str] = {}
+        with self._store.catalog_guard(), self._store.transaction() as conn:
+            rows = conn.execute(
+                """
+                SELECT source_identity, resource_template_uuid
+                FROM workflow_resource_template_identity
+                WHERE authority_id = ?
+                """,
+                (self._authority.authority_id,),
+            ).fetchall()
+        for row in rows:
+            source_identity = str(row["source_identity"])
+            if source_identity not in self._known:
+                continue
+            resource_template_uuid = _uuid_value(
+                row["resource_template_uuid"],
+                "/resource_templates/resource_template_uuid",
+            )
+            if resource_template_uuid in self._by_uuid:
+                raise TemplateCatalogImportError(
+                    "/resource_templates/resource_template_uuid"
+                )
+            self._by_source[source_identity] = resource_template_uuid
+            self._by_uuid[resource_template_uuid] = source_identity
 
     def __call__(self, source_identity: str) -> str:
         if (
             not isinstance(source_identity, str)
             or not source_identity
             or source_identity.strip() != source_identity
+            or source_identity not in self._known
         ):
-            raise TemplateCatalogImportError("/resource_templates/source_identity")
-        with self._store.catalog_guard():
-            with self._store.transaction() as conn:
-                row = conn.execute(
-                    """
-                    SELECT resource_template_uuid
-                    FROM workflow_resource_template_identity
-                    WHERE authority_id = ? AND source_identity = ?
-                    """,
-                    (self._authority.authority_id, source_identity),
-                ).fetchone()
-                if row is not None:
-                    return str(row["resource_template_uuid"])
-                identity = str(uuid4())
-                now = utc_now()
-                conn.execute(
-                    """
-                    INSERT INTO workflow_resource_template_identity(
-                        authority_id, source_identity, resource_template_uuid,
-                        create_time, update_time
-                    ) VALUES (?, ?, ?, ?, ?)
-                    """,
-                    (
-                        self._authority.authority_id,
-                        source_identity,
-                        identity,
-                        now,
-                        now,
-                    ),
-                )
-                return identity
+            raise KeyError(source_identity)
+        identity = self._by_source.get(source_identity)
+        if identity is None:
+            identity = str(uuid4())
+            self._by_source[source_identity] = identity
+            self._by_uuid[identity] = source_identity
+        return identity
+
+    def source_identity(self, resource_template_uuid: str) -> str:
+        try:
+            identity = _uuid_value(
+                resource_template_uuid,
+                "/resource_templates/resource_template_uuid",
+            )
+            return self._by_uuid[identity]
+        except KeyError:
+            raise TemplateCatalogMismatch(
+                "/resource_templates/resource_template_uuid"
+            ) from None
+
+    @property
+    def assignments(self) -> Mapping[str, str]:
+        return MappingProxyType(dict(self._by_source))
+
+
+# F006 兼容旧 import 名；新组合根必须显式提供完成态 known identities。
+LocalResourceTemplateIdentityResolver = LocalResourceTemplateIdentityIndex
 
 
 @dataclass(frozen=True)
@@ -236,8 +273,14 @@ class TemplateCatalog:
         self,
         authority: CatalogAuthority,
         templates: Sequence[NodeTemplateImport],
+        *,
+        resource_template_identities: Mapping[str, str] | None = None,
     ) -> TemplateCatalogSnapshot:
         normalized = _normalize_import(authority, templates)
+        normalized_identities = _normalize_resource_template_identities(
+            authority,
+            resource_template_identities,
+        )
         try:
             with self._store.catalog_guard(), self._store.transaction() as conn:
                 metadata = conn.execute(
@@ -253,6 +296,12 @@ class TemplateCatalog:
                     and metadata["authority_kind"] != authority.kind
                 ):
                     raise TemplateCatalogImportError("/authority/kind")
+
+                self._persist_resource_template_identities(
+                    conn,
+                    authority,
+                    normalized_identities,
+                )
 
                 retained_nodes: list[str] = []
                 retained_handles: list[str] = []
@@ -308,6 +357,56 @@ class TemplateCatalog:
             raise
         except sqlite3.Error:
             raise TemplateCatalogImportError("/authority/catalog") from None
+
+    @staticmethod
+    def _persist_resource_template_identities(
+        conn: sqlite3.Connection,
+        authority: CatalogAuthority,
+        identities: tuple[tuple[str, str], ...],
+    ) -> None:
+        now = utc_now()
+        for source_identity, resource_template_uuid in identities:
+            source_row = conn.execute(
+                """
+                SELECT resource_template_uuid
+                FROM workflow_resource_template_identity
+                WHERE authority_id = ? AND source_identity = ?
+                """,
+                (authority.authority_id, source_identity),
+            ).fetchone()
+            if source_row is not None:
+                if source_row["resource_template_uuid"] != resource_template_uuid:
+                    raise TemplateCatalogImportError(
+                        "/resource_templates/source_identity"
+                    )
+                continue
+            uuid_row = conn.execute(
+                """
+                SELECT authority_id, source_identity
+                FROM workflow_resource_template_identity
+                WHERE resource_template_uuid = ?
+                """,
+                (resource_template_uuid,),
+            ).fetchone()
+            if uuid_row is not None:
+                raise TemplateCatalogImportError(
+                    "/resource_templates/resource_template_uuid"
+                )
+            conn.execute(
+                """
+                INSERT INTO workflow_resource_template_identity(
+                    authority_id, source_identity, resource_template_uuid,
+                    create_time, update_time
+                ) VALUES (?, ?, ?, ?, ?)
+                """,
+                (
+                    authority.authority_id,
+                    source_identity,
+                    resource_template_uuid,
+                    now,
+                    now,
+                ),
+            )
 
     @contextmanager
     def snapshot(
@@ -519,6 +618,39 @@ class TemplateCatalog:
                 (now, *values, authority.authority_id, handle_uuid),
             )
         return handle_uuid
+
+
+def _normalize_resource_template_identities(
+    authority: CatalogAuthority,
+    raw: Mapping[str, str] | None,
+) -> tuple[tuple[str, str], ...]:
+    if raw is None:
+        return ()
+    if authority.kind != "local" or not isinstance(raw, Mapping):
+        raise TemplateCatalogImportError("/resource_templates")
+    normalized: list[tuple[str, str]] = []
+    seen_uuids: set[str] = set()
+    raw_items = list(raw.items())
+    if any(not isinstance(source_identity, str) for source_identity, _ in raw_items):
+        raise TemplateCatalogImportError("/resource_templates/source_identity")
+    for source_identity, raw_uuid in sorted(raw_items):
+        if (
+            not isinstance(source_identity, str)
+            or not source_identity
+            or source_identity.strip() != source_identity
+        ):
+            raise TemplateCatalogImportError("/resource_templates/source_identity")
+        identity = _uuid_value(
+            raw_uuid,
+            "/resource_templates/resource_template_uuid",
+        )
+        if UUID(identity).int == 0 or identity in seen_uuids:
+            raise TemplateCatalogImportError(
+                "/resource_templates/resource_template_uuid"
+            )
+        seen_uuids.add(identity)
+        normalized.append((source_identity, identity))
+    return tuple(normalized)
 
 
 def _normalize_import(
@@ -1130,6 +1262,7 @@ def _freeze_json(value: Any) -> Any:
 
 __all__ = [
     "CatalogAuthority",
+    "LocalResourceTemplateIdentityIndex",
     "LocalResourceTemplateIdentityResolver",
     "NodeTemplateImport",
     "TemplateCatalog",

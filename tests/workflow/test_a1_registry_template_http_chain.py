@@ -643,6 +643,9 @@ def test_real_web_server_entry_publishes_registry_before_http_ready(
         client = TestClient(
             server.setup_server(
                 registry_snapshot=_registry_snapshot(registry),
+                resource_registry_snapshot=MappingProxyType(
+                    copy.deepcopy(registry.resource_type_registry)
+                ),
             )
         )
         response = client.get("/api/v1/workflow-node-templates")
@@ -662,6 +665,9 @@ def test_real_web_server_entry_publishes_registry_before_http_ready(
         client = TestClient(
             server.setup_server(
                 registry_snapshot=_registry_snapshot(registry),
+                resource_registry_snapshot=MappingProxyType(
+                    copy.deepcopy(registry.resource_type_registry)
+                ),
             )
         )
         second = client.get("/api/v1/workflow-node-templates").json()["data"]

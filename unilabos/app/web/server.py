@@ -81,6 +81,7 @@ async def log_requests(request: Request, call_next) -> Response:
 def setup_server(
     *,
     registry_snapshot: Mapping[str, Any] | None = None,
+    resource_registry_snapshot: Mapping[str, Any] | None = None,
 ) -> FastAPI:
     """
     设置服务器
@@ -135,6 +136,7 @@ def setup_server(
                 authority=authority,
                 editable_package_roots=editable_package_roots,
                 registry_snapshot=registry_snapshot,
+                resource_registry_snapshot=resource_registry_snapshot,
             )
             if workflow_service.compiler is None:
                 raise RuntimeError("Workflow Authoring engine 未完成组合")
@@ -205,6 +207,7 @@ def start_server(
     open_browser: bool = True,
     *,
     registry_snapshot: Mapping[str, Any] | None = None,
+    resource_registry_snapshot: Mapping[str, Any] | None = None,
 ) -> bool:
     """
     启动服务器
@@ -223,7 +226,10 @@ def start_server(
     from uvicorn import Config, Server
 
     # 设置服务器
-    setup_server(registry_snapshot=registry_snapshot)
+    setup_server(
+        registry_snapshot=registry_snapshot,
+        resource_registry_snapshot=resource_registry_snapshot,
+    )
 
     # 配置日志
     log_config = setup_fastapi_logging()
@@ -261,9 +267,8 @@ def start_server(
             hasattr(main_module, "_restart_requested")
             and main_module._restart_requested
         ):
-            info(
-                f"[Web] Restart requested via WebSocket, reason: {getattr(main_module, '_restart_reason', 'unknown')}"
-            )
+            restart_reason = getattr(main_module, "_restart_reason", "unknown")
+            info(f"[Web] Restart requested via WebSocket, reason: {restart_reason}")
             main_module._restart_requested = False
 
             # 停止服务器

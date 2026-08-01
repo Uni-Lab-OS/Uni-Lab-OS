@@ -789,24 +789,80 @@ def create_workflow_template_catalog_router(
         }
 
     @router.get("/workflow-node-templates")
-    def list_workflow_node_templates() -> JSONResponse:
+    def list_workflow_node_templates(
+        page: str = Query(default="1"),
+        page_size: str = Query(default="20"),
+        resource_template_uuid: str | None = Query(default=None),
+        name: str | None = Query(default=None),
+        type: str | None = Query(default=None),
+        node_type: str | None = Query(default=None),
+    ) -> JSONResponse:
+        try:
+            parsed_page = _parse_catalog_integer(page)
+            parsed_page_size = _parse_catalog_integer(page_size)
+            resource_uuid = (
+                str(UUID(resource_template_uuid))
+                if resource_template_uuid not in (None, "")
+                else None
+            )
+        except (TypeError, ValueError):
+            return _error(WorkflowError("invalid_input"))
         fingerprint, nodes, _handles = read_snapshot()
-        items = [_workflow_node_template_summary(item) for item in nodes]
+        normalized_page = max(parsed_page, 1)
+        normalized_page_size = (
+            20 if parsed_page_size < 1 else min(parsed_page_size, 100)
+        )
+        name_query = name.strip().casefold() if name is not None else None
+        type_query = type.strip() if type is not None else None
+        node_type_query = node_type.strip() if node_type is not None else None
+        type_query = type_query or None
+        node_type_query = node_type_query or None
+        filtered = [
+            item
+            for item in nodes
+            if (
+                resource_uuid is None
+                or item.get("resource_template_uuid") == resource_uuid
+            )
+            and (
+                not name_query
+                or name_query in str(item.get("name") or "").casefold()
+                or name_query in str(item.get("display_name") or "").casefold()
+            )
+            and (type_query is None or item.get("type") == type_query)
+            and (node_type_query is None or item.get("node_type") == node_type_query)
+        ]
+        filtered.sort(
+            key=lambda item: (
+                str(item.get("create_time") or ""),
+                str(item.get("uuid") or ""),
+            ),
+            reverse=True,
+        )
+        offset = (normalized_page - 1) * normalized_page_size
+        items = [
+            _workflow_node_template_summary(item)
+            for item in filtered[offset : offset + normalized_page_size]
+        ]
         return _success(
             {
                 **envelope(fingerprint),
                 "items": items,
-                "total": len(items),
-                "page": 1,
-                "page_size": len(items),
+                "total": len(filtered),
+                "page": normalized_page,
+                "page_size": normalized_page_size,
             }
         )
 
     @router.get("/workflow-node-templates/{template_uuid}")
     def get_workflow_node_template(template_uuid: str) -> JSONResponse:
+        try:
+            template_identity = validate_uuid(template_uuid)
+        except (TypeError, ValueError):
+            return _error(WorkflowError("invalid_input"))
         fingerprint, nodes, handles = read_snapshot()
         template = next(
-            (item for item in nodes if item.get("uuid") == template_uuid),
+            (item for item in nodes if item.get("uuid") == template_identity),
             None,
         )
         if template is None:
@@ -814,7 +870,7 @@ def create_workflow_template_catalog_router(
         owned_handles = [
             item
             for item in handles
-            if item.get("workflow_node_template_uuid") == template_uuid
+            if item.get("workflow_node_template_uuid") == template_identity
         ]
         return _success(
             {
@@ -826,8 +882,12 @@ def create_workflow_template_catalog_router(
 
     @router.get("/workflow-node-templates/{template_uuid}/handles")
     def list_workflow_node_template_handles(template_uuid: str) -> JSONResponse:
+        try:
+            template_identity = validate_uuid(template_uuid)
+        except (TypeError, ValueError):
+            return _error(WorkflowError("invalid_input"))
         fingerprint, nodes, handles = read_snapshot()
-        if not any(item.get("uuid") == template_uuid for item in nodes):
+        if not any(item.get("uuid") == template_identity for item in nodes):
             return _template_catalog_not_found()
         return _success(
             {
@@ -835,16 +895,20 @@ def create_workflow_template_catalog_router(
                 "items": [
                     item
                     for item in handles
-                    if item.get("workflow_node_template_uuid") == template_uuid
+                    if item.get("workflow_node_template_uuid") == template_identity
                 ],
             }
         )
 
     @router.get("/workflow-handle-templates/{handle_uuid}")
     def get_workflow_handle_template(handle_uuid: str) -> JSONResponse:
+        try:
+            handle_identity = validate_uuid(handle_uuid)
+        except (TypeError, ValueError):
+            return _error(WorkflowError("invalid_input"))
         fingerprint, _nodes, handles = read_snapshot()
         handle = next(
-            (item for item in handles if item.get("uuid") == handle_uuid),
+            (item for item in handles if item.get("uuid") == handle_identity),
             None,
         )
         if handle is None:
@@ -852,6 +916,15 @@ def create_workflow_template_catalog_router(
         return _success({**envelope(fingerprint), "handle": handle})
 
     return router
+
+
+def _parse_catalog_integer(value: str) -> int:
+    if _SIGNED_DECIMAL.fullmatch(value) is None:
+        raise ValueError("catalog pagination must be an integer")
+    parsed = int(value, 10)
+    if parsed < -(1 << 63) or parsed > _INT64_MAX:
+        raise ValueError("catalog pagination exceeds int64")
+    return parsed
 
 
 def _workflow_node_template_summary(template: Mapping[str, Any]) -> dict[str, Any]:
@@ -863,7 +936,7 @@ def _workflow_node_template_summary(template: Mapping[str, Any]) -> dict[str, An
             "name": template["resource_template_uuid"],
             "display_name": template["resource_template_uuid"],
         }
-    return {
+    summary = {
         "uuid": template["uuid"],
         "name": template["name"],
         "display_name": template["display_name"],
@@ -875,6 +948,9 @@ def _workflow_node_template_summary(template: Mapping[str, Any]) -> dict[str, An
             "display_name": resource["display_name"],
         },
     }
+    if template.get("icon") is not None:
+        summary["icon"] = template["icon"]
+    return summary
 
 
 def _detached_catalog_value(value: Any) -> Any:
@@ -912,6 +988,8 @@ def _install_error_handlers(app: FastAPI) -> None:
             "/api/v1/workflows",
             "/api/v1/workflow-tasks",
             "/api/v1/workflow-node-jobs",
+            "/api/v1/workflow-node-templates",
+            "/api/v1/workflow-handle-templates",
             "/api/v1/events",
             "/api/v1/authoring",
         )

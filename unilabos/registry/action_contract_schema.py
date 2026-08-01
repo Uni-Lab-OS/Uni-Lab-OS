@@ -270,7 +270,38 @@ def _validate_legacy_handles(
             "action_handle_contract_conflict",
             f"/actions/{action_name}/handles",
         )
-    actual: dict[tuple[str, str], tuple[str, str, str]] = {}
+
+    expected: dict[tuple[str, str], tuple[str, str, str, bool]] = {}
+    goal = schema["properties"]["goal"]
+    required_goal = set(goal.get("required", []))
+    for name, value_schema in goal["properties"].items():
+        expected[("target", name)] = (
+            _legacy_value_type(value_schema),
+            "goal",
+            name,
+            name in required_goal,
+        )
+    result = schema["properties"]["result"]
+    for name, value_schema in result["properties"].items():
+        expected[("source", name)] = (
+            _legacy_value_type(value_schema),
+            "result",
+            name,
+            False,
+        )
+    for name, value_schema in goal["properties"].items():
+        if (
+            _base_value_schema(value_schema).get("$slot") == "ResourceSlot"
+            and ("source", name) not in expected
+        ):
+            expected[("source", name)] = (
+                "ResourceSlot",
+                "result",
+                name,
+                False,
+            )
+
+    actual: dict[tuple[str, str], tuple[str, str, str, bool]] = {}
     for index, handle in enumerate(raw):
         if not isinstance(handle, Mapping):
             _compatibility_fail(
@@ -303,37 +334,32 @@ def _validate_legacy_handles(
                 "action_handle_contract_conflict",
                 f"/actions/{action_name}/handles/{index}",
             )
+        declared_io_type = values.get("io_type")
+        if declared_io_type is not None and (
+            not isinstance(declared_io_type, str) or declared_io_type.lower() != io_type
+        ):
+            _compatibility_fail(
+                "action_handle_contract_conflict",
+                f"/actions/{action_name}/handles",
+            )
+        expected_handle = expected.get(identity)
+        if expected_handle is None:
+            _compatibility_fail(
+                "action_handle_contract_conflict",
+                f"/actions/{action_name}/handles/{index}",
+            )
+        declared_required = values.get("required", expected_handle[3])
+        if not isinstance(declared_required, bool):
+            _compatibility_fail(
+                "action_handle_contract_conflict",
+                f"/actions/{action_name}/handles",
+            )
         actual[identity] = (
             str(values.get("data_type") or ""),
             str(values.get("data_source") or default_source).lower(),
             str(values.get("data_key") or key),
+            declared_required,
         )
-
-    expected: dict[tuple[str, str], tuple[str, str, str]] = {}
-    goal = schema["properties"]["goal"]
-    for name, value_schema in goal["properties"].items():
-        expected[("target", name)] = (
-            _legacy_value_type(value_schema),
-            "goal",
-            name,
-        )
-    result = schema["properties"]["result"]
-    for name, value_schema in result["properties"].items():
-        expected[("source", name)] = (
-            _legacy_value_type(value_schema),
-            "result",
-            name,
-        )
-    for name, value_schema in goal["properties"].items():
-        if (
-            _base_value_schema(value_schema).get("$slot") == "ResourceSlot"
-            and (
-                "source",
-                name,
-            )
-            not in expected
-        ):
-            expected[("source", name)] = ("ResourceSlot", "result", name)
     if actual != expected:
         _compatibility_fail(
             "action_handle_contract_conflict",

@@ -262,6 +262,12 @@ def encode_json(value: Any, *, sort_keys: bool = False) -> bytes:
     return "".join(output).encode("utf-8")
 
 
+def clone_json(value: Any) -> Any:
+    """用公共非递归 codec 复制一个有界 JSON 值。"""
+
+    return decode_json_bytes(encode_json(value))
+
+
 def strict_json_equal(left: Any, right: Any) -> bool:
     """迭代比较 JSON 值，并区分 bool、int 与 float。"""
 
@@ -285,6 +291,7 @@ def strict_json_equal(left: Any, right: Any) -> bool:
 
 __all__ = [
     "MAX_BACKEND_JSON_DEPTH",
+    "clone_json",
     "decode_json_bytes",
     "encode_json",
     "strict_json_equal",

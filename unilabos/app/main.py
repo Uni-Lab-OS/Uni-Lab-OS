@@ -1015,6 +1015,9 @@ def main():
     args_dict["_workflow_registry_snapshot"] = copy.deepcopy(
         lab_registry.device_type_registry
     )
+    args_dict["_workflow_resource_registry_snapshot"] = copy.deepcopy(
+        lab_registry.resource_type_registry
+    )
 
     # Check mode: 注册表验证完成后直接退出
     if check_mode:
@@ -1210,6 +1213,9 @@ def main():
                     registry_snapshot=args_dict.get(
                         "_workflow_registry_snapshot"
                     ),
+                    resource_registry_snapshot=args_dict.get(
+                        "_workflow_resource_registry_snapshot"
+                    ),
                 ),
             )
             server_thread.start()
@@ -1236,6 +1242,9 @@ def main():
                 open_browser=not args_dict["disable_browser"],
                 port=BasicConfig.port,
                 registry_snapshot=args_dict.get("_workflow_registry_snapshot"),
+                resource_registry_snapshot=args_dict.get(
+                    "_workflow_resource_registry_snapshot"
+                ),
             )
             if restart_requested:
                 print_status("[Main] Restart requested, cleaning up...", "info")
@@ -1249,6 +1258,9 @@ def main():
             open_browser=not args_dict["disable_browser"],
             port=BasicConfig.port,
             registry_snapshot=args_dict.get("_workflow_registry_snapshot"),
+            resource_registry_snapshot=args_dict.get(
+                "_workflow_resource_registry_snapshot"
+            ),
         )
         if restart_requested:
             print_status("[Main] Restart requested, cleaning up...", "info")

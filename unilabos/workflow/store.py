@@ -815,6 +815,7 @@ class WorkflowStore:
         nodes: List[WorkflowNodeWrite],
         edges: List[WorkflowEdgeWrite],
         protect_reserved_metadata: bool = False,
+        validate_input_binding_schema: bool = False,
     ) -> Dict[str, Any]:
         with self.transaction() as conn:
             self._reconcile_graph(
@@ -825,6 +826,7 @@ class WorkflowStore:
                 edges=edges,
                 advance_revision=True,
                 protect_reserved_metadata=protect_reserved_metadata,
+                validate_input_binding_schema=validate_input_binding_schema,
             )
         return self.get_graph(workflow_uuid)
 
@@ -839,6 +841,7 @@ class WorkflowStore:
         advance_revision: bool,
         protect_reserved_metadata: bool = False,
         semantic_workflow_meta_data: Optional[Dict[str, Any]] = None,
+        validate_input_binding_schema: bool = False,
     ) -> int:
         workflow = self.get_workflow(workflow_uuid, conn=conn)
         if workflow["revision"] != expected_revision:
@@ -906,6 +909,11 @@ class WorkflowStore:
                 (existing_node["meta_data"] if existing_node is not None else None),
                 enabled=protect_reserved_metadata,
             )
+        effective_workflow_meta_data = (
+            semantic_workflow_meta_data
+            if semantic_workflow_meta_data is not None
+            else workflow["meta_data"]
+        )
         try:
             validate_graph(
                 nodes=nodes,
@@ -913,12 +921,9 @@ class WorkflowStore:
                 templates=templates,
                 handles=handles,
                 effective_params=effective_params,
-                workflow_meta_data=(
-                    semantic_workflow_meta_data
-                    if semantic_workflow_meta_data is not None
-                    else workflow["meta_data"]
-                ),
+                workflow_meta_data=effective_workflow_meta_data,
                 node_meta_data=effective_node_meta_data,
+                validate_input_binding_schema=validate_input_binding_schema,
             )
         except MissingTemplateError as exc:
             raise StoreNotFound(str(exc)) from exc
@@ -1722,6 +1727,7 @@ class WorkflowStore:
                     advance_revision=True,
                     protect_reserved_metadata=False,
                     semantic_workflow_meta_data=candidate_meta,
+                    validate_input_binding_schema=True,
                 )
                 workflow_meta = dict(workflow["meta_data"])
                 workflow_meta.pop("unilab", None)
