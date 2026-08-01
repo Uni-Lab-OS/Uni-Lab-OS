@@ -19,6 +19,7 @@ from unilabos.resources.authority.sqlite import SQLiteMaterialAdapter
 from unilabos.workflow.store import WorkflowStore
 
 MATERIAL_UUID = "50000000-0000-4000-8000-000000000017"
+UNKNOWN_MATERIAL_UUID = "50000000-0000-4000-8000-000000000099"
 RESOURCE_TEMPLATE_UUID = "20000000-0000-4000-8000-000000000017"
 SECOND_RESOURCE_TEMPLATE_UUID = "20000000-0000-4000-8000-000000000018"
 SITE_UUID = "60000000-0000-4000-8000-000000000017"
@@ -134,5 +135,29 @@ def test_site_create_rejects_unrepresentable_numbers_without_write(
         with pytest.raises(MaterialNotFound):
             materials.get_site(SITE_UUID)
         assert type(caught_error) is MaterialInvalidInput
+    finally:
+        coordinator.close()
+
+
+def test_site_create_reports_missing_shared_owner_and_occupant_before_self_occupancy(
+    tmp_path: Path,
+) -> None:
+    coordinator = WorkflowStore(tmp_path / "workflow.db")
+    try:
+        materials = _material_module(coordinator)
+        arguments = _site_arguments()
+        arguments["material_uuid"] = UNKNOWN_MATERIAL_UUID
+        arguments["occupied_material_uuid"] = UNKNOWN_MATERIAL_UUID
+
+        caught_error: MaterialError | None = None
+        try:
+            materials.create_site(**arguments)
+        except MaterialError as error:
+            caught_error = error
+
+        assert caught_error is not None
+        with pytest.raises(MaterialNotFound):
+            materials.get_site(SITE_UUID)
+        assert type(caught_error) is MaterialNotFound
     finally:
         coordinator.close()
