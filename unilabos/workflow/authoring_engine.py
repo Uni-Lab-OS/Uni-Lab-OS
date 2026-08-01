@@ -76,6 +76,19 @@ _OWNED_WORKFLOW_KEYS = {
     "output_bindings",
 }
 _OWNED_NODE_KEYS = {"input_bindings", "executor_binding"}
+_NODE_TEMPLATE_NULLABLE_READ_FIELDS = {
+    "description",
+    "class",
+    "schema",
+    "icon",
+    "header",
+    "footer",
+}
+_HANDLE_TEMPLATE_NULLABLE_READ_FIELDS = {
+    "description",
+    "data_source",
+    "data_key",
+}
 
 
 class _AuthoringFailure(ValueError):
@@ -114,6 +127,34 @@ def _detached(value: Any) -> Any:
         return item
 
     return decode_json_bytes(encode_json(thaw(value)))
+
+
+def _catalog_read_entity(
+    value: Mapping[str, Any],
+    *,
+    nullable_fields: set[str],
+) -> dict[str, Any]:
+    """统一 Catalog snapshot 与 Backend JSON omitempty 的读取形状。"""
+
+    projected = _detached(value)
+    for field_name in nullable_fields:
+        if projected.get(field_name) is None:
+            projected.pop(field_name, None)
+    return projected
+
+
+def _sorted_catalog_read_entities(
+    values: Sequence[Mapping[str, Any]],
+    *,
+    nullable_fields: set[str],
+) -> list[dict[str, Any]]:
+    return sorted(
+        (
+            _catalog_read_entity(item, nullable_fields=nullable_fields)
+            for item in values
+        ),
+        key=lambda item: item["uuid"],
+    )
 
 
 def _safe_identifier(value: str, fallback: str) -> str:
@@ -2061,11 +2102,20 @@ def _validate_catalog_projection(
         if node.get("workflow_node_template_uuid") is not None
     }
     snapshot_nodes = {
-        item["uuid"]: _detached(item)
+        item["uuid"]: _catalog_read_entity(
+            item,
+            nullable_fields=_NODE_TEMPLATE_NULLABLE_READ_FIELDS,
+        )
         for item in snapshot.node_templates
         if item["uuid"] in referenced
     }
-    projected_nodes = {item.get("uuid"): item for item in graph["node_templates"]}
+    projected_nodes = {
+        item.get("uuid"): _catalog_read_entity(
+            item,
+            nullable_fields=_NODE_TEMPLATE_NULLABLE_READ_FIELDS,
+        )
+        for item in graph["node_templates"]
+    }
     if (
         set(snapshot_nodes) != referenced
         or len(projected_nodes) != len(graph["node_templates"])
@@ -2080,11 +2130,20 @@ def _validate_catalog_projection(
             "Candidate NodeTemplate projection 不属于当前 authority snapshot",
         )
     snapshot_handles = {
-        item["uuid"]: _detached(item)
+        item["uuid"]: _catalog_read_entity(
+            item,
+            nullable_fields=_HANDLE_TEMPLATE_NULLABLE_READ_FIELDS,
+        )
         for item in snapshot.handle_templates
         if item["workflow_node_template_uuid"] in referenced
     }
-    projected_handles = {item.get("uuid"): item for item in graph["handle_templates"]}
+    projected_handles = {
+        item.get("uuid"): _catalog_read_entity(
+            item,
+            nullable_fields=_HANDLE_TEMPLATE_NULLABLE_READ_FIELDS,
+        )
+        for item in graph["handle_templates"]
+    }
     if (
         len(projected_handles) != len(graph["handle_templates"])
         or set(projected_handles) != set(snapshot_handles)
@@ -2709,12 +2768,24 @@ def _semantic_graph_equal(left: Any, right: Any) -> bool:
                 strict_json_equal(left_nodes, right_nodes),
                 strict_json_equal(left_edges, right_edges),
                 strict_json_equal(
-                    sorted(left["node_templates"], key=lambda item: item["uuid"]),
-                    sorted(right["node_templates"], key=lambda item: item["uuid"]),
+                    _sorted_catalog_read_entities(
+                        left["node_templates"],
+                        nullable_fields=_NODE_TEMPLATE_NULLABLE_READ_FIELDS,
+                    ),
+                    _sorted_catalog_read_entities(
+                        right["node_templates"],
+                        nullable_fields=_NODE_TEMPLATE_NULLABLE_READ_FIELDS,
+                    ),
                 ),
                 strict_json_equal(
-                    sorted(left["handle_templates"], key=lambda item: item["uuid"]),
-                    sorted(right["handle_templates"], key=lambda item: item["uuid"]),
+                    _sorted_catalog_read_entities(
+                        left["handle_templates"],
+                        nullable_fields=_HANDLE_TEMPLATE_NULLABLE_READ_FIELDS,
+                    ),
+                    _sorted_catalog_read_entities(
+                        right["handle_templates"],
+                        nullable_fields=_HANDLE_TEMPLATE_NULLABLE_READ_FIELDS,
+                    ),
                 ),
             )
         )
