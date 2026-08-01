@@ -14,7 +14,7 @@ changed-files Ruff/format、compileall、diff check，以及同一独立 reviewe
 - `MaterialModule.create_site/get_site` 的 Backend-shaped public seam；
 - `site` durable table 与规范化的 `site_allowed_resource_template` 关联表；
 - owner/occupant/template authority、单 Site occupant、单 Material placement、组合与 placement
-  无环、owner 内名称和 `sort_order` 唯一等不变量；
+  无环、owner 内名称唯一及 `sort_order` 稳定排序等不变量；
 - Site + allowlist 在 owned/borrowed UoW 中的原子写入；
 - geometry、JSON、UUID、soft-delete normal-read 和稳定 domain error 边界。
 
@@ -105,4 +105,3 @@ MaterialModule validates Backend-shaped Site command
 
 下一步必须先把 M1B 非 squash 本地合入最新 `integration/workflow-task-runtime`，再从更新后的
 integration 新开后续 round；不得继续在本分支堆叠 M2A。
-
