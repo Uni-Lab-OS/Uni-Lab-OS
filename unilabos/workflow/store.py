@@ -225,6 +225,31 @@ CREATE INDEX IF NOT EXISTS ix_workflow_task_workflow
 CREATE INDEX IF NOT EXISTS ix_workflow_task_status
     ON workflow_task(status);
 
+CREATE TABLE IF NOT EXISTS workflow_task_command (
+    uuid TEXT PRIMARY KEY,
+    create_time TEXT NOT NULL,
+    update_time TEXT NOT NULL,
+    deleted_at TEXT,
+    description TEXT,
+    meta_data TEXT NOT NULL DEFAULT '{}' CHECK (json_valid(meta_data)),
+    workflow_task_uuid TEXT NOT NULL,
+    type TEXT NOT NULL CHECK (type IN ('step', 'pause', 'resume', 'cancel')),
+    target_node_uuid TEXT,
+    idempotency_key TEXT NOT NULL,
+    status TEXT NOT NULL
+        CHECK (status IN ('pending', 'succeeded', 'rejected')),
+    result TEXT NOT NULL DEFAULT '{}' CHECK (json_valid(result)),
+    trace_context TEXT NOT NULL DEFAULT '{}' CHECK (json_valid(trace_context)),
+    consumed_at TEXT,
+    FOREIGN KEY(workflow_task_uuid) REFERENCES workflow_task(uuid) ON DELETE CASCADE
+);
+CREATE UNIQUE INDEX IF NOT EXISTS ux_workflow_task_command_idempotency_active
+    ON workflow_task_command(workflow_task_uuid, idempotency_key)
+    WHERE deleted_at IS NULL;
+CREATE INDEX IF NOT EXISTS idx_workflow_task_command_pending
+    ON workflow_task_command(workflow_task_uuid, create_time, uuid)
+    WHERE deleted_at IS NULL AND status = 'pending';
+
 CREATE TABLE IF NOT EXISTS workflow_node_job (
     uuid TEXT PRIMARY KEY,
     create_time TEXT NOT NULL,
@@ -1156,6 +1181,83 @@ class WorkflowStore:
             "page_size": page_size,
         }
 
+    def create_task_command(
+        self,
+        *,
+        command_uuid: str,
+        task_uuid: str,
+        command_type: str,
+        target_node_uuid: Optional[str],
+        idempotency_key: str,
+        description: Optional[str],
+        meta_data: Dict[str, Any],
+    ) -> Tuple[Dict[str, Any], bool]:
+        """持久化 command，唯一键重放时返回既有冻结事实。"""
+
+        now = utc_now()
+        try:
+            with self.transaction() as conn:
+                conn.execute(
+                    """
+                    INSERT INTO workflow_task_command(
+                        uuid, create_time, update_time, deleted_at, description,
+                        meta_data, workflow_task_uuid, type, target_node_uuid,
+                        idempotency_key, status, result, trace_context, consumed_at
+                    ) VALUES (?, ?, ?, NULL, ?, ?, ?, ?, ?, ?, 'pending', '{}',
+                              '{}', NULL)
+                    """,
+                    (
+                        command_uuid,
+                        now,
+                        now,
+                        description,
+                        _json(meta_data),
+                        task_uuid,
+                        command_type,
+                        target_node_uuid,
+                        idempotency_key,
+                    ),
+                )
+        except sqlite3.IntegrityError as error:
+            try:
+                return self.get_task_command_by_key(task_uuid, idempotency_key), False
+            except StoreNotFound:
+                raise StoreConflict("task command could not be persisted") from error
+        return self.get_task_command(command_uuid), True
+
+    def get_task_command(self, command_uuid: str) -> Dict[str, Any]:
+        with self._lock:
+            row = self._conn.execute(
+                """
+                SELECT * FROM workflow_task_command
+                WHERE uuid = ? AND deleted_at IS NULL
+                """,
+                (command_uuid,),
+            ).fetchone()
+        if row is None:
+            raise StoreNotFound(f"workflow task command {command_uuid} not found")
+        return self._task_command_row(row)
+
+    def get_task_command_by_key(
+        self,
+        task_uuid: str,
+        idempotency_key: str,
+    ) -> Dict[str, Any]:
+        with self._lock:
+            row = self._conn.execute(
+                """
+                SELECT * FROM workflow_task_command
+                WHERE workflow_task_uuid = ? AND idempotency_key = ?
+                  AND deleted_at IS NULL
+                """,
+                (task_uuid, idempotency_key),
+            ).fetchone()
+        if row is None:
+            raise StoreNotFound(
+                f"workflow task command key {idempotency_key!r} not found"
+            )
+        return self._task_command_row(row)
+
     def list_jobs(self, task_uuid: str) -> List[Dict[str, Any]]:
         self.get_task(task_uuid)
         with self._lock:
@@ -1593,6 +1695,7 @@ class WorkflowStore:
             "workflow_node",
             "workflow_edge",
             "workflow_task",
+            "workflow_task_command",
             "workflow_node_job",
             "workflow_authoring",
             "frontend_event",
@@ -1741,6 +1844,20 @@ class WorkflowStore:
             "started_at",
             "finished_at",
         )
+        return result
+
+    @classmethod
+    def _task_command_row(cls, row: sqlite3.Row) -> Dict[str, Any]:
+        result = {
+            **cls._base(row),
+            "workflow_task_uuid": row["workflow_task_uuid"],
+            "type": row["type"],
+            "idempotency_key": row["idempotency_key"],
+            "status": row["status"],
+            "result": _load(row["result"], {}),
+            "trace_context": _load(row["trace_context"], {}),
+        }
+        cls._add_optional(result, row, "target_node_uuid", "consumed_at")
         return result
 
     @classmethod
