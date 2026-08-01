@@ -208,6 +208,14 @@ class ResourceTemplateIdentity:
 
 
 @dataclass(frozen=True, slots=True)
+class ResourceSlotResolution:
+    """InventoryService 对 concrete ResourceSlot 的 canonical resolution。"""
+
+    uuid: str
+    resource_template_uuid: str
+
+
+@dataclass(frozen=True, slots=True)
 class MaterialRecord:
     """Backend-field-aligned durable Material projection。"""
 

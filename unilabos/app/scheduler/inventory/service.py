@@ -36,6 +36,7 @@ from unilabos.app.scheduler.inventory.domain import (
     MaterialRequirement,
     NotFound,
     ReservationState,
+    ResourceSlotResolution,
     ResourceTemplateIdentity,
     SiteRecord,
     VersionConflict,
@@ -499,6 +500,53 @@ class InventoryService:
         if row is None:
             raise MaterialNotFound(f"material {canonical_material_uuid} not found")
         return _material_record(row)
+
+    def resolve_resource_slot(
+        self,
+        *,
+        material_uuid: str,
+        allowed_resource_template_uuids: tuple[str, ...] | None,
+    ) -> ResourceSlotResolution:
+        """Resolve one concrete ResourceSlot against durable Material truth."""
+
+        canonical_material_uuid = _canonical_uuid(material_uuid, "material_uuid")
+        allowed_templates: set[str] | None = None
+        if allowed_resource_template_uuids is not None:
+            if type(allowed_resource_template_uuids) is not tuple:
+                raise MaterialInvalidInput(
+                    "allowed_resource_template_uuids must be a UUID tuple or null"
+                )
+            if not allowed_resource_template_uuids:
+                raise MaterialInvalidInput(
+                    "allowed_resource_template_uuids must not be empty"
+                )
+            canonical_templates = tuple(
+                _canonical_uuid(value, "allowed_resource_template_uuid")
+                for value in allowed_resource_template_uuids
+            )
+            allowed_templates = set(canonical_templates)
+            if len(allowed_templates) != len(canonical_templates):
+                raise MaterialInvalidInput(
+                    "allowed_resource_template_uuids must be unique"
+                )
+
+        material = self.get_material(canonical_material_uuid)
+        template_uuid = _canonical_uuid(
+            material.resource_template_uuid,
+            "material.resource_template_uuid",
+        )
+        if material.material_kind != "business":
+            raise MaterialInvalidInput("ResourceSlot requires a business Material")
+        if material.disposition != "active":
+            raise MaterialConflict("Material is not runnable")
+        if allowed_templates is not None and template_uuid not in allowed_templates:
+            raise MaterialInvalidInput(
+                "Material template is not allowed by ResourceSlot"
+            )
+        return ResourceSlotResolution(
+            uuid=canonical_material_uuid,
+            resource_template_uuid=template_uuid,
+        )
 
     def create_site(
         self,
