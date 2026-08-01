@@ -809,14 +809,18 @@ class InventoryService:
                     "SELECT * FROM processed_command WHERE command_id = ?",
                     (canonical_command_uuid,),
                 ).fetchone()
+                previous_blocked: TaskMaterialAdmissionResult | None = None
                 if processed is not None:
                     if processed["payload_hash"] != payload_hash:
                         raise MaterialConflict(
                             "command_uuid was already used with a different payload"
                         )
-                    return _admission_result_from_payload(
+                    previous_result = _admission_result_from_payload(
                         json.loads(processed["result_json"])
                     )
+                    if previous_result.status != "blocked":
+                        return previous_result
+                    previous_blocked = previous_result
 
                 bindings: list[TaskMaterialBinding] = []
                 members: dict[str, tuple[str, int]] = {}
@@ -921,6 +925,8 @@ class InventoryService:
                     (*material_uuids, canonical_task_uuid),
                 ).fetchone()
                 if reserved_elsewhere is not None:
+                    if previous_blocked is not None:
+                        return previous_blocked
                     outbox_sequence = self._emit(
                         conn,
                         now_ms,
@@ -1043,6 +1049,11 @@ class InventoryService:
                         command_id, idempotency_key, command_type, payload_hash,
                         result_json, status, processed_at
                     ) VALUES (?, ?, 'material.admit', ?, ?, 'completed', ?)
+                    ON CONFLICT(command_id) DO UPDATE SET
+                        result_json = excluded.result_json,
+                        status = excluded.status,
+                        processed_at = excluded.processed_at
+                    WHERE processed_command.payload_hash = excluded.payload_hash
                     """,
                     (
                         canonical_command_uuid,
