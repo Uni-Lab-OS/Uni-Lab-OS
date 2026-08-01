@@ -177,8 +177,9 @@ producer public read DTO
    它是组合缺陷发现门，不只是前端截图门。
 3. 发现 OS 缺陷时插入来源明确的独立修正 Round，不在 FE 增加兼容生成器，也不改写既定
    02H 范围。
-4. 修复合入 OS integration 后立即恢复 FE-D117；完成 FE 合并后再进入既定 02H Task input
-   preflight。
+4. 02H 已在 02G1 验证期间从同一 `0138044` 基线独立完成门禁并先行合入 integration；
+   02G1 合入最新 integration 后立即恢复 FE-D117，不重复执行 02H。
 
-本报告提交后，Round 02G1 可非 squash 本地合入
-`integration/workflow-task-runtime`；不 push。
+本报告提交后，Round 02G1 可非 squash 本地合入已含 02H 的
+`integration/workflow-task-runtime`；不 push。两个分支均从 `0138044` 开始且修改面不重叠，
+合入后仍需执行 02G1 focused 回归，证明合并结果而非单分支候选。
