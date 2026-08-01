@@ -171,6 +171,37 @@ CREATE TABLE IF NOT EXISTS inventory_reservation (
 CREATE UNIQUE INDEX IF NOT EXISTS idx_reservation_idem
     ON inventory_reservation(workflow_id, node_id, attempt);
 
+CREATE TABLE IF NOT EXISTS material_reservation (
+    uuid TEXT PRIMARY KEY,
+    workflow_task_uuid TEXT NOT NULL,
+    set_fingerprint TEXT NOT NULL,
+    status TEXT NOT NULL CHECK (status IN ('active', 'released')),
+    create_time TEXT NOT NULL,
+    released_at TEXT,
+    CHECK (
+        (status = 'active' AND released_at IS NULL)
+        OR (status = 'released' AND released_at IS NOT NULL)
+    )
+);
+CREATE UNIQUE INDEX IF NOT EXISTS ux_material_reservation_task_active
+    ON material_reservation(workflow_task_uuid) WHERE status = 'active';
+CREATE TABLE IF NOT EXISTS material_reservation_member (
+    reservation_uuid TEXT NOT NULL,
+    material_uuid TEXT NOT NULL,
+    root_material_uuid TEXT NOT NULL,
+    acquired_version INTEGER NOT NULL CHECK (acquired_version > 0),
+    released_at TEXT,
+    PRIMARY KEY(reservation_uuid, material_uuid),
+    FOREIGN KEY(reservation_uuid) REFERENCES material_reservation(uuid)
+        ON DELETE CASCADE,
+    FOREIGN KEY(material_uuid) REFERENCES material(uuid) ON DELETE RESTRICT,
+    FOREIGN KEY(root_material_uuid) REFERENCES material(uuid) ON DELETE RESTRICT
+);
+CREATE UNIQUE INDEX IF NOT EXISTS ux_material_reservation_member_active
+    ON material_reservation_member(material_uuid) WHERE released_at IS NULL;
+CREATE INDEX IF NOT EXISTS ix_material_reservation_member_root
+    ON material_reservation_member(root_material_uuid);
+
 CREATE TABLE IF NOT EXISTS inventory_ledger (
     ledger_id     INTEGER PRIMARY KEY AUTOINCREMENT,
     occurred_at   INTEGER NOT NULL,
@@ -198,11 +229,16 @@ CREATE TABLE IF NOT EXISTS sync_outbox (
 );
 
 CREATE TABLE IF NOT EXISTS processed_command (
-    command_id   TEXT PRIMARY KEY,
-    result_json  TEXT NOT NULL DEFAULT '{}',
-    status       TEXT NOT NULL DEFAULT 'completed',
-    processed_at INTEGER NOT NULL DEFAULT 0
+    command_id      TEXT PRIMARY KEY,
+    idempotency_key TEXT NOT NULL DEFAULT '',
+    command_type    TEXT NOT NULL DEFAULT '',
+    payload_hash    TEXT NOT NULL DEFAULT '',
+    result_json     TEXT NOT NULL DEFAULT '{}',
+    status          TEXT NOT NULL DEFAULT 'completed',
+    processed_at    INTEGER NOT NULL DEFAULT 0
 );
+CREATE UNIQUE INDEX IF NOT EXISTS ux_processed_command_idempotency
+    ON processed_command(idempotency_key) WHERE idempotency_key <> '';
 
 CREATE TABLE IF NOT EXISTS sync_cursor (
     cursor_name    TEXT PRIMARY KEY,

@@ -7,6 +7,7 @@
 
 from __future__ import annotations
 
+import hashlib
 import json
 import math
 import sqlite3
@@ -39,6 +40,10 @@ from unilabos.app.scheduler.inventory.domain import (
     ResourceSlotResolution,
     ResourceTemplateIdentity,
     SiteRecord,
+    TaskMaterialAdmissionCommand,
+    TaskMaterialAdmissionResult,
+    TaskMaterialAdmissionSource,
+    TaskMaterialBinding,
     VersionConflict,
     check_instance_transition,
     check_lot_invariants,
@@ -174,6 +179,102 @@ def _read_site(conn: sqlite3.Connection, site_uuid: str) -> SiteRecord | None:
     )
 
 
+def _admission_result_payload(result: TaskMaterialAdmissionResult) -> dict[str, Any]:
+    return {
+        "schema_version": result.schema_version,
+        "command_uuid": result.command_uuid,
+        "workflow_task_uuid": result.workflow_task_uuid,
+        "status": result.status,
+        "reservation_uuid": result.reservation_uuid,
+        "bindings": [
+            {
+                "material_source_node_uuid": binding.material_source_node_uuid,
+                "resource_slot": dict(binding.resource_slot),
+                "site_uuid": binding.site_uuid,
+            }
+            for binding in result.bindings
+        ],
+        "diagnostics": [dict(item) for item in result.diagnostics],
+        "outbox_sequence": result.outbox_sequence,
+    }
+
+
+def _admission_result_from_payload(
+    payload: Mapping[str, Any],
+) -> TaskMaterialAdmissionResult:
+    return TaskMaterialAdmissionResult(
+        schema_version=int(payload["schema_version"]),
+        command_uuid=str(payload["command_uuid"]),
+        workflow_task_uuid=str(payload["workflow_task_uuid"]),
+        status=str(payload["status"]),
+        reservation_uuid=(
+            str(payload["reservation_uuid"])
+            if payload.get("reservation_uuid") is not None
+            else None
+        ),
+        bindings=tuple(
+            TaskMaterialBinding(
+                material_source_node_uuid=str(item["material_source_node_uuid"]),
+                resource_slot=dict(item["resource_slot"]),
+                site_uuid=(
+                    str(item["site_uuid"])
+                    if item.get("site_uuid") is not None
+                    else None
+                ),
+            )
+            for item in payload.get("bindings", [])
+        ),
+        diagnostics=tuple(dict(item) for item in payload.get("diagnostics", [])),
+        outbox_sequence=int(payload["outbox_sequence"]),
+    )
+
+
+def _admission_command_payload(command: TaskMaterialAdmissionCommand) -> dict[str, Any]:
+    return {
+        "schema_version": command.schema_version,
+        "command_uuid": command.command_uuid,
+        "idempotency_key": command.idempotency_key,
+        "workflow_task_uuid": command.workflow_task_uuid,
+        "workflow_snapshot_fingerprint": command.workflow_snapshot_fingerprint,
+        "sources": [
+            {
+                "material_source_node_uuid": source.material_source_node_uuid,
+                "mode": source.mode,
+                "resource_template_uuid": source.resource_template_uuid,
+                "mount": dict(source.mount),
+                "material_uuid": source.material_uuid,
+                "site_uuid": source.site_uuid,
+                "candidate_site_uuids": list(source.candidate_site_uuids),
+                "flow_role": source.flow_role,
+            }
+            for source in command.sources
+        ],
+    }
+
+
+def _canonical_payload_hash(payload: Mapping[str, Any]) -> str:
+    try:
+        encoded = json.dumps(
+            dict(payload),
+            allow_nan=False,
+            ensure_ascii=False,
+            separators=(",", ":"),
+            sort_keys=True,
+        ).encode()
+    except (TypeError, ValueError) as exc:
+        raise MaterialInvalidInput("admission command must be JSON-canonical") from exc
+    return f"sha256:{hashlib.sha256(encoded).hexdigest()}"
+
+
+def _reservation_fingerprint(material_uuids: tuple[str, ...]) -> str:
+    encoded = json.dumps(
+        list(material_uuids),
+        ensure_ascii=False,
+        separators=(",", ":"),
+    ).encode()
+    return f"sha256:{hashlib.sha256(encoded).hexdigest()}"
+
+
 class InventoryService:
     """Edge 仓储唯一事实源的业务入口."""
 
@@ -292,7 +393,7 @@ class InventoryService:
         causation_id: str = "",
         actor: str = "",
         reason: str = "",
-    ) -> None:
+    ) -> int:
         """同事务写 ledger + outbox."""
         InventoryStore.tx_insert_ledger(
             conn,
@@ -305,7 +406,7 @@ class InventoryService:
             reason=reason,
             causation_id=causation_id,
         )
-        InventoryStore.tx_insert_outbox(
+        outbox_sequence = InventoryStore.tx_insert_outbox(
             conn,
             new_event_id(now_ms),
             self.edge_id,
@@ -332,6 +433,7 @@ class InventoryService:
                     "actor": actor,
                 }
             )
+        return outbox_sequence
 
     @staticmethod
     def _tx_get_lot(conn: sqlite3.Connection, lot_id: str) -> dict[str, Any]:
@@ -547,6 +649,342 @@ class InventoryService:
             uuid=canonical_material_uuid,
             resource_template_uuid=template_uuid,
         )
+
+    def admit_task(
+        self,
+        command: TaskMaterialAdmissionCommand,
+    ) -> TaskMaterialAdmissionResult:
+        """Atomically resolve and reserve all explicit Materials for one Task."""
+
+        if not isinstance(command, TaskMaterialAdmissionCommand):
+            raise MaterialInvalidInput("command must be a TaskMaterialAdmissionCommand")
+        if command.schema_version != 1:
+            raise MaterialInvalidInput("unsupported admission schema_version")
+        canonical_command_uuid = _canonical_uuid(command.command_uuid, "command_uuid")
+        canonical_task_uuid = _canonical_uuid(
+            command.workflow_task_uuid,
+            "workflow_task_uuid",
+        )
+        if not isinstance(command.idempotency_key, str) or not command.idempotency_key:
+            raise MaterialInvalidInput("idempotency_key must not be blank")
+        if (
+            not isinstance(command.workflow_snapshot_fingerprint, str)
+            or not command.workflow_snapshot_fingerprint
+        ):
+            raise MaterialInvalidInput(
+                "workflow_snapshot_fingerprint must not be blank"
+            )
+        if type(command.sources) is not tuple or not command.sources:
+            raise MaterialInvalidInput("sources must be a non-empty tuple")
+
+        normalized_sources: list[TaskMaterialAdmissionSource] = []
+        seen_nodes: set[str] = set()
+        seen_materials: set[str] = set()
+        for source in command.sources:
+            if not isinstance(source, TaskMaterialAdmissionSource):
+                raise MaterialInvalidInput(
+                    "sources must contain TaskMaterialAdmissionSource values"
+                )
+            node_uuid = _canonical_uuid(
+                source.material_source_node_uuid,
+                "material_source_node_uuid",
+            )
+            if node_uuid in seen_nodes:
+                raise MaterialInvalidInput(
+                    "material_source_node_uuid values must be unique"
+                )
+            seen_nodes.add(node_uuid)
+            if source.mode != "existing":
+                raise MaterialInvalidInput(
+                    "M1R admission only supports explicit existing Materials"
+                )
+            template_uuid = _canonical_uuid(
+                source.resource_template_uuid,
+                "resource_template_uuid",
+            )
+            if template_uuid not in self._resource_templates:
+                raise MaterialInvalidInput("resource_template_uuid is not registered")
+            if source.material_uuid is None:
+                raise MaterialInvalidInput(
+                    "existing MaterialSource requires material_uuid"
+                )
+            material_uuid = _canonical_uuid(source.material_uuid, "material_uuid")
+            if material_uuid in seen_materials:
+                raise MaterialInvalidInput(
+                    "a Material may be bound by only one MaterialSource"
+                )
+            seen_materials.add(material_uuid)
+            if not isinstance(source.mount, Mapping):
+                raise MaterialInvalidInput("mount must be a ResourceSlot object")
+            mount_uuid = _canonical_uuid(
+                str(source.mount.get("uuid", "")), "mount.uuid"
+            )
+            if mount_uuid != material_uuid:
+                raise MaterialInvalidInput("mount.uuid must match material_uuid")
+            site_uuid = (
+                _canonical_uuid(source.site_uuid, "site_uuid")
+                if source.site_uuid is not None
+                else None
+            )
+            if type(source.candidate_site_uuids) is not tuple:
+                raise MaterialInvalidInput("candidate_site_uuids must be a UUID tuple")
+            candidate_site_uuids = tuple(
+                _canonical_uuid(value, "candidate_site_uuid")
+                for value in source.candidate_site_uuids
+            )
+            if len(set(candidate_site_uuids)) != len(candidate_site_uuids):
+                raise MaterialInvalidInput("candidate_site_uuids must be unique")
+            if not isinstance(source.flow_role, str) or not source.flow_role.strip():
+                raise MaterialInvalidInput("flow_role must not be blank")
+            normalized_sources.append(
+                TaskMaterialAdmissionSource(
+                    material_source_node_uuid=node_uuid,
+                    mode="existing",
+                    resource_template_uuid=template_uuid,
+                    mount={"uuid": material_uuid},
+                    material_uuid=material_uuid,
+                    site_uuid=site_uuid,
+                    candidate_site_uuids=tuple(sorted(candidate_site_uuids)),
+                    flow_role=source.flow_role.strip(),
+                )
+            )
+
+        normalized_command = TaskMaterialAdmissionCommand(
+            schema_version=1,
+            command_uuid=canonical_command_uuid,
+            idempotency_key=command.idempotency_key,
+            workflow_task_uuid=canonical_task_uuid,
+            workflow_snapshot_fingerprint=command.workflow_snapshot_fingerprint,
+            sources=tuple(normalized_sources),
+        )
+        payload_hash = _canonical_payload_hash(
+            _admission_command_payload(normalized_command)
+        )
+        now_iso = self._now_iso()
+        now_ms = self._now_ms()
+
+        try:
+            with self._tx() as conn:
+                processed = conn.execute(
+                    "SELECT * FROM processed_command WHERE command_id = ?",
+                    (canonical_command_uuid,),
+                ).fetchone()
+                if processed is not None:
+                    if processed["payload_hash"] != payload_hash:
+                        raise MaterialConflict(
+                            "command_uuid was already used with a different payload"
+                        )
+                    return _admission_result_from_payload(
+                        json.loads(processed["result_json"])
+                    )
+
+                bindings: list[TaskMaterialBinding] = []
+                members: dict[str, tuple[str, int]] = {}
+                for source in normalized_sources:
+                    row = conn.execute(
+                        """
+                        SELECT uuid, resource_template_uuid, material_kind,
+                               disposition, version
+                        FROM material
+                        WHERE uuid = ? AND deleted_at IS NULL
+                        """,
+                        (source.material_uuid,),
+                    ).fetchone()
+                    if row is None:
+                        raise MaterialNotFound(
+                            f"material {source.material_uuid} not found"
+                        )
+                    if row["resource_template_uuid"] != source.resource_template_uuid:
+                        raise MaterialInvalidInput(
+                            "Material template does not match MaterialSource"
+                        )
+                    if row["material_kind"] != "business":
+                        raise MaterialInvalidInput(
+                            "MaterialSource requires a business Material"
+                        )
+                    if row["disposition"] != "active":
+                        raise MaterialConflict("Material is not runnable")
+                    if source.site_uuid is not None:
+                        site = conn.execute(
+                            """
+                            SELECT occupied_material_uuid
+                            FROM site
+                            WHERE uuid = ? AND deleted_at IS NULL
+                            """,
+                            (source.site_uuid,),
+                        ).fetchone()
+                        if site is None:
+                            raise MaterialNotFound(f"site {source.site_uuid} not found")
+                        if site["occupied_material_uuid"] != source.material_uuid:
+                            raise MaterialConflict(
+                                "Site does not contain the selected Material"
+                            )
+                    subtree = conn.execute(
+                        """
+                        WITH RECURSIVE subtree(uuid) AS (
+                            SELECT uuid
+                            FROM material
+                            WHERE uuid = ? AND deleted_at IS NULL
+                            UNION
+                            SELECT child.uuid
+                            FROM material AS child
+                            JOIN subtree ON child.parent_uuid = subtree.uuid
+                            WHERE child.deleted_at IS NULL
+                        )
+                        SELECT uuid, material_kind, disposition, version
+                        FROM material
+                        WHERE uuid IN (SELECT uuid FROM subtree)
+                        ORDER BY uuid
+                        """,
+                        (source.material_uuid,),
+                    ).fetchall()
+                    for item in subtree:
+                        if item["material_kind"] != "business":
+                            raise MaterialInvalidInput(
+                                "Material reservation requires business Materials"
+                            )
+                        if item["disposition"] != "active":
+                            raise MaterialConflict("Material is not runnable")
+                        existing = members.get(item["uuid"])
+                        if existing is None or source.material_uuid < existing[0]:
+                            members[item["uuid"]] = (
+                                source.material_uuid,
+                                int(item["version"]),
+                            )
+                    bindings.append(
+                        TaskMaterialBinding(
+                            material_source_node_uuid=source.material_source_node_uuid,
+                            resource_slot={
+                                "uuid": source.material_uuid,
+                                "resource_template_uuid": source.resource_template_uuid,
+                            },
+                            site_uuid=source.site_uuid,
+                        )
+                    )
+
+                material_uuids = tuple(sorted(members))
+                set_fingerprint = _reservation_fingerprint(material_uuids)
+                active = conn.execute(
+                    """
+                    SELECT uuid, set_fingerprint
+                    FROM material_reservation
+                    WHERE workflow_task_uuid = ? AND status = 'active'
+                    """,
+                    (canonical_task_uuid,),
+                ).fetchone()
+                if active is not None:
+                    if active["set_fingerprint"] != set_fingerprint:
+                        raise MaterialConflict(
+                            "Task already owns a different Material reservation"
+                        )
+                    reservation_uuid = str(active["uuid"])
+                else:
+                    reservation_uuid = str(
+                        uuid.uuid5(
+                            uuid.NAMESPACE_URL,
+                            f"unilab:m1r:reservation:{canonical_task_uuid}:{set_fingerprint}",
+                        )
+                    )
+                    conn.execute(
+                        """
+                        INSERT INTO material_reservation(
+                            uuid, workflow_task_uuid, set_fingerprint,
+                            status, create_time, released_at
+                        ) VALUES (?, ?, ?, 'active', ?, NULL)
+                        """,
+                        (
+                            reservation_uuid,
+                            canonical_task_uuid,
+                            set_fingerprint,
+                            now_iso,
+                        ),
+                    )
+                    for material_uuid, (root_uuid, version) in sorted(members.items()):
+                        conn.execute(
+                            """
+                            INSERT INTO material_reservation_member(
+                                reservation_uuid, material_uuid,
+                                root_material_uuid, acquired_version, released_at
+                            ) VALUES (?, ?, ?, ?, NULL)
+                            """,
+                            (reservation_uuid, material_uuid, root_uuid, version),
+                        )
+
+                outbox_sequence = self._emit(
+                    conn,
+                    now_ms,
+                    "material_reservation",
+                    reservation_uuid,
+                    1,
+                    "material_reservation.admitted",
+                    {
+                        "workflow_task_uuid": canonical_task_uuid,
+                        "set_fingerprint": set_fingerprint,
+                        "material_uuids": list(material_uuids),
+                    },
+                    causation_id=canonical_command_uuid,
+                )
+                result = TaskMaterialAdmissionResult(
+                    schema_version=1,
+                    command_uuid=canonical_command_uuid,
+                    workflow_task_uuid=canonical_task_uuid,
+                    status="admitted",
+                    reservation_uuid=reservation_uuid,
+                    bindings=tuple(bindings),
+                    diagnostics=(),
+                    outbox_sequence=outbox_sequence,
+                )
+                conn.execute(
+                    """
+                    INSERT INTO processed_command(
+                        command_id, idempotency_key, command_type, payload_hash,
+                        result_json, status, processed_at
+                    ) VALUES (?, ?, 'material.admit', ?, ?, 'completed', ?)
+                    """,
+                    (
+                        canonical_command_uuid,
+                        command.idempotency_key,
+                        payload_hash,
+                        json.dumps(
+                            _admission_result_payload(result),
+                            ensure_ascii=False,
+                            separators=(",", ":"),
+                            sort_keys=True,
+                        ),
+                        now_ms,
+                    ),
+                )
+        except sqlite3.IntegrityError:
+            raise MaterialConflict("Material reservation conflicts") from None
+        except sqlite3.Error:
+            raise MaterialAuthorityUnavailable(
+                "failed to admit Task Materials"
+            ) from None
+        return result
+
+    def get_command_result(
+        self,
+        command_uuid: str,
+    ) -> TaskMaterialAdmissionResult:
+        """Read one durable Material admission result by command UUID."""
+
+        canonical_command_uuid = _canonical_uuid(command_uuid, "command_uuid")
+        try:
+            row = self.store.get_processed_command(canonical_command_uuid)
+        except sqlite3.Error:
+            raise MaterialAuthorityUnavailable(
+                "failed to read command result"
+            ) from None
+        if row is None or row.get("command_type") != "material.admit":
+            raise MaterialNotFound(
+                f"inventory command {canonical_command_uuid} not found"
+            )
+        try:
+            return _admission_result_from_payload(json.loads(row["result_json"]))
+        except (KeyError, TypeError, ValueError, json.JSONDecodeError):
+            raise MaterialAuthorityUnavailable(
+                "stored inventory command result is invalid"
+            ) from None
 
     def create_site(
         self,

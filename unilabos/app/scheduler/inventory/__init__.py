@@ -30,6 +30,10 @@ from unilabos.app.scheduler.inventory.domain import (
     ResourceSlotResolution,
     ResourceTemplateIdentity,
     SiteRecord,
+    TaskMaterialAdmissionCommand,
+    TaskMaterialAdmissionResult,
+    TaskMaterialAdmissionSource,
+    TaskMaterialBinding,
     VersionConflict,
 )
 from unilabos.app.scheduler.inventory.service import InventoryService
@@ -59,6 +63,10 @@ __all__ = [
     "ResourceSlotResolution",
     "ResourceTemplateIdentity",
     "SiteRecord",
+    "TaskMaterialAdmissionCommand",
+    "TaskMaterialAdmissionResult",
+    "TaskMaterialAdmissionSource",
+    "TaskMaterialBinding",
     "VersionConflict",
     "build_snapshot",
     "execute_command",

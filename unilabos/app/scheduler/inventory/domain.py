@@ -216,6 +216,55 @@ class ResourceSlotResolution:
 
 
 @dataclass(frozen=True, slots=True)
+class TaskMaterialAdmissionSource:
+    """One closed MaterialSource entry in a Task admission command。"""
+
+    material_source_node_uuid: str
+    mode: str
+    resource_template_uuid: str
+    mount: dict[str, Any]
+    material_uuid: str | None
+    site_uuid: str | None
+    candidate_site_uuids: tuple[str, ...]
+    flow_role: str
+
+
+@dataclass(frozen=True, slots=True)
+class TaskMaterialAdmissionCommand:
+    """Versioned Task-wide Material admission command。"""
+
+    schema_version: int
+    command_uuid: str
+    idempotency_key: str
+    workflow_task_uuid: str
+    workflow_snapshot_fingerprint: str
+    sources: tuple[TaskMaterialAdmissionSource, ...]
+
+
+@dataclass(frozen=True, slots=True)
+class TaskMaterialBinding:
+    """Canonical Material binding for one MaterialSource node。"""
+
+    material_source_node_uuid: str
+    resource_slot: dict[str, Any]
+    site_uuid: str | None
+
+
+@dataclass(frozen=True, slots=True)
+class TaskMaterialAdmissionResult:
+    """Closed durable result of one Task-wide admission command。"""
+
+    schema_version: int
+    command_uuid: str
+    workflow_task_uuid: str
+    status: str
+    reservation_uuid: str | None
+    bindings: tuple[TaskMaterialBinding, ...]
+    diagnostics: tuple[dict[str, Any], ...]
+    outbox_sequence: int
+
+
+@dataclass(frozen=True, slots=True)
 class MaterialRecord:
     """Backend-field-aligned durable Material projection。"""
 
