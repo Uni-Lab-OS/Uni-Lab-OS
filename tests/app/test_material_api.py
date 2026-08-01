@@ -289,6 +289,7 @@ def test_material_query_reports_structured_errors_and_health_is_public() -> None
 
     unavailable = TestClient(create_app(lambda: None))
     assert unavailable.get("/health").json() == {"status": "ok"}
+    assert unavailable.get("/api/v1/health").json() == {"status": "ok"}
     unavailable_materials = unavailable.get("/api/v1/materials")
     assert unavailable_materials.status_code == 503
     assert (

@@ -30,6 +30,7 @@ from typing import Any
 
 from unilabos.app.device_catalog import device_catalog_from_action_catalog
 from unilabos.app.local_bridge.bind_security import require_loopback_runtime_host
+from unilabos.app.local_bridge.device_control_api import DeviceControlProxy
 from unilabos.app.local_bridge.local_api import (
     LOCAL_DEMO_ACTION_CATALOG,
     LocalApiServer,
@@ -116,6 +117,7 @@ class LocalBridgeServer:
         execution_http_url: str = "http://127.0.0.1:8002",
         internal_api_token: str | None = None,
         runtime_action_proxy: RuntimeActionCatalogProxy | None = None,
+        device_control_proxy: DeviceControlProxy | None = None,
     ) -> None:
         require_loopback_runtime_host(host)
         if graph_path is not None and not offline:
@@ -175,6 +177,13 @@ class LocalBridgeServer:
                 internal_token=internal_api_token,
             )
         )
+        self._device_control_proxy = (
+            device_control_proxy
+            or DeviceControlProxy(
+                execution_http_url,
+                internal_token=internal_api_token,
+            )
+        )
         self._runtime_action_sync_task: asyncio.Task[None] | None = None
 
         if offline:
@@ -201,6 +210,7 @@ class LocalBridgeServer:
             host=host,
             port=api_port,
             resource_template_proxy=self._resource_template_proxy,
+            device_control_proxy=self._device_control_proxy,
         )
 
     def _adopt_session(self, session: ScheduleSession) -> None:

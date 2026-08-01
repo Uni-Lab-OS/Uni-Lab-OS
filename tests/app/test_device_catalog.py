@@ -84,6 +84,7 @@ def test_build_device_catalog_projects_online_devices_and_action_schemas() -> No
                     },
                     "contract": {},
                     "is_busy": True,
+                    "current_job_id": None,
                 }
             ],
         }
@@ -121,12 +122,16 @@ def test_action_lock_report_updates_busy_projection_without_mutating_source() ->
                 "device_id": "camera",
                 "action_name": "capture",
                 "free": False,
+                "current_job_id": "job-capture",
             }
         ],
     )
 
     assert updated is not None
     assert updated["devices"][0]["actions"][0]["is_busy"] is True
+    assert updated["devices"][0]["actions"][0]["current_job_id"] == (
+        "job-capture"
+    )
     assert snapshot["devices"][0]["actions"][0]["is_busy"] is False
 
 
@@ -153,7 +158,10 @@ def test_websocket_publisher_adapts_device_action_key(monkeypatch) -> None:
     client = object.__new__(ws_client_module.WebSocketClient)
     client.is_disabled = False
     client.is_connected = lambda: True
-    client.device_manager = SimpleNamespace(is_action_busy=Mock(return_value=True))
+    client.device_manager = SimpleNamespace(
+        is_action_busy=Mock(return_value=True),
+        current_action_job_id=Mock(return_value="job-move"),
+    )
     client.message_processor = SimpleNamespace(
         send_message=Mock(return_value=True)
     )
@@ -165,3 +173,6 @@ def test_websocket_publisher_adapts_device_action_key(monkeypatch) -> None:
     message = client.message_processor.send_message.call_args.args[0]
     assert message["data"]["request_id"] == "catalog-1"
     assert message["data"]["devices"][0]["actions"][0]["is_busy"] is True
+    assert message["data"]["devices"][0]["actions"][0][
+        "current_job_id"
+    ] == "job-move"

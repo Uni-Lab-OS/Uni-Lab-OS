@@ -285,6 +285,46 @@ class DeviceActionManager:
                 return True
             return bool(self.device_queues.get(device_action_key))
 
+    def current_action_job_id(self, device_action_key: str) -> Optional[str]:
+        """返回当前锁 holder；无 active 时以队首 job 作为保守比较 token。"""
+        with self.lock:
+            active = self.active_jobs.get(device_action_key)
+            if active is not None:
+                return active.job_id
+            queued = self.device_queues.get(device_action_key) or []
+            return queued[0].job_id if queued else None
+
+    def force_release_action(
+        self,
+        device_action_key: str,
+        *,
+        expected_job_id: str,
+    ) -> Tuple[str, List[JobInfo]]:
+        """以 holder compare-and-release 强制清理一个 Action 的 active/queue。
+
+        返回 ``(status, released_jobs)``；status 为 ``released``、
+        ``already_unlocked`` 或 ``lock_changed``。调用方必须先完成此 CAS，
+        再向快照中的物理 Action 请求取消；否则快速取消回调可能先提升队列、
+        改变 holder。``lock_changed`` 必须映射成 409，不能误释放后来取得锁的 job。
+        """
+        with self.lock:
+            current_job_id = self.current_action_job_id(device_action_key)
+            if current_job_id is None:
+                return "already_unlocked", []
+            if current_job_id != expected_job_id:
+                return "lock_changed", []
+
+            released_jobs: List[JobInfo] = []
+            active = self.active_jobs.pop(device_action_key, None)
+            if active is not None:
+                released_jobs.append(active)
+            released_jobs.extend(self.device_queues.pop(device_action_key, []))
+            for job in released_jobs:
+                job.status = JobStatus.ENDED
+                job.update_timestamp()
+                self.all_jobs.pop(job.job_id, None)
+            return "released", released_jobs
+
     def cancel_job(self, job_id: str) -> Tuple[bool, Optional[JobInfo], bool]:
         """
         取消单个任务。
@@ -2072,6 +2112,11 @@ class WebSocketClient(BaseCommunicationClient):
                     f"/devices/{device_id}/{action_name}"
                 )
             ),
+            current_action_job_id=lambda device_id, action_name: (
+                self.device_manager.current_action_job_id(
+                    f"/devices/{device_id}/{action_name}"
+                )
+            ),
             request_id=request_id,
         )
         queued = self.message_processor.send_message(
@@ -2324,11 +2369,11 @@ class WebSocketClient(BaseCommunicationClient):
         job_log = format_job_log(item.job_id, item.task_id, item.device_id, item.action_name)
 
         # 拦截最终结果状态，与原版本逻辑一致
-        if status in ["success", "failed"]:
+        if status in ["success", "failed", "cancelled"]:
             self._job_running_last_sent.pop(item.job_id, None)
 
             cached_status = self.get_cached_job_start_response_status(item.job_id, item.task_id)
-            if cached_status in ["success", "failed"]:
+            if cached_status in ["success", "failed", "cancelled"]:
                 # 同一节点的首个权威终态不可被迟到/重复回调覆盖。尤其不能让一个
                 # 已上报的设备失败随后被迟到的 success 染绿。
                 logger.warning(
@@ -2423,14 +2468,118 @@ class WebSocketClient(BaseCommunicationClient):
         else:
             logger.warning(f"[WebSocketClient] Failed to cancel job {job_log}")
 
+    def force_unlock_action(
+        self,
+        device_id: str,
+        action_name: str,
+        *,
+        expected_job_id: str,
+        reason: str,
+    ) -> Dict[str, Any]:
+        """操作员确认物理安全后，以 holder CAS 强制释放指定 Action 锁。"""
+        device_action_key = f"/devices/{device_id}/{action_name}"
+        current_job_id = self.device_manager.current_action_job_id(
+            device_action_key
+        )
+        if current_job_id is None:
+            return {
+                "status": "already_unlocked",
+                "deviceId": device_id,
+                "actionName": action_name,
+                "releasedJobIds": [],
+            }
+        if current_job_id != expected_job_id:
+            return {
+                "status": "lock_changed",
+                "deviceId": device_id,
+                "actionName": action_name,
+                "currentJobId": current_job_id,
+                "releasedJobIds": [],
+            }
+
+        # Compare-and-release first.  A ROS cancel result can arrive immediately
+        # and drive the ordinary completion path, which would otherwise promote
+        # the queued job before this operation has cleared the queue.
+        status, released_jobs = self.device_manager.force_release_action(
+            device_action_key,
+            expected_job_id=expected_job_id,
+        )
+        if status != "released":
+            return {
+                "status": status,
+                "deviceId": device_id,
+                "actionName": action_name,
+                "currentJobId": self.device_manager.current_action_job_id(
+                    device_action_key
+                ),
+                "releasedJobIds": [],
+            }
+
+        host_node = HostNode.get_instance(0)
+        cancel_requested_job_ids: List[str] = []
+        if host_node is not None:
+            for job in released_jobs:
+                if host_node.cancel_goal(job.job_id):
+                    cancel_requested_job_ids.append(job.job_id)
+
+        for job in released_jobs:
+            self.publish_job_status(
+                {},
+                job,
+                "cancelled",
+                return_info={
+                    "reason": "manual_force_unlock",
+                    "operator_reason": reason,
+                },
+            )
+        # A genuinely new job may have arrived after the successful CAS.  Never
+        # overwrite that later holder with a stale free projection.
+        new_holder = self.device_manager.current_action_job_id(device_action_key)
+        self.publish_action_lock(
+            device_id,
+            action_name,
+            free=new_holder is None,
+        )
+        if self.queue_processor:
+            self.queue_processor.notify_queue_update()
+        logger.warning(
+            "[WebSocketClient] Action lock manually released: %s holder=%s jobs=%d reason=%s",
+            device_action_key,
+            expected_job_id,
+            len(released_jobs),
+            reason,
+        )
+        result = {
+            "status": "released",
+            "deviceId": device_id,
+            "actionName": action_name,
+            "releasedJobIds": [job.job_id for job in released_jobs],
+            "cancelRequestedJobIds": cancel_requested_job_ids,
+        }
+        if new_holder is not None:
+            result["currentJobId"] = new_holder
+        return result
+
     def publish_action_lock(self, device_id: str, action_name: str, free: bool) -> None:
         """主动上报单个 device+action 的锁(可用性)状态。"""
-        self.publish_action_locks([{"device_id": device_id, "action_name": action_name, "free": free}])
+        lock: Dict[str, Any] = {
+            "device_id": device_id,
+            "action_name": action_name,
+            "free": free,
+        }
+        if not free:
+            current_job_id = self.device_manager.current_action_job_id(
+                f"/devices/{device_id}/{action_name}"
+            )
+            if current_job_id:
+                lock["current_job_id"] = current_job_id
+        self.publish_action_locks([lock])
 
     def publish_action_locks(self, locks: List[Dict[str, Any]]) -> None:
         """批量主动上报 device+action 的锁(可用性)状态。
 
-        report_action_lock 不带 job_id/task_id，仅表达每个 device+action 当前是否空闲。
+        report_action_lock 以 current_job_id 作为 busy holder 的并发比较 token；
+        不公开 task_id，也不把该投影当作运行终态。
         单次锁翻转 locks 长度为 1，host_ready/重连时为全量快照。
         """
         if self.is_disabled or not locks:
@@ -2482,7 +2631,18 @@ class WebSocketClient(BaseCommunicationClient):
             for action_name in action_names:
                 device_action_key = f"/devices/{device_id}/{action_name}"
                 free = not self.device_manager.is_action_busy(device_action_key)
-                locks.append({"device_id": device_id, "action_name": action_name, "free": free})
+                lock: Dict[str, Any] = {
+                    "device_id": device_id,
+                    "action_name": action_name,
+                    "free": free,
+                }
+                if not free:
+                    current_job_id = self.device_manager.current_action_job_id(
+                        device_action_key
+                    )
+                    if current_job_id:
+                        lock["current_job_id"] = current_job_id
+                locks.append(lock)
         self.publish_action_locks(locks)
 
     def publish_host_ready(self) -> None:

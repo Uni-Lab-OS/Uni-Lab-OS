@@ -26,6 +26,7 @@ from unilabos.app.web.controller import (
     job_add,
     job_info,
 )
+from unilabos.app.web.device_control import device_control_router
 from unilabos.app.web.resource_templates import resource_template_router
 from unilabos.app.web.runtime_actions import runtime_action_router
 from unilabos.app.web.utils.host_utils import get_host_node_info
@@ -1347,6 +1348,11 @@ def setup_api_routes(app):
         runtime_action_router,
         prefix="/internal/v1",
         tags=["internal-runtime-actions"],
+    )
+    app.include_router(
+        device_control_router,
+        prefix="/internal/v1",
+        tags=["internal-device-control"],
     )
 
     # 启动广播任务

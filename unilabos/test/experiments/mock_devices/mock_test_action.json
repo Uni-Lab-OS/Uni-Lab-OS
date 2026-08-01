@@ -1,0 +1,22 @@
+{
+  "nodes": [
+    {
+      "id": "TestAction1",
+      "name": "测试动作设备",
+      "children": [],
+      "parent": null,
+      "type": "device",
+      "class": "test_action",
+      "position": {
+        "x": 400,
+        "y": 300,
+        "z": 0
+      },
+      "config": {},
+      "data": {
+        "status": "Idle"
+      }
+    }
+  ],
+  "links": []
+}

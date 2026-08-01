@@ -214,6 +214,7 @@ def test_edge_device_catalog_populates_ui_and_single_action_runtime() -> None:
                         "output_schema": {},
                         "contract": {},
                         "is_busy": False,
+                        "current_job_id": None,
                     }
                 ],
             }
@@ -263,6 +264,7 @@ def test_edge_device_catalog_populates_ui_and_single_action_runtime() -> None:
                     },
                     "outputSchema": {},
                     "busy": False,
+                    "currentJobId": None,
                 }
             ],
         }

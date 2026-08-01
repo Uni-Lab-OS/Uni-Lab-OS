@@ -33,6 +33,10 @@ from typing import TYPE_CHECKING, Any
 
 from unilabos.app.device_catalog import public_device_catalog
 from unilabos.app.local_bridge.bind_security import require_loopback_runtime_host
+from unilabos.app.local_bridge.device_control_api import (
+    DeviceControlProxy,
+    DeviceControlProxyError,
+)
 from unilabos.app.local_bridge.material_api import (
     InvalidMaterialQuery,
     MaterialGraphCatalog,
@@ -756,6 +760,7 @@ def build_stack_status() -> dict[str, Any]:
 def create_app(
     get_state: Callable[[], LocalApiState | None],
     resource_template_proxy: ResourceTemplateProxy | None = None,
+    device_control_proxy: DeviceControlProxy | None = None,
 ) -> Any:
     """建 FastAPI app。get_state() 返回已就绪 LocalApiState（OS 未连入时返回 None）。
 
@@ -805,6 +810,20 @@ def create_app(
         return state
 
     def _template_proxy_error(exc: ResourceTemplateProxyError) -> JSONResponse:
+        return JSONResponse(
+            {
+                "error": {
+                    "code": exc.code,
+                    "message": str(exc),
+                    "retryable": exc.retryable,
+                }
+            },
+            status_code=exc.status,
+        )
+
+    def _device_control_proxy_error(
+        exc: DeviceControlProxyError,
+    ) -> JSONResponse:
         return JSONResponse(
             {
                 "error": {
@@ -924,6 +943,7 @@ def create_app(
         return registry
 
     @app.get("/health")
+    @app.get("/api/v1/health")
     async def health() -> Any:
         return {"status": "ok"}
 
@@ -1037,6 +1057,54 @@ def create_app(
                 "Edge has not reported a device catalog",
             )
         return catalog
+
+    @app.post(
+        "/api/v1/devices/{device_id}/actions/{action_name}/commands"
+    )
+    async def api_v1_device_action_command(
+        device_id: str,
+        action_name: str,
+        body: dict[str, Any] = Body(...),
+    ) -> Any:
+        _require_state()
+        if device_control_proxy is None:
+            return _device_control_proxy_error(
+                DeviceControlProxyError(
+                    "DEVICE_CONTROL_UNAVAILABLE",
+                    "当前本地桥未装配设备控制代理",
+                    status=503,
+                    retryable=True,
+                )
+            )
+        if body.get("command") != "force_unlock":
+            raise _problem(
+                422,
+                "INVALID_DEVICE_COMMAND",
+                "command 必须是 force_unlock",
+            )
+        expected_job_id = str(body.get("expectedJobId") or "").strip()
+        if not expected_job_id:
+            raise _problem(
+                422,
+                "INVALID_DEVICE_COMMAND",
+                "expectedJobId 不能为空",
+            )
+        reason = str(body.get("reason") or "").strip()
+        if reason != "operator_confirmed_device_safe":
+            raise _problem(
+                422,
+                "INVALID_DEVICE_COMMAND",
+                "reason 必须确认设备已处于安全状态",
+            )
+        try:
+            return await device_control_proxy.force_unlock_action(
+                device_id,
+                action_name,
+                expected_job_id=expected_job_id,
+                reason=reason,
+            )
+        except DeviceControlProxyError as exc:
+            return _device_control_proxy_error(exc)
 
     @app.get("/api/v1/materials")
     async def api_v1_materials(
@@ -1682,12 +1750,14 @@ class LocalApiServer:
         host: str = "127.0.0.1",
         port: int = 8014,
         resource_template_proxy: ResourceTemplateProxy | None = None,
+        device_control_proxy: DeviceControlProxy | None = None,
     ) -> None:
         require_loopback_runtime_host(host)
         self._get_state = get_state
         self.host = host
         self.port = port
         self._resource_template_proxy = resource_template_proxy
+        self._device_control_proxy = device_control_proxy
         self._server: Any = None
 
     async def start(self) -> None:
@@ -1696,6 +1766,7 @@ class LocalApiServer:
         app = create_app(
             self._get_state,
             resource_template_proxy=self._resource_template_proxy,
+            device_control_proxy=self._device_control_proxy,
         )
         config = uvicorn.Config(app, host=self.host, port=self.port, log_level="info")
         self._server = uvicorn.Server(config)

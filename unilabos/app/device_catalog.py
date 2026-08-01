@@ -20,6 +20,7 @@ def build_device_catalog(
     *,
     machine_name: str,
     is_action_busy: Callable[[str, str], bool],
+    current_action_job_id: Callable[[str, str], str | None] | None = None,
     request_id: str = "",
 ) -> dict[str, Any]:
     """Build one complete device/action snapshot from the live HostNode."""
@@ -56,6 +57,11 @@ def build_device_catalog(
                         str(action_name),
                         definition,
                         busy=is_action_busy(device_id, str(action_name)),
+                        current_job_id=(
+                            current_action_job_id(device_id, str(action_name))
+                            if current_action_job_id is not None
+                            else None
+                        ),
                     )
                 )
         devices.append(
@@ -195,7 +201,7 @@ def apply_action_locks(
     updated = copy.deepcopy(dict(snapshot))
     by_key = {
         (str(lock.get("device_id") or ""), str(lock.get("action_name") or "")):
-        not bool(lock.get("free", False))
+        lock
         for lock in locks
     }
     for device in updated.get("devices") or []:
@@ -207,7 +213,12 @@ def apply_action_locks(
                 continue
             key = (device_id, str(action.get("action_name") or ""))
             if key in by_key:
-                action["is_busy"] = by_key[key]
+                lock = by_key[key]
+                action["is_busy"] = not bool(lock.get("free", False))
+                current_job_id = str(lock.get("current_job_id") or "")
+                action["current_job_id"] = (
+                    current_job_id if action["is_busy"] else None
+                )
     updated["timestamp"] = time.time()
     return updated
 
@@ -240,6 +251,11 @@ def public_device_catalog(snapshot: Mapping[str, Any]) -> dict[str, Any]:
                         dict(action.get("output_schema") or {})
                     ),
                     "busy": bool(action.get("is_busy", False)),
+                    "currentJobId": (
+                        str(action.get("current_job_id"))
+                        if action.get("current_job_id")
+                        else None
+                    ),
                 }
             )
         items.append(
@@ -270,6 +286,7 @@ def _project_action(
     definition: Mapping[str, Any],
     *,
     busy: bool,
+    current_job_id: str | None = None,
 ) -> dict[str, Any]:
     schema = definition.get("schema")
     schema = schema if isinstance(schema, Mapping) else {}
@@ -315,6 +332,7 @@ def _project_action(
         "output_schema": output_schema,
         "contract": contract,
         "is_busy": busy,
+        "current_job_id": current_job_id if busy else None,
     }
 
 

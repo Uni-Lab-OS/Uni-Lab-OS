@@ -103,6 +103,27 @@ class TestActionDevice:
         """设备当前状态。"""
         return self.data.get("status", "Idle")
 
+    @action(
+        description="测试排他锁：保持 Action 运行指定秒数，供锁投影与恢复链路验证",
+        goal_default={"duration_seconds": 15.0},
+    )
+    async def test_hold(self, duration_seconds: float = 15.0) -> Dict[str, Any]:
+        """保持一个排他 Action，不依赖物料或外部设备。"""
+
+        duration = float(duration_seconds)
+        if duration <= 0:
+            raise ValueError("duration_seconds 必须大于 0")
+        self.data["status"] = "Holding"
+        self.data["last_message"] = f"holding for {duration:.1f}s"
+        try:
+            await self._ros_node.sleep(duration)
+        finally:
+            self.data["status"] = "Idle"
+        return {
+            "success": True,
+            "duration_seconds": duration,
+        }
+
     def _get_resource_state(self, resource: ResourceSlot) -> Dict[str, Any]:
         """读取资源 state，失败时返回空字典。"""
         try:
