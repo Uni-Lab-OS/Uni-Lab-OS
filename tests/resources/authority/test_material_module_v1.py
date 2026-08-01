@@ -115,10 +115,12 @@ def _create_site_with_references(
     allowed_resource_template_uuids: list[str],
     site_uuid: str = SITE_UUID,
     name: str = "A1",
+    description: str | None = "Reference validation site",
+    uow: Any | None = None,
 ) -> Any:
     return materials.create_site(
         site_uuid=site_uuid,
-        description="Reference validation site",
+        description=description,
         meta_data={"slice": "m1b-references"},
         material_uuid=material_uuid,
         name=name,
@@ -131,6 +133,7 @@ def _create_site_with_references(
         depth=1.0,
         length=1.0,
         width=1.0,
+        uow=uow,
     )
 
 
@@ -561,7 +564,6 @@ def test_site_create_read_reopen_preserves_backend_projection_and_composition(
             "uuid": SITE_UUID,
             "create_time": created.create_time,
             "update_time": created.update_time,
-            "deleted_at": None,
             "description": "Cold deck position A1",
             "meta_data": {"zone": "cold", "labels": ["robot", "primary"]},
             "material_uuid": MATERIAL_UUID,
@@ -597,6 +599,66 @@ def test_site_create_read_reopen_preserves_backend_projection_and_composition(
             reopened_materials.get_material(MATERIAL_UUID).parent_uuid,
             reopened_materials.get_material(SECOND_MATERIAL_UUID).parent_uuid,
         ) == (None, None)
+
+
+@pytest.mark.parametrize(
+    (
+        "description",
+        "occupied_material_uuid",
+        "allowed_resource_template_uuids",
+    ),
+    [
+        pytest.param(None, None, [], id="nullable-fields-omitted"),
+        pytest.param(
+            "Wire-visible site",
+            SECOND_MATERIAL_UUID,
+            [SECOND_RESOURCE_TEMPLATE_UUID],
+            id="non-null-fields-retained",
+        ),
+    ],
+)
+def test_site_wire_omits_null_optionals_and_retains_non_null_fields(
+    tmp_path: Path,
+    description: str | None,
+    occupied_material_uuid: str | None,
+    allowed_resource_template_uuids: list[str],
+) -> None:
+    database_path = tmp_path / "workflow.db"
+    with _open_material_module(database_path) as materials:
+        _create_placement_materials(materials)
+        created = _create_site_with_references(
+            materials,
+            description=description,
+            material_uuid=MATERIAL_UUID,
+            occupied_material_uuid=occupied_material_uuid,
+            allowed_resource_template_uuids=allowed_resource_template_uuids,
+        )
+
+        for projection in (
+            created.to_dict(),
+            materials.get_site(SITE_UUID).to_dict(),
+        ):
+            assert "deleted_at" not in projection
+            if description is None:
+                assert "description" not in projection
+            else:
+                assert projection["description"] == description
+            if occupied_material_uuid is None:
+                assert "occupied_material_uuid" not in projection
+            else:
+                assert projection["occupied_material_uuid"] == occupied_material_uuid
+
+    with _open_material_module(database_path) as reopened_materials:
+        projection = reopened_materials.get_site(SITE_UUID).to_dict()
+        assert "deleted_at" not in projection
+        if description is None:
+            assert "description" not in projection
+        else:
+            assert projection["description"] == description
+        if occupied_material_uuid is None:
+            assert "occupied_material_uuid" not in projection
+        else:
+            assert projection["occupied_material_uuid"] == occupied_material_uuid
 
 
 @pytest.mark.parametrize(
@@ -698,7 +760,7 @@ def test_site_rejects_owner_as_its_own_occupant_without_write(
         _create_placement_materials(materials)
         owner_projection = materials.get_material(MATERIAL_UUID).to_dict()
 
-        with pytest.raises(MaterialInvalidInput) as error:
+        with pytest.raises(MaterialConflict) as error:
             _create_site_with_references(
                 materials,
                 material_uuid=MATERIAL_UUID,
@@ -706,7 +768,7 @@ def test_site_rejects_owner_as_its_own_occupant_without_write(
                 allowed_resource_template_uuids=[RESOURCE_TEMPLATE_UUID],
             )
 
-        assert error.type is MaterialInvalidInput
+        assert error.type is MaterialConflict
         with pytest.raises(MaterialNotFound):
             materials.get_site(SITE_UUID)
         assert materials.get_material(MATERIAL_UUID).to_dict() == owner_projection
@@ -827,3 +889,78 @@ def test_empty_site_template_allowlist_accepts_any_registered_occupant(
 
     with _open_material_module(database_path) as reopened_materials:
         assert reopened_materials.get_site(SITE_UUID).to_dict() == projection
+
+
+def test_borrowed_uow_site_association_fault_rolls_back_the_whole_site(
+    tmp_path: Path,
+) -> None:
+    database_path = tmp_path / "workflow.db"
+    with _open_runtime_authority(database_path) as coordinator:
+        materials = _material_module(
+            SQLiteMaterialAdapter.from_runtime_authority(coordinator)
+        )
+        _create_placement_materials(materials)
+        material_snapshot = {
+            material_uuid: materials.get_material(material_uuid).to_dict()
+            for material_uuid in (MATERIAL_UUID, SECOND_MATERIAL_UUID)
+        }
+
+        with coordinator.transaction() as uow:
+            uow.execute(
+                """
+                CREATE TEMP TRIGGER fail_second_site_allowlist_insert
+                BEFORE INSERT ON site_allowed_resource_template
+                WHEN (
+                    SELECT COUNT(*)
+                    FROM site_allowed_resource_template
+                    WHERE site_uuid = NEW.site_uuid
+                ) = 1
+                BEGIN
+                    SELECT RAISE(ABORT, 'injected second association failure');
+                END
+                """
+            )
+            with pytest.raises(MaterialConflict) as error:
+                _create_site_with_references(
+                    materials,
+                    material_uuid=MATERIAL_UUID,
+                    occupied_material_uuid=None,
+                    allowed_resource_template_uuids=[
+                        RESOURCE_TEMPLATE_UUID,
+                        SECOND_RESOURCE_TEMPLATE_UUID,
+                    ],
+                    uow=uow,
+                )
+
+            assert error.type is MaterialConflict
+            assert str(error.value) == "site identity or placement conflicts"
+            assert (
+                materials.get_material(
+                    MATERIAL_UUID,
+                    uow=uow,
+                ).to_dict()
+                == material_snapshot[MATERIAL_UUID]
+            )
+
+        with pytest.raises(MaterialNotFound):
+            materials.get_site(SITE_UUID)
+        assert {
+            material_uuid: materials.get_material(material_uuid).to_dict()
+            for material_uuid in material_snapshot
+        } == material_snapshot
+        with coordinator.transaction() as continued_uow:
+            assert (
+                materials.get_material(
+                    SECOND_MATERIAL_UUID,
+                    uow=continued_uow,
+                ).to_dict()
+                == material_snapshot[SECOND_MATERIAL_UUID]
+            )
+
+    with _open_material_module(database_path) as reopened_materials:
+        with pytest.raises(MaterialNotFound):
+            reopened_materials.get_site(SITE_UUID)
+        assert {
+            material_uuid: reopened_materials.get_material(material_uuid).to_dict()
+            for material_uuid in material_snapshot
+        } == material_snapshot
