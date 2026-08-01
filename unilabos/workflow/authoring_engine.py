@@ -42,6 +42,11 @@ from unilabos.workflow.json_codec import (
     encode_json,
     strict_json_equal,
 )
+from unilabos.workflow.material_source import (
+    MaterialSourceAuthorityError,
+    MaterialSourceStaticAuthority,
+    validate_material_source_authority,
+)
 from unilabos.workflow.models import (
     CandidateCompilation,
     WorkflowEdgeWrite,
@@ -444,6 +449,7 @@ class WorkflowAuthoringEngine:
         catalog: TemplateCatalog,
         authority: CatalogAuthority,
         resource_template_identity_index: ResourceTemplateIdentityIndex | None = None,
+        material_source_authority: MaterialSourceStaticAuthority | None = None,
     ) -> None:
         if not isinstance(catalog, TemplateCatalog):
             raise TypeError("catalog 必须是 TemplateCatalog")
@@ -452,6 +458,7 @@ class WorkflowAuthoringEngine:
         self._catalog = catalog
         self._authority = authority
         self._resource_template_identity_index = resource_template_identity_index
+        self._material_source_authority = material_source_authority
         self._active_snapshot: ContextVar[TemplateCatalogSnapshot | None] = ContextVar(
             f"authoring_snapshot_{id(self)}",
             default=None,
@@ -531,6 +538,7 @@ class WorkflowAuthoringEngine:
                     resource_template_identity_index=(
                         self._resource_template_identity_index
                     ),
+                    material_source_authority=self._material_source_authority,
                 )
         except TemplateCatalogUnavailable:
             return _error_result(
@@ -577,6 +585,7 @@ class WorkflowAuthoringEngine:
                     resource_template_identity_index=(
                         self._resource_template_identity_index
                     ),
+                    material_source_authority=self._material_source_authority,
                 )
         except TemplateCatalogUnavailable:
             return _error_result(
@@ -624,6 +633,7 @@ class WorkflowAuthoringEngine:
                     resource_template_identity_index=(
                         self._resource_template_identity_index
                     ),
+                    material_source_authority=self._material_source_authority,
                 )
                 if not generated.valid:
                     return generated
@@ -637,6 +647,7 @@ class WorkflowAuthoringEngine:
                     resource_template_identity_index=(
                         self._resource_template_identity_index
                     ),
+                    material_source_authority=self._material_source_authority,
                 )
                 if not compiled.valid or not _semantic_graph_equal(
                     compiled.graph,
@@ -709,6 +720,7 @@ def _compile_with_snapshot(
     source_uri: str,
     applied_graph: dict[str, Any],
     resource_template_identity_index: ResourceTemplateIdentityIndex | None,
+    material_source_authority: MaterialSourceStaticAuthority | None,
     prove_normalized: bool = True,
 ) -> CandidateCompilation:
     del source_uri
@@ -777,7 +789,10 @@ def _compile_with_snapshot(
             output_contract=output_contract,
             output_bindings=output_bindings,
         )
-        _validate_built_graph(graph)
+        _validate_built_graph(
+            graph,
+            material_source_authority=material_source_authority,
+        )
         normalized, source_map = _render_graph(
             graph,
             resource_template_identity_index=resource_template_identity_index,
@@ -791,6 +806,7 @@ def _compile_with_snapshot(
                 source_uri="authoring://normalized-proof",
                 applied_graph=graph,
                 resource_template_identity_index=resource_template_identity_index,
+                material_source_authority=material_source_authority,
                 prove_normalized=False,
             )
             if (
@@ -832,7 +848,7 @@ def _compile_with_snapshot(
             fingerprint=snapshot.fingerprint,
             diagnostic=_diagnostic(failure, python_source),
         )
-    except MaterialSourceGraphError as error:
+    except (MaterialSourceGraphError, MaterialSourceAuthorityError) as error:
         failure = _AuthoringFailure(error.code, str(error))
         return _error_result(
             fingerprint=snapshot.fingerprint,
@@ -1562,14 +1578,68 @@ def _parse_material_source(
             "create_new 禁止指定 material_uuid",
             node=material_uuid_expression,
         )
-    for field_name in ("site", "slot_range"):
-        expression = keywords[field_name]
-        if not isinstance(expression, ast.Constant) or expression.value is not None:
+    site_expression = keywords["site"]
+    site: str | None
+    if isinstance(site_expression, ast.Constant) and site_expression.value is None:
+        site = None
+    elif isinstance(site_expression, ast.Constant) and isinstance(
+        site_expression.value,
+        str,
+    ):
+        try:
+            site = validate_uuid(site_expression.value)
+        except (TypeError, ValueError):
             _fail(
                 "invalid_material_source",
-                f"首版 MaterialSource {field_name} 必须是 None",
-                node=expression,
+                "site 必须是 canonical non-nil UUID 或 None",
+                node=site_expression,
             )
+    else:
+        _fail(
+            "invalid_material_source",
+            "site 必须是 UUID string literal 或 None",
+            node=site_expression,
+        )
+
+    range_expression = keywords["slot_range"]
+    slot_range: list[str] | None
+    if isinstance(range_expression, ast.Constant) and range_expression.value is None:
+        slot_range = None
+    elif isinstance(range_expression, ast.List) and range_expression.elts:
+        slot_range = []
+        for item in range_expression.elts:
+            if not isinstance(item, ast.Constant) or not isinstance(item.value, str):
+                _fail(
+                    "invalid_material_source",
+                    "slot_range 只接受 Site UUID string literals",
+                    node=item,
+                )
+            try:
+                slot_range.append(validate_uuid(item.value))
+            except (TypeError, ValueError):
+                _fail(
+                    "invalid_material_source",
+                    "slot_range 只接受 canonical non-nil UUID",
+                    node=item,
+                )
+        if len(set(slot_range)) != len(slot_range) or slot_range != sorted(slot_range):
+            _fail(
+                "invalid_material_source",
+                "slot_range 必须无重复并按 Site UUID 规范排序",
+                node=range_expression,
+            )
+    else:
+        _fail(
+            "invalid_material_source",
+            "slot_range 必须是非空 Site UUID 数组或 None",
+            node=range_expression,
+        )
+    if site is not None and slot_range is not None:
+        _fail(
+            "invalid_material_source",
+            "site 与 slot_range 互斥",
+            node=call,
+        )
     role = keywords["flow_role"]
     if not (
         isinstance(role, ast.Attribute)
@@ -1598,8 +1668,8 @@ def _parse_material_source(
             "resource_template_uuid": resource_template_uuid,
             "mount": {"uuid": mount_uuid},
             "material_uuid": material_uuid,
-            "site": None,
-            "slot_range": None,
+            "site": site,
+            "slot_range": slot_range,
             "flow_role": _MATERIAL_FLOW_ROLES[role.attr],
         },
         meta_data=_node_metadata(applied.get("meta_data"), None),
@@ -2276,7 +2346,11 @@ def _candidate_graph(
     }
 
 
-def _validate_built_graph(graph: dict[str, Any]) -> None:
+def _validate_built_graph(
+    graph: dict[str, Any],
+    *,
+    material_source_authority: MaterialSourceStaticAuthority | None = None,
+) -> None:
     templates = {item["uuid"]: item for item in graph["node_templates"]}
     handles = {item["uuid"]: item for item in graph["handle_templates"]}
     nodes = [WorkflowNodeWrite.model_validate(item) for item in graph["nodes"]]
@@ -2297,6 +2371,7 @@ def _validate_built_graph(graph: dict[str, Any]) -> None:
         node_meta_data={node.uuid: node.meta_data for node in nodes},
         validate_input_binding_schema=True,
     )
+    validate_material_source_authority(graph, material_source_authority)
 
 
 def _validate_typed_action_field_providers(
@@ -2453,6 +2528,7 @@ def _generate_with_snapshot(
     graph: dict[str, Any],
     source_uri: str,
     resource_template_identity_index: ResourceTemplateIdentityIndex | None,
+    material_source_authority: MaterialSourceStaticAuthority | None,
 ) -> CandidateCompilation:
     del source_uri
     try:
@@ -2462,7 +2538,10 @@ def _generate_with_snapshot(
             workflow_revision=workflow_revision,
         )
         _validate_catalog_projection(snapshot, candidate)
-        _validate_built_graph(candidate)
+        _validate_built_graph(
+            candidate,
+            material_source_authority=material_source_authority,
+        )
         source, source_map = _render_graph(
             candidate,
             resource_template_identity_index=resource_template_identity_index,
@@ -2475,6 +2554,7 @@ def _generate_with_snapshot(
             source_uri="authoring://round-trip-proof",
             applied_graph=candidate,
             resource_template_identity_index=resource_template_identity_index,
+            material_source_authority=material_source_authority,
             prove_normalized=False,
         )
         if (
@@ -2500,7 +2580,7 @@ def _generate_with_snapshot(
             fingerprint=snapshot.fingerprint,
             diagnostic=_diagnostic(error, ""),
         )
-    except MaterialSourceGraphError as error:
+    except (MaterialSourceGraphError, MaterialSourceAuthorityError) as error:
         return _error_result(
             fingerprint=snapshot.fingerprint,
             diagnostic={
@@ -3144,6 +3224,8 @@ def _emit_material_source(
     mount = param.get("mount")
     mode = param.get("mode")
     material_uuid = param.get("material_uuid")
+    site = param.get("site")
+    slot_range = param.get("slot_range")
     role_member = next(
         (
             member
@@ -3157,7 +3239,6 @@ def _emit_material_source(
         or mode not in {"existing", "create_new"}
         or not isinstance(mount, dict)
         or set(mount) != {"uuid"}
-        or any(param.get(name) is not None for name in ("site", "slot_range"))
         or role_member is None
         or (mode == "create_new" and material_uuid is not None)
     ):
@@ -3176,7 +3257,7 @@ def _emit_material_source(
         f"{result_name} = material_source("
         f"resource_template={resource_symbol}, mode={mode!r}, "
         f"mount=resource_ref({mount_uuid!r}), material_uuid={material_uuid!r}, "
-        "site=None, slot_range=None, "
+        f"site={site!r}, slot_range={slot_range!r}, "
         f"flow_role=MaterialFlowRole.{role_member})"
     )
     emitter.anchored(str(node["uuid"]), construct, indent=indent)

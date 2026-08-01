@@ -23,6 +23,11 @@ from pydantic import ValidationError
 
 from unilabos.workflow.candidate_validation import validate_candidate_bundle
 from unilabos.workflow.json_codec import encode_json
+from unilabos.workflow.material_source import (
+    MaterialSourceAuthorityError,
+    MaterialSourceStaticAuthority,
+    validate_material_source_authority,
+)
 from unilabos.workflow.models import (
     CandidateChangeset,
     CandidateCompilation,
@@ -84,6 +89,8 @@ _ERRORS = {
     "candidate_invalid": (422, "工作流校验失败，请检查节点、连线和输入输出"),
     "invalid_material_source": (400, "物料来源配置不符合合同"),
     "template_catalog_mismatch": (409, "物料来源框架模板与目录不一致"),
+    "material_source_conflict": (409, "物料来源与仓库或库位事实冲突"),
+    "material_authority_unavailable": (503, "物料权威暂不可用"),
     "template_catalog_unavailable": (
         503,
         "设备动作模板暂不可用，请稍后重试",
@@ -267,6 +274,7 @@ class WorkflowService:
         *,
         compiler: Optional[AuthoringCompiler] = None,
         resource_resolver: Optional[ResourceSlotResolver] = None,
+        material_source_authority: MaterialSourceStaticAuthority | None = None,
     ):
         self._store = store
         self.compiler = compiler
@@ -275,6 +283,7 @@ class WorkflowService:
             if resource_resolver is not None
             else UnconfiguredResourceSlotResolver()
         )
+        self._material_source_authority = material_source_authority
         self._locks_guard = threading.Lock()
         self._authoring_locks: Dict[str, threading.RLock] = {}
 
@@ -398,6 +407,10 @@ class WorkflowService:
                     else WorkflowEdgeWrite.model_validate(item)
                     for item in edges
                 ]
+                validate_material_source_authority(
+                    {"nodes": [item.model_dump() for item in node_values]},
+                    self._material_source_authority,
+                )
                 return self._store.save_graph(
                     identity,
                     revision=revision,
@@ -408,6 +421,8 @@ class WorkflowService:
                 )
             except ValidationError:
                 raise WorkflowError("invalid_input") from None
+            except MaterialSourceAuthorityError as error:
+                raise WorkflowError(error.code) from None
             except StoreAuthoringConflict as error:
                 raise WorkflowError(error.code) from None
             except StoreRevisionConflict:
