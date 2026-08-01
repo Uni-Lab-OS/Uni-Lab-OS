@@ -91,6 +91,8 @@ def test_process_adapter_builds_explicit_sqlite_environment(tmp_path: Path) -> N
     assert env["PHOENIX_ALLOW_EXTERNAL_RESOURCES"] == "false"
     assert env["PHOENIX_ALLOWED_PROVIDERS"] == "NONE"
     assert env["PHOENIX_ALLOWED_SANDBOX_PROVIDERS"] == "NONE"
+    assert env["PHOENIX_WASM_BINARY_PATH"] == str(settings.wasm_disabled_path)
+    assert settings.wasm_disabled_path.is_file()
     assert settings.database_path.parent.is_dir()
     assert adapter.managed is False
 

@@ -11,6 +11,7 @@ import pytest
 
 from unilabos.app.ws_client import QueueItem
 from unilabos.observability.runtime import (
+    ROS_GOAL_UUID_KEY,
     TRACE_CONTEXT_KEY,
     decode_job_trace_context,
     encode_job_trace_context,
@@ -109,6 +110,7 @@ def test_native_action_registers_context_before_goal_by_service() -> None:
     assert host.client.request is not None
     decoded = decode_job_trace_context(host.client.request.command)
     assert decoded == {
+        ROS_GOAL_UUID_KEY: _JOB_UUID,
         "node_job_uuid": _JOB_UUID,
         "task_uuid": _TASK_UUID,
         "action_name": "move",

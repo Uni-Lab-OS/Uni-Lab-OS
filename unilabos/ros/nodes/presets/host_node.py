@@ -78,6 +78,10 @@ from unilabos.config.config import BasicConfig
 if TYPE_CHECKING:
     from unilabos.app.ws_client import QueueItem
 
+_TRACE_ACTION_SERVER_WAIT_TIMEOUT_SECONDS = 5.0
+_WORKFLOW_NODE_JOB_UUID_PARAM = "workflow_node_job_uuid"
+_WORKFLOW_TASK_UUID_PARAM = "workflow_task_uuid"
+
 
 @dataclass
 class DeviceActionStatus:
@@ -176,6 +180,7 @@ class HostNode(BaseROS2DeviceNode):
             timeout: Maximum time to wait for each thread (seconds)
         """
         cls._shutting_down = True
+        cls._shutdown_trace_registration_executor()
 
         # Wait for background threads to finish
         active_threads = []
@@ -193,11 +198,25 @@ class HostNode(BaseROS2DeviceNode):
         logger.info(f"[Host Node] Background threads shutdown complete")
 
     @classmethod
+    def _shutdown_trace_registration_executor(cls) -> None:
+        """取消未开始的 trace 登记，并阻止旧 Host 在 reset 后继续发设备 goal。"""
+
+        instance = cls._instance
+        if instance is None:
+            return
+        instance._shutting_down = True
+        executor = getattr(instance, "_trace_registration_executor", None)
+        instance._trace_registration_executor = None
+        if executor is not None:
+            executor.shutdown(wait=False, cancel_futures=True)
+
+    @classmethod
     def reset_state(cls) -> None:
         """
         Reset the HostNode singleton state for restart or clean exit.
         Call this after destroying the instance.
         """
+        cls._shutdown_trace_registration_executor()
         cls._instance = None
         cls._ready_event.clear()
         cls._shutting_down = False
@@ -944,6 +963,8 @@ class HostNode(BaseROS2DeviceNode):
                 JSON_UNILABOS_PARAM: {
                     PARAM_SAMPLE_UUIDS: sample_material,
                     TRACE_CONTEXT_KEY: normalize_trace_context(trace_context),
+                    _WORKFLOW_NODE_JOB_UUID_PARAM: item.job_id,
+                    _WORKFLOW_TASK_UUID_PARAM: item.task_id,
                 },
             }
             action_kwargs = {"string": json.dumps(json_command)}
@@ -976,8 +997,13 @@ class HostNode(BaseROS2DeviceNode):
                     item.task_id,
                     item.action_name,
                 )
-        elif not action_type.startswith("UniLabJsonCommand"):
-            deferred = self._trace_registration_executor.submit(
+        elif not action_type.startswith("UniLabJsonCommand") and normalize_trace_context(
+            trace_context
+        ):
+            executor = self._trace_registration_executor
+            if executor is None or getattr(self, "_shutting_down", False):
+                raise RuntimeError("Host is shutting down")
+            deferred = executor.submit(
                 HostNode._register_then_send_goal,
                 self,
                 item,
@@ -1014,13 +1040,25 @@ class HostNode(BaseROS2DeviceNode):
         action_client: ActionClient,
         goal_msg: Any,
         action_kwargs: Dict[str, Any],
+        server_wait_timeout: Optional[float] = None,
     ) -> None:
         """执行既有 ROS goal 发送；允许从 trace 登记线程安全调用。"""
+
+        if getattr(self, "_shutting_down", False):
+            raise RuntimeError("Host is shutting down")
 
         # self.lab_logger().trace(f"[Host Node] Sending goal for {action_id}: {str(goal_msg)[:1000]}")
         self.lab_logger().trace(f"[Host Node] Sending goal for {action_id}: {action_kwargs}")
         self.lab_logger().trace(f"[Host Node] Sending goal for {action_id}: {goal_msg}")
-        action_client.wait_for_server()
+        if server_wait_timeout is None:
+            action_client.wait_for_server()
+        elif not action_client.wait_for_server(timeout_sec=server_wait_timeout):
+            raise TimeoutError(
+                f"Action server {action_id} unavailable after "
+                f"{server_wait_timeout:g}s"
+            )
+        if getattr(self, "_shutting_down", False):
+            raise RuntimeError("Host is shutting down")
         goal_uuid_obj = UUID(uuid=list(uuid.UUID(item.job_id).bytes))
 
         future = action_client.send_goal_async(
@@ -1042,6 +1080,8 @@ class HostNode(BaseROS2DeviceNode):
         """在专用线程按序完成 side-channel 和业务 goal，不占调度 worker。"""
 
         HostNode._register_remote_trace_context(self, item, trace_context)
+        if getattr(self, "_shutting_down", False):
+            raise RuntimeError("Host is shutting down")
         HostNode._send_action_goal(
             self,
             item,
@@ -1049,6 +1089,7 @@ class HostNode(BaseROS2DeviceNode):
             action_client,
             goal_msg,
             action_kwargs,
+            _TRACE_ACTION_SERVER_WAIT_TIMEOUT_SECONDS,
         )
 
     def _deferred_goal_send_callback(
@@ -1111,6 +1152,7 @@ class HostNode(BaseROS2DeviceNode):
         return BaseROS2DeviceNode._register_remote_action_trace_context(
             self,
             device_id=item.device_id,
+            ros_goal_uuid=item.job_id,
             node_job_uuid=item.job_id,
             task_uuid=item.task_id,
             action_name=item.action_name,

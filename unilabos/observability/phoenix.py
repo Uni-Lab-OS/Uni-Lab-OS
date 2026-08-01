@@ -56,6 +56,13 @@ class PhoenixProcessAdapter:
 
         executable = self._resolve_executable()
         self.settings.working_dir.mkdir(parents=True, exist_ok=True)
+        # Phoenix 17.5 即使 PHOENIX_ALLOWED_SANDBOX_PROVIDERS=NONE 仍会在
+        # application startup 无条件预取 CPython WASM。受限网络下该请求会阻塞
+        # /healthz；提供一个不会被启用的本地 sentinel，彻底避免启动期外网访问。
+        self.settings.wasm_disabled_path.write_text(
+            "WASM provider disabled by Uni-Lab-OS\n",
+            encoding="utf-8",
+        )
         self._log_handle = self.settings.log_path.open("ab", buffering=0)
         command = [executable, "serve"]
         try:
@@ -129,6 +136,7 @@ class PhoenixProcessAdapter:
             "PHOENIX_ALLOW_EXTERNAL_RESOURCES": "false",
             "PHOENIX_ALLOWED_PROVIDERS": "NONE",
             "PHOENIX_ALLOWED_SANDBOX_PROVIDERS": "NONE",
+            "PHOENIX_WASM_BINARY_PATH": str(self.settings.wasm_disabled_path),
             "PYTHONUNBUFFERED": "1",
         }
 

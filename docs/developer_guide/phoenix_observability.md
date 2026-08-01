@@ -30,6 +30,7 @@ class ObservabilityConfig:
 - SQLite：`<BasicConfig.working_dir>/observability/phoenix/phoenix.sqlite3`
 - Phoenix 日志：`<BasicConfig.working_dir>/observability/phoenix/phoenix.log`
 - Phoenix 自身遥测、外部资源加载、模型与代码沙箱提供商：关闭
+- 本地 sentinel：阻止 Phoenix 17.5 在关闭 WASM 后仍于启动期预下载运行时
 
 也可以通过现有配置环境变量机制设置，例如：
 
@@ -112,9 +113,13 @@ W3C `traceparent/tracestate`。远端 `UniLabJsonCommand` 把 carrier 放在已�
 Host 会先调用设备私有的 `_register_trace_context` ROS service，收到确认后再发送
 goal。旧设备没有该 service 或 trace 注册超时时仅丢失远端父子关系，动作仍正常发送。
 Host 的远端原生 Action 登记在专用线程池中按“登记后发 goal”的顺序执行，不占用
-Scheduler 的唯一事件 worker；登记失败或 500ms 超时后仍发送业务 goal。
+Scheduler 的唯一事件 worker；登记失败或 500ms 超时后仍发送业务 goal。只有存在有效
+carrier 时才进入该线程池；action server 等待有 5 秒上限，Host 停机时取消排队任务并在
+发送前再次检查停机状态，避免停机后继续触发物理动作。
 
-side-channel 只接受 node job UUID、task UUID、动作名和 W3C carrier，拒绝未知字段，
+side-channel 只接受 ROS goal UUID、node job UUID、task UUID、动作名和 W3C carrier，
+其中 ROS goal UUID 只用于匹配 Action，WorkflowNodeJob UUID 保持原任务领域身份，
+二者不会在嵌套设备调用中混用；未知字段会被拒绝。
 待消费 context 有数量和 60 秒 TTL 上限。同步驱动进入 `ThreadPoolExecutor` 时显式
 复制/恢复 trace context，保证驱动 span 与 ROS span 保持父子关系。设备驱动继续调用
 另一设备时，JSON 与原生 ROS Action 也会继续传播 carrier；原生调用使用同一个新生成的

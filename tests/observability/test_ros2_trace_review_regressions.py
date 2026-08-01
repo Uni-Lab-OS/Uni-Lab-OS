@@ -17,8 +17,10 @@ import pytest
 
 from unilabos.app.ws_client import QueueItem
 from unilabos.observability.runtime import (
+    ROS_GOAL_UUID_KEY,
     TRACE_CONTEXT_KEY,
     _OpenTelemetryRuntimeTraceBackend,
+    attach_workflow_execution_identity,
     decode_job_trace_context,
 )
 from unilabos.ros.nodes import base_device_node as device_module
@@ -30,6 +32,7 @@ from unilabos_msgs.srv import SerialCommand
 
 _JOB_UUID = "11111111-1111-4111-8111-111111111111"
 _TASK_UUID = "22222222-2222-4222-8222-222222222222"
+_NESTED_GOAL_UUID = "33333333-3333-4333-8333-333333333333"
 _CARRIER = {
     "traceparent": "00-0123456789abcdef0123456789abcdef-0123456789abcdef-01",
     "tracestate": "unilab=test",
@@ -149,6 +152,21 @@ def test_runtime_span_never_records_exception_message_or_stacktrace() -> None:
     assert backend._tracer.kwargs["set_status_on_exception"] is False
     assert backend._tracer.span.attributes == {"error.type": "RuntimeError"}
     assert secret not in repr(backend._tracer.span.events)
+    assert backend._tracer.span.status == ("status", "ERROR")
+
+
+def test_error_type_attribute_marks_callback_span_as_error() -> None:
+    backend = object.__new__(_OpenTelemetryRuntimeTraceBackend)
+    backend._tracer = _FakeTracer()
+    backend._propagator = SimpleNamespace(extract=lambda _carrier: None)
+    backend._trace = _FakeTraceApi()
+
+    with backend.start_span(
+        "ros2.action.cancel_response",
+        attributes={"error.type": "TimeoutError"},
+    ):
+        pass
+
     assert backend._tracer.span.status == ("status", "ERROR")
 
 
@@ -310,10 +328,31 @@ def _assert_registered_uuid_matches_goal(
     assert service_client.request is not None
     registered = decode_job_trace_context(service_client.request.command)
     goal_uuid = str(uuid.UUID(bytes=bytes(action_client.goal_uuid.uuid)))
-    assert registered["node_job_uuid"] == goal_uuid
+    assert registered[ROS_GOAL_UUID_KEY] == goal_uuid
+    assert registered["node_job_uuid"] == _JOB_UUID
+    assert registered["task_uuid"] == _TASK_UUID
     assert registered[TRACE_CONTEXT_KEY]["traceparent"].startswith(
         "00-0123456789abcdef0123456789abcdef-"
     )
+
+    target = object.__new__(BaseROS2DeviceNode)
+    target._job_contexts = {}
+    target._job_contexts_lock = threading.Lock()
+    target.lab_logger = lambda: _Logger()
+    response = BaseROS2DeviceNode._register_trace_context_service(
+        target,
+        service_client.request,
+        SerialCommand.Response(),
+    )
+    assert json.loads(response.response) == {"accepted": True}
+    consumed = BaseROS2DeviceNode._consume_job_context(
+        target,
+        _ServerGoal(goal_uuid),
+        "move",
+    )
+    assert consumed[ROS_GOAL_UUID_KEY] == goal_uuid
+    assert consumed["job_id"] == _JOB_UUID
+    assert consumed["task_id"] == _TASK_UUID
 
 
 def test_nested_sync_native_action_uses_side_channel_and_matching_goal_uuid(
@@ -325,7 +364,8 @@ def test_nested_sync_native_action_uses_side_channel_and_matching_goal_uuid(
     service_client = _TraceServiceClient()
     node = _nested_node(action_client, service_client)
 
-    assert BaseROS2DeviceNode.call_device_action(node, "arm-2", "move") == "ok"
+    with attach_workflow_execution_identity(_JOB_UUID, _TASK_UUID):
+        assert BaseROS2DeviceNode.call_device_action(node, "arm-2", "move") == "ok"
 
     _assert_registered_uuid_matches_goal(action_client, service_client)
 
@@ -339,9 +379,13 @@ def test_nested_async_native_action_uses_side_channel_and_matching_goal_uuid(
     service_client = _TraceServiceClient()
     node = _nested_node(action_client, service_client)
 
-    result = asyncio.run(
-        BaseROS2DeviceNode.call_device_action_async(node, "arm-2", "move")
-    )
+    async def exercise() -> Any:
+        with attach_workflow_execution_identity(_JOB_UUID, _TASK_UUID):
+            return await BaseROS2DeviceNode.call_device_action_async(
+                node, "arm-2", "move"
+            )
+
+    result = asyncio.run(exercise())
 
     assert result == "ok"
     _assert_registered_uuid_matches_goal(action_client, service_client)
@@ -435,6 +479,133 @@ def test_hanging_trace_registration_does_not_block_scheduler_send_thread(
         executor.shutdown(wait=True)
 
 
+class _UnavailableActionClient(_ActionClient):
+    def __init__(self) -> None:
+        super().__init__()
+        self.wait_timeout: float | None = None
+
+    def wait_for_server(self, **kwargs: Any) -> bool:
+        self.wait_timeout = kwargs.get("timeout_sec")
+        return False
+
+
+def _remote_host(
+    action_client: _ActionClient,
+    service_client: _TraceServiceClient,
+    executor: Any,
+) -> SimpleNamespace:
+    return SimpleNamespace(
+        _action_clients={"/devices/arm-1/move": action_client},
+        devices_instances={},
+        server_latest_timestamp=0.0,
+        callback_group=object(),
+        _trace_context_clients={},
+        _trace_registration_executor=executor,
+        _shutting_down=False,
+        bridges=[],
+        create_client=lambda *_args, **_kwargs: service_client,
+        lab_logger=lambda: _Logger(),
+        goal_response_callback=lambda *_args, **_kwargs: None,
+        feedback_callback=lambda *_args, **_kwargs: None,
+    )
+
+
+def test_unavailable_action_server_finishes_deferred_send_with_failure() -> None:
+    action_client = _UnavailableActionClient()
+    executor = ThreadPoolExecutor(max_workers=1)
+    host = _remote_host(action_client, _TraceServiceClient(), executor)
+    failure_reported = threading.Event()
+    reported_statuses: list[str] = []
+
+    def publish_job_status(
+        _payload: Any,
+        _item: Any,
+        status: str,
+        _return_info: Any,
+    ) -> None:
+        reported_statuses.append(status)
+        failure_reported.set()
+
+    host.bridges = [SimpleNamespace(publish_job_status=publish_job_status)]
+
+    deferred = HostNode._send_goal_with_trace(
+        host,
+        _item(),
+        action_type="NativeAction",
+        action_kwargs={},
+        sample_material={},
+        trace_context=_CARRIER,
+    )
+
+    try:
+        assert deferred is not None
+        with pytest.raises(TimeoutError, match="unavailable"):
+            deferred.result(timeout=1.0)
+        assert action_client.wait_timeout == pytest.approx(5.0)
+        assert action_client.send_count == 0
+        assert failure_reported.wait(1.0)
+        assert reported_statuses == ["failed"]
+    finally:
+        executor.shutdown(wait=True)
+
+
+class _ForbiddenExecutor:
+    def submit(self, *_args: Any, **_kwargs: Any) -> Any:
+        raise AssertionError("no carrier must not defer business send")
+
+
+def test_disabled_tracing_preserves_synchronous_native_send() -> None:
+    action_client = _ActionClient()
+    host = _remote_host(
+        action_client,
+        _TraceServiceClient(),
+        _ForbiddenExecutor(),
+    )
+
+    deferred = HostNode._send_goal_with_trace(
+        host,
+        _item(),
+        action_type="NativeAction",
+        action_kwargs={},
+        sample_material={},
+        trace_context={},
+    )
+
+    assert deferred is None
+    assert action_client.send_count == 1
+
+
+def test_shutdown_cancels_executor_and_prevents_deferred_physical_goal(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    action_client = _ActionClient()
+    executor = ThreadPoolExecutor(max_workers=1)
+    host = _remote_host(
+        action_client,
+        _TraceServiceClient(hanging=True),
+        executor,
+    )
+    monkeypatch.setattr(HostNode, "_instance", host)
+
+    deferred = HostNode._send_goal_with_trace(
+        host,
+        _item(),
+        action_type="NativeAction",
+        action_kwargs={},
+        sample_material={},
+        trace_context=_CARRIER,
+    )
+    assert deferred is not None
+
+    HostNode._shutdown_trace_registration_executor()
+
+    with pytest.raises(RuntimeError, match="shutting down"):
+        deferred.result(timeout=1.5)
+    assert host._trace_registration_executor is None
+    assert host._shutting_down is True
+    assert action_client.send_count == 0
+
+
 class _ExecutableGoal:
     def __init__(self, request: Any, value: str) -> None:
         self.request = request
@@ -486,6 +657,7 @@ def test_async_driver_execution_keeps_ros_parent_context(
         _TASK_UUID,
         "run",
         trace_context=_CARRIER,
+        ros_goal_uuid=_NESTED_GOAL_UUID,
     )
     mapping = {
         "type": StrSingleInput,
@@ -497,7 +669,7 @@ def test_async_driver_execution_keeps_ros_parent_context(
     callback = BaseROS2DeviceNode._create_execute_callback(node, "run", mapping)
     goal_handle = _ExecutableGoal(
         StrSingleInput.Goal(string="argument-not-exported"),
-        _JOB_UUID,
+        _NESTED_GOAL_UUID,
     )
 
     try:
@@ -515,4 +687,11 @@ def test_async_driver_execution_keeps_ros_parent_context(
     driver_span = next(
         span for span in tracing.spans if span.name == "device.driver.execute"
     )
+    execute_span = next(
+        span for span in tracing.spans if span.name == "ros2.action.execute"
+    )
+    assert execute_span.attributes["workflow.node_job.uuid"] == _JOB_UUID
+    assert execute_span.attributes["workflow.task.uuid"] == _TASK_UUID
+    assert execute_span.attributes["ros.goal.uuid"] == _NESTED_GOAL_UUID
+    assert driver_span.attributes["workflow.node_job.uuid"] == _JOB_UUID
     assert "argument-not-exported" not in repr(driver_span.attributes)

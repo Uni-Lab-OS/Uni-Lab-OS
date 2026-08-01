@@ -33,6 +33,11 @@ _MAX_TRACESTATE_LENGTH = 512
 
 TRACE_CONTEXT_KEY = "trace_context"
 TRACE_CONTEXT_SERVICE_SUFFIX = "_register_trace_context"
+ROS_GOAL_UUID_KEY = "ros_goal_uuid"
+
+_WORKFLOW_EXECUTION_IDENTITY: contextvars.ContextVar[dict[str, str]] = (
+    contextvars.ContextVar("unilabos_workflow_execution_identity", default={})
+)
 
 
 class RuntimeTraceBackend(Protocol):
@@ -140,15 +145,18 @@ class _OpenTelemetryRuntimeTraceBackend:
         normalized_parent = normalize_trace_context(parent)
         if normalized_parent:
             parent_context = self._propagator.extract(normalized_parent)
+        safe_attributes = sanitize_span_attributes(attributes)
         with self._tracer.start_as_current_span(
             name,
             context=parent_context,
-            attributes=sanitize_span_attributes(attributes),
+            attributes=safe_attributes,
             # OTel 默认会上报异常消息和完整 stacktrace；驱动异常可能包含动作
             # 参数或凭据，因此这里只保留受控的异常类型和 ERROR 状态。
             record_exception=False,
             set_status_on_exception=False,
         ) as span:
+            if safe_attributes.get("error.type"):
+                span.set_status(self._trace.Status(self._trace.StatusCode.ERROR))
             try:
                 yield span
             except BaseException as exc:
@@ -316,6 +324,7 @@ def sanitize_span_attributes(
 
 def encode_job_trace_context(
     *,
+    ros_goal_uuid: str | None = None,
     node_job_uuid: str,
     task_uuid: str,
     action_name: str,
@@ -324,10 +333,16 @@ def encode_job_trace_context(
     """生成原生 ROS Action side-channel 的最小、无业务参数载荷。"""
 
     carrier = normalize_trace_context(trace_context)
+    normalized_job_uuid = ""
+    if node_job_uuid:
+        try:
+            normalized_job_uuid = str(uuid.UUID(node_job_uuid))
+        except (AttributeError, TypeError, ValueError) as exc:
+            raise ValueError("node_job_uuid 格式不正确") from exc
     try:
-        normalized_job_uuid = str(uuid.UUID(node_job_uuid))
+        normalized_goal_uuid = str(uuid.UUID(ros_goal_uuid or node_job_uuid))
     except (AttributeError, TypeError, ValueError) as exc:
-        raise ValueError("node_job_uuid 格式不正确") from exc
+        raise ValueError("ros_goal_uuid 格式不正确") from exc
     normalized_task_uuid = ""
     if task_uuid:
         try:
@@ -339,6 +354,7 @@ def encode_job_trace_context(
         raise ValueError("action_name 不能为空")
     return json.dumps(
         {
+            ROS_GOAL_UUID_KEY: normalized_goal_uuid,
             "node_job_uuid": normalized_job_uuid,
             "task_uuid": normalized_task_uuid,
             "action_name": safe_action_name,
@@ -359,15 +375,21 @@ def decode_job_trace_context(payload: str) -> dict[str, Any]:
     except (TypeError, ValueError) as exc:
         raise ValueError("trace context 载荷不是有效 JSON") from exc
     expected_keys = {
+        ROS_GOAL_UUID_KEY,
         "node_job_uuid",
         "task_uuid",
         "action_name",
         TRACE_CONTEXT_KEY,
     }
-    if not isinstance(decoded, dict) or set(decoded) != expected_keys:
+    legacy_keys = expected_keys - {ROS_GOAL_UUID_KEY}
+    if not isinstance(decoded, dict):
+        raise ValueError("trace context 载荷字段不正确")
+    decoded_keys = frozenset(decoded)
+    if decoded_keys not in {frozenset(expected_keys), frozenset(legacy_keys)}:
         raise ValueError("trace context 载荷字段不正确")
     normalized = json.loads(
         encode_job_trace_context(
+            ros_goal_uuid=decoded.get(ROS_GOAL_UUID_KEY) or decoded["node_job_uuid"],
             node_job_uuid=decoded["node_job_uuid"],
             task_uuid=decoded["task_uuid"],
             action_name=decoded["action_name"],
@@ -377,6 +399,30 @@ def decode_job_trace_context(payload: str) -> dict[str, Any]:
     if not normalized[TRACE_CONTEXT_KEY]:
         raise ValueError("trace context 缺少有效 traceparent")
     return normalized
+
+
+@contextmanager
+def attach_workflow_execution_identity(
+    node_job_uuid: str,
+    task_uuid: str,
+) -> Iterator[None]:
+    """让嵌套设备调用沿 Python context 继承原 Workflow 身份。"""
+
+    identity = {
+        "node_job_uuid": str(node_job_uuid or ""),
+        "task_uuid": str(task_uuid or ""),
+    }
+    token = _WORKFLOW_EXECUTION_IDENTITY.set(identity)
+    try:
+        yield None
+    finally:
+        _WORKFLOW_EXECUTION_IDENTITY.reset(token)
+
+
+def capture_workflow_execution_identity() -> dict[str, str]:
+    """读取当前驱动执行所属的 WorkflowNodeJob/WorkflowTask。"""
+
+    return dict(_WORKFLOW_EXECUTION_IDENTITY.get())
 
 
 @contextmanager
@@ -468,12 +514,15 @@ def start_runtime_span(
 
 
 __all__ = [
+    "ROS_GOAL_UUID_KEY",
     "TRACE_CONTEXT_KEY",
     "TRACE_CONTEXT_SERVICE_SUFFIX",
     "RuntimeTracing",
     "attach_context",
+    "attach_workflow_execution_identity",
     "capture_context",
     "capture_trace_context",
+    "capture_workflow_execution_identity",
     "decode_job_trace_context",
     "encode_job_trace_context",
     "fail_open_span",

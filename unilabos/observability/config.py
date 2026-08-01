@@ -71,6 +71,12 @@ class ObservabilitySettings:
     def log_path(self) -> Path:
         return self.working_dir / "phoenix.log"
 
+    @property
+    def wasm_disabled_path(self) -> Path:
+        """Phoenix 关闭 WASM provider 时用于阻止其无条件预下载的本地 sentinel。"""
+
+        return self.working_dir / ".wasm-provider-disabled"
+
     @classmethod
     def from_runtime_config(
         cls,
