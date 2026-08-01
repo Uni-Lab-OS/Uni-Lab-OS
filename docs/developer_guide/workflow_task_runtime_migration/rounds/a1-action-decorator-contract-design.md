@@ -2,16 +2,16 @@
 
 日期：2026-08-01
 
-实现分支：`migration/a1-action-decorator-contract`
+实现分支：`migration/a1-action-catalog-e2e`
 
-OS 基线：`integration/workflow-task-runtime@91b00dd030483058a6d0aafc42f143de829cc1bc`
+OS 基线：`integration/workflow-task-runtime@21e42beee58062abcf3417841e2db4c44a154dc9`
 
 跨仓协议权威：[Uni-Lab-Core #153](https://github.com/Uni-Lab-OS/Uni-Lab-Core/issues/153)
 
 跨仓验收门：[Uni-Lab-Core #159](https://github.com/Uni-Lab-OS/Uni-Lab-Core/issues/159)
 
-状态：**implementation spec 已起草；只允许文档工作。production RED 与 production
-implementation 仍被第 11 节的治理冲突阻塞。**
+状态：**HUMAN APPROVED / IMPLEMENTATION AUTHORIZED — 2026-08-01。用户已完成本 spec
+评审，并明确允许在经过 FE-OS migration、无 local bridge 的 F006 integration 基线上继续。**
 
 ## 1. 结果与唯一扩展方向
 
@@ -75,7 +75,7 @@ schema 只能向后兼容地增强它；禁止增加 sibling `action_contract`�
   猜测 typed contract。
 - 不让 compiler、HTTP handler 或 frontend 临时同步、修补或生成 Handle。
 - 不修改 Backend，不增加 `/action-catalog` 或其他平行 public resource。
-- 本 spec 阶段不修改任何 production/test source，也不提交 RED。
+- 本轮在独立 RED 与 exact-SHA review 门内修改 production/test source。
 
 ## 4. 现有 decorator schema 的兼容增强
 
@@ -244,12 +244,12 @@ snapshot 冒充当前 Registry 的成功同步结果。
 5. **A1-OS-4 read adapter**：从同一 Catalog snapshot 提供 Backend-shaped read DTO 与
    fingerprint；补齐跨 FE integration fixture。
 
-每个切片必须保持一个 mergeable round；具体分轮要在第 11 节治理冲突解决后再建立，不能
-把本设计文档当作跳过 RED/review 门的许可。
+这些切片属于同一个 A1 owning round；不得把未合入的切片继续堆成新 round。整轮使用恰好
+一名独立 test-author 与恰好一名独立 reviewer，任何切片都不能跳过 RED 或最终门禁。
 
 ## 10. 测试与接受门
 
-治理解除后，独立 RED 至少覆盖：
+独立 RED 至少覆盖：
 
 - 只有显式 `@action` 进入 typed Catalog，auto-action 继续旧 runtime 可见但 Catalog 不可见；
 - sync/async method、positional-only/keyword-only、required/static default/nullable、
@@ -269,20 +269,14 @@ Core gate 还必须固定 OS/FE exact SHA，证明 Python/JSON/DAG 端口一致�
 不漂移、旧 fingerprint 产生 409、非法类型/缺参/错误 Handle 明确拒绝，以及 production
 source 中字段名/Action 类型/ordinal 猜测为零。
 
-## 11. 当前治理阻塞
+## 11. 本轮授权与门禁
 
-[Core #158](https://github.com/Uni-Lab-OS/Uni-Lab-Core/issues/158) 正在裁决以下冲突：
-[Core #104](https://github.com/Uni-Lab-OS/Uni-Lab-Core/issues/104) 当前有效文本要求每个
-implementation round **至少两名**独立 test-author 与 **至少三名**独立 reviewer；本仓
-`AGENTS.md` 则要求 **恰好一名** test-author、**恰好一名** reviewer，并禁止并发 subagent。
-同一个 round 无法同时满足两组数量约束。
+用户在本会话中先要求 spec 经人工评审，随后逐项确认无异议，并明确授权开始实现；同时
+指定必须以 F006 已完成 FE-OS migration、无 local bridge 的 integration 为基线。当前仓库
+`AGENTS.md` 的 owning-round 规则因此作为本地执行门：
 
-因此在权威治理文档明确 supersede/收窄其中一组规则前：
-
-- 本分支只允许本 implementation spec；
-- 不分派 production RED author，不创建/合入 RED commit；
-- 不修改 production code，不宣称进入 `stage:implementation`；
-- 不自行取中间值，也不把任一门禁解释为“建议”。
-
-Core #153 继续保持 `stage:protocol-definition`。治理冲突解决、OS/FE implementation spec
-与 Core integration spec 复核完成后，才允许按最终唯一门禁启动 RED。
+- 从已合入 F006 的 integration 创建新 A1 分支，不堆叠未合入 implementation round；
+- 恰好一名独立 test-author 先提交 OS/FE RED；
+- production 完成并通过 OS/FE/SZLab 门禁后，恰好一名独立 reviewer 审 exact SHA；
+- spec、RED、实现与 review evidence 全部留在本地分支；除非用户另行要求，不修改远端
+  GitHub issue 或 stage。
