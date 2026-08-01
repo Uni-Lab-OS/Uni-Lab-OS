@@ -6,6 +6,9 @@
 
 基线：`integration/workflow-task-runtime@91b00dd030483058a6d0aafc42f143de829cc1bc`
 
+Material/Site 字段基线：
+`Uni-Lab-OS/uni-lab-backend@2b961459bd020a3abeccd495001f585ec9b49c00`
+
 控制面：[Core #155](https://github.com/Uni-Lab-OS/Uni-Lab-Core/issues/155)
 
 跨仓验收门：[Core #156](https://github.com/Uni-Lab-OS/Uni-Lab-Core/issues/156)
@@ -57,14 +60,28 @@ OS `91b00dd030483058a6d0aafc42f143de829cc1bc` 上下文采用 stable Site UUID �
 identity，并保留对 revision 9 的 supersession 说明。FE、driver 与 migration 在此之前都不得
 把 label/name 当持久 identity。
 
+### 1.3 Backend 字段对齐
+
+Material 与 Site 的共享实体字段、字段名、空值和 JSON 语义以
+`Uni-Lab-OS/uni-lab-backend@2b961459bd020a3abeccd495001f585ec9b49c00` 为准。M1 不再把
+Backend `barcode` 改名为 `code`，也不把 Backend Site 的六个位置/尺寸字段折叠成一个
+`geometry` 字段。Backend 已有而原 M1 最小表遗漏的字段必须补齐。
+
+唯一有意的共享实体存储差异是 Site allowlist：OS 不在 `site` row 内保存
+`allowed_resource_template_uuids` JSON，而使用
+`site_allowed_resource_template(site_uuid, resource_template_uuid)` 关联表；public DTO 仍投影为
+Backend 同名数组字段，空数组语义不变。`disposition`、`material_kind`、optimistic `version`
+以及 Reservation/Claim/fencing/ChangeSet 表是 Backend 不具备的 OS runtime-authority 扩展，
+不得伪装成 Backend 字段，也不得因此删除。
+
 ## 2. 范围与停止线
 
 ### 2.1 M1 必须交付
 
 1. 把现有 Inventory 持久化能力迁入唯一 runtime-authority SQLite UoW，并停用 production
    中第二个 `InventoryStore` connection/database；
-2. 持久化 Backend-shaped Material identity、composition、Disposition、barcode、version
-   与 soft delete；
+2. 持久化完整 Backend Material 字段、composition 与 soft delete，并附加 OS-owned
+   Disposition、material kind 与 optimistic version；
 3. 将 Site 作为独立 aggregate 持久化，明确分离 composition 与 placement；
 4. 用 durable Material adapter 替换 02H 的
    `UnconfiguredResourceSlotResolver`，保持现有 Task input caller 与 HTTP DTO 不变；
@@ -124,8 +141,9 @@ M1 不实现、也不创建空表、空 DTO、feature flag 或 placeholder 预�
    executor Claim，不给 device 写 warehouse/consumed 等业务 Disposition；
 5. soft-deleted entity 不参与正常读、resolve、reserve 或 claim。受 live relationship、
    Reservation、Claim 或 uncertainty fence 保护的 entity 不得删除；
-6. 非空 barcode 在非删除 Material 中按大小写不敏感唯一。SQLite 内部只存一个
-   `barcode` 值，公共 DTO 一对一投影为 Backend `code`，禁止 `code`/`barcode` 双列；
+6. `barcode` 采用 Backend 语义：required column、默认空字符串；空字符串表示尚未分配 barcode，
+   可被多个 Material 使用；非空 barcode 在非删除 Material 中按大小写不敏感唯一。SQLite 与
+   public DTO 都只使用 `barcode`，禁止再引入 `code` 或第二个 barcode 列；
 7. 任一并发 primitive 都完整成功或 zero-write；transaction/process mutex 不是
    Reservation/Claim 的替代品；
 8. SQLite transaction 不跨物理 Action，不调用 driver、ROS、网络或 PLR refresh。
@@ -178,16 +196,24 @@ Material SQL 的前提下扩展其 transaction coordinator。禁止让 `Material
 | `uuid` | primary key；唯一 canonical Material identity |
 | `resource_template_uuid` | required；authority-owned ResourceTemplate identity |
 | `parent_uuid` | nullable FK `material.uuid`；只表达 composition |
-| `barcode` | required non-blank；公共 DTO 投影为 `code` |
+| `class` | required Backend business field；与 OS `material_kind` 语义不同，不能互相替代 |
+| `barcode` | required column、默认 `''`；非空 active 值大小写不敏感唯一 |
+| `name` | required Backend business field |
+| `description` | nullable Backend base field |
+| `meta_data` | required valid JSON object，默认 `{}` |
+| `config` | required valid JSON object，默认 `{}` |
+| `data` | required valid JSON object，默认 `{}`；Material Module 持有的最新 confirmed state projection |
 | `disposition` | business Material 为 closed `active/consumed/discarded/quarantined/reconciling`；device Material 不使用该业务状态机 |
 | `material_kind` | closed `business/device`，只隔离业务 invariant，不改变 UUID 类型 |
 | `version` | positive integer；只在实际业务事实变化时递增 |
 | `deleted_at` | nullable UTC timestamp；只允许 soft delete |
 | `create_time/update_time` | required UTC timestamp |
 
-Material 的已确认内容、配置与业务字段继续由 Material Module 在同一 aggregate 内持有；
-存储可用 closed JSON 或规范化子表，但不得藏入第二个 `ResourceTreeSet` snapshot 充当真值。
-composition 必须无环；一个 child 最多一个 `parent_uuid`。
+`class`、`name`、`description`、`meta_data`、`config` 和 `data` 必须作为 Backend 同名字段存在；
+不能用 M1 私有列、另一个无名 content blob 或第二个 `ResourceTreeSet` snapshot 代替。
+`class` 与 Backend 一样由 ResourceTemplate identity 确定，`resource_template_uuid`/`class` 不得由
+普通 Material update 漂移。`data` 的业务更新只能通过 Material Module/ChangeSet，并保留其
+“latest state projection”语义。composition 必须无环；一个 child 最多一个 `parent_uuid`。
 
 ### 5.2 `site` 与 allowlist
 
@@ -198,15 +224,20 @@ composition 必须无环；一个 child 最多一个 `parent_uuid`。
 | `name` | required；同一未删除 owner 下大小写规范化后唯一 |
 | `sort_order` | required integer；只用于稳定展示/PLR 顺序，不是 identity |
 | `occupied_material_uuid` | nullable FK `material.uuid`；active occupant 全局唯一 |
-| `geometry` | required valid Backend-shaped geometry JSON |
+| `description` | nullable Backend base field |
+| `meta_data` | required valid JSON object，默认 `{}` |
+| `position_x/position_y/position_z` | required Backend position fields |
+| `depth/length/width` | required non-negative Backend dimension fields |
 | `version` | positive integer；只在实际变化时递增 |
 | `deleted_at` | nullable UTC timestamp |
 | `create_time/update_time` | required UTC timestamp |
 
 `site_allowed_resource_template` 以 `(site_uuid, resource_template_uuid)` 为主键保存 allowlist；
-不要在 runtime 解析逗号字符串。空集合和未约束必须沿用冻结 Backend Site 合同的唯一语义，
-不能由 FE 或 driver 自行解释。occupancy write 在同一 transaction 验证 owner、occupant、
-template allowlist、soft delete、self-occupancy、occupant 唯一性与 expected Site version。
+这是相对 Backend `site.allowed_resource_template_uuids` JSON 的唯一有意规范化。repository 在
+public boundary 确定性聚合回同名 UUID 数组，空数组语义与 Backend 保持一致；不得同时保留
+JSON 列形成双写，也不要在 runtime 解析逗号字符串。occupancy write 在同一 transaction 验证
+owner、occupant、template allowlist、soft delete、self-occupancy、occupant 唯一性与 expected
+Site version。
 
 `lab_zone`/`lab_placement` 继续是独立 2D layout model，不是 Site，不拥有 occupancy，也不
 产生 Site Claim。
@@ -569,11 +600,14 @@ WorkflowTask、不能写 M1 tables、不能被 production composition 同时装�
 
 ## 14. Read projection、SSE 与 FE boundary
 
-OS 提供 closed、Backend-shaped read DTO：
+OS 提供 closed、Backend-field-aligned read DTO：
 
-- Material：`uuid/resource_template_uuid/parent_uuid/code/disposition/version/deleted_at` 及已冻结
-  Backend business fields；
-- Site：stable UUID、owner、name/order、template allowlist、occupant、geometry、version；
+- Material：Backend 的 `uuid/create_time/update_time/description/meta_data/resource_template_uuid/`
+  `parent_uuid/class/barcode/name/config/data`，另加 OS-owned
+  `disposition/material_kind/version`；与 Backend 一样，soft-deleted row 不通过普通 read DTO 暴露；
+- Site：Backend 的 `uuid/create_time/update_time/description/meta_data/material_uuid/name/`
+  `sort_order/allowed_resource_template_uuids/occupied_material_uuid/position_x/position_y/position_z/`
+  `depth/length/width`，另加 OS-owned `version`；allowlist 虽由关联表持久化，wire shape 不变；
 - Reservation：Task owner、complete members、lifecycle；
 - Claim：Job/attempt owner、complete typed members、lifecycle、fencing token 与 stable reason。
 
@@ -604,8 +638,9 @@ reopen 证据；不能 mock repository transaction 来证明原子性。
 
 最低覆盖：
 
-1. Material/Site create/read/update/soft-delete、barcode case-insensitive unique、composition
-   cycle、occupancy/allowlist/version；
+1. Material/Site create/read/update/soft-delete、Backend 字段 round-trip、多个空 barcode、非空
+   barcode case-insensitive unique、composition cycle、occupancy/allowlist/version，以及 Site
+   allowlist 关联表到 Backend 数组 DTO 的确定性 round-trip；
 2. ResourceSlot closed `{uuid}`、authority-owned template、business/device distinction 与
    exact 400/404/409；
 3. Task create + Reservation success 的同事务 fault injection；

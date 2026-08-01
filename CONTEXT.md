@@ -97,10 +97,11 @@ relationship, Workflow field, Inventory state row, and runtime operation.
 _Avoid_: Edge UUID, cloud alias, instance UUID, graph-derived UUID
 
 **Material Barcode**:
-The laboratory scan identifier named `barcode` inside OS and projected
-one-to-one as required Backend `Material.code`; it is non-blank and
-case-insensitively unique among non-deleted Materials.
-_Avoid_: Second code field, UUID, value hidden in config/data
+The optional laboratory scan identifier named `barcode` in both OS and the
+Backend Material contract. An empty string means that no barcode has been
+assigned; non-empty values are case-insensitively unique among non-deleted
+Materials.
+_Avoid_: `code`, second barcode field, UUID, value hidden in config/data
 
 **Material Disposition**:
 The durable business lifecycle value `active`, `consumed`, `discarded`,
