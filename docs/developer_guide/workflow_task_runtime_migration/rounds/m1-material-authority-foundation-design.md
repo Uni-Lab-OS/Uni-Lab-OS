@@ -151,8 +151,10 @@ M1 不实现、也不创建空表、空 DTO、feature flag 或 placeholder 预�
 ## 4. 深 Module 与 one-UoW 架构
 
 现有 `unilabos.app.scheduler.inventory` 是迁移来源和要深化的 transaction engine，而不是
-需要并存的 legacy authority。实现允许在该 package 内重构或移动代码，但 production
-composition 最终只能装配一个概念上的 `MaterialModule`：
+需要并存的 legacy authority。Material 与现有 OS Resource Instance 是同一实体，因此新的
+durable implementation 归入 `unilabos.resources`，不创建平行顶层 `unilabos.material`
+package。production composition 最终只能装配一个 public
+`unilabos.resources.authority.MaterialModule`：
 
 ```python
 class MaterialModule:
@@ -166,7 +168,21 @@ class MaterialModule:
     def reconcile_startup(uow) -> RecoveryPlan: ...
 ```
 
-名称可因代码布局微调，语义不可拆散。边界规则：
+package seam 固定为：
+
+```text
+unilabos/resources/authority/
+  __init__.py   # public MaterialModule、closed records/errors
+  models.py     # Material/Site/Reservation/Claim domain records
+  sqlite.py     # SQLiteMaterialAdapter implementation
+  projection.py # durable Material/Site <-> ResourceDict/ResourceTreeSet
+```
+
+`resource_tracker.py`、`graphio.py`、PLR Resource factory 与具体 resource definitions 继续位于
+`unilabos.resources`，但不能获得 SQL、transaction、Reservation/Claim 或 durable truth 的解释权。
+同一 package 提供 locality，不代表 durable record 与 runtime projection 合并为同一个可写对象。
+
+边界规则：
 
 - transaction coordinator 拥有 SQLite connection、进程内写锁、`BEGIN IMMEDIATE`、commit
   和 rollback；
@@ -186,8 +202,10 @@ Material SQL 的前提下扩展其 transaction coordinator。禁止让 `Material
 
 ## 5. Durable schema 与约束
 
-最终表名使用单数 snake_case。下面是 M1 的最小持久合同；实现可增加不改变语义的索引、
-时间戳或内部审计列，但不能增加平行 identity/status。
+Python package placement 不改变 Backend-aligned persistence vocabulary。最终共享实体表固定为
+单数 snake_case `material` 与 `site`；不得因为代码位于 `unilabos.resources` 而改名为
+`resource`、`resource_instance` 或 `resource_site`。下面是 M1 的最小持久合同；实现可增加不
+改变语义的索引、时间戳或内部审计列，但不能增加平行 identity/status。
 
 ### 5.1 `material`
 
@@ -496,7 +514,8 @@ output 自身仍保留字段顺序和重复引用。
 
 ## 11. ResourceTreeSet / PLR projection
 
-`ResourceTreeSet` 只在以下受控边界使用：
+`unilabos.resources.authority.projection` 是 durable authority 与现有 `ResourceDict`/
+`ResourceTreeSet` 之间的唯一转换 seam。`ResourceTreeSet` 只在以下受控边界使用：
 
 1. authority startup/recovery 完成后，从 durable Material/Site facts 构建；
 2. Job Claim commit 后，为 claimed roots 构建 immutable baseline 与 job-owned Mutation Session；
