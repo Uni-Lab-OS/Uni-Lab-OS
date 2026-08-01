@@ -79,6 +79,13 @@ cross-authority fallback.
 _Avoid_: Independently selected service, Template Catalog, frontend selector
 cache, remote lookup
 
+**Material (Resource Instance)**:
+A concrete physical or logical resource instance with one stable UUID. The
+Backend and durable runtime contracts call it Material; OS resource tracking
+represents the same instance as `ResourceDict`/`ResourceTreeSet` without
+creating another identity or authority.
+_Avoid_: Resource Definition, ResourceTemplate, Package Definition, runtime-only copy
+
 **Material Module**:
 The OS-local durable module that owns Material identity, the last confirmed
 tree/content and availability, reservations, versions, audit, and conversion
@@ -89,7 +96,7 @@ _Avoid_: Workflow store, frontend query cache, Inventory-only facade
 The controlled `ResourceTreeSet`/PLR in-memory form used while resolving and
 executing device actions, rebuilt and committed only through the Material
 Module's owned synchronization points.
-_Avoid_: Durable Material authority, second writable store, graph-file truth
+_Avoid_: Durable Material authority, second writable store, separate Resource identity, graph-file truth
 
 **Material UUID**:
 The sole stable `Material.uuid`; referred to as `material_uuid` by every
@@ -97,10 +104,11 @@ relationship, Workflow field, Inventory state row, and runtime operation.
 _Avoid_: Edge UUID, cloud alias, instance UUID, graph-derived UUID
 
 **Material Barcode**:
-The laboratory scan identifier named `barcode` inside OS and projected
-one-to-one as required Backend `Material.code`; it is non-blank and
-case-insensitively unique among non-deleted Materials.
-_Avoid_: Second code field, UUID, value hidden in config/data
+The optional laboratory scan identifier named `barcode` in both OS and the
+Backend Material contract. An empty string means that no barcode has been
+assigned; non-empty values are case-insensitively unique among non-deleted
+Materials.
+_Avoid_: `code`, second barcode field, UUID, value hidden in config/data
 
 **Material Disposition**:
 The durable business lifecycle value `active`, `consumed`, `discarded`,

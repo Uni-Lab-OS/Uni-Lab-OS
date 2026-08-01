@@ -528,6 +528,12 @@ class WorkflowStore:
             else:
                 self._conn.commit()
 
+    def owns_unit_of_work(self, uow: object) -> bool:
+        """确认一个活动 UoW 由本 authority coordinator 签发。"""
+
+        with self._lock:
+            return uow is self._conn and self._conn.in_transaction
+
     @contextmanager
     def catalog_guard(self) -> Iterator[None]:
         """串行化 Catalog replace 与 compiler read snapshot。

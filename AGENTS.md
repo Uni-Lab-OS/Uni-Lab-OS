@@ -492,11 +492,11 @@ ResourceDict（`unilabos/resources/resource_tracker.py`）是全系统唯一内�
   `material_uuid`. Remove `edge_uuid`, `legacy_cloud_id`, graph-derived Material
   UUIDs, and `instance_uuid` aliases from the migrated path; explicit imports
   preserve the source UUID and one-time migration rewrites all dependents.
-- Backend `Material.code` means the laboratory barcode. OS may name and persist
-  the single domain value `barcode`, but the shared HTTP DTO projects it as
-  `code`. Never store independently mutable `code` and `barcode` values or hide
-  a second barcode in config/data. Create and full update require a non-blank
-  barcode, case-insensitively unique among non-deleted Materials.
+- Backend exact baseline names the laboratory barcode field `barcode`. Persist
+  and project only that field; never add a `code` alias, independently mutable
+  second value, or hidden barcode in config/data. An empty string means
+  unassigned and may repeat. A non-empty barcode is Unicode-casefold unique
+  among non-deleted Materials.
 - The common Material identity table may contain both devices and business
   resources, but their operational state stays separate. Inventory
   lot/reservation/consumption/quarantine state applies only to business
