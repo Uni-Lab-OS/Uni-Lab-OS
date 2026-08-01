@@ -9,6 +9,7 @@ import stat
 import threading
 from collections.abc import Callable, Iterable, Mapping
 from pathlib import Path
+from typing import cast
 
 from unilabos.resources.authority import MaterialModule
 from unilabos.resources.authority.sqlite import SQLiteMaterialAdapter
@@ -16,6 +17,7 @@ from unilabos.workflow.authoring_engine import WorkflowAuthoringEngine
 from unilabos.workflow.catalog import (
     CatalogAuthority,
     LocalResourceTemplateIdentityIndex,
+    ResourceTemplateIdentityIndex,
     TemplateCatalog,
 )
 from unilabos.workflow.material_resolver import MaterialResourceSlotResolver
@@ -70,6 +72,28 @@ def _registry_resource_template_identities(
         if isinstance(module, str) and module:
             identities.add(module)
     return tuple(sorted(identities))
+
+
+def _bidirectional_identity_index(
+    value: ResourceTemplateIdentityIndex | Callable[[str], str] | None,
+) -> ResourceTemplateIdentityIndex | None:
+    """只接受同时提供正向、反向查询的 identity capability。"""
+
+    if value is None:
+        return None
+    if callable(getattr(value, "resolve_symbol", None)) and callable(
+        getattr(value, "identify_uuid", None)
+    ):
+        return cast(ResourceTemplateIdentityIndex, value)
+    return None
+
+
+def _registry_has_material_source_owner(
+    registry_snapshot: Mapping[str, object],
+) -> bool:
+    """HostNode 是 production MaterialSource framework template 的 owner。"""
+
+    return isinstance(registry_snapshot.get("host_node"), Mapping)
 
 
 def _retain_runtime(
@@ -189,7 +213,9 @@ def compose_workflow_runtime(
     editable_package_roots: Iterable[str | Path] = (),
     registry_snapshot: Mapping[str, object] | None = None,
     resource_registry_snapshot: Mapping[str, object] | None = None,
-    resource_template_identity_resolver: Callable[[str], str] | None = None,
+    resource_template_identity_resolver: (
+        ResourceTemplateIdentityIndex | Callable[[str], str] | None
+    ) = None,
 ) -> WorkflowService:
     """装配工作区唯一的 Workflow authority、启动恢复和 Draft 监视。"""
 
@@ -219,6 +245,20 @@ def compose_workflow_runtime(
         raise RegistryTemplateProjectionError(
             "template_catalog_mismatch",
             "/resource_registry",
+        )
+    if (
+        registry_snapshot is not None
+        and resource_template_identity_resolver is not None
+        and _registry_has_material_source_owner(registry_snapshot)
+        and _bidirectional_identity_index(resource_template_identity_resolver) is None
+    ):
+        from unilabos.registry.catalog_consumer import (
+            RegistryTemplateProjectionError,
+        )
+
+        raise RegistryTemplateProjectionError(
+            "template_catalog_mismatch",
+            "/resource_template_identity_resolver",
         )
     resolved_working_dir = Path(working_dir).resolve()
     database_path = resolved_working_dir / "workflow.db"
@@ -278,13 +318,17 @@ def compose_workflow_runtime(
             runtime_compiler = compiler
             if authority is not None:
                 catalog = TemplateCatalog(store)
-                identity_index: LocalResourceTemplateIdentityIndex | None = None
+                identity_index: ResourceTemplateIdentityIndex | None = None
                 if registry_snapshot is not None:
                     from unilabos.registry.catalog_consumer import (
                         workflow_template_imports_from_registry_snapshot,
                     )
 
+                    identity_index = _bidirectional_identity_index(
+                        resource_template_identity_resolver
+                    )
                     identity_resolver = resource_template_identity_resolver
+                    resolved_identities: dict[str, str] = {}
                     if identity_resolver is None:
                         identity_index = LocalResourceTemplateIdentityIndex(
                             store,
@@ -294,7 +338,14 @@ def compose_workflow_runtime(
                                 resource_registry_snapshot,
                             ),
                         )
-                        identity_resolver = identity_index
+                    if identity_index is not None:
+
+                        def resolve_identity(source_identity: str) -> str:
+                            resolved = identity_index.resolve_symbol(source_identity)
+                            resolved_identities[source_identity] = resolved
+                            return resolved
+
+                        identity_resolver = resolve_identity
                     templates = workflow_template_imports_from_registry_snapshot(
                         registry_snapshot,
                         authority_id=authority.authority_id,
@@ -304,9 +355,7 @@ def compose_workflow_runtime(
                         authority,
                         templates,
                         resource_template_identities=(
-                            identity_index.assignments
-                            if identity_index is not None
-                            else None
+                            resolved_identities if identity_index is not None else None
                         ),
                     )
                 runtime_compiler = WorkflowAuthoringEngine(
@@ -409,7 +458,9 @@ def setup_workflow_service(
     editable_package_roots: Iterable[str | Path] = (),
     registry_snapshot: Mapping[str, object] | None = None,
     resource_registry_snapshot: Mapping[str, object] | None = None,
-    resource_template_identity_resolver: Callable[[str], str] | None = None,
+    resource_template_identity_resolver: (
+        ResourceTemplateIdentityIndex | Callable[[str], str] | None
+    ) = None,
 ) -> WorkflowService:
     """兼容旧装配调用；所有入口统一进入完整运行时组合。"""
 
