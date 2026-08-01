@@ -14,8 +14,13 @@ from typing import Any
 
 import pytest
 
-from unilabos.resources.authority import MaterialConflict, MaterialModule
+from unilabos.resources.authority import (
+    MaterialConflict,
+    MaterialModule,
+    MaterialNotFound,
+)
 from unilabos.resources.authority.sqlite import SQLiteMaterialAdapter
+from unilabos.workflow.store import WorkflowStore
 
 MATERIAL_UUID = "50000000-0000-4000-8000-000000000017"
 SECOND_MATERIAL_UUID = "50000000-0000-4000-8000-000000000018"
@@ -32,6 +37,10 @@ EXPECTED_INITIAL_MATERIAL = {
 }
 
 
+class _RollbackSentinel(RuntimeError):
+    pass
+
+
 @contextmanager
 def _open_material_module(database_path: Path) -> Iterator[MaterialModule]:
     adapter = SQLiteMaterialAdapter(database_path)
@@ -39,6 +48,15 @@ def _open_material_module(database_path: Path) -> Iterator[MaterialModule]:
         yield MaterialModule(adapter)
     finally:
         adapter.close()
+
+
+@contextmanager
+def _open_runtime_authority(database_path: Path) -> Iterator[WorkflowStore]:
+    coordinator = WorkflowStore(database_path)
+    try:
+        yield coordinator
+    finally:
+        coordinator.close()
 
 
 def _observable_material(record: Any) -> dict[str, Any]:
@@ -138,3 +156,69 @@ def test_distinct_business_materials_may_share_empty_barcode(
             "version": 1,
             "deleted_at": None,
         }
+
+
+def test_runtime_authority_uow_rolls_back_material_with_outer_transaction(
+    tmp_path: Path,
+) -> None:
+    database_path = tmp_path / "workflow.db"
+
+    with _open_runtime_authority(database_path) as coordinator:
+        adapter = SQLiteMaterialAdapter.from_runtime_authority(coordinator)
+        materials = MaterialModule(adapter)
+
+        with pytest.raises(_RollbackSentinel):
+            with coordinator.transaction() as uow:
+                materials.create_business_material(
+                    material_uuid=MATERIAL_UUID,
+                    resource_template_uuid=RESOURCE_TEMPLATE_UUID,
+                    barcode="SAMPLE-017",
+                    uow=uow,
+                )
+                raise _RollbackSentinel
+
+        with pytest.raises(MaterialNotFound):
+            materials.get_material(MATERIAL_UUID)
+
+
+def test_runtime_authority_uow_commits_material_with_outer_transaction(
+    tmp_path: Path,
+) -> None:
+    database_path = tmp_path / "workflow.db"
+
+    with _open_runtime_authority(database_path) as coordinator:
+        adapter = SQLiteMaterialAdapter.from_runtime_authority(coordinator)
+        materials = MaterialModule(adapter)
+
+        with coordinator.transaction() as uow:
+            created = materials.create_business_material(
+                material_uuid=MATERIAL_UUID,
+                resource_template_uuid=RESOURCE_TEMPLATE_UUID,
+                barcode="SAMPLE-017",
+                uow=uow,
+            )
+
+            assert _observable_material(created) == EXPECTED_INITIAL_MATERIAL
+            assert (
+                _observable_material(materials.get_material(MATERIAL_UUID, uow=uow))
+                == EXPECTED_INITIAL_MATERIAL
+            )
+
+        assert (
+            _observable_material(materials.get_material(MATERIAL_UUID))
+            == EXPECTED_INITIAL_MATERIAL
+        )
+
+
+def test_coordinator_backed_adapter_close_keeps_workflow_store_open(
+    tmp_path: Path,
+) -> None:
+    database_path = tmp_path / "workflow.db"
+
+    with _open_runtime_authority(database_path) as coordinator:
+        adapter = SQLiteMaterialAdapter.from_runtime_authority(coordinator)
+
+        adapter.close()
+
+        with coordinator.transaction() as uow:
+            assert uow is not None
