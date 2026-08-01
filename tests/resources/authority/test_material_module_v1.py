@@ -66,14 +66,16 @@ def test_business_material_create_read_survives_sqlite_reopen(
         )
 
         assert _observable_material(created) == EXPECTED_INITIAL_MATERIAL
-        assert _observable_material(
-            materials.get_material(MATERIAL_UUID)
-        ) == EXPECTED_INITIAL_MATERIAL
+        assert (
+            _observable_material(materials.get_material(MATERIAL_UUID))
+            == EXPECTED_INITIAL_MATERIAL
+        )
 
     with _open_material_module(database_path) as reopened_materials:
-        assert _observable_material(
-            reopened_materials.get_material(MATERIAL_UUID)
-        ) == EXPECTED_INITIAL_MATERIAL
+        assert (
+            _observable_material(reopened_materials.get_material(MATERIAL_UUID))
+            == EXPECTED_INITIAL_MATERIAL
+        )
 
 
 def test_business_material_barcode_is_unique_case_insensitively(
@@ -95,9 +97,10 @@ def test_business_material_barcode_is_unique_case_insensitively(
                 barcode="sample-017",
             )
 
-        assert _observable_material(
-            materials.get_material(MATERIAL_UUID)
-        ) == EXPECTED_INITIAL_MATERIAL
+        assert (
+            _observable_material(materials.get_material(MATERIAL_UUID))
+            == EXPECTED_INITIAL_MATERIAL
+        )
 
 
 def test_distinct_business_materials_may_share_empty_barcode(
