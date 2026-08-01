@@ -82,6 +82,8 @@ _ERRORS = {
     "candidate_not_ready": (409, "当前草稿尚未生成可应用的工作流"),
     "draft_invalid": (422, "草稿存在错误，修复后才能应用"),
     "candidate_invalid": (422, "工作流校验失败，请检查节点、连线和输入输出"),
+    "invalid_material_source": (400, "物料来源配置不符合合同"),
+    "template_catalog_mismatch": (409, "物料来源框架模板与目录不一致"),
     "template_catalog_unavailable": (
         503,
         "设备动作模板暂不可用，请稍后重试",
@@ -406,6 +408,8 @@ class WorkflowService:
                 )
             except ValidationError:
                 raise WorkflowError("invalid_input") from None
+            except StoreAuthoringConflict as error:
+                raise WorkflowError(error.code) from None
             except StoreRevisionConflict:
                 raise WorkflowConflict("conflict") from None
             except StoreNotFound:

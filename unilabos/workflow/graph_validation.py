@@ -8,6 +8,7 @@ import re
 from collections import defaultdict
 from collections.abc import Iterable, Mapping
 from typing import Any
+from uuid import UUID
 
 from unilabos.workflow.json_codec import encode_json, strict_json_equal
 from unilabos.workflow.models import WorkflowEdgeWrite, WorkflowNodeWrite
@@ -22,6 +23,14 @@ class GraphValidationError(ValueError):
 
 class MissingTemplateError(GraphValidationError):
     """节点引用的模板不在当前 OS 模板目录中。"""
+
+
+class MaterialSourceGraphError(GraphValidationError):
+    """MaterialSource 的 closed graph 合同错误。"""
+
+    def __init__(self, code: str, message: str):
+        super().__init__(message)
+        self.code = code
 
 
 def validate_graph(
@@ -51,6 +60,12 @@ def validate_graph(
         if node.parent_uuid is not None and node.parent_uuid not in node_by_uuid:
             raise GraphValidationError("父节点不在提交的完整图中")
     _validate_parent_cycles(nodes)
+    _validate_material_source_nodes(
+        nodes=nodes,
+        templates=templates,
+        handles=handles,
+        effective_params=effective_params,
+    )
 
     for edge in edges:
         if edge.source_node_uuid == edge.target_node_uuid:
@@ -217,6 +232,166 @@ def _node_kind(
     if kind is None:
         raise GraphValidationError(f"不支持的节点执行类型 {raw_kind!r}")
     return kind
+
+
+def _validate_material_source_nodes(
+    *,
+    nodes: Iterable[WorkflowNodeWrite],
+    templates: Mapping[str, dict[str, Any]],
+    handles: Mapping[str, dict[str, Any]],
+    effective_params: Mapping[str, dict[str, Any]],
+) -> None:
+    for node in nodes:
+        template_uuid = node.workflow_node_template_uuid
+        template = templates.get(template_uuid or "", {})
+        is_material_source = node.type == "material_source" or any(
+            (
+                template.get("class") == "unilabos.workflow.authoring:material_source",
+                template.get("name") == "material_source",
+                template.get("type") == "material_source",
+                template.get("node_type") == "material_source",
+            )
+        )
+        if not is_material_source:
+            continue
+        material_handles = [
+            handle
+            for handle in handles.values()
+            if handle.get("workflow_node_template_uuid") == template_uuid
+        ]
+        if (
+            template.get("class") != "unilabos.workflow.authoring:material_source"
+            or template.get("name") != "material_source"
+            or template.get("type") != "material_source"
+            or template.get("node_type") != "material_source"
+            or node.type != "material_source"
+            or node.action_name is not None
+            or len(material_handles) != 1
+        ):
+            raise MaterialSourceGraphError(
+                "template_catalog_mismatch",
+                "MaterialSource framework template 不符合合同",
+            )
+        handle = material_handles[0]
+        if (
+            handle.get("handle_key") != "material"
+            or handle.get("io_type") != "source"
+            or handle.get("type") != "ResourceSlot"
+            or handle.get("required") is not False
+            or handle.get("data_source") != "executor"
+            or handle.get("data_key") != "material"
+        ):
+            raise MaterialSourceGraphError(
+                "template_catalog_mismatch",
+                "MaterialSource framework Handle 不符合合同",
+            )
+        if node.material_uuid is not None:
+            raise MaterialSourceGraphError(
+                "invalid_material_source",
+                "MaterialSource 顶层 material_uuid 必须为 null",
+            )
+        _validate_material_source_selector(effective_params[node.uuid])
+
+
+def _validate_material_source_selector(param: Mapping[str, Any]) -> None:
+    expected_keys = {
+        "mode",
+        "resource_template_uuid",
+        "mount",
+        "material_uuid",
+        "site",
+        "slot_range",
+        "flow_role",
+    }
+    if set(param) != expected_keys:
+        raise MaterialSourceGraphError(
+            "invalid_material_source",
+            "MaterialSource selector 必须是 closed object",
+        )
+    mode = param.get("mode")
+    if mode not in {"existing", "create_new"}:
+        raise MaterialSourceGraphError(
+            "invalid_material_source",
+            "MaterialSource mode 不在闭合目录中",
+        )
+    _require_canonical_uuid(
+        param.get("resource_template_uuid"),
+        "resource_template_uuid",
+    )
+    mount = param.get("mount")
+    if not isinstance(mount, dict) or set(mount) != {"uuid"}:
+        raise MaterialSourceGraphError(
+            "invalid_material_source",
+            "MaterialSource mount 必须是 closed ResourceSlot",
+        )
+    _require_canonical_uuid(mount.get("uuid"), "mount.uuid")
+    material_uuid = param.get("material_uuid")
+    if mode == "create_new" and material_uuid is not None:
+        raise MaterialSourceGraphError(
+            "invalid_material_source",
+            "create_new 禁止指定 material_uuid",
+        )
+    if material_uuid is not None:
+        _require_canonical_uuid(material_uuid, "material_uuid")
+    site = param.get("site")
+    slot_range = param.get("slot_range")
+    if site is not None and slot_range is not None:
+        raise MaterialSourceGraphError(
+            "invalid_material_source",
+            "site 与 slot_range 互斥",
+        )
+    if site is not None:
+        _require_canonical_uuid(site, "site")
+    if slot_range is not None:
+        if not isinstance(slot_range, list) or not slot_range:
+            raise MaterialSourceGraphError(
+                "invalid_material_source",
+                "slot_range 必须是非空 Site UUID 数组",
+            )
+        canonical_range = [
+            _require_canonical_uuid(value, "slot_range") for value in slot_range
+        ]
+        if len(set(canonical_range)) != len(canonical_range):
+            raise MaterialSourceGraphError(
+                "invalid_material_source",
+                "slot_range 不能包含重复 Site UUID",
+            )
+        if canonical_range != sorted(canonical_range):
+            raise MaterialSourceGraphError(
+                "invalid_material_source",
+                "slot_range 必须按 Site UUID 规范排序",
+            )
+    if param.get("flow_role") not in {
+        "primary_sample",
+        "aliquot_sample",
+        "reagent",
+        "consumable",
+    }:
+        raise MaterialSourceGraphError(
+            "invalid_material_source",
+            "flow_role 不在闭合目录中",
+        )
+
+
+def _require_canonical_uuid(value: Any, field: str) -> str:
+    if not isinstance(value, str):
+        raise MaterialSourceGraphError(
+            "invalid_material_source",
+            f"MaterialSource {field} 必须是 canonical non-nil UUID",
+        )
+    try:
+        parsed = UUID(value)
+    except (AttributeError, ValueError):
+        raise MaterialSourceGraphError(
+            "invalid_material_source",
+            f"MaterialSource {field} 必须是 canonical non-nil UUID",
+        ) from None
+    if parsed.int == 0 or str(parsed) != value:
+        raise MaterialSourceGraphError(
+            "invalid_material_source",
+            f"MaterialSource {field} 必须是 canonical non-nil UUID",
+        )
+    return value
 
 
 def _validate_edge_cycles(
@@ -797,6 +972,7 @@ def _json_equal(left: Any, right: Any) -> bool:
 
 __all__ = [
     "GraphValidationError",
+    "MaterialSourceGraphError",
     "MissingTemplateError",
     "declared_handle_type_matches",
     "validate_graph",

@@ -32,7 +32,11 @@ from unilabos.workflow.catalog import (
     TemplateCatalogSnapshot,
     TemplateCatalogUnavailable,
 )
-from unilabos.workflow.graph_validation import GraphValidationError, validate_graph
+from unilabos.workflow.graph_validation import (
+    GraphValidationError,
+    MaterialSourceGraphError,
+    validate_graph,
+)
 from unilabos.workflow.json_codec import (
     decode_json_bytes,
     encode_json,
@@ -824,6 +828,12 @@ def _compile_with_snapshot(
         )
     except WorkflowSchemaError as error:
         failure = _AuthoringFailure(error.code, error.message)
+        return _error_result(
+            fingerprint=snapshot.fingerprint,
+            diagnostic=_diagnostic(failure, python_source),
+        )
+    except MaterialSourceGraphError as error:
+        failure = _AuthoringFailure(error.code, str(error))
         return _error_result(
             fingerprint=snapshot.fingerprint,
             diagnostic=_diagnostic(failure, python_source),
@@ -2489,6 +2499,15 @@ def _generate_with_snapshot(
         return _error_result(
             fingerprint=snapshot.fingerprint,
             diagnostic=_diagnostic(error, ""),
+        )
+    except MaterialSourceGraphError as error:
+        return _error_result(
+            fingerprint=snapshot.fingerprint,
+            diagnostic={
+                "severity": "error",
+                "code": error.code,
+                "message": str(error),
+            },
         )
     except (GraphValidationError, TypeError, ValueError):
         return _error_result(
