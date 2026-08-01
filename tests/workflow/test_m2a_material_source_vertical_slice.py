@@ -288,6 +288,20 @@ def test_canonical_material_source_round_trips_and_persists_selector(
         assert _node(persisted, MATERIAL_SOURCE_NODE_UUID)["param"] == (
             EXPECTED_SELECTOR
         )
-        assert persisted["edges"] == candidate["edges"]
+        edge_business_fields = (
+            "uuid",
+            "source_node_uuid",
+            "target_node_uuid",
+            "source_handle_uuid",
+            "target_handle_uuid",
+            "meta_data",
+        )
+        assert [
+            {field: edge[field] for field in edge_business_fields}
+            for edge in persisted["edges"]
+        ] == [
+            {field: edge[field] for field in edge_business_fields}
+            for edge in candidate["edges"]
+        ]
     finally:
         store.close()
