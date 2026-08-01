@@ -267,6 +267,42 @@ def test_runtime_authority_uow_commits_material_with_outer_transaction(
         )
 
 
+def test_material_module_rejects_uow_from_another_runtime_authority(
+    tmp_path: Path,
+) -> None:
+    with (
+        _open_runtime_authority(tmp_path / "authority-a.db") as authority_a,
+        _open_runtime_authority(tmp_path / "authority-b.db") as authority_b,
+    ):
+        materials_a = _material_module(
+            SQLiteMaterialAdapter.from_runtime_authority(authority_a)
+        )
+        materials_b = _material_module(
+            SQLiteMaterialAdapter.from_runtime_authority(authority_b)
+        )
+
+        with authority_b.transaction() as foreign_uow:
+            with pytest.raises(MaterialAuthorityUnavailable) as error:
+                materials_a.create_business_material(
+                    material_uuid=MATERIAL_UUID,
+                    resource_template_uuid=RESOURCE_TEMPLATE_UUID,
+                    barcode="SAMPLE-017",
+                    name=MATERIAL_NAME,
+                    uow=foreign_uow,
+                )
+
+        assert error.type is MaterialAuthorityUnavailable
+        with pytest.raises(MaterialNotFound):
+            materials_a.get_material(MATERIAL_UUID)
+        with pytest.raises(MaterialNotFound):
+            materials_b.get_material(MATERIAL_UUID)
+
+        with authority_a.transaction() as uow_a:
+            assert uow_a is not None
+        with authority_b.transaction() as uow_b:
+            assert uow_b is not None
+
+
 def test_coordinator_backed_adapter_close_keeps_workflow_store_open(
     tmp_path: Path,
 ) -> None:
@@ -409,3 +445,21 @@ def test_adapter_init_wraps_filesystem_failure_without_path_disclosure(
     assert error.type is MaterialAuthorityUnavailable
     assert str(error.value) == "failed to initialize Material Authority"
     assert str(database_path) not in str(error.value)
+
+
+def test_adapter_init_wraps_nul_path_without_raw_error_disclosure() -> None:
+    database_path = "review\x00.db"
+
+    with pytest.raises(MaterialAuthorityUnavailable) as error:
+        SQLiteMaterialAdapter(database_path)
+
+    assert error.type is MaterialAuthorityUnavailable
+    assert str(error.value) == "failed to initialize Material Authority"
+    assert database_path not in str(error.value)
+
+
+def test_generic_runtime_authority_uow_excludes_sqlite_collation_capability() -> None:
+    from unilabos.resources.authority.models import RuntimeAuthorityUnitOfWork
+
+    assert hasattr(RuntimeAuthorityUnitOfWork, "execute")
+    assert not hasattr(RuntimeAuthorityUnitOfWork, "create_collation")
