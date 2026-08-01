@@ -28,6 +28,7 @@ from unilabos.app.scheduler.inventory.domain import (
     NotFound,
     ReservationState,
     ResourceTemplateIdentity,
+    SiteRecord,
     VersionConflict,
 )
 from unilabos.app.scheduler.inventory.service import InventoryService
@@ -55,6 +56,7 @@ __all__ = [
     "OutboxWorker",
     "ReservationState",
     "ResourceTemplateIdentity",
+    "SiteRecord",
     "VersionConflict",
     "build_snapshot",
     "execute_command",

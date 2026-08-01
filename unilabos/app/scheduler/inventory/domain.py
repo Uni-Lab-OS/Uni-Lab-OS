@@ -251,6 +251,58 @@ class MaterialRecord:
         }
 
 
+@dataclass(frozen=True, slots=True)
+class SiteRecord:
+    """Backend-field-aligned durable Site projection。"""
+
+    uuid: str
+    create_time: str
+    update_time: str
+    deleted_at: str | None
+    description: str | None
+    meta_data: dict[str, Any]
+    material_uuid: str
+    name: str
+    sort_order: int
+    allowed_resource_template_uuids: tuple[str, ...]
+    occupied_material_uuid: str | None
+    position_x: float
+    position_y: float
+    position_z: float
+    depth: float
+    length: float
+    width: float
+    version: int
+
+    def to_dict(self) -> dict[str, Any]:
+        """Project one active Site to the Backend-shaped public record."""
+
+        projection: dict[str, Any] = {
+            "uuid": self.uuid,
+            "create_time": self.create_time,
+            "update_time": self.update_time,
+            "meta_data": dict(self.meta_data),
+            "material_uuid": self.material_uuid,
+            "name": self.name,
+            "sort_order": self.sort_order,
+            "allowed_resource_template_uuids": list(
+                self.allowed_resource_template_uuids
+            ),
+            "position_x": self.position_x,
+            "position_y": self.position_y,
+            "position_z": self.position_z,
+            "depth": self.depth,
+            "length": self.length,
+            "width": self.width,
+            "version": self.version,
+        }
+        if self.description is not None:
+            projection["description"] = self.description
+        if self.occupied_material_uuid is not None:
+            projection["occupied_material_uuid"] = self.occupied_material_uuid
+        return projection
+
+
 @dataclass
 class MaterialRequirement:
     """一个节点对物料的需求（挂在 WorkflowNode 上，可选字段）.

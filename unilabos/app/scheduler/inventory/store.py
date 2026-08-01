@@ -64,6 +64,45 @@ CREATE INDEX IF NOT EXISTS ix_material_template_active
 CREATE INDEX IF NOT EXISTS ix_material_parent_active
     ON material(parent_uuid) WHERE deleted_at IS NULL;
 
+CREATE TABLE IF NOT EXISTS site (
+    uuid TEXT PRIMARY KEY,
+    create_time TEXT NOT NULL,
+    update_time TEXT NOT NULL,
+    deleted_at TEXT,
+    description TEXT,
+    meta_data TEXT NOT NULL DEFAULT '{}'
+        CHECK (json_valid(meta_data) AND json_type(meta_data) = 'object'),
+    material_uuid TEXT NOT NULL,
+    name TEXT NOT NULL CHECK (LENGTH(TRIM(name)) > 0),
+    sort_order INTEGER NOT NULL DEFAULT 0 CHECK (sort_order >= 0),
+    occupied_material_uuid TEXT,
+    position_x REAL NOT NULL,
+    position_y REAL NOT NULL,
+    position_z REAL NOT NULL,
+    depth REAL NOT NULL CHECK (depth >= 0),
+    length REAL NOT NULL CHECK (length >= 0),
+    width REAL NOT NULL CHECK (width >= 0),
+    version INTEGER NOT NULL DEFAULT 1 CHECK (version > 0),
+    FOREIGN KEY(material_uuid) REFERENCES material(uuid) ON DELETE RESTRICT,
+    FOREIGN KEY(occupied_material_uuid) REFERENCES material(uuid) ON DELETE RESTRICT,
+    CHECK (occupied_material_uuid IS NULL OR occupied_material_uuid <> material_uuid)
+);
+CREATE TABLE IF NOT EXISTS site_allowed_resource_template (
+    site_uuid TEXT NOT NULL,
+    resource_template_uuid TEXT NOT NULL,
+    PRIMARY KEY(site_uuid, resource_template_uuid),
+    FOREIGN KEY(site_uuid) REFERENCES site(uuid) ON DELETE CASCADE
+);
+CREATE UNIQUE INDEX IF NOT EXISTS ux_site_material_name_active
+    ON site(material_uuid, name COLLATE UNICODE_CASEFOLD)
+    WHERE deleted_at IS NULL;
+CREATE UNIQUE INDEX IF NOT EXISTS ux_site_occupied_material_active
+    ON site(occupied_material_uuid)
+    WHERE deleted_at IS NULL AND occupied_material_uuid IS NOT NULL;
+CREATE INDEX IF NOT EXISTS ix_site_material_order_active
+    ON site(material_uuid, sort_order, create_time, uuid)
+    WHERE deleted_at IS NULL;
+
 CREATE TABLE IF NOT EXISTS resource_template (
     template_id   TEXT PRIMARY KEY,
     name          TEXT NOT NULL DEFAULT '',

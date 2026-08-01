@@ -8,11 +8,12 @@
 from __future__ import annotations
 
 import json
+import math
 import sqlite3
 import threading
 import time
 import uuid
-from collections.abc import Callable, Iterator, Mapping
+from collections.abc import Callable, Iterator, Mapping, Sequence
 from contextlib import contextmanager
 from datetime import datetime, timezone
 from pathlib import Path
@@ -36,6 +37,7 @@ from unilabos.app.scheduler.inventory.domain import (
     NotFound,
     ReservationState,
     ResourceTemplateIdentity,
+    SiteRecord,
     VersionConflict,
     check_instance_transition,
     check_lot_invariants,
@@ -44,6 +46,7 @@ from unilabos.app.scheduler.inventory.domain import (
 from unilabos.app.scheduler.inventory.store import InventoryStore
 
 _ACTIVE_STATES_TUPLE = tuple(s.value for s in ACTIVE_INSTANCE_STATES)
+_MAX_SIGNED_64_BIT_INTEGER = (1 << 63) - 1
 
 
 def _canonical_uuid(value: str, field: str) -> str:
@@ -89,6 +92,18 @@ def _stored_json_object(value: str) -> dict[str, Any]:
     return decoded
 
 
+def _finite_number(value: object, field: str) -> float:
+    if isinstance(value, bool) or not isinstance(value, (int, float)):
+        raise MaterialInvalidInput(f"{field} must be a finite number")
+    try:
+        normalized = float(value)
+    except OverflowError:
+        raise MaterialInvalidInput(f"{field} must be a finite number") from None
+    if not math.isfinite(normalized):
+        raise MaterialInvalidInput(f"{field} must be a finite number")
+    return normalized
+
+
 def _material_record(row: Mapping[str, Any]) -> MaterialRecord:
     return MaterialRecord(
         uuid=row["uuid"],
@@ -107,6 +122,54 @@ def _material_record(row: Mapping[str, Any]) -> MaterialRecord:
         disposition=row["disposition"],
         material_kind=row["material_kind"],
         version=row["version"],
+    )
+
+
+def _site_record(
+    row: Mapping[str, Any],
+    allowed_resource_template_uuids: tuple[str, ...],
+) -> SiteRecord:
+    return SiteRecord(
+        uuid=row["uuid"],
+        create_time=row["create_time"],
+        update_time=row["update_time"],
+        deleted_at=row["deleted_at"],
+        description=row["description"],
+        meta_data=_stored_json_object(row["meta_data"]),
+        material_uuid=row["material_uuid"],
+        name=row["name"],
+        sort_order=row["sort_order"],
+        allowed_resource_template_uuids=allowed_resource_template_uuids,
+        occupied_material_uuid=row["occupied_material_uuid"],
+        position_x=row["position_x"],
+        position_y=row["position_y"],
+        position_z=row["position_z"],
+        depth=row["depth"],
+        length=row["length"],
+        width=row["width"],
+        version=row["version"],
+    )
+
+
+def _read_site(conn: sqlite3.Connection, site_uuid: str) -> SiteRecord | None:
+    row = conn.execute(
+        "SELECT * FROM site WHERE uuid = ? AND deleted_at IS NULL",
+        (site_uuid,),
+    ).fetchone()
+    if row is None:
+        return None
+    allowed_rows = conn.execute(
+        """
+        SELECT resource_template_uuid
+        FROM site_allowed_resource_template
+        WHERE site_uuid = ?
+        ORDER BY resource_template_uuid
+        """,
+        (site_uuid,),
+    ).fetchall()
+    return _site_record(
+        dict(row),
+        tuple(item["resource_template_uuid"] for item in allowed_rows),
     )
 
 
@@ -436,6 +499,230 @@ class InventoryService:
         if row is None:
             raise MaterialNotFound(f"material {canonical_material_uuid} not found")
         return _material_record(row)
+
+    def create_site(
+        self,
+        *,
+        site_uuid: str,
+        description: str | None,
+        meta_data: Mapping[str, Any] | None,
+        material_uuid: str,
+        name: str,
+        sort_order: int,
+        allowed_resource_template_uuids: Sequence[str],
+        occupied_material_uuid: str | None,
+        position_x: float,
+        position_y: float,
+        position_z: float,
+        depth: float,
+        length: float,
+        width: float,
+    ) -> SiteRecord:
+        """Create one Backend-aligned Site and its normalized allowlist."""
+
+        if description is not None and not isinstance(description, str):
+            raise MaterialInvalidInput("description must be a string or null")
+        if not isinstance(name, str) or not name.strip():
+            raise MaterialInvalidInput("name must be a non-blank string")
+        if isinstance(sort_order, bool) or not isinstance(sort_order, int):
+            raise MaterialInvalidInput("sort_order must be a non-negative integer")
+        if sort_order < 0 or sort_order > _MAX_SIGNED_64_BIT_INTEGER:
+            raise MaterialInvalidInput("sort_order must be a non-negative integer")
+        if isinstance(allowed_resource_template_uuids, (str, bytes)) or not isinstance(
+            allowed_resource_template_uuids,
+            Sequence,
+        ):
+            raise MaterialInvalidInput(
+                "allowed_resource_template_uuids must be a UUID array"
+            )
+
+        allowed_templates: set[str] = set()
+        for value in allowed_resource_template_uuids:
+            canonical_template_uuid = _canonical_uuid(
+                value,
+                "allowed_resource_template_uuid",
+            )
+            if canonical_template_uuid not in self._resource_templates:
+                raise MaterialInvalidInput(
+                    "allowed resource template is not registered"
+                )
+            allowed_templates.add(canonical_template_uuid)
+
+        geometry = {
+            "position_x": _finite_number(position_x, "position_x"),
+            "position_y": _finite_number(position_y, "position_y"),
+            "position_z": _finite_number(position_z, "position_z"),
+            "depth": _finite_number(depth, "depth"),
+            "length": _finite_number(length, "length"),
+            "width": _finite_number(width, "width"),
+        }
+        for field in ("depth", "length", "width"):
+            if geometry[field] < 0:
+                raise MaterialInvalidInput(f"{field} must not be negative")
+
+        canonical_site_uuid = _canonical_uuid(site_uuid, "site_uuid")
+        canonical_material_uuid = _canonical_uuid(material_uuid, "material_uuid")
+        canonical_occupant_uuid = (
+            _canonical_uuid(occupied_material_uuid, "occupied_material_uuid")
+            if occupied_material_uuid is not None
+            else None
+        )
+        normalized_meta_data = _json_object(meta_data, "meta_data")
+        now_iso = self._now_iso()
+        now_ms = self._now_ms()
+        try:
+            with self._tx() as conn:
+                owner = conn.execute(
+                    "SELECT 1 FROM material WHERE uuid = ? AND deleted_at IS NULL",
+                    (canonical_material_uuid,),
+                ).fetchone()
+                if owner is None:
+                    raise MaterialNotFound("site owner material not found")
+
+                if canonical_occupant_uuid is not None:
+                    occupant = conn.execute(
+                        """
+                        SELECT resource_template_uuid
+                        FROM material
+                        WHERE uuid = ? AND deleted_at IS NULL
+                        """,
+                        (canonical_occupant_uuid,),
+                    ).fetchone()
+                    if occupant is None:
+                        raise MaterialNotFound("site occupant material not found")
+                    if canonical_occupant_uuid == canonical_material_uuid:
+                        raise MaterialConflict("site placement would create a cycle")
+                    if (
+                        allowed_templates
+                        and occupant["resource_template_uuid"] not in allowed_templates
+                    ):
+                        raise MaterialInvalidInput(
+                            "occupied material template is not allowed by site"
+                        )
+                    would_cycle = conn.execute(
+                        """
+                        WITH RECURSIVE
+                        edges(source_uuid, target_uuid) AS (
+                            SELECT parent_uuid, uuid
+                            FROM material
+                            WHERE parent_uuid IS NOT NULL AND deleted_at IS NULL
+                            UNION ALL
+                            SELECT material_uuid, occupied_material_uuid
+                            FROM site
+                            WHERE occupied_material_uuid IS NOT NULL
+                              AND deleted_at IS NULL
+                        ),
+                        reachable(uuid) AS (
+                            SELECT ?
+                            UNION
+                            SELECT edges.target_uuid
+                            FROM edges
+                            JOIN reachable ON edges.source_uuid = reachable.uuid
+                        )
+                        SELECT 1 FROM reachable WHERE uuid = ? LIMIT 1
+                        """,
+                        (canonical_occupant_uuid, canonical_material_uuid),
+                    ).fetchone()
+                    if would_cycle is not None:
+                        raise MaterialConflict("site placement would create a cycle")
+
+                conn.execute(
+                    """
+                    INSERT INTO site(
+                        uuid, create_time, update_time, deleted_at,
+                        description, meta_data, material_uuid, name,
+                        sort_order, occupied_material_uuid,
+                        position_x, position_y, position_z,
+                        depth, length, width, version
+                    ) VALUES (?, ?, ?, NULL, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 1)
+                    """,
+                    (
+                        canonical_site_uuid,
+                        now_iso,
+                        now_iso,
+                        description,
+                        json.dumps(normalized_meta_data, ensure_ascii=False),
+                        canonical_material_uuid,
+                        name.strip(),
+                        sort_order,
+                        canonical_occupant_uuid,
+                        geometry["position_x"],
+                        geometry["position_y"],
+                        geometry["position_z"],
+                        geometry["depth"],
+                        geometry["length"],
+                        geometry["width"],
+                    ),
+                )
+                for template_uuid in sorted(allowed_templates):
+                    conn.execute(
+                        """
+                        INSERT INTO site_allowed_resource_template(
+                            site_uuid, resource_template_uuid
+                        ) VALUES (?, ?)
+                        """,
+                        (canonical_site_uuid, template_uuid),
+                    )
+                site = _read_site(conn, canonical_site_uuid)
+                if site is None:
+                    raise MaterialAuthorityUnavailable("created site is not readable")
+                self._emit(
+                    conn,
+                    now_ms,
+                    "site",
+                    canonical_site_uuid,
+                    1,
+                    "site.created",
+                    {"site": site.to_dict()},
+                )
+        except sqlite3.IntegrityError:
+            raise MaterialConflict("site identity or placement conflicts") from None
+        except sqlite3.Error:
+            raise MaterialAuthorityUnavailable("failed to create site") from None
+        return site
+
+    def get_site(self, site_uuid: str) -> SiteRecord:
+        """Read one non-deleted Site."""
+
+        canonical_site_uuid = _canonical_uuid(site_uuid, "site_uuid")
+        try:
+            with self.store.transaction() as conn:
+                site = _read_site(conn, canonical_site_uuid)
+        except sqlite3.Error:
+            raise MaterialAuthorityUnavailable("failed to read site") from None
+        if site is None:
+            raise MaterialNotFound(f"site {canonical_site_uuid} not found")
+        return site
+
+    def list_sites(self, material_uuid: str) -> tuple[SiteRecord, ...]:
+        """List one Material's active Sites in stable display order."""
+
+        canonical_material_uuid = _canonical_uuid(material_uuid, "material_uuid")
+        try:
+            with self.store.transaction() as conn:
+                owner = conn.execute(
+                    "SELECT 1 FROM material WHERE uuid = ? AND deleted_at IS NULL",
+                    (canonical_material_uuid,),
+                ).fetchone()
+                if owner is None:
+                    raise MaterialNotFound(
+                        f"material {canonical_material_uuid} not found"
+                    )
+                rows = conn.execute(
+                    """
+                    SELECT uuid
+                    FROM site
+                    WHERE material_uuid = ? AND deleted_at IS NULL
+                    ORDER BY sort_order, uuid
+                    """,
+                    (canonical_material_uuid,),
+                ).fetchall()
+                sites = tuple(_read_site(conn, row["uuid"]) for row in rows)
+        except sqlite3.Error:
+            raise MaterialAuthorityUnavailable("failed to list sites") from None
+        if any(site is None for site in sites):
+            raise MaterialAuthorityUnavailable("listed site is not readable")
+        return tuple(site for site in sites if site is not None)
 
     # ------------------------------------------------------------------
     # template / 品类模板
