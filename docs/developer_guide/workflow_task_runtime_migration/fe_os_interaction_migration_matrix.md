@@ -14,7 +14,7 @@
 | `Uni-Lab-OS/uni-lab-fe` | `0fd39af3014b29035ee8e2280b9d753b2b9f96a2` | 旧版前端行为和测试依据 |
 | `Uni-Lab-OS/Uni-Lab-OS` | `f5c10733e7e37218ab5c660ecef9c41bb94c72ab` | 旧版 OS bridge、runtime 行为和测试依据 |
 | `Uni-Lab-OS/uni-lab-backend` | 冻结版本 `09609a27e652c9e56ede636a2883a4fd241e4400` | 共享前端合同权威 |
-| 发布 `Uni-Lab-OS/Uni-Lab-OS` | R1B 受测/受审候选 `6cc9390623b21061d31800a36f653e7d82750b62`；R1B non-squash merge `c540337d87a29003d02ea9653e6a042ca201897a`；UI1C 证据记录 `5d5ceb77f3f385de9a5050f3c1583d6a03c85b88` | Phase 01、02A～02H、02G1、R1A 和 R1B 已合入并把 `integration/workflow-task-runtime` 推送到组织仓库；后续 OS 工作树统一由 Core 下的 submodule Git 仓库管理 |
+| 发布 `Uni-Lab-OS/Uni-Lab-OS` | R1B 受测/受审候选 `6cc9390623b21061d31800a36f653e7d82750b62`；R1B non-squash merge `c540337d87a29003d02ea9653e6a042ca201897a`；UI1C 证据记录 `5d5ceb77f3f385de9a5050f3c1583d6a03c85b88`；UI1D 证据记录 `726aca42760f42abdde8b28341a656489ac56450` | Phase 01、02A～02H、02G1、R1A 和 R1B 已合入并把 `integration/workflow-task-runtime` 推送到组织仓库；UI1D 跨仓证据已更新；后续 OS 工作树统一由 Core 下的 submodule Git 仓库管理 |
 | 发布 `Uni-Lab-OS/uni-lab-fe` | FE-D117 候选 `c779d473a2553c07b5e0a8551649567085501c28`；UI1A production/test 候选 `5ca7cd2b2baa5d0656626af25874fd597b19c267`；UI1B 纠偏候选 `e864e491463191473ab4f691cc7c26a1c5d4c6e3`；UI1C 候选 `eb5e2a30b391a5c7aae7400bf616bcdfa0175065`；UI1D 候选 `27212c7674f746d0ac941ccf592dd57644983272`；当前 FE integration `bb0bb249afd0dd6ded0025fb8c34e534aec5c278` | UI1D 已删除旧 Run DTO/client/hook、Runtime WebSocket、polling fallback 和 local bridge E2E；原生产工作台完成真实 OS final gate，候选与 non-squash integration 均已推送；Core exact-SHA review/pin 尚待完成 |
 
 目标仓库中的约束决策如下：
