@@ -36,7 +36,7 @@ from unilabos.registry.utils import resolve_registry_displayname
 
 MAX_SCAN_DEPTH = 10      # 最大目录递归深度
 MAX_SCAN_FILES = 1000    # 最大扫描文件数量
-_CACHE_VERSION = 8       # 缓存格式版本号，格式变更时递增
+_CACHE_VERSION = 9       # 缓存格式版本号，格式变更时递增
 _DEVICE_ID_RE = re.compile(r"^[A-Za-z0-9_]+$")
 
 # 合法的装饰器来源模块
@@ -376,7 +376,12 @@ def _parse_file(
             device_decorator = _find_decorator(node, "device")
             if device_decorator is not None and _is_registry_decorator("device", import_map):
                 device_args = _extract_decorator_args(device_decorator, import_map)
-                class_body = _extract_class_body(node, import_map)
+                class_body = _extract_class_body(
+                    node,
+                    import_map,
+                    module=tree,
+                    module_name=module_path,
+                )
 
                 # Support ids + id_meta (multi-device) or id (single device)
                 device_ids: List[str] = []
@@ -829,6 +834,9 @@ def _ast_call_to_value(node: ast.Call, import_map: Dict[str, str]) -> dict:
 def _extract_class_body(
     cls_node: ast.ClassDef,
     import_map: Dict[str, str],
+    *,
+    module: ast.Module | None = None,
+    module_name: str = "",
 ) -> dict:
     """
     Walk the class body to extract:
@@ -870,6 +878,42 @@ def _extract_class_body(
         action_dec = _find_method_decorator(item, "action")
         if action_dec is not None and _is_registry_decorator("action", import_map):
             action_args = _extract_decorator_args(action_dec, import_map)
+            canonical_schema: dict[str, Any] | None = None
+            canonical_defaults: dict[str, Any] = {}
+            contract_diagnostic: dict[str, str] | None = None
+            if module is not None and module_name:
+                from unilabos.registry import action_contract_schema
+
+                try:
+                    parsed_contract = action_contract_schema.parse_action_contract(
+                        module,
+                        item,
+                        module_name=module_name,
+                    )
+                    canonical_schema = parsed_contract.to_action_schema(
+                        action_name=method_name,
+                        description=str(action_args.get("description") or ""),
+                    )
+                    canonical_defaults = (
+                        action_contract_schema.validate_legacy_action_assertions(
+                            canonical_schema,
+                            action_name=method_name,
+                            goal_default=action_args.get("goal_default"),
+                            handles=action_args.get("handles"),
+                        )
+                    )
+                except (
+                    action_contract_schema.ActionContractError,
+                    action_contract_schema.ActionCompatibilityError,
+                ) as exc:
+                    # Legacy Registry discovery must remain capable of starting
+                    # old built-ins, but the failed record stays untyped and is
+                    # therefore ineligible for TemplateCatalog publication.
+                    contract_diagnostic = {
+                        "code": exc.code,
+                        "path": exc.path,
+                        "message": exc.message,
+                    }
             # 补全 @action 装饰器的默认值（与 decorators.py 中 action() 签名一致）
             action_args.setdefault("action_type", None)
             action_args.setdefault("action_name", None)
@@ -908,13 +952,19 @@ def _extract_class_body(
             is_async = isinstance(item, ast.AsyncFunctionDef)
             method_doc = ast.get_docstring(item)
 
-            result["actions"][method_name] = {
+            action_record = {
                 "action_args": action_args,
                 "params": method_params,
                 "return_type": return_type,
                 "is_async": is_async,
                 "docstring": method_doc,
             }
+            if canonical_schema is not None:
+                action_record["schema"] = canonical_schema
+                action_record["goal_default"] = canonical_defaults
+            if contract_diagnostic is not None:
+                action_record["contract_diagnostic"] = contract_diagnostic
+            result["actions"][method_name] = action_record
             continue
 
         # --- Check for @property or @topic_config → status property ---

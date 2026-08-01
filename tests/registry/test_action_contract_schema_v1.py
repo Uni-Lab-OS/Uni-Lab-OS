@@ -690,16 +690,6 @@ def test_facade_never_imports_executes_compiles_or_reflects_author_source(
         ),
         pytest.param(
             """
-            @action(handles={"answer": {"type": "str"}})
-            def action(value: int) -> dict:
-                return {"answer": value}
-            """,
-            "invalid_action_result",
-            "/return",
-            id="runtime-handle-example-does-not-create-results",
-        ),
-        pytest.param(
-            """
             @action(goal={"value": {"type": "str"}})
             def action(value) -> None:
                 pass

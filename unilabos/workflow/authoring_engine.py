@@ -143,6 +143,36 @@ def _catalog_read_entity(
     return projected
 
 
+def _catalog_wire_equal(left: Any, right: Any) -> bool:
+    """Compare Catalog DTOs using JSON's single number domain.
+
+    Browser parse/stringify cycles cannot preserve Python's distinction between
+    integral floats and integers.  Catalog defaults remain immutable by UUID and
+    fingerprint, so only that wire-level numeric representation is normalized.
+    """
+
+    pending = [(left, right)]
+    while pending:
+        left_item, right_item = pending.pop()
+        if type(left_item) in {int, float} and type(right_item) in {int, float}:
+            if left_item != right_item:
+                return False
+            continue
+        if type(left_item) is not type(right_item):
+            return False
+        if isinstance(left_item, dict):
+            if left_item.keys() != right_item.keys():
+                return False
+            pending.extend((value, right_item[key]) for key, value in left_item.items())
+        elif isinstance(left_item, list):
+            if len(left_item) != len(right_item):
+                return False
+            pending.extend(zip(left_item, right_item, strict=True))
+        elif left_item != right_item:
+            return False
+    return True
+
+
 def _sorted_catalog_read_entities(
     values: Sequence[Mapping[str, Any]],
     *,
@@ -383,6 +413,18 @@ class WorkflowAuthoringEngine:
             return active.fingerprint
         with self._catalog.snapshot(self._authority) as snapshot:
             return snapshot.fingerprint
+
+    @property
+    def template_catalog(self) -> TemplateCatalog:
+        """Return the persisted Catalog read facade used by this compiler."""
+
+        return self._catalog
+
+    @property
+    def catalog_authority(self) -> CatalogAuthority:
+        """Return the Graph Authority selected at composition time."""
+
+        return self._authority
 
     @contextmanager
     def catalog_snapshot(self) -> Iterator[str]:
@@ -2121,7 +2163,7 @@ def _validate_catalog_projection(
         or len(projected_nodes) != len(graph["node_templates"])
         or set(projected_nodes) != set(snapshot_nodes)
         or any(
-            not strict_json_equal(projected_nodes[uuid], snapshot_nodes[uuid])
+            not _catalog_wire_equal(projected_nodes[uuid], snapshot_nodes[uuid])
             for uuid in snapshot_nodes
         )
     ):
@@ -2148,7 +2190,7 @@ def _validate_catalog_projection(
         len(projected_handles) != len(graph["handle_templates"])
         or set(projected_handles) != set(snapshot_handles)
         or any(
-            not strict_json_equal(projected_handles[uuid], snapshot_handles[uuid])
+            not _catalog_wire_equal(projected_handles[uuid], snapshot_handles[uuid])
             for uuid in snapshot_handles
         )
     ):
@@ -2767,7 +2809,7 @@ def _semantic_graph_equal(left: Any, right: Any) -> bool:
                 strict_json_equal(left_workflow, right_workflow),
                 strict_json_equal(left_nodes, right_nodes),
                 strict_json_equal(left_edges, right_edges),
-                strict_json_equal(
+                _catalog_wire_equal(
                     _sorted_catalog_read_entities(
                         left["node_templates"],
                         nullable_fields=_NODE_TEMPLATE_NULLABLE_READ_FIELDS,
@@ -2777,7 +2819,7 @@ def _semantic_graph_equal(left: Any, right: Any) -> bool:
                         nullable_fields=_NODE_TEMPLATE_NULLABLE_READ_FIELDS,
                     ),
                 ),
-                strict_json_equal(
+                _catalog_wire_equal(
                     _sorted_catalog_read_entities(
                         left["handle_templates"],
                         nullable_fields=_HANDLE_TEMPLATE_NULLABLE_READ_FIELDS,

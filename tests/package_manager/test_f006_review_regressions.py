@@ -23,7 +23,6 @@ from unilabos.package_manager.community import (
     CommunityPackageError,
     resolve_graph_packages,
 )
-from unilabos.package_manager.consumers import register_package_catalog
 from unilabos.package_manager.distribution import build_workspace_wheel
 from unilabos.registry.registry import lab_registry
 
@@ -68,7 +67,7 @@ def _rewrite_wheel(wheel: Path, replacements: dict[str, bytes]) -> None:
     replacement.replace(wheel)
 
 
-def test_registry_projection_does_not_import_domain_annotation_modules(
+def test_strict_action_compile_does_not_import_domain_annotation_modules(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -99,19 +98,14 @@ class ConnectionOptions:
     monkeypatch.setattr(lab_registry, "device_type_registry", {})
     monkeypatch.setattr(lab_registry, "resource_type_registry", {})
 
-    catalog = compile_package_source(WorkspaceSource(tmp_path))
-    register_package_catalog(lab_registry, catalog)
+    with pytest.raises(PackageCompileError) as caught:
+        compile_package_source(WorkspaceSource(tmp_path))
 
     assert "review_lab.types" not in sys.modules
-    assert (
-        lab_registry.device_type_registry["community.review_lab.pump"][
-            "init_param_schema"
-        ]["config"]["properties"]["options"]["type"]
-        == "object"
-    )
+    assert {item.code for item in caught.value.diagnostics} == {"invalid_annotation"}
 
 
-def test_registry_projection_does_not_import_parent_action_modules(
+def test_strict_action_compile_does_not_import_parent_action_modules(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -141,10 +135,13 @@ class Pump(Parent):
     monkeypatch.setattr(lab_registry, "device_type_registry", {})
     monkeypatch.setattr(lab_registry, "resource_type_registry", {})
 
-    catalog = compile_package_source(WorkspaceSource(tmp_path))
-    register_package_catalog(lab_registry, catalog)
+    with pytest.raises(PackageCompileError) as caught:
+        compile_package_source(WorkspaceSource(tmp_path))
 
     assert not hasattr(__import__("builtins"), "_f006_parent_module_imported")
+    assert {item.code for item in caught.value.diagnostics} == {
+        "invalid_action_contract"
+    }
 
 
 def test_cached_wheel_recompiles_source_instead_of_trusting_embedded_contract(

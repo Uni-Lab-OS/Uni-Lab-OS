@@ -364,14 +364,27 @@ def _validate_execution_policy(policy: Mapping[str, Any]) -> None:
 
 
 def _parse_schema(raw_schema: Any) -> Any:
-    if raw_schema is None or str(raw_schema).strip() == "":
+    if raw_schema is None:
         return None
-    try:
-        schema = json.loads(str(raw_schema))
-    except (TypeError, ValueError) as exc:
-        raise GraphValidationError("节点参数 JSON Schema 无效") from exc
+    if isinstance(raw_schema, dict):
+        schema = raw_schema
+    else:
+        if not isinstance(raw_schema, str) or raw_schema.strip() == "":
+            return None
+        try:
+            schema = json.loads(raw_schema)
+        except (TypeError, ValueError) as exc:
+            raise GraphValidationError("节点参数 JSON Schema 无效") from exc
     if not isinstance(schema, (dict, bool)):
         raise GraphValidationError("节点参数 JSON Schema 必须是对象或布尔值")
+    if isinstance(schema, dict):
+        extension = schema.get("x-unilabos-action-contract")
+        if isinstance(extension, dict):
+            properties = schema.get("properties")
+            goal = properties.get("goal") if isinstance(properties, dict) else None
+            if extension.get("version") != 1 or not isinstance(goal, dict):
+                raise GraphValidationError("Action 参数 JSON Schema 无效")
+            return goal
     return schema
 
 

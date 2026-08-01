@@ -133,7 +133,7 @@ def test_registry_projection_publishes_one_complete_stable_catalog_and_metadata(
         )
         assert sample_target["required"] is True
         assert sample_target["type"] == "ResourceSlot"
-        assert sample_target["meta_data"]["unilab"] == {
+        assert _plain(sample_target["meta_data"]["unilab"]) == {
             "value_schema": {"$slot": "ResourceSlot"},
             "editor_control": "material_port",
             "allowed_resource_template_uuids": [RESOURCE_TEMPLATE_UUID],
@@ -144,7 +144,7 @@ def test_registry_projection_publishes_one_complete_stable_catalog_and_metadata(
             for item in transfer_handles
             if item["handle_key"] == "mode" and item["io_type"] == "target"
         )
-        assert mode_target["meta_data"]["unilab"] == {
+        assert _plain(mode_target["meta_data"]["unilab"]) == {
             "value_schema": {
                 "type": "string",
                 "enum": ["safe", "fast"],
@@ -154,6 +154,20 @@ def test_registry_projection_publishes_one_complete_stable_catalog_and_metadata(
             "allowed_resource_template_uuids": None,
             "implicit_passthrough": False,
         }
+
+        select_target = next(
+            item for item in first.node_templates if item["name"] == "select_target"
+        )
+        device_target = next(
+            item
+            for item in first.handle_templates
+            if item["workflow_node_template_uuid"] == select_target["uuid"]
+            and item["handle_key"] == "target"
+            and item["io_type"] == "target"
+        )
+        assert device_target["meta_data"]["unilab"]["editor_control"] == (
+            "site_selector"
+        )
 
         consume = next(
             item for item in first.node_templates if item["name"] == "consume"

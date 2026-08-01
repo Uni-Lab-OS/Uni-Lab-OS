@@ -112,10 +112,22 @@ def setup_server() -> FastAPI:
             )
             if workflow_service.compiler is None:
                 raise RuntimeError("Workflow Authoring engine 未完成组合")
+            template_catalog = getattr(
+                workflow_service.compiler,
+                "template_catalog",
+                None,
+            )
+            catalog_authority = getattr(
+                workflow_service.compiler,
+                "catalog_authority",
+                None,
+            )
             install_composed_workflow_authoring_api(
                 app,
                 workflow_service,
                 workflow_service.compiler,
+                template_catalog=template_catalog,
+                catalog_authority=catalog_authority,
             )
             workflow_routes_mounted = True
         except Exception as e:  # noqa: BLE001 - keep unrelated web surfaces alive

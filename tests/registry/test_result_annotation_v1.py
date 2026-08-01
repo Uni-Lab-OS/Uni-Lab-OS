@@ -281,7 +281,6 @@ def _assert_annotation_error(
             "value", "Any", ("from typing import Any",), "/annotation", id="any"
         ),
         pytest.param("value", "bytes", (), "/annotation", id="bytes"),
-        pytest.param("value", "dict", (), "/annotation", id="bare-dict"),
         pytest.param("value", "list[list[str]]", (), "/annotation", id="nested-list"),
         pytest.param("value", "str | int", (), "/annotation", id="multi-union"),
         pytest.param(

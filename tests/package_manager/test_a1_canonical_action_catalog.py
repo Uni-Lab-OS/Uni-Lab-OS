@@ -120,7 +120,7 @@ from unilabos.registry.decorators import (
     action,
     device,
 )
-from unilabos.registry.placeholder_type import ResourceSlot
+from unilabos.registry.placeholder_type import DeviceSlot, ResourceSlot
 
 
 class TransferResult(TypedDict):
@@ -176,6 +176,10 @@ class Pump:
 
     @action(description="implicit resource pass-through")
     def consume(self, sample: ResourceSlot) -> None:
+        return None
+
+    @action(description="explicit device selector")
+    def select_target(self, target: DeviceSlot) -> None:
         return None
 
     @action(description="opaque bare dict result")
@@ -411,6 +415,11 @@ def test_package_catalog_and_registry_record_share_the_exact_canonical_schema(
     }
     assert "input_contract" not in action
     assert "output_contract" not in action
+    selector_schema = _plain(_action(catalog, "select_target"))["schema"]
+    assert selector_schema["properties"]["goal"]["properties"]["target"] == {
+        "type": "string",
+        "x-unilabos-editor-control": "site_selector",
+    }
 
 
 def test_package_catalog_calls_the_unique_public_action_parser_once_per_action(
@@ -443,6 +452,7 @@ def test_package_catalog_calls_the_unique_public_action_parser_once_per_action(
         "a1_contract_lab.device:raw_pep585",
         "a1_contract_lab.device:raw_typing",
         "a1_contract_lab.device:reset",
+        "a1_contract_lab.device:select_target",
         "a1_contract_lab.device:transfer",
     ]
     assert all(not item.endswith(":health") for item in calls)
@@ -486,6 +496,7 @@ def test_legacy_scanner_uses_the_same_parser_and_does_not_type_auto_actions(
         "a1_contract_lab.device:raw_pep585",
         "a1_contract_lab.device:raw_typing",
         "a1_contract_lab.device:reset",
+        "a1_contract_lab.device:select_target",
         "a1_contract_lab.device:transfer",
     ]
     class_meta = scanned["devices"]["pump"]
@@ -600,6 +611,7 @@ def test_registry_snapshot_adapter_excludes_auto_actions_and_keeps_input_order(
         "raw_pep585",
         "raw_typing",
         "reset",
+        "select_target",
         "transfer",
     ]
     assert "health" not in names
@@ -612,10 +624,12 @@ def test_registry_snapshot_adapter_excludes_auto_actions_and_keeps_input_order(
         "note",
         "batches",
         "payload",
+        "ready",
     ]
     assert [item["handle_key"] for item in handles if item["io_type"] == "source"] == [
         "sample",
         "report",
+        "ready",
     ]
     consume = next(item for item in imports if item.template["name"] == "consume")
     implicit = next(

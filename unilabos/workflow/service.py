@@ -1032,7 +1032,6 @@ class WorkflowService:
                     registration=registration,
                     python_source=source["python_source"],
                 )
-                diagnostics = compilation.diagnostics
                 candidate = self._issue_candidate(
                     workflow_revision=workflow["revision"],
                     draft_hash=source["draft_hash"],
@@ -1040,6 +1039,7 @@ class WorkflowService:
                     applied_graph=applied_graph,
                     draft_python_source=source["python_source"],
                 )
+                diagnostics = compilation.diagnostics
             cause = (
                 "recovered"
                 if source is not None
@@ -2401,13 +2401,18 @@ class WorkflowService:
                 {
                     "description",
                     "class",
-                    "schema",
                     "icon",
                     "header",
                     "footer",
                 },
                 str,
             )
+            if "schema" in template:
+                schema = template["schema"]
+                if type(schema) not in {str, dict}:
+                    raise ValueError
+                if type(schema) is dict:
+                    normalize_json_object(schema)
 
         for handle in graph["handle_templates"]:
             uuids(handle, {"uuid", "workflow_node_template_uuid"})

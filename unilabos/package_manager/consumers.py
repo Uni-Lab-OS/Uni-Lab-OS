@@ -270,12 +270,8 @@ def _device_ast_metadata(record: DefinitionRecord) -> dict[str, Any]:
             ),
             "docstring": str(action.get("docstring") or ""),
             "is_async": bool(action.get("is_async", False)),
-            "params": _registry_value(
-                action.get("parameters", []),
-                imports=imports,
-                module=record.module,
-            ),
-            "return_type": str(action.get("return_type") or "Any"),
+            "schema": _plain_mapping(action.get("schema")),
+            "goal_default": _plain_mapping(action.get("goal_default")),
         }
         for action in details.get("actions", [])
     }

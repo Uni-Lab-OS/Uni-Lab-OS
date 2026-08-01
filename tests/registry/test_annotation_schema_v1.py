@@ -20,6 +20,7 @@ _STANDARD_RENDER_IMPORTS = {
         "unilabos.registry.annotations:AllowedResourceTemplates"
     ),
     "Annotated": "typing:Annotated",
+    "DeviceSlot": "unilabos.registry.placeholder_type:DeviceSlot",
     "Field": "pydantic:Field",
     "JSONValue": "unilabos.registry.annotations:JSONValue",
     "Literal": "typing:Literal",
@@ -213,6 +214,16 @@ _ACCEPTED_TYPES = [
         {"$slot": "ResourceSlot"},
         "ResourceSlot",
         id="resource-slot",
+    ),
+    pytest.param(
+        "DeviceSlot",
+        ("from unilabos.registry.placeholder_type import DeviceSlot",),
+        {
+            "type": "string",
+            "x-unilabos-editor-control": "site_selector",
+        },
+        "DeviceSlot",
+        id="device-slot",
     ),
     pytest.param(
         "list[str]",
@@ -1039,7 +1050,6 @@ def test_render_uses_canonical_value_instead_of_the_original_ast() -> None:
     [
         pytest.param("Any", id="any"),
         pytest.param("object", id="object"),
-        pytest.param("dict", id="bare-dict"),
         pytest.param("list", id="bare-list"),
         pytest.param("tuple[str]", id="tuple"),
         pytest.param("set[str]", id="set"),
