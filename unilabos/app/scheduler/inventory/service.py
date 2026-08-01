@@ -904,6 +904,67 @@ class InventoryService:
 
                 material_uuids = tuple(sorted(members))
                 set_fingerprint = _reservation_fingerprint(material_uuids)
+                placeholders = ",".join("?" for _ in material_uuids)
+                reserved_elsewhere = conn.execute(
+                    f"""
+                    SELECT member.material_uuid
+                    FROM material_reservation_member AS member
+                    JOIN material_reservation AS reservation
+                      ON reservation.uuid = member.reservation_uuid
+                    WHERE member.material_uuid IN ({placeholders})
+                      AND member.released_at IS NULL
+                      AND reservation.status = 'active'
+                      AND reservation.workflow_task_uuid <> ?
+                    ORDER BY member.material_uuid
+                    LIMIT 1
+                    """,
+                    (*material_uuids, canonical_task_uuid),
+                ).fetchone()
+                if reserved_elsewhere is not None:
+                    outbox_sequence = self._emit(
+                        conn,
+                        now_ms,
+                        "material_admission",
+                        canonical_task_uuid,
+                        1,
+                        "material_admission.blocked",
+                        {
+                            "workflow_task_uuid": canonical_task_uuid,
+                            "reason": "material_reserved",
+                        },
+                        causation_id=canonical_command_uuid,
+                    )
+                    blocked_result = TaskMaterialAdmissionResult(
+                        schema_version=1,
+                        command_uuid=canonical_command_uuid,
+                        workflow_task_uuid=canonical_task_uuid,
+                        status="blocked",
+                        reservation_uuid=None,
+                        bindings=(),
+                        diagnostics=({"code": "material_reserved"},),
+                        outbox_sequence=outbox_sequence,
+                    )
+                    conn.execute(
+                        """
+                        INSERT INTO processed_command(
+                            command_id, idempotency_key, command_type, payload_hash,
+                            result_json, status, processed_at
+                        ) VALUES (?, ?, 'material.admit', ?, ?, 'blocked', ?)
+                        """,
+                        (
+                            canonical_command_uuid,
+                            normalized_command.idempotency_key,
+                            payload_hash,
+                            json.dumps(
+                                _admission_result_payload(blocked_result),
+                                ensure_ascii=False,
+                                separators=(",", ":"),
+                                sort_keys=True,
+                            ),
+                            now_ms,
+                        ),
+                    )
+                    return blocked_result
                 active = conn.execute(
                     """
                     SELECT uuid, set_fingerprint
