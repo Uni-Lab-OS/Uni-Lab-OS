@@ -906,9 +906,8 @@ def _extract_class_body(
                     action_contract_schema.ActionContractError,
                     action_contract_schema.ActionCompatibilityError,
                 ) as exc:
-                    # Legacy Registry discovery must remain capable of starting
-                    # old built-ins, but the failed record stays untyped and is
-                    # therefore ineligible for TemplateCatalog publication.
+                    # 旧 Registry discovery 仍需允许存量内建设备启动，但失败记录
+                    # 必须保持 untyped，因此不能发布到 TemplateCatalog。
                     contract_diagnostic = {
                         "code": exc.code,
                         "path": exc.path,

@@ -757,7 +757,7 @@ def create_workflow_template_catalog_router(
     catalog: TemplateCatalog,
     authority: CatalogAuthority,
 ) -> APIRouter:
-    """Expose one persisted TemplateCatalog snapshot with Backend DTO shapes."""
+    """以 Backend DTO 形状公开同一份持久 TemplateCatalog snapshot。"""
 
     if not isinstance(catalog, TemplateCatalog):
         raise TypeError("catalog 必须是 TemplateCatalog")

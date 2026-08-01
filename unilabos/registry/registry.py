@@ -1005,7 +1005,7 @@ class Registry:
         action_value_mappings: Dict[str, Any] = {}
 
         def _build_canonical_action_entry(method_name, method_info, action_args):
-            """Validate and project a Package/legacy scanner canonical record."""
+            """验证并投影 Package/legacy scanner 的 canonical record。"""
 
             schema = copy.deepcopy(method_info.get("schema"))
             if not isinstance(schema, dict):
@@ -1042,9 +1042,93 @@ class Registry:
             if action_args.get("auto_prefix"):
                 action_name = f"auto-{action_name}"
             action_type = action_args.get("action_type")
+            transport_goal = {name: name for name in input_order}
+            transport_feedback = copy.deepcopy(action_args.get("feedback") or {})
+            transport_result = {name: name for name in output_order}
             if action_type:
                 if not isinstance(action_type, str):
                     action_type = str(action_type)
+                resolved_action_type = action_type
+                if ":" not in resolved_action_type:
+                    resolved_action_type = imap.get(
+                        resolved_action_type,
+                        resolved_action_type,
+                    )
+                action_type_obj = (
+                    resolve_type_object(resolved_action_type)
+                    if ":" in resolved_action_type
+                    else None
+                )
+                if action_type_obj is None:
+                    raise ValueError(
+                        f"Action {method_name} ROS action_type 无法解析"
+                    )
+
+                def validate_transport_fields(
+                    section: str,
+                    canonical_names: list[str] | None,
+                    reserved: set[str],
+                ) -> dict[str, str]:
+                    message_type = getattr(
+                        action_type_obj,
+                        section.capitalize(),
+                        None,
+                    )
+                    get_fields = getattr(
+                        message_type,
+                        "get_fields_and_field_types",
+                        None,
+                    )
+                    if not callable(get_fields):
+                        raise ValueError(
+                            f"Action {method_name} ROS {section} schema 缺失"
+                        )
+                    ros_fields = set(get_fields()) - reserved
+                    mapping = action_args.get(section) or {
+                        name: name
+                        for name in (
+                            canonical_names
+                            if canonical_names is not None
+                            else sorted(ros_fields)
+                        )
+                    }
+                    if not isinstance(mapping, dict) or any(
+                        not isinstance(key, str)
+                        or not key
+                        or not isinstance(value, str)
+                        or not value
+                        for key, value in mapping.items()
+                    ):
+                        raise ValueError(
+                            f"Action {method_name} ROS {section} mapping 无效"
+                        )
+                    values = list(mapping.values())
+                    conflicts = set(mapping) != ros_fields or len(values) != len(
+                        set(values)
+                    )
+                    if canonical_names is not None:
+                        conflicts = conflicts or set(values) != set(canonical_names)
+                    if conflicts:
+                        raise ValueError(
+                            f"Action {method_name} ROS {section} mapping 与 canonical schema 冲突"
+                        )
+                    return copy.deepcopy(mapping)
+
+                transport_goal = validate_transport_fields(
+                    "goal",
+                    input_order,
+                    {"unilabos_param"},
+                )
+                transport_feedback = validate_transport_fields(
+                    "feedback",
+                    None,
+                    set(),
+                )
+                transport_result = validate_transport_fields(
+                    "result",
+                    output_order,
+                    {"unilabos_samples"},
+                )
                 type_str = action_type.split(":")[-1]
             else:
                 type_str = (
@@ -1054,17 +1138,15 @@ class Registry:
                 )
             action_extensions = _normalize_action_extensions(action_args)
             goal_default = copy.deepcopy(method_info.get("goal_default") or {})
-            goal = {name: name for name in input_order}
-            result = {name: name for name in output_order}
             handles = _canonical_registry_action_handles(schema)
             entry = {
                 "type": type_str,
                 "displayname": resolve_registry_displayname(
                     action_args.get("displayname"), action_name
                 ),
-                "goal": goal,
-                "feedback": copy.deepcopy(action_args.get("feedback") or {}),
-                "result": result,
+                "goal": transport_goal,
+                "feedback": transport_feedback,
+                "result": transport_result,
                 "schema": schema,
                 "goal_default": goal_default,
                 "handles": handles,
@@ -1085,6 +1167,10 @@ class Registry:
                     "feedback_interval", method_info.get("feedback_interval", 1.0)
                 ),
             }
+            if method_info.get("contract_diagnostic"):
+                entry["contract_diagnostic"] = copy.deepcopy(
+                    method_info["contract_diagnostic"]
+                )
             if action_name.removeprefix("auto-") != method_name:
                 entry["method_name"] = method_name
             if action_args.get("always_free") or method_info.get("always_free"):
@@ -1180,6 +1266,10 @@ class Registry:
                 "estimate_duration_fixed": action_extensions["estimate_duration_fixed"],
                 "estimate_duration_express": action_extensions["estimate_duration_express"],
             }
+            if action_args is not None and method_info.get("contract_diagnostic"):
+                entry["contract_diagnostic"] = copy.deepcopy(
+                    method_info["contract_diagnostic"]
+                )
             if action_name.removeprefix("auto-") != method_name:
                 entry["method_name"] = method_name
             if (action_args or {}).get("always_free") or method_info.get("always_free"):
@@ -1337,6 +1427,10 @@ class Registry:
                 "estimate_duration_fixed": action_extensions["estimate_duration_fixed"],
                 "estimate_duration_express": action_extensions["estimate_duration_express"],
             }
+            if method_info.get("contract_diagnostic"):
+                action_entry["contract_diagnostic"] = copy.deepcopy(
+                    method_info["contract_diagnostic"]
+                )
             if action_name.removeprefix("auto-") != method_name:
                 action_entry["method_name"] = method_name
             if action_args.get("always_free") or method_info.get("always_free"):

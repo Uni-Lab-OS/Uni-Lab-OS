@@ -66,7 +66,7 @@ def workflow_template_imports_from_package_catalog(
     *,
     resource_template_uuids: Mapping[str, str],
 ) -> tuple[Any, ...]:
-    """生成现有 D-042 TemplateCatalog 的完整 action aggregates。
+    """生成现有 D-042 TemplateCatalog 的完整 Action 聚合。
 
     ResourceTemplate identity 必须由其权威模块显式提供；PackageCatalog 只携带
     source identity，绝不生成数据库 UUID。WorkflowNodeTemplate/Handle UUID 则
@@ -123,9 +123,8 @@ def workflow_template_imports_from_package_catalog(
                 for item in parameters
                 if isinstance(item, Mapping) and item.get("name")
             ]
-            # FE authoring represents lexical source order with the existing
-            # dependency handle pair. These are action-template contracts,
-            # not Graph connection parameters or runtime instances.
+            # FE authoring 使用既有 dependency Handle 对表达源码词法顺序。
+            # 它们属于 Action Template contract，不是 Graph 连接参数或运行时实例。
             handles.extend((_ready_handle("target"), _ready_handle("source")))
             result_mapping = decorator.get("result")
             if isinstance(result_mapping, Mapping):

@@ -147,6 +147,15 @@ CREATE TABLE IF NOT EXISTS workflow_template_catalog (
     update_time TEXT NOT NULL
 );
 
+CREATE TABLE IF NOT EXISTS workflow_resource_template_identity (
+    authority_id TEXT NOT NULL,
+    source_identity TEXT NOT NULL,
+    resource_template_uuid TEXT NOT NULL UNIQUE,
+    create_time TEXT NOT NULL,
+    update_time TEXT NOT NULL,
+    PRIMARY KEY(authority_id, source_identity)
+);
+
 CREATE TABLE IF NOT EXISTS workflow_node (
     uuid TEXT PRIMARY KEY,
     create_time TEXT NOT NULL,
@@ -1913,11 +1922,12 @@ class WorkflowStore:
             "type": row["type"],
             "node_type": row["node_type"],
         }
+        if row["schema"] is not None:
+            result["schema"] = _load(row["schema"], None)
         cls._add_optional(
             result,
             row,
             "class",
-            "schema",
             "icon",
             "header",
             "footer",

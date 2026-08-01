@@ -22,14 +22,12 @@ _PARSED_PARAMETER_TOKEN = object()
 _PARSED_RESULT_TOKEN = object()
 
 _ANNOTATED = "typing:Annotated"
-_ANY = "typing:Any"
 _DICT = "typing:Dict"
 _FIELD = "pydantic:Field"
 _JSON_VALUE = "unilabos.registry.annotations:JSONValue"
 _LIST = "typing:List"
 _LITERAL = "typing:Literal"
 _OPTIONAL = "typing:Optional"
-_DEVICE_SLOT = "unilabos.registry.placeholder_type:DeviceSlot"
 _RESOURCE_SLOT = "unilabos.registry.placeholder_type:ResourceSlot"
 _RESOURCE_TEMPLATES = "unilabos.registry.annotations:AllowedResourceTemplates"
 _ERROR_MESSAGE = "参数注解不符合 Workflow 版本 1 合同"
@@ -287,18 +285,6 @@ def _parse_type(
     if _is_import(node, _RESOURCE_SLOT, imports):
         return {"$slot": "ResourceSlot"}
 
-    if _is_import(node, _DEVICE_SLOT, imports):
-        return {
-            "type": "string",
-            "x-unilabos-editor-control": "site_selector",
-        }
-
-    # ``dict`` is the canonical opaque JSON object spelling.  It deliberately
-    # carries no field contract; A1 renders it as an open JSON object in the
-    # Registry envelope rather than guessing keys from runtime examples.
-    if _is_builtin(node, "dict", imports):
-        return {"type": "object"}
-
     if not isinstance(node, ast.Subscript):
         _fail(path)
 
@@ -332,10 +318,7 @@ def _parse_type(
         if (
             len(members) != 2
             or not _is_builtin(members[0], "str", imports)
-            or not (
-                _is_import(members[1], _JSON_VALUE, imports)
-                or _is_import(members[1], _ANY, imports)
-            )
+            or not _is_import(members[1], _JSON_VALUE, imports)
         ):
             _fail(path)
         return {"type": "object"}
@@ -647,9 +630,6 @@ def _render_schema(schema: dict[str, Any]) -> ast.expr:
         )
     if "$slot" in schema:
         return ast.Name(id="ResourceSlot", ctx=ast.Load())
-    if schema.get("x-unilabos-editor-control") == "site_selector":
-        return ast.Name(id="DeviceSlot", ctx=ast.Load())
-
     kind = schema["type"]
     if "enum" in schema:
         values = [_constant(value) for value in schema["enum"]]

@@ -114,8 +114,9 @@ def _fail(
     message: str,
     *,
     node: ast.AST | None = None,
+    fields: dict[str, Any] | None = None,
 ) -> Never:
-    raise _AuthoringFailure(code, message, node=node)
+    raise _AuthoringFailure(code, message, node=node, fields=fields)
 
 
 def _detached(value: Any) -> Any:
@@ -144,11 +145,11 @@ def _catalog_read_entity(
 
 
 def _catalog_wire_equal(left: Any, right: Any) -> bool:
-    """Compare Catalog DTOs using JSON's single number domain.
+    """按 JSON 的单一数字域比较 Catalog DTO。
 
-    Browser parse/stringify cycles cannot preserve Python's distinction between
-    integral floats and integers.  Catalog defaults remain immutable by UUID and
-    fingerprint, so only that wire-level numeric representation is normalized.
+    浏览器 parse/stringify 往返无法保留 Python 对整数与整数值浮点数的区分。
+    Catalog 默认值仍由 UUID 和 fingerprint 保持不可变，因此这里只归一化线上的
+    数字表示。
     """
 
     pending = [(left, right)]
@@ -416,13 +417,13 @@ class WorkflowAuthoringEngine:
 
     @property
     def template_catalog(self) -> TemplateCatalog:
-        """Return the persisted Catalog read facade used by this compiler."""
+        """返回此 compiler 使用的持久 Catalog 读取 facade。"""
 
         return self._catalog
 
     @property
     def catalog_authority(self) -> CatalogAuthority:
-        """Return the Graph Authority selected at composition time."""
+        """返回 composition 时选择的 Graph Authority。"""
 
         return self._authority
 
@@ -1405,10 +1406,19 @@ def _parse_action(
     applied = state.applied_nodes.get(node_uuid, {})
     meta_data = _node_metadata(applied.get("meta_data"), selector)
     input_bindings: dict[str, dict[str, str]] = {}
-    param = resolve_template_root_param(
-        template.get("goal_default"),
-        template.get("goal"),
+    schema = template.get("schema")
+    action_contract = (
+        schema.get("x-unilabos-action-contract")
+        if isinstance(schema, Mapping)
+        else None
     )
+    if isinstance(action_contract, Mapping) and action_contract.get("version") == 1:
+        param = _detached(template.get("goal_default") or {})
+    else:
+        param = resolve_template_root_param(
+            template.get("goal_default"),
+            template.get("goal"),
+        )
     pending_edges: list[dict[str, Any]] = []
     input_names = state.input_names
     for keyword_node in call.keywords:
@@ -1982,6 +1992,12 @@ def _validate_built_graph(graph: dict[str, Any]) -> None:
     handles = {item["uuid"]: item for item in graph["handle_templates"]}
     nodes = [WorkflowNodeWrite.model_validate(item) for item in graph["nodes"]]
     edges = [WorkflowEdgeWrite.model_validate(item) for item in graph["edges"]]
+    _validate_typed_action_field_providers(
+        nodes=nodes,
+        edges=edges,
+        templates=templates,
+        handles=handles,
+    )
     validate_graph(
         nodes=nodes,
         edges=edges,
@@ -1991,6 +2007,72 @@ def _validate_built_graph(graph: dict[str, Any]) -> None:
         workflow_meta_data=graph["workflow"].get("meta_data") or {},
         node_meta_data={node.uuid: node.meta_data for node in nodes},
     )
+
+
+def _validate_typed_action_field_providers(
+    *,
+    nodes: list[WorkflowNodeWrite],
+    edges: list[WorkflowEdgeWrite],
+    templates: Mapping[str, dict[str, Any]],
+    handles: Mapping[str, dict[str, Any]],
+) -> None:
+    """在通用图校验前保留 typed Action 字段的稳定诊断坐标。"""
+
+    edge_targets = {(edge.target_node_uuid, edge.target_handle_uuid) for edge in edges}
+    for node in nodes:
+        template_uuid = node.workflow_node_template_uuid
+        template = templates.get(template_uuid or "")
+        if not isinstance(template, Mapping):
+            continue
+        schema = template.get("schema")
+        extension = (
+            schema.get("x-unilabos-action-contract")
+            if isinstance(schema, Mapping)
+            else None
+        )
+        if not isinstance(extension, Mapping) or extension.get("version") != 1:
+            continue
+        param = node.param or {}
+        unilab = node.meta_data.get("unilab")
+        bindings = unilab.get("input_bindings") if isinstance(unilab, Mapping) else {}
+        if not isinstance(bindings, Mapping):
+            bindings = {}
+        for handle in handles.values():
+            if (
+                handle.get("workflow_node_template_uuid") != template_uuid
+                or handle.get("io_type") != "target"
+                or str(handle.get("handle_key") or "").lower() == "ready"
+            ):
+                continue
+            handle_uuid = str(handle.get("uuid") or "")
+            data_key = str(handle.get("data_key") or handle.get("handle_key") or "")
+            providers = sum(
+                (
+                    data_key in param,
+                    handle_uuid in bindings,
+                    (node.uuid, handle_uuid) in edge_targets,
+                )
+            )
+            fields = {
+                "node_id": node.uuid,
+                "workflow_handle_template_uuid": handle_uuid,
+                "path": (
+                    f"/nodes/{node.uuid}/param/"
+                    f"{data_key.replace('~', '~0').replace('/', '~1')}"
+                ),
+            }
+            if providers > 1:
+                _fail(
+                    "candidate_invalid",
+                    "target Handle 有多个 provider",
+                    fields=fields,
+                )
+            if handle.get("required") is True and providers == 0:
+                _fail(
+                    "required_action_parameter_missing",
+                    f"{handle.get('display_name') or data_key}为必填参数",
+                    fields=fields,
+                )
 
 
 def _changeset(

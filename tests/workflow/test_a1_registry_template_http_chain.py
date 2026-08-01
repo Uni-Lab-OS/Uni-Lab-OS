@@ -29,6 +29,7 @@ from unilabos.workflow.composition import (
     get_workflow_service,
     reset_workflow_service_for_test,
 )
+from unilabos.workflow.models import WorkflowNodeWrite
 from unilabos.workflow.store import WorkflowStore
 
 AUTHORITY = CatalogAuthority(authority_id="os-local", kind="local")
@@ -155,20 +156,6 @@ def test_registry_projection_publishes_one_complete_stable_catalog_and_metadata(
             "implicit_passthrough": False,
         }
 
-        select_target = next(
-            item for item in first.node_templates if item["name"] == "select_target"
-        )
-        device_target = next(
-            item
-            for item in first.handle_templates
-            if item["workflow_node_template_uuid"] == select_target["uuid"]
-            and item["handle_key"] == "target"
-            and item["io_type"] == "target"
-        )
-        assert device_target["meta_data"]["unilab"]["editor_control"] == (
-            "site_selector"
-        )
-
         consume = next(
             item for item in first.node_templates if item["name"] == "consume"
         )
@@ -182,6 +169,178 @@ def test_registry_projection_publishes_one_complete_stable_catalog_and_metadata(
         assert implicit["meta_data"]["unilab"]["implicit_passthrough"] is True
         assert implicit["data_source"] == "result"
         assert implicit["data_key"] == "sample"
+
+        workflow_uuid = "90000000-0000-4000-8000-000000000010"
+        store.create_workflow(
+            workflow_uuid=workflow_uuid,
+            name="Canonical schema graph read",
+            tags=[],
+            description=None,
+            meta_data={},
+        )
+        store.save_graph(
+            workflow_uuid,
+            revision=1,
+            nodes=[
+                WorkflowNodeWrite(
+                    uuid="90000000-0000-4000-8000-000000000011",
+                    workflow_node_template_uuid=transfer["uuid"],
+                    name="transfer",
+                    status="idle",
+                    type="device",
+                    param={"sample": {"uuid": "sample-1"}},
+                    action_name="transfer",
+                )
+            ],
+            edges=[],
+        )
+        projected = store.get_graph(workflow_uuid)["node_templates"][0]
+        assert projected["schema"] == _plain(transfer["schema"])
+    finally:
+        store.close()
+
+
+def test_typed_action_missing_field_keeps_os_handle_diagnostic_coordinates(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    workspace = tmp_path / "package"
+    _write_package(workspace)
+    registry = _register(
+        compile_package_source(WorkspaceSource(workspace)),
+        monkeypatch,
+    )
+    store = WorkflowStore(tmp_path / "workflow.db")
+    try:
+        catalog = TemplateCatalog(store)
+        catalog.replace(AUTHORITY, _imports(_registry_snapshot(registry)))
+        with catalog.snapshot(AUTHORITY) as snapshot:
+            template = next(
+                _plain(item)
+                for item in snapshot.node_templates
+                if item["name"] == "transfer"
+            )
+            handles = [
+                _plain(item)
+                for item in snapshot.handle_templates
+                if item["workflow_node_template_uuid"] == template["uuid"]
+            ]
+        sample_handle = next(
+            item
+            for item in handles
+            if item["io_type"] == "target" and item["handle_key"] == "sample"
+        )
+        workflow_uuid = "90000000-0000-4000-8000-000000000001"
+        node_uuid = "90000000-0000-4000-8000-000000000002"
+        timestamp = "2026-08-01T00:00:00Z"
+        result = WorkflowAuthoringEngine(
+            catalog=catalog,
+            authority=AUTHORITY,
+        ).generate_python(
+            workflow_uuid=workflow_uuid,
+            workflow_revision=1,
+            source_uri="package://a1_contract_lab/workflows/field.py",
+            graph={
+                "workflow": {
+                    "uuid": workflow_uuid,
+                    "create_time": timestamp,
+                    "update_time": timestamp,
+                    "meta_data": {},
+                    "name": "Field diagnostic",
+                    "tags": [],
+                    "revision": 1,
+                },
+                "nodes": [
+                    {
+                        "uuid": node_uuid,
+                        "workflow_uuid": workflow_uuid,
+                        "create_time": timestamp,
+                        "update_time": timestamp,
+                        "workflow_node_template_uuid": template["uuid"],
+                        "name": "transfer",
+                        "status": "idle",
+                        "type": "action",
+                        "pose": {},
+                        "param": {},
+                        "execution_policy": {},
+                        "disabled": False,
+                        "minimized": False,
+                        "meta_data": {},
+                    }
+                ],
+                "edges": [],
+                "node_templates": [template],
+                "handle_templates": handles,
+            },
+        )
+
+        assert not result.valid
+        diagnostic = result.diagnostics[0]
+        assert diagnostic["code"] == "required_action_parameter_missing"
+        assert diagnostic["node_id"] == node_uuid
+        assert diagnostic["workflow_handle_template_uuid"] == sample_handle["uuid"]
+        assert diagnostic["path"] == f"/nodes/{node_uuid}/param/sample"
+    finally:
+        store.close()
+
+
+def test_typed_action_does_not_treat_ros_goal_mapping_as_business_defaults(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    workspace = tmp_path / "package"
+    _write_package(workspace)
+    registry = _register(
+        compile_package_source(WorkspaceSource(workspace)),
+        monkeypatch,
+    )
+    store = WorkflowStore(tmp_path / "workflow.db")
+    try:
+        catalog = TemplateCatalog(store)
+        catalog.replace(AUTHORITY, _imports(_registry_snapshot(registry)))
+        workflow_uuid = "90000000-0000-4000-8000-000000000020"
+        result = WorkflowAuthoringEngine(
+            catalog=catalog,
+            authority=AUTHORITY,
+        ).compile(
+            workflow_uuid=workflow_uuid,
+            workflow_revision=1,
+            source_uri="package://a1_contract_lab/workflows/required.py",
+            python_source=f'''from a1_contract_lab.device import Pump
+from unilabos.workflow.authoring import device, workflow_definition
+
+pump: Pump = device()
+
+@workflow_definition(
+    workflow_uuid="{workflow_uuid}",
+    displayname="Required field",
+    description="Required field contract",
+)
+def required_field():
+    # unilab:node_uuid=90000000-0000-4000-8000-000000000021
+    measured = pump.measure()
+''',
+            applied_graph={
+                "workflow": {
+                    "uuid": workflow_uuid,
+                    "create_time": "2026-08-01T00:00:00Z",
+                    "update_time": "2026-08-01T00:00:00Z",
+                    "meta_data": {},
+                    "name": "Required field",
+                    "tags": [],
+                    "revision": 1,
+                },
+                "nodes": [],
+                "edges": [],
+                "node_templates": [],
+                "handle_templates": [],
+            },
+        )
+
+        assert not result.valid
+        diagnostic = result.diagnostics[0]
+        assert diagnostic["code"] == "required_action_parameter_missing"
+        assert diagnostic["path"].endswith("/param/channel")
     finally:
         store.close()
 
@@ -454,6 +613,61 @@ def test_failed_production_projection_keeps_old_catalog_and_never_becomes_ready(
             assert _catalog_state(TemplateCatalog(reader)) == before
         finally:
             reader.close()
+    finally:
+        reset_workflow_service_for_test()
+
+
+def test_real_web_server_entry_publishes_registry_before_http_ready(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    workspace = tmp_path / "package"
+    _write_package(workspace)
+    registry = _register(
+        compile_package_source(WorkspaceSource(workspace)),
+        monkeypatch,
+    )
+    working_dir = tmp_path / "unilabos_data"
+    from unilabos.config.config import BasicConfig
+
+    monkeypatch.setattr(BasicConfig, "working_dir", str(working_dir))
+    monkeypatch.setattr(BasicConfig, "workflow_graph_authority", AUTHORITY)
+    monkeypatch.setattr(
+        BasicConfig,
+        "workflow_editable_package_roots",
+        (),
+    )
+    reset_workflow_service_for_test()
+    server = importlib.reload(importlib.import_module("unilabos.app.web.server"))
+    try:
+        client = TestClient(
+            server.setup_server(
+                registry_snapshot=_registry_snapshot(registry),
+            )
+        )
+        response = client.get("/api/v1/workflow-node-templates")
+        assert response.status_code == 200
+        first = response.json()["data"]
+        assert {item["name"] for item in first["items"]} >= {
+            "transfer",
+            "measure",
+        }
+        resource_uuids = {item["resource_template"]["uuid"] for item in first["items"]}
+        assert len(resource_uuids) == 1
+    finally:
+        reset_workflow_service_for_test()
+
+    server = importlib.reload(importlib.import_module("unilabos.app.web.server"))
+    try:
+        client = TestClient(
+            server.setup_server(
+                registry_snapshot=_registry_snapshot(registry),
+            )
+        )
+        second = client.get("/api/v1/workflow-node-templates").json()["data"]
+        assert {
+            item["resource_template"]["uuid"] for item in second["items"]
+        } == resource_uuids
     finally:
         reset_workflow_service_for_test()
 

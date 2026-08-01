@@ -1,10 +1,12 @@
-"""Registry consumers for package discovery and Workflow template Catalog."""
+"""Registry 到 Workflow Template Catalog 的只读投影。"""
 
 from __future__ import annotations
 
 from collections.abc import Callable, Mapping, Sequence
 from typing import Any
 
+# 这些 re-export 只维持 F006 以前的稳定 import path；A1 production 发布只能走
+# 本模块的 Registry snapshot adapter。
 from unilabos.package_manager.consumers import (
     action_catalog_from_package_catalog,
     register_package_catalog,
@@ -14,7 +16,7 @@ from unilabos.workflow.catalog import NodeTemplateImport
 
 
 class RegistryTemplateProjectionError(ValueError):
-    """A detached Registry snapshot cannot be published as one Catalog."""
+    """完整 Registry snapshot 无法原子发布为一个 Catalog。"""
 
     def __init__(self, code: str, path: str) -> None:
         super().__init__(code)
@@ -28,16 +30,18 @@ def workflow_template_imports_from_registry_snapshot(
     authority_id: str,
     resource_template_identity_resolver: Callable[[str], str],
 ) -> tuple[NodeTemplateImport, ...]:
-    """Project a completed, read-only Registry snapshot as full aggregates.
+    """把已完成构建的只读 Registry snapshot 投影为完整聚合。
 
-    The adapter consumes only the versioned canonical schema.  It never reads
-    live HostNode mappings and never reparses annotations or decorator fields.
+    Adapter 只消费带版本的 canonical schema；不读取 live HostNode mapping，
+    也不重新解析 annotation 或 decorator 字段。
     """
 
     if not isinstance(registry_snapshot, Mapping):
         raise RegistryTemplateProjectionError("invalid_action_contract", "/registry")
     if not isinstance(authority_id, str) or not authority_id:
         raise RegistryTemplateProjectionError("template_catalog_mismatch", "/authority")
+    if any(not isinstance(key, str) or not key for key in registry_snapshot):
+        raise RegistryTemplateProjectionError("invalid_action_contract", "/registry")
     imports: list[NodeTemplateImport] = []
     for registry_key in sorted(registry_snapshot):
         device = registry_snapshot[registry_key]
@@ -51,6 +55,56 @@ def workflow_template_imports_from_registry_snapshot(
         actions = class_info.get("action_value_mappings")
         if not isinstance(actions, Mapping):
             continue
+        if any(not isinstance(key, str) or not key for key in actions):
+            raise RegistryTemplateProjectionError(
+                "invalid_action_contract",
+                f"/devices/{registry_key}/actions",
+            )
+        typed_actions: list[tuple[str, Mapping[str, Any]]] = []
+        for action_name in sorted(actions):
+            action = actions[action_name]
+            if not isinstance(action, Mapping):
+                raise RegistryTemplateProjectionError(
+                    "invalid_action_contract",
+                    f"/devices/{registry_key}/actions/{action_name}",
+                )
+            diagnostic = action.get("contract_diagnostic")
+            if diagnostic is not None:
+                if not isinstance(diagnostic, Mapping):
+                    raise RegistryTemplateProjectionError(
+                        "invalid_action_contract",
+                        f"/devices/{registry_key}/actions/{action_name}",
+                    )
+                code = diagnostic.get("code")
+                diagnostic_path = diagnostic.get("path")
+                if not isinstance(code, str) or not isinstance(
+                    diagnostic_path,
+                    str,
+                ):
+                    raise RegistryTemplateProjectionError(
+                        "invalid_action_contract",
+                        f"/devices/{registry_key}/actions/{action_name}",
+                    )
+                raise RegistryTemplateProjectionError(
+                    code,
+                    (
+                        f"/devices/{registry_key}{diagnostic_path}"
+                        if diagnostic_path.startswith(f"/actions/{action_name}/")
+                        else (
+                            f"/devices/{registry_key}/actions/"
+                            f"{action_name}{diagnostic_path}"
+                        )
+                    ),
+                )
+            schema = action.get("schema")
+            if not isinstance(schema, Mapping):
+                continue  # legacy auto-action
+            extension = schema.get("x-unilabos-action-contract")
+            if extension is None:
+                continue  # legacy auto-action 或无类型 transport action
+            typed_actions.append((action_name, action))
+        if not typed_actions:
+            continue
         owner_identity = str(device.get("source_fqid") or registry_key)
         try:
             owner_uuid = resource_template_identity_resolver(owner_identity)
@@ -59,16 +113,9 @@ def workflow_template_imports_from_registry_snapshot(
                 "template_catalog_mismatch",
                 f"/devices/{registry_key}/resource_template_uuid",
             ) from None
-        for action_name in sorted(actions):
-            action = actions[action_name]
-            if not isinstance(action, Mapping):
-                continue
-            schema = action.get("schema")
-            if not isinstance(schema, Mapping):
-                continue  # legacy auto-action
-            extension = schema.get("x-unilabos-action-contract")
-            if extension is None:
-                continue  # legacy auto-action or untyped transport action
+        for action_name, action in typed_actions:
+            schema = action["schema"]
+            assert isinstance(schema, Mapping)
             path = f"/devices/{registry_key}/actions/{action_name}/schema"
             canonical = _canonical_schema(schema, path=path)
             handles = _template_handles(
@@ -143,9 +190,55 @@ def _canonical_schema(value: Mapping[str, Any], *, path: str) -> dict[str, Any]:
         or len(output_order) != len(set(output_order))
         or set(input_order) != set(goal_fields)
         or set(output_order) != set(result_fields)
+        or any(not isinstance(value, Mapping) for value in goal_fields.values())
+        or any(not isinstance(value, Mapping) for value in result_fields.values())
     ):
         raise RegistryTemplateProjectionError("invalid_action_contract", path)
+    _validate_resource_template_symbols(
+        extension,
+        goal_names=set(goal_fields),
+        result_names=set(result_fields),
+        path=path,
+    )
     return schema
+
+
+def _validate_resource_template_symbols(
+    extension: Mapping[str, Any],
+    *,
+    goal_names: set[str],
+    result_names: set[str],
+    path: str,
+) -> None:
+    symbols = extension.get("resource_template_symbols")
+    if not isinstance(symbols, Mapping) or set(symbols) != {"goal", "result"}:
+        raise RegistryTemplateProjectionError(
+            "invalid_action_contract",
+            f"{path}/x-unilabos-action-contract/resource_template_symbols",
+        )
+    for section, field_names in (("goal", goal_names), ("result", result_names)):
+        fields = symbols.get(section)
+        section_path = (
+            f"{path}/x-unilabos-action-contract/resource_template_symbols/{section}"
+        )
+        if not isinstance(fields, Mapping) or any(
+            not isinstance(name, str) or name not in field_names for name in fields
+        ):
+            raise RegistryTemplateProjectionError(
+                "invalid_action_contract",
+                section_path,
+            )
+        for name, values in fields.items():
+            if (
+                not isinstance(values, list)
+                or not values
+                or any(not isinstance(item, str) or not item for item in values)
+                or len(values) != len(set(values))
+            ):
+                raise RegistryTemplateProjectionError(
+                    "invalid_action_contract",
+                    f"{section_path}/{name}",
+                )
 
 
 def _template_handles(
@@ -172,7 +265,7 @@ def _template_handles(
                 io_type="target",
                 required=name in required,
                 data_source="goal",
-                symbols=_symbol_list(goal_symbols, name),
+                symbols=_symbol_list(goal_symbols, name, path=path),
                 resolver=resolver,
                 implicit=False,
                 path=f"{path}/properties/goal/properties/{name}",
@@ -187,7 +280,7 @@ def _template_handles(
                 io_type="source",
                 required=False,
                 data_source="result",
-                symbols=_symbol_list(result_symbols, name),
+                symbols=_symbol_list(result_symbols, name, path=path),
                 resolver=resolver,
                 implicit=False,
                 path=f"{path}/properties/result/properties/{name}",
@@ -207,7 +300,7 @@ def _template_handles(
                 io_type="source",
                 required=False,
                 data_source="result",
-                symbols=_symbol_list(goal_symbols, name),
+                symbols=_symbol_list(goal_symbols, name, path=path),
                 resolver=resolver,
                 implicit=True,
                 path=f"{path}/properties/goal/properties/{name}",
@@ -305,14 +398,19 @@ def _schema_base(schema: Mapping[str, Any]) -> Mapping[str, Any]:
     return schema
 
 
-def _symbol_list(value: Any, name: str) -> tuple[str, ...]:
+def _symbol_list(value: Any, name: str, *, path: str) -> tuple[str, ...]:
     if not isinstance(value, Mapping):
-        return ()
+        raise RegistryTemplateProjectionError("invalid_action_contract", path)
     symbols = value.get(name)
-    if not isinstance(symbols, list) or any(
-        not isinstance(item, str) for item in symbols
-    ):
+    if symbols is None:
         return ()
+    if (
+        not isinstance(symbols, list)
+        or not symbols
+        or any(not isinstance(item, str) or not item for item in symbols)
+        or len(symbols) != len(set(symbols))
+    ):
+        raise RegistryTemplateProjectionError("invalid_action_contract", path)
     return tuple(symbols)
 
 

@@ -111,6 +111,54 @@ class CatalogAuthority:
             raise TemplateCatalogImportError("/authority")
 
 
+class LocalResourceTemplateIdentityResolver:
+    """为 local Graph Authority 持久分配 ResourceTemplate UUID。"""
+
+    def __init__(self, store: WorkflowStore, authority: CatalogAuthority) -> None:
+        if authority.kind != "local":
+            raise TemplateCatalogImportError("/authority/kind")
+        self._store = store
+        self._authority = authority
+
+    def __call__(self, source_identity: str) -> str:
+        if (
+            not isinstance(source_identity, str)
+            or not source_identity
+            or source_identity.strip() != source_identity
+        ):
+            raise TemplateCatalogImportError("/resource_templates/source_identity")
+        with self._store.catalog_guard():
+            with self._store.transaction() as conn:
+                row = conn.execute(
+                    """
+                    SELECT resource_template_uuid
+                    FROM workflow_resource_template_identity
+                    WHERE authority_id = ? AND source_identity = ?
+                    """,
+                    (self._authority.authority_id, source_identity),
+                ).fetchone()
+                if row is not None:
+                    return str(row["resource_template_uuid"])
+                identity = str(uuid4())
+                now = utc_now()
+                conn.execute(
+                    """
+                    INSERT INTO workflow_resource_template_identity(
+                        authority_id, source_identity, resource_template_uuid,
+                        create_time, update_time
+                    ) VALUES (?, ?, ?, ?, ?)
+                    """,
+                    (
+                        self._authority.authority_id,
+                        source_identity,
+                        identity,
+                        now,
+                        now,
+                    ),
+                )
+                return identity
+
+
 @dataclass(frozen=True)
 class NodeTemplateImport:
     """一个 NodeTemplate 及其显式 Handle aggregate。"""
@@ -1082,6 +1130,7 @@ def _freeze_json(value: Any) -> Any:
 
 __all__ = [
     "CatalogAuthority",
+    "LocalResourceTemplateIdentityResolver",
     "NodeTemplateImport",
     "TemplateCatalog",
     "TemplateCatalogError",

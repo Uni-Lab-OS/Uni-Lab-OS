@@ -35,6 +35,9 @@ from unilabos.workflow.schema import (
 _ERROR_MESSAGE = "Action 定义不符合 Workflow 版本 1 合同"
 _PARSED_ACTION_CONTRACT_TOKEN = object()
 _FRAMEWORK_PARAMETERS = frozenset({"sample_uuids"})
+_ANY = "typing:Any"
+_DICT = "typing:Dict"
+_JSON_VALUE = "unilabos.registry.annotations:JSONValue"
 
 
 class ActionContractError(ValueError):
@@ -48,7 +51,7 @@ class ActionContractError(ValueError):
 
 
 class ActionCompatibilityError(ValueError):
-    """A legacy decorator assertion conflicts with the canonical schema."""
+    """旧 decorator 兼容断言与 canonical schema 冲突。"""
 
     def __init__(self, code: str, path: str) -> None:
         super().__init__(code)
@@ -122,12 +125,11 @@ class ParsedActionContract:
         action_name: str,
         description: str = "",
     ) -> dict[str, Any]:
-        """Project the one canonical contract into the existing Action schema.
+        """把唯一 canonical contract 投影到既有 Action schema。
 
-        The returned envelope is the only typed authority stored by
-        PackageCatalog and Registry.  Order and source symbols live in the
-        versioned extension; input/output contract dumps are intentionally not
-        copied beside it.
+        返回的 envelope 是 PackageCatalog 与 Registry 保存的唯一 typed 权威。
+        字段顺序和源码 symbol 位于带版本的扩展中，不在旁边复制 input/output
+        contract dump。
         """
 
         descriptor = self.to_dict()
@@ -188,7 +190,7 @@ class ParsedActionContract:
 
 
 def _action_value_schema(value: Mapping[str, Any]) -> dict[str, Any]:
-    """Render the strict Workflow value schema as JSON Schema presentation."""
+    """把严格 Workflow value schema 渲染为 JSON Schema 展示形状。"""
 
     rendered = {key: _copy_json(item) for key, item in value.items()}
     if rendered.get("type") == "object":
@@ -215,7 +217,7 @@ def _symbol_projection(
 
 
 def canonical_goal_defaults(schema: Mapping[str, Any]) -> dict[str, Any]:
-    """Derive the compatibility default projection from one Action schema."""
+    """从唯一 Action schema 派生兼容默认值投影。"""
 
     properties = schema["properties"]["goal"]["properties"]
     return {
@@ -232,7 +234,7 @@ def validate_legacy_action_assertions(
     goal_default: Any = None,
     handles: Any = None,
 ) -> dict[str, Any]:
-    """Validate legacy decorator values without merging a second contract."""
+    """校验旧 decorator 值，不合并第二份 contract。"""
 
     defaults = canonical_goal_defaults(schema)
     if goal_default not in (None, {}):
@@ -631,7 +633,7 @@ def _parse_results(
     ):
         try:
             return parse_output_contract({"version": 1, "outputs": []}), ()
-        except WorkflowSchemaError as error:  # defensive: constant schema
+        except WorkflowSchemaError as error:  # pragma: no cover - 常量合同防御
             _fail(error.path or "/return", code="invalid_schema")
     if isinstance(declaration, ast.Name):
         name = getattr(declaration, "id", None)
@@ -668,21 +670,43 @@ def _parse_results(
 
 
 def _opaque_dict_result(
-    declaration: ast.expr | ast.ClassDef,
+    declaration: ast.expr,
     imports: Mapping[str, str],
 ) -> bool:
+    """只接受顶层兼容 opaque JSON mapping，不放宽字段 annotation。"""
+
     if isinstance(declaration, ast.Name):
         return declaration.id == "dict" and declaration.id not in imports
     if not isinstance(declaration, ast.Subscript):
         return False
-    value = declaration.value
-    if isinstance(value, ast.Name):
-        if value.id == "dict" and value.id not in imports:
-            return True
-        return imports.get(value.id) == "typing:Dict"
-    if isinstance(value, ast.Attribute) and isinstance(value.value, ast.Name):
-        return imports.get(value.value.id) == "typing" and value.attr == "Dict"
-    return False
+    origin = declaration.value
+    if isinstance(origin, ast.Name):
+        valid_origin = (
+            origin.id == "dict" and origin.id not in imports
+        ) or imports.get(origin.id) == _DICT
+    elif isinstance(origin, ast.Attribute) and isinstance(origin.value, ast.Name):
+        valid_origin = (
+            imports.get(origin.value.id) == "typing" and origin.attr == "Dict"
+        )
+    else:
+        valid_origin = False
+    if not valid_origin:
+        return False
+    members = (
+        list(declaration.slice.elts)
+        if isinstance(declaration.slice, ast.Tuple)
+        else [declaration.slice]
+    )
+    if len(members) != 2:
+        return False
+    key, value = members
+    return (
+        isinstance(key, ast.Name)
+        and key.id == "str"
+        and key.id not in imports
+        and isinstance(value, ast.Name)
+        and imports.get(value.id) in {_ANY, _JSON_VALUE}
+    )
 
 
 def parse_action_contract(

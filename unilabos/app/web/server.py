@@ -5,6 +5,8 @@ Web服务器模块
 """
 
 import webbrowser
+from collections.abc import Mapping
+from typing import Any
 
 from fastapi import FastAPI, Request
 from fastapi.middleware.cors import CORSMiddleware
@@ -74,7 +76,10 @@ async def log_requests(request: Request, call_next) -> Response:
     return response
 
 
-def setup_server() -> FastAPI:
+def setup_server(
+    *,
+    registry_snapshot: Mapping[str, Any] | None = None,
+) -> FastAPI:
     """
     设置服务器
 
@@ -109,6 +114,7 @@ def setup_server() -> FastAPI:
                 BasicConfig.working_dir,
                 authority=authority,
                 editable_package_roots=editable_package_roots,
+                registry_snapshot=registry_snapshot,
             )
             if workflow_service.compiler is None:
                 raise RuntimeError("Workflow Authoring engine 未完成组合")
@@ -174,7 +180,11 @@ def setup_server() -> FastAPI:
 
 
 def start_server(
-    host: str = "0.0.0.0", port: int = 8002, open_browser: bool = True
+    host: str = "0.0.0.0",
+    port: int = 8002,
+    open_browser: bool = True,
+    *,
+    registry_snapshot: Mapping[str, Any] | None = None,
 ) -> bool:
     """
     启动服务器
@@ -193,7 +203,7 @@ def start_server(
     from uvicorn import Config, Server
 
     # 设置服务器
-    setup_server()
+    setup_server(registry_snapshot=registry_snapshot)
 
     # 配置日志
     log_config = setup_fastapi_logging()

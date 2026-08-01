@@ -113,14 +113,14 @@ from typing import Annotated, Any, Dict, Literal, TypedDict
 from pydantic import Field
 
 from a1_contract_lab.resources import plate_96
-from unilabos.registry.annotations import AllowedResourceTemplates
+from unilabos.registry.annotations import AllowedResourceTemplates, JSONValue
 from unilabos.registry.decorators import (
     ActionInputHandle,
     ActionOutputHandle,
     action,
     device,
 )
-from unilabos.registry.placeholder_type import DeviceSlot, ResourceSlot
+from unilabos.registry.placeholder_type import ResourceSlot
 
 
 class TransferResult(TypedDict):
@@ -154,7 +154,7 @@ class Pump:
         *,
         note: str | None = None,
         batches: list[int] = [],
-        payload: dict = {{}},
+        payload: dict[str, JSONValue] = {{}},
     ) -> TransferResult:
         raise NotImplementedError
 
@@ -178,20 +178,16 @@ class Pump:
     def consume(self, sample: ResourceSlot) -> None:
         return None
 
-    @action(description="explicit device selector")
-    def select_target(self, target: DeviceSlot) -> None:
-        return None
-
     @action(description="opaque bare dict result")
-    def raw_bare(self, options: dict) -> dict:
+    def raw_bare(self, options: dict[str, JSONValue]) -> dict:
         return options
 
     @action(description="opaque PEP 585 dict result")
-    def raw_pep585(self, options: dict) -> dict[str, Any]:
+    def raw_pep585(self, options: dict[str, JSONValue]) -> dict[str, Any]:
         return options
 
     @action(description="opaque typing Dict result")
-    def raw_typing(self, options: dict) -> Dict[str, Any]:
+    def raw_typing(self, options: dict[str, JSONValue]) -> Dict[str, Any]:
         return options
 
     def health(self) -> str:
@@ -370,7 +366,7 @@ def test_opaque_dict_result_is_a_legal_closed_empty_result(
     tmp_path: Path,
     action_name: str,
 ) -> None:
-    """Opaque mappings are legal, but must never invent named outputs."""
+    """允许 opaque mapping，但绝不能猜测 named output。"""
 
     _write_package(tmp_path)
     catalog = compile_package_source(WorkspaceSource(tmp_path))
@@ -415,11 +411,6 @@ def test_package_catalog_and_registry_record_share_the_exact_canonical_schema(
     }
     assert "input_contract" not in action
     assert "output_contract" not in action
-    selector_schema = _plain(_action(catalog, "select_target"))["schema"]
-    assert selector_schema["properties"]["goal"]["properties"]["target"] == {
-        "type": "string",
-        "x-unilabos-editor-control": "site_selector",
-    }
 
 
 def test_package_catalog_calls_the_unique_public_action_parser_once_per_action(
@@ -452,7 +443,6 @@ def test_package_catalog_calls_the_unique_public_action_parser_once_per_action(
         "a1_contract_lab.device:raw_pep585",
         "a1_contract_lab.device:raw_typing",
         "a1_contract_lab.device:reset",
-        "a1_contract_lab.device:select_target",
         "a1_contract_lab.device:transfer",
     ]
     assert all(not item.endswith(":health") for item in calls)
@@ -496,7 +486,6 @@ def test_legacy_scanner_uses_the_same_parser_and_does_not_type_auto_actions(
         "a1_contract_lab.device:raw_pep585",
         "a1_contract_lab.device:raw_typing",
         "a1_contract_lab.device:reset",
-        "a1_contract_lab.device:select_target",
         "a1_contract_lab.device:transfer",
     ]
     class_meta = scanned["devices"]["pump"]
@@ -579,6 +568,249 @@ def test_conflicting_legacy_goal_default_fails_the_whole_catalog_compile(
     )
 
 
+def test_legacy_registry_diagnostic_blocks_the_complete_template_projection(
+    tmp_path: Path,
+) -> None:
+    _write_package(tmp_path, legacy_handles="conflict")
+    scanner = importlib.import_module("unilabos.registry.ast_registry_scanner")
+    from concurrent.futures import ThreadPoolExecutor
+
+    with ThreadPoolExecutor(max_workers=1) as executor:
+        scanned = scanner.scan_directory(
+            tmp_path / "a1_contract_lab",
+            python_path=tmp_path,
+            executor=executor,
+            cache={"version": 8, "files": {}},
+        )
+    registry = Registry()
+    registry.device_type_registry = {
+        "pump": registry._build_device_entry_from_ast(
+            "pump",
+            scanned["devices"]["pump"],
+            allow_definition_imports=False,
+        )
+    }
+    adapter = _require_public_member(
+        "unilabos.registry.catalog_consumer",
+        "workflow_template_imports_from_registry_snapshot",
+    )
+    projection_error = _require_public_member(
+        "unilabos.registry.catalog_consumer",
+        "RegistryTemplateProjectionError",
+    )
+
+    with pytest.raises(projection_error) as caught:
+        adapter(
+            MappingProxyType(copy.deepcopy(registry.device_type_registry)),
+            authority_id="os-local",
+            resource_template_identity_resolver=lambda _identity: (
+                RESOURCE_TEMPLATE_UUID
+            ),
+        )
+
+    assert caught.value.code == "action_handle_contract_conflict"
+    assert caught.value.path.startswith("/devices/pump/actions/transfer/handles")
+
+
+def test_malformed_resource_symbol_metadata_fails_closed(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _write_package(tmp_path)
+    registry = _register(
+        compile_package_source(WorkspaceSource(tmp_path)),
+        monkeypatch,
+    )
+    broken = copy.deepcopy(registry.device_type_registry)
+    extension = broken["community.a1_contract_lab.pump"]["class"][
+        "action_value_mappings"
+    ]["transfer"]["schema"]["x-unilabos-action-contract"]
+    extension["resource_template_symbols"]["goal"]["sample"] = "not-a-list"
+    adapter = _require_public_member(
+        "unilabos.registry.catalog_consumer",
+        "workflow_template_imports_from_registry_snapshot",
+    )
+    projection_error = _require_public_member(
+        "unilabos.registry.catalog_consumer",
+        "RegistryTemplateProjectionError",
+    )
+
+    with pytest.raises(projection_error) as caught:
+        adapter(
+            MappingProxyType(broken),
+            authority_id="os-local",
+            resource_template_identity_resolver=lambda _identity: (
+                RESOURCE_TEMPLATE_UUID
+            ),
+        )
+
+    assert caught.value.code == "invalid_action_contract"
+    assert "resource_template_symbols/goal/sample" in caught.value.path
+
+
+def test_registry_adapter_projects_site_selector_metadata(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _write_package(tmp_path)
+    registry = _register(
+        compile_package_source(WorkspaceSource(tmp_path)),
+        monkeypatch,
+    )
+    snapshot = copy.deepcopy(registry.device_type_registry)
+    action = snapshot["community.a1_contract_lab.pump"]["class"][
+        "action_value_mappings"
+    ]["transfer"]
+    action["schema"]["properties"]["goal"]["properties"]["note"][
+        "x-unilabos-editor-control"
+    ] = "site_selector"
+    adapter = _require_public_member(
+        "unilabos.registry.catalog_consumer",
+        "workflow_template_imports_from_registry_snapshot",
+    )
+
+    imports = adapter(
+        MappingProxyType(snapshot),
+        authority_id="os-local",
+        resource_template_identity_resolver=lambda _identity: RESOURCE_TEMPLATE_UUID,
+    )
+
+    transfer = next(item for item in imports if item.template["name"] == "transfer")
+    note = next(
+        item
+        for item in transfer.handles
+        if item["io_type"] == "target" and item["handle_key"] == "note"
+    )
+    assert note["meta_data"]["unilab"]["editor_control"] == "site_selector"
+
+
+def test_ros_transport_fields_cannot_rewrite_the_canonical_contract(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _write_package(tmp_path)
+    catalog = compile_package_source(WorkspaceSource(tmp_path))
+    device = catalog.definitions.devices[0]
+    consumers = importlib.import_module("unilabos.package_manager.consumers")
+    metadata = consumers._device_ast_metadata(device)
+    metadata["actions"] = {"transfer": metadata["actions"]["transfer"]}
+    metadata["actions"]["transfer"]["action_args"]["action_type"] = (
+        "test_transport:FakeAction"
+    )
+    registry_module = importlib.import_module("unilabos.registry.registry")
+
+    class Goal:
+        @staticmethod
+        def get_fields_and_field_types() -> dict[str, str]:
+            return {
+                "sample": "string",
+                "volume": "double",
+                "mode": "string",
+                "note": "string",
+                "batches": "sequence<int32>",
+                "payload": "string",
+                "unexpected": "string",
+            }
+
+    class Result:
+        @staticmethod
+        def get_fields_and_field_types() -> dict[str, str]:
+            return {"sample": "string", "report": "string"}
+
+    class Feedback:
+        @staticmethod
+        def get_fields_and_field_types() -> dict[str, str]:
+            return {"progress": "double"}
+
+    class FakeAction:
+        pass
+
+    FakeAction.Goal = Goal
+    FakeAction.Feedback = Feedback
+    FakeAction.Result = Result
+    monkeypatch.setattr(
+        registry_module,
+        "resolve_type_object",
+        lambda _identity: FakeAction,
+    )
+
+    with pytest.raises(ValueError, match="ROS goal mapping"):
+        Registry()._build_device_entry_from_ast(
+            device.fqid,
+            metadata,
+            allow_definition_imports=False,
+        )
+
+
+def test_ros_transport_mappings_are_validated_and_preserved_as_projection(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _write_package(tmp_path)
+    catalog = compile_package_source(WorkspaceSource(tmp_path))
+    device = catalog.definitions.devices[0]
+    consumers = importlib.import_module("unilabos.package_manager.consumers")
+    metadata = consumers._device_ast_metadata(device)
+    metadata["actions"] = {"transfer": metadata["actions"]["transfer"]}
+    action_args = metadata["actions"]["transfer"]["action_args"]
+    action_args["action_type"] = "test_transport:FakeAction"
+    action_args["feedback"] = {"progress": "completion"}
+    registry_module = importlib.import_module("unilabos.registry.registry")
+
+    class Goal:
+        @staticmethod
+        def get_fields_and_field_types() -> dict[str, str]:
+            return {
+                "sample": "string",
+                "volume": "double",
+                "mode": "string",
+                "note": "string",
+                "batches": "sequence<int32>",
+                "payload": "string",
+                "unilabos_param": "string",
+            }
+
+    class Feedback:
+        @staticmethod
+        def get_fields_and_field_types() -> dict[str, str]:
+            return {"progress": "double"}
+
+    class Result:
+        @staticmethod
+        def get_fields_and_field_types() -> dict[str, str]:
+            return {
+                "sample": "string",
+                "report": "string",
+                "unilabos_samples": "sequence<string>",
+            }
+
+    class FakeAction:
+        pass
+
+    FakeAction.Goal = Goal
+    FakeAction.Feedback = Feedback
+    FakeAction.Result = Result
+    monkeypatch.setattr(
+        registry_module,
+        "resolve_type_object",
+        lambda _identity: FakeAction,
+    )
+
+    registry = Registry()
+    entry = registry._build_device_entry_from_ast(
+        device.fqid,
+        metadata,
+        allow_definition_imports=False,
+    )["class"]["action_value_mappings"]["transfer"]
+
+    assert entry["goal"] == {
+        name: name
+        for name in entry["schema"]["x-unilabos-action-contract"]["input_order"]
+    }
+    assert entry["feedback"] == {"progress": "completion"}
+    assert entry["result"] == {"sample": "sample", "report": "report"}
+
+
 def test_registry_snapshot_adapter_excludes_auto_actions_and_keeps_input_order(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
@@ -611,7 +843,6 @@ def test_registry_snapshot_adapter_excludes_auto_actions_and_keeps_input_order(
         "raw_pep585",
         "raw_typing",
         "reset",
-        "select_target",
         "transfer",
     ]
     assert "health" not in names

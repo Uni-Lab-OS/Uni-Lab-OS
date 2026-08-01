@@ -988,8 +988,8 @@ def _action_records(
         decorator = _find_decorator(item, imports, _REGISTRY_DECORATORS, "action")
         if decorator is None:
             continue
-        # Resolve through the module on every call so tests and downstream
-        # embedders observe the one public parser seam (no copied parser).
+        # 每次都通过模块解析，使测试和下游嵌入方只能观察到唯一公共 parser
+        # 接缝，避免复制 parser。
         from unilabos.registry import action_contract_schema
 
         try:
