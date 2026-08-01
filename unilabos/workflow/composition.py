@@ -30,6 +30,7 @@ from unilabos.workflow.store import WorkflowStore
 
 _lock = threading.Lock()
 _service: WorkflowService | None = None
+_startup_store: WorkflowStore | None = None
 _database_path: Path | None = None
 _monitor: WorkflowSourceMonitor | None = None
 _runtime_worker: WorkflowRuntimeWorker | None = None
@@ -63,9 +64,10 @@ def _retain_runtime(
     """发布 ready Authority，或保留失败 cleanup 的独占 ownership。"""
 
     global _authority, _compiler, _database_path, _editable_package_roots
-    global _monitor, _ready, _runtime_worker
+    global _monitor, _ready, _runtime_worker, _startup_store
     global _owner_pid, _service, _workspace_lease_fd
     _service = service
+    _startup_store = None
     _database_path = database_path
     _compiler = compiler
     _authority = authority
@@ -77,13 +79,32 @@ def _retain_runtime(
     _ready = ready
 
 
+def _retain_startup_store(
+    store: WorkflowStore,
+    *,
+    database_path: Path,
+    owner_pid: int,
+    lease_descriptor: int,
+) -> None:
+    """保留 Service 构造前未确认关闭的 Store 与工作区租约。"""
+
+    global _database_path, _owner_pid, _ready, _startup_store
+    global _workspace_lease_fd
+    _startup_store = store
+    _database_path = database_path
+    _owner_pid = owner_pid
+    _workspace_lease_fd = lease_descriptor
+    _ready = False
+
+
 def _clear_runtime() -> None:
     """清除已确认关闭的进程内引用；lease 由调用方显式释放。"""
 
     global _authority, _compiler, _database_path, _editable_package_roots
-    global _monitor, _ready, _runtime_worker
+    global _monitor, _ready, _runtime_worker, _startup_store
     global _owner_pid, _service, _workspace_lease_fd
     _service = None
+    _startup_store = None
     _database_path = None
     _compiler = None
     _authority = None
@@ -170,6 +191,12 @@ def compose_workflow_runtime(
     database_path = resolved_working_dir / "workflow.db"
     configured_roots = _configured_package_roots(editable_package_roots)
     with _lock:
+        if _startup_store is not None:
+            if _owner_pid != os.getpid():
+                raise RuntimeError("当前工作区已由另一个 OS Workflow Authority 占用")
+            raise RuntimeError(
+                "Workflow authority startup cleanup must complete before retry"
+            )
         if _service is not None:
             if _owner_pid != os.getpid():
                 raise RuntimeError("当前工作区已由另一个 OS Workflow Authority 占用")
@@ -289,19 +316,27 @@ def compose_workflow_runtime(
                     new_store.close()
                 except BaseException as error:  # noqa: BLE001 - 保留租约需捕获关闭失败
                     cleanup_error = error
-            if cleanup_error is not None and new_service is not None:
-                _retain_runtime(
-                    new_service,
-                    new_monitor,
-                    new_runtime_worker,
-                    database_path=database_path,
-                    compiler=runtime_compiler,
-                    authority=authority,
-                    editable_package_roots=configured_roots,
-                    owner_pid=os.getpid(),
-                    lease_descriptor=lease_descriptor,
-                    ready=False,
-                )
+            if cleanup_error is not None:
+                if new_service is not None:
+                    _retain_runtime(
+                        new_service,
+                        new_monitor,
+                        new_runtime_worker,
+                        database_path=database_path,
+                        compiler=runtime_compiler,
+                        authority=authority,
+                        editable_package_roots=configured_roots,
+                        owner_pid=os.getpid(),
+                        lease_descriptor=lease_descriptor,
+                        ready=False,
+                    )
+                elif new_store is not None:
+                    _retain_startup_store(
+                        new_store,
+                        database_path=database_path,
+                        owner_pid=os.getpid(),
+                        lease_descriptor=lease_descriptor,
+                    )
                 raise startup_error from cleanup_error
             if published:
                 _clear_runtime()
@@ -342,7 +377,7 @@ def reset_workflow_service_for_test() -> None:
     """停止监视器并关闭测试使用的进程级单例。"""
 
     global _authority, _compiler, _database_path, _editable_package_roots
-    global _monitor, _ready, _runtime_worker
+    global _monitor, _ready, _runtime_worker, _startup_store
     global _owner_pid, _service, _workspace_lease_fd
     with _lock:
         lease_owned = _owner_pid == os.getpid()
@@ -357,9 +392,13 @@ def reset_workflow_service_for_test() -> None:
         if _service is not None:
             # Store 未确认关闭时同样保留组合根与租约，避免第二 Authority 进入。
             _service.close()
+        elif _startup_store is not None:
+            # Service 构造前的 Store 也必须确认关闭后才能释放租约。
+            _startup_store.close()
         _monitor = None
         _runtime_worker = None
         _service = None
+        _startup_store = None
         _database_path = None
         _compiler = None
         _authority = None
