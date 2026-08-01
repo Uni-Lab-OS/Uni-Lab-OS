@@ -8,13 +8,17 @@ from typing import Any
 
 import pytest
 
+from unilabos.resources.authority.sqlite import SQLiteMaterialAdapter
 from unilabos.workflow.composition import (
     compose_workflow_runtime,
     get_workflow_service,
     reset_workflow_service_for_test,
 )
+from unilabos.workflow.store import WorkflowStore
 
 CLOSE_FAILURE = "Phase 01A5 注入的 Service.close 失败"
+STARTUP_FAILURE = "M1C 注入的 Material adapter 启动失败"
+STORE_CLOSE_FAILURE = "M1C 注入的 pre-Service Store.close 失败"
 LEASE_REJECTION = "当前工作区已由另一个 OS Workflow Authority 占用"
 
 
@@ -114,3 +118,68 @@ def test_service关闭失败保留原service和租约直到重试成功(
         2,
         True,
     )
+
+
+def test_service构造前store关闭失败保留租约直到reset重试(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    working_dir = tmp_path / "unilabos_data"
+    opened_stores: list[WorkflowStore] = []
+    real_store_close = WorkflowStore.close
+    first_error: tuple[str, str, str, str] | None = None
+    second_process: tuple[str, ...] = ("not_started",)
+    reopened_after_retry = False
+
+    def fail_material_adapter_startup(
+        cls: type[SQLiteMaterialAdapter],
+        coordinator: WorkflowStore,
+    ) -> None:
+        del cls
+        opened_stores.append(coordinator)
+        raise RuntimeError(STARTUP_FAILURE)
+
+    def fail_store_close(store: WorkflowStore) -> None:
+        del store
+        raise RuntimeError(STORE_CLOSE_FAILURE)
+
+    reset_workflow_service_for_test()
+    try:
+        with monkeypatch.context() as startup_faults:
+            startup_faults.setattr(
+                SQLiteMaterialAdapter,
+                "from_runtime_authority",
+                classmethod(fail_material_adapter_startup),
+            )
+            startup_faults.setattr(WorkflowStore, "close", fail_store_close)
+
+            try:
+                compose_workflow_runtime(working_dir)
+            except RuntimeError as error:
+                cause = error.__cause__
+                first_error = (
+                    type(error).__name__,
+                    str(error),
+                    type(cause).__name__ if cause is not None else "",
+                    str(cause) if cause is not None else "",
+                )
+
+            assert get_workflow_service() is None
+            second_process = _second_process_result(working_dir)
+
+        reset_workflow_service_for_test()
+        replacement = compose_workflow_runtime(working_dir)
+        reopened_after_retry = replacement is get_workflow_service()
+    finally:
+        reset_workflow_service_for_test()
+        for store in opened_stores:
+            real_store_close(store)
+
+    assert second_process == ("rejected", LEASE_REJECTION)
+    assert first_error == (
+        "RuntimeError",
+        STARTUP_FAILURE,
+        "RuntimeError",
+        STORE_CLOSE_FAILURE,
+    )
+    assert reopened_after_retry
