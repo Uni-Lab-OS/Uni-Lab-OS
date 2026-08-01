@@ -92,6 +92,13 @@ def validate_graph(
             handles,
         )
     _validate_resource_slot_fan_out(edges=edges, handles=handles)
+    _validate_resource_slot_template_compatibility(
+        nodes=node_by_uuid,
+        edges=edges,
+        templates=templates,
+        handles=handles,
+        effective_params=effective_params,
+    )
 
     bindings_by_node = {
         node.uuid: _validated_input_bindings(
@@ -228,6 +235,88 @@ def _validate_resource_slot_fan_out(
                 "material_flow_fan_out",
                 "同一个 ResourceSlot 输出不能同时进入多个下游节点",
             )
+
+
+def _validate_resource_slot_template_compatibility(
+    *,
+    nodes: Mapping[str, WorkflowNodeWrite],
+    edges: Iterable[WorkflowEdgeWrite],
+    templates: Mapping[str, dict[str, Any]],
+    handles: Mapping[str, dict[str, Any]],
+    effective_params: Mapping[str, dict[str, Any]],
+) -> None:
+    """用 producer guarantee 证明 ResourceSlot 可以进入受限 target。"""
+
+    for edge in edges:
+        source_handle = handles[edge.source_handle_uuid]
+        target_handle = handles[edge.target_handle_uuid]
+        if (
+            source_handle.get("type") != "ResourceSlot"
+            or target_handle.get("type") != "ResourceSlot"
+        ):
+            continue
+        target_templates = _resource_slot_template_allowlist(target_handle)
+        if target_templates is None:
+            continue
+
+        source_node = nodes[edge.source_node_uuid]
+        if _node_kind(source_node, templates) == "material_source":
+            template_uuid = effective_params[source_node.uuid].get(
+                "resource_template_uuid"
+            )
+            source_templates = (
+                frozenset({template_uuid})
+                if isinstance(template_uuid, str)
+                else frozenset()
+            )
+            if not source_templates.issubset(target_templates):
+                raise MaterialSourceGraphError(
+                    "material_source_conflict",
+                    "MaterialSource 物料模板不被下游 ResourceSlot 接受",
+                )
+            continue
+
+        source_templates = _resource_slot_template_allowlist(source_handle)
+        if source_templates is None or not source_templates.issubset(target_templates):
+            raise GraphValidationError(
+                "ResourceSlot producer 不能证明满足下游物料模板约束"
+            )
+
+
+def _resource_slot_template_allowlist(
+    handle: Mapping[str, Any],
+) -> frozenset[str] | None:
+    meta_data = handle.get("meta_data")
+    unilab = meta_data.get("unilab") if isinstance(meta_data, Mapping) else None
+    raw = (
+        unilab.get("allowed_resource_template_uuids")
+        if isinstance(unilab, Mapping)
+        else None
+    )
+    if raw is None or raw == [] or raw == ():
+        return None
+    if isinstance(raw, (str, bytes)) or not isinstance(raw, (list, tuple)):
+        raise GraphValidationError(
+            "ResourceSlot allowed_resource_template_uuids 必须是 UUID 数组"
+        )
+    result: set[str] = set()
+    for value in raw:
+        if not isinstance(value, str):
+            raise GraphValidationError(
+                "ResourceSlot allowed_resource_template_uuids 必须是 UUID 数组"
+            )
+        try:
+            parsed = UUID(value)
+        except (AttributeError, ValueError):
+            raise GraphValidationError(
+                "ResourceSlot allowed_resource_template_uuids 包含无效 UUID"
+            ) from None
+        if parsed.int == 0 or str(parsed) != value or value in result:
+            raise GraphValidationError(
+                "ResourceSlot allowed_resource_template_uuids 不是规范唯一 UUID 数组"
+            )
+        result.add(value)
+    return frozenset(result)
 
 
 def _node_kind(
