@@ -192,8 +192,8 @@ def compose_workflow_runtime(
                 )
             material_module = MaterialModule(
                 SQLiteMaterialAdapter.from_runtime_authority(store),
-                # Concrete ResourceSlot resolution reads the durable Material
-                # identity only; template discovery remains outside M1C.
+                # concrete ResourceSlot 解析只读取持久 Material identity；
+                # template discovery 不属于 M1C。
                 resource_templates={},
             )
             new_service = WorkflowService(

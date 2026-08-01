@@ -182,10 +182,19 @@ class MaterialModule:
                 raise MaterialInvalidInput(
                     "allowed_resource_template_uuids must be a UUID tuple or null"
                 )
-            allowed_templates = {
+            if not allowed_resource_template_uuids:
+                raise MaterialInvalidInput(
+                    "allowed_resource_template_uuids must not be empty"
+                )
+            canonical_templates = tuple(
                 _canonical_uuid(value, "allowed_resource_template_uuid")
                 for value in allowed_resource_template_uuids
-            }
+            )
+            allowed_templates = set(canonical_templates)
+            if len(allowed_templates) != len(canonical_templates):
+                raise MaterialInvalidInput(
+                    "allowed_resource_template_uuids must be unique"
+                )
 
         material = self._adapter.get_material(canonical_uuid, uow=uow)
         if material is None:
