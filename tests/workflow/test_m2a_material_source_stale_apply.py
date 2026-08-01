@@ -39,8 +39,13 @@ class _MutableMaterialSourceAuthority:
         assert state in {"missing", "deleted"}
         self._mount_state = state
 
-    def get_material(self, material_uuid: str) -> MaterialRecord:
-        material = self._delegate.get_material(material_uuid)
+    def get_material(
+        self,
+        material_uuid: str,
+        *,
+        uow: object | None = None,
+    ) -> MaterialRecord:
+        material = self._delegate.get_material(material_uuid, uow=uow)
         if material_uuid != MOUNT_MATERIAL_UUID:
             return material
         if self._mount_state == "missing":
@@ -49,11 +54,21 @@ class _MutableMaterialSourceAuthority:
             return replace(material, deleted_at="2026-08-02T01:00:00Z")
         return material
 
-    def get_site(self, site_uuid: str) -> SiteRecord:
-        return self._delegate.get_site(site_uuid)
+    def get_site(
+        self,
+        site_uuid: str,
+        *,
+        uow: object | None = None,
+    ) -> SiteRecord:
+        return self._delegate.get_site(site_uuid, uow=uow)
 
-    def list_sites(self, material_uuid: str) -> Sequence[SiteRecord]:
-        return self._delegate.list_sites(material_uuid)
+    def list_sites(
+        self,
+        material_uuid: str,
+        *,
+        uow: object | None = None,
+    ) -> Sequence[SiteRecord]:
+        return self._delegate.list_sites(material_uuid, uow=uow)
 
 
 def _save_materialized_candidate(

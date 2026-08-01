@@ -139,19 +139,37 @@ class StaticMaterialSourceAuthority:
         self._materials = {item.uuid: item for item in materials}
         self._sites = {item.uuid: item for item in sites}
 
-    def get_material(self, material_uuid: str) -> MaterialRecord:
+    def get_material(
+        self,
+        material_uuid: str,
+        *,
+        uow: object | None = None,
+    ) -> MaterialRecord:
+        del uow
         try:
             return self._materials[material_uuid]
         except KeyError:
             raise MaterialNotFound(f"material {material_uuid} not found") from None
 
-    def get_site(self, site_uuid: str) -> SiteRecord:
+    def get_site(
+        self,
+        site_uuid: str,
+        *,
+        uow: object | None = None,
+    ) -> SiteRecord:
+        del uow
         try:
             return self._sites[site_uuid]
         except KeyError:
             raise MaterialNotFound(f"site {site_uuid} not found") from None
 
-    def list_sites(self, material_uuid: str) -> Sequence[SiteRecord]:
+    def list_sites(
+        self,
+        material_uuid: str,
+        *,
+        uow: object | None = None,
+    ) -> Sequence[SiteRecord]:
+        del uow
         return tuple(
             sorted(
                 (
