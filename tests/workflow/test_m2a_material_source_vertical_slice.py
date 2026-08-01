@@ -19,6 +19,10 @@ from unilabos.workflow.catalog import (
 from unilabos.workflow.service import WorkflowService
 from unilabos.workflow.store import WorkflowStore
 
+from .m2a_material_source_authority_fixture import (
+    default_material_source_authority,
+)
+
 WORKFLOW_UUID = "10000000-0000-4000-8000-000000000001"
 MATERIAL_SOURCE_NODE_UUID = "20000000-0000-4000-8000-000000000001"
 PREPARE_NODE_UUID = "20000000-0000-4000-8000-000000000002"
@@ -190,12 +194,18 @@ def test_canonical_material_source_round_trips_and_persists_selector(
     try:
         catalog = TemplateCatalog(store)
         catalog.replace(AUTHORITY, _catalog_imports())
+        material_source_authority = default_material_source_authority()
         engine = WorkflowAuthoringEngine(
             catalog=catalog,
             authority=AUTHORITY,
             resource_template_identity_index=(_StaticResourceTemplateIdentityIndex()),
+            material_source_authority=material_source_authority,
         )
-        service = WorkflowService(store, compiler=engine)
+        service = WorkflowService(
+            store,
+            compiler=engine,
+            material_source_authority=material_source_authority,
+        )
         service.create_workflow(
             workflow_uuid=WORKFLOW_UUID,
             name="Assay",

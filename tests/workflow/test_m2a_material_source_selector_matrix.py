@@ -19,6 +19,9 @@ from unilabos.workflow.catalog import TemplateCatalog
 from unilabos.workflow.models import CandidateCompilation
 from unilabos.workflow.store import WorkflowStore
 
+from .m2a_material_source_authority_fixture import (
+    default_material_source_authority,
+)
 from .test_m2a_material_source_vertical_slice import (
     AUTHORITY,
     MATERIAL_SOURCE_NODE_UUID,
@@ -57,6 +60,7 @@ def engine_context(tmp_path: Path) -> Iterator[_EngineContext]:
             catalog=catalog,
             authority=AUTHORITY,
             resource_template_identity_index=(_StaticResourceTemplateIdentityIndex()),
+            material_source_authority=default_material_source_authority(),
         )
         yield _EngineContext(store, engine, store.get_graph(WORKFLOW_UUID))
     finally:
@@ -68,6 +72,8 @@ def _source(
     mode: str,
     material_uuid: str,
     flow_role: str,
+    site: str = "None",
+    slot_range: str = "None",
     omitted_field: str | None = None,
     extra_field: str | None = None,
 ) -> str:
@@ -76,8 +82,8 @@ def _source(
         f"mode={mode}",
         f'mount=resource_ref("{MOUNT_MATERIAL_UUID}")',
         f"material_uuid={material_uuid}",
-        "site=None",
-        "slot_range=None",
+        f"site={site}",
+        f"slot_range={slot_range}",
         f"flow_role={flow_role}",
     ]
     if omitted_field is not None:

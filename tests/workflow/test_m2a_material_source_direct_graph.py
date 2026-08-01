@@ -21,6 +21,10 @@ from unilabos.workflow.models import CandidateCompilation
 from unilabos.workflow.service import WorkflowError, WorkflowService
 from unilabos.workflow.store import WorkflowStore
 
+from .m2a_material_source_authority_fixture import (
+    StaticMaterialSourceAuthority,
+    default_material_source_authority,
+)
 from .test_m2a_material_source_selector_matrix import (
     FIXED_MATERIAL_UUID,
 )
@@ -71,13 +75,17 @@ def _legal_source() -> str:
     )
 
 
-def _new_engine(store: WorkflowStore) -> WorkflowAuthoringEngine:
+def _new_engine(
+    store: WorkflowStore,
+    material_source_authority: StaticMaterialSourceAuthority,
+) -> WorkflowAuthoringEngine:
     catalog = TemplateCatalog(store)
     catalog.replace(AUTHORITY, _catalog_imports())
     return WorkflowAuthoringEngine(
         catalog=catalog,
         authority=AUTHORITY,
         resource_template_identity_index=_StaticResourceTemplateIdentityIndex(),
+        material_source_authority=material_source_authority,
     )
 
 
@@ -100,8 +108,13 @@ def _compile(
 def graph_context(tmp_path: Path) -> Iterator[_DirectGraphContext]:
     store = WorkflowStore(tmp_path / "workflow.db")
     try:
-        engine = _new_engine(store)
-        service = WorkflowService(store, compiler=engine)
+        material_source_authority = default_material_source_authority()
+        engine = _new_engine(store, material_source_authority)
+        service = WorkflowService(
+            store,
+            compiler=engine,
+            material_source_authority=material_source_authority,
+        )
         service.create_workflow(
             workflow_uuid=WORKFLOW_UUID,
             name="Assay",
@@ -279,6 +292,7 @@ def test_framework_aggregate_mismatch_is_catalog_diagnostic(
             catalog=catalog,
             authority=AUTHORITY,
             resource_template_identity_index=(_StaticResourceTemplateIdentityIndex()),
+            material_source_authority=default_material_source_authority(),
         )
         store.create_workflow(
             workflow_uuid=WORKFLOW_UUID,
