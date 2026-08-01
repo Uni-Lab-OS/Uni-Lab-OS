@@ -12,7 +12,8 @@
 
 Uni-Lab-OS 通过一个垂直 `package_manager` seam 读取领域包。显式 `PackageSource` 经
 `compile_package_source()` 编译为无副作用、确定性的完整 `PackageCatalog`；OS 内的
-Registry、FE Workflow/Template、Asset 与 community resolver 直接消费 Catalog。
+Registry definition、FE Workflow source identity、Asset 与 community resolver 直接消费
+Catalog。
 
 ```text
 发现全部定义 ≠ Graph 选择定义 ≠ 激活全部定义 ≠ 连接全部硬件
@@ -34,6 +35,9 @@ Registry、FE Workflow/Template、Asset 与 community resolver 直接消费 Cata
 8. 当前以完整 distribution 为 Catalog、审计和可见性单位；Graph 只激活选中定义。
    按 Graph 裁剪可见性的 `DefinitionClosure` 延后实现。
 9. 原计划 R6 取消；本 feature 止于 R5。
+10. F006 不冻结 Action contract，也不负责 production `TemplateCatalog` 发布。唯一 Action
+    parser、Registry canonical action record、原子 Template projection、HTTP 与 FE typed
+    editor 由已单独批准评审的 A1 实现。
 
 ## 3. PackageCatalog v1
 
@@ -64,7 +68,8 @@ Graph 解析阶段才 import 和实例化所选 definition。Graph 节点 `confi
 资源构造参数，Graph edge 表达拓扑。发现未选 definition 保持零运行副作用。
 
 FE workflow source roots 和 Graph authority 由 OS composition root 配置；领域 workflow
-直接进入 FE authoring compiler，不经过 bridge 或另一套 DAG/runtime。
+source identity 不经过 bridge 或另一套 DAG/runtime。只有 A1 完成 Registry snapshot 到
+TemplateCatalog 的整份发布后，composition 才能宣布 WorkflowAuthoringEngine/HTTP ready。
 
 ## 6. 构建、安装与发布
 
@@ -75,8 +80,9 @@ distribution identity 并在安装后验证，不记录 Inventory。
 ## 7. 验收与延期
 
 必须覆盖 AST 无副作用发现、canonical digest、三来源 parity、wheel audit、显式 workflow
-manifest、Registry/Template 投影、Graph-only activation、Graph config 构造、单设备 Graph 和
-完整实验室 Graph 调试。
+manifest、Registry definition 投影、Graph-only activation、Graph config 构造、单设备
+Graph 和完整实验室 Graph 调试。PackageCatalog 到 Template/FE 的完整 E2E 由 A1 验收，
+不得用 F006 的简化结构投影替代。
 
 延期项仅为 `DefinitionClosure`/Lab 级定义可见性裁剪。它不影响“仅激活 Graph 所选设备”，
 也不得在本轮以隐式过滤或第二 manifest 的形式提前实现。

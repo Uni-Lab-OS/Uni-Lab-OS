@@ -108,6 +108,10 @@ def build_workspace_wheel(
                 for asset in catalog.assets
             },
         }
+        if (source.root / "package.yaml").is_file():
+            injected[f"{catalog.import_package}/_generated/package.yaml"] = (
+                source.read_bytes("package.yaml")
+            )
         _inject_wheel_members(built_wheel, injected)
         target = output / built_wheel.name
         shutil.copy2(built_wheel, target)

@@ -10,6 +10,12 @@ from importlib import metadata
 from pathlib import Path, PurePosixPath
 from typing import Literal, Protocol, runtime_checkable
 
+_MAX_ARCHIVE_BYTES = 2 * 1024 * 1024 * 1024
+_MAX_MEMBER_BYTES = 1024 * 1024 * 1024
+_MAX_TOTAL_UNCOMPRESSED_BYTES = 4 * 1024 * 1024 * 1024
+_MAX_ARCHIVE_MEMBERS = 50_000
+_MAX_COMPRESSION_RATIO = 1_000
+
 
 @runtime_checkable
 class PackageSource(Protocol):
@@ -65,9 +71,15 @@ class CachedArchiveSource:
         return "cached_archive"
 
     def verify_artifact(self) -> None:
-        if not self.wheel.is_file():
+        if self.wheel.is_symlink() or not self.wheel.is_file():
             raise ValueError(f"wheel 不存在: {self.wheel}")
-        actual = "sha256:" + hashlib.sha256(self.wheel.read_bytes()).hexdigest()
+        if self.wheel.stat().st_size > _MAX_ARCHIVE_BYTES:
+            raise ValueError(f"wheel 超过 artifact 大小上限: {self.wheel}")
+        digest = hashlib.sha256()
+        with self.wheel.open("rb") as stream:
+            while chunk := stream.read(1024 * 1024):
+                digest.update(chunk)
+        actual = "sha256:" + digest.hexdigest()
         if not self.expected_digest or actual != self.expected_digest:
             raise ValueError(
                 f"artifact digest mismatch: {actual} != {self.expected_digest or '-'}"
@@ -82,9 +94,8 @@ class CachedArchiveSource:
         logical = _safe_logical_path(logical_path).as_posix()
         try:
             with zipfile.ZipFile(self.wheel) as archive:
-                matches = [
-                    item for item in archive.infolist() if item.filename == logical
-                ]
+                infos = _validated_archive_infos(archive)
+                matches = [item for item in infos if item.filename == logical]
                 if len(matches) != 1:
                     raise ValueError(
                         f"wheel 中 Package source 数量不是 1: {logical_path}"
@@ -101,7 +112,9 @@ class CachedArchiveSource:
         self.verify_artifact()
         try:
             with zipfile.ZipFile(self.wheel) as archive:
-                return tuple(sorted(item.filename for item in archive.infolist()))
+                return tuple(
+                    sorted(item.filename for item in _validated_archive_infos(archive))
+                )
         except zipfile.BadZipFile as exc:
             raise ValueError(f"wheel 格式无效: {self.wheel}") from exc
 
@@ -167,8 +180,18 @@ def _read_installed_file(dist: metadata.Distribution, logical_path: str) -> byte
         raise ValueError(
             f"installed distribution 中 Package source 数量不是 1: {logical_path}"
         )
+    distribution_root = Path(dist.locate_file(".")).resolve()
     path = Path(dist.locate_file(entries[0]))
-    if path.is_symlink() or not path.is_file():
+    if (
+        path.is_symlink()
+        or any(
+            parent.is_symlink()
+            for parent in path.parents
+            if parent != distribution_root and parent.is_relative_to(distribution_root)
+        )
+        or not path.resolve().is_relative_to(distribution_root)
+        or not path.is_file()
+    ):
         raise ValueError(
             f"installed distribution Package source 非普通文件: {logical_path}"
         )
@@ -180,6 +203,37 @@ def _safe_logical_path(logical_path: str) -> PurePosixPath:
     if logical.is_absolute() or ".." in logical.parts or "\\" in logical_path:
         raise ValueError(f"Package source 路径非法: {logical_path}")
     return logical
+
+
+def _validated_archive_infos(
+    archive: zipfile.ZipFile,
+) -> tuple[zipfile.ZipInfo, ...]:
+    infos = tuple(archive.infolist())
+    if len(infos) > _MAX_ARCHIVE_MEMBERS:
+        raise ValueError("wheel 成员数量超过上限")
+    names: set[str] = set()
+    total = 0
+    for item in infos:
+        _safe_logical_path(item.filename.rstrip("/"))
+        if item.filename in names:
+            raise ValueError(f"wheel 包含重复成员: {item.filename}")
+        names.add(item.filename)
+        mode = item.external_attr >> 16
+        if item.flag_bits & 0x1:
+            raise ValueError(f"wheel 包含加密成员: {item.filename}")
+        if stat.S_ISLNK(mode):
+            raise ValueError(f"wheel 包含 symlink 成员: {item.filename}")
+        if item.file_size > _MAX_MEMBER_BYTES:
+            raise ValueError(f"wheel 成员超过大小上限: {item.filename}")
+        total += item.file_size
+        if total > _MAX_TOTAL_UNCOMPRESSED_BYTES:
+            raise ValueError("wheel 解压后总大小超过上限")
+        if (item.file_size > 0 and item.compress_size == 0) or (
+            item.compress_size > 0
+            and item.file_size / item.compress_size > _MAX_COMPRESSION_RATIO
+        ):
+            raise ValueError(f"wheel 成员压缩比超过上限: {item.filename}")
+    return infos
 
 
 __all__ = [

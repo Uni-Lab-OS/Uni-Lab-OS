@@ -257,6 +257,7 @@ def _device_ast_metadata(record: DefinitionRecord) -> dict[str, Any]:
     imports = {
         str(name): _import_reference(str(reference))
         for name, reference in details.get("imports", {}).items()
+        if _is_trusted_schema_import(str(reference))
     }
     actions = {
         str(action["name"]): {
@@ -314,6 +315,7 @@ def _device_ast_metadata(record: DefinitionRecord) -> dict[str, Any]:
             module=record.module,
         ),
         "model": details.get("model"),
+        "metadata": _plain_mapping(details.get("metadata")),
         "module": f"{record.module}:{record.symbol}",
         "status_properties": statuses,
         "version": record.version,
@@ -337,6 +339,7 @@ def _resource_ast_metadata(record: DefinitionRecord) -> dict[str, Any]:
         ),
         "is_function": details.get("factory_kind") == "function",
         "model": details.get("model"),
+        "metadata": _plain_mapping(details.get("metadata")),
         "module": f"{record.module}:{record.symbol}",
         "name": record.symbol,
         "resource_id": record.fqid,
@@ -373,7 +376,7 @@ def _resolve_static_name(name: str, imports: Mapping[str, str], module: str) -> 
     base, separator, attribute = name.partition(".")
     resolved = imports.get(base)
     if resolved is None:
-        return f"{module}:{name}" if not separator else name
+        return name
     if not separator:
         return resolved
     if resolved.startswith("unilabos.registry.decorators:") and base in {
@@ -388,6 +391,19 @@ def _resolve_static_name(name: str, imports: Mapping[str, str], module: str) -> 
 def _import_reference(reference: str) -> str:
     module, separator, symbol = reference.rpartition(".")
     return f"{module}:{symbol}" if separator else reference
+
+
+def _is_trusted_schema_import(reference: str) -> bool:
+    root = reference.split(".", 1)[0]
+    return root in {
+        "builtins",
+        "collections",
+        "pydantic",
+        "types",
+        "typing",
+        "unilabos",
+        "unilabos_msgs",
+    }
 
 
 def _plain(value: Any) -> Any:

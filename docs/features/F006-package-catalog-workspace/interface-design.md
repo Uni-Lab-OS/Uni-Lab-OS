@@ -11,7 +11,7 @@ unilabos/package_manager/
 ├── distribution.py # wheel staging、build、audit
 ├── publication.py  # 后端发布 payload 与顺序
 ├── community.py    # Graph 引用的缓存 wheel resolve
-├── consumers.py    # Registry、Workflow/Template 投影
+├── consumers.py    # Registry definition 与 Workflow source identity 投影
 ├── cli.py           # package 子命令 adapter
 └── legacy.py        # 旧 YAML / --devices，仅内部兼容
 ```
@@ -45,7 +45,7 @@ explicit PackageSource
 compile_package_source ──> immutable PackageCatalog
         │                         │
         │                         ├─> Registry definition projection
-        │                         ├─> FE Template/Workflow projection
+        │                         ├─> FE Workflow source identity
         │                         └─> PackageAssetResolver
         │
         └─> build staging ─> wheel ─> recompile/audit/parity
@@ -63,9 +63,11 @@ Graph edge: physical / communication topology
 authoring loader。PackageCatalog 只携带 source identity 和内容摘要，不生成 Applied revision、
 Task 或数据库 UUID。
 
-Template consumer 以 `source_fqid + content_hash` 投影 action contract。持久
-ResourceTemplate UUID 由现有 Template Catalog authority 显式提供，PackageCatalog 不抢占
-其身份权威。
+`workflow_template_imports_from_package_catalog()` 只保留为 F006 测试期间的结构兼容
+adapter，不是 production publisher，也不允许 composition 逐 Action 调用。A1 会以唯一
+`parse_action_contract()` 先生成 Registry canonical schema，再由只读 Registry snapshot
+一次投影完整 aggregate 并调用 `TemplateCatalog.replace()`。持久 ResourceTemplate UUID
+由现有 authority 显式提供，PackageCatalog 不抢占其身份权威。
 
 ## Registry 与 Graph 激活
 

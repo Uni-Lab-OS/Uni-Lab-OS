@@ -20,7 +20,7 @@
       "id": "R2",
       "name": "FE-OS 进程内 consumer 与 Graph-only activation",
       "status": "completed",
-      "notes": "Registry、Workflow/Template、Asset 和 Graph config 接入；无 bridge/Profile"
+      "notes": "Registry definition、Workflow source identity、Asset 和 Graph config 接入；production Template 发布归 A1；无 bridge/Profile"
     },
     {
       "id": "R3",

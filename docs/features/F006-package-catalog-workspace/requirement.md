@@ -29,9 +29,10 @@ canonical bytes 与 digest 可重复。
 
 ### AC-3：发现与激活分离
 
-完整 PackageCatalog 可供 Registry、Authoring/Template 和 Asset consumer 查询；OS 只对
-Graph 引用的 definition 做解析和运行激活。未被 Graph 选择的设备不 import、不实例化、
-不创建运行节点、不连接硬件。
+完整 PackageCatalog 可供 Registry definition、Workflow source identity 和 Asset consumer
+查询；OS 只对 Graph 引用的 definition 做解析和运行激活。未被 Graph 选择的设备不
+import、不实例化、不创建运行节点、不连接硬件。Action 到 TemplateCatalog/HTTP/FE 的
+生产发布链由 A1 建立，F006 不提前开放 Authoring ready。
 
 ### AC-4：三种显式来源一致
 
@@ -47,8 +48,9 @@ wheel 构建在临时 staging tree 中嵌入 Catalog；构建后从 wheel 来源
 ### AC-6：FE-OS workspace 调试
 
 `unilab --workspace <root> -g <graph>` 在 FE-OS 单进程启动链中完成 PackageCatalog 编译、
-Registry 投影、Graph 选择和运行初始化。workflow 使用 FE authoring source loader 和
-Graph authority；不得引入 package Profile 或领域包专用 local bridge。
+Registry definition 投影、Graph 选择和运行初始化。workflow source identity 交给既有
+FE authoring source loader，运行连接仍以 Graph 为 authority；不得引入 package Profile
+或领域包专用 local bridge。缺少 A1 Template snapshot 时不得伪装为 Authoring ready。
 
 ## 用户入口
 

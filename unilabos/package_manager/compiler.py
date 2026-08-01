@@ -5,7 +5,8 @@ from __future__ import annotations
 import ast
 import hashlib
 import re
-from pathlib import Path
+import tempfile
+from pathlib import Path, PurePosixPath
 from typing import Any
 
 import tomllib
@@ -92,6 +93,8 @@ def _compile_embedded(
                 f"installed distribution {installed_name!r} 与 Catalog 不一致",
             )
 
+    members = _validate_embedded_payload(source, catalog)
+
     checked_declarations: set[str] = set()
     for record in (
         *catalog.definitions.devices,
@@ -130,7 +133,101 @@ def _compile_embedded(
             "CONTENT_DIGEST_MISMATCH",
             f"{actual_content_digest} != {catalog.content_digest}",
         )
+
+    rebuilt = _recompile_embedded_source(source, catalog, members)
+    if rebuilt.to_canonical_bytes() != catalog.to_canonical_bytes():
+        raise _embedded_error(
+            "CATALOG_SOURCE_MISMATCH",
+            "embedded Catalog 与 artifact 内源码重新编译结果不一致",
+        )
     return catalog
+
+
+def _validate_embedded_payload(
+    source: InstalledDistributionSource | CachedArchiveSource,
+    catalog: PackageCatalog,
+) -> tuple[str, ...]:
+    """验证 artifact closure，并返回唯一的常规文件成员。"""
+
+    try:
+        raw_members = source.members()
+    except ValueError as exc:
+        raise _embedded_error("ARTIFACT_PAYLOAD_INVALID", str(exc)) from exc
+    if len(raw_members) != len(set(raw_members)):
+        raise _embedded_error(
+            "ARTIFACT_PAYLOAD_INVALID",
+            "artifact 包含重复成员路径",
+        )
+
+    files: list[str] = []
+    roots: set[str] = set()
+    for name in raw_members:
+        logical = PurePosixPath(name)
+        if (
+            not name
+            or logical.is_absolute()
+            or ".." in logical.parts
+            or "\\" in name
+            or not logical.parts
+        ):
+            raise _embedded_error(
+                "ARTIFACT_PAYLOAD_INVALID",
+                f"artifact 成员路径非法: {name!r}",
+            )
+        root = logical.parts[0]
+        roots.add(root)
+        if not name.endswith("/"):
+            files.append(name)
+
+    unexpected = sorted(
+        root
+        for root in roots
+        if root != catalog.import_package
+        and not root.endswith(".dist-info")
+        and not root.endswith(".data")
+    )
+    if unexpected:
+        raise _embedded_error(
+            "ARTIFACT_PAYLOAD_INVALID",
+            "artifact 包含额外顶层 payload: " + ", ".join(unexpected),
+        )
+    return tuple(sorted(files))
+
+
+def _recompile_embedded_source(
+    source: InstalledDistributionSource | CachedArchiveSource,
+    catalog: PackageCatalog,
+    members: tuple[str, ...],
+) -> PackageCatalog:
+    """只从 artifact 内源码重建临时 Workspace，再走唯一编译入口。"""
+
+    generated_root = f"{catalog.import_package}/_generated/"
+    package_root = f"{catalog.import_package}/"
+    pyproject_member = f"{generated_root}pyproject.toml"
+    manifest_member = f"{generated_root}package.yaml"
+    try:
+        pyproject = source.read_bytes(pyproject_member)
+    except ValueError as exc:
+        raise _embedded_error("PYPROJECT_SNAPSHOT_MISSING", str(exc)) from exc
+
+    with tempfile.TemporaryDirectory(prefix="unilab-package-recompile-") as temporary:
+        root = Path(temporary)
+        (root / "pyproject.toml").write_bytes(pyproject)
+        if manifest_member in members:
+            try:
+                (root / "package.yaml").write_bytes(source.read_bytes(manifest_member))
+            except ValueError as exc:
+                raise _embedded_error("MANIFEST_SNAPSHOT_INVALID", str(exc)) from exc
+        for name in members:
+            if not name.startswith(package_root) or name.startswith(generated_root):
+                continue
+            target = root.joinpath(*PurePosixPath(name).parts)
+            target.parent.mkdir(parents=True, exist_ok=True)
+            try:
+                target.write_bytes(source.read_bytes(name))
+            except ValueError as exc:
+                raise _embedded_error("ARTIFACT_PAYLOAD_INVALID", str(exc)) from exc
+        return _compile_workspace(WorkspaceSource(root))
 
 
 def _embedded_content_digest(
@@ -403,12 +500,15 @@ def _compile_workspace(source: WorkspaceSource) -> PackageCatalog:
                 )
                 if decorator is not None:
                     args = _decorator_args(decorator)
+                    _validate_definition_metadata(
+                        args, relative, node.lineno, diagnostics
+                    )
                     ids = _definition_ids(args, relative, node.lineno, diagnostics)
                     for definition_id in ids:
                         devices.append(
                             _device_record(
                                 node=node,
-                                args=args,
+                                args=_device_args_for_id(args, definition_id),
                                 definition_id=definition_id,
                                 namespace=namespace,
                                 module=module,
@@ -423,6 +523,9 @@ def _compile_workspace(source: WorkspaceSource) -> PackageCatalog:
                 )
                 if decorator is not None:
                     args = _decorator_args(decorator)
+                    _validate_definition_metadata(
+                        args, relative, node.lineno, diagnostics
+                    )
                     definition_id = _single_definition_id(
                         args, relative, node.lineno, diagnostics
                     )
@@ -445,6 +548,9 @@ def _compile_workspace(source: WorkspaceSource) -> PackageCatalog:
                 )
                 if resource_decorator is not None:
                     args = _decorator_args(resource_decorator)
+                    _validate_definition_metadata(
+                        args, relative, node.lineno, diagnostics
+                    )
                     definition_id = _single_definition_id(
                         args, relative, node.lineno, diagnostics
                     )
@@ -653,6 +759,99 @@ def _decorator_args(node: ast.Call) -> dict[str, Any]:
     }
 
 
+def _validate_definition_metadata(
+    args: dict[str, Any],
+    path: str,
+    line: int,
+    diagnostics: list[PackageDiagnostic],
+) -> None:
+    """Definition identity 与展示元数据必须能由 AST 完整决定。"""
+
+    invalid: list[str] = []
+    for name in (
+        "category",
+        "class_type",
+        "description",
+        "device_type",
+        "display_name",
+        "displayname",
+        "icon",
+        "manufacturer",
+        "metadata",
+        "model",
+        "version",
+    ):
+        if name in args and _contains_dynamic_expression(args[name]):
+            invalid.append(name)
+    category = args.get("category")
+    if "category" in args and (
+        not isinstance(category, list)
+        or any(not isinstance(item, str) for item in category)
+    ):
+        invalid.append("category")
+    for name in (
+        "class_type",
+        "description",
+        "device_type",
+        "display_name",
+        "displayname",
+        "icon",
+        "manufacturer",
+        "version",
+    ):
+        if name in args and not isinstance(args[name], str):
+            invalid.append(name)
+    for name in ("metadata", "model"):
+        if name in args and not isinstance(args[name], dict):
+            invalid.append(name)
+    id_meta = args.get("id_meta")
+    if "id_meta" in args and not isinstance(id_meta, dict):
+        invalid.append("id_meta")
+    elif isinstance(id_meta, dict):
+        for definition_id, override in id_meta.items():
+            if not isinstance(definition_id, str) or not isinstance(override, dict):
+                invalid.append("id_meta")
+                continue
+            for name in (
+                "category",
+                "class_type",
+                "description",
+                "device_type",
+                "display_name",
+                "displayname",
+                "icon",
+                "manufacturer",
+                "metadata",
+                "model",
+                "version",
+            ):
+                if name in override and _contains_dynamic_expression(override[name]):
+                    invalid.append(f"id_meta.{definition_id}.{name}")
+    if invalid:
+        diagnostics.append(
+            PackageDiagnostic(
+                code="DEFINITION_METADATA_DYNAMIC",
+                severity="error",
+                message=(
+                    "definition metadata 必须是静态且类型合法: "
+                    + ", ".join(sorted(set(invalid)))
+                ),
+                path=path,
+                line=line,
+            )
+        )
+
+
+def _contains_dynamic_expression(value: Any) -> bool:
+    if isinstance(value, list):
+        return any(_contains_dynamic_expression(item) for item in value)
+    if not isinstance(value, dict):
+        return False
+    if any(name in value for name in ("$ast", "$call", "$name")):
+        return True
+    return any(_contains_dynamic_expression(item) for item in value.values())
+
+
 def _definition_ids(
     args: dict[str, Any],
     path: str,
@@ -684,6 +883,16 @@ def _definition_ids(
         )
     )
     return []
+
+
+def _device_args_for_id(args: dict[str, Any], definition_id: str) -> dict[str, Any]:
+    id_meta = args.get("id_meta")
+    if not isinstance(id_meta, dict):
+        return args
+    override = id_meta.get(definition_id)
+    if not isinstance(override, dict):
+        return args
+    return {**args, **override}
 
 
 def _single_definition_id(
@@ -857,6 +1066,7 @@ def _device_record(
         "init_docstring": ast.get_docstring(init_node) if init_node else "",
         "init_parameters": _parameter_records(init_node) if init_node else [],
         "model": args.get("model"),
+        "metadata": args.get("metadata", {}),
         "status_properties": _status_records(node, imports),
         "subscriptions": _subscription_records(node, imports),
     }
@@ -902,6 +1112,7 @@ def _resource_record(
         "handles": args.get("handles", []),
         "icon": args.get("icon", ""),
         "model": args.get("model"),
+        "metadata": args.get("metadata", {}),
         "parameters": _parameter_records(init_node) if init_node else [],
     }
     return DefinitionRecord(

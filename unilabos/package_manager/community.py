@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import re
 import shutil
 import tempfile
 from collections.abc import Iterable
@@ -17,6 +18,9 @@ from .sources import CachedArchiveSource
 COMMUNITY_PREFIX = "community."
 _CACHE_DIR = "community_packages"
 _INDEX_NAME = "cache-index.json"
+_NAMESPACE = re.compile(r"^community\.[a-z_][a-z0-9_]*$")
+_VERSION = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._+-]{0,127}$")
+_MAX_DOWNLOAD_BYTES = 2 * 1024 * 1024 * 1024
 
 
 class CommunityPackageError(RuntimeError):
@@ -59,9 +63,15 @@ class HttpClientCommunityAdapter:
         requester = getattr(self._http_client, "_session", None) or requests
         with requester.get(url, stream=True, timeout=(5, 120)) as response:
             response.raise_for_status()
+            total = 0
             with destination.open("wb") as stream:
                 for chunk in response.iter_content(chunk_size=1024 * 1024):
                     if chunk:
+                        total += len(chunk)
+                        if total > _MAX_DOWNLOAD_BYTES:
+                            raise CommunityPackageError(
+                                "community wheel 超过下载大小上限"
+                            )
                         stream.write(chunk)
 
 
@@ -110,19 +120,29 @@ def resolve_graph_packages(
     cache_root = Path(working_dir).resolve() / _CACHE_DIR
     cache_root.mkdir(parents=True, exist_ok=True)
     index = _load_index(cache_root)
-    current = [
-        {
-            "class_namespace": namespace,
-            "version": str(info.get("version") or ""),
-            "sha256": str(info.get("artifact_digest") or ""),
-        }
-        for namespace, info in sorted(index.get("packages", {}).items())
-        if isinstance(info, dict)
-    ]
+    current = []
+    for namespace, info in sorted(index.get("packages", {}).items()):
+        if not isinstance(info, dict) or not _NAMESPACE.fullmatch(str(namespace)):
+            continue
+        current.append(
+            {
+                "class_namespace": namespace,
+                "version": str(info.get("version") or ""),
+                "sha256": str(info.get("artifact_digest") or ""),
+            }
+        )
     remote_items = port.resolve(unresolved_classes, current) if port is not None else []
-    by_namespace = {
-        _item_namespace(item): item for item in remote_items if _item_namespace(item)
-    }
+    by_namespace: dict[str, dict[str, Any]] = {}
+    for item in remote_items:
+        namespace = _item_namespace(item)
+        if not namespace:
+            continue
+        _validate_namespace(namespace)
+        if namespace in by_namespace:
+            raise CommunityPackageError(
+                f"远端返回重复 community namespace: {namespace}"
+            )
+        by_namespace[namespace] = item
 
     sources: list[CachedArchiveSource] = []
     catalogs: list[PackageCatalog] = []
@@ -139,11 +159,13 @@ def resolve_graph_packages(
             index.setdefault("packages", {})[namespace] = {
                 "version": _item_version(item),
                 "artifact_digest": source.expected_digest,
-                "wheel": str(source.wheel),
+                "wheel": source.wheel.resolve().relative_to(cache_root).as_posix(),
                 "dependencies": package_dependencies,
             }
         else:
-            source, package_dependencies = _cached_source(namespace, index)
+            source, package_dependencies = _cached_source(
+                namespace, index, cache_root=cache_root
+            )
         catalog = compile_package_source(source)
         if catalog.namespace != namespace:
             raise CommunityPackageError(
@@ -201,12 +223,19 @@ def _cache_remote_item(
         package_info.get("artifact_digest") or package_info.get("sha256") or ""
     )
     version = _item_version(item)
+    _validate_namespace(namespace)
+    _validate_version(version)
     url = str(package_info.get("download_url") or "")
     if not digest or not url or port is None:
         raise CommunityPackageError(
             f"community package {namespace} 缺少 wheel URL/digest 或下载 port"
         )
-    target_dir = cache_root / namespace.removeprefix(COMMUNITY_PREFIX) / version
+    cache_root = cache_root.resolve()
+    target_dir = (
+        cache_root / namespace.removeprefix(COMMUNITY_PREFIX) / version
+    ).resolve()
+    if not target_dir.is_relative_to(cache_root):
+        raise CommunityPackageError("community package cache 路径逃逸")
     target_dir.mkdir(parents=True, exist_ok=True)
     target = target_dir / f"{namespace.removeprefix(COMMUNITY_PREFIX)}-{version}.whl"
     if target.is_file():
@@ -231,22 +260,38 @@ def _cache_remote_item(
 def _cached_source(
     namespace: str,
     index: dict[str, Any],
+    *,
+    cache_root: Path,
 ) -> tuple[CachedArchiveSource, list[str]]:
+    _validate_namespace(namespace)
     item = index.get("packages", {}).get(namespace)
     if not isinstance(item, dict):
         raise CommunityPackageError(
             f"无法加载 community package {namespace}：远端未返回且无缓存"
         )
-    source = CachedArchiveSource(
-        str(item.get("wheel") or ""),
-        str(item.get("artifact_digest") or ""),
-    )
+    version = str(item.get("version") or "")
+    _validate_version(version)
+    raw_wheel = Path(str(item.get("wheel") or ""))
+    wheel = raw_wheel if raw_wheel.is_absolute() else cache_root / raw_wheel
+    cache_root = cache_root.resolve()
+    wheel = wheel.resolve()
+    if not wheel.is_relative_to(cache_root):
+        raise CommunityPackageError(
+            f"community package {namespace} 的 cache index 路径逃逸"
+        )
+    source = CachedArchiveSource(wheel, str(item.get("artifact_digest") or ""))
     return source, list(item.get("dependencies") or [])
 
 
 def _community_namespace(class_name: str) -> str:
     parts = class_name.split(".")
-    if len(parts) < 3 or parts[0] != "community":
+    if (
+        len(parts) != 3
+        or parts[0] != "community"
+        or not _NAMESPACE.fullmatch(".".join(parts[:2]))
+        or not parts[2]
+        or not parts[2].replace("_", "a").isalnum()
+    ):
         raise CommunityPackageError(f"community class 无效: {class_name}")
     return ".".join(parts[:2])
 
@@ -259,6 +304,16 @@ def _item_namespace(item: dict[str, Any]) -> str:
 def _item_version(item: dict[str, Any]) -> str:
     package_info = item.get("package_info") or item
     return str(package_info.get("version") or "unknown")
+
+
+def _validate_namespace(namespace: str) -> None:
+    if not _NAMESPACE.fullmatch(namespace):
+        raise CommunityPackageError(f"community namespace 无效: {namespace}")
+
+
+def _validate_version(version: str) -> None:
+    if not _VERSION.fullmatch(version) or ".." in version:
+        raise CommunityPackageError(f"community package version 无效: {version}")
 
 
 def _load_index(cache_root: Path) -> dict[str, Any]:
