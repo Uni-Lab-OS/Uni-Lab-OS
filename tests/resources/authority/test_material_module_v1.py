@@ -28,6 +28,7 @@ from unilabos.workflow.store import WorkflowStore
 
 MATERIAL_UUID = "50000000-0000-4000-8000-000000000017"
 SECOND_MATERIAL_UUID = "50000000-0000-4000-8000-000000000018"
+UNKNOWN_MATERIAL_UUID = "50000000-0000-4000-8000-000000000099"
 RESOURCE_TEMPLATE_UUID = "20000000-0000-4000-8000-000000000017"
 SECOND_RESOURCE_TEMPLATE_UUID = "20000000-0000-4000-8000-000000000018"
 UNKNOWN_RESOURCE_TEMPLATE_UUID = "20000000-0000-4000-8000-000000000099"
@@ -103,6 +104,31 @@ def _observable_material(record: MaterialRecord) -> dict[str, Any]:
         "version": record.version,
         "deleted_at": record.deleted_at,
     }
+
+
+def _create_site_with_references(
+    materials: MaterialModule,
+    *,
+    material_uuid: str,
+    occupied_material_uuid: str | None,
+    allowed_resource_template_uuids: list[str],
+) -> Any:
+    return materials.create_site(
+        site_uuid=SITE_UUID,
+        description="Reference validation site",
+        meta_data={"slice": "m1b-references"},
+        material_uuid=material_uuid,
+        name="A1",
+        sort_order=0,
+        allowed_resource_template_uuids=allowed_resource_template_uuids,
+        occupied_material_uuid=occupied_material_uuid,
+        position_x=0.0,
+        position_y=0.0,
+        position_z=0.0,
+        depth=1.0,
+        length=1.0,
+        width=1.0,
+    )
 
 
 def test_business_material_create_read_survives_sqlite_reopen(
@@ -553,3 +579,94 @@ def test_site_create_read_reopen_preserves_backend_projection_and_composition(
             reopened_materials.get_material(MATERIAL_UUID).parent_uuid,
             reopened_materials.get_material(SECOND_MATERIAL_UUID).parent_uuid,
         ) == (None, None)
+
+
+@pytest.mark.parametrize(
+    (
+        "owner_uuid",
+        "occupant_uuid",
+        "allowed_template_uuids",
+        "expected_error",
+    ),
+    [
+        pytest.param(
+            UNKNOWN_MATERIAL_UUID,
+            None,
+            [RESOURCE_TEMPLATE_UUID],
+            MaterialNotFound,
+            id="unknown-owner",
+        ),
+        pytest.param(
+            MATERIAL_UUID,
+            UNKNOWN_MATERIAL_UUID,
+            [RESOURCE_TEMPLATE_UUID, SECOND_RESOURCE_TEMPLATE_UUID],
+            MaterialNotFound,
+            id="unknown-occupant",
+        ),
+        pytest.param(
+            MATERIAL_UUID,
+            None,
+            [UNKNOWN_RESOURCE_TEMPLATE_UUID],
+            MaterialInvalidInput,
+            id="unregistered-allowlist-template",
+        ),
+        pytest.param(
+            MATERIAL_UUID,
+            SECOND_MATERIAL_UUID,
+            [RESOURCE_TEMPLATE_UUID],
+            MaterialInvalidInput,
+            id="occupant-template-not-allowed",
+        ),
+    ],
+)
+def test_site_create_rejects_invalid_authority_references_without_side_effects(
+    tmp_path: Path,
+    owner_uuid: str,
+    occupant_uuid: str | None,
+    allowed_template_uuids: list[str],
+    expected_error: type[Exception],
+) -> None:
+    database_path = tmp_path / "workflow.db"
+    with _open_material_module(database_path) as materials:
+        materials.create_business_material(
+            material_uuid=MATERIAL_UUID,
+            resource_template_uuid=RESOURCE_TEMPLATE_UUID,
+            barcode="OWNER-017",
+            name="Deck owner",
+        )
+        materials.create_business_material(
+            material_uuid=SECOND_MATERIAL_UUID,
+            resource_template_uuid=SECOND_RESOURCE_TEMPLATE_UUID,
+            barcode="OCCUPANT-018",
+            name="Placed microplate",
+        )
+        material_snapshot = {
+            MATERIAL_UUID: materials.get_material(MATERIAL_UUID).to_dict(),
+            SECOND_MATERIAL_UUID: materials.get_material(
+                SECOND_MATERIAL_UUID
+            ).to_dict(),
+        }
+
+        with pytest.raises(expected_error) as error:
+            _create_site_with_references(
+                materials,
+                material_uuid=owner_uuid,
+                occupied_material_uuid=occupant_uuid,
+                allowed_resource_template_uuids=allowed_template_uuids,
+            )
+
+        assert error.type is expected_error
+        with pytest.raises(MaterialNotFound):
+            materials.get_site(SITE_UUID)
+        assert {
+            material_uuid: materials.get_material(material_uuid).to_dict()
+            for material_uuid in material_snapshot
+        } == material_snapshot
+
+    with _open_material_module(database_path) as reopened_materials:
+        with pytest.raises(MaterialNotFound):
+            reopened_materials.get_site(SITE_UUID)
+        assert {
+            material_uuid: reopened_materials.get_material(material_uuid).to_dict()
+            for material_uuid in material_snapshot
+        } == material_snapshot
