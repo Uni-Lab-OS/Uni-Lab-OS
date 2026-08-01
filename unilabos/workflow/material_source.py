@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from collections.abc import Mapping, Sequence
 from typing import Any, Never, Protocol
+from uuid import UUID
 
 from unilabos.resources.authority import (
     MaterialAuthorityUnavailable,
@@ -65,25 +66,64 @@ def validate_material_source_authority(
 def _selector_has_authority_shape(selector: Mapping[str, Any]) -> bool:
     """只让 shape 已闭合到可安全查询的 selector 进入 authority adapter。"""
 
+    expected_keys = {
+        "mode",
+        "resource_template_uuid",
+        "mount",
+        "material_uuid",
+        "site",
+        "slot_range",
+        "flow_role",
+    }
+    if set(selector) != expected_keys:
+        return False
+    mode = selector.get("mode")
     mount = selector.get("mount")
+    material_uuid = selector.get("material_uuid")
+    site = selector.get("site")
     slot_range = selector.get("slot_range")
-    return bool(
-        isinstance(selector.get("resource_template_uuid"), str)
-        and isinstance(mount, Mapping)
-        and isinstance(mount.get("uuid"), str)
-        and (
-            selector.get("material_uuid") is None
-            or isinstance(selector.get("material_uuid"), str)
-        )
-        and (selector.get("site") is None or isinstance(selector.get("site"), str))
-        and (
-            slot_range is None
-            or (
-                isinstance(slot_range, list)
-                and all(isinstance(item, str) for item in slot_range)
-            )
-        )
-    )
+    if mode not in {"existing", "create_new"} or not _canonical_uuid(
+        selector.get("resource_template_uuid")
+    ):
+        return False
+    if (
+        not isinstance(mount, Mapping)
+        or set(mount) != {"uuid"}
+        or not _canonical_uuid(mount.get("uuid"))
+    ):
+        return False
+    if material_uuid is not None and not _canonical_uuid(material_uuid):
+        return False
+    if mode == "create_new" and material_uuid is not None:
+        return False
+    if site is not None and not _canonical_uuid(site):
+        return False
+    if site is not None and slot_range is not None:
+        return False
+    if slot_range is not None and (
+        not isinstance(slot_range, list)
+        or not slot_range
+        or any(not _canonical_uuid(item) for item in slot_range)
+        or len(set(slot_range)) != len(slot_range)
+        or slot_range != sorted(slot_range)
+    ):
+        return False
+    return selector.get("flow_role") in {
+        "primary_sample",
+        "aliquot_sample",
+        "reagent",
+        "consumable",
+    }
+
+
+def _canonical_uuid(value: Any) -> bool:
+    if not isinstance(value, str):
+        return False
+    try:
+        parsed = UUID(value)
+    except (AttributeError, ValueError):
+        return False
+    return parsed.int != 0 and str(parsed) == value
 
 
 def _validate_selector_authority(
@@ -159,6 +199,8 @@ def _get_material(
         _unavailable()
     except MaterialError:
         _conflict()
+    except Exception:
+        _unavailable()
     if not isinstance(material, MaterialRecord) or material.uuid != material_uuid:
         _conflict()
     return material
@@ -176,6 +218,8 @@ def _get_site(
         _unavailable()
     except MaterialError:
         _conflict()
+    except Exception:
+        _unavailable()
     if not isinstance(site, SiteRecord) or site.uuid != site_uuid:
         _conflict()
     return site
@@ -193,6 +237,8 @@ def _list_sites(
         _unavailable()
     except MaterialError:
         _conflict()
+    except Exception:
+        _unavailable()
     if isinstance(sites, (str, bytes)) or not isinstance(sites, Sequence):
         _conflict()
     result = tuple(sites)

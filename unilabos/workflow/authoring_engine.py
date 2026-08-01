@@ -1989,6 +1989,12 @@ def _result_reference(
             "named result output 必须来自当前可见的先前 Action",
             node=expression,
         )
+    if _is_material_source_template(producer.template):
+        _fail(
+            "invalid_material_source",
+            "MaterialSource 变量本身就是唯一 material Handle",
+            node=expression,
+        )
     return producer, expression.attr
 
 

@@ -75,9 +75,8 @@ def device(device_id: str | None = None) -> Any:
 def resource_ref(material_uuid: str) -> Any:
     """标记一个 compile-only ResourceSlot mount 引用。"""
 
-    raise RuntimeError(
-        f"Workflow authoring resource_ref({material_uuid!r}) 只能由静态编译器解析"
-    )
+    del material_uuid
+    raise RuntimeError("Workflow authoring resource_ref() 只能由静态编译器解析")
 
 
 def material_source(
