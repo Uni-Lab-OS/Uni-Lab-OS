@@ -153,6 +153,7 @@ class WorkflowRuntimeCoordinator:
             roots = material_root_uuids_from_task_snapshot(
                 _load(task["workflow_snapshot"]),
                 _load(task["input"]),
+                _load(task["execution_plan"]),
             )
             if not roots:
                 return

@@ -1206,7 +1206,7 @@ class WorkflowStore:
                     description,
                     _json(meta_data),
                     workflow_uuid,
-                    _json(graph),
+                    _json(prepared.workflow_snapshot),
                     _json(plan),
                     effective_run_mode,
                     effective_target,

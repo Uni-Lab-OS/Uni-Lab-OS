@@ -69,6 +69,7 @@ class UnconfiguredResourceSlotResolver:
 class PreparedTaskInput:
     """Task transaction 在首次 INSERT 前准备好的全部 JSON 事实。"""
 
+    workflow_snapshot: dict[str, Any]
     resolved_input: dict[str, Any]
     execution_plan: dict[str, Any]
     jobs: list[dict[str, Any]]
@@ -86,7 +87,10 @@ def preflight_task_input(
     """在 Task/Job 写入前完成合同、slot、binding 与 provider 校验。"""
 
     try:
-        contract = _parse_graph_input_contract(graph)
+        workflow_snapshot = deepcopy(graph)
+        if type(workflow_snapshot) is not dict:
+            raise TaskInputError()
+        contract = _parse_graph_input_contract(workflow_snapshot)
         resolved_input = _resolve_input_values(
             contract,
             raw_input,
@@ -94,21 +98,24 @@ def preflight_task_input(
         )
         bindings = _validate_graph_bindings(graph, contract)
         bound_plan, bound_jobs = _bind_active_plan(
-            graph,
+            workflow_snapshot,
             execution_plan,
             jobs,
             bindings=bindings,
             resolved_input=resolved_input,
+            resource_resolver=resource_resolver,
         )
         material_roots = material_root_uuids_from_task_snapshot(
-            graph,
+            workflow_snapshot,
             resolved_input,
+            bound_plan,
         )
     except TaskInputError:
         raise
     except (KeyError, TypeError, ValueError, WorkflowSchemaError):
         raise TaskInputError("invalid_input") from None
     return PreparedTaskInput(
+        workflow_snapshot=workflow_snapshot,
         resolved_input=deepcopy(resolved_input),
         execution_plan=bound_plan,
         jobs=bound_jobs,
@@ -119,8 +126,9 @@ def preflight_task_input(
 def material_root_uuids_from_task_snapshot(
     graph: Mapping[str, Any],
     resolved_input: Mapping[str, Any],
+    execution_plan: Mapping[str, Any],
 ) -> tuple[str, ...]:
-    """只按 frozen Workflow Input Contract 提取 concrete ResourceSlot roots。"""
+    """按 frozen Input Contract 与 active typed target Handles 提取 roots。"""
 
     try:
         contract = _parse_graph_input_contract(graph)
@@ -138,6 +146,66 @@ def material_root_uuids_from_task_snapshot(
                     resolved_input[parameter["name"]],
                 )
             )
+        plan_nodes = execution_plan.get("nodes")
+        graph_handles = graph.get("handle_templates")
+        graph_nodes = graph.get("nodes")
+        if (
+            type(plan_nodes) is not list
+            or type(graph_handles) is not list
+            or type(graph_nodes) is not list
+        ):
+            raise TaskInputError()
+        handles: dict[str, Mapping[str, Any]] = {}
+        for handle in graph_handles:
+            if type(handle) is not dict or type(handle.get("uuid")) is not str:
+                raise TaskInputError()
+            if handle["uuid"] in handles:
+                raise TaskInputError()
+            handles[handle["uuid"]] = handle
+        nodes: dict[str, Mapping[str, Any]] = {}
+        for node in graph_nodes:
+            if type(node) is not dict or type(node.get("uuid")) is not str:
+                raise TaskInputError()
+            if node["uuid"] in nodes:
+                raise TaskInputError()
+            nodes[node["uuid"]] = node
+        seen_plan_nodes: set[str] = set()
+        for planned_node in plan_nodes:
+            if (
+                type(planned_node) is not dict
+                or type(planned_node.get("uuid")) is not str
+            ):
+                raise TaskInputError()
+            node_uuid = planned_node["uuid"]
+            if node_uuid in seen_plan_nodes:
+                raise TaskInputError()
+            seen_plan_nodes.add(node_uuid)
+            graph_node = nodes.get(node_uuid)
+            if graph_node is None:
+                raise TaskInputError()
+            param = planned_node.get("param")
+            if type(param) is not dict:
+                raise TaskInputError()
+            template_uuid = graph_node.get("workflow_node_template_uuid")
+            target_handles = (
+                handle
+                for handle in handles.values()
+                if handle.get("workflow_node_template_uuid") == template_uuid
+                and handle.get("io_type") == "target"
+            )
+            for handle in target_handles:
+                data_key = _final_target_data_key(_handle_data_key(handle))
+                if not data_key:
+                    raise TaskInputError()
+                value_schema = _typed_handle_value_schema(handle)
+                if (
+                    value_schema is None
+                    or not _schema_contains_resource_slot(value_schema)
+                    or data_key not in param
+                    or param[data_key] is None
+                ):
+                    continue
+                roots.update(_material_roots_for_value(value_schema, param[data_key]))
         return tuple(sorted(roots))
     except TaskInputError:
         raise
@@ -184,6 +252,64 @@ def _material_roots_for_value(
             for root in _material_roots_for_value(schema["items"], item)
         )
     return ()
+
+
+def _schema_contains_resource_slot(schema: Mapping[str, Any]) -> bool:
+    if schema.get("$slot") == "ResourceSlot":
+        return True
+    if "anyOf" in schema:
+        return any(
+            _schema_contains_resource_slot(member)
+            for member in schema.get("anyOf", ())
+            if type(member) is dict
+        )
+    if schema.get("type") == "array" and type(schema.get("items")) is dict:
+        return _schema_contains_resource_slot(schema["items"])
+    return False
+
+
+def _apply_handle_slot_allowlist(
+    schema: Mapping[str, Any],
+    allowed: Any,
+) -> dict[str, Any]:
+    result = deepcopy(dict(schema))
+    if result.get("$slot") == "ResourceSlot":
+        if allowed is not None:
+            result["allowed_resource_template_uuids"] = deepcopy(allowed)
+        return result
+    if "anyOf" in result:
+        result["anyOf"] = [
+            _apply_handle_slot_allowlist(member, allowed)
+            if type(member) is dict
+            else member
+            for member in result["anyOf"]
+        ]
+    if result.get("type") == "array" and type(result.get("items")) is dict:
+        result["items"] = _apply_handle_slot_allowlist(result["items"], allowed)
+    return result
+
+
+def _typed_handle_value_schema(
+    handle: Mapping[str, Any],
+) -> dict[str, Any] | None:
+    meta_data = handle.get("meta_data", {})
+    if type(meta_data) is not dict:
+        raise TaskInputError()
+    unilab = meta_data.get("unilab", {})
+    if type(unilab) is not dict:
+        raise TaskInputError()
+    raw_schema = unilab.get("value_schema")
+    if raw_schema is None:
+        if handle.get("type") != "ResourceSlot":
+            return None
+        raw_schema = {"$slot": "ResourceSlot"}
+    if type(raw_schema) is not dict:
+        raise TaskInputError()
+    with_allowlist = _apply_handle_slot_allowlist(
+        raw_schema,
+        unilab.get("allowed_resource_template_uuids"),
+    )
+    return parse_value_schema(with_allowlist).to_dict()
 
 
 def _parse_graph_input_contract(
@@ -403,6 +529,7 @@ def _bind_active_plan(
     *,
     bindings: Mapping[str, Mapping[str, Any]],
     resolved_input: Mapping[str, Any],
+    resource_resolver: ResourceSlotResolver | None,
 ) -> tuple[dict[str, Any], list[dict[str, Any]]]:
     plan = deepcopy(execution_plan)
     bound_jobs = deepcopy(list(jobs))
@@ -460,6 +587,7 @@ def _bind_active_plan(
             raise TaskInputError()
         plan_param = deepcopy(raw_param)
         job_param = deepcopy(raw_param)
+        snapshot_param = deepcopy(raw_param)
         template_uuid = graph_node.get("workflow_node_template_uuid")
         target_handles = [
             handle
@@ -482,13 +610,42 @@ def _bind_active_plan(
             binding_value = (
                 resolved_input[binding["parameter"]] if binding is not None else None
             )
+            value_schema = _typed_handle_value_schema(handle)
+            if (
+                has_static
+                and value_schema is not None
+                and _schema_contains_resource_slot(value_schema)
+            ):
+                normalized_static = normalize_value(
+                    parse_value_schema(value_schema),
+                    raw_param[data_key],
+                )
+                resolved_static = _resolve_slots(
+                    value_schema,
+                    normalized_static,
+                    resource_resolver=resource_resolver,
+                )
+                plan_param[data_key] = deepcopy(resolved_static)
+                job_param[data_key] = deepcopy(resolved_static)
+                snapshot_param[data_key] = deepcopy(resolved_static)
+            if (
+                binding is not None
+                and binding_value is not None
+                and value_schema is not None
+                and _schema_contains_resource_slot(value_schema)
+            ):
+                binding_value = _resolve_slots(
+                    value_schema,
+                    binding_value,
+                    resource_resolver=resource_resolver,
+                )
             if binding is not None and not workflow_schema_matches_handle_type(
                 binding["schema"],
                 handle.get("type"),
             ):
                 raise TaskInputError()
             if has_static and not declared_handle_type_matches(
-                raw_param[data_key],
+                plan_param[data_key],
                 handle.get("type"),
             ):
                 raise TaskInputError()
@@ -504,6 +661,7 @@ def _bind_active_plan(
             if binding is not None:
                 plan_param[data_key] = deepcopy(binding_value)
                 job_param[data_key] = deepcopy(binding_value)
+        graph_node["param"] = snapshot_param
         planned_node["param"] = plan_param
         job_by_node[node_uuid]["param"] = job_param
     return plan, bound_jobs
