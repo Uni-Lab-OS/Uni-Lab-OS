@@ -612,6 +612,20 @@ def create_workflow_router(service: WorkflowService) -> APIRouter:
     def list_workflow_node_jobs(task_uuid: str) -> JSONResponse:
         return _success(service.list_workflow_node_jobs(task_uuid))
 
+    @router.get("/workflow-node-jobs/{job_uuid}/feedback")
+    def list_workflow_node_job_feedback(
+        job_uuid: str,
+        after_sequence: int = Query(default=0, ge=0, le=_INT64_MAX),
+        limit: int = Query(default=100, ge=1, le=500),
+    ) -> JSONResponse:
+        return _success(
+            service.list_workflow_node_job_feedback(
+                job_uuid,
+                after_sequence=after_sequence,
+                limit=limit,
+            )
+        )
+
     @router.get("/workflow-node-jobs/{job_uuid}")
     def get_workflow_node_job(job_uuid: str) -> JSONResponse:
         return _success(service.get_workflow_node_job(job_uuid))
