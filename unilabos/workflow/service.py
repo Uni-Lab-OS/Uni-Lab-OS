@@ -57,6 +57,7 @@ _ERRORS = {
     "invalid_input": (400, "提交内容格式不正确"),
     "not_found": (404, "请求的资源不存在"),
     "conflict": (409, "资源已发生冲突，请刷新后重试"),
+    "invalid_transition": (409, "当前工作流任务状态不接受该命令"),
     "workflow_not_found": (404, "工作流不存在或已被删除"),
     "draft_hash_conflict": (
         409,
@@ -514,6 +515,60 @@ class WorkflowService:
     def list_workflow_node_jobs(self, task_uuid: str) -> List[Dict[str, Any]]:
         identity = self.get_workflow_task(task_uuid)["uuid"]
         return self._store.list_jobs(identity)
+
+    def create_workflow_task_command(
+        self,
+        task_uuid: str,
+        *,
+        command_type: str,
+        target_node_uuid: Optional[str],
+        idempotency_key: str,
+        description: Optional[str],
+        meta_data: Optional[Dict[str, Any]],
+    ) -> Dict[str, Any]:
+        try:
+            task_identity = validate_uuid(task_uuid)
+        except ValueError:
+            raise WorkflowError("invalid_input") from None
+        task = self.get_workflow_task(task_identity)
+        if task["status"] in {"succeeded", "failed", "canceled", "timeout"}:
+            raise WorkflowError("invalid_transition")
+        if command_type not in {"step", "pause", "resume", "cancel"}:
+            raise WorkflowError("invalid_input")
+        if command_type == "step" and task["run_mode"] != "step":
+            raise WorkflowError("invalid_transition")
+        if command_type != "step" and target_node_uuid is not None:
+            raise WorkflowError("invalid_input")
+        if target_node_uuid is not None:
+            try:
+                target_node_uuid = validate_uuid(target_node_uuid)
+            except ValueError:
+                raise WorkflowError("invalid_input") from None
+        try:
+            idempotency_key = idempotency_key.strip()
+        except AttributeError:
+            raise WorkflowError("invalid_input") from None
+        if not idempotency_key or len(idempotency_key.encode("utf-8")) > 255:
+            raise WorkflowError("invalid_input")
+        try:
+            normalized_meta_data = normalize_json_object(meta_data)
+        except ValueError:
+            raise WorkflowError("invalid_input") from None
+        command, created = self._store.create_task_command(
+            command_uuid=str(uuid4()),
+            task_uuid=task_identity,
+            command_type=command_type,
+            target_node_uuid=target_node_uuid,
+            idempotency_key=idempotency_key,
+            description=self._optional_text(description),
+            meta_data=normalized_meta_data,
+        )
+        if not created and (
+            command["type"] != command_type
+            or command.get("target_node_uuid") != target_node_uuid
+        ):
+            raise WorkflowConflict("conflict")
+        return command
 
     def get_workflow_node_job(self, job_uuid: str) -> Dict[str, Any]:
         try:

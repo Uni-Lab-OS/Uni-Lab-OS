@@ -176,6 +176,19 @@ class WorkflowTaskCreateRequest(_BackendModel):
         return normalize_json_object(value)
 
 
+class WorkflowTaskCommandRequest(_BackendModel):
+    type: str
+    target_node_uuid: Optional[str] = None
+    idempotency_key: str
+    description: Optional[str] = None
+    meta_data: Dict[str, Any] = Field(default_factory=dict)
+
+    @field_validator("meta_data", mode="before")
+    @classmethod
+    def _json_object(cls, value: Any) -> Dict[str, Any]:
+        return normalize_json_object(value)
+
+
 class DraftWriteRequest(_StrictModel):
     python_source: str
     expected_draft_hash: Optional[HashToken]
@@ -545,6 +558,23 @@ def create_workflow_router(service: WorkflowService) -> APIRouter:
                 run_mode=body.run_mode,
                 target_node_uuid=body.target_node_uuid,
                 input_value=body.input,
+                description=body.description,
+                meta_data=body.meta_data,
+            ),
+            status=201,
+        )
+
+    @router.post("/workflow-tasks/{task_uuid}/commands")
+    def create_workflow_task_command(
+        task_uuid: str,
+        body: WorkflowTaskCommandRequest,
+    ) -> JSONResponse:
+        return _success(
+            service.create_workflow_task_command(
+                task_uuid,
+                command_type=body.type,
+                target_node_uuid=body.target_node_uuid,
+                idempotency_key=body.idempotency_key,
                 description=body.description,
                 meta_data=body.meta_data,
             ),
