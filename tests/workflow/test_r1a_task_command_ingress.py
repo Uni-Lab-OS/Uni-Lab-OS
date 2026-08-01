@@ -321,7 +321,7 @@ def test_terminal_task_rejects_command_before_command_shape_validation(
     assert store.count_rows(_COMMAND_TABLE) == 0
 
 
-def test_unknown_task_is_not_found_before_command_shape_validation(
+def test_handler_rejects_invalid_target_uuid_before_task_lookup(
     client: TestClient,
     store: WorkflowStore,
 ) -> None:
@@ -330,6 +330,23 @@ def test_unknown_task_is_not_found_before_command_shape_validation(
         json={
             "type": "unsupported",
             "target_node_uuid": "not-a-uuid",
+            "idempotency_key": "handler-uuid-first",
+        },
+    )
+
+    _assert_error(response, 400, "invalid_input")
+    assert store.count_rows(_COMMAND_TABLE) == 0
+
+
+def test_unknown_task_is_not_found_before_service_shape_validation(
+    client: TestClient,
+    store: WorkflowStore,
+) -> None:
+    response = client.post(
+        f"/api/v1/workflow-tasks/{uuid4()}/commands",
+        json={
+            "type": "unsupported",
+            "target_node_uuid": str(uuid4()),
             "idempotency_key": "unknown-task-first",
         },
     )
