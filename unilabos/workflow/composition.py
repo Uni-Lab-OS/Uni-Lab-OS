@@ -265,16 +265,22 @@ def compose_workflow_runtime(
             new_store = store
             runtime_coordinator = WorkflowRuntimeCoordinator(store)
             runtime_coordinator.recover_startup()
+            material_module = MaterialModule(
+                SQLiteMaterialAdapter.from_runtime_authority(store),
+                # concrete ResourceSlot 与 MaterialSource 静态证明只读取 durable
+                # Material/Site；template discovery 不属于 Material owner。
+                resource_templates={},
+            )
             runtime_compiler = compiler
             if authority is not None:
                 catalog = TemplateCatalog(store)
+                identity_index: LocalResourceTemplateIdentityIndex | None = None
                 if registry_snapshot is not None:
                     from unilabos.registry.catalog_consumer import (
                         workflow_template_imports_from_registry_snapshot,
                     )
 
                     identity_resolver = resource_template_identity_resolver
-                    identity_index: LocalResourceTemplateIdentityIndex | None = None
                     if identity_resolver is None:
                         identity_index = LocalResourceTemplateIdentityIndex(
                             store,
@@ -302,17 +308,14 @@ def compose_workflow_runtime(
                 runtime_compiler = WorkflowAuthoringEngine(
                     catalog=catalog,
                     authority=authority,
+                    resource_template_identity_index=identity_index,
+                    material_source_authority=material_module,
                 )
-            material_module = MaterialModule(
-                SQLiteMaterialAdapter.from_runtime_authority(store),
-                # concrete ResourceSlot 解析只读取持久 Material identity；
-                # template discovery 不属于 M1C。
-                resource_templates={},
-            )
             new_service = WorkflowService(
                 store,
                 compiler=runtime_compiler,
                 resource_resolver=MaterialResourceSlotResolver(material_module),
+                material_source_authority=material_module,
             )
             register_editable_package_sources(
                 new_service,

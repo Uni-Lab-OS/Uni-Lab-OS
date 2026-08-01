@@ -43,6 +43,7 @@ def workflow_template_imports_from_registry_snapshot(
     if any(not isinstance(key, str) or not key for key in registry_snapshot):
         raise RegistryTemplateProjectionError("invalid_action_contract", "/registry")
     imports: list[NodeTemplateImport] = []
+    host_owner: tuple[str, str, str] | None = None
     for registry_key in sorted(registry_snapshot):
         device = registry_snapshot[registry_key]
         if not isinstance(device, Mapping):
@@ -103,7 +104,8 @@ def workflow_template_imports_from_registry_snapshot(
             if extension is None:
                 continue  # legacy auto-action 或无类型 transport action
             typed_actions.append((action_name, action))
-        if not typed_actions:
+        is_host_node = registry_key == "host_node"
+        if not typed_actions and not is_host_node:
             continue
         owner_identity = str(device.get("source_fqid") or registry_key)
         try:
@@ -113,6 +115,16 @@ def workflow_template_imports_from_registry_snapshot(
                 "template_catalog_mismatch",
                 f"/devices/{registry_key}/resource_template_uuid",
             ) from None
+        if is_host_node:
+            host_owner = (
+                owner_identity,
+                owner_uuid,
+                str(
+                    device.get("display_name")
+                    or device.get("displayname")
+                    or owner_identity
+                ),
+            )
         for action_name, action in typed_actions:
             schema = action["schema"]
             assert isinstance(schema, Mapping)
@@ -162,6 +174,52 @@ def workflow_template_imports_from_registry_snapshot(
                     handles=handles,
                 )
             )
+    if host_owner is not None:
+        owner_identity, owner_uuid, owner_display_name = host_owner
+        imports.append(
+            NodeTemplateImport(
+                template={
+                    "resource_template_uuid": owner_uuid,
+                    "name": "material_source",
+                    "display_name": "Material Source",
+                    "description": "Declare one material at an OS-owned mount",
+                    "class": "unilabos.workflow.authoring:material_source",
+                    "goal": {},
+                    "goal_default": {},
+                    "feedback": {},
+                    "result": {},
+                    "schema": None,
+                    "type": "material_source",
+                    "node_type": "material_source",
+                    "meta_data": {
+                        "unilab": {
+                            "authority_id": authority_id,
+                            "source_fqid": (
+                                "unilabos.workflow.authoring:material_source"
+                            ),
+                            "resource_template": {
+                                "uuid": owner_uuid,
+                                "name": owner_identity,
+                                "display_name": owner_display_name,
+                            },
+                        }
+                    },
+                },
+                handles=(
+                    {
+                        "description": "The selected or newly declared material",
+                        "meta_data": {},
+                        "handle_key": "material",
+                        "io_type": "source",
+                        "display_name": "Material",
+                        "type": "ResourceSlot",
+                        "required": False,
+                        "data_source": "executor",
+                        "data_key": "material",
+                    },
+                ),
+            )
+        )
     return tuple(imports)
 
 
