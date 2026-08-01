@@ -3,7 +3,8 @@
 from __future__ import annotations
 
 import json
-from collections.abc import Mapping
+import math
+from collections.abc import Mapping, Sequence
 from datetime import datetime, timezone
 from types import MappingProxyType
 from typing import Any
@@ -19,6 +20,7 @@ from .models import (
     MaterialRecord,
     ResourceTemplateIdentity,
     RuntimeAuthorityUnitOfWork,
+    SiteRecord,
 )
 
 
@@ -55,6 +57,15 @@ def _json_object(value: Mapping[str, Any] | None, field: str) -> dict[str, Any]:
     except (TypeError, ValueError) as exc:
         raise MaterialInvalidInput(f"{field} must be a JSON object") from exc
     return decoded
+
+
+def _finite_number(value: object, field: str) -> float:
+    if isinstance(value, bool) or not isinstance(value, (int, float)):
+        raise MaterialInvalidInput(f"{field} must be a finite number")
+    normalized = float(value)
+    if not math.isfinite(normalized):
+        raise MaterialInvalidInput(f"{field} must be a finite number")
+    return normalized
 
 
 class MaterialModule:
@@ -149,6 +160,100 @@ class MaterialModule:
             raise MaterialNotFound(f"material {canonical_uuid} not found")
         return material
 
+    def create_site(
+        self,
+        *,
+        site_uuid: str,
+        description: str | None,
+        meta_data: Mapping[str, Any] | None,
+        material_uuid: str,
+        name: str,
+        sort_order: int,
+        allowed_resource_template_uuids: Sequence[str],
+        occupied_material_uuid: str | None,
+        position_x: float,
+        position_y: float,
+        position_z: float,
+        depth: float,
+        length: float,
+        width: float,
+        uow: RuntimeAuthorityUnitOfWork | None = None,
+    ) -> SiteRecord:
+        """创建一个 Backend-shaped durable Site。"""
+
+        if description is not None and not isinstance(description, str):
+            raise MaterialInvalidInput("description must be a string or null")
+        if not isinstance(name, str) or not name.strip():
+            raise MaterialInvalidInput("name must be a non-blank string")
+        if isinstance(sort_order, bool) or not isinstance(sort_order, int):
+            raise MaterialInvalidInput("sort_order must be a non-negative integer")
+        if sort_order < 0:
+            raise MaterialInvalidInput("sort_order must be a non-negative integer")
+        if isinstance(allowed_resource_template_uuids, (str, bytes)) or not isinstance(
+            allowed_resource_template_uuids,
+            Sequence,
+        ):
+            raise MaterialInvalidInput(
+                "allowed_resource_template_uuids must be a UUID array"
+            )
+
+        allowed_templates: set[str] = set()
+        for value in allowed_resource_template_uuids:
+            canonical_template_uuid = _canonical_uuid(
+                value,
+                "allowed_resource_template_uuid",
+            )
+            if canonical_template_uuid not in self._resource_templates:
+                raise MaterialInvalidInput(
+                    "allowed resource template is not registered"
+                )
+            allowed_templates.add(canonical_template_uuid)
+
+        geometry = {
+            "position_x": _finite_number(position_x, "position_x"),
+            "position_y": _finite_number(position_y, "position_y"),
+            "position_z": _finite_number(position_z, "position_z"),
+            "depth": _finite_number(depth, "depth"),
+            "length": _finite_number(length, "length"),
+            "width": _finite_number(width, "width"),
+        }
+        for field in ("depth", "length", "width"):
+            if geometry[field] < 0:
+                raise MaterialInvalidInput(f"{field} must not be negative")
+
+        canonical_occupant_uuid = (
+            _canonical_uuid(occupied_material_uuid, "occupied_material_uuid")
+            if occupied_material_uuid is not None
+            else None
+        )
+        return self._adapter.create_site(
+            site_uuid=_canonical_uuid(site_uuid, "site_uuid"),
+            description=description,
+            meta_data=_json_object(meta_data, "meta_data"),
+            material_uuid=_canonical_uuid(material_uuid, "material_uuid"),
+            name=name.strip(),
+            sort_order=sort_order,
+            allowed_resource_template_uuids=tuple(sorted(allowed_templates)),
+            occupied_material_uuid=canonical_occupant_uuid,
+            **geometry,
+            now=_utc_now(),
+            uow=uow,
+        )
+
+    def get_site(
+        self,
+        site_uuid: str,
+        *,
+        uow: RuntimeAuthorityUnitOfWork | None = None,
+    ) -> SiteRecord:
+        """读取一个未 soft-delete 的 durable Site。"""
+
+        canonical_uuid = _canonical_uuid(site_uuid, "site_uuid")
+        site = self._adapter.get_site(canonical_uuid, uow=uow)
+        if site is None:
+            raise MaterialNotFound(f"site {canonical_uuid} not found")
+        return site
+
 
 __all__ = [
     "MaterialAuthorityUnavailable",
@@ -159,4 +264,5 @@ __all__ = [
     "MaterialNotFound",
     "MaterialRecord",
     "ResourceTemplateIdentity",
+    "SiteRecord",
 ]

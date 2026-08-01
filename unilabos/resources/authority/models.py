@@ -89,6 +89,56 @@ class MaterialRecord:
         }
 
 
+@dataclass(frozen=True, slots=True)
+class SiteRecord:
+    """一个 Backend-field-aligned durable Site projection。"""
+
+    uuid: str
+    create_time: str
+    update_time: str
+    deleted_at: str | None
+    description: str | None
+    meta_data: dict[str, Any]
+    material_uuid: str
+    name: str
+    sort_order: int
+    allowed_resource_template_uuids: tuple[str, ...]
+    occupied_material_uuid: str | None
+    position_x: float
+    position_y: float
+    position_z: float
+    depth: float
+    length: float
+    width: float
+    version: int
+
+    def to_dict(self) -> dict[str, Any]:
+        """投影为 Backend Site 字段加 OS-owned version。"""
+
+        return {
+            "uuid": self.uuid,
+            "create_time": self.create_time,
+            "update_time": self.update_time,
+            "deleted_at": self.deleted_at,
+            "description": self.description,
+            "meta_data": dict(self.meta_data),
+            "material_uuid": self.material_uuid,
+            "name": self.name,
+            "sort_order": self.sort_order,
+            "allowed_resource_template_uuids": list(
+                self.allowed_resource_template_uuids
+            ),
+            "occupied_material_uuid": self.occupied_material_uuid,
+            "position_x": self.position_x,
+            "position_y": self.position_y,
+            "position_z": self.position_z,
+            "depth": self.depth,
+            "length": self.length,
+            "width": self.width,
+            "version": self.version,
+        }
+
+
 class RuntimeAuthorityUnitOfWork(Protocol):
     """调用者已经打开的 runtime-authority transaction capability。"""
 
@@ -128,3 +178,31 @@ class MaterialAdapter(Protocol):
         *,
         uow: RuntimeAuthorityUnitOfWork | None = None,
     ) -> MaterialRecord | None: ...
+
+    def create_site(
+        self,
+        *,
+        site_uuid: str,
+        description: str | None,
+        meta_data: dict[str, Any],
+        material_uuid: str,
+        name: str,
+        sort_order: int,
+        allowed_resource_template_uuids: tuple[str, ...],
+        occupied_material_uuid: str | None,
+        position_x: float,
+        position_y: float,
+        position_z: float,
+        depth: float,
+        length: float,
+        width: float,
+        now: str,
+        uow: RuntimeAuthorityUnitOfWork | None = None,
+    ) -> SiteRecord: ...
+
+    def get_site(
+        self,
+        site_uuid: str,
+        *,
+        uow: RuntimeAuthorityUnitOfWork | None = None,
+    ) -> SiteRecord | None: ...
