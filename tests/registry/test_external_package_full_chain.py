@@ -2,7 +2,7 @@
 
 from pathlib import Path
 
-from unilabos.app.package_cli import discover_registry_paths_from_project
+from unilabos.package_manager.legacy import discover_registry_paths_from_project
 from unilabos.registry.registry import Registry
 
 PKG = Path(__file__).parent / "fixtures" / "external_variant_pkg"

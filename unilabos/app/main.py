@@ -155,6 +155,15 @@ def parse_args():
     subparsers = parser.add_subparsers(title="Valid subcommands", dest="command")
 
     parser.add_argument("-g", "--graph", help="Physical setup graph file path.")
+    parser.add_argument(
+        "--workspace",
+        type=str,
+        default=None,
+        help=(
+            "Explicit Uni-Lab Package Workspace root. The package is compiled "
+            "to a read-only Catalog before any domain module is activated."
+        ),
+    )
     parser.add_argument("-c", "--controllers", default=None, help="Controllers config file path.")
     parser.add_argument(
         "--registry_path",
@@ -433,68 +442,10 @@ def parse_args():
         "--no_service_check", action="store_true", help="Skip host registration service visibility check"
     )
 
-    # package subcommand: 社区设备包 inspect / upload
-    package_parser = subparsers.add_parser(
-        "package",
-        aliases=["pkg"],
-        help="Community device package tools: inspect / upload / install",
-    )
-    package_actions = package_parser.add_subparsers(
-        title="package actions", dest="package_action"
-    )
-    for action_name in ("inspect", "upload"):
-        action_parser = package_actions.add_parser(
-            action_name,
-            help=(
-                "Scan package dir and generate package_info/archive (local only)"
-                if action_name == "inspect"
-                else "Inspect then upload archive + package_info to backend /lab/resource"
-            ),
-        )
-        action_parser.add_argument(
-            "--path",
-            dest="package_path",
-            type=str,
-            required=True,
-            help="Path to the community device package directory (contains pyproject.toml)",
-        )
-        action_parser.add_argument(
-            "--namespace",
-            type=str,
-            default=None,
-            help="Class namespace, e.g. community.acme; defaults to community.<normalized pyproject name>",
-        )
-        action_parser.add_argument(
-            "--out",
-            type=str,
-            default=None,
-            help="Output dir for archive/package_info.json (default: <package>/../dist)",
-        )
-        if action_name == "upload":
-            action_parser.add_argument(
-                "--download-url",
-                dest="download_url",
-                type=str,
-                default="",
-                help="Explicit reachable archive URL (skips OSS upload; handy for local static server)",
-            )
+    # package_manager owns package verbs; app/main.py is only the CLI adapter.
+    from unilabos.package_manager.cli import register_package_subcommands
 
-    # install：开发者本地调试入口
-    install_parser = package_actions.add_parser(
-        "install",
-        help="Install a pip spec / git URL locally (uv pip > pip), then scan @device IDs",
-    )
-    install_parser.add_argument(
-        "install_spec",
-        type=str,
-        help="pip spec (name==version / name) or git URL (git+https://...)",
-    )
-    install_parser.add_argument(
-        "--no-inspect",
-        dest="no_inspect",
-        action="store_true",
-        help="Skip post-install @device scan / device listing",
-    )
+    register_package_subcommands(subparsers)
 
     # HTTP 客户端子命令（与现有 --ak/--sk/--addr 复用）
     parser.add_argument(
@@ -549,11 +500,20 @@ def parse_args():
     return parser
 
 
-def _resolve_graph_file_path(file_path: str | None) -> str | None:
+def _resolve_graph_file_path(
+    file_path: str | None,
+    *,
+    workspace_root: str | None = None,
+) -> str | None:
     if file_path is None:
         return None
     if os.path.isfile(file_path):
         return file_path
+    if workspace_root:
+        workspace_file = os.path.abspath(os.path.join(workspace_root, file_path))
+        if os.path.isfile(workspace_file):
+            print_status(f"使用 Package Workspace 内 graph {workspace_file}", "info")
+            return workspace_file
     temp_file_path = os.path.abspath(str(os.path.join(__file__, "..", "..", file_path)))
     if os.path.isfile(temp_file_path):
         print_status(f"使用相对路径{temp_file_path}", "info")
@@ -585,6 +545,23 @@ def main():
         from unilabos.hostlink.doctor import run_doctor
 
         sys.exit(run_doctor(args_dict))
+
+    # inspect/build/install are package-manager operations. They do not need
+    # runtime configuration, credentials, or device bootstrap.
+    if args_dict.get("command") in ("package", "pkg") and args_dict.get(
+        "package_action"
+    ) != "upload":
+        from unilabos.package_manager.cli import (
+            PackageCommandError,
+            run_package_command,
+        )
+
+        try:
+            run_package_command(args_dict)
+        except PackageCommandError as exc:
+            print(str(exc), file=sys.stderr)
+            raise SystemExit(2) from exc
+        return
 
     # 处理 HTTP 客户端子命令（login, logout, whoami, config, lab, material, workflow）
     # 这些命令不需要加载完整的 UniLab-OS 环境，提前处理并退出
@@ -678,15 +655,65 @@ def main():
         _run_as_supervisor(args_dict.get("auto_restart_count", 5))
         return
 
+    # A Package Workspace is observed exactly once before it is made
+    # importable. The resulting Catalog is the only input to Registry and
+    # other OS consumers; no second directory scan is performed.
+    workspace_source = None
+    workspace_catalog = None
+    workspace_path = args_dict.get("workspace")
+    if workspace_path:
+        if args_dict.get("devices"):
+            parser.error("--workspace 不可与 legacy --devices 同时使用")
+        from unilabos.package_manager import (
+            PackageCompileError,
+            WorkspaceSource,
+            compile_package_source,
+        )
+
+        workspace_source = WorkspaceSource(workspace_path)
+        try:
+            workspace_catalog = compile_package_source(workspace_source)
+        except PackageCompileError as exc:
+            for diagnostic in exc.diagnostics:
+                location = diagnostic.path or "package"
+                if diagnostic.line is not None:
+                    location += f":{diagnostic.line}"
+                print(
+                    f"{location}: {diagnostic.code}: {diagnostic.message}",
+                    file=sys.stderr,
+                )
+            raise SystemExit(2) from exc
+        workspace_root = str(workspace_source.root.resolve())
+        if workspace_root not in sys.path:
+            sys.path.insert(0, workspace_root)
+        args_dict["_package_sources"] = [workspace_source]
+        args_dict["_package_catalogs"] = [workspace_catalog]
+        args_dict["_workspace_root"] = workspace_root
+
     # 环境检查 - 检查并自动安装必需的包 (可选)
     skip_env_check = args_dict.get("skip_env_check", False)
     check_mode = args_dict.get("check_mode", False)
 
     if not skip_env_check:
-        from unilabos.utils.environment_check import check_environment, check_device_package_requirements
+        from unilabos.utils.environment_check import (
+            check_device_package_requirements,
+            check_environment,
+            install_requirements_list,
+        )
 
         if not check_environment(auto_install=True):
             print_status("环境检查失败，程序退出", "error")
+            os._exit(1)
+
+        if (
+            workspace_catalog is not None
+            and workspace_catalog.distribution.dependencies
+            and not install_requirements_list(
+                list(workspace_catalog.distribution.dependencies),
+                label=workspace_catalog.distribution.name,
+            )
+        ):
+            print_status("Package Workspace 依赖安装失败，程序退出", "error")
             os._exit(1)
 
         # 第一次设备包依赖检查：build_registry 之前，确保 import map 可用
@@ -710,6 +737,8 @@ def main():
         working_dir = os.path.abspath(raw_working_dir)
     elif config_path and os.path.exists(config_path):
         working_dir = os.path.dirname(os.path.abspath(config_path))
+    elif workspace_source is not None:
+        working_dir = str(workspace_source.root.resolve())
     else:
         working_dir = os.path.abspath(os.getcwd())
 
@@ -720,7 +749,12 @@ def main():
             working_dir = unilabos_data_sub
         elif not raw_working_dir and not (config_path and os.path.exists(config_path)):
             # 未显式指定路径，默认使用 cwd/unilabos_data
-            working_dir = os.path.abspath(os.path.join(os.getcwd(), "unilabos_data"))
+            default_root = (
+                str(workspace_source.root.resolve())
+                if workspace_source is not None
+                else os.getcwd()
+            )
+            working_dir = os.path.abspath(os.path.join(default_root, "unilabos_data"))
 
     # === 解析 config_path ===
     if config_path and not os.path.exists(config_path):
@@ -801,10 +835,24 @@ def main():
         BasicConfig.sk = args_dict.get("sk", "")
         print_status("传入了sk参数，优先采用传入参数！", "info")
     BasicConfig.working_dir = working_dir
+    if workspace_source is not None:
+        from unilabos.workflow.catalog import CatalogAuthority
+
+        BasicConfig.workflow_editable_package_roots = (
+            str(workspace_source.root.resolve()),
+        )
+        if BasicConfig.workflow_graph_authority is None:
+            BasicConfig.workflow_graph_authority = CatalogAuthority(
+                authority_id="os-local",
+                kind="local",
+            )
 
     # package 子命令：在配置/鉴权就绪后尽早处理，不进入设备 bootstrap
     if args_dict.get("command") in ("package", "pkg"):
-        from unilabos.app.package_cli import PackageCLIError, cmd_package
+        from unilabos.package_manager.cli import (
+            PackageCommandError,
+            run_package_command,
+        )
 
         package_http_client = None
         if args_dict.get("package_action") == "upload":
@@ -815,8 +863,8 @@ def main():
 
             package_http_client = _http_client_for_package
         try:
-            cmd_package(args_dict, http_client=package_http_client)
-        except PackageCLIError as exc:
+            run_package_command(args_dict, http_client=package_http_client)
+        except PackageCommandError as exc:
             print_status(str(exc), "error")
             os._exit(1)
         return
@@ -885,7 +933,10 @@ def main():
     # Step -1: 预读取 graph 中的 community.* class，并在 build_registry 前挂载社区设备包
     if not check_mode and not workflow_upload:
         startup_json_preview = None
-        graph_file_path = _resolve_graph_file_path(args_dict.get("graph") or BasicConfig.startup_json_path)
+        graph_file_path = _resolve_graph_file_path(
+            args_dict.get("graph") or BasicConfig.startup_json_path,
+            workspace_root=args_dict.get("_workspace_root"),
+        )
         args_dict["_graph_file_path"] = graph_file_path
         graph_preview = _load_graph_json_preview(graph_file_path)
 
@@ -900,42 +951,49 @@ def main():
                 graph_preview = startup_json_preview
 
         if graph_preview:
-            from unilabos.app.community_packages import (
+            from unilabos.package_manager.community import (
                 CommunityPackageError,
-                prepare_community_packages,
+                HttpClientCommunityAdapter,
+                resolve_graph_packages,
             )
 
+            community_port = (
+                HttpClientCommunityAdapter(http_client_for_community)
+                if http_client_for_community is not None
+                else None
+            )
             try:
-                community_result = prepare_community_packages(
+                community_result = resolve_graph_packages(
                     graph_preview,
                     working_dir=BasicConfig.working_dir,
-                    http_client=http_client_for_community,
+                    port=community_port,
+                    available_catalogs=args_dict.get("_package_catalogs", ()),
                 )
             except CommunityPackageError as exc:
                 print_status(str(exc), "error")
                 os._exit(1)
 
-            if community_result.devices_dirs:
-                existing_devices_dirs = args_dict.get("devices") or []
-                args_dict["devices"] = existing_devices_dirs + community_result.devices_dirs
-                if not skip_env_check:
-                    from unilabos.utils.environment_check import (
-                        check_device_package_requirements,
-                        install_requirements_list,
-                    )
+            args_dict.setdefault("_package_sources", []).extend(
+                community_result.sources
+            )
+            args_dict.setdefault("_package_catalogs", []).extend(
+                community_result.catalogs
+            )
+            for source in community_result.sources:
+                wheel_path = str(source.wheel.resolve())
+                if wheel_path not in sys.path:
+                    sys.path.insert(0, wheel_path)
+            if community_result.dependencies and not skip_env_check:
+                from unilabos.utils.environment_check import (
+                    install_requirements_list,
+                )
 
-                    # 社区包依赖：pyproject [project].dependencies 为标准来源，只装依赖不装包体
-                    # （保持源码挂载，便于 track/卸载）；requirements.txt 作为补充兜底
-                    if community_result.dependencies and not install_requirements_list(
-                        community_result.dependencies, label="community"
-                    ):
-                        print_status("community 设备包 pyproject 依赖安装失败，程序退出", "error")
-                        os._exit(1)
-                    if not check_device_package_requirements(args_dict["devices"]):
-                        print_status("community 设备包依赖检查失败，程序退出", "error")
-                        os._exit(1)
-            # 社区包设备直接以 community.<ns>.<id> 注册（扫描期命名空间化），不做 alias 桥接
-            args_dict["_community_namespaces"] = community_result.namespaces
+                if not install_requirements_list(
+                    list(community_result.dependencies),
+                    label="community",
+                ):
+                    print_status("community package 依赖安装失败，程序退出", "error")
+                    os._exit(1)
 
     # Step 0: AST 分析优先 + YAML 注册表加载
     # check_mode 和 upload_registry 都会执行实际 import 验证
@@ -945,11 +1003,11 @@ def main():
     lab_registry = build_registry(
         registry_paths=args_dict["registry_path"],
         devices_dirs=devices_dirs,
-        community_namespaces=args_dict.get("_community_namespaces"),
         upload_registry=BasicConfig.upload_registry,
         check_mode=check_mode,
         complete_registry=complete_registry,
         external_only=external_only,
+        package_catalogs=args_dict.get("_package_catalogs"),
     )
 
     # Check mode: 注册表验证完成后直接退出
@@ -1002,7 +1060,10 @@ def main():
 
     file_path = args_dict.get("_graph_file_path")
     if file_path is None:
-        file_path = _resolve_graph_file_path(args_dict.get("graph") or BasicConfig.startup_json_path)
+        file_path = _resolve_graph_file_path(
+            args_dict.get("graph") or BasicConfig.startup_json_path,
+            workspace_root=args_dict.get("_workspace_root"),
+        )
     if file_path is None:
         if not request_startup_json:
             print_status(

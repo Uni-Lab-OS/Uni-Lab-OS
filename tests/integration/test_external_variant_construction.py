@@ -287,7 +287,7 @@ from pathlib import Path
 
 import rclpy
 
-from unilabos.app.package_cli import discover_registry_paths_from_project
+from unilabos.package_manager.legacy import discover_registry_paths_from_project
 from unilabos.registry.registry import build_registry
 from unilabos.resources.resource_tracker import ResourceDictInstance
 from unilabos.ros.initialize_device import initialize_device_from_dict

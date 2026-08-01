@@ -1,0 +1,51 @@
+{
+  "feature_name": "F006-package-catalog-workspace",
+  "approved_at": "2026-08-01",
+  "base": "integration/workflow-task-runtime",
+  "implementation_rounds": ["R0", "R1", "R2", "R3", "R4", "R5"],
+  "tasks": [
+    {
+      "id": "R0",
+      "name": "人工评审与规格冻结",
+      "status": "completed",
+      "notes": "用户批准；A 身份、无 Profile、无 local bridge、R6 取消"
+    },
+    {
+      "id": "R1",
+      "name": "PackageCatalog kernel 与 WorkspaceSource",
+      "status": "completed",
+      "notes": "immutable canonical Catalog、AST-only compiler、assets、diagnostics"
+    },
+    {
+      "id": "R2",
+      "name": "FE-OS 进程内 consumer 与 Graph-only activation",
+      "status": "completed",
+      "notes": "Registry、Workflow/Template、Asset 和 Graph config 接入；无 bridge/Profile"
+    },
+    {
+      "id": "R3",
+      "name": "三来源 parity 与 Package CLI",
+      "status": "completed",
+      "notes": "installed/cached adapters、wheel staging/audit、inspect/build/upload/install"
+    },
+    {
+      "id": "R4",
+      "name": "Uni-Lab-SZLab 领域仓迁移",
+      "status": "completed",
+      "notes": "package.yaml、12 个 FE workflows、单设备/全 Graph 启动脚本与领域测试"
+    },
+    {
+      "id": "R5",
+      "name": "跨仓验证与独立评审",
+      "status": "in_progress",
+      "notes": "SZLab 62 tests 与 wheel audit 已通过；等待 OS 全量 gate 和 exact-SHA review"
+    }
+  ],
+  "deferred_features": [
+    {
+      "name": "DefinitionClosure / Lab 级定义可见性裁剪",
+      "reason": "用户决定稍后实现；当前完整 Catalog 可见，Graph 仅激活所选定义"
+    }
+  ],
+  "cancelled": ["R6", "D identity", "persistent Package Inventory", "Profile", "local bridge"]
+}

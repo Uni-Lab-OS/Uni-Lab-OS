@@ -144,6 +144,7 @@ class Registry:
         complete_registry=False,
         external_only=False,
         community_namespaces=None,
+        package_catalogs=None,
     ):
         """统一构建注册表入口。"""
         if self._setup_called:
@@ -189,6 +190,15 @@ class Registry:
         self._load_devices_dir_registries(
             devices_dirs, upload_registry=upload_registry, complete_registry=complete_registry
         )
+
+        # Explicit workspace/wheel discovery produces PackageCatalog once.
+        # Registry only projects that immutable metadata; it does not rescan or
+        # import package modules here.
+        if package_catalogs:
+            from unilabos.package_manager.consumers import register_package_catalog
+
+            for catalog in package_catalogs:
+                register_package_catalog(self, catalog)
 
         self._startup_executor.shutdown(wait=True)
         self._startup_executor = None
@@ -1290,6 +1300,10 @@ class Registry:
         """Build a resource registry entry from AST-scanned metadata."""
         module_str = ast_meta.get("module", "")
         file_path = ast_meta.get("file_path", "")
+        config_schema = self._generate_schema_from_ast_params(
+            ast_meta.get("init_params", []),
+            "__init__",
+        )
 
         handles_raw = ast_meta.get("handles", [])
         handles = normalize_ast_handles(handles_raw)
@@ -1305,6 +1319,7 @@ class Registry:
             "displayname": resolve_registry_displayname(ast_meta.get("displayname"), resource_id),
             "metadata": dict(ast_meta.get("metadata") or {}),
             "file_path": file_path,
+            "init_param_schema": {"config": config_schema},
         }
 
         if ast_meta.get("model"):
@@ -1504,14 +1519,28 @@ class Registry:
     # Verify & Resolve (实际 import 验证)
     # ------------------------------------------------------------------
 
-    def verify_and_resolve_registry(self):
+    def verify_and_resolve_registry(self, definition_ids: set[str] | None = None):
         """
         对 AST 扫描得到的注册表执行实际 import 验证（使用共享线程池并行）。
+
+        ``definition_ids`` 用于显式 Package Workspace 的 check mode，只验证
+        Catalog closure；OS 内置 Registry 仍然可用，但不把无关可选驱动依赖算作
+        领域包错误。
         """
         errors = []
         import_success_count = 0
         resolved_count = 0
-        total_items = len(self.device_type_registry) + len(self.resource_type_registry)
+        selected_devices = {
+            definition_id: entry
+            for definition_id, entry in self.device_type_registry.items()
+            if definition_ids is None or definition_id in definition_ids
+        }
+        selected_resources = {
+            definition_id: entry
+            for definition_id, entry in self.resource_type_registry.items()
+            if definition_ids is None or definition_id in definition_ids
+        }
+        total_items = len(selected_devices) + len(selected_resources)
 
         lock = threading.Lock()
 
@@ -1568,11 +1597,11 @@ class Registry:
             device_futures = {}
             resource_futures = {}
 
-            for device_id, entry in list(self.device_type_registry.items()):
+            for device_id, entry in selected_devices.items():
                 fut = executor.submit(_verify_device, device_id, entry)
                 device_futures[fut] = device_id
 
-            for resource_id, entry in list(self.resource_type_registry.items()):
+            for resource_id, entry in selected_resources.items():
                 fut = executor.submit(_verify_resource, resource_id, entry)
                 resource_futures[fut] = resource_id
 
@@ -2582,6 +2611,7 @@ def build_registry(
     complete_registry=False,
     external_only=False,
     community_namespaces=None,
+    package_catalogs=None,
 ):
     """
     构建或获取Registry单例实例
@@ -2602,13 +2632,25 @@ def build_registry(
         complete_registry=complete_registry,
         external_only=external_only,
         community_namespaces=community_namespaces,
+        package_catalogs=package_catalogs,
     )
 
     # 将 AST 扫描的字符串类型替换为实际 ROS2 消息类（仅查找 ROS2 类型，不 import 设备模块）
     lab_registry.resolve_all_types()
 
     if check_mode:
-        lab_registry.verify_and_resolve_registry()
+        package_definition_ids = None
+        if package_catalogs:
+            package_definition_ids = {
+                definition.fqid
+                for catalog in package_catalogs
+                for definitions in (
+                    catalog.definitions.devices,
+                    catalog.definitions.resources,
+                )
+                for definition in definitions
+            }
+        lab_registry.verify_and_resolve_registry(package_definition_ids)
 
     # noinspection PyProtectedMember
     if lab_registry._startup_executor is not None:
