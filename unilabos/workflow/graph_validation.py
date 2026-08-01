@@ -6,7 +6,8 @@ import json
 import math
 import re
 from collections import defaultdict
-from typing import Any, Dict, Iterable, List, Mapping
+from collections.abc import Iterable, Mapping
+from typing import Any
 
 from unilabos.workflow.json_codec import encode_json, strict_json_equal
 from unilabos.workflow.models import WorkflowEdgeWrite, WorkflowNodeWrite
@@ -25,13 +26,13 @@ class MissingTemplateError(GraphValidationError):
 
 def validate_graph(
     *,
-    nodes: List[WorkflowNodeWrite],
-    edges: List[WorkflowEdgeWrite],
-    templates: Mapping[str, Dict[str, Any]],
-    handles: Mapping[str, Dict[str, Any]],
-    effective_params: Mapping[str, Dict[str, Any]],
+    nodes: list[WorkflowNodeWrite],
+    edges: list[WorkflowEdgeWrite],
+    templates: Mapping[str, dict[str, Any]],
+    handles: Mapping[str, dict[str, Any]],
+    effective_params: Mapping[str, dict[str, Any]],
     workflow_meta_data: Mapping[str, Any],
-    node_meta_data: Mapping[str, Dict[str, Any]],
+    node_meta_data: Mapping[str, dict[str, Any]],
     validate_input_binding_schema: bool = False,
 ) -> None:
     """在写事务内校验一份完整替换图。"""
@@ -87,10 +88,10 @@ def validate_graph(
         for node in nodes
         if not node.disabled and _node_kind(node, templates) != "group"
     }
-    enabled_edges: List[WorkflowEdgeWrite] = []
-    incoming: Dict[tuple[str, str], str] = {}
-    connected_inputs: Dict[tuple[str, str], str] = {}
-    available_data_keys: Dict[str, List[str]] = defaultdict(list)
+    enabled_edges: list[WorkflowEdgeWrite] = []
+    incoming: dict[tuple[str, str], str] = {}
+    connected_inputs: dict[tuple[str, str], str] = {}
+    available_data_keys: dict[str, list[str]] = defaultdict(list)
     for edge in edges:
         if edge.source_node_uuid not in enabled or edge.target_node_uuid not in enabled:
             continue
@@ -174,7 +175,7 @@ def _validate_edge_handle(
     node: WorkflowNodeWrite,
     handle_uuid: str,
     io_type: str,
-    handles: Mapping[str, Dict[str, Any]],
+    handles: Mapping[str, dict[str, Any]],
 ) -> None:
     template_uuid = node.workflow_node_template_uuid
     if template_uuid is None:
@@ -190,7 +191,7 @@ def _validate_edge_handle(
 
 def _node_kind(
     node: WorkflowNodeWrite,
-    templates: Mapping[str, Dict[str, Any]],
+    templates: Mapping[str, dict[str, Any]],
 ) -> str:
     raw_kind = node.type
     if node.workflow_node_template_uuid is not None:
@@ -210,6 +211,7 @@ def _node_kind(
         "group": "group",
         "tool_call": "tool_call",
         "manual_confirm": "manual_confirm",
+        "material_source": "material_source",
     }
     kind = aliases.get(str(raw_kind).strip().lower())
     if kind is None:
@@ -222,7 +224,7 @@ def _validate_edge_cycles(
     edges: Iterable[WorkflowEdgeWrite],
 ) -> None:
     indegree = {node_uuid: 0 for node_uuid in enabled}
-    outgoing: Dict[str, List[str]] = defaultdict(list)
+    outgoing: dict[str, list[str]] = defaultdict(list)
     for edge in edges:
         indegree[edge.target_node_uuid] += 1
         outgoing[edge.source_node_uuid].append(edge.target_node_uuid)
@@ -267,9 +269,9 @@ def _dependency_only(handle: Mapping[str, Any]) -> bool:
 def _validate_required_handles(
     node: WorkflowNodeWrite,
     param: Mapping[str, Any],
-    handles: Iterable[Dict[str, Any]],
+    handles: Iterable[dict[str, Any]],
     incoming: Mapping[tuple[str, str], str],
-    bindings: Mapping[str, Dict[str, Any]],
+    bindings: Mapping[str, dict[str, Any]],
 ) -> None:
     template_uuid = node.workflow_node_template_uuid
     if template_uuid is None:
@@ -300,10 +302,10 @@ def _validated_input_bindings(
     node: WorkflowNodeWrite,
     meta_data: Mapping[str, Any],
     workflow_meta_data: Mapping[str, Any],
-    handles: Mapping[str, Dict[str, Any]],
+    handles: Mapping[str, dict[str, Any]],
     *,
     validate_schema_compatibility: bool,
-) -> Dict[str, Dict[str, Any]]:
+) -> dict[str, dict[str, Any]]:
     unilab = meta_data.get("unilab", {})
     if not isinstance(unilab, dict):
         raise GraphValidationError("Node meta_data.unilab 必须是对象")
@@ -326,7 +328,7 @@ def _validated_input_bindings(
         raise GraphValidationError("input_contract.parameters 必须是数组")
     parameter_entries = [item for item in parameters if isinstance(item, dict)]
 
-    result: Dict[str, Dict[str, Any]] = {}
+    result: dict[str, dict[str, Any]] = {}
     for handle_uuid, raw_binding in raw_bindings.items():
         handle = handles.get(handle_uuid)
         if (
@@ -794,9 +796,9 @@ def _json_equal(left: Any, right: Any) -> bool:
 
 
 __all__ = [
-    "declared_handle_type_matches",
     "GraphValidationError",
     "MissingTemplateError",
+    "declared_handle_type_matches",
     "validate_graph",
     "workflow_schema_matches_handle_type",
 ]
