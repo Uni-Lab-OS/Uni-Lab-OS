@@ -41,24 +41,49 @@ def validate_material_source_authority(
     nodes = graph.get("nodes")
     if not isinstance(nodes, list):
         return
-    material_sources = [
-        node
+    selectors = [
+        node.get("param")
         for node in nodes
         if isinstance(node, Mapping) and node.get("type") == "material_source"
     ]
-    if not material_sources:
+    authority_selectors = [
+        selector
+        for selector in selectors
+        if isinstance(selector, Mapping) and _selector_has_authority_shape(selector)
+    ]
+    if not authority_selectors:
         return
     if authority is None:
         raise MaterialSourceAuthorityError(
             "material_authority_unavailable",
             "MaterialSource 静态 authority 未配置",
         )
-    for node in material_sources:
-        selector = node.get("param")
-        if not isinstance(selector, Mapping):
-            # closed selector 的 shape 由共享 graph validator 先行负责。
-            continue
+    for selector in authority_selectors:
         _validate_selector_authority(selector, authority)
+
+
+def _selector_has_authority_shape(selector: Mapping[str, Any]) -> bool:
+    """只让 shape 已闭合到可安全查询的 selector 进入 authority adapter。"""
+
+    mount = selector.get("mount")
+    slot_range = selector.get("slot_range")
+    return bool(
+        isinstance(selector.get("resource_template_uuid"), str)
+        and isinstance(mount, Mapping)
+        and isinstance(mount.get("uuid"), str)
+        and (
+            selector.get("material_uuid") is None
+            or isinstance(selector.get("material_uuid"), str)
+        )
+        and (selector.get("site") is None or isinstance(selector.get("site"), str))
+        and (
+            slot_range is None
+            or (
+                isinstance(slot_range, list)
+                and all(isinstance(item, str) for item in slot_range)
+            )
+        )
+    )
 
 
 def _validate_selector_authority(
@@ -67,9 +92,12 @@ def _validate_selector_authority(
 ) -> None:
     mount = selector.get("mount")
     mount_uuid = mount.get("uuid") if isinstance(mount, Mapping) else None
-    assert isinstance(mount_uuid, str)
     template_uuid = selector.get("resource_template_uuid")
-    assert isinstance(template_uuid, str)
+    if not isinstance(mount_uuid, str) or not isinstance(template_uuid, str):
+        raise MaterialSourceAuthorityError(
+            "invalid_material_source",
+            "MaterialSource selector 不符合 authority 查询合同",
+        )
 
     mount_material = _get_material(authority, mount_uuid)
     if mount_material.deleted_at is not None:
@@ -102,7 +130,11 @@ def _validate_selector_authority(
     fixed_material_uuid = selector.get("material_uuid")
     if fixed_material_uuid is None:
         return
-    assert isinstance(fixed_material_uuid, str)
+    if not isinstance(fixed_material_uuid, str):
+        raise MaterialSourceAuthorityError(
+            "invalid_material_source",
+            "MaterialSource selector 不符合 authority 查询合同",
+        )
     fixed_material = _get_material(authority, fixed_material_uuid)
     if (
         fixed_material.deleted_at is not None

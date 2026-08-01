@@ -11,6 +11,7 @@ from collections.abc import Callable
 from contextlib import AbstractContextManager
 from dataclasses import dataclass
 from enum import Enum
+from types import MappingProxyType
 from typing import Any, TypeVar
 
 WorkflowFunction = TypeVar("WorkflowFunction", bound=Callable[..., Any])
@@ -23,6 +24,16 @@ class MaterialFlowRole(str, Enum):
     ALIQUOT_SAMPLE = "aliquot_sample"
     REAGENT = "reagent"
     CONSUMABLE = "consumable"
+
+
+MATERIAL_FLOW_ROLE_LABELS_ZH = MappingProxyType(
+    {
+        "primary_sample": "主样品",
+        "aliquot_sample": "分装样品",
+        "reagent": "试剂",
+        "consumable": "耗材",
+    }
+)
 
 
 def workflow_definition(
@@ -115,6 +126,7 @@ def workflow_output(**values: Any) -> dict[str, Any]:
 
 
 __all__ = [
+    "MATERIAL_FLOW_ROLE_LABELS_ZH",
     "MaterialFlowRole",
     "device",
     "group",

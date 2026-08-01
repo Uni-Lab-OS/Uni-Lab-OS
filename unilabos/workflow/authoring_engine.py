@@ -1512,7 +1512,9 @@ def _parse_material_source(
         )
     try:
         resource_template_uuid = validate_uuid(index.resolve_symbol(qualified_name))
-    except (AttributeError, KeyError, TypeError, ValueError):
+        if index.identify_uuid(resource_template_uuid) != qualified_name:
+            raise LookupError(qualified_name)
+    except (AttributeError, LookupError, TypeError, ValueError):
         _fail(
             "template_catalog_mismatch",
             "当前 authority 无法解析 ResourceTemplate symbol",
@@ -2791,8 +2793,15 @@ def _render_graph(
             identity = resource_template_identity_index.identify_uuid(
                 validate_uuid(resource_template_uuid)
             )
+            if (
+                validate_uuid(resource_template_identity_index.resolve_symbol(identity))
+                != resource_template_uuid
+            ):
+                raise LookupError(identity)
             module, symbol = identity.rsplit(":", 1)
-        except (AttributeError, KeyError, TypeError, ValueError):
+            if not module or not symbol:
+                raise ValueError(identity)
+        except (AttributeError, LookupError, TypeError, ValueError):
             _fail(
                 "template_catalog_mismatch",
                 "当前 authority 无法反查 ResourceTemplate UUID",
