@@ -39,6 +39,12 @@ from unilabos.app.ws_client import (
     QueueItem,
     format_job_log,
 )
+from unilabos.observability import runtime as runtime_tracing
+from unilabos.observability.runtime import (
+    fail_open_span,
+    normalize_trace_context,
+    safe_capture_context,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -112,6 +118,28 @@ class JobExecutionBackend:
 
     def dispatch(self, payload: DispatchPayload) -> None:
         """接收调度器下发的 job_start 载荷：入队/直发（同 _handle_job_start 语义）。"""
+        parent_trace_context = normalize_trace_context(
+            payload.get("trace_context")
+        )
+        trace_attributes = {
+            "workflow.node_job.uuid": payload["job_id"],
+            "workflow.task.uuid": payload.get("task_id", ""),
+            "workflow.uuid": payload.get("workflow_id", ""),
+            "workflow.node.uuid": payload.get("node_id", ""),
+            "device.id": payload["device_id"],
+            "device.action.name": payload["action"],
+        }
+        trace_context = parent_trace_context
+        with fail_open_span(
+            runtime_tracing,
+            "workflow.node.dispatch",
+            parent=parent_trace_context,
+            attributes=trace_attributes,
+        ):
+            captured_context = safe_capture_context(runtime_tracing)
+            if captured_context:
+                trace_context = captured_context
+
         job_info = JobInfo(
             job_id=payload["job_id"],
             task_id=payload.get("task_id", ""),
@@ -125,6 +153,7 @@ class JobExecutionBackend:
             action_args=payload.get("action_args", {}) or {},
             sample_material=payload.get("sample_material", {}) or {},
             server_info=payload.get("server_info"),
+            trace_context=trace_context,
         )
         should_start_now, _lock_became_busy = self.device_manager.enqueue_job(job_info)
         job_log = format_job_log(job_info.job_id, job_info.task_id, job_info.device_id, job_info.action_name)
@@ -337,6 +366,7 @@ class JobExecutionBackend:
             job_id=job.job_id,
             notebook_id=job.notebook_id,
             device_action_key=job.device_action_key,
+            trace_context=dict(job.trace_context),
         )
         host_node = self._host_node_getter()
         if host_node is None:

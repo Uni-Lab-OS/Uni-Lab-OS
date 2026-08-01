@@ -14,7 +14,7 @@ from starlette.responses import Response
 
 from unilabos.app.web.api import setup_api_routes
 from unilabos.app.web.pages import setup_web_pages
-from unilabos.config.config import BasicConfig
+from unilabos.config.config import BasicConfig, ObservabilityConfig
 from unilabos.utils.fastapi.log_adapter import setup_fastapi_logging
 from unilabos.utils.log import error, info
 
@@ -30,6 +30,8 @@ app = FastAPI(
 # 创建页面路由
 pages = None
 workflow_routes_mounted = False
+observability_routes_mounted = False
+observability_gateway = None
 
 # noinspection PyTypeChecker
 app.add_middleware(
@@ -87,6 +89,7 @@ def setup_server(
         FastAPI: 配置好的FastAPI应用实例
     """
     global pages, workflow_routes_mounted
+    global observability_routes_mounted, observability_gateway
 
     # 创建页面路由
     if pages is None:
@@ -94,6 +97,23 @@ def setup_server(
 
     # 设置API路由
     setup_api_routes(app)
+
+    # Electron 只通过 Uni-Lab-OS 上报和查询 trace；Phoenix 保持 loopback 私有实现。
+    if not observability_routes_mounted:
+        try:
+            from unilabos.app.observability_api import install_observability_api
+            from unilabos.observability.config import ObservabilitySettings
+            from unilabos.observability.gateway import ObservabilityGateway
+
+            observability_settings = ObservabilitySettings.from_runtime_config(
+                BasicConfig,
+                ObservabilityConfig,
+            )
+            observability_gateway = ObservabilityGateway(observability_settings)
+            install_observability_api(app, observability_gateway)
+            observability_routes_mounted = True
+        except Exception as e:  # noqa: BLE001 - 可观测性不阻断设备运行
+            error(f"[Web] 挂载 Phoenix trace 日志路由失败: {str(e)}")
 
     # Backend-shaped Workflow authority 统一拥有本工作区的 workflow.db。
     if not workflow_routes_mounted and BasicConfig.working_dir:
