@@ -1,8 +1,11 @@
 # Round R1B：durable runtime state kernel 设计
 
-日期：2026-08-01  
-实现分支：`migration/r1b-durable-runtime-kernel`  
-基线：`d461b93450dfbaf36957562938ba4df108aabfbf`  
+日期：2026-08-01
+
+实现分支：`migration/r1b-durable-runtime-kernel`
+
+基线：`d461b93450dfbaf36957562938ba4df108aabfbf`
+
 Wayfinder：`Uni-Lab-OS/Uni-Lab-Core#150`、`deepmodeling/Uni-Lab-OS#303`
 
 ## 1. 本轮结果与停止线
