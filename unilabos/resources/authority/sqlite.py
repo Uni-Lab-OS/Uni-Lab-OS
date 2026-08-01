@@ -5,16 +5,19 @@ from __future__ import annotations
 import json
 import sqlite3
 import threading
-from collections.abc import Callable
+from collections.abc import Callable, Iterator
 from contextlib import AbstractContextManager, contextmanager
 from pathlib import Path
-from typing import Any, Iterator, Protocol
+from typing import Any, Protocol
 
 from .models import (
     MaterialAuthorityUnavailable,
     MaterialConflict,
+    MaterialInvalidInput,
+    MaterialNotFound,
     MaterialRecord,
     RuntimeAuthorityUnitOfWork,
+    SiteRecord,
 )
 
 _SQLITE_BUSY_TIMEOUT_MS = 5000
@@ -90,6 +93,54 @@ CREATE INDEX IF NOT EXISTS ix_material_parent_active
     ON material(parent_uuid)
     WHERE deleted_at IS NULL
 """,
+    """
+CREATE TABLE IF NOT EXISTS site (
+    uuid TEXT PRIMARY KEY,
+    create_time TEXT NOT NULL,
+    update_time TEXT NOT NULL,
+    deleted_at TEXT,
+    description TEXT,
+    meta_data TEXT NOT NULL DEFAULT '{}'
+        CHECK (json_valid(meta_data) AND json_type(meta_data) = 'object'),
+    material_uuid TEXT NOT NULL,
+    name TEXT NOT NULL CHECK (LENGTH(TRIM(name)) > 0),
+    sort_order INTEGER NOT NULL DEFAULT 0 CHECK (sort_order >= 0),
+    occupied_material_uuid TEXT,
+    position_x REAL NOT NULL,
+    position_y REAL NOT NULL,
+    position_z REAL NOT NULL,
+    depth REAL NOT NULL CHECK (depth >= 0),
+    length REAL NOT NULL CHECK (length >= 0),
+    width REAL NOT NULL CHECK (width >= 0),
+    version INTEGER NOT NULL DEFAULT 1 CHECK (version > 0),
+    FOREIGN KEY(material_uuid) REFERENCES material(uuid) ON DELETE RESTRICT,
+    FOREIGN KEY(occupied_material_uuid) REFERENCES material(uuid) ON DELETE RESTRICT,
+    CHECK (occupied_material_uuid IS NULL OR occupied_material_uuid <> material_uuid)
+)
+""",
+    """
+CREATE TABLE IF NOT EXISTS site_allowed_resource_template (
+    site_uuid TEXT NOT NULL,
+    resource_template_uuid TEXT NOT NULL,
+    PRIMARY KEY(site_uuid, resource_template_uuid),
+    FOREIGN KEY(site_uuid) REFERENCES site(uuid) ON DELETE CASCADE
+)
+""",
+    """
+CREATE UNIQUE INDEX IF NOT EXISTS ux_site_material_name_active
+    ON site(material_uuid, name COLLATE UNICODE_CASEFOLD)
+    WHERE deleted_at IS NULL
+""",
+    """
+CREATE UNIQUE INDEX IF NOT EXISTS ux_site_occupied_material_active
+    ON site(occupied_material_uuid)
+    WHERE deleted_at IS NULL AND occupied_material_uuid IS NOT NULL
+""",
+    """
+CREATE INDEX IF NOT EXISTS ix_site_material_order_active
+    ON site(material_uuid, sort_order, create_time, uuid)
+    WHERE deleted_at IS NULL
+""",
 )
 
 
@@ -125,6 +176,76 @@ def _material_record(row: sqlite3.Row) -> MaterialRecord:
         material_kind=row["material_kind"],
         version=row["version"],
     )
+
+
+def _site_record(
+    row: sqlite3.Row,
+    allowed_resource_template_uuids: tuple[str, ...],
+) -> SiteRecord:
+    return SiteRecord(
+        uuid=row["uuid"],
+        create_time=row["create_time"],
+        update_time=row["update_time"],
+        deleted_at=row["deleted_at"],
+        description=row["description"],
+        meta_data=_json_object(row["meta_data"]),
+        material_uuid=row["material_uuid"],
+        name=row["name"],
+        sort_order=row["sort_order"],
+        allowed_resource_template_uuids=allowed_resource_template_uuids,
+        occupied_material_uuid=row["occupied_material_uuid"],
+        position_x=row["position_x"],
+        position_y=row["position_y"],
+        position_z=row["position_z"],
+        depth=row["depth"],
+        length=row["length"],
+        width=row["width"],
+        version=row["version"],
+    )
+
+
+def _read_site(
+    uow: RuntimeAuthorityUnitOfWork,
+    site_uuid: str,
+) -> SiteRecord | None:
+    row = uow.execute(
+        "SELECT * FROM site WHERE uuid = ? AND deleted_at IS NULL",
+        (site_uuid,),
+    ).fetchone()
+    if row is None:
+        return None
+    allowed_rows = uow.execute(
+        """
+        SELECT resource_template_uuid
+        FROM site_allowed_resource_template
+        WHERE site_uuid = ?
+        ORDER BY resource_template_uuid
+        """,
+        (site_uuid,),
+    ).fetchall()
+    return _site_record(
+        row,
+        tuple(allowed_row["resource_template_uuid"] for allowed_row in allowed_rows),
+    )
+
+
+@contextmanager
+def _site_create_savepoint(
+    uow: RuntimeAuthorityUnitOfWork,
+) -> Iterator[None]:
+    """让多语句 Site 创建在借用的 UoW 内保持原子性。"""
+
+    uow.execute("SAVEPOINT unilab_site_create")
+    try:
+        yield
+    except BaseException:
+        try:
+            uow.execute("ROLLBACK TO SAVEPOINT unilab_site_create")
+        finally:
+            uow.execute("RELEASE SAVEPOINT unilab_site_create")
+        raise
+    else:
+        uow.execute("RELEASE SAVEPOINT unilab_site_create")
 
 
 class _StandaloneRuntimeAuthority:
@@ -310,6 +431,150 @@ class SQLiteMaterialAdapter:
         except sqlite3.Error:
             raise MaterialAuthorityUnavailable("failed to read material") from None
         return _material_record(row) if row is not None else None
+
+    def create_site(
+        self,
+        *,
+        site_uuid: str,
+        description: str | None,
+        meta_data: dict[str, Any],
+        material_uuid: str,
+        name: str,
+        sort_order: int,
+        allowed_resource_template_uuids: tuple[str, ...],
+        occupied_material_uuid: str | None,
+        position_x: float,
+        position_y: float,
+        position_z: float,
+        depth: float,
+        length: float,
+        width: float,
+        now: str,
+        uow: RuntimeAuthorityUnitOfWork | None = None,
+    ) -> SiteRecord:
+        try:
+            with (
+                self._with_uow(uow) as active_uow,
+                _site_create_savepoint(active_uow),
+            ):
+                owner = active_uow.execute(
+                    """
+                        SELECT resource_template_uuid
+                        FROM material
+                        WHERE uuid = ? AND deleted_at IS NULL
+                        """,
+                    (material_uuid,),
+                ).fetchone()
+                if owner is None:
+                    raise MaterialNotFound("site owner material not found")
+
+                if occupied_material_uuid is not None:
+                    occupant = active_uow.execute(
+                        """
+                            SELECT resource_template_uuid
+                            FROM material
+                            WHERE uuid = ? AND deleted_at IS NULL
+                            """,
+                        (occupied_material_uuid,),
+                    ).fetchone()
+                    if occupant is None:
+                        raise MaterialNotFound("site occupant material not found")
+                    if (
+                        allowed_resource_template_uuids
+                        and occupant["resource_template_uuid"]
+                        not in allowed_resource_template_uuids
+                    ):
+                        raise MaterialInvalidInput(
+                            "occupied material template is not allowed by site"
+                        )
+                    would_cycle = active_uow.execute(
+                        """
+                            WITH RECURSIVE
+                            edges(source_uuid, target_uuid) AS (
+                                SELECT parent_uuid, uuid
+                                FROM material
+                                WHERE parent_uuid IS NOT NULL AND deleted_at IS NULL
+                                UNION ALL
+                                SELECT material_uuid, occupied_material_uuid
+                                FROM site
+                                WHERE occupied_material_uuid IS NOT NULL
+                                  AND deleted_at IS NULL
+                            ),
+                            reachable(uuid) AS (
+                                SELECT ?
+                                UNION
+                                SELECT edges.target_uuid
+                                FROM edges
+                                JOIN reachable ON edges.source_uuid = reachable.uuid
+                            )
+                            SELECT 1 FROM reachable WHERE uuid = ? LIMIT 1
+                            """,
+                        (occupied_material_uuid, material_uuid),
+                    ).fetchone()
+                    if would_cycle is not None:
+                        raise MaterialConflict("site placement would create a cycle")
+
+                active_uow.execute(
+                    """
+                        INSERT INTO site(
+                            uuid, create_time, update_time, deleted_at,
+                            description, meta_data, material_uuid, name,
+                            sort_order, occupied_material_uuid,
+                            position_x, position_y, position_z,
+                            depth, length, width, version
+                        ) VALUES (?, ?, ?, NULL, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 1)
+                        """,
+                    (
+                        site_uuid,
+                        now,
+                        now,
+                        description,
+                        json.dumps(
+                            meta_data,
+                            ensure_ascii=False,
+                            separators=(",", ":"),
+                        ),
+                        material_uuid,
+                        name,
+                        sort_order,
+                        occupied_material_uuid,
+                        position_x,
+                        position_y,
+                        position_z,
+                        depth,
+                        length,
+                        width,
+                    ),
+                )
+                for template_uuid in allowed_resource_template_uuids:
+                    active_uow.execute(
+                        """
+                            INSERT INTO site_allowed_resource_template(
+                                site_uuid, resource_template_uuid
+                            ) VALUES (?, ?)
+                            """,
+                        (site_uuid, template_uuid),
+                    )
+                site = _read_site(active_uow, site_uuid)
+        except sqlite3.IntegrityError:
+            raise MaterialConflict("site identity or placement conflicts") from None
+        except sqlite3.Error:
+            raise MaterialAuthorityUnavailable("failed to create site") from None
+        if site is None:
+            raise MaterialAuthorityUnavailable("created site is not readable")
+        return site
+
+    def get_site(
+        self,
+        site_uuid: str,
+        *,
+        uow: RuntimeAuthorityUnitOfWork | None = None,
+    ) -> SiteRecord | None:
+        try:
+            with self._with_uow(uow) as active_uow:
+                return _read_site(active_uow, site_uuid)
+        except sqlite3.Error:
+            raise MaterialAuthorityUnavailable("failed to read site") from None
 
 
 class _BorrowedUnitOfWork:

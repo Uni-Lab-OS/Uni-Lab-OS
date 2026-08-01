@@ -28,11 +28,16 @@ from unilabos.workflow.store import WorkflowStore
 
 MATERIAL_UUID = "50000000-0000-4000-8000-000000000017"
 SECOND_MATERIAL_UUID = "50000000-0000-4000-8000-000000000018"
+UNKNOWN_MATERIAL_UUID = "50000000-0000-4000-8000-000000000099"
 RESOURCE_TEMPLATE_UUID = "20000000-0000-4000-8000-000000000017"
+SECOND_RESOURCE_TEMPLATE_UUID = "20000000-0000-4000-8000-000000000018"
 UNKNOWN_RESOURCE_TEMPLATE_UUID = "20000000-0000-4000-8000-000000000099"
 MATERIAL_CLASS = "SampleTube"
+SECOND_MATERIAL_CLASS = "Microplate"
 MATERIAL_NAME = "Sample 17"
 SECOND_MATERIAL_NAME = "Sample 18"
+SITE_UUID = "60000000-0000-4000-8000-000000000017"
+SECOND_SITE_UUID = "60000000-0000-4000-8000-000000000018"
 
 EXPECTED_INITIAL_MATERIAL = {
     "uuid": MATERIAL_UUID,
@@ -52,11 +57,17 @@ class _RollbackSentinel(RuntimeError):
 def _resource_template_snapshot() -> Mapping[str, object]:
     from unilabos.resources.authority import ResourceTemplateIdentity
 
-    identity = ResourceTemplateIdentity(
-        uuid=RESOURCE_TEMPLATE_UUID,
-        material_class=MATERIAL_CLASS,
+    identities = (
+        ResourceTemplateIdentity(
+            uuid=RESOURCE_TEMPLATE_UUID,
+            material_class=MATERIAL_CLASS,
+        ),
+        ResourceTemplateIdentity(
+            uuid=SECOND_RESOURCE_TEMPLATE_UUID,
+            material_class=SECOND_MATERIAL_CLASS,
+        ),
     )
-    return MappingProxyType({identity.uuid: identity})
+    return MappingProxyType({identity.uuid: identity for identity in identities})
 
 
 def _material_module(adapter: SQLiteMaterialAdapter) -> MaterialModule:
@@ -94,6 +105,51 @@ def _observable_material(record: MaterialRecord) -> dict[str, Any]:
         "version": record.version,
         "deleted_at": record.deleted_at,
     }
+
+
+def _create_site_with_references(
+    materials: MaterialModule,
+    *,
+    material_uuid: str,
+    occupied_material_uuid: str | None,
+    allowed_resource_template_uuids: list[str],
+    site_uuid: str = SITE_UUID,
+    name: str = "A1",
+    description: str | None = "Reference validation site",
+    uow: Any | None = None,
+) -> Any:
+    return materials.create_site(
+        site_uuid=site_uuid,
+        description=description,
+        meta_data={"slice": "m1b-references"},
+        material_uuid=material_uuid,
+        name=name,
+        sort_order=0,
+        allowed_resource_template_uuids=allowed_resource_template_uuids,
+        occupied_material_uuid=occupied_material_uuid,
+        position_x=0.0,
+        position_y=0.0,
+        position_z=0.0,
+        depth=1.0,
+        length=1.0,
+        width=1.0,
+        uow=uow,
+    )
+
+
+def _create_placement_materials(materials: MaterialModule) -> None:
+    materials.create_business_material(
+        material_uuid=MATERIAL_UUID,
+        resource_template_uuid=RESOURCE_TEMPLATE_UUID,
+        barcode="OWNER-PLACEMENT-017",
+        name="Placement owner",
+    )
+    materials.create_business_material(
+        material_uuid=SECOND_MATERIAL_UUID,
+        resource_template_uuid=SECOND_RESOURCE_TEMPLATE_UUID,
+        barcode="OCCUPANT-PLACEMENT-018",
+        name="Placement occupant",
+    )
 
 
 def test_business_material_create_read_survives_sqlite_reopen(
@@ -463,3 +519,448 @@ def test_generic_runtime_authority_uow_excludes_sqlite_collation_capability() ->
 
     assert hasattr(RuntimeAuthorityUnitOfWork, "execute")
     assert not hasattr(RuntimeAuthorityUnitOfWork, "create_collation")
+
+
+def test_site_create_read_reopen_preserves_backend_projection_and_composition(
+    tmp_path: Path,
+) -> None:
+    from unilabos.resources.authority import SiteRecord
+
+    database_path = tmp_path / "workflow.db"
+    with _open_material_module(database_path) as materials:
+        materials.create_business_material(
+            material_uuid=MATERIAL_UUID,
+            resource_template_uuid=RESOURCE_TEMPLATE_UUID,
+            barcode="OWNER-017",
+            name="Deck owner",
+        )
+        materials.create_business_material(
+            material_uuid=SECOND_MATERIAL_UUID,
+            resource_template_uuid=SECOND_RESOURCE_TEMPLATE_UUID,
+            barcode="OCCUPANT-018",
+            name="Placed microplate",
+        )
+
+        created = materials.create_site(
+            site_uuid=SITE_UUID,
+            description="Cold deck position A1",
+            meta_data={"zone": "cold", "labels": ["robot", "primary"]},
+            material_uuid=MATERIAL_UUID,
+            name="A1",
+            sort_order=7,
+            allowed_resource_template_uuids=[
+                SECOND_RESOURCE_TEMPLATE_UUID,
+                RESOURCE_TEMPLATE_UUID,
+            ],
+            occupied_material_uuid=SECOND_MATERIAL_UUID,
+            position_x=1.25,
+            position_y=-2.5,
+            position_z=3.75,
+            depth=10.0,
+            length=20.5,
+            width=30.25,
+        )
+        expected_projection = {
+            "uuid": SITE_UUID,
+            "create_time": created.create_time,
+            "update_time": created.update_time,
+            "description": "Cold deck position A1",
+            "meta_data": {"zone": "cold", "labels": ["robot", "primary"]},
+            "material_uuid": MATERIAL_UUID,
+            "name": "A1",
+            "sort_order": 7,
+            "allowed_resource_template_uuids": [
+                RESOURCE_TEMPLATE_UUID,
+                SECOND_RESOURCE_TEMPLATE_UUID,
+            ],
+            "occupied_material_uuid": SECOND_MATERIAL_UUID,
+            "position_x": 1.25,
+            "position_y": -2.5,
+            "position_z": 3.75,
+            "depth": 10.0,
+            "length": 20.5,
+            "width": 30.25,
+            "version": 1,
+        }
+
+        assert isinstance(created, SiteRecord)
+        assert created.to_dict() == expected_projection
+        assert materials.get_site(SITE_UUID).to_dict() == expected_projection
+        assert (
+            materials.get_material(MATERIAL_UUID).parent_uuid,
+            materials.get_material(SECOND_MATERIAL_UUID).parent_uuid,
+        ) == (None, None)
+
+    with _open_material_module(database_path) as reopened_materials:
+        reopened = reopened_materials.get_site(SITE_UUID)
+        assert isinstance(reopened, SiteRecord)
+        assert reopened.to_dict() == expected_projection
+        assert (
+            reopened_materials.get_material(MATERIAL_UUID).parent_uuid,
+            reopened_materials.get_material(SECOND_MATERIAL_UUID).parent_uuid,
+        ) == (None, None)
+
+
+@pytest.mark.parametrize(
+    (
+        "description",
+        "occupied_material_uuid",
+        "allowed_resource_template_uuids",
+    ),
+    [
+        pytest.param(None, None, [], id="nullable-fields-omitted"),
+        pytest.param(
+            "Wire-visible site",
+            SECOND_MATERIAL_UUID,
+            [SECOND_RESOURCE_TEMPLATE_UUID],
+            id="non-null-fields-retained",
+        ),
+    ],
+)
+def test_site_wire_omits_null_optionals_and_retains_non_null_fields(
+    tmp_path: Path,
+    description: str | None,
+    occupied_material_uuid: str | None,
+    allowed_resource_template_uuids: list[str],
+) -> None:
+    database_path = tmp_path / "workflow.db"
+    with _open_material_module(database_path) as materials:
+        _create_placement_materials(materials)
+        created = _create_site_with_references(
+            materials,
+            description=description,
+            material_uuid=MATERIAL_UUID,
+            occupied_material_uuid=occupied_material_uuid,
+            allowed_resource_template_uuids=allowed_resource_template_uuids,
+        )
+
+        for projection in (
+            created.to_dict(),
+            materials.get_site(SITE_UUID).to_dict(),
+        ):
+            assert "deleted_at" not in projection
+            if description is None:
+                assert "description" not in projection
+            else:
+                assert projection["description"] == description
+            if occupied_material_uuid is None:
+                assert "occupied_material_uuid" not in projection
+            else:
+                assert projection["occupied_material_uuid"] == occupied_material_uuid
+
+    with _open_material_module(database_path) as reopened_materials:
+        projection = reopened_materials.get_site(SITE_UUID).to_dict()
+        assert "deleted_at" not in projection
+        if description is None:
+            assert "description" not in projection
+        else:
+            assert projection["description"] == description
+        if occupied_material_uuid is None:
+            assert "occupied_material_uuid" not in projection
+        else:
+            assert projection["occupied_material_uuid"] == occupied_material_uuid
+
+
+@pytest.mark.parametrize(
+    (
+        "owner_uuid",
+        "occupant_uuid",
+        "allowed_template_uuids",
+        "expected_error",
+    ),
+    [
+        pytest.param(
+            UNKNOWN_MATERIAL_UUID,
+            None,
+            [RESOURCE_TEMPLATE_UUID],
+            MaterialNotFound,
+            id="unknown-owner",
+        ),
+        pytest.param(
+            MATERIAL_UUID,
+            UNKNOWN_MATERIAL_UUID,
+            [RESOURCE_TEMPLATE_UUID, SECOND_RESOURCE_TEMPLATE_UUID],
+            MaterialNotFound,
+            id="unknown-occupant",
+        ),
+        pytest.param(
+            MATERIAL_UUID,
+            None,
+            [UNKNOWN_RESOURCE_TEMPLATE_UUID],
+            MaterialInvalidInput,
+            id="unregistered-allowlist-template",
+        ),
+        pytest.param(
+            MATERIAL_UUID,
+            SECOND_MATERIAL_UUID,
+            [RESOURCE_TEMPLATE_UUID],
+            MaterialInvalidInput,
+            id="occupant-template-not-allowed",
+        ),
+    ],
+)
+def test_site_create_rejects_invalid_authority_references_without_side_effects(
+    tmp_path: Path,
+    owner_uuid: str,
+    occupant_uuid: str | None,
+    allowed_template_uuids: list[str],
+    expected_error: type[Exception],
+) -> None:
+    database_path = tmp_path / "workflow.db"
+    with _open_material_module(database_path) as materials:
+        materials.create_business_material(
+            material_uuid=MATERIAL_UUID,
+            resource_template_uuid=RESOURCE_TEMPLATE_UUID,
+            barcode="OWNER-017",
+            name="Deck owner",
+        )
+        materials.create_business_material(
+            material_uuid=SECOND_MATERIAL_UUID,
+            resource_template_uuid=SECOND_RESOURCE_TEMPLATE_UUID,
+            barcode="OCCUPANT-018",
+            name="Placed microplate",
+        )
+        material_snapshot = {
+            MATERIAL_UUID: materials.get_material(MATERIAL_UUID).to_dict(),
+            SECOND_MATERIAL_UUID: materials.get_material(
+                SECOND_MATERIAL_UUID
+            ).to_dict(),
+        }
+
+        with pytest.raises(expected_error) as error:
+            _create_site_with_references(
+                materials,
+                material_uuid=owner_uuid,
+                occupied_material_uuid=occupant_uuid,
+                allowed_resource_template_uuids=allowed_template_uuids,
+            )
+
+        assert error.type is expected_error
+        with pytest.raises(MaterialNotFound):
+            materials.get_site(SITE_UUID)
+        assert {
+            material_uuid: materials.get_material(material_uuid).to_dict()
+            for material_uuid in material_snapshot
+        } == material_snapshot
+
+    with _open_material_module(database_path) as reopened_materials:
+        with pytest.raises(MaterialNotFound):
+            reopened_materials.get_site(SITE_UUID)
+        assert {
+            material_uuid: reopened_materials.get_material(material_uuid).to_dict()
+            for material_uuid in material_snapshot
+        } == material_snapshot
+
+
+def test_site_rejects_owner_as_its_own_occupant_without_write(
+    tmp_path: Path,
+) -> None:
+    database_path = tmp_path / "workflow.db"
+    with _open_material_module(database_path) as materials:
+        _create_placement_materials(materials)
+        owner_projection = materials.get_material(MATERIAL_UUID).to_dict()
+
+        with pytest.raises(MaterialConflict) as error:
+            _create_site_with_references(
+                materials,
+                material_uuid=MATERIAL_UUID,
+                occupied_material_uuid=MATERIAL_UUID,
+                allowed_resource_template_uuids=[RESOURCE_TEMPLATE_UUID],
+            )
+
+        assert error.type is MaterialConflict
+        with pytest.raises(MaterialNotFound):
+            materials.get_site(SITE_UUID)
+        assert materials.get_material(MATERIAL_UUID).to_dict() == owner_projection
+
+    with _open_material_module(database_path) as reopened_materials:
+        with pytest.raises(MaterialNotFound):
+            reopened_materials.get_site(SITE_UUID)
+        assert (
+            reopened_materials.get_material(MATERIAL_UUID).to_dict() == owner_projection
+        )
+
+
+@pytest.mark.parametrize(
+    ("first_placement", "rejected_placement"),
+    [
+        pytest.param(
+            {
+                "material_uuid": MATERIAL_UUID,
+                "occupied_material_uuid": SECOND_MATERIAL_UUID,
+                "allowed_resource_template_uuids": [SECOND_RESOURCE_TEMPLATE_UUID],
+                "name": "A1",
+            },
+            {
+                "material_uuid": MATERIAL_UUID,
+                "occupied_material_uuid": SECOND_MATERIAL_UUID,
+                "allowed_resource_template_uuids": [SECOND_RESOURCE_TEMPLATE_UUID],
+                "name": "B1",
+            },
+            id="occupant-already-placed",
+        ),
+        pytest.param(
+            {
+                "material_uuid": MATERIAL_UUID,
+                "occupied_material_uuid": SECOND_MATERIAL_UUID,
+                "allowed_resource_template_uuids": [SECOND_RESOURCE_TEMPLATE_UUID],
+                "name": "A1",
+            },
+            {
+                "material_uuid": SECOND_MATERIAL_UUID,
+                "occupied_material_uuid": MATERIAL_UUID,
+                "allowed_resource_template_uuids": [RESOURCE_TEMPLATE_UUID],
+                "name": "B1",
+            },
+            id="placement-cycle",
+        ),
+        pytest.param(
+            {
+                "material_uuid": MATERIAL_UUID,
+                "occupied_material_uuid": None,
+                "allowed_resource_template_uuids": [],
+                "name": "Ä1",
+            },
+            {
+                "material_uuid": MATERIAL_UUID,
+                "occupied_material_uuid": None,
+                "allowed_resource_template_uuids": [],
+                "name": "ä1",
+            },
+            id="unicode-casefold-owner-name",
+        ),
+    ],
+)
+def test_site_rejects_conflicting_second_placement_and_preserves_first(
+    tmp_path: Path,
+    first_placement: dict[str, Any],
+    rejected_placement: dict[str, Any],
+) -> None:
+    database_path = tmp_path / "workflow.db"
+    with _open_material_module(database_path) as materials:
+        _create_placement_materials(materials)
+        first = _create_site_with_references(
+            materials,
+            site_uuid=SITE_UUID,
+            **first_placement,
+        )
+        first_projection = first.to_dict()
+
+        with pytest.raises(MaterialConflict) as error:
+            _create_site_with_references(
+                materials,
+                site_uuid=SECOND_SITE_UUID,
+                **rejected_placement,
+            )
+
+        assert error.type is MaterialConflict
+        assert materials.get_site(SITE_UUID).to_dict() == first_projection
+        with pytest.raises(MaterialNotFound):
+            materials.get_site(SECOND_SITE_UUID)
+
+    with _open_material_module(database_path) as reopened_materials:
+        assert reopened_materials.get_site(SITE_UUID).to_dict() == first_projection
+        with pytest.raises(MaterialNotFound):
+            reopened_materials.get_site(SECOND_SITE_UUID)
+
+
+def test_empty_site_template_allowlist_accepts_any_registered_occupant(
+    tmp_path: Path,
+) -> None:
+    from unilabos.resources.authority import SiteRecord
+
+    database_path = tmp_path / "workflow.db"
+    with _open_material_module(database_path) as materials:
+        _create_placement_materials(materials)
+
+        created = _create_site_with_references(
+            materials,
+            material_uuid=MATERIAL_UUID,
+            occupied_material_uuid=SECOND_MATERIAL_UUID,
+            allowed_resource_template_uuids=[],
+        )
+        projection = created.to_dict()
+
+        assert isinstance(created, SiteRecord)
+        assert projection["material_uuid"] == MATERIAL_UUID
+        assert projection["occupied_material_uuid"] == SECOND_MATERIAL_UUID
+        assert projection["allowed_resource_template_uuids"] == []
+        assert materials.get_site(SITE_UUID).to_dict() == projection
+
+    with _open_material_module(database_path) as reopened_materials:
+        assert reopened_materials.get_site(SITE_UUID).to_dict() == projection
+
+
+def test_borrowed_uow_site_association_fault_rolls_back_the_whole_site(
+    tmp_path: Path,
+) -> None:
+    database_path = tmp_path / "workflow.db"
+    with _open_runtime_authority(database_path) as coordinator:
+        materials = _material_module(
+            SQLiteMaterialAdapter.from_runtime_authority(coordinator)
+        )
+        _create_placement_materials(materials)
+        material_snapshot = {
+            material_uuid: materials.get_material(material_uuid).to_dict()
+            for material_uuid in (MATERIAL_UUID, SECOND_MATERIAL_UUID)
+        }
+
+        with coordinator.transaction() as uow:
+            uow.execute(
+                """
+                CREATE TEMP TRIGGER fail_second_site_allowlist_insert
+                BEFORE INSERT ON site_allowed_resource_template
+                WHEN (
+                    SELECT COUNT(*)
+                    FROM site_allowed_resource_template
+                    WHERE site_uuid = NEW.site_uuid
+                ) = 1
+                BEGIN
+                    SELECT RAISE(ABORT, 'injected second association failure');
+                END
+                """
+            )
+            with pytest.raises(MaterialConflict) as error:
+                _create_site_with_references(
+                    materials,
+                    material_uuid=MATERIAL_UUID,
+                    occupied_material_uuid=None,
+                    allowed_resource_template_uuids=[
+                        RESOURCE_TEMPLATE_UUID,
+                        SECOND_RESOURCE_TEMPLATE_UUID,
+                    ],
+                    uow=uow,
+                )
+
+            assert error.type is MaterialConflict
+            assert str(error.value) == "site identity or placement conflicts"
+            assert (
+                materials.get_material(
+                    MATERIAL_UUID,
+                    uow=uow,
+                ).to_dict()
+                == material_snapshot[MATERIAL_UUID]
+            )
+
+        with pytest.raises(MaterialNotFound):
+            materials.get_site(SITE_UUID)
+        assert {
+            material_uuid: materials.get_material(material_uuid).to_dict()
+            for material_uuid in material_snapshot
+        } == material_snapshot
+        with coordinator.transaction() as continued_uow:
+            assert (
+                materials.get_material(
+                    SECOND_MATERIAL_UUID,
+                    uow=continued_uow,
+                ).to_dict()
+                == material_snapshot[SECOND_MATERIAL_UUID]
+            )
+
+    with _open_material_module(database_path) as reopened_materials:
+        with pytest.raises(MaterialNotFound):
+            reopened_materials.get_site(SITE_UUID)
+        assert {
+            material_uuid: reopened_materials.get_material(material_uuid).to_dict()
+            for material_uuid in material_snapshot
+        } == material_snapshot
