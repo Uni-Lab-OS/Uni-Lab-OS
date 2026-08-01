@@ -259,7 +259,7 @@ def _dependency_only(handle: Mapping[str, Any]) -> bool:
     if str(handle.get("handle_key") or "").strip().lower() == "ready":
         return True
     data_source = str(handle.get("data_source") or "").strip()
-    return bool(data_source) and data_source.lower() != "executor"
+    return data_source.lower() == "dependency"
 
 
 def _validate_required_handles(

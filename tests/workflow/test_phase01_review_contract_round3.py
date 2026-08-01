@@ -713,7 +713,7 @@ def test_normal_task_accepts_target_node_uuid(
     ]
 
 
-def _create_task_with_typed_dependency_edge(
+def _create_task_with_typed_result_edge(
     service: WorkflowService,
     store: WorkflowStore,
 ) -> dict[str, Any]:
@@ -753,7 +753,7 @@ def test_execution_plan_edges_project_frozen_backend_semantics(
     service: WorkflowService,
     store: WorkflowStore,
 ) -> None:
-    task = _create_task_with_typed_dependency_edge(service, store)
+    task = _create_task_with_typed_result_edge(service, store)
 
     assert task["execution_plan"]["edges"] == [
         {
@@ -762,7 +762,6 @@ def test_execution_plan_edges_project_frozen_backend_semantics(
             "target_node_uuid": TARGET_NODE_UUID,
             "source_handle_uuid": SOURCE_HANDLE_UUID,
             "target_handle_uuid": TARGET_HANDLE_UUID,
-            "dependency_only": True,
             "source_data_key": "measurement",
             "target_data_key": "wrapped@@@temperature",
             "source_type": "number",
@@ -775,7 +774,7 @@ def test_execution_plan_nodes_project_declared_target_inputs(
     service: WorkflowService,
     store: WorkflowStore,
 ) -> None:
-    task = _create_task_with_typed_dependency_edge(service, store)
+    task = _create_task_with_typed_result_edge(service, store)
     planned_nodes = {node["uuid"]: node for node in task["execution_plan"]["nodes"]}
 
     assert planned_nodes[TARGET_NODE_UUID]["inputs"] == [

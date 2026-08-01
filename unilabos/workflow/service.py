@@ -402,6 +402,7 @@ class WorkflowService:
                     nodes=node_values,
                     edges=edge_values,
                     protect_reserved_metadata=True,
+                    infer_input_contract=True,
                 )
             except ValidationError:
                 raise WorkflowError("invalid_input") from None
@@ -815,7 +816,7 @@ class WorkflowService:
         if str(handle.get("handle_key") or "").strip().lower() == "ready":
             return True
         data_source = str(handle.get("data_source") or "").strip()
-        return bool(data_source) and data_source.lower() != "executor"
+        return data_source.lower() == "dependency"
 
     @staticmethod
     def _executor_kind(node_type: str) -> str:

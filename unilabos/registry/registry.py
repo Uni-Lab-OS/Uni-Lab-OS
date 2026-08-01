@@ -87,6 +87,72 @@ def _canonical_schema_base(schema: Any) -> Dict[str, Any]:
     return schema
 
 
+def _ros_container_item_type(ros_type: str) -> str | None:
+    normalized = "".join(ros_type.lower().split())
+    if normalized.startswith("sequence<") and normalized.endswith(">"):
+        inner = normalized[len("sequence<") : -1]
+        return inner.split(",", 1)[0]
+    if normalized.startswith("bounded_sequence<") and normalized.endswith(">"):
+        inner = normalized[len("bounded_sequence<") : -1]
+        return inner.split(",", 1)[0]
+    if normalized.endswith("]") and "[" in normalized:
+        return normalized.rsplit("[", 1)[0]
+    return None
+
+
+def _canonical_schema_accepts_ros_type(schema: Any, ros_type: Any) -> bool:
+    """验证 canonical business value 可由一个 ROS 字段无损承载。"""
+
+    if not isinstance(ros_type, str) or not ros_type.strip():
+        return False
+    base = _canonical_schema_base(schema)
+    normalized = "".join(ros_type.lower().split())
+
+    def ros_string() -> bool:
+        if normalized in {"string", "wstring"}:
+            return True
+        prefix, separator, bound = normalized.partition("<=")
+        return (
+            separator == "<="
+            and prefix in {"string", "wstring"}
+            and bound.isdigit()
+        )
+
+    item_type = _ros_container_item_type(normalized)
+    if base.get("type") == "array":
+        if item_type is None:
+            return False
+        return _canonical_schema_accepts_ros_type(base.get("items", {}), item_type)
+    if item_type is not None:
+        return False
+
+    if base.get("$slot") == "ResourceSlot":
+        return ros_string()
+    value_type = base.get("type")
+    if value_type == "string":
+        return ros_string()
+    if value_type == "boolean":
+        return normalized in {"bool", "boolean"}
+    if value_type == "integer":
+        return normalized in {
+            "byte",
+            "char",
+            "int8",
+            "uint8",
+            "int16",
+            "uint16",
+            "int32",
+            "uint32",
+            "int64",
+            "uint64",
+        }
+    if value_type == "number":
+        return normalized in {"float32", "float64", "double"}
+    if value_type in {"object", None}:
+        return ros_string()
+    return False
+
+
 def _canonical_handle_type(schema: Any) -> str:
     base = _canonical_schema_base(schema)
     if base.get("$slot") == "ResourceSlot":
@@ -1067,6 +1133,7 @@ class Registry:
                 def validate_transport_fields(
                     section: str,
                     canonical_names: list[str] | None,
+                    canonical_properties: dict[str, Any] | None,
                     reserved: set[str],
                 ) -> dict[str, str]:
                     message_type = getattr(
@@ -1083,7 +1150,12 @@ class Registry:
                         raise ValueError(
                             f"Action {method_name} ROS {section} schema 缺失"
                         )
-                    ros_fields = set(get_fields()) - reserved
+                    raw_ros_fields = get_fields()
+                    if not isinstance(raw_ros_fields, dict):
+                        raise ValueError(
+                            f"Action {method_name} ROS {section} schema 缺失"
+                        )
+                    ros_fields = set(raw_ros_fields) - reserved
                     mapping = action_args.get(section) or {
                         name: name
                         for name in (
@@ -1112,21 +1184,34 @@ class Registry:
                         raise ValueError(
                             f"Action {method_name} ROS {section} mapping 与 canonical schema 冲突"
                         )
+                    if canonical_properties is not None:
+                        for ros_name, canonical_name in mapping.items():
+                            if not _canonical_schema_accepts_ros_type(
+                                canonical_properties[canonical_name],
+                                raw_ros_fields.get(ros_name),
+                            ):
+                                raise ValueError(
+                                    f"Action {method_name} ROS {section} 字段 "
+                                    f"{ros_name!r} 与 canonical schema 不兼容"
+                                )
                     return copy.deepcopy(mapping)
 
                 transport_goal = validate_transport_fields(
                     "goal",
                     input_order,
+                    goal_properties,
                     {"unilabos_param"},
                 )
                 transport_feedback = validate_transport_fields(
                     "feedback",
+                    None,
                     None,
                     set(),
                 )
                 transport_result = validate_transport_fields(
                     "result",
                     output_order,
+                    result_properties,
                     {"unilabos_samples"},
                 )
                 type_str = action_type.split(":")[-1]
