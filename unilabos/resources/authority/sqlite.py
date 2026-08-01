@@ -5,10 +5,10 @@ from __future__ import annotations
 import json
 import sqlite3
 import threading
-from collections.abc import Callable
+from collections.abc import Callable, Iterator
 from contextlib import AbstractContextManager, contextmanager
 from pathlib import Path
-from typing import Any, Iterator, Protocol
+from typing import Any, Protocol
 
 from .models import (
     MaterialAuthorityUnavailable,
@@ -229,6 +229,25 @@ def _read_site(
     )
 
 
+@contextmanager
+def _site_create_savepoint(
+    uow: RuntimeAuthorityUnitOfWork,
+) -> Iterator[None]:
+    """Make the multi-statement Site create atomic inside a borrowed UoW."""
+
+    uow.execute("SAVEPOINT unilab_site_create")
+    try:
+        yield
+    except BaseException:
+        try:
+            uow.execute("ROLLBACK TO SAVEPOINT unilab_site_create")
+        finally:
+            uow.execute("RELEASE SAVEPOINT unilab_site_create")
+        raise
+    else:
+        uow.execute("RELEASE SAVEPOINT unilab_site_create")
+
+
 class _StandaloneRuntimeAuthority:
     """仅供独立 Material 部署/测试使用的 SQLite coordinator。"""
 
@@ -434,13 +453,16 @@ class SQLiteMaterialAdapter:
         uow: RuntimeAuthorityUnitOfWork | None = None,
     ) -> SiteRecord:
         try:
-            with self._with_uow(uow) as active_uow:
+            with (
+                self._with_uow(uow) as active_uow,
+                _site_create_savepoint(active_uow),
+            ):
                 owner = active_uow.execute(
                     """
-                    SELECT resource_template_uuid
-                    FROM material
-                    WHERE uuid = ? AND deleted_at IS NULL
-                    """,
+                        SELECT resource_template_uuid
+                        FROM material
+                        WHERE uuid = ? AND deleted_at IS NULL
+                        """,
                     (material_uuid,),
                 ).fetchone()
                 if owner is None:
@@ -449,10 +471,10 @@ class SQLiteMaterialAdapter:
                 if occupied_material_uuid is not None:
                     occupant = active_uow.execute(
                         """
-                        SELECT resource_template_uuid
-                        FROM material
-                        WHERE uuid = ? AND deleted_at IS NULL
-                        """,
+                            SELECT resource_template_uuid
+                            FROM material
+                            WHERE uuid = ? AND deleted_at IS NULL
+                            """,
                         (occupied_material_uuid,),
                     ).fetchone()
                     if occupant is None:
@@ -467,26 +489,26 @@ class SQLiteMaterialAdapter:
                         )
                     would_cycle = active_uow.execute(
                         """
-                        WITH RECURSIVE
-                        edges(source_uuid, target_uuid) AS (
-                            SELECT parent_uuid, uuid
-                            FROM material
-                            WHERE parent_uuid IS NOT NULL AND deleted_at IS NULL
-                            UNION ALL
-                            SELECT material_uuid, occupied_material_uuid
-                            FROM site
-                            WHERE occupied_material_uuid IS NOT NULL
-                              AND deleted_at IS NULL
-                        ),
-                        reachable(uuid) AS (
-                            SELECT ?
-                            UNION
-                            SELECT edges.target_uuid
-                            FROM edges
-                            JOIN reachable ON edges.source_uuid = reachable.uuid
-                        )
-                        SELECT 1 FROM reachable WHERE uuid = ? LIMIT 1
-                        """,
+                            WITH RECURSIVE
+                            edges(source_uuid, target_uuid) AS (
+                                SELECT parent_uuid, uuid
+                                FROM material
+                                WHERE parent_uuid IS NOT NULL AND deleted_at IS NULL
+                                UNION ALL
+                                SELECT material_uuid, occupied_material_uuid
+                                FROM site
+                                WHERE occupied_material_uuid IS NOT NULL
+                                  AND deleted_at IS NULL
+                            ),
+                            reachable(uuid) AS (
+                                SELECT ?
+                                UNION
+                                SELECT edges.target_uuid
+                                FROM edges
+                                JOIN reachable ON edges.source_uuid = reachable.uuid
+                            )
+                            SELECT 1 FROM reachable WHERE uuid = ? LIMIT 1
+                            """,
                         (occupied_material_uuid, material_uuid),
                     ).fetchone()
                     if would_cycle is not None:
@@ -494,21 +516,23 @@ class SQLiteMaterialAdapter:
 
                 active_uow.execute(
                     """
-                    INSERT INTO site(
-                        uuid, create_time, update_time, deleted_at,
-                        description, meta_data, material_uuid, name,
-                        sort_order, occupied_material_uuid,
-                        position_x, position_y, position_z,
-                        depth, length, width, version
-                    ) VALUES (?, ?, ?, NULL, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 1)
-                    """,
+                        INSERT INTO site(
+                            uuid, create_time, update_time, deleted_at,
+                            description, meta_data, material_uuid, name,
+                            sort_order, occupied_material_uuid,
+                            position_x, position_y, position_z,
+                            depth, length, width, version
+                        ) VALUES (?, ?, ?, NULL, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 1)
+                        """,
                     (
                         site_uuid,
                         now,
                         now,
                         description,
                         json.dumps(
-                            meta_data, ensure_ascii=False, separators=(",", ":")
+                            meta_data,
+                            ensure_ascii=False,
+                            separators=(",", ":"),
                         ),
                         material_uuid,
                         name,
@@ -525,10 +549,10 @@ class SQLiteMaterialAdapter:
                 for template_uuid in allowed_resource_template_uuids:
                     active_uow.execute(
                         """
-                        INSERT INTO site_allowed_resource_template(
-                            site_uuid, resource_template_uuid
-                        ) VALUES (?, ?)
-                        """,
+                            INSERT INTO site_allowed_resource_template(
+                                site_uuid, resource_template_uuid
+                            ) VALUES (?, ?)
+                            """,
                         (site_uuid, template_uuid),
                     )
                 site = _read_site(active_uow, site_uuid)

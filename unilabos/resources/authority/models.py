@@ -115,12 +115,10 @@ class SiteRecord:
     def to_dict(self) -> dict[str, Any]:
         """投影为 Backend Site 字段加 OS-owned version。"""
 
-        return {
+        projection: dict[str, Any] = {
             "uuid": self.uuid,
             "create_time": self.create_time,
             "update_time": self.update_time,
-            "deleted_at": self.deleted_at,
-            "description": self.description,
             "meta_data": dict(self.meta_data),
             "material_uuid": self.material_uuid,
             "name": self.name,
@@ -128,7 +126,6 @@ class SiteRecord:
             "allowed_resource_template_uuids": list(
                 self.allowed_resource_template_uuids
             ),
-            "occupied_material_uuid": self.occupied_material_uuid,
             "position_x": self.position_x,
             "position_y": self.position_y,
             "position_z": self.position_z,
@@ -137,6 +134,11 @@ class SiteRecord:
             "width": self.width,
             "version": self.version,
         }
+        if self.description is not None:
+            projection["description"] = self.description
+        if self.occupied_material_uuid is not None:
+            projection["occupied_material_uuid"] = self.occupied_material_uuid
+        return projection
 
 
 class RuntimeAuthorityUnitOfWork(Protocol):

@@ -228,7 +228,7 @@ class MaterialModule:
         )
         canonical_material_uuid = _canonical_uuid(material_uuid, "material_uuid")
         if canonical_occupant_uuid == canonical_material_uuid:
-            raise MaterialInvalidInput("a Material cannot occupy its own Site")
+            raise MaterialConflict("site placement would create a cycle")
         return self._adapter.create_site(
             site_uuid=_canonical_uuid(site_uuid, "site_uuid"),
             description=description,
