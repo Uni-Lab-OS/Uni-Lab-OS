@@ -165,7 +165,7 @@ class _KnownMaterial:
         allowed_resource_template_uuids: tuple[str, ...] | None,
     ) -> ResolvedResourceSlot:
         assert material_uuid == MATERIAL_UUID
-        assert allowed_resource_template_uuids == (RESOURCE_TEMPLATE_UUID,)
+        assert allowed_resource_template_uuids is None
         return ResolvedResourceSlot(material_uuid, RESOURCE_TEMPLATE_UUID)
 
 
@@ -214,12 +214,7 @@ def test_named_and_implicit_results_remain_business_edges_through_task_creation(
             meta_data={},
         )
         assert applied["revision"] == 1
-        compiled = engine.compile(
-            workflow_uuid=WORKFLOW_UUID,
-            workflow_revision=1,
-            source_uri="package://a1_contract_lab/workflows/results.py",
-            applied_graph=service.get_graph(WORKFLOW_UUID),
-            python_source=f'''from a1_contract_lab.device import Pump
+        python_source = f'''from a1_contract_lab.device import Pump
 from unilabos.registry.placeholder_type import ResourceSlot
 from unilabos.workflow.authoring import device, workflow_definition
 
@@ -239,16 +234,35 @@ def result_flow(*, sample: ResourceSlot):
     held = pump.consume(sample=transferred.sample)
     # unilab:node_uuid=a2000000-0000-4000-8000-000000000004
     finished = pump.consume(sample=held.sample)
-''',
+'''
+        service.register_editable_source(
+            workflow_uuid=WORKFLOW_UUID,
+            package_id="a1_contract_lab",
+            package_root=workspace,
+            relative_path="workflows/results.py",
         )
-        assert compiled.valid, compiled.diagnostics
-        assert compiled.graph is not None
-        graph = service.save_graph(
+        draft = service.save_draft(
             WORKFLOW_UUID,
-            revision=1,
-            nodes=compiled.graph["nodes"],
-            edges=compiled.graph["edges"],
+            python_source=python_source,
+            expected_draft_hash=None,
+            expected_workflow_revision=1,
         )
+        candidate = draft["candidate"]
+        assert candidate is not None, draft["draft"]["diagnostics"]
+        if draft["draft"]["python_source"] != candidate["normalized_python_source"]:
+            draft = service.save_draft(
+                WORKFLOW_UUID,
+                python_source=candidate["normalized_python_source"],
+                expected_draft_hash=draft["draft"]["draft_hash"],
+                expected_workflow_revision=1,
+            )
+            candidate = draft["candidate"]
+            assert candidate is not None, draft["draft"]["diagnostics"]
+        service.apply_authoring(
+            WORKFLOW_UUID,
+            candidate_hash=candidate["candidate_hash"],
+        )
+        graph = service.get_graph(WORKFLOW_UUID)
         task = service.create_workflow_task(
             workflow_uuid=WORKFLOW_UUID,
             run_mode="normal",
