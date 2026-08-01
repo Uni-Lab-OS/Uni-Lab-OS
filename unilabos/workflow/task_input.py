@@ -72,6 +72,7 @@ class PreparedTaskInput:
     resolved_input: dict[str, Any]
     execution_plan: dict[str, Any]
     jobs: list[dict[str, Any]]
+    material_root_uuids: tuple[str, ...]
 
 
 def preflight_task_input(
@@ -99,6 +100,10 @@ def preflight_task_input(
             bindings=bindings,
             resolved_input=resolved_input,
         )
+        material_roots = material_root_uuids_from_task_snapshot(
+            graph,
+            resolved_input,
+        )
     except TaskInputError:
         raise
     except (KeyError, TypeError, ValueError, WorkflowSchemaError):
@@ -107,7 +112,78 @@ def preflight_task_input(
         resolved_input=deepcopy(resolved_input),
         execution_plan=bound_plan,
         jobs=bound_jobs,
+        material_root_uuids=material_roots,
     )
+
+
+def material_root_uuids_from_task_snapshot(
+    graph: Mapping[str, Any],
+    resolved_input: Mapping[str, Any],
+) -> tuple[str, ...]:
+    """只按 frozen Workflow Input Contract 提取 concrete ResourceSlot roots。"""
+
+    try:
+        contract = _parse_graph_input_contract(graph)
+        if type(resolved_input) is not dict:
+            raise TaskInputError()
+        parameters = contract["parameters"]
+        expected_names = {parameter["name"] for parameter in parameters}
+        if set(resolved_input) != expected_names:
+            raise TaskInputError()
+        roots: set[str] = set()
+        for parameter in parameters:
+            roots.update(
+                _material_roots_for_value(
+                    parameter["schema"],
+                    resolved_input[parameter["name"]],
+                )
+            )
+        return tuple(sorted(roots))
+    except TaskInputError:
+        raise
+    except (KeyError, TypeError, ValueError, WorkflowSchemaError):
+        raise TaskInputError("invalid_input") from None
+
+
+def _material_roots_for_value(
+    schema: Mapping[str, Any],
+    value: Any,
+) -> tuple[str, ...]:
+    if "anyOf" in schema:
+        if value is None:
+            return ()
+        members = schema["anyOf"]
+        concrete = next(
+            (member for member in members if member.get("type") != "null"),
+            None,
+        )
+        if concrete is None:
+            raise TaskInputError()
+        return _material_roots_for_value(concrete, value)
+    if schema.get("$slot") == "ResourceSlot":
+        if type(value) is not dict or set(value) != {
+            "uuid",
+            "resource_template_uuid",
+        }:
+            raise TaskInputError()
+        try:
+            material_uuid = validate_uuid(value["uuid"])
+            template_uuid = validate_uuid(value["resource_template_uuid"])
+        except (TypeError, ValueError):
+            raise TaskInputError() from None
+        allowed = schema.get("allowed_resource_template_uuids")
+        if allowed is not None and template_uuid not in allowed:
+            raise TaskInputError()
+        return (material_uuid,)
+    if schema.get("type") == "array":
+        if type(value) is not list:
+            raise TaskInputError()
+        return tuple(
+            root
+            for item in value
+            for root in _material_roots_for_value(schema["items"], item)
+        )
+    return ()
 
 
 def _parse_graph_input_contract(
@@ -447,5 +523,6 @@ __all__ = [
     "ResourceSlotResolver",
     "TaskInputError",
     "UnconfiguredResourceSlotResolver",
+    "material_root_uuids_from_task_snapshot",
     "preflight_task_input",
 ]

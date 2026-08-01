@@ -1175,6 +1175,10 @@ class WorkflowStore:
         description: Optional[str],
         meta_data: Dict[str, Any],
         plan_builder: Callable[[Dict[str, Any]], PreparedTaskInput],
+        reservation_builder: Callable[
+            [sqlite3.Connection, str, tuple[str, ...]], object
+        ]
+        | None = None,
     ) -> Dict[str, Any]:
         now = utc_now()
         with self.transaction() as conn:
@@ -1210,6 +1214,12 @@ class WorkflowStore:
                     encode_json(prepared.resolved_input).decode("utf-8"),
                 ),
             )
+            if prepared.material_root_uuids and reservation_builder is not None:
+                reservation_builder(
+                    conn,
+                    task_uuid,
+                    prepared.material_root_uuids,
+                )
             for job in jobs:
                 conn.execute(
                     """
