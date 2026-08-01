@@ -285,7 +285,7 @@ class DuplicateNodeUUIDRepair(BaseModel):
 
 
 class CandidateDiagnostic(BaseModel):
-    """One stable compiler diagnostic exposed by the Authoring contract."""
+    """Authoring 合同公开的稳定 compiler diagnostic。"""
 
     model_config = ConfigDict(extra="forbid")
 
@@ -293,6 +293,9 @@ class CandidateDiagnostic(BaseModel):
     code: str
     message: str
     source_range: Optional[DiagnosticSourceRange] = None
+    node_id: Optional[str] = None
+    path: Optional[str] = None
+    workflow_handle_template_uuid: Optional[str] = None
     duplicate_uuid: Optional[str] = None
     occurrence_ranges: Optional[List[DiagnosticSourceRange]] = None
     repair_alternatives: Optional[List[DuplicateNodeUUIDRepair]] = None
@@ -309,6 +312,18 @@ class CandidateDiagnostic(BaseModel):
     def _required_text(cls, value: str) -> str:
         if not isinstance(value, str) or not value.strip():
             raise ValueError("diagnostic text must not be blank")
+        return value
+
+    @field_validator("node_id", "workflow_handle_template_uuid")
+    @classmethod
+    def _optional_uuid(cls, value: Optional[str]) -> Optional[str]:
+        return validate_uuid(value) if value is not None else None
+
+    @field_validator("path")
+    @classmethod
+    def _optional_path(cls, value: Optional[str]) -> Optional[str]:
+        if value is not None and (not value or not value.startswith("/")):
+            raise ValueError("diagnostic path must be a JSON pointer")
         return value
 
     @model_validator(mode="after")

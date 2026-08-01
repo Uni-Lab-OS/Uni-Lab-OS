@@ -73,6 +73,68 @@ from msgcenterpy.instances.json_schema_instance import JSONSchemaMessageInstance
 from msgcenterpy.instances.ros2_instance import ROS2MessageInstance
 
 _module_hash_cache: Dict[str, Optional[str]] = {}
+
+
+def _canonical_schema_base(schema: Any) -> Dict[str, Any]:
+    if not isinstance(schema, dict):
+        return {}
+    members = schema.get("anyOf")
+    if isinstance(members, list):
+        for member in members:
+            if isinstance(member, dict) and member.get("type") != "null":
+                return member
+        return {}
+    return schema
+
+
+def _canonical_handle_type(schema: Any) -> str:
+    base = _canonical_schema_base(schema)
+    if base.get("$slot") == "ResourceSlot":
+        return "ResourceSlot"
+    return str(base.get("type") or "object")
+
+
+def _canonical_registry_action_handles(schema: Dict[str, Any]) -> Dict[str, Any]:
+    properties = schema["properties"]
+    goal = properties["goal"]
+    result = properties["result"]
+    inputs = [
+        {
+            "handler_key": name,
+            "data_type": _canonical_handle_type(value_schema),
+            "label": str(value_schema.get("title") or name),
+            "data_source": "goal",
+            "data_key": name,
+        }
+        for name, value_schema in goal["properties"].items()
+    ]
+    outputs = [
+        {
+            "handler_key": name,
+            "data_type": _canonical_handle_type(value_schema),
+            "label": str(value_schema.get("title") or name),
+            "data_source": "result",
+            "data_key": name,
+        }
+        for name, value_schema in result["properties"].items()
+    ]
+    output_names = {item["handler_key"] for item in outputs}
+    for name, value_schema in goal["properties"].items():
+        if (
+            _canonical_schema_base(value_schema).get("$slot") == "ResourceSlot"
+            and name not in output_names
+        ):
+            outputs.append(
+                {
+                    "handler_key": name,
+                    "data_type": "ResourceSlot",
+                    "label": str(value_schema.get("title") or name),
+                    "data_source": "result",
+                    "data_key": name,
+                    "implicit": True,
+                }
+            )
+    return {"input": inputs, "output": outputs}
 _DEFAULT_ACTION_DURATION_SECONDS = 60.0
 
 
@@ -942,8 +1004,192 @@ class Registry:
         # --- action_value_mappings ---
         action_value_mappings: Dict[str, Any] = {}
 
+        def _build_canonical_action_entry(method_name, method_info, action_args):
+            """验证并投影 Package/legacy scanner 的 canonical record。"""
+
+            schema = copy.deepcopy(method_info.get("schema"))
+            if not isinstance(schema, dict):
+                raise ValueError(f"Action {method_name} 缺少 canonical schema")
+            extension = schema.get("x-unilabos-action-contract")
+            properties = schema.get("properties")
+            if (
+                not isinstance(extension, dict)
+                or extension.get("version") != 1
+                or not isinstance(properties, dict)
+            ):
+                raise ValueError(f"Action {method_name} canonical schema 版本无效")
+            goal_schema = properties.get("goal")
+            result_schema = properties.get("result")
+            if not isinstance(goal_schema, dict) or not isinstance(result_schema, dict):
+                raise ValueError(f"Action {method_name} canonical schema 不完整")
+            goal_properties = goal_schema.get("properties")
+            result_properties = result_schema.get("properties")
+            input_order = extension.get("input_order")
+            output_order = extension.get("output_order")
+            if (
+                not isinstance(goal_properties, dict)
+                or not isinstance(result_properties, dict)
+                or not isinstance(input_order, list)
+                or not isinstance(output_order, list)
+                or set(input_order) != set(goal_properties)
+                or len(input_order) != len(goal_properties)
+                or set(output_order) != set(result_properties)
+                or len(output_order) != len(result_properties)
+            ):
+                raise ValueError(f"Action {method_name} canonical schema order 无效")
+
+            action_name = action_args.get("action_name") or method_name
+            if action_args.get("auto_prefix"):
+                action_name = f"auto-{action_name}"
+            action_type = action_args.get("action_type")
+            transport_goal = {name: name for name in input_order}
+            transport_feedback = copy.deepcopy(action_args.get("feedback") or {})
+            transport_result = {name: name for name in output_order}
+            if action_type:
+                if not isinstance(action_type, str):
+                    action_type = str(action_type)
+                resolved_action_type = action_type
+                if ":" not in resolved_action_type:
+                    resolved_action_type = imap.get(
+                        resolved_action_type,
+                        resolved_action_type,
+                    )
+                action_type_obj = (
+                    resolve_type_object(resolved_action_type)
+                    if ":" in resolved_action_type
+                    else None
+                )
+                if action_type_obj is None:
+                    raise ValueError(
+                        f"Action {method_name} ROS action_type 无法解析"
+                    )
+
+                def validate_transport_fields(
+                    section: str,
+                    canonical_names: list[str] | None,
+                    reserved: set[str],
+                ) -> dict[str, str]:
+                    message_type = getattr(
+                        action_type_obj,
+                        section.capitalize(),
+                        None,
+                    )
+                    get_fields = getattr(
+                        message_type,
+                        "get_fields_and_field_types",
+                        None,
+                    )
+                    if not callable(get_fields):
+                        raise ValueError(
+                            f"Action {method_name} ROS {section} schema 缺失"
+                        )
+                    ros_fields = set(get_fields()) - reserved
+                    mapping = action_args.get(section) or {
+                        name: name
+                        for name in (
+                            canonical_names
+                            if canonical_names is not None
+                            else sorted(ros_fields)
+                        )
+                    }
+                    if not isinstance(mapping, dict) or any(
+                        not isinstance(key, str)
+                        or not key
+                        or not isinstance(value, str)
+                        or not value
+                        for key, value in mapping.items()
+                    ):
+                        raise ValueError(
+                            f"Action {method_name} ROS {section} mapping 无效"
+                        )
+                    values = list(mapping.values())
+                    conflicts = set(mapping) != ros_fields or len(values) != len(
+                        set(values)
+                    )
+                    if canonical_names is not None:
+                        conflicts = conflicts or set(values) != set(canonical_names)
+                    if conflicts:
+                        raise ValueError(
+                            f"Action {method_name} ROS {section} mapping 与 canonical schema 冲突"
+                        )
+                    return copy.deepcopy(mapping)
+
+                transport_goal = validate_transport_fields(
+                    "goal",
+                    input_order,
+                    {"unilabos_param"},
+                )
+                transport_feedback = validate_transport_fields(
+                    "feedback",
+                    None,
+                    set(),
+                )
+                transport_result = validate_transport_fields(
+                    "result",
+                    output_order,
+                    {"unilabos_samples"},
+                )
+                type_str = action_type.split(":")[-1]
+            else:
+                type_str = (
+                    "UniLabJsonCommandAsync"
+                    if method_info.get("is_async", False)
+                    else "UniLabJsonCommand"
+                )
+            action_extensions = _normalize_action_extensions(action_args)
+            goal_default = copy.deepcopy(method_info.get("goal_default") or {})
+            handles = _canonical_registry_action_handles(schema)
+            entry = {
+                "type": type_str,
+                "displayname": resolve_registry_displayname(
+                    action_args.get("displayname"), action_name
+                ),
+                "goal": transport_goal,
+                "feedback": transport_feedback,
+                "result": transport_result,
+                "schema": schema,
+                "goal_default": goal_default,
+                "handles": handles,
+                "placeholder_keys": {
+                    name: name
+                    for name, value_schema in goal_properties.items()
+                    if _canonical_schema_base(value_schema).get("$slot")
+                    == "ResourceSlot"
+                },
+                "lock_resource": action_extensions["lock_resource"],
+                "estimate_duration_fixed": action_extensions[
+                    "estimate_duration_fixed"
+                ],
+                "estimate_duration_express": action_extensions[
+                    "estimate_duration_express"
+                ],
+                "feedback_interval": action_args.get(
+                    "feedback_interval", method_info.get("feedback_interval", 1.0)
+                ),
+            }
+            if method_info.get("contract_diagnostic"):
+                entry["contract_diagnostic"] = copy.deepcopy(
+                    method_info["contract_diagnostic"]
+                )
+            if action_name.removeprefix("auto-") != method_name:
+                entry["method_name"] = method_name
+            if action_args.get("always_free") or method_info.get("always_free"):
+                entry["always_free"] = True
+            if action_args.get("error_policy"):
+                entry["error_policy"] = action_args["error_policy"]
+            node_type = normalize_enum_value(action_args.get("node_type"), NodeType)
+            if node_type:
+                entry["node_type"] = node_type
+            return action_name, entry
+
         def _build_json_command_entry(method_name, method_info, action_args=None):
             """构建 UniLabJsonCommand 类型的 action entry"""
+            if action_args is not None and method_info.get("schema"):
+                return _build_canonical_action_entry(
+                    method_name,
+                    method_info,
+                    action_args,
+                )
             action_extensions = _normalize_action_extensions(action_args)
             is_async = method_info.get("is_async", False)
             type_str = "UniLabJsonCommandAsync" if is_async else "UniLabJsonCommand"
@@ -1020,6 +1266,10 @@ class Registry:
                 "estimate_duration_fixed": action_extensions["estimate_duration_fixed"],
                 "estimate_duration_express": action_extensions["estimate_duration_express"],
             }
+            if action_args is not None and method_info.get("contract_diagnostic"):
+                entry["contract_diagnostic"] = copy.deepcopy(
+                    method_info["contract_diagnostic"]
+                )
             if action_name.removeprefix("auto-") != method_name:
                 entry["method_name"] = method_name
             if (action_args or {}).get("always_free") or method_info.get("always_free"):
@@ -1051,6 +1301,14 @@ class Registry:
             action_args = method_info.get("action_args", {})
             action_type = action_args.get("action_type")
             if not action_type:
+                continue
+            if method_info.get("schema"):
+                action_name, action_entry = _build_canonical_action_entry(
+                    method_name,
+                    method_info,
+                    action_args,
+                )
+                action_value_mappings[action_name] = action_entry
                 continue
             action_extensions = _normalize_action_extensions(action_args)
 
@@ -1169,6 +1427,10 @@ class Registry:
                 "estimate_duration_fixed": action_extensions["estimate_duration_fixed"],
                 "estimate_duration_express": action_extensions["estimate_duration_express"],
             }
+            if method_info.get("contract_diagnostic"):
+                action_entry["contract_diagnostic"] = copy.deepcopy(
+                    method_info["contract_diagnostic"]
+                )
             if action_name.removeprefix("auto-") != method_name:
                 action_entry["method_name"] = method_name
             if action_args.get("always_free") or method_info.get("always_free"):

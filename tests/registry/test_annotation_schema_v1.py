@@ -1040,6 +1040,7 @@ def test_render_uses_canonical_value_instead_of_the_original_ast() -> None:
         pytest.param("Any", id="any"),
         pytest.param("object", id="object"),
         pytest.param("dict", id="bare-dict"),
+        pytest.param("dict[str, Any]", id="any-dict-value"),
         pytest.param("list", id="bare-list"),
         pytest.param("tuple[str]", id="tuple"),
         pytest.param("set[str]", id="set"),

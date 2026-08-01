@@ -23,6 +23,7 @@ from unilabos.registry.module_scope import (
     resolve_module_scope,
 )
 from unilabos.registry.utils import parse_docstring
+from unilabos.workflow.json_codec import strict_json_equal
 from unilabos.workflow.schema import (
     WorkflowInputContract,
     WorkflowOutputContract,
@@ -34,6 +35,9 @@ from unilabos.workflow.schema import (
 _ERROR_MESSAGE = "Action 定义不符合 Workflow 版本 1 合同"
 _PARSED_ACTION_CONTRACT_TOKEN = object()
 _FRAMEWORK_PARAMETERS = frozenset({"sample_uuids"})
+_ANY = "typing:Any"
+_DICT = "typing:Dict"
+_JSON_VALUE = "unilabos.registry.annotations:JSONValue"
 
 
 class ActionContractError(ValueError):
@@ -44,6 +48,16 @@ class ActionContractError(ValueError):
         self.code = code
         self.path = path
         self.message = message
+
+
+class ActionCompatibilityError(ValueError):
+    """旧 decorator 兼容断言与 canonical schema 冲突。"""
+
+    def __init__(self, code: str, path: str) -> None:
+        super().__init__(code)
+        self.code = code
+        self.path = path
+        self.message = "Action 兼容声明与 canonical contract 冲突"
 
 
 @dataclass(frozen=True, slots=True, init=False)
@@ -104,6 +118,252 @@ class ParsedActionContract:
             "input_contract": self._input_contract.to_dict(),
             "output_contract": self._output_contract.to_dict(),
         }
+
+    def to_action_schema(
+        self,
+        *,
+        action_name: str,
+        description: str = "",
+    ) -> dict[str, Any]:
+        """把唯一 canonical contract 投影到既有 Action schema。
+
+        返回的 envelope 是 PackageCatalog 与 Registry 保存的唯一 typed 权威。
+        字段顺序和源码 symbol 位于带版本的扩展中，不在旁边复制 input/output
+        contract dump。
+        """
+
+        descriptor = self.to_dict()
+        inputs = descriptor["input_contract"]["parameters"]
+        outputs = descriptor["output_contract"]["outputs"]
+        goal_properties: dict[str, Any] = {}
+        required_inputs: list[str] = []
+        for parameter in inputs:
+            name = parameter["name"]
+            field = _action_value_schema(parameter["schema"])
+            if "default" in parameter:
+                field["default"] = parameter["default"]
+            for key in ("title", "description"):
+                if key in parameter:
+                    field[key] = parameter[key]
+            goal_properties[name] = field
+            if parameter["required"]:
+                required_inputs.append(name)
+
+        result_properties: dict[str, Any] = {}
+        for output in outputs:
+            field = _action_value_schema(output["schema"])
+            for key in ("title", "description"):
+                if key in output:
+                    field[key] = output[key]
+            result_properties[output["name"]] = field
+
+        return {
+            "title": f"{action_name}参数",
+            "description": description or f"{action_name}的参数schema",
+            "type": "object",
+            "properties": {
+                "goal": {
+                    "type": "object",
+                    "properties": goal_properties,
+                    "required": required_inputs,
+                    "additionalProperties": False,
+                },
+                "feedback": {},
+                "result": {
+                    "type": "object",
+                    "properties": result_properties,
+                    "required": [output["name"] for output in outputs],
+                    "additionalProperties": False,
+                },
+            },
+            "required": ["goal"],
+            "x-unilabos-action-contract": {
+                "version": 1,
+                "input_order": [parameter["name"] for parameter in inputs],
+                "output_order": [output["name"] for output in outputs],
+                "resource_template_symbols": {
+                    "goal": _symbol_projection(self.input_resource_templates),
+                    "result": _symbol_projection(self.output_resource_templates),
+                },
+            },
+        }
+
+
+def _action_value_schema(value: Mapping[str, Any]) -> dict[str, Any]:
+    """把严格 Workflow value schema 渲染为 JSON Schema 展示形状。"""
+
+    rendered = {key: _copy_json(item) for key, item in value.items()}
+    if rendered.get("type") == "object":
+        rendered["additionalProperties"] = True
+    return rendered
+
+
+def _copy_json(value: Any) -> Any:
+    if isinstance(value, Mapping):
+        return {str(key): _copy_json(item) for key, item in value.items()}
+    if isinstance(value, list):
+        return [_copy_json(item) for item in value]
+    return value
+
+
+def _symbol_projection(
+    groups: tuple[tuple[str, tuple[ResourceTemplateSymbol, ...]], ...],
+) -> dict[str, list[str]]:
+    return {
+        name: [symbol.qualified_name for symbol in symbols]
+        for name, symbols in groups
+        if symbols
+    }
+
+
+def canonical_goal_defaults(schema: Mapping[str, Any]) -> dict[str, Any]:
+    """从唯一 Action schema 派生兼容默认值投影。"""
+
+    properties = schema["properties"]["goal"]["properties"]
+    return {
+        str(name): _copy_json(value["default"])
+        for name, value in properties.items()
+        if "default" in value
+    }
+
+
+def validate_legacy_action_assertions(
+    schema: Mapping[str, Any],
+    *,
+    action_name: str,
+    goal_default: Any = None,
+    handles: Any = None,
+) -> dict[str, Any]:
+    """校验旧 decorator 值，不合并第二份 contract。"""
+
+    defaults = canonical_goal_defaults(schema)
+    if goal_default not in (None, {}):
+        if not isinstance(goal_default, Mapping):
+            _compatibility_fail(
+                "action_default_contract_conflict",
+                f"/actions/{action_name}/goal_default",
+            )
+        for key in sorted(set(goal_default) | set(defaults)):
+            if (
+                key not in goal_default
+                or key not in defaults
+                or not strict_json_equal(goal_default[key], defaults[key])
+            ):
+                _compatibility_fail(
+                    "action_default_contract_conflict",
+                    f"/actions/{action_name}/goal_default/{key}",
+                )
+    _validate_legacy_handles(handles, schema=schema, action_name=action_name)
+    return defaults
+
+
+def _validate_legacy_handles(
+    raw: Any,
+    *,
+    schema: Mapping[str, Any],
+    action_name: str,
+) -> None:
+    if raw in (None, [], {}):
+        return
+    if not isinstance(raw, list):
+        _compatibility_fail(
+            "action_handle_contract_conflict",
+            f"/actions/{action_name}/handles",
+        )
+    actual: dict[tuple[str, str], tuple[str, str, str]] = {}
+    for index, handle in enumerate(raw):
+        if not isinstance(handle, Mapping):
+            _compatibility_fail(
+                "action_handle_contract_conflict",
+                f"/actions/{action_name}/handles/{index}",
+            )
+        call = str(handle.get("$call") or handle.get("_call") or "")
+        kwargs = handle.get("kwargs")
+        values = kwargs if isinstance(kwargs, Mapping) else handle
+        if call.endswith(("ActionInputHandle", "InputHandle")):
+            io_type = "target"
+            default_source = "goal"
+        elif call.endswith(("ActionOutputHandle", "OutputHandle")):
+            io_type = "source"
+            default_source = "result"
+        else:
+            _compatibility_fail(
+                "action_handle_contract_conflict",
+                f"/actions/{action_name}/handles/{index}",
+            )
+        key = values.get("key")
+        if not isinstance(key, str) or not key:
+            _compatibility_fail(
+                "action_handle_contract_conflict",
+                f"/actions/{action_name}/handles/{index}",
+            )
+        identity = (io_type, key)
+        if identity in actual:
+            _compatibility_fail(
+                "action_handle_contract_conflict",
+                f"/actions/{action_name}/handles/{index}",
+            )
+        actual[identity] = (
+            str(values.get("data_type") or ""),
+            str(values.get("data_source") or default_source).lower(),
+            str(values.get("data_key") or key),
+        )
+
+    expected: dict[tuple[str, str], tuple[str, str, str]] = {}
+    goal = schema["properties"]["goal"]
+    for name, value_schema in goal["properties"].items():
+        expected[("target", name)] = (
+            _legacy_value_type(value_schema),
+            "goal",
+            name,
+        )
+    result = schema["properties"]["result"]
+    for name, value_schema in result["properties"].items():
+        expected[("source", name)] = (
+            _legacy_value_type(value_schema),
+            "result",
+            name,
+        )
+    for name, value_schema in goal["properties"].items():
+        if (
+            _base_value_schema(value_schema).get("$slot") == "ResourceSlot"
+            and (
+                "source",
+                name,
+            )
+            not in expected
+        ):
+            expected[("source", name)] = ("ResourceSlot", "result", name)
+    if actual != expected:
+        _compatibility_fail(
+            "action_handle_contract_conflict",
+            f"/actions/{action_name}/handles",
+        )
+
+
+def _base_value_schema(schema: Mapping[str, Any]) -> Mapping[str, Any]:
+    members = schema.get("anyOf")
+    if isinstance(members, list):
+        return next(
+            (
+                item
+                for item in members
+                if isinstance(item, Mapping) and item.get("type") != "null"
+            ),
+            {},
+        )
+    return schema
+
+
+def _legacy_value_type(schema: Mapping[str, Any]) -> str:
+    base = _base_value_schema(schema)
+    if base.get("$slot") == "ResourceSlot":
+        return "ResourceSlot"
+    return str(base.get("type") or "object")
+
+
+def _compatibility_fail(code: str, path: str) -> Never:
+    raise ActionCompatibilityError(code, path)
 
 
 def _fail(
@@ -373,6 +633,14 @@ def _parse_results(
     declaration = getattr(action, "returns", None)
     if declaration is None:
         _fail("/return")
+    if isinstance(declaration, ast.expr) and _opaque_dict_result(
+        declaration,
+        imports,
+    ):
+        try:
+            return parse_output_contract({"version": 1, "outputs": []}), ()
+        except WorkflowSchemaError as error:  # pragma: no cover - 常量合同防御
+            _fail(error.path or "/return", code="invalid_schema")
     if isinstance(declaration, ast.Name):
         name = getattr(declaration, "id", None)
         if type(name) is not str:
@@ -405,6 +673,46 @@ def _parse_results(
             message=error.message,
         )
     return contract, parsed.resource_templates
+
+
+def _opaque_dict_result(
+    declaration: ast.expr,
+    imports: Mapping[str, str],
+) -> bool:
+    """只接受顶层兼容 opaque JSON mapping，不放宽字段 annotation。"""
+
+    if isinstance(declaration, ast.Name):
+        return declaration.id == "dict" and declaration.id not in imports
+    if not isinstance(declaration, ast.Subscript):
+        return False
+    origin = declaration.value
+    if isinstance(origin, ast.Name):
+        valid_origin = (
+            origin.id == "dict" and origin.id not in imports
+        ) or imports.get(origin.id) == _DICT
+    elif isinstance(origin, ast.Attribute) and isinstance(origin.value, ast.Name):
+        valid_origin = (
+            imports.get(origin.value.id) == "typing" and origin.attr == "Dict"
+        )
+    else:
+        valid_origin = False
+    if not valid_origin:
+        return False
+    members = (
+        list(declaration.slice.elts)
+        if isinstance(declaration.slice, ast.Tuple)
+        else [declaration.slice]
+    )
+    if len(members) != 2:
+        return False
+    key, value = members
+    return (
+        isinstance(key, ast.Name)
+        and key.id == "str"
+        and key.id not in imports
+        and isinstance(value, ast.Name)
+        and imports.get(value.id) in {_ANY, _JSON_VALUE}
+    )
 
 
 def parse_action_contract(
@@ -446,7 +754,10 @@ def parse_action_contract(
 
 
 __all__ = [
+    "ActionCompatibilityError",
     "ActionContractError",
     "ParsedActionContract",
+    "canonical_goal_defaults",
     "parse_action_contract",
+    "validate_legacy_action_assertions",
 ]
