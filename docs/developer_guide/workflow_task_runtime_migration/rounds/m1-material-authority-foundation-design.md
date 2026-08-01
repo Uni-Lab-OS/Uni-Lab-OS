@@ -34,23 +34,18 @@ repository primitive，以及 restart/reconciliation 所需的持久事实。
   `EdgeScheduler` 永远不能成为 Material、Reservation、Claim、fencing 或 admission 的
   权威。
 
-### 1.1 production RED 暂停条件
+### 1.1 production RED gate 与可移植性
 
-本设计文档可以继续审阅和发布，但 production RED 与 production implementation 当前
-暂停。原因是 [Core #158](https://github.com/Uni-Lab-OS/Uni-Lab-Core/issues/158) 正在裁决：
-[Core #104](https://github.com/Uni-Lab-OS/Uni-Lab-Core/issues/104) 要求每个
-implementation round 至少两个 test-author、至少三个 reviewer，而本仓 `AGENTS.md` 的
-Workflow Migration Round Gate 要求恰好一个 test-author、恰好一个 reviewer，且 agent
-不得并发。两条当前都标记为强制规则，不能由实现者自行挑选或折中。
+[Core #158](https://github.com/Uni-Lab-OS/Uni-Lab-Core/issues/158) 已 Accepted，并明确
+supersede Core #104 的 2 test-author / 3 reviewer 数量要求。M1 每个 round 使用恰好一名
+test-author、一名 implementation owner 和一名 reviewer；同一 round 严格串行，A1/I1/M1
+可以在隔离 branch/worktree 中并行。production implementation 仍必须先取得独立 RED commit。
 
-在治理权威明确消解该人数冲突前：
-
-- 不分派 production RED test-author；
-- 不修改 production code 或 production migration；
-- 不声称 M1 已从 `stage:protocol-definition` 进入 implementation；
-- 不用手写本地测试替代独立 RED provenance。
-
-冲突消解后，按被明确确认的唯一 gate 执行，不从本文件反向推断 agent 人数。
+SQLite 是 OS 当前 durable adapter 和原子 UoW 的部署选择，不是跨层 domain contract。Material
+Module 的 identity、invariant、Reservation/Claim/ChangeSet port、closed DTO 与错误分类不得
+泄漏 table name、rowid、SQLite exception 或 connection lifecycle。测试以 public Module、
+WorkflowService/HTTP seam 验证行为；直接检查 SQLite 只用于 constraint、atomicity、crash 与
+reopen 证据。未来替换持久化 adapter 时，不得改变稳定 UUID、fencing、幂等与 public DTO 语义。
 
 ### 1.2 Feishu 协议冲突
 
@@ -601,9 +596,9 @@ FE 展示：
 - Claim `fenced`/reconciling 是 operator-visible unresolved state，不展示成“空闲”或自动
   “已释放”。
 
-## 15. RED 计划与验收矩阵（待治理冲突解除）
+## 15. RED 计划与验收矩阵
 
-冲突解除后的独立 RED 必须通过 public Module/WorkflowService/真实 HTTP seam 与真实 SQLite
+独立 RED 必须通过 public Module/WorkflowService/真实 HTTP seam 与真实 SQLite
 编写。直接查 SQLite 只用于 schema constraint、atomicity、fencing、ledger/outbox、crash 和
 reopen 证据；不能 mock repository transaction 来证明原子性。
 
