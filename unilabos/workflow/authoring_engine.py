@@ -74,6 +74,12 @@ _PARALLEL = f"{_AUTHORING_MODULE}:parallel"
 _RESOURCE_REF = f"{_AUTHORING_MODULE}:resource_ref"
 _WORKFLOW_DEFINITION = f"{_AUTHORING_MODULE}:workflow_definition"
 _WORKFLOW_OUTPUT = f"{_AUTHORING_MODULE}:workflow_output"
+_MATERIAL_FLOW_ROLES = {
+    "PRIMARY_SAMPLE": "primary_sample",
+    "ALIQUOT_SAMPLE": "aliquot_sample",
+    "REAGENT": "reagent",
+    "CONSUMABLE": "consumable",
+}
 _OWNED_WORKFLOW_KEYS = {
     "input_contract",
     "output_contract",
@@ -1488,10 +1494,14 @@ def _parse_material_source(
         )
 
     mode = keywords["mode"]
-    if not isinstance(mode, ast.Constant) or mode.value != "existing":
+    if (
+        not isinstance(mode, ast.Constant)
+        or not isinstance(mode.value, str)
+        or mode.value not in {"existing", "create_new"}
+    ):
         _fail(
             "invalid_material_source",
-            "首版 MaterialSource mode 必须是 existing",
+            "MaterialSource mode 不在闭合目录中",
             node=mode,
         )
     mount = keywords["mount"]
@@ -1516,7 +1526,33 @@ def _parse_material_source(
             "mount 必须是 canonical non-nil UUID",
             node=mount,
         )
-    for field_name in ("material_uuid", "site", "slot_range"):
+    material_uuid_expression = keywords["material_uuid"]
+    material_uuid: str | None
+    if (
+        isinstance(material_uuid_expression, ast.Constant)
+        and material_uuid_expression.value is None
+    ):
+        material_uuid = None
+    elif (
+        mode.value == "existing"
+        and isinstance(material_uuid_expression, ast.Constant)
+        and isinstance(material_uuid_expression.value, str)
+    ):
+        try:
+            material_uuid = validate_uuid(material_uuid_expression.value)
+        except (TypeError, ValueError):
+            _fail(
+                "invalid_material_source",
+                "material_uuid 必须是 canonical non-nil UUID 或 None",
+                node=material_uuid_expression,
+            )
+    else:
+        _fail(
+            "invalid_material_source",
+            "create_new 禁止指定 material_uuid",
+            node=material_uuid_expression,
+        )
+    for field_name in ("site", "slot_range"):
         expression = keywords[field_name]
         if not isinstance(expression, ast.Constant) or expression.value is not None:
             _fail(
@@ -1529,11 +1565,11 @@ def _parse_material_source(
         isinstance(role, ast.Attribute)
         and isinstance(role.value, ast.Name)
         and state.imports.get(role.value.id) == _MATERIAL_FLOW_ROLE
-        and role.attr == "PRIMARY_SAMPLE"
+        and role.attr in _MATERIAL_FLOW_ROLES
     ):
         _fail(
             "invalid_material_source",
-            "flow_role 必须是 MaterialFlowRole.PRIMARY_SAMPLE",
+            "flow_role 必须是 MaterialFlowRole 的闭合成员",
             node=role,
         )
 
@@ -1548,13 +1584,13 @@ def _parse_material_source(
         name=result_name,
         node_type="material_source",
         param={
-            "mode": "existing",
+            "mode": mode.value,
             "resource_template_uuid": resource_template_uuid,
             "mount": {"uuid": mount_uuid},
-            "material_uuid": None,
+            "material_uuid": material_uuid,
             "site": None,
             "slot_range": None,
-            "flow_role": "primary_sample",
+            "flow_role": _MATERIAL_FLOW_ROLES[role.attr],
         },
         meta_data=_node_metadata(applied.get("meta_data"), None),
         action_name=None,
@@ -3087,28 +3123,42 @@ def _emit_material_source(
     resource_template_uuid = str(param.get("resource_template_uuid"))
     resource_symbol = resource_import_names.get(resource_template_uuid)
     mount = param.get("mount")
+    mode = param.get("mode")
+    material_uuid = param.get("material_uuid")
+    role_member = next(
+        (
+            member
+            for member, wire_value in _MATERIAL_FLOW_ROLES.items()
+            if wire_value == param.get("flow_role")
+        ),
+        None,
+    )
     if (
         resource_symbol is None
-        or param.get("mode") != "existing"
+        or mode not in {"existing", "create_new"}
         or not isinstance(mount, dict)
         or set(mount) != {"uuid"}
-        or any(
-            param.get(name) is not None
-            for name in ("material_uuid", "site", "slot_range")
-        )
-        or param.get("flow_role") != "primary_sample"
+        or any(param.get(name) is not None for name in ("site", "slot_range"))
+        or role_member is None
+        or (mode == "create_new" and material_uuid is not None)
     ):
         _fail("invalid_material_source", "MaterialSource selector 不符合当前合同")
     try:
         mount_uuid = validate_uuid(mount["uuid"])
     except (KeyError, TypeError, ValueError):
         _fail("invalid_material_source", "MaterialSource mount UUID 无效")
+    if material_uuid is not None:
+        try:
+            material_uuid = validate_uuid(material_uuid)
+        except (TypeError, ValueError):
+            _fail("invalid_material_source", "MaterialSource material UUID 无效")
     result_name = _safe_identifier(str(node.get("name") or "material"), "material")
     construct = (
         f"{result_name} = material_source("
-        f"resource_template={resource_symbol}, mode='existing', "
-        f"mount=resource_ref({mount_uuid!r}), material_uuid=None, site=None, "
-        "slot_range=None, flow_role=MaterialFlowRole.PRIMARY_SAMPLE)"
+        f"resource_template={resource_symbol}, mode={mode!r}, "
+        f"mount=resource_ref({mount_uuid!r}), material_uuid={material_uuid!r}, "
+        "site=None, slot_range=None, "
+        f"flow_role=MaterialFlowRole.{role_member})"
     )
     emitter.anchored(str(node["uuid"]), construct, indent=indent)
 
