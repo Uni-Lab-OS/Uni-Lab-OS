@@ -26,16 +26,26 @@ from unilabos.registry.annotation_schema import (
 from unilabos.registry.utils import parse_docstring
 from unilabos.workflow.catalog import (
     CatalogAuthority,
+    ResourceTemplateIdentityIndex,
     TemplateCatalog,
     TemplateCatalogError,
     TemplateCatalogSnapshot,
     TemplateCatalogUnavailable,
 )
-from unilabos.workflow.graph_validation import GraphValidationError, validate_graph
+from unilabos.workflow.graph_validation import (
+    CodedGraphValidationError,
+    GraphValidationError,
+    validate_graph,
+)
 from unilabos.workflow.json_codec import (
     decode_json_bytes,
     encode_json,
     strict_json_equal,
+)
+from unilabos.workflow.material_source import (
+    MaterialSourceAuthorityError,
+    MaterialSourceStaticAuthority,
+    validate_material_source_authority,
 )
 from unilabos.workflow.models import (
     CandidateCompilation,
@@ -67,9 +77,18 @@ _ANCHOR_LIKE = re.compile(r"^#\s*unilab:node_uuid")
 _AUTHORING_MODULE = "unilabos.workflow.authoring"
 _DEVICE = f"{_AUTHORING_MODULE}:device"
 _GROUP = f"{_AUTHORING_MODULE}:group"
+_MATERIAL_FLOW_ROLE = f"{_AUTHORING_MODULE}:MaterialFlowRole"
+_MATERIAL_SOURCE = f"{_AUTHORING_MODULE}:material_source"
 _PARALLEL = f"{_AUTHORING_MODULE}:parallel"
+_RESOURCE_REF = f"{_AUTHORING_MODULE}:resource_ref"
 _WORKFLOW_DEFINITION = f"{_AUTHORING_MODULE}:workflow_definition"
 _WORKFLOW_OUTPUT = f"{_AUTHORING_MODULE}:workflow_output"
+_MATERIAL_FLOW_ROLES = {
+    "PRIMARY_SAMPLE": "primary_sample",
+    "ALIQUOT_SAMPLE": "aliquot_sample",
+    "REAGENT": "reagent",
+    "CONSUMABLE": "consumable",
+}
 _OWNED_WORKFLOW_KEYS = {
     "input_contract",
     "output_contract",
@@ -331,6 +350,7 @@ class _BuildState:
     input_names: set[str]
     applied_nodes: dict[str, dict[str, Any]]
     catalog: _CatalogIndex
+    resource_template_identity_index: ResourceTemplateIdentityIndex | None
     nodes: list[_NodeState] = field(default_factory=list)
     edges: list[dict[str, Any]] = field(default_factory=list)
     results: dict[str, _NodeState] = field(default_factory=dict)
@@ -384,6 +404,39 @@ class _CatalogIndex:
     ) -> tuple[dict[str, Any], tuple[dict[str, Any], ...]]:
         return self.action(_GROUP.rsplit(":", 1)[0] + ":group", "group", node=node)
 
+    def material_source(
+        self,
+        *,
+        node: ast.AST,
+    ) -> tuple[dict[str, Any], tuple[dict[str, Any], ...]]:
+        template, handles = self.action(
+            _MATERIAL_SOURCE,
+            "material_source",
+            node=node,
+        )
+        if (
+            template.get("type") != "material_source"
+            or template.get("node_type") != "material_source"
+            or len(handles) != 1
+        ):
+            _fail(
+                "template_catalog_mismatch",
+                "MaterialSource framework template 不符合合同",
+                node=node,
+            )
+        handle = handles[0]
+        if (
+            handle.get("handle_key") != "material"
+            or handle.get("io_type") != "source"
+            or handle.get("type") != "ResourceSlot"
+        ):
+            _fail(
+                "template_catalog_mismatch",
+                "MaterialSource framework Handle 不符合合同",
+                node=node,
+            )
+        return template, handles
+
 
 class WorkflowAuthoringEngine:
     """把一个稳定 Template Catalog snapshot 深化为三个纯 Authoring transform。"""
@@ -395,6 +448,8 @@ class WorkflowAuthoringEngine:
         *,
         catalog: TemplateCatalog,
         authority: CatalogAuthority,
+        resource_template_identity_index: ResourceTemplateIdentityIndex | None = None,
+        material_source_authority: MaterialSourceStaticAuthority | None = None,
     ) -> None:
         if not isinstance(catalog, TemplateCatalog):
             raise TypeError("catalog 必须是 TemplateCatalog")
@@ -402,6 +457,8 @@ class WorkflowAuthoringEngine:
             raise TypeError("authority 必须是 CatalogAuthority")
         self._catalog = catalog
         self._authority = authority
+        self._resource_template_identity_index = resource_template_identity_index
+        self._material_source_authority = material_source_authority
         self._active_snapshot: ContextVar[TemplateCatalogSnapshot | None] = ContextVar(
             f"authoring_snapshot_{id(self)}",
             default=None,
@@ -478,6 +535,10 @@ class WorkflowAuthoringEngine:
                     python_source=python_source,
                     source_uri=source_uri,
                     applied_graph=applied_graph,
+                    resource_template_identity_index=(
+                        self._resource_template_identity_index
+                    ),
+                    material_source_authority=self._material_source_authority,
                 )
         except TemplateCatalogUnavailable:
             return _error_result(
@@ -521,6 +582,10 @@ class WorkflowAuthoringEngine:
                     workflow_revision=workflow_revision,
                     graph=graph,
                     source_uri=source_uri,
+                    resource_template_identity_index=(
+                        self._resource_template_identity_index
+                    ),
+                    material_source_authority=self._material_source_authority,
                 )
         except TemplateCatalogUnavailable:
             return _error_result(
@@ -565,6 +630,10 @@ class WorkflowAuthoringEngine:
                     workflow_revision=workflow_revision,
                     graph=graph,
                     source_uri=source_uri,
+                    resource_template_identity_index=(
+                        self._resource_template_identity_index
+                    ),
+                    material_source_authority=self._material_source_authority,
                 )
                 if not generated.valid:
                     return generated
@@ -575,6 +644,10 @@ class WorkflowAuthoringEngine:
                     python_source=python_source,
                     source_uri=source_uri,
                     applied_graph=graph,
+                    resource_template_identity_index=(
+                        self._resource_template_identity_index
+                    ),
+                    material_source_authority=self._material_source_authority,
                 )
                 if not compiled.valid or not _semantic_graph_equal(
                     compiled.graph,
@@ -646,6 +719,8 @@ def _compile_with_snapshot(
     python_source: str,
     source_uri: str,
     applied_graph: dict[str, Any],
+    resource_template_identity_index: ResourceTemplateIdentityIndex | None,
+    material_source_authority: MaterialSourceStaticAuthority | None,
     prove_normalized: bool = True,
 ) -> CandidateCompilation:
     del source_uri
@@ -682,6 +757,7 @@ def _compile_with_snapshot(
             input_names={item["name"] for item in input_contract["parameters"]},
             applied_nodes={item["uuid"]: item for item in applied["nodes"]},
             catalog=_CatalogIndex(snapshot),
+            resource_template_identity_index=resource_template_identity_index,
         )
         executable, return_statement = _function_body(function)
         if executable == [None]:
@@ -713,8 +789,14 @@ def _compile_with_snapshot(
             output_contract=output_contract,
             output_bindings=output_bindings,
         )
-        _validate_built_graph(graph)
-        normalized, source_map = _render_graph(graph)
+        _validate_built_graph(
+            graph,
+            material_source_authority=material_source_authority,
+        )
+        normalized, source_map = _render_graph(
+            graph,
+            resource_template_identity_index=resource_template_identity_index,
+        )
         if prove_normalized:
             proof = _compile_with_snapshot(
                 snapshot=snapshot,
@@ -723,6 +805,8 @@ def _compile_with_snapshot(
                 python_source=normalized,
                 source_uri="authoring://normalized-proof",
                 applied_graph=graph,
+                resource_template_identity_index=resource_template_identity_index,
+                material_source_authority=material_source_authority,
                 prove_normalized=False,
             )
             if (
@@ -760,6 +844,12 @@ def _compile_with_snapshot(
         )
     except WorkflowSchemaError as error:
         failure = _AuthoringFailure(error.code, error.message)
+        return _error_result(
+            fingerprint=snapshot.fingerprint,
+            diagnostic=_diagnostic(failure, python_source),
+        )
+    except (CodedGraphValidationError, MaterialSourceAuthorityError) as error:
+        failure = _AuthoringFailure(error.code, str(error))
         return _error_result(
             fingerprint=snapshot.fingerprint,
             diagnostic=_diagnostic(failure, python_source),
@@ -1282,12 +1372,25 @@ def _parse_sequence(
     previous: tuple[str, ...] = ()
     for statement in statements:
         if isinstance(statement, ast.Assign):
-            segment = _parse_action(
-                statement,
-                state=state,
-                available_results=available_results,
-                parent_uuid=parent_uuid,
+            call_identity = (
+                _call_identity(statement.value, state.imports)
+                if isinstance(statement.value, ast.Call)
+                else None
             )
+            if call_identity == _MATERIAL_SOURCE:
+                segment = _parse_material_source(
+                    statement,
+                    state=state,
+                    available_results=available_results,
+                    parent_uuid=parent_uuid,
+                )
+            else:
+                segment = _parse_action(
+                    statement,
+                    state=state,
+                    available_results=available_results,
+                    parent_uuid=parent_uuid,
+                )
         elif isinstance(statement, ast.With):
             kind = _with_kind(statement, state.imports)
             if kind == "group":
@@ -1337,6 +1440,250 @@ def _with_kind(statement: ast.With, imports: Mapping[str, str]) -> str | None:
     if identity == _PARALLEL:
         return "parallel"
     return None
+
+
+def _parse_material_source(
+    statement: ast.Assign,
+    *,
+    state: _BuildState,
+    available_results: dict[str, _NodeState],
+    parent_uuid: str | None,
+) -> _Flow:
+    if (
+        len(statement.targets) != 1
+        or not isinstance(statement.targets[0], ast.Name)
+        or not isinstance(statement.value, ast.Call)
+        or _call_identity(statement.value, state.imports) != _MATERIAL_SOURCE
+    ):
+        _fail(
+            "invalid_material_source",
+            "MaterialSource 必须由一个新名字接收",
+            node=statement,
+        )
+    result_name = statement.targets[0].id
+    if (
+        result_name in available_results
+        or result_name in state.selectors
+        or result_name in state.input_names
+    ):
+        _fail(
+            "invalid_material_source",
+            "MaterialSource 名称不能重绑定",
+            node=statement.targets[0],
+        )
+    call = statement.value
+    if call.args or any(item.arg is None for item in call.keywords):
+        _fail(
+            "invalid_material_source",
+            "material_source 只接受命名参数",
+            node=call,
+        )
+    keywords = {str(item.arg): item.value for item in call.keywords if item.arg}
+    required = {
+        "resource_template",
+        "mode",
+        "mount",
+        "material_uuid",
+        "site",
+        "slot_range",
+        "flow_role",
+    }
+    if len(keywords) != len(call.keywords) or set(keywords) != required:
+        _fail(
+            "invalid_material_source",
+            "material_source 字段不符合当前合同",
+            node=call,
+        )
+
+    resource_expression = keywords["resource_template"]
+    if not isinstance(resource_expression, ast.Name):
+        _fail(
+            "template_catalog_mismatch",
+            "resource_template 必须是绝对导入的静态 symbol",
+            node=resource_expression,
+        )
+    qualified_name = state.imports.get(resource_expression.id)
+    index = state.resource_template_identity_index
+    if not qualified_name or ":" not in qualified_name or index is None:
+        _fail(
+            "template_catalog_mismatch",
+            "当前 authority 无法解析 ResourceTemplate symbol",
+            node=resource_expression,
+        )
+    try:
+        resource_template_uuid = validate_uuid(index.resolve_symbol(qualified_name))
+        if index.identify_uuid(resource_template_uuid) != qualified_name:
+            raise LookupError(qualified_name)
+    except (AttributeError, LookupError, TypeError, ValueError):
+        _fail(
+            "template_catalog_mismatch",
+            "当前 authority 无法解析 ResourceTemplate symbol",
+            node=resource_expression,
+        )
+
+    mode = keywords["mode"]
+    if (
+        not isinstance(mode, ast.Constant)
+        or not isinstance(mode.value, str)
+        or mode.value not in {"existing", "create_new"}
+    ):
+        _fail(
+            "invalid_material_source",
+            "MaterialSource mode 不在闭合目录中",
+            node=mode,
+        )
+    mount = keywords["mount"]
+    if (
+        not isinstance(mount, ast.Call)
+        or _call_identity(mount, state.imports) != _RESOURCE_REF
+        or len(mount.args) != 1
+        or mount.keywords
+        or not isinstance(mount.args[0], ast.Constant)
+        or not isinstance(mount.args[0].value, str)
+    ):
+        _fail(
+            "invalid_material_source",
+            "mount 必须是单 UUID literal resource_ref",
+            node=mount,
+        )
+    try:
+        mount_uuid = validate_uuid(mount.args[0].value)
+    except (TypeError, ValueError):
+        _fail(
+            "invalid_material_source",
+            "mount 必须是 canonical non-nil UUID",
+            node=mount,
+        )
+    material_uuid_expression = keywords["material_uuid"]
+    material_uuid: str | None
+    if (
+        isinstance(material_uuid_expression, ast.Constant)
+        and material_uuid_expression.value is None
+    ):
+        material_uuid = None
+    elif (
+        mode.value == "existing"
+        and isinstance(material_uuid_expression, ast.Constant)
+        and isinstance(material_uuid_expression.value, str)
+    ):
+        try:
+            material_uuid = validate_uuid(material_uuid_expression.value)
+        except (TypeError, ValueError):
+            _fail(
+                "invalid_material_source",
+                "material_uuid 必须是 canonical non-nil UUID 或 None",
+                node=material_uuid_expression,
+            )
+    else:
+        _fail(
+            "invalid_material_source",
+            "create_new 禁止指定 material_uuid",
+            node=material_uuid_expression,
+        )
+    site_expression = keywords["site"]
+    site: str | None
+    if isinstance(site_expression, ast.Constant) and site_expression.value is None:
+        site = None
+    elif isinstance(site_expression, ast.Constant) and isinstance(
+        site_expression.value,
+        str,
+    ):
+        try:
+            site = validate_uuid(site_expression.value)
+        except (TypeError, ValueError):
+            _fail(
+                "invalid_material_source",
+                "site 必须是 canonical non-nil UUID 或 None",
+                node=site_expression,
+            )
+    else:
+        _fail(
+            "invalid_material_source",
+            "site 必须是 UUID string literal 或 None",
+            node=site_expression,
+        )
+
+    range_expression = keywords["slot_range"]
+    slot_range: list[str] | None
+    if isinstance(range_expression, ast.Constant) and range_expression.value is None:
+        slot_range = None
+    elif isinstance(range_expression, ast.List) and range_expression.elts:
+        slot_range = []
+        for item in range_expression.elts:
+            if not isinstance(item, ast.Constant) or not isinstance(item.value, str):
+                _fail(
+                    "invalid_material_source",
+                    "slot_range 只接受 Site UUID string literals",
+                    node=item,
+                )
+            try:
+                slot_range.append(validate_uuid(item.value))
+            except (TypeError, ValueError):
+                _fail(
+                    "invalid_material_source",
+                    "slot_range 只接受 canonical non-nil UUID",
+                    node=item,
+                )
+        if len(set(slot_range)) != len(slot_range) or slot_range != sorted(slot_range):
+            _fail(
+                "invalid_material_source",
+                "slot_range 必须无重复并按 Site UUID 规范排序",
+                node=range_expression,
+            )
+    else:
+        _fail(
+            "invalid_material_source",
+            "slot_range 必须是非空 Site UUID 数组或 None",
+            node=range_expression,
+        )
+    if site is not None and slot_range is not None:
+        _fail(
+            "invalid_material_source",
+            "site 与 slot_range 互斥",
+            node=call,
+        )
+    role = keywords["flow_role"]
+    if not (
+        isinstance(role, ast.Attribute)
+        and isinstance(role.value, ast.Name)
+        and state.imports.get(role.value.id) == _MATERIAL_FLOW_ROLE
+        and role.attr in _MATERIAL_FLOW_ROLES
+    ):
+        _fail(
+            "invalid_material_source",
+            "flow_role 必须是 MaterialFlowRole 的闭合成员",
+            node=role,
+        )
+
+    template, handles = state.catalog.material_source(node=call)
+    node_uuid = state.node_uuid(statement)
+    applied = state.applied_nodes.get(node_uuid, {})
+    node = _node_payload(
+        applied,
+        uuid=node_uuid,
+        template_uuid=template["uuid"],
+        parent_uuid=parent_uuid,
+        name=result_name,
+        node_type="material_source",
+        param={
+            "mode": mode.value,
+            "resource_template_uuid": resource_template_uuid,
+            "mount": {"uuid": mount_uuid},
+            "material_uuid": material_uuid,
+            "site": site,
+            "slot_range": slot_range,
+            "flow_role": _MATERIAL_FLOW_ROLES[role.attr],
+        },
+        meta_data=_node_metadata(applied.get("meta_data"), None),
+        action_name=None,
+    )
+    node.pop("material_uuid", None)
+    node_state = _NodeState(node, template, handles, result_name, statement)
+    state.nodes.append(node_state)
+    available_results[result_name] = node_state
+    state.results[result_name] = node_state
+    # MaterialSource 不执行，不参与 ready 控制链；消费者的数据边表达顺序。
+    return _Flow()
 
 
 def _parse_action(
@@ -1626,6 +1973,11 @@ def _result_reference(
     expression: ast.expr,
     results: Mapping[str, _NodeState],
 ) -> tuple[_NodeState, str] | None:
+    if isinstance(expression, ast.Name):
+        producer = results.get(expression.id)
+        if producer is not None and _is_material_source_template(producer.template):
+            return producer, "material"
+        return None
     if not (
         isinstance(expression, ast.Attribute) and isinstance(expression.value, ast.Name)
     ):
@@ -1637,7 +1989,22 @@ def _result_reference(
             "named result output 必须来自当前可见的先前 Action",
             node=expression,
         )
+    if _is_material_source_template(producer.template):
+        _fail(
+            "invalid_material_source",
+            "MaterialSource 变量本身就是唯一 material Handle",
+            node=expression,
+        )
     return producer, expression.attr
+
+
+def _is_material_source_template(template: Mapping[str, Any]) -> bool:
+    return (
+        template.get("class") == _MATERIAL_SOURCE
+        and template.get("name") == "material_source"
+        and template.get("type") == "material_source"
+        and template.get("node_type") == "material_source"
+    )
 
 
 def _source_handle(
@@ -1987,7 +2354,11 @@ def _candidate_graph(
     }
 
 
-def _validate_built_graph(graph: dict[str, Any]) -> None:
+def _validate_built_graph(
+    graph: dict[str, Any],
+    *,
+    material_source_authority: MaterialSourceStaticAuthority | None = None,
+) -> None:
     templates = {item["uuid"]: item for item in graph["node_templates"]}
     handles = {item["uuid"]: item for item in graph["handle_templates"]}
     nodes = [WorkflowNodeWrite.model_validate(item) for item in graph["nodes"]]
@@ -2008,6 +2379,7 @@ def _validate_built_graph(graph: dict[str, Any]) -> None:
         node_meta_data={node.uuid: node.meta_data for node in nodes},
         validate_input_binding_schema=True,
     )
+    validate_material_source_authority(graph, material_source_authority)
 
 
 def _validate_typed_action_field_providers(
@@ -2163,6 +2535,8 @@ def _generate_with_snapshot(
     workflow_revision: int,
     graph: dict[str, Any],
     source_uri: str,
+    resource_template_identity_index: ResourceTemplateIdentityIndex | None,
+    material_source_authority: MaterialSourceStaticAuthority | None,
 ) -> CandidateCompilation:
     del source_uri
     try:
@@ -2172,8 +2546,14 @@ def _generate_with_snapshot(
             workflow_revision=workflow_revision,
         )
         _validate_catalog_projection(snapshot, candidate)
-        _validate_built_graph(candidate)
-        source, source_map = _render_graph(candidate)
+        _validate_built_graph(
+            candidate,
+            material_source_authority=material_source_authority,
+        )
+        source, source_map = _render_graph(
+            candidate,
+            resource_template_identity_index=resource_template_identity_index,
+        )
         recompiled = _compile_with_snapshot(
             snapshot=snapshot,
             workflow_uuid=workflow_uuid,
@@ -2181,6 +2561,8 @@ def _generate_with_snapshot(
             python_source=source,
             source_uri="authoring://round-trip-proof",
             applied_graph=candidate,
+            resource_template_identity_index=resource_template_identity_index,
+            material_source_authority=material_source_authority,
             prove_normalized=False,
         )
         if (
@@ -2205,6 +2587,15 @@ def _generate_with_snapshot(
         return _error_result(
             fingerprint=snapshot.fingerprint,
             diagnostic=_diagnostic(error, ""),
+        )
+    except (CodedGraphValidationError, MaterialSourceAuthorityError) as error:
+        return _error_result(
+            fingerprint=snapshot.fingerprint,
+            diagnostic={
+                "severity": "error",
+                "code": error.code,
+                "message": str(error),
+            },
         )
     except (GraphValidationError, TypeError, ValueError):
         return _error_result(
@@ -2306,7 +2697,11 @@ class _Emitter:
         )
 
 
-def _render_graph(graph: dict[str, Any]) -> tuple[str, list[dict[str, Any]]]:
+def _render_graph(
+    graph: dict[str, Any],
+    *,
+    resource_template_identity_index: ResourceTemplateIdentityIndex | None,
+) -> tuple[str, list[dict[str, Any]]]:
     workflow = graph["workflow"]
     unilab = (workflow.get("meta_data") or {}).get("unilab") or {}
     try:
@@ -2344,6 +2739,13 @@ def _render_graph(graph: dict[str, Any]) -> tuple[str, list[dict[str, Any]]]:
         edge_by_target[key] = edge
 
     selectors, selector_by_node = _render_selectors(nodes, templates)
+    material_source_nodes = [
+        item
+        for item in nodes
+        if _is_material_source_template(
+            templates.get(str(item.get("workflow_node_template_uuid")), {})
+        )
+    ]
     needs = _annotation_import_needs(input_contract)
     markers = {"workflow_definition", "workflow_output"}
     if selectors:
@@ -2354,6 +2756,8 @@ def _render_graph(graph: dict[str, Any]) -> tuple[str, list[dict[str, Any]]]:
         markers.add("group")
     if any(len(layer) > 1 for layer in root_layers):
         markers.add("parallel")
+    if material_source_nodes:
+        markers.update({"MaterialFlowRole", "material_source", "resource_ref"})
 
     emitter = _Emitter()
     if needs["typing"]:
@@ -2377,6 +2781,44 @@ def _render_graph(graph: dict[str, Any]) -> tuple[str, list[dict[str, Any]]]:
             suffix += 1
         reserved_import_names.add(imported_name)
         class_import_names[class_identity] = imported_name
+        alias = "" if imported_name == symbol else f" as {imported_name}"
+        emitter.emit(f"from {module} import {symbol}{alias}")
+    resource_import_names: dict[str, str] = {}
+    for resource_template_uuid in sorted(
+        {
+            str(item.get("param", {}).get("resource_template_uuid"))
+            for item in material_source_nodes
+        }
+    ):
+        if resource_template_identity_index is None:
+            _fail(
+                "template_catalog_mismatch",
+                "当前 authority 无法反查 ResourceTemplate UUID",
+            )
+        try:
+            identity = resource_template_identity_index.identify_uuid(
+                validate_uuid(resource_template_uuid)
+            )
+            if (
+                validate_uuid(resource_template_identity_index.resolve_symbol(identity))
+                != resource_template_uuid
+            ):
+                raise LookupError(identity)
+            module, symbol = identity.rsplit(":", 1)
+            if not module or not symbol:
+                raise ValueError(identity)
+        except (AttributeError, LookupError, TypeError, ValueError):
+            _fail(
+                "template_catalog_mismatch",
+                "当前 authority 无法反查 ResourceTemplate UUID",
+            )
+        imported_name = symbol
+        suffix = 2
+        while imported_name in reserved_import_names:
+            imported_name = f"{symbol}_{suffix}"
+            suffix += 1
+        reserved_import_names.add(imported_name)
+        resource_import_names[resource_template_uuid] = imported_name
         alias = "" if imported_name == symbol else f" as {imported_name}"
         emitter.emit(f"from {module} import {symbol}{alias}")
     if needs["json_value"]:
@@ -2453,17 +2895,29 @@ def _render_graph(graph: dict[str, Any]) -> tuple[str, list[dict[str, Any]]]:
                 selector_by_node=selector_by_node,
             )
         else:
-            _emit_action(
-                emitter,
-                construct,
-                indent=body_indent,
-                templates=templates,
-                handles_by_node=handles_by_node,
-                handles=handles,
-                node_by_uuid=node_by_uuid,
-                edge_by_target=edge_by_target,
-                selector_by_node=selector_by_node,
+            template = templates.get(
+                str(construct.get("workflow_node_template_uuid")),
+                {},
             )
+            if _is_material_source_template(template):
+                _emit_material_source(
+                    emitter,
+                    construct,
+                    indent=body_indent,
+                    resource_import_names=resource_import_names,
+                )
+            else:
+                _emit_action(
+                    emitter,
+                    construct,
+                    indent=body_indent,
+                    templates=templates,
+                    handles_by_node=handles_by_node,
+                    handles=handles,
+                    node_by_uuid=node_by_uuid,
+                    edge_by_target=edge_by_target,
+                    selector_by_node=selector_by_node,
+                )
 
     if output_contract["outputs"]:
         parts = []
@@ -2564,6 +3018,8 @@ def _render_selectors(
                 "template_catalog_mismatch",
                 "Node 未引用当前 graph 的 NodeTemplate",
             )
+        if _is_material_source_template(template):
+            continue
         class_identity = template.get("class")
         if not isinstance(class_identity, str) or ":" not in class_identity:
             _fail(
@@ -2759,6 +3215,69 @@ def _ordered_group_children(
     return ordered
 
 
+def _emit_material_source(
+    emitter: _Emitter,
+    node: Mapping[str, Any],
+    *,
+    indent: str,
+    resource_import_names: Mapping[str, str],
+) -> None:
+    param = node.get("param")
+    expected_keys = {
+        "mode",
+        "resource_template_uuid",
+        "mount",
+        "material_uuid",
+        "site",
+        "slot_range",
+        "flow_role",
+    }
+    if not isinstance(param, dict) or set(param) != expected_keys:
+        _fail("invalid_material_source", "MaterialSource selector 不符合当前合同")
+    resource_template_uuid = str(param.get("resource_template_uuid"))
+    resource_symbol = resource_import_names.get(resource_template_uuid)
+    mount = param.get("mount")
+    mode = param.get("mode")
+    material_uuid = param.get("material_uuid")
+    site = param.get("site")
+    slot_range = param.get("slot_range")
+    role_member = next(
+        (
+            member
+            for member, wire_value in _MATERIAL_FLOW_ROLES.items()
+            if wire_value == param.get("flow_role")
+        ),
+        None,
+    )
+    if (
+        resource_symbol is None
+        or mode not in {"existing", "create_new"}
+        or not isinstance(mount, dict)
+        or set(mount) != {"uuid"}
+        or role_member is None
+        or (mode == "create_new" and material_uuid is not None)
+    ):
+        _fail("invalid_material_source", "MaterialSource selector 不符合当前合同")
+    try:
+        mount_uuid = validate_uuid(mount["uuid"])
+    except (KeyError, TypeError, ValueError):
+        _fail("invalid_material_source", "MaterialSource mount UUID 无效")
+    if material_uuid is not None:
+        try:
+            material_uuid = validate_uuid(material_uuid)
+        except (TypeError, ValueError):
+            _fail("invalid_material_source", "MaterialSource material UUID 无效")
+    result_name = _safe_identifier(str(node.get("name") or "material"), "material")
+    construct = (
+        f"{result_name} = material_source("
+        f"resource_template={resource_symbol}, mode={mode!r}, "
+        f"mount=resource_ref({mount_uuid!r}), material_uuid={material_uuid!r}, "
+        f"site={site!r}, slot_range={slot_range!r}, "
+        f"flow_role=MaterialFlowRole.{role_member})"
+    )
+    emitter.anchored(str(node["uuid"]), construct, indent=indent)
+
+
 def _emit_action(
     emitter: _Emitter,
     node: dict[str, Any],
@@ -2815,10 +3334,20 @@ def _emit_action(
                 source_handle.get("data_key") or source_handle.get("handle_key") or ""
             )
             if source_name.lower() != "ready":
-                expression = (
-                    f"{_safe_identifier(str(producer['name']), 'result')}."
-                    f"{_safe_identifier(source_name, 'value')}"
+                producer_template = templates.get(
+                    str(producer.get("workflow_node_template_uuid")),
+                    {},
                 )
+                producer_name = _safe_identifier(str(producer["name"]), "result")
+                if (
+                    _is_material_source_template(producer_template)
+                    and source_name == "material"
+                ):
+                    expression = producer_name
+                else:
+                    expression = (
+                        f"{producer_name}.{_safe_identifier(source_name, 'value')}"
+                    )
         param = node.get("param") or {}
         if name in param:
             if expression is not None:

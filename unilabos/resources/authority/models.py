@@ -229,6 +229,13 @@ class MaterialAdapter(Protocol):
         uow: RuntimeAuthorityUnitOfWork | None = None,
     ) -> SiteRecord | None: ...
 
+    def list_sites(
+        self,
+        material_uuid: str,
+        *,
+        uow: RuntimeAuthorityUnitOfWork | None = None,
+    ) -> tuple[SiteRecord, ...]: ...
+
     def reserve_task_materials(
         self,
         *,

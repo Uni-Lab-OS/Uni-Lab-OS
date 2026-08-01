@@ -10,9 +10,30 @@ from __future__ import annotations
 from collections.abc import Callable
 from contextlib import AbstractContextManager
 from dataclasses import dataclass
+from enum import Enum
+from types import MappingProxyType
 from typing import Any, TypeVar
 
 WorkflowFunction = TypeVar("WorkflowFunction", bound=Callable[..., Any])
+
+
+class MaterialFlowRole(str, Enum):
+    """MaterialSource 的闭合物料角色 wire value。"""
+
+    PRIMARY_SAMPLE = "primary_sample"
+    ALIQUOT_SAMPLE = "aliquot_sample"
+    REAGENT = "reagent"
+    CONSUMABLE = "consumable"
+
+
+MATERIAL_FLOW_ROLE_LABELS_ZH = MappingProxyType(
+    {
+        "primary_sample": "主样品",
+        "aliquot_sample": "分装样品",
+        "reagent": "试剂",
+        "consumable": "耗材",
+    }
+)
 
 
 def workflow_definition(
@@ -51,6 +72,29 @@ def device(device_id: str | None = None) -> Any:
     return _DeviceSelector()
 
 
+def resource_ref(material_uuid: str) -> Any:
+    """标记一个 compile-only ResourceSlot mount 引用。"""
+
+    del material_uuid
+    raise RuntimeError("Workflow authoring resource_ref() 只能由静态编译器解析")
+
+
+def material_source(
+    *,
+    resource_template: Any,
+    mode: str,
+    mount: Any,
+    material_uuid: str | None,
+    site: str | None,
+    slot_range: list[str] | None,
+    flow_role: MaterialFlowRole,
+) -> Any:
+    """标记一个 compile-only MaterialSource selector。"""
+
+    del resource_template, mode, mount, material_uuid, site, slot_range, flow_role
+    raise RuntimeError("Workflow authoring material_source() 只能由静态编译器解析")
+
+
 @dataclass(frozen=True, slots=True)
 class _CompileOnlyBlock(AbstractContextManager[None]):
     name: str
@@ -81,9 +125,13 @@ def workflow_output(**values: Any) -> dict[str, Any]:
 
 
 __all__ = [
+    "MATERIAL_FLOW_ROLE_LABELS_ZH",
+    "MaterialFlowRole",
     "device",
     "group",
+    "material_source",
     "parallel",
+    "resource_ref",
     "workflow_definition",
     "workflow_output",
 ]

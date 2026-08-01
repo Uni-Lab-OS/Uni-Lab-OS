@@ -717,6 +717,30 @@ class SQLiteMaterialAdapter:
         except sqlite3.Error:
             raise MaterialAuthorityUnavailable("failed to read site") from None
 
+    def list_sites(
+        self,
+        material_uuid: str,
+        *,
+        uow: RuntimeAuthorityUnitOfWork | None = None,
+    ) -> tuple[SiteRecord, ...]:
+        try:
+            with self._with_uow(uow) as active_uow:
+                rows = active_uow.execute(
+                    """
+                    SELECT uuid
+                    FROM site
+                    WHERE material_uuid = ? AND deleted_at IS NULL
+                    ORDER BY sort_order, uuid
+                    """,
+                    (material_uuid,),
+                ).fetchall()
+                sites = tuple(_read_site(active_uow, str(row["uuid"])) for row in rows)
+        except sqlite3.Error:
+            raise MaterialAuthorityUnavailable("failed to list sites") from None
+        if any(site is None for site in sites):
+            raise MaterialAuthorityUnavailable("listed site is not readable")
+        return tuple(site for site in sites if site is not None)
+
     def reserve_task_materials(
         self,
         *,

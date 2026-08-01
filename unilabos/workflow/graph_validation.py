@@ -6,7 +6,9 @@ import json
 import math
 import re
 from collections import defaultdict
-from typing import Any, Dict, Iterable, List, Mapping
+from collections.abc import Iterable, Mapping
+from typing import Any
+from uuid import UUID
 
 from unilabos.workflow.json_codec import encode_json, strict_json_equal
 from unilabos.workflow.models import WorkflowEdgeWrite, WorkflowNodeWrite
@@ -23,15 +25,27 @@ class MissingTemplateError(GraphValidationError):
     """节点引用的模板不在当前 OS 模板目录中。"""
 
 
+class CodedGraphValidationError(GraphValidationError):
+    """可由 public Workflow seam 稳定暴露的图合同错误。"""
+
+    def __init__(self, code: str, message: str):
+        super().__init__(message)
+        self.code = code
+
+
+class MaterialSourceGraphError(CodedGraphValidationError):
+    """MaterialSource 的 closed graph 合同错误。"""
+
+
 def validate_graph(
     *,
-    nodes: List[WorkflowNodeWrite],
-    edges: List[WorkflowEdgeWrite],
-    templates: Mapping[str, Dict[str, Any]],
-    handles: Mapping[str, Dict[str, Any]],
-    effective_params: Mapping[str, Dict[str, Any]],
+    nodes: list[WorkflowNodeWrite],
+    edges: list[WorkflowEdgeWrite],
+    templates: Mapping[str, dict[str, Any]],
+    handles: Mapping[str, dict[str, Any]],
+    effective_params: Mapping[str, dict[str, Any]],
     workflow_meta_data: Mapping[str, Any],
-    node_meta_data: Mapping[str, Dict[str, Any]],
+    node_meta_data: Mapping[str, dict[str, Any]],
     validate_input_binding_schema: bool = False,
 ) -> None:
     """在写事务内校验一份完整替换图。"""
@@ -50,6 +64,12 @@ def validate_graph(
         if node.parent_uuid is not None and node.parent_uuid not in node_by_uuid:
             raise GraphValidationError("父节点不在提交的完整图中")
     _validate_parent_cycles(nodes)
+    _validate_material_source_nodes(
+        nodes=nodes,
+        templates=templates,
+        handles=handles,
+        effective_params=effective_params,
+    )
 
     for edge in edges:
         if edge.source_node_uuid == edge.target_node_uuid:
@@ -71,6 +91,14 @@ def validate_graph(
             "target",
             handles,
         )
+    _validate_resource_slot_fan_out(edges=edges, handles=handles)
+    _validate_resource_slot_template_compatibility(
+        nodes=node_by_uuid,
+        edges=edges,
+        templates=templates,
+        handles=handles,
+        effective_params=effective_params,
+    )
 
     bindings_by_node = {
         node.uuid: _validated_input_bindings(
@@ -87,10 +115,10 @@ def validate_graph(
         for node in nodes
         if not node.disabled and _node_kind(node, templates) != "group"
     }
-    enabled_edges: List[WorkflowEdgeWrite] = []
-    incoming: Dict[tuple[str, str], str] = {}
-    connected_inputs: Dict[tuple[str, str], str] = {}
-    available_data_keys: Dict[str, List[str]] = defaultdict(list)
+    enabled_edges: list[WorkflowEdgeWrite] = []
+    incoming: dict[tuple[str, str], str] = {}
+    connected_inputs: dict[tuple[str, str], str] = {}
+    available_data_keys: dict[str, list[str]] = defaultdict(list)
     for edge in edges:
         if edge.source_node_uuid not in enabled or edge.target_node_uuid not in enabled:
             continue
@@ -174,7 +202,7 @@ def _validate_edge_handle(
     node: WorkflowNodeWrite,
     handle_uuid: str,
     io_type: str,
-    handles: Mapping[str, Dict[str, Any]],
+    handles: Mapping[str, dict[str, Any]],
 ) -> None:
     template_uuid = node.workflow_node_template_uuid
     if template_uuid is None:
@@ -188,9 +216,112 @@ def _validate_edge_handle(
         raise GraphValidationError("Handle 不属于节点模板或方向错误")
 
 
+def _validate_resource_slot_fan_out(
+    *,
+    edges: Iterable[WorkflowEdgeWrite],
+    handles: Mapping[str, dict[str, Any]],
+) -> None:
+    """一个物理 ResourceSlot 输出只能沿一条物料链继续传递。"""
+
+    outgoing: dict[tuple[str, str], int] = defaultdict(int)
+    for edge in edges:
+        source_handle = handles[edge.source_handle_uuid]
+        if source_handle.get("type") != "ResourceSlot":
+            continue
+        source = (edge.source_node_uuid, edge.source_handle_uuid)
+        outgoing[source] += 1
+        if outgoing[source] > 1:
+            raise CodedGraphValidationError(
+                "material_flow_fan_out",
+                "同一个 ResourceSlot 输出不能同时进入多个下游节点",
+            )
+
+
+def _validate_resource_slot_template_compatibility(
+    *,
+    nodes: Mapping[str, WorkflowNodeWrite],
+    edges: Iterable[WorkflowEdgeWrite],
+    templates: Mapping[str, dict[str, Any]],
+    handles: Mapping[str, dict[str, Any]],
+    effective_params: Mapping[str, dict[str, Any]],
+) -> None:
+    """用 producer guarantee 证明 ResourceSlot 可以进入受限 target。"""
+
+    for edge in edges:
+        source_handle = handles[edge.source_handle_uuid]
+        target_handle = handles[edge.target_handle_uuid]
+        if (
+            source_handle.get("type") != "ResourceSlot"
+            or target_handle.get("type") != "ResourceSlot"
+        ):
+            continue
+        target_templates = _resource_slot_template_allowlist(target_handle)
+        if target_templates is None:
+            continue
+
+        source_node = nodes[edge.source_node_uuid]
+        if _node_kind(source_node, templates) == "material_source":
+            template_uuid = effective_params[source_node.uuid].get(
+                "resource_template_uuid"
+            )
+            source_templates = (
+                frozenset({template_uuid})
+                if isinstance(template_uuid, str)
+                else frozenset()
+            )
+            if not source_templates.issubset(target_templates):
+                raise MaterialSourceGraphError(
+                    "material_source_conflict",
+                    "MaterialSource 物料模板不被下游 ResourceSlot 接受",
+                )
+            continue
+
+        source_templates = _resource_slot_template_allowlist(source_handle)
+        if source_templates is None or not source_templates.issubset(target_templates):
+            raise GraphValidationError(
+                "ResourceSlot producer 不能证明满足下游物料模板约束"
+            )
+
+
+def _resource_slot_template_allowlist(
+    handle: Mapping[str, Any],
+) -> frozenset[str] | None:
+    meta_data = handle.get("meta_data")
+    unilab = meta_data.get("unilab") if isinstance(meta_data, Mapping) else None
+    raw = (
+        unilab.get("allowed_resource_template_uuids")
+        if isinstance(unilab, Mapping)
+        else None
+    )
+    if raw is None or raw == [] or raw == ():
+        return None
+    if isinstance(raw, (str, bytes)) or not isinstance(raw, (list, tuple)):
+        raise GraphValidationError(
+            "ResourceSlot allowed_resource_template_uuids 必须是 UUID 数组"
+        )
+    result: set[str] = set()
+    for value in raw:
+        if not isinstance(value, str):
+            raise GraphValidationError(
+                "ResourceSlot allowed_resource_template_uuids 必须是 UUID 数组"
+            )
+        try:
+            parsed = UUID(value)
+        except (AttributeError, ValueError):
+            raise GraphValidationError(
+                "ResourceSlot allowed_resource_template_uuids 包含无效 UUID"
+            ) from None
+        if parsed.int == 0 or str(parsed) != value or value in result:
+            raise GraphValidationError(
+                "ResourceSlot allowed_resource_template_uuids 不是规范唯一 UUID 数组"
+            )
+        result.add(value)
+    return frozenset(result)
+
+
 def _node_kind(
     node: WorkflowNodeWrite,
-    templates: Mapping[str, Dict[str, Any]],
+    templates: Mapping[str, dict[str, Any]],
 ) -> str:
     raw_kind = node.type
     if node.workflow_node_template_uuid is not None:
@@ -210,6 +341,7 @@ def _node_kind(
         "group": "group",
         "tool_call": "tool_call",
         "manual_confirm": "manual_confirm",
+        "material_source": "material_source",
     }
     kind = aliases.get(str(raw_kind).strip().lower())
     if kind is None:
@@ -217,12 +349,172 @@ def _node_kind(
     return kind
 
 
+def _validate_material_source_nodes(
+    *,
+    nodes: Iterable[WorkflowNodeWrite],
+    templates: Mapping[str, dict[str, Any]],
+    handles: Mapping[str, dict[str, Any]],
+    effective_params: Mapping[str, dict[str, Any]],
+) -> None:
+    for node in nodes:
+        template_uuid = node.workflow_node_template_uuid
+        template = templates.get(template_uuid or "", {})
+        is_material_source = node.type == "material_source" or any(
+            (
+                template.get("class") == "unilabos.workflow.authoring:material_source",
+                template.get("name") == "material_source",
+                template.get("type") == "material_source",
+                template.get("node_type") == "material_source",
+            )
+        )
+        if not is_material_source:
+            continue
+        material_handles = [
+            handle
+            for handle in handles.values()
+            if handle.get("workflow_node_template_uuid") == template_uuid
+        ]
+        if (
+            template.get("class") != "unilabos.workflow.authoring:material_source"
+            or template.get("name") != "material_source"
+            or template.get("type") != "material_source"
+            or template.get("node_type") != "material_source"
+            or node.type != "material_source"
+            or node.action_name is not None
+            or len(material_handles) != 1
+        ):
+            raise MaterialSourceGraphError(
+                "template_catalog_mismatch",
+                "MaterialSource framework template 不符合合同",
+            )
+        handle = material_handles[0]
+        if (
+            handle.get("handle_key") != "material"
+            or handle.get("io_type") != "source"
+            or handle.get("type") != "ResourceSlot"
+            or handle.get("required") is not False
+            or handle.get("data_source") != "executor"
+            or handle.get("data_key") != "material"
+        ):
+            raise MaterialSourceGraphError(
+                "template_catalog_mismatch",
+                "MaterialSource framework Handle 不符合合同",
+            )
+        if node.material_uuid is not None:
+            raise MaterialSourceGraphError(
+                "invalid_material_source",
+                "MaterialSource 顶层 material_uuid 必须为 null",
+            )
+        _validate_material_source_selector(effective_params[node.uuid])
+
+
+def _validate_material_source_selector(param: Mapping[str, Any]) -> None:
+    expected_keys = {
+        "mode",
+        "resource_template_uuid",
+        "mount",
+        "material_uuid",
+        "site",
+        "slot_range",
+        "flow_role",
+    }
+    if set(param) != expected_keys:
+        raise MaterialSourceGraphError(
+            "invalid_material_source",
+            "MaterialSource selector 必须是 closed object",
+        )
+    mode = param.get("mode")
+    if mode not in {"existing", "create_new"}:
+        raise MaterialSourceGraphError(
+            "invalid_material_source",
+            "MaterialSource mode 不在闭合目录中",
+        )
+    _require_canonical_uuid(
+        param.get("resource_template_uuid"),
+        "resource_template_uuid",
+    )
+    mount = param.get("mount")
+    if not isinstance(mount, dict) or set(mount) != {"uuid"}:
+        raise MaterialSourceGraphError(
+            "invalid_material_source",
+            "MaterialSource mount 必须是 closed ResourceSlot",
+        )
+    _require_canonical_uuid(mount.get("uuid"), "mount.uuid")
+    material_uuid = param.get("material_uuid")
+    if mode == "create_new" and material_uuid is not None:
+        raise MaterialSourceGraphError(
+            "invalid_material_source",
+            "create_new 禁止指定 material_uuid",
+        )
+    if material_uuid is not None:
+        _require_canonical_uuid(material_uuid, "material_uuid")
+    site = param.get("site")
+    slot_range = param.get("slot_range")
+    if site is not None and slot_range is not None:
+        raise MaterialSourceGraphError(
+            "invalid_material_source",
+            "site 与 slot_range 互斥",
+        )
+    if site is not None:
+        _require_canonical_uuid(site, "site")
+    if slot_range is not None:
+        if not isinstance(slot_range, list) or not slot_range:
+            raise MaterialSourceGraphError(
+                "invalid_material_source",
+                "slot_range 必须是非空 Site UUID 数组",
+            )
+        canonical_range = [
+            _require_canonical_uuid(value, "slot_range") for value in slot_range
+        ]
+        if len(set(canonical_range)) != len(canonical_range):
+            raise MaterialSourceGraphError(
+                "invalid_material_source",
+                "slot_range 不能包含重复 Site UUID",
+            )
+        if canonical_range != sorted(canonical_range):
+            raise MaterialSourceGraphError(
+                "invalid_material_source",
+                "slot_range 必须按 Site UUID 规范排序",
+            )
+    if param.get("flow_role") not in {
+        "primary_sample",
+        "aliquot_sample",
+        "reagent",
+        "consumable",
+    }:
+        raise MaterialSourceGraphError(
+            "invalid_material_source",
+            "flow_role 不在闭合目录中",
+        )
+
+
+def _require_canonical_uuid(value: Any, field: str) -> str:
+    if not isinstance(value, str):
+        raise MaterialSourceGraphError(
+            "invalid_material_source",
+            f"MaterialSource {field} 必须是 canonical non-nil UUID",
+        )
+    try:
+        parsed = UUID(value)
+    except (AttributeError, ValueError):
+        raise MaterialSourceGraphError(
+            "invalid_material_source",
+            f"MaterialSource {field} 必须是 canonical non-nil UUID",
+        ) from None
+    if parsed.int == 0 or str(parsed) != value:
+        raise MaterialSourceGraphError(
+            "invalid_material_source",
+            f"MaterialSource {field} 必须是 canonical non-nil UUID",
+        )
+    return value
+
+
 def _validate_edge_cycles(
     enabled: Mapping[str, WorkflowNodeWrite],
     edges: Iterable[WorkflowEdgeWrite],
 ) -> None:
     indegree = {node_uuid: 0 for node_uuid in enabled}
-    outgoing: Dict[str, List[str]] = defaultdict(list)
+    outgoing: dict[str, list[str]] = defaultdict(list)
     for edge in edges:
         indegree[edge.target_node_uuid] += 1
         outgoing[edge.source_node_uuid].append(edge.target_node_uuid)
@@ -267,9 +559,9 @@ def _dependency_only(handle: Mapping[str, Any]) -> bool:
 def _validate_required_handles(
     node: WorkflowNodeWrite,
     param: Mapping[str, Any],
-    handles: Iterable[Dict[str, Any]],
+    handles: Iterable[dict[str, Any]],
     incoming: Mapping[tuple[str, str], str],
-    bindings: Mapping[str, Dict[str, Any]],
+    bindings: Mapping[str, dict[str, Any]],
 ) -> None:
     template_uuid = node.workflow_node_template_uuid
     if template_uuid is None:
@@ -300,10 +592,10 @@ def _validated_input_bindings(
     node: WorkflowNodeWrite,
     meta_data: Mapping[str, Any],
     workflow_meta_data: Mapping[str, Any],
-    handles: Mapping[str, Dict[str, Any]],
+    handles: Mapping[str, dict[str, Any]],
     *,
     validate_schema_compatibility: bool,
-) -> Dict[str, Dict[str, Any]]:
+) -> dict[str, dict[str, Any]]:
     unilab = meta_data.get("unilab", {})
     if not isinstance(unilab, dict):
         raise GraphValidationError("Node meta_data.unilab 必须是对象")
@@ -326,7 +618,7 @@ def _validated_input_bindings(
         raise GraphValidationError("input_contract.parameters 必须是数组")
     parameter_entries = [item for item in parameters if isinstance(item, dict)]
 
-    result: Dict[str, Dict[str, Any]] = {}
+    result: dict[str, dict[str, Any]] = {}
     for handle_uuid, raw_binding in raw_bindings.items():
         handle = handles.get(handle_uuid)
         if (
@@ -794,9 +1086,11 @@ def _json_equal(left: Any, right: Any) -> bool:
 
 
 __all__ = [
-    "declared_handle_type_matches",
+    "CodedGraphValidationError",
     "GraphValidationError",
+    "MaterialSourceGraphError",
     "MissingTemplateError",
+    "declared_handle_type_matches",
     "validate_graph",
     "workflow_schema_matches_handle_type",
 ]

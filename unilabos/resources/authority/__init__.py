@@ -319,6 +319,31 @@ class MaterialModule:
             raise MaterialNotFound(f"site {canonical_uuid} not found")
         return site
 
+    def list_sites(
+        self,
+        material_uuid: str,
+        *,
+        uow: RuntimeAuthorityUnitOfWork | None = None,
+    ) -> tuple[SiteRecord, ...]:
+        """按稳定展示顺序读取一个 Material 直接拥有的 active Sites。"""
+
+        canonical_uuid = _canonical_uuid(material_uuid, "material_uuid")
+        if self._adapter.get_material(canonical_uuid, uow=uow) is None:
+            raise MaterialNotFound(f"material {canonical_uuid} not found")
+        sites = self._adapter.list_sites(canonical_uuid, uow=uow)
+        if not isinstance(sites, tuple):
+            raise MaterialInvalidInput("material adapter returned an invalid Site list")
+        for site in sites:
+            if (
+                not isinstance(site, SiteRecord)
+                or site.material_uuid != canonical_uuid
+                or site.deleted_at is not None
+            ):
+                raise MaterialInvalidInput(
+                    "material adapter returned an invalid Site list"
+                )
+        return tuple(sorted(sites, key=lambda item: (item.sort_order, item.uuid)))
+
     def reserve_task_materials(
         self,
         uow: RuntimeAuthorityUnitOfWork,

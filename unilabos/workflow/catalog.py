@@ -13,7 +13,7 @@ from collections.abc import Iterator, Mapping, Sequence
 from contextlib import contextmanager
 from dataclasses import dataclass, field
 from types import MappingProxyType
-from typing import Any, Literal
+from typing import Any, Literal, Protocol
 from uuid import UUID, uuid4
 
 from unilabos.workflow.catalog_keys import (
@@ -111,6 +111,14 @@ class CatalogAuthority:
             raise TemplateCatalogImportError("/authority")
 
 
+class ResourceTemplateIdentityIndex(Protocol):
+    """Authoring 使用的 authority-scoped 双向 ResourceTemplate 身份视图。"""
+
+    def resolve_symbol(self, qualified_name: str) -> str: ...
+
+    def identify_uuid(self, resource_template_uuid: str) -> str: ...
+
+
 class LocalResourceTemplateIdentityIndex:
     """基于完成态 Registry 的只读双向 ResourceTemplate 身份索引。"""
 
@@ -160,7 +168,7 @@ class LocalResourceTemplateIdentityIndex:
             self._by_source[source_identity] = resource_template_uuid
             self._by_uuid[resource_template_uuid] = source_identity
 
-    def __call__(self, source_identity: str) -> str:
+    def resolve_symbol(self, source_identity: str) -> str:
         if (
             not isinstance(source_identity, str)
             or not source_identity
@@ -175,7 +183,7 @@ class LocalResourceTemplateIdentityIndex:
             self._by_uuid[identity] = source_identity
         return identity
 
-    def source_identity(self, resource_template_uuid: str) -> str:
+    def identify_uuid(self, resource_template_uuid: str) -> str:
         try:
             identity = _uuid_value(
                 resource_template_uuid,
@@ -186,6 +194,16 @@ class LocalResourceTemplateIdentityIndex:
             raise TemplateCatalogMismatch(
                 "/resource_templates/resource_template_uuid"
             ) from None
+
+    def __call__(self, source_identity: str) -> str:
+        """兼容 A1 Registry publisher 的单向 callable seam。"""
+
+        return self.resolve_symbol(source_identity)
+
+    def source_identity(self, resource_template_uuid: str) -> str:
+        """兼容 A1 首版反向查询名。"""
+
+        return self.identify_uuid(resource_template_uuid)
 
     @property
     def assignments(self) -> Mapping[str, str]:
