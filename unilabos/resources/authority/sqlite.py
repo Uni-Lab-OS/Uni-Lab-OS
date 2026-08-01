@@ -18,6 +18,7 @@ from .models import (
 )
 
 _SQLITE_BUSY_TIMEOUT_MS = 5000
+_UNICODE_CASEFOLD_COLLATION = "UNICODE_CASEFOLD"
 
 _SCHEMA_STATEMENTS = (
     """
@@ -52,9 +53,10 @@ CREATE TABLE IF NOT EXISTS material (
     )
 )
 """,
+    "DROP INDEX IF EXISTS ux_material_barcode_active_nonempty",
     """
 CREATE UNIQUE INDEX IF NOT EXISTS ux_material_barcode_active_nonempty
-    ON material(LOWER(barcode))
+    ON material(barcode COLLATE UNICODE_CASEFOLD)
     WHERE deleted_at IS NULL AND barcode <> ''
 """,
     """
@@ -68,6 +70,12 @@ CREATE INDEX IF NOT EXISTS ix_material_parent_active
     WHERE deleted_at IS NULL
 """,
 )
+
+
+def _unicode_casefold(left: str, right: str) -> int:
+    left_folded = left.casefold()
+    right_folded = right.casefold()
+    return (left_folded > right_folded) - (left_folded < right_folded)
 
 
 def _json_object(value: str) -> dict[str, Any]:
@@ -103,20 +111,27 @@ class _StandaloneRuntimeAuthority:
 
     def __init__(self, database_path: str | Path):
         self.path = str(database_path)
-        if self.path != ":memory:":
-            Path(self.path).parent.mkdir(parents=True, exist_ok=True)
-        self._lock = threading.RLock()
-        self._connection = sqlite3.connect(
-            self.path,
-            check_same_thread=False,
-        )
-        self._connection.row_factory = sqlite3.Row
-        with self._lock:
-            self._connection.execute(f"PRAGMA busy_timeout = {_SQLITE_BUSY_TIMEOUT_MS}")
-            self._connection.execute("PRAGMA foreign_keys = ON")
+        connection: sqlite3.Connection | None = None
+        try:
             if self.path != ":memory:":
-                self._connection.execute("PRAGMA journal_mode = WAL")
-                self._connection.execute("PRAGMA synchronous = NORMAL")
+                Path(self.path).parent.mkdir(parents=True, exist_ok=True)
+            self._lock = threading.RLock()
+            connection = sqlite3.connect(
+                self.path,
+                check_same_thread=False,
+            )
+            connection.row_factory = sqlite3.Row
+            with self._lock:
+                connection.execute(f"PRAGMA busy_timeout = {_SQLITE_BUSY_TIMEOUT_MS}")
+                connection.execute("PRAGMA foreign_keys = ON")
+                if self.path != ":memory:":
+                    connection.execute("PRAGMA journal_mode = WAL")
+                    connection.execute("PRAGMA synchronous = NORMAL")
+            self._connection = connection
+        except BaseException:
+            if connection is not None:
+                connection.close()
+            raise
 
     @contextmanager
     def transaction(self) -> Iterator[sqlite3.Connection]:
@@ -143,7 +158,7 @@ class SQLiteMaterialAdapter:
         try:
             coordinator = _StandaloneRuntimeAuthority(database_path)
             self._configure(coordinator, owned=True)
-        except sqlite3.Error:
+        except (OSError, sqlite3.Error):
             if coordinator is not None:
                 coordinator.close()
             raise MaterialAuthorityUnavailable(
@@ -175,6 +190,10 @@ class SQLiteMaterialAdapter:
         self._coordinator = coordinator
         self._owned_coordinator = coordinator if owned else None
         with coordinator.transaction() as uow:
+            uow.create_collation(
+                _UNICODE_CASEFOLD_COLLATION,
+                _unicode_casefold,
+            )
             for statement in _SCHEMA_STATEMENTS:
                 uow.execute(statement)
 
