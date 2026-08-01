@@ -23,6 +23,8 @@ from .models import (
     SiteRecord,
 )
 
+_MAX_SIGNED_64_BIT_INTEGER = (1 << 63) - 1
+
 
 def _canonical_uuid(value: str, field: str) -> str:
     if not isinstance(value, str):
@@ -62,7 +64,10 @@ def _json_object(value: Mapping[str, Any] | None, field: str) -> dict[str, Any]:
 def _finite_number(value: object, field: str) -> float:
     if isinstance(value, bool) or not isinstance(value, (int, float)):
         raise MaterialInvalidInput(f"{field} must be a finite number")
-    normalized = float(value)
+    try:
+        normalized = float(value)
+    except OverflowError:
+        raise MaterialInvalidInput(f"{field} must be a finite number") from None
     if not math.isfinite(normalized):
         raise MaterialInvalidInput(f"{field} must be a finite number")
     return normalized
@@ -187,7 +192,7 @@ class MaterialModule:
             raise MaterialInvalidInput("name must be a non-blank string")
         if isinstance(sort_order, bool) or not isinstance(sort_order, int):
             raise MaterialInvalidInput("sort_order must be a non-negative integer")
-        if sort_order < 0:
+        if sort_order < 0 or sort_order > _MAX_SIGNED_64_BIT_INTEGER:
             raise MaterialInvalidInput("sort_order must be a non-negative integer")
         if isinstance(allowed_resource_template_uuids, (str, bytes)) or not isinstance(
             allowed_resource_template_uuids,
