@@ -31,9 +31,9 @@ CREATE TABLE IF NOT EXISTS material (
         CHECK (json_valid(meta_data) AND json_type(meta_data) = 'object'),
     resource_template_uuid TEXT NOT NULL,
     parent_uuid TEXT,
-    class TEXT NOT NULL DEFAULT '',
+    class TEXT NOT NULL CHECK (LENGTH(TRIM(class)) > 0),
     barcode TEXT NOT NULL DEFAULT '',
-    name TEXT NOT NULL DEFAULT '',
+    name TEXT NOT NULL CHECK (LENGTH(TRIM(name)) > 0),
     config TEXT NOT NULL DEFAULT '{}'
         CHECK (json_valid(config) AND json_type(config) = 'object'),
     data TEXT NOT NULL DEFAULT '{}'
@@ -87,7 +87,7 @@ def _material_record(row: sqlite3.Row) -> MaterialRecord:
         meta_data=_json_object(row["meta_data"]),
         resource_template_uuid=row["resource_template_uuid"],
         parent_uuid=row["parent_uuid"],
-        resource_class=row["class"],
+        klass=row["class"],
         barcode=row["barcode"],
         name=row["name"],
         config=_json_object(row["config"]),
@@ -195,7 +195,13 @@ class SQLiteMaterialAdapter:
         *,
         material_uuid: str,
         resource_template_uuid: str,
+        resource_class: str,
         barcode: str,
+        name: str,
+        description: str | None,
+        meta_data: dict[str, Any],
+        config: dict[str, Any],
+        data: dict[str, Any],
         now: str,
         uow: RuntimeAuthorityUnitOfWork | None = None,
     ) -> MaterialRecord:
@@ -208,10 +214,24 @@ class SQLiteMaterialAdapter:
                             description, meta_data, resource_template_uuid,
                             parent_uuid, class, barcode, name, config, data,
                             disposition, material_kind, version
-                        ) VALUES (?, ?, ?, NULL, NULL, '{}', ?, NULL, '', ?, '',
-                                  '{}', '{}', 'active', 'business', 1)
+                        ) VALUES (?, ?, ?, NULL, ?, ?, ?, NULL, ?, ?, ?, ?, ?,
+                                  'active', 'business', 1)
                         """,
-                    (material_uuid, now, now, resource_template_uuid, barcode),
+                    (
+                        material_uuid,
+                        now,
+                        now,
+                        description,
+                        json.dumps(
+                            meta_data, ensure_ascii=False, separators=(",", ":")
+                        ),
+                        resource_template_uuid,
+                        resource_class,
+                        barcode,
+                        name,
+                        json.dumps(config, ensure_ascii=False, separators=(",", ":")),
+                        json.dumps(data, ensure_ascii=False, separators=(",", ":")),
+                    ),
                 )
                 row = active_uow.execute(
                     "SELECT * FROM material WHERE uuid = ? AND deleted_at IS NULL",
