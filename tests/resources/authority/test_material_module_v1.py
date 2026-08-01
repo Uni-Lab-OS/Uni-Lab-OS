@@ -7,17 +7,20 @@ SQLite durable adapter，并仅通过关闭后重开 adapter 证明持久性；�
 
 from __future__ import annotations
 
-from collections.abc import Iterator
+from collections.abc import Iterator, Mapping
 from contextlib import contextmanager
 from pathlib import Path
+from types import MappingProxyType
 from typing import Any
 
 import pytest
 
 from unilabos.resources.authority import (
     MaterialConflict,
+    MaterialInvalidInput,
     MaterialModule,
     MaterialNotFound,
+    MaterialRecord,
 )
 from unilabos.resources.authority.sqlite import SQLiteMaterialAdapter
 from unilabos.workflow.store import WorkflowStore
@@ -25,6 +28,10 @@ from unilabos.workflow.store import WorkflowStore
 MATERIAL_UUID = "50000000-0000-4000-8000-000000000017"
 SECOND_MATERIAL_UUID = "50000000-0000-4000-8000-000000000018"
 RESOURCE_TEMPLATE_UUID = "20000000-0000-4000-8000-000000000017"
+UNKNOWN_RESOURCE_TEMPLATE_UUID = "20000000-0000-4000-8000-000000000099"
+MATERIAL_CLASS = "SampleTube"
+MATERIAL_NAME = "Sample 17"
+SECOND_MATERIAL_NAME = "Sample 18"
 
 EXPECTED_INITIAL_MATERIAL = {
     "uuid": MATERIAL_UUID,
@@ -41,11 +48,28 @@ class _RollbackSentinel(RuntimeError):
     pass
 
 
+def _resource_template_snapshot() -> Mapping[str, object]:
+    from unilabos.resources.authority import ResourceTemplateIdentity
+
+    identity = ResourceTemplateIdentity(
+        uuid=RESOURCE_TEMPLATE_UUID,
+        material_class=MATERIAL_CLASS,
+    )
+    return MappingProxyType({identity.uuid: identity})
+
+
+def _material_module(adapter: SQLiteMaterialAdapter) -> MaterialModule:
+    return MaterialModule(
+        adapter,
+        resource_templates=_resource_template_snapshot(),
+    )
+
+
 @contextmanager
 def _open_material_module(database_path: Path) -> Iterator[MaterialModule]:
     adapter = SQLiteMaterialAdapter(database_path)
     try:
-        yield MaterialModule(adapter)
+        yield _material_module(adapter)
     finally:
         adapter.close()
 
@@ -59,7 +83,7 @@ def _open_runtime_authority(database_path: Path) -> Iterator[WorkflowStore]:
         coordinator.close()
 
 
-def _observable_material(record: Any) -> dict[str, Any]:
+def _observable_material(record: MaterialRecord) -> dict[str, Any]:
     return {
         "uuid": record.uuid,
         "resource_template_uuid": record.resource_template_uuid,
@@ -81,6 +105,7 @@ def test_business_material_create_read_survives_sqlite_reopen(
             material_uuid=MATERIAL_UUID,
             resource_template_uuid=RESOURCE_TEMPLATE_UUID,
             barcode="SAMPLE-017",
+            name=MATERIAL_NAME,
         )
 
         assert _observable_material(created) == EXPECTED_INITIAL_MATERIAL
@@ -106,6 +131,7 @@ def test_business_material_barcode_is_unique_case_insensitively(
             material_uuid=MATERIAL_UUID,
             resource_template_uuid=RESOURCE_TEMPLATE_UUID,
             barcode="SAMPLE-017",
+            name=MATERIAL_NAME,
         )
 
         with pytest.raises(MaterialConflict):
@@ -113,6 +139,7 @@ def test_business_material_barcode_is_unique_case_insensitively(
                 material_uuid=SECOND_MATERIAL_UUID,
                 resource_template_uuid=RESOURCE_TEMPLATE_UUID,
                 barcode="sample-017",
+                name=SECOND_MATERIAL_NAME,
             )
 
         assert (
@@ -131,11 +158,13 @@ def test_distinct_business_materials_may_share_empty_barcode(
             material_uuid=MATERIAL_UUID,
             resource_template_uuid=RESOURCE_TEMPLATE_UUID,
             barcode="",
+            name=MATERIAL_NAME,
         )
         second = materials.create_business_material(
             material_uuid=SECOND_MATERIAL_UUID,
             resource_template_uuid=RESOURCE_TEMPLATE_UUID,
             barcode="",
+            name=SECOND_MATERIAL_NAME,
         )
 
         assert _observable_material(first) == {
@@ -165,7 +194,7 @@ def test_runtime_authority_uow_rolls_back_material_with_outer_transaction(
 
     with _open_runtime_authority(database_path) as coordinator:
         adapter = SQLiteMaterialAdapter.from_runtime_authority(coordinator)
-        materials = MaterialModule(adapter)
+        materials = _material_module(adapter)
 
         with pytest.raises(_RollbackSentinel):
             with coordinator.transaction() as uow:
@@ -173,6 +202,7 @@ def test_runtime_authority_uow_rolls_back_material_with_outer_transaction(
                     material_uuid=MATERIAL_UUID,
                     resource_template_uuid=RESOURCE_TEMPLATE_UUID,
                     barcode="SAMPLE-017",
+                    name=MATERIAL_NAME,
                     uow=uow,
                 )
                 raise _RollbackSentinel
@@ -188,13 +218,14 @@ def test_runtime_authority_uow_commits_material_with_outer_transaction(
 
     with _open_runtime_authority(database_path) as coordinator:
         adapter = SQLiteMaterialAdapter.from_runtime_authority(coordinator)
-        materials = MaterialModule(adapter)
+        materials = _material_module(adapter)
 
         with coordinator.transaction() as uow:
             created = materials.create_business_material(
                 material_uuid=MATERIAL_UUID,
                 resource_template_uuid=RESOURCE_TEMPLATE_UUID,
                 barcode="SAMPLE-017",
+                name=MATERIAL_NAME,
                 uow=uow,
             )
 
@@ -222,3 +253,118 @@ def test_coordinator_backed_adapter_close_keeps_workflow_store_open(
 
         with coordinator.transaction() as uow:
             assert uow is not None
+
+
+def test_resource_template_identity_is_public_and_backend_aligned() -> None:
+    from unilabos.resources.authority import ResourceTemplateIdentity
+
+    identity = ResourceTemplateIdentity(
+        uuid=RESOURCE_TEMPLATE_UUID,
+        material_class=MATERIAL_CLASS,
+    )
+
+    assert identity.uuid == RESOURCE_TEMPLATE_UUID
+    assert identity.material_class == MATERIAL_CLASS
+
+
+def test_complete_backend_material_fields_survive_create_read_and_reopen(
+    tmp_path: Path,
+) -> None:
+    database_path = tmp_path / "workflow.db"
+
+    with _open_material_module(database_path) as materials:
+        created = materials.create_business_material(
+            material_uuid=MATERIAL_UUID,
+            resource_template_uuid=RESOURCE_TEMPLATE_UUID,
+            barcode="SAMPLE-017",
+            name=MATERIAL_NAME,
+            description="Primary sample for reviewer B2",
+            meta_data={"source": "reviewer-b2", "labels": ["fragile"]},
+            config={"volume_ul": 125.5, "sterile": True},
+            data={"measurements": [1, 2.5], "note": None},
+        )
+        expected_projection = {
+            "uuid": MATERIAL_UUID,
+            "create_time": created.create_time,
+            "update_time": created.update_time,
+            "deleted_at": None,
+            "description": "Primary sample for reviewer B2",
+            "meta_data": {"source": "reviewer-b2", "labels": ["fragile"]},
+            "resource_template_uuid": RESOURCE_TEMPLATE_UUID,
+            "parent_uuid": None,
+            "class": MATERIAL_CLASS,
+            "barcode": "SAMPLE-017",
+            "name": MATERIAL_NAME,
+            "config": {"volume_ul": 125.5, "sterile": True},
+            "data": {"measurements": [1, 2.5], "note": None},
+            "disposition": "active",
+            "material_kind": "business",
+            "version": 1,
+        }
+
+        assert created.to_dict() == expected_projection
+        assert "resource_class" not in created.to_dict()
+        assert materials.get_material(MATERIAL_UUID).to_dict() == expected_projection
+
+    with _open_material_module(database_path) as reopened_materials:
+        assert (
+            reopened_materials.get_material(MATERIAL_UUID).to_dict()
+            == expected_projection
+        )
+
+
+def test_unknown_resource_template_is_rejected_without_material_write(
+    tmp_path: Path,
+) -> None:
+    database_path = tmp_path / "workflow.db"
+
+    with _open_material_module(database_path) as materials:
+        with pytest.raises(MaterialInvalidInput):
+            materials.create_business_material(
+                material_uuid=MATERIAL_UUID,
+                resource_template_uuid=UNKNOWN_RESOURCE_TEMPLATE_UUID,
+                barcode="SAMPLE-017",
+                name=MATERIAL_NAME,
+            )
+
+        with pytest.raises(MaterialNotFound):
+            materials.get_material(MATERIAL_UUID)
+
+
+@pytest.mark.parametrize("blank_name", ["", "   "])
+def test_blank_material_name_is_rejected_without_material_write(
+    tmp_path: Path,
+    blank_name: str,
+) -> None:
+    database_path = tmp_path / "workflow.db"
+
+    with _open_material_module(database_path) as materials:
+        with pytest.raises(MaterialInvalidInput):
+            materials.create_business_material(
+                material_uuid=MATERIAL_UUID,
+                resource_template_uuid=RESOURCE_TEMPLATE_UUID,
+                barcode="SAMPLE-017",
+                name=blank_name,
+            )
+
+        with pytest.raises(MaterialNotFound):
+            materials.get_material(MATERIAL_UUID)
+
+
+def test_material_class_cannot_be_supplied_by_create_caller(
+    tmp_path: Path,
+) -> None:
+    database_path = tmp_path / "workflow.db"
+
+    with _open_material_module(database_path) as materials:
+        with pytest.raises(TypeError):
+            materials.create_business_material(
+                material_uuid=MATERIAL_UUID,
+                resource_template_uuid=RESOURCE_TEMPLATE_UUID,
+                barcode="SAMPLE-017",
+                name=MATERIAL_NAME,
+                **{"class": "CallerForgedClass"},
+            )
+
+        with pytest.raises(MaterialNotFound):
+            materials.get_material(MATERIAL_UUID)
