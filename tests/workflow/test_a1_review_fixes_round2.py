@@ -158,7 +158,7 @@ def test_template_http_matches_backend_optional_filters_bounds_and_ordering(
         store.close()
 
 
-def test_template_http_rejects_malformed_and_nil_uuid_filters_and_paths(
+def test_template_http_rejects_malformed_filters_and_nil_uuid_paths(
     tmp_path: Path,
 ) -> None:
     store = WorkflowStore(tmp_path / "workflow.db")
@@ -168,10 +168,17 @@ def test_template_http_rejects_malformed_and_nil_uuid_filters_and_paths(
         client = _http_client(catalog)
         endpoint = "/api/v1/workflow-node-templates"
 
-        for value in ("not-a-uuid", " ", NIL_UUID):
+        for value in ("not-a-uuid", " "):
             _assert_invalid_input(
                 client.get(endpoint, params={"resource_template_uuid": value})
             )
+        nil_filter = client.get(
+            endpoint,
+            params={"resource_template_uuid": NIL_UUID},
+        )
+        assert nil_filter.status_code == 200
+        assert nil_filter.json()["data"]["total"] == 0
+        assert nil_filter.json()["data"]["items"] == []
         for identity in ("not-a-uuid", NIL_UUID):
             for path in (
                 f"/api/v1/workflow-node-templates/{identity}",
@@ -594,6 +601,35 @@ def test_compiler_candidate_apply_keeps_fixed_selector_contract_and_task_default
             assert nodes[node_uuid]["meta_data"]["unilab"]["executor_binding"] == {
                 "mode": "fixed",
                 "device_id": "reactor-1",
+            }
+
+        trusted_unilab = {
+            node_uuid: copy.deepcopy(nodes[node_uuid]["meta_data"]["unilab"])
+            for node_uuid in (PREPARE_NODE_UUID, ANALYZE_NODE_UUID)
+        }
+        ordinary_nodes = copy.deepcopy(graph["nodes"])
+        for node in ordinary_nodes:
+            node["meta_data"] = {
+                "caller": "ordinary update",
+                "unilab": {
+                    "executor_binding": {
+                        "mode": "fixed",
+                        "device_id": "ordinary-overwrite",
+                    },
+                    "input_bindings": {},
+                },
+            }
+        graph = service.save_graph(
+            ENGINE_WORKFLOW_UUID,
+            revision=2,
+            nodes=ordinary_nodes,
+            edges=graph["edges"],
+        )
+        nodes = {node["uuid"]: node for node in graph["nodes"]}
+        for node_uuid in (PREPARE_NODE_UUID, ANALYZE_NODE_UUID):
+            assert nodes[node_uuid]["meta_data"] == {
+                "caller": "ordinary update",
+                "unilab": trusted_unilab[node_uuid],
             }
 
         task = service.create_workflow_task(

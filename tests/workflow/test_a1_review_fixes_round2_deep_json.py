@@ -6,6 +6,8 @@ import sys
 from pathlib import Path
 from typing import Any
 
+import pytest
+
 from tests.workflow.test_phase01_review_contract_round14_followup import (
     CATALOG_FINGERPRINT,
     DEEP_JSON_DEPTH,
@@ -15,6 +17,7 @@ from tests.workflow.test_phase01_review_contract_round14_followup import (
     FollowupCompiler,
     _nested_json,
 )
+from unilabos.workflow.authoring_engine import WorkflowAuthoringEngine
 from unilabos.workflow.catalog import (
     CatalogAuthority,
     NodeTemplateImport,
@@ -28,6 +31,22 @@ NODE_TEMPLATE_UUID = "c0000000-0000-4000-8000-000000000001"
 HANDLE_TEMPLATE_UUID = "c1000000-0000-4000-8000-000000000001"
 RESOURCE_TEMPLATE_UUID = "c2000000-0000-4000-8000-000000000001"
 AUTHORITY = CatalogAuthority(authority_id="deep-json", kind="backend")
+TRUSTED_SOURCE = f'''from tests.deep import DeepConsumer
+from unilabos.registry.annotations import JSONValue
+from unilabos.workflow.authoring import device, workflow_definition
+
+
+consumer: DeepConsumer = device()
+
+
+@workflow_definition(
+    workflow_uuid="{WORKFLOW_UUID}",
+    displayname="Deep public path",
+)
+def deep_public_path(*, payload: dict[str, JSONValue]):
+    # unilab:node_uuid={NODE_UUID}
+    consumed = consumer.deep_consumer(payload=payload)
+'''
 
 
 def _deep_leaf(value: Any) -> Any:
@@ -64,7 +83,7 @@ def _catalog_import() -> NodeTemplateImport:
             "resource_template_uuid": RESOURCE_TEMPLATE_UUID,
             "name": "deep_consumer",
             "display_name": "Deep consumer",
-            "class": "tests:DeepConsumer",
+            "class": "tests.deep:DeepConsumer",
             "goal": {},
             "goal_default": {},
             "feedback": {},
@@ -129,6 +148,37 @@ def _node(param: dict[str, Any]) -> WorkflowNodeWrite:
     )
 
 
+def _materialize_and_apply(
+    service: WorkflowService,
+    *,
+    python_source: str,
+    expected_draft_hash: str | None,
+    expected_workflow_revision: int,
+) -> dict[str, Any]:
+    draft = service.save_draft(
+        WORKFLOW_UUID,
+        python_source=python_source,
+        expected_draft_hash=expected_draft_hash,
+        expected_workflow_revision=expected_workflow_revision,
+    )
+    candidate = draft["candidate"]
+    assert candidate is not None, draft["draft"]["diagnostics"]
+    if draft["draft"]["python_source"] != candidate["normalized_python_source"]:
+        draft = service.save_draft(
+            WORKFLOW_UUID,
+            python_source=candidate["normalized_python_source"],
+            expected_draft_hash=draft["draft"]["draft_hash"],
+            expected_workflow_revision=expected_workflow_revision,
+        )
+        candidate = draft["candidate"]
+        assert candidate is not None, draft["draft"]["diagnostics"]
+    service.apply_authoring(
+        WORKFLOW_UUID,
+        candidate_hash=candidate["candidate_hash"],
+    )
+    return draft
+
+
 def test_deep_contract_survives_apply_save_read_and_task_without_aliasing(
     tmp_path: Path,
 ) -> None:
@@ -138,22 +188,15 @@ def test_deep_contract_survives_apply_save_read_and_task_without_aliasing(
     try:
         catalog = TemplateCatalog(store)
         catalog.replace(AUTHORITY, [_catalog_import()])
-        store.create_workflow(
+        engine = WorkflowAuthoringEngine(catalog=catalog, authority=AUTHORITY)
+        service = WorkflowService(store, compiler=engine)
+        service.create_workflow(
             workflow_uuid=WORKFLOW_UUID,
             name="Deep public path",
             tags=[],
             description=None,
-            meta_data={"unilab": {"input_contract": _input_contract(contract_default)}},
+            meta_data={},
         )
-        service = WorkflowService(store, compiler=FollowupCompiler())
-        service.save_graph(
-            WORKFLOW_UUID,
-            revision=1,
-            nodes=[_node({"static": "seed"})],
-            edges=[],
-        )
-        _replace_deep_leaf(contract_default, "contract-caller-mutated")
-
         package_root = tmp_path / "package"
         package_root.mkdir()
         service.register_editable_source(
@@ -162,10 +205,39 @@ def test_deep_contract_survives_apply_save_read_and_task_without_aliasing(
             package_root=package_root,
             relative_path="workflows/deep.py",
         )
+        trusted = _materialize_and_apply(
+            service,
+            python_source=TRUSTED_SOURCE,
+            expected_draft_hash=None,
+            expected_workflow_revision=1,
+        )
+        trusted_graph = service.get_graph(WORKFLOW_UUID)
+        assert trusted_graph["nodes"][0]["meta_data"]["unilab"][
+            "input_bindings"
+        ] == {HANDLE_TEMPLATE_UUID: {"parameter": "payload"}}
+
+        current = service.get_workflow(WORKFLOW_UUID)
+        current_unilab = current["meta_data"]["unilab"]
+        store.update_workflow(
+            WORKFLOW_UUID,
+            name=current["name"],
+            tags=current["tags"],
+            description=current.get("description"),
+            meta_data={
+                **current["meta_data"],
+                "unilab": {
+                    **current_unilab,
+                    "input_contract": _input_contract(contract_default),
+                },
+            },
+        )
+        _replace_deep_leaf(contract_default, "contract-caller-mutated")
+
+        service = WorkflowService(store, compiler=FollowupCompiler())
         draft = service.save_draft(
             WORKFLOW_UUID,
             python_source=SOURCE,
-            expected_draft_hash=None,
+            expected_draft_hash=trusted["draft"]["draft_hash"],
             expected_workflow_revision=2,
         )
         candidate = draft["candidate"]
@@ -233,5 +305,79 @@ def test_deep_contract_survives_apply_save_read_and_task_without_aliasing(
         persisted_job = service.list_workflow_node_jobs(task["uuid"])[0]
         assert _deep_leaf(persisted_task["input"]["payload"]) == "contract-original"
         assert _deep_leaf(persisted_job["param"]["static"]) == "param-original"
+    finally:
+        store.close()
+
+
+@pytest.mark.parametrize("fallback_field", ["goal_default", "goal"])
+def test_none_param_uses_deep_template_fallback_without_recursion_or_aliasing(
+    tmp_path: Path,
+    fallback_field: str,
+) -> None:
+    assert DEEP_JSON_DEPTH > sys.getrecursionlimit()
+    caller_fallback = _nested_json(DEEP_JSON_DEPTH, f"{fallback_field}-original")
+    imported = _catalog_import()
+    imported.template["goal_default"] = (
+        caller_fallback if fallback_field == "goal_default" else {}
+    )
+    imported.template["goal"] = (
+        caller_fallback if fallback_field == "goal" else {"shallow": "unused"}
+    )
+    store = WorkflowStore(tmp_path / f"{fallback_field}.db")
+    try:
+        catalog = TemplateCatalog(store)
+        catalog.replace(AUTHORITY, [imported])
+        _replace_deep_leaf(caller_fallback, f"{fallback_field}-caller-mutated")
+        service = WorkflowService(store)
+        service.create_workflow(
+            workflow_uuid=WORKFLOW_UUID,
+            name=f"Deep {fallback_field}",
+            tags=[],
+            description=None,
+            meta_data={},
+        )
+
+        saved = service.save_graph(
+            WORKFLOW_UUID,
+            revision=1,
+            nodes=[
+                WorkflowNodeWrite(
+                    uuid=NODE_UUID,
+                    workflow_node_template_uuid=NODE_TEMPLATE_UUID,
+                    name="deep fallback",
+                    status="idle",
+                    type="compute",
+                    param=None,
+                    action_name="deep_consumer",
+                    meta_data={},
+                )
+            ],
+            edges=[],
+        )
+        assert _deep_leaf(saved["nodes"][0]["param"]) == (
+            f"{fallback_field}-original"
+        )
+        _replace_deep_leaf(
+            saved["nodes"][0]["param"],
+            f"{fallback_field}-save-response-mutated",
+        )
+
+        read_back = service.get_graph(WORKFLOW_UUID)
+        assert _deep_leaf(read_back["nodes"][0]["param"]) == (
+            f"{fallback_field}-original"
+        )
+        task = service.create_workflow_task(
+            workflow_uuid=WORKFLOW_UUID,
+            run_mode="normal",
+            target_node_uuid=None,
+            input_value={},
+            description=None,
+            meta_data={},
+        )
+        job = service.list_workflow_node_jobs(task["uuid"])[0]
+        assert _deep_leaf(job["param"]) == f"{fallback_field}-original"
+        _replace_deep_leaf(job["param"], f"{fallback_field}-job-response-mutated")
+        persisted_job = service.list_workflow_node_jobs(task["uuid"])[0]
+        assert _deep_leaf(persisted_job["param"]) == f"{fallback_field}-original"
     finally:
         store.close()
