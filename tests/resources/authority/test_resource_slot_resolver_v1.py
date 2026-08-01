@@ -527,7 +527,7 @@ def test_production_resolver_is_injectable_into_workflow_service(
 
         assert response.status_code == expected_status
         if case == "active":
-            task = response.json()
+            task = response.json()["data"]
             assert task["input"] == {
                 "sample": {
                     "uuid": MATERIAL_UUID,
