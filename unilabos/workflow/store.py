@@ -12,8 +12,8 @@ from typing import Any, Callable, Dict, Iterable, Iterator, List, Optional, Tupl
 
 from unilabos.workflow.catalog_keys import normalize_catalog_business_name
 from unilabos.workflow.graph_validation import (
+    CodedGraphValidationError,
     GraphValidationError,
-    MaterialSourceGraphError,
     MissingTemplateError,
     validate_graph,
 )
@@ -928,7 +928,7 @@ class WorkflowStore:
             )
         except MissingTemplateError as exc:
             raise StoreNotFound(str(exc)) from exc
-        except MaterialSourceGraphError as exc:
+        except CodedGraphValidationError as exc:
             raise StoreAuthoringConflict(exc.code) from exc
         except GraphValidationError as exc:
             raise StoreConflict(str(exc)) from exc

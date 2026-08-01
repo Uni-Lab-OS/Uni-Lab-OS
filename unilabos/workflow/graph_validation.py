@@ -25,12 +25,16 @@ class MissingTemplateError(GraphValidationError):
     """节点引用的模板不在当前 OS 模板目录中。"""
 
 
-class MaterialSourceGraphError(GraphValidationError):
-    """MaterialSource 的 closed graph 合同错误。"""
+class CodedGraphValidationError(GraphValidationError):
+    """可由 public Workflow seam 稳定暴露的图合同错误。"""
 
     def __init__(self, code: str, message: str):
         super().__init__(message)
         self.code = code
+
+
+class MaterialSourceGraphError(CodedGraphValidationError):
+    """MaterialSource 的 closed graph 合同错误。"""
 
 
 def validate_graph(
@@ -87,6 +91,7 @@ def validate_graph(
             "target",
             handles,
         )
+    _validate_resource_slot_fan_out(edges=edges, handles=handles)
 
     bindings_by_node = {
         node.uuid: _validated_input_bindings(
@@ -202,6 +207,27 @@ def _validate_edge_handle(
         or handle.get("io_type") != io_type
     ):
         raise GraphValidationError("Handle 不属于节点模板或方向错误")
+
+
+def _validate_resource_slot_fan_out(
+    *,
+    edges: Iterable[WorkflowEdgeWrite],
+    handles: Mapping[str, dict[str, Any]],
+) -> None:
+    """一个物理 ResourceSlot 输出只能沿一条物料链继续传递。"""
+
+    outgoing: dict[tuple[str, str], int] = defaultdict(int)
+    for edge in edges:
+        source_handle = handles[edge.source_handle_uuid]
+        if source_handle.get("type") != "ResourceSlot":
+            continue
+        source = (edge.source_node_uuid, edge.source_handle_uuid)
+        outgoing[source] += 1
+        if outgoing[source] > 1:
+            raise CodedGraphValidationError(
+                "material_flow_fan_out",
+                "同一个 ResourceSlot 输出不能同时进入多个下游节点",
+            )
 
 
 def _node_kind(
@@ -971,6 +997,7 @@ def _json_equal(left: Any, right: Any) -> bool:
 
 
 __all__ = [
+    "CodedGraphValidationError",
     "GraphValidationError",
     "MaterialSourceGraphError",
     "MissingTemplateError",

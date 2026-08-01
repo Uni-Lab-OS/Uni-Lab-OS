@@ -90,6 +90,7 @@ _ERRORS = {
     "invalid_material_source": (400, "物料来源配置不符合合同"),
     "template_catalog_mismatch": (409, "物料来源框架模板与目录不一致"),
     "material_source_conflict": (409, "物料来源与仓库或库位事实冲突"),
+    "material_flow_fan_out": (409, "同一个物料输出不能同时连接多个下游节点"),
     "material_authority_unavailable": (503, "物料权威暂不可用"),
     "template_catalog_unavailable": (
         503,
