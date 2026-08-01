@@ -1230,6 +1230,7 @@ def initialize_resource(resource_config: dict, resource_type: Any = None) -> Uni
     from unilabos.registry.registry import lab_registry
 
     resource_class_config = resource_config.get("class", None)
+    catalog_runtime_config: dict[str, Any] = {}
     if resource_class_config is None:
         return [resource_config]
     elif type(resource_class_config) == str:
@@ -1240,16 +1241,31 @@ def initialize_resource(resource_config: dict, resource_type: Any = None) -> Uni
             return [resource_config]
         # If the resource class is a string, look up the class in the
         # resource_type_registry and import it
-        resource_class_config = resource_config["class"] = lab_registry.resource_type_registry[resource_class_config][
-            "class"
-        ]
+        registry_entry = lab_registry.resource_type_registry[resource_class_config]
+        if registry_entry.get("source_fqid"):
+            raw_config = resource_config.get("config")
+            if isinstance(raw_config, dict):
+                properties = (
+                    (registry_entry.get("init_param_schema") or {})
+                    .get("config", {})
+                    .get("properties", {})
+                )
+                catalog_runtime_config = {
+                    name: value
+                    for name, value in raw_config.items()
+                    if name != "name" and name in properties
+                }
+        resource_class_config = resource_config["class"] = registry_entry["class"]
     if type(resource_class_config) == dict:
         module = importlib.import_module(resource_class_config["module"].split(":")[0])
         mclass = resource_class_config["module"].split(":")[1]
         RESOURCE = getattr(module, mclass)
 
         if resource_class_config["type"] == "pylabrobot":
-            resource_plr = RESOURCE(name=resource_config["name"])
+            resource_plr = RESOURCE(
+                name=resource_config["name"],
+                **catalog_runtime_config,
+            )
             if resource_type != ResourcePLR:
                 tree_sets = ResourceTreeSet.from_plr_resources([resource_plr], known_newly_created=True)
                 r = tree_sets.dump()

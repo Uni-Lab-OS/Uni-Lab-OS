@@ -6,8 +6,8 @@
 
 from pathlib import Path
 
-from unilabos.app.package_cli import (
-    inspect_package,
+from unilabos import package_manager
+from unilabos.package_manager.legacy import (
     read_external_registry_devices,
     read_registry_yaml_devices,
 )
@@ -38,21 +38,6 @@ def test_read_external_registry_devices_discovers_folder_layout():
     assert "initialized" in b["class"]["status_types"]
 
 
-def test_inspect_package_uses_folder_registry_source(tmp_path):
-    info = inspect_package(str(PKG), namespace=None, out_dir=str(tmp_path))
-
-    assert sorted(info["devices"]) == ["vendor.lh.model_a", "vendor.lh.model_b"]
-    assert info["class_namespace"] == "community.example_variant_pkg"
-
-    by_id = {r["id"]: r for r in info["resources"]}
-    source_a = by_id["vendor.lh.model_a"]["source_registry"]
-    source_b = by_id["vendor.lh.model_b"]["source_registry"]
-    assert "init" not in source_a["class"]
-    assert "init" not in source_b["class"]
-    assert source_a["init_param_enforce"]["channels"] == 8
-    assert source_a["init_param_enforce"]["deck_name"] == "model-a-deck"
-    assert source_b["init_param_enforce"]["channels"] == 96
-    assert source_b["init_param_enforce"]["deck_name"] == "model-b-deck"
-
-    assert by_id["vendor.lh.model_a"]["init_param_enforce"] == source_a["init_param_enforce"]
-    assert by_id["vendor.lh.model_b"]["init_param_enforce"] == source_b["init_param_enforce"]
+def test_folder_registry_compatibility_is_not_a_public_package_catalog_api():
+    assert not hasattr(package_manager, "read_external_registry_devices")
+    assert not hasattr(package_manager, "read_registry_yaml_devices")
