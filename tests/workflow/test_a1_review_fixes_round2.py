@@ -50,7 +50,7 @@ from unilabos.workflow.composition import (
     reset_workflow_service_for_test,
 )
 from unilabos.workflow.models import WorkflowNodeWrite
-from unilabos.workflow.service import WorkflowError, WorkflowService
+from unilabos.workflow.service import WorkflowService
 from unilabos.workflow.store import WorkflowStore
 from unilabos.workflow.task_input import ResolvedResourceSlot
 
@@ -405,97 +405,106 @@ def _input_contract(name: str, schema: dict[str, Any]) -> dict[str, Any]:
     }
 
 
-def test_ordinary_binding_cannot_invent_workflow_input_contract(
+def test_ordinary_binding_without_contract_is_stripped_and_cannot_invent_contract(
     tmp_path: Path,
 ) -> None:
     store, service = _ordinary_service(tmp_path)
     try:
-        with pytest.raises(WorkflowError) as failure:
-            service.save_graph(
-                WORKFLOW_UUID,
-                revision=1,
-                nodes=[
-                    _final_node(
-                        meta_data={
-                            "unilab": {
-                                "input_bindings": {
-                                    FINAL_REPORT_TARGET: {"parameter": "report"}
-                                }
+        saved = service.save_graph(
+            WORKFLOW_UUID,
+            revision=1,
+            nodes=[
+                _final_node(
+                    meta_data={
+                        "caller": "preserved",
+                        "unilab": {
+                            "input_bindings": {
+                                FINAL_REPORT_TARGET: {"parameter": "report"}
                             }
-                        }
-                    )
-                ],
-                edges=[],
-            )
-        assert failure.value.code == "invalid_input"
+                        },
+                    }
+                )
+            ],
+            edges=[],
+        )
+
+        assert saved["nodes"][0]["meta_data"] == {"caller": "preserved"}
         graph = service.get_graph(WORKFLOW_UUID)
-        assert graph["nodes"] == []
+        assert graph["nodes"][0]["meta_data"] == {"caller": "preserved"}
         assert "unilab" not in graph["workflow"]["meta_data"]
     finally:
         store.close()
 
 
-def test_ordinary_binding_rejects_extra_fields_at_save(
+def test_ordinary_binding_with_extra_fields_is_stripped_without_contract_change(
     tmp_path: Path,
 ) -> None:
+    contract = _input_contract("report", {"type": "string"})
     store, service = _ordinary_service(
         tmp_path,
-        input_contract=_input_contract("report", {"type": "string"}),
+        input_contract=contract,
     )
     try:
-        with pytest.raises(WorkflowError) as failure:
-            service.save_graph(
-                WORKFLOW_UUID,
-                revision=1,
-                nodes=[
-                    _final_node(
-                        meta_data={
-                            "unilab": {
-                                "input_bindings": {
-                                    FINAL_REPORT_TARGET: {
-                                        "parameter": "report",
-                                        "extra": "not-owned",
-                                    }
+        saved = service.save_graph(
+            WORKFLOW_UUID,
+            revision=1,
+            nodes=[
+                _final_node(
+                    meta_data={
+                        "caller": "preserved",
+                        "unilab": {
+                            "input_bindings": {
+                                FINAL_REPORT_TARGET: {
+                                    "parameter": "report",
+                                    "extra": "not-owned",
                                 }
                             }
-                        }
-                    )
-                ],
-                edges=[],
-            )
-        assert failure.value.code == "invalid_input"
-        assert service.get_graph(WORKFLOW_UUID)["nodes"] == []
+                        },
+                    }
+                )
+            ],
+            edges=[],
+        )
+
+        assert saved["nodes"][0]["meta_data"] == {"caller": "preserved"}
+        assert saved["workflow"]["meta_data"]["unilab"]["input_contract"] == (
+            contract
+        )
     finally:
         store.close()
 
 
-def test_ordinary_binding_rejects_contract_handle_type_mismatch_at_save(
+def test_ordinary_incompatible_binding_is_stripped_without_contract_change(
     tmp_path: Path,
 ) -> None:
+    contract = _input_contract("amount", {"type": "integer"})
     store, service = _ordinary_service(
         tmp_path,
-        input_contract=_input_contract("amount", {"type": "integer"}),
+        input_contract=contract,
     )
     try:
-        with pytest.raises(WorkflowError) as failure:
-            service.save_graph(
-                WORKFLOW_UUID,
-                revision=1,
-                nodes=[
-                    _final_node(
-                        meta_data={
-                            "unilab": {
-                                "input_bindings": {
-                                    FINAL_REPORT_TARGET: {"parameter": "amount"}
-                                }
+        saved = service.save_graph(
+            WORKFLOW_UUID,
+            revision=1,
+            nodes=[
+                _final_node(
+                    meta_data={
+                        "caller": "preserved",
+                        "unilab": {
+                            "input_bindings": {
+                                FINAL_REPORT_TARGET: {"parameter": "amount"}
                             }
-                        }
-                    )
-                ],
-                edges=[],
-            )
-        assert failure.value.code == "invalid_input"
-        assert service.get_graph(WORKFLOW_UUID)["nodes"] == []
+                        },
+                    }
+                )
+            ],
+            edges=[],
+        )
+
+        assert saved["nodes"][0]["meta_data"] == {"caller": "preserved"}
+        assert saved["workflow"]["meta_data"]["unilab"]["input_contract"] == (
+            contract
+        )
     finally:
         store.close()
 
