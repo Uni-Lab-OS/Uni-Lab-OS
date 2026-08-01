@@ -233,6 +233,18 @@ class AuthoringCompiler(Protocol):
     ) -> CandidateCompilation: ...
 
 
+class TaskMaterialReservationProvider(Protocol):
+    """Workflow 只依赖的 Task-scoped Material reservation port。"""
+
+    def reserve_task_materials(
+        self,
+        uow: Any,
+        *,
+        task_uuid: str,
+        root_material_uuids: tuple[str, ...],
+    ) -> object: ...
+
+
 @runtime_checkable
 class CatalogSnapshotProvider(Protocol):
     """可变 Catalog 编译器提供的可选稳定快照能力。"""
@@ -265,6 +277,7 @@ class WorkflowService:
         *,
         compiler: Optional[AuthoringCompiler] = None,
         resource_resolver: Optional[ResourceSlotResolver] = None,
+        material_reservations: Optional[TaskMaterialReservationProvider] = None,
     ):
         self._store = store
         self.compiler = compiler
@@ -273,6 +286,7 @@ class WorkflowService:
             if resource_resolver is not None
             else UnconfiguredResourceSlotResolver()
         )
+        self._material_reservations = material_reservations
         self._locks_guard = threading.Lock()
         self._authoring_locks: Dict[str, threading.RLock] = {}
 
@@ -453,6 +467,11 @@ class WorkflowService:
                     run_mode=run_mode,
                     target_node_uuid=target_node_uuid,
                     input_value=input_value,
+                ),
+                reservation_builder=(
+                    self._reserve_task_materials
+                    if self._material_reservations is not None
+                    else None
                 ),
             )
         except TaskInputError as error:
@@ -801,6 +820,21 @@ class WorkflowService:
             execution_plan=plan,
             jobs=jobs,
             resource_resolver=self._resource_resolver,
+        )
+
+    def _reserve_task_materials(
+        self,
+        uow: Any,
+        task_uuid: str,
+        root_material_uuids: tuple[str, ...],
+    ) -> object:
+        provider = self._material_reservations
+        if provider is None:
+            raise TaskInputError("conflict")
+        return provider.reserve_task_materials(
+            uow,
+            task_uuid=task_uuid,
+            root_material_uuids=root_material_uuids,
         )
 
     @staticmethod

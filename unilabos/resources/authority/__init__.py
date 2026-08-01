@@ -8,7 +8,7 @@ from collections.abc import Mapping, Sequence
 from datetime import datetime, timezone
 from types import MappingProxyType
 from typing import Any
-from uuid import UUID
+from uuid import UUID, uuid4
 
 from .models import (
     MaterialAdapter,
@@ -18,6 +18,7 @@ from .models import (
     MaterialInvalidInput,
     MaterialNotFound,
     MaterialRecord,
+    MaterialReservationOutcome,
     ResourceSlotResolution,
     ResourceTemplateIdentity,
     RuntimeAuthorityUnitOfWork,
@@ -318,6 +319,56 @@ class MaterialModule:
             raise MaterialNotFound(f"site {canonical_uuid} not found")
         return site
 
+    def reserve_task_materials(
+        self,
+        uow: RuntimeAuthorityUnitOfWork,
+        *,
+        task_uuid: str,
+        root_material_uuids: tuple[str, ...],
+    ) -> MaterialReservationOutcome:
+        """在调用者事务内为 Task 原子预留完整 Material 集合。"""
+
+        canonical_task_uuid = _canonical_uuid(task_uuid, "task_uuid")
+        if type(root_material_uuids) is not tuple or not root_material_uuids:
+            raise MaterialInvalidInput("root_material_uuids must be a non-empty tuple")
+        canonical_roots = tuple(
+            _canonical_uuid(value, "root_material_uuid")
+            for value in root_material_uuids
+        )
+        if len(set(canonical_roots)) != len(canonical_roots):
+            raise MaterialInvalidInput("root_material_uuids must be unique")
+        return self._adapter.reserve_task_materials(
+            reservation_uuid=str(uuid4()),
+            task_uuid=canonical_task_uuid,
+            root_material_uuids=tuple(sorted(canonical_roots)),
+            now=_utc_now(),
+            uow=uow,
+        )
+
+    def has_complete_task_reservation(
+        self,
+        uow: RuntimeAuthorityUnitOfWork,
+        *,
+        task_uuid: str,
+        root_material_uuids: tuple[str, ...],
+    ) -> bool:
+        """确认 Task 仍持有与 typed roots 完全匹配的活动预留。"""
+
+        canonical_task_uuid = _canonical_uuid(task_uuid, "task_uuid")
+        if type(root_material_uuids) is not tuple or not root_material_uuids:
+            raise MaterialInvalidInput("root_material_uuids must be a non-empty tuple")
+        canonical_roots = tuple(
+            _canonical_uuid(value, "root_material_uuid")
+            for value in root_material_uuids
+        )
+        if len(set(canonical_roots)) != len(canonical_roots):
+            raise MaterialInvalidInput("root_material_uuids must be unique")
+        return self._adapter.has_complete_task_reservation(
+            task_uuid=canonical_task_uuid,
+            root_material_uuids=tuple(sorted(canonical_roots)),
+            uow=uow,
+        )
+
 
 __all__ = [
     "MaterialAuthorityUnavailable",
@@ -327,6 +378,7 @@ __all__ = [
     "MaterialModule",
     "MaterialNotFound",
     "MaterialRecord",
+    "MaterialReservationOutcome",
     "ResourceSlotResolution",
     "ResourceTemplateIdentity",
     "SiteRecord",

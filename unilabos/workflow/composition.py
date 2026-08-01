@@ -263,7 +263,17 @@ def compose_workflow_runtime(
         try:
             store = WorkflowStore(database_path)
             new_store = store
-            runtime_coordinator = WorkflowRuntimeCoordinator(store)
+            material_module = MaterialModule(
+                SQLiteMaterialAdapter.from_runtime_authority(store),
+                # concrete ResourceSlot 与 Reservation 都只读取 durable identity；
+                # template discovery 不属于 M1D。
+                resource_templates={},
+            )
+            material_authority = MaterialResourceSlotResolver(material_module)
+            runtime_coordinator = WorkflowRuntimeCoordinator(
+                store,
+                material_reservations=material_authority,
+            )
             runtime_coordinator.recover_startup()
             runtime_compiler = compiler
             if authority is not None:
@@ -303,16 +313,11 @@ def compose_workflow_runtime(
                     catalog=catalog,
                     authority=authority,
                 )
-            material_module = MaterialModule(
-                SQLiteMaterialAdapter.from_runtime_authority(store),
-                # concrete ResourceSlot 解析只读取持久 Material identity；
-                # template discovery 不属于 M1C。
-                resource_templates={},
-            )
             new_service = WorkflowService(
                 store,
                 compiler=runtime_compiler,
-                resource_resolver=MaterialResourceSlotResolver(material_module),
+                resource_resolver=material_authority,
+                material_reservations=material_authority,
             )
             register_editable_package_sources(
                 new_service,
