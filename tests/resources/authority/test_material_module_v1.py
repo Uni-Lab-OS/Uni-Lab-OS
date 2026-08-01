@@ -29,10 +29,13 @@ from unilabos.workflow.store import WorkflowStore
 MATERIAL_UUID = "50000000-0000-4000-8000-000000000017"
 SECOND_MATERIAL_UUID = "50000000-0000-4000-8000-000000000018"
 RESOURCE_TEMPLATE_UUID = "20000000-0000-4000-8000-000000000017"
+SECOND_RESOURCE_TEMPLATE_UUID = "20000000-0000-4000-8000-000000000018"
 UNKNOWN_RESOURCE_TEMPLATE_UUID = "20000000-0000-4000-8000-000000000099"
 MATERIAL_CLASS = "SampleTube"
+SECOND_MATERIAL_CLASS = "Microplate"
 MATERIAL_NAME = "Sample 17"
 SECOND_MATERIAL_NAME = "Sample 18"
+SITE_UUID = "60000000-0000-4000-8000-000000000017"
 
 EXPECTED_INITIAL_MATERIAL = {
     "uuid": MATERIAL_UUID,
@@ -52,11 +55,17 @@ class _RollbackSentinel(RuntimeError):
 def _resource_template_snapshot() -> Mapping[str, object]:
     from unilabos.resources.authority import ResourceTemplateIdentity
 
-    identity = ResourceTemplateIdentity(
-        uuid=RESOURCE_TEMPLATE_UUID,
-        material_class=MATERIAL_CLASS,
+    identities = (
+        ResourceTemplateIdentity(
+            uuid=RESOURCE_TEMPLATE_UUID,
+            material_class=MATERIAL_CLASS,
+        ),
+        ResourceTemplateIdentity(
+            uuid=SECOND_RESOURCE_TEMPLATE_UUID,
+            material_class=SECOND_MATERIAL_CLASS,
+        ),
     )
-    return MappingProxyType({identity.uuid: identity})
+    return MappingProxyType({identity.uuid: identity for identity in identities})
 
 
 def _material_module(adapter: SQLiteMaterialAdapter) -> MaterialModule:
@@ -463,3 +472,84 @@ def test_generic_runtime_authority_uow_excludes_sqlite_collation_capability() ->
 
     assert hasattr(RuntimeAuthorityUnitOfWork, "execute")
     assert not hasattr(RuntimeAuthorityUnitOfWork, "create_collation")
+
+
+def test_site_create_read_reopen_preserves_backend_projection_and_composition(
+    tmp_path: Path,
+) -> None:
+    from unilabos.resources.authority import SiteRecord
+
+    database_path = tmp_path / "workflow.db"
+    with _open_material_module(database_path) as materials:
+        materials.create_business_material(
+            material_uuid=MATERIAL_UUID,
+            resource_template_uuid=RESOURCE_TEMPLATE_UUID,
+            barcode="OWNER-017",
+            name="Deck owner",
+        )
+        materials.create_business_material(
+            material_uuid=SECOND_MATERIAL_UUID,
+            resource_template_uuid=SECOND_RESOURCE_TEMPLATE_UUID,
+            barcode="OCCUPANT-018",
+            name="Placed microplate",
+        )
+
+        created = materials.create_site(
+            site_uuid=SITE_UUID,
+            description="Cold deck position A1",
+            meta_data={"zone": "cold", "labels": ["robot", "primary"]},
+            material_uuid=MATERIAL_UUID,
+            name="A1",
+            sort_order=7,
+            allowed_resource_template_uuids=[
+                SECOND_RESOURCE_TEMPLATE_UUID,
+                RESOURCE_TEMPLATE_UUID,
+            ],
+            occupied_material_uuid=SECOND_MATERIAL_UUID,
+            position_x=1.25,
+            position_y=-2.5,
+            position_z=3.75,
+            depth=10.0,
+            length=20.5,
+            width=30.25,
+        )
+        expected_projection = {
+            "uuid": SITE_UUID,
+            "create_time": created.create_time,
+            "update_time": created.update_time,
+            "deleted_at": None,
+            "description": "Cold deck position A1",
+            "meta_data": {"zone": "cold", "labels": ["robot", "primary"]},
+            "material_uuid": MATERIAL_UUID,
+            "name": "A1",
+            "sort_order": 7,
+            "allowed_resource_template_uuids": [
+                RESOURCE_TEMPLATE_UUID,
+                SECOND_RESOURCE_TEMPLATE_UUID,
+            ],
+            "occupied_material_uuid": SECOND_MATERIAL_UUID,
+            "position_x": 1.25,
+            "position_y": -2.5,
+            "position_z": 3.75,
+            "depth": 10.0,
+            "length": 20.5,
+            "width": 30.25,
+            "version": 1,
+        }
+
+        assert isinstance(created, SiteRecord)
+        assert created.to_dict() == expected_projection
+        assert materials.get_site(SITE_UUID).to_dict() == expected_projection
+        assert (
+            materials.get_material(MATERIAL_UUID).parent_uuid,
+            materials.get_material(SECOND_MATERIAL_UUID).parent_uuid,
+        ) == (None, None)
+
+    with _open_material_module(database_path) as reopened_materials:
+        reopened = reopened_materials.get_site(SITE_UUID)
+        assert isinstance(reopened, SiteRecord)
+        assert reopened.to_dict() == expected_projection
+        assert (
+            reopened_materials.get_material(MATERIAL_UUID).parent_uuid,
+            reopened_materials.get_material(SECOND_MATERIAL_UUID).parent_uuid,
+        ) == (None, None)
