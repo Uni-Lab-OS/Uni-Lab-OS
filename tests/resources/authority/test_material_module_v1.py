@@ -13,6 +13,7 @@ from pathlib import Path
 from typing import Any
 
 import pytest
+
 from unilabos.resources.authority import MaterialConflict, MaterialModule
 from unilabos.resources.authority.sqlite import SQLiteMaterialAdapter
 
