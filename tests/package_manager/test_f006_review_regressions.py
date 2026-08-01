@@ -337,6 +337,43 @@ class Pump:
     assert result.catalogs[0].distribution.dependencies == ()
 
 
+def test_community_wheel_publish_replaces_a_dangling_symlink_without_following_it(
+    tmp_path: Path,
+) -> None:
+    _write_package(
+        tmp_path / "workspace",
+        """from unilabos.registry.decorators import device
+
+@device(id="pump", category=["test"])
+class Pump:
+    pass
+""",
+    )
+    artifact = build_workspace_wheel(tmp_path / "workspace", tmp_path / "dist")
+    outside = tmp_path / "outside.whl"
+    target = (
+        tmp_path
+        / "runtime"
+        / "community_packages"
+        / "review_lab"
+        / "1.0.0"
+        / "review_lab-1.0.0.whl"
+    )
+    target.parent.mkdir(parents=True)
+    target.symlink_to(outside)
+
+    result = resolve_graph_packages(
+        {"nodes": [{"class": "community.review_lab.pump"}]},
+        working_dir=tmp_path / "runtime",
+        port=_DependencyInjectionPort(artifact.wheel, artifact.artifact_digest),
+    )
+
+    assert len(result.catalogs) == 1
+    assert not target.is_symlink()
+    assert target.is_file()
+    assert not outside.exists()
+
+
 def test_dynamic_definition_metadata_fails_catalog_compilation(tmp_path: Path) -> None:
     _write_package(
         tmp_path,

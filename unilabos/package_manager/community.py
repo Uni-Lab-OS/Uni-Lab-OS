@@ -4,7 +4,6 @@ from __future__ import annotations
 
 import json
 import re
-import shutil
 import tempfile
 from collections.abc import Iterable
 from dataclasses import dataclass
@@ -255,7 +254,7 @@ def _cache_remote_item(
         port.download(url, downloaded)
         source = CachedArchiveSource(downloaded, digest)
         compile_package_source(source)
-        shutil.copy2(downloaded, target)
+        downloaded.replace(target)
     return CachedArchiveSource(target, digest)
 
 
