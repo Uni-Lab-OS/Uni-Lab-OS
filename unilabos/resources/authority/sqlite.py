@@ -233,7 +233,7 @@ def _read_site(
 def _site_create_savepoint(
     uow: RuntimeAuthorityUnitOfWork,
 ) -> Iterator[None]:
-    """Make the multi-statement Site create atomic inside a borrowed UoW."""
+    """让多语句 Site 创建在借用的 UoW 内保持原子性。"""
 
     uow.execute("SAVEPOINT unilab_site_create")
     try:

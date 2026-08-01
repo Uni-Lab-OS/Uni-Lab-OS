@@ -1,4 +1,4 @@
-"""M1B review-fix RED contracts at the public Material Authority seam."""
+"""M1B 在 Material Authority 公开边界上的评审修复 RED 合同。"""
 
 from __future__ import annotations
 
@@ -85,8 +85,8 @@ def test_borrowed_uow_site_create_is_atomic_when_allowlist_insert_fails(
         materials = _material_module(coordinator)
         _create_owner(materials)
 
-        # SQLite is the only fault-injection boundary. The second allowlist row
-        # fails after the Site and first allowlist row have been attempted.
+        # SQLite 是唯一的故障注入边界；写入 Site 和首个白名单行后，
+        # 第二个白名单行会失败。
         with coordinator.transaction() as sqlite:
             sqlite.execute(
                 f"""
