@@ -328,6 +328,34 @@ def test_template_mismatch_or_invalid_allowlist_is_invalid_input(
 
 
 @pytest.mark.parametrize(
+    ("allowed_resource_template_uuids", "record"),
+    [
+        pytest.param((), None, id="empty-before-missing-lookup"),
+        pytest.param(
+            (RESOURCE_TEMPLATE_UUID, RESOURCE_TEMPLATE_UUID.upper()),
+            _material_record(),
+            id="canonical-duplicate",
+        ),
+    ],
+)
+def test_invalid_allowlist_cardinality_is_rejected_before_material_lookup(
+    allowed_resource_template_uuids: tuple[str, ...],
+    record: MaterialRecord | None,
+) -> None:
+    adapter = _ReadOnlyMaterialAdapter(record)
+    materials = _material_module(adapter)
+
+    with pytest.raises(MaterialInvalidInput) as failure:
+        _resolve(
+            materials,
+            allowed_resource_template_uuids=allowed_resource_template_uuids,
+        )
+
+    assert failure.value.code == "invalid_input"
+    assert adapter.requested_uuids == []
+
+
+@pytest.mark.parametrize(
     "disposition",
     ["consumed", "discarded", "quarantined", "reconciling"],
 )
