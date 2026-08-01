@@ -32,6 +32,7 @@ def validate_graph(
     effective_params: Mapping[str, Dict[str, Any]],
     workflow_meta_data: Mapping[str, Any],
     node_meta_data: Mapping[str, Dict[str, Any]],
+    validate_input_binding_schema: bool = False,
 ) -> None:
     """在写事务内校验一份完整替换图。"""
 
@@ -77,6 +78,7 @@ def validate_graph(
             node_meta_data[node.uuid],
             workflow_meta_data,
             handles,
+            validate_schema_compatibility=validate_input_binding_schema,
         )
         for node in nodes
     }
@@ -299,6 +301,8 @@ def _validated_input_bindings(
     meta_data: Mapping[str, Any],
     workflow_meta_data: Mapping[str, Any],
     handles: Mapping[str, Dict[str, Any]],
+    *,
+    validate_schema_compatibility: bool,
 ) -> Dict[str, Dict[str, Any]]:
     unilab = meta_data.get("unilab", {})
     if not isinstance(unilab, dict):
@@ -320,11 +324,7 @@ def _validated_input_bindings(
     parameters = input_contract.get("parameters", [])
     if not isinstance(parameters, list):
         raise GraphValidationError("input_contract.parameters 必须是数组")
-    parameter_names = [
-        item.get("name")
-        for item in parameters
-        if isinstance(item, dict) and isinstance(item.get("name"), str)
-    ]
+    parameter_entries = [item for item in parameters if isinstance(item, dict)]
 
     result: Dict[str, Dict[str, Any]] = {}
     for handle_uuid, raw_binding in raw_bindings.items():
@@ -336,16 +336,23 @@ def _validated_input_bindings(
             or handle.get("io_type") != "target"
         ):
             raise GraphValidationError("input_binding 未引用本节点的目标 Handle")
-        if not isinstance(raw_binding, dict):
-            raise GraphValidationError("input_binding 必须是对象")
+        if not isinstance(raw_binding, dict) or set(raw_binding) != {"parameter"}:
+            raise GraphValidationError("input_binding 必须是闭合对象")
         parameter = raw_binding.get("parameter")
         if not isinstance(parameter, str) or not parameter:
             raise GraphValidationError("input_binding.parameter 无效")
-        if parameter_names.count(parameter) != 1:
+        matches = [item for item in parameter_entries if item.get("name") == parameter]
+        if len(matches) != 1:
             raise GraphValidationError("input_binding 必须唯一引用 Workflow 参数")
-        source = raw_binding.get("source")
-        if source is not None and source != "workflow_input":
-            raise GraphValidationError("input_binding.source 无效")
+        parameter_schema = matches[0].get("schema")
+        if validate_schema_compatibility and (
+            not isinstance(parameter_schema, dict)
+            or not workflow_schema_matches_handle_type(
+                parameter_schema,
+                handle.get("type"),
+            )
+        ):
+            raise GraphValidationError("input_binding 与 Workflow 参数类型不兼容")
         result[handle_uuid] = dict(raw_binding)
     return result
 

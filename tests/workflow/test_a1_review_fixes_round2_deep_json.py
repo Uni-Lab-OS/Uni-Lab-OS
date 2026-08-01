@@ -143,9 +143,7 @@ def test_deep_contract_survives_apply_save_read_and_task_without_aliasing(
             name="Deep public path",
             tags=[],
             description=None,
-            meta_data={
-                "unilab": {"input_contract": _input_contract(contract_default)}
-            },
+            meta_data={"unilab": {"input_contract": _input_contract(contract_default)}},
         )
         service = WorkflowService(store, compiler=FollowupCompiler())
         service.save_graph(
@@ -173,9 +171,9 @@ def test_deep_contract_survives_apply_save_read_and_task_without_aliasing(
         candidate = draft["candidate"]
         assert candidate is not None
         assert candidate["template_catalog_fingerprint"] == CATALOG_FINGERPRINT
-        candidate_default = candidate["graph"]["workflow"]["meta_data"][
-            "unilab"
-        ]["input_contract"]["parameters"][0]["default"]
+        candidate_default = candidate["graph"]["workflow"]["meta_data"]["unilab"][
+            "input_contract"
+        ]["parameters"][0]["default"]
         _replace_deep_leaf(candidate_default, "candidate-response-mutated")
         service.apply_authoring(
             WORKFLOW_UUID,
@@ -206,11 +204,14 @@ def test_deep_contract_survives_apply_save_read_and_task_without_aliasing(
         assert _deep_leaf(read_back["nodes"][0]["param"]["static"]) == (
             "param-original"
         )
-        assert _deep_leaf(
-            read_back["workflow"]["meta_data"]["unilab"]["input_contract"][
-                "parameters"
-            ][0]["default"]
-        ) == "contract-original"
+        assert (
+            _deep_leaf(
+                read_back["workflow"]["meta_data"]["unilab"]["input_contract"][
+                    "parameters"
+                ][0]["default"]
+            )
+            == "contract-original"
+        )
 
         task = service.create_workflow_task(
             workflow_uuid=WORKFLOW_UUID,

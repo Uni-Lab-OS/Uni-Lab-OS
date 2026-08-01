@@ -6,7 +6,6 @@ import hashlib
 import sqlite3
 import threading
 from contextlib import contextmanager
-from copy import deepcopy
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Callable, Dict, Iterable, Iterator, List, Optional, Tuple
@@ -40,104 +39,6 @@ def _load(value: Optional[str], fallback: Any) -> Any:
     if value is None or value == "":
         return fallback
     return decode_json_bytes(value.encode("utf-8"))
-
-
-def _workflow_input_schema_from_handle(handle: Dict[str, Any]) -> Dict[str, Any]:
-    unilab = handle.get("meta_data", {}).get("unilab", {})
-    raw_schema = unilab.get("value_schema") if isinstance(unilab, dict) else None
-    schema = deepcopy(raw_schema) if isinstance(raw_schema, dict) else {}
-    if not schema:
-        handle_type = str(handle.get("type") or "").strip().lower()
-        if handle_type == "resourceslot":
-            schema = {"$slot": "ResourceSlot"}
-        else:
-            aliases = {
-                "string": "string",
-                "number": "number",
-                "integer": "integer",
-                "boolean": "boolean",
-                "object": "object",
-                "array": "array",
-            }
-            schema = {"type": aliases.get(handle_type, "object")}
-    allowed = (
-        unilab.get("allowed_resource_template_uuids")
-        if isinstance(unilab, dict)
-        else None
-    )
-    if isinstance(allowed, list):
-        target = schema.get("items", schema)
-        if isinstance(target, dict) and target.get("$slot") == "ResourceSlot":
-            target["allowed_resource_template_uuids"] = deepcopy(allowed)
-    return schema
-
-
-def _infer_workflow_input_contract(
-    workflow_meta_data: Dict[str, Any],
-    nodes: List[WorkflowNodeWrite],
-    node_meta_data: Dict[str, Dict[str, Any]],
-    handles: Dict[str, Dict[str, Any]],
-) -> tuple[Dict[str, Any], bool]:
-    inferred = dict(workflow_meta_data)
-    raw_unilab = workflow_meta_data.get("unilab")
-    if raw_unilab is None:
-        unilab: Dict[str, Any] = {}
-    elif isinstance(raw_unilab, dict):
-        unilab = dict(raw_unilab)
-    else:
-        return inferred, False
-    contract = unilab.get("input_contract")
-    missing_contract = contract is None
-    if missing_contract:
-        parameters: list[Dict[str, Any]] = []
-    elif (
-        not isinstance(contract, dict)
-        or contract.get("version") != 1
-        or not isinstance(contract.get("parameters"), list)
-    ):
-        return inferred, False
-    else:
-        contract = dict(contract)
-        parameters = list(contract["parameters"])
-    names = {
-        item.get("name")
-        for item in parameters
-        if isinstance(item, dict) and isinstance(item.get("name"), str)
-    }
-    added: dict[str, Dict[str, Any]] = {}
-    for node in nodes:
-        unilab_node = node_meta_data[node.uuid].get("unilab", {})
-        bindings = (
-            unilab_node.get("input_bindings") if isinstance(unilab_node, dict) else None
-        )
-        if not isinstance(bindings, dict):
-            continue
-        for handle_uuid, binding in bindings.items():
-            parameter = binding.get("parameter") if isinstance(binding, dict) else None
-            handle = handles.get(handle_uuid)
-            if (
-                not isinstance(parameter, str)
-                or not parameter
-                or parameter in names
-                or parameter in added
-                or handle is None
-            ):
-                continue
-            added[parameter] = {
-                "name": parameter,
-                "schema": _workflow_input_schema_from_handle(handle),
-                "required": True,
-            }
-    if not added:
-        return inferred, False
-    if missing_contract:
-        contract = {"version": 1, "parameters": parameters}
-    else:
-        contract["parameters"] = parameters
-    parameters.extend(added[name] for name in sorted(added))
-    unilab["input_contract"] = contract
-    inferred["unilab"] = unilab
-    return inferred, True
 
 
 class StoreNotFound(LookupError):
@@ -908,7 +809,7 @@ class WorkflowStore:
         nodes: List[WorkflowNodeWrite],
         edges: List[WorkflowEdgeWrite],
         protect_reserved_metadata: bool = False,
-        infer_input_contract: bool = False,
+        validate_input_binding_schema: bool = False,
     ) -> Dict[str, Any]:
         with self.transaction() as conn:
             self._reconcile_graph(
@@ -919,7 +820,7 @@ class WorkflowStore:
                 edges=edges,
                 advance_revision=True,
                 protect_reserved_metadata=protect_reserved_metadata,
-                infer_input_contract=infer_input_contract,
+                validate_input_binding_schema=validate_input_binding_schema,
             )
         return self.get_graph(workflow_uuid)
 
@@ -934,7 +835,7 @@ class WorkflowStore:
         advance_revision: bool,
         protect_reserved_metadata: bool = False,
         semantic_workflow_meta_data: Optional[Dict[str, Any]] = None,
-        infer_input_contract: bool = False,
+        validate_input_binding_schema: bool = False,
     ) -> int:
         workflow = self.get_workflow(workflow_uuid, conn=conn)
         if workflow["revision"] != expected_revision:
@@ -1007,17 +908,6 @@ class WorkflowStore:
             if semantic_workflow_meta_data is not None
             else workflow["meta_data"]
         )
-        inferred_workflow_meta_data = False
-        if infer_input_contract:
-            (
-                effective_workflow_meta_data,
-                inferred_workflow_meta_data,
-            ) = _infer_workflow_input_contract(
-                effective_workflow_meta_data,
-                nodes,
-                effective_node_meta_data,
-                handles,
-            )
         try:
             validate_graph(
                 nodes=nodes,
@@ -1027,6 +917,7 @@ class WorkflowStore:
                 effective_params=effective_params,
                 workflow_meta_data=effective_workflow_meta_data,
                 node_meta_data=effective_node_meta_data,
+                validate_input_binding_schema=validate_input_binding_schema,
             )
         except MissingTemplateError as exc:
             raise StoreNotFound(str(exc)) from exc
@@ -1064,23 +955,11 @@ class WorkflowStore:
             now=now,
         )
         next_revision = expected_revision + 1 if advance_revision else expected_revision
-        if inferred_workflow_meta_data:
-            conn.execute(
-                "UPDATE workflow SET revision = ?, update_time = ?, meta_data = ? "
-                "WHERE uuid = ? AND deleted_at IS NULL",
-                (
-                    next_revision,
-                    now,
-                    _json(effective_workflow_meta_data),
-                    workflow_uuid,
-                ),
-            )
-        else:
-            conn.execute(
-                "UPDATE workflow SET revision = ?, update_time = ? "
-                "WHERE uuid = ? AND deleted_at IS NULL",
-                (next_revision, now, workflow_uuid),
-            )
+        conn.execute(
+            "UPDATE workflow SET revision = ?, update_time = ? "
+            "WHERE uuid = ? AND deleted_at IS NULL",
+            (next_revision, now, workflow_uuid),
+        )
         return next_revision
 
     def _upsert_node(
@@ -1246,23 +1125,19 @@ class WorkflowStore:
         result = dict(submitted)
         if not enabled:
             return result
-        if existing_json is None:
-            # 新节点没有既有 reserved state；只接受编译器产生且会被完整图
-            # 校验闭合的两个 node-owned 字段，其他 unilab key 仍不能由普通写入注入。
-            submitted_unilab = result.pop("unilab", None)
-            if isinstance(submitted_unilab, dict):
-                owned = {
-                    key: submitted_unilab[key]
-                    for key in ("input_bindings", "executor_binding")
-                    if key in submitted_unilab
-                }
-                if owned:
-                    result["unilab"] = owned
-            return result
-        result.pop("unilab", None)
+        submitted_unilab = result.pop("unilab", None)
         existing = _load(existing_json, {}) if existing_json is not None else {}
         if isinstance(existing, dict) and "unilab" in existing:
             result["unilab"] = existing["unilab"]
+        elif (
+            isinstance(submitted_unilab, dict) and "input_bindings" in submitted_unilab
+        ):
+            # A newly created Node may bind its target Handles to an already
+            # persisted Workflow input contract.  The ordinary graph route
+            # cannot invent that contract or create any other compiler-owned
+            # Node metadata (for example executor_binding); graph validation
+            # below checks the closed binding shape and schema compatibility.
+            result["unilab"] = {"input_bindings": submitted_unilab["input_bindings"]}
         return result
 
     @staticmethod

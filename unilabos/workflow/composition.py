@@ -46,7 +46,7 @@ def _configured_package_roots(
 
 def _registry_resource_template_identities(
     registry_snapshot: Mapping[str, object],
-    resource_registry_snapshot: Mapping[str, object] | None,
+    resource_registry_snapshot: Mapping[str, object],
 ) -> tuple[str, ...]:
     """冻结 production Registry 中可被模板投影引用的 source identities。"""
 
@@ -58,55 +58,13 @@ def _registry_resource_template_identities(
         if isinstance(owner, str) and owner:
             identities.add(owner)
 
-    if resource_registry_snapshot is not None:
-        for raw_resource in resource_registry_snapshot.values():
-            if not isinstance(raw_resource, Mapping):
-                continue
-            class_info = raw_resource.get("class")
-            module = (
-                class_info.get("module") if isinstance(class_info, Mapping) else None
-            )
-            if isinstance(module, str) and module:
-                identities.add(module)
-        return tuple(sorted(identities))
-
-    # 兼容旧的显式 composition 调用；真实 production main 会始终传入完成态
-    # resource Registry，因此不会把仅声明、但已失效的 symbol 当成 authority 事实。
-    for raw_device in registry_snapshot.values():
-        if not isinstance(raw_device, Mapping):
+    for raw_resource in resource_registry_snapshot.values():
+        if not isinstance(raw_resource, Mapping):
             continue
-        class_info = raw_device.get("class")
-        actions = (
-            class_info.get("action_value_mappings")
-            if isinstance(class_info, Mapping)
-            else None
-        )
-        if not isinstance(actions, Mapping):
-            continue
-        for action in actions.values():
-            schema = action.get("schema") if isinstance(action, Mapping) else None
-            extension = (
-                schema.get("x-unilabos-action-contract")
-                if isinstance(schema, Mapping)
-                else None
-            )
-            symbols = (
-                extension.get("resource_template_symbols")
-                if isinstance(extension, Mapping)
-                else None
-            )
-            if not isinstance(symbols, Mapping):
-                continue
-            for section in symbols.values():
-                if not isinstance(section, Mapping):
-                    continue
-                for values in section.values():
-                    if isinstance(values, list):
-                        identities.update(
-                            value
-                            for value in values
-                            if isinstance(value, str) and value
-                        )
+        class_info = raw_resource.get("class")
+        module = class_info.get("module") if isinstance(class_info, Mapping) else None
+        if isinstance(module, str) and module:
+            identities.add(module)
     return tuple(sorted(identities))
 
 
@@ -228,10 +186,16 @@ def compose_workflow_runtime(
     if (
         registry_snapshot is not None
         and resource_template_identity_resolver is None
-        and authority is not None
-        and authority.kind != "local"
+        and resource_registry_snapshot is None
     ):
-        raise ValueError("Backend Registry Catalog 发布需要显式 identity resolver")
+        from unilabos.registry.catalog_consumer import (
+            RegistryTemplateProjectionError,
+        )
+
+        raise RegistryTemplateProjectionError(
+            "template_catalog_mismatch",
+            "/resource_registry",
+        )
     resolved_working_dir = Path(working_dir).resolve()
     database_path = resolved_working_dir / "workflow.db"
     configured_roots = _configured_package_roots(editable_package_roots)

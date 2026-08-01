@@ -802,7 +802,7 @@ def create_workflow_template_catalog_router(
             parsed_page_size = _parse_catalog_integer(page_size)
             resource_uuid = (
                 validate_uuid(resource_template_uuid)
-                if resource_template_uuid is not None
+                if resource_template_uuid not in (None, "")
                 else None
             )
         except (TypeError, ValueError):
@@ -813,8 +813,10 @@ def create_workflow_template_catalog_router(
             20 if parsed_page_size < 1 else min(parsed_page_size, 100)
         )
         name_query = name.strip().casefold() if name is not None else None
-        type_query = type if type else None
-        node_type_query = node_type if node_type else None
+        type_query = type.strip() if type is not None else None
+        node_type_query = node_type.strip() if node_type is not None else None
+        type_query = type_query or None
+        node_type_query = node_type_query or None
         filtered = [
             item
             for item in nodes
@@ -919,7 +921,10 @@ def create_workflow_template_catalog_router(
 def _parse_catalog_integer(value: str) -> int:
     if _SIGNED_DECIMAL.fullmatch(value) is None:
         raise ValueError("catalog pagination must be an integer")
-    return int(value, 10)
+    parsed = int(value, 10)
+    if parsed < -(1 << 63) or parsed > _INT64_MAX:
+        raise ValueError("catalog pagination exceeds int64")
+    return parsed
 
 
 def _workflow_node_template_summary(template: Mapping[str, Any]) -> dict[str, Any]:

@@ -85,9 +85,7 @@ def test_template_http_matches_backend_optional_filters_bounds_and_ordering(
         with store.transaction() as connection:
             for index, template_uuid in enumerate(template_uuids):
                 create_time = (
-                    "2026-08-02T00:00:01Z"
-                    if index < 2
-                    else "2026-08-02T00:00:00Z"
+                    "2026-08-02T00:00:01Z" if index < 2 else "2026-08-02T00:00:00Z"
                 )
                 connection.execute(
                     "UPDATE workflow_node_template SET create_time = ? WHERE uuid = ?",
@@ -129,10 +127,13 @@ def test_template_http_matches_backend_optional_filters_bounds_and_ordering(
             assert response.status_code == 200
             assert response.json()["data"]["total"] > 0
 
-        assert client.get(
-            endpoint,
-            params={"resource_template_uuid": UNKNOWN_RESOURCE_TEMPLATE_UUID},
-        ).json()["data"]["total"] == 0
+        assert (
+            client.get(
+                endpoint,
+                params={"resource_template_uuid": UNKNOWN_RESOURCE_TEMPLATE_UUID},
+            ).json()["data"]["total"]
+            == 0
+        )
         for name in ("name", "type", "node_type"):
             whitespace = client.get(endpoint, params={name: "   ", "page_size": 100})
             assert whitespace.status_code == 200

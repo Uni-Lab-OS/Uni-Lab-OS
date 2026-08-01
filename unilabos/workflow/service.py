@@ -402,7 +402,7 @@ class WorkflowService:
                     nodes=node_values,
                     edges=edge_values,
                     protect_reserved_metadata=True,
-                    infer_input_contract=True,
+                    validate_input_binding_schema=True,
                 )
             except ValidationError:
                 raise WorkflowError("invalid_input") from None
