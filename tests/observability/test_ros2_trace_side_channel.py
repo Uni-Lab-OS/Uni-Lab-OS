@@ -163,3 +163,32 @@ def test_pruning_does_not_evict_a_live_context_at_the_capacity_limit() -> None:
     BaseROS2DeviceNode._prune_job_contexts_locked(node)
 
     assert len(node._job_contexts) == 2048
+
+
+def test_pruning_removes_expired_contexts() -> None:
+    node = object.__new__(BaseROS2DeviceNode)
+    registered_at = time.monotonic()
+    node._job_contexts = {
+        "expired": {"registered_at": registered_at - 61},
+        "live": {"registered_at": registered_at},
+    }
+
+    BaseROS2DeviceNode._prune_job_contexts_locked(node)
+
+    assert set(node._job_contexts) == {"live"}
+
+
+def test_pruning_evicts_only_the_oldest_contexts_over_capacity() -> None:
+    node = object.__new__(BaseROS2DeviceNode)
+    registered_at = time.monotonic()
+    node._job_contexts = {
+        f"job-{index}": {"registered_at": registered_at + index / 10_000}
+        for index in range(2050)
+    }
+
+    BaseROS2DeviceNode._prune_job_contexts_locked(node)
+
+    assert len(node._job_contexts) == 2048
+    assert "job-0" not in node._job_contexts
+    assert "job-1" not in node._job_contexts
+    assert "job-2" in node._job_contexts

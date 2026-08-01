@@ -98,7 +98,7 @@ Phoenix 的管理 Interface，也不应直接读取 SQLite。即使 Uni-Lab-OS �
 
 - `workflow.node.dispatch`：Scheduler 下发节点动作；
 - `ros2.action.send_goal`、`ros2.action.goal_response`、`ros2.action.result`、
-  `ros2.action.cancel`：HostNode 的 ROS Action 生命周期；
+  `ros2.action.cancel`、`ros2.action.cancel_response`：HostNode 的 ROS Action 生命周期；
 - `ros2.action.execute`：设备 ActionServer 接收并执行 goal；
 - `device.driver.execute`：真正调用设备驱动方法，包括同步线程池和异步方法。
 
@@ -111,10 +111,17 @@ W3C `traceparent/tracestate`。远端 `UniLabJsonCommand` 把 carrier 放在已�
 `unilabos_param.trace_context` 中；原生 ROS Action 的 Goal 没有统一扩展字段，因此
 Host 会先调用设备私有的 `_register_trace_context` ROS service，收到确认后再发送
 goal。旧设备没有该 service 或 trace 注册超时时仅丢失远端父子关系，动作仍正常发送。
+Host 的远端原生 Action 登记在专用线程池中按“登记后发 goal”的顺序执行，不占用
+Scheduler 的唯一事件 worker；登记失败或 500ms 超时后仍发送业务 goal。
 
 side-channel 只接受 node job UUID、task UUID、动作名和 W3C carrier，拒绝未知字段，
 待消费 context 有数量和 60 秒 TTL 上限。同步驱动进入 `ThreadPoolExecutor` 时显式
-复制/恢复 trace context，保证驱动 span 与 ROS span 保持父子关系。
+复制/恢复 trace context，保证驱动 span 与 ROS span 保持父子关系。设备驱动继续调用
+另一设备时，JSON 与原生 ROS Action 也会继续传播 carrier；原生调用使用同一个新生成的
+goal UUID 完成 side-channel 登记和 goal 发送。
+
+异常 span 只记录经过白名单清洗的 `error.type` 和 ERROR 状态，明确关闭 OpenTelemetry
+默认的 exception message 与 stacktrace 采集，避免驱动异常把动作参数或凭据带入 Phoenix。
 
 ## 降级行为
 

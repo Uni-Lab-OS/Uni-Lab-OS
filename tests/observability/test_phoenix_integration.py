@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import json
 import os
 import subprocess
 import time
@@ -94,6 +95,13 @@ def test_real_phoenix_sqlite_otlp_and_query(tmp_path: Path) -> None:
         ) as runtime_span:
             assert runtime_span is not None
             runtime_trace_id = f"{runtime_span.get_span_context().trace_id:032x}"
+
+        secret = "password=DO-NOT-EXPORT"
+        with pytest.raises(RuntimeError, match="DO-NOT-EXPORT"):
+            with start_runtime_span("ros2.integration.error") as error_span:
+                assert error_span is not None
+                error_trace_id = f"{error_span.get_span_context().trace_id:032x}"
+                raise RuntimeError(secret)
         assert runtime_tracing.force_flush(10.0)
 
         exported = client.post(
@@ -113,7 +121,7 @@ def test_real_phoenix_sqlite_otlp_and_query(tmp_path: Path) -> None:
             returned_trace_ids = {
                 item.get("trace_id") for item in traces.json()["data"]["traces"]
             }
-            if {trace_id.hex(), runtime_trace_id} <= returned_trace_ids:
+            if {trace_id.hex(), runtime_trace_id, error_trace_id} <= returned_trace_ids:
                 break
             if time.monotonic() >= deadline:
                 pytest.fail("Phoenix 未在期限内返回刚上报的 trace")
@@ -129,5 +137,10 @@ def test_real_phoenix_sqlite_otlp_and_query(tmp_path: Path) -> None:
         assert runtime_detail.json()["data"]["spans"][0]["name"] == (
             "ros2.integration.smoke"
         )
+        error_detail = client.get(f"/api/v1/observability/traces/{error_trace_id}")
+        assert error_detail.status_code == 200
+        error_payload = json.dumps(error_detail.json(), ensure_ascii=False)
+        assert secret not in error_payload
+        assert "RuntimeError" in error_payload
 
     assert settings.database_path.is_file()

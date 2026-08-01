@@ -35,6 +35,7 @@ from rclpy.callback_groups import ReentrantCallbackGroup
 from rclpy.service import Service
 from unilabos_msgs.action import SendCmd, StrSingleInput
 from unilabos_msgs.srv._serial_command import SerialCommand_Request, SerialCommand_Response
+from unique_identifier_msgs.msg import UUID as RosUUID
 
 from unilabos.config.config import BasicConfig
 from unilabos.observability import runtime as runtime_tracing
@@ -42,6 +43,7 @@ from unilabos.observability.runtime import (
     TRACE_CONTEXT_KEY,
     TRACE_CONTEXT_SERVICE_SUFFIX,
     decode_job_trace_context,
+    encode_job_trace_context,
     fail_open_span,
     normalize_trace_context,
     safe_capture_context,
@@ -480,6 +482,8 @@ class BaseROS2DeviceNode(Node, Generic[T]):
         self._cross_device_action_clients: Dict[str, ActionClient] = {}
         # 跨设备动作类型探测缓存（key: "<clean_device_id>/<function_name>"，value: 原生 Action 类型或 None）
         self._remote_action_type_cache: Dict[str, Any] = {}
+        self._trace_context_clients: Dict[str, Client] = {}
+        self._trace_context_clients_lock = threading.Lock()
         # HostNode 在发送 goal 前按 job UUID 注入上下文；action server 消费后立即删除。
         self._job_contexts: Dict[str, Dict[str, Any]] = {}
         self._job_contexts_lock = threading.Lock()
@@ -1502,8 +1506,9 @@ class BaseROS2DeviceNode(Node, Generic[T]):
         is_async_command: bool,
         sample_uuids: Optional[Dict[str, str]],
         action_type: Optional[Any] = None,
-    ) -> Tuple[str, ActionClient, Any]:
-        """构造跨设备动作调用的 ``(action_id, action_client, goal_msg)``。
+        trace_context: Optional[Dict[str, str]] = None,
+    ) -> Tuple[str, ActionClient, Any, bool]:
+        """构造 ``(action_id, client, goal, is_native)`` 跨设备调用。
 
         ``action_kwargs`` 必须是 **dict**（``None`` 视为 ``{}``）；序列化由本函数内部完成，
         调用方不要自己 ``json.dumps``。
@@ -1540,7 +1545,7 @@ class BaseROS2DeviceNode(Node, Generic[T]):
             if client is None:
                 client = ActionClient(self, action_type, action_id, callback_group=self.callback_group)
                 self._cross_device_action_clients[action_id] = client
-            return action_id, client, goal
+            return action_id, client, goal, True
 
         # serial JSON 指令通道（unilabos command）：入参 json dumps 到 string 字段
         suffix = "_execute_driver_command_async" if is_async_command else "_execute_driver_command"
@@ -1551,7 +1556,7 @@ class BaseROS2DeviceNode(Node, Generic[T]):
             "function_args": action_kwargs,
             JSON_UNILABOS_PARAM: {
                 PARAM_SAMPLE_UUIDS: sample_uuids or {},
-                TRACE_CONTEXT_KEY: safe_capture_context(runtime_tracing),
+                TRACE_CONTEXT_KEY: normalize_trace_context(trace_context),
             },
         }
         goal = convert_to_ros_msg(
@@ -1563,7 +1568,7 @@ class BaseROS2DeviceNode(Node, Generic[T]):
         if client is None:
             client = ActionClient(self, StrSingleInput, action_id, callback_group=self.callback_group)
             self._cross_device_action_clients[action_id] = client
-        return action_id, client, goal
+        return action_id, client, goal, False
 
     def _parse_action_result(self, device_id: str, action_name: str, result_msg) -> Any:
         """把动作结果消息解析成 python 值/字典（两通道统一，与 host_node.get_result_callback 一致）。
@@ -1660,17 +1665,61 @@ class BaseROS2DeviceNode(Node, Generic[T]):
         Raises:
             DeviceActionError: 服务不可用 / 目标被拒绝 / 超时 / 远端执行失败 / 结果解析失败。
         """
-        action_id, client, goal = self._build_action_call(
-            device_id, action_name, action_kwargs, is_async_command, sample_uuids, action_type
-        )
-        if not client.wait_for_server(timeout_sec=server_wait_timeout):
-            raise DeviceActionError(
-                device_id, action_name, f"动作服务 {action_id} 不可用（等待 {server_wait_timeout}s 超时）"
+        parent_trace_context = safe_capture_context(runtime_tracing)
+        with fail_open_span(
+            runtime_tracing,
+            "ros2.action.send_goal",
+            parent=parent_trace_context,
+            attributes={
+                "device.id": device_id,
+                "device.action.name": action_name,
+            },
+        ):
+            trace_context = (
+                safe_capture_context(runtime_tracing) or parent_trace_context
             )
+            action_id, client, goal, is_native = self._build_action_call(
+                device_id,
+                action_name,
+                action_kwargs,
+                is_async_command,
+                sample_uuids,
+                action_type,
+                trace_context,
+            )
+            if not client.wait_for_server(timeout_sec=server_wait_timeout):
+                raise DeviceActionError(
+                    device_id,
+                    action_name,
+                    f"动作服务 {action_id} 不可用（等待 {server_wait_timeout}s 超时）",
+                )
+            nested_goal_uuid = uuid.uuid4() if is_native else None
+            if nested_goal_uuid is not None:
+                self._register_remote_action_trace_context(
+                    device_id=device_id,
+                    node_job_uuid=str(nested_goal_uuid),
+                    task_uuid="",
+                    action_name=action_name,
+                    trace_context=trace_context,
+                )
 
-        self.lab_logger().debug(f"[call_device_action] -> {action_id}, args={str(action_kwargs)[:500]}")
-        send_future = client.send_goal_async(goal)
-        self._wait_future_blocking(send_future, timeout, device_id, action_name, "发送目标", poll_interval)
+            self.lab_logger().debug(
+                f"[call_device_action] -> {action_id}, args={str(action_kwargs)[:500]}"
+            )
+            send_kwargs = {}
+            if nested_goal_uuid is not None:
+                send_kwargs["goal_uuid"] = RosUUID(
+                    uuid=list(nested_goal_uuid.bytes)
+                )
+            send_future = client.send_goal_async(goal, **send_kwargs)
+            self._wait_future_blocking(
+                send_future,
+                timeout,
+                device_id,
+                action_name,
+                "发送目标",
+                poll_interval,
+            )
         goal_handle = send_future.result()
         if goal_handle is None or not goal_handle.accepted:
             raise DeviceActionError(device_id, action_name, "目标被拒绝", rejected=True)
@@ -1700,21 +1749,60 @@ class BaseROS2DeviceNode(Node, Generic[T]):
         Raises:
             DeviceActionError: 服务不可用 / 目标被拒绝 / 远端执行失败 / 结果解析失败。
         """
-        action_id, client, goal = self._build_action_call(
-            device_id, action_name, action_kwargs, is_async_command, sample_uuids, action_type
-        )
+        parent_trace_context = safe_capture_context(runtime_tracing)
+        with fail_open_span(
+            runtime_tracing,
+            "ros2.action.send_goal",
+            parent=parent_trace_context,
+            attributes={
+                "device.id": device_id,
+                "device.action.name": action_name,
+            },
+        ):
+            trace_context = (
+                safe_capture_context(runtime_tracing) or parent_trace_context
+            )
+            action_id, client, goal, is_native = self._build_action_call(
+                device_id,
+                action_name,
+                action_kwargs,
+                is_async_command,
+                sample_uuids,
+                action_type,
+                trace_context,
+            )
 
-        waited = 0.0
-        while not client.server_is_ready():
-            if waited >= server_wait_timeout:
-                raise DeviceActionError(
-                    device_id, action_name, f"动作服务 {action_id} 不可用（等待 {server_wait_timeout}s 超时）"
+            waited = 0.0
+            while not client.server_is_ready():
+                if waited >= server_wait_timeout:
+                    raise DeviceActionError(
+                        device_id,
+                        action_name,
+                        f"动作服务 {action_id} 不可用（等待 {server_wait_timeout}s 超时）",
+                    )
+                await self.sleep(0.1)
+                waited += 0.1
+
+            nested_goal_uuid = uuid.uuid4() if is_native else None
+            if nested_goal_uuid is not None:
+                await self._register_remote_action_trace_context_async(
+                    device_id=device_id,
+                    node_job_uuid=str(nested_goal_uuid),
+                    task_uuid="",
+                    action_name=action_name,
+                    trace_context=trace_context,
                 )
-            await self.sleep(0.1)
-            waited += 0.1
 
-        self.lab_logger().debug(f"[call_device_action_async] -> {action_id}, args={str(action_kwargs)[:500]}")
-        goal_handle = await client.send_goal_async(goal)
+            self.lab_logger().debug(
+                f"[call_device_action_async] -> {action_id}, "
+                f"args={str(action_kwargs)[:500]}"
+            )
+            send_kwargs = {}
+            if nested_goal_uuid is not None:
+                send_kwargs["goal_uuid"] = RosUUID(
+                    uuid=list(nested_goal_uuid.bytes)
+                )
+            goal_handle = await client.send_goal_async(goal, **send_kwargs)
         if goal_handle is None or not goal_handle.accepted:
             raise DeviceActionError(device_id, action_name, "目标被拒绝", rejected=True)
 
@@ -2123,8 +2211,12 @@ class BaseROS2DeviceNode(Node, Generic[T]):
 
         if not job_id:
             return
+        try:
+            context_key = str(uuid.UUID(job_id))
+        except (AttributeError, TypeError, ValueError):
+            context_key = str(job_id)
         with self._job_contexts_lock:
-            self._job_contexts[job_id] = {
+            self._job_contexts[context_key] = {
                 "job_id": job_id,
                 "task_id": task_id,
                 "action_name": action_name,
@@ -2132,6 +2224,139 @@ class BaseROS2DeviceNode(Node, Generic[T]):
                 "registered_at": time.monotonic(),
             }
             self._prune_job_contexts_locked()
+
+    def _get_trace_context_client(self, device_id: str):
+        clean_device_id = device_id.strip("/")
+        if clean_device_id.startswith("devices/"):
+            clean_device_id = clean_device_id[len("devices/") :]
+        service_name = (
+            f"/srv/devices/{clean_device_id}/{TRACE_CONTEXT_SERVICE_SUFFIX}"
+        )
+        clients = getattr(self, "_trace_context_clients", None)
+        if clients is None:
+            clients = {}
+            self._trace_context_clients = clients
+        clients_lock = getattr(self, "_trace_context_clients_lock", None)
+        if clients_lock is None:
+            clients_lock = threading.Lock()
+            self._trace_context_clients_lock = clients_lock
+        with clients_lock:
+            client = clients.get(service_name)
+            if client is None:
+                client = self.create_client(
+                    SerialCommand,
+                    service_name,
+                    callback_group=self.callback_group,
+                )
+                clients[service_name] = client
+        return service_name, client
+
+    @staticmethod
+    def _build_trace_context_request(
+        *,
+        node_job_uuid: str,
+        task_uuid: str,
+        action_name: str,
+        trace_context: Optional[Dict[str, str]],
+    ) -> SerialCommand_Request:
+        request = SerialCommand.Request()
+        request.command = encode_job_trace_context(
+            node_job_uuid=node_job_uuid,
+            task_uuid=task_uuid,
+            action_name=action_name,
+            trace_context=trace_context,
+        )
+        return request
+
+    def _register_remote_action_trace_context(
+        self,
+        *,
+        device_id: str,
+        node_job_uuid: str,
+        task_uuid: str,
+        action_name: str,
+        trace_context: Optional[Dict[str, str]],
+    ) -> bool:
+        """同步驱动调用原生 Action 前登记 carrier；失败不影响业务 goal。"""
+
+        carrier = normalize_trace_context(trace_context)
+        if not carrier:
+            return False
+        service_name, client = BaseROS2DeviceNode._get_trace_context_client(
+            self, device_id
+        )
+        try:
+            if not client.wait_for_service(timeout_sec=0.05):
+                return False
+            request = BaseROS2DeviceNode._build_trace_context_request(
+                node_job_uuid=node_job_uuid,
+                task_uuid=task_uuid,
+                action_name=action_name,
+                trace_context=carrier,
+            )
+            future = client.call_async(request)
+            deadline = time.monotonic() + 0.5
+            while not future.done() and time.monotonic() < deadline:
+                time.sleep(0.005)
+            if not future.done():
+                future.cancel()
+                return False
+            response = json.loads(future.result().response)
+            return bool(response.get("accepted"))
+        except Exception as exc:  # noqa: BLE001 - trace 旁路不得阻断动作
+            self.lab_logger().warning(
+                f"Trace context registration failed for {service_name}: "
+                f"{type(exc).__name__}"
+            )
+            return False
+
+    async def _register_remote_action_trace_context_async(
+        self,
+        *,
+        device_id: str,
+        node_job_uuid: str,
+        task_uuid: str,
+        action_name: str,
+        trace_context: Optional[Dict[str, str]],
+    ) -> bool:
+        """异步驱动调用的非阻塞 trace side-channel。"""
+
+        carrier = normalize_trace_context(trace_context)
+        if not carrier:
+            return False
+        service_name, client = BaseROS2DeviceNode._get_trace_context_client(
+            self, device_id
+        )
+        try:
+            discovery_deadline = time.monotonic() + 0.05
+            while (
+                not client.service_is_ready()
+                and time.monotonic() < discovery_deadline
+            ):
+                await self.sleep(0.005)
+            if not client.service_is_ready():
+                return False
+            request = BaseROS2DeviceNode._build_trace_context_request(
+                node_job_uuid=node_job_uuid,
+                task_uuid=task_uuid,
+                action_name=action_name,
+                trace_context=carrier,
+            )
+            future = client.call_async(request)
+            deadline = time.monotonic() + 0.5
+            while not future.done() and time.monotonic() < deadline:
+                await self.sleep(0.005)
+            if not future.done():
+                future.cancel()
+                return False
+            response = json.loads(future.result().response)
+            return bool(response.get("accepted"))
+        except Exception as exc:  # noqa: BLE001 - trace 旁路不得阻断动作
+            self.lab_logger().warning(
+                f"Trace context registration failed for {service_name}: "
+                f"{type(exc).__name__}"
+            )
+            return False
 
     def _prune_job_contexts_locked(self) -> None:
         now = time.monotonic()

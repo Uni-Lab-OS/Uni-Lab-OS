@@ -144,8 +144,19 @@ class _OpenTelemetryRuntimeTraceBackend:
             name,
             context=parent_context,
             attributes=sanitize_span_attributes(attributes),
+            # OTel 默认会上报异常消息和完整 stacktrace；驱动异常可能包含动作
+            # 参数或凭据，因此这里只保留受控的异常类型和 ERROR 状态。
+            record_exception=False,
+            set_status_on_exception=False,
         ) as span:
-            yield span
+            try:
+                yield span
+            except BaseException as exc:
+                span.set_attribute(
+                    "error.type", type(exc).__name__[:_MAX_ATTRIBUTE_LENGTH]
+                )
+                span.set_status(self._trace.Status(self._trace.StatusCode.ERROR))
+                raise
 
     @contextmanager
     def attach_context(
