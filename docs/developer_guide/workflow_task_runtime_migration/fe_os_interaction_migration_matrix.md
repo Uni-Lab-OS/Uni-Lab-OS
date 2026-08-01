@@ -15,7 +15,7 @@
 | `Uni-Lab-OS/Uni-Lab-OS` | `f5c10733e7e37218ab5c660ecef9c41bb94c72ab` | 旧版 OS bridge、runtime 行为和测试依据 |
 | `Uni-Lab-OS/uni-lab-backend` | 冻结版本 `09609a27e652c9e56ede636a2883a4fd241e4400` | 共享前端合同权威 |
 | 发布 `Uni-Lab-OS/Uni-Lab-OS` | R1B 受测/受审候选 `6cc9390623b21061d31800a36f653e7d82750b62`；R1B non-squash merge `c540337d87a29003d02ea9653e6a042ca201897a`；UI1C 证据记录 `5d5ceb77f3f385de9a5050f3c1583d6a03c85b88`；UI1D 证据记录 `726aca42760f42abdde8b28341a656489ac56450` | Phase 01、02A～02H、02G1、R1A 和 R1B 已合入并把 `integration/workflow-task-runtime` 推送到组织仓库；UI1D 跨仓证据已更新；后续 OS 工作树统一由 Core 下的 submodule Git 仓库管理 |
-| 发布 `Uni-Lab-OS/uni-lab-fe` | FE-D117 候选 `c779d473a2553c07b5e0a8551649567085501c28`；UI1A production/test 候选 `5ca7cd2b2baa5d0656626af25874fd597b19c267`；UI1B 纠偏候选 `e864e491463191473ab4f691cc7c26a1c5d4c6e3`；UI1C 候选 `eb5e2a30b391a5c7aae7400bf616bcdfa0175065`；UI1D 受测/受审候选 `b2547ee51fd9d7e6f9f277c407e3503c59cc4085`；当前 FE integration `a641fa6fa38b223ec90648a2c308c67d4a57b6fd` | UI1D 已删除旧 Run DTO/client/hook、Runtime WebSocket、polling fallback、前端假运行权威和 local bridge E2E；原生产工作台完成真实 OS final gate，候选与 non-squash integration 均已推送，exact-SHA Standards/Spec review 为 0B/0NB；Core/Feishu 发布状态以 #150/#152 为准 |
+| 发布 `Uni-Lab-OS/uni-lab-fe` | FE-D117 候选 `c779d473a2553c07b5e0a8551649567085501c28`；UI1A production/test 候选 `5ca7cd2b2baa5d0656626af25874fd597b19c267`；UI1B 纠偏候选 `e864e491463191473ab4f691cc7c26a1c5d4c6e3`；UI1C 候选 `eb5e2a30b391a5c7aae7400bf616bcdfa0175065`；UI1D 受测/受审候选 `b2547ee51fd9d7e6f9f277c407e3503c59cc4085`；当前 FE integration `e2a09aff14c4676bb610ec59f87e147b1ba2d595` | UI1D 已删除旧 Run DTO/client/hook、Runtime WebSocket、polling fallback、前端假运行权威和 local bridge E2E；随后在同一 integration 分支复用原设备 UI，把 live device/action directory 读取切到 `GET /api/v1/devices`，并完成真实 Edge→OS→浏览器 E2E；这不推进 A1 typed Workflow Catalog 或 D1 单节点执行的 stage；repo-local delivery 状态见 `Uni-Lab-OS/uni-lab-fe#10` |
 
 目标仓库中的约束决策如下：
 
@@ -69,6 +69,12 @@ MaterialSource 及其分配边界继续由 `Uni-Lab-OS/Uni-Lab-Core#140～#146` 
 - **前端 Runtime 纵向迁移已完成**：UI1D 候选和 FE integration 已推送；真正 Debug
   launch/multi-start/Hold、Catalog 与 device execution 仍由各自后续功能票拥有，
   不属于 UI1D；
+- **live 设备目录读取已迁移**：FE integration
+  `e2a09aff14c4676bb610ec59f87e147b1ba2d595` 只替换原
+  `LaboratoryService` 的读取适配和 health route；原设备列表、动作卡片、状态展示与
+  参数表单继续复用。浏览器使用 `GET /api/v1/devices` 消费 Edge-owned
+  `device-catalog/v1`，不再读取 `/api/v1/workflow-node-templates`；该投影不等于 A1
+  持久 typed Workflow Catalog，也不提供 D1 单节点执行；
 - **联调进度**：R1B、UI1A、UI1B 和 UI1C 候选均已进入已推送的 OS/FE integration
   历史，并由 Core `main` 的 submodule gitlink 固定；UI1B 已通过独立真实
   FE→OS happy path（原控件可见、起点/断点设置与取消、DAG/code gutter 同步、
@@ -96,7 +102,7 @@ MaterialSource 及其分配边界继续由 `Uni-Lab-OS/Uni-Lab-Core#140～#146` 
 | `GET /api/v1/events` 的 `workflow.runtime.changed` | R1B 完成同事务 outbox、全局 cursor/replay，payload 仅有 `workflow_task_uuid` | UI1C 已补齐连接状态、非主动 EOF/网络错误、重连 `Last-Event-ID` 和 on-open REST rehydration；event 仍只作 invalidation | 真实 OS 已验证进程停止显示正在重连、同端口同库重启后恢复连接、startup recovery 投影 `execution_unknown`；终态后 3.5 秒内 Task list/detail、Jobs、feedback GET 为 0；无 Runtime WebSocket/旧 Run 请求 |
 | Debugger 起点/断点配置投影 | OS-only debug launch/projection 仍由 `deepmodeling/Uni-Lab-OS#299` 实现；普通 Task Interface 不接受调试配置 | UI1B 在最新活跃 FE 基线上直接复用原 `WorkflowNodeCard` 按钮、DAG overlay、右键/双击与 CodeMirror marker；配置只进入当前前端会话预览，不调用旧 Run/WS 接口 | 真实 OS Playwright 已覆盖设置、取消、DAG/gutter 同步和普通 Task 请求隔离；多起点、durable Hold 和真实 debug launch 仍归 FE #1 / Core #6/#137 |
 | Workflow-scoped Authoring aggregate/Draft/Apply | OS 02G1 已完成本地 authority 回环 | FE-D117 已本地合入 `e67feb1d` | Authoring delivery 已有 5 项 Playwright；最终 Core/Feishu 接受仍随 X1 统一 pin |
-| 设备动作 Catalog 与单节点执行 | R1 不提供旧 `/workflow-node-templates` 或 local bridge 单节点 Run；最终 Catalog/执行分别归 A1/D1 | UI1D 保留设备目录与参数表单组件，但删除临时 `createRun/getRun/poll/cancel`；入口明确移交 WorkflowTask，生产接口缺失时 fail closed | 不用 fake bridge 冒充已联调；Catalog/editor 归 Core #135，真实 device adapter/result commit 归 D1 后续 gate |
+| live 设备/动作目录、A1 Catalog 与单节点执行 | OS local bridge 已公开 Edge-owned `GET /api/v1/devices`（`device-catalog/v1`）供现有设备目录读取；不恢复旧 `/workflow-node-templates` 或 local bridge 单节点 Run。持久 typed Workflow Catalog/执行仍分别归 A1/D1 | FE `e2a09aff14c4676bb610ec59f87e147b1ba2d595` 在未改写原 UI 的前提下把 `LaboratoryService` 切到 `/api/v1/devices`，保留 `id/deviceKey/namespace/name/online/actions/typeName/busy/schema`；health 统一读取 `/health`，旧 node-template route 为 0。设备动作仍只预览参数，执行按钮 fail closed 并移交 WorkflowTask | 基于 OS `ba16ebd23695e6beb52eee1472cb34b055587804` 的 Edge `18002`→schedule WS `8890`→bridge `8014`→真实浏览器 E2E 通过 1/1，6 张截图、0 个旧 route、0 个 console/page error；这是 live directory 读取 gate，不接受 A1 fingerprint/editor 或 D1 result commit |
 | DAG readiness/admission 与 device result | R2/D1 未开始；R1B 明确不 dispatch | 只能展示 durable projection，不得自行推进状态 | 必须等待 R2/D1，不能用 R1B kernel 冒充可执行闭环 |
 
 本工作树的 `decisions.md` 目前只包含较早账本；D-102～D-116 在完成
@@ -368,6 +374,7 @@ Core Decision；其 delivery Issue 以 `Uni-Lab-OS/Uni-Lab-Core#133` 为主父�
 | 切片 | OS delivery | 前端 delivery | Scheduler/设备 delivery | 联调与 Spec 落位 |
 |---|---|---|---|---|
 | **02H Input preflight** | ordered contract、严格规范化、snapshot、Job param binding；ResourceSlot resolver seam | 仅同步最终 Task input DTO/错误展示，不提前做 Material selector | 无 | OS round spec；真实 OS API 覆盖 scalar/default/null、ResourceSlot injected 404/409 分类和 production fail-closed，不单独设置跨仓接受门 |
+| **L0 Live device directory adapter** | 已由 local bridge 公开 Edge-owned `GET /api/v1/devices`；只提供实时设备/动作投影，不提供持久 Workflow Catalog 或执行入口 | 已在 `e2a09aff14c4676bb610ec59f87e147b1ba2d595` 最大限度复用原设备 UI，仅替换 `LaboratoryService` 适配；旧 `/workflow-node-templates` 读取退役，参数预览继续 fail closed | Edge 通过 schedule WS 回报 `device_catalog`；设备在线、动作 busy 与 schema 由上报事实提供 | owning-repo delivery `Uni-Lab-OS/uni-lab-fe#10` 记录实现与测试；真实链路验证 1/1、6 图和网络账本。它是 A1 前的独立读取迁移，不解除 A1/R2/D1 依赖 |
 | **A1 Action typed contract** | D-100～D-108：参数/具名结果、真实 Backend Handles、material port、variable selector、默认值、结果归一化；退役 `@action(handles=...)` | Catalog 驱动端口、参数表单和 selector；删除字段名/ordinal 猜测 | 无 | `Uni-Lab-OS/Uni-Lab-Core#135` 下保持 active Decision，分别创建 OS/FE children；联调验证 Catalog fingerprint、Python/JSON round-trip 和 UI 投影 |
 | **I1 Workflow I/O** | Input/Output Contract、input/output bindings、Executable Node Contract 和 schema/codec | Workflow input/output 编辑、校验和 Task 表单 | 无 | `Uni-Lab-OS/Uni-Lab-Core#133`；协议冻结后分别写 OS/FE implementation spec，联调 contract/default/ResourceSlot codec |
 | **C1 Composite authoring** | persistent Composite Invocation、稳定 boundary Handles/mappings、transparent/gated 声明 | Composite node、边界端口、映射和模式编辑 | 无 | `Uni-Lab-OS/Uni-Lab-Core#136`；依赖 A1/I1，做保存/刷新/生成 Python 往返联调 |
