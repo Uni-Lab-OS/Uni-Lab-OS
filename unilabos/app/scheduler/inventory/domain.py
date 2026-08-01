@@ -265,6 +265,29 @@ class TaskMaterialAdmissionResult:
 
 
 @dataclass(frozen=True, slots=True)
+class TaskMaterialReleaseCommand:
+    """Versioned terminal release command for one WorkflowTask。"""
+
+    schema_version: int
+    command_uuid: str
+    idempotency_key: str
+    workflow_task_uuid: str
+    reason: str
+
+
+@dataclass(frozen=True, slots=True)
+class TaskMaterialReleaseResult:
+    """Closed durable result of one Task Reservation release。"""
+
+    schema_version: int
+    command_uuid: str
+    workflow_task_uuid: str
+    status: str
+    reservation_uuid: str | None
+    outbox_sequence: int
+
+
+@dataclass(frozen=True, slots=True)
 class MaterialRecord:
     """Backend-field-aligned durable Material projection。"""
 

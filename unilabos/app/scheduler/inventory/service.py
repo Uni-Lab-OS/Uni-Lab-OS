@@ -44,6 +44,8 @@ from unilabos.app.scheduler.inventory.domain import (
     TaskMaterialAdmissionResult,
     TaskMaterialAdmissionSource,
     TaskMaterialBinding,
+    TaskMaterialReleaseCommand,
+    TaskMaterialReleaseResult,
     VersionConflict,
     check_instance_transition,
     check_lot_invariants,
@@ -249,6 +251,44 @@ def _admission_command_payload(command: TaskMaterialAdmissionCommand) -> dict[st
             }
             for source in command.sources
         ],
+    }
+
+
+def _release_result_payload(result: TaskMaterialReleaseResult) -> dict[str, Any]:
+    return {
+        "schema_version": result.schema_version,
+        "command_uuid": result.command_uuid,
+        "workflow_task_uuid": result.workflow_task_uuid,
+        "status": result.status,
+        "reservation_uuid": result.reservation_uuid,
+        "outbox_sequence": result.outbox_sequence,
+    }
+
+
+def _release_result_from_payload(
+    payload: Mapping[str, Any],
+) -> TaskMaterialReleaseResult:
+    return TaskMaterialReleaseResult(
+        schema_version=int(payload["schema_version"]),
+        command_uuid=str(payload["command_uuid"]),
+        workflow_task_uuid=str(payload["workflow_task_uuid"]),
+        status=str(payload["status"]),
+        reservation_uuid=(
+            str(payload["reservation_uuid"])
+            if payload.get("reservation_uuid") is not None
+            else None
+        ),
+        outbox_sequence=int(payload["outbox_sequence"]),
+    )
+
+
+def _release_command_payload(command: TaskMaterialReleaseCommand) -> dict[str, Any]:
+    return {
+        "schema_version": command.schema_version,
+        "command_uuid": command.command_uuid,
+        "idempotency_key": command.idempotency_key,
+        "workflow_task_uuid": command.workflow_task_uuid,
+        "reason": command.reason,
     }
 
 
@@ -882,7 +922,9 @@ class InventoryService:
                     reservation_uuid = str(
                         uuid.uuid5(
                             uuid.NAMESPACE_URL,
-                            f"unilab:m1r:reservation:{canonical_task_uuid}:{set_fingerprint}",
+                            "unilab:m1r:reservation:"
+                            f"{canonical_task_uuid}:{set_fingerprint}:"
+                            f"{canonical_command_uuid}",
                         )
                     )
                     conn.execute(
@@ -962,11 +1004,136 @@ class InventoryService:
             ) from None
         return result
 
+    def release_task(
+        self,
+        command: TaskMaterialReleaseCommand,
+    ) -> TaskMaterialReleaseResult:
+        """Idempotently release one Task's complete active Reservation."""
+
+        if not isinstance(command, TaskMaterialReleaseCommand):
+            raise MaterialInvalidInput("command must be a TaskMaterialReleaseCommand")
+        if command.schema_version != 1:
+            raise MaterialInvalidInput("unsupported release schema_version")
+        canonical_command_uuid = _canonical_uuid(command.command_uuid, "command_uuid")
+        canonical_task_uuid = _canonical_uuid(
+            command.workflow_task_uuid,
+            "workflow_task_uuid",
+        )
+        if not isinstance(command.idempotency_key, str) or not command.idempotency_key:
+            raise MaterialInvalidInput("idempotency_key must not be blank")
+        if not isinstance(command.reason, str) or not command.reason.strip():
+            raise MaterialInvalidInput("reason must not be blank")
+        normalized_command = TaskMaterialReleaseCommand(
+            schema_version=1,
+            command_uuid=canonical_command_uuid,
+            idempotency_key=command.idempotency_key,
+            workflow_task_uuid=canonical_task_uuid,
+            reason=command.reason.strip(),
+        )
+        payload_hash = _canonical_payload_hash(
+            _release_command_payload(normalized_command)
+        )
+        now_iso = self._now_iso()
+        now_ms = self._now_ms()
+
+        try:
+            with self._tx() as conn:
+                processed = conn.execute(
+                    "SELECT * FROM processed_command WHERE command_id = ?",
+                    (canonical_command_uuid,),
+                ).fetchone()
+                if processed is not None:
+                    if processed["payload_hash"] != payload_hash:
+                        raise MaterialConflict(
+                            "command_uuid was already used with a different payload"
+                        )
+                    return _release_result_from_payload(
+                        json.loads(processed["result_json"])
+                    )
+
+                active = conn.execute(
+                    """
+                    SELECT uuid
+                    FROM material_reservation
+                    WHERE workflow_task_uuid = ? AND status = 'active'
+                    """,
+                    (canonical_task_uuid,),
+                ).fetchone()
+                reservation_uuid = str(active["uuid"]) if active is not None else None
+                if reservation_uuid is not None:
+                    conn.execute(
+                        """
+                        UPDATE material_reservation
+                        SET status = 'released', released_at = ?
+                        WHERE uuid = ? AND status = 'active'
+                        """,
+                        (now_iso, reservation_uuid),
+                    )
+                    conn.execute(
+                        """
+                        UPDATE material_reservation_member
+                        SET released_at = ?
+                        WHERE reservation_uuid = ? AND released_at IS NULL
+                        """,
+                        (now_iso, reservation_uuid),
+                    )
+
+                outbox_sequence = self._emit(
+                    conn,
+                    now_ms,
+                    "material_reservation",
+                    reservation_uuid or canonical_task_uuid,
+                    1,
+                    "material_reservation.released",
+                    {
+                        "workflow_task_uuid": canonical_task_uuid,
+                        "reservation_uuid": reservation_uuid,
+                        "reason": normalized_command.reason,
+                    },
+                    causation_id=canonical_command_uuid,
+                    reason=normalized_command.reason,
+                )
+                result = TaskMaterialReleaseResult(
+                    schema_version=1,
+                    command_uuid=canonical_command_uuid,
+                    workflow_task_uuid=canonical_task_uuid,
+                    status="released",
+                    reservation_uuid=reservation_uuid,
+                    outbox_sequence=outbox_sequence,
+                )
+                conn.execute(
+                    """
+                    INSERT INTO processed_command(
+                        command_id, idempotency_key, command_type, payload_hash,
+                        result_json, status, processed_at
+                    ) VALUES (?, ?, 'material.release', ?, ?, 'completed', ?)
+                    """,
+                    (
+                        canonical_command_uuid,
+                        normalized_command.idempotency_key,
+                        payload_hash,
+                        json.dumps(
+                            _release_result_payload(result),
+                            ensure_ascii=False,
+                            separators=(",", ":"),
+                            sort_keys=True,
+                        ),
+                        now_ms,
+                    ),
+                )
+        except sqlite3.IntegrityError:
+            raise MaterialConflict("Material release conflicts") from None
+        except sqlite3.Error:
+            raise MaterialAuthorityUnavailable(
+                "failed to release Task Materials"
+            ) from None
+        return result
+
     def get_command_result(
         self,
         command_uuid: str,
-    ) -> TaskMaterialAdmissionResult:
-        """Read one durable Material admission result by command UUID."""
+    ) -> TaskMaterialAdmissionResult | TaskMaterialReleaseResult:
+        """Read one durable Material command result by command UUID."""
 
         canonical_command_uuid = _canonical_uuid(command_uuid, "command_uuid")
         try:
@@ -975,13 +1142,20 @@ class InventoryService:
             raise MaterialAuthorityUnavailable(
                 "failed to read command result"
             ) from None
-        if row is None or row.get("command_type") != "material.admit":
+        if row is None:
             raise MaterialNotFound(
                 f"inventory command {canonical_command_uuid} not found"
             )
         try:
-            return _admission_result_from_payload(json.loads(row["result_json"]))
-        except (KeyError, TypeError, ValueError, json.JSONDecodeError):
+            payload = json.loads(row["result_json"])
+            if row.get("command_type") == "material.admit":
+                return _admission_result_from_payload(payload)
+            if row.get("command_type") == "material.release":
+                return _release_result_from_payload(payload)
+            raise MaterialNotFound(
+                f"inventory command {canonical_command_uuid} not found"
+            )
+        except (KeyError, TypeError, ValueError):
             raise MaterialAuthorityUnavailable(
                 "stored inventory command result is invalid"
             ) from None

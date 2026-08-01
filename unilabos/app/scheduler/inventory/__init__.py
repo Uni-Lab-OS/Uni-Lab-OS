@@ -34,6 +34,8 @@ from unilabos.app.scheduler.inventory.domain import (
     TaskMaterialAdmissionResult,
     TaskMaterialAdmissionSource,
     TaskMaterialBinding,
+    TaskMaterialReleaseCommand,
+    TaskMaterialReleaseResult,
     VersionConflict,
 )
 from unilabos.app.scheduler.inventory.service import InventoryService
@@ -67,6 +69,8 @@ __all__ = [
     "TaskMaterialAdmissionResult",
     "TaskMaterialAdmissionSource",
     "TaskMaterialBinding",
+    "TaskMaterialReleaseCommand",
+    "TaskMaterialReleaseResult",
     "VersionConflict",
     "build_snapshot",
     "execute_command",
