@@ -13,6 +13,7 @@ from .models import (
     MaterialInvalidInput,
     MaterialNotFound,
     MaterialRecord,
+    RuntimeAuthorityUnitOfWork,
 )
 
 
@@ -44,6 +45,7 @@ class MaterialModule:
         material_uuid: str,
         resource_template_uuid: str,
         barcode: str,
+        uow: RuntimeAuthorityUnitOfWork | None = None,
     ) -> MaterialRecord:
         """创建一个初始为 active 的 durable business Material。"""
 
@@ -57,13 +59,19 @@ class MaterialModule:
             ),
             barcode=barcode,
             now=_utc_now(),
+            uow=uow,
         )
 
-    def get_material(self, material_uuid: str) -> MaterialRecord:
+    def get_material(
+        self,
+        material_uuid: str,
+        *,
+        uow: RuntimeAuthorityUnitOfWork | None = None,
+    ) -> MaterialRecord:
         """读取一个未 soft-delete 的 durable Material。"""
 
         canonical_uuid = _canonical_uuid(material_uuid, "material_uuid")
-        material = self._adapter.get_material(canonical_uuid)
+        material = self._adapter.get_material(canonical_uuid, uow=uow)
         if material is None:
             raise MaterialNotFound(f"material {canonical_uuid} not found")
         return material

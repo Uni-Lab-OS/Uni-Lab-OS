@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from contextlib import AbstractContextManager
 from dataclasses import dataclass
 from typing import Any, Protocol
 
@@ -58,6 +59,20 @@ class MaterialRecord:
     version: int
 
 
+class RuntimeAuthorityUnitOfWork(Protocol):
+    """调用者已经打开的 runtime-authority transaction capability。"""
+
+    def execute(self, statement: str, parameters: tuple[Any, ...] = ()) -> Any: ...
+
+
+class RuntimeAuthorityCoordinator(Protocol):
+    """统一 runtime-authority transaction coordinator port。"""
+
+    def transaction(
+        self,
+    ) -> AbstractContextManager[RuntimeAuthorityUnitOfWork]: ...
+
+
 class MaterialAdapter(Protocol):
     """MaterialModule 所需的最小 durable adapter port。"""
 
@@ -68,6 +83,12 @@ class MaterialAdapter(Protocol):
         resource_template_uuid: str,
         barcode: str,
         now: str,
+        uow: RuntimeAuthorityUnitOfWork | None = None,
     ) -> MaterialRecord: ...
 
-    def get_material(self, material_uuid: str) -> MaterialRecord | None: ...
+    def get_material(
+        self,
+        material_uuid: str,
+        *,
+        uow: RuntimeAuthorityUnitOfWork | None = None,
+    ) -> MaterialRecord | None: ...

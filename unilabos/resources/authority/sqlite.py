@@ -5,20 +5,22 @@ from __future__ import annotations
 import json
 import sqlite3
 import threading
+from contextlib import AbstractContextManager, contextmanager
 from pathlib import Path
-from typing import Any
+from typing import Any, Iterator
 
 from .models import (
     MaterialAuthorityUnavailable,
     MaterialConflict,
     MaterialRecord,
+    RuntimeAuthorityCoordinator,
+    RuntimeAuthorityUnitOfWork,
 )
 
 _SQLITE_BUSY_TIMEOUT_MS = 5000
 
-_SCHEMA = """
-PRAGMA foreign_keys = ON;
-
+_SCHEMA_STATEMENTS = (
+    """
 CREATE TABLE IF NOT EXISTS material (
     uuid TEXT PRIMARY KEY,
     create_time TEXT NOT NULL,
@@ -48,20 +50,24 @@ CREATE TABLE IF NOT EXISTS material (
         (material_kind = 'business' AND disposition IS NOT NULL)
         OR (material_kind = 'device' AND disposition IS NULL)
     )
-);
-
+)
+""",
+    """
 CREATE UNIQUE INDEX IF NOT EXISTS ux_material_barcode_active_nonempty
     ON material(LOWER(barcode))
-    WHERE deleted_at IS NULL AND barcode <> '';
-
+    WHERE deleted_at IS NULL AND barcode <> ''
+""",
+    """
 CREATE INDEX IF NOT EXISTS ix_material_template_active
     ON material(resource_template_uuid)
-    WHERE deleted_at IS NULL;
-
+    WHERE deleted_at IS NULL
+""",
+    """
 CREATE INDEX IF NOT EXISTS ix_material_parent_active
     ON material(parent_uuid)
-    WHERE deleted_at IS NULL;
-"""
+    WHERE deleted_at IS NULL
+""",
+)
 
 
 def _json_object(value: str) -> dict[str, Any]:
@@ -92,40 +98,97 @@ def _material_record(row: sqlite3.Row) -> MaterialRecord:
     )
 
 
-class SQLiteMaterialAdapter:
-    """以单连接和进程内锁持有 Material SQLite partition。"""
+class _StandaloneRuntimeAuthority:
+    """仅供独立 Material 部署/测试使用的 SQLite coordinator。"""
 
     def __init__(self, database_path: str | Path):
         self.path = str(database_path)
         if self.path != ":memory:":
             Path(self.path).parent.mkdir(parents=True, exist_ok=True)
         self._lock = threading.RLock()
-        try:
-            self._connection = sqlite3.connect(
-                self.path,
-                check_same_thread=False,
-            )
-            self._connection.row_factory = sqlite3.Row
-            with self._lock:
-                self._connection.execute(
-                    f"PRAGMA busy_timeout = {_SQLITE_BUSY_TIMEOUT_MS}"
-                )
-                self._connection.execute("PRAGMA foreign_keys = ON")
-                if self.path != ":memory:":
-                    self._connection.execute("PRAGMA journal_mode = WAL")
-                    self._connection.execute("PRAGMA synchronous = NORMAL")
-                self._connection.executescript(_SCHEMA)
-        except sqlite3.Error:
-            connection = getattr(self, "_connection", None)
-            if connection is not None:
-                connection.close()
-            raise MaterialAuthorityUnavailable(
-                "failed to initialize Material Authority"
-            ) from None
+        self._connection = sqlite3.connect(
+            self.path,
+            check_same_thread=False,
+        )
+        self._connection.row_factory = sqlite3.Row
+        with self._lock:
+            self._connection.execute(f"PRAGMA busy_timeout = {_SQLITE_BUSY_TIMEOUT_MS}")
+            self._connection.execute("PRAGMA foreign_keys = ON")
+            if self.path != ":memory:":
+                self._connection.execute("PRAGMA journal_mode = WAL")
+                self._connection.execute("PRAGMA synchronous = NORMAL")
+
+    @contextmanager
+    def transaction(self) -> Iterator[sqlite3.Connection]:
+        with self._lock:
+            self._connection.execute("BEGIN IMMEDIATE")
+            try:
+                yield self._connection
+            except BaseException:
+                self._connection.rollback()
+                raise
+            else:
+                self._connection.commit()
 
     def close(self) -> None:
         with self._lock:
             self._connection.close()
+
+
+class SQLiteMaterialAdapter:
+    """把 Material repository 装配到一个 runtime-authority coordinator。"""
+
+    def __init__(self, database_path: str | Path):
+        coordinator: RuntimeAuthorityCoordinator | None = None
+        try:
+            coordinator = _StandaloneRuntimeAuthority(database_path)
+            self._configure(coordinator, owned=True)
+        except sqlite3.Error:
+            if coordinator is not None:
+                coordinator.close()
+            raise MaterialAuthorityUnavailable(
+                "failed to initialize Material Authority"
+            ) from None
+
+    @classmethod
+    def from_runtime_authority(
+        cls,
+        coordinator: RuntimeAuthorityCoordinator,
+    ) -> SQLiteMaterialAdapter:
+        """绑定已有 coordinator；adapter 不取得 connection/close ownership。"""
+
+        adapter = cls.__new__(cls)
+        try:
+            adapter._configure(coordinator, owned=False)
+        except sqlite3.Error:
+            raise MaterialAuthorityUnavailable(
+                "failed to initialize Material Authority"
+            ) from None
+        return adapter
+
+    def _configure(
+        self,
+        coordinator: RuntimeAuthorityCoordinator,
+        *,
+        owned: bool,
+    ) -> None:
+        self._coordinator = coordinator
+        self._owned_coordinator = coordinator if owned else None
+        with coordinator.transaction() as uow:
+            for statement in _SCHEMA_STATEMENTS:
+                uow.execute(statement)
+
+    def close(self) -> None:
+        if self._owned_coordinator is not None:
+            self._owned_coordinator.close()
+
+    def _with_uow(
+        self,
+        uow: RuntimeAuthorityUnitOfWork | None,
+    ) -> AbstractContextManager[RuntimeAuthorityUnitOfWork]:
+        if uow is not None:
+            return _BorrowedUnitOfWork(uow)
+        return self._coordinator.transaction()
 
     def create_business_material(
         self,
@@ -134,13 +197,12 @@ class SQLiteMaterialAdapter:
         resource_template_uuid: str,
         barcode: str,
         now: str,
+        uow: RuntimeAuthorityUnitOfWork | None = None,
     ) -> MaterialRecord:
         try:
-            with self._lock:
-                self._connection.execute("BEGIN IMMEDIATE")
-                try:
-                    self._connection.execute(
-                        """
+            with self._with_uow(uow) as active_uow:
+                active_uow.execute(
+                    """
                         INSERT INTO material(
                             uuid, create_time, update_time, deleted_at,
                             description, meta_data, resource_template_uuid,
@@ -149,14 +211,9 @@ class SQLiteMaterialAdapter:
                         ) VALUES (?, ?, ?, NULL, NULL, '{}', ?, NULL, '', ?, '',
                                   '{}', '{}', 'active', 'business', 1)
                         """,
-                        (material_uuid, now, now, resource_template_uuid, barcode),
-                    )
-                except BaseException:
-                    self._connection.rollback()
-                    raise
-                else:
-                    self._connection.commit()
-                row = self._connection.execute(
+                    (material_uuid, now, now, resource_template_uuid, barcode),
+                )
+                row = active_uow.execute(
                     "SELECT * FROM material WHERE uuid = ? AND deleted_at IS NULL",
                     (material_uuid,),
                 ).fetchone()
@@ -170,16 +227,34 @@ class SQLiteMaterialAdapter:
             raise MaterialAuthorityUnavailable("created material is not readable")
         return _material_record(row)
 
-    def get_material(self, material_uuid: str) -> MaterialRecord | None:
+    def get_material(
+        self,
+        material_uuid: str,
+        *,
+        uow: RuntimeAuthorityUnitOfWork | None = None,
+    ) -> MaterialRecord | None:
         try:
-            with self._lock:
-                row = self._connection.execute(
+            with self._with_uow(uow) as active_uow:
+                row = active_uow.execute(
                     "SELECT * FROM material WHERE uuid = ? AND deleted_at IS NULL",
                     (material_uuid,),
                 ).fetchone()
         except sqlite3.Error:
             raise MaterialAuthorityUnavailable("failed to read material") from None
         return _material_record(row) if row is not None else None
+
+
+class _BorrowedUnitOfWork:
+    """借用调用者 UoW；退出时不 commit、rollback 或 close。"""
+
+    def __init__(self, uow: RuntimeAuthorityUnitOfWork):
+        self._uow = uow
+
+    def __enter__(self) -> RuntimeAuthorityUnitOfWork:
+        return self._uow
+
+    def __exit__(self, *_exc: object) -> None:
+        return None
 
 
 __all__ = ["SQLiteMaterialAdapter"]
