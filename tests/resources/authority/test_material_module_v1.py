@@ -16,6 +16,7 @@ from typing import Any
 import pytest
 
 from unilabos.resources.authority import (
+    MaterialAuthorityUnavailable,
     MaterialConflict,
     MaterialInvalidInput,
     MaterialModule,
@@ -146,6 +147,31 @@ def test_business_material_barcode_is_unique_case_insensitively(
             _observable_material(materials.get_material(MATERIAL_UUID))
             == EXPECTED_INITIAL_MATERIAL
         )
+
+
+def test_business_material_barcode_uniqueness_uses_unicode_casefold(
+    tmp_path: Path,
+) -> None:
+    database_path = tmp_path / "workflow.db"
+
+    with _open_material_module(database_path) as materials:
+        materials.create_business_material(
+            material_uuid=MATERIAL_UUID,
+            resource_template_uuid=RESOURCE_TEMPLATE_UUID,
+            barcode="ÄBC",
+            name=MATERIAL_NAME,
+        )
+
+        with pytest.raises(MaterialConflict):
+            materials.create_business_material(
+                material_uuid=SECOND_MATERIAL_UUID,
+                resource_template_uuid=RESOURCE_TEMPLATE_UUID,
+                barcode="äbc",
+                name=SECOND_MATERIAL_NAME,
+            )
+
+        original = materials.get_material(MATERIAL_UUID)
+        assert (original.uuid, original.barcode) == (MATERIAL_UUID, "ÄBC")
 
 
 def test_distinct_business_materials_may_share_empty_barcode(
@@ -368,3 +394,18 @@ def test_material_class_cannot_be_supplied_by_create_caller(
 
         with pytest.raises(MaterialNotFound):
             materials.get_material(MATERIAL_UUID)
+
+
+def test_adapter_init_wraps_filesystem_failure_without_path_disclosure(
+    tmp_path: Path,
+) -> None:
+    non_directory_parent = tmp_path / "ordinary-file"
+    non_directory_parent.write_text("not a directory", encoding="utf-8")
+    database_path = non_directory_parent / "workflow.db"
+
+    with pytest.raises(MaterialAuthorityUnavailable) as error:
+        SQLiteMaterialAdapter(database_path)
+
+    assert error.type is MaterialAuthorityUnavailable
+    assert str(error.value) == "failed to initialize Material Authority"
+    assert str(database_path) not in str(error.value)
