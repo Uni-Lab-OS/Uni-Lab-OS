@@ -276,21 +276,18 @@ OS focused tests 至少覆盖：
 最终候选必须运行 round-target、Phase 02 累积、完整 repository suite、配置的静态检查和
 `git diff --check`，并把 exact tested SHA、命令、结果与 finding disposition 写入 round ledger。
 
-## 9. Governance blocker
+## 9. Governance decision 与可移植性
 
-当前 production RED 和 production implementation 暂停，原因不是技术缺口，而是有效治理
-文本冲突：
+[Core #158](https://github.com/Uni-Lab-OS/Uni-Lab-Core/issues/158) 已 Accepted，并明确
+supersede Core #104 的 2 test-author / 3 reviewer 数量要求。I1 每个 round 使用恰好一名
+test-author、一名 implementation owner 和一名 reviewer；同一 round 严格串行，A1/I1/M1
+可以在隔离 branch/worktree 中并行。production implementation 仍必须先取得独立 RED commit。
 
-- [Core #158](https://github.com/Uni-Lab-OS/Uni-Lab-Core/issues/158) 正在裁决以下冲突；
-- [Core #104](https://github.com/Uni-Lab-OS/Uni-Lab-Core/issues/104) 要求每个 round
-  **至少两名**独立 test author 和 **至少三名**独立 reviewer；
-- 本仓 `AGENTS.md` 要求每个 round **恰好一名** test author、**恰好一名** reviewer，且
-  subagent 不并发。
-
-在 Core/OS owner 明确哪一条替代或收窄另一条，并同步 GitHub/Feishu/仓库规则前，只允许
-完成本 implementation spec 与只读审计；不得分配 RED author、修改 production、用较宽松
-解释自行开工或把冲突伪装为已通过 gate。治理裁决后仍必须先取得独立 RED commit，再开始
-production implementation。
+I/O deep Module 与 public DTO 必须保持 transport-independent：validator、canonical schema、
+binding identity、diagnostics 与 fixed-point 不能依赖 FastAPI request object、SQLite row shape、
+前端本地 store 或单一进程内对象。FastAPI、SQLite、Python source 与 FE services 都只是该合同
+的 adapter；替换 transport、数据库 adapter 或进程部署形态不得改变 canonical JSON、错误分类
+和 public seam 的行为。
 
 ## 10. Non-goals
 
