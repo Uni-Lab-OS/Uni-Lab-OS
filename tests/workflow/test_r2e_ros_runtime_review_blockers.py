@@ -55,6 +55,12 @@ class _RecordingDispatcher:
         self.removed.append(listener)
 
 
+class _EmptyMessageDispatcher(_RecordingDispatcher):
+    def dispatch(self, payload: dict[str, Any]) -> None:
+        self.payloads.append(dict(payload))
+        raise RuntimeError()
+
+
 def _create_device_task(
     service: WorkflowService,
 ) -> tuple[dict[str, Any], dict[str, Any]]:
@@ -141,6 +147,40 @@ def test_synchronous_dispatch_error_is_unknown_and_payload_uses_uuid_identities(
     assert payload["task_uuid"] == task["uuid"]
     assert payload["node_uuid"] == job["workflow_node_uuid"]
     assert payload["workflow_uuid"] == task["workflow_uuid"]
+
+
+def test_empty_dispatch_error_still_opens_stable_reconciliation_fence(
+    tmp_path: Path,
+) -> None:
+    store = WorkflowStore(tmp_path / "workflow.db")
+    service = WorkflowService(store)
+    task, job = _create_device_task(service)
+    dispatcher = _EmptyMessageDispatcher()
+    worker = WorkflowRuntimeWorker(
+        WorkflowRuntimeCoordinator(store),
+        dispatcher=dispatcher,
+        device_identity_resolver=lambda _identity: "r2e_szlab_mixer",
+        poll_interval_seconds=0.01,
+    )
+    try:
+        worker.start()
+        observed_job = _wait_for_job_status(
+            service,
+            job["uuid"],
+            "execution_unknown",
+        )
+        observed_task = service.get_workflow_task(task["uuid"])
+    finally:
+        worker.stop()
+        worker.join(timeout=1)
+        service.close()
+
+    assert observed_job["status"] == "execution_unknown"
+    assert observed_job["status"] != "running"
+    assert observed_job["uncertainty_reason"] == "dispatch_outcome_unknown"
+    assert observed_task["control_status"] == "waiting_reconciliation"
+    assert observed_task["cleanup_status"] == "requires_attention"
+    assert observed_task["attention_reason"] == "dispatch_outcome_unknown"
 
 
 def test_worker_stop_unsubscribes_dispatch_completion_listener(tmp_path: Path) -> None:
