@@ -58,6 +58,27 @@ class _EmptyMessageDispatcher(_RecordingDispatcher):
         raise RuntimeError()
 
 
+class _MaterialGateCoordinator:
+    def __init__(self) -> None:
+        self.starts: list[str] = []
+        self.task = {
+            "uuid": str(uuid4()),
+            "workflow_uuid": str(uuid4()),
+            "status": "pending",
+            "control_status": "active",
+            "workflow_snapshot": {
+                "nodes": [{"uuid": str(uuid4()), "type": "material_source"}]
+            },
+        }
+
+    def _execution_tasks(self) -> list[dict[str, Any]]:
+        return [dict(self.task)]
+
+    def start_task(self, task_uuid: str) -> dict[str, Any]:
+        self.starts.append(task_uuid)
+        return {**self.task, "status": "running"}
+
+
 def _create_device_task(
     service: WorkflowService,
 ) -> tuple[dict[str, Any], dict[str, Any]]:
@@ -195,6 +216,39 @@ def test_worker_stop_unsubscribes_dispatch_completion_listener(tmp_path: Path) -
     assert dispatcher.listeners == []
     assert len(dispatcher.removed) == 1
     store.close()
+
+
+def test_material_source_task_dispatch_is_fail_closed_until_scheduler_proves_admission(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    coordinator = _MaterialGateCoordinator()
+    dispatcher = _RecordingDispatcher()
+    worker = WorkflowRuntimeWorker(  # type: ignore[arg-type]
+        coordinator,
+        dispatcher=dispatcher,
+        device_identity_resolver=lambda _identity: "r2e_szlab_mixer",
+    )
+    advanced: list[str] = []
+    monkeypatch.setattr(
+        worker,
+        "_advance_task",
+        lambda task: advanced.append(task["uuid"]),
+    )
+    admitted = False
+    try:
+        worker._sweep_execution_tasks()
+        worker.set_task_reconciler(
+            lambda _task_uuid: None,
+            lambda _task_uuid: admitted,
+        )
+        worker._sweep_execution_tasks()
+        admitted = True
+        worker._sweep_execution_tasks()
+    finally:
+        worker.stop()
+
+    assert coordinator.starts == [coordinator.task["uuid"]]
+    assert advanced == [coordinator.task["uuid"]]
 
 
 @pytest.mark.parametrize(

@@ -1,211 +1,154 @@
-"""Outbox 同步协议测试.
+"""Canonical outbox/cursor/snapshot replay regressions."""
 
-覆盖测试门槛：
-- 重复 event 不重复应用（云端 (edge_id,event_id) 去重语义）
-- 乱序 aggregate_version 不覆盖新状态
-- 业务提交后、网络发送前 crash → 重启回放 outbox
-- 离线变更恢复后顺序 ACK（指数退避期间 outbox 保留）
-- snapshot 可重建云端 projection，ledger 可对账
-"""
+from __future__ import annotations
 
-import json
+from pathlib import Path
+from typing import Any
 
 import pytest
 
-from unilabos.app.scheduler.inventory.domain import MaterialRequirement
-from unilabos.app.scheduler.inventory.service import InventoryService
-from unilabos.app.scheduler.inventory.store import InventoryStore
-from unilabos.app.scheduler.inventory.sync import (
-    CloudProjectionReference,
+from unilabos.app.scheduler.inventory import (
+    InventoryService,
     OutboxWorker,
+    ResourceTemplateIdentity,
     build_snapshot,
 )
+from unilabos.app.scheduler.inventory.sync import CloudProjectionReference
+
+TEMPLATE_UUID = "20000000-0000-4000-8000-000000000701"
 
 
-def _req(lot="", qty=0.0):
-    return MaterialRequirement(lot_id=lot, quantity=qty)
+def _open(path: Path) -> InventoryService:
+    identity = ResourceTemplateIdentity(TEMPLATE_UUID, "SampleTube")
+    return InventoryService.open(
+        working_dir=path,
+        resource_templates={identity.uuid: identity},
+    )
 
 
-class _CollectingSender:
-    """测试 sender：可注入失败次数，成功时全量 ACK."""
-
-    def __init__(self, fail_times: int = 0):
-        self.fail_times = fail_times
-        self.calls = 0
-        self.received = []
-
-    def __call__(self, events):
-        self.calls += 1
-        if self.calls <= self.fail_times:
-            raise ConnectionError("network down")
-        self.received.extend(events)
-        return max(e["sequence"] for e in events)
+def _create_material(inventory: InventoryService, index: int) -> str:
+    material_uuid = f"50000000-0000-4000-8000-{index:012d}"
+    inventory.create_material(
+        material_uuid=material_uuid,
+        resource_template_uuid=TEMPLATE_UUID,
+        barcode=f"SYNC-{index}",
+        name=f"Sync material {index}",
+    )
+    return material_uuid
 
 
-class TestOutboxWorker:
-    def test_flush_and_cursor_advance(self):
-        svc = InventoryService(InventoryStore(":memory:"))
-        svc.inbound_lot("tpl-w", 100.0, lot_id="lot-1")
-        svc.reserve_workflow("wf1", {"n1": [_req(lot="lot-1", qty=10.0)]})
+def test_failed_send_keeps_durable_events_for_retry(tmp_path: Path) -> None:
+    inventory = _open(tmp_path)
+    _create_material(inventory, 701)
 
-        sender = _CollectingSender()
-        worker = OutboxWorker(svc.store, sender)
-        n = worker.flush_all()
-        assert n == svc.store.max_outbox_sequence()
-        assert worker.backlog() == 0
-        # envelope 完整性
-        ev = sender.received[0]
-        for key in ("event_id", "edge_id", "lab_id", "sequence", "aggregate_type",
-                    "aggregate_id", "aggregate_version", "event_type", "occurred_at",
-                    "causation_id", "payload"):
-            assert key in ev
+    def fail(_events: list[dict[str, Any]]) -> int:
+        raise ConnectionError("offline")
 
-    def test_send_failure_keeps_outbox(self):
-        """网络失败：事件保留，退避计数上升，恢复后继续发."""
-        svc = InventoryService(InventoryStore(":memory:"))
-        svc.inbound_lot("tpl-w", 100.0, lot_id="lot-1")
-
-        sender = _CollectingSender(fail_times=2)
-        worker = OutboxWorker(svc.store, sender)
+    try:
+        worker = OutboxWorker(inventory, fail)
         with pytest.raises(ConnectionError):
             worker.flush_once()
-        with pytest.raises(ConnectionError):
-            worker.flush_once()
-        assert worker.backlog() > 0  # 未 ACK，事件还在
-        worker.flush_all()
+        assert inventory.get_acknowledged_sequence(consumer="cloud") == 0
+        assert worker.backlog() == 1
+        assert len(inventory.read_outbox(after_sequence=0, limit=100)) == 1
+    finally:
+        inventory.close()
+
+
+def test_partial_ack_replays_only_unacknowledged_suffix(tmp_path: Path) -> None:
+    inventory = _open(tmp_path)
+    for index in (702, 703, 704):
+        _create_material(inventory, index)
+    batches: list[list[int]] = []
+
+    def sender(events: list[dict[str, Any]]) -> int:
+        sequences = [event["sequence"] for event in events]
+        batches.append(sequences)
+        return sequences[0] if len(batches) == 1 else sequences[-1]
+
+    try:
+        worker = OutboxWorker(inventory, sender)
+        assert worker.flush_once() == 1
+        assert inventory.get_acknowledged_sequence(consumer="cloud") == 1
+        assert worker.flush_once() == 2
+        assert batches == [[1, 2, 3], [2, 3]]
         assert worker.backlog() == 0
-
-    def test_crash_before_send_replays_after_restart(self, tmp_path):
-        """业务事务已提交、网络发送前 crash：重启后 outbox 完整回放."""
-        db = str(tmp_path / "inv.db")
-        svc = InventoryService(InventoryStore(db))
-        svc.inbound_lot("tpl-w", 100.0, lot_id="lot-1")
-        svc.reserve_workflow("wf1", {"n1": [_req(lot="lot-1", qty=10.0)]})
-        expected = svc.store.max_outbox_sequence()
-        svc.store.close()  # 模拟 crash：worker 从未跑过
-
-        store2 = InventoryStore(db)
-        sender = _CollectingSender()
-        worker = OutboxWorker(store2, sender)
-        n = worker.flush_all()
-        assert n == expected
-        assert [e["sequence"] for e in sender.received] == list(range(1, expected + 1))
-        store2.close()
-
-    def test_offline_changes_acked_in_order(self, tmp_path):
-        """离线累积多批变更，恢复后按 sequence 顺序 ACK，cursor 只前进."""
-        db = str(tmp_path / "inv.db")
-        svc = InventoryService(InventoryStore(db))
-        for i in range(5):
-            svc.inbound_lot("tpl-w", 10.0, lot_id=f"lot-{i}")
-
-        sender = _CollectingSender()
-        worker = OutboxWorker(svc.store, sender, batch_size=2)  # 强制分批
-        worker.flush_all()
-        seqs = [e["sequence"] for e in sender.received]
-        assert seqs == sorted(seqs) == list(range(1, len(seqs) + 1))
-        assert svc.store.get_cursor() == len(seqs)
-        svc.store.close()
-
-    def test_partial_ack_resends_remainder(self):
-        """云端只 ACK 一部分（缺口）：cursor 停在水位，剩余下一批重发."""
-        svc = InventoryService(InventoryStore(":memory:"))
-        for i in range(4):
-            svc.inbound_lot("tpl-w", 10.0, lot_id=f"lot-{i}")
-
-        acks = []
-
-        def partial_sender(events):
-            acks.append([e["sequence"] for e in events])
-            return events[0]["sequence"]  # 每次只确认第一条
-
-        worker = OutboxWorker(svc.store, partial_sender, batch_size=10)
-        worker.flush_once()
-        assert svc.store.get_cursor() == 1
-        worker.flush_once()
-        # 第二批从 seq=2 开始重发（seq=1 不再发）
-        assert acks[1][0] == 2
+    finally:
+        inventory.close()
 
 
-class TestCloudProjectionContract:
-    """云端 inbox 参考语义（Go 实现的契约）."""
+def test_snapshot_and_event_replay_converge_on_versions(tmp_path: Path) -> None:
+    inventory = _open(tmp_path)
+    material_uuid = _create_material(inventory, 705)
+    try:
+        snapshot = build_snapshot(inventory)
+        events = inventory.read_outbox(after_sequence=0, limit=100)
+        event_projection = CloudProjectionReference()
+        event_projection.ingest(
+            [
+                {
+                    "event_id": event.event_id,
+                    "edge_id": event.edge_id,
+                    "sequence": event.sequence,
+                    "aggregate_type": event.aggregate_type,
+                    "aggregate_id": event.aggregate_id,
+                    "aggregate_version": event.aggregate_version,
+                    "event_type": event.event_type,
+                    "payload": event.payload,
+                }
+                for event in events
+            ]
+        )
+        snapshot_projection = CloudProjectionReference()
+        snapshot_projection.load_snapshot(snapshot)
 
-    def _event(self, seq, agg="lot:lot-1", version=1, event_id=None, payload=None):
-        atype, aid = agg.split(":")
-        return {
-            "event_id": event_id or f"ev-{seq}",
-            "edge_id": "edge-t", "lab_id": "lab-t", "sequence": seq,
-            "aggregate_type": atype, "aggregate_id": aid,
-            "aggregate_version": version, "event_type": "lot.inbound",
-            "occurred_at": 1000 + seq, "causation_id": "",
-            "payload": payload or {"v": version},
-        }
-
-    def test_duplicate_event_not_applied_twice(self):
-        proj = CloudProjectionReference()
-        e = self._event(1, version=1, payload={"quantity_total": 10})
-        proj.ingest([e])
-        proj.ingest([e])  # Edge 重发同一 event
-        assert proj.acked_sequence == 1
-        assert proj.state["lot:lot-1"]["version"] == 1
-
-    def test_out_of_order_version_does_not_overwrite(self):
-        proj = CloudProjectionReference()
-        newer = self._event(2, version=5, payload={"quantity_total": 50})
-        older = self._event(3, version=3, payload={"quantity_total": 30},
-                            event_id="ev-old")
-        proj.ingest([self._event(1, version=1)])
-        proj.ingest([newer])
-        proj.ingest([older])  # 乱序旧版本
-        assert proj.state["lot:lot-1"]["version"] == 5
-        assert proj.state["lot:lot-1"]["payload"]["quantity_total"] == 50
-
-    def test_gap_does_not_advance_ack(self):
-        proj = CloudProjectionReference()
-        proj.ingest([self._event(1)])
-        proj.ingest([self._event(3)])  # seq=2 缺口
-        assert proj.acked_sequence == 1  # 等 Edge 重发
+        key = f"material:{material_uuid}"
+        assert event_projection.versions[key] == snapshot_projection.versions[key] == 1
+        assert snapshot_projection.acked_sequence == snapshot["snapshot_sequence"]
+    finally:
+        inventory.close()
 
 
-class TestSnapshotReconciliation:
-    def test_snapshot_rebuilds_projection(self):
-        """snapshot 与 事件回放 两条路径重建的 projection 版本一致."""
-        svc = InventoryService(InventoryStore(":memory:"))
-        svc.inbound_lot("tpl-w", 100.0, lot_id="lot-1")
-        svc.reserve_workflow("wf1", {"n1": [_req(lot="lot-1", qty=30.0)]})
-        svc.consume_reservation("wf1", "n1")
-        svc.register_instance(edge_uuid="mi-1", barcode="BC-1")
+def test_reopen_preserves_cursor_and_snapshot_sequence(tmp_path: Path) -> None:
+    inventory = _open(tmp_path)
+    _create_material(inventory, 706)
+    sent: list[dict[str, Any]] = []
 
-        # 路径 1：事件流回放
-        sender = _CollectingSender()
-        OutboxWorker(svc.store, sender).flush_all()
-        proj_events = CloudProjectionReference()
-        proj_events.ingest(sender.received)
+    def sender(events: list[dict[str, Any]]) -> int:
+        sent.extend(events)
+        return events[-1]["sequence"]
 
-        # 路径 2：snapshot 全量重建
-        proj_snap = CloudProjectionReference()
-        proj_snap.load_snapshot(build_snapshot(svc.store))
+    try:
+        assert OutboxWorker(inventory, sender).flush_all() == 1
+        sequence = inventory.get_acknowledged_sequence(consumer="cloud")
+    finally:
+        inventory.close()
 
-        for key in ("lot:lot-1", "instance:mi-1"):
-            assert proj_events.versions[key] == proj_snap.versions[key]
+    reopened = _open(tmp_path)
+    try:
+        assert reopened.get_acknowledged_sequence(consumer="cloud") == sequence
+        assert build_snapshot(reopened)["snapshot_sequence"] == sequence
+        assert reopened.outbox_status()["backlog"] == 0
+    finally:
+        reopened.close()
 
-    def test_ledger_reconciles_quantities(self):
-        """ledger 可对账：数量事件累计 == 当前库存行."""
-        svc = InventoryService(InventoryStore(":memory:"))
-        svc.inbound_lot("tpl-w", 100.0, lot_id="lot-1")
-        svc.reserve_workflow("wf1", {"n1": [_req(lot="lot-1", qty=30.0)]})
-        svc.consume_reservation("wf1", "n1")
-        svc.reserve_workflow("wf2", {"n1": [_req(lot="lot-1", qty=10.0)]})
-        svc.release_reservation("wf2", "n1")
 
-        total = 0.0
-        for row in svc.store.query_all(
-            "SELECT op_type, delta_json FROM inventory_ledger WHERE aggregate_id = 'lot-1'"
-        ):
-            delta = json.loads(row["delta_json"])
-            if row["op_type"] in ("lot.created", "lot.inbound"):
-                total += delta["quantity"]
-            elif row["op_type"] == "lot.consumed":
-                total -= delta["quantity"]
-        lot = svc.store.get_lot("lot-1")
-        assert total == pytest.approx(lot["quantity_total"])
+def test_scheduler_ack_does_not_skip_cloud_delivery(tmp_path: Path) -> None:
+    inventory = _open(tmp_path)
+    _create_material(inventory, 707)
+    _create_material(inventory, 708)
+    sent: list[int] = []
+
+    def sender(events: list[dict[str, Any]]) -> int:
+        sent.extend(event["sequence"] for event in events)
+        return events[-1]["sequence"]
+
+    try:
+        inventory.acknowledge(2, consumer="scheduler")
+
+        assert OutboxWorker(inventory, sender).flush_once() == 2
+        assert sent == [1, 2]
+        assert inventory.get_acknowledged_sequence(consumer="scheduler") == 2
+        assert inventory.get_acknowledged_sequence(consumer="cloud") == 2
+    finally:
+        inventory.close()

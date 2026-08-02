@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+from collections.abc import Callable
 from copy import deepcopy
 from pathlib import Path
 from typing import Any
@@ -153,6 +154,7 @@ def _get_events_through_asgi(
     app: FastAPI,
     *,
     last_event_id: str,
+    disconnect_after: Callable[[], bool] | None = None,
 ) -> list[dict[str, Any]]:
     async def invoke() -> list[dict[str, Any]]:
         messages: list[dict[str, Any]] = []
@@ -167,7 +169,11 @@ def _get_events_through_asgi(
                     "body": b"",
                     "more_body": False,
                 }
-            await asyncio.sleep(0.01)
+            if disconnect_after is None:
+                await asyncio.sleep(0.01)
+            else:
+                while not disconnect_after():
+                    await asyncio.sleep(0)
             return {"type": "http.disconnect"}
 
         async def send(message: dict[str, Any]) -> None:
@@ -237,6 +243,7 @@ def test_last_event_id_trims_go_ascii_white_space(
     messages = _get_events_through_asgi(
         create_workflow_app(service),
         last_event_id=f"{white_space}10{white_space}",
+        disconnect_after=lambda: bool(service.seen_after_ids),
     )
 
     assert {
@@ -256,6 +263,7 @@ def test_last_event_id_go_ascii_white_space_only_becomes_cursor_zero(
     messages = _get_events_through_asgi(
         create_workflow_app(service),
         last_event_id="\t\r\n\v\f ",
+        disconnect_after=lambda: bool(service.seen_after_ids),
     )
 
     assert {
@@ -281,6 +289,7 @@ def test_last_event_id_trims_go_unicode_white_space(
     messages = _get_events_through_asgi(
         create_workflow_app(service),
         last_event_id=f"{white_space}10{white_space}",
+        disconnect_after=lambda: bool(service.seen_after_ids),
     )
 
     assert {
@@ -300,6 +309,7 @@ def test_last_event_id_go_unicode_white_space_only_becomes_cursor_zero(
     messages = _get_events_through_asgi(
         create_workflow_app(service),
         last_event_id="\u0085\u00a0\u2000\u3000",
+        disconnect_after=lambda: bool(service.seen_after_ids),
     )
 
     assert {

@@ -3,15 +3,14 @@
 from __future__ import annotations
 
 from collections.abc import Mapping, Sequence
-from typing import Any, Never, Protocol
+from typing import Any, Never, Protocol, cast
 from uuid import UUID
 
-from unilabos.resources.authority import (
+from unilabos.app.scheduler.inventory import (
     MaterialAuthorityUnavailable,
     MaterialError,
     MaterialNotFound,
     MaterialRecord,
-    RuntimeAuthorityUnitOfWork,
     SiteRecord,
 )
 
@@ -23,21 +22,21 @@ class MaterialSourceStaticAuthority(Protocol):
         self,
         material_uuid: str,
         *,
-        uow: RuntimeAuthorityUnitOfWork | None = None,
+        uow: object | None = None,
     ) -> MaterialRecord: ...
 
     def get_site(
         self,
         site_uuid: str,
         *,
-        uow: RuntimeAuthorityUnitOfWork | None = None,
+        uow: object | None = None,
     ) -> SiteRecord: ...
 
     def list_sites(
         self,
         material_uuid: str,
         *,
-        uow: RuntimeAuthorityUnitOfWork | None = None,
+        uow: object | None = None,
     ) -> Sequence[SiteRecord]: ...
 
 
@@ -53,7 +52,7 @@ def validate_material_source_authority(
     graph: Mapping[str, Any],
     authority: MaterialSourceStaticAuthority | None,
     *,
-    uow: RuntimeAuthorityUnitOfWork | None = None,
+    uow: object | None = None,
 ) -> None:
     """证明每个 canonical MaterialSource selector 的静态位置可行性。"""
 
@@ -148,7 +147,7 @@ def _validate_selector_authority(
     selector: Mapping[str, Any],
     authority: MaterialSourceStaticAuthority,
     *,
-    uow: RuntimeAuthorityUnitOfWork | None,
+    uow: object | None,
 ) -> None:
     mount = selector.get("mount")
     mount_uuid = mount.get("uuid") if isinstance(mount, Mapping) else None
@@ -213,7 +212,7 @@ def _get_material(
     authority: MaterialSourceStaticAuthority,
     material_uuid: str,
     *,
-    uow: RuntimeAuthorityUnitOfWork | None,
+    uow: object | None,
 ) -> MaterialRecord:
     try:
         material = (
@@ -221,24 +220,18 @@ def _get_material(
             if uow is None
             else authority.get_material(material_uuid, uow=uow)
         )
-    except MaterialNotFound:
-        _not_found()
-    except MaterialAuthorityUnavailable:
-        _unavailable()
-    except MaterialError:
+    except Exception as exc:  # noqa: BLE001 - authority adapter must fail closed
+        _translate_authority_error(exc)
+    if not _is_material_record(material) or material.uuid != material_uuid:
         _conflict()
-    except Exception:
-        _unavailable()
-    if not isinstance(material, MaterialRecord) or material.uuid != material_uuid:
-        _conflict()
-    return material
+    return cast(MaterialRecord, material)
 
 
 def _get_site(
     authority: MaterialSourceStaticAuthority,
     site_uuid: str,
     *,
-    uow: RuntimeAuthorityUnitOfWork | None,
+    uow: object | None,
 ) -> SiteRecord:
     try:
         site = (
@@ -246,24 +239,18 @@ def _get_site(
             if uow is None
             else authority.get_site(site_uuid, uow=uow)
         )
-    except MaterialNotFound:
-        _not_found()
-    except MaterialAuthorityUnavailable:
-        _unavailable()
-    except MaterialError:
+    except Exception as exc:  # noqa: BLE001 - authority adapter must fail closed
+        _translate_authority_error(exc)
+    if not _is_site_record(site) or site.uuid != site_uuid:
         _conflict()
-    except Exception:
-        _unavailable()
-    if not isinstance(site, SiteRecord) or site.uuid != site_uuid:
-        _conflict()
-    return site
+    return cast(SiteRecord, site)
 
 
 def _list_sites(
     authority: MaterialSourceStaticAuthority,
     mount_uuid: str,
     *,
-    uow: RuntimeAuthorityUnitOfWork | None,
+    uow: object | None,
 ) -> tuple[SiteRecord, ...]:
     try:
         sites = (
@@ -271,20 +258,61 @@ def _list_sites(
             if uow is None
             else authority.list_sites(mount_uuid, uow=uow)
         )
-    except MaterialNotFound:
-        _not_found()
-    except MaterialAuthorityUnavailable:
-        _unavailable()
-    except MaterialError:
-        _conflict()
-    except Exception:
-        _unavailable()
+    except Exception as exc:  # noqa: BLE001 - authority adapter must fail closed
+        _translate_authority_error(exc)
     if isinstance(sites, (str, bytes)) or not isinstance(sites, Sequence):
         _conflict()
     result = tuple(sites)
-    if any(not isinstance(site, SiteRecord) for site in result):
+    if any(not _is_site_record(site) for site in result):
         _conflict()
-    return result
+    return cast(tuple[SiteRecord, ...], result)
+
+
+def _is_material_record(value: object) -> bool:
+    """Accept the public Inventory DTO and transitionally compatible projections."""
+
+    return all(
+        hasattr(value, attribute)
+        for attribute in (
+            "uuid",
+            "deleted_at",
+            "resource_template_uuid",
+        )
+    )
+
+
+def _is_site_record(value: object) -> bool:
+    """Validate the narrow Site projection consumed by static authoring checks."""
+
+    return all(
+        hasattr(value, attribute)
+        for attribute in (
+            "uuid",
+            "deleted_at",
+            "material_uuid",
+            "allowed_resource_template_uuids",
+            "occupied_material_uuid",
+        )
+    )
+
+
+def _translate_authority_error(exc: Exception) -> Never:
+    """Map Inventory errors and compatible legacy projections to stable diagnostics."""
+
+    if isinstance(exc, MaterialNotFound) or getattr(exc, "code", None) == "not_found":
+        _not_found()
+    if (
+        isinstance(exc, MaterialAuthorityUnavailable)
+        or getattr(exc, "code", None) == "material_authority_unavailable"
+    ):
+        _unavailable()
+    if isinstance(exc, MaterialError) or getattr(exc, "code", None) in {
+        "material_error",
+        "invalid_input",
+        "conflict",
+    }:
+        _conflict()
+    _unavailable()
 
 
 def _not_found() -> Never:

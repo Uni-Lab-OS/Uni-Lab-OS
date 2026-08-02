@@ -10,19 +10,12 @@ from datetime import datetime, timezone
 from typing import Any, Dict, Optional, Protocol
 from uuid import uuid4
 
-from unilabos.resources.authority import MaterialModule
-from unilabos.resources.authority.sqlite import SQLiteMaterialAdapter
 from unilabos.workflow.json_codec import decode_json_bytes, encode_json
-from unilabos.workflow.material_resolver import MaterialResourceSlotResolver
 from unilabos.workflow.store import (
     StoreConflict,
     StoreNotFound,
     WorkflowStore,
     utc_now,
-)
-from unilabos.workflow.task_input import (
-    TaskInputError,
-    material_root_uuids_from_task_snapshot,
 )
 
 _LOGGER = logging.getLogger(__name__)
@@ -89,18 +82,6 @@ _JOB_IN_FLIGHT = frozenset(
 )
 
 
-class TaskMaterialReservationGuard(Protocol):
-    """Runtime dispatch 所需的最小 Material capability。"""
-
-    def has_complete_task_reservation(
-        self,
-        uow: Any,
-        *,
-        task_uuid: str,
-        root_material_uuids: tuple[str, ...],
-    ) -> bool: ...
-
-
 class WorkflowJobDispatcher(Protocol):
     """ROS execution backend capability required by the durable worker."""
 
@@ -144,40 +125,8 @@ class WorkflowRuntimeCoordinator:
     def __init__(
         self,
         store: WorkflowStore,
-        *,
-        material_reservations: TaskMaterialReservationGuard | None = None,
     ):
         self._store = store
-        if material_reservations is None:
-            materials = MaterialModule(
-                SQLiteMaterialAdapter.from_runtime_authority(store),
-                resource_templates={},
-            )
-            material_reservations = MaterialResourceSlotResolver(materials)
-        self._material_reservations = material_reservations
-
-    def _require_complete_material_reservation(
-        self,
-        connection: sqlite3.Connection,
-        task: sqlite3.Row,
-    ) -> None:
-        try:
-            roots = material_root_uuids_from_task_snapshot(
-                _load(task["workflow_snapshot"]),
-                _load(task["input"]),
-                _load(task["execution_plan"]),
-            )
-            if not roots:
-                return
-            complete = self._material_reservations.has_complete_task_reservation(
-                connection,
-                task_uuid=task["uuid"],
-                root_material_uuids=roots,
-            )
-        except (TaskInputError, TypeError, ValueError):
-            raise StoreConflict("task Material reservation is not verifiable") from None
-        if not complete:
-            raise StoreConflict("task does not own a complete Material reservation")
 
     @staticmethod
     def _task_row(
@@ -350,8 +299,6 @@ class WorkflowRuntimeCoordinator:
             task = self._task_row(connection, row["workflow_task_uuid"])
             if task["status"] in _TASK_TERMINAL:
                 raise StoreConflict("terminal task cannot mutate a job")
-            if status == "dispatched":
-                self._require_complete_material_reservation(connection, task)
             assignments = ["status = ?", "update_time = ?"]
             values: list[Any] = [status, now]
             if status == "running" and row["started_at"] is None:
@@ -1117,6 +1064,30 @@ class WorkflowRuntimeWorker:
         if dispatcher is not None:
             dispatcher.add_job_finished_listener(self._on_job_finished)
             self._listener_registered = True
+        self._task_reconciler: Callable[[str], object] | None = None
+        self._task_dispatch_guard: Callable[[str], bool] | None = None
+        self._pending_task_reconciliations: set[str] = set()
+
+    def set_task_reconciler(
+        self,
+        reconciler: Callable[[str], object] | None,
+        dispatch_guard: Callable[[str], bool] | None = None,
+    ) -> None:
+        """Attach the Scheduler-owned Material saga and dispatch proof."""
+
+        if reconciler is None and dispatch_guard is not None:
+            raise ValueError("dispatch_guard requires a task reconciler")
+
+        with self._lock:
+            self._task_reconciler = reconciler
+            self._task_dispatch_guard = dispatch_guard
+            if reconciler is None:
+                self._pending_task_reconciliations.clear()
+
+    def _queue_task_reconciliation(self, task_uuid: str) -> None:
+        with self._lock:
+            if self._task_reconciler is not None:
+                self._pending_task_reconciliations.add(task_uuid)
 
     def start(self) -> None:
         with self._lock:
@@ -1158,11 +1129,17 @@ class WorkflowRuntimeWorker:
             try:
                 task_uuids = self._coordinator._pending_command_task_uuids()
                 for task_uuid in task_uuids:
-                    self._coordinator.consume_next_command(task_uuid)
+                    consumed = self._coordinator.consume_next_command(task_uuid)
+                    if consumed is not None:
+                        self._queue_task_reconciliation(task_uuid)
+            except (sqlite3.Error, StoreConflict, StoreNotFound):
+                _LOGGER.exception("Workflow runtime command sweep failed")
+            self._reconcile_task_mutations()
+            try:
                 if self._dispatcher is not None:
                     self._sweep_execution_tasks()
             except (sqlite3.Error, StoreConflict, StoreNotFound):
-                _LOGGER.exception("Workflow runtime sweep failed")
+                _LOGGER.exception("Workflow runtime execution sweep failed")
             if self._stop_event.is_set():
                 return
             self._wake_event.wait(self._poll_interval_seconds)
@@ -1175,6 +1152,8 @@ class WorkflowRuntimeWorker:
             return
         for task in self._coordinator._execution_tasks():
             if task["control_status"] != "active":
+                continue
+            if not self._can_dispatch_task_materials(task):
                 continue
             if task["status"] == "pending":
                 task = self._coordinator.start_task(task["uuid"])
@@ -1198,6 +1177,7 @@ class WorkflowRuntimeWorker:
             return
         if jobs and all(job["status"] in {"succeeded", "skipped"} for job in jobs):
             self._coordinator.transition_task(task_uuid, "succeeded")
+            self._queue_task_reconciliation(task_uuid)
             _LOGGER.info("Workflow Task succeeded task_uuid=%s", task_uuid)
             return
         if any(
@@ -1462,7 +1442,52 @@ class WorkflowRuntimeWorker:
                 "failed",
                 error_info=[error],
             )
+            self._queue_task_reconciliation(task_uuid)
         _LOGGER.error("Workflow Task failed task_uuid=%s code=%s", task_uuid, code)
+
+    @staticmethod
+    def _requires_material_admission(task: Mapping[str, Any]) -> bool:
+        snapshot = task.get("workflow_snapshot")
+        nodes = snapshot.get("nodes") if isinstance(snapshot, Mapping) else None
+        return isinstance(nodes, list) and any(
+            isinstance(node, Mapping) and node.get("type") == "material_source"
+            for node in nodes
+        )
+
+    def _can_dispatch_task_materials(self, task: Mapping[str, Any]) -> bool:
+        if not self._requires_material_admission(task):
+            return True
+        with self._lock:
+            dispatch_guard = self._task_dispatch_guard
+        if dispatch_guard is None:
+            return False
+        try:
+            return bool(dispatch_guard(str(task["uuid"])))
+        except Exception:
+            _LOGGER.exception(
+                "Workflow Task Material dispatch proof failed for %s",
+                task.get("uuid"),
+            )
+            return False
+
+    def _reconcile_task_mutations(self) -> None:
+        with self._lock:
+            reconciler = self._task_reconciler
+            task_uuids = tuple(sorted(self._pending_task_reconciliations))
+        if reconciler is None:
+            return
+        for task_uuid in task_uuids:
+            try:
+                reconciler(task_uuid)
+            except Exception:
+                _LOGGER.exception(
+                    "Workflow Task Material reconciliation failed for %s",
+                    task_uuid,
+                )
+                continue
+            with self._lock:
+                if self._task_reconciler is reconciler:
+                    self._pending_task_reconciliations.discard(task_uuid)
 
 
 __all__ = [

@@ -331,8 +331,10 @@ def test_catalog_projects_registry_and_assets_without_overwriting_live_material(
     consumer = _require_module(
         "unilabos.registry.catalog_consumer", "register_package_catalog"
     )
-    from unilabos.app.scheduler.inventory.service import InventoryService
-    from unilabos.app.scheduler.inventory.store import InventoryStore
+    from unilabos.app.scheduler.inventory import (
+        InventoryService,
+        ResourceTemplateIdentity,
+    )
     from unilabos.registry.registry import lab_registry
 
     _write_resource_package(tmp_path)
@@ -340,25 +342,24 @@ def test_catalog_projects_registry_and_assets_without_overwriting_live_material(
     catalog = api.compile_package_source(source)
     resolver = api.PackageAssetResolver(source, catalog)
 
-    store = InventoryStore(str(tmp_path / "inventory.db"))
-    material_service = InventoryService(store)
+    material_uuid = "50000000-0000-4000-8000-000000001201"
+    material_service = InventoryService.open(
+        working_dir=tmp_path,
+        resource_templates={
+            RESOURCE_TEMPLATE_UUID: ResourceTemplateIdentity(
+                RESOURCE_TEMPLATE_UUID,
+                "LiveMaterial",
+            )
+        },
+    )
     try:
-        material_service.upsert_template(
-            template_id="existing-template",
-            name="Existing",
-            category="sample",
-        )
-        material_service.register_instance(
-            template_id="existing-template",
+        material_service.create_material(
+            material_uuid=material_uuid,
+            resource_template_uuid=RESOURCE_TEMPLATE_UUID,
             barcode="LIVE-001",
-            edge_uuid="material-live-001",
+            name="Existing",
         )
-        before_templates = store.query_all(
-            "SELECT * FROM resource_template ORDER BY template_id"
-        )
-        before_materials = store.query_all(
-            "SELECT * FROM material_instance ORDER BY edge_uuid"
-        )
+        before_inventory = material_service.inventory_snapshot()
 
         monkeypatch.setattr(lab_registry, "device_type_registry", {})
         monkeypatch.setattr(lab_registry, "resource_type_registry", {})
@@ -372,16 +373,9 @@ def test_catalog_projects_registry_and_assets_without_overwriting_live_material(
         with resolver.open_binary(logical_path) as stream:
             assert stream.read() == b"glTF-resource"
 
-        assert (
-            store.query_all("SELECT * FROM resource_template ORDER BY template_id")
-            == before_templates
-        )
-        assert (
-            store.query_all("SELECT * FROM material_instance ORDER BY edge_uuid")
-            == before_materials
-        )
+        assert material_service.inventory_snapshot() == before_inventory
     finally:
-        store.close()
+        material_service.close()
 
 
 def test_actions_project_into_the_existing_process_local_template_catalog(

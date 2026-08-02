@@ -2,26 +2,25 @@
 
 覆盖：
 - lock_resource 声明的资源被在执行 job 占用 → 后续节点跨设备也串行
-- 实体型物料需求（instance_uuid / barcode）自动并入锁键
-- suc_type=skip（异常后人工跳过）→ 节点算成功推进，但已消费物料 quarantined
+- 旧 WorkflowSpec 物料形状 fail closed，不形成第二套物料锁
 - JobExecutionBackend 解析 return_info.suc_type 并 4 参回调（兼容旧 3 参 listener）
 - 本地异常决策通道：publish_job_error_decision_required 暂存 →
   list/resolve 经 REST 路由回设备节点
 """
 
-import threading
-import time
-from typing import Any, Dict, List, Optional
+from typing import Any, ClassVar
 
 from unilabos.app.scheduler.backend import (
     JobExecutionBackend,
     make_device_lock_resource_resolver,
 )
 from unilabos.app.scheduler.dispatch import RecordingDispatcher
-from unilabos.app.scheduler.inventory.domain import MaterialRequirement
-from unilabos.app.scheduler.inventory.service import InventoryService
-from unilabos.app.scheduler.inventory.store import InventoryStore
-from unilabos.app.scheduler.models import WorkflowEdge, WorkflowNode, WorkflowSpec
+from unilabos.app.scheduler.models import (
+    WorkflowEdge,
+    WorkflowNode,
+    WorkflowSpec,
+    spec_from_dict,
+)
 from unilabos.app.scheduler.service import EdgeScheduler, _extract_resource_ids
 from unilabos.app.ws_client import QueueItem
 from unilabos.utils.type_check import serialize_result_info
@@ -29,8 +28,12 @@ from unilabos.utils.type_check import serialize_result_info
 
 def _node(node_id, device="dev1", action="run", param=None, materials=None):
     return WorkflowNode(
-        id=node_id, device_id=device, action_name=action, action_type="goal",
-        param=param or {}, material_requirements=materials or [],
+        id=node_id,
+        device_id=device,
+        action_name=action,
+        action_type="goal",
+        param=param or {},
+        material_requirements=materials or [],
     )
 
 
@@ -42,7 +45,9 @@ class TestExtractResourceIds:
     def test_shapes(self):
         assert _extract_resource_ids("rack-1") == {"rack-1"}
         assert _extract_resource_ids({"name": "rack-1"}) == {"rack-1"}
-        assert _extract_resource_ids({"id": "r2", "name": "ignored-lower-priority"}) == {"r2"}
+        assert _extract_resource_ids(
+            {"id": "r2", "name": "ignored-lower-priority"}
+        ) == {"r2"}
         assert _extract_resource_ids({"data": {"unilabos_uuid": "u-9"}}) == {"u-9"}
         assert _extract_resource_ids([{"name": "a"}, "b", None]) == {"a", "b"}
         assert _extract_resource_ids(None) == set()
@@ -73,7 +78,7 @@ class TestLockResourceSerializesAcrossDevices:
         assert len(result["dispatched"]) == 1  # 只有一个拿到 rack-1 锁
 
         snap = scheduler.snapshot()
-        (job_id, job), = snap["inflight_jobs"].items()
+        ((job_id, job),) = snap["inflight_jobs"].items()
         assert job["resource_locks"] == ["res:rack-1"]
 
         # 持锁 job 完成 → 锁释放 → 另一节点下发
@@ -106,73 +111,31 @@ class TestLockResourceSerializesAcrossDevices:
         assert len(scheduler.submit_workflow(spec)["dispatched"]) == 2
 
 
-class TestInstanceRequirementLock:
-    def test_same_instance_serialized_without_resolver(self):
-        """实体型物料需求即使没有 lock_resource 声明也天然互斥。"""
+class TestRetiredMaterialRequirementPath:
+    def test_old_material_shape_is_not_converted_into_an_implicit_lock(self):
         dispatcher = RecordingDispatcher()
         scheduler = EdgeScheduler(dispatcher=dispatcher)
-        spec = WorkflowSpec(
-            workflow_id="wf1",
-            nodes=[
-                _node("A", device="dev1", materials=[MaterialRequirement(instance_uuid="mi-1")]),
-                _node("B", device="dev2", materials=[MaterialRequirement(instance_uuid="mi-1")]),
-            ],
+        spec = spec_from_dict(
+            {
+                "workflow_id": "wf1",
+                "nodes": [
+                    {
+                        "id": "A",
+                        "device_id": "dev1",
+                        "action_name": "run",
+                        "material_requirements": [
+                            {"instance_uuid": "retired-material-id"}
+                        ],
+                    }
+                ],
+            }
         )
-        result = scheduler.submit_workflow(spec)
-        assert len(result["dispatched"]) == 1
-        job_id = result["dispatched"][0]["job_id"]
-        r2 = scheduler.on_job_finished(job_id, success=True)
-        assert len(r2["dispatched"]) == 1
 
-    def test_barcode_lock_key(self):
-        dispatcher = RecordingDispatcher()
-        scheduler = EdgeScheduler(dispatcher=dispatcher)
-        spec = WorkflowSpec(
-            workflow_id="wf1",
-            nodes=[_node("A", materials=[MaterialRequirement(barcode="BC-7")])],
-        )
-        scheduler.submit_workflow(spec)
-        snap = scheduler.snapshot()
-        (job,) = snap["inflight_jobs"].values()
-        assert job["resource_locks"] == ["res:barcode:BC-7"]
+        import pytest
 
-
-class TestSkipQuarantinesMaterials:
-    def test_skip_marks_success_but_quarantines(self):
-        """异常后人工 skip：节点成功推进，其已消费物料隔离待复核。"""
-        svc = InventoryService(InventoryStore(":memory:"))
-        svc.inbound_lot("tpl-w", 100.0, lot_id="lot-1")
-        dispatcher = RecordingDispatcher()
-        scheduler = EdgeScheduler(dispatcher=dispatcher, inventory=svc)
-        spec = WorkflowSpec(
-            workflow_id="wf1",
-            nodes=[
-                _node("A", materials=[MaterialRequirement(lot_id="lot-1", quantity=20.0)]),
-                _node("B", device="dev2"),
-            ],
-            edges=[_edge("A", "B")],
-        )
-        scheduler.submit_workflow(spec)
-        job_a = dispatcher.dispatched[0]["job_id"]
-
-        r2 = scheduler.on_job_finished(job_a, success=True, suc_type="skip")
-        # 节点按成功推进（B 继续下发），workflow 不失败
-        assert [d["node_id"] for d in r2["dispatched"]] == ["B"]
-        # 但 A 已消费的物料转 quarantined（人工复核）
-        assert svc.store.get_reservation("wf1", "A", 1)["status"] == "quarantined"
-
-    def test_normal_success_untouched(self):
-        svc = InventoryService(InventoryStore(":memory:"))
-        svc.inbound_lot("tpl-w", 100.0, lot_id="lot-1")
-        dispatcher = RecordingDispatcher()
-        scheduler = EdgeScheduler(dispatcher=dispatcher, inventory=svc)
-        spec = WorkflowSpec(
-            workflow_id="wf1",
-            nodes=[_node("A", materials=[MaterialRequirement(lot_id="lot-1", quantity=20.0)])],
-        )
-        scheduler.submit_workflow(spec)
-        scheduler.on_job_finished(dispatcher.dispatched[0]["job_id"], success=True)
-        assert svc.store.get_reservation("wf1", "A", 1)["status"] == "consumed"
+        with pytest.raises(ValueError, match="WorkflowTask Material admission"):
+            scheduler.submit_workflow(spec)
+        assert dispatcher.dispatched == []
 
 
 class _FakeHost:
@@ -180,14 +143,22 @@ class _FakeHost:
 
     def __init__(self, suc_type="normal"):
         self.suc_type = suc_type
-        self.backend: Optional[JobExecutionBackend] = None
-        self.devices_instances: Dict[str, Any] = {}
+        self.backend: JobExecutionBackend | None = None
+        self.devices_instances: dict[str, Any] = {}
 
-    def send_goal(self, item: QueueItem, action_type, action_kwargs,
-                  sample_material, server_info=None):
+    def send_goal(
+        self,
+        item: QueueItem,
+        action_type,
+        action_kwargs,
+        sample_material,
+        server_info=None,
+    ):
         assert self.backend is not None
         self.backend.publish_job_status(
-            {}, item, "success",
+            {},
+            item,
+            "success",
             serialize_result_info("", True, {"v": 1}, suc_type=self.suc_type),
         )
 
@@ -199,21 +170,30 @@ class TestBackendSucTypePropagation:
         host.backend = backend
         backend.start()
         backend.add_job_finished_listener(listener)
-        backend.dispatch({
-            "job_id": "job-1", "task_id": "t", "device_id": "dev1",
-            "action": "run", "action_type": "goal", "action_args": {},
-        })
+        backend.dispatch(
+            {
+                "job_id": "job-1",
+                "task_id": "t",
+                "device_id": "dev1",
+                "action": "run",
+                "action_type": "goal",
+                "action_args": {},
+            }
+        )
         assert backend.wait_idle(timeout=5)
         backend.stop()
 
     def test_four_arg_listener_gets_suc_type(self):
-        received: List[tuple] = []
-        self._run_one(lambda job_id, success, ret, suc_type: received.append(
-            (job_id, success, ret, suc_type)))
+        received: list[tuple] = []
+        self._run_one(
+            lambda job_id, success, ret, suc_type: received.append(
+                (job_id, success, ret, suc_type)
+            )
+        )
         assert received == [("job-1", True, {"v": 1}, "skip")]
 
     def test_three_arg_listener_still_works(self):
-        received: List[tuple] = []
+        received: list[tuple] = []
 
         def legacy(job_id, success, ret):
             received.append((job_id, success, ret))
@@ -224,7 +204,7 @@ class TestBackendSucTypePropagation:
 
 class _FakeBaseNode:
     def __init__(self):
-        self.decisions: List[Dict[str, Any]] = []
+        self.decisions: list[dict[str, Any]] = []
 
     def handle_action_error_decision(self, decision_id, job_id, decision):
         self.decisions.append(decision)
@@ -253,8 +233,10 @@ class TestLocalErrorDecisionChannel:
             "job_id": "job-9",
             "exception_type": "CommunicationError",
             "error_message": "port closed",
-            "options": [{"action": "retry", "label": "重试"},
-                        {"action": "skip", "label": "跳过"}],
+            "options": [
+                {"action": "retry", "label": "重试"},
+                {"action": "skip", "label": "跳过"},
+            ],
         }
 
     def test_store_list_resolve(self):
@@ -276,7 +258,9 @@ class TestLocalErrorDecisionChannel:
 
     def test_missing_decision_id_rejected(self):
         backend, _ = self._make()
-        assert backend.publish_job_error_decision_required({"device_id": "dev1"}) is False
+        assert (
+            backend.publish_job_error_decision_required({"device_id": "dev1"}) is False
+        )
 
     def test_device_gone_keeps_report(self):
         """设备暂不可用时审批结果不丢：报告放回，等重试。"""
@@ -296,11 +280,13 @@ class TestErrorDecisionRest:
 
         backend, base_node = TestLocalErrorDecisionChannel()._make()
         backend.publish_job_error_decision_required(
-            TestLocalErrorDecisionChannel()._report("d-rest"))
+            TestLocalErrorDecisionChannel()._report("d-rest")
+        )
 
         app = FastAPI()
         app.include_router(
-            create_scheduler_router(lambda: None, get_backend=lambda: backend))
+            create_scheduler_router(lambda: None, get_backend=lambda: backend)
+        )
         client = TestClient(app)
 
         resp = client.get("/api/v1/error-decisions")
@@ -352,7 +338,10 @@ class TestDecisionChannelFallback:
         backend = JobExecutionBackend(host_node_getter=lambda: None)
 
         class _HostWithBridges:
-            bridges = [object(), backend]  # 第一个 bridge 没有决策接口 → 跳过
+            bridges: ClassVar[list[object]] = [
+                object(),
+                backend,
+            ]  # 第一个 bridge 没有决策接口 → 跳过
 
         monkeypatch.setattr(
             HostNode, "get_instance", classmethod(lambda cls, idx=0: _HostWithBridges())
@@ -364,7 +353,7 @@ class TestDecisionChannelFallback:
     def test_cloud_client_wins_when_available(self, monkeypatch):
         from unilabos.ros.nodes.presets.host_node import HostNode
 
-        sent: List[Dict[str, Any]] = []
+        sent: list[dict[str, Any]] = []
 
         class _CloudClient:
             def publish_job_error_decision_required(self, report):
@@ -374,13 +363,15 @@ class TestDecisionChannelFallback:
         backend = JobExecutionBackend(host_node_getter=lambda: None)
 
         class _HostWithBridges:
-            bridges = [backend]
+            bridges: ClassVar[list[object]] = [backend]
 
         monkeypatch.setattr(
             HostNode, "get_instance", classmethod(lambda cls, idx=0: _HostWithBridges())
         )
         stub = self._Stub(client=_CloudClient())
-        assert self._publish(stub, {"decision_id": "d-cloud", "device_id": "dev1"}) is True
+        assert (
+            self._publish(stub, {"decision_id": "d-cloud", "device_id": "dev1"}) is True
+        )
         assert len(sent) == 1
         assert backend.list_error_decisions() == []  # 云端成功，不落本地
 
@@ -391,7 +382,9 @@ class TestDecisionChannelFallback:
             HostNode, "get_instance", classmethod(lambda cls, idx=0: None)
         )
         stub = self._Stub(client=None)
-        assert self._publish(stub, {"decision_id": "d-none", "device_id": "dev1"}) is False
+        assert (
+            self._publish(stub, {"decision_id": "d-none", "device_id": "dev1"}) is False
+        )
 
 
 class TestLockResourceResolverFactory:
@@ -402,42 +395,48 @@ class TestLockResourceResolverFactory:
         class _Host:
             # dev-slave 不在 devices_instances（跑在 slave 机器上），
             # 但注册表副本里有它的 action mappings
-            _action_value_mappings = {
+            _action_value_mappings: ClassVar[dict[str, Any]] = {
                 "dev-slave": {
                     "run": {"lock_resource": ["plate", "tips"]},
                     "auto-move": {"lock_resource": ["arm"]},
                 },
             }
-            devices_instances: Dict[str, Any] = {}
+            devices_instances: ClassVar[dict[str, Any]] = {}
 
         resolver = make_device_lock_resource_resolver(lambda: _Host())
         assert resolver("dev-slave", "run") == ["plate", "tips"]
         assert resolver("dev-slave", "move") == ["arm"]  # auto- 前缀回退
         assert resolver("dev-slave", "unknown") == []
-        assert resolver("dev-none", "run") == []         # 设备不存在
+        assert resolver("dev-none", "run") == []  # 设备不存在
 
     def test_local_instance_fallback(self):
         """Host 副本尚未写入时回退本地设备实例的 mappings。"""
 
         class _Node:
-            _action_value_mappings = {"run": {"lock_resource": ["rack"]}}
+            _action_value_mappings: ClassVar[dict[str, Any]] = {
+                "run": {"lock_resource": ["rack"]}
+            }
 
         class _Host:
-            _action_value_mappings: Dict[str, Any] = {}
-            devices_instances = {"dev-local": _Wrapper(_Node())}
+            _action_value_mappings: ClassVar[dict[str, Any]] = {}
+            devices_instances: ClassVar[dict[str, Any]] = {
+                "dev-local": _Wrapper(_Node())
+            }
 
         resolver = make_device_lock_resource_resolver(lambda: _Host())
         assert resolver("dev-local", "run") == ["rack"]
 
     def test_host_replica_wins_over_instance(self):
         class _Node:
-            _action_value_mappings = {"run": {"lock_resource": ["stale"]}}
+            _action_value_mappings: ClassVar[dict[str, Any]] = {
+                "run": {"lock_resource": ["stale"]}
+            }
 
         class _Host:
-            _action_value_mappings = {
+            _action_value_mappings: ClassVar[dict[str, Any]] = {
                 "dev1": {"run": {"lock_resource": ["fresh"]}},
             }
-            devices_instances = {"dev1": _Wrapper(_Node())}
+            devices_instances: ClassVar[dict[str, Any]] = {"dev1": _Wrapper(_Node())}
 
         resolver = make_device_lock_resource_resolver(lambda: _Host())
         assert resolver("dev1", "run") == ["fresh"]

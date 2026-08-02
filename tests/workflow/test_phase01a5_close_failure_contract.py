@@ -8,7 +8,7 @@ from typing import Any
 
 import pytest
 
-from unilabos.resources.authority.sqlite import SQLiteMaterialAdapter
+from unilabos.app.scheduler.inventory import InventoryService
 from unilabos.workflow.composition import (
     compose_workflow_runtime,
     get_workflow_service,
@@ -17,8 +17,8 @@ from unilabos.workflow.composition import (
 from unilabos.workflow.store import WorkflowStore
 
 CLOSE_FAILURE = "Phase 01A5 注入的 Service.close 失败"
-STARTUP_FAILURE = "M1C 注入的 Material adapter 启动失败"
-STORE_CLOSE_FAILURE = "M1C 注入的 pre-Service Store.close 失败"
+STARTUP_FAILURE = "M1R 注入的 InventoryService.open 启动失败"
+STORE_CLOSE_FAILURE = "M1R 注入的 pre-Service Store.close 失败"
 LEASE_REJECTION = "当前工作区已由另一个 OS Workflow Authority 占用"
 
 
@@ -131,25 +131,24 @@ def test_service构造前store关闭失败保留租约直到reset重试(
     second_process: tuple[str, ...] = ("not_started",)
     reopened_after_retry = False
 
-    def fail_material_adapter_startup(
-        cls: type[SQLiteMaterialAdapter],
-        coordinator: WorkflowStore,
+    def fail_inventory_service_startup(
+        cls: type[InventoryService],
+        **kwargs: Any,
     ) -> None:
-        del cls
-        opened_stores.append(coordinator)
+        del cls, kwargs
         raise RuntimeError(STARTUP_FAILURE)
 
     def fail_store_close(store: WorkflowStore) -> None:
-        del store
+        opened_stores.append(store)
         raise RuntimeError(STORE_CLOSE_FAILURE)
 
     reset_workflow_service_for_test()
     try:
         with monkeypatch.context() as startup_faults:
             startup_faults.setattr(
-                SQLiteMaterialAdapter,
-                "from_runtime_authority",
-                classmethod(fail_material_adapter_startup),
+                InventoryService,
+                "open",
+                classmethod(fail_inventory_service_startup),
             )
             startup_faults.setattr(WorkflowStore, "close", fail_store_close)
 

@@ -11,7 +11,7 @@ from typing import Any
 
 import pytest
 
-from unilabos.resources.authority import MaterialRecord, SiteRecord
+from unilabos.app.scheduler.inventory import MaterialRecord, SiteRecord
 from unilabos.workflow.authoring import resource_ref
 from unilabos.workflow.authoring_engine import WorkflowAuthoringEngine
 from unilabos.workflow.catalog import TemplateCatalog
@@ -253,12 +253,14 @@ def test_engine_does_not_swallow_process_control_exceptions(
         failing_method="get_material",
         error_type=error_type,
     )
-    with _opened_context(
-        tmp_path / "workflow.db",
-        engine_authority=authority,
-    ) as context:
-        with pytest.raises(error_type, match=SECRET):
-            _compile(context, _source(site=SITE_A_UUID))
+    with (
+        _opened_context(
+            tmp_path / "workflow.db",
+            engine_authority=authority,
+        ) as context,
+        pytest.raises(error_type, match=SECRET),
+    ):
+        _compile(context, _source(site=SITE_A_UUID))
 
 
 @pytest.mark.parametrize("error_type", [KeyboardInterrupt, SystemExit])
