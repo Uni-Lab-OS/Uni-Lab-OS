@@ -742,7 +742,7 @@ def test_catalog_snapshot_used_by_round_trip_is_authority_scoped(
     assert AUTHORITY.authority_id == "backend-primary"
 
 
-def test_empty_workflow_has_explicit_empty_output_contract_and_bindings(
+def test_empty_workflow_synthesizes_resource_slot_pass_through(
     engine_context: EngineContext,
 ) -> None:
     source = _workflow_input_output_source().replace(
@@ -754,8 +754,23 @@ def test_empty_workflow_has_explicit_empty_output_contract_and_bindings(
 
     assert result.valid and result.graph is not None
     unilab = result.graph["workflow"]["meta_data"]["unilab"]
-    assert unilab["output_contract"] == {"version": 1, "outputs": []}
-    assert unilab["output_bindings"] == {}
+    assert unilab["output_contract"] == {
+        "version": 1,
+        "outputs": [
+            {
+                "name": "sample",
+                "schema": {"$slot": "ResourceSlot"},
+                "implicit": True,
+            }
+        ],
+    }
+    assert unilab["output_bindings"] == {
+        "sample": {"kind": "workflow_input", "parameter": "sample"}
+    }
+    assert result.normalized_python_source is not None
+    assert "def pass_through(" in result.normalized_python_source
+    assert ") -> None:" in result.normalized_python_source
+    assert "workflow_output" not in result.normalized_python_source
     assert result.graph["nodes"] == []
     assert result.graph["edges"] == []
     assert result.source_map == []

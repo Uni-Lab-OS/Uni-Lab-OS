@@ -931,7 +931,7 @@ def test_generate_python_and_validate_are_pure_public_transforms(
     assert validated.normalized_python_source == compiled.normalized_python_source
 
 
-def test_workflow_output_import_alias_normalizes_to_the_canonical_marker(
+def test_workflow_output_import_alias_normalizes_to_the_result_record(
     engine_context: EngineContext,
 ) -> None:
     source = (
@@ -946,7 +946,13 @@ def test_workflow_output_import_alias_normalizes_to_the_canonical_marker(
     result = _compile(engine_context.engine, source)
 
     assert result.valid and result.normalized_python_source is not None
-    assert "return workflow_output(" in result.normalized_python_source
+    assert "workflow_output" not in result.normalized_python_source
+    assert "class SamplePreparationResult(TypedDict):" in (
+        result.normalized_python_source
+    )
+    assert "return {'sample': prepared.prepared, 'report': analyzed.report}" in (
+        result.normalized_python_source
+    )
 
 
 def test_validate_rejects_a_source_graph_semantic_mismatch(

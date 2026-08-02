@@ -150,6 +150,36 @@ def schema_is_assignable(
     )
 
 
+def resource_slot_passthrough_is_compatible(
+    input_schema: WorkflowValueSchema | Mapping[str, Any],
+    output_schema: WorkflowValueSchema | Mapping[str, Any],
+    *,
+    exact: bool = False,
+) -> bool:
+    """验证同名 ResourceSlot input/output 是否可作为安全透传合同。"""
+
+    try:
+        parsed_input = (
+            input_schema
+            if isinstance(input_schema, WorkflowValueSchema)
+            else parse_value_schema(input_schema)
+        )
+        parsed_output = (
+            output_schema
+            if isinstance(output_schema, WorkflowValueSchema)
+            else parse_value_schema(output_schema)
+        )
+    except WorkflowSchemaError:
+        return False
+    input_dict = parsed_input.to_dict()
+    output_dict = parsed_output.to_dict()
+    if not _schema_contains_resource_slot(input_dict):
+        return False
+    if exact:
+        return input_dict == output_dict
+    return _schema_dict_is_assignable(input_dict, output_dict)
+
+
 def _validate_input_bindings(
     *,
     nodes: Mapping[str, WorkflowNodeWrite],
@@ -212,6 +242,11 @@ def _validate_output_bindings(
     outputs = {item["name"]: item for item in output_contract.to_dict()["outputs"]}
     if not isinstance(raw_bindings, Mapping) or set(raw_bindings) != set(outputs):
         raise WorkflowIOValidationError("Workflow output bindings 不完整")
+    _validate_resource_slot_output_authority(
+        input_parameters=input_parameters,
+        outputs=outputs,
+        raw_bindings=raw_bindings,
+    )
     result: dict[str, Mapping[str, str]] = {}
     for output_name, output in outputs.items():
         binding = raw_bindings[output_name]
@@ -273,6 +308,43 @@ def _validate_output_bindings(
             raise WorkflowIOValidationError("未知 Workflow output binding kind")
         result[output_name] = MappingProxyType(normalized)
     return result
+
+
+def _validate_resource_slot_output_authority(
+    *,
+    input_parameters: Mapping[str, Mapping[str, Any]],
+    outputs: Mapping[str, Mapping[str, Any]],
+    raw_bindings: Mapping[str, Any],
+) -> None:
+    for output_name, output in outputs.items():
+        if not output.get("implicit", False):
+            continue
+        parameter = input_parameters.get(output_name)
+        binding = raw_bindings.get(output_name)
+        if (
+            parameter is None
+            or not resource_slot_passthrough_is_compatible(
+                parameter["schema"],
+                output["schema"],
+                exact=True,
+            )
+            or not isinstance(binding, Mapping)
+            or dict(binding) != {"kind": "workflow_input", "parameter": output_name}
+        ):
+            raise WorkflowIOValidationError(
+                "implicit output 必须是 server-managed 同名 ResourceSlot 透传"
+            )
+
+    for parameter_name, parameter in input_parameters.items():
+        if not _schema_contains_resource_slot(parameter["schema"]):
+            continue
+        output = outputs.get(parameter_name)
+        if output is None or not resource_slot_passthrough_is_compatible(
+            parameter["schema"],
+            output["schema"],
+            exact=bool(output.get("implicit", False)),
+        ):
+            raise WorkflowIOValidationError("ResourceSlot input 缺少兼容的同名 output")
 
 
 def _schema_dict_is_assignable(
@@ -385,6 +457,18 @@ def _unwrap_nullable(
     return members[0], True
 
 
+def _schema_contains_resource_slot(schema: Mapping[str, Any]) -> bool:
+    base, _ = _unwrap_nullable(schema)
+    if base.get("$slot") == "ResourceSlot":
+        return True
+    items = base.get("items")
+    return (
+        base.get("type") == "array"
+        and isinstance(items, Mapping)
+        and _schema_contains_resource_slot(items)
+    )
+
+
 def _unilab_metadata(
     meta_data: Mapping[str, Any],
     *,
@@ -470,6 +554,7 @@ __all__ = [
     "ValidatedWorkflowIO",
     "WorkflowIOValidationError",
     "handle_value_schema",
+    "resource_slot_passthrough_is_compatible",
     "schema_is_assignable",
     "validate_workflow_io",
 ]

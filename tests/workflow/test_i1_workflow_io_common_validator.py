@@ -187,6 +187,21 @@ def _declare_input_binding(
         value_schema=consumer_schema,
         value_type=consumer_type,
     )
+    if producer_schema.get("$slot") == "ResourceSlot":
+        unilab = graph["workflow"]["meta_data"]["unilab"]
+        unilab["output_contract"] = {
+            "version": 1,
+            "outputs": [
+                {
+                    "name": "input",
+                    "schema": deepcopy(producer_schema),
+                    "implicit": True,
+                }
+            ],
+        }
+        unilab["output_bindings"] = {
+            "input": {"kind": "workflow_input", "parameter": "input"}
+        }
 
 
 def _validate(graph: dict[str, object]) -> dict[str, object]:
@@ -264,6 +279,40 @@ def test_candidate_rejects_declared_output_without_its_root_binding() -> None:
             },
             require_unchanged_graph=False,
         )
+
+
+def test_candidate_rejects_scalar_output_marked_as_implicit() -> None:
+    graph = _producer_graph()
+    _declare_output(
+        graph,
+        schema={"type": "number"},
+        binding=_node_output_binding(),
+    )
+    output = graph["workflow"]["meta_data"]["unilab"]["output_contract"]["outputs"][0]
+    output["implicit"] = True
+
+    with pytest.raises(CandidateBundleError):
+        _validate(graph)
+
+
+def test_candidate_rejects_deleted_implicit_resource_slot_pass_through() -> None:
+    graph = _producer_graph()
+    slot_schema = {
+        "$slot": "ResourceSlot",
+        "allowed_resource_template_uuids": [RESOURCE_TEMPLATE_A_UUID],
+    }
+    _declare_input_binding(
+        graph,
+        producer_schema=slot_schema,
+        consumer_schema=slot_schema,
+        consumer_type="ResourceSlot",
+    )
+    unilab = graph["workflow"]["meta_data"]["unilab"]
+    unilab["output_contract"] = {"version": 1, "outputs": []}
+    unilab["output_bindings"] = {}
+
+    with pytest.raises(CandidateBundleError):
+        _validate(graph)
 
 
 @pytest.mark.parametrize(
