@@ -154,7 +154,7 @@ class EdgeScheduler:
         self._workflow_state_listener = workflow_state_listener
         self._notified_workflows: set[str] = set()
         self._reschedule_count = 0
-        # Canonical InventoryService used only by durable WorkflowTask sagas.
+        # Canonical InventoryService 只供 durable WorkflowTask saga 使用。
         self._inventory = inventory
         # 物料/资源锁：resolver(device_id, action_name) -> @action(lock_resource=[...])
         # 声明的参数名列表；None = 物料锁关闭
@@ -244,7 +244,7 @@ class EdgeScheduler:
         device_id: str,
         attempt: int = 1,
     ) -> JobClaimResult:
-        """Acquire the device-only D1A Claim through the Inventory authority."""
+        """通过 Inventory authority 获取 device-only D1A Claim。"""
 
         if self._inventory is None:
             raise RuntimeError("Inventory Job Claim authority is unavailable")
@@ -270,7 +270,7 @@ class EdgeScheduler:
         claim: JobClaimRecord,
         evidence_fingerprint: str,
     ) -> JobClaimResult:
-        """Attach driver accepted/running evidence to an exact D1A fence."""
+        """把 driver accepted/running evidence 附加到精确 D1A fence。"""
 
         if self._inventory is None:
             raise RuntimeError("Inventory Job Claim authority is unavailable")
@@ -303,7 +303,7 @@ class EdgeScheduler:
         reason: str,
         evidence_fingerprint: str,
     ) -> JobClaimResult:
-        """Fence an ambiguous D1A dispatch/cancel/result without releasing it."""
+        """fence 住不明确的 D1A dispatch/cancel/result，且不释放它。"""
 
         if self._inventory is None:
             raise RuntimeError("Inventory Job Claim authority is unavailable")
@@ -337,7 +337,7 @@ class EdgeScheduler:
         outcome: str,
         result: dict[str, Any],
     ) -> MaterialChangeSetReceipt:
-        """Commit D1A's deterministic device-only no-op terminal receipt."""
+        """提交 D1A deterministic device-only no-op terminal receipt。"""
 
         if self._inventory is None:
             raise RuntimeError("Inventory ChangeSet authority is unavailable")
@@ -373,7 +373,7 @@ class EdgeScheduler:
         receipt: MaterialChangeSetReceipt,
         workflow_terminal_fingerprint: str,
     ) -> JobClaimResult:
-        """Settle the exact D1A Claim after both durable terminal commits."""
+        """两个 durable terminal commit 后 settle 精确 D1A Claim。"""
 
         if self._inventory is None:
             raise RuntimeError("Inventory Job Claim authority is unavailable")
@@ -399,12 +399,51 @@ class EdgeScheduler:
                 material_changeset_fingerprint=receipt.deterministic_fingerprint,
                 workflow_terminal_fingerprint=workflow_terminal_fingerprint,
                 reason="workflow_job_terminal_settled",
+                no_send_proof_fingerprint=None,
             )
         )
-        # D1A device-only Claims intentionally have no Task Material Reservation.
-        # The general Workflow terminal saga invokes reconcile_task_release after
-        # all of its business-material Claims settle.
+        # D1A device-only Claim 按约定没有 Task Material Reservation。
+        # 普通 Workflow terminal saga 在全部 business-material Claim settle 后
+        # 调用 reconcile_task_release。
         return released
+
+    def release_unsubmitted_device_action_job_claim(
+        self,
+        *,
+        claim: JobClaimRecord,
+        no_send_proof_fingerprint: str,
+        reason: str,
+    ) -> JobClaimResult:
+        """由 Scheduler 用 durable zero-send proof 释放尚未派发的 D1A Claim。"""
+
+        if self._inventory is None:
+            raise RuntimeError("Inventory Job Claim authority is unavailable")
+        command_uuid = self._m1ef_command_uuid(
+            claim.workflow_node_job_uuid,
+            claim.attempt,
+            "claim-release-not-submitted",
+        )
+        return self._inventory.release_job_claim(
+            JobClaimReleaseCommand(
+                schema_version=1,
+                command_uuid=command_uuid,
+                idempotency_key=(
+                    f"m1ef:{claim.workflow_node_job_uuid}:"
+                    f"{claim.attempt}:claim-release-not-submitted"
+                ),
+                workflow_node_job_uuid=claim.workflow_node_job_uuid,
+                attempt=claim.attempt,
+                claim_uuid=claim.uuid,
+                fencing_token=claim.fencing_token,
+                release_proof_kind="not_submitted",
+                material_changeset_uuid=None,
+                material_changeset_fingerprint=None,
+                workflow_terminal_fingerprint=None,
+                reason=reason,
+                no_send_proof_fingerprint=no_send_proof_fingerprint,
+                expected_state="reserved",
+            )
+        )
 
     def inventory_job_claim(
         self,
@@ -420,7 +459,7 @@ class EdgeScheduler:
         job_uuid: str,
         attempt: int = 1,
     ) -> JobClaimRecord | None:
-        """Read an optional Claim without leaking Inventory errors to adapters."""
+        """读取可选 Claim，且不向 adapter 泄漏 Inventory errors。"""
 
         try:
             return self.inventory_job_claim(job_uuid, attempt)
@@ -438,8 +477,15 @@ class EdgeScheduler:
             raise RuntimeError("Inventory ChangeSet authority is unavailable")
         return self._inventory.get_terminal_material_changeset(job_uuid, attempt)
 
+    def unsettled_inventory_job_claims(self) -> tuple[JobClaimRecord, ...]:
+        """枚举启动恢复必须与 Workflow facts 双向核对的 live Claims。"""
+
+        if self._inventory is None:
+            raise RuntimeError("Inventory Claim authority is unavailable")
+        return self._inventory.list_unsettled_claims()
+
     def acknowledge_inventory_result(self, sequence: int | None) -> None:
-        """Advance only the Scheduler's durable Inventory consumer cursor."""
+        """只推进 Scheduler 自己的 durable Inventory consumer cursor。"""
 
         if sequence is None:
             return
@@ -448,7 +494,7 @@ class EdgeScheduler:
         self._inventory.acknowledge(sequence, consumer="scheduler")
 
     def busy_inventory_device_action_keys(self) -> set[str]:
-        """Build Scheduler device fences only from live Inventory Claims."""
+        """只从 live Inventory Claims 构建 Scheduler device fences。"""
 
         if self._inventory is None:
             return set()
@@ -464,14 +510,14 @@ class EdgeScheduler:
         return busy
 
     def audit_inventory_job_claims(self) -> tuple[JobClaimRecord, ...]:
-        """Fail closed before enabling physical dispatch after startup."""
+        """启动后允许 physical dispatch 前先 fail-closed 审计。"""
 
         if self._inventory is None:
             raise RuntimeError("Inventory Claim authority is unavailable")
         return self._inventory.audit_job_claim_authority()
 
     def owns_live_inventory_claim(self, job_uuid: str | None) -> bool:
-        """Let the owning Job replay C1 without bypassing another Job's fence."""
+        """允许 owner Job 重放 C1，但不能绕过其他 Job 的 fence。"""
 
         if not job_uuid or self._inventory is None:
             return False

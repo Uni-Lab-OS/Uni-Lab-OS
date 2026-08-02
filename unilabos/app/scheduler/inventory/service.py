@@ -1965,7 +1965,7 @@ class InventoryService:
         )
 
     def resolve_executor_material(self, device_id: str) -> MaterialRecord:
-        """Resolve exact ResourceTreeSet device identity without fallback guessing."""
+        """精确解析 ResourceTreeSet device identity，不做 fallback guessing。"""
 
         canonical_device_id = self._validate_nonblank(device_id, "device_id")
         try:
@@ -1993,7 +1993,7 @@ class InventoryService:
         self,
         command: JobClaimAcquireCommand,
     ) -> JobClaimResult:
-        """Atomically acquire the complete physical resource set for one attempt."""
+        """为一个 attempt 原子获取完整 physical resource set。"""
 
         if not isinstance(command, JobClaimAcquireCommand):
             raise MaterialInvalidInput("command must be a JobClaimAcquireCommand")
@@ -2207,6 +2207,33 @@ class InventoryService:
                     )
                     return result
 
+                job_claims = conn.execute(
+                    """
+                    SELECT uuid, workflow_task_uuid, attempt, state
+                    FROM material_claim
+                    WHERE workflow_node_job_uuid = ?
+                    ORDER BY attempt, uuid
+                    """,
+                    (job_uuid,),
+                ).fetchall()
+                if job_claims:
+                    latest_attempt = int(job_claims[-1]["attempt"])
+                    if attempt != latest_attempt + 1:
+                        raise MaterialConflict(
+                            "Job Claim attempt is stale or out of order"
+                        )
+                    if any(row["state"] != "released" for row in job_claims):
+                        raise MaterialConflict(
+                            "previous Job Claim attempt is not released"
+                        )
+                    if any(
+                        str(row["workflow_task_uuid"]) != task_uuid
+                        for row in job_claims
+                    ):
+                        raise MaterialConflict(
+                            "Job Claim attempts belong to different WorkflowTasks"
+                        )
+
                 blocked_member = None
                 for resource_kind, resource_uuid, _version in members:
                     blocked_member = conn.execute(
@@ -2365,7 +2392,7 @@ class InventoryService:
         return result
 
     def get_job_claim(self, job_uuid: str, attempt: int) -> JobClaimRecord:
-        """Read one durable Claim by formal Job attempt identity."""
+        """按 formal Job attempt identity 读取一个 durable Claim。"""
 
         canonical_job_uuid = _canonical_uuid(job_uuid, "workflow_node_job_uuid")
         canonical_attempt = self._validate_attempt(attempt)
@@ -2387,7 +2414,7 @@ class InventoryService:
         *,
         workflow_task_uuid: str | None = None,
     ) -> tuple[JobClaimRecord, ...]:
-        """Read all live fences in deterministic recovery order."""
+        """按 deterministic recovery order 读取全部 live fences。"""
 
         task_uuid = (
             _canonical_uuid(workflow_task_uuid, "workflow_task_uuid")
@@ -2427,7 +2454,7 @@ class InventoryService:
         return tuple(claim for claim in claims if claim is not None)
 
     def audit_job_claim_authority(self) -> tuple[JobClaimRecord, ...]:
-        """Verify durable Claim/member/fence/receipt facts before dispatch."""
+        """dispatch 前验证 durable Claim/member/fence/receipt facts。"""
 
         try:
             with self._tx() as conn:
@@ -2663,7 +2690,7 @@ class InventoryService:
         job_uuid: str,
         attempt: int,
     ) -> MaterialChangeSetReceipt | None:
-        """Read the one M1EF terminal receipt used by startup saga recovery."""
+        """读取 startup saga recovery 使用的唯一 M1EF terminal receipt。"""
 
         canonical_job_uuid = _canonical_uuid(job_uuid, "workflow_node_job_uuid")
         canonical_attempt = self._validate_attempt(attempt)
@@ -2732,7 +2759,7 @@ class InventoryService:
         self,
         command: JobClaimStateCommand,
     ) -> JobClaimResult:
-        """Advance reserved/uncertain Claim to running with accepted evidence."""
+        """用 accepted evidence 把 reserved/uncertain Claim 推进到 running。"""
 
         if not isinstance(command, JobClaimStateCommand):
             raise MaterialInvalidInput("command must be a JobClaimStateCommand")
@@ -2746,7 +2773,7 @@ class InventoryService:
         self,
         command: JobClaimUncertainCommand,
     ) -> JobClaimResult:
-        """Fence ambiguous physical reality and mark business members reconciling."""
+        """fence 住不明确 physical reality，并把 business members 标为 reconciling。"""
 
         if not isinstance(command, JobClaimUncertainCommand):
             raise MaterialInvalidInput("command must be a JobClaimUncertainCommand")
@@ -2997,7 +3024,7 @@ class InventoryService:
         self,
         command: MaterialChangeSetCommand,
     ) -> MaterialChangeSetReceipt:
-        """Commit one terminal physical-reality receipt under an exact fence."""
+        """在精确 fence 下提交一个 terminal physical-reality receipt。"""
 
         if not isinstance(command, MaterialChangeSetCommand):
             raise MaterialInvalidInput("command must be a MaterialChangeSetCommand")
@@ -3154,6 +3181,7 @@ class InventoryService:
                     and claim.state != expected_claim_state
                 ):
                     raise MaterialConflict("Job Claim expected_state is stale")
+                self._audit_job_claim(conn, claim)
                 member_index = {
                     (member.resource_kind, member.resource_uuid): member
                     for member in claim.members
@@ -3214,12 +3242,14 @@ class InventoryService:
                         continue
                     if current is None or current["deleted_at"] is not None:
                         raise MaterialNotFound("ChangeSet target not found")
-                    expected_version = (
-                        effect.expected_version
-                        if effect.expected_version is not None
-                        else member.expected_version
-                    )
-                    if int(current["version"]) != expected_version:
+                    if (
+                        effect.expected_version is not None
+                        and effect.expected_version != member.expected_version
+                    ):
+                        raise MaterialConflict(
+                            "ChangeSet expected_version differs from Claim baseline"
+                        )
+                    if int(current["version"]) != member.expected_version:
                         raise MaterialConflict("ChangeSet expected_version is stale")
                     if table == "material":
                         before_projection = _material_record(dict(current)).to_dict()
@@ -3235,6 +3265,7 @@ class InventoryService:
                     if table == "material":
                         self._apply_material_effect(
                             conn,
+                            claim_members=member_index,
                             current=dict(current),
                             effect=effect,
                             now_iso=now_iso,
@@ -3255,6 +3286,7 @@ class InventoryService:
                                 )
                         self._apply_site_effect(
                             conn,
+                            claim_members=member_index,
                             current=dict(current),
                             effect=effect,
                             now_iso=now_iso,
@@ -3435,15 +3467,16 @@ class InventoryService:
             if parent_value is not None
             else None
         )
-        if (
-            parent_uuid is not None
-            and (
-                "business_material",
-                parent_uuid,
+        if parent_uuid is not None and parent_uuid == effect.resource_uuid:
+            raise MaterialConflict("created Material parent would create a cycle")
+        if parent_uuid is not None:
+            self._require_live_claimed_material(
+                conn,
+                claim_members=claim_members,
+                resource_kind="business_material",
+                material_uuid=parent_uuid,
+                require_active=True,
             )
-            not in claim_members
-        ):
-            raise MaterialConflict("created Material parent is not a Claim member")
         disposition = str(effect.after.get("disposition") or "active")
         if disposition not in {
             "active",
@@ -3521,6 +3554,18 @@ class InventoryService:
             for kind in ("device_material", "business_material")
         ):
             raise MaterialConflict("created Site owner is not a Claim member")
+        owner_kind = (
+            "device_material"
+            if ("device_material", owner_uuid) in claim_members
+            else "business_material"
+        )
+        self._require_live_claimed_material(
+            conn,
+            claim_members=claim_members,
+            resource_kind=owner_kind,
+            material_uuid=owner_uuid,
+            require_active=owner_kind == "business_material",
+        )
         name = str(effect.after.get("name") or "").strip()
         if not name:
             raise MaterialInvalidInput("Site name must not be blank")
@@ -3550,15 +3595,14 @@ class InventoryService:
             if occupant_value is not None
             else None
         )
-        if (
-            occupant_uuid is not None
-            and (
-                "business_material",
-                occupant_uuid,
-            )
-            not in claim_members
-        ):
-            raise MaterialConflict("created Site occupant is not a Claim member")
+        self._validate_site_placement(
+            conn,
+            claim_members=claim_members,
+            site_uuid=None,
+            owner_uuid=owner_uuid,
+            occupant_uuid=occupant_uuid,
+            allowed_template_uuids=allowlist,
+        )
         geometry = {
             name: _finite_number(effect.after.get(name, 0), name)
             for name in (
@@ -3615,10 +3659,103 @@ class InventoryService:
                 (effect.resource_uuid, template_uuid),
             )
 
+    def _require_live_claimed_material(
+        self,
+        conn: sqlite3.Connection,
+        *,
+        claim_members: Mapping[tuple[str, str], JobClaimMemberRecord],
+        resource_kind: str,
+        material_uuid: str,
+        require_active: bool,
+    ) -> sqlite3.Row:
+        member = claim_members.get((resource_kind, material_uuid))
+        if member is None:
+            raise MaterialConflict("referenced Material is not a live Claim member")
+        expected_kind = "device" if resource_kind == "device_material" else "business"
+        row = conn.execute(
+            """
+            SELECT uuid, resource_template_uuid, disposition,
+                   material_kind, version
+            FROM material
+            WHERE uuid = ? AND deleted_at IS NULL
+            """,
+            (material_uuid,),
+        ).fetchone()
+        if row is None or str(row["material_kind"]) != expected_kind:
+            raise MaterialConflict("referenced Claim Material is not live")
+        if int(row["version"]) != member.expected_version:
+            raise MaterialConflict("referenced Claim Material version is stale")
+        if require_active and row["disposition"] != "active":
+            raise MaterialConflict("referenced business Material is not active")
+        return row
+
+    def _validate_site_placement(
+        self,
+        conn: sqlite3.Connection,
+        *,
+        claim_members: Mapping[tuple[str, str], JobClaimMemberRecord],
+        site_uuid: str | None,
+        owner_uuid: str,
+        occupant_uuid: str | None,
+        allowed_template_uuids: tuple[str, ...],
+    ) -> None:
+        if occupant_uuid is None:
+            return
+        if occupant_uuid == owner_uuid:
+            raise MaterialConflict("Site placement would create a cycle")
+        occupant = self._require_live_claimed_material(
+            conn,
+            claim_members=claim_members,
+            resource_kind="business_material",
+            material_uuid=occupant_uuid,
+            require_active=True,
+        )
+        if (
+            allowed_template_uuids
+            and str(occupant["resource_template_uuid"]) not in allowed_template_uuids
+        ):
+            raise MaterialConflict("Site occupant template is not allowed")
+        duplicate = conn.execute(
+            """
+            SELECT uuid FROM site
+            WHERE deleted_at IS NULL AND occupied_material_uuid = ?
+              AND (? IS NULL OR uuid <> ?)
+            LIMIT 1
+            """,
+            (occupant_uuid, site_uuid, site_uuid),
+        ).fetchone()
+        if duplicate is not None:
+            raise MaterialConflict("Material already occupies another Site")
+        would_cycle = conn.execute(
+            """
+            WITH RECURSIVE
+            edges(source_uuid, target_uuid) AS (
+                SELECT parent_uuid, uuid FROM material
+                WHERE parent_uuid IS NOT NULL AND deleted_at IS NULL
+                UNION ALL
+                SELECT material_uuid, occupied_material_uuid FROM site
+                WHERE occupied_material_uuid IS NOT NULL
+                  AND deleted_at IS NULL
+                  AND (? IS NULL OR uuid <> ?)
+            ),
+            reachable(uuid) AS (
+                SELECT ?
+                UNION
+                SELECT edges.target_uuid FROM edges
+                JOIN reachable ON edges.source_uuid = reachable.uuid
+            )
+            SELECT 1 FROM reachable WHERE uuid = ? LIMIT 1
+            """,
+            (site_uuid, site_uuid, occupant_uuid, owner_uuid),
+        ).fetchone()
+        if would_cycle is not None:
+            raise MaterialConflict("Site placement would create a cycle")
+
     def _apply_material_effect(
         self,
         conn: sqlite3.Connection,
         *,
+        claim_members: Mapping[tuple[str, str], JobClaimMemberRecord],
         current: dict[str, Any],
         effect: MaterialChangeSetEffect,
         now_iso: str,
@@ -3638,6 +3775,10 @@ class InventoryService:
         if not set(effect.after).issubset(allowed):
             raise MaterialInvalidInput("Material ChangeSet contains unknown fields")
         normalized_after = dict(effect.after)
+        if effect.operation != "reparent" and "parent_uuid" in normalized_after:
+            raise MaterialInvalidInput(
+                "parent_uuid can only be changed by a reparent effect"
+            )
         if effect.operation == "reparent":
             parent_uuid = normalized_after.get("parent_uuid")
             canonical_parent = (
@@ -3648,6 +3789,13 @@ class InventoryService:
             if canonical_parent == effect.resource_uuid:
                 raise MaterialConflict("Material reparent would create a cycle")
             if canonical_parent is not None:
+                self._require_live_claimed_material(
+                    conn,
+                    claim_members=claim_members,
+                    resource_kind="business_material",
+                    material_uuid=canonical_parent,
+                    require_active=True,
+                )
                 cycle = conn.execute(
                     """
                     WITH RECURSIVE subtree(uuid) AS (
@@ -3740,6 +3888,7 @@ class InventoryService:
         self,
         conn: sqlite3.Connection,
         *,
+        claim_members: Mapping[tuple[str, str], JobClaimMemberRecord],
         current: dict[str, Any],
         effect: MaterialChangeSetEffect,
         now_iso: str,
@@ -3788,55 +3937,26 @@ class InventoryService:
                 occupant_uuid,
                 "occupied_material_uuid",
             )
-            occupant = conn.execute(
+        allowlist = tuple(
+            str(row["resource_template_uuid"])
+            for row in conn.execute(
                 """
-                SELECT resource_template_uuid FROM material
-                WHERE uuid = ? AND deleted_at IS NULL
-                  AND material_kind = 'business'
-                """,
-                (occupant_uuid,),
-            ).fetchone()
-            if occupant is None:
-                raise MaterialNotFound("Site occupant Material not found")
-            allowed_template = conn.execute(
-                """
-                SELECT 1 FROM site_allowed_resource_template
-                WHERE site_uuid = ? AND resource_template_uuid = ?
-                """,
-                (effect.resource_uuid, occupant["resource_template_uuid"]),
-            ).fetchone()
-            allowlist_count = conn.execute(
-                """
-                SELECT COUNT(*) AS value FROM site_allowed_resource_template
+                SELECT resource_template_uuid
+                FROM site_allowed_resource_template
                 WHERE site_uuid = ?
+                ORDER BY resource_template_uuid
                 """,
                 (effect.resource_uuid,),
-            ).fetchone()
-            if int(allowlist_count["value"]) and allowed_template is None:
-                raise MaterialConflict("Site occupant template is not allowed")
-            would_cycle = conn.execute(
-                """
-                WITH RECURSIVE
-                edges(source_uuid, target_uuid) AS (
-                    SELECT parent_uuid, uuid FROM material
-                    WHERE parent_uuid IS NOT NULL AND deleted_at IS NULL
-                    UNION ALL
-                    SELECT material_uuid, occupied_material_uuid FROM site
-                    WHERE occupied_material_uuid IS NOT NULL
-                      AND deleted_at IS NULL AND uuid <> ?
-                ),
-                reachable(uuid) AS (
-                    SELECT ?
-                    UNION
-                    SELECT edges.target_uuid FROM edges
-                    JOIN reachable ON edges.source_uuid = reachable.uuid
-                )
-                SELECT 1 FROM reachable WHERE uuid = ? LIMIT 1
-                """,
-                (effect.resource_uuid, occupant_uuid, current["material_uuid"]),
-            ).fetchone()
-            if would_cycle is not None:
-                raise MaterialConflict("Site placement would create a cycle")
+            ).fetchall()
+        )
+        self._validate_site_placement(
+            conn,
+            claim_members=claim_members,
+            site_uuid=effect.resource_uuid,
+            owner_uuid=str(current["material_uuid"]),
+            occupant_uuid=occupant_uuid,
+            allowed_template_uuids=allowlist,
+        )
         if "meta_data" in effect.after:
             updated["meta_data"] = json.dumps(
                 _json_object(effect.after["meta_data"], "after.meta_data"),
@@ -3871,7 +3991,7 @@ class InventoryService:
         self,
         command: JobClaimReleaseCommand,
     ) -> JobClaimResult:
-        """Release a Claim only after exact no-send or terminal-settled proof."""
+        """只有 exact no-send 或 terminal-settled proof 才能释放 Claim。"""
 
         if not isinstance(command, JobClaimReleaseCommand):
             raise MaterialInvalidInput("command must be a JobClaimReleaseCommand")
@@ -3899,9 +4019,21 @@ class InventoryService:
             "reconciled_terminal",
         }:
             raise MaterialInvalidInput("release_proof_kind is invalid")
-        terminal_fingerprint = self._validate_fingerprint(
-            command.workflow_terminal_fingerprint,
-            "workflow_terminal_fingerprint",
+        terminal_fingerprint = (
+            self._validate_fingerprint(
+                command.workflow_terminal_fingerprint,
+                "workflow_terminal_fingerprint",
+            )
+            if command.workflow_terminal_fingerprint is not None
+            else None
+        )
+        no_send_fingerprint = (
+            self._validate_fingerprint(
+                command.no_send_proof_fingerprint,
+                "no_send_proof_fingerprint",
+            )
+            if command.no_send_proof_fingerprint is not None
+            else None
         )
         reason = self._validate_nonblank(command.reason, "reason")
         expected_state = command.expected_state
@@ -3930,17 +4062,38 @@ class InventoryService:
                 raise MaterialInvalidInput(
                     "not_submitted proof must not carry a Material ChangeSet"
                 )
+            if terminal_fingerprint is not None:
+                raise MaterialInvalidInput(
+                    "not_submitted proof must not carry workflow terminal proof"
+                )
+            if no_send_fingerprint is None:
+                raise MaterialInvalidInput(
+                    "not_submitted release requires durable no-send proof"
+                )
         elif changeset_uuid is None or changeset_fingerprint is None:
             raise MaterialInvalidInput(
                 "terminal release proof requires Material ChangeSet identity"
+            )
+        elif terminal_fingerprint is None:
+            raise MaterialInvalidInput(
+                "terminal release proof requires workflow terminal proof"
+            )
+        elif no_send_fingerprint is not None:
+            raise MaterialInvalidInput(
+                "terminal release proof must not carry no-send proof"
             )
         proof_payload = {
             "release_proof_kind": proof_kind,
             "material_changeset_uuid": changeset_uuid,
             "material_changeset_fingerprint": changeset_fingerprint,
             "workflow_terminal_fingerprint": terminal_fingerprint,
+            "no_send_proof_fingerprint": no_send_fingerprint,
         }
-        proof_fingerprint = _canonical_payload_hash(proof_payload)
+        proof_fingerprint = (
+            no_send_fingerprint
+            if proof_kind == "not_submitted"
+            else _canonical_payload_hash(proof_payload)
+        )
         normalized_payload = {
             "schema_version": 1,
             "command_uuid": command_uuid,
@@ -4092,7 +4245,7 @@ class InventoryService:
         self,
         command: JobClaimResolutionCommand,
     ) -> JobClaimResult:
-        """Persist one closed, evidenced reconciliation decision.
+        """持久化一个封闭、有 evidence 的 reconciliation decision。
 
         Terminal resolutions commit physical reality only.  The Scheduler then
         projects the Workflow terminal fact and releases the Claim (C4-C6).
@@ -4280,8 +4433,9 @@ class InventoryService:
                     release_proof_kind="not_submitted",
                     material_changeset_uuid=None,
                     material_changeset_fingerprint=None,
-                    workflow_terminal_fingerprint=no_send_proof,
+                    workflow_terminal_fingerprint=None,
                     reason=reason,
+                    no_send_proof_fingerprint=no_send_proof,
                     expected_state=expected_state,
                 )
             )
@@ -4503,7 +4657,7 @@ class InventoryService:
         | JobClaimResult
         | MaterialChangeSetReceipt
     ):
-        """Read one durable Material command result by command UUID."""
+        """按 command UUID 读取一个 durable Material command result。"""
 
         canonical_command_uuid = _canonical_uuid(command_uuid, "command_uuid")
         try:
@@ -4540,7 +4694,7 @@ class InventoryService:
         after_sequence: int,
         limit: int,
     ) -> tuple[InventoryEvent, ...]:
-        """Read durable Inventory events after one exclusive sequence cursor."""
+        """读取一个 exclusive sequence cursor 之后的 durable Inventory events。"""
 
         if (
             isinstance(after_sequence, bool)
@@ -4561,7 +4715,7 @@ class InventoryService:
         return tuple(_inventory_event(row) for row in rows)
 
     def get_acknowledged_sequence(self, *, consumer: str = "scheduler") -> int:
-        """Return one consumer's independent durable acknowledgement watermark."""
+        """返回一个 consumer 独立的 durable acknowledgement watermark。"""
 
         if consumer not in _CURSOR_NAMES:
             raise MaterialInvalidInput("consumer must be scheduler or cloud")
@@ -4574,7 +4728,7 @@ class InventoryService:
             ) from None
 
     def acknowledge(self, sequence: int, *, consumer: str = "scheduler") -> None:
-        """Advance one consumer watermark monotonically without crossing consumers."""
+        """单调推进一个 consumer watermark，且不跨 consumer。"""
 
         if isinstance(sequence, bool) or not isinstance(sequence, int) or sequence < 0:
             raise MaterialInvalidInput("sequence must be a non-negative integer")

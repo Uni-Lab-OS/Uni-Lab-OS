@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import sqlite3
 from pathlib import Path
 
 import pytest
@@ -99,11 +100,26 @@ def test_confirmed_not_dispatched_requires_and_freezes_no_send_proof(
         no_send_proof_fingerprint="8" * 64,
     )
     try:
+        connection = sqlite3.connect(tmp_path / "inventory.db")
+        try:
+            with pytest.raises(sqlite3.IntegrityError):
+                connection.execute(
+                    """
+                    UPDATE material_claim
+                    SET workflow_terminal_fingerprint = ? WHERE uuid = ?
+                    """,
+                    ("f" * 64, claim.uuid),
+                )
+            connection.rollback()
+        finally:
+            connection.close()
         result = inventory.resolve_job_claim(command)
         assert result.status == "released"
         assert result.claim is not None
         assert result.claim.release_proof_kind == "not_submitted"
         assert result.claim.terminal_changeset_uuid is None
+        assert result.claim.workflow_terminal_fingerprint is None
+        assert result.claim.release_proof_fingerprint == "8" * 64
         assert inventory.resolve_job_claim(command) == result
         assert inventory.get_command_result(command.command_uuid) == result
     finally:

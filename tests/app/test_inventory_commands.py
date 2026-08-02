@@ -130,6 +130,15 @@ def test_command_adapter_rejects_unknown_or_mismatched_envelopes(
         result = execute_command(inventory, unknown)
         assert result["status"] == "rejected"
         assert "unknown command type" in result["error"]
+
+        internal = {
+            "command_id": "80000000-0000-4000-8000-000000000899",
+            "type": "material.claim.acquire",
+            "payload": {"command_uuid": "80000000-0000-4000-8000-000000000899"},
+        }
+        rejected = execute_command(inventory, internal)
+        assert rejected["status"] == "rejected"
+        assert "unknown command type" in rejected["error"]
     finally:
         inventory.close()
 

@@ -6,6 +6,8 @@ from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 from threading import Barrier
 
+import pytest
+
 import unilabos.app.scheduler.inventory as inventory_api
 from tests.app.test_m1ef_inventory_claim_lifecycle import (
     DEVICE_MATERIAL_UUID,
@@ -25,6 +27,7 @@ CLAIM_RELEASE_COMMAND_UUID = "85000000-0000-4000-8000-000000000411"
 TASK_RELEASE_COMMAND_UUID = "86000000-0000-4000-8000-000000000411"
 SECOND_JOB_UUID = "b1000000-0000-4000-8000-000000000412"
 SECOND_ACQUIRE_COMMAND_UUID = "82000000-0000-4000-8000-000000000412"
+SECOND_DEVICE_UUID = "51000000-0000-4000-8000-000000000412"
 
 
 def _seed(tmp_path: Path) -> inventory_api.InventoryService:
@@ -173,3 +176,70 @@ def test_two_inventory_clients_acquire_complete_set_all_or_none(
     finally:
         second.close()
         first.close()
+
+
+def test_same_job_cannot_acquire_new_attempt_until_previous_claim_released(
+    tmp_path: Path,
+) -> None:
+    inventory = _open_inventory(tmp_path)
+    imported = inventory.bootstrap_resource_graph(
+        {
+            "source_id": "m1ef-two-device-graph.json",
+            "fingerprint": "sha256:" + "d" * 64,
+            "materials": [
+                {
+                    "uuid": material_uuid,
+                    "resource_template_uuid": ("21000000-0000-4000-8000-000000000301"),
+                    "parent_uuid": None,
+                    "class": "Heater",
+                    "barcode": "",
+                    "name": name,
+                    "description": None,
+                    "meta_data": {"source_node_id": name},
+                    "config": {},
+                    "data": {},
+                    "material_kind": "device",
+                }
+                for material_uuid, name in (
+                    (DEVICE_MATERIAL_UUID, "heater-attempt-1"),
+                    (SECOND_DEVICE_UUID, "heater-attempt-2"),
+                )
+            ],
+            "relative_positions": [],
+            "sites": [],
+        }
+    )
+    assert imported["status"] == "imported"
+    first = inventory.acquire_job_claim(
+        inventory_api.JobClaimAcquireCommand(
+            schema_version=1,
+            command_uuid="82000000-0000-4000-8000-000000000414",
+            idempotency_key="m1ef-same-job-attempt-1",
+            workflow_task_uuid=WORKFLOW_TASK_UUID,
+            workflow_node_job_uuid=FIRST_JOB_UUID,
+            attempt=1,
+            device_material_uuid=DEVICE_MATERIAL_UUID,
+            mutable_material_root_uuids=(),
+            occupancy_changing_site_uuids=(),
+        )
+    )
+    assert first.status == "acquired"
+    assert first.claim is not None
+    try:
+        with pytest.raises(inventory_api.MaterialConflict, match="not released"):
+            inventory.acquire_job_claim(
+                inventory_api.JobClaimAcquireCommand(
+                    schema_version=1,
+                    command_uuid="82000000-0000-4000-8000-000000000415",
+                    idempotency_key="m1ef-same-job-attempt-2",
+                    workflow_task_uuid=WORKFLOW_TASK_UUID,
+                    workflow_node_job_uuid=FIRST_JOB_UUID,
+                    attempt=2,
+                    device_material_uuid=SECOND_DEVICE_UUID,
+                    mutable_material_root_uuids=(),
+                    occupancy_changing_site_uuids=(),
+                )
+            )
+        assert inventory.list_unsettled_claims() == (first.claim,)
+    finally:
+        inventory.close()

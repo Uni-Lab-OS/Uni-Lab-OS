@@ -801,8 +801,19 @@ class DeviceActionTaskRuntimeBridge:
             self._backend.add_job_status_listener(self._on_job_status)
             self._backend.add_job_completion_listener(self._on_job_finished)
             self._started = True
-            self.recover_inventory_claims()
-            self.replay_pending()
+            try:
+                self.recover_inventory_claims()
+                self.replay_pending()
+            except BaseException:
+                self._started = False
+                self._scheduler.set_device_action_task_hooks(
+                    before=None,
+                    on_error=None,
+                )
+                self._scheduler.set_device_action_fence_provider(None)
+                self._backend.remove_job_status_listener(self._on_job_status)
+                self._backend.remove_job_completion_listener(self._on_job_finished)
+                raise
             self._stop_event.clear()
             self._cancel_thread = threading.Thread(
                 target=self._run_cancel_sweep,
@@ -812,7 +823,7 @@ class DeviceActionTaskRuntimeBridge:
             self._cancel_thread.start()
 
     def recover_inventory_claims(self) -> None:
-        """Fail closed for every pre-restart D1A physical execution fact."""
+        """在 dispatch ready 前双向核对 Workflow 与 Inventory durable facts。"""
 
         if not self._started:
             return
@@ -821,42 +832,151 @@ class DeviceActionTaskRuntimeBridge:
                 dict(row)
                 for row in connection.execute(
                     """
-                    SELECT d.workflow_task_uuid, d.workflow_node_job_uuid,
-                           d.device_id, d.claim_status,
-                           d.inventory_claim_uuid,
+                    SELECT d.*,
                            j.status AS job_status,
+                           j.return_info AS job_return_info,
+                           j.error_info AS job_error_info,
                            t.status AS task_status,
-                           t.control_status AS task_control_status
+                           t.output AS task_output,
+                           t.error_info AS task_error_info,
+                           t.control_status AS task_control_status,
+                           EXISTS(
+                               SELECT 1 FROM workflow_runtime_journal AS rj
+                               WHERE rj.workflow_node_job_uuid =
+                                     d.workflow_node_job_uuid
+                                 AND rj.kind = 'job_transition'
+                                 AND rj.to_status = 'dispatched'
+                           ) AS dispatch_recorded
                     FROM device_action_task AS d
                     JOIN workflow_node_job AS j
                       ON j.uuid = d.workflow_node_job_uuid
                     JOIN workflow_task AS t
                       ON t.uuid = d.workflow_task_uuid
-                    WHERE d.claim_status IN ('claimed', 'unknown')
-                       OR j.status = 'execution_unknown'
                     ORDER BY d.create_time, d.workflow_task_uuid
                     """
                 )
             ]
+        rows_by_job = {row["workflow_node_job_uuid"]: row for row in rows}
+        unsettled = {
+            claim.workflow_node_job_uuid: claim
+            for claim in self._scheduler.unsettled_inventory_job_claims()
+        }
+        for job_uuid, claim in unsettled.items():
+            row = rows_by_job.get(job_uuid)
+            if (
+                row is None
+                or claim.attempt != 1
+                or claim.workflow_task_uuid != row["workflow_task_uuid"]
+            ):
+                raise WorkflowError("reconciliation_required")
+
+        recovery_rows: list[tuple[dict[str, Any], Any]] = []
         for row in rows:
             job_uuid = row["workflow_node_job_uuid"]
-            claim = self._scheduler.find_inventory_job_claim(job_uuid, 1)
+            claim_fields = (
+                row["inventory_claim_uuid"],
+                row["inventory_fencing_token"],
+                row["inventory_claim_set_fingerprint"],
+            )
+            if any(value is not None for value in claim_fields) and not all(
+                value is not None for value in claim_fields
+            ):
+                raise WorkflowError("reconciliation_required")
+            changeset_fields = (
+                row["material_changeset_uuid"],
+                row["material_changeset_fingerprint"],
+                row["material_changeset_outbox_sequence"],
+            )
+            if any(value is not None for value in changeset_fields) and not all(
+                value is not None for value in changeset_fields
+            ):
+                raise WorkflowError("reconciliation_required")
+            if row["workflow_terminal_fingerprint"] is not None and not all(
+                value is not None for value in changeset_fields
+            ):
+                raise WorkflowError("reconciliation_required")
+
+            claim = unsettled.get(job_uuid)
+            if claim is None and (
+                row["claim_status"] in {"claimed", "unknown"}
+                or any(value is not None for value in claim_fields)
+                or row["job_status"] == "execution_unknown"
+            ):
+                claim = self._scheduler.find_inventory_job_claim(job_uuid, 1)
             if claim is None:
-                acquired = self._scheduler.acquire_device_action_job_claim(
-                    task_uuid=row["workflow_task_uuid"],
-                    job_uuid=job_uuid,
-                    device_id=row["device_id"],
-                    attempt=1,
-                )
-                if acquired.status != "acquired" or acquired.claim is None:
-                    raise WorkflowError("admission_unavailable")
-                claim = acquired.claim
+                if row["claim_status"] in {"claimed", "unknown"} or any(
+                    value is not None for value in claim_fields
+                ):
+                    raise WorkflowError("reconciliation_required")
+                continue
+            if (
+                claim.workflow_task_uuid != row["workflow_task_uuid"]
+                or claim.workflow_node_job_uuid != job_uuid
+                or claim.attempt != 1
+            ):
+                raise WorkflowError("reconciliation_required")
+            if all(value is not None for value in claim_fields) and (
+                row["inventory_claim_uuid"] != claim.uuid
+                or int(row["inventory_fencing_token"]) != claim.fencing_token
+                or row["inventory_claim_set_fingerprint"] != claim.set_fingerprint
+            ):
+                raise WorkflowError("reconciliation_required")
+            recovery_rows.append((row, claim))
+
+        for row, claim in recovery_rows:
+            job_uuid = row["workflow_node_job_uuid"]
             receipt = self._scheduler.terminal_material_changeset(job_uuid, 1)
             if receipt is not None:
                 self._recover_terminal_receipt(row, claim, receipt)
                 continue
             if claim.state == "released":
+                if (
+                    claim.release_proof_kind == "not_submitted"
+                    and row["task_status"] == "canceled"
+                    and row["job_status"] == "canceled"
+                ):
+                    self._project_unsubmitted_claim_release(row, claim)
+                    continue
                 raise WorkflowError("reconciliation_required")
+            if (
+                claim.state == "reserved"
+                and row["task_status"] == "pending"
+                and row["job_status"] == "pending"
+                and row["claim_status"] == "pending"
+                and not row["dispatch_recorded"]
+            ):
+                # C1：保留 projection 为空，由 replay_pending 以同 Claim/token 推进。
+                continue
+            if (
+                claim.state == "reserved"
+                and row["task_status"] == "canceled"
+                and row["job_status"] == "canceled"
+                and not row["dispatch_recorded"]
+            ):
+                no_send_fingerprint = hashlib.sha256(
+                    encode_json(
+                        {
+                            "job_uuid": job_uuid,
+                            "attempt": claim.attempt,
+                            "claim_uuid": claim.uuid,
+                            "claim_state": claim.state,
+                            "workflow_task_status": row["task_status"],
+                            "workflow_job_status": row["job_status"],
+                            "dispatch_recorded": False,
+                        },
+                        sort_keys=True,
+                    )
+                ).hexdigest()
+                released = self._scheduler.release_unsubmitted_device_action_job_claim(
+                    claim=claim,
+                    no_send_proof_fingerprint=no_send_fingerprint,
+                    reason="canceled_before_durable_dispatch",
+                )
+                if released.claim is None:
+                    raise WorkflowError("reconciliation_required")
+                self._project_unsubmitted_claim_release(row, released.claim)
+                self._scheduler.acknowledge_inventory_result(released.outbox_sequence)
+                continue
             evidence_fingerprint = hashlib.sha256(
                 encode_json(
                     {
@@ -929,13 +1049,58 @@ class DeviceActionTaskRuntimeBridge:
                     )
             self._scheduler.acknowledge_inventory_result(uncertain.outbox_sequence)
 
+    def _project_unsubmitted_claim_release(
+        self, row: dict[str, Any], claim: Any
+    ) -> None:
+        """把已由 zero-send proof 释放的 Claim 幂等投影到 Workflow DB。"""
+
+        with self._store.transaction() as connection:
+            now = utc_now()
+            changed = connection.execute(
+                """
+                UPDATE device_action_task
+                SET claim_status = 'released', inventory_claim_uuid = ?,
+                    inventory_fencing_token = ?,
+                    inventory_claim_set_fingerprint = ?, update_time = ?
+                WHERE workflow_node_job_uuid = ?
+                  AND (claim_status <> 'released'
+                       OR inventory_claim_uuid IS NOT ?
+                       OR inventory_fencing_token IS NOT ?
+                       OR inventory_claim_set_fingerprint IS NOT ?)
+                """,
+                (
+                    claim.uuid,
+                    claim.fencing_token,
+                    claim.set_fingerprint,
+                    now,
+                    row["workflow_node_job_uuid"],
+                    claim.uuid,
+                    claim.fencing_token,
+                    claim.set_fingerprint,
+                ),
+            ).rowcount
+            cleanup_changed = connection.execute(
+                """
+                UPDATE workflow_task
+                SET cleanup_status = 'settled', update_time = ?
+                WHERE uuid = ? AND cleanup_status <> 'settled'
+                """,
+                (now, row["workflow_task_uuid"]),
+            ).rowcount
+            if changed or cleanup_changed:
+                self._runtime_events(
+                    connection,
+                    task_uuid=row["workflow_task_uuid"],
+                    now=now,
+                )
+
     def _recover_terminal_receipt(
         self,
         row: dict[str, Any],
         claim: Any,
         receipt: Any,
     ) -> None:
-        """Replay C4/C5: receipt -> Workflow terminal -> Claim release."""
+        """重放 C4/C5：receipt → Workflow terminal → Claim release。"""
 
         result_payload = receipt.result
         output = result_payload.get("return_info")
@@ -965,9 +1130,18 @@ class DeviceActionTaskRuntimeBridge:
         with self._store.transaction() as connection:
             current = connection.execute(
                 """
-                SELECT j.status AS job_status, t.status AS task_status
+                SELECT j.status AS job_status, j.return_info, j.error_info,
+                       t.status AS task_status, t.output AS task_output,
+                       t.error_info AS task_error_info,
+                       d.material_changeset_uuid,
+                       d.material_changeset_fingerprint,
+                       d.material_changeset_outbox_sequence,
+                       d.workflow_terminal_fingerprint,
+                       d.claim_status
                 FROM workflow_node_job AS j
                 JOIN workflow_task AS t ON t.uuid = j.workflow_task_uuid
+                JOIN device_action_task AS d
+                  ON d.workflow_node_job_uuid = j.uuid
                 WHERE j.uuid = ?
                 """,
                 (row["workflow_node_job_uuid"],),
@@ -1025,12 +1199,41 @@ class DeviceActionTaskRuntimeBridge:
                     data={"reason": "material_changeset_receipt_replayed"},
                     now=now,
                 )
-            elif current["job_status"] != terminal_status:
+            else:
+                if (
+                    current["job_status"] != terminal_status
+                    or current["task_status"] != terminal_status
+                    or _load(current["return_info"], {}) != output
+                    or _load(current["error_info"], []) != error_info
+                    or _load(current["task_output"], {}) != output
+                    or _load(current["task_error_info"], []) != error_info
+                ):
+                    raise WorkflowError("reconciliation_required")
+            projected_receipt = (
+                current["material_changeset_uuid"],
+                current["material_changeset_fingerprint"],
+                current["material_changeset_outbox_sequence"],
+            )
+            if any(value is not None for value in projected_receipt) and (
+                current["material_changeset_uuid"] != receipt.uuid
+                or current["material_changeset_fingerprint"]
+                != receipt.deterministic_fingerprint
+                or int(current["material_changeset_outbox_sequence"])
+                != receipt.outbox_sequence
+            ):
                 raise WorkflowError("reconciliation_required")
-            connection.execute(
+            if (
+                current["workflow_terminal_fingerprint"] is not None
+                and current["workflow_terminal_fingerprint"] != terminal_fingerprint
+            ):
+                raise WorkflowError("reconciliation_required")
+            projected_claim_status = (
+                "released" if claim.state == "released" else "claimed"
+            )
+            projection_changed = connection.execute(
                 """
                 UPDATE device_action_task
-                SET claim_status = 'claimed', inventory_claim_uuid = ?,
+                SET claim_status = ?, inventory_claim_uuid = ?,
                     inventory_fencing_token = ?,
                     inventory_claim_set_fingerprint = ?,
                     material_changeset_uuid = ?,
@@ -1038,8 +1241,17 @@ class DeviceActionTaskRuntimeBridge:
                     material_changeset_outbox_sequence = ?,
                     workflow_terminal_fingerprint = ?, update_time = ?
                 WHERE workflow_node_job_uuid = ?
+                  AND (claim_status <> ?
+                       OR inventory_claim_uuid IS NOT ?
+                       OR inventory_fencing_token IS NOT ?
+                       OR inventory_claim_set_fingerprint IS NOT ?
+                       OR material_changeset_uuid IS NOT ?
+                       OR material_changeset_fingerprint IS NOT ?
+                       OR material_changeset_outbox_sequence IS NOT ?
+                       OR workflow_terminal_fingerprint IS NOT ?)
                 """,
                 (
+                    projected_claim_status,
                     claim.uuid,
                     claim.fencing_token,
                     claim.set_fingerprint,
@@ -1049,14 +1261,22 @@ class DeviceActionTaskRuntimeBridge:
                     terminal_fingerprint,
                     now,
                     row["workflow_node_job_uuid"],
+                    projected_claim_status,
+                    claim.uuid,
+                    claim.fencing_token,
+                    claim.set_fingerprint,
+                    receipt.uuid,
+                    receipt.deterministic_fingerprint,
+                    receipt.outbox_sequence,
+                    terminal_fingerprint,
                 ),
-            )
-            self._runtime_events(
-                connection,
-                task_uuid=row["workflow_task_uuid"],
-                now=now,
-            )
-        self._scheduler.acknowledge_inventory_result(receipt.outbox_sequence)
+            ).rowcount
+            if projection_changed:
+                self._runtime_events(
+                    connection,
+                    task_uuid=row["workflow_task_uuid"],
+                    now=now,
+                )
         release_result = self._scheduler.release_device_action_job_claim(
             claim=claim,
             receipt=receipt,
@@ -1064,26 +1284,31 @@ class DeviceActionTaskRuntimeBridge:
         )
         with self._store.transaction() as connection:
             now = utc_now()
-            connection.execute(
+            projection_changed = connection.execute(
                 """
                 UPDATE device_action_task
                 SET claim_status = 'released', update_time = ?
-                WHERE workflow_node_job_uuid = ?
+                WHERE workflow_node_job_uuid = ? AND claim_status <> 'released'
                 """,
                 (now, row["workflow_node_job_uuid"]),
-            )
-            connection.execute(
+            ).rowcount
+            cleanup_changed = connection.execute(
                 """
                 UPDATE workflow_task
-                SET cleanup_status = 'settled', update_time = ? WHERE uuid = ?
+                SET cleanup_status = 'settled', update_time = ?
+                WHERE uuid = ? AND cleanup_status <> 'settled'
                 """,
                 (now, row["workflow_task_uuid"]),
-            )
-            self._runtime_events(
-                connection,
-                task_uuid=row["workflow_task_uuid"],
-                now=now,
-            )
+            ).rowcount
+            if projection_changed or cleanup_changed:
+                self._runtime_events(
+                    connection,
+                    task_uuid=row["workflow_task_uuid"],
+                    now=now,
+                )
+        self._inject_fault("before_material_changeset_outbox_ack")
+        self._scheduler.acknowledge_inventory_result(receipt.outbox_sequence)
+        self._inject_fault("before_material_claim_release_outbox_ack")
         self._scheduler.acknowledge_inventory_result(release_result.outbox_sequence)
 
     def stop(self) -> None:
@@ -1140,7 +1365,7 @@ class DeviceActionTaskRuntimeBridge:
             self._submit(task_uuid)
 
     def busy_device_action_keys(self) -> set[str]:
-        """Compatibility read delegates to the sole Inventory Claim authority."""
+        """兼容读取委托给唯一 Inventory Claim authority。"""
 
         if self._scheduler is None:
             return set()
@@ -1156,7 +1381,14 @@ class DeviceActionTaskRuntimeBridge:
                 dict(row)
                 for row in connection.execute(
                     """
-                    SELECT d.workflow_task_uuid, d.workflow_node_job_uuid
+                    SELECT d.workflow_task_uuid, d.workflow_node_job_uuid,
+                           EXISTS(
+                               SELECT 1 FROM workflow_runtime_journal AS rj
+                               WHERE rj.workflow_node_job_uuid =
+                                     d.workflow_node_job_uuid
+                                 AND rj.kind = 'job_transition'
+                                 AND rj.to_status = 'dispatched'
+                           ) AS dispatch_recorded
                     FROM device_action_task AS d
                     JOIN workflow_task AS t ON t.uuid = d.workflow_task_uuid
                     JOIN workflow_node_job AS j
@@ -1185,15 +1417,6 @@ class DeviceActionTaskRuntimeBridge:
                 )
             ]
             now = utc_now()
-            for item in pending_canceled:
-                connection.execute(
-                    """
-                    UPDATE device_action_task
-                    SET claim_status = 'released', update_time = ?
-                    WHERE workflow_task_uuid = ? AND claim_status = 'pending'
-                    """,
-                    (now, item["workflow_task_uuid"]),
-                )
             claimed: list[dict[str, Any]] = []
             for item in cancel_requested:
                 changed = connection.execute(
@@ -1212,6 +1435,49 @@ class DeviceActionTaskRuntimeBridge:
                     claimed.append(item)
 
         for item in pending_canceled:
+            claim = self._scheduler.find_inventory_job_claim(
+                item["workflow_node_job_uuid"],
+                1,
+            )
+            if claim is not None and claim.state != "released":
+                if claim.state != "reserved" or item["dispatch_recorded"]:
+                    raise WorkflowError("reconciliation_required")
+                no_send_fingerprint = hashlib.sha256(
+                    encode_json(
+                        {
+                            "job_uuid": item["workflow_node_job_uuid"],
+                            "attempt": claim.attempt,
+                            "claim_uuid": claim.uuid,
+                            "claim_state": claim.state,
+                            "workflow_task_status": "canceled",
+                            "workflow_job_status": "canceled",
+                            "dispatch_recorded": False,
+                        },
+                        sort_keys=True,
+                    )
+                ).hexdigest()
+                released = self._scheduler.release_unsubmitted_device_action_job_claim(
+                    claim=claim,
+                    no_send_proof_fingerprint=no_send_fingerprint,
+                    reason="canceled_before_durable_dispatch",
+                )
+                if released.claim is None:
+                    raise WorkflowError("reconciliation_required")
+                self._project_unsubmitted_claim_release(item, released.claim)
+                self._scheduler.acknowledge_inventory_result(released.outbox_sequence)
+            elif claim is not None:
+                self._project_unsubmitted_claim_release(item, claim)
+            else:
+                with self._store.transaction() as connection:
+                    now = utc_now()
+                    connection.execute(
+                        """
+                        UPDATE device_action_task
+                        SET claim_status = 'released', update_time = ?
+                        WHERE workflow_task_uuid = ? AND claim_status = 'pending'
+                        """,
+                        (now, item["workflow_task_uuid"]),
+                    )
             self._scheduler.cancel_device_action_task(item["workflow_task_uuid"])
         for item in claimed:
             job_uuid = item["workflow_node_job_uuid"]
@@ -1844,7 +2110,6 @@ class DeviceActionTaskRuntimeBridge:
                 now=now,
             )
         self._inject_fault("after_workflow_terminal_commit")
-        self._scheduler.acknowledge_inventory_result(receipt.outbox_sequence)
         release_result = self._scheduler.release_device_action_job_claim(
             claim=claim,
             receipt=receipt,
@@ -1875,6 +2140,9 @@ class DeviceActionTaskRuntimeBridge:
                 task_uuid=observed["workflow_task_uuid"],
                 now=now,
             )
+        self._inject_fault("before_material_changeset_outbox_ack")
+        self._scheduler.acknowledge_inventory_result(receipt.outbox_sequence)
+        self._inject_fault("before_material_claim_release_outbox_ack")
         self._scheduler.acknowledge_inventory_result(release_result.outbox_sequence)
         return True
 
