@@ -29,7 +29,7 @@ import logging
 import queue
 import threading
 import time
-from typing import Any, Callable, Dict, List, Optional, Set
+from typing import Any, Callable, Dict, List, Mapping, Optional, Set
 
 from unilabos.app.scheduler.dispatch import DispatchPayload
 from unilabos.app.ws_client import (
@@ -69,6 +69,7 @@ class JobExecutionBackend:
         self.device_manager = device_manager or DeviceActionManager()
         self._host_node_getter = host_node_getter or self._default_host_getter
         self._listeners: List[JobFinishedListener] = []
+        self._listeners_lock = threading.Lock()
         # 设备状态存储（DeviceStateStore；None = 不落盘）与监控总线
         self.device_state = device_state_store
         self._monitor = monitor
@@ -116,8 +117,22 @@ class JobExecutionBackend:
 
     # ── 调度器侧接口（Dispatcher 协议） ───────────────────────
 
-    def dispatch(self, payload: DispatchPayload) -> None:
+    def dispatch(self, payload: DispatchPayload | Mapping[str, Any]) -> None:
         """接收调度器下发的 job_start 载荷：入队/直发（同 _handle_job_start 语义）。"""
+        if "job_uuid" in payload:
+            # WorkflowTask runtime uses Backend-aligned UUID vocabulary.  This
+            # is the sole boundary into the pre-migration Edge transport.
+            payload = DispatchPayload(
+                job_id=payload["job_uuid"],
+                task_id=payload["task_uuid"],
+                node_id=payload["node_uuid"],
+                workflow_id=payload["workflow_uuid"],
+                device_id=payload["device_id"],
+                action=payload["action_name"],
+                action_type=payload["action_type"],
+                action_args=payload.get("param") or {},
+                sample_material=payload.get("sample_material") or {},
+            )
         parent_trace_context = normalize_trace_context(
             payload.get("trace_context")
         )
@@ -176,11 +191,26 @@ class JobExecutionBackend:
         except (TypeError, ValueError):
             accepts_suc_type = True
         if accepts_suc_type:
-            self._listeners.append(listener)
+            registered = listener
         else:
-            self._listeners.append(
-                lambda job_id, success, ret_value, _suc_type: listener(job_id, success, ret_value)
-            )
+            def registered(job_id, success, ret_value, _suc_type):
+                listener(job_id, success, ret_value)
+
+            setattr(registered, "_unilabos_listener", listener)
+        with self._listeners_lock:
+            if registered not in self._listeners:
+                self._listeners.append(registered)
+
+    def remove_job_finished_listener(self, listener: Callable[..., None]) -> None:
+        """注销完成回调；允许用注册时的原始三参 listener 移除。"""
+
+        with self._listeners_lock:
+            self._listeners = [
+                registered
+                for registered in self._listeners
+                if registered != listener
+                and getattr(registered, "_unilabos_listener", None) != listener
+            ]
 
     def busy_device_action_keys(self) -> Set[str]:
         """当前被占用的 device_action_key（供调度器做锁视图合并）。"""
@@ -399,7 +429,9 @@ class JobExecutionBackend:
         if next_job is not None:
             self._put_event(("start", next_job))
 
-        for listener in self._listeners:
+        with self._listeners_lock:
+            listeners = tuple(self._listeners)
+        for listener in listeners:
             try:
                 listener(job_id, success, ret_value, suc_type)
             except Exception:  # noqa: BLE001 - 单个 listener 异常不阻断其他

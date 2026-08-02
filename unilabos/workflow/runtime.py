@@ -108,6 +108,8 @@ class WorkflowJobDispatcher(Protocol):
 
     def add_job_finished_listener(self, listener: Callable[..., None]) -> None: ...
 
+    def remove_job_finished_listener(self, listener: Callable[..., None]) -> None: ...
+
     def execution_ready(self) -> bool: ...
 
 
@@ -1111,13 +1113,18 @@ class WorkflowRuntimeWorker:
         self._wake_event = threading.Event()
         self._thread: Optional[threading.Thread] = None
         self._lock = threading.Lock()
+        self._listener_registered = False
         if dispatcher is not None:
             dispatcher.add_job_finished_listener(self._on_job_finished)
+            self._listener_registered = True
 
     def start(self) -> None:
         with self._lock:
             if self._thread is not None and self._thread.is_alive():
                 return
+            if self._dispatcher is not None and not self._listener_registered:
+                self._dispatcher.add_job_finished_listener(self._on_job_finished)
+                self._listener_registered = True
             self._stop_event.clear()
             self._thread = threading.Thread(
                 target=self._run,
@@ -1129,6 +1136,13 @@ class WorkflowRuntimeWorker:
     def stop(self) -> None:
         self._stop_event.set()
         self._wake_event.set()
+        dispatcher = self._dispatcher
+        with self._lock:
+            remove_listener = dispatcher is not None and self._listener_registered
+            self._listener_registered = False
+        if remove_listener:
+            assert dispatcher is not None
+            dispatcher.remove_job_finished_listener(self._on_job_finished)
 
     def join(self, timeout: Optional[float] = None) -> None:
         thread = self._thread
@@ -1265,7 +1279,7 @@ class WorkflowRuntimeWorker:
                     task_uuid,
                     job["uuid"],
                     payload["device_id"],
-                    payload["action"],
+                    payload["action_name"],
                 )
             except (KeyError, TypeError, ValueError, StoreConflict) as error:
                 self._fail_task(
@@ -1279,17 +1293,17 @@ class WorkflowRuntimeWorker:
             try:
                 self._dispatcher.dispatch(payload)
             except Exception as error:  # noqa: BLE001
-                # The dispatch boundary must terminalize the durable Job.
+                # The transport may have accepted the action before its
+                # acknowledgement failed.  Preserve the durable uncertainty
+                # fence instead of inventing a physical failure fact.
                 _LOGGER.exception(
-                    "Workflow Job dispatch failed task_uuid=%s job_uuid=%s",
+                    "Workflow Job dispatch outcome unknown task_uuid=%s job_uuid=%s",
                     task_uuid,
                     job["uuid"],
                 )
-                self._fail_task(
-                    task_uuid,
+                self._coordinator.mark_job_unknown(
                     job["uuid"],
-                    "dispatch_failed",
-                    detail=str(error),
+                    str(error),
                 )
             return
 
@@ -1345,14 +1359,14 @@ class WorkflowRuntimeWorker:
                 source_job.get("return_info"), source_key
             )
         return {
-            "job_id": job["uuid"],
-            "task_id": task["uuid"],
-            "node_id": job["workflow_node_uuid"],
-            "workflow_id": task["workflow_uuid"],
+            "job_uuid": job["uuid"],
+            "task_uuid": task["uuid"],
+            "node_uuid": job["workflow_node_uuid"],
+            "workflow_uuid": task["workflow_uuid"],
             "device_id": device_id,
-            "action": action_name,
+            "action_name": action_name,
             "action_type": action_type,
-            "action_args": action_args,
+            "param": action_args,
             "sample_material": {},
         }
 
@@ -1372,6 +1386,8 @@ class WorkflowRuntimeWorker:
         return_value: Any,
         _success_type: str = "normal",
     ) -> None:
+        if self._stop_event.is_set() or not self._listener_registered:
+            return
         try:
             job = self._coordinator._execution_job(job_uuid)
             if job["status"] in _JOB_TERMINAL:

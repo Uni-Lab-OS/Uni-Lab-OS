@@ -1019,14 +1019,9 @@ def main():
     )
     # Registry 已完成全部来源的构建后再冻结快照；TemplateCatalog adapter 自行筛选
     # 显式 typed @action，production composition 不按来源复制第二套筛选规则。
-    workflow_registry_snapshot = copy.deepcopy(lab_registry.device_type_registry)
-    for registry_entry in workflow_registry_snapshot.values():
-        if isinstance(registry_entry, dict) and not registry_entry.get("source_fqid"):
-            # Built-in/YAML Registry entries remain runtime-compatible legacy.
-            # Only PackageCatalog-owned definitions are A1 authoring sources;
-            # host_node is still consumed as the MaterialSource framework owner.
-            registry_entry["workflow_template_projection"] = False
-    args_dict["_workflow_registry_snapshot"] = workflow_registry_snapshot
+    args_dict["_workflow_registry_snapshot"] = copy.deepcopy(
+        lab_registry.device_type_registry
+    )
     args_dict["_workflow_resource_registry_snapshot"] = copy.deepcopy(
         lab_registry.resource_type_registry
     )
@@ -1202,7 +1197,11 @@ def main():
         # the legacy cloud workflow_start Edge scheduler.  Wire its Jobs to the
         # same HostNode/ROS execution backend whenever a Package Workspace owns
         # the local Workflow authority.
-        if workspace_source is not None and args_dict.get("backend") == "ros":
+        if (
+            workspace_source is not None
+            and args_dict.get("backend") == "ros"
+            and BasicConfig.test_mode
+        ):
             from unilabos.app.scheduler.backend import JobExecutionBackend
 
             device_ids_by_identity = {}
@@ -1216,8 +1215,13 @@ def main():
             workflow_job_dispatcher.start()
             args_dict["bridges"].append(workflow_job_dispatcher)
             print_status(
-                "WorkflowTask ROS 执行后端已启用",
+                "WorkflowTask ROS 执行后端已启用（仅 test_mode）",
                 "info",
+            )
+        elif workspace_source is not None and args_dict.get("backend") == "ros":
+            print_status(
+                "WorkflowTask ROS 物理执行未启用：durable Execution Claims 尚未接入",
+                "warning",
             )
     else:
         print_status("SlaveMode跳过Websocket连接")
