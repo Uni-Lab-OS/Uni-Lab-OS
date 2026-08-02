@@ -20,7 +20,7 @@ from __future__ import annotations
 import logging
 import os
 import time
-from typing import Any, Optional, Tuple
+from typing import Any
 
 from unilabos.app.scheduler.backend import JobExecutionBackend, create_edge_stack
 from unilabos.app.scheduler.ordering import HttpSchedulerOrderer, StableLocalOrderer
@@ -29,21 +29,21 @@ from unilabos.app.scheduler.service import EdgeScheduler
 logger = logging.getLogger(__name__)
 
 # 进程内单例（主进程装配一次，ws_client/api 层共享）
-_scheduler: Optional[EdgeScheduler] = None
-_backend: Optional[JobExecutionBackend] = None
-_inventory: Optional[Any] = None
-_outbox_worker: Optional[Any] = None
+_scheduler: EdgeScheduler | None = None
+_backend: JobExecutionBackend | None = None
+_inventory: Any | None = None
+_outbox_worker: Any | None = None
 
 
-def get_edge_scheduler() -> Optional[EdgeScheduler]:
+def get_edge_scheduler() -> EdgeScheduler | None:
     return _scheduler
 
 
-def get_edge_backend() -> Optional[JobExecutionBackend]:
+def get_edge_backend() -> JobExecutionBackend | None:
     return _backend
 
 
-def get_inventory_service() -> Optional[Any]:
+def get_inventory_service() -> Any | None:
     return _inventory
 
 
@@ -75,12 +75,13 @@ def setup_edge_scheduler(
     ordering_algorithm: str = "WeightedCriticalPath",
     lab_id: str = "edge-lab",
     host_node_getter: Any = None,
-    inventory_db_path: str = "",
+    working_dir: str = "",
+    inventory_resource_templates: Any = None,
     edge_id: str = "edge-default",
     sync_sender: Any = None,
     device_state_db_path: str = "",
     workflow_history_db_path: str = "",
-) -> Tuple[EdgeScheduler, JobExecutionBackend]:
+) -> tuple[EdgeScheduler, JobExecutionBackend]:
     """装配 EdgeScheduler + 微后端，并接通云端 ws 链路（幂等）。
 
     Args:
@@ -89,7 +90,8 @@ def setup_edge_scheduler(
             - 注入 message_processor.inventory_service（inventory_command 执行目标）
             - 注册工作流终态上报（workflow_status 消息）
         ordering_url: uni-lab-scheduler 地址（空则本地稳定排序）
-        inventory_db_path: Edge 仓储 SQLite 路径（空 = 不启用仓储/物料衔接）
+        working_dir: OS workspace；Inventory 固定使用其下的 ``inventory.db``。
+        inventory_resource_templates: Registry 注入的只读 ResourceTemplate identities。
         sync_sender: outbox 上报 callable（events → acked_sequence）；
             传入时启动 OutboxWorker，不传则事件保留在 outbox（云端端点就绪后再挂）
         device_state_db_path: 设备状态 SQLite 路径（独立于仓储/工作流库；
@@ -105,7 +107,9 @@ def setup_edge_scheduler(
     """
     global _scheduler, _backend, _inventory, _outbox_worker
     if _scheduler is not None and _backend is not None:
-        logger.warning("[EdgeSchedulerIntegration] already set up, reusing existing stack")
+        logger.warning(
+            "[EdgeSchedulerIntegration] already set up, reusing existing stack"
+        )
         return _scheduler, _backend
 
     # 时长预估器：orderer（排序 duration）与 scheduler（泳道图/历史样本）共享
@@ -127,28 +131,28 @@ def setup_edge_scheduler(
         orderer = StableLocalOrderer()
 
     inventory = None
-    if inventory_db_path:
+    if working_dir:
         from unilabos.app.scheduler.inventory.service import InventoryService
-        from unilabos.app.scheduler.inventory.store import InventoryStore
         from unilabos.app.scheduler.inventory.sync import OutboxWorker
-
         from unilabos.app.scheduler.monitor import monitor_bus as _monitor_bus
 
-        inventory = InventoryService(
-            InventoryStore(inventory_db_path), edge_id=edge_id, lab_id=lab_id,
+        inventory = InventoryService.open(
+            working_dir=working_dir,
+            resource_templates=inventory_resource_templates or {},
+            edge_id=edge_id,
+            lab_id=lab_id,
             monitor=_monitor_bus,
         )
         _inventory = inventory
         # 本地优先：仅显式传入 sync_sender 时才启动云端同步；纯本地模式下
         # 领域事件留在 sync_outbox（SQLite），后续接入云端时挂 worker 重放即可。
         if sync_sender is not None:
-            _outbox_worker = OutboxWorker(inventory.store, sync_sender)
+            _outbox_worker = OutboxWorker(inventory, sync_sender)
             _outbox_worker.start()
         else:
             logger.info(
                 "[EdgeSchedulerIntegration] cloud sync disabled (local-only mode); "
-                "outbox events retained in %s",
-                inventory_db_path,
+                "outbox events retained in workspace inventory.db",
             )
 
     from unilabos.app.scheduler.monitor import monitor_bus
@@ -232,7 +236,7 @@ def _wire_ws_client(scheduler: EdgeScheduler, ws_client: Any) -> None:
         try:
             if message_processor is not None:
                 message_processor.send_message(message)
-        except Exception:  # noqa: BLE001 - 上报失败不影响调度
+        except Exception:
             logger.exception("[EdgeSchedulerIntegration] workflow_status report failed")
 
     scheduler.set_workflow_state_listener(_report_workflow_state)
@@ -246,7 +250,7 @@ def reset_for_test() -> None:
     if _outbox_worker is not None:
         _outbox_worker.stop()
     if _inventory is not None:
-        _inventory.store.close()
+        _inventory.close()
     _scheduler = None
     _backend = None
     _inventory = None

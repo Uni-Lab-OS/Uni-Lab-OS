@@ -477,68 +477,16 @@ class InventoryStore:
     def get_lot(self, lot_id: str) -> dict[str, Any] | None:
         return self.query_one("SELECT * FROM inventory_lot WHERE lot_id = ?", (lot_id,))
 
-    def get_instance(self, edge_uuid: str) -> dict[str, Any] | None:
-        return self.query_one(
-            "SELECT * FROM material_instance WHERE edge_uuid = ?", (edge_uuid,)
-        )
-
-    def find_instance_by_barcode_active(
-        self, barcode: str, active_states: tuple
-    ) -> dict[str, Any] | None:
-        placeholders = ",".join("?" for _ in active_states)
-        return self.query_one(
-            f"SELECT * FROM material_instance WHERE barcode = ? AND status IN ({placeholders})",
-            (barcode, *active_states),
-        )
-
-    def find_instance_by_legacy_cloud_id(self, cloud_id: str) -> dict[str, Any] | None:
-        return self.query_one(
-            "SELECT * FROM material_instance WHERE legacy_cloud_id = ?", (cloud_id,)
-        )
-
-    def lots_by_template_fifo(self, template_id: str) -> list[dict[str, Any]]:
+    def lots_by_template_fifo(
+        self,
+        resource_template_uuid: str,
+    ) -> list[dict[str, Any]]:
         """FIFO：按 created_at 升序（同毫秒按 rowid 插入序）返回可用批次."""
         return self.query_all(
-            "SELECT * FROM inventory_lot WHERE template_id = ? AND quarantined = 0 "
+            "SELECT * FROM inventory_lot WHERE resource_template_uuid = ? "
+            "AND quarantined = 0 "
             "AND quantity_available > 0 ORDER BY created_at ASC, rowid ASC",
-            (template_id,),
-        )
-
-    def get_reservation(
-        self, workflow_id: str, node_id: str, attempt: int
-    ) -> dict[str, Any] | None:
-        return self.query_one(
-            "SELECT * FROM inventory_reservation WHERE workflow_id = ? AND node_id = ? AND attempt = ?",
-            (workflow_id, node_id, attempt),
-        )
-
-    def reservations_for_workflow(self, workflow_id: str) -> list[dict[str, Any]]:
-        return self.query_all(
-            "SELECT * FROM inventory_reservation WHERE workflow_id = ? ORDER BY created_at ASC, reservation_id ASC",
-            (workflow_id,),
-        )
-
-    def get_relation(self, child_uuid: str) -> dict[str, Any] | None:
-        return self.query_one(
-            "SELECT * FROM resource_relation WHERE child_uuid = ?", (child_uuid,)
-        )
-
-    def children_of(self, parent_uuid: str) -> list[dict[str, Any]]:
-        return self.query_all(
-            "SELECT * FROM resource_relation WHERE parent_uuid = ? ORDER BY slot_id ASC",
-            (parent_uuid,),
-        )
-
-    def get_content(self, instance_uuid: str) -> dict[str, Any] | None:
-        return self.query_one(
-            "SELECT * FROM substance_content WHERE instance_uuid = ?", (instance_uuid,)
-        )
-
-    def component_children_of(self, parent_uuid: str) -> list[dict[str, Any]]:
-        """组成父子（material_instance.parent_uuid）下的直接子物料；与 site 放置无关."""
-        return self.query_all(
-            "SELECT * FROM material_instance WHERE parent_uuid = ? ORDER BY edge_uuid ASC",
-            (parent_uuid,),
+            (resource_template_uuid,),
         )
 
     def get_processed_command(self, command_id: str) -> dict[str, Any] | None:

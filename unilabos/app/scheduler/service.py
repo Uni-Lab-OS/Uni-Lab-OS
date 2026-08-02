@@ -14,21 +14,14 @@
 
 不做一次性拓扑序：ready 集合每次触发点都重新计算、重新排序。
 
-物料衔接（注入 InventoryService 时启用；spec 无物料字段则行为完全不变）：
-
-- submit：汇总 DAG 全部物料需求，入队前 all-or-nothing 预留；
-  不足 → workflow 置 ``waiting_for_material``，不进入执行队列，每次重排重试预留
-- 节点下发前：预留 → FIFO lot 消费 + 实例 deploy（幂等键 workflow:node:attempt）
-- 节点失败：该节点已消费的物料转 quarantined（人工复核，不虚假加回）
-- 节点异常后人工选择 skip（suc_type=skip）：节点算成功继续推进，但其已消费
-  物料状态不明，同样转 quarantined 待复核
-- 工作流终态（failed/canceled）：剩余 active 预留自动 release（依据 DB，不依赖内存）
+Material admission/release only serves durable WorkflowTasks. Legacy
+``WorkflowSpec.material_requirements`` is rejected instead of guessed or
+silently dispatched.
 
 物料锁（``@action(lock_resource=[...])``，注入 lock_resource_resolver 时启用）：
 
 - 下发前用 resolver 取该动作声明的 ResourceSlot 参数名，从已解析参数里提取
   资源标识生成锁键；与在执行 job 的锁键冲突 → 本轮跳过（等释放后的重排）
-- 实体型物料需求（instance_uuid / barcode）自动并入锁键，双保险防同料并用
 - job 完成 / 工作流取消时释放
 """
 
@@ -41,7 +34,8 @@ import threading
 import time
 import uuid as uuid_mod
 from collections import deque
-from typing import Any, Callable, Deque, Dict, List, Optional, Set
+from collections.abc import Callable
+from typing import Any
 
 from unilabos.app.scheduler.dag_state import WorkflowRun
 from unilabos.app.scheduler.dispatch import (
@@ -51,7 +45,6 @@ from unilabos.app.scheduler.dispatch import (
 )
 from unilabos.app.scheduler.estimation import DurationEstimator
 from unilabos.app.scheduler.inventory.domain import (
-    InsufficientStock,
     InventoryError,
     TaskMaterialAdmissionCommand,
     TaskMaterialAdmissionResult,
@@ -79,14 +72,14 @@ logger = logging.getLogger(__name__)
 _RESOURCE_ID_FIELDS = ("unilabos_uuid", "uuid", "id", "name")
 
 
-def _extract_resource_ids(value: Any) -> Set[str]:
+def _extract_resource_ids(value: Any) -> set[str]:
     """从 action 参数值提取资源标识（锁键素材）。
 
     支持形态：字符串（uuid/名称）、dict（ResourceSlot 原始入参，含
     unilabos_uuid/uuid/id/name 任一字段，或嵌套 ``data.unilabos_uuid``）、
     以及它们的 list/tuple。取不到标识的值直接忽略（宁可漏锁不误锁）。
     """
-    ids: Set[str] = set()
+    ids: set[str] = set()
     if value is None:
         return ids
     if isinstance(value, str):
@@ -114,49 +107,48 @@ def _extract_resource_ids(value: Any) -> Set[str]:
 class EdgeScheduler:
     def __init__(
         self,
-        orderer: Optional[TaskOrderer] = None,
-        dispatcher: Optional[Dispatcher] = None,
-        external_busy_keys: Optional[Set[str]] = None,
-        busy_key_provider: Optional["Callable[[], Set[str]]"] = None,
-        workflow_state_listener: Optional["Callable[[str, str], None]"] = None,
+        orderer: TaskOrderer | None = None,
+        dispatcher: Dispatcher | None = None,
+        external_busy_keys: set[str] | None = None,
+        busy_key_provider: Callable[[], set[str]] | None = None,
+        workflow_state_listener: Callable[[str, str], None] | None = None,
         inventory: Any = None,
-        lock_resource_resolver: Optional["Callable[[str, str], List[str]]"] = None,
-        estimator: Optional[DurationEstimator] = None,
+        lock_resource_resolver: Callable[[str, str], list[str]] | None = None,
+        estimator: DurationEstimator | None = None,
         timeline_capacity: int = 400,
         monitor: Any = None,
         history: Any = None,
         workflow_tasks: Any = None,
-        admission_fault_hook: Optional["Callable[[str], None]"] = None,
+        admission_fault_hook: Callable[[str], None] | None = None,
     ):
         self._orderer = orderer or StableLocalOrderer()
         self._dispatcher = dispatcher or RecordingDispatcher()
         self._lock = threading.RLock()
 
-        self._workflows: Dict[str, WorkflowRun] = {}
+        self._workflows: dict[str, WorkflowRun] = {}
         # job_id -> DispatchedJob（完成回调路由 + 资源锁）
-        self._inflight: Dict[str, DispatchedJob] = {}
+        self._inflight: dict[str, DispatchedJob] = {}
         # 外部注入的锁（例如 DeviceActionManager 已占用的设备），可选
-        self._external_busy_keys = external_busy_keys if external_busy_keys is not None else set()
+        self._external_busy_keys = (
+            external_busy_keys if external_busy_keys is not None else set()
+        )
         # 实时锁视图提供者（微后端 busy_device_action_keys），可选
         self._busy_key_provider = busy_key_provider
         # 工作流终态通知（success/failed/canceled 各通知一次；锁外触发）
         self._workflow_state_listener = workflow_state_listener
-        self._notified_workflows: Set[str] = set()
+        self._notified_workflows: set[str] = set()
         self._reschedule_count = 0
-        # 可选 InventoryService（duck-typed：reserve_workflow / consume_reservation /
-        # quarantine_reservation / release_workflow）；None = 物料衔接整体关闭
+        # Canonical InventoryService used only by durable WorkflowTask sagas.
         self._inventory = inventory
-        # 有物料需求的 workflow（其余 workflow 不产生任何 inventory 调用）
-        self._material_workflows: Set[str] = set()
         # 物料/资源锁：resolver(device_id, action_name) -> @action(lock_resource=[...])
         # 声明的参数名列表；None = 物料锁关闭
         self._lock_resource_resolver = lock_resource_resolver
         # job_id -> 该 job 持有的资源锁键（job 完成/取消时释放）
-        self._job_resource_locks: Dict[str, Set[str]] = {}
+        self._job_resource_locks: dict[str, set[str]] = {}
         # 时长预估器（declared / historical / auto 三种 mode，内含两种计算模式）
         self._estimator = estimator or DurationEstimator()
         # 泳道图时间线：已完结 job 的起止记录（环形缓冲）
-        self._timeline: Deque[Dict[str, Any]] = deque(maxlen=timeline_capacity)
+        self._timeline: deque[dict[str, Any]] = deque(maxlen=timeline_capacity)
         # 实时监控总线（duck-typed emit(channel, type, data)）；None = 关闭
         self._monitor = monitor
         # 工作流执行历史（WorkflowHistoryStore，独立 SQLite）；None = 不落盘
@@ -165,12 +157,14 @@ class EdgeScheduler:
         self._workflow_tasks = workflow_tasks
         self._admission_fault_hook = admission_fault_hook
 
-    def _emit_monitor(self, channel: str, event_type: str, data: Dict[str, Any]) -> None:
+    def _emit_monitor(
+        self, channel: str, event_type: str, data: dict[str, Any]
+    ) -> None:
         if self._monitor is None:
             return
         try:
             self._monitor.emit(channel, event_type, data)
-        except Exception:  # noqa: BLE001 - 监控故障不影响调度
+        except Exception:  # noqa: BLE001, S110 - 监控故障不影响调度
             pass
 
     def _safe_history(self, method: str, *args: Any, **kwargs: Any) -> None:
@@ -179,10 +173,10 @@ class EdgeScheduler:
             return
         try:
             getattr(self._history, method)(*args, **kwargs)
-        except Exception:  # noqa: BLE001
+        except Exception:
             logger.exception("[EdgeScheduler] history.%s failed", method)
 
-    def set_workflow_state_listener(self, listener: "Callable[[str, str], None]") -> None:
+    def set_workflow_state_listener(self, listener: Callable[[str, str], None]) -> None:
         self._workflow_state_listener = listener
 
     def reconcile_task_admission(
@@ -196,10 +190,10 @@ class EdgeScheduler:
         task = self._workflow_tasks.get_workflow_task(task_uuid)
         snapshot = task.get("workflow_snapshot")
         if not isinstance(snapshot, dict):
-            raise ValueError("Workflow Task snapshot is invalid")
+            raise TypeError("Workflow Task snapshot is invalid")
         nodes = snapshot.get("nodes")
         if not isinstance(nodes, list):
-            raise ValueError("Workflow Task snapshot nodes are invalid")
+            raise TypeError("Workflow Task snapshot nodes are invalid")
         encoded_snapshot = json.dumps(
             snapshot,
             ensure_ascii=False,
@@ -218,7 +212,7 @@ class EdgeScheduler:
         ):
             param = node.get("param")
             if not isinstance(param, dict):
-                raise ValueError("MaterialSource snapshot parameter is invalid")
+                raise TypeError("MaterialSource snapshot parameter is invalid")
             slot_range = param.get("slot_range")
             candidate_site_uuids = (
                 tuple(slot_range) if isinstance(slot_range, list) else ()
@@ -335,30 +329,21 @@ class EdgeScheduler:
 
     # ── 触发点 1：任务进来 ────────────────────────────────────
 
-    def submit_workflow(self, spec: WorkflowSpec) -> Dict[str, Any]:
+    def submit_workflow(self, spec: WorkflowSpec) -> dict[str, Any]:
         """提交工作流并立即重排。返回本次下发结果。
 
-        带物料需求时：入队前整 DAG all-or-nothing 预留；不足则置
-        ``waiting_for_material``（不进入执行队列，后续每次重排自动重试）。
+        Legacy material requirements are not an admission contract and fail closed.
         """
         with self._lock:
             if spec.workflow_id in self._workflows:
                 raise ValueError(f"workflow {spec.workflow_id} already submitted")
+            if spec.material_requirements_by_node():
+                raise ValueError(
+                    "WorkflowSpec material requirements are retired; "
+                    "use WorkflowTask Material admission"
+                )
             run = WorkflowRun(spec)  # 构图 + 环检测，失败直接抛
             self._workflows[spec.workflow_id] = run
-
-            requirements = spec.material_requirements_by_node()
-            if requirements:
-                if self._inventory is None:
-                    logger.warning(
-                        "[EdgeScheduler] workflow %s declares materials but no inventory "
-                        "service wired; proceeding without reservation",
-                        spec.workflow_id,
-                    )
-                else:
-                    self._material_workflows.add(spec.workflow_id)
-                    if not self._try_reserve(run):
-                        run.state = WorkflowState.WAITING_MATERIAL
 
             logger.info(
                 "[EdgeScheduler] workflow %s submitted (%d nodes, state=%s), reschedule",
@@ -386,21 +371,6 @@ class EdgeScheduler:
             "dispatched": dispatched,
         }
 
-    def _try_reserve(self, run: WorkflowRun) -> bool:
-        """尝试整 DAG 预留；不足返回 False（幂等，可反复重试）。"""
-        try:
-            self._inventory.reserve_workflow(
-                run.spec.workflow_id, run.spec.material_requirements_by_node()
-            )
-            return True
-        except InsufficientStock as exc:
-            logger.info(
-                "[EdgeScheduler] workflow %s waiting for material: %s",
-                run.spec.workflow_id,
-                exc,
-            )
-            return False
-
     # ── 触发点 2：子 action 完成 ──────────────────────────────
 
     def on_job_finished(
@@ -409,7 +379,7 @@ class EdgeScheduler:
         success: bool,
         ret_value: Any = None,
         suc_type: str = "normal",
-    ) -> Dict[str, Any]:
+    ) -> dict[str, Any]:
         """job 完成回调（成功或失败）：写回结果 → 清依赖 → 强制重排。
 
         ``suc_type`` 来自设备侧异常决策（registry.action_policy）：
@@ -424,7 +394,9 @@ class EdgeScheduler:
                 return {"dispatched": []}
 
             # 泳道图时间线：记录实际起止 + 喂给历史统计（EMA）+ 历史库落盘
-            self._record_timeline(job, success=success, suc_type=suc_type, ret_value=ret_value)
+            self._record_timeline(
+                job, success=success, suc_type=suc_type, ret_value=ret_value
+            )
 
             run = self._workflows.get(job.workflow_id)
             if run is None:
@@ -432,27 +404,8 @@ class EdgeScheduler:
 
             if success:
                 run.mark_finished(job.node_id, ret_value)
-                if suc_type == "skip" and job.workflow_id in self._material_workflows:
-                    # 异常后跳过：动作未真正完成，该节点已消费物料状态不明 → 隔离
-                    logger.warning(
-                        "[EdgeScheduler] node %s skipped after error, "
-                        "quarantine its consumed materials (wf=%s)",
-                        job.node_id,
-                        job.workflow_id,
-                    )
-                    self._safe_inventory_call(
-                        "quarantine_reservation",
-                        job.workflow_id,
-                        job.node_id,
-                        reason="node_skipped_after_error",
-                    )
             else:
                 run.mark_failed(job.node_id)
-                # 失败节点已物理使用的物料转 quarantined（不虚假加回）
-                if job.workflow_id in self._material_workflows:
-                    self._safe_inventory_call(
-                        "quarantine_reservation", job.workflow_id, job.node_id,
-                    )
                 # 失败工作流的未下发节点不再推进；已下发的等它们各自回调
                 logger.warning(
                     "[EdgeScheduler] node %s failed, workflow %s stops advancing",
@@ -479,31 +432,15 @@ class EdgeScheduler:
 
     # ── 重排核心 ─────────────────────────────────────────────
 
-    def reschedule(self) -> List[Dict[str, Any]]:
+    def reschedule(self) -> list[dict[str, Any]]:
         """手动触发重排（API 暴露；正常推进依赖两个自动触发点）。"""
         with self._lock:
             return self._reschedule_locked()
 
-    def _reschedule_locked(self) -> List[Dict[str, Any]]:
+    def _reschedule_locked(self) -> list[dict[str, Any]]:
         self._reschedule_count += 1
 
-        # 等料工作流每次重排重试预留（补料后自动恢复 RUNNING）
-        if self._inventory is not None:
-            for run in self._workflows.values():
-                if run.state is WorkflowState.WAITING_MATERIAL and self._try_reserve(run):
-                    run.state = WorkflowState.RUNNING
-                    logger.info(
-                        "[EdgeScheduler] workflow %s material reserved, resume running",
-                        run.spec.workflow_id,
-                    )
-                    self._emit_monitor(
-                        "scheduler",
-                        "workflow_resumed",
-                        {"workflow_id": run.spec.workflow_id, "reason": "material_reserved"},
-                    )
-                    self._safe_history("record_state", run.spec.workflow_id, "running")
-
-        ready: List[ReadyTask] = []
+        ready: list[ReadyTask] = []
         for run in self._workflows.values():
             if run.state is not WorkflowState.RUNNING:
                 continue
@@ -525,7 +462,7 @@ class EdgeScheduler:
         held_resource_locks = self._held_resource_locks()
         ordered = self._orderer.order(ready, OrderingContext(set(busy)))
 
-        dispatched: List[Dict[str, Any]] = []
+        dispatched: list[dict[str, Any]] = []
         for task in ordered:
             key = task.node.device_action_key
             # manual_confirm 是 always-free 特殊节点：不占设备动作锁，也不受其阻塞
@@ -557,23 +494,6 @@ class EdgeScheduler:
                     task.workflow_id,
                 )
                 continue
-
-            # 节点开始：预留 → FIFO lot 消费 + 实例 deploy（同一 SQLite 事务，幂等）
-            if (
-                task.workflow_id in self._material_workflows
-                and task.node.material_requirements
-            ):
-                try:
-                    self._inventory.consume_reservation(task.workflow_id, task.node.id)
-                except InventoryError as exc:
-                    logger.error(
-                        "[EdgeScheduler] material consume failed for wf=%s node=%s: %s",
-                        task.workflow_id,
-                        task.node.id,
-                        exc,
-                    )
-                    run.mark_failed(task.node.id)
-                    continue
 
             job_id = uuid_mod.uuid4().hex
             payload = build_job_start_payload(
@@ -668,76 +588,64 @@ class EdgeScheduler:
         WorkflowState.TIMEOUT,
     )
 
-    def _collect_terminal_notifications(self) -> List["tuple[str, str]"]:
+    def _collect_terminal_notifications(self) -> list[tuple[str, str]]:
         """收集未处理过的终态工作流（须在锁内调用；通知/释放在锁外做）。"""
-        pending: List["tuple[str, str]"] = []
+        pending: list[tuple[str, str]] = []
         for wid, run in self._workflows.items():
-            if run.state not in self._TERMINAL_STATES or wid in self._notified_workflows:
+            if (
+                run.state not in self._TERMINAL_STATES
+                or wid in self._notified_workflows
+            ):
                 continue
             self._notified_workflows.add(wid)
             pending.append((wid, run.state.value))
             self._emit_monitor(
-                "scheduler", "workflow_state", {"workflow_id": wid, "state": run.state.value},
+                "scheduler",
+                "workflow_state",
+                {"workflow_id": wid, "state": run.state.value},
             )
             self._safe_history("record_state", wid, run.state.value)
         return pending
 
-    def _fire_notifications(self, notifications: List["tuple[str, str]"]) -> None:
+    def _fire_notifications(self, notifications: list[tuple[str, str]]) -> None:
         for wid, state in notifications:
-            # 终态工作流释放剩余 active 预留（幂等，依据 DB 状态而非内存）
-            if wid in self._material_workflows and state != WorkflowState.SUCCESS.value:
-                self._safe_inventory_call(
-                    "release_workflow", wid, reason=f"workflow_{state}",
-                )
             if self._workflow_state_listener is None:
                 continue
             try:
                 self._workflow_state_listener(wid, state)
-            except Exception:  # noqa: BLE001 - 通知失败不影响调度
+            except Exception:
                 logger.exception("[EdgeScheduler] workflow state listener failed")
-
-    def _safe_inventory_call(self, method: str, *args: Any, **kwargs: Any) -> None:
-        """调用 inventory（release/quarantine 等善后操作）；失败记日志不阻断调度。"""
-        if self._inventory is None:
-            return
-        try:
-            getattr(self._inventory, method)(*args, **kwargs)
-        except Exception:  # noqa: BLE001 - 善后失败可由人工经 inventory API 补救
-            logger.exception("[EdgeScheduler] inventory.%s failed", method)
 
     # ── 物料/资源锁 ──────────────────────────────────────────
 
-    def _held_resource_locks(self) -> Set[str]:
-        held: Set[str] = set()
+    def _held_resource_locks(self) -> set[str]:
+        held: set[str] = set()
         for keys in self._job_resource_locks.values():
             held |= keys
         return held
 
-    def _resource_lock_keys(self, node: Any, resolved_args: Dict[str, Any]) -> Set[str]:
-        """节点的资源锁键集合：lock_resource 参数值 + 实体型物料需求。"""
-        keys: Set[str] = set()
+    def _resource_lock_keys(self, node: Any, resolved_args: dict[str, Any]) -> set[str]:
+        """节点的资源锁键集合只来自 explicit action lock_resource。"""
+        keys: set[str] = set()
         if self._lock_resource_resolver is not None:
             try:
-                param_names = self._lock_resource_resolver(node.device_id, node.action_name) or []
-            except Exception:  # noqa: BLE001 - resolver 失败按无锁处理，不阻断下发
+                param_names = (
+                    self._lock_resource_resolver(node.device_id, node.action_name) or []
+                )
+            except Exception:
                 logger.exception("[EdgeScheduler] lock_resource resolver failed")
                 param_names = []
             for name in param_names:
                 for rid in _extract_resource_ids(resolved_args.get(name)):
                     keys.add(f"res:{rid}")
-        for req in getattr(node, "material_requirements", []) or []:
-            if getattr(req, "instance_uuid", ""):
-                keys.add(f"res:{req.instance_uuid}")
-            elif getattr(req, "barcode", ""):
-                keys.add(f"res:barcode:{req.barcode}")
         return keys
 
-    def _busy_keys(self) -> Set[str]:
+    def _busy_keys(self) -> set[str]:
         busy = set(self._external_busy_keys)
         if self._busy_key_provider is not None:
             try:
                 busy |= set(self._busy_key_provider())
-            except Exception:  # noqa: BLE001 - 锁视图失败时退化为 inflight 视图
+            except Exception:
                 logger.exception("[EdgeScheduler] busy_key_provider failed")
         for job in self._inflight.values():
             busy.add(job.device_action_key)
@@ -806,7 +714,7 @@ class EdgeScheduler:
             },
         )
 
-    def timeline(self, window_s: float = 3600.0) -> Dict[str, Any]:
+    def timeline(self, window_s: float = 3600.0) -> dict[str, Any]:
         """泳道图数据：执行中 job + 窗口内已完结 job + 预估器状态。
 
         泳道由前端按 device_id（或 device_action_key）分组；running 条目
@@ -843,11 +751,11 @@ class EdgeScheduler:
                 },
             }
 
-    def device_status(self) -> List[Dict[str, Any]]:
+    def device_status(self) -> list[dict[str, Any]]:
         """设备占用视图（监控面板）：busy 来自 inflight，idle 来自时间线痕迹。"""
         now = time.time()
         with self._lock:
-            devices: Dict[str, Dict[str, Any]] = {}
+            devices: dict[str, dict[str, Any]] = {}
             # 时间线里出现过的设备默认 idle（带最近一次动作）
             for entry in self._timeline:
                 dev = entry["device_id"] or entry["device_action_key"]
@@ -879,7 +787,7 @@ class EdgeScheduler:
 
     # ── 查询 ─────────────────────────────────────────────────
 
-    def workflow_snapshot(self, workflow_id: str) -> Optional[Dict[str, Any]]:
+    def workflow_snapshot(self, workflow_id: str) -> dict[str, Any] | None:
         with self._lock:
             run = self._workflows.get(workflow_id)
             if run is None:
@@ -892,16 +800,20 @@ class EdgeScheduler:
                     nodes[job.node_id]["job_id"] = job_id
             return snap
 
-    def snapshot(self) -> Dict[str, Any]:
+    def snapshot(self) -> dict[str, Any]:
         with self._lock:
             return {
-                "workflows": {wid: run.snapshot() for wid, run in self._workflows.items()},
+                "workflows": {
+                    wid: run.snapshot() for wid, run in self._workflows.items()
+                },
                 "inflight_jobs": {
                     job_id: {
                         "workflow_id": j.workflow_id,
                         "node_id": j.node_id,
                         "device_action_key": j.device_action_key,
-                        "resource_locks": sorted(self._job_resource_locks.get(job_id, set())),
+                        "resource_locks": sorted(
+                            self._job_resource_locks.get(job_id, set())
+                        ),
                         "started_at": j.dispatched_at,
                         "estimated_s": round(j.estimated_s, 3),
                         "estimate_source": j.estimate_source,
@@ -918,7 +830,9 @@ class EdgeScheduler:
                 return False
             run.cancel()
             removed = [
-                job_id for job_id, j in self._inflight.items() if j.workflow_id == workflow_id
+                job_id
+                for job_id, j in self._inflight.items()
+                if j.workflow_id == workflow_id
             ]
             for job_id in removed:
                 job = self._inflight.pop(job_id, None)
