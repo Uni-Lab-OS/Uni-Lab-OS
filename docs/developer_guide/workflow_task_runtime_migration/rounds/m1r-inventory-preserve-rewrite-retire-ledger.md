@@ -60,13 +60,18 @@ facade, legacy tables, or a second Material identity.
   suite reports `6 passed` after convergence. The earlier branch that placed
   the identical test blob late remains recoverable but is not the final
   candidate history.
-- Latest review-fix implementation tree: `ab1f89b`. The M1R owner/waiter and
-  stale-terminal suites report `39 passed`; the adjacent
+- Latest review-fix implementation tree: `068ecdf`. The M1R owner/waiter,
+  stale-terminal and UUID-alias suites report `40 passed`; the adjacent
   M2A/R1B/persistent-authoring suites report
   `323 passed`.
-- Full repository gate after the fourth exact-SHA review fix: `2228 passed, 4
-  skipped` in `102.48s`. The skips are the three opt-in networking process tests
+- Full repository gate after the fifth exact-SHA review fix: `2229 passed, 4
+  skipped` in `98.38s`. The skips are the three opt-in networking process tests
   and the Phoenix executable integration test.
+- The full gate exposed a pre-existing timing race in the round-9 SSE cursor
+  ASGI harness: its fixed 10 ms disconnect could win before the first
+  `list_events` call under suite load. Test-only commit `57e8774` replaces the
+  timer with an observable first-read handshake while retaining the outer
+  one-second timeout; no SSE production behavior changed.
 - The 28 M1R-owned modified Python files pass Ruff check and format; the three
   broad pre-existing Workflow files have no net-new Ruff debt against the
   frozen base (`runtime 37→37`, `service 150→149`, `store 97→97`). Changed
@@ -138,5 +143,17 @@ admission. Therefore release-first observes terminal state and cannot be
 followed by a late admission; admission-first retains the slot until its
 Inventory/Workflow attempt ends, after which terminal reconciliation releases
 the current Reservation.
+
+The same reviewer then checked `1a43de78667bdd2ead6d0740179918ae7b576e64`.
+Standards passed with `0B / 0NB`; Spec found one equivalent-identifier bypass:
+uppercase and lowercase spellings resolved to one WorkflowTask but occupied
+different raw Scheduler saga keys, allowing the empty-release/late-admission
+race to reappear.
+
+The tests-only review regression `21855ea` freezes that concurrent alias
+interleaving. Implementation `068ecdf` canonicalizes the saga key through UUID
+parsing before entering the Condition, so every equivalent Task UUID spelling
+shares one logical slot without changing the persisted identity or command
+payload.
 
 The same reviewer must re-review the new final immutable SHA before acceptance.
