@@ -60,12 +60,12 @@ facade, legacy tables, or a second Material identity.
   suite reports `6 passed` after convergence. The earlier branch that placed
   the identical test blob late remains recoverable but is not the final
   candidate history.
-- Latest review-fix implementation tree: `068ecdf`. The M1R owner/waiter,
-  stale-terminal and UUID-alias suites report `40 passed`; the adjacent
+- Latest review-fix implementation tree: `7a8649a`. The M1R owner/waiter,
+  stale-terminal, UUID-alias and invalid-UUID suites report `46 passed`; the adjacent
   M2A/R1B/persistent-authoring suites report
   `323 passed`.
-- Full repository gate after the fifth exact-SHA review fix: `2229 passed, 4
-  skipped` in `98.38s`. The skips are the three opt-in networking process tests
+- Full repository gate after the sixth exact-SHA review fix: `2235 passed, 4
+  skipped` in `100.35s`. The skips are the three opt-in networking process tests
   and the Phoenix executable integration test.
 - The full gate exposed a pre-existing timing race in the round-9 SSE cursor
   ASGI harness: its fixed 10 ms disconnect could win before the first
@@ -155,5 +155,16 @@ interleaving. Implementation `068ecdf` canonicalizes the saga key through UUID
 parsing before entering the Condition, so every equivalent Task UUID spelling
 shares one logical slot without changing the persisted identity or command
 payload.
+
+The same reviewer then checked `c840fbb120d06d167440548cf26682b9e29737c8`.
+Standards passed with `0B / 0NB`; Spec found that direct stdlib UUID parsing at
+the slot boundary leaked `ValueError` for malformed input instead of preserving
+the established `WorkflowError.invalid_input` classification.
+
+The tests-only review regression `b9f3a19` freezes malformed and nil UUIDs on
+all three public saga entries. Implementation `7a8649a` retains canonical UUID
+slot keys but delegates parse failures back through the injected WorkflowTask
+authority's public validation, preserving the existing domain error without
+introducing a second Scheduler error vocabulary.
 
 The same reviewer must re-review the new final immutable SHA before acceptance.
