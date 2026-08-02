@@ -25,7 +25,19 @@ from uuid import UUID, uuid4
 from unilabos.app.scheduler.inventory.domain import (
     InvariantViolation,
     InventoryEvent,
+    JobClaimAcquireCommand,
+    JobClaimMemberRecord,
+    JobClaimRecord,
+    JobClaimReleaseCommand,
+    JobClaimResolutionCommand,
+    JobClaimResult,
+    JobClaimStateCommand,
+    JobClaimUncertainCommand,
     MaterialAuthorityUnavailable,
+    MaterialChangeSetCommand,
+    MaterialChangeSetEffect,
+    MaterialChangeSetReceipt,
+    MaterialClaimCorrupt,
     MaterialConflict,
     MaterialInvalidInput,
     MaterialNotFound,
@@ -185,9 +197,7 @@ def _backend_site(record: SiteRecord, *, graph: bool = False) -> dict[str, Any]:
         "material_uuid": record.material_uuid,
         "name": record.name,
         "sort_order": record.sort_order,
-        "allowed_resource_template_uuids": list(
-            record.allowed_resource_template_uuids
-        ),
+        "allowed_resource_template_uuids": list(record.allowed_resource_template_uuids),
         "position_x": record.position_x,
         "position_y": record.position_y,
         "position_z": record.position_z,
@@ -358,6 +368,195 @@ def _release_command_payload(command: TaskMaterialReleaseCommand) -> dict[str, A
         "workflow_task_uuid": command.workflow_task_uuid,
         "reason": command.reason,
     }
+
+
+def _claim_member_payload(member: JobClaimMemberRecord) -> dict[str, Any]:
+    return {
+        "resource_kind": member.resource_kind,
+        "resource_uuid": member.resource_uuid,
+        "acquired_version": member.acquired_version,
+        "expected_version": member.expected_version,
+        "released_at": member.released_at,
+    }
+
+
+def _claim_payload(claim: JobClaimRecord) -> dict[str, Any]:
+    return {
+        "uuid": claim.uuid,
+        "workflow_task_uuid": claim.workflow_task_uuid,
+        "workflow_node_job_uuid": claim.workflow_node_job_uuid,
+        "attempt": claim.attempt,
+        "set_fingerprint": claim.set_fingerprint,
+        "fencing_token": claim.fencing_token,
+        "state": claim.state,
+        "uncertainty_reason": claim.uncertainty_reason,
+        "acquired_at": claim.acquired_at,
+        "create_time": claim.create_time,
+        "running_at": claim.running_at,
+        "release_proof_kind": claim.release_proof_kind,
+        "release_proof_fingerprint": claim.release_proof_fingerprint,
+        "release_reason": claim.release_reason,
+        "terminal_changeset_uuid": claim.terminal_changeset_uuid,
+        "workflow_terminal_fingerprint": claim.workflow_terminal_fingerprint,
+        "release_command_uuid": claim.release_command_uuid,
+        "released_at": claim.released_at,
+        "update_time": claim.update_time,
+        "members": [_claim_member_payload(member) for member in claim.members],
+    }
+
+
+def _claim_from_payload(payload: Mapping[str, Any]) -> JobClaimRecord:
+    return JobClaimRecord(
+        uuid=str(payload["uuid"]),
+        workflow_task_uuid=str(payload["workflow_task_uuid"]),
+        workflow_node_job_uuid=str(payload["workflow_node_job_uuid"]),
+        attempt=int(payload["attempt"]),
+        set_fingerprint=str(payload["set_fingerprint"]),
+        fencing_token=int(payload["fencing_token"]),
+        state=str(payload["state"]),
+        uncertainty_reason=payload.get("uncertainty_reason"),
+        acquired_at=str(payload["acquired_at"]),
+        create_time=str(payload["create_time"]),
+        running_at=payload.get("running_at"),
+        release_proof_kind=payload.get("release_proof_kind"),
+        release_proof_fingerprint=payload.get("release_proof_fingerprint"),
+        release_reason=payload.get("release_reason"),
+        terminal_changeset_uuid=payload.get("terminal_changeset_uuid"),
+        workflow_terminal_fingerprint=payload.get("workflow_terminal_fingerprint"),
+        release_command_uuid=payload.get("release_command_uuid"),
+        released_at=payload.get("released_at"),
+        update_time=str(payload["update_time"]),
+        members=tuple(
+            JobClaimMemberRecord(
+                resource_kind=str(member["resource_kind"]),
+                resource_uuid=str(member["resource_uuid"]),
+                acquired_version=int(member["acquired_version"]),
+                expected_version=int(member["expected_version"]),
+                released_at=member.get("released_at"),
+            )
+            for member in payload.get("members", [])
+        ),
+    )
+
+
+def _claim_result_payload(result: JobClaimResult) -> dict[str, Any]:
+    return {
+        "schema_version": result.schema_version,
+        "command_uuid": result.command_uuid,
+        "status": result.status,
+        "claim": _claim_payload(result.claim) if result.claim is not None else None,
+        "diagnostics": [dict(item) for item in result.diagnostics],
+        "outbox_sequence": result.outbox_sequence,
+    }
+
+
+def _claim_result_from_payload(payload: Mapping[str, Any]) -> JobClaimResult:
+    raw_claim = payload.get("claim")
+    return JobClaimResult(
+        schema_version=int(payload["schema_version"]),
+        command_uuid=str(payload["command_uuid"]),
+        status=str(payload["status"]),
+        claim=(
+            _claim_from_payload(raw_claim) if isinstance(raw_claim, Mapping) else None
+        ),
+        diagnostics=tuple(dict(item) for item in payload.get("diagnostics", [])),
+        outbox_sequence=(
+            int(payload["outbox_sequence"])
+            if payload.get("outbox_sequence") is not None
+            else None
+        ),
+    )
+
+
+def _effect_payload(effect: MaterialChangeSetEffect) -> dict[str, Any]:
+    return {
+        "effect_key": effect.effect_key,
+        "resource_kind": effect.resource_kind,
+        "resource_uuid": effect.resource_uuid,
+        "operation": effect.operation,
+        "expected_version": effect.expected_version,
+        "before": dict(effect.before),
+        "after": dict(effect.after),
+    }
+
+
+def _changeset_command_payload(
+    command: MaterialChangeSetCommand,
+) -> dict[str, Any]:
+    return {
+        "schema_version": command.schema_version,
+        "command_uuid": command.command_uuid,
+        "idempotency_key": command.idempotency_key,
+        "workflow_task_uuid": command.workflow_task_uuid,
+        "workflow_node_job_uuid": command.workflow_node_job_uuid,
+        "attempt": command.attempt,
+        "claim_uuid": command.claim_uuid,
+        "fencing_token": command.fencing_token,
+        "effect_identity": command.effect_identity,
+        "outcome": command.outcome,
+        "result": dict(command.result),
+        "effects": [_effect_payload(effect) for effect in command.effects],
+        "expected_claim_state": command.expected_claim_state,
+    }
+
+
+def _changeset_receipt_payload(
+    receipt: MaterialChangeSetReceipt,
+) -> dict[str, Any]:
+    return {
+        "schema_version": receipt.schema_version,
+        "command_uuid": receipt.command_uuid,
+        "uuid": receipt.uuid,
+        "workflow_task_uuid": receipt.workflow_task_uuid,
+        "workflow_node_job_uuid": receipt.workflow_node_job_uuid,
+        "attempt": receipt.attempt,
+        "claim_uuid": receipt.claim_uuid,
+        "fencing_token": receipt.fencing_token,
+        "effect_identity": receipt.effect_identity,
+        "deterministic_fingerprint": receipt.deterministic_fingerprint,
+        "outcome": receipt.outcome,
+        "result": dict(receipt.result),
+        "effects": [_effect_payload(effect) for effect in receipt.effects],
+        "create_time": receipt.create_time,
+        "outbox_sequence": receipt.outbox_sequence,
+    }
+
+
+def _changeset_receipt_from_payload(
+    payload: Mapping[str, Any],
+) -> MaterialChangeSetReceipt:
+    return MaterialChangeSetReceipt(
+        schema_version=int(payload["schema_version"]),
+        command_uuid=str(payload["command_uuid"]),
+        uuid=str(payload["uuid"]),
+        workflow_task_uuid=str(payload["workflow_task_uuid"]),
+        workflow_node_job_uuid=str(payload["workflow_node_job_uuid"]),
+        attempt=int(payload["attempt"]),
+        claim_uuid=str(payload["claim_uuid"]),
+        fencing_token=int(payload["fencing_token"]),
+        effect_identity=str(payload["effect_identity"]),
+        deterministic_fingerprint=str(payload["deterministic_fingerprint"]),
+        outcome=str(payload["outcome"]),
+        result=dict(payload["result"]),
+        effects=tuple(
+            MaterialChangeSetEffect(
+                effect_key=str(effect["effect_key"]),
+                resource_kind=str(effect["resource_kind"]),
+                resource_uuid=str(effect["resource_uuid"]),
+                operation=str(effect["operation"]),
+                expected_version=(
+                    int(effect["expected_version"])
+                    if effect.get("expected_version") is not None
+                    else None
+                ),
+                before=dict(effect["before"]),
+                after=dict(effect["after"]),
+            )
+            for effect in payload.get("effects", [])
+        ),
+        create_time=str(payload["create_time"]),
+        outbox_sequence=int(payload["outbox_sequence"]),
+    )
 
 
 def _canonical_payload_hash(payload: Mapping[str, Any]) -> str:
@@ -985,7 +1184,8 @@ class InventoryService:
                         for candidate_site in candidate_sites:
                             if candidate_site["material_uuid"] != mount_uuid:
                                 raise MaterialConflict(
-                                    "Candidate Site does not belong to the selected mount"
+                                    "Candidate Site does not belong to the "
+                                    "selected mount"
                                 )
                             allowed = conn.execute(
                                 """
@@ -999,7 +1199,8 @@ class InventoryService:
                                 item["resource_template_uuid"] for item in allowed
                             }:
                                 raise MaterialInvalidInput(
-                                    "Candidate Site does not allow the Material template"
+                                    "Candidate Site does not allow the "
+                                    "Material template"
                                 )
                             if (
                                 candidate_site["occupied_material_uuid"]
@@ -1423,14 +1624,93 @@ class InventoryService:
                     "SELECT * FROM processed_command WHERE command_id = ?",
                     (canonical_command_uuid,),
                 ).fetchone()
+                blocked_replay = False
                 if processed is not None:
                     if processed["payload_hash"] != payload_hash:
                         raise MaterialConflict(
                             "command_uuid was already used with a different payload"
                         )
-                    return _release_result_from_payload(
-                        json.loads(processed["result_json"])
+                    if processed["status"] != "blocked":
+                        return _release_result_from_payload(
+                            json.loads(processed["result_json"])
+                        )
+                    blocked_replay = True
+
+                live_claim = conn.execute(
+                    """
+                    SELECT uuid, workflow_node_job_uuid, attempt, state
+                    FROM material_claim
+                    WHERE workflow_task_uuid = ?
+                      AND state IN ('reserved', 'running', 'uncertain')
+                    ORDER BY create_time, uuid LIMIT 1
+                    """,
+                    (canonical_task_uuid,),
+                ).fetchone()
+                if live_claim is not None:
+                    if blocked_replay:
+                        return _release_result_from_payload(
+                            json.loads(processed["result_json"])
+                        )
+                    active = conn.execute(
+                        """
+                        SELECT uuid FROM material_reservation
+                        WHERE workflow_task_uuid = ? AND status = 'active'
+                        """,
+                        (canonical_task_uuid,),
+                    ).fetchone()
+                    reservation_uuid = (
+                        str(active["uuid"]) if active is not None else None
                     )
+                    outbox_sequence = self._emit(
+                        conn,
+                        now_ms,
+                        "material_reservation",
+                        reservation_uuid or canonical_task_uuid,
+                        1,
+                        "material_reservation.release_blocked",
+                        {
+                            "workflow_task_uuid": canonical_task_uuid,
+                            "reservation_uuid": reservation_uuid,
+                            "blocking_claim_uuid": str(live_claim["uuid"]),
+                            "workflow_node_job_uuid": str(
+                                live_claim["workflow_node_job_uuid"]
+                            ),
+                            "attempt": int(live_claim["attempt"]),
+                            "claim_state": str(live_claim["state"]),
+                            "reason": normalized_command.reason,
+                        },
+                        causation_id=canonical_command_uuid,
+                        reason=normalized_command.reason,
+                    )
+                    result = TaskMaterialReleaseResult(
+                        schema_version=1,
+                        command_uuid=canonical_command_uuid,
+                        workflow_task_uuid=canonical_task_uuid,
+                        status="blocked",
+                        reservation_uuid=reservation_uuid,
+                        outbox_sequence=outbox_sequence,
+                    )
+                    conn.execute(
+                        """
+                        INSERT INTO processed_command(
+                            command_id, idempotency_key, command_type,
+                            payload_hash, result_json, status, processed_at
+                        ) VALUES (?, ?, 'material.release', ?, ?, 'blocked', ?)
+                        """,
+                        (
+                            canonical_command_uuid,
+                            normalized_command.idempotency_key,
+                            payload_hash,
+                            json.dumps(
+                                _release_result_payload(result),
+                                ensure_ascii=False,
+                                separators=(",", ":"),
+                                sort_keys=True,
+                            ),
+                            now_ms,
+                        ),
+                    )
+                    return result
 
                 active = conn.execute(
                     """
@@ -1482,26 +1762,37 @@ class InventoryService:
                     reservation_uuid=reservation_uuid,
                     outbox_sequence=outbox_sequence,
                 )
-                conn.execute(
-                    """
-                    INSERT INTO processed_command(
-                        command_id, idempotency_key, command_type, payload_hash,
-                        result_json, status, processed_at
-                    ) VALUES (?, ?, 'material.release', ?, ?, 'completed', ?)
-                    """,
-                    (
-                        canonical_command_uuid,
-                        normalized_command.idempotency_key,
-                        payload_hash,
-                        json.dumps(
-                            _release_result_payload(result),
-                            ensure_ascii=False,
-                            separators=(",", ":"),
-                            sort_keys=True,
-                        ),
-                        now_ms,
-                    ),
+                encoded_result = json.dumps(
+                    _release_result_payload(result),
+                    ensure_ascii=False,
+                    separators=(",", ":"),
+                    sort_keys=True,
                 )
+                if blocked_replay:
+                    conn.execute(
+                        """
+                        UPDATE processed_command
+                        SET result_json = ?, status = 'completed', processed_at = ?
+                        WHERE command_id = ? AND status = 'blocked'
+                        """,
+                        (encoded_result, now_ms, canonical_command_uuid),
+                    )
+                else:
+                    conn.execute(
+                        """
+                        INSERT INTO processed_command(
+                            command_id, idempotency_key, command_type, payload_hash,
+                            result_json, status, processed_at
+                        ) VALUES (?, ?, 'material.release', ?, ?, 'completed', ?)
+                        """,
+                        (
+                            canonical_command_uuid,
+                            normalized_command.idempotency_key,
+                            payload_hash,
+                            encoded_result,
+                            now_ms,
+                        ),
+                    )
         except sqlite3.IntegrityError:
             raise MaterialConflict("Material release conflicts") from None
         except sqlite3.Error:
@@ -1510,10 +1801,2708 @@ class InventoryService:
             ) from None
         return result
 
+    # ------------------------------------------------------------------
+    # M1EF Job Claim / fencing / terminal Material ChangeSet authority
+    # ------------------------------------------------------------------
+
+    @staticmethod
+    def _validate_attempt(value: int) -> int:
+        if isinstance(value, bool) or not isinstance(value, int) or value <= 0:
+            raise MaterialInvalidInput("attempt must be a positive integer")
+        return value
+
+    @staticmethod
+    def _validate_fencing_token(value: int) -> int:
+        if isinstance(value, bool) or not isinstance(value, int) or value <= 0:
+            raise MaterialInvalidInput("fencing_token must be a positive integer")
+        return value
+
+    @staticmethod
+    def _validate_nonblank(value: str, field: str) -> str:
+        if not isinstance(value, str) or not value.strip():
+            raise MaterialInvalidInput(f"{field} must not be blank")
+        return value.strip()
+
+    @staticmethod
+    def _validate_fingerprint(value: str, field: str) -> str:
+        normalized = InventoryService._validate_nonblank(value, field)
+        digest = normalized.removeprefix("sha256:")
+        if len(digest) != 64 or any(char not in "0123456789abcdef" for char in digest):
+            raise MaterialInvalidInput(f"{field} must be a SHA-256 fingerprint")
+        return normalized
+
+    @staticmethod
+    def _read_job_claim(
+        conn: sqlite3.Connection,
+        *,
+        job_uuid: str | None = None,
+        attempt: int | None = None,
+        claim_uuid: str | None = None,
+    ) -> JobClaimRecord | None:
+        if claim_uuid is not None:
+            row = conn.execute(
+                "SELECT * FROM material_claim WHERE uuid = ?",
+                (claim_uuid,),
+            ).fetchone()
+        else:
+            row = conn.execute(
+                """
+                SELECT * FROM material_claim
+                WHERE workflow_node_job_uuid = ? AND attempt = ?
+                """,
+                (job_uuid, attempt),
+            ).fetchone()
+        if row is None:
+            return None
+        members = conn.execute(
+            """
+            SELECT resource_kind, resource_uuid, acquired_version,
+                   expected_version, released_at
+            FROM material_claim_member
+            WHERE claim_uuid = ?
+            ORDER BY CASE resource_kind
+                       WHEN 'device_material' THEN 0
+                       WHEN 'business_material' THEN 1
+                       ELSE 2 END,
+                     resource_uuid
+            """,
+            (row["uuid"],),
+        ).fetchall()
+        return JobClaimRecord(
+            uuid=str(row["uuid"]),
+            workflow_task_uuid=str(row["workflow_task_uuid"]),
+            workflow_node_job_uuid=str(row["workflow_node_job_uuid"]),
+            attempt=int(row["attempt"]),
+            set_fingerprint=str(row["set_fingerprint"]),
+            fencing_token=int(row["fencing_token"]),
+            state=str(row["state"]),
+            uncertainty_reason=row["uncertainty_reason"],
+            acquired_at=str(row["acquired_at"]),
+            create_time=str(row["create_time"]),
+            running_at=row["running_at"],
+            release_proof_kind=row["release_proof_kind"],
+            release_proof_fingerprint=row["release_proof_fingerprint"],
+            release_reason=row["release_reason"],
+            terminal_changeset_uuid=row["terminal_changeset_uuid"],
+            workflow_terminal_fingerprint=row["workflow_terminal_fingerprint"],
+            release_command_uuid=row["release_command_uuid"],
+            released_at=row["released_at"],
+            update_time=str(row["update_time"]),
+            members=tuple(
+                JobClaimMemberRecord(
+                    resource_kind=str(member["resource_kind"]),
+                    resource_uuid=str(member["resource_uuid"]),
+                    acquired_version=int(member["acquired_version"]),
+                    expected_version=int(member["expected_version"]),
+                    released_at=member["released_at"],
+                )
+                for member in members
+            ),
+        )
+
+    @staticmethod
+    def _processed_payload(
+        conn: sqlite3.Connection,
+        command_uuid: str,
+        payload_hash: str,
+    ) -> Mapping[str, Any] | None:
+        processed = conn.execute(
+            "SELECT payload_hash, result_json FROM processed_command "
+            "WHERE command_id = ?",
+            (command_uuid,),
+        ).fetchone()
+        if processed is None:
+            return None
+        if processed["payload_hash"] != payload_hash:
+            raise MaterialConflict(
+                "command_uuid was already used with a different payload"
+            )
+        try:
+            payload = json.loads(processed["result_json"])
+        except (TypeError, ValueError):
+            raise MaterialAuthorityUnavailable(
+                "stored Inventory command result is invalid"
+            ) from None
+        if not isinstance(payload, dict):
+            raise MaterialAuthorityUnavailable(
+                "stored Inventory command result is invalid"
+            )
+        return payload
+
+    @staticmethod
+    def _insert_processed(
+        conn: sqlite3.Connection,
+        *,
+        command_uuid: str,
+        idempotency_key: str,
+        command_type: str,
+        payload_hash: str,
+        result: Mapping[str, Any],
+        status: str,
+        now_ms: int,
+    ) -> None:
+        conn.execute(
+            """
+            INSERT INTO processed_command(
+                command_id, idempotency_key, command_type, payload_hash,
+                result_json, status, processed_at
+            ) VALUES (?, ?, ?, ?, ?, ?, ?)
+            """,
+            (
+                command_uuid,
+                idempotency_key,
+                command_type,
+                payload_hash,
+                json.dumps(
+                    dict(result),
+                    ensure_ascii=False,
+                    separators=(",", ":"),
+                    sort_keys=True,
+                ),
+                status,
+                now_ms,
+            ),
+        )
+
+    def resolve_executor_material(self, device_id: str) -> MaterialRecord:
+        """Resolve exact ResourceTreeSet device identity without fallback guessing."""
+
+        canonical_device_id = self._validate_nonblank(device_id, "device_id")
+        try:
+            rows = self._store.query_all(
+                """
+                SELECT * FROM material
+                WHERE material_kind = 'device' AND deleted_at IS NULL
+                  AND json_extract(meta_data, '$.source') = 'resource-tree-set'
+                  AND json_extract(meta_data, '$.source_node_id') = ?
+                ORDER BY uuid
+                """,
+                (canonical_device_id,),
+            )
+        except sqlite3.Error:
+            raise MaterialAuthorityUnavailable(
+                "failed to resolve executor Material"
+            ) from None
+        if not rows:
+            raise MaterialNotFound("executor Material not found")
+        if len(rows) != 1:
+            raise MaterialConflict("executor Material mapping is ambiguous")
+        return _material_record(rows[0])
+
+    def acquire_job_claim(
+        self,
+        command: JobClaimAcquireCommand,
+    ) -> JobClaimResult:
+        """Atomically acquire the complete physical resource set for one attempt."""
+
+        if not isinstance(command, JobClaimAcquireCommand):
+            raise MaterialInvalidInput("command must be a JobClaimAcquireCommand")
+        if command.schema_version != 1:
+            raise MaterialInvalidInput("unsupported Job Claim schema_version")
+        command_uuid = _canonical_uuid(command.command_uuid, "command_uuid")
+        task_uuid = _canonical_uuid(command.workflow_task_uuid, "workflow_task_uuid")
+        job_uuid = _canonical_uuid(
+            command.workflow_node_job_uuid,
+            "workflow_node_job_uuid",
+        )
+        attempt = self._validate_attempt(command.attempt)
+        idempotency_key = self._validate_nonblank(
+            command.idempotency_key,
+            "idempotency_key",
+        )
+        device_uuid = _canonical_uuid(
+            command.device_material_uuid,
+            "device_material_uuid",
+        )
+        if type(command.mutable_material_root_uuids) is not tuple:
+            raise MaterialInvalidInput("mutable_material_root_uuids must be a tuple")
+        if type(command.occupancy_changing_site_uuids) is not tuple:
+            raise MaterialInvalidInput("occupancy_changing_site_uuids must be a tuple")
+        roots = tuple(
+            sorted(
+                {
+                    _canonical_uuid(value, "mutable_material_root_uuid")
+                    for value in command.mutable_material_root_uuids
+                }
+            )
+        )
+        sites = tuple(
+            sorted(
+                {
+                    _canonical_uuid(value, "occupancy_changing_site_uuid")
+                    for value in command.occupancy_changing_site_uuids
+                }
+            )
+        )
+        if len(roots) != len(command.mutable_material_root_uuids) or len(sites) != len(
+            command.occupancy_changing_site_uuids
+        ):
+            raise MaterialInvalidInput("Job Claim resource roots must be unique")
+        normalized_payload = {
+            "schema_version": 1,
+            "command_uuid": command_uuid,
+            "idempotency_key": idempotency_key,
+            "workflow_task_uuid": task_uuid,
+            "workflow_node_job_uuid": job_uuid,
+            "attempt": attempt,
+            "device_material_uuid": device_uuid,
+            "mutable_material_root_uuids": list(roots),
+            "occupancy_changing_site_uuids": list(sites),
+        }
+        payload_hash = _canonical_payload_hash(normalized_payload)
+        now_iso = self._now_iso()
+        now_ms = self._now_ms()
+        try:
+            with self._tx() as conn:
+                replay = self._processed_payload(conn, command_uuid, payload_hash)
+                if replay is not None:
+                    return _claim_result_from_payload(replay)
+
+                device = conn.execute(
+                    """
+                    SELECT uuid, version FROM material
+                    WHERE uuid = ? AND deleted_at IS NULL
+                      AND material_kind = 'device'
+                    """,
+                    (device_uuid,),
+                ).fetchone()
+                if device is None:
+                    raise MaterialNotFound("selected device Material not found")
+
+                business: dict[str, int] = {}
+                for root_uuid in roots:
+                    root = conn.execute(
+                        """
+                        SELECT uuid, disposition FROM material
+                        WHERE uuid = ? AND deleted_at IS NULL
+                          AND material_kind = 'business'
+                        """,
+                        (root_uuid,),
+                    ).fetchone()
+                    if root is None:
+                        raise MaterialNotFound("mutable business Material not found")
+                    if root["disposition"] != "active":
+                        raise MaterialConflict(
+                            "mutable business Material is not active"
+                        )
+                    descendants = conn.execute(
+                        """
+                        WITH RECURSIVE subtree(uuid) AS (
+                            SELECT ?
+                            UNION ALL
+                            SELECT m.uuid FROM material AS m
+                            JOIN subtree AS s ON m.parent_uuid = s.uuid
+                            WHERE m.deleted_at IS NULL
+                              AND m.material_kind = 'business'
+                        )
+                        SELECT m.uuid, m.version, m.disposition
+                        FROM material AS m JOIN subtree AS s ON s.uuid = m.uuid
+                        ORDER BY m.uuid
+                        """,
+                        (root_uuid,),
+                    ).fetchall()
+                    for material in descendants:
+                        if material["disposition"] != "active":
+                            raise MaterialConflict(
+                                "mutable business subtree is not active"
+                            )
+                        business[str(material["uuid"])] = int(material["version"])
+
+                site_versions: dict[str, int] = {}
+                for site_uuid in sites:
+                    site = conn.execute(
+                        """
+                        SELECT uuid, version, occupied_material_uuid
+                        FROM site WHERE uuid = ? AND deleted_at IS NULL
+                        """,
+                        (site_uuid,),
+                    ).fetchone()
+                    if site is None:
+                        raise MaterialNotFound("occupancy-changing Site not found")
+                    site_versions[site_uuid] = int(site["version"])
+                    occupant_uuid = site["occupied_material_uuid"]
+                    if occupant_uuid is not None:
+                        occupant = conn.execute(
+                            """
+                            SELECT uuid, version, disposition, material_kind
+                            FROM material WHERE uuid = ? AND deleted_at IS NULL
+                            """,
+                            (occupant_uuid,),
+                        ).fetchone()
+                        if occupant is None or occupant["material_kind"] != "business":
+                            raise MaterialConflict("Site occupant is not runnable")
+                        if occupant["disposition"] != "active":
+                            raise MaterialConflict("Site occupant is not active")
+                        business[str(occupant["uuid"])] = int(occupant["version"])
+
+                if business:
+                    placeholders = ",".join("?" for _ in business)
+                    reserved_rows = conn.execute(
+                        f"""
+                        SELECT rm.material_uuid
+                        FROM material_reservation AS r
+                        JOIN material_reservation_member AS rm
+                          ON rm.reservation_uuid = r.uuid
+                        WHERE r.workflow_task_uuid = ? AND r.status = 'active'
+                          AND rm.released_at IS NULL
+                          AND rm.material_uuid IN ({placeholders})
+                        """,
+                        (task_uuid, *sorted(business)),
+                    ).fetchall()
+                    covered = {str(row["material_uuid"]) for row in reserved_rows}
+                    if covered != set(business):
+                        raise MaterialConflict("claim_set_not_reserved")
+
+                members: list[tuple[str, str, int]] = [
+                    ("device_material", device_uuid, int(device["version"]))
+                ]
+                members.extend(
+                    ("business_material", material_uuid, business[material_uuid])
+                    for material_uuid in sorted(business)
+                )
+                members.extend(
+                    ("site", site_uuid, site_versions[site_uuid])
+                    for site_uuid in sorted(site_versions)
+                )
+                set_fingerprint = _canonical_payload_hash(
+                    {
+                        "members": [
+                            [resource_kind, resource_uuid, version]
+                            for resource_kind, resource_uuid, version in members
+                        ]
+                    }
+                )
+                existing = self._read_job_claim(
+                    conn,
+                    job_uuid=job_uuid,
+                    attempt=attempt,
+                )
+                if existing is not None:
+                    if (
+                        existing.workflow_task_uuid != task_uuid
+                        or existing.set_fingerprint != set_fingerprint
+                    ):
+                        raise MaterialConflict(
+                            "Job attempt was already bound to a different Claim set"
+                        )
+                    result = JobClaimResult(
+                        schema_version=1,
+                        command_uuid=command_uuid,
+                        status=(
+                            "acquired" if existing.state != "released" else "rejected"
+                        ),
+                        claim=existing,
+                        diagnostics=(),
+                        outbox_sequence=None,
+                    )
+                    self._insert_processed(
+                        conn,
+                        command_uuid=command_uuid,
+                        idempotency_key=idempotency_key,
+                        command_type="material.claim.acquire",
+                        payload_hash=payload_hash,
+                        result=_claim_result_payload(result),
+                        status="completed",
+                        now_ms=now_ms,
+                    )
+                    return result
+
+                blocked_member = None
+                for resource_kind, resource_uuid, _version in members:
+                    blocked_member = conn.execute(
+                        """
+                        SELECT claim_uuid FROM material_claim_member
+                        WHERE resource_kind = ? AND resource_uuid = ?
+                          AND released_at IS NULL
+                        """,
+                        (resource_kind, resource_uuid),
+                    ).fetchone()
+                    if blocked_member is not None:
+                        break
+                if blocked_member is not None:
+                    return JobClaimResult(
+                        schema_version=1,
+                        command_uuid=command_uuid,
+                        status="blocked",
+                        claim=None,
+                        diagnostics=(
+                            {
+                                "code": "claim_blocked",
+                                "blocking_claim_uuid": str(
+                                    blocked_member["claim_uuid"]
+                                ),
+                            },
+                        ),
+                        outbox_sequence=None,
+                    )
+
+                claim_uuid = str(
+                    uuid.uuid5(
+                        UUID(job_uuid),
+                        f"material-claim:{attempt}:{set_fingerprint}",
+                    )
+                )
+                sequence_row = conn.execute(
+                    """
+                    SELECT COALESCE(MAX(sequence), 0) + 1 AS next_sequence
+                    FROM material_claim_fence_sequence
+                    """
+                ).fetchone()
+                fencing_token = int(sequence_row["next_sequence"])
+                conn.execute(
+                    """
+                    INSERT INTO material_claim(
+                        uuid, workflow_task_uuid, workflow_node_job_uuid,
+                        attempt, set_fingerprint, fencing_token, state,
+                        uncertainty_reason, acquired_at, create_time, running_at,
+                        release_proof_kind, release_proof_fingerprint,
+                        release_reason, terminal_changeset_uuid,
+                        workflow_terminal_fingerprint, release_command_uuid,
+                        released_at, update_time
+                    ) VALUES (?, ?, ?, ?, ?, ?, 'reserved', NULL, ?, ?, NULL,
+                              NULL, NULL, NULL, NULL, NULL, NULL, NULL, ?)
+                    """,
+                    (
+                        claim_uuid,
+                        task_uuid,
+                        job_uuid,
+                        attempt,
+                        set_fingerprint,
+                        fencing_token,
+                        now_iso,
+                        now_iso,
+                        now_iso,
+                    ),
+                )
+                conn.execute(
+                    """
+                    INSERT INTO material_claim_fence_sequence(sequence, claim_uuid)
+                    VALUES (?, ?)
+                    """,
+                    (fencing_token, claim_uuid),
+                )
+                for resource_kind, resource_uuid, version in members:
+                    conn.execute(
+                        """
+                        INSERT INTO material_claim_member(
+                            claim_uuid, resource_kind, resource_uuid,
+                            acquired_version, expected_version, released_at
+                        ) VALUES (?, ?, ?, ?, ?, NULL)
+                        """,
+                        (claim_uuid, resource_kind, resource_uuid, version, version),
+                    )
+                    conn.execute(
+                        """
+                        INSERT INTO material_resource_fence(
+                            resource_kind, resource_uuid, fencing_token,
+                            claim_uuid, update_time
+                        ) VALUES (?, ?, ?, ?, ?)
+                        ON CONFLICT(resource_kind, resource_uuid) DO UPDATE SET
+                            fencing_token = excluded.fencing_token,
+                            claim_uuid = excluded.claim_uuid,
+                            update_time = excluded.update_time
+                        WHERE excluded.fencing_token
+                              > material_resource_fence.fencing_token
+                        """,
+                        (
+                            resource_kind,
+                            resource_uuid,
+                            fencing_token,
+                            claim_uuid,
+                            now_iso,
+                        ),
+                    )
+                outbox_sequence = self._emit(
+                    conn,
+                    now_ms,
+                    "material_claim",
+                    claim_uuid,
+                    fencing_token,
+                    "material_claim.acquired",
+                    {
+                        "workflow_task_uuid": task_uuid,
+                        "workflow_node_job_uuid": job_uuid,
+                        "attempt": attempt,
+                        "fencing_token": fencing_token,
+                        "set_fingerprint": set_fingerprint,
+                        "members": [
+                            {
+                                "resource_kind": kind,
+                                "resource_uuid": resource_uuid,
+                            }
+                            for kind, resource_uuid, _version in members
+                        ],
+                    },
+                    causation_id=command_uuid,
+                )
+                claim = self._read_job_claim(conn, claim_uuid=claim_uuid)
+                if claim is None:
+                    raise MaterialAuthorityUnavailable(
+                        "committed Job Claim is not readable"
+                    )
+                result = JobClaimResult(
+                    schema_version=1,
+                    command_uuid=command_uuid,
+                    status="acquired",
+                    claim=claim,
+                    diagnostics=(),
+                    outbox_sequence=outbox_sequence,
+                )
+                self._insert_processed(
+                    conn,
+                    command_uuid=command_uuid,
+                    idempotency_key=idempotency_key,
+                    command_type="material.claim.acquire",
+                    payload_hash=payload_hash,
+                    result=_claim_result_payload(result),
+                    status="completed",
+                    now_ms=now_ms,
+                )
+        except sqlite3.IntegrityError as exc:
+            raise MaterialConflict("Job Claim conflicts") from exc
+        except sqlite3.Error:
+            raise MaterialAuthorityUnavailable("failed to acquire Job Claim") from None
+        return result
+
+    def get_job_claim(self, job_uuid: str, attempt: int) -> JobClaimRecord:
+        """Read one durable Claim by formal Job attempt identity."""
+
+        canonical_job_uuid = _canonical_uuid(job_uuid, "workflow_node_job_uuid")
+        canonical_attempt = self._validate_attempt(attempt)
+        try:
+            with self._tx() as conn:
+                claim = self._read_job_claim(
+                    conn,
+                    job_uuid=canonical_job_uuid,
+                    attempt=canonical_attempt,
+                )
+        except sqlite3.Error:
+            raise MaterialAuthorityUnavailable("failed to read Job Claim") from None
+        if claim is None:
+            raise MaterialNotFound("Job Claim not found")
+        return claim
+
+    def list_unsettled_claims(
+        self,
+        *,
+        workflow_task_uuid: str | None = None,
+    ) -> tuple[JobClaimRecord, ...]:
+        """Read all live fences in deterministic recovery order."""
+
+        task_uuid = (
+            _canonical_uuid(workflow_task_uuid, "workflow_task_uuid")
+            if workflow_task_uuid is not None
+            else None
+        )
+        try:
+            with self._tx() as conn:
+                if task_uuid is None:
+                    rows = conn.execute(
+                        """
+                        SELECT uuid FROM material_claim
+                        WHERE state IN ('reserved', 'running', 'uncertain')
+                        ORDER BY create_time, uuid
+                        """
+                    ).fetchall()
+                else:
+                    rows = conn.execute(
+                        """
+                        SELECT uuid FROM material_claim
+                        WHERE workflow_task_uuid = ?
+                          AND state IN ('reserved', 'running', 'uncertain')
+                        ORDER BY create_time, uuid
+                        """,
+                        (task_uuid,),
+                    ).fetchall()
+                claims = tuple(
+                    self._read_job_claim(conn, claim_uuid=str(row["uuid"]))
+                    for row in rows
+                )
+        except sqlite3.Error:
+            raise MaterialAuthorityUnavailable(
+                "failed to list unsettled Job Claims"
+            ) from None
+        if any(claim is None for claim in claims):
+            raise MaterialAuthorityUnavailable("Job Claim authority is incomplete")
+        return tuple(claim for claim in claims if claim is not None)
+
+    def audit_job_claim_authority(self) -> tuple[JobClaimRecord, ...]:
+        """Verify durable Claim/member/fence/receipt facts before dispatch."""
+
+        try:
+            with self._tx() as conn:
+                claim_rows = conn.execute(
+                    "SELECT uuid FROM material_claim ORDER BY fencing_token, uuid"
+                ).fetchall()
+                claims: list[JobClaimRecord] = []
+                for claim_row in claim_rows:
+                    claim = self._read_job_claim(
+                        conn,
+                        claim_uuid=str(claim_row["uuid"]),
+                    )
+                    if claim is None:
+                        raise MaterialClaimCorrupt("Job Claim header disappeared")
+                    self._audit_job_claim(conn, claim)
+                    claims.append(claim)
+
+                orphan_fences = conn.execute(
+                    """
+                    SELECT f.resource_kind, f.resource_uuid, f.claim_uuid
+                    FROM material_resource_fence AS f
+                    LEFT JOIN material_claim_member AS m
+                      ON m.claim_uuid = f.claim_uuid
+                     AND m.resource_kind = f.resource_kind
+                     AND m.resource_uuid = f.resource_uuid
+                    WHERE m.claim_uuid IS NULL
+                    ORDER BY f.resource_kind, f.resource_uuid
+                    """
+                ).fetchall()
+                if orphan_fences:
+                    raise MaterialClaimCorrupt(
+                        "resource fence does not belong to its recorded Claim set"
+                    )
+        except MaterialClaimCorrupt:
+            raise
+        except sqlite3.Error:
+            raise MaterialAuthorityUnavailable(
+                "failed to audit Job Claim authority"
+            ) from None
+        return tuple(claims)
+
+    def _audit_job_claim(
+        self,
+        conn: sqlite3.Connection,
+        claim: JobClaimRecord,
+    ) -> None:
+        if not claim.members:
+            raise MaterialClaimCorrupt("Job Claim has no members")
+        if (
+            sum(member.resource_kind == "device_material" for member in claim.members)
+            != 1
+        ):
+            raise MaterialClaimCorrupt(
+                "Job Claim must contain exactly one device Material"
+            )
+        expected_set_fingerprint = _canonical_payload_hash(
+            {
+                "members": [
+                    [
+                        member.resource_kind,
+                        member.resource_uuid,
+                        member.acquired_version,
+                    ]
+                    for member in claim.members
+                ]
+            }
+        )
+        if claim.set_fingerprint != expected_set_fingerprint:
+            raise MaterialClaimCorrupt("Job Claim set fingerprint is corrupt")
+
+        sequence = conn.execute(
+            """
+            SELECT sequence FROM material_claim_fence_sequence
+            WHERE claim_uuid = ?
+            """,
+            (claim.uuid,),
+        ).fetchone()
+        if sequence is None or int(sequence["sequence"]) != claim.fencing_token:
+            raise MaterialClaimCorrupt("Job Claim fencing sequence is corrupt")
+
+        is_live = claim.state in {"reserved", "running", "uncertain"}
+        for member in claim.members:
+            if member.expected_version < member.acquired_version:
+                raise MaterialClaimCorrupt("Job Claim member version moved backward")
+            if is_live != (member.released_at is None):
+                raise MaterialClaimCorrupt(
+                    "Job Claim member release state differs from its header"
+                )
+            fence = conn.execute(
+                """
+                SELECT fencing_token, claim_uuid FROM material_resource_fence
+                WHERE resource_kind = ? AND resource_uuid = ?
+                """,
+                (member.resource_kind, member.resource_uuid),
+            ).fetchone()
+            if fence is None or int(fence["fencing_token"]) < claim.fencing_token:
+                raise MaterialClaimCorrupt(
+                    "Job Claim resource fence is missing or stale"
+                )
+            if is_live and (
+                int(fence["fencing_token"]) != claim.fencing_token
+                or str(fence["claim_uuid"]) != claim.uuid
+            ):
+                raise MaterialClaimCorrupt("live Job Claim does not own its fence")
+            if (
+                int(fence["fencing_token"]) == claim.fencing_token
+                and str(fence["claim_uuid"]) != claim.uuid
+            ):
+                raise MaterialClaimCorrupt("Job Claim fencing token owner is corrupt")
+            if is_live:
+                table = "site" if member.resource_kind == "site" else "material"
+                row = conn.execute(
+                    f'SELECT version, material_kind FROM "{table}" WHERE uuid = ?'
+                    if table == "material"
+                    else f'SELECT version FROM "{table}" WHERE uuid = ?',
+                    (member.resource_uuid,),
+                ).fetchone()
+                if row is None or int(row["version"]) != member.expected_version:
+                    raise MaterialClaimCorrupt(
+                        "live Job Claim member version differs from durable reality"
+                    )
+                if table == "material":
+                    expected_kind = (
+                        "device"
+                        if member.resource_kind == "device_material"
+                        else "business"
+                    )
+                    if str(row["material_kind"]) != expected_kind:
+                        raise MaterialClaimCorrupt(
+                            "Job Claim member kind differs from durable reality"
+                        )
+
+        changesets = conn.execute(
+            """
+            SELECT * FROM material_changeset
+            WHERE claim_uuid = ? ORDER BY create_time, uuid
+            """,
+            (claim.uuid,),
+        ).fetchall()
+        if len(changesets) > 1:
+            raise MaterialClaimCorrupt("Job Claim has multiple terminal ChangeSets")
+        if changesets:
+            self._audit_material_changeset(conn, claim, changesets[0])
+        if claim.terminal_changeset_uuid is not None and (
+            not changesets
+            or str(changesets[0]["uuid"]) != claim.terminal_changeset_uuid
+        ):
+            raise MaterialClaimCorrupt("released Claim terminal receipt is missing")
+        if (
+            claim.release_proof_kind
+            in {
+                "terminal_settled",
+                "reconciled_terminal",
+            }
+            and not changesets
+        ):
+            raise MaterialClaimCorrupt("terminal Claim release has no ChangeSet")
+        if claim.release_proof_kind == "not_submitted" and changesets:
+            raise MaterialClaimCorrupt("not-submitted Claim has a terminal ChangeSet")
+
+    def _audit_material_changeset(
+        self,
+        conn: sqlite3.Connection,
+        claim: JobClaimRecord,
+        row: sqlite3.Row,
+    ) -> None:
+        if (
+            str(row["workflow_task_uuid"]) != claim.workflow_task_uuid
+            or str(row["workflow_node_job_uuid"]) != claim.workflow_node_job_uuid
+            or int(row["attempt"]) != claim.attempt
+            or int(row["fencing_token"]) != claim.fencing_token
+        ):
+            raise MaterialClaimCorrupt("terminal ChangeSet owner or fence is corrupt")
+        effects = conn.execute(
+            """
+            SELECT * FROM material_changeset_effect
+            WHERE changeset_uuid = ? ORDER BY effect_key
+            """,
+            (row["uuid"],),
+        ).fetchall()
+        member_keys = {
+            (member.resource_kind, member.resource_uuid) for member in claim.members
+        }
+        normalized_effects: list[dict[str, Any]] = []
+        for effect in effects:
+            key = (str(effect["resource_kind"]), str(effect["resource_uuid"]))
+            if effect["operation"] != "create" and key not in member_keys:
+                raise MaterialClaimCorrupt(
+                    "terminal ChangeSet affects an undeclared Claim member"
+                )
+            normalized_effects.append(
+                {
+                    "effect_key": str(effect["effect_key"]),
+                    "resource_kind": key[0],
+                    "resource_uuid": key[1],
+                    "operation": str(effect["operation"]),
+                    "expected_version": effect["expected_version"],
+                    "before": _stored_json_object(effect["before_json"]),
+                    "after": _stored_json_object(effect["after_json"]),
+                }
+            )
+        fingerprint = _canonical_payload_hash(
+            {
+                "workflow_task_uuid": claim.workflow_task_uuid,
+                "workflow_node_job_uuid": claim.workflow_node_job_uuid,
+                "attempt": claim.attempt,
+                "claim_uuid": claim.uuid,
+                "fencing_token": claim.fencing_token,
+                "effect_identity": str(row["effect_identity"]),
+                "outcome": str(row["outcome"]),
+                "result": _stored_json_object(row["result_json"]),
+                "effects": normalized_effects,
+            }
+        )
+        if fingerprint != str(row["deterministic_fingerprint"]):
+            raise MaterialClaimCorrupt("terminal ChangeSet fingerprint is corrupt")
+        outbox = conn.execute(
+            """
+            SELECT aggregate_type, aggregate_id, event_type
+            FROM sync_outbox WHERE sequence = ?
+            """,
+            (row["outbox_sequence"],),
+        ).fetchone()
+        if outbox is None or (
+            str(outbox["aggregate_type"]) != "material_changeset"
+            or str(outbox["aggregate_id"]) != str(row["uuid"])
+            or str(outbox["event_type"]) != "material_changeset.committed"
+        ):
+            raise MaterialClaimCorrupt("terminal ChangeSet outbox receipt is corrupt")
+
+    def get_terminal_material_changeset(
+        self,
+        job_uuid: str,
+        attempt: int,
+    ) -> MaterialChangeSetReceipt | None:
+        """Read the one M1EF terminal receipt used by startup saga recovery."""
+
+        canonical_job_uuid = _canonical_uuid(job_uuid, "workflow_node_job_uuid")
+        canonical_attempt = self._validate_attempt(attempt)
+        try:
+            with self._tx() as conn:
+                row = conn.execute(
+                    """
+                    SELECT * FROM material_changeset
+                    WHERE workflow_node_job_uuid = ? AND attempt = ?
+                      AND effect_identity = 'terminal'
+                    """,
+                    (canonical_job_uuid, canonical_attempt),
+                ).fetchone()
+                if row is None:
+                    return None
+                effect_rows = conn.execute(
+                    """
+                    SELECT * FROM material_changeset_effect
+                    WHERE changeset_uuid = ? ORDER BY effect_key
+                    """,
+                    (row["uuid"],),
+                ).fetchall()
+        except sqlite3.Error:
+            raise MaterialAuthorityUnavailable(
+                "failed to read terminal Material ChangeSet"
+            ) from None
+        return MaterialChangeSetReceipt(
+            schema_version=1,
+            command_uuid=str(
+                uuid.uuid5(
+                    UUID(canonical_job_uuid),
+                    f"m1ef:{canonical_attempt}:terminal-changeset",
+                )
+            ),
+            uuid=str(row["uuid"]),
+            workflow_task_uuid=str(row["workflow_task_uuid"]),
+            workflow_node_job_uuid=str(row["workflow_node_job_uuid"]),
+            attempt=int(row["attempt"]),
+            claim_uuid=str(row["claim_uuid"]),
+            fencing_token=int(row["fencing_token"]),
+            effect_identity=str(row["effect_identity"]),
+            deterministic_fingerprint=str(row["deterministic_fingerprint"]),
+            outcome=str(row["outcome"]),
+            result=_stored_json_object(row["result_json"]),
+            effects=tuple(
+                MaterialChangeSetEffect(
+                    effect_key=str(effect["effect_key"]),
+                    resource_kind=str(effect["resource_kind"]),
+                    resource_uuid=str(effect["resource_uuid"]),
+                    operation=str(effect["operation"]),
+                    expected_version=(
+                        int(effect["expected_version"])
+                        if effect["expected_version"] is not None
+                        else None
+                    ),
+                    before=_stored_json_object(effect["before_json"]),
+                    after=_stored_json_object(effect["after_json"]),
+                )
+                for effect in effect_rows
+            ),
+            create_time=str(row["create_time"]),
+            outbox_sequence=int(row["outbox_sequence"]),
+        )
+
+    def mark_job_claim_running(
+        self,
+        command: JobClaimStateCommand,
+    ) -> JobClaimResult:
+        """Advance reserved/uncertain Claim to running with accepted evidence."""
+
+        if not isinstance(command, JobClaimStateCommand):
+            raise MaterialInvalidInput("command must be a JobClaimStateCommand")
+        return self._transition_job_claim(
+            command=command,
+            target_state="running",
+            uncertainty_reason=None,
+        )
+
+    def mark_job_claim_uncertain(
+        self,
+        command: JobClaimUncertainCommand,
+    ) -> JobClaimResult:
+        """Fence ambiguous physical reality and mark business members reconciling."""
+
+        if not isinstance(command, JobClaimUncertainCommand):
+            raise MaterialInvalidInput("command must be a JobClaimUncertainCommand")
+        return self._transition_job_claim(
+            command=command,
+            target_state="uncertain",
+            uncertainty_reason=self._validate_nonblank(
+                command.uncertainty_reason,
+                "uncertainty_reason",
+            ),
+        )
+
+    def _transition_job_claim(
+        self,
+        *,
+        command: JobClaimStateCommand | JobClaimUncertainCommand,
+        target_state: str,
+        uncertainty_reason: str | None,
+    ) -> JobClaimResult:
+        if command.schema_version != 1:
+            raise MaterialInvalidInput("unsupported Job Claim schema_version")
+        command_uuid = _canonical_uuid(command.command_uuid, "command_uuid")
+        job_uuid = _canonical_uuid(
+            command.workflow_node_job_uuid,
+            "workflow_node_job_uuid",
+        )
+        claim_uuid = _canonical_uuid(command.claim_uuid, "claim_uuid")
+        attempt = self._validate_attempt(command.attempt)
+        token = self._validate_fencing_token(command.fencing_token)
+        idempotency_key = self._validate_nonblank(
+            command.idempotency_key,
+            "idempotency_key",
+        )
+        evidence_kind = self._validate_nonblank(
+            getattr(command, "evidence_kind", "uncertain"),
+            "evidence_kind",
+        )
+        evidence_fingerprint = self._validate_fingerprint(
+            command.evidence_fingerprint,
+            "evidence_fingerprint",
+        )
+        expected_state = getattr(command, "expected_state", None)
+        if expected_state is not None:
+            expected_state = self._validate_nonblank(
+                expected_state,
+                "expected_state",
+            )
+            if expected_state not in {"reserved", "running", "uncertain"}:
+                raise MaterialInvalidInput("expected_state is invalid")
+        normalized_payload = {
+            "schema_version": 1,
+            "command_uuid": command_uuid,
+            "idempotency_key": idempotency_key,
+            "workflow_node_job_uuid": job_uuid,
+            "attempt": attempt,
+            "claim_uuid": claim_uuid,
+            "fencing_token": token,
+            "target_state": target_state,
+            "uncertainty_reason": uncertainty_reason,
+            "evidence_kind": evidence_kind,
+            "evidence_fingerprint": evidence_fingerprint,
+            "expected_state": expected_state,
+        }
+        payload_hash = _canonical_payload_hash(normalized_payload)
+        now_iso = self._now_iso()
+        now_ms = self._now_ms()
+        try:
+            with self._tx() as conn:
+                replay = self._processed_payload(conn, command_uuid, payload_hash)
+                if replay is not None:
+                    return _claim_result_from_payload(replay)
+                claim = self._read_job_claim(conn, claim_uuid=claim_uuid)
+                if claim is None:
+                    raise MaterialNotFound("Job Claim not found")
+                if (
+                    claim.workflow_node_job_uuid != job_uuid
+                    or claim.attempt != attempt
+                    or claim.fencing_token != token
+                ):
+                    raise MaterialConflict("stale Job Claim owner or fencing token")
+                if expected_state is not None and claim.state != expected_state:
+                    raise MaterialConflict("Job Claim expected_state is stale")
+                allowed = {
+                    "running": {"reserved", "running", "uncertain"},
+                    "uncertain": {"reserved", "running", "uncertain"},
+                }[target_state]
+                if claim.state not in allowed:
+                    raise MaterialConflict("Job Claim state transition is not allowed")
+                if target_state == "uncertain":
+                    business_rows = conn.execute(
+                        """
+                        SELECT m.uuid, m.version, m.disposition
+                        FROM material AS m
+                        JOIN material_claim_member AS cm
+                          ON cm.resource_uuid = m.uuid
+                         AND cm.resource_kind = 'business_material'
+                        WHERE cm.claim_uuid = ? AND cm.released_at IS NULL
+                          AND m.deleted_at IS NULL
+                        ORDER BY m.uuid
+                        """,
+                        (claim_uuid,),
+                    ).fetchall()
+                    for material in business_rows:
+                        expected_version = int(material["version"])
+                        if material["disposition"] == "active":
+                            expected_version += 1
+                            conn.execute(
+                                """
+                                UPDATE material
+                                SET disposition = 'reconciling', version = ?,
+                                    update_time = ?
+                                WHERE uuid = ?
+                                """,
+                                (expected_version, now_iso, material["uuid"]),
+                            )
+                        conn.execute(
+                            """
+                            UPDATE material_claim_member
+                            SET expected_version = ?
+                            WHERE claim_uuid = ?
+                              AND resource_kind = 'business_material'
+                              AND resource_uuid = ?
+                            """,
+                            (expected_version, claim_uuid, material["uuid"]),
+                        )
+                conn.execute(
+                    """
+                    UPDATE material_claim
+                    SET state = ?,
+                        uncertainty_reason = ?,
+                        running_at = CASE WHEN ? = 'running'
+                                          THEN COALESCE(running_at, ?)
+                                          ELSE running_at END,
+                        update_time = ?
+                    WHERE uuid = ?
+                    """,
+                    (
+                        target_state,
+                        uncertainty_reason,
+                        target_state,
+                        now_iso,
+                        now_iso,
+                        claim_uuid,
+                    ),
+                )
+                outbox_sequence = self._emit(
+                    conn,
+                    now_ms,
+                    "material_claim",
+                    claim_uuid,
+                    token,
+                    f"material_claim.{target_state}",
+                    {
+                        "workflow_node_job_uuid": job_uuid,
+                        "attempt": attempt,
+                        "fencing_token": token,
+                        "evidence_kind": evidence_kind,
+                        "evidence_fingerprint": evidence_fingerprint,
+                        "uncertainty_reason": uncertainty_reason,
+                    },
+                    causation_id=command_uuid,
+                    reason=uncertainty_reason or evidence_kind,
+                )
+                updated = self._read_job_claim(conn, claim_uuid=claim_uuid)
+                if updated is None:
+                    raise MaterialAuthorityUnavailable("Job Claim disappeared")
+                result = JobClaimResult(
+                    schema_version=1,
+                    command_uuid=command_uuid,
+                    status=target_state,
+                    claim=updated,
+                    diagnostics=(),
+                    outbox_sequence=outbox_sequence,
+                )
+                self._insert_processed(
+                    conn,
+                    command_uuid=command_uuid,
+                    idempotency_key=idempotency_key,
+                    command_type=f"material.claim.{target_state}",
+                    payload_hash=payload_hash,
+                    result=_claim_result_payload(result),
+                    status="completed",
+                    now_ms=now_ms,
+                )
+        except sqlite3.IntegrityError as exc:
+            raise MaterialConflict("Job Claim state command conflicts") from exc
+        except sqlite3.Error:
+            raise MaterialAuthorityUnavailable(
+                f"failed to mark Job Claim {target_state}"
+            ) from None
+        return result
+
+    @staticmethod
+    def _normalized_changeset_effects(
+        effects: tuple[MaterialChangeSetEffect, ...],
+    ) -> tuple[MaterialChangeSetEffect, ...]:
+        if type(effects) is not tuple:
+            raise MaterialInvalidInput("effects must be a tuple")
+        normalized: list[MaterialChangeSetEffect] = []
+        seen: set[str] = set()
+        for effect in effects:
+            if not isinstance(effect, MaterialChangeSetEffect):
+                raise MaterialInvalidInput(
+                    "effects must contain MaterialChangeSetEffect values"
+                )
+            effect_key = InventoryService._validate_nonblank(
+                effect.effect_key,
+                "effect_key",
+            )
+            if effect_key in seen:
+                raise MaterialInvalidInput("effect_key must be unique")
+            seen.add(effect_key)
+            if effect.resource_kind not in {"business_material", "site"}:
+                raise MaterialInvalidInput("effect resource_kind is invalid")
+            resource_uuid = _canonical_uuid(effect.resource_uuid, "resource_uuid")
+            if effect.operation not in {
+                "create",
+                "update",
+                "reparent",
+                "soft_delete",
+                "set_occupancy",
+            }:
+                raise MaterialInvalidInput("effect operation is invalid")
+            expected_version = effect.expected_version
+            if expected_version is not None:
+                if (
+                    isinstance(expected_version, bool)
+                    or not isinstance(expected_version, int)
+                    or expected_version <= 0
+                ):
+                    raise MaterialInvalidInput(
+                        "effect expected_version must be positive or null"
+                    )
+            normalized.append(
+                MaterialChangeSetEffect(
+                    effect_key=effect_key,
+                    resource_kind=effect.resource_kind,
+                    resource_uuid=resource_uuid,
+                    operation=effect.operation,
+                    expected_version=expected_version,
+                    before=_json_object(effect.before, "effect.before"),
+                    after=_json_object(effect.after, "effect.after"),
+                )
+            )
+        return tuple(sorted(normalized, key=lambda effect: effect.effect_key))
+
+    def commit_material_changeset(
+        self,
+        command: MaterialChangeSetCommand,
+    ) -> MaterialChangeSetReceipt:
+        """Commit one terminal physical-reality receipt under an exact fence."""
+
+        if not isinstance(command, MaterialChangeSetCommand):
+            raise MaterialInvalidInput("command must be a MaterialChangeSetCommand")
+        if command.schema_version != 1:
+            raise MaterialInvalidInput("unsupported Material ChangeSet schema_version")
+        command_uuid = _canonical_uuid(command.command_uuid, "command_uuid")
+        task_uuid = _canonical_uuid(command.workflow_task_uuid, "workflow_task_uuid")
+        job_uuid = _canonical_uuid(
+            command.workflow_node_job_uuid,
+            "workflow_node_job_uuid",
+        )
+        claim_uuid = _canonical_uuid(command.claim_uuid, "claim_uuid")
+        attempt = self._validate_attempt(command.attempt)
+        token = self._validate_fencing_token(command.fencing_token)
+        idempotency_key = self._validate_nonblank(
+            command.idempotency_key,
+            "idempotency_key",
+        )
+        effect_identity = self._validate_nonblank(
+            command.effect_identity,
+            "effect_identity",
+        )
+        if effect_identity != "terminal":
+            raise MaterialInvalidInput("M1EF v1 only accepts terminal effect identity")
+        if command.outcome not in {"succeeded", "failed", "canceled", "timeout"}:
+            raise MaterialInvalidInput("Material ChangeSet outcome is invalid")
+        result_json = _json_object(command.result, "result")
+        effects = self._normalized_changeset_effects(command.effects)
+        expected_claim_state = command.expected_claim_state
+        if expected_claim_state is not None:
+            expected_claim_state = self._validate_nonblank(
+                expected_claim_state,
+                "expected_claim_state",
+            )
+            if expected_claim_state not in {"running", "uncertain"}:
+                raise MaterialInvalidInput("expected_claim_state is invalid")
+        fingerprint_payload = {
+            "workflow_task_uuid": task_uuid,
+            "workflow_node_job_uuid": job_uuid,
+            "attempt": attempt,
+            "claim_uuid": claim_uuid,
+            "fencing_token": token,
+            "effect_identity": effect_identity,
+            "outcome": command.outcome,
+            "result": result_json,
+            "effects": [_effect_payload(effect) for effect in effects],
+        }
+        deterministic_fingerprint = _canonical_payload_hash(fingerprint_payload)
+        normalized_payload = {
+            "schema_version": 1,
+            "command_uuid": command_uuid,
+            "idempotency_key": idempotency_key,
+            **fingerprint_payload,
+            "expected_claim_state": expected_claim_state,
+        }
+        payload_hash = _canonical_payload_hash(normalized_payload)
+        changeset_uuid = str(
+            uuid.uuid5(
+                UUID(job_uuid),
+                f"material-changeset:{attempt}:{effect_identity}",
+            )
+        )
+        now_iso = self._now_iso()
+        now_ms = self._now_ms()
+        try:
+            with self._tx() as conn:
+                replay = self._processed_payload(conn, command_uuid, payload_hash)
+                if replay is not None:
+                    return _changeset_receipt_from_payload(replay)
+                existing = conn.execute(
+                    """
+                    SELECT * FROM material_changeset
+                    WHERE workflow_node_job_uuid = ? AND attempt = ?
+                      AND effect_identity = ?
+                    """,
+                    (job_uuid, attempt, effect_identity),
+                ).fetchone()
+                if existing is not None:
+                    if (
+                        existing["deterministic_fingerprint"]
+                        != deterministic_fingerprint
+                    ):
+                        raise MaterialConflict(
+                            "terminal Material ChangeSet fingerprint conflicts"
+                        )
+                    stored_effects = conn.execute(
+                        """
+                        SELECT * FROM material_changeset_effect
+                        WHERE changeset_uuid = ? ORDER BY effect_key
+                        """,
+                        (existing["uuid"],),
+                    ).fetchall()
+                    receipt = MaterialChangeSetReceipt(
+                        schema_version=1,
+                        command_uuid=command_uuid,
+                        uuid=str(existing["uuid"]),
+                        workflow_task_uuid=str(existing["workflow_task_uuid"]),
+                        workflow_node_job_uuid=str(existing["workflow_node_job_uuid"]),
+                        attempt=int(existing["attempt"]),
+                        claim_uuid=str(existing["claim_uuid"]),
+                        fencing_token=int(existing["fencing_token"]),
+                        effect_identity=str(existing["effect_identity"]),
+                        deterministic_fingerprint=str(
+                            existing["deterministic_fingerprint"]
+                        ),
+                        outcome=str(existing["outcome"]),
+                        result=_stored_json_object(existing["result_json"]),
+                        effects=tuple(
+                            MaterialChangeSetEffect(
+                                effect_key=str(row["effect_key"]),
+                                resource_kind=str(row["resource_kind"]),
+                                resource_uuid=str(row["resource_uuid"]),
+                                operation=str(row["operation"]),
+                                expected_version=(
+                                    int(row["expected_version"])
+                                    if row["expected_version"] is not None
+                                    else None
+                                ),
+                                before=_stored_json_object(row["before_json"]),
+                                after=_stored_json_object(row["after_json"]),
+                            )
+                            for row in stored_effects
+                        ),
+                        create_time=str(existing["create_time"]),
+                        outbox_sequence=int(existing["outbox_sequence"]),
+                    )
+                    self._insert_processed(
+                        conn,
+                        command_uuid=command_uuid,
+                        idempotency_key=idempotency_key,
+                        command_type="material.changeset.commit",
+                        payload_hash=payload_hash,
+                        result=_changeset_receipt_payload(receipt),
+                        status="completed",
+                        now_ms=now_ms,
+                    )
+                    return receipt
+                claim = self._read_job_claim(conn, claim_uuid=claim_uuid)
+                if claim is None:
+                    raise MaterialNotFound("Job Claim not found")
+                if (
+                    claim.workflow_task_uuid != task_uuid
+                    or claim.workflow_node_job_uuid != job_uuid
+                    or claim.attempt != attempt
+                    or claim.fencing_token != token
+                ):
+                    raise MaterialConflict("stale Job Claim owner or fencing token")
+                if claim.state not in {"running", "uncertain"}:
+                    raise MaterialConflict(
+                        "Material ChangeSet requires running or uncertain Claim"
+                    )
+                if (
+                    expected_claim_state is not None
+                    and claim.state != expected_claim_state
+                ):
+                    raise MaterialConflict("Job Claim expected_state is stale")
+                member_index = {
+                    (member.resource_kind, member.resource_uuid): member
+                    for member in claim.members
+                    if member.released_at is None
+                }
+                for effect in effects:
+                    member = member_index.get(
+                        (effect.resource_kind, effect.resource_uuid)
+                    )
+                    if effect.operation != "create" and member is None:
+                        raise MaterialConflict(
+                            "Material ChangeSet affects an undeclared Claim member"
+                        )
+                    table = (
+                        "material"
+                        if effect.resource_kind == "business_material"
+                        else "site"
+                    )
+                    current = conn.execute(
+                        f'SELECT * FROM "{table}" WHERE uuid = ?',
+                        (effect.resource_uuid,),
+                    ).fetchone()
+                    if effect.operation == "create":
+                        if current is not None:
+                            raise MaterialConflict("ChangeSet create target exists")
+                        if effect.expected_version is not None or effect.before:
+                            raise MaterialInvalidInput(
+                                "ChangeSet create requires null version and "
+                                "empty before"
+                            )
+                        if table == "material":
+                            self._apply_create_material_effect(
+                                conn,
+                                claim_members=member_index,
+                                effect=effect,
+                                now_iso=now_iso,
+                            )
+                        else:
+                            self._apply_create_site_effect(
+                                conn,
+                                claim_members=member_index,
+                                effect=effect,
+                                now_iso=now_iso,
+                            )
+                        changed_row = conn.execute(
+                            f'SELECT version FROM "{table}" WHERE uuid = ?',
+                            (effect.resource_uuid,),
+                        ).fetchone()
+                        InventoryStore.tx_insert_ledger(
+                            conn,
+                            now_ms,
+                            "material_changeset.effect",
+                            effect.resource_kind,
+                            effect.resource_uuid,
+                            _effect_payload(effect),
+                            causation_id=command_uuid,
+                        )
+                        continue
+                    if current is None or current["deleted_at"] is not None:
+                        raise MaterialNotFound("ChangeSet target not found")
+                    expected_version = (
+                        effect.expected_version
+                        if effect.expected_version is not None
+                        else member.expected_version
+                    )
+                    if int(current["version"]) != expected_version:
+                        raise MaterialConflict("ChangeSet expected_version is stale")
+                    if table == "material":
+                        before_projection = _material_record(dict(current)).to_dict()
+                    else:
+                        site_projection = _read_site(conn, effect.resource_uuid)
+                        if site_projection is None:
+                            raise MaterialNotFound("ChangeSet Site not found")
+                        before_projection = site_projection.to_dict()
+                    for key, value in effect.before.items():
+                        if before_projection.get(key) != value:
+                            raise MaterialConflict("ChangeSet before image is stale")
+                    previous_version = int(current["version"])
+                    if table == "material":
+                        self._apply_material_effect(
+                            conn,
+                            current=dict(current),
+                            effect=effect,
+                            now_iso=now_iso,
+                        )
+                    else:
+                        target_occupant = effect.after.get("occupied_material_uuid")
+                        if target_occupant is not None:
+                            target_occupant = _canonical_uuid(
+                                target_occupant,
+                                "occupied_material_uuid",
+                            )
+                            if (
+                                "business_material",
+                                target_occupant,
+                            ) not in member_index:
+                                raise MaterialConflict(
+                                    "target Site occupant is not a Claim member"
+                                )
+                        self._apply_site_effect(
+                            conn,
+                            current=dict(current),
+                            effect=effect,
+                            now_iso=now_iso,
+                        )
+                    changed_row = conn.execute(
+                        f'SELECT version FROM "{table}" WHERE uuid = ?',
+                        (effect.resource_uuid,),
+                    ).fetchone()
+                    changed_version = int(changed_row["version"])
+                    if changed_version > previous_version:
+                        InventoryStore.tx_insert_ledger(
+                            conn,
+                            now_ms,
+                            "material_changeset.effect",
+                            effect.resource_kind,
+                            effect.resource_uuid,
+                            _effect_payload(effect),
+                            causation_id=command_uuid,
+                        )
+                    conn.execute(
+                        """
+                        UPDATE material_claim_member SET expected_version = ?
+                        WHERE claim_uuid = ? AND resource_kind = ?
+                          AND resource_uuid = ?
+                        """,
+                        (
+                            int(changed_row["version"]),
+                            claim_uuid,
+                            effect.resource_kind,
+                            effect.resource_uuid,
+                        ),
+                    )
+
+                outbox_sequence = InventoryStore.tx_insert_outbox(
+                    conn,
+                    new_event_id(now_ms),
+                    self.edge_id,
+                    self.lab_id,
+                    "material_changeset",
+                    changeset_uuid,
+                    1,
+                    "material_changeset.committed",
+                    now_ms,
+                    command_uuid,
+                    {
+                        "workflow_task_uuid": task_uuid,
+                        "workflow_node_job_uuid": job_uuid,
+                        "attempt": attempt,
+                        "claim_uuid": claim_uuid,
+                        "fencing_token": token,
+                        "effect_identity": effect_identity,
+                        "deterministic_fingerprint": deterministic_fingerprint,
+                        "outcome": command.outcome,
+                        "effect_count": len(effects),
+                    },
+                )
+                conn.execute(
+                    """
+                    INSERT INTO material_changeset(
+                        uuid, workflow_task_uuid, workflow_node_job_uuid,
+                        attempt, claim_uuid, fencing_token, effect_identity,
+                        deterministic_fingerprint, outcome, result_json,
+                        outbox_sequence, create_time
+                    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    """,
+                    (
+                        changeset_uuid,
+                        task_uuid,
+                        job_uuid,
+                        attempt,
+                        claim_uuid,
+                        token,
+                        effect_identity,
+                        deterministic_fingerprint,
+                        command.outcome,
+                        json.dumps(result_json, ensure_ascii=False, sort_keys=True),
+                        outbox_sequence,
+                        now_iso,
+                    ),
+                )
+                for effect in effects:
+                    conn.execute(
+                        """
+                        INSERT INTO material_changeset_effect(
+                            changeset_uuid, effect_key, resource_kind,
+                            resource_uuid, operation, expected_version,
+                            before_json, after_json
+                        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+                        """,
+                        (
+                            changeset_uuid,
+                            effect.effect_key,
+                            effect.resource_kind,
+                            effect.resource_uuid,
+                            effect.operation,
+                            effect.expected_version,
+                            json.dumps(
+                                effect.before, ensure_ascii=False, sort_keys=True
+                            ),
+                            json.dumps(
+                                effect.after, ensure_ascii=False, sort_keys=True
+                            ),
+                        ),
+                    )
+                receipt = MaterialChangeSetReceipt(
+                    schema_version=1,
+                    command_uuid=command_uuid,
+                    uuid=changeset_uuid,
+                    workflow_task_uuid=task_uuid,
+                    workflow_node_job_uuid=job_uuid,
+                    attempt=attempt,
+                    claim_uuid=claim_uuid,
+                    fencing_token=token,
+                    effect_identity=effect_identity,
+                    deterministic_fingerprint=deterministic_fingerprint,
+                    outcome=command.outcome,
+                    result=result_json,
+                    effects=effects,
+                    create_time=now_iso,
+                    outbox_sequence=outbox_sequence,
+                )
+                self._insert_processed(
+                    conn,
+                    command_uuid=command_uuid,
+                    idempotency_key=idempotency_key,
+                    command_type="material.changeset.commit",
+                    payload_hash=payload_hash,
+                    result=_changeset_receipt_payload(receipt),
+                    status="completed",
+                    now_ms=now_ms,
+                )
+        except sqlite3.IntegrityError as exc:
+            raise MaterialConflict("Material ChangeSet conflicts") from exc
+        except sqlite3.Error:
+            raise MaterialAuthorityUnavailable(
+                "failed to commit Material ChangeSet"
+            ) from None
+        return receipt
+
+    def _apply_create_material_effect(
+        self,
+        conn: sqlite3.Connection,
+        *,
+        claim_members: Mapping[tuple[str, str], JobClaimMemberRecord],
+        effect: MaterialChangeSetEffect,
+        now_iso: str,
+    ) -> None:
+        allowed = {
+            "description",
+            "meta_data",
+            "resource_template_uuid",
+            "parent_uuid",
+            "class",
+            "barcode",
+            "name",
+            "config",
+            "data",
+            "disposition",
+        }
+        if not set(effect.after).issubset(allowed):
+            raise MaterialInvalidInput("Material create contains unknown fields")
+        template_uuid = _canonical_uuid(
+            effect.after.get("resource_template_uuid"),
+            "resource_template_uuid",
+        )
+        template = self._resource_templates.get(template_uuid)
+        if template is None:
+            raise MaterialInvalidInput("resource_template_uuid is not registered")
+        klass = str(effect.after.get("class") or template.material_class).strip()
+        if klass != template.material_class:
+            raise MaterialInvalidInput("Material class does not match template")
+        name = str(effect.after.get("name") or "").strip()
+        if not name:
+            raise MaterialInvalidInput("Material name must not be blank")
+        parent_value = effect.after.get("parent_uuid")
+        parent_uuid = (
+            _canonical_uuid(parent_value, "parent_uuid")
+            if parent_value is not None
+            else None
+        )
+        if (
+            parent_uuid is not None
+            and (
+                "business_material",
+                parent_uuid,
+            )
+            not in claim_members
+        ):
+            raise MaterialConflict("created Material parent is not a Claim member")
+        disposition = str(effect.after.get("disposition") or "active")
+        if disposition not in {
+            "active",
+            "consumed",
+            "discarded",
+            "quarantined",
+            "reconciling",
+        }:
+            raise MaterialInvalidInput("Material disposition is invalid")
+        description = effect.after.get("description")
+        if description is not None and not isinstance(description, str):
+            raise MaterialInvalidInput("Material description must be string or null")
+        conn.execute(
+            """
+            INSERT INTO material(
+                uuid, create_time, update_time, deleted_at, description,
+                meta_data, resource_template_uuid, parent_uuid, class,
+                barcode, name, config, data, disposition, material_kind, version
+            ) VALUES (?, ?, ?, NULL, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'business', 1)
+            """,
+            (
+                effect.resource_uuid,
+                now_iso,
+                now_iso,
+                description,
+                json.dumps(
+                    _json_object(effect.after.get("meta_data"), "after.meta_data"),
+                    ensure_ascii=False,
+                ),
+                template_uuid,
+                parent_uuid,
+                klass,
+                str(effect.after.get("barcode") or ""),
+                name,
+                json.dumps(
+                    _json_object(effect.after.get("config"), "after.config"),
+                    ensure_ascii=False,
+                ),
+                json.dumps(
+                    _json_object(effect.after.get("data"), "after.data"),
+                    ensure_ascii=False,
+                ),
+                disposition,
+            ),
+        )
+
+    def _apply_create_site_effect(
+        self,
+        conn: sqlite3.Connection,
+        *,
+        claim_members: Mapping[tuple[str, str], JobClaimMemberRecord],
+        effect: MaterialChangeSetEffect,
+        now_iso: str,
+    ) -> None:
+        allowed = {
+            "description",
+            "meta_data",
+            "material_uuid",
+            "name",
+            "sort_order",
+            "allowed_resource_template_uuids",
+            "occupied_material_uuid",
+            "position_x",
+            "position_y",
+            "position_z",
+            "depth",
+            "length",
+            "width",
+        }
+        if not set(effect.after).issubset(allowed):
+            raise MaterialInvalidInput("Site create contains unknown fields")
+        owner_uuid = _canonical_uuid(effect.after.get("material_uuid"), "material_uuid")
+        if not any(
+            (kind, owner_uuid) in claim_members
+            for kind in ("device_material", "business_material")
+        ):
+            raise MaterialConflict("created Site owner is not a Claim member")
+        name = str(effect.after.get("name") or "").strip()
+        if not name:
+            raise MaterialInvalidInput("Site name must not be blank")
+        sort_order = effect.after.get("sort_order", 0)
+        if (
+            isinstance(sort_order, bool)
+            or not isinstance(sort_order, int)
+            or sort_order < 0
+        ):
+            raise MaterialInvalidInput("Site sort_order is invalid")
+        raw_allowlist = effect.after.get("allowed_resource_template_uuids", [])
+        if not isinstance(raw_allowlist, list):
+            raise MaterialInvalidInput("Site allowlist must be an array")
+        allowlist = tuple(
+            sorted(
+                {
+                    _canonical_uuid(value, "allowed_resource_template_uuid")
+                    for value in raw_allowlist
+                }
+            )
+        )
+        if any(value not in self._resource_templates for value in allowlist):
+            raise MaterialInvalidInput("Site allowlist template is not registered")
+        occupant_value = effect.after.get("occupied_material_uuid")
+        occupant_uuid = (
+            _canonical_uuid(occupant_value, "occupied_material_uuid")
+            if occupant_value is not None
+            else None
+        )
+        if (
+            occupant_uuid is not None
+            and (
+                "business_material",
+                occupant_uuid,
+            )
+            not in claim_members
+        ):
+            raise MaterialConflict("created Site occupant is not a Claim member")
+        geometry = {
+            name: _finite_number(effect.after.get(name, 0), name)
+            for name in (
+                "position_x",
+                "position_y",
+                "position_z",
+                "depth",
+                "length",
+                "width",
+            )
+        }
+        if any(geometry[name] < 0 for name in ("depth", "length", "width")):
+            raise MaterialInvalidInput("Site dimensions must not be negative")
+        description = effect.after.get("description")
+        if description is not None and not isinstance(description, str):
+            raise MaterialInvalidInput("Site description must be string or null")
+        conn.execute(
+            """
+            INSERT INTO site(
+                uuid, create_time, update_time, deleted_at, description,
+                meta_data, material_uuid, name, sort_order,
+                occupied_material_uuid, position_x, position_y, position_z,
+                depth, length, width, version
+            ) VALUES (?, ?, ?, NULL, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 1)
+            """,
+            (
+                effect.resource_uuid,
+                now_iso,
+                now_iso,
+                description,
+                json.dumps(
+                    _json_object(effect.after.get("meta_data"), "after.meta_data"),
+                    ensure_ascii=False,
+                ),
+                owner_uuid,
+                name,
+                sort_order,
+                occupant_uuid,
+                geometry["position_x"],
+                geometry["position_y"],
+                geometry["position_z"],
+                geometry["depth"],
+                geometry["length"],
+                geometry["width"],
+            ),
+        )
+        for template_uuid in allowlist:
+            conn.execute(
+                """
+                INSERT INTO site_allowed_resource_template(
+                    site_uuid, resource_template_uuid
+                ) VALUES (?, ?)
+                """,
+                (effect.resource_uuid, template_uuid),
+            )
+
+    def _apply_material_effect(
+        self,
+        conn: sqlite3.Connection,
+        *,
+        current: dict[str, Any],
+        effect: MaterialChangeSetEffect,
+        now_iso: str,
+    ) -> None:
+        if effect.operation not in {"update", "reparent", "soft_delete"}:
+            raise MaterialInvalidInput("operation is invalid for business Material")
+        allowed = {
+            "description",
+            "meta_data",
+            "parent_uuid",
+            "barcode",
+            "name",
+            "config",
+            "data",
+            "disposition",
+        }
+        if not set(effect.after).issubset(allowed):
+            raise MaterialInvalidInput("Material ChangeSet contains unknown fields")
+        normalized_after = dict(effect.after)
+        if effect.operation == "reparent":
+            parent_uuid = normalized_after.get("parent_uuid")
+            canonical_parent = (
+                _canonical_uuid(parent_uuid, "parent_uuid")
+                if parent_uuid is not None
+                else None
+            )
+            if canonical_parent == effect.resource_uuid:
+                raise MaterialConflict("Material reparent would create a cycle")
+            if canonical_parent is not None:
+                cycle = conn.execute(
+                    """
+                    WITH RECURSIVE subtree(uuid) AS (
+                        SELECT ? UNION ALL
+                        SELECT m.uuid FROM material AS m
+                        JOIN subtree AS s ON m.parent_uuid = s.uuid
+                        WHERE m.deleted_at IS NULL
+                    )
+                    SELECT 1 FROM subtree WHERE uuid = ? LIMIT 1
+                    """,
+                    (effect.resource_uuid, canonical_parent),
+                ).fetchone()
+                if cycle is not None:
+                    raise MaterialConflict("Material reparent would create a cycle")
+            normalized_after["parent_uuid"] = canonical_parent
+        if effect.operation == "soft_delete":
+            active_occupancy = conn.execute(
+                """
+                SELECT 1 FROM site
+                WHERE deleted_at IS NULL AND occupied_material_uuid = ? LIMIT 1
+                """,
+                (effect.resource_uuid,),
+            ).fetchone()
+            if active_occupancy is not None:
+                raise MaterialConflict("material_in_use")
+            conn.execute(
+                """
+                UPDATE material SET deleted_at = ?, update_time = ?,
+                    version = version + 1
+                WHERE uuid = ?
+                """,
+                (now_iso, now_iso, effect.resource_uuid),
+            )
+            return
+        current_projection = _material_record(current).to_dict()
+        if all(
+            current_projection.get(key) == value
+            for key, value in normalized_after.items()
+        ):
+            return
+        updated = dict(current)
+        updated.update(normalized_after)
+        if "meta_data" in normalized_after:
+            updated["meta_data"] = json.dumps(
+                _json_object(normalized_after["meta_data"], "after.meta_data"),
+                ensure_ascii=False,
+            )
+        if "config" in normalized_after:
+            updated["config"] = json.dumps(
+                _json_object(normalized_after["config"], "after.config"),
+                ensure_ascii=False,
+            )
+        if "data" in normalized_after:
+            updated["data"] = json.dumps(
+                _json_object(normalized_after["data"], "after.data"),
+                ensure_ascii=False,
+            )
+        if updated["disposition"] not in {
+            "active",
+            "consumed",
+            "discarded",
+            "quarantined",
+            "reconciling",
+        }:
+            raise MaterialInvalidInput("Material disposition is invalid")
+        if not isinstance(updated["name"], str) or not updated["name"].strip():
+            raise MaterialInvalidInput("Material name must not be blank")
+        conn.execute(
+            """
+            UPDATE material SET description = ?, meta_data = ?, parent_uuid = ?,
+                barcode = ?, name = ?, config = ?, data = ?, disposition = ?,
+                version = version + 1, update_time = ?
+            WHERE uuid = ?
+            """,
+            (
+                updated["description"],
+                updated["meta_data"],
+                updated["parent_uuid"],
+                updated["barcode"],
+                updated["name"].strip(),
+                updated["config"],
+                updated["data"],
+                updated["disposition"],
+                now_iso,
+                effect.resource_uuid,
+            ),
+        )
+
+    def _apply_site_effect(
+        self,
+        conn: sqlite3.Connection,
+        *,
+        current: dict[str, Any],
+        effect: MaterialChangeSetEffect,
+        now_iso: str,
+    ) -> None:
+        if effect.operation not in {"update", "set_occupancy", "soft_delete"}:
+            raise MaterialInvalidInput("operation is invalid for Site")
+        if effect.operation == "soft_delete":
+            if current["occupied_material_uuid"] is not None:
+                raise MaterialConflict("material_in_use")
+            conn.execute(
+                """
+                UPDATE site SET deleted_at = ?, update_time = ?, version = version + 1
+                WHERE uuid = ?
+                """,
+                (now_iso, now_iso, effect.resource_uuid),
+            )
+            return
+        allowed = {
+            "description",
+            "meta_data",
+            "name",
+            "sort_order",
+            "occupied_material_uuid",
+            "position_x",
+            "position_y",
+            "position_z",
+            "depth",
+            "length",
+            "width",
+        }
+        if not set(effect.after).issubset(allowed):
+            raise MaterialInvalidInput("Site ChangeSet contains unknown fields")
+        current_record = _read_site(conn, effect.resource_uuid)
+        if current_record is None:
+            raise MaterialNotFound("ChangeSet Site not found")
+        current_projection = current_record.to_dict()
+        if all(
+            current_projection.get(key) == value for key, value in effect.after.items()
+        ):
+            return
+        updated = dict(current)
+        updated.update(effect.after)
+        occupant_uuid = updated["occupied_material_uuid"]
+        if occupant_uuid is not None:
+            occupant_uuid = _canonical_uuid(
+                occupant_uuid,
+                "occupied_material_uuid",
+            )
+            occupant = conn.execute(
+                """
+                SELECT resource_template_uuid FROM material
+                WHERE uuid = ? AND deleted_at IS NULL
+                  AND material_kind = 'business'
+                """,
+                (occupant_uuid,),
+            ).fetchone()
+            if occupant is None:
+                raise MaterialNotFound("Site occupant Material not found")
+            allowed_template = conn.execute(
+                """
+                SELECT 1 FROM site_allowed_resource_template
+                WHERE site_uuid = ? AND resource_template_uuid = ?
+                """,
+                (effect.resource_uuid, occupant["resource_template_uuid"]),
+            ).fetchone()
+            allowlist_count = conn.execute(
+                """
+                SELECT COUNT(*) AS value FROM site_allowed_resource_template
+                WHERE site_uuid = ?
+                """,
+                (effect.resource_uuid,),
+            ).fetchone()
+            if int(allowlist_count["value"]) and allowed_template is None:
+                raise MaterialConflict("Site occupant template is not allowed")
+            would_cycle = conn.execute(
+                """
+                WITH RECURSIVE
+                edges(source_uuid, target_uuid) AS (
+                    SELECT parent_uuid, uuid FROM material
+                    WHERE parent_uuid IS NOT NULL AND deleted_at IS NULL
+                    UNION ALL
+                    SELECT material_uuid, occupied_material_uuid FROM site
+                    WHERE occupied_material_uuid IS NOT NULL
+                      AND deleted_at IS NULL AND uuid <> ?
+                ),
+                reachable(uuid) AS (
+                    SELECT ?
+                    UNION
+                    SELECT edges.target_uuid FROM edges
+                    JOIN reachable ON edges.source_uuid = reachable.uuid
+                )
+                SELECT 1 FROM reachable WHERE uuid = ? LIMIT 1
+                """,
+                (effect.resource_uuid, occupant_uuid, current["material_uuid"]),
+            ).fetchone()
+            if would_cycle is not None:
+                raise MaterialConflict("Site placement would create a cycle")
+        if "meta_data" in effect.after:
+            updated["meta_data"] = json.dumps(
+                _json_object(effect.after["meta_data"], "after.meta_data"),
+                ensure_ascii=False,
+            )
+        conn.execute(
+            """
+            UPDATE site SET description = ?, meta_data = ?, name = ?, sort_order = ?,
+                occupied_material_uuid = ?, position_x = ?, position_y = ?,
+                position_z = ?, depth = ?, length = ?, width = ?,
+                version = version + 1, update_time = ?
+            WHERE uuid = ?
+            """,
+            (
+                updated["description"],
+                updated["meta_data"],
+                updated["name"],
+                updated["sort_order"],
+                occupant_uuid,
+                updated["position_x"],
+                updated["position_y"],
+                updated["position_z"],
+                updated["depth"],
+                updated["length"],
+                updated["width"],
+                now_iso,
+                effect.resource_uuid,
+            ),
+        )
+
+    def release_job_claim(
+        self,
+        command: JobClaimReleaseCommand,
+    ) -> JobClaimResult:
+        """Release a Claim only after exact no-send or terminal-settled proof."""
+
+        if not isinstance(command, JobClaimReleaseCommand):
+            raise MaterialInvalidInput("command must be a JobClaimReleaseCommand")
+        if command.schema_version != 1:
+            raise MaterialInvalidInput("unsupported Job Claim schema_version")
+        command_uuid = _canonical_uuid(command.command_uuid, "command_uuid")
+        job_uuid = _canonical_uuid(
+            command.workflow_node_job_uuid,
+            "workflow_node_job_uuid",
+        )
+        claim_uuid = _canonical_uuid(command.claim_uuid, "claim_uuid")
+        attempt = self._validate_attempt(command.attempt)
+        token = self._validate_fencing_token(command.fencing_token)
+        idempotency_key = self._validate_nonblank(
+            command.idempotency_key,
+            "idempotency_key",
+        )
+        proof_kind = self._validate_nonblank(
+            command.release_proof_kind,
+            "release_proof_kind",
+        )
+        if proof_kind not in {
+            "not_submitted",
+            "terminal_settled",
+            "reconciled_terminal",
+        }:
+            raise MaterialInvalidInput("release_proof_kind is invalid")
+        terminal_fingerprint = self._validate_fingerprint(
+            command.workflow_terminal_fingerprint,
+            "workflow_terminal_fingerprint",
+        )
+        reason = self._validate_nonblank(command.reason, "reason")
+        expected_state = command.expected_state
+        if expected_state is not None:
+            expected_state = self._validate_nonblank(
+                expected_state,
+                "expected_state",
+            )
+            if expected_state not in {"reserved", "running", "uncertain"}:
+                raise MaterialInvalidInput("expected_state is invalid")
+        changeset_uuid = (
+            _canonical_uuid(command.material_changeset_uuid, "material_changeset_uuid")
+            if command.material_changeset_uuid is not None
+            else None
+        )
+        changeset_fingerprint = (
+            self._validate_fingerprint(
+                command.material_changeset_fingerprint,
+                "material_changeset_fingerprint",
+            )
+            if command.material_changeset_fingerprint is not None
+            else None
+        )
+        if proof_kind == "not_submitted":
+            if changeset_uuid is not None or changeset_fingerprint is not None:
+                raise MaterialInvalidInput(
+                    "not_submitted proof must not carry a Material ChangeSet"
+                )
+        elif changeset_uuid is None or changeset_fingerprint is None:
+            raise MaterialInvalidInput(
+                "terminal release proof requires Material ChangeSet identity"
+            )
+        proof_payload = {
+            "release_proof_kind": proof_kind,
+            "material_changeset_uuid": changeset_uuid,
+            "material_changeset_fingerprint": changeset_fingerprint,
+            "workflow_terminal_fingerprint": terminal_fingerprint,
+        }
+        proof_fingerprint = _canonical_payload_hash(proof_payload)
+        normalized_payload = {
+            "schema_version": 1,
+            "command_uuid": command_uuid,
+            "idempotency_key": idempotency_key,
+            "workflow_node_job_uuid": job_uuid,
+            "attempt": attempt,
+            "claim_uuid": claim_uuid,
+            "fencing_token": token,
+            **proof_payload,
+            "reason": reason,
+            "expected_state": expected_state,
+        }
+        payload_hash = _canonical_payload_hash(normalized_payload)
+        now_iso = self._now_iso()
+        now_ms = self._now_ms()
+        try:
+            with self._tx() as conn:
+                replay = self._processed_payload(conn, command_uuid, payload_hash)
+                if replay is not None:
+                    return _claim_result_from_payload(replay)
+                claim = self._read_job_claim(conn, claim_uuid=claim_uuid)
+                if claim is None:
+                    raise MaterialNotFound("Job Claim not found")
+                if (
+                    claim.workflow_node_job_uuid != job_uuid
+                    or claim.attempt != attempt
+                    or claim.fencing_token != token
+                ):
+                    raise MaterialConflict("stale Job Claim owner or fencing token")
+                if expected_state is not None and claim.state != expected_state:
+                    raise MaterialConflict("Job Claim expected_state is stale")
+                if claim.state == "released":
+                    if (
+                        claim.release_proof_fingerprint != proof_fingerprint
+                        or claim.release_command_uuid != command_uuid
+                    ):
+                        raise MaterialConflict("Job Claim release proof conflicts")
+                    result = JobClaimResult(
+                        schema_version=1,
+                        command_uuid=command_uuid,
+                        status="released",
+                        claim=claim,
+                        diagnostics=(),
+                        outbox_sequence=None,
+                    )
+                    self._insert_processed(
+                        conn,
+                        command_uuid=command_uuid,
+                        idempotency_key=idempotency_key,
+                        command_type="material.claim.release",
+                        payload_hash=payload_hash,
+                        result=_claim_result_payload(result),
+                        status="completed",
+                        now_ms=now_ms,
+                    )
+                    return result
+                if proof_kind == "not_submitted" and claim.state != "reserved":
+                    raise MaterialConflict(
+                        "not_submitted proof only releases a reserved Claim"
+                    )
+                if proof_kind != "not_submitted":
+                    receipt = conn.execute(
+                        "SELECT * FROM material_changeset WHERE uuid = ?",
+                        (changeset_uuid,),
+                    ).fetchone()
+                    if (
+                        receipt is None
+                        or receipt["claim_uuid"] != claim_uuid
+                        or int(receipt["fencing_token"]) != token
+                        or receipt["deterministic_fingerprint"] != changeset_fingerprint
+                    ):
+                        raise MaterialConflict(
+                            "terminal Material ChangeSet proof does not match Claim"
+                        )
+                conn.execute(
+                    """
+                    UPDATE material_claim
+                    SET state = 'released', release_proof_kind = ?,
+                        release_proof_fingerprint = ?, release_reason = ?,
+                        terminal_changeset_uuid = ?,
+                        workflow_terminal_fingerprint = ?,
+                        release_command_uuid = ?, released_at = ?, update_time = ?
+                    WHERE uuid = ?
+                    """,
+                    (
+                        proof_kind,
+                        proof_fingerprint,
+                        reason,
+                        changeset_uuid,
+                        terminal_fingerprint,
+                        command_uuid,
+                        now_iso,
+                        now_iso,
+                        claim_uuid,
+                    ),
+                )
+                conn.execute(
+                    """
+                    UPDATE material_claim_member SET released_at = ?
+                    WHERE claim_uuid = ? AND released_at IS NULL
+                    """,
+                    (now_iso, claim_uuid),
+                )
+                outbox_sequence = self._emit(
+                    conn,
+                    now_ms,
+                    "material_claim",
+                    claim_uuid,
+                    token,
+                    "material_claim.released",
+                    {
+                        "workflow_node_job_uuid": job_uuid,
+                        "attempt": attempt,
+                        "fencing_token": token,
+                        **proof_payload,
+                        "reason": reason,
+                    },
+                    causation_id=command_uuid,
+                    reason=reason,
+                )
+                released = self._read_job_claim(conn, claim_uuid=claim_uuid)
+                if released is None:
+                    raise MaterialAuthorityUnavailable("released Claim disappeared")
+                result = JobClaimResult(
+                    schema_version=1,
+                    command_uuid=command_uuid,
+                    status="released",
+                    claim=released,
+                    diagnostics=(),
+                    outbox_sequence=outbox_sequence,
+                )
+                self._insert_processed(
+                    conn,
+                    command_uuid=command_uuid,
+                    idempotency_key=idempotency_key,
+                    command_type="material.claim.release",
+                    payload_hash=payload_hash,
+                    result=_claim_result_payload(result),
+                    status="completed",
+                    now_ms=now_ms,
+                )
+        except sqlite3.IntegrityError as exc:
+            raise MaterialConflict("Job Claim release conflicts") from exc
+        except sqlite3.Error:
+            raise MaterialAuthorityUnavailable("failed to release Job Claim") from None
+        return result
+
+    def resolve_job_claim(
+        self,
+        command: JobClaimResolutionCommand,
+    ) -> JobClaimResult:
+        """Persist one closed, evidenced reconciliation decision.
+
+        Terminal resolutions commit physical reality only.  The Scheduler then
+        projects the Workflow terminal fact and releases the Claim (C4-C6).
+        """
+
+        if not isinstance(command, JobClaimResolutionCommand):
+            raise MaterialInvalidInput("command must be a JobClaimResolutionCommand")
+        if command.schema_version != 1:
+            raise MaterialInvalidInput("unsupported Job Claim schema_version")
+        command_uuid = _canonical_uuid(command.command_uuid, "command_uuid")
+        job_uuid = _canonical_uuid(
+            command.workflow_node_job_uuid,
+            "workflow_node_job_uuid",
+        )
+        claim_uuid = _canonical_uuid(command.claim_uuid, "claim_uuid")
+        attempt = self._validate_attempt(command.attempt)
+        token = self._validate_fencing_token(command.fencing_token)
+        idempotency_key = self._validate_nonblank(
+            command.idempotency_key,
+            "idempotency_key",
+        )
+        expected_state = self._validate_nonblank(
+            command.expected_state,
+            "expected_state",
+        )
+        if expected_state not in {"reserved", "running", "uncertain"}:
+            raise MaterialInvalidInput("expected_state is invalid")
+        resolution = self._validate_nonblank(command.resolution, "resolution")
+        if resolution not in {
+            "confirmed_running",
+            "confirmed_not_dispatched",
+            "confirmed_terminal",
+            "quarantine_and_fail",
+            "unresolved",
+        }:
+            raise MaterialInvalidInput("resolution is invalid")
+        evidence_kind = self._validate_nonblank(
+            command.evidence_kind,
+            "evidence_kind",
+        )
+        evidence_fingerprint = self._validate_fingerprint(
+            command.evidence_fingerprint,
+            "evidence_fingerprint",
+        )
+        actor_identity = self._validate_nonblank(
+            command.actor_identity,
+            "actor_identity",
+        )
+        reason = self._validate_nonblank(command.reason, "reason")
+        observed_at = self._validate_observed_at(command.observed_at)
+        no_send_proof = (
+            self._validate_fingerprint(
+                command.no_send_proof_fingerprint,
+                "no_send_proof_fingerprint",
+            )
+            if command.no_send_proof_fingerprint is not None
+            else None
+        )
+        workflow_terminal_fingerprint = (
+            self._validate_fingerprint(
+                command.workflow_terminal_fingerprint,
+                "workflow_terminal_fingerprint",
+            )
+            if command.workflow_terminal_fingerprint is not None
+            else None
+        )
+        terminal_payload = (
+            _changeset_command_payload(command.terminal_changeset)
+            if command.terminal_changeset is not None
+            else None
+        )
+        normalized_payload = {
+            "schema_version": 1,
+            "command_uuid": command_uuid,
+            "idempotency_key": idempotency_key,
+            "workflow_node_job_uuid": job_uuid,
+            "attempt": attempt,
+            "claim_uuid": claim_uuid,
+            "fencing_token": token,
+            "expected_state": expected_state,
+            "resolution": resolution,
+            "evidence_kind": evidence_kind,
+            "evidence_fingerprint": evidence_fingerprint,
+            "observed_at": observed_at,
+            "actor_identity": actor_identity,
+            "reason": reason,
+            "no_send_proof_fingerprint": no_send_proof,
+            "terminal_changeset": terminal_payload,
+            "workflow_terminal_fingerprint": workflow_terminal_fingerprint,
+        }
+        payload_hash = _canonical_payload_hash(normalized_payload)
+        try:
+            with self._tx() as conn:
+                replay = self._processed_payload(conn, command_uuid, payload_hash)
+                if replay is not None:
+                    return _claim_result_from_payload(replay)
+                claim = self._read_job_claim(conn, claim_uuid=claim_uuid)
+        except sqlite3.Error:
+            raise MaterialAuthorityUnavailable(
+                "failed to read Job Claim resolution state"
+            ) from None
+        if claim is None:
+            raise MaterialNotFound("Job Claim not found")
+        if (
+            claim.workflow_node_job_uuid != job_uuid
+            or claim.attempt != attempt
+            or claim.fencing_token != token
+        ):
+            raise MaterialConflict("stale Job Claim owner or fencing token")
+
+        child_uuid = lambda phase: str(  # noqa: E731 - deterministic command seam
+            uuid.uuid5(UUID(command_uuid), phase)
+        )
+        nested_result: JobClaimResult
+        receipt: MaterialChangeSetReceipt | None = None
+        if resolution == "confirmed_running":
+            if expected_state != "uncertain":
+                raise MaterialConflict("confirmed_running requires uncertain Claim")
+            self._reject_resolution_terminal_fields(
+                no_send_proof,
+                command.terminal_changeset,
+                workflow_terminal_fingerprint,
+            )
+            nested_result = self.mark_job_claim_running(
+                JobClaimStateCommand(
+                    schema_version=1,
+                    command_uuid=child_uuid("confirmed-running"),
+                    idempotency_key=f"{idempotency_key}:confirmed-running",
+                    workflow_node_job_uuid=job_uuid,
+                    attempt=attempt,
+                    claim_uuid=claim_uuid,
+                    fencing_token=token,
+                    evidence_kind=evidence_kind,
+                    evidence_fingerprint=evidence_fingerprint,
+                    expected_state=expected_state,
+                )
+            )
+        elif resolution == "unresolved":
+            self._reject_resolution_terminal_fields(
+                no_send_proof,
+                command.terminal_changeset,
+                workflow_terminal_fingerprint,
+            )
+            nested_result = self.mark_job_claim_uncertain(
+                JobClaimUncertainCommand(
+                    schema_version=1,
+                    command_uuid=child_uuid("unresolved"),
+                    idempotency_key=f"{idempotency_key}:unresolved",
+                    workflow_node_job_uuid=job_uuid,
+                    attempt=attempt,
+                    claim_uuid=claim_uuid,
+                    fencing_token=token,
+                    uncertainty_reason=reason,
+                    evidence_fingerprint=evidence_fingerprint,
+                    expected_state=expected_state,
+                )
+            )
+        elif resolution == "confirmed_not_dispatched":
+            if expected_state != "reserved":
+                raise MaterialConflict(
+                    "confirmed_not_dispatched requires reserved Claim"
+                )
+            if evidence_kind != "coordinator_no_send" or no_send_proof is None:
+                raise MaterialInvalidInput(
+                    "confirmed_not_dispatched requires durable coordinator "
+                    "no-send proof"
+                )
+            if command.terminal_changeset is not None:
+                raise MaterialInvalidInput(
+                    "confirmed_not_dispatched must not carry a terminal ChangeSet"
+                )
+            if workflow_terminal_fingerprint is not None:
+                raise MaterialInvalidInput(
+                    "confirmed_not_dispatched must not carry terminal workflow proof"
+                )
+            nested_result = self.release_job_claim(
+                JobClaimReleaseCommand(
+                    schema_version=1,
+                    command_uuid=child_uuid("confirmed-not-dispatched"),
+                    idempotency_key=(f"{idempotency_key}:confirmed-not-dispatched"),
+                    workflow_node_job_uuid=job_uuid,
+                    attempt=attempt,
+                    claim_uuid=claim_uuid,
+                    fencing_token=token,
+                    release_proof_kind="not_submitted",
+                    material_changeset_uuid=None,
+                    material_changeset_fingerprint=None,
+                    workflow_terminal_fingerprint=no_send_proof,
+                    reason=reason,
+                    expected_state=expected_state,
+                )
+            )
+        else:
+            if expected_state not in {"running", "uncertain"}:
+                raise MaterialConflict(
+                    "terminal resolution requires running or uncertain Claim"
+                )
+            if no_send_proof is not None:
+                raise MaterialInvalidInput(
+                    "terminal resolution must not carry no-send proof"
+                )
+            if command.terminal_changeset is None:
+                raise MaterialInvalidInput(
+                    "terminal resolution requires a Material ChangeSet"
+                )
+            if workflow_terminal_fingerprint is None:
+                raise MaterialInvalidInput(
+                    "terminal resolution requires workflow terminal fingerprint"
+                )
+            terminal = command.terminal_changeset
+            if (
+                terminal.command_uuid == command_uuid
+                or terminal.workflow_task_uuid != claim.workflow_task_uuid
+                or terminal.workflow_node_job_uuid != job_uuid
+                or terminal.attempt != attempt
+                or terminal.claim_uuid != claim_uuid
+                or terminal.fencing_token != token
+            ):
+                raise MaterialConflict(
+                    "terminal resolution ChangeSet owner or command identity conflicts"
+                )
+            if resolution == "quarantine_and_fail":
+                if terminal.outcome != "failed":
+                    raise MaterialInvalidInput(
+                        "quarantine_and_fail requires failed outcome"
+                    )
+                quarantined = {
+                    effect.resource_uuid
+                    for effect in terminal.effects
+                    if effect.resource_kind == "business_material"
+                    and effect.operation == "update"
+                    and effect.after.get("disposition") == "quarantined"
+                }
+                business_members = {
+                    member.resource_uuid
+                    for member in claim.members
+                    if member.resource_kind == "business_material"
+                    and member.released_at is None
+                }
+                if not business_members.issubset(quarantined):
+                    raise MaterialInvalidInput(
+                        "quarantine_and_fail must quarantine every business member"
+                    )
+            receipt = self.commit_material_changeset(
+                MaterialChangeSetCommand(
+                    schema_version=terminal.schema_version,
+                    command_uuid=terminal.command_uuid,
+                    idempotency_key=terminal.idempotency_key,
+                    workflow_task_uuid=terminal.workflow_task_uuid,
+                    workflow_node_job_uuid=terminal.workflow_node_job_uuid,
+                    attempt=terminal.attempt,
+                    claim_uuid=terminal.claim_uuid,
+                    fencing_token=terminal.fencing_token,
+                    effect_identity=terminal.effect_identity,
+                    outcome=terminal.outcome,
+                    result=terminal.result,
+                    effects=terminal.effects,
+                    expected_claim_state=expected_state,
+                )
+            )
+            durable_claim = self.get_job_claim(job_uuid, attempt)
+            nested_result = JobClaimResult(
+                schema_version=1,
+                command_uuid=command_uuid,
+                status="terminal_evidence_committed",
+                claim=durable_claim,
+                diagnostics=(),
+                outbox_sequence=receipt.outbox_sequence,
+            )
+
+        return self._record_job_claim_resolution(
+            command_uuid=command_uuid,
+            idempotency_key=idempotency_key,
+            payload_hash=payload_hash,
+            claim=nested_result.claim,
+            status=nested_result.status,
+            resolution=resolution,
+            evidence_kind=evidence_kind,
+            evidence_fingerprint=evidence_fingerprint,
+            observed_at=observed_at,
+            actor_identity=actor_identity,
+            reason=reason,
+            workflow_terminal_fingerprint=workflow_terminal_fingerprint,
+            receipt=receipt,
+        )
+
+    @staticmethod
+    def _validate_observed_at(value: str) -> str:
+        observed_at = InventoryService._validate_nonblank(value, "observed_at")
+        try:
+            parsed = datetime.fromisoformat(observed_at.replace("Z", "+00:00"))
+        except ValueError:
+            raise MaterialInvalidInput("observed_at must be RFC3339") from None
+        if parsed.tzinfo is None:
+            raise MaterialInvalidInput("observed_at must include a timezone")
+        return observed_at
+
+    @staticmethod
+    def _reject_resolution_terminal_fields(
+        no_send_proof: str | None,
+        terminal_changeset: MaterialChangeSetCommand | None,
+        workflow_terminal_fingerprint: str | None,
+    ) -> None:
+        if (
+            no_send_proof is not None
+            or terminal_changeset is not None
+            or workflow_terminal_fingerprint is not None
+        ):
+            raise MaterialInvalidInput(
+                "resolution carries evidence fields that do not apply"
+            )
+
+    def _record_job_claim_resolution(
+        self,
+        *,
+        command_uuid: str,
+        idempotency_key: str,
+        payload_hash: str,
+        claim: JobClaimRecord | None,
+        status: str,
+        resolution: str,
+        evidence_kind: str,
+        evidence_fingerprint: str,
+        observed_at: str,
+        actor_identity: str,
+        reason: str,
+        workflow_terminal_fingerprint: str | None,
+        receipt: MaterialChangeSetReceipt | None,
+    ) -> JobClaimResult:
+        if claim is None:
+            raise MaterialAuthorityUnavailable("resolved Job Claim disappeared")
+        now_ms = self._now_ms()
+        details = {
+            "resolution": resolution,
+            "evidence_kind": evidence_kind,
+            "evidence_fingerprint": evidence_fingerprint,
+            "observed_at": observed_at,
+            "actor_identity": actor_identity,
+            "reason": reason,
+            "workflow_terminal_fingerprint": workflow_terminal_fingerprint,
+            "material_changeset_uuid": receipt.uuid if receipt else None,
+            "material_changeset_fingerprint": (
+                receipt.deterministic_fingerprint if receipt else None
+            ),
+        }
+        try:
+            with self._tx() as conn:
+                replay = self._processed_payload(conn, command_uuid, payload_hash)
+                if replay is not None:
+                    return _claim_result_from_payload(replay)
+                outbox_sequence = self._emit(
+                    conn,
+                    now_ms,
+                    "material_claim",
+                    claim.uuid,
+                    claim.fencing_token,
+                    "material_claim.resolved",
+                    details,
+                    causation_id=command_uuid,
+                    actor=actor_identity,
+                    reason=reason,
+                )
+                result = JobClaimResult(
+                    schema_version=1,
+                    command_uuid=command_uuid,
+                    status=status,
+                    claim=claim,
+                    diagnostics=(details,),
+                    outbox_sequence=outbox_sequence,
+                )
+                self._insert_processed(
+                    conn,
+                    command_uuid=command_uuid,
+                    idempotency_key=idempotency_key,
+                    command_type="material.claim.resolve",
+                    payload_hash=payload_hash,
+                    result=_claim_result_payload(result),
+                    status="completed",
+                    now_ms=now_ms,
+                )
+        except sqlite3.IntegrityError:
+            try:
+                with self._tx() as conn:
+                    replay = self._processed_payload(
+                        conn,
+                        command_uuid,
+                        payload_hash,
+                    )
+            except sqlite3.Error:
+                raise MaterialAuthorityUnavailable(
+                    "failed to replay Job Claim resolution"
+                ) from None
+            if replay is None:
+                raise MaterialConflict("Job Claim resolution conflicts") from None
+            return _claim_result_from_payload(replay)
+        except sqlite3.Error:
+            raise MaterialAuthorityUnavailable(
+                "failed to record Job Claim resolution"
+            ) from None
+        return result
+
     def get_command_result(
         self,
         command_uuid: str,
-    ) -> TaskMaterialAdmissionResult | TaskMaterialReleaseResult:
+    ) -> (
+        TaskMaterialAdmissionResult
+        | TaskMaterialReleaseResult
+        | JobClaimResult
+        | MaterialChangeSetReceipt
+    ):
         """Read one durable Material command result by command UUID."""
 
         canonical_command_uuid = _canonical_uuid(command_uuid, "command_uuid")
@@ -1533,6 +4522,10 @@ class InventoryService:
                 return _admission_result_from_payload(payload)
             if row.get("command_type") == "material.release":
                 return _release_result_from_payload(payload)
+            if str(row.get("command_type") or "").startswith("material.claim."):
+                return _claim_result_from_payload(payload)
+            if row.get("command_type") == "material.changeset.commit":
+                return _changeset_receipt_from_payload(payload)
             raise MaterialNotFound(
                 f"inventory command {canonical_command_uuid} not found"
             )
@@ -2118,7 +5111,9 @@ class InventoryService:
         if not isinstance(materials, list) or not materials:
             raise MaterialInvalidInput("resource graph bootstrap requires materials")
         if not isinstance(positions, list) or not isinstance(sites, list):
-            raise MaterialInvalidInput("resource graph bootstrap collections are invalid")
+            raise MaterialInvalidInput(
+                "resource graph bootstrap collections are invalid"
+            )
         now_iso = self._now_iso()
         now_ms = self._now_ms()
         try:
@@ -2145,7 +5140,9 @@ class InventoryService:
                 parent_by_material: dict[str, str | None] = {}
                 for raw in materials:
                     if not isinstance(raw, Mapping):
-                        raise MaterialInvalidInput("bootstrap material must be an object")
+                        raise MaterialInvalidInput(
+                            "bootstrap material must be an object"
+                        )
                     material_uuid = _canonical_uuid(raw.get("uuid"), "material.uuid")
                     if material_uuid in material_ids:
                         raise MaterialConflict("bootstrap Material UUID must be unique")
@@ -2208,7 +5205,9 @@ class InventoryService:
                     if parent_uuid is None:
                         continue
                     if parent_uuid not in material_ids or parent_uuid == material_uuid:
-                        raise MaterialInvalidInput("bootstrap Material parent is invalid")
+                        raise MaterialInvalidInput(
+                            "bootstrap Material parent is invalid"
+                        )
                     conn.execute(
                         "UPDATE material SET parent_uuid = ? WHERE uuid = ?",
                         (parent_uuid, material_uuid),
@@ -2248,9 +5247,12 @@ class InventoryService:
                     }
                     if any(values[key] < 0 for key in ("depth", "length", "width")):
                         raise MaterialInvalidInput(
-                            "bootstrap relative_position dimensions must be non-negative"
+                            "bootstrap relative_position dimensions must be "
+                            "non-negative"
                         )
-                    if any(values[key] <= 0 for key in ("scale_x", "scale_y", "scale_z")):
+                    if any(
+                        values[key] <= 0 for key in ("scale_x", "scale_y", "scale_z")
+                    ):
                         raise MaterialInvalidInput(
                             "bootstrap relative_position scale must be positive"
                         )
@@ -2262,7 +5264,10 @@ class InventoryService:
                             position_x, position_y, position_z,
                             depth, length, width, scale_x, scale_y, scale_z,
                             rotation_x, rotation_y, rotation_z
-                        ) VALUES (?, ?, ?, NULL, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                        ) VALUES (
+                            ?, ?, ?, NULL, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?,
+                            ?, ?, ?
+                        )
                         """,
                         (
                             position_uuid,
@@ -2271,20 +5276,23 @@ class InventoryService:
                             raw.get("description"),
                             json.dumps(_json_object(raw.get("meta_data"), "meta_data")),
                             material_uuid,
-                            *(values[key] for key in (
-                                "position_x",
-                                "position_y",
-                                "position_z",
-                                "depth",
-                                "length",
-                                "width",
-                                "scale_x",
-                                "scale_y",
-                                "scale_z",
-                                "rotation_x",
-                                "rotation_y",
-                                "rotation_z",
-                            )),
+                            *(
+                                values[key]
+                                for key in (
+                                    "position_x",
+                                    "position_y",
+                                    "position_z",
+                                    "depth",
+                                    "length",
+                                    "width",
+                                    "scale_x",
+                                    "scale_y",
+                                    "scale_z",
+                                    "rotation_x",
+                                    "rotation_y",
+                                    "rotation_z",
+                                )
+                            ),
                         ),
                     )
 
@@ -2299,12 +5307,16 @@ class InventoryService:
                         raise MaterialInvalidInput("bootstrap Site owner is missing")
                     allowed = raw.get("allowed_resource_template_uuids")
                     if not isinstance(allowed, list):
-                        raise MaterialInvalidInput("bootstrap Site allowlist is invalid")
+                        raise MaterialInvalidInput(
+                            "bootstrap Site allowlist is invalid"
+                        )
                     allowed_uuids = tuple(
                         _canonical_uuid(value, "site.allowed_resource_template_uuids")
                         for value in allowed
                     )
-                    if any(value not in self._resource_templates for value in allowed_uuids):
+                    if any(
+                        value not in self._resource_templates for value in allowed_uuids
+                    ):
                         raise MaterialInvalidInput(
                             "bootstrap Site allowlist template is not registered"
                         )
@@ -2319,8 +5331,12 @@ class InventoryService:
                             "width",
                         )
                     }
-                    if any(site_values[key] < 0 for key in ("depth", "length", "width")):
-                        raise MaterialInvalidInput("bootstrap Site dimensions are invalid")
+                    if any(
+                        site_values[key] < 0 for key in ("depth", "length", "width")
+                    ):
+                        raise MaterialInvalidInput(
+                            "bootstrap Site dimensions are invalid"
+                        )
                     conn.execute(
                         """
                         INSERT INTO site(
@@ -2329,7 +5345,10 @@ class InventoryService:
                             sort_order, occupied_material_uuid,
                             position_x, position_y, position_z,
                             depth, length, width, version
-                        ) VALUES (?, ?, ?, NULL, ?, ?, ?, ?, ?, NULL, ?, ?, ?, ?, ?, ?, 1)
+                        ) VALUES (
+                            ?, ?, ?, NULL, ?, ?, ?, ?, ?, NULL, ?, ?, ?, ?, ?,
+                            ?, 1
+                        )
                         """,
                         (
                             site_uuid,
@@ -2340,14 +5359,17 @@ class InventoryService:
                             owner_uuid,
                             str(raw.get("name") or "").strip(),
                             int(raw.get("sort_order") or 0),
-                            *(site_values[key] for key in (
-                                "position_x",
-                                "position_y",
-                                "position_z",
-                                "depth",
-                                "length",
-                                "width",
-                            )),
+                            *(
+                                site_values[key]
+                                for key in (
+                                    "position_x",
+                                    "position_y",
+                                    "position_z",
+                                    "depth",
+                                    "length",
+                                    "width",
+                                )
+                            ),
                         ),
                     )
                     conn.executemany(
@@ -2478,7 +5500,8 @@ class InventoryService:
                     for row in conn.execute(
                         """
                         SELECT uuid FROM site WHERE deleted_at IS NULL
-                        ORDER BY material_uuid ASC, sort_order ASC, create_time ASC, uuid ASC
+                        ORDER BY material_uuid ASC, sort_order ASC,
+                                 create_time ASC, uuid ASC
                         """
                     ).fetchall()
                 )
@@ -2631,7 +5654,9 @@ class InventoryService:
             with self._tx() as conn:
                 conn.execute(
                     """
-                    INSERT INTO lab_zone(zone_id, name, kind, x, y, w, h, meta_json, version)
+                    INSERT INTO lab_zone(
+                        zone_id, name, kind, x, y, w, h, meta_json, version
+                    )
                     VALUES (?, ?, ?, ?, ?, ?, ?, ?, 1)
                     ON CONFLICT(zone_id) DO UPDATE SET
                         name = excluded.name,
@@ -2841,7 +5866,8 @@ class InventoryService:
                 raise MaterialNotFound(f"material {current_uuid} not found")
             node = _material_record(row).to_dict()
             content = conn.execute(
-                "SELECT state_json, version FROM material_content WHERE material_uuid = ?",
+                "SELECT state_json, version FROM material_content "
+                "WHERE material_uuid = ?",
                 (current_uuid,),
             ).fetchone()
             node["content"] = (

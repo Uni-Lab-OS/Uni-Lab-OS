@@ -251,7 +251,7 @@ CREATE TABLE IF NOT EXISTS workflow_task_material_admission_projection (
 CREATE TABLE IF NOT EXISTS workflow_task_material_release_projection (
     workflow_task_uuid TEXT PRIMARY KEY,
     command_uuid TEXT NOT NULL UNIQUE,
-    status TEXT NOT NULL CHECK (status = 'released'),
+    status TEXT NOT NULL CHECK (status IN ('blocked', 'released')),
     reservation_uuid TEXT,
     outbox_sequence INTEGER NOT NULL CHECK (outbox_sequence > 0),
     result TEXT NOT NULL CHECK (json_valid(result) AND json_type(result) = 'object'),
@@ -357,6 +357,18 @@ CREATE TABLE IF NOT EXISTS device_action_task (
     admitted_device_id TEXT,
     claim_status TEXT NOT NULL DEFAULT 'pending'
         CHECK (claim_status IN ('pending', 'claimed', 'released', 'unknown')),
+    inventory_claim_uuid TEXT,
+    inventory_fencing_token INTEGER CHECK (
+        inventory_fencing_token IS NULL OR inventory_fencing_token > 0
+    ),
+    inventory_claim_set_fingerprint TEXT,
+    material_changeset_uuid TEXT,
+    material_changeset_fingerprint TEXT,
+    material_changeset_outbox_sequence INTEGER CHECK (
+        material_changeset_outbox_sequence IS NULL
+        OR material_changeset_outbox_sequence > 0
+    ),
+    workflow_terminal_fingerprint TEXT,
     create_time TEXT NOT NULL,
     update_time TEXT NOT NULL,
     FOREIGN KEY(workflow_task_uuid)
@@ -589,9 +601,115 @@ class WorkflowStore:
                 self._conn.execute("PRAGMA journal_mode = WAL")
                 self._conn.execute("PRAGMA synchronous = NORMAL")
                 self._conn.executescript(_SCHEMA)
+                self._migrate_m1ef_projection_schema()
         except BaseException:
             self._conn.close()
             raise
+
+    def _migrate_m1ef_projection_schema(self) -> None:
+        """Add only Workflow-owned M1EF logical projection fields."""
+
+        columns = {
+            str(row[1])
+            for row in self._conn.execute('PRAGMA table_info("device_action_task")')
+        }
+        additions = (
+            (
+                "inventory_claim_uuid",
+                "ALTER TABLE device_action_task ADD COLUMN inventory_claim_uuid TEXT",
+            ),
+            (
+                "inventory_fencing_token",
+                """ALTER TABLE device_action_task
+                   ADD COLUMN inventory_fencing_token INTEGER
+                   CHECK (inventory_fencing_token IS NULL
+                          OR inventory_fencing_token > 0)""",
+            ),
+            (
+                "inventory_claim_set_fingerprint",
+                """ALTER TABLE device_action_task
+                   ADD COLUMN inventory_claim_set_fingerprint TEXT""",
+            ),
+            (
+                "material_changeset_uuid",
+                "ALTER TABLE device_action_task ADD COLUMN "
+                "material_changeset_uuid TEXT",
+            ),
+            (
+                "material_changeset_fingerprint",
+                """ALTER TABLE device_action_task
+                   ADD COLUMN material_changeset_fingerprint TEXT""",
+            ),
+            (
+                "material_changeset_outbox_sequence",
+                """ALTER TABLE device_action_task
+                   ADD COLUMN material_changeset_outbox_sequence INTEGER
+                   CHECK (material_changeset_outbox_sequence IS NULL
+                          OR material_changeset_outbox_sequence > 0)""",
+            ),
+            (
+                "workflow_terminal_fingerprint",
+                """ALTER TABLE device_action_task
+                   ADD COLUMN workflow_terminal_fingerprint TEXT""",
+            ),
+        )
+        for name, statement in additions:
+            if name not in columns:
+                self._conn.execute(statement)
+
+        release_sql_row = self._conn.execute(
+            """
+            SELECT sql FROM sqlite_master
+            WHERE type = 'table'
+              AND name = 'workflow_task_material_release_projection'
+            """
+        ).fetchone()
+        release_sql = str(release_sql_row[0] or "") if release_sql_row else ""
+        if "status = 'released'" in release_sql:
+            self._conn.execute("PRAGMA foreign_keys = OFF")
+            try:
+                self._conn.execute("BEGIN IMMEDIATE")
+                self._conn.execute(
+                    """
+                    CREATE TABLE workflow_task_material_release_projection_m1ef (
+                        workflow_task_uuid TEXT PRIMARY KEY,
+                        command_uuid TEXT NOT NULL UNIQUE,
+                        status TEXT NOT NULL
+                            CHECK (status IN ('blocked', 'released')),
+                        reservation_uuid TEXT,
+                        outbox_sequence INTEGER NOT NULL
+                            CHECK (outbox_sequence > 0),
+                        result TEXT NOT NULL
+                            CHECK (json_valid(result)
+                                   AND json_type(result) = 'object'),
+                        create_time TEXT NOT NULL,
+                        update_time TEXT NOT NULL,
+                        FOREIGN KEY(workflow_task_uuid)
+                            REFERENCES workflow_task(uuid) ON DELETE CASCADE
+                    )
+                    """
+                )
+                self._conn.execute(
+                    """
+                    INSERT INTO workflow_task_material_release_projection_m1ef
+                    SELECT * FROM workflow_task_material_release_projection
+                    """
+                )
+                self._conn.execute(
+                    "DROP TABLE workflow_task_material_release_projection"
+                )
+                self._conn.execute(
+                    """ALTER TABLE workflow_task_material_release_projection_m1ef
+                       RENAME TO workflow_task_material_release_projection"""
+                )
+                self._conn.commit()
+            except BaseException:
+                self._conn.rollback()
+                raise
+            finally:
+                self._conn.execute("PRAGMA foreign_keys = ON")
+        else:
+            self._conn.commit()
 
     def close(self) -> None:
         with self._lock:
@@ -1737,6 +1855,8 @@ class WorkflowStore:
     ) -> bool:
         """Idempotently project one terminal Inventory release result."""
 
+        if status not in {"blocked", "released"}:
+            raise StoreConflict("Task Material release status is invalid")
         now = utc_now()
         encoded_result = _json(result)
         with self.transaction() as conn:
@@ -1751,7 +1871,7 @@ class WorkflowStore:
                 raise StoreNotFound(f"workflow task {task_uuid} not found")
             existing = conn.execute(
                 """
-                SELECT command_uuid, result
+                SELECT command_uuid, status, outbox_sequence, result
                 FROM workflow_task_material_release_projection
                 WHERE workflow_task_uuid = ?
                 """,
@@ -1763,25 +1883,50 @@ class WorkflowStore:
                     and existing["result"] == encoded_result
                 ):
                     return False
-                raise StoreConflict("Task Material release projection conflicts")
-            conn.execute(
-                """
-                INSERT INTO workflow_task_material_release_projection(
-                    workflow_task_uuid, command_uuid, status, reservation_uuid,
-                    outbox_sequence, result, create_time, update_time
-                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?)
-                """,
-                (
-                    task_uuid,
-                    command_uuid,
-                    status,
-                    reservation_uuid,
-                    outbox_sequence,
-                    encoded_result,
-                    now,
-                    now,
-                ),
-            )
+                upgrade_blocked = (
+                    existing["command_uuid"] == command_uuid
+                    and existing["status"] == "blocked"
+                    and status == "released"
+                    and outbox_sequence > int(existing["outbox_sequence"])
+                )
+                if not upgrade_blocked:
+                    raise StoreConflict("Task Material release projection conflicts")
+                conn.execute(
+                    """
+                    UPDATE workflow_task_material_release_projection
+                    SET status = 'released', reservation_uuid = ?,
+                        outbox_sequence = ?, result = ?, update_time = ?
+                    WHERE workflow_task_uuid = ? AND command_uuid = ?
+                      AND status = 'blocked'
+                    """,
+                    (
+                        reservation_uuid,
+                        outbox_sequence,
+                        encoded_result,
+                        now,
+                        task_uuid,
+                        command_uuid,
+                    ),
+                )
+            else:
+                conn.execute(
+                    """
+                    INSERT INTO workflow_task_material_release_projection(
+                        workflow_task_uuid, command_uuid, status, reservation_uuid,
+                        outbox_sequence, result, create_time, update_time
+                    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+                    """,
+                    (
+                        task_uuid,
+                        command_uuid,
+                        status,
+                        reservation_uuid,
+                        outbox_sequence,
+                        encoded_result,
+                        now,
+                        now,
+                    ),
+                )
             self._append_event(
                 conn,
                 event="workflow.runtime.changed",

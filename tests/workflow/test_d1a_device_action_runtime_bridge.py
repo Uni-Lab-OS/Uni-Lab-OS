@@ -8,13 +8,17 @@ import json
 import time
 from pathlib import Path
 from typing import Any
-from uuid import uuid4
+from uuid import NAMESPACE_URL, uuid4, uuid5
 
 from fastapi.testclient import TestClient
 
 import tests.app.test_d1a_device_action_task_contract as contract
 from unilabos.app.scheduler.backend import JobExecutionBackend, create_edge_stack
 from unilabos.app.scheduler.dispatch import RecordingDispatcher
+from unilabos.app.scheduler.inventory import (
+    InventoryService,
+    ResourceTemplateIdentity,
+)
 from unilabos.app.scheduler.models import WorkflowNode, WorkflowSpec
 from unilabos.app.scheduler.monitor import MonitorBus
 from unilabos.app.scheduler.service import EdgeScheduler
@@ -45,6 +49,56 @@ def _contains_identity(value: Any, identities: set[str]) -> bool:
     if isinstance(value, list):
         return any(_contains_identity(item, identities) for item in value)
     return isinstance(value, str) and value in identities
+
+
+def _create_m1ef_edge_stack(
+    tmp_path: Path,
+    *,
+    host_node_getter: Any,
+    monitor: Any = None,
+) -> tuple[EdgeScheduler, JobExecutionBackend, InventoryService]:
+    inventory = InventoryService.open(
+        working_dir=tmp_path,
+        resource_templates={
+            contract.RESOURCE_TEMPLATE_UUID: ResourceTemplateIdentity(
+                uuid=contract.RESOURCE_TEMPLATE_UUID,
+                material_class="Robot",
+            )
+        },
+    )
+    inventory.bootstrap_resource_graph(
+        {
+            "source_id": "d1a-m1ef-test-devices.json",
+            "fingerprint": "sha256:" + "9" * 64,
+            "materials": [
+                {
+                    "uuid": str(uuid5(NAMESPACE_URL, f"d1a:{device_id}")),
+                    "resource_template_uuid": contract.RESOURCE_TEMPLATE_UUID,
+                    "parent_uuid": None,
+                    "class": "Robot",
+                    "barcode": "",
+                    "name": device_id,
+                    "description": "D1A M1EF test executor",
+                    "meta_data": {
+                        "source": "resource-tree-set",
+                        "source_node_id": device_id,
+                    },
+                    "config": {},
+                    "data": {},
+                    "material_kind": "device",
+                }
+                for device_id in ("robot", "material-robot")
+            ],
+            "relative_positions": [],
+            "sites": [],
+        }
+    )
+    scheduler, backend = create_edge_stack(
+        host_node_getter=host_node_getter,
+        inventory=inventory,
+        monitor=monitor,
+    )
+    return scheduler, backend, inventory
 
 
 class FeedbackHost:
@@ -230,9 +284,11 @@ def test_duplicate_formal_task_identity_preserves_the_existing_scheduler_run() -
         pass
 
     assert scheduler.snapshot() == before_snapshot
-    assert scheduler._device_action_tasks_by_job_uuid == before_mappings == {
-        job_uuid: task_uuid
-    }
+    assert (
+        scheduler._device_action_tasks_by_job_uuid
+        == before_mappings
+        == {job_uuid: task_uuid}
+    )
     assert scheduler._job_resource_locks == before_resource_locks
 
 
@@ -320,7 +376,10 @@ def test_claim_hook_failure_cannot_leave_a_dispatchable_scheduler_run(
     template = snapshot.node_templates[0]
     host = FeedbackHost()
     host.auto_complete = False
-    scheduler, backend = create_edge_stack(host_node_getter=lambda: host)
+    scheduler, backend, inventory = _create_m1ef_edge_stack(
+        tmp_path,
+        host_node_getter=lambda: host,
+    )
     host.backend = backend
     bridge = DeviceActionTaskRuntimeBridge(
         store=store,
@@ -376,6 +435,7 @@ def test_claim_hook_failure_cannot_leave_a_dispatchable_scheduler_run(
         client.close()
         bridge.stop()
         backend.stop()
+        inventory.close()
         store.close()
 
 
@@ -396,7 +456,10 @@ def test_transport_uncertainty_opens_durable_fence_and_keeps_next_task_pending(
         ],
     )
     template = snapshot.node_templates[0]
-    scheduler, backend = create_edge_stack(host_node_getter=lambda: None)
+    scheduler, backend, inventory = _create_m1ef_edge_stack(
+        tmp_path,
+        host_node_getter=lambda: None,
+    )
     bridge = DeviceActionTaskRuntimeBridge(
         store=store,
         coordinator=WorkflowRuntimeCoordinator(store),
@@ -431,8 +494,7 @@ def test_transport_uncertainty_opens_durable_fence_and_keeps_next_task_pending(
             "/api/v1/device-action-tasks", json=contract._request(harness)
         ).json()["data"]
         assert _wait(
-            lambda: service.get(first["task_uuid"])["job_status"]
-            == "execution_unknown"
+            lambda: service.get(first["task_uuid"])["job_status"] == "execution_unknown"
         )
         second = client.post(
             "/api/v1/device-action-tasks", json=contract._request(harness)
@@ -449,6 +511,7 @@ def test_transport_uncertainty_opens_durable_fence_and_keeps_next_task_pending(
         client.close()
         bridge.stop()
         backend.stop()
+        inventory.close()
         store.close()
 
 
@@ -475,7 +538,10 @@ def test_transport_unknown_fences_every_action_on_the_selected_device(
         ],
     )
     templates = {item["name"]: item for item in snapshot.node_templates}
-    scheduler, backend = create_edge_stack(host_node_getter=lambda: None)
+    scheduler, backend, inventory = _create_m1ef_edge_stack(
+        tmp_path,
+        host_node_getter=lambda: None,
+    )
     bridge = DeviceActionTaskRuntimeBridge(
         store=store,
         coordinator=WorkflowRuntimeCoordinator(store),
@@ -514,8 +580,7 @@ def test_transport_unknown_fences_every_action_on_the_selected_device(
             "/api/v1/device-action-tasks", json=contract._request(harness)
         ).json()["data"]
         assert _wait(
-            lambda: service.get(first["task_uuid"])["job_status"]
-            == "execution_unknown"
+            lambda: service.get(first["task_uuid"])["job_status"] == "execution_unknown"
         )
 
         second = client.post(
@@ -534,6 +599,7 @@ def test_transport_unknown_fences_every_action_on_the_selected_device(
         client.close()
         bridge.stop()
         backend.stop()
+        inventory.close()
         store.close()
 
 
@@ -556,8 +622,9 @@ def test_restart_promotes_inflight_claim_to_unknown_and_fences_new_runtime(
     template = snapshot.node_templates[0]
     first_host = FeedbackHost()
     first_host.auto_complete = False
-    first_scheduler, first_backend = create_edge_stack(
-        host_node_getter=lambda: first_host
+    first_scheduler, first_backend, first_inventory = _create_m1ef_edge_stack(
+        tmp_path,
+        host_node_getter=lambda: first_host,
     )
     first_host.backend = first_backend
     coordinator = WorkflowRuntimeCoordinator(store)
@@ -595,6 +662,7 @@ def test_restart_promotes_inflight_claim_to_unknown_and_fences_new_runtime(
     )
     second_bridge: DeviceActionTaskRuntimeBridge | None = None
     second_backend: JobExecutionBackend | None = None
+    second_inventory: InventoryService | None = None
     second_client: TestClient | None = None
     try:
         first = first_client.post(
@@ -603,13 +671,15 @@ def test_restart_promotes_inflight_claim_to_unknown_and_fences_new_runtime(
         assert _wait(lambda: len(first_host.sent) == 1)
         first_bridge.stop()
         first_backend.stop()
+        first_inventory.close()
 
         coordinator.recover_startup()
 
         second_host = FeedbackHost()
         second_host.auto_complete = False
-        second_scheduler, second_backend = create_edge_stack(
-            host_node_getter=lambda: second_host
+        second_scheduler, second_backend, second_inventory = _create_m1ef_edge_stack(
+            tmp_path,
+            host_node_getter=lambda: second_host,
         )
         second_host.backend = second_backend
         second_bridge = DeviceActionTaskRuntimeBridge(
@@ -671,8 +741,12 @@ def test_restart_promotes_inflight_claim_to_unknown_and_fences_new_runtime(
             second_bridge.stop()
         if second_backend is not None:
             second_backend.stop()
+        if second_inventory is not None:
+            second_inventory.close()
         first_bridge.stop()
         first_backend.stop()
+        if second_inventory is None:
+            first_inventory.close()
         store.close()
 
 
@@ -695,7 +769,10 @@ def test_durable_completion_precedes_scheduler_release_crash_window(
     template = snapshot.node_templates[0]
     host = FeedbackHost()
     host.auto_complete = False
-    scheduler, backend = create_edge_stack(host_node_getter=lambda: host)
+    scheduler, backend, inventory = _create_m1ef_edge_stack(
+        tmp_path,
+        host_node_getter=lambda: host,
+    )
     host.backend = backend
     bridge = DeviceActionTaskRuntimeBridge(
         store=store,
@@ -756,6 +833,7 @@ def test_durable_completion_precedes_scheduler_release_crash_window(
         client.close()
         bridge.stop()
         backend.stop()
+        inventory.close()
         store.close()
 
 
@@ -777,7 +855,10 @@ def test_late_result_closes_transport_uncertainty_and_releases_fence(
     )
     template = snapshot.node_templates[0]
     host = UncertainFeedbackHost()
-    scheduler, backend = create_edge_stack(host_node_getter=lambda: host)
+    scheduler, backend, inventory = _create_m1ef_edge_stack(
+        tmp_path,
+        host_node_getter=lambda: host,
+    )
     host.backend = backend
     bridge = DeviceActionTaskRuntimeBridge(
         store=store,
@@ -813,8 +894,9 @@ def test_late_result_closes_transport_uncertainty_and_releases_fence(
             "/api/v1/device-action-tasks", json=contract._request(harness)
         ).json()["data"]
         assert _wait(
-            lambda: service.get(created["task_uuid"])["job_status"]
-            == "execution_unknown"
+            lambda: (
+                service.get(created["task_uuid"])["job_status"] == "execution_unknown"
+            )
         )
 
         backend.publish_job_status(
@@ -823,19 +905,18 @@ def test_late_result_closes_transport_uncertainty_and_releases_fence(
             "success",
             serialize_result_info("", True, {"completed": True}),
         )
-        assert _wait(
-            lambda: service.get(created["task_uuid"])["status"] == "succeeded"
-        )
+        assert _wait(lambda: service.get(created["task_uuid"])["status"] == "succeeded")
 
         view = service.get(created["task_uuid"])
         assert view["job_status"] == "succeeded"
         assert view["control_status"] == "active"
-        assert view["cleanup_status"] == "none"
+        assert view["cleanup_status"] == "settled"
         assert bridge.busy_device_action_keys() == set()
     finally:
         client.close()
         bridge.stop()
         backend.stop()
+        inventory.close()
         store.close()
 
 
@@ -858,7 +939,8 @@ def test_device_action_runtime_reuses_formal_job_for_feedback_and_typed_result(
     template = snapshot.node_templates[0]
     host = FeedbackHost()
     monitor = MonitorBus()
-    scheduler, backend = create_edge_stack(
+    scheduler, backend, inventory = _create_m1ef_edge_stack(
+        tmp_path,
         host_node_getter=lambda: host,
         monitor=monitor,
     )
@@ -944,6 +1026,7 @@ def test_device_action_runtime_reuses_formal_job_for_feedback_and_typed_result(
         client.close()
         bridge.stop()
         backend.stop()
+        inventory.close()
         store.close()
 
 
@@ -966,7 +1049,10 @@ def test_busy_second_task_stays_durable_pending_until_first_releases(
     template = snapshot.node_templates[0]
     host = FeedbackHost()
     host.auto_complete = False
-    scheduler, backend = create_edge_stack(host_node_getter=lambda: host)
+    scheduler, backend, inventory = _create_m1ef_edge_stack(
+        tmp_path,
+        host_node_getter=lambda: host,
+    )
     host.backend = backend
     bridge = DeviceActionTaskRuntimeBridge(
         store=store,
@@ -1029,6 +1115,7 @@ def test_busy_second_task_stays_durable_pending_until_first_releases(
         client.close()
         bridge.stop()
         backend.stop()
+        inventory.close()
         store.close()
 
 
@@ -1051,7 +1138,10 @@ def test_running_task_normalizes_result_with_its_frozen_contract_snapshot(
     template = snapshot.node_templates[0]
     host = FeedbackHost()
     host.auto_complete = False
-    scheduler, backend = create_edge_stack(host_node_getter=lambda: host)
+    scheduler, backend, inventory = _create_m1ef_edge_stack(
+        tmp_path,
+        host_node_getter=lambda: host,
+    )
     host.backend = backend
     bridge = DeviceActionTaskRuntimeBridge(
         store=store,
@@ -1131,6 +1221,7 @@ def test_running_task_normalizes_result_with_its_frozen_contract_snapshot(
         client.close()
         bridge.stop()
         backend.stop()
+        inventory.close()
         store.close()
 
 
@@ -1175,7 +1266,10 @@ def test_pending_task_dispatches_with_its_frozen_action_transport_type(
     )
     host = FeedbackHost()
     host.auto_complete = False
-    scheduler, backend = create_edge_stack(host_node_getter=lambda: host)
+    scheduler, backend, inventory = _create_m1ef_edge_stack(
+        tmp_path,
+        host_node_getter=lambda: host,
+    )
     host.backend = backend
     bridge = DeviceActionTaskRuntimeBridge(
         store=store,
@@ -1243,6 +1337,7 @@ def test_pending_task_dispatches_with_its_frozen_action_transport_type(
         client.close()
         bridge.stop()
         backend.stop()
+        inventory.close()
         store.close()
 
 
@@ -1265,7 +1360,10 @@ def test_durable_cancel_command_requests_host_cancel_and_finishes_canceled(
     template = snapshot.node_templates[0]
     host = FeedbackHost()
     host.auto_complete = False
-    scheduler, backend = create_edge_stack(host_node_getter=lambda: host)
+    scheduler, backend, inventory = _create_m1ef_edge_stack(
+        tmp_path,
+        host_node_getter=lambda: host,
+    )
     host.backend = backend
     coordinator = WorkflowRuntimeCoordinator(store)
     bridge = DeviceActionTaskRuntimeBridge(
@@ -1330,4 +1428,5 @@ def test_durable_cancel_command_requests_host_cancel_and_finishes_canceled(
         client.close()
         bridge.stop()
         backend.stop()
+        inventory.close()
         store.close()
