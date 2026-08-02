@@ -220,6 +220,7 @@ class CompositeAuthoring:
         module: str,
         symbol: str,
         keyword_arguments: Mapping[str, object],
+        parent_input_contract: Mapping[str, object] | None = None,
     ) -> CompositeExpansion:
         """只读编译一个 child invocation；任何失败都返回零写诊断。"""
 
@@ -261,7 +262,11 @@ class CompositeAuthoring:
             with self._catalog.snapshot(self._authority) as catalog_snapshot:
                 parent_graph = self._store.get_graph(parent_uuid)
                 try:
-                    parent_input_contract = _parent_input_contract(parent_graph)
+                    effective_parent_contract = (
+                        _parent_input_contract(parent_graph)
+                        if parent_input_contract is None
+                        else parse_input_contract(parent_input_contract).to_dict()
+                    )
                 except (TypeError, ValueError, WorkflowSchemaError):
                     raise _CompositeFailure(
                         "composite_boundary_mapping_invalid",
@@ -278,7 +283,7 @@ class CompositeAuthoring:
                     base_node=None,
                 )
                 effective = _effective_parent_input_contract(
-                    parent_input_contract,
+                    effective_parent_contract,
                     expanded.effective_input_contract,
                     keyword_arguments,
                 )
@@ -2269,6 +2274,133 @@ def _semantic_descriptor(raw: Mapping[str, Any]) -> dict[str, Any]:
     return result
 
 
+def classify_published_workflow_compatibility(
+    *,
+    previous_template: Mapping[str, Any],
+    previous_handles: Sequence[Mapping[str, Any]],
+    current_template: Mapping[str, Any],
+    current_handles: Sequence[Mapping[str, Any]],
+) -> str:
+    """按 C1 compatibility_version=1 分类 Published Workflow 合同演化。"""
+
+    try:
+        previous = _compatibility_projection(
+            previous_template,
+            previous_handles,
+        )
+        current = _compatibility_projection(current_template, current_handles)
+    except (KeyError, TypeError, ValueError):
+        return "breaking"
+    if (
+        previous["workflow_uuid"] != current["workflow_uuid"]
+        or previous["template_uuid"] != current["template_uuid"]
+        or previous["mode"] != current["mode"]
+    ):
+        return "breaking"
+    previous_inputs = previous["inputs"]
+    current_inputs = current["inputs"]
+    previous_outputs = previous["outputs"]
+    current_outputs = current["outputs"]
+    if previous["digest"] == current["digest"]:
+        return (
+            "exact"
+            if previous_inputs == current_inputs and previous_outputs == current_outputs
+            else "breaking"
+        )
+    if (
+        current_inputs[: len(previous_inputs)] != previous_inputs
+        or current_outputs[: len(previous_outputs)] != previous_outputs
+    ):
+        return "breaking"
+    if any(
+        item["required"] is not False or item["has_default"] is not True
+        for item in current_inputs[len(previous_inputs) :]
+    ):
+        return "breaking"
+    return "additive"
+
+
+def _compatibility_projection(
+    template: Mapping[str, Any],
+    handles: Sequence[Mapping[str, Any]],
+) -> dict[str, Any]:
+    schema = template["schema"]
+    extension = schema["x-unilabos-workflow-contract"]
+    if (
+        not isinstance(schema, Mapping)
+        or not isinstance(extension, Mapping)
+        or extension.get("version") != 1
+        or extension.get("compatibility_version") != 1
+    ):
+        raise ValueError("Published Workflow contract 无效")
+    properties = schema["properties"]
+    goal = properties["goal"]
+    result = properties["result"]
+    goal_properties = goal["properties"]
+    result_properties = result["properties"]
+    required_inputs = set(goal.get("required", []))
+    goal_default = template.get("goal_default", {})
+    if not all(
+        isinstance(value, Mapping)
+        for value in (properties, goal, result, goal_properties, result_properties)
+    ) or not isinstance(goal_default, Mapping):
+        raise ValueError("Published Workflow schema 无效")
+    input_order = extension["input_order"]
+    output_order = extension["output_order"]
+    if (
+        not isinstance(input_order, list)
+        or not isinstance(output_order, list)
+        or any(not isinstance(name, str) for name in [*input_order, *output_order])
+    ):
+        raise ValueError("Published Workflow order 无效")
+    handle_by_key = {
+        (str(handle.get("handle_key")), str(handle.get("io_type"))): handle
+        for handle in handles
+    }
+
+    def handle_identity(name: str, io_type: str) -> str:
+        handle = handle_by_key[(name, io_type)]
+        value = handle.get("uuid")
+        if not isinstance(value, str):
+            raise TypeError("Published Workflow Handle UUID 无效")
+        return value
+
+    inputs = [
+        {
+            "name": name,
+            "schema": _plain(goal_properties[name]),
+            "required": name in required_inputs,
+            "has_default": name in goal_default,
+            **({"default": _plain(goal_default[name])} if name in goal_default else {}),
+            "handle_uuid": handle_identity(name, "target"),
+        }
+        for name in input_order
+    ]
+    outputs = []
+    for name in output_order:
+        handle = handle_by_key[(name, "source")]
+        meta_data = handle.get("meta_data")
+        unilab = meta_data.get("unilab") if isinstance(meta_data, Mapping) else None
+        if not isinstance(unilab, Mapping):
+            raise TypeError("Published Workflow Handle metadata 无效")
+        outputs.append(
+            {
+                "name": name,
+                "schema": _plain(result_properties[name]),
+                "implicit": bool(unilab.get("implicit_passthrough", False)),
+                "handle_uuid": handle_identity(name, "source"),
+            }
+        )
+    return {
+        "template_uuid": str(template["uuid"]),
+        "workflow_uuid": str(extension["workflow_uuid"]),
+        "mode": extension["composition_allow_transparent"],
+        "digest": str(extension["contract_digest"]),
+        "inputs": inputs,
+        "outputs": outputs,
+    }
+
+
 def _contract_digest(
     *,
     inputs: Sequence[Mapping[str, Any]],
@@ -2385,5 +2517,6 @@ __all__ = [
     "PublishedWorkflowCatalogPublisher",
     "PublishedWorkflowResolver",
     "PublishedWorkflowSource",
+    "classify_published_workflow_compatibility",
     "project_published_workflow_contract",
 ]

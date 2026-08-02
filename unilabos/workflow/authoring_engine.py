@@ -37,7 +37,11 @@ from unilabos.workflow.catalog import (
     TemplateCatalogSnapshot,
     TemplateCatalogUnavailable,
 )
-from unilabos.workflow.composite import CompositeAuthoring, CompositeExpansion
+from unilabos.workflow.composite import (
+    CompositeAuthoring,
+    CompositeExpansion,
+    classify_published_workflow_compatibility,
+)
 from unilabos.workflow.graph_validation import (
     CodedGraphValidationError,
     GraphValidationError,
@@ -1729,6 +1733,7 @@ def _parse_composite(
         module=module,
         symbol=symbol,
         keyword_arguments=keyword_arguments,
+        parent_input_contract=state.effective_input_contract,
     )
     _require_composite_expansion(expansion, statement)
     assert expansion.invocation_node is not None
@@ -1737,7 +1742,12 @@ def _parse_composite(
     invocation["parent_uuid"] = parent_uuid
     applied = state.applied_nodes.get(node_uuid)
     if applied is not None:
-        _assert_composite_pin_compatible(applied, expansion, statement)
+        _assert_composite_pin_compatible(
+            applied,
+            expansion,
+            statement,
+            applied_graph=state.applied_graph,
+        )
         for key in (
             "description",
             "icon",
@@ -1854,6 +1864,8 @@ def _assert_composite_pin_compatible(
     applied: Mapping[str, Any],
     expansion: CompositeExpansion,
     statement: ast.stmt,
+    *,
+    applied_graph: Mapping[str, Any],
 ) -> None:
     try:
         stored = applied["meta_data"]["unilab"]["composite"]
@@ -1865,17 +1877,72 @@ def _assert_composite_pin_compatible(
             "Published Workflow contract pin 不符合合同",
             node=statement,
         )
-    for key in (
-        "child_workflow_uuid",
-        "contract_digest",
-        "composition_allow_transparent",
+    template_uuid = str(applied.get("workflow_node_template_uuid") or "")
+    previous_template = next(
+        (
+            template
+            for template in applied_graph.get("node_templates", [])
+            if template.get("uuid") == template_uuid
+        ),
+        None,
+    )
+    current_template = next(
+        (
+            template
+            for template in expansion.node_templates
+            if template.get("uuid") == template_uuid
+        ),
+        None,
+    )
+    if not isinstance(previous_template, Mapping) or not isinstance(
+        current_template, Mapping
     ):
-        if stored.get(key) != expansion.contract_pin.get(key):
-            _fail(
-                "composite_contract_stale",
-                "Published Workflow contract 已发生 breaking 变化",
-                node=statement,
-            )
+        _fail(
+            "composite_contract_stale",
+            "Published Workflow contract template 缺失",
+            node=statement,
+        )
+    previous_schema = previous_template.get("schema")
+    previous_extension = (
+        previous_schema.get("x-unilabos-workflow-contract")
+        if isinstance(previous_schema, Mapping)
+        else None
+    )
+    if not isinstance(previous_extension, Mapping) or any(
+        stored.get(key) != previous_extension.get(extension_key)
+        for key, extension_key in (
+            ("child_workflow_uuid", "workflow_uuid"),
+            ("contract_digest", "contract_digest"),
+            ("composition_allow_transparent", "composition_allow_transparent"),
+        )
+    ):
+        _fail(
+            "composite_contract_stale",
+            "Published Workflow stored contract pin 不自洽",
+            node=statement,
+        )
+    previous_handles = [
+        handle
+        for handle in applied_graph.get("handle_templates", [])
+        if handle.get("workflow_node_template_uuid") == template_uuid
+    ]
+    current_handles = [
+        handle
+        for handle in expansion.handle_templates
+        if handle.get("workflow_node_template_uuid") == template_uuid
+    ]
+    compatibility = classify_published_workflow_compatibility(
+        previous_template=previous_template,
+        previous_handles=previous_handles,
+        current_template=current_template,
+        current_handles=current_handles,
+    )
+    if compatibility == "breaking":
+        _fail(
+            "composite_contract_stale",
+            "Published Workflow contract 已发生 breaking 变化",
+            node=statement,
+        )
 
 
 def _with_kind(statement: ast.With, imports: Mapping[str, str]) -> str | None:
@@ -3238,6 +3305,7 @@ def _generate_with_snapshot(
             material_source_authority=material_source_authority,
         )
         normalized_candidate = _materialize_typed_action_defaults(candidate)
+        unexpanded_composites = _unexpanded_composite_invocations(normalized_candidate)
         source, source_map = _render_graph(
             normalized_candidate,
             resource_template_identity_index=resource_template_identity_index,
@@ -3256,7 +3324,19 @@ def _generate_with_snapshot(
         )
         if (
             not recompiled.valid
-            or not _semantic_graph_equal(recompiled.graph, normalized_candidate)
+            or not (
+                _semantic_graph_equal(recompiled.graph, normalized_candidate)
+                or (
+                    unexpanded_composites
+                    and _semantic_graph_equal(
+                        _project_unexpanded_composite_boundaries(
+                            recompiled.graph,
+                            unexpanded_composites,
+                        ),
+                        normalized_candidate,
+                    )
+                )
+            )
             or recompiled.normalized_python_source != source
         ):
             _fail(
@@ -3802,7 +3882,7 @@ def _root_construct_layers(
     edges: Sequence[dict[str, Any]],
     templates: Mapping[str, dict[str, Any]],
 ) -> list[list[dict[str, Any]]]:
-    """Collapse presentation groups/Composite internals to canonical root order."""
+    """折叠展示 group 与 Composite 内部节点，恢复唯一可表示的根顺序。"""
 
     group_uuids = {item["uuid"] for item in nodes if _is_group_node(item, templates)}
     node_by_uuid = {str(item["uuid"]): item for item in nodes}
@@ -4500,6 +4580,96 @@ def _semantic_graph_equal(left: Any, right: Any) -> bool:
         )
     except (KeyError, TypeError, ValueError):
         return False
+
+
+def _unexpanded_composite_invocations(graph: Mapping[str, Any]) -> set[str]:
+    templates = {
+        str(template.get("uuid")): template
+        for template in graph.get("node_templates", [])
+        if isinstance(template, Mapping)
+    }
+    nodes = [node for node in graph.get("nodes", []) if isinstance(node, Mapping)]
+    parent_uuids = {
+        str(node.get("parent_uuid"))
+        for node in nodes
+        if isinstance(node.get("parent_uuid"), str)
+    }
+    result: set[str] = set()
+    for node in nodes:
+        node_uuid = str(node.get("uuid") or "")
+        template = templates.get(str(node.get("workflow_node_template_uuid")), {})
+        if not node_uuid or not _is_published_workflow_template(template):
+            continue
+        meta_data = node.get("meta_data")
+        unilab = meta_data.get("unilab") if isinstance(meta_data, Mapping) else None
+        if isinstance(unilab, Mapping) and isinstance(unilab.get("composite"), Mapping):
+            continue
+        if node_uuid in parent_uuids:
+            _fail(
+                "candidate_invalid",
+                "未展开 Composite boundary 不得携带 internal Nodes",
+            )
+        result.add(node_uuid)
+    return result
+
+
+def _project_unexpanded_composite_boundaries(
+    graph: Any,
+    invocation_uuids: set[str],
+) -> dict[str, Any]:
+    if not isinstance(graph, Mapping):
+        _fail("round_trip_mismatch", "Composite round-trip graph 缺失")
+    projected = _detached(graph)
+    nodes = projected.get("nodes")
+    if not isinstance(nodes, list):
+        _fail("round_trip_mismatch", "Composite round-trip Nodes 缺失")
+    descendants: set[str] = set()
+    changed = True
+    while changed:
+        changed = False
+        for node in nodes:
+            node_uuid = str(node.get("uuid") or "")
+            parent_uuid = node.get("parent_uuid")
+            if (
+                node_uuid not in invocation_uuids
+                and node_uuid not in descendants
+                and parent_uuid in invocation_uuids | descendants
+            ):
+                descendants.add(node_uuid)
+                changed = True
+    retained_nodes = []
+    for node in nodes:
+        node_uuid = str(node.get("uuid") or "")
+        if node_uuid in descendants:
+            continue
+        if node_uuid in invocation_uuids:
+            meta_data = node.get("meta_data")
+            unilab = meta_data.get("unilab") if isinstance(meta_data, dict) else None
+            if isinstance(unilab, dict):
+                unilab.pop("composite", None)
+        retained_nodes.append(node)
+    projected["nodes"] = retained_nodes
+    retained_uuids = {str(node["uuid"]) for node in retained_nodes}
+    projected["edges"] = [
+        edge
+        for edge in projected.get("edges", [])
+        if edge.get("source_node_uuid") in retained_uuids
+        and edge.get("target_node_uuid") in retained_uuids
+    ]
+    template_uuids = {
+        str(node.get("workflow_node_template_uuid")) for node in retained_nodes
+    }
+    projected["node_templates"] = [
+        template
+        for template in projected.get("node_templates", [])
+        if str(template.get("uuid")) in template_uuids
+    ]
+    projected["handle_templates"] = [
+        handle
+        for handle in projected.get("handle_templates", [])
+        if str(handle.get("workflow_node_template_uuid")) in template_uuids
+    ]
+    return projected
 
 
 __all__ = ["WorkflowAuthoringEngine"]
