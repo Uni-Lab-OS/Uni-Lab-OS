@@ -7,7 +7,7 @@ from dataclasses import dataclass
 from types import MappingProxyType
 from typing import Any
 
-from unilabos.workflow.models import WorkflowNodeWrite
+from unilabos.workflow.models import WorkflowNodeWrite, validate_uuid
 from unilabos.workflow.schema import (
     WorkflowInputContract,
     WorkflowOutputContract,
@@ -80,6 +80,55 @@ def validate_workflow_io(
         input_bindings=MappingProxyType(input_bindings),
         output_bindings=MappingProxyType(output_bindings),
     )
+
+
+def validate_workflow_graph_io(graph: Mapping[str, Any]) -> ValidatedWorkflowIO:
+    """从 Backend-shaped graph 构造并验证唯一的 Workflow I/O authority。"""
+
+    try:
+        workflow = graph.get("workflow")
+        raw_nodes = graph.get("nodes")
+        raw_handles = graph.get("handle_templates")
+        if (
+            not isinstance(workflow, Mapping)
+            or not isinstance(raw_nodes, list)
+            or not isinstance(raw_handles, list)
+        ):
+            raise WorkflowIOValidationError("Workflow graph I/O projection 无效")
+
+        nodes: dict[str, WorkflowNodeWrite] = {}
+        node_meta_data: dict[str, Mapping[str, Any]] = {}
+        for raw_node in raw_nodes:
+            if not isinstance(raw_node, Mapping):
+                raise WorkflowIOValidationError("Workflow Node projection 无效")
+            node = WorkflowNodeWrite.model_validate(raw_node)
+            if node.uuid in nodes:
+                raise WorkflowIOValidationError("Workflow Node UUID 重复")
+            nodes[node.uuid] = node
+            node_meta_data[node.uuid] = node.meta_data
+
+        handles: dict[str, Mapping[str, Any]] = {}
+        for handle in raw_handles:
+            if not isinstance(handle, Mapping):
+                raise WorkflowIOValidationError("Workflow Handle projection 无效")
+            handle_uuid = handle.get("uuid")
+            if not isinstance(handle_uuid, str):
+                raise WorkflowIOValidationError("Workflow Handle UUID 无效或重复")
+            canonical_handle_uuid = validate_uuid(handle_uuid)
+            if canonical_handle_uuid != handle_uuid or handle_uuid in handles:
+                raise WorkflowIOValidationError("Workflow Handle UUID 无效或重复")
+            handles[handle_uuid] = handle
+
+        return validate_workflow_io(
+            nodes=nodes,
+            handles=handles,
+            workflow_meta_data=workflow.get("meta_data", {}),
+            node_meta_data=node_meta_data,
+        )
+    except WorkflowIOValidationError:
+        raise
+    except (KeyError, TypeError, ValueError, WorkflowSchemaError) as exc:
+        raise WorkflowIOValidationError("Workflow graph I/O projection 无效") from exc
 
 
 def handle_value_schema(handle: Mapping[str, Any]) -> WorkflowValueSchema:
@@ -556,5 +605,6 @@ __all__ = [
     "handle_value_schema",
     "resource_slot_passthrough_is_compatible",
     "schema_is_assignable",
+    "validate_workflow_graph_io",
     "validate_workflow_io",
 ]
