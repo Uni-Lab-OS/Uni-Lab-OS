@@ -205,7 +205,15 @@ class EdgeScheduler:
     def _material_saga_slot(self, task_uuid: str) -> Iterator[None]:
         """Serialize one Task without holding a mutex across durable operations."""
 
-        task_uuid = str(uuid_mod.UUID(task_uuid))
+        try:
+            task_uuid = str(uuid_mod.UUID(task_uuid))
+        except (AttributeError, TypeError, ValueError):
+            if self._workflow_tasks is None:
+                raise RuntimeError(
+                    "Workflow Task Material coordination is not configured"
+                ) from None
+            self._workflow_tasks.get_workflow_task(task_uuid)
+            raise
         with self._material_saga_condition:
             while task_uuid in self._active_material_sagas:
                 self._material_saga_condition.wait()
