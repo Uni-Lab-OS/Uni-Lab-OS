@@ -27,7 +27,7 @@ from unilabos.workflow.device_action_task import (
     DeviceActionTaskService,
 )
 from unilabos.workflow.runtime import WorkflowRuntimeCoordinator
-from unilabos.workflow.service import WorkflowService
+from unilabos.workflow.service import WorkflowError, WorkflowService
 from unilabos.workflow.store import WorkflowStore
 
 DEVICE_MATERIAL_UUID = "51000000-0000-4000-8000-000000000401"
@@ -109,6 +109,88 @@ def _database_rows(database: Path) -> dict[str, tuple[tuple[Any, ...], ...]]:
         }
     finally:
         connection.close()
+
+
+def _create_faulted_d1a_task(tmp_path: Path, fault_stage: str) -> dict[str, Any]:
+    store = WorkflowStore(tmp_path / "workflow.db")
+    catalog = TemplateCatalog(store)
+    snapshot = catalog.replace(
+        contract.AUTHORITY,
+        [
+            contract._template_import(
+                name="move",
+                display_name="移动",
+                resource_template_uuid=contract.RESOURCE_TEMPLATE_UUID,
+                schema=contract.SIMPLE_SCHEMA,
+            )
+        ],
+    )
+    inventory = _inventory(tmp_path)
+    host = FeedbackHost()
+    host.auto_complete = False
+    scheduler, backend = create_edge_stack(
+        host_node_getter=lambda: host,
+        inventory=inventory,
+    )
+    host.backend = backend
+
+    def fault(stage: str) -> None:
+        if stage == fault_stage:
+            raise RuntimeError(f"simulated crash at {stage}")
+
+    bridge = DeviceActionTaskRuntimeBridge(
+        store=store,
+        coordinator=WorkflowRuntimeCoordinator(store),
+        scheduler=scheduler,
+        backend=backend,
+        fault_hook=fault,
+    )
+    bridge.start()
+    live = contract.MutableLiveCatalog()
+    service = DeviceActionTaskService(
+        store=store,
+        template_catalog=catalog,
+        authority=contract.AUTHORITY,
+        live_catalog=live,
+        admission=bridge,
+    )
+    client = TestClient(
+        create_workflow_app(WorkflowService(store), device_action_tasks=service)
+    )
+    harness = contract.Harness(
+        tmp_path / "workflow.db",
+        store,
+        client,
+        catalog,
+        snapshot.fingerprint,
+        str(snapshot.node_templates[0]["uuid"]),
+        "",
+        live,
+        bridge,
+    )
+    try:
+        response = client.post(
+            "/api/v1/device-action-tasks",
+            json=contract._request(harness),
+        )
+        assert response.status_code == 201
+        created = response.json()["data"]
+        if fault_stage == "after_workflow_terminal_commit":
+            assert _wait(lambda: len(host.sent) == 1)
+            backend.publish_job_status(
+                {"completed": True},
+                host.sent[0],
+                "success",
+                serialize_result_info("", True, {"completed": True}),
+            )
+            assert _wait(lambda: _job_status(store, created["job_uuid"]) == "succeeded")
+        return created
+    finally:
+        client.close()
+        bridge.stop()
+        backend.stop()
+        inventory.close()
+        store.close()
 
 
 def test_d1a_terminal_saga_commits_receipt_before_releasing_claim_and_reopens(
@@ -206,6 +288,20 @@ def test_d1a_terminal_saga_commits_receipt_before_releasing_claim_and_reopens(
             projection["workflow_terminal_fingerprint"]
             == claim.workflow_terminal_fingerprint
         )
+        guarded = sqlite3.connect(tmp_path / "workflow.db")
+        try:
+            with pytest.raises(sqlite3.IntegrityError, match="projection"):
+                guarded.execute(
+                    """
+                    UPDATE device_action_task
+                    SET material_changeset_fingerprint = NULL
+                    WHERE workflow_node_job_uuid = ?
+                    """,
+                    (created["job_uuid"],),
+                )
+            guarded.rollback()
+        finally:
+            guarded.close()
     finally:
         client.close()
         bridge.stop()
@@ -232,8 +328,10 @@ def test_d1a_terminal_saga_commits_receipt_before_releasing_claim_and_reopens(
         ("after_material_changeset_commit", "released", "succeeded"),
         ("after_workflow_terminal_commit", "released", "succeeded"),
         ("after_inventory_claim_release", "released", "succeeded"),
+        ("before_material_changeset_outbox_ack", "released", "succeeded"),
+        ("before_material_claim_release_outbox_ack", "released", "succeeded"),
     ],
-    ids=["c1", "c2", "c3", "c4", "c5-c7", "c6"],
+    ids=["c1", "c2", "c3", "c4", "c5", "c6", "c7-receipt", "c7-release"],
 )
 def test_d1a_crash_windows_replay_from_two_durable_databases(
     tmp_path: Path,
@@ -471,3 +569,170 @@ def test_d1a_dispatch_startup_fails_closed_for_corrupt_inventory_fence(
         backend.stop()
         store.close()
         inventory.close()
+
+
+def test_d1a_startup_fails_closed_for_inventory_claim_without_workflow_facts(
+    tmp_path: Path,
+) -> None:
+    inventory = _inventory(tmp_path)
+    acquired = inventory.acquire_job_claim(
+        JobClaimAcquireCommand(
+            schema_version=1,
+            command_uuid="82000000-0000-4000-8000-000000000902",
+            idempotency_key="m1ef-orphan-claim",
+            workflow_task_uuid="91000000-0000-4000-8000-000000000902",
+            workflow_node_job_uuid="b1000000-0000-4000-8000-000000000902",
+            attempt=1,
+            device_material_uuid=DEVICE_MATERIAL_UUID,
+            mutable_material_root_uuids=(),
+            occupancy_changing_site_uuids=(),
+        )
+    )
+    assert acquired.claim is not None
+    store = WorkflowStore(tmp_path / "workflow.db")
+    scheduler, backend = create_edge_stack(
+        host_node_getter=lambda: None,
+        inventory=inventory,
+    )
+    bridge = DeviceActionTaskRuntimeBridge(
+        store=store,
+        coordinator=WorkflowRuntimeCoordinator(store),
+        scheduler=scheduler,
+        backend=backend,
+    )
+    try:
+        with pytest.raises(WorkflowError) as raised:
+            bridge.start()
+        assert raised.value.code == "reconciliation_required"
+        assert not bridge.is_available()
+        assert inventory.list_unsettled_claims() == (acquired.claim,)
+    finally:
+        bridge.stop()
+        backend.stop()
+        store.close()
+        inventory.close()
+
+
+def test_c1_claim_followed_by_durable_cancel_releases_only_with_no_send_proof(
+    tmp_path: Path,
+) -> None:
+    created = _create_faulted_d1a_task(tmp_path, "after_inventory_claim_commit")
+    connection = sqlite3.connect(tmp_path / "workflow.db")
+    try:
+        connection.execute(
+            "UPDATE workflow_node_job SET status = 'canceled' WHERE uuid = ?",
+            (created["job_uuid"],),
+        )
+        connection.execute(
+            """
+            UPDATE workflow_task
+            SET status = 'canceled', cleanup_status = 'pending' WHERE uuid = ?
+            """,
+            (created["task_uuid"],),
+        )
+        connection.commit()
+    finally:
+        connection.close()
+
+    store = WorkflowStore(tmp_path / "workflow.db")
+    inventory = _inventory(tmp_path)
+    host = FeedbackHost()
+    scheduler, backend = create_edge_stack(
+        host_node_getter=lambda: host,
+        inventory=inventory,
+    )
+    bridge = DeviceActionTaskRuntimeBridge(
+        store=store,
+        coordinator=WorkflowRuntimeCoordinator(store),
+        scheduler=scheduler,
+        backend=backend,
+    )
+    try:
+        bridge.start()
+        claim = inventory.get_job_claim(created["job_uuid"], 1)
+        assert claim.state == "released"
+        assert claim.release_proof_kind == "not_submitted"
+        assert claim.terminal_changeset_uuid is None
+        assert claim.workflow_terminal_fingerprint is None
+        assert host.sent == []
+        with store.transaction() as workflow_connection:
+            projection = workflow_connection.execute(
+                """
+                SELECT claim_status FROM device_action_task
+                WHERE workflow_node_job_uuid = ?
+                """,
+                (created["job_uuid"],),
+            ).fetchone()
+        assert projection["claim_status"] == "released"
+    finally:
+        bridge.stop()
+        backend.stop()
+        inventory.close()
+        store.close()
+
+    before_restart = {
+        "workflow": _database_rows(tmp_path / "workflow.db"),
+        "inventory": _database_rows(tmp_path / "inventory.db"),
+    }
+    reopened_store = WorkflowStore(tmp_path / "workflow.db")
+    reopened_inventory = _inventory(tmp_path)
+    reopened_scheduler, reopened_backend = create_edge_stack(
+        host_node_getter=lambda: None,
+        inventory=reopened_inventory,
+    )
+    reopened_bridge = DeviceActionTaskRuntimeBridge(
+        store=reopened_store,
+        coordinator=WorkflowRuntimeCoordinator(reopened_store),
+        scheduler=reopened_scheduler,
+        backend=reopened_backend,
+    )
+    try:
+        reopened_bridge.start()
+    finally:
+        reopened_bridge.stop()
+        reopened_backend.stop()
+        reopened_inventory.close()
+        reopened_store.close()
+    assert {
+        "workflow": _database_rows(tmp_path / "workflow.db"),
+        "inventory": _database_rows(tmp_path / "inventory.db"),
+    } == before_restart
+
+
+def test_terminal_receipt_recovery_rejects_mismatched_workflow_payload(
+    tmp_path: Path,
+) -> None:
+    created = _create_faulted_d1a_task(tmp_path, "after_workflow_terminal_commit")
+    connection = sqlite3.connect(tmp_path / "workflow.db")
+    try:
+        connection.execute(
+            "UPDATE workflow_node_job SET return_info = ? WHERE uuid = ?",
+            ('{"tampered":true}', created["job_uuid"]),
+        )
+        connection.commit()
+    finally:
+        connection.close()
+
+    store = WorkflowStore(tmp_path / "workflow.db")
+    inventory = _inventory(tmp_path)
+    scheduler, backend = create_edge_stack(
+        host_node_getter=lambda: None,
+        inventory=inventory,
+    )
+    bridge = DeviceActionTaskRuntimeBridge(
+        store=store,
+        coordinator=WorkflowRuntimeCoordinator(store),
+        scheduler=scheduler,
+        backend=backend,
+    )
+    try:
+        with pytest.raises(WorkflowError) as raised:
+            bridge.start()
+        assert raised.value.code == "reconciliation_required"
+        assert not bridge.is_available()
+        assert inventory.get_job_claim(created["job_uuid"], 1).state != "released"
+    finally:
+        bridge.stop()
+        backend.stop()
+        inventory.close()
+        store.close()

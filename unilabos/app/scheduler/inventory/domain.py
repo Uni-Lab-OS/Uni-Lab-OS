@@ -89,13 +89,13 @@ class MaterialAuthorityUnavailable(MaterialError):
 
 
 class MaterialClaimBlocked(MaterialConflict):
-    """A complete Job Claim set is temporarily unavailable."""
+    """完整 Job Claim 集合暂时不可用。"""
 
     code = "claim_blocked"
 
 
 class MaterialClaimCorrupt(MaterialAuthorityUnavailable):
-    """Durable Claim/fence/receipt facts violate the authority invariant."""
+    """Durable Claim/fence/receipt facts 违反 authority invariant。"""
 
     code = "claim_authority_corrupt"
 
@@ -302,7 +302,7 @@ class TaskMaterialReleaseResult:
 
 @dataclass(frozen=True, slots=True)
 class JobClaimAcquireCommand:
-    """Acquire one complete, typed physical-resource set for a Job attempt."""
+    """为一个 Job attempt 获取完整、typed 的 physical-resource 集合。"""
 
     schema_version: int
     command_uuid: str
@@ -317,7 +317,7 @@ class JobClaimAcquireCommand:
 
 @dataclass(frozen=True, slots=True)
 class JobClaimStateCommand:
-    """Attach accepted/running evidence to an exact fenced Job Claim."""
+    """给精确 fenced Job Claim 附加 accepted/running evidence。"""
 
     schema_version: int
     command_uuid: str
@@ -333,7 +333,7 @@ class JobClaimStateCommand:
 
 @dataclass(frozen=True, slots=True)
 class JobClaimUncertainCommand:
-    """Fail closed when physical dispatch/result reality is not known."""
+    """physical dispatch/result reality 未知时 fail closed。"""
 
     schema_version: int
     command_uuid: str
@@ -349,7 +349,7 @@ class JobClaimUncertainCommand:
 
 @dataclass(frozen=True, slots=True)
 class MaterialChangeSetEffect:
-    """One declared Material/Site mutation in a terminal ChangeSet."""
+    """terminal ChangeSet 中一个已声明的 Material/Site mutation。"""
 
     effect_key: str
     resource_kind: str
@@ -362,7 +362,7 @@ class MaterialChangeSetEffect:
 
 @dataclass(frozen=True, slots=True)
 class MaterialChangeSetCommand:
-    """Commit one terminal physical-reality effect for a Job attempt."""
+    """提交一个 Job attempt 的 terminal physical-reality effect。"""
 
     schema_version: int
     command_uuid: str
@@ -381,7 +381,7 @@ class MaterialChangeSetCommand:
 
 @dataclass(frozen=True, slots=True)
 class JobClaimReleaseCommand:
-    """Release an exact Claim only with durable no-send or terminal proof."""
+    """仅凭 durable no-send 或 terminal proof 释放精确 Claim。"""
 
     schema_version: int
     command_uuid: str
@@ -393,14 +393,15 @@ class JobClaimReleaseCommand:
     release_proof_kind: str
     material_changeset_uuid: str | None
     material_changeset_fingerprint: str | None
-    workflow_terminal_fingerprint: str
+    workflow_terminal_fingerprint: str | None
     reason: str
+    no_send_proof_fingerprint: str | None = None
     expected_state: str | None = None
 
 
 @dataclass(frozen=True, slots=True)
 class JobClaimResolutionCommand:
-    """Audited device/human resolution of one uncertain Claim."""
+    """对一个 uncertain Claim 做可审计的 device/human resolution。"""
 
     schema_version: int
     command_uuid: str
@@ -423,7 +424,7 @@ class JobClaimResolutionCommand:
 
 @dataclass(frozen=True, slots=True)
 class JobClaimMemberRecord:
-    """One member of a complete Job Claim set."""
+    """完整 Job Claim 集合中的一个 member。"""
 
     resource_kind: str
     resource_uuid: str
@@ -434,7 +435,7 @@ class JobClaimMemberRecord:
 
 @dataclass(frozen=True, slots=True)
 class JobClaimRecord:
-    """Public immutable projection of the durable Claim authority."""
+    """durable Claim authority 的公开不可变 projection。"""
 
     uuid: str
     workflow_task_uuid: str
@@ -460,7 +461,7 @@ class JobClaimRecord:
 
 @dataclass(frozen=True, slots=True)
 class JobClaimResult:
-    """Closed durable result for acquire/state/release/resolve commands."""
+    """acquire/state/release/resolve 命令的封闭 durable result。"""
 
     schema_version: int
     command_uuid: str
@@ -472,7 +473,7 @@ class JobClaimResult:
 
 @dataclass(frozen=True, slots=True)
 class MaterialChangeSetReceipt:
-    """Durable, replayable terminal Material reality receipt."""
+    """durable、可重放的 terminal Material reality receipt。"""
 
     schema_version: int
     command_uuid: str

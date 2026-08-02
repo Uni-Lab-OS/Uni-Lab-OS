@@ -5,9 +5,13 @@ from __future__ import annotations
 import sqlite3
 from pathlib import Path
 
+import pytest
+
 import unilabos.app.scheduler.inventory as inventory_api
 from tests.app.test_m1ef_inventory_claim_lifecycle import (
+    DEVICE_MATERIAL_UUID,
     FIRST_JOB_UUID,
+    MOUNT_TEMPLATE_UUID,
     SAMPLE_MATERIAL_UUID,
     SAMPLE_TEMPLATE_UUID,
     SITE_UUID,
@@ -20,6 +24,8 @@ from tests.app.test_m1ef_inventory_claim_lifecycle import (
 )
 
 CREATED_MATERIAL_UUID = "51000000-0000-4000-8000-000000000421"
+UNCLAIMED_PARENT_UUID = "51000000-0000-4000-8000-000000000422"
+CREATED_SITE_UUID = "61000000-0000-4000-8000-000000000421"
 
 
 def _running_claim(
@@ -196,5 +202,127 @@ def test_declared_noop_effect_writes_receipt_without_version_or_fake_ledger(
         assert receipt.effects == command.effects
         assert inventory.get_material(SAMPLE_MATERIAL_UUID).version == 1
         assert ledger_count() == before
+    finally:
+        inventory.close()
+
+
+def test_changeset_cannot_replace_claim_member_version_baseline(
+    tmp_path: Path,
+) -> None:
+    inventory, claim = _running_claim(tmp_path)
+    connection = sqlite3.connect(tmp_path / "inventory.db")
+    try:
+        connection.execute(
+            "UPDATE material SET version = 2 WHERE uuid = ?",
+            (SAMPLE_MATERIAL_UUID,),
+        )
+        connection.commit()
+    finally:
+        connection.close()
+    command = _command(
+        claim,
+        command_uuid="84000000-0000-4000-8000-000000000424",
+        effects=(
+            inventory_api.MaterialChangeSetEffect(
+                effect_key="01-stale-sample",
+                resource_kind="business_material",
+                resource_uuid=SAMPLE_MATERIAL_UUID,
+                operation="update",
+                expected_version=2,
+                before={},
+                after={"data": {"temperature_c": 90.0}},
+            ),
+        ),
+    )
+    try:
+        with pytest.raises(
+            inventory_api.MaterialClaimCorrupt,
+            match="durable reality",
+        ):
+            inventory.commit_material_changeset(command)
+        assert inventory.get_terminal_material_changeset(FIRST_JOB_UUID, 1) is None
+        assert inventory.get_material(SAMPLE_MATERIAL_UUID).version == 2
+    finally:
+        inventory.close()
+
+
+def test_reparent_requires_the_target_parent_in_the_live_claim(
+    tmp_path: Path,
+) -> None:
+    inventory, claim = _running_claim(tmp_path)
+    inventory.create_material(
+        material_uuid=UNCLAIMED_PARENT_UUID,
+        resource_template_uuid=MOUNT_TEMPLATE_UUID,
+        barcode="M1EF-UNCLAIMED-PARENT",
+        name="Unclaimed parent",
+    )
+    command = _command(
+        claim,
+        command_uuid="84000000-0000-4000-8000-000000000425",
+        effects=(
+            inventory_api.MaterialChangeSetEffect(
+                effect_key="01-reparent-outside-claim",
+                resource_kind="business_material",
+                resource_uuid=SAMPLE_MATERIAL_UUID,
+                operation="reparent",
+                expected_version=1,
+                before={"parent_uuid": None},
+                after={"parent_uuid": UNCLAIMED_PARENT_UUID},
+            ),
+        ),
+    )
+    try:
+        with pytest.raises(inventory_api.MaterialConflict, match="Claim member"):
+            inventory.commit_material_changeset(command)
+        assert inventory.get_material(SAMPLE_MATERIAL_UUID).parent_uuid is None
+    finally:
+        inventory.close()
+
+
+@pytest.mark.parametrize(
+    ("owner_uuid", "allowlist", "message"),
+    [
+        (DEVICE_MATERIAL_UUID, [MOUNT_TEMPLATE_UUID], "not allowed"),
+        (SAMPLE_MATERIAL_UUID, [SAMPLE_TEMPLATE_UUID], "cycle"),
+        (DEVICE_MATERIAL_UUID, [SAMPLE_TEMPLATE_UUID], "another Site"),
+    ],
+    ids=["allowlist", "cycle", "duplicate-occupant"],
+)
+def test_create_site_enforces_complete_placement_invariants(
+    tmp_path: Path,
+    owner_uuid: str,
+    allowlist: list[str],
+    message: str,
+) -> None:
+    inventory, claim = _running_claim(tmp_path)
+    command = _command(
+        claim,
+        command_uuid={
+            "not allowed": "84000000-0000-4000-8000-000000000426",
+            "cycle": "84000000-0000-4000-8000-000000000427",
+            "another Site": "84000000-0000-4000-8000-000000000428",
+        }[message],
+        effects=(
+            inventory_api.MaterialChangeSetEffect(
+                effect_key="01-create-site",
+                resource_kind="site",
+                resource_uuid=CREATED_SITE_UUID,
+                operation="create",
+                expected_version=None,
+                before={},
+                after={
+                    "material_uuid": owner_uuid,
+                    "name": "created-site",
+                    "allowed_resource_template_uuids": allowlist,
+                    "occupied_material_uuid": SAMPLE_MATERIAL_UUID,
+                },
+            ),
+        ),
+    )
+    try:
+        with pytest.raises(inventory_api.MaterialConflict, match=message):
+            inventory.commit_material_changeset(command)
+        with pytest.raises(inventory_api.MaterialNotFound):
+            inventory.get_site(CREATED_SITE_UUID)
     finally:
         inventory.close()

@@ -371,6 +371,30 @@ CREATE TABLE IF NOT EXISTS device_action_task (
     workflow_terminal_fingerprint TEXT,
     create_time TEXT NOT NULL,
     update_time TEXT NOT NULL,
+    CHECK (
+        (inventory_claim_uuid IS NULL
+         AND inventory_fencing_token IS NULL
+         AND inventory_claim_set_fingerprint IS NULL)
+        OR
+        (inventory_claim_uuid IS NOT NULL
+         AND inventory_fencing_token IS NOT NULL
+         AND inventory_claim_set_fingerprint IS NOT NULL)
+    ),
+    CHECK (
+        (material_changeset_uuid IS NULL
+         AND material_changeset_fingerprint IS NULL
+         AND material_changeset_outbox_sequence IS NULL)
+        OR
+        (material_changeset_uuid IS NOT NULL
+         AND material_changeset_fingerprint IS NOT NULL
+         AND material_changeset_outbox_sequence IS NOT NULL)
+    ),
+    CHECK (
+        workflow_terminal_fingerprint IS NULL
+        OR (material_changeset_uuid IS NOT NULL
+            AND material_changeset_fingerprint IS NOT NULL
+            AND material_changeset_outbox_sequence IS NOT NULL)
+    ),
     FOREIGN KEY(workflow_task_uuid)
         REFERENCES workflow_task(uuid) ON DELETE CASCADE,
     FOREIGN KEY(workflow_node_job_uuid)
@@ -602,12 +626,13 @@ class WorkflowStore:
                 self._conn.execute("PRAGMA synchronous = NORMAL")
                 self._conn.executescript(_SCHEMA)
                 self._migrate_m1ef_projection_schema()
+                self._install_m1ef_projection_guards()
         except BaseException:
             self._conn.close()
             raise
 
     def _migrate_m1ef_projection_schema(self) -> None:
-        """Add only Workflow-owned M1EF logical projection fields."""
+        """只增加 Workflow 自有的 M1EF logical projection 字段。"""
 
         columns = {
             str(row[1])
@@ -710,6 +735,85 @@ class WorkflowStore:
                 self._conn.execute("PRAGMA foreign_keys = ON")
         else:
             self._conn.commit()
+
+    def _install_m1ef_projection_guards(self) -> None:
+        """给新建与原位升级的 Workflow DB 安装相同的组合约束。"""
+
+        self._conn.executescript(
+            """
+            CREATE TRIGGER IF NOT EXISTS trg_device_action_task_m1ef_insert
+            BEFORE INSERT ON device_action_task
+            WHEN NOT (
+                (
+                    (NEW.inventory_claim_uuid IS NULL
+                     AND NEW.inventory_fencing_token IS NULL
+                     AND NEW.inventory_claim_set_fingerprint IS NULL)
+                    OR
+                    (NEW.inventory_claim_uuid IS NOT NULL
+                     AND NEW.inventory_fencing_token IS NOT NULL
+                     AND NEW.inventory_claim_set_fingerprint IS NOT NULL)
+                )
+                AND
+                (
+                    (NEW.material_changeset_uuid IS NULL
+                     AND NEW.material_changeset_fingerprint IS NULL
+                     AND NEW.material_changeset_outbox_sequence IS NULL)
+                    OR
+                    (NEW.material_changeset_uuid IS NOT NULL
+                     AND NEW.material_changeset_fingerprint IS NOT NULL
+                     AND NEW.material_changeset_outbox_sequence IS NOT NULL)
+                )
+                AND
+                (NEW.workflow_terminal_fingerprint IS NULL
+                 OR (NEW.material_changeset_uuid IS NOT NULL
+                     AND NEW.material_changeset_fingerprint IS NOT NULL
+                     AND NEW.material_changeset_outbox_sequence IS NOT NULL))
+            )
+            BEGIN
+                SELECT RAISE(ABORT, 'm1ef_projection_incomplete');
+            END;
+
+            CREATE TRIGGER IF NOT EXISTS trg_device_action_task_m1ef_update
+            BEFORE UPDATE OF
+                inventory_claim_uuid,
+                inventory_fencing_token,
+                inventory_claim_set_fingerprint,
+                material_changeset_uuid,
+                material_changeset_fingerprint,
+                material_changeset_outbox_sequence,
+                workflow_terminal_fingerprint
+            ON device_action_task
+            WHEN NOT (
+                (
+                    (NEW.inventory_claim_uuid IS NULL
+                     AND NEW.inventory_fencing_token IS NULL
+                     AND NEW.inventory_claim_set_fingerprint IS NULL)
+                    OR
+                    (NEW.inventory_claim_uuid IS NOT NULL
+                     AND NEW.inventory_fencing_token IS NOT NULL
+                     AND NEW.inventory_claim_set_fingerprint IS NOT NULL)
+                )
+                AND
+                (
+                    (NEW.material_changeset_uuid IS NULL
+                     AND NEW.material_changeset_fingerprint IS NULL
+                     AND NEW.material_changeset_outbox_sequence IS NULL)
+                    OR
+                    (NEW.material_changeset_uuid IS NOT NULL
+                     AND NEW.material_changeset_fingerprint IS NOT NULL
+                     AND NEW.material_changeset_outbox_sequence IS NOT NULL)
+                )
+                AND
+                (NEW.workflow_terminal_fingerprint IS NULL
+                 OR (NEW.material_changeset_uuid IS NOT NULL
+                     AND NEW.material_changeset_fingerprint IS NOT NULL
+                     AND NEW.material_changeset_outbox_sequence IS NOT NULL))
+            )
+            BEGIN
+                SELECT RAISE(ABORT, 'm1ef_projection_incomplete');
+            END;
+            """
+        )
 
     def close(self) -> None:
         with self._lock:

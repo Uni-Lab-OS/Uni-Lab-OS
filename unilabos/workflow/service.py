@@ -100,6 +100,7 @@ _ERRORS = {
     "material_source_conflict": (409, "物料来源与仓库或库位事实冲突"),
     "material_flow_fan_out": (409, "同一个物料输出不能同时连接多个下游节点"),
     "material_authority_unavailable": (503, "物料权威暂不可用"),
+    "reconciliation_required": (503, "物理执行事实需要先完成对账"),
     "template_catalog_unavailable": (
         503,
         "设备动作模板暂不可用，请稍后重试",

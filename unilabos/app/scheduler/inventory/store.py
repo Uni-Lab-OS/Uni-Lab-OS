@@ -458,6 +458,8 @@ CREATE TABLE material_claim (
          AND release_proof_kind IS NULL
          AND release_proof_fingerprint IS NULL
          AND release_reason IS NULL
+         AND terminal_changeset_uuid IS NULL
+         AND workflow_terminal_fingerprint IS NULL
          AND release_command_uuid IS NULL
          AND released_at IS NULL)
     ),
@@ -474,7 +476,8 @@ CREATE TABLE material_claim (
     ),
     CHECK (
         release_proof_kind <> 'not_submitted'
-        OR terminal_changeset_uuid IS NULL
+        OR (terminal_changeset_uuid IS NULL
+            AND workflow_terminal_fingerprint IS NULL)
     )
 );
 CREATE INDEX ix_material_claim_task_state
@@ -633,7 +636,7 @@ _EXPECTED_TABLE_COLUMNS = {
 def _schema_objects(
     connection: sqlite3.Connection,
 ) -> tuple[tuple[str, str, str, str], ...]:
-    """Return every application DDL object exactly as SQLite persisted it."""
+    """返回 SQLite 精确持久化的全部 application DDL objects。"""
 
     return tuple(
         (str(row[0]), str(row[1]), str(row[2]), str(row[3]))
@@ -688,7 +691,7 @@ class InventoryStore:
             raise
 
     def _open_exact_schema(self) -> None:
-        """Create v6, migrate exact v5 atomically, or reject mixed/corrupt data."""
+        """创建 v6、原子迁移 exact v5，或拒绝 mixed/corrupt data。"""
 
         with self._lock:
             self._conn.create_collation(
@@ -727,7 +730,7 @@ class InventoryStore:
 
     @staticmethod
     def _statements(script: str) -> tuple[str, ...]:
-        """Split trusted DDL without letting ``executescript`` commit our tx."""
+        """拆分可信 DDL，且不允许 ``executescript`` 提交当前事务。"""
 
         statements: list[str] = []
         pending = ""
@@ -743,7 +746,7 @@ class InventoryStore:
         return tuple(statements)
 
     def _migrate_v5_to_v6(self) -> None:
-        """Add M1EF authority tables while preserving every accepted v5 row."""
+        """增加 M1EF authority tables，并保留全部 accepted v5 rows。"""
 
         try:
             self._conn.execute("BEGIN EXCLUSIVE")
@@ -779,7 +782,7 @@ class InventoryStore:
             raise
 
     def _inject_migration_fault(self, stage: str) -> None:
-        """Expose deterministic crash windows without changing normal startup."""
+        """暴露 deterministic crash windows，且不改变正常启动行为。"""
 
         if self._migration_fault_hook is not None:
             self._migration_fault_hook(stage)
