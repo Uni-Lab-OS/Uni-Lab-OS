@@ -483,6 +483,17 @@ def action(
     return decorator
 
 
+def legacy_action(*args: Any, **kwargs: Any):
+    """声明仅供旧设备 transport 使用、不可进入 typed Workflow 的动作。
+
+    Runtime metadata 与 :func:`action` 保持兼容；静态 Registry scanner 会保留
+    原动作名和 transport 配置，但不会把它误报为 canonical ``@action`` contract。
+    新的 Workflow-capable 方法必须使用 ``@action`` 并通过 strict parser。
+    """
+
+    return action(*args, **kwargs)
+
+
 def get_action_meta(func) -> Optional[Dict[str, Any]]:
     """获取方法上的 @action 装饰器元数据"""
     return getattr(func, "_action_registry_meta", None)

@@ -34,7 +34,14 @@ from unilabos.observability.runtime import (
     normalize_trace_context,
     safe_capture_context,
 )
-from unilabos.registry.decorators import device, action, NodeType, ActionInputHandle, ActionOutputHandle, DataSource
+from unilabos.registry.decorators import (
+    ActionInputHandle,
+    ActionOutputHandle,
+    DataSource,
+    NodeType,
+    device,
+    legacy_action,
+)
 from unilabos.registry.placeholder_type import (
     ResourceSlot,
     DeviceSlot,
@@ -759,13 +766,8 @@ class HostNode(BaseROS2DeviceNode):
             d = None
         if d is None:
             return False
-        # noinspection PyProtectedMember
-        self.devices_names[device_id] = d._ros_node.namespace  # 这里不涉及二级device_id
-        self.device_machine_names[device_id] = "本地"
-        self.devices_instances[device_id] = d
-        # noinspection PyProtectedMember
-        self._action_value_mappings[device_id] = d._ros_node._action_value_mappings
         new_action_pairs: List[Tuple[str, str]] = []
+        staged_action_clients: Dict[str, ActionClient] = {}
         # 仅为建独立 ROS ActionServer 的动作创建 ActionClient：
         # auto-/UniLabJsonCommand 动作无 ROS action server，无法也无需建 ActionClient。
         # noinspection PyProtectedMember
@@ -778,17 +780,37 @@ class HostNode(BaseROS2DeviceNode):
             if action_id not in self._action_clients:
                 action_type = action_value_mapping["type"]
                 try:
-                    self._action_clients[action_id] = ActionClient(self, action_type, action_id)
+                    staged_action_clients[action_id] = ActionClient(
+                        self, action_type, action_id
+                    )
                 except Exception as e:
                     self.lab_logger().error(
                         f"创建ActionClient失败，Device: {device_id}, Action Name: {action_name}, Action Type: {action_type}, Error: {e}")
-                    continue
+                    for client in staged_action_clients.values():
+                        try:
+                            client.destroy()
+                        except Exception:
+                            pass
+                    try:
+                        d._ros_node.destroy_node()
+                    except Exception:
+                        pass
+                    return False
                 self.lab_logger().trace(
                     f"[Host Node] Created ActionClient (Local): {action_id}"
                 )  # 子设备再创建用的是Discover发现的
                 new_action_pairs.append((device_id, action_name))
             else:
                 self.lab_logger().warning(f"[Host Node] ActionClient {action_id} already exists.")
+        # Device readiness is published atomically only after every required
+        # ActionClient exists.  A partially callable device must stay offline.
+        # noinspection PyProtectedMember
+        self.devices_names[device_id] = d._ros_node.namespace  # 这里不涉及二级device_id
+        self.device_machine_names[device_id] = "本地"
+        self.devices_instances[device_id] = d
+        # noinspection PyProtectedMember
+        self._action_value_mappings[device_id] = d._ros_node._action_value_mappings
+        self._action_clients.update(staged_action_clients)
         # 锁上报需全量：auto-/UniLabJsonCommand 动作虽不建 ActionClient，但仍是可经
         # _execute_driver_command 调用的能力(如 workbench 的 prepare_materials 等)，必须一并
         # 上报 free 锁，与 report_all_action_locks 的全量快照保持一致。_execute_driver_command
@@ -2254,7 +2276,7 @@ class HostNode(BaseROS2DeviceNode):
         }
         return res
 
-    @action(always_free=True, node_type=NodeType.MANUAL_CONFIRM, placeholder_keys={
+    @legacy_action(always_free=True, node_type=NodeType.MANUAL_CONFIRM, placeholder_keys={
         "assignee_user_ids": PLACEHOLDER_MANUAL_CONFIRM
     }, goal_default={
         "timeout_seconds": 3600,
@@ -2267,7 +2289,7 @@ class HostNode(BaseROS2DeviceNode):
         """
         return kwargs
 
-    @action(
+    @legacy_action(
         description="申请扣减物料并挂载（接收服务端已扣减的单个根物料，挂载到目标设备的目标物料上）",
         always_free=True,
         placeholder_keys={
@@ -2402,7 +2424,7 @@ class HostNode(BaseROS2DeviceNode):
         )
         return res
 
-    @action(
+    @legacy_action(
         description="设置物料内容物（液体/固体，默认单位 微升/微克）；接收单个物料，设置后输出",
         always_free=True,
         placeholder_keys={"resource": PLACEHOLDER_DEDUCT_REAGENT},
@@ -2459,7 +2481,7 @@ class HostNode(BaseROS2DeviceNode):
         dumped = ResourceTreeSet.from_plr_resources([resource]).dump()
         return {"resource": dumped[0] if dumped else []}
 
-    @action(
+    @legacy_action(
         description="废弃台面物料（指定设备 + uuid：云端销毁并通知该设备本地移除）",
         always_free=True,
         placeholder_keys={
@@ -2566,7 +2588,7 @@ class HostNode(BaseROS2DeviceNode):
             "result": result,
         }
 
-    @action(
+    @legacy_action(
         description="转移物料（系统派发）：把已物理就位的物料在系统中改挂到目标设备的目标孔位（人工/机械臂工作流的统一末步）",
         always_free=True,
         placeholder_keys={
@@ -2651,7 +2673,7 @@ class HostNode(BaseROS2DeviceNode):
         """
         return await self._do_transfer_resource(resource, target_device, mount_resource, site)
 
-    @action(
+    @legacy_action(
         description="人工搬运闸门：到该步暂停等人工确认（人工把物料搬运到位），仅透传物料，不做系统转移（人工工作流中间步，对应机械臂 pick/place）",
         always_free=True,
         node_type=NodeType.MANUAL_CONFIRM,

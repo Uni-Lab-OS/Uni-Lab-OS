@@ -45,6 +45,9 @@ _workspace_lease_fd: int | None = None
 _compiler: AuthoringCompiler | None = None
 _authority: CatalogAuthority | None = None
 _editable_package_roots: tuple[Path, ...] = ()
+_workflow_job_dispatcher: WorkflowJobDispatcher | None = None
+_device_identity_resolver: Callable[[str], str | None] | None = None
+_workflow_catalog_configuration: tuple[tuple[str, str], ...] = ()
 _ready = False
 
 
@@ -52,6 +55,16 @@ def _configured_package_roots(
     roots: Iterable[str | Path],
 ) -> tuple[Path, ...]:
     return tuple(Path(os.path.abspath(root)) for root in roots)
+
+
+def _configured_workflow_catalogs(
+    catalogs: Iterable[PackageCatalog],
+) -> tuple[tuple[PackageCatalog, ...], tuple[tuple[str, str], ...]]:
+    configured = tuple(catalogs)
+    signature = tuple(
+        (catalog.import_package, catalog.catalog_digest) for catalog in configured
+    )
+    return configured, signature
 
 
 def _registry_resource_template_identities(
@@ -139,6 +152,9 @@ def _retain_runtime(
     compiler: AuthoringCompiler | None,
     authority: CatalogAuthority | None,
     editable_package_roots: tuple[Path, ...],
+    workflow_job_dispatcher: WorkflowJobDispatcher | None,
+    device_identity_resolver: Callable[[str], str | None] | None,
+    workflow_catalog_configuration: tuple[tuple[str, str], ...],
     owner_pid: int,
     lease_descriptor: int,
     ready: bool,
@@ -146,6 +162,8 @@ def _retain_runtime(
     """发布 ready Authority，或保留失败 cleanup 的独占 ownership。"""
 
     global _authority, _compiler, _database_path, _editable_package_roots
+    global _device_identity_resolver, _workflow_catalog_configuration
+    global _workflow_job_dispatcher
     global _monitor, _ready, _runtime_worker, _startup_store
     global _owner_pid, _service, _workspace_lease_fd
     _service = service
@@ -154,6 +172,9 @@ def _retain_runtime(
     _compiler = compiler
     _authority = authority
     _editable_package_roots = editable_package_roots
+    _workflow_job_dispatcher = workflow_job_dispatcher
+    _device_identity_resolver = device_identity_resolver
+    _workflow_catalog_configuration = workflow_catalog_configuration
     _monitor = monitor
     _runtime_worker = runtime_worker
     _owner_pid = owner_pid
@@ -183,6 +204,8 @@ def _clear_runtime() -> None:
     """清除已确认关闭的进程内引用；lease 由调用方显式释放。"""
 
     global _authority, _compiler, _database_path, _editable_package_roots
+    global _device_identity_resolver, _workflow_catalog_configuration
+    global _workflow_job_dispatcher
     global _monitor, _ready, _runtime_worker, _startup_store
     global _owner_pid, _service, _workspace_lease_fd
     _service = None
@@ -191,6 +214,9 @@ def _clear_runtime() -> None:
     _compiler = None
     _authority = None
     _editable_package_roots = ()
+    _workflow_job_dispatcher = None
+    _device_identity_resolver = None
+    _workflow_catalog_configuration = ()
     _monitor = None
     _runtime_worker = None
     _owner_pid = None
@@ -304,7 +330,9 @@ def compose_workflow_runtime(
     resolved_working_dir = Path(working_dir).resolve()
     database_path = resolved_working_dir / "workflow.db"
     configured_roots = _configured_package_roots(editable_package_roots)
-    configured_workflow_catalogs = tuple(workflow_package_catalogs)
+    configured_workflow_catalogs, configured_catalog_signature = (
+        _configured_workflow_catalogs(workflow_package_catalogs)
+    )
     with _lock:
         if _startup_store is not None:
             if _owner_pid != os.getpid():
@@ -330,6 +358,18 @@ def compose_workflow_runtime(
             if configured_roots != _editable_package_roots:
                 raise RuntimeError(
                     "Workflow authority cannot switch editable packages at runtime"
+                )
+            if workflow_job_dispatcher is not _workflow_job_dispatcher:
+                raise RuntimeError(
+                    "Workflow runtime configuration cannot switch dispatcher"
+                )
+            if device_identity_resolver is not _device_identity_resolver:
+                raise RuntimeError(
+                    "Workflow runtime configuration cannot switch device resolver"
+                )
+            if configured_catalog_signature != _workflow_catalog_configuration:
+                raise RuntimeError(
+                    "Workflow runtime configuration cannot switch package catalogs"
                 )
             if not _ready:
                 raise RuntimeError(
@@ -441,6 +481,9 @@ def compose_workflow_runtime(
                 compiler=runtime_compiler,
                 authority=authority,
                 editable_package_roots=configured_roots,
+                workflow_job_dispatcher=workflow_job_dispatcher,
+                device_identity_resolver=device_identity_resolver,
+                workflow_catalog_configuration=configured_catalog_signature,
                 owner_pid=os.getpid(),
                 lease_descriptor=lease_descriptor,
                 ready=True,
@@ -483,6 +526,9 @@ def compose_workflow_runtime(
                         compiler=runtime_compiler,
                         authority=authority,
                         editable_package_roots=configured_roots,
+                        workflow_job_dispatcher=workflow_job_dispatcher,
+                        device_identity_resolver=device_identity_resolver,
+                        workflow_catalog_configuration=configured_catalog_signature,
                         owner_pid=os.getpid(),
                         lease_descriptor=lease_descriptor,
                         ready=False,
@@ -544,6 +590,8 @@ def reset_workflow_service_for_test() -> None:
     """停止监视器并关闭测试使用的进程级单例。"""
 
     global _authority, _compiler, _database_path, _editable_package_roots
+    global _device_identity_resolver, _workflow_catalog_configuration
+    global _workflow_job_dispatcher
     global _monitor, _ready, _runtime_worker, _startup_store
     global _owner_pid, _service, _workspace_lease_fd
     with _lock:
@@ -570,6 +618,9 @@ def reset_workflow_service_for_test() -> None:
         _compiler = None
         _authority = None
         _editable_package_roots = ()
+        _workflow_job_dispatcher = None
+        _device_identity_resolver = None
+        _workflow_catalog_configuration = ()
         _ready = False
         _owner_pid = None
         lease_descriptor = _workspace_lease_fd

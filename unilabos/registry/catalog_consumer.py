@@ -54,8 +54,6 @@ def workflow_template_imports_from_registry_snapshot(
         if not isinstance(class_info, Mapping):
             continue
         actions = class_info.get("action_value_mappings")
-        if device.get("workflow_template_projection") is False:
-            actions = {}
         if not isinstance(actions, Mapping):
             continue
         if any(not isinstance(key, str) or not key for key in actions):
