@@ -188,7 +188,17 @@ class EdgeScheduler:
     ) -> TaskMaterialAdmissionResult | None:
         """Drive one replay-safe workflow.db ↔ inventory.db admission saga."""
 
+        if self._workflow_tasks is None or self._inventory is None:
+            raise RuntimeError("Workflow Task Material coordination is not configured")
         with self._material_saga_slot(task_uuid):
+            task = self._workflow_tasks.get_workflow_task(task_uuid)
+            if task.get("status") in {
+                "succeeded",
+                "failed",
+                "canceled",
+                "timeout",
+            }:
+                return None
             return self._reconcile_task_admission_serialized(task_uuid)
 
     @contextmanager
@@ -320,7 +330,13 @@ class EdgeScheduler:
             ),
         ):
             task_uuid = str(task.get("uuid") or "")
-            if self.reconcile_task_admission(task_uuid) is not None:
+            if (
+                self._reconcile_task_material_state(
+                    task_uuid,
+                    retry_pending_after_release=False,
+                )
+                is not None
+            ):
                 reconciled.append(task_uuid)
         return tuple(reconciled)
 
