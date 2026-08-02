@@ -366,7 +366,7 @@ class CompositeAuthoring:
             applied_source_hash=applied_source.get("source_hash"),
         )
         try:
-            validated_io = _validate_composite_graph_io(applied)
+            validated_io = _validate_composite_graph_io(applied, catalog=catalog)
         except (WorkflowIOValidationError, WorkflowSchemaError, TypeError, ValueError):
             raise _CompositeFailure(
                 "composite_boundary_mapping_invalid",
@@ -717,17 +717,265 @@ def _is_published_workflow_template(template: Mapping[str, Any]) -> bool:
     )
 
 
-def _is_framework_published_workflow_template(template: Mapping[str, Any]) -> bool:
+_WORKFLOW_CONTRACT_FIELDS = {
+    "version",
+    "compatibility_version",
+    "workflow_uuid",
+    "workflow_revision",
+    "applied_source_hash",
+    "contract_digest",
+    "composition_allow_transparent",
+    "input_order",
+    "output_order",
+}
+_WORKFLOW_SOURCE_FIELDS = {
+    "kind",
+    "definition_fqid",
+    "module",
+    "symbol",
+    "package_catalog_digest",
+    "definition_content_hash",
+}
+
+
+def _is_framework_published_workflow_template(
+    template: Mapping[str, Any],
+    handles: Sequence[Mapping[str, Any]],
+    *,
+    host_resource_template_uuid: str | None = None,
+) -> bool:
     if not _is_published_workflow_template(template):
+        return False
+    template_uuid = template.get("uuid")
+    resource_template_uuid = template.get("resource_template_uuid")
+    if not _is_canonical_uuid(template_uuid) or not _is_canonical_uuid(
+        resource_template_uuid
+    ):
+        return False
+    if (
+        host_resource_template_uuid is not None
+        and resource_template_uuid != host_resource_template_uuid
+    ):
+        return False
+    schema = template.get("schema")
+    if not isinstance(schema, Mapping):
+        return False
+    extension = schema.get("x-unilabos-workflow-contract")
+    if (
+        not isinstance(extension, Mapping)
+        or set(extension) != _WORKFLOW_CONTRACT_FIELDS
+    ):
+        return False
+    workflow_uuid = extension.get("workflow_uuid")
+    revision = extension.get("workflow_revision")
+    input_order = _closed_string_order(extension.get("input_order"))
+    output_order = _closed_string_order(extension.get("output_order"))
+    if (
+        extension.get("version") != 1
+        or extension.get("compatibility_version") != 1
+        or not _is_canonical_uuid(workflow_uuid)
+        or isinstance(revision, bool)
+        or not isinstance(revision, int)
+        or revision < 1
+        or not _is_sha256_string(extension.get("applied_source_hash"))
+        or not _is_sha256_string(extension.get("contract_digest"))
+        or not isinstance(extension.get("composition_allow_transparent"), bool)
+        or input_order is None
+        or output_order is None
+        or template.get("name") != f"workflow:{workflow_uuid}"
+    ):
         return False
     meta_data = template.get("meta_data")
     unilab = meta_data.get("unilab") if isinstance(meta_data, Mapping) else None
     source = unilab.get("workflow_source") if isinstance(unilab, Mapping) else None
+    if (
+        not isinstance(unilab, Mapping)
+        or unilab.get("framework_owner_only") is not True
+        or not isinstance(source, Mapping)
+        or set(source) != _WORKFLOW_SOURCE_FIELDS
+        or source.get("kind") != "package"
+        or not _is_dotted_identifier(source.get("definition_fqid"))
+        or not _is_dotted_identifier(source.get("module"))
+        or not isinstance(source.get("symbol"), str)
+        or not source["symbol"].isidentifier()
+        or not _is_sha256_string(source.get("package_catalog_digest"))
+        or not _is_sha256_string(source.get("definition_content_hash"))
+        or template.get("class") != f"{source['module']}:{source['symbol']}"
+        or not _workflow_schema_matches_orders(schema, input_order, output_order)
+    ):
+        return False
+    return _published_workflow_handles_match(
+        str(template_uuid),
+        handles,
+        schema=schema,
+        input_order=input_order,
+        output_order=output_order,
+    )
+
+
+def _is_canonical_uuid(value: Any) -> bool:
+    try:
+        return validate_uuid(value) == value
+    except (TypeError, ValueError):
+        return False
+
+
+def _is_sha256_string(value: Any) -> bool:
     return (
-        isinstance(unilab, Mapping)
-        and unilab.get("framework_owner_only") is True
-        and isinstance(source, Mapping)
-        and source.get("kind") == "package"
+        isinstance(value, str)
+        and len(value) == 71
+        and value.startswith("sha256:")
+        and all(character in "0123456789abcdef" for character in value[7:])
+    )
+
+
+def _is_dotted_identifier(value: Any) -> bool:
+    return (
+        isinstance(value, str)
+        and not value.startswith(".")
+        and all(part.isidentifier() for part in value.split("."))
+    )
+
+
+def _closed_string_order(value: Any) -> list[str] | None:
+    if (
+        not isinstance(value, (list, tuple))
+        or any(not isinstance(item, str) or not item for item in value)
+        or len(set(value)) != len(value)
+    ):
+        return None
+    return list(value)
+
+
+def _workflow_schema_matches_orders(
+    schema: Mapping[str, Any],
+    input_order: Sequence[str],
+    output_order: Sequence[str],
+) -> bool:
+    if (
+        set(schema)
+        != {
+            "type",
+            "additionalProperties",
+            "properties",
+            "required",
+            "x-unilabos-workflow-contract",
+        }
+        or schema.get("type") != "object"
+        or schema.get("additionalProperties") is not False
+    ):
+        return False
+    properties = schema.get("properties")
+    required = schema.get("required")
+    if (
+        not isinstance(properties, Mapping)
+        or set(properties) != {"goal", "result"}
+        or not isinstance(required, (list, tuple))
+        or list(required) != ["goal", "result"]
+    ):
+        return False
+    goal = properties.get("goal")
+    result = properties.get("result")
+    if not _workflow_envelope_matches(goal, input_order, require_all=False):
+        return False
+    return _workflow_envelope_matches(result, output_order, require_all=True)
+
+
+def _workflow_envelope_matches(
+    envelope: Any,
+    order: Sequence[str],
+    *,
+    require_all: bool,
+) -> bool:
+    if (
+        not isinstance(envelope, Mapping)
+        or set(envelope) != {"type", "additionalProperties", "properties", "required"}
+        or envelope.get("type") != "object"
+        or envelope.get("additionalProperties") is not False
+    ):
+        return False
+    properties = envelope.get("properties")
+    required = envelope.get("required")
+    if (
+        not isinstance(properties, Mapping)
+        or list(properties) != list(order)
+        or not isinstance(required, (list, tuple))
+        or any(item not in order for item in required)
+        or len(set(required)) != len(required)
+    ):
+        return False
+    return not require_all or list(required) == list(order)
+
+
+def _published_workflow_handles_match(
+    template_uuid: str,
+    handles: Sequence[Mapping[str, Any]],
+    *,
+    schema: Mapping[str, Any],
+    input_order: Sequence[str],
+    output_order: Sequence[str],
+) -> bool:
+    owned = [
+        handle
+        for handle in handles
+        if handle.get("workflow_node_template_uuid") == template_uuid
+    ]
+    if any(not _is_canonical_uuid(handle.get("uuid")) for handle in owned):
+        return False
+    business: dict[tuple[str, str], Mapping[str, Any]] = {}
+    ready: dict[str, Mapping[str, Any]] = {}
+    for handle in owned:
+        io_type = handle.get("io_type")
+        meta_data = handle.get("meta_data")
+        unilab = meta_data.get("unilab") if isinstance(meta_data, Mapping) else None
+        if io_type not in {"target", "source"} or not isinstance(unilab, Mapping):
+            return False
+        if unilab.get("structural_role") == "ready":
+            if io_type in ready or not _ready_handle_shape_matches(handle, unilab):
+                return False
+            ready[str(io_type)] = handle
+            continue
+        data_key = handle.get("data_key")
+        if not isinstance(data_key, str) or (str(io_type), data_key) in business:
+            return False
+        business[(str(io_type), data_key)] = handle
+    if set(ready) != {"target", "source"} or set(business) != {
+        *(("target", name) for name in input_order),
+        *(("source", name) for name in output_order),
+    }:
+        return False
+    properties = schema["properties"]
+    for io_type, order, envelope_name in (
+        ("target", input_order, "goal"),
+        ("source", output_order, "result"),
+    ):
+        schemas = properties[envelope_name]["properties"]
+        for name in order:
+            handle = business[(io_type, name)]
+            unilab = handle["meta_data"]["unilab"]
+            if (
+                handle.get("handle_key") != name
+                or handle.get("data_key") != name
+                or handle.get("data_source")
+                != ("goal" if io_type == "target" else "result")
+                or unilab.get("value_schema") != schemas[name]
+            ):
+                return False
+    return True
+
+
+def _ready_handle_shape_matches(
+    handle: Mapping[str, Any],
+    unilab: Mapping[str, Any],
+) -> bool:
+    return (
+        handle.get("handle_key") == "ready"
+        and handle.get("data_key") == "ready"
+        and handle.get("data_source") == "dependency"
+        and handle.get("type") == "boolean"
+        and handle.get("required") is False
+        and unilab.get("value_schema") == {"type": "boolean"}
+        and unilab.get("implicit_passthrough") is False
     )
 
 
@@ -1570,6 +1818,9 @@ def _group_template(
 
 def _validate_composite_graph_io(
     graph: Mapping[str, Any],
+    *,
+    catalog: TemplateCatalogSnapshot | None = None,
+    host_resource_template_uuid: str | None = None,
 ) -> ValidatedWorkflowIO:
     """Validate I1 while deferring only Composite ResourceSlot narrowing.
 
@@ -1587,13 +1838,39 @@ def _validate_composite_graph_io(
     raw_handles = relaxed.get("handle_templates")
     if not isinstance(raw_templates, list) or not isinstance(raw_handles, list):
         return validate_workflow_graph_io(relaxed)
-    composite_template_uuids = {
-        str(template["uuid"])
-        for template in raw_templates
-        if isinstance(template, Mapping)
-        and isinstance(template.get("uuid"), str)
-        and _is_framework_published_workflow_template(template)
-    }
+    catalog_templates = (
+        {
+            str(template.get("uuid")): template
+            for template in catalog.node_templates
+            if isinstance(template.get("uuid"), str)
+        }
+        if catalog is not None
+        else {}
+    )
+    composite_template_uuids: set[str] = set()
+    for template in raw_templates:
+        if not isinstance(template, Mapping) or not isinstance(
+            template.get("uuid"), str
+        ):
+            continue
+        template_uuid = str(template["uuid"])
+        if not _is_framework_published_workflow_template(
+            template,
+            raw_handles,
+            host_resource_template_uuid=host_resource_template_uuid,
+        ):
+            continue
+        if catalog is not None:
+            catalog_template = catalog_templates.get(template_uuid)
+            if (
+                catalog_template is None
+                or not _is_framework_published_workflow_template(
+                    catalog_template,
+                    catalog.handle_templates,
+                )
+            ):
+                continue
+        composite_template_uuids.add(template_uuid)
     for handle in raw_handles:
         if (
             not isinstance(handle, dict)
@@ -1662,7 +1939,10 @@ def project_published_workflow_contract(
         ),
     }
     try:
-        workflow_io = _validate_composite_graph_io(graph)
+        workflow_io = _validate_composite_graph_io(
+            graph,
+            host_resource_template_uuid=host_uuid,
+        )
     except (WorkflowIOValidationError, WorkflowSchemaError, TypeError, ValueError):
         raise CompositeCatalogMismatch("/published_workflow/io_contract") from None
 
