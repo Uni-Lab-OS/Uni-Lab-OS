@@ -131,6 +131,45 @@ def _slot_schema(
     return schema
 
 
+def _contains_resource_slot(schema: Any) -> bool:
+    if not isinstance(schema, dict):
+        return False
+    if schema.get("$slot") == "ResourceSlot":
+        return True
+    if schema.get("type") == "array":
+        return _contains_resource_slot(schema.get("items"))
+    variants = schema.get("anyOf")
+    return isinstance(variants, list) and any(
+        _contains_resource_slot(variant) for variant in variants
+    )
+
+
+def _complete_workflow_io(contract: Any) -> dict[str, Any]:
+    input_contract = deepcopy(contract)
+    outputs: list[dict[str, Any]] = []
+    output_bindings: dict[str, dict[str, str]] = {}
+    for parameter in input_contract["parameters"]:
+        if not _contains_resource_slot(parameter["schema"]):
+            continue
+        name = parameter["name"]
+        outputs.append(
+            {
+                "name": name,
+                "schema": deepcopy(parameter["schema"]),
+                "implicit": True,
+            }
+        )
+        output_bindings[name] = {
+            "kind": "workflow_input",
+            "parameter": name,
+        }
+    return {
+        "input_contract": input_contract,
+        "output_contract": {"version": 1, "outputs": outputs},
+        "output_bindings": output_bindings,
+    }
+
+
 def _create_workflow(
     store: WorkflowStore,
     *,
@@ -141,7 +180,7 @@ def _create_workflow(
     if unilab is not None:
         meta_data = {"unilab": unilab}
     elif include_contract:
-        meta_data = {"unilab": {"input_contract": deepcopy(contract)}}
+        meta_data = {"unilab": _complete_workflow_io(contract)}
     else:
         meta_data = {}
     store.create_workflow(
@@ -389,6 +428,20 @@ def _replace_target_handle_type(
         connection.execute(
             "UPDATE workflow_handle_template SET type = ? WHERE uuid = ?",
             (handle_type, TARGET_HANDLE_UUID),
+        )
+
+
+def _replace_target_handle_value_schema(
+    store: WorkflowStore,
+    value_schema: dict[str, Any],
+) -> None:
+    with store.transaction() as connection:
+        connection.execute(
+            "UPDATE workflow_handle_template SET meta_data = ? WHERE uuid = ?",
+            (
+                json.dumps({"unilab": {"value_schema": value_schema}}),
+                TARGET_HANDLE_UUID,
+            ),
         )
 
 
@@ -659,6 +712,38 @@ def test_malformed_persisted_contract_fails_closed_before_write(
 
     with pytest.raises(WorkflowError) as failure:
         _create_task(service)
+
+    assert failure.value.code == "invalid_input"
+    _assert_no_tasks(service)
+
+
+def test_forged_scalar_implicit_output_fails_before_task_or_job_write(
+    store: WorkflowStore,
+) -> None:
+    contract = _input_contract(_parameter("amount", {"type": "number"}))
+    service = _create_workflow(store, contract=contract)
+    _replace_workflow_unilab(
+        store,
+        {
+            "input_contract": contract,
+            "output_contract": {
+                "version": 1,
+                "outputs": [
+                    {
+                        "name": "amount",
+                        "schema": {"type": "number"},
+                        "implicit": True,
+                    }
+                ],
+            },
+            "output_bindings": {
+                "amount": {"kind": "workflow_input", "parameter": "amount"}
+            },
+        },
+    )
+
+    with pytest.raises(WorkflowError) as failure:
+        _create_task(service, {"amount": 1})
 
     assert failure.value.code == "invalid_input"
     _assert_no_tasks(service)
@@ -1070,6 +1155,36 @@ def test_binding_value_must_match_the_real_target_handle_type(
 
     with pytest.raises(WorkflowError) as failure:
         _create_task(service, {"amount": "not-a-number"})
+
+    assert failure.value.code == "invalid_input"
+    _assert_no_tasks(service)
+
+
+def test_unassignable_input_and_target_schemas_fail_before_task_or_job_write(
+    store: WorkflowStore,
+) -> None:
+    service = _create_workflow(
+        store,
+        contract=_input_contract(_parameter("amount", {"type": "number"})),
+    )
+    _seed_template_catalog(store)
+    _save_graph(
+        store,
+        nodes=[
+            _node(
+                TARGET_NODE_UUID,
+                template_uuid=TARGET_TEMPLATE_UUID,
+                bindings={TARGET_HANDLE_UUID: {"parameter": "amount"}},
+            )
+        ],
+    )
+    _replace_target_handle_value_schema(
+        store,
+        {"type": "number", "minimum": 10},
+    )
+
+    with pytest.raises(WorkflowError) as failure:
+        _create_task(service, {"amount": 10})
 
     assert failure.value.code == "invalid_input"
     _assert_no_tasks(service)
