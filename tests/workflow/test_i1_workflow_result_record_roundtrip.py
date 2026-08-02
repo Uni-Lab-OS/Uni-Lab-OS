@@ -88,6 +88,30 @@ def _inline_result_source() -> str:
     )
 
 
+def _singular_implicit_conflict_source() -> str:
+    return f'''from typing import TypedDict
+
+from unilabos.registry.placeholder_type import ResourceSlot
+from unilabos.workflow.authoring import workflow_definition
+
+
+class ConflictingResult(TypedDict):
+    sample: list[ResourceSlot]
+
+
+@workflow_definition(
+    workflow_uuid="{WORKFLOW_UUID}",
+    displayname="Conflicting pass through",
+)
+def conflicting_pass_through(
+    *,
+    sample: ResourceSlot,
+    samples: list[ResourceSlot],
+) -> ConflictingResult:
+    return {{"sample": samples}}
+'''
+
+
 @pytest.fixture()
 def engine_context(tmp_path: Path) -> Iterator[EngineContext]:
     with _opened_engine(tmp_path / "workflow.db") as context:
@@ -235,3 +259,20 @@ def test_compat_result_declarations_normalize_to_typed_dict(
         compiled.diagnostics
     )
     _assert_canonical_typed_dict_source(compiled.normalized_python_source)
+
+
+def test_explicit_list_output_cannot_replace_same_name_singular_pass_through(
+    engine_context: EngineContext,
+) -> None:
+    compiled = engine_context.engine.compile(
+        workflow_uuid=WORKFLOW_UUID,
+        workflow_revision=7,
+        python_source=_singular_implicit_conflict_source(),
+        source_uri="package://lab/workflows/implicit-conflict.py",
+        applied_graph=_empty_graph(),
+    )
+
+    assert not compiled.valid
+    assert {diagnostic["code"] for diagnostic in compiled.diagnostics} == {
+        "invalid_workflow_output"
+    }

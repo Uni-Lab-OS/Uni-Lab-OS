@@ -266,6 +266,20 @@ def test_candidate_rejects_declared_output_without_its_root_binding() -> None:
         )
 
 
+def test_candidate_rejects_scalar_output_marked_as_implicit() -> None:
+    graph = _producer_graph()
+    _declare_output(
+        graph,
+        schema={"type": "number"},
+        binding=_node_output_binding(),
+    )
+    output = graph["workflow"]["meta_data"]["unilab"]["output_contract"]["outputs"][0]
+    output["implicit"] = True
+
+    with pytest.raises(CandidateBundleError):
+        _validate(graph)
+
+
 @pytest.mark.parametrize(
     "binding",
     [
