@@ -10,6 +10,7 @@ from __future__ import annotations
 import threading
 from pathlib import Path
 from typing import Any
+from uuid import UUID
 
 import pytest
 
@@ -22,7 +23,7 @@ from unilabos.workflow.catalog import (
 )
 from unilabos.workflow.models import WorkflowNodeWrite
 from unilabos.workflow.runtime import WorkflowRuntimeCoordinator
-from unilabos.workflow.service import WorkflowService
+from unilabos.workflow.service import WorkflowError, WorkflowService
 from unilabos.workflow.store import WorkflowStore
 
 WORKFLOW_UUID = "10000000-0000-4000-8000-000000000203"
@@ -35,6 +36,7 @@ MOUNT_TEMPLATE_UUID = "2aa00000-0000-4000-8000-000000000203"
 SAMPLE_TEMPLATE_UUID = "2bb00000-0000-4000-8000-000000000203"
 SITE_UUID = "6aa00000-0000-4000-8000-000000000203"
 NO_MATERIAL_WORKFLOW_UUID = "10000000-0000-4000-8000-000000000204"
+ALIAS_TASK_UUID = "abcdefab-cdef-4abc-8def-abcdefabcdef"
 
 AUTHORITY = CatalogAuthority(authority_id="m1r-saga", kind="backend")
 
@@ -123,6 +125,56 @@ class _StalePendingWorkflowPort:
 
     def __getattr__(self, name: str) -> Any:
         return getattr(self._service, name)
+
+
+class _AliasReleaseDuringAdmissionPort(_RecordingInventoryPort):
+    """Terminalize through canonical UUID while alias admission owns its slot."""
+
+    def __init__(
+        self,
+        inventory: inventory_api.InventoryService,
+        service: WorkflowService,
+        workflow_database: Path,
+        task_uuid: str,
+    ) -> None:
+        super().__init__(inventory)
+        self._service = service
+        self._workflow_database = workflow_database
+        self._task_uuid = task_uuid
+        self.scheduler: EdgeScheduler | None = None
+        self.release_finished_before_admission = False
+        self.release_outcome: list[object] = []
+        self.release_thread: threading.Thread | None = None
+        self.admission_result: inventory_api.TaskMaterialAdmissionResult | None = None
+
+    def admit_task(
+        self,
+        command: inventory_api.TaskMaterialAdmissionCommand,
+    ) -> inventory_api.TaskMaterialAdmissionResult:
+        assert self.scheduler is not None
+        _cancel_task(
+            self._service,
+            self._workflow_database,
+            self._task_uuid,
+            idempotency_key="terminal-during-alias-admission",
+        )
+        release_finished = threading.Event()
+
+        def release_with_canonical_uuid() -> None:
+            try:
+                self.release_outcome.append(
+                    self.scheduler.reconcile_task_material_state(self._task_uuid)
+                )
+            except Exception as error:  # noqa: BLE001 - asserted by caller
+                self.release_outcome.append(error)
+            finally:
+                release_finished.set()
+
+        self.release_thread = threading.Thread(target=release_with_canonical_uuid)
+        self.release_thread.start()
+        self.release_finished_before_admission = release_finished.wait(timeout=0.25)
+        self.admission_result = super().admit_task(command)
+        return self.admission_result
 
 
 def _resource_templates() -> dict[str, inventory_api.ResourceTemplateIdentity]:
@@ -581,6 +633,59 @@ def test_pending_scan_routes_stale_item_through_latest_terminal_state(
         assert release["reservation_uuid"] is None
         assert service.get_material_admission(task["uuid"]) is None
         assert _admission_events(inventory, task_uuid=task["uuid"]) == ()
+    finally:
+        if service is not None:
+            service.close()
+        inventory.close()
+
+
+def test_equivalent_uuid_spelling_shares_one_task_saga_slot(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    workflow_database = tmp_path / "workflow-authority" / "workflow.db"
+    inventory = inventory_api.InventoryService.open(
+        working_dir=tmp_path / "inventory-authority",
+        resource_templates=_resource_templates(),
+    )
+    service = None
+    try:
+        _seed_inventory(inventory)
+        with monkeypatch.context() as patch:
+            patch.setattr(
+                "unilabos.workflow.service.uuid4",
+                lambda: UUID(ALIAS_TASK_UUID),
+            )
+            service, task = _create_pending_task(workflow_database)
+        assert task["uuid"] == ALIAS_TASK_UUID
+        inventory_port = _AliasReleaseDuringAdmissionPort(
+            inventory,
+            service,
+            workflow_database,
+            task["uuid"],
+        )
+        scheduler = EdgeScheduler(workflow_tasks=service, inventory=inventory_port)
+        inventory_port.scheduler = scheduler
+
+        with pytest.raises(WorkflowError):
+            scheduler.reconcile_task_admission(task["uuid"].upper())
+
+        assert inventory_port.release_thread is not None
+        inventory_port.release_thread.join(timeout=1)
+        assert not inventory_port.release_thread.is_alive()
+        assert not inventory_port.release_finished_before_admission
+        admission = inventory_port.admission_result
+        assert admission is not None
+        assert admission.status == "admitted"
+        assert admission.reservation_uuid is not None
+        assert len(inventory_port.release_outcome) == 1
+        release = inventory_port.release_outcome[0]
+        assert isinstance(release, inventory_api.TaskMaterialReleaseResult)
+        assert release.reservation_uuid == admission.reservation_uuid
+        assert not inventory.has_active_task_reservation(
+            task["uuid"],
+            admission.reservation_uuid,
+        )
     finally:
         if service is not None:
             service.close()
