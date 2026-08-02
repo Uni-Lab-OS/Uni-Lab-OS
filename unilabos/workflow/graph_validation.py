@@ -69,14 +69,25 @@ def validate_graph(
         if node.parent_uuid is not None and node.parent_uuid not in node_by_uuid:
             raise GraphValidationError("父节点不在提交的完整图中")
     _validate_parent_cycles(nodes)
+    composite_internal_uuids = _composite_internal_node_uuids(
+        nodes,
+        templates,
+    )
+    public_nodes = {
+        node_uuid: node
+        for node_uuid, node in node_by_uuid.items()
+        if node_uuid not in composite_internal_uuids
+    }
     validated_io = None
     if validate_workflow_io_contract:
         try:
             validated_io = validate_workflow_io(
-                nodes=node_by_uuid,
+                nodes=public_nodes,
                 handles=handles,
                 workflow_meta_data=workflow_meta_data,
-                node_meta_data=node_meta_data,
+                node_meta_data={
+                    node_uuid: node_meta_data[node_uuid] for node_uuid in public_nodes
+                },
             )
         except WorkflowIOValidationError as exc:
             raise GraphValidationError("Workflow I/O 合同无效") from exc
@@ -119,7 +130,7 @@ def validate_graph(
     )
 
     bindings_by_node = (
-        validated_io.input_bindings
+        dict(validated_io.input_bindings)
         if validated_io is not None
         else {
             node.uuid: _validated_input_bindings(
@@ -130,12 +141,20 @@ def validate_graph(
                 validate_schema_compatibility=False,
             )
             for node in nodes
+            if node.uuid not in composite_internal_uuids
         }
     )
+    for node_uuid in composite_internal_uuids:
+        bindings_by_node[node_uuid] = _validated_private_input_bindings(
+            node_by_uuid[node_uuid],
+            node_meta_data[node_uuid],
+            handles,
+        )
     enabled = {
         node.uuid: node
         for node in nodes
-        if not node.disabled and _node_kind(node, templates) != "group"
+        if not node.disabled
+        and _node_kind(node, templates) not in {"group", "composite"}
     }
     enabled_edges: list[WorkflowEdgeWrite] = []
     incoming: dict[tuple[str, str], str] = {}
@@ -239,6 +258,48 @@ def _validate_parent_cycles(nodes: Iterable[WorkflowNodeWrite]) -> None:
                 raise GraphValidationError("父子关系形成循环")
             visited.add(current)
             current = parents.get(current)
+
+
+def _composite_internal_node_uuids(
+    nodes: Iterable[WorkflowNodeWrite],
+    templates: Mapping[str, dict[str, Any]],
+) -> set[str]:
+    node_by_uuid = {node.uuid: node for node in nodes}
+    composite_uuids = {
+        node.uuid
+        for node in node_by_uuid.values()
+        if _is_composite_template(
+            templates.get(node.workflow_node_template_uuid or "", {})
+        )
+    }
+    internal: set[str] = set()
+    for node_uuid, node in node_by_uuid.items():
+        parent = node.parent_uuid
+        seen = {node_uuid}
+        while parent is not None:
+            if parent in seen or parent not in node_by_uuid:
+                raise GraphValidationError("Composite parent hierarchy 不完整")
+            if parent in composite_uuids:
+                internal.add(node_uuid)
+                break
+            seen.add(parent)
+            parent = node_by_uuid[parent].parent_uuid
+    return internal
+
+
+def _is_composite_template(template: Mapping[str, Any]) -> bool:
+    schema = template.get("schema")
+    extension = (
+        schema.get("x-unilabos-workflow-contract")
+        if isinstance(schema, Mapping)
+        else None
+    )
+    return (
+        template.get("type") == "workflow"
+        and template.get("node_type") == "workflow"
+        and isinstance(extension, Mapping)
+        and extension.get("version") == 1
+    )
 
 
 def _validate_edge_handle(
@@ -385,6 +446,7 @@ def _node_kind(
         "tool_call": "tool_call",
         "manual_confirm": "manual_confirm",
         "material_source": "material_source",
+        "workflow": "composite",
     }
     kind = aliases.get(str(raw_kind).strip().lower())
     if kind is None:
@@ -690,6 +752,39 @@ def _validated_input_bindings(
             )
         ):
             raise GraphValidationError("input_binding 与 Workflow 参数类型不兼容")
+        result[handle_uuid] = dict(raw_binding)
+    return result
+
+
+def _validated_private_input_bindings(
+    node: WorkflowNodeWrite,
+    meta_data: Mapping[str, Any],
+    handles: Mapping[str, dict[str, Any]],
+) -> dict[str, dict[str, Any]]:
+    """校验 Composite 内部 binding 形状；child-local 参数已由展开器验证。"""
+
+    unilab = meta_data.get("unilab", {})
+    if not isinstance(unilab, dict):
+        raise GraphValidationError("Node meta_data.unilab 必须是对象")
+    raw_bindings = unilab.get("input_bindings", {})
+    if not isinstance(raw_bindings, dict):
+        raise GraphValidationError("input_bindings 必须是对象")
+    result: dict[str, dict[str, Any]] = {}
+    for handle_uuid, raw_binding in raw_bindings.items():
+        handle = handles.get(handle_uuid)
+        if (
+            node.workflow_node_template_uuid is None
+            or handle is None
+            or handle.get("workflow_node_template_uuid")
+            != node.workflow_node_template_uuid
+            or handle.get("io_type") != "target"
+        ):
+            raise GraphValidationError("input_binding 未引用本节点的目标 Handle")
+        if not isinstance(raw_binding, dict) or set(raw_binding) != {"parameter"}:
+            raise GraphValidationError("input_binding 必须是闭合对象")
+        parameter = raw_binding.get("parameter")
+        if not isinstance(parameter, str) or not parameter:
+            raise GraphValidationError("input_binding.parameter 无效")
         result[handle_uuid] = dict(raw_binding)
     return result
 

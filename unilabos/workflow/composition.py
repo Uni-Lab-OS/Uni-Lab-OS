@@ -427,6 +427,7 @@ def compose_workflow_runtime(
         new_device_action_runtime: DeviceActionTaskRuntimeBridge | None = None
         new_device_action_tasks: DeviceActionTaskService | None = None
         catalog_publisher = None
+        composite_authoring = None
         published = False
         try:
             store = WorkflowStore(database_path)
@@ -490,6 +491,7 @@ def compose_workflow_runtime(
                         PackageCatalogPublishedWorkflowResolver,
                     )
                     from unilabos.workflow.composite import (
+                        CompositeAuthoring,
                         PublishedWorkflowCatalogPublisher,
                     )
 
@@ -508,6 +510,12 @@ def compose_workflow_runtime(
                         ),
                     )
                     catalog_publisher.publish()
+                    composite_authoring = CompositeAuthoring(
+                        store=store,
+                        catalog=catalog,
+                        authority=authority,
+                        resolver=published_workflows,
+                    )
             configured_package_sources = tuple(package_sources)
             configured_package_catalogs = tuple(package_catalogs)
             material_shapes: tuple[Mapping[str, object], ...] = ()
@@ -556,6 +564,7 @@ def compose_workflow_runtime(
                     authority=authority,
                     resource_template_identity_index=identity_index,
                     material_source_authority=new_inventory_service,
+                    composite_authoring=composite_authoring,
                 )
             new_service = WorkflowService(
                 store,
