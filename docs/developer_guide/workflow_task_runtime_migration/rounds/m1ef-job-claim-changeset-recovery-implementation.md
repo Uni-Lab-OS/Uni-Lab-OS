@@ -2,7 +2,8 @@
 
 日期：2026-08-03
 
-状态：implementation candidate；待 exact-SHA 独立 Standards/Spec review；未 merge、未 push。
+状态：implementation candidate；第二轮 review finding 已修复，待同一 reviewer 对最终 exact SHA
+复审；未 merge、未 push。
 
 ## 1. Provenance
 
@@ -15,6 +16,8 @@
 | production + tests implementation | `065210a84ed5eaf2ee5f05b5fadabc621cfa1d8d` |
 | first evidence candidate（independent review rejected） | `7b9d1db5b595db28a2c09bd41a146abcce4c07eb` |
 | review finding repair（production + tests） | `1c8f8761b5b4d42d84b0556cacc72cafe6d7a70c` |
+| second evidence candidate（same reviewer rejected） | `ddcf32ffff6f37aad3d512e8f13c254892b8dd03` |
+| second review repair（production + tests） | `48dd2d3a9ede732b6741fa1527156093acb83daa` |
 | latest Backend production reference | `2a3591eaff21d808557e6a645f9092b152fb3504` |
 
 独立 test-author 仅提交 public `InventoryService` 纵向 RED，未参与实现。实现 worktree 为
@@ -41,7 +44,7 @@
 8. active Claim 阻止 Task Reservation release；同一 release command 可从 `blocked` 单向推进到
    `released`，不允许换 command 绕过。
 
-## 3. 首轮独立 review 的修复闭环
+## 3. 独立 review 的修复闭环
 
 同一名独立 reviewer 对 `7b9d1db5b595db28a2c09bd41a146abcce4c07eb` 给出
 `REJECT / changes required`。所有 blocking finding 都在
@@ -61,17 +64,31 @@
 | C1+cancel 会遗留 Claim | durable no-dispatch journal 才可经 Scheduler typed resolution 释放；第二次 restart 零写入 |
 | C7 顺序与 spec 相反 | ChangeSet → Workflow terminal → Claim release → cleanup projection → receipt ACK → release ACK；两种 ACK 均可独立 replay |
 
-实现候选不把旧 review 结论改写为通过；本账本提交后的 exact SHA 必须由同一 reviewer 重新执行
-Standards/Spec review。
+同一 reviewer 随后对 `ddcf32ffff6f37aad3d512e8f13c254892b8dd03` 再次给出
+`REJECT / changes required`。不能把首轮 finding 的关闭误写成候选已接受；第二轮的两个 Spec blocker
+和三个 Standards non-blocker 在 `48dd2d3a9ede732b6741fa1527156093acb83daa` 收敛：
+
+| second-review finding | 修复 |
+|---|---|
+| Material reparent 只沿 composition 检查，可经 Site occupancy 形成组合环 | Material create/reparent 与 Site placement 共用唯一 composition + occupancy 可达性校验；增加 owner → occupant → owner 回归 |
+| released Claim + pending Workflow 未进入启动双向恢复 | `start()` 将完整 authority audit 快照交给恢复；包含 released Claim，任何 released + nonterminal 组合在 ready/dispatch 前 `reconciliation_required` |
+| acquire command replay 返回旧 `acquired/reserved` 快照 | processed command 只证明命令 identity；重放时重新读取 durable Claim，released 返回 `rejected` 和当前 Claim |
+| 两份 cycle validator 已漂移 | 删除 material-only CTE，三类 mutation 只调用同一个组合图 helper |
+| 新增领域注释混入英文句子 | 将违规的 Claim corruption 说明改为中文项目文档表达 |
+| exact manifest 的 runtime 路径指向上一轮目录 | 最终 source manifest 只引用本轮 exact candidate 自己的 runtime 与四个隔离数据库 |
+
+实现候选保留两次 rejected provenance，不把历史结论改写为通过；最终 exact SHA 必须由同一 reviewer
+重新执行 Standards/Spec review。
 
 ## 4. 自动测试门
 
 独立 RED 最初准确失败在缺少 public `JobClaimAcquireCommand`。实现后的主要证据：
 
-- reviewer finding 聚焦复现与 M1EF 组合：`32 passed`；
-- v5 migration + M1R + D1A broad regression：`85 passed`；
+- 第二轮 blocker 的三个新回归：`3 passed`；
+- M1EF 聚焦组合：`30 passed`；
+- M1R + D1A + M1EF broad regression：`78 passed`；
 - migration crash、resolution、ChangeSet、concurrency 与 C1～C7 扩展均通过；
-- 修复后完整 `pytest -q -rs tests`：`2382 passed, 4 skipped, 68 warnings`；4 skip 均为需显式联网/Phoenix 的既有
+- 第二轮修复后完整 `pytest -q -rs tests`：`2384 passed, 4 skipped, 68 warnings`；4 skip 均为需显式联网/Phoenix 的既有
   optional test；
 - changed production `py_compile`：通过；
 - changed files Ruff `E/F/I` 与 format：通过；
@@ -83,13 +100,13 @@ C1～C6、C7-receipt ACK、C7-release ACK deterministic fault tests 每个窗口
 
 ## 5. 隔离的真实 `unilab` CLI + SZLab E2E
 
-证据根：
+第二轮修复的 pre-ledger code candidate 证据根：
 
 ```text
-/home/changjunhan/Uni-Lab-Core/.artifacts/m1ef-claim-recovery-e2e-review-olikUx/
+/home/changjunhan/Uni-Lab-Core/.artifacts/m1ef-claim-recovery-e2e-final-48dd2d3a/
 ```
 
-启动使用 review-fix source `1c8f8761b5b4d42d84b0556cacc72cafe6d7a70c`、SZLab workspace、
+启动使用 second-review-fix source `48dd2d3a9ede732b6741fa1527156093acb83daa`、SZLab workspace、
 ROS backend、FastAPI、`--edge_scheduler` 与 `--test_mode`。`PYTHONPATH` 精确指向候选 worktree；
 `inventory.db`、`workflow.db`、`device_state.db` 和 `workflow_history.db` 全部隔离在 artifact runtime，
 没有读取或写入 `~/.unilabos` authority DB。可移植图只保留真实 S09 移液站，并使用
@@ -97,12 +114,12 @@ PackageCatalog definition id `szlab_mixer_pipetting_station`；没有增加 Regi
 
 真实 HTTP 创建：
 
-- Task `56a8e7db-cd54-4865-99ee-485a01d087f3`；
-- Job `3bb1e92e-9dc7-40b0-ad15-192ed9708117`；
+- Task `54484ca6-9106-4420-9271-66a1866c972c`；
+- Job `4f196f69-820d-4de5-9181-5ab857412eac`；
 - device `szlab_mixer_pipetting_station`；
 - Action `prepare_liquid_station`；
-- Inventory Claim `db96d171-d63b-53f6-b7b9-4062578ae0a0`，token `1`；
-- terminal ChangeSet `7da068ba-85fc-592b-ad78-19881f9ca476`。
+- Inventory Claim `129c3954-3f7f-5b9c-b4fa-ebe024990efa`，token `1`；
+- terminal ChangeSet `af4c3f94-6905-580b-8a6b-2b2282df7dbe`。
 
 SZLab test-mode driver 返回 success，但 frozen A1 output contract 拒绝其模拟结果，因此 Job/Task
 终态为 `failed / invalid_device_action_result`。M1EF 仍按安全顺序先提交 outcome=`failed` 的
@@ -128,9 +145,11 @@ result 随后无效”的强制顺序。
 - winner 从未 dispatch，随后以 evidenced `confirmed_not_dispatched` resolution 和 durable no-send
   proof 释放；最终 authority audit 通过。
 
-关键机器证据：`source-manifest.json`、`authority-first.json`、`task-after-restart.json`、
-`hashes-before-restart.json`、`hashes-after-second-restart.json`、
-`restart-hash-comparison.json`、`concurrent-clients.json` 与三次 native OS console log。
+关键机器证据：`authority.json`、`task-terminal.json`、`task-after-restart.json`、
+`task-after-second-restart.json`、`hashes-before-restarts.json`、
+`hashes-after-second-restart.json`、`restart-comparison.json`、`concurrent-clients.json` 与三次 native
+OS console log。账本提交后还要在最终 exact SHA 上重跑门禁和原生 E2E，并生成只指向该 exact runtime
+的最终 manifest，随后才能交给同一 reviewer。
 
 ## 6. 停止线
 
