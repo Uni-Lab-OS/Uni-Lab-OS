@@ -1,6 +1,6 @@
 # D1A-S1 设备页单 Action Task：OS 实施规格
 
-状态：Implementation baseline
+状态：Release candidate（精确 SHA 独立复核中）
 上游协议：`Uni-Lab-OS/Uni-Lab-Core#162`
 OS delivery：`Uni-Lab-OS/Uni-Lab-OS#16`
 Integration gate：`Uni-Lab-OS/Uni-Lab-Core#163`
@@ -164,3 +164,56 @@ commit 保留 provenance；实现后运行目标测试、全仓 pytest、静态�
 OS ticket 记录 base/test/implementation/review full SHA、命令与 finding disposition。
 跨仓真实 Edge E2E、至少五张截图、network ledger 和 system source 负向证据归 Core
 #163。未完成 FE gate、Core pin 与 Feishu Accepted 前，本轮不宣称 `stage:accepted`。
+
+## 9. 2026-08-02 实现与 E2E 报告
+
+### 9.1 候选
+
+- OS 实现候选：`373ce840e0a69ec3013ffeae02fff447ee4e3176`；
+- FE 最终受测候选：`379f029622a7ccd7364947cf6e105ee1f27d4aee`；
+- 发布目标：OS `integration/workflow-task-runtime`、FE
+  `integration/fe-os-migration`；合并必须等待同一独立 reviewer 对最终精确 SHA
+  无 blocking finding。
+
+### 9.2 本轮实现结果
+
+1. 幂等 replay 先于可变 admission、live device 和 Catalog 检查；同 key 不同 payload
+   仍为 `409 idempotency_conflict`，Action 被移除为 `409 device_action_mismatch`。
+2. system Workflow/Node identity 稳定，合同变化只推进 revision；旧 Task 的 input/output
+   snapshot 冻结，不受后续 Catalog 改动影响。
+3. production 启动顺序允许先组合 Workflow authority、再创建 Edge stack；后创建的
+   Scheduler/backend 会反向绑定既有 D1A bridge。普通 Workflow worker 不消费 D1A Job。
+4. durable completion listener 在设备锁释放前提交正式 Job/Task 终态；transport 不确定、
+   崩溃窗口和重启进入持久 unknown fence，不盲发；晚到真实结果可完成 reconciliation。
+5. Scheduler timeline/monitor 使用公开 Job UUID 作为 opaque node identity，不暴露 system
+   Workflow/Node UUID。全局 SSE 使用窄事件 `device_action_task.changed {task_uuid}`。
+6. FE 保留原 DevicePanel、Action 卡、参数/localStorage draft、锁/手动解锁及
+   `edge-device__execution` 事件/结果 UI；仅替换 service/controller、SSE invalidation 和
+   REST rehydrate，不把 system source 暴露给浏览器。
+
+### 9.3 Gate
+
+- OS focused D1A/release tests：`77 passed`；
+- OS 全仓：`2335 passed, 4 skipped`；修改文件 Ruff
+  `--select E4,E7,E9,F` 与 `git diff --check` 通过；
+- FE material/services/pascal/workflow-editor/kernel/desktop 六组：共 261 tests 通过；
+  全 workspace typecheck、`build:web`、`build:desktop` 和 `git diff --check` 通过；
+- 浏览器 E2E：`1 passed`，18.7 秒；夹具先组合 Workflow authority、再挂生产
+  EdgeScheduler/JobExecutionBackend，只在物理 driver 边界使用确定性测试 Host。
+
+### 9.4 E2E 截图与账本
+
+Core 发布目标目录：
+`docs/testing/workflow-task-runtime/d1a-s1/`。
+
+八张截图按顺序证明：原 Action 参数/占用提示、原表单可运行、durable pending、
+running feedback 事件流、运行中锁、typed terminal result、释放后再次运行按钮、第二个
+正式 Task/Job 成功。网络账本记录两次浏览器 POST、正式 Task/Job UUID、REST feedback、
+`/api/v1/timeline` 和 `/api/v1/monitor/snapshot` 的公开 Job UUID；旧 Run/Runtime WS、
+前端直连 Edge WebSocket、system source read 和 browser error 均为 0。
+
+### 9.5 尚未接受的门
+
+此报告只说明软件候选通过本地自动化门。精确 SHA 独立复核、GitHub non-squash merge、
+Core submodule/evidence pin、Issue/Wayfinder 同步以及真实物理设备/ROS 验收仍需完成；因此
+Core #162 最多进入 `stage:testing`，不得关闭或标记 `stage:accepted`。
