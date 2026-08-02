@@ -28,6 +28,7 @@ from unilabos.app.scheduler.inventory.domain import (
     MaterialAuthorityUnavailable,
     MaterialConflict,
     MaterialInvalidInput,
+    MaterialModelAsset,
     MaterialNotFound,
     MaterialRecord,
     ResourceSlotResolution,
@@ -417,6 +418,7 @@ class InventoryService:
         monitor: Any = None,
         resource_templates: Mapping[str, ResourceTemplateIdentity] | None = None,
         material_shapes: Sequence[Mapping[str, Any]] = (),
+        material_model_assets: Sequence[MaterialModelAsset] = (),
     ):
         self._store = store
         self.edge_id = edge_id
@@ -452,6 +454,18 @@ class InventoryService:
         self._material_shapes = tuple(
             _json_object(shape, "material_shapes item") for shape in material_shapes
         )
+        model_assets_by_path: dict[str, MaterialModelAsset] = {}
+        for asset in material_model_assets:
+            if not isinstance(asset, MaterialModelAsset):
+                raise MaterialInvalidInput(
+                    "material_model_assets must contain MaterialModelAsset values"
+                )
+            if not asset.public_path.startswith("/api/v1/material-models/"):
+                raise MaterialInvalidInput("material model asset path is outside its API")
+            if asset.public_path in model_assets_by_path:
+                raise MaterialInvalidInput("duplicate material model asset path")
+            model_assets_by_path[asset.public_path] = asset
+        self._material_model_assets = MappingProxyType(model_assets_by_path)
 
     @classmethod
     def open(
@@ -464,6 +478,7 @@ class InventoryService:
         time_fn: Callable[[], float] = time.time,
         monitor: Any = None,
         material_shapes: Sequence[Mapping[str, Any]] = (),
+        material_model_assets: Sequence[MaterialModelAsset] = (),
     ) -> InventoryService:
         """Open the one ``inventory.db`` owned by a workspace."""
 
@@ -477,6 +492,7 @@ class InventoryService:
             monitor=monitor,
             resource_templates=resource_templates,
             material_shapes=material_shapes,
+            material_model_assets=material_model_assets,
         )
 
     def close(self) -> None:
@@ -2538,6 +2554,19 @@ class InventoryService:
         """返回 PackageCatalog 审计过的静态 2.5D shape assets。"""
 
         return [json.loads(json.dumps(item)) for item in self._material_shapes]
+
+    def read_material_model_asset(
+        self, public_path: str
+    ) -> tuple[MaterialModelAsset, bytes]:
+        """Read one exact Catalog asset without exposing its package source path."""
+
+        asset = self._material_model_assets.get(public_path)
+        if asset is None:
+            raise MaterialNotFound(f"material model asset not found: {public_path}")
+        content = asset.read_bytes()
+        if len(content) != asset.size:
+            raise MaterialAuthorityUnavailable("material model asset size mismatch")
+        return asset, content
 
     def read_ledger(
         self, *, after_id: int = 0, limit: int = 200

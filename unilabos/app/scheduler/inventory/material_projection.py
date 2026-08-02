@@ -10,11 +10,13 @@ from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
+from urllib.parse import quote
 
 import yaml
 
 from unilabos.package_manager import PackageAssetResolver, PackageCatalog
 from unilabos.package_manager.sources import PackageSource
+from unilabos.app.scheduler.inventory.domain import MaterialModelAsset
 
 _INTERNAL_SITE_TYPES = frozenset({"tipspot", "tip_spot", "well"})
 _PART_TYPES = frozenset(
@@ -62,6 +64,7 @@ class MaterialDefinitionProjection:
     kind: str
     categories: tuple[str, ...]
     envelope_mm: tuple[float, float, float] | None
+    model: Mapping[str, Any] | None
 
 
 @dataclass(frozen=True, slots=True)
@@ -70,6 +73,7 @@ class PackageMaterialProjection:
 
     definitions: Mapping[str, MaterialDefinitionProjection]
     shapes: tuple[dict[str, Any], ...]
+    model_assets: tuple[MaterialModelAsset, ...]
     fingerprint: str
 
 
@@ -83,10 +87,29 @@ def build_package_material_projection(
         raise ValueError("Package source 与 PackageCatalog 数量不一致")
     definitions: dict[str, MaterialDefinitionProjection] = {}
     shapes_by_identity: dict[tuple[str, str], dict[str, Any]] = {}
+    model_assets_by_path: dict[str, MaterialModelAsset] = {}
     digests: list[str] = []
     for source, catalog in zip(sources, catalogs, strict=True):
         resolver = PackageAssetResolver(source, catalog)
         digests.append(catalog.catalog_digest)
+        for asset in catalog.assets:
+            public_path = _model_asset_path(catalog.namespace, asset.logical_path)
+            projected_asset = MaterialModelAsset(
+                public_path=public_path,
+                media_type=asset.media_type,
+                digest=asset.digest,
+                size=asset.size,
+                read_bytes=lambda resolver=resolver, logical_path=asset.logical_path: (
+                    resolver.open_binary(logical_path).read()
+                ),
+            )
+            existing_asset = model_assets_by_path.get(public_path)
+            if existing_asset is not None and (
+                existing_asset.digest != projected_asset.digest
+                or existing_asset.size != projected_asset.size
+            ):
+                raise ValueError(f"同一 Package model asset path 指向不同内容: {public_path}")
+            model_assets_by_path[public_path] = projected_asset
         records = (*catalog.definitions.devices, *catalog.definitions.resources)
         for record in records:
             shape = _shape_for_definition(
@@ -117,6 +140,11 @@ def build_package_material_projection(
                 kind=kind,
                 categories=categories,
                 envelope_mm=envelope,
+                model=_model_for_definition(
+                    resolver,
+                    record.details.get("model"),
+                    bundle=catalog.namespace,
+                ),
             )
     shapes = sorted(
         shapes_by_identity.values(), key=lambda item: (item["bundle"], item["id"])
@@ -130,6 +158,7 @@ def build_package_material_projection(
                     "kind": value.kind,
                     "categories": value.categories,
                     "envelope_mm": value.envelope_mm,
+                    "model": value.model,
                 }
                 for key, value in sorted(definitions.items())
             },
@@ -142,6 +171,9 @@ def build_package_material_projection(
     return PackageMaterialProjection(
         definitions=definitions,
         shapes=tuple(shapes),
+        model_assets=tuple(
+            model_assets_by_path[key] for key in sorted(model_assets_by_path)
+        ),
         fingerprint="sha256:" + hashlib.sha256(canonical).hexdigest(),
     )
 
@@ -160,11 +192,6 @@ def build_resource_graph_import(
     nodes = [_json_object(item) for item in raw_nodes if isinstance(item, Mapping)]
     if len(nodes) != len(raw_nodes):
         raise ValueError("ResourceTreeSet snapshot nodes 必须全是对象")
-    by_runtime_uuid = {
-        str(node.get("uuid") or ""): node
-        for node in nodes
-        if str(node.get("uuid") or "")
-    }
     material_nodes = [node for node in nodes if not _is_internal_site(node)]
     material_uuid_by_runtime_uuid = {
         str(node["uuid"]): _stable_uuid(source_id, "material", str(node["id"]))
@@ -195,6 +222,7 @@ def build_resource_graph_import(
                 "kind": definition.kind,
                 "dimensions_mm": list(dimensions),
                 "categories": list(definition.categories),
+                **({"model": dict(definition.model)} if definition.model else {}),
             },
         }
         materials.append(
@@ -316,6 +344,44 @@ def _shape_for_definition(
     if not isinstance(raw_shape, Mapping):
         raise ValueError(f"shape manifest 必须包含唯一 shape: {entry}")
     return _public_shape(raw_shape, bundle=bundle)
+
+
+def _model_for_definition(
+    resolver: PackageAssetResolver,
+    model: object,
+    *,
+    bundle: str,
+) -> dict[str, Any] | None:
+    if not isinstance(model, Mapping):
+        return None
+    entry = model.get("entry")
+    model_format = model.get("format")
+    if not isinstance(entry, str) or not entry:
+        return None
+    if not isinstance(model_format, str) or not model_format:
+        return None
+    metadata = resolver.public_metadata(entry)
+    public_path = _model_asset_path(bundle, entry)
+    result: dict[str, Any] = {
+        "path": public_path,
+        "format": model_format,
+        "meshDir": public_path.rsplit("/", 1)[0],
+        "version": metadata.digest,
+    }
+    for key in ("macro", "color", "position", "rotation", "scale"):
+        value = model.get(key)
+        if value is not None:
+            result[key] = value
+    return result
+
+
+def _model_asset_path(bundle: str, logical_path: str) -> str:
+    return (
+        "/api/v1/material-models/"
+        + quote(bundle, safe="")
+        + "/"
+        + quote(logical_path, safe="/")
+    )
 
 
 def _public_shape(raw: Mapping[str, Any], *, bundle: str) -> dict[str, Any]:
