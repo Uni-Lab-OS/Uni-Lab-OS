@@ -38,6 +38,7 @@ from unilabos.workflow.graph_validation import (
     validate_graph,
 )
 from unilabos.workflow.json_codec import (
+    clone_json,
     decode_json_bytes,
     encode_json,
     strict_json_equal,
@@ -651,7 +652,7 @@ class WorkflowAuthoringEngine:
                 )
                 if not compiled.valid or not _semantic_graph_equal(
                     compiled.graph,
-                    graph,
+                    _materialize_typed_action_defaults(generated.graph),
                 ):
                     return _error_result(
                         fingerprint=fingerprint,
@@ -2528,6 +2529,67 @@ def _source_only_changeset() -> dict[str, Any]:
     }
 
 
+def _materialize_typed_action_defaults(
+    graph: dict[str, Any],
+) -> dict[str, Any]:
+    """把 canonical ``@action`` default 物化进 OS normalized Candidate。"""
+
+    normalized = clone_json(graph)
+    templates = {
+        str(template.get("uuid")): template for template in normalized["node_templates"]
+    }
+    handles_by_template: dict[str, dict[str, dict[str, Any]]] = {}
+    for handle in normalized["handle_templates"]:
+        if handle.get("io_type") != "target":
+            continue
+        template_uuid = str(handle.get("workflow_node_template_uuid") or "")
+        data_key = str(handle.get("data_key") or handle.get("handle_key") or "")
+        handles_by_template.setdefault(template_uuid, {})[data_key] = handle
+    edge_targets = {
+        (str(edge.get("target_node_uuid")), str(edge.get("target_handle_uuid")))
+        for edge in normalized["edges"]
+    }
+
+    for node in normalized["nodes"]:
+        template_uuid = str(node.get("workflow_node_template_uuid") or "")
+        template = templates.get(template_uuid)
+        schema = template.get("schema") if isinstance(template, Mapping) else None
+        extension = (
+            schema.get("x-unilabos-action-contract")
+            if isinstance(schema, Mapping)
+            else None
+        )
+        if not isinstance(extension, Mapping) or extension.get("version") != 1:
+            continue
+        properties = schema.get("properties")
+        goal = properties.get("goal") if isinstance(properties, Mapping) else None
+        fields = goal.get("properties") if isinstance(goal, Mapping) else None
+        if not isinstance(fields, Mapping):
+            _fail("template_catalog_mismatch", "typed Action goal schema 不完整")
+        param = node.get("param")
+        if not isinstance(param, dict):
+            _fail("candidate_invalid", "typed Action param 必须是对象")
+        unilab = (node.get("meta_data") or {}).get("unilab") or {}
+        bindings = unilab.get("input_bindings") or {}
+        if not isinstance(bindings, Mapping):
+            _fail("candidate_invalid", "Node input_bindings 必须是对象")
+        handles = handles_by_template.get(template_uuid, {})
+        for name, value_schema in fields.items():
+            if name in param or not isinstance(value_schema, Mapping):
+                continue
+            handle = handles.get(str(name))
+            handle_uuid = str(handle.get("uuid") or "") if handle else ""
+            if (
+                not handle_uuid
+                or handle_uuid in bindings
+                or (str(node.get("uuid")), handle_uuid) in edge_targets
+                or "default" not in value_schema
+            ):
+                continue
+            param[str(name)] = clone_json(value_schema["default"])
+    return normalized
+
+
 def _generate_with_snapshot(
     *,
     snapshot: TemplateCatalogSnapshot,
@@ -2550,8 +2612,9 @@ def _generate_with_snapshot(
             candidate,
             material_source_authority=material_source_authority,
         )
+        normalized_candidate = _materialize_typed_action_defaults(candidate)
         source, source_map = _render_graph(
-            candidate,
+            normalized_candidate,
             resource_template_identity_index=resource_template_identity_index,
         )
         recompiled = _compile_with_snapshot(
@@ -2560,14 +2623,14 @@ def _generate_with_snapshot(
             workflow_revision=workflow_revision,
             python_source=source,
             source_uri="authoring://round-trip-proof",
-            applied_graph=candidate,
+            applied_graph=normalized_candidate,
             resource_template_identity_index=resource_template_identity_index,
             material_source_authority=material_source_authority,
             prove_normalized=False,
         )
         if (
             not recompiled.valid
-            or not _semantic_graph_equal(recompiled.graph, candidate)
+            or not _semantic_graph_equal(recompiled.graph, normalized_candidate)
             or recompiled.normalized_python_source != source
         ):
             _fail(

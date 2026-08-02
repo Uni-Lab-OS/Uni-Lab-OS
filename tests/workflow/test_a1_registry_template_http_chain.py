@@ -284,6 +284,98 @@ def test_typed_action_missing_field_keeps_os_handle_diagnostic_coordinates(
         store.close()
 
 
+def test_generate_python_materializes_omitted_typed_defaults_only_in_python(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    workspace = tmp_path / "package"
+    _write_package(workspace)
+    registry = _register(
+        compile_package_source(WorkspaceSource(workspace)),
+        monkeypatch,
+    )
+    store = WorkflowStore(tmp_path / "workflow.db")
+    try:
+        catalog = TemplateCatalog(store)
+        catalog.replace(AUTHORITY, _imports(_registry_snapshot(registry)))
+        with catalog.snapshot(AUTHORITY) as snapshot:
+            template = next(
+                _plain(item)
+                for item in snapshot.node_templates
+                if item["name"] == "transfer"
+            )
+            handles = [
+                _plain(item)
+                for item in snapshot.handle_templates
+                if item["workflow_node_template_uuid"] == template["uuid"]
+            ]
+        workflow_uuid = "90000000-0000-4000-8000-000000000021"
+        node_uuid = "90000000-0000-4000-8000-000000000022"
+        timestamp = "2026-08-02T00:00:00Z"
+        candidate = {
+            "workflow": {
+                "uuid": workflow_uuid,
+                "create_time": timestamp,
+                "update_time": timestamp,
+                "meta_data": {
+                    "unilab": {
+                        "input_contract": {"version": 1, "parameters": []},
+                        "output_contract": {"version": 1, "outputs": []},
+                        "output_bindings": {},
+                    }
+                },
+                "name": "Default normalization",
+                "tags": [],
+                "revision": 1,
+            },
+            "nodes": [
+                {
+                    "uuid": node_uuid,
+                    "workflow_uuid": workflow_uuid,
+                    "create_time": timestamp,
+                    "update_time": timestamp,
+                    "workflow_node_template_uuid": template["uuid"],
+                    "name": "transfer",
+                    "status": "idle",
+                    "type": "device",
+                    "pose": {},
+                    "param": {"sample": {"uuid": "sample-1"}},
+                    "execution_policy": {},
+                    "disabled": False,
+                    "minimized": False,
+                    "action_name": "transfer",
+                    "meta_data": {"unilab": {"input_bindings": {}}},
+                }
+            ],
+            "edges": [],
+            "node_templates": [template],
+            "handle_templates": handles,
+        }
+
+        result = WorkflowAuthoringEngine(
+            catalog=catalog,
+            authority=AUTHORITY,
+        ).generate_python(
+            workflow_uuid=workflow_uuid,
+            workflow_revision=1,
+            source_uri="package://a1_contract_lab/workflows/defaults.py",
+            graph=candidate,
+        )
+
+        assert result.valid, result.diagnostics
+        assert result.graph is not None
+        assert result.graph["nodes"][0]["param"] == {"sample": {"uuid": "sample-1"}}
+        assert result.normalized_python_source is not None
+        assert "batches=[]" in result.normalized_python_source
+        assert "mode='safe'" in result.normalized_python_source
+        assert "note=None" in result.normalized_python_source
+        assert "payload={}" in result.normalized_python_source
+        assert "volume=1.25" in result.normalized_python_source
+        assert candidate["nodes"][0]["param"] == {"sample": {"uuid": "sample-1"}}
+    finally:
+        store.close()
+
+
 def test_typed_action_does_not_treat_ros_goal_mapping_as_business_defaults(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
