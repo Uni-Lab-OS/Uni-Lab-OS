@@ -54,6 +54,8 @@ def workflow_template_imports_from_registry_snapshot(
         if not isinstance(class_info, Mapping):
             continue
         actions = class_info.get("action_value_mappings")
+        if device.get("workflow_template_projection") is False:
+            actions = {}
         if not isinstance(actions, Mapping):
             continue
         if any(not isinstance(key, str) or not key for key in actions):
@@ -69,6 +71,10 @@ def workflow_template_imports_from_registry_snapshot(
                     "invalid_action_contract",
                     f"/devices/{registry_key}/actions/{action_name}",
                 )
+            # Auto-actions are legacy runtime transport conveniences, never A1
+            # authoring templates, even when their scanner recorded a diagnostic.
+            if action_name.startswith("auto-"):
+                continue
             diagnostic = action.get("contract_diagnostic")
             if diagnostic is not None:
                 if not isinstance(diagnostic, Mapping):

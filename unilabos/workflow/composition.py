@@ -9,7 +9,7 @@ import stat
 import threading
 from collections.abc import Callable, Iterable, Mapping
 from pathlib import Path
-from typing import cast
+from typing import TYPE_CHECKING, cast
 
 from unilabos.resources.authority import MaterialModule
 from unilabos.resources.authority.sqlite import SQLiteMaterialAdapter
@@ -22,6 +22,7 @@ from unilabos.workflow.catalog import (
 )
 from unilabos.workflow.material_resolver import MaterialResourceSlotResolver
 from unilabos.workflow.runtime import (
+    WorkflowJobDispatcher,
     WorkflowRuntimeCoordinator,
     WorkflowRuntimeWorker,
 )
@@ -29,6 +30,9 @@ from unilabos.workflow.service import AuthoringCompiler, WorkflowService
 from unilabos.workflow.source_discovery import register_editable_package_sources
 from unilabos.workflow.source_monitor import WorkflowSourceMonitor
 from unilabos.workflow.store import WorkflowStore
+
+if TYPE_CHECKING:
+    from unilabos.package_manager import PackageCatalog
 
 _lock = threading.Lock()
 _service: WorkflowService | None = None
@@ -94,6 +98,36 @@ def _registry_has_material_source_owner(
     """HostNode 是 production MaterialSource framework template 的 owner。"""
 
     return isinstance(registry_snapshot.get("host_node"), Mapping)
+
+
+def _ensure_package_workflow_drafts(
+    service: WorkflowService,
+    catalogs: Iterable[PackageCatalog],
+) -> None:
+    """Materialize explicit PackageCatalog Workflow identities before source bind."""
+
+    from unilabos.workflow.service import WorkflowError
+
+    for catalog in catalogs:
+        for definition in catalog.definitions.workflows:
+            workflow_uuid = definition.details.get("workflow_uuid")
+            if not isinstance(workflow_uuid, str):
+                raise TypeError("PackageCatalog Workflow 缺少 workflow_uuid")
+            try:
+                service.get_workflow(workflow_uuid)
+            except WorkflowError as error:
+                if error.code != "not_found":
+                    raise
+                service.create_workflow(
+                    workflow_uuid=workflow_uuid,
+                    name=definition.displayname or definition.id,
+                    tags=["package", catalog.import_package],
+                    description=definition.description or None,
+                    meta_data={
+                        "package_fqid": definition.fqid,
+                        "package_catalog_digest": catalog.catalog_digest,
+                    },
+                )
 
 
 def _retain_runtime(
@@ -216,11 +250,18 @@ def compose_workflow_runtime(
     resource_template_identity_resolver: (
         ResourceTemplateIdentityIndex | Callable[[str], str] | None
     ) = None,
+    workflow_job_dispatcher: WorkflowJobDispatcher | None = None,
+    device_identity_resolver: Callable[[str], str | None] | None = None,
+    workflow_package_catalogs: Iterable[PackageCatalog] = (),
 ) -> WorkflowService:
     """装配工作区唯一的 Workflow authority、启动恢复和 Draft 监视。"""
 
     if compiler is not None and authority is not None:
         raise ValueError("compiler 与 authority 只能选择一种生产组合方式")
+    if (workflow_job_dispatcher is None) != (device_identity_resolver is None):
+        raise ValueError(
+            "workflow_job_dispatcher 与 device_identity_resolver 必须同时配置"
+        )
     if authority is not None and not isinstance(authority, CatalogAuthority):
         raise TypeError("authority 必须是 CatalogAuthority")
     if authority is not None and authority.kind != "local":
@@ -263,6 +304,7 @@ def compose_workflow_runtime(
     resolved_working_dir = Path(working_dir).resolve()
     database_path = resolved_working_dir / "workflow.db"
     configured_roots = _configured_package_roots(editable_package_roots)
+    configured_workflow_catalogs = tuple(workflow_package_catalogs)
     with _lock:
         if _startup_store is not None:
             if _owner_pid != os.getpid():
@@ -371,13 +413,24 @@ def compose_workflow_runtime(
                 material_source_authority=material_module,
                 material_reservations=material_authority,
             )
+            _ensure_package_workflow_drafts(
+                new_service,
+                configured_workflow_catalogs,
+            )
             register_editable_package_sources(
                 new_service,
                 configured_roots,
             )
             new_service.recover_registered_sources()
             new_monitor = WorkflowSourceMonitor(new_service)
-            new_runtime_worker = WorkflowRuntimeWorker(runtime_coordinator)
+            if workflow_job_dispatcher is None:
+                new_runtime_worker = WorkflowRuntimeWorker(runtime_coordinator)
+            else:
+                new_runtime_worker = WorkflowRuntimeWorker(
+                    runtime_coordinator,
+                    dispatcher=workflow_job_dispatcher,
+                    device_identity_resolver=device_identity_resolver,
+                )
             # Reconciliation 已完成，可以读取一致 baseline；monitor 从空签名集启动，
             # 会捕获此发布点与线程启动之间发生的变化。
             _retain_runtime(
@@ -461,6 +514,9 @@ def setup_workflow_service(
     resource_template_identity_resolver: (
         ResourceTemplateIdentityIndex | Callable[[str], str] | None
     ) = None,
+    workflow_job_dispatcher: WorkflowJobDispatcher | None = None,
+    device_identity_resolver: Callable[[str], str | None] | None = None,
+    workflow_package_catalogs: Iterable[PackageCatalog] = (),
 ) -> WorkflowService:
     """兼容旧装配调用；所有入口统一进入完整运行时组合。"""
 
@@ -472,6 +528,9 @@ def setup_workflow_service(
         registry_snapshot=registry_snapshot,
         resource_registry_snapshot=resource_registry_snapshot,
         resource_template_identity_resolver=resource_template_identity_resolver,
+        workflow_job_dispatcher=workflow_job_dispatcher,
+        device_identity_resolver=device_identity_resolver,
+        workflow_package_catalogs=workflow_package_catalogs,
     )
 
 

@@ -5,7 +5,7 @@ Web服务器模块
 """
 
 import webbrowser
-from collections.abc import Mapping
+from collections.abc import Callable, Mapping
 from typing import Any
 
 from fastapi import FastAPI, Request
@@ -82,6 +82,9 @@ def setup_server(
     *,
     registry_snapshot: Mapping[str, Any] | None = None,
     resource_registry_snapshot: Mapping[str, Any] | None = None,
+    workflow_job_dispatcher: Any = None,
+    device_identity_resolver: Callable[[str], str | None] | None = None,
+    workflow_package_catalogs: tuple[Any, ...] = (),
 ) -> FastAPI:
     """
     设置服务器
@@ -137,6 +140,9 @@ def setup_server(
                 editable_package_roots=editable_package_roots,
                 registry_snapshot=registry_snapshot,
                 resource_registry_snapshot=resource_registry_snapshot,
+                workflow_job_dispatcher=workflow_job_dispatcher,
+                device_identity_resolver=device_identity_resolver,
+                workflow_package_catalogs=workflow_package_catalogs,
             )
             if workflow_service.compiler is None:
                 raise RuntimeError("Workflow Authoring engine 未完成组合")
@@ -208,6 +214,9 @@ def start_server(
     *,
     registry_snapshot: Mapping[str, Any] | None = None,
     resource_registry_snapshot: Mapping[str, Any] | None = None,
+    workflow_job_dispatcher: Any = None,
+    device_identity_resolver: Callable[[str], str | None] | None = None,
+    workflow_package_catalogs: tuple[Any, ...] = (),
 ) -> bool:
     """
     启动服务器
@@ -229,6 +238,9 @@ def start_server(
     setup_server(
         registry_snapshot=registry_snapshot,
         resource_registry_snapshot=resource_registry_snapshot,
+        workflow_job_dispatcher=workflow_job_dispatcher,
+        device_identity_resolver=device_identity_resolver,
+        workflow_package_catalogs=workflow_package_catalogs,
     )
 
     # 配置日志
