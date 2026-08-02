@@ -32,7 +32,9 @@ from unilabos.workflow.models import WorkflowNodeWrite, validate_uuid
 from unilabos.workflow.schema import WorkflowSchemaError, parse_input_contract
 from unilabos.workflow.store import StoreNotFound, WorkflowStore
 from unilabos.workflow.workflow_io import (
+    ValidatedWorkflowIO,
     WorkflowIOValidationError,
+    schema_is_assignable,
     validate_workflow_graph_io,
 )
 
@@ -94,6 +96,7 @@ class _ExpandedChild:
     source_mappings: dict[str, dict[str, str]]
     structural_mappings: dict[str, list[dict[str, str]]]
     contract_pin: dict[str, Any]
+    effective_input_contract: dict[str, Any]
     paths: dict[tuple[str, ...], str]
 
 
@@ -276,9 +279,8 @@ class CompositeAuthoring:
                 )
                 effective = _effective_parent_input_contract(
                     parent_input_contract,
-                    expanded,
+                    expanded.effective_input_contract,
                     keyword_arguments,
-                    catalog_snapshot,
                 )
                 _reject_private_providers(keyword_arguments, expanded)
                 node_templates, handle_templates = _referenced_templates(
@@ -364,7 +366,7 @@ class CompositeAuthoring:
             applied_source_hash=applied_source.get("source_hash"),
         )
         try:
-            validated_io = validate_workflow_graph_io(applied)
+            validated_io = _validate_composite_graph_io(applied)
         except (WorkflowIOValidationError, WorkflowSchemaError, TypeError, ValueError):
             raise _CompositeFailure(
                 "composite_boundary_mapping_invalid",
@@ -426,6 +428,7 @@ class CompositeAuthoring:
         paths: dict[tuple[str, ...], str] = {}
         endpoint_aliases = dict(mapped_visible)
         next_stack = (*workflow_stack, source.workflow_uuid)
+        effective_input_contract = validated_io.input_contract.to_dict()
 
         for node_uuid in sorted(mapped_visible):
             raw_node = node_by_uuid[node_uuid]
@@ -446,17 +449,27 @@ class CompositeAuthoring:
                     self._resolver,
                     template_by_node[node_uuid],
                 )
+                nested_arguments = _node_keyword_arguments(
+                    raw_node,
+                    template_by_node[node_uuid],
+                    catalog,
+                )
                 nested = self._expand(
                     source=nested_source,
                     invocation_uuid=mapped_uuid,
                     parent_uuid=mapped_parent,
-                    keyword_arguments=_node_param(raw_node),
+                    keyword_arguments=nested_arguments,
                     catalog=catalog,
                     root_parent_workflow_uuid=root_parent_workflow_uuid,
                     workflow_stack=next_stack,
                     base_node=raw_node,
                 )
                 _assert_pinned_nested(raw_node, nested.contract_pin)
+                effective_input_contract = _effective_parent_input_contract(
+                    effective_input_contract,
+                    nested.effective_input_contract,
+                    nested_arguments,
+                )
                 nodes.append(nested.invocation_node)
                 nodes.extend(nested.nodes)
                 edges.extend(nested.edges)
@@ -497,6 +510,8 @@ class CompositeAuthoring:
                         "composite_boundary_mapping_invalid",
                         "/child/edges/target_handle_uuid",
                     ),
+                    description=raw_edge.get("description"),
+                    meta_data=_edge_meta_data(raw_edge),
                 )
             )
         edges = _unique_edges(edges)
@@ -540,6 +555,7 @@ class CompositeAuthoring:
             source_mappings=source_mappings,
             structural_mappings=structural,
             contract_pin=pin,
+            effective_input_contract=effective_input_contract,
             paths=paths,
         )
 
@@ -701,6 +717,20 @@ def _is_published_workflow_template(template: Mapping[str, Any]) -> bool:
     )
 
 
+def _is_framework_published_workflow_template(template: Mapping[str, Any]) -> bool:
+    if not _is_published_workflow_template(template):
+        return False
+    meta_data = template.get("meta_data")
+    unilab = meta_data.get("unilab") if isinstance(meta_data, Mapping) else None
+    source = unilab.get("workflow_source") if isinstance(unilab, Mapping) else None
+    return (
+        isinstance(unilab, Mapping)
+        and unilab.get("framework_owner_only") is True
+        and isinstance(source, Mapping)
+        and source.get("kind") == "package"
+    )
+
+
 def _source_from_template(
     resolver: PublishedWorkflowResolver,
     template: Mapping[str, Any],
@@ -762,6 +792,73 @@ def _node_param(node: Mapping[str, Any]) -> dict[str, Any]:
         raise _CompositeFailure(
             "composite_boundary_mapping_invalid",
             "/child/nodes/param",
+        )
+    return _plain(value)
+
+
+def _node_keyword_arguments(
+    node: Mapping[str, Any],
+    template: Mapping[str, Any],
+    catalog: TemplateCatalogSnapshot,
+) -> dict[str, Any]:
+    """Restore a nested invocation's literals and real I1 input bindings."""
+
+    arguments = _node_param(node)
+    template_uuid = template.get("uuid")
+    if not isinstance(template_uuid, str):
+        raise _CompositeFailure(
+            "composite_catalog_mismatch",
+            "/catalog/node_templates/uuid",
+        )
+    targets = {
+        str(handle["uuid"]): _plain(handle)
+        for handle in catalog.handle_templates
+        if handle.get("workflow_node_template_uuid") == template_uuid
+        and handle.get("io_type") == "target"
+        and _structural_role(handle) is None
+    }
+    meta_data = node.get("meta_data", {})
+    unilab = meta_data.get("unilab") if isinstance(meta_data, Mapping) else None
+    raw_bindings = (
+        unilab.get("input_bindings", {}) if isinstance(unilab, Mapping) else {}
+    )
+    if not isinstance(raw_bindings, Mapping):
+        raise _CompositeFailure(
+            "composite_boundary_mapping_invalid",
+            "/child/nodes/meta_data/unilab/input_bindings",
+        )
+    for handle_uuid, raw_binding in raw_bindings.items():
+        handle = targets.get(handle_uuid) if isinstance(handle_uuid, str) else None
+        if (
+            handle is None
+            or not isinstance(raw_binding, Mapping)
+            or set(raw_binding) != {"parameter"}
+            or not isinstance(raw_binding.get("parameter"), str)
+            or not isinstance(handle.get("data_key"), str)
+        ):
+            raise _CompositeFailure(
+                "composite_boundary_mapping_invalid",
+                "/child/nodes/meta_data/unilab/input_bindings",
+            )
+        name = str(handle["data_key"])
+        if name in arguments:
+            raise _CompositeFailure(
+                "composite_boundary_mapping_invalid",
+                f"/child/nodes/param/{name}",
+            )
+        arguments[name] = {
+            "kind": "workflow_input",
+            "parameter": str(raw_binding["parameter"]),
+        }
+    return arguments
+
+
+def _edge_meta_data(edge: Mapping[str, Any]) -> dict[str, Any]:
+    value = edge.get("meta_data", {})
+    if not isinstance(value, Mapping):
+        raise _CompositeFailure(
+            "composite_boundary_mapping_invalid",
+            "/child/edges/meta_data",
         )
     return _plain(value)
 
@@ -1025,12 +1122,21 @@ def _structural_mappings(
     edges: Sequence[Mapping[str, Any]],
     catalog: TemplateCatalogSnapshot,
 ) -> dict[str, list[dict[str, str]]]:
-    node_by_uuid = {str(node["uuid"]): node for node in nodes}
+    node_by_uuid = {
+        str(node["uuid"]): node
+        for node in nodes
+        if not _is_presentation_group(catalog, node)
+    }
     incoming = {node_uuid: 0 for node_uuid in node_by_uuid}
     outgoing = {node_uuid: 0 for node_uuid in node_by_uuid}
     for edge in edges:
         source = str(edge["source_node_uuid"])
         target = str(edge["target_node_uuid"])
+        if source not in outgoing or target not in incoming:
+            raise _CompositeFailure(
+                "composite_boundary_mapping_invalid",
+                "/child/edges/presentation_group",
+            )
         outgoing[source] += 1
         incoming[target] += 1
     entry_targets = [
@@ -1061,6 +1167,14 @@ def _structural_mappings(
         "entry_targets": entry_targets,
         "completion_sources": completion_sources,
     }
+
+
+def _is_presentation_group(
+    catalog: TemplateCatalogSnapshot,
+    node: Mapping[str, Any],
+) -> bool:
+    template = _node_template(catalog, node)
+    return template.get("type") == "group" and template.get("node_type") == "group"
 
 
 def _ready_handle(
@@ -1206,7 +1320,7 @@ def _structural_role(handle: Mapping[str, Any]) -> Any:
 def _parent_input_contract(parent_graph: Mapping[str, Any]) -> dict[str, Any]:
     workflow = parent_graph.get("workflow")
     if not isinstance(workflow, Mapping):
-        raise ValueError("parent workflow missing")
+        raise TypeError("parent workflow missing")
     meta_data = workflow.get("meta_data")
     unilab = meta_data.get("unilab") if isinstance(meta_data, Mapping) else None
     raw = (
@@ -1219,9 +1333,8 @@ def _parent_input_contract(parent_graph: Mapping[str, Any]) -> dict[str, Any]:
 
 def _effective_parent_input_contract(
     parent_input_contract: Mapping[str, Any],
-    expanded: _ExpandedChild,
+    child_input_contract: Mapping[str, Any],
     keyword_arguments: Mapping[str, object],
-    catalog: TemplateCatalogSnapshot,
 ) -> dict[str, Any]:
     effective = _plain(parent_input_contract)
     parameters = effective.get("parameters")
@@ -1235,18 +1348,16 @@ def _effective_parent_input_contract(
         for parameter in parameters
         if isinstance(parameter, dict) and isinstance(parameter.get("name"), str)
     }
-    template_uuid = expanded.invocation_node.get("workflow_node_template_uuid")
-    child_handles = [
-        _plain(handle)
-        for handle in catalog.handle_templates
-        if handle.get("workflow_node_template_uuid") == template_uuid
-    ]
+    child_parameters = child_input_contract.get("parameters")
+    if not isinstance(child_parameters, list):
+        raise _CompositeFailure(
+            "composite_boundary_mapping_invalid",
+            "/child/input_contract",
+        )
     child_by_name = {
-        str(handle["data_key"]): handle
-        for handle in child_handles
-        if handle.get("io_type") == "target"
-        and _structural_role(handle) is None
-        and isinstance(handle.get("data_key"), str)
+        parameter.get("name"): parameter
+        for parameter in child_parameters
+        if isinstance(parameter, Mapping) and isinstance(parameter.get("name"), str)
     }
     for child_name, provider in keyword_arguments.items():
         if (
@@ -1260,15 +1371,14 @@ def _effective_parent_input_contract(
             if isinstance(parameter_name, str)
             else None
         )
-        child_handle = child_by_name.get(child_name)
-        if parent_parameter is None or child_handle is None:
+        child_parameter = child_by_name.get(child_name)
+        if parent_parameter is None or child_parameter is None:
             raise _CompositeFailure(
                 "composite_boundary_mapping_invalid",
                 f"/keyword_arguments/{child_name}",
             )
         parent_schema = parent_parameter.get("schema")
-        child_unilab = _handle_unilab(child_handle)
-        child_schema = child_unilab.get("value_schema")
+        child_schema = child_parameter.get("schema")
         if not isinstance(parent_schema, Mapping) or not isinstance(
             child_schema, Mapping
         ):
@@ -1281,6 +1391,14 @@ def _effective_parent_input_contract(
         if parent_slot is None and child_slot is None:
             continue
         if parent_slot is None or child_slot is None:
+            raise _CompositeFailure(
+                "composite_boundary_mapping_invalid",
+                f"/keyword_arguments/{child_name}/schema",
+            )
+        if not schema_is_assignable(
+            _replace_slot_allowlist(parent_schema, None),
+            _replace_slot_allowlist(child_schema, None),
+        ):
             raise _CompositeFailure(
                 "composite_boundary_mapping_invalid",
                 f"/keyword_arguments/{child_name}/schema",
@@ -1303,17 +1421,6 @@ def _effective_parent_input_contract(
             intersection,
         )
     return effective
-
-
-def _handle_unilab(handle: Mapping[str, Any]) -> Mapping[str, Any]:
-    meta_data = handle.get("meta_data")
-    unilab = meta_data.get("unilab") if isinstance(meta_data, Mapping) else None
-    if not isinstance(unilab, Mapping):
-        raise _CompositeFailure(
-            "composite_catalog_mismatch",
-            "/catalog/handle/meta_data",
-        )
-    return unilab
 
 
 def _slot_allowlist(slot_schema: Mapping[str, Any]) -> list[str] | None:
@@ -1461,6 +1568,52 @@ def _group_template(
     )
 
 
+def _validate_composite_graph_io(
+    graph: Mapping[str, Any],
+) -> ValidatedWorkflowIO:
+    """Validate I1 while deferring only Composite ResourceSlot narrowing.
+
+    Ordinary I1 assignability remains strict.  A Published Workflow boundary is
+    special under D-064: its allowlist is intersected across the complete
+    Composite chain during compile, so publication must not reject a legal
+    narrowing before the chain is available.  We therefore erase only the
+    consumer allowlist on authoritative Published Workflow target Handles in a
+    private validation copy; type/wrapper/nullability and every other I/O rule
+    remain unchanged.
+    """
+
+    relaxed = _plain(graph)
+    raw_templates = relaxed.get("node_templates")
+    raw_handles = relaxed.get("handle_templates")
+    if not isinstance(raw_templates, list) or not isinstance(raw_handles, list):
+        return validate_workflow_graph_io(relaxed)
+    composite_template_uuids = {
+        str(template["uuid"])
+        for template in raw_templates
+        if isinstance(template, Mapping)
+        and isinstance(template.get("uuid"), str)
+        and _is_framework_published_workflow_template(template)
+    }
+    for handle in raw_handles:
+        if (
+            not isinstance(handle, dict)
+            or handle.get("workflow_node_template_uuid") not in composite_template_uuids
+            or handle.get("io_type") != "target"
+        ):
+            continue
+        meta_data = handle.get("meta_data")
+        unilab = meta_data.get("unilab") if isinstance(meta_data, dict) else None
+        value_schema = unilab.get("value_schema") if isinstance(unilab, dict) else None
+        if (
+            not isinstance(value_schema, Mapping)
+            or resource_slot_schema(value_schema) is None
+        ):
+            continue
+        unilab["value_schema"] = _replace_slot_allowlist(value_schema, None)
+        unilab["allowed_resource_template_uuids"] = None
+    return validate_workflow_graph_io(relaxed)
+
+
 def project_published_workflow_contract(
     *,
     source: PublishedWorkflowSource,
@@ -1509,7 +1662,7 @@ def project_published_workflow_contract(
         ),
     }
     try:
-        workflow_io = validate_workflow_graph_io(graph)
+        workflow_io = _validate_composite_graph_io(graph)
     except (WorkflowIOValidationError, WorkflowSchemaError, TypeError, ValueError):
         raise CompositeCatalogMismatch("/published_workflow/io_contract") from None
 

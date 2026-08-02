@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+from collections.abc import Mapping
+from typing import Any
 from uuid import UUID, uuid5
 
 from unilabos.workflow.models import WorkflowEdgeWrite, validate_uuid
@@ -23,8 +25,15 @@ def authoring_edge(
     target_node_uuid: str,
     source_handle_uuid: str,
     target_handle_uuid: str,
+    *,
+    description: str | None = None,
+    meta_data: Mapping[str, Any] | None = None,
 ) -> dict[str, object]:
-    """生成现有 authoring edge rule 的 Backend-shaped Edge。"""
+    """生成现有 authoring edge rule 的 Backend-shaped Edge。
+
+    Identity 和 endpoints 由 server 重算；调用者可选传入 child Edge 的
+    presentation/control 字段，由 ``WorkflowEdgeWrite`` 规范化并深拷贝。
+    """
 
     workflow = validate_uuid(workflow_uuid)
     source_node = validate_uuid(source_node_uuid)
@@ -44,7 +53,8 @@ def authoring_edge(
         target_node_uuid=target_node,
         source_handle_uuid=source_handle,
         target_handle_uuid=target_handle,
-        meta_data={},
+        description=description,
+        meta_data=dict(meta_data) if meta_data is not None else {},
     ).model_dump(exclude_none=True)
 
 
