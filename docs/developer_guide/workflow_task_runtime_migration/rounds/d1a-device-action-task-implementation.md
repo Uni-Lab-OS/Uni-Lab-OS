@@ -173,11 +173,13 @@ OS ticket 记录 base/test/implementation/review full SHA、命令与 finding di
   target 对齐的最终受测候选：`2c65cd139605985047d5ecf82592c8850636cbd9`；
 - FE D1A 代码提交：`a380bf81666509b8a5bfe7a7c84af43576828dd9`；与最新
   target 对齐的最终受测候选：`b502e4379250f7b5d3b3ed7506d4476b50353538`；
-- 发布结果：OS integration `25e71d1aeff1e13e9ab3405c2302cf5a4bf15b7a`、
-  canonical `deepmodeling/Uni-Lab-OS:dev@b3190ca8a99f5be2cdc4c9943771728bf98dc10f`、
-  FE integration `b963a33d0a589a12b1e2aa16a9e0d05929ee4ff7`、Core pin/evidence
-  `68768e53a5f2d154db22f5ddaea732aab4e073c4`；同一独立 reviewer 最终结论为
-  Standards `0B/1NB`、Spec `0B/0NB`。
+- 发布结果：私有 OS `dev` production merge
+  `f4d9c1e4fb007ff26c8a867d0d2e1f43eafd404b`（包含 OS integration
+  `25e71d1aeff1e13e9ab3405c2302cf5a4bf15b7a`）、FE integration
+  `b963a33d0a589a12b1e2aa16a9e0d05929ee4ff7`；当前 FE integration
+  `0bf83ea93de9aff5a10f0419a3322cff27b48595` 包含该 D1A merge。最新 Core
+  pin/evidence 以 Core integration branch 与 Wayfinder #1 为准；同一独立 reviewer
+  最终结论为 Standards `0B/1NB`、Spec `0B/0NB`。
 
 ### 9.2 本轮实现结果
 
@@ -229,7 +231,7 @@ running feedback 事件流、运行中锁、typed terminal result、释放后再
 
 ### 9.5 尚未接受的门
 
-软件自动化、精确 SHA 独立复核、GitHub non-squash merge、canonical OS dev、Core
+软件自动化、精确 SHA 独立复核、GitHub non-squash merge、私有 OS dev、Core
 submodule/evidence pin 与 Issue/Wayfinder 同步均已完成。剩余门只有真实物理设备/ROS
 与 Feishu acceptance；因此 Core #162/#163 保持 open、`stage:testing`，不得提前标记
 `stage:accepted`。
