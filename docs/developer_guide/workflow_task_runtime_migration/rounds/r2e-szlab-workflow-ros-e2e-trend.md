@@ -177,6 +177,29 @@ OS 日志交叉验证：
 仍是 `31590d51f7008afd1f57b12dd6c805e250dee57d`。本轮必须保留独立测试 merge 与所有修复
 commit，以 non-squash 方式本地合入 `integration/workflow-task-runtime`，未经授权不得 push。
 
+实际 non-squash integration merge 为
+`fd716cdfa0d945452af75323afb26c982c2b20d3`。本轮进行期间 integration 另行合入 I1 typed
+Workflow I/O validator，因此合并后额外执行组合门禁，而没有只依赖两个分支各自的结果：
+
+- R2E focused：`15 passed, 1 warning`；
+- 完整 `pytest -q tests/`：`2381 passed, 4 skipped, 69 warnings`；
+- Ruff `E,F,I`、format、全部本轮 Python 文件 `py_compile`、merge diff check：passed；
+- integration worktree：clean。
+
+组合后还用 merge SHA `fd716cd` 重跑相同真实 FE→OS→ROS E2E。Workflow UUID 保持
+`d176a938-5e34-511b-9e28-68540833559b`，Task 为
+`25259a00-e036-42b5-bd68-3d61d59cee5b`：半程仍为 2 succeeded / 2 pending，resume 后
+4/4 succeeded、Task succeeded，`browser_errors=[]`。完整组合证据位于：
+
+```text
+/home/changjunhan/Uni-Lab-Core/.artifacts/
+  r2e-szlab-workflow-ros-e2e-integration-fd716cd/
+```
+
+因此 I1 input/output validator 与本轮 ROS runtime 在最终 integration 上经过同库完整测试和
+同一 S09 browser execution，不存在仅在分支级门禁中被遗漏的组合冲突。合并与记录均为本地
+操作，没有 push。
+
 下一轮只允许从本轮合并后的 integration 新建分支。其第一份交付物是
 `POST /api/v1/device-action-runs` 的 OS/FE implementation spec，合同对齐 Backend
 `feat/workflow`，并在任何 production code 之前交人工评审。
