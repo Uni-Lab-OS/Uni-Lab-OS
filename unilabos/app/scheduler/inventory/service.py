@@ -2056,7 +2056,35 @@ class InventoryService:
             with self._tx() as conn:
                 replay = self._processed_payload(conn, command_uuid, payload_hash)
                 if replay is not None:
-                    return _claim_result_from_payload(replay)
+                    stored_result = _claim_result_from_payload(replay)
+                    if stored_result.claim is None:
+                        return stored_result
+                    current_claim = self._read_job_claim(
+                        conn,
+                        job_uuid=job_uuid,
+                        attempt=attempt,
+                    )
+                    if (
+                        current_claim is None
+                        or current_claim.uuid != stored_result.claim.uuid
+                        or current_claim.workflow_task_uuid != task_uuid
+                        or current_claim.workflow_node_job_uuid != job_uuid
+                    ):
+                        raise MaterialClaimCorrupt(
+                            "stored acquire result does not match the durable Claim"
+                        )
+                    return JobClaimResult(
+                        schema_version=stored_result.schema_version,
+                        command_uuid=stored_result.command_uuid,
+                        status=(
+                            "acquired"
+                            if current_claim.state != "released"
+                            else "rejected"
+                        ),
+                        claim=current_claim,
+                        diagnostics=stored_result.diagnostics,
+                        outbox_sequence=stored_result.outbox_sequence,
+                    )
 
                 device = conn.execute(
                     """
@@ -3477,6 +3505,12 @@ class InventoryService:
                 material_uuid=parent_uuid,
                 require_active=True,
             )
+            if self._relationship_path_exists(
+                conn,
+                source_uuid=effect.resource_uuid,
+                target_uuid=parent_uuid,
+            ):
+                raise MaterialConflict("created Material parent would create a cycle")
         disposition = str(effect.after.get("disposition") or "active")
         if disposition not in {
             "active",
@@ -3726,8 +3760,27 @@ class InventoryService:
         ).fetchone()
         if duplicate is not None:
             raise MaterialConflict("Material already occupies another Site")
-        would_cycle = conn.execute(
-            """
+        if self._relationship_path_exists(
+            conn,
+            source_uuid=occupant_uuid,
+            target_uuid=owner_uuid,
+            excluded_site_uuid=site_uuid,
+        ):
+            raise MaterialConflict("Site placement would create a cycle")
+
+    @staticmethod
+    def _relationship_path_exists(
+        conn: sqlite3.Connection,
+        *,
+        source_uuid: str,
+        target_uuid: str,
+        excluded_site_uuid: str | None = None,
+    ) -> bool:
+        """在 Material composition 与 Site occupancy 组合图中检查可达性。"""
+
+        return (
+            conn.execute(
+                """
             WITH RECURSIVE
             edges(source_uuid, target_uuid) AS (
                 SELECT parent_uuid, uuid FROM material
@@ -3746,10 +3799,15 @@ class InventoryService:
             )
             SELECT 1 FROM reachable WHERE uuid = ? LIMIT 1
             """,
-            (site_uuid, site_uuid, occupant_uuid, owner_uuid),
-        ).fetchone()
-        if would_cycle is not None:
-            raise MaterialConflict("Site placement would create a cycle")
+                (
+                    excluded_site_uuid,
+                    excluded_site_uuid,
+                    source_uuid,
+                    target_uuid,
+                ),
+            ).fetchone()
+            is not None
+        )
 
     def _apply_material_effect(
         self,
@@ -3796,19 +3854,11 @@ class InventoryService:
                     material_uuid=canonical_parent,
                     require_active=True,
                 )
-                cycle = conn.execute(
-                    """
-                    WITH RECURSIVE subtree(uuid) AS (
-                        SELECT ? UNION ALL
-                        SELECT m.uuid FROM material AS m
-                        JOIN subtree AS s ON m.parent_uuid = s.uuid
-                        WHERE m.deleted_at IS NULL
-                    )
-                    SELECT 1 FROM subtree WHERE uuid = ? LIMIT 1
-                    """,
-                    (effect.resource_uuid, canonical_parent),
-                ).fetchone()
-                if cycle is not None:
+                if self._relationship_path_exists(
+                    conn,
+                    source_uuid=effect.resource_uuid,
+                    target_uuid=canonical_parent,
+                ):
                     raise MaterialConflict("Material reparent would create a cycle")
             normalized_after["parent_uuid"] = canonical_parent
         if effect.operation == "soft_delete":

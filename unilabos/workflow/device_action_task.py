@@ -790,7 +790,7 @@ class DeviceActionTaskRuntimeBridge:
                 return
             if self._scheduler is None or self._backend is None:
                 return
-            self._scheduler.audit_inventory_job_claims()
+            audited_claims = self._scheduler.audit_inventory_job_claims()
             self._scheduler.set_device_action_task_hooks(
                 before=self._before_dispatch,
                 on_error=self._dispatch_failed,
@@ -802,7 +802,7 @@ class DeviceActionTaskRuntimeBridge:
             self._backend.add_job_completion_listener(self._on_job_finished)
             self._started = True
             try:
-                self.recover_inventory_claims()
+                self.recover_inventory_claims(audited_claims)
                 self.replay_pending()
             except BaseException:
                 self._started = False
@@ -822,7 +822,7 @@ class DeviceActionTaskRuntimeBridge:
             )
             self._cancel_thread.start()
 
-    def recover_inventory_claims(self) -> None:
+    def recover_inventory_claims(self, audited_claims: tuple[Any, ...]) -> None:
         """在 dispatch ready 前双向核对 Workflow 与 Inventory durable facts。"""
 
         if not self._started:
@@ -857,11 +857,12 @@ class DeviceActionTaskRuntimeBridge:
                 )
             ]
         rows_by_job = {row["workflow_node_job_uuid"]: row for row in rows}
-        unsettled = {
-            claim.workflow_node_job_uuid: claim
-            for claim in self._scheduler.unsettled_inventory_job_claims()
-        }
-        for job_uuid, claim in unsettled.items():
+        claims_by_job: dict[str, Any] = {}
+        for claim in audited_claims:
+            job_uuid = claim.workflow_node_job_uuid
+            if job_uuid in claims_by_job:
+                raise WorkflowError("reconciliation_required")
+            claims_by_job[job_uuid] = claim
             row = rows_by_job.get(job_uuid)
             if (
                 row is None
@@ -896,13 +897,7 @@ class DeviceActionTaskRuntimeBridge:
             ):
                 raise WorkflowError("reconciliation_required")
 
-            claim = unsettled.get(job_uuid)
-            if claim is None and (
-                row["claim_status"] in {"claimed", "unknown"}
-                or any(value is not None for value in claim_fields)
-                or row["job_status"] == "execution_unknown"
-            ):
-                claim = self._scheduler.find_inventory_job_claim(job_uuid, 1)
+            claim = claims_by_job.get(job_uuid)
             if claim is None:
                 if row["claim_status"] in {"claimed", "unknown"} or any(
                     value is not None for value in claim_fields

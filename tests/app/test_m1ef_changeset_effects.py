@@ -3,18 +3,23 @@
 from __future__ import annotations
 
 import sqlite3
+from dataclasses import replace
 from pathlib import Path
 
 import pytest
 
 import unilabos.app.scheduler.inventory as inventory_api
 from tests.app.test_m1ef_inventory_claim_lifecycle import (
+    ADMISSION_COMMAND_UUID,
     DEVICE_MATERIAL_UUID,
     FIRST_JOB_UUID,
+    MATERIAL_SOURCE_NODE_UUID,
+    MOUNT_MATERIAL_UUID,
     MOUNT_TEMPLATE_UUID,
     SAMPLE_MATERIAL_UUID,
     SAMPLE_TEMPLATE_UUID,
     SITE_UUID,
+    WORKFLOW_SNAPSHOT_FINGERPRINT,
     WORKFLOW_TASK_UUID,
     _admit_task,
     _claim_command,
@@ -30,17 +35,59 @@ CREATED_SITE_UUID = "61000000-0000-4000-8000-000000000421"
 
 def _running_claim(
     tmp_path: Path,
+    *,
+    mutable_roots: tuple[str, ...] | None = None,
 ) -> tuple[inventory_api.InventoryService, inventory_api.JobClaimRecord]:
     inventory = _open_inventory(tmp_path)
     _seed_device_material(inventory)
     _seed_business_material_and_site(inventory)
-    _admit_task(inventory)
-    acquired = inventory.acquire_job_claim(
-        _claim_command(
-            command_uuid="82000000-0000-4000-8000-000000000421",
-            job_uuid=FIRST_JOB_UUID,
+    if mutable_roots is None:
+        _admit_task(inventory)
+    else:
+        admitted = inventory.admit_task(
+            inventory_api.TaskMaterialAdmissionCommand(
+                schema_version=1,
+                command_uuid=ADMISSION_COMMAND_UUID,
+                idempotency_key="m1ef-admit-mount-and-sample-421",
+                workflow_task_uuid=WORKFLOW_TASK_UUID,
+                workflow_snapshot_fingerprint=WORKFLOW_SNAPSHOT_FINGERPRINT,
+                sources=(
+                    inventory_api.TaskMaterialAdmissionSource(
+                        material_source_node_uuid=MATERIAL_SOURCE_NODE_UUID,
+                        mode="existing",
+                        resource_template_uuid=SAMPLE_TEMPLATE_UUID,
+                        mount={"uuid": MOUNT_MATERIAL_UUID},
+                        material_uuid=SAMPLE_MATERIAL_UUID,
+                        site_uuid=SITE_UUID,
+                        candidate_site_uuids=(),
+                        flow_role="sample",
+                    ),
+                    inventory_api.TaskMaterialAdmissionSource(
+                        material_source_node_uuid=(
+                            "a1000000-0000-4000-8000-000000000421"
+                        ),
+                        mode="existing",
+                        resource_template_uuid=MOUNT_TEMPLATE_UUID,
+                        mount={"uuid": MOUNT_MATERIAL_UUID},
+                        material_uuid=MOUNT_MATERIAL_UUID,
+                        site_uuid=None,
+                        candidate_site_uuids=(),
+                        flow_role="mount",
+                    ),
+                ),
+            )
         )
+        assert admitted.status == "admitted"
+    acquire_command = _claim_command(
+        command_uuid="82000000-0000-4000-8000-000000000421",
+        job_uuid=FIRST_JOB_UUID,
     )
+    if mutable_roots is not None:
+        acquire_command = replace(
+            acquire_command,
+            mutable_material_root_uuids=mutable_roots,
+        )
+    acquired = inventory.acquire_job_claim(acquire_command)
     assert acquired.claim is not None
     running = inventory.mark_job_claim_running(
         inventory_api.JobClaimStateCommand(
@@ -275,6 +322,37 @@ def test_reparent_requires_the_target_parent_in_the_live_claim(
         with pytest.raises(inventory_api.MaterialConflict, match="Claim member"):
             inventory.commit_material_changeset(command)
         assert inventory.get_material(SAMPLE_MATERIAL_UUID).parent_uuid is None
+    finally:
+        inventory.close()
+
+
+def test_reparent_rejects_cycle_through_site_occupancy(
+    tmp_path: Path,
+) -> None:
+    inventory, claim = _running_claim(
+        tmp_path,
+        mutable_roots=(MOUNT_MATERIAL_UUID, SAMPLE_MATERIAL_UUID),
+    )
+    command = _command(
+        claim,
+        command_uuid="84000000-0000-4000-8000-000000000429",
+        effects=(
+            inventory_api.MaterialChangeSetEffect(
+                effect_key="01-reparent-site-owner-under-occupant",
+                resource_kind="business_material",
+                resource_uuid=MOUNT_MATERIAL_UUID,
+                operation="reparent",
+                expected_version=1,
+                before={"parent_uuid": None},
+                after={"parent_uuid": SAMPLE_MATERIAL_UUID},
+            ),
+        ),
+    )
+    try:
+        with pytest.raises(inventory_api.MaterialConflict, match="cycle"):
+            inventory.commit_material_changeset(command)
+        assert inventory.get_material(MOUNT_MATERIAL_UUID).parent_uuid is None
+        assert inventory.get_terminal_material_changeset(FIRST_JOB_UUID, 1) is None
     finally:
         inventory.close()
 

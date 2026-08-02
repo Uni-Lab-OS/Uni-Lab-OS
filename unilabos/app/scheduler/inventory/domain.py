@@ -95,7 +95,7 @@ class MaterialClaimBlocked(MaterialConflict):
 
 
 class MaterialClaimCorrupt(MaterialAuthorityUnavailable):
-    """Durable Claim/fence/receipt facts 违反 authority invariant。"""
+    """持久 Claim、fence 或 receipt 事实违反权威不变量。"""
 
     code = "claim_authority_corrupt"
 

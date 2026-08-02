@@ -16,6 +16,7 @@ from unilabos.app.scheduler.backend import create_edge_stack
 from unilabos.app.scheduler.inventory import (
     InventoryService,
     JobClaimAcquireCommand,
+    JobClaimResolutionCommand,
     MaterialClaimCorrupt,
     ResourceTemplateIdentity,
 )
@@ -697,6 +698,67 @@ def test_c1_claim_followed_by_durable_cancel_releases_only_with_no_send_proof(
         "workflow": _database_rows(tmp_path / "workflow.db"),
         "inventory": _database_rows(tmp_path / "inventory.db"),
     } == before_restart
+
+
+def test_startup_rejects_released_claim_while_workflow_is_still_pending(
+    tmp_path: Path,
+) -> None:
+    created = _create_faulted_d1a_task(tmp_path, "after_inventory_claim_commit")
+    inventory = _inventory(tmp_path)
+    claim = inventory.get_job_claim(created["job_uuid"], 1)
+    released = inventory.resolve_job_claim(
+        JobClaimResolutionCommand(
+            schema_version=1,
+            command_uuid="86000000-0000-4000-8000-000000000904",
+            idempotency_key="m1ef-released-claim-pending-workflow-904",
+            workflow_node_job_uuid=created["job_uuid"],
+            attempt=1,
+            claim_uuid=claim.uuid,
+            fencing_token=claim.fencing_token,
+            expected_state="reserved",
+            resolution="confirmed_not_dispatched",
+            evidence_kind="coordinator_no_send",
+            evidence_fingerprint="9" * 64,
+            observed_at="2026-08-03T02:00:00+08:00",
+            actor_identity="test:scheduler",
+            reason="prove startup rejects a released Claim for pending Workflow facts",
+            no_send_proof_fingerprint="a" * 64,
+            terminal_changeset=None,
+            workflow_terminal_fingerprint=None,
+        )
+    )
+    assert released.claim is not None
+    assert released.claim.state == "released"
+    inventory.close()
+
+    store = WorkflowStore(tmp_path / "workflow.db")
+    reopened_inventory = _inventory(tmp_path)
+    host = FeedbackHost()
+    scheduler, backend = create_edge_stack(
+        host_node_getter=lambda: host,
+        inventory=reopened_inventory,
+    )
+    bridge = DeviceActionTaskRuntimeBridge(
+        store=store,
+        coordinator=WorkflowRuntimeCoordinator(store),
+        scheduler=scheduler,
+        backend=backend,
+    )
+    try:
+        with pytest.raises(WorkflowError) as raised:
+            bridge.start()
+        assert raised.value.code == "reconciliation_required"
+        assert not bridge.is_available()
+        assert host.sent == []
+        assert reopened_inventory.get_job_claim(created["job_uuid"], 1).state == (
+            "released"
+        )
+        assert _job_status(store, created["job_uuid"]) == "pending"
+    finally:
+        bridge.stop()
+        backend.stop()
+        reopened_inventory.close()
+        store.close()
 
 
 def test_terminal_receipt_recovery_rejects_mismatched_workflow_payload(
