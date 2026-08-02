@@ -817,7 +817,7 @@ class WorkflowStore:
         nodes: List[WorkflowNodeWrite],
         edges: List[WorkflowEdgeWrite],
         protect_reserved_metadata: bool = False,
-        validate_input_binding_schema: bool = False,
+        validate_workflow_io_contract: bool = False,
         commit_validator: GraphCommitValidator | None = None,
     ) -> Dict[str, Any]:
         with self.transaction() as conn:
@@ -829,7 +829,7 @@ class WorkflowStore:
                 edges=edges,
                 advance_revision=True,
                 protect_reserved_metadata=protect_reserved_metadata,
-                validate_input_binding_schema=validate_input_binding_schema,
+                validate_workflow_io_contract=validate_workflow_io_contract,
                 commit_validator=commit_validator,
             )
         return self.get_graph(workflow_uuid)
@@ -845,7 +845,7 @@ class WorkflowStore:
         advance_revision: bool,
         protect_reserved_metadata: bool = False,
         semantic_workflow_meta_data: Optional[Dict[str, Any]] = None,
-        validate_input_binding_schema: bool = False,
+        validate_workflow_io_contract: bool = False,
         commit_validator: GraphCommitValidator | None = None,
     ) -> int:
         workflow = self.get_workflow(workflow_uuid, conn=conn)
@@ -928,7 +928,7 @@ class WorkflowStore:
                 effective_params=effective_params,
                 workflow_meta_data=effective_workflow_meta_data,
                 node_meta_data=effective_node_meta_data,
-                validate_input_binding_schema=validate_input_binding_schema,
+                validate_workflow_io_contract=validate_workflow_io_contract,
             )
         except MissingTemplateError as exc:
             raise StoreNotFound(str(exc)) from exc
@@ -1764,7 +1764,7 @@ class WorkflowStore:
                     advance_revision=True,
                     protect_reserved_metadata=False,
                     semantic_workflow_meta_data=candidate_meta,
-                    validate_input_binding_schema=True,
+                    validate_workflow_io_contract=True,
                     commit_validator=commit_validator,
                 )
                 workflow_meta = dict(workflow["meta_data"])

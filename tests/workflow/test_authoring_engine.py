@@ -573,7 +573,9 @@ def test_compile_returns_backend_identity_contracts_bindings_and_catalog(
         ANALYZE_TEMPLATE_UUID,
     }
     note_handle = next(
-        item for item in graph["handle_templates"] if item["uuid"] == PREPARE_NOTE_TARGET
+        item
+        for item in graph["handle_templates"]
+        if item["uuid"] == PREPARE_NOTE_TARGET
     )
     assert note_handle["required"] is False
     assert note_handle["meta_data"]["unilab"]["value_schema"] == {

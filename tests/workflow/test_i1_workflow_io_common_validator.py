@@ -446,8 +446,9 @@ def test_candidate_accepts_workflow_input_slot_guaranteed_for_handle(
     assert _validate(graph) is graph
 
 
-def test_candidate_rejects_nullable_workflow_input_for_optional_non_null_handle(
-) -> None:
+def test_candidate_rejects_nullable_workflow_input_for_optional_non_null_handle() -> (
+    None
+):
     graph = _producer_graph()
     _declare_input_binding(
         graph,

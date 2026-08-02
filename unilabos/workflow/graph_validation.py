@@ -51,7 +51,7 @@ def validate_graph(
     effective_params: Mapping[str, dict[str, Any]],
     workflow_meta_data: Mapping[str, Any],
     node_meta_data: Mapping[str, dict[str, Any]],
-    validate_input_binding_schema: bool = False,
+    validate_workflow_io_contract: bool = False,
 ) -> None:
     """在写事务内校验一份完整替换图。"""
 
@@ -70,7 +70,7 @@ def validate_graph(
             raise GraphValidationError("父节点不在提交的完整图中")
     _validate_parent_cycles(nodes)
     validated_io = None
-    if validate_input_binding_schema:
+    if validate_workflow_io_contract:
         try:
             validated_io = validate_workflow_io(
                 nodes=node_by_uuid,

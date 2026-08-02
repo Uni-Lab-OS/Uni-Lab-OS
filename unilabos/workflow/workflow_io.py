@@ -92,7 +92,7 @@ def handle_value_schema(handle: Mapping[str, Any]) -> WorkflowValueSchema:
         raw_schema = _legacy_handle_schema(handle.get("type"))
     if not isinstance(raw_schema, Mapping):
         raise WorkflowIOValidationError("Handle value_schema 无效")
-    schema = _plain_mapping(raw_schema)
+    schema = _value_set_schema(_plain_mapping(raw_schema))
     allowlist = unilab.get("allowed_resource_template_uuids")
     if allowlist is not None:
         schema, applied = _apply_slot_allowlist(schema, allowlist)
@@ -102,6 +102,27 @@ def handle_value_schema(handle: Mapping[str, Any]) -> WorkflowValueSchema:
         return parse_value_schema(schema)
     except WorkflowSchemaError as exc:
         raise WorkflowIOValidationError("Handle value_schema 无效") from exc
+
+
+def _value_set_schema(schema: dict[str, Any]) -> dict[str, Any]:
+    """从 A1 JSON Schema property 投影出只影响可赋值集的 I1 schema。"""
+
+    for key in ("default", "title", "description"):
+        schema.pop(key, None)
+    if "anyOf" in schema:
+        members = schema.get("anyOf")
+        if not isinstance(members, list):
+            return schema
+        schema["anyOf"] = [
+            _value_set_schema(member) if isinstance(member, dict) else member
+            for member in members
+        ]
+    items = schema.get("items")
+    if isinstance(items, dict):
+        schema["items"] = _value_set_schema(items)
+    if schema.get("type") == "object" and schema.get("additionalProperties") is True:
+        schema.pop("additionalProperties")
+    return schema
 
 
 def schema_is_assignable(
@@ -168,9 +189,9 @@ def _validate_input_bindings(
                 raise WorkflowIOValidationError("input_binding 必须是闭合对象")
             parameter_name = str(raw_binding["parameter"])
             parameter = input_parameters.get(parameter_name)
-            if parameter is None or not _input_schema_is_assignable(
+            if parameter is None or not schema_is_assignable(
                 parameter["schema"],
-                handle,
+                handle_value_schema(handle),
             ):
                 raise WorkflowIOValidationError(
                     "input_binding 与 Workflow 参数类型不兼容"
@@ -178,33 +199,6 @@ def _validate_input_bindings(
             bindings[handle_uuid] = MappingProxyType({"parameter": parameter_name})
         result[node_uuid] = MappingProxyType(bindings)
     return result
-
-
-def _input_schema_is_assignable(
-    producer: Mapping[str, Any],
-    handle: Mapping[str, Any],
-) -> bool:
-    consumer = handle_value_schema(handle)
-    if schema_is_assignable(producer, consumer):
-        return True
-    producer_base, _ = _unwrap_nullable(producer)
-    consumer_base, _ = _unwrap_nullable(consumer.to_dict())
-    if (
-        producer_base.get("$slot") == "ResourceSlot"
-        and consumer_base.get("$slot") == "ResourceSlot"
-    ):
-        # Task preflight 仍会按 target Handle 的 allowlist 校验 authority-owned
-        # ResourceTemplate；Catalog symbol round-trip 完成前不在这里丢失旧输入。
-        return True
-    members = producer.get("anyOf")
-    return (
-        handle.get("io_type") == "target"
-        and handle.get("required") is False
-        and isinstance(members, list)
-        and bool(members)
-        and isinstance(members[0], Mapping)
-        and schema_is_assignable(members[0], consumer)
-    )
 
 
 def _validate_output_bindings(
