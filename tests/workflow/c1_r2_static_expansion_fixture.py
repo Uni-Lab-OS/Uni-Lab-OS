@@ -30,10 +30,12 @@ THIRD_WORKFLOW_UUID = "a1000000-0000-4000-8000-000000000003"
 
 CHILD_NODE_UUID = "22222222-2222-4222-8222-222222222222"
 GRANDCHILD_NODE_UUID = "33333333-3333-4333-8333-333333333333"
+GROUP_NODE_UUID = "77777777-7777-4777-8777-777777777777"
 SECOND_CHILD_NODE_UUID = "22222222-2222-4222-8222-222222222223"
 EXPANDED_CHILD_NODE_UUID = "b6b35f79-80d0-5b77-a0eb-9646bcb36808"
 EXPANDED_GRANDCHILD_NODE_UUID = "7b221513-105e-5c92-9859-1a3c2015fafb"
 STORED_EXPANDED_GRANDCHILD_UUID = "c4f12353-a256-572a-a790-851e211182b4"
+STORED_EXPANDED_GROUP_UUID = "72b77e66-444e-5787-a914-d48a4d6ccf47"
 EXPANDED_EDGE_UUID = "b3e67370-ee6e-54b5-9dd1-6d44c5a5854f"
 
 HOST_RESOURCE_TEMPLATE_UUID = "a2000000-0000-4000-8000-000000000001"
@@ -48,6 +50,7 @@ SECOND_ACTION_TEMPLATE_UUID = "a3000000-0000-4000-8000-000000000002"
 CHILD_TEMPLATE_UUID = "a3000000-0000-4000-8000-000000000011"
 LEAF_TEMPLATE_UUID = "a3000000-0000-4000-8000-000000000012"
 THIRD_TEMPLATE_UUID = "a3000000-0000-4000-8000-000000000013"
+GROUP_TEMPLATE_UUID = "a3000000-0000-4000-8000-000000000021"
 
 ACTION_VALUE_TARGET_UUID = "a4000000-0000-4000-8000-000000000001"
 ACTION_VALUE_SOURCE_UUID = "55555555-5555-4555-8555-555555555555"
@@ -165,6 +168,21 @@ def resource_slot_schema(*allowlist: str) -> dict[str, Any]:
     return schema
 
 
+def resource_slot_wrapper(
+    *allowlist: str,
+    collection: bool = False,
+    nullable: bool = False,
+) -> dict[str, Any]:
+    """Build the D-064 wrapper shapes already accepted by the I1 schema."""
+
+    schema: dict[str, Any] = resource_slot_schema(*allowlist)
+    if collection:
+        schema = {"type": "array", "items": schema}
+    if nullable:
+        schema = {"anyOf": [schema, {"type": "null"}]}
+    return schema
+
+
 def action_import(
     *,
     template_uuid: str = ACTION_TEMPLATE_UUID,
@@ -223,6 +241,36 @@ def action_import(
             "meta_data": {},
         },
         handles=tuple(handles),
+    )
+
+
+def presentation_group_import() -> NodeTemplateImport:
+    """C1/R1 presentation group: a Catalog node with deliberately no handles."""
+
+    return NodeTemplateImport(
+        template={
+            "uuid": GROUP_TEMPLATE_UUID,
+            "resource_template_uuid": HOST_RESOURCE_TEMPLATE_UUID,
+            "name": "group",
+            "display_name": "Group",
+            "description": "Presentation group for Workflow authoring",
+            "class": "unilabos.workflow.authoring:group",
+            "goal": {},
+            "goal_default": {},
+            "feedback": {},
+            "result": {},
+            "schema": None,
+            "type": "group",
+            "node_type": "group",
+            "meta_data": {
+                "unilab": {
+                    "authority_id": AUTHORITY.authority_id,
+                    "framework_owner_only": True,
+                    "source_fqid": "unilabos.workflow.authoring:group",
+                }
+            },
+        },
+        handles=(),
     )
 
 
@@ -313,6 +361,23 @@ def action_node(
     )
 
 
+def group_node(*, node_uuid: str, parent_uuid: str | None = None) -> WorkflowNodeWrite:
+    return WorkflowNodeWrite(
+        uuid=node_uuid,
+        workflow_node_template_uuid=GROUP_TEMPLATE_UUID,
+        parent_uuid=parent_uuid,
+        name="Fixture Group",
+        status="idle",
+        type="group",
+        pose={},
+        param={},
+        execution_policy={},
+        disabled=False,
+        minimized=False,
+        meta_data={"presentation": {"collapsed": False}},
+    )
+
+
 def workflow_node(
     *,
     node_uuid: str,
@@ -376,6 +441,8 @@ def composite_metadata(
         ]
     source_mappings: dict[str, Any] = {}
     boundary_source = contract.handles.get(("result", "source"))
+    if boundary_source is None:
+        boundary_source = contract.handles.get(("value", "source"))
     if (
         boundary_source is not None
         and source_node_uuid is not None
@@ -385,6 +452,11 @@ def composite_metadata(
             "kind": "node_output",
             "workflow_node_uuid": source_node_uuid,
             "source_handle_uuid": source_handle_uuid,
+        }
+    elif boundary_source == contract.handles.get(("value", "source")):
+        source_mappings[boundary_source] = {
+            "kind": "workflow_input",
+            "parameter": "value",
         }
     return {
         "version": 1,
@@ -419,6 +491,8 @@ def authoring_edge(
     source_handle_uuid: str,
     target_node_uuid: str,
     target_handle_uuid: str,
+    description: str | None = None,
+    meta_data: dict[str, Any] | None = None,
 ) -> WorkflowEdgeWrite:
     return WorkflowEdgeWrite(
         uuid=edge_uuid,
@@ -426,7 +500,8 @@ def authoring_edge(
         source_handle_uuid=source_handle_uuid,
         target_node_uuid=target_node_uuid,
         target_handle_uuid=target_handle_uuid,
-        meta_data={},
+        description=description,
+        meta_data=meta_data or {},
     )
 
 
@@ -439,7 +514,15 @@ def workflow_meta(
 ) -> dict[str, Any]:
     parameters: list[dict[str, Any]] = []
     if input_schema is not None:
-        parameters.append({"name": "value", "schema": input_schema, "required": True})
+        nullable = isinstance(input_schema.get("anyOf"), list)
+        parameter = {
+            "name": "value",
+            "schema": input_schema,
+            "required": not nullable,
+        }
+        if nullable:
+            parameter["default"] = None
+        parameters.append(parameter)
     outputs: list[dict[str, Any]] = []
     bindings: dict[str, Any] = {}
     if output_schema is not None:
@@ -813,7 +896,13 @@ def make_direct_world(
     return world
 
 
-def make_nested_world(tmp_path: Path) -> ExpansionWorld:
+def make_nested_world(
+    tmp_path: Path,
+    *,
+    edge_description: str | None = None,
+    edge_meta_data: dict[str, Any] | None = None,
+    leaf_group: bool = False,
+) -> ExpansionWorld:
     """建立一个含完整 nested hierarchy 与固定 edge vector 的 Applied child。"""
 
     store = WorkflowStore(tmp_path / "workflow.db")
@@ -840,11 +929,14 @@ def make_nested_world(tmp_path: Path) -> ExpansionWorld:
         handles={},
         contract_pin={},
     )
+    imports = {SECOND_ACTION_TEMPLATE_UUID: nested_action}
+    if leaf_group:
+        imports[GROUP_TEMPLATE_UUID] = presentation_group_import()
     world = ExpansionWorld(
         store=store,
         catalog=catalog,
         resolver=resolver,
-        imports={SECOND_ACTION_TEMPLATE_UUID: nested_action},
+        imports=imports,
         child=placeholder,
         contracts={},
     )
@@ -861,13 +953,25 @@ def make_nested_world(tmp_path: Path) -> ExpansionWorld:
             ("ready", "target"): LEAF_READY_TARGET_UUID,
             ("ready", "source"): LEAF_READY_SOURCE_UUID,
         },
-        nodes=[
-            action_node(
-                node_uuid=GRANDCHILD_NODE_UUID,
-                template_uuid=SECOND_ACTION_TEMPLATE_UUID,
-                target_handle_uuid=SECOND_ACTION_VALUE_TARGET_UUID,
-            )
-        ],
+        nodes=(
+            [
+                group_node(node_uuid=GROUP_NODE_UUID),
+                action_node(
+                    node_uuid=GRANDCHILD_NODE_UUID,
+                    template_uuid=SECOND_ACTION_TEMPLATE_UUID,
+                    target_handle_uuid=SECOND_ACTION_VALUE_TARGET_UUID,
+                    parent_uuid=GROUP_NODE_UUID,
+                ),
+            ]
+            if leaf_group
+            else [
+                action_node(
+                    node_uuid=GRANDCHILD_NODE_UUID,
+                    template_uuid=SECOND_ACTION_TEMPLATE_UUID,
+                    target_handle_uuid=SECOND_ACTION_VALUE_TARGET_UUID,
+                )
+            ]
+        ),
         edges=[],
         meta_data=workflow_meta(
             input_schema=scalar_schema(),
@@ -902,7 +1006,15 @@ def make_nested_world(tmp_path: Path) -> ExpansionWorld:
         template_uuid=SECOND_ACTION_TEMPLATE_UUID,
         target_handle_uuid=SECOND_ACTION_VALUE_TARGET_UUID,
         parameter=None,
-        parent_uuid=CHILD_NODE_UUID,
+        parent_uuid=STORED_EXPANDED_GROUP_UUID if leaf_group else CHILD_NODE_UUID,
+    )
+    nested_group = (
+        group_node(
+            node_uuid=STORED_EXPANDED_GROUP_UUID,
+            parent_uuid=CHILD_NODE_UUID,
+        )
+        if leaf_group
+        else None
     )
     child = create_applied_workflow(
         world,
@@ -916,7 +1028,11 @@ def make_nested_world(tmp_path: Path) -> ExpansionWorld:
             ("ready", "target"): CHILD_READY_TARGET_UUID,
             ("ready", "source"): CHILD_READY_SOURCE_UUID,
         },
-        nodes=[nested, nested_internal],
+        nodes=[
+            nested,
+            *([nested_group] if nested_group is not None else []),
+            nested_internal,
+        ],
         edges=[
             authoring_edge(
                 edge_uuid=STORED_NESTED_EDGE_UUID,
@@ -924,6 +1040,8 @@ def make_nested_world(tmp_path: Path) -> ExpansionWorld:
                 source_handle_uuid=ACTION_VALUE_SOURCE_UUID,
                 target_node_uuid=STORED_EXPANDED_GRANDCHILD_UUID,
                 target_handle_uuid=SECOND_ACTION_VALUE_TARGET_UUID,
+                description=edge_description,
+                meta_data=edge_meta_data,
             )
         ],
         meta_data=workflow_meta(
@@ -951,6 +1069,151 @@ def make_nested_world(tmp_path: Path) -> ExpansionWorld:
         ),
     )
     return world
+
+
+def make_nested_resource_world(
+    tmp_path: Path,
+    *,
+    parent_schema: dict[str, Any],
+    direct_schema: dict[str, Any],
+    leaf_schema: dict[str, Any],
+) -> ExpansionWorld:
+    """Publish parent -> direct Composite -> leaf Action with real I/O bindings.
+
+    The nested provider deliberately lives in ``meta_data.unilab.input_bindings``;
+    ``param`` remains empty because it is reserved for literal values.
+    """
+
+    store = WorkflowStore(tmp_path / "workflow.db")
+    catalog = TemplateCatalog(store)
+    resolver = MemoryPublishedWorkflowResolver()
+    nested_action = action_import(
+        template_uuid=SECOND_ACTION_TEMPLATE_UUID,
+        resource_template_uuid=SECOND_ACTION_RESOURCE_TEMPLATE_UUID,
+        target_handle_uuid=SECOND_ACTION_VALUE_TARGET_UUID,
+        source_handle_uuid=SECOND_ACTION_VALUE_SOURCE_UUID,
+        ready_target_uuid=SECOND_ACTION_READY_TARGET_UUID,
+        ready_source_uuid=SECOND_ACTION_READY_SOURCE_UUID,
+        value_schema=leaf_schema,
+    )
+    placeholder = WorkflowContractFixture(
+        source=PublishedWorkflowSource(
+            workflow_uuid=CHILD_WORKFLOW_UUID,
+            definition_fqid="tests.c1_r2.pending",
+            module="tests.c1_r2.pending",
+            symbol="pending",
+            package_catalog_digest=_digest("pending-package"),
+            definition_content_hash=_digest("pending-definition"),
+        ),
+        template_uuid=CHILD_TEMPLATE_UUID,
+        handles={},
+        contract_pin={},
+    )
+    world = ExpansionWorld(
+        store=store,
+        catalog=catalog,
+        resolver=resolver,
+        imports={SECOND_ACTION_TEMPLATE_UUID: nested_action},
+        child=placeholder,
+        contracts={},
+    )
+    try:
+        world.publish()
+        leaf = create_applied_workflow(
+            world,
+            workflow_uuid=LEAF_WORKFLOW_UUID,
+            module="tests.c1_r2.resource_leaf",
+            symbol="resource_leaf",
+            template_uuid=LEAF_TEMPLATE_UUID,
+            boundary_handle_uuids={
+                ("value", "target"): LEAF_VALUE_TARGET_UUID,
+                ("value", "source"): LEAF_VALUE_SOURCE_UUID,
+                ("ready", "target"): LEAF_READY_TARGET_UUID,
+                ("ready", "source"): LEAF_READY_SOURCE_UUID,
+            },
+            nodes=[
+                action_node(
+                    node_uuid=GRANDCHILD_NODE_UUID,
+                    template_uuid=SECOND_ACTION_TEMPLATE_UUID,
+                    target_handle_uuid=SECOND_ACTION_VALUE_TARGET_UUID,
+                )
+            ],
+            edges=[],
+            meta_data=workflow_meta(
+                input_schema=leaf_schema,
+                output_schema=leaf_schema,
+                output_binding={"kind": "workflow_input", "parameter": "value"},
+                output_implicit=True,
+            ),
+        )
+        world.contracts[leaf.source.workflow_uuid] = leaf
+        nested = workflow_node(
+            node_uuid=CHILD_NODE_UUID,
+            template_uuid=LEAF_TEMPLATE_UUID,
+            input_handle_uuid=LEAF_VALUE_TARGET_UUID,
+            parameter="value",
+            composite=composite_metadata(
+                leaf,
+                target_node_uuid=STORED_EXPANDED_GRANDCHILD_UUID,
+                target_handle_uuid=SECOND_ACTION_VALUE_TARGET_UUID,
+                source_node_uuid=None,
+                source_handle_uuid=None,
+                entry_node_uuid=STORED_EXPANDED_GRANDCHILD_UUID,
+                entry_handle_uuid=SECOND_ACTION_READY_TARGET_UUID,
+                completion_node_uuid=STORED_EXPANDED_GRANDCHILD_UUID,
+                completion_handle_uuid=SECOND_ACTION_READY_SOURCE_UUID,
+            ),
+        )
+        assert nested.param == {}
+        assert nested.meta_data["unilab"]["input_bindings"] == {
+            LEAF_VALUE_TARGET_UUID: {"parameter": "value"}
+        }
+        nested_internal = action_node(
+            node_uuid=STORED_EXPANDED_GRANDCHILD_UUID,
+            template_uuid=SECOND_ACTION_TEMPLATE_UUID,
+            target_handle_uuid=SECOND_ACTION_VALUE_TARGET_UUID,
+            parameter=None,
+            parent_uuid=CHILD_NODE_UUID,
+        )
+        child = create_applied_workflow(
+            world,
+            workflow_uuid=CHILD_WORKFLOW_UUID,
+            module="tests.c1_r2.resource_child",
+            symbol="resource_child",
+            template_uuid=CHILD_TEMPLATE_UUID,
+            boundary_handle_uuids={
+                ("value", "target"): CHILD_VALUE_TARGET_UUID,
+                ("value", "source"): CHILD_VALUE_SOURCE_UUID,
+                ("ready", "target"): CHILD_READY_TARGET_UUID,
+                ("ready", "source"): CHILD_READY_SOURCE_UUID,
+            },
+            nodes=[nested, nested_internal],
+            edges=[],
+            meta_data=workflow_meta(
+                input_schema=direct_schema,
+                output_schema=direct_schema,
+                output_binding={"kind": "workflow_input", "parameter": "value"},
+                output_implicit=True,
+            ),
+            hierarchical_fixture=True,
+        )
+        world.child = child
+        world.contracts[child.source.workflow_uuid] = child
+        world.store.create_workflow(
+            workflow_uuid=PARENT_WORKFLOW_UUID,
+            name="resource-parent",
+            tags=[],
+            description=None,
+            meta_data=workflow_meta(
+                input_schema=parent_schema,
+                output_schema=None,
+                output_binding=None,
+            ),
+        )
+        return world
+    except BaseException:
+        world.close()
+        raise
 
 
 def plain(value: Any) -> Any:
