@@ -44,7 +44,7 @@ def _slot_schema(schema: dict[str, Any]) -> dict[str, Any]:
     for member in schema.get("anyOf", []):
         if isinstance(member, dict) and member.get("type") != "null":
             return _slot_schema(member)
-    raise AssertionError(f"schema has no ResourceSlot: {schema!r}")
+    raise AssertionError(f"schema 不含 ResourceSlot：{schema!r}")
 
 
 def _compile_nested(world: Any) -> Any:

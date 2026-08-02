@@ -2002,25 +2002,31 @@ def _validate_composite_graph_io(
         ):
             continue
         template_uuid = str(template["uuid"])
-        if not _is_published_workflow_template(template):
-            continue
         if catalog is not None:
             catalog_template = catalog_templates.get(template_uuid)
-            if (
-                catalog_template is None
-                or not _is_framework_published_workflow_template(
+            catalog_is_composite = catalog_template is not None and (
+                _is_framework_published_workflow_template(
                     catalog_template,
                     catalog.handle_templates,
                 )
-            ):
+            )
+            if catalog_is_composite:
+                if not _published_workflow_aggregate_matches(
+                    template,
+                    raw_handles,
+                    catalog_template,
+                    catalog.handle_templates,
+                ):
+                    raise CompositeCatalogMismatch(
+                        "/catalog/published_workflow/aggregate"
+                    )
+                composite_template_uuids.add(template_uuid)
+                continue
+            if _is_published_workflow_template(template):
                 raise CompositeCatalogMismatch("/catalog/published_workflow/aggregate")
-            if not _published_workflow_aggregate_matches(
-                template,
-                raw_handles,
-                catalog_template,
-                catalog.handle_templates,
-            ):
-                raise CompositeCatalogMismatch("/catalog/published_workflow/aggregate")
+            continue
+        if not _is_published_workflow_template(template):
+            continue
         if not _is_framework_published_workflow_template(
             template,
             raw_handles,
