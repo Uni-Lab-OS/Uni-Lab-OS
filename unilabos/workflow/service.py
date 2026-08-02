@@ -21,6 +21,7 @@ from uuid import uuid4
 
 from pydantic import ValidationError
 
+from unilabos.app.scheduler.inventory import TaskMaterialAdmissionResult
 from unilabos.workflow.candidate_validation import validate_candidate_bundle
 from unilabos.workflow.json_codec import encode_json
 from unilabos.workflow.material_source import (
@@ -563,6 +564,47 @@ class WorkflowService:
         identity = self.get_workflow_task(task_uuid)["uuid"]
         return self._store.list_jobs(identity)
 
+    def project_material_admission(
+        self,
+        result: TaskMaterialAdmissionResult,
+    ) -> bool:
+        """Project one closed Inventory admission result exactly once."""
+
+        if not isinstance(result, TaskMaterialAdmissionResult):
+            raise WorkflowError("invalid_input")
+        task_uuid = self.get_workflow_task(result.workflow_task_uuid)["uuid"]
+        payload = {
+            "schema_version": result.schema_version,
+            "command_uuid": result.command_uuid,
+            "workflow_task_uuid": result.workflow_task_uuid,
+            "status": result.status,
+            "reservation_uuid": result.reservation_uuid,
+            "bindings": [
+                {
+                    "material_source_node_uuid": binding.material_source_node_uuid,
+                    "resource_slot": dict(binding.resource_slot),
+                    "site_uuid": binding.site_uuid,
+                }
+                for binding in result.bindings
+            ],
+            "diagnostics": [dict(item) for item in result.diagnostics],
+            "outbox_sequence": result.outbox_sequence,
+        }
+        try:
+            return self._store.project_task_material_admission(
+                task_uuid=task_uuid,
+                command_uuid=result.command_uuid,
+                status=result.status,
+                reservation_uuid=result.reservation_uuid,
+                outbox_sequence=result.outbox_sequence,
+                result=payload,
+                bindings=payload["bindings"],
+            )
+        except StoreNotFound:
+            raise WorkflowError("not_found") from None
+        except StoreConflict:
+            raise WorkflowError("conflict") from None
+
     def create_workflow_task_command(
         self,
         task_uuid: str,
@@ -883,6 +925,7 @@ class WorkflowService:
             "group",
             "tool_call",
             "manual_confirm",
+            "material_source",
         }:
             raise StoreConflict(f"unsupported workflow node type {node_type!r}")
         return kind

@@ -783,8 +783,6 @@ class InventoryService:
             mount_uuid = _canonical_uuid(
                 str(source.mount.get("uuid", "")), "mount.uuid"
             )
-            if mount_uuid != material_uuid:
-                raise MaterialInvalidInput("mount.uuid must match material_uuid")
             site_uuid = (
                 _canonical_uuid(source.site_uuid, "site_uuid")
                 if source.site_uuid is not None
@@ -805,7 +803,7 @@ class InventoryService:
                     material_source_node_uuid=node_uuid,
                     mode="existing",
                     resource_template_uuid=template_uuid,
-                    mount={"uuid": material_uuid},
+                    mount={"uuid": mount_uuid},
                     material_uuid=material_uuid,
                     site_uuid=site_uuid,
                     candidate_site_uuids=tuple(sorted(candidate_site_uuids)),
@@ -849,6 +847,17 @@ class InventoryService:
                 bindings: list[TaskMaterialBinding] = []
                 members: dict[str, tuple[str, int]] = {}
                 for source in normalized_sources:
+                    mount_uuid = str(source.mount["uuid"])
+                    mount = conn.execute(
+                        """
+                        SELECT uuid
+                        FROM material
+                        WHERE uuid = ? AND deleted_at IS NULL
+                        """,
+                        (mount_uuid,),
+                    ).fetchone()
+                    if mount is None:
+                        raise MaterialNotFound(f"mount Material {mount_uuid} not found")
                     row = conn.execute(
                         """
                         SELECT uuid, resource_template_uuid, material_kind,
@@ -875,7 +884,7 @@ class InventoryService:
                     if source.site_uuid is not None:
                         site = conn.execute(
                             """
-                            SELECT occupied_material_uuid
+                            SELECT material_uuid, occupied_material_uuid
                             FROM site
                             WHERE uuid = ? AND deleted_at IS NULL
                             """,
@@ -883,9 +892,27 @@ class InventoryService:
                         ).fetchone()
                         if site is None:
                             raise MaterialNotFound(f"site {source.site_uuid} not found")
+                        if site["material_uuid"] != mount_uuid:
+                            raise MaterialConflict(
+                                "Site does not belong to the selected mount"
+                            )
                         if site["occupied_material_uuid"] != source.material_uuid:
                             raise MaterialConflict(
                                 "Site does not contain the selected Material"
+                            )
+                        allowed = conn.execute(
+                            """
+                            SELECT resource_template_uuid
+                            FROM site_allowed_resource_template
+                            WHERE site_uuid = ?
+                            """,
+                            (source.site_uuid,),
+                        ).fetchall()
+                        if allowed and source.resource_template_uuid not in {
+                            item["resource_template_uuid"] for item in allowed
+                        }:
+                            raise MaterialInvalidInput(
+                                "Site does not allow the Material template"
                             )
                     subtree = conn.execute(
                         """

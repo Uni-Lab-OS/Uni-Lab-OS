@@ -34,6 +34,8 @@
 
 from __future__ import annotations
 
+import hashlib
+import json
 import logging
 import threading
 import time
@@ -48,7 +50,13 @@ from unilabos.app.scheduler.dispatch import (
     build_job_start_payload,
 )
 from unilabos.app.scheduler.estimation import DurationEstimator
-from unilabos.app.scheduler.inventory.domain import InsufficientStock, InventoryError
+from unilabos.app.scheduler.inventory.domain import (
+    InsufficientStock,
+    InventoryError,
+    TaskMaterialAdmissionCommand,
+    TaskMaterialAdmissionResult,
+    TaskMaterialAdmissionSource,
+)
 from unilabos.app.scheduler.models import (
     DispatchedJob,
     ReadyTask,
@@ -115,6 +123,8 @@ class EdgeScheduler:
         timeline_capacity: int = 400,
         monitor: Any = None,
         history: Any = None,
+        workflow_tasks: Any = None,
+        admission_fault_hook: Optional["Callable[[str], None]"] = None,
     ):
         self._orderer = orderer or StableLocalOrderer()
         self._dispatcher = dispatcher or RecordingDispatcher()
@@ -149,6 +159,9 @@ class EdgeScheduler:
         self._monitor = monitor
         # 工作流执行历史（WorkflowHistoryStore，独立 SQLite）；None = 不落盘
         self._history = history
+        # 新 WorkflowTask kernel 的持久投影 port；不参与 legacy WorkflowRun DAG。
+        self._workflow_tasks = workflow_tasks
+        self._admission_fault_hook = admission_fault_hook
 
     def _emit_monitor(self, channel: str, event_type: str, data: Dict[str, Any]) -> None:
         if self._monitor is None:
@@ -169,6 +182,96 @@ class EdgeScheduler:
 
     def set_workflow_state_listener(self, listener: "Callable[[str, str], None]") -> None:
         self._workflow_state_listener = listener
+
+    def reconcile_task_admission(
+        self,
+        task_uuid: str,
+    ) -> TaskMaterialAdmissionResult:
+        """Drive one replay-safe workflow.db ↔ inventory.db admission saga."""
+
+        if self._workflow_tasks is None or self._inventory is None:
+            raise RuntimeError("Workflow Task Material coordination is not configured")
+        task = self._workflow_tasks.get_workflow_task(task_uuid)
+        snapshot = task.get("workflow_snapshot")
+        if not isinstance(snapshot, dict):
+            raise ValueError("Workflow Task snapshot is invalid")
+        nodes = snapshot.get("nodes")
+        if not isinstance(nodes, list):
+            raise ValueError("Workflow Task snapshot nodes are invalid")
+        encoded_snapshot = json.dumps(
+            snapshot,
+            ensure_ascii=False,
+            separators=(",", ":"),
+            sort_keys=True,
+        ).encode("utf-8")
+        snapshot_fingerprint = f"sha256:{hashlib.sha256(encoded_snapshot).hexdigest()}"
+        sources: list[TaskMaterialAdmissionSource] = []
+        for node in sorted(
+            (
+                item
+                for item in nodes
+                if isinstance(item, dict) and item.get("type") == "material_source"
+            ),
+            key=lambda item: str(item.get("uuid") or ""),
+        ):
+            param = node.get("param")
+            if not isinstance(param, dict):
+                raise ValueError("MaterialSource snapshot parameter is invalid")
+            slot_range = param.get("slot_range")
+            candidate_site_uuids = (
+                tuple(slot_range) if isinstance(slot_range, list) else ()
+            )
+            sources.append(
+                TaskMaterialAdmissionSource(
+                    material_source_node_uuid=str(node.get("uuid") or ""),
+                    mode=str(param.get("mode") or ""),
+                    resource_template_uuid=str(
+                        param.get("resource_template_uuid") or ""
+                    ),
+                    mount=dict(param.get("mount") or {}),
+                    material_uuid=(
+                        str(param["material_uuid"])
+                        if param.get("material_uuid") is not None
+                        else None
+                    ),
+                    site_uuid=(
+                        str(param["site"]) if param.get("site") is not None else None
+                    ),
+                    candidate_site_uuids=candidate_site_uuids,
+                    flow_role=str(param.get("flow_role") or ""),
+                )
+            )
+        if not sources:
+            raise ValueError("Workflow Task has no MaterialSource admission inputs")
+        canonical_task_uuid = str(task["uuid"])
+        command_uuid = str(
+            uuid_mod.uuid5(
+                uuid_mod.UUID(canonical_task_uuid),
+                f"material-admission:{snapshot_fingerprint}",
+            )
+        )
+        command = TaskMaterialAdmissionCommand(
+            schema_version=1,
+            command_uuid=command_uuid,
+            idempotency_key=(
+                f"workflow-task:{canonical_task_uuid}:material-admission:"
+                f"{snapshot_fingerprint}"
+            ),
+            workflow_task_uuid=canonical_task_uuid,
+            workflow_snapshot_fingerprint=snapshot_fingerprint,
+            sources=tuple(sources),
+        )
+        result = self._inventory.admit_task(command)
+        self._inject_admission_fault("after_inventory_commit")
+        self._workflow_tasks.project_material_admission(result)
+        self._inject_admission_fault("after_workflow_projection")
+        self._inventory.acknowledge(result.outbox_sequence)
+        return result
+
+    def _inject_admission_fault(self, stage: str) -> None:
+        hook = self._admission_fault_hook
+        if hook is not None:
+            hook(stage)
 
     # ── 触发点 1：任务进来 ────────────────────────────────────
 
