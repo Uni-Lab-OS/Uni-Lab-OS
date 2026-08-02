@@ -40,9 +40,8 @@ SOURCE_A_UUID = "21000000-0000-4000-8000-0000000002b1"
 SOURCE_B_UUID = "21000000-0000-4000-8000-0000000002b2"
 SOURCE_C_UUID = "21000000-0000-4000-8000-0000000002b3"
 
-# UUID order differs from business order for both candidate sets.  In
-# particular, create-new's UUID-sorted input puts its sort_order=40 Site first,
-# while the durable Site order must select its sort_order=30 Site.
+# 两组候选的 UUID 顺序都与业务顺序不同。尤其 create_new 的 UUID 规范输入会先列出
+# sort_order=40 Site，而持久 Site 业务顺序必须选择 sort_order=30 Site。
 ALTERNATE_SITE_UUID = "61000000-0000-4000-8000-0000000002b1"
 CREATE_NEW_ALTERNATE_SITE_UUID = "61000000-0000-4000-8000-0000000002b4"
 CREATE_NEW_SITE_UUID = "61000000-0000-4000-8000-0000000002b5"
@@ -52,7 +51,7 @@ AUTHORITY = CatalogAuthority(authority_id="m2b-red", kind="backend")
 
 
 class _InjectedCrash(RuntimeError):
-    """Simulate process loss at one durable cross-database boundary."""
+    """模拟进程在一个持久跨库边界退出。"""
 
 
 class _CrashAt:
@@ -65,7 +64,7 @@ class _CrashAt:
 
 
 class _RecordingInventoryPort:
-    """Record the one public Task-wide command and delegate durable work."""
+    """记录唯一公开 Task-wide command，并委托真实持久操作。"""
 
     def __init__(self, inventory: inventory_api.InventoryService) -> None:
         self._inventory = inventory
@@ -190,9 +189,8 @@ def _create_workflow_service(
         description=None,
         meta_data={},
     )
-    # Fixture-only setup: the public authoring API cannot yet create this
-    # standalone graph without source compilation. Runtime assertions below
-    # remain entirely on WorkflowService/EdgeScheduler public seams.
+    # 仅 fixture 装配：当前公开 authoring API 尚不能绕过 source compilation 创建这张
+    # 独立 Graph；以下 runtime 断言仍全部经过 WorkflowService/EdgeScheduler 公开接缝。
     store.save_graph(WORKFLOW_UUID, revision=1, nodes=nodes, edges=[])
     task = service.create_workflow_task(
         workflow_uuid=WORKFLOW_UUID,
@@ -310,12 +308,11 @@ def _jobs_by_node(
 def test_task_wide_matching_uses_site_order_creates_one_material_and_keeps_lots(
     tmp_path: Path,
 ) -> None:
-    """One complete solution requires backtracking the first existing Source.
+    """完整解要求回溯第一个 existing Source。
 
-    A two-Source automatic-existing/create-new fixture cannot itself create a
-    Site conflict: existing needs an occupied Site while create_new needs an
-    empty Site.  A/B therefore prove the shared-candidate backtrack, and C
-    proves constrained create_new commits atomically in that same Task.
+    automatic-existing/create_new 两个 Source 自身不会产生 Site 冲突：existing 需要
+    occupied Site，而 create_new 需要 empty Site。因此 A/B 证明共享候选回溯，C 证明
+    受约束 create_new 在同一 Task 内原子提交。
     """
 
     inventory = inventory_api.InventoryService.open(

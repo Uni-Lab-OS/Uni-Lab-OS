@@ -493,9 +493,8 @@ def test_reconcile_task_admission_recovers_both_crash_windows(
 
         recovered = scheduler.reconcile_task_admission(task_uuid)
 
-        # W2 has already completed every resolution Job, so M2B recovers the
-        # durable command result directly instead of rebuilding a command from
-        # non-pending Jobs.  W1 still replays through admit_task().
+        # W2 已完成全部 resolution Job，因此 M2B 直接恢复持久 command result，
+        # 不从非 pending Job 重建 command；W1 仍通过 admit_task() 重放。
         assert replay_inventory.commands == (
             [first_command] if fault_stage == "after_inventory_commit" else []
         )

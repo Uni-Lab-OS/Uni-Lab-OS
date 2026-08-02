@@ -187,22 +187,21 @@ class EdgeScheduler:
             set_change_listener(self._on_inventory_change)
 
     def _on_inventory_change(self, event: Any) -> None:
-        """Wake blocked Tasks after an external durable Material/Site change."""
+        """外部 Material/Site 持久变化提交后唤醒 blocked Tasks。"""
 
         if not isinstance(event, Mapping):
             return
         if event.get("event_type") not in _MATERIAL_WAKE_EVENT_TYPES:
             return
-        # Admission-owned events are emitted while this coordinator still owns
-        # the per-Task saga slot.  Release already performs its own post-saga
-        # sweep; only external resource changes enter this post-commit wakeup.
+        # Admission 自有事件发出时 coordinator 仍持有 per-Task saga slot；release
+        # 已在 saga 结束后自行 sweep，因此这里只有外部资源变化进入提交后唤醒。
         if event.get("causation_id"):
             return
         try:
             self.reconcile_pending_task_admissions()
         except Exception:
             logger.exception(
-                "[EdgeScheduler] Material change wakeup failed for %s",
+                "[EdgeScheduler] Material 变化唤醒失败：%s",
                 event.get("event_type"),
             )
 
@@ -349,7 +348,7 @@ class EdgeScheduler:
         self,
         task_uuid: str,
     ) -> TaskMaterialAdmissionResult | None:
-        """Finish W2 without rebuilding a command from already-resolved Jobs."""
+        """不从已完成的 resolution Jobs 重建 command，直接完成 W2。"""
 
         if self._workflow_tasks is None or self._inventory is None:
             raise RuntimeError("Workflow Task Material coordination is not configured")
@@ -1098,7 +1097,7 @@ class EdgeScheduler:
             try:
                 busy |= set(self._device_action_fence_provider())
             except Exception:
-                logger.exception("[EdgeScheduler] device_action_fence_provider failed")
+                logger.exception("[EdgeScheduler] device_action fence 查询失败")
         for job in self._inflight.values():
             busy.add(job.device_action_key)
             busy.add(f"/devices/{job.device_id}")

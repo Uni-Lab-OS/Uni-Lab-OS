@@ -57,7 +57,7 @@ _LOGGER = logging.getLogger(__name__)
 
 
 class _AdmissionRejected(MaterialInvalidInput):
-    """Deterministic M2B rejection with a stable public diagnostic."""
+    """携带稳定公开诊断的确定性 M2B rejection。"""
 
     def __init__(
         self,
@@ -524,7 +524,7 @@ class InventoryService:
         self,
         listener: Callable[[Mapping[str, Any]], None] | None,
     ) -> None:
-        """Attach the sole post-commit consumer of durable Inventory changes."""
+        """挂载持久 Inventory 变化的唯一提交后 consumer。"""
 
         if listener is not None and not callable(listener):
             raise MaterialInvalidInput("change listener must be callable or null")
@@ -570,7 +570,7 @@ class InventoryService:
                     change_listener(MappingProxyType(dict(data)))
                 except Exception:
                     _LOGGER.exception(
-                        "Inventory post-commit listener failed for %s",
+                        "Inventory 提交后 listener 处理失败：%s",
                         event_type,
                     )
 
@@ -1206,7 +1206,7 @@ class InventoryService:
         self,
         command: TaskMaterialAdmissionCommand,
     ) -> TaskMaterialAdmissionResult:
-        """Atomically find and reserve one complete Task-wide assignment."""
+        """原子查找并预留一组完整的 Task-wide assignment。"""
 
         normalized_command = self._normalize_admission_command(command)
         canonical_command_uuid = normalized_command.command_uuid
