@@ -29,6 +29,7 @@ from unilabos.app.scheduler.inventory.domain import (
     InstanceState,
     InsufficientStock,
     InvariantViolation,
+    InventoryEvent,
     MaterialAuthorityUnavailable,
     MaterialConflict,
     MaterialInvalidInput,
@@ -55,6 +56,7 @@ from unilabos.app.scheduler.inventory.store import InventoryStore
 
 _ACTIVE_STATES_TUPLE = tuple(s.value for s in ACTIVE_INSTANCE_STATES)
 _MAX_SIGNED_64_BIT_INTEGER = (1 << 63) - 1
+_SCHEDULER_CURSOR_NAME = "scheduler"
 
 
 def _canonical_uuid(value: str, field: str) -> str:
@@ -313,6 +315,28 @@ def _reservation_fingerprint(material_uuids: tuple[str, ...]) -> str:
         separators=(",", ":"),
     ).encode()
     return f"sha256:{hashlib.sha256(encoded).hexdigest()}"
+
+
+def _inventory_event(row: Mapping[str, Any]) -> InventoryEvent:
+    try:
+        payload = json.loads(row["payload_json"])
+        if not isinstance(payload, dict):
+            raise TypeError("outbox payload must be an object")
+        return InventoryEvent(
+            sequence=int(row["sequence"]),
+            event_id=str(row["event_id"]),
+            edge_id=str(row["edge_id"]),
+            lab_id=str(row["lab_id"]),
+            aggregate_type=str(row["aggregate_type"]),
+            aggregate_id=str(row["aggregate_id"]),
+            aggregate_version=int(row["aggregate_version"]),
+            event_type=str(row["event_type"]),
+            occurred_at=int(row["occurred_at"]),
+            causation_id=str(row["causation_id"]),
+            payload=payload,
+        )
+    except (KeyError, TypeError, ValueError):
+        raise MaterialAuthorityUnavailable("stored outbox event is invalid") from None
 
 
 class InventoryService:
@@ -1231,6 +1255,119 @@ class InventoryService:
             raise MaterialAuthorityUnavailable(
                 "stored inventory command result is invalid"
             ) from None
+
+    def read_outbox(
+        self,
+        *,
+        after_sequence: int,
+        limit: int,
+    ) -> tuple[InventoryEvent, ...]:
+        """Read durable Inventory events after one exclusive sequence cursor."""
+
+        if (
+            isinstance(after_sequence, bool)
+            or not isinstance(after_sequence, int)
+            or after_sequence < 0
+        ):
+            raise MaterialInvalidInput("after_sequence must be a non-negative integer")
+        if (
+            isinstance(limit, bool)
+            or not isinstance(limit, int)
+            or not 1 <= limit <= 1000
+        ):
+            raise MaterialInvalidInput("limit must be between 1 and 1000")
+        try:
+            rows = self.store.pending_outbox(after_sequence, limit)
+        except sqlite3.Error:
+            raise MaterialAuthorityUnavailable("failed to read outbox") from None
+        return tuple(_inventory_event(row) for row in rows)
+
+    def get_acknowledged_sequence(self) -> int:
+        """Return the durable Scheduler acknowledgement watermark."""
+
+        try:
+            return self.store.get_cursor(_SCHEDULER_CURSOR_NAME)
+        except sqlite3.Error:
+            raise MaterialAuthorityUnavailable(
+                "failed to read acknowledgement"
+            ) from None
+
+    def acknowledge(self, sequence: int) -> None:
+        """Advance the Scheduler acknowledgement watermark monotonically."""
+
+        if isinstance(sequence, bool) or not isinstance(sequence, int) or sequence < 0:
+            raise MaterialInvalidInput("sequence must be a non-negative integer")
+        try:
+            with self._tx() as conn:
+                maximum_row = conn.execute(
+                    "SELECT COALESCE(MAX(sequence), 0) AS value FROM sync_outbox"
+                ).fetchone()
+                maximum = int(maximum_row["value"])
+                if sequence > maximum:
+                    raise MaterialConflict(
+                        "acknowledgement cannot advance beyond the durable outbox"
+                    )
+                current_row = conn.execute(
+                    "SELECT acked_sequence FROM sync_cursor WHERE cursor_name = ?",
+                    (_SCHEDULER_CURSOR_NAME,),
+                ).fetchone()
+                current = int(current_row["acked_sequence"]) if current_row else 0
+                if sequence <= current:
+                    return
+                conn.execute(
+                    """
+                    INSERT INTO sync_cursor(cursor_name, acked_sequence, updated_at)
+                    VALUES (?, ?, ?)
+                    ON CONFLICT(cursor_name) DO UPDATE SET
+                        acked_sequence = excluded.acked_sequence,
+                        updated_at = excluded.updated_at
+                    WHERE excluded.acked_sequence > sync_cursor.acked_sequence
+                    """,
+                    (_SCHEDULER_CURSOR_NAME, sequence, self._now_ms()),
+                )
+        except sqlite3.Error:
+            raise MaterialAuthorityUnavailable(
+                "failed to persist acknowledgement"
+            ) from None
+
+    def has_active_task_reservation(
+        self,
+        workflow_task_uuid: str,
+        reservation_uuid: str,
+    ) -> bool:
+        """Prove that one Task still owns the named complete active Reservation."""
+
+        canonical_task_uuid = _canonical_uuid(
+            workflow_task_uuid,
+            "workflow_task_uuid",
+        )
+        canonical_reservation_uuid = _canonical_uuid(
+            reservation_uuid,
+            "reservation_uuid",
+        )
+        try:
+            row = self.store.query_one(
+                """
+                SELECT 1 AS present
+                FROM material_reservation AS reservation
+                WHERE reservation.uuid = ?
+                  AND reservation.workflow_task_uuid = ?
+                  AND reservation.status = 'active'
+                  AND reservation.released_at IS NULL
+                  AND EXISTS (
+                      SELECT 1
+                      FROM material_reservation_member AS member
+                      WHERE member.reservation_uuid = reservation.uuid
+                        AND member.released_at IS NULL
+                  )
+                """,
+                (canonical_reservation_uuid, canonical_task_uuid),
+            )
+        except sqlite3.Error:
+            raise MaterialAuthorityUnavailable(
+                "failed to verify task reservation"
+            ) from None
+        return row is not None
 
     def create_site(
         self,

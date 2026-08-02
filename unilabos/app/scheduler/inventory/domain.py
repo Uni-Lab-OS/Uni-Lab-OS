@@ -288,6 +288,23 @@ class TaskMaterialReleaseResult:
 
 
 @dataclass(frozen=True, slots=True)
+class InventoryEvent:
+    """Public immutable projection of one durable Inventory outbox event。"""
+
+    sequence: int
+    event_id: str
+    edge_id: str
+    lab_id: str
+    aggregate_type: str
+    aggregate_id: str
+    aggregate_version: int
+    event_type: str
+    occurred_at: int
+    causation_id: str
+    payload: dict[str, Any]
+
+
+@dataclass(frozen=True, slots=True)
 class MaterialRecord:
     """Backend-field-aligned durable Material projection。"""
 
