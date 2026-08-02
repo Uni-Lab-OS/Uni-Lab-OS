@@ -1,30 +1,74 @@
-"""Plan 09 Task 7: community alias resolution."""
+"""Community device classes use their namespaced registry keys directly."""
+
+from types import SimpleNamespace
 
 import pytest
 
-from unilabos.registry.community_alias import (
-    CommunityAliasError,
-    normalize_community_class,
-    resolve_community_alias,
-)
+import unilabos.ros.initialize_device as device_initializer
+from unilabos.utils.exception import DeviceClassInvalid
 
 
-def test_normalize_community_class_strips_prefix():
-    assert normalize_community_class("community.pylabrobot.lh.opentrons_flex") == "pylabrobot.lh.opentrons_flex"
+def _device_config(class_name, config=None):
+    return SimpleNamespace(
+        res_content=SimpleNamespace(
+            klass=class_name,
+            uuid="test-device-uuid",
+            config=config or {},
+        )
+    )
 
 
-def test_normalize_community_class_leaves_local_class_unchanged():
-    assert normalize_community_class("pylabrobot.lh.opentrons_flex") == "pylabrobot.lh.opentrons_flex"
+def test_initialize_device_uses_exact_community_registry_key(monkeypatch):
+    class_name = "community.test_package.pump"
+    registry_entry = {
+        "class": {
+            "module": "tests.registry.fixtures.initializer_drivers:SharedDevice",
+            "type": "python",
+            "status_types": {},
+            "action_value_mappings": {},
+        },
+        "init_param_enforce": {
+            "channels": 8,
+            "transport": {"port": 5000},
+        },
+    }
+    monkeypatch.setitem(device_initializer.lab_registry.device_type_registry, class_name, registry_entry)
+
+    captured = {}
+
+    class _WrappedDevice:
+        def __init__(self, **kwargs):
+            captured.update(kwargs)
+
+    monkeypatch.setattr(device_initializer.default_manager, "get_class", lambda _module: object())
+    monkeypatch.setattr(device_initializer, "ros2_device_node", lambda _device, **_kwargs: _WrappedDevice)
+
+    result = device_initializer.initialize_device_from_dict(
+        "pump-1",
+        _device_config(
+            class_name,
+            {
+                "channels": 1,
+                "transport": {"host": "127.0.0.1", "port": 9000},
+            },
+        ),
+    )
+
+    assert isinstance(result, _WrappedDevice)
+    assert captured["driver_params"] == {
+        "channels": 8,
+        "transport": {"host": "127.0.0.1", "port": 5000},
+    }
 
 
-def test_resolve_community_alias_requires_registry_entry():
-    registry = {"pylabrobot.lh.opentrons_flex": {"class": {"module": "x:Y"}}}
+def test_initialize_device_does_not_fall_back_to_an_unprefixed_alias(monkeypatch):
+    class_name = "community.test_package.alias_only"
+    monkeypatch.delitem(device_initializer.lab_registry.device_type_registry, class_name, raising=False)
+    monkeypatch.setitem(
+        device_initializer.lab_registry.device_type_registry,
+        "test_package.alias_only",
+        {"class": {"module": "unused:Driver"}},
+    )
 
-    resolved = resolve_community_alias("community.pylabrobot.lh.opentrons_flex", registry)
-
-    assert resolved == "pylabrobot.lh.opentrons_flex"
-
-
-def test_resolve_community_alias_raises_when_missing():
-    with pytest.raises(CommunityAliasError):
-        resolve_community_alias("community.unknown.device", {})
+    with pytest.raises(DeviceClassInvalid, match=class_name):
+        device_initializer.initialize_device_from_dict("alias-1", _device_config(class_name))

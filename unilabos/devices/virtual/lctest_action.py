@@ -15,8 +15,8 @@ from unilabos.registry.decorators import (
     ActionInputHandle,
     ActionOutputHandle,
     DataSource,
-    action,
     device,
+    legacy_action,
     not_action,
     topic_config,
 )
@@ -180,7 +180,7 @@ class TestActionDevice:
         """生成一个测试报告条目。"""
         return {"name": name, "passed": passed, "message": message}
 
-    @action(
+    @legacy_action(
         always_free=True,
         description="测试液体写入：向资源中追加或替换液体信息，并输出更新后的资源",
         goal_default={
@@ -338,7 +338,7 @@ class TestActionDevice:
             "elapsed_seconds": elapsed_seconds,
         }
 
-    @action(
+    @legacy_action(
         always_free=True,
         description="测试资源检查：检查资源数量、液体信息和总体积，可接收上游 test_liquid 的输出资源",
         goal_default={

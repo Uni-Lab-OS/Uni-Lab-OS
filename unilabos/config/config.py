@@ -10,6 +10,10 @@ class BasicConfig:
     ak = ""
     sk = ""
     working_dir = ""
+    # Workflow Authoring 必须由部署显式选择 Graph Authority；None 时不挂载。
+    workflow_graph_authority = None
+    # 仅扫描明确声明的可编辑 package 根目录，不从工作区猜测。
+    workflow_editable_package_roots = ()
     config_path = ""
     is_host_mode = True
     slave_no_host = False  # 是否跳过rclient.wait_for_service()
@@ -52,6 +56,47 @@ class HTTPConfig:
     remote_addr = "https://leap-lab.bohrium.com/api/v1"
     # schedule 通道（WebSocket）地址；为空时从 remote_addr 派生：带端口则 +1，否则沿用原 netloc
     schedule_addr = ""
+
+
+class ObservabilityConfig:
+    """Electron trace 日志与 Arize Phoenix OSS 配置。"""
+
+    enabled = False
+    auto_start = True
+    host = "127.0.0.1"
+    port = 6006
+    grpc_port = 4317
+    project_name = "uni-lab-electron"
+    # 空值时使用 BasicConfig.working_dir/observability/phoenix。
+    working_dir = ""
+    retention_days = 30
+    startup_timeout_seconds = 60.0
+    request_timeout_seconds = 10.0
+    shutdown_timeout_seconds = 10.0
+    max_ingest_bytes = 8 * 1024 * 1024
+    # 空值时从 PATH 查找 phoenix；可填写绝对路径。
+    phoenix_executable = ""
+
+
+# host-slave TCP 请求通路（HostLink）：物料查询走 host 本地事实源（云端物料已下线），
+# 并承载在线监控与 ROS 组网协助；是 host-slave 逐步从 ROS2 迁到 TCP/IP 组网的第一步。
+class HostLinkConfig:
+    enable = True
+    host = ""  # slave 侧：host node 的 IP（组网入口）；空 = 不启用 TCP 通路，走旧 ROS 链路
+    port = 7302  # 通路端口（host 监听 / slave 连接）
+    bind = "0.0.0.0"  # host 侧监听地址
+    advertise_ip = ""  # host 对外 IP（下发 slave 作 ROS 静态对端）；空 = 自动探测
+    heartbeat_interval = 5  # slave ping 周期（秒）
+    heartbeat_timeout = 15  # host 判离线阈值（秒）
+    connect_timeout = 5  # 连接/握手超时（秒）
+    request_timeout = 10  # 单请求超时（秒）
+    # ROS 组网协助（host 经握手下发，slave 在 rclpy.init 前套用；空 = 沿用 host 环境变量）
+    ros_assist_apply = True  # slave 是否套用 host 下发的组网信息；False = 完全用本地环境
+    # （隔离场景/联网测试/手动管理组网时关闭：HostLink 照常连接，仅不动 ROS 环境）
+    ros_domain_id = ""  # ROS_DOMAIN_ID
+    ros_discovery_range = ""  # SUBNET / LOCALHOST / OFF；OFF = 关闭组播自动发现（纯单播降级）
+    ros_static_peers = ""  # 分号分隔 ip 列表；空 = 自动用 advertise_ip
+    ros_discovery_server = ""  # Fast DDS Discovery Server 地址 ip:port
 
 
 # ROS配置

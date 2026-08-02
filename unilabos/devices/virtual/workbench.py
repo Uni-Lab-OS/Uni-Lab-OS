@@ -29,6 +29,7 @@ from unilabos.registry.decorators import (
     NodeType,
     action,
     device,
+    legacy_action,
     not_action,
     topic_config,
 )
@@ -363,7 +364,7 @@ class VirtualWorkbench:
         return_value = self._ros_node.call_device_action(target_device, function_name, kwargs)
         return {"success": True, "target_device": target_device, "function_name": function_name, "return_value": return_value}
 
-    @action(
+    @legacy_action(
         always_free=True,
         node_type=NodeType.MANUAL_CONFIRM,
         placeholder_keys={"assignee_user_ids": "unilabos_manual_confirm"},
@@ -513,7 +514,7 @@ class VirtualWorkbench:
         kwargs.pop("mount_resource_tree")
         return kwargs
 
-    @action(
+    @legacy_action(
         description="转移物料",
         handles=[
             ActionInputHandle(
@@ -566,7 +567,7 @@ class VirtualWorkbench:
         result = await future
         return result
 
-    @action(
+    @legacy_action(
         description="扣电测试启动",
         handles=[
             ActionInputHandle(

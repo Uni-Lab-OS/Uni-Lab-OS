@@ -4,6 +4,7 @@ import threading
 import time
 import traceback
 import uuid
+from concurrent.futures import Future as ConcurrentFuture, ThreadPoolExecutor
 
 from unilabos.utils.tools import fast_dumps_str as _fast_dumps_str, fast_loads as _fast_loads
 from dataclasses import dataclass, field
@@ -26,7 +27,21 @@ from unilabos_msgs.srv import (
 from unilabos_msgs.srv._serial_command import SerialCommand_Request, SerialCommand_Response
 from unique_identifier_msgs.msg import UUID
 
-from unilabos.registry.decorators import device, action, NodeType, ActionInputHandle, ActionOutputHandle, DataSource
+from unilabos.observability import runtime as runtime_tracing
+from unilabos.observability.runtime import (
+    TRACE_CONTEXT_KEY,
+    fail_open_span,
+    normalize_trace_context,
+    safe_capture_context,
+)
+from unilabos.registry.decorators import (
+    ActionInputHandle,
+    ActionOutputHandle,
+    DataSource,
+    NodeType,
+    device,
+    legacy_action,
+)
 from unilabos.registry.placeholder_type import (
     ResourceSlot,
     DeviceSlot,
@@ -69,6 +84,10 @@ from unilabos.config.config import BasicConfig
 
 if TYPE_CHECKING:
     from unilabos.app.ws_client import QueueItem
+
+_TRACE_ACTION_SERVER_WAIT_TIMEOUT_SECONDS = 5.0
+_WORKFLOW_NODE_JOB_UUID_PARAM = "workflow_node_job_uuid"
+_WORKFLOW_TASK_UUID_PARAM = "workflow_task_uuid"
 
 
 @dataclass
@@ -168,6 +187,7 @@ class HostNode(BaseROS2DeviceNode):
             timeout: Maximum time to wait for each thread (seconds)
         """
         cls._shutting_down = True
+        cls._shutdown_trace_registration_executor()
 
         # Wait for background threads to finish
         active_threads = []
@@ -185,11 +205,25 @@ class HostNode(BaseROS2DeviceNode):
         logger.info(f"[Host Node] Background threads shutdown complete")
 
     @classmethod
+    def _shutdown_trace_registration_executor(cls) -> None:
+        """取消未开始的 trace 登记，并阻止旧 Host 在 reset 后继续发设备 goal。"""
+
+        instance = cls._instance
+        if instance is None:
+            return
+        instance._shutting_down = True
+        executor = getattr(instance, "_trace_registration_executor", None)
+        instance._trace_registration_executor = None
+        if executor is not None:
+            executor.shutdown(wait=False, cancel_futures=True)
+
+    @classmethod
     def reset_state(cls) -> None:
         """
         Reset the HostNode singleton state for restart or clean exit.
         Call this after destroying the instance.
         """
+        cls._shutdown_trace_registration_executor()
         cls._instance = None
         cls._ready_event.clear()
         cls._shutting_down = False
@@ -360,6 +394,16 @@ class HostNode(BaseROS2DeviceNode):
         }  # device_id -> action_value_mappings(本地+远程设备统一存储)
         self._slave_registry_configs: Dict[str, Dict] = {}  # registry_name -> registry_config(含action_value_mappings)
         self._goals: Dict[str, Any] = {}  # 用来存储多个目标的状态
+        self._goal_trace_contexts: Dict[str, Dict[str, str]] = {}
+        self._goals_lock = threading.RLock()
+        self._pending_goal_requests: Set[str] = set()
+        # 手动解锁可能发生在 send_goal_async 返回、goal response 到达之前。
+        # 这里保存待接受 goal 的取消意图，避免旧 goal 迟到接受后无人取消。
+        self._pending_goal_cancellations: Set[str] = set()
+        self._trace_registration_executor = ThreadPoolExecutor(
+            max_workers=4,
+            thread_name_prefix="HostTraceRegistration",
+        )
         self._online_devices: Set[str] = {f"{self.namespace}/{device_id}"}  # 用于跟踪在线设备
         self._last_discovery_time = 0.0  # 上次设备发现的时间
         self._discovery_lock = threading.Lock()  # 设备发现的互斥锁
@@ -376,6 +420,7 @@ class HostNode(BaseROS2DeviceNode):
 
         # 初始化所有本机设备节点，多一次过滤，防止重复初始化
         local_machine = BasicConfig.machine_name
+        initialization_failures: list[str] = []
         for device_config in devices_config.root_nodes:
             device_id = device_config.res_content.id
             if device_config.res_content.type != "device":
@@ -388,7 +433,8 @@ class HostNode(BaseROS2DeviceNode):
                 )
                 continue
             if device_id not in self.devices_names:
-                self.initialize_device(device_id, device_config)
+                if not self.initialize_device(device_id, device_config):
+                    initialization_failures.append(device_id)
             else:
                 self.lab_logger().warning(f"[Host Node] Device {device_id} already existed, skipping.")
         self.update_device_status_subscriptions()
@@ -410,6 +456,12 @@ class HostNode(BaseROS2DeviceNode):
         self._ping_responses = {}  # 存储ping响应
         self._ping_lock = threading.Lock()
 
+        if initialization_failures:
+            failed = ", ".join(sorted(initialization_failures))
+            self.lab_logger().error(
+                f"[Host Node] Host node initialization failed; devices unavailable: {failed}"
+            )
+            return
         self.lab_logger().info("[Host Node] Host node initialized.")
         HostNode._ready_event.set()
 
@@ -694,7 +746,7 @@ class HostNode(BaseROS2DeviceNode):
             return res
         raise ValueError(f"创建资源时失败！响应为空")
 
-    def initialize_device(self, device_id: str, device_config: ResourceDictInstance) -> None:
+    def initialize_device(self, device_id: str, device_config: ResourceDictInstance) -> bool:
         """
         根据配置初始化设备，
 
@@ -713,14 +765,9 @@ class HostNode(BaseROS2DeviceNode):
             self.lab_logger().error(f"[Host Node] Device class invalid: {e}")
             d = None
         if d is None:
-            return
-        # noinspection PyProtectedMember
-        self.devices_names[device_id] = d._ros_node.namespace  # 这里不涉及二级device_id
-        self.device_machine_names[device_id] = "本地"
-        self.devices_instances[device_id] = d
-        # noinspection PyProtectedMember
-        self._action_value_mappings[device_id] = d._ros_node._action_value_mappings
+            return False
         new_action_pairs: List[Tuple[str, str]] = []
+        staged_action_clients: Dict[str, ActionClient] = {}
         # 仅为建独立 ROS ActionServer 的动作创建 ActionClient：
         # auto-/UniLabJsonCommand 动作无 ROS action server，无法也无需建 ActionClient。
         # noinspection PyProtectedMember
@@ -733,17 +780,37 @@ class HostNode(BaseROS2DeviceNode):
             if action_id not in self._action_clients:
                 action_type = action_value_mapping["type"]
                 try:
-                    self._action_clients[action_id] = ActionClient(self, action_type, action_id)
+                    staged_action_clients[action_id] = ActionClient(
+                        self, action_type, action_id
+                    )
                 except Exception as e:
                     self.lab_logger().error(
                         f"创建ActionClient失败，Device: {device_id}, Action Name: {action_name}, Action Type: {action_type}, Error: {e}")
-                    continue
+                    for client in staged_action_clients.values():
+                        try:
+                            client.destroy()
+                        except Exception:
+                            pass
+                    try:
+                        d._ros_node.destroy_node()
+                    except Exception:
+                        pass
+                    return False
                 self.lab_logger().trace(
                     f"[Host Node] Created ActionClient (Local): {action_id}"
                 )  # 子设备再创建用的是Discover发现的
                 new_action_pairs.append((device_id, action_name))
             else:
                 self.lab_logger().warning(f"[Host Node] ActionClient {action_id} already exists.")
+        # Device readiness is published atomically only after every required
+        # ActionClient exists.  A partially callable device must stay offline.
+        # noinspection PyProtectedMember
+        self.devices_names[device_id] = d._ros_node.namespace  # 这里不涉及二级device_id
+        self.device_machine_names[device_id] = "本地"
+        self.devices_instances[device_id] = d
+        # noinspection PyProtectedMember
+        self._action_value_mappings[device_id] = d._ros_node._action_value_mappings
+        self._action_clients.update(staged_action_clients)
         # 锁上报需全量：auto-/UniLabJsonCommand 动作虽不建 ActionClient，但仍是可经
         # _execute_driver_command 调用的能力(如 workbench 的 prepare_materials 等)，必须一并
         # 上报 free 锁，与 report_all_action_locks 的全量快照保持一致。_execute_driver_command
@@ -759,6 +826,7 @@ class HostNode(BaseROS2DeviceNode):
         self._online_devices.add(device_key)
         # 新注册本地设备 action 后主动上报其 free 锁状态
         self._report_action_locks_free(new_action_pairs)
+        return True
 
     def update_device_status_subscriptions(self) -> None:
         """
@@ -857,7 +925,49 @@ class HostNode(BaseROS2DeviceNode):
         action_kwargs: Dict[str, Any],
         sample_material: Dict[str, str],
         server_info: Optional[Dict[str, Any]] = None,
-    ) -> None:
+    ) -> Optional[ConcurrentFuture]:
+        """在 fail-open span 中向设备发送 ROS action goal。"""
+
+        parent_trace_context = normalize_trace_context(
+            getattr(item, "trace_context", {})
+        )
+        trace_context = parent_trace_context
+        with fail_open_span(
+            runtime_tracing,
+            "ros2.action.send_goal",
+            parent=parent_trace_context,
+            attributes={
+                "workflow.node_job.uuid": item.job_id,
+                "workflow.task.uuid": item.task_id,
+                "device.id": item.device_id,
+                "device.action.name": item.action_name,
+                "ros.action.type": action_type,
+                "ros.goal.uuid": item.job_id,
+            },
+        ):
+            captured_context = safe_capture_context(runtime_tracing)
+            if captured_context:
+                trace_context = captured_context
+            item.trace_context = trace_context
+            return HostNode._send_goal_with_trace(
+                self,
+                item,
+                action_type=action_type,
+                action_kwargs=action_kwargs,
+                sample_material=sample_material,
+                server_info=server_info,
+                trace_context=trace_context,
+            )
+
+    def _send_goal_with_trace(
+        self,
+        item: "QueueItem",
+        action_type: str,
+        action_kwargs: Dict[str, Any],
+        sample_material: Dict[str, str],
+        server_info: Optional[Dict[str, Any]] = None,
+        trace_context: Optional[Dict[str, str]] = None,
+    ) -> Optional[ConcurrentFuture]:
         """
         向设备发送目标请求
 
@@ -866,7 +976,6 @@ class HostNode(BaseROS2DeviceNode):
             action_kwargs: 动作参数
             server_info: 服务器发送信息，包含发送时间戳等
         """
-        u = uuid.UUID(item.job_id)
         device_id = item.device_id
         action_name = item.action_name
 
@@ -889,6 +998,9 @@ class HostNode(BaseROS2DeviceNode):
                 "function_args": action_kwargs,
                 JSON_UNILABOS_PARAM: {
                     PARAM_SAMPLE_UUIDS: sample_material,
+                    TRACE_CONTEXT_KEY: normalize_trace_context(trace_context),
+                    _WORKFLOW_NODE_JOB_UUID_PARAM: item.job_id,
+                    _WORKFLOW_TASK_UUID_PARAM: item.task_id,
                 },
             }
             action_kwargs = {"string": json.dumps(json_command)}
@@ -904,18 +1016,214 @@ class HostNode(BaseROS2DeviceNode):
         action_client: ActionClient = self._action_clients[action_id]
         goal_msg = convert_to_ros_msg(action_client._action_type.Goal(), action_kwargs)
 
+        # 必须在任何可能阻塞或切到 trace executor 的步骤之前登记请求。
+        # 这样人工解锁可以在 ROS 真正提交前留下取消意图。
+        with HostNode._goal_tracking_lock(self):
+            self._pending_goal_requests.add(item.job_id)
+
+        try:
+            target_wrapper = self.devices_instances.get(device_id)
+            target_node = getattr(target_wrapper, "_ros_node", None) if target_wrapper is not None else None
+            if target_node is not None and hasattr(target_node, "register_job_context"):
+                try:
+                    target_node.register_job_context(
+                        item.job_id,
+                        item.task_id,
+                        item.action_name,
+                        trace_context=trace_context,
+                    )
+                except TypeError:
+                    # 兼容尚未升级 tracing seam 的本地自定义节点。
+                    target_node.register_job_context(
+                        item.job_id,
+                        item.task_id,
+                        item.action_name,
+                    )
+            elif not action_type.startswith("UniLabJsonCommand") and normalize_trace_context(
+                trace_context
+            ):
+                executor = self._trace_registration_executor
+                if executor is None or getattr(self, "_shutting_down", False):
+                    raise RuntimeError("Host is shutting down")
+                deferred = executor.submit(
+                    HostNode._register_then_send_goal,
+                    self,
+                    item,
+                    action_id,
+                    action_client,
+                    goal_msg,
+                    action_kwargs,
+                    trace_context,
+                )
+                deferred.add_done_callback(
+                    lambda future: HostNode._deferred_goal_send_callback(
+                        self,
+                        item,
+                        action_id,
+                        future,
+                    )
+                )
+                return deferred
+
+            HostNode._send_action_goal(
+                self,
+                item,
+                action_id,
+                action_client,
+                goal_msg,
+                action_kwargs,
+            )
+        except Exception:
+            HostNode._clear_goal_tracking(self, item.job_id)
+            raise
+        return None
+
+    def _send_action_goal(
+        self,
+        item: "QueueItem",
+        action_id: str,
+        action_client: ActionClient,
+        goal_msg: Any,
+        action_kwargs: Dict[str, Any],
+        server_wait_timeout: Optional[float] = None,
+    ) -> None:
+        """执行既有 ROS goal 发送；允许从 trace 登记线程安全调用。"""
+
+        if getattr(self, "_shutting_down", False):
+            raise RuntimeError("Host is shutting down")
+
         # self.lab_logger().trace(f"[Host Node] Sending goal for {action_id}: {str(goal_msg)[:1000]}")
         self.lab_logger().trace(f"[Host Node] Sending goal for {action_id}: {action_kwargs}")
         self.lab_logger().trace(f"[Host Node] Sending goal for {action_id}: {goal_msg}")
-        action_client.wait_for_server()
-        goal_uuid_obj = UUID(uuid=list(u.bytes))
+        if server_wait_timeout is None:
+            action_client.wait_for_server()
+        elif not action_client.wait_for_server(timeout_sec=server_wait_timeout):
+            raise TimeoutError(
+                f"Action server {action_id} unavailable after "
+                f"{server_wait_timeout:g}s"
+            )
+        if getattr(self, "_shutting_down", False):
+            raise RuntimeError("Host is shutting down")
 
-        future = action_client.send_goal_async(
-            goal_msg,
-            feedback_callback=lambda feedback_msg: self.feedback_callback(item, action_id, feedback_msg),
-            goal_uuid=goal_uuid_obj,
-        )
+        # cancel_goal_or_defer 使用同一把锁。检查和 send_goal_async 必须处于
+        # 同一临界区：解锁先拿锁则完全不提交，提交先拿锁则解锁随后登记取消。
+        with HostNode._goal_tracking_lock(self):
+            if item.job_id in self._pending_goal_cancellations:
+                self._pending_goal_requests.discard(item.job_id)
+                self._pending_goal_cancellations.discard(item.job_id)
+                self.lab_logger().warning(
+                    f"[Host Node] Drop goal {item.job_id[:8]} before ROS submit "
+                    "because manual unlock won"
+                )
+                return
+            goal_uuid_obj = UUID(uuid=list(uuid.UUID(item.job_id).bytes))
+            try:
+                future = action_client.send_goal_async(
+                    goal_msg,
+                    feedback_callback=lambda feedback_msg: self.feedback_callback(item, action_id, feedback_msg),
+                    goal_uuid=goal_uuid_obj,
+                )
+            except Exception:
+                self._pending_goal_requests.discard(item.job_id)
+                self._pending_goal_cancellations.discard(item.job_id)
+                raise
         future.add_done_callback(lambda f: self.goal_response_callback(item, action_id, f))
+
+    def _register_then_send_goal(
+        self,
+        item: "QueueItem",
+        action_id: str,
+        action_client: ActionClient,
+        goal_msg: Any,
+        action_kwargs: Dict[str, Any],
+        trace_context: Optional[Dict[str, str]],
+    ) -> None:
+        """在专用线程按序完成 side-channel 和业务 goal，不占调度 worker。"""
+
+        HostNode._register_remote_trace_context(self, item, trace_context)
+        if getattr(self, "_shutting_down", False):
+            raise RuntimeError("Host is shutting down")
+        HostNode._send_action_goal(
+            self,
+            item,
+            action_id,
+            action_client,
+            goal_msg,
+            action_kwargs,
+            _TRACE_ACTION_SERVER_WAIT_TIMEOUT_SECONDS,
+        )
+
+    def _deferred_goal_send_callback(
+        self,
+        item: "QueueItem",
+        action_id: str,
+        future: ConcurrentFuture,
+    ) -> None:
+        """后台 goal 发送失败时走普通失败回报，确保设备锁可释放。"""
+
+        try:
+            future.result()
+            return
+        except Exception as exc:  # noqa: BLE001 - 后台边界必须收敛异常
+            HostNode._clear_goal_tracking(self, item.job_id)
+            self.lab_logger().error(
+                f"[Host Node] Deferred goal send failed for {item.job_id[:8]}: "
+                f"{type(exc).__name__}"
+            )
+            with fail_open_span(
+                runtime_tracing,
+                "ros2.action.goal_response",
+                parent=getattr(item, "trace_context", {}),
+                attributes={
+                    "workflow.node_job.uuid": item.job_id,
+                    "device.id": item.device_id,
+                    "device.action.name": item.action_name,
+                    "ros.action.accepted": False,
+                    "error.type": type(exc).__name__,
+                },
+            ):
+                pass
+
+        return_info = serialize_result_info("ROS goal send failed", False, {})
+        try:
+            HostNode._store_job_result_unless_fenced(
+                self,
+                item.job_id,
+                "failed",
+                return_info,
+                {},
+            )
+        except Exception as exc:  # noqa: BLE001 - bridge 回报仍须继续
+            self.lab_logger().error(
+                f"[Host Node] Failed to store deferred send result: "
+                f"{type(exc).__name__}"
+            )
+        for bridge in self.bridges:
+            if hasattr(bridge, "publish_job_status"):
+                try:
+                    bridge.publish_job_status({}, item, "failed", return_info)
+                except Exception as exc:  # noqa: BLE001 - 单一 bridge 不阻断锁释放
+                    self.lab_logger().error(
+                        f"[Host Node] Deferred send bridge failed: "
+                        f"{type(exc).__name__}"
+                    )
+
+    def _register_remote_trace_context(
+        self,
+        item: "QueueItem",
+        trace_context: Optional[Dict[str, str]],
+    ) -> bool:
+        """原生 ROS Action 无扩展字段，先通过有确认的 service 注册 parent。"""
+
+        return BaseROS2DeviceNode._register_remote_action_trace_context(
+            self,
+            device_id=item.device_id,
+            ros_goal_uuid=item.job_id,
+            node_job_uuid=item.job_id,
+            task_uuid=item.task_id,
+            action_name=item.action_name,
+            trace_context=trace_context,
+        )
 
     def _build_test_mode_return(
         self, device_id: str, action_name: str, action_kwargs: Dict[str, Any]
@@ -965,18 +1273,54 @@ class HostNode(BaseROS2DeviceNode):
     def goal_response_callback(self, item: "QueueItem", action_id: str, future) -> None:
         """目标响应回调"""
         goal_handle = future.result()
+        with fail_open_span(
+            runtime_tracing,
+            "ros2.action.goal_response",
+            parent=getattr(item, "trace_context", {}),
+            attributes={
+                "workflow.node_job.uuid": item.job_id,
+                "device.id": item.device_id,
+                "device.action.name": item.action_name,
+                "ros.action.accepted": bool(goal_handle.accepted),
+            },
+        ):
+            pass
         if not goal_handle.accepted:
+            with HostNode._goal_tracking_lock(self):
+                self._pending_goal_requests.discard(item.job_id)
+                self._pending_goal_cancellations.discard(item.job_id)
             self.lab_logger().warning(f"[Host Node] Goal {item.action_name} ({item.job_id}) rejected")
             return
 
         self.lab_logger().info(f"[Host Node] Goal {action_id} ({item.job_id}) accepted")
-        self._goals[item.job_id] = goal_handle
+        with HostNode._goal_tracking_lock(self):
+            self._pending_goal_requests.discard(item.job_id)
+            self._goals[item.job_id] = goal_handle
+            self._goal_trace_contexts[item.job_id] = normalize_trace_context(
+                getattr(item, "trace_context", {})
+            )
+            cancel_on_accept = item.job_id in self._pending_goal_cancellations
+            self._pending_goal_cancellations.discard(item.job_id)
+        if cancel_on_accept:
+            self.lab_logger().warning(
+                f"[Host Node] Goal {item.job_id[:8]} accepted after manual unlock; cancelling immediately"
+            )
+            HostNode._request_registered_goal_cancel(
+                self,
+                item.job_id,
+                goal_handle,
+            )
         goal_future = goal_handle.get_result_async()
         goal_future.add_done_callback(lambda f: self.get_result_callback(item, action_id, f))
         goal_future.result()
 
     def feedback_callback(self, item: "QueueItem", action_id: str, feedback_msg) -> None:
         """反馈回调"""
+        if HostNode._is_manual_unlock_fenced(self, item.job_id):
+            self.lab_logger().warning(
+                f"[Host Node] Skip late feedback for manually unlocked goal {item.job_id[:8]}"
+            )
+            return
         feedback_data = convert_from_ros_msg(feedback_msg)
         feedback_data.pop("goal_id")
         self.lab_logger().trace(f"[Host Node] Feedback for {action_id} ({item.job_id}): {feedback_data}")
@@ -991,6 +1335,12 @@ class HostNode(BaseROS2DeviceNode):
 
         try:
             result = future.result()
+            if HostNode._is_manual_unlock_fenced(self, job_id):
+                self.lab_logger().warning(
+                    f"[Host Node] Skip late result for manually unlocked goal {job_id[:8]}"
+                )
+                HostNode._clear_goal_tracking(self, job_id)
+                return
             result_msg = result.result
             goal_status = result.status
 
@@ -1036,24 +1386,42 @@ class HostNode(BaseROS2DeviceNode):
                         return_info = serialize_result_info("缺少return_info", False, result_data)
 
             self.lab_logger().info(f"[Host Node] Result for {action_id} ({job_id[:8]}): {status}")
+            with fail_open_span(
+                runtime_tracing,
+                "ros2.action.result",
+                parent=getattr(item, "trace_context", {}),
+                attributes={
+                    "workflow.node_job.uuid": job_id,
+                    "device.id": item.device_id,
+                    "device.action.name": item.action_name,
+                    "job.result.status": status,
+                    "ros.goal.status": int(goal_status),
+                },
+            ):
+                pass
             if goal_status != GoalStatus.STATUS_CANCELED:
                 self.lab_logger().trace(f"[Host Node] Result data: {result_data}")
 
             # 清理 _goals 中的记录
-            if job_id in self._goals:
-                del self._goals[job_id]
-                self.lab_logger().trace(f"[Host Node] Removed goal {job_id[:8]} from _goals")
+            HostNode._clear_goal_tracking(self, job_id)
 
             # 存储结果供 HTTP API 查询
-            try:
-                from unilabos.app.web.controller import store_job_result
-
-                if goal_status == GoalStatus.STATUS_CANCELED:
-                    store_job_result(job_id, status, return_info, {})
-                else:
-                    store_job_result(job_id, status, return_info, result_data)
-            except ImportError:
-                pass  # controller 模块可能未加载
+            if goal_status == GoalStatus.STATUS_CANCELED:
+                HostNode._store_job_result_unless_fenced(
+                    self,
+                    job_id,
+                    status,
+                    return_info,
+                    {},
+                )
+            else:
+                HostNode._store_job_result_unless_fenced(
+                    self,
+                    job_id,
+                    status,
+                    return_info,
+                    result_data,
+                )
 
             # 发布状态到桥接器
             if job_id:
@@ -1065,6 +1433,19 @@ class HostNode(BaseROS2DeviceNode):
                             bridge.publish_job_status(result_data, item, status, return_info)
 
         except Exception as e:
+            with fail_open_span(
+                runtime_tracing,
+                "ros2.action.result",
+                parent=getattr(item, "trace_context", {}),
+                attributes={
+                    "workflow.node_job.uuid": job_id,
+                    "device.id": item.device_id,
+                    "device.action.name": item.action_name,
+                    "job.result.status": "failed",
+                    "error.type": type(e).__name__,
+                },
+            ):
+                pass
             self.lab_logger().error(
                 f"[Host Node] Error in get_result_callback for {action_id} ({job_id[:8]}): {str(e)}"
             )
@@ -1073,8 +1454,7 @@ class HostNode(BaseROS2DeviceNode):
             self.lab_logger().error(traceback.format_exc())
 
             # 清理 _goals 中的记录
-            if job_id in self._goals:
-                del self._goals[job_id]
+            HostNode._clear_goal_tracking(self, job_id)
 
             # 发布失败状态
             for bridge in self.bridges:
@@ -1082,6 +1462,89 @@ class HostNode(BaseROS2DeviceNode):
                     bridge.publish_job_status(
                         {}, item, "failed", serialize_result_info(f"Callback error: {str(e)}", False, {})
                     )
+
+    def _is_manual_unlock_fenced(self, job_id: str) -> bool:
+        """查询 bridge 中的人工解锁 fence，不把 Job 状态权威复制到 HostNode。"""
+
+        for bridge in self.bridges:
+            checker = getattr(bridge, "is_manual_unlock_fenced", None)
+            if callable(checker) and checker(job_id):
+                return True
+        return False
+
+    def _store_job_result_unless_fenced(
+        self,
+        job_id: str,
+        status: str,
+        result: Optional[Dict[str, Any]],
+        feedback: Optional[Dict[str, Any]] = None,
+    ) -> bool:
+        """优先由 bridge 在其 fence 临界区内写旧 HTTP 结果仓。"""
+
+        for bridge in self.bridges:
+            writer = getattr(bridge, "store_job_result_if_unfenced", None)
+            if callable(writer):
+                return bool(writer(job_id, status, result, feedback))
+
+        try:
+            from unilabos.app.web.controller import store_job_result
+
+            store_job_result(job_id, status, result, feedback)
+            return True
+        except ImportError:
+            return False
+
+    def _goal_tracking_lock(self) -> threading.RLock:
+        """为完整 Host 与历史轻量测试替身提供一致的 goal 跟踪状态。"""
+
+        lock = getattr(self, "_goals_lock", None)
+        if lock is None:
+            lock = threading.RLock()
+            self._goals_lock = lock
+        if not hasattr(self, "_goals"):
+            self._goals = {}
+        if not hasattr(self, "_goal_trace_contexts"):
+            self._goal_trace_contexts = {}
+        if not hasattr(self, "_pending_goal_requests"):
+            self._pending_goal_requests = set()
+        if not hasattr(self, "_pending_goal_cancellations"):
+            self._pending_goal_cancellations = set()
+        return lock
+
+    def _clear_goal_tracking(self, job_id: str) -> None:
+        """原子清理 goal handle、trace context 和待接受取消意图。"""
+
+        with HostNode._goal_tracking_lock(self):
+            removed = self._goals.pop(job_id, None)
+            self._goal_trace_contexts.pop(job_id, None)
+            self._pending_goal_requests.discard(job_id)
+            self._pending_goal_cancellations.discard(job_id)
+        if removed is not None:
+            self.lab_logger().trace(
+                f"[Host Node] Removed goal {job_id[:8]} from _goals"
+            )
+
+    def cancel_goal_or_defer(self, goal_uuid: str) -> bool:
+        """取消已登记 goal，或保存其尚未 accepted 时的取消意图。"""
+
+        with HostNode._goal_tracking_lock(self):
+            goal_handle = self._goals.get(goal_uuid)
+            if goal_handle is None:
+                if goal_uuid not in self._pending_goal_requests:
+                    self.lab_logger().warning(
+                        f"[Host Node] Goal {goal_uuid[:8]} was never submitted; cannot defer cancel"
+                    )
+                    return False
+                self._pending_goal_cancellations.add(goal_uuid)
+                self.lab_logger().warning(
+                    f"[Host Node] Goal {goal_uuid[:8]} pending acceptance; defer cancel"
+                )
+                return True
+        return HostNode._request_registered_goal_cancel(
+            self,
+            goal_uuid,
+            goal_handle,
+        )
 
     def cancel_goal(self, goal_uuid: str) -> bool:
         """
@@ -1093,38 +1556,97 @@ class HostNode(BaseROS2DeviceNode):
         Returns:
             bool: 如果找到目标并发起取消请求返回True，否则返回False
         """
-        if goal_uuid in self._goals:
-            self.lab_logger().info(f"[Host Node] Cancelling goal {goal_uuid[:8]}")
-            goal_handle = self._goals[goal_uuid]
-
-            # 发起异步取消请求
-            cancel_future = goal_handle.cancel_goal_async()
-
-            # 添加取消完成的回调
-            cancel_future.add_done_callback(lambda future: self._cancel_goal_callback(goal_uuid, future))
-            return True
-        else:
+        with HostNode._goal_tracking_lock(self):
+            goal_handle = self._goals.get(goal_uuid)
+        if goal_handle is None:
             self.lab_logger().warning(f"[Host Node] Goal {goal_uuid[:8]} not found in _goals, cannot cancel")
             return False
+        return HostNode._request_registered_goal_cancel(
+            self,
+            goal_uuid,
+            goal_handle,
+        )
 
-    def _cancel_goal_callback(self, goal_uuid: str, future) -> None:
+    def _request_registered_goal_cancel(
+        self,
+        goal_uuid: str,
+        goal_handle: Any,
+    ) -> bool:
+        """向已 accepted 的 goal handle 发起异步取消。"""
+
+        with HostNode._goal_tracking_lock(self):
+            cancel_parent = normalize_trace_context(
+                self._goal_trace_contexts.get(goal_uuid)
+            )
+        cancel_trace_context = cancel_parent
+        try:
+            with fail_open_span(
+                runtime_tracing,
+                "ros2.action.cancel",
+                parent=cancel_parent,
+                attributes={"workflow.node_job.uuid": goal_uuid},
+            ):
+                captured_context = safe_capture_context(runtime_tracing)
+                if captured_context:
+                    cancel_trace_context = captured_context
+                self.lab_logger().info(f"[Host Node] Cancelling goal {goal_uuid[:8]}")
+                cancel_future = goal_handle.cancel_goal_async()
+        except Exception as exc:
+            self.lab_logger().error(
+                f"[Host Node] Failed to request goal cancellation {goal_uuid[:8]}: {exc}"
+            )
+            return False
+
+        cancel_future.add_done_callback(
+            lambda future: self._cancel_goal_callback(
+                goal_uuid,
+                future,
+                cancel_trace_context,
+            )
+        )
+        return True
+
+    def _cancel_goal_callback(
+        self,
+        goal_uuid: str,
+        future,
+        parent_trace_context: Optional[Dict[str, str]] = None,
+    ) -> None:
         """取消目标的回调"""
+        accepted = False
+        error_type: Optional[str] = None
         try:
             cancel_response = future.result()
-            if cancel_response.goals_canceling:
+            accepted = bool(cancel_response.goals_canceling)
+            if accepted:
                 self.lab_logger().info(f"[Host Node] Goal {goal_uuid[:8]} cancel request accepted")
             else:
                 self.lab_logger().warning(f"[Host Node] Goal {goal_uuid[:8]} cancel request rejected")
         except Exception as e:
+            error_type = type(e).__name__
             self.lab_logger().error(f"[Host Node] Error cancelling goal {goal_uuid[:8]}: {str(e)}")
             import traceback
 
             self.lab_logger().error(traceback.format_exc())
+        attributes = {
+            "workflow.node_job.uuid": goal_uuid,
+            "ros.cancel.accepted": accepted,
+        }
+        if error_type is not None:
+            attributes["error.type"] = error_type
+        with fail_open_span(
+            runtime_tracing,
+            "ros2.action.cancel_response",
+            parent=parent_trace_context,
+            attributes=attributes,
+        ):
+            pass
 
     def get_goal_status(self, job_id: str) -> int:
         """获取目标状态"""
-        if job_id in self._goals:
-            g = self._goals[job_id]
+        with HostNode._goal_tracking_lock(self):
+            g = self._goals.get(job_id)
+        if g is not None:
             status = g.status
             self.lab_logger().debug(f"[Host Node] Goal status for {job_id}: {status}")
             return status
@@ -1225,6 +1747,7 @@ class HostNode(BaseROS2DeviceNode):
 
         if success:
             from unilabos.resources.graphio import physical_setup_graph
+            from unilabos.resources.resource_tracker import TRACKER_STATE_KEYS
 
             # 将资源添加到本地图中
             for node in resource_tree_set.all_nodes:
@@ -1232,14 +1755,49 @@ class HostNode(BaseROS2DeviceNode):
                 if resource_dict.get("id") not in physical_setup_graph.nodes:
                     physical_setup_graph.add_node(resource_dict["id"], **resource_dict)
                 else:
-                    physical_setup_graph.nodes[resource_dict["id"]]["data"].update(resource_dict.get("data", {}))
+                    graph_node = physical_setup_graph.nodes[resource_dict["id"]]
+                    graph_node["data"].update(resource_dict.get("data", {}))
+                    # 液体状态在根字段（与 dump 形态一致），已存在节点同步刷新，避免与 data 双真相漂移
+                    for state_key in TRACKER_STATE_KEYS:
+                        if resource_dict.get(state_key) is not None:
+                            graph_node[state_key] = resource_dict[state_key]
 
         response.response = _fast_dumps_str(uuid_mapping) if success else "FAILED"
         self.lab_logger().info(f"[Host Node-Resource] Resource tree add completed, success: {success}")
 
+    def _local_resource_nodes(
+        self, uuid: Optional[str] = None, res_id: Optional[str] = None, with_children: bool = True
+    ) -> Optional[List[dict]]:
+        """host 本地树解析（物料唯一事实源，云端物料接口已下线）；未命中返回 None。"""
+        from unilabos.hostlink.resolver import LocalResourceResolver, ResourceNotFound
+
+        if not hasattr(self, "_hostlink_resolver"):
+            self._hostlink_resolver = LocalResourceResolver(lambda: self.resources_config)
+        try:
+            return self._hostlink_resolver.resolve(uuid=uuid, res_id=res_id, with_children=with_children)
+        except ResourceNotFound:
+            return None
+
     async def _resource_tree_action_get_callback(self, data: dict, response: SerialCommand_Response):  # OK
         uuid_list: List[str] = data["data"]
         with_children: bool = data["with_children"]
+
+        # 本地树优先：全部命中直接返回；任一未命中回退旧云端接口（过渡期兜底，
+        # 云端物料下线后该兜底只会失败并抛错，行为与旧链路一致）。
+        local_nodes: List[dict] = []
+        for res_uuid in uuid_list:
+            nodes = self._local_resource_nodes(uuid=res_uuid, with_children=with_children)
+            if nodes is None:
+                local_nodes = []
+                break
+            local_nodes.extend(nodes)
+        if local_nodes:
+            response.response = json.dumps(local_nodes)
+            self.lab_logger().trace(
+                f"[Host Node-Resource] Resource tree get served locally ({len(local_nodes)} nodes)"
+            )
+            return
+
         from unilabos.app.web.client import http_client
 
         resource_response = http_client.resource_tree_get(uuid_list, with_children)
@@ -1474,15 +2032,26 @@ class HostNode(BaseROS2DeviceNode):
             响应对象，包含查询到的资源
         """
         try:
+            data = json.loads(request.command)
+            req_uuid = data.get("uuid")
+            req_id = data.get("id") if not req_uuid else None
+            if not req_uuid and not req_id:
+                raise ValueError("没有使用正确的物料 id 或 uuid")
+
+            # 本地树优先（物料唯一事实源）；未命中回退旧云端接口（过渡期兜底）
+            local_nodes = self._local_resource_nodes(
+                uuid=req_uuid, res_id=req_id, with_children=data.get("with_children", True)
+            )
+            if local_nodes is not None:
+                response.response = json.dumps(local_nodes)
+                return response
+
             from unilabos.app.web import http_client
 
-            data = json.loads(request.command)
-            if "uuid" in data and data["uuid"] is not None:
-                http_req = http_client.resource_tree_get([data["uuid"]], data["with_children"])
-            elif "id" in data:
-                http_req = http_client.resource_get(data["id"], data["with_children"])
+            if req_uuid:
+                http_req = http_client.resource_tree_get([req_uuid], data["with_children"])
             else:
-                raise ValueError("没有使用正确的物料 id 或 uuid")
+                http_req = http_client.resource_get(req_id, data["with_children"])
             response.response = json.dumps(http_req["data"])
             return response
         except Exception as e:
@@ -1707,7 +2276,7 @@ class HostNode(BaseROS2DeviceNode):
         }
         return res
 
-    @action(always_free=True, node_type=NodeType.MANUAL_CONFIRM, placeholder_keys={
+    @legacy_action(always_free=True, node_type=NodeType.MANUAL_CONFIRM, placeholder_keys={
         "assignee_user_ids": PLACEHOLDER_MANUAL_CONFIRM
     }, goal_default={
         "timeout_seconds": 3600,
@@ -1720,7 +2289,7 @@ class HostNode(BaseROS2DeviceNode):
         """
         return kwargs
 
-    @action(
+    @legacy_action(
         description="申请扣减物料并挂载（接收服务端已扣减的单个根物料，挂载到目标设备的目标物料上）",
         always_free=True,
         placeholder_keys={
@@ -1855,7 +2424,7 @@ class HostNode(BaseROS2DeviceNode):
         )
         return res
 
-    @action(
+    @legacy_action(
         description="设置物料内容物（液体/固体，默认单位 微升/微克）；接收单个物料，设置后输出",
         always_free=True,
         placeholder_keys={"resource": PLACEHOLDER_DEDUCT_REAGENT},
@@ -1912,7 +2481,7 @@ class HostNode(BaseROS2DeviceNode):
         dumped = ResourceTreeSet.from_plr_resources([resource]).dump()
         return {"resource": dumped[0] if dumped else []}
 
-    @action(
+    @legacy_action(
         description="废弃台面物料（指定设备 + uuid：云端销毁并通知该设备本地移除）",
         always_free=True,
         placeholder_keys={
@@ -2019,7 +2588,7 @@ class HostNode(BaseROS2DeviceNode):
             "result": result,
         }
 
-    @action(
+    @legacy_action(
         description="转移物料（系统派发）：把已物理就位的物料在系统中改挂到目标设备的目标孔位（人工/机械臂工作流的统一末步）",
         always_free=True,
         placeholder_keys={
@@ -2104,7 +2673,7 @@ class HostNode(BaseROS2DeviceNode):
         """
         return await self._do_transfer_resource(resource, target_device, mount_resource, site)
 
-    @action(
+    @legacy_action(
         description="人工搬运闸门：到该步暂停等人工确认（人工把物料搬运到位），仅透传物料，不做系统转移（人工工作流中间步，对应机械臂 pick/place）",
         always_free=True,
         node_type=NodeType.MANUAL_CONFIRM,

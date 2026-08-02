@@ -14,6 +14,8 @@ from unilabos.resources.container import RegularContainer
 from unilabos.resources.itemized_carrier import ItemizedCarrier, BottleCarrier
 from unilabos.ros.msgs.message_converter import convert_to_ros_msg
 from unilabos.resources.resource_tracker import (
+    RESOURCE_ROOT_FIELDS,
+    TRACKER_STATE_KEYS,
     ResourceDictInstance,
     ResourceTreeSet,
 )
@@ -76,7 +78,8 @@ def canonicalize_nodes_data(
             if sample_id:
                 logger.error(f"{node}的sample_id参数已弃用，sample_id: {sample_id}")
         for k in list(node.keys()):
-            if k not in ["id", "uuid", "name", "description", "schema", "model", "icon", "parent_uuid", "parent", "type", "class", "position", "config", "data", "children", "pose", "extra", "machine_name", "barcode", "barcode_symbology"]:
+            # 根键白名单从 ResourceDict 派生（新增根字段自动生效），position/children 是老形态输入键
+            if k not in RESOURCE_ROOT_FIELDS and k not in ("position", "children"):
                 v = node.pop(k)
                 node["config"][k] = v
     if outer_host_node_id is not None:
@@ -581,10 +584,18 @@ def resource_ulab_to_plr(resource: dict, plr_model=False) -> "ResourcePLR":
     if ResourcePLR is None:
         raise ImportError("pylabrobot not found")
 
-    all_states = {resource["id"]: resource["data"]}
+    def state_of(resource: dict) -> dict:
+        # 兼容两种输入形态：老形态 data 完整；新协议形态液体状态在根字段（liquids 等），组装回 data
+        data = dict(resource.get("data") or {})
+        for state_key in TRACKER_STATE_KEYS:
+            if resource.get(state_key) is not None:
+                data[state_key] = resource[state_key]
+        return data
+
+    all_states = {resource["id"]: state_of(resource)}
 
     def resource_ulab_to_plr_inner(resource: dict):
-        all_states[resource["name"]] = resource["data"]
+        all_states[resource["name"]] = state_of(resource)
         extra = resource.pop("extra", {})
         d = {
             "name": resource["name"],
@@ -1219,26 +1230,48 @@ def initialize_resource(resource_config: dict, resource_type: Any = None) -> Uni
     from unilabos.registry.registry import lab_registry
 
     resource_class_config = resource_config.get("class", None)
+    catalog_runtime_config: dict[str, Any] = {}
     if resource_class_config is None:
         return [resource_config]
     elif type(resource_class_config) == str:
         # Allow special resource class names to be used
-        if resource_class_config not in lab_registry.resource_type_registry:
+        from unilabos.package_manager.consumers import resolve_registry_definition
+
+        try:
+            _canonical_class, registry_entry = resolve_registry_definition(
+                lab_registry.resource_type_registry,
+                resource_class_config,
+            )
+        except KeyError:
             logger.warning(f"❌ 类 {resource_class_config} 不在 registry 中，返回原始配置")
             logger.debug(f"   可用的类: {list(lab_registry.resource_type_registry.keys())[:10]}...")
             return [resource_config]
         # If the resource class is a string, look up the class in the
         # resource_type_registry and import it
-        resource_class_config = resource_config["class"] = lab_registry.resource_type_registry[resource_class_config][
-            "class"
-        ]
+        if registry_entry.get("source_fqid"):
+            raw_config = resource_config.get("config")
+            if isinstance(raw_config, dict):
+                properties = (
+                    (registry_entry.get("init_param_schema") or {})
+                    .get("config", {})
+                    .get("properties", {})
+                )
+                catalog_runtime_config = {
+                    name: value
+                    for name, value in raw_config.items()
+                    if name != "name" and name in properties
+                }
+        resource_class_config = resource_config["class"] = registry_entry["class"]
     if type(resource_class_config) == dict:
         module = importlib.import_module(resource_class_config["module"].split(":")[0])
         mclass = resource_class_config["module"].split(":")[1]
         RESOURCE = getattr(module, mclass)
 
         if resource_class_config["type"] == "pylabrobot":
-            resource_plr = RESOURCE(name=resource_config["name"])
+            resource_plr = RESOURCE(
+                name=resource_config["name"],
+                **catalog_runtime_config,
+            )
             if resource_type != ResourcePLR:
                 tree_sets = ResourceTreeSet.from_plr_resources([resource_plr], known_newly_created=True)
                 r = tree_sets.dump()

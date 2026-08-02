@@ -75,6 +75,154 @@ from msgcenterpy.instances.ros2_instance import ROS2MessageInstance
 _module_hash_cache: Dict[str, Optional[str]] = {}
 
 
+def _canonical_schema_base(schema: Any) -> Dict[str, Any]:
+    if not isinstance(schema, dict):
+        return {}
+    members = schema.get("anyOf")
+    if isinstance(members, list):
+        for member in members:
+            if isinstance(member, dict) and member.get("type") != "null":
+                return member
+        return {}
+    return schema
+
+
+def _ros_container_item_type(ros_type: str) -> str | None:
+    normalized = "".join(ros_type.lower().split())
+    if normalized.startswith("sequence<") and normalized.endswith(">"):
+        inner = normalized[len("sequence<") : -1]
+        return inner.split(",", 1)[0]
+    if normalized.startswith("bounded_sequence<") and normalized.endswith(">"):
+        inner = normalized[len("bounded_sequence<") : -1]
+        return inner.split(",", 1)[0]
+    if normalized.endswith("]") and "[" in normalized:
+        return normalized.rsplit("[", 1)[0]
+    return None
+
+
+def _canonical_schema_accepts_ros_type(schema: Any, ros_type: Any) -> bool:
+    """验证 canonical business value 可由一个 ROS 字段无损承载。"""
+
+    if not isinstance(ros_type, str) or not ros_type.strip():
+        return False
+    base = _canonical_schema_base(schema)
+    normalized = "".join(ros_type.lower().split())
+
+    def ros_string() -> bool:
+        if normalized in {"string", "wstring"}:
+            return True
+        prefix, separator, bound = normalized.partition("<=")
+        return (
+            separator == "<="
+            and prefix in {"string", "wstring"}
+            and bound.isdigit()
+        )
+
+    item_type = _ros_container_item_type(normalized)
+    if base.get("type") == "array":
+        if item_type is None:
+            return False
+        return _canonical_schema_accepts_ros_type(base.get("items", {}), item_type)
+    if item_type is not None:
+        return False
+
+    if base.get("$slot") == "ResourceSlot":
+        return ros_string()
+    value_type = base.get("type")
+    if value_type == "string":
+        return ros_string()
+    if value_type == "boolean":
+        return normalized in {"bool", "boolean"}
+    if value_type == "integer":
+        return normalized in {
+            "byte",
+            "char",
+            "int8",
+            "uint8",
+            "int16",
+            "uint16",
+            "int32",
+            "uint32",
+            "int64",
+            "uint64",
+        }
+    if value_type == "number":
+        return normalized in {"float32", "float64", "double"}
+    if value_type in {"object", None}:
+        return ros_string()
+    return False
+
+
+def _canonical_handle_type(schema: Any) -> str:
+    base = _canonical_schema_base(schema)
+    if base.get("$slot") == "ResourceSlot":
+        return "ResourceSlot"
+    return str(base.get("type") or "object")
+
+
+def _canonical_registry_action_handles(schema: Dict[str, Any]) -> Dict[str, Any]:
+    properties = schema["properties"]
+    goal = properties["goal"]
+    result = properties["result"]
+    inputs = [
+        {
+            "handler_key": name,
+            "data_type": _canonical_handle_type(value_schema),
+            "label": str(value_schema.get("title") or name),
+            "data_source": "goal",
+            "data_key": name,
+        }
+        for name, value_schema in goal["properties"].items()
+    ]
+    outputs = [
+        {
+            "handler_key": name,
+            "data_type": _canonical_handle_type(value_schema),
+            "label": str(value_schema.get("title") or name),
+            "data_source": "result",
+            "data_key": name,
+        }
+        for name, value_schema in result["properties"].items()
+    ]
+    output_names = {item["handler_key"] for item in outputs}
+    for name, value_schema in goal["properties"].items():
+        if (
+            _canonical_schema_base(value_schema).get("$slot") == "ResourceSlot"
+            and name not in output_names
+        ):
+            outputs.append(
+                {
+                    "handler_key": name,
+                    "data_type": "ResourceSlot",
+                    "label": str(value_schema.get("title") or name),
+                    "data_source": "result",
+                    "data_key": name,
+                    "implicit": True,
+                }
+            )
+    return {"input": inputs, "output": outputs}
+_DEFAULT_ACTION_DURATION_SECONDS = 60.0
+
+
+def _normalize_action_extensions(config: Optional[Dict[str, Any]]) -> Dict[str, Any]:
+    """补齐并归一化动作的物料锁与预计时长元数据。"""
+    normalized = dict(config or {})
+    raw_lock_resource = normalized.get("lock_resource")
+    if raw_lock_resource is None:
+        raw_lock_resource = normalized.get("materials_lock")
+    if raw_lock_resource is None:
+        lock_resource = []
+    elif isinstance(raw_lock_resource, str):
+        lock_resource = [raw_lock_resource]
+    else:
+        lock_resource = list(raw_lock_resource)
+    normalized["lock_resource"] = lock_resource
+    normalized.pop("materials_lock", None)
+    normalized.setdefault("estimate_duration_fixed", _DEFAULT_ACTION_DURATION_SECONDS)
+    normalized.setdefault("estimate_duration_express", "")
+    return normalized
+
+
 @singleton
 class Registry:
     """
@@ -124,6 +272,7 @@ class Registry:
         complete_registry=False,
         external_only=False,
         community_namespaces=None,
+        package_catalogs=None,
     ):
         """统一构建注册表入口。"""
         if self._setup_called:
@@ -169,6 +318,15 @@ class Registry:
         self._load_devices_dir_registries(
             devices_dirs, upload_registry=upload_registry, complete_registry=complete_registry
         )
+
+        # Explicit workspace/wheel discovery produces PackageCatalog once.
+        # Registry only projects that immutable metadata; it does not rescan or
+        # import package modules here.
+        if package_catalogs:
+            from unilabos.package_manager.consumers import register_package_catalog
+
+            for catalog in package_catalogs:
+                register_package_catalog(self, catalog)
 
         self._startup_executor.shutdown(wait=True)
         self._startup_executor = None
@@ -781,7 +939,10 @@ class Registry:
                     tc = get_topic_config(method.fget)
                     if tc:
                         status_entry["topic_config"] = tc
-                result["status_methods"][name] = status_entry
+                status_name = status_entry.get("topic_config", {}).get("name") or name
+                status_entry["name"] = status_name
+                status_entry["method_name"] = name
+                result["status_methods"][status_name] = status_entry
 
                 if method.fset:
                     setter_info = self._analyze_method_signature(method.fset)
@@ -799,40 +960,45 @@ class Registry:
             if is_not_action(method):
                 continue
 
-            # @topic_config 装饰的非 property 方法视为状态方法，不作为 action
-            tc = get_topic_config(method)
-            if tc:
-                return_type = self._get_return_type_from_method(method)
-                prop_name = name[4:] if name.startswith("get_") else name
-                result["status_methods"][prop_name] = {
-                    "name": prop_name,
-                    "return_type": return_type,
-                    "topic_config": tc,
-                }
-                continue
-
             method_info = self._analyze_method_signature(method)
             action_meta = get_action_meta(method)
 
             if action_meta:
+                action_name = action_meta.get("action_name") or name
                 action_type = action_meta.get("action_type")
                 if action_type is not None:
-                    result["explicit_actions"][name] = {
+                    result["explicit_actions"][action_name] = {
+                        "method_name": name,
                         "method_info": method_info,
                         "action_meta": action_meta,
                     }
                 else:
-                    result["decorated_no_type_actions"][name] = {
+                    result["decorated_no_type_actions"][action_name] = {
+                        "method_name": name,
                         "method_info": method_info,
                         "action_meta": action_meta,
                     }
             elif has_action_decorator(method):
                 result["explicit_actions"][name] = {
+                    "method_name": name,
                     "method_info": method_info,
                     "action_meta": action_meta or {},
                 }
             else:
-                result["action_methods"][name] = method_info
+                # @topic_config 装饰的非 property 方法视为状态方法；显式 @action 优先。
+                tc = get_topic_config(method)
+                if tc:
+                    return_type = self._get_return_type_from_method(method)
+                    default_name = name[4:] if name.startswith("get_") else name
+                    prop_name = tc.get("name") or default_name
+                    result["status_methods"][prop_name] = {
+                        "name": prop_name,
+                        "method_name": name,
+                        "return_type": return_type,
+                        "topic_config": tc,
+                    }
+                else:
+                    result["action_methods"][name] = method_info
 
         return result
 
@@ -863,7 +1029,9 @@ class Registry:
     # AST-based 注册表条目构建
     # ------------------------------------------------------------------
 
-    def _build_device_entry_from_ast(self, device_id: str, ast_meta: dict) -> Dict[str, Any]:
+    def _build_device_entry_from_ast(
+        self, device_id: str, ast_meta: dict, *, allow_definition_imports: bool = True
+    ) -> Dict[str, Any]:
         """
         Build a device registry entry from AST-scanned metadata.
         Uses only string types -- no module imports required (except for TypedDict resolution).
@@ -902,8 +1070,212 @@ class Registry:
         # --- action_value_mappings ---
         action_value_mappings: Dict[str, Any] = {}
 
+        def _build_canonical_action_entry(method_name, method_info, action_args):
+            """验证并投影 Package/legacy scanner 的 canonical record。"""
+
+            schema = copy.deepcopy(method_info.get("schema"))
+            if not isinstance(schema, dict):
+                raise ValueError(f"Action {method_name} 缺少 canonical schema")
+            extension = schema.get("x-unilabos-action-contract")
+            properties = schema.get("properties")
+            if (
+                not isinstance(extension, dict)
+                or extension.get("version") != 1
+                or not isinstance(properties, dict)
+            ):
+                raise ValueError(f"Action {method_name} canonical schema 版本无效")
+            goal_schema = properties.get("goal")
+            result_schema = properties.get("result")
+            if not isinstance(goal_schema, dict) or not isinstance(result_schema, dict):
+                raise ValueError(f"Action {method_name} canonical schema 不完整")
+            goal_properties = goal_schema.get("properties")
+            result_properties = result_schema.get("properties")
+            input_order = extension.get("input_order")
+            output_order = extension.get("output_order")
+            if (
+                not isinstance(goal_properties, dict)
+                or not isinstance(result_properties, dict)
+                or not isinstance(input_order, list)
+                or not isinstance(output_order, list)
+                or set(input_order) != set(goal_properties)
+                or len(input_order) != len(goal_properties)
+                or set(output_order) != set(result_properties)
+                or len(output_order) != len(result_properties)
+            ):
+                raise ValueError(f"Action {method_name} canonical schema order 无效")
+
+            action_name = action_args.get("action_name") or method_name
+            if action_args.get("auto_prefix"):
+                action_name = f"auto-{action_name}"
+            action_type = action_args.get("action_type")
+            transport_goal = {name: name for name in input_order}
+            transport_feedback = copy.deepcopy(action_args.get("feedback") or {})
+            transport_result = {name: name for name in output_order}
+            if action_type:
+                if not isinstance(action_type, str):
+                    action_type = str(action_type)
+                resolved_action_type = action_type
+                if ":" not in resolved_action_type:
+                    resolved_action_type = imap.get(
+                        resolved_action_type,
+                        resolved_action_type,
+                    )
+                action_type_obj = (
+                    resolve_type_object(resolved_action_type)
+                    if ":" in resolved_action_type
+                    else None
+                )
+                if action_type_obj is None:
+                    raise ValueError(
+                        f"Action {method_name} ROS action_type 无法解析"
+                    )
+
+                def validate_transport_fields(
+                    section: str,
+                    canonical_names: list[str] | None,
+                    canonical_properties: dict[str, Any] | None,
+                    reserved: set[str],
+                ) -> dict[str, str]:
+                    message_type = getattr(
+                        action_type_obj,
+                        section.capitalize(),
+                        None,
+                    )
+                    get_fields = getattr(
+                        message_type,
+                        "get_fields_and_field_types",
+                        None,
+                    )
+                    if not callable(get_fields):
+                        raise ValueError(
+                            f"Action {method_name} ROS {section} schema 缺失"
+                        )
+                    raw_ros_fields = get_fields()
+                    if not isinstance(raw_ros_fields, dict):
+                        raise ValueError(
+                            f"Action {method_name} ROS {section} schema 缺失"
+                        )
+                    ros_fields = set(raw_ros_fields) - reserved
+                    mapping = action_args.get(section) or {
+                        name: name
+                        for name in (
+                            canonical_names
+                            if canonical_names is not None
+                            else sorted(ros_fields)
+                        )
+                    }
+                    if not isinstance(mapping, dict) or any(
+                        not isinstance(key, str)
+                        or not key
+                        or not isinstance(value, str)
+                        or not value
+                        for key, value in mapping.items()
+                    ):
+                        raise ValueError(
+                            f"Action {method_name} ROS {section} mapping 无效"
+                        )
+                    values = list(mapping.values())
+                    conflicts = set(mapping) != ros_fields or len(values) != len(
+                        set(values)
+                    )
+                    if canonical_names is not None:
+                        conflicts = conflicts or set(values) != set(canonical_names)
+                    if conflicts:
+                        raise ValueError(
+                            f"Action {method_name} ROS {section} mapping 与 canonical schema 冲突"
+                        )
+                    if canonical_properties is not None:
+                        for ros_name, canonical_name in mapping.items():
+                            if not _canonical_schema_accepts_ros_type(
+                                canonical_properties[canonical_name],
+                                raw_ros_fields.get(ros_name),
+                            ):
+                                raise ValueError(
+                                    f"Action {method_name} ROS {section} 字段 "
+                                    f"{ros_name!r} 与 canonical schema 不兼容"
+                                )
+                    return copy.deepcopy(mapping)
+
+                transport_goal = validate_transport_fields(
+                    "goal",
+                    input_order,
+                    goal_properties,
+                    {"unilabos_param"},
+                )
+                transport_feedback = validate_transport_fields(
+                    "feedback",
+                    None,
+                    None,
+                    set(),
+                )
+                transport_result = validate_transport_fields(
+                    "result",
+                    output_order,
+                    result_properties,
+                    {"unilabos_samples"},
+                )
+                type_str = action_type.split(":")[-1]
+            else:
+                type_str = (
+                    "UniLabJsonCommandAsync"
+                    if method_info.get("is_async", False)
+                    else "UniLabJsonCommand"
+                )
+            action_extensions = _normalize_action_extensions(action_args)
+            goal_default = copy.deepcopy(method_info.get("goal_default") or {})
+            handles = _canonical_registry_action_handles(schema)
+            entry = {
+                "type": type_str,
+                "displayname": resolve_registry_displayname(
+                    action_args.get("displayname"), action_name
+                ),
+                "goal": transport_goal,
+                "feedback": transport_feedback,
+                "result": transport_result,
+                "schema": schema,
+                "goal_default": goal_default,
+                "handles": handles,
+                "placeholder_keys": {
+                    name: name
+                    for name, value_schema in goal_properties.items()
+                    if _canonical_schema_base(value_schema).get("$slot")
+                    == "ResourceSlot"
+                },
+                "lock_resource": action_extensions["lock_resource"],
+                "estimate_duration_fixed": action_extensions[
+                    "estimate_duration_fixed"
+                ],
+                "estimate_duration_express": action_extensions[
+                    "estimate_duration_express"
+                ],
+                "feedback_interval": action_args.get(
+                    "feedback_interval", method_info.get("feedback_interval", 1.0)
+                ),
+            }
+            if method_info.get("contract_diagnostic"):
+                entry["contract_diagnostic"] = copy.deepcopy(
+                    method_info["contract_diagnostic"]
+                )
+            if action_name.removeprefix("auto-") != method_name:
+                entry["method_name"] = method_name
+            if action_args.get("always_free") or method_info.get("always_free"):
+                entry["always_free"] = True
+            if action_args.get("error_policy"):
+                entry["error_policy"] = action_args["error_policy"]
+            node_type = normalize_enum_value(action_args.get("node_type"), NodeType)
+            if node_type:
+                entry["node_type"] = node_type
+            return action_name, entry
+
         def _build_json_command_entry(method_name, method_info, action_args=None):
             """构建 UniLabJsonCommand 类型的 action entry"""
+            if action_args is not None and method_info.get("schema"):
+                return _build_canonical_action_entry(
+                    method_name,
+                    method_info,
+                    action_args,
+                )
+            action_extensions = _normalize_action_extensions(action_args)
             is_async = method_info.get("is_async", False)
             type_str = "UniLabJsonCommandAsync" if is_async else "UniLabJsonCommand"
             params = method_info.get("params", [])
@@ -912,7 +1284,7 @@ class Registry:
             goal_schema = self._generate_schema_from_ast_params(params, method_name, method_doc, imap)
 
             if action_args is not None:
-                action_name = action_args.get("action_name", method_name)
+                action_name = action_args.get("action_name") or method_name
                 if action_args.get("auto_prefix"):
                     action_name = f"auto-{action_name}"
             else:
@@ -960,6 +1332,9 @@ class Registry:
 
             entry = {
                 "type": type_str,
+                "displayname": resolve_registry_displayname(
+                    (action_args or {}).get("displayname"), action_name
+                ),
                 "goal": goal,
                 "feedback": (action_args or {}).get("feedback") or {},
                 "result": (action_args or {}).get("result") or {},
@@ -972,11 +1347,22 @@ class Registry:
                 "goal_default": goal_default,
                 "handles": handles,
                 "placeholder_keys": pk,
+                "lock_resource": action_extensions["lock_resource"],
+                "estimate_duration_fixed": action_extensions["estimate_duration_fixed"],
+                "estimate_duration_express": action_extensions["estimate_duration_express"],
             }
+            if action_args is not None and method_info.get("contract_diagnostic"):
+                entry["contract_diagnostic"] = copy.deepcopy(
+                    method_info["contract_diagnostic"]
+                )
+            if action_name.removeprefix("auto-") != method_name:
+                entry["method_name"] = method_name
             if (action_args or {}).get("always_free") or method_info.get("always_free"):
                 entry["always_free"] = True
             _fb_iv = (action_args or {}).get("feedback_interval", method_info.get("feedback_interval", 1.0))
             entry["feedback_interval"] = _fb_iv
+            if (action_args or {}).get("error_policy"):
+                entry["error_policy"] = action_args["error_policy"]
             nt = normalize_enum_value((action_args or {}).get("node_type"), NodeType)
             if nt:
                 entry["node_type"] = nt
@@ -1001,8 +1387,17 @@ class Registry:
             action_type = action_args.get("action_type")
             if not action_type:
                 continue
+            if method_info.get("schema"):
+                action_name, action_entry = _build_canonical_action_entry(
+                    method_name,
+                    method_info,
+                    action_args,
+                )
+                action_value_mappings[action_name] = action_entry
+                continue
+            action_extensions = _normalize_action_extensions(action_args)
 
-            action_name = action_args.get("action_name", method_name)
+            action_name = action_args.get("action_name") or method_name
             if action_args.get("auto_prefix"):
                 action_name = f"auto-{action_name}"
 
@@ -1023,7 +1418,7 @@ class Registry:
             result_override = dict(action_args.get("result", {}))
             goal_default_override = dict(action_args.get("goal_default", {}))
 
-            if action_args.get("parent"):
+            if action_args.get("parent") and allow_definition_imports:
                 # @action(parent=True): 直接通过 import class + MRO 获取父类方法签名
                 goal = resolve_method_params_via_import(module_str, method_name)
             else:
@@ -1100,6 +1495,9 @@ class Registry:
 
             action_entry = {
                 "type": action_type.split(":")[-1],
+                "displayname": resolve_registry_displayname(
+                    action_args.get("displayname"), action_name
+                ),
                 "goal": goal,
                 "feedback": feedback,
                 "result": result,
@@ -1110,11 +1508,22 @@ class Registry:
                     **detect_placeholder_keys(method_params),
                     **(action_args.get("placeholder_keys") or {}),
                 },
+                "lock_resource": action_extensions["lock_resource"],
+                "estimate_duration_fixed": action_extensions["estimate_duration_fixed"],
+                "estimate_duration_express": action_extensions["estimate_duration_express"],
             }
+            if method_info.get("contract_diagnostic"):
+                action_entry["contract_diagnostic"] = copy.deepcopy(
+                    method_info["contract_diagnostic"]
+                )
+            if action_name.removeprefix("auto-") != method_name:
+                action_entry["method_name"] = method_name
             if action_args.get("always_free") or method_info.get("always_free"):
                 action_entry["always_free"] = True
             _fb_iv = action_args.get("feedback_interval", method_info.get("feedback_interval", 1.0))
             action_entry["feedback_interval"] = _fb_iv
+            if action_args.get("error_policy"):
+                action_entry["error_policy"] = action_args["error_policy"]
             nt = normalize_enum_value(action_args.get("node_type"), NodeType)
             if nt:
                 action_entry["node_type"] = nt
@@ -1161,6 +1570,7 @@ class Registry:
             "icon": ast_meta.get("icon", ""),
             "init_param_schema": init_schema,
             "version": ast_meta.get("version", "1.0.0"),
+            "metadata": dict(ast_meta.get("metadata") or {}),
             "registry_type": "device",
             "file_path": file_path,
         }
@@ -1239,6 +1649,10 @@ class Registry:
         """Build a resource registry entry from AST-scanned metadata."""
         module_str = ast_meta.get("module", "")
         file_path = ast_meta.get("file_path", "")
+        config_schema = self._generate_schema_from_ast_params(
+            ast_meta.get("init_params", []),
+            "__init__",
+        )
 
         handles_raw = ast_meta.get("handles", [])
         handles = normalize_ast_handles(handles_raw)
@@ -1252,7 +1666,9 @@ class Registry:
             "config_info": [],
             "description": ast_meta.get("description", ""),
             "displayname": resolve_registry_displayname(ast_meta.get("displayname"), resource_id),
+            "metadata": dict(ast_meta.get("metadata") or {}),
             "file_path": file_path,
+            "init_param_schema": {"config": config_schema},
         }
 
         if ast_meta.get("model"):
@@ -1452,14 +1868,28 @@ class Registry:
     # Verify & Resolve (实际 import 验证)
     # ------------------------------------------------------------------
 
-    def verify_and_resolve_registry(self):
+    def verify_and_resolve_registry(self, definition_ids: set[str] | None = None):
         """
         对 AST 扫描得到的注册表执行实际 import 验证（使用共享线程池并行）。
+
+        ``definition_ids`` 用于显式 Package Workspace 的 check mode，只验证
+        Catalog closure；OS 内置 Registry 仍然可用，但不把无关可选驱动依赖算作
+        领域包错误。
         """
         errors = []
         import_success_count = 0
         resolved_count = 0
-        total_items = len(self.device_type_registry) + len(self.resource_type_registry)
+        selected_devices = {
+            definition_id: entry
+            for definition_id, entry in self.device_type_registry.items()
+            if definition_ids is None or definition_id in definition_ids
+        }
+        selected_resources = {
+            definition_id: entry
+            for definition_id, entry in self.resource_type_registry.items()
+            if definition_ids is None or definition_id in definition_ids
+        }
+        total_items = len(selected_devices) + len(selected_resources)
 
         lock = threading.Lock()
 
@@ -1516,11 +1946,11 @@ class Registry:
             device_futures = {}
             resource_futures = {}
 
-            for device_id, entry in list(self.device_type_registry.items()):
+            for device_id, entry in selected_devices.items():
                 fut = executor.submit(_verify_device, device_id, entry)
                 device_futures[fut] = device_id
 
-            for resource_id, entry in list(self.resource_type_registry.items()):
+            for resource_id, entry in selected_resources.items():
                 fut = executor.submit(_verify_resource, resource_id, entry)
                 resource_futures[fut] = resource_id
 
@@ -1702,6 +2132,7 @@ class Registry:
             resource_info["displayname"] = resolve_registry_displayname(
                 resource_info.get("displayname"), resource_id
             )
+            resource_info.setdefault("metadata", {})
             if "config_info" in resource_info:
                 del resource_info["config_info"]
             if "file_path" in resource_info:
@@ -1882,6 +2313,7 @@ class Registry:
             device_config["displayname"] = resolve_registry_displayname(
                 device_config.get("displayname"), device_id
             )
+            device_config.setdefault("metadata", {})
             if "icon" not in device_config:
                 device_config["icon"] = ""
             if "handles" not in device_config:
@@ -2045,9 +2477,13 @@ class Registry:
                             else {}
                         )
                         self._apply_docstring_param_metadata(goal_schema_for_docs, doc_info, entry_goal)
+                        action_extensions = _normalize_action_extensions(old_cfg)
 
                         entry = {
                             "type": entry_type,
+                            "displayname": resolve_registry_displayname(
+                                old_cfg.get("displayname"), action_key
+                            ),
                             "goal": entry_goal,
                             "feedback": entry_feedback,
                             "result": entry_result,
@@ -2055,6 +2491,11 @@ class Registry:
                             "goal_default": entry_goal_default,
                             "handles": old_cfg.get("handles", []),
                             "placeholder_keys": merged_pk,
+                            "lock_resource": action_extensions["lock_resource"],
+                            "estimate_duration_fixed": action_extensions["estimate_duration_fixed"],
+                            "estimate_duration_express": action_extensions[
+                                "estimate_duration_express"
+                            ],
                         }
                         if v.get("always_free"):
                             entry["always_free"] = True
@@ -2096,6 +2537,12 @@ class Registry:
                     sorted(device_config["class"]["action_value_mappings"].items())
                 )
                 for action_name, action_config in device_config["class"]["action_value_mappings"].items():
+                    action_config["displayname"] = resolve_registry_displayname(
+                        action_config.get("displayname"), action_name
+                    )
+                    normalized_action_config = _normalize_action_extensions(action_config)
+                    action_config.pop("materials_lock", None)
+                    action_config.update(normalized_action_config)
                     if "handles" not in action_config:
                         action_config["handles"] = {}
                     elif isinstance(action_config["handles"], list):
@@ -2513,6 +2960,7 @@ def build_registry(
     complete_registry=False,
     external_only=False,
     community_namespaces=None,
+    package_catalogs=None,
 ):
     """
     构建或获取Registry单例实例
@@ -2533,13 +2981,25 @@ def build_registry(
         complete_registry=complete_registry,
         external_only=external_only,
         community_namespaces=community_namespaces,
+        package_catalogs=package_catalogs,
     )
 
     # 将 AST 扫描的字符串类型替换为实际 ROS2 消息类（仅查找 ROS2 类型，不 import 设备模块）
     lab_registry.resolve_all_types()
 
     if check_mode:
-        lab_registry.verify_and_resolve_registry()
+        package_definition_ids = None
+        if package_catalogs:
+            package_definition_ids = {
+                definition.fqid
+                for catalog in package_catalogs
+                for definitions in (
+                    catalog.definitions.devices,
+                    catalog.definitions.resources,
+                )
+                for definition in definitions
+            }
+        lab_registry.verify_and_resolve_registry(package_definition_ids)
 
     # noinspection PyProtectedMember
     if lab_registry._startup_executor is not None:
