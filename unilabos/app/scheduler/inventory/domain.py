@@ -88,6 +88,18 @@ class MaterialAuthorityUnavailable(MaterialError):
     code = "material_authority_unavailable"
 
 
+class MaterialClaimBlocked(MaterialConflict):
+    """A complete Job Claim set is temporarily unavailable."""
+
+    code = "claim_blocked"
+
+
+class MaterialClaimCorrupt(MaterialAuthorityUnavailable):
+    """Durable Claim/fence/receipt facts violate the authority invariant."""
+
+    code = "claim_authority_corrupt"
+
+
 # ---------------------------------------------------------------------------
 # 状态机
 # ---------------------------------------------------------------------------
@@ -185,7 +197,8 @@ def check_lot_invariants(total: float, available: float, reserved: float) -> Non
     """数量非负，available + reserved <= total."""
     if total < 0 or available < 0 or reserved < 0:
         raise InvariantViolation(
-            f"negative quantity: total={total} available={available} reserved={reserved}"
+            "negative quantity: "
+            f"total={total} available={available} reserved={reserved}"
         )
     # 浮点容差
     if available + reserved > total + 1e-9:
@@ -284,6 +297,197 @@ class TaskMaterialReleaseResult:
     workflow_task_uuid: str
     status: str
     reservation_uuid: str | None
+    outbox_sequence: int
+
+
+@dataclass(frozen=True, slots=True)
+class JobClaimAcquireCommand:
+    """Acquire one complete, typed physical-resource set for a Job attempt."""
+
+    schema_version: int
+    command_uuid: str
+    idempotency_key: str
+    workflow_task_uuid: str
+    workflow_node_job_uuid: str
+    attempt: int
+    device_material_uuid: str
+    mutable_material_root_uuids: tuple[str, ...]
+    occupancy_changing_site_uuids: tuple[str, ...]
+
+
+@dataclass(frozen=True, slots=True)
+class JobClaimStateCommand:
+    """Attach accepted/running evidence to an exact fenced Job Claim."""
+
+    schema_version: int
+    command_uuid: str
+    idempotency_key: str
+    workflow_node_job_uuid: str
+    attempt: int
+    claim_uuid: str
+    fencing_token: int
+    evidence_kind: str
+    evidence_fingerprint: str
+    expected_state: str | None = None
+
+
+@dataclass(frozen=True, slots=True)
+class JobClaimUncertainCommand:
+    """Fail closed when physical dispatch/result reality is not known."""
+
+    schema_version: int
+    command_uuid: str
+    idempotency_key: str
+    workflow_node_job_uuid: str
+    attempt: int
+    claim_uuid: str
+    fencing_token: int
+    uncertainty_reason: str
+    evidence_fingerprint: str
+    expected_state: str | None = None
+
+
+@dataclass(frozen=True, slots=True)
+class MaterialChangeSetEffect:
+    """One declared Material/Site mutation in a terminal ChangeSet."""
+
+    effect_key: str
+    resource_kind: str
+    resource_uuid: str
+    operation: str
+    expected_version: int | None
+    before: dict[str, Any]
+    after: dict[str, Any]
+
+
+@dataclass(frozen=True, slots=True)
+class MaterialChangeSetCommand:
+    """Commit one terminal physical-reality effect for a Job attempt."""
+
+    schema_version: int
+    command_uuid: str
+    idempotency_key: str
+    workflow_task_uuid: str
+    workflow_node_job_uuid: str
+    attempt: int
+    claim_uuid: str
+    fencing_token: int
+    effect_identity: str
+    outcome: str
+    result: dict[str, Any]
+    effects: tuple[MaterialChangeSetEffect, ...]
+    expected_claim_state: str | None = None
+
+
+@dataclass(frozen=True, slots=True)
+class JobClaimReleaseCommand:
+    """Release an exact Claim only with durable no-send or terminal proof."""
+
+    schema_version: int
+    command_uuid: str
+    idempotency_key: str
+    workflow_node_job_uuid: str
+    attempt: int
+    claim_uuid: str
+    fencing_token: int
+    release_proof_kind: str
+    material_changeset_uuid: str | None
+    material_changeset_fingerprint: str | None
+    workflow_terminal_fingerprint: str
+    reason: str
+    expected_state: str | None = None
+
+
+@dataclass(frozen=True, slots=True)
+class JobClaimResolutionCommand:
+    """Audited device/human resolution of one uncertain Claim."""
+
+    schema_version: int
+    command_uuid: str
+    idempotency_key: str
+    workflow_node_job_uuid: str
+    attempt: int
+    claim_uuid: str
+    fencing_token: int
+    expected_state: str
+    resolution: str
+    evidence_kind: str
+    evidence_fingerprint: str
+    observed_at: str
+    actor_identity: str
+    reason: str
+    no_send_proof_fingerprint: str | None = None
+    terminal_changeset: MaterialChangeSetCommand | None = None
+    workflow_terminal_fingerprint: str | None = None
+
+
+@dataclass(frozen=True, slots=True)
+class JobClaimMemberRecord:
+    """One member of a complete Job Claim set."""
+
+    resource_kind: str
+    resource_uuid: str
+    acquired_version: int
+    expected_version: int
+    released_at: str | None
+
+
+@dataclass(frozen=True, slots=True)
+class JobClaimRecord:
+    """Public immutable projection of the durable Claim authority."""
+
+    uuid: str
+    workflow_task_uuid: str
+    workflow_node_job_uuid: str
+    attempt: int
+    set_fingerprint: str
+    fencing_token: int
+    state: str
+    uncertainty_reason: str | None
+    acquired_at: str
+    create_time: str
+    running_at: str | None
+    release_proof_kind: str | None
+    release_proof_fingerprint: str | None
+    release_reason: str | None
+    terminal_changeset_uuid: str | None
+    workflow_terminal_fingerprint: str | None
+    release_command_uuid: str | None
+    released_at: str | None
+    update_time: str
+    members: tuple[JobClaimMemberRecord, ...]
+
+
+@dataclass(frozen=True, slots=True)
+class JobClaimResult:
+    """Closed durable result for acquire/state/release/resolve commands."""
+
+    schema_version: int
+    command_uuid: str
+    status: str
+    claim: JobClaimRecord | None
+    diagnostics: tuple[dict[str, Any], ...]
+    outbox_sequence: int | None
+
+
+@dataclass(frozen=True, slots=True)
+class MaterialChangeSetReceipt:
+    """Durable, replayable terminal Material reality receipt."""
+
+    schema_version: int
+    command_uuid: str
+    uuid: str
+    workflow_task_uuid: str
+    workflow_node_job_uuid: str
+    attempt: int
+    claim_uuid: str
+    fencing_token: int
+    effect_identity: str
+    deterministic_fingerprint: str
+    outcome: str
+    result: dict[str, Any]
+    effects: tuple[MaterialChangeSetEffect, ...]
+    create_time: str
     outbox_sequence: int
 
 
