@@ -2,15 +2,26 @@
 
 from __future__ import annotations
 
-import re
+import keyword
 from collections.abc import Mapping
 from typing import Any
 
 from unilabos.package_manager import DefinitionRecord, PackageCatalog
 from unilabos.workflow.composite import PublishedWorkflowSource
 
-_ABSOLUTE_MODULE = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*(?:\.[A-Za-z_][A-Za-z0-9_]*)*$")
-_SYMBOL = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*$")
+
+def _is_python_identifier(value: object) -> bool:
+    return (
+        isinstance(value, str) and value.isidentifier() and not keyword.iskeyword(value)
+    )
+
+
+def _is_absolute_module(value: object) -> bool:
+    return (
+        isinstance(value, str)
+        and not value.startswith(".")
+        and all(_is_python_identifier(part) for part in value.split("."))
+    )
 
 
 class PackageCatalogPublishedWorkflowResolver:
@@ -26,9 +37,7 @@ class PackageCatalogPublishedWorkflowResolver:
             for definition in catalog.definitions.workflows:
                 module = definition.module
                 symbol = definition.symbol
-                if not _ABSOLUTE_MODULE.fullmatch(module) or not _SYMBOL.fullmatch(
-                    symbol
-                ):
+                if not _is_absolute_module(module) or not _is_python_identifier(symbol):
                     raise ValueError(
                         "Published Workflow 必须使用 absolute module/symbol"
                     )
@@ -62,8 +71,8 @@ class PackageCatalogPublishedWorkflowResolver:
         if (
             not isinstance(module, str)
             or not isinstance(symbol, str)
-            or not _ABSOLUTE_MODULE.fullmatch(module)
-            or not _SYMBOL.fullmatch(symbol)
+            or not _is_absolute_module(module)
+            or not _is_python_identifier(symbol)
         ):
             raise LookupError((module, symbol))
         try:

@@ -51,7 +51,9 @@ CONTRACT_DIGEST = (
 
 
 def _package_catalog(
-    *, module: str = "c1_published_lab.workflows.child"
+    *,
+    module: str = "c1_published_lab.workflows.child",
+    symbol: str = "prepare_sample",
 ) -> PackageCatalog:
     catalog = PackageCatalog.create(
         distribution=DistributionIdentity(
@@ -69,7 +71,7 @@ def _package_catalog(
                     id="prepare_sample",
                     fqid="c1_published_lab.workflows.prepare_sample",
                     module=module,
-                    symbol="prepare_sample",
+                    symbol=symbol,
                     declaring_file="c1_published_lab/workflows/child.py",
                     content_hash=DEFINITION_CONTENT_HASH,
                     displayname="Published sample preparation",
@@ -83,7 +85,7 @@ def _package_catalog(
         ),
         content_digest="sha256:" + "2" * 64,
     )
-    if module == "c1_published_lab.workflows.child":
+    if module == "c1_published_lab.workflows.child" and symbol == "prepare_sample":
         assert catalog.catalog_digest == PACKAGE_CATALOG_DIGEST
     return catalog
 
@@ -254,6 +256,17 @@ def test_package_catalog_resolver_returns_one_frozen_static_source() -> None:
     assert source.symbol == "prepare_sample"
     assert source.package_catalog_digest == PACKAGE_CATALOG_DIGEST
     assert source.definition_content_hash == DEFINITION_CONTENT_HASH
+
+
+def test_package_catalog_resolver_accepts_python_identifier_symbols() -> None:
+    symbol = "s09_移液调试"
+    resolver = PackageCatalogPublishedWorkflowResolver(
+        (_package_catalog(symbol=symbol),)
+    )
+
+    source = resolver.resolve("c1_published_lab.workflows.child", symbol)
+
+    assert source.symbol == symbol
 
 
 def test_package_catalog_resolver_rejects_missing_duplicate_and_dynamic_identity() -> (
