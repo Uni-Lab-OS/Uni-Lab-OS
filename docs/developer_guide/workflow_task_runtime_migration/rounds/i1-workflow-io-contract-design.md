@@ -18,6 +18,15 @@ owning repository 的 implementation boundary，不另造协议。
   `integration/fe-os-migration@a641fa6fa38b223ec90648a2c308c67d4a57b6fd`；
 - implementation branch `migration/i1-workflow-io-contract`。
 
+### 2026-08-02 continuation 基线
+
+旧 implementation branch 保留上述冻结 spec 与 RED provenance，不直接承载后续
+A1/M2A 之后的 production。当前续作从最新远端
+`integration/workflow-task-runtime@8fad069c16faeb991fade5232eaf84ef32b17146`
+建立 `migration/i1-workflow-io-contract-8fad`；独立 RED `ec914c615a7fbcac0df15e88d0029083268954b4`
+以提交 `265a013` 原样移植，首个 GREEN 为 `0c21f9f`。后续 integration/review 证据必须固定
+续作分支的 exact SHA，不得再把 `91b00dd...` 表述为当前 production 起点。
+
 I1 的 non-Catalog、non-Material slice 可以与 A1、M1 并行。result-record 的 Catalog
 projection 与 `AllowedResourceTemplates` symbol identity 必须等待 A1 gate；真实
 ResourceSlot UUID 的成功解析必须等待 M1 durable Material adapter。C1 和 R2 只能消费
