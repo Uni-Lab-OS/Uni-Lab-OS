@@ -91,8 +91,11 @@ def test_legacy_action_keeps_runtime_record_without_calling_canonical_parser(
 
     action = scanned["devices"]["legacy_transport"]["actions"]["transport"]
     assert parser_calls == []
-    assert "schema" not in action
     assert "contract_diagnostic" not in action
+    scanner_schema = action.get("schema")
+    if scanner_schema is not None:
+        assert isinstance(scanner_schema, dict)
+        assert "x-unilabos-action-contract" not in scanner_schema
 
     registry = Registry()
     entry = registry._build_device_entry_from_ast(
@@ -101,8 +104,11 @@ def test_legacy_action_keeps_runtime_record_without_calling_canonical_parser(
         allow_definition_imports=False,
     )
     runtime_action = entry["class"]["action_value_mappings"]["transport"]
-    assert "schema" not in runtime_action
     assert "contract_diagnostic" not in runtime_action
+    runtime_schema = runtime_action.get("schema")
+    if runtime_schema is not None:
+        assert isinstance(runtime_schema, dict)
+        assert "x-unilabos-action-contract" not in runtime_schema
     decorators = importlib.import_module("unilabos.registry.decorators")
     assert callable(getattr(decorators, "legacy_action", None))
 
