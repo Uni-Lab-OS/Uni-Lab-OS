@@ -60,12 +60,11 @@ facade, legacy tables, or a second Material identity.
   suite reports `6 passed` after convergence. The earlier branch that placed
   the identical test blob late remains recoverable but is not the final
   candidate history.
-- Review-fix implementation tree: `71a2637`. The focused review regression set
-  reports `28 passed`; complete `tests/app tests/workflow` reports
-  `1596 passed` in `53.78s`.
-- Full repository gate after the exact-SHA review fixes: `2221 passed, 4
-  skipped` in `103.74s`. The skips are the three opt-in networking process tests
-  and the Phoenix executable integration test.
+- Latest review-fix implementation tree: `0c6e890`. Complete
+  `tests/app tests/workflow` reports `1601 passed` in `80.71s`.
+- Full repository gate after the second exact-SHA review fixes: `2226 passed, 4
+  skipped` in `100.88s`. The skips are the three opt-in networking process
+  tests and the Phoenix executable integration test.
 - The 28 M1R-owned modified Python files pass Ruff check and format; the three
   broad pre-existing Workflow files have no net-new Ruff debt against the
   frozen base (`runtime 37→37`, `service 150→149`, `store 97→97`). Changed
@@ -93,8 +92,21 @@ serialization, ignored candidate Site filters, non-durable deterministic
 admission rejection, and incomplete exact-v4 reopen validation.
 
 The final history moves the unchanged independent RED before all production
-changes. Review-fix commits `6e9c799` and `71a2637` close the five behavior
+changes. Review-fix commits `6e9c799` and `71a2637` close the first five behavior
 findings with production composition/startup/Task-ingress wiring, separate
-Scheduler and cloud cursors, a dedicated Material saga lock, candidate Site
+Scheduler and cloud cursors, command serialization, candidate Site
 revalidation, durable `rejected` results, and exact SQLite DDL-object checking.
-The same reviewer must re-review the final immutable SHA before acceptance.
+
+The same reviewer then checked `01579cf3617e4834577abcbd7be569a9d2f9058f`.
+Standards passed with `0B / 0NB`; Spec found four remaining blockers: no
+production terminal-release trigger/recovery, transient Site occupancy escaping
+instead of a durable `blocked` result, a conflicting Workflow projection on
+`blocked → admitted`, and a Scheduler mutex held across SQLite calls.
+
+Commits `8f2955f`, `1891c3f`, and `0c6e890` close those four findings. The
+existing runtime worker now triggers and retries Task Material reconciliation;
+startup replays terminal releases; transient Site occupancy is durable
+`blocked`; the same command may advance only monotonically from `blocked` to
+`admitted`; and a per-Task logical saga slot releases its Condition mutex before
+any Inventory/Workflow durable operation. The same reviewer must re-review the
+new final immutable SHA before acceptance.
