@@ -156,12 +156,16 @@ def validate_graph(
         if not node.disabled
         and _node_kind(node, templates) not in {"group", "composite"}
     }
+    providers = {node.uuid for node in nodes if not node.disabled}
     enabled_edges: list[WorkflowEdgeWrite] = []
     incoming: dict[tuple[str, str], str] = {}
     connected_inputs: dict[tuple[str, str], str] = {}
     available_data_keys: dict[str, list[str]] = defaultdict(list)
     for edge in edges:
-        if edge.source_node_uuid not in enabled or edge.target_node_uuid not in enabled:
+        if (
+            edge.source_node_uuid not in providers
+            or edge.target_node_uuid not in enabled
+        ):
             continue
         source_handle = handles[edge.source_handle_uuid]
         target_handle = handles[edge.target_handle_uuid]
@@ -174,7 +178,8 @@ def validate_graph(
         if target_input in incoming:
             raise GraphValidationError("同一目标 Handle 只能有一条入边")
         incoming[target_input] = edge.uuid
-        enabled_edges.append(edge)
+        if edge.source_node_uuid in enabled:
+            enabled_edges.append(edge)
         if not _dependency_only(source_handle):
             connected_inputs[target_input] = edge.uuid
             available_data_keys[edge.target_node_uuid].append(
