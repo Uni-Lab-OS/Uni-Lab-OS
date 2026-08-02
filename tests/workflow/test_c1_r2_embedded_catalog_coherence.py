@@ -1,4 +1,4 @@
-"""C1 R2 embedded Published Workflow facts must equal the guarded Catalog."""
+"""C1 R2 embedded Published Workflow 事实必须与受保护的 Catalog 一致。"""
 
 from __future__ import annotations
 
@@ -69,7 +69,7 @@ def _ready_target(snapshot: Mapping[str, Any]) -> dict[str, Any]:
 
 
 class _EmbeddedDriftStore(WorkflowStore):
-    """A public Store adapter that drifts only one returned embedded fact."""
+    """仅让一个返回的 embedded 事实发生漂移的公开 Store 适配器。"""
 
     def __init__(
         self,
@@ -96,6 +96,15 @@ def _catalog_snapshot(world: Any) -> dict[str, Any]:
             "nodes": _plain(snapshot.node_templates),
             "handles": _plain(snapshot.handle_templates),
         }
+
+
+def _world_snapshot(world: Any) -> dict[str, Any]:
+    return {
+        "parent": _plain(world.store.get_graph(ORDER_PARENT_WORKFLOW_UUID)),
+        "outer": _plain(world.store.get_graph(ORDER_OUTER_WORKFLOW_UUID)),
+        "leaf": _plain(world.store.get_graph(ORDER_LEAF_WORKFLOW_UUID)),
+        "catalog": _catalog_snapshot(world),
+    }
 
 
 def _compile(world: Any, store: WorkflowStore) -> Any:
@@ -138,7 +147,16 @@ def _mutate_embedded(snapshot: dict[str, Any], case: str) -> None:
         extension = template["schema"]["x-unilabos-workflow-contract"]
         assert extension["contract_digest"] != OTHER_CONTRACT_DIGEST
         extension["contract_digest"] = OTHER_CONTRACT_DIGEST
-    else:  # pragma: no cover - parameter table is intentionally closed
+    elif case == "template-type":
+        assert template["type"] == "workflow"
+        template["type"] = "action"
+    elif case == "template-node-type":
+        assert template["node_type"] == "workflow"
+        template["node_type"] = "compute"
+    elif case == "workflow-contract-marker-missing":
+        assert "x-unilabos-workflow-contract" in template["schema"]
+        del template["schema"]["x-unilabos-workflow-contract"]
+    else:  # pragma: no cover - 参数表有意保持封闭
         raise AssertionError(case)
 
 
@@ -209,4 +227,37 @@ def test_genuine_implicit_false_outputs_and_unchanged_catalog_remain_authoritati
         assert expansion.invocation_node is not None
         assert _catalog_snapshot(world) == before
     finally:
+        world.close()
+
+
+@pytest.mark.parametrize(
+    "case",
+    [
+        "template-type",
+        "template-node-type",
+        "workflow-contract-marker-missing",
+    ],
+)
+def test_embedded_workflow_marker_drift_from_current_catalog_fails_closed(
+    tmp_path: Path,
+    case: str,
+) -> None:
+    world = _make_ordered_world(tmp_path)
+    drifted = _EmbeddedDriftStore(
+        tmp_path / "workflow.db",
+        lambda snapshot: _mutate_embedded(snapshot, case),
+    )
+    try:
+        before = _world_snapshot(world)
+
+        expansion = _compile(world, drifted)
+
+        assert _world_snapshot(world) == before
+        diagnostics = _plain(expansion.diagnostics)
+        assert expansion.invocation_node is None
+        assert len(diagnostics) == 1
+        assert diagnostics[0]["code"] == "composite_catalog_mismatch"
+        assert diagnostics[0]["severity"] == "error"
+    finally:
+        drifted.close()
         world.close()

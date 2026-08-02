@@ -173,7 +173,7 @@ def resource_slot_wrapper(
     collection: bool = False,
     nullable: bool = False,
 ) -> dict[str, Any]:
-    """Build the D-064 wrapper shapes already accepted by the I1 schema."""
+    """构造已经由 I1 schema 接受的 D-064 包装形状。"""
 
     schema: dict[str, Any] = resource_slot_schema(*allowlist)
     if collection:
@@ -245,7 +245,7 @@ def action_import(
 
 
 def presentation_group_import() -> NodeTemplateImport:
-    """C1/R1 presentation group: a Catalog node with deliberately no handles."""
+    """构造 C1/R1 展示分组：一个有意不带 Handle 的 Catalog 节点。"""
 
     return NodeTemplateImport(
         template={
@@ -614,7 +614,7 @@ def _seed_hierarchical_graph(
     nodes: list[WorkflowNodeWrite],
     edges: list[WorkflowEdgeWrite],
 ) -> dict[str, Any]:
-    """Seed R2-only hierarchy until the production validator learns type=workflow."""
+    """在生产校验器支持 type=workflow 前植入仅供 R2 使用的层级。"""
 
     timestamp = "2026-08-02T00:00:00Z"
     with store.transaction() as connection:
@@ -1078,10 +1078,10 @@ def make_nested_resource_world(
     direct_schema: dict[str, Any],
     leaf_schema: dict[str, Any],
 ) -> ExpansionWorld:
-    """Publish parent -> direct Composite -> leaf Action with real I/O bindings.
+    """使用真实 I/O binding 发布 parent -> direct Composite -> leaf Action。
 
-    The nested provider deliberately lives in ``meta_data.unilab.input_bindings``;
-    ``param`` remains empty because it is reserved for literal values.
+    嵌套 provider 有意存放在 ``meta_data.unilab.input_bindings``；``param``
+    保持为空，因为它专用于 literal value。
     """
 
     store = WorkflowStore(tmp_path / "workflow.db")

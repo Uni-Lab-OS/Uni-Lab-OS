@@ -1,4 +1,4 @@
-"""C1 R2 presentation groups stay visible but never become executable public RED."""
+"""C1 R2 展示分组保持可见但绝不成为可执行节点的公开 RED。"""
 
 from __future__ import annotations
 

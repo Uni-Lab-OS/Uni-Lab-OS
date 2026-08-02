@@ -1,4 +1,4 @@
-"""C1 R2 child Edge control/presentation semantics preservation public RED."""
+"""C1 R2 子 Edge 控制/展示语义保留的公开 RED。"""
 
 from __future__ import annotations
 

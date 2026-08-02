@@ -1,4 +1,4 @@
-"""C1 R2 D-064 nested ResourceSlot constraint propagation public RED."""
+"""C1 R2 D-064 嵌套 ResourceSlot 约束传导的公开 RED。"""
 
 from __future__ import annotations
 
@@ -56,10 +56,10 @@ def _compile_nested(world: Any) -> Any:
 def test_publisher_accepts_legal_resource_slot_narrowing_at_nested_binding(
     tmp_path: Path,
 ) -> None:
-    """D-064 narrowing is a compile-time intersection, not invalid I/O.
+    """D-064 收窄是编译期交集，并非非法 I/O。
 
-    This independently freezes the current publication blocker: the direct child
-    input is universal and its real nested input_binding targets leaf ``{B}``.
+    这里独立冻结当前发布 blocker：direct child input 是全集，而它真实的嵌套
+    input_binding 指向 leaf ``{B}``。
     """
 
     world = make_nested_resource_world(

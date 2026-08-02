@@ -1,4 +1,4 @@
-"""C1 R2 Published Workflow authority after a real Catalog JSON round-trip."""
+"""C1 R2 真实 Catalog JSON 往返后的 Published Workflow 权威测试。"""
 
 from __future__ import annotations
 
@@ -552,7 +552,7 @@ def _mutate_genuine_leaf_authority(snapshot: dict[str, Any], case: str) -> None:
         ready["unexpected"] = True
     elif case == "ready-required":
         ready["required"] = True
-    else:  # pragma: no cover - parameter table is deliberately closed
+    else:  # pragma: no cover - 参数表有意保持封闭
         raise AssertionError(case)
 
 

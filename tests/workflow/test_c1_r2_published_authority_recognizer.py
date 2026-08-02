@@ -1,4 +1,4 @@
-"""C1 R2 D-064 relaxation must require an authoritative Published Workflow."""
+"""C1 R2 D-064 放宽规则必须要求权威的 Published Workflow。"""
 
 from __future__ import annotations
 
@@ -77,7 +77,7 @@ def _closed_workflow_provenance() -> dict[str, Any]:
 
 
 def _spoofed_action_snapshot(case: str) -> dict[str, Any]:
-    """Retain the Action template/Handle identities while spoofing authority."""
+    """伪造权威事实，同时保留 Action template/Handle identity。"""
 
     snapshot = deepcopy(_applied_snapshot())
     workflow_unilab = snapshot["workflow"]["meta_data"]["unilab"]
@@ -178,8 +178,8 @@ def _spoofed_action_snapshot(case: str) -> dict[str, Any]:
         action["class"] = "spoof_package.workflows.other:other"
     elif case == "template-contract-workflow-uuid-mismatch":
         extension["workflow_uuid"] = OTHER_WORKFLOW_UUID
-    else:  # pragma: no cover - the parameter table is intentionally closed
-        raise AssertionError(f"unknown malformed authority case: {case}")
+    else:  # pragma: no cover - 参数表有意保持封闭
+        raise AssertionError(f"未知的非法权威用例：{case}")
     return snapshot
 
 
