@@ -21,6 +21,7 @@ from unilabos.workflow.catalog import (
     TemplateCatalog,
 )
 from unilabos.workflow.models import WorkflowNodeWrite
+from unilabos.workflow.runtime import WorkflowRuntimeCoordinator
 from unilabos.workflow.service import WorkflowService
 from unilabos.workflow.store import WorkflowStore
 
@@ -104,6 +105,24 @@ class _LockOrderProbeInventoryPort(_RecordingInventoryPort):
         assert not thread.is_alive(), "Scheduler mutex was held across Inventory I/O"
         assert self.parallel_result == [None]
         return super().admit_task(command)
+
+
+class _StalePendingWorkflowPort:
+    """Return one already-captured pending page, then delegate latest reads."""
+
+    def __init__(self, service: WorkflowService, stale_task: dict[str, Any]) -> None:
+        self._service = service
+        self._stale_task = stale_task
+        self._served = False
+
+    def list_workflow_tasks(self, **kwargs: Any) -> dict[str, Any]:
+        if kwargs.get("status") == "pending" and not self._served:
+            self._served = True
+            return {"items": [self._stale_task], "total": 1}
+        return self._service.list_workflow_tasks(**kwargs)
+
+    def __getattr__(self, name: str) -> Any:
+        return getattr(self._service, name)
 
 
 def _resource_templates() -> dict[str, inventory_api.ResourceTemplateIdentity]:
@@ -253,6 +272,32 @@ def _create_pending_task(
 
 def _open_workflow_service(workflow_database: Path) -> WorkflowService:
     return WorkflowService(WorkflowStore(workflow_database))
+
+
+def _cancel_task(
+    service: WorkflowService,
+    workflow_database: Path,
+    task_uuid: str,
+    *,
+    idempotency_key: str,
+) -> None:
+    service.create_workflow_task_command(
+        task_uuid,
+        command_type="cancel",
+        target_node_uuid=None,
+        idempotency_key=idempotency_key,
+        description=None,
+        meta_data={},
+    )
+    runtime_store = WorkflowStore(workflow_database)
+    try:
+        consumed = WorkflowRuntimeCoordinator(runtime_store).consume_next_command(
+            task_uuid
+        )
+        assert consumed is not None
+    finally:
+        runtime_store.close()
+    assert service.get_workflow_task(task_uuid)["status"] == "canceled"
 
 
 def _task_runtime_events(
@@ -467,6 +512,75 @@ def test_scheduler_does_not_hold_its_serialization_mutex_during_inventory_io(
         assert admitted is not None
         assert admitted.status == "admitted"
         assert inventory_port.parallel_result == [None]
+    finally:
+        if service is not None:
+            service.close()
+        inventory.close()
+
+
+def test_direct_admission_rechecks_terminal_task_before_inventory_commit(
+    tmp_path: Path,
+) -> None:
+    workflow_database = tmp_path / "workflow-authority" / "workflow.db"
+    inventory = inventory_api.InventoryService.open(
+        working_dir=tmp_path / "inventory-authority",
+        resource_templates=_resource_templates(),
+    )
+    service = None
+    try:
+        _seed_inventory(inventory)
+        service, task = _create_pending_task(workflow_database)
+        task_uuid = task["uuid"]
+        _cancel_task(
+            service,
+            workflow_database,
+            task_uuid,
+            idempotency_key="terminal-before-direct-admission",
+        )
+        scheduler = EdgeScheduler(workflow_tasks=service, inventory=inventory)
+        first_release = scheduler.reconcile_task_material_state(task_uuid)
+        assert isinstance(first_release, inventory_api.TaskMaterialReleaseResult)
+        assert first_release.reservation_uuid is None
+
+        assert scheduler.reconcile_task_admission(task_uuid) is None
+
+        assert _admission_events(inventory, task_uuid=task_uuid) == ()
+        assert scheduler.reconcile_task_material_state(task_uuid) == first_release
+    finally:
+        if service is not None:
+            service.close()
+        inventory.close()
+
+
+def test_pending_scan_routes_stale_item_through_latest_terminal_state(
+    tmp_path: Path,
+) -> None:
+    workflow_database = tmp_path / "workflow-authority" / "workflow.db"
+    inventory = inventory_api.InventoryService.open(
+        working_dir=tmp_path / "inventory-authority",
+        resource_templates=_resource_templates(),
+    )
+    service = None
+    try:
+        _seed_inventory(inventory)
+        service, task = _create_pending_task(workflow_database)
+        _cancel_task(
+            service,
+            workflow_database,
+            task["uuid"],
+            idempotency_key="terminal-after-pending-page",
+        )
+        stale_workflow = _StalePendingWorkflowPort(service, task)
+        scheduler = EdgeScheduler(workflow_tasks=stale_workflow, inventory=inventory)
+
+        assert scheduler.reconcile_pending_task_admissions() == (task["uuid"],)
+
+        release = service.get_material_release(task["uuid"])
+        assert release is not None
+        assert release["status"] == "released"
+        assert release["reservation_uuid"] is None
+        assert service.get_material_admission(task["uuid"]) is None
+        assert _admission_events(inventory, task_uuid=task["uuid"]) == ()
     finally:
         if service is not None:
             service.close()
