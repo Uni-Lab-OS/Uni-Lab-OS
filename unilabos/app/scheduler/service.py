@@ -34,7 +34,8 @@ import threading
 import time
 import uuid as uuid_mod
 from collections import deque
-from collections.abc import Callable
+from collections.abc import Callable, Iterator
+from contextlib import contextmanager
 from typing import Any
 
 from unilabos.app.scheduler.dag_state import WorkflowRun
@@ -124,7 +125,8 @@ class EdgeScheduler:
         self._orderer = orderer or StableLocalOrderer()
         self._dispatcher = dispatcher or RecordingDispatcher()
         self._lock = threading.RLock()
-        self._material_saga_lock = threading.Lock()
+        self._material_saga_condition = threading.Condition()
+        self._active_material_sagas: set[str] = set()
 
         self._workflows: dict[str, WorkflowRun] = {}
         # job_id -> DispatchedJob（完成回调路由 + 资源锁）
@@ -186,14 +188,29 @@ class EdgeScheduler:
     ) -> TaskMaterialAdmissionResult | None:
         """Drive one replay-safe workflow.db ↔ inventory.db admission saga."""
 
-        with self._material_saga_lock:
-            return self._reconcile_task_admission_locked(task_uuid)
+        with self._material_saga_slot(task_uuid):
+            return self._reconcile_task_admission_serialized(task_uuid)
 
-    def _reconcile_task_admission_locked(
+    @contextmanager
+    def _material_saga_slot(self, task_uuid: str) -> Iterator[None]:
+        """Serialize one Task without holding a mutex across durable operations."""
+
+        with self._material_saga_condition:
+            while task_uuid in self._active_material_sagas:
+                self._material_saga_condition.wait()
+            self._active_material_sagas.add(task_uuid)
+        try:
+            yield
+        finally:
+            with self._material_saga_condition:
+                self._active_material_sagas.remove(task_uuid)
+                self._material_saga_condition.notify_all()
+
+    def _reconcile_task_admission_serialized(
         self,
         task_uuid: str,
     ) -> TaskMaterialAdmissionResult | None:
-        """Serialize one complete cross-database admission command."""
+        """Run admission after the caller has acquired the Task saga slot."""
 
         if self._workflow_tasks is None or self._inventory is None:
             raise RuntimeError("Workflow Task Material coordination is not configured")
@@ -307,6 +324,73 @@ class EdgeScheduler:
                 reconciled.append(task_uuid)
         return tuple(reconciled)
 
+    def reconcile_terminal_task_releases(self) -> tuple[str, ...]:
+        """Replay terminal Task release sagas in durable creation order at startup."""
+
+        if self._workflow_tasks is None or self._inventory is None:
+            raise RuntimeError("Workflow Task Material coordination is not configured")
+        terminal: list[dict[str, Any]] = []
+        for status in ("succeeded", "failed", "canceled", "timeout"):
+            page = 1
+            while True:
+                tasks = self._workflow_tasks.list_workflow_tasks(
+                    page=page,
+                    page_size=100,
+                    status=status,
+                )
+                items = tasks.get("items")
+                if not isinstance(items, list):
+                    raise TypeError("Workflow Task list projection is invalid")
+                terminal.extend(items)
+                if page * 100 >= int(tasks.get("total") or 0):
+                    break
+                page += 1
+        reconciled: list[str] = []
+        for task in sorted(
+            terminal,
+            key=lambda item: (
+                str(item.get("create_time") or ""),
+                str(item.get("uuid") or ""),
+            ),
+        ):
+            task_uuid = str(task.get("uuid") or "")
+            if self.reconcile_task_material_state(task_uuid) is not None:
+                reconciled.append(task_uuid)
+        return tuple(reconciled)
+
+    def reconcile_workflow_task_materials(self) -> tuple[str, ...]:
+        """Recover every startup admission/release saga currently needing work."""
+
+        return (
+            *self.reconcile_pending_task_admissions(),
+            *self.reconcile_terminal_task_releases(),
+        )
+
+    def reconcile_task_material_state(
+        self,
+        task_uuid: str,
+    ) -> TaskMaterialAdmissionResult | TaskMaterialReleaseResult | None:
+        """Choose admission or terminal release from the latest durable Task state."""
+
+        if self._workflow_tasks is None or self._inventory is None:
+            raise RuntimeError("Workflow Task Material coordination is not configured")
+        with self._material_saga_slot(task_uuid):
+            task = self._workflow_tasks.get_workflow_task(task_uuid)
+            snapshot = task.get("workflow_snapshot")
+            nodes = snapshot.get("nodes") if isinstance(snapshot, dict) else None
+            has_material_source = isinstance(nodes, list) and any(
+                isinstance(node, dict) and node.get("type") == "material_source"
+                for node in nodes
+            )
+            if not has_material_source:
+                return None
+            if task.get("status") in {"succeeded", "failed", "canceled", "timeout"}:
+                return self._reconcile_task_release_serialized(
+                    task_uuid,
+                    "workflow_task_terminal",
+                )
+            return self._reconcile_task_admission_serialized(task_uuid)
+
     def _inject_admission_fault(self, stage: str) -> None:
         hook = self._admission_fault_hook
         if hook is not None:
@@ -340,15 +424,15 @@ class EdgeScheduler:
     ) -> TaskMaterialReleaseResult:
         """Drive one replay-safe terminal Task Material release saga."""
 
-        with self._material_saga_lock:
-            return self._reconcile_task_release_locked(task_uuid, reason)
+        with self._material_saga_slot(task_uuid):
+            return self._reconcile_task_release_serialized(task_uuid, reason)
 
-    def _reconcile_task_release_locked(
+    def _reconcile_task_release_serialized(
         self,
         task_uuid: str,
         reason: str,
     ) -> TaskMaterialReleaseResult:
-        """Serialize one complete cross-database release command."""
+        """Run release after the caller has acquired the Task saga slot."""
 
         if self._workflow_tasks is None or self._inventory is None:
             raise RuntimeError("Workflow Task Material coordination is not configured")

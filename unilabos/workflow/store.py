@@ -1462,19 +1462,27 @@ class WorkflowStore:
                 raise StoreNotFound(f"workflow task {task_uuid} not found")
             existing = conn.execute(
                 """
-                SELECT command_uuid, result
+                SELECT command_uuid, status, outbox_sequence, result
                 FROM workflow_task_material_admission_projection
                 WHERE workflow_task_uuid = ?
                 """,
                 (task_uuid,),
             ).fetchone()
+            upgrade_blocked = False
             if existing is not None:
                 if (
                     existing["command_uuid"] == command_uuid
                     and existing["result"] == encoded_result
                 ):
                     return False
-                raise StoreConflict("Task Material admission projection conflicts")
+                upgrade_blocked = (
+                    existing["command_uuid"] == command_uuid
+                    and existing["status"] == "blocked"
+                    and status == "admitted"
+                    and outbox_sequence > int(existing["outbox_sequence"])
+                )
+                if not upgrade_blocked:
+                    raise StoreConflict("Task Material admission projection conflicts")
 
             if status == "admitted":
                 for binding in bindings:
@@ -1515,24 +1523,43 @@ class WorkflowStore:
                         (encoded_return_info, now, now, job["uuid"]),
                     )
 
-            conn.execute(
-                """
-                INSERT INTO workflow_task_material_admission_projection(
-                    workflow_task_uuid, command_uuid, status, reservation_uuid,
-                    outbox_sequence, result, create_time, update_time
-                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?)
-                """,
-                (
-                    task_uuid,
-                    command_uuid,
-                    status,
-                    reservation_uuid,
-                    outbox_sequence,
-                    encoded_result,
-                    now,
-                    now,
-                ),
-            )
+            if upgrade_blocked:
+                conn.execute(
+                    """
+                    UPDATE workflow_task_material_admission_projection
+                    SET status = ?, reservation_uuid = ?, outbox_sequence = ?,
+                        result = ?, update_time = ?
+                    WHERE workflow_task_uuid = ? AND command_uuid = ?
+                    """,
+                    (
+                        status,
+                        reservation_uuid,
+                        outbox_sequence,
+                        encoded_result,
+                        now,
+                        task_uuid,
+                        command_uuid,
+                    ),
+                )
+            else:
+                conn.execute(
+                    """
+                    INSERT INTO workflow_task_material_admission_projection(
+                        workflow_task_uuid, command_uuid, status, reservation_uuid,
+                        outbox_sequence, result, create_time, update_time
+                    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+                    """,
+                    (
+                        task_uuid,
+                        command_uuid,
+                        status,
+                        reservation_uuid,
+                        outbox_sequence,
+                        encoded_result,
+                        now,
+                        now,
+                    ),
+                )
             self._append_event(
                 conn,
                 event="workflow.runtime.changed",

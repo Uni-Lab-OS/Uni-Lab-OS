@@ -925,6 +925,15 @@ class InventoryService:
                                 == source.material_uuid
                             ):
                                 occupied_candidates.append(candidate_site["uuid"])
+                        if not occupied_candidates:
+                            return self._blocked_admission_result(
+                                conn,
+                                normalized_command,
+                                payload_hash=payload_hash,
+                                now_ms=now_ms,
+                                previous_blocked=previous_blocked,
+                                reason="material_not_in_candidate_site",
+                            )
                         if len(occupied_candidates) != 1:
                             raise MaterialConflict(
                                 "Material is not present in exactly one candidate Site"
@@ -946,8 +955,13 @@ class InventoryService:
                                 "Site does not belong to the selected mount"
                             )
                         if site["occupied_material_uuid"] != source.material_uuid:
-                            raise MaterialConflict(
-                                "Site does not contain the selected Material"
+                            return self._blocked_admission_result(
+                                conn,
+                                normalized_command,
+                                payload_hash=payload_hash,
+                                now_ms=now_ms,
+                                previous_blocked=previous_blocked,
+                                reason="material_not_in_site",
                             )
                         allowed = conn.execute(
                             """
@@ -1025,52 +1039,14 @@ class InventoryService:
                     (*material_uuids, canonical_task_uuid),
                 ).fetchone()
                 if reserved_elsewhere is not None:
-                    if previous_blocked is not None:
-                        return previous_blocked
-                    outbox_sequence = self._emit(
+                    return self._blocked_admission_result(
                         conn,
-                        now_ms,
-                        "material_admission",
-                        canonical_task_uuid,
-                        1,
-                        "material_admission.blocked",
-                        {
-                            "workflow_task_uuid": canonical_task_uuid,
-                            "reason": "material_reserved",
-                        },
-                        causation_id=canonical_command_uuid,
+                        normalized_command,
+                        payload_hash=payload_hash,
+                        now_ms=now_ms,
+                        previous_blocked=previous_blocked,
+                        reason="material_reserved",
                     )
-                    blocked_result = TaskMaterialAdmissionResult(
-                        schema_version=1,
-                        command_uuid=canonical_command_uuid,
-                        workflow_task_uuid=canonical_task_uuid,
-                        status="blocked",
-                        reservation_uuid=None,
-                        bindings=(),
-                        diagnostics=({"code": "material_reserved"},),
-                        outbox_sequence=outbox_sequence,
-                    )
-                    conn.execute(
-                        """
-                        INSERT INTO processed_command(
-                            command_id, idempotency_key, command_type, payload_hash,
-                            result_json, status, processed_at
-                        ) VALUES (?, ?, 'material.admit', ?, ?, 'blocked', ?)
-                        """,
-                        (
-                            canonical_command_uuid,
-                            normalized_command.idempotency_key,
-                            payload_hash,
-                            json.dumps(
-                                _admission_result_payload(blocked_result),
-                                ensure_ascii=False,
-                                separators=(",", ":"),
-                                sort_keys=True,
-                            ),
-                            now_ms,
-                        ),
-                    )
-                    return blocked_result
                 active = conn.execute(
                     """
                     SELECT uuid, set_fingerprint
@@ -1174,6 +1150,65 @@ class InventoryService:
             raise MaterialAuthorityUnavailable(
                 "failed to admit Task Materials"
             ) from None
+        return result
+
+    def _blocked_admission_result(
+        self,
+        conn: sqlite3.Connection,
+        command: TaskMaterialAdmissionCommand,
+        *,
+        payload_hash: str,
+        now_ms: int,
+        previous_blocked: TaskMaterialAdmissionResult | None,
+        reason: str,
+    ) -> TaskMaterialAdmissionResult:
+        """Persist one transient contention result with no partial reservation."""
+
+        if previous_blocked is not None:
+            return previous_blocked
+        outbox_sequence = self._emit(
+            conn,
+            now_ms,
+            "material_admission",
+            command.workflow_task_uuid,
+            1,
+            "material_admission.blocked",
+            {
+                "workflow_task_uuid": command.workflow_task_uuid,
+                "reason": reason,
+            },
+            causation_id=command.command_uuid,
+        )
+        result = TaskMaterialAdmissionResult(
+            schema_version=1,
+            command_uuid=command.command_uuid,
+            workflow_task_uuid=command.workflow_task_uuid,
+            status="blocked",
+            reservation_uuid=None,
+            bindings=(),
+            diagnostics=({"code": reason},),
+            outbox_sequence=outbox_sequence,
+        )
+        conn.execute(
+            """
+            INSERT INTO processed_command(
+                command_id, idempotency_key, command_type, payload_hash,
+                result_json, status, processed_at
+            ) VALUES (?, ?, 'material.admit', ?, ?, 'blocked', ?)
+            """,
+            (
+                command.command_uuid,
+                command.idempotency_key,
+                payload_hash,
+                json.dumps(
+                    _admission_result_payload(result),
+                    ensure_ascii=False,
+                    separators=(",", ":"),
+                    sort_keys=True,
+                ),
+                now_ms,
+            ),
+        )
         return result
 
     def _persist_admission_rejection(

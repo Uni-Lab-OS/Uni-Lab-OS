@@ -5,7 +5,7 @@ from __future__ import annotations
 import logging
 import sqlite3
 import threading
-from collections.abc import Iterable
+from collections.abc import Callable, Iterable
 from datetime import datetime, timezone
 from typing import Any, Dict, Optional
 from uuid import uuid4
@@ -1020,6 +1020,19 @@ class WorkflowRuntimeWorker:
         self._stop_event = threading.Event()
         self._thread: Optional[threading.Thread] = None
         self._lock = threading.Lock()
+        self._task_reconciler: Callable[[str], object] | None = None
+        self._pending_task_reconciliations: set[str] = set()
+
+    def set_task_reconciler(
+        self,
+        reconciler: Callable[[str], object] | None,
+    ) -> None:
+        """Attach the production Material saga callback without owning its policy."""
+
+        with self._lock:
+            self._task_reconciler = reconciler
+            if reconciler is None:
+                self._pending_task_reconciliations.clear()
 
     def start(self) -> None:
         with self._lock:
@@ -1050,11 +1063,35 @@ class WorkflowRuntimeWorker:
             try:
                 task_uuids = self._coordinator._pending_command_task_uuids()
                 for task_uuid in task_uuids:
-                    self._coordinator.consume_next_command(task_uuid)
+                    consumed = self._coordinator.consume_next_command(task_uuid)
+                    if consumed is not None:
+                        with self._lock:
+                            if self._task_reconciler is not None:
+                                self._pending_task_reconciliations.add(task_uuid)
             except (sqlite3.Error, StoreConflict, StoreNotFound):
                 _LOGGER.exception("Workflow runtime command sweep failed")
+            self._reconcile_task_mutations()
             if self._stop_event.wait(self._poll_interval_seconds):
                 return
+
+    def _reconcile_task_mutations(self) -> None:
+        with self._lock:
+            reconciler = self._task_reconciler
+            task_uuids = tuple(sorted(self._pending_task_reconciliations))
+        if reconciler is None:
+            return
+        for task_uuid in task_uuids:
+            try:
+                reconciler(task_uuid)
+            except Exception:
+                _LOGGER.exception(
+                    "Workflow Task Material reconciliation failed for %s",
+                    task_uuid,
+                )
+                continue
+            with self._lock:
+                if self._task_reconciler is reconciler:
+                    self._pending_task_reconciliations.discard(task_uuid)
 
 
 __all__ = [

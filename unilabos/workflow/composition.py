@@ -364,6 +364,11 @@ def compose_workflow_runtime(
                             return resolved
 
                         identity_resolver = resolve_identity
+                        for source_identity in _registry_resource_template_identities(
+                            registry_snapshot,
+                            resource_registry_snapshot,
+                        ):
+                            resolve_identity(source_identity)
                     templates = workflow_template_imports_from_registry_snapshot(
                         registry_snapshot,
                         authority_id=authority.authority_id,
@@ -526,6 +531,24 @@ def get_workflow_inventory_service() -> InventoryService | None:
     return _inventory_service
 
 
+def configure_workflow_task_reconciler(
+    service: WorkflowService,
+    reconciler: Callable[[str], object] | None,
+) -> bool:
+    """Attach/detach the Scheduler callback on the active runtime worker."""
+
+    with _lock:
+        if (
+            not _ready
+            or _owner_pid != os.getpid()
+            or service is not _service
+            or _runtime_worker is None
+        ):
+            return False
+        _runtime_worker.set_task_reconciler(reconciler)
+        return True
+
+
 def reset_workflow_service_for_test() -> None:
     """停止监视器并关闭测试使用的进程级单例。"""
 
@@ -572,6 +595,7 @@ def reset_workflow_service_for_test() -> None:
 
 __all__ = [
     "compose_workflow_runtime",
+    "configure_workflow_task_reconciler",
     "get_workflow_inventory_service",
     "get_workflow_service",
     "reset_workflow_service_for_test",

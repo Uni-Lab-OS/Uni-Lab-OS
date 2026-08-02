@@ -34,6 +34,8 @@ _backend: JobExecutionBackend | None = None
 _inventory: Any | None = None
 _outbox_worker: Any | None = None
 _owns_inventory = False
+_workflow_tasks: Any | None = None
+_workflow_reconciler_attached = False
 
 
 def get_edge_scheduler() -> EdgeScheduler | None:
@@ -111,6 +113,7 @@ def setup_edge_scheduler(
         (scheduler, backend)；backend 需由调用方追加进 HostNode bridges 列表。
     """
     global _scheduler, _backend, _inventory, _outbox_worker, _owns_inventory
+    global _workflow_tasks, _workflow_reconciler_attached
     if _scheduler is not None and _backend is not None:
         logger.warning(
             "[EdgeSchedulerIntegration] already set up, reusing existing stack"
@@ -214,7 +217,14 @@ def setup_edge_scheduler(
     _scheduler, _backend = scheduler, backend
 
     if workflow_tasks is not None and inventory is not None:
-        scheduler.reconcile_pending_task_admissions()
+        from unilabos.workflow.composition import configure_workflow_task_reconciler
+
+        _workflow_tasks = workflow_tasks
+        _workflow_reconciler_attached = configure_workflow_task_reconciler(
+            workflow_tasks,
+            scheduler.reconcile_task_material_state,
+        )
+        scheduler.reconcile_workflow_task_materials()
 
     if ws_client is not None:
         _wire_ws_client(scheduler, ws_client)
@@ -259,6 +269,11 @@ def _wire_ws_client(scheduler: EdgeScheduler, ws_client: Any) -> None:
 def reset_for_test() -> None:
     """测试用：清掉进程内单例。"""
     global _scheduler, _backend, _inventory, _outbox_worker, _owns_inventory
+    global _workflow_tasks, _workflow_reconciler_attached
+    if _workflow_reconciler_attached and _workflow_tasks is not None:
+        from unilabos.workflow.composition import configure_workflow_task_reconciler
+
+        configure_workflow_task_reconciler(_workflow_tasks, None)
     if _backend is not None:
         _backend.stop()
     if _outbox_worker is not None:
@@ -270,6 +285,8 @@ def reset_for_test() -> None:
     _inventory = None
     _outbox_worker = None
     _owns_inventory = False
+    _workflow_tasks = None
+    _workflow_reconciler_attached = False
 
 
 __all__ = [
