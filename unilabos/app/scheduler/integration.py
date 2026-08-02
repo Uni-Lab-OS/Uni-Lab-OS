@@ -216,9 +216,7 @@ def setup_edge_scheduler(
         logger.info("[EdgeSchedulerIntegration] workflow history store: %s", history_db)
 
     shared_device_manager = (
-        getattr(ws_client, "device_manager", None)
-        if ws_client is not None
-        else None
+        getattr(ws_client, "device_manager", None) if ws_client is not None else None
     )
     scheduler, backend = create_edge_stack(
         orderer=orderer,
