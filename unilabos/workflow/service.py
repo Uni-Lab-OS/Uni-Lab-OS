@@ -258,6 +258,14 @@ class CatalogSnapshotProvider(Protocol):
     def catalog_snapshot(self) -> AbstractContextManager[str]: ...
 
 
+class CatalogPublisher(Protocol):
+    """Apply 提交后、Catalog guard 释放前执行 complete replace 的 capability。"""
+
+    def publish(self) -> object: ...
+
+    def invalidate(self) -> None: ...
+
+
 def _sha256(data: bytes) -> str:
     return f"sha256:{hashlib.sha256(data).hexdigest()}"
 
@@ -285,6 +293,7 @@ class WorkflowService:
         resource_resolver: Optional[ResourceSlotResolver] = None,
         material_source_authority: MaterialSourceStaticAuthority | None = None,
         material_reservations: object | None = None,
+        catalog_publisher: CatalogPublisher | None = None,
     ):
         # Compatibility-only constructor input. Task creation deliberately does
         # not invoke Inventory; EdgeScheduler owns the post-commit saga.
@@ -297,6 +306,7 @@ class WorkflowService:
             else UnconfiguredResourceSlotResolver()
         )
         self._material_source_authority = material_source_authority
+        self._catalog_publisher = catalog_publisher
         self._locks_guard = threading.Lock()
         self._authoring_locks: Dict[str, threading.RLock] = {}
 
@@ -1339,6 +1349,19 @@ class WorkflowService:
                         candidate_hash=candidate_hash,
                         validate_draft_state=validate_draft_linearization,
                     )
+                    if self._catalog_publisher is not None:
+                        try:
+                            self._catalog_publisher.publish()
+                        except Exception:  # noqa: BLE001 - adapter boundary
+                            try:
+                                self._catalog_publisher.invalidate()
+                            except Exception:  # noqa: BLE001 - preserve fail-closed error
+                                _LOGGER.exception(
+                                    "Catalog publication 失败后无法持久化 unavailable marker"
+                                )
+                            raise WorkflowError(
+                                "template_catalog_unavailable"
+                            ) from None
             except StoreAuthoringConflict as error:
                 raise WorkflowConflict(error.code) from None
             except StoreRevisionConflict:

@@ -426,6 +426,7 @@ def compose_workflow_runtime(
         new_runtime_worker: WorkflowRuntimeWorker | None = None
         new_device_action_runtime: DeviceActionTaskRuntimeBridge | None = None
         new_device_action_tasks: DeviceActionTaskService | None = None
+        catalog_publisher = None
         published = False
         try:
             store = WorkflowStore(database_path)
@@ -435,6 +436,8 @@ def compose_workflow_runtime(
             if authority is not None:
                 catalog = TemplateCatalog(store)
                 identity_index: ResourceTemplateIdentityIndex | None = None
+                templates = ()
+                host_owner_uuid: str | None = None
                 if registry_snapshot is not None:
                     from unilabos.registry.catalog_consumer import (
                         workflow_template_imports_from_registry_snapshot,
@@ -476,13 +479,35 @@ def compose_workflow_runtime(
                         authority_id=authority.authority_id,
                         resource_template_identity_resolver=identity_resolver,
                     )
-                    catalog.replace(
-                        authority,
-                        templates,
+                    host_device = registry_snapshot.get("host_node")
+                    if isinstance(host_device, Mapping):
+                        host_identity = str(
+                            host_device.get("source_fqid") or "host_node"
+                        )
+                        host_owner_uuid = resolved_identities.get(host_identity)
+
+                    from unilabos.package_manager.consumers import (
+                        PackageCatalogPublishedWorkflowResolver,
+                    )
+                    from unilabos.workflow.composite import (
+                        PublishedWorkflowCatalogPublisher,
+                    )
+
+                    published_workflows = PackageCatalogPublishedWorkflowResolver(
+                        list(configured_workflow_catalogs)
+                    )
+                    catalog_publisher = PublishedWorkflowCatalogPublisher(
+                        catalog=catalog,
+                        authority=authority,
+                        store=store,
+                        sources=published_workflows.sources,
+                        base_templates=templates,
+                        host_node_resource_template_uuid=host_owner_uuid,
                         resource_template_identities=(
                             resolved_identities if identity_index is not None else None
                         ),
                     )
+                    catalog_publisher.publish()
             configured_package_sources = tuple(package_sources)
             configured_package_catalogs = tuple(package_catalogs)
             material_shapes: tuple[Mapping[str, object], ...] = ()
@@ -537,6 +562,7 @@ def compose_workflow_runtime(
                 compiler=runtime_compiler,
                 resource_resolver=material_authority,
                 material_source_authority=new_inventory_service,
+                catalog_publisher=catalog_publisher,
             )
             _ensure_package_workflow_drafts(
                 new_service,
@@ -825,8 +851,8 @@ def reset_workflow_service_for_test() -> None:
 __all__ = [
     "compose_workflow_runtime",
     "configure_device_action_runtime",
-    "get_device_action_task_service",
     "configure_workflow_task_reconciler",
+    "get_device_action_task_service",
     "get_workflow_inventory_service",
     "get_workflow_service",
     "reset_workflow_service_for_test",

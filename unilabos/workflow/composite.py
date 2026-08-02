@@ -8,18 +8,22 @@ TemplateCatalog、HTTP handler 或 frontend。
 from __future__ import annotations
 
 import hashlib
-from collections.abc import Mapping
+from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
 from typing import Any, Protocol
 
 import rfc8785
 
 from unilabos.workflow.catalog import (
+    CatalogAuthority,
     NodeTemplateImport,
+    TemplateCatalog,
     TemplateCatalogMismatch,
+    TemplateCatalogSnapshot,
 )
 from unilabos.workflow.models import validate_uuid
 from unilabos.workflow.schema import WorkflowSchemaError
+from unilabos.workflow.store import StoreNotFound, WorkflowStore
 from unilabos.workflow.workflow_io import (
     WorkflowIOValidationError,
     validate_workflow_graph_io,
@@ -44,6 +48,83 @@ class PublishedWorkflowResolver(Protocol):
     def resolve(self, module: str, symbol: str) -> PublishedWorkflowSource: ...
 
 
+class PublishedWorkflowCatalogPublisher:
+    """把 frozen Registry/framework imports 与 eligible child 一次完整发布。"""
+
+    def __init__(
+        self,
+        *,
+        catalog: TemplateCatalog,
+        authority: CatalogAuthority,
+        store: WorkflowStore,
+        sources: Sequence[PublishedWorkflowSource],
+        base_templates: Sequence[NodeTemplateImport],
+        host_node_resource_template_uuid: str | None,
+        resource_template_identities: Mapping[str, str] | None = None,
+    ) -> None:
+        if not isinstance(catalog, TemplateCatalog):
+            raise TypeError("catalog 必须是 TemplateCatalog")
+        if not isinstance(authority, CatalogAuthority):
+            raise TypeError("authority 必须是 CatalogAuthority")
+        if not isinstance(store, WorkflowStore):
+            raise TypeError("store 必须是 WorkflowStore")
+        frozen_sources = tuple(sources)
+        if any(
+            not isinstance(item, PublishedWorkflowSource) for item in frozen_sources
+        ):
+            raise TypeError("sources 必须只包含 PublishedWorkflowSource")
+        frozen_templates = tuple(base_templates)
+        if any(not isinstance(item, NodeTemplateImport) for item in frozen_templates):
+            raise TypeError("base_templates 必须只包含 NodeTemplateImport")
+        self._catalog = catalog
+        self._authority = authority
+        self._store = store
+        self._sources = tuple(
+            sorted(frozen_sources, key=lambda item: item.definition_fqid)
+        )
+        self._base_templates = frozen_templates
+        self._host_node_resource_template_uuid = host_node_resource_template_uuid
+        self._resource_template_identities = (
+            dict(resource_template_identities)
+            if resource_template_identities is not None
+            else None
+        )
+
+    def publish(self) -> TemplateCatalogSnapshot:
+        """在同一 Catalog guard 内读取 Applied facts 并执行唯一 complete replace。"""
+
+        with self._store.catalog_guard():
+            templates = list(self._base_templates)
+            for source in self._sources:
+                try:
+                    graph = self._store.get_graph(source.workflow_uuid)
+                except StoreNotFound:
+                    continue
+                record = self._store.get_authoring_record(source.workflow_uuid)
+                projected = project_published_workflow_contract(
+                    source=source,
+                    applied_snapshot={
+                        **graph,
+                        "applied_source": record.get("applied_source"),
+                    },
+                    host_node_resource_template_uuid=(
+                        self._host_node_resource_template_uuid
+                    ),
+                )
+                if projected is not None:
+                    templates.append(projected)
+            return self._catalog.replace(
+                self._authority,
+                templates,
+                resource_template_identities=self._resource_template_identities,
+            )
+
+    def invalidate(self) -> None:
+        """使已提交 graph 后发布失败的 authority 立即 fail closed。"""
+
+        self._catalog.invalidate(self._authority)
+
+
 def project_published_workflow_contract(
     *,
     source: PublishedWorkflowSource,
@@ -58,7 +139,6 @@ def project_published_workflow_contract(
 
     if not isinstance(source, PublishedWorkflowSource):
         raise TypeError("source 必须是 PublishedWorkflowSource")
-    host_uuid = _host_owner_uuid(host_node_resource_template_uuid)
     workflow = applied_snapshot.get("workflow")
     applied_source = applied_snapshot.get("applied_source")
     if not isinstance(workflow, Mapping):
@@ -77,6 +157,7 @@ def project_published_workflow_contract(
         applied_source.get("source_hash"),
         "/published_workflow/applied_source/source_hash",
     )
+    host_uuid = _host_owner_uuid(host_node_resource_template_uuid)
 
     graph = {
         "workflow": _plain(workflow),
@@ -370,6 +451,7 @@ def _plain(value: Any) -> Any:
 
 
 __all__ = [
+    "PublishedWorkflowCatalogPublisher",
     "PublishedWorkflowResolver",
     "PublishedWorkflowSource",
     "project_published_workflow_contract",

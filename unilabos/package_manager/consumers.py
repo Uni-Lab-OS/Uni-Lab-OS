@@ -18,6 +18,8 @@ class PackageCatalogPublishedWorkflowResolver:
 
     def __init__(self, catalogs: tuple[PackageCatalog, ...] | list[PackageCatalog]):
         index: dict[tuple[str, str], PublishedWorkflowSource] = {}
+        workflow_uuids: set[str] = set()
+        sources: list[PublishedWorkflowSource] = []
         for catalog in tuple(catalogs):
             if not isinstance(catalog, PackageCatalog):
                 raise TypeError("catalogs 必须只包含 PackageCatalog")
@@ -42,10 +44,19 @@ class PackageCatalogPublishedWorkflowResolver:
                     definition_content_hash=definition.content_hash,
                 )
                 key = (module, symbol)
-                if key in index:
+                if key in index or workflow_uuid in workflow_uuids:
                     raise ValueError("Published Workflow source identity 重复")
                 index[key] = source
+                workflow_uuids.add(workflow_uuid)
+                sources.append(source)
         self._index = index
+        self._sources = tuple(sources)
+
+    @property
+    def sources(self) -> tuple[PublishedWorkflowSource, ...]:
+        """返回启动时冻结的完整 Published Workflow source 集合。"""
+
+        return self._sources
 
     def resolve(self, module: str, symbol: str) -> PublishedWorkflowSource:
         if (
