@@ -373,7 +373,7 @@ def compose_workflow_runtime(
                         authority,
                         templates,
                         resource_template_identities=(
-                            resolved_identities if resolved_identities else None
+                            resolved_identities if identity_index is not None else None
                         ),
                     )
             new_inventory_service = InventoryService.open(
