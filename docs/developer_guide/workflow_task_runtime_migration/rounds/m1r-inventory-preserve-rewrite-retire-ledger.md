@@ -54,17 +54,22 @@ facade, legacy tables, or a second Material identity.
 
 ## Verification evidence
 
-- Sole independent test-author base: `800fee7a678`; tests-only RED commit:
-  `3d3b9f397` (preserved on this branch as `1fd9156`). The initial exact result
-  was `6 failed`; after the retirement implementation the same suite reports
-  `6 passed`.
-- Canonical M1R targeted suites: `26 passed` before the final donor-test
-  convergence; the final affected set reports `37 passed`.
-- Full repository gate after convergence: `2214 passed, 4 skipped` in
-  `97.30s`. The skips are the three opt-in networking process tests and the
-  Phoenix executable integration test.
-- Every changed Python file passes Ruff check and format. Changed production
-  files pass `py_compile`; `git diff --check` is clean.
+- Frozen spec/test base: `a243e54690e0ecd6477a128bfd5acdb88645383f`.
+  The sole independent test-author's tests-only RED is the first delivery
+  commit, `c0883c0`; its exact pre-production run reported `6 failed`. The same
+  suite reports `6 passed` after convergence. The earlier branch that placed
+  the identical test blob late remains recoverable but is not the final
+  candidate history.
+- Review-fix implementation tree: `71a2637`. The focused review regression set
+  reports `28 passed`; complete `tests/app tests/workflow` reports
+  `1596 passed` in `53.78s`.
+- Full repository gate after the exact-SHA review fixes: `2221 passed, 4
+  skipped` in `103.74s`. The skips are the three opt-in networking process tests
+  and the Phoenix executable integration test.
+- The 28 M1R-owned modified Python files pass Ruff check and format; the three
+  broad pre-existing Workflow files have no net-new Ruff debt against the
+  frozen base (`runtime 37→37`, `service 150→149`, `store 97→97`). Changed
+  production files pass `py_compile`; `git diff --check` is clean.
 - Static production scans report no `unilabos.resources.authority`,
   `MaterialModule`, `InventoryModule`, borrowed Workflow UoW, retired
   WorkflowSpec allocation calls, configurable `edge_inventory_db`, or
@@ -77,3 +82,19 @@ facade, legacy tables, or a second Material identity.
 The final candidate SHA and exact-SHA Standards/Spec review are recorded only
 after the candidate commits are immutable; no intermediate checkpoint is an
 integration merge candidate.
+
+## Exact-SHA review disposition
+
+The sole reviewer checked the first immutable candidate
+`1b5d59e44c7eadcacfbce93d8b0cc81763ff3fe6` on both axes. Standards found one
+blocking provenance-order issue; Spec found five blockers: duplicate production
+Inventory composition, a shared Scheduler/cloud outbox cursor with no saga
+serialization, ignored candidate Site filters, non-durable deterministic
+admission rejection, and incomplete exact-v4 reopen validation.
+
+The final history moves the unchanged independent RED before all production
+changes. Review-fix commits `6e9c799` and `71a2637` close the five behavior
+findings with production composition/startup/Task-ingress wiring, separate
+Scheduler and cloud cursors, a dedicated Material saga lock, candidate Site
+revalidation, durable `rejected` results, and exact SQLite DDL-object checking.
+The same reviewer must re-review the final immutable SHA before acceptance.
