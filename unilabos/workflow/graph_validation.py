@@ -13,6 +13,10 @@ from uuid import UUID
 from unilabos.workflow.json_codec import encode_json, strict_json_equal
 from unilabos.workflow.models import WorkflowEdgeWrite, WorkflowNodeWrite
 from unilabos.workflow.schema import WorkflowSchemaError, parse_output_contract
+from unilabos.workflow.workflow_io import (
+    WorkflowIOValidationError,
+    validate_workflow_io,
+)
 
 _MAX_SCHEMA_DEPTH = 64
 _MAX_TIMEOUT_SECONDS = (2**63 - 1) // 1_000_000_000
@@ -51,8 +55,6 @@ def validate_graph(
 ) -> None:
     """在写事务内校验一份完整替换图。"""
 
-    _validate_output_binding_coverage(workflow_meta_data)
-
     node_by_uuid = {node.uuid: node for node in nodes}
     edge_by_uuid = {edge.uuid: edge for edge in edges}
     if len(node_by_uuid) != len(nodes):
@@ -67,6 +69,19 @@ def validate_graph(
         if node.parent_uuid is not None and node.parent_uuid not in node_by_uuid:
             raise GraphValidationError("父节点不在提交的完整图中")
     _validate_parent_cycles(nodes)
+    validated_io = None
+    if validate_input_binding_schema:
+        try:
+            validated_io = validate_workflow_io(
+                nodes=node_by_uuid,
+                handles=handles,
+                workflow_meta_data=workflow_meta_data,
+                node_meta_data=node_meta_data,
+            )
+        except WorkflowIOValidationError as exc:
+            raise GraphValidationError("Workflow I/O 合同无效") from exc
+    else:
+        _validate_output_binding_coverage(workflow_meta_data)
     _validate_material_source_nodes(
         nodes=nodes,
         templates=templates,
@@ -103,16 +118,20 @@ def validate_graph(
         effective_params=effective_params,
     )
 
-    bindings_by_node = {
-        node.uuid: _validated_input_bindings(
-            node,
-            node_meta_data[node.uuid],
-            workflow_meta_data,
-            handles,
-            validate_schema_compatibility=validate_input_binding_schema,
-        )
-        for node in nodes
-    }
+    bindings_by_node = (
+        validated_io.input_bindings
+        if validated_io is not None
+        else {
+            node.uuid: _validated_input_bindings(
+                node,
+                node_meta_data[node.uuid],
+                workflow_meta_data,
+                handles,
+                validate_schema_compatibility=False,
+            )
+            for node in nodes
+        }
+    )
     enabled = {
         node.uuid: node
         for node in nodes
@@ -190,7 +209,7 @@ def validate_graph(
 def _validate_output_binding_coverage(
     workflow_meta_data: Mapping[str, Any],
 ) -> None:
-    """保证每个显式 Workflow output 恰有一个 root binding。"""
+    """普通 Graph PUT 仍只执行已经冻结的 root coverage 门。"""
 
     unilab = workflow_meta_data.get("unilab", {})
     if not isinstance(unilab, dict):
@@ -620,6 +639,8 @@ def _validated_input_bindings(
     *,
     validate_schema_compatibility: bool,
 ) -> dict[str, dict[str, Any]]:
+    """兼容普通 Graph PUT；Authoring 路径使用公共 I/O validator。"""
+
     unilab = meta_data.get("unilab", {})
     if not isinstance(unilab, dict):
         raise GraphValidationError("Node meta_data.unilab 必须是对象")

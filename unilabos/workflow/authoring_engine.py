@@ -68,6 +68,7 @@ from unilabos.workflow.source_coordinates import (
     utf8_offset_to_utf16_column,
     utf16_length,
 )
+from unilabos.workflow.workflow_io import WorkflowIOValidationError
 
 _COMPILER_VERSION = "unilab-authoring/v1"
 _ZERO_FINGERPRINT = "sha256:" + "0" * 64
@@ -2660,7 +2661,21 @@ def _generate_with_snapshot(
                 "message": str(error),
             },
         )
-    except (GraphValidationError, TypeError, ValueError):
+    except GraphValidationError as error:
+        code = (
+            "round_trip_mismatch"
+            if isinstance(error.__cause__, WorkflowIOValidationError)
+            else "candidate_invalid"
+        )
+        return _error_result(
+            fingerprint=snapshot.fingerprint,
+            diagnostic={
+                "severity": "error",
+                "code": code,
+                "message": "Candidate graph 不满足 Workflow 合同",
+            },
+        )
+    except (TypeError, ValueError):
         return _error_result(
             fingerprint=snapshot.fingerprint,
             diagnostic={
