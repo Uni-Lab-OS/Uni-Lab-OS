@@ -472,6 +472,7 @@ class DeviceActionTaskService:
         }
         node_meta = {"unilab": {"input_bindings": input_bindings}}
         contract_snapshot = {
+            "action_type": template["type"],
             "input_contract": input_contract,
             "output_contract": output_contract,
         }
@@ -514,7 +515,7 @@ class DeviceActionTaskService:
                 UPDATE workflow_node
                 SET update_time = ?, meta_data = ?,
                     workflow_node_template_uuid = ?, name = ?, icon = ?,
-                    footer = ?, action_name = ?
+                    footer = ?, action_name = ?, action_type = ?
                 WHERE uuid = ? AND deleted_at IS NULL
                 """,
                 (
@@ -525,6 +526,7 @@ class DeviceActionTaskService:
                     template.get("icon"),
                     template.get("footer"),
                     template["name"],
+                    template["type"],
                     node_uuid,
                 ),
             )
@@ -577,7 +579,7 @@ class DeviceActionTaskService:
                 param, footer, action_name, action_type, execution_policy,
                 disabled, minimized, script
             ) VALUES (?, ?, ?, NULL, NULL, ?, ?, ?, NULL, NULL, ?, 'idle',
-                      'device', ?, '{}', '{}', ?, ?, 'action', '{}', 0, 0, NULL)
+                      'device', ?, '{}', '{}', ?, ?, ?, '{}', 0, 0, NULL)
             """,
             (
                 node_uuid,
@@ -590,6 +592,7 @@ class DeviceActionTaskService:
                 template.get("icon"),
                 template.get("footer"),
                 template["name"],
+                template["type"],
             ),
         )
         conn.execute(
@@ -976,14 +979,12 @@ class DeviceActionTaskRuntimeBridge:
             row = connection.execute(
                 """
                 SELECT d.*, t.status AS task_status, t.trace_context,
-                       j.status AS job_status, j.param,
-                       j.workflow_node_uuid, nt.type AS action_type
+                       t.workflow_snapshot,
+                       j.status AS job_status, j.param, j.workflow_node_uuid
                 FROM device_action_task AS d
                 JOIN workflow_task AS t ON t.uuid = d.workflow_task_uuid
                 JOIN workflow_node_job AS j
                   ON j.uuid = d.workflow_node_job_uuid
-                JOIN workflow_node_template AS nt
-                  ON nt.uuid = d.workflow_node_template_uuid
                 WHERE d.workflow_task_uuid = ?
                 """,
                 (task_uuid,),
@@ -999,6 +1000,28 @@ class DeviceActionTaskRuntimeBridge:
                 return
             if self._scheduler.workflow_snapshot(task_uuid) is not None:
                 return
+            workflow_snapshot = _load(row["workflow_snapshot"], {})
+            nodes = (
+                workflow_snapshot.get("nodes")
+                if isinstance(workflow_snapshot, dict)
+                else None
+            )
+            frozen_node = next(
+                (
+                    node
+                    for node in nodes
+                    if isinstance(node, dict)
+                    and node.get("uuid") == row["workflow_node_uuid"]
+                ),
+                None,
+            ) if isinstance(nodes, list) else None
+            action_type = (
+                frozen_node.get("action_type")
+                if isinstance(frozen_node, dict)
+                else None
+            )
+            if not isinstance(action_type, str) or not action_type:
+                raise WorkflowError("internal_error")
             spec = WorkflowSpec(
                 workflow_id=task_uuid,
                 task_id=task_uuid,
@@ -1011,7 +1034,7 @@ class DeviceActionTaskRuntimeBridge:
                         job_id=row["workflow_node_job_uuid"],
                         device_id=row["device_id"],
                         action_name=row["action_name"],
-                        action_type=row["action_type"],
+                        action_type=action_type,
                         param=_load(row["param"], {}),
                         node_type="ILab",
                     )

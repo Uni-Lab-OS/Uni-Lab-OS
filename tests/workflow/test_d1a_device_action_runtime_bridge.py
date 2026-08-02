@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import copy
+import json
 import time
 from pathlib import Path
 from typing import Any
@@ -49,6 +50,7 @@ class FeedbackHost:
     def __init__(self) -> None:
         self.backend: JobExecutionBackend | None = None
         self.sent: list[Any] = []
+        self.action_types: list[str] = []
         self.auto_complete = True
         self.cancel_requests: list[str] = []
 
@@ -61,8 +63,9 @@ class FeedbackHost:
         sample_material: dict[str, Any],
         server_info: Any = None,
     ) -> None:
-        del action_type, action_kwargs, sample_material, server_info
+        del action_kwargs, sample_material, server_info
         self.sent.append(item)
+        self.action_types.append(action_type)
         assert self.backend is not None
         self.backend.publish_job_status({"progress": 0.5}, item, "running")
         if self.auto_complete:
@@ -869,6 +872,118 @@ def test_running_task_normalizes_result_with_its_frozen_contract_snapshot(
         assert _wait(lambda: service.get(first["task_uuid"])["status"] != "running")
         assert service.get(first["task_uuid"])["status"] == "succeeded"
         assert service.get(first["task_uuid"])["output"] == {"completed": True}
+    finally:
+        client.close()
+        bridge.stop()
+        backend.stop()
+        store.close()
+
+
+def test_pending_task_dispatches_with_its_frozen_action_transport_type(
+    tmp_path: Path,
+) -> None:
+    database_path = tmp_path / "workflow.db"
+    store = WorkflowStore(database_path)
+    catalog = TemplateCatalog(store)
+    initial_import = contract._template_import(
+        name="move",
+        display_name="移动",
+        resource_template_uuid=contract.RESOURCE_TEMPLATE_UUID,
+        schema=contract.SIMPLE_SCHEMA,
+    )
+    initial_import.template["type"] = "transport.v1.Move"
+    snapshot = catalog.replace(contract.AUTHORITY, [initial_import])
+    template = snapshot.node_templates[0]
+    live = contract.MutableLiveCatalog()
+    live.devices["robot"]["actions"]["move"]["type"] = "transport.v1.Move"
+    admission = contract.RecordingAdmission(database_path)
+    service = DeviceActionTaskService(
+        store=store,
+        template_catalog=catalog,
+        authority=contract.AUTHORITY,
+        live_catalog=live,
+        admission=admission,
+    )
+    client = TestClient(
+        create_workflow_app(WorkflowService(store), device_action_tasks=service)
+    )
+    harness = contract.Harness(
+        tmp_path / "workflow.db",
+        store,
+        client,
+        catalog,
+        snapshot.fingerprint,
+        str(template["uuid"]),
+        "",
+        live,
+        admission,
+    )
+    host = FeedbackHost()
+    host.auto_complete = False
+    scheduler, backend = create_edge_stack(host_node_getter=lambda: host)
+    host.backend = backend
+    bridge = DeviceActionTaskRuntimeBridge(
+        store=store,
+        coordinator=WorkflowRuntimeCoordinator(store),
+        scheduler=scheduler,
+        backend=backend,
+    )
+    try:
+        first = client.post(
+            "/api/v1/device-action-tasks", json=contract._request(harness)
+        ).json()["data"]
+        assert service.get(first["task_uuid"])["status"] == "pending"
+
+        revised_import = contract._template_import(
+            name="move",
+            display_name="移动（新 transport）",
+            resource_template_uuid=contract.RESOURCE_TEMPLATE_UUID,
+            schema=contract.SIMPLE_SCHEMA,
+        )
+        revised_import.template["type"] = "transport.v2.Move"
+        revised = catalog.replace(contract.AUTHORITY, [revised_import])
+        live.devices["robot"]["actions"]["move"]["type"] = "transport.v2.Move"
+        second = client.post(
+            "/api/v1/device-action-tasks",
+            json=contract._request(harness, fingerprint=revised.fingerprint),
+        ).json()["data"]
+
+        with store.transaction() as connection:
+            source = connection.execute(
+                "SELECT source_revision, contract_snapshot "
+                "FROM device_action_system_source"
+            ).fetchone()
+            snapshots = {
+                row["uuid"]: json.loads(row["workflow_snapshot"])
+                for row in connection.execute(
+                    "SELECT uuid, workflow_snapshot FROM workflow_task"
+                )
+            }
+        assert source["source_revision"] == 2
+        assert json.loads(source["contract_snapshot"])["action_type"] == (
+            "transport.v2.Move"
+        )
+        assert snapshots[first["task_uuid"]]["nodes"][0]["action_type"] == (
+            "transport.v1.Move"
+        )
+        assert snapshots[second["task_uuid"]]["nodes"][0]["action_type"] == (
+            "transport.v2.Move"
+        )
+
+        bridge.start()
+        assert _wait(lambda: len(host.sent) == 1)
+        assert host.action_types[0] == "transport.v1.Move"
+
+        backend.publish_job_status(
+            {"completed": True},
+            host.sent[0],
+            "success",
+            serialize_result_info("", True, {"completed": True}),
+        )
+        assert _wait(lambda: len(host.sent) == 2)
+        assert host.action_types[1] == "transport.v2.Move"
+        assert service.get(first["task_uuid"])["status"] == "succeeded"
+        assert service.get(second["task_uuid"])["status"] == "running"
     finally:
         client.close()
         bridge.stop()
