@@ -555,6 +555,37 @@ def test_post_get_materializes_one_formal_task_job_and_sanitized_view(
     assert json.loads(event["data"]) == {"task_uuid": view["task_uuid"]}
 
 
+def test_production_action_transport_type_is_not_mistaken_for_node_kind(
+    harness: Harness,
+) -> None:
+    canonical = _template_import(
+        name="move",
+        display_name="移动",
+        resource_template_uuid=RESOURCE_TEMPLATE_UUID,
+        schema=SIMPLE_SCHEMA,
+    )
+    canonical.template["type"] = "UniLabJsonCommand"
+    snapshot = harness.catalog.replace(AUTHORITY, [canonical])
+    template = snapshot.node_templates[0]
+    harness.live_catalog.devices["robot"]["actions"]["move"][
+        "type"
+    ] = "UniLabJsonCommand"
+
+    response = harness.client.post(
+        "/api/v1/device-action-tasks",
+        json=_request(
+            harness,
+            fingerprint=snapshot.fingerprint,
+            template_uuid=str(template["uuid"]),
+        ),
+    )
+
+    assert response.status_code == 201
+    view = response.json()["data"]
+    assert view["name"] == "move"
+    assert view["workflow_node_template_uuid"] == str(template["uuid"])
+
+
 def test_idempotency_replay_is_one_task_and_conflicting_payload_is_409(
     harness: Harness,
 ) -> None:

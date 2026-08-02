@@ -229,7 +229,7 @@ class DeviceActionTaskService:
             with self._template_catalog.snapshot(self._authority) as snapshot:
                 snapshot.assert_fingerprint(template_catalog_fingerprint)
                 template = snapshot.require_node(workflow_node_template_uuid)
-                if template.get("type") != "action":
+                if template.get("node_type") != "device":
                     raise WorkflowError("unsupported_contract")
                 input_contract, output_contract = _contracts(template)
                 handles = [
