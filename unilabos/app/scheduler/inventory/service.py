@@ -697,7 +697,9 @@ class InventoryService:
                     "material_model_assets must contain MaterialModelAsset values"
                 )
             if not asset.public_path.startswith("/api/v1/material-models/"):
-                raise MaterialInvalidInput("material model asset path is outside its API")
+                raise MaterialInvalidInput(
+                    "material model asset path is outside its API"
+                )
             if asset.public_path in model_assets_by_path:
                 raise MaterialInvalidInput("duplicate material model asset path")
             model_assets_by_path[asset.public_path] = asset
@@ -5782,6 +5784,7 @@ class InventoryService:
 
                 material_ids: set[str] = set()
                 parent_by_material: dict[str, str | None] = {}
+                template_by_material: dict[str, str] = {}
                 for raw in materials:
                     if not isinstance(raw, Mapping):
                         raise MaterialInvalidInput(
@@ -5799,6 +5802,7 @@ class InventoryService:
                         raise MaterialInvalidInput(
                             "bootstrap resource_template_uuid is not registered"
                         )
+                    template_by_material[material_uuid] = template_uuid
                     parent_value = raw.get("parent_uuid")
                     parent_by_material[material_uuid] = (
                         _canonical_uuid(parent_value, "material.parent_uuid")
@@ -5939,6 +5943,8 @@ class InventoryService:
                         ),
                     )
 
+                site_occupants: list[tuple[str, str, tuple[str, ...]]] = []
+                occupied_material_ids: set[str] = set()
                 for raw in sites:
                     if not isinstance(raw, Mapping):
                         raise MaterialInvalidInput("bootstrap Site must be an object")
@@ -5962,6 +5968,38 @@ class InventoryService:
                     ):
                         raise MaterialInvalidInput(
                             "bootstrap Site allowlist template is not registered"
+                        )
+                    occupied_value = raw.get("occupied_material_uuid")
+                    if occupied_value is not None:
+                        occupied_material_uuid = _canonical_uuid(
+                            occupied_value,
+                            "site.occupied_material_uuid",
+                        )
+                        if occupied_material_uuid not in material_ids:
+                            raise MaterialInvalidInput(
+                                "bootstrap Site occupant is missing"
+                            )
+                        if occupied_material_uuid == owner_uuid:
+                            raise MaterialInvalidInput(
+                                "bootstrap Site cannot contain its owner"
+                            )
+                        if occupied_material_uuid in occupied_material_ids:
+                            raise MaterialConflict(
+                                "bootstrap Material cannot occupy multiple Sites"
+                            )
+                        occupant_template_uuid = template_by_material[
+                            occupied_material_uuid
+                        ]
+                        if (
+                            allowed_uuids
+                            and occupant_template_uuid not in allowed_uuids
+                        ):
+                            raise MaterialConflict(
+                                "bootstrap Site occupant template is not allowed"
+                            )
+                        occupied_material_ids.add(occupied_material_uuid)
+                        site_occupants.append(
+                            (site_uuid, occupied_material_uuid, allowed_uuids)
                         )
                     site_values = {
                         key: _finite_number(raw.get(key), f"site.{key}")
@@ -6021,6 +6059,12 @@ class InventoryService:
                         ) VALUES (?, ?)
                         """,
                         ((site_uuid, value) for value in sorted(set(allowed_uuids))),
+                    )
+
+                for site_uuid, occupied_material_uuid, _allowed in site_occupants:
+                    conn.execute(
+                        "UPDATE site SET occupied_material_uuid = ? WHERE uuid = ?",
+                        (occupied_material_uuid, site_uuid),
                     )
 
                 conn.executemany(
