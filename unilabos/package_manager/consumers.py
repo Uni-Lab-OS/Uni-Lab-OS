@@ -2,10 +2,74 @@
 
 from __future__ import annotations
 
+import re
 from collections.abc import Mapping
 from typing import Any
 
 from unilabos.package_manager import DefinitionRecord, PackageCatalog
+from unilabos.workflow.composite import PublishedWorkflowSource
+
+_ABSOLUTE_MODULE = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*(?:\.[A-Za-z_][A-Za-z0-9_]*)*$")
+_SYMBOL = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*$")
+
+
+class PackageCatalogPublishedWorkflowResolver:
+    """从显式完整 PackageCatalog 集合构造 immutable Workflow source 索引。"""
+
+    def __init__(self, catalogs: tuple[PackageCatalog, ...] | list[PackageCatalog]):
+        index: dict[tuple[str, str], PublishedWorkflowSource] = {}
+        workflow_uuids: set[str] = set()
+        sources: list[PublishedWorkflowSource] = []
+        for catalog in tuple(catalogs):
+            if not isinstance(catalog, PackageCatalog):
+                raise TypeError("catalogs 必须只包含 PackageCatalog")
+            for definition in catalog.definitions.workflows:
+                module = definition.module
+                symbol = definition.symbol
+                if not _ABSOLUTE_MODULE.fullmatch(module) or not _SYMBOL.fullmatch(
+                    symbol
+                ):
+                    raise ValueError(
+                        "Published Workflow 必须使用 absolute module/symbol"
+                    )
+                workflow_uuid = definition.details.get("workflow_uuid")
+                if not isinstance(workflow_uuid, str):
+                    raise TypeError("Published Workflow 缺少 workflow_uuid")
+                source = PublishedWorkflowSource(
+                    workflow_uuid=workflow_uuid,
+                    definition_fqid=definition.fqid,
+                    module=module,
+                    symbol=symbol,
+                    package_catalog_digest=catalog.catalog_digest,
+                    definition_content_hash=definition.content_hash,
+                )
+                key = (module, symbol)
+                if key in index or workflow_uuid in workflow_uuids:
+                    raise ValueError("Published Workflow source identity 重复")
+                index[key] = source
+                workflow_uuids.add(workflow_uuid)
+                sources.append(source)
+        self._index = index
+        self._sources = tuple(sources)
+
+    @property
+    def sources(self) -> tuple[PublishedWorkflowSource, ...]:
+        """返回启动时冻结的完整 Published Workflow source 集合。"""
+
+        return self._sources
+
+    def resolve(self, module: str, symbol: str) -> PublishedWorkflowSource:
+        if (
+            not isinstance(module, str)
+            or not isinstance(symbol, str)
+            or not _ABSOLUTE_MODULE.fullmatch(module)
+            or not _SYMBOL.fullmatch(symbol)
+        ):
+            raise LookupError((module, symbol))
+        try:
+            return self._index[(module, symbol)]
+        except KeyError:
+            raise LookupError((module, symbol)) from None
 
 
 def resolve_registry_definition(
@@ -22,7 +86,7 @@ def resolve_registry_definition(
     if identity in registry_entries:
         return identity, registry_entries[identity]
     matches: dict[str, Any] = {}
-    for registry_key, entry in registry_entries.items():
+    for entry in registry_entries.values():
         if not isinstance(entry, Mapping):
             continue
         source_fqid = entry.get("source_fqid")

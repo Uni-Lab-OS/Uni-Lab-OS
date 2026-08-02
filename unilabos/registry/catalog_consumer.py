@@ -13,6 +13,11 @@ from unilabos.package_manager.consumers import (
     workflow_template_imports_from_package_catalog,
 )
 from unilabos.workflow.catalog import NodeTemplateImport
+from unilabos.workflow.handle_projection import (
+    resource_slot_schema,
+    structural_ready_handle,
+    workflow_handle_type,
+)
 
 
 class RegistryTemplateProjectionError(ValueError):
@@ -370,33 +375,11 @@ def _template_handles(
         )
     handles.extend(
         (
-            _structural_ready_handle("target"),
-            _structural_ready_handle("source"),
+            structural_ready_handle("target"),
+            structural_ready_handle("source"),
         )
     )
     return tuple(handles)
-
-
-def _structural_ready_handle(io_type: str) -> dict[str, Any]:
-    return {
-        "handle_key": "ready",
-        "io_type": io_type,
-        "display_name": "Ready",
-        "type": "boolean",
-        "required": False,
-        "data_source": "dependency",
-        "data_key": "ready",
-        "description": "Lexical source-order dependency",
-        "meta_data": {
-            "unilab": {
-                "value_schema": {"type": "boolean"},
-                "editor_control": "variable_selector",
-                "allowed_resource_template_uuids": None,
-                "implicit_passthrough": False,
-                "structural_role": "ready",
-            }
-        },
-    }
 
 
 def _handle(
@@ -423,14 +406,13 @@ def _handle(
                 ) from None
             if identity not in allowed:
                 allowed.append(identity)
-    base = _schema_base(value_schema)
-    is_slot = base.get("$slot") == "ResourceSlot"
+    is_slot = resource_slot_schema(value_schema) is not None
     control = str(value_schema.get("x-unilabos-editor-control") or "")
     if is_slot:
         control = "material_port"
     elif control != "site_selector":
         control = "variable_selector"
-    value_type = "ResourceSlot" if is_slot else str(base.get("type") or "object")
+    value_type = workflow_handle_type(value_schema)
     return {
         "handle_key": name,
         "io_type": io_type,

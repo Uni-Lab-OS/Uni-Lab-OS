@@ -743,13 +743,16 @@ class WorkflowStore:
     ) -> bool:
         database = conn or self._conn
         with self._lock:
-            return database.execute(
-                """
+            return (
+                database.execute(
+                    """
                 SELECT 1 FROM device_action_system_source
                 WHERE workflow_uuid = ?
                 """,
-                (workflow_uuid,),
-            ).fetchone() is not None
+                    (workflow_uuid,),
+                ).fetchone()
+                is not None
+            )
 
     def is_device_action_task(
         self,
@@ -759,13 +762,16 @@ class WorkflowStore:
     ) -> bool:
         database = conn or self._conn
         with self._lock:
-            return database.execute(
-                """
+            return (
+                database.execute(
+                    """
                 SELECT 1 FROM device_action_task
                 WHERE workflow_task_uuid = ?
                 """,
-                (task_uuid,),
-            ).fetchone() is not None
+                    (task_uuid,),
+                ).fetchone()
+                is not None
+            )
 
     def is_device_action_job(
         self,
@@ -775,13 +781,16 @@ class WorkflowStore:
     ) -> bool:
         database = conn or self._conn
         with self._lock:
-            return database.execute(
-                """
+            return (
+                database.execute(
+                    """
                 SELECT 1 FROM device_action_task
                 WHERE workflow_node_job_uuid = ?
                 """,
-                (job_uuid,),
-            ).fetchone() is not None
+                    (job_uuid,),
+                ).fetchone()
+                is not None
+            )
 
     def list_workflows(
         self,
@@ -828,6 +837,7 @@ class WorkflowStore:
         tags: List[Any],
         description: Optional[str],
         meta_data: Dict[str, Any],
+        catalog_authority_id: str | None = None,
     ) -> Dict[str, Any]:
         with self.transaction() as conn:
             self.get_workflow(workflow_uuid, conn=conn)
@@ -847,9 +857,15 @@ class WorkflowStore:
                     workflow_uuid,
                 ),
             )
+            self._invalidate_catalog_marker(conn, catalog_authority_id)
         return self.get_workflow(workflow_uuid)
 
-    def delete_workflow(self, workflow_uuid: str) -> None:
+    def delete_workflow(
+        self,
+        workflow_uuid: str,
+        *,
+        catalog_authority_id: str | None = None,
+    ) -> None:
         now = utc_now()
         with self.transaction() as conn:
             self.get_workflow(workflow_uuid, conn=conn)
@@ -857,6 +873,7 @@ class WorkflowStore:
                 "UPDATE workflow SET deleted_at = ?, update_time = ? WHERE uuid = ?",
                 (now, now, workflow_uuid),
             )
+            self._invalidate_catalog_marker(conn, catalog_authority_id)
             conn.execute(
                 "UPDATE workflow_node SET deleted_at = ?, update_time = ? "
                 "WHERE workflow_uuid = ? AND deleted_at IS NULL",
@@ -931,6 +948,23 @@ class WorkflowStore:
             "handle_templates": handle_templates,
         }
 
+    def get_published_workflow_snapshot(
+        self,
+        workflow_uuid: str,
+    ) -> Dict[str, Any]:
+        """一次冻结 Published Workflow graph 与 Applied source eligibility facts。"""
+
+        with self._lock:
+            graph = self.get_graph(workflow_uuid, conn=self._conn)
+            row = self._conn.execute(
+                "SELECT applied_source FROM workflow_authoring WHERE workflow_uuid = ?",
+                (workflow_uuid,),
+            ).fetchone()
+            applied_source = (
+                _load(row["applied_source"], None) if row is not None else None
+            )
+            return {**graph, "applied_source": applied_source}
+
     def save_graph(
         self,
         workflow_uuid: str,
@@ -941,6 +975,7 @@ class WorkflowStore:
         protect_reserved_metadata: bool = False,
         validate_workflow_io_contract: bool = False,
         commit_validator: GraphCommitValidator | None = None,
+        catalog_authority_id: str | None = None,
     ) -> Dict[str, Any]:
         with self.transaction() as conn:
             self._reconcile_graph(
@@ -954,6 +989,7 @@ class WorkflowStore:
                 validate_workflow_io_contract=validate_workflow_io_contract,
                 commit_validator=commit_validator,
             )
+            self._invalidate_catalog_marker(conn, catalog_authority_id)
         return self.get_graph(workflow_uuid)
 
     def _reconcile_graph(
@@ -2035,6 +2071,7 @@ class WorkflowStore:
         candidate_hash: str,
         validate_draft_state: Callable[[], None],
         commit_validator: GraphCommitValidator | None = None,
+        catalog_authority_id: str | None = None,
     ) -> int:
         now = utc_now()
         with self.transaction() as conn:
@@ -2180,7 +2217,24 @@ class WorkflowStore:
                 },
                 now=now,
             )
+            self._invalidate_catalog_marker(conn, catalog_authority_id)
             return resulting_revision
+
+    @staticmethod
+    def _invalidate_catalog_marker(
+        conn: sqlite3.Connection,
+        authority_id: str | None,
+    ) -> None:
+        """在 eligibility mutation transaction 内先使 complete Catalog 不可用。"""
+
+        if authority_id is None:
+            return
+        if not isinstance(authority_id, str) or not authority_id:
+            raise StoreConflict("Catalog authority identity 无效")
+        conn.execute(
+            "DELETE FROM workflow_template_catalog WHERE authority_id = ?",
+            (authority_id,),
+        )
 
     # 事件与诊断 --------------------------------------------------------
 
