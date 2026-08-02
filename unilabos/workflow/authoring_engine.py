@@ -68,6 +68,7 @@ from unilabos.workflow.source_coordinates import (
     utf8_offset_to_utf16_column,
     utf16_length,
 )
+from unilabos.workflow.workflow_io import WorkflowIOValidationError
 
 _COMPILER_VERSION = "unilab-authoring/v1"
 _ZERO_FINGERPRINT = "sha256:" + "0" * 64
@@ -745,7 +746,11 @@ def _compile_with_snapshot(
             imports,
             workflow_uuid=workflow_uuid,
         )
-        input_contract = _workflow_parameters(function, imports)
+        input_contract = _workflow_parameters(
+            function,
+            imports,
+            resource_template_identity_index=resource_template_identity_index,
+        )
         anchors, anchor_lines = _source_anchors(python_source)
         state = _BuildState(
             workflow_uuid=workflow_uuid,
@@ -1149,6 +1154,8 @@ def _workflow_declaration(
 def _workflow_parameters(
     function: ast.FunctionDef,
     imports: Mapping[str, str],
+    *,
+    resource_template_identity_index: ResourceTemplateIdentityIndex | None,
 ) -> dict[str, Any]:
     arguments = function.args
     if (
@@ -1209,13 +1216,47 @@ def _workflow_parameters(
             )
         except AnnotationSchemaError as error:
             _fail(error.code, error.message, node=argument)
+        descriptor = parsed.to_dict()
         if parsed.resource_templates:
-            _fail(
-                "template_catalog_mismatch",
-                "当前 Catalog 尚未发布 ResourceTemplate symbol identity",
-                node=argument,
+            if resource_template_identity_index is None:
+                _fail(
+                    "template_catalog_mismatch",
+                    "当前 authority 无法解析 ResourceTemplate symbol",
+                    node=argument,
+                )
+            resource_template_uuids: list[str] = []
+            for symbol in parsed.resource_templates:
+                try:
+                    resource_template_uuid = validate_uuid(
+                        resource_template_identity_index.resolve_symbol(
+                            symbol.qualified_name
+                        )
+                    )
+                    if (
+                        resource_template_identity_index.identify_uuid(
+                            resource_template_uuid
+                        )
+                        != symbol.qualified_name
+                    ):
+                        raise LookupError(symbol.qualified_name)
+                except (AttributeError, LookupError, TypeError, ValueError):
+                    _fail(
+                        "template_catalog_mismatch",
+                        "当前 authority 无法解析 ResourceTemplate symbol",
+                        node=argument,
+                    )
+                resource_template_uuids.append(resource_template_uuid)
+            resource_slot_schema = _resource_slot_schema(descriptor["schema"])
+            if not isinstance(resource_slot_schema, dict):
+                _fail(
+                    "invalid_schema",
+                    "ResourceTemplate allowlist 只能约束 ResourceSlot 或其列表",
+                    node=argument,
+                )
+            resource_slot_schema["allowed_resource_template_uuids"] = (
+                resource_template_uuids
             )
-        descriptors.append(parsed.to_dict())
+        descriptors.append(descriptor)
     try:
         return parse_input_contract({"version": 1, "parameters": descriptors}).to_dict()
     except WorkflowSchemaError as error:
@@ -2378,7 +2419,7 @@ def _validate_built_graph(
         effective_params={node.uuid: node.param or {} for node in nodes},
         workflow_meta_data=graph["workflow"].get("meta_data") or {},
         node_meta_data={node.uuid: node.meta_data for node in nodes},
-        validate_input_binding_schema=True,
+        validate_workflow_io_contract=True,
     )
     validate_material_source_authority(graph, material_source_authority)
 
@@ -2660,7 +2701,21 @@ def _generate_with_snapshot(
                 "message": str(error),
             },
         )
-    except (GraphValidationError, TypeError, ValueError):
+    except GraphValidationError as error:
+        code = (
+            "round_trip_mismatch"
+            if isinstance(error.__cause__, WorkflowIOValidationError)
+            else "candidate_invalid"
+        )
+        return _error_result(
+            fingerprint=snapshot.fingerprint,
+            diagnostic={
+                "severity": "error",
+                "code": code,
+                "message": "Candidate graph 不满足 Workflow 合同",
+            },
+        )
+    except (TypeError, ValueError):
         return _error_result(
             fingerprint=snapshot.fingerprint,
             diagnostic={
@@ -2830,6 +2885,7 @@ def _render_graph(
     reserved_import_names = {
         *needs["typing"],
         *markers,
+        "AllowedResourceTemplates",
         "Field",
         "JSONValue",
         "ResourceSlot",
@@ -2847,8 +2903,14 @@ def _render_graph(
         alias = "" if imported_name == symbol else f" as {imported_name}"
         emitter.emit(f"from {module} import {symbol}{alias}")
     resource_import_names: dict[str, str] = {}
+    workflow_input_resource_template_uuids = {
+        resource_template_uuid
+        for parameter in input_contract["parameters"]
+        for resource_template_uuid in _resource_template_allowlist(parameter["schema"])
+    }
     for resource_template_uuid in sorted(
-        {
+        workflow_input_resource_template_uuids
+        | {
             str(item.get("param", {}).get("resource_template_uuid"))
             for item in material_source_nodes
         }
@@ -2884,8 +2946,16 @@ def _render_graph(
         resource_import_names[resource_template_uuid] = imported_name
         alias = "" if imported_name == symbol else f" as {imported_name}"
         emitter.emit(f"from {module} import {symbol}{alias}")
+    registry_annotation_imports = []
+    if needs["allowed_resource_templates"]:
+        registry_annotation_imports.append("AllowedResourceTemplates")
     if needs["json_value"]:
-        emitter.emit("from unilabos.registry.annotations import JSONValue")
+        registry_annotation_imports.append("JSONValue")
+    if registry_annotation_imports:
+        emitter.emit(
+            "from unilabos.registry.annotations import "
+            + ", ".join(registry_annotation_imports)
+        )
     if needs["resource_slot"]:
         emitter.emit("from unilabos.registry.placeholder_type import ResourceSlot")
     emitter.emit(
@@ -2914,7 +2984,11 @@ def _render_graph(
         emitter.emit(f"def {function_name}(")
         emitter.emit("    *,")
         for parameter in parameters:
-            annotation = _annotation_source(parameter["schema"], parameter)
+            annotation = _annotation_source(
+                parameter["schema"],
+                parameter,
+                resource_import_names=resource_import_names,
+            )
             declaration = f"{parameter['name']}: {annotation}"
             if not parameter["required"]:
                 declaration += f" = {parameter['default']!r}"
@@ -3130,31 +3204,92 @@ def _annotation_import_needs(contract: Mapping[str, Any]) -> dict[str, Any]:
     typing_names: set[str] = set()
     field_needed = False
     resource_slot = False
+    allowed_resource_templates = False
     json_value = False
     for parameter in contract.get("parameters", []):
         schema = parameter["schema"]
-        rendered = _annotation_source(schema, parameter)
-        if "Annotated[" in rendered:
+        constraint_schema = schema["anyOf"][0] if "anyOf" in schema else schema
+        if (
+            "title" in parameter
+            or "description" in parameter
+            or any(
+                key in constraint_schema
+                for key in (
+                    "minimum",
+                    "maximum",
+                    "minLength",
+                    "maxLength",
+                    "minItems",
+                    "maxItems",
+                )
+            )
+        ):
             typing_names.add("Annotated")
-        if "Literal[" in rendered:
-            typing_names.add("Literal")
-        if "Field(" in rendered:
             field_needed = True
-        if "ResourceSlot" in rendered:
+        if _resource_template_allowlist(schema):
+            typing_names.add("Annotated")
+            allowed_resource_templates = True
+        if _schema_contains_key(constraint_schema, "enum"):
+            typing_names.add("Literal")
+        if _schema_contains_key(constraint_schema, "$slot"):
             resource_slot = True
-        if "JSONValue" in rendered:
+        if _schema_contains_kind(constraint_schema, "object"):
             json_value = True
     return {
         "typing": typing_names,
         "field": field_needed,
         "resource_slot": resource_slot,
+        "allowed_resource_templates": allowed_resource_templates,
         "json_value": json_value,
     }
+
+
+def _schema_contains_kind(schema: Mapping[str, Any], kind: str) -> bool:
+    if schema.get("type") == kind:
+        return True
+    items = schema.get("items")
+    return isinstance(items, Mapping) and _schema_contains_kind(items, kind)
+
+
+def _schema_contains_key(schema: Mapping[str, Any], key: str) -> bool:
+    if key in schema:
+        return True
+    items = schema.get("items")
+    return isinstance(items, Mapping) and _schema_contains_key(items, key)
+
+
+def _resource_template_allowlist(schema: Mapping[str, Any]) -> tuple[str, ...]:
+    resource_slot_schema = _resource_slot_schema(schema)
+    if resource_slot_schema is None:
+        return ()
+    allowlist = resource_slot_schema.get("allowed_resource_template_uuids")
+    if not isinstance(allowlist, list):
+        return ()
+    return tuple(str(item) for item in allowlist)
+
+
+def _resource_slot_schema(
+    schema: Mapping[str, Any],
+) -> Mapping[str, Any] | None:
+    members = schema.get("anyOf")
+    if isinstance(members, list):
+        for member in members:
+            if isinstance(member, Mapping) and member.get("type") != "null":
+                return _resource_slot_schema(member)
+        return None
+    if schema.get("$slot") == "ResourceSlot":
+        return schema
+    items = schema.get("items")
+    if schema.get("type") == "array" and isinstance(items, Mapping):
+        return _resource_slot_schema(items)
+    return None
 
 
 def _annotation_source(
     schema: Mapping[str, Any],
     descriptor: Mapping[str, Any] | None = None,
+    *,
+    resource_import_names: Mapping[str, str] | None = None,
 ) -> str:
     if "anyOf" in schema:
         members = schema["anyOf"]
@@ -3163,6 +3298,24 @@ def _annotation_source(
     else:
         base = _base_annotation_source(schema)
         constraint_schema = schema
+    metadata: list[str] = []
+    resource_template_uuids = _resource_template_allowlist(schema)
+    if resource_template_uuids:
+        if resource_import_names is None:
+            _fail(
+                "template_catalog_mismatch",
+                "当前 authority 无法反查 ResourceTemplate UUID",
+            )
+        resource_symbols: list[str] = []
+        for resource_template_uuid in resource_template_uuids:
+            resource_symbol = resource_import_names.get(resource_template_uuid)
+            if resource_symbol is None:
+                _fail(
+                    "template_catalog_mismatch",
+                    "当前 authority 无法反查 ResourceTemplate UUID",
+                )
+            resource_symbols.append(resource_symbol)
+        metadata.append(f"AllowedResourceTemplates({', '.join(resource_symbols)})")
     field_parts: list[str] = []
     descriptor = descriptor or {}
     if "title" in descriptor:
@@ -3180,17 +3333,14 @@ def _annotation_source(
         if schema_key in constraint_schema:
             field_parts.append(f"{field_key}={constraint_schema[schema_key]!r}")
     if field_parts:
-        return f"Annotated[{base}, Field({', '.join(field_parts)})]"
+        metadata.append(f"Field({', '.join(field_parts)})")
+    if metadata:
+        return f"Annotated[{base}, {', '.join(metadata)}]"
     return base
 
 
 def _base_annotation_source(schema: Mapping[str, Any]) -> str:
     if schema.get("$slot") == "ResourceSlot":
-        if schema.get("allowed_resource_template_uuids"):
-            _fail(
-                "template_catalog_mismatch",
-                "当前版本无法从 UUID allowlist 恢复 ResourceTemplate symbol",
-            )
         return "ResourceSlot"
     kind = schema.get("type")
     if kind == "array":

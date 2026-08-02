@@ -504,10 +504,12 @@ def validate_candidate_bundle(
             effective_params={node.uuid: node.param or {} for node in nodes},
             workflow_meta_data=workflow["meta_data"],
             node_meta_data={node.uuid: node.meta_data for node in nodes},
-            validate_input_binding_schema=True,
+            validate_workflow_io_contract=True,
         )
     except GraphValidationError as exc:
-        raise CandidateBundleError("Candidate graph violates Workflow contract") from exc
+        raise CandidateBundleError(
+            "Candidate graph violates Workflow contract"
+        ) from exc
     if any(item["workflow_node_uuid"] not in nodes_by_uuid for item in source_map):
         raise CandidateBundleError("Source map references a Node outside Candidate")
 

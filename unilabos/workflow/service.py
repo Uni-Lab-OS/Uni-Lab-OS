@@ -444,7 +444,7 @@ class WorkflowService:
                     nodes=node_values,
                     edges=edge_values,
                     protect_reserved_metadata=True,
-                    validate_input_binding_schema=True,
+                    validate_workflow_io_contract=True,
                     commit_validator=self._validate_material_source_commit,
                 )
             except ValidationError:
