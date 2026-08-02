@@ -2696,7 +2696,7 @@ def _candidate_graph(
             _detached(item)
             for template_uuid in referenced_templates
             for item in (
-                applied_handles_by_template.get(template_uuid)
+                applied_handles_by_template.get(template_uuid, [])
                 if template_uuid in applied_templates
                 else snapshot_handles_by_template.get(template_uuid, [])
             )
