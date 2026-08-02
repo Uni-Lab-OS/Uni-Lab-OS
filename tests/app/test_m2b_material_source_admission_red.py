@@ -23,6 +23,7 @@ from unilabos.workflow.catalog import (
     TemplateCatalog,
 )
 from unilabos.workflow.models import WorkflowNodeWrite
+from unilabos.workflow.runtime import WorkflowRuntimeCoordinator
 from unilabos.workflow.service import WorkflowService
 from unilabos.workflow.store import WorkflowStore
 
@@ -79,37 +80,6 @@ class _RecordingInventoryPort:
 
     def __getattr__(self, name: str) -> Any:
         return getattr(self._inventory, name)
-
-
-class _RejectAfterBlockedInventoryPort(_RecordingInventoryPort):
-    """Return a later durable-sequence rejection to exercise W3 projection."""
-
-    def __init__(self, inventory: inventory_api.InventoryService) -> None:
-        super().__init__(inventory)
-        self.reject_outbox_sequence: int | None = None
-
-    def admit_task(
-        self,
-        command: inventory_api.TaskMaterialAdmissionCommand,
-    ) -> inventory_api.TaskMaterialAdmissionResult:
-        self.commands.append(command)
-        if self.reject_outbox_sequence is None:
-            return self._inventory.admit_task(command)
-        return inventory_api.TaskMaterialAdmissionResult(
-            schema_version=1,
-            command_uuid=command.command_uuid,
-            workflow_task_uuid=command.workflow_task_uuid,
-            status="rejected",
-            reservation_uuid=None,
-            bindings=(),
-            diagnostics=(
-                {
-                    "code": "material_location_mismatch",
-                    "material_source_node_uuid": SOURCE_A_UUID,
-                },
-            ),
-            outbox_sequence=self.reject_outbox_sequence,
-        )
 
 
 def _resource_templates() -> dict[str, inventory_api.ResourceTemplateIdentity]:
@@ -1064,6 +1034,7 @@ def test_create_new_breaks_equal_site_order_ties_by_site_uuid(tmp_path: Path) ->
 def test_blocked_task_projects_later_rejection_to_task_and_resolution_job(
     tmp_path: Path,
 ) -> None:
+    workflow_database = tmp_path / "workflow-authority" / "workflow.db"
     inventory = inventory_api.InventoryService.open(
         working_dir=tmp_path / "inventory-authority",
         resource_templates=_resource_templates(),
@@ -1080,7 +1051,7 @@ def test_blocked_task_projects_later_rejection_to_task_and_resolution_job(
             flow_role="primary_sample",
         )
         service, owner_task = _create_workflow_service(
-            tmp_path / "workflow-authority" / "workflow.db",
+            workflow_database,
             nodes=[node],
         )
         waiting_task = service.create_workflow_task(
@@ -1091,15 +1062,9 @@ def test_blocked_task_projects_later_rejection_to_task_and_resolution_job(
             description=None,
             meta_data={},
         )
-        owner_scheduler = EdgeScheduler(workflow_tasks=service, inventory=inventory)
-        assert owner_scheduler.reconcile_task_admission(owner_task["uuid"]).status == (
-            "admitted"
-        )
-        projection_inventory = _RejectAfterBlockedInventoryPort(inventory)
-        scheduler = EdgeScheduler(
-            workflow_tasks=service,
-            inventory=projection_inventory,
-        )
+        scheduler = EdgeScheduler(workflow_tasks=service, inventory=inventory)
+        owner = scheduler.reconcile_task_admission(owner_task["uuid"])
+        assert owner is not None and owner.status == "admitted"
 
         blocked = scheduler.reconcile_task_admission(waiting_task["uuid"])
 
@@ -1107,28 +1072,68 @@ def test_blocked_task_projects_later_rejection_to_task_and_resolution_job(
         assert service.get_workflow_task(waiting_task["uuid"])["status"] == (
             "admission_blocked"
         )
-        inventory.set_change_listener(None)
-        inventory.create_material(
-            material_uuid="53000000-0000-4000-8000-0000000002b3",
-            resource_template_uuid=SAMPLE_TEMPLATE_UUID,
-            barcode="M2B-W3-EVIDENCE",
-            name="W3 evidence",
+        conflicting = inventory.admit_task(
+            inventory_api.TaskMaterialAdmissionCommand(
+                schema_version=1,
+                command_uuid="73000000-0000-4000-8000-0000000002b3",
+                idempotency_key="m2b-w3-conflicting-task-material-set",
+                workflow_task_uuid=waiting_task["uuid"],
+                workflow_snapshot_fingerprint="sha256:m2b-w3-conflict",
+                sources=(
+                    inventory_api.TaskMaterialAdmissionSource(
+                        material_source_node_uuid=SOURCE_B_UUID,
+                        mode="existing",
+                        resource_template_uuid=SAMPLE_TEMPLATE_UUID,
+                        mount={"uuid": MOUNT_MATERIAL_UUID},
+                        material_uuid=ALTERNATE_MATERIAL_UUID,
+                        site_uuid=ALTERNATE_SITE_UUID,
+                        candidate_site_uuids=(),
+                        flow_role="reagent",
+                    ),
+                ),
+            )
         )
-        projection_inventory.reject_outbox_sequence = inventory.read_outbox(
-            after_sequence=0,
-            limit=100,
-        )[-1].sequence
+        assert conflicting.status == "admitted"
 
-        rejected = scheduler.reconcile_task_admission(waiting_task["uuid"])
+        service.create_workflow_task_command(
+            owner_task["uuid"],
+            command_type="cancel",
+            target_node_uuid=None,
+            idempotency_key="m2b-w3-terminal-owner",
+            description=None,
+            meta_data={},
+        )
+        runtime_store = WorkflowStore(workflow_database)
+        try:
+            consumed = WorkflowRuntimeCoordinator(runtime_store).consume_next_command(
+                owner_task["uuid"]
+            )
+            assert consumed is not None
+        finally:
+            runtime_store.close()
 
-        assert rejected is not None and rejected.status == "rejected"
+        scheduler.reconcile_task_material_state(owner_task["uuid"])
+
+        rejected = service.get_material_admission(waiting_task["uuid"])
+        assert rejected is not None and rejected["status"] == "rejected"
+        assert rejected["command_uuid"] == blocked.command_uuid
+        durable_rejected = inventory.get_command_result(blocked.command_uuid)
+        assert isinstance(durable_rejected, inventory_api.TaskMaterialAdmissionResult)
+        assert durable_rejected.status == "rejected"
+        assert durable_rejected.outbox_sequence == rejected["outbox_sequence"]
+        assert durable_rejected.diagnostics == (
+            {
+                "code": "task_material_set_conflict",
+                "material_source_node_uuid": None,
+            },
+        )
         assert service.get_workflow_task(waiting_task["uuid"])["status"] == "failed"
         job = _jobs_by_node(service, waiting_task["uuid"])[SOURCE_A_UUID]
         assert job["status"] == "failed"
         assert job["error_info"] == [
             {
-                "code": "material_location_mismatch",
-                "material_source_node_uuid": SOURCE_A_UUID,
+                "code": "task_material_set_conflict",
+                "material_source_node_uuid": None,
             }
         ]
         assert not scheduler.can_dispatch_task_materials(waiting_task["uuid"])
