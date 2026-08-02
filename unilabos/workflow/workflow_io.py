@@ -7,7 +7,7 @@ from dataclasses import dataclass
 from types import MappingProxyType
 from typing import Any
 
-from unilabos.workflow.models import WorkflowNodeWrite
+from unilabos.workflow.models import WorkflowNodeWrite, validate_uuid
 from unilabos.workflow.schema import (
     WorkflowInputContract,
     WorkflowOutputContract,
@@ -112,7 +112,10 @@ def validate_workflow_graph_io(graph: Mapping[str, Any]) -> ValidatedWorkflowIO:
             if not isinstance(handle, Mapping):
                 raise WorkflowIOValidationError("Workflow Handle projection 无效")
             handle_uuid = handle.get("uuid")
-            if not isinstance(handle_uuid, str) or handle_uuid in handles:
+            if not isinstance(handle_uuid, str):
+                raise WorkflowIOValidationError("Workflow Handle UUID 无效或重复")
+            canonical_handle_uuid = validate_uuid(handle_uuid)
+            if canonical_handle_uuid != handle_uuid or handle_uuid in handles:
                 raise WorkflowIOValidationError("Workflow Handle UUID 无效或重复")
             handles[handle_uuid] = handle
 
