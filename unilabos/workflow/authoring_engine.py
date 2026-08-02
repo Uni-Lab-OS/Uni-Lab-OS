@@ -37,6 +37,7 @@ from unilabos.workflow.catalog import (
     TemplateCatalogSnapshot,
     TemplateCatalogUnavailable,
 )
+from unilabos.workflow.composite import CompositeAuthoring, CompositeExpansion
 from unilabos.workflow.graph_validation import (
     CodedGraphValidationError,
     GraphValidationError,
@@ -364,9 +365,11 @@ class _BuildState:
     anchors: dict[int, str]
     anchor_lines: set[int]
     input_names: set[str]
+    effective_input_contract: dict[str, Any]
     applied_nodes: dict[str, dict[str, Any]]
     catalog: _CatalogIndex
     resource_template_identity_index: ResourceTemplateIdentityIndex | None
+    composite_authoring: CompositeAuthoring | None
     nodes: list[_NodeState] = field(default_factory=list)
     edges: list[dict[str, Any]] = field(default_factory=list)
     results: dict[str, _NodeState] = field(default_factory=dict)
@@ -466,6 +469,7 @@ class WorkflowAuthoringEngine:
         authority: CatalogAuthority,
         resource_template_identity_index: ResourceTemplateIdentityIndex | None = None,
         material_source_authority: MaterialSourceStaticAuthority | None = None,
+        composite_authoring: CompositeAuthoring | None = None,
     ) -> None:
         if not isinstance(catalog, TemplateCatalog):
             raise TypeError("catalog 必须是 TemplateCatalog")
@@ -475,6 +479,11 @@ class WorkflowAuthoringEngine:
         self._authority = authority
         self._resource_template_identity_index = resource_template_identity_index
         self._material_source_authority = material_source_authority
+        if composite_authoring is not None and not isinstance(
+            composite_authoring, CompositeAuthoring
+        ):
+            raise TypeError("composite_authoring 必须是 CompositeAuthoring")
+        self._composite_authoring = composite_authoring
         self._active_snapshot: ContextVar[TemplateCatalogSnapshot | None] = ContextVar(
             f"authoring_snapshot_{id(self)}",
             default=None,
@@ -555,6 +564,7 @@ class WorkflowAuthoringEngine:
                         self._resource_template_identity_index
                     ),
                     material_source_authority=self._material_source_authority,
+                    composite_authoring=self._composite_authoring,
                 )
         except TemplateCatalogUnavailable:
             return _error_result(
@@ -602,6 +612,7 @@ class WorkflowAuthoringEngine:
                         self._resource_template_identity_index
                     ),
                     material_source_authority=self._material_source_authority,
+                    composite_authoring=self._composite_authoring,
                 )
         except TemplateCatalogUnavailable:
             return _error_result(
@@ -650,6 +661,7 @@ class WorkflowAuthoringEngine:
                         self._resource_template_identity_index
                     ),
                     material_source_authority=self._material_source_authority,
+                    composite_authoring=self._composite_authoring,
                 )
                 if not generated.valid:
                     return generated
@@ -664,6 +676,7 @@ class WorkflowAuthoringEngine:
                         self._resource_template_identity_index
                     ),
                     material_source_authority=self._material_source_authority,
+                    composite_authoring=self._composite_authoring,
                 )
                 if not compiled.valid or not _semantic_graph_equal(
                     compiled.graph,
@@ -737,6 +750,7 @@ def _compile_with_snapshot(
     applied_graph: dict[str, Any],
     resource_template_identity_index: ResourceTemplateIdentityIndex | None,
     material_source_authority: MaterialSourceStaticAuthority | None,
+    composite_authoring: CompositeAuthoring | None,
     prove_normalized: bool = True,
 ) -> CandidateCompilation:
     del source_uri
@@ -782,9 +796,11 @@ def _compile_with_snapshot(
             anchors=anchors,
             anchor_lines=anchor_lines,
             input_names={item["name"] for item in input_contract["parameters"]},
+            effective_input_contract=input_contract,
             applied_nodes={item["uuid"]: item for item in applied["nodes"]},
             catalog=_CatalogIndex(snapshot),
             resource_template_identity_index=resource_template_identity_index,
+            composite_authoring=composite_authoring,
         )
         executable, return_statement = _function_body(function)
         if executable == [None]:
@@ -796,6 +812,7 @@ def _compile_with_snapshot(
             parent_uuid=None,
             allow_parallel=True,
         )
+        input_contract = state.effective_input_contract
         unused_anchors = anchor_lines - state.used_anchors
         if unused_anchors:
             _fail(
@@ -835,6 +852,7 @@ def _compile_with_snapshot(
                 applied_graph=graph,
                 resource_template_identity_index=resource_template_identity_index,
                 material_source_authority=material_source_authority,
+                composite_authoring=composite_authoring,
                 prove_normalized=False,
             )
             if (
@@ -1560,6 +1578,19 @@ def _parse_sequence(
                     available_results=available_results,
                     parent_uuid=parent_uuid,
                 )
+            elif (
+                call_identity is not None
+                and state.composite_authoring is not None
+                and isinstance(statement.value, ast.Call)
+                and isinstance(statement.value.func, ast.Name)
+            ):
+                segment = _parse_composite(
+                    statement,
+                    source_identity=call_identity,
+                    state=state,
+                    available_results=available_results,
+                    parent_uuid=parent_uuid,
+                )
             else:
                 segment = _parse_action(
                     statement,
@@ -1602,6 +1633,249 @@ def _parse_sequence(
         if segment.ends:
             previous = segment.ends
     return _Flow(first, previous)
+
+
+def _parse_composite(
+    statement: ast.Assign,
+    *,
+    source_identity: str,
+    state: _BuildState,
+    available_results: dict[str, _NodeState],
+    parent_uuid: str | None,
+) -> _Flow:
+    if (
+        len(statement.targets) != 1
+        or not isinstance(statement.targets[0], ast.Name)
+        or not isinstance(statement.value, ast.Call)
+        or not isinstance(statement.value.func, ast.Name)
+        or ":" not in source_identity
+    ):
+        _fail(
+            "invalid_composite_call",
+            "Published Workflow 必须由一个新名字接收 named result object",
+            node=statement,
+        )
+    result_name = statement.targets[0].id
+    if (
+        result_name in available_results
+        or result_name in state.selectors
+        or result_name in state.input_names
+    ):
+        _fail(
+            "invalid_composite_call",
+            "Published Workflow result 名称不能重绑定",
+            node=statement.targets[0],
+        )
+    call = statement.value
+    if call.args or any(item.arg is None for item in call.keywords):
+        _fail(
+            "invalid_composite_call",
+            "Published Workflow 只接受 direct keyword arguments",
+            node=call,
+        )
+    keyword_names = [str(item.arg) for item in call.keywords]
+    if len(keyword_names) != len(set(keyword_names)):
+        _fail(
+            "invalid_composite_call",
+            "Published Workflow keyword 不能重复",
+            node=call,
+        )
+
+    node_uuid = state.node_uuid(statement)
+    keyword_arguments: dict[str, object] = {}
+    pending_provider_edges: list[tuple[_NodeState, str, str]] = []
+    for keyword_node in call.keywords:
+        assert keyword_node.arg is not None
+        expression = keyword_node.value
+        if isinstance(expression, ast.Name) and expression.id in state.input_names:
+            keyword_arguments[keyword_node.arg] = {
+                "kind": "workflow_input",
+                "parameter": expression.id,
+            }
+            continue
+        producer = _result_reference(expression, available_results)
+        if producer is not None:
+            source_node, output_name = producer
+            source_handle = _source_handle(
+                source_node.handles,
+                output_name,
+                node=expression,
+            )
+            keyword_arguments[keyword_node.arg] = {
+                "kind": "node_output",
+                "workflow_node_uuid": source_node.node["uuid"],
+                "source_handle_uuid": source_handle["uuid"],
+            }
+            pending_provider_edges.append(
+                (source_node, source_handle["uuid"], keyword_node.arg)
+            )
+            continue
+        try:
+            value = ast.literal_eval(expression)
+            validate_json_value(value)
+        except (TypeError, ValueError):
+            _fail(
+                "invalid_composite_call",
+                "Published Workflow value 必须是 literal、Workflow 参数或 named result output",
+                node=expression,
+            )
+        keyword_arguments[keyword_node.arg] = value
+
+    module, symbol = source_identity.rsplit(":", 1)
+    assert state.composite_authoring is not None
+    expansion = state.composite_authoring.compile_invocation(
+        parent_workflow_uuid=state.workflow_uuid,
+        invocation_uuid=node_uuid,
+        module=module,
+        symbol=symbol,
+        keyword_arguments=keyword_arguments,
+    )
+    _require_composite_expansion(expansion, statement)
+    assert expansion.invocation_node is not None
+    invocation = _detached(expansion.invocation_node)
+    invocation["name"] = result_name
+    invocation["parent_uuid"] = parent_uuid
+    applied = state.applied_nodes.get(node_uuid)
+    if applied is not None:
+        _assert_composite_pin_compatible(applied, expansion, statement)
+        for key in (
+            "description",
+            "icon",
+            "pose",
+            "footer",
+            "execution_policy",
+            "disabled",
+            "minimized",
+            "script",
+        ):
+            if key in applied:
+                invocation[key] = _detached(applied[key])
+
+    templates = {
+        str(template["uuid"]): _detached(template)
+        for template in expansion.node_templates
+    }
+    handles_by_template: dict[str, tuple[dict[str, Any], ...]] = {}
+    for raw_handle in expansion.handle_templates:
+        handle = _detached(raw_handle)
+        template_uuid = str(handle["workflow_node_template_uuid"])
+        handles_by_template[template_uuid] = (
+            *handles_by_template.get(template_uuid, ()),
+            handle,
+        )
+
+    invocation_template_uuid = str(invocation["workflow_node_template_uuid"])
+    invocation_template = templates.get(invocation_template_uuid)
+    if invocation_template is None:
+        _fail(
+            "composite_catalog_mismatch",
+            "Published Workflow invocation template 不完整",
+            node=statement,
+        )
+    invocation_handles = handles_by_template.get(invocation_template_uuid, ())
+    target_handles = _handles_by_business_name(
+        invocation_handles,
+        "target",
+        node=call,
+    )
+    for source_node, source_handle_uuid, input_name in pending_provider_edges:
+        target_handle = target_handles.get(input_name)
+        if target_handle is None or input_name == "ready":
+            _fail(
+                "composite_boundary_mapping_invalid",
+                "Published Workflow input 未匹配真实 boundary Handle",
+                node=statement,
+            )
+        invocation.get("param", {}).pop(input_name, None)
+        state.edges.append(
+            _edge(
+                state.workflow_uuid,
+                source_node.node["uuid"],
+                node_uuid,
+                source_handle_uuid,
+                target_handle["uuid"],
+            )
+        )
+
+    invocation_state = _NodeState(
+        invocation,
+        invocation_template,
+        invocation_handles,
+        result_name,
+        statement,
+    )
+    state.nodes.append(invocation_state)
+    for raw_node in expansion.nodes:
+        node = _detached(raw_node)
+        template_uuid = str(node["workflow_node_template_uuid"])
+        template = templates.get(template_uuid)
+        if template is None:
+            _fail(
+                "composite_catalog_mismatch",
+                "Composite internal template 不完整",
+                node=statement,
+            )
+        state.nodes.append(
+            _NodeState(
+                node,
+                template,
+                handles_by_template.get(template_uuid, ()),
+                None,
+                statement,
+            )
+        )
+    state.edges.extend(_detached(list(expansion.edges)))
+    state.effective_input_contract = _detached(
+        expansion.effective_parent_input_contract
+    )
+    available_results[result_name] = invocation_state
+    state.results[result_name] = invocation_state
+    return _Flow((node_uuid,), (node_uuid,))
+
+
+def _require_composite_expansion(
+    expansion: CompositeExpansion,
+    statement: ast.stmt,
+) -> None:
+    if not expansion.diagnostics and expansion.invocation_node is not None:
+        return
+    diagnostic = expansion.diagnostics[0] if expansion.diagnostics else {}
+    code = str(diagnostic.get("code") or "composite_catalog_mismatch")
+    path = str(diagnostic.get("path") or "/composite")
+    _fail(
+        code,
+        str(diagnostic.get("message") or "Composite authoring validation failed"),
+        node=statement,
+        fields={"path": path},
+    )
+
+
+def _assert_composite_pin_compatible(
+    applied: Mapping[str, Any],
+    expansion: CompositeExpansion,
+    statement: ast.stmt,
+) -> None:
+    try:
+        stored = applied["meta_data"]["unilab"]["composite"]
+    except (KeyError, TypeError):
+        return
+    if not isinstance(stored, Mapping):
+        _fail(
+            "composite_contract_stale",
+            "Published Workflow contract pin 不符合合同",
+            node=statement,
+        )
+    for key in (
+        "child_workflow_uuid",
+        "contract_digest",
+        "composition_allow_transparent",
+    ):
+        if stored.get(key) != expansion.contract_pin.get(key):
+            _fail(
+                "composite_contract_stale",
+                "Published Workflow contract 已发生 breaking 变化",
+                node=statement,
+            )
 
 
 def _with_kind(statement: ast.With, imports: Mapping[str, str]) -> str | None:
@@ -2949,6 +3223,7 @@ def _generate_with_snapshot(
     source_uri: str,
     resource_template_identity_index: ResourceTemplateIdentityIndex | None,
     material_source_authority: MaterialSourceStaticAuthority | None,
+    composite_authoring: CompositeAuthoring | None,
 ) -> CandidateCompilation:
     del source_uri
     try:
@@ -2976,6 +3251,7 @@ def _generate_with_snapshot(
             applied_graph=normalized_candidate,
             resource_template_identity_index=resource_template_identity_index,
             material_source_authority=material_source_authority,
+            composite_authoring=composite_authoring,
             prove_normalized=False,
         )
         if (
@@ -3165,11 +3441,22 @@ def _render_graph(
             _fail("candidate_invalid", "同一 target Handle 有多条入边")
         edge_by_target[key] = edge
 
+    composite_internal_uuids = _composite_internal_node_uuids(nodes, templates)
+    visible_nodes = [
+        item for item in nodes if item["uuid"] not in composite_internal_uuids
+    ]
     selectors, selector_by_node = _render_selectors(nodes, templates)
     material_source_nodes = [
         item
-        for item in nodes
+        for item in visible_nodes
         if _is_material_source_template(
+            templates.get(str(item.get("workflow_node_template_uuid")), {})
+        )
+    ]
+    published_workflow_nodes = [
+        item
+        for item in visible_nodes
+        if _is_published_workflow_template(
             templates.get(str(item.get("workflow_node_template_uuid")), {})
         )
     ]
@@ -3189,7 +3476,7 @@ def _render_graph(
     markers = {"workflow_definition"}
     if selectors:
         markers.add("device")
-    group_nodes = [item for item in nodes if _is_group_node(item, templates)]
+    group_nodes = [item for item in visible_nodes if _is_group_node(item, templates)]
     root_layers = _root_construct_layers(nodes, graph["edges"], templates)
     if group_nodes:
         markers.add("group")
@@ -3224,6 +3511,41 @@ def _render_graph(
             suffix += 1
         reserved_import_names.add(imported_name)
         class_import_names[class_identity] = imported_name
+        alias = "" if imported_name == symbol else f" as {imported_name}"
+        emitter.emit(f"from {module} import {symbol}{alias}")
+    workflow_import_names: dict[str, str] = {}
+    for template_uuid in sorted(
+        {str(node["workflow_node_template_uuid"]) for node in published_workflow_nodes}
+    ):
+        template = templates[template_uuid]
+        try:
+            provenance = template["meta_data"]["unilab"]["workflow_source"]
+            module = provenance["module"]
+            symbol = provenance["symbol"]
+        except (KeyError, TypeError):
+            _fail(
+                "composite_catalog_mismatch",
+                "Published Workflow provenance 不完整",
+            )
+        if (
+            not isinstance(module, str)
+            or not module
+            or module.startswith(".")
+            or not isinstance(symbol, str)
+            or not symbol.isidentifier()
+            or template.get("class") != f"{module}:{symbol}"
+        ):
+            _fail(
+                "composite_catalog_mismatch",
+                "Published Workflow provenance 不是 absolute import identity",
+            )
+        imported_name = symbol
+        suffix = 2
+        while imported_name in reserved_import_names:
+            imported_name = f"{symbol}_{suffix}"
+            suffix += 1
+        reserved_import_names.add(imported_name)
+        workflow_import_names[template_uuid] = imported_name
         alias = "" if imported_name == symbol else f" as {imported_name}"
         emitter.emit(f"from {module} import {symbol}{alias}")
     resource_import_names: dict[str, str] = {}
@@ -3349,6 +3671,7 @@ def _render_graph(
                     node_by_uuid=node_by_uuid,
                     edge_by_target=edge_by_target,
                     selector_by_node=selector_by_node,
+                    workflow_import_names=workflow_import_names,
                 )
             continue
         construct = layer[0]
@@ -3365,6 +3688,7 @@ def _render_graph(
                 node_by_uuid=node_by_uuid,
                 edge_by_target=edge_by_target,
                 selector_by_node=selector_by_node,
+                workflow_import_names=workflow_import_names,
             )
         else:
             template = templates.get(
@@ -3377,6 +3701,18 @@ def _render_graph(
                     construct,
                     indent=body_indent,
                     resource_import_names=resource_import_names,
+                )
+            elif _is_published_workflow_template(template):
+                _emit_published_workflow(
+                    emitter,
+                    construct,
+                    indent=body_indent,
+                    template=template,
+                    handles_by_node=handles_by_node,
+                    handles=handles,
+                    node_by_uuid=node_by_uuid,
+                    edge_by_target=edge_by_target,
+                    workflow_import_names=workflow_import_names,
                 )
             else:
                 _emit_action(
@@ -3419,32 +3755,85 @@ def _is_group_node(
     )
 
 
+def _is_published_workflow_template(template: Mapping[str, Any]) -> bool:
+    schema = template.get("schema")
+    extension = (
+        schema.get("x-unilabos-workflow-contract")
+        if isinstance(schema, Mapping)
+        else None
+    )
+    return (
+        template.get("type") == "workflow"
+        and template.get("node_type") == "workflow"
+        and isinstance(extension, Mapping)
+        and extension.get("version") == 1
+    )
+
+
+def _composite_internal_node_uuids(
+    nodes: Sequence[Mapping[str, Any]],
+    templates: Mapping[str, dict[str, Any]],
+) -> set[str]:
+    node_by_uuid = {str(node["uuid"]): node for node in nodes}
+    composite_uuids = {
+        node_uuid
+        for node_uuid, node in node_by_uuid.items()
+        if _is_published_workflow_template(
+            templates.get(str(node.get("workflow_node_template_uuid")), {})
+        )
+    }
+    internal: set[str] = set()
+    for node_uuid, node in node_by_uuid.items():
+        parent = node.get("parent_uuid")
+        seen = {node_uuid}
+        while isinstance(parent, str):
+            if parent in seen or parent not in node_by_uuid:
+                _fail("candidate_invalid", "Composite parent hierarchy 不完整")
+            if parent in composite_uuids:
+                internal.add(node_uuid)
+                break
+            seen.add(parent)
+            parent = node_by_uuid[parent].get("parent_uuid")
+    return internal
+
+
 def _root_construct_layers(
     nodes: Sequence[dict[str, Any]],
     edges: Sequence[dict[str, Any]],
     templates: Mapping[str, dict[str, Any]],
 ) -> list[list[dict[str, Any]]]:
-    """Collapse presentation groups and recover the only representable root order."""
+    """Collapse presentation groups/Composite internals to canonical root order."""
 
     group_uuids = {item["uuid"] for item in nodes if _is_group_node(item, templates)}
+    node_by_uuid = {str(item["uuid"]): item for item in nodes}
     roots: dict[str, dict[str, Any]] = {}
     owner_by_node: dict[str, str] = {}
     for node in nodes:
         node_uuid = node["uuid"]
         parent_uuid = node.get("parent_uuid")
-        if node_uuid in group_uuids:
-            if parent_uuid is not None:
-                _fail("candidate_invalid", "02D 不支持嵌套 group graph")
-            owner_by_node[node_uuid] = node_uuid
-            roots[node_uuid] = node
-            continue
         if parent_uuid is None:
             owner_by_node[node_uuid] = node_uuid
             roots[node_uuid] = node
             continue
-        if parent_uuid not in group_uuids:
-            _fail("candidate_invalid", "Action parent 不是当前 graph 的 group")
-        owner_by_node[node_uuid] = parent_uuid
+        owner = parent_uuid
+        seen = {node_uuid}
+        while True:
+            if owner in seen or owner not in node_by_uuid:
+                _fail("candidate_invalid", "Node parent hierarchy 不完整")
+            seen.add(owner)
+            parent = node_by_uuid[owner].get("parent_uuid")
+            if parent is None:
+                break
+            owner = parent
+        owner_template = templates.get(
+            str(node_by_uuid[owner].get("workflow_node_template_uuid")),
+            {},
+        )
+        if owner not in group_uuids and not _is_published_workflow_template(
+            owner_template
+        ):
+            _fail("candidate_invalid", "Node parent 不是 group 或 Composite")
+        owner_by_node[node_uuid] = owner
 
     dependencies: dict[str, set[str]] = {uuid: set() for uuid in roots}
     for edge in edges:
@@ -3481,8 +3870,9 @@ def _render_selectors(
     dict[str, str],
 ]:
     selector_key_by_node: dict[str, tuple[str, str | None]] = {}
+    internal_uuids = _composite_internal_node_uuids(nodes, templates)
     for node in nodes:
-        if _is_group_node(node, templates):
+        if node["uuid"] in internal_uuids or _is_group_node(node, templates):
             continue
         template = templates.get(str(node.get("workflow_node_template_uuid")))
         if template is None:
@@ -3490,7 +3880,9 @@ def _render_selectors(
                 "template_catalog_mismatch",
                 "Node 未引用当前 graph 的 NodeTemplate",
             )
-        if _is_material_source_template(template):
+        if _is_material_source_template(template) or _is_published_workflow_template(
+            template
+        ):
             continue
         class_identity = template.get("class")
         if not isinstance(class_identity, str) or ":" not in class_identity:
@@ -3708,6 +4100,7 @@ def _emit_group(
     node_by_uuid: Mapping[str, dict[str, Any]],
     edge_by_target: Mapping[tuple[str, str], dict[str, Any]],
     selector_by_node: Mapping[str, str],
+    workflow_import_names: Mapping[str, str],
 ) -> None:
     emitter.anchored(
         group_node["uuid"],
@@ -3720,17 +4113,34 @@ def _emit_group(
     for child in children:
         if _is_group_node(child, templates):
             _fail("candidate_invalid", "02D 不支持嵌套 group graph")
-        _emit_action(
-            emitter,
-            child,
-            indent=indent + "    ",
-            templates=templates,
-            handles_by_node=handles_by_node,
-            handles=handles,
-            node_by_uuid=node_by_uuid,
-            edge_by_target=edge_by_target,
-            selector_by_node=selector_by_node,
+        template = templates.get(
+            str(child.get("workflow_node_template_uuid")),
+            {},
         )
+        if _is_published_workflow_template(template):
+            _emit_published_workflow(
+                emitter,
+                child,
+                indent=indent + "    ",
+                template=template,
+                handles_by_node=handles_by_node,
+                handles=handles,
+                node_by_uuid=node_by_uuid,
+                edge_by_target=edge_by_target,
+                workflow_import_names=workflow_import_names,
+            )
+        else:
+            _emit_action(
+                emitter,
+                child,
+                indent=indent + "    ",
+                templates=templates,
+                handles_by_node=handles_by_node,
+                handles=handles,
+                node_by_uuid=node_by_uuid,
+                edge_by_target=edge_by_target,
+                selector_by_node=selector_by_node,
+            )
 
 
 def _ordered_group_children(
@@ -3824,6 +4234,103 @@ def _emit_material_source(
         f"flow_role=MaterialFlowRole.{role_member})"
     )
     emitter.anchored(str(node["uuid"]), construct, indent=indent)
+
+
+def _emit_published_workflow(
+    emitter: _Emitter,
+    node: dict[str, Any],
+    *,
+    indent: str,
+    template: Mapping[str, Any],
+    handles_by_node: Mapping[str, list[dict[str, Any]]],
+    handles: Mapping[str, dict[str, Any]],
+    node_by_uuid: Mapping[str, dict[str, Any]],
+    edge_by_target: Mapping[tuple[str, str], dict[str, Any]],
+    workflow_import_names: Mapping[str, str],
+) -> None:
+    template_uuid = str(node.get("workflow_node_template_uuid") or "")
+    imported_name = workflow_import_names.get(template_uuid)
+    schema = template.get("schema")
+    extension = (
+        schema.get("x-unilabos-workflow-contract")
+        if isinstance(schema, Mapping)
+        else None
+    )
+    if imported_name is None or not isinstance(extension, Mapping):
+        _fail(
+            "composite_catalog_mismatch",
+            "Published Workflow canonical import 不完整",
+        )
+    input_order = extension.get("input_order")
+    if not isinstance(input_order, list) or any(
+        not isinstance(name, str) for name in input_order
+    ):
+        _fail(
+            "composite_catalog_mismatch",
+            "Published Workflow input order 不符合合同",
+        )
+    target_by_name = {
+        str(handle.get("data_key") or handle.get("handle_key") or ""): handle
+        for handle in handles_by_node.get(template_uuid, [])
+        if handle.get("io_type") == "target"
+        and str(handle.get("data_key") or handle.get("handle_key") or "").lower()
+        != "ready"
+    }
+    if set(target_by_name) != set(input_order):
+        _fail(
+            "composite_catalog_mismatch",
+            "Published Workflow boundary Handles 不符合 input contract",
+        )
+    input_bindings = (
+        (node.get("meta_data") or {}).get("unilab", {}).get("input_bindings", {})
+    )
+    param = node.get("param") or {}
+    if not isinstance(input_bindings, Mapping) or not isinstance(param, Mapping):
+        _fail("candidate_invalid", "Published Workflow providers 必须是对象")
+    parameters: list[str] = []
+    for name in input_order:
+        handle = target_by_name[name]
+        expression: str | None = None
+        binding = input_bindings.get(handle["uuid"])
+        if binding is not None:
+            if (
+                not isinstance(binding, Mapping)
+                or set(binding) != {"parameter"}
+                or not isinstance(binding.get("parameter"), str)
+            ):
+                _fail(
+                    "candidate_invalid",
+                    "Published Workflow input binding 不符合合同",
+                )
+            expression = str(binding["parameter"])
+        edge = edge_by_target.get((node["uuid"], handle["uuid"]))
+        if edge is not None:
+            if expression is not None:
+                _fail("candidate_invalid", "Composite target Handle 有多个 provider")
+            producer = node_by_uuid.get(str(edge["source_node_uuid"]))
+            source_handle = handles.get(str(edge["source_handle_uuid"]))
+            if producer is None or source_handle is None:
+                _fail("candidate_invalid", "Composite Edge identity 不完整")
+            output_name = str(
+                source_handle.get("data_key") or source_handle.get("handle_key") or ""
+            )
+            if output_name.lower() != "ready":
+                expression = (
+                    f"{_safe_identifier(str(producer.get('name') or 'result'), 'result')}."
+                    f"{_safe_identifier(output_name, 'value')}"
+                )
+        if name in param:
+            if expression is not None:
+                _fail("candidate_invalid", "Composite target Handle 有多个 provider")
+            expression = repr(param[name])
+        if expression is not None:
+            parameters.append(f"{name}={expression}")
+    result_name = _safe_identifier(str(node.get("name") or "result"), "result")
+    emitter.anchored(
+        str(node["uuid"]),
+        f"{result_name} = {imported_name}({', '.join(parameters)})",
+        indent=indent,
+    )
 
 
 def _emit_action(

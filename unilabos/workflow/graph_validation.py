@@ -135,7 +135,8 @@ def validate_graph(
     enabled = {
         node.uuid: node
         for node in nodes
-        if not node.disabled and _node_kind(node, templates) != "group"
+        if not node.disabled
+        and _node_kind(node, templates) not in {"group", "composite"}
     }
     enabled_edges: list[WorkflowEdgeWrite] = []
     incoming: dict[tuple[str, str], str] = {}
@@ -385,6 +386,7 @@ def _node_kind(
         "tool_call": "tool_call",
         "manual_confirm": "manual_confirm",
         "material_source": "material_source",
+        "workflow": "composite",
     }
     kind = aliases.get(str(raw_kind).strip().lower())
     if kind is None:
