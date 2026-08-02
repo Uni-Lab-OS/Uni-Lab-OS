@@ -209,6 +209,33 @@ def test_formal_scheduler_identity_mapping_is_released_after_cancel() -> None:
     assert scheduler._device_action_tasks_by_job_uuid == {}
 
 
+def test_duplicate_formal_task_identity_preserves_the_existing_scheduler_run() -> None:
+    scheduler = EdgeScheduler(dispatcher=RecordingDispatcher())
+    task_uuid, job_uuid = _submit_formal_device_action(scheduler)
+    before_snapshot = copy.deepcopy(scheduler.snapshot())
+    before_mappings = dict(scheduler._device_action_tasks_by_job_uuid)
+    before_resource_locks = copy.deepcopy(scheduler._job_resource_locks)
+
+    try:
+        scheduler.submit_device_action_task(
+            task_uuid=task_uuid,
+            job_uuid=str(uuid4()),
+            device_id="other-robot",
+            action_name="inspect",
+            action_type="test.action.Inspect",
+            input_value={},
+        )
+        raise AssertionError("duplicate formal task identity must be rejected")
+    except ValueError:
+        pass
+
+    assert scheduler.snapshot() == before_snapshot
+    assert scheduler._device_action_tasks_by_job_uuid == before_mappings == {
+        job_uuid: task_uuid
+    }
+    assert scheduler._job_resource_locks == before_resource_locks
+
+
 def test_generic_workflow_worker_never_dispatches_device_action_tasks(
     tmp_path: Path,
 ) -> None:

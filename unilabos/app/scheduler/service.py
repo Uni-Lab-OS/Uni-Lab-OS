@@ -239,6 +239,8 @@ class EdgeScheduler:
         if any(not isinstance(value, str) or not value for value in values):
             raise ValueError("formal device-action Task fields must be non-empty")
         with self._lock:
+            if task_uuid in self._workflows:
+                raise ValueError(f"device-action Task {task_uuid} already submitted")
             if job_uuid in self._device_action_tasks_by_job_uuid:
                 raise ValueError(f"device-action Job {job_uuid} already submitted")
             self._device_action_tasks_by_job_uuid[job_uuid] = task_uuid
