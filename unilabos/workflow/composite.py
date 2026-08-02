@@ -736,6 +736,31 @@ _WORKFLOW_SOURCE_FIELDS = {
     "package_catalog_digest",
     "definition_content_hash",
 }
+_WORKFLOW_HANDLE_FIELDS = {
+    "uuid",
+    "workflow_node_template_uuid",
+    "handle_key",
+    "io_type",
+    "display_name",
+    "description",
+    "type",
+    "required",
+    "data_source",
+    "data_key",
+    "meta_data",
+    "create_time",
+    "update_time",
+}
+_WORKFLOW_BUSINESS_HANDLE_METADATA_FIELDS = {
+    "value_schema",
+    "editor_control",
+    "allowed_resource_template_uuids",
+    "implicit_passthrough",
+}
+_WORKFLOW_READY_HANDLE_METADATA_FIELDS = {
+    *_WORKFLOW_BUSINESS_HANDLE_METADATA_FIELDS,
+    "structural_role",
+}
 
 
 def _is_framework_published_workflow_template(
@@ -898,7 +923,7 @@ def _workflow_envelope_matches(
     required = envelope.get("required")
     if (
         not isinstance(properties, Mapping)
-        or list(properties) != list(order)
+        or set(properties) != set(order)
         or not isinstance(required, (list, tuple))
         or any(item not in order for item in required)
         or len(set(required)) != len(required)
@@ -920,7 +945,14 @@ def _published_workflow_handles_match(
         for handle in handles
         if handle.get("workflow_node_template_uuid") == template_uuid
     ]
-    if any(not _is_canonical_uuid(handle.get("uuid")) for handle in owned):
+    if any(
+        not _is_canonical_uuid(handle.get("uuid"))
+        or not set(handle).issubset(_WORKFLOW_HANDLE_FIELDS)
+        or not _WORKFLOW_HANDLE_FIELDS.difference(
+            {"description", "create_time", "update_time"}
+        ).issubset(handle)
+        for handle in owned
+    ):
         return False
     business: dict[tuple[str, str], Mapping[str, Any]] = {}
     ready: dict[str, Mapping[str, Any]] = {}
@@ -958,10 +990,55 @@ def _published_workflow_handles_match(
                 or handle.get("data_key") != name
                 or handle.get("data_source")
                 != ("goal" if io_type == "target" else "result")
-                or unilab.get("value_schema") != schemas[name]
+                or not _business_handle_shape_matches(
+                    handle,
+                    unilab,
+                    schema=schemas[name],
+                    required=(
+                        name in properties[envelope_name]["required"]
+                        if io_type == "target"
+                        else False
+                    ),
+                    io_type=io_type,
+                )
             ):
                 return False
     return True
+
+
+def _business_handle_shape_matches(
+    handle: Mapping[str, Any],
+    unilab: Mapping[str, Any],
+    *,
+    schema: Mapping[str, Any],
+    required: bool,
+    io_type: str,
+) -> bool:
+    # TemplateCatalog freezes JSON arrays as tuples in a read snapshot.  The
+    # shared public projection helpers intentionally consume JSON-shaped
+    # mappings, so normalize the authoritative schema before deriving the
+    # Handle presentation fields.
+    plain_schema = _plain(schema)
+    slot_schema = resource_slot_schema(plain_schema)
+    expected_allowlist = (
+        _plain(slot_schema.get("allowed_resource_template_uuids"))
+        if slot_schema is not None
+        else None
+    )
+    expected_control = (
+        "material_port" if slot_schema is not None else "variable_selector"
+    )
+    implicit = unilab.get("implicit_passthrough")
+    return (
+        set(unilab) == _WORKFLOW_BUSINESS_HANDLE_METADATA_FIELDS
+        and handle.get("type") == workflow_handle_type(plain_schema)
+        and handle.get("required") is required
+        and unilab.get("value_schema") == schema
+        and unilab.get("editor_control") == expected_control
+        and _plain(unilab.get("allowed_resource_template_uuids")) == expected_allowlist
+        and isinstance(implicit, bool)
+        and (io_type == "source" or implicit is False)
+    )
 
 
 def _ready_handle_shape_matches(
@@ -969,7 +1046,8 @@ def _ready_handle_shape_matches(
     unilab: Mapping[str, Any],
 ) -> bool:
     return (
-        handle.get("handle_key") == "ready"
+        set(unilab) == _WORKFLOW_READY_HANDLE_METADATA_FIELDS
+        and handle.get("handle_key") == "ready"
         and handle.get("data_key") == "ready"
         and handle.get("data_source") == "dependency"
         and handle.get("type") == "boolean"
