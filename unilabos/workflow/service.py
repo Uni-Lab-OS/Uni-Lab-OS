@@ -110,7 +110,7 @@ _HASH_TOKEN = re.compile(r"sha256:[0-9a-f]{64}\Z")
 _NO_EXPECTED_HASH = object()
 _F_SETOWN_EX = getattr(fcntl, "F_SETOWN_EX", 15)
 _F_OWNER_TID = 0
-_LEASE_BREAK_SIGNAL = signal.SIGRTMAX
+_LEASE_BREAK_SIGNAL = signal.SIGIO
 _WORKFLOW_READ_FIELDS = {
     "uuid",
     "create_time",
