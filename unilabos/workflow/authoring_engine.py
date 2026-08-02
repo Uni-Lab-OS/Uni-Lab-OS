@@ -41,6 +41,7 @@ from unilabos.workflow.composite import (
     CompositeAuthoring,
     CompositeExpansion,
     classify_published_workflow_compatibility_projections,
+    published_workflow_compatibility_projection,
 )
 from unilabos.workflow.graph_validation import (
     CodedGraphValidationError,
@@ -2975,12 +2976,22 @@ def _candidate_graph(
     workflow["meta_data"] = meta_data
 
     referenced_templates = {item.template["uuid"] for item in state.nodes}
+    refreshed_published_templates = {
+        str(item.template["uuid"]): item.template
+        for item in state.nodes
+        if _is_published_workflow_template(item.template)
+    }
     applied_templates = {
         item["uuid"]: item for item in state.applied_graph["node_templates"]
     }
     node_templates = sorted(
         (
-            _detached(applied_templates.get(item["uuid"], item))
+            _detached(
+                refreshed_published_templates.get(
+                    str(item["uuid"]),
+                    applied_templates.get(item["uuid"], item),
+                )
+            )
             for item in state.snapshot.node_templates
             if item["uuid"] in referenced_templates
         ),
@@ -2992,6 +3003,12 @@ def _candidate_graph(
             item["workflow_node_template_uuid"],
             [],
         ).append(item)
+    refreshed_published_handles: dict[str, list[dict[str, Any]]] = {}
+    for item in state.nodes:
+        template_uuid = str(item.template["uuid"])
+        if template_uuid not in refreshed_published_templates:
+            continue
+        refreshed_published_handles[template_uuid] = list(item.handles)
     snapshot_handles_by_template: dict[str, list[dict[str, Any]]] = {}
     for item in state.snapshot.handle_templates:
         snapshot_handles_by_template.setdefault(
@@ -3003,9 +3020,12 @@ def _candidate_graph(
             _detached(item)
             for template_uuid in referenced_templates
             for item in (
-                applied_handles_by_template.get(template_uuid, [])
-                if template_uuid in applied_templates
-                else snapshot_handles_by_template.get(template_uuid, [])
+                refreshed_published_handles.get(template_uuid)
+                or (
+                    applied_handles_by_template.get(template_uuid, [])
+                    if template_uuid in applied_templates
+                    else snapshot_handles_by_template.get(template_uuid, [])
+                )
             )
         ),
         key=lambda item: item["uuid"],
@@ -3272,7 +3292,7 @@ def _generate_with_snapshot(
             workflow_uuid=workflow_uuid,
             workflow_revision=workflow_revision,
         )
-        _validate_catalog_projection(snapshot, candidate)
+        stale_published = _validate_catalog_projection(snapshot, candidate)
         _validate_built_graph(
             candidate,
             material_source_authority=material_source_authority,
@@ -3295,16 +3315,28 @@ def _generate_with_snapshot(
             composite_authoring=composite_authoring,
             prove_normalized=False,
         )
+        if not recompiled.valid:
+            diagnostic = recompiled.diagnostics[0] if recompiled.diagnostics else {}
+            _fail(
+                str(diagnostic.get("code") or "round_trip_mismatch"),
+                str(
+                    diagnostic.get("message")
+                    or "Candidate graph 不能证明为等价的 Python"
+                ),
+            )
         if (
-            not recompiled.valid
-            or not (
+            not (
                 _semantic_graph_equal(recompiled.graph, normalized_candidate)
                 or (
                     unexpanded_composites
                     and _semantic_graph_equal(
-                        _project_unexpanded_composite_boundaries(
-                            recompiled.graph,
-                            unexpanded_composites,
+                        _align_stale_published_projection(
+                            _project_unexpanded_composite_boundaries(
+                                recompiled.graph,
+                                unexpanded_composites,
+                            ),
+                            normalized_candidate,
+                            stale_published,
                         ),
                         normalized_candidate,
                     )
@@ -3367,7 +3399,7 @@ def _generate_with_snapshot(
 def _validate_catalog_projection(
     snapshot: TemplateCatalogSnapshot,
     graph: dict[str, Any],
-) -> None:
+) -> set[str]:
     referenced = {
         node.get("workflow_node_template_uuid")
         for node in graph["nodes"]
@@ -3388,19 +3420,6 @@ def _validate_catalog_projection(
         )
         for item in graph["node_templates"]
     }
-    if (
-        set(snapshot_nodes) != referenced
-        or len(projected_nodes) != len(graph["node_templates"])
-        or set(projected_nodes) != set(snapshot_nodes)
-        or any(
-            not _catalog_wire_equal(projected_nodes[uuid], snapshot_nodes[uuid])
-            for uuid in snapshot_nodes
-        )
-    ):
-        _fail(
-            "template_catalog_mismatch",
-            "Candidate NodeTemplate projection 不属于当前 authority snapshot",
-        )
     snapshot_handles = {
         item["uuid"]: _catalog_read_entity(
             item,
@@ -3416,18 +3435,196 @@ def _validate_catalog_projection(
         )
         for item in graph["handle_templates"]
     }
+    stale_published = _stale_published_projection_uuids(
+        graph=graph,
+        snapshot_nodes=snapshot_nodes,
+        projected_nodes=projected_nodes,
+        snapshot_handles=snapshot_handles,
+        projected_handles=projected_handles,
+    )
+    if (
+        set(snapshot_nodes) != referenced
+        or len(projected_nodes) != len(graph["node_templates"])
+        or set(projected_nodes) != set(snapshot_nodes)
+        or any(
+            uuid not in stale_published
+            and not _catalog_wire_equal(projected_nodes[uuid], snapshot_nodes[uuid])
+            for uuid in snapshot_nodes
+        )
+    ):
+        _fail(
+            "template_catalog_mismatch",
+            "Candidate NodeTemplate projection 不属于当前 authority snapshot",
+        )
+    exact_snapshot_handles = {
+        uuid: handle
+        for uuid, handle in snapshot_handles.items()
+        if handle.get("workflow_node_template_uuid") not in stale_published
+    }
+    exact_projected_handles = {
+        uuid: handle
+        for uuid, handle in projected_handles.items()
+        if handle.get("workflow_node_template_uuid") not in stale_published
+    }
     if (
         len(projected_handles) != len(graph["handle_templates"])
-        or set(projected_handles) != set(snapshot_handles)
+        or set(exact_projected_handles) != set(exact_snapshot_handles)
         or any(
-            not _catalog_wire_equal(projected_handles[uuid], snapshot_handles[uuid])
-            for uuid in snapshot_handles
+            not _catalog_wire_equal(
+                exact_projected_handles[uuid],
+                exact_snapshot_handles[uuid],
+            )
+            for uuid in exact_snapshot_handles
         )
     ):
         _fail(
             "template_catalog_mismatch",
             "Candidate HandleTemplate projection 不属于当前 authority snapshot",
         )
+    return stale_published
+
+
+def _stale_published_projection_uuids(
+    *,
+    graph: Mapping[str, Any],
+    snapshot_nodes: Mapping[str, Mapping[str, Any]],
+    projected_nodes: Mapping[str, Mapping[str, Any]],
+    snapshot_handles: Mapping[str, Mapping[str, Any]],
+    projected_handles: Mapping[str, Mapping[str, Any]],
+) -> set[str]:
+    result: set[str] = set()
+    graph_nodes = [node for node in graph.get("nodes", []) if isinstance(node, Mapping)]
+    for template_uuid, previous_template in projected_nodes.items():
+        current_template = snapshot_nodes.get(template_uuid)
+        if (
+            not isinstance(template_uuid, str)
+            or not isinstance(current_template, Mapping)
+            or not _is_published_workflow_template(previous_template)
+            or not _is_published_workflow_template(current_template)
+            or not _published_template_identity_equal(
+                previous_template,
+                current_template,
+            )
+        ):
+            continue
+        previous_handles = [
+            handle
+            for handle in projected_handles.values()
+            if handle.get("workflow_node_template_uuid") == template_uuid
+        ]
+        current_handles = [
+            handle
+            for handle in snapshot_handles.values()
+            if handle.get("workflow_node_template_uuid") == template_uuid
+        ]
+        try:
+            previous_projection = published_workflow_compatibility_projection(
+                previous_template,
+                previous_handles,
+            )
+            current_projection = published_workflow_compatibility_projection(
+                current_template,
+                current_handles,
+            )
+        except (KeyError, TypeError, ValueError):
+            continue
+        if previous_projection == current_projection and (
+            _published_implementation_pin(previous_template)
+            == _published_implementation_pin(current_template)
+        ):
+            continue
+        invocations = [
+            node
+            for node in graph_nodes
+            if node.get("workflow_node_template_uuid") == template_uuid
+        ]
+        if not invocations or not all(
+            _invocation_projection_matches(node, previous_projection)
+            for node in invocations
+        ):
+            continue
+        if not _published_handle_projection_closed(
+            previous_handles,
+            previous_projection,
+        ):
+            continue
+        result.add(template_uuid)
+    return result
+
+
+def _published_implementation_pin(template: Mapping[str, Any]) -> tuple[Any, Any]:
+    schema = template.get("schema")
+    extension = (
+        schema.get("x-unilabos-workflow-contract")
+        if isinstance(schema, Mapping)
+        else None
+    )
+    if not isinstance(extension, Mapping):
+        return None, None
+    return extension.get("workflow_revision"), extension.get("applied_source_hash")
+
+
+def _published_template_identity_equal(
+    previous: Mapping[str, Any],
+    current: Mapping[str, Any],
+) -> bool:
+    if any(
+        previous.get(key) != current.get(key)
+        for key in (
+            "uuid",
+            "resource_template_uuid",
+            "name",
+            "type",
+            "node_type",
+            "class",
+        )
+    ):
+        return False
+
+    def authority(template: Mapping[str, Any]) -> tuple[Any, Any]:
+        meta_data = template.get("meta_data")
+        unilab = meta_data.get("unilab") if isinstance(meta_data, Mapping) else None
+        if not isinstance(unilab, Mapping):
+            return None, None
+        return unilab.get("workflow_source"), unilab.get("framework_owner_only")
+
+    return authority(previous) == authority(current)
+
+
+def _invocation_projection_matches(
+    node: Mapping[str, Any],
+    projection: Mapping[str, Any],
+) -> bool:
+    meta_data = node.get("meta_data")
+    unilab = meta_data.get("unilab") if isinstance(meta_data, Mapping) else None
+    composite = unilab.get("composite") if isinstance(unilab, Mapping) else None
+    if not isinstance(composite, Mapping):
+        return False
+    return composite.get("contract_compatibility") == projection and all(
+        composite.get(key) == projection.get(projection_key)
+        for key, projection_key in (
+            ("child_workflow_uuid", "workflow_uuid"),
+            ("contract_digest", "digest"),
+            ("composition_allow_transparent", "mode"),
+        )
+    )
+
+
+def _published_handle_projection_closed(
+    handles: Sequence[Mapping[str, Any]],
+    projection: Mapping[str, Any],
+) -> bool:
+    expected = {
+        *((str(item["name"]), "target") for item in projection["inputs"]),
+        *((str(item["name"]), "source") for item in projection["outputs"]),
+        ("ready", "target"),
+        ("ready", "source"),
+    }
+    actual = {
+        (str(handle.get("handle_key")), str(handle.get("io_type")))
+        for handle in handles
+    }
+    return len(actual) == len(handles) and actual == expected
 
 
 @dataclass(slots=True)
@@ -4575,12 +4772,13 @@ def _unexpanded_composite_invocations(graph: Mapping[str, Any]) -> set[str]:
             continue
         meta_data = node.get("meta_data")
         unilab = meta_data.get("unilab") if isinstance(meta_data, Mapping) else None
-        if isinstance(unilab, Mapping) and isinstance(unilab.get("composite"), Mapping):
-            continue
         if node_uuid in parent_uuids:
+            if isinstance(unilab, Mapping) and isinstance(
+                unilab.get("composite"), Mapping
+            ):
+                continue
             _fail(
-                "candidate_invalid",
-                "未展开 Composite boundary 不得携带 internal Nodes",
+                "candidate_invalid", "未展开 Composite boundary 不得携带 internal Nodes"
             )
         result.add(node_uuid)
     return result
@@ -4643,6 +4841,66 @@ def _project_unexpanded_composite_boundaries(
         if str(handle.get("workflow_node_template_uuid")) in template_uuids
     ]
     return projected
+
+
+def _align_stale_published_projection(
+    actual: dict[str, Any],
+    expected: Mapping[str, Any],
+    template_uuids: set[str],
+) -> dict[str, Any]:
+    """仅在 fixed-point 证明中对齐已认证的旧 Published server projection。"""
+
+    if not template_uuids:
+        return actual
+    result = _detached(actual)
+    expected_nodes = {
+        str(node.get("uuid")): node
+        for node in expected.get("nodes", [])
+        if isinstance(node, Mapping)
+    }
+    for node in result.get("nodes", []):
+        if str(node.get("workflow_node_template_uuid")) not in template_uuids:
+            continue
+        previous = expected_nodes.get(str(node.get("uuid")))
+        if not isinstance(previous, Mapping):
+            continue
+        current_meta = node.get("meta_data")
+        previous_meta = previous.get("meta_data")
+        current_unilab = (
+            current_meta.get("unilab") if isinstance(current_meta, dict) else None
+        )
+        previous_unilab = (
+            previous_meta.get("unilab") if isinstance(previous_meta, Mapping) else None
+        )
+        if isinstance(current_unilab, dict) and isinstance(previous_unilab, Mapping):
+            current_unilab["composite"] = _detached(
+                previous_unilab.get("composite", {})
+            )
+    result["node_templates"] = [
+        *[
+            template
+            for template in result.get("node_templates", [])
+            if str(template.get("uuid")) not in template_uuids
+        ],
+        *[
+            _detached(template)
+            for template in expected.get("node_templates", [])
+            if str(template.get("uuid")) in template_uuids
+        ],
+    ]
+    result["handle_templates"] = [
+        *[
+            handle
+            for handle in result.get("handle_templates", [])
+            if str(handle.get("workflow_node_template_uuid")) not in template_uuids
+        ],
+        *[
+            _detached(handle)
+            for handle in expected.get("handle_templates", [])
+            if str(handle.get("workflow_node_template_uuid")) in template_uuids
+        ],
+    ]
+    return result
 
 
 __all__ = ["WorkflowAuthoringEngine"]

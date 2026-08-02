@@ -1440,7 +1440,9 @@ def _target_mappings(
                         "target_handle_uuid": target_handle_uuid,
                     }
                 )
-        if not entries:
+        if not entries and (
+            parameter.get("required") is not False or "default" not in parameter
+        ):
             raise _CompositeFailure(
                 "composite_boundary_mapping_invalid",
                 f"/child/input_bindings/{name}",
@@ -2300,6 +2302,15 @@ def classify_published_workflow_compatibility(
     return classify_published_workflow_compatibility_projections(previous, current)
 
 
+def published_workflow_compatibility_projection(
+    template: Mapping[str, Any],
+    handles: Sequence[Mapping[str, Any]],
+) -> dict[str, Any]:
+    """生成可随 Applied invocation 固定的最小兼容性投影。"""
+
+    return _compatibility_projection(template, handles)
+
+
 def classify_published_workflow_compatibility_projections(
     previous: Mapping[str, Any],
     current: Mapping[str, Any],
@@ -2545,4 +2556,5 @@ __all__ = [
     "classify_published_workflow_compatibility",
     "classify_published_workflow_compatibility_projections",
     "project_published_workflow_contract",
+    "published_workflow_compatibility_projection",
 ]
