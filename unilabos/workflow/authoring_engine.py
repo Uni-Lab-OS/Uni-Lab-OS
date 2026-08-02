@@ -42,6 +42,7 @@ from unilabos.workflow.composite import (
     CompositeExpansion,
     classify_published_workflow_compatibility_projections,
     published_workflow_compatibility_projection,
+    published_workflow_projection_is_canonical,
 )
 from unilabos.workflow.graph_validation import (
     CodedGraphValidationError,
@@ -3543,9 +3544,9 @@ def _stale_published_projection_uuids(
             for node in invocations
         ):
             continue
-        if not _published_handle_projection_closed(
+        if not published_workflow_projection_is_canonical(
+            previous_template,
             previous_handles,
-            previous_projection,
         ):
             continue
         result.add(template_uuid)
@@ -3608,23 +3609,6 @@ def _invocation_projection_matches(
             ("composition_allow_transparent", "mode"),
         )
     )
-
-
-def _published_handle_projection_closed(
-    handles: Sequence[Mapping[str, Any]],
-    projection: Mapping[str, Any],
-) -> bool:
-    expected = {
-        *((str(item["name"]), "target") for item in projection["inputs"]),
-        *((str(item["name"]), "source") for item in projection["outputs"]),
-        ("ready", "target"),
-        ("ready", "source"),
-    }
-    actual = {
-        (str(handle.get("handle_key")), str(handle.get("io_type")))
-        for handle in handles
-    }
-    return len(actual) == len(handles) and actual == expected
 
 
 @dataclass(slots=True)

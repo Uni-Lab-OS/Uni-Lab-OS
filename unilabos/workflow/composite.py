@@ -2311,6 +2311,15 @@ def published_workflow_compatibility_projection(
     return _compatibility_projection(template, handles)
 
 
+def published_workflow_projection_is_canonical(
+    template: Mapping[str, Any],
+    handles: Sequence[Mapping[str, Any]],
+) -> bool:
+    """认证旧 Canvas 中完整的 Published Workflow template/Handle aggregate。"""
+
+    return _is_framework_published_workflow_template(template, handles)
+
+
 def classify_published_workflow_compatibility_projections(
     previous: Mapping[str, Any],
     current: Mapping[str, Any],
@@ -2557,4 +2566,5 @@ __all__ = [
     "classify_published_workflow_compatibility_projections",
     "project_published_workflow_contract",
     "published_workflow_compatibility_projection",
+    "published_workflow_projection_is_canonical",
 ]
