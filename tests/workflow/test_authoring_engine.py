@@ -931,6 +931,109 @@ def test_generate_python_and_validate_are_pure_public_transforms(
     assert validated.normalized_python_source == compiled.normalized_python_source
 
 
+def test_compile_retains_wire_equivalent_applied_catalog_read_projection(
+    tmp_path: Path,
+) -> None:
+    imports = _catalog_imports()
+    prepare_import = next(
+        item for item in imports if item.template["uuid"] == PREPARE_TEMPLATE_UUID
+    )
+    for handle in prepare_import.handles:
+        handle["description"] = None
+
+    with _opened_engine(
+        tmp_path / "retained-catalog-projection.db",
+        imports=imports,
+    ) as context:
+        prepare_only_source = _source().replace(
+            f"""    # unilab:node_uuid={ANALYZE_NODE_UUID}
+    analyzed = reactor.analyze(
+        prepared=prepared.prepared,
+        label=mode,
+    )
+    return workflow_output(
+        sample=prepared.prepared,
+        report=analyzed.report,
+    )
+""",
+            "    return workflow_output(sample=prepared.prepared)\n",
+        )
+        applied = _compile(context.engine, prepare_only_source)
+        assert applied.valid and applied.graph is not None
+        applied_graph = deepcopy(applied.graph)
+        for template in applied_graph["node_templates"]:
+            for field_name in ("schema", "icon", "header", "footer"):
+                assert template.pop(field_name) is None
+        for handle in applied_graph["handle_templates"]:
+            assert handle.pop("description") is None
+
+        expanded = _compile(context.engine, graph=applied_graph)
+        assert expanded.valid and expanded.graph is not None
+        candidate_graph = deepcopy(expanded.graph)
+        candidate_graph["node_templates"] = [
+            deepcopy(applied_graph["node_templates"][0])
+            if item["uuid"] == PREPARE_TEMPLATE_UUID
+            else item
+            for item in candidate_graph["node_templates"]
+        ]
+        retained_handles = {
+            item["uuid"]: item for item in applied_graph["handle_templates"]
+        }
+        candidate_graph["handle_templates"] = [
+            deepcopy(retained_handles[item["uuid"]])
+            if item["uuid"] in retained_handles
+            else item
+            for item in candidate_graph["handle_templates"]
+        ]
+
+        generated = context.engine.generate_python(
+            workflow_uuid=WORKFLOW_UUID,
+            workflow_revision=7,
+            graph=candidate_graph,
+            source_uri="package://lab/workflows/expanded.py",
+        )
+        assert generated.valid and generated.normalized_python_source is not None
+        recompiled = _compile(
+            context.engine,
+            generated.normalized_python_source,
+            graph=applied_graph,
+        )
+
+    assert recompiled.valid and recompiled.graph is not None
+    retained_template = next(
+        item
+        for item in recompiled.graph["node_templates"]
+        if item["uuid"] == PREPARE_TEMPLATE_UUID
+    )
+    assert retained_template == applied_graph["node_templates"][0]
+    assert {
+        item["uuid"]: item
+        for item in recompiled.graph["handle_templates"]
+        if item["workflow_node_template_uuid"] == PREPARE_TEMPLATE_UUID
+    } == retained_handles
+
+    new_template = next(
+        item
+        for item in recompiled.graph["node_templates"]
+        if item["uuid"] == ANALYZE_TEMPLATE_UUID
+    )
+    expected_new_template = next(
+        item
+        for item in candidate_graph["node_templates"]
+        if item["uuid"] == ANALYZE_TEMPLATE_UUID
+    )
+    assert new_template == expected_new_template
+    assert [
+        item
+        for item in recompiled.graph["handle_templates"]
+        if item["workflow_node_template_uuid"] == ANALYZE_TEMPLATE_UUID
+    ] == [
+        item
+        for item in candidate_graph["handle_templates"]
+        if item["workflow_node_template_uuid"] == ANALYZE_TEMPLATE_UUID
+    ]
+
+
 def test_workflow_output_import_alias_normalizes_to_the_result_record(
     engine_context: EngineContext,
 ) -> None:
