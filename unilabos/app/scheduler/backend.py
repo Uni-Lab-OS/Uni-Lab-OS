@@ -191,6 +191,11 @@ class JobExecutionBackend:
             busy.add(job.device_action_key)
         return busy
 
+    def execution_ready(self) -> bool:
+        """Whether HostNode completed device initialization for local dispatch."""
+
+        return self._host_node_getter() is not None
+
     # ── HostNode 侧接口（bridge 形状，duck-typing） ───────────
 
     def publish_job_status(

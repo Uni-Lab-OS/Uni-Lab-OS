@@ -413,6 +413,7 @@ class HostNode(BaseROS2DeviceNode):
 
         # 初始化所有本机设备节点，多一次过滤，防止重复初始化
         local_machine = BasicConfig.machine_name
+        initialization_failures: list[str] = []
         for device_config in devices_config.root_nodes:
             device_id = device_config.res_content.id
             if device_config.res_content.type != "device":
@@ -425,7 +426,8 @@ class HostNode(BaseROS2DeviceNode):
                 )
                 continue
             if device_id not in self.devices_names:
-                self.initialize_device(device_id, device_config)
+                if not self.initialize_device(device_id, device_config):
+                    initialization_failures.append(device_id)
             else:
                 self.lab_logger().warning(f"[Host Node] Device {device_id} already existed, skipping.")
         self.update_device_status_subscriptions()
@@ -447,6 +449,12 @@ class HostNode(BaseROS2DeviceNode):
         self._ping_responses = {}  # 存储ping响应
         self._ping_lock = threading.Lock()
 
+        if initialization_failures:
+            failed = ", ".join(sorted(initialization_failures))
+            self.lab_logger().error(
+                f"[Host Node] Host node initialization failed; devices unavailable: {failed}"
+            )
+            return
         self.lab_logger().info("[Host Node] Host node initialized.")
         HostNode._ready_event.set()
 
@@ -731,7 +739,7 @@ class HostNode(BaseROS2DeviceNode):
             return res
         raise ValueError(f"创建资源时失败！响应为空")
 
-    def initialize_device(self, device_id: str, device_config: ResourceDictInstance) -> None:
+    def initialize_device(self, device_id: str, device_config: ResourceDictInstance) -> bool:
         """
         根据配置初始化设备，
 
@@ -750,7 +758,7 @@ class HostNode(BaseROS2DeviceNode):
             self.lab_logger().error(f"[Host Node] Device class invalid: {e}")
             d = None
         if d is None:
-            return
+            return False
         # noinspection PyProtectedMember
         self.devices_names[device_id] = d._ros_node.namespace  # 这里不涉及二级device_id
         self.device_machine_names[device_id] = "本地"
@@ -796,6 +804,7 @@ class HostNode(BaseROS2DeviceNode):
         self._online_devices.add(device_key)
         # 新注册本地设备 action 后主动上报其 free 锁状态
         self._report_action_locks_free(new_action_pairs)
+        return True
 
     def update_device_status_subscriptions(self) -> None:
         """

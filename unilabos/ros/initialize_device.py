@@ -2,6 +2,7 @@ from typing import Optional
 
 from unilabos.registry.init_enforce import merge_init_param_enforce
 from unilabos.registry.registry import lab_registry
+from unilabos.package_manager.consumers import resolve_registry_definition
 from unilabos.ros.device_node_wrapper import ros2_device_node
 from unilabos.ros.nodes.base_device_node import ROS2DeviceNode, DeviceInitError
 from unilabos.resources.resource_tracker import ResourceDictInstance
@@ -31,11 +32,18 @@ def initialize_device_from_dict(device_id, device_config: ResourceDictInstance) 
     if isinstance(device_class_config, str):  # 如果是字符串，则直接去lab_registry中查找，获取class
         if len(device_class_config) == 0:
             raise DeviceClassInvalid(f"Device [{device_id}] class cannot be an empty string. {device_config}")
-        if device_class_config not in lab_registry.device_type_registry:
+        try:
+            canonical_class, registry_entry = resolve_registry_definition(
+                lab_registry.device_type_registry,
+                device_class_config,
+            )
+        except KeyError:
             raise DeviceClassInvalid(
                 f"Device [{device_id}] class {device_class_config} not found. {device_config}"
-            )
-        registry_entry = lab_registry.device_type_registry[device_class_config]
+            ) from None
+        # Runtime graph state carries the resolved identity after activation;
+        # Registry itself remains canonical and does not gain alias records.
+        device_config.res_content.klass = canonical_class
         device_class_config = registry_entry["class"]
     elif isinstance(device_class_config, dict):
         raise DeviceClassInvalid(
