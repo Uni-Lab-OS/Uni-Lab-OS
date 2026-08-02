@@ -14,10 +14,12 @@ from typing import Any, Protocol
 
 import rfc8785
 
+from unilabos.workflow.authoring_identity import authoring_edge, expanded_node_uuid
 from unilabos.workflow.catalog import (
     CatalogAuthority,
     NodeTemplateImport,
     TemplateCatalog,
+    TemplateCatalogError,
     TemplateCatalogMismatch,
     TemplateCatalogSnapshot,
 )
@@ -26,8 +28,8 @@ from unilabos.workflow.handle_projection import (
     structural_ready_handle,
     workflow_handle_type,
 )
-from unilabos.workflow.models import validate_uuid
-from unilabos.workflow.schema import WorkflowSchemaError
+from unilabos.workflow.models import WorkflowNodeWrite, validate_uuid
+from unilabos.workflow.schema import WorkflowSchemaError, parse_input_contract
 from unilabos.workflow.store import StoreNotFound, WorkflowStore
 from unilabos.workflow.workflow_io import (
     WorkflowIOValidationError,
@@ -57,6 +59,42 @@ class CompositeCatalogMismatch(TemplateCatalogMismatch):
     """Published Workflow publication 无法与当前 Composite authority 对齐。"""
 
     code = "composite_catalog_mismatch"
+
+
+@dataclass(frozen=True, slots=True)
+class CompositeExpansion:
+    """一次 Composite invocation 的完整 server-owned authoring 投影。"""
+
+    invocation_node: Mapping[str, Any] | None
+    nodes: tuple[Mapping[str, Any], ...]
+    edges: tuple[Mapping[str, Any], ...]
+    target_mappings: Mapping[str, tuple[Mapping[str, str], ...]]
+    source_mappings: Mapping[str, Mapping[str, str]]
+    structural_mappings: Mapping[str, tuple[Mapping[str, str], ...]]
+    node_templates: tuple[Mapping[str, Any], ...]
+    handle_templates: tuple[Mapping[str, Any], ...]
+    contract_pin: Mapping[str, Any]
+    effective_parent_input_contract: Mapping[str, Any]
+    diagnostics: tuple[Mapping[str, str], ...]
+
+
+class _CompositeFailure(RuntimeError):
+    def __init__(self, code: str, path: str) -> None:
+        super().__init__(path)
+        self.code = code
+        self.path = path
+
+
+@dataclass(slots=True)
+class _ExpandedChild:
+    invocation_node: dict[str, Any]
+    nodes: list[dict[str, Any]]
+    edges: list[dict[str, Any]]
+    target_mappings: dict[str, list[dict[str, str]]]
+    source_mappings: dict[str, dict[str, str]]
+    structural_mappings: dict[str, list[dict[str, str]]]
+    contract_pin: dict[str, Any]
+    paths: dict[tuple[str, ...], str]
 
 
 class PublishedWorkflowCatalogPublisher:
@@ -145,6 +183,1248 @@ class PublishedWorkflowCatalogPublisher:
         """需要在 workflow mutation transaction 内失效的 Catalog authority。"""
 
         return self._authority.authority_id
+
+
+class CompositeAuthoring:
+    """Published Workflow invocation 的唯一静态展开 Interface。"""
+
+    def __init__(
+        self,
+        *,
+        store: WorkflowStore,
+        catalog: TemplateCatalog,
+        authority: CatalogAuthority,
+        resolver: PublishedWorkflowResolver,
+    ) -> None:
+        if not isinstance(store, WorkflowStore):
+            raise TypeError("store 必须是 WorkflowStore")
+        if not isinstance(catalog, TemplateCatalog):
+            raise TypeError("catalog 必须是 TemplateCatalog")
+        if not isinstance(authority, CatalogAuthority):
+            raise TypeError("authority 必须是 CatalogAuthority")
+        if not callable(getattr(resolver, "resolve", None)):
+            raise TypeError("resolver 必须实现 PublishedWorkflowResolver")
+        self._store = store
+        self._catalog = catalog
+        self._authority = authority
+        self._resolver = resolver
+
+    def compile_invocation(
+        self,
+        *,
+        parent_workflow_uuid: str,
+        invocation_uuid: str,
+        module: str,
+        symbol: str,
+        keyword_arguments: Mapping[str, object],
+    ) -> CompositeExpansion:
+        """只读编译一个 child invocation；任何失败都返回零写诊断。"""
+
+        try:
+            parent_uuid = _canonical_uuid(
+                parent_workflow_uuid,
+                "composite_boundary_mapping_invalid",
+                "/parent_workflow_uuid",
+            )
+            invocation = _canonical_uuid(
+                invocation_uuid,
+                "composite_boundary_mapping_invalid",
+                "/invocation_uuid",
+            )
+            if not isinstance(module, str) or not module or not isinstance(symbol, str):
+                raise _CompositeFailure(
+                    "composite_child_not_found",
+                    "/source",
+                )
+            if not isinstance(keyword_arguments, Mapping) or any(
+                not isinstance(key, str) for key in keyword_arguments
+            ):
+                raise _CompositeFailure(
+                    "composite_boundary_mapping_invalid",
+                    "/keyword_arguments",
+                )
+            try:
+                source = self._resolver.resolve(module, symbol)
+            except (KeyError, LookupError):
+                raise _CompositeFailure(
+                    "composite_child_not_found",
+                    "/source",
+                ) from None
+            if not isinstance(source, PublishedWorkflowSource):
+                raise _CompositeFailure(
+                    "composite_catalog_mismatch",
+                    "/source",
+                )
+            with self._catalog.snapshot(self._authority) as catalog_snapshot:
+                parent_graph = self._store.get_graph(parent_uuid)
+                try:
+                    parent_input_contract = _parent_input_contract(parent_graph)
+                except (TypeError, ValueError, WorkflowSchemaError):
+                    raise _CompositeFailure(
+                        "composite_boundary_mapping_invalid",
+                        "/parent/io_contract",
+                    ) from None
+                expanded = self._expand(
+                    source=source,
+                    invocation_uuid=invocation,
+                    parent_uuid=None,
+                    keyword_arguments=dict(keyword_arguments),
+                    catalog=catalog_snapshot,
+                    root_parent_workflow_uuid=parent_uuid,
+                    workflow_stack=(parent_uuid,),
+                    base_node=None,
+                )
+                effective = _effective_parent_input_contract(
+                    parent_input_contract,
+                    expanded,
+                    keyword_arguments,
+                    catalog_snapshot,
+                )
+                _reject_private_providers(keyword_arguments, expanded)
+                node_templates, handle_templates = _referenced_templates(
+                    catalog_snapshot,
+                    expanded.invocation_node,
+                    expanded.nodes,
+                )
+                return CompositeExpansion(
+                    invocation_node=expanded.invocation_node,
+                    nodes=tuple(expanded.nodes),
+                    edges=tuple(expanded.edges),
+                    target_mappings={
+                        key: tuple(value)
+                        for key, value in expanded.target_mappings.items()
+                    },
+                    source_mappings=expanded.source_mappings,
+                    structural_mappings={
+                        key: tuple(value)
+                        for key, value in expanded.structural_mappings.items()
+                    },
+                    node_templates=tuple(node_templates),
+                    handle_templates=tuple(handle_templates),
+                    contract_pin=expanded.contract_pin,
+                    effective_parent_input_contract=effective,
+                    diagnostics=(),
+                )
+        except _CompositeFailure as exc:
+            return _failed_expansion(exc.code, exc.path)
+        except TemplateCatalogError as exc:
+            return _failed_expansion(
+                getattr(exc, "code", "composite_catalog_mismatch"),
+                getattr(exc, "path", "/catalog"),
+            )
+        except StoreNotFound:
+            return _failed_expansion(
+                "composite_child_not_found",
+                "/workflow",
+            )
+
+    def _expand(
+        self,
+        *,
+        source: PublishedWorkflowSource,
+        invocation_uuid: str,
+        parent_uuid: str | None,
+        keyword_arguments: Mapping[str, object],
+        catalog: TemplateCatalogSnapshot,
+        root_parent_workflow_uuid: str,
+        workflow_stack: tuple[str, ...],
+        base_node: Mapping[str, Any] | None,
+    ) -> _ExpandedChild:
+        if source.workflow_uuid in workflow_stack:
+            raise _CompositeFailure(
+                "composite_recursive_reference",
+                "/composite/child_workflow_uuid",
+            )
+        try:
+            applied = self._store.get_published_workflow_snapshot(source.workflow_uuid)
+        except StoreNotFound:
+            raise _CompositeFailure(
+                "composite_child_not_found",
+                "/composite/child_workflow_uuid",
+            ) from None
+        workflow = _mapping(applied.get("workflow"), "/child/workflow")
+        revision = workflow.get("revision")
+        applied_source = applied.get("applied_source")
+        if not isinstance(applied_source, Mapping) or (
+            applied_source.get("workflow_revision") != revision
+        ):
+            raise _CompositeFailure(
+                "composite_child_unapplied",
+                "/child/applied_source",
+            )
+        if workflow.get("uuid") != source.workflow_uuid:
+            raise _CompositeFailure(
+                "composite_catalog_mismatch",
+                "/child/workflow/uuid",
+            )
+        template, boundary_handles, pin = _published_template(
+            catalog,
+            source,
+            revision=revision,
+            applied_source_hash=applied_source.get("source_hash"),
+        )
+        try:
+            validated_io = validate_workflow_graph_io(applied)
+        except (WorkflowIOValidationError, WorkflowSchemaError, TypeError, ValueError):
+            raise _CompositeFailure(
+                "composite_boundary_mapping_invalid",
+                "/child/io_contract",
+            ) from None
+
+        raw_nodes = [
+            _mapping(item, "/child/nodes")
+            for item in _sequence(applied.get("nodes"), "/child/nodes")
+        ]
+        raw_edges = [
+            _mapping(item, "/child/edges")
+            for item in _sequence(applied.get("edges"), "/child/edges")
+        ]
+        node_by_uuid = {
+            _canonical_uuid(
+                node.get("uuid"),
+                "composite_boundary_mapping_invalid",
+                "/child/nodes/uuid",
+            ): node
+            for node in raw_nodes
+        }
+        if len(node_by_uuid) != len(raw_nodes):
+            raise _CompositeFailure(
+                "composite_boundary_mapping_invalid",
+                "/child/nodes/uuid",
+            )
+        template_by_node = {
+            node_uuid: _node_template(catalog, node)
+            for node_uuid, node in node_by_uuid.items()
+        }
+        composite_nodes = {
+            node_uuid
+            for node_uuid, node_template in template_by_node.items()
+            if _is_published_workflow_template(node_template)
+        }
+        parent_by_node = {
+            node_uuid: node.get("parent_uuid")
+            for node_uuid, node in node_by_uuid.items()
+        }
+        _validate_parent_tree(parent_by_node)
+        hidden_by_composite = {
+            node_uuid
+            for node_uuid in node_by_uuid
+            if _composite_ancestor(
+                node_uuid,
+                parent_by_node=parent_by_node,
+                composite_nodes=composite_nodes,
+            )
+            is not None
+        }
+        mapped_visible = {
+            node_uuid: expanded_node_uuid(invocation_uuid, node_uuid)
+            for node_uuid in node_by_uuid
+            if node_uuid not in hidden_by_composite
+        }
+        nodes: list[dict[str, Any]] = []
+        edges: list[dict[str, Any]] = []
+        paths: dict[tuple[str, ...], str] = {}
+        endpoint_aliases = dict(mapped_visible)
+        next_stack = (*workflow_stack, source.workflow_uuid)
+
+        for node_uuid in sorted(mapped_visible):
+            raw_node = node_by_uuid[node_uuid]
+            mapped_uuid = mapped_visible[node_uuid]
+            raw_parent = raw_node.get("parent_uuid")
+            mapped_parent = (
+                invocation_uuid
+                if raw_parent is None
+                else mapped_visible.get(str(raw_parent))
+            )
+            if mapped_parent is None:
+                raise _CompositeFailure(
+                    "composite_boundary_mapping_invalid",
+                    "/child/nodes/parent_uuid",
+                )
+            if node_uuid in composite_nodes:
+                nested_source = _source_from_template(
+                    self._resolver,
+                    template_by_node[node_uuid],
+                )
+                nested = self._expand(
+                    source=nested_source,
+                    invocation_uuid=mapped_uuid,
+                    parent_uuid=mapped_parent,
+                    keyword_arguments=_node_param(raw_node),
+                    catalog=catalog,
+                    root_parent_workflow_uuid=root_parent_workflow_uuid,
+                    workflow_stack=next_stack,
+                    base_node=raw_node,
+                )
+                _assert_pinned_nested(raw_node, nested.contract_pin)
+                nodes.append(nested.invocation_node)
+                nodes.extend(nested.nodes)
+                edges.extend(nested.edges)
+                paths[(node_uuid,)] = mapped_uuid
+                for nested_path, final_uuid in nested.paths.items():
+                    paths[(node_uuid, *nested_path)] = final_uuid
+                    endpoint_aliases[_derive_path(node_uuid, nested_path)] = final_uuid
+            else:
+                nodes.append(
+                    _copy_node(
+                        raw_node,
+                        uuid=mapped_uuid,
+                        parent_uuid=mapped_parent,
+                    )
+                )
+                paths[(node_uuid,)] = mapped_uuid
+
+        for raw_edge in raw_edges:
+            source_uuid = endpoint_aliases.get(str(raw_edge.get("source_node_uuid")))
+            target_uuid = endpoint_aliases.get(str(raw_edge.get("target_node_uuid")))
+            if source_uuid is None or target_uuid is None:
+                raise _CompositeFailure(
+                    "composite_boundary_mapping_invalid",
+                    "/child/edges/node",
+                )
+            edges.append(
+                authoring_edge(
+                    root_parent_workflow_uuid,
+                    source_uuid,
+                    target_uuid,
+                    _canonical_uuid(
+                        raw_edge.get("source_handle_uuid"),
+                        "composite_boundary_mapping_invalid",
+                        "/child/edges/source_handle_uuid",
+                    ),
+                    _canonical_uuid(
+                        raw_edge.get("target_handle_uuid"),
+                        "composite_boundary_mapping_invalid",
+                        "/child/edges/target_handle_uuid",
+                    ),
+                )
+            )
+        edges = _unique_edges(edges)
+        _assert_acyclic(nodes, edges)
+
+        target_mappings = _target_mappings(
+            validated_io.input_contract.to_dict(),
+            validated_io.input_bindings,
+            boundary_handles,
+            endpoint_aliases,
+        )
+        source_mappings = _source_mappings(
+            validated_io.output_contract.to_dict(),
+            validated_io.output_bindings,
+            boundary_handles,
+            endpoint_aliases,
+        )
+        structural = _structural_mappings(
+            nodes,
+            edges,
+            catalog,
+        )
+        invocation_node = _invocation_node(
+            source=source,
+            template_uuid=str(template["uuid"]),
+            invocation_uuid=invocation_uuid,
+            parent_uuid=parent_uuid,
+            keyword_arguments=keyword_arguments,
+            boundary_handles=boundary_handles,
+            base_node=base_node,
+            pin=pin,
+            target_mappings=target_mappings,
+            source_mappings=source_mappings,
+            structural_mappings=structural,
+        )
+        return _ExpandedChild(
+            invocation_node=invocation_node,
+            nodes=nodes,
+            edges=edges,
+            target_mappings=target_mappings,
+            source_mappings=source_mappings,
+            structural_mappings=structural,
+            contract_pin=pin,
+            paths=paths,
+        )
+
+
+def _failed_expansion(code: str, path: str) -> CompositeExpansion:
+    return CompositeExpansion(
+        invocation_node=None,
+        nodes=(),
+        edges=(),
+        target_mappings={},
+        source_mappings={},
+        structural_mappings={},
+        node_templates=(),
+        handle_templates=(),
+        contract_pin={},
+        effective_parent_input_contract={},
+        diagnostics=(
+            {
+                "code": code,
+                "path": path,
+                "severity": "error",
+                "message": "Composite authoring contract validation failed",
+            },
+        ),
+    )
+
+
+def _canonical_uuid(value: Any, code: str, path: str) -> str:
+    try:
+        canonical = validate_uuid(value)
+    except (TypeError, ValueError):
+        raise _CompositeFailure(code, path) from None
+    if canonical != value:
+        raise _CompositeFailure(code, path)
+    return canonical
+
+
+def _mapping(value: Any, path: str) -> dict[str, Any]:
+    if not isinstance(value, Mapping):
+        raise _CompositeFailure("composite_boundary_mapping_invalid", path)
+    return _plain(value)
+
+
+def _published_template(
+    catalog: TemplateCatalogSnapshot,
+    source: PublishedWorkflowSource,
+    *,
+    revision: Any,
+    applied_source_hash: Any,
+) -> tuple[dict[str, Any], list[dict[str, Any]], dict[str, Any]]:
+    matches = [
+        _plain(template)
+        for template in catalog.node_templates
+        if template.get("name") == f"workflow:{source.workflow_uuid}"
+    ]
+    if len(matches) != 1:
+        raise _CompositeFailure(
+            "composite_catalog_mismatch",
+            "/catalog/published_workflow",
+        )
+    template = matches[0]
+    if not _is_published_workflow_template(template):
+        raise _CompositeFailure(
+            "composite_catalog_mismatch",
+            "/catalog/published_workflow/type",
+        )
+    schema = _mapping(template.get("schema"), "/catalog/workflow/schema")
+    extension = _mapping(
+        schema.get("x-unilabos-workflow-contract"),
+        "/catalog/workflow/contract",
+    )
+    if (
+        extension.get("version") != 1
+        or extension.get("compatibility_version") != 1
+        or extension.get("workflow_uuid") != source.workflow_uuid
+        or extension.get("workflow_revision") != revision
+        or extension.get("applied_source_hash") != applied_source_hash
+        or not isinstance(extension.get("composition_allow_transparent"), bool)
+    ):
+        raise _CompositeFailure(
+            "composite_catalog_mismatch",
+            "/catalog/workflow/contract",
+        )
+    contract_digest = extension.get("contract_digest")
+    try:
+        _sha256(contract_digest, "/catalog/workflow/contract_digest")
+        _sha256(applied_source_hash, "/child/applied_source/source_hash")
+    except CompositeCatalogMismatch:
+        raise _CompositeFailure(
+            "composite_catalog_mismatch",
+            "/catalog/workflow/contract",
+        ) from None
+    meta_data = _mapping(template.get("meta_data"), "/catalog/workflow/meta_data")
+    unilab = _mapping(meta_data.get("unilab"), "/catalog/workflow/meta_data/unilab")
+    provenance = _mapping(
+        unilab.get("workflow_source"),
+        "/catalog/workflow/source",
+    )
+    expected_source = {
+        "kind": "package",
+        "definition_fqid": source.definition_fqid,
+        "module": source.module,
+        "symbol": source.symbol,
+        "package_catalog_digest": source.package_catalog_digest,
+        "definition_content_hash": source.definition_content_hash,
+    }
+    if provenance != expected_source or unilab.get("framework_owner_only") is not True:
+        raise _CompositeFailure(
+            "composite_catalog_mismatch",
+            "/catalog/workflow/source",
+        )
+    template_uuid = str(template.get("uuid"))
+    handles = [
+        _plain(handle)
+        for handle in catalog.handle_templates
+        if handle.get("workflow_node_template_uuid") == template_uuid
+    ]
+    if not handles:
+        raise _CompositeFailure(
+            "composite_catalog_mismatch",
+            "/catalog/workflow/handles",
+        )
+    pin = {
+        "child_workflow_uuid": source.workflow_uuid,
+        "child_workflow_revision": revision,
+        "child_applied_source_hash": applied_source_hash,
+        "contract_digest": contract_digest,
+        "composition_allow_transparent": extension["composition_allow_transparent"],
+    }
+    return template, handles, pin
+
+
+def _node_template(
+    catalog: TemplateCatalogSnapshot,
+    node: Mapping[str, Any],
+) -> dict[str, Any]:
+    template_uuid = node.get("workflow_node_template_uuid")
+    if not isinstance(template_uuid, str):
+        raise _CompositeFailure(
+            "composite_boundary_mapping_invalid",
+            "/child/nodes/workflow_node_template_uuid",
+        )
+    try:
+        return _plain(catalog.require_node(template_uuid))
+    except TemplateCatalogMismatch:
+        raise _CompositeFailure(
+            "composite_catalog_mismatch",
+            "/catalog/node_templates/uuid",
+        ) from None
+
+
+def _is_published_workflow_template(template: Mapping[str, Any]) -> bool:
+    schema = template.get("schema")
+    return (
+        template.get("type") == "workflow"
+        and template.get("node_type") == "workflow"
+        and isinstance(schema, Mapping)
+        and isinstance(schema.get("x-unilabos-workflow-contract"), Mapping)
+    )
+
+
+def _source_from_template(
+    resolver: PublishedWorkflowResolver,
+    template: Mapping[str, Any],
+) -> PublishedWorkflowSource:
+    try:
+        provenance = template["meta_data"]["unilab"]["workflow_source"]
+        module = provenance["module"]
+        symbol = provenance["symbol"]
+        source = resolver.resolve(module, symbol)
+    except (KeyError, LookupError, TypeError):
+        raise _CompositeFailure(
+            "composite_child_not_found",
+            "/nested/source",
+        ) from None
+    if not isinstance(source, PublishedWorkflowSource):
+        raise _CompositeFailure(
+            "composite_catalog_mismatch",
+            "/nested/source",
+        )
+    return source
+
+
+def _validate_parent_tree(parent_by_node: Mapping[str, Any]) -> None:
+    for node_uuid in parent_by_node:
+        seen = {node_uuid}
+        parent = parent_by_node[node_uuid]
+        while parent is not None:
+            if not isinstance(parent, str) or parent not in parent_by_node:
+                raise _CompositeFailure(
+                    "composite_boundary_mapping_invalid",
+                    "/child/nodes/parent_uuid",
+                )
+            if parent in seen:
+                raise _CompositeFailure(
+                    "composite_recursive_reference",
+                    "/child/nodes/parent_uuid",
+                )
+            seen.add(parent)
+            parent = parent_by_node[parent]
+
+
+def _composite_ancestor(
+    node_uuid: str,
+    *,
+    parent_by_node: Mapping[str, Any],
+    composite_nodes: set[str],
+) -> str | None:
+    parent = parent_by_node[node_uuid]
+    while isinstance(parent, str):
+        if parent in composite_nodes:
+            return parent
+        parent = parent_by_node[parent]
+    return None
+
+
+def _node_param(node: Mapping[str, Any]) -> dict[str, Any]:
+    value = node.get("param", {})
+    if not isinstance(value, Mapping):
+        raise _CompositeFailure(
+            "composite_boundary_mapping_invalid",
+            "/child/nodes/param",
+        )
+    return _plain(value)
+
+
+def _copy_node(
+    node: Mapping[str, Any],
+    *,
+    uuid: str,
+    parent_uuid: str,
+) -> dict[str, Any]:
+    base = {
+        key: _plain(value)
+        for key, value in node.items()
+        if key in WorkflowNodeWrite.model_fields
+    }
+    base.update({"uuid": uuid, "parent_uuid": parent_uuid})
+    try:
+        result = WorkflowNodeWrite.model_validate(base).model_dump(exclude_none=True)
+        result["parent_uuid"] = parent_uuid
+        return result
+    except (TypeError, ValueError):
+        raise _CompositeFailure(
+            "composite_boundary_mapping_invalid",
+            "/child/nodes",
+        ) from None
+
+
+def _assert_pinned_nested(
+    node: Mapping[str, Any],
+    current_pin: Mapping[str, Any],
+) -> None:
+    try:
+        stored = node["meta_data"]["unilab"]["composite"]
+    except (KeyError, TypeError):
+        raise _CompositeFailure(
+            "composite_boundary_mapping_invalid",
+            "/child/nodes/composite",
+        ) from None
+    if not isinstance(stored, Mapping):
+        raise _CompositeFailure(
+            "composite_boundary_mapping_invalid",
+            "/child/nodes/composite",
+        )
+    if any(stored.get(key) != value for key, value in current_pin.items()):
+        raise _CompositeFailure(
+            "composite_contract_stale",
+            "/child/nodes/composite/pin",
+        )
+
+
+def _derive_path(namespace_uuid: str, path: Sequence[str]) -> str:
+    result = namespace_uuid
+    for child_uuid in path:
+        result = expanded_node_uuid(result, child_uuid)
+    return result
+
+
+def _unique_edges(edges: Sequence[dict[str, Any]]) -> list[dict[str, Any]]:
+    by_uuid: dict[str, dict[str, Any]] = {}
+    for edge in edges:
+        edge_uuid = str(edge["uuid"])
+        existing = by_uuid.get(edge_uuid)
+        if existing is not None and existing != edge:
+            raise _CompositeFailure(
+                "composite_boundary_mapping_invalid",
+                "/child/edges/uuid",
+            )
+        by_uuid[edge_uuid] = edge
+    return [by_uuid[key] for key in sorted(by_uuid)]
+
+
+def _assert_acyclic(
+    nodes: Sequence[Mapping[str, Any]],
+    edges: Sequence[Mapping[str, Any]],
+) -> None:
+    node_uuids = {str(node["uuid"]) for node in nodes}
+    incoming = {node_uuid: 0 for node_uuid in node_uuids}
+    outgoing = {node_uuid: [] for node_uuid in node_uuids}
+    for edge in edges:
+        source = str(edge["source_node_uuid"])
+        target = str(edge["target_node_uuid"])
+        if source not in node_uuids or target not in node_uuids:
+            raise _CompositeFailure(
+                "composite_boundary_mapping_invalid",
+                "/child/edges/node",
+            )
+        outgoing[source].append(target)
+        incoming[target] += 1
+    ready = sorted(node_uuid for node_uuid, degree in incoming.items() if degree == 0)
+    visited = 0
+    while ready:
+        current = ready.pop(0)
+        visited += 1
+        for target in sorted(outgoing[current]):
+            incoming[target] -= 1
+            if incoming[target] == 0:
+                ready.append(target)
+                ready.sort()
+    if visited != len(node_uuids):
+        raise _CompositeFailure(
+            "composite_recursive_reference",
+            "/child/edges/cycle",
+        )
+
+
+def _business_handle(
+    handles: Sequence[Mapping[str, Any]],
+    *,
+    name: str,
+    io_type: str,
+) -> dict[str, Any]:
+    matches = []
+    for handle in handles:
+        meta_data = handle.get("meta_data")
+        unilab = meta_data.get("unilab") if isinstance(meta_data, Mapping) else None
+        if (
+            handle.get("io_type") == io_type
+            and handle.get("data_key") == name
+            and isinstance(unilab, Mapping)
+            and unilab.get("structural_role") is None
+        ):
+            matches.append(_plain(handle))
+    if len(matches) != 1:
+        raise _CompositeFailure(
+            "composite_boundary_mapping_invalid",
+            "/composite/boundary_handle",
+        )
+    return matches[0]
+
+
+def _target_mappings(
+    input_contract: Mapping[str, Any],
+    input_bindings: Mapping[str, Mapping[str, Mapping[str, str]]],
+    boundary_handles: Sequence[Mapping[str, Any]],
+    endpoint_aliases: Mapping[str, str],
+) -> dict[str, list[dict[str, str]]]:
+    parameters = input_contract.get("parameters")
+    if not isinstance(parameters, list):
+        raise _CompositeFailure(
+            "composite_boundary_mapping_invalid",
+            "/child/input_contract",
+        )
+    result: dict[str, list[dict[str, str]]] = {}
+    for raw_parameter in parameters:
+        parameter = _mapping(raw_parameter, "/child/input_contract/parameters")
+        name = parameter.get("name")
+        if not isinstance(name, str):
+            raise _CompositeFailure(
+                "composite_boundary_mapping_invalid",
+                "/child/input_contract/parameters/name",
+            )
+        boundary = _business_handle(
+            boundary_handles,
+            name=name,
+            io_type="target",
+        )
+        entries: list[dict[str, str]] = []
+        for original_node_uuid, bindings in input_bindings.items():
+            mapped_node_uuid = endpoint_aliases.get(original_node_uuid)
+            for target_handle_uuid, binding in bindings.items():
+                if binding.get("parameter") != name:
+                    continue
+                if mapped_node_uuid is None:
+                    raise _CompositeFailure(
+                        "composite_boundary_mapping_invalid",
+                        "/child/input_bindings/node",
+                    )
+                entries.append(
+                    {
+                        "workflow_node_uuid": mapped_node_uuid,
+                        "target_handle_uuid": target_handle_uuid,
+                    }
+                )
+        if not entries:
+            raise _CompositeFailure(
+                "composite_boundary_mapping_invalid",
+                f"/child/input_bindings/{name}",
+            )
+        result[str(boundary["uuid"])] = sorted(
+            entries,
+            key=lambda item: (
+                item["workflow_node_uuid"],
+                item["target_handle_uuid"],
+            ),
+        )
+    return {key: result[key] for key in sorted(result)}
+
+
+def _source_mappings(
+    output_contract: Mapping[str, Any],
+    output_bindings: Mapping[str, Mapping[str, str]],
+    boundary_handles: Sequence[Mapping[str, Any]],
+    endpoint_aliases: Mapping[str, str],
+) -> dict[str, dict[str, str]]:
+    outputs = output_contract.get("outputs")
+    if not isinstance(outputs, list):
+        raise _CompositeFailure(
+            "composite_boundary_mapping_invalid",
+            "/child/output_contract",
+        )
+    result: dict[str, dict[str, str]] = {}
+    for raw_output in outputs:
+        output = _mapping(raw_output, "/child/output_contract/outputs")
+        name = output.get("name")
+        if not isinstance(name, str):
+            raise _CompositeFailure(
+                "composite_boundary_mapping_invalid",
+                "/child/output_contract/outputs/name",
+            )
+        boundary = _business_handle(
+            boundary_handles,
+            name=name,
+            io_type="source",
+        )
+        binding = output_bindings.get(name)
+        if not isinstance(binding, Mapping):
+            raise _CompositeFailure(
+                "composite_boundary_mapping_invalid",
+                f"/child/output_bindings/{name}",
+            )
+        if binding.get("kind") == "workflow_input":
+            parameter = binding.get("parameter")
+            if not isinstance(parameter, str):
+                raise _CompositeFailure(
+                    "composite_boundary_mapping_invalid",
+                    f"/child/output_bindings/{name}",
+                )
+            normalized = {
+                "kind": "workflow_input",
+                "parameter": parameter,
+            }
+        elif binding.get("kind") == "node_output":
+            original_node_uuid = binding.get("workflow_node_uuid")
+            mapped_node_uuid = (
+                endpoint_aliases.get(original_node_uuid)
+                if isinstance(original_node_uuid, str)
+                else None
+            )
+            source_handle_uuid = binding.get("source_handle_uuid")
+            if mapped_node_uuid is None or not isinstance(source_handle_uuid, str):
+                raise _CompositeFailure(
+                    "composite_boundary_mapping_invalid",
+                    f"/child/output_bindings/{name}",
+                )
+            normalized = {
+                "kind": "node_output",
+                "workflow_node_uuid": mapped_node_uuid,
+                "source_handle_uuid": source_handle_uuid,
+            }
+        else:
+            raise _CompositeFailure(
+                "composite_boundary_mapping_invalid",
+                f"/child/output_bindings/{name}",
+            )
+        result[str(boundary["uuid"])] = normalized
+    return {key: result[key] for key in sorted(result)}
+
+
+def _structural_mappings(
+    nodes: Sequence[Mapping[str, Any]],
+    edges: Sequence[Mapping[str, Any]],
+    catalog: TemplateCatalogSnapshot,
+) -> dict[str, list[dict[str, str]]]:
+    node_by_uuid = {str(node["uuid"]): node for node in nodes}
+    incoming = {node_uuid: 0 for node_uuid in node_by_uuid}
+    outgoing = {node_uuid: 0 for node_uuid in node_by_uuid}
+    for edge in edges:
+        source = str(edge["source_node_uuid"])
+        target = str(edge["target_node_uuid"])
+        outgoing[source] += 1
+        incoming[target] += 1
+    entry_targets = [
+        {
+            "workflow_node_uuid": node_uuid,
+            "target_handle_uuid": _ready_handle(
+                catalog,
+                node_by_uuid[node_uuid],
+                "target",
+            ),
+        }
+        for node_uuid in sorted(node_by_uuid)
+        if incoming[node_uuid] == 0
+    ]
+    completion_sources = [
+        {
+            "workflow_node_uuid": node_uuid,
+            "source_handle_uuid": _ready_handle(
+                catalog,
+                node_by_uuid[node_uuid],
+                "source",
+            ),
+        }
+        for node_uuid in sorted(node_by_uuid)
+        if outgoing[node_uuid] == 0
+    ]
+    return {
+        "entry_targets": entry_targets,
+        "completion_sources": completion_sources,
+    }
+
+
+def _ready_handle(
+    catalog: TemplateCatalogSnapshot,
+    node: Mapping[str, Any],
+    io_type: str,
+) -> str:
+    template_uuid = node.get("workflow_node_template_uuid")
+    matches = []
+    for handle in catalog.handle_templates:
+        meta_data = handle.get("meta_data")
+        unilab = meta_data.get("unilab") if isinstance(meta_data, Mapping) else None
+        if (
+            handle.get("workflow_node_template_uuid") == template_uuid
+            and handle.get("io_type") == io_type
+            and isinstance(unilab, Mapping)
+            and unilab.get("structural_role") == "ready"
+        ):
+            matches.append(handle)
+    if len(matches) != 1:
+        raise _CompositeFailure(
+            "composite_boundary_mapping_invalid",
+            "/catalog/ready_handle",
+        )
+    return str(matches[0]["uuid"])
+
+
+def _invocation_node(
+    *,
+    source: PublishedWorkflowSource,
+    template_uuid: str,
+    invocation_uuid: str,
+    parent_uuid: str | None,
+    keyword_arguments: Mapping[str, object],
+    boundary_handles: Sequence[Mapping[str, Any]],
+    base_node: Mapping[str, Any] | None,
+    pin: Mapping[str, Any],
+    target_mappings: Mapping[str, Any],
+    source_mappings: Mapping[str, Any],
+    structural_mappings: Mapping[str, Any],
+) -> dict[str, Any]:
+    value_targets = {
+        str(handle.get("data_key")): handle
+        for handle in boundary_handles
+        if handle.get("io_type") == "target"
+        and _structural_role(handle) is None
+        and isinstance(handle.get("data_key"), str)
+    }
+    if any(name not in value_targets for name in keyword_arguments):
+        raise _CompositeFailure(
+            "composite_boundary_mapping_invalid",
+            "/keyword_arguments/name",
+        )
+    existing_meta = (
+        _plain(base_node.get("meta_data", {})) if base_node is not None else {}
+    )
+    if not isinstance(existing_meta, dict):
+        existing_meta = {}
+    unilab = existing_meta.get("unilab")
+    unilab = dict(unilab) if isinstance(unilab, Mapping) else {}
+    existing_bindings = unilab.get("input_bindings")
+    input_bindings = (
+        _plain(existing_bindings) if isinstance(existing_bindings, Mapping) else {}
+    )
+    param: dict[str, Any] = {}
+    for name, value in keyword_arguments.items():
+        handle = value_targets[name]
+        handle_uuid = str(handle["uuid"])
+        if isinstance(value, Mapping) and value.get("kind") == "workflow_input":
+            if set(value) != {"kind", "parameter"} or not isinstance(
+                value.get("parameter"), str
+            ):
+                raise _CompositeFailure(
+                    "composite_boundary_mapping_invalid",
+                    f"/keyword_arguments/{name}",
+                )
+            input_bindings[handle_uuid] = {"parameter": value["parameter"]}
+        else:
+            param[name] = _plain(value)
+            input_bindings.pop(handle_uuid, None)
+    for name, handle in value_targets.items():
+        if (
+            handle.get("required") is True
+            and name not in keyword_arguments
+            and str(handle["uuid"]) not in input_bindings
+        ):
+            raise _CompositeFailure(
+                "composite_boundary_mapping_invalid",
+                f"/keyword_arguments/{name}",
+            )
+    composite = {
+        "version": 1,
+        **_plain(pin),
+        "target_mappings": _plain(target_mappings),
+        "source_mappings": _plain(source_mappings),
+        "structural_mappings": _plain(structural_mappings),
+    }
+    unilab["input_bindings"] = input_bindings
+    unilab["composite"] = composite
+    existing_meta["unilab"] = unilab
+    base = (
+        {
+            key: _plain(value)
+            for key, value in base_node.items()
+            if key in WorkflowNodeWrite.model_fields
+        }
+        if base_node is not None
+        else {}
+    )
+    base.update(
+        {
+            "uuid": invocation_uuid,
+            "workflow_node_template_uuid": template_uuid,
+            "parent_uuid": parent_uuid,
+            "name": str(base.get("name") or source.symbol),
+            "status": str(base.get("status") or "idle"),
+            "type": "workflow",
+            "pose": _plain(base.get("pose") or {}),
+            "param": param,
+            "execution_policy": _plain(base.get("execution_policy") or {}),
+            "disabled": bool(base.get("disabled", False)),
+            "minimized": bool(base.get("minimized", False)),
+            "meta_data": existing_meta,
+        }
+    )
+    try:
+        result = WorkflowNodeWrite.model_validate(base).model_dump(exclude_none=True)
+        result["parent_uuid"] = parent_uuid
+        return result
+    except (TypeError, ValueError):
+        raise _CompositeFailure(
+            "composite_boundary_mapping_invalid",
+            "/invocation_node",
+        ) from None
+
+
+def _structural_role(handle: Mapping[str, Any]) -> Any:
+    meta_data = handle.get("meta_data")
+    unilab = meta_data.get("unilab") if isinstance(meta_data, Mapping) else None
+    return unilab.get("structural_role") if isinstance(unilab, Mapping) else None
+
+
+def _parent_input_contract(parent_graph: Mapping[str, Any]) -> dict[str, Any]:
+    workflow = parent_graph.get("workflow")
+    if not isinstance(workflow, Mapping):
+        raise ValueError("parent workflow missing")
+    meta_data = workflow.get("meta_data")
+    unilab = meta_data.get("unilab") if isinstance(meta_data, Mapping) else None
+    raw = (
+        unilab.get("input_contract", {"version": 1, "parameters": []})
+        if isinstance(unilab, Mapping)
+        else {"version": 1, "parameters": []}
+    )
+    return parse_input_contract(raw).to_dict()
+
+
+def _effective_parent_input_contract(
+    parent_input_contract: Mapping[str, Any],
+    expanded: _ExpandedChild,
+    keyword_arguments: Mapping[str, object],
+    catalog: TemplateCatalogSnapshot,
+) -> dict[str, Any]:
+    effective = _plain(parent_input_contract)
+    parameters = effective.get("parameters")
+    if not isinstance(parameters, list):
+        raise _CompositeFailure(
+            "composite_boundary_mapping_invalid",
+            "/parent/input_contract",
+        )
+    parent_by_name = {
+        parameter.get("name"): parameter
+        for parameter in parameters
+        if isinstance(parameter, dict) and isinstance(parameter.get("name"), str)
+    }
+    template_uuid = expanded.invocation_node.get("workflow_node_template_uuid")
+    child_handles = [
+        _plain(handle)
+        for handle in catalog.handle_templates
+        if handle.get("workflow_node_template_uuid") == template_uuid
+    ]
+    child_by_name = {
+        str(handle["data_key"]): handle
+        for handle in child_handles
+        if handle.get("io_type") == "target"
+        and _structural_role(handle) is None
+        and isinstance(handle.get("data_key"), str)
+    }
+    for child_name, provider in keyword_arguments.items():
+        if (
+            not isinstance(provider, Mapping)
+            or provider.get("kind") != "workflow_input"
+        ):
+            continue
+        parameter_name = provider.get("parameter")
+        parent_parameter = (
+            parent_by_name.get(parameter_name)
+            if isinstance(parameter_name, str)
+            else None
+        )
+        child_handle = child_by_name.get(child_name)
+        if parent_parameter is None or child_handle is None:
+            raise _CompositeFailure(
+                "composite_boundary_mapping_invalid",
+                f"/keyword_arguments/{child_name}",
+            )
+        parent_schema = parent_parameter.get("schema")
+        child_unilab = _handle_unilab(child_handle)
+        child_schema = child_unilab.get("value_schema")
+        if not isinstance(parent_schema, Mapping) or not isinstance(
+            child_schema, Mapping
+        ):
+            raise _CompositeFailure(
+                "composite_boundary_mapping_invalid",
+                f"/keyword_arguments/{child_name}/schema",
+            )
+        parent_slot = resource_slot_schema(parent_schema)
+        child_slot = resource_slot_schema(child_schema)
+        if parent_slot is None and child_slot is None:
+            continue
+        if parent_slot is None or child_slot is None:
+            raise _CompositeFailure(
+                "composite_boundary_mapping_invalid",
+                f"/keyword_arguments/{child_name}/schema",
+            )
+        parent_allowed = _slot_allowlist(parent_slot)
+        child_allowed = _slot_allowlist(child_slot)
+        if parent_allowed is None:
+            intersection = child_allowed
+        elif child_allowed is None:
+            intersection = parent_allowed
+        else:
+            intersection = sorted(set(parent_allowed) & set(child_allowed))
+            if not intersection:
+                raise _CompositeFailure(
+                    "composite_resource_constraint_empty",
+                    f"/keyword_arguments/{child_name}/schema",
+                )
+        parent_parameter["schema"] = _replace_slot_allowlist(
+            parent_schema,
+            intersection,
+        )
+    return effective
+
+
+def _handle_unilab(handle: Mapping[str, Any]) -> Mapping[str, Any]:
+    meta_data = handle.get("meta_data")
+    unilab = meta_data.get("unilab") if isinstance(meta_data, Mapping) else None
+    if not isinstance(unilab, Mapping):
+        raise _CompositeFailure(
+            "composite_catalog_mismatch",
+            "/catalog/handle/meta_data",
+        )
+    return unilab
+
+
+def _slot_allowlist(slot_schema: Mapping[str, Any]) -> list[str] | None:
+    raw = slot_schema.get("allowed_resource_template_uuids")
+    if raw is None:
+        return None
+    if (
+        not isinstance(raw, list)
+        or not raw
+        or any(not isinstance(item, str) for item in raw)
+    ):
+        raise _CompositeFailure(
+            "composite_catalog_mismatch",
+            "/catalog/handle/allowed_resource_template_uuids",
+        )
+    values = [
+        _canonical_uuid(
+            item,
+            "composite_catalog_mismatch",
+            "/catalog/handle/allowed_resource_template_uuids",
+        )
+        for item in raw
+    ]
+    if len(set(values)) != len(values):
+        raise _CompositeFailure(
+            "composite_catalog_mismatch",
+            "/catalog/handle/allowed_resource_template_uuids",
+        )
+    return sorted(values)
+
+
+def _replace_slot_allowlist(
+    schema: Mapping[str, Any],
+    allowlist: list[str] | None,
+) -> dict[str, Any]:
+    result = _plain(schema)
+    if result.get("$slot") == "ResourceSlot":
+        if allowlist is None:
+            result.pop("allowed_resource_template_uuids", None)
+        else:
+            result["allowed_resource_template_uuids"] = list(allowlist)
+        return result
+    items = result.get("items")
+    if isinstance(items, Mapping) and resource_slot_schema(items) is not None:
+        result["items"] = _replace_slot_allowlist(items, allowlist)
+        return result
+    members = result.get("anyOf")
+    if isinstance(members, list):
+        result["anyOf"] = [
+            _replace_slot_allowlist(member, allowlist)
+            if isinstance(member, Mapping) and resource_slot_schema(member) is not None
+            else _plain(member)
+            for member in members
+        ]
+    return result
+
+
+def _reject_private_providers(
+    keyword_arguments: Mapping[str, object],
+    expanded: _ExpandedChild,
+) -> None:
+    private_nodes = {str(node["uuid"]) for node in expanded.nodes}
+    for name, provider in keyword_arguments.items():
+        if not isinstance(provider, Mapping) or provider.get("kind") != "node_output":
+            continue
+        node_uuid = provider.get("workflow_node_uuid")
+        if node_uuid in private_nodes:
+            raise _CompositeFailure(
+                "composite_external_private_edge",
+                f"/keyword_arguments/{name}",
+            )
+        if set(provider) != {
+            "kind",
+            "workflow_node_uuid",
+            "source_handle_uuid",
+        }:
+            raise _CompositeFailure(
+                "composite_boundary_mapping_invalid",
+                f"/keyword_arguments/{name}",
+            )
+
+
+def _referenced_templates(
+    catalog: TemplateCatalogSnapshot,
+    invocation_node: Mapping[str, Any],
+    nodes: Sequence[Mapping[str, Any]],
+) -> tuple[list[dict[str, Any]], list[dict[str, Any]]]:
+    template_uuids = {
+        str(node["workflow_node_template_uuid"])
+        for node in (invocation_node, *nodes)
+        if isinstance(node.get("workflow_node_template_uuid"), str)
+    }
+    node_templates = [
+        _plain(template)
+        for template in catalog.node_templates
+        if template.get("uuid") in template_uuids
+    ]
+    if {str(item["uuid"]) for item in node_templates} != template_uuids:
+        raise _CompositeFailure(
+            "composite_catalog_mismatch",
+            "/catalog/node_templates",
+        )
+    handle_templates = [
+        _plain(handle)
+        for handle in catalog.handle_templates
+        if handle.get("workflow_node_template_uuid") in template_uuids
+    ]
+    return (
+        sorted(node_templates, key=lambda item: str(item["uuid"])),
+        sorted(handle_templates, key=lambda item: str(item["uuid"])),
+    )
 
 
 def _group_template(
@@ -452,7 +1732,9 @@ def _plain(value: Any) -> Any:
 
 
 __all__ = [
+    "CompositeAuthoring",
     "CompositeCatalogMismatch",
+    "CompositeExpansion",
     "PublishedWorkflowCatalogPublisher",
     "PublishedWorkflowResolver",
     "PublishedWorkflowSource",

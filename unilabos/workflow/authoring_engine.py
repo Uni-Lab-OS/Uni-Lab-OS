@@ -16,7 +16,7 @@ from contextlib import contextmanager
 from contextvars import ContextVar
 from dataclasses import dataclass, field
 from typing import Any, Never
-from uuid import UUID, uuid4, uuid5
+from uuid import uuid4
 
 from unilabos.registry.action_result_schema import (
     ActionResultSchemaError,
@@ -28,6 +28,7 @@ from unilabos.registry.annotation_schema import (
     parse_parameter_annotation,
 )
 from unilabos.registry.utils import parse_docstring
+from unilabos.workflow.authoring_identity import authoring_edge
 from unilabos.workflow.catalog import (
     CatalogAuthority,
     ResourceTemplateIdentityIndex,
@@ -2265,22 +2266,13 @@ def _edge(
     source_handle_uuid: str,
     target_handle_uuid: str,
 ) -> dict[str, Any]:
-    edge_uuid = str(
-        uuid5(
-            UUID(workflow_uuid),
-            "authoring-edge:"
-            f"{source_node_uuid}:{source_handle_uuid}:"
-            f"{target_node_uuid}:{target_handle_uuid}",
-        )
+    return authoring_edge(
+        workflow_uuid,
+        source_node_uuid,
+        target_node_uuid,
+        source_handle_uuid,
+        target_handle_uuid,
     )
-    return WorkflowEdgeWrite(
-        uuid=edge_uuid,
-        source_node_uuid=source_node_uuid,
-        target_node_uuid=target_node_uuid,
-        source_handle_uuid=source_handle_uuid,
-        target_handle_uuid=target_handle_uuid,
-        meta_data={},
-    ).model_dump(exclude_none=True)
 
 
 def _connect_dependencies(
