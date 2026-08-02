@@ -169,7 +169,7 @@ OS ticket 记录 base/test/implementation/review full SHA、命令与 finding di
 
 ### 9.1 候选
 
-- OS 实现候选：`373ce840e0a69ec3013ffeae02fff447ee4e3176`；
+- OS 实现候选：`4ca471bc4d02dcc6af12ad50851ae378fec396c0`；
 - FE 最终受测候选：`379f029622a7ccd7364947cf6e105ee1f27d4aee`；
 - 发布目标：OS `integration/workflow-task-runtime`、FE
   `integration/fe-os-migration`；合并必须等待同一独立 reviewer 对最终精确 SHA
@@ -180,7 +180,8 @@ OS ticket 记录 base/test/implementation/review full SHA、命令与 finding di
 1. 幂等 replay 先于可变 admission、live device 和 Catalog 检查；同 key 不同 payload
    仍为 `409 idempotency_conflict`，Action 被移除为 `409 device_action_mismatch`。
 2. system Workflow/Node identity 稳定，合同变化只推进 revision；旧 Task 的 input/output
-   snapshot 冻结，不受后续 Catalog 改动影响。
+   与 Action transport type snapshot 冻结，不受后续 Catalog 改动影响；type-only 变化
+   同样推进 revision，旧 pending Task 只从自身 immutable Workflow snapshot 下发。
 3. production 启动顺序允许先组合 Workflow authority、再创建 Edge stack；后创建的
    Scheduler/backend 会反向绑定既有 D1A bridge。普通 Workflow worker 不消费 D1A Job。
 4. durable completion listener 在设备锁释放前提交正式 Job/Task 终态；transport 不确定、
@@ -193,12 +194,12 @@ OS ticket 记录 base/test/implementation/review full SHA、命令与 finding di
 
 ### 9.3 Gate
 
-- OS focused D1A/release tests：`77 passed`；
-- OS 全仓：`2335 passed, 4 skipped`；修改文件 Ruff
+- OS focused D1A/release tests：`78 passed`；
+- OS 全仓：`2336 passed, 4 skipped`；修改文件 Ruff
   `--select E4,E7,E9,F` 与 `git diff --check` 通过；
 - FE material/services/pascal/workflow-editor/kernel/desktop 六组：共 261 tests 通过；
   全 workspace typecheck、`build:web`、`build:desktop` 和 `git diff --check` 通过；
-- 浏览器 E2E：`1 passed`，18.7 秒；夹具先组合 Workflow authority、再挂生产
+- 浏览器 E2E：`1 passed`，18.8 秒；夹具先组合 Workflow authority、再挂生产
   EdgeScheduler/JobExecutionBackend，只在物理 driver 边界使用确定性测试 Host。
 
 ### 9.4 E2E 截图与账本
