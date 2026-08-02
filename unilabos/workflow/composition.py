@@ -3,13 +3,17 @@
 from __future__ import annotations
 
 import errno
-import fcntl
 import os
 import stat
 import threading
 from collections.abc import Callable, Iterable, Mapping
 from pathlib import Path
 from typing import TYPE_CHECKING, cast
+
+try:
+    import fcntl
+except ModuleNotFoundError:  # pragma: no cover - exercised by Windows CI
+    fcntl = None  # type: ignore[assignment]
 
 from unilabos.app.scheduler.inventory import (
     InventoryService,
@@ -266,6 +270,9 @@ def _clear_runtime() -> None:
 def _acquire_workspace_lease(working_dir: Path) -> int:
     """在打开数据库前取得工作区唯一 OS Authority 的进程锁。"""
 
+    if fcntl is None:
+        raise RuntimeError("当前平台不支持 Workflow Authority 所需的进程文件锁")
+
     working_dir.mkdir(parents=True, exist_ok=True)
     lease_path = working_dir / ".workflow-authority.lock"
     descriptor = os.open(
@@ -296,6 +303,9 @@ def _release_workspace_lease(
     unlock: bool = True,
 ) -> None:
     if descriptor is None:
+        return
+    if fcntl is None:
+        os.close(descriptor)
         return
     try:
         if unlock:

@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-import fcntl
 import hashlib
 import logging
 import os
@@ -18,6 +17,11 @@ from datetime import datetime, timezone
 from pathlib import Path, PurePosixPath
 from typing import Any, Dict, List, Optional, Protocol, Tuple, runtime_checkable
 from uuid import uuid4
+
+try:
+    import fcntl
+except ModuleNotFoundError:  # pragma: no cover - exercised by Windows CI
+    fcntl = None  # type: ignore[assignment]
 
 from pydantic import ValidationError
 
@@ -111,7 +115,7 @@ _HASH_TOKEN = re.compile(r"sha256:[0-9a-f]{64}\Z")
 _NO_EXPECTED_HASH = object()
 _F_SETOWN_EX = getattr(fcntl, "F_SETOWN_EX", 15)
 _F_OWNER_TID = 0
-_LEASE_BREAK_SIGNAL = signal.SIGRTMAX
+_LEASE_BREAK_SIGNAL = getattr(signal, "SIGRTMAX", None)
 _WORKFLOW_READ_FIELDS = {
     "uuid",
     "create_time",
@@ -1639,6 +1643,11 @@ class WorkflowService:
         expected_hash: Optional[str],
     ) -> None:
         """在可安全中断的 lease 下执行 fsync 后的原子 CAS replace。"""
+
+        if fcntl is None or _LEASE_BREAK_SIGNAL is None:
+            # Windows 没有 Linux file lease / realtime signal；导入和只读
+            # Registry 检查必须可用，但无法证明 CAS 安全时继续失败关闭。
+            raise WorkflowConflict("draft_hash_conflict")
 
         target_descriptor = -1
         temporary_descriptor = -1
