@@ -31,6 +31,7 @@ _REPOSITORY_ROOT = Path(__file__).resolve().parents[2]
 _FIXTURE_WORKSPACE = _REPOSITORY_ROOT / "tests" / "fixtures" / "r2e_szlab_workspace"
 _DEVICE_UUID = "64000000-0000-4000-8000-000000000001"
 _DEVICE_ID = "r2e_szlab_mixer"
+_WORKFLOW_UUID = "65000000-0000-4000-8000-000000000001"
 _TERMINAL_TASK_STATUSES = {"succeeded", "failed", "canceled", "timeout"}
 
 
@@ -111,7 +112,11 @@ def _wait_for_health(running: _RunningOS, timeout: float = 30.0) -> None:
 
 
 @contextmanager
-def _start_cli(tmp_path: Path) -> Iterator[_RunningOS]:
+def _start_cli(
+    tmp_path: Path,
+    *,
+    test_mode: bool = True,
+) -> Iterator[_RunningOS]:
     workspace = tmp_path / "r2e-szlab"
     shutil.copytree(_FIXTURE_WORKSPACE, workspace)
     runtime_root = tmp_path / "runtime"
@@ -143,7 +148,6 @@ def _start_cli(tmp_path: Path) -> Iterator[_RunningOS]:
         "ros",
         "--app_bridges",
         "fastapi",
-        "--test_mode",
         "--visual",
         "disable",
         "--port",
@@ -153,6 +157,8 @@ def _start_cli(tmp_path: Path) -> Iterator[_RunningOS]:
         "--ros_domain_id",
         ros_domain_id,
     ]
+    if test_mode:
+        command.append("--test_mode")
     environment = os.environ.copy()
     environment["PYTHONUNBUFFERED"] = "1"
     environment["ROS_DOMAIN_ID"] = ros_domain_id
@@ -323,6 +329,13 @@ def test_unilab_cli_hostnode_resolves_short_graph_class_and_registers_ros_action
     assert f"/devices/{_DEVICE_ID}/_execute_driver_command" in _ros_actions(running_os)
 
 
+def test_unilab_cli_non_test_mode_does_not_enable_unclaimed_ros_dispatcher(
+    tmp_path: Path,
+) -> None:
+    with _start_cli(tmp_path, test_mode=False) as running:
+        assert "WorkflowTask ROS 执行后端已启用" not in running.logs()
+
+
 def test_unilab_cli_ros_executes_complete_szlab_workflow_with_correlated_logs(
     running_os: _RunningOS,
 ) -> None:
@@ -334,17 +347,12 @@ def test_unilab_cli_ros_executes_complete_szlab_workflow_with_correlated_logs(
     workflow = _data(
         _request(
             running_os.base_url,
-            "POST",
-            "/api/v1/workflows",
-            {
-                "name": "R2E SZLab complete workflow",
-                "tags": ["r2e", "szlab"],
-                "description": "prepare then finish",
-                "meta_data": {},
-            },
-        ),
-        expected_status=201,
+            "GET",
+            f"/api/v1/workflows/{_WORKFLOW_UUID}",
+        )
     )
+    assert workflow["uuid"] == _WORKFLOW_UUID
+    assert workflow["meta_data"]["package_fqid"].endswith(".complete_workflow")
     prepare_node_uuid = str(uuid4())
     finish_node_uuid = str(uuid4())
     source_handle = _handle(prepare, io_type="source", handle_key="payload")
