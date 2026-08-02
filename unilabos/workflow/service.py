@@ -648,6 +648,15 @@ class WorkflowService:
         except StoreConflict:
             raise WorkflowError("conflict") from None
 
+    def get_material_release(
+        self,
+        task_uuid: str,
+    ) -> Dict[str, Any] | None:
+        """Read the durable five-field terminal Material release projection."""
+
+        identity = self.get_workflow_task(task_uuid)["uuid"]
+        return self._store.get_task_material_release(identity)
+
     def create_workflow_task_command(
         self,
         task_uuid: str,

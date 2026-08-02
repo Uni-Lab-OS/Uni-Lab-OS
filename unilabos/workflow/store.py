@@ -1625,6 +1625,25 @@ class WorkflowStore:
             )
         return True
 
+    def get_task_material_release(
+        self,
+        task_uuid: str,
+    ) -> Dict[str, Any] | None:
+        """Read the closed public terminal Material release projection."""
+
+        self.get_task(task_uuid)
+        with self._lock:
+            row = self._conn.execute(
+                """
+                SELECT workflow_task_uuid, command_uuid, status,
+                       reservation_uuid, outbox_sequence
+                FROM workflow_task_material_release_projection
+                WHERE workflow_task_uuid = ?
+                """,
+                (task_uuid,),
+            ).fetchone()
+        return dict(row) if row is not None else None
+
     def get_job(self, job_uuid: str) -> Dict[str, Any]:
         with self._lock:
             row = self._conn.execute(
