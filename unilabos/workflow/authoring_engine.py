@@ -1246,15 +1246,16 @@ def _workflow_parameters(
                         node=argument,
                     )
                 resource_template_uuids.append(resource_template_uuid)
-            schema = descriptor["schema"]
-            base_schema = schema["anyOf"][0] if "anyOf" in schema else schema
-            if base_schema.get("$slot") != "ResourceSlot":
+            resource_slot_schema = _resource_slot_schema(descriptor["schema"])
+            if not isinstance(resource_slot_schema, dict):
                 _fail(
                     "invalid_schema",
-                    "ResourceTemplate allowlist 只能约束 ResourceSlot",
+                    "ResourceTemplate allowlist 只能约束 ResourceSlot 或其列表",
                     node=argument,
                 )
-            base_schema["allowed_resource_template_uuids"] = resource_template_uuids
+            resource_slot_schema["allowed_resource_template_uuids"] = (
+                resource_template_uuids
+            )
         descriptors.append(descriptor)
     try:
         return parse_input_contract({"version": 1, "parameters": descriptors}).to_dict()
@@ -3225,7 +3226,7 @@ def _annotation_import_needs(contract: Mapping[str, Any]) -> dict[str, Any]:
         ):
             typing_names.add("Annotated")
             field_needed = True
-        if constraint_schema.get("allowed_resource_template_uuids"):
+        if _resource_template_allowlist(schema):
             typing_names.add("Annotated")
             allowed_resource_templates = True
         if _schema_contains_key(constraint_schema, "enum"):
@@ -3258,11 +3259,30 @@ def _schema_contains_key(schema: Mapping[str, Any], key: str) -> bool:
 
 
 def _resource_template_allowlist(schema: Mapping[str, Any]) -> tuple[str, ...]:
-    base = schema["anyOf"][0] if "anyOf" in schema else schema
-    allowlist = base.get("allowed_resource_template_uuids")
+    resource_slot_schema = _resource_slot_schema(schema)
+    if resource_slot_schema is None:
+        return ()
+    allowlist = resource_slot_schema.get("allowed_resource_template_uuids")
     if not isinstance(allowlist, list):
         return ()
     return tuple(str(item) for item in allowlist)
+
+
+def _resource_slot_schema(
+    schema: Mapping[str, Any],
+) -> Mapping[str, Any] | None:
+    members = schema.get("anyOf")
+    if isinstance(members, list):
+        for member in members:
+            if isinstance(member, Mapping) and member.get("type") != "null":
+                return _resource_slot_schema(member)
+        return None
+    if schema.get("$slot") == "ResourceSlot":
+        return schema
+    items = schema.get("items")
+    if schema.get("type") == "array" and isinstance(items, Mapping):
+        return _resource_slot_schema(items)
+    return None
 
 
 def _annotation_source(
