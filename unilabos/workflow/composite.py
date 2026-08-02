@@ -548,6 +548,10 @@ class CompositeAuthoring:
             boundary_handles=boundary_handles,
             base_node=base_node,
             pin=pin,
+            contract_compatibility=_compatibility_projection(
+                template,
+                boundary_handles,
+            ),
             target_mappings=target_mappings,
             source_mappings=source_mappings,
             structural_mappings=structural,
@@ -1616,6 +1620,7 @@ def _invocation_node(
     boundary_handles: Sequence[Mapping[str, Any]],
     base_node: Mapping[str, Any] | None,
     pin: Mapping[str, Any],
+    contract_compatibility: Mapping[str, Any],
     target_mappings: Mapping[str, Any],
     source_mappings: Mapping[str, Any],
     structural_mappings: Mapping[str, Any],
@@ -1672,6 +1677,7 @@ def _invocation_node(
     composite = {
         "version": 1,
         **_plain(pin),
+        "contract_compatibility": _plain(contract_compatibility),
         "target_mappings": _plain(target_mappings),
         "source_mappings": _plain(source_mappings),
         "structural_mappings": _plain(structural_mappings),
@@ -2291,6 +2297,25 @@ def classify_published_workflow_compatibility(
         current = _compatibility_projection(current_template, current_handles)
     except (KeyError, TypeError, ValueError):
         return "breaking"
+    return classify_published_workflow_compatibility_projections(previous, current)
+
+
+def classify_published_workflow_compatibility_projections(
+    previous: Mapping[str, Any],
+    current: Mapping[str, Any],
+) -> str:
+    """比较随 Applied invocation 固定的最小兼容性投影。"""
+
+    required = {
+        "template_uuid",
+        "workflow_uuid",
+        "mode",
+        "digest",
+        "inputs",
+        "outputs",
+    }
+    if set(previous) != required or set(current) != required:
+        return "breaking"
     if (
         previous["workflow_uuid"] != current["workflow_uuid"]
         or previous["template_uuid"] != current["template_uuid"]
@@ -2518,5 +2543,6 @@ __all__ = [
     "PublishedWorkflowResolver",
     "PublishedWorkflowSource",
     "classify_published_workflow_compatibility",
+    "classify_published_workflow_compatibility_projections",
     "project_published_workflow_contract",
 ]

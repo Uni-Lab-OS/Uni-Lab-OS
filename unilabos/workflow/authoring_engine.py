@@ -40,7 +40,7 @@ from unilabos.workflow.catalog import (
 from unilabos.workflow.composite import (
     CompositeAuthoring,
     CompositeExpansion,
-    classify_published_workflow_compatibility,
+    classify_published_workflow_compatibility_projections,
 )
 from unilabos.workflow.graph_validation import (
     CodedGraphValidationError,
@@ -1746,7 +1746,6 @@ def _parse_composite(
             applied,
             expansion,
             statement,
-            applied_graph=state.applied_graph,
         )
         for key in (
             "description",
@@ -1864,8 +1863,6 @@ def _assert_composite_pin_compatible(
     applied: Mapping[str, Any],
     expansion: CompositeExpansion,
     statement: ast.stmt,
-    *,
-    applied_graph: Mapping[str, Any],
 ) -> None:
     try:
         stored = applied["meta_data"]["unilab"]["composite"]
@@ -1877,65 +1874,41 @@ def _assert_composite_pin_compatible(
             "Published Workflow contract pin 不符合合同",
             node=statement,
         )
-    template_uuid = str(applied.get("workflow_node_template_uuid") or "")
-    previous_template = next(
-        (
-            template
-            for template in applied_graph.get("node_templates", [])
-            if template.get("uuid") == template_uuid
-        ),
-        None,
+    current_node = expansion.invocation_node
+    current = (
+        current_node.get("meta_data", {}).get("unilab", {}).get("composite", {})
+        if isinstance(current_node, Mapping)
+        else {}
     )
-    current_template = next(
-        (
-            template
-            for template in expansion.node_templates
-            if template.get("uuid") == template_uuid
-        ),
-        None,
+    previous_projection = stored.get("contract_compatibility")
+    current_projection = (
+        current.get("contract_compatibility") if isinstance(current, Mapping) else None
     )
-    if not isinstance(previous_template, Mapping) or not isinstance(
-        current_template, Mapping
-    ):
-        _fail(
-            "composite_contract_stale",
-            "Published Workflow contract template 缺失",
-            node=statement,
-        )
-    previous_schema = previous_template.get("schema")
-    previous_extension = (
-        previous_schema.get("x-unilabos-workflow-contract")
-        if isinstance(previous_schema, Mapping)
-        else None
-    )
-    if not isinstance(previous_extension, Mapping) or any(
-        stored.get(key) != previous_extension.get(extension_key)
-        for key, extension_key in (
+    stored_is_coherent = isinstance(previous_projection, Mapping) and all(
+        stored.get(key) == previous_projection.get(projection_key)
+        for key, projection_key in (
             ("child_workflow_uuid", "workflow_uuid"),
-            ("contract_digest", "contract_digest"),
-            ("composition_allow_transparent", "composition_allow_transparent"),
+            ("contract_digest", "digest"),
+            ("composition_allow_transparent", "mode"),
         )
-    ):
+    )
+    current_is_coherent = isinstance(current_projection, Mapping) and all(
+        expansion.contract_pin.get(key) == current_projection.get(projection_key)
+        for key, projection_key in (
+            ("child_workflow_uuid", "workflow_uuid"),
+            ("contract_digest", "digest"),
+            ("composition_allow_transparent", "mode"),
+        )
+    )
+    if not stored_is_coherent or not current_is_coherent:
         _fail(
             "composite_contract_stale",
             "Published Workflow stored contract pin 不自洽",
             node=statement,
         )
-    previous_handles = [
-        handle
-        for handle in applied_graph.get("handle_templates", [])
-        if handle.get("workflow_node_template_uuid") == template_uuid
-    ]
-    current_handles = [
-        handle
-        for handle in expansion.handle_templates
-        if handle.get("workflow_node_template_uuid") == template_uuid
-    ]
-    compatibility = classify_published_workflow_compatibility(
-        previous_template=previous_template,
-        previous_handles=previous_handles,
-        current_template=current_template,
-        current_handles=current_handles,
+    compatibility = classify_published_workflow_compatibility_projections(
+        previous_projection,
+        current_projection,
     )
     if compatibility == "breaking":
         _fail(
