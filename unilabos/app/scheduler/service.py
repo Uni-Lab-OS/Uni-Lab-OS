@@ -56,6 +56,8 @@ from unilabos.app.scheduler.inventory.domain import (
     TaskMaterialAdmissionCommand,
     TaskMaterialAdmissionResult,
     TaskMaterialAdmissionSource,
+    TaskMaterialReleaseCommand,
+    TaskMaterialReleaseResult,
 )
 from unilabos.app.scheduler.models import (
     DispatchedJob,
@@ -272,6 +274,64 @@ class EdgeScheduler:
         hook = self._admission_fault_hook
         if hook is not None:
             hook(stage)
+
+    def can_dispatch_task_materials(self, task_uuid: str) -> bool:
+        """Fail-closed proof used before WorkflowTask Job dispatch admission."""
+
+        if self._workflow_tasks is None or self._inventory is None:
+            return False
+        projection = self._workflow_tasks.get_material_admission(task_uuid)
+        if not isinstance(projection, dict) or projection.get("status") != "admitted":
+            return False
+        reservation_uuid = projection.get("reservation_uuid")
+        if not isinstance(reservation_uuid, str) or not reservation_uuid:
+            return False
+        try:
+            return bool(
+                self._inventory.has_active_task_reservation(
+                    task_uuid,
+                    reservation_uuid,
+                )
+            )
+        except InventoryError:
+            return False
+
+    def reconcile_task_release(
+        self,
+        task_uuid: str,
+        reason: str,
+    ) -> TaskMaterialReleaseResult:
+        """Drive one replay-safe terminal Task Material release saga."""
+
+        if self._workflow_tasks is None or self._inventory is None:
+            raise RuntimeError("Workflow Task Material coordination is not configured")
+        task = self._workflow_tasks.get_workflow_task(task_uuid)
+        canonical_task_uuid = str(task["uuid"])
+        normalized_reason = reason.strip()
+        if not normalized_reason:
+            raise ValueError("Material release reason must not be blank")
+        command_uuid = str(
+            uuid_mod.uuid5(
+                uuid_mod.UUID(canonical_task_uuid),
+                f"material-release:{normalized_reason}",
+            )
+        )
+        command = TaskMaterialReleaseCommand(
+            schema_version=1,
+            command_uuid=command_uuid,
+            idempotency_key=(
+                f"workflow-task:{canonical_task_uuid}:material-release:"
+                f"{normalized_reason}"
+            ),
+            workflow_task_uuid=canonical_task_uuid,
+            reason=normalized_reason,
+        )
+        result = self._inventory.release_task(command)
+        self._inject_admission_fault("after_inventory_release_commit")
+        self._workflow_tasks.project_material_release(result)
+        self._inject_admission_fault("after_workflow_release_projection")
+        self._inventory.acknowledge(result.outbox_sequence)
+        return result
 
     # ── 触发点 1：任务进来 ────────────────────────────────────
 

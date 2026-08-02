@@ -248,6 +248,18 @@ CREATE TABLE IF NOT EXISTS workflow_task_material_admission_projection (
     FOREIGN KEY(workflow_task_uuid) REFERENCES workflow_task(uuid) ON DELETE CASCADE
 );
 
+CREATE TABLE IF NOT EXISTS workflow_task_material_release_projection (
+    workflow_task_uuid TEXT PRIMARY KEY,
+    command_uuid TEXT NOT NULL UNIQUE,
+    status TEXT NOT NULL CHECK (status = 'released'),
+    reservation_uuid TEXT,
+    outbox_sequence INTEGER NOT NULL CHECK (outbox_sequence > 0),
+    result TEXT NOT NULL CHECK (json_valid(result) AND json_type(result) = 'object'),
+    create_time TEXT NOT NULL,
+    update_time TEXT NOT NULL,
+    FOREIGN KEY(workflow_task_uuid) REFERENCES workflow_task(uuid) ON DELETE CASCADE
+);
+
 CREATE TABLE IF NOT EXISTS workflow_task_command (
     uuid TEXT PRIMARY KEY,
     create_time TEXT NOT NULL,
@@ -1506,6 +1518,90 @@ class WorkflowStore:
             conn.execute(
                 """
                 INSERT INTO workflow_task_material_admission_projection(
+                    workflow_task_uuid, command_uuid, status, reservation_uuid,
+                    outbox_sequence, result, create_time, update_time
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+                """,
+                (
+                    task_uuid,
+                    command_uuid,
+                    status,
+                    reservation_uuid,
+                    outbox_sequence,
+                    encoded_result,
+                    now,
+                    now,
+                ),
+            )
+            self._append_event(
+                conn,
+                event="workflow.runtime.changed",
+                data={"workflow_task_uuid": task_uuid},
+                now=now,
+            )
+        return True
+
+    def get_task_material_admission(
+        self,
+        task_uuid: str,
+    ) -> Dict[str, Any] | None:
+        """Read the closed public admission projection for one Task."""
+
+        self.get_task(task_uuid)
+        with self._lock:
+            row = self._conn.execute(
+                """
+                SELECT workflow_task_uuid, command_uuid, status,
+                       reservation_uuid, outbox_sequence
+                FROM workflow_task_material_admission_projection
+                WHERE workflow_task_uuid = ?
+                """,
+                (task_uuid,),
+            ).fetchone()
+        return dict(row) if row is not None else None
+
+    def project_task_material_release(
+        self,
+        *,
+        task_uuid: str,
+        command_uuid: str,
+        status: str,
+        reservation_uuid: str | None,
+        outbox_sequence: int,
+        result: Dict[str, Any],
+    ) -> bool:
+        """Idempotently project one terminal Inventory release result."""
+
+        now = utc_now()
+        encoded_result = _json(result)
+        with self.transaction() as conn:
+            task = conn.execute(
+                """
+                SELECT uuid FROM workflow_task
+                WHERE uuid = ? AND deleted_at IS NULL
+                """,
+                (task_uuid,),
+            ).fetchone()
+            if task is None:
+                raise StoreNotFound(f"workflow task {task_uuid} not found")
+            existing = conn.execute(
+                """
+                SELECT command_uuid, result
+                FROM workflow_task_material_release_projection
+                WHERE workflow_task_uuid = ?
+                """,
+                (task_uuid,),
+            ).fetchone()
+            if existing is not None:
+                if (
+                    existing["command_uuid"] == command_uuid
+                    and existing["result"] == encoded_result
+                ):
+                    return False
+                raise StoreConflict("Task Material release projection conflicts")
+            conn.execute(
+                """
+                INSERT INTO workflow_task_material_release_projection(
                     workflow_task_uuid, command_uuid, status, reservation_uuid,
                     outbox_sequence, result, create_time, update_time
                 ) VALUES (?, ?, ?, ?, ?, ?, ?, ?)

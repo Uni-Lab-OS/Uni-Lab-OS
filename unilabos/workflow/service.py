@@ -21,7 +21,10 @@ from uuid import uuid4
 
 from pydantic import ValidationError
 
-from unilabos.app.scheduler.inventory import TaskMaterialAdmissionResult
+from unilabos.app.scheduler.inventory import (
+    TaskMaterialAdmissionResult,
+    TaskMaterialReleaseResult,
+)
 from unilabos.workflow.candidate_validation import validate_candidate_bundle
 from unilabos.workflow.json_codec import encode_json
 from unilabos.workflow.material_source import (
@@ -599,6 +602,46 @@ class WorkflowService:
                 outbox_sequence=result.outbox_sequence,
                 result=payload,
                 bindings=payload["bindings"],
+            )
+        except StoreNotFound:
+            raise WorkflowError("not_found") from None
+        except StoreConflict:
+            raise WorkflowError("conflict") from None
+
+    def get_material_admission(
+        self,
+        task_uuid: str,
+    ) -> Dict[str, Any] | None:
+        """Read the durable five-field Material admission projection."""
+
+        identity = self.get_workflow_task(task_uuid)["uuid"]
+        return self._store.get_task_material_admission(identity)
+
+    def project_material_release(
+        self,
+        result: TaskMaterialReleaseResult,
+    ) -> bool:
+        """Project one closed terminal Material release exactly once."""
+
+        if not isinstance(result, TaskMaterialReleaseResult):
+            raise WorkflowError("invalid_input")
+        task_uuid = self.get_workflow_task(result.workflow_task_uuid)["uuid"]
+        payload = {
+            "schema_version": result.schema_version,
+            "command_uuid": result.command_uuid,
+            "workflow_task_uuid": result.workflow_task_uuid,
+            "status": result.status,
+            "reservation_uuid": result.reservation_uuid,
+            "outbox_sequence": result.outbox_sequence,
+        }
+        try:
+            return self._store.project_task_material_release(
+                task_uuid=task_uuid,
+                command_uuid=result.command_uuid,
+                status=result.status,
+                reservation_uuid=result.reservation_uuid,
+                outbox_sequence=result.outbox_sequence,
+                result=payload,
             )
         except StoreNotFound:
             raise WorkflowError("not_found") from None
