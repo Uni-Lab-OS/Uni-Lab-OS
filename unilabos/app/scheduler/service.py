@@ -354,7 +354,13 @@ class EdgeScheduler:
             ),
         ):
             task_uuid = str(task.get("uuid") or "")
-            if self.reconcile_task_material_state(task_uuid) is not None:
+            if (
+                self._reconcile_task_material_state(
+                    task_uuid,
+                    retry_pending_after_release=False,
+                )
+                is not None
+            ):
                 reconciled.append(task_uuid)
         return tuple(reconciled)
 
@@ -362,8 +368,8 @@ class EdgeScheduler:
         """Recover every startup admission/release saga currently needing work."""
 
         return (
-            *self.reconcile_pending_task_admissions(),
             *self.reconcile_terminal_task_releases(),
+            *self.reconcile_pending_task_admissions(),
         )
 
     def reconcile_task_material_state(
@@ -371,6 +377,19 @@ class EdgeScheduler:
         task_uuid: str,
     ) -> TaskMaterialAdmissionResult | TaskMaterialReleaseResult | None:
         """Choose admission or terminal release from the latest durable Task state."""
+
+        return self._reconcile_task_material_state(
+            task_uuid,
+            retry_pending_after_release=True,
+        )
+
+    def _reconcile_task_material_state(
+        self,
+        task_uuid: str,
+        *,
+        retry_pending_after_release: bool,
+    ) -> TaskMaterialAdmissionResult | TaskMaterialReleaseResult | None:
+        """Reconcile one Task and optionally wake pending Tasks after release."""
 
         if self._workflow_tasks is None or self._inventory is None:
             raise RuntimeError("Workflow Task Material coordination is not configured")
@@ -385,11 +404,15 @@ class EdgeScheduler:
             if not has_material_source:
                 return None
             if task.get("status") in {"succeeded", "failed", "canceled", "timeout"}:
-                return self._reconcile_task_release_serialized(
+                release_result = self._reconcile_task_release_serialized(
                     task_uuid,
                     "workflow_task_terminal",
                 )
-            return self._reconcile_task_admission_serialized(task_uuid)
+            else:
+                return self._reconcile_task_admission_serialized(task_uuid)
+        if retry_pending_after_release:
+            self.reconcile_pending_task_admissions()
+        return release_result
 
     def _inject_admission_fault(self, stage: str) -> None:
         hook = self._admission_fault_hook
