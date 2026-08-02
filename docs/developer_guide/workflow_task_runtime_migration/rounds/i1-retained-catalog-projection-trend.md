@@ -6,8 +6,9 @@
 
 integration 基点：`de95b9965ed551ed2ed1581fe2bd3100e1b93672`
 
-状态：**实现与完整门禁已通过，等待 exact-SHA Standards/Spec 独立评审。本文不把
-整个 I1 或 Core #157 标记为 Accepted。**
+状态：**首轮 exact-SHA 独立评审的唯一 blocker 已按独立 RED 修复；完整门禁已重新
+通过，等待同一 reviewer 复核最终候选。本文不把整个 I1 或 Core #157 标记为
+Accepted。**
 
 ## 1. 触发与根因
 
@@ -28,6 +29,10 @@ graph→Python，随后把 generated canonical Python 回编译时，public
 - 只有 Candidate 新引入的 template/handle 才从当前 Catalog snapshot 投影。
 - 未放宽 `_validate_catalog_projection()`、retained projection boundary、Catalog
   fingerprint 或 Handle UUID 校验。
+- compile 在复用 Applied read projection 前，先用同一
+  `_validate_catalog_projection()` 证明它属于当前 snapshot；只有 nullable `null`/省略及
+  JSON 数字域表示差异按既有规则 wire-equivalent，`display_name`、`required` 等语义漂移
+  必须 `template_catalog_mismatch`。
 - FE E2E 的固定点按 DTO 层级收紧：Applied/generated read graph 自身 exact；
   compiled/regenerated Candidate write graph 自身 exact；两层之间逐字段比较完整 I/O、
   全部 Node input binding 与 Node/Edge authoring semantics，不比较数据库 audit 字段。
@@ -45,25 +50,40 @@ graph→Python，随后把 generated canonical Python 回编译时，public
   忽略当前 Catalog。
 - Production GREEN：`c669afc`；零 Handle retained template 回归修复：`b0533ba`。
 
+首轮 reviewer 在 `e3fd85122394a228b3fc19d9896415fd006f6993` 报告
+`Standards 0B/0NB; Spec 1B/0NB`：Applied retained Template/Handle 的非 nullable 语义字段
+尚未在复用前与当前 snapshot 对照。由同一 test-author 补充 tests-only commit
+`c9afc60eba7f77626d80f57a6f96e18272305fd8`，实现分支 cherry-pick 为 `4f31507`：
+
+- `WorkflowNodeTemplate.display_name` 漂移必须拒绝；
+- `WorkflowHandleTemplate.required` 漂移必须拒绝；
+- nullable read projection 与 retained zero-handle template 继续允许。
+
+独立补充测试先得到 `2 failed, 1 passed`，production fix
+`8e7a6eeb61ba5bd461f2fe2bb5c4802c478c7deb` 仅在 compile 入口复用现有 snapshot
+校验，随后为 `3 passed`。
+
 没有删除、skip、xfail 或弱化独立测试。
 
 ## 4. 门禁证据
 
-当前实现候选：`b0533ba`。
+当前 production 候选：`8e7a6eeb61ba5bd461f2fe2bb5c4802c478c7deb`。最终 exact-SHA
+候选包含本文档更新，由同一 reviewer 复核并在 repository-local ticket 记录。
 
 | 门禁 | 结果 |
 |---|---|
 | 独立 retained projection RED→GREEN | `1 passed` |
-| Authoring/I1/API focused | `95 passed` |
+| Authoring/I1/API focused（修复后扩大重跑） | `159 passed` |
 | group/parallel fixed-point 回归 | `25 passed` |
-| 完整 `tests` | `2312 passed, 4 skipped, 68 warnings` |
+| 完整 `tests`（修复前） | `2312 passed, 4 skipped, 68 warnings` |
+| 完整 `tests`（修复后） | `2315 passed, 4 skipped, 68 warnings` |
 | changed-files Ruff / Ruff format | passed |
 | `git diff --check` | passed |
-| FE Candidate I/O real OS browser E2E | `1 passed`；原 500 消失，完整 fixed point 通过 |
+| FE Candidate I/O real OS browser E2E | focused `1 passed`；完整 Authoring suite `6 passed`，原 500 消失，完整 fixed point 通过 |
 
 ## 5. 评审与下一入口
 
-exact-SHA Standards/Spec reviewer、finding disposition 与最终候选 SHA 将在本轮评审后
-补入，并由同一 reviewer 复核最终文档 commit。通过后 non-squash merge 到
+同一 exact-SHA Standards/Spec reviewer 将复核上述 finding disposition 与最终候选。
+通过后 non-squash merge 到
 `integration/workflow-task-runtime` 并推送，再以新的 OS integration SHA完成 FE
 Candidate editor 全门禁与评审。
