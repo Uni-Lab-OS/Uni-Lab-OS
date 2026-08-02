@@ -232,3 +232,54 @@ def test_dispatch_proof_and_release_w1_recover_through_public_services(
     finally:
         reopened_service.close()
         reopened_inventory.close()
+
+
+def test_blocked_projection_monotonically_advances_to_admitted(
+    tmp_path: Path,
+) -> None:
+    inventory = inventory_api.InventoryService.open(
+        working_dir=tmp_path / "inventory-authority",
+        resource_templates=_resource_templates(),
+    )
+    service = None
+    try:
+        _seed_inventory(inventory)
+        service, owner_task = _create_pending_task(
+            tmp_path / "workflow-authority" / "workflow.db"
+        )
+        waiting_task = service.create_workflow_task(
+            workflow_uuid=owner_task["workflow_uuid"],
+            run_mode="normal",
+            target_node_uuid=None,
+            input_value={},
+            description=None,
+            meta_data={},
+        )
+        scheduler = EdgeScheduler(workflow_tasks=service, inventory=inventory)
+        owner_admission = scheduler.reconcile_task_admission(owner_task["uuid"])
+        blocked = scheduler.reconcile_task_admission(waiting_task["uuid"])
+        assert owner_admission is not None
+        assert owner_admission.status == "admitted"
+        assert blocked is not None
+        assert blocked.status == "blocked"
+
+        scheduler.reconcile_task_release(
+            owner_task["uuid"],
+            "workflow_task_terminal",
+        )
+        admitted = scheduler.reconcile_task_admission(waiting_task["uuid"])
+
+        assert admitted is not None
+        assert admitted.status == "admitted"
+        assert admitted.outbox_sequence > blocked.outbox_sequence
+        assert service.get_material_admission(waiting_task["uuid"]) == (
+            _projected_admission(
+                task_uuid=waiting_task["uuid"],
+                result=admitted,
+            )
+        )
+        assert scheduler.can_dispatch_task_materials(waiting_task["uuid"])
+    finally:
+        if service is not None:
+            service.close()
+        inventory.close()

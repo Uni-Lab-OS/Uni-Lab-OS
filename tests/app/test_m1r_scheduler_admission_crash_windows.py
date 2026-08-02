@@ -7,6 +7,7 @@ WorkflowService、InventoryService 和 EdgeScheduler 的 public seam 完成。
 
 from __future__ import annotations
 
+import threading
 from pathlib import Path
 from typing import Any
 
@@ -32,6 +33,7 @@ SAMPLE_MATERIAL_UUID = "5bb00000-0000-4000-8000-000000000203"
 MOUNT_TEMPLATE_UUID = "2aa00000-0000-4000-8000-000000000203"
 SAMPLE_TEMPLATE_UUID = "2bb00000-0000-4000-8000-000000000203"
 SITE_UUID = "6aa00000-0000-4000-8000-000000000203"
+NO_MATERIAL_WORKFLOW_UUID = "10000000-0000-4000-8000-000000000204"
 
 AUTHORITY = CatalogAuthority(authority_id="m1r-saga", kind="backend")
 
@@ -67,6 +69,41 @@ class _RecordingInventoryPort:
 
     def __getattr__(self, name: str) -> Any:
         return getattr(self._inventory, name)
+
+
+class _LockOrderProbeInventoryPort(_RecordingInventoryPort):
+    """Prove an unrelated Task can enter Scheduler while Inventory is active."""
+
+    def __init__(
+        self,
+        inventory: inventory_api.InventoryService,
+        no_material_task_uuid: str,
+    ) -> None:
+        super().__init__(inventory)
+        self.no_material_task_uuid = no_material_task_uuid
+        self.scheduler: EdgeScheduler | None = None
+        self.parallel_result: list[object] = []
+
+    def admit_task(
+        self,
+        command: inventory_api.TaskMaterialAdmissionCommand,
+    ) -> inventory_api.TaskMaterialAdmissionResult:
+        assert self.scheduler is not None
+
+        def enter_unrelated_task() -> None:
+            try:
+                self.parallel_result.append(
+                    self.scheduler.reconcile_task_admission(self.no_material_task_uuid)
+                )
+            except Exception as error:  # noqa: BLE001 - surfaced in caller thread
+                self.parallel_result.append(error)
+
+        thread = threading.Thread(target=enter_unrelated_task)
+        thread.start()
+        thread.join(timeout=1)
+        assert not thread.is_alive(), "Scheduler mutex was held across Inventory I/O"
+        assert self.parallel_result == [None]
+        return super().admit_task(command)
 
 
 def _resource_templates() -> dict[str, inventory_api.ResourceTemplateIdentity]:
@@ -388,3 +425,49 @@ def test_reconcile_task_admission_recovers_both_crash_windows(
     finally:
         reopened_service.close()
         reopened_inventory.close()
+
+
+def test_scheduler_does_not_hold_its_serialization_mutex_during_inventory_io(
+    tmp_path: Path,
+) -> None:
+    inventory = inventory_api.InventoryService.open(
+        working_dir=tmp_path / "inventory-authority",
+        resource_templates=_resource_templates(),
+    )
+    service = None
+    try:
+        _seed_inventory(inventory)
+        service, material_task = _create_pending_task(
+            tmp_path / "workflow-authority" / "workflow.db"
+        )
+        service.create_workflow(
+            workflow_uuid=NO_MATERIAL_WORKFLOW_UUID,
+            name="No Material lock-order probe",
+            tags=[],
+            description=None,
+            meta_data={},
+        )
+        no_material_task = service.create_workflow_task(
+            workflow_uuid=NO_MATERIAL_WORKFLOW_UUID,
+            run_mode="normal",
+            target_node_uuid=None,
+            input_value={},
+            description=None,
+            meta_data={},
+        )
+        inventory_port = _LockOrderProbeInventoryPort(
+            inventory,
+            no_material_task["uuid"],
+        )
+        scheduler = EdgeScheduler(workflow_tasks=service, inventory=inventory_port)
+        inventory_port.scheduler = scheduler
+
+        admitted = scheduler.reconcile_task_admission(material_task["uuid"])
+
+        assert admitted is not None
+        assert admitted.status == "admitted"
+        assert inventory_port.parallel_result == [None]
+    finally:
+        if service is not None:
+            service.close()
+        inventory.close()

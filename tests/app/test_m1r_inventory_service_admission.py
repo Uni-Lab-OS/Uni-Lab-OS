@@ -214,3 +214,73 @@ def test_candidate_sites_resolve_the_materials_current_site(
         assert admitted.bindings[0].site_uuid == SITE_UUID
     finally:
         inventory.close()
+
+
+def test_candidate_site_occupancy_contention_is_a_durable_blocked_result(
+    tmp_path: Path,
+) -> None:
+    inventory = inventory_api.InventoryService.open(
+        working_dir=tmp_path,
+        resource_templates=_resource_templates(),
+    )
+    try:
+        inventory.create_material(
+            material_uuid=MOUNT_UUID,
+            resource_template_uuid=RESOURCE_TEMPLATE_UUID,
+            barcode="MOUNT-105-BLOCKED",
+            name="Candidate Site blocked mount",
+        )
+        inventory.create_material(
+            material_uuid=MATERIAL_UUID,
+            resource_template_uuid=RESOURCE_TEMPLATE_UUID,
+            barcode="SAMPLE-105-BLOCKED",
+            name="Candidate Site waiting sample",
+        )
+        inventory.create_site(
+            site_uuid=SITE_UUID,
+            description=None,
+            meta_data={},
+            material_uuid=MOUNT_UUID,
+            name="A1",
+            sort_order=0,
+            allowed_resource_template_uuids=[RESOURCE_TEMPLATE_UUID],
+            occupied_material_uuid=None,
+            position_x=0.0,
+            position_y=0.0,
+            position_z=0.0,
+            depth=1.0,
+            length=1.0,
+            width=1.0,
+        )
+        command = _admission_command()
+        command = replace(
+            command,
+            sources=(
+                replace(
+                    command.sources[0],
+                    mount={"uuid": MOUNT_UUID},
+                    candidate_site_uuids=(SITE_UUID,),
+                ),
+            ),
+        )
+
+        blocked = inventory.admit_task(command)
+
+        assert blocked.status == "blocked"
+        assert blocked.reservation_uuid is None
+        assert blocked.bindings == ()
+        assert blocked.diagnostics == ({"code": "material_not_in_candidate_site"},)
+        assert inventory.get_command_result(COMMAND_UUID) == blocked
+        assert inventory.admit_task(command) == blocked
+    finally:
+        inventory.close()
+
+    reopened = inventory_api.InventoryService.open(
+        working_dir=tmp_path,
+        resource_templates=_resource_templates(),
+    )
+    try:
+        assert reopened.get_command_result(COMMAND_UUID) == blocked
+        assert reopened.admit_task(command) == blocked
+    finally:
+        reopened.close()
