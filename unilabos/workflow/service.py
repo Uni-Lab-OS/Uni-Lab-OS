@@ -265,6 +265,9 @@ class CatalogPublisher(Protocol):
 
     def invalidate(self) -> None: ...
 
+    @property
+    def authority_id(self) -> str: ...
+
 
 def _sha256(data: bytes) -> str:
     return f"sha256:{hashlib.sha256(data).hexdigest()}"
@@ -388,19 +391,28 @@ class WorkflowService:
             public_meta_data.pop("unilab", None)
             if "unilab" in current["meta_data"]:
                 public_meta_data["unilab"] = current["meta_data"]["unilab"]
-            return self._store.update_workflow(
-                identity,
-                name=name,
-                tags=tags,
-                description=self._optional_text(description),
-                meta_data=public_meta_data,
-            )
+            with self._catalog_mutation() as catalog_authority_id:
+                updated = self._store.update_workflow(
+                    identity,
+                    name=name,
+                    tags=tags,
+                    description=self._optional_text(description),
+                    meta_data=public_meta_data,
+                    catalog_authority_id=catalog_authority_id,
+                )
+                self._publish_catalog_after_mutation()
+                return updated
 
     def delete_workflow(self, workflow_uuid: str) -> None:
         identity = self.get_workflow(workflow_uuid)["uuid"]
         with self._authoring_lock(identity):
             self.get_workflow(identity)
-            self._store.delete_workflow(identity)
+            with self._catalog_mutation() as catalog_authority_id:
+                self._store.delete_workflow(
+                    identity,
+                    catalog_authority_id=catalog_authority_id,
+                )
+                self._publish_catalog_after_mutation()
 
     def get_graph(self, workflow_uuid: str) -> Dict[str, Any]:
         identity = self.get_workflow(workflow_uuid)["uuid"]
@@ -449,14 +461,18 @@ class WorkflowService:
                 self._validate_material_source(
                     {"nodes": [item.model_dump() for item in node_values]}
                 )
-                return self._store.save_graph(
-                    identity,
-                    revision=revision,
-                    nodes=node_values,
-                    edges=edge_values,
-                    protect_reserved_metadata=True,
-                    validate_workflow_io_contract=True,
-                )
+                with self._catalog_mutation() as catalog_authority_id:
+                    saved = self._store.save_graph(
+                        identity,
+                        revision=revision,
+                        nodes=node_values,
+                        edges=edge_values,
+                        protect_reserved_metadata=True,
+                        validate_workflow_io_contract=True,
+                        catalog_authority_id=catalog_authority_id,
+                    )
+                    self._publish_catalog_after_mutation()
+                    return saved
             except ValidationError:
                 raise WorkflowError("invalid_input") from None
             except MaterialSourceAuthorityError as error:
@@ -1348,20 +1364,9 @@ class WorkflowService:
                         workflow_uuid=workflow_uuid,
                         candidate_hash=candidate_hash,
                         validate_draft_state=validate_draft_linearization,
+                        catalog_authority_id=self._catalog_authority_id(),
                     )
-                    if self._catalog_publisher is not None:
-                        try:
-                            self._catalog_publisher.publish()
-                        except Exception:  # noqa: BLE001 - adapter boundary
-                            try:
-                                self._catalog_publisher.invalidate()
-                            except Exception:  # noqa: BLE001 - preserve fail-closed error
-                                _LOGGER.exception(
-                                    "Catalog publication 失败后无法持久化 unavailable marker"
-                                )
-                            raise WorkflowError(
-                                "template_catalog_unavailable"
-                            ) from None
+                    self._publish_catalog_after_mutation()
             except StoreAuthoringConflict as error:
                 raise WorkflowConflict(error.code) from None
             except StoreRevisionConflict:
@@ -2066,6 +2071,38 @@ class WorkflowService:
         except Exception:
             raise WorkflowError("template_catalog_unavailable") from None
         return self._validate_catalog_fingerprint(value)
+
+    def _catalog_authority_id(self) -> str | None:
+        if self._catalog_publisher is None:
+            return None
+        authority_id = self._catalog_publisher.authority_id
+        if not isinstance(authority_id, str) or not authority_id:
+            raise WorkflowError("template_catalog_unavailable")
+        return authority_id
+
+    @contextmanager
+    def _catalog_mutation(self) -> Iterator[str | None]:
+        """让 eligibility mutation 与 complete publication 共享 Catalog guard。"""
+
+        if self._catalog_publisher is None:
+            yield None
+            return
+        with self._catalog_snapshot():
+            yield self._catalog_authority_id()
+
+    def _publish_catalog_after_mutation(self) -> None:
+        if self._catalog_publisher is None:
+            return
+        try:
+            self._catalog_publisher.publish()
+        except Exception:  # noqa: BLE001 - adapter boundary
+            try:
+                self._catalog_publisher.invalidate()
+            except Exception:  # noqa: BLE001 - marker 已在 Store transaction 内删除
+                _LOGGER.exception(
+                    "Catalog publication 失败后的冗余 unavailable cleanup 失败"
+                )
+            raise WorkflowError("template_catalog_unavailable") from None
 
     @staticmethod
     def _validate_catalog_fingerprint(value: Any) -> str:

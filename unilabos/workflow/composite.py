@@ -21,6 +21,11 @@ from unilabos.workflow.catalog import (
     TemplateCatalogMismatch,
     TemplateCatalogSnapshot,
 )
+from unilabos.workflow.handle_projection import (
+    resource_slot_schema,
+    structural_ready_handle,
+    workflow_handle_type,
+)
 from unilabos.workflow.models import validate_uuid
 from unilabos.workflow.schema import WorkflowSchemaError
 from unilabos.workflow.store import StoreNotFound, WorkflowStore
@@ -46,6 +51,12 @@ class PublishedWorkflowResolver(Protocol):
     """absolute module/symbol 到 PackageCatalog Workflow identity 的 Interface。"""
 
     def resolve(self, module: str, symbol: str) -> PublishedWorkflowSource: ...
+
+
+class CompositeCatalogMismatch(TemplateCatalogMismatch):
+    """Published Workflow publication 无法与当前 Composite authority 对齐。"""
+
+    code = "composite_catalog_mismatch"
 
 
 class PublishedWorkflowCatalogPublisher:
@@ -104,16 +115,14 @@ class PublishedWorkflowCatalogPublisher:
                 )
             for source in self._sources:
                 try:
-                    graph = self._store.get_graph(source.workflow_uuid)
+                    applied_snapshot = self._store.get_published_workflow_snapshot(
+                        source.workflow_uuid
+                    )
                 except StoreNotFound:
                     continue
-                record = self._store.get_authoring_record(source.workflow_uuid)
                 projected = project_published_workflow_contract(
                     source=source,
-                    applied_snapshot={
-                        **graph,
-                        "applied_source": record.get("applied_source"),
-                    },
+                    applied_snapshot=applied_snapshot,
                     host_node_resource_template_uuid=(
                         self._host_node_resource_template_uuid
                     ),
@@ -130,6 +139,12 @@ class PublishedWorkflowCatalogPublisher:
         """使已提交 graph 后发布失败的 authority 立即 fail closed。"""
 
         self._catalog.invalidate(self._authority)
+
+    @property
+    def authority_id(self) -> str:
+        """需要在 workflow mutation transaction 内失效的 Catalog authority。"""
+
+        return self._authority.authority_id
 
 
 def _group_template(
@@ -183,13 +198,13 @@ def project_published_workflow_contract(
     workflow = applied_snapshot.get("workflow")
     applied_source = applied_snapshot.get("applied_source")
     if not isinstance(workflow, Mapping):
-        raise TemplateCatalogMismatch("/published_workflow/workflow")
+        raise CompositeCatalogMismatch("/published_workflow/workflow")
     workflow_uuid = _uuid(workflow.get("uuid"), "/published_workflow/workflow/uuid")
     if workflow_uuid != source.workflow_uuid:
-        raise TemplateCatalogMismatch("/published_workflow/source/workflow_uuid")
+        raise CompositeCatalogMismatch("/published_workflow/source/workflow_uuid")
     revision = workflow.get("revision")
     if isinstance(revision, bool) or not isinstance(revision, int) or revision < 1:
-        raise TemplateCatalogMismatch("/published_workflow/workflow/revision")
+        raise CompositeCatalogMismatch("/published_workflow/workflow/revision")
     if not isinstance(applied_source, Mapping):
         return None
     if applied_source.get("workflow_revision") != revision:
@@ -216,18 +231,18 @@ def project_published_workflow_contract(
     try:
         workflow_io = validate_workflow_graph_io(graph)
     except (WorkflowIOValidationError, WorkflowSchemaError, TypeError, ValueError):
-        raise TemplateCatalogMismatch("/published_workflow/io_contract") from None
+        raise CompositeCatalogMismatch("/published_workflow/io_contract") from None
 
     input_contract = workflow_io.input_contract.to_dict()
     output_contract = workflow_io.output_contract.to_dict()
-    inputs = [_semantic_descriptor(item) for item in input_contract["parameters"]]
-    outputs = [_semantic_descriptor(item) for item in output_contract["outputs"]]
+    inputs = [_plain(item) for item in input_contract["parameters"]]
+    outputs = [_plain(item) for item in output_contract["outputs"]]
     mode = _composition_mode(workflow)
     digest_payload = {
         "version": 1,
         "composition_allow_transparent": mode,
-        "inputs": inputs,
-        "outputs": outputs,
+        "inputs": [_semantic_descriptor(item) for item in inputs],
+        "outputs": [_semantic_descriptor(item) for item in outputs],
     }
     contract_digest = (
         "sha256:" + hashlib.sha256(rfc8785.dumps(digest_payload)).hexdigest()
@@ -244,7 +259,7 @@ def project_published_workflow_contract(
     handles = tuple(
         [_value_handle(item, io_type="target") for item in input_contract["parameters"]]
         + [_value_handle(item, io_type="source") for item in output_contract["outputs"]]
-        + [_ready_handle("target"), _ready_handle("source")]
+        + [structural_ready_handle("target"), structural_ready_handle("source")]
     )
     return NodeTemplateImport(
         template={
@@ -349,7 +364,7 @@ def _value_handle(
 ) -> dict[str, Any]:
     name = str(descriptor["name"])
     schema = _plain(descriptor["schema"])
-    slot_schema = _resource_slot_schema(schema)
+    slot_schema = resource_slot_schema(schema)
     allowed = (
         _plain(slot_schema.get("allowed_resource_template_uuids"))
         if slot_schema is not None
@@ -361,7 +376,7 @@ def _value_handle(
         "io_type": io_type,
         "display_name": str(descriptor.get("title") or name),
         "description": str(descriptor.get("description") or ""),
-        "type": _handle_type(schema),
+        "type": workflow_handle_type(schema),
         "required": bool(descriptor.get("required", False))
         if io_type == "target"
         else False,
@@ -380,61 +395,6 @@ def _value_handle(
     }
 
 
-def _ready_handle(io_type: str) -> dict[str, Any]:
-    return {
-        "handle_key": "ready",
-        "io_type": io_type,
-        "display_name": "Ready",
-        "description": "Composite structural dependency",
-        "type": "any",
-        "required": False,
-        "data_source": "dependency",
-        "data_key": "ready",
-        "meta_data": {
-            "unilab": {
-                "value_schema": {"type": "boolean"},
-                "editor_control": "variable_selector",
-                "allowed_resource_template_uuids": None,
-                "implicit_passthrough": False,
-                "structural_role": "ready",
-            }
-        },
-    }
-
-
-def _resource_slot_schema(schema: Mapping[str, Any]) -> Mapping[str, Any] | None:
-    if schema.get("$slot") == "ResourceSlot":
-        return schema
-    items = schema.get("items")
-    if (
-        schema.get("type") == "array"
-        and isinstance(items, Mapping)
-        and items.get("$slot") == "ResourceSlot"
-    ):
-        return items
-    members = schema.get("anyOf")
-    if isinstance(members, list):
-        for member in members:
-            if isinstance(member, Mapping):
-                found = _resource_slot_schema(member)
-                if found is not None:
-                    return found
-    return None
-
-
-def _handle_type(schema: Mapping[str, Any]) -> str:
-    if _resource_slot_schema(schema) is not None:
-        return "ResourceSlot" if schema.get("type") != "array" else "array"
-    if isinstance(schema.get("type"), str):
-        return str(schema["type"])
-    members = schema.get("anyOf")
-    if isinstance(members, list):
-        for member in members:
-            if isinstance(member, Mapping) and member.get("type") != "null":
-                return _handle_type(member)
-    return "object"
-
-
 def _composition_mode(workflow: Mapping[str, Any]) -> bool:
     meta_data = workflow.get("meta_data")
     unilab = meta_data.get("unilab") if isinstance(meta_data, Mapping) else None
@@ -444,7 +404,7 @@ def _composition_mode(workflow: Mapping[str, Any]) -> bool:
         else False
     )
     if not isinstance(raw, bool):
-        raise TemplateCatalogMismatch(
+        raise CompositeCatalogMismatch(
             "/published_workflow/composition_allow_transparent"
         )
     return raw
@@ -452,7 +412,7 @@ def _composition_mode(workflow: Mapping[str, Any]) -> bool:
 
 def _host_owner_uuid(value: Any) -> str:
     if value is None:
-        raise TemplateCatalogMismatch("/host_node/resource_template_uuid")
+        raise CompositeCatalogMismatch("/host_node/resource_template_uuid")
     return _uuid(value, "/host_node/resource_template_uuid")
 
 
@@ -460,26 +420,26 @@ def _uuid(value: Any, path: str) -> str:
     try:
         canonical = validate_uuid(value)
     except (TypeError, ValueError):
-        raise TemplateCatalogMismatch(path) from None
+        raise CompositeCatalogMismatch(path) from None
     if canonical != value:
-        raise TemplateCatalogMismatch(path)
+        raise CompositeCatalogMismatch(path)
     return canonical
 
 
 def _sha256(value: Any, path: str) -> str:
     if not isinstance(value, str) or not value.startswith("sha256:"):
-        raise TemplateCatalogMismatch(path)
+        raise CompositeCatalogMismatch(path)
     digest = value.removeprefix("sha256:")
     if len(digest) != 64 or any(
         character not in "0123456789abcdef" for character in digest
     ):
-        raise TemplateCatalogMismatch(path)
+        raise CompositeCatalogMismatch(path)
     return value
 
 
 def _sequence(value: Any, path: str) -> list[Any]:
     if not isinstance(value, list):
-        raise TemplateCatalogMismatch(path)
+        raise CompositeCatalogMismatch(path)
     return _plain(value)
 
 
@@ -492,6 +452,7 @@ def _plain(value: Any) -> Any:
 
 
 __all__ = [
+    "CompositeCatalogMismatch",
     "PublishedWorkflowCatalogPublisher",
     "PublishedWorkflowResolver",
     "PublishedWorkflowSource",
