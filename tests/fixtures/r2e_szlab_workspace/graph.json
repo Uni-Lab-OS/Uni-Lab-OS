@@ -1,0 +1,17 @@
+{
+  "nodes": [
+    {
+      "id": "r2e_szlab_mixer",
+      "uuid": "64000000-0000-4000-8000-000000000001",
+      "name": "R2E SZLab mixer",
+      "children": [],
+      "parent": null,
+      "type": "device",
+      "class": "r2e_szlab_mixer",
+      "position": {"x": 0, "y": 0, "z": 0},
+      "config": {},
+      "data": {}
+    }
+  ],
+  "links": []
+}

@@ -839,8 +839,15 @@ def main():
     if workspace_source is not None:
         from unilabos.workflow.catalog import CatalogAuthority
 
+        workspace_root = workspace_source.root.resolve()
+        # PackageCatalog workspaces may contain devices/resources only.  The
+        # editable Workflow source protocol is an additional, explicit
+        # capability whose closed manifest is package.yaml; do not make that
+        # manifest mandatory merely because --workspace was selected.
         BasicConfig.workflow_editable_package_roots = (
-            str(workspace_source.root.resolve()),
+            (str(workspace_root),)
+            if (workspace_root / "package.yaml").is_file()
+            else ()
         )
         if BasicConfig.workflow_graph_authority is None:
             BasicConfig.workflow_graph_authority = CatalogAuthority(
@@ -1063,16 +1070,15 @@ def main():
     graph: nx.Graph
     resource_tree_set: ResourceTreeSet
     resource_links: List[Dict[str, Any]]
-    request_startup_json = args_dict.get("_startup_json")
-    if request_startup_json is None:
-        request_startup_json = http_client.request_startup_json()
-
     file_path = args_dict.get("_graph_file_path")
     if file_path is None:
         file_path = _resolve_graph_file_path(
             args_dict.get("graph") or BasicConfig.startup_json_path,
             workspace_root=args_dict.get("_workspace_root"),
         )
+    request_startup_json = args_dict.get("_startup_json")
+    if request_startup_json is None and file_path is None:
+        request_startup_json = http_client.request_startup_json()
     if file_path is None:
         if not request_startup_json:
             print_status(
@@ -1149,9 +1155,11 @@ def main():
         args_dict["controllers_config"] = None
 
     args_dict["bridges"] = []
-
-    if "fastapi" in args_dict["app_bridges"]:
-        args_dict["bridges"].append(http_client)
+    workflow_job_dispatcher = None
+    device_identity_resolver = None
+    workflow_package_catalogs = (
+        (workspace_catalog,) if workspace_catalog is not None else ()
+    )
     # 获取通信客户端（仅支持WebSocket）
     if BasicConfig.is_host_mode:
         comm_client = get_communication_client()
@@ -1184,6 +1192,37 @@ def main():
             print_status("Edge 调度器已启用 (workflow_start 整图下沉执行)", "info")
             if inventory_db:
                 print_status(f"Edge 仓储已启用 (SQLite WAL: {inventory_db})", "info")
+
+        # Persistent WorkflowTask execution is a separate local authority from
+        # the legacy cloud workflow_start Edge scheduler.  Wire its Jobs to the
+        # same HostNode/ROS execution backend whenever a Package Workspace owns
+        # the local Workflow authority.
+        if (
+            workspace_source is not None
+            and args_dict.get("backend") == "ros"
+            and BasicConfig.test_mode
+        ):
+            from unilabos.app.scheduler.backend import JobExecutionBackend
+
+            device_ids_by_identity = {}
+            for node in resource_tree_set.all_nodes:
+                if node.res_content.type != "device":
+                    continue
+                device_ids_by_identity[node.res_content.uuid] = node.res_content.id
+                device_ids_by_identity[node.res_content.id] = node.res_content.id
+            device_identity_resolver = device_ids_by_identity.get
+            workflow_job_dispatcher = JobExecutionBackend()
+            workflow_job_dispatcher.start()
+            args_dict["bridges"].append(workflow_job_dispatcher)
+            print_status(
+                "WorkflowTask ROS 执行后端已启用（仅 test_mode）",
+                "info",
+            )
+        elif workspace_source is not None and args_dict.get("backend") == "ros":
+            print_status(
+                "WorkflowTask ROS 物理执行未启用：durable Execution Claims 尚未接入",
+                "warning",
+            )
     else:
         print_status("SlaveMode跳过Websocket连接")
 
@@ -1216,6 +1255,9 @@ def main():
                     resource_registry_snapshot=args_dict.get(
                         "_workflow_resource_registry_snapshot"
                     ),
+                    workflow_job_dispatcher=workflow_job_dispatcher,
+                    device_identity_resolver=device_identity_resolver,
+                    workflow_package_catalogs=workflow_package_catalogs,
                 ),
             )
             server_thread.start()
@@ -1245,6 +1287,9 @@ def main():
                 resource_registry_snapshot=args_dict.get(
                     "_workflow_resource_registry_snapshot"
                 ),
+                workflow_job_dispatcher=workflow_job_dispatcher,
+                device_identity_resolver=device_identity_resolver,
+                workflow_package_catalogs=workflow_package_catalogs,
             )
             if restart_requested:
                 print_status("[Main] Restart requested, cleaning up...", "info")
@@ -1261,6 +1306,9 @@ def main():
             resource_registry_snapshot=args_dict.get(
                 "_workflow_resource_registry_snapshot"
             ),
+            workflow_job_dispatcher=workflow_job_dispatcher,
+            device_identity_resolver=device_identity_resolver,
+            workflow_package_catalogs=workflow_package_catalogs,
         )
         if restart_requested:
             print_status("[Main] Restart requested, cleaning up...", "info")
