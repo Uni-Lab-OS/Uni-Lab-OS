@@ -1293,17 +1293,17 @@ class WorkflowRuntimeWorker:
             try:
                 self._dispatcher.dispatch(payload)
             except Exception as error:  # noqa: BLE001
-                # The transport may have accepted the action before its
-                # acknowledgement failed.  Preserve the durable uncertainty
-                # fence instead of inventing a physical failure fact.
+                # 传输层可能已接受动作、却在确认阶段失败；保留 durable
+                # uncertainty fence，不能凭空生成物理失败事实。
                 _LOGGER.exception(
                     "Workflow Job dispatch outcome unknown task_uuid=%s job_uuid=%s",
                     task_uuid,
                     job["uuid"],
                 )
+                uncertainty_reason = str(error).strip() or "dispatch_outcome_unknown"
                 self._coordinator.mark_job_unknown(
                     job["uuid"],
-                    str(error),
+                    uncertainty_reason,
                 )
             return
 

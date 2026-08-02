@@ -23,10 +23,7 @@ from unilabos.workflow.service import WorkflowService
 from unilabos.workflow.store import WorkflowStore
 
 _FIXTURE_WORKSPACE = (
-    Path(__file__).resolve().parents[2]
-    / "tests"
-    / "fixtures"
-    / "r2e_szlab_workspace"
+    Path(__file__).resolve().parents[2] / "tests" / "fixtures" / "r2e_szlab_workspace"
 )
 _LEGACY_IDENTITY_KEYS = {"job_id", "task_id", "node_id", "workflow_id"}
 _UUID_IDENTITY_KEYS = {"job_uuid", "task_uuid", "node_uuid", "workflow_uuid"}
@@ -210,7 +207,10 @@ def test_composition_rejects_changed_execution_configuration(
 ) -> None:
     catalog = compile_package_source(WorkspaceSource(_FIXTURE_WORKSPACE))
     dispatcher = _RecordingDispatcher()
-    resolver = lambda _identity: "r2e_szlab_mixer"
+
+    def resolver(_identity: str) -> str:
+        return "r2e_szlab_mixer"
+
     first_options: dict[str, Any] = {
         "workflow_job_dispatcher": dispatcher,
         "device_identity_resolver": resolver,
@@ -220,8 +220,8 @@ def test_composition_rejects_changed_execution_configuration(
     if changed_capability == "dispatcher":
         second_options["workflow_job_dispatcher"] = _RecordingDispatcher()
     elif changed_capability == "resolver":
-        second_options["device_identity_resolver"] = (
-            lambda _identity: "replacement_mixer"
+        second_options["device_identity_resolver"] = lambda _identity: (
+            "replacement_mixer"
         )
     else:
         second_options["workflow_package_catalogs"] = (
