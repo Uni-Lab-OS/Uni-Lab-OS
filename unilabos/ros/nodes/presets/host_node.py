@@ -388,6 +388,11 @@ class HostNode(BaseROS2DeviceNode):
         self._slave_registry_configs: Dict[str, Dict] = {}  # registry_name -> registry_config(含action_value_mappings)
         self._goals: Dict[str, Any] = {}  # 用来存储多个目标的状态
         self._goal_trace_contexts: Dict[str, Dict[str, str]] = {}
+        self._goals_lock = threading.RLock()
+        self._pending_goal_requests: Set[str] = set()
+        # 手动解锁可能发生在 send_goal_async 返回、goal response 到达之前。
+        # 这里保存待接受 goal 的取消意图，避免旧 goal 迟到接受后无人取消。
+        self._pending_goal_cancellations: Set[str] = set()
         self._trace_registration_executor = ThreadPoolExecutor(
             max_workers=4,
             thread_name_prefix="HostTraceRegistration",
@@ -980,57 +985,66 @@ class HostNode(BaseROS2DeviceNode):
         action_client: ActionClient = self._action_clients[action_id]
         goal_msg = convert_to_ros_msg(action_client._action_type.Goal(), action_kwargs)
 
-        target_wrapper = self.devices_instances.get(device_id)
-        target_node = getattr(target_wrapper, "_ros_node", None) if target_wrapper is not None else None
-        if target_node is not None and hasattr(target_node, "register_job_context"):
-            try:
-                target_node.register_job_context(
-                    item.job_id,
-                    item.task_id,
-                    item.action_name,
-                    trace_context=trace_context,
+        # 必须在任何可能阻塞或切到 trace executor 的步骤之前登记请求。
+        # 这样人工解锁可以在 ROS 真正提交前留下取消意图。
+        with HostNode._goal_tracking_lock(self):
+            self._pending_goal_requests.add(item.job_id)
+
+        try:
+            target_wrapper = self.devices_instances.get(device_id)
+            target_node = getattr(target_wrapper, "_ros_node", None) if target_wrapper is not None else None
+            if target_node is not None and hasattr(target_node, "register_job_context"):
+                try:
+                    target_node.register_job_context(
+                        item.job_id,
+                        item.task_id,
+                        item.action_name,
+                        trace_context=trace_context,
+                    )
+                except TypeError:
+                    # 兼容尚未升级 tracing seam 的本地自定义节点。
+                    target_node.register_job_context(
+                        item.job_id,
+                        item.task_id,
+                        item.action_name,
+                    )
+            elif not action_type.startswith("UniLabJsonCommand") and normalize_trace_context(
+                trace_context
+            ):
+                executor = self._trace_registration_executor
+                if executor is None or getattr(self, "_shutting_down", False):
+                    raise RuntimeError("Host is shutting down")
+                deferred = executor.submit(
+                    HostNode._register_then_send_goal,
+                    self,
+                    item,
+                    action_id,
+                    action_client,
+                    goal_msg,
+                    action_kwargs,
+                    trace_context,
                 )
-            except TypeError:
-                # 兼容尚未升级 tracing seam 的本地自定义节点。
-                target_node.register_job_context(
-                    item.job_id,
-                    item.task_id,
-                    item.action_name,
+                deferred.add_done_callback(
+                    lambda future: HostNode._deferred_goal_send_callback(
+                        self,
+                        item,
+                        action_id,
+                        future,
+                    )
                 )
-        elif not action_type.startswith("UniLabJsonCommand") and normalize_trace_context(
-            trace_context
-        ):
-            executor = self._trace_registration_executor
-            if executor is None or getattr(self, "_shutting_down", False):
-                raise RuntimeError("Host is shutting down")
-            deferred = executor.submit(
-                HostNode._register_then_send_goal,
+                return deferred
+
+            HostNode._send_action_goal(
                 self,
                 item,
                 action_id,
                 action_client,
                 goal_msg,
                 action_kwargs,
-                trace_context,
             )
-            deferred.add_done_callback(
-                lambda future: HostNode._deferred_goal_send_callback(
-                    self,
-                    item,
-                    action_id,
-                    future,
-                )
-            )
-            return deferred
-
-        HostNode._send_action_goal(
-            self,
-            item,
-            action_id,
-            action_client,
-            goal_msg,
-            action_kwargs,
-        )
+        except Exception:
+            HostNode._clear_goal_tracking(self, item.job_id)
+            raise
         return None
 
     def _send_action_goal(
@@ -1059,13 +1073,29 @@ class HostNode(BaseROS2DeviceNode):
             )
         if getattr(self, "_shutting_down", False):
             raise RuntimeError("Host is shutting down")
-        goal_uuid_obj = UUID(uuid=list(uuid.UUID(item.job_id).bytes))
 
-        future = action_client.send_goal_async(
-            goal_msg,
-            feedback_callback=lambda feedback_msg: self.feedback_callback(item, action_id, feedback_msg),
-            goal_uuid=goal_uuid_obj,
-        )
+        # cancel_goal_or_defer 使用同一把锁。检查和 send_goal_async 必须处于
+        # 同一临界区：解锁先拿锁则完全不提交，提交先拿锁则解锁随后登记取消。
+        with HostNode._goal_tracking_lock(self):
+            if item.job_id in self._pending_goal_cancellations:
+                self._pending_goal_requests.discard(item.job_id)
+                self._pending_goal_cancellations.discard(item.job_id)
+                self.lab_logger().warning(
+                    f"[Host Node] Drop goal {item.job_id[:8]} before ROS submit "
+                    "because manual unlock won"
+                )
+                return
+            goal_uuid_obj = UUID(uuid=list(uuid.UUID(item.job_id).bytes))
+            try:
+                future = action_client.send_goal_async(
+                    goal_msg,
+                    feedback_callback=lambda feedback_msg: self.feedback_callback(item, action_id, feedback_msg),
+                    goal_uuid=goal_uuid_obj,
+                )
+            except Exception:
+                self._pending_goal_requests.discard(item.job_id)
+                self._pending_goal_cancellations.discard(item.job_id)
+                raise
         future.add_done_callback(lambda f: self.goal_response_callback(item, action_id, f))
 
     def _register_then_send_goal(
@@ -1104,6 +1134,7 @@ class HostNode(BaseROS2DeviceNode):
             future.result()
             return
         except Exception as exc:  # noqa: BLE001 - 后台边界必须收敛异常
+            HostNode._clear_goal_tracking(self, item.job_id)
             self.lab_logger().error(
                 f"[Host Node] Deferred goal send failed for {item.job_id[:8]}: "
                 f"{type(exc).__name__}"
@@ -1124,9 +1155,13 @@ class HostNode(BaseROS2DeviceNode):
 
         return_info = serialize_result_info("ROS goal send failed", False, {})
         try:
-            from unilabos.app.web.controller import store_job_result
-
-            store_job_result(item.job_id, "failed", return_info, {})
+            HostNode._store_job_result_unless_fenced(
+                self,
+                item.job_id,
+                "failed",
+                return_info,
+                {},
+            )
         except Exception as exc:  # noqa: BLE001 - bridge 回报仍须继续
             self.lab_logger().error(
                 f"[Host Node] Failed to store deferred send result: "
@@ -1220,20 +1255,41 @@ class HostNode(BaseROS2DeviceNode):
         ):
             pass
         if not goal_handle.accepted:
+            with HostNode._goal_tracking_lock(self):
+                self._pending_goal_requests.discard(item.job_id)
+                self._pending_goal_cancellations.discard(item.job_id)
             self.lab_logger().warning(f"[Host Node] Goal {item.action_name} ({item.job_id}) rejected")
             return
 
         self.lab_logger().info(f"[Host Node] Goal {action_id} ({item.job_id}) accepted")
-        self._goals[item.job_id] = goal_handle
-        self._goal_trace_contexts[item.job_id] = normalize_trace_context(
-            getattr(item, "trace_context", {})
-        )
+        with HostNode._goal_tracking_lock(self):
+            self._pending_goal_requests.discard(item.job_id)
+            self._goals[item.job_id] = goal_handle
+            self._goal_trace_contexts[item.job_id] = normalize_trace_context(
+                getattr(item, "trace_context", {})
+            )
+            cancel_on_accept = item.job_id in self._pending_goal_cancellations
+            self._pending_goal_cancellations.discard(item.job_id)
+        if cancel_on_accept:
+            self.lab_logger().warning(
+                f"[Host Node] Goal {item.job_id[:8]} accepted after manual unlock; cancelling immediately"
+            )
+            HostNode._request_registered_goal_cancel(
+                self,
+                item.job_id,
+                goal_handle,
+            )
         goal_future = goal_handle.get_result_async()
         goal_future.add_done_callback(lambda f: self.get_result_callback(item, action_id, f))
         goal_future.result()
 
     def feedback_callback(self, item: "QueueItem", action_id: str, feedback_msg) -> None:
         """反馈回调"""
+        if HostNode._is_manual_unlock_fenced(self, item.job_id):
+            self.lab_logger().warning(
+                f"[Host Node] Skip late feedback for manually unlocked goal {item.job_id[:8]}"
+            )
+            return
         feedback_data = convert_from_ros_msg(feedback_msg)
         feedback_data.pop("goal_id")
         self.lab_logger().trace(f"[Host Node] Feedback for {action_id} ({item.job_id}): {feedback_data}")
@@ -1248,6 +1304,12 @@ class HostNode(BaseROS2DeviceNode):
 
         try:
             result = future.result()
+            if HostNode._is_manual_unlock_fenced(self, job_id):
+                self.lab_logger().warning(
+                    f"[Host Node] Skip late result for manually unlocked goal {job_id[:8]}"
+                )
+                HostNode._clear_goal_tracking(self, job_id)
+                return
             result_msg = result.result
             goal_status = result.status
 
@@ -1310,21 +1372,25 @@ class HostNode(BaseROS2DeviceNode):
                 self.lab_logger().trace(f"[Host Node] Result data: {result_data}")
 
             # 清理 _goals 中的记录
-            if job_id in self._goals:
-                del self._goals[job_id]
-                self.lab_logger().trace(f"[Host Node] Removed goal {job_id[:8]} from _goals")
-            self._goal_trace_contexts.pop(job_id, None)
+            HostNode._clear_goal_tracking(self, job_id)
 
             # 存储结果供 HTTP API 查询
-            try:
-                from unilabos.app.web.controller import store_job_result
-
-                if goal_status == GoalStatus.STATUS_CANCELED:
-                    store_job_result(job_id, status, return_info, {})
-                else:
-                    store_job_result(job_id, status, return_info, result_data)
-            except ImportError:
-                pass  # controller 模块可能未加载
+            if goal_status == GoalStatus.STATUS_CANCELED:
+                HostNode._store_job_result_unless_fenced(
+                    self,
+                    job_id,
+                    status,
+                    return_info,
+                    {},
+                )
+            else:
+                HostNode._store_job_result_unless_fenced(
+                    self,
+                    job_id,
+                    status,
+                    return_info,
+                    result_data,
+                )
 
             # 发布状态到桥接器
             if job_id:
@@ -1357,9 +1423,7 @@ class HostNode(BaseROS2DeviceNode):
             self.lab_logger().error(traceback.format_exc())
 
             # 清理 _goals 中的记录
-            if job_id in self._goals:
-                del self._goals[job_id]
-            self._goal_trace_contexts.pop(job_id, None)
+            HostNode._clear_goal_tracking(self, job_id)
 
             # 发布失败状态
             for bridge in self.bridges:
@@ -1367,6 +1431,89 @@ class HostNode(BaseROS2DeviceNode):
                     bridge.publish_job_status(
                         {}, item, "failed", serialize_result_info(f"Callback error: {str(e)}", False, {})
                     )
+
+    def _is_manual_unlock_fenced(self, job_id: str) -> bool:
+        """查询 bridge 中的人工解锁 fence，不把 Job 状态权威复制到 HostNode。"""
+
+        for bridge in self.bridges:
+            checker = getattr(bridge, "is_manual_unlock_fenced", None)
+            if callable(checker) and checker(job_id):
+                return True
+        return False
+
+    def _store_job_result_unless_fenced(
+        self,
+        job_id: str,
+        status: str,
+        result: Optional[Dict[str, Any]],
+        feedback: Optional[Dict[str, Any]] = None,
+    ) -> bool:
+        """优先由 bridge 在其 fence 临界区内写旧 HTTP 结果仓。"""
+
+        for bridge in self.bridges:
+            writer = getattr(bridge, "store_job_result_if_unfenced", None)
+            if callable(writer):
+                return bool(writer(job_id, status, result, feedback))
+
+        try:
+            from unilabos.app.web.controller import store_job_result
+
+            store_job_result(job_id, status, result, feedback)
+            return True
+        except ImportError:
+            return False
+
+    def _goal_tracking_lock(self) -> threading.RLock:
+        """为完整 Host 与历史轻量测试替身提供一致的 goal 跟踪状态。"""
+
+        lock = getattr(self, "_goals_lock", None)
+        if lock is None:
+            lock = threading.RLock()
+            self._goals_lock = lock
+        if not hasattr(self, "_goals"):
+            self._goals = {}
+        if not hasattr(self, "_goal_trace_contexts"):
+            self._goal_trace_contexts = {}
+        if not hasattr(self, "_pending_goal_requests"):
+            self._pending_goal_requests = set()
+        if not hasattr(self, "_pending_goal_cancellations"):
+            self._pending_goal_cancellations = set()
+        return lock
+
+    def _clear_goal_tracking(self, job_id: str) -> None:
+        """原子清理 goal handle、trace context 和待接受取消意图。"""
+
+        with HostNode._goal_tracking_lock(self):
+            removed = self._goals.pop(job_id, None)
+            self._goal_trace_contexts.pop(job_id, None)
+            self._pending_goal_requests.discard(job_id)
+            self._pending_goal_cancellations.discard(job_id)
+        if removed is not None:
+            self.lab_logger().trace(
+                f"[Host Node] Removed goal {job_id[:8]} from _goals"
+            )
+
+    def cancel_goal_or_defer(self, goal_uuid: str) -> bool:
+        """取消已登记 goal，或保存其尚未 accepted 时的取消意图。"""
+
+        with HostNode._goal_tracking_lock(self):
+            goal_handle = self._goals.get(goal_uuid)
+            if goal_handle is None:
+                if goal_uuid not in self._pending_goal_requests:
+                    self.lab_logger().warning(
+                        f"[Host Node] Goal {goal_uuid[:8]} was never submitted; cannot defer cancel"
+                    )
+                    return False
+                self._pending_goal_cancellations.add(goal_uuid)
+                self.lab_logger().warning(
+                    f"[Host Node] Goal {goal_uuid[:8]} pending acceptance; defer cancel"
+                )
+                return True
+        return HostNode._request_registered_goal_cancel(
+            self,
+            goal_uuid,
+            goal_handle,
+        )
 
     def cancel_goal(self, goal_uuid: str) -> bool:
         """
@@ -1378,11 +1525,30 @@ class HostNode(BaseROS2DeviceNode):
         Returns:
             bool: 如果找到目标并发起取消请求返回True，否则返回False
         """
-        if goal_uuid in self._goals:
+        with HostNode._goal_tracking_lock(self):
+            goal_handle = self._goals.get(goal_uuid)
+        if goal_handle is None:
+            self.lab_logger().warning(f"[Host Node] Goal {goal_uuid[:8]} not found in _goals, cannot cancel")
+            return False
+        return HostNode._request_registered_goal_cancel(
+            self,
+            goal_uuid,
+            goal_handle,
+        )
+
+    def _request_registered_goal_cancel(
+        self,
+        goal_uuid: str,
+        goal_handle: Any,
+    ) -> bool:
+        """向已 accepted 的 goal handle 发起异步取消。"""
+
+        with HostNode._goal_tracking_lock(self):
             cancel_parent = normalize_trace_context(
                 self._goal_trace_contexts.get(goal_uuid)
             )
-            cancel_trace_context = cancel_parent
+        cancel_trace_context = cancel_parent
+        try:
             with fail_open_span(
                 runtime_tracing,
                 "ros2.action.cancel",
@@ -1393,23 +1559,21 @@ class HostNode(BaseROS2DeviceNode):
                 if captured_context:
                     cancel_trace_context = captured_context
                 self.lab_logger().info(f"[Host Node] Cancelling goal {goal_uuid[:8]}")
-                goal_handle = self._goals[goal_uuid]
-
-                # 发起异步取消请求
                 cancel_future = goal_handle.cancel_goal_async()
-
-            # 添加取消完成的回调
-            cancel_future.add_done_callback(
-                lambda future: self._cancel_goal_callback(
-                    goal_uuid,
-                    future,
-                    cancel_trace_context,
-                )
+        except Exception as exc:
+            self.lab_logger().error(
+                f"[Host Node] Failed to request goal cancellation {goal_uuid[:8]}: {exc}"
             )
-            return True
-        else:
-            self.lab_logger().warning(f"[Host Node] Goal {goal_uuid[:8]} not found in _goals, cannot cancel")
             return False
+
+        cancel_future.add_done_callback(
+            lambda future: self._cancel_goal_callback(
+                goal_uuid,
+                future,
+                cancel_trace_context,
+            )
+        )
+        return True
 
     def _cancel_goal_callback(
         self,
@@ -1449,8 +1613,9 @@ class HostNode(BaseROS2DeviceNode):
 
     def get_goal_status(self, job_id: str) -> int:
         """获取目标状态"""
-        if job_id in self._goals:
-            g = self._goals[job_id]
+        with HostNode._goal_tracking_lock(self):
+            g = self._goals.get(job_id)
+        if g is not None:
             status = g.status
             self.lab_logger().debug(f"[Host Node] Goal status for {job_id}: {status}")
             return status
