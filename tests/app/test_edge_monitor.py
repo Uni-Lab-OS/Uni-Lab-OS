@@ -19,8 +19,12 @@ def _spec(workflow_id="wf-m", device="dev1"):
     return WorkflowSpec(
         workflow_id=workflow_id,
         nodes=[
-            WorkflowNode(id="A", device_id=device, action_name="run", action_type="goal"),
-            WorkflowNode(id="B", device_id=device, action_name="run", action_type="goal"),
+            WorkflowNode(
+                id="A", device_id=device, action_name="run", action_type="goal"
+            ),
+            WorkflowNode(
+                id="B", device_id=device, action_name="run", action_type="goal"
+            ),
         ],
         edges=[WorkflowEdge(uuid="e", source_node_id="A", target_node_id="B")],
     )
@@ -81,7 +85,9 @@ class TestSchedulerEmissions:
         types = [(e["channel"], e["type"]) for e in bus.recent("scheduler", 10)]
         assert ("scheduler", "workflow_submitted") in types
         assert ("scheduler", "reschedule") in types
-        dispatched = [e for e in bus.recent("action", 10) if e["type"] == "job_dispatched"]
+        dispatched = [
+            e for e in bus.recent("action", 10) if e["type"] == "job_dispatched"
+        ]
         assert len(dispatched) == 1
         assert dispatched[0]["data"]["job_id"] == result["dispatched"][0]["job_id"]
         assert dispatched[0]["data"]["estimated_s"] > 0
@@ -94,7 +100,9 @@ class TestSchedulerEmissions:
         r = scheduler.submit_workflow(_spec("wf-fin"))
         scheduler.on_job_finished(r["dispatched"][0]["job_id"], True)
         # B 下发后完成 → 工作流终态
-        second = [e for e in bus.recent("action", 20) if e["type"] == "job_dispatched"][-1]
+        second = [e for e in bus.recent("action", 20) if e["type"] == "job_dispatched"][
+            -1
+        ]
         scheduler.on_job_finished(second["data"]["job_id"], True)
 
         finished = [e for e in bus.recent("action", 20) if e["type"] == "job_finished"]
@@ -103,7 +111,9 @@ class TestSchedulerEmissions:
         assert finished[0]["data"]["actual_s"] >= 0
         idle = [e for e in bus.recent("device", 20) if e["type"] == "device_idle"]
         assert len(idle) == 2
-        states = [e for e in bus.recent("scheduler", 20) if e["type"] == "workflow_state"]
+        states = [
+            e for e in bus.recent("scheduler", 20) if e["type"] == "workflow_state"
+        ]
         assert states[-1]["data"] == {"workflow_id": "wf-fin", "state": "success"}
 
     def test_failure_and_cancel_states(self):
@@ -112,7 +122,9 @@ class TestSchedulerEmissions:
         scheduler.on_job_finished(r["dispatched"][0]["job_id"], False)
         finished = [e for e in bus.recent("action", 20) if e["type"] == "job_finished"]
         assert finished[-1]["data"]["state"] == "failed"
-        states = [e for e in bus.recent("scheduler", 20) if e["type"] == "workflow_state"]
+        states = [
+            e for e in bus.recent("scheduler", 20) if e["type"] == "workflow_state"
+        ]
         assert states[-1]["data"]["state"] == "failed"
 
         scheduler.submit_workflow(_spec("wf-c"))
@@ -149,43 +161,79 @@ class TestDeviceStatus:
 
 
 class TestInventoryEmissions:
-    def _svc(self):
+    def _svc(self, tmp_path):
         pytest.importorskip("sqlite3")
-        from unilabos.app.scheduler.inventory.service import InventoryService
-        from unilabos.app.scheduler.inventory.store import InventoryStore
+        from unilabos.app.scheduler.inventory import (
+            InventoryService,
+            ResourceTemplateIdentity,
+        )
 
         bus = MonitorBus()
-        svc = InventoryService(
-            InventoryStore(":memory:"), edge_id="edge-t", lab_id="lab-t", monitor=bus
+        template_uuid = "20000000-0000-4000-8000-000000001101"
+        svc = InventoryService.open(
+            working_dir=tmp_path,
+            resource_templates={
+                template_uuid: ResourceTemplateIdentity(template_uuid, "Water")
+            },
+            edge_id="edge-t",
+            lab_id="lab-t",
+            monitor=bus,
         )
-        return svc, bus
+        return svc, bus, template_uuid
 
-    def test_committed_tx_emits_material_events(self):
-        svc, bus = self._svc()
-        svc.inbound_lot("tpl-water", 100.0, unit="mL", lot_id="lot-1")
+    def test_committed_tx_emits_material_events(self, tmp_path):
+        svc, bus, template_uuid = self._svc(tmp_path)
+        svc.inbound_lot(
+            resource_template_uuid=template_uuid,
+            quantity=100.0,
+            unit="mL",
+            lot_id="lot-1",
+        )
         events = bus.recent("material", 10)
         assert [e["type"] for e in events] == ["lot.created"]
         assert events[0]["data"]["aggregate_id"] == "lot-1"
         assert events[0]["data"]["payload"]["quantity_total"] == 100.0
 
-        svc.adjust_lot("lot-1", 90.0, reason="盘亏", actor="tester")
+        svc.adjust_lot(
+            lot_id="lot-1",
+            new_total=90.0,
+            reason="盘亏",
+            actor="tester",
+        )
         assert bus.recent("material", 10)[-1]["type"] == "lot.adjusted"
+        svc.close()
 
-    def test_rolled_back_tx_emits_nothing(self):
-        svc, bus = self._svc()
+    def test_rolled_back_tx_emits_nothing(self, tmp_path):
+        svc, bus, template_uuid = self._svc(tmp_path)
         from unilabos.app.scheduler.inventory.domain import InvariantViolation
 
         with pytest.raises(InvariantViolation):
-            svc.inbound_lot("tpl-water", -5.0)
+            svc.inbound_lot(
+                resource_template_uuid=template_uuid,
+                quantity=-5.0,
+            )
         assert bus.recent("material", 10) == []
+        svc.close()
 
-    def test_monitorless_service_still_works(self):
-        from unilabos.app.scheduler.inventory.service import InventoryService
-        from unilabos.app.scheduler.inventory.store import InventoryStore
+    def test_monitorless_service_still_works(self, tmp_path):
+        from unilabos.app.scheduler.inventory import (
+            InventoryService,
+            ResourceTemplateIdentity,
+        )
 
-        svc = InventoryService(InventoryStore(":memory:"))
-        lot = svc.inbound_lot("tpl-x", 1.0)
+        template_uuid = "20000000-0000-4000-8000-000000001102"
+        svc = InventoryService.open(
+            working_dir=tmp_path,
+            resource_templates={
+                template_uuid: ResourceTemplateIdentity(template_uuid, "Sample")
+            },
+        )
+        lot = svc.inbound_lot(
+            resource_template_uuid=template_uuid,
+            quantity=1.0,
+        )
         assert lot["quantity_total"] == 1.0
+        svc.close()
 
 
 class TestMonitorApi:
@@ -195,12 +243,17 @@ class TestMonitorApi:
 
         from unilabos.app.scheduler.api import create_app
 
-        client = TestClient(
-            create_app(include_execution_shaped_workflow_routes=True)
-        )
+        client = TestClient(create_app(include_execution_shaped_workflow_routes=True))
         body = {
             "workflow_id": "wf-snap",
-            "nodes": [{"id": "A", "device_id": "d1", "action_name": "run", "action_type": "goal"}],
+            "nodes": [
+                {
+                    "id": "A",
+                    "device_id": "d1",
+                    "action_name": "run",
+                    "action_type": "goal",
+                }
+            ],
         }
         assert client.post("/api/v1/workflows", json=body).status_code == 200
 

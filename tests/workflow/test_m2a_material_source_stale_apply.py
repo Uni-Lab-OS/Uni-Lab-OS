@@ -8,7 +8,11 @@ from pathlib import Path
 
 import pytest
 
-from unilabos.resources.authority import MaterialNotFound, MaterialRecord, SiteRecord
+from unilabos.app.scheduler.inventory import (
+    MaterialNotFound,
+    MaterialRecord,
+    SiteRecord,
+)
 from unilabos.workflow.authoring_engine import WorkflowAuthoringEngine
 from unilabos.workflow.catalog import TemplateCatalog
 from unilabos.workflow.service import WorkflowError, WorkflowService

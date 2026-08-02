@@ -4,7 +4,11 @@ from __future__ import annotations
 
 from collections.abc import Sequence
 
-from unilabos.resources.authority import MaterialNotFound, MaterialRecord, SiteRecord
+from unilabos.app.scheduler.inventory import (
+    MaterialNotFound,
+    MaterialRecord,
+    SiteRecord,
+)
 
 MOUNT_MATERIAL_UUID = "50000000-0000-4000-8000-000000000001"
 OTHER_MOUNT_MATERIAL_UUID = "50000000-0000-4000-8000-000000000002"
