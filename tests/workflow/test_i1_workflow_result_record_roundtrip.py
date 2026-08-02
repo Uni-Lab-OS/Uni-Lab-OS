@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 import ast
-from collections.abc import Iterator
+from collections.abc import Callable, Iterator
 from pathlib import Path
 from typing import Any
 
@@ -50,6 +50,42 @@ def prepare_sample(*, sample: ResourceSlot) -> SamplePreparationResult:
     analyzed = reactor.analyze(prepared=prepared.prepared, label="typed")
     return {{"sample": prepared.prepared, "report": analyzed.report}}
 '''
+
+
+def _dataclass_result_source() -> str:
+    return (
+        _typed_result_source()
+        .replace("from typing import TypedDict", "from dataclasses import dataclass")
+        .replace(
+            "class SamplePreparationResult(TypedDict):",
+            "@dataclass(frozen=True)\nclass SamplePreparationResult:",
+        )
+        .replace(
+            'return {"sample": prepared.prepared, "report": analyzed.report}',
+            "return SamplePreparationResult(\n"
+            "        sample=prepared.prepared, report=analyzed.report\n"
+            "    )",
+        )
+    )
+
+
+def _inline_result_source() -> str:
+    return (
+        _typed_result_source()
+        .replace("from typing import TypedDict\n\n", "")
+        .replace(
+            "\n\nclass SamplePreparationResult(TypedDict):\n"
+            "    sample: ResourceSlot\n"
+            "    report: str\n",
+            "",
+        )
+        .replace(
+            "def prepare_sample(*, sample: ResourceSlot) -> SamplePreparationResult:",
+            "def prepare_sample(\n"
+            "    *, sample: ResourceSlot\n"
+            ') -> {"sample": ResourceSlot, "report": str}:',
+        )
+    )
 
 
 @pytest.fixture()
@@ -176,3 +212,26 @@ def test_typed_result_record_compile_generate_compile_is_a_fixed_point(
     assert _workflow_io(recompiled.graph) == (expected_contract, expected_bindings)
     assert recompiled.normalized_python_source == generated.normalized_python_source
     assert CandidateChangeset.model_validate(recompiled.changeset).kind == "source_only"
+
+
+@pytest.mark.parametrize(
+    "source_factory",
+    [_dataclass_result_source, _inline_result_source],
+    ids=["frozen-dataclass", "inline-return-dict"],
+)
+def test_compat_result_declarations_normalize_to_typed_dict(
+    engine_context: EngineContext,
+    source_factory: Callable[[], str],
+) -> None:
+    compiled = engine_context.engine.compile(
+        workflow_uuid=WORKFLOW_UUID,
+        workflow_revision=7,
+        python_source=source_factory(),
+        source_uri="package://lab/workflows/compat-result.py",
+        applied_graph=_empty_graph(),
+    )
+
+    assert compiled.valid and compiled.normalized_python_source is not None, (
+        compiled.diagnostics
+    )
+    _assert_canonical_typed_dict_source(compiled.normalized_python_source)
