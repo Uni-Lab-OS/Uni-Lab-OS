@@ -435,6 +435,7 @@ def workflow_meta(
     input_schema: dict[str, Any] | None,
     output_schema: dict[str, Any] | None,
     output_binding: dict[str, Any] | None,
+    output_implicit: bool = False,
 ) -> dict[str, Any]:
     parameters: list[dict[str, Any]] = []
     if input_schema is not None:
@@ -442,9 +443,16 @@ def workflow_meta(
     outputs: list[dict[str, Any]] = []
     bindings: dict[str, Any] = {}
     if output_schema is not None:
-        outputs.append({"name": "result", "schema": output_schema, "implicit": False})
+        output_name = "value" if output_implicit else "result"
+        outputs.append(
+            {
+                "name": output_name,
+                "schema": output_schema,
+                "implicit": output_implicit,
+            }
+        )
         assert output_binding is not None
-        bindings["result"] = output_binding
+        bindings[output_name] = output_binding
     return {
         "unilab": {
             "input_contract": {"version": 1, "parameters": parameters},
@@ -743,9 +751,14 @@ def make_direct_world(
         node_uuid=CHILD_NODE_UUID,
         parameter=None if ready_only else "value",
     )
+    material_passthrough = (
+        isinstance(actual_input, dict) and actual_input.get("$slot") == "ResourceSlot"
+    )
     output_binding = (
         None
         if ready_only
+        else {"kind": "workflow_input", "parameter": "value"}
+        if material_passthrough
         else {
             "kind": "node_output",
             "workflow_node_uuid": CHILD_NODE_UUID,
@@ -760,7 +773,10 @@ def make_direct_world(
         if ready_only
         else {
             ("value", "target"): CHILD_VALUE_TARGET_UUID,
-            ("result", "source"): CHILD_VALUE_SOURCE_UUID,
+            (
+                "value" if material_passthrough else "result",
+                "source",
+            ): CHILD_VALUE_SOURCE_UUID,
             ("ready", "target"): CHILD_READY_TARGET_UUID,
             ("ready", "source"): CHILD_READY_SOURCE_UUID,
         }
@@ -778,6 +794,7 @@ def make_direct_world(
             input_schema=actual_input,
             output_schema=actual_output,
             output_binding=output_binding,
+            output_implicit=material_passthrough,
         ),
     )
     world.child = child
