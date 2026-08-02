@@ -110,10 +110,11 @@ def preflight_task_input(
             resolved_input=resolved_input,
             resource_resolver=resource_resolver,
         )
-        material_roots = material_root_uuids_from_task_snapshot(
+        material_roots = _material_root_uuids_from_contract(
             workflow_snapshot,
             resolved_input,
             bound_plan,
+            contract=contract,
         )
     except TaskInputError:
         raise
@@ -137,85 +138,97 @@ def material_root_uuids_from_task_snapshot(
 
     try:
         contract = _parse_frozen_input_contract(graph)
-        if type(resolved_input) is not dict:
-            raise TaskInputError()
-        parameters = contract["parameters"]
-        expected_names = {parameter["name"] for parameter in parameters}
-        if set(resolved_input) != expected_names:
-            raise TaskInputError()
-        roots: set[str] = set()
-        for parameter in parameters:
-            roots.update(
-                _material_roots_for_value(
-                    parameter["schema"],
-                    resolved_input[parameter["name"]],
-                )
-            )
-        plan_nodes = execution_plan.get("nodes")
-        graph_handles = graph.get("handle_templates")
-        graph_nodes = graph.get("nodes")
-        if (
-            type(plan_nodes) is not list
-            or type(graph_handles) is not list
-            or type(graph_nodes) is not list
-        ):
-            raise TaskInputError()
-        handles: dict[str, Mapping[str, Any]] = {}
-        for handle in graph_handles:
-            if type(handle) is not dict or type(handle.get("uuid")) is not str:
-                raise TaskInputError()
-            if handle["uuid"] in handles:
-                raise TaskInputError()
-            handles[handle["uuid"]] = handle
-        nodes: dict[str, Mapping[str, Any]] = {}
-        for node in graph_nodes:
-            if type(node) is not dict or type(node.get("uuid")) is not str:
-                raise TaskInputError()
-            if node["uuid"] in nodes:
-                raise TaskInputError()
-            nodes[node["uuid"]] = node
-        seen_plan_nodes: set[str] = set()
-        for planned_node in plan_nodes:
-            if (
-                type(planned_node) is not dict
-                or type(planned_node.get("uuid")) is not str
-            ):
-                raise TaskInputError()
-            node_uuid = planned_node["uuid"]
-            if node_uuid in seen_plan_nodes:
-                raise TaskInputError()
-            seen_plan_nodes.add(node_uuid)
-            graph_node = nodes.get(node_uuid)
-            if graph_node is None:
-                raise TaskInputError()
-            param = planned_node.get("param")
-            if type(param) is not dict:
-                raise TaskInputError()
-            template_uuid = graph_node.get("workflow_node_template_uuid")
-            target_handles = (
-                handle
-                for handle in handles.values()
-                if handle.get("workflow_node_template_uuid") == template_uuid
-                and handle.get("io_type") == "target"
-            )
-            for handle in target_handles:
-                data_key = _final_target_data_key(_handle_data_key(handle))
-                if not data_key:
-                    raise TaskInputError()
-                value_schema = _typed_handle_value_schema(handle)
-                if (
-                    value_schema is None
-                    or not _schema_contains_resource_slot(value_schema)
-                    or data_key not in param
-                    or param[data_key] is None
-                ):
-                    continue
-                roots.update(_material_roots_for_value(value_schema, param[data_key]))
-        return tuple(sorted(roots))
+        return _material_root_uuids_from_contract(
+            graph,
+            resolved_input,
+            execution_plan,
+            contract=contract,
+        )
     except TaskInputError:
         raise
     except (KeyError, TypeError, ValueError, WorkflowSchemaError):
         raise TaskInputError("invalid_input") from None
+
+
+def _material_root_uuids_from_contract(
+    graph: Mapping[str, Any],
+    resolved_input: Mapping[str, Any],
+    execution_plan: Mapping[str, Any],
+    *,
+    contract: Mapping[str, Any],
+) -> tuple[str, ...]:
+    if type(resolved_input) is not dict:
+        raise TaskInputError()
+    parameters = contract["parameters"]
+    expected_names = {parameter["name"] for parameter in parameters}
+    if set(resolved_input) != expected_names:
+        raise TaskInputError()
+    roots: set[str] = set()
+    for parameter in parameters:
+        roots.update(
+            _material_roots_for_value(
+                parameter["schema"],
+                resolved_input[parameter["name"]],
+            )
+        )
+    plan_nodes = execution_plan.get("nodes")
+    graph_handles = graph.get("handle_templates")
+    graph_nodes = graph.get("nodes")
+    if (
+        type(plan_nodes) is not list
+        or type(graph_handles) is not list
+        or type(graph_nodes) is not list
+    ):
+        raise TaskInputError()
+    handles: dict[str, Mapping[str, Any]] = {}
+    for handle in graph_handles:
+        if type(handle) is not dict or type(handle.get("uuid")) is not str:
+            raise TaskInputError()
+        if handle["uuid"] in handles:
+            raise TaskInputError()
+        handles[handle["uuid"]] = handle
+    nodes: dict[str, Mapping[str, Any]] = {}
+    for node in graph_nodes:
+        if type(node) is not dict or type(node.get("uuid")) is not str:
+            raise TaskInputError()
+        if node["uuid"] in nodes:
+            raise TaskInputError()
+        nodes[node["uuid"]] = node
+    seen_plan_nodes: set[str] = set()
+    for planned_node in plan_nodes:
+        if type(planned_node) is not dict or type(planned_node.get("uuid")) is not str:
+            raise TaskInputError()
+        node_uuid = planned_node["uuid"]
+        if node_uuid in seen_plan_nodes:
+            raise TaskInputError()
+        seen_plan_nodes.add(node_uuid)
+        graph_node = nodes.get(node_uuid)
+        if graph_node is None:
+            raise TaskInputError()
+        param = planned_node.get("param")
+        if type(param) is not dict:
+            raise TaskInputError()
+        template_uuid = graph_node.get("workflow_node_template_uuid")
+        target_handles = (
+            handle
+            for handle in handles.values()
+            if handle.get("workflow_node_template_uuid") == template_uuid
+            and handle.get("io_type") == "target"
+        )
+        for handle in target_handles:
+            data_key = _final_target_data_key(_handle_data_key(handle))
+            if not data_key:
+                raise TaskInputError()
+            value_schema = _typed_handle_value_schema(handle)
+            if (
+                value_schema is None
+                or not _schema_contains_resource_slot(value_schema)
+                or data_key not in param
+                or param[data_key] is None
+            ):
+                continue
+            roots.update(_material_roots_for_value(value_schema, param[data_key]))
+    return tuple(sorted(roots))
 
 
 def _material_roots_for_value(
