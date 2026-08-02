@@ -1443,8 +1443,8 @@ class WorkflowStore:
         status: str,
         reservation_uuid: str | None,
         outbox_sequence: int,
-        result: Dict[str, Any],
-        bindings: List[Dict[str, Any]],
+        result: dict[str, Any],
+        bindings: list[dict[str, Any]],
     ) -> bool:
         """Idempotently project one closed Inventory result into Workflow facts."""
 
@@ -1544,7 +1544,7 @@ class WorkflowStore:
     def get_task_material_admission(
         self,
         task_uuid: str,
-    ) -> Dict[str, Any] | None:
+    ) -> dict[str, Any] | None:
         """Read the closed public admission projection for one Task."""
 
         self.get_task(task_uuid)
@@ -1568,7 +1568,7 @@ class WorkflowStore:
         status: str,
         reservation_uuid: str | None,
         outbox_sequence: int,
-        result: Dict[str, Any],
+        result: dict[str, Any],
     ) -> bool:
         """Idempotently project one terminal Inventory release result."""
 
@@ -1628,7 +1628,7 @@ class WorkflowStore:
     def get_task_material_release(
         self,
         task_uuid: str,
-    ) -> Dict[str, Any] | None:
+    ) -> dict[str, Any] | None:
         """Read the closed public terminal Material release projection."""
 
         self.get_task(task_uuid)

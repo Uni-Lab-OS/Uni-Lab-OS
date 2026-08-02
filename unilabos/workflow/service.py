@@ -602,7 +602,7 @@ class WorkflowService:
     def get_material_admission(
         self,
         task_uuid: str,
-    ) -> Dict[str, Any] | None:
+    ) -> dict[str, Any] | None:
         """Read the durable five-field Material admission projection."""
 
         identity = self.get_workflow_task(task_uuid)["uuid"]
@@ -642,7 +642,7 @@ class WorkflowService:
     def get_material_release(
         self,
         task_uuid: str,
-    ) -> Dict[str, Any] | None:
+    ) -> dict[str, Any] | None:
         """Read the durable five-field terminal Material release projection."""
 
         identity = self.get_workflow_task(task_uuid)["uuid"]
