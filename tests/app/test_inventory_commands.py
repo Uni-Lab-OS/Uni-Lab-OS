@@ -93,7 +93,7 @@ def _admission_envelope() -> dict[str, Any]:
                     "material_uuid": SAMPLE_UUID,
                     "site_uuid": SITE_UUID,
                     "candidate_site_uuids": [],
-                    "flow_role": "sample",
+                    "flow_role": "primary_sample",
                 }
             ],
         },

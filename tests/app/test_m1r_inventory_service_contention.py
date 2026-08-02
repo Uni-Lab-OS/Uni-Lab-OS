@@ -47,7 +47,7 @@ def _admission_command(
         material_uuid=MATERIAL_UUID,
         site_uuid=SITE_UUID,
         candidate_site_uuids=(),
-        flow_role="sample",
+        flow_role="primary_sample",
     )
     return inventory_api.TaskMaterialAdmissionCommand(
         schema_version=1,
