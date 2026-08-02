@@ -1,9 +1,9 @@
 # D1A-S1 设备页单 Action Task：OS 实施规格
 
-状态：Implementation baseline  
-上游协议：`Uni-Lab-OS/Uni-Lab-Core#162`  
-OS delivery：`Uni-Lab-OS/Uni-Lab-OS#16`  
-Integration gate：`Uni-Lab-OS/Uni-Lab-Core#163`  
+状态：Implementation baseline
+上游协议：`Uni-Lab-OS/Uni-Lab-Core#162`
+OS delivery：`Uni-Lab-OS/Uni-Lab-OS#16`
+Integration gate：`Uni-Lab-OS/Uni-Lab-Core#163`
 实施基线：`08b86898c7b56cce4e5851abb56ecc05b03e3bb0`
 
 ## 1. 本轮 Outcome 与停止线
