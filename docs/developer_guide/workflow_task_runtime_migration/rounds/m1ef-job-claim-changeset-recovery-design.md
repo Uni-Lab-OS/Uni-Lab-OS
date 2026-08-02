@@ -2,7 +2,7 @@
 
 日期：2026-08-02
 
-状态：published repository implementation spec；human-approved；production RED 尚未开始
+状态：implementation candidate；human-approved spec；RED、实现、全仓测试与真实 OS E2E 已完成；待 exact-SHA 独立复核
 
 权威票据：
 
@@ -65,6 +65,9 @@ device occupancy authority。
 本轮不实现 M2B selector policy、R2 ExecutionPlan、automatic retry、D1 driver vendor protocol、
 O1 Workflow output、Template Catalog/Registry 或 PackageCatalog 重构。M1EF 提供这些阶段消费的
 安全 primitive 和 durable command seam。
+
+实现与验证账本见
+[M1EF implementation and E2E ledger](m1ef-job-claim-changeset-recovery-implementation.md)。
 
 现有 legacy DAG 的 `@action(lock_resource)` / `_job_resource_locks` 在 R2 typed claim-set wiring 前可
 暂留为 compatibility scheduling hint，但它不构成 durable Claim、不能使任何 M1EF gate 通过，也不得
