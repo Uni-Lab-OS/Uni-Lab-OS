@@ -85,7 +85,28 @@ def _seed_workflow_contract(store: WorkflowStore) -> None:
                             "required": True,
                         }
                     ],
-                }
+                },
+                "output_contract": {
+                    "version": 1,
+                    "outputs": [
+                        {
+                            "name": "sample",
+                            "schema": {
+                                "$slot": "ResourceSlot",
+                                "allowed_resource_template_uuids": [
+                                    RESOURCE_TEMPLATE_UUID
+                                ],
+                            },
+                            "implicit": True,
+                        }
+                    ],
+                },
+                "output_bindings": {
+                    "sample": {
+                        "kind": "workflow_input",
+                        "parameter": "sample",
+                    }
+                },
             }
         },
     )
