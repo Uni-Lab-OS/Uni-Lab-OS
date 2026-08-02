@@ -488,6 +488,23 @@ class _ActionClientBeforeSubmit:
         return True
 
 
+class _BlockingSubmitActionClient:
+    def __init__(self) -> None:
+        self.submit_entered = threading.Event()
+        self.allow_submit_return = threading.Event()
+        self.future = _DoneFuture(None)
+        self.send_count = 0
+
+    def wait_for_server(self, *, timeout_sec: float) -> bool:
+        return True
+
+    def send_goal_async(self, *_args, **_kwargs):
+        self.send_count += 1
+        self.submit_entered.set()
+        assert self.allow_submit_return.wait(1.0)
+        return self.future
+
+
 def _bare_host(*, bridges=None):
     host = object.__new__(HostNode)
     host._goals = {}
@@ -566,6 +583,50 @@ def test_deferred_trace_send_is_dropped_if_unlock_wins_before_ros_submit(
     action_client.send_goal_async.assert_not_called()
     assert job.job_id not in host._pending_goal_requests
     assert job.job_id not in host._pending_goal_cancellations
+
+
+def test_manual_unlock_cannot_complete_inside_ros_submit_window() -> None:
+    host = _bare_host()
+    host._shutting_down = False
+    job = _job("00000000-0000-0000-0000-000000000543")
+    action_client = _BlockingSubmitActionClient()
+    host._pending_goal_requests.add(job.job_id)
+    send_finished = threading.Event()
+    unlock_finished = threading.Event()
+    unlock_result: list[bool] = []
+
+    def send_goal() -> None:
+        HostNode._send_action_goal(
+            host,
+            _queue_item(job),
+            "/devices/robot/move",
+            action_client,
+            object(),
+            {},
+            server_wait_timeout=0.1,
+        )
+        send_finished.set()
+
+    def unlock() -> None:
+        unlock_result.append(host.cancel_goal_or_defer(job.job_id))
+        unlock_finished.set()
+
+    send_thread = threading.Thread(target=send_goal)
+    unlock_thread = threading.Thread(target=unlock)
+    send_thread.start()
+    assert action_client.submit_entered.wait(1.0)
+    unlock_thread.start()
+
+    assert unlock_finished.wait(0.05) is False
+    action_client.allow_submit_return.set()
+    send_thread.join(1.0)
+    unlock_thread.join(1.0)
+
+    assert send_finished.is_set()
+    assert unlock_finished.is_set()
+    assert unlock_result == [True]
+    assert action_client.send_count == 1
+    assert job.job_id in host._pending_goal_cancellations
 
 
 def test_late_host_result_cannot_overwrite_manual_cancelled_store(

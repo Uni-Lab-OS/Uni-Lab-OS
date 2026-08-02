@@ -1074,6 +1074,8 @@ class HostNode(BaseROS2DeviceNode):
         if getattr(self, "_shutting_down", False):
             raise RuntimeError("Host is shutting down")
 
+        # cancel_goal_or_defer 使用同一把锁。检查和 send_goal_async 必须处于
+        # 同一临界区：解锁先拿锁则完全不提交，提交先拿锁则解锁随后登记取消。
         with HostNode._goal_tracking_lock(self):
             if item.job_id in self._pending_goal_cancellations:
                 self._pending_goal_requests.discard(item.job_id)
@@ -1083,18 +1085,17 @@ class HostNode(BaseROS2DeviceNode):
                     "because manual unlock won"
                 )
                 return
-        goal_uuid_obj = UUID(uuid=list(uuid.UUID(item.job_id).bytes))
-        try:
-            future = action_client.send_goal_async(
-                goal_msg,
-                feedback_callback=lambda feedback_msg: self.feedback_callback(item, action_id, feedback_msg),
-                goal_uuid=goal_uuid_obj,
-            )
-        except Exception:
-            with HostNode._goal_tracking_lock(self):
+            goal_uuid_obj = UUID(uuid=list(uuid.UUID(item.job_id).bytes))
+            try:
+                future = action_client.send_goal_async(
+                    goal_msg,
+                    feedback_callback=lambda feedback_msg: self.feedback_callback(item, action_id, feedback_msg),
+                    goal_uuid=goal_uuid_obj,
+                )
+            except Exception:
                 self._pending_goal_requests.discard(item.job_id)
                 self._pending_goal_cancellations.discard(item.job_id)
-            raise
+                raise
         future.add_done_callback(lambda f: self.goal_response_callback(item, action_id, f))
 
     def _register_then_send_goal(
