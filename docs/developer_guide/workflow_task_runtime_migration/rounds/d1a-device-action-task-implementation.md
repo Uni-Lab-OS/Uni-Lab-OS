@@ -169,7 +169,7 @@ OS ticket 记录 base/test/implementation/review full SHA、命令与 finding di
 
 ### 9.1 候选
 
-- OS 最终受测代码候选：`0cf22d3f53ebeaae6a70262e820fae6c9345844f`；
+- OS 最终受测代码候选：`305a5caceda42acfe0d835263cd2e51cc6fc497d`；
 - FE 最终受测候选：`a380bf81666509b8a5bfe7a7c84af43576828dd9`；
 - 发布目标：OS `integration/workflow-task-runtime`、FE
   `integration/fe-os-migration`；合并必须等待同一独立 reviewer 对最终精确 SHA
@@ -199,15 +199,17 @@ OS ticket 记录 base/test/implementation/review full SHA、命令与 finding di
 9. Scheduler formal `job_uuid → task_uuid` mapping 在 success/failure/cancel 任一终态释放；
    pre-dispatch Claim hook 异常时同时回滚 mapping、run 与派生的 scheduler state，
    durable Task/Job 保持 pending，后续 `reschedule()` 仍不得派发。
+10. formal submit 在任何写入前同时预检 Task/Job identity；重复 `task_uuid` + 新
+    `job_uuid` 返回错误时，既有 run、inflight、resource locks 和 mapping 完全不变。
 
 ### 9.3 Gate
 
-- OS direct D1A tests：`29 passed`；
-- OS 全仓：`2342 passed, 4 skipped`；修改文件 Ruff
+- OS direct D1A tests：`30 passed`；
+- OS 全仓：`2343 passed, 4 skipped`；修改文件 Ruff
   `--select E4,E7,E9,F` 与 `git diff --check` 通过；
 - FE material/services/pascal/workflow-editor/kernel/desktop 六组：共 261 tests 通过；
   全 workspace typecheck、`build:web`、`build:desktop` 和 `git diff --check` 通过；
-- 浏览器 E2E：`1 passed`，18.9 秒；夹具先组合 Workflow authority、再挂生产
+- 浏览器 E2E：`1 passed`，18.8 秒；夹具先组合 Workflow authority、再挂生产
   EdgeScheduler/JobExecutionBackend，只在物理 driver 边界使用确定性测试 Host。
 
 ### 9.4 E2E 截图与账本
