@@ -26,6 +26,7 @@ from .test_authoring_engine import (
     PREPARE_READY_SOURCE,
     PREPARE_READY_TARGET,
     PREPARE_REPORT_SOURCE,
+    RESOURCE_TEMPLATE_UUID,
     WORKFLOW_UUID,
     EngineContext,
     _assert_error_result,
@@ -34,6 +35,20 @@ from .test_authoring_engine import (
     _node_by_uuid,
     _opened_engine,
 )
+
+RESOURCE_TEMPLATE_SOURCE_IDENTITY = "lab.resources:plate_96"
+
+
+class _StaticResourceTemplateIdentityIndex:
+    def resolve_symbol(self, qualified_name: str) -> str:
+        if qualified_name != RESOURCE_TEMPLATE_SOURCE_IDENTITY:
+            raise KeyError(qualified_name)
+        return RESOURCE_TEMPLATE_UUID
+
+    def identify_uuid(self, resource_template_uuid: str) -> str:
+        if resource_template_uuid != RESOURCE_TEMPLATE_UUID:
+            raise KeyError(resource_template_uuid)
+        return RESOURCE_TEMPLATE_SOURCE_IDENTITY
 
 
 @pytest.fixture()
@@ -169,6 +184,30 @@ from unilabos.workflow.authoring import workflow_definition, workflow_output
     displayname="Pass through",
 )
 def pass_through(*, sample: ResourceSlot):
+    return workflow_output(sample=sample)
+'''
+
+
+def _constrained_workflow_input_source() -> str:
+    return f'''from typing import Annotated
+
+from lab.resources import plate_96
+from unilabos.registry.annotations import AllowedResourceTemplates
+from unilabos.registry.placeholder_type import ResourceSlot
+from unilabos.workflow.authoring import workflow_definition, workflow_output
+
+
+@workflow_definition(
+    workflow_uuid="{WORKFLOW_UUID}",
+    displayname="Constrained pass through",
+)
+def constrained_pass_through(
+    *,
+    sample: Annotated[
+        ResourceSlot,
+        AllowedResourceTemplates(plate_96),
+    ],
+):
     return workflow_output(sample=sample)
 '''
 
@@ -382,6 +421,52 @@ def test_workflow_input_can_be_the_explicit_root_output_binding(
     }
     assert result.graph["nodes"] == []
     assert result.graph["edges"] == []
+
+
+def test_constrained_workflow_input_round_trips_resource_template_identity(
+    tmp_path: Path,
+) -> None:
+    with _opened_engine(
+        tmp_path / "constrained-input.db",
+        resource_template_identity_index=_StaticResourceTemplateIdentityIndex(),
+    ) as context:
+        compiled = _compile(context.engine, _constrained_workflow_input_source())
+
+        assert compiled.valid and compiled.graph is not None
+        unilab = compiled.graph["workflow"]["meta_data"]["unilab"]
+        assert unilab["input_contract"] == {
+            "version": 1,
+            "parameters": [
+                {
+                    "name": "sample",
+                    "schema": {
+                        "$slot": "ResourceSlot",
+                        "allowed_resource_template_uuids": [RESOURCE_TEMPLATE_UUID],
+                    },
+                    "required": True,
+                }
+            ],
+        }
+        normalized = compiled.normalized_python_source
+        assert normalized is not None
+        assert "from lab.resources import plate_96" in normalized
+        assert (
+            "from unilabos.registry.annotations import AllowedResourceTemplates"
+            in normalized
+        )
+        assert (
+            "sample: Annotated[ResourceSlot, AllowedResourceTemplates(plate_96)]"
+            in normalized
+        )
+
+        recompiled = _compile(context.engine, normalized, graph=compiled.graph)
+
+        assert recompiled.valid and recompiled.graph is not None
+        assert _semantic_graph(recompiled.graph) == _semantic_graph(compiled.graph)
+        assert recompiled.normalized_python_source == normalized
+        assert CandidateChangeset.model_validate(recompiled.changeset).kind == (
+            "source_only"
+        )
 
 
 def test_compile_generate_compile_is_a_semantic_fixed_point(
