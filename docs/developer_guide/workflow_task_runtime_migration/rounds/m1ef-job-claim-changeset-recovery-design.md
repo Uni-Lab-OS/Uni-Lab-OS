@@ -2,7 +2,7 @@
 
 日期：2026-08-02
 
-状态：repository implementation spec candidate；production RED 尚未开始
+状态：published repository implementation spec；human-approved；production RED 尚未开始
 
 权威票据：
 
@@ -12,7 +12,10 @@
 - Core contention/restart gate：[`Uni-Lab-OS/Uni-Lab-Core#156`](https://github.com/Uni-Lab-OS/Uni-Lab-Core/issues/156)
 - M1R Accepted delivery：[`Uni-Lab-OS/Uni-Lab-OS#14`](https://github.com/Uni-Lab-OS/Uni-Lab-OS/issues/14)
 
-实现基点：private `Uni-Lab-OS/Uni-Lab-OS:dev@5588b6b697c50533057a0200e0ca8b5174443ca5`。
+实现基点：private `Uni-Lab-OS/Uni-Lab-OS:dev@90f04339424ac2094a089ee30f9c2bfff6e050de`。
+其中 M1R/D1A Accepted production tree 来自 `5588b6b697c50533057a0200e0ca8b5174443ca5`；
+后续 commit 仅修正 workflow process lease 的可移植 break signal，不改变 Inventory、Scheduler、D1A
+或本 spec 合同。
 
 Backend 参考：
 
@@ -651,13 +654,12 @@ Core #155/#156 和 OS #15 的 current block 必须在 spec publication 时同步
 
 ## 15. 完成与后续依赖
 
-本 spec 本地通过只表示 M1EF to-spec gate 完成，不授权 production、push 或 merge。下一步严格是：
+本 spec publication 完成 M1EF to-spec gate，不授权 production implementation 或 merge。下一步严格是：
 
-1. 发布 spec candidate并同步 OS #15/Core #155/#156 current frontier；
-2. 唯一独立 test-author 从最终 spec SHA 创建 tests-only RED；
-3. implementation owner 在同一 delivery branch完成 atomic implementation；
-4. full tests + exact-SHA reviewer + Core E2E；
-5. 用户明确授权后才 push/merge/release。
+1. 唯一独立 test-author 从 published spec SHA 创建 tests-only RED；
+2. implementation owner 在同一 delivery branch完成 atomic implementation；
+3. full tests + exact-SHA reviewer + Core E2E；
+4. 用户明确授权后才 merge/release。
 
 M2B 可以继续完成 selector→binding 与 Task admission，不必等待 M1EF production；但任何真实
 physical Action dispatch/result acceptance 必须同时通过 M1EF Claim/fence/ChangeSet/recovery gate。
