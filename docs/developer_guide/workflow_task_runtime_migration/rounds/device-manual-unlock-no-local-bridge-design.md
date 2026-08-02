@@ -40,34 +40,37 @@ RED、实现、完整回归、exact-SHA 独立 review 和真实 browser E2E 后�
 ### 2.1 public read model
 
 `GET /api/v1/devices` 直接从 live `HostNode` 的设备/Action 映射与 live
-`DeviceActionManager` 的锁快照投影，继续返回 FE 已消费的 JSON：
+`DeviceActionManager` 的锁快照投影，使用当前 Backend envelope：
 
 ```json
 {
-  "schemaVersion": "device-catalog/v1",
-  "source": "edge",
-  "generatedAt": 0,
-  "items": [
-    {
-      "id": "robot",
-      "deviceKey": "/cell/robot",
-      "namespace": "/cell",
-      "name": "六轴机械臂",
-      "online": true,
-      "actions": [
-        {
-          "id": "move",
-          "actionRef": "robot.move",
-          "name": "move",
-          "typeName": "UniLabJsonCommand",
-          "inputSchema": {},
-          "outputSchema": {},
-          "busy": true,
-          "currentJobId": "<完整 holder job UUID>"
-        }
-      ]
-    }
-  ]
+  "code": 0,
+  "data": {
+    "schemaVersion": "device-catalog/v1",
+    "source": "edge",
+    "generatedAt": 0,
+    "items": [
+      {
+        "id": "robot",
+        "deviceKey": "/cell/robot",
+        "namespace": "/cell",
+        "name": "六轴机械臂",
+        "online": true,
+        "actions": [
+          {
+            "id": "move",
+            "actionRef": "robot.move",
+            "name": "move",
+            "typeName": "UniLabJsonCommand",
+            "inputSchema": {},
+            "outputSchema": {},
+            "busy": true,
+            "currentJobId": "<完整 holder job UUID>"
+          }
+        ]
+      }
+    ]
+  }
 }
 ```
 
@@ -91,9 +94,9 @@ POST /api/v1/devices/{device_id}/actions/{action_name}/commands
 }
 ```
 
-成功响应保持 FE 现有 adapter 形状：`status` 为 `released` 或
-`already_unlocked`，并返回 `deviceId`、`actionName`、`releasedJobIds` 与
-`cancelRequestedJobIds`。holder 已变化返回 HTTP 409 和稳定
+成功响应使用相同 envelope；`data.status` 为 `unlocked` 或
+`already_unlocked`。首次释放还返回 `deviceId`、`actionName`、`releasedJobIds`、
+`cancelRequestedJobIds` 与 CAS 后重新读取的 `currentJobId`。holder 已变化返回 HTTP 409 和稳定
 `DEVICE_LOCK_CHANGED` error；输入错误返回 422；runtime/HostNode 未装配不得伪造成功。
 
 ## 3. CAS 与物理取消语义

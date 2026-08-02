@@ -9,6 +9,7 @@
 
 from abc import ABC, abstractmethod
 from typing import Optional
+
 from unilabos.config.config import BasicConfig
 from unilabos.utils import logger
 
@@ -145,7 +146,7 @@ class CommunicationClientFactory:
             return cls._create_websocket_client()
         else:
             logger.error(f"[CommunicationFactory] Unsupported protocol: {protocol}")
-            logger.warning(f"[CommunicationFactory] Falling back to WebSocket")
+            logger.warning("[CommunicationFactory] Falling back to WebSocket")
             return cls._create_websocket_client()
 
     @classmethod
@@ -162,6 +163,12 @@ class CommunicationClientFactory:
         if cls._client_cache is None:
             cls._client_cache = cls.create_client(protocol)
             logger.trace(f"[CommunicationFactory] Created {type(cls._client_cache).__name__} client")
+
+        return cls._client_cache
+
+    @classmethod
+    def current_client(cls) -> Optional[BaseCommunicationClient]:
+        """返回已经组合的进程内 live client，不隐式创建第二个 client。"""
 
         return cls._client_cache
 
