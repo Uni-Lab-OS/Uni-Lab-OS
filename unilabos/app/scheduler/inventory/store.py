@@ -14,9 +14,145 @@ from collections.abc import Iterator
 from contextlib import contextmanager
 from typing import Any
 
-SCHEMA_VERSION = 3
+from unilabos.app.scheduler.inventory.domain import MaterialAuthorityUnavailable
+
+SCHEMA_VERSION = 4
 
 _UNICODE_CASEFOLD_COLLATION = "UNICODE_CASEFOLD"
+_SQLITE_BUSY_TIMEOUT_MS = 5_000
+
+_EXPECTED_TABLE_COLUMNS = {
+    "material": (
+        "uuid",
+        "create_time",
+        "update_time",
+        "deleted_at",
+        "description",
+        "meta_data",
+        "resource_template_uuid",
+        "parent_uuid",
+        "class",
+        "barcode",
+        "name",
+        "config",
+        "data",
+        "disposition",
+        "material_kind",
+        "version",
+    ),
+    "site": (
+        "uuid",
+        "create_time",
+        "update_time",
+        "deleted_at",
+        "description",
+        "meta_data",
+        "material_uuid",
+        "name",
+        "sort_order",
+        "occupied_material_uuid",
+        "position_x",
+        "position_y",
+        "position_z",
+        "depth",
+        "length",
+        "width",
+        "version",
+    ),
+    "site_allowed_resource_template": (
+        "site_uuid",
+        "resource_template_uuid",
+    ),
+    "material_reservation": (
+        "uuid",
+        "workflow_task_uuid",
+        "set_fingerprint",
+        "status",
+        "create_time",
+        "released_at",
+    ),
+    "material_reservation_member": (
+        "reservation_uuid",
+        "material_uuid",
+        "root_material_uuid",
+        "acquired_version",
+        "released_at",
+    ),
+    "material_content": ("material_uuid", "state_json", "version"),
+    "inventory_lot": (
+        "lot_id",
+        "resource_template_uuid",
+        "batch_no",
+        "unit",
+        "quantity_total",
+        "quantity_available",
+        "quantity_reserved",
+        "expiry",
+        "quarantined",
+        "warehouse_zone_id",
+        "created_at",
+        "version",
+    ),
+    "inventory_ledger": (
+        "ledger_id",
+        "occurred_at",
+        "op_type",
+        "aggregate_type",
+        "aggregate_id",
+        "delta_json",
+        "actor",
+        "reason",
+        "causation_id",
+    ),
+    "sync_outbox": (
+        "sequence",
+        "event_id",
+        "edge_id",
+        "lab_id",
+        "aggregate_type",
+        "aggregate_id",
+        "aggregate_version",
+        "event_type",
+        "occurred_at",
+        "causation_id",
+        "payload_json",
+    ),
+    "processed_command": (
+        "command_id",
+        "idempotency_key",
+        "command_type",
+        "payload_hash",
+        "result_json",
+        "status",
+        "processed_at",
+    ),
+    "sync_cursor": ("cursor_name", "acked_sequence", "updated_at"),
+    "lab_meta": ("meta_key", "meta_value"),
+    "lab_zone": (
+        "zone_id",
+        "name",
+        "kind",
+        "x",
+        "y",
+        "w",
+        "h",
+        "meta_json",
+        "version",
+    ),
+    "lab_placement": (
+        "subject_id",
+        "subject_kind",
+        "zone_id",
+        "x",
+        "y",
+        "w",
+        "h",
+        "rotation",
+        "label",
+        "meta_json",
+        "version",
+    ),
+}
 
 
 def _unicode_casefold(left: str, right: str) -> int:
@@ -103,17 +239,9 @@ CREATE INDEX IF NOT EXISTS ix_site_material_order_active
     ON site(material_uuid, sort_order, create_time, uuid)
     WHERE deleted_at IS NULL;
 
-CREATE TABLE IF NOT EXISTS resource_template (
-    template_id   TEXT PRIMARY KEY,
-    name          TEXT NOT NULL DEFAULT '',
-    category      TEXT NOT NULL DEFAULT '',
-    spec_json     TEXT NOT NULL DEFAULT '{}',
-    version       INTEGER NOT NULL DEFAULT 1
-);
-
 CREATE TABLE IF NOT EXISTS inventory_lot (
     lot_id             TEXT PRIMARY KEY,
-    template_id        TEXT NOT NULL DEFAULT '',
+    resource_template_uuid TEXT NOT NULL,
     batch_no           TEXT NOT NULL DEFAULT '',
     unit               TEXT NOT NULL DEFAULT '',
     quantity_total     REAL NOT NULL DEFAULT 0,
@@ -129,47 +257,15 @@ CREATE TABLE IF NOT EXISTS inventory_lot (
     CHECK (quantity_reserved >= 0),
     CHECK (quantity_available + quantity_reserved <= quantity_total + 1e-9)
 );
-CREATE INDEX IF NOT EXISTS idx_lot_template ON inventory_lot(template_id, created_at);
+CREATE INDEX IF NOT EXISTS idx_lot_template
+    ON inventory_lot(resource_template_uuid, created_at);
 
-CREATE TABLE IF NOT EXISTS material_instance (
-    edge_uuid       TEXT PRIMARY KEY,
-    legacy_cloud_id TEXT NOT NULL DEFAULT '',
-    lot_id          TEXT NOT NULL DEFAULT '',
-    template_id     TEXT NOT NULL DEFAULT '',
-    barcode         TEXT NOT NULL DEFAULT '',
-    status          TEXT NOT NULL DEFAULT 'warehouse',
-    version         INTEGER NOT NULL DEFAULT 1
-);
-CREATE INDEX IF NOT EXISTS idx_instance_barcode ON material_instance(barcode);
-CREATE INDEX IF NOT EXISTS idx_instance_legacy ON material_instance(legacy_cloud_id);
-
-CREATE TABLE IF NOT EXISTS resource_relation (
-    parent_uuid TEXT NOT NULL,
-    slot_id     TEXT NOT NULL DEFAULT '',
-    child_uuid  TEXT NOT NULL,
-    version     INTEGER NOT NULL DEFAULT 1,
-    PRIMARY KEY (child_uuid)
-);
-CREATE INDEX IF NOT EXISTS idx_relation_parent ON resource_relation(parent_uuid);
-
-CREATE TABLE IF NOT EXISTS substance_content (
-    instance_uuid TEXT PRIMARY KEY,
+CREATE TABLE IF NOT EXISTS material_content (
+    material_uuid TEXT PRIMARY KEY,
     state_json    TEXT NOT NULL DEFAULT '{}',
-    version       INTEGER NOT NULL DEFAULT 1
+    version       INTEGER NOT NULL DEFAULT 1 CHECK (version > 0),
+    FOREIGN KEY(material_uuid) REFERENCES material(uuid) ON DELETE CASCADE
 );
-
-CREATE TABLE IF NOT EXISTS inventory_reservation (
-    reservation_id TEXT PRIMARY KEY,
-    workflow_id    TEXT NOT NULL,
-    node_id        TEXT NOT NULL DEFAULT '',
-    attempt        INTEGER NOT NULL DEFAULT 1,
-    status         TEXT NOT NULL DEFAULT 'active',
-    amounts_json   TEXT NOT NULL DEFAULT '{}',
-    created_at     INTEGER NOT NULL DEFAULT 0,
-    version        INTEGER NOT NULL DEFAULT 1
-);
-CREATE UNIQUE INDEX IF NOT EXISTS idx_reservation_idem
-    ON inventory_reservation(workflow_id, node_id, attempt);
 
 CREATE TABLE IF NOT EXISTS material_reservation (
     uuid TEXT PRIMARY KEY,
@@ -245,23 +341,7 @@ CREATE TABLE IF NOT EXISTS sync_cursor (
     acked_sequence INTEGER NOT NULL DEFAULT 0,
     updated_at     INTEGER NOT NULL DEFAULT 0
 );
-"""
 
-# v3：父物料列（云端 material.parent_material_uuid ≡ 资源树 parent_uuid，单一父）。
-# 与 resource_relation 的关系：parent_uuid 列是唯一父层级事实；relation 行仅在
-# 「父 + 具名位」时存在（slot_id = PLR site 名 ↔ 云端 sites.label，uuid 仅后端索引），
-# 且 relation.parent_uuid 恒等于本列（_tx_upsert_relation 同步维护）。
-# 空串表示顶层物料；单父由列语义天然保证（树形父）。
-_SCHEMA_V3_ADD_PARENT = (
-    "ALTER TABLE material_instance ADD COLUMN parent_uuid TEXT NOT NULL DEFAULT ''"
-)
-_SCHEMA_V3_INDEX = (
-    "CREATE INDEX IF NOT EXISTS idx_instance_parent ON material_instance(parent_uuid)"
-)
-
-# v2：实验室操作系统布局层（元信息 / 分区 / 2D 摆放）。
-# 只增表不改旧表，v1 库可原地升级。
-_SCHEMA_V2 = """
 CREATE TABLE IF NOT EXISTS lab_meta (
     meta_key   TEXT PRIMARY KEY,
     meta_value TEXT NOT NULL DEFAULT ''
@@ -304,37 +384,62 @@ class InventoryStore:
         self._lock = threading.RLock()
         self._conn = sqlite3.connect(path, check_same_thread=False)
         self._conn.row_factory = sqlite3.Row
-        self._conn.create_collation(
-            _UNICODE_CASEFOLD_COLLATION,
-            _unicode_casefold,
-        )
-        self._conn.execute("PRAGMA foreign_keys = ON")
-        if path != ":memory:":
-            self._conn.execute("PRAGMA journal_mode = WAL")
-            self._conn.execute("PRAGMA synchronous = NORMAL")
-        self._migrate()
+        try:
+            self._open_exact_schema()
+        except BaseException:
+            self._conn.close()
+            raise
 
-    def _migrate(self) -> None:
+    def _open_exact_schema(self) -> None:
+        """Create an empty v4 database or reject every legacy/mixed shape."""
+
         with self._lock:
-            current = self._conn.execute("PRAGMA user_version").fetchone()[0]
-            if current < 1:
+            current = int(self._conn.execute("PRAGMA user_version").fetchone()[0])
+            tables = self._application_tables()
+            is_empty = current == 0 and not tables
+            if not is_empty and (
+                current != SCHEMA_VERSION or not self._has_exact_schema(tables)
+            ):
+                raise MaterialAuthorityUnavailable(
+                    "inventory.db uses an unsupported schema; archive or remove it"
+                )
+
+            self._conn.create_collation(
+                _UNICODE_CASEFOLD_COLLATION,
+                _unicode_casefold,
+            )
+            self._conn.execute(f"PRAGMA busy_timeout = {_SQLITE_BUSY_TIMEOUT_MS}")
+            self._conn.execute("PRAGMA foreign_keys = ON")
+            if self.path != ":memory:":
+                self._conn.execute("PRAGMA journal_mode = WAL")
+                self._conn.execute("PRAGMA synchronous = NORMAL")
+            if is_empty:
                 self._conn.executescript(_SCHEMA)
-            if current < 2:
-                self._conn.executescript(_SCHEMA_V2)
-            if current < 3:
-                # ALTER 前先查列（半途中断的迁移可安全重放）
-                cols = {
-                    r[1]
-                    for r in self._conn.execute(
-                        "PRAGMA table_info(material_instance)"
-                    ).fetchall()
-                }
-                if "parent_uuid" not in cols:
-                    self._conn.execute(_SCHEMA_V3_ADD_PARENT)
-                self._conn.execute(_SCHEMA_V3_INDEX)
-            if current < SCHEMA_VERSION:
                 self._conn.execute(f"PRAGMA user_version = {SCHEMA_VERSION}")
                 self._conn.commit()
+
+    def _application_tables(self) -> set[str]:
+        return {
+            str(row[0])
+            for row in self._conn.execute(
+                """
+                SELECT name FROM sqlite_master
+                WHERE type = 'table' AND name NOT LIKE 'sqlite_%'
+                """
+            )
+        }
+
+    def _has_exact_schema(self, tables: set[str]) -> bool:
+        if tables != set(_EXPECTED_TABLE_COLUMNS):
+            return False
+        for table, expected in _EXPECTED_TABLE_COLUMNS.items():
+            columns = tuple(
+                str(row[1])
+                for row in self._conn.execute(f'PRAGMA table_info("{table}")')
+            )
+            if columns != expected:
+                return False
+        return True
 
     def close(self) -> None:
         with self._lock:
