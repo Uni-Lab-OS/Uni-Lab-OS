@@ -364,6 +364,35 @@ def prepare_sample(
 '''
 
 
+def _grouped_source() -> str:
+    return f'''from lab.devices import Reactor
+from unilabos.registry.placeholder_type import ResourceSlot
+from unilabos.workflow.authoring import (
+    device,
+    group,
+    workflow_definition,
+    workflow_output,
+)
+
+
+reactor: Reactor = device()
+
+
+@workflow_definition(
+    workflow_uuid="{WORKFLOW_UUID}",
+    displayname="Grouped preparation",
+)
+def grouped(*, sample: ResourceSlot):
+    # unilab:node_uuid={GROUP_A_NODE_UUID}
+    with group(name="Preparation"):
+        # unilab:node_uuid={PREPARE_NODE_UUID}
+        prepared = reactor.prepare(sample=sample, cycles=1, note=None)
+        # unilab:node_uuid={ANALYZE_NODE_UUID}
+        analyzed = reactor.analyze(prepared=prepared.prepared, label="grouped")
+    return workflow_output(report=analyzed.report)
+'''
+
+
 @contextmanager
 def _opened_engine(
     database_path: Path,
@@ -1032,6 +1061,93 @@ def test_compile_retains_wire_equivalent_applied_catalog_read_projection(
         for item in candidate_graph["handle_templates"]
         if item["workflow_node_template_uuid"] == ANALYZE_TEMPLATE_UUID
     ]
+
+
+def test_compile_rejects_retained_node_template_semantic_drift(
+    engine_context: EngineContext,
+) -> None:
+    applied = _compile(engine_context.engine)
+    assert applied.valid and applied.graph is not None
+    applied_graph = deepcopy(applied.graph)
+    prepare_template = next(
+        item
+        for item in applied_graph["node_templates"]
+        if item["uuid"] == PREPARE_TEMPLATE_UUID
+    )
+    prepare_template["display_name"] = "Stale Prepare Display Name"
+
+    result = _compile(engine_context.engine, graph=applied_graph)
+
+    _assert_error_result(result, code="template_catalog_mismatch")
+
+
+def test_compile_rejects_retained_handle_template_semantic_drift(
+    engine_context: EngineContext,
+) -> None:
+    applied = _compile(engine_context.engine)
+    assert applied.valid and applied.graph is not None
+    applied_graph = deepcopy(applied.graph)
+    sample_handle = next(
+        item
+        for item in applied_graph["handle_templates"]
+        if item["uuid"] == PREPARE_SAMPLE_TARGET
+    )
+    assert sample_handle["required"] is True
+    sample_handle["required"] = False
+
+    result = _compile(engine_context.engine, graph=applied_graph)
+
+    _assert_error_result(result, code="template_catalog_mismatch")
+
+
+def test_compile_allows_nullable_read_projection_and_retained_zero_handle_template(
+    tmp_path: Path,
+) -> None:
+    imports = _catalog_imports()
+    prepare_import = next(
+        item for item in imports if item.template["uuid"] == PREPARE_TEMPLATE_UUID
+    )
+    for handle in prepare_import.handles:
+        handle["description"] = None
+
+    with _opened_engine(
+        tmp_path / "zero-handle-read-projection.db",
+        imports=imports,
+    ) as context:
+        applied = _compile(context.engine, _grouped_source())
+        assert applied.valid and applied.graph is not None
+        applied_graph = deepcopy(applied.graph)
+        for template in applied_graph["node_templates"]:
+            for field_name in ("schema", "icon", "header", "footer"):
+                assert template.pop(field_name) is None
+        for handle in applied_graph["handle_templates"]:
+            if handle["workflow_node_template_uuid"] == PREPARE_TEMPLATE_UUID:
+                assert handle.pop("description") is None
+        group_template = next(
+            item
+            for item in applied_graph["node_templates"]
+            if item["uuid"] == GROUP_TEMPLATE_UUID
+        )
+        assert not any(
+            item["workflow_node_template_uuid"] == GROUP_TEMPLATE_UUID
+            for item in applied_graph["handle_templates"]
+        )
+
+        result = _compile(
+            context.engine,
+            applied.normalized_python_source,
+            graph=applied_graph,
+        )
+
+    assert result.valid and result.graph is not None
+    assert any(
+        item["uuid"] == group_template["uuid"]
+        for item in result.graph["node_templates"]
+    )
+    assert not any(
+        item["workflow_node_template_uuid"] == GROUP_TEMPLATE_UUID
+        for item in result.graph["handle_templates"]
+    )
 
 
 def test_workflow_output_import_alias_normalizes_to_the_result_record(
