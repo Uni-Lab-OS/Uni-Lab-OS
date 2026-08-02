@@ -224,37 +224,6 @@ def workflow_template_imports_from_registry_snapshot(
                 ),
             )
         )
-        imports.append(
-            NodeTemplateImport(
-                template={
-                    "resource_template_uuid": owner_uuid,
-                    "name": "group",
-                    "display_name": "Group",
-                    "description": "Presentation group for Workflow authoring",
-                    "class": "unilabos.workflow.authoring:group",
-                    "goal": {},
-                    "goal_default": {},
-                    "feedback": {},
-                    "result": {},
-                    "schema": None,
-                    "type": "group",
-                    "node_type": "group",
-                    "meta_data": {
-                        "unilab": {
-                            "authority_id": authority_id,
-                            "framework_owner_only": True,
-                            "source_fqid": "unilabos.workflow.authoring:group",
-                            "resource_template": {
-                                "uuid": owner_uuid,
-                                "name": owner_identity,
-                                "display_name": owner_display_name,
-                            },
-                        }
-                    },
-                },
-                handles=(),
-            )
-        )
     return tuple(imports)
 
 

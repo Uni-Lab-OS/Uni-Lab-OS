@@ -95,6 +95,13 @@ class PublishedWorkflowCatalogPublisher:
 
         with self._store.catalog_guard():
             templates = list(self._base_templates)
+            if self._sources and self._host_node_resource_template_uuid is not None:
+                templates.append(
+                    _group_template(
+                        self._host_node_resource_template_uuid,
+                        authority_id=self._authority.authority_id,
+                    )
+                )
             for source in self._sources:
                 try:
                     graph = self._store.get_graph(source.workflow_uuid)
@@ -123,6 +130,40 @@ class PublishedWorkflowCatalogPublisher:
         """使已提交 graph 后发布失败的 authority 立即 fail closed。"""
 
         self._catalog.invalidate(self._authority)
+
+
+def _group_template(
+    host_node_resource_template_uuid: str,
+    *,
+    authority_id: str,
+) -> NodeTemplateImport:
+    """C1 使用 host_node renderer owner 发布唯一 presentation group template。"""
+
+    owner_uuid = _host_owner_uuid(host_node_resource_template_uuid)
+    return NodeTemplateImport(
+        template={
+            "resource_template_uuid": owner_uuid,
+            "name": "group",
+            "display_name": "Group",
+            "description": "Presentation group for Workflow authoring",
+            "class": "unilabos.workflow.authoring:group",
+            "goal": {},
+            "goal_default": {},
+            "feedback": {},
+            "result": {},
+            "schema": None,
+            "type": "group",
+            "node_type": "group",
+            "meta_data": {
+                "unilab": {
+                    "authority_id": authority_id,
+                    "framework_owner_only": True,
+                    "source_fqid": "unilabos.workflow.authoring:group",
+                }
+            },
+        },
+        handles=(),
+    )
 
 
 def project_published_workflow_contract(
