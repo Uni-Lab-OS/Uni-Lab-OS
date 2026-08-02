@@ -232,6 +232,6 @@ running feedback 事件流、运行中锁、typed terminal result、释放后再
 ### 9.5 尚未接受的门
 
 软件自动化、精确 SHA 独立复核、GitHub non-squash merge、私有 OS dev、Core
-submodule/evidence pin 与 Issue/Wayfinder 同步均已完成。剩余门只有真实物理设备/ROS
-与 Feishu acceptance；因此 Core #162/#163 保持 open、`stage:testing`，不得提前标记
-`stage:accepted`。
+submodule/evidence pin 与 Issue/Wayfinder 同步均已完成。用户已确认真实物理设备/ROS
+不构成 D1A acceptance gate；当前只待 Feishu acceptance。因此 Core #162/#163 保持
+open、`stage:testing`，不得提前标记 `stage:accepted`。

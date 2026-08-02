@@ -115,7 +115,7 @@ _HASH_TOKEN = re.compile(r"sha256:[0-9a-f]{64}\Z")
 _NO_EXPECTED_HASH = object()
 _F_SETOWN_EX = getattr(fcntl, "F_SETOWN_EX", 15)
 _F_OWNER_TID = 0
-_LEASE_BREAK_SIGNAL = getattr(signal, "SIGRTMAX", None)
+_LEASE_BREAK_SIGNAL = getattr(signal, "SIGIO", None)
 _WORKFLOW_READ_FIELDS = {
     "uuid",
     "create_time",
@@ -1645,7 +1645,7 @@ class WorkflowService:
         """在可安全中断的 lease 下执行 fsync 后的原子 CAS replace。"""
 
         if fcntl is None or _LEASE_BREAK_SIGNAL is None:
-            # Windows 没有 Linux file lease / realtime signal；导入和只读
+            # Windows 没有 Linux file lease / lease break signal；导入和只读
             # Registry 检查必须可用，但无法证明 CAS 安全时继续失败关闭。
             raise WorkflowConflict("draft_hash_conflict")
 

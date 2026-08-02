@@ -21,8 +21,9 @@ def windows_import(name, *args, **kwargs):
     return original_import(name, *args, **kwargs)
 
 builtins.__import__ = windows_import
-if hasattr(signal, "SIGRTMAX"):
-    del signal.SIGRTMAX
+for signal_name in ("SIGIO", "SIGRTMAX"):
+    if hasattr(signal, signal_name):
+        delattr(signal, signal_name)
 
 import unilabos.workflow.service
 import unilabos.workflow.composition
