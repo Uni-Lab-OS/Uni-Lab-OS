@@ -6,12 +6,13 @@ API模块
 
 import asyncio
 import ipaddress
+from collections.abc import Mapping
 from typing import Any, Literal
 
 import yaml
-from fastapi import APIRouter, Body, Request, WebSocket, WebSocketDisconnect
+from fastapi import APIRouter, Request, WebSocket, WebSocketDisconnect
 from fastapi.responses import JSONResponse
-from pydantic import BaseModel, Field, ValidationError
+from pydantic import BaseModel, ConfigDict, Field, ValidationError
 
 from unilabos.app.communication import CommunicationClientFactory
 from unilabos.app.device_catalog import build_public_device_catalog
@@ -1315,24 +1316,26 @@ def get_devices(request: Request):
 
 
 class DeviceActionCommand(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
     command: Literal["force_unlock"]
     expected_job_id: str = Field(alias="expectedJobId", min_length=1)
     reason: Literal["operator_confirmed_device_safe"]
 
 
-def command_device_action(
+async def command_device_action(
     device_id: str,
     action_name: str,
     request: Request,
-    body: Any = Body(...),
 ):
     """操作员确认安全后，以 CAS 释放一个 live Action holder。"""
 
     if denied := _device_api_forbidden(request):
         return denied
     try:
+        body = await request.json()
         command = DeviceActionCommand.model_validate(body)
-    except ValidationError:
+    except (ValidationError, ValueError):
         return _api_error(
             422,
             "INVALID_DEVICE_COMMAND",
@@ -1340,6 +1343,29 @@ def command_device_action(
         )
 
     client = _live_device_client()
+    host_node = HostNode.get_instance(0)
+    if client is None or host_node is None:
+        return _api_error(
+            503,
+            "DEVICE_CONTROL_UNAVAILABLE",
+            "设备控制 runtime 尚未就绪",
+        )
+    action_mappings = getattr(host_node, "_action_value_mappings", {})
+    device_actions = (
+        action_mappings.get(device_id, {})
+        if isinstance(action_mappings, Mapping)
+        else {}
+    )
+    if (
+        not isinstance(device_actions, Mapping)
+        or action_name.startswith("_execute_driver_command")
+        or action_name not in device_actions
+    ):
+        return _api_error(
+            404,
+            "DEVICE_ACTION_NOT_FOUND",
+            "设备 Action 不存在",
+        )
     force_unlock = getattr(client, "force_unlock_action", None)
     if not callable(force_unlock):
         return _api_error(
@@ -1453,6 +1479,9 @@ def post_job_add(req: JobAddReq):
 
 def setup_api_routes(app):
     """设置API路由"""
+    if getattr(app.state, "unilabos_api_routes_mounted", False):
+        return
+    app.state.unilabos_api_routes_mounted = True
     # 危险设备命令直接挂到当前 composition root；不经过已退役的
     # local bridge，也不在 handler 内构造第二个 communication client。
     app.add_api_route(

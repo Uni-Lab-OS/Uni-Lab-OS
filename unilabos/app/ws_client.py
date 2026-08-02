@@ -20,7 +20,7 @@ import uuid
 from dataclasses import dataclass, field
 from enum import Enum
 from queue import Empty, Queue
-from typing import Any, Dict, List, Optional, Tuple
+from typing import Any, Callable, Dict, List, Optional, Tuple
 from urllib.parse import urlparse
 
 import websockets
@@ -300,26 +300,29 @@ class DeviceActionManager:
         """返回 Job 是否已被一次成功的 manual unlock 隔离。"""
 
         with self.lock:
-            self._prune_manual_unlock_fences()
             return job_id in self.manual_unlock_fences
 
-    def _prune_manual_unlock_fences(self) -> None:
-        cutoff = time.time() - 24 * 60 * 60
-        expired = [
-            job_id
-            for job_id, fenced_at in self.manual_unlock_fences.items()
-            if fenced_at < cutoff
-        ]
-        for job_id in expired:
-            self.manual_unlock_fences.pop(job_id, None)
-        overflow = len(self.manual_unlock_fences) - 4096
-        if overflow > 0:
-            oldest = sorted(
-                self.manual_unlock_fences,
-                key=self.manual_unlock_fences.__getitem__,
-            )[:overflow]
-            for job_id in oldest:
-                self.manual_unlock_fences.pop(job_id, None)
+    def dispatch_if_current(
+        self,
+        job_info: JobInfo,
+        dispatch: Callable[[], None],
+    ) -> bool:
+        """仅在 Job 仍是当前可执行项时下发，并与手动解锁串行化。"""
+
+        with self.lock:
+            if job_info.job_id in self.manual_unlock_fences:
+                return False
+            current = self.all_jobs.get(job_info.job_id)
+            if current is None or current.status != JobStatus.STARTED:
+                return False
+            if not current.always_free:
+                active = self.active_jobs.get(current.device_action_key)
+                if active is None or active.job_id != current.job_id:
+                    return False
+            # send_goal 与 force_unlock 共用同一把锁：若解锁先完成，本次下发
+            # 会被上面的 fence 拒绝；若下发先开始，解锁随后会请求物理取消。
+            dispatch()
+            return True
 
     def force_unlock(
         self,
@@ -354,7 +357,6 @@ class DeviceActionManager:
                 job.update_timestamp()
                 self.all_jobs.pop(job.job_id, None)
                 self.manual_unlock_fences[job.job_id] = time.time()
-            self._prune_manual_unlock_fences()
             return DeviceActionUnlockResult(
                 "unlocked",
                 released_jobs=tuple(released_jobs),
@@ -1101,13 +1103,20 @@ class MessageProcessor:
                 logger.error(f"[MessageProcessor] HostNode instance not available for job_id: {req.job_id}")
                 return
 
-            host_node.send_goal(
-                queue_item,
-                action_type=req.action_type,
-                action_kwargs=req.action_args,
-                sample_material=req.sample_material,
-                server_info=req.server_info,
+            dispatched = self.device_manager.dispatch_if_current(
+                job_info,
+                lambda: host_node.send_goal(
+                    queue_item,
+                    action_type=req.action_type,
+                    action_kwargs=req.action_args,
+                    sample_material=req.sample_material,
+                    server_info=req.server_info,
+                ),
             )
+            if not dispatched:
+                logger.warning(
+                    f"[MessageProcessor] Skip fenced or superseded job {job_log}"
+                )
 
         except Exception as e:
             logger.error(f"[MessageProcessor] Error handling job start: {str(e)}")
@@ -1569,14 +1578,22 @@ class QueueProcessor:
             return
 
         try:
-            host_node.send_goal(
-                queue_item,
-                action_type=job.action_type,
-                action_kwargs=job.action_args,
-                sample_material=job.sample_material,
-                server_info=job.server_info,
+            dispatched = self.device_manager.dispatch_if_current(
+                job,
+                lambda: host_node.send_goal(
+                    queue_item,
+                    action_type=job.action_type,
+                    action_kwargs=job.action_args,
+                    sample_material=job.sample_material,
+                    server_info=job.server_info,
+                ),
             )
-            logger.info(f"[QueueProcessor] Started dequeued job {job_log}")
+            if dispatched:
+                logger.info(f"[QueueProcessor] Started dequeued job {job_log}")
+            else:
+                logger.warning(
+                    f"[QueueProcessor] Skip fenced or superseded job {job_log}"
+                )
         except Exception as e:
             logger.error(f"[QueueProcessor] Failed to start dequeued job {job_log}: {e}")
             logger.error(traceback.format_exc())
@@ -1918,13 +1935,20 @@ class WebSocketClient(BaseCommunicationClient):
 
             cached_status = self.get_cached_job_start_response_status(item.job_id, item.task_id)
             if cached_status in ["success", "failed", "cancelled"]:
-                # 首个权威终态不可被迟到/重复回调覆盖。手动解锁先缓存
-                # cancelled 后，尤其不能让迟到的 driver success 把它染绿。
-                logger.warning(
-                    f"[WebSocketClient] Skipped duplicate terminal job status for {job_log}: "
-                    f"cached={cached_status}, incoming={status}"
+                # 保留普通任务原有的 failed -> success 终态纠正；手动解锁
+                # 的 cancelled 由上方永久 fence 单独保护。
+                must_skip = (
+                    cached_status == "success"
+                    or cached_status == "cancelled"
+                    or cached_status == status
+                    or status == "cancelled"
                 )
-                return
+                if must_skip:
+                    logger.warning(
+                        f"[WebSocketClient] Skipped duplicate terminal job status for {job_log}: "
+                        f"cached={cached_status}, incoming={status}"
+                    )
+                    return
 
         # running状态按job_id做debounce，内容变化时仍然上报
         if status == "running":
@@ -2052,8 +2076,14 @@ class WebSocketClient(BaseCommunicationClient):
         cancel_requested_job_ids: List[str] = []
         if host_node is not None:
             for job in unlock.released_jobs:
-                if host_node.cancel_goal(job.job_id):
-                    cancel_requested_job_ids.append(job.job_id)
+                try:
+                    if host_node.cancel_goal(job.job_id):
+                        cancel_requested_job_ids.append(job.job_id)
+                except Exception as exc:
+                    logger.error(
+                        "[WebSocketClient] Manual unlock physical cancel failed: "
+                        f"job={job.job_id[:8]} error={exc}"
+                    )
 
         current_job_id = self.device_manager.current_action_job_id(
             device_action_key
@@ -2081,18 +2111,26 @@ class WebSocketClient(BaseCommunicationClient):
 
     def publish_action_lock(self, device_id: str, action_name: str, free: bool) -> None:
         """主动上报单个 device+action 的锁(可用性)状态。"""
-        lock: Dict[str, Any] = {
-            "device_id": device_id,
-            "action_name": action_name,
-            "free": free,
-        }
-        if not free:
+        device_action_key = f"/devices/{device_id}/{action_name}"
+        with self.device_manager.lock:
             current_job_id = self.device_manager.current_action_job_id(
-                f"/devices/{device_id}/{action_name}"
+                device_action_key
             )
-            if current_job_id:
+            actual_free = current_job_id is None
+            lock: Dict[str, Any] = {
+                "device_id": device_id,
+                "action_name": action_name,
+                "free": actual_free,
+            }
+            if current_job_id is not None:
                 lock["current_job_id"] = current_job_id
-        self.publish_action_locks([lock])
+            if free != actual_free:
+                logger.debug(
+                    "[WebSocketClient] Action lock report refreshed from live state: "
+                    f"{device_action_key} requested_free={free} actual_free={actual_free}"
+                )
+            # 状态读取与 FIFO 入队保持同一临界区，避免新 busy 后又迟到旧 free。
+            self.publish_action_locks([lock])
 
     def publish_action_locks(self, locks: List[Dict[str, Any]]) -> None:
         """批量主动上报 device+action 的锁(可用性)状态。
@@ -2134,35 +2172,36 @@ class WebSocketClient(BaseCommunicationClient):
             logger.debug("[WebSocketClient] Host node 尚未就绪，跳过全量锁上报")
             return
 
-        locks: List[Dict[str, Any]] = []
-        for device_id in host_node.devices_names.keys():
-            action_names = set()
-            # 从全量动作映射(_action_value_mappings)取动作名，而非仅 _action_clients：
-            # 它是设备“可调用动作”的权威清单，需全量上报，包含
-            #   - 建独立 ROS ActionServer 的动作；
-            #   - UniLabJsonCommand 动作(不建 ActionServer、经 _execute_driver_command 调用)；
-            #   - @action(auto_prefix=True) 注册成的 "auto-" 动作(如 workbench 的 prepare_materials 等)。
-            # 仅跳过 _execute_driver_command[_async]：它是上述动作的通用调用通道本身，并非具体业务动作。
-            for action_name in host_node._action_value_mappings.get(device_id, {}).keys():
-                if action_name.startswith("_execute_driver_command"):
-                    continue
-                action_names.add(action_name)
-            for action_name in action_names:
-                device_action_key = f"/devices/{device_id}/{action_name}"
-                free = not self.device_manager.is_action_busy(device_action_key)
-                lock: Dict[str, Any] = {
-                    "device_id": device_id,
-                    "action_name": action_name,
-                    "free": free,
-                }
-                if not free:
-                    current_job_id = self.device_manager.current_action_job_id(
-                        device_action_key
-                    )
-                    if current_job_id:
-                        lock["current_job_id"] = current_job_id
-                locks.append(lock)
-        self.publish_action_locks(locks)
+        with self.device_manager.lock:
+            locks: List[Dict[str, Any]] = []
+            for device_id in host_node.devices_names.keys():
+                action_names = set()
+                # 从全量动作映射(_action_value_mappings)取动作名，而非仅 _action_clients：
+                # 它是设备“可调用动作”的权威清单，需全量上报，包含
+                #   - 建独立 ROS ActionServer 的动作；
+                #   - UniLabJsonCommand 动作(不建 ActionServer、经 _execute_driver_command 调用)；
+                #   - @action(auto_prefix=True) 注册成的 "auto-" 动作(如 workbench 的 prepare_materials 等)。
+                # 仅跳过 _execute_driver_command[_async]：它是上述动作的通用调用通道本身，并非具体业务动作。
+                for action_name in host_node._action_value_mappings.get(device_id, {}).keys():
+                    if action_name.startswith("_execute_driver_command"):
+                        continue
+                    action_names.add(action_name)
+                for action_name in action_names:
+                    device_action_key = f"/devices/{device_id}/{action_name}"
+                    free = not self.device_manager.is_action_busy(device_action_key)
+                    lock: Dict[str, Any] = {
+                        "device_id": device_id,
+                        "action_name": action_name,
+                        "free": free,
+                    }
+                    if not free:
+                        current_job_id = self.device_manager.current_action_job_id(
+                            device_action_key
+                        )
+                        if current_job_id:
+                            lock["current_job_id"] = current_job_id
+                    locks.append(lock)
+            self.publish_action_locks(locks)
 
     def publish_host_ready(self) -> None:
         """发布host_node ready信号，包含设备和动作信息"""

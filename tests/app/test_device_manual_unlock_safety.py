@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import asyncio
 import time
 from queue import Empty
 from types import SimpleNamespace
@@ -228,3 +229,220 @@ def test_web_api_uses_cached_live_client_without_constructing_another(
 
     assert response.status_code == 200
     assert CommunicationClientFactory.current_client() is live_client
+
+
+def test_initial_dispatch_does_not_send_goal_after_manual_fence(monkeypatch) -> None:
+    client = WebSocketClient()
+    host = SimpleNamespace(send_goal=Mock())
+
+    def unlock_before_host_is_returned(_index: int):
+        result = client.device_manager.force_unlock(
+            "/devices/robot/move",
+            "job-initial",
+        )
+        assert result.status == "unlocked"
+        return host
+
+    monkeypatch.setattr(
+        ws_client_module.HostNode,
+        "get_instance",
+        unlock_before_host_is_returned,
+    )
+
+    asyncio.run(
+        client.message_processor._handle_job_start(
+            {
+                "device_id": "robot",
+                "action": "move",
+                "action_type": "example.Move",
+                "sample_material": {},
+                "action_args": {},
+                "task_id": "task-initial",
+                "job_id": "job-initial",
+            }
+        )
+    )
+
+    host.send_goal.assert_not_called()
+
+
+def test_pending_start_does_not_send_goal_after_manual_fence(monkeypatch) -> None:
+    client = WebSocketClient()
+    holder = _job("job-holder")
+    promoted = _job("job-promoted")
+    assert client.device_manager.enqueue_job(holder) == (True, True)
+    assert client.device_manager.enqueue_job(promoted) == (False, False)
+    next_job, _ = client.device_manager.end_job(holder.job_id)
+    assert next_job is promoted
+    client.queue_processor.enqueue_pending_start(promoted)
+    assert client.device_manager.force_unlock(
+        promoted.device_action_key,
+        promoted.job_id,
+    ).status == "unlocked"
+
+    host = SimpleNamespace(send_goal=Mock())
+    monkeypatch.setattr(
+        ws_client_module.HostNode,
+        "get_instance",
+        lambda _index: host,
+    )
+
+    client.queue_processor._drain_pending_starts()
+
+    host.send_goal.assert_not_called()
+
+
+def test_stale_free_report_uses_current_busy_holder() -> None:
+    client = WebSocketClient()
+    holder = _job("job-new-holder")
+    assert client.device_manager.enqueue_job(holder) == (True, True)
+    client.message_processor.connected = True
+
+    client.publish_action_lock("robot", "move", free=True)
+
+    message = _drain(client)[0]
+    assert message["data"]["locks"] == [
+        {
+            "device_id": "robot",
+            "action_name": "move",
+            "free": False,
+            "current_job_id": holder.job_id,
+        }
+    ]
+
+
+def test_command_fails_closed_when_host_node_is_unavailable(monkeypatch) -> None:
+    app = FastAPI()
+    setup_api_routes(app)
+    client = WebSocketClient()
+    monkeypatch.setattr(CommunicationClientFactory, "_client_cache", client)
+    monkeypatch.setattr(BasicConfig, "communication_protocol", "websocket")
+    monkeypatch.setattr(
+        HostNode,
+        "get_instance",
+        classmethod(lambda cls, timeout=None: None),
+    )
+
+    response = TestClient(app, client=("127.0.0.1", 41000)).post(
+        "/api/v1/devices/robot/actions/move/commands",
+        json={
+            "command": "force_unlock",
+            "expectedJobId": "job-holder",
+            "reason": "operator_confirmed_device_safe",
+        },
+    )
+
+    assert response.status_code == 503
+    assert response.json()["error"]["code"] == "DEVICE_CONTROL_UNAVAILABLE"
+
+
+def test_cancel_exception_does_not_skip_remaining_snapshot(monkeypatch) -> None:
+    client = WebSocketClient()
+    holder = _job("job-holder")
+    queued = _job("job-queued")
+    assert client.device_manager.enqueue_job(holder) == (True, True)
+    assert client.device_manager.enqueue_job(queued) == (False, False)
+    attempted: list[str] = []
+
+    def cancel_goal(job_id: str) -> bool:
+        attempted.append(job_id)
+        if job_id == holder.job_id:
+            raise RuntimeError("driver cancel failed")
+        return True
+
+    host = SimpleNamespace(
+        cancel_goal=cancel_goal,
+        _device_action_status={},
+    )
+    monkeypatch.setattr(
+        ws_client_module.HostNode,
+        "get_instance",
+        lambda _index: host,
+    )
+
+    result = client.force_unlock_action(
+        "robot",
+        "move",
+        expected_job_id=holder.job_id,
+        reason="operator_confirmed_device_safe",
+    )
+
+    assert result["status"] == "unlocked"
+    assert attempted == [holder.job_id, queued.job_id]
+    assert result["cancelRequestedJobIds"] == [queued.job_id]
+
+
+def test_malformed_or_missing_command_body_uses_backend_envelope(monkeypatch) -> None:
+    app = FastAPI()
+    setup_api_routes(app)
+    client = WebSocketClient()
+    host = SimpleNamespace(
+        devices_names={"robot": "/devices"},
+        _action_value_mappings={"robot": {"move": {}}},
+    )
+    monkeypatch.setattr(CommunicationClientFactory, "_client_cache", client)
+    monkeypatch.setattr(BasicConfig, "communication_protocol", "websocket")
+    monkeypatch.setattr(
+        HostNode,
+        "get_instance",
+        classmethod(lambda cls, timeout=None: host),
+    )
+
+    with TestClient(app, client=("127.0.0.1", 41000)) as http:
+        missing = http.post(
+            "/api/v1/devices/robot/actions/move/commands",
+        )
+        malformed = http.post(
+            "/api/v1/devices/robot/actions/move/commands",
+            content="{",
+            headers={"content-type": "application/json"},
+        )
+
+    for response in (missing, malformed):
+        assert response.status_code == 422
+        assert response.json()["error"]["code"] == "INVALID_DEVICE_COMMAND"
+        assert "detail" not in response.json()
+
+
+def test_setup_api_routes_is_idempotent() -> None:
+    app = FastAPI()
+
+    setup_api_routes(app)
+    setup_api_routes(app)
+
+    command_routes = [
+        route
+        for route in app.routes
+        if getattr(route, "path", "")
+        == "/api/v1/devices/{device_id}/actions/{action_name}/commands"
+    ]
+    assert len(command_routes) == 1
+
+
+def test_ordinary_failed_result_can_still_be_corrected_to_success(
+    monkeypatch,
+) -> None:
+    client = WebSocketClient()
+    job = _job("job-corrected")
+    assert client.device_manager.enqueue_job(job) == (True, True)
+    client.message_processor.connected = True
+    host = SimpleNamespace(_device_action_status={})
+    monkeypatch.setattr(
+        ws_client_module.HostNode,
+        "get_instance",
+        lambda _index: host,
+    )
+
+    client.publish_job_status({}, job, "failed", return_info={})
+    client.publish_job_status({}, job, "success", return_info={})
+
+    statuses = [
+        message["data"]["status"]
+        for message in _drain(client)
+        if message.get("action") == "job_status"
+    ]
+    assert statuses == ["failed", "success"]
+    assert client.get_cached_job_start_response_status(
+        job.job_id,
+        job.task_id,
+    ) == "success"

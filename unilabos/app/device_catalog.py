@@ -1,9 +1,8 @@
-"""Live device/Action read projection for the public Edge API.
+"""面向 Edge 公共接口的实时设备与 Action 只读投影。
 
-The HostNode owns device presence and callable Action definitions. The
-process-live DeviceActionManager owns the corresponding busy holder. This
-module only combines immutable copies of those facts into a JSON DTO; it does
-not own either lifecycle.
+HostNode 持有设备在线状态和可调用 Action 定义，进程内唯一的
+DeviceActionManager 持有对应的占用者。本模块只把两类事实的不可变副本
+组合成 JSON DTO，不拥有任何一方的生命周期。
 """
 
 from __future__ import annotations
@@ -21,7 +20,7 @@ def build_public_device_catalog(
     is_action_busy: Callable[[str], bool],
     current_action_job_id: Callable[[str], str | None],
 ) -> dict[str, Any]:
-    """Project one complete live HostNode/lock snapshot for the frontend."""
+    """为前端投影一份完整的 HostNode 与锁实时快照。"""
 
     namespaces = dict(getattr(host_node, "devices_names", {}) or {})
     machine_names = dict(getattr(host_node, "device_machine_names", {}) or {})
