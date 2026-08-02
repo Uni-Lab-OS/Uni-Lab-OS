@@ -717,6 +717,30 @@ def get_device_action_task_service() -> DeviceActionTaskService | None:
     return _device_action_tasks
 
 
+def configure_device_action_runtime(
+    service: WorkflowService,
+    scheduler: object | None,
+    backend: object | None,
+) -> bool:
+    """把后创建的 production Edge stack 绑定到既有 D1A authority。"""
+
+    with _lock:
+        if (
+            not _ready
+            or _owner_pid != os.getpid()
+            or service is not _service
+            or _device_action_runtime is None
+        ):
+            return False
+        if scheduler is None and backend is None:
+            _device_action_runtime.unbind_execution_stack()
+            return True
+        if scheduler is None or backend is None:
+            raise ValueError("scheduler 与 backend 必须同时配置")
+        _device_action_runtime.bind_execution_stack(scheduler, backend)
+        return True
+
+
 def get_workflow_inventory_service() -> InventoryService | None:
     """Return the InventoryService owned by the active workspace composition."""
 
@@ -800,6 +824,7 @@ def reset_workflow_service_for_test() -> None:
 
 __all__ = [
     "compose_workflow_runtime",
+    "configure_device_action_runtime",
     "get_device_action_task_service",
     "configure_workflow_task_reconciler",
     "get_workflow_inventory_service",

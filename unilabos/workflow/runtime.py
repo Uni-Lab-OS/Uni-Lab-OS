@@ -970,6 +970,22 @@ class WorkflowRuntimeCoordinator:
                     """,
                     (now, job["uuid"]),
                 )
+                d1a_claim_changed = connection.execute(
+                    """
+                    UPDATE device_action_task
+                    SET claim_status = 'unknown', update_time = ?
+                    WHERE workflow_node_job_uuid = ?
+                      AND claim_status = 'claimed'
+                    """,
+                    (now, job["uuid"]),
+                ).rowcount
+                if d1a_claim_changed:
+                    WorkflowStore._append_event(
+                        connection,
+                        event="device_action_task.changed",
+                        data={"task_uuid": task_uuid},
+                        now=now,
+                    )
                 connection.execute(
                     """
                     UPDATE workflow_task
@@ -1023,6 +1039,10 @@ class WorkflowRuntimeCoordinator:
                 """
                 SELECT * FROM workflow_task
                 WHERE deleted_at IS NULL AND status IN ('pending', 'running')
+                  AND NOT EXISTS (
+                      SELECT 1 FROM device_action_task AS d1a
+                      WHERE d1a.workflow_task_uuid = workflow_task.uuid
+                  )
                 ORDER BY create_time, uuid
                 """
             ).fetchall()

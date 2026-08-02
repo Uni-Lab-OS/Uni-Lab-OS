@@ -220,10 +220,34 @@ class DeviceActionTaskService:
         idempotency_key: str,
         description: str | None,
     ) -> dict[str, Any]:
-        if not self._admission.is_available():
-            raise WorkflowError("admission_unavailable")
         if authority_id != self._authority.authority_id:
             raise WorkflowError("not_found")
+
+        payload_hash = self._payload_hash(
+            authority_id=authority_id,
+            template_catalog_fingerprint=template_catalog_fingerprint,
+            workflow_node_template_uuid=workflow_node_template_uuid,
+            device_id=device_id,
+            input_value=input_value,
+            description=description,
+        )
+        with self._store.transaction() as conn:
+            existing = conn.execute(
+                """
+                SELECT workflow_task_uuid, canonical_payload_hash
+                FROM device_action_task
+                WHERE authority_id = ? AND device_id = ?
+                  AND idempotency_key = ?
+                """,
+                (authority_id, device_id, idempotency_key),
+            ).fetchone()
+            if existing is not None:
+                if existing["canonical_payload_hash"] != payload_hash:
+                    raise WorkflowError("idempotency_conflict")
+                return self._view(existing["workflow_task_uuid"], conn=conn)
+
+        if not self._admission.is_available():
+            raise WorkflowError("admission_unavailable")
 
         try:
             with self._template_catalog.snapshot(self._authority) as snapshot:
@@ -241,14 +265,6 @@ class DeviceActionTaskService:
                 if _contains_unsupported_contract(handles):
                     raise WorkflowError("unsupported_contract")
                 self._assert_live_action(template, device_id)
-                payload_hash = self._payload_hash(
-                    authority_id=authority_id,
-                    template_catalog_fingerprint=template_catalog_fingerprint,
-                    workflow_node_template_uuid=workflow_node_template_uuid,
-                    device_id=device_id,
-                    input_value=input_value,
-                    description=description,
-                )
                 replayed = False
                 with self._store.transaction() as conn:
                     existing = conn.execute(
@@ -374,7 +390,7 @@ class DeviceActionTaskService:
             actions.get(template.get("name")) if isinstance(actions, dict) else None
         )
         if not isinstance(action, dict):
-            raise WorkflowError("not_found")
+            raise WorkflowError("device_action_mismatch")
         if (
             device.get("online") is not True
             or device.get("resource_template_uuid")
@@ -409,8 +425,6 @@ class DeviceActionTaskService:
             """,
             (self._authority.authority_id, template_uuid),
         ).fetchone()
-        if existing is not None:
-            return dict(existing)
 
         target_handles = {
             str(item["data_key"] or item["handle_key"]): item
@@ -438,8 +452,14 @@ class DeviceActionTaskService:
         except KeyError:
             raise WorkflowError("device_action_mismatch") from None
 
-        workflow_uuid = str(uuid4())
-        node_uuid = str(uuid4())
+        workflow_uuid = (
+            str(existing["workflow_uuid"]) if existing is not None else str(uuid4())
+        )
+        node_uuid = (
+            str(existing["workflow_node_uuid"])
+            if existing is not None
+            else str(uuid4())
+        )
         for binding in output_bindings.values():
             binding["workflow_node_uuid"] = node_uuid
         now = utc_now()
@@ -451,6 +471,88 @@ class DeviceActionTaskService:
             }
         }
         node_meta = {"unilab": {"input_bindings": input_bindings}}
+        contract_snapshot = {
+            "input_contract": input_contract,
+            "output_contract": output_contract,
+        }
+        if existing is not None:
+            if existing["contract_snapshot"] == _json(contract_snapshot):
+                if existing["template_catalog_fingerprint"] != fingerprint:
+                    conn.execute(
+                        """
+                        UPDATE device_action_system_source
+                        SET template_catalog_fingerprint = ?, update_time = ?
+                        WHERE authority_id = ?
+                          AND workflow_node_template_uuid = ?
+                        """,
+                        (
+                            fingerprint,
+                            now,
+                            self._authority.authority_id,
+                            template_uuid,
+                        ),
+                    )
+                return dict(existing)
+
+            revision = int(existing["source_revision"]) + 1
+            conn.execute(
+                """
+                UPDATE workflow
+                SET update_time = ?, meta_data = ?, name = ?, revision = ?
+                WHERE uuid = ? AND deleted_at IS NULL
+                """,
+                (
+                    now,
+                    _json(workflow_meta),
+                    f"Device console: {template['display_name']}",
+                    revision,
+                    workflow_uuid,
+                ),
+            )
+            conn.execute(
+                """
+                UPDATE workflow_node
+                SET update_time = ?, meta_data = ?,
+                    workflow_node_template_uuid = ?, name = ?, icon = ?,
+                    footer = ?, action_name = ?
+                WHERE uuid = ? AND deleted_at IS NULL
+                """,
+                (
+                    now,
+                    _json(node_meta),
+                    template_uuid,
+                    template["display_name"],
+                    template.get("icon"),
+                    template.get("footer"),
+                    template["name"],
+                    node_uuid,
+                ),
+            )
+            conn.execute(
+                """
+                UPDATE device_action_system_source
+                SET source_revision = ?, template_catalog_fingerprint = ?,
+                    contract_snapshot = ?, update_time = ?
+                WHERE authority_id = ? AND workflow_node_template_uuid = ?
+                """,
+                (
+                    revision,
+                    fingerprint,
+                    _json(contract_snapshot),
+                    now,
+                    self._authority.authority_id,
+                    template_uuid,
+                ),
+            )
+            updated = dict(existing)
+            updated.update(
+                source_revision=revision,
+                template_catalog_fingerprint=fingerprint,
+                contract_snapshot=_json(contract_snapshot),
+                update_time=now,
+            )
+            return updated
+
         conn.execute(
             """
             INSERT INTO workflow(
@@ -490,10 +592,6 @@ class DeviceActionTaskService:
                 template["name"],
             ),
         )
-        contract_snapshot = {
-            "input_contract": input_contract,
-            "output_contract": output_contract,
-        }
         conn.execute(
             """
             INSERT INTO device_action_system_source(
@@ -654,6 +752,28 @@ class DeviceActionTaskRuntimeBridge:
         self._stop_event = threading.Event()
         self._cancel_thread: threading.Thread | None = None
 
+    def bind_execution_stack(self, scheduler: Any, backend: Any) -> None:
+        """在 production Edge stack 就绪后完成一次性反向绑定。"""
+
+        if scheduler is None or backend is None:
+            raise ValueError("D1A execution stack must be complete")
+        with self._lock:
+            if self._started:
+                if self._scheduler is scheduler and self._backend is backend:
+                    return
+                raise RuntimeError("D1A execution stack is already bound")
+            self._scheduler = scheduler
+            self._backend = backend
+        self.start()
+
+    def unbind_execution_stack(self) -> None:
+        """先移除 listener，再释放 integration 持有的 Edge stack。"""
+
+        self.stop()
+        with self._lock:
+            self._scheduler = None
+            self._backend = None
+
     def start(self) -> None:
         with self._lock:
             if self._started:
@@ -664,8 +784,11 @@ class DeviceActionTaskRuntimeBridge:
                 before=self._before_dispatch,
                 on_error=self._dispatch_failed,
             )
+            self._scheduler.set_device_action_fence_provider(
+                self.busy_device_action_keys
+            )
             self._backend.add_job_status_listener(self._on_job_status)
-            self._backend.add_job_finished_listener(self._on_job_finished)
+            self._backend.add_job_completion_listener(self._on_job_finished)
             self._started = True
             self.replay_pending()
             self._stop_event.clear()
@@ -682,9 +805,10 @@ class DeviceActionTaskRuntimeBridge:
             self._stop_event.set()
             if self._scheduler is not None:
                 self._scheduler.set_dispatch_hooks(before=None, on_error=None)
+                self._scheduler.set_device_action_fence_provider(None)
             if self._backend is not None:
                 self._backend.remove_job_status_listener(self._on_job_status)
-                self._backend.remove_job_finished_listener(self._on_job_finished)
+                self._backend.remove_job_completion_listener(self._on_job_finished)
         thread = self._cancel_thread
         if thread is not None and thread is not threading.current_thread():
             thread.join(timeout=2)
@@ -724,6 +848,22 @@ class DeviceActionTaskRuntimeBridge:
             ]
         for task_uuid in task_uuids:
             self._submit(task_uuid)
+
+    def busy_device_action_keys(self) -> set[str]:
+        """把 durable Job Execution Claim 投影为 Scheduler busy keys。"""
+
+        with self._store.transaction() as connection:
+            rows = connection.execute(
+                """
+                SELECT device_id, action_name
+                FROM device_action_task
+                WHERE claim_status IN ('claimed', 'unknown')
+                """
+            ).fetchall()
+        return {
+            f"/devices/{row['device_id']}/{row['action_name']}"
+            for row in rows
+        }
 
     def sweep_cancellations(self) -> None:
         """把 durable cancel 状态投影到 scheduler/backend；外部调用幂等。"""
@@ -864,7 +1004,10 @@ class DeviceActionTaskRuntimeBridge:
                 task_id=task_uuid,
                 nodes=[
                     WorkflowNode(
-                        id=row["workflow_node_uuid"],
+                        # Scheduler timeline/monitor 是公开 wire。单节点投影以
+                        # 已公开的 formal Job UUID 作为 opaque node identity，
+                        # 不允许 system WorkflowNode UUID 从旁路泄漏。
+                        id=row["workflow_node_job_uuid"],
                         job_id=row["workflow_node_job_uuid"],
                         device_id=row["device_id"],
                         action_name=row["action_name"],
@@ -1039,21 +1182,57 @@ class DeviceActionTaskRuntimeBridge:
         success: bool,
         result: Any,
         suc_type: str,
-    ) -> None:
+    ) -> bool:
         if not self._started or not self._is_d1a_job(job_uuid):
-            return
+            return False
+        if suc_type == "transport_unknown":
+            with self._store.transaction() as connection:
+                current = connection.execute(
+                    """
+                    SELECT j.status, d.workflow_task_uuid
+                    FROM workflow_node_job AS j
+                    JOIN device_action_task AS d
+                      ON d.workflow_node_job_uuid = j.uuid
+                    WHERE j.uuid = ?
+                    """,
+                    (job_uuid,),
+                ).fetchone()
+            if current is None or current["status"] == "execution_unknown":
+                return current is not None
+            if current["status"] in {"succeeded", "failed", "canceled", "timeout"}:
+                return True
+            self._coordinator.mark_job_unknown(
+                job_uuid,
+                "device_action_transport_unknown",
+            )
+            with self._store.transaction() as connection:
+                now = utc_now()
+                connection.execute(
+                    """
+                    UPDATE device_action_task
+                    SET claim_status = 'unknown', update_time = ?
+                    WHERE workflow_node_job_uuid = ?
+                    """,
+                    (now, job_uuid),
+                )
+                WorkflowStore._append_event(
+                    connection,
+                    event="device_action_task.changed",
+                    data={"task_uuid": current["workflow_task_uuid"]},
+                    now=now,
+                )
+            return True
         with self._store.transaction() as connection:
             row = connection.execute(
                 """
-                SELECT d.*, t.status AS task_status, j.status AS job_status,
-                       s.contract_snapshot
+                SELECT d.*, t.status AS task_status,
+                       t.control_status AS task_control_status,
+                       t.reconciliation_resume_control_status,
+                       j.status AS job_status, t.workflow_snapshot
                 FROM device_action_task AS d
                 JOIN workflow_task AS t ON t.uuid = d.workflow_task_uuid
                 JOIN workflow_node_job AS j
                   ON j.uuid = d.workflow_node_job_uuid
-                JOIN device_action_system_source AS s
-                  ON s.authority_id = d.authority_id
-                 AND s.workflow_node_template_uuid = d.workflow_node_template_uuid
                 WHERE d.workflow_node_job_uuid = ?
                 """,
                 (job_uuid,),
@@ -1064,7 +1243,7 @@ class DeviceActionTaskRuntimeBridge:
                 "canceled",
                 "timeout",
             }:
-                return
+                return row is not None
             canceled = (
                 row["job_status"] == "cancel_requested"
                 or row["task_status"] == "canceling"
@@ -1075,8 +1254,15 @@ class DeviceActionTaskRuntimeBridge:
             task_status = "canceled" if canceled else "failed"
             if success and not canceled and suc_type == "normal":
                 try:
-                    output = self._normalize_output(row["contract_snapshot"], result)
-                except (TypeError, ValueError, WorkflowSchemaError):
+                    task_snapshot = _load(row["workflow_snapshot"], {})
+                    output_contract = task_snapshot["workflow"]["meta_data"][
+                        "unilab"
+                    ]["output_contract"]
+                    output = self._normalize_output(
+                        _json({"output_contract": output_contract}),
+                        result,
+                    )
+                except (KeyError, TypeError, ValueError, WorkflowSchemaError):
                     error_info = [{"code": "invalid_device_action_result"}]
                 else:
                     job_status = "succeeded"
@@ -1089,10 +1275,20 @@ class DeviceActionTaskRuntimeBridge:
                     }
                 ]
             now = utc_now()
+            was_unknown = row["job_status"] == "execution_unknown"
+            resumed_control_status = row["task_control_status"]
+            if was_unknown:
+                resumed_control_status = (
+                    row["reconciliation_resume_control_status"]
+                    if row["reconciliation_resume_control_status"]
+                    in {"active", "paused"}
+                    else "active"
+                )
             connection.execute(
                 """
                 UPDATE workflow_node_job
                 SET status = ?, return_info = ?, error_info = ?,
+                    uncertainty_reason = NULL,
                     finished_at = COALESCE(finished_at, ?), update_time = ?
                 WHERE uuid = ?
                 """,
@@ -1109,8 +1305,11 @@ class DeviceActionTaskRuntimeBridge:
                 """
                 UPDATE workflow_task
                 SET status = ?, output = ?, error_info = ?,
+                    control_status = ?,
                     cleanup_status = CASE WHEN ? = 'canceled' THEN 'settled'
-                                          ELSE cleanup_status END,
+                                          ELSE 'none' END,
+                    reconciliation_resume_control_status = NULL,
+                    attention_reason = NULL,
                     finished_at = COALESCE(finished_at, ?), update_time = ?
                 WHERE uuid = ?
                 """,
@@ -1118,6 +1317,7 @@ class DeviceActionTaskRuntimeBridge:
                     task_status,
                     _json(output),
                     _json(error_info),
+                    resumed_control_status,
                     task_status,
                     now,
                     now,
@@ -1136,9 +1336,14 @@ class DeviceActionTaskRuntimeBridge:
                 connection,
                 task_uuid=row["workflow_task_uuid"],
                 job_uuid=job_uuid,
-                kind="job_transition",
+                kind=("uncertainty_resolved" if was_unknown else "job_transition"),
                 from_status=row["job_status"],
                 to_status=job_status,
+                data=(
+                    {"reason": "late_device_action_result"}
+                    if was_unknown
+                    else None
+                ),
                 now=now,
             )
             self._coordinator._append_journal(
@@ -1154,6 +1359,7 @@ class DeviceActionTaskRuntimeBridge:
                 task_uuid=row["workflow_task_uuid"],
                 now=now,
             )
+        return True
 
     def _is_d1a_job(self, job_uuid: str) -> bool:
         if not job_uuid:

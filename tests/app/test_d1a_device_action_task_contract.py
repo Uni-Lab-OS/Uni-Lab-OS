@@ -599,6 +599,33 @@ def test_idempotency_replay_is_one_task_and_conflicting_payload_is_409(
     assert replay.json()["data"] == first.json()["data"]
     assert _table_count(harness.store, "workflow_task") == 1
     assert _table_count(harness.store, "workflow_node_job") == 1
+
+
+def test_idempotency_replay_survives_mutable_admission_and_catalog_changes(
+    harness: Harness,
+) -> None:
+    key = str(uuid4())
+    request = _request(harness, idempotency_key=key)
+    first = harness.client.post("/api/v1/device-action-tasks", json=request)
+    assert first.status_code == 201
+
+    harness.admission.available = False
+    harness.live_catalog.devices["robot"]["online"] = False
+    changed = _template_import(
+        name="move",
+        display_name="移动（新合同）",
+        resource_template_uuid=RESOURCE_TEMPLATE_UUID,
+        schema=SIMPLE_SCHEMA,
+    )
+    harness.catalog.replace(AUTHORITY, [changed])
+
+    replay = harness.client.post("/api/v1/device-action-tasks", json=request)
+
+    assert 200 <= replay.status_code < 300
+    assert replay.json()["data"] == first.json()["data"]
+    assert _table_count(harness.store, "workflow_task") == 1
+    assert _table_count(harness.store, "workflow_node_job") == 1
+    assert len(harness.admission.wakes) == 1
     assert len(harness.admission.wakes) == 1
 
     conflict = harness.client.post(
@@ -667,9 +694,21 @@ def test_device_absence_and_action_contract_mismatch_are_distinct(
     )
     _assert_error(missing, status=404, code="not_found")
 
-    harness.live_catalog.devices["robot"]["actions"]["move"]["schema"] = (
-        _closed_action_schema(material=True)
+    del harness.live_catalog.devices["robot"]["actions"]["move"]
+    action_removed = harness.client.post(
+        "/api/v1/device-action-tasks",
+        json=_request(harness),
     )
+    _assert_error(
+        action_removed,
+        status=409,
+        code="device_action_mismatch",
+    )
+
+    harness.live_catalog.devices["robot"]["actions"]["move"] = {
+        "type": "action",
+        "schema": _closed_action_schema(material=True),
+    }
     mismatch = harness.client.post(
         "/api/v1/device-action-tasks",
         json=_request(harness),
@@ -867,6 +906,80 @@ def test_system_source_identity_is_stable_and_device_is_not_graph_state(
         }
         for job in jobs
     )
+
+
+def test_catalog_contract_change_revises_stable_system_source_and_freezes_old_task(
+    harness: Harness,
+) -> None:
+    first = harness.client.post(
+        "/api/v1/device-action-tasks",
+        json=_request(harness),
+    )
+    assert first.status_code == 201
+
+    revised_schema = copy.deepcopy(SIMPLE_SCHEMA)
+    revised_schema["properties"]["result"] = {
+        "type": "object",
+        "properties": {"ok": {"type": "boolean"}},
+        "required": ["ok"],
+        "additionalProperties": False,
+    }
+    revised_schema["x-unilabos-action-contract"]["output_order"] = ["ok"]
+    revised_import = _template_import(
+        name="move",
+        display_name="移动（修订）",
+        resource_template_uuid=RESOURCE_TEMPLATE_UUID,
+        schema=revised_schema,
+    )
+    revised_snapshot = harness.catalog.replace(AUTHORITY, [revised_import])
+    revised_template = revised_snapshot.node_templates[0]
+    assert str(revised_template["uuid"]) == harness.simple_template_uuid
+    harness.live_catalog.devices["robot"]["actions"]["move"] = {
+        "type": "action",
+        "schema": copy.deepcopy(revised_schema),
+    }
+
+    second = harness.client.post(
+        "/api/v1/device-action-tasks",
+        json=_request(
+            harness,
+            fingerprint=revised_snapshot.fingerprint,
+            template_uuid=str(revised_template["uuid"]),
+        ),
+    )
+    assert second.status_code == 201, second.text
+
+    with harness.store.transaction() as connection:
+        source = dict(
+            connection.execute("SELECT * FROM device_action_system_source").fetchone()
+        )
+        workflow = dict(
+            connection.execute(
+                "SELECT * FROM workflow WHERE uuid = ?",
+                (source["workflow_uuid"],),
+            ).fetchone()
+        )
+        snapshots = {
+            row["uuid"]: json.loads(row["workflow_snapshot"])
+            for row in connection.execute(
+                "SELECT uuid, workflow_snapshot FROM workflow_task"
+            )
+        }
+
+    assert source["source_revision"] == workflow["revision"] == 2
+    assert json.loads(source["contract_snapshot"])["output_contract"][
+        "outputs"
+    ][0]["name"] == "ok"
+    first_task_uuid = first.json()["data"]["task_uuid"]
+    second_task_uuid = second.json()["data"]["task_uuid"]
+    assert snapshots[first_task_uuid]["workflow"]["revision"] == 1
+    assert snapshots[first_task_uuid]["workflow"]["meta_data"]["unilab"][
+        "output_contract"
+    ]["outputs"][0]["name"] == "completed"
+    assert snapshots[second_task_uuid]["workflow"]["revision"] == 2
+    assert snapshots[second_task_uuid]["workflow"]["meta_data"]["unilab"][
+        "output_contract"
+    ]["outputs"][0]["name"] == "ok"
 
 
 def test_unavailable_admission_returns_503_without_creating_facts(

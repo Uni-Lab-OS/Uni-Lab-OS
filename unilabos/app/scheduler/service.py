@@ -141,6 +141,7 @@ class EdgeScheduler:
         )
         # 实时锁视图提供者（微后端 busy_device_action_keys），可选
         self._busy_key_provider = busy_key_provider
+        self._device_action_fence_provider: Callable[[], set[str]] | None = None
         # 工作流终态通知（success/failed/canceled 各通知一次；锁外触发）
         self._workflow_state_listener = workflow_state_listener
         self._notified_workflows: set[str] = set()
@@ -863,9 +864,25 @@ class EdgeScheduler:
                 busy |= set(self._busy_key_provider())
             except Exception:
                 logger.exception("[EdgeScheduler] busy_key_provider failed")
+        if self._device_action_fence_provider is not None:
+            try:
+                busy |= set(self._device_action_fence_provider())
+            except Exception:
+                logger.exception(
+                    "[EdgeScheduler] device_action_fence_provider failed"
+                )
         for job in self._inflight.values():
             busy.add(job.device_action_key)
         return busy
+
+    def set_device_action_fence_provider(
+        self,
+        provider: Callable[[], set[str]] | None,
+    ) -> None:
+        """绑定 D1A durable claimed/unknown fence projection。"""
+
+        with self._lock:
+            self._device_action_fence_provider = provider
 
     # ── 泳道图时间线 ─────────────────────────────────────────
 

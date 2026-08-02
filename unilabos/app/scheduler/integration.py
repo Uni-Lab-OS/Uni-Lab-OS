@@ -115,6 +115,17 @@ def setup_edge_scheduler(
     global _scheduler, _backend, _inventory, _outbox_worker, _owns_inventory
     global _workflow_tasks, _workflow_reconciler_attached
     if _scheduler is not None and _backend is not None:
+        if workflow_tasks is not None:
+            from unilabos.workflow.composition import (
+                configure_device_action_runtime,
+            )
+
+            _workflow_tasks = workflow_tasks
+            configure_device_action_runtime(
+                workflow_tasks,
+                _scheduler,
+                _backend,
+            )
         logger.warning(
             "[EdgeSchedulerIntegration] already set up, reusing existing stack"
         )
@@ -222,6 +233,12 @@ def setup_edge_scheduler(
     )
     _scheduler, _backend = scheduler, backend
 
+    if workflow_tasks is not None:
+        from unilabos.workflow.composition import configure_device_action_runtime
+
+        _workflow_tasks = workflow_tasks
+        configure_device_action_runtime(workflow_tasks, scheduler, backend)
+
     if workflow_tasks is not None and inventory is not None:
         from unilabos.workflow.composition import configure_workflow_task_reconciler
 
@@ -277,6 +294,10 @@ def reset_for_test() -> None:
     """测试用：清掉进程内单例。"""
     global _scheduler, _backend, _inventory, _outbox_worker, _owns_inventory
     global _workflow_tasks, _workflow_reconciler_attached
+    if _workflow_tasks is not None:
+        from unilabos.workflow.composition import configure_device_action_runtime
+
+        configure_device_action_runtime(_workflow_tasks, None, None)
     if _workflow_reconciler_attached and _workflow_tasks is not None:
         from unilabos.workflow.composition import configure_workflow_task_reconciler
 
