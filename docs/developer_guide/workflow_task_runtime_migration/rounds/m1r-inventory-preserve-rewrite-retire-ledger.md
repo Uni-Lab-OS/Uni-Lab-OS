@@ -60,11 +60,12 @@ facade, legacy tables, or a second Material identity.
   suite reports `6 passed` after convergence. The earlier branch that placed
   the identical test blob late remains recoverable but is not the final
   candidate history.
-- Latest review-fix implementation tree: `3db90ef`. The M1R owner/waiter suites
-  report `37 passed`; the adjacent M2A/R1B/persistent-authoring suites report
+- Latest review-fix implementation tree: `ab1f89b`. The M1R owner/waiter and
+  stale-terminal suites report `39 passed`; the adjacent
+  M2A/R1B/persistent-authoring suites report
   `323 passed`.
-- Full repository gate after the third exact-SHA review fix: `2226 passed, 4
-  skipped` in `103.65s`. The skips are the three opt-in networking process tests
+- Full repository gate after the fourth exact-SHA review fix: `2228 passed, 4
+  skipped` in `102.48s`. The skips are the three opt-in networking process tests
   and the Phoenix executable integration test.
 - The 28 M1R-owned modified Python files pass Ruff check and format; the three
   broad pre-existing Workflow files have no net-new Ruff debt against the
@@ -121,4 +122,21 @@ The tests-only review regression `00a0e85` freezes both startup and live
 owner/waiter cases. Implementation `3db90ef` makes startup reconcile terminal
 releases before pending admissions and makes the production terminal callback
 retry pending admissions only after release projection and acknowledgement.
+
+The same reviewer then checked `ef0760fa18c09c71f236709c4029b9ca05df9695`.
+Standards passed with `0B / 0NB`; Spec found one remaining release-before-admit
+race. A pending scan could retain a stale Task row, terminal reconciliation
+could persist a stable empty release, and the stale scan could then admit a
+Reservation whose Workflow projection conflicts. Replaying the already
+processed empty release could not clean that late Reservation.
+
+The tests-only review regression `7a4ecc5` freezes both the direct terminal
+admission guard and stale pending-page routing. Implementation `ab1f89b` makes
+every pending scan item re-enter latest-state reconciliation, and rechecks Task
+terminal state inside the same per-Task saga slot before any direct Inventory
+admission. Therefore release-first observes terminal state and cannot be
+followed by a late admission; admission-first retains the slot until its
+Inventory/Workflow attempt ends, after which terminal reconciliation releases
+the current Reservation.
+
 The same reviewer must re-review the new final immutable SHA before acceptance.
