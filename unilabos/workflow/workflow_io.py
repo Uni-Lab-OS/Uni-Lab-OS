@@ -55,8 +55,7 @@ def validate_workflow_io(
             unilab.get("output_contract", _EMPTY_OUTPUT_CONTRACT)
         )
         input_parameters = {
-            item["name"]: item
-            for item in input_contract.to_dict()["parameters"]
+            item["name"]: item for item in input_contract.to_dict()["parameters"]
         }
         input_bindings = _validate_input_bindings(
             nodes=nodes,
@@ -176,9 +175,7 @@ def _validate_input_bindings(
                 raise WorkflowIOValidationError(
                     "input_binding 与 Workflow 参数类型不兼容"
                 )
-            bindings[handle_uuid] = MappingProxyType(
-                {"parameter": parameter_name}
-            )
+            bindings[handle_uuid] = MappingProxyType({"parameter": parameter_name})
         result[node_uuid] = MappingProxyType(bindings)
     return result
 
@@ -218,10 +215,7 @@ def _validate_output_bindings(
     input_parameters: Mapping[str, Mapping[str, Any]],
     output_contract: WorkflowOutputContract,
 ) -> dict[str, Mapping[str, str]]:
-    outputs = {
-        item["name"]: item
-        for item in output_contract.to_dict()["outputs"]
-    }
+    outputs = {item["name"]: item for item in output_contract.to_dict()["outputs"]}
     if not isinstance(raw_bindings, Mapping) or set(raw_bindings) != set(outputs):
         raise WorkflowIOValidationError("Workflow output bindings 不完整")
     result: dict[str, Mapping[str, str]] = {}
@@ -243,9 +237,7 @@ def _validate_output_bindings(
                 parameter["schema"],
                 output["schema"],
             ):
-                raise WorkflowIOValidationError(
-                    "Workflow input 不能满足 output schema"
-                )
+                raise WorkflowIOValidationError("Workflow input 不能满足 output schema")
             normalized = {
                 "kind": "workflow_input",
                 "parameter": parameter_name,
@@ -260,9 +252,7 @@ def _validate_output_bindings(
             node_uuid = binding.get("workflow_node_uuid")
             handle_uuid = binding.get("source_handle_uuid")
             node = nodes.get(node_uuid) if isinstance(node_uuid, str) else None
-            handle = (
-                handles.get(handle_uuid) if isinstance(handle_uuid, str) else None
-            )
+            handle = handles.get(handle_uuid) if isinstance(handle_uuid, str) else None
             if (
                 node is None
                 or handle is None
@@ -342,8 +332,7 @@ def _schema_dict_is_assignable(
     consumer_enum = consumer_base.get("enum")
     if producer_enum is not None:
         return all(
-            _value_satisfies_schema(value, consumer_base)
-            for value in producer_enum
+            _value_satisfies_schema(value, consumer_base) for value in producer_enum
         )
     if consumer_enum is not None:
         return False
