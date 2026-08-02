@@ -835,6 +835,12 @@ def _is_framework_published_workflow_template(
         schema=schema,
         input_order=input_order,
         output_order=output_order,
+    ) and _published_workflow_contract_digest_matches(
+        template,
+        handles,
+        schema=schema,
+        input_order=input_order,
+        output_order=output_order,
     )
 
 
@@ -951,6 +957,8 @@ def _published_workflow_handles_match(
         or not _WORKFLOW_HANDLE_FIELDS.difference(
             {"description", "create_time", "update_time"}
         ).issubset(handle)
+        or not isinstance(handle.get("meta_data"), Mapping)
+        or set(handle["meta_data"]) != {"unilab"}
         for handle in owned
     ):
         return False
@@ -1014,10 +1022,8 @@ def _business_handle_shape_matches(
     required: bool,
     io_type: str,
 ) -> bool:
-    # TemplateCatalog freezes JSON arrays as tuples in a read snapshot.  The
-    # shared public projection helpers intentionally consume JSON-shaped
-    # mappings, so normalize the authoritative schema before deriving the
-    # Handle presentation fields.
+    # TemplateCatalog 在只读快照中把 JSON 数组冻结为 tuple；共享投影 helper
+    # 接收 JSON 外形，因此先恢复权威 schema 再派生 Handle 展示字段。
     plain_schema = _plain(schema)
     slot_schema = resource_slot_schema(plain_schema)
     expected_allowlist = (
@@ -1050,10 +1056,77 @@ def _ready_handle_shape_matches(
         and handle.get("handle_key") == "ready"
         and handle.get("data_key") == "ready"
         and handle.get("data_source") == "dependency"
+        and handle.get("display_name") == "Ready"
+        and handle.get("description") == "Lexical source-order dependency"
         and handle.get("type") == "boolean"
         and handle.get("required") is False
         and unilab.get("value_schema") == {"type": "boolean"}
+        and unilab.get("editor_control") == "variable_selector"
+        and unilab.get("allowed_resource_template_uuids") is None
         and unilab.get("implicit_passthrough") is False
+    )
+
+
+def _published_workflow_contract_digest_matches(
+    template: Mapping[str, Any],
+    handles: Sequence[Mapping[str, Any]],
+    *,
+    schema: Mapping[str, Any],
+    input_order: Sequence[str],
+    output_order: Sequence[str],
+) -> bool:
+    goal = template.get("goal")
+    goal_default = template.get("goal_default")
+    result = template.get("result")
+    if (
+        not isinstance(goal, Mapping)
+        or _plain(goal) != {name: name for name in input_order}
+        or not isinstance(goal_default, Mapping)
+        or any(name not in input_order for name in goal_default)
+        or not isinstance(result, Mapping)
+        or _plain(result) != {name: name for name in output_order}
+    ):
+        return False
+    properties = schema["properties"]
+    goal_schema = properties["goal"]
+    result_schema = properties["result"]
+    required = set(goal_schema["required"])
+    inputs: list[dict[str, Any]] = []
+    for name in input_order:
+        descriptor: dict[str, Any] = {
+            "name": name,
+            "schema": _plain(goal_schema["properties"][name]),
+            "required": name in required,
+        }
+        if name in goal_default:
+            descriptor["default"] = _plain(goal_default[name])
+        inputs.append(descriptor)
+    source_by_name = {
+        str(handle.get("data_key")): handle
+        for handle in handles
+        if handle.get("workflow_node_template_uuid") == template.get("uuid")
+        and handle.get("io_type") == "source"
+        and isinstance(handle.get("meta_data"), Mapping)
+        and isinstance(handle["meta_data"].get("unilab"), Mapping)
+        and handle["meta_data"]["unilab"].get("structural_role") is None
+    }
+    if set(source_by_name) != set(output_order):
+        return False
+    outputs = [
+        {
+            "name": name,
+            "schema": _plain(result_schema["properties"][name]),
+            "implicit": source_by_name[name]["meta_data"]["unilab"][
+                "implicit_passthrough"
+            ],
+        }
+        for name in output_order
+    ]
+    extension = schema["x-unilabos-workflow-contract"]
+    return extension.get("contract_digest") == _contract_digest(
+        inputs=inputs,
+        outputs=outputs,
+        composition_allow_transparent=extension["composition_allow_transparent"],
     )
 
 
@@ -1127,7 +1200,7 @@ def _node_keyword_arguments(
     template: Mapping[str, Any],
     catalog: TemplateCatalogSnapshot,
 ) -> dict[str, Any]:
-    """Restore a nested invocation's literals and real I1 input bindings."""
+    """恢复 nested invocation 的 literal 与真实 I1 input binding。"""
 
     arguments = _node_param(node)
     template_uuid = template.get("uuid")
@@ -1646,7 +1719,7 @@ def _structural_role(handle: Mapping[str, Any]) -> Any:
 def _parent_input_contract(parent_graph: Mapping[str, Any]) -> dict[str, Any]:
     workflow = parent_graph.get("workflow")
     if not isinstance(workflow, Mapping):
-        raise TypeError("parent workflow missing")
+        raise TypeError("缺少 parent Workflow")
     meta_data = workflow.get("meta_data")
     unilab = meta_data.get("unilab") if isinstance(meta_data, Mapping) else None
     raw = (
@@ -1900,15 +1973,12 @@ def _validate_composite_graph_io(
     catalog: TemplateCatalogSnapshot | None = None,
     host_resource_template_uuid: str | None = None,
 ) -> ValidatedWorkflowIO:
-    """Validate I1 while deferring only Composite ResourceSlot narrowing.
+    """验证 I1，仅把 Composite ResourceSlot 收窄延后到 compile。
 
-    Ordinary I1 assignability remains strict.  A Published Workflow boundary is
-    special under D-064: its allowlist is intersected across the complete
-    Composite chain during compile, so publication must not reject a legal
-    narrowing before the chain is available.  We therefore erase only the
-    consumer allowlist on authoritative Published Workflow target Handles in a
-    private validation copy; type/wrapper/nullability and every other I/O rule
-    remain unchanged.
+    普通 I1 assignability 仍保持严格。D-064 要求 Published Workflow boundary
+    在完整 Composite chain 上求 allowlist 交集，因此 publication 不能提前拒绝
+    合法收窄。这里只在私有校验副本中擦除权威 Published Workflow target Handle
+    的 consumer allowlist；type、wrapper、nullability 与其他 I/O 规则均不放宽。
     """
 
     relaxed = _plain(graph)
@@ -1932,11 +2002,7 @@ def _validate_composite_graph_io(
         ):
             continue
         template_uuid = str(template["uuid"])
-        if not _is_framework_published_workflow_template(
-            template,
-            raw_handles,
-            host_resource_template_uuid=host_resource_template_uuid,
-        ):
+        if not _is_published_workflow_template(template):
             continue
         if catalog is not None:
             catalog_template = catalog_templates.get(template_uuid)
@@ -1947,7 +2013,20 @@ def _validate_composite_graph_io(
                     catalog.handle_templates,
                 )
             ):
-                continue
+                raise CompositeCatalogMismatch("/catalog/published_workflow/aggregate")
+            if not _published_workflow_aggregate_matches(
+                template,
+                raw_handles,
+                catalog_template,
+                catalog.handle_templates,
+            ):
+                raise CompositeCatalogMismatch("/catalog/published_workflow/aggregate")
+        if not _is_framework_published_workflow_template(
+            template,
+            raw_handles,
+            host_resource_template_uuid=host_resource_template_uuid,
+        ):
+            continue
         composite_template_uuids.add(template_uuid)
     for handle in raw_handles:
         if (
@@ -1967,6 +2046,46 @@ def _validate_composite_graph_io(
         unilab["value_schema"] = _replace_slot_allowlist(value_schema, None)
         unilab["allowed_resource_template_uuids"] = None
     return validate_workflow_graph_io(relaxed)
+
+
+def _published_workflow_aggregate_matches(
+    graph_template: Mapping[str, Any],
+    graph_handles: Sequence[Mapping[str, Any]],
+    catalog_template: Mapping[str, Any],
+    catalog_handles: Sequence[Mapping[str, Any]],
+) -> bool:
+    if _read_entity(graph_template) != _read_entity(catalog_template):
+        return False
+    template_uuid = graph_template.get("uuid")
+    graph_owned = {
+        str(handle.get("uuid")): _read_entity(handle)
+        for handle in graph_handles
+        if handle.get("workflow_node_template_uuid") == template_uuid
+        and isinstance(handle.get("uuid"), str)
+    }
+    catalog_owned = {
+        str(handle.get("uuid")): _read_entity(handle)
+        for handle in catalog_handles
+        if handle.get("workflow_node_template_uuid") == template_uuid
+        and isinstance(handle.get("uuid"), str)
+    }
+    return (
+        len(graph_owned)
+        == len(
+            [
+                handle
+                for handle in graph_handles
+                if handle.get("workflow_node_template_uuid") == template_uuid
+            ]
+        )
+        and graph_owned == catalog_owned
+    )
+
+
+def _read_entity(value: Mapping[str, Any]) -> dict[str, Any]:
+    """统一 Catalog read DTO 与 graph snapshot 的 nullable 外形。"""
+
+    return {str(key): _plain(item) for key, item in value.items() if item is not None}
 
 
 def project_published_workflow_contract(
@@ -2029,14 +2148,10 @@ def project_published_workflow_contract(
     inputs = [_plain(item) for item in input_contract["parameters"]]
     outputs = [_plain(item) for item in output_contract["outputs"]]
     mode = _composition_mode(workflow)
-    digest_payload = {
-        "version": 1,
-        "composition_allow_transparent": mode,
-        "inputs": [_semantic_descriptor(item) for item in inputs],
-        "outputs": [_semantic_descriptor(item) for item in outputs],
-    }
-    contract_digest = (
-        "sha256:" + hashlib.sha256(rfc8785.dumps(digest_payload)).hexdigest()
+    contract_digest = _contract_digest(
+        inputs=inputs,
+        outputs=outputs,
+        composition_allow_transparent=mode,
     )
     schema = _workflow_schema(
         inputs=inputs,
@@ -2146,6 +2261,21 @@ def _semantic_descriptor(raw: Mapping[str, Any]) -> dict[str, Any]:
         if key not in {"title", "description"}
     }
     return result
+
+
+def _contract_digest(
+    *,
+    inputs: Sequence[Mapping[str, Any]],
+    outputs: Sequence[Mapping[str, Any]],
+    composition_allow_transparent: bool,
+) -> str:
+    payload = {
+        "version": 1,
+        "composition_allow_transparent": composition_allow_transparent,
+        "inputs": [_semantic_descriptor(item) for item in inputs],
+        "outputs": [_semantic_descriptor(item) for item in outputs],
+    }
+    return "sha256:" + hashlib.sha256(rfc8785.dumps(payload)).hexdigest()
 
 
 def _value_handle(
