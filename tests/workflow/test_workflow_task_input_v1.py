@@ -22,6 +22,7 @@ from unilabos.workflow.json_codec import MAX_BACKEND_JSON_DEPTH
 from unilabos.workflow.models import WorkflowEdgeWrite, WorkflowNodeWrite
 from unilabos.workflow.service import WorkflowError, WorkflowService
 from unilabos.workflow.store import WorkflowStore
+from unilabos.workflow.task_input import material_root_uuids_from_task_snapshot
 
 WORKFLOW_UUID = "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa"
 SOURCE_NODE_UUID = "aaaaaaaa-aaaa-4aaa-8aaa-000000000001"
@@ -1134,6 +1135,53 @@ def test_persisted_binding_identity_and_shape_fail_closed_at_task_preflight(
     _assert_no_tasks(service)
 
 
+def test_invalid_persisted_handle_uuid_fails_before_task_or_job_write(
+    store: WorkflowStore,
+) -> None:
+    service = _create_workflow(
+        store,
+        contract=_input_contract(_parameter("amount", {"type": "number"})),
+    )
+    _seed_template_catalog(store)
+    _save_graph(
+        store,
+        nodes=[
+            _node(
+                TARGET_NODE_UUID,
+                template_uuid=TARGET_TEMPLATE_UUID,
+                bindings={TARGET_HANDLE_UUID: {"parameter": "amount"}},
+            )
+        ],
+    )
+    invalid_handle_uuid = "not-a-uuid"
+    with store.transaction() as connection:
+        connection.execute(
+            "UPDATE workflow_handle_template SET uuid = ? WHERE uuid = ?",
+            (invalid_handle_uuid, TARGET_HANDLE_UUID),
+        )
+        connection.execute(
+            "UPDATE workflow_node SET meta_data = ? WHERE uuid = ?",
+            (
+                json.dumps(
+                    {
+                        "unilab": {
+                            "input_bindings": {
+                                invalid_handle_uuid: {"parameter": "amount"}
+                            }
+                        }
+                    }
+                ),
+                TARGET_NODE_UUID,
+            ),
+        )
+
+    with pytest.raises(WorkflowError) as failure:
+        _create_task(service, {"amount": 1})
+
+    assert failure.value.code == "invalid_input"
+    _assert_no_tasks(service)
+
+
 def test_binding_value_must_match_the_real_target_handle_type(
     store: WorkflowStore,
 ) -> None:
@@ -1338,6 +1386,34 @@ def test_resource_slot_handle_accepts_only_the_canonical_resolved_slot(
 
     assert task["input"]["value"] == canonical
     assert job["param"]["volume"] == canonical
+
+
+def test_historical_task_snapshot_without_d068_output_keeps_material_roots() -> None:
+    snapshot = {
+        "workflow": {
+            "meta_data": {
+                "unilab": {
+                    "input_contract": _input_contract(
+                        _parameter("sample", _slot_schema(RESOURCE_TEMPLATE_UUID))
+                    )
+                }
+            }
+        },
+        "nodes": [],
+        "handle_templates": [],
+    }
+    resolved_input = {
+        "sample": {
+            "uuid": MATERIAL_A_UUID,
+            "resource_template_uuid": RESOURCE_TEMPLATE_UUID,
+        }
+    }
+
+    assert material_root_uuids_from_task_snapshot(
+        snapshot,
+        resolved_input,
+        {"nodes": []},
+    ) == (MATERIAL_A_UUID,)
 
 
 @pytest.mark.parametrize("provider", ["static", "edge"], ids=["static", "edge"])
