@@ -72,7 +72,10 @@ from unilabos.workflow.source_coordinates import (
     utf8_offset_to_utf16_column,
     utf16_length,
 )
-from unilabos.workflow.workflow_io import WorkflowIOValidationError
+from unilabos.workflow.workflow_io import (
+    WorkflowIOValidationError,
+    resource_slot_passthrough_is_compatible,
+)
 
 _COMPILER_VERSION = "unilab-authoring/v1"
 _ZERO_FINGERPRINT = "sha256:" + "0" * 64
@@ -1514,7 +1517,7 @@ def _function_body(
         ):
             _fail(
                 "invalid_workflow_output",
-                "workflow_output 必须是唯一最终 top-level return",
+                "Workflow result 必须是唯一最终 top-level return",
                 node=function,
             )
         return_statement = body.pop()
@@ -2556,7 +2559,10 @@ def _synthesize_implicit_workflow_outputs(
             continue
         existing = by_name.get(parameter_name)
         if existing is not None:
-            if _resource_slot_schema(existing["schema"]) is None:
+            if not resource_slot_passthrough_is_compatible(
+                parameter["schema"],
+                existing["schema"],
+            ):
                 _fail(
                     "invalid_workflow_output",
                     "同名显式 output 与 ResourceSlot pass-through 不兼容",
