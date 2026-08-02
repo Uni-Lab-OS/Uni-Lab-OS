@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import logging
 import math
 import sqlite3
 import threading
@@ -49,6 +50,10 @@ _MAX_SIGNED_64_BIT_INTEGER = (1 << 63) - 1
 _SCHEDULER_CURSOR_NAME = "scheduler"
 _CLOUD_CURSOR_NAME = "cloud"
 _CURSOR_NAMES = frozenset({_SCHEDULER_CURSOR_NAME, _CLOUD_CURSOR_NAME})
+_MATERIAL_FLOW_ROLES = frozenset(
+    {"primary_sample", "aliquot_sample", "reagent", "consumable"}
+)
+_LOGGER = logging.getLogger(__name__)
 
 
 class _AdmissionRejected(MaterialInvalidInput):
@@ -454,6 +459,8 @@ class InventoryService:
         self._monitor = monitor
         # 事务内暂存的监控事件（提交成功才发布，回滚即丢弃）
         self._tx_local = threading.local()
+        self._change_listener_lock = threading.Lock()
+        self._change_listener: Callable[[Mapping[str, Any]], None] | None = None
         canonical_templates: dict[str, ResourceTemplateIdentity] = {}
         for key, identity in (resource_templates or {}).items():
             if not isinstance(identity, ResourceTemplateIdentity):
@@ -510,7 +517,19 @@ class InventoryService:
     def close(self) -> None:
         """Close the InventoryService-owned durable store."""
 
+        self.set_change_listener(None)
         self._store.close()
+
+    def set_change_listener(
+        self,
+        listener: Callable[[Mapping[str, Any]], None] | None,
+    ) -> None:
+        """Attach the sole post-commit consumer of durable Inventory changes."""
+
+        if listener is not None and not callable(listener):
+            raise MaterialInvalidInput("change listener must be callable or null")
+        with self._change_listener_lock:
+            self._change_listener = listener
 
     def _now_ms(self) -> int:
         return int(self._time_fn() * 1000)
@@ -524,7 +543,7 @@ class InventoryService:
 
     @contextmanager
     def _tx(self) -> Iterator[sqlite3.Connection]:
-        """业务事务 + 监控事件缓冲：commit 成功后才把 material 事件发到总线."""
+        """业务事务 + 事件缓冲：commit 成功后才发布 Material 变化。"""
         events: list[dict[str, Any]] = []
         self._tx_local.events = events
         store = self._store
@@ -534,12 +553,26 @@ class InventoryService:
         finally:
             self._tx_local.events = None
         # 到这里说明事务已提交（异常路径在 finally 清理后向上抛，不会执行到此）
-        if self._monitor is not None:
-            for data in events:
+        with self._change_listener_lock:
+            change_listener = self._change_listener
+        for data in events:
+            event_type = str(data["event_type"])
+            if self._monitor is not None:
                 try:
-                    self._monitor.emit("material", data.pop("event_type"), data)
+                    monitor_data = {
+                        key: value for key, value in data.items() if key != "event_type"
+                    }
+                    self._monitor.emit("material", event_type, monitor_data)
                 except Exception:  # noqa: BLE001, S110 - 监控故障不影响业务
                     pass
+            if change_listener is not None:
+                try:
+                    change_listener(MappingProxyType(dict(data)))
+                except Exception:
+                    _LOGGER.exception(
+                        "Inventory post-commit listener failed for %s",
+                        event_type,
+                    )
 
     # ------------------------------------------------------------------
     # 事务内公共 helper
@@ -595,6 +628,7 @@ class InventoryService:
                     "payload": payload,
                     "reason": reason,
                     "actor": actor,
+                    "causation_id": causation_id,
                 }
             )
         return outbox_sequence
@@ -898,6 +932,12 @@ class InventoryService:
                     "mount must be a ResourceSlot object",
                     material_source_node_uuid=node_uuid,
                 )
+            if set(source.mount) != {"uuid"}:
+                raise _AdmissionRejected(
+                    "invalid_material_source",
+                    "mount must contain only the ResourceSlot uuid",
+                    material_source_node_uuid=node_uuid,
+                )
             mount_uuid = _canonical_uuid(
                 str(source.mount.get("uuid", "")),
                 "mount.uuid",
@@ -948,10 +988,13 @@ class InventoryService:
                     "site_uuid and candidate_site_uuids are mutually exclusive",
                     material_source_node_uuid=node_uuid,
                 )
-            if not isinstance(source.flow_role, str) or not source.flow_role.strip():
+            if (
+                not isinstance(source.flow_role, str)
+                or source.flow_role not in _MATERIAL_FLOW_ROLES
+            ):
                 raise _AdmissionRejected(
                     "invalid_material_source",
-                    "flow_role must not be blank",
+                    "flow_role is not in the closed MaterialFlowRole catalog",
                     material_source_node_uuid=node_uuid,
                 )
             normalized_sources.append(
@@ -963,7 +1006,7 @@ class InventoryService:
                     material_uuid=material_uuid,
                     site_uuid=site_uuid,
                     candidate_site_uuids=tuple(sorted(candidate_site_uuids)),
-                    flow_role=source.flow_role.strip(),
+                    flow_role=source.flow_role,
                 )
             )
         return TaskMaterialAdmissionCommand(

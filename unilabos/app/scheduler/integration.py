@@ -306,8 +306,10 @@ def reset_for_test() -> None:
         _backend.stop()
     if _outbox_worker is not None:
         _outbox_worker.stop()
-    if _inventory is not None and _owns_inventory:
-        _inventory.close()
+    if _inventory is not None:
+        _inventory.set_change_listener(None)
+        if _owns_inventory:
+            _inventory.close()
     _scheduler = None
     _backend = None
     _inventory = None

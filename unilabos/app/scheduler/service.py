@@ -34,7 +34,7 @@ import threading
 import time
 import uuid as uuid_mod
 from collections import deque
-from collections.abc import Callable, Iterator
+from collections.abc import Callable, Iterator, Mapping
 from contextlib import contextmanager
 from typing import Any
 
@@ -71,6 +71,16 @@ logger = logging.getLogger(__name__)
 
 # ResourceSlot 参数值里可作为资源标识的字段（按优先级取第一个非空）
 _RESOURCE_ID_FIELDS = ("unilabos_uuid", "uuid", "id", "name")
+_MATERIAL_WAKE_EVENT_TYPES = frozenset(
+    {
+        "material.created",
+        "material.updated",
+        "material.disposition_updated",
+        "site.created",
+        "site.occupancy_updated",
+        "material_graph.bootstrapped",
+    }
+)
 
 
 def _extract_resource_ids(value: Any) -> set[str]:
@@ -172,6 +182,29 @@ class EdgeScheduler:
         # 新 WorkflowTask kernel 的持久投影 port；不参与 legacy WorkflowRun DAG。
         self._workflow_tasks = workflow_tasks
         self._admission_fault_hook = admission_fault_hook
+        set_change_listener = getattr(inventory, "set_change_listener", None)
+        if workflow_tasks is not None and callable(set_change_listener):
+            set_change_listener(self._on_inventory_change)
+
+    def _on_inventory_change(self, event: Any) -> None:
+        """Wake blocked Tasks after an external durable Material/Site change."""
+
+        if not isinstance(event, Mapping):
+            return
+        if event.get("event_type") not in _MATERIAL_WAKE_EVENT_TYPES:
+            return
+        # Admission-owned events are emitted while this coordinator still owns
+        # the per-Task saga slot.  Release already performs its own post-saga
+        # sweep; only external resource changes enter this post-commit wakeup.
+        if event.get("causation_id"):
+            return
+        try:
+            self.reconcile_pending_task_admissions()
+        except Exception:
+            logger.exception(
+                "[EdgeScheduler] Material change wakeup failed for %s",
+                event.get("event_type"),
+            )
 
     def _emit_monitor(
         self, channel: str, event_type: str, data: dict[str, Any]
@@ -609,11 +642,14 @@ class EdgeScheduler:
                 if isinstance(node, dict) and node.get("type") == "material_source"
             }
             jobs = self._workflow_tasks.list_workflow_node_jobs(task_uuid)
-            if any(
-                job.get("workflow_node_uuid") in material_source_node_uuids
-                and job.get("status") != "succeeded"
+            material_source_jobs = [
+                job
                 for job in jobs
-            ):
+                if job.get("workflow_node_uuid") in material_source_node_uuids
+            ]
+            if not material_source_jobs:
+                return True
+            if any(job.get("status") != "succeeded" for job in material_source_jobs):
                 return False
         except (KeyError, TypeError, ValueError):
             return False
