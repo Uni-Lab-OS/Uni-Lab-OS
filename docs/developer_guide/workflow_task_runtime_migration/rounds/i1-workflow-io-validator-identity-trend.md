@@ -8,10 +8,13 @@ integration 基点：`75a6abb69b25b65f75c1c40c5c60b55ceb7353ae`
 
 精确受测/受审候选：`30e97a76c263ec1ae8b47e8a95b4b6a4c590b523`
 
+non-squash integration merge：`1e6e02cf8da0f9073a7cc4a3a1796b8fd76a7afd`
+
 Wayfinder：Core #154 冻结 I1 合同；Core #157 仍是跨仓 E2E 验收门。
 
 状态：**本 validator/identity 切片已通过完整仓库门禁与同一独立
-reviewer 的 Standards/Spec `0B/0NB`，可 non-squash 本地合入 integration。**
+reviewer 的 Standards/Spec `0B/0NB`，并已 non-squash 本地合入 integration；
+未推送远程。**
 
 本记录不将整个 I1 或 Core #157 E2E 标记为完成；后续 canonical
 Workflow result-record、implicit ResourceSlot output、Task common-validator 复用与真实
