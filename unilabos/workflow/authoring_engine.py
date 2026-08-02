@@ -752,6 +752,7 @@ def _compile_with_snapshot(
             workflow_uuid=workflow_uuid,
             workflow_revision=workflow_revision,
         )
+        _validate_catalog_projection(snapshot, applied)
         imports = _module_imports(module)
         selectors, function, result_classes = _module_declarations(module, imports)
         displayname, description = _workflow_declaration(
@@ -2668,19 +2669,38 @@ def _candidate_graph(
     workflow["meta_data"] = meta_data
 
     referenced_templates = {item.template["uuid"] for item in state.nodes}
+    applied_templates = {
+        item["uuid"]: item for item in state.applied_graph["node_templates"]
+    }
     node_templates = sorted(
         (
-            _detached(item)
+            _detached(applied_templates.get(item["uuid"], item))
             for item in state.snapshot.node_templates
             if item["uuid"] in referenced_templates
         ),
         key=lambda item: item["uuid"],
     )
+    applied_handles_by_template: dict[str, list[dict[str, Any]]] = {}
+    for item in state.applied_graph["handle_templates"]:
+        applied_handles_by_template.setdefault(
+            item["workflow_node_template_uuid"],
+            [],
+        ).append(item)
+    snapshot_handles_by_template: dict[str, list[dict[str, Any]]] = {}
+    for item in state.snapshot.handle_templates:
+        snapshot_handles_by_template.setdefault(
+            item["workflow_node_template_uuid"],
+            [],
+        ).append(item)
     handle_templates = sorted(
         (
             _detached(item)
-            for item in state.snapshot.handle_templates
-            if item["workflow_node_template_uuid"] in referenced_templates
+            for template_uuid in referenced_templates
+            for item in (
+                applied_handles_by_template.get(template_uuid, [])
+                if template_uuid in applied_templates
+                else snapshot_handles_by_template.get(template_uuid, [])
+            )
         ),
         key=lambda item: item["uuid"],
     )
