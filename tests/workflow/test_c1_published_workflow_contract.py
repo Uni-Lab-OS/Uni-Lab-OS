@@ -350,14 +350,14 @@ def test_projection_emits_i1_value_handles_and_separate_ready_handles() -> None:
         {
             "key": "ready",
             "io": "target",
-            "type": "any",
+            "type": "boolean",
             "required": False,
             "data_source": "dependency",
         },
         {
             "key": "ready",
             "io": "source",
-            "type": "any",
+            "type": "boolean",
             "required": False,
             "data_source": "dependency",
         },
@@ -443,7 +443,7 @@ def test_missing_host_owner_fails_without_replacing_the_previous_catalog(
                 host_node_resource_template_uuid=None,
             )
 
-        assert caught.value.code == "template_catalog_mismatch"
+        assert caught.value.code == "composite_catalog_mismatch"
         assert caught.value.path == "/host_node/resource_template_uuid"
         with catalog.snapshot(AUTHORITY) as current:
             assert current.fingerprint == before.fingerprint
