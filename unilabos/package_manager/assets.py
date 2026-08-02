@@ -266,16 +266,18 @@ def _thaw(value: Any) -> Any:
 def _representation_entries(
     model: Mapping[str, Any],
 ) -> list[tuple[tuple[str, ...], Mapping[str, Any]]]:
+    representations: list[tuple[tuple[str, ...], Mapping[str, Any]]] = []
     direct_entry = model.get("entry")
     if isinstance(direct_entry, str) and direct_entry:
-        return [((), model)]
-    return [
+        representations.append(((), model))
+    representations.extend(
         ((str(name),), representation)
         for name, representation in sorted(model.items())
         if isinstance(representation, Mapping)
         and isinstance(representation.get("entry"), str)
         and representation.get("entry")
-    ]
+    )
+    return representations
 
 
 def _set_representation_entry(

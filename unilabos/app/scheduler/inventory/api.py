@@ -5,11 +5,11 @@ from __future__ import annotations
 from tempfile import TemporaryDirectory
 from typing import Any
 
-from fastapi import APIRouter, FastAPI
-from fastapi.responses import JSONResponse
+from fastapi import APIRouter, FastAPI, HTTPException
+from fastapi.responses import JSONResponse, Response
 
 from unilabos.app.scheduler.inventory.commands import execute_command
-from unilabos.app.scheduler.inventory.domain import InventoryError
+from unilabos.app.scheduler.inventory.domain import InventoryError, MaterialNotFound
 from unilabos.app.scheduler.inventory.service import InventoryService
 from unilabos.app.scheduler.inventory.sync import build_snapshot
 
@@ -118,6 +118,22 @@ def create_backend_material_router(service: InventoryService) -> APIRouter:
     @router.get("/material-shapes")
     def material_shapes() -> dict[str, Any]:
         return {"code": 0, "data": {"items": service.list_material_shapes()}}
+
+    @router.get("/material-models/{asset_path:path}")
+    def material_model_asset(asset_path: str) -> Response:
+        public_path = f"/api/v1/material-models/{asset_path}"
+        try:
+            asset, content = service.read_material_model_asset(public_path)
+        except MaterialNotFound as exc:
+            raise HTTPException(status_code=404, detail=str(exc)) from exc
+        return Response(
+            content=content,
+            media_type=asset.media_type,
+            headers={
+                "Cache-Control": "private, max-age=0, must-revalidate",
+                "ETag": f'"{asset.digest}"',
+            },
+        )
 
     return router
 

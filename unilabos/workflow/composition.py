@@ -546,6 +546,11 @@ def compose_workflow_runtime(
                     resolved_identities,
                 ),
                 material_shapes=material_shapes,
+                material_model_assets=(
+                    package_material_projection.model_assets
+                    if package_material_projection is not None
+                    else ()
+                ),
             )
             if inventory_graph_snapshot is not None:
                 if package_material_projection is None:

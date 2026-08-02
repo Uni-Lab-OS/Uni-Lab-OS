@@ -7,6 +7,7 @@ Edge 是仓储/物料实例/物理层级/内容物/预留的唯一事实源（�
 from __future__ import annotations
 
 import uuid
+from collections.abc import Callable
 from dataclasses import dataclass, field
 from enum import Enum
 from typing import Any
@@ -218,6 +219,17 @@ class ResourceTemplateIdentity:
 
     uuid: str
     material_class: str
+
+
+@dataclass(frozen=True, slots=True)
+class MaterialModelAsset:
+    """Catalog-audited model asset exposed through an opaque read callback."""
+
+    public_path: str
+    media_type: str
+    digest: str
+    size: int
+    read_bytes: Callable[[], bytes] = field(repr=False, compare=False)
 
 
 @dataclass(frozen=True, slots=True)
