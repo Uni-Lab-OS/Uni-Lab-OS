@@ -6,9 +6,8 @@
 
 integration 基点：`de95b9965ed551ed2ed1581fe2bd3100e1b93672`
 
-状态：**首轮 exact-SHA 独立评审的唯一 blocker 已按独立 RED 修复；完整门禁已重新
-通过，等待同一 reviewer 复核最终候选。本文不把整个 I1 或 Core #157 标记为
-Accepted。**
+状态：**首轮 exact-SHA 独立评审的唯一 blocker 已按独立 RED 修复；完整门禁与同一
+reviewer 复核均通过。本文不把整个 I1 或 Core #157 标记为 Accepted。**
 
 ## 1. 触发与根因
 
@@ -67,8 +66,10 @@ graph→Python，随后把 generated canonical Python 回编译时，public
 
 ## 4. 门禁证据
 
-当前 production 候选：`8e7a6eeb61ba5bd461f2fe2bb5c4802c478c7deb`。最终 exact-SHA
-候选包含本文档更新，由同一 reviewer 复核并在 repository-local ticket 记录。
+当前 production 候选：`8e7a6eeb61ba5bd461f2fe2bb5c4802c478c7deb`。包含首轮 finding
+disposition 的 exact-SHA 候选 `8ddf649b9ea56362632aec83a7d669e6748f56be` 已由同一
+reviewer 复核为 `Standards 0B/0NB; Spec 0B/0NB`；本文最终状态提交只再做文档一致性
+复核。
 
 | 门禁 | 结果 |
 |---|---|
@@ -83,7 +84,7 @@ graph→Python，随后把 generated canonical Python 回编译时，public
 
 ## 5. 评审与下一入口
 
-同一 exact-SHA Standards/Spec reviewer 将复核上述 finding disposition 与最终候选。
-通过后 non-squash merge 到
+同一 exact-SHA Standards/Spec reviewer 已关闭首轮 blocker；本文最终状态提交完成文档
+一致性复核后 non-squash merge 到
 `integration/workflow-task-runtime` 并推送，再以新的 OS integration SHA完成 FE
 Candidate editor 全门禁与评审。
