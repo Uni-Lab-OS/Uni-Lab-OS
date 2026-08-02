@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import logging
 import math
 import sqlite3
 import threading
@@ -16,6 +17,7 @@ import time
 import uuid
 from collections.abc import Callable, Iterator, Mapping, Sequence
 from contextlib import contextmanager
+from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path
 from types import MappingProxyType
@@ -60,6 +62,39 @@ _MAX_SIGNED_64_BIT_INTEGER = (1 << 63) - 1
 _SCHEDULER_CURSOR_NAME = "scheduler"
 _CLOUD_CURSOR_NAME = "cloud"
 _CURSOR_NAMES = frozenset({_SCHEDULER_CURSOR_NAME, _CLOUD_CURSOR_NAME})
+_MATERIAL_FLOW_ROLES = frozenset(
+    {"primary_sample", "aliquot_sample", "reagent", "consumable"}
+)
+_LOGGER = logging.getLogger(__name__)
+
+
+class _AdmissionRejected(MaterialInvalidInput):
+    """携带稳定公开诊断的确定性 M2B rejection。"""
+
+    def __init__(
+        self,
+        code: str,
+        message: str,
+        *,
+        material_source_node_uuid: str | None = None,
+    ) -> None:
+        super().__init__(message)
+        self.code = code
+        self.material_source_node_uuid = material_source_node_uuid
+
+
+@dataclass(frozen=True, slots=True)
+class _AdmissionSite:
+    uuid: str
+    sort_order: int
+    occupied_material_uuid: str | None
+
+
+@dataclass(frozen=True, slots=True)
+class _AdmissionChoice:
+    site_uuid: str
+    material_uuid: str | None
+    member_versions: tuple[tuple[str, int], ...]
 
 
 def _canonical_uuid(value: str, field: str) -> str:
@@ -625,6 +660,8 @@ class InventoryService:
         self._monitor = monitor
         # 事务内暂存的监控事件（提交成功才发布，回滚即丢弃）
         self._tx_local = threading.local()
+        self._change_listener_lock = threading.Lock()
+        self._change_listener: Callable[[Mapping[str, Any]], None] | None = None
         canonical_templates: dict[str, ResourceTemplateIdentity] = {}
         for key, identity in (resource_templates or {}).items():
             if not isinstance(identity, ResourceTemplateIdentity):
@@ -681,7 +718,19 @@ class InventoryService:
     def close(self) -> None:
         """Close the InventoryService-owned durable store."""
 
+        self.set_change_listener(None)
         self._store.close()
+
+    def set_change_listener(
+        self,
+        listener: Callable[[Mapping[str, Any]], None] | None,
+    ) -> None:
+        """挂载持久 Inventory 变化的唯一提交后 consumer。"""
+
+        if listener is not None and not callable(listener):
+            raise MaterialInvalidInput("change listener must be callable or null")
+        with self._change_listener_lock:
+            self._change_listener = listener
 
     def _now_ms(self) -> int:
         return int(self._time_fn() * 1000)
@@ -695,7 +744,7 @@ class InventoryService:
 
     @contextmanager
     def _tx(self) -> Iterator[sqlite3.Connection]:
-        """业务事务 + 监控事件缓冲：commit 成功后才把 material 事件发到总线."""
+        """业务事务 + 事件缓冲：commit 成功后才发布 Material 变化。"""
         events: list[dict[str, Any]] = []
         self._tx_local.events = events
         store = self._store
@@ -705,12 +754,26 @@ class InventoryService:
         finally:
             self._tx_local.events = None
         # 到这里说明事务已提交（异常路径在 finally 清理后向上抛，不会执行到此）
-        if self._monitor is not None:
-            for data in events:
+        with self._change_listener_lock:
+            change_listener = self._change_listener
+        for data in events:
+            event_type = str(data["event_type"])
+            if self._monitor is not None:
                 try:
-                    self._monitor.emit("material", data.pop("event_type"), data)
+                    monitor_data = {
+                        key: value for key, value in data.items() if key != "event_type"
+                    }
+                    self._monitor.emit("material", event_type, monitor_data)
                 except Exception:  # noqa: BLE001, S110 - 监控故障不影响业务
                     pass
+            if change_listener is not None:
+                try:
+                    change_listener(MappingProxyType(dict(data)))
+                except Exception:
+                    _LOGGER.exception(
+                        "Inventory 提交后 listener 处理失败：%s",
+                        event_type,
+                    )
 
     # ------------------------------------------------------------------
     # 事务内公共 helper
@@ -766,6 +829,7 @@ class InventoryService:
                     "payload": payload,
                     "reason": reason,
                     "actor": actor,
+                    "causation_id": causation_id,
                 }
             )
         return outbox_sequence
@@ -987,17 +1051,26 @@ class InventoryService:
     ) -> TaskMaterialAdmissionResult:
         """Return a durable closed result for every well-formed admission command."""
 
+        normalized_command: TaskMaterialAdmissionCommand | None = None
         try:
-            return self._admit_task_or_raise(command)
+            normalized_command = self._normalize_admission_command(command)
+            return self._admit_task_or_raise(normalized_command)
+        except _AdmissionRejected as error:
+            return self._persist_admission_rejection(
+                normalized_command or command,
+                error,
+            )
         except (MaterialInvalidInput, MaterialNotFound) as error:
-            return self._persist_admission_rejection(command, error)
+            rejection = _AdmissionRejected("invalid_material_source", str(error))
+            return self._persist_admission_rejection(
+                normalized_command or command,
+                rejection,
+            )
 
-    def _admit_task_or_raise(
+    def _normalize_admission_command(
         self,
         command: TaskMaterialAdmissionCommand,
-    ) -> TaskMaterialAdmissionResult:
-        """Atomically resolve and reserve all explicit Materials for one Task."""
-
+    ) -> TaskMaterialAdmissionCommand:
         if not isinstance(command, TaskMaterialAdmissionCommand):
             raise MaterialInvalidInput("command must be a TaskMaterialAdmissionCommand")
         if command.schema_version != 1:
@@ -1021,7 +1094,7 @@ class InventoryService:
 
         normalized_sources: list[TaskMaterialAdmissionSource] = []
         seen_nodes: set[str] = set()
-        seen_materials: set[str] = set()
+        seen_fixed_materials: set[str] = set()
         for source in command.sources:
             if not isinstance(source, TaskMaterialAdmissionSource):
                 raise MaterialInvalidInput(
@@ -1032,75 +1105,313 @@ class InventoryService:
                 "material_source_node_uuid",
             )
             if node_uuid in seen_nodes:
-                raise MaterialInvalidInput(
-                    "material_source_node_uuid values must be unique"
+                raise _AdmissionRejected(
+                    "invalid_material_source",
+                    "material_source_node_uuid values must be unique",
+                    material_source_node_uuid=node_uuid,
                 )
             seen_nodes.add(node_uuid)
-            if source.mode != "existing":
-                raise MaterialInvalidInput(
-                    "M1R admission only supports explicit existing Materials"
+            if source.mode not in {"existing", "create_new"}:
+                raise _AdmissionRejected(
+                    "invalid_material_source",
+                    "MaterialSource mode must be existing or create_new",
+                    material_source_node_uuid=node_uuid,
                 )
             template_uuid = _canonical_uuid(
                 source.resource_template_uuid,
                 "resource_template_uuid",
             )
             if template_uuid not in self._resource_templates:
-                raise MaterialInvalidInput("resource_template_uuid is not registered")
-            if source.material_uuid is None:
-                raise MaterialInvalidInput(
-                    "existing MaterialSource requires material_uuid"
+                raise _AdmissionRejected(
+                    "resource_template_not_found",
+                    "resource_template_uuid is not registered",
+                    material_source_node_uuid=node_uuid,
                 )
-            material_uuid = _canonical_uuid(source.material_uuid, "material_uuid")
-            if material_uuid in seen_materials:
-                raise MaterialInvalidInput(
-                    "a Material may be bound by only one MaterialSource"
-                )
-            seen_materials.add(material_uuid)
             if not isinstance(source.mount, Mapping):
-                raise MaterialInvalidInput("mount must be a ResourceSlot object")
+                raise _AdmissionRejected(
+                    "invalid_material_source",
+                    "mount must be a ResourceSlot object",
+                    material_source_node_uuid=node_uuid,
+                )
+            if set(source.mount) != {"uuid"}:
+                raise _AdmissionRejected(
+                    "invalid_material_source",
+                    "mount must contain only the ResourceSlot uuid",
+                    material_source_node_uuid=node_uuid,
+                )
             mount_uuid = _canonical_uuid(
-                str(source.mount.get("uuid", "")), "mount.uuid"
+                str(source.mount.get("uuid", "")),
+                "mount.uuid",
             )
+            material_uuid = (
+                _canonical_uuid(source.material_uuid, "material_uuid")
+                if source.material_uuid is not None
+                else None
+            )
+            if source.mode == "create_new" and material_uuid is not None:
+                raise _AdmissionRejected(
+                    "invalid_material_source",
+                    "create_new MaterialSource prohibits material_uuid",
+                    material_source_node_uuid=node_uuid,
+                )
+            if material_uuid is not None:
+                if material_uuid in seen_fixed_materials:
+                    raise _AdmissionRejected(
+                        "invalid_material_source",
+                        "a fixed Material may be bound by only one MaterialSource",
+                        material_source_node_uuid=node_uuid,
+                    )
+                seen_fixed_materials.add(material_uuid)
             site_uuid = (
                 _canonical_uuid(source.site_uuid, "site_uuid")
                 if source.site_uuid is not None
                 else None
             )
             if type(source.candidate_site_uuids) is not tuple:
-                raise MaterialInvalidInput("candidate_site_uuids must be a UUID tuple")
+                raise _AdmissionRejected(
+                    "invalid_material_source",
+                    "candidate_site_uuids must be a UUID tuple",
+                    material_source_node_uuid=node_uuid,
+                )
             candidate_site_uuids = tuple(
                 _canonical_uuid(value, "candidate_site_uuid")
                 for value in source.candidate_site_uuids
             )
             if len(set(candidate_site_uuids)) != len(candidate_site_uuids):
-                raise MaterialInvalidInput("candidate_site_uuids must be unique")
-            if site_uuid is not None and candidate_site_uuids:
-                raise MaterialInvalidInput(
-                    "site_uuid and candidate_site_uuids are mutually exclusive"
+                raise _AdmissionRejected(
+                    "invalid_material_source",
+                    "candidate_site_uuids must be unique",
+                    material_source_node_uuid=node_uuid,
                 )
-            if not isinstance(source.flow_role, str) or not source.flow_role.strip():
-                raise MaterialInvalidInput("flow_role must not be blank")
+            if site_uuid is not None and candidate_site_uuids:
+                raise _AdmissionRejected(
+                    "invalid_material_source",
+                    "site_uuid and candidate_site_uuids are mutually exclusive",
+                    material_source_node_uuid=node_uuid,
+                )
+            if (
+                not isinstance(source.flow_role, str)
+                or source.flow_role not in _MATERIAL_FLOW_ROLES
+            ):
+                raise _AdmissionRejected(
+                    "invalid_material_source",
+                    "flow_role is not in the closed MaterialFlowRole catalog",
+                    material_source_node_uuid=node_uuid,
+                )
             normalized_sources.append(
                 TaskMaterialAdmissionSource(
                     material_source_node_uuid=node_uuid,
-                    mode="existing",
+                    mode=source.mode,
                     resource_template_uuid=template_uuid,
                     mount={"uuid": mount_uuid},
                     material_uuid=material_uuid,
                     site_uuid=site_uuid,
                     candidate_site_uuids=tuple(sorted(candidate_site_uuids)),
-                    flow_role=source.flow_role.strip(),
+                    flow_role=source.flow_role,
                 )
             )
-
-        normalized_command = TaskMaterialAdmissionCommand(
+        return TaskMaterialAdmissionCommand(
             schema_version=1,
             command_uuid=canonical_command_uuid,
             idempotency_key=command.idempotency_key,
             workflow_task_uuid=canonical_task_uuid,
             workflow_snapshot_fingerprint=command.workflow_snapshot_fingerprint,
-            sources=tuple(normalized_sources),
+            sources=tuple(
+                sorted(
+                    normalized_sources,
+                    key=lambda item: item.material_source_node_uuid,
+                )
+            ),
         )
+
+    @staticmethod
+    def _admission_sites(
+        conn: sqlite3.Connection,
+        source: TaskMaterialAdmissionSource,
+    ) -> tuple[_AdmissionSite, ...]:
+        node_uuid = source.material_source_node_uuid
+        mount_uuid = str(source.mount["uuid"])
+        if source.site_uuid is not None:
+            requested_site_uuids = (source.site_uuid,)
+        else:
+            requested_site_uuids = source.candidate_site_uuids
+
+        if requested_site_uuids:
+            placeholders = ",".join("?" for _ in requested_site_uuids)
+            rows = conn.execute(
+                f"""
+                SELECT uuid, deleted_at, material_uuid, sort_order,
+                       occupied_material_uuid
+                FROM site
+                WHERE uuid IN ({placeholders})
+                """,
+                requested_site_uuids,
+            ).fetchall()
+            by_uuid = {str(row["uuid"]): row for row in rows}
+            for site_uuid in requested_site_uuids:
+                row = by_uuid.get(site_uuid)
+                if row is None or row["deleted_at"] is not None:
+                    raise _AdmissionRejected(
+                        "site_not_found",
+                        "selected Site does not exist",
+                        material_source_node_uuid=node_uuid,
+                    )
+                if row["material_uuid"] != mount_uuid:
+                    raise _AdmissionRejected(
+                        "site_scope_mismatch",
+                        "selected Site is not directly owned by mount",
+                        material_source_node_uuid=node_uuid,
+                    )
+            selected_rows = [by_uuid[site_uuid] for site_uuid in requested_site_uuids]
+        else:
+            selected_rows = conn.execute(
+                """
+                SELECT uuid, deleted_at, material_uuid, sort_order,
+                       occupied_material_uuid
+                FROM site
+                WHERE material_uuid = ? AND deleted_at IS NULL
+                """,
+                (mount_uuid,),
+            ).fetchall()
+
+        sites: list[_AdmissionSite] = []
+        for row in selected_rows:
+            allowed = conn.execute(
+                """
+                SELECT resource_template_uuid
+                FROM site_allowed_resource_template
+                WHERE site_uuid = ?
+                """,
+                (row["uuid"],),
+            ).fetchall()
+            if allowed and source.resource_template_uuid not in {
+                str(item["resource_template_uuid"]) for item in allowed
+            }:
+                if requested_site_uuids:
+                    raise _AdmissionRejected(
+                        "site_template_mismatch",
+                        "selected Site does not allow the Material template",
+                        material_source_node_uuid=node_uuid,
+                    )
+                continue
+            sites.append(
+                _AdmissionSite(
+                    uuid=str(row["uuid"]),
+                    sort_order=int(row["sort_order"]),
+                    occupied_material_uuid=(
+                        str(row["occupied_material_uuid"])
+                        if row["occupied_material_uuid"] is not None
+                        else None
+                    ),
+                )
+            )
+        return tuple(sorted(sites, key=lambda item: (item.sort_order, item.uuid)))
+
+    @staticmethod
+    def _admission_material_members(
+        conn: sqlite3.Connection,
+        *,
+        material_uuid: str,
+        workflow_task_uuid: str,
+        fixed: bool,
+        material_source_node_uuid: str,
+    ) -> tuple[tuple[tuple[str, int], ...] | None, bool]:
+        rows = conn.execute(
+            """
+            WITH RECURSIVE subtree(uuid) AS (
+                SELECT uuid
+                FROM material
+                WHERE uuid = ? AND deleted_at IS NULL
+                UNION
+                SELECT child.uuid
+                FROM material AS child
+                JOIN subtree ON child.parent_uuid = subtree.uuid
+                WHERE child.deleted_at IS NULL
+            )
+            SELECT uuid, material_kind, disposition, version
+            FROM material
+            WHERE uuid IN (SELECT uuid FROM subtree)
+            ORDER BY uuid
+            """,
+            (material_uuid,),
+        ).fetchall()
+        if not rows:
+            return None, False
+        for row in rows:
+            if row["material_kind"] != "business":
+                if fixed:
+                    raise _AdmissionRejected(
+                        "material_not_runnable",
+                        "fixed Material subtree is not runnable",
+                        material_source_node_uuid=material_source_node_uuid,
+                    )
+                return None, False
+            if row["disposition"] != "active":
+                if fixed and row["disposition"] != "reconciling":
+                    raise _AdmissionRejected(
+                        "material_not_runnable",
+                        "fixed Material subtree is not runnable",
+                        material_source_node_uuid=material_source_node_uuid,
+                    )
+                return None, False
+        member_uuids = tuple(str(row["uuid"]) for row in rows)
+        placeholders = ",".join("?" for _ in member_uuids)
+        reserved = conn.execute(
+            f"""
+            SELECT 1
+            FROM material_reservation_member AS member
+            JOIN material_reservation AS reservation
+              ON reservation.uuid = member.reservation_uuid
+            WHERE member.material_uuid IN ({placeholders})
+              AND member.released_at IS NULL
+              AND reservation.status = 'active'
+              AND reservation.workflow_task_uuid <> ?
+            LIMIT 1
+            """,
+            (*member_uuids, workflow_task_uuid),
+        ).fetchone()
+        if reserved is not None:
+            return None, True
+        return tuple((str(row["uuid"]), int(row["version"])) for row in rows), False
+
+    @staticmethod
+    def _complete_admission_assignment(
+        sources: tuple[TaskMaterialAdmissionSource, ...],
+        choices_by_node: Mapping[str, tuple[_AdmissionChoice, ...]],
+    ) -> dict[str, _AdmissionChoice] | None:
+        assignment: dict[str, _AdmissionChoice] = {}
+        used_sites: set[str] = set()
+        used_materials: set[str] = set()
+
+        def search(index: int) -> bool:
+            if index == len(sources):
+                return True
+            source = sources[index]
+            for choice in choices_by_node[source.material_source_node_uuid]:
+                member_uuids = {item[0] for item in choice.member_versions}
+                if choice.site_uuid in used_sites or member_uuids & used_materials:
+                    continue
+                assignment[source.material_source_node_uuid] = choice
+                used_sites.add(choice.site_uuid)
+                used_materials.update(member_uuids)
+                if search(index + 1):
+                    return True
+                used_materials.difference_update(member_uuids)
+                used_sites.remove(choice.site_uuid)
+                del assignment[source.material_source_node_uuid]
+            return False
+
+        return assignment if search(0) else None
+
+    def _admit_task_or_raise(
+        self,
+        command: TaskMaterialAdmissionCommand,
+    ) -> TaskMaterialAdmissionResult:
+        """原子查找并预留一组完整的 Task-wide assignment。"""
+
+        normalized_command = self._normalize_admission_command(command)
+        canonical_command_uuid = normalized_command.command_uuid
+        canonical_task_uuid = normalized_command.workflow_task_uuid
         payload_hash = _canonical_payload_hash(
             _admission_command_payload(normalized_command)
         )
@@ -1126,9 +1437,9 @@ class InventoryService:
                         return previous_result
                     previous_blocked = previous_result
 
-                bindings: list[TaskMaterialBinding] = []
-                members: dict[str, tuple[str, int]] = {}
-                for source in normalized_sources:
+                choices_by_node: dict[str, tuple[_AdmissionChoice, ...]] = {}
+                blocked_reason_by_node: dict[str, str] = {}
+                for source in normalized_command.sources:
                     mount_uuid = str(source.mount["uuid"])
                     mount = conn.execute(
                         """
@@ -1139,196 +1450,290 @@ class InventoryService:
                         (mount_uuid,),
                     ).fetchone()
                     if mount is None:
-                        raise MaterialNotFound(f"mount Material {mount_uuid} not found")
-                    row = conn.execute(
-                        """
-                        SELECT uuid, resource_template_uuid, material_kind,
-                               disposition, version
-                        FROM material
-                        WHERE uuid = ? AND deleted_at IS NULL
-                        """,
-                        (source.material_uuid,),
-                    ).fetchone()
-                    if row is None:
-                        raise MaterialNotFound(
-                            f"material {source.material_uuid} not found"
+                        raise _AdmissionRejected(
+                            "mount_not_found",
+                            "mount Material does not exist",
+                            material_source_node_uuid=source.material_source_node_uuid,
                         )
-                    if row["resource_template_uuid"] != source.resource_template_uuid:
-                        raise MaterialInvalidInput(
-                            "Material template does not match MaterialSource"
-                        )
-                    if row["material_kind"] != "business":
-                        raise MaterialInvalidInput(
-                            "MaterialSource requires a business Material"
-                        )
-                    if row["disposition"] != "active":
-                        raise MaterialConflict("Material is not runnable")
-                    resolved_site_uuid = source.site_uuid
-                    if source.candidate_site_uuids:
-                        candidate_placeholders = ",".join(
-                            "?" for _ in source.candidate_site_uuids
-                        )
-                        candidate_sites = conn.execute(
-                            f"""
-                            SELECT uuid, material_uuid, occupied_material_uuid
-                            FROM site
-                            WHERE uuid IN ({candidate_placeholders})
-                              AND deleted_at IS NULL
-                            ORDER BY uuid
-                            """,
-                            source.candidate_site_uuids,
-                        ).fetchall()
-                        if len(candidate_sites) != len(source.candidate_site_uuids):
-                            raise MaterialNotFound("candidate Site not found")
-                        occupied_candidates: list[str] = []
-                        for candidate_site in candidate_sites:
-                            if candidate_site["material_uuid"] != mount_uuid:
-                                raise MaterialConflict(
-                                    "Candidate Site does not belong to the "
-                                    "selected mount"
-                                )
-                            allowed = conn.execute(
-                                """
-                                SELECT resource_template_uuid
-                                FROM site_allowed_resource_template
-                                WHERE site_uuid = ?
-                                """,
-                                (candidate_site["uuid"],),
-                            ).fetchall()
-                            if allowed and source.resource_template_uuid not in {
-                                item["resource_template_uuid"] for item in allowed
-                            }:
-                                raise MaterialInvalidInput(
-                                    "Candidate Site does not allow the "
-                                    "Material template"
-                                )
-                            if (
-                                candidate_site["occupied_material_uuid"]
-                                == source.material_uuid
-                            ):
-                                occupied_candidates.append(candidate_site["uuid"])
-                        if not occupied_candidates:
-                            return self._blocked_admission_result(
-                                conn,
-                                normalized_command,
-                                payload_hash=payload_hash,
-                                now_ms=now_ms,
-                                previous_blocked=previous_blocked,
-                                reason="material_not_in_candidate_site",
-                            )
-                        if len(occupied_candidates) != 1:
-                            raise MaterialConflict(
-                                "Material is not present in exactly one candidate Site"
-                            )
-                        resolved_site_uuid = occupied_candidates[0]
-                    if source.site_uuid is not None:
-                        site = conn.execute(
+                    sites = self._admission_sites(conn, source)
+                    choices: list[_AdmissionChoice] = []
+                    saw_reserved = False
+                    if source.mode == "create_new":
+                        for site in sites:
+                            if site.occupied_material_uuid is None:
+                                choices.append(_AdmissionChoice(site.uuid, None, ()))
+                        blocked_reason = "site_unavailable"
+                    elif source.material_uuid is not None:
+                        row = conn.execute(
                             """
-                            SELECT material_uuid, occupied_material_uuid
-                            FROM site
-                            WHERE uuid = ? AND deleted_at IS NULL
-                            """,
-                            (source.site_uuid,),
-                        ).fetchone()
-                        if site is None:
-                            raise MaterialNotFound(f"site {source.site_uuid} not found")
-                        if site["material_uuid"] != mount_uuid:
-                            raise MaterialConflict(
-                                "Site does not belong to the selected mount"
-                            )
-                        if site["occupied_material_uuid"] != source.material_uuid:
-                            return self._blocked_admission_result(
-                                conn,
-                                normalized_command,
-                                payload_hash=payload_hash,
-                                now_ms=now_ms,
-                                previous_blocked=previous_blocked,
-                                reason="material_not_in_site",
-                            )
-                        allowed = conn.execute(
-                            """
-                            SELECT resource_template_uuid
-                            FROM site_allowed_resource_template
-                            WHERE site_uuid = ?
-                            """,
-                            (source.site_uuid,),
-                        ).fetchall()
-                        if allowed and source.resource_template_uuid not in {
-                            item["resource_template_uuid"] for item in allowed
-                        }:
-                            raise MaterialInvalidInput(
-                                "Site does not allow the Material template"
-                            )
-                    subtree = conn.execute(
-                        """
-                        WITH RECURSIVE subtree(uuid) AS (
-                            SELECT uuid
+                            SELECT resource_template_uuid, material_kind, disposition
                             FROM material
                             WHERE uuid = ? AND deleted_at IS NULL
-                            UNION
-                            SELECT child.uuid
-                            FROM material AS child
-                            JOIN subtree ON child.parent_uuid = subtree.uuid
-                            WHERE child.deleted_at IS NULL
-                        )
-                        SELECT uuid, material_kind, disposition, version
-                        FROM material
-                        WHERE uuid IN (SELECT uuid FROM subtree)
-                        ORDER BY uuid
-                        """,
-                        (source.material_uuid,),
-                    ).fetchall()
-                    for item in subtree:
-                        if item["material_kind"] != "business":
-                            raise MaterialInvalidInput(
-                                "Material reservation requires business Materials"
+                            """,
+                            (source.material_uuid,),
+                        ).fetchone()
+                        if row is None:
+                            raise _AdmissionRejected(
+                                "material_not_found",
+                                "fixed Material does not exist",
+                                material_source_node_uuid=source.material_source_node_uuid,
                             )
-                        if item["disposition"] != "active":
-                            raise MaterialConflict("Material is not runnable")
-                        existing = members.get(item["uuid"])
-                        if existing is None or source.material_uuid < existing[0]:
-                            members[item["uuid"]] = (
-                                source.material_uuid,
-                                int(item["version"]),
+                        if (
+                            row["resource_template_uuid"]
+                            != source.resource_template_uuid
+                        ):
+                            raise _AdmissionRejected(
+                                "material_template_mismatch",
+                                "fixed Material template does not match selector",
+                                material_source_node_uuid=source.material_source_node_uuid,
                             )
-                    bindings.append(
-                        TaskMaterialBinding(
-                            material_source_node_uuid=source.material_source_node_uuid,
-                            resource_slot={
-                                "uuid": source.material_uuid,
-                                "resource_template_uuid": source.resource_template_uuid,
-                            },
-                            site_uuid=resolved_site_uuid,
+                        if row["material_kind"] != "business":
+                            raise _AdmissionRejected(
+                                "material_not_runnable",
+                                "fixed Material is not runnable",
+                                material_source_node_uuid=source.material_source_node_uuid,
+                            )
+                        if row["disposition"] != "active":
+                            if row["disposition"] == "reconciling":
+                                blocked_reason = "material_unavailable"
+                                choices_by_node[source.material_source_node_uuid] = ()
+                                blocked_reason_by_node[
+                                    source.material_source_node_uuid
+                                ] = blocked_reason
+                                continue
+                            raise _AdmissionRejected(
+                                "material_not_runnable",
+                                "fixed Material is not runnable",
+                                material_source_node_uuid=source.material_source_node_uuid,
+                            )
+                        occupied_sites = [
+                            site
+                            for site in sites
+                            if site.occupied_material_uuid == source.material_uuid
+                        ]
+                        if len(occupied_sites) != 1:
+                            raise _AdmissionRejected(
+                                "material_location_mismatch",
+                                "fixed Material is not in the selected Site scope",
+                                material_source_node_uuid=source.material_source_node_uuid,
+                            )
+                        member_versions, saw_reserved = (
+                            self._admission_material_members(
+                                conn,
+                                material_uuid=source.material_uuid,
+                                workflow_task_uuid=canonical_task_uuid,
+                                fixed=True,
+                                material_source_node_uuid=source.material_source_node_uuid,
+                            )
                         )
+                        if member_versions is not None:
+                            choices.append(
+                                _AdmissionChoice(
+                                    occupied_sites[0].uuid,
+                                    source.material_uuid,
+                                    member_versions,
+                                )
+                            )
+                        blocked_reason = (
+                            "material_reserved"
+                            if saw_reserved
+                            else "material_unavailable"
+                        )
+                    else:
+                        for site in sites:
+                            if site.occupied_material_uuid is None:
+                                continue
+                            row = conn.execute(
+                                """
+                                SELECT resource_template_uuid, material_kind,
+                                       disposition
+                                FROM material
+                                WHERE uuid = ? AND deleted_at IS NULL
+                                """,
+                                (site.occupied_material_uuid,),
+                            ).fetchone()
+                            if (
+                                row is None
+                                or row["resource_template_uuid"]
+                                != source.resource_template_uuid
+                                or row["material_kind"] != "business"
+                                or row["disposition"] != "active"
+                            ):
+                                continue
+                            member_versions, reserved = (
+                                self._admission_material_members(
+                                    conn,
+                                    material_uuid=site.occupied_material_uuid,
+                                    workflow_task_uuid=canonical_task_uuid,
+                                    fixed=False,
+                                    material_source_node_uuid=source.material_source_node_uuid,
+                                )
+                            )
+                            saw_reserved = saw_reserved or reserved
+                            if member_versions is not None:
+                                choices.append(
+                                    _AdmissionChoice(
+                                        site.uuid,
+                                        site.occupied_material_uuid,
+                                        member_versions,
+                                    )
+                                )
+                        blocked_reason = (
+                            "material_reserved"
+                            if saw_reserved and not choices
+                            else "material_unavailable"
+                        )
+                    choices_by_node[source.material_source_node_uuid] = tuple(choices)
+                    blocked_reason_by_node[source.material_source_node_uuid] = (
+                        blocked_reason
                     )
 
-                material_uuids = tuple(sorted(members))
-                set_fingerprint = _reservation_fingerprint(material_uuids)
-                placeholders = ",".join("?" for _ in material_uuids)
-                reserved_elsewhere = conn.execute(
-                    f"""
-                    SELECT member.material_uuid
-                    FROM material_reservation_member AS member
-                    JOIN material_reservation AS reservation
-                      ON reservation.uuid = member.reservation_uuid
-                    WHERE member.material_uuid IN ({placeholders})
-                      AND member.released_at IS NULL
-                      AND reservation.status = 'active'
-                      AND reservation.workflow_task_uuid <> ?
-                    ORDER BY member.material_uuid
-                    LIMIT 1
-                    """,
-                    (*material_uuids, canonical_task_uuid),
-                ).fetchone()
-                if reserved_elsewhere is not None:
+                normalized_sources = normalized_command.sources
+                for source in normalized_sources:
+                    if not choices_by_node[source.material_source_node_uuid]:
+                        return self._blocked_admission_result(
+                            conn,
+                            normalized_command,
+                            payload_hash=payload_hash,
+                            now_ms=now_ms,
+                            previous_blocked=previous_blocked,
+                            reason=blocked_reason_by_node[
+                                source.material_source_node_uuid
+                            ],
+                            material_source_node_uuid=source.material_source_node_uuid,
+                        )
+                assignment = self._complete_admission_assignment(
+                    normalized_sources,
+                    choices_by_node,
+                )
+                if assignment is None:
+                    conflict_source = next(
+                        (
+                            source
+                            for source in normalized_sources
+                            if source.material_uuid is None
+                        ),
+                        normalized_sources[0],
+                    )
+                    reason = (
+                        "site_unavailable"
+                        if conflict_source.mode == "create_new"
+                        else "material_unavailable"
+                    )
                     return self._blocked_admission_result(
                         conn,
                         normalized_command,
                         payload_hash=payload_hash,
                         now_ms=now_ms,
                         previous_blocked=previous_blocked,
-                        reason="material_reserved",
+                        reason=reason,
+                        material_source_node_uuid=(
+                            conflict_source.material_source_node_uuid
+                        ),
                     )
+
+                bindings: list[TaskMaterialBinding] = []
+                members: dict[str, tuple[str, int]] = {}
+                for source in normalized_sources:
+                    choice = assignment[source.material_source_node_uuid]
+                    material_uuid = choice.material_uuid
+                    member_versions = choice.member_versions
+                    if source.mode == "create_new":
+                        material_uuid = str(uuid4())
+                        template = self._resource_templates[
+                            source.resource_template_uuid
+                        ]
+                        conn.execute(
+                            """
+                            INSERT INTO material(
+                                uuid, create_time, update_time, deleted_at,
+                                description, meta_data, resource_template_uuid,
+                                parent_uuid, class, barcode, name, config, data,
+                                disposition, material_kind, version
+                            ) VALUES (?, ?, ?, NULL, NULL, '{}', ?, NULL,
+                                      ?, '', ?, '{}', '{}',
+                                      'active', 'business', 1)
+                            """,
+                            (
+                                material_uuid,
+                                now_iso,
+                                now_iso,
+                                source.resource_template_uuid,
+                                template.material_class,
+                                template.material_class,
+                            ),
+                        )
+                        material_row = conn.execute(
+                            "SELECT * FROM material WHERE uuid = ?",
+                            (material_uuid,),
+                        ).fetchone()
+                        self._emit(
+                            conn,
+                            now_ms,
+                            "material",
+                            material_uuid,
+                            1,
+                            "material.created",
+                            {
+                                "material": _material_record(
+                                    dict(material_row)
+                                ).to_dict()
+                            },
+                            causation_id=canonical_command_uuid,
+                        )
+                        updated = conn.execute(
+                            """
+                            UPDATE site
+                            SET occupied_material_uuid = ?, update_time = ?,
+                                version = version + 1
+                            WHERE uuid = ? AND deleted_at IS NULL
+                              AND occupied_material_uuid IS NULL
+                            """,
+                            (material_uuid, now_iso, choice.site_uuid),
+                        )
+                        if updated.rowcount != 1:
+                            raise MaterialConflict(
+                                "Site occupancy changed during admission"
+                            )
+                        site = _read_site(conn, choice.site_uuid)
+                        if site is None:
+                            raise MaterialAuthorityUnavailable(
+                                "updated Site is not readable"
+                            )
+                        self._emit(
+                            conn,
+                            now_ms,
+                            "site",
+                            choice.site_uuid,
+                            site.version,
+                            "site.occupancy_updated",
+                            {"site": site.to_dict()},
+                            causation_id=canonical_command_uuid,
+                        )
+                        member_versions = ((material_uuid, 1),)
+                    if material_uuid is None:
+                        raise MaterialAuthorityUnavailable(
+                            "admission assignment has no Material identity"
+                        )
+                    for member_uuid, version in member_versions:
+                        members[member_uuid] = (material_uuid, version)
+                    bindings.append(
+                        TaskMaterialBinding(
+                            material_source_node_uuid=(
+                                source.material_source_node_uuid
+                            ),
+                            resource_slot={
+                                "uuid": material_uuid,
+                                "resource_template_uuid": (
+                                    source.resource_template_uuid
+                                ),
+                            },
+                            site_uuid=choice.site_uuid,
+                        )
+                    )
+
+                material_uuids = tuple(sorted(members))
+                set_fingerprint = _reservation_fingerprint(material_uuids)
                 active = conn.execute(
                     """
                     SELECT uuid, set_fingerprint
@@ -1339,8 +1744,9 @@ class InventoryService:
                 ).fetchone()
                 if active is not None:
                     if active["set_fingerprint"] != set_fingerprint:
-                        raise MaterialConflict(
-                            "Task already owns a different Material reservation"
+                        raise _AdmissionRejected(
+                            "task_material_set_conflict",
+                            "Task already owns a different Material reservation",
                         )
                     reservation_uuid = str(active["uuid"])
                 else:
@@ -1443,6 +1849,7 @@ class InventoryService:
         now_ms: int,
         previous_blocked: TaskMaterialAdmissionResult | None,
         reason: str,
+        material_source_node_uuid: str,
     ) -> TaskMaterialAdmissionResult:
         """Persist one transient contention result with no partial reservation."""
 
@@ -1458,6 +1865,7 @@ class InventoryService:
             {
                 "workflow_task_uuid": command.workflow_task_uuid,
                 "reason": reason,
+                "material_source_node_uuid": material_source_node_uuid,
             },
             causation_id=command.command_uuid,
         )
@@ -1468,7 +1876,12 @@ class InventoryService:
             status="blocked",
             reservation_uuid=None,
             bindings=(),
-            diagnostics=({"code": reason},),
+            diagnostics=(
+                {
+                    "code": reason,
+                    "material_source_node_uuid": material_source_node_uuid,
+                },
+            ),
             outbox_sequence=outbox_sequence,
         )
         conn.execute(
@@ -1496,7 +1909,7 @@ class InventoryService:
     def _persist_admission_rejection(
         self,
         command: TaskMaterialAdmissionCommand,
-        error: MaterialInvalidInput | MaterialNotFound,
+        error: _AdmissionRejected,
     ) -> TaskMaterialAdmissionResult:
         """Freeze one deterministic rejection for replay across process restarts."""
 
@@ -1532,9 +1945,15 @@ class InventoryService:
                         raise MaterialConflict(
                             "command_uuid was already used with a different payload"
                         )
-                    return _admission_result_from_payload(
+                    previous_result = _admission_result_from_payload(
                         json.loads(processed["result_json"])
                     )
+                    if previous_result.status != "blocked":
+                        return previous_result
+                diagnostic = {
+                    "code": error.code,
+                    "material_source_node_uuid": error.material_source_node_uuid,
+                }
                 outbox_sequence = self._emit(
                     conn,
                     now_ms,
@@ -1544,7 +1963,7 @@ class InventoryService:
                     "material_admission.rejected",
                     {
                         "workflow_task_uuid": canonical_task_uuid,
-                        "diagnostics": [{"code": error.code}],
+                        "diagnostics": [diagnostic],
                     },
                     causation_id=canonical_command_uuid,
                 )
@@ -1555,7 +1974,7 @@ class InventoryService:
                     status="rejected",
                     reservation_uuid=None,
                     bindings=(),
-                    diagnostics=({"code": error.code},),
+                    diagnostics=(diagnostic,),
                     outbox_sequence=outbox_sequence,
                 )
                 conn.execute(
@@ -1564,6 +1983,11 @@ class InventoryService:
                         command_id, idempotency_key, command_type, payload_hash,
                         result_json, status, processed_at
                     ) VALUES (?, ?, 'material.admit', ?, ?, 'rejected', ?)
+                    ON CONFLICT(command_id) DO UPDATE SET
+                        result_json = excluded.result_json,
+                        status = excluded.status,
+                        processed_at = excluded.processed_at
+                    WHERE processed_command.payload_hash = excluded.payload_hash
                     """,
                     (
                         canonical_command_uuid,
@@ -5451,8 +5875,8 @@ class InventoryService:
                     }
                     if any(values[key] < 0 for key in ("depth", "length", "width")):
                         raise MaterialInvalidInput(
-                            "bootstrap relative_position dimensions must be "
-                            "non-negative"
+                            "bootstrap relative_position dimensions "
+                            "must be non-negative"
                         )
                     if any(
                         values[key] <= 0 for key in ("scale_x", "scale_y", "scale_z")
@@ -5469,8 +5893,7 @@ class InventoryService:
                             depth, length, width, scale_x, scale_y, scale_z,
                             rotation_x, rotation_y, rotation_z
                         ) VALUES (
-                            ?, ?, ?, NULL, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?,
-                            ?, ?, ?
+                            ?, ?, ?, NULL, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?
                         )
                         """,
                         (
@@ -5550,8 +5973,7 @@ class InventoryService:
                             position_x, position_y, position_z,
                             depth, length, width, version
                         ) VALUES (
-                            ?, ?, ?, NULL, ?, ?, ?, ?, ?, NULL, ?, ?, ?, ?, ?,
-                            ?, 1
+                            ?, ?, ?, NULL, ?, ?, ?, ?, ?, NULL, ?, ?, ?, ?, ?, ?, 1
                         )
                         """,
                         (

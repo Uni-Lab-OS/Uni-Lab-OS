@@ -143,7 +143,7 @@ def _admit_task(
         material_uuid=SAMPLE_MATERIAL_UUID,
         site_uuid=SITE_UUID,
         candidate_site_uuids=(),
-        flow_role="sample",
+        flow_role="primary_sample",
     )
     admitted = inventory.admit_task(
         inventory_api.TaskMaterialAdmissionCommand(

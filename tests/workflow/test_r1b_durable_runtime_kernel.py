@@ -32,7 +32,8 @@ from unilabos.workflow.service import WorkflowService
 from unilabos.workflow.store import StoreConflict, WorkflowStore
 
 _TASK_ALLOWED = {
-    "pending": {"running", "canceled"},
+    "pending": {"admission_blocked", "running", "failed", "canceled"},
+    "admission_blocked": {"pending", "failed", "canceled"},
     "running": {"succeeded", "failed", "canceling", "timeout"},
     "canceling": {"canceled", "failed", "timeout"},
     "succeeded": set(),
@@ -243,6 +244,8 @@ def _task_in_status(
     task, _ = _create_task(service)
     if status == "pending":
         return task
+    if status == "admission_blocked":
+        return coordinator.transition_task(task["uuid"], "admission_blocked")
     if status == "running":
         return coordinator.start_task(task["uuid"])
     if status == "canceling":
@@ -424,6 +427,60 @@ def test_commands_are_consumed_fifo_once_and_replay_is_zero_write(
     assert coordinator.consume_next_command(task["uuid"]) is None
     assert _table_count(store, "frontend_event") == event_count
     assert _table_count(store, "workflow_runtime_journal") == journal_count
+
+
+@pytest.mark.parametrize("command_type", ["pause", "resume", "step"])
+def test_admission_blocked_rejects_non_cancel_controls_without_changing_task(
+    service: WorkflowService,
+    store: WorkflowStore,
+    command_type: str,
+) -> None:
+    coordinator = _coordinator(store)
+    run_mode = "step" if command_type == "step" else "normal"
+    task, jobs = _create_task(service, node_count=1, run_mode=run_mode)
+    coordinator.transition_task(task["uuid"], "admission_blocked")
+    blocked_before = service.get_workflow_task(task["uuid"])
+    command = _create_command(
+        service,
+        task["uuid"],
+        command_type,
+        f"blocked-{command_type}",
+        target_node_uuid=(
+            jobs[0]["workflow_node_uuid"] if command_type == "step" else None
+        ),
+    )
+
+    consumed = coordinator.consume_next_command(task["uuid"])
+
+    assert consumed["uuid"] == command["uuid"]
+    assert consumed["status"] == "rejected"
+    assert consumed["result"] == {
+        "outcome": "rejected",
+        "error_code": "invalid_transition",
+    }
+    assert service.get_workflow_task(task["uuid"]) == blocked_before
+    assert service.get_workflow_node_job(jobs[0]["uuid"])["status"] == "pending"
+
+
+def test_admission_blocked_cancel_reuses_pending_terminal_cleanup(
+    service: WorkflowService,
+    store: WorkflowStore,
+) -> None:
+    coordinator = _coordinator(store)
+    task, jobs = _create_task(service, node_count=2)
+    coordinator.transition_task(task["uuid"], "admission_blocked")
+    _create_command(service, task["uuid"], "cancel", "blocked-cancel")
+
+    consumed = coordinator.consume_next_command(task["uuid"])
+
+    assert consumed["status"] == "succeeded"
+    canceled = service.get_workflow_task(task["uuid"])
+    assert canceled["status"] == "canceled"
+    assert canceled["control_status"] == "paused"
+    assert canceled["cleanup_status"] == "settled"
+    assert {service.get_workflow_node_job(job["uuid"])["status"] for job in jobs} == {
+        "canceled"
+    }
 
 
 def test_terminal_race_rejects_pending_command_durably(

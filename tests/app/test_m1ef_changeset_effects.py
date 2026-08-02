@@ -31,6 +31,8 @@ from tests.app.test_m1ef_inventory_claim_lifecycle import (
 CREATED_MATERIAL_UUID = "51000000-0000-4000-8000-000000000421"
 UNCLAIMED_PARENT_UUID = "51000000-0000-4000-8000-000000000422"
 CREATED_SITE_UUID = "61000000-0000-4000-8000-000000000421"
+OUTER_MOUNT_UUID = "51000000-0000-4000-8000-000000000423"
+OUTER_SITE_UUID = "61000000-0000-4000-8000-000000000423"
 
 
 def _running_claim(
@@ -44,6 +46,28 @@ def _running_claim(
     if mutable_roots is None:
         _admit_task(inventory)
     else:
+        inventory.create_material(
+            material_uuid=OUTER_MOUNT_UUID,
+            resource_template_uuid=MOUNT_TEMPLATE_UUID,
+            barcode="M1EF-OUTER-MOUNT-421",
+            name="M1EF outer mount",
+        )
+        inventory.create_site(
+            site_uuid=OUTER_SITE_UUID,
+            description="M1EF outer mount Site",
+            meta_data={"slot": "outer"},
+            material_uuid=OUTER_MOUNT_UUID,
+            name="outer",
+            sort_order=0,
+            allowed_resource_template_uuids=[MOUNT_TEMPLATE_UUID],
+            occupied_material_uuid=MOUNT_MATERIAL_UUID,
+            position_x=0.0,
+            position_y=0.0,
+            position_z=0.0,
+            depth=1.0,
+            length=1.0,
+            width=1.0,
+        )
         admitted = inventory.admit_task(
             inventory_api.TaskMaterialAdmissionCommand(
                 schema_version=1,
@@ -60,7 +84,7 @@ def _running_claim(
                         material_uuid=SAMPLE_MATERIAL_UUID,
                         site_uuid=SITE_UUID,
                         candidate_site_uuids=(),
-                        flow_role="sample",
+                        flow_role="primary_sample",
                     ),
                     inventory_api.TaskMaterialAdmissionSource(
                         material_source_node_uuid=(
@@ -68,11 +92,11 @@ def _running_claim(
                         ),
                         mode="existing",
                         resource_template_uuid=MOUNT_TEMPLATE_UUID,
-                        mount={"uuid": MOUNT_MATERIAL_UUID},
-                        material_uuid=MOUNT_MATERIAL_UUID,
-                        site_uuid=None,
+                            mount={"uuid": OUTER_MOUNT_UUID},
+                            material_uuid=MOUNT_MATERIAL_UUID,
+                            site_uuid=OUTER_SITE_UUID,
                         candidate_site_uuids=(),
-                        flow_role="mount",
+                        flow_role="consumable",
                     ),
                 ),
             )

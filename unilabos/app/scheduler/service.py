@@ -34,7 +34,7 @@ import threading
 import time
 import uuid as uuid_mod
 from collections import deque
-from collections.abc import Callable, Iterator
+from collections.abc import Callable, Iterator, Mapping
 from contextlib import contextmanager
 from typing import Any
 
@@ -79,6 +79,16 @@ logger = logging.getLogger(__name__)
 
 # ResourceSlot 参数值里可作为资源标识的字段（按优先级取第一个非空）
 _RESOURCE_ID_FIELDS = ("unilabos_uuid", "uuid", "id", "name")
+_MATERIAL_WAKE_EVENT_TYPES = frozenset(
+    {
+        "material.created",
+        "material.updated",
+        "material.disposition_updated",
+        "site.created",
+        "site.occupancy_updated",
+        "material_graph.bootstrapped",
+    }
+)
 
 
 def _extract_resource_ids(value: Any) -> set[str]:
@@ -180,6 +190,28 @@ class EdgeScheduler:
         # 新 WorkflowTask kernel 的持久投影 port；不参与 legacy WorkflowRun DAG。
         self._workflow_tasks = workflow_tasks
         self._admission_fault_hook = admission_fault_hook
+        set_change_listener = getattr(inventory, "set_change_listener", None)
+        if workflow_tasks is not None and callable(set_change_listener):
+            set_change_listener(self._on_inventory_change)
+
+    def _on_inventory_change(self, event: Any) -> None:
+        """外部 Material/Site 持久变化提交后唤醒 blocked Tasks。"""
+
+        if not isinstance(event, Mapping):
+            return
+        if event.get("event_type") not in _MATERIAL_WAKE_EVENT_TYPES:
+            return
+        # Admission 自有事件发出时 coordinator 仍持有 per-Task saga slot；release
+        # 已在 saga 结束后自行 sweep，因此这里只有外部资源变化进入提交后唤醒。
+        if event.get("causation_id"):
+            return
+        try:
+            self.reconcile_pending_task_admissions()
+        except Exception:
+            logger.exception(
+                "[EdgeScheduler] Material 变化唤醒失败：%s",
+                event.get("event_type"),
+            )
 
     def _emit_monitor(
         self, channel: str, event_type: str, data: dict[str, Any]
@@ -618,8 +650,27 @@ class EdgeScheduler:
                 "canceled",
                 "timeout",
             }:
-                return None
+                return self._ack_projected_admission_result(task_uuid)
             return self._reconcile_task_admission_serialized(task_uuid)
+
+    def _ack_projected_admission_result(
+        self,
+        task_uuid: str,
+    ) -> TaskMaterialAdmissionResult | None:
+        """不从已完成的 resolution Jobs 重建 command，直接完成 W2。"""
+
+        if self._workflow_tasks is None or self._inventory is None:
+            raise RuntimeError("Workflow Task Material coordination is not configured")
+        projection = self._workflow_tasks.get_material_admission(task_uuid)
+        if not isinstance(projection, dict):
+            return None
+        result = self._inventory.get_command_result(str(projection["command_uuid"]))
+        if not isinstance(result, TaskMaterialAdmissionResult):
+            raise TypeError(
+                "Inventory admission projection points to a non-admission result"
+            )
+        self._inventory.acknowledge(result.outbox_sequence)
+        return result
 
     @contextmanager
     def _material_saga_slot(self, task_uuid: str) -> Iterator[None]:
@@ -667,12 +718,27 @@ class EdgeScheduler:
             sort_keys=True,
         ).encode("utf-8")
         snapshot_fingerprint = f"sha256:{hashlib.sha256(encoded_snapshot).hexdigest()}"
+        canonical_task_uuid = str(task["uuid"])
+        command_uuid = str(
+            uuid_mod.uuid5(
+                uuid_mod.UUID(canonical_task_uuid),
+                f"material-admission:{snapshot_fingerprint}",
+            )
+        )
+        jobs = self._workflow_tasks.list_workflow_node_jobs(canonical_task_uuid)
+        pending_resolution_node_uuids = {
+            str(job.get("workflow_node_uuid") or "")
+            for job in jobs
+            if job.get("status") == "pending"
+        }
         sources: list[TaskMaterialAdmissionSource] = []
         for node in sorted(
             (
                 item
                 for item in nodes
-                if isinstance(item, dict) and item.get("type") == "material_source"
+                if isinstance(item, dict)
+                and item.get("type") == "material_source"
+                and str(item.get("uuid") or "") in pending_resolution_node_uuids
             ),
             key=lambda item: str(item.get("uuid") or ""),
         ):
@@ -704,14 +770,15 @@ class EdgeScheduler:
                 )
             )
         if not sources:
-            return None
-        canonical_task_uuid = str(task["uuid"])
-        command_uuid = str(
-            uuid_mod.uuid5(
-                uuid_mod.UUID(canonical_task_uuid),
-                f"material-admission:{snapshot_fingerprint}",
+            projection = self._workflow_tasks.get_material_admission(
+                canonical_task_uuid
             )
-        )
+            if (
+                isinstance(projection, dict)
+                and projection.get("command_uuid") == command_uuid
+            ):
+                return self._ack_projected_admission_result(canonical_task_uuid)
+            return None
         command = TaskMaterialAdmissionCommand(
             schema_version=1,
             command_uuid=command_uuid,
@@ -737,20 +804,21 @@ class EdgeScheduler:
             raise RuntimeError("Workflow Task Material coordination is not configured")
         pending: list[dict[str, Any]] = []
         reconciled: list[str] = []
-        page = 1
-        while True:
-            tasks = self._workflow_tasks.list_workflow_tasks(
-                page=page,
-                page_size=100,
-                status="pending",
-            )
-            items = tasks.get("items")
-            if not isinstance(items, list):
-                raise TypeError("Workflow Task list projection is invalid")
-            pending.extend(items)
-            if page * 100 >= int(tasks.get("total") or 0):
-                break
-            page += 1
+        for status in ("pending", "admission_blocked"):
+            page = 1
+            while True:
+                tasks = self._workflow_tasks.list_workflow_tasks(
+                    page=page,
+                    page_size=100,
+                    status=status,
+                )
+                items = tasks.get("items")
+                if not isinstance(items, list):
+                    raise TypeError("Workflow Task list projection is invalid")
+                pending.extend(items)
+                if page * 100 >= int(tasks.get("total") or 0):
+                    break
+                page += 1
         for task in sorted(
             pending,
             key=lambda item: (
@@ -849,6 +917,7 @@ class EdgeScheduler:
             if not has_material_source:
                 return None
             if task.get("status") in {"succeeded", "failed", "canceled", "timeout"}:
+                self._ack_projected_admission_result(task_uuid)
                 release_result = self._reconcile_task_release_serialized(
                     task_uuid,
                     "workflow_task_terminal",
@@ -868,6 +937,29 @@ class EdgeScheduler:
         """Fail-closed proof used before WorkflowTask Job dispatch admission."""
 
         if self._workflow_tasks is None or self._inventory is None:
+            return False
+        try:
+            task = self._workflow_tasks.get_workflow_task(task_uuid)
+            if task.get("status") not in {"pending", "running"}:
+                return False
+            snapshot = task.get("workflow_snapshot")
+            nodes = snapshot.get("nodes") if isinstance(snapshot, dict) else None
+            material_source_node_uuids = {
+                str(node.get("uuid") or "")
+                for node in nodes or []
+                if isinstance(node, dict) and node.get("type") == "material_source"
+            }
+            jobs = self._workflow_tasks.list_workflow_node_jobs(task_uuid)
+            material_source_jobs = [
+                job
+                for job in jobs
+                if job.get("workflow_node_uuid") in material_source_node_uuids
+            ]
+            if not material_source_jobs:
+                return True
+            if any(job.get("status") != "succeeded" for job in material_source_jobs):
+                return False
+        except (KeyError, TypeError, ValueError):
             return False
         projection = self._workflow_tasks.get_material_admission(task_uuid)
         if not isinstance(projection, dict) or projection.get("status") != "admitted":

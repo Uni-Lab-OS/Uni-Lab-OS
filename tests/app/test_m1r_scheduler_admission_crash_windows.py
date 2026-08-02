@@ -493,7 +493,11 @@ def test_reconcile_task_admission_recovers_both_crash_windows(
 
         recovered = scheduler.reconcile_task_admission(task_uuid)
 
-        assert replay_inventory.commands == [first_command]
+        # W2 已完成全部 resolution Job，因此 M2B 直接恢复持久 command result，
+        # 不从非 pending Job 重建 command；W1 仍通过 admit_task() 重放。
+        assert replay_inventory.commands == (
+            [first_command] if fault_stage == "after_inventory_commit" else []
+        )
         assert recovered == committed
         assert reopened_inventory.get_command_result(first_command.command_uuid) == (
             committed

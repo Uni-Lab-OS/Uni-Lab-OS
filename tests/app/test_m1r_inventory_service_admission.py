@@ -35,11 +35,11 @@ def _admission_command() -> inventory_api.TaskMaterialAdmissionCommand:
         material_source_node_uuid=MATERIAL_SOURCE_NODE_UUID,
         mode="existing",
         resource_template_uuid=RESOURCE_TEMPLATE_UUID,
-        mount={"uuid": MATERIAL_UUID},
+        mount={"uuid": MOUNT_UUID},
         material_uuid=MATERIAL_UUID,
-        site_uuid=None,
+        site_uuid=SITE_UUID,
         candidate_site_uuids=(),
-        flow_role="sample",
+        flow_role="primary_sample",
     )
     return inventory_api.TaskMaterialAdmissionCommand(
         schema_version=1,
@@ -69,7 +69,42 @@ def _assert_admitted_result(
         "uuid": MATERIAL_UUID,
         "resource_template_uuid": RESOURCE_TEMPLATE_UUID,
     }
-    assert binding.site_uuid is None
+    assert binding.site_uuid == SITE_UUID
+
+
+def _seed_located_material(
+    inventory: inventory_api.InventoryService,
+    *,
+    barcode_suffix: str,
+) -> None:
+    inventory.create_material(
+        material_uuid=MOUNT_UUID,
+        resource_template_uuid=RESOURCE_TEMPLATE_UUID,
+        barcode=f"MOUNT-{barcode_suffix}",
+        name="Admission mount",
+    )
+    inventory.create_material(
+        material_uuid=MATERIAL_UUID,
+        resource_template_uuid=RESOURCE_TEMPLATE_UUID,
+        barcode=f"SAMPLE-{barcode_suffix}",
+        name="Admission sample",
+    )
+    inventory.create_site(
+        site_uuid=SITE_UUID,
+        description=None,
+        meta_data={},
+        material_uuid=MOUNT_UUID,
+        name="A1",
+        sort_order=0,
+        allowed_resource_template_uuids=[RESOURCE_TEMPLATE_UUID],
+        occupied_material_uuid=MATERIAL_UUID,
+        position_x=0.0,
+        position_y=0.0,
+        position_z=0.0,
+        depth=1.0,
+        length=1.0,
+        width=1.0,
+    )
 
 
 def test_existing_material_admission_replays_and_survives_reopen(
@@ -80,12 +115,7 @@ def test_existing_material_admission_replays_and_survives_reopen(
         resource_templates=_resource_templates(),
     )
     try:
-        inventory.create_material(
-            material_uuid=MATERIAL_UUID,
-            resource_template_uuid=RESOURCE_TEMPLATE_UUID,
-            barcode="SAMPLE-104",
-            name="Admission sample 104",
-        )
+        _seed_located_material(inventory, barcode_suffix="104")
         command = _admission_command()
         admitted = inventory.admit_task(command)
 
@@ -114,18 +144,14 @@ def test_missing_candidate_site_is_a_durable_rejected_result(
         resource_templates=_resource_templates(),
     )
     try:
-        inventory.create_material(
-            material_uuid=MATERIAL_UUID,
-            resource_template_uuid=RESOURCE_TEMPLATE_UUID,
-            barcode="SAMPLE-104-REJECTED",
-            name="Admission sample with missing candidate Site",
-        )
+        _seed_located_material(inventory, barcode_suffix="104-REJECTED")
         command = _admission_command()
         command = replace(
             command,
             sources=(
                 replace(
                     command.sources[0],
+                    site_uuid=None,
                     candidate_site_uuids=(MISSING_SITE_UUID,),
                 ),
             ),
@@ -136,7 +162,12 @@ def test_missing_candidate_site_is_a_durable_rejected_result(
         assert rejected.status == "rejected"
         assert rejected.reservation_uuid is None
         assert rejected.bindings == ()
-        assert rejected.diagnostics == ({"code": "not_found"},)
+        assert rejected.diagnostics == (
+            {
+                "code": "site_not_found",
+                "material_source_node_uuid": MATERIAL_SOURCE_NODE_UUID,
+            },
+        )
         assert inventory.get_command_result(COMMAND_UUID) == rejected
         assert inventory.admit_task(command) == rejected
         event = next(
@@ -145,7 +176,12 @@ def test_missing_candidate_site_is_a_durable_rejected_result(
             if item.sequence == rejected.outbox_sequence
         )
         assert event.event_type == "material_admission.rejected"
-        assert event.payload["diagnostics"] == [{"code": "not_found"}]
+        assert event.payload["diagnostics"] == [
+            {
+                "code": "site_not_found",
+                "material_source_node_uuid": MATERIAL_SOURCE_NODE_UUID,
+            }
+        ]
     finally:
         inventory.close()
 
@@ -203,6 +239,7 @@ def test_candidate_sites_resolve_the_materials_current_site(
                 replace(
                     command.sources[0],
                     mount={"uuid": MOUNT_UUID},
+                    site_uuid=None,
                     candidate_site_uuids=(SITE_UUID,),
                 ),
             ),
@@ -216,7 +253,7 @@ def test_candidate_sites_resolve_the_materials_current_site(
         inventory.close()
 
 
-def test_candidate_site_occupancy_contention_is_a_durable_blocked_result(
+def test_automatic_existing_with_empty_candidate_site_is_durably_blocked(
     tmp_path: Path,
 ) -> None:
     inventory = inventory_api.InventoryService.open(
@@ -259,6 +296,8 @@ def test_candidate_site_occupancy_contention_is_a_durable_blocked_result(
                 replace(
                     command.sources[0],
                     mount={"uuid": MOUNT_UUID},
+                    material_uuid=None,
+                    site_uuid=None,
                     candidate_site_uuids=(SITE_UUID,),
                 ),
             ),
@@ -269,7 +308,12 @@ def test_candidate_site_occupancy_contention_is_a_durable_blocked_result(
         assert blocked.status == "blocked"
         assert blocked.reservation_uuid is None
         assert blocked.bindings == ()
-        assert blocked.diagnostics == ({"code": "material_not_in_candidate_site"},)
+        assert blocked.diagnostics == (
+            {
+                "code": "material_unavailable",
+                "material_source_node_uuid": MATERIAL_SOURCE_NODE_UUID,
+            },
+        )
         assert inventory.get_command_result(COMMAND_UUID) == blocked
         assert inventory.admit_task(command) == blocked
     finally:

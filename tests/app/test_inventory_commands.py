@@ -21,6 +21,7 @@ SAMPLE_TEMPLATE_UUID = "20000000-0000-4000-8000-000000000801"
 MOUNT_TEMPLATE_UUID = "20000000-0000-4000-8000-000000000802"
 SAMPLE_UUID = "50000000-0000-4000-8000-000000000801"
 MOUNT_UUID = "50000000-0000-4000-8000-000000000802"
+SITE_UUID = "60000000-0000-4000-8000-000000000801"
 TASK_UUID = "70000000-0000-4000-8000-000000000801"
 NODE_UUID = "40000000-0000-4000-8000-000000000801"
 ADMIT_UUID = "80000000-0000-4000-8000-000000000801"
@@ -54,6 +55,22 @@ def _open(path: Path) -> InventoryService:
         barcode="COMMAND-SAMPLE",
         name="Command sample",
     )
+    inventory.create_site(
+        site_uuid=SITE_UUID,
+        description=None,
+        meta_data={},
+        material_uuid=MOUNT_UUID,
+        name="A1",
+        sort_order=0,
+        allowed_resource_template_uuids=[SAMPLE_TEMPLATE_UUID],
+        occupied_material_uuid=SAMPLE_UUID,
+        position_x=0.0,
+        position_y=0.0,
+        position_z=0.0,
+        depth=1.0,
+        length=1.0,
+        width=1.0,
+    )
     return inventory
 
 
@@ -74,9 +91,9 @@ def _admission_envelope() -> dict[str, Any]:
                     "resource_template_uuid": SAMPLE_TEMPLATE_UUID,
                     "mount": {"uuid": MOUNT_UUID},
                     "material_uuid": SAMPLE_UUID,
-                    "site_uuid": None,
+                    "site_uuid": SITE_UUID,
                     "candidate_site_uuids": [],
-                    "flow_role": "sample",
+                    "flow_role": "primary_sample",
                 }
             ],
         },
