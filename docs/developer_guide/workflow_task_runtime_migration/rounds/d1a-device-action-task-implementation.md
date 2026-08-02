@@ -169,8 +169,10 @@ OS ticket 记录 base/test/implementation/review full SHA、命令与 finding di
 
 ### 9.1 候选
 
-- OS 最终受测代码候选：`305a5caceda42acfe0d835263cd2e51cc6fc497d`；
-- FE 最终受测候选：`a380bf81666509b8a5bfe7a7c84af43576828dd9`；
+- OS D1A 代码提交：`305a5caceda42acfe0d835263cd2e51cc6fc497d`；与最新
+  target 对齐的最终受测候选：`2c65cd139605985047d5ecf82592c8850636cbd9`；
+- FE D1A 代码提交：`a380bf81666509b8a5bfe7a7c84af43576828dd9`；与最新
+  target 对齐的最终受测候选：`b502e4379250f7b5d3b3ed7506d4476b50353538`；
 - 发布目标：OS `integration/workflow-task-runtime`、FE
   `integration/fe-os-migration`；合并必须等待同一独立 reviewer 对最终精确 SHA
   无 blocking finding。
@@ -205,9 +207,9 @@ OS ticket 记录 base/test/implementation/review full SHA、命令与 finding di
 ### 9.3 Gate
 
 - OS direct D1A tests：`30 passed`；
-- OS 全仓：`2343 passed, 4 skipped`；修改文件 Ruff
+- OS 全仓：`2347 passed, 4 skipped`；修改文件 Ruff
   `--select E4,E7,E9,F` 与 `git diff --check` 通过；
-- FE material/services/pascal/workflow-editor/kernel/desktop 六组：共 261 tests 通过；
+- FE material/services/pascal/workflow-editor/kernel/desktop 六组：共 262 tests 通过；
   全 workspace typecheck、`build:web`、`build:desktop` 和 `git diff --check` 通过；
 - 浏览器 E2E：`1 passed`，18.8 秒；夹具先组合 Workflow authority、再挂生产
   EdgeScheduler/JobExecutionBackend，只在物理 driver 边界使用确定性测试 Host。
