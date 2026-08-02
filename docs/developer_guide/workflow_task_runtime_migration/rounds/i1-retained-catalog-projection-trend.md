@@ -67,4 +67,3 @@ exact-SHA Standards/Spec reviewer、finding disposition 与最终候选 SHA 将�
 补入，并由同一 reviewer 复核最终文档 commit。通过后 non-squash merge 到
 `integration/workflow-task-runtime` 并推送，再以新的 OS integration SHA完成 FE
 Candidate editor 全门禁与评审。
-
