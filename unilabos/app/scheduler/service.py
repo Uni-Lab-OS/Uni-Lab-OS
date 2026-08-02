@@ -205,6 +205,7 @@ class EdgeScheduler:
     def _material_saga_slot(self, task_uuid: str) -> Iterator[None]:
         """Serialize one Task without holding a mutex across durable operations."""
 
+        task_uuid = str(uuid_mod.UUID(task_uuid))
         with self._material_saga_condition:
             while task_uuid in self._active_material_sagas:
                 self._material_saga_condition.wait()
