@@ -37,6 +37,7 @@ from unilabos.workflow.task_input import ResolvedResourceSlot
 
 WORKFLOW_UUID = "a0000000-0000-4000-8000-000000000001"
 MATERIAL_UUID = "a1000000-0000-4000-8000-000000000001"
+RESOURCE_TEMPLATE_SOURCE_IDENTITY = "a1_contract_lab.resources:plate_96"
 
 
 def _assert_invalid_input(response: Any) -> None:
@@ -165,8 +166,20 @@ class _KnownMaterial:
         allowed_resource_template_uuids: tuple[str, ...] | None,
     ) -> ResolvedResourceSlot:
         assert material_uuid == MATERIAL_UUID
-        assert allowed_resource_template_uuids is None
+        assert allowed_resource_template_uuids == (RESOURCE_TEMPLATE_UUID,)
         return ResolvedResourceSlot(material_uuid, RESOURCE_TEMPLATE_UUID)
+
+
+class _A1ResourceTemplateIdentityIndex:
+    def resolve_symbol(self, qualified_name: str) -> str:
+        if qualified_name != RESOURCE_TEMPLATE_SOURCE_IDENTITY:
+            raise KeyError(qualified_name)
+        return RESOURCE_TEMPLATE_UUID
+
+    def identify_uuid(self, resource_template_uuid: str) -> str:
+        if resource_template_uuid != RESOURCE_TEMPLATE_UUID:
+            raise KeyError(resource_template_uuid)
+        return RESOURCE_TEMPLATE_SOURCE_IDENTITY
 
 
 def _add_report_consumer(workspace: Path) -> None:
@@ -200,7 +213,11 @@ def test_named_and_implicit_results_remain_business_edges_through_task_creation(
     try:
         catalog = TemplateCatalog(store)
         catalog.replace(AUTHORITY, _imports(_registry_snapshot(registry)))
-        engine = WorkflowAuthoringEngine(catalog=catalog, authority=AUTHORITY)
+        engine = WorkflowAuthoringEngine(
+            catalog=catalog,
+            authority=AUTHORITY,
+            resource_template_identity_index=_A1ResourceTemplateIdentityIndex(),
+        )
         service = WorkflowService(
             store,
             compiler=engine,
@@ -214,7 +231,11 @@ def test_named_and_implicit_results_remain_business_edges_through_task_creation(
             meta_data={},
         )
         assert applied["revision"] == 1
-        python_source = f'''from a1_contract_lab.device import Pump
+        python_source = f'''from typing import Annotated
+
+from a1_contract_lab.device import Pump
+from a1_contract_lab.resources import plate_96
+from unilabos.registry.annotations import AllowedResourceTemplates
 from unilabos.registry.placeholder_type import ResourceSlot
 from unilabos.workflow.authoring import device, workflow_definition
 
@@ -225,7 +246,13 @@ pump: Pump = device()
     displayname="A1 result flow",
     description="Named and implicit result flow",
 )
-def result_flow(*, sample: ResourceSlot):
+def result_flow(
+    *,
+    sample: Annotated[
+        ResourceSlot,
+        AllowedResourceTemplates(plate_96),
+    ],
+):
     # unilab:node_uuid=a2000000-0000-4000-8000-000000000001
     transferred = pump.transfer(sample=sample)
     # unilab:node_uuid=a2000000-0000-4000-8000-000000000002

@@ -236,6 +236,30 @@ CREATE INDEX IF NOT EXISTS ix_workflow_task_workflow
 CREATE INDEX IF NOT EXISTS ix_workflow_task_status
     ON workflow_task(status);
 
+CREATE TABLE IF NOT EXISTS workflow_task_material_admission_projection (
+    workflow_task_uuid TEXT PRIMARY KEY,
+    command_uuid TEXT NOT NULL UNIQUE,
+    status TEXT NOT NULL CHECK (status IN ('admitted', 'blocked', 'rejected')),
+    reservation_uuid TEXT,
+    outbox_sequence INTEGER NOT NULL CHECK (outbox_sequence > 0),
+    result TEXT NOT NULL CHECK (json_valid(result) AND json_type(result) = 'object'),
+    create_time TEXT NOT NULL,
+    update_time TEXT NOT NULL,
+    FOREIGN KEY(workflow_task_uuid) REFERENCES workflow_task(uuid) ON DELETE CASCADE
+);
+
+CREATE TABLE IF NOT EXISTS workflow_task_material_release_projection (
+    workflow_task_uuid TEXT PRIMARY KEY,
+    command_uuid TEXT NOT NULL UNIQUE,
+    status TEXT NOT NULL CHECK (status = 'released'),
+    reservation_uuid TEXT,
+    outbox_sequence INTEGER NOT NULL CHECK (outbox_sequence > 0),
+    result TEXT NOT NULL CHECK (json_valid(result) AND json_type(result) = 'object'),
+    create_time TEXT NOT NULL,
+    update_time TEXT NOT NULL,
+    FOREIGN KEY(workflow_task_uuid) REFERENCES workflow_task(uuid) ON DELETE CASCADE
+);
+
 CREATE TABLE IF NOT EXISTS workflow_task_command (
     uuid TEXT PRIMARY KEY,
     create_time TEXT NOT NULL,
@@ -915,7 +939,7 @@ class WorkflowStore:
         nodes: List[WorkflowNodeWrite],
         edges: List[WorkflowEdgeWrite],
         protect_reserved_metadata: bool = False,
-        validate_input_binding_schema: bool = False,
+        validate_workflow_io_contract: bool = False,
         commit_validator: GraphCommitValidator | None = None,
     ) -> Dict[str, Any]:
         with self.transaction() as conn:
@@ -927,7 +951,7 @@ class WorkflowStore:
                 edges=edges,
                 advance_revision=True,
                 protect_reserved_metadata=protect_reserved_metadata,
-                validate_input_binding_schema=validate_input_binding_schema,
+                validate_workflow_io_contract=validate_workflow_io_contract,
                 commit_validator=commit_validator,
             )
         return self.get_graph(workflow_uuid)
@@ -943,7 +967,7 @@ class WorkflowStore:
         advance_revision: bool,
         protect_reserved_metadata: bool = False,
         semantic_workflow_meta_data: Optional[Dict[str, Any]] = None,
-        validate_input_binding_schema: bool = False,
+        validate_workflow_io_contract: bool = False,
         commit_validator: GraphCommitValidator | None = None,
     ) -> int:
         workflow = self.get_workflow(workflow_uuid, conn=conn)
@@ -1026,7 +1050,7 @@ class WorkflowStore:
                 effective_params=effective_params,
                 workflow_meta_data=effective_workflow_meta_data,
                 node_meta_data=effective_node_meta_data,
-                validate_input_binding_schema=validate_input_binding_schema,
+                validate_workflow_io_contract=validate_workflow_io_contract,
             )
         except MissingTemplateError as exc:
             raise StoreNotFound(str(exc)) from exc
@@ -1304,10 +1328,6 @@ class WorkflowStore:
         description: Optional[str],
         meta_data: Dict[str, Any],
         plan_builder: Callable[[Dict[str, Any]], PreparedTaskInput],
-        reservation_builder: Callable[
-            [sqlite3.Connection, str, tuple[str, ...]], object
-        ]
-        | None = None,
     ) -> Dict[str, Any]:
         now = utc_now()
         with self.transaction() as conn:
@@ -1343,12 +1363,6 @@ class WorkflowStore:
                     encode_json(prepared.resolved_input).decode("utf-8"),
                 ),
             )
-            if prepared.material_root_uuids and reservation_builder is not None:
-                reservation_builder(
-                    conn,
-                    task_uuid,
-                    prepared.material_root_uuids,
-                )
             for job in jobs:
                 conn.execute(
                     """
@@ -1522,6 +1536,242 @@ class WorkflowStore:
                 (task_uuid,),
             ).fetchall()
         return [self._job_row(row) for row in rows]
+
+    def project_task_material_admission(
+        self,
+        *,
+        task_uuid: str,
+        command_uuid: str,
+        status: str,
+        reservation_uuid: str | None,
+        outbox_sequence: int,
+        result: dict[str, Any],
+        bindings: list[dict[str, Any]],
+    ) -> bool:
+        """Idempotently project one closed Inventory result into Workflow facts."""
+
+        now = utc_now()
+        encoded_result = _json(result)
+        with self.transaction() as conn:
+            task = conn.execute(
+                """
+                SELECT uuid FROM workflow_task
+                WHERE uuid = ? AND deleted_at IS NULL
+                """,
+                (task_uuid,),
+            ).fetchone()
+            if task is None:
+                raise StoreNotFound(f"workflow task {task_uuid} not found")
+            existing = conn.execute(
+                """
+                SELECT command_uuid, status, outbox_sequence, result
+                FROM workflow_task_material_admission_projection
+                WHERE workflow_task_uuid = ?
+                """,
+                (task_uuid,),
+            ).fetchone()
+            upgrade_blocked = False
+            if existing is not None:
+                if (
+                    existing["command_uuid"] == command_uuid
+                    and existing["result"] == encoded_result
+                ):
+                    return False
+                upgrade_blocked = (
+                    existing["command_uuid"] == command_uuid
+                    and existing["status"] == "blocked"
+                    and status == "admitted"
+                    and outbox_sequence > int(existing["outbox_sequence"])
+                )
+                if not upgrade_blocked:
+                    raise StoreConflict("Task Material admission projection conflicts")
+
+            if status == "admitted":
+                for binding in bindings:
+                    node_uuid = binding["material_source_node_uuid"]
+                    return_info = {"material": binding["resource_slot"]}
+                    encoded_return_info = _json(return_info)
+                    job = conn.execute(
+                        """
+                        SELECT uuid, status, return_info
+                        FROM workflow_node_job
+                        WHERE workflow_task_uuid = ?
+                          AND workflow_node_uuid = ?
+                          AND deleted_at IS NULL
+                        """,
+                        (task_uuid, node_uuid),
+                    ).fetchone()
+                    if job is None:
+                        raise StoreConflict(
+                            "Material admission binding has no resolution Job"
+                        )
+                    if job["status"] == "succeeded":
+                        if job["return_info"] != encoded_return_info:
+                            raise StoreConflict(
+                                "MaterialSource Job already has a different binding"
+                            )
+                        continue
+                    if job["status"] != "pending" or job["return_info"] != "{}":
+                        raise StoreConflict(
+                            "MaterialSource Job cannot accept an admission binding"
+                        )
+                    conn.execute(
+                        """
+                        UPDATE workflow_node_job
+                        SET status = 'succeeded', return_info = ?,
+                            update_time = ?, finished_at = ?
+                        WHERE uuid = ?
+                        """,
+                        (encoded_return_info, now, now, job["uuid"]),
+                    )
+
+            if upgrade_blocked:
+                conn.execute(
+                    """
+                    UPDATE workflow_task_material_admission_projection
+                    SET status = ?, reservation_uuid = ?, outbox_sequence = ?,
+                        result = ?, update_time = ?
+                    WHERE workflow_task_uuid = ? AND command_uuid = ?
+                    """,
+                    (
+                        status,
+                        reservation_uuid,
+                        outbox_sequence,
+                        encoded_result,
+                        now,
+                        task_uuid,
+                        command_uuid,
+                    ),
+                )
+            else:
+                conn.execute(
+                    """
+                    INSERT INTO workflow_task_material_admission_projection(
+                        workflow_task_uuid, command_uuid, status, reservation_uuid,
+                        outbox_sequence, result, create_time, update_time
+                    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+                    """,
+                    (
+                        task_uuid,
+                        command_uuid,
+                        status,
+                        reservation_uuid,
+                        outbox_sequence,
+                        encoded_result,
+                        now,
+                        now,
+                    ),
+                )
+            self._append_event(
+                conn,
+                event="workflow.runtime.changed",
+                data={"workflow_task_uuid": task_uuid},
+                now=now,
+            )
+        return True
+
+    def get_task_material_admission(
+        self,
+        task_uuid: str,
+    ) -> dict[str, Any] | None:
+        """Read the closed public admission projection for one Task."""
+
+        self.get_task(task_uuid)
+        with self._lock:
+            row = self._conn.execute(
+                """
+                SELECT workflow_task_uuid, command_uuid, status,
+                       reservation_uuid, outbox_sequence
+                FROM workflow_task_material_admission_projection
+                WHERE workflow_task_uuid = ?
+                """,
+                (task_uuid,),
+            ).fetchone()
+        return dict(row) if row is not None else None
+
+    def project_task_material_release(
+        self,
+        *,
+        task_uuid: str,
+        command_uuid: str,
+        status: str,
+        reservation_uuid: str | None,
+        outbox_sequence: int,
+        result: dict[str, Any],
+    ) -> bool:
+        """Idempotently project one terminal Inventory release result."""
+
+        now = utc_now()
+        encoded_result = _json(result)
+        with self.transaction() as conn:
+            task = conn.execute(
+                """
+                SELECT uuid FROM workflow_task
+                WHERE uuid = ? AND deleted_at IS NULL
+                """,
+                (task_uuid,),
+            ).fetchone()
+            if task is None:
+                raise StoreNotFound(f"workflow task {task_uuid} not found")
+            existing = conn.execute(
+                """
+                SELECT command_uuid, result
+                FROM workflow_task_material_release_projection
+                WHERE workflow_task_uuid = ?
+                """,
+                (task_uuid,),
+            ).fetchone()
+            if existing is not None:
+                if (
+                    existing["command_uuid"] == command_uuid
+                    and existing["result"] == encoded_result
+                ):
+                    return False
+                raise StoreConflict("Task Material release projection conflicts")
+            conn.execute(
+                """
+                INSERT INTO workflow_task_material_release_projection(
+                    workflow_task_uuid, command_uuid, status, reservation_uuid,
+                    outbox_sequence, result, create_time, update_time
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+                """,
+                (
+                    task_uuid,
+                    command_uuid,
+                    status,
+                    reservation_uuid,
+                    outbox_sequence,
+                    encoded_result,
+                    now,
+                    now,
+                ),
+            )
+            self._append_event(
+                conn,
+                event="workflow.runtime.changed",
+                data={"workflow_task_uuid": task_uuid},
+                now=now,
+            )
+        return True
+
+    def get_task_material_release(
+        self,
+        task_uuid: str,
+    ) -> dict[str, Any] | None:
+        """Read the closed public terminal Material release projection."""
+
+        self.get_task(task_uuid)
+        with self._lock:
+            row = self._conn.execute(
+                """
+                SELECT workflow_task_uuid, command_uuid, status,
+                       reservation_uuid, outbox_sequence
+                FROM workflow_task_material_release_projection
+                WHERE workflow_task_uuid = ?
+                """,
+                (task_uuid,),
+            ).fetchone()
+        return dict(row) if row is not None else None
 
     def get_job(self, job_uuid: str) -> Dict[str, Any]:
         with self._lock:
@@ -1866,7 +2116,7 @@ class WorkflowStore:
                     advance_revision=True,
                     protect_reserved_metadata=False,
                     semantic_workflow_meta_data=candidate_meta,
-                    validate_input_binding_schema=True,
+                    validate_workflow_io_contract=True,
                     commit_validator=commit_validator,
                 )
                 workflow_meta = dict(workflow["meta_data"])

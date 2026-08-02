@@ -5,24 +5,17 @@ from __future__ import annotations
 import logging
 import sqlite3
 import threading
-from collections.abc import Iterable
+from collections.abc import Callable, Iterable, Mapping
 from datetime import datetime, timezone
 from typing import Any, Dict, Optional, Protocol
 from uuid import uuid4
 
-from unilabos.resources.authority import MaterialModule
-from unilabos.resources.authority.sqlite import SQLiteMaterialAdapter
 from unilabos.workflow.json_codec import decode_json_bytes, encode_json
-from unilabos.workflow.material_resolver import MaterialResourceSlotResolver
 from unilabos.workflow.store import (
     StoreConflict,
     StoreNotFound,
     WorkflowStore,
     utc_now,
-)
-from unilabos.workflow.task_input import (
-    TaskInputError,
-    material_root_uuids_from_task_snapshot,
 )
 
 _LOGGER = logging.getLogger(__name__)
@@ -89,16 +82,16 @@ _JOB_IN_FLIGHT = frozenset(
 )
 
 
-class TaskMaterialReservationGuard(Protocol):
-    """Runtime dispatch 所需的最小 Material capability。"""
+class WorkflowJobDispatcher(Protocol):
+    """ROS execution backend capability required by the durable worker."""
 
-    def has_complete_task_reservation(
-        self,
-        uow: Any,
-        *,
-        task_uuid: str,
-        root_material_uuids: tuple[str, ...],
-    ) -> bool: ...
+    def dispatch(self, payload: Mapping[str, Any]) -> None: ...
+
+    def add_job_finished_listener(self, listener: Callable[..., None]) -> None: ...
+
+    def remove_job_finished_listener(self, listener: Callable[..., None]) -> None: ...
+
+    def execution_ready(self) -> bool: ...
 
 
 def _json(value: Any) -> str:
@@ -132,40 +125,8 @@ class WorkflowRuntimeCoordinator:
     def __init__(
         self,
         store: WorkflowStore,
-        *,
-        material_reservations: TaskMaterialReservationGuard | None = None,
     ):
         self._store = store
-        if material_reservations is None:
-            materials = MaterialModule(
-                SQLiteMaterialAdapter.from_runtime_authority(store),
-                resource_templates={},
-            )
-            material_reservations = MaterialResourceSlotResolver(materials)
-        self._material_reservations = material_reservations
-
-    def _require_complete_material_reservation(
-        self,
-        connection: sqlite3.Connection,
-        task: sqlite3.Row,
-    ) -> None:
-        try:
-            roots = material_root_uuids_from_task_snapshot(
-                _load(task["workflow_snapshot"]),
-                _load(task["input"]),
-                _load(task["execution_plan"]),
-            )
-            if not roots:
-                return
-            complete = self._material_reservations.has_complete_task_reservation(
-                connection,
-                task_uuid=task["uuid"],
-                root_material_uuids=roots,
-            )
-        except (TaskInputError, TypeError, ValueError):
-            raise StoreConflict("task Material reservation is not verifiable") from None
-        if not complete:
-            raise StoreConflict("task does not own a complete Material reservation")
 
     @staticmethod
     def _task_row(
@@ -338,8 +299,6 @@ class WorkflowRuntimeCoordinator:
             task = self._task_row(connection, row["workflow_task_uuid"])
             if task["status"] in _TASK_TERMINAL:
                 raise StoreConflict("terminal task cannot mutate a job")
-            if status == "dispatched":
-                self._require_complete_material_reservation(connection, task)
             assignments = ["status = ?", "update_time = ?"]
             values: list[Any] = [status, now]
             if status == "running" and row["started_at"] is None:
@@ -1056,28 +1015,87 @@ class WorkflowRuntimeCoordinator:
                 )
             ]
 
+    def _execution_tasks(self) -> list[Dict[str, Any]]:
+        """Return frozen pending/running Tasks in deterministic creation order."""
+
+        with self._store.transaction() as connection:
+            rows = connection.execute(
+                """
+                SELECT * FROM workflow_task
+                WHERE deleted_at IS NULL AND status IN ('pending', 'running')
+                ORDER BY create_time, uuid
+                """
+            ).fetchall()
+            return [self._project_task(row) for row in rows]
+
+    def _execution_jobs(self, task_uuid: str) -> list[Dict[str, Any]]:
+        return self._store.list_jobs(task_uuid)
+
+    def _execution_job(self, job_uuid: str) -> Dict[str, Any]:
+        return self._store.get_job(job_uuid)
+
 
 class WorkflowRuntimeWorker:
-    """只消费 durable command 的单 worker；不承担 DAG scheduling。"""
+    """Consume durable commands and, when configured, execute frozen DAG Jobs."""
 
     def __init__(
         self,
         coordinator: WorkflowRuntimeCoordinator,
         *,
+        dispatcher: WorkflowJobDispatcher | None = None,
+        device_identity_resolver: Callable[[str], str | None] | None = None,
         poll_interval_seconds: float = 0.25,
     ):
         if poll_interval_seconds <= 0:
             raise ValueError("poll_interval_seconds must be positive")
         self._coordinator = coordinator
+        if (dispatcher is None) != (device_identity_resolver is None):
+            raise ValueError(
+                "dispatcher and device_identity_resolver must be configured together"
+            )
+        self._dispatcher = dispatcher
+        self._device_identity_resolver = device_identity_resolver
         self._poll_interval_seconds = poll_interval_seconds
         self._stop_event = threading.Event()
+        self._wake_event = threading.Event()
         self._thread: Optional[threading.Thread] = None
         self._lock = threading.Lock()
+        self._listener_registered = False
+        if dispatcher is not None:
+            dispatcher.add_job_finished_listener(self._on_job_finished)
+            self._listener_registered = True
+        self._task_reconciler: Callable[[str], object] | None = None
+        self._task_dispatch_guard: Callable[[str], bool] | None = None
+        self._pending_task_reconciliations: set[str] = set()
+
+    def set_task_reconciler(
+        self,
+        reconciler: Callable[[str], object] | None,
+        dispatch_guard: Callable[[str], bool] | None = None,
+    ) -> None:
+        """Attach the Scheduler-owned Material saga and dispatch proof."""
+
+        if reconciler is None and dispatch_guard is not None:
+            raise ValueError("dispatch_guard requires a task reconciler")
+
+        with self._lock:
+            self._task_reconciler = reconciler
+            self._task_dispatch_guard = dispatch_guard
+            if reconciler is None:
+                self._pending_task_reconciliations.clear()
+
+    def _queue_task_reconciliation(self, task_uuid: str) -> None:
+        with self._lock:
+            if self._task_reconciler is not None:
+                self._pending_task_reconciliations.add(task_uuid)
 
     def start(self) -> None:
         with self._lock:
             if self._thread is not None and self._thread.is_alive():
                 return
+            if self._dispatcher is not None and not self._listener_registered:
+                self._dispatcher.add_job_finished_listener(self._on_job_finished)
+                self._listener_registered = True
             self._stop_event.clear()
             self._thread = threading.Thread(
                 target=self._run,
@@ -1088,6 +1106,14 @@ class WorkflowRuntimeWorker:
 
     def stop(self) -> None:
         self._stop_event.set()
+        self._wake_event.set()
+        dispatcher = self._dispatcher
+        with self._lock:
+            remove_listener = dispatcher is not None and self._listener_registered
+            self._listener_registered = False
+        if remove_listener:
+            assert dispatcher is not None
+            dispatcher.remove_job_finished_listener(self._on_job_finished)
 
     def join(self, timeout: Optional[float] = None) -> None:
         thread = self._thread
@@ -1103,11 +1129,365 @@ class WorkflowRuntimeWorker:
             try:
                 task_uuids = self._coordinator._pending_command_task_uuids()
                 for task_uuid in task_uuids:
-                    self._coordinator.consume_next_command(task_uuid)
+                    consumed = self._coordinator.consume_next_command(task_uuid)
+                    if consumed is not None:
+                        self._queue_task_reconciliation(task_uuid)
             except (sqlite3.Error, StoreConflict, StoreNotFound):
                 _LOGGER.exception("Workflow runtime command sweep failed")
-            if self._stop_event.wait(self._poll_interval_seconds):
+            self._reconcile_task_mutations()
+            try:
+                if self._dispatcher is not None:
+                    self._sweep_execution_tasks()
+            except (sqlite3.Error, StoreConflict, StoreNotFound):
+                _LOGGER.exception("Workflow runtime execution sweep failed")
+            if self._stop_event.is_set():
                 return
+            self._wake_event.wait(self._poll_interval_seconds)
+            self._wake_event.clear()
+
+    def _sweep_execution_tasks(self) -> None:
+        dispatcher = self._dispatcher
+        assert dispatcher is not None
+        if not dispatcher.execution_ready():
+            return
+        for task in self._coordinator._execution_tasks():
+            if task["control_status"] != "active":
+                continue
+            if not self._can_dispatch_task_materials(task):
+                continue
+            if task["status"] == "pending":
+                task = self._coordinator.start_task(task["uuid"])
+                _LOGGER.info(
+                    "Workflow Task running task_uuid=%s workflow_uuid=%s",
+                    task["uuid"],
+                    task["workflow_uuid"],
+                )
+            self._advance_task(task)
+
+    def _advance_task(self, task: Dict[str, Any]) -> None:
+        task_uuid = task["uuid"]
+        jobs = self._coordinator._execution_jobs(task_uuid)
+        if any(job["status"] == "failed" for job in jobs):
+            self._coordinator.transition_task(
+                task_uuid,
+                "failed",
+                error_info=[{"code": "job_failed"}],
+            )
+            _LOGGER.error("Workflow Task failed task_uuid=%s", task_uuid)
+            return
+        if jobs and all(job["status"] in {"succeeded", "skipped"} for job in jobs):
+            self._coordinator.transition_task(task_uuid, "succeeded")
+            self._queue_task_reconciliation(task_uuid)
+            _LOGGER.info("Workflow Task succeeded task_uuid=%s", task_uuid)
+            return
+        if any(
+            job["status"]
+            in {
+                "dispatched",
+                "running",
+                "intervention_required",
+                "cancel_requested",
+                "execution_unknown",
+            }
+            for job in jobs
+        ):
+            return
+
+        plan = task.get("execution_plan")
+        snapshot = task.get("workflow_snapshot")
+        if not isinstance(plan, dict) or not isinstance(snapshot, dict):
+            self._fail_task(task_uuid, None, "invalid_execution_snapshot")
+            return
+        nodes = {
+            node.get("uuid"): node
+            for node in snapshot.get("nodes", [])
+            if isinstance(node, dict) and isinstance(node.get("uuid"), str)
+        }
+        plan_nodes = {
+            node.get("uuid"): node
+            for node in plan.get("nodes", [])
+            if isinstance(node, dict) and isinstance(node.get("uuid"), str)
+        }
+        templates = {
+            template.get("uuid"): template
+            for template in snapshot.get("node_templates", [])
+            if isinstance(template, dict) and isinstance(template.get("uuid"), str)
+        }
+        jobs_by_node = {job["workflow_node_uuid"]: job for job in jobs}
+        incoming: dict[str, list[dict[str, Any]]] = {}
+        for edge in plan.get("edges", []):
+            if not isinstance(edge, dict):
+                self._fail_task(task_uuid, None, "invalid_execution_plan")
+                return
+            incoming.setdefault(str(edge.get("target_node_uuid") or ""), []).append(
+                edge
+            )
+
+        pending = sorted(
+            (job for job in jobs if job["status"] == "pending"),
+            key=lambda item: (item["topological_index"], item["uuid"]),
+        )
+        for job in pending:
+            predecessors = [
+                jobs_by_node.get(edge.get("source_node_uuid"))
+                for edge in incoming.get(job["workflow_node_uuid"], [])
+            ]
+            if any(
+                item is None or item["status"] != "succeeded" for item in predecessors
+            ):
+                continue
+            node = nodes.get(job["workflow_node_uuid"])
+            planned_node = plan_nodes.get(job["workflow_node_uuid"])
+            if node is None or planned_node is None:
+                self._fail_task(task_uuid, job["uuid"], "invalid_execution_snapshot")
+                return
+            try:
+                payload = self._dispatch_payload(
+                    task,
+                    job,
+                    node,
+                    planned_node,
+                    templates.get(node.get("workflow_node_template_uuid")),
+                    incoming.get(job["workflow_node_uuid"], []),
+                    jobs_by_node,
+                )
+                self._coordinator.transition_job(job["uuid"], "dispatched")
+                self._coordinator.transition_job(job["uuid"], "running")
+                _LOGGER.info(
+                    "Workflow Job dispatch task_uuid=%s job_uuid=%s "
+                    "device_id=%s action_name=%s",
+                    task_uuid,
+                    job["uuid"],
+                    payload["device_id"],
+                    payload["action_name"],
+                )
+            except (KeyError, TypeError, ValueError, StoreConflict) as error:
+                self._fail_task(
+                    task_uuid,
+                    job["uuid"],
+                    "dispatch_invalid",
+                    detail=str(error),
+                )
+                return
+            assert self._dispatcher is not None
+            try:
+                self._dispatcher.dispatch(payload)
+            except Exception as error:  # noqa: BLE001
+                # 传输层可能已接受动作、却在确认阶段失败；保留 durable
+                # uncertainty fence，不能凭空生成物理失败事实。
+                _LOGGER.exception(
+                    "Workflow Job dispatch outcome unknown task_uuid=%s job_uuid=%s",
+                    task_uuid,
+                    job["uuid"],
+                )
+                uncertainty_reason = str(error).strip() or "dispatch_outcome_unknown"
+                self._coordinator.mark_job_unknown(
+                    job["uuid"],
+                    uncertainty_reason,
+                )
+            return
+
+    def _dispatch_payload(
+        self,
+        task: Dict[str, Any],
+        job: Dict[str, Any],
+        node: Dict[str, Any],
+        planned_node: Dict[str, Any],
+        node_template: Dict[str, Any] | None,
+        incoming_edges: list[dict[str, Any]],
+        jobs_by_node: dict[str, Dict[str, Any]],
+    ) -> Dict[str, Any]:
+        if job["executor_kind"] != "device_action":
+            raise ValueError(f"unsupported executor kind {job['executor_kind']!r}")
+        device_identity = planned_node.get("material_uuid") or node.get("material_uuid")
+        if not isinstance(device_identity, str) or not device_identity:
+            metadata = node.get("meta_data")
+            unilab = metadata.get("unilab") if isinstance(metadata, dict) else None
+            binding = (
+                unilab.get("executor_binding") if isinstance(unilab, dict) else None
+            )
+            if isinstance(binding, dict) and binding.get("mode") == "fixed":
+                device_identity = binding.get("device_id")
+        if not isinstance(device_identity, str) or not device_identity:
+            raise ValueError("device action is missing a frozen executor identity")
+        assert self._device_identity_resolver is not None
+        device_id = self._device_identity_resolver(device_identity)
+        if not isinstance(device_id, str) or not device_id:
+            raise ValueError(f"executor {device_identity!r} is not a graph device")
+        action_name = node.get("action_name")
+        action_type = node.get("action_type") or (
+            node_template.get("type") if isinstance(node_template, dict) else None
+        )
+        if not isinstance(action_name, str) or not action_name:
+            raise ValueError("device action is missing action_name")
+        if not isinstance(action_type, str) or not action_type:
+            raise ValueError("device action is missing action_type")
+        action_args = dict(job.get("param") or {})
+        for edge in incoming_edges:
+            if edge.get("dependency_only") is True:
+                continue
+            source_job = jobs_by_node.get(edge.get("source_node_uuid"))
+            if source_job is None:
+                raise ValueError("execution edge source job is missing")
+            source_key = edge.get("source_data_key")
+            target_key = edge.get("target_data_key")
+            if not isinstance(source_key, str) or not source_key:
+                raise ValueError("execution edge source key is missing")
+            if not isinstance(target_key, str) or not target_key:
+                raise ValueError("execution edge target key is missing")
+            action_args[target_key.split("@@@")[-1]] = self._read_result_value(
+                source_job.get("return_info"), source_key
+            )
+        return {
+            "job_uuid": job["uuid"],
+            "task_uuid": task["uuid"],
+            "node_uuid": job["workflow_node_uuid"],
+            "workflow_uuid": task["workflow_uuid"],
+            "device_id": device_id,
+            "action_name": action_name,
+            "action_type": action_type,
+            "param": action_args,
+            "sample_material": {},
+        }
+
+    @staticmethod
+    def _read_result_value(return_info: Any, data_key: str) -> Any:
+        value = return_info
+        for part in data_key.split("@@@"):
+            if not isinstance(value, dict) or part not in value:
+                raise ValueError(f"result does not contain {data_key!r}")
+            value = value[part]
+        return value
+
+    def _on_job_finished(
+        self,
+        job_uuid: str,
+        success: bool,
+        return_value: Any,
+        _success_type: str = "normal",
+    ) -> None:
+        if self._stop_event.is_set() or not self._listener_registered:
+            return
+        try:
+            job = self._coordinator._execution_job(job_uuid)
+            if job["status"] in _JOB_TERMINAL:
+                return
+            task_uuid = job["workflow_task_uuid"]
+            if success:
+                result = (
+                    return_value
+                    if isinstance(return_value, dict)
+                    else {"value": return_value}
+                )
+                self._coordinator.transition_job(
+                    job_uuid,
+                    "succeeded",
+                    return_info=result,
+                )
+                _LOGGER.info(
+                    "Workflow Job succeeded task_uuid=%s job_uuid=%s",
+                    task_uuid,
+                    job_uuid,
+                )
+            else:
+                self._coordinator.transition_job(
+                    job_uuid,
+                    "failed",
+                    error_info=[{"code": "device_action_failed"}],
+                )
+                _LOGGER.error(
+                    "Workflow Job failed task_uuid=%s job_uuid=%s",
+                    task_uuid,
+                    job_uuid,
+                )
+        except (sqlite3.Error, StoreConflict, StoreNotFound):
+            _LOGGER.exception("Workflow Job completion could not be committed")
+
+    def _fail_task(
+        self,
+        task_uuid: str,
+        job_uuid: str | None,
+        code: str,
+        *,
+        detail: str = "",
+    ) -> None:
+        error = {"code": code}
+        if detail:
+            error["detail"] = detail
+        if job_uuid is not None:
+            job = self._coordinator._execution_job(job_uuid)
+            if job["status"] in {"pending", "dispatched", "running"}:
+                self._coordinator.transition_job(
+                    job_uuid,
+                    "failed",
+                    error_info=[error],
+                )
+                _LOGGER.error(
+                    "Workflow Job failed task_uuid=%s job_uuid=%s code=%s",
+                    task_uuid,
+                    job_uuid,
+                    code,
+                )
+        task = next(
+            (
+                item
+                for item in self._coordinator._execution_tasks()
+                if item["uuid"] == task_uuid
+            ),
+            None,
+        )
+        if task is not None and task["status"] == "running":
+            self._coordinator.transition_task(
+                task_uuid,
+                "failed",
+                error_info=[error],
+            )
+            self._queue_task_reconciliation(task_uuid)
+        _LOGGER.error("Workflow Task failed task_uuid=%s code=%s", task_uuid, code)
+
+    @staticmethod
+    def _requires_material_admission(task: Mapping[str, Any]) -> bool:
+        snapshot = task.get("workflow_snapshot")
+        nodes = snapshot.get("nodes") if isinstance(snapshot, Mapping) else None
+        return isinstance(nodes, list) and any(
+            isinstance(node, Mapping) and node.get("type") == "material_source"
+            for node in nodes
+        )
+
+    def _can_dispatch_task_materials(self, task: Mapping[str, Any]) -> bool:
+        if not self._requires_material_admission(task):
+            return True
+        with self._lock:
+            dispatch_guard = self._task_dispatch_guard
+        if dispatch_guard is None:
+            return False
+        try:
+            return bool(dispatch_guard(str(task["uuid"])))
+        except Exception:
+            _LOGGER.exception(
+                "Workflow Task Material dispatch proof failed for %s",
+                task.get("uuid"),
+            )
+            return False
+
+    def _reconcile_task_mutations(self) -> None:
+        with self._lock:
+            reconciler = self._task_reconciler
+            task_uuids = tuple(sorted(self._pending_task_reconciliations))
+        if reconciler is None:
+            return
+        for task_uuid in task_uuids:
+            try:
+                reconciler(task_uuid)
+            except Exception:
+                _LOGGER.exception(
+                    "Workflow Task Material reconciliation failed for %s",
+                    task_uuid,
+                )
+                continue
+            with self._lock:
+                if self._task_reconciler is reconciler:
+                    self._pending_task_reconciliations.discard(task_uuid)
 
 
 __all__ = [
@@ -1115,4 +1495,5 @@ __all__ = [
     "TASK_TRANSITIONS",
     "WorkflowRuntimeCoordinator",
     "WorkflowRuntimeWorker",
+    "WorkflowJobDispatcher",
 ]

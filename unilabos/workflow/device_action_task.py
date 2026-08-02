@@ -682,6 +682,9 @@ class DeviceActionTaskRuntimeBridge:
             self._stop_event.set()
             if self._scheduler is not None:
                 self._scheduler.set_dispatch_hooks(before=None, on_error=None)
+            if self._backend is not None:
+                self._backend.remove_job_status_listener(self._on_job_status)
+                self._backend.remove_job_finished_listener(self._on_job_finished)
         thread = self._cancel_thread
         if thread is not None and thread is not threading.current_thread():
             thread.join(timeout=2)

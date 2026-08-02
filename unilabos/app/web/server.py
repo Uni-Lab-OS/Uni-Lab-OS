@@ -5,7 +5,7 @@ Web服务器模块
 """
 
 import webbrowser
-from collections.abc import Mapping
+from collections.abc import Callable, Mapping
 from typing import Any
 
 from fastapi import FastAPI, Request
@@ -82,6 +82,9 @@ def setup_server(
     *,
     registry_snapshot: Mapping[str, Any] | None = None,
     resource_registry_snapshot: Mapping[str, Any] | None = None,
+    workflow_job_dispatcher: Any = None,
+    device_identity_resolver: Callable[[str], str | None] | None = None,
+    workflow_package_catalogs: tuple[Any, ...] = (),
 ) -> FastAPI:
     """
     设置服务器
@@ -114,7 +117,7 @@ def setup_server(
             install_observability_api(app, observability_gateway)
             observability_routes_mounted = True
         except Exception as e:  # noqa: BLE001 - 可观测性不阻断设备运行
-            error(f"[Web] 挂载 Phoenix trace 日志路由失败: {str(e)}")
+            error(f"[Web] 挂载 Phoenix trace 日志路由失败: {e!s}")
 
     # Backend-shaped Workflow authority 统一拥有本工作区的 workflow.db。
     if not workflow_routes_mounted and BasicConfig.working_dir:
@@ -140,6 +143,9 @@ def setup_server(
                 editable_package_roots=editable_package_roots,
                 registry_snapshot=registry_snapshot,
                 resource_registry_snapshot=resource_registry_snapshot,
+                workflow_job_dispatcher=workflow_job_dispatcher,
+                device_identity_resolver=device_identity_resolver,
+                workflow_package_catalogs=workflow_package_catalogs,
             )
             if workflow_service.compiler is None:
                 raise RuntimeError("Workflow Authoring engine 未完成组合")
@@ -153,6 +159,9 @@ def setup_server(
                 "catalog_authority",
                 None,
             )
+            from unilabos.app.scheduler.integration import get_edge_scheduler
+
+            edge_scheduler = get_edge_scheduler()
             install_composed_workflow_authoring_api(
                 app,
                 workflow_service,
@@ -160,10 +169,15 @@ def setup_server(
                 template_catalog=template_catalog,
                 catalog_authority=catalog_authority,
                 device_action_tasks=get_device_action_task_service(),
+                task_admission_coordinator=(
+                    edge_scheduler.reconcile_task_admission
+                    if edge_scheduler is not None
+                    else None
+                ),
             )
             workflow_routes_mounted = True
         except Exception as e:  # noqa: BLE001 - keep unrelated web surfaces alive
-            error(f"[Web] 挂载 Workflow authority 路由失败: {str(e)}")
+            error(f"[Web] 挂载 Workflow authority 路由失败: {e!s}")
 
     # Edge 调度器/仓储路由（--edge_scheduler 未启用时端点返回 503/不挂载）
     try:
@@ -184,23 +198,25 @@ def setup_server(
         inventory_service = get_inventory_service()
         if inventory_service is not None:
             from unilabos.app.scheduler.inventory.api import (
+                create_backend_material_router,
                 create_router as create_inventory_router,
             )
             from unilabos.app.scheduler.inventory.layout import create_lab_router
 
             app.include_router(create_inventory_router(inventory_service))
+            app.include_router(create_backend_material_router(inventory_service))
             app.include_router(create_lab_router(inventory_service))
     except Exception as e:  # noqa: BLE001 - 调度器路由挂载失败不影响主服务
-        error(f"[Web] 挂载 Edge 调度器路由失败: {str(e)}")
+        error(f"[Web] 挂载 Edge 调度器路由失败: {e!s}")
 
     # 设置页面路由
     try:
         setup_web_pages(pages)
         # info("[Web] 已加载Web UI模块")
     except ImportError as e:
-        info(f"[Web] 未找到Web页面模块: {str(e)}")
-    except Exception as e:
-        error(f"[Web] 加载Web页面模块时出错: {str(e)}")
+        info(f"[Web] 未找到Web页面模块: {e!s}")
+    except Exception as e:  # noqa: BLE001 - 页面装配错误不阻断 API
+        error(f"[Web] 加载Web页面模块时出错: {e!s}")
 
     return app
 
@@ -212,6 +228,9 @@ def start_server(
     *,
     registry_snapshot: Mapping[str, Any] | None = None,
     resource_registry_snapshot: Mapping[str, Any] | None = None,
+    workflow_job_dispatcher: Any = None,
+    device_identity_resolver: Callable[[str], str | None] | None = None,
+    workflow_package_catalogs: tuple[Any, ...] = (),
 ) -> bool:
     """
     启动服务器
@@ -233,6 +252,9 @@ def start_server(
     setup_server(
         registry_snapshot=registry_snapshot,
         resource_registry_snapshot=resource_registry_snapshot,
+        workflow_job_dispatcher=workflow_job_dispatcher,
+        device_identity_resolver=device_identity_resolver,
+        workflow_package_catalogs=workflow_package_catalogs,
     )
 
     # 配置日志
@@ -245,8 +267,8 @@ def start_server(
         info(f"[Web] 正在打开浏览器访问: {url}")
         try:
             webbrowser.open(url)
-        except Exception as e:
-            error(f"[Web] 无法打开浏览器: {str(e)}")
+        except Exception as e:  # noqa: BLE001 - 浏览器启动失败不阻断服务
+            error(f"[Web] 无法打开浏览器: {e!s}")
 
     # 启动服务器
     info(f"[Web] 启动FastAPI服务器: {host}:{port}")

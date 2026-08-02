@@ -218,6 +218,7 @@ def _input_contract(parameter_names: list[str]) -> dict[str, Any]:
                     {
                         "name": name,
                         "schema": {"type": "number"},
+                        "required": True,
                     }
                     for name in parameter_names
                 ],

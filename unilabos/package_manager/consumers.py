@@ -8,6 +8,33 @@ from typing import Any
 from unilabos.package_manager import DefinitionRecord, PackageCatalog
 
 
+def resolve_registry_definition(
+    registry_entries: Mapping[str, Any],
+    identity: str,
+) -> tuple[str, Any]:
+    """Resolve one graph identity without publishing package-local aliases.
+
+    Registry remains keyed by canonical ``fqid``.  A graph inside an explicitly
+    selected workspace may use the package-local definition id; activation
+    resolves it only when exactly one Catalog record owns that id.
+    """
+
+    if identity in registry_entries:
+        return identity, registry_entries[identity]
+    matches: dict[str, Any] = {}
+    for registry_key, entry in registry_entries.items():
+        if not isinstance(entry, Mapping):
+            continue
+        source_fqid = entry.get("source_fqid")
+        if not isinstance(source_fqid, str) or not source_fqid:
+            continue
+        if source_fqid.rsplit(".", 1)[-1] == identity:
+            matches[source_fqid] = entry
+    if len(matches) != 1:
+        raise KeyError(identity)
+    return next(iter(matches.items()))
+
+
 def register_package_catalog(registry: Any, catalog: PackageCatalog) -> None:
     """登记完整定义元数据；不 import definition module，也不创建实例。"""
 

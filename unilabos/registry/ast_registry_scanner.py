@@ -874,14 +874,23 @@ def _extract_class_body(
         if _has_decorator(item, "subscribe") and _is_subscribe_decorator("subscribe", import_map):
             continue
 
-        # --- Check for @action first: explicit action always wins over get_/topic inference ---
+        # --- Explicit typed/legacy action always wins over topic inference ---
         action_dec = _find_method_decorator(item, "action")
-        if action_dec is not None and _is_registry_decorator("action", import_map):
+        typed_action = action_dec is not None and _is_registry_decorator(
+            "action", import_map
+        )
+        if not typed_action:
+            action_dec = _find_method_decorator(item, "legacy_action")
+        legacy_action = action_dec is not None and _is_registry_decorator(
+            "legacy_action", import_map
+        )
+        if typed_action or legacy_action:
+            assert action_dec is not None
             action_args = _extract_decorator_args(action_dec, import_map)
             canonical_schema: dict[str, Any] | None = None
             canonical_defaults: dict[str, Any] = {}
             contract_diagnostic: dict[str, str] | None = None
-            if module is not None and module_name:
+            if typed_action and module is not None and module_name:
                 from unilabos.registry import action_contract_schema
 
                 try:

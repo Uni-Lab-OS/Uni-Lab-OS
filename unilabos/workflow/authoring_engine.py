@@ -18,6 +18,10 @@ from dataclasses import dataclass, field
 from typing import Any, Never
 from uuid import UUID, uuid4, uuid5
 
+from unilabos.registry.action_result_schema import (
+    ActionResultSchemaError,
+    parse_action_result_declaration,
+)
 from unilabos.registry.annotation_schema import (
     NO_DEFAULT,
     AnnotationSchemaError,
@@ -67,6 +71,10 @@ from unilabos.workflow.source_coordinates import (
     source_lines,
     utf8_offset_to_utf16_column,
     utf16_length,
+)
+from unilabos.workflow.workflow_io import (
+    WorkflowIOValidationError,
+    resource_slot_passthrough_is_compatible,
 )
 
 _COMPILER_VERSION = "unilab-authoring/v1"
@@ -218,6 +226,12 @@ def _safe_identifier(value: str, fallback: str) -> str:
 def _snake_case(value: str, fallback: str) -> str:
     separated = re.sub(r"(?<!^)(?=[A-Z])", "_", value)
     return _safe_identifier(separated.lower(), fallback)
+
+
+def _workflow_result_record_name(function_name: str) -> str:
+    parts = [part for part in function_name.split("_") if part]
+    candidate = "".join(part[:1].upper() + part[1:] for part in parts) + "Result"
+    return _safe_identifier(candidate, "WorkflowResult")
 
 
 def _call_identity(call: ast.Call, imports: Mapping[str, str]) -> str | None:
@@ -739,13 +753,23 @@ def _compile_with_snapshot(
             workflow_revision=workflow_revision,
         )
         imports = _module_imports(module)
-        selectors, function = _module_declarations(module, imports)
+        selectors, function, result_classes = _module_declarations(module, imports)
         displayname, description = _workflow_declaration(
             function,
             imports,
             workflow_uuid=workflow_uuid,
         )
-        input_contract = _workflow_parameters(function, imports)
+        input_contract = _workflow_parameters(
+            function,
+            imports,
+            resource_template_identity_index=resource_template_identity_index,
+        )
+        result_declaration = _workflow_result_declaration(
+            function,
+            result_classes=result_classes,
+            imports=imports,
+            resource_template_identity_index=resource_template_identity_index,
+        )
         anchors, anchor_lines = _source_anchors(python_source)
         state = _BuildState(
             workflow_uuid=workflow_uuid,
@@ -781,6 +805,7 @@ def _compile_with_snapshot(
             input_contract=input_contract,
             results=state.results,
             imports=imports,
+            declaration=result_declaration,
         )
         graph = _candidate_graph(
             state,
@@ -971,9 +996,10 @@ def _module_imports(module: ast.Module) -> dict[str, str]:
 def _module_declarations(
     module: ast.Module,
     imports: Mapping[str, str],
-) -> tuple[dict[str, _Selector], ast.FunctionDef]:
+) -> tuple[dict[str, _Selector], ast.FunctionDef, dict[str, ast.ClassDef]]:
     selectors: dict[str, _Selector] = {}
     functions: list[ast.FunctionDef] = []
+    result_classes: dict[str, ast.ClassDef] = {}
     for statement in module.body:
         if isinstance(statement, (ast.Import, ast.ImportFrom)):
             continue
@@ -993,6 +1019,15 @@ def _module_declarations(
         ):
             functions.append(statement)
             continue
+        if isinstance(statement, ast.ClassDef):
+            if statement.name in result_classes:
+                _fail(
+                    "invalid_module_scope",
+                    "Workflow result declaration 名称重复",
+                    node=statement,
+                )
+            result_classes[statement.name] = statement
+            continue
         _fail(
             "invalid_module_scope",
             "Workflow module 顶层只允许 import、typed device selector 和唯一 Workflow",
@@ -1003,7 +1038,7 @@ def _module_declarations(
             "invalid_workflow_declaration",
             "Workflow module 必须恰有一个 @workflow_definition 函数",
         )
-    return selectors, functions[0]
+    return selectors, functions[0], result_classes
 
 
 def _has_workflow_decorator(
@@ -1146,9 +1181,136 @@ def _workflow_declaration(
     return str(values["displayname"]), values.get("description")
 
 
+@dataclass(frozen=True, slots=True)
+class _WorkflowResultDeclaration:
+    contract: dict[str, Any] | None
+    form: str
+    constructor_name: str | None = None
+
+
+def _workflow_result_declaration(
+    function: ast.FunctionDef,
+    *,
+    result_classes: Mapping[str, ast.ClassDef],
+    imports: Mapping[str, str],
+    resource_template_identity_index: ResourceTemplateIdentityIndex | None,
+) -> _WorkflowResultDeclaration:
+    annotation = function.returns
+    if annotation is None:
+        if result_classes:
+            _fail(
+                "invalid_module_scope",
+                "Workflow result declaration 必须由 return annotation 引用",
+                node=next(iter(result_classes.values())),
+            )
+        return _WorkflowResultDeclaration(None, "legacy")
+
+    declaration: ast.expr | ast.ClassDef | None = annotation
+    form = "mapping"
+    constructor_name: str | None = None
+    if isinstance(annotation, ast.Name):
+        result_class = result_classes.get(annotation.id)
+        if result_class is None or set(result_classes) != {annotation.id}:
+            _fail(
+                "invalid_workflow_output",
+                "Workflow result annotation 必须引用唯一 module-scope result record",
+                node=annotation,
+            )
+        declaration = result_class
+        constructor_name = annotation.id
+        form = "mapping" if result_class.bases else "dataclass"
+    elif result_classes:
+        _fail(
+            "invalid_module_scope",
+            "Workflow module 包含未引用的 result declaration",
+            node=next(iter(result_classes.values())),
+        )
+    elif isinstance(annotation, ast.Constant) and annotation.value is None:
+        form = "none"
+    elif not isinstance(annotation, ast.Dict):
+        _fail(
+            "invalid_workflow_output",
+            "Workflow return annotation 不符合 result-record 合同",
+            node=annotation,
+        )
+
+    try:
+        parsed = parse_action_result_declaration(declaration, imports=imports)
+    except ActionResultSchemaError as error:
+        _fail(error.code, error.message, node=annotation)
+    contract = parsed.to_dict()
+    descriptor_by_name = {item["name"]: item for item in contract.get("outputs", [])}
+    for output_name, symbols in parsed.resource_templates:
+        if not symbols:
+            continue
+        descriptor = descriptor_by_name.get(output_name)
+        if descriptor is None:
+            _fail(
+                "invalid_workflow_output",
+                "Workflow result declaration 与资源约束不一致",
+                node=annotation,
+            )
+        resource_template_uuids = _resolve_resource_template_symbols(
+            symbols,
+            resource_template_identity_index=resource_template_identity_index,
+            node=annotation,
+        )
+        resource_slot_schema = _resource_slot_schema(descriptor["schema"])
+        if not isinstance(resource_slot_schema, dict):
+            _fail(
+                "invalid_schema",
+                "ResourceTemplate allowlist 只能约束 ResourceSlot 或其列表",
+                node=annotation,
+            )
+        resource_slot_schema["allowed_resource_template_uuids"] = list(
+            resource_template_uuids
+        )
+    try:
+        canonical = parse_output_contract(contract).to_dict()
+    except WorkflowSchemaError as error:
+        _fail(error.code, error.message, node=annotation)
+    return _WorkflowResultDeclaration(canonical, form, constructor_name)
+
+
+def _resolve_resource_template_symbols(
+    symbols: Sequence[Any],
+    *,
+    resource_template_identity_index: ResourceTemplateIdentityIndex | None,
+    node: ast.AST,
+) -> tuple[str, ...]:
+    if resource_template_identity_index is None:
+        _fail(
+            "template_catalog_mismatch",
+            "当前 authority 无法解析 ResourceTemplate symbol",
+            node=node,
+        )
+    resolved: list[str] = []
+    for symbol in symbols:
+        try:
+            qualified_name = symbol.qualified_name
+            resource_template_uuid = validate_uuid(
+                resource_template_identity_index.resolve_symbol(qualified_name)
+            )
+            if (
+                resource_template_identity_index.identify_uuid(resource_template_uuid)
+                != qualified_name
+            ):
+                raise LookupError(qualified_name)
+        except (AttributeError, LookupError, TypeError, ValueError):
+            _fail(
+                "template_catalog_mismatch",
+                "当前 authority 无法解析 ResourceTemplate symbol",
+                node=node,
+            )
+        resolved.append(resource_template_uuid)
+    return tuple(resolved)
+
+
 def _workflow_parameters(
     function: ast.FunctionDef,
     imports: Mapping[str, str],
+    *,
+    resource_template_identity_index: ResourceTemplateIdentityIndex | None,
 ) -> dict[str, Any]:
     arguments = function.args
     if (
@@ -1209,13 +1371,24 @@ def _workflow_parameters(
             )
         except AnnotationSchemaError as error:
             _fail(error.code, error.message, node=argument)
+        descriptor = parsed.to_dict()
         if parsed.resource_templates:
-            _fail(
-                "template_catalog_mismatch",
-                "当前 Catalog 尚未发布 ResourceTemplate symbol identity",
+            resource_template_uuids = _resolve_resource_template_symbols(
+                parsed.resource_templates,
+                resource_template_identity_index=resource_template_identity_index,
                 node=argument,
             )
-        descriptors.append(parsed.to_dict())
+            resource_slot_schema = _resource_slot_schema(descriptor["schema"])
+            if not isinstance(resource_slot_schema, dict):
+                _fail(
+                    "invalid_schema",
+                    "ResourceTemplate allowlist 只能约束 ResourceSlot 或其列表",
+                    node=argument,
+                )
+            resource_slot_schema["allowed_resource_template_uuids"] = list(
+                resource_template_uuids
+            )
+        descriptors.append(descriptor)
     try:
         return parse_input_contract({"version": 1, "parameters": descriptors}).to_dict()
     except WorkflowSchemaError as error:
@@ -1344,7 +1517,7 @@ def _function_body(
         ):
             _fail(
                 "invalid_workflow_output",
-                "workflow_output 必须是唯一最终 top-level return",
+                "Workflow result 必须是唯一最终 top-level return",
                 node=function,
             )
         return_statement = body.pop()
@@ -2169,21 +2342,75 @@ def _workflow_outputs(
     input_contract: dict[str, Any],
     results: Mapping[str, _NodeState],
     imports: Mapping[str, str],
+    declaration: _WorkflowResultDeclaration,
 ) -> tuple[dict[str, Any], dict[str, Any]]:
-    if statement is None:
-        return {"version": 1, "outputs": []}, {}
-    value = statement.value
-    if not isinstance(value, ast.Call):
-        _fail(
-            "invalid_workflow_output",
-            "Workflow return 必须调用 workflow_output",
-            node=statement,
+    parameters = {item["name"]: item for item in input_contract.get("parameters", [])}
+    outputs: list[dict[str, Any]]
+    bindings: dict[str, dict[str, Any]] = {}
+    if declaration.contract is None:
+        expressions = _legacy_workflow_output_expressions(statement, imports=imports)
+        outputs = []
+        for output_name, expression in expressions.items():
+            descriptor, binding = _workflow_output_binding(
+                output_name,
+                expression,
+                parameters=parameters,
+                results=results,
+                infer_schema=True,
+            )
+            outputs.append(descriptor)
+            bindings[output_name] = binding
+    else:
+        outputs = _detached(declaration.contract["outputs"])
+        expressions = _declared_workflow_output_expressions(
+            statement,
+            declaration=declaration,
         )
-    if _call_identity(value, imports) != _WORKFLOW_OUTPUT:
+        expected_names = [item["name"] for item in outputs]
+        if set(expressions) != set(expected_names):
+            _fail(
+                "invalid_workflow_output",
+                "Workflow return 必须完整绑定每个声明 result field",
+                node=statement,
+            )
+        for output_name in expected_names:
+            _, binding = _workflow_output_binding(
+                output_name,
+                expressions[output_name],
+                parameters=parameters,
+                results=results,
+                infer_schema=False,
+            )
+            bindings[output_name] = binding
+
+    _synthesize_implicit_workflow_outputs(
+        outputs,
+        bindings,
+        parameters=parameters,
+    )
+    try:
+        contract = parse_output_contract({"version": 1, "outputs": outputs}).to_dict()
+    except WorkflowSchemaError as error:
+        _fail(error.code, error.message, node=statement)
+    return contract, bindings
+
+
+def _legacy_workflow_output_expressions(
+    statement: ast.Return | None,
+    *,
+    imports: Mapping[str, str],
+) -> dict[str, ast.expr]:
+    if statement is None:
+        return {}
+    value = statement.value
+    if (
+        not isinstance(value, ast.Call)
+        or _call_identity(value, imports) != _WORKFLOW_OUTPUT
+    ):
         _fail(
             "invalid_workflow_output",
-            "Workflow return 必须调用 workflow_output",
-            node=value,
+            "旧 Workflow return 必须调用 workflow_output",
+            node=statement,
         )
     if value.args or any(item.arg is None for item in value.keywords):
         _fail(
@@ -2198,52 +2425,163 @@ def _workflow_outputs(
             "workflow_output 名称必须非空且唯一",
             node=value,
         )
-    parameters = {item["name"]: item for item in input_contract.get("parameters", [])}
-    outputs: list[dict[str, Any]] = []
-    bindings: dict[str, dict[str, Any]] = {}
-    for keyword_node in value.keywords:
-        assert keyword_node.arg is not None
-        expression = keyword_node.value
-        if isinstance(expression, ast.Name) and expression.id in parameters:
-            parameter = parameters[expression.id]
-            descriptor = {
-                "name": keyword_node.arg,
-                "schema": _detached(parameter["schema"]),
-            }
-            for key in ("title", "description"):
-                if key in parameter:
-                    descriptor[key] = parameter[key]
-            outputs.append(descriptor)
-            bindings[keyword_node.arg] = {
-                "kind": "workflow_input",
-                "parameter": expression.id,
-            }
-            continue
-        producer = _result_reference(expression, results)
-        if producer is None:
+    return {
+        str(item.arg): item.value for item in value.keywords if item.arg is not None
+    }
+
+
+def _declared_workflow_output_expressions(
+    statement: ast.Return | None,
+    *,
+    declaration: _WorkflowResultDeclaration,
+) -> dict[str, ast.expr]:
+    outputs = declaration.contract["outputs"] if declaration.contract else []
+    if declaration.form == "none":
+        if statement is not None or outputs:
             _fail(
                 "invalid_workflow_output",
-                "Workflow output 必须绑定 Workflow input 或 named result output",
-                node=expression,
+                "-> None 的 Workflow 不得返回显式 result record",
+                node=statement,
             )
-        node_state, output_name = producer
-        handle = _source_handle(node_state.handles, output_name, node=expression)
-        outputs.append(
-            {
-                "name": keyword_node.arg,
-                "schema": _schema_from_handle(handle),
-            }
+        return {}
+    if statement is None or statement.value is None:
+        _fail(
+            "invalid_workflow_output",
+            "Workflow result record 缺少最终 return",
+            node=statement,
         )
-        bindings[keyword_node.arg] = {
-            "kind": "node_output",
-            "workflow_node_uuid": node_state.node["uuid"],
-            "source_handle_uuid": handle["uuid"],
+    value = statement.value
+    if declaration.form == "mapping":
+        if not isinstance(value, ast.Dict) or len(value.keys) != len(value.values):
+            _fail(
+                "invalid_workflow_output",
+                "TypedDict Workflow result 必须返回 closed mapping literal",
+                node=value,
+            )
+        result: dict[str, ast.expr] = {}
+        for key, expression in zip(value.keys, value.values, strict=True):
+            if (
+                not isinstance(key, ast.Constant)
+                or not isinstance(key.value, str)
+                or key.value in result
+            ):
+                _fail(
+                    "invalid_workflow_output",
+                    "Workflow result mapping key 必须是唯一字符串 literal",
+                    node=key or value,
+                )
+            result[key.value] = expression
+        return result
+    if declaration.form == "dataclass":
+        if (
+            not isinstance(value, ast.Call)
+            or not isinstance(value.func, ast.Name)
+            or value.func.id != declaration.constructor_name
+            or value.args
+            or any(item.arg is None for item in value.keywords)
+        ):
+            _fail(
+                "invalid_workflow_output",
+                "dataclass Workflow result 必须调用声明的 frozen constructor",
+                node=value,
+            )
+        names = [str(item.arg) for item in value.keywords]
+        if len(names) != len(set(names)):
+            _fail(
+                "invalid_workflow_output",
+                "Workflow result constructor field 重复",
+                node=value,
+            )
+        return {
+            str(item.arg): item.value for item in value.keywords if item.arg is not None
         }
-    try:
-        contract = parse_output_contract({"version": 1, "outputs": outputs}).to_dict()
-    except WorkflowSchemaError as error:
-        _fail(error.code, error.message, node=statement)
-    return contract, bindings
+    _fail(
+        "invalid_workflow_output",
+        "未知 Workflow result-record declaration",
+        node=statement,
+    )
+
+
+def _workflow_output_binding(
+    output_name: str,
+    expression: ast.expr,
+    *,
+    parameters: Mapping[str, Mapping[str, Any]],
+    results: Mapping[str, _NodeState],
+    infer_schema: bool,
+) -> tuple[dict[str, Any], dict[str, Any]]:
+    if isinstance(expression, ast.Name) and expression.id in parameters:
+        parameter = parameters[expression.id]
+        descriptor = {
+            "name": output_name,
+            "schema": _detached(parameter["schema"]),
+        }
+        for key in ("title", "description"):
+            if key in parameter:
+                descriptor[key] = parameter[key]
+        return descriptor, {
+            "kind": "workflow_input",
+            "parameter": expression.id,
+        }
+    producer = _result_reference(expression, results)
+    if producer is None:
+        _fail(
+            "invalid_workflow_output",
+            "Workflow output 必须绑定 Workflow input 或 named result output",
+            node=expression,
+        )
+    node_state, producer_output_name = producer
+    handle = _source_handle(
+        node_state.handles,
+        producer_output_name,
+        node=expression,
+    )
+    descriptor = {
+        "name": output_name,
+        "schema": _schema_from_handle(handle) if infer_schema else {},
+    }
+    return descriptor, {
+        "kind": "node_output",
+        "workflow_node_uuid": node_state.node["uuid"],
+        "source_handle_uuid": handle["uuid"],
+    }
+
+
+def _synthesize_implicit_workflow_outputs(
+    outputs: list[dict[str, Any]],
+    bindings: dict[str, dict[str, Any]],
+    *,
+    parameters: Mapping[str, Mapping[str, Any]],
+) -> None:
+    by_name = {item["name"]: item for item in outputs}
+    for parameter_name, parameter in parameters.items():
+        if _resource_slot_schema(parameter["schema"]) is None:
+            continue
+        existing = by_name.get(parameter_name)
+        if existing is not None:
+            if not resource_slot_passthrough_is_compatible(
+                parameter["schema"],
+                existing["schema"],
+            ):
+                _fail(
+                    "invalid_workflow_output",
+                    "同名显式 output 与 ResourceSlot pass-through 不兼容",
+                )
+            continue
+        descriptor = {
+            "name": parameter_name,
+            "schema": _detached(parameter["schema"]),
+            "implicit": True,
+        }
+        for key in ("title", "description"):
+            if key in parameter:
+                descriptor[key] = parameter[key]
+        outputs.append(descriptor)
+        by_name[parameter_name] = descriptor
+        bindings[parameter_name] = {
+            "kind": "workflow_input",
+            "parameter": parameter_name,
+        }
 
 
 def _schema_from_handle(handle: Mapping[str, Any]) -> dict[str, Any]:
@@ -2378,7 +2716,7 @@ def _validate_built_graph(
         effective_params={node.uuid: node.param or {} for node in nodes},
         workflow_meta_data=graph["workflow"].get("meta_data") or {},
         node_meta_data={node.uuid: node.meta_data for node in nodes},
-        validate_input_binding_schema=True,
+        validate_workflow_io_contract=True,
     )
     validate_material_source_authority(graph, material_source_authority)
 
@@ -2660,7 +2998,21 @@ def _generate_with_snapshot(
                 "message": str(error),
             },
         )
-    except (GraphValidationError, TypeError, ValueError):
+    except GraphValidationError as error:
+        code = (
+            "round_trip_mismatch"
+            if isinstance(error.__cause__, WorkflowIOValidationError)
+            else "candidate_invalid"
+        )
+        return _error_result(
+            fingerprint=snapshot.fingerprint,
+            diagnostic={
+                "severity": "error",
+                "code": code,
+                "message": "Candidate graph 不满足 Workflow 合同",
+            },
+        )
+    except (TypeError, ValueError):
         return _error_result(
             fingerprint=snapshot.fingerprint,
             diagnostic={
@@ -2809,8 +3161,20 @@ def _render_graph(
             templates.get(str(item.get("workflow_node_template_uuid")), {})
         )
     ]
-    needs = _annotation_import_needs(input_contract)
-    markers = {"workflow_definition", "workflow_output"}
+    explicit_outputs = [
+        item for item in output_contract["outputs"] if not item.get("implicit", False)
+    ]
+    needs = _annotation_import_needs(
+        {
+            "parameters": [
+                *input_contract["parameters"],
+                *explicit_outputs,
+            ]
+        }
+    )
+    if explicit_outputs:
+        needs["typing"].add("TypedDict")
+    markers = {"workflow_definition"}
     if selectors:
         markers.add("device")
     group_nodes = [item for item in nodes if _is_group_node(item, templates)]
@@ -2827,12 +3191,16 @@ def _render_graph(
         emitter.emit(f"from typing import {', '.join(sorted(needs['typing']))}")
     if needs["field"]:
         emitter.emit("from pydantic import Field")
+    function_name = _snake_case(str(workflow.get("name") or "workflow"), "workflow")
+    result_record_name = _workflow_result_record_name(function_name)
     reserved_import_names = {
         *needs["typing"],
         *markers,
+        "AllowedResourceTemplates",
         "Field",
         "JSONValue",
         "ResourceSlot",
+        result_record_name,
     }
     class_import_names: dict[str, str] = {}
     for class_identity in sorted({key[0] for key in selectors}):
@@ -2847,8 +3215,14 @@ def _render_graph(
         alias = "" if imported_name == symbol else f" as {imported_name}"
         emitter.emit(f"from {module} import {symbol}{alias}")
     resource_import_names: dict[str, str] = {}
+    workflow_contract_resource_template_uuids = {
+        resource_template_uuid
+        for descriptor in [*input_contract["parameters"], *explicit_outputs]
+        for resource_template_uuid in _resource_template_allowlist(descriptor["schema"])
+    }
     for resource_template_uuid in sorted(
-        {
+        workflow_contract_resource_template_uuids
+        | {
             str(item.get("param", {}).get("resource_template_uuid"))
             for item in material_source_nodes
         }
@@ -2884,8 +3258,16 @@ def _render_graph(
         resource_import_names[resource_template_uuid] = imported_name
         alias = "" if imported_name == symbol else f" as {imported_name}"
         emitter.emit(f"from {module} import {symbol}{alias}")
+    registry_annotation_imports = []
+    if needs["allowed_resource_templates"]:
+        registry_annotation_imports.append("AllowedResourceTemplates")
     if needs["json_value"]:
-        emitter.emit("from unilabos.registry.annotations import JSONValue")
+        registry_annotation_imports.append("JSONValue")
+    if registry_annotation_imports:
+        emitter.emit(
+            "from unilabos.registry.annotations import "
+            + ", ".join(registry_annotation_imports)
+        )
     if needs["resource_slot"]:
         emitter.emit("from unilabos.registry.placeholder_type import ResourceSlot")
     emitter.emit(
@@ -2893,6 +3275,17 @@ def _render_graph(
     )
     emitter.emit()
     emitter.emit()
+    if explicit_outputs:
+        emitter.emit(f"class {result_record_name}(TypedDict):")
+        for output in explicit_outputs:
+            annotation = _annotation_source(
+                output["schema"],
+                output,
+                resource_import_names=resource_import_names,
+            )
+            emitter.emit(f"    {output['name']}: {annotation}")
+        emitter.emit()
+        emitter.emit()
     for (class_identity, device_id), local_name in selectors.items():
         symbol = class_import_names[class_identity]
         argument = "" if device_id is None else repr(device_id)
@@ -2908,20 +3301,24 @@ def _render_graph(
     if description is not None:
         emitter.emit(f"    description={description!r},")
     emitter.emit(")")
-    function_name = _snake_case(str(workflow.get("name") or "workflow"), "workflow")
     parameters = input_contract["parameters"]
+    result_annotation = result_record_name if explicit_outputs else "None"
     if parameters:
         emitter.emit(f"def {function_name}(")
         emitter.emit("    *,")
         for parameter in parameters:
-            annotation = _annotation_source(parameter["schema"], parameter)
+            annotation = _annotation_source(
+                parameter["schema"],
+                parameter,
+                resource_import_names=resource_import_names,
+            )
             declaration = f"{parameter['name']}: {annotation}"
             if not parameter["required"]:
                 declaration += f" = {parameter['default']!r}"
             emitter.emit(f"    {declaration},")
-        emitter.emit("):")
+        emitter.emit(f") -> {result_annotation}:")
     else:
-        emitter.emit(f"def {function_name}():")
+        emitter.emit(f"def {function_name}() -> {result_annotation}:")
 
     body_indent = "    "
     for layer in root_layers:
@@ -2982,17 +3379,17 @@ def _render_graph(
                     selector_by_node=selector_by_node,
                 )
 
-    if output_contract["outputs"]:
+    if explicit_outputs:
         parts = []
-        for output in output_contract["outputs"]:
+        for output in explicit_outputs:
             name = output["name"]
             expression = _output_expression(
                 output_bindings[name],
                 node_by_uuid,
                 handles,
             )
-            parts.append(f"{name}={expression}")
-        emitter.emit(f"{body_indent}return workflow_output({', '.join(parts)})")
+            parts.append(f"{name!r}: {expression}")
+        emitter.emit(f"{body_indent}return {{{', '.join(parts)}}}")
     elif not nodes:
         emitter.emit(f"{body_indent}pass")
     source = "\n".join(emitter.lines).rstrip() + "\n"
@@ -3130,31 +3527,92 @@ def _annotation_import_needs(contract: Mapping[str, Any]) -> dict[str, Any]:
     typing_names: set[str] = set()
     field_needed = False
     resource_slot = False
+    allowed_resource_templates = False
     json_value = False
     for parameter in contract.get("parameters", []):
         schema = parameter["schema"]
-        rendered = _annotation_source(schema, parameter)
-        if "Annotated[" in rendered:
+        constraint_schema = schema["anyOf"][0] if "anyOf" in schema else schema
+        if (
+            "title" in parameter
+            or "description" in parameter
+            or any(
+                key in constraint_schema
+                for key in (
+                    "minimum",
+                    "maximum",
+                    "minLength",
+                    "maxLength",
+                    "minItems",
+                    "maxItems",
+                )
+            )
+        ):
             typing_names.add("Annotated")
-        if "Literal[" in rendered:
-            typing_names.add("Literal")
-        if "Field(" in rendered:
             field_needed = True
-        if "ResourceSlot" in rendered:
+        if _resource_template_allowlist(schema):
+            typing_names.add("Annotated")
+            allowed_resource_templates = True
+        if _schema_contains_key(constraint_schema, "enum"):
+            typing_names.add("Literal")
+        if _schema_contains_key(constraint_schema, "$slot"):
             resource_slot = True
-        if "JSONValue" in rendered:
+        if _schema_contains_kind(constraint_schema, "object"):
             json_value = True
     return {
         "typing": typing_names,
         "field": field_needed,
         "resource_slot": resource_slot,
+        "allowed_resource_templates": allowed_resource_templates,
         "json_value": json_value,
     }
+
+
+def _schema_contains_kind(schema: Mapping[str, Any], kind: str) -> bool:
+    if schema.get("type") == kind:
+        return True
+    items = schema.get("items")
+    return isinstance(items, Mapping) and _schema_contains_kind(items, kind)
+
+
+def _schema_contains_key(schema: Mapping[str, Any], key: str) -> bool:
+    if key in schema:
+        return True
+    items = schema.get("items")
+    return isinstance(items, Mapping) and _schema_contains_key(items, key)
+
+
+def _resource_template_allowlist(schema: Mapping[str, Any]) -> tuple[str, ...]:
+    resource_slot_schema = _resource_slot_schema(schema)
+    if resource_slot_schema is None:
+        return ()
+    allowlist = resource_slot_schema.get("allowed_resource_template_uuids")
+    if not isinstance(allowlist, list):
+        return ()
+    return tuple(str(item) for item in allowlist)
+
+
+def _resource_slot_schema(
+    schema: Mapping[str, Any],
+) -> Mapping[str, Any] | None:
+    members = schema.get("anyOf")
+    if isinstance(members, list):
+        for member in members:
+            if isinstance(member, Mapping) and member.get("type") != "null":
+                return _resource_slot_schema(member)
+        return None
+    if schema.get("$slot") == "ResourceSlot":
+        return schema
+    items = schema.get("items")
+    if schema.get("type") == "array" and isinstance(items, Mapping):
+        return _resource_slot_schema(items)
+    return None
 
 
 def _annotation_source(
     schema: Mapping[str, Any],
     descriptor: Mapping[str, Any] | None = None,
+    *,
+    resource_import_names: Mapping[str, str] | None = None,
 ) -> str:
     if "anyOf" in schema:
         members = schema["anyOf"]
@@ -3163,6 +3621,24 @@ def _annotation_source(
     else:
         base = _base_annotation_source(schema)
         constraint_schema = schema
+    metadata: list[str] = []
+    resource_template_uuids = _resource_template_allowlist(schema)
+    if resource_template_uuids:
+        if resource_import_names is None:
+            _fail(
+                "template_catalog_mismatch",
+                "当前 authority 无法反查 ResourceTemplate UUID",
+            )
+        resource_symbols: list[str] = []
+        for resource_template_uuid in resource_template_uuids:
+            resource_symbol = resource_import_names.get(resource_template_uuid)
+            if resource_symbol is None:
+                _fail(
+                    "template_catalog_mismatch",
+                    "当前 authority 无法反查 ResourceTemplate UUID",
+                )
+            resource_symbols.append(resource_symbol)
+        metadata.append(f"AllowedResourceTemplates({', '.join(resource_symbols)})")
     field_parts: list[str] = []
     descriptor = descriptor or {}
     if "title" in descriptor:
@@ -3180,17 +3656,14 @@ def _annotation_source(
         if schema_key in constraint_schema:
             field_parts.append(f"{field_key}={constraint_schema[schema_key]!r}")
     if field_parts:
-        return f"Annotated[{base}, Field({', '.join(field_parts)})]"
+        metadata.append(f"Field({', '.join(field_parts)})")
+    if metadata:
+        return f"Annotated[{base}, {', '.join(metadata)}]"
     return base
 
 
 def _base_annotation_source(schema: Mapping[str, Any]) -> str:
     if schema.get("$slot") == "ResourceSlot":
-        if schema.get("allowed_resource_template_uuids"):
-            _fail(
-                "template_catalog_mismatch",
-                "当前版本无法从 UUID allowlist 恢复 ResourceTemplate symbol",
-            )
         return "ResourceSlot"
     kind = schema.get("type")
     if kind == "array":

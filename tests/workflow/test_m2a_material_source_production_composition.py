@@ -1,4 +1,4 @@
-"""M2A production Registry publication 与 composition 纵向 RED。"""
+"""M2A production Registry 与独立 Inventory composition 纵向合同。"""
 
 from __future__ import annotations
 
@@ -12,14 +12,13 @@ from typing import Any
 
 import pytest
 
+from unilabos.app.scheduler.inventory import (
+    InventoryService,
+    ResourceTemplateIdentity,
+)
 from unilabos.registry.catalog_consumer import (
     workflow_template_imports_from_registry_snapshot,
 )
-from unilabos.resources.authority import (
-    MaterialModule,
-    ResourceTemplateIdentity,
-)
-from unilabos.resources.authority.sqlite import SQLiteMaterialAdapter
 from unilabos.workflow.catalog import (
     CatalogAuthority,
     LocalResourceTemplateIdentityIndex,
@@ -115,31 +114,35 @@ def _seed_material_authority(working_dir: Path) -> _SeededIdentities:
             [],
             resource_template_identities=index.assignments,
         )
-        resource_templates = {
-            identities.host_uuid: ResourceTemplateIdentity(
-                uuid=identities.host_uuid,
-                material_class="HostNode",
-            ),
-            identities.plate_uuid: ResourceTemplateIdentity(
-                uuid=identities.plate_uuid,
-                material_class="Plate96",
-            ),
-            identities.warehouse_uuid: ResourceTemplateIdentity(
-                uuid=identities.warehouse_uuid,
-                material_class="Warehouse",
-            ),
-        }
-        materials = MaterialModule(
-            SQLiteMaterialAdapter.from_runtime_authority(store),
-            resource_templates=MappingProxyType(resource_templates),
-        )
-        materials.create_business_material(
+    finally:
+        store.close()
+
+    resource_templates = {
+        identities.host_uuid: ResourceTemplateIdentity(
+            uuid=identities.host_uuid,
+            material_class="HostNode",
+        ),
+        identities.plate_uuid: ResourceTemplateIdentity(
+            uuid=identities.plate_uuid,
+            material_class="Plate96",
+        ),
+        identities.warehouse_uuid: ResourceTemplateIdentity(
+            uuid=identities.warehouse_uuid,
+            material_class="Warehouse",
+        ),
+    }
+    inventory = InventoryService.open(
+        working_dir=working_dir,
+        resource_templates=MappingProxyType(resource_templates),
+    )
+    try:
+        inventory.create_material(
             material_uuid=MOUNT_MATERIAL_UUID,
             resource_template_uuid=identities.warehouse_uuid,
             barcode="M2A-WAREHOUSE-1",
             name="M2A warehouse",
         )
-        materials.create_site(
+        inventory.create_site(
             site_uuid=SITE_UUID,
             description="M2A direct compatible Site",
             meta_data={"slot": "A1"},
@@ -157,7 +160,7 @@ def _seed_material_authority(working_dir: Path) -> _SeededIdentities:
         )
         return identities
     finally:
-        store.close()
+        inventory.close()
 
 
 @contextmanager
@@ -290,7 +293,7 @@ def test_registry_adapter_publishes_one_host_owned_material_source_aggregate(
     assert without_host == ()
 
 
-def test_production_composition_compiles_material_source_with_shared_authorities(
+def test_production_composition_compiles_material_source_with_inventory_authority(
     tmp_path: Path,
 ) -> None:
     working_dir = tmp_path / "unilabos_data"

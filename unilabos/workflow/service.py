@@ -21,6 +21,10 @@ from uuid import uuid4
 
 from pydantic import ValidationError
 
+from unilabos.app.scheduler.inventory import (
+    TaskMaterialAdmissionResult,
+    TaskMaterialReleaseResult,
+)
 from unilabos.workflow.candidate_validation import validate_candidate_bundle
 from unilabos.workflow.json_codec import encode_json
 from unilabos.workflow.material_source import (
@@ -247,18 +251,6 @@ class AuthoringCompiler(Protocol):
     ) -> CandidateCompilation: ...
 
 
-class TaskMaterialReservationProvider(Protocol):
-    """Workflow 只依赖的 Task-scoped Material reservation port。"""
-
-    def reserve_task_materials(
-        self,
-        uow: Any,
-        *,
-        task_uuid: str,
-        root_material_uuids: tuple[str, ...],
-    ) -> object: ...
-
-
 @runtime_checkable
 class CatalogSnapshotProvider(Protocol):
     """可变 Catalog 编译器提供的可选稳定快照能力。"""
@@ -292,8 +284,11 @@ class WorkflowService:
         compiler: Optional[AuthoringCompiler] = None,
         resource_resolver: Optional[ResourceSlotResolver] = None,
         material_source_authority: MaterialSourceStaticAuthority | None = None,
-        material_reservations: Optional[TaskMaterialReservationProvider] = None,
+        material_reservations: object | None = None,
     ):
+        # Compatibility-only constructor input. Task creation deliberately does
+        # not invoke Inventory; EdgeScheduler owns the post-commit saga.
+        del material_reservations
         self._store = store
         self.compiler = compiler
         self._resource_resolver = (
@@ -302,7 +297,6 @@ class WorkflowService:
             else UnconfiguredResourceSlotResolver()
         )
         self._material_source_authority = material_source_authority
-        self._material_reservations = material_reservations
         self._locks_guard = threading.Lock()
         self._authoring_locks: Dict[str, threading.RLock] = {}
 
@@ -404,18 +398,16 @@ class WorkflowService:
             self._store.get_graph(identity),
         )
 
-    def _validate_material_source_commit(
+    def _validate_material_source(
         self,
         graph: Dict[str, Any],
-        uow: Any,
     ) -> None:
-        """在 Store 写事务内复核 MaterialSource 的 durable facts。"""
+        """在 Workflow 写事务外执行 MaterialSource 静态只读检查。"""
 
         try:
             validate_material_source_authority(
                 graph,
                 self._material_source_authority,
-                uow=uow,
             )
         except MaterialSourceAuthorityError as error:
             raise StoreAuthoringConflict(error.code) from None
@@ -444,14 +436,16 @@ class WorkflowService:
                     else WorkflowEdgeWrite.model_validate(item)
                     for item in edges
                 ]
+                self._validate_material_source(
+                    {"nodes": [item.model_dump() for item in node_values]}
+                )
                 return self._store.save_graph(
                     identity,
                     revision=revision,
                     nodes=node_values,
                     edges=edge_values,
                     protect_reserved_metadata=True,
-                    validate_input_binding_schema=True,
-                    commit_validator=self._validate_material_source_commit,
+                    validate_workflow_io_contract=True,
                 )
             except ValidationError:
                 raise WorkflowError("invalid_input") from None
@@ -506,11 +500,6 @@ class WorkflowService:
                     run_mode=run_mode,
                     target_node_uuid=target_node_uuid,
                     input_value=input_value,
-                ),
-                reservation_builder=(
-                    self._reserve_task_materials
-                    if self._material_reservations is not None
-                    else None
                 ),
             )
         except TaskInputError as error:
@@ -576,6 +565,96 @@ class WorkflowService:
     def list_workflow_node_jobs(self, task_uuid: str) -> List[Dict[str, Any]]:
         identity = self.get_workflow_task(task_uuid)["uuid"]
         return self._store.list_jobs(identity)
+
+    def project_material_admission(
+        self,
+        result: TaskMaterialAdmissionResult,
+    ) -> bool:
+        """Project one closed Inventory admission result exactly once."""
+
+        if not isinstance(result, TaskMaterialAdmissionResult):
+            raise WorkflowError("invalid_input")
+        task_uuid = self.get_workflow_task(result.workflow_task_uuid)["uuid"]
+        payload = {
+            "schema_version": result.schema_version,
+            "command_uuid": result.command_uuid,
+            "workflow_task_uuid": result.workflow_task_uuid,
+            "status": result.status,
+            "reservation_uuid": result.reservation_uuid,
+            "bindings": [
+                {
+                    "material_source_node_uuid": binding.material_source_node_uuid,
+                    "resource_slot": dict(binding.resource_slot),
+                    "site_uuid": binding.site_uuid,
+                }
+                for binding in result.bindings
+            ],
+            "diagnostics": [dict(item) for item in result.diagnostics],
+            "outbox_sequence": result.outbox_sequence,
+        }
+        try:
+            return self._store.project_task_material_admission(
+                task_uuid=task_uuid,
+                command_uuid=result.command_uuid,
+                status=result.status,
+                reservation_uuid=result.reservation_uuid,
+                outbox_sequence=result.outbox_sequence,
+                result=payload,
+                bindings=payload["bindings"],
+            )
+        except StoreNotFound:
+            raise WorkflowError("not_found") from None
+        except StoreConflict:
+            raise WorkflowError("conflict") from None
+
+    def get_material_admission(
+        self,
+        task_uuid: str,
+    ) -> dict[str, Any] | None:
+        """Read the durable five-field Material admission projection."""
+
+        identity = self.get_workflow_task(task_uuid)["uuid"]
+        return self._store.get_task_material_admission(identity)
+
+    def project_material_release(
+        self,
+        result: TaskMaterialReleaseResult,
+    ) -> bool:
+        """Project one closed terminal Material release exactly once."""
+
+        if not isinstance(result, TaskMaterialReleaseResult):
+            raise WorkflowError("invalid_input")
+        task_uuid = self.get_workflow_task(result.workflow_task_uuid)["uuid"]
+        payload = {
+            "schema_version": result.schema_version,
+            "command_uuid": result.command_uuid,
+            "workflow_task_uuid": result.workflow_task_uuid,
+            "status": result.status,
+            "reservation_uuid": result.reservation_uuid,
+            "outbox_sequence": result.outbox_sequence,
+        }
+        try:
+            return self._store.project_task_material_release(
+                task_uuid=task_uuid,
+                command_uuid=result.command_uuid,
+                status=result.status,
+                reservation_uuid=result.reservation_uuid,
+                outbox_sequence=result.outbox_sequence,
+                result=payload,
+            )
+        except StoreNotFound:
+            raise WorkflowError("not_found") from None
+        except StoreConflict:
+            raise WorkflowError("conflict") from None
+
+    def get_material_release(
+        self,
+        task_uuid: str,
+    ) -> dict[str, Any] | None:
+        """Read the durable five-field terminal Material release projection."""
+
+        identity = self.get_workflow_task(task_uuid)["uuid"]
+        return self._store.get_task_material_release(identity)
 
     def create_workflow_task_command(
         self,
@@ -868,21 +947,6 @@ class WorkflowService:
             resource_resolver=self._resource_resolver,
         )
 
-    def _reserve_task_materials(
-        self,
-        uow: Any,
-        task_uuid: str,
-        root_material_uuids: tuple[str, ...],
-    ) -> object:
-        provider = self._material_reservations
-        if provider is None:
-            raise TaskInputError("conflict")
-        return provider.reserve_task_materials(
-            uow,
-            task_uuid=task_uuid,
-            root_material_uuids=root_material_uuids,
-        )
-
     @staticmethod
     def _handle_data_key(handle: Dict[str, Any]) -> str:
         return str(handle.get("data_key") or handle.get("handle_key") or "").strip()
@@ -917,6 +981,7 @@ class WorkflowService:
             "group",
             "tool_call",
             "manual_confirm",
+            "material_source",
         }:
             raise StoreConflict(f"unsupported workflow node type {node_type!r}")
         return kind
@@ -1264,6 +1329,7 @@ class WorkflowService:
                     raise WorkflowConflict("candidate_not_materialized")
 
             try:
+                self._validate_material_source(candidate["graph"])
                 # 可变 Catalog 的 guard 必须先于 Store 事务获取并保持到事务结束。
                 with self._catalog_snapshot() as catalog_fingerprint:
                     if catalog_fingerprint != candidate["template_catalog_fingerprint"]:
@@ -1272,7 +1338,6 @@ class WorkflowService:
                         workflow_uuid=workflow_uuid,
                         candidate_hash=candidate_hash,
                         validate_draft_state=validate_draft_linearization,
-                        commit_validator=self._validate_material_source_commit,
                     )
             except StoreAuthoringConflict as error:
                 raise WorkflowConflict(error.code) from None

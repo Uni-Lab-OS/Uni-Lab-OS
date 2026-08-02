@@ -98,11 +98,15 @@ def _handle(
     value_type: str,
     required: bool = False,
     data_source: str | None = None,
+    value_schema: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
+    meta_data: dict[str, Any] = {"contract": "declared"}
+    if value_schema is not None:
+        meta_data["unilab"] = {"value_schema": deepcopy(value_schema)}
     return {
         "uuid": handle_uuid,
         "description": f"{key} contract",
-        "meta_data": {"contract": "declared"},
+        "meta_data": meta_data,
         "handle_key": key,
         "io_type": io_type,
         "display_name": key.replace("_", " ").title(),
@@ -187,6 +191,10 @@ def _catalog_imports() -> list[NodeTemplateImport]:
                     io_type="target",
                     value_type="string",
                     data_source="executor",
+                    value_schema={
+                        "anyOf": [{"type": "string"}, {"type": "null"}],
+                        "default": None,
+                    },
                 ),
                 _handle(PREPARE_READY_TARGET, **ready_target),
                 _handle(
@@ -361,6 +369,7 @@ def _opened_engine(
     database_path: Path,
     *,
     imports: list[NodeTemplateImport] | None = None,
+    resource_template_identity_index: Any | None = None,
 ) -> Iterator[EngineContext]:
     store = WorkflowStore(database_path)
     try:
@@ -369,7 +378,11 @@ def _opened_engine(
             AUTHORITY,
             _catalog_imports() if imports is None else imports,
         )
-        engine = _engine_class()(catalog=catalog, authority=AUTHORITY)
+        engine = _engine_class()(
+            catalog=catalog,
+            authority=AUTHORITY,
+            resource_template_identity_index=resource_template_identity_index,
+        )
         yield EngineContext(store, catalog, engine, snapshot.fingerprint)
     finally:
         store.close()
@@ -558,6 +571,16 @@ def test_compile_returns_backend_identity_contracts_bindings_and_catalog(
     } == {
         PREPARE_TEMPLATE_UUID,
         ANALYZE_TEMPLATE_UUID,
+    }
+    note_handle = next(
+        item
+        for item in graph["handle_templates"]
+        if item["uuid"] == PREPARE_NOTE_TARGET
+    )
+    assert note_handle["required"] is False
+    assert note_handle["meta_data"]["unilab"]["value_schema"] == {
+        "anyOf": [{"type": "string"}, {"type": "null"}],
+        "default": None,
     }
     json.dumps(graph, ensure_ascii=False, allow_nan=False)
 
@@ -908,7 +931,7 @@ def test_generate_python_and_validate_are_pure_public_transforms(
     assert validated.normalized_python_source == compiled.normalized_python_source
 
 
-def test_workflow_output_import_alias_normalizes_to_the_canonical_marker(
+def test_workflow_output_import_alias_normalizes_to_the_result_record(
     engine_context: EngineContext,
 ) -> None:
     source = (
@@ -923,7 +946,13 @@ def test_workflow_output_import_alias_normalizes_to_the_canonical_marker(
     result = _compile(engine_context.engine, source)
 
     assert result.valid and result.normalized_python_source is not None
-    assert "return workflow_output(" in result.normalized_python_source
+    assert "workflow_output" not in result.normalized_python_source
+    assert "class SamplePreparationResult(TypedDict):" in (
+        result.normalized_python_source
+    )
+    assert "return {'sample': prepared.prepared, 'report': analyzed.report}" in (
+        result.normalized_python_source
+    )
 
 
 def test_validate_rejects_a_source_graph_semantic_mismatch(

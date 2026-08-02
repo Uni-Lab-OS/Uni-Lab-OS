@@ -9,39 +9,51 @@
 - api       —— 本地 FastAPI 路由（薄层）
 """
 
+from unilabos.app.scheduler.inventory.commands import execute_command
 from unilabos.app.scheduler.inventory.domain import (
-    CommandRejected,
-    DuplicateBarcode,
-    InstanceState,
-    InsufficientStock,
     InvariantViolation,
     InventoryError,
-    LotState,
-    MaterialRequirement,
-    NotFound,
-    ReservationState,
-    VersionConflict,
+    InventoryEvent,
+    MaterialAuthorityUnavailable,
+    MaterialConflict,
+    MaterialError,
+    MaterialInvalidInput,
+    MaterialNotFound,
+    MaterialRecord,
+    ResourceSlotResolution,
+    ResourceTemplateIdentity,
+    SiteRecord,
+    TaskMaterialAdmissionCommand,
+    TaskMaterialAdmissionResult,
+    TaskMaterialAdmissionSource,
+    TaskMaterialBinding,
+    TaskMaterialReleaseCommand,
+    TaskMaterialReleaseResult,
 )
-from unilabos.app.scheduler.inventory.store import InventoryStore
 from unilabos.app.scheduler.inventory.service import InventoryService
 from unilabos.app.scheduler.inventory.sync import OutboxWorker, build_snapshot
-from unilabos.app.scheduler.inventory.commands import execute_command
 
 __all__ = [
-    "CommandRejected",
-    "DuplicateBarcode",
-    "InstanceState",
-    "InsufficientStock",
     "InvariantViolation",
     "InventoryError",
+    "InventoryEvent",
     "InventoryService",
-    "InventoryStore",
-    "LotState",
-    "MaterialRequirement",
-    "NotFound",
+    "MaterialAuthorityUnavailable",
+    "MaterialConflict",
+    "MaterialError",
+    "MaterialInvalidInput",
+    "MaterialNotFound",
+    "MaterialRecord",
     "OutboxWorker",
-    "ReservationState",
-    "VersionConflict",
+    "ResourceSlotResolution",
+    "ResourceTemplateIdentity",
+    "SiteRecord",
+    "TaskMaterialAdmissionCommand",
+    "TaskMaterialAdmissionResult",
+    "TaskMaterialAdmissionSource",
+    "TaskMaterialBinding",
+    "TaskMaterialReleaseCommand",
+    "TaskMaterialReleaseResult",
     "build_snapshot",
     "execute_command",
 ]

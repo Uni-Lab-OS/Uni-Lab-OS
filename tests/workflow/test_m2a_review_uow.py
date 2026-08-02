@@ -1,4 +1,8 @@
-"""M2A review：MaterialSource 写事务 authority UoW。"""
+"""M1R review：MaterialSource 跨库静态读取发生在 Workflow 写事务外。
+
+静态读取不承诺跨库 TOCTOU 原子；Task admission 的动态重验与恢复由
+``test_m1r_scheduler_admission_crash_windows.py`` 等 M1R saga tests 覆盖。
+"""
 
 from __future__ import annotations
 
@@ -11,7 +15,7 @@ from typing import Any
 
 import pytest
 
-from unilabos.resources.authority import (
+from unilabos.app.scheduler.inventory import (
     MaterialNotFound,
     MaterialRecord,
     SiteRecord,
@@ -39,53 +43,42 @@ from .test_m2a_material_source_vertical_slice import (
 SECOND_MATERIAL_SOURCE_NODE_UUID = "20000000-0000-4000-8000-000000000003"
 
 
-class _UowAwareMaterialSourceAuthority:
-    """仅在调用者借入 Store UoW 时变化的 static-authority fake。"""
+class _CrossDatabaseStaticReadAuthority:
+    """不接受 Workflow UoW 的窄 static-authority fake。"""
 
-    def __init__(self, store: WorkflowStore, *, fail_in_uow: bool = False) -> None:
+    def __init__(self, store: WorkflowStore) -> None:
         self._store = store
         self._delegate = default_material_source_authority()
-        self._fail_in_uow = fail_in_uow
-        self.calls: list[tuple[str, object | None, bool]] = []
+        self.fail = False
+        self.calls: list[tuple[str, bool]] = []
 
     def reset_calls(self) -> None:
         self.calls.clear()
 
-    def _record(self, method: str, uow: object | None) -> None:
-        owned = uow is not None and self._store.owns_unit_of_work(uow)
-        self.calls.append((method, uow, owned))
+    def _record(self, method: str) -> None:
+        self.calls.append((method, self._store.current_unit_of_work() is not None))
 
     def get_material(
         self,
         material_uuid: str,
-        *,
-        uow: object | None = None,
     ) -> MaterialRecord:
-        self._record("get_material", uow)
-        if (
-            self._fail_in_uow
-            and uow is not None
-            and material_uuid == MOUNT_MATERIAL_UUID
-        ):
+        self._record("get_material")
+        if self.fail and material_uuid == MOUNT_MATERIAL_UUID:
             raise MaterialNotFound(f"material {material_uuid} not found")
         return self._delegate.get_material(material_uuid)
 
     def get_site(
         self,
         site_uuid: str,
-        *,
-        uow: object | None = None,
     ) -> SiteRecord:
-        self._record("get_site", uow)
+        self._record("get_site")
         return self._delegate.get_site(site_uuid)
 
     def list_sites(
         self,
         material_uuid: str,
-        *,
-        uow: object | None = None,
     ) -> Sequence[SiteRecord]:
-        self._record("list_sites", uow)
+        self._record("list_sites")
         return self._delegate.list_sites(material_uuid)
 
 
@@ -94,23 +87,18 @@ class _ServiceContext:
     store: WorkflowStore
     engine: WorkflowAuthoringEngine
     service: WorkflowService
-    authority: _UowAwareMaterialSourceAuthority
+    authority: _CrossDatabaseStaticReadAuthority
 
 
 @contextmanager
 def _opened_service(
     database_path: Path,
-    *,
-    fail_in_uow: bool,
 ) -> Iterator[_ServiceContext]:
     store = WorkflowStore(database_path)
     try:
         catalog = TemplateCatalog(store)
         catalog.replace(AUTHORITY, _catalog_imports())
-        authority = _UowAwareMaterialSourceAuthority(
-            store,
-            fail_in_uow=fail_in_uow,
-        )
+        authority = _CrossDatabaseStaticReadAuthority(store)
         engine = WorkflowAuthoringEngine(
             catalog=catalog,
             authority=AUTHORITY,
@@ -163,28 +151,22 @@ def _graph_covering_exact_and_all_sites(
     return graph
 
 
-def _assert_one_active_store_uow(
-    calls: list[tuple[str, object | None, bool]],
+def _assert_static_reads_outside_workflow_transaction(
+    calls: list[tuple[str, bool]],
 ) -> None:
-    assert {method for method, _, _ in calls} == {
+    assert {method for method, _ in calls} == {
         "get_material",
         "get_site",
         "list_sites",
     }
-    uows = [uow for _, uow, _ in calls]
-    assert uows
-    assert uows[0] is not None
-    assert all(uow is uows[0] for uow in uows)
-    assert all(owned for _, _, owned in calls)
+    assert calls
+    assert all(not in_workflow_transaction for _, in_workflow_transaction in calls)
 
 
-def test_direct_save_validates_all_material_source_facts_in_one_store_uow(
+def test_save_reads_all_material_source_facts_outside_workflow_transaction(
     tmp_path: Path,
 ) -> None:
-    with _opened_service(
-        tmp_path / "workflow.db",
-        fail_in_uow=False,
-    ) as context:
+    with _opened_service(tmp_path / "workflow.db") as context:
         graph = _graph_covering_exact_and_all_sites(context)
         context.authority.reset_calls()
 
@@ -196,19 +178,17 @@ def test_direct_save_validates_all_material_source_facts_in_one_store_uow(
         )
 
         assert saved["workflow"]["revision"] == 2
-        _assert_one_active_store_uow(context.authority.calls)
+        _assert_static_reads_outside_workflow_transaction(context.authority.calls)
 
 
-def test_direct_save_rolls_back_when_mount_disappears_inside_store_uow(
+def test_save_rejects_static_not_found_before_workflow_write(
     tmp_path: Path,
 ) -> None:
-    with _opened_service(
-        tmp_path / "workflow.db",
-        fail_in_uow=True,
-    ) as context:
+    with _opened_service(tmp_path / "workflow.db") as context:
         graph = _compiled_graph(context)
         context.authority.reset_calls()
         graph_before = context.service.get_graph(WORKFLOW_UUID)
+        context.authority.fail = True
 
         with pytest.raises(WorkflowError) as caught:
             context.service.save_graph(
@@ -220,19 +200,18 @@ def test_direct_save_rolls_back_when_mount_disappears_inside_store_uow(
 
         assert caught.value.code == "not_found"
         assert context.authority.calls
-        assert context.authority.calls[0][1] is not None
-        assert context.authority.calls[0][2] is True
+        assert all(
+            not in_workflow_transaction
+            for _, in_workflow_transaction in context.authority.calls
+        )
         assert context.service.get_graph(WORKFLOW_UUID) == graph_before
         assert context.service.get_workflow(WORKFLOW_UUID)["revision"] == 1
 
 
-def test_apply_rolls_back_when_mount_disappears_inside_commit_uow(
+def test_apply_rejects_static_not_found_before_workflow_write(
     tmp_path: Path,
 ) -> None:
-    with _opened_service(
-        tmp_path / "workflow.db",
-        fail_in_uow=True,
-    ) as context:
+    with _opened_service(tmp_path / "workflow.db") as context:
         package_root = tmp_path / "package"
         package_root.mkdir()
         context.service.register_editable_source(
@@ -250,6 +229,7 @@ def test_apply_rolls_back_when_mount_disappears_inside_commit_uow(
         source_before = source_path.read_bytes()
         events_before = context.service.list_events(after_id=0)
         context.authority.reset_calls()
+        context.authority.fail = True
 
         with pytest.raises(WorkflowError) as caught:
             context.service.apply_authoring(
@@ -257,12 +237,12 @@ def test_apply_rolls_back_when_mount_disappears_inside_commit_uow(
                 candidate_hash=candidate["candidate_hash"],
             )
 
-        assert caught.value.code == "not_found"
-        assert any(uow is None for _, uow, _ in context.authority.calls)
-        commit_calls = [call for call in context.authority.calls if call[1] is not None]
-        assert commit_calls
-        assert all(call[2] for call in commit_calls)
-        assert all(call[1] is commit_calls[0][1] for call in commit_calls)
+        assert caught.value.code == "draft_invalid"
+        assert context.authority.calls
+        assert all(
+            not in_workflow_transaction
+            for _, in_workflow_transaction in context.authority.calls
+        )
         assert context.service.get_graph(WORKFLOW_UUID) == graph_before
         assert context.service.get_workflow(WORKFLOW_UUID)["revision"] == 1
         assert source_path.read_bytes() == source_before

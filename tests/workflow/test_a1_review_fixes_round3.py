@@ -238,6 +238,10 @@ def _compatible_case(case: str) -> tuple[list[Any], str]:
             for handle in template.handles:
                 if handle["uuid"] == PREPARE_NOTE_TARGET:
                     handle["type"] = "list[string]"
+                    handle["meta_data"]["unilab"]["value_schema"] = {
+                        "type": "array",
+                        "items": {"type": "string"},
+                    }
         source = source.replace(
             "    note: Annotated[str | None, Field(max_length=200)] = None,",
             "    note: list[str] = [],",
