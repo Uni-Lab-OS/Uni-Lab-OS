@@ -374,11 +374,19 @@ def test_production_cancel_command_triggers_terminal_material_release(
         resource_template_identity_resolver=_FixedResourceTemplateIdentityIndex(),
     )
     task = _create_existing_material_task(service)
+    waiting_task = service.create_workflow_task(
+        workflow_uuid=WORKFLOW_UUID,
+        run_mode="normal",
+        target_node_uuid=None,
+        input_value={},
+        description=None,
+        meta_data={},
+    )
     inventory = get_workflow_inventory_service()
     assert inventory is not None
 
     try:
-        integration.setup_edge_scheduler(
+        scheduler, _backend = integration.setup_edge_scheduler(
             inventory_service=inventory,
             workflow_tasks=service,
             host_node_getter=lambda: None,
@@ -390,6 +398,9 @@ def test_production_cancel_command_triggers_terminal_material_release(
         assert admission["status"] == "admitted"
         reservation_uuid = admission["reservation_uuid"]
         assert isinstance(reservation_uuid, str)
+        blocked = service.get_material_admission(waiting_task["uuid"])
+        assert blocked is not None
+        assert blocked["status"] == "blocked"
 
         service.create_workflow_task_command(
             task["uuid"],
@@ -403,6 +414,10 @@ def test_production_cancel_command_triggers_terminal_material_release(
             lambda: (
                 service.get_workflow_task(task["uuid"])["status"] == "canceled"
                 and service.get_material_release(task["uuid"]) is not None
+                and (service.get_material_admission(waiting_task["uuid"]) or {}).get(
+                    "status"
+                )
+                == "admitted"
             )
         )
 
@@ -414,6 +429,7 @@ def test_production_cancel_command_triggers_terminal_material_release(
             task["uuid"],
             reservation_uuid,
         )
+        assert scheduler.can_dispatch_task_materials(waiting_task["uuid"])
     finally:
         integration.reset_for_test()
 
@@ -450,6 +466,16 @@ def test_edge_scheduler_startup_recovers_missed_terminal_release(
         assert isinstance(reservation_uuid, str)
         integration.reset_for_test()
 
+        waiting_task = service.create_workflow_task(
+            workflow_uuid=WORKFLOW_UUID,
+            run_mode="normal",
+            target_node_uuid=None,
+            input_value={},
+            description=None,
+            meta_data={},
+        )
+        assert service.get_material_admission(waiting_task["uuid"]) is None
+
         service.create_workflow_task_command(
             task["uuid"],
             command_type="cancel",
@@ -467,7 +493,7 @@ def test_edge_scheduler_startup_recovers_missed_terminal_release(
             reservation_uuid,
         )
 
-        integration.setup_edge_scheduler(
+        scheduler, _backend = integration.setup_edge_scheduler(
             inventory_service=inventory,
             workflow_tasks=service,
             host_node_getter=lambda: None,
@@ -483,5 +509,9 @@ def test_edge_scheduler_startup_recovers_missed_terminal_release(
             task["uuid"],
             reservation_uuid,
         )
+        waiting_admission = service.get_material_admission(waiting_task["uuid"])
+        assert waiting_admission is not None
+        assert waiting_admission["status"] == "admitted"
+        assert scheduler.can_dispatch_task_materials(waiting_task["uuid"])
     finally:
         integration.reset_for_test()
