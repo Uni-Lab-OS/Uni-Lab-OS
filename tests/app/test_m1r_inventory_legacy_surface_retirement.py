@@ -185,7 +185,7 @@ def test_outbox_worker_flushes_and_reopens_through_inventory_service(
         _create_material(inventory)
         worker = inventory_api.OutboxWorker(inventory, sender)
 
-        assert inventory.get_acknowledged_sequence() == 0
+        assert inventory.get_acknowledged_sequence(consumer="cloud") == 0
         assert worker.flush_all() == 1
         assert worker.backlog() == 0
         assert len(sender.received) == 1
@@ -194,13 +194,19 @@ def test_outbox_worker_flushes_and_reopens_through_inventory_service(
         assert event["aggregate_id"] == MATERIAL_UUID
         assert event["payload"]["material"]["uuid"] == MATERIAL_UUID
         acknowledged_sequence = event["sequence"]
-        assert inventory.get_acknowledged_sequence() == acknowledged_sequence
+        assert (
+            inventory.get_acknowledged_sequence(consumer="cloud")
+            == acknowledged_sequence
+        )
     finally:
         inventory.close()
 
     reopened = _open_inventory(tmp_path)
     try:
-        assert reopened.get_acknowledged_sequence() == acknowledged_sequence
+        assert (
+            reopened.get_acknowledged_sequence(consumer="cloud")
+            == acknowledged_sequence
+        )
         assert (
             reopened.read_outbox(
                 after_sequence=acknowledged_sequence,

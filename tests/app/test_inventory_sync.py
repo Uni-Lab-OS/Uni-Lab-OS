@@ -48,7 +48,7 @@ def test_failed_send_keeps_durable_events_for_retry(tmp_path: Path) -> None:
         worker = OutboxWorker(inventory, fail)
         with pytest.raises(ConnectionError):
             worker.flush_once()
-        assert inventory.get_acknowledged_sequence() == 0
+        assert inventory.get_acknowledged_sequence(consumer="cloud") == 0
         assert worker.backlog() == 1
         assert len(inventory.read_outbox(after_sequence=0, limit=100)) == 1
     finally:
@@ -69,7 +69,7 @@ def test_partial_ack_replays_only_unacknowledged_suffix(tmp_path: Path) -> None:
     try:
         worker = OutboxWorker(inventory, sender)
         assert worker.flush_once() == 1
-        assert inventory.get_acknowledged_sequence() == 1
+        assert inventory.get_acknowledged_sequence(consumer="cloud") == 1
         assert worker.flush_once() == 2
         assert batches == [[1, 2, 3], [2, 3]]
         assert worker.backlog() == 0
@@ -120,14 +120,35 @@ def test_reopen_preserves_cursor_and_snapshot_sequence(tmp_path: Path) -> None:
 
     try:
         assert OutboxWorker(inventory, sender).flush_all() == 1
-        sequence = inventory.get_acknowledged_sequence()
+        sequence = inventory.get_acknowledged_sequence(consumer="cloud")
     finally:
         inventory.close()
 
     reopened = _open(tmp_path)
     try:
-        assert reopened.get_acknowledged_sequence() == sequence
+        assert reopened.get_acknowledged_sequence(consumer="cloud") == sequence
         assert build_snapshot(reopened)["snapshot_sequence"] == sequence
         assert reopened.outbox_status()["backlog"] == 0
     finally:
         reopened.close()
+
+
+def test_scheduler_ack_does_not_skip_cloud_delivery(tmp_path: Path) -> None:
+    inventory = _open(tmp_path)
+    _create_material(inventory, 707)
+    _create_material(inventory, 708)
+    sent: list[int] = []
+
+    def sender(events: list[dict[str, Any]]) -> int:
+        sent.extend(event["sequence"] for event in events)
+        return events[-1]["sequence"]
+
+    try:
+        inventory.acknowledge(2, consumer="scheduler")
+
+        assert OutboxWorker(inventory, sender).flush_once() == 2
+        assert sent == [1, 2]
+        assert inventory.get_acknowledged_sequence(consumer="scheduler") == 2
+        assert inventory.get_acknowledged_sequence(consumer="cloud") == 2
+    finally:
+        inventory.close()

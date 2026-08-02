@@ -318,3 +318,29 @@ def test_inventory_open_rejects_legacy_or_mixed_schema_without_mutation(
             unexpectedly_opened.close()
 
     assert _database_snapshot(database) == before
+
+
+def test_inventory_open_rejects_v4_with_missing_required_index(
+    tmp_path: Path,
+) -> None:
+    database = tmp_path / "inventory.db"
+    inventory = InventoryService.open(
+        working_dir=tmp_path,
+        resource_templates={},
+    )
+    inventory.close()
+    connection = sqlite3.connect(database)
+    try:
+        connection.execute("DROP INDEX ux_material_barcode_active_nonempty")
+        connection.commit()
+    finally:
+        connection.close()
+    before = _database_snapshot(database)
+
+    with pytest.raises(MaterialAuthorityUnavailable):
+        InventoryService.open(
+            working_dir=tmp_path,
+            resource_templates={},
+        )
+
+    assert _database_snapshot(database) == before

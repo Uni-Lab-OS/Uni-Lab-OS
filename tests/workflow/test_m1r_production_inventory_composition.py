@@ -5,6 +5,8 @@ from __future__ import annotations
 from pathlib import Path
 
 import pytest
+from fastapi import FastAPI
+from fastapi.testclient import TestClient
 
 import unilabos.workflow.composition as composition_module
 import unilabos.workflow.material_resolver as material_resolver_module
@@ -13,6 +15,7 @@ from tests.workflow.test_m2a_material_source_production_composition import (
     AUTHORITY,
     MOUNT_MATERIAL_UUID,
     SITE_UUID,
+    WORKFLOW_UUID,
     _compile,
     _create_workflow,
     _registry_snapshot,
@@ -22,10 +25,13 @@ from unilabos.app.scheduler.inventory import (
     InventoryService,
     ResourceTemplateIdentity,
 )
+from unilabos.app.workflow_api import install_composed_workflow_authoring_api
 from unilabos.workflow.composition import (
     compose_workflow_runtime,
+    get_workflow_inventory_service,
     reset_workflow_service_for_test,
 )
+from unilabos.workflow.service import WorkflowError
 
 HOST_TEMPLATE_UUID = "81000000-0000-4000-8000-000000000214"
 PLATE_TEMPLATE_UUID = "82000000-0000-4000-8000-000000000214"
@@ -109,6 +115,7 @@ def test_production_composition_opens_workflow_and_inventory_databases(
     service = compose_workflow_runtime(working_dir)
 
     assert service is composition_module.get_workflow_service()
+    assert get_workflow_inventory_service() is not None
     assert (working_dir / "workflow.db").is_file()
     assert (working_dir / "inventory.db").is_file()
 
@@ -182,3 +189,123 @@ def test_production_wiring_has_no_retired_or_borrowed_material_authority() -> No
         "opens_public_inventory": True,
         "forbidden_references": [],
     }
+
+
+def test_edge_scheduler_reuses_composed_workflow_and_inventory_authorities(
+    tmp_path: Path,
+) -> None:
+    from unilabos.app.scheduler import integration
+
+    working_dir = tmp_path / "unilabos_data"
+    service = compose_workflow_runtime(working_dir)
+    inventory = get_workflow_inventory_service()
+    assert inventory is not None
+    try:
+        scheduler, _backend = integration.setup_edge_scheduler(
+            inventory_service=inventory,
+            workflow_tasks=service,
+            host_node_getter=lambda: None,
+            device_state_db_path="off",
+            workflow_history_db_path="off",
+        )
+
+        assert integration.get_inventory_service() is inventory
+        with pytest.raises(WorkflowError, match="请求的资源不存在"):
+            scheduler.reconcile_task_admission("70000000-0000-4000-8000-000000000214")
+        assert sorted(path.name for path in working_dir.glob("*.db")) == [
+            "inventory.db",
+            "workflow.db",
+        ]
+    finally:
+        integration.reset_for_test()
+
+
+def test_production_task_post_coordinates_admission_after_task_commit(
+    tmp_path: Path,
+) -> None:
+    service = compose_workflow_runtime(tmp_path / "unilabos_data")
+    service.create_workflow(
+        workflow_uuid=WORKFLOW_UUID,
+        name="M1R task ingress",
+        tags=[],
+        description=None,
+        meta_data={},
+    )
+    coordinated: list[str] = []
+
+    def coordinate(task_uuid: str) -> None:
+        assert service.get_workflow_task(task_uuid)["uuid"] == task_uuid
+        coordinated.append(task_uuid)
+
+    app = FastAPI()
+    install_composed_workflow_authoring_api(
+        app,
+        service,
+        object(),
+        task_admission_coordinator=coordinate,
+    )
+    with TestClient(app) as client:
+        response = client.post(
+            "/api/v1/workflow-tasks",
+            json={
+                "workflow_uuid": WORKFLOW_UUID,
+                "run_mode": "normal",
+                "input": {},
+                "meta_data": {},
+            },
+        )
+
+    assert response.status_code == 201
+    assert coordinated == [response.json()["data"]["uuid"]]
+
+
+def test_edge_scheduler_startup_reconciles_pending_material_source_tasks(
+    tmp_path: Path,
+) -> None:
+    from unilabos.app.scheduler import integration
+
+    working_dir = tmp_path / "unilabos_data"
+    _seed_public_inventory(working_dir)
+    service = compose_workflow_runtime(
+        working_dir,
+        authority=AUTHORITY,
+        registry_snapshot=_registry_snapshot(),
+        resource_registry_snapshot=_resource_registry_snapshot(),
+        resource_template_identity_resolver=_FixedResourceTemplateIdentityIndex(),
+    )
+    applied = _create_workflow(service)
+    compiled = _compile(service, applied)
+    assert compiled.valid, compiled.diagnostics
+    assert compiled.graph is not None
+    service.save_graph(
+        applied["workflow"]["uuid"],
+        revision=applied["workflow"]["revision"],
+        nodes=compiled.graph["nodes"],
+        edges=compiled.graph["edges"],
+    )
+    task = service.create_workflow_task(
+        workflow_uuid=WORKFLOW_UUID,
+        run_mode="normal",
+        target_node_uuid=None,
+        input_value={},
+        description=None,
+        meta_data={},
+    )
+    assert service.get_material_admission(task["uuid"]) is None
+    inventory = get_workflow_inventory_service()
+    assert inventory is not None
+
+    try:
+        integration.setup_edge_scheduler(
+            inventory_service=inventory,
+            workflow_tasks=service,
+            host_node_getter=lambda: None,
+            device_state_db_path="off",
+            workflow_history_db_path="off",
+        )
+
+        projection = service.get_material_admission(task["uuid"])
+        assert projection is not None
+        assert projection["status"] == "rejected"
+    finally:
+        integration.reset_for_test()
