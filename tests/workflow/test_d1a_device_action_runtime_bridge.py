@@ -40,6 +40,7 @@ class FeedbackHost:
         self.backend: JobExecutionBackend | None = None
         self.sent: list[Any] = []
         self.auto_complete = True
+        self.cancel_requests: list[str] = []
 
     def send_goal(
         self,
@@ -61,6 +62,10 @@ class FeedbackHost:
                 "success",
                 serialize_result_info("", True, {"completed": True}),
             )
+
+    def cancel_goal_or_defer(self, job_uuid: str) -> bool:
+        self.cancel_requests.append(job_uuid)
+        return True
 
 
 def test_edge_scheduler_uses_fixed_job_uuid_and_commits_before_dispatch() -> None:
@@ -255,6 +260,93 @@ def test_busy_second_task_stays_durable_pending_until_first_releases(
                 """
             ).fetchone()[0]
         assert holders == 1
+    finally:
+        client.close()
+        bridge.stop()
+        backend.stop()
+        store.close()
+
+
+def test_durable_cancel_command_requests_host_cancel_and_finishes_canceled(
+    tmp_path: Path,
+) -> None:
+    store = WorkflowStore(tmp_path / "workflow.db")
+    catalog = TemplateCatalog(store)
+    snapshot = catalog.replace(
+        contract.AUTHORITY,
+        [
+            contract._template_import(
+                name="move",
+                display_name="移动",
+                resource_template_uuid=contract.RESOURCE_TEMPLATE_UUID,
+                schema=contract.SIMPLE_SCHEMA,
+            )
+        ],
+    )
+    template = snapshot.node_templates[0]
+    host = FeedbackHost()
+    host.auto_complete = False
+    scheduler, backend = create_edge_stack(host_node_getter=lambda: host)
+    host.backend = backend
+    coordinator = WorkflowRuntimeCoordinator(store)
+    bridge = DeviceActionTaskRuntimeBridge(
+        store=store,
+        coordinator=coordinator,
+        scheduler=scheduler,
+        backend=backend,
+    )
+    bridge.start()
+    live = contract.MutableLiveCatalog()
+    service = DeviceActionTaskService(
+        store=store,
+        template_catalog=catalog,
+        authority=contract.AUTHORITY,
+        live_catalog=live,
+        admission=bridge,
+    )
+    workflow_service = WorkflowService(store)
+    client = TestClient(
+        create_workflow_app(workflow_service, device_action_tasks=service)
+    )
+    harness = contract.Harness(
+        tmp_path / "workflow.db",
+        store,
+        client,
+        catalog,
+        snapshot.fingerprint,
+        str(template["uuid"]),
+        "",
+        live,
+        bridge,
+    )
+    try:
+        created = client.post(
+            "/api/v1/device-action-tasks", json=contract._request(harness)
+        ).json()["data"]
+        assert _wait(lambda: len(host.sent) == 1)
+        response = client.post(
+            f"/api/v1/workflow-tasks/{created['task_uuid']}/commands",
+            json={
+                "type": "cancel",
+                "target_node_uuid": None,
+                "idempotency_key": str(uuid4()),
+                "description": "operator cancel",
+                "meta_data": {},
+            },
+        )
+        assert response.status_code == 201
+        coordinator.consume_next_command(created["task_uuid"])
+        bridge.sweep_cancellations()
+        assert host.cancel_requests == [created["job_uuid"]]
+
+        backend.publish_job_status(
+            {},
+            host.sent[0],
+            "failed",
+            serialize_result_info("Job was cancelled", False, {}),
+        )
+        assert _wait(lambda: service.get(created["task_uuid"])["status"] == "canceled")
+        assert service.get(created["task_uuid"])["job_status"] == "canceled"
     finally:
         client.close()
         bridge.stop()
