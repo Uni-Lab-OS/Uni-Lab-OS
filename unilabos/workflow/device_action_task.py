@@ -783,7 +783,7 @@ class DeviceActionTaskRuntimeBridge:
                 return
             if self._scheduler is None or self._backend is None:
                 return
-            self._scheduler.set_dispatch_hooks(
+            self._scheduler.set_device_action_task_hooks(
                 before=self._before_dispatch,
                 on_error=self._dispatch_failed,
             )
@@ -807,7 +807,10 @@ class DeviceActionTaskRuntimeBridge:
             self._started = False
             self._stop_event.set()
             if self._scheduler is not None:
-                self._scheduler.set_dispatch_hooks(before=None, on_error=None)
+                self._scheduler.set_device_action_task_hooks(
+                    before=None,
+                    on_error=None,
+                )
                 self._scheduler.set_device_action_fence_provider(None)
             if self._backend is not None:
                 self._backend.remove_job_status_listener(self._on_job_status)
@@ -853,20 +856,17 @@ class DeviceActionTaskRuntimeBridge:
             self._submit(task_uuid)
 
     def busy_device_action_keys(self) -> set[str]:
-        """把 durable Job Execution Claim 投影为 Scheduler busy keys。"""
+        """把 durable Claim/unknown 投影为 v1 device-instance fences。"""
 
         with self._store.transaction() as connection:
             rows = connection.execute(
                 """
-                SELECT device_id, action_name
+                SELECT DISTINCT device_id
                 FROM device_action_task
                 WHERE claim_status IN ('claimed', 'unknown')
                 """
             ).fetchall()
-        return {
-            f"/devices/{row['device_id']}/{row['action_name']}"
-            for row in rows
-        }
+        return {f"/devices/{row['device_id']}" for row in rows}
 
     def sweep_cancellations(self) -> None:
         """把 durable cancel 状态投影到 scheduler/backend；外部调用幂等。"""
@@ -934,7 +934,7 @@ class DeviceActionTaskRuntimeBridge:
                     claimed.append(item)
 
         for item in pending_canceled:
-            self._scheduler.cancel_workflow(item["workflow_task_uuid"])
+            self._scheduler.cancel_device_action_task(item["workflow_task_uuid"])
         for item in claimed:
             job_uuid = item["workflow_node_job_uuid"]
             if self._backend.request_cancel(job_uuid):
@@ -973,8 +973,6 @@ class DeviceActionTaskRuntimeBridge:
         *,
         expected_job_uuid: str | None = None,
     ) -> None:
-        from unilabos.app.scheduler.models import WorkflowNode, WorkflowSpec
-
         with self._lock, self._store.transaction() as connection:
             row = connection.execute(
                 """
@@ -998,7 +996,7 @@ class DeviceActionTaskRuntimeBridge:
                 raise WorkflowError("conflict")
             if row["task_status"] != "pending" or row["job_status"] != "pending":
                 return
-            if self._scheduler.workflow_snapshot(task_uuid) is not None:
+            if self._scheduler.has_device_action_task(task_uuid):
                 return
             workflow_snapshot = _load(row["workflow_snapshot"], {})
             nodes = (
@@ -1022,28 +1020,27 @@ class DeviceActionTaskRuntimeBridge:
             )
             if not isinstance(action_type, str) or not action_type:
                 raise WorkflowError("internal_error")
-            spec = WorkflowSpec(
-                workflow_id=task_uuid,
-                task_id=task_uuid,
-                nodes=[
-                    WorkflowNode(
-                        # Scheduler timeline/monitor 是公开 wire。单节点投影以
-                        # 已公开的 formal Job UUID 作为 opaque node identity，
-                        # 不允许 system WorkflowNode UUID 从旁路泄漏。
-                        id=row["workflow_node_job_uuid"],
-                        job_id=row["workflow_node_job_uuid"],
-                        device_id=row["device_id"],
-                        action_name=row["action_name"],
-                        action_type=action_type,
-                        param=_load(row["param"], {}),
-                        node_type="ILab",
-                    )
-                ],
-            )
-        self._scheduler.submit_workflow(spec)
+            job_uuid = row["workflow_node_job_uuid"]
+            device_id = row["device_id"]
+            action_name = row["action_name"]
+            input_value = _load(row["param"], {})
+        self._scheduler.submit_device_action_task(
+            task_uuid=task_uuid,
+            job_uuid=job_uuid,
+            device_id=device_id,
+            action_name=action_name,
+            action_type=action_type,
+            input_value=input_value,
+        )
 
-    def _before_dispatch(self, payload: dict[str, Any]) -> bool:
-        job_uuid = str(payload.get("job_id") or "")
+    def _before_dispatch(
+        self,
+        *,
+        task_uuid: str,
+        job_uuid: str,
+        device_id: str,
+        action_name: str,
+    ) -> bool:
         if not self._is_d1a_job(job_uuid):
             return False
         with self._store.transaction() as connection:
@@ -1064,9 +1061,9 @@ class DeviceActionTaskRuntimeBridge:
                 row["task_status"] != "pending"
                 or row["job_status"] != "pending"
                 or row["claim_status"] != "pending"
-                or payload.get("task_id") != row["workflow_task_uuid"]
-                or payload.get("device_id") != row["device_id"]
-                or payload.get("action") != row["action_name"]
+                or task_uuid != row["workflow_task_uuid"]
+                or device_id != row["device_id"]
+                or action_name != row["action_name"]
             ):
                 raise WorkflowError("conflict")
             now = utc_now()
@@ -1121,10 +1118,14 @@ class DeviceActionTaskRuntimeBridge:
 
     def _dispatch_failed(
         self,
-        payload: dict[str, Any],
+        *,
+        task_uuid: str,
+        job_uuid: str,
+        device_id: str,
+        action_name: str,
         error: BaseException,
     ) -> None:
-        job_uuid = str(payload.get("job_id") or "")
+        del task_uuid, device_id, action_name
         if not self._is_d1a_job(job_uuid):
             return
         self._coordinator.mark_job_unknown(

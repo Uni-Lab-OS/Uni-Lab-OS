@@ -163,6 +163,10 @@ class EdgeScheduler:
         self._history = history
         self._pre_dispatch_hook = pre_dispatch_hook
         self._dispatch_error_hook = dispatch_error_hook
+        # D1A 只消费 formal Task/Job port；legacy DAG identity 转换止于本模块。
+        self._device_action_tasks_by_job_uuid: dict[str, str] = {}
+        self._device_action_task_before_dispatch: Callable[..., bool | None] | None = None
+        self._device_action_task_dispatch_error: Callable[..., None] | None = None
         # 新 WorkflowTask kernel 的持久投影 port；不参与 legacy WorkflowRun DAG。
         self._workflow_tasks = workflow_tasks
         self._admission_fault_hook = admission_fault_hook
@@ -200,6 +204,84 @@ class EdgeScheduler:
         with self._lock:
             self._pre_dispatch_hook = before
             self._dispatch_error_hook = on_error
+
+    def set_device_action_task_hooks(
+        self,
+        *,
+        before: Callable[..., bool | None] | None = None,
+        on_error: Callable[..., None] | None = None,
+    ) -> None:
+        """安装 formal device-action Task dispatch 事务缝。"""
+
+        with self._lock:
+            self._device_action_task_before_dispatch = before
+            self._device_action_task_dispatch_error = on_error
+
+    def submit_device_action_task(
+        self,
+        *,
+        task_uuid: str,
+        job_uuid: str,
+        device_id: str,
+        action_name: str,
+        action_type: str,
+        input_value: dict[str, Any],
+    ) -> dict[str, Any]:
+        """以 formal Task/Job identity 提交一个冻结的设备 Action。
+
+        EdgeScheduler 的 legacy DAG model 转换只存在于这里；Workflow runtime
+        与公开 wire 不得看到该内部兼容模型。
+        """
+
+        from unilabos.app.scheduler.models import WorkflowNode, WorkflowSpec
+
+        values = (task_uuid, job_uuid, device_id, action_name, action_type)
+        if any(not isinstance(value, str) or not value for value in values):
+            raise ValueError("formal device-action Task fields must be non-empty")
+        with self._lock:
+            if job_uuid in self._device_action_tasks_by_job_uuid:
+                raise ValueError(f"device-action Job {job_uuid} already submitted")
+            self._device_action_tasks_by_job_uuid[job_uuid] = task_uuid
+            try:
+                return self.submit_workflow(
+                    WorkflowSpec(
+                        workflow_id=task_uuid,
+                        task_id=task_uuid,
+                        nodes=[
+                            WorkflowNode(
+                                id=job_uuid,
+                                job_id=job_uuid,
+                                device_id=device_id,
+                                action_name=action_name,
+                                action_type=action_type,
+                                param=dict(input_value),
+                                node_type="ILab",
+                            )
+                        ],
+                    )
+                )
+            except BaseException:
+                self._device_action_tasks_by_job_uuid.pop(job_uuid, None)
+                raise
+
+    def has_device_action_task(self, task_uuid: str) -> bool:
+        """Return whether the formal Task is already registered in this generation."""
+
+        with self._lock:
+            return task_uuid in self._workflows
+
+    def cancel_device_action_task(self, task_uuid: str) -> bool:
+        """Cancel one formal Task without exporting the legacy DAG model."""
+
+        with self._lock:
+            canceled = self.cancel_workflow(task_uuid)
+            if canceled:
+                for job_uuid, owner_uuid in tuple(
+                    self._device_action_tasks_by_job_uuid.items()
+                ):
+                    if owner_uuid == task_uuid:
+                        self._device_action_tasks_by_job_uuid.pop(job_uuid, None)
+            return canceled
 
     def reconcile_task_admission(
         self,
@@ -669,10 +751,11 @@ class EdgeScheduler:
         dispatched: list[dict[str, Any]] = []
         for task in ordered:
             key = task.node.device_action_key
+            device_key = task.node.device_lock_key
             # manual_confirm 是 always-free 特殊节点：不占设备动作锁，也不受其阻塞
             manual_confirm = task.node.is_manual_confirm()
-            if not manual_confirm and key in busy:
-                # 设备/动作被占用：本轮跳过，等占用 job 完成的那次重排再下发
+            if not manual_confirm and (key in busy or device_key in busy):
+                # v1 锁整个设备实例；任一 Action/Claim/fence 占用都阻止同设备下发。
                 continue
 
             run = self._workflows[task.workflow_id]
@@ -715,11 +798,40 @@ class EdgeScheduler:
             estimated_s, estimate_source = self._estimator.estimate(key, resolved_args)
             if not manual_confirm:
                 committed = False
+                formal_task_uuid = self._device_action_tasks_by_job_uuid.get(job_id)
                 try:
-                    if self._pre_dispatch_hook is not None:
+                    if (
+                        formal_task_uuid is not None
+                        and self._device_action_task_before_dispatch is not None
+                    ):
+                        committed = self._device_action_task_before_dispatch(
+                            task_uuid=formal_task_uuid,
+                            job_uuid=job_id,
+                            device_id=task.node.device_id,
+                            action_name=task.node.action_name,
+                        ) is True
+                    elif self._pre_dispatch_hook is not None:
                         committed = self._pre_dispatch_hook(payload) is True
                     self._dispatcher.dispatch(payload)
                 except Exception as error:
+                    if (
+                        committed
+                        and formal_task_uuid is not None
+                        and self._device_action_task_dispatch_error is not None
+                    ):
+                        self._device_action_task_dispatch_error(
+                            task_uuid=formal_task_uuid,
+                            job_uuid=job_id,
+                            device_id=task.node.device_id,
+                            action_name=task.node.action_name,
+                            error=error,
+                        )
+                        run.mark_failed(task.node.id)
+                        logger.exception(
+                            "[EdgeScheduler] formal Task dispatch failed after "
+                            "durable pre-commit"
+                        )
+                        continue
                     if committed and self._dispatch_error_hook is not None:
                         self._dispatch_error_hook(payload, error)
                         run.mark_failed(task.node.id)
@@ -742,7 +854,7 @@ class EdgeScheduler:
                 estimate_source=estimate_source,
             )
             if not manual_confirm:
-                busy.add(key)
+                busy.update((key, device_key))
             if lock_keys:
                 self._job_resource_locks[job_id] = lock_keys
                 held_resource_locks |= lock_keys
@@ -873,6 +985,7 @@ class EdgeScheduler:
                 )
         for job in self._inflight.values():
             busy.add(job.device_action_key)
+            busy.add(f"/devices/{job.device_id}")
         return busy
 
     def set_device_action_fence_provider(

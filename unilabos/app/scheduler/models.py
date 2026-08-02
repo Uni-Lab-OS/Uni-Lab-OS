@@ -99,6 +99,11 @@ class WorkflowNode:
         """与 ws_client 一致的设备动作锁 key。"""
         return f"/devices/{self.device_id}/{self.action_name}"
 
+    @property
+    def device_lock_key(self) -> str:
+        """v1 Claim/fence 锁整个选中设备实例，而不是单个 Action。"""
+        return f"/devices/{self.device_id}"
+
     def is_ilab(self) -> bool:
         return normalize_node_type(self.node_type) == "ILab"
 

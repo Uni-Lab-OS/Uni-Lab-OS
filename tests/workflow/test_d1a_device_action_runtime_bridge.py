@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import copy
+import inspect
 import json
 import time
 from pathlib import Path
@@ -112,6 +113,23 @@ class GenericRecordingDispatcher:
 
     def remove_job_finished_listener(self, listener: Any) -> None:
         self.listeners.remove(listener)
+
+
+def test_d1a_bridge_only_depends_on_formal_scheduler_identity_port() -> None:
+    source = inspect.getsource(DeviceActionTaskRuntimeBridge)
+
+    for forbidden in (
+        "WorkflowSpec",
+        "WorkflowNode(",
+        "submit_workflow(",
+        "cancel_workflow(",
+        "workflow_snapshot(",
+        'payload.get("job_id")',
+        'payload.get("task_id")',
+    ):
+        assert forbidden not in source
+    assert "submit_device_action_task(" in source
+    assert "cancel_device_action_task(" in source
 
 
 def test_edge_scheduler_uses_fixed_job_uuid_and_commits_before_dispatch() -> None:
@@ -275,6 +293,91 @@ def test_transport_uncertainty_opens_durable_fence_and_keeps_next_task_pending(
         )
         assert service.get(second["task_uuid"])["status"] == "pending"
         assert service.get(second["task_uuid"])["job_status"] == "pending"
+    finally:
+        client.close()
+        bridge.stop()
+        backend.stop()
+        store.close()
+
+
+def test_transport_unknown_fences_every_action_on_the_selected_device(
+    tmp_path: Path,
+) -> None:
+    store = WorkflowStore(tmp_path / "workflow.db")
+    catalog = TemplateCatalog(store)
+    snapshot = catalog.replace(
+        contract.AUTHORITY,
+        [
+            contract._template_import(
+                name="move",
+                display_name="移动",
+                resource_template_uuid=contract.RESOURCE_TEMPLATE_UUID,
+                schema=contract.SIMPLE_SCHEMA,
+            ),
+            contract._template_import(
+                name="inspect",
+                display_name="检查",
+                resource_template_uuid=contract.RESOURCE_TEMPLATE_UUID,
+                schema=contract.SIMPLE_SCHEMA,
+            ),
+        ],
+    )
+    templates = {item["name"]: item for item in snapshot.node_templates}
+    scheduler, backend = create_edge_stack(host_node_getter=lambda: None)
+    bridge = DeviceActionTaskRuntimeBridge(
+        store=store,
+        coordinator=WorkflowRuntimeCoordinator(store),
+        scheduler=scheduler,
+        backend=backend,
+    )
+    bridge.start()
+    live = contract.MutableLiveCatalog()
+    live.devices["robot"]["actions"]["inspect"] = {
+        "type": "action",
+        "schema": copy.deepcopy(contract.SIMPLE_SCHEMA),
+    }
+    service = DeviceActionTaskService(
+        store=store,
+        template_catalog=catalog,
+        authority=contract.AUTHORITY,
+        live_catalog=live,
+        admission=bridge,
+    )
+    client = TestClient(
+        create_workflow_app(WorkflowService(store), device_action_tasks=service)
+    )
+    harness = contract.Harness(
+        tmp_path / "workflow.db",
+        store,
+        client,
+        catalog,
+        snapshot.fingerprint,
+        str(templates["move"]["uuid"]),
+        "",
+        live,
+        bridge,
+    )
+    try:
+        first = client.post(
+            "/api/v1/device-action-tasks", json=contract._request(harness)
+        ).json()["data"]
+        assert _wait(
+            lambda: service.get(first["task_uuid"])["job_status"]
+            == "execution_unknown"
+        )
+
+        second = client.post(
+            "/api/v1/device-action-tasks",
+            json=contract._request(
+                harness,
+                template_uuid=str(templates["inspect"]["uuid"]),
+            ),
+        ).json()["data"]
+        time.sleep(0.1)
+
+        assert service.get(second["task_uuid"])["status"] == "pending"
+        assert service.get(second["task_uuid"])["job_status"] == "pending"
+        assert bridge.busy_device_action_keys() == {"/devices/robot"}
     finally:
         client.close()
         bridge.stop()
