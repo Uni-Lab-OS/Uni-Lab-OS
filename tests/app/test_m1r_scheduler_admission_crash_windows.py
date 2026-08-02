@@ -690,3 +690,43 @@ def test_equivalent_uuid_spelling_shares_one_task_saga_slot(
         if service is not None:
             service.close()
         inventory.close()
+
+
+@pytest.mark.parametrize(
+    "task_uuid",
+    ["not-a-uuid", "00000000-0000-0000-0000-000000000000"],
+    ids=["malformed", "nil"],
+)
+@pytest.mark.parametrize(
+    "entry",
+    ["admission", "state", "release"],
+)
+def test_task_saga_entries_preserve_invalid_uuid_domain_error(
+    tmp_path: Path,
+    task_uuid: str,
+    entry: str,
+) -> None:
+    inventory = inventory_api.InventoryService.open(
+        working_dir=tmp_path / "inventory-authority",
+        resource_templates=_resource_templates(),
+    )
+    service = None
+    try:
+        service, _task = _create_pending_task(
+            tmp_path / "workflow-authority" / "workflow.db"
+        )
+        scheduler = EdgeScheduler(workflow_tasks=service, inventory=inventory)
+
+        with pytest.raises(WorkflowError) as captured:
+            if entry == "admission":
+                scheduler.reconcile_task_admission(task_uuid)
+            elif entry == "state":
+                scheduler.reconcile_task_material_state(task_uuid)
+            else:
+                scheduler.reconcile_task_release(task_uuid, "invalid-uuid-proof")
+
+        assert captured.value.code == "invalid_input"
+    finally:
+        if service is not None:
+            service.close()
+        inventory.close()
