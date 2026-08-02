@@ -1217,8 +1217,7 @@ class WorkflowRuntimeWorker:
         templates = {
             template.get("uuid"): template
             for template in snapshot.get("node_templates", [])
-            if isinstance(template, dict)
-            and isinstance(template.get("uuid"), str)
+            if isinstance(template, dict) and isinstance(template.get("uuid"), str)
         }
         jobs_by_node = {job["workflow_node_uuid"]: job for job in jobs}
         incoming: dict[str, list[dict[str, Any]]] = {}
@@ -1239,7 +1238,9 @@ class WorkflowRuntimeWorker:
                 jobs_by_node.get(edge.get("source_node_uuid"))
                 for edge in incoming.get(job["workflow_node_uuid"], [])
             ]
-            if any(item is None or item["status"] != "succeeded" for item in predecessors):
+            if any(
+                item is None or item["status"] != "succeeded" for item in predecessors
+            ):
                 continue
             node = nodes.get(job["workflow_node_uuid"])
             planned_node = plan_nodes.get(job["workflow_node_uuid"])
@@ -1309,9 +1310,7 @@ class WorkflowRuntimeWorker:
             metadata = node.get("meta_data")
             unilab = metadata.get("unilab") if isinstance(metadata, dict) else None
             binding = (
-                unilab.get("executor_binding")
-                if isinstance(unilab, dict)
-                else None
+                unilab.get("executor_binding") if isinstance(unilab, dict) else None
             )
             if isinstance(binding, dict) and binding.get("mode") == "fixed":
                 device_identity = binding.get("device_id")
@@ -1379,7 +1378,11 @@ class WorkflowRuntimeWorker:
                 return
             task_uuid = job["workflow_task_uuid"]
             if success:
-                result = return_value if isinstance(return_value, dict) else {"value": return_value}
+                result = (
+                    return_value
+                    if isinstance(return_value, dict)
+                    else {"value": return_value}
+                )
                 self._coordinator.transition_job(
                     job_uuid,
                     "succeeded",
