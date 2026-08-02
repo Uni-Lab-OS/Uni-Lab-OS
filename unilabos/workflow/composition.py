@@ -22,6 +22,11 @@ from unilabos.workflow.catalog import (
     ResourceTemplateIdentityIndex,
     TemplateCatalog,
 )
+from unilabos.workflow.device_action_task import (
+    DeviceActionTaskRuntimeBridge,
+    DeviceActionTaskService,
+    HostNodeDeviceActionLiveCatalog,
+)
 from unilabos.workflow.material_resolver import MaterialResourceSlotResolver
 from unilabos.workflow.runtime import (
     WorkflowJobDispatcher,
@@ -52,6 +57,8 @@ _workflow_job_dispatcher: WorkflowJobDispatcher | None = None
 _device_identity_resolver: Callable[[str], str | None] | None = None
 _workflow_catalog_configuration: tuple[tuple[str, str], ...] = ()
 _ready = False
+_device_action_runtime: DeviceActionTaskRuntimeBridge | None = None
+_device_action_tasks: DeviceActionTaskService | None = None
 
 
 def _configured_package_roots(
@@ -176,6 +183,8 @@ def _retain_runtime(
     owner_pid: int,
     lease_descriptor: int,
     ready: bool,
+    device_action_runtime: DeviceActionTaskRuntimeBridge | None = None,
+    device_action_tasks: DeviceActionTaskService | None = None,
 ) -> None:
     """发布 ready Authority，或保留失败 cleanup 的独占 ownership。"""
 
@@ -185,6 +194,7 @@ def _retain_runtime(
     global _inventory_service
     global _monitor, _ready, _runtime_worker, _startup_store
     global _owner_pid, _service, _workspace_lease_fd
+    global _device_action_runtime, _device_action_tasks
     _service = service
     _startup_store = None
     _inventory_service = inventory_service
@@ -200,6 +210,8 @@ def _retain_runtime(
     _owner_pid = owner_pid
     _workspace_lease_fd = lease_descriptor
     _ready = ready
+    _device_action_runtime = device_action_runtime
+    _device_action_tasks = device_action_tasks
 
 
 def _retain_startup_store(
@@ -231,6 +243,7 @@ def _clear_runtime() -> None:
     global _inventory_service
     global _monitor, _ready, _runtime_worker, _startup_store
     global _owner_pid, _service, _workspace_lease_fd
+    global _device_action_runtime, _device_action_tasks
     _service = None
     _startup_store = None
     _inventory_service = None
@@ -246,6 +259,8 @@ def _clear_runtime() -> None:
     _owner_pid = None
     _workspace_lease_fd = None
     _ready = False
+    _device_action_runtime = None
+    _device_action_tasks = None
 
 
 def _acquire_workspace_lease(working_dir: Path) -> int:
@@ -409,6 +424,8 @@ def compose_workflow_runtime(
         new_inventory_service: InventoryService | None = None
         new_monitor: WorkflowSourceMonitor | None = None
         new_runtime_worker: WorkflowRuntimeWorker | None = None
+        new_device_action_runtime: DeviceActionTaskRuntimeBridge | None = None
+        new_device_action_tasks: DeviceActionTaskService | None = None
         published = False
         try:
             store = WorkflowStore(database_path)
@@ -525,6 +542,29 @@ def compose_workflow_runtime(
                 new_service,
                 configured_workflow_catalogs,
             )
+            if authority is not None:
+                from unilabos.app.scheduler.integration import (
+                    get_edge_backend,
+                    get_edge_scheduler,
+                )
+
+                new_device_action_runtime = DeviceActionTaskRuntimeBridge(
+                    store=store,
+                    coordinator=runtime_coordinator,
+                    scheduler=get_edge_scheduler(),
+                    backend=get_edge_backend(),
+                )
+                new_device_action_runtime.start()
+                new_device_action_tasks = DeviceActionTaskService(
+                    store=store,
+                    template_catalog=catalog,
+                    authority=authority,
+                    live_catalog=HostNodeDeviceActionLiveCatalog(
+                        template_catalog=catalog,
+                        authority=authority,
+                    ),
+                    admission=new_device_action_runtime,
+                )
             register_editable_package_sources(
                 new_service,
                 configured_roots,
@@ -556,12 +596,19 @@ def compose_workflow_runtime(
                 owner_pid=os.getpid(),
                 lease_descriptor=lease_descriptor,
                 ready=True,
+                device_action_runtime=new_device_action_runtime,
+                device_action_tasks=new_device_action_tasks,
             )
             published = True
             new_monitor.start()
             new_runtime_worker.start()
         except BaseException as startup_error:
             cleanup_error: BaseException | None = None
+            if new_device_action_runtime is not None:
+                try:
+                    new_device_action_runtime.stop()
+                except BaseException as error:  # noqa: BLE001 - 保留租约
+                    cleanup_error = error
             if new_monitor is not None:
                 try:
                     new_monitor.stop()
@@ -607,6 +654,8 @@ def compose_workflow_runtime(
                         owner_pid=os.getpid(),
                         lease_descriptor=lease_descriptor,
                         ready=False,
+                        device_action_runtime=new_device_action_runtime,
+                        device_action_tasks=new_device_action_tasks,
                     )
                 elif new_store is not None:
                     _retain_startup_store(
@@ -662,6 +711,36 @@ def get_workflow_service() -> WorkflowService | None:
     return _service
 
 
+def get_device_action_task_service() -> DeviceActionTaskService | None:
+    if not _ready or _owner_pid != os.getpid():
+        return None
+    return _device_action_tasks
+
+
+def configure_device_action_runtime(
+    service: WorkflowService,
+    scheduler: object | None,
+    backend: object | None,
+) -> bool:
+    """把后创建的 production Edge stack 绑定到既有 D1A authority。"""
+
+    with _lock:
+        if (
+            not _ready
+            or _owner_pid != os.getpid()
+            or service is not _service
+            or _device_action_runtime is None
+        ):
+            return False
+        if scheduler is None and backend is None:
+            _device_action_runtime.unbind_execution_stack()
+            return True
+        if scheduler is None or backend is None:
+            raise ValueError("scheduler 与 backend 必须同时配置")
+        _device_action_runtime.bind_execution_stack(scheduler, backend)
+        return True
+
+
 def get_workflow_inventory_service() -> InventoryService | None:
     """Return the InventoryService owned by the active workspace composition."""
 
@@ -698,8 +777,11 @@ def reset_workflow_service_for_test() -> None:
     global _inventory_service
     global _monitor, _ready, _runtime_worker, _startup_store
     global _owner_pid, _service, _workspace_lease_fd
+    global _device_action_runtime, _device_action_tasks
     with _lock:
         lease_owned = _owner_pid == os.getpid()
+        if _device_action_runtime is not None:
+            _device_action_runtime.stop()
         if _monitor is not None:
             # 监视线程未退出时必须保留 Service 与租约，允许稍后重试停机。
             _monitor.stop()
@@ -729,6 +811,8 @@ def reset_workflow_service_for_test() -> None:
         _device_identity_resolver = None
         _workflow_catalog_configuration = ()
         _ready = False
+        _device_action_runtime = None
+        _device_action_tasks = None
         _owner_pid = None
         lease_descriptor = _workspace_lease_fd
         _workspace_lease_fd = None
@@ -740,6 +824,8 @@ def reset_workflow_service_for_test() -> None:
 
 __all__ = [
     "compose_workflow_runtime",
+    "configure_device_action_runtime",
+    "get_device_action_task_service",
     "configure_workflow_task_reconciler",
     "get_workflow_inventory_service",
     "get_workflow_service",

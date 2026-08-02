@@ -52,6 +52,8 @@ logger = logging.getLogger(__name__)
 # listener 签名：(job_id, success, ret_value, suc_type) -> None
 # suc_type 取值 normal / skip / operator_intervention（见 registry.action_policy）
 JobFinishedListener = Callable[[str, bool, Any, str], None]
+JobCompletionListener = Callable[[str, bool, Any, str], bool]
+JobStatusListener = Callable[[str, dict[str, Any], str], None]
 
 # 异常决策等待人工处理的保留时长（超时的设备侧早已按 default_on_decision_timeout 自决）
 _ERROR_DECISION_TTL_SECONDS = 3600.0
@@ -69,7 +71,9 @@ class JobExecutionBackend:
     ):
         self.device_manager = device_manager or DeviceActionManager()
         self._host_node_getter = host_node_getter or self._default_host_getter
+        self._completion_listeners: list[JobCompletionListener] = []
         self._listeners: list[JobFinishedListener] = []
+        self._status_listeners: list[JobStatusListener] = []
         self._listeners_lock = threading.Lock()
         # 设备状态存储（DeviceStateStore；None = 不落盘）与监控总线
         self.device_state = device_state_store
@@ -209,6 +213,21 @@ class JobExecutionBackend:
             if registered not in self._listeners:
                 self._listeners.append(registered)
 
+    def add_job_completion_listener(self, listener: JobCompletionListener) -> None:
+        """注册 durable completion hook；它在释放设备锁/重排前同步完成。"""
+
+        with self._listeners_lock:
+            if listener not in self._completion_listeners:
+                self._completion_listeners.append(listener)
+
+    def remove_job_completion_listener(self, listener: JobCompletionListener) -> None:
+        with self._listeners_lock:
+            self._completion_listeners = [
+                registered
+                for registered in self._completion_listeners
+                if registered != listener
+            ]
+
     def remove_job_finished_listener(self, listener: Callable[..., None]) -> None:
         """注销完成回调；允许用注册时的原始三参 listener 移除。"""
 
@@ -220,6 +239,23 @@ class JobExecutionBackend:
                 and getattr(registered, "_unilabos_listener", None) != listener
             ]
 
+    def add_job_status_listener(self, listener: JobStatusListener) -> None:
+        """注册 running/feedback listener；回调始终在 backend worker 中执行。"""
+
+        with self._listeners_lock:
+            if listener not in self._status_listeners:
+                self._status_listeners.append(listener)
+
+    def remove_job_status_listener(self, listener: JobStatusListener) -> None:
+        """注销 running/feedback listener。"""
+
+        with self._listeners_lock:
+            self._status_listeners = [
+                registered
+                for registered in self._status_listeners
+                if registered != listener
+            ]
+
     def busy_device_action_keys(self) -> set[str]:
         """当前被占用的 device_action_key（供调度器做锁视图合并）。"""
         busy: set[str] = set()
@@ -228,6 +264,27 @@ class JobExecutionBackend:
         for job in self.device_manager.get_queued_jobs():
             busy.add(job.device_action_key)
         return busy
+
+    def request_cancel(self, job_id: str) -> bool:
+        """请求 HostNode 取消仍由本 backend 持有的 goal，不提前释放设备锁。"""
+
+        if self.device_manager.get_job_info(job_id) is None:
+            return False
+        host_node = self._host_node_getter()
+        if host_node is None:
+            return False
+        cancel = getattr(
+            host_node,
+            "cancel_goal_or_defer",
+            getattr(host_node, "cancel_goal", None),
+        )
+        if not callable(cancel):
+            return False
+        try:
+            return bool(cancel(job_id))
+        except Exception:  # noqa: BLE001 - transport 失败由 runtime 进入不确定态
+            logger.exception("[JobExecutionBackend] cancel request failed: %s", job_id)
+            return False
 
     def execution_ready(self) -> bool:
         """Whether HostNode completed device initialization for local dispatch."""
@@ -249,8 +306,11 @@ class JobExecutionBackend:
         """
         if self.device_manager.get_job_info(item.job_id) is None:
             return
+        if status == "running":
+            self._put_event(("status", item.job_id, dict(feedback_data or {}), status))
+            return
         if status not in ("success", "failed"):
-            return  # running/feedback 不推进生命周期
+            return
 
         ret_value = None
         suc_type = "normal"
@@ -406,7 +466,9 @@ class JobExecutionBackend:
                     self._handle_finished(event[1], event[2], event[3], suc_type)
                 elif event[0] == "device_status":
                     self._write_device_property(event[1], event[2], event[3])
-            except Exception:
+                elif event[0] == "status":
+                    self._handle_status(event[1], event[2], event[3])
+            except Exception:  # noqa: BLE001 - worker 不允许死
                 logger.exception("[JobExecutionBackend] event %s failed", event[0])
             finally:
                 with self._pending_lock:
@@ -431,7 +493,9 @@ class JobExecutionBackend:
             logger.error(
                 "[JobExecutionBackend] HostNode unavailable, fail job %s", job_log
             )
-            self._put_event(("finished", job.job_id, False, None))
+            self._put_event(
+                ("finished", job.job_id, False, None, "transport_unknown")
+            )
             return
         try:
             host_node.send_goal(
@@ -446,11 +510,29 @@ class JobExecutionBackend:
             logger.exception(
                 "[JobExecutionBackend] send_goal failed for job %s", job_log
             )
-            self._put_event(("finished", job.job_id, False, None))
+            self._put_event(
+                ("finished", job.job_id, False, None, "transport_unknown")
+            )
 
     def _handle_finished(
         self, job_id: str, success: bool, ret_value: Any, suc_type: str = "normal"
     ) -> None:
+        with self._listeners_lock:
+            completion_listeners = tuple(self._completion_listeners)
+        # Durable owner 必须先提交 terminal/unknown 与 claim 变更；失败时保留
+        # DeviceManager 锁并阻止 Scheduler 重排，避免 crash window 双 holder。
+        completion_owned = False
+        for listener in completion_listeners:
+            completion_owned = (
+                listener(job_id, success, ret_value, suc_type) is True
+                or completion_owned
+            )
+
+        if suc_type == "transport_unknown" and completion_owned:
+            # 未确认 HostNode 是否已接收 goal 时既不能释放设备锁，也不能让
+            # Scheduler 把该 Job 投影成确定失败。晚到回报仍可通过原 job closure。
+            return
+
         # 出队下一个同设备 job 并启动（锁保持 busy）
         next_job, _lock_became_free = self.device_manager.end_job(job_id)
         if next_job is not None:
@@ -463,6 +545,20 @@ class JobExecutionBackend:
                 listener(job_id, success, ret_value, suc_type)
             except Exception:
                 logger.exception("[JobExecutionBackend] job finished listener failed")
+
+    def _handle_status(
+        self,
+        job_id: str,
+        feedback_data: dict[str, Any],
+        status: str,
+    ) -> None:
+        with self._listeners_lock:
+            listeners = tuple(self._status_listeners)
+        for listener in listeners:
+            try:
+                listener(job_id, feedback_data, status)
+            except Exception:  # noqa: BLE001 - 单个 listener 不阻断设备回报
+                logger.exception("[JobExecutionBackend] job status listener failed")
 
     @staticmethod
     def _default_host_getter() -> Any:
@@ -565,6 +661,7 @@ def create_edge_stack(
 __all__ = [
     "JobExecutionBackend",
     "JobFinishedListener",
+    "JobStatusListener",
     "create_edge_stack",
     "make_device_lock_resource_resolver",
 ]

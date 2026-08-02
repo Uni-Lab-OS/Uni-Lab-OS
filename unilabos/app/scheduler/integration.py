@@ -115,6 +115,17 @@ def setup_edge_scheduler(
     global _scheduler, _backend, _inventory, _outbox_worker, _owns_inventory
     global _workflow_tasks, _workflow_reconciler_attached
     if _scheduler is not None and _backend is not None:
+        if workflow_tasks is not None:
+            from unilabos.workflow.composition import (
+                configure_device_action_runtime,
+            )
+
+            _workflow_tasks = workflow_tasks
+            configure_device_action_runtime(
+                workflow_tasks,
+                _scheduler,
+                _backend,
+            )
         logger.warning(
             "[EdgeSchedulerIntegration] already set up, reusing existing stack"
         )
@@ -204,8 +215,14 @@ def setup_edge_scheduler(
             )
         logger.info("[EdgeSchedulerIntegration] workflow history store: %s", history_db)
 
+    shared_device_manager = (
+        getattr(ws_client, "device_manager", None)
+        if ws_client is not None
+        else None
+    )
     scheduler, backend = create_edge_stack(
         orderer=orderer,
+        device_manager=shared_device_manager,
         host_node_getter=host_node_getter,
         inventory=inventory,
         estimator=estimator,
@@ -215,6 +232,12 @@ def setup_edge_scheduler(
         workflow_tasks=workflow_tasks,
     )
     _scheduler, _backend = scheduler, backend
+
+    if workflow_tasks is not None:
+        from unilabos.workflow.composition import configure_device_action_runtime
+
+        _workflow_tasks = workflow_tasks
+        configure_device_action_runtime(workflow_tasks, scheduler, backend)
 
     if workflow_tasks is not None and inventory is not None:
         from unilabos.workflow.composition import configure_workflow_task_reconciler
@@ -271,6 +294,10 @@ def reset_for_test() -> None:
     """测试用：清掉进程内单例。"""
     global _scheduler, _backend, _inventory, _outbox_worker, _owns_inventory
     global _workflow_tasks, _workflow_reconciler_attached
+    if _workflow_tasks is not None:
+        from unilabos.workflow.composition import configure_device_action_runtime
+
+        configure_device_action_runtime(_workflow_tasks, None, None)
     if _workflow_reconciler_attached and _workflow_tasks is not None:
         from unilabos.workflow.composition import configure_workflow_task_reconciler
 

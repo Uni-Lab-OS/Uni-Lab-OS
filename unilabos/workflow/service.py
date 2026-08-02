@@ -88,6 +88,10 @@ _ERRORS = {
         409,
         "设备动作模板已更新，请重新编译并检查工作流",
     ),
+    "idempotency_conflict": (409, "幂等键已用于不同的设备动作请求"),
+    "device_action_mismatch": (409, "设备当前 Action 与模板合同不一致"),
+    "unsupported_contract": (422, "该 Action 合同超出单动作运行范围"),
+    "admission_unavailable": (503, "设备动作调度暂不可用"),
     "candidate_not_ready": (409, "当前草稿尚未生成可应用的工作流"),
     "draft_invalid": (422, "草稿存在错误，修复后才能应用"),
     "candidate_invalid": (422, "工作流校验失败，请检查节点、连线和输入输出"),
@@ -334,6 +338,8 @@ class WorkflowService:
         except ValueError:
             raise WorkflowError("invalid_input") from None
         try:
+            if self._store.is_device_action_system_workflow(identity):
+                raise WorkflowError("not_found")
             return self._store.get_workflow(identity)
         except StoreNotFound:
             raise WorkflowError("not_found") from None
@@ -507,6 +513,8 @@ class WorkflowService:
         except ValueError:
             raise WorkflowError("invalid_input") from None
         try:
+            if self._store.is_device_action_task(identity):
+                raise WorkflowError("not_found")
             return self._store.get_task(identity)
         except StoreNotFound:
             raise WorkflowError("not_found") from None
@@ -662,7 +670,10 @@ class WorkflowService:
             task_identity = validate_uuid(task_uuid)
         except ValueError:
             raise WorkflowError("invalid_input") from None
-        task = self.get_workflow_task(task_identity)
+        try:
+            task = self._store.get_task(task_identity)
+        except StoreNotFound:
+            raise WorkflowError("not_found") from None
         if task["status"] in {"succeeded", "failed", "canceled", "timeout"}:
             raise WorkflowError("invalid_transition")
         if command_type not in {"step", "pause", "resume", "cancel"}:
@@ -708,6 +719,8 @@ class WorkflowService:
         except ValueError:
             raise WorkflowError("invalid_input") from None
         try:
+            if self._store.is_device_action_job(identity):
+                raise WorkflowError("not_found")
             return self._store.get_job(identity)
         except StoreNotFound:
             raise WorkflowError("not_found") from None
@@ -1424,6 +1437,8 @@ class WorkflowService:
         except ValueError:
             raise WorkflowError("invalid_input") from None
         try:
+            if self._store.is_device_action_system_workflow(identity):
+                raise WorkflowError("not_found")
             return self._store.get_workflow(identity)
         except StoreNotFound:
             raise WorkflowError("workflow_not_found") from None

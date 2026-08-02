@@ -12,7 +12,7 @@ from __future__ import annotations
 import time
 from dataclasses import dataclass, field
 from enum import Enum
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, List
 
 from unilabos.app.scheduler.inventory.domain import MaterialRequirement
 
@@ -81,6 +81,8 @@ class WorkflowNode:
     """WorkflowNode 子集：Edge 执行一个设备动作所需的全部信息。"""
 
     id: str                       # 节点 id（uuid 或云端 node_id 字符串化）
+    # 本地正式 WorkflowNodeJob 可冻结该身份；空值保持既有随机 Edge job 行为。
+    job_id: str = ""
     device_id: str = ""           # 目标设备
     action_name: str = ""         # 设备动作名
     action_type: str = ""         # goal / goal_sequence 等
@@ -96,6 +98,11 @@ class WorkflowNode:
     def device_action_key(self) -> str:
         """与 ws_client 一致的设备动作锁 key。"""
         return f"/devices/{self.device_id}/{self.action_name}"
+
+    @property
+    def device_lock_key(self) -> str:
+        """v1 Claim/fence 锁整个选中设备实例，而不是单个 Action。"""
+        return f"/devices/{self.device_id}"
 
     def is_ilab(self) -> bool:
         return normalize_node_type(self.node_type) == "ILab"
@@ -206,6 +213,7 @@ def priority_weight(priority: Any) -> float:
 def node_from_dict(data: Dict[str, Any]) -> WorkflowNode:
     return WorkflowNode(
         id=str(data["id"]),
+        job_id=str(data.get("job_id", "") or ""),
         device_id=data.get("device_id", "") or "",
         action_name=data.get("action_name", "") or "",
         action_type=data.get("action_type", "") or "",

@@ -23,6 +23,7 @@ from unilabos.workflow.catalog import (
     TemplateCatalog,
     TemplateCatalogUnavailable,
 )
+from unilabos.workflow.device_action_task import DeviceActionTaskService
 from unilabos.workflow.json_codec import decode_json_bytes, encode_json
 from unilabos.workflow.models import (
     CandidateChangeset,
@@ -166,6 +167,25 @@ class WorkflowCreateRequest(_BackendModel):
 
 class WorkflowUpdateRequest(WorkflowCreateRequest):
     pass
+
+
+class DeviceActionTaskCreateRequest(_StrictModel):
+    """前端设备页提交的 closed D1A-S1 请求。"""
+
+    authority_id: str = Field(min_length=1, strict=True)
+    template_catalog_fingerprint: HashToken
+    workflow_node_template_uuid: UUID
+    device_id: str = Field(min_length=1, strict=True)
+    input: dict[str, Any]
+    idempotency_key: UUID
+    description: str | None = None
+
+    @field_validator("authority_id", "device_id")
+    @classmethod
+    def _closed_identity(cls, value: str) -> str:
+        if value.strip() != value:
+            raise ValueError("identity must not contain surrounding whitespace")
+        return value
 
 
 class GraphWriteRequest(_BackendModel):
@@ -508,6 +528,7 @@ def create_authoring_transform_router(
 def create_workflow_router(
     service: WorkflowService,
     *,
+    device_action_tasks: DeviceActionTaskService | None = None,
     task_admission_coordinator: Callable[[str], object] | None = None,
 ) -> APIRouter:
     """Build the public Workflow router around one injected authority."""
@@ -517,6 +538,29 @@ def create_workflow_router(
         tags=["workflow"],
         route_class=_BackendJSONRoute,
     )
+
+    if device_action_tasks is not None:
+
+        @router.post("/device-action-tasks")
+        def create_device_action_task(
+            body: DeviceActionTaskCreateRequest,
+        ) -> JSONResponse:
+            return _success(
+                device_action_tasks.create(
+                    authority_id=body.authority_id,
+                    template_catalog_fingerprint=body.template_catalog_fingerprint,
+                    workflow_node_template_uuid=str(body.workflow_node_template_uuid),
+                    device_id=body.device_id,
+                    input_value=body.input,
+                    idempotency_key=str(body.idempotency_key),
+                    description=body.description,
+                ),
+                status=201,
+            )
+
+        @router.get("/device-action-tasks/{task_uuid}")
+        def get_device_action_task(task_uuid: UUID) -> JSONResponse:
+            return _success(device_action_tasks.get(str(task_uuid)))
 
     @router.post("/workflows")
     def create_workflow(body: WorkflowCreateRequest) -> JSONResponse:
@@ -992,6 +1036,7 @@ def _install_error_handlers(app: FastAPI) -> None:
         error: RequestValidationError,
     ) -> JSONResponse:
         workflow_prefixes = (
+            "/api/v1/device-action-tasks",
             "/api/v1/workflows",
             "/api/v1/workflow-tasks",
             "/api/v1/workflow-node-jobs",
@@ -1008,12 +1053,19 @@ def _install_error_handlers(app: FastAPI) -> None:
         return await request_validation_exception_handler(request, error)
 
 
-def install_workflow_api(app: FastAPI, service: WorkflowService) -> None:
+def install_workflow_api(
+    app: FastAPI,
+    service: WorkflowService,
+    *,
+    device_action_tasks: DeviceActionTaskService | None = None,
+) -> None:
     """Install error mapping and routes into an OS FastAPI application."""
 
     _install_error_handlers(app)
 
-    app.include_router(create_workflow_router(service))
+    app.include_router(
+        create_workflow_router(service, device_action_tasks=device_action_tasks)
+    )
 
 
 def install_authoring_transform_api(
@@ -1033,6 +1085,7 @@ def install_composed_workflow_authoring_api(
     *,
     template_catalog: TemplateCatalog | None = None,
     catalog_authority: CatalogAuthority | None = None,
+    device_action_tasks: DeviceActionTaskService | None = None,
     task_admission_coordinator: Callable[[str], object] | None = None,
 ) -> None:
     """完整构造 production Authoring 路由后，以一次 app mutation 安装。"""
@@ -1050,6 +1103,7 @@ def install_composed_workflow_authoring_api(
     router.include_router(
         create_workflow_router(
             service,
+            device_action_tasks=device_action_tasks,
             task_admission_coordinator=task_admission_coordinator,
         )
     )
@@ -1058,11 +1112,15 @@ def install_composed_workflow_authoring_api(
     app.include_router(router)
 
 
-def create_workflow_app(service: WorkflowService) -> FastAPI:
+def create_workflow_app(
+    service: WorkflowService,
+    *,
+    device_action_tasks: DeviceActionTaskService | None = None,
+) -> FastAPI:
     """Create a focused application used by composition and contract tests."""
 
     app = FastAPI(title="Uni-Lab Workflow", version="0.1.0")
-    install_workflow_api(app, service)
+    install_workflow_api(app, service, device_action_tasks=device_action_tasks)
     return app
 
 
@@ -1078,6 +1136,7 @@ __all__ = [
     "AuthoringCompileRequest",
     "AuthoringGeneratePythonRequest",
     "AuthoringValidateRequest",
+    "DeviceActionTaskCreateRequest",
     "create_authoring_transform_app",
     "create_authoring_transform_router",
     "create_workflow_app",

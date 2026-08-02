@@ -325,6 +325,52 @@ CREATE INDEX IF NOT EXISTS ix_workflow_node_job_task
 CREATE INDEX IF NOT EXISTS ix_workflow_node_job_node
     ON workflow_node_job(workflow_node_uuid);
 
+CREATE TABLE IF NOT EXISTS device_action_system_source (
+    authority_id TEXT NOT NULL,
+    workflow_node_template_uuid TEXT NOT NULL,
+    workflow_uuid TEXT NOT NULL UNIQUE,
+    workflow_node_uuid TEXT NOT NULL UNIQUE,
+    origin_kind TEXT NOT NULL CHECK (origin_kind = 'system/device-console'),
+    source_revision INTEGER NOT NULL CHECK (source_revision > 0),
+    template_catalog_fingerprint TEXT NOT NULL,
+    contract_snapshot TEXT NOT NULL CHECK (json_valid(contract_snapshot)),
+    create_time TEXT NOT NULL,
+    update_time TEXT NOT NULL,
+    PRIMARY KEY(authority_id, workflow_node_template_uuid),
+    FOREIGN KEY(workflow_node_template_uuid)
+        REFERENCES workflow_node_template(uuid),
+    FOREIGN KEY(workflow_uuid) REFERENCES workflow(uuid),
+    FOREIGN KEY(workflow_node_uuid) REFERENCES workflow_node(uuid)
+);
+
+CREATE TABLE IF NOT EXISTS device_action_task (
+    workflow_task_uuid TEXT PRIMARY KEY,
+    workflow_node_job_uuid TEXT NOT NULL UNIQUE,
+    authority_id TEXT NOT NULL,
+    template_catalog_fingerprint TEXT NOT NULL,
+    workflow_node_template_uuid TEXT NOT NULL,
+    device_id TEXT NOT NULL,
+    action_name TEXT NOT NULL,
+    action_display_name TEXT NOT NULL,
+    canonical_payload_hash TEXT NOT NULL,
+    idempotency_key TEXT NOT NULL,
+    admitted_device_id TEXT,
+    claim_status TEXT NOT NULL DEFAULT 'pending'
+        CHECK (claim_status IN ('pending', 'claimed', 'released', 'unknown')),
+    create_time TEXT NOT NULL,
+    update_time TEXT NOT NULL,
+    FOREIGN KEY(workflow_task_uuid)
+        REFERENCES workflow_task(uuid) ON DELETE CASCADE,
+    FOREIGN KEY(workflow_node_job_uuid)
+        REFERENCES workflow_node_job(uuid) ON DELETE CASCADE,
+    FOREIGN KEY(workflow_node_template_uuid)
+        REFERENCES workflow_node_template(uuid)
+);
+CREATE UNIQUE INDEX IF NOT EXISTS ux_device_action_task_idempotency
+    ON device_action_task(authority_id, device_id, idempotency_key);
+CREATE INDEX IF NOT EXISTS ix_device_action_task_template
+    ON device_action_task(authority_id, workflow_node_template_uuid);
+
 CREATE TABLE IF NOT EXISTS workflow_source_registration (
     workflow_uuid TEXT PRIMARY KEY,
     package_id TEXT NOT NULL,
@@ -689,6 +735,54 @@ class WorkflowStore:
             raise StoreNotFound(f"workflow {workflow_uuid} not found")
         return self._workflow_row(row)
 
+    def is_device_action_system_workflow(
+        self,
+        workflow_uuid: str,
+        *,
+        conn: Optional[sqlite3.Connection] = None,
+    ) -> bool:
+        database = conn or self._conn
+        with self._lock:
+            return database.execute(
+                """
+                SELECT 1 FROM device_action_system_source
+                WHERE workflow_uuid = ?
+                """,
+                (workflow_uuid,),
+            ).fetchone() is not None
+
+    def is_device_action_task(
+        self,
+        task_uuid: str,
+        *,
+        conn: Optional[sqlite3.Connection] = None,
+    ) -> bool:
+        database = conn or self._conn
+        with self._lock:
+            return database.execute(
+                """
+                SELECT 1 FROM device_action_task
+                WHERE workflow_task_uuid = ?
+                """,
+                (task_uuid,),
+            ).fetchone() is not None
+
+    def is_device_action_job(
+        self,
+        job_uuid: str,
+        *,
+        conn: Optional[sqlite3.Connection] = None,
+    ) -> bool:
+        database = conn or self._conn
+        with self._lock:
+            return database.execute(
+                """
+                SELECT 1 FROM device_action_task
+                WHERE workflow_node_job_uuid = ?
+                """,
+                (job_uuid,),
+            ).fetchone() is not None
+
     def list_workflows(
         self,
         *,
@@ -696,7 +790,11 @@ class WorkflowStore:
         page_size: int,
         name: str = "",
     ) -> Dict[str, Any]:
-        where = "deleted_at IS NULL"
+        where = (
+            "deleted_at IS NULL AND NOT EXISTS ("
+            "SELECT 1 FROM device_action_system_source AS system_source "
+            "WHERE system_source.workflow_uuid = workflow.uuid)"
+        )
         values: List[Any] = []
         if name:
             where += " AND name LIKE ?"
@@ -1313,7 +1411,11 @@ class WorkflowStore:
         status: str = "",
         cleanup_status: str = "",
     ) -> Dict[str, Any]:
-        clauses = ["deleted_at IS NULL"]
+        clauses = [
+            "deleted_at IS NULL",
+            "NOT EXISTS (SELECT 1 FROM device_action_task AS device_task "
+            "WHERE device_task.workflow_task_uuid = workflow_task.uuid)",
+        ]
         values: List[Any] = []
         for field, value in (
             ("workflow_uuid", workflow_uuid),

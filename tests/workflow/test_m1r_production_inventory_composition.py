@@ -29,8 +29,10 @@ from unilabos.app.scheduler.inventory import (
     ResourceTemplateIdentity,
 )
 from unilabos.app.workflow_api import install_composed_workflow_authoring_api
+from unilabos.app.workflow_api import create_workflow_app
 from unilabos.workflow.composition import (
     compose_workflow_runtime,
+    get_device_action_task_service,
     get_workflow_inventory_service,
     reset_workflow_service_for_test,
 )
@@ -265,6 +267,58 @@ def test_edge_scheduler_reuses_composed_workflow_and_inventory_authorities(
             "workflow.db",
         ]
     finally:
+        integration.reset_for_test()
+
+
+def test_production_startup_order_binds_device_action_runtime_after_edge_stack(
+    tmp_path: Path,
+) -> None:
+    from unilabos.app.scheduler import integration
+
+    working_dir = tmp_path / "unilabos_data"
+    integration.reset_for_test()
+    service = compose_workflow_runtime(
+        working_dir,
+        authority=AUTHORITY,
+        registry_snapshot={},
+        resource_registry_snapshot={},
+    )
+    device_action_tasks = get_device_action_task_service()
+    assert device_action_tasks is not None
+    inventory = get_workflow_inventory_service()
+    assert inventory is not None
+    client = TestClient(
+        create_workflow_app(service, device_action_tasks=device_action_tasks),
+        raise_server_exceptions=False,
+    )
+    try:
+        integration.setup_edge_scheduler(
+            inventory_service=inventory,
+            workflow_tasks=service,
+            host_node_getter=lambda: None,
+            device_state_db_path="off",
+            workflow_history_db_path="off",
+        )
+
+        response = client.post(
+            "/api/v1/device-action-tasks",
+            json={
+                "authority_id": AUTHORITY.authority_id,
+                "template_catalog_fingerprint": f"sha256:{'f' * 64}",
+                "workflow_node_template_uuid": (
+                    "20000000-0000-4000-8000-000000000099"
+                ),
+                "device_id": "robot",
+                "input": {"duration_seconds": 5},
+                "idempotency_key": "30000000-0000-4000-8000-000000000099",
+                "description": "production startup order tracer",
+            },
+        )
+
+        assert response.status_code == 409, response.text
+        assert response.json()["error"]["code"] == "template_catalog_conflict"
+    finally:
+        client.close()
         integration.reset_for_test()
 
 
