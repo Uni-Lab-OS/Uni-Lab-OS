@@ -55,7 +55,7 @@ def _configured_package_roots(
 
 def _registry_resource_template_identities(
     registry_snapshot: Mapping[str, object],
-    resource_registry_snapshot: Mapping[str, object],
+    resource_registry_snapshot: Mapping[str, object] | None,
 ) -> tuple[str, ...]:
     """冻结 production Registry 中可被模板投影引用的 source identities。"""
 
@@ -67,7 +67,7 @@ def _registry_resource_template_identities(
         if isinstance(owner, str) and owner:
             identities.add(owner)
 
-    for raw_resource in resource_registry_snapshot.values():
+    for raw_resource in (resource_registry_snapshot or {}).values():
         if not isinstance(raw_resource, Mapping):
             continue
         class_info = raw_resource.get("class")
