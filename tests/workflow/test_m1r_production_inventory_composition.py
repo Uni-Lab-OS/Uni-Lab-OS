@@ -28,8 +28,10 @@ from unilabos.app.scheduler.inventory import (
     InventoryService,
     ResourceTemplateIdentity,
 )
-from unilabos.app.workflow_api import install_composed_workflow_authoring_api
-from unilabos.app.workflow_api import create_workflow_app
+from unilabos.app.workflow_api import (
+    create_workflow_app,
+    install_composed_workflow_authoring_api,
+)
 from unilabos.workflow.composition import (
     compose_workflow_runtime,
     get_device_action_task_service,
@@ -305,9 +307,7 @@ def test_production_startup_order_binds_device_action_runtime_after_edge_stack(
             json={
                 "authority_id": AUTHORITY.authority_id,
                 "template_catalog_fingerprint": f"sha256:{'f' * 64}",
-                "workflow_node_template_uuid": (
-                    "20000000-0000-4000-8000-000000000099"
-                ),
+                "workflow_node_template_uuid": ("20000000-0000-4000-8000-000000000099"),
                 "device_id": "robot",
                 "input": {"duration_seconds": 5},
                 "idempotency_key": "30000000-0000-4000-8000-000000000099",
@@ -408,7 +408,10 @@ def test_edge_scheduler_startup_reconciles_pending_material_source_tasks(
 
         projection = service.get_material_admission(task["uuid"])
         assert projection is not None
-        assert projection["status"] == "rejected"
+        assert projection["status"] == "blocked"
+        assert service.get_workflow_task(task["uuid"])["status"] == (
+            "admission_blocked"
+        )
     finally:
         integration.reset_for_test()
 

@@ -430,6 +430,15 @@ def test_task_wide_matching_uses_site_order_creates_one_material_and_keeps_lots(
             assert jobs[node_uuid]["return_info"] == {"material": binding.resource_slot}
         assert service.get_workflow_task(task["uuid"])["status"] == "pending"
         assert scheduler.can_dispatch_task_materials(task["uuid"])
+
+        durable_events = inventory.read_outbox(after_sequence=0, limit=100)
+        replayed = scheduler.reconcile_task_admission(task["uuid"])
+
+        assert replayed == admitted
+        assert len(recording_inventory.commands) == 1
+        assert inventory.inventory_snapshot() == after
+        assert inventory.read_outbox(after_sequence=0, limit=100) == durable_events
+        assert _jobs_by_node(service, task["uuid"]) == jobs
     finally:
         if service is not None:
             service.close()
@@ -496,6 +505,63 @@ def test_fixed_material_location_mismatch_rejects_and_fails_resolution(
         inventory.close()
 
 
+def test_later_rejection_rolls_back_earlier_create_new_candidate(
+    tmp_path: Path,
+) -> None:
+    inventory = inventory_api.InventoryService.open(
+        working_dir=tmp_path / "inventory-authority",
+        resource_templates=_resource_templates(),
+    )
+    service: WorkflowService | None = None
+    try:
+        _seed_inventory(inventory)
+        nodes = [
+            _source_node(
+                SOURCE_A_UUID,
+                mode="create_new",
+                material_uuid=None,
+                site_uuid=CREATE_NEW_SITE_UUID,
+                candidate_site_uuids=(),
+                flow_role="consumable",
+            ),
+            _source_node(
+                SOURCE_B_UUID,
+                mode="existing",
+                material_uuid=LOW_SITE_MATERIAL_UUID,
+                site_uuid=ALTERNATE_SITE_UUID,
+                candidate_site_uuids=(),
+                flow_role="primary_sample",
+            ),
+        ]
+        service, task = _create_workflow_service(
+            tmp_path / "workflow-authority" / "workflow.db",
+            nodes=nodes,
+        )
+        before = inventory.inventory_snapshot()
+        scheduler = EdgeScheduler(workflow_tasks=service, inventory=inventory)
+
+        rejected = scheduler.reconcile_task_admission(task["uuid"])
+
+        assert rejected is not None and rejected.status == "rejected"
+        assert rejected.diagnostics == (
+            {
+                "code": "material_location_mismatch",
+                "material_source_node_uuid": SOURCE_B_UUID,
+            },
+        )
+        after = inventory.inventory_snapshot()
+        assert after["materials"] == before["materials"]
+        assert after["inventory_lots"] == before["inventory_lots"]
+        assert after["material_reservations"] == before["material_reservations"]
+        empty_site = inventory.get_site(CREATE_NEW_SITE_UUID)
+        assert empty_site.occupied_material_uuid is None
+        assert empty_site.version == 1
+    finally:
+        if service is not None:
+            service.close()
+        inventory.close()
+
+
 def test_blocked_task_state_and_pending_job_monotonically_upgrade_to_admitted(
     tmp_path: Path,
 ) -> None:
@@ -546,6 +612,16 @@ def test_blocked_task_state_and_pending_job_monotonically_upgrade_to_admitted(
             service.get_workflow_task(waiting_task["uuid"])
         ]
         assert not scheduler.can_dispatch_task_materials(waiting_task["uuid"])
+
+        blocked_task = service.get_workflow_task(waiting_task["uuid"])
+        blocked_events = service.list_events(after_id=0)["items"]
+        blocked_outbox = inventory.read_outbox(after_sequence=0, limit=100)
+        same_blocked = scheduler.reconcile_task_admission(waiting_task["uuid"])
+
+        assert same_blocked == blocked
+        assert service.get_workflow_task(waiting_task["uuid"]) == blocked_task
+        assert service.list_events(after_id=0)["items"] == blocked_events
+        assert inventory.read_outbox(after_sequence=0, limit=100) == blocked_outbox
 
         scheduler.reconcile_task_release(
             owner_task["uuid"],

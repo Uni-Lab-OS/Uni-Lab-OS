@@ -165,7 +165,9 @@ class EdgeScheduler:
         self._dispatch_error_hook = dispatch_error_hook
         # D1A 只消费 formal Task/Job port；legacy DAG identity 转换止于本模块。
         self._device_action_tasks_by_job_uuid: dict[str, str] = {}
-        self._device_action_task_before_dispatch: Callable[..., bool | None] | None = None
+        self._device_action_task_before_dispatch: Callable[..., bool | None] | None = (
+            None
+        )
         self._device_action_task_dispatch_error: Callable[..., None] | None = None
         # 新 WorkflowTask kernel 的持久投影 port；不参与 legacy WorkflowRun DAG。
         self._workflow_tasks = workflow_tasks
@@ -307,8 +309,27 @@ class EdgeScheduler:
                 "canceled",
                 "timeout",
             }:
-                return None
+                return self._ack_projected_admission_result(task_uuid)
             return self._reconcile_task_admission_serialized(task_uuid)
+
+    def _ack_projected_admission_result(
+        self,
+        task_uuid: str,
+    ) -> TaskMaterialAdmissionResult | None:
+        """Finish W2 without rebuilding a command from already-resolved Jobs."""
+
+        if self._workflow_tasks is None or self._inventory is None:
+            raise RuntimeError("Workflow Task Material coordination is not configured")
+        projection = self._workflow_tasks.get_material_admission(task_uuid)
+        if not isinstance(projection, dict):
+            return None
+        result = self._inventory.get_command_result(str(projection["command_uuid"]))
+        if not isinstance(result, TaskMaterialAdmissionResult):
+            raise TypeError(
+                "Inventory admission projection points to a non-admission result"
+            )
+        self._inventory.acknowledge(result.outbox_sequence)
+        return result
 
     @contextmanager
     def _material_saga_slot(self, task_uuid: str) -> Iterator[None]:
@@ -356,12 +377,27 @@ class EdgeScheduler:
             sort_keys=True,
         ).encode("utf-8")
         snapshot_fingerprint = f"sha256:{hashlib.sha256(encoded_snapshot).hexdigest()}"
+        canonical_task_uuid = str(task["uuid"])
+        command_uuid = str(
+            uuid_mod.uuid5(
+                uuid_mod.UUID(canonical_task_uuid),
+                f"material-admission:{snapshot_fingerprint}",
+            )
+        )
+        jobs = self._workflow_tasks.list_workflow_node_jobs(canonical_task_uuid)
+        pending_resolution_node_uuids = {
+            str(job.get("workflow_node_uuid") or "")
+            for job in jobs
+            if job.get("status") == "pending"
+        }
         sources: list[TaskMaterialAdmissionSource] = []
         for node in sorted(
             (
                 item
                 for item in nodes
-                if isinstance(item, dict) and item.get("type") == "material_source"
+                if isinstance(item, dict)
+                and item.get("type") == "material_source"
+                and str(item.get("uuid") or "") in pending_resolution_node_uuids
             ),
             key=lambda item: str(item.get("uuid") or ""),
         ):
@@ -393,14 +429,15 @@ class EdgeScheduler:
                 )
             )
         if not sources:
-            return None
-        canonical_task_uuid = str(task["uuid"])
-        command_uuid = str(
-            uuid_mod.uuid5(
-                uuid_mod.UUID(canonical_task_uuid),
-                f"material-admission:{snapshot_fingerprint}",
+            projection = self._workflow_tasks.get_material_admission(
+                canonical_task_uuid
             )
-        )
+            if (
+                isinstance(projection, dict)
+                and projection.get("command_uuid") == command_uuid
+            ):
+                return self._ack_projected_admission_result(canonical_task_uuid)
+            return None
         command = TaskMaterialAdmissionCommand(
             schema_version=1,
             command_uuid=command_uuid,
@@ -426,20 +463,21 @@ class EdgeScheduler:
             raise RuntimeError("Workflow Task Material coordination is not configured")
         pending: list[dict[str, Any]] = []
         reconciled: list[str] = []
-        page = 1
-        while True:
-            tasks = self._workflow_tasks.list_workflow_tasks(
-                page=page,
-                page_size=100,
-                status="pending",
-            )
-            items = tasks.get("items")
-            if not isinstance(items, list):
-                raise TypeError("Workflow Task list projection is invalid")
-            pending.extend(items)
-            if page * 100 >= int(tasks.get("total") or 0):
-                break
-            page += 1
+        for status in ("pending", "admission_blocked"):
+            page = 1
+            while True:
+                tasks = self._workflow_tasks.list_workflow_tasks(
+                    page=page,
+                    page_size=100,
+                    status=status,
+                )
+                items = tasks.get("items")
+                if not isinstance(items, list):
+                    raise TypeError("Workflow Task list projection is invalid")
+                pending.extend(items)
+                if page * 100 >= int(tasks.get("total") or 0):
+                    break
+                page += 1
         for task in sorted(
             pending,
             key=lambda item: (
@@ -538,6 +576,7 @@ class EdgeScheduler:
             if not has_material_source:
                 return None
             if task.get("status") in {"succeeded", "failed", "canceled", "timeout"}:
+                self._ack_projected_admission_result(task_uuid)
                 release_result = self._reconcile_task_release_serialized(
                     task_uuid,
                     "workflow_task_terminal",
@@ -557,6 +596,26 @@ class EdgeScheduler:
         """Fail-closed proof used before WorkflowTask Job dispatch admission."""
 
         if self._workflow_tasks is None or self._inventory is None:
+            return False
+        try:
+            task = self._workflow_tasks.get_workflow_task(task_uuid)
+            if task.get("status") not in {"pending", "running"}:
+                return False
+            snapshot = task.get("workflow_snapshot")
+            nodes = snapshot.get("nodes") if isinstance(snapshot, dict) else None
+            material_source_node_uuids = {
+                str(node.get("uuid") or "")
+                for node in nodes or []
+                if isinstance(node, dict) and node.get("type") == "material_source"
+            }
+            jobs = self._workflow_tasks.list_workflow_node_jobs(task_uuid)
+            if any(
+                job.get("workflow_node_uuid") in material_source_node_uuids
+                and job.get("status") != "succeeded"
+                for job in jobs
+            ):
+                return False
+        except (KeyError, TypeError, ValueError):
             return False
         projection = self._workflow_tasks.get_material_admission(task_uuid)
         if not isinstance(projection, dict) or projection.get("status") != "admitted":
@@ -640,7 +699,8 @@ class EdgeScheduler:
             self._workflows[spec.workflow_id] = run
 
             logger.info(
-                "[EdgeScheduler] workflow %s submitted (%d nodes, state=%s), reschedule",
+                "[EdgeScheduler] workflow %s submitted "
+                "(%d nodes, state=%s), reschedule",
                 spec.workflow_id,
                 len(spec.nodes),
                 run.state.value,
@@ -708,7 +768,8 @@ class EdgeScheduler:
                 )
 
             logger.info(
-                "[EdgeScheduler] job %s (wf=%s node=%s success=%s) finished, reschedule",
+                "[EdgeScheduler] job %s (wf=%s node=%s success=%s) "
+                "finished, reschedule",
                 job_id[:8],
                 job.workflow_id,
                 job.node_id,
@@ -779,7 +840,7 @@ class EdgeScheduler:
                 run.mark_failed(task.node.id)
                 continue
 
-            # 物料锁：@action(lock_resource=[...]) 声明的资源被在执行 job 占用 → 本轮跳过
+            # 物料锁：声明的资源被在执行 job 占用 → 本轮跳过。
             lock_keys = self._resource_lock_keys(task.node, resolved_args)
             if lock_keys & held_resource_locks:
                 logger.info(
@@ -813,12 +874,15 @@ class EdgeScheduler:
                             raise RuntimeError(
                                 "formal device-action Task claim hook is unavailable"
                             )
-                        committed = self._device_action_task_before_dispatch(
-                            task_uuid=formal_task_uuid,
-                            job_uuid=job_id,
-                            device_id=task.node.device_id,
-                            action_name=task.node.action_name,
-                        ) is True
+                        committed = (
+                            self._device_action_task_before_dispatch(
+                                task_uuid=formal_task_uuid,
+                                job_uuid=job_id,
+                                device_id=task.node.device_id,
+                                action_name=task.node.action_name,
+                            )
+                            is True
+                        )
                         if not committed:
                             raise RuntimeError(
                                 "formal device-action Task claim was not committed"
@@ -998,9 +1062,7 @@ class EdgeScheduler:
             try:
                 busy |= set(self._device_action_fence_provider())
             except Exception:
-                logger.exception(
-                    "[EdgeScheduler] device_action_fence_provider failed"
-                )
+                logger.exception("[EdgeScheduler] device_action_fence_provider failed")
         for job in self._inflight.values():
             busy.add(job.device_action_key)
             busy.add(f"/devices/{job.device_id}")

@@ -538,6 +538,7 @@ class WorkflowService:
         cleanup_status = cleanup_status.strip().lower()
         if status and status not in {
             "pending",
+            "admission_blocked",
             "running",
             "canceling",
             "succeeded",

@@ -743,13 +743,16 @@ class WorkflowStore:
     ) -> bool:
         database = conn or self._conn
         with self._lock:
-            return database.execute(
-                """
+            return (
+                database.execute(
+                    """
                 SELECT 1 FROM device_action_system_source
                 WHERE workflow_uuid = ?
                 """,
-                (workflow_uuid,),
-            ).fetchone() is not None
+                    (workflow_uuid,),
+                ).fetchone()
+                is not None
+            )
 
     def is_device_action_task(
         self,
@@ -759,13 +762,16 @@ class WorkflowStore:
     ) -> bool:
         database = conn or self._conn
         with self._lock:
-            return database.execute(
-                """
+            return (
+                database.execute(
+                    """
                 SELECT 1 FROM device_action_task
                 WHERE workflow_task_uuid = ?
                 """,
-                (task_uuid,),
-            ).fetchone() is not None
+                    (task_uuid,),
+                ).fetchone()
+                is not None
+            )
 
     def is_device_action_job(
         self,
@@ -775,13 +781,16 @@ class WorkflowStore:
     ) -> bool:
         database = conn or self._conn
         with self._lock:
-            return database.execute(
-                """
+            return (
+                database.execute(
+                    """
                 SELECT 1 FROM device_action_task
                 WHERE workflow_node_job_uuid = ?
                 """,
-                (job_uuid,),
-            ).fetchone() is not None
+                    (job_uuid,),
+                ).fetchone()
+                is not None
+            )
 
     def list_workflows(
         self,
@@ -1555,7 +1564,7 @@ class WorkflowStore:
         with self.transaction() as conn:
             task = conn.execute(
                 """
-                SELECT uuid FROM workflow_task
+                SELECT uuid, status, workflow_snapshot FROM workflow_task
                 WHERE uuid = ? AND deleted_at IS NULL
                 """,
                 (task_uuid,),
@@ -1580,11 +1589,16 @@ class WorkflowStore:
                 upgrade_blocked = (
                     existing["command_uuid"] == command_uuid
                     and existing["status"] == "blocked"
-                    and status == "admitted"
+                    and status in {"admitted", "rejected"}
                     and outbox_sequence > int(existing["outbox_sequence"])
                 )
                 if not upgrade_blocked:
                     raise StoreConflict("Task Material admission projection conflicts")
+
+            if task["status"] not in {"pending", "admission_blocked"}:
+                raise StoreConflict(
+                    "Task cannot accept a Material admission projection"
+                )
 
             if status == "admitted":
                 for binding in bindings:
@@ -1624,6 +1638,122 @@ class WorkflowStore:
                         """,
                         (encoded_return_info, now, now, job["uuid"]),
                     )
+                    conn.execute(
+                        """
+                        INSERT INTO workflow_runtime_journal(
+                            workflow_task_uuid, workflow_node_job_uuid,
+                            workflow_task_command_uuid, kind, from_status,
+                            to_status, data, create_time
+                        ) VALUES (?, ?, NULL, 'job_transition',
+                                  'pending', 'succeeded', '{}', ?)
+                        """,
+                        (task_uuid, job["uuid"], now),
+                    )
+
+            diagnostics = result.get("diagnostics")
+            if not isinstance(diagnostics, list):
+                diagnostics = []
+            task_status = str(task["status"])
+            next_task_status = task_status
+            if status == "blocked":
+                if task_status != "pending":
+                    raise StoreConflict("Task cannot enter admission_blocked")
+                next_task_status = "admission_blocked"
+                conn.execute(
+                    """
+                    UPDATE workflow_task
+                    SET status = 'admission_blocked', update_time = ?
+                    WHERE uuid = ? AND status = 'pending'
+                    """,
+                    (now, task_uuid),
+                )
+            elif status == "admitted" and task_status == "admission_blocked":
+                next_task_status = "pending"
+                conn.execute(
+                    """
+                    UPDATE workflow_task
+                    SET status = 'pending', update_time = ?
+                    WHERE uuid = ? AND status = 'admission_blocked'
+                    """,
+                    (now, task_uuid),
+                )
+            elif status == "rejected":
+                next_task_status = "failed"
+                encoded_diagnostics = _json(diagnostics)
+                snapshot = _load(task["workflow_snapshot"], {})
+                snapshot_nodes = (
+                    snapshot.get("nodes") if isinstance(snapshot, dict) else None
+                )
+                source_node_uuids = {
+                    str(node.get("uuid") or "")
+                    for node in snapshot_nodes or []
+                    if isinstance(node, dict) and node.get("type") == "material_source"
+                }
+                resolution_jobs = conn.execute(
+                    """
+                    SELECT uuid, workflow_node_uuid
+                    FROM workflow_node_job
+                    WHERE workflow_task_uuid = ? AND deleted_at IS NULL
+                      AND status = 'pending'
+                    ORDER BY topological_index, create_time, uuid
+                    """,
+                    (task_uuid,),
+                ).fetchall()
+                for job in resolution_jobs:
+                    if job["workflow_node_uuid"] not in source_node_uuids:
+                        continue
+                    conn.execute(
+                        """
+                        UPDATE workflow_node_job
+                        SET status = 'failed', error_info = ?,
+                            update_time = ?, finished_at = ?
+                        WHERE uuid = ? AND status = 'pending'
+                        """,
+                        (encoded_diagnostics, now, now, job["uuid"]),
+                    )
+                    conn.execute(
+                        """
+                        INSERT INTO workflow_runtime_journal(
+                            workflow_task_uuid, workflow_node_job_uuid,
+                            workflow_task_command_uuid, kind, from_status,
+                            to_status, data, create_time
+                        ) VALUES (?, ?, NULL, 'job_transition',
+                                  'pending', 'failed', ?, ?)
+                        """,
+                        (
+                            task_uuid,
+                            job["uuid"],
+                            _json({"diagnostics": diagnostics}),
+                            now,
+                        ),
+                    )
+                conn.execute(
+                    """
+                    UPDATE workflow_task
+                    SET status = 'failed', error_info = ?, update_time = ?,
+                        finished_at = ?
+                    WHERE uuid = ? AND status IN ('pending', 'admission_blocked')
+                    """,
+                    (encoded_diagnostics, now, now, task_uuid),
+                )
+
+            if next_task_status != task_status:
+                conn.execute(
+                    """
+                    INSERT INTO workflow_runtime_journal(
+                        workflow_task_uuid, workflow_node_job_uuid,
+                        workflow_task_command_uuid, kind, from_status,
+                        to_status, data, create_time
+                    ) VALUES (?, NULL, NULL, 'task_transition', ?, ?, ?, ?)
+                    """,
+                    (
+                        task_uuid,
+                        task_status,
+                        next_task_status,
+                        _json({"material_admission_status": status}),
+                        now,
+                    ),
+                )
 
             if upgrade_blocked:
                 conn.execute(

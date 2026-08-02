@@ -13,6 +13,8 @@ from typing import Any
 import unilabos.app.scheduler.inventory as inventory_api
 
 MATERIAL_UUID = "5aa00000-0000-4000-8000-000000000106"
+MOUNT_UUID = "5aa00000-0000-4000-8000-000000000108"
+SITE_UUID = "6aa00000-0000-4000-8000-000000000106"
 RESOURCE_TEMPLATE_UUID = "2bb00000-0000-4000-8000-000000000106"
 COMMAND_A_UUID = "80000000-0000-4000-8000-000000000106"
 COMMAND_B_UUID = "80000000-0000-4000-8000-000000000107"
@@ -41,9 +43,9 @@ def _admission_command(
         material_source_node_uuid=material_source_node_uuid,
         mode="existing",
         resource_template_uuid=RESOURCE_TEMPLATE_UUID,
-        mount={"uuid": MATERIAL_UUID},
+        mount={"uuid": MOUNT_UUID},
         material_uuid=MATERIAL_UUID,
-        site_uuid=None,
+        site_uuid=SITE_UUID,
         candidate_site_uuids=(),
         flow_role="sample",
     )
@@ -85,10 +87,32 @@ def test_concurrent_tasks_get_admitted_and_blocked_durable_results(
     )
     try:
         seeder.create_material(
+            material_uuid=MOUNT_UUID,
+            resource_template_uuid=RESOURCE_TEMPLATE_UUID,
+            barcode="MOUNT-106",
+            name="Contended mount 106",
+        )
+        seeder.create_material(
             material_uuid=MATERIAL_UUID,
             resource_template_uuid=RESOURCE_TEMPLATE_UUID,
             barcode="SAMPLE-106",
             name="Contended sample 106",
+        )
+        seeder.create_site(
+            site_uuid=SITE_UUID,
+            description=None,
+            meta_data={},
+            material_uuid=MOUNT_UUID,
+            name="A1",
+            sort_order=0,
+            allowed_resource_template_uuids=[RESOURCE_TEMPLATE_UUID],
+            occupied_material_uuid=MATERIAL_UUID,
+            position_x=0.0,
+            position_y=0.0,
+            position_z=0.0,
+            depth=1.0,
+            length=1.0,
+            width=1.0,
         )
     finally:
         seeder.close()

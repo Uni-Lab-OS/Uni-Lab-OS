@@ -21,7 +21,8 @@ from unilabos.workflow.store import (
 _LOGGER = logging.getLogger(__name__)
 
 TASK_TRANSITIONS = {
-    "pending": frozenset({"running", "canceled"}),
+    "pending": frozenset({"admission_blocked", "running", "failed", "canceled"}),
+    "admission_blocked": frozenset({"pending", "failed", "canceled"}),
     "running": frozenset({"succeeded", "failed", "canceling", "timeout"}),
     "canceling": frozenset({"canceled", "failed", "timeout"}),
     "succeeded": frozenset(),
@@ -536,7 +537,9 @@ class WorkflowRuntimeCoordinator:
                 outcome = "rejected"
             else:
                 command_type = command["type"]
-                if command_type == "pause":
+                if task["status"] == "admission_blocked" and command_type != "cancel":
+                    outcome = "rejected"
+                elif command_type == "pause":
                     self._apply_control_command(
                         connection,
                         task,
@@ -646,7 +649,8 @@ class WorkflowRuntimeCoordinator:
             """,
             (task_uuid,),
         ).fetchall()
-        if task["status"] == "pending":
+        if task["status"] in {"pending", "admission_blocked"}:
+            source_task_status = str(task["status"])
             for job in jobs:
                 if job["status"] != "pending":
                     continue
@@ -680,7 +684,7 @@ class WorkflowRuntimeCoordinator:
                 connection,
                 task_uuid=task_uuid,
                 kind="task_transition",
-                from_status="pending",
+                from_status=source_task_status,
                 to_status="canceled",
                 now=now,
             )
