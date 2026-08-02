@@ -325,6 +325,9 @@ def test_claim_changeset_release_reopen_and_stale_fence_are_one_durable_flow(
         assert durable_claim.state == "released"
         assert durable_claim.fencing_token == first_claim.fencing_token
         assert reopened.commit_material_changeset(changeset_command) == receipt
+        replayed_after_release = reopened.acquire_job_claim(first_command)
+        assert replayed_after_release.status == "rejected"
+        assert replayed_after_release.claim == durable_claim
 
         acquired_after_release = reopened.acquire_job_claim(second_command)
         assert acquired_after_release.status == "acquired"
