@@ -1911,7 +1911,7 @@ class WebSocketClient(BaseCommunicationClient):
         """发布作业状态，拦截最终结果（给HostNode调用的接口）"""
         job_log = format_job_log(item.job_id, item.task_id, item.device_id, item.action_name)
 
-        if status in ["success", "failed"] and self.device_manager.is_manual_unlock_fenced(
+        if status != "cancelled" and self.device_manager.is_manual_unlock_fenced(
             item.job_id
         ):
             logger.warning(
@@ -2061,23 +2061,34 @@ class WebSocketClient(BaseCommunicationClient):
 
         # 先缓存 cancelled fence，再触发可能立即回调的物理 cancel；manager
         # 中的 manual_unlock_fences 同时封住本线程切换前的迟到 success。
+        from unilabos.app.web.controller import job_result_store
+
         for job in unlock.released_jobs:
+            # 若结果回调先取得 manager lock 并写入旧 HTTP 结果仓，fence
+            # 随后建立时在这里清掉；fence 之后的写入会被下方原子接口拒绝。
+            job_result_store.get_and_remove(job.job_id)
+            return_info = {
+                "reason": "manual_force_unlock",
+                "operator_reason": reason,
+            }
             self.publish_job_status(
                 {},
                 job,
                 "cancelled",
-                return_info={
-                    "reason": "manual_force_unlock",
-                    "operator_reason": reason,
-                },
+                return_info=return_info,
             )
 
         host_node = HostNode.get_instance(0)
         cancel_requested_job_ids: List[str] = []
         if host_node is not None:
+            cancel_goal_or_defer = getattr(
+                host_node,
+                "cancel_goal_or_defer",
+                host_node.cancel_goal,
+            )
             for job in unlock.released_jobs:
                 try:
-                    if host_node.cancel_goal(job.job_id):
+                    if cancel_goal_or_defer(job.job_id):
                         cancel_requested_job_ids.append(job.job_id)
                 except Exception as exc:
                     logger.error(
@@ -2108,6 +2119,28 @@ class WebSocketClient(BaseCommunicationClient):
             "releasedJobIds": [job.job_id for job in unlock.released_jobs],
             "cancelRequestedJobIds": cancel_requested_job_ids,
         }
+
+    def is_manual_unlock_fenced(self, job_id: str) -> bool:
+        """供 HostNode 在本地结果落盘前查询 manual fence。"""
+
+        return self.device_manager.is_manual_unlock_fenced(job_id)
+
+    def store_job_result_if_unfenced(
+        self,
+        job_id: str,
+        status: str,
+        result: Optional[Dict[str, Any]],
+        feedback: Optional[Dict[str, Any]] = None,
+    ) -> bool:
+        """与 manual fence 串行化地写入旧 HTTP 结果仓。"""
+
+        with self.device_manager.lock:
+            if job_id in self.device_manager.manual_unlock_fences:
+                return False
+            from unilabos.app.web.controller import store_job_result
+
+            store_job_result(job_id, status, result, feedback)
+            return True
 
     def publish_action_lock(self, device_id: str, action_name: str, free: bool) -> None:
         """主动上报单个 device+action 的锁(可用性)状态。"""
