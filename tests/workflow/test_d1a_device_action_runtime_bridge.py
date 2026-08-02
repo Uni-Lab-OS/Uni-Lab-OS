@@ -162,6 +162,53 @@ def test_edge_scheduler_uses_fixed_job_uuid_and_commits_before_dispatch() -> Non
     assert events == [("commit", job_uuid), ("dispatch", job_uuid)]
 
 
+def _submit_formal_device_action(
+    scheduler: EdgeScheduler,
+) -> tuple[str, str]:
+    task_uuid = str(uuid4())
+    job_uuid = str(uuid4())
+    scheduler.set_device_action_task_hooks(before=lambda **_kwargs: True)
+    scheduler.submit_device_action_task(
+        task_uuid=task_uuid,
+        job_uuid=job_uuid,
+        device_id="robot",
+        action_name="move",
+        action_type="test.action.Move",
+        input_value={"duration_seconds": 1},
+    )
+    return task_uuid, job_uuid
+
+
+def test_formal_scheduler_identity_mapping_is_released_after_success() -> None:
+    scheduler = EdgeScheduler(dispatcher=RecordingDispatcher())
+    task_uuid, job_uuid = _submit_formal_device_action(scheduler)
+
+    assert scheduler._device_action_tasks_by_job_uuid == {job_uuid: task_uuid}
+    scheduler.on_job_finished(job_uuid, success=True, ret_value={"completed": True})
+
+    assert scheduler._device_action_tasks_by_job_uuid == {}
+
+
+def test_formal_scheduler_identity_mapping_is_released_after_failure() -> None:
+    scheduler = EdgeScheduler(dispatcher=RecordingDispatcher())
+    task_uuid, job_uuid = _submit_formal_device_action(scheduler)
+
+    assert scheduler._device_action_tasks_by_job_uuid == {job_uuid: task_uuid}
+    scheduler.on_job_finished(job_uuid, success=False, ret_value={"error": "failed"})
+
+    assert scheduler._device_action_tasks_by_job_uuid == {}
+
+
+def test_formal_scheduler_identity_mapping_is_released_after_cancel() -> None:
+    scheduler = EdgeScheduler(dispatcher=RecordingDispatcher())
+    task_uuid, job_uuid = _submit_formal_device_action(scheduler)
+
+    assert scheduler._device_action_tasks_by_job_uuid == {job_uuid: task_uuid}
+    assert scheduler.cancel_device_action_task(task_uuid) is True
+
+    assert scheduler._device_action_tasks_by_job_uuid == {}
+
+
 def test_generic_workflow_worker_never_dispatches_device_action_tasks(
     tmp_path: Path,
 ) -> None:
@@ -224,6 +271,84 @@ def test_generic_workflow_worker_never_dispatches_device_action_tasks(
         worker.stop()
         worker.join(timeout=1)
         client.close()
+        store.close()
+
+
+def test_claim_hook_failure_cannot_leave_a_dispatchable_scheduler_run(
+    tmp_path: Path,
+) -> None:
+    store = WorkflowStore(tmp_path / "workflow.db")
+    catalog = TemplateCatalog(store)
+    snapshot = catalog.replace(
+        contract.AUTHORITY,
+        [
+            contract._template_import(
+                name="move",
+                display_name="移动",
+                resource_template_uuid=contract.RESOURCE_TEMPLATE_UUID,
+                schema=contract.SIMPLE_SCHEMA,
+            )
+        ],
+    )
+    template = snapshot.node_templates[0]
+    host = FeedbackHost()
+    host.auto_complete = False
+    scheduler, backend = create_edge_stack(host_node_getter=lambda: host)
+    host.backend = backend
+    bridge = DeviceActionTaskRuntimeBridge(
+        store=store,
+        coordinator=WorkflowRuntimeCoordinator(store),
+        scheduler=scheduler,
+        backend=backend,
+    )
+    bridge.start()
+
+    def fail_before_claim(**_kwargs: Any) -> bool:
+        raise RuntimeError("claim store unavailable")
+
+    scheduler.set_device_action_task_hooks(before=fail_before_claim, on_error=None)
+    live = contract.MutableLiveCatalog()
+    service = DeviceActionTaskService(
+        store=store,
+        template_catalog=catalog,
+        authority=contract.AUTHORITY,
+        live_catalog=live,
+        admission=bridge,
+    )
+    client = TestClient(
+        create_workflow_app(WorkflowService(store), device_action_tasks=service)
+    )
+    harness = contract.Harness(
+        tmp_path / "workflow.db",
+        store,
+        client,
+        catalog,
+        snapshot.fingerprint,
+        str(template["uuid"]),
+        "",
+        live,
+        bridge,
+    )
+    try:
+        response = client.post(
+            "/api/v1/device-action-tasks", json=contract._request(harness)
+        )
+        assert response.status_code == 201
+        created = response.json()["data"]
+        assert service.get(created["task_uuid"])["status"] == "pending"
+        assert service.get(created["task_uuid"])["job_status"] == "pending"
+        assert scheduler.has_device_action_task(created["task_uuid"]) is False
+
+        assert scheduler.reschedule() == []
+        time.sleep(0.1)
+
+        assert host.sent == []
+        assert service.get(created["task_uuid"])["status"] == "pending"
+        assert service.get(created["task_uuid"])["job_status"] == "pending"
+    finally:
+        client.close()
+        bridge.stop()
+        backend.stop()
         store.close()
 
 

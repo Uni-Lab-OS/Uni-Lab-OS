@@ -262,6 +262,12 @@ class EdgeScheduler:
                 )
             except BaseException:
                 self._device_action_tasks_by_job_uuid.pop(job_uuid, None)
+                self._workflows.pop(task_uuid, None)
+                self._notified_workflows.discard(task_uuid)
+                for inflight_uuid, inflight in tuple(self._inflight.items()):
+                    if inflight.workflow_id == task_uuid:
+                        self._inflight.pop(inflight_uuid, None)
+                        self._job_resource_locks.pop(inflight_uuid, None)
                 raise
 
     def has_device_action_task(self, task_uuid: str) -> bool:
@@ -800,16 +806,21 @@ class EdgeScheduler:
                 committed = False
                 formal_task_uuid = self._device_action_tasks_by_job_uuid.get(job_id)
                 try:
-                    if (
-                        formal_task_uuid is not None
-                        and self._device_action_task_before_dispatch is not None
-                    ):
+                    if formal_task_uuid is not None:
+                        if self._device_action_task_before_dispatch is None:
+                            raise RuntimeError(
+                                "formal device-action Task claim hook is unavailable"
+                            )
                         committed = self._device_action_task_before_dispatch(
                             task_uuid=formal_task_uuid,
                             job_uuid=job_id,
                             device_id=task.node.device_id,
                             action_name=task.node.action_name,
                         ) is True
+                        if not committed:
+                            raise RuntimeError(
+                                "formal device-action Task claim was not committed"
+                            )
                     elif self._pre_dispatch_hook is not None:
                         committed = self._pre_dispatch_hook(payload) is True
                     self._dispatcher.dispatch(payload)
@@ -934,6 +945,11 @@ class EdgeScheduler:
                 {"workflow_id": wid, "state": run.state.value},
             )
             self._safe_history("record_state", wid, run.state.value)
+            for job_uuid, task_uuid in tuple(
+                self._device_action_tasks_by_job_uuid.items()
+            ):
+                if task_uuid == wid:
+                    self._device_action_tasks_by_job_uuid.pop(job_uuid, None)
         return pending
 
     def _fire_notifications(self, notifications: list[tuple[str, str]]) -> None:
