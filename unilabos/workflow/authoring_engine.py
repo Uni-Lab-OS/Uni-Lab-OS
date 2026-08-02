@@ -752,6 +752,7 @@ def _compile_with_snapshot(
             workflow_uuid=workflow_uuid,
             workflow_revision=workflow_revision,
         )
+        _validate_catalog_projection(snapshot, applied)
         imports = _module_imports(module)
         selectors, function, result_classes = _module_declarations(module, imports)
         displayname, description = _workflow_declaration(
