@@ -11,7 +11,6 @@ from pathlib import Path
 from typing import Any
 
 import pytest
-from unilabos.workflow.composite import project_published_workflow_contract
 
 from unilabos.package_manager import (
     DefinitionCatalog,
@@ -28,6 +27,7 @@ from unilabos.workflow.catalog import (
     TemplateCatalog,
     TemplateCatalogMismatch,
 )
+from unilabos.workflow.composite import project_published_workflow_contract
 from unilabos.workflow.store import WorkflowStore
 
 AUTHORITY = CatalogAuthority(authority_id="os-c1-r1", kind="local")
