@@ -159,9 +159,40 @@ def _declare_output(
     unilab["output_bindings"] = {"result": deepcopy(binding)}
 
 
+def _declare_input_binding(
+    graph: dict[str, object],
+    *,
+    producer_schema: dict[str, object],
+    consumer_schema: dict[str, object],
+    consumer_type: str,
+    producer_required: bool = True,
+) -> None:
+    parameter: dict[str, object] = {
+        "name": "input",
+        "schema": deepcopy(producer_schema),
+        "required": producer_required,
+    }
+    if not producer_required:
+        parameter["default"] = None
+    graph["workflow"]["meta_data"]["unilab"]["input_contract"] = {
+        "version": 1,
+        "parameters": [parameter],
+    }
+    graph["nodes"][0]["meta_data"]["unilab"]["input_bindings"] = {
+        TARGET_HANDLE_UUID: {"parameter": "input"}
+    }
+    graph["handle_templates"][1] = _handle(
+        handle_uuid=TARGET_HANDLE_UUID,
+        io_type="target",
+        value_schema=consumer_schema,
+        value_type=consumer_type,
+    )
+
+
 def _validate(graph: dict[str, object]) -> dict[str, object]:
     base_graph = deepcopy(graph)
     base_unilab = base_graph["workflow"]["meta_data"]["unilab"]
+    base_unilab["input_contract"] = {"version": 1, "parameters": []}
     base_unilab["output_contract"] = {"version": 1, "outputs": []}
     base_unilab["output_bindings"] = {}
     return validate_candidate_bundle(
@@ -342,3 +373,91 @@ def test_candidate_accepts_resource_slot_producer_allowlist_subset() -> None:
     )
 
     assert _validate(graph) is graph
+
+
+@pytest.mark.parametrize(
+    ("producer_schema", "consumer_schema"),
+    [
+        pytest.param(
+            {"$slot": "ResourceSlot"},
+            {
+                "$slot": "ResourceSlot",
+                "allowed_resource_template_uuids": [RESOURCE_TEMPLATE_A_UUID],
+            },
+            id="unconstrained-producer",
+        ),
+        pytest.param(
+            {
+                "$slot": "ResourceSlot",
+                "allowed_resource_template_uuids": [RESOURCE_TEMPLATE_A_UUID],
+            },
+            {
+                "$slot": "ResourceSlot",
+                "allowed_resource_template_uuids": [RESOURCE_TEMPLATE_B_UUID],
+            },
+            id="disjoint-allowlists",
+        ),
+    ],
+)
+def test_candidate_rejects_workflow_input_slot_not_guaranteed_for_handle(
+    producer_schema: dict[str, object],
+    consumer_schema: dict[str, object],
+) -> None:
+    graph = _producer_graph()
+    _declare_input_binding(
+        graph,
+        producer_schema=producer_schema,
+        consumer_schema=consumer_schema,
+        consumer_type="ResourceSlot",
+    )
+
+    with pytest.raises(CandidateBundleError):
+        _validate(graph)
+
+
+@pytest.mark.parametrize(
+    "producer_allowlist",
+    [
+        pytest.param([RESOURCE_TEMPLATE_A_UUID], id="proper-subset"),
+        pytest.param(
+            [RESOURCE_TEMPLATE_A_UUID, RESOURCE_TEMPLATE_B_UUID],
+            id="same-set",
+        ),
+    ],
+)
+def test_candidate_accepts_workflow_input_slot_guaranteed_for_handle(
+    producer_allowlist: list[str],
+) -> None:
+    consumer_allowlist = [RESOURCE_TEMPLATE_A_UUID, RESOURCE_TEMPLATE_B_UUID]
+    graph = _producer_graph()
+    _declare_input_binding(
+        graph,
+        producer_schema={
+            "$slot": "ResourceSlot",
+            "allowed_resource_template_uuids": producer_allowlist,
+        },
+        consumer_schema={
+            "$slot": "ResourceSlot",
+            "allowed_resource_template_uuids": consumer_allowlist,
+        },
+        consumer_type="ResourceSlot",
+    )
+
+    assert _validate(graph) is graph
+
+
+def test_candidate_rejects_nullable_workflow_input_for_optional_non_null_handle(
+) -> None:
+    graph = _producer_graph()
+    _declare_input_binding(
+        graph,
+        producer_schema={
+            "anyOf": [{"type": "string"}, {"type": "null"}],
+        },
+        consumer_schema={"type": "string"},
+        consumer_type="string",
+        producer_required=False,
+    )
+
+    with pytest.raises(CandidateBundleError):
+        _validate(graph)
