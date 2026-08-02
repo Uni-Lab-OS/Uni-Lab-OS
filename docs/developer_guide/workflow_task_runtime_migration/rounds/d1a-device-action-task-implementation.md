@@ -169,8 +169,8 @@ OS ticket 记录 base/test/implementation/review full SHA、命令与 finding di
 
 ### 9.1 候选
 
-- OS 实现候选：`4ca471bc4d02dcc6af12ad50851ae378fec396c0`；
-- FE 最终受测候选：`379f029622a7ccd7364947cf6e105ee1f27d4aee`；
+- OS 最终受测代码候选：`556c941855ac931f4e1e23d1ad7d3aed865a29eb`；
+- FE 最终受测候选：`a380bf81666509b8a5bfe7a7c84af43576828dd9`；
 - 发布目标：OS `integration/workflow-task-runtime`、FE
   `integration/fe-os-migration`；合并必须等待同一独立 reviewer 对最终精确 SHA
   无 blocking finding。
@@ -191,11 +191,16 @@ OS ticket 记录 base/test/implementation/review full SHA、命令与 finding di
 6. FE 保留原 DevicePanel、Action 卡、参数/localStorage draft、锁/手动解锁及
    `edge-device__execution` 事件/结果 UI；仅替换 service/controller、SSE invalidation 和
    REST rehydrate，不把 system source 暴露给浏览器。
+7. claimed 或 transport-unknown 状态以 device-wide lock key 隔离，同一设备的其他 Action
+   不能穿透；D1A bridge 只调用 Scheduler 的正式 Task/Job identity port，legacy
+   WorkflowSpec/WorkflowNode identity 的内部转换被隔离在 Scheduler。
+8. Electron local runtime 启动参数显式增加 `--edge_scheduler`，使本地进程实际能力与
+   前端 capability 声明一致。
 
 ### 9.3 Gate
 
-- OS focused D1A/release tests：`78 passed`；
-- OS 全仓：`2336 passed, 4 skipped`；修改文件 Ruff
+- OS direct D1A tests：`25 passed`；
+- OS 全仓：`2338 passed, 4 skipped`；修改文件 Ruff
   `--select E4,E7,E9,F` 与 `git diff --check` 通过；
 - FE material/services/pascal/workflow-editor/kernel/desktop 六组：共 261 tests 通过；
   全 workspace typecheck、`build:web`、`build:desktop` 和 `git diff --check` 通过；
