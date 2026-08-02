@@ -115,6 +115,12 @@ class EdgeScheduler:
         timeline_capacity: int = 400,
         monitor: Any = None,
         history: Any = None,
+        pre_dispatch_hook: Optional[
+            "Callable[[Dict[str, Any]], bool | None]"
+        ] = None,
+        dispatch_error_hook: Optional[
+            "Callable[[Dict[str, Any], BaseException], None]"
+        ] = None,
     ):
         self._orderer = orderer or StableLocalOrderer()
         self._dispatcher = dispatcher or RecordingDispatcher()
@@ -149,6 +155,8 @@ class EdgeScheduler:
         self._monitor = monitor
         # 工作流执行历史（WorkflowHistoryStore，独立 SQLite）；None = 不落盘
         self._history = history
+        self._pre_dispatch_hook = pre_dispatch_hook
+        self._dispatch_error_hook = dispatch_error_hook
 
     def _emit_monitor(self, channel: str, event_type: str, data: Dict[str, Any]) -> None:
         if self._monitor is None:
@@ -169,6 +177,18 @@ class EdgeScheduler:
 
     def set_workflow_state_listener(self, listener: "Callable[[str, str], None]") -> None:
         self._workflow_state_listener = listener
+
+    def set_dispatch_hooks(
+        self,
+        *,
+        before: Optional["Callable[[Dict[str, Any]], bool | None]"] = None,
+        on_error: Optional["Callable[[Dict[str, Any], BaseException], None]"] = None,
+    ) -> None:
+        """安装 dispatch 事务缝；组合根必须在接收工作流前调用。"""
+
+        with self._lock:
+            self._pre_dispatch_hook = before
+            self._dispatch_error_hook = on_error
 
     # ── 触发点 1：任务进来 ────────────────────────────────────
 
@@ -412,7 +432,7 @@ class EdgeScheduler:
                     run.mark_failed(task.node.id)
                     continue
 
-            job_id = uuid_mod.uuid4().hex
+            job_id = task.node.job_id or uuid_mod.uuid4().hex
             payload = build_job_start_payload(
                 job_id=job_id,
                 task_id=run.spec.task_id,
@@ -427,7 +447,20 @@ class EdgeScheduler:
             # 实际值（如 time）直接决定声明式预估结果
             estimated_s, estimate_source = self._estimator.estimate(key, resolved_args)
             if not manual_confirm:
-                self._dispatcher.dispatch(payload)
+                committed = False
+                try:
+                    if self._pre_dispatch_hook is not None:
+                        committed = self._pre_dispatch_hook(payload) is True
+                    self._dispatcher.dispatch(payload)
+                except Exception as error:
+                    if committed and self._dispatch_error_hook is not None:
+                        self._dispatch_error_hook(payload, error)
+                        run.mark_failed(task.node.id)
+                        logger.exception(
+                            "[EdgeScheduler] dispatch failed after durable pre-commit"
+                        )
+                        continue
+                    raise
             # manual_confirm 不进执行器：job 停驻在 inflight，
             # 由 POST /jobs/{job_id}/finish（人工确认）走统一完成路径
             run.mark_dispatched(task.node.id)

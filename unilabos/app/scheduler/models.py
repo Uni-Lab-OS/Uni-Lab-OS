@@ -81,6 +81,8 @@ class WorkflowNode:
     """WorkflowNode 子集：Edge 执行一个设备动作所需的全部信息。"""
 
     id: str                       # 节点 id（uuid 或云端 node_id 字符串化）
+    # 本地正式 WorkflowNodeJob 可冻结该身份；空值保持既有随机 Edge job 行为。
+    job_id: str = ""
     device_id: str = ""           # 目标设备
     action_name: str = ""         # 设备动作名
     action_type: str = ""         # goal / goal_sequence 等
@@ -206,6 +208,7 @@ def priority_weight(priority: Any) -> float:
 def node_from_dict(data: Dict[str, Any]) -> WorkflowNode:
     return WorkflowNode(
         id=str(data["id"]),
+        job_id=str(data.get("job_id", "") or ""),
         device_id=data.get("device_id", "") or "",
         action_name=data.get("action_name", "") or "",
         action_type=data.get("action_type", "") or "",

@@ -51,6 +51,7 @@ logger = logging.getLogger(__name__)
 # listener 签名：(job_id, success, ret_value, suc_type) -> None
 # suc_type 取值 normal / skip / operator_intervention（见 registry.action_policy）
 JobFinishedListener = Callable[[str, bool, Any, str], None]
+JobStatusListener = Callable[[str, Dict[str, Any], str], None]
 
 # 异常决策等待人工处理的保留时长（超时的设备侧早已按 default_on_decision_timeout 自决）
 _ERROR_DECISION_TTL_SECONDS = 3600.0
@@ -69,6 +70,7 @@ class JobExecutionBackend:
         self.device_manager = device_manager or DeviceActionManager()
         self._host_node_getter = host_node_getter or self._default_host_getter
         self._listeners: List[JobFinishedListener] = []
+        self._status_listeners: List[JobStatusListener] = []
         # 设备状态存储（DeviceStateStore；None = 不落盘）与监控总线
         self.device_state = device_state_store
         self._monitor = monitor
@@ -182,6 +184,11 @@ class JobExecutionBackend:
                 lambda job_id, success, ret_value, _suc_type: listener(job_id, success, ret_value)
             )
 
+    def add_job_status_listener(self, listener: JobStatusListener) -> None:
+        """注册 running/feedback listener；回调始终在 backend worker 中执行。"""
+
+        self._status_listeners.append(listener)
+
     def busy_device_action_keys(self) -> Set[str]:
         """当前被占用的 device_action_key（供调度器做锁视图合并）。"""
         busy: Set[str] = set()
@@ -190,6 +197,27 @@ class JobExecutionBackend:
         for job in self.device_manager.get_queued_jobs():
             busy.add(job.device_action_key)
         return busy
+
+    def request_cancel(self, job_id: str) -> bool:
+        """请求 HostNode 取消仍由本 backend 持有的 goal，不提前释放设备锁。"""
+
+        if self.device_manager.get_job_info(job_id) is None:
+            return False
+        host_node = self._host_node_getter()
+        if host_node is None:
+            return False
+        cancel = getattr(
+            host_node,
+            "cancel_goal_or_defer",
+            getattr(host_node, "cancel_goal", None),
+        )
+        if not callable(cancel):
+            return False
+        try:
+            return bool(cancel(job_id))
+        except Exception:  # noqa: BLE001 - transport 失败由 runtime 进入不确定态
+            logger.exception("[JobExecutionBackend] cancel request failed: %s", job_id)
+            return False
 
     # ── HostNode 侧接口（bridge 形状，duck-typing） ───────────
 
@@ -206,8 +234,11 @@ class JobExecutionBackend:
         """
         if self.device_manager.get_job_info(item.job_id) is None:
             return
+        if status == "running":
+            self._put_event(("status", item.job_id, dict(feedback_data or {}), status))
+            return
         if status not in ("success", "failed"):
-            return  # running/feedback 不推进生命周期
+            return
 
         ret_value = None
         suc_type = "normal"
@@ -350,6 +381,8 @@ class JobExecutionBackend:
                     self._handle_finished(event[1], event[2], event[3], suc_type)
                 elif event[0] == "device_status":
                     self._write_device_property(event[1], event[2], event[3])
+                elif event[0] == "status":
+                    self._handle_status(event[1], event[2], event[3])
             except Exception:  # noqa: BLE001 - worker 不允许死
                 logger.exception("[JobExecutionBackend] event %s failed", event[0])
             finally:
@@ -399,6 +432,18 @@ class JobExecutionBackend:
                 listener(job_id, success, ret_value, suc_type)
             except Exception:  # noqa: BLE001 - 单个 listener 异常不阻断其他
                 logger.exception("[JobExecutionBackend] job finished listener failed")
+
+    def _handle_status(
+        self,
+        job_id: str,
+        feedback_data: Dict[str, Any],
+        status: str,
+    ) -> None:
+        for listener in self._status_listeners:
+            try:
+                listener(job_id, feedback_data, status)
+            except Exception:  # noqa: BLE001 - 单个 listener 不阻断设备回报
+                logger.exception("[JobExecutionBackend] job status listener failed")
 
     @staticmethod
     def _default_host_getter() -> Any:
@@ -497,6 +542,7 @@ def create_edge_stack(
 __all__ = [
     "JobExecutionBackend",
     "JobFinishedListener",
+    "JobStatusListener",
     "create_edge_stack",
     "make_device_lock_resource_resolver",
 ]

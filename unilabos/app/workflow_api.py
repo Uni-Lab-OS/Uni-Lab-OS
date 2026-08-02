@@ -548,9 +548,7 @@ def create_workflow_router(
                 device_action_tasks.create(
                     authority_id=body.authority_id,
                     template_catalog_fingerprint=body.template_catalog_fingerprint,
-                    workflow_node_template_uuid=str(
-                        body.workflow_node_template_uuid
-                    ),
+                    workflow_node_template_uuid=str(body.workflow_node_template_uuid),
                     device_id=body.device_id,
                     input_value=body.input,
                     idempotency_key=str(body.idempotency_key),
@@ -1083,6 +1081,7 @@ def install_composed_workflow_authoring_api(
     *,
     template_catalog: TemplateCatalog | None = None,
     catalog_authority: CatalogAuthority | None = None,
+    device_action_tasks: DeviceActionTaskService | None = None,
 ) -> None:
     """完整构造 production Authoring 路由后，以一次 app mutation 安装。"""
 
@@ -1096,7 +1095,9 @@ def install_composed_workflow_authoring_api(
                 catalog_authority,
             )
         )
-    router.include_router(create_workflow_router(service))
+    router.include_router(
+        create_workflow_router(service, device_action_tasks=device_action_tasks)
+    )
     router.include_router(create_authoring_transform_router(engine))
     _install_error_handlers(app)
     app.include_router(router)

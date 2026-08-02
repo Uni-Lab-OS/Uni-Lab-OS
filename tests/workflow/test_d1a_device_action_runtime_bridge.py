@@ -73,9 +73,7 @@ def test_edge_scheduler_uses_fixed_job_uuid_and_commits_before_dispatch() -> Non
     dispatcher = RecordingDispatcher()
     scheduler = EdgeScheduler(
         dispatcher=dispatcher,
-        pre_dispatch_hook=lambda payload: events.append(
-            ("commit", payload["job_id"])
-        ),
+        pre_dispatch_hook=lambda payload: events.append(("commit", payload["job_id"])),
     )
     job_uuid = str(uuid4())
 
@@ -158,15 +156,17 @@ def test_device_action_runtime_reuses_formal_job_for_feedback_and_typed_result(
             json=contract._request(harness),
         ).json()["data"]
         assert _wait(
-            lambda: client.get(
-                f"/api/v1/device-action-tasks/{created['task_uuid']}"
-            ).json()["data"]["status"]
-            == "succeeded"
+            lambda: (
+                client.get(
+                    f"/api/v1/device-action-tasks/{created['task_uuid']}"
+                ).json()["data"]["status"]
+                == "succeeded"
+            )
         )
 
-        view = client.get(
-            f"/api/v1/device-action-tasks/{created['task_uuid']}"
-        ).json()["data"]
+        view = client.get(f"/api/v1/device-action-tasks/{created['task_uuid']}").json()[
+            "data"
+        ]
         feedback = client.get(
             f"/api/v1/workflow-node-jobs/{created['job_uuid']}/feedback"
         ).json()["data"]

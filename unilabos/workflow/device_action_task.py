@@ -3,7 +3,9 @@
 from __future__ import annotations
 
 import hashlib
+import logging
 import sqlite3
+import threading
 from collections.abc import Mapping
 from typing import Any, Protocol
 from uuid import uuid4
@@ -18,14 +20,17 @@ from unilabos.workflow.catalog import (
 from unilabos.workflow.json_codec import decode_json_bytes, encode_json
 from unilabos.workflow.schema import (
     WorkflowSchemaError,
+    normalize_value,
     parse_input_contract,
     parse_output_contract,
+    parse_value_schema,
 )
 from unilabos.workflow.service import WorkflowError, WorkflowService
 from unilabos.workflow.store import WorkflowStore, utc_now
 from unilabos.workflow.task_input import TaskInputError
 
 _ORIGIN_KIND = "system/device-console"
+_LOGGER = logging.getLogger(__name__)
 
 
 class DeviceActionLiveCatalog(Protocol):
@@ -331,7 +336,14 @@ class DeviceActionTaskService:
                         )
                         view = self._view(task_uuid, conn=conn)
             if not replayed:
-                self._admission.wake(view["task_uuid"], view["job_uuid"])
+                try:
+                    self._admission.wake(view["task_uuid"], view["job_uuid"])
+                except Exception:  # noqa: BLE001 - durable commit 后只允许异步恢复
+                    # Task/Job 已提交；唤醒失败只能保持 durable pending，不能把
+                    # 已成功的幂等创建伪装成 HTTP 失败。
+                    _LOGGER.exception(
+                        "D1A admission wake failed after durable task commit"
+                    )
             return view
         except TemplateCatalogStale:
             raise WorkflowError("template_catalog_conflict") from None
@@ -622,8 +634,655 @@ class DeviceActionTaskService:
         }
 
 
+class DeviceActionTaskRuntimeBridge:
+    """把正式 D1A Task/Job 适配到既有 EdgeScheduler/HostNode 执行栈。"""
+
+    def __init__(
+        self,
+        *,
+        store: WorkflowStore,
+        coordinator: Any,
+        scheduler: Any,
+        backend: Any,
+    ) -> None:
+        self._store = store
+        self._coordinator = coordinator
+        self._scheduler = scheduler
+        self._backend = backend
+        self._started = False
+        self._lock = threading.RLock()
+        self._stop_event = threading.Event()
+        self._cancel_thread: threading.Thread | None = None
+
+    def start(self) -> None:
+        with self._lock:
+            if self._started:
+                return
+            if self._scheduler is None or self._backend is None:
+                return
+            self._scheduler.set_dispatch_hooks(
+                before=self._before_dispatch,
+                on_error=self._dispatch_failed,
+            )
+            self._backend.add_job_status_listener(self._on_job_status)
+            self._backend.add_job_finished_listener(self._on_job_finished)
+            self._started = True
+            self.replay_pending()
+            self._stop_event.clear()
+            self._cancel_thread = threading.Thread(
+                target=self._run_cancel_sweep,
+                name="device-action-task-runtime",
+                daemon=True,
+            )
+            self._cancel_thread.start()
+
+    def stop(self) -> None:
+        with self._lock:
+            self._started = False
+            self._stop_event.set()
+            if self._scheduler is not None:
+                self._scheduler.set_dispatch_hooks(before=None, on_error=None)
+        thread = self._cancel_thread
+        if thread is not None and thread is not threading.current_thread():
+            thread.join(timeout=2)
+        self._cancel_thread = None
+
+    def is_available(self) -> bool:
+        return bool(
+            self._started
+            and self._scheduler is not None
+            and self._backend is not None
+            and getattr(self._backend, "_running", True)
+        )
+
+    def wake(self, task_uuid: str, job_uuid: str) -> None:
+        if not self.is_available():
+            raise WorkflowError("admission_unavailable")
+        self._submit(task_uuid, expected_job_uuid=job_uuid)
+
+    def replay_pending(self) -> None:
+        if not self._started:
+            return
+        with self._store.transaction() as connection:
+            task_uuids = [
+                row["workflow_task_uuid"]
+                for row in connection.execute(
+                    """
+                    SELECT d.workflow_task_uuid
+                    FROM device_action_task AS d
+                    JOIN workflow_task AS t ON t.uuid = d.workflow_task_uuid
+                    JOIN workflow_node_job AS j
+                      ON j.uuid = d.workflow_node_job_uuid
+                    WHERE t.deleted_at IS NULL AND j.deleted_at IS NULL
+                      AND t.status = 'pending' AND j.status = 'pending'
+                    ORDER BY t.create_time, t.uuid
+                    """
+                )
+            ]
+        for task_uuid in task_uuids:
+            self._submit(task_uuid)
+
+    def sweep_cancellations(self) -> None:
+        """把 durable cancel 状态投影到 scheduler/backend；外部调用幂等。"""
+
+        if not self._started:
+            return
+        with self._store.transaction() as connection:
+            pending_canceled = [
+                dict(row)
+                for row in connection.execute(
+                    """
+                    SELECT d.workflow_task_uuid, d.workflow_node_job_uuid
+                    FROM device_action_task AS d
+                    JOIN workflow_task AS t ON t.uuid = d.workflow_task_uuid
+                    JOIN workflow_node_job AS j
+                      ON j.uuid = d.workflow_node_job_uuid
+                    WHERE t.status = 'canceled' AND j.status = 'canceled'
+                      AND d.claim_status = 'pending'
+                    """
+                )
+            ]
+            cancel_requested = [
+                dict(row)
+                for row in connection.execute(
+                    """
+                    SELECT d.workflow_task_uuid, d.workflow_node_job_uuid,
+                           c.uuid AS command_uuid
+                    FROM device_action_task AS d
+                    JOIN workflow_node_job AS j
+                      ON j.uuid = d.workflow_node_job_uuid
+                    JOIN workflow_task_command AS c
+                      ON c.workflow_task_uuid = d.workflow_task_uuid
+                     AND c.type = 'cancel' AND c.status = 'succeeded'
+                    WHERE j.status = 'cancel_requested'
+                      AND j.cancel_command_uuid IS NULL
+                    ORDER BY c.consumed_at DESC, c.uuid DESC
+                    """
+                )
+            ]
+            now = utc_now()
+            for item in pending_canceled:
+                connection.execute(
+                    """
+                    UPDATE device_action_task
+                    SET claim_status = 'released', update_time = ?
+                    WHERE workflow_task_uuid = ? AND claim_status = 'pending'
+                    """,
+                    (now, item["workflow_task_uuid"]),
+                )
+            claimed: list[dict[str, Any]] = []
+            for item in cancel_requested:
+                changed = connection.execute(
+                    """
+                    UPDATE workflow_node_job
+                    SET cancel_command_uuid = ?, update_time = ?
+                    WHERE uuid = ? AND cancel_command_uuid IS NULL
+                    """,
+                    (
+                        item["command_uuid"],
+                        now,
+                        item["workflow_node_job_uuid"],
+                    ),
+                ).rowcount
+                if changed:
+                    claimed.append(item)
+
+        for item in pending_canceled:
+            self._scheduler.cancel_workflow(item["workflow_task_uuid"])
+        for item in claimed:
+            job_uuid = item["workflow_node_job_uuid"]
+            if self._backend.request_cancel(job_uuid):
+                continue
+            self._coordinator.mark_job_unknown(
+                job_uuid,
+                "device_action_cancel_unconfirmed",
+            )
+            with self._store.transaction() as connection:
+                now = utc_now()
+                connection.execute(
+                    """
+                    UPDATE device_action_task
+                    SET claim_status = 'unknown', update_time = ?
+                    WHERE workflow_node_job_uuid = ?
+                    """,
+                    (now, job_uuid),
+                )
+                WorkflowStore._append_event(
+                    connection,
+                    event="device_action_task.changed",
+                    data={"task_uuid": item["workflow_task_uuid"]},
+                    now=now,
+                )
+
+    def _run_cancel_sweep(self) -> None:
+        while not self._stop_event.wait(0.1):
+            try:
+                self.sweep_cancellations()
+            except (sqlite3.Error, RuntimeError):
+                _LOGGER.exception("D1A cancel sweep failed")
+
+    def _submit(
+        self,
+        task_uuid: str,
+        *,
+        expected_job_uuid: str | None = None,
+    ) -> None:
+        from unilabos.app.scheduler.models import WorkflowNode, WorkflowSpec
+
+        with self._lock, self._store.transaction() as connection:
+            row = connection.execute(
+                """
+                SELECT d.*, t.status AS task_status, t.trace_context,
+                       j.status AS job_status, j.param,
+                       j.workflow_node_uuid, nt.type AS action_type
+                FROM device_action_task AS d
+                JOIN workflow_task AS t ON t.uuid = d.workflow_task_uuid
+                JOIN workflow_node_job AS j
+                  ON j.uuid = d.workflow_node_job_uuid
+                JOIN workflow_node_template AS nt
+                  ON nt.uuid = d.workflow_node_template_uuid
+                WHERE d.workflow_task_uuid = ?
+                """,
+                (task_uuid,),
+            ).fetchone()
+            if row is None:
+                raise WorkflowError("not_found")
+            if (
+                expected_job_uuid is not None
+                and row["workflow_node_job_uuid"] != expected_job_uuid
+            ):
+                raise WorkflowError("conflict")
+            if row["task_status"] != "pending" or row["job_status"] != "pending":
+                return
+            if self._scheduler.workflow_snapshot(task_uuid) is not None:
+                return
+            spec = WorkflowSpec(
+                workflow_id=task_uuid,
+                task_id=task_uuid,
+                nodes=[
+                    WorkflowNode(
+                        id=row["workflow_node_uuid"],
+                        job_id=row["workflow_node_job_uuid"],
+                        device_id=row["device_id"],
+                        action_name=row["action_name"],
+                        action_type=row["action_type"],
+                        param=_load(row["param"], {}),
+                        node_type="ILab",
+                    )
+                ],
+            )
+        self._scheduler.submit_workflow(spec)
+
+    def _before_dispatch(self, payload: dict[str, Any]) -> bool:
+        job_uuid = str(payload.get("job_id") or "")
+        if not self._is_d1a_job(job_uuid):
+            return False
+        with self._store.transaction() as connection:
+            row = connection.execute(
+                """
+                SELECT d.*, t.status AS task_status, j.status AS job_status
+                FROM device_action_task AS d
+                JOIN workflow_task AS t ON t.uuid = d.workflow_task_uuid
+                JOIN workflow_node_job AS j
+                  ON j.uuid = d.workflow_node_job_uuid
+                WHERE d.workflow_node_job_uuid = ?
+                """,
+                (job_uuid,),
+            ).fetchone()
+            if row is None:
+                return False
+            if (
+                row["task_status"] != "pending"
+                or row["job_status"] != "pending"
+                or row["claim_status"] != "pending"
+                or payload.get("task_id") != row["workflow_task_uuid"]
+                or payload.get("device_id") != row["device_id"]
+                or payload.get("action") != row["action_name"]
+            ):
+                raise WorkflowError("conflict")
+            now = utc_now()
+            connection.execute(
+                """
+                UPDATE workflow_task
+                SET status = 'running', started_at = COALESCE(started_at, ?),
+                    update_time = ?
+                WHERE uuid = ?
+                """,
+                (now, now, row["workflow_task_uuid"]),
+            )
+            connection.execute(
+                """
+                UPDATE workflow_node_job
+                SET status = 'dispatched', update_time = ? WHERE uuid = ?
+                """,
+                (now, job_uuid),
+            )
+            connection.execute(
+                """
+                UPDATE device_action_task
+                SET admitted_device_id = device_id, claim_status = 'claimed',
+                    update_time = ?
+                WHERE workflow_node_job_uuid = ?
+                """,
+                (now, job_uuid),
+            )
+            self._coordinator._append_journal(
+                connection,
+                task_uuid=row["workflow_task_uuid"],
+                kind="task_transition",
+                from_status="pending",
+                to_status="running",
+                now=now,
+            )
+            self._coordinator._append_journal(
+                connection,
+                task_uuid=row["workflow_task_uuid"],
+                job_uuid=job_uuid,
+                kind="job_transition",
+                from_status="pending",
+                to_status="dispatched",
+                now=now,
+            )
+            self._runtime_events(
+                connection,
+                task_uuid=row["workflow_task_uuid"],
+                now=now,
+            )
+        return True
+
+    def _dispatch_failed(
+        self,
+        payload: dict[str, Any],
+        error: BaseException,
+    ) -> None:
+        job_uuid = str(payload.get("job_id") or "")
+        if not self._is_d1a_job(job_uuid):
+            return
+        self._coordinator.mark_job_unknown(
+            job_uuid,
+            f"edge_dispatch_unconfirmed:{type(error).__name__}",
+        )
+        with self._store.transaction() as connection:
+            now = utc_now()
+            row = connection.execute(
+                """
+                SELECT workflow_task_uuid FROM device_action_task
+                WHERE workflow_node_job_uuid = ?
+                """,
+                (job_uuid,),
+            ).fetchone()
+            if row is None:
+                return
+            connection.execute(
+                """
+                UPDATE device_action_task
+                SET claim_status = 'unknown', update_time = ?
+                WHERE workflow_node_job_uuid = ?
+                """,
+                (now, job_uuid),
+            )
+            WorkflowStore._append_event(
+                connection,
+                event="device_action_task.changed",
+                data={"task_uuid": row["workflow_task_uuid"]},
+                now=now,
+            )
+
+    def _on_job_status(
+        self,
+        job_uuid: str,
+        feedback_data: dict[str, Any],
+        status: str,
+    ) -> None:
+        if not self._started or status != "running" or not self._is_d1a_job(job_uuid):
+            return
+        with self._store.transaction() as connection:
+            job = connection.execute(
+                """
+                SELECT status, feedback_sequence
+                FROM workflow_node_job WHERE uuid = ?
+                """,
+                (job_uuid,),
+            ).fetchone()
+            if job is None:
+                return
+            current_status = job["status"]
+            sequence = int(job["feedback_sequence"]) + 1
+        if current_status == "dispatched":
+            self._coordinator.transition_job(job_uuid, "running")
+        elif current_status != "running":
+            return
+        if feedback_data:
+            observed_at = utc_now()
+            fingerprint = hashlib.sha256(
+                encode_json(feedback_data, sort_keys=True)
+            ).hexdigest()
+            self._coordinator.commit_job_feedback(
+                job_uuid,
+                [
+                    {
+                        "sequence": sequence,
+                        "feedback_type": "feedback",
+                        "data": feedback_data,
+                        "observed_at": observed_at,
+                        "idempotency_key": f"d1a:{job_uuid}:{sequence}:{fingerprint}",
+                    }
+                ],
+            )
+
+    def _on_job_finished(
+        self,
+        job_uuid: str,
+        success: bool,
+        result: Any,
+        suc_type: str,
+    ) -> None:
+        if not self._started or not self._is_d1a_job(job_uuid):
+            return
+        with self._store.transaction() as connection:
+            row = connection.execute(
+                """
+                SELECT d.*, t.status AS task_status, j.status AS job_status,
+                       s.contract_snapshot
+                FROM device_action_task AS d
+                JOIN workflow_task AS t ON t.uuid = d.workflow_task_uuid
+                JOIN workflow_node_job AS j
+                  ON j.uuid = d.workflow_node_job_uuid
+                JOIN device_action_system_source AS s
+                  ON s.authority_id = d.authority_id
+                 AND s.workflow_node_template_uuid = d.workflow_node_template_uuid
+                WHERE d.workflow_node_job_uuid = ?
+                """,
+                (job_uuid,),
+            ).fetchone()
+            if row is None or row["job_status"] in {
+                "succeeded",
+                "failed",
+                "canceled",
+                "timeout",
+            }:
+                return
+            canceled = (
+                row["job_status"] == "cancel_requested"
+                or row["task_status"] == "canceling"
+            )
+            output: dict[str, Any] = {}
+            error_info: list[dict[str, Any]] = []
+            job_status = "canceled" if canceled else "failed"
+            task_status = "canceled" if canceled else "failed"
+            if success and not canceled and suc_type == "normal":
+                try:
+                    output = self._normalize_output(row["contract_snapshot"], result)
+                except (TypeError, ValueError, WorkflowSchemaError):
+                    error_info = [{"code": "invalid_device_action_result"}]
+                else:
+                    job_status = "succeeded"
+                    task_status = "succeeded"
+            elif not canceled:
+                error_info = [
+                    {
+                        "code": "device_action_failed",
+                        "suc_type": str(suc_type or "normal"),
+                    }
+                ]
+            now = utc_now()
+            connection.execute(
+                """
+                UPDATE workflow_node_job
+                SET status = ?, return_info = ?, error_info = ?,
+                    finished_at = COALESCE(finished_at, ?), update_time = ?
+                WHERE uuid = ?
+                """,
+                (
+                    job_status,
+                    _json(output),
+                    _json(error_info),
+                    now,
+                    now,
+                    job_uuid,
+                ),
+            )
+            connection.execute(
+                """
+                UPDATE workflow_task
+                SET status = ?, output = ?, error_info = ?,
+                    cleanup_status = CASE WHEN ? = 'canceled' THEN 'settled'
+                                          ELSE cleanup_status END,
+                    finished_at = COALESCE(finished_at, ?), update_time = ?
+                WHERE uuid = ?
+                """,
+                (
+                    task_status,
+                    _json(output),
+                    _json(error_info),
+                    task_status,
+                    now,
+                    now,
+                    row["workflow_task_uuid"],
+                ),
+            )
+            connection.execute(
+                """
+                UPDATE device_action_task
+                SET claim_status = 'released', update_time = ?
+                WHERE workflow_node_job_uuid = ?
+                """,
+                (now, job_uuid),
+            )
+            self._coordinator._append_journal(
+                connection,
+                task_uuid=row["workflow_task_uuid"],
+                job_uuid=job_uuid,
+                kind="job_transition",
+                from_status=row["job_status"],
+                to_status=job_status,
+                now=now,
+            )
+            self._coordinator._append_journal(
+                connection,
+                task_uuid=row["workflow_task_uuid"],
+                kind="task_transition",
+                from_status=row["task_status"],
+                to_status=task_status,
+                now=now,
+            )
+            self._runtime_events(
+                connection,
+                task_uuid=row["workflow_task_uuid"],
+                now=now,
+            )
+
+    def _is_d1a_job(self, job_uuid: str) -> bool:
+        if not job_uuid:
+            return False
+        return self._store.is_device_action_job(job_uuid)
+
+    @staticmethod
+    def _normalize_output(contract_snapshot: str, raw: Any) -> dict[str, Any]:
+        snapshot = _load(contract_snapshot, {})
+        contract = parse_output_contract(snapshot["output_contract"]).to_dict()
+        if type(raw) is not dict:
+            raise ValueError("device action result must be an object")
+        expected = {item["name"] for item in contract["outputs"]}
+        if set(raw) != expected:
+            raise ValueError("device action result fields do not match")
+        return {
+            item["name"]: normalize_value(
+                parse_value_schema(item["schema"]),
+                raw[item["name"]],
+            )
+            for item in contract["outputs"]
+        }
+
+    def _runtime_events(
+        self,
+        connection: sqlite3.Connection,
+        *,
+        task_uuid: str,
+        now: str,
+    ) -> None:
+        self._coordinator._append_invalidation(
+            connection,
+            task_uuid=task_uuid,
+            now=now,
+        )
+        WorkflowStore._append_event(
+            connection,
+            event="device_action_task.changed",
+            data={"task_uuid": task_uuid},
+            now=now,
+        )
+
+
+class HostNodeDeviceActionLiveCatalog:
+    """用 HostNode 完成态 mapping 与 A1 Catalog 组成内部 live validation port。"""
+
+    def __init__(
+        self,
+        *,
+        template_catalog: TemplateCatalog,
+        authority: CatalogAuthority,
+        host_node_getter: Any | None = None,
+    ) -> None:
+        self._template_catalog = template_catalog
+        self._authority = authority
+        self._host_node_getter = host_node_getter or self._default_host_getter
+
+    def snapshot(self) -> dict[str, dict[str, Any]]:
+        host_node = self._host_node_getter()
+        if host_node is None:
+            return {}
+        mappings = getattr(host_node, "_action_value_mappings", {}) or {}
+        namespaces = getattr(host_node, "devices_names", {}) or {}
+        online = set(getattr(host_node, "_online_devices", set()) or set())
+        with self._template_catalog.snapshot(self._authority) as catalog:
+            templates = list(catalog.node_templates)
+
+        result: dict[str, dict[str, Any]] = {}
+        for raw_device_id, raw_actions in mappings.items():
+            device_id = str(raw_device_id)
+            if not isinstance(raw_actions, Mapping):
+                continue
+            projected_actions: dict[str, dict[str, Any]] = {}
+            owner_uuids: set[str] = set()
+            for raw_name, raw_action in raw_actions.items():
+                name = str(raw_name)
+                if not isinstance(raw_action, Mapping):
+                    continue
+                schema = raw_action.get("schema")
+                if not isinstance(schema, Mapping):
+                    continue
+                live_type = self._type_name(raw_action.get("type"))
+                matches = [
+                    template
+                    for template in templates
+                    if template.get("name") == name
+                    and template.get("type") == live_type
+                    and encode_json(_detached(template.get("schema")), sort_keys=True)
+                    == encode_json(_detached(schema), sort_keys=True)
+                ]
+                if len(matches) != 1:
+                    continue
+                owner_uuids.add(str(matches[0]["resource_template_uuid"]))
+                projected_actions[name] = {
+                    "type": live_type,
+                    "schema": _detached(schema),
+                }
+            if not projected_actions or len(owner_uuids) != 1:
+                continue
+            namespace = str(namespaces.get(raw_device_id, "") or "").rstrip("/")
+            if namespace and not namespace.startswith("/"):
+                namespace = f"/{namespace}"
+            device_key = f"{namespace}/{device_id}" if namespace else f"/{device_id}"
+            is_online = (
+                device_id in online
+                or device_key in online
+                or f"/devices/{device_id}" in online
+            )
+            result[device_id] = {
+                "online": is_online,
+                "resource_template_uuid": next(iter(owner_uuids)),
+                "actions": projected_actions,
+            }
+        return result
+
+    @staticmethod
+    def _type_name(value: Any) -> str:
+        if hasattr(value, "__module__") and hasattr(value, "__name__"):
+            return f"{value.__module__}.{value.__name__}"
+        return str(value or "")
+
+    @staticmethod
+    def _default_host_getter() -> Any:
+        from unilabos.ros.nodes.presets.host_node import HostNode
+
+        return HostNode.get_instance(0)
+
+
 __all__ = [
     "DeviceActionAdmission",
     "DeviceActionLiveCatalog",
+    "DeviceActionTaskRuntimeBridge",
     "DeviceActionTaskService",
+    "HostNodeDeviceActionLiveCatalog",
 ]

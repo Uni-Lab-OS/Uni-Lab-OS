@@ -123,7 +123,10 @@ def setup_server(
                 install_composed_workflow_authoring_api,
             )
             from unilabos.workflow.catalog import CatalogAuthority
-            from unilabos.workflow.composition import compose_workflow_runtime
+            from unilabos.workflow.composition import (
+                compose_workflow_runtime,
+                get_device_action_task_service,
+            )
 
             authority = BasicConfig.workflow_graph_authority
             if not isinstance(authority, CatalogAuthority) or authority.kind != "local":
@@ -156,6 +159,7 @@ def setup_server(
                 workflow_service.compiler,
                 template_catalog=template_catalog,
                 catalog_authority=catalog_authority,
+                device_action_tasks=get_device_action_task_service(),
             )
             workflow_routes_mounted = True
         except Exception as e:  # noqa: BLE001 - keep unrelated web surfaces alive
