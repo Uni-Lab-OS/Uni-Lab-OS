@@ -247,15 +247,6 @@ class AuthoringCompiler(Protocol):
     ) -> CandidateCompilation: ...
 
 
-class TaskMaterialAdmissionProvider(Protocol):
-    """Scheduler 使用的 closed Task Material admission port。"""
-
-    def admit_task(
-        self,
-        command: object,
-    ) -> object: ...
-
-
 @runtime_checkable
 class CatalogSnapshotProvider(Protocol):
     """可变 Catalog 编译器提供的可选稳定快照能力。"""
@@ -289,8 +280,11 @@ class WorkflowService:
         compiler: Optional[AuthoringCompiler] = None,
         resource_resolver: Optional[ResourceSlotResolver] = None,
         material_source_authority: MaterialSourceStaticAuthority | None = None,
-        material_reservations: Optional[TaskMaterialAdmissionProvider] = None,
+        material_reservations: object | None = None,
     ):
+        # Compatibility-only constructor input. Task creation deliberately does
+        # not invoke Inventory; EdgeScheduler owns the post-commit saga.
+        del material_reservations
         self._store = store
         self.compiler = compiler
         self._resource_resolver = (
@@ -299,9 +293,6 @@ class WorkflowService:
             else UnconfiguredResourceSlotResolver()
         )
         self._material_source_authority = material_source_authority
-        # Transitional composition seam only. Workflow Task creation never calls
-        # Inventory; EdgeScheduler coordinates the closed command after commit.
-        self._material_admission = material_reservations
         self._locks_guard = threading.Lock()
         self._authoring_locks: Dict[str, threading.RLock] = {}
 
@@ -401,18 +392,16 @@ class WorkflowService:
             self._store.get_graph(identity),
         )
 
-    def _validate_material_source_commit(
+    def _validate_material_source(
         self,
         graph: Dict[str, Any],
-        uow: Any,
     ) -> None:
-        """在 Store 写事务内复核 MaterialSource 的 durable facts。"""
+        """在 Workflow 写事务外执行 MaterialSource 静态只读检查。"""
 
         try:
             validate_material_source_authority(
                 graph,
                 self._material_source_authority,
-                uow=uow,
             )
         except MaterialSourceAuthorityError as error:
             raise StoreAuthoringConflict(error.code) from None
@@ -441,6 +430,9 @@ class WorkflowService:
                     else WorkflowEdgeWrite.model_validate(item)
                     for item in edges
                 ]
+                self._validate_material_source(
+                    {"nodes": [item.model_dump() for item in node_values]}
+                )
                 return self._store.save_graph(
                     identity,
                     revision=revision,
@@ -448,7 +440,6 @@ class WorkflowService:
                     edges=edge_values,
                     protect_reserved_metadata=True,
                     validate_input_binding_schema=True,
-                    commit_validator=self._validate_material_source_commit,
                 )
             except ValidationError:
                 raise WorkflowError("invalid_input") from None
@@ -1325,6 +1316,7 @@ class WorkflowService:
                     raise WorkflowConflict("candidate_not_materialized")
 
             try:
+                self._validate_material_source(candidate["graph"])
                 # 可变 Catalog 的 guard 必须先于 Store 事务获取并保持到事务结束。
                 with self._catalog_snapshot() as catalog_fingerprint:
                     if catalog_fingerprint != candidate["template_catalog_fingerprint"]:
@@ -1333,7 +1325,6 @@ class WorkflowService:
                         workflow_uuid=workflow_uuid,
                         candidate_hash=candidate_hash,
                         validate_draft_state=validate_draft_linearization,
-                        commit_validator=self._validate_material_source_commit,
                     )
             except StoreAuthoringConflict as error:
                 raise WorkflowConflict(error.code) from None

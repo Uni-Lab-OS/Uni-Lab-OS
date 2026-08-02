@@ -7,22 +7,15 @@ import sqlite3
 import threading
 from collections.abc import Iterable
 from datetime import datetime, timezone
-from typing import Any, Dict, Optional, Protocol
+from typing import Any, Dict, Optional
 from uuid import uuid4
 
-from unilabos.resources.authority import MaterialModule
-from unilabos.resources.authority.sqlite import SQLiteMaterialAdapter
 from unilabos.workflow.json_codec import decode_json_bytes, encode_json
-from unilabos.workflow.material_resolver import MaterialResourceSlotResolver
 from unilabos.workflow.store import (
     StoreConflict,
     StoreNotFound,
     WorkflowStore,
     utc_now,
-)
-from unilabos.workflow.task_input import (
-    TaskInputError,
-    material_root_uuids_from_task_snapshot,
 )
 
 _LOGGER = logging.getLogger(__name__)
@@ -89,18 +82,6 @@ _JOB_IN_FLIGHT = frozenset(
 )
 
 
-class TaskMaterialReservationGuard(Protocol):
-    """Runtime dispatch 所需的最小 Material capability。"""
-
-    def has_complete_task_reservation(
-        self,
-        uow: Any,
-        *,
-        task_uuid: str,
-        root_material_uuids: tuple[str, ...],
-    ) -> bool: ...
-
-
 def _json(value: Any) -> str:
     return encode_json(value, sort_keys=True).decode("utf-8")
 
@@ -132,40 +113,8 @@ class WorkflowRuntimeCoordinator:
     def __init__(
         self,
         store: WorkflowStore,
-        *,
-        material_reservations: TaskMaterialReservationGuard | None = None,
     ):
         self._store = store
-        if material_reservations is None:
-            materials = MaterialModule(
-                SQLiteMaterialAdapter.from_runtime_authority(store),
-                resource_templates={},
-            )
-            material_reservations = MaterialResourceSlotResolver(materials)
-        self._material_reservations = material_reservations
-
-    def _require_complete_material_reservation(
-        self,
-        connection: sqlite3.Connection,
-        task: sqlite3.Row,
-    ) -> None:
-        try:
-            roots = material_root_uuids_from_task_snapshot(
-                _load(task["workflow_snapshot"]),
-                _load(task["input"]),
-                _load(task["execution_plan"]),
-            )
-            if not roots:
-                return
-            complete = self._material_reservations.has_complete_task_reservation(
-                connection,
-                task_uuid=task["uuid"],
-                root_material_uuids=roots,
-            )
-        except (TaskInputError, TypeError, ValueError):
-            raise StoreConflict("task Material reservation is not verifiable") from None
-        if not complete:
-            raise StoreConflict("task does not own a complete Material reservation")
 
     @staticmethod
     def _task_row(
@@ -338,8 +287,6 @@ class WorkflowRuntimeCoordinator:
             task = self._task_row(connection, row["workflow_task_uuid"])
             if task["status"] in _TASK_TERMINAL:
                 raise StoreConflict("terminal task cannot mutate a job")
-            if status == "dispatched":
-                self._require_complete_material_reservation(connection, task)
             assignments = ["status = ?", "update_time = ?"]
             values: list[Any] = [status, now]
             if status == "running" and row["started_at"] is None:

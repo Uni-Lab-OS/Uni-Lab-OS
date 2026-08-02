@@ -11,8 +11,10 @@ from collections.abc import Callable, Iterable, Mapping
 from pathlib import Path
 from typing import cast
 
-from unilabos.resources.authority import MaterialModule
-from unilabos.resources.authority.sqlite import SQLiteMaterialAdapter
+from unilabos.app.scheduler.inventory import (
+    InventoryService,
+    ResourceTemplateIdentity,
+)
 from unilabos.workflow.authoring_engine import WorkflowAuthoringEngine
 from unilabos.workflow.catalog import (
     CatalogAuthority,
@@ -33,6 +35,7 @@ from unilabos.workflow.store import WorkflowStore
 _lock = threading.Lock()
 _service: WorkflowService | None = None
 _startup_store: WorkflowStore | None = None
+_inventory_service: InventoryService | None = None
 _database_path: Path | None = None
 _monitor: WorkflowSourceMonitor | None = None
 _runtime_worker: WorkflowRuntimeWorker | None = None
@@ -96,8 +99,23 @@ def _registry_has_material_source_owner(
     return isinstance(registry_snapshot.get("host_node"), Mapping)
 
 
+def _inventory_resource_templates(
+    assignments: Mapping[str, str],
+) -> dict[str, ResourceTemplateIdentity]:
+    """Project Registry identities into Inventory's immutable lookup snapshot."""
+
+    return {
+        resource_template_uuid: ResourceTemplateIdentity(
+            uuid=resource_template_uuid,
+            material_class=source_identity,
+        )
+        for source_identity, resource_template_uuid in assignments.items()
+    }
+
+
 def _retain_runtime(
     service: WorkflowService,
+    inventory_service: InventoryService,
     monitor: WorkflowSourceMonitor | None,
     runtime_worker: WorkflowRuntimeWorker | None,
     *,
@@ -112,10 +130,12 @@ def _retain_runtime(
     """发布 ready Authority，或保留失败 cleanup 的独占 ownership。"""
 
     global _authority, _compiler, _database_path, _editable_package_roots
+    global _inventory_service
     global _monitor, _ready, _runtime_worker, _startup_store
     global _owner_pid, _service, _workspace_lease_fd
     _service = service
     _startup_store = None
+    _inventory_service = inventory_service
     _database_path = database_path
     _compiler = compiler
     _authority = authority
@@ -129,6 +149,7 @@ def _retain_runtime(
 
 def _retain_startup_store(
     store: WorkflowStore,
+    inventory_service: InventoryService | None,
     *,
     database_path: Path,
     owner_pid: int,
@@ -136,9 +157,10 @@ def _retain_startup_store(
 ) -> None:
     """保留 Service 构造前未确认关闭的 Store 与工作区租约。"""
 
-    global _database_path, _owner_pid, _ready, _startup_store
+    global _database_path, _inventory_service, _owner_pid, _ready, _startup_store
     global _workspace_lease_fd
     _startup_store = store
+    _inventory_service = inventory_service
     _database_path = database_path
     _owner_pid = owner_pid
     _workspace_lease_fd = lease_descriptor
@@ -149,10 +171,12 @@ def _clear_runtime() -> None:
     """清除已确认关闭的进程内引用；lease 由调用方显式释放。"""
 
     global _authority, _compiler, _database_path, _editable_package_roots
+    global _inventory_service
     global _monitor, _ready, _runtime_worker, _startup_store
     global _owner_pid, _service, _workspace_lease_fd
     _service = None
     _startup_store = None
+    _inventory_service = None
     _database_path = None
     _compiler = None
     _authority = None
@@ -297,25 +321,15 @@ def compose_workflow_runtime(
         lease_descriptor = _acquire_workspace_lease(resolved_working_dir)
         new_service: WorkflowService | None = None
         new_store: WorkflowStore | None = None
+        new_inventory_service: InventoryService | None = None
         new_monitor: WorkflowSourceMonitor | None = None
         new_runtime_worker: WorkflowRuntimeWorker | None = None
         published = False
         try:
             store = WorkflowStore(database_path)
             new_store = store
-            material_module = MaterialModule(
-                SQLiteMaterialAdapter.from_runtime_authority(store),
-                # ResourceSlot、Reservation 与 MaterialSource 静态证明共享
-                # durable Material/Site；template discovery 不属于其 owner。
-                resource_templates={},
-            )
-            material_authority = MaterialResourceSlotResolver(material_module)
-            runtime_coordinator = WorkflowRuntimeCoordinator(
-                store,
-                material_reservations=material_authority,
-            )
-            runtime_coordinator.recover_startup()
             runtime_compiler = compiler
+            resolved_identities: dict[str, str] = {}
             if authority is not None:
                 catalog = TemplateCatalog(store)
                 identity_index: ResourceTemplateIdentityIndex | None = None
@@ -328,7 +342,6 @@ def compose_workflow_runtime(
                         resource_template_identity_resolver
                     )
                     identity_resolver = resource_template_identity_resolver
-                    resolved_identities: dict[str, str] = {}
                     if identity_resolver is None:
                         identity_index = LocalResourceTemplateIdentityIndex(
                             store,
@@ -338,10 +351,15 @@ def compose_workflow_runtime(
                                 resource_registry_snapshot,
                             ),
                         )
-                    if identity_index is not None:
+                    if identity_index is not None or identity_resolver is not None:
+                        base_identity_resolver = identity_resolver
 
                         def resolve_identity(source_identity: str) -> str:
-                            resolved = identity_index.resolve_symbol(source_identity)
+                            resolved = (
+                                identity_index.resolve_symbol(source_identity)
+                                if identity_index is not None
+                                else base_identity_resolver(source_identity)  # type: ignore[misc]
+                            )
                             resolved_identities[source_identity] = resolved
                             return resolved
 
@@ -355,21 +373,32 @@ def compose_workflow_runtime(
                         authority,
                         templates,
                         resource_template_identities=(
-                            resolved_identities if identity_index is not None else None
+                            resolved_identities if resolved_identities else None
                         ),
                     )
+            new_inventory_service = InventoryService.open(
+                working_dir=resolved_working_dir,
+                resource_templates=_inventory_resource_templates(
+                    resolved_identities,
+                ),
+            )
+            material_authority = MaterialResourceSlotResolver(
+                new_inventory_service,
+            )
+            runtime_coordinator = WorkflowRuntimeCoordinator(store)
+            runtime_coordinator.recover_startup()
+            if authority is not None:
                 runtime_compiler = WorkflowAuthoringEngine(
                     catalog=catalog,
                     authority=authority,
                     resource_template_identity_index=identity_index,
-                    material_source_authority=material_module,
+                    material_source_authority=new_inventory_service,
                 )
             new_service = WorkflowService(
                 store,
                 compiler=runtime_compiler,
                 resource_resolver=material_authority,
-                material_source_authority=material_module,
-                material_reservations=material_authority,
+                material_source_authority=new_inventory_service,
             )
             register_editable_package_sources(
                 new_service,
@@ -382,6 +411,7 @@ def compose_workflow_runtime(
             # 会捕获此发布点与线程启动之间发生的变化。
             _retain_runtime(
                 new_service,
+                new_inventory_service,
                 new_monitor,
                 new_runtime_worker,
                 database_path=database_path,
@@ -420,10 +450,16 @@ def compose_workflow_runtime(
                     new_store.close()
                 except BaseException as error:  # noqa: BLE001 - 保留租约需捕获关闭失败
                     cleanup_error = error
+            if cleanup_error is None and new_inventory_service is not None:
+                try:
+                    new_inventory_service.close()
+                except BaseException as error:  # noqa: BLE001 - 保留租约需捕获关闭失败
+                    cleanup_error = error
             if cleanup_error is not None:
-                if new_service is not None:
+                if new_service is not None and new_inventory_service is not None:
                     _retain_runtime(
                         new_service,
+                        new_inventory_service,
                         new_monitor,
                         new_runtime_worker,
                         database_path=database_path,
@@ -437,6 +473,7 @@ def compose_workflow_runtime(
                 elif new_store is not None:
                     _retain_startup_store(
                         new_store,
+                        new_inventory_service,
                         database_path=database_path,
                         owner_pid=os.getpid(),
                         lease_descriptor=lease_descriptor,
@@ -485,6 +522,7 @@ def reset_workflow_service_for_test() -> None:
     """停止监视器并关闭测试使用的进程级单例。"""
 
     global _authority, _compiler, _database_path, _editable_package_roots
+    global _inventory_service
     global _monitor, _ready, _runtime_worker, _startup_store
     global _owner_pid, _service, _workspace_lease_fd
     with _lock:
@@ -503,10 +541,13 @@ def reset_workflow_service_for_test() -> None:
         elif _startup_store is not None:
             # Service 构造前的 Store 也必须确认关闭后才能释放租约。
             _startup_store.close()
+        if _inventory_service is not None:
+            _inventory_service.close()
         _monitor = None
         _runtime_worker = None
         _service = None
         _startup_store = None
+        _inventory_service = None
         _database_path = None
         _compiler = None
         _authority = None
