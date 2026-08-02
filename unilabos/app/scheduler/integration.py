@@ -33,6 +33,7 @@ _scheduler: EdgeScheduler | None = None
 _backend: JobExecutionBackend | None = None
 _inventory: Any | None = None
 _outbox_worker: Any | None = None
+_owns_inventory = False
 
 
 def get_edge_scheduler() -> EdgeScheduler | None:
@@ -77,6 +78,8 @@ def setup_edge_scheduler(
     host_node_getter: Any = None,
     working_dir: str = "",
     inventory_resource_templates: Any = None,
+    inventory_service: Any = None,
+    workflow_tasks: Any = None,
     edge_id: str = "edge-default",
     sync_sender: Any = None,
     device_state_db_path: str = "",
@@ -92,6 +95,8 @@ def setup_edge_scheduler(
         ordering_url: uni-lab-scheduler 地址（空则本地稳定排序）
         working_dir: OS workspace；Inventory 固定使用其下的 ``inventory.db``。
         inventory_resource_templates: Registry 注入的只读 ResourceTemplate identities。
+        inventory_service: workspace composition 已打开的唯一 InventoryService。
+        workflow_tasks: 同一 composition 的 WorkflowService durable Task authority。
         sync_sender: outbox 上报 callable（events → acked_sequence）；
             传入时启动 OutboxWorker，不传则事件保留在 outbox（云端端点就绪后再挂）
         device_state_db_path: 设备状态 SQLite 路径（独立于仓储/工作流库；
@@ -105,7 +110,7 @@ def setup_edge_scheduler(
     Returns:
         (scheduler, backend)；backend 需由调用方追加进 HostNode bridges 列表。
     """
-    global _scheduler, _backend, _inventory, _outbox_worker
+    global _scheduler, _backend, _inventory, _outbox_worker, _owns_inventory
     if _scheduler is not None and _backend is not None:
         logger.warning(
             "[EdgeSchedulerIntegration] already set up, reusing existing stack"
@@ -130,10 +135,11 @@ def setup_edge_scheduler(
     else:
         orderer = StableLocalOrderer()
 
-    inventory = None
+    if inventory_service is not None and working_dir:
+        raise ValueError("inventory_service and working_dir are mutually exclusive")
+    inventory = inventory_service
     if working_dir:
         from unilabos.app.scheduler.inventory.service import InventoryService
-        from unilabos.app.scheduler.inventory.sync import OutboxWorker
         from unilabos.app.scheduler.monitor import monitor_bus as _monitor_bus
 
         inventory = InventoryService.open(
@@ -143,10 +149,14 @@ def setup_edge_scheduler(
             lab_id=lab_id,
             monitor=_monitor_bus,
         )
+        _owns_inventory = True
+    if inventory is not None:
         _inventory = inventory
         # 本地优先：仅显式传入 sync_sender 时才启动云端同步；纯本地模式下
         # 领域事件留在 sync_outbox（SQLite），后续接入云端时挂 worker 重放即可。
         if sync_sender is not None:
+            from unilabos.app.scheduler.inventory.sync import OutboxWorker
+
             _outbox_worker = OutboxWorker(inventory, sync_sender)
             _outbox_worker.start()
         else:
@@ -199,8 +209,12 @@ def setup_edge_scheduler(
         monitor=monitor_bus,
         device_state_store=device_state_store,
         history=history_store,
+        workflow_tasks=workflow_tasks,
     )
     _scheduler, _backend = scheduler, backend
+
+    if workflow_tasks is not None and inventory is not None:
+        scheduler.reconcile_pending_task_admissions()
 
     if ws_client is not None:
         _wire_ws_client(scheduler, ws_client)
@@ -244,17 +258,18 @@ def _wire_ws_client(scheduler: EdgeScheduler, ws_client: Any) -> None:
 
 def reset_for_test() -> None:
     """测试用：清掉进程内单例。"""
-    global _scheduler, _backend, _inventory, _outbox_worker
+    global _scheduler, _backend, _inventory, _outbox_worker, _owns_inventory
     if _backend is not None:
         _backend.stop()
     if _outbox_worker is not None:
         _outbox_worker.stop()
-    if _inventory is not None:
+    if _inventory is not None and _owns_inventory:
         _inventory.close()
     _scheduler = None
     _backend = None
     _inventory = None
     _outbox_worker = None
+    _owns_inventory = False
 
 
 __all__ = [

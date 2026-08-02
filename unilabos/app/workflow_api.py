@@ -7,7 +7,7 @@ import json
 import logging
 import re
 from collections.abc import Callable, Mapping
-from typing import Annotated, Any, Dict, List, Optional, Protocol
+from typing import Annotated, Any, Protocol
 from uuid import UUID
 
 from fastapi import APIRouter, FastAPI, Header, Query, Request
@@ -149,18 +149,18 @@ def _parse_positive_decimal(value: str, *, maximum: int) -> int:
 
 class WorkflowCreateRequest(_BackendModel):
     name: str
-    tags: List[Any] = Field(default_factory=list)
-    description: Optional[str] = None
-    meta_data: Dict[str, Any] = Field(default_factory=dict)
+    tags: list[Any] = Field(default_factory=list)
+    description: str | None = None
+    meta_data: dict[str, Any] = Field(default_factory=dict)
 
     @field_validator("tags", mode="before")
     @classmethod
-    def _json_array(cls, value: Any) -> List[Any]:
+    def _json_array(cls, value: Any) -> list[Any]:
         return normalize_json_array(value)
 
     @field_validator("meta_data", mode="before")
     @classmethod
-    def _json_object(cls, value: Any) -> Dict[str, Any]:
+    def _json_object(cls, value: Any) -> dict[str, Any]:
         return normalize_json_object(value)
 
 
@@ -170,45 +170,45 @@ class WorkflowUpdateRequest(WorkflowCreateRequest):
 
 class GraphWriteRequest(_BackendModel):
     revision: int = Field(ge=1, le=_INT64_MAX, strict=True)
-    nodes: List[WorkflowNodeWrite] = Field(default_factory=list)
-    edges: List[WorkflowEdgeWrite] = Field(default_factory=list)
+    nodes: list[WorkflowNodeWrite] = Field(default_factory=list)
+    edges: list[WorkflowEdgeWrite] = Field(default_factory=list)
 
     @field_validator("nodes", "edges", mode="before")
     @classmethod
-    def _json_array(cls, value: Any) -> List[Any]:
+    def _json_array(cls, value: Any) -> list[Any]:
         return [] if value is None else value
 
 
 class WorkflowTaskCreateRequest(_BackendModel):
     workflow_uuid: str
     run_mode: str = "normal"
-    target_node_uuid: Optional[str] = None
-    input: Dict[str, Any] = Field(default_factory=dict)
-    description: Optional[str] = None
-    meta_data: Dict[str, Any] = Field(default_factory=dict)
+    target_node_uuid: str | None = None
+    input: dict[str, Any] = Field(default_factory=dict)
+    description: str | None = None
+    meta_data: dict[str, Any] = Field(default_factory=dict)
 
     @field_validator("input", "meta_data", mode="before")
     @classmethod
-    def _json_object(cls, value: Any) -> Dict[str, Any]:
+    def _json_object(cls, value: Any) -> dict[str, Any]:
         return normalize_json_object(value)
 
 
 class WorkflowTaskCommandRequest(_BackendModel):
     type: str
-    target_node_uuid: Optional[UUID] = None
+    target_node_uuid: UUID | None = None
     idempotency_key: str
-    description: Optional[str] = None
-    meta_data: Dict[str, Any] = Field(default_factory=dict)
+    description: str | None = None
+    meta_data: dict[str, Any] = Field(default_factory=dict)
 
     @field_validator("meta_data", mode="before")
     @classmethod
-    def _json_object(cls, value: Any) -> Dict[str, Any]:
+    def _json_object(cls, value: Any) -> dict[str, Any]:
         return normalize_json_object(value)
 
 
 class DraftWriteRequest(_StrictModel):
     python_source: str
-    expected_draft_hash: Optional[HashToken]
+    expected_draft_hash: HashToken | None
     expected_workflow_revision: int = Field(
         ge=1,
         le=_INT64_MAX,
@@ -251,15 +251,15 @@ class _AuthoringTransformRequest(_StrictModel):
 
 class AuthoringCompileRequest(_AuthoringTransformRequest):
     python_source: str
-    applied_graph: Dict[str, Any]
+    applied_graph: dict[str, Any]
 
 
 class AuthoringGeneratePythonRequest(_AuthoringTransformRequest):
-    graph: Dict[str, Any]
+    graph: dict[str, Any]
 
 
 class AuthoringValidateRequest(_AuthoringTransformRequest):
-    graph: Dict[str, Any]
+    graph: dict[str, Any]
     python_source: str
 
 
@@ -298,9 +298,9 @@ def _error(error: WorkflowError) -> _BackendJSONResponse:
 
 
 def _diagnostic_ranges(
-    diagnostics: List[Dict[str, Any]],
-) -> List[Dict[str, Any]]:
-    ranges: List[Dict[str, Any]] = []
+    diagnostics: list[dict[str, Any]],
+) -> list[dict[str, Any]]:
+    ranges: list[dict[str, Any]] = []
     for item in diagnostics:
         source_range = item.get("source_range")
         if source_range is not None:
@@ -318,17 +318,17 @@ def _diagnostic_ranges(
 def _transform_data(
     result: Any,
     *,
-    input_source: Optional[str],
+    input_source: str | None,
     workflow_uuid: str,
     revision: int,
-    base_graph: Dict[str, Any],
+    base_graph: dict[str, Any],
     require_unchanged_graph: bool,
-) -> Dict[str, Any]:
+) -> dict[str, Any]:
     """把 engine 结果收紧为唯一公开 DTO，拒绝内部或越界值。"""
 
     compilation = CandidateCompilation.model_validate(result)
     if not isinstance(compilation.diagnostics, list):
-        raise ValueError("diagnostics must be an array")
+        raise TypeError("diagnostics must be an array")
     diagnostics = [
         CandidateDiagnostic.model_validate(item).model_dump(exclude_none=True)
         for item in compilation.diagnostics
@@ -338,14 +338,14 @@ def _transform_data(
         raise ValueError("diagnostic range is outside the request source")
 
     if not isinstance(compilation.source_map, list):
-        raise ValueError("source_map must be an array")
+        raise TypeError("source_map must be an array")
     source_map = [
         CandidateSourceMapEntry.model_validate(item).model_dump()
         for item in compilation.source_map
     ]
     normalized_source = compilation.normalized_python_source
     graph = compilation.graph
-    changeset: Optional[Dict[str, Any]] = None
+    changeset: dict[str, Any] | None = None
     has_error = any(item["severity"].strip().lower() == "error" for item in diagnostics)
 
     if graph is None:
@@ -402,10 +402,10 @@ def _transform_data(
 def _transform_response(
     operation: Callable[[], Any],
     *,
-    input_source: Optional[str],
+    input_source: str | None,
     workflow_uuid: str,
     revision: int,
-    base_graph: Dict[str, Any],
+    base_graph: dict[str, Any],
     require_unchanged_graph: bool = False,
 ) -> _BackendJSONResponse:
     try:
@@ -423,12 +423,12 @@ def _transform_response(
         ):
             return _error(WorkflowError("template_catalog_unavailable"))
         return _success(data)
-    except Exception:  # noqa: BLE001 - HTTP 边界不得泄漏 engine/adapter 内部异常
+    except Exception:
         _LOGGER.exception("Authoring pure transform 失败")
         return _error(WorkflowError("internal_error"))
 
 
-def format_sse_event(event: Dict[str, Any]) -> str:
+def format_sse_event(event: dict[str, Any]) -> str:
     payload = json.dumps(
         event["data"],
         ensure_ascii=False,
@@ -505,7 +505,11 @@ def create_authoring_transform_router(
     return router
 
 
-def create_workflow_router(service: WorkflowService) -> APIRouter:
+def create_workflow_router(
+    service: WorkflowService,
+    *,
+    task_admission_coordinator: Callable[[str], object] | None = None,
+) -> APIRouter:
     """Build the public Workflow router around one injected authority."""
 
     router = APIRouter(
@@ -569,15 +573,18 @@ def create_workflow_router(service: WorkflowService) -> APIRouter:
     def create_workflow_task(
         body: WorkflowTaskCreateRequest,
     ) -> JSONResponse:
+        task = service.create_workflow_task(
+            workflow_uuid=body.workflow_uuid,
+            run_mode=body.run_mode,
+            target_node_uuid=body.target_node_uuid,
+            input_value=body.input,
+            description=body.description,
+            meta_data=body.meta_data,
+        )
+        if task_admission_coordinator is not None:
+            task_admission_coordinator(task["uuid"])
         return _success(
-            service.create_workflow_task(
-                workflow_uuid=body.workflow_uuid,
-                run_mode=body.run_mode,
-                target_node_uuid=body.target_node_uuid,
-                input_value=body.input,
-                description=body.description,
-                meta_data=body.meta_data,
-            ),
+            task,
             status=201,
         )
 
@@ -606,7 +613,7 @@ def create_workflow_router(service: WorkflowService) -> APIRouter:
     def list_workflow_tasks(
         page: int = Query(default=1),
         page_size: int = Query(default=20),
-        workflow_uuid: Optional[str] = Query(default=None),
+        workflow_uuid: str | None = Query(default=None),
         status: str = Query(default=""),
         cleanup_status: str = Query(default=""),
     ) -> JSONResponse:
@@ -690,7 +697,7 @@ def create_workflow_router(service: WorkflowService) -> APIRouter:
     @router.get("/events")
     async def events(
         request: Request,
-        last_event_id: Optional[str] = Header(
+        last_event_id: str | None = Header(
             default=None,
             alias="Last-Event-ID",
         ),
@@ -1026,6 +1033,7 @@ def install_composed_workflow_authoring_api(
     *,
     template_catalog: TemplateCatalog | None = None,
     catalog_authority: CatalogAuthority | None = None,
+    task_admission_coordinator: Callable[[str], object] | None = None,
 ) -> None:
     """完整构造 production Authoring 路由后，以一次 app mutation 安装。"""
 
@@ -1039,7 +1047,12 @@ def install_composed_workflow_authoring_api(
                 catalog_authority,
             )
         )
-    router.include_router(create_workflow_router(service))
+    router.include_router(
+        create_workflow_router(
+            service,
+            task_admission_coordinator=task_admission_coordinator,
+        )
+    )
     router.include_router(create_authoring_transform_router(engine))
     _install_error_handlers(app)
     app.include_router(router)
@@ -1067,9 +1080,9 @@ __all__ = [
     "AuthoringValidateRequest",
     "create_authoring_transform_app",
     "create_authoring_transform_router",
-    "create_workflow_template_catalog_router",
     "create_workflow_app",
     "create_workflow_router",
+    "create_workflow_template_catalog_router",
     "format_sse_event",
     "install_authoring_transform_api",
     "install_composed_workflow_authoring_api",

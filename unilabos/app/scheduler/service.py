@@ -124,6 +124,7 @@ class EdgeScheduler:
         self._orderer = orderer or StableLocalOrderer()
         self._dispatcher = dispatcher or RecordingDispatcher()
         self._lock = threading.RLock()
+        self._material_saga_lock = threading.Lock()
 
         self._workflows: dict[str, WorkflowRun] = {}
         # job_id -> DispatchedJob（完成回调路由 + 资源锁）
@@ -182,8 +183,17 @@ class EdgeScheduler:
     def reconcile_task_admission(
         self,
         task_uuid: str,
-    ) -> TaskMaterialAdmissionResult:
+    ) -> TaskMaterialAdmissionResult | None:
         """Drive one replay-safe workflow.db ↔ inventory.db admission saga."""
+
+        with self._material_saga_lock:
+            return self._reconcile_task_admission_locked(task_uuid)
+
+    def _reconcile_task_admission_locked(
+        self,
+        task_uuid: str,
+    ) -> TaskMaterialAdmissionResult | None:
+        """Serialize one complete cross-database admission command."""
 
         if self._workflow_tasks is None or self._inventory is None:
             raise RuntimeError("Workflow Task Material coordination is not configured")
@@ -238,7 +248,7 @@ class EdgeScheduler:
                 )
             )
         if not sources:
-            raise ValueError("Workflow Task has no MaterialSource admission inputs")
+            return None
         canonical_task_uuid = str(task["uuid"])
         command_uuid = str(
             uuid_mod.uuid5(
@@ -263,6 +273,39 @@ class EdgeScheduler:
         self._inject_admission_fault("after_workflow_projection")
         self._inventory.acknowledge(result.outbox_sequence)
         return result
+
+    def reconcile_pending_task_admissions(self) -> tuple[str, ...]:
+        """Replay pending Task admissions in durable creation order at startup."""
+
+        if self._workflow_tasks is None or self._inventory is None:
+            raise RuntimeError("Workflow Task Material coordination is not configured")
+        pending: list[dict[str, Any]] = []
+        reconciled: list[str] = []
+        page = 1
+        while True:
+            tasks = self._workflow_tasks.list_workflow_tasks(
+                page=page,
+                page_size=100,
+                status="pending",
+            )
+            items = tasks.get("items")
+            if not isinstance(items, list):
+                raise TypeError("Workflow Task list projection is invalid")
+            pending.extend(items)
+            if page * 100 >= int(tasks.get("total") or 0):
+                break
+            page += 1
+        for task in sorted(
+            pending,
+            key=lambda item: (
+                str(item.get("create_time") or ""),
+                str(item.get("uuid") or ""),
+            ),
+        ):
+            task_uuid = str(task.get("uuid") or "")
+            if self.reconcile_task_admission(task_uuid) is not None:
+                reconciled.append(task_uuid)
+        return tuple(reconciled)
 
     def _inject_admission_fault(self, stage: str) -> None:
         hook = self._admission_fault_hook
@@ -296,6 +339,16 @@ class EdgeScheduler:
         reason: str,
     ) -> TaskMaterialReleaseResult:
         """Drive one replay-safe terminal Task Material release saga."""
+
+        with self._material_saga_lock:
+            return self._reconcile_task_release_locked(task_uuid, reason)
+
+    def _reconcile_task_release_locked(
+        self,
+        task_uuid: str,
+        reason: str,
+    ) -> TaskMaterialReleaseResult:
+        """Serialize one complete cross-database release command."""
 
         if self._workflow_tasks is None or self._inventory is None:
             raise RuntimeError("Workflow Task Material coordination is not configured")

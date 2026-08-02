@@ -56,7 +56,7 @@ class OutboxWorker:
     def flush_once(self) -> int:
         """Send one ordered batch and durably advance its acknowledged watermark."""
 
-        acknowledged_from = self._inventory.get_acknowledged_sequence()
+        acknowledged_from = self._inventory.get_acknowledged_sequence(consumer="cloud")
         events = self._inventory.read_outbox(
             after_sequence=acknowledged_from,
             limit=self._batch_size,
@@ -71,7 +71,10 @@ class OutboxWorker:
             raise
         self._failures = 0
         if acknowledged_sequence > acknowledged_from:
-            self._inventory.acknowledge(acknowledged_sequence)
+            self._inventory.acknowledge(
+                acknowledged_sequence,
+                consumer="cloud",
+            )
         return sum(1 for event in events if event.sequence <= acknowledged_sequence)
 
     def flush_all(self, max_batches: int = 1000) -> int:
@@ -86,7 +89,7 @@ class OutboxWorker:
         return total
 
     def backlog(self) -> int:
-        return self._inventory.outbox_status()["backlog"]
+        return self._inventory.outbox_status(consumer="cloud")["backlog"]
 
     def start(self) -> None:
         if self._thread is not None and self._thread.is_alive():

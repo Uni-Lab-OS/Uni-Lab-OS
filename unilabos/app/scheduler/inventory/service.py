@@ -46,6 +46,8 @@ from unilabos.app.scheduler.inventory.store import InventoryStore
 
 _MAX_SIGNED_64_BIT_INTEGER = (1 << 63) - 1
 _SCHEDULER_CURSOR_NAME = "scheduler"
+_CLOUD_CURSOR_NAME = "cloud"
+_CURSOR_NAMES = frozenset({_SCHEDULER_CURSOR_NAME, _CLOUD_CURSOR_NAME})
 
 
 def _canonical_uuid(value: str, field: str) -> str:
@@ -703,6 +705,17 @@ class InventoryService:
         self,
         command: TaskMaterialAdmissionCommand,
     ) -> TaskMaterialAdmissionResult:
+        """Return a durable closed result for every well-formed admission command."""
+
+        try:
+            return self._admit_task_or_raise(command)
+        except (MaterialInvalidInput, MaterialNotFound) as error:
+            return self._persist_admission_rejection(command, error)
+
+    def _admit_task_or_raise(
+        self,
+        command: TaskMaterialAdmissionCommand,
+    ) -> TaskMaterialAdmissionResult:
         """Atomically resolve and reserve all explicit Materials for one Task."""
 
         if not isinstance(command, TaskMaterialAdmissionCommand):
@@ -781,6 +794,10 @@ class InventoryService:
             )
             if len(set(candidate_site_uuids)) != len(candidate_site_uuids):
                 raise MaterialInvalidInput("candidate_site_uuids must be unique")
+            if site_uuid is not None and candidate_site_uuids:
+                raise MaterialInvalidInput(
+                    "site_uuid and candidate_site_uuids are mutually exclusive"
+                )
             if not isinstance(source.flow_role, str) or not source.flow_role.strip():
                 raise MaterialInvalidInput("flow_role must not be blank")
             normalized_sources.append(
@@ -866,6 +883,53 @@ class InventoryService:
                         )
                     if row["disposition"] != "active":
                         raise MaterialConflict("Material is not runnable")
+                    resolved_site_uuid = source.site_uuid
+                    if source.candidate_site_uuids:
+                        candidate_placeholders = ",".join(
+                            "?" for _ in source.candidate_site_uuids
+                        )
+                        candidate_sites = conn.execute(
+                            f"""
+                            SELECT uuid, material_uuid, occupied_material_uuid
+                            FROM site
+                            WHERE uuid IN ({candidate_placeholders})
+                              AND deleted_at IS NULL
+                            ORDER BY uuid
+                            """,
+                            source.candidate_site_uuids,
+                        ).fetchall()
+                        if len(candidate_sites) != len(source.candidate_site_uuids):
+                            raise MaterialNotFound("candidate Site not found")
+                        occupied_candidates: list[str] = []
+                        for candidate_site in candidate_sites:
+                            if candidate_site["material_uuid"] != mount_uuid:
+                                raise MaterialConflict(
+                                    "Candidate Site does not belong to the selected mount"
+                                )
+                            allowed = conn.execute(
+                                """
+                                SELECT resource_template_uuid
+                                FROM site_allowed_resource_template
+                                WHERE site_uuid = ?
+                                """,
+                                (candidate_site["uuid"],),
+                            ).fetchall()
+                            if allowed and source.resource_template_uuid not in {
+                                item["resource_template_uuid"] for item in allowed
+                            }:
+                                raise MaterialInvalidInput(
+                                    "Candidate Site does not allow the Material template"
+                                )
+                            if (
+                                candidate_site["occupied_material_uuid"]
+                                == source.material_uuid
+                            ):
+                                occupied_candidates.append(candidate_site["uuid"])
+                        if len(occupied_candidates) != 1:
+                            raise MaterialConflict(
+                                "Material is not present in exactly one candidate Site"
+                            )
+                        resolved_site_uuid = occupied_candidates[0]
                     if source.site_uuid is not None:
                         site = conn.execute(
                             """
@@ -938,7 +1002,7 @@ class InventoryService:
                                 "uuid": source.material_uuid,
                                 "resource_template_uuid": source.resource_template_uuid,
                             },
-                            site_uuid=source.site_uuid,
+                            site_uuid=resolved_site_uuid,
                         )
                     )
 
@@ -1109,6 +1173,99 @@ class InventoryService:
         except sqlite3.Error:
             raise MaterialAuthorityUnavailable(
                 "failed to admit Task Materials"
+            ) from None
+        return result
+
+    def _persist_admission_rejection(
+        self,
+        command: TaskMaterialAdmissionCommand,
+        error: MaterialInvalidInput | MaterialNotFound,
+    ) -> TaskMaterialAdmissionResult:
+        """Freeze one deterministic rejection for replay across process restarts."""
+
+        if not isinstance(command, TaskMaterialAdmissionCommand):
+            raise error
+        if command.schema_version != 1:
+            raise error
+        canonical_command_uuid = _canonical_uuid(command.command_uuid, "command_uuid")
+        canonical_task_uuid = _canonical_uuid(
+            command.workflow_task_uuid,
+            "workflow_task_uuid",
+        )
+        if not isinstance(command.idempotency_key, str) or not command.idempotency_key:
+            raise error
+        if (
+            not isinstance(command.workflow_snapshot_fingerprint, str)
+            or not command.workflow_snapshot_fingerprint
+        ):
+            raise error
+        try:
+            payload_hash = _canonical_payload_hash(_admission_command_payload(command))
+        except (TypeError, ValueError):
+            raise error from None
+        now_ms = self._now_ms()
+        try:
+            with self._tx() as conn:
+                processed = conn.execute(
+                    "SELECT * FROM processed_command WHERE command_id = ?",
+                    (canonical_command_uuid,),
+                ).fetchone()
+                if processed is not None:
+                    if processed["payload_hash"] != payload_hash:
+                        raise MaterialConflict(
+                            "command_uuid was already used with a different payload"
+                        )
+                    return _admission_result_from_payload(
+                        json.loads(processed["result_json"])
+                    )
+                outbox_sequence = self._emit(
+                    conn,
+                    now_ms,
+                    "material_admission",
+                    canonical_task_uuid,
+                    1,
+                    "material_admission.rejected",
+                    {
+                        "workflow_task_uuid": canonical_task_uuid,
+                        "diagnostics": [{"code": error.code}],
+                    },
+                    causation_id=canonical_command_uuid,
+                )
+                result = TaskMaterialAdmissionResult(
+                    schema_version=1,
+                    command_uuid=canonical_command_uuid,
+                    workflow_task_uuid=canonical_task_uuid,
+                    status="rejected",
+                    reservation_uuid=None,
+                    bindings=(),
+                    diagnostics=({"code": error.code},),
+                    outbox_sequence=outbox_sequence,
+                )
+                conn.execute(
+                    """
+                    INSERT INTO processed_command(
+                        command_id, idempotency_key, command_type, payload_hash,
+                        result_json, status, processed_at
+                    ) VALUES (?, ?, 'material.admit', ?, ?, 'rejected', ?)
+                    """,
+                    (
+                        canonical_command_uuid,
+                        command.idempotency_key,
+                        payload_hash,
+                        json.dumps(
+                            _admission_result_payload(result),
+                            ensure_ascii=False,
+                            separators=(",", ":"),
+                            sort_keys=True,
+                        ),
+                        now_ms,
+                    ),
+                )
+        except sqlite3.IntegrityError:
+            raise MaterialConflict("Material admission command conflicts") from None
+        except sqlite3.Error:
+            raise MaterialAuthorityUnavailable(
+                "failed to persist Material admission rejection"
             ) from None
         return result
 
@@ -1294,21 +1451,26 @@ class InventoryService:
             raise MaterialAuthorityUnavailable("failed to read outbox") from None
         return tuple(_inventory_event(row) for row in rows)
 
-    def get_acknowledged_sequence(self) -> int:
-        """Return the durable Scheduler acknowledgement watermark."""
+    def get_acknowledged_sequence(self, *, consumer: str = "scheduler") -> int:
+        """Return one consumer's independent durable acknowledgement watermark."""
+
+        if consumer not in _CURSOR_NAMES:
+            raise MaterialInvalidInput("consumer must be scheduler or cloud")
 
         try:
-            return self._store.get_cursor(_SCHEDULER_CURSOR_NAME)
+            return self._store.get_cursor(consumer)
         except sqlite3.Error:
             raise MaterialAuthorityUnavailable(
                 "failed to read acknowledgement"
             ) from None
 
-    def acknowledge(self, sequence: int) -> None:
-        """Advance the Scheduler acknowledgement watermark monotonically."""
+    def acknowledge(self, sequence: int, *, consumer: str = "scheduler") -> None:
+        """Advance one consumer watermark monotonically without crossing consumers."""
 
         if isinstance(sequence, bool) or not isinstance(sequence, int) or sequence < 0:
             raise MaterialInvalidInput("sequence must be a non-negative integer")
+        if consumer not in _CURSOR_NAMES:
+            raise MaterialInvalidInput("consumer must be scheduler or cloud")
         try:
             with self._tx() as conn:
                 maximum_row = conn.execute(
@@ -1321,7 +1483,7 @@ class InventoryService:
                     )
                 current_row = conn.execute(
                     "SELECT acked_sequence FROM sync_cursor WHERE cursor_name = ?",
-                    (_SCHEDULER_CURSOR_NAME,),
+                    (consumer,),
                 ).fetchone()
                 current = int(current_row["acked_sequence"]) if current_row else 0
                 if sequence <= current:
@@ -1335,7 +1497,7 @@ class InventoryService:
                         updated_at = excluded.updated_at
                     WHERE excluded.acked_sequence > sync_cursor.acked_sequence
                     """,
-                    (_SCHEDULER_CURSOR_NAME, sequence, self._now_ms()),
+                    (consumer, sequence, self._now_ms()),
                 )
         except sqlite3.Error:
             raise MaterialAuthorityUnavailable(
@@ -1852,14 +2014,14 @@ class InventoryService:
             ) from None
         return tuple(rows)
 
-    def outbox_status(self) -> dict[str, int]:
+    def outbox_status(self, *, consumer: str = "cloud") -> dict[str, int]:
         """Return durable outbox high-water marks through the public service seam."""
 
         try:
             maximum = self._store.max_outbox_sequence()
         except sqlite3.Error:
             raise MaterialAuthorityUnavailable("failed to read outbox status") from None
-        acknowledged = self.get_acknowledged_sequence()
+        acknowledged = self.get_acknowledged_sequence(consumer=consumer)
         return {
             "max_sequence": maximum,
             "acked_sequence": acknowledged,

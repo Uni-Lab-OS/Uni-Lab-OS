@@ -518,6 +518,14 @@ def get_workflow_service() -> WorkflowService | None:
     return _service
 
 
+def get_workflow_inventory_service() -> InventoryService | None:
+    """Return the InventoryService owned by the active workspace composition."""
+
+    if not _ready or _owner_pid != os.getpid():
+        return None
+    return _inventory_service
+
+
 def reset_workflow_service_for_test() -> None:
     """停止监视器并关闭测试使用的进程级单例。"""
 
@@ -564,6 +572,7 @@ def reset_workflow_service_for_test() -> None:
 
 __all__ = [
     "compose_workflow_runtime",
+    "get_workflow_inventory_service",
     "get_workflow_service",
     "reset_workflow_service_for_test",
     "setup_workflow_service",

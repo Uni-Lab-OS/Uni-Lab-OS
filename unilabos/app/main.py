@@ -1295,13 +1295,31 @@ def main():
         # Edge 工作流调度器：接收 workflow_start 整图、拆解 DAG、每个 job 完成后重排
         if args_dict.get("edge_scheduler"):
             from unilabos.app.scheduler.integration import setup_edge_scheduler
+            from unilabos.workflow.composition import (
+                compose_workflow_runtime,
+                get_workflow_inventory_service,
+            )
+
+            workflow_service = compose_workflow_runtime(
+                BasicConfig.working_dir,
+                authority=BasicConfig.workflow_graph_authority,
+                editable_package_roots=BasicConfig.workflow_editable_package_roots,
+                registry_snapshot=args_dict.get("_workflow_registry_snapshot"),
+                resource_registry_snapshot=args_dict.get(
+                    "_workflow_resource_registry_snapshot"
+                ),
+            )
+            inventory_service = get_workflow_inventory_service()
+            if inventory_service is None:
+                raise RuntimeError("Workflow Inventory authority is not ready")
 
             _edge_sched, edge_exec_backend = setup_edge_scheduler(
                 ws_client=comm_client
                 if "websocket" in args_dict["app_bridges"]
                 else None,
                 ordering_url=args_dict.get("edge_scheduler_ordering_url", ""),
-                working_dir=BasicConfig.working_dir,
+                inventory_service=inventory_service,
+                workflow_tasks=workflow_service,
             )
             # backend 是 bridge 形状(publish_job_status)，注册进 HostNode.bridges 收执行回报
             args_dict["bridges"].append(edge_exec_backend)

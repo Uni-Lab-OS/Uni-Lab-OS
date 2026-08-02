@@ -376,6 +376,40 @@ CREATE INDEX IF NOT EXISTS idx_placement_zone ON lab_placement(zone_id);
 """
 
 
+def _schema_objects(
+    connection: sqlite3.Connection,
+) -> tuple[tuple[str, str, str, str], ...]:
+    """Return every application DDL object exactly as SQLite persisted it."""
+
+    return tuple(
+        (str(row[0]), str(row[1]), str(row[2]), str(row[3]))
+        for row in connection.execute(
+            """
+            SELECT type, name, tbl_name, sql
+            FROM sqlite_master
+            WHERE name NOT LIKE 'sqlite_%' AND sql IS NOT NULL
+            ORDER BY type, name
+            """
+        )
+    )
+
+
+def _canonical_schema_objects() -> tuple[tuple[str, str, str, str], ...]:
+    connection = sqlite3.connect(":memory:")
+    try:
+        connection.create_collation(
+            _UNICODE_CASEFOLD_COLLATION,
+            _unicode_casefold,
+        )
+        connection.executescript(_SCHEMA)
+        return _schema_objects(connection)
+    finally:
+        connection.close()
+
+
+_EXPECTED_SCHEMA_OBJECTS = _canonical_schema_objects()
+
+
 class InventoryStore:
     """SQLite WAL 存储：单连接 + 进程内写锁（单写者）."""
 
@@ -439,7 +473,7 @@ class InventoryStore:
             )
             if columns != expected:
                 return False
-        return True
+        return _schema_objects(self._conn) == _EXPECTED_SCHEMA_OBJECTS
 
     def close(self) -> None:
         with self._lock:

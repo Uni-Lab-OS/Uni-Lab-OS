@@ -29,7 +29,8 @@ import logging
 import queue
 import threading
 import time
-from typing import Any, Callable, Dict, List, Optional, Set
+from collections.abc import Callable
+from typing import Any
 
 from unilabos.app.scheduler.dispatch import DispatchPayload
 from unilabos.app.ws_client import (
@@ -61,27 +62,27 @@ class JobExecutionBackend:
 
     def __init__(
         self,
-        device_manager: Optional[DeviceActionManager] = None,
-        host_node_getter: Optional[Callable[[], Any]] = None,
+        device_manager: DeviceActionManager | None = None,
+        host_node_getter: Callable[[], Any] | None = None,
         device_state_store: Any = None,
         monitor: Any = None,
     ):
         self.device_manager = device_manager or DeviceActionManager()
         self._host_node_getter = host_node_getter or self._default_host_getter
-        self._listeners: List[JobFinishedListener] = []
+        self._listeners: list[JobFinishedListener] = []
         # 设备状态存储（DeviceStateStore；None = 不落盘）与监控总线
         self.device_state = device_state_store
         self._monitor = monitor
 
-        self._events: "queue.Queue[tuple]" = queue.Queue()
-        self._worker: Optional[threading.Thread] = None
+        self._events: queue.Queue[tuple] = queue.Queue()
+        self._worker: threading.Thread | None = None
         self._running = False
         self._pending = 0
         self._pending_lock = threading.Lock()
 
         # 等待人工决策的 action 异常（decision_id -> report）。
         # 本地模式（无云端 WS）下由调度器 REST / 前端做审批入口。
-        self._error_decisions: Dict[str, Dict[str, Any]] = {}
+        self._error_decisions: dict[str, dict[str, Any]] = {}
         self._error_decisions_lock = threading.Lock()
 
     # ── 生命周期 ─────────────────────────────────────────────
@@ -90,7 +91,9 @@ class JobExecutionBackend:
         if self._running:
             return
         self._running = True
-        self._worker = threading.Thread(target=self._run, daemon=True, name="JobExecutionBackend")
+        self._worker = threading.Thread(
+            target=self._run, daemon=True, name="JobExecutionBackend"
+        )
         self._worker.start()
 
     def stop(self) -> None:
@@ -118,9 +121,7 @@ class JobExecutionBackend:
 
     def dispatch(self, payload: DispatchPayload) -> None:
         """接收调度器下发的 job_start 载荷：入队/直发（同 _handle_job_start 语义）。"""
-        parent_trace_context = normalize_trace_context(
-            payload.get("trace_context")
-        )
+        parent_trace_context = normalize_trace_context(payload.get("trace_context"))
         trace_attributes = {
             "workflow.node_job.uuid": payload["job_id"],
             "workflow.task.uuid": payload.get("task_id", ""),
@@ -156,7 +157,9 @@ class JobExecutionBackend:
             trace_context=trace_context,
         )
         should_start_now, _lock_became_busy = self.device_manager.enqueue_job(job_info)
-        job_log = format_job_log(job_info.job_id, job_info.task_id, job_info.device_id, job_info.action_name)
+        job_log = format_job_log(
+            job_info.job_id, job_info.task_id, job_info.device_id, job_info.action_name
+        )
         if should_start_now:
             logger.info("[JobExecutionBackend] job %s start now", job_log)
             self._put_event(("start", job_info))
@@ -169,22 +172,28 @@ class JobExecutionBackend:
 
         try:
             params = [
-                p for p in inspect.signature(listener).parameters.values()
-                if p.kind in (p.POSITIONAL_ONLY, p.POSITIONAL_OR_KEYWORD, p.VAR_POSITIONAL)
+                p
+                for p in inspect.signature(listener).parameters.values()
+                if p.kind
+                in (p.POSITIONAL_ONLY, p.POSITIONAL_OR_KEYWORD, p.VAR_POSITIONAL)
             ]
-            accepts_suc_type = any(p.kind == p.VAR_POSITIONAL for p in params) or len(params) >= 4
+            accepts_suc_type = (
+                any(p.kind == p.VAR_POSITIONAL for p in params) or len(params) >= 4
+            )
         except (TypeError, ValueError):
             accepts_suc_type = True
         if accepts_suc_type:
             self._listeners.append(listener)
         else:
             self._listeners.append(
-                lambda job_id, success, ret_value, _suc_type: listener(job_id, success, ret_value)
+                lambda job_id, success, ret_value, _suc_type: listener(
+                    job_id, success, ret_value
+                )
             )
 
-    def busy_device_action_keys(self) -> Set[str]:
+    def busy_device_action_keys(self) -> set[str]:
         """当前被占用的 device_action_key（供调度器做锁视图合并）。"""
-        busy: Set[str] = set()
+        busy: set[str] = set()
         for job in self.device_manager.get_active_jobs():
             busy.add(job.device_action_key)
         for job in self.device_manager.get_queued_jobs():
@@ -198,7 +207,7 @@ class JobExecutionBackend:
         feedback_data: dict,
         item: QueueItem,
         status: str,
-        return_info: Optional[dict] = None,
+        return_info: dict | None = None,
     ) -> None:
         """HostNode 执行回报入口（与 ws_client.WebSocketClient 同形状）。
 
@@ -217,11 +226,15 @@ class JobExecutionBackend:
             # （normal / skip / operator_intervention，见 registry.action_policy）
             ret_value = return_info.get("return_value")
             suc_type = str(return_info.get("suc_type") or "normal")
-        self._put_event(("finished", item.job_id, status == "success", ret_value, suc_type))
+        self._put_event(
+            ("finished", item.job_id, status == "success", ret_value, suc_type)
+        )
 
     # ── 设备状态桥（bridge 形状：publish_device_status） ──────
 
-    def publish_device_status(self, device_status: dict, device_id: str, property_name: str) -> None:
+    def publish_device_status(
+        self, device_status: dict, device_id: str, property_name: str
+    ) -> None:
         """HostNode 设备属性更新入口（值变化时被调，与 ws_client 同形状）。
 
         ROS 回调线程里只做入队，SQLite 写入由 worker 串行执行。
@@ -233,11 +246,13 @@ class JobExecutionBackend:
             return  # 与 HostNode.property_callback 的标量过滤口径一致
         self._put_event(("device_status", device_id, property_name, value))
 
-    def report_device_properties(self, device_id: str, properties: Dict[str, Any]) -> Dict[str, bool]:
+    def report_device_properties(
+        self, device_id: str, properties: dict[str, Any]
+    ) -> dict[str, bool]:
         """直接上报入口（REST / 非 ROS 设备）：同步写入并发监控事件。"""
         if self.device_state is None:
             raise RuntimeError("device state store not enabled")
-        results: Dict[str, bool] = {}
+        results: dict[str, bool] = {}
         for prop, value in properties.items():
             results[prop] = self._write_device_property(device_id, prop, value)
         return results
@@ -251,13 +266,13 @@ class JobExecutionBackend:
                     "device_property",
                     {"device_id": device_id, "property": prop, "value": value},
                 )
-            except Exception:  # noqa: BLE001 - 监控故障不影响状态落盘
+            except Exception:  # noqa: BLE001, S110 - 监控故障不影响状态落盘
                 pass
         return changed
 
     # ── 异常决策桥（bridge 形状：publish_job_error_decision_required） ──
 
-    def publish_job_error_decision_required(self, report: Dict[str, Any]) -> bool:
+    def publish_job_error_decision_required(self, report: dict[str, Any]) -> bool:
         """接收设备侧异常决策请求（本地审批通道，云端 WS 不可用时的回退）。
 
         base_device_node._publish_error_decision_report 会先试云端 WS，失败后
@@ -270,7 +285,8 @@ class JobExecutionBackend:
         with self._error_decisions_lock:
             # 清理过期请求（设备侧超时后已按 default_on_decision_timeout 自决）
             expired = [
-                did for did, r in self._error_decisions.items()
+                did
+                for did, r in self._error_decisions.items()
                 if now - r.get("_received_at", now) > _ERROR_DECISION_TTL_SECONDS
             ]
             for did in expired:
@@ -286,7 +302,7 @@ class JobExecutionBackend:
         )
         return True
 
-    def list_error_decisions(self) -> List[Dict[str, Any]]:
+    def list_error_decisions(self) -> list[dict[str, Any]]:
         """当前等待人工决策的异常（供 REST / 前端展示）。"""
         with self._error_decisions_lock:
             return [
@@ -294,7 +310,9 @@ class JobExecutionBackend:
                 for report in self._error_decisions.values()
             ]
 
-    def resolve_error_decision(self, decision_id: str, decision: Dict[str, Any]) -> bool:
+    def resolve_error_decision(
+        self, decision_id: str, decision: dict[str, Any]
+    ) -> bool:
         """把人工审批结果路由回挂起的设备 action（与 ws job_error_decision 同语义）。"""
         with self._error_decisions_lock:
             report = self._error_decisions.pop(decision_id, None)
@@ -303,7 +321,11 @@ class JobExecutionBackend:
 
         device_id = str(report.get("device_id") or "")
         host_node = self._host_node_getter()
-        wrapper = getattr(host_node, "devices_instances", {}).get(device_id) if host_node else None
+        wrapper = (
+            getattr(host_node, "devices_instances", {}).get(device_id)
+            if host_node
+            else None
+        )
         base_node = getattr(wrapper, "_ros_node", None) if wrapper is not None else None
         if base_node is None or not hasattr(base_node, "handle_action_error_decision"):
             logger.error(
@@ -350,14 +372,16 @@ class JobExecutionBackend:
                     self._handle_finished(event[1], event[2], event[3], suc_type)
                 elif event[0] == "device_status":
                     self._write_device_property(event[1], event[2], event[3])
-            except Exception:  # noqa: BLE001 - worker 不允许死
+            except Exception:
                 logger.exception("[JobExecutionBackend] event %s failed", event[0])
             finally:
                 with self._pending_lock:
                     self._pending -= 1
 
     def _start_goal(self, job: JobInfo) -> None:
-        job_log = format_job_log(job.job_id, job.task_id, job.device_id, job.action_name)
+        job_log = format_job_log(
+            job.job_id, job.task_id, job.device_id, job.action_name
+        )
         queue_item = QueueItem(
             task_type="job_call_back_status",
             device_id=job.device_id,
@@ -370,7 +394,9 @@ class JobExecutionBackend:
         )
         host_node = self._host_node_getter()
         if host_node is None:
-            logger.error("[JobExecutionBackend] HostNode unavailable, fail job %s", job_log)
+            logger.error(
+                "[JobExecutionBackend] HostNode unavailable, fail job %s", job_log
+            )
             self._put_event(("finished", job.job_id, False, None))
             return
         try:
@@ -382,8 +408,10 @@ class JobExecutionBackend:
                 server_info=job.server_info,
             )
             logger.info("[JobExecutionBackend] goal sent for job %s", job_log)
-        except Exception:  # noqa: BLE001 - 启动失败必须走完结流程释放锁
-            logger.exception("[JobExecutionBackend] send_goal failed for job %s", job_log)
+        except Exception:
+            logger.exception(
+                "[JobExecutionBackend] send_goal failed for job %s", job_log
+            )
             self._put_event(("finished", job.job_id, False, None))
 
     def _handle_finished(
@@ -397,7 +425,7 @@ class JobExecutionBackend:
         for listener in self._listeners:
             try:
                 listener(job_id, success, ret_value, suc_type)
-            except Exception:  # noqa: BLE001 - 单个 listener 异常不阻断其他
+            except Exception:
                 logger.exception("[JobExecutionBackend] job finished listener failed")
 
     @staticmethod
@@ -408,8 +436,8 @@ class JobExecutionBackend:
 
 
 def make_device_lock_resource_resolver(
-    host_node_getter: Optional[Callable[[], Any]] = None,
-) -> Callable[[str, str], List[str]]:
+    host_node_getter: Callable[[], Any] | None = None,
+) -> Callable[[str, str], list[str]]:
     """生产 lock_resource resolver：读取 ``@action(lock_resource=[...])`` 声明。
 
     查找顺序（对齐「Slave 与 Host 同注册表副本」机制）：
@@ -422,7 +450,7 @@ def make_device_lock_resource_resolver(
     """
     getter = host_node_getter or JobExecutionBackend._default_host_getter
 
-    def _lock_from(mappings: Any, action_name: str) -> Optional[List[str]]:
+    def _lock_from(mappings: Any, action_name: str) -> list[str] | None:
         if not isinstance(mappings, dict):
             return None
         mapping = mappings.get(action_name) or mappings.get(f"auto-{action_name}")
@@ -430,7 +458,7 @@ def make_device_lock_resource_resolver(
             return None
         return list(mapping.get("lock_resource") or [])
 
-    def resolve(device_id: str, action_name: str) -> List[str]:
+    def resolve(device_id: str, action_name: str) -> list[str]:
         host_node = getter()
         if host_node is None:
             return []
@@ -442,7 +470,9 @@ def make_device_lock_resource_resolver(
         # ② 本地设备实例回退
         wrapper = getattr(host_node, "devices_instances", {}).get(device_id)
         base_node = getattr(wrapper, "_ros_node", None) if wrapper is not None else None
-        found = _lock_from(getattr(base_node, "_action_value_mappings", None), action_name)
+        found = _lock_from(
+            getattr(base_node, "_action_value_mappings", None), action_name
+        )
         return found if found is not None else []
 
     return resolve
@@ -450,14 +480,15 @@ def make_device_lock_resource_resolver(
 
 def create_edge_stack(
     orderer: Any = None,
-    device_manager: Optional[DeviceActionManager] = None,
-    host_node_getter: Optional[Callable[[], Any]] = None,
+    device_manager: DeviceActionManager | None = None,
+    host_node_getter: Callable[[], Any] | None = None,
     inventory: Any = None,
     estimator: Any = None,
     monitor: Any = None,
     device_state_store: Any = None,
     history: Any = None,
-) -> "tuple[Any, JobExecutionBackend]":
+    workflow_tasks: Any = None,
+) -> tuple[Any, JobExecutionBackend]:
     """组装 EdgeScheduler + 微后端（composition root）。
 
     返回 (scheduler, backend)；backend 已 start，并需由调用方注册进
@@ -488,6 +519,7 @@ def create_edge_stack(
         estimator=estimator,
         monitor=monitor,
         history=history,
+        workflow_tasks=workflow_tasks,
     )
     backend.add_job_finished_listener(scheduler.on_job_finished)
     backend.start()
