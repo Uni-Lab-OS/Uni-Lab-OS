@@ -35,8 +35,18 @@ _MANIFEST_BYTE_LIMIT = 1024 * 1024
 _YAML_DEPTH_LIMIT = 32
 _WORKFLOW_ENTRY_LIMIT = 1024
 _YAML_SCALAR_BYTE_LIMIT = 1024 * 1024
-_DIRECTORY_FLAGS = os.O_RDONLY | os.O_DIRECTORY | os.O_CLOEXEC | os.O_NOFOLLOW
-_FILE_FLAGS = os.O_RDONLY | os.O_CLOEXEC | os.O_NOFOLLOW | os.O_NONBLOCK
+_DIRECTORY_FLAGS = (
+    os.O_RDONLY
+    | getattr(os, "O_DIRECTORY", 0)
+    | getattr(os, "O_CLOEXEC", 0)
+    | getattr(os, "O_NOFOLLOW", 0)
+)
+_FILE_FLAGS = (
+    os.O_RDONLY
+    | getattr(os, "O_CLOEXEC", 0)
+    | getattr(os, "O_NOFOLLOW", 0)
+    | getattr(os, "O_NONBLOCK", 0)
+)
 _ERROR_MESSAGES = {
     "invalid_package_root": "editable package 根目录无效",
     "invalid_manifest": "package.yaml 声明格式不正确",
