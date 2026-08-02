@@ -553,7 +553,7 @@ def _mutate_genuine_leaf_authority(snapshot: dict[str, Any], case: str) -> None:
     elif case == "ready-required":
         ready["required"] = True
     else:  # pragma: no cover - 参数表有意保持封闭
-        raise AssertionError(case)
+        raise AssertionError(f"未知权威变体：{case}")
 
 
 GENUINE_SINGLE_FIELD_MUTATIONS = [

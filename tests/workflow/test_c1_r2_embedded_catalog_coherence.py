@@ -157,7 +157,7 @@ def _mutate_embedded(snapshot: dict[str, Any], case: str) -> None:
         assert "x-unilabos-workflow-contract" in template["schema"]
         del template["schema"]["x-unilabos-workflow-contract"]
     else:  # pragma: no cover - 参数表有意保持封闭
-        raise AssertionError(case)
+        raise AssertionError(f"未知漂移类型：{case}")
 
 
 @pytest.mark.parametrize(

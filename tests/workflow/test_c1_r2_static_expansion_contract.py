@@ -1,4 +1,4 @@
-"""C1 R2 CompositeAuthoring public static-expansion RED。"""
+"""C1 R2 CompositeAuthoring 公开静态展开 RED。"""
 
 from __future__ import annotations
 

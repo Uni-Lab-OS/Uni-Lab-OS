@@ -228,7 +228,7 @@ def _damage_mapping(world: Any, kind: str) -> None:
         node_meta["unilab"]["input_bindings"] = {}
         key = None
     else:
-        raise AssertionError(kind)
+        raise AssertionError(f"未知无效类型：{kind}")
     if key is not None:
         node_meta["unilab"]["input_bindings"] = {key: {"parameter": "value"}}
     _set_node(
