@@ -152,6 +152,81 @@ def _site_record(
     )
 
 
+def _backend_material(record: MaterialRecord) -> dict[str, Any]:
+    """投影冻结 Backend Material；OS runtime 扩展不得泄漏到共享 DTO。"""
+
+    projection: dict[str, Any] = {
+        "uuid": record.uuid,
+        "create_time": record.create_time,
+        "update_time": record.update_time,
+        "meta_data": dict(record.meta_data),
+        "resource_template_uuid": record.resource_template_uuid,
+        "class": record.klass,
+        "barcode": record.barcode,
+        "name": record.name,
+        "config": dict(record.config),
+        "data": dict(record.data),
+    }
+    if record.description is not None:
+        projection["description"] = record.description
+    if record.parent_uuid is not None:
+        projection["parent_uuid"] = record.parent_uuid
+    return projection
+
+
+def _backend_site(record: SiteRecord, *, graph: bool = False) -> dict[str, Any]:
+    """投影冻结 Backend Site；Graph 节点固定保留空 occupied 字段。"""
+
+    projection: dict[str, Any] = {
+        "uuid": record.uuid,
+        "create_time": record.create_time,
+        "update_time": record.update_time,
+        "meta_data": dict(record.meta_data),
+        "material_uuid": record.material_uuid,
+        "name": record.name,
+        "sort_order": record.sort_order,
+        "allowed_resource_template_uuids": list(
+            record.allowed_resource_template_uuids
+        ),
+        "position_x": record.position_x,
+        "position_y": record.position_y,
+        "position_z": record.position_z,
+        "depth": record.depth,
+        "length": record.length,
+        "width": record.width,
+    }
+    if record.description is not None:
+        projection["description"] = record.description
+    if graph or record.occupied_material_uuid is not None:
+        projection["occupied_material_uuid"] = record.occupied_material_uuid
+    return projection
+
+
+def _backend_relative_position(row: Mapping[str, Any]) -> dict[str, Any]:
+    projection: dict[str, Any] = {
+        "uuid": row["uuid"],
+        "create_time": row["create_time"],
+        "update_time": row["update_time"],
+        "meta_data": _stored_json_object(row["meta_data"]),
+        "material_uuid": row["material_uuid"],
+        "position_x": row["position_x"],
+        "position_y": row["position_y"],
+        "position_z": row["position_z"],
+        "depth": row["depth"],
+        "length": row["length"],
+        "width": row["width"],
+        "scale_x": row["scale_x"],
+        "scale_y": row["scale_y"],
+        "scale_z": row["scale_z"],
+        "rotation_x": row["rotation_x"],
+        "rotation_y": row["rotation_y"],
+        "rotation_z": row["rotation_z"],
+    }
+    if row["description"] is not None:
+        projection["description"] = row["description"]
+    return projection
+
+
 def _read_site(conn: sqlite3.Connection, site_uuid: str) -> SiteRecord | None:
     row = conn.execute(
         "SELECT * FROM site WHERE uuid = ? AND deleted_at IS NULL",
@@ -341,6 +416,7 @@ class InventoryService:
         time_fn: Callable[[], float] = time.time,
         monitor: Any = None,
         resource_templates: Mapping[str, ResourceTemplateIdentity] | None = None,
+        material_shapes: Sequence[Mapping[str, Any]] = (),
     ):
         self._store = store
         self.edge_id = edge_id
@@ -373,6 +449,9 @@ class InventoryService:
                 material_class=material_class,
             )
         self._resource_templates = MappingProxyType(canonical_templates)
+        self._material_shapes = tuple(
+            _json_object(shape, "material_shapes item") for shape in material_shapes
+        )
 
     @classmethod
     def open(
@@ -384,6 +463,7 @@ class InventoryService:
         lab_id: str = "edge-lab",
         time_fn: Callable[[], float] = time.time,
         monitor: Any = None,
+        material_shapes: Sequence[Mapping[str, Any]] = (),
     ) -> InventoryService:
         """Open the one ``inventory.db`` owned by a workspace."""
 
@@ -396,6 +476,7 @@ class InventoryService:
             time_fn=time_fn,
             monitor=monitor,
             resource_templates=resource_templates,
+            material_shapes=material_shapes,
         )
 
     def close(self) -> None:
@@ -2021,6 +2102,442 @@ class InventoryService:
             "inventory_lots": lots,
             "snapshot_sequence": int(sequence_row["value"]),
         }
+
+    def bootstrap_resource_graph(self, command: Mapping[str, Any]) -> dict[str, Any]:
+        """仅在空库内原子导入一次 ResourceTreeSet；既有 durable truth 永不覆盖。"""
+
+        if not isinstance(command, Mapping):
+            raise MaterialInvalidInput("resource graph bootstrap must be an object")
+        source_id = str(command.get("source_id") or "").strip()
+        fingerprint = str(command.get("fingerprint") or "").strip()
+        if not source_id or not fingerprint.startswith("sha256:"):
+            raise MaterialInvalidInput("resource graph bootstrap identity is invalid")
+        materials = command.get("materials")
+        positions = command.get("relative_positions")
+        sites = command.get("sites")
+        if not isinstance(materials, list) or not materials:
+            raise MaterialInvalidInput("resource graph bootstrap requires materials")
+        if not isinstance(positions, list) or not isinstance(sites, list):
+            raise MaterialInvalidInput("resource graph bootstrap collections are invalid")
+        now_iso = self._now_iso()
+        now_ms = self._now_ms()
+        try:
+            with self._tx() as conn:
+                existing = int(
+                    conn.execute("SELECT COUNT(*) AS value FROM material").fetchone()[
+                        "value"
+                    ]
+                )
+                stored_row = conn.execute(
+                    "SELECT meta_value FROM lab_meta WHERE meta_key = ?",
+                    ("resource_graph_bootstrap_fingerprint",),
+                ).fetchone()
+                stored = str(stored_row["meta_value"]) if stored_row else ""
+                if existing:
+                    return {
+                        "status": "unchanged" if stored == fingerprint else "preserved",
+                        "source_id": source_id,
+                        "fingerprint": stored or None,
+                        "material_count": existing,
+                    }
+
+                material_ids: set[str] = set()
+                parent_by_material: dict[str, str | None] = {}
+                for raw in materials:
+                    if not isinstance(raw, Mapping):
+                        raise MaterialInvalidInput("bootstrap material must be an object")
+                    material_uuid = _canonical_uuid(raw.get("uuid"), "material.uuid")
+                    if material_uuid in material_ids:
+                        raise MaterialConflict("bootstrap Material UUID must be unique")
+                    material_ids.add(material_uuid)
+                    template_uuid = _canonical_uuid(
+                        raw.get("resource_template_uuid"),
+                        "material.resource_template_uuid",
+                    )
+                    if template_uuid not in self._resource_templates:
+                        raise MaterialInvalidInput(
+                            "bootstrap resource_template_uuid is not registered"
+                        )
+                    parent_value = raw.get("parent_uuid")
+                    parent_by_material[material_uuid] = (
+                        _canonical_uuid(parent_value, "material.parent_uuid")
+                        if parent_value is not None
+                        else None
+                    )
+                    material_kind = str(raw.get("material_kind") or "")
+                    if material_kind not in {"business", "device"}:
+                        raise MaterialInvalidInput("bootstrap material_kind is invalid")
+                    name = str(raw.get("name") or "").strip()
+                    klass = str(raw.get("class") or "").strip()
+                    if not name or not klass:
+                        raise MaterialInvalidInput(
+                            "bootstrap Material name/class must not be blank"
+                        )
+                    description = raw.get("description")
+                    if description is not None and not isinstance(description, str):
+                        raise MaterialInvalidInput(
+                            "bootstrap Material description must be string or null"
+                        )
+                    barcode = str(raw.get("barcode") or "")
+                    conn.execute(
+                        """
+                        INSERT INTO material(
+                            uuid, create_time, update_time, deleted_at,
+                            description, meta_data, resource_template_uuid,
+                            parent_uuid, class, barcode, name, config, data,
+                            disposition, material_kind, version
+                        ) VALUES (?, ?, ?, NULL, ?, ?, ?, NULL, ?, ?, ?, ?, ?, ?, ?, 1)
+                        """,
+                        (
+                            material_uuid,
+                            now_iso,
+                            now_iso,
+                            description,
+                            json.dumps(_json_object(raw.get("meta_data"), "meta_data")),
+                            template_uuid,
+                            klass,
+                            barcode,
+                            name,
+                            json.dumps(_json_object(raw.get("config"), "config")),
+                            json.dumps(_json_object(raw.get("data"), "data")),
+                            "active" if material_kind == "business" else None,
+                            material_kind,
+                        ),
+                    )
+                for material_uuid, parent_uuid in parent_by_material.items():
+                    if parent_uuid is None:
+                        continue
+                    if parent_uuid not in material_ids or parent_uuid == material_uuid:
+                        raise MaterialInvalidInput("bootstrap Material parent is invalid")
+                    conn.execute(
+                        "UPDATE material SET parent_uuid = ? WHERE uuid = ?",
+                        (parent_uuid, material_uuid),
+                    )
+
+                for raw in positions:
+                    if not isinstance(raw, Mapping):
+                        raise MaterialInvalidInput(
+                            "bootstrap relative_position must be an object"
+                        )
+                    position_uuid = _canonical_uuid(
+                        raw.get("uuid"), "relative_position.uuid"
+                    )
+                    material_uuid = _canonical_uuid(
+                        raw.get("material_uuid"), "relative_position.material_uuid"
+                    )
+                    if material_uuid not in material_ids:
+                        raise MaterialInvalidInput(
+                            "bootstrap relative_position Material is missing"
+                        )
+                    values = {
+                        key: _finite_number(raw.get(key), f"relative_position.{key}")
+                        for key in (
+                            "position_x",
+                            "position_y",
+                            "position_z",
+                            "depth",
+                            "length",
+                            "width",
+                            "scale_x",
+                            "scale_y",
+                            "scale_z",
+                            "rotation_x",
+                            "rotation_y",
+                            "rotation_z",
+                        )
+                    }
+                    if any(values[key] < 0 for key in ("depth", "length", "width")):
+                        raise MaterialInvalidInput(
+                            "bootstrap relative_position dimensions must be non-negative"
+                        )
+                    if any(values[key] <= 0 for key in ("scale_x", "scale_y", "scale_z")):
+                        raise MaterialInvalidInput(
+                            "bootstrap relative_position scale must be positive"
+                        )
+                    conn.execute(
+                        """
+                        INSERT INTO relative_position(
+                            uuid, create_time, update_time, deleted_at,
+                            description, meta_data, material_uuid,
+                            position_x, position_y, position_z,
+                            depth, length, width, scale_x, scale_y, scale_z,
+                            rotation_x, rotation_y, rotation_z
+                        ) VALUES (?, ?, ?, NULL, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                        """,
+                        (
+                            position_uuid,
+                            now_iso,
+                            now_iso,
+                            raw.get("description"),
+                            json.dumps(_json_object(raw.get("meta_data"), "meta_data")),
+                            material_uuid,
+                            *(values[key] for key in (
+                                "position_x",
+                                "position_y",
+                                "position_z",
+                                "depth",
+                                "length",
+                                "width",
+                                "scale_x",
+                                "scale_y",
+                                "scale_z",
+                                "rotation_x",
+                                "rotation_y",
+                                "rotation_z",
+                            )),
+                        ),
+                    )
+
+                for raw in sites:
+                    if not isinstance(raw, Mapping):
+                        raise MaterialInvalidInput("bootstrap Site must be an object")
+                    site_uuid = _canonical_uuid(raw.get("uuid"), "site.uuid")
+                    owner_uuid = _canonical_uuid(
+                        raw.get("material_uuid"), "site.material_uuid"
+                    )
+                    if owner_uuid not in material_ids:
+                        raise MaterialInvalidInput("bootstrap Site owner is missing")
+                    allowed = raw.get("allowed_resource_template_uuids")
+                    if not isinstance(allowed, list):
+                        raise MaterialInvalidInput("bootstrap Site allowlist is invalid")
+                    allowed_uuids = tuple(
+                        _canonical_uuid(value, "site.allowed_resource_template_uuids")
+                        for value in allowed
+                    )
+                    if any(value not in self._resource_templates for value in allowed_uuids):
+                        raise MaterialInvalidInput(
+                            "bootstrap Site allowlist template is not registered"
+                        )
+                    site_values = {
+                        key: _finite_number(raw.get(key), f"site.{key}")
+                        for key in (
+                            "position_x",
+                            "position_y",
+                            "position_z",
+                            "depth",
+                            "length",
+                            "width",
+                        )
+                    }
+                    if any(site_values[key] < 0 for key in ("depth", "length", "width")):
+                        raise MaterialInvalidInput("bootstrap Site dimensions are invalid")
+                    conn.execute(
+                        """
+                        INSERT INTO site(
+                            uuid, create_time, update_time, deleted_at,
+                            description, meta_data, material_uuid, name,
+                            sort_order, occupied_material_uuid,
+                            position_x, position_y, position_z,
+                            depth, length, width, version
+                        ) VALUES (?, ?, ?, NULL, ?, ?, ?, ?, ?, NULL, ?, ?, ?, ?, ?, ?, 1)
+                        """,
+                        (
+                            site_uuid,
+                            now_iso,
+                            now_iso,
+                            raw.get("description"),
+                            json.dumps(_json_object(raw.get("meta_data"), "meta_data")),
+                            owner_uuid,
+                            str(raw.get("name") or "").strip(),
+                            int(raw.get("sort_order") or 0),
+                            *(site_values[key] for key in (
+                                "position_x",
+                                "position_y",
+                                "position_z",
+                                "depth",
+                                "length",
+                                "width",
+                            )),
+                        ),
+                    )
+                    conn.executemany(
+                        """
+                        INSERT INTO site_allowed_resource_template(
+                            site_uuid, resource_template_uuid
+                        ) VALUES (?, ?)
+                        """,
+                        ((site_uuid, value) for value in sorted(set(allowed_uuids))),
+                    )
+
+                conn.executemany(
+                    "INSERT INTO lab_meta(meta_key, meta_value) VALUES (?, ?)",
+                    (
+                        ("resource_graph_bootstrap_fingerprint", fingerprint),
+                        ("resource_graph_bootstrap_source", source_id),
+                    ),
+                )
+                self._emit(
+                    conn,
+                    now_ms,
+                    "material_graph",
+                    source_id,
+                    1,
+                    "material_graph.bootstrapped",
+                    {
+                        "source_id": source_id,
+                        "fingerprint": fingerprint,
+                        "material_count": len(materials),
+                        "site_count": len(sites),
+                    },
+                )
+        except (MaterialInvalidInput, MaterialConflict):
+            raise
+        except sqlite3.IntegrityError as exc:
+            raise MaterialConflict("resource graph bootstrap conflicts") from exc
+        except (sqlite3.Error, TypeError, ValueError, OverflowError) as exc:
+            raise MaterialAuthorityUnavailable(
+                "failed to bootstrap resource graph"
+            ) from exc
+        return {
+            "status": "imported",
+            "source_id": source_id,
+            "fingerprint": fingerprint,
+            "material_count": len(materials),
+            "site_count": len(sites),
+        }
+
+    def list_backend_materials(
+        self,
+        *,
+        page: int = 1,
+        page_size: int = 20,
+        name: str = "",
+        barcode: str = "",
+        resource_template_uuid: str = "",
+    ) -> dict[str, Any]:
+        """返回冻结 Backend ``GET /materials`` 的 data 对象。"""
+
+        if isinstance(page, bool) or not isinstance(page, int) or page < 1:
+            raise MaterialInvalidInput("page must be a positive integer")
+        if (
+            isinstance(page_size, bool)
+            or not isinstance(page_size, int)
+            or not 1 <= page_size <= 100
+        ):
+            raise MaterialInvalidInput("page_size must be between 1 and 100")
+        template_uuid = (
+            _canonical_uuid(resource_template_uuid, "resource_template_uuid")
+            if resource_template_uuid
+            else ""
+        )
+        clauses = ["deleted_at IS NULL"]
+        parameters: list[Any] = []
+        if name.strip():
+            clauses.append("LOWER(name) LIKE ?")
+            parameters.append(f"%{name.strip().lower()}%")
+        if barcode.strip():
+            clauses.append("LOWER(barcode) LIKE ?")
+            parameters.append(f"%{barcode.strip().lower()}%")
+        if template_uuid:
+            clauses.append("resource_template_uuid = ?")
+            parameters.append(template_uuid)
+        where = " AND ".join(clauses)
+        try:
+            with self._store.transaction() as conn:
+                total = int(
+                    conn.execute(
+                        f"SELECT COUNT(*) AS value FROM material WHERE {where}",
+                        tuple(parameters),
+                    ).fetchone()["value"]
+                )
+                rows = conn.execute(
+                    f"""
+                    SELECT * FROM material WHERE {where}
+                    ORDER BY create_time DESC, uuid DESC LIMIT ? OFFSET ?
+                    """,
+                    (*parameters, page_size, (page - 1) * page_size),
+                ).fetchall()
+        except sqlite3.Error:
+            raise MaterialAuthorityUnavailable("failed to list Materials") from None
+        return {
+            "items": [_backend_material(_material_record(row)) for row in rows],
+            "total": total,
+            "page": page,
+            "page_size": page_size,
+        }
+
+    def backend_material_graph(self) -> dict[str, Any]:
+        """返回冻结 Backend ``GET /materials/graph`` 的完整一致快照。"""
+
+        try:
+            with self._store.transaction() as conn:
+                material_rows = conn.execute(
+                    """
+                    SELECT * FROM material WHERE deleted_at IS NULL
+                    ORDER BY create_time ASC, uuid ASC
+                    """
+                ).fetchall()
+                position_rows = conn.execute(
+                    """
+                    SELECT * FROM relative_position WHERE deleted_at IS NULL
+                    ORDER BY material_uuid ASC, create_time ASC, uuid ASC
+                    """
+                ).fetchall()
+                site_ids = tuple(
+                    row["uuid"]
+                    for row in conn.execute(
+                        """
+                        SELECT uuid FROM site WHERE deleted_at IS NULL
+                        ORDER BY material_uuid ASC, sort_order ASC, create_time ASC, uuid ASC
+                        """
+                    ).fetchall()
+                )
+                sites = tuple(_read_site(conn, site_uuid) for site_uuid in site_ids)
+        except sqlite3.Error:
+            raise MaterialAuthorityUnavailable(
+                "failed to build Backend MaterialGraph"
+            ) from None
+        position_by_material = {
+            row["material_uuid"]: _backend_relative_position(row)
+            for row in position_rows
+        }
+        sites_by_owner: dict[str, list[dict[str, Any]]] = {}
+        current_site_by_occupant: dict[str, str] = {}
+        for site in sites:
+            if site is None:
+                raise MaterialAuthorityUnavailable("MaterialGraph Site is unreadable")
+            sites_by_owner.setdefault(site.material_uuid, []).append(
+                _backend_site(site, graph=True)
+            )
+            if site.occupied_material_uuid is not None:
+                current_site_by_occupant[site.occupied_material_uuid] = site.uuid
+        return {
+            "nodes": [
+                {
+                    "material": _backend_material(record),
+                    "relative_position": position_by_material.get(record.uuid),
+                    "sites": sites_by_owner.get(record.uuid, []),
+                    "current_site_uuid": current_site_by_occupant.get(record.uuid),
+                    "handles": [],
+                }
+                for record in (_material_record(row) for row in material_rows)
+            ]
+        }
+
+    def backend_material_detail(self, material_uuid: str) -> dict[str, Any]:
+        """返回冻结 Backend ``GET /materials/{uuid}`` 的 MaterialDetail。"""
+
+        material = self.get_material(material_uuid)
+        graph = self.backend_material_graph()
+        node = next(
+            item for item in graph["nodes"] if item["material"]["uuid"] == material.uuid
+        )
+        current_site = None
+        if node["current_site_uuid"] is not None:
+            current_site = _backend_site(
+                self.get_site(node["current_site_uuid"]),
+            )
+        return {
+            **node["material"],
+            "relative_position": node["relative_position"],
+            "sites": node["sites"],
+            "current_site": current_site,
+        }
+
+    def list_material_shapes(self) -> list[dict[str, Any]]:
+        """返回 PackageCatalog 审计过的静态 2.5D shape assets。"""
+
+        return [json.loads(json.dumps(item)) for item in self._material_shapes]
 
     def read_ledger(
         self, *, after_id: int = 0, limit: int = 200

@@ -1,4 +1,4 @@
-"""M1R ``inventory.db`` v4 exact schema 与弃旧策略 RED。"""
+"""M1V ``inventory.db`` v5 exact schema 与弃旧策略。"""
 
 from __future__ import annotations
 
@@ -14,7 +14,7 @@ from unilabos.app.scheduler.inventory import (
     MaterialAuthorityUnavailable,
 )
 
-SCHEMA_VERSION = 4
+SCHEMA_VERSION = 5
 
 REQUIRED_TABLE_COLUMNS = {
     "material": (
@@ -57,6 +57,27 @@ REQUIRED_TABLE_COLUMNS = {
     "site_allowed_resource_template": (
         "site_uuid",
         "resource_template_uuid",
+    ),
+    "relative_position": (
+        "uuid",
+        "create_time",
+        "update_time",
+        "deleted_at",
+        "description",
+        "meta_data",
+        "material_uuid",
+        "position_x",
+        "position_y",
+        "position_z",
+        "depth",
+        "length",
+        "width",
+        "scale_x",
+        "scale_y",
+        "scale_z",
+        "rotation_x",
+        "rotation_y",
+        "rotation_z",
     ),
     "material_reservation": (
         "uuid",
@@ -231,7 +252,7 @@ def _create_legacy_v3(database: Path) -> None:
         connection.close()
 
 
-def _create_mixed_v4(database: Path) -> None:
+def _create_mixed_v5(database: Path) -> None:
     connection = sqlite3.connect(database)
     try:
         connection.executescript(
@@ -248,7 +269,7 @@ def _create_mixed_v4(database: Path) -> None:
             VALUES ('50000000-0000-4000-8000-000000000404', 'Mixed material');
             INSERT INTO material_instance(edge_uuid, template_id)
             VALUES ('legacy-material', 'legacy-template');
-            PRAGMA user_version = 4;
+            PRAGMA user_version = 5;
             """
         )
         connection.commit()
@@ -256,7 +277,7 @@ def _create_mixed_v4(database: Path) -> None:
         connection.close()
 
 
-def test_empty_inventory_opens_exact_v4_schema_and_sqlite_configuration(
+def test_empty_inventory_opens_exact_v5_schema_and_sqlite_configuration(
     tmp_path: Path,
 ) -> None:
     database = tmp_path / "inventory.db"
@@ -295,8 +316,8 @@ def test_empty_inventory_opens_exact_v4_schema_and_sqlite_configuration(
 
 @pytest.mark.parametrize(
     "legacy_builder",
-    [_create_legacy_v3, _create_mixed_v4],
-    ids=["legacy-v3", "mixed-v4"],
+    [_create_legacy_v3, _create_mixed_v5],
+    ids=["legacy-v3", "mixed-v5"],
 )
 def test_inventory_open_rejects_legacy_or_mixed_schema_without_mutation(
     tmp_path: Path,
@@ -320,7 +341,7 @@ def test_inventory_open_rejects_legacy_or_mixed_schema_without_mutation(
     assert _database_snapshot(database) == before
 
 
-def test_inventory_open_rejects_v4_with_missing_required_index(
+def test_inventory_open_rejects_v5_with_missing_required_index(
     tmp_path: Path,
 ) -> None:
     database = tmp_path / "inventory.db"

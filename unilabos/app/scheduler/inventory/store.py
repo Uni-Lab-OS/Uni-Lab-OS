@@ -16,7 +16,7 @@ from typing import Any
 
 from unilabos.app.scheduler.inventory.domain import MaterialAuthorityUnavailable
 
-SCHEMA_VERSION = 4
+SCHEMA_VERSION = 5
 
 _UNICODE_CASEFOLD_COLLATION = "UNICODE_CASEFOLD"
 _SQLITE_BUSY_TIMEOUT_MS = 5_000
@@ -62,6 +62,27 @@ _EXPECTED_TABLE_COLUMNS = {
     "site_allowed_resource_template": (
         "site_uuid",
         "resource_template_uuid",
+    ),
+    "relative_position": (
+        "uuid",
+        "create_time",
+        "update_time",
+        "deleted_at",
+        "description",
+        "meta_data",
+        "material_uuid",
+        "position_x",
+        "position_y",
+        "position_z",
+        "depth",
+        "length",
+        "width",
+        "scale_x",
+        "scale_y",
+        "scale_z",
+        "rotation_x",
+        "rotation_y",
+        "rotation_z",
     ),
     "material_reservation": (
         "uuid",
@@ -238,6 +259,32 @@ CREATE UNIQUE INDEX IF NOT EXISTS ux_site_occupied_material_active
 CREATE INDEX IF NOT EXISTS ix_site_material_order_active
     ON site(material_uuid, sort_order, create_time, uuid)
     WHERE deleted_at IS NULL;
+
+CREATE TABLE IF NOT EXISTS relative_position (
+    uuid TEXT PRIMARY KEY,
+    create_time TEXT NOT NULL,
+    update_time TEXT NOT NULL,
+    deleted_at TEXT,
+    description TEXT,
+    meta_data TEXT NOT NULL DEFAULT '{}'
+        CHECK (json_valid(meta_data) AND json_type(meta_data) = 'object'),
+    material_uuid TEXT NOT NULL,
+    position_x REAL NOT NULL DEFAULT 0,
+    position_y REAL NOT NULL DEFAULT 0,
+    position_z REAL NOT NULL DEFAULT 0,
+    depth REAL NOT NULL CHECK (depth >= 0),
+    length REAL NOT NULL CHECK (length >= 0),
+    width REAL NOT NULL CHECK (width >= 0),
+    scale_x REAL NOT NULL DEFAULT 1 CHECK (scale_x > 0),
+    scale_y REAL NOT NULL DEFAULT 1 CHECK (scale_y > 0),
+    scale_z REAL NOT NULL DEFAULT 1 CHECK (scale_z > 0),
+    rotation_x REAL NOT NULL DEFAULT 0,
+    rotation_y REAL NOT NULL DEFAULT 0,
+    rotation_z REAL NOT NULL DEFAULT 0,
+    FOREIGN KEY(material_uuid) REFERENCES material(uuid) ON DELETE RESTRICT
+);
+CREATE UNIQUE INDEX IF NOT EXISTS ux_relative_position_material_active
+    ON relative_position(material_uuid) WHERE deleted_at IS NULL;
 
 CREATE TABLE IF NOT EXISTS inventory_lot (
     lot_id             TEXT PRIMARY KEY,
@@ -425,7 +472,7 @@ class InventoryStore:
             raise
 
     def _open_exact_schema(self) -> None:
-        """Create an empty v4 database or reject every legacy/mixed shape."""
+        """Create an empty v5 database or reject every legacy/mixed shape."""
 
         with self._lock:
             current = int(self._conn.execute("PRAGMA user_version").fetchone()[0])

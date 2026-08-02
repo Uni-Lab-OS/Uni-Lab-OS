@@ -1,4 +1,4 @@
-"""Private HTTP projection of the canonical InventoryService interface."""
+"""Inventory 私有 adapter 与 Backend Material 公开读模型。"""
 
 from __future__ import annotations
 
@@ -83,6 +83,45 @@ def create_router(service: InventoryService) -> APIRouter:
     return router
 
 
+def create_backend_material_router(service: InventoryService) -> APIRouter:
+    """冻结 Backend Material read Interface；Inventory 私有路由保持隔离。"""
+
+    router = APIRouter(prefix="/api/v1", tags=["materials"])
+
+    @router.get("/materials")
+    def list_materials(
+        page: int = 1,
+        page_size: int = 20,
+        name: str = "",
+        barcode: str = "",
+        resource_template_uuid: str = "",
+    ) -> dict[str, Any]:
+        return {
+            "code": 0,
+            "data": service.list_backend_materials(
+                page=page,
+                page_size=page_size,
+                name=name,
+                barcode=barcode,
+                resource_template_uuid=resource_template_uuid,
+            ),
+        }
+
+    @router.get("/materials/graph")
+    def material_graph() -> dict[str, Any]:
+        return {"code": 0, "data": service.backend_material_graph()}
+
+    @router.get("/materials/{material_uuid}")
+    def material_detail(material_uuid: str) -> dict[str, Any]:
+        return {"code": 0, "data": service.backend_material_detail(material_uuid)}
+
+    @router.get("/material-shapes")
+    def material_shapes() -> dict[str, Any]:
+        return {"code": 0, "data": {"items": service.list_material_shapes()}}
+
+    return router
+
+
 def create_app(service: InventoryService | None = None) -> FastAPI:
     """Create a standalone adapter for tests; production injects its service."""
 
@@ -95,6 +134,7 @@ def create_app(service: InventoryService | None = None) -> FastAPI:
         )
     app = FastAPI(title="Uni-Lab Edge Inventory", version="0.2.0")
     app.include_router(create_router(service))
+    app.include_router(create_backend_material_router(service))
     app.state.inventory_temporary_directory = temporary_directory
 
     @app.exception_handler(InventoryError)

@@ -240,6 +240,9 @@ def compose_workflow_runtime(
     resource_template_identity_resolver: (
         ResourceTemplateIdentityIndex | Callable[[str], str] | None
     ) = None,
+    inventory_graph_snapshot: Mapping[str, object] | None = None,
+    package_sources: Iterable[object] = (),
+    package_catalogs: Iterable[object] = (),
 ) -> WorkflowService:
     """装配工作区唯一的 Workflow authority、启动恢复和 Draft 监视。"""
 
@@ -381,12 +384,43 @@ def compose_workflow_runtime(
                             resolved_identities if identity_index is not None else None
                         ),
                     )
+            configured_package_sources = tuple(package_sources)
+            configured_package_catalogs = tuple(package_catalogs)
+            material_shapes: tuple[Mapping[str, object], ...] = ()
+            package_material_projection = None
+            if configured_package_sources or configured_package_catalogs:
+                from unilabos.app.scheduler.inventory.material_projection import (
+                    build_package_material_projection,
+                )
+
+                package_material_projection = build_package_material_projection(
+                    configured_package_sources,  # type: ignore[arg-type]
+                    configured_package_catalogs,  # type: ignore[arg-type]
+                )
+                material_shapes = package_material_projection.shapes
             new_inventory_service = InventoryService.open(
                 working_dir=resolved_working_dir,
                 resource_templates=_inventory_resource_templates(
                     resolved_identities,
                 ),
+                material_shapes=material_shapes,
             )
+            if inventory_graph_snapshot is not None:
+                if package_material_projection is None:
+                    raise RuntimeError(
+                        "ResourceTreeSet bootstrap 缺少 PackageCatalog projection"
+                    )
+                from unilabos.app.scheduler.inventory.material_projection import (
+                    build_resource_graph_import,
+                )
+
+                new_inventory_service.bootstrap_resource_graph(
+                    build_resource_graph_import(
+                        inventory_graph_snapshot,
+                        package_material_projection,
+                        resolved_identities,
+                    )
+                )
             material_authority = MaterialResourceSlotResolver(
                 new_inventory_service,
             )

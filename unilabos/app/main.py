@@ -1308,6 +1308,17 @@ def main():
                 resource_registry_snapshot=args_dict.get(
                     "_workflow_resource_registry_snapshot"
                 ),
+                inventory_graph_snapshot={
+                    "source_id": os.path.basename(
+                        str(args_dict.get("_graph_file_path") or "os-current")
+                    ),
+                    "nodes": [
+                        node.res_content.model_dump(by_alias=True)
+                        for node in resource_tree_set.all_nodes
+                    ],
+                },
+                package_sources=args_dict.get("_package_sources", ()),
+                package_catalogs=args_dict.get("_package_catalogs", ()),
             )
             inventory_service = get_workflow_inventory_service()
             if inventory_service is None:
