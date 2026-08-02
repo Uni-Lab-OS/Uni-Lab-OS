@@ -60,11 +60,12 @@ facade, legacy tables, or a second Material identity.
   suite reports `6 passed` after convergence. The earlier branch that placed
   the identical test blob late remains recoverable but is not the final
   candidate history.
-- Latest review-fix implementation tree: `0c6e890`. Complete
-  `tests/app tests/workflow` reports `1601 passed` in `80.71s`.
-- Full repository gate after the second exact-SHA review fixes: `2226 passed, 4
-  skipped` in `100.88s`. The skips are the three opt-in networking process
-  tests and the Phoenix executable integration test.
+- Latest review-fix implementation tree: `3db90ef`. The M1R owner/waiter suites
+  report `37 passed`; the adjacent M2A/R1B/persistent-authoring suites report
+  `323 passed`.
+- Full repository gate after the third exact-SHA review fix: `2226 passed, 4
+  skipped` in `103.65s`. The skips are the three opt-in networking process tests
+  and the Phoenix executable integration test.
 - The 28 M1R-owned modified Python files pass Ruff check and format; the three
   broad pre-existing Workflow files have no net-new Ruff debt against the
   frozen base (`runtime 37→37`, `service 150→149`, `store 97→97`). Changed
@@ -108,5 +109,16 @@ existing runtime worker now triggers and retries Task Material reconciliation;
 startup replays terminal releases; transient Site occupancy is durable
 `blocked`; the same command may advance only monotonically from `blocked` to
 `admitted`; and a per-Task logical saga slot releases its Condition mutex before
-any Inventory/Workflow durable operation. The same reviewer must re-review the
-new final immutable SHA before acceptance.
+any Inventory/Workflow durable operation.
+
+The same reviewer then checked `621ffe68bca9c586b31d806d20c83bd8036e06dd`.
+Standards passed with `0B / 0NB`; Spec found one remaining blocker: startup
+admitted pending Tasks before releasing terminal owners, and online terminal
+release did not retry another Task whose durable `blocked` result was caused by
+that Reservation. This could strand a waiter after the contention disappeared.
+
+The tests-only review regression `00a0e85` freezes both startup and live
+owner/waiter cases. Implementation `3db90ef` makes startup reconcile terminal
+releases before pending admissions and makes the production terminal callback
+retry pending admissions only after release projection and acknowledgement.
+The same reviewer must re-review the new final immutable SHA before acceptance.
