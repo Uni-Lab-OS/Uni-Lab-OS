@@ -3,8 +3,8 @@
 日期：2026-08-03
 
 状态：**OS、FE 与真实 Electron 联调候选均已完成本地门禁；OS exact-SHA review
-为 Standards `0B/0NB`、Spec `0B/0NB`。当前未 merge、未 push、未更新 Core
-submodule pin，不等于团队发布或 Accepted。**
+为 Standards `0B/0NB`、Spec `0B/0NB`。两个候选已 non-squash merge 并推送到
+对应 integration；尚未更新 Core submodule pin，不等于 Accepted。**
 
 ## 1. 基线与边界
 
@@ -133,12 +133,17 @@ SZLab PLC driver 在 `auto_connect=false` 时仍会轮询 PLC 传感器并输出
 也不是本轮 OS/FE launcher 的 fatal 条件。该领域 driver 噪声需要在 SZLab owning repo
 单独处理，不在本轮越界修改。
 
-## 7. 发布停止线
+## 7. 发布结果与停止线
 
-当前候选只允许进入用户判断：
+用户确认 publication 后已完成：
 
-- 尚未把 OS 分支 non-squash merge 到 `integration/workflow-task-runtime`；
-- 尚未把 FE 分支 non-squash merge 到 `integration/fe-os-migration`；
-- 尚未 push OS/FE 候选；
-- 尚未提交 Core submodule pin 或团队 immutable evidence；
-- 因此 Core #147/#151 只能记录本地 testing progress，不得标记 Accepted。
+- OS non-squash merge：`815df9a29d9fd82c560bc44489ce0063267ff6d3`；
+- OS integration 文档后继：`1918dda087fff08fe21e2ac8507938eb608e38a2`；
+- FE non-squash merge：`2fae21724231b08a45cd7bb776f12fdfe1865586`；
+- 原独立 RED、修复、review finding 和 FE 三个实现提交均保留在 integration 历史中；
+- OS 只推送私有 `Uni-Lab-OS/Uni-Lab-OS`，没有修改 public `deepmodeling`。
+
+剩余停止线：
+
+- 尚未提交 Core submodule pin，也未把 E2E artifacts 固定为 Core team evidence；
+- Core #147/#151 继续保持 testing，不得标记 Accepted。
