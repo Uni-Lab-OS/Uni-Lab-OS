@@ -142,4 +142,3 @@ SZLab PLC driver 在 `auto_connect=false` 时仍会轮询 PLC 传感器并输出
 - 尚未 push OS/FE 候选；
 - 尚未提交 Core submodule pin 或团队 immutable evidence；
 - 因此 Core #147/#151 只能记录本地 testing progress，不得标记 Accepted。
-
