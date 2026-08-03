@@ -9,12 +9,22 @@ import asyncio
 import inspect
 import traceback
 from abc import abstractmethod
-from typing import Type, Any, Dict, Optional, TypeVar, Generic, List
+from typing import Any, Dict, Generic, List, Optional, Type, TypeVar
 
-from unilabos.resources.resource_tracker import DeviceNodeResourceTracker, ResourceTreeSet, ResourceDictInstance, \
-    ResourceTreeInstance
+from unilabos.package_manager.consumers import (
+    DefinitionIdentityNotFound,
+    resolve_registry_definition,
+)
+from unilabos.registry.registry import lab_registry
+from unilabos.resources.resource_tracker import (
+    DeviceNodeResourceTracker,
+    ResourceDictInstance,
+    ResourceTreeInstance,
+    ResourceTreeSet,
+)
 from unilabos.utils import logger
 from unilabos.utils.cls_creator import create_instance_from_config
+from unilabos.utils.import_manager import default_manager
 
 # 定义泛型类型变量
 T = TypeVar("T")
@@ -52,8 +62,59 @@ class DeviceClassCreator(Generic[T]):
         if self.device_instance is not None:
             for c in self.children:
                 if c.res_content.type != "device":
-                    res = ResourceTreeSet([ResourceTreeInstance(c)]).to_plr_resources()[0]
+                    res = self._create_child_resource(c)
                     self.resource_tracker.add_resource(res)
+
+    def _create_child_resource(self, child: ResourceDictInstance) -> Any:
+        """优先按 Package Registry definition 激活 child 的真实 resource factory。"""
+
+        identity = child.res_content.klass
+        if isinstance(identity, str) and identity:
+            try:
+                canonical_identity, entry = resolve_registry_definition(
+                    lab_registry.resource_type_registry,
+                    identity,
+                )
+            except DefinitionIdentityNotFound:
+                entry = None
+            if isinstance(entry, dict) and entry.get("source_fqid"):
+                child.res_content.klass = canonical_identity
+                return self._create_package_resource(child, entry)
+        return ResourceTreeSet([ResourceTreeInstance(child)]).to_plr_resources()[0]
+
+    def _create_package_resource(
+        self, child: ResourceDictInstance, entry: Dict[str, Any]
+    ) -> Any:
+        class_config = entry.get("class")
+        module = class_config.get("module") if isinstance(class_config, dict) else None
+        if not isinstance(module, str) or not module:
+            raise ValueError(
+                f"Package resource 缺少激活 module: {child.res_content.klass}"
+            )
+        factory = default_manager.get_class(module)
+        signature = inspect.signature(factory)
+        accepts_kwargs = any(
+            parameter.kind is inspect.Parameter.VAR_KEYWORD
+            for parameter in signature.parameters.values()
+        )
+        params = {
+            key: value
+            for key, value in child.res_content.config.items()
+            if accepts_kwargs or key in signature.parameters
+        }
+        if accepts_kwargs or "name" in signature.parameters:
+            params["name"] = child.res_content.name
+        resource = factory(**params)
+        self.resource_tracker.loop_set_uuid(
+            resource,
+            {child.res_content.name: child.res_content.uuid},
+        )
+        if child.res_content.extra:
+            self.resource_tracker.loop_set_extra(
+                resource,
+                {child.res_content.name: child.res_content.extra},
+            )
+        return resource
 
     def create_instance(self, data: Dict[str, Any]) -> T:
         """
