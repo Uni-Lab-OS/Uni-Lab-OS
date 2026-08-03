@@ -61,9 +61,16 @@ class DeviceClassCreator(Generic[T]):
         """
         if self.device_instance is not None:
             for c in self.children:
-                if c.res_content.type != "device":
-                    res = self._create_child_resource(c)
-                    self.resource_tracker.add_resource(res)
+                if c.res_content.type == "device":
+                    continue
+                # Logical mounts describe inventory sites for graph projection. They
+                # are not physical pylabrobot resources owned by the device driver,
+                # so trying to deserialize their domain type (for example
+                # ``warehouse``) as a PLR subclass aborts the entire ROS backend.
+                if c.res_content.config.get("logical_mount") is True:
+                    continue
+                res = self._create_child_resource(c)
+                self.resource_tracker.add_resource(res)
 
     def _create_child_resource(self, child: ResourceDictInstance) -> Any:
         """优先按 Package Registry definition 激活 child 的真实 resource factory。"""

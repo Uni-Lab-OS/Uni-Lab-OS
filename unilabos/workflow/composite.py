@@ -2238,7 +2238,12 @@ def _workflow_schema(
     contract_digest: str,
     composition_allow_transparent: bool,
 ) -> dict[str, Any]:
-    goal_properties = {str(item["name"]): _plain(item["schema"]) for item in inputs}
+    goal_properties: dict[str, Any] = {}
+    for item in inputs:
+        property_schema = _plain(item["schema"])
+        if "default" in item:
+            property_schema["default"] = _plain(item["default"])
+        goal_properties[str(item["name"])] = property_schema
     result_properties = {str(item["name"]): _plain(item["schema"]) for item in outputs}
     required = [str(item["name"]) for item in inputs if item.get("required") is True]
     return {

@@ -324,6 +324,34 @@ def test_applied_workflow_projects_exact_owner_schema_digest_and_provenance() ->
     }
 
 
+def test_projection_embeds_input_defaults_in_goal_json_schema() -> None:
+    source = PackageCatalogPublishedWorkflowResolver((_package_catalog(),)).resolve(
+        "c1_published_lab.workflows.child",
+        "prepare_sample",
+    )
+    snapshot = _applied_snapshot()
+    descriptor = snapshot["workflow"]["meta_data"]["unilab"]["input_contract"][
+        "parameters"
+    ][0]
+    descriptor["required"] = False
+    descriptor["default"] = 1.25
+
+    projected = project_published_workflow_contract(
+        source=source,
+        applied_snapshot=snapshot,
+        host_node_resource_template_uuid=HOST_RESOURCE_TEMPLATE_UUID,
+    )
+
+    template = _plain(projected.template)
+    goal_schema = template["schema"]["properties"]["goal"]
+    assert goal_schema["properties"]["value"] == {
+        "type": "number",
+        "default": 1.25,
+    }
+    assert goal_schema["required"] == []
+    assert template["goal_default"] == {"value": 1.25}
+
+
 def test_projection_emits_i1_value_handles_and_separate_ready_handles() -> None:
     source = PackageCatalogPublishedWorkflowResolver((_package_catalog(),)).resolve(
         "c1_published_lab.workflows.child",

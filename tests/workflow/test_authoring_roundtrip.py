@@ -51,6 +51,18 @@ class _StaticResourceTemplateIdentityIndex:
         return RESOURCE_TEMPLATE_SOURCE_IDENTITY
 
 
+class _MappingResourceTemplateIdentityIndex:
+    def __init__(self, identities: dict[str, str]) -> None:
+        self.identities = identities
+        self.sources = {value: key for key, value in identities.items()}
+
+    def resolve_symbol(self, qualified_name: str) -> str:
+        return self.identities[qualified_name]
+
+    def identify_uuid(self, resource_template_uuid: str) -> str:
+        return self.sources[resource_template_uuid]
+
+
 @pytest.fixture()
 def engine_context(tmp_path: Path) -> Iterator[EngineContext]:
     with _opened_engine(tmp_path / "workflow.db") as context:
@@ -536,6 +548,53 @@ def test_constrained_workflow_input_round_trips_resource_template_identity(
         assert CandidateChangeset.model_validate(recompiled.changeset).kind == (
             "source_only"
         )
+
+
+def test_normalized_resource_import_order_does_not_depend_on_local_uuids(
+    tmp_path: Path,
+) -> None:
+    source = f'''from typing import Annotated
+from lab.resources import alpha, beta
+from unilabos.registry.annotations import AllowedResourceTemplates
+from unilabos.registry.placeholder_type import ResourceSlot
+from unilabos.workflow.authoring import workflow_definition, workflow_output
+
+
+@workflow_definition(
+    workflow_uuid="{WORKFLOW_UUID}",
+    displayname="Stable imports",
+)
+def stable_imports(
+    *,
+    first: Annotated[ResourceSlot, AllowedResourceTemplates(alpha)],
+    second: Annotated[ResourceSlot, AllowedResourceTemplates(beta)],
+):
+    return workflow_output(first=first, second=second)
+'''
+    alpha = "lab.resources:alpha"
+    beta = "lab.resources:beta"
+    low_uuid = "10000000-0000-4000-8000-000000000001"
+    high_uuid = "20000000-0000-4000-8000-000000000001"
+    normalized: list[str] = []
+    for name, identities in (
+        ("alpha-first", {alpha: low_uuid, beta: high_uuid}),
+        ("beta-first", {alpha: high_uuid, beta: low_uuid}),
+    ):
+        with _opened_engine(
+            tmp_path / f"{name}.db",
+            resource_template_identity_index=(
+                _MappingResourceTemplateIdentityIndex(identities)
+            ),
+        ) as context:
+            compiled = _compile(context.engine, source)
+        assert compiled.valid, compiled.diagnostics
+        assert compiled.normalized_python_source is not None
+        normalized.append(compiled.normalized_python_source)
+
+    assert normalized[0] == normalized[1]
+    assert normalized[0].index("from lab.resources import alpha") < normalized[
+        0
+    ].index("from lab.resources import beta")
 
 
 def test_compile_generate_compile_is_a_semantic_fixed_point(

@@ -1016,6 +1016,36 @@ class InventoryService:
             raise MaterialNotFound(f"material {canonical_material_uuid} not found")
         return _material_record(row)
 
+    def resolve_material_ref(
+        self,
+        resource_id: str,
+        *,
+        uow: object | None = None,
+    ) -> MaterialRecord:
+        """Resolve a deployment resource id to one visible durable Material."""
+
+        del uow
+        if not isinstance(resource_id, str) or not resource_id.strip() or (
+            resource_id != resource_id.strip()
+        ):
+            raise MaterialInvalidInput("resource_id must be a non-empty string")
+        try:
+            rows = self._store.query_all(
+                "SELECT * FROM material WHERE deleted_at IS NULL "
+                "AND json_extract(meta_data, '$.source_node_id') = ? "
+                "ORDER BY uuid LIMIT 2",
+                (resource_id,),
+            )
+        except sqlite3.Error:
+            raise MaterialAuthorityUnavailable(
+                "failed to resolve material reference"
+            ) from None
+        if not rows:
+            raise MaterialNotFound(f"resource {resource_id} not found")
+        if len(rows) != 1:
+            raise MaterialConflict(f"resource {resource_id} is ambiguous")
+        return _material_record(rows[0])
+
     def resolve_resource_slot(
         self,
         *,

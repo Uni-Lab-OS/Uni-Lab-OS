@@ -286,6 +286,28 @@ def _schema_contains_resource_slot(schema: Mapping[str, Any]) -> bool:
     return False
 
 
+def _contains_closed_resource_slot_value(
+    schema: Mapping[str, Any],
+    value: Any,
+) -> bool:
+    if "anyOf" in schema:
+        if value is None:
+            return False
+        return any(
+            _contains_closed_resource_slot_value(member, value)
+            for member in schema.get("anyOf", ())
+            if type(member) is dict and member.get("type") != "null"
+        )
+    if schema.get("$slot") == "ResourceSlot":
+        return type(value) is dict and "resource_template_uuid" in value
+    if schema.get("type") == "array" and type(schema.get("items")) is dict:
+        return type(value) is list and any(
+            _contains_closed_resource_slot_value(schema["items"], item)
+            for item in value
+        )
+    return False
+
+
 def _apply_handle_slot_allowlist(
     schema: Mapping[str, Any],
     allowed: Any,
@@ -304,6 +326,24 @@ def _apply_handle_slot_allowlist(
         ]
     if result.get("type") == "array" and type(result.get("items")) is dict:
         result["items"] = _apply_handle_slot_allowlist(result["items"], allowed)
+    return result
+
+
+def _strip_handle_schema_annotations(schema: Mapping[str, Any]) -> dict[str, Any]:
+    """Remove catalog presentation metadata before strict execution parsing."""
+
+    result = clone_json(dict(schema))
+    result.pop("title", None)
+    result.pop("description", None)
+    if "anyOf" in result:
+        result["anyOf"] = [
+            _strip_handle_schema_annotations(member)
+            if type(member) is dict
+            else member
+            for member in result["anyOf"]
+        ]
+    if result.get("type") == "array" and type(result.get("items")) is dict:
+        result["items"] = _strip_handle_schema_annotations(result["items"])
     return result
 
 
@@ -329,7 +369,8 @@ def _typed_handle_value_schema(
         raw_schema,
         unilab.get("allowed_resource_template_uuids"),
     )
-    return parse_value_schema(with_allowlist).to_dict()
+    execution_schema = _strip_handle_schema_annotations(with_allowlist)
+    return parse_value_schema(execution_schema).to_dict()
 
 
 def _parse_frozen_input_contract(
@@ -594,15 +635,23 @@ def _bind_active_plan(
                 and value_schema is not None
                 and _schema_contains_resource_slot(value_schema)
             ):
-                normalized_static = normalize_value(
-                    parse_value_schema(value_schema),
-                    raw_param[data_key],
-                )
-                resolved_static = _resolve_slots(
-                    value_schema,
-                    normalized_static,
-                    resource_resolver=resource_resolver,
-                )
+                raw_static = raw_param[data_key]
+                if _contains_closed_resource_slot_value(value_schema, raw_static):
+                    # Applied Authoring graphs already carry the Material
+                    # Authority-owned identity. Validate its exact closed shape
+                    # and Handle allowlist without performing a second lookup.
+                    _material_roots_for_value(value_schema, raw_static)
+                    resolved_static = clone_json(raw_static)
+                else:
+                    normalized_static = normalize_value(
+                        parse_value_schema(value_schema),
+                        raw_static,
+                    )
+                    resolved_static = _resolve_slots(
+                        value_schema,
+                        normalized_static,
+                        resource_resolver=resource_resolver,
+                    )
                 plan_param[data_key] = clone_json(resolved_static)
                 job_param[data_key] = clone_json(resolved_static)
                 snapshot_param[data_key] = clone_json(resolved_static)

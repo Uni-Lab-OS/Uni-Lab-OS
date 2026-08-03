@@ -212,7 +212,11 @@ def build_resource_graph_import(
         raise ValueError("ResourceTreeSet snapshot nodes 必须全是对象")
     material_nodes = [node for node in nodes if not _is_internal_site(node)]
     material_uuid_by_runtime_uuid = {
-        str(node["uuid"]): _stable_uuid(source_id, "material", str(node["id"]))
+        str(node["uuid"]): _canonical_material_uuid(
+            source_id,
+            runtime_uuid=str(node["uuid"]),
+            node_id=str(node["id"]),
+        )
         for node in material_nodes
     }
     material_node_by_runtime_uuid = {str(node["uuid"]): node for node in material_nodes}
@@ -787,6 +791,21 @@ def _declared_site_kind(
 
 def _stable_uuid(source_id: str, domain: str, value: str) -> str:
     return str(uuid.uuid5(uuid.NAMESPACE_URL, f"unilabos:{source_id}:{domain}:{value}"))
+
+
+def _canonical_material_uuid(
+    source_id: str,
+    *,
+    runtime_uuid: str,
+    node_id: str,
+) -> str:
+    try:
+        parsed = uuid.UUID(runtime_uuid)
+    except (AttributeError, ValueError):
+        return _stable_uuid(source_id, "material", node_id)
+    if parsed.int != 0 and str(parsed) == runtime_uuid:
+        return runtime_uuid
+    return _stable_uuid(source_id, "material", node_id)
 
 
 def _normalize_category(value: str) -> str:

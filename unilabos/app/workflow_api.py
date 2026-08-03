@@ -679,6 +679,31 @@ def create_workflow_router(
     def list_workflow_node_jobs(task_uuid: str) -> JSONResponse:
         return _success(service.list_workflow_node_jobs(task_uuid))
 
+    @router.get("/workflow-tasks/{task_uuid}/events")
+    def list_workflow_task_runtime_events(
+        task_uuid: str,
+        after_sequence: str = Query(default=""),
+        limit: str = Query(default=""),
+    ) -> JSONResponse:
+        try:
+            after_text = after_sequence.strip(_GO_WHITE_SPACE)
+            limit_text = limit.strip(_GO_WHITE_SPACE)
+            parsed_after = (
+                _parse_non_negative_int64_decimal(after_text) if after_text else 0
+            )
+            parsed_limit = (
+                _parse_positive_decimal(limit_text, maximum=500) if limit_text else 100
+            )
+        except ValueError:
+            raise WorkflowError("invalid_input") from None
+        return _success(
+            service.list_workflow_task_runtime_events(
+                task_uuid,
+                after_sequence=parsed_after,
+                limit=parsed_limit,
+            )
+        )
+
     @router.get("/workflow-node-jobs/{job_uuid}/feedback")
     def list_workflow_node_job_feedback(
         job_uuid: str,

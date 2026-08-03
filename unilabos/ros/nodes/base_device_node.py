@@ -113,6 +113,29 @@ _WORKFLOW_NODE_JOB_UUID_PARAM = "workflow_node_job_uuid"
 _WORKFLOW_TASK_UUID_PARAM = "workflow_task_uuid"
 
 
+def _is_resource_slot_annotation(annotation: Any) -> bool:
+    """Accept both workspace-short and canonical ResourceSlot type identities."""
+
+    return isinstance(annotation, str) and (
+        annotation == "ResourceSlot" or annotation.endswith(":ResourceSlot")
+    )
+
+
+def _resource_slot_uuid(value: Any) -> str | None:
+    """Return the inventory UUID from either ResourceSlot wire shape.
+
+    Inventory references use ``uuid``.  A ResourceSlot returned by a ROS
+    device action is serialized from the PLR instance and therefore carries
+    ``unilabos_uuid`` instead.  Both shapes identify the same inventory
+    resource and must be accepted when the value is wired into a downstream
+    ResourceSlot parameter.
+    """
+
+    if not isinstance(value, dict):
+        return None
+    return value.get("uuid") or value.get("unilabos_uuid")
+
+
 class RclpyAsyncMutex:
     """rclpy executor 兼容的异步互斥锁
 
@@ -2778,22 +2801,30 @@ class BaseROS2DeviceNode(Node, Generic[T]):
             }
 
             def _run_sync_action():
-                with fail_open_span(
-                    runtime_tracing,
-                    "device.driver.execute",
-                    parent=driver_parent_context,
-                    attributes=driver_trace_attributes,
+                with attach_workflow_execution_identity(
+                    job_context.get("job_id", ""),
+                    job_context.get("task_id", ""),
                 ):
-                    return ACTION(**action_kwargs)
+                    with fail_open_span(
+                        runtime_tracing,
+                        "device.driver.execute",
+                        parent=driver_parent_context,
+                        attributes=driver_trace_attributes,
+                    ):
+                        return ACTION(**action_kwargs)
 
             async def _run_async_action():
-                with fail_open_span(
-                    runtime_tracing,
-                    "device.driver.execute",
-                    parent=driver_parent_context,
-                    attributes=driver_trace_attributes,
+                with attach_workflow_execution_identity(
+                    job_context.get("job_id", ""),
+                    job_context.get("task_id", ""),
                 ):
-                    return await ACTION(**action_kwargs)
+                    with fail_open_span(
+                        runtime_tracing,
+                        "device.driver.execute",
+                        parent=driver_parent_context,
+                        attributes=driver_trace_attributes,
+                    ):
+                        return await ACTION(**action_kwargs)
 
             async def _retry_action_once():
                 if asyncio.iscoroutinefunction(ACTION):
@@ -3008,6 +3039,15 @@ class BaseROS2DeviceNode(Node, Generic[T]):
                 elif not execution_error:
                     execution_success = True
                     action_return_value = _raw_result
+                    if (
+                        isinstance(_raw_result, dict)
+                        and _raw_result.get("success") is False
+                    ):
+                        execution_success = False
+                        execution_error = str(
+                            _raw_result.get("message")
+                            or "设备动作返回 success=false"
+                        )
 
                 if isinstance(_raw_result, BaseException) and error_policy:
                     try:
@@ -3127,32 +3167,28 @@ class BaseROS2DeviceNode(Node, Generic[T]):
                 job_context.get(TRACE_CONTEXT_KEY)
             )
             driver_parent_context = parent_trace_context
-            with attach_workflow_execution_identity(
-                job_context.get("job_id", ""),
-                job_context.get("task_id", ""),
+            with fail_open_span(
+                runtime_tracing,
+                "ros2.action.execute",
+                parent=parent_trace_context,
+                attributes={
+                    "workflow.node_job.uuid": job_context.get("job_id", ""),
+                    "workflow.task.uuid": job_context.get("task_id", ""),
+                    "device.id": getattr(self, "device_id", ""),
+                    "device.action.name": job_context.get(
+                        "action_name", action_name
+                    ),
+                    "ros.goal.uuid": job_context.get(ROS_GOAL_UUID_KEY, ""),
+                },
             ):
-                with fail_open_span(
-                    runtime_tracing,
-                    "ros2.action.execute",
-                    parent=parent_trace_context,
-                    attributes={
-                        "workflow.node_job.uuid": job_context.get("job_id", ""),
-                        "workflow.task.uuid": job_context.get("task_id", ""),
-                        "device.id": getattr(self, "device_id", ""),
-                        "device.action.name": job_context.get(
-                            "action_name", action_name
-                        ),
-                        "ros.goal.uuid": job_context.get(ROS_GOAL_UUID_KEY, ""),
-                    },
-                ):
-                    captured_context = safe_capture_context(runtime_tracing)
-                    if captured_context:
-                        driver_parent_context = captured_context
-                    return await _execute_callback_body(
-                        goal_handle,
-                        job_context,
-                        driver_parent_context,
-                    )
+                captured_context = safe_capture_context(runtime_tracing)
+                if captured_context:
+                    driver_parent_context = captured_context
+                return await _execute_callback_body(
+                    goal_handle,
+                    job_context,
+                    driver_parent_context,
+                )
 
         return execute_callback
 
@@ -3206,14 +3242,14 @@ class BaseROS2DeviceNode(Node, Generic[T]):
                 # 处理单个 ResourceSlot（单物料两种入参形态：
                 #   dict = 资源引用，按 uuid 重新 with_children 拉取；
                 #   list = 一棵树的扁平节点组（上游 handle 的 @flatten），就地装配成一个物料）
-                if arg_type == "unilabos.registry.placeholder_type:ResourceSlot":
+                if _is_resource_slot_annotation(arg_type):
                     # 内部解析层：raw 值可能是 list（@flatten 节点组）或 dict（资源引用）
                     resource_data: ResourceSlotRawInput = function_args[arg_name]
                     try:
                         if isinstance(resource_data, list):
                             function_args[arg_name] = self._assemble_single_resource(resource_data)
-                        elif isinstance(resource_data, dict) and "id" in resource_data:
-                            function_args[arg_name] = self._convert_resources_sync(resource_data["uuid"])[0]
+                        elif resource_uuid := _resource_slot_uuid(resource_data):
+                            function_args[arg_name] = self._convert_resources_sync(resource_uuid)[0]
                     except Exception as e:
                         self.lab_logger().error(
                             f"转换ResourceSlot参数 {arg_name} 失败: {e}\n{traceback.format_exc()}"
@@ -3222,12 +3258,15 @@ class BaseROS2DeviceNode(Node, Generic[T]):
 
                 # 处理 ResourceSlot 列表
                 elif isinstance(arg_type, tuple) and len(arg_type) == 2:
-                    resource_slot_type = "unilabos.registry.placeholder_type:ResourceSlot"
-                    if arg_type[0] == "list" and arg_type[1] == resource_slot_type:
+                    if arg_type[0] == "list" and _is_resource_slot_annotation(arg_type[1]):
                         resource_list = function_args[arg_name]
                         if isinstance(resource_list, list):
                             try:
-                                uuids = [r["uuid"] for r in resource_list if isinstance(r, dict) and "id" in r]
+                                uuids = [
+                                    resource_uuid
+                                    for r in resource_list
+                                    if (resource_uuid := _resource_slot_uuid(r))
+                                ]
                                 function_args[arg_name] = self._convert_resources_sync(*uuids) if uuids else []
                             except Exception as e:
                                 self.lab_logger().error(
@@ -3316,16 +3355,40 @@ class BaseROS2DeviceNode(Node, Generic[T]):
 
         return mapped_plr_resources
 
-    def _assemble_single_resource(self, raw_nodes: List[Dict[str, Any]]) -> "ResourcePLR":
-        """把一组扁平节点 dict 装配成「单个物料」（单 ResourceSlot 的 list 输入形态）。
+    def _assemble_single_resource(
+        self,
+        raw_nodes: List[Dict[str, Any]] | List[List[Dict[str, Any]]],
+    ) -> "ResourcePLR":
+        """把单树 wire payload 装配成「单个物料」。
 
-        list 输入形态：通常来自上游 handle 的 `xxx.@flatten`（一棵树的扁平节点列表，root + children），
-        必须**恰好一个根** → 装配成一个物料；多根视为非法（一组必须变成一个物料）。
+        接受上游 handle 的扁平 ``[node, ...]``，也接受 action 输出使用的
+        ``ResourceTreeSet.dump()`` 单树形态 ``[[node, ...]]``。两者都必须
+        **恰好一棵树、一个根**；多树或混合层级视为非法。
         与 dict 形态（按 uuid 重新 with_children 拉取）相对：此处直接就地装配，不回服务端拉取。
         """
         if not raw_nodes:
             raise ValueError("单物料 list 输入为空")
-        tree_set = ResourceTreeSet.from_raw_dict_list(raw_nodes)
+
+        first_item = raw_nodes[0]
+        if isinstance(first_item, list):
+            if not all(isinstance(tree_nodes, list) for tree_nodes in raw_nodes):
+                raise ValueError("单物料输入不能混用扁平节点与嵌套资源树")
+            if len(raw_nodes) != 1:
+                raise ValueError(
+                    f"单物料输入要求恰好一棵资源树，实际得到 {len(raw_nodes)} 棵"
+                )
+            normalized_nodes = raw_nodes[0]
+        else:
+            if not all(isinstance(node, dict) for node in raw_nodes):
+                raise ValueError("单物料扁平输入中的每个节点都必须是对象")
+            normalized_nodes = raw_nodes
+
+        if not normalized_nodes:
+            raise ValueError("单物料资源树为空")
+        if not all(isinstance(node, dict) for node in normalized_nodes):
+            raise ValueError("单物料资源树中的每个节点都必须是对象")
+
+        tree_set = ResourceTreeSet.from_raw_dict_list(normalized_nodes)
         if len(tree_set.trees) != 1:
             names = [t.root_node.res_content.name for t in tree_set.trees]
             raise ValueError(f"单物料输入要求恰好一个根物料，实际得到 {len(tree_set.trees)} 个根：{names}")
@@ -3393,14 +3456,18 @@ class BaseROS2DeviceNode(Node, Generic[T]):
                 # 处理单个 ResourceSlot（单物料两种入参形态：
                 #   dict = 资源引用，按 uuid 重新 with_children 拉取；
                 #   list = 一棵树的扁平节点组（上游 handle 的 @flatten），就地装配成一个物料）
-                _is_resource_slot = isinstance(arg_type, str) and arg_type.endswith(":ResourceSlot")
+                _is_resource_slot = _is_resource_slot_annotation(arg_type)
                 if _is_resource_slot:
                     # 内部解析层：raw 值可能是 list（@flatten 节点组）或 dict（资源引用）
                     resource_data: ResourceSlotRawInput = function_args[arg_name]
                     try:
                         if isinstance(resource_data, list):
                             function_args[arg_name] = self._assemble_single_resource(resource_data)
-                        elif isinstance(resource_data, dict) and "id" in resource_data:
+                        elif isinstance(resource_data, dict) and (
+                            _resource_slot_uuid(resource_data)
+                            or resource_data.get("id")
+                            or resource_data.get("name")
+                        ):
                             function_args[arg_name] = await self._convert_resource_async(resource_data)
                     except Exception as e:
                         self.lab_logger().error(
@@ -3410,13 +3477,17 @@ class BaseROS2DeviceNode(Node, Generic[T]):
 
                 # 处理 ResourceSlot 列表
                 elif isinstance(arg_type, tuple) and len(arg_type) == 2:
-                    if arg_type[0] == "list" and isinstance(arg_type[1], str) and arg_type[1].endswith(":ResourceSlot"):
+                    if arg_type[0] == "list" and _is_resource_slot_annotation(arg_type[1]):
                         resource_list = function_args[arg_name]
                         if isinstance(resource_list, list):
                             try:
                                 converted_resources = []
                                 for resource_data in resource_list:
-                                    if isinstance(resource_data, dict) and "id" in resource_data:
+                                    if isinstance(resource_data, dict) and (
+                                        _resource_slot_uuid(resource_data)
+                                        or resource_data.get("id")
+                                        or resource_data.get("name")
+                                    ):
                                         converted_resource = await self._convert_resource_async(resource_data)
                                         converted_resources.append(converted_resource)
                                 function_args[arg_name] = converted_resources
@@ -3434,7 +3505,7 @@ class BaseROS2DeviceNode(Node, Generic[T]):
 
     async def _convert_resource_async(self, resource_data: "ResourceDictType"):
         """异步转换 ResourceDictType 为 PLR 实例，优先用 uuid 查询"""
-        unilabos_uuid = resource_data.get("uuid")
+        unilabos_uuid = _resource_slot_uuid(resource_data)
 
         if unilabos_uuid:
             resource_tree = await self.get_resource([unilabos_uuid], with_children=True)

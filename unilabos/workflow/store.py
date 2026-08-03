@@ -2220,6 +2220,76 @@ class WorkflowStore:
             "has_more": has_more,
         }
 
+    def list_task_runtime_events(
+        self,
+        task_uuid: str,
+        *,
+        after_sequence: int,
+        limit: int,
+    ) -> Dict[str, Any]:
+        """Return the durable Task runtime journal as an observable timeline.
+
+        Journal transitions remain the source of ordering and timestamps.  The
+        response only enriches action dispatch and terminal transitions with
+        the Job payload that operators need to inspect; it does not invent
+        lifecycle events from the current Job snapshot.
+        """
+
+        self.get_task(task_uuid)
+        with self._lock:
+            rows = self._conn.execute(
+                """
+                SELECT
+                    journal.sequence AS event_sequence,
+                    journal.workflow_task_uuid AS event_task_uuid,
+                    journal.workflow_node_job_uuid AS event_job_uuid,
+                    journal.workflow_task_command_uuid AS event_command_uuid,
+                    journal.kind AS event_kind,
+                    journal.from_status AS event_from_status,
+                    journal.to_status AS event_to_status,
+                    journal.data AS event_data,
+                    journal.create_time AS event_create_time,
+                    job.workflow_node_uuid AS job_workflow_node_uuid,
+                    job.executor_kind AS job_executor_kind,
+                    job.attempt AS job_attempt,
+                    job.param AS job_param,
+                    job.return_info AS job_return_info,
+                    job.error_info AS job_error_info,
+                    feedback.feedback_type AS committed_feedback_type,
+                    feedback.data AS committed_feedback_data,
+                    command.type AS command_type,
+                    command.result AS command_result
+                FROM workflow_runtime_journal AS journal
+                LEFT JOIN workflow_node_job AS job
+                  ON job.uuid = journal.workflow_node_job_uuid
+                 AND job.deleted_at IS NULL
+                LEFT JOIN workflow_node_job_feedback_history AS feedback
+                  ON journal.kind = 'feedback_committed'
+                 AND feedback.workflow_node_job_uuid = journal.workflow_node_job_uuid
+                 AND feedback.sequence = CAST(
+                     json_extract(journal.data, '$.sequence') AS INTEGER
+                 )
+                 AND feedback.deleted_at IS NULL
+                LEFT JOIN workflow_task_command AS command
+                  ON command.uuid = journal.workflow_task_command_uuid
+                 AND command.deleted_at IS NULL
+                WHERE journal.workflow_task_uuid = ?
+                  AND journal.sequence > ?
+                ORDER BY journal.sequence
+                LIMIT ?
+                """,
+                (task_uuid, after_sequence, limit + 1),
+            ).fetchall()
+        has_more = len(rows) > limit
+        selected = rows[:limit]
+        return {
+            "items": [self._runtime_event_row(row) for row in selected],
+            "next_cursor": (
+                selected[-1]["event_sequence"] if selected else after_sequence
+            ),
+            "has_more": has_more,
+        }
+
     # Authoring ----------------------------------------------------------
 
     @contextmanager
@@ -2874,6 +2944,51 @@ class WorkflowStore:
             "idempotency_key": row["idempotency_key"],
         }
         cls._add_optional(result, row, "published_at")
+        return result
+
+    @staticmethod
+    def _runtime_event_row(row: sqlite3.Row) -> Dict[str, Any]:
+        result: Dict[str, Any] = {
+            "sequence": row["event_sequence"],
+            "workflow_task_uuid": row["event_task_uuid"],
+            "kind": row["event_kind"],
+            "data": _load(row["event_data"], {}),
+            "create_time": row["event_create_time"],
+        }
+        for column, output in (
+            ("event_job_uuid", "workflow_node_job_uuid"),
+            ("event_command_uuid", "workflow_task_command_uuid"),
+            ("event_from_status", "from_status"),
+            ("event_to_status", "to_status"),
+            ("job_workflow_node_uuid", "workflow_node_uuid"),
+            ("job_executor_kind", "executor_kind"),
+            ("job_attempt", "attempt"),
+            ("command_type", "command_type"),
+        ):
+            value = row[column]
+            if value is not None:
+                result[output] = value
+
+        kind = row["event_kind"]
+        to_status = row["event_to_status"]
+        if kind == "job_transition" and to_status == "dispatched":
+            result["param"] = _load(row["job_param"], {})
+        if kind == "job_transition" and to_status in {
+            "succeeded",
+            "failed",
+            "skipped",
+            "canceled",
+            "timeout",
+        }:
+            result["return_info"] = _load(row["job_return_info"], {})
+            result["error_info"] = _load(row["job_error_info"], [])
+        if kind == "feedback_committed":
+            feedback_type = row["committed_feedback_type"]
+            if feedback_type is not None:
+                result["feedback_type"] = feedback_type
+                result["feedback"] = _load(row["committed_feedback_data"], {})
+        if row["event_command_uuid"] is not None:
+            result["command_result"] = _load(row["command_result"], {})
         return result
 
     @staticmethod

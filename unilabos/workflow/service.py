@@ -757,6 +757,36 @@ class WorkflowService:
         except StoreNotFound:
             raise WorkflowError("not_found") from None
 
+    def list_workflow_task_runtime_events(
+        self,
+        task_uuid: str,
+        *,
+        after_sequence: int = 0,
+        limit: int = 100,
+    ) -> Dict[str, Any]:
+        try:
+            identity = validate_uuid(task_uuid)
+        except ValueError:
+            raise WorkflowError("invalid_input") from None
+        if (
+            isinstance(after_sequence, bool)
+            or not isinstance(after_sequence, int)
+            or after_sequence < 0
+            or after_sequence > (1 << 63) - 1
+            or isinstance(limit, bool)
+            or not isinstance(limit, int)
+            or not 1 <= limit <= 500
+        ):
+            raise WorkflowError("invalid_input")
+        try:
+            return self._store.list_task_runtime_events(
+                identity,
+                after_sequence=after_sequence,
+                limit=limit,
+            )
+        except StoreNotFound:
+            raise WorkflowError("not_found") from None
+
     def list_workflow_node_job_feedback(
         self,
         job_uuid: str,

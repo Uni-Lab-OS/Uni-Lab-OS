@@ -58,6 +58,7 @@ from unilabos.workflow.json_codec import (
 from unilabos.workflow.material_source import (
     MaterialSourceAuthorityError,
     MaterialSourceStaticAuthority,
+    resolve_resource_ref,
     validate_material_source_authority,
 )
 from unilabos.workflow.models import (
@@ -111,7 +112,7 @@ _OWNED_WORKFLOW_KEYS = {
     "output_contract",
     "output_bindings",
 }
-_OWNED_NODE_KEYS = {"input_bindings", "executor_binding"}
+_OWNED_NODE_KEYS = {"input_bindings", "executor_binding", "resource_refs"}
 _NODE_TEMPLATE_NULLABLE_READ_FIELDS = {
     "description",
     "class",
@@ -375,6 +376,7 @@ class _BuildState:
     applied_nodes: dict[str, dict[str, Any]]
     catalog: _CatalogIndex
     resource_template_identity_index: ResourceTemplateIdentityIndex | None
+    material_source_authority: MaterialSourceStaticAuthority | None
     composite_authoring: CompositeAuthoring | None
     nodes: list[_NodeState] = field(default_factory=list)
     edges: list[dict[str, Any]] = field(default_factory=list)
@@ -806,6 +808,7 @@ def _compile_with_snapshot(
             applied_nodes={item["uuid"]: item for item in applied["nodes"]},
             catalog=_CatalogIndex(snapshot),
             resource_template_identity_index=resource_template_identity_index,
+            material_source_authority=material_source_authority,
             composite_authoring=composite_authoring,
         )
         executable, return_statement = _function_body(function)
@@ -2035,17 +2038,15 @@ def _parse_material_source(
     ):
         _fail(
             "invalid_material_source",
-            "mount 必须是单 UUID literal resource_ref",
+            "mount 必须是单 resource id literal resource_ref",
             node=mount,
         )
-    try:
-        mount_uuid = validate_uuid(mount.args[0].value)
-    except (TypeError, ValueError):
-        _fail(
-            "invalid_material_source",
-            "mount 必须是 canonical non-nil UUID",
-            node=mount,
-        )
+    mount_resource_id = mount.args[0].value
+    mount_slot = resolve_resource_ref(
+        mount_resource_id,
+        state.material_source_authority,
+    )
+    mount_uuid = mount_slot["uuid"]
     material_uuid_expression = keywords["material_uuid"]
     material_uuid: str | None
     if (
@@ -2166,7 +2167,11 @@ def _parse_material_source(
             "slot_range": slot_range,
             "flow_role": _MATERIAL_FLOW_ROLES[role.attr],
         },
-        meta_data=_node_metadata(applied.get("meta_data"), None),
+        meta_data=_node_metadata(
+            applied.get("meta_data"),
+            None,
+            resource_refs={"mount": {"resource_id": mount_resource_id}},
+        ),
         action_name=None,
     )
     node.pop("material_uuid", None)
@@ -2245,6 +2250,7 @@ def _parse_action(
     applied = state.applied_nodes.get(node_uuid, {})
     meta_data = _node_metadata(applied.get("meta_data"), selector)
     input_bindings: dict[str, dict[str, str]] = {}
+    resource_refs: dict[str, dict[str, str]] = {}
     schema = template.get("schema")
     action_contract = (
         schema.get("x-unilabos-action-contract")
@@ -2291,6 +2297,16 @@ def _parse_action(
             )
             param.pop(keyword_node.arg, None)
             continue
+        resource_reference = _action_resource_ref(
+            expression,
+            target=target,
+            state=state,
+        )
+        if resource_reference is not None:
+            resource_slot, resource_id = resource_reference
+            param[keyword_node.arg] = resource_slot
+            resource_refs[target["uuid"]] = {"resource_id": resource_id}
+            continue
         try:
             value = ast.literal_eval(expression)
             validate_json_value(value)
@@ -2302,6 +2318,8 @@ def _parse_action(
             )
         param[keyword_node.arg] = value
     meta_data["unilab"]["input_bindings"] = dict(sorted(input_bindings.items()))
+    if resource_refs:
+        meta_data["unilab"]["resource_refs"] = dict(sorted(resource_refs.items()))
     node_type = str(template.get("node_type") or template.get("type") or "compute")
     node = _node_payload(
         applied,
@@ -2320,6 +2338,61 @@ def _parse_action(
     available_results[result_name] = node_state
     state.results[result_name] = node_state
     return _Flow((node_uuid,), (node_uuid,))
+
+
+def _action_resource_ref(
+    expression: ast.expr,
+    *,
+    target: Mapping[str, Any],
+    state: _BuildState,
+) -> tuple[dict[str, str], str] | None:
+    if not isinstance(expression, ast.Call) or _call_identity(
+        expression, state.imports
+    ) != _RESOURCE_REF:
+        return None
+    if (
+        len(expression.args) != 1
+        or expression.keywords
+        or not isinstance(expression.args[0], ast.Constant)
+        or not isinstance(expression.args[0].value, str)
+    ):
+        _fail(
+            "invalid_action_call",
+            "resource_ref 必须接收单个非空 resource id literal",
+            node=expression,
+        )
+    if str(target.get("type") or "").strip().lower() != "resourceslot":
+        _fail(
+            "invalid_action_call",
+            "resource_ref 只能绑定 ResourceSlot Action 参数",
+            node=expression,
+        )
+    resource_id = expression.args[0].value
+    if not resource_id.strip() or resource_id != resource_id.strip():
+        _fail(
+            "invalid_action_call",
+            "resource_ref 必须接收单个非空 resource id literal",
+            node=expression,
+        )
+    resource_slot = resolve_resource_ref(
+        resource_id,
+        state.material_source_authority,
+    )
+    unilab = target.get("meta_data", {}).get("unilab", {})
+    allowlist = (
+        unilab.get("allowed_resource_template_uuids")
+        if isinstance(unilab, Mapping)
+        else None
+    )
+    if allowlist not in (None, [], ()) and resource_slot[
+        "resource_template_uuid"
+    ] not in allowlist:
+        _fail(
+            "material_source_conflict",
+            "resource_ref 物料模板不被 Action ResourceSlot 接受",
+            node=expression,
+        )
+    return resource_slot, resource_id
 
 
 def _parse_group(
@@ -2519,6 +2592,8 @@ def _source_handle(
 def _node_metadata(
     raw: Any,
     selector: _Selector | None,
+    *,
+    resource_refs: Mapping[str, Mapping[str, str]] | None = None,
 ) -> dict[str, Any]:
     meta_data = _detached(raw) if isinstance(raw, dict) else {}
     unilab = meta_data.get("unilab")
@@ -2529,6 +2604,8 @@ def _node_metadata(
     for key in _OWNED_NODE_KEYS:
         unilab.pop(key, None)
     unilab["input_bindings"] = {}
+    if resource_refs:
+        unilab["resource_refs"] = _detached(resource_refs)
     if selector is not None and selector.device_id is not None:
         unilab["executor_binding"] = {
             "mode": "fixed",
@@ -3718,6 +3795,14 @@ def _render_graph(
         markers.add("parallel")
     if material_source_nodes:
         markers.update({"MaterialFlowRole", "material_source", "resource_ref"})
+    if any(
+        _resource_ref_source(node, handle) is not None
+        for node in nodes
+        for handle in handles_by_node.get(
+            str(node.get("workflow_node_template_uuid")), []
+        )
+    ):
+        markers.add("resource_ref")
 
     emitter = _Emitter()
     if needs["typing"]:
@@ -3788,7 +3873,8 @@ def _render_graph(
         for descriptor in [*input_contract["parameters"], *explicit_outputs]
         for resource_template_uuid in _resource_template_allowlist(descriptor["schema"])
     }
-    for resource_template_uuid in sorted(
+    resource_imports: list[tuple[str, str, str, str]] = []
+    for resource_template_uuid in (
         workflow_contract_resource_template_uuids
         | {
             str(item.get("param", {}).get("resource_template_uuid"))
@@ -3817,6 +3903,12 @@ def _render_graph(
                 "template_catalog_mismatch",
                 "当前 authority 无法反查 ResourceTemplate UUID",
             )
+        resource_imports.append(
+            (identity, resource_template_uuid, module, symbol)
+        )
+    for identity, resource_template_uuid, module, symbol in sorted(
+        resource_imports
+    ):
         imported_name = symbol
         suffix = 2
         while imported_name in reserved_import_names:
@@ -3891,6 +3983,23 @@ def _render_graph(
     body_indent = "    "
     for layer in root_layers:
         if len(layer) > 1:
+            if all(
+                _is_material_source_template(
+                    templates.get(
+                        str(node.get("workflow_node_template_uuid")),
+                        {},
+                    )
+                )
+                for node in layer
+            ):
+                for material_source_node in layer:
+                    _emit_material_source(
+                        emitter,
+                        material_source_node,
+                        indent=body_indent,
+                        resource_import_names=resource_import_names,
+                    )
+                continue
             emitter.emit(f"{body_indent}with parallel():")
             for group_node in layer:
                 _emit_group(
@@ -4081,16 +4190,46 @@ def _root_construct_layers(
     remaining = set(roots)
     layers: list[list[dict[str, Any]]] = []
     while remaining:
+        ready_material_sources = sorted(
+            uuid
+            for uuid in remaining
+            if not (dependencies[uuid] & remaining)
+            and _is_material_source_template(
+                templates.get(
+                    str(roots[uuid].get("workflow_node_template_uuid")),
+                    {},
+                )
+            )
+        )
+        if ready_material_sources:
+            layers.extend([[roots[uuid]] for uuid in ready_material_sources])
+            remaining.difference_update(ready_material_sources)
+            continue
         ready = sorted(
             (uuid for uuid in remaining if not (dependencies[uuid] & remaining)),
         )
         if not ready:
             _fail("candidate_invalid", "Candidate graph 包含循环依赖")
-        if len(ready) > 1 and any(uuid not in group_uuids for uuid in ready):
-            _fail(
-                "round_trip_mismatch",
-                "02D Python 无法表达未分组的并行 action",
+        if len(ready) > 1:
+            ready_are_groups = all(uuid in group_uuids for uuid in ready)
+            ready_are_material_sources = all(
+                _is_material_source_template(
+                    templates.get(
+                        str(
+                            roots[uuid].get(
+                                "workflow_node_template_uuid"
+                            )
+                        ),
+                        {},
+                    )
+                )
+                for uuid in ready
             )
+            if not ready_are_groups and not ready_are_material_sources:
+                _fail(
+                    "round_trip_mismatch",
+                    "02D Python 无法表达未分组的并行 action",
+                )
         layers.append([roots[uuid] for uuid in ready])
         remaining.difference_update(ready)
     return layers
@@ -4459,11 +4598,24 @@ def _emit_material_source(
             material_uuid = validate_uuid(material_uuid)
         except (TypeError, ValueError):
             _fail("invalid_material_source", "MaterialSource material UUID 无效")
+    mount_reference = mount_uuid
+    resource_refs = (node.get("meta_data") or {}).get("unilab", {}).get(
+        "resource_refs", {}
+    )
+    binding = resource_refs.get("mount") if isinstance(resource_refs, Mapping) else None
+    if isinstance(binding, Mapping) and set(binding) == {"resource_id"}:
+        resource_id = binding.get("resource_id")
+        if (
+            isinstance(resource_id, str)
+            and resource_id.strip()
+            and resource_id == resource_id.strip()
+        ):
+            mount_reference = resource_id
     result_name = _safe_identifier(str(node.get("name") or "material"), "material")
     construct = (
         f"{result_name} = material_source("
         f"resource_template={resource_symbol}, mode={mode!r}, "
-        f"mount=resource_ref({mount_uuid!r}), material_uuid={material_uuid!r}, "
+        f"mount=resource_ref({mount_reference!r}), material_uuid={material_uuid!r}, "
         f"site={site!r}, slot_range={slot_range!r}, "
         f"flow_role=MaterialFlowRole.{role_member})"
     )
@@ -4641,7 +4793,12 @@ def _emit_action(
         if name in param:
             if expression is not None:
                 _fail("candidate_invalid", "target Handle 有多个 provider")
-            expression = repr(param[name])
+            resource_reference = _resource_ref_source(node, handle)
+            expression = (
+                resource_reference
+                if resource_reference is not None
+                else repr(param[name])
+            )
         if expression is not None:
             parameters.append(f"{name}={expression}")
     result_name = _safe_identifier(str(node.get("name") or "result"), "result")
@@ -4655,6 +4812,41 @@ def _emit_action(
         f"{result_name} = {call}",
         indent=indent,
     )
+
+
+def _resource_ref_source(
+    node: Mapping[str, Any],
+    handle: Mapping[str, Any],
+) -> str | None:
+    if str(handle.get("type") or "").strip().lower() != "resourceslot":
+        return None
+    name = str(handle.get("data_key") or handle.get("handle_key") or "").strip()
+    param = node.get("param")
+    value = param.get(name) if isinstance(param, Mapping) else None
+    if not isinstance(value, Mapping) or set(value) != {
+        "uuid",
+        "resource_template_uuid",
+    }:
+        return None
+    resource_refs = (node.get("meta_data") or {}).get("unilab", {}).get(
+        "resource_refs", {}
+    )
+    binding = resource_refs.get(str(handle.get("uuid") or "")) if isinstance(
+        resource_refs, Mapping
+    ) else None
+    if not isinstance(binding, Mapping) or set(binding) != {"resource_id"}:
+        return None
+    resource_id = binding.get("resource_id")
+    if not isinstance(resource_id, str) or not resource_id.strip() or (
+        resource_id != resource_id.strip()
+    ):
+        return None
+    try:
+        validate_uuid(value["uuid"])
+        validate_uuid(value["resource_template_uuid"])
+    except (KeyError, TypeError, ValueError):
+        return None
+    return f"resource_ref({resource_id!r})"
 
 
 def _output_expression(

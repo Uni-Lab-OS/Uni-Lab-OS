@@ -18,6 +18,7 @@ from unilabos.app.scheduler.inventory.material_projection import (
 from unilabos.package_manager import WorkspaceSource, compile_package_source
 
 TEMPLATE_UUID = "81000000-0000-4000-8000-000000000601"
+MATERIAL_UUID = "81000000-0000-4000-8000-000000000602"
 
 
 def _write(path: Path, content: str | bytes) -> None:
@@ -117,7 +118,9 @@ def test_graph_projects_package_model_and_serves_its_audited_asset_closure(
     catalog = compile_package_source(source)
     projection = build_package_material_projection((source,), (catalog,))
     definition = projection.definitions["model_robot"]
+    fqid = catalog.definitions.devices[0].fqid
 
+    assert projection.definitions[fqid] == definition
     assert definition.model is not None
     assert definition.model["format"] == "xacro"
     assert definition.model["macro"] == "model_robot"
@@ -130,8 +133,8 @@ def test_graph_projects_package_model_and_serves_its_audited_asset_closure(
             "nodes": [
                 {
                     "id": "robot",
-                    "uuid": "runtime-robot",
-                    "class": "model_robot",
+                    "uuid": MATERIAL_UUID,
+                    "class": fqid,
                     "type": "device",
                     "name": "Robot",
                     "config": {},
@@ -156,6 +159,7 @@ def test_graph_projects_package_model_and_serves_its_audited_asset_closure(
         material_model_assets=projection.model_assets,
     )
     try:
+        assert imported["materials"][0]["uuid"] == MATERIAL_UUID
         inventory.bootstrap_resource_graph(imported)
         with TestClient(create_app(inventory)) as client:
             graph = client.get("/api/v1/materials/graph").json()

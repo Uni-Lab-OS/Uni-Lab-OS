@@ -413,6 +413,11 @@ def _handle(
     elif control != "site_selector":
         control = "variable_selector"
     value_type = workflow_handle_type(value_schema)
+    workflow_value_schema = (
+        _without_presentation_fields(value_schema)
+        if is_slot
+        else _plain_mapping(value_schema)
+    )
     return {
         "handle_key": name,
         "io_type": io_type,
@@ -424,13 +429,27 @@ def _handle(
         "description": str(value_schema.get("description") or ""),
         "meta_data": {
             "unilab": {
-                "value_schema": _plain_mapping(value_schema),
+                "value_schema": workflow_value_schema,
                 "editor_control": control,
                 "allowed_resource_template_uuids": allowed,
                 "implicit_passthrough": implicit,
             }
         },
     }
+
+
+def _without_presentation_fields(value: Any) -> Any:
+    """Keep ResourceSlot handle schemas within the strict Workflow v1 dialect."""
+
+    if isinstance(value, Mapping):
+        return {
+            str(key): _without_presentation_fields(item)
+            for key, item in value.items()
+            if key not in {"title", "description"}
+        }
+    if isinstance(value, list):
+        return [_without_presentation_fields(item) for item in value]
+    return value
 
 
 def _schema_base(schema: Mapping[str, Any]) -> Mapping[str, Any]:

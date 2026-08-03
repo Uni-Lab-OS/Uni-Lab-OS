@@ -39,6 +39,13 @@ class MaterialSourceStaticAuthority(Protocol):
         uow: object | None = None,
     ) -> Sequence[SiteRecord]: ...
 
+    def resolve_material_ref(
+        self,
+        resource_id: str,
+        *,
+        uow: object | None = None,
+    ) -> MaterialRecord: ...
+
 
 class MaterialSourceAuthorityError(RuntimeError):
     """对外稳定的 MaterialSource 静态 authority 诊断。"""
@@ -46,6 +53,46 @@ class MaterialSourceAuthorityError(RuntimeError):
     def __init__(self, code: str, message: str) -> None:
         super().__init__(message)
         self.code = code
+
+
+def resolve_resource_ref(
+    resource_id: str,
+    authority: MaterialSourceStaticAuthority | None,
+    *,
+    uow: object | None = None,
+) -> dict[str, str]:
+    """Resolve a compile-only ``resource_ref`` into a closed ResourceSlot."""
+
+    if authority is None:
+        _unavailable()
+    if not isinstance(resource_id, str) or not resource_id.strip() or (
+        resource_id != resource_id.strip()
+    ):
+        _conflict()
+    if _canonical_uuid(resource_id):
+        material = _get_material(authority, resource_id, uow=uow)
+    else:
+        resolver = getattr(authority, "resolve_material_ref", None)
+        if not callable(resolver):
+            _unavailable()
+        try:
+            material = (
+                resolver(resource_id)
+                if uow is None
+                else resolver(resource_id, uow=uow)
+            )
+        except Exception as exc:  # noqa: BLE001 - authority adapter fails closed
+            _translate_authority_error(exc)
+        if not _is_material_record(material):
+            _conflict()
+    if material.deleted_at is not None or not _canonical_uuid(
+        material.resource_template_uuid
+    ):
+        _not_found()
+    return {
+        "uuid": material.uuid,
+        "resource_template_uuid": material.resource_template_uuid,
+    }
 
 
 def validate_material_source_authority(
@@ -339,5 +386,6 @@ def _unavailable() -> Never:
 __all__ = [
     "MaterialSourceAuthorityError",
     "MaterialSourceStaticAuthority",
+    "resolve_resource_ref",
     "validate_material_source_authority",
 ]

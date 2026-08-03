@@ -49,6 +49,36 @@ _restart_reason: str = ""
 RESTART_EXIT_CODE = 42
 
 
+def _build_workflow_device_identity_map(resource_tree_set: Any) -> dict[str, str]:
+    """Build the frozen workflow-executor identity map for local ROS dispatch."""
+
+    device_ids_by_identity = {"host_node": "host_node"}
+    for node in resource_tree_set.all_nodes:
+        if node.res_content.type != "device":
+            continue
+        device_ids_by_identity[node.res_content.uuid] = node.res_content.id
+        device_ids_by_identity[node.res_content.id] = node.res_content.id
+    return device_ids_by_identity
+
+
+def _workflow_ros_execution_mode(
+    *,
+    workspace_attached: bool,
+    backend: str | None,
+    test_mode: bool,
+    physical_execution_enabled: bool,
+) -> str | None:
+    """Select the explicitly authorized local WorkflowTask ROS executor mode."""
+
+    if not workspace_attached or backend != "ros":
+        return None
+    if test_mode:
+        return "simulated"
+    if physical_execution_enabled:
+        return "physical"
+    return None
+
+
 def _build_child_argv():
     """Build sys.argv for child process, stripping supervisor-only arguments."""
     result = []
@@ -344,6 +374,15 @@ def parse_args():
         action="store_true",
         default=False,
         help="Test mode: all actions simulate execution and return mock results without running real hardware",
+    )
+    parser.add_argument(
+        "--enable_workflow_physical_execution",
+        action="store_true",
+        default=False,
+        help=(
+            "Explicitly allow local WorkflowTask jobs to invoke real ROS device "
+            "actions. Without this opt-in, non-test workflow tasks remain pending."
+        ),
     )
     parser.add_argument(
         "--external_devices_only",
@@ -1304,27 +1343,34 @@ def main():
         # the legacy cloud workflow_start Edge scheduler. Wire its Jobs to the
         # same HostNode/ROS execution backend whenever a Package Workspace owns
         # the local Workflow authority.
-        if (
-            workspace_source is not None
-            and args_dict.get("backend") == "ros"
-            and BasicConfig.test_mode
-        ):
+        workflow_execution_mode = _workflow_ros_execution_mode(
+            workspace_attached=workspace_source is not None,
+            backend=args_dict.get("backend"),
+            test_mode=BasicConfig.test_mode,
+            physical_execution_enabled=bool(
+                args_dict.get("enable_workflow_physical_execution", False)
+            ),
+        )
+        if workflow_execution_mode is not None:
             from unilabos.app.scheduler.backend import JobExecutionBackend
 
-            device_ids_by_identity = {}
-            for node in resource_tree_set.all_nodes:
-                if node.res_content.type != "device":
-                    continue
-                device_ids_by_identity[node.res_content.uuid] = node.res_content.id
-                device_ids_by_identity[node.res_content.id] = node.res_content.id
+            device_ids_by_identity = _build_workflow_device_identity_map(
+                resource_tree_set
+            )
             device_identity_resolver = device_ids_by_identity.get
             workflow_job_dispatcher = JobExecutionBackend()
             workflow_job_dispatcher.start()
             args_dict["bridges"].append(workflow_job_dispatcher)
-            print_status(
-                "WorkflowTask ROS 执行后端已启用（仅 test_mode）",
-                "info",
-            )
+            if workflow_execution_mode == "physical":
+                print_status(
+                    "WorkflowTask ROS 物理执行后端已显式启用：动作将调用真实设备",
+                    "warning",
+                )
+            else:
+                print_status(
+                    "WorkflowTask ROS 执行后端已启用（test_mode 模拟动作）",
+                    "info",
+                )
         elif workspace_source is not None and args_dict.get("backend") == "ros":
             print_status(
                 "WorkflowTask ROS 物理执行未启用：durable Execution Claims 尚未接入",
