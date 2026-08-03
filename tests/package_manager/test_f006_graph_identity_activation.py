@@ -15,6 +15,11 @@ from unilabos.app.scheduler.inventory.material_projection import (
     build_resource_graph_import,
 )
 from unilabos.package_manager import WorkspaceSource, compile_package_source
+from unilabos.package_manager.consumers import DefinitionIdentityAmbiguous
+from unilabos.registry.registry import lab_registry
+from unilabos.resources.graphio import initialize_resource
+from unilabos.resources.resource_tracker import ResourceDictInstance
+from unilabos.ros.utils.driver_creator import DeviceClassCreator
 
 TEMPLATE_UUID_A = "83000000-0000-4000-8000-000000000001"
 TEMPLATE_UUID_B = "83000000-0000-4000-8000-000000000002"
@@ -197,10 +202,10 @@ class Controller:
 
 
 @resource(id="process_warehouse", category=["warehouse"])
-def make_process_warehouse(name: str):
+def make_process_warehouse(name: str, site_count: int = 2):
     sites = create_homogeneous_resources(
         klass=ResourceHolder,
-        locations=[Coordinate(1, 2, 3), Coordinate(4, 5, 6)],
+        locations=[Coordinate(1, 2, 3), Coordinate(4, 5, 6)][:site_count],
         resource_size_x=10,
         resource_size_y=11,
         resource_size_z=12,
@@ -232,6 +237,7 @@ from unilabos.resources.resource_tracker import ResourceTreeSet
 from unilabos.ros.initialize_device import initialize_device_from_dict
 
 workspace = sys.argv[1]
+resource_identity = sys.argv[2]
 sys.path.insert(0, workspace)
 catalog = compile_package_source(WorkspaceSource(workspace))
 lab_registry.device_type_registry = {}
@@ -253,9 +259,9 @@ graph = ResourceTreeSet.from_raw_dict_list(
             "uuid": "runtime-process-warehouse-a",
             "parent_uuid": "runtime-controller-a",
             "name": "process-warehouse-a",
-            "class": "community.graph_activation_lab.process_warehouse",
+            "class": resource_identity,
             "type": "warehouse",
-            "config": {},
+            "config": {"site_count": 1},
             "data": {},
         },
     ]
@@ -275,10 +281,19 @@ print(json.dumps(payload))
 """
 
 
+@pytest.mark.parametrize(
+    "resource_identity",
+    (
+        "community.graph_activation_lab.process_warehouse",
+        "process_warehouse",
+    ),
+    ids=("canonical-fqid", "unique-legacy-short-alias"),
+)
 def test_graph_only_device_activation_uses_package_resource_factory(
     tmp_path: Path,
+    resource_identity: str,
 ) -> None:
-    """设备 child 按 FQID 激活真实 factory 产物及其 sites。"""
+    """设备 child 按 canonical/唯一短名激活 factory、config 与 sites。"""
 
     workspace = tmp_path / "activation-package"
     _write_activation_workspace(workspace)
@@ -288,7 +303,13 @@ def test_graph_only_device_activation_uses_package_resource_factory(
         item for item in (str(REPOSITORY_ROOT), pythonpath) if item
     )
     result = subprocess.run(
-        [sys.executable, "-c", _ACTIVATION_SCRIPT, str(workspace)],
+        [
+            sys.executable,
+            "-c",
+            _ACTIVATION_SCRIPT,
+            str(workspace),
+            resource_identity,
+        ],
         cwd=REPOSITORY_ROOT,
         env=env,
         capture_output=True,
@@ -304,6 +325,50 @@ def test_graph_only_device_activation_uses_package_resource_factory(
             "name": "process-warehouse-a",
             "category": "warehouse",
             "model": "fixture-process-warehouse",
-            "sites": ["process-warehouse-a-0", "process-warehouse-a-1"],
+            "sites": ["process-warehouse-a-0"],
         }
     ]
+
+
+def test_ambiguous_package_resource_short_id_fails_closed(monkeypatch) -> None:
+    """Runtime activation 不得把歧义 package short id 回退为 generic resource。"""
+
+    monkeypatch.setattr(
+        lab_registry,
+        "resource_type_registry",
+        {
+            "community.package_a.shared": {
+                "source_fqid": "community.package_a.shared",
+                "class": {"module": "package_a.resources:make_shared"},
+            },
+            "community.package_b.shared": {
+                "source_fqid": "community.package_b.shared",
+                "class": {"module": "package_b.resources:make_shared"},
+            },
+        },
+    )
+    child = ResourceDictInstance.get_resource_instance_from_dict(
+        {
+            "id": "runtime-child",
+            "uuid": "runtime-child-uuid",
+            "name": "runtime-child",
+            "class": "shared",
+            "type": "container",
+            "config": {},
+            "data": {},
+            "extra": {},
+        }
+    )
+    creator = DeviceClassCreator(object, [child], object())
+    creator.device_instance = object()
+
+    with pytest.raises(DefinitionIdentityAmbiguous, match="shared"):
+        initialize_resource(
+            {
+                "name": "runtime-child",
+                "class": "shared",
+                "config": {},
+            }
+        )
+    with pytest.raises(DefinitionIdentityAmbiguous, match="shared"):
+        creator.attach_resource()

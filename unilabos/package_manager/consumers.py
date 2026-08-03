@@ -4,10 +4,40 @@ from __future__ import annotations
 
 import keyword
 from collections.abc import Mapping
-from typing import Any
+from typing import Any, TypeVar
 
 from unilabos.package_manager import DefinitionRecord, PackageCatalog
 from unilabos.workflow.composite import PublishedWorkflowSource
+
+DefinitionT = TypeVar("DefinitionT")
+
+
+class DefinitionIdentityNotFound(KeyError):
+    """Definition identity 不存在。"""
+
+
+class DefinitionIdentityAmbiguous(KeyError):
+    """Definition legacy short id 匹配多个 canonical identity。"""
+
+
+def resolve_definition_identity(
+    definitions: Mapping[str, DefinitionT],
+    identity: str,
+) -> tuple[str, DefinitionT]:
+    """优先解析 canonical identity，仅窄兼容唯一 legacy short id。"""
+
+    if identity in definitions:
+        return identity, definitions[identity]
+    matches = {
+        canonical_identity: definition
+        for canonical_identity, definition in definitions.items()
+        if canonical_identity.rsplit(".", 1)[-1] == identity
+    }
+    if not matches:
+        raise DefinitionIdentityNotFound(identity)
+    if len(matches) > 1:
+        raise DefinitionIdentityAmbiguous(identity)
+    return next(iter(matches.items()))
 
 
 def _is_python_identifier(value: object) -> bool:
@@ -94,18 +124,15 @@ def resolve_registry_definition(
 
     if identity in registry_entries:
         return identity, registry_entries[identity]
-    matches: dict[str, Any] = {}
+    package_entries: dict[str, Any] = {}
     for entry in registry_entries.values():
         if not isinstance(entry, Mapping):
             continue
         source_fqid = entry.get("source_fqid")
         if not isinstance(source_fqid, str) or not source_fqid:
             continue
-        if source_fqid.rsplit(".", 1)[-1] == identity:
-            matches[source_fqid] = entry
-    if len(matches) != 1:
-        raise KeyError(identity)
-    return next(iter(matches.items()))
+        package_entries[source_fqid] = entry
+    return resolve_definition_identity(package_entries, identity)
 
 
 def register_package_catalog(registry: Any, catalog: PackageCatalog) -> None:

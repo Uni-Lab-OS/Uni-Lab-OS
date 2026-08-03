@@ -16,6 +16,11 @@ import yaml
 
 from unilabos.app.scheduler.inventory.domain import MaterialModelAsset
 from unilabos.package_manager import PackageAssetResolver, PackageCatalog
+from unilabos.package_manager.consumers import (
+    DefinitionIdentityAmbiguous,
+    DefinitionIdentityNotFound,
+    resolve_definition_identity,
+)
 from unilabos.package_manager.sources import PackageSource
 
 _INTERNAL_SITE_TYPES = frozenset({"tipspot", "tip_spot", "well"})
@@ -65,6 +70,7 @@ class MaterialDefinitionProjection:
     categories: tuple[str, ...]
     envelope_mm: tuple[float, float, float] | None
     model: Mapping[str, Any] | None
+    canonical_identity: str | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -150,6 +156,7 @@ def build_package_material_projection(
                     record.details.get("model"),
                     bundle=catalog.namespace,
                 ),
+                canonical_identity=record.fqid,
             )
             definitions[record.fqid] = definition
             local_definitions.setdefault(record.id, []).append(definition)
@@ -729,19 +736,24 @@ def _resolve_graph_definition(
 ) -> MaterialDefinitionProjection:
     """按 canonical FQID 解析 Graph definition，并窄兼容唯一 local id。"""
 
-    canonical = package_projection.definitions.get(graph_class)
-    if canonical is not None:
-        return canonical
-    legacy_matches = [
-        definition
-        for definition in package_projection.definitions.values()
-        if definition.graph_class == graph_class
-    ]
-    if len(legacy_matches) == 1:
-        return next(iter(legacy_matches))
-    if len(legacy_matches) > 1:
+    try:
+        exact = package_projection.definitions.get(graph_class)
+        if exact is not None:
+            return exact
+        canonical_definitions = {
+            definition.canonical_identity or identity: definition
+            for identity, definition in package_projection.definitions.items()
+            if definition.canonical_identity is not None
+        }
+        _canonical_identity, definition = resolve_definition_identity(
+            canonical_definitions,
+            graph_class,
+        )
+    except DefinitionIdentityAmbiguous:
         raise ValueError(f"{field} legacy short id 歧义: {graph_class}")
-    raise ValueError(f"{field} 未进入 PackageCatalog: {graph_class}")
+    except DefinitionIdentityNotFound:
+        raise ValueError(f"{field} 未进入 PackageCatalog: {graph_class}")
+    return definition
 
 
 def _declared_site_kind(

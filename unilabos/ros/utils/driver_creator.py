@@ -11,7 +11,10 @@ import traceback
 from abc import abstractmethod
 from typing import Any, Dict, Generic, List, Optional, Type, TypeVar
 
-from unilabos.package_manager.consumers import resolve_registry_definition
+from unilabos.package_manager.consumers import (
+    DefinitionIdentityNotFound,
+    resolve_registry_definition,
+)
 from unilabos.registry.registry import lab_registry
 from unilabos.resources.resource_tracker import (
     DeviceNodeResourceTracker,
@@ -62,7 +65,7 @@ class DeviceClassCreator(Generic[T]):
                     res = self._create_child_resource(c)
                     self.resource_tracker.add_resource(res)
 
-    def _create_child_resource(self, child: ResourceDictInstance):
+    def _create_child_resource(self, child: ResourceDictInstance) -> Any:
         """优先按 Package Registry definition 激活 child 的真实 resource factory。"""
 
         identity = child.res_content.klass
@@ -72,7 +75,7 @@ class DeviceClassCreator(Generic[T]):
                     lab_registry.resource_type_registry,
                     identity,
                 )
-            except KeyError:
+            except DefinitionIdentityNotFound:
                 entry = None
             if isinstance(entry, dict) and entry.get("source_fqid"):
                 child.res_content.klass = canonical_identity
@@ -81,7 +84,7 @@ class DeviceClassCreator(Generic[T]):
 
     def _create_package_resource(
         self, child: ResourceDictInstance, entry: Dict[str, Any]
-    ):
+    ) -> Any:
         class_config = entry.get("class")
         module = class_config.get("module") if isinstance(class_config, dict) else None
         if not isinstance(module, str) or not module:
