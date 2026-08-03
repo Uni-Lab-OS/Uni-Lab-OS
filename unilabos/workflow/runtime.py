@@ -1161,9 +1161,8 @@ class WorkflowRuntimeWorker:
         self._wake_event = threading.Event()
         self._thread: Optional[threading.Thread] = None
         self._lock = threading.Lock()
-        # Dispatcher completion callbacks run outside the worker sweep thread.
-        # Serialize their durable terminal write with cancel acknowledgement
-        # handling so neither path can act on a stale job snapshot.
+        # Dispatcher 终态回调不在 Worker 扫描线程执行。终态持久化必须与取消确认
+        # 串行，避免任一路径依据过期的 Job 快照推进状态。
         self._job_settlement_lock = threading.RLock()
         self._listener_registered = False
         self._uses_completion_listener = False

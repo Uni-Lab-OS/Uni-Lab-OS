@@ -1652,7 +1652,7 @@ def test_generic_cancel_terminal_commits_before_backend_releases_lock(
 def test_generic_cancel_sweep_cannot_overtake_inflight_terminal_commit(
     tmp_path: Path,
 ) -> None:
-    """A completion snapshot and its terminal write form one settlement unit."""
+    """终态快照读取和终态写入必须构成一个完整结算单元。"""
 
     completion_read = threading.Event()
     release_completion = threading.Event()
