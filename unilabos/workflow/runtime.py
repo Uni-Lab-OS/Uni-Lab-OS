@@ -1161,6 +1161,10 @@ class WorkflowRuntimeWorker:
         self._wake_event = threading.Event()
         self._thread: Optional[threading.Thread] = None
         self._lock = threading.Lock()
+        # Dispatcher completion callbacks run outside the worker sweep thread.
+        # Serialize their durable terminal write with cancel acknowledgement
+        # handling so neither path can act on a stale job snapshot.
+        self._job_settlement_lock = threading.RLock()
         self._listener_registered = False
         self._uses_completion_listener = False
         self._cancel_requests_inflight: set[str] = set()
@@ -1297,29 +1301,31 @@ class WorkflowRuntimeWorker:
                     or job_uuid in self._cancel_requests_inflight
                 ):
                     continue
-                if dispatcher.request_cancel(job_uuid):
-                    self._cancel_requests_inflight.add(job_uuid)
-                    _LOGGER.info(
-                        "Workflow Job cancel requested task_uuid=%s job_uuid=%s",
+                cancel_accepted = dispatcher.request_cancel(job_uuid)
+                with self._job_settlement_lock:
+                    current = self._coordinator._execution_job(job_uuid)
+                    if current["status"] in _JOB_TERMINAL:
+                        self._cancel_requests_inflight.discard(job_uuid)
+                        continue
+                    if current["status"] != "cancel_requested":
+                        continue
+                    if cancel_accepted:
+                        self._cancel_requests_inflight.add(job_uuid)
+                        _LOGGER.info(
+                            "Workflow Job cancel requested task_uuid=%s job_uuid=%s",
+                            task["uuid"],
+                            job_uuid,
+                        )
+                        continue
+                    self._coordinator.mark_job_unknown(
+                        job_uuid,
+                        "workflow_job_cancel_unconfirmed",
+                    )
+                    _LOGGER.error(
+                        "Workflow Job cancel outcome unknown task_uuid=%s job_uuid=%s",
                         task["uuid"],
                         job_uuid,
                     )
-                    continue
-                current = self._coordinator._execution_job(job_uuid)
-                if current["status"] in _JOB_TERMINAL:
-                    self._cancel_requests_inflight.discard(job_uuid)
-                    continue
-                if current["status"] != "cancel_requested":
-                    continue
-                self._coordinator.mark_job_unknown(
-                    job_uuid,
-                    "workflow_job_cancel_unconfirmed",
-                )
-                _LOGGER.error(
-                    "Workflow Job cancel outcome unknown task_uuid=%s job_uuid=%s",
-                    task["uuid"],
-                    job_uuid,
-                )
             self._coordinator.reconcile_task_cancellation(task["uuid"])
 
     def _advance_task(self, task: Dict[str, Any]) -> None:
@@ -1551,6 +1557,21 @@ class WorkflowRuntimeWorker:
             _LOGGER.exception("Workflow Job completion could not be committed")
 
     def _settle_job_finished(
+        self,
+        job_uuid: str,
+        success: bool,
+        return_value: Any,
+        success_type: str,
+    ) -> bool:
+        with self._job_settlement_lock:
+            return self._settle_job_finished_locked(
+                job_uuid,
+                success,
+                return_value,
+                success_type,
+            )
+
+    def _settle_job_finished_locked(
         self,
         job_uuid: str,
         success: bool,

@@ -1107,6 +1107,13 @@ def _published_workflow_contract_digest_matches(
     inputs: list[dict[str, Any]] = []
     for name in input_order:
         input_schema = _plain(goal_schema["properties"][name])
+        schema_has_default = "default" in input_schema
+        contract_has_default = name in goal_default
+        if schema_has_default != contract_has_default or (
+            schema_has_default
+            and _plain(input_schema["default"]) != _plain(goal_default[name])
+        ):
+            return False
         input_schema.pop("default", None)
         descriptor: dict[str, Any] = {
             "name": name,

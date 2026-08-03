@@ -1649,6 +1649,91 @@ def test_generic_cancel_terminal_commits_before_backend_releases_lock(
         service.close()
 
 
+def test_generic_cancel_sweep_cannot_overtake_inflight_terminal_commit(
+    tmp_path: Path,
+) -> None:
+    """A completion snapshot and its terminal write form one settlement unit."""
+
+    completion_read = threading.Event()
+    release_completion = threading.Event()
+
+    class CompletionReadBarrierCoordinator(WorkflowRuntimeCoordinator):
+        def _execution_job(self, job_uuid: str) -> dict[str, Any]:
+            job = super()._execution_job(job_uuid)
+            if (
+                threading.current_thread().name == "f007-completion"
+                and not completion_read.is_set()
+            ):
+                completion_read.set()
+                assert release_completion.wait(timeout=2)
+            return job
+
+    class RejectingCancelDispatcher(GenericRecordingDispatcher):
+        def __init__(self) -> None:
+            super().__init__()
+            self.cancel_checked = threading.Event()
+
+        def request_cancel(self, _job_uuid: str) -> bool:
+            self.cancel_checked.set()
+            return False
+
+    store = WorkflowStore(tmp_path / "workflow.db")
+    service = WorkflowService(store)
+    coordinator = CompletionReadBarrierCoordinator(store)
+    task, job = _create_generic_device_workflow_task(
+        service,
+        device_material_uuid=str(uuid4()),
+    )
+    coordinator.start_task(task["uuid"])
+    coordinator.transition_job(job["uuid"], "dispatched")
+    coordinator.transition_job(job["uuid"], "running")
+    service.create_workflow_task_command(
+        task["uuid"],
+        command_type="cancel",
+        target_node_uuid=None,
+        idempotency_key="f007-overlapping-terminal-settlement",
+        description="cancel overlaps physical terminal callback",
+        meta_data={"source": "frontend"},
+    )
+    coordinator.consume_next_command(task["uuid"])
+    dispatcher = RejectingCancelDispatcher()
+    worker = WorkflowRuntimeWorker(
+        coordinator,
+        dispatcher=dispatcher,
+        device_identity_resolver=lambda _identity: "robot",
+    )
+    completion = threading.Thread(
+        target=worker._on_job_finished,
+        args=(job["uuid"], False, {}, "normal"),
+        name="f007-completion",
+    )
+    sweep = threading.Thread(
+        target=worker._sweep_execution_cancellations,
+        name="f007-cancel-sweep",
+    )
+    try:
+        completion.start()
+        assert completion_read.wait(timeout=2)
+        sweep.start()
+        assert dispatcher.cancel_checked.wait(timeout=2)
+        release_completion.set()
+        completion.join(timeout=2)
+        sweep.join(timeout=2)
+
+        assert not completion.is_alive()
+        assert not sweep.is_alive()
+        assert service.get_workflow_node_job(job["uuid"])["status"] == "canceled"
+        settled = service.get_workflow_task(task["uuid"])
+        assert settled["status"] == "canceled"
+        assert settled["cleanup_status"] == "settled"
+    finally:
+        release_completion.set()
+        completion.join(timeout=1)
+        sweep.join(timeout=1)
+        worker.stop()
+        service.close()
+
+
 def test_generic_cancel_transport_unknown_keeps_device_fenced(
     tmp_path: Path,
 ) -> None:
