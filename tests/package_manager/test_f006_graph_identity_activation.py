@@ -240,7 +240,7 @@ register_package_catalog(lab_registry, catalog)
 graph = ResourceTreeSet.from_raw_dict_list(
     [
         {
-            "id": "controller-a",
+            "id": "controller_a",
             "uuid": "runtime-controller-a",
             "name": "Controller A",
             "class": "community.graph_activation_lab.controller",
@@ -264,7 +264,7 @@ graph = ResourceTreeSet.from_raw_dict_list(
 node = None
 rclpy.init()
 try:
-    node = initialize_device_from_dict("controller-a", graph.root_nodes[0])
+    node = initialize_device_from_dict("controller_a", graph.root_nodes[0])
     payload = node.driver_instance.attached_resource_summary()
 finally:
     if node is not None:
