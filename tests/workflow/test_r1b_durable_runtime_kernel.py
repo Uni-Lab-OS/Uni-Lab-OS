@@ -32,7 +32,8 @@ from unilabos.workflow.service import WorkflowService
 from unilabos.workflow.store import StoreConflict, WorkflowStore
 
 _TASK_ALLOWED = {
-    "pending": {"running", "canceled"},
+    "pending": {"admission_blocked", "running", "failed", "canceled"},
+    "admission_blocked": {"pending", "failed", "canceled"},
     "running": {"succeeded", "failed", "canceling", "timeout"},
     "canceling": {"canceled", "failed", "timeout"},
     "succeeded": set(),
@@ -243,6 +244,8 @@ def _task_in_status(
     task, _ = _create_task(service)
     if status == "pending":
         return task
+    if status == "admission_blocked":
+        return coordinator.transition_task(task["uuid"], "admission_blocked")
     if status == "running":
         return coordinator.start_task(task["uuid"])
     if status == "canceling":
@@ -424,6 +427,60 @@ def test_commands_are_consumed_fifo_once_and_replay_is_zero_write(
     assert coordinator.consume_next_command(task["uuid"]) is None
     assert _table_count(store, "frontend_event") == event_count
     assert _table_count(store, "workflow_runtime_journal") == journal_count
+
+
+@pytest.mark.parametrize("command_type", ["pause", "resume", "step"])
+def test_admission_blocked_rejects_non_cancel_controls_without_changing_task(
+    service: WorkflowService,
+    store: WorkflowStore,
+    command_type: str,
+) -> None:
+    coordinator = _coordinator(store)
+    run_mode = "step" if command_type == "step" else "normal"
+    task, jobs = _create_task(service, node_count=1, run_mode=run_mode)
+    coordinator.transition_task(task["uuid"], "admission_blocked")
+    blocked_before = service.get_workflow_task(task["uuid"])
+    command = _create_command(
+        service,
+        task["uuid"],
+        command_type,
+        f"blocked-{command_type}",
+        target_node_uuid=(
+            jobs[0]["workflow_node_uuid"] if command_type == "step" else None
+        ),
+    )
+
+    consumed = coordinator.consume_next_command(task["uuid"])
+
+    assert consumed["uuid"] == command["uuid"]
+    assert consumed["status"] == "rejected"
+    assert consumed["result"] == {
+        "outcome": "rejected",
+        "error_code": "invalid_transition",
+    }
+    assert service.get_workflow_task(task["uuid"]) == blocked_before
+    assert service.get_workflow_node_job(jobs[0]["uuid"])["status"] == "pending"
+
+
+def test_admission_blocked_cancel_reuses_pending_terminal_cleanup(
+    service: WorkflowService,
+    store: WorkflowStore,
+) -> None:
+    coordinator = _coordinator(store)
+    task, jobs = _create_task(service, node_count=2)
+    coordinator.transition_task(task["uuid"], "admission_blocked")
+    _create_command(service, task["uuid"], "cancel", "blocked-cancel")
+
+    consumed = coordinator.consume_next_command(task["uuid"])
+
+    assert consumed["status"] == "succeeded"
+    canceled = service.get_workflow_task(task["uuid"])
+    assert canceled["status"] == "canceled"
+    assert canceled["control_status"] == "paused"
+    assert canceled["cleanup_status"] == "settled"
+    assert {service.get_workflow_node_job(job["uuid"])["status"] for job in jobs} == {
+        "canceled"
+    }
 
 
 def test_terminal_race_rejects_pending_command_durably(
@@ -749,6 +806,66 @@ def test_feedback_http_empty_trimmed_query_uses_defaults_and_accepts_boundaries(
         }
     )
     assert boundary.json()["data"]["next_cursor"] == (1 << 63) - 1
+
+
+def test_task_runtime_events_http_exposes_durable_dispatch_and_result(
+    client: TestClient,
+    service: WorkflowService,
+    store: WorkflowStore,
+) -> None:
+    coordinator = _coordinator(store)
+    task, jobs = _create_task(service, node_count=1)
+    job = jobs[0]
+    coordinator.start_task(task["uuid"])
+    coordinator.transition_job(job["uuid"], "dispatched")
+    coordinator.transition_job(job["uuid"], "running")
+    coordinator.transition_job(
+        job["uuid"],
+        "succeeded",
+        return_info={"completed": True, "message": "action finished"},
+    )
+    coordinator.transition_task(task["uuid"], "succeeded")
+
+    response = client.get(f"/api/v1/workflow-tasks/{task['uuid']}/events")
+
+    assert response.status_code == 200
+    page = response.json()["data"]
+    assert page["has_more"] is False
+    assert page["next_cursor"] == page["items"][-1]["sequence"]
+    assert [
+        (item["kind"], item.get("from_status"), item.get("to_status"))
+        for item in page["items"]
+    ] == [
+        ("task_transition", "pending", "running"),
+        ("job_transition", "pending", "dispatched"),
+        ("job_transition", "dispatched", "running"),
+        ("job_transition", "running", "succeeded"),
+        ("task_transition", "running", "succeeded"),
+    ]
+    dispatched = page["items"][1]
+    assert dispatched["workflow_node_job_uuid"] == job["uuid"]
+    assert dispatched["workflow_node_uuid"] == job["workflow_node_uuid"]
+    assert dispatched["executor_kind"] == job["executor_kind"]
+    assert dispatched["attempt"] == 1
+    assert dispatched["param"] == {}
+    result = page["items"][3]
+    assert result["return_info"] == {
+        "completed": True,
+        "message": "action finished",
+    }
+    assert result["error_info"] == []
+
+    cursor = page["items"][0]["sequence"]
+    paged = client.get(
+        f"/api/v1/workflow-tasks/{task['uuid']}/events",
+        params={"after_sequence": cursor, "limit": 2},
+    ).json()["data"]
+    assert [item["to_status"] for item in paged["items"]] == [
+        "dispatched",
+        "running",
+    ]
+    assert paged["has_more"] is True
+    assert paged["next_cursor"] == paged["items"][-1]["sequence"]
 
 
 def test_unknown_open_and_last_resolution_restore_saved_control_state(

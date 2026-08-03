@@ -1,4 +1,5 @@
 import collections
+import copy
 import json
 import threading
 import time
@@ -39,6 +40,7 @@ from unilabos.registry.decorators import (
     ActionOutputHandle,
     DataSource,
     NodeType,
+    action,
     device,
     legacy_action,
 )
@@ -74,7 +76,12 @@ from unilabos.ros.msgs.message_converter import (
     convert_to_ros_msg,
     msg_converter_manager,
 )
-from unilabos.ros.nodes.base_device_node import BaseROS2DeviceNode, ROS2DeviceNode, DeviceNodeResourceTracker
+from unilabos.ros.nodes.base_device_node import (
+    BaseROS2DeviceNode,
+    ROS2DeviceNode,
+    DeviceNodeResourceTracker,
+    registered_devices,
+)
 from unilabos.ros.nodes.presets.controller_node import ControllerNode
 from unilabos.utils import logger
 from unilabos.utils.exception import DeviceClassInvalid
@@ -113,17 +120,18 @@ class DeductResourceReturn(CreateResourceReturn):
     mount_resource: List[List[ResourceDictType]]
 
 
-class TransferResourceReturn(TypedDict):
+@dataclass(frozen=True, slots=True, kw_only=True)
+class TransferResourceReturn:
     """transfer_resource 返回值：透传被转移物料、目标孔位与槽位，便于下游引用。
 
     resource / mount_resource 均为「单个物料」的扁平节点形态（list[list[ResourceDict]]，单根，
     经 @flatten 后即一棵树的扁平节点 list），与 apply_deduct 输出一致、可直接连到下游单物料输入。
     """
 
-    resource: List[List[ResourceDictType]]
-    mount_resource: List[List[ResourceDictType]]
+    resource: ResourceSlot
+    mount_resource: ResourceSlot
     site: str
-    result: Any
+    result: str
 
 
 class TransferManualReturn(TypedDict):
@@ -1229,14 +1237,108 @@ class HostNode(BaseROS2DeviceNode):
         self, device_id: str, action_name: str, action_kwargs: Dict[str, Any]
     ) -> Dict[str, Any]:
         """
-        根据注册表 handles 的 output 定义构建测试模式的模拟返回值
+        根据注册表 action schema 或 legacy handles 构建测试模式的模拟返回值。
 
-        根据 data_key 中 @flatten 的层数决定嵌套数组层数，叶子值为空字典。
+        Typed action 的同名输出会深拷贝输入值（例如 ResourceSlot），其余输出按
+        JSON Schema 生成稳定的成功值。Legacy handle 则继续根据 data_key 中
+        @flatten 的层数决定嵌套数组层数，叶子值为空字典。
         例如: "vessel" → {}, "plate.@flatten" → [{}], "a.@flatten.@flatten" → [[{}]]
         """
         mock_return: Dict[str, Any] = {"test_mode": True, "action_name": action_name}
         action_mappings = self._action_value_mappings.get(device_id, {})
         action_mapping = action_mappings.get(action_name, {})
+        mapping_source = "host"
+        device_info = registered_devices.get(device_id, {})
+        base_node = (
+            device_info.get("base_node_instance")
+            if isinstance(device_info, dict)
+            else None
+        )
+        local_mappings = getattr(base_node, "_action_value_mappings", {})
+        if isinstance(local_mappings, dict):
+            local_action_mapping = local_mappings.get(action_name, {})
+            if local_action_mapping:
+                # 本地设备节点持有完整 canonical action contract；Host 的副本
+                # 可能来自较早的 ROS discovery，只含 transport type。
+                action_mapping = local_action_mapping
+                mapping_source = "registered_device"
+        if mapping_source == "host":
+            device_class = None
+            devices_config = getattr(self, "devices_config", None)
+            for tree in getattr(devices_config, "trees", []):
+                resource = getattr(
+                    getattr(tree, "root_node", None),
+                    "res_content",
+                    None,
+                )
+                if getattr(resource, "id", None) == device_id:
+                    device_class = getattr(resource, "klass", None)
+                    break
+            device_type_registry = getattr(
+                lab_registry,
+                "device_type_registry",
+                {},
+            )
+            type_entry = (
+                device_type_registry.get(device_class, {})
+                if isinstance(device_type_registry, dict)
+                else {}
+            )
+            registry_mappings = (
+                type_entry.get("class", {}).get("action_value_mappings", {})
+                if isinstance(type_entry, dict)
+                else {}
+            )
+            if isinstance(registry_mappings, dict):
+                registry_action_mapping = registry_mappings.get(action_name, {})
+                if registry_action_mapping:
+                    action_mapping = registry_action_mapping
+                    mapping_source = "device_type_registry"
+        action_schema = action_mapping.get("schema", {})
+        if isinstance(action_schema, dict):
+            schema_properties = action_schema.get("properties", {})
+            result_schema = (
+                schema_properties.get("result", {})
+                if isinstance(schema_properties, dict)
+                else {}
+            )
+            result_properties = (
+                result_schema.get("properties", {})
+                if isinstance(result_schema, dict)
+                else {}
+            )
+            if isinstance(result_properties, dict) and result_properties:
+                contract = action_schema.get("x-unilabos-action-contract", {})
+                output_order = (
+                    contract.get("output_order", [])
+                    if isinstance(contract, dict)
+                    else []
+                )
+                ordered_names = [
+                    name
+                    for name in output_order
+                    if isinstance(name, str) and name in result_properties
+                ]
+                ordered_names.extend(
+                    name for name in result_properties if name not in ordered_names
+                )
+                for output_name in ordered_names:
+                    if output_name in action_kwargs:
+                        mock_return[output_name] = copy.deepcopy(
+                            action_kwargs[output_name]
+                        )
+                    else:
+                        mock_return[output_name] = HostNode._test_mode_schema_value(
+                            result_properties[output_name]
+                        )
+                lab_logger = getattr(self, "lab_logger", None)
+                if callable(lab_logger):
+                    lab_logger().info(
+                        f"[TEST MODE] Contract for {device_id}/{action_name}: "
+                        f"source={mapping_source}, outputs={ordered_names}"
+                    )
+                return mock_return
+
         handles = action_mapping.get("handles", {})
         if isinstance(handles, dict):
             for output_handle in handles.get("output", []):
@@ -1248,7 +1350,65 @@ class HostNode(BaseROS2DeviceNode):
                 for _ in range(flatten_count):
                     value = [value]
                 mock_return[handler_key] = value
+        lab_logger = getattr(self, "lab_logger", None)
+        if callable(lab_logger):
+            lab_logger().info(
+                f"[TEST MODE] Contract for {device_id}/{action_name}: "
+                f"source={mapping_source}, outputs={list(mock_return)[2:]}"
+            )
         return mock_return
+
+    @staticmethod
+    def _test_mode_schema_value(schema: Any) -> Any:
+        """为 typed action 的测试模式输出生成保守、可序列化的默认值。"""
+
+        if not isinstance(schema, dict):
+            return None
+        if "const" in schema:
+            return copy.deepcopy(schema["const"])
+        if "default" in schema:
+            return copy.deepcopy(schema["default"])
+        enum_values = schema.get("enum")
+        if isinstance(enum_values, list) and enum_values:
+            for preferred in ("SUCCEEDED", "SUCCESS", "COMPLETED", "DONE"):
+                if preferred in enum_values:
+                    return preferred
+            return copy.deepcopy(enum_values[0])
+        for alternatives_key in ("oneOf", "anyOf"):
+            alternatives = schema.get(alternatives_key)
+            if isinstance(alternatives, list):
+                non_null = [
+                    option
+                    for option in alternatives
+                    if not (isinstance(option, dict) and option.get("type") == "null")
+                ]
+                if non_null:
+                    return HostNode._test_mode_schema_value(non_null[0])
+                return None
+
+        schema_type = schema.get("type")
+        if isinstance(schema_type, list):
+            non_null_types = [value for value in schema_type if value != "null"]
+            schema_type = non_null_types[0] if non_null_types else "null"
+        if schema_type == "boolean":
+            return True
+        if schema_type == "string":
+            return ""
+        if schema_type == "integer":
+            return 0
+        if schema_type == "number":
+            return 0.0
+        if schema_type == "array":
+            return []
+        if schema_type == "object":
+            properties = schema.get("properties", {})
+            if isinstance(properties, dict) and properties:
+                return {
+                    key: HostNode._test_mode_schema_value(value)
+                    for key, value in properties.items()
+                }
+            return {}
+        return None
 
     def _handle_test_mode_result(
         self, item: "QueueItem", action_id: str, mock_return: Dict[str, Any]
@@ -1682,6 +1842,19 @@ class HostNode(BaseROS2DeviceNode):
 
     """Resource"""
 
+    def _material_resource_sync_client(self) -> Optional[Any]:
+        """Return an explicitly configured material-sync bridge, if one exists.
+
+        Workflow execution, websocket status and edge-scheduler bridges are not
+        material HTTP clients.  Treating any non-empty bridge list as permission
+        to use the process-global cloud client makes loopback/local bookkeeping
+        emit authentication errors even though the local transfer succeeds.
+        """
+        for bridge in self.bridges:
+            if callable(getattr(bridge, "resource_tree_add", None)):
+                return bridge
+        return None
+
     def _init_host_service(self):
         self._resource_services: Dict[str, Service] = {
             "resource_add": self.create_service(
@@ -1730,37 +1903,38 @@ class HostNode(BaseROS2DeviceNode):
         )
 
         # 处理资源添加逻辑
-        success = False
+        success = True
         uuid_mapping = {}
-        if len(self.bridges) > 0:
-            from unilabos.app.web.client import HTTPClient, http_client
-
+        material_sync_client = self._material_resource_sync_client()
+        if material_sync_client is not None:
             resource_start_time = time.time()
-            uuid_mapping = http_client.resource_tree_add(resource_tree_set, mount_uuid, first_add)
-            success = True
+            uuid_mapping = material_sync_client.resource_tree_add(resource_tree_set, mount_uuid, first_add)
             resource_end_time = time.time()
             self.lab_logger().info(
                 f"[Host Node-Resource] 物料创建上传 {round(resource_end_time - resource_start_time, 5) * 1000} ms"
             )
             if uuid_mapping:
                 self.lab_logger().info(f"[Host Node-Resource] UUID映射: {len(uuid_mapping)} 个节点")
+        else:
+            self.lab_logger().trace(
+                "[Host Node-Resource] 未配置物料同步 bridge；仅更新 Host 本地物料图"
+            )
 
-        if success:
-            from unilabos.resources.graphio import physical_setup_graph
-            from unilabos.resources.resource_tracker import TRACKER_STATE_KEYS
+        from unilabos.resources.graphio import physical_setup_graph
+        from unilabos.resources.resource_tracker import TRACKER_STATE_KEYS
 
-            # 将资源添加到本地图中
-            for node in resource_tree_set.all_nodes:
-                resource_dict = node.res_content.model_dump(by_alias=True)
-                if resource_dict.get("id") not in physical_setup_graph.nodes:
-                    physical_setup_graph.add_node(resource_dict["id"], **resource_dict)
-                else:
-                    graph_node = physical_setup_graph.nodes[resource_dict["id"]]
-                    graph_node["data"].update(resource_dict.get("data", {}))
-                    # 液体状态在根字段（与 dump 形态一致），已存在节点同步刷新，避免与 data 双真相漂移
-                    for state_key in TRACKER_STATE_KEYS:
-                        if resource_dict.get(state_key) is not None:
-                            graph_node[state_key] = resource_dict[state_key]
+        # Host 本地物料图是本地运行的事实源；云同步是否启用不影响本地记账。
+        for node in resource_tree_set.all_nodes:
+            resource_dict = node.res_content.model_dump(by_alias=True)
+            if resource_dict.get("id") not in physical_setup_graph.nodes:
+                physical_setup_graph.add_node(resource_dict["id"], **resource_dict)
+            else:
+                graph_node = physical_setup_graph.nodes[resource_dict["id"]]
+                graph_node["data"].update(resource_dict.get("data", {}))
+                # 液体状态在根字段（与 dump 形态一致），已存在节点同步刷新，避免与 data 双真相漂移
+                for state_key in TRACKER_STATE_KEYS:
+                    if resource_dict.get(state_key) is not None:
+                        graph_node[state_key] = resource_dict[state_key]
 
         response.response = _fast_dumps_str(uuid_mapping) if success else "FAILED"
         self.lab_logger().info(f"[Host Node-Resource] Resource tree add completed, success: {success}")
@@ -1769,12 +1943,37 @@ class HostNode(BaseROS2DeviceNode):
         self, uuid: Optional[str] = None, res_id: Optional[str] = None, with_children: bool = True
     ) -> Optional[List[dict]]:
         """host 本地树解析（物料唯一事实源，云端物料接口已下线）；未命中返回 None。"""
-        from unilabos.hostlink.resolver import LocalResourceResolver, ResourceNotFound
+        from unilabos.hostlink.resolver import (
+            InventoryResourceAliasResolver,
+            LocalResourceResolver,
+            ResourceNotFound,
+        )
 
         if not hasattr(self, "_hostlink_resolver"):
             self._hostlink_resolver = LocalResourceResolver(lambda: self.resources_config)
         try:
-            return self._hostlink_resolver.resolve(uuid=uuid, res_id=res_id, with_children=with_children)
+            if uuid:
+                if not hasattr(self, "_inventory_resource_alias_resolver"):
+                    def _inventory_snapshot() -> dict[str, Any]:
+                        from unilabos.workflow.composition import (
+                            get_workflow_inventory_service,
+                        )
+
+                        inventory = get_workflow_inventory_service()
+                        return inventory.inventory_snapshot() if inventory is not None else {"materials": []}
+
+                    self._inventory_resource_alias_resolver = InventoryResourceAliasResolver(
+                        self._hostlink_resolver,
+                        _inventory_snapshot,
+                    )
+                return self._inventory_resource_alias_resolver.resolve(
+                    uuid=uuid,
+                    with_children=with_children,
+                )
+            return self._hostlink_resolver.resolve(
+                res_id=res_id,
+                with_children=with_children,
+            )
         except ResourceNotFound:
             return None
 
@@ -1823,29 +2022,35 @@ class HostNode(BaseROS2DeviceNode):
             f"{len(resource_tree_set.all_nodes)} total nodes"
         )
 
-        from unilabos.app.web.client import http_client
-
+        material_sync_client = self._material_resource_sync_client()
+        all_uuid_mapping: Dict[str, str] = {}
         uuid_to_trees: Dict[str, List[ResourceTreeInstance]] = collections.defaultdict(list)
         for tree in resource_tree_set.trees:
             uuid_to_trees[tree.root_node.res_content.parent_uuid].append(tree)
 
         for uid, trees in uuid_to_trees.items():
             new_tree_set = ResourceTreeSet(trees)
-            resource_start_time = time.time()
-            self.lab_logger().info(
-                f"[Host Node-Resource] 物料 {[root_node.res_content.id for root_node in new_tree_set.root_nodes]} {uid} 挂载 {trees[0].root_node.res_content.parent_uuid} 请求更新上传"
-            )
-            uuid_mapping = http_client.resource_tree_add(new_tree_set, uid, False)
-            success = bool(uuid_mapping)
-            resource_end_time = time.time()
-            self.lab_logger().info(
-                f"[Host Node-Resource] 物料更新上传 {round(resource_end_time - resource_start_time, 5) * 1000} ms"
-            )
-            if uuid_mapping:
-                self.lab_logger().info(f"[Host Node-Resource] UUID映射: {len(uuid_mapping)} 个节点")
+            uuid_mapping: Dict[str, str] = {}
+            if material_sync_client is not None:
+                resource_start_time = time.time()
+                self.lab_logger().info(
+                    f"[Host Node-Resource] 物料 {[root_node.res_content.id for root_node in new_tree_set.root_nodes]} {uid} 挂载 {trees[0].root_node.res_content.parent_uuid} 请求更新上传"
+                )
+                uuid_mapping = material_sync_client.resource_tree_add(new_tree_set, uid, False)
+                resource_end_time = time.time()
+                self.lab_logger().info(
+                    f"[Host Node-Resource] 物料更新上传 {round(resource_end_time - resource_start_time, 5) * 1000} ms"
+                )
+                if uuid_mapping:
+                    self.lab_logger().info(f"[Host Node-Resource] UUID映射: {len(uuid_mapping)} 个节点")
+            else:
+                self.lab_logger().trace(
+                    "[Host Node-Resource] 未配置物料同步 bridge；转运仅更新本地设备树"
+                )
+            all_uuid_mapping.update(uuid_mapping)
             # 还需要加入到资源图中，暂不实现，考虑资源图新的获取方式
-            response.response = json.dumps(uuid_mapping)
-            self.lab_logger().info(f"[Host Node-Resource] Resource tree update completed, success: {success}")
+        response.response = json.dumps(all_uuid_mapping)
+        self.lab_logger().info("[Host Node-Resource] Resource tree update completed, success: True")
 
     async def _resource_tree_update_callback(self, request: SerialCommand_Request, response: SerialCommand_Response):
         """
@@ -2585,72 +2790,21 @@ class HostNode(BaseROS2DeviceNode):
             "resource": ResourceTreeSet.from_plr_resources([resource]).dump(),
             "mount_resource": ResourceTreeSet.from_plr_resources([mount_resource]).dump(),
             "site": site,
-            "result": result,
+            "result": str(result),
         }
 
-    @legacy_action(
+    @action(
         description="转移物料（系统派发）：把已物理就位的物料在系统中改挂到目标设备的目标孔位（人工/机械臂工作流的统一末步）",
         always_free=True,
         placeholder_keys={
             "target_device": PLACEHOLDER_DEVICES,
             "mount_resource": PLACEHOLDER_NODES,
         },
-        handles=[
-            ActionInputHandle(
-                key="resource",
-                data_type="resource",
-                label="待转移物料",
-                data_key="resource",
-                data_source=DataSource.HANDLE,
-            ),
-            ActionInputHandle(
-                key="target_device",
-                data_type="device_id",
-                label="目标设备",
-                data_key="target_device",
-                data_source=DataSource.HANDLE,
-            ),
-            ActionInputHandle(
-                key="mount_resource",
-                data_type="resource",
-                label="目标孔位",
-                data_key="mount_resource",
-                data_source=DataSource.HANDLE,
-            ),
-            ActionInputHandle(
-                key="site",
-                data_type="site",
-                label="目标槽位",
-                data_key="site",
-                data_source=DataSource.HANDLE,
-            ),
-            ActionOutputHandle(
-                key="resource",
-                data_type="resource",
-                label="已转移物料",
-                data_key="resource.@flatten",
-                data_source=DataSource.EXECUTOR,
-            ),
-            ActionOutputHandle(
-                key="mount_resource",
-                data_type="resource",
-                label="目标孔位",
-                data_key="mount_resource.@flatten",
-                data_source=DataSource.EXECUTOR,
-            ),
-            ActionOutputHandle(
-                key="site",
-                data_type="site",
-                label="目标槽位",
-                data_key="site",
-                data_source=DataSource.EXECUTOR,
-            ),
-        ],
     )
     async def transfer_resource(
         self,
         resource: ResourceSlot,
-        target_device: DeviceSlot,
+        target_device: str,
         mount_resource: ResourceSlot,
         site: str = "",
     ) -> TransferResourceReturn:

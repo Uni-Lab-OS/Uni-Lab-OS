@@ -648,6 +648,10 @@ class ResourceTreeSet(object):
             "deck": "Deck",
             "container": "RegularContainer",
             "tip_spot": "TipSpot",
+            # Deployment packages also contain logical warehouses used for
+            # Inventory/Site addressing.  They are valid ResourceSlots even
+            # when they do not define a dedicated pylabrobot subclass.
+            "warehouse": "Resource",
         }
 
         def collect_node_data(node: ResourceDictInstance, name_to_uuid: dict, all_states: dict, name_to_extra: dict):
@@ -719,6 +723,31 @@ class ResourceTreeSet(object):
                     raise ValueError(
                         f"无法找到类型 {plr_dict['type']} 对应的 PLR 资源类。原始信息：{tree.root_node.res_content}"
                     )
+                if tree.root_node.res_content.type == "warehouse":
+                    # Resource.deserialize forwards custom config keys to the
+                    # constructor.  Keep only the generic PLR wire contract;
+                    # warehouse-specific layout metadata remains authoritative
+                    # in Inventory and is not needed by device actions.
+                    generic_resource_keys = {
+                        "name",
+                        "type",
+                        "size_x",
+                        "size_y",
+                        "size_z",
+                        "location",
+                        "rotation",
+                        "category",
+                        "model",
+                        "barcode",
+                        "preferred_pickup_location",
+                        "children",
+                        "parent_name",
+                    }
+                    plr_dict = {
+                        key: value
+                        for key, value in plr_dict.items()
+                        if key in generic_resource_keys
+                    }
                 spec = inspect.signature(sub_cls)
                 if "category" not in spec.parameters:
                     plr_dict.pop("category", None)

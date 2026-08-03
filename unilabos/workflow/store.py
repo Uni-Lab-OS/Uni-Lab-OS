@@ -251,7 +251,7 @@ CREATE TABLE IF NOT EXISTS workflow_task_material_admission_projection (
 CREATE TABLE IF NOT EXISTS workflow_task_material_release_projection (
     workflow_task_uuid TEXT PRIMARY KEY,
     command_uuid TEXT NOT NULL UNIQUE,
-    status TEXT NOT NULL CHECK (status = 'released'),
+    status TEXT NOT NULL CHECK (status IN ('blocked', 'released')),
     reservation_uuid TEXT,
     outbox_sequence INTEGER NOT NULL CHECK (outbox_sequence > 0),
     result TEXT NOT NULL CHECK (json_valid(result) AND json_type(result) = 'object'),
@@ -357,8 +357,44 @@ CREATE TABLE IF NOT EXISTS device_action_task (
     admitted_device_id TEXT,
     claim_status TEXT NOT NULL DEFAULT 'pending'
         CHECK (claim_status IN ('pending', 'claimed', 'released', 'unknown')),
+    inventory_claim_uuid TEXT,
+    inventory_fencing_token INTEGER CHECK (
+        inventory_fencing_token IS NULL OR inventory_fencing_token > 0
+    ),
+    inventory_claim_set_fingerprint TEXT,
+    material_changeset_uuid TEXT,
+    material_changeset_fingerprint TEXT,
+    material_changeset_outbox_sequence INTEGER CHECK (
+        material_changeset_outbox_sequence IS NULL
+        OR material_changeset_outbox_sequence > 0
+    ),
+    workflow_terminal_fingerprint TEXT,
     create_time TEXT NOT NULL,
     update_time TEXT NOT NULL,
+    CHECK (
+        (inventory_claim_uuid IS NULL
+         AND inventory_fencing_token IS NULL
+         AND inventory_claim_set_fingerprint IS NULL)
+        OR
+        (inventory_claim_uuid IS NOT NULL
+         AND inventory_fencing_token IS NOT NULL
+         AND inventory_claim_set_fingerprint IS NOT NULL)
+    ),
+    CHECK (
+        (material_changeset_uuid IS NULL
+         AND material_changeset_fingerprint IS NULL
+         AND material_changeset_outbox_sequence IS NULL)
+        OR
+        (material_changeset_uuid IS NOT NULL
+         AND material_changeset_fingerprint IS NOT NULL
+         AND material_changeset_outbox_sequence IS NOT NULL)
+    ),
+    CHECK (
+        workflow_terminal_fingerprint IS NULL
+        OR (material_changeset_uuid IS NOT NULL
+            AND material_changeset_fingerprint IS NOT NULL
+            AND material_changeset_outbox_sequence IS NOT NULL)
+    ),
     FOREIGN KEY(workflow_task_uuid)
         REFERENCES workflow_task(uuid) ON DELETE CASCADE,
     FOREIGN KEY(workflow_node_job_uuid)
@@ -589,9 +625,195 @@ class WorkflowStore:
                 self._conn.execute("PRAGMA journal_mode = WAL")
                 self._conn.execute("PRAGMA synchronous = NORMAL")
                 self._conn.executescript(_SCHEMA)
+                self._migrate_m1ef_projection_schema()
+                self._install_m1ef_projection_guards()
         except BaseException:
             self._conn.close()
             raise
+
+    def _migrate_m1ef_projection_schema(self) -> None:
+        """只增加 Workflow 自有的 M1EF logical projection 字段。"""
+
+        columns = {
+            str(row[1])
+            for row in self._conn.execute('PRAGMA table_info("device_action_task")')
+        }
+        additions = (
+            (
+                "inventory_claim_uuid",
+                "ALTER TABLE device_action_task ADD COLUMN inventory_claim_uuid TEXT",
+            ),
+            (
+                "inventory_fencing_token",
+                """ALTER TABLE device_action_task
+                   ADD COLUMN inventory_fencing_token INTEGER
+                   CHECK (inventory_fencing_token IS NULL
+                          OR inventory_fencing_token > 0)""",
+            ),
+            (
+                "inventory_claim_set_fingerprint",
+                """ALTER TABLE device_action_task
+                   ADD COLUMN inventory_claim_set_fingerprint TEXT""",
+            ),
+            (
+                "material_changeset_uuid",
+                "ALTER TABLE device_action_task ADD COLUMN "
+                "material_changeset_uuid TEXT",
+            ),
+            (
+                "material_changeset_fingerprint",
+                """ALTER TABLE device_action_task
+                   ADD COLUMN material_changeset_fingerprint TEXT""",
+            ),
+            (
+                "material_changeset_outbox_sequence",
+                """ALTER TABLE device_action_task
+                   ADD COLUMN material_changeset_outbox_sequence INTEGER
+                   CHECK (material_changeset_outbox_sequence IS NULL
+                          OR material_changeset_outbox_sequence > 0)""",
+            ),
+            (
+                "workflow_terminal_fingerprint",
+                """ALTER TABLE device_action_task
+                   ADD COLUMN workflow_terminal_fingerprint TEXT""",
+            ),
+        )
+        for name, statement in additions:
+            if name not in columns:
+                self._conn.execute(statement)
+
+        release_sql_row = self._conn.execute(
+            """
+            SELECT sql FROM sqlite_master
+            WHERE type = 'table'
+              AND name = 'workflow_task_material_release_projection'
+            """
+        ).fetchone()
+        release_sql = str(release_sql_row[0] or "") if release_sql_row else ""
+        if "status = 'released'" in release_sql:
+            self._conn.execute("PRAGMA foreign_keys = OFF")
+            try:
+                self._conn.execute("BEGIN IMMEDIATE")
+                self._conn.execute(
+                    """
+                    CREATE TABLE workflow_task_material_release_projection_m1ef (
+                        workflow_task_uuid TEXT PRIMARY KEY,
+                        command_uuid TEXT NOT NULL UNIQUE,
+                        status TEXT NOT NULL
+                            CHECK (status IN ('blocked', 'released')),
+                        reservation_uuid TEXT,
+                        outbox_sequence INTEGER NOT NULL
+                            CHECK (outbox_sequence > 0),
+                        result TEXT NOT NULL
+                            CHECK (json_valid(result)
+                                   AND json_type(result) = 'object'),
+                        create_time TEXT NOT NULL,
+                        update_time TEXT NOT NULL,
+                        FOREIGN KEY(workflow_task_uuid)
+                            REFERENCES workflow_task(uuid) ON DELETE CASCADE
+                    )
+                    """
+                )
+                self._conn.execute(
+                    """
+                    INSERT INTO workflow_task_material_release_projection_m1ef
+                    SELECT * FROM workflow_task_material_release_projection
+                    """
+                )
+                self._conn.execute(
+                    "DROP TABLE workflow_task_material_release_projection"
+                )
+                self._conn.execute(
+                    """ALTER TABLE workflow_task_material_release_projection_m1ef
+                       RENAME TO workflow_task_material_release_projection"""
+                )
+                self._conn.commit()
+            except BaseException:
+                self._conn.rollback()
+                raise
+            finally:
+                self._conn.execute("PRAGMA foreign_keys = ON")
+        else:
+            self._conn.commit()
+
+    def _install_m1ef_projection_guards(self) -> None:
+        """给新建与原位升级的 Workflow DB 安装相同的组合约束。"""
+
+        self._conn.executescript(
+            """
+            CREATE TRIGGER IF NOT EXISTS trg_device_action_task_m1ef_insert
+            BEFORE INSERT ON device_action_task
+            WHEN NOT (
+                (
+                    (NEW.inventory_claim_uuid IS NULL
+                     AND NEW.inventory_fencing_token IS NULL
+                     AND NEW.inventory_claim_set_fingerprint IS NULL)
+                    OR
+                    (NEW.inventory_claim_uuid IS NOT NULL
+                     AND NEW.inventory_fencing_token IS NOT NULL
+                     AND NEW.inventory_claim_set_fingerprint IS NOT NULL)
+                )
+                AND
+                (
+                    (NEW.material_changeset_uuid IS NULL
+                     AND NEW.material_changeset_fingerprint IS NULL
+                     AND NEW.material_changeset_outbox_sequence IS NULL)
+                    OR
+                    (NEW.material_changeset_uuid IS NOT NULL
+                     AND NEW.material_changeset_fingerprint IS NOT NULL
+                     AND NEW.material_changeset_outbox_sequence IS NOT NULL)
+                )
+                AND
+                (NEW.workflow_terminal_fingerprint IS NULL
+                 OR (NEW.material_changeset_uuid IS NOT NULL
+                     AND NEW.material_changeset_fingerprint IS NOT NULL
+                     AND NEW.material_changeset_outbox_sequence IS NOT NULL))
+            )
+            BEGIN
+                SELECT RAISE(ABORT, 'm1ef_projection_incomplete');
+            END;
+
+            CREATE TRIGGER IF NOT EXISTS trg_device_action_task_m1ef_update
+            BEFORE UPDATE OF
+                inventory_claim_uuid,
+                inventory_fencing_token,
+                inventory_claim_set_fingerprint,
+                material_changeset_uuid,
+                material_changeset_fingerprint,
+                material_changeset_outbox_sequence,
+                workflow_terminal_fingerprint
+            ON device_action_task
+            WHEN NOT (
+                (
+                    (NEW.inventory_claim_uuid IS NULL
+                     AND NEW.inventory_fencing_token IS NULL
+                     AND NEW.inventory_claim_set_fingerprint IS NULL)
+                    OR
+                    (NEW.inventory_claim_uuid IS NOT NULL
+                     AND NEW.inventory_fencing_token IS NOT NULL
+                     AND NEW.inventory_claim_set_fingerprint IS NOT NULL)
+                )
+                AND
+                (
+                    (NEW.material_changeset_uuid IS NULL
+                     AND NEW.material_changeset_fingerprint IS NULL
+                     AND NEW.material_changeset_outbox_sequence IS NULL)
+                    OR
+                    (NEW.material_changeset_uuid IS NOT NULL
+                     AND NEW.material_changeset_fingerprint IS NOT NULL
+                     AND NEW.material_changeset_outbox_sequence IS NOT NULL)
+                )
+                AND
+                (NEW.workflow_terminal_fingerprint IS NULL
+                 OR (NEW.material_changeset_uuid IS NOT NULL
+                     AND NEW.material_changeset_fingerprint IS NOT NULL
+                     AND NEW.material_changeset_outbox_sequence IS NOT NULL))
+            )
+            BEGIN
+                SELECT RAISE(ABORT, 'm1ef_projection_incomplete');
+            END;
+            """
+        )
 
     def close(self) -> None:
         with self._lock:
@@ -743,13 +965,16 @@ class WorkflowStore:
     ) -> bool:
         database = conn or self._conn
         with self._lock:
-            return database.execute(
-                """
+            return (
+                database.execute(
+                    """
                 SELECT 1 FROM device_action_system_source
                 WHERE workflow_uuid = ?
                 """,
-                (workflow_uuid,),
-            ).fetchone() is not None
+                    (workflow_uuid,),
+                ).fetchone()
+                is not None
+            )
 
     def is_device_action_task(
         self,
@@ -759,13 +984,16 @@ class WorkflowStore:
     ) -> bool:
         database = conn or self._conn
         with self._lock:
-            return database.execute(
-                """
+            return (
+                database.execute(
+                    """
                 SELECT 1 FROM device_action_task
                 WHERE workflow_task_uuid = ?
                 """,
-                (task_uuid,),
-            ).fetchone() is not None
+                    (task_uuid,),
+                ).fetchone()
+                is not None
+            )
 
     def is_device_action_job(
         self,
@@ -775,13 +1003,16 @@ class WorkflowStore:
     ) -> bool:
         database = conn or self._conn
         with self._lock:
-            return database.execute(
-                """
+            return (
+                database.execute(
+                    """
                 SELECT 1 FROM device_action_task
                 WHERE workflow_node_job_uuid = ?
                 """,
-                (job_uuid,),
-            ).fetchone() is not None
+                    (job_uuid,),
+                ).fetchone()
+                is not None
+            )
 
     def list_workflows(
         self,
@@ -828,6 +1059,7 @@ class WorkflowStore:
         tags: List[Any],
         description: Optional[str],
         meta_data: Dict[str, Any],
+        catalog_authority_id: str | None = None,
     ) -> Dict[str, Any]:
         with self.transaction() as conn:
             self.get_workflow(workflow_uuid, conn=conn)
@@ -847,9 +1079,15 @@ class WorkflowStore:
                     workflow_uuid,
                 ),
             )
+            self._invalidate_catalog_marker(conn, catalog_authority_id)
         return self.get_workflow(workflow_uuid)
 
-    def delete_workflow(self, workflow_uuid: str) -> None:
+    def delete_workflow(
+        self,
+        workflow_uuid: str,
+        *,
+        catalog_authority_id: str | None = None,
+    ) -> None:
         now = utc_now()
         with self.transaction() as conn:
             self.get_workflow(workflow_uuid, conn=conn)
@@ -857,6 +1095,7 @@ class WorkflowStore:
                 "UPDATE workflow SET deleted_at = ?, update_time = ? WHERE uuid = ?",
                 (now, now, workflow_uuid),
             )
+            self._invalidate_catalog_marker(conn, catalog_authority_id)
             conn.execute(
                 "UPDATE workflow_node SET deleted_at = ?, update_time = ? "
                 "WHERE workflow_uuid = ? AND deleted_at IS NULL",
@@ -931,6 +1170,23 @@ class WorkflowStore:
             "handle_templates": handle_templates,
         }
 
+    def get_published_workflow_snapshot(
+        self,
+        workflow_uuid: str,
+    ) -> Dict[str, Any]:
+        """一次冻结 Published Workflow graph 与 Applied source eligibility facts。"""
+
+        with self._lock:
+            graph = self.get_graph(workflow_uuid, conn=self._conn)
+            row = self._conn.execute(
+                "SELECT applied_source FROM workflow_authoring WHERE workflow_uuid = ?",
+                (workflow_uuid,),
+            ).fetchone()
+            applied_source = (
+                _load(row["applied_source"], None) if row is not None else None
+            )
+            return {**graph, "applied_source": applied_source}
+
     def save_graph(
         self,
         workflow_uuid: str,
@@ -941,6 +1197,7 @@ class WorkflowStore:
         protect_reserved_metadata: bool = False,
         validate_workflow_io_contract: bool = False,
         commit_validator: GraphCommitValidator | None = None,
+        catalog_authority_id: str | None = None,
     ) -> Dict[str, Any]:
         with self.transaction() as conn:
             self._reconcile_graph(
@@ -954,6 +1211,7 @@ class WorkflowStore:
                 validate_workflow_io_contract=validate_workflow_io_contract,
                 commit_validator=commit_validator,
             )
+            self._invalidate_catalog_marker(conn, catalog_authority_id)
         return self.get_graph(workflow_uuid)
 
     def _reconcile_graph(
@@ -1555,7 +1813,7 @@ class WorkflowStore:
         with self.transaction() as conn:
             task = conn.execute(
                 """
-                SELECT uuid FROM workflow_task
+                SELECT uuid, status, workflow_snapshot FROM workflow_task
                 WHERE uuid = ? AND deleted_at IS NULL
                 """,
                 (task_uuid,),
@@ -1580,11 +1838,16 @@ class WorkflowStore:
                 upgrade_blocked = (
                     existing["command_uuid"] == command_uuid
                     and existing["status"] == "blocked"
-                    and status == "admitted"
+                    and status in {"admitted", "rejected"}
                     and outbox_sequence > int(existing["outbox_sequence"])
                 )
                 if not upgrade_blocked:
                     raise StoreConflict("Task Material admission projection conflicts")
+
+            if task["status"] not in {"pending", "admission_blocked"}:
+                raise StoreConflict(
+                    "Task cannot accept a Material admission projection"
+                )
 
             if status == "admitted":
                 for binding in bindings:
@@ -1624,6 +1887,122 @@ class WorkflowStore:
                         """,
                         (encoded_return_info, now, now, job["uuid"]),
                     )
+                    conn.execute(
+                        """
+                        INSERT INTO workflow_runtime_journal(
+                            workflow_task_uuid, workflow_node_job_uuid,
+                            workflow_task_command_uuid, kind, from_status,
+                            to_status, data, create_time
+                        ) VALUES (?, ?, NULL, 'job_transition',
+                                  'pending', 'succeeded', '{}', ?)
+                        """,
+                        (task_uuid, job["uuid"], now),
+                    )
+
+            diagnostics = result.get("diagnostics")
+            if not isinstance(diagnostics, list):
+                diagnostics = []
+            task_status = str(task["status"])
+            next_task_status = task_status
+            if status == "blocked":
+                if task_status != "pending":
+                    raise StoreConflict("Task cannot enter admission_blocked")
+                next_task_status = "admission_blocked"
+                conn.execute(
+                    """
+                    UPDATE workflow_task
+                    SET status = 'admission_blocked', update_time = ?
+                    WHERE uuid = ? AND status = 'pending'
+                    """,
+                    (now, task_uuid),
+                )
+            elif status == "admitted" and task_status == "admission_blocked":
+                next_task_status = "pending"
+                conn.execute(
+                    """
+                    UPDATE workflow_task
+                    SET status = 'pending', update_time = ?
+                    WHERE uuid = ? AND status = 'admission_blocked'
+                    """,
+                    (now, task_uuid),
+                )
+            elif status == "rejected":
+                next_task_status = "failed"
+                encoded_diagnostics = _json(diagnostics)
+                snapshot = _load(task["workflow_snapshot"], {})
+                snapshot_nodes = (
+                    snapshot.get("nodes") if isinstance(snapshot, dict) else None
+                )
+                source_node_uuids = {
+                    str(node.get("uuid") or "")
+                    for node in snapshot_nodes or []
+                    if isinstance(node, dict) and node.get("type") == "material_source"
+                }
+                resolution_jobs = conn.execute(
+                    """
+                    SELECT uuid, workflow_node_uuid
+                    FROM workflow_node_job
+                    WHERE workflow_task_uuid = ? AND deleted_at IS NULL
+                      AND status = 'pending'
+                    ORDER BY topological_index, create_time, uuid
+                    """,
+                    (task_uuid,),
+                ).fetchall()
+                for job in resolution_jobs:
+                    if job["workflow_node_uuid"] not in source_node_uuids:
+                        continue
+                    conn.execute(
+                        """
+                        UPDATE workflow_node_job
+                        SET status = 'failed', error_info = ?,
+                            update_time = ?, finished_at = ?
+                        WHERE uuid = ? AND status = 'pending'
+                        """,
+                        (encoded_diagnostics, now, now, job["uuid"]),
+                    )
+                    conn.execute(
+                        """
+                        INSERT INTO workflow_runtime_journal(
+                            workflow_task_uuid, workflow_node_job_uuid,
+                            workflow_task_command_uuid, kind, from_status,
+                            to_status, data, create_time
+                        ) VALUES (?, ?, NULL, 'job_transition',
+                                  'pending', 'failed', ?, ?)
+                        """,
+                        (
+                            task_uuid,
+                            job["uuid"],
+                            _json({"diagnostics": diagnostics}),
+                            now,
+                        ),
+                    )
+                conn.execute(
+                    """
+                    UPDATE workflow_task
+                    SET status = 'failed', error_info = ?, update_time = ?,
+                        finished_at = ?
+                    WHERE uuid = ? AND status IN ('pending', 'admission_blocked')
+                    """,
+                    (encoded_diagnostics, now, now, task_uuid),
+                )
+
+            if next_task_status != task_status:
+                conn.execute(
+                    """
+                    INSERT INTO workflow_runtime_journal(
+                        workflow_task_uuid, workflow_node_job_uuid,
+                        workflow_task_command_uuid, kind, from_status,
+                        to_status, data, create_time
+                    ) VALUES (?, NULL, NULL, 'task_transition', ?, ?, ?, ?)
+                    """,
+                    (
+                        task_uuid,
+                        task_status,
+                        next_task_status,
+                        _json({"material_admission_status": status}),
+                        now,
+                    ),
+                )
 
             if upgrade_blocked:
                 conn.execute(
@@ -1701,6 +2080,8 @@ class WorkflowStore:
     ) -> bool:
         """Idempotently project one terminal Inventory release result."""
 
+        if status not in {"blocked", "released"}:
+            raise StoreConflict("Task Material release status is invalid")
         now = utc_now()
         encoded_result = _json(result)
         with self.transaction() as conn:
@@ -1715,7 +2096,7 @@ class WorkflowStore:
                 raise StoreNotFound(f"workflow task {task_uuid} not found")
             existing = conn.execute(
                 """
-                SELECT command_uuid, result
+                SELECT command_uuid, status, outbox_sequence, result
                 FROM workflow_task_material_release_projection
                 WHERE workflow_task_uuid = ?
                 """,
@@ -1727,25 +2108,50 @@ class WorkflowStore:
                     and existing["result"] == encoded_result
                 ):
                     return False
-                raise StoreConflict("Task Material release projection conflicts")
-            conn.execute(
-                """
-                INSERT INTO workflow_task_material_release_projection(
-                    workflow_task_uuid, command_uuid, status, reservation_uuid,
-                    outbox_sequence, result, create_time, update_time
-                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?)
-                """,
-                (
-                    task_uuid,
-                    command_uuid,
-                    status,
-                    reservation_uuid,
-                    outbox_sequence,
-                    encoded_result,
-                    now,
-                    now,
-                ),
-            )
+                upgrade_blocked = (
+                    existing["command_uuid"] == command_uuid
+                    and existing["status"] == "blocked"
+                    and status == "released"
+                    and outbox_sequence > int(existing["outbox_sequence"])
+                )
+                if not upgrade_blocked:
+                    raise StoreConflict("Task Material release projection conflicts")
+                conn.execute(
+                    """
+                    UPDATE workflow_task_material_release_projection
+                    SET status = 'released', reservation_uuid = ?,
+                        outbox_sequence = ?, result = ?, update_time = ?
+                    WHERE workflow_task_uuid = ? AND command_uuid = ?
+                      AND status = 'blocked'
+                    """,
+                    (
+                        reservation_uuid,
+                        outbox_sequence,
+                        encoded_result,
+                        now,
+                        task_uuid,
+                        command_uuid,
+                    ),
+                )
+            else:
+                conn.execute(
+                    """
+                    INSERT INTO workflow_task_material_release_projection(
+                        workflow_task_uuid, command_uuid, status, reservation_uuid,
+                        outbox_sequence, result, create_time, update_time
+                    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+                    """,
+                    (
+                        task_uuid,
+                        command_uuid,
+                        status,
+                        reservation_uuid,
+                        outbox_sequence,
+                        encoded_result,
+                        now,
+                        now,
+                    ),
+                )
             self._append_event(
                 conn,
                 event="workflow.runtime.changed",
@@ -1811,6 +2217,76 @@ class WorkflowStore:
         return {
             "items": [self._job_feedback_row(row) for row in selected],
             "next_cursor": (selected[-1]["sequence"] if selected else after_sequence),
+            "has_more": has_more,
+        }
+
+    def list_task_runtime_events(
+        self,
+        task_uuid: str,
+        *,
+        after_sequence: int,
+        limit: int,
+    ) -> Dict[str, Any]:
+        """Return the durable Task runtime journal as an observable timeline.
+
+        Journal transitions remain the source of ordering and timestamps.  The
+        response only enriches action dispatch and terminal transitions with
+        the Job payload that operators need to inspect; it does not invent
+        lifecycle events from the current Job snapshot.
+        """
+
+        self.get_task(task_uuid)
+        with self._lock:
+            rows = self._conn.execute(
+                """
+                SELECT
+                    journal.sequence AS event_sequence,
+                    journal.workflow_task_uuid AS event_task_uuid,
+                    journal.workflow_node_job_uuid AS event_job_uuid,
+                    journal.workflow_task_command_uuid AS event_command_uuid,
+                    journal.kind AS event_kind,
+                    journal.from_status AS event_from_status,
+                    journal.to_status AS event_to_status,
+                    journal.data AS event_data,
+                    journal.create_time AS event_create_time,
+                    job.workflow_node_uuid AS job_workflow_node_uuid,
+                    job.executor_kind AS job_executor_kind,
+                    job.attempt AS job_attempt,
+                    job.param AS job_param,
+                    job.return_info AS job_return_info,
+                    job.error_info AS job_error_info,
+                    feedback.feedback_type AS committed_feedback_type,
+                    feedback.data AS committed_feedback_data,
+                    command.type AS command_type,
+                    command.result AS command_result
+                FROM workflow_runtime_journal AS journal
+                LEFT JOIN workflow_node_job AS job
+                  ON job.uuid = journal.workflow_node_job_uuid
+                 AND job.deleted_at IS NULL
+                LEFT JOIN workflow_node_job_feedback_history AS feedback
+                  ON journal.kind = 'feedback_committed'
+                 AND feedback.workflow_node_job_uuid = journal.workflow_node_job_uuid
+                 AND feedback.sequence = CAST(
+                     json_extract(journal.data, '$.sequence') AS INTEGER
+                 )
+                 AND feedback.deleted_at IS NULL
+                LEFT JOIN workflow_task_command AS command
+                  ON command.uuid = journal.workflow_task_command_uuid
+                 AND command.deleted_at IS NULL
+                WHERE journal.workflow_task_uuid = ?
+                  AND journal.sequence > ?
+                ORDER BY journal.sequence
+                LIMIT ?
+                """,
+                (task_uuid, after_sequence, limit + 1),
+            ).fetchall()
+        has_more = len(rows) > limit
+        selected = rows[:limit]
+        return {
+            "items": [self._runtime_event_row(row) for row in selected],
+            "next_cursor": (
+                selected[-1]["event_sequence"] if selected else after_sequence
+            ),
             "has_more": has_more,
         }
 
@@ -2035,6 +2511,7 @@ class WorkflowStore:
         candidate_hash: str,
         validate_draft_state: Callable[[], None],
         commit_validator: GraphCommitValidator | None = None,
+        catalog_authority_id: str | None = None,
     ) -> int:
         now = utc_now()
         with self.transaction() as conn:
@@ -2180,7 +2657,24 @@ class WorkflowStore:
                 },
                 now=now,
             )
+            self._invalidate_catalog_marker(conn, catalog_authority_id)
             return resulting_revision
+
+    @staticmethod
+    def _invalidate_catalog_marker(
+        conn: sqlite3.Connection,
+        authority_id: str | None,
+    ) -> None:
+        """在 eligibility mutation transaction 内先使 complete Catalog 不可用。"""
+
+        if authority_id is None:
+            return
+        if not isinstance(authority_id, str) or not authority_id:
+            raise StoreConflict("Catalog authority identity 无效")
+        conn.execute(
+            "DELETE FROM workflow_template_catalog WHERE authority_id = ?",
+            (authority_id,),
+        )
 
     # 事件与诊断 --------------------------------------------------------
 
@@ -2450,6 +2944,51 @@ class WorkflowStore:
             "idempotency_key": row["idempotency_key"],
         }
         cls._add_optional(result, row, "published_at")
+        return result
+
+    @staticmethod
+    def _runtime_event_row(row: sqlite3.Row) -> Dict[str, Any]:
+        result: Dict[str, Any] = {
+            "sequence": row["event_sequence"],
+            "workflow_task_uuid": row["event_task_uuid"],
+            "kind": row["event_kind"],
+            "data": _load(row["event_data"], {}),
+            "create_time": row["event_create_time"],
+        }
+        for column, output in (
+            ("event_job_uuid", "workflow_node_job_uuid"),
+            ("event_command_uuid", "workflow_task_command_uuid"),
+            ("event_from_status", "from_status"),
+            ("event_to_status", "to_status"),
+            ("job_workflow_node_uuid", "workflow_node_uuid"),
+            ("job_executor_kind", "executor_kind"),
+            ("job_attempt", "attempt"),
+            ("command_type", "command_type"),
+        ):
+            value = row[column]
+            if value is not None:
+                result[output] = value
+
+        kind = row["event_kind"]
+        to_status = row["event_to_status"]
+        if kind == "job_transition" and to_status == "dispatched":
+            result["param"] = _load(row["job_param"], {})
+        if kind == "job_transition" and to_status in {
+            "succeeded",
+            "failed",
+            "skipped",
+            "canceled",
+            "timeout",
+        }:
+            result["return_info"] = _load(row["job_return_info"], {})
+            result["error_info"] = _load(row["job_error_info"], [])
+        if kind == "feedback_committed":
+            feedback_type = row["committed_feedback_type"]
+            if feedback_type is not None:
+                result["feedback_type"] = feedback_type
+                result["feedback"] = _load(row["committed_feedback_data"], {})
+        if row["event_command_uuid"] is not None:
+            result["command_result"] = _load(row["command_result"], {})
         return result
 
     @staticmethod

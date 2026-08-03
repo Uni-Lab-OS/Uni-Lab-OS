@@ -1388,6 +1388,41 @@ def test_resource_slot_handle_accepts_only_the_canonical_resolved_slot(
     assert job["param"]["volume"] == canonical
 
 
+def test_static_resource_slot_accepts_compiler_closed_identity(
+    store: WorkflowStore,
+) -> None:
+    service = _create_workflow(store)
+    _seed_template_catalog(store)
+    canonical = {
+        "uuid": MATERIAL_A_UUID,
+        "resource_template_uuid": RESOURCE_TEMPLATE_UUID,
+    }
+    _replace_target_handle_type(store, "ResourceSlot")
+    _replace_target_handle_value_schema(
+        store,
+        {
+            **_slot_schema(RESOURCE_TEMPLATE_UUID),
+            "title": "Material",
+            "description": "Compiler-projected presentation metadata.",
+        },
+    )
+    _save_graph(
+        store,
+        nodes=[
+            _node(
+                TARGET_NODE_UUID,
+                template_uuid=TARGET_TEMPLATE_UUID,
+                param={"volume": canonical},
+            )
+        ],
+    )
+
+    task = _create_task(service)
+    job = service.list_workflow_node_jobs(task["uuid"])[0]
+
+    assert job["param"]["volume"] == canonical
+
+
 def test_historical_task_snapshot_without_d068_output_keeps_material_roots() -> None:
     snapshot = {
         "workflow": {

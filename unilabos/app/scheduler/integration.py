@@ -216,9 +216,7 @@ def setup_edge_scheduler(
         logger.info("[EdgeSchedulerIntegration] workflow history store: %s", history_db)
 
     shared_device_manager = (
-        getattr(ws_client, "device_manager", None)
-        if ws_client is not None
-        else None
+        getattr(ws_client, "device_manager", None) if ws_client is not None else None
     )
     scheduler, backend = create_edge_stack(
         orderer=orderer,
@@ -306,8 +304,10 @@ def reset_for_test() -> None:
         _backend.stop()
     if _outbox_worker is not None:
         _outbox_worker.stop()
-    if _inventory is not None and _owns_inventory:
-        _inventory.close()
+    if _inventory is not None:
+        _inventory.set_change_listener(None)
+        if _owns_inventory:
+            _inventory.close()
     _scheduler = None
     _backend = None
     _inventory = None

@@ -7,6 +7,7 @@ Edge 是仓储/物料实例/物理层级/内容物/预留的唯一事实源（�
 from __future__ import annotations
 
 import uuid
+from collections.abc import Callable
 from dataclasses import dataclass, field
 from enum import Enum
 from typing import Any
@@ -86,6 +87,18 @@ class MaterialAuthorityUnavailable(MaterialError):
     """Material durable store 无法完成请求。"""
 
     code = "material_authority_unavailable"
+
+
+class MaterialClaimBlocked(MaterialConflict):
+    """完整 Job Claim 集合暂时不可用。"""
+
+    code = "claim_blocked"
+
+
+class MaterialClaimCorrupt(MaterialAuthorityUnavailable):
+    """持久 Claim、fence 或 receipt 事实违反权威不变量。"""
+
+    code = "claim_authority_corrupt"
 
 
 # ---------------------------------------------------------------------------
@@ -185,7 +198,8 @@ def check_lot_invariants(total: float, available: float, reserved: float) -> Non
     """数量非负，available + reserved <= total."""
     if total < 0 or available < 0 or reserved < 0:
         raise InvariantViolation(
-            f"negative quantity: total={total} available={available} reserved={reserved}"
+            "negative quantity: "
+            f"total={total} available={available} reserved={reserved}"
         )
     # 浮点容差
     if available + reserved > total + 1e-9:
@@ -205,6 +219,17 @@ class ResourceTemplateIdentity:
 
     uuid: str
     material_class: str
+
+
+@dataclass(frozen=True, slots=True)
+class MaterialModelAsset:
+    """Catalog-audited model asset exposed through an opaque read callback."""
+
+    public_path: str
+    media_type: str
+    digest: str
+    size: int
+    read_bytes: Callable[[], bytes] = field(repr=False, compare=False)
 
 
 @dataclass(frozen=True, slots=True)
@@ -284,6 +309,198 @@ class TaskMaterialReleaseResult:
     workflow_task_uuid: str
     status: str
     reservation_uuid: str | None
+    outbox_sequence: int
+
+
+@dataclass(frozen=True, slots=True)
+class JobClaimAcquireCommand:
+    """为一个 Job attempt 获取完整、typed 的 physical-resource 集合。"""
+
+    schema_version: int
+    command_uuid: str
+    idempotency_key: str
+    workflow_task_uuid: str
+    workflow_node_job_uuid: str
+    attempt: int
+    device_material_uuid: str
+    mutable_material_root_uuids: tuple[str, ...]
+    occupancy_changing_site_uuids: tuple[str, ...]
+
+
+@dataclass(frozen=True, slots=True)
+class JobClaimStateCommand:
+    """给精确 fenced Job Claim 附加 accepted/running evidence。"""
+
+    schema_version: int
+    command_uuid: str
+    idempotency_key: str
+    workflow_node_job_uuid: str
+    attempt: int
+    claim_uuid: str
+    fencing_token: int
+    evidence_kind: str
+    evidence_fingerprint: str
+    expected_state: str | None = None
+
+
+@dataclass(frozen=True, slots=True)
+class JobClaimUncertainCommand:
+    """physical dispatch/result reality 未知时 fail closed。"""
+
+    schema_version: int
+    command_uuid: str
+    idempotency_key: str
+    workflow_node_job_uuid: str
+    attempt: int
+    claim_uuid: str
+    fencing_token: int
+    uncertainty_reason: str
+    evidence_fingerprint: str
+    expected_state: str | None = None
+
+
+@dataclass(frozen=True, slots=True)
+class MaterialChangeSetEffect:
+    """terminal ChangeSet 中一个已声明的 Material/Site mutation。"""
+
+    effect_key: str
+    resource_kind: str
+    resource_uuid: str
+    operation: str
+    expected_version: int | None
+    before: dict[str, Any]
+    after: dict[str, Any]
+
+
+@dataclass(frozen=True, slots=True)
+class MaterialChangeSetCommand:
+    """提交一个 Job attempt 的 terminal physical-reality effect。"""
+
+    schema_version: int
+    command_uuid: str
+    idempotency_key: str
+    workflow_task_uuid: str
+    workflow_node_job_uuid: str
+    attempt: int
+    claim_uuid: str
+    fencing_token: int
+    effect_identity: str
+    outcome: str
+    result: dict[str, Any]
+    effects: tuple[MaterialChangeSetEffect, ...]
+    expected_claim_state: str | None = None
+
+
+@dataclass(frozen=True, slots=True)
+class JobClaimReleaseCommand:
+    """仅凭 durable no-send 或 terminal proof 释放精确 Claim。"""
+
+    schema_version: int
+    command_uuid: str
+    idempotency_key: str
+    workflow_node_job_uuid: str
+    attempt: int
+    claim_uuid: str
+    fencing_token: int
+    release_proof_kind: str
+    material_changeset_uuid: str | None
+    material_changeset_fingerprint: str | None
+    workflow_terminal_fingerprint: str | None
+    reason: str
+    no_send_proof_fingerprint: str | None = None
+    expected_state: str | None = None
+
+
+@dataclass(frozen=True, slots=True)
+class JobClaimResolutionCommand:
+    """对一个 uncertain Claim 做可审计的 device/human resolution。"""
+
+    schema_version: int
+    command_uuid: str
+    idempotency_key: str
+    workflow_node_job_uuid: str
+    attempt: int
+    claim_uuid: str
+    fencing_token: int
+    expected_state: str
+    resolution: str
+    evidence_kind: str
+    evidence_fingerprint: str
+    observed_at: str
+    actor_identity: str
+    reason: str
+    no_send_proof_fingerprint: str | None = None
+    terminal_changeset: MaterialChangeSetCommand | None = None
+    workflow_terminal_fingerprint: str | None = None
+
+
+@dataclass(frozen=True, slots=True)
+class JobClaimMemberRecord:
+    """完整 Job Claim 集合中的一个 member。"""
+
+    resource_kind: str
+    resource_uuid: str
+    acquired_version: int
+    expected_version: int
+    released_at: str | None
+
+
+@dataclass(frozen=True, slots=True)
+class JobClaimRecord:
+    """durable Claim authority 的公开不可变 projection。"""
+
+    uuid: str
+    workflow_task_uuid: str
+    workflow_node_job_uuid: str
+    attempt: int
+    set_fingerprint: str
+    fencing_token: int
+    state: str
+    uncertainty_reason: str | None
+    acquired_at: str
+    create_time: str
+    running_at: str | None
+    release_proof_kind: str | None
+    release_proof_fingerprint: str | None
+    release_reason: str | None
+    terminal_changeset_uuid: str | None
+    workflow_terminal_fingerprint: str | None
+    release_command_uuid: str | None
+    released_at: str | None
+    update_time: str
+    members: tuple[JobClaimMemberRecord, ...]
+
+
+@dataclass(frozen=True, slots=True)
+class JobClaimResult:
+    """acquire/state/release/resolve 命令的封闭 durable result。"""
+
+    schema_version: int
+    command_uuid: str
+    status: str
+    claim: JobClaimRecord | None
+    diagnostics: tuple[dict[str, Any], ...]
+    outbox_sequence: int | None
+
+
+@dataclass(frozen=True, slots=True)
+class MaterialChangeSetReceipt:
+    """durable、可重放的 terminal Material reality receipt。"""
+
+    schema_version: int
+    command_uuid: str
+    uuid: str
+    workflow_task_uuid: str
+    workflow_node_job_uuid: str
+    attempt: int
+    claim_uuid: str
+    fencing_token: int
+    effect_identity: str
+    deterministic_fingerprint: str
+    outcome: str
+    result: dict[str, Any]
+    effects: tuple[MaterialChangeSetEffect, ...]
+    create_time: str
     outbox_sequence: int
 
 

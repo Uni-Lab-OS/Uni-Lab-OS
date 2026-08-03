@@ -1235,14 +1235,17 @@ def initialize_resource(resource_config: dict, resource_type: Any = None) -> Uni
         return [resource_config]
     elif type(resource_class_config) == str:
         # Allow special resource class names to be used
-        from unilabos.package_manager.consumers import resolve_registry_definition
+        from unilabos.package_manager.consumers import (
+            DefinitionIdentityNotFound,
+            resolve_registry_definition,
+        )
 
         try:
             _canonical_class, registry_entry = resolve_registry_definition(
                 lab_registry.resource_type_registry,
                 resource_class_config,
             )
-        except KeyError:
+        except DefinitionIdentityNotFound:
             logger.warning(f"❌ 类 {resource_class_config} 不在 registry 中，返回原始配置")
             logger.debug(f"   可用的类: {list(lab_registry.resource_type_registry.keys())[:10]}...")
             return [resource_config]

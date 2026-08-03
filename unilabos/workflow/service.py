@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-import fcntl
 import hashlib
 import logging
 import os
@@ -18,6 +17,11 @@ from datetime import datetime, timezone
 from pathlib import Path, PurePosixPath
 from typing import Any, Dict, List, Optional, Protocol, Tuple, runtime_checkable
 from uuid import uuid4
+
+try:
+    import fcntl
+except ModuleNotFoundError:  # pragma: no cover - exercised by Windows CI
+    fcntl = None  # type: ignore[assignment]
 
 from pydantic import ValidationError
 
@@ -100,6 +104,7 @@ _ERRORS = {
     "material_source_conflict": (409, "物料来源与仓库或库位事实冲突"),
     "material_flow_fan_out": (409, "同一个物料输出不能同时连接多个下游节点"),
     "material_authority_unavailable": (503, "物料权威暂不可用"),
+    "reconciliation_required": (503, "物理执行事实需要先完成对账"),
     "template_catalog_unavailable": (
         503,
         "设备动作模板暂不可用，请稍后重试",
@@ -110,7 +115,7 @@ _HASH_TOKEN = re.compile(r"sha256:[0-9a-f]{64}\Z")
 _NO_EXPECTED_HASH = object()
 _F_SETOWN_EX = getattr(fcntl, "F_SETOWN_EX", 15)
 _F_OWNER_TID = 0
-_LEASE_BREAK_SIGNAL = signal.SIGIO
+_LEASE_BREAK_SIGNAL = getattr(signal, "SIGIO", None)
 _WORKFLOW_READ_FIELDS = {
     "uuid",
     "create_time",
@@ -258,6 +263,17 @@ class CatalogSnapshotProvider(Protocol):
     def catalog_snapshot(self) -> AbstractContextManager[str]: ...
 
 
+class CatalogPublisher(Protocol):
+    """Apply 提交后、Catalog guard 释放前执行 complete replace 的 capability。"""
+
+    def publish(self) -> object: ...
+
+    def invalidate(self) -> None: ...
+
+    @property
+    def authority_id(self) -> str: ...
+
+
 def _sha256(data: bytes) -> str:
     return f"sha256:{hashlib.sha256(data).hexdigest()}"
 
@@ -285,6 +301,7 @@ class WorkflowService:
         resource_resolver: Optional[ResourceSlotResolver] = None,
         material_source_authority: MaterialSourceStaticAuthority | None = None,
         material_reservations: object | None = None,
+        catalog_publisher: CatalogPublisher | None = None,
     ):
         # Compatibility-only constructor input. Task creation deliberately does
         # not invoke Inventory; EdgeScheduler owns the post-commit saga.
@@ -297,6 +314,7 @@ class WorkflowService:
             else UnconfiguredResourceSlotResolver()
         )
         self._material_source_authority = material_source_authority
+        self._catalog_publisher = catalog_publisher
         self._locks_guard = threading.Lock()
         self._authoring_locks: Dict[str, threading.RLock] = {}
 
@@ -378,19 +396,28 @@ class WorkflowService:
             public_meta_data.pop("unilab", None)
             if "unilab" in current["meta_data"]:
                 public_meta_data["unilab"] = current["meta_data"]["unilab"]
-            return self._store.update_workflow(
-                identity,
-                name=name,
-                tags=tags,
-                description=self._optional_text(description),
-                meta_data=public_meta_data,
-            )
+            with self._catalog_mutation() as catalog_authority_id:
+                updated = self._store.update_workflow(
+                    identity,
+                    name=name,
+                    tags=tags,
+                    description=self._optional_text(description),
+                    meta_data=public_meta_data,
+                    catalog_authority_id=catalog_authority_id,
+                )
+                self._publish_catalog_after_mutation()
+                return updated
 
     def delete_workflow(self, workflow_uuid: str) -> None:
         identity = self.get_workflow(workflow_uuid)["uuid"]
         with self._authoring_lock(identity):
             self.get_workflow(identity)
-            self._store.delete_workflow(identity)
+            with self._catalog_mutation() as catalog_authority_id:
+                self._store.delete_workflow(
+                    identity,
+                    catalog_authority_id=catalog_authority_id,
+                )
+                self._publish_catalog_after_mutation()
 
     def get_graph(self, workflow_uuid: str) -> Dict[str, Any]:
         identity = self.get_workflow(workflow_uuid)["uuid"]
@@ -439,14 +466,18 @@ class WorkflowService:
                 self._validate_material_source(
                     {"nodes": [item.model_dump() for item in node_values]}
                 )
-                return self._store.save_graph(
-                    identity,
-                    revision=revision,
-                    nodes=node_values,
-                    edges=edge_values,
-                    protect_reserved_metadata=True,
-                    validate_workflow_io_contract=True,
-                )
+                with self._catalog_mutation() as catalog_authority_id:
+                    saved = self._store.save_graph(
+                        identity,
+                        revision=revision,
+                        nodes=node_values,
+                        edges=edge_values,
+                        protect_reserved_metadata=True,
+                        validate_workflow_io_contract=True,
+                        catalog_authority_id=catalog_authority_id,
+                    )
+                    self._publish_catalog_after_mutation()
+                    return saved
             except ValidationError:
                 raise WorkflowError("invalid_input") from None
             except MaterialSourceAuthorityError as error:
@@ -538,6 +569,7 @@ class WorkflowService:
         cleanup_status = cleanup_status.strip().lower()
         if status and status not in {
             "pending",
+            "admission_blocked",
             "running",
             "canceling",
             "succeeded",
@@ -722,6 +754,36 @@ class WorkflowService:
             if self._store.is_device_action_job(identity):
                 raise WorkflowError("not_found")
             return self._store.get_job(identity)
+        except StoreNotFound:
+            raise WorkflowError("not_found") from None
+
+    def list_workflow_task_runtime_events(
+        self,
+        task_uuid: str,
+        *,
+        after_sequence: int = 0,
+        limit: int = 100,
+    ) -> Dict[str, Any]:
+        try:
+            identity = validate_uuid(task_uuid)
+        except ValueError:
+            raise WorkflowError("invalid_input") from None
+        if (
+            isinstance(after_sequence, bool)
+            or not isinstance(after_sequence, int)
+            or after_sequence < 0
+            or after_sequence > (1 << 63) - 1
+            or isinstance(limit, bool)
+            or not isinstance(limit, int)
+            or not 1 <= limit <= 500
+        ):
+            raise WorkflowError("invalid_input")
+        try:
+            return self._store.list_task_runtime_events(
+                identity,
+                after_sequence=after_sequence,
+                limit=limit,
+            )
         except StoreNotFound:
             raise WorkflowError("not_found") from None
 
@@ -1338,7 +1400,9 @@ class WorkflowService:
                         workflow_uuid=workflow_uuid,
                         candidate_hash=candidate_hash,
                         validate_draft_state=validate_draft_linearization,
+                        catalog_authority_id=self._catalog_authority_id(),
                     )
+                    self._publish_catalog_after_mutation()
             except StoreAuthoringConflict as error:
                 raise WorkflowConflict(error.code) from None
             except StoreRevisionConflict:
@@ -1609,6 +1673,11 @@ class WorkflowService:
         expected_hash: Optional[str],
     ) -> None:
         """在可安全中断的 lease 下执行 fsync 后的原子 CAS replace。"""
+
+        if fcntl is None or _LEASE_BREAK_SIGNAL is None:
+            # Windows 没有 Linux file lease / lease break signal；导入和只读
+            # Registry 检查必须可用，但无法证明 CAS 安全时继续失败关闭。
+            raise WorkflowConflict("draft_hash_conflict")
 
         target_descriptor = -1
         temporary_descriptor = -1
@@ -2043,6 +2112,38 @@ class WorkflowService:
         except Exception:
             raise WorkflowError("template_catalog_unavailable") from None
         return self._validate_catalog_fingerprint(value)
+
+    def _catalog_authority_id(self) -> str | None:
+        if self._catalog_publisher is None:
+            return None
+        authority_id = self._catalog_publisher.authority_id
+        if not isinstance(authority_id, str) or not authority_id:
+            raise WorkflowError("template_catalog_unavailable")
+        return authority_id
+
+    @contextmanager
+    def _catalog_mutation(self) -> Iterator[str | None]:
+        """让 eligibility mutation 与 complete publication 共享 Catalog guard。"""
+
+        if self._catalog_publisher is None:
+            yield None
+            return
+        with self._catalog_snapshot():
+            yield self._catalog_authority_id()
+
+    def _publish_catalog_after_mutation(self) -> None:
+        if self._catalog_publisher is None:
+            return
+        try:
+            self._catalog_publisher.publish()
+        except Exception:  # noqa: BLE001 - adapter boundary
+            try:
+                self._catalog_publisher.invalidate()
+            except Exception:  # noqa: BLE001 - marker 已在 Store transaction 内删除
+                _LOGGER.exception(
+                    "Catalog publication 失败后的冗余 unavailable cleanup 失败"
+                )
+            raise WorkflowError("template_catalog_unavailable") from None
 
     @staticmethod
     def _validate_catalog_fingerprint(value: Any) -> str:

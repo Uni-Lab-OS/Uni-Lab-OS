@@ -49,6 +49,36 @@ _restart_reason: str = ""
 RESTART_EXIT_CODE = 42
 
 
+def _build_workflow_device_identity_map(resource_tree_set: Any) -> dict[str, str]:
+    """Build the frozen workflow-executor identity map for local ROS dispatch."""
+
+    device_ids_by_identity = {"host_node": "host_node"}
+    for node in resource_tree_set.all_nodes:
+        if node.res_content.type != "device":
+            continue
+        device_ids_by_identity[node.res_content.uuid] = node.res_content.id
+        device_ids_by_identity[node.res_content.id] = node.res_content.id
+    return device_ids_by_identity
+
+
+def _workflow_ros_execution_mode(
+    *,
+    workspace_attached: bool,
+    backend: str | None,
+    test_mode: bool,
+    physical_execution_enabled: bool,
+) -> str | None:
+    """Select the explicitly authorized local WorkflowTask ROS executor mode."""
+
+    if not workspace_attached or backend != "ros":
+        return None
+    if test_mode:
+        return "simulated"
+    if physical_execution_enabled:
+        return "physical"
+    return None
+
+
 def _build_child_argv():
     """Build sys.argv for child process, stripping supervisor-only arguments."""
     result = []
@@ -344,6 +374,15 @@ def parse_args():
         action="store_true",
         default=False,
         help="Test mode: all actions simulate execution and return mock results without running real hardware",
+    )
+    parser.add_argument(
+        "--enable_workflow_physical_execution",
+        action="store_true",
+        default=False,
+        help=(
+            "Explicitly allow local WorkflowTask jobs to invoke real ROS device "
+            "actions. Without this opt-in, non-test workflow tasks remain pending."
+        ),
     )
     parser.add_argument(
         "--external_devices_only",
@@ -928,9 +967,9 @@ def main():
         BasicConfig.sk = args_dict.get("sk", "")
         print_status("传入了sk参数，优先采用传入参数！", "info")
     BasicConfig.working_dir = working_dir
-    if workspace_source is not None:
-        from unilabos.workflow.catalog import CatalogAuthority
+    from unilabos.workflow.catalog import CatalogAuthority
 
+    if workspace_source is not None:
         workspace_root = workspace_source.root.resolve()
         # PackageCatalog workspaces may contain devices/resources only.  The
         # editable Workflow source protocol is an additional, explicit
@@ -941,11 +980,14 @@ def main():
             if (workspace_root / "package.yaml").is_file()
             else ()
         )
-        if BasicConfig.workflow_graph_authority is None:
-            BasicConfig.workflow_graph_authority = CatalogAuthority(
-                authority_id="os-local",
-                kind="local",
-            )
+    # A domain Package Workspace is optional for local Edge debugging. The OS
+    # registry still publishes a Catalog snapshot, so it needs the same local
+    # Graph Authority even when only built-in device capabilities are loaded.
+    if BasicConfig.workflow_graph_authority is None:
+        BasicConfig.workflow_graph_authority = CatalogAuthority(
+            authority_id="os-local",
+            kind="local",
+        )
 
     # package 子命令：在配置/鉴权就绪后尽早处理，不进入设备 bootstrap
     if args_dict.get("command") in ("package", "pkg"):
@@ -1304,27 +1346,34 @@ def main():
         # the legacy cloud workflow_start Edge scheduler. Wire its Jobs to the
         # same HostNode/ROS execution backend whenever a Package Workspace owns
         # the local Workflow authority.
-        if (
-            workspace_source is not None
-            and args_dict.get("backend") == "ros"
-            and BasicConfig.test_mode
-        ):
+        workflow_execution_mode = _workflow_ros_execution_mode(
+            workspace_attached=workspace_source is not None,
+            backend=args_dict.get("backend"),
+            test_mode=BasicConfig.test_mode,
+            physical_execution_enabled=bool(
+                args_dict.get("enable_workflow_physical_execution", False)
+            ),
+        )
+        if workflow_execution_mode is not None:
             from unilabos.app.scheduler.backend import JobExecutionBackend
 
-            device_ids_by_identity = {}
-            for node in resource_tree_set.all_nodes:
-                if node.res_content.type != "device":
-                    continue
-                device_ids_by_identity[node.res_content.uuid] = node.res_content.id
-                device_ids_by_identity[node.res_content.id] = node.res_content.id
+            device_ids_by_identity = _build_workflow_device_identity_map(
+                resource_tree_set
+            )
             device_identity_resolver = device_ids_by_identity.get
             workflow_job_dispatcher = JobExecutionBackend()
             workflow_job_dispatcher.start()
             args_dict["bridges"].append(workflow_job_dispatcher)
-            print_status(
-                "WorkflowTask ROS 执行后端已启用（仅 test_mode）",
-                "info",
-            )
+            if workflow_execution_mode == "physical":
+                print_status(
+                    "WorkflowTask ROS 物理执行后端已显式启用：动作将调用真实设备",
+                    "warning",
+                )
+            else:
+                print_status(
+                    "WorkflowTask ROS 执行后端已启用（test_mode 模拟动作）",
+                    "info",
+                )
         elif workspace_source is not None and args_dict.get("backend") == "ros":
             print_status(
                 "WorkflowTask ROS 物理执行未启用：durable Execution Claims 尚未接入",
@@ -1347,15 +1396,19 @@ def main():
                 resource_registry_snapshot=args_dict.get(
                     "_workflow_resource_registry_snapshot"
                 ),
-                inventory_graph_snapshot={
-                    "source_id": os.path.basename(
-                        str(args_dict.get("_graph_file_path") or "os-current")
-                    ),
-                    "nodes": [
-                        node.res_content.model_dump(by_alias=True)
-                        for node in resource_tree_set.all_nodes
-                    ],
-                },
+                inventory_graph_snapshot=(
+                    {
+                        "source_id": os.path.basename(
+                            str(args_dict.get("_graph_file_path") or "os-current")
+                        ),
+                        "nodes": [
+                            node.res_content.model_dump(by_alias=True)
+                            for node in resource_tree_set.all_nodes
+                        ],
+                    }
+                    if workspace_catalog is not None
+                    else None
+                ),
                 package_sources=args_dict.get("_package_sources", ()),
                 package_catalogs=args_dict.get("_package_catalogs", ()),
                 workflow_job_dispatcher=workflow_job_dispatcher,

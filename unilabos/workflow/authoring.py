@@ -72,10 +72,10 @@ def device(device_id: str | None = None) -> Any:
     return _DeviceSelector()
 
 
-def resource_ref(material_uuid: str) -> Any:
-    """标记一个 compile-only ResourceSlot mount 引用。"""
+def resource_ref(resource_id: str) -> Any:
+    """标记一个 compile-only ResourceSlot 引用，可用于 mount 或 Action 参数。"""
 
-    del material_uuid
+    del resource_id
     raise RuntimeError("Workflow authoring resource_ref() 只能由静态编译器解析")
 
 

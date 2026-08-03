@@ -5,16 +5,21 @@ from __future__ import annotations
 import copy
 import inspect
 import json
+import threading
 import time
 from pathlib import Path
 from typing import Any
-from uuid import uuid4
+from uuid import NAMESPACE_URL, uuid4, uuid5
 
 from fastapi.testclient import TestClient
 
 import tests.app.test_d1a_device_action_task_contract as contract
 from unilabos.app.scheduler.backend import JobExecutionBackend, create_edge_stack
 from unilabos.app.scheduler.dispatch import RecordingDispatcher
+from unilabos.app.scheduler.inventory import (
+    InventoryService,
+    ResourceTemplateIdentity,
+)
 from unilabos.app.scheduler.models import WorkflowNode, WorkflowSpec
 from unilabos.app.scheduler.monitor import MonitorBus
 from unilabos.app.scheduler.service import EdgeScheduler
@@ -25,6 +30,7 @@ from unilabos.workflow.device_action_task import (
     DeviceActionTaskRuntimeBridge,
     DeviceActionTaskService,
 )
+from unilabos.workflow.models import WorkflowNodeWrite
 from unilabos.workflow.runtime import WorkflowRuntimeCoordinator, WorkflowRuntimeWorker
 from unilabos.workflow.service import WorkflowService
 from unilabos.workflow.store import WorkflowStore
@@ -45,6 +51,56 @@ def _contains_identity(value: Any, identities: set[str]) -> bool:
     if isinstance(value, list):
         return any(_contains_identity(item, identities) for item in value)
     return isinstance(value, str) and value in identities
+
+
+def _create_m1ef_edge_stack(
+    tmp_path: Path,
+    *,
+    host_node_getter: Any,
+    monitor: Any = None,
+) -> tuple[EdgeScheduler, JobExecutionBackend, InventoryService]:
+    inventory = InventoryService.open(
+        working_dir=tmp_path,
+        resource_templates={
+            contract.RESOURCE_TEMPLATE_UUID: ResourceTemplateIdentity(
+                uuid=contract.RESOURCE_TEMPLATE_UUID,
+                material_class="Robot",
+            )
+        },
+    )
+    inventory.bootstrap_resource_graph(
+        {
+            "source_id": "d1a-m1ef-test-devices.json",
+            "fingerprint": "sha256:" + "9" * 64,
+            "materials": [
+                {
+                    "uuid": str(uuid5(NAMESPACE_URL, f"d1a:{device_id}")),
+                    "resource_template_uuid": contract.RESOURCE_TEMPLATE_UUID,
+                    "parent_uuid": None,
+                    "class": "Robot",
+                    "barcode": "",
+                    "name": device_id,
+                    "description": "D1A M1EF test executor",
+                    "meta_data": {
+                        "source": "resource-tree-set",
+                        "source_node_id": device_id,
+                    },
+                    "config": {},
+                    "data": {},
+                    "material_kind": "device",
+                }
+                for device_id in ("robot", "material-robot")
+            ],
+            "relative_positions": [],
+            "sites": [],
+        }
+    )
+    scheduler, backend = create_edge_stack(
+        host_node_getter=host_node_getter,
+        inventory=inventory,
+        monitor=monitor,
+    )
+    return scheduler, backend, inventory
 
 
 class FeedbackHost:
@@ -95,6 +151,22 @@ class UncertainFeedbackHost(FeedbackHost):
         del action_type, action_kwargs, sample_material, server_info
         self.sent.append(item)
         raise RuntimeError("transport acknowledgement was lost")
+
+
+class CancelCompletingHost(FeedbackHost):
+    """Host seam that emits the physical canceled terminal after cancel ingress."""
+
+    def cancel_goal_or_defer(self, job_uuid: str) -> bool:
+        accepted = super().cancel_goal_or_defer(job_uuid)
+        item = next(sent for sent in self.sent if sent.job_id == job_uuid)
+        assert self.backend is not None
+        self.backend.publish_job_status(
+            {},
+            item,
+            "failed",
+            serialize_result_info("Job was cancelled", False, {}),
+        )
+        return accepted
 
 
 class GenericRecordingDispatcher:
@@ -230,9 +302,11 @@ def test_duplicate_formal_task_identity_preserves_the_existing_scheduler_run() -
         pass
 
     assert scheduler.snapshot() == before_snapshot
-    assert scheduler._device_action_tasks_by_job_uuid == before_mappings == {
-        job_uuid: task_uuid
-    }
+    assert (
+        scheduler._device_action_tasks_by_job_uuid
+        == before_mappings
+        == {job_uuid: task_uuid}
+    )
     assert scheduler._job_resource_locks == before_resource_locks
 
 
@@ -320,7 +394,10 @@ def test_claim_hook_failure_cannot_leave_a_dispatchable_scheduler_run(
     template = snapshot.node_templates[0]
     host = FeedbackHost()
     host.auto_complete = False
-    scheduler, backend = create_edge_stack(host_node_getter=lambda: host)
+    scheduler, backend, inventory = _create_m1ef_edge_stack(
+        tmp_path,
+        host_node_getter=lambda: host,
+    )
     host.backend = backend
     bridge = DeviceActionTaskRuntimeBridge(
         store=store,
@@ -376,6 +453,7 @@ def test_claim_hook_failure_cannot_leave_a_dispatchable_scheduler_run(
         client.close()
         bridge.stop()
         backend.stop()
+        inventory.close()
         store.close()
 
 
@@ -396,7 +474,10 @@ def test_transport_uncertainty_opens_durable_fence_and_keeps_next_task_pending(
         ],
     )
     template = snapshot.node_templates[0]
-    scheduler, backend = create_edge_stack(host_node_getter=lambda: None)
+    scheduler, backend, inventory = _create_m1ef_edge_stack(
+        tmp_path,
+        host_node_getter=lambda: None,
+    )
     bridge = DeviceActionTaskRuntimeBridge(
         store=store,
         coordinator=WorkflowRuntimeCoordinator(store),
@@ -431,8 +512,7 @@ def test_transport_uncertainty_opens_durable_fence_and_keeps_next_task_pending(
             "/api/v1/device-action-tasks", json=contract._request(harness)
         ).json()["data"]
         assert _wait(
-            lambda: service.get(first["task_uuid"])["job_status"]
-            == "execution_unknown"
+            lambda: service.get(first["task_uuid"])["job_status"] == "execution_unknown"
         )
         second = client.post(
             "/api/v1/device-action-tasks", json=contract._request(harness)
@@ -449,6 +529,7 @@ def test_transport_uncertainty_opens_durable_fence_and_keeps_next_task_pending(
         client.close()
         bridge.stop()
         backend.stop()
+        inventory.close()
         store.close()
 
 
@@ -475,7 +556,10 @@ def test_transport_unknown_fences_every_action_on_the_selected_device(
         ],
     )
     templates = {item["name"]: item for item in snapshot.node_templates}
-    scheduler, backend = create_edge_stack(host_node_getter=lambda: None)
+    scheduler, backend, inventory = _create_m1ef_edge_stack(
+        tmp_path,
+        host_node_getter=lambda: None,
+    )
     bridge = DeviceActionTaskRuntimeBridge(
         store=store,
         coordinator=WorkflowRuntimeCoordinator(store),
@@ -514,8 +598,7 @@ def test_transport_unknown_fences_every_action_on_the_selected_device(
             "/api/v1/device-action-tasks", json=contract._request(harness)
         ).json()["data"]
         assert _wait(
-            lambda: service.get(first["task_uuid"])["job_status"]
-            == "execution_unknown"
+            lambda: service.get(first["task_uuid"])["job_status"] == "execution_unknown"
         )
 
         second = client.post(
@@ -534,6 +617,7 @@ def test_transport_unknown_fences_every_action_on_the_selected_device(
         client.close()
         bridge.stop()
         backend.stop()
+        inventory.close()
         store.close()
 
 
@@ -556,8 +640,9 @@ def test_restart_promotes_inflight_claim_to_unknown_and_fences_new_runtime(
     template = snapshot.node_templates[0]
     first_host = FeedbackHost()
     first_host.auto_complete = False
-    first_scheduler, first_backend = create_edge_stack(
-        host_node_getter=lambda: first_host
+    first_scheduler, first_backend, first_inventory = _create_m1ef_edge_stack(
+        tmp_path,
+        host_node_getter=lambda: first_host,
     )
     first_host.backend = first_backend
     coordinator = WorkflowRuntimeCoordinator(store)
@@ -595,6 +680,7 @@ def test_restart_promotes_inflight_claim_to_unknown_and_fences_new_runtime(
     )
     second_bridge: DeviceActionTaskRuntimeBridge | None = None
     second_backend: JobExecutionBackend | None = None
+    second_inventory: InventoryService | None = None
     second_client: TestClient | None = None
     try:
         first = first_client.post(
@@ -603,13 +689,15 @@ def test_restart_promotes_inflight_claim_to_unknown_and_fences_new_runtime(
         assert _wait(lambda: len(first_host.sent) == 1)
         first_bridge.stop()
         first_backend.stop()
+        first_inventory.close()
 
         coordinator.recover_startup()
 
         second_host = FeedbackHost()
         second_host.auto_complete = False
-        second_scheduler, second_backend = create_edge_stack(
-            host_node_getter=lambda: second_host
+        second_scheduler, second_backend, second_inventory = _create_m1ef_edge_stack(
+            tmp_path,
+            host_node_getter=lambda: second_host,
         )
         second_host.backend = second_backend
         second_bridge = DeviceActionTaskRuntimeBridge(
@@ -671,8 +759,12 @@ def test_restart_promotes_inflight_claim_to_unknown_and_fences_new_runtime(
             second_bridge.stop()
         if second_backend is not None:
             second_backend.stop()
+        if second_inventory is not None:
+            second_inventory.close()
         first_bridge.stop()
         first_backend.stop()
+        if second_inventory is None:
+            first_inventory.close()
         store.close()
 
 
@@ -695,7 +787,10 @@ def test_durable_completion_precedes_scheduler_release_crash_window(
     template = snapshot.node_templates[0]
     host = FeedbackHost()
     host.auto_complete = False
-    scheduler, backend = create_edge_stack(host_node_getter=lambda: host)
+    scheduler, backend, inventory = _create_m1ef_edge_stack(
+        tmp_path,
+        host_node_getter=lambda: host,
+    )
     host.backend = backend
     bridge = DeviceActionTaskRuntimeBridge(
         store=store,
@@ -756,6 +851,7 @@ def test_durable_completion_precedes_scheduler_release_crash_window(
         client.close()
         bridge.stop()
         backend.stop()
+        inventory.close()
         store.close()
 
 
@@ -777,7 +873,10 @@ def test_late_result_closes_transport_uncertainty_and_releases_fence(
     )
     template = snapshot.node_templates[0]
     host = UncertainFeedbackHost()
-    scheduler, backend = create_edge_stack(host_node_getter=lambda: host)
+    scheduler, backend, inventory = _create_m1ef_edge_stack(
+        tmp_path,
+        host_node_getter=lambda: host,
+    )
     host.backend = backend
     bridge = DeviceActionTaskRuntimeBridge(
         store=store,
@@ -813,8 +912,9 @@ def test_late_result_closes_transport_uncertainty_and_releases_fence(
             "/api/v1/device-action-tasks", json=contract._request(harness)
         ).json()["data"]
         assert _wait(
-            lambda: service.get(created["task_uuid"])["job_status"]
-            == "execution_unknown"
+            lambda: (
+                service.get(created["task_uuid"])["job_status"] == "execution_unknown"
+            )
         )
 
         backend.publish_job_status(
@@ -823,19 +923,18 @@ def test_late_result_closes_transport_uncertainty_and_releases_fence(
             "success",
             serialize_result_info("", True, {"completed": True}),
         )
-        assert _wait(
-            lambda: service.get(created["task_uuid"])["status"] == "succeeded"
-        )
+        assert _wait(lambda: service.get(created["task_uuid"])["status"] == "succeeded")
 
         view = service.get(created["task_uuid"])
         assert view["job_status"] == "succeeded"
         assert view["control_status"] == "active"
-        assert view["cleanup_status"] == "none"
+        assert view["cleanup_status"] == "settled"
         assert bridge.busy_device_action_keys() == set()
     finally:
         client.close()
         bridge.stop()
         backend.stop()
+        inventory.close()
         store.close()
 
 
@@ -858,7 +957,8 @@ def test_device_action_runtime_reuses_formal_job_for_feedback_and_typed_result(
     template = snapshot.node_templates[0]
     host = FeedbackHost()
     monitor = MonitorBus()
-    scheduler, backend = create_edge_stack(
+    scheduler, backend, inventory = _create_m1ef_edge_stack(
+        tmp_path,
         host_node_getter=lambda: host,
         monitor=monitor,
     )
@@ -944,6 +1044,7 @@ def test_device_action_runtime_reuses_formal_job_for_feedback_and_typed_result(
         client.close()
         bridge.stop()
         backend.stop()
+        inventory.close()
         store.close()
 
 
@@ -966,7 +1067,10 @@ def test_busy_second_task_stays_durable_pending_until_first_releases(
     template = snapshot.node_templates[0]
     host = FeedbackHost()
     host.auto_complete = False
-    scheduler, backend = create_edge_stack(host_node_getter=lambda: host)
+    scheduler, backend, inventory = _create_m1ef_edge_stack(
+        tmp_path,
+        host_node_getter=lambda: host,
+    )
     host.backend = backend
     bridge = DeviceActionTaskRuntimeBridge(
         store=store,
@@ -1029,6 +1133,7 @@ def test_busy_second_task_stays_durable_pending_until_first_releases(
         client.close()
         bridge.stop()
         backend.stop()
+        inventory.close()
         store.close()
 
 
@@ -1051,7 +1156,10 @@ def test_running_task_normalizes_result_with_its_frozen_contract_snapshot(
     template = snapshot.node_templates[0]
     host = FeedbackHost()
     host.auto_complete = False
-    scheduler, backend = create_edge_stack(host_node_getter=lambda: host)
+    scheduler, backend, inventory = _create_m1ef_edge_stack(
+        tmp_path,
+        host_node_getter=lambda: host,
+    )
     host.backend = backend
     bridge = DeviceActionTaskRuntimeBridge(
         store=store,
@@ -1131,6 +1239,7 @@ def test_running_task_normalizes_result_with_its_frozen_contract_snapshot(
         client.close()
         bridge.stop()
         backend.stop()
+        inventory.close()
         store.close()
 
 
@@ -1175,7 +1284,10 @@ def test_pending_task_dispatches_with_its_frozen_action_transport_type(
     )
     host = FeedbackHost()
     host.auto_complete = False
-    scheduler, backend = create_edge_stack(host_node_getter=lambda: host)
+    scheduler, backend, inventory = _create_m1ef_edge_stack(
+        tmp_path,
+        host_node_getter=lambda: host,
+    )
     host.backend = backend
     bridge = DeviceActionTaskRuntimeBridge(
         store=store,
@@ -1243,6 +1355,7 @@ def test_pending_task_dispatches_with_its_frozen_action_transport_type(
         client.close()
         bridge.stop()
         backend.stop()
+        inventory.close()
         store.close()
 
 
@@ -1265,7 +1378,10 @@ def test_durable_cancel_command_requests_host_cancel_and_finishes_canceled(
     template = snapshot.node_templates[0]
     host = FeedbackHost()
     host.auto_complete = False
-    scheduler, backend = create_edge_stack(host_node_getter=lambda: host)
+    scheduler, backend, inventory = _create_m1ef_edge_stack(
+        tmp_path,
+        host_node_getter=lambda: host,
+    )
     host.backend = backend
     coordinator = WorkflowRuntimeCoordinator(store)
     bridge = DeviceActionTaskRuntimeBridge(
@@ -1303,6 +1419,10 @@ def test_durable_cancel_command_requests_host_cancel_and_finishes_canceled(
             "/api/v1/device-action-tasks", json=contract._request(harness)
         ).json()["data"]
         assert _wait(lambda: len(host.sent) == 1)
+        following = client.post(
+            "/api/v1/device-action-tasks", json=contract._request(harness)
+        ).json()["data"]
+        assert service.get(following["task_uuid"])["status"] == "pending"
         response = client.post(
             f"/api/v1/workflow-tasks/{created['task_uuid']}/commands",
             json={
@@ -1326,8 +1446,368 @@ def test_durable_cancel_command_requests_host_cancel_and_finishes_canceled(
         )
         assert _wait(lambda: service.get(created["task_uuid"])["status"] == "canceled")
         assert service.get(created["task_uuid"])["job_status"] == "canceled"
+        assert _wait(lambda: len(host.sent) == 2)
+        assert host.sent[1].task_id == following["task_uuid"]
+        assert service.get(following["task_uuid"])["status"] == "running"
     finally:
         client.close()
         bridge.stop()
         backend.stop()
+        inventory.close()
         store.close()
+
+
+def _create_generic_device_workflow_task(
+    service: WorkflowService,
+    *,
+    device_material_uuid: str,
+) -> tuple[dict[str, Any], dict[str, Any]]:
+    workflow = service.create_workflow(
+        name="F007 cancellation lock release",
+        tags=[],
+        description=None,
+        meta_data={},
+        workflow_uuid=str(uuid4()),
+    )
+    node = WorkflowNodeWrite(
+        uuid=str(uuid4()),
+        material_uuid=device_material_uuid,
+        name="move",
+        status="idle",
+        type="device_action",
+        pose={},
+        param={"duration_seconds": 30},
+        action_name="move",
+        action_type="test.action.Move",
+        execution_policy={},
+        disabled=False,
+        minimized=False,
+        meta_data={},
+    )
+    service.save_graph(
+        workflow["uuid"],
+        revision=workflow["revision"],
+        nodes=[node],
+        edges=[],
+    )
+    task = service.create_workflow_task(
+        workflow_uuid=workflow["uuid"],
+        run_mode="normal",
+        target_node_uuid=None,
+        input_value={},
+        description=None,
+        meta_data={},
+    )
+    job = service.list_workflow_node_jobs(task["uuid"])[0]
+    return task, job
+
+
+def test_generic_workflow_cancel_reaches_host_and_physical_terminal_unlocks_next_task(
+    tmp_path: Path,
+) -> None:
+    """A public cancel command must not strand the device execution lock."""
+
+    store = WorkflowStore(tmp_path / "workflow.db")
+    service = WorkflowService(store)
+    device_material_uuid = str(uuid4())
+    first_task, first_job = _create_generic_device_workflow_task(
+        service,
+        device_material_uuid=device_material_uuid,
+    )
+    host = CancelCompletingHost()
+    host.auto_complete = False
+    backend = JobExecutionBackend(host_node_getter=lambda: host)
+    host.backend = backend
+    worker = WorkflowRuntimeWorker(
+        WorkflowRuntimeCoordinator(store),
+        dispatcher=backend,
+        device_identity_resolver=lambda identity: (
+            "robot" if identity == device_material_uuid else None
+        ),
+        poll_interval_seconds=0.01,
+    )
+    try:
+        backend.start()
+        worker.start()
+        assert _wait(lambda: len(host.sent) == 1)
+
+        second_task, second_job = _create_generic_device_workflow_task(
+            service,
+            device_material_uuid=device_material_uuid,
+        )
+        assert _wait(
+            lambda: (
+                service.get_workflow_node_job(second_job["uuid"])["status"] == "running"
+            )
+        )
+        assert len(host.sent) == 1
+
+        service.create_workflow_task_command(
+            first_task["uuid"],
+            command_type="cancel",
+            target_node_uuid=None,
+            idempotency_key="f007-cancel-first-workflow",
+            description="operator terminates the running workflow",
+            meta_data={"source": "frontend"},
+        )
+
+        assert _wait(lambda: len(host.cancel_requests) == 1), (
+            "the durable WorkflowTask cancel command was consumed but never "
+            "forwarded to the execution backend/HostNode"
+        )
+        assert host.cancel_requests == [first_job["uuid"]]
+        assert _wait(lambda: len(host.sent) == 2), (
+            "the HostNode reported the physical canceled terminal, but the "
+            "same-device queued workflow remained locked"
+        )
+        assert host.sent[1].job_id == second_job["uuid"]
+        assert _wait(
+            lambda: (
+                service.get_workflow_node_job(first_job["uuid"])["status"] == "canceled"
+            )
+        )
+        settled = service.get_workflow_task(first_task["uuid"])
+        assert settled["status"] == "canceled"
+        assert settled["cleanup_status"] == "settled"
+        assert service.get_workflow_task(second_task["uuid"])["status"] == "running"
+    finally:
+        worker.stop()
+        worker.join(timeout=1)
+        backend.stop()
+        service.close()
+
+
+def test_generic_cancel_terminal_commits_before_backend_releases_lock(
+    tmp_path: Path,
+) -> None:
+    """A physical terminal winning the cancel race must not become unknown."""
+
+    store = WorkflowStore(tmp_path / "workflow.db")
+    service = WorkflowService(store)
+    device_material_uuid = str(uuid4())
+    task, job = _create_generic_device_workflow_task(
+        service,
+        device_material_uuid=device_material_uuid,
+    )
+    host = FeedbackHost()
+    host.auto_complete = False
+    backend = JobExecutionBackend(host_node_getter=lambda: host)
+    host.backend = backend
+    backend_released = threading.Event()
+    allow_legacy_finished_listener = threading.Event()
+
+    def block_after_backend_release(*_args: Any) -> None:
+        backend_released.set()
+        assert allow_legacy_finished_listener.wait(timeout=2)
+
+    backend.add_job_finished_listener(block_after_backend_release)
+
+    def complete_while_cancel_is_inflight(job_uuid: str) -> bool:
+        item = next(sent for sent in host.sent if sent.job_id == job_uuid)
+        backend.publish_job_status(
+            {},
+            item,
+            "failed",
+            serialize_result_info("Job was cancelled", False, {}),
+        )
+        assert backend_released.wait(timeout=2)
+        return False
+
+    host.cancel_goal_or_defer = complete_while_cancel_is_inflight  # type: ignore[method-assign]
+    worker = WorkflowRuntimeWorker(
+        WorkflowRuntimeCoordinator(store),
+        dispatcher=backend,
+        device_identity_resolver=lambda identity: (
+            "robot" if identity == device_material_uuid else None
+        ),
+        poll_interval_seconds=0.01,
+    )
+    try:
+        backend.start()
+        worker.start()
+        assert _wait(lambda: len(host.sent) == 1)
+        service.create_workflow_task_command(
+            task["uuid"],
+            command_type="cancel",
+            target_node_uuid=None,
+            idempotency_key="f007-cancel-terminal-race",
+            description="physical terminal wins the cancel request race",
+            meta_data={"source": "frontend"},
+        )
+
+        assert backend_released.wait(timeout=2)
+        assert _wait(
+            lambda: service.get_workflow_node_job(job["uuid"])["status"] == "canceled"
+        )
+        assert service.get_workflow_task(task["uuid"])["status"] == "canceled"
+    finally:
+        allow_legacy_finished_listener.set()
+        worker.stop()
+        worker.join(timeout=1)
+        backend.remove_job_finished_listener(block_after_backend_release)
+        backend.stop()
+        service.close()
+
+
+def test_generic_cancel_sweep_cannot_overtake_inflight_terminal_commit(
+    tmp_path: Path,
+) -> None:
+    """终态快照读取和终态写入必须构成一个完整结算单元。"""
+
+    completion_read = threading.Event()
+    release_completion = threading.Event()
+
+    class CompletionReadBarrierCoordinator(WorkflowRuntimeCoordinator):
+        def _execution_job(self, job_uuid: str) -> dict[str, Any]:
+            job = super()._execution_job(job_uuid)
+            if (
+                threading.current_thread().name == "f007-completion"
+                and not completion_read.is_set()
+            ):
+                completion_read.set()
+                assert release_completion.wait(timeout=2)
+            return job
+
+    class RejectingCancelDispatcher(GenericRecordingDispatcher):
+        def __init__(self) -> None:
+            super().__init__()
+            self.cancel_checked = threading.Event()
+
+        def request_cancel(self, _job_uuid: str) -> bool:
+            self.cancel_checked.set()
+            return False
+
+    store = WorkflowStore(tmp_path / "workflow.db")
+    service = WorkflowService(store)
+    coordinator = CompletionReadBarrierCoordinator(store)
+    task, job = _create_generic_device_workflow_task(
+        service,
+        device_material_uuid=str(uuid4()),
+    )
+    coordinator.start_task(task["uuid"])
+    coordinator.transition_job(job["uuid"], "dispatched")
+    coordinator.transition_job(job["uuid"], "running")
+    service.create_workflow_task_command(
+        task["uuid"],
+        command_type="cancel",
+        target_node_uuid=None,
+        idempotency_key="f007-overlapping-terminal-settlement",
+        description="cancel overlaps physical terminal callback",
+        meta_data={"source": "frontend"},
+    )
+    coordinator.consume_next_command(task["uuid"])
+    dispatcher = RejectingCancelDispatcher()
+    worker = WorkflowRuntimeWorker(
+        coordinator,
+        dispatcher=dispatcher,
+        device_identity_resolver=lambda _identity: "robot",
+    )
+    completion = threading.Thread(
+        target=worker._on_job_finished,
+        args=(job["uuid"], False, {}, "normal"),
+        name="f007-completion",
+    )
+    sweep = threading.Thread(
+        target=worker._sweep_execution_cancellations,
+        name="f007-cancel-sweep",
+    )
+    try:
+        completion.start()
+        assert completion_read.wait(timeout=2)
+        sweep.start()
+        assert dispatcher.cancel_checked.wait(timeout=2)
+        release_completion.set()
+        completion.join(timeout=2)
+        sweep.join(timeout=2)
+
+        assert not completion.is_alive()
+        assert not sweep.is_alive()
+        assert service.get_workflow_node_job(job["uuid"])["status"] == "canceled"
+        settled = service.get_workflow_task(task["uuid"])
+        assert settled["status"] == "canceled"
+        assert settled["cleanup_status"] == "settled"
+    finally:
+        release_completion.set()
+        completion.join(timeout=1)
+        sweep.join(timeout=1)
+        worker.stop()
+        service.close()
+
+
+def test_generic_cancel_transport_unknown_keeps_device_fenced(
+    tmp_path: Path,
+) -> None:
+    """An unconfirmed physical outcome must not be reported as canceled."""
+
+    send_started = threading.Event()
+    release_send = threading.Event()
+
+    class BlockingUncertainHost(FeedbackHost):
+        def send_goal(
+            self,
+            item: Any,
+            *,
+            action_type: str,
+            action_kwargs: dict[str, Any],
+            sample_material: dict[str, Any],
+            server_info: Any = None,
+        ) -> None:
+            del action_type, action_kwargs, sample_material, server_info
+            self.sent.append(item)
+            send_started.set()
+            assert release_send.wait(timeout=2)
+            raise RuntimeError("transport acknowledgement was lost")
+
+    store = WorkflowStore(tmp_path / "workflow.db")
+    service = WorkflowService(store)
+    device_material_uuid = str(uuid4())
+    task, job = _create_generic_device_workflow_task(
+        service,
+        device_material_uuid=device_material_uuid,
+    )
+    host = BlockingUncertainHost()
+    backend = JobExecutionBackend(host_node_getter=lambda: host)
+    host.backend = backend
+    worker = WorkflowRuntimeWorker(
+        WorkflowRuntimeCoordinator(store),
+        dispatcher=backend,
+        device_identity_resolver=lambda identity: (
+            "robot" if identity == device_material_uuid else None
+        ),
+        poll_interval_seconds=0.01,
+    )
+    try:
+        backend.start()
+        worker.start()
+        assert send_started.wait(timeout=2)
+        service.create_workflow_task_command(
+            task["uuid"],
+            command_type="cancel",
+            target_node_uuid=None,
+            idempotency_key="f007-cancel-transport-unknown",
+            description="cancel while transport acknowledgement is unknown",
+            meta_data={"source": "frontend"},
+        )
+        assert _wait(
+            lambda: (
+                service.get_workflow_node_job(job["uuid"])["status"]
+                == "cancel_requested"
+            )
+        )
+        assert _wait(lambda: host.cancel_requests == [job["uuid"]])
+        release_send.set()
+
+        assert _wait(
+            lambda: (
+                service.get_workflow_node_job(job["uuid"])["status"]
+                == "execution_unknown"
+            )
+        )
+        assert service.get_workflow_task(task["uuid"])["status"] == "canceling"
+        assert backend.device_manager.get_job_info(job["uuid"]) is not None
+    finally:
+        release_send.set()
+        worker.stop()
+        worker.join(timeout=1)
+        backend.stop()
+        service.close()

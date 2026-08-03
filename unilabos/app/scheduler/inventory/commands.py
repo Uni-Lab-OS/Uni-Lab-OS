@@ -1,4 +1,4 @@
-"""Closed Task Material command adapter for InventoryService."""
+"""InventoryService 的封闭 Task Material 命令适配器。"""
 
 from __future__ import annotations
 
@@ -55,7 +55,7 @@ def execute_command(
     service: InventoryService,
     command: dict[str, Any],
 ) -> dict[str, Any]:
-    """Execute only versioned Task-wide admission/release commands."""
+    """只执行允许从远端进入的、封闭且带版本的 Material 命令。"""
 
     command_type = str(command.get("type") or "")
     payload = command.get("payload")

@@ -29,11 +29,13 @@ from unilabos.workflow.composition import (
     reset_workflow_service_for_test,
 )
 from unilabos.workflow.service import WorkflowError, WorkflowService
+from unilabos.workflow.schema import parse_value_schema
 from unilabos.workflow.store import WorkflowStore
 
 AUTHORITY = CatalogAuthority(authority_id="m2a-production", kind="local")
 
 HOST_SOURCE_IDENTITY = "host_node"
+HOST_RESOURCE_TEMPLATE_UUID = "90000000-0000-4000-8000-000000000001"
 PLATE_SOURCE_IDENTITY = "lab.resources:plate_96"
 WAREHOUSE_SOURCE_IDENTITY = "lab.resources:warehouse"
 
@@ -291,6 +293,58 @@ def test_registry_adapter_publishes_one_host_owned_material_source_aggregate(
         resource_template_identity_resolver=identities.by_source.__getitem__,
     )
     assert without_host == ()
+
+
+def test_builtin_host_transfer_resource_is_a_typed_authoring_action(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from unilabos.registry.registry import Registry
+
+    registry = Registry()
+    monkeypatch.setattr(registry, "_setup_called", False)
+    monkeypatch.setattr(registry, "_startup_executor", None)
+    monkeypatch.setattr(registry, "device_type_registry", {})
+    monkeypatch.setattr(registry, "resource_type_registry", {})
+    registry.setup(external_only=True)
+
+    imports = workflow_template_imports_from_registry_snapshot(
+        registry.device_type_registry,
+        authority_id=AUTHORITY.authority_id,
+        resource_template_identity_resolver=lambda _identity: (
+            HOST_RESOURCE_TEMPLATE_UUID
+        ),
+    )
+    transfer = next(
+        item for item in imports if item.template["name"] == "transfer_resource"
+    )
+
+    assert transfer.template["class"] == (
+        "unilabos.ros.nodes.presets.host_node:HostNode"
+    )
+    handles = {(item["handle_key"], item["io_type"]) for item in transfer.handles}
+    assert {
+        ("resource", "target"),
+        ("resource", "source"),
+        ("mount_resource", "target"),
+        ("mount_resource", "source"),
+        ("site", "target"),
+        ("site", "source"),
+        ("target_device", "target"),
+        ("ready", "target"),
+        ("ready", "source"),
+    } <= handles
+    handles_by_identity = {
+        (item["handle_key"], item["io_type"]): item for item in transfer.handles
+    }
+    for identity in (
+        ("resource", "target"),
+        ("mount_resource", "target"),
+    ):
+        value_schema = handles_by_identity[identity]["meta_data"]["unilab"][
+            "value_schema"
+        ]
+        assert value_schema == {"$slot": "ResourceSlot"}
+        assert parse_value_schema(value_schema).to_dict() == value_schema
 
 
 def test_production_composition_compiles_material_source_with_inventory_authority(

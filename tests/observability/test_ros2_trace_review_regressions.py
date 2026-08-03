@@ -21,6 +21,7 @@ from unilabos.observability.runtime import (
     TRACE_CONTEXT_KEY,
     _OpenTelemetryRuntimeTraceBackend,
     attach_workflow_execution_identity,
+    capture_workflow_execution_identity,
     decode_job_trace_context,
 )
 from unilabos.ros.nodes import base_device_node as device_module
@@ -37,6 +38,25 @@ _CARRIER = {
     "traceparent": "00-0123456789abcdef0123456789abcdef-0123456789abcdef-01",
     "tracestate": "unilab=test",
 }
+
+
+def test_workflow_identity_cleanup_is_fail_open_across_rclpy_contexts() -> None:
+    """rclpy resumes one coroutine from different Context objects between spins."""
+
+    manager = attach_workflow_execution_identity(_JOB_UUID, _TASK_UUID)
+    entered_context = contextvars.Context()
+    resumed_context = contextvars.Context()
+
+    entered_context.run(manager.__enter__)
+    assert entered_context.run(capture_workflow_execution_identity) == {
+        "node_job_uuid": _JOB_UUID,
+        "task_uuid": _TASK_UUID,
+    }
+
+    # Cleanup must never replace a successful device result with a default ROS
+    # Result merely because rclpy resumed the coroutine in another Context.
+    resumed_context.run(manager.__exit__, None, None, None)
+    assert resumed_context.run(capture_workflow_execution_identity) == {}
 
 
 class _Logger:

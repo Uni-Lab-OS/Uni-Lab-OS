@@ -10,18 +10,19 @@ from __future__ import annotations
 import json
 import sqlite3
 import threading
-from collections.abc import Iterator
+from collections.abc import Callable, Iterator
 from contextlib import contextmanager
 from typing import Any
 
 from unilabos.app.scheduler.inventory.domain import MaterialAuthorityUnavailable
 
-SCHEMA_VERSION = 5
+SCHEMA_VERSION = 6
+_PREVIOUS_SCHEMA_VERSION = 5
 
 _UNICODE_CASEFOLD_COLLATION = "UNICODE_CASEFOLD"
 _SQLITE_BUSY_TIMEOUT_MS = 5_000
 
-_EXPECTED_TABLE_COLUMNS = {
+_EXPECTED_V5_TABLE_COLUMNS = {
     "material": (
         "uuid",
         "create_time",
@@ -182,7 +183,7 @@ def _unicode_casefold(left: str, right: str) -> int:
     return (left_folded > right_folded) - (left_folded < right_folded)
 
 
-_SCHEMA = """
+_SCHEMA_V5 = """
 CREATE TABLE IF NOT EXISTS material (
     uuid TEXT PRIMARY KEY,
     create_time TEXT NOT NULL,
@@ -422,11 +423,220 @@ CREATE TABLE IF NOT EXISTS lab_placement (
 CREATE INDEX IF NOT EXISTS idx_placement_zone ON lab_placement(zone_id);
 """
 
+_SCHEMA_V6_ADDITIONS = """
+CREATE TABLE material_claim (
+    uuid TEXT PRIMARY KEY,
+    workflow_task_uuid TEXT NOT NULL,
+    workflow_node_job_uuid TEXT NOT NULL,
+    attempt INTEGER NOT NULL CHECK (attempt > 0),
+    set_fingerprint TEXT NOT NULL,
+    fencing_token INTEGER NOT NULL UNIQUE CHECK (fencing_token > 0),
+    state TEXT NOT NULL
+        CHECK (state IN ('reserved', 'running', 'uncertain', 'released')),
+    uncertainty_reason TEXT,
+    acquired_at TEXT NOT NULL,
+    create_time TEXT NOT NULL,
+    running_at TEXT,
+    release_proof_kind TEXT,
+    release_proof_fingerprint TEXT,
+    release_reason TEXT,
+    terminal_changeset_uuid TEXT,
+    workflow_terminal_fingerprint TEXT,
+    release_command_uuid TEXT UNIQUE,
+    released_at TEXT,
+    update_time TEXT NOT NULL,
+    UNIQUE(workflow_node_job_uuid, attempt),
+    CHECK (
+        (state = 'released'
+         AND release_proof_kind IS NOT NULL
+         AND release_proof_fingerprint IS NOT NULL
+         AND release_reason IS NOT NULL
+         AND release_command_uuid IS NOT NULL
+         AND released_at IS NOT NULL)
+        OR
+        (state <> 'released'
+         AND release_proof_kind IS NULL
+         AND release_proof_fingerprint IS NULL
+         AND release_reason IS NULL
+         AND terminal_changeset_uuid IS NULL
+         AND workflow_terminal_fingerprint IS NULL
+         AND release_command_uuid IS NULL
+         AND released_at IS NULL)
+    ),
+    CHECK (
+        release_proof_kind IS NULL
+        OR release_proof_kind IN (
+            'not_submitted', 'terminal_settled', 'reconciled_terminal'
+        )
+    ),
+    CHECK (
+        release_proof_kind NOT IN ('terminal_settled', 'reconciled_terminal')
+        OR (terminal_changeset_uuid IS NOT NULL
+            AND workflow_terminal_fingerprint IS NOT NULL)
+    ),
+    CHECK (
+        release_proof_kind <> 'not_submitted'
+        OR (terminal_changeset_uuid IS NULL
+            AND workflow_terminal_fingerprint IS NULL)
+    )
+);
+CREATE INDEX ix_material_claim_task_state
+    ON material_claim(workflow_task_uuid, state, create_time, uuid);
+CREATE INDEX ix_material_claim_state
+    ON material_claim(state, create_time, uuid);
+
+CREATE TABLE material_claim_member (
+    claim_uuid TEXT NOT NULL,
+    resource_kind TEXT NOT NULL
+        CHECK (resource_kind IN (
+            'device_material', 'business_material', 'site'
+        )),
+    resource_uuid TEXT NOT NULL,
+    acquired_version INTEGER NOT NULL CHECK (acquired_version > 0),
+    expected_version INTEGER NOT NULL CHECK (expected_version > 0),
+    released_at TEXT,
+    PRIMARY KEY(claim_uuid, resource_kind, resource_uuid),
+    FOREIGN KEY(claim_uuid) REFERENCES material_claim(uuid) ON DELETE RESTRICT
+);
+CREATE UNIQUE INDEX ux_material_claim_member_active
+    ON material_claim_member(resource_kind, resource_uuid)
+    WHERE released_at IS NULL;
+CREATE INDEX ix_material_claim_member_claim
+    ON material_claim_member(claim_uuid, resource_kind, resource_uuid);
+
+CREATE TABLE material_claim_fence_sequence (
+    sequence INTEGER PRIMARY KEY AUTOINCREMENT,
+    claim_uuid TEXT NOT NULL UNIQUE,
+    FOREIGN KEY(claim_uuid) REFERENCES material_claim(uuid) ON DELETE RESTRICT
+);
+
+CREATE TABLE material_resource_fence (
+    resource_kind TEXT NOT NULL
+        CHECK (resource_kind IN (
+            'device_material', 'business_material', 'site'
+        )),
+    resource_uuid TEXT NOT NULL,
+    fencing_token INTEGER NOT NULL CHECK (fencing_token > 0),
+    claim_uuid TEXT NOT NULL,
+    update_time TEXT NOT NULL,
+    PRIMARY KEY(resource_kind, resource_uuid),
+    FOREIGN KEY(claim_uuid) REFERENCES material_claim(uuid) ON DELETE RESTRICT
+);
+
+CREATE TABLE material_changeset (
+    uuid TEXT PRIMARY KEY,
+    workflow_task_uuid TEXT NOT NULL,
+    workflow_node_job_uuid TEXT NOT NULL,
+    attempt INTEGER NOT NULL CHECK (attempt > 0),
+    claim_uuid TEXT NOT NULL,
+    fencing_token INTEGER NOT NULL CHECK (fencing_token > 0),
+    effect_identity TEXT NOT NULL,
+    deterministic_fingerprint TEXT NOT NULL,
+    outcome TEXT NOT NULL
+        CHECK (outcome IN ('succeeded', 'failed', 'canceled', 'timeout')),
+    result_json TEXT NOT NULL
+        CHECK (json_valid(result_json) AND json_type(result_json) = 'object'),
+    outbox_sequence INTEGER NOT NULL CHECK (outbox_sequence > 0),
+    create_time TEXT NOT NULL,
+    UNIQUE(workflow_node_job_uuid, attempt, effect_identity),
+    FOREIGN KEY(claim_uuid) REFERENCES material_claim(uuid) ON DELETE RESTRICT
+);
+CREATE INDEX ix_material_changeset_claim
+    ON material_changeset(claim_uuid, create_time, uuid);
+
+CREATE TABLE material_changeset_effect (
+    changeset_uuid TEXT NOT NULL,
+    effect_key TEXT NOT NULL,
+    resource_kind TEXT NOT NULL
+        CHECK (resource_kind IN ('business_material', 'site')),
+    resource_uuid TEXT NOT NULL,
+    operation TEXT NOT NULL
+        CHECK (operation IN (
+            'create', 'update', 'reparent', 'soft_delete', 'set_occupancy'
+        )),
+    expected_version INTEGER CHECK (expected_version IS NULL OR expected_version > 0),
+    before_json TEXT NOT NULL
+        CHECK (json_valid(before_json) AND json_type(before_json) = 'object'),
+    after_json TEXT NOT NULL
+        CHECK (json_valid(after_json) AND json_type(after_json) = 'object'),
+    PRIMARY KEY(changeset_uuid, effect_key),
+    FOREIGN KEY(changeset_uuid) REFERENCES material_changeset(uuid)
+        ON DELETE RESTRICT
+);
+"""
+
+_SCHEMA = _SCHEMA_V5 + _SCHEMA_V6_ADDITIONS
+
+_EXPECTED_TABLE_COLUMNS = {
+    **_EXPECTED_V5_TABLE_COLUMNS,
+    "material_claim": (
+        "uuid",
+        "workflow_task_uuid",
+        "workflow_node_job_uuid",
+        "attempt",
+        "set_fingerprint",
+        "fencing_token",
+        "state",
+        "uncertainty_reason",
+        "acquired_at",
+        "create_time",
+        "running_at",
+        "release_proof_kind",
+        "release_proof_fingerprint",
+        "release_reason",
+        "terminal_changeset_uuid",
+        "workflow_terminal_fingerprint",
+        "release_command_uuid",
+        "released_at",
+        "update_time",
+    ),
+    "material_claim_member": (
+        "claim_uuid",
+        "resource_kind",
+        "resource_uuid",
+        "acquired_version",
+        "expected_version",
+        "released_at",
+    ),
+    "material_claim_fence_sequence": ("sequence", "claim_uuid"),
+    "material_resource_fence": (
+        "resource_kind",
+        "resource_uuid",
+        "fencing_token",
+        "claim_uuid",
+        "update_time",
+    ),
+    "material_changeset": (
+        "uuid",
+        "workflow_task_uuid",
+        "workflow_node_job_uuid",
+        "attempt",
+        "claim_uuid",
+        "fencing_token",
+        "effect_identity",
+        "deterministic_fingerprint",
+        "outcome",
+        "result_json",
+        "outbox_sequence",
+        "create_time",
+    ),
+    "material_changeset_effect": (
+        "changeset_uuid",
+        "effect_key",
+        "resource_kind",
+        "resource_uuid",
+        "operation",
+        "expected_version",
+        "before_json",
+        "after_json",
+    ),
+}
+
 
 def _schema_objects(
     connection: sqlite3.Connection,
 ) -> tuple[tuple[str, str, str, str], ...]:
-    """Return every application DDL object exactly as SQLite persisted it."""
+    """返回 SQLite 精确持久化的全部 application DDL objects。"""
 
     return tuple(
         (str(row[0]), str(row[1]), str(row[2]), str(row[3]))
@@ -441,28 +651,37 @@ def _schema_objects(
     )
 
 
-def _canonical_schema_objects() -> tuple[tuple[str, str, str, str], ...]:
+def _canonical_schema_objects(
+    schema: str,
+) -> tuple[tuple[str, str, str, str], ...]:
     connection = sqlite3.connect(":memory:")
     try:
         connection.create_collation(
             _UNICODE_CASEFOLD_COLLATION,
             _unicode_casefold,
         )
-        connection.executescript(_SCHEMA)
+        connection.executescript(schema)
         return _schema_objects(connection)
     finally:
         connection.close()
 
 
-_EXPECTED_SCHEMA_OBJECTS = _canonical_schema_objects()
+_EXPECTED_V5_SCHEMA_OBJECTS = _canonical_schema_objects(_SCHEMA_V5)
+_EXPECTED_SCHEMA_OBJECTS = _canonical_schema_objects(_SCHEMA)
 
 
 class InventoryStore:
     """SQLite WAL 存储：单连接 + 进程内写锁（单写者）."""
 
-    def __init__(self, path: str = ":memory:"):
+    def __init__(
+        self,
+        path: str = ":memory:",
+        *,
+        migration_fault_hook: Callable[[str], None] | None = None,
+    ):
         self.path = path
         self._lock = threading.RLock()
+        self._migration_fault_hook = migration_fault_hook
         self._conn = sqlite3.connect(path, check_same_thread=False)
         self._conn.row_factory = sqlite3.Row
         try:
@@ -472,25 +691,33 @@ class InventoryStore:
             raise
 
     def _open_exact_schema(self) -> None:
-        """Create an empty v5 database or reject every legacy/mixed shape."""
+        """创建 v6、原子迁移 exact v5，或拒绝 mixed/corrupt data。"""
 
         with self._lock:
-            current = int(self._conn.execute("PRAGMA user_version").fetchone()[0])
-            tables = self._application_tables()
-            is_empty = current == 0 and not tables
-            if not is_empty and (
-                current != SCHEMA_VERSION or not self._has_exact_schema(tables)
-            ):
-                raise MaterialAuthorityUnavailable(
-                    "inventory.db uses an unsupported schema; archive or remove it"
-                )
-
             self._conn.create_collation(
                 _UNICODE_CASEFOLD_COLLATION,
                 _unicode_casefold,
             )
             self._conn.execute(f"PRAGMA busy_timeout = {_SQLITE_BUSY_TIMEOUT_MS}")
             self._conn.execute("PRAGMA foreign_keys = ON")
+            current = int(self._conn.execute("PRAGMA user_version").fetchone()[0])
+            tables = self._application_tables()
+            is_empty = current == 0 and not tables
+            is_v6 = current == SCHEMA_VERSION and self._has_exact_schema(
+                tables,
+                _EXPECTED_TABLE_COLUMNS,
+                _EXPECTED_SCHEMA_OBJECTS,
+            )
+            is_v5 = current == _PREVIOUS_SCHEMA_VERSION and self._has_exact_schema(
+                tables,
+                _EXPECTED_V5_TABLE_COLUMNS,
+                _EXPECTED_V5_SCHEMA_OBJECTS,
+            )
+            if not is_empty and not is_v6 and not is_v5:
+                raise MaterialAuthorityUnavailable(
+                    "inventory.db uses an unsupported schema; archive or remove it"
+                )
+
             if self.path != ":memory:":
                 self._conn.execute("PRAGMA journal_mode = WAL")
                 self._conn.execute("PRAGMA synchronous = NORMAL")
@@ -498,6 +725,67 @@ class InventoryStore:
                 self._conn.executescript(_SCHEMA)
                 self._conn.execute(f"PRAGMA user_version = {SCHEMA_VERSION}")
                 self._conn.commit()
+            elif is_v5:
+                self._migrate_v5_to_v6()
+
+    @staticmethod
+    def _statements(script: str) -> tuple[str, ...]:
+        """拆分可信 DDL，且不允许 ``executescript`` 提交当前事务。"""
+
+        statements: list[str] = []
+        pending = ""
+        for line in script.splitlines(keepends=True):
+            pending += line
+            if sqlite3.complete_statement(pending):
+                statement = pending.strip()
+                if statement:
+                    statements.append(statement)
+                pending = ""
+        if pending.strip():
+            raise MaterialAuthorityUnavailable("inventory v6 migration DDL is invalid")
+        return tuple(statements)
+
+    def _migrate_v5_to_v6(self) -> None:
+        """增加 M1EF authority tables，并保留全部 accepted v5 rows。"""
+
+        try:
+            self._conn.execute("BEGIN EXCLUSIVE")
+            self._inject_migration_fault("before_v6_ddl")
+            for index, statement in enumerate(self._statements(_SCHEMA_V6_ADDITIONS)):
+                self._conn.execute(statement)
+                if index == 0:
+                    self._inject_migration_fault("after_first_v6_ddl")
+            self._inject_migration_fault("after_v6_ddl")
+            self._conn.execute(
+                """
+                INSERT INTO lab_meta(meta_key, meta_value) VALUES (?, ?)
+                ON CONFLICT(meta_key) DO UPDATE SET meta_value = excluded.meta_value
+                """,
+                ("inventory_schema_migration", "v5-to-v6:m1ef"),
+            )
+            self._inject_migration_fault("after_schema_receipt")
+            self._conn.execute(f"PRAGMA user_version = {SCHEMA_VERSION}")
+            self._inject_migration_fault("after_user_version")
+            tables = self._application_tables()
+            if not self._has_exact_schema(
+                tables,
+                _EXPECTED_TABLE_COLUMNS,
+                _EXPECTED_SCHEMA_OBJECTS,
+            ):
+                raise MaterialAuthorityUnavailable(
+                    "inventory.db v5-to-v6 migration did not produce exact schema"
+                )
+            self._inject_migration_fault("after_exact_schema_audit")
+            self._conn.commit()
+        except BaseException:
+            self._conn.rollback()
+            raise
+
+    def _inject_migration_fault(self, stage: str) -> None:
+        """暴露 deterministic crash windows，且不改变正常启动行为。"""
+
+        if self._migration_fault_hook is not None:
+            self._migration_fault_hook(stage)
 
     def _application_tables(self) -> set[str]:
         return {
@@ -510,17 +798,22 @@ class InventoryStore:
             )
         }
 
-    def _has_exact_schema(self, tables: set[str]) -> bool:
-        if tables != set(_EXPECTED_TABLE_COLUMNS):
+    def _has_exact_schema(
+        self,
+        tables: set[str],
+        expected_columns: dict[str, tuple[str, ...]],
+        expected_objects: tuple[tuple[str, str, str, str], ...],
+    ) -> bool:
+        if tables != set(expected_columns):
             return False
-        for table, expected in _EXPECTED_TABLE_COLUMNS.items():
+        for table, expected in expected_columns.items():
             columns = tuple(
                 str(row[1])
                 for row in self._conn.execute(f'PRAGMA table_info("{table}")')
             )
             if columns != expected:
                 return False
-        return _schema_objects(self._conn) == _EXPECTED_SCHEMA_OBJECTS
+        return _schema_objects(self._conn) == expected_objects
 
     def close(self) -> None:
         with self._lock:
@@ -613,7 +906,8 @@ class InventoryStore:
         self, after_sequence: int, limit: int = 100
     ) -> list[dict[str, Any]]:
         return self.query_all(
-            "SELECT * FROM sync_outbox WHERE sequence > ? ORDER BY sequence ASC LIMIT ?",
+            "SELECT * FROM sync_outbox WHERE sequence > ? "
+            "ORDER BY sequence ASC LIMIT ?",
             (after_sequence, limit),
         )
 
@@ -626,8 +920,9 @@ class InventoryStore:
     def set_cursor(self, name: str, acked_sequence: int, now_ms: int) -> None:
         with self.transaction() as conn:
             conn.execute(
-                "INSERT INTO sync_cursor(cursor_name, acked_sequence, updated_at) VALUES (?, ?, ?) "
-                "ON CONFLICT(cursor_name) DO UPDATE SET acked_sequence = excluded.acked_sequence, "
+                "INSERT INTO sync_cursor(cursor_name, acked_sequence, updated_at) "
+                "VALUES (?, ?, ?) ON CONFLICT(cursor_name) DO UPDATE SET "
+                "acked_sequence = excluded.acked_sequence, "
                 "updated_at = excluded.updated_at",
                 (name, acked_sequence, now_ms),
             )
@@ -651,7 +946,8 @@ class InventoryStore:
         causation_id: str = "",
     ) -> None:
         conn.execute(
-            "INSERT INTO inventory_ledger(occurred_at, op_type, aggregate_type, aggregate_id, "
+            "INSERT INTO inventory_ledger(occurred_at, op_type, aggregate_type, "
+            "aggregate_id, "
             "delta_json, actor, reason, causation_id) VALUES (?,?,?,?,?,?,?,?)",
             (
                 occurred_at,
@@ -680,7 +976,8 @@ class InventoryStore:
         payload: dict[str, Any],
     ) -> int:
         cur = conn.execute(
-            "INSERT INTO sync_outbox(event_id, edge_id, lab_id, aggregate_type, aggregate_id, "
+            "INSERT INTO sync_outbox(event_id, edge_id, lab_id, aggregate_type, "
+            "aggregate_id, "
             "aggregate_version, event_type, occurred_at, causation_id, payload_json) "
             "VALUES (?,?,?,?,?,?,?,?,?,?)",
             (

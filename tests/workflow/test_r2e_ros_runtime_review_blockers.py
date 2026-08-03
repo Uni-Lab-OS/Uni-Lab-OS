@@ -334,3 +334,179 @@ def test_hostnode_action_client_failure_prevents_device_readiness(
     assert initialized is False
     assert host._online_devices == set()
     assert host._action_clients == {}
+
+
+def test_hostnode_test_mode_builds_typed_action_outputs_from_goal_values() -> None:
+    resource = {
+        "uuid": str(uuid4()),
+        "resource_template_uuid": str(uuid4()),
+    }
+    host = SimpleNamespace(
+        _action_value_mappings={
+            "robot": {
+                "pick": {
+                    "schema": {
+                        "type": "object",
+                        "properties": {
+                            "goal": {
+                                "type": "object",
+                                "properties": {
+                                    "resource": {"$slot": "ResourceSlot"},
+                                    "site": {"type": "string"},
+                                },
+                            },
+                            "result": {
+                                "type": "object",
+                                "properties": {
+                                    "resource": {"$slot": "ResourceSlot"},
+                                    "success": {"type": "boolean"},
+                                    "state": {
+                                        "type": "string",
+                                        "enum": ["RUNNING", "SUCCEEDED"],
+                                    },
+                                    "message": {"type": "string"},
+                                },
+                            },
+                        },
+                        "x-unilabos-action-contract": {
+                            "output_order": [
+                                "resource",
+                                "success",
+                                "state",
+                                "message",
+                            ]
+                        },
+                    }
+                }
+            }
+        }
+    )
+
+    result = host_node_module.HostNode._build_test_mode_return(
+        host,
+        "robot",
+        "pick",
+        {"resource": resource, "site": "L1B1"},
+    )
+
+    assert result == {
+        "test_mode": True,
+        "action_name": "pick",
+        "resource": resource,
+        "success": True,
+        "state": "SUCCEEDED",
+        "message": "",
+    }
+    assert result["resource"] is not resource
+
+
+def test_hostnode_test_mode_reads_action_schema_from_registered_local_device(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    resource = {
+        "uuid": str(uuid4()),
+        "resource_template_uuid": str(uuid4()),
+    }
+    action_mapping = {
+        "schema": {
+            "properties": {
+                "result": {
+                    "properties": {
+                        "resource": {"$slot": "ResourceSlot"},
+                        "success": {"type": "boolean"},
+                    }
+                }
+            },
+            "x-unilabos-action-contract": {
+                "output_order": ["resource", "success"]
+            },
+        }
+    }
+    monkeypatch.setattr(
+        host_node_module,
+        "registered_devices",
+        {
+            "robot": {
+                "base_node_instance": SimpleNamespace(
+                    _action_value_mappings={"pick": action_mapping}
+                )
+            }
+        },
+        raising=False,
+    )
+    host = SimpleNamespace(
+        _action_value_mappings={"robot": {"pick": {"type": "discovered"}}}
+    )
+
+    result = host_node_module.HostNode._build_test_mode_return(
+        host,
+        "robot",
+        "pick",
+        {"resource": resource},
+    )
+
+    assert result["resource"] == resource
+    assert result["success"] is True
+
+
+def test_hostnode_test_mode_reads_action_schema_from_device_type_registry(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    resource = {
+        "uuid": str(uuid4()),
+        "resource_template_uuid": str(uuid4()),
+    }
+    action_mapping = {
+        "schema": {
+            "properties": {
+                "result": {
+                    "properties": {
+                        "resource": {"$slot": "ResourceSlot"},
+                        "success": {"type": "boolean"},
+                    }
+                }
+            },
+            "x-unilabos-action-contract": {
+                "output_order": ["resource", "success"]
+            },
+        }
+    }
+    monkeypatch.setattr(host_node_module, "registered_devices", {})
+    monkeypatch.setattr(
+        host_node_module,
+        "lab_registry",
+        SimpleNamespace(
+            device_type_registry={
+                "robot_type": {
+                    "class": {
+                        "action_value_mappings": {"pick": action_mapping}
+                    }
+                }
+            }
+        ),
+    )
+    host = SimpleNamespace(
+        _action_value_mappings={"robot": {"pick": {"type": "discovered"}}},
+        devices_config=SimpleNamespace(
+            trees=[
+                SimpleNamespace(
+                    root_node=SimpleNamespace(
+                        res_content=SimpleNamespace(
+                            id="robot",
+                            klass="robot_type",
+                        )
+                    )
+                )
+            ]
+        ),
+    )
+
+    result = host_node_module.HostNode._build_test_mode_return(
+        host,
+        "robot",
+        "pick",
+        {"resource": resource},
+    )
+
+    assert result["resource"] == resource
+    assert result["success"] is True

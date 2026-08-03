@@ -13,8 +13,9 @@ from unilabos.app.scheduler.inventory import (
     InventoryService,
     MaterialAuthorityUnavailable,
 )
+from unilabos.app.scheduler.inventory.store import _SCHEMA_V5, InventoryStore
 
-SCHEMA_VERSION = 5
+SCHEMA_VERSION = 6
 
 REQUIRED_TABLE_COLUMNS = {
     "material": (
@@ -172,6 +173,67 @@ REQUIRED_TABLE_COLUMNS = {
         "meta_json",
         "version",
     ),
+    "material_claim": (
+        "uuid",
+        "workflow_task_uuid",
+        "workflow_node_job_uuid",
+        "attempt",
+        "set_fingerprint",
+        "fencing_token",
+        "state",
+        "uncertainty_reason",
+        "acquired_at",
+        "create_time",
+        "running_at",
+        "release_proof_kind",
+        "release_proof_fingerprint",
+        "release_reason",
+        "terminal_changeset_uuid",
+        "workflow_terminal_fingerprint",
+        "release_command_uuid",
+        "released_at",
+        "update_time",
+    ),
+    "material_claim_member": (
+        "claim_uuid",
+        "resource_kind",
+        "resource_uuid",
+        "acquired_version",
+        "expected_version",
+        "released_at",
+    ),
+    "material_claim_fence_sequence": ("sequence", "claim_uuid"),
+    "material_resource_fence": (
+        "resource_kind",
+        "resource_uuid",
+        "fencing_token",
+        "claim_uuid",
+        "update_time",
+    ),
+    "material_changeset": (
+        "uuid",
+        "workflow_task_uuid",
+        "workflow_node_job_uuid",
+        "attempt",
+        "claim_uuid",
+        "fencing_token",
+        "effect_identity",
+        "deterministic_fingerprint",
+        "outcome",
+        "result_json",
+        "outbox_sequence",
+        "create_time",
+    ),
+    "material_changeset_effect": (
+        "changeset_uuid",
+        "effect_key",
+        "resource_kind",
+        "resource_uuid",
+        "operation",
+        "expected_version",
+        "before_json",
+        "after_json",
+    ),
 }
 FORBIDDEN_TABLES = {
     "resource_template",
@@ -277,7 +339,7 @@ def _create_mixed_v5(database: Path) -> None:
         connection.close()
 
 
-def test_empty_inventory_opens_exact_v5_schema_and_sqlite_configuration(
+def test_empty_inventory_opens_exact_v6_schema_and_sqlite_configuration(
     tmp_path: Path,
 ) -> None:
     database = tmp_path / "inventory.db"
@@ -341,7 +403,7 @@ def test_inventory_open_rejects_legacy_or_mixed_schema_without_mutation(
     assert _database_snapshot(database) == before
 
 
-def test_inventory_open_rejects_v5_with_missing_required_index(
+def test_inventory_open_rejects_v6_with_missing_required_index(
     tmp_path: Path,
 ) -> None:
     database = tmp_path / "inventory.db"
@@ -365,3 +427,111 @@ def test_inventory_open_rejects_v5_with_missing_required_index(
         )
 
     assert _database_snapshot(database) == before
+
+
+def test_exact_v5_migrates_to_v6_without_losing_accepted_rows(
+    tmp_path: Path,
+) -> None:
+    database = tmp_path / "inventory.db"
+    connection = sqlite3.connect(database)
+    try:
+        connection.create_collation(
+            "UNICODE_CASEFOLD",
+            lambda left, right: (
+                (left.casefold() > right.casefold())
+                - (left.casefold() < right.casefold())
+            ),
+        )
+        connection.executescript(_SCHEMA_V5)
+        connection.execute(
+            """
+            INSERT INTO material(
+                uuid, create_time, update_time, deleted_at, description,
+                meta_data, resource_template_uuid, parent_uuid, class,
+                barcode, name, config, data, disposition, material_kind,
+                version
+            ) VALUES (?, '2026-08-02T00:00:00Z', '2026-08-02T00:00:00Z',
+                      NULL, 'preserved', '{}', ?, NULL, 'SampleTube',
+                      'M1EF-MIGRATION', 'preserved sample', '{}',
+                      '{"temperature":20}', 'active', 'business', 7)
+            """,
+            (
+                "50000000-0000-4000-8000-000000000505",
+                "20000000-0000-4000-8000-000000000505",
+            ),
+        )
+        connection.execute(
+            """
+            INSERT INTO inventory_lot(
+                lot_id, resource_template_uuid, batch_no, unit,
+                quantity_total, quantity_available, quantity_reserved,
+                expiry, quarantined, warehouse_zone_id, created_at, version
+            ) VALUES ('lot-505', ?, 'batch-505', 'mL', 10, 6, 4,
+                      '2030-01-01', 0, 'cold-room', 505, 3)
+            """,
+            ("20000000-0000-4000-8000-000000000505",),
+        )
+        connection.execute("PRAGMA user_version = 5")
+        connection.commit()
+    finally:
+        connection.close()
+
+    before = _database_snapshot(database)
+    inventory = InventoryService.open(working_dir=tmp_path, resource_templates={})
+    inventory.close()
+    after = _database_snapshot(database)
+
+    assert before["rows"]["material"] == after["rows"]["material"]
+    assert before["rows"]["inventory_lot"] == after["rows"]["inventory_lot"]
+    assert after["user_version"] == 6
+    assert set(after["rows"]) == set(REQUIRED_TABLE_COLUMNS)
+    assert after["rows"]["material_claim"] == ()
+    assert after["rows"]["material_changeset"] == ()
+
+
+@pytest.mark.parametrize(
+    "fault_stage",
+    [
+        "before_v6_ddl",
+        "after_first_v6_ddl",
+        "after_v6_ddl",
+        "after_schema_receipt",
+        "after_user_version",
+        "after_exact_schema_audit",
+    ],
+)
+def test_v5_to_v6_crash_windows_roll_back_to_exact_v5(
+    tmp_path: Path,
+    fault_stage: str,
+) -> None:
+    database = tmp_path / "inventory.db"
+    connection = sqlite3.connect(database)
+    try:
+        connection.create_collation(
+            "UNICODE_CASEFOLD",
+            lambda left, right: (
+                (left.casefold() > right.casefold())
+                - (left.casefold() < right.casefold())
+            ),
+        )
+        connection.executescript(_SCHEMA_V5)
+        connection.execute(
+            "INSERT INTO lab_meta(meta_key, meta_value) VALUES ('fixture', 'kept')"
+        )
+        connection.execute("PRAGMA user_version = 5")
+        connection.commit()
+    finally:
+        connection.close()
+    before = _database_snapshot(database)
+
+    def fail(stage: str) -> None:
+        if stage == fault_stage:
+            raise RuntimeError(f"simulated migration crash at {stage}")
+
+    with pytest.raises(RuntimeError, match="simulated migration crash"):
+        InventoryStore(str(database), migration_fault_hook=fail)
+
+    assert _database_snapshot(database) == before
+    inventory = InventoryService.open(working_dir=tmp_path, resource_templates={})
+    inventory.close()
+    assert _database_snapshot(database)["user_version"] == SCHEMA_VERSION

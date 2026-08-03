@@ -370,6 +370,58 @@ def test_sync_driver_threadpool_keeps_parent_context(
     assert "sensitive-action-argument" not in repr(driver_span.attributes)
 
 
+def test_device_business_failure_is_reported_as_failed_ros_result(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    class Driver:
+        def run(self, string: str) -> dict[str, Any]:
+            return {"success": False, "message": "device rejected command"}
+
+    node = object.__new__(BaseROS2DeviceNode)
+    node.driver_instance = Driver()
+    node._job_contexts = {}
+    node._job_contexts_lock = threading.Lock()
+    node._executor = ThreadPoolExecutor(max_workers=1)
+    node._print_publish = False
+    node._time_spent = 0.0
+    node._time_remaining = 0.0
+    node.lab_logger = lambda: _SilentLogger()
+    node._resolve_runtime_error_policy = (
+        lambda action_name, _mapping, _action, _kwargs: (None, action_name)
+    )
+
+    mapping = {
+        "type": StrSingleInput,
+        "method_name": "run",
+        "goal": {"string": "string"},
+        "feedback": {},
+        "result": {},
+    }
+    goal_handle = _GoalHandle(
+        StrSingleInput.Goal(string="command"),
+        _queue_item().job_id,
+    )
+    callback = BaseROS2DeviceNode._create_execute_callback(node, "run", mapping)
+
+    async def exercise() -> None:
+        loop = asyncio.get_running_loop()
+        monkeypatch.setattr(
+            device_module.rclpy,
+            "get_global_executor",
+            lambda: _LoopExecutor(loop),
+        )
+        result = await asyncio.wait_for(callback(goal_handle), timeout=2.0)
+        assert result.success is False
+        return_info = json.loads(result.return_info)
+        assert return_info["suc"] is False
+        assert return_info["return_value"]["message"] == "device rejected command"
+
+    try:
+        asyncio.run(exercise())
+    finally:
+        node._executor.shutdown(wait=True)
+
+
 def test_degraded_observability_does_not_block_dispatch(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:

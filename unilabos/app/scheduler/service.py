@@ -34,7 +34,7 @@ import threading
 import time
 import uuid as uuid_mod
 from collections import deque
-from collections.abc import Callable, Iterator
+from collections.abc import Callable, Iterator, Mapping
 from contextlib import contextmanager
 from typing import Any
 
@@ -47,6 +47,14 @@ from unilabos.app.scheduler.dispatch import (
 from unilabos.app.scheduler.estimation import DurationEstimator
 from unilabos.app.scheduler.inventory.domain import (
     InventoryError,
+    JobClaimAcquireCommand,
+    JobClaimRecord,
+    JobClaimReleaseCommand,
+    JobClaimResult,
+    JobClaimStateCommand,
+    JobClaimUncertainCommand,
+    MaterialChangeSetCommand,
+    MaterialChangeSetReceipt,
     TaskMaterialAdmissionCommand,
     TaskMaterialAdmissionResult,
     TaskMaterialAdmissionSource,
@@ -71,6 +79,16 @@ logger = logging.getLogger(__name__)
 
 # ResourceSlot 参数值里可作为资源标识的字段（按优先级取第一个非空）
 _RESOURCE_ID_FIELDS = ("unilabos_uuid", "uuid", "id", "name")
+_MATERIAL_WAKE_EVENT_TYPES = frozenset(
+    {
+        "material.created",
+        "material.updated",
+        "material.disposition_updated",
+        "site.created",
+        "site.occupancy_updated",
+        "material_graph.bootstrapped",
+    }
+)
 
 
 def _extract_resource_ids(value: Any) -> set[str]:
@@ -146,7 +164,7 @@ class EdgeScheduler:
         self._workflow_state_listener = workflow_state_listener
         self._notified_workflows: set[str] = set()
         self._reschedule_count = 0
-        # Canonical InventoryService used only by durable WorkflowTask sagas.
+        # Canonical InventoryService 只供 durable WorkflowTask saga 使用。
         self._inventory = inventory
         # 物料/资源锁：resolver(device_id, action_name) -> @action(lock_resource=[...])
         # 声明的参数名列表；None = 物料锁关闭
@@ -165,11 +183,35 @@ class EdgeScheduler:
         self._dispatch_error_hook = dispatch_error_hook
         # D1A 只消费 formal Task/Job port；legacy DAG identity 转换止于本模块。
         self._device_action_tasks_by_job_uuid: dict[str, str] = {}
-        self._device_action_task_before_dispatch: Callable[..., bool | None] | None = None
+        self._device_action_task_before_dispatch: Callable[..., bool | None] | None = (
+            None
+        )
         self._device_action_task_dispatch_error: Callable[..., None] | None = None
         # 新 WorkflowTask kernel 的持久投影 port；不参与 legacy WorkflowRun DAG。
         self._workflow_tasks = workflow_tasks
         self._admission_fault_hook = admission_fault_hook
+        set_change_listener = getattr(inventory, "set_change_listener", None)
+        if workflow_tasks is not None and callable(set_change_listener):
+            set_change_listener(self._on_inventory_change)
+
+    def _on_inventory_change(self, event: Any) -> None:
+        """外部 Material/Site 持久变化提交后唤醒 blocked Tasks。"""
+
+        if not isinstance(event, Mapping):
+            return
+        if event.get("event_type") not in _MATERIAL_WAKE_EVENT_TYPES:
+            return
+        # Admission 自有事件发出时 coordinator 仍持有 per-Task saga slot；release
+        # 已在 saga 结束后自行 sweep，因此这里只有外部资源变化进入提交后唤醒。
+        if event.get("causation_id"):
+            return
+        try:
+            self.reconcile_pending_task_admissions()
+        except Exception:
+            logger.exception(
+                "[EdgeScheduler] Material 变化唤醒失败：%s",
+                event.get("event_type"),
+            )
 
     def _emit_monitor(
         self, channel: str, event_type: str, data: dict[str, Any]
@@ -216,6 +258,307 @@ class EdgeScheduler:
         with self._lock:
             self._device_action_task_before_dispatch = before
             self._device_action_task_dispatch_error = on_error
+
+    @staticmethod
+    def _m1ef_command_uuid(job_uuid: str, attempt: int, phase: str) -> str:
+        return str(
+            uuid_mod.uuid5(
+                uuid_mod.UUID(job_uuid),
+                f"m1ef:{attempt}:{phase}",
+            )
+        )
+
+    def acquire_device_action_job_claim(
+        self,
+        *,
+        task_uuid: str,
+        job_uuid: str,
+        device_id: str,
+        attempt: int = 1,
+    ) -> JobClaimResult:
+        """通过 Inventory authority 获取 device-only D1A Claim。"""
+
+        if self._inventory is None:
+            raise RuntimeError("Inventory Job Claim authority is unavailable")
+        executor = self._inventory.resolve_executor_material(device_id)
+        command_uuid = self._m1ef_command_uuid(job_uuid, attempt, "claim-acquire")
+        return self._inventory.acquire_job_claim(
+            JobClaimAcquireCommand(
+                schema_version=1,
+                command_uuid=command_uuid,
+                idempotency_key=f"m1ef:{job_uuid}:{attempt}:claim-acquire",
+                workflow_task_uuid=task_uuid,
+                workflow_node_job_uuid=job_uuid,
+                attempt=attempt,
+                device_material_uuid=executor.uuid,
+                mutable_material_root_uuids=(),
+                occupancy_changing_site_uuids=(),
+            )
+        )
+
+    def mark_device_action_job_claim_running(
+        self,
+        *,
+        claim: JobClaimRecord,
+        evidence_fingerprint: str,
+    ) -> JobClaimResult:
+        """把 driver accepted/running evidence 附加到精确 D1A fence。"""
+
+        if self._inventory is None:
+            raise RuntimeError("Inventory Job Claim authority is unavailable")
+        command_uuid = self._m1ef_command_uuid(
+            claim.workflow_node_job_uuid,
+            claim.attempt,
+            f"claim-running:{evidence_fingerprint}",
+        )
+        return self._inventory.mark_job_claim_running(
+            JobClaimStateCommand(
+                schema_version=1,
+                command_uuid=command_uuid,
+                idempotency_key=(
+                    f"m1ef:{claim.workflow_node_job_uuid}:"
+                    f"{claim.attempt}:claim-running:{evidence_fingerprint}"
+                ),
+                workflow_node_job_uuid=claim.workflow_node_job_uuid,
+                attempt=claim.attempt,
+                claim_uuid=claim.uuid,
+                fencing_token=claim.fencing_token,
+                evidence_kind="driver_accepted",
+                evidence_fingerprint=evidence_fingerprint,
+            )
+        )
+
+    def mark_device_action_job_claim_uncertain(
+        self,
+        *,
+        claim: JobClaimRecord,
+        reason: str,
+        evidence_fingerprint: str,
+    ) -> JobClaimResult:
+        """fence 住不明确的 D1A dispatch/cancel/result，且不释放它。"""
+
+        if self._inventory is None:
+            raise RuntimeError("Inventory Job Claim authority is unavailable")
+        command_uuid = self._m1ef_command_uuid(
+            claim.workflow_node_job_uuid,
+            claim.attempt,
+            f"claim-uncertain:{reason}:{evidence_fingerprint}",
+        )
+        return self._inventory.mark_job_claim_uncertain(
+            JobClaimUncertainCommand(
+                schema_version=1,
+                command_uuid=command_uuid,
+                idempotency_key=(
+                    f"m1ef:{claim.workflow_node_job_uuid}:"
+                    f"{claim.attempt}:claim-uncertain:{reason}:"
+                    f"{evidence_fingerprint}"
+                ),
+                workflow_node_job_uuid=claim.workflow_node_job_uuid,
+                attempt=claim.attempt,
+                claim_uuid=claim.uuid,
+                fencing_token=claim.fencing_token,
+                uncertainty_reason=reason,
+                evidence_fingerprint=evidence_fingerprint,
+            )
+        )
+
+    def commit_device_action_terminal_changeset(
+        self,
+        *,
+        claim: JobClaimRecord,
+        outcome: str,
+        result: dict[str, Any],
+    ) -> MaterialChangeSetReceipt:
+        """提交 D1A deterministic device-only no-op terminal receipt。"""
+
+        if self._inventory is None:
+            raise RuntimeError("Inventory ChangeSet authority is unavailable")
+        command_uuid = self._m1ef_command_uuid(
+            claim.workflow_node_job_uuid,
+            claim.attempt,
+            "terminal-changeset",
+        )
+        return self._inventory.commit_material_changeset(
+            MaterialChangeSetCommand(
+                schema_version=1,
+                command_uuid=command_uuid,
+                idempotency_key=(
+                    f"m1ef:{claim.workflow_node_job_uuid}:"
+                    f"{claim.attempt}:terminal-changeset"
+                ),
+                workflow_task_uuid=claim.workflow_task_uuid,
+                workflow_node_job_uuid=claim.workflow_node_job_uuid,
+                attempt=claim.attempt,
+                claim_uuid=claim.uuid,
+                fencing_token=claim.fencing_token,
+                effect_identity="terminal",
+                outcome=outcome,
+                result=result,
+                effects=(),
+            )
+        )
+
+    def release_device_action_job_claim(
+        self,
+        *,
+        claim: JobClaimRecord,
+        receipt: MaterialChangeSetReceipt,
+        workflow_terminal_fingerprint: str,
+    ) -> JobClaimResult:
+        """两个 durable terminal commit 后 settle 精确 D1A Claim。"""
+
+        if self._inventory is None:
+            raise RuntimeError("Inventory Job Claim authority is unavailable")
+        command_uuid = self._m1ef_command_uuid(
+            claim.workflow_node_job_uuid,
+            claim.attempt,
+            "claim-release-terminal",
+        )
+        released = self._inventory.release_job_claim(
+            JobClaimReleaseCommand(
+                schema_version=1,
+                command_uuid=command_uuid,
+                idempotency_key=(
+                    f"m1ef:{claim.workflow_node_job_uuid}:"
+                    f"{claim.attempt}:claim-release-terminal"
+                ),
+                workflow_node_job_uuid=claim.workflow_node_job_uuid,
+                attempt=claim.attempt,
+                claim_uuid=claim.uuid,
+                fencing_token=claim.fencing_token,
+                release_proof_kind="terminal_settled",
+                material_changeset_uuid=receipt.uuid,
+                material_changeset_fingerprint=receipt.deterministic_fingerprint,
+                workflow_terminal_fingerprint=workflow_terminal_fingerprint,
+                reason="workflow_job_terminal_settled",
+                no_send_proof_fingerprint=None,
+            )
+        )
+        # D1A device-only Claim 按约定没有 Task Material Reservation。
+        # 普通 Workflow terminal saga 在全部 business-material Claim settle 后
+        # 调用 reconcile_task_release。
+        return released
+
+    def release_unsubmitted_device_action_job_claim(
+        self,
+        *,
+        claim: JobClaimRecord,
+        no_send_proof_fingerprint: str,
+        reason: str,
+    ) -> JobClaimResult:
+        """由 Scheduler 用 durable zero-send proof 释放尚未派发的 D1A Claim。"""
+
+        if self._inventory is None:
+            raise RuntimeError("Inventory Job Claim authority is unavailable")
+        command_uuid = self._m1ef_command_uuid(
+            claim.workflow_node_job_uuid,
+            claim.attempt,
+            "claim-release-not-submitted",
+        )
+        return self._inventory.release_job_claim(
+            JobClaimReleaseCommand(
+                schema_version=1,
+                command_uuid=command_uuid,
+                idempotency_key=(
+                    f"m1ef:{claim.workflow_node_job_uuid}:"
+                    f"{claim.attempt}:claim-release-not-submitted"
+                ),
+                workflow_node_job_uuid=claim.workflow_node_job_uuid,
+                attempt=claim.attempt,
+                claim_uuid=claim.uuid,
+                fencing_token=claim.fencing_token,
+                release_proof_kind="not_submitted",
+                material_changeset_uuid=None,
+                material_changeset_fingerprint=None,
+                workflow_terminal_fingerprint=None,
+                reason=reason,
+                no_send_proof_fingerprint=no_send_proof_fingerprint,
+                expected_state="reserved",
+            )
+        )
+
+    def inventory_job_claim(
+        self,
+        job_uuid: str,
+        attempt: int = 1,
+    ) -> JobClaimRecord:
+        if self._inventory is None:
+            raise RuntimeError("Inventory Job Claim authority is unavailable")
+        return self._inventory.get_job_claim(job_uuid, attempt)
+
+    def find_inventory_job_claim(
+        self,
+        job_uuid: str,
+        attempt: int = 1,
+    ) -> JobClaimRecord | None:
+        """读取可选 Claim，且不向 adapter 泄漏 Inventory errors。"""
+
+        try:
+            return self.inventory_job_claim(job_uuid, attempt)
+        except InventoryError as error:
+            if error.code == "not_found":
+                return None
+            raise
+
+    def terminal_material_changeset(
+        self,
+        job_uuid: str,
+        attempt: int = 1,
+    ) -> MaterialChangeSetReceipt | None:
+        if self._inventory is None:
+            raise RuntimeError("Inventory ChangeSet authority is unavailable")
+        return self._inventory.get_terminal_material_changeset(job_uuid, attempt)
+
+    def unsettled_inventory_job_claims(self) -> tuple[JobClaimRecord, ...]:
+        """枚举启动恢复必须与 Workflow facts 双向核对的 live Claims。"""
+
+        if self._inventory is None:
+            raise RuntimeError("Inventory Claim authority is unavailable")
+        return self._inventory.list_unsettled_claims()
+
+    def acknowledge_inventory_result(self, sequence: int | None) -> None:
+        """只推进 Scheduler 自己的 durable Inventory consumer cursor。"""
+
+        if sequence is None:
+            return
+        if self._inventory is None:
+            raise RuntimeError("Inventory authority is unavailable")
+        self._inventory.acknowledge(sequence, consumer="scheduler")
+
+    def busy_inventory_device_action_keys(self) -> set[str]:
+        """只从 live Inventory Claims 构建 Scheduler device fences。"""
+
+        if self._inventory is None:
+            return set()
+        busy: set[str] = set()
+        for claim in self._inventory.list_unsettled_claims():
+            for member in claim.members:
+                if member.resource_kind != "device_material":
+                    continue
+                material = self._inventory.get_material(member.resource_uuid)
+                source_node_id = material.meta_data.get("source_node_id")
+                if isinstance(source_node_id, str) and source_node_id:
+                    busy.add(f"/devices/{source_node_id}")
+        return busy
+
+    def audit_inventory_job_claims(self) -> tuple[JobClaimRecord, ...]:
+        """启动后允许 physical dispatch 前先 fail-closed 审计。"""
+
+        if self._inventory is None:
+            raise RuntimeError("Inventory Claim authority is unavailable")
+        return self._inventory.audit_job_claim_authority()
+
+    def owns_live_inventory_claim(self, job_uuid: str | None) -> bool:
+        """允许 owner Job 重放 C1，但不能绕过其他 Job 的 fence。"""
+
+        if not job_uuid or self._inventory is None:
+            return False
+        claim = self.find_inventory_job_claim(job_uuid, 1)
+        return claim is not None and claim.state in {
+            "reserved",
+            "running",
+            "uncertain",
+        }
 
     def submit_device_action_task(
         self,
@@ -307,8 +650,27 @@ class EdgeScheduler:
                 "canceled",
                 "timeout",
             }:
-                return None
+                return self._ack_projected_admission_result(task_uuid)
             return self._reconcile_task_admission_serialized(task_uuid)
+
+    def _ack_projected_admission_result(
+        self,
+        task_uuid: str,
+    ) -> TaskMaterialAdmissionResult | None:
+        """不从已完成的 resolution Jobs 重建 command，直接完成 W2。"""
+
+        if self._workflow_tasks is None or self._inventory is None:
+            raise RuntimeError("Workflow Task Material coordination is not configured")
+        projection = self._workflow_tasks.get_material_admission(task_uuid)
+        if not isinstance(projection, dict):
+            return None
+        result = self._inventory.get_command_result(str(projection["command_uuid"]))
+        if not isinstance(result, TaskMaterialAdmissionResult):
+            raise TypeError(
+                "Inventory admission projection points to a non-admission result"
+            )
+        self._inventory.acknowledge(result.outbox_sequence)
+        return result
 
     @contextmanager
     def _material_saga_slot(self, task_uuid: str) -> Iterator[None]:
@@ -356,12 +718,27 @@ class EdgeScheduler:
             sort_keys=True,
         ).encode("utf-8")
         snapshot_fingerprint = f"sha256:{hashlib.sha256(encoded_snapshot).hexdigest()}"
+        canonical_task_uuid = str(task["uuid"])
+        command_uuid = str(
+            uuid_mod.uuid5(
+                uuid_mod.UUID(canonical_task_uuid),
+                f"material-admission:{snapshot_fingerprint}",
+            )
+        )
+        jobs = self._workflow_tasks.list_workflow_node_jobs(canonical_task_uuid)
+        pending_resolution_node_uuids = {
+            str(job.get("workflow_node_uuid") or "")
+            for job in jobs
+            if job.get("status") == "pending"
+        }
         sources: list[TaskMaterialAdmissionSource] = []
         for node in sorted(
             (
                 item
                 for item in nodes
-                if isinstance(item, dict) and item.get("type") == "material_source"
+                if isinstance(item, dict)
+                and item.get("type") == "material_source"
+                and str(item.get("uuid") or "") in pending_resolution_node_uuids
             ),
             key=lambda item: str(item.get("uuid") or ""),
         ):
@@ -393,14 +770,15 @@ class EdgeScheduler:
                 )
             )
         if not sources:
-            return None
-        canonical_task_uuid = str(task["uuid"])
-        command_uuid = str(
-            uuid_mod.uuid5(
-                uuid_mod.UUID(canonical_task_uuid),
-                f"material-admission:{snapshot_fingerprint}",
+            projection = self._workflow_tasks.get_material_admission(
+                canonical_task_uuid
             )
-        )
+            if (
+                isinstance(projection, dict)
+                and projection.get("command_uuid") == command_uuid
+            ):
+                return self._ack_projected_admission_result(canonical_task_uuid)
+            return None
         command = TaskMaterialAdmissionCommand(
             schema_version=1,
             command_uuid=command_uuid,
@@ -426,20 +804,21 @@ class EdgeScheduler:
             raise RuntimeError("Workflow Task Material coordination is not configured")
         pending: list[dict[str, Any]] = []
         reconciled: list[str] = []
-        page = 1
-        while True:
-            tasks = self._workflow_tasks.list_workflow_tasks(
-                page=page,
-                page_size=100,
-                status="pending",
-            )
-            items = tasks.get("items")
-            if not isinstance(items, list):
-                raise TypeError("Workflow Task list projection is invalid")
-            pending.extend(items)
-            if page * 100 >= int(tasks.get("total") or 0):
-                break
-            page += 1
+        for status in ("pending", "admission_blocked"):
+            page = 1
+            while True:
+                tasks = self._workflow_tasks.list_workflow_tasks(
+                    page=page,
+                    page_size=100,
+                    status=status,
+                )
+                items = tasks.get("items")
+                if not isinstance(items, list):
+                    raise TypeError("Workflow Task list projection is invalid")
+                pending.extend(items)
+                if page * 100 >= int(tasks.get("total") or 0):
+                    break
+                page += 1
         for task in sorted(
             pending,
             key=lambda item: (
@@ -538,6 +917,7 @@ class EdgeScheduler:
             if not has_material_source:
                 return None
             if task.get("status") in {"succeeded", "failed", "canceled", "timeout"}:
+                self._ack_projected_admission_result(task_uuid)
                 release_result = self._reconcile_task_release_serialized(
                     task_uuid,
                     "workflow_task_terminal",
@@ -557,6 +937,29 @@ class EdgeScheduler:
         """Fail-closed proof used before WorkflowTask Job dispatch admission."""
 
         if self._workflow_tasks is None or self._inventory is None:
+            return False
+        try:
+            task = self._workflow_tasks.get_workflow_task(task_uuid)
+            if task.get("status") not in {"pending", "running"}:
+                return False
+            snapshot = task.get("workflow_snapshot")
+            nodes = snapshot.get("nodes") if isinstance(snapshot, dict) else None
+            material_source_node_uuids = {
+                str(node.get("uuid") or "")
+                for node in nodes or []
+                if isinstance(node, dict) and node.get("type") == "material_source"
+            }
+            jobs = self._workflow_tasks.list_workflow_node_jobs(task_uuid)
+            material_source_jobs = [
+                job
+                for job in jobs
+                if job.get("workflow_node_uuid") in material_source_node_uuids
+            ]
+            if not material_source_jobs:
+                return True
+            if any(job.get("status") != "succeeded" for job in material_source_jobs):
+                return False
+        except (KeyError, TypeError, ValueError):
             return False
         projection = self._workflow_tasks.get_material_admission(task_uuid)
         if not isinstance(projection, dict) or projection.get("status") != "admitted":
@@ -640,7 +1043,8 @@ class EdgeScheduler:
             self._workflows[spec.workflow_id] = run
 
             logger.info(
-                "[EdgeScheduler] workflow %s submitted (%d nodes, state=%s), reschedule",
+                "[EdgeScheduler] workflow %s submitted "
+                "(%d nodes, state=%s), reschedule",
                 spec.workflow_id,
                 len(spec.nodes),
                 run.state.value,
@@ -708,7 +1112,8 @@ class EdgeScheduler:
                 )
 
             logger.info(
-                "[EdgeScheduler] job %s (wf=%s node=%s success=%s) finished, reschedule",
+                "[EdgeScheduler] job %s (wf=%s node=%s success=%s) "
+                "finished, reschedule",
                 job_id[:8],
                 job.workflow_id,
                 job.node_id,
@@ -760,9 +1165,14 @@ class EdgeScheduler:
         for task in ordered:
             key = task.node.device_action_key
             device_key = task.node.device_lock_key
+            job_id = task.node.job_id or uuid_mod.uuid4().hex
             # manual_confirm 是 always-free 特殊节点：不占设备动作锁，也不受其阻塞
             manual_confirm = task.node.is_manual_confirm()
-            if not manual_confirm and (key in busy or device_key in busy):
+            if (
+                not manual_confirm
+                and (key in busy or device_key in busy)
+                and not self.owns_live_inventory_claim(job_id)
+            ):
                 # v1 锁整个设备实例；任一 Action/Claim/fence 占用都阻止同设备下发。
                 continue
 
@@ -779,7 +1189,7 @@ class EdgeScheduler:
                 run.mark_failed(task.node.id)
                 continue
 
-            # 物料锁：@action(lock_resource=[...]) 声明的资源被在执行 job 占用 → 本轮跳过
+            # 物料锁：被在执行 job 占用的 @action lock_resource 本轮跳过。
             lock_keys = self._resource_lock_keys(task.node, resolved_args)
             if lock_keys & held_resource_locks:
                 logger.info(
@@ -790,7 +1200,6 @@ class EdgeScheduler:
                 )
                 continue
 
-            job_id = task.node.job_id or uuid_mod.uuid4().hex
             payload = build_job_start_payload(
                 job_id=job_id,
                 task_id=run.spec.task_id,
@@ -813,16 +1222,23 @@ class EdgeScheduler:
                             raise RuntimeError(
                                 "formal device-action Task claim hook is unavailable"
                             )
-                        committed = self._device_action_task_before_dispatch(
-                            task_uuid=formal_task_uuid,
-                            job_uuid=job_id,
-                            device_id=task.node.device_id,
-                            action_name=task.node.action_name,
-                        ) is True
-                        if not committed:
-                            raise RuntimeError(
-                                "formal device-action Task claim was not committed"
+                        committed = (
+                            self._device_action_task_before_dispatch(
+                                task_uuid=formal_task_uuid,
+                                job_uuid=job_id,
+                                device_id=task.node.device_id,
+                                action_name=task.node.action_name,
                             )
+                            is True
+                        )
+                        if not committed:
+                            logger.info(
+                                "[EdgeScheduler] formal Task waits for Inventory Claim "
+                                "(task=%s job=%s)",
+                                formal_task_uuid,
+                                job_id,
+                            )
+                            continue
                     elif self._pre_dispatch_hook is not None:
                         committed = self._pre_dispatch_hook(payload) is True
                     self._dispatcher.dispatch(payload)
@@ -998,9 +1414,7 @@ class EdgeScheduler:
             try:
                 busy |= set(self._device_action_fence_provider())
             except Exception:
-                logger.exception(
-                    "[EdgeScheduler] device_action_fence_provider failed"
-                )
+                logger.exception("[EdgeScheduler] device_action_fence_provider failed")
         for job in self._inflight.values():
             busy.add(job.device_action_key)
             busy.add(f"/devices/{job.device_id}")

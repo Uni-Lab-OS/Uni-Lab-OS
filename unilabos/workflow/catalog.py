@@ -376,6 +376,20 @@ class TemplateCatalog:
         except sqlite3.Error:
             raise TemplateCatalogImportError("/authority/catalog") from None
 
+    def invalidate(self, authority: CatalogAuthority) -> None:
+        """删除可用性 marker；保留模板历史，等待下一次完整 replace 恢复。"""
+
+        if not isinstance(authority, CatalogAuthority):
+            raise TypeError("authority 必须是 CatalogAuthority")
+        try:
+            with self._store.catalog_guard(), self._store.transaction() as conn:
+                conn.execute(
+                    "DELETE FROM workflow_template_catalog WHERE authority_id = ?",
+                    (authority.authority_id,),
+                )
+        except sqlite3.Error:
+            raise TemplateCatalogImportError("/authority/catalog") from None
+
     @staticmethod
     def _persist_resource_template_identities(
         conn: sqlite3.Connection,

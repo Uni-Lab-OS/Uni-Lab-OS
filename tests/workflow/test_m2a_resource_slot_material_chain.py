@@ -40,6 +40,7 @@ from .test_m2a_material_source_vertical_slice import (
 )
 
 SECOND_CONSUMER_NODE_UUID = "20000000-0000-4000-8000-000000000003"
+SECOND_MATERIAL_SOURCE_NODE_UUID = "20000000-0000-4000-8000-000000000005"
 MIDDLE_NODE_UUID = "20000000-0000-4000-8000-000000000004"
 MIDDLE_TEMPLATE_UUID = "30000000-0000-4000-8000-000000000003"
 MIDDLE_SAMPLE_TARGET_UUID = "40000000-0000-4000-8000-000000000003"
@@ -199,6 +200,39 @@ def _compile(context: _ChainContext, source: str) -> CandidateCompilation:
         source_uri="package://lab/workflows/m2a_material_chain.py",
         applied_graph=context.applied_graph,
     )
+
+
+def test_two_material_sources_round_trip_as_non_executable_declarations(
+    tmp_path: Path,
+) -> None:
+    second_source = _material_source_call().replace(
+        MATERIAL_SOURCE_NODE_UUID,
+        SECOND_MATERIAL_SOURCE_NODE_UUID,
+    ).replace("sample =", "reagent =")
+    source = f'''from lab.resources import corning_96_well_plate
+from unilabos.workflow.authoring import (
+    MaterialFlowRole,
+    material_source,
+    resource_ref,
+    workflow_definition,
+)
+
+
+@workflow_definition(
+    workflow_uuid="{WORKFLOW_UUID}",
+    displayname="Two material sources",
+)
+def two_material_sources():
+{_material_source_call()}
+{second_source}
+'''
+
+    with _opened_context(tmp_path / "workflow.db") as context:
+        compiled = _compile(context, source)
+
+    assert compiled.valid, compiled.diagnostics
+    assert compiled.normalized_python_source.count("material_source(") == 2
+    assert "with parallel():" not in compiled.normalized_python_source
 
 
 def _node(graph: dict[str, Any], node_uuid: str) -> dict[str, Any]:

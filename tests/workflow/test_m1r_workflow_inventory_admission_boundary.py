@@ -19,6 +19,8 @@ WORKFLOW_UUID = "10000000-0000-4000-8000-000000000201"
 WORKFLOW_TASK_COMMAND_UUID = "80000000-0000-4000-8000-000000000201"
 MATERIAL_SOURCE_NODE_UUID = "a0000000-0000-4000-8000-000000000201"
 MATERIAL_UUID = "5aa00000-0000-4000-8000-000000000201"
+MOUNT_UUID = "5aa00000-0000-4000-8000-000000000202"
+SITE_UUID = "6aa00000-0000-4000-8000-000000000201"
 RESOURCE_TEMPLATE_UUID = "2bb00000-0000-4000-8000-000000000201"
 
 
@@ -129,9 +131,9 @@ def _admission_command(
         material_source_node_uuid=MATERIAL_SOURCE_NODE_UUID,
         mode="existing",
         resource_template_uuid=RESOURCE_TEMPLATE_UUID,
-        mount={"uuid": MATERIAL_UUID},
+        mount={"uuid": MOUNT_UUID},
         material_uuid=MATERIAL_UUID,
-        site_uuid=None,
+        site_uuid=SITE_UUID,
         candidate_site_uuids=(),
         flow_role="primary_sample",
     )
@@ -163,10 +165,32 @@ def test_task_persists_before_independent_inventory_admission(
     )
     try:
         inventory.create_material(
+            material_uuid=MOUNT_UUID,
+            resource_template_uuid=RESOURCE_TEMPLATE_UUID,
+            barcode="M1R-MOUNT-201",
+            name="M1R admission boundary mount",
+        )
+        inventory.create_material(
             material_uuid=MATERIAL_UUID,
             resource_template_uuid=RESOURCE_TEMPLATE_UUID,
             barcode="M1R-SAMPLE-201",
             name="M1R admission boundary sample",
+        )
+        inventory.create_site(
+            site_uuid=SITE_UUID,
+            description=None,
+            meta_data={},
+            material_uuid=MOUNT_UUID,
+            name="A1",
+            sort_order=0,
+            allowed_resource_template_uuids=[RESOURCE_TEMPLATE_UUID],
+            occupied_material_uuid=MATERIAL_UUID,
+            position_x=0.0,
+            position_y=0.0,
+            position_z=0.0,
+            depth=1.0,
+            length=1.0,
+            width=1.0,
         )
         _seed_workflow_contract(store)
 

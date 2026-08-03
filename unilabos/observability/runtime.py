@@ -412,11 +412,19 @@ def attach_workflow_execution_identity(
         "node_job_uuid": str(node_job_uuid or ""),
         "task_uuid": str(task_uuid or ""),
     }
+    previous_identity = dict(_WORKFLOW_EXECUTION_IDENTITY.get())
     token = _WORKFLOW_EXECUTION_IDENTITY.set(identity)
     try:
         yield None
     finally:
-        _WORKFLOW_EXECUTION_IDENTITY.reset(token)
+        try:
+            _WORKFLOW_EXECUTION_IDENTITY.reset(token)
+        except ValueError:
+            # rclpy Task manually advances a coroutine on successive executor
+            # spins and does not preserve the same contextvars.Context. Tracing
+            # and workflow identity are observational state: crossing that
+            # boundary must never discard an already successful device result.
+            _WORKFLOW_EXECUTION_IDENTITY.set(previous_identity)
 
 
 def capture_workflow_execution_identity() -> dict[str, str]:
