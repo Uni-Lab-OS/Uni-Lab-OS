@@ -14,9 +14,9 @@ from urllib.parse import quote
 
 import yaml
 
+from unilabos.app.scheduler.inventory.domain import MaterialModelAsset
 from unilabos.package_manager import PackageAssetResolver, PackageCatalog
 from unilabos.package_manager.sources import PackageSource
-from unilabos.app.scheduler.inventory.domain import MaterialModelAsset
 
 _INTERNAL_SITE_TYPES = frozenset({"tipspot", "tip_spot", "well"})
 _PART_TYPES = frozenset(
@@ -86,6 +86,7 @@ def build_package_material_projection(
     if len(sources) != len(catalogs):
         raise ValueError("Package source 与 PackageCatalog 数量不一致")
     definitions: dict[str, MaterialDefinitionProjection] = {}
+    local_definitions: dict[str, list[MaterialDefinitionProjection]] = {}
     shapes_by_identity: dict[tuple[str, str], dict[str, Any]] = {}
     model_assets_by_path: dict[str, MaterialModelAsset] = {}
     digests: list[str] = []
@@ -136,7 +137,9 @@ def build_package_material_projection(
                 if record.kind == "device"
                 else f"{record.module}:{record.symbol}"
             )
-            definitions[record.id] = MaterialDefinitionProjection(
+            if record.fqid in definitions:
+                raise ValueError(f"Package definition FQID 重复: {record.fqid}")
+            definition = MaterialDefinitionProjection(
                 graph_class=record.id,
                 source_identity=source_identity,
                 kind=kind,
@@ -148,6 +151,12 @@ def build_package_material_projection(
                     bundle=catalog.namespace,
                 ),
             )
+            definitions[record.fqid] = definition
+            local_definitions.setdefault(record.id, []).append(definition)
+    canonical_definitions = dict(definitions)
+    for local_id, matches in local_definitions.items():
+        if len(matches) == 1 and local_id not in definitions:
+            definitions[local_id] = matches[0]
     shapes = sorted(
         shapes_by_identity.values(), key=lambda item: (item["bundle"], item["id"])
     )
@@ -162,7 +171,7 @@ def build_package_material_projection(
                     "envelope_mm": value.envelope_mm,
                     "model": value.model,
                 }
-                for key, value in sorted(definitions.items())
+                for key, value in sorted(canonical_definitions.items())
             },
             "shapes": shapes,
         },
@@ -206,11 +215,7 @@ def build_resource_graph_import(
         node_id = _required_string(node.get("id"), "node.id")
         runtime_uuid = _required_string(node.get("uuid"), f"nodes[{node_id}].uuid")
         graph_class = _required_string(node.get("class"), f"nodes[{node_id}].class")
-        definition = package_projection.definitions.get(graph_class)
-        if definition is None:
-            raise ValueError(
-                f"ResourceTreeSet class 未进入 PackageCatalog: {graph_class}"
-            )
+        definition = _resolve_graph_definition(package_projection, graph_class)
         template_uuid = resolved_identities.get(definition.source_identity)
         if template_uuid is None:
             raise ValueError(
@@ -683,11 +688,11 @@ def _declared_site_template_uuids(
     template_uuids: list[str] = []
     for content_type in content_types:
         graph_class = _required_string(content_type, f"Site {label} content_type")
-        definition = package_projection.definitions.get(graph_class)
-        if definition is None:
-            raise ValueError(
-                f"Site {label} content_type 未进入 PackageCatalog: {graph_class}"
-            )
+        definition = _resolve_graph_definition(
+            package_projection,
+            graph_class,
+            field=f"Site {label} content_type",
+        )
         template_uuid = resolved_identities.get(definition.source_identity)
         if template_uuid is None:
             raise ValueError(
@@ -714,6 +719,29 @@ def _declared_site_occupant(
             f"Site {label} occupied_by 未解析为 owner 的直接 Material: {occupant}"
         )
     return material_uuid
+
+
+def _resolve_graph_definition(
+    package_projection: PackageMaterialProjection,
+    graph_class: str,
+    *,
+    field: str = "ResourceTreeSet class",
+) -> MaterialDefinitionProjection:
+    """按 canonical FQID 解析 Graph definition，并窄兼容唯一 local id。"""
+
+    canonical = package_projection.definitions.get(graph_class)
+    if canonical is not None:
+        return canonical
+    legacy_matches = [
+        definition
+        for definition in package_projection.definitions.values()
+        if definition.graph_class == graph_class
+    ]
+    if len(legacy_matches) == 1:
+        return next(iter(legacy_matches))
+    if len(legacy_matches) > 1:
+        raise ValueError(f"{field} legacy short id 歧义: {graph_class}")
+    raise ValueError(f"{field} 未进入 PackageCatalog: {graph_class}")
 
 
 def _declared_site_kind(
