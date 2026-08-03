@@ -29,6 +29,7 @@ from unilabos.workflow.device_action_task import (
     DeviceActionTaskRuntimeBridge,
     DeviceActionTaskService,
 )
+from unilabos.workflow.models import WorkflowNodeWrite
 from unilabos.workflow.runtime import WorkflowRuntimeCoordinator, WorkflowRuntimeWorker
 from unilabos.workflow.service import WorkflowService
 from unilabos.workflow.store import WorkflowStore
@@ -149,6 +150,22 @@ class UncertainFeedbackHost(FeedbackHost):
         del action_type, action_kwargs, sample_material, server_info
         self.sent.append(item)
         raise RuntimeError("transport acknowledgement was lost")
+
+
+class CancelCompletingHost(FeedbackHost):
+    """Host seam that emits the physical canceled terminal after cancel ingress."""
+
+    def cancel_goal_or_defer(self, job_uuid: str) -> bool:
+        accepted = super().cancel_goal_or_defer(job_uuid)
+        item = next(sent for sent in self.sent if sent.job_id == job_uuid)
+        assert self.backend is not None
+        self.backend.publish_job_status(
+            {},
+            item,
+            "failed",
+            serialize_result_info("Job was cancelled", False, {}),
+        )
+        return accepted
 
 
 class GenericRecordingDispatcher:
@@ -1401,6 +1418,10 @@ def test_durable_cancel_command_requests_host_cancel_and_finishes_canceled(
             "/api/v1/device-action-tasks", json=contract._request(harness)
         ).json()["data"]
         assert _wait(lambda: len(host.sent) == 1)
+        following = client.post(
+            "/api/v1/device-action-tasks", json=contract._request(harness)
+        ).json()["data"]
+        assert service.get(following["task_uuid"])["status"] == "pending"
         response = client.post(
             f"/api/v1/workflow-tasks/{created['task_uuid']}/commands",
             json={
@@ -1424,9 +1445,132 @@ def test_durable_cancel_command_requests_host_cancel_and_finishes_canceled(
         )
         assert _wait(lambda: service.get(created["task_uuid"])["status"] == "canceled")
         assert service.get(created["task_uuid"])["job_status"] == "canceled"
+        assert _wait(lambda: len(host.sent) == 2)
+        assert host.sent[1].task_id == following["task_uuid"]
+        assert service.get(following["task_uuid"])["status"] == "running"
     finally:
         client.close()
         bridge.stop()
         backend.stop()
         inventory.close()
         store.close()
+
+
+def _create_generic_device_workflow_task(
+    service: WorkflowService,
+    *,
+    device_material_uuid: str,
+) -> tuple[dict[str, Any], dict[str, Any]]:
+    workflow = service.create_workflow(
+        name="F007 cancellation lock release",
+        tags=[],
+        description=None,
+        meta_data={},
+        workflow_uuid=str(uuid4()),
+    )
+    node = WorkflowNodeWrite(
+        uuid=str(uuid4()),
+        material_uuid=device_material_uuid,
+        name="move",
+        status="idle",
+        type="device_action",
+        pose={},
+        param={"duration_seconds": 30},
+        action_name="move",
+        action_type="test.action.Move",
+        execution_policy={},
+        disabled=False,
+        minimized=False,
+        meta_data={},
+    )
+    service.save_graph(
+        workflow["uuid"],
+        revision=workflow["revision"],
+        nodes=[node],
+        edges=[],
+    )
+    task = service.create_workflow_task(
+        workflow_uuid=workflow["uuid"],
+        run_mode="normal",
+        target_node_uuid=None,
+        input_value={},
+        description=None,
+        meta_data={},
+    )
+    job = service.list_workflow_node_jobs(task["uuid"])[0]
+    return task, job
+
+
+def test_generic_workflow_cancel_reaches_host_and_physical_terminal_unlocks_next_task(
+    tmp_path: Path,
+) -> None:
+    """A public cancel command must not strand the device execution lock."""
+
+    store = WorkflowStore(tmp_path / "workflow.db")
+    service = WorkflowService(store)
+    device_material_uuid = str(uuid4())
+    first_task, first_job = _create_generic_device_workflow_task(
+        service,
+        device_material_uuid=device_material_uuid,
+    )
+    host = CancelCompletingHost()
+    host.auto_complete = False
+    backend = JobExecutionBackend(host_node_getter=lambda: host)
+    host.backend = backend
+    worker = WorkflowRuntimeWorker(
+        WorkflowRuntimeCoordinator(store),
+        dispatcher=backend,
+        device_identity_resolver=lambda identity: (
+            "robot" if identity == device_material_uuid else None
+        ),
+        poll_interval_seconds=0.01,
+    )
+    try:
+        backend.start()
+        worker.start()
+        assert _wait(lambda: len(host.sent) == 1)
+
+        second_task, second_job = _create_generic_device_workflow_task(
+            service,
+            device_material_uuid=device_material_uuid,
+        )
+        assert _wait(
+            lambda: (
+                service.get_workflow_node_job(second_job["uuid"])["status"] == "running"
+            )
+        )
+        assert len(host.sent) == 1
+
+        service.create_workflow_task_command(
+            first_task["uuid"],
+            command_type="cancel",
+            target_node_uuid=None,
+            idempotency_key="f007-cancel-first-workflow",
+            description="operator terminates the running workflow",
+            meta_data={"source": "frontend"},
+        )
+
+        assert _wait(lambda: len(host.cancel_requests) == 1), (
+            "the durable WorkflowTask cancel command was consumed but never "
+            "forwarded to the execution backend/HostNode"
+        )
+        assert host.cancel_requests == [first_job["uuid"]]
+        assert _wait(lambda: len(host.sent) == 2), (
+            "the HostNode reported the physical canceled terminal, but the "
+            "same-device queued workflow remained locked"
+        )
+        assert host.sent[1].job_id == second_job["uuid"]
+        assert _wait(
+            lambda: (
+                service.get_workflow_node_job(first_job["uuid"])["status"] == "canceled"
+            )
+        )
+        settled = service.get_workflow_task(first_task["uuid"])
+        assert settled["status"] == "canceled"
+        assert settled["cleanup_status"] == "settled"
+        assert service.get_workflow_task(second_task["uuid"])["status"] == "running"
+    finally:
+        worker.stop()
+        worker.join(timeout=1)
+        backend.stop()
+        service.close()
