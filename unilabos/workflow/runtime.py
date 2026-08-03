@@ -92,6 +92,10 @@ class WorkflowJobDispatcher(Protocol):
 
     def remove_job_finished_listener(self, listener: Callable[..., None]) -> None: ...
 
+    def add_job_completion_listener(self, listener: Callable[..., bool]) -> None: ...
+
+    def remove_job_completion_listener(self, listener: Callable[..., bool]) -> None: ...
+
     def execution_ready(self) -> bool: ...
 
     def request_cancel(self, job_id: str) -> bool: ...
@@ -1118,6 +1122,19 @@ class WorkflowRuntimeCoordinator:
     def _execution_job(self, job_uuid: str) -> Dict[str, Any]:
         return self._store.get_job(job_uuid)
 
+    def _is_device_action_task(self, task_uuid: str) -> bool:
+        with self._store.transaction() as connection:
+            return (
+                connection.execute(
+                    """
+                    SELECT 1 FROM device_action_task
+                    WHERE workflow_task_uuid = ?
+                    """,
+                    (task_uuid,),
+                ).fetchone()
+                is not None
+            )
+
 
 class WorkflowRuntimeWorker:
     """Consume durable commands and, when configured, execute frozen DAG Jobs."""
@@ -1145,10 +1162,10 @@ class WorkflowRuntimeWorker:
         self._thread: Optional[threading.Thread] = None
         self._lock = threading.Lock()
         self._listener_registered = False
+        self._uses_completion_listener = False
         self._cancel_requests_inflight: set[str] = set()
         if dispatcher is not None:
-            dispatcher.add_job_finished_listener(self._on_job_finished)
-            self._listener_registered = True
+            self._register_dispatcher_listener(dispatcher)
         self._task_reconciler: Callable[[str], object] | None = None
         self._task_dispatch_guard: Callable[[str], bool] | None = None
         self._pending_task_reconciliations: set[str] = set()
@@ -1179,8 +1196,7 @@ class WorkflowRuntimeWorker:
             if self._thread is not None and self._thread.is_alive():
                 return
             if self._dispatcher is not None and not self._listener_registered:
-                self._dispatcher.add_job_finished_listener(self._on_job_finished)
-                self._listener_registered = True
+                self._register_dispatcher_listener(self._dispatcher)
             self._stop_event.clear()
             self._thread = threading.Thread(
                 target=self._run,
@@ -1198,7 +1214,27 @@ class WorkflowRuntimeWorker:
             self._listener_registered = False
         if remove_listener:
             assert dispatcher is not None
-            dispatcher.remove_job_finished_listener(self._on_job_finished)
+            if self._uses_completion_listener:
+                dispatcher.remove_job_completion_listener(self._on_job_completion)
+            else:
+                dispatcher.remove_job_finished_listener(self._on_job_finished)
+
+    def _register_dispatcher_listener(
+        self,
+        dispatcher: WorkflowJobDispatcher,
+    ) -> None:
+        add_completion_listener = getattr(
+            dispatcher,
+            "add_job_completion_listener",
+            None,
+        )
+        if callable(add_completion_listener):
+            add_completion_listener(self._on_job_completion)
+            self._uses_completion_listener = True
+        else:
+            dispatcher.add_job_finished_listener(self._on_job_finished)
+            self._uses_completion_listener = False
+        self._listener_registered = True
 
     def join(self, timeout: Optional[float] = None) -> None:
         thread = self._thread
@@ -1268,6 +1304,12 @@ class WorkflowRuntimeWorker:
                         task["uuid"],
                         job_uuid,
                     )
+                    continue
+                current = self._coordinator._execution_job(job_uuid)
+                if current["status"] in _JOB_TERMINAL:
+                    self._cancel_requests_inflight.discard(job_uuid)
+                    continue
+                if current["status"] != "cancel_requested":
                     continue
                 self._coordinator.mark_job_unknown(
                     job_uuid,
@@ -1475,59 +1517,103 @@ class WorkflowRuntimeWorker:
             value = value[part]
         return value
 
+    def _on_job_completion(
+        self,
+        job_uuid: str,
+        success: bool,
+        return_value: Any,
+        success_type: str = "normal",
+    ) -> bool:
+        if self._stop_event.is_set() or not self._listener_registered:
+            return False
+        return self._settle_job_finished(
+            job_uuid,
+            success,
+            return_value,
+            success_type,
+        )
+
     def _on_job_finished(
         self,
         job_uuid: str,
         success: bool,
         return_value: Any,
-        _success_type: str = "normal",
+        success_type: str = "normal",
     ) -> None:
-        if self._stop_event.is_set() or not self._listener_registered:
-            return
         try:
-            job = self._coordinator._execution_job(job_uuid)
-            if job["status"] in _JOB_TERMINAL:
-                return
-            task_uuid = job["workflow_task_uuid"]
-            if job["status"] == "cancel_requested":
-                self._coordinator.transition_job(job_uuid, "canceled")
-                self._cancel_requests_inflight.discard(job_uuid)
-                self._coordinator.reconcile_task_cancellation(task_uuid)
-                self._queue_task_reconciliation(task_uuid)
-                _LOGGER.info(
-                    "Workflow Job canceled task_uuid=%s job_uuid=%s",
-                    task_uuid,
-                    job_uuid,
-                )
-            elif success:
-                result = (
-                    return_value
-                    if isinstance(return_value, dict)
-                    else {"value": return_value}
-                )
-                self._coordinator.transition_job(
-                    job_uuid,
-                    "succeeded",
-                    return_info=result,
-                )
-                _LOGGER.info(
-                    "Workflow Job succeeded task_uuid=%s job_uuid=%s",
-                    task_uuid,
-                    job_uuid,
-                )
-            else:
-                self._coordinator.transition_job(
-                    job_uuid,
-                    "failed",
-                    error_info=[{"code": "device_action_failed"}],
-                )
-                _LOGGER.error(
-                    "Workflow Job failed task_uuid=%s job_uuid=%s",
-                    task_uuid,
-                    job_uuid,
-                )
+            self._settle_job_finished(
+                job_uuid,
+                success,
+                return_value,
+                success_type,
+            )
         except (sqlite3.Error, StoreConflict, StoreNotFound):
             _LOGGER.exception("Workflow Job completion could not be committed")
+
+    def _settle_job_finished(
+        self,
+        job_uuid: str,
+        success: bool,
+        return_value: Any,
+        success_type: str,
+    ) -> bool:
+        job = self._coordinator._execution_job(job_uuid)
+        task_uuid = job["workflow_task_uuid"]
+        if self._coordinator._is_device_action_task(task_uuid):
+            return False
+        if job["status"] in _JOB_TERMINAL:
+            return True
+        if success_type == "transport_unknown":
+            self._coordinator.mark_job_unknown(
+                job_uuid,
+                "workflow_job_dispatch_transport_unknown",
+            )
+            self._queue_task_reconciliation(task_uuid)
+            _LOGGER.error(
+                "Workflow Job outcome unknown task_uuid=%s job_uuid=%s",
+                task_uuid,
+                job_uuid,
+            )
+            return True
+        if job["status"] == "cancel_requested":
+            self._coordinator.transition_job(job_uuid, "canceled")
+            self._cancel_requests_inflight.discard(job_uuid)
+            self._coordinator.reconcile_task_cancellation(task_uuid)
+            self._queue_task_reconciliation(task_uuid)
+            _LOGGER.info(
+                "Workflow Job canceled task_uuid=%s job_uuid=%s",
+                task_uuid,
+                job_uuid,
+            )
+            return True
+        if success:
+            result = (
+                return_value
+                if isinstance(return_value, dict)
+                else {"value": return_value}
+            )
+            self._coordinator.transition_job(
+                job_uuid,
+                "succeeded",
+                return_info=result,
+            )
+            _LOGGER.info(
+                "Workflow Job succeeded task_uuid=%s job_uuid=%s",
+                task_uuid,
+                job_uuid,
+            )
+            return True
+        self._coordinator.transition_job(
+            job_uuid,
+            "failed",
+            error_info=[{"code": "device_action_failed"}],
+        )
+        _LOGGER.error(
+            "Workflow Job failed task_uuid=%s job_uuid=%s",
+            task_uuid,
+            job_uuid,
+        )
+        return True
 
     def _fail_task(
         self,
