@@ -94,6 +94,8 @@ class WorkflowJobDispatcher(Protocol):
 
     def execution_ready(self) -> bool: ...
 
+    def request_cancel(self, job_id: str) -> bool: ...
+
 
 def _json(value: Any) -> str:
     return encode_json(value, sort_keys=True).decode("utf-8")
@@ -1052,6 +1054,64 @@ class WorkflowRuntimeCoordinator:
             ).fetchall()
             return [self._project_task(row) for row in rows]
 
+    def _canceling_execution_tasks(self) -> list[Dict[str, Any]]:
+        """Return non-D1A Tasks waiting for physical cancellation settlement."""
+
+        with self._store.transaction() as connection:
+            rows = connection.execute(
+                """
+                SELECT * FROM workflow_task
+                WHERE deleted_at IS NULL AND status = 'canceling'
+                  AND NOT EXISTS (
+                      SELECT 1 FROM device_action_task AS d1a
+                      WHERE d1a.workflow_task_uuid = workflow_task.uuid
+                  )
+                ORDER BY create_time, uuid
+                """
+            ).fetchall()
+            return [self._project_task(row) for row in rows]
+
+    def reconcile_task_cancellation(self, task_uuid: str) -> Dict[str, Any]:
+        """Settle a canceling Task only after every physical Job is terminal."""
+
+        with self._store.transaction() as connection:
+            now = utc_now()
+            task = self._task_row(connection, task_uuid)
+            if task["status"] != "canceling":
+                return self._project_task(task)
+            active = connection.execute(
+                """
+                SELECT COUNT(*) FROM workflow_node_job
+                WHERE workflow_task_uuid = ? AND deleted_at IS NULL
+                  AND status IN (
+                      'dispatched', 'running', 'intervention_required',
+                      'cancel_requested', 'execution_unknown'
+                  )
+                """,
+                (task_uuid,),
+            ).fetchone()[0]
+            if active:
+                return self._project_task(task)
+            connection.execute(
+                """
+                UPDATE workflow_task
+                SET status = 'canceled', cleanup_status = 'settled',
+                    finished_at = COALESCE(finished_at, ?), update_time = ?
+                WHERE uuid = ? AND status = 'canceling'
+                """,
+                (now, now, task_uuid),
+            )
+            self._append_journal(
+                connection,
+                task_uuid=task_uuid,
+                kind="task_transition",
+                from_status="canceling",
+                to_status="canceled",
+                now=now,
+            )
+            self._append_invalidation(connection, task_uuid=task_uuid, now=now)
+            return self._project_task(self._task_row(connection, task_uuid))
+
     def _execution_jobs(self, task_uuid: str) -> list[Dict[str, Any]]:
         return self._store.list_jobs(task_uuid)
 
@@ -1085,6 +1145,7 @@ class WorkflowRuntimeWorker:
         self._thread: Optional[threading.Thread] = None
         self._lock = threading.Lock()
         self._listener_registered = False
+        self._cancel_requests_inflight: set[str] = set()
         if dispatcher is not None:
             dispatcher.add_job_finished_listener(self._on_job_finished)
             self._listener_registered = True
@@ -1161,6 +1222,7 @@ class WorkflowRuntimeWorker:
             self._reconcile_task_mutations()
             try:
                 if self._dispatcher is not None:
+                    self._sweep_execution_cancellations()
                     self._sweep_execution_tasks()
             except (sqlite3.Error, StoreConflict, StoreNotFound):
                 _LOGGER.exception("Workflow runtime execution sweep failed")
@@ -1187,6 +1249,36 @@ class WorkflowRuntimeWorker:
                     task["workflow_uuid"],
                 )
             self._advance_task(task)
+
+    def _sweep_execution_cancellations(self) -> None:
+        dispatcher = self._dispatcher
+        assert dispatcher is not None
+        for task in self._coordinator._canceling_execution_tasks():
+            for job in self._coordinator._execution_jobs(task["uuid"]):
+                job_uuid = job["uuid"]
+                if (
+                    job["status"] != "cancel_requested"
+                    or job_uuid in self._cancel_requests_inflight
+                ):
+                    continue
+                if dispatcher.request_cancel(job_uuid):
+                    self._cancel_requests_inflight.add(job_uuid)
+                    _LOGGER.info(
+                        "Workflow Job cancel requested task_uuid=%s job_uuid=%s",
+                        task["uuid"],
+                        job_uuid,
+                    )
+                    continue
+                self._coordinator.mark_job_unknown(
+                    job_uuid,
+                    "workflow_job_cancel_unconfirmed",
+                )
+                _LOGGER.error(
+                    "Workflow Job cancel outcome unknown task_uuid=%s job_uuid=%s",
+                    task["uuid"],
+                    job_uuid,
+                )
+            self._coordinator.reconcile_task_cancellation(task["uuid"])
 
     def _advance_task(self, task: Dict[str, Any]) -> None:
         task_uuid = task["uuid"]
@@ -1397,7 +1489,17 @@ class WorkflowRuntimeWorker:
             if job["status"] in _JOB_TERMINAL:
                 return
             task_uuid = job["workflow_task_uuid"]
-            if success:
+            if job["status"] == "cancel_requested":
+                self._coordinator.transition_job(job_uuid, "canceled")
+                self._cancel_requests_inflight.discard(job_uuid)
+                self._coordinator.reconcile_task_cancellation(task_uuid)
+                self._queue_task_reconciliation(task_uuid)
+                _LOGGER.info(
+                    "Workflow Job canceled task_uuid=%s job_uuid=%s",
+                    task_uuid,
+                    job_uuid,
+                )
+            elif success:
                 result = (
                     return_value
                     if isinstance(return_value, dict)

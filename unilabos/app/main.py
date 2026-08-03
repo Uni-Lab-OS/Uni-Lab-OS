@@ -967,9 +967,9 @@ def main():
         BasicConfig.sk = args_dict.get("sk", "")
         print_status("传入了sk参数，优先采用传入参数！", "info")
     BasicConfig.working_dir = working_dir
-    if workspace_source is not None:
-        from unilabos.workflow.catalog import CatalogAuthority
+    from unilabos.workflow.catalog import CatalogAuthority
 
+    if workspace_source is not None:
         workspace_root = workspace_source.root.resolve()
         # PackageCatalog workspaces may contain devices/resources only.  The
         # editable Workflow source protocol is an additional, explicit
@@ -980,11 +980,14 @@ def main():
             if (workspace_root / "package.yaml").is_file()
             else ()
         )
-        if BasicConfig.workflow_graph_authority is None:
-            BasicConfig.workflow_graph_authority = CatalogAuthority(
-                authority_id="os-local",
-                kind="local",
-            )
+    # A domain Package Workspace is optional for local Edge debugging. The OS
+    # registry still publishes a Catalog snapshot, so it needs the same local
+    # Graph Authority even when only built-in device capabilities are loaded.
+    if BasicConfig.workflow_graph_authority is None:
+        BasicConfig.workflow_graph_authority = CatalogAuthority(
+            authority_id="os-local",
+            kind="local",
+        )
 
     # package 子命令：在配置/鉴权就绪后尽早处理，不进入设备 bootstrap
     if args_dict.get("command") in ("package", "pkg"):
@@ -1393,15 +1396,19 @@ def main():
                 resource_registry_snapshot=args_dict.get(
                     "_workflow_resource_registry_snapshot"
                 ),
-                inventory_graph_snapshot={
-                    "source_id": os.path.basename(
-                        str(args_dict.get("_graph_file_path") or "os-current")
-                    ),
-                    "nodes": [
-                        node.res_content.model_dump(by_alias=True)
-                        for node in resource_tree_set.all_nodes
-                    ],
-                },
+                inventory_graph_snapshot=(
+                    {
+                        "source_id": os.path.basename(
+                            str(args_dict.get("_graph_file_path") or "os-current")
+                        ),
+                        "nodes": [
+                            node.res_content.model_dump(by_alias=True)
+                            for node in resource_tree_set.all_nodes
+                        ],
+                    }
+                    if workspace_catalog is not None
+                    else None
+                ),
                 package_sources=args_dict.get("_package_sources", ()),
                 package_catalogs=args_dict.get("_package_catalogs", ()),
                 workflow_job_dispatcher=workflow_job_dispatcher,
