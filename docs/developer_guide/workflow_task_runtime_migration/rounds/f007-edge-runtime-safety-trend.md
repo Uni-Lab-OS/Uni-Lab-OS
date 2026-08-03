@@ -3,14 +3,15 @@
 日期：2026-08-03
 
 状态：**OS、FE 与真实 Electron 联调候选已通过完整门禁和 exact-SHA review，
-已具备候选分支发布条件；尚未 merge integration、更新 Core gitlink 或进入 Accepted。**
+并已在隔离发布分支完成 non-squash integration merge 与合并态复验；本报告随
+integration 发布。尚未更新 Core gitlink、私有 OS `dev` 或进入 Accepted。**
 
 ## 1. 范围与基线
 
-| 仓库 | 基线 | 候选分支 | 最终受测 SHA |
+| 仓库 | integration 基线 | exact-reviewed 候选 | non-squash integration merge |
 |---|---|---|---|
-| OS | `integration/workflow-task-runtime@25be15efb272667bc4398241cf119299ba02fd2f` | `migration/f007-edge-runtime-safety` | `77c05f8f37d56c7179b1c7024337a43bb14d749f` |
-| FE | `0a50f1047f3c48a9ef33266cc30758288ed003e2` | `feat/ui-optimization-szlab-material-display` | `4a5a941ff3bc15636b2cba95b6b3da98743e25f9` |
+| OS | `integration/workflow-task-runtime@25be15efb272667bc4398241cf119299ba02fd2f` | `migration/f007-edge-runtime-safety@77c05f8f37d56c7179b1c7024337a43bb14d749f` | `336a075f16c92410c3a70eca0671c1b11a397f9b` |
+| FE | `integration/fe-os-migration@a453b30868f530456c3fa7a06d878567be863d6e` | `feat/ui-optimization-szlab-material-display@4a5a941ff3bc15636b2cba95b6b3da98743e25f9` | `8907e608ba58b1b0e4fb53d2e12d4514d422a966` |
 | SZLab fixture | `feat/szlab-material-display` | 未修改源码 | 已跟踪 `deployment/graphs/szlab-local-debug.json` |
 
 本轮关闭五项：Edge 启动后 Action 目录上报、0 Action 设备点击崩溃、Action/Workflow
@@ -61,7 +62,7 @@ single ESC/C1 和 default 一致性等 finding。修复后对最终组合：
 
 确认 Standards `0B/0NB`、Spec `0B/0NB`，结论 `APPROVED`。
 
-## 4. 最终门禁
+## 4. 候选与 integration 最终门禁
 
 ### OS
 
@@ -69,7 +70,8 @@ single ESC/C1 和 default 一致性等 finding。修复后对最终组合：
 |---|---:|
 | cancellation/terminal/unknown 定向 | `4 passed, 18 deselected` |
 | Published Workflow contract 定向 | `34 passed` |
-| 完整 `python -m pytest -q tests/` | `2569 passed, 4 skipped, 68 warnings` |
+| 候选完整 `python -m pytest -q tests/` | `2569 passed, 4 skipped, 68 warnings` |
+| integration merge 完整 `python -m pytest -q tests/` | `2569 passed, 4 skipped, 69 warnings` |
 | changed files Ruff format | passed |
 | changed files Ruff fatal rules `E9,F63,F7,F82` | passed |
 | `git diff 25be15ef..77c05f8f --check` | passed |
@@ -78,22 +80,26 @@ single ESC/C1 和 default 一致性等 finding。修复后对最终组合：
 
 | 门禁 | 结果 |
 |---|---:|
-| 完整 `pnpm test` | `417 passed` |
+| 候选完整 `pnpm test` | `417 passed` |
+| integration merge 完整 `pnpm test` | `419 passed` |
 | `pnpm typecheck` | passed |
 | `pnpm build:web` | passed |
 | `pnpm build:desktop` | passed |
-| 真实 Electron：领域包 + 无领域包 | `2 passed`，35.1 秒 |
-| 0 Action 设备点击/刷新 | `1 passed`，16.1 秒 |
+| integration merge 真实 Electron：领域包 + 无领域包 | `2 passed`，42.8 秒 |
+| integration merge 0 Action 设备点击/刷新 | `1 passed`，17.0 秒 |
 
 真实 Electron 用例不清空、不按文本过滤 console/page errors；覆盖 ready 后 renderer
 reload、两次启停、9 台领域设备、OS-only HostNode、health、Action 目录和格式化日志。
 最终本地产出 19 张截图。个人本地截图路径只用于本轮人工判断，不作为团队 immutable
 evidence；团队证据需在后续 Core pin/evidence gate 中以 commit 或 CI URL 固定。
 
-## 5. 停止线
+## 5. Integration 发布边界与停止线
 
-- 当前候选不是 integration merge、私有 OS `dev` release 或 Core submodule pin；
+- OS merge commit 的两个父提交为 integration 基线 `25be15ef` 与候选文档 HEAD
+  `c3419752`；FE merge commit 的两个父提交为 integration 基线 `a453b308` 与候选
+  `4a5a941f`，两个 merge 均无冲突且未 squash；
+- 本报告只批准发布 OS `integration/workflow-task-runtime` 与 FE
+  `integration/fe-os-migration`，不是私有 OS `dev` release 或 Core submodule pin；
 - 未修改 public `deepmodeling/Uni-Lab-OS:dev`；
 - 不将 F007 局部 safety 修复解释为 R2 sole-coordinator、full D1 或 Accepted；
-- 候选分支发布和 Core Wayfinder 记录只提供评审入口；是否进入 integration merge/Core pin
-  仍等待用户判断。
+- Core gitlink、私有 OS `dev` 与 Feishu acceptance 仍需后续独立判断。
