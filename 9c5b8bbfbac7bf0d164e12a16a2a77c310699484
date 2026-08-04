@@ -1,0 +1,9 @@
+Round 02G2 Windows Draft CAS migration ledger
+
+Tested SHA: 9c5b8bbfbac7bf0d164e12a16a2a77c310699484
+
+Independent test author: /root/windows_cas_test_author (Ptolemy); original RED commit 815fdeda76f38e4c2d379875a20a3737096d3c8a; cherry-picked provenance commit 4727e6c8; RED 3 failed, 1 warning.
+
+Verification: target Windows and source lifecycle 76 passed; tests/workflow 1560 passed; tests 2588 passed, 4 skipped; changed-file Ruff E,F,I passed; ruff format check passed; compileall passed; git diff --check passed.
+
+Root pytest baseline collection blockers: legacy Modbus Coil example missing data_type and cameraSII top-level cameraUSB import; both outside this round. Reviewer disposition: pending.
