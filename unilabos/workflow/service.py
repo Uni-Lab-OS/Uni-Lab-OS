@@ -1759,6 +1759,14 @@ class WorkflowService:
         *,
         expected_hash: Any = _NO_EXPECTED_HASH,
     ) -> None:
+        """按平台把 `content` 以 Draft hash CAS 写入 registered source。
+
+        `registration` 固定 editable package 根和相对路径，`content` 是有界源码，
+        `expected_hash` 是调用方观察到的旧 Draft hash。成功没有返回值；函数保证
+        Windows 与 POSIX 都只在目录链、文件身份及旧 hash 可证明稳定时发布，路径
+        变化映射为输入错误或冲突，基础设施故障映射为内部错误。
+        """
+
         if len(content) > AUTHORING_SOURCE_BYTE_LIMIT:
             raise WorkflowError("invalid_input")
         if not _supports_directory_fd_paths() or fcntl is None:

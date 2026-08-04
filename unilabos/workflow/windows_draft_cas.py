@@ -6,10 +6,20 @@ import ctypes
 import hashlib
 import os
 import stat
-from contextlib import suppress
+from collections.abc import Iterator
+from contextlib import contextmanager, suppress
 from pathlib import Path
 from typing import Protocol
 from uuid import uuid4
+
+from unilabos.workflow.windows_file_api import (
+    WindowsFileConflict,
+    WindowsFileInternalError,
+    WindowsFileInvalidTarget,
+    hold_directory_chain,
+    portable_replace_file_with_backup,
+    replace_file_with_backup,
+)
 
 
 class WindowsDraftCasConflict(Exception):
@@ -32,6 +42,12 @@ class WindowsLocking(Protocol):
 
     def locking(self, descriptor: int, mode: int, size: int) -> None:
         """锁定或解锁 `descriptor` 从当前位置开始的 `size` 字节。"""
+
+
+def _is_reparse_point(stat_result: os.stat_result) -> bool:
+    """返回 Windows stat 是否声明当前路径是 reparse point。"""
+
+    return bool(getattr(stat_result, "st_file_attributes", 0) & 0x400)
 
 
 def _sha256(content: bytes) -> str:
@@ -104,14 +120,22 @@ def _validate_directory_chain(
 
     try:
         root_stat = root.lstat()
-        if root.is_symlink() or not stat.S_ISDIR(root_stat.st_mode):
+        if (
+            root.is_symlink()
+            or _is_reparse_point(root_stat)
+            or not stat.S_ISDIR(root_stat.st_mode)
+        ):
             raise WindowsDraftCasInvalidTarget
         relative = parent.relative_to(root)
         current = root
         for part in relative.parts:
             current = current / part
             current_stat = current.lstat()
-            if current.is_symlink() or not stat.S_ISDIR(current_stat.st_mode):
+            if (
+                current.is_symlink()
+                or _is_reparse_point(current_stat)
+                or not stat.S_ISDIR(current_stat.st_mode)
+            ):
                 raise WindowsDraftCasInvalidTarget
         parent_stat = parent.lstat()
         return _identity(root_stat), _identity(parent_stat)
@@ -129,7 +153,11 @@ def _create_parent(
 
     try:
         root_before = root.lstat()
-        if root.is_symlink() or not stat.S_ISDIR(root_before.st_mode):
+        if (
+            root.is_symlink()
+            or _is_reparse_point(root_before)
+            or not stat.S_ISDIR(root_before.st_mode)
+        ):
             raise WindowsDraftCasInvalidTarget
         parent.relative_to(root)
         parent.mkdir(parents=True, exist_ok=True)
@@ -154,15 +182,47 @@ def _assert_directory_identity(
         raise WindowsDraftCasConflict
 
 
-def _windows_extended_path(path: Path) -> str:
-    """返回供 Win32 Unicode API 使用的绝对长路径表示。"""
+def _directory_paths(root: Path, parent: Path) -> tuple[Path, ...]:
+    """返回从 registered `root` 到 Draft `parent` 的有序目录链。"""
 
-    absolute = str(path.absolute())
-    if absolute.startswith("\\\\?\\"):
-        return absolute
-    if absolute.startswith("\\\\"):
-        return f"\\\\?\\UNC\\{absolute[2:]}"
-    return f"\\\\?\\{absolute}"
+    relative = parent.relative_to(root)
+    paths = [root]
+    current = root
+    for part in relative.parts:
+        current = current / part
+        paths.append(current)
+    return tuple(paths)
+
+
+@contextmanager
+def _publication_directory_guard(
+    root: Path,
+    parent: Path,
+    expected: tuple[tuple[int, int], tuple[int, int]],
+) -> Iterator[None]:
+    """固定 Draft 目录链，覆盖临时写入、发布、backup 校验与恢复窗口。
+
+    参数来自同一次注册路径校验，上下文不产出值。Windows 逐级持有不共享
+    delete/rename 的目录句柄；任一身份变化都失败关闭，禁止发布到注册根外。
+    """
+
+    try:
+        if os.name == "nt":
+            with hold_directory_chain(
+                _directory_paths(root, parent),
+                ctypes_api=ctypes,
+            ):
+                _assert_directory_identity(root, parent, expected)
+                yield
+                _assert_directory_identity(root, parent, expected)
+            return
+        _assert_directory_identity(root, parent, expected)
+        yield
+        _assert_directory_identity(root, parent, expected)
+    except WindowsFileConflict:
+        raise WindowsDraftCasConflict from None
+    except WindowsFileInternalError:
+        raise WindowsDraftCasInternalError from None
 
 
 def _native_replace_with_backup(
@@ -170,47 +230,19 @@ def _native_replace_with_backup(
     replacement: Path,
     backup: Path,
 ) -> None:
-    """用 Win32 `ReplaceFileW` 原子替换并保存替换瞬间的原 Draft。"""
+    """用 Win32 `ReplaceFileW` 替换，并稳定分类 CAS 与基础设施错误。"""
 
-    kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)
-    replace_file = kernel32.ReplaceFileW
-    replace_file.argtypes = [
-        ctypes.c_wchar_p,
-        ctypes.c_wchar_p,
-        ctypes.c_wchar_p,
-        ctypes.c_uint32,
-        ctypes.c_void_p,
-        ctypes.c_void_p,
-    ]
-    replace_file.restype = ctypes.c_int
-    succeeded = replace_file(
-        _windows_extended_path(target),
-        _windows_extended_path(replacement),
-        _windows_extended_path(backup),
-        0,
-        None,
-        None,
-    )
-    if succeeded:
-        return
-    error_number = ctypes.get_last_error()
-    raise OSError(error_number, ctypes.FormatError(error_number), str(target))
-
-
-def _portable_replace_with_backup(
-    target: Path,
-    replacement: Path,
-    backup: Path,
-) -> None:
-    """为非 Windows 合同测试模拟替换与备份；生产 Windows 不走该路径。"""
-
-    os.replace(target, backup)
     try:
-        os.replace(replacement, target)
-    except OSError:
-        with suppress(OSError):
-            os.replace(backup, target)
-        raise
+        replace_file_with_backup(
+            target,
+            replacement,
+            backup,
+            ctypes_api=ctypes,
+        )
+    except WindowsFileConflict:
+        raise WindowsDraftCasConflict from None
+    except WindowsFileInternalError:
+        raise WindowsDraftCasInternalError from None
 
 
 def _replace_with_backup(
@@ -223,18 +255,24 @@ def _replace_with_backup(
     if os.name == "nt":
         _native_replace_with_backup(target, replacement, backup)
         return
-    _portable_replace_with_backup(target, replacement, backup)
+    try:
+        portable_replace_file_with_backup(target, replacement, backup)
+    except WindowsFileInvalidTarget:
+        raise WindowsDraftCasInvalidTarget from None
 
 
-def _restore_missing_target(target: Path, backup: Path) -> None:
-    """在 Win32 部分失败留下 canonical 缺口时尽力恢复原 Draft。"""
+def _restore_missing_target(target: Path, backup: Path) -> bool:
+    """恢复 Win32 部分失败留下的 canonical 缺口，并返回是否存在目标。"""
 
-    if target.exists() or not backup.exists():
-        return
+    if target.exists():
+        return True
+    if not backup.exists():
+        return False
     try:
         os.rename(backup, target)
     except OSError:
-        return
+        return False
+    return True
 
 
 def _restore_conflicting_backup(
@@ -243,16 +281,26 @@ def _restore_conflicting_backup(
     backup: Path,
     replacement_hash: str,
     byte_limit: int,
-) -> None:
-    """把 CAS 竞争者保存到 canonical，并只清理可证明属于本次写入的文件。"""
+) -> bool:
+    """把 CAS 竞争者恢复到 canonical，并返回是否完成可证明的恢复。"""
 
     displaced = target.with_name(f".{target.name}.{uuid4().hex}.displaced")
-    try:
-        _replace_with_backup(target, backup, displaced)
-    except OSError:
-        # `backup` 或 `displaced` 可能是外部 Authority 的唯一完整副本；无法
-        # 证明归属时保留 artifact，禁止用历史内容再次覆盖 canonical。
-        return
+    restored = False
+    for _attempt in range(2):
+        try:
+            _replace_with_backup(target, backup, displaced)
+            restored = True
+            break
+        except (
+            OSError,
+            WindowsDraftCasConflict,
+            WindowsDraftCasInternalError,
+        ):
+            continue
+    if not restored:
+        # `backup` 可能是外部 Authority 的唯一完整副本；无法恢复时保留
+        # artifact，并让调用方报告内部不确定性，禁止伪装成已回滚的 409。
+        return False
     try:
         displaced_content = _read_regular_path(displaced, byte_limit=byte_limit)
     except (WindowsDraftCasConflict, WindowsDraftCasInvalidTarget):
@@ -260,13 +308,20 @@ def _restore_conflicting_backup(
     if displaced_content is not None and _sha256(displaced_content) == replacement_hash:
         with suppress(OSError):
             displaced.unlink()
-        return
+        return True
 
     # rollback 窗口内若又有外部写入，`displaced` 才是更新的外部 Draft；把它
     # 放回 canonical，并把较早竞争者留作 artifact，禁止丢失任一外部版本。
     preserved = target.with_name(f".{target.name}.{uuid4().hex}.cas")
-    with suppress(OSError):
+    try:
         _replace_with_backup(target, displaced, preserved)
+    except (
+        OSError,
+        WindowsDraftCasConflict,
+        WindowsDraftCasInternalError,
+    ):
+        return False
+    return True
 
 
 def write_windows_draft_cas(
@@ -280,16 +335,41 @@ def write_windows_draft_cas(
 ) -> None:
     """在 Windows 保存一个 Draft，并以 hash CAS 保护外部编辑。
 
-    `root` 与 `target` 来自已注册 editable package，`content` 是新 Draft 字节，
-    `expected_hash` 是调用方观察到的旧 hash，`byte_limit` 同时约束新旧源码，
-    `locking` 是当前解释器的 `msvcrt`。成功没有返回值；路径异常、CAS 冲突和
-    不可恢复系统错误分别抛出对应异常。函数保证只有替换瞬间的旧 Draft hash
-    仍匹配时才接受发布，否则恢复或保留竞争者字节并报告冲突。
+    `root`/`target` 标识注册源码，`content`/`expected_hash` 是新旧 Draft，
+    `byte_limit` 约束源码，`locking` 提供 `msvcrt`。成功没有返回值；只有目录、
+    文件身份与旧 hash 都稳定时才发布，否则恢复外部字节并分类抛出异常。
     """
 
     if len(content) > byte_limit:
         raise WindowsDraftCasInvalidTarget
     directory_identity = _create_parent(root, target.parent)
+    with _publication_directory_guard(root, target.parent, directory_identity):
+        _write_windows_draft_cas_guarded(
+            root=root,
+            target=target,
+            content=content,
+            expected_hash=expected_hash,
+            byte_limit=byte_limit,
+            locking=locking,
+            directory_identity=directory_identity,
+        )
+
+
+def _write_windows_draft_cas_guarded(
+    *,
+    root: Path,
+    target: Path,
+    content: bytes,
+    expected_hash: str | None,
+    byte_limit: int,
+    locking: WindowsLocking,
+    directory_identity: tuple[tuple[int, int], tuple[int, int]],
+) -> None:
+    """在已固定的目录链内完成临时写入、CAS 发布和冲突恢复。
+    参数与公开 Interface 相同，`directory_identity` 是固定目录身份；成功没有
+    返回值，且不得在 guard 外执行任何 canonical 路径写入。
+    """
+
     temporary = target.with_name(f".{target.name}.{uuid4().hex}.tmp")
     backup = target.with_name(f".{target.name}.{uuid4().hex}.cas")
     descriptor = -1
@@ -317,6 +397,7 @@ def write_windows_draft_cas(
         if expected_hash is None:
             if target.exists() or target.is_symlink():
                 raise WindowsDraftCasConflict
+            _assert_directory_identity(root, target.parent, directory_identity)
             try:
                 os.link(temporary, target, follow_symlinks=False)
             except OSError:
@@ -366,28 +447,39 @@ def write_windows_draft_cas(
         # backup 是替换瞬间的原文件，以它再次核验 hash 才完成 CAS 证明。
         if _sha256(_read_regular_path(target, byte_limit=byte_limit)) != expected_hash:
             raise WindowsDraftCasConflict
+        _assert_directory_identity(root, target.parent, directory_identity)
         try:
             _replace_with_backup(target, temporary, backup)
+        except WindowsDraftCasConflict:
+            _restore_missing_target(target, backup)
+            raise
+        except WindowsDraftCasInternalError:
+            _restore_missing_target(target, backup)
+            raise
         except OSError:
             _restore_missing_target(target, backup)
             raise WindowsDraftCasConflict from None
         try:
             backup_content = _read_regular_path(backup, byte_limit=byte_limit)
         except (WindowsDraftCasConflict, WindowsDraftCasInvalidTarget):
-            _restore_conflicting_backup(
+            restored = _restore_conflicting_backup(
                 target=target,
                 backup=backup,
                 replacement_hash=replacement_hash,
                 byte_limit=byte_limit,
             )
+            if not restored:
+                raise WindowsDraftCasInternalError from None
             raise WindowsDraftCasConflict from None
         if _sha256(backup_content) != expected_hash:
-            _restore_conflicting_backup(
+            restored = _restore_conflicting_backup(
                 target=target,
                 backup=backup,
                 replacement_hash=replacement_hash,
                 byte_limit=byte_limit,
             )
+            if not restored:
+                raise WindowsDraftCasInternalError
             raise WindowsDraftCasConflict
         with suppress(OSError):
             backup.unlink()

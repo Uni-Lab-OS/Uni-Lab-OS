@@ -1,6 +1,7 @@
 # Round 02G2：Windows Draft CAS 趋势记录
 
-状态：**实现与完整正式测试已通过，等待精确候选 SHA 的独立复审。**
+状态：**首次精确复审的 4 项 blocker 已修复，完整正式测试已通过，等待同一
+reviewer 最终确认。**
 
 基线：`5f111ffb`（`integration/workflow-task-runtime`）
 
@@ -54,18 +55,31 @@ Interface 验证：
 实现阶段另补“最终复核后、原子替换前”的 gap 竞争回归，证明替换 backup 能识别
 并恢复外部胜者，且不遗留本次 `.tmp`/`.cas` 文件。
 
+首次候选 `9c5b8bbf` 由唯一 reviewer `/root/windows_cas_reviewer` 独立审查，发现
+目录链 TOCTOU、rollback 失败仍返回 409、WinError 过度映射和原生 Windows/ledger
+证据不足 4 项 blocker。同一 test-author 随后提交 reviewer finding RED
+`2a8794ede73b283d610b430313ef822bfb8b5d5a`，以非 squash 提交 `e22814fb` 带入
+本分支。finding RED 为 `11 failed, 5 passed, 1 warning`，且原 4 项能力合同仍绿。
+
 ## 3. 实现结论
 
-Windows 路径使用独立深模块 `windows_draft_cas.py`：
+Windows 路径使用 `windows_draft_cas.py` 与窄 Win32 Adapter
+`windows_file_api.py`：
 
-1. 在 registered root 内校验/创建父目录，拒绝符号链接和目录身份变化；
+1. 在 registered root 内校验/创建父目录，拒绝 symlink、junction/reparse point
+   和目录身份变化；
 2. 在同目录写入独占临时文件，flush 后 `fsync`；
-3. 使用 `msvcrt.locking(LK_NBLCK)` 锁住 `8 MiB + 1` 字节，并在锁内重读、重验
+3. 从 registered root 到 Draft parent 逐级持有不共享 delete/rename 的 Win32
+   目录句柄，覆盖临时写入、missing Draft、发布、backup 校验和 rollback 全窗口；
+4. 使用 `msvcrt.locking(LK_NBLCK)` 锁住 `8 MiB + 1` 字节，并在锁内重读、重验
    Draft hash 与文件身份；Microsoft CRT 明确允许锁到 EOF 之后；
-4. 关闭 Windows CRT handle 后重新核验一次，再调用 Win32 `ReplaceFileW`，同时
+5. 关闭 Windows CRT handle 后重新核验一次，再调用 Win32 `ReplaceFileW`，同时
    取得替换瞬间原文件的 backup；
-5. backup hash 匹配才接受发布；若 gap 内有外部胜者，则把它恢复到 canonical 并
-   返回稳定 `draft_hash_conflict`；无法证明 artifact 归属时保留而不覆盖。
+6. backup hash 匹配才接受发布；若 gap 内有外部胜者，rollback 首次故障会在同一
+   目录 guard 内重试。只有外部 canonical 可证明恢复后才返回
+   `draft_hash_conflict`，否则报告内部不确定性并保留 artifact；
+7. WinError `2/3/32/33` 映射为 CAS 冲突；ACL、磁盘空间和 I/O 故障映射为
+   `internal_error`，禁止用 409 隐藏基础设施故障。
 
 `service.py` 只负责平台分派和领域错误映射，POSIX `dir_fd + file lease` 路径保持
 不变。
@@ -74,12 +88,18 @@ Windows 路径使用独立深模块 `windows_draft_cas.py`：
 
 | 门禁 | 结果 |
 | --- | --- |
-| Windows Round 目标及原 Windows 回归 | `76 passed, 1 warning` |
-| 完整 `tests/workflow` | `1560 passed, 13 warnings` |
-| 完整正式 `tests/` | `2588 passed, 4 skipped, 68 warnings` |
+| 02G2 能力/finding/Win32 Adapter | `17 passed, 3 Windows-only skipped` |
+| Windows Round 目标及原 Windows 回归 | `89 passed, 3 Windows-only skipped` |
+| 完整 `tests/workflow` | `1573 passed, 3 skipped, 13 warnings` |
+| 完整正式 `tests/` | `2601 passed, 7 skipped, 68 warnings` |
 | 变更 Python 文件 Ruff `E,F,I` | passed |
 | 变更 Python 文件 `ruff format --check` | passed |
 | `compileall` 与 `git diff --check` | passed |
+
+`.github/workflows/ci-check.yml` 的既有 `windows-latest` job 已加入真实 Windows
+Workflow Draft CAS suite，直接运行 kernel32/msvcrt 已有 Draft、missing Draft 和
+跨进程父目录 rename 拒绝测试；Linux 本地的 3 个 Windows-only skip 将在该 job
+转为执行。
 
 仓库根目录裸跑 `pytest -q` 在收集正式 `tests/` 之前被两个既有硬件示例阻断：
 
@@ -93,9 +113,10 @@ Windows 路径使用独立深模块 `windows_draft_cas.py`：
 
 ## 5. 文件规模与模块边界
 
-- 新 `windows_draft_cas.py`：408 行，保持在 500 行预算内；
-- 新/扩展 02G2 合同测试：414 行，保持在 500 行预算内；
-- `service.py`：3068 行，属于既有超大应用服务。本轮没有继续内联 Windows 算法，
+- 新 `windows_draft_cas.py`：500 行；窄 `windows_file_api.py`：191 行。CAS 算法
+  与 Win32 FFI/handle lifecycle 分离，两个深模块都保持在 500 行预算内；
+- 02G2 能力/finding/native/API 测试分别为 414/491/119/103 行，均在预算内；
+- `service.py`：3076 行，属于既有超大应用服务。本轮没有继续内联 Windows 算法，
   而是只增加平台分派并把完整 CAS 边界抽到新深模块；拆分整个 Service 会扩大本轮
   迁移范围并触及大量无关 Workflow/Task Interface；
 - `test_authoring_source_discovery.py`：841 行。本轮仅把一条过时的 Windows
