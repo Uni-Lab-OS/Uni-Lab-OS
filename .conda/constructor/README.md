@@ -23,17 +23,26 @@ Conda subdir。Constructor 只能在目标原生系统上生成可发布安装�
 
 ## 本机构建
 
-先安装固定版本的构建工具：
+先安装固定版本的构建工具。Linux 和 macOS 使用 micromamba；Windows 必须使用
+Constructor 支持的 conda-standalone：
 
 ```bash
+# Linux / macOS
 conda create -n constructor-build -c conda-forge constructor=3.16.1 micromamba=2.8.1
 conda activate constructor-build
 export CONSTRUCTOR_CONDA_EXE="$(command -v micromamba)"
+
+# Windows（在 Miniforge Bash 中）
+conda create -n constructor-build -c conda-forge constructor=3.16.1 conda-standalone=26.3.2.post1
+conda activate constructor-build
+export CONSTRUCTOR_CONDA_EXE="$CONDA_PREFIX/standalone_conda/conda.exe"
 ```
 
-Constructor 仍然生成 Conda Runtime；这里仅使用 micromamba 作为离线安装阶段的执行器，
-以兼容 Conda channel 中同时存在的连字符/下划线过渡元包。安装完成后的 Runtime 仍包含
-正式的 `conda` 命令。
+Constructor 仍然生成 Conda Runtime；上述执行器仅用于离线安装阶段。Unix 使用
+micromamba 避开 Conda channel 中连字符/下划线过渡元包的重复规范问题；Constructor
+3.16.1 不支持用 micromamba 生成 Windows 安装器，因此 Windows 固定到已验证可处理同一
+离线依赖集的 conda-standalone 26.3.2.post1。安装完成后的 Runtime 仍包含正式的
+`conda` 命令。
 
 从仓库根目录构建当前平台（版本默认与当前配置中的 `0.11.3` 一致）：
 

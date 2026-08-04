@@ -146,11 +146,18 @@ jobs:
 
       - name: Install constructor
         if: steps.select.outputs.enabled == 'true'
+        env:
+          TARGET_PLATFORM: ${{ matrix.platform }}
         run: |
-          mamba install -n constructor-build --override-channels -c conda-forge constructor=3.16.1 micromamba=2.8.1 -y
-          micromamba_path="$(command -v micromamba)"
-          test -n "$micromamba_path"
-          echo "CONSTRUCTOR_CONDA_EXE=$micromamba_path" >> "$GITHUB_ENV"
+          if [[ "$TARGET_PLATFORM" == "win-64" ]]; then
+            mamba install -n constructor-build --override-channels -c conda-forge constructor=3.16.1 conda-standalone=26.3.2.post1 -y
+            conda_exe="$(python -c 'import os; from pathlib import Path; print(Path(os.environ["CONDA_PREFIX"], "standalone_conda", "conda.exe"))')"
+          else
+            mamba install -n constructor-build --override-channels -c conda-forge constructor=3.16.1 micromamba=2.8.1 -y
+            conda_exe="$(command -v micromamba)"
+          fi
+          python -c 'from pathlib import Path; import sys; assert Path(sys.argv[1]).is_file()' "$conda_exe"
+          echo "CONSTRUCTOR_CONDA_EXE=$conda_exe" >> "$GITHUB_ENV"
 
       - name: Resolve installer metadata
         if: steps.select.outputs.enabled == 'true'
