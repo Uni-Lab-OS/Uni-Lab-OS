@@ -16,10 +16,10 @@ from unilabos.workflow.material_selector import (
     MATERIAL_FLOW_ROLE_MEMBERS,
     MATERIAL_FLOW_ROLE_VALUES,
     MaterialSelectorError,
+    validate_canonical_uuid,
     validate_material_source_node,
     validate_material_source_selector,
 )
-from unilabos.workflow.models import validate_uuid
 from unilabos.workflow.source_identity import (
     PythonSourceIdentityError,
     validate_python_source_identity,
@@ -198,9 +198,7 @@ def build_material_source_node(
         "material_uuid": declaration.material_uuid,
         "site": declaration.site,
         "slot_range": (
-            list(declaration.slot_range)
-            if declaration.slot_range is not None
-            else None
+            list(declaration.slot_range) if declaration.slot_range is not None else None
         ),
         "flow_role": declaration.flow_role,
     }
@@ -289,7 +287,7 @@ def render_material_source_call(
     arguments = [
         f"resource_template={symbol}",
         f"mode={selector['mode']!r}",
-        f"mount=resource_ref(\"{selector['mount']['uuid']}\")",
+        f'mount=resource_ref("{selector["mount"]["uuid"]}")',
         f"material_uuid={selector['material_uuid']!r}",
         f"site={selector['site']!r}",
         f"slot_range={selector['slot_range']!r}",
@@ -402,7 +400,7 @@ def _required_uuid_literal(expression: ast.expr, *, label: str) -> str:
 
     try:
         value = ast.literal_eval(expression)
-        return validate_uuid(value)
+        return validate_canonical_uuid(value)
     except (TypeError, ValueError):
         _fail(f"{label}必须是规范 UUID 字符串", expression)
 
@@ -414,7 +412,7 @@ def _validate_optional_uuid_value(value: Any) -> str | None:
     非法值抛出 ``ValueError``，由调用边界转换为稳定领域诊断。
     """
 
-    return None if value is None else validate_uuid(value)
+    return None if value is None else validate_canonical_uuid(value)
 
 
 def _validate_optional_uuid_list_value(value: Any) -> list[str] | None:
@@ -427,7 +425,7 @@ def _validate_optional_uuid_list_value(value: Any) -> list[str] | None:
         return None
     if not isinstance(value, list) or not value:
         raise ValueError("库位（Slot）范围必须是非空列表")
-    identities = [validate_uuid(item) for item in value]
+    identities = [validate_canonical_uuid(item) for item in value]
     if len(set(identities)) != len(identities):
         raise ValueError("库位（Slot）范围不能重复")
     return sorted(identities)
@@ -444,7 +442,10 @@ def _fail(message: str, node: ast.AST | None = None) -> None:
 
 
 __all__ = [
-    "MaterialAuthoringError", "MaterialSourceDeclaration", "RenderedMaterialSource",
-    "build_material_source_node", "parse_material_source_declaration",
+    "MaterialAuthoringError",
+    "MaterialSourceDeclaration",
+    "RenderedMaterialSource",
+    "build_material_source_node",
+    "parse_material_source_declaration",
     "render_material_source_call",
 ]

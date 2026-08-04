@@ -10,11 +10,6 @@ from unilabos.registry.action_template_projection import (
     compile_action_template_handles,
     goal_parameter_schema,
 )
-from unilabos.registry.template_identity_projection import (
-    ResourceTemplateIdentityProjectionError,
-    embed_resource_template_identities,
-    extract_resource_template_identities,
-)
 from unilabos.registry.template_snapshot import (
     RegistryTemplateSnapshot,
     RegistryTemplateSnapshotError,
@@ -49,37 +44,38 @@ class RegistryTemplateProjection:
         authority_id: str,
         resource_template_identity_resolver: Callable[[str], str],
     ) -> None:
-        """装配模板投影及资源模板身份解析器。
+        """装配设备注册表（Registry）模板投影及资源模板身份解析器。
 
-        参数说明：``workflow_store`` 保存现有工作流模板表；``authority_id`` 标识
-        本地投影来源；``resource_template_identity_resolver`` 把设备注册身份映射为
-        稳定资源模板 UUID，解析失败时必须关闭式失败（Fail-closed）。
+        参数说明：``workflow_store`` 持有现有工作流模板表和唯一 SQLite 事务；
+        ``authority_id`` 标识本地投影来源；
+        ``resource_template_identity_resolver`` 把设备注册身份映射为稳定资源模板
+        （ResourceTemplate）UUID。返回：无；构造时从同一投影代际恢复内存快照。
+        异常：已持久化目录或资源身份不一致时抛出
+        ``RegistryTemplateProjectionError``，不得发布部分目录。
         """
 
         self._store = RegistryTemplateProjectionStore(workflow_store)
         self._authority_id = authority_id
-        self._resource_template_identity_resolver = (
-            resource_template_identity_resolver
-        )
-        nodes, handles = self._store.load(authority_id=authority_id)
+        self._resource_template_identity_resolver = resource_template_identity_resolver
         try:
-            resource_template_symbols = extract_resource_template_identities(nodes)
+            generation = self._store.load_generation(authority_id=authority_id)
             self._snapshot = AuthoringCatalogSnapshot.from_entities(
-                nodes,
-                handles,
-                resource_template_symbols=resource_template_symbols,
+                generation.node_templates,
+                generation.handle_templates,
+                resource_template_symbols=generation.resource_template_symbols,
             )
-        except (
-            AuthoringCatalogError,
-            ResourceTemplateIdentityProjectionError,
-        ) as error:
+        except (AuthoringCatalogError, TemplateProjectionIdentityConflict) as error:
             raise RegistryTemplateProjectionError(str(error)) from error
 
     def refresh(self, registry: Any) -> AuthoringCatalogSnapshot:
         """从一次完整设备注册表快照原子发布新模板代际。
 
-        参数说明：``registry`` 必须提供 ``obtain_registry_device_info``；返回值是
-        新的不可变目录快照。规范化或事务失败时，旧内存快照和旧持久投影保持不变。
+        参数说明：``registry`` 是已冻结快照或同时提供设备与资源定义读取接口的
+        设备注册表（Registry）。返回：新提交的不可变工作流创作目录快照；节点、
+        连接点（Handle）和资源模板（ResourceTemplate）源码身份在同一事务替换。
+        异常：快照、动作合同、资源身份或持久模板不一致时抛出
+        ``RegistryTemplateProjectionError``；事务失败时旧内存快照和旧持久投影
+        保持不变。
         """
 
         try:
@@ -97,27 +93,21 @@ class RegistryTemplateProjection:
             resource_definitions
         )
         try:
-            nodes = embed_resource_template_identities(
-                nodes,
-                resource_template_symbols,
-            )
-        except ResourceTemplateIdentityProjectionError as error:
-            raise RegistryTemplateProjectionError(str(error)) from error
-        try:
-            persisted_nodes, persisted_handles = self._store.replace(
+            persisted_generation = self._store.replace_generation(
                 authority_id=self._authority_id,
                 node_templates=nodes,
                 handle_templates=handles,
+                resource_template_symbols=resource_template_symbols,
             )
         except TemplateProjectionIdentityConflict as error:
-            raise RegistryTemplateProjectionError(
-                f"模板身份冲突: {error!s}"
-            ) from error
+            raise RegistryTemplateProjectionError(f"模板身份冲突: {error!s}") from error
         try:
             next_snapshot = AuthoringCatalogSnapshot.from_entities(
-                persisted_nodes,
-                persisted_handles,
-                resource_template_symbols=resource_template_symbols,
+                persisted_generation.node_templates,
+                persisted_generation.handle_templates,
+                resource_template_symbols=(
+                    persisted_generation.resource_template_symbols
+                ),
             )
         except AuthoringCatalogError as error:
             raise RegistryTemplateProjectionError(str(error)) from error
@@ -168,7 +158,8 @@ class RegistryTemplateProjection:
     ) -> dict[str, str]:
         """冻结源码资源符号到既有资源模板 UUID 的一一映射。
 
-        参数说明：``resource_definitions`` 是同代 Registry 资源模板全集。
+        参数说明：``resource_definitions`` 是同代设备注册表（Registry）资源模板
+        （ResourceTemplate）全集。
         返回：以源码符号为键、本地模板 UUID 为值的新字典；业务唯一名缺失、
         身份解析失败或 UUID 被多个符号复用时关闭式失败。
         """
@@ -221,8 +212,9 @@ class RegistryTemplateProjection:
     ) -> tuple[list[dict[str, Any]], list[dict[str, Any]]]:
         """规范化一个设备定义中的全部强类型动作。
 
-        参数说明：``device`` 是单个 Registry 设备条目；返回该设备的节点和句柄
-        候选，旧式或自动生成动作不进入可信工作流创作投影。
+        参数说明：``device`` 是单个设备注册表（Registry）设备条目；返回该设备
+        的节点和连接点（Handle）候选，旧式或自动生成动作不进入可信工作流创作
+        投影。
         """
 
         if not isinstance(device, Mapping):
@@ -249,9 +241,7 @@ class RegistryTemplateProjection:
             raise RegistryTemplateProjectionError("设备动作映射必须是对象")
         resource_name = str(device.get("id") or resource_identity)
         resource_display_name = str(
-            device.get("display_name")
-            or device.get("displayname")
-            or resource_name
+            device.get("display_name") or device.get("displayname") or resource_name
         )
 
         nodes: list[dict[str, Any]] = []
@@ -307,11 +297,13 @@ class RegistryTemplateProjection:
         resource_name: str,
         resource_display_name: str,
     ) -> tuple[dict[str, Any], dict[str, Any]]:
-        """编译 Host 唯一拥有的物料来源（MaterialSource）框架模板。
+        """编译宿主节点（Host Node）唯一拥有的物料来源框架模板。
 
-        参数说明：``resource_template_uuid`` 是本地 Host 模板稳定身份，名称字段
-        用于 HTTP 资源摘要。返回：一个框架节点和一个 source 物料占位符
-        （ResourceSlot）；稳定 UUID 由持久投影按业务唯一键复用或首次分配。
+        参数说明：``resource_template_uuid`` 是本地宿主节点（Host Node）资源模板
+        （ResourceTemplate）的稳定身份；``resource_name`` 与
+        ``resource_display_name`` 用于 HTTP 资源摘要。返回：一个物料来源
+        （MaterialSource）框架节点和一个 source 物料占位符（ResourceSlot）；
+        稳定 UUID 由持久投影按业务唯一键复用或首次分配。
         """
 
         node_business_key = (resource_template_uuid, "material_source")
@@ -422,9 +414,7 @@ class RegistryTemplateProjection:
         handles = compile_action_template_handles(
             schema,
             node_business_key=node_business_key,
-            resource_template_identity_resolver=(
-                resource_template_identity_resolver
-            ),
+            resource_template_identity_resolver=(resource_template_identity_resolver),
         )
         return node, handles
 

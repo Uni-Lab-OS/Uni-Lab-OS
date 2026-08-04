@@ -20,10 +20,10 @@ PLATE_SOURCE_IDENTITY = "lab.resources:plate_96"
 
 
 class _Registry:
-    """提供 Host 设备与一个物料资源模板（ResourceTemplate）的冻结快照。"""
+    """提供宿主节点（Host Node）与一个资源模板的设备注册表冻结快照。"""
 
     def obtain_registry_device_info(self) -> list[dict[str, Any]]:
-        """返回框架物料来源（MaterialSource）的唯一 Host 所有者。
+        """返回框架物料来源（MaterialSource）的唯一宿主节点（Host Node）所有者。
 
         参数：无。返回：只含 ``host_node`` 的完整设备定义集。
         """
@@ -157,12 +157,13 @@ class _ActionRegistry(_Registry):
             }
         ]
 
-def _identity(source_identity: str) -> str:
-    """把 Registry 唯一名称解析为本地稳定资源模板 UUID。
 
-    参数说明：``source_identity`` 是 Host 或物料资源的业务唯一
-    名称。返回：已存储的资源模板 UUID。异常：未知身份抛出
-    ``KeyError``，投影层必须关闭失败。
+def _identity(source_identity: str) -> str:
+    """把设备注册表（Registry）唯一名称解析为本地稳定资源模板 UUID。
+
+    参数说明：``source_identity`` 是宿主节点（Host Node）或物料资源的业务唯一
+    名称。返回：已存储的资源模板（ResourceTemplate）UUID。异常：未知身份抛出
+    ``KeyError``，投影层必须关闭式失败。
     """
 
     # ``identities`` 是测试代表的已有模板数据库身份映射。
@@ -191,7 +192,7 @@ def _projection(database_path: Path) -> RegistryTemplateProjection:
 def test_registry_projects_one_stable_material_source_framework_template(
     tmp_path: Path,
 ) -> None:
-    """Host 应发布单一物料来源（MaterialSource）模板及 source 物料占位符。
+    """宿主节点（Host Node）应发布单一物料来源模板及 source 物料占位符。
 
     参数说明：``tmp_path`` 提供跨刷新和重启的隔离 SQLite 路径。
     返回：无；断言节点、连接点（Handle）和 UUID 生命周期。
@@ -229,9 +230,10 @@ def test_registry_projects_one_stable_material_source_framework_template(
         "type": "ResourceSlot",
         "required": False,
     }
-    assert projection.refresh(_Registry()).require_material_source().template[
-        "uuid"
-    ] == framework_uuid
+    assert (
+        projection.refresh(_Registry()).require_material_source().template["uuid"]
+        == framework_uuid
+    )
     projection.close()
 
     restarted = _projection(database_path)
@@ -244,7 +246,7 @@ def test_registry_projects_one_stable_material_source_framework_template(
 def test_catalog_snapshot_freezes_bidirectional_resource_template_identity(
     tmp_path: Path,
 ) -> None:
-    """创作快照应以冻结 Registry 投影解析资源模板符号，不查实时库存。
+    """创作快照应以冻结设备注册表（Registry）投影解析资源模板符号。
 
     参数说明：``tmp_path`` 提供隔离存储。返回：无；断言源码身份
     与资源模板 UUID 双向一一对应。
@@ -318,16 +320,18 @@ def test_registry_rejects_unsafe_source_identity_without_replacing_projection(
         projection.refresh(_UnsafeSourceRegistry(unsafe_source_identity))
 
     assert projection.snapshot().fingerprint == trusted.fingerprint
-    assert projection.snapshot().require_resource_template_uuid(
-        PLATE_SOURCE_IDENTITY
-    ) == PLATE_TEMPLATE_UUID
+    assert (
+        projection.snapshot().require_resource_template_uuid(PLATE_SOURCE_IDENTITY)
+        == PLATE_TEMPLATE_UUID
+    )
     projection.close()
 
     restarted = _projection(database_path)
     assert restarted.snapshot().fingerprint == trusted.fingerprint
-    assert restarted.snapshot().require_resource_template_symbol(
-        PLATE_TEMPLATE_UUID
-    ) == PLATE_SOURCE_IDENTITY
+    assert (
+        restarted.snapshot().require_resource_template_symbol(PLATE_TEMPLATE_UUID)
+        == PLATE_SOURCE_IDENTITY
+    )
     restarted.close()
 
 

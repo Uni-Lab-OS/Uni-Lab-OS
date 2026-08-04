@@ -1,4 +1,4 @@
-"""冻结 Backend 全图 PUT 的本地语义校验。"""
+"""冻结后端（Backend）全图 PUT 的本地语义校验。"""
 
 from __future__ import annotations
 
@@ -24,7 +24,7 @@ _MAX_TIMEOUT_SECONDS = (2**63 - 1) // 1_000_000_000
 
 
 class GraphValidationError(ValueError):
-    """提交的全图不满足冻结 Backend 语义。"""
+    """提交的全图不满足冻结后端（Backend）语义。"""
 
 
 class CodedGraphValidationError(GraphValidationError):
@@ -56,12 +56,17 @@ def validate_graph(
     node_meta_data: Mapping[str, Dict[str, Any]],
     validate_workflow_io_contract: bool = False,
 ) -> None:
-    """在写事务内校验一份完整替换图。
+    """在写事务内校验一份完整替换的工作流图（Workflow Graph）。
 
-    参数说明：节点、边、模板和连接点（Handle）共同构成冻结工作流图；
-    `effective_params` 与两级元数据是事务内实际值；
-    `validate_workflow_io_contract=True` 启用唯一公共工作流输入/输出
-    （Workflow I/O）合同，`False` 仅保留旧调用方兼容语义。
+    参数说明：``nodes`` 与 ``edges`` 是待替换的完整节点和边；``templates`` 与
+    ``handles`` 是其引用的活动节点模板和连接点（Handle）模板；
+    ``effective_params`` 是合并保留字段后的节点实参；``workflow_meta_data`` 与
+    ``node_meta_data`` 是事务内实际工作流和节点元数据；
+    ``validate_workflow_io_contract`` 为 ``True`` 时启用唯一公共工作流输入/输出
+    （Workflow I/O）合同，为 ``False`` 时保留旧调用方兼容语义。返回：无；全部
+    不变量成立才正常返回。异常：缺少模板抛出 ``MissingTemplateError``；带稳定
+    机器码的物料来源（MaterialSource）错误抛出 ``CodedGraphValidationError``；
+    其余图、连接点或工作流输入/输出错误抛出 ``GraphValidationError``。
     """
 
     node_by_uuid = {node.uuid: node for node in nodes}

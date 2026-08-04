@@ -158,7 +158,8 @@ def material_source(
     参数说明：``resource_template`` 是显式导入的资源模板
     （ResourceTemplate）符号；``mode`` 是 ``existing | create_new``；
     ``mount`` 是 ``resource_ref`` 声明；``material_uuid`` 是可选固定物料
-    （Material）身份；``site`` 与 ``slot_range`` 是库位（Site）选择；
+    （Material）身份；``site`` 是库位（Site）选择，``slot_range`` 是库位
+    （Slot）范围；
     ``flow_role`` 是工作流局部物料流角色。本标记没有返回值，被
     执行时抛出 ``RuntimeError``，防止越过创作编译边界读写物料权威。
     """

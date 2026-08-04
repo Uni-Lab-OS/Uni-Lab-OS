@@ -37,6 +37,7 @@ from .test_f05_material_source_authoring import (
 
 SITE_UUID = "60000000-0000-4000-8000-000000000001"
 SLOT_UUID = "60000000-0000-4000-8000-000000000002"
+NONCANONICAL_MOUNT_UUID = "5ABC0000-0000-4000-8000-000000000010"
 
 
 @dataclass(frozen=True, slots=True)
@@ -99,9 +100,7 @@ def direct_graph_context(tmp_path: Path) -> Iterator[_DirectGraphContext]:
         handle_templates=[
             _projection_handle(
                 source_handle,
-                resource_template_uuid=str(
-                    source_template["resource_template_uuid"]
-                ),
+                resource_template_uuid=str(source_template["resource_template_uuid"]),
                 action_name="material_source",
             ),
             *[
@@ -161,9 +160,7 @@ def _mutated_graph(candidate: dict[str, Any], case: str) -> dict[str, Any]:
 
     graph = deepcopy(candidate)
     source_node = next(
-        node
-        for node in graph["nodes"]
-        if node["uuid"] == MATERIAL_SOURCE_NODE_UUID
+        node for node in graph["nodes"] if node["uuid"] == MATERIAL_SOURCE_NODE_UUID
     )
     selector = source_node["param"]
     if case == "invalid-mode":
@@ -183,7 +180,7 @@ def _mutated_graph(candidate: dict[str, Any], case: str) -> dict[str, Any]:
         selector["site"] = SITE_UUID
         selector["slot_range"] = [SLOT_UUID]
     elif case == "noncanonical-mount":
-        selector["mount"]["uuid"] = MOUNT_MATERIAL_UUID.upper()
+        selector["mount"]["uuid"] = NONCANONICAL_MOUNT_UUID
     elif case == "flow-role-list":
         selector["flow_role"] = ["primary_sample"]
     elif case == "flow-role-object":
@@ -271,9 +268,7 @@ def test_invalid_direct_graph_has_one_stable_engine_diagnostic(
     assert not result.valid
     assert result.graph is None
     assert result.normalized_python_source is None
-    assert [item["code"] for item in result.diagnostics] == [
-        "invalid_material_source"
-    ]
+    assert [item["code"] for item in result.diagnostics] == ["invalid_material_source"]
 
 
 @pytest.mark.parametrize(
@@ -281,8 +276,10 @@ def test_invalid_direct_graph_has_one_stable_engine_diagnostic(
     (
         _source().replace("mode='existing'", "mode='later'"),
         _source().replace("        mount=resource_ref", "        other=resource_ref"),
-        _source().replace("        site=None,", "        site=None,\n        quantity=1,"),
-        _source().replace(MOUNT_MATERIAL_UUID, MOUNT_MATERIAL_UUID.upper()),
+        _source().replace(
+            "        site=None,", "        site=None,\n        quantity=1,"
+        ),
+        _source().replace(MOUNT_MATERIAL_UUID, NONCANONICAL_MOUNT_UUID),
     ),
     ids=("invalid-mode", "missing-mount", "extra-field", "noncanonical-uuid"),
 )
@@ -339,6 +336,4 @@ def test_compile_keeps_invalid_material_source_diagnostic(source: str) -> None:
     assert not result.valid
     assert result.graph is None
     assert result.normalized_python_source is None
-    assert [item["code"] for item in result.diagnostics] == [
-        "invalid_material_source"
-    ]
+    assert [item["code"] for item in result.diagnostics] == ["invalid_material_source"]

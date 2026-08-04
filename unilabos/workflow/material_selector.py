@@ -60,16 +60,19 @@ def validate_material_source_selector(raw_selector: Any) -> dict[str, Any]:
     selector = deepcopy(dict(raw_selector))
     if set(selector) != _SELECTOR_FIELDS:
         raise MaterialSelectorError("物料来源选择器字段不完整或包含未知字段")
-    if selector["mode"] not in {"existing", "create_new"}:
+    if not isinstance(selector["mode"], str) or selector["mode"] not in {
+        "existing",
+        "create_new",
+    }:
         raise MaterialSelectorError("物料来源模式必须是 existing 或 create_new")
     try:
-        selector["resource_template_uuid"] = validate_uuid(
+        selector["resource_template_uuid"] = validate_canonical_uuid(
             selector["resource_template_uuid"]
         )
         mount = selector["mount"]
         if not isinstance(mount, Mapping) or set(mount) != {"uuid"}:
             raise ValueError("mount 必须是仅含 uuid 的物料引用")
-        selector["mount"] = {"uuid": validate_uuid(mount["uuid"])}
+        selector["mount"] = {"uuid": validate_canonical_uuid(mount["uuid"])}
         selector["material_uuid"] = _optional_uuid(selector["material_uuid"])
         selector["site"] = _optional_uuid(selector["site"])
         selector["slot_range"] = _optional_slot_range(selector["slot_range"])
@@ -81,7 +84,10 @@ def validate_material_source_selector(raw_selector: Any) -> dict[str, Any]:
         )
     if selector["mode"] == "create_new" and selector["material_uuid"] is not None:
         raise MaterialSelectorError("新建物料来源不能绑定现有物料（Material）")
-    if selector["flow_role"] not in MATERIAL_FLOW_ROLE_MEMBERS:
+    if (
+        not isinstance(selector["flow_role"], str)
+        or selector["flow_role"] not in MATERIAL_FLOW_ROLE_MEMBERS
+    ):
         raise MaterialSelectorError("物料流角色（MaterialFlowRole）不在规范闭集")
     return selector
 
@@ -95,10 +101,22 @@ def validate_material_source_node(node: Mapping[str, Any]) -> dict[str, Any]:
     """
 
     if node.get("material_uuid") is not None:
-        raise MaterialSelectorError(
-            "物料来源节点不能在顶层绑定物料（Material）UUID"
-        )
+        raise MaterialSelectorError("物料来源节点不能在顶层绑定物料（Material）UUID")
     return validate_material_source_selector(node.get("param"))
+
+
+def validate_canonical_uuid(value: Any) -> str:
+    """要求 UUID 原始拼写已经是规范小写连字符形式。
+
+    参数说明：``value`` 是物料来源选择器（MaterialSourceSelector）中的原始
+    身份值。返回：与原值完全相同的规范 UUID；类型、nil UUID、大小写、空白或
+    连字符形式不规范时抛出 ``ValueError``，绝不静默改写作者或直接图输入。
+    """
+
+    canonical = validate_uuid(value)
+    if value != canonical:
+        raise ValueError("UUID 必须使用规范小写连字符形式")
+    return canonical
 
 
 def _optional_uuid(value: Any) -> str | None:
@@ -108,7 +126,7 @@ def _optional_uuid(value: Any) -> str | None:
     抛出 ``ValueError``，由公共选择器边界转换成稳定诊断。
     """
 
-    return None if value is None else validate_uuid(value)
+    return None if value is None else validate_canonical_uuid(value)
 
 
 def _optional_slot_range(value: Any) -> list[str] | None:
@@ -123,7 +141,7 @@ def _optional_slot_range(value: Any) -> list[str] | None:
         return None
     if not isinstance(value, list) or not value:
         raise ValueError("库位（Slot）范围必须是非空数组")
-    identities = [validate_uuid(item) for item in value]
+    identities = [validate_canonical_uuid(item) for item in value]
     if len(set(identities)) != len(identities):
         raise ValueError("库位（Slot）范围不能包含重复库位")
     ordered = sorted(identities)
@@ -136,6 +154,7 @@ __all__ = [
     "MATERIAL_FLOW_ROLE_MEMBERS",
     "MATERIAL_FLOW_ROLE_VALUES",
     "MaterialSelectorError",
+    "validate_canonical_uuid",
     "validate_material_source_node",
     "validate_material_source_selector",
 ]

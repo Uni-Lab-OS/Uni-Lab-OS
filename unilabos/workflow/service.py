@@ -404,9 +404,12 @@ class WorkflowService:
     ) -> Dict[str, Any]:
         """以严格工作流输入/输出（Workflow I/O）合同保存完整图。
 
-        参数说明：`workflow_uuid` 是工作流稳定身份，`revision` 是预期版本，
-        `nodes/edges` 是完整替换集合。旧形状只在存储适配器（Store Adapter）
-        内兼容，公共服务入口始终使用同一个严格校验深模块。
+        参数说明：``workflow_uuid`` 是工作流（Workflow）稳定身份，``revision``
+        是乐观并发预期版本，``nodes`` 与 ``edges`` 是完整替换集合。返回：提交后
+        的后端（Backend）形状工作流图投影。异常：输入 DTO 或图语义非法抛出
+        ``WorkflowError``；修订冲突抛出 ``WorkflowConflict``；任何失败都由存储
+        适配器（Store Adapter）回滚，公共服务入口不会留下部分节点或修订写入。
+        旧形状只在存储适配器内兼容，公共入口始终使用同一个严格校验深模块。
         """
 
         identity = self.get_workflow(workflow_uuid)["uuid"]

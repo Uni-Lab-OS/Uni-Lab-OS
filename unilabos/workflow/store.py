@@ -690,9 +690,16 @@ class WorkflowStore:
     ) -> int:
         """在现有事务中核对并写入完整工作流图。
 
-        参数说明：`conn` 是唯一写事务；`semantic_workflow_meta_data` 可替换待
-        校验的工作流元数据；`validate_workflow_io_contract` 选择严格公共合同，
-        其余参数控制身份、版本和服务端保留字段。返回推进后的工作流版本。
+        参数说明：``conn`` 是调用方持有的唯一 SQLite 写事务；``workflow_uuid``
+        是工作流（Workflow）稳定身份；``expected_revision`` 是乐观并发预期版本；
+        ``nodes`` 与 ``edges`` 是完整替换集合；``advance_revision`` 控制成功后是否
+        推进修订；``protect_reserved_metadata`` 保留服务端私有元数据；
+        ``semantic_workflow_meta_data`` 可替换本轮语义校验使用的工作流元数据；
+        ``validate_workflow_io_contract`` 控制是否启用严格工作流输入/输出
+        （Workflow I/O）合同。返回：本事务采用的最终工作流修订。异常：工作流
+        不存在抛出 ``StoreNotFound``，修订不匹配抛出 ``StoreRevisionConflict``，
+        创作合同冲突抛出 ``StoreAuthoringConflict``，其余身份、模板、图或元数据
+        冲突抛出 ``StoreConflict``；异常由调用事务统一回滚，不留下部分写入。
         """
 
         workflow = self.get_workflow(workflow_uuid, conn=conn)
