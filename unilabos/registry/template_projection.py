@@ -10,6 +10,11 @@ from unilabos.registry.action_template_projection import (
     compile_action_template_handles,
     goal_parameter_schema,
 )
+from unilabos.registry.template_identity_projection import (
+    ResourceTemplateIdentityProjectionError,
+    embed_resource_template_identities,
+    extract_resource_template_identities,
+)
 from unilabos.registry.template_snapshot import (
     RegistryTemplateSnapshot,
     RegistryTemplateSnapshotError,
@@ -53,7 +58,18 @@ class RegistryTemplateProjection:
             resource_template_identity_resolver
         )
         nodes, handles = self._store.load(authority_id=authority_id)
-        self._snapshot = AuthoringCatalogSnapshot.from_entities(nodes, handles)
+        try:
+            resource_template_symbols = extract_resource_template_identities(nodes)
+            self._snapshot = AuthoringCatalogSnapshot.from_entities(
+                nodes,
+                handles,
+                resource_template_symbols=resource_template_symbols,
+            )
+        except (
+            AuthoringCatalogError,
+            ResourceTemplateIdentityProjectionError,
+        ) as error:
+            raise RegistryTemplateProjectionError(str(error)) from error
 
     def refresh(self, registry: Any) -> AuthoringCatalogSnapshot:
         """从一次完整设备注册表快照原子发布新模板代际。
@@ -76,6 +92,13 @@ class RegistryTemplateProjection:
         resource_template_symbols = self._compile_resource_template_identities(
             resource_definitions
         )
+        try:
+            nodes = embed_resource_template_identities(
+                nodes,
+                resource_template_symbols,
+            )
+        except ResourceTemplateIdentityProjectionError as error:
+            raise RegistryTemplateProjectionError(str(error)) from error
         try:
             persisted_nodes, persisted_handles = self._store.replace(
                 authority_id=self._authority_id,
