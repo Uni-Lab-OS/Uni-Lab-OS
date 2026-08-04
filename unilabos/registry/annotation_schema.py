@@ -335,11 +335,14 @@ def _schema_base(schema: dict[str, Any]) -> dict[str, Any]:
     return schema
 
 
-def _slot_shape(schema: dict[str, Any]) -> bool:
+def _resource_slot_shape(schema: dict[str, Any]) -> bool:
     base = _schema_base(schema)
-    if "$slot" in base:
+    if base.get("$slot") == "ResourceSlot":
         return True
-    return base.get("type") == "array" and "$slot" in base.get("items", {})
+    return (
+        base.get("type") == "array"
+        and base.get("items", {}).get("$slot") == "ResourceSlot"
+    )
 
 
 def _trim_presentation(value: Any, *, path: str) -> str:
@@ -437,7 +440,7 @@ def _parse_resource_templates(
     *,
     path: str,
 ) -> tuple[ResourceTemplateSymbol, ...]:
-    if not _slot_shape(schema) or not call.args or call.keywords:
+    if not _resource_slot_shape(schema) or not call.args or call.keywords:
         _fail(path)
     symbols: list[ResourceTemplateSymbol] = []
     local_names: set[str] = set()

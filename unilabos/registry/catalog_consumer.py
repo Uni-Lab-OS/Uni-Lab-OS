@@ -421,6 +421,10 @@ def _handle(
     implicit: bool,
     path: str,
 ) -> dict[str, Any]:
+    is_resource_slot = resource_slot_schema(value_schema) is not None
+    is_site_ref = site_ref_schema(value_schema) is not None
+    if symbols and not is_resource_slot:
+        raise RegistryTemplateProjectionError("invalid_action_contract", path)
     allowed: list[str] | None = None
     if symbols:
         allowed = []
@@ -433,8 +437,6 @@ def _handle(
                 ) from None
             if identity not in allowed:
                 allowed.append(identity)
-    is_resource_slot = resource_slot_schema(value_schema) is not None
-    is_site_ref = site_ref_schema(value_schema) is not None
     is_typed_slot = is_resource_slot or is_site_ref
     control = str(value_schema.get("x-unilabos-editor-control") or "")
     if is_resource_slot:

@@ -83,6 +83,7 @@ from unilabos.workflow.source_coordinates import (
 )
 from unilabos.workflow.workflow_io import (
     WorkflowIOValidationError,
+    handle_value_schema,
     resource_slot_passthrough_is_compatible,
 )
 
@@ -3039,49 +3040,13 @@ def _synthesize_implicit_workflow_outputs(
 
 
 def _schema_from_handle(handle: Mapping[str, Any]) -> dict[str, Any]:
-    raw = str(handle.get("type") or "").strip().lower()
-    scalars = {
-        "str": "string",
-        "string": "string",
-        "int": "integer",
-        "integer": "integer",
-        "float": "number",
-        "number": "number",
-        "bool": "boolean",
-        "boolean": "boolean",
-        "dict": "object",
-        "object": "object",
-        "json": "object",
-    }
-    if raw == "resourceslot":
-        schema: dict[str, Any] = {"$slot": "ResourceSlot"}
-    elif raw.startswith("list[") and raw.endswith("]"):
-        inner = raw[5:-1].strip()
-        if inner == "resourceslot":
-            items: dict[str, Any] = {"$slot": "ResourceSlot"}
-        elif inner in scalars:
-            items = {"type": scalars[inner]}
-        else:
-            _fail(
-                "template_catalog_mismatch",
-                "Handle type 不属于 Workflow v1 schema",
-            )
-        schema = {"type": "array", "items": items}
-    elif raw in scalars:
-        schema = {"type": scalars[raw]}
-    else:
+    try:
+        return handle_value_schema(handle).to_dict()
+    except WorkflowIOValidationError:
         _fail(
             "template_catalog_mismatch",
             "Handle type 不属于 Workflow v1 schema",
         )
-    unilab = handle.get("meta_data", {}).get("unilab", {})
-    if isinstance(unilab, dict):
-        allowlist = unilab.get("allowed_resource_template_uuids")
-        if allowlist is not None:
-            target = schema.get("items", schema)
-            if isinstance(target, dict) and target.get("$slot") == "ResourceSlot":
-                target["allowed_resource_template_uuids"] = _detached(allowlist)
-    return schema
 
 
 def _candidate_graph(

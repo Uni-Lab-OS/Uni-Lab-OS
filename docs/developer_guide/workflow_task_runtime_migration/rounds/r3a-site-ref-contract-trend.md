@@ -40,8 +40,10 @@
 
 | 门禁 | 结果 |
 |---|---:|
-| 独立 R3A acceptance | `12 passed, 1 warning` |
-| Annotation/Action/Catalog/I/O/Task/Authoring/DeviceAction 相关回归 | `382 passed, 1 warning` |
+| 独立 R3A acceptance（初始实现） | `12 passed, 1 warning` |
+| R3A acceptance（首轮审查修复后） | `17 passed, 1 warning` |
+| Annotation/Action/Catalog/I/O/Task/Authoring/DeviceAction 相关回归（初始实现） | `382 passed, 1 warning` |
+| 相关回归（首轮审查修复后） | `396 passed, 1 warning` |
 | 完整 `pytest -q -rs tests` | `2613 passed, 7 skipped, 68 warnings` |
 | SiteRef Pydantic exact-object smoke | passed |
 | changed Python Ruff E/F/I（排除 E501） | passed |
@@ -54,4 +56,27 @@ deprecation、ROS 测试类收集提示与 on_event deprecation。
 
 整文件 `ruff format --check` 仍会报告 `authoring_engine.py`、`graph_validation.py` 和
 `task_input.py` 中不属于 R3A 的既有格式差异；本轮没有为消除该提示批量改写无关代码。新增 R3A
-测试文件已单独执行 formatter。最终独立 review 尚未执行；结果会在本文件继续追加。
+测试文件已单独执行 formatter。
+
+## 5. 独立审查与 finding disposition
+
+唯一 reviewer：`/root/r3a_site_ref_review`。首轮审查固定在 `7237f2e9`，Standards 没有 finding，
+Spec 报告 3 个 blocking finding：
+
+1. `WorkflowService` 没有暴露/传递 SiteRefResolver，正常 Task API 无法装配；
+2. `AllowedResourceTemplates` 会错误接受 SiteRef，Catalog 也未防御 forged symbols；
+3. legacy `workflow_output(...)` 的 Handle schema 推断未读取 canonical SiteRef value schema。
+
+修复方式：
+
+- `WorkflowService` 新增可选 SiteRefResolver，默认装配 `UnconfiguredSiteRefResolver` 并传入
+  preflight；因此生产未装配时仍稳定 conflict，显式注入时可正常创建 Task；
+- Annotation 只允许 ResourceSlot/ResourceSlot collection 使用 `AllowedResourceTemplates`，Catalog
+  在消费边界再次拒绝非 ResourceSlot 的 symbols；
+- Authoring Engine 删除自身的第二套 Handle type 推断，改用 `workflow_io.handle_value_schema()`
+  统一读取 canonical schema，并保留 legacy type fallback；
+- 新增 5 个回归覆盖 WorkflowService success/fail-closed、Annotation/Catalog 双边界拒绝以及
+  legacy authoring compile/generate round-trip。
+
+修复后的完整仓库 gate 与同一 reviewer 复审尚待执行；结果会继续追加，不把首次 rejected SHA
+写成 accepted candidate。

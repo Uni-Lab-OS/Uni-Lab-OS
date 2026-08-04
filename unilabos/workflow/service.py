@@ -64,8 +64,10 @@ from unilabos.workflow.store import (
 from unilabos.workflow.task_input import (
     PreparedTaskInput,
     ResourceSlotResolver,
+    SiteRefResolver,
     TaskInputError,
     UnconfiguredResourceSlotResolver,
+    UnconfiguredSiteRefResolver,
     preflight_task_input,
 )
 from unilabos.workflow.windows_draft_cas import (
@@ -360,6 +362,7 @@ class WorkflowService:
         *,
         compiler: Optional[AuthoringCompiler] = None,
         resource_resolver: Optional[ResourceSlotResolver] = None,
+        site_ref_resolver: Optional[SiteRefResolver] = None,
         material_source_authority: MaterialSourceStaticAuthority | None = None,
         material_reservations: object | None = None,
         catalog_publisher: CatalogPublisher | None = None,
@@ -373,6 +376,11 @@ class WorkflowService:
             resource_resolver
             if resource_resolver is not None
             else UnconfiguredResourceSlotResolver()
+        )
+        self._site_ref_resolver = (
+            site_ref_resolver
+            if site_ref_resolver is not None
+            else UnconfiguredSiteRefResolver()
         )
         self._material_source_authority = material_source_authority
         self._catalog_publisher = catalog_publisher
@@ -1068,6 +1076,7 @@ class WorkflowService:
             execution_plan=plan,
             jobs=jobs,
             resource_resolver=self._resource_resolver,
+            site_ref_resolver=self._site_ref_resolver,
         )
 
     @staticmethod

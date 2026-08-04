@@ -316,3 +316,220 @@ def test_task_input_rejects_resolver_identity_substitution() -> None:
 
     assert failure.value.code == "invalid_input"
     assert resolver.calls == [SITE_UUID]
+
+
+def test_workflow_service_injects_site_resolver_into_task_creation(
+    tmp_path: Any,
+) -> None:
+    service_module = importlib.import_module("unilabos.workflow.service")
+    store_module = importlib.import_module("unilabos.workflow.store")
+    workflow_uuid = "90000000-0000-4000-8000-000000000001"
+    store = store_module.WorkflowStore(tmp_path / "site-ref-service.db")
+    resolver = _RecordingSiteResolver()
+    try:
+        store.create_workflow(
+            workflow_uuid=workflow_uuid,
+            name="R3A SiteRef service",
+            tags=[],
+            description=None,
+            meta_data=_site_input_graph()["workflow"]["meta_data"],
+        )
+        service = service_module.WorkflowService(store, site_ref_resolver=resolver)
+
+        task = service.create_workflow_task(
+            workflow_uuid=workflow_uuid,
+            run_mode="normal",
+            target_node_uuid=None,
+            input_value={"target_site": {"uuid": SITE_UUID.upper()}},
+            description=None,
+            meta_data={},
+        )
+
+        assert resolver.calls == [SITE_UUID]
+        assert task["input"] == {"target_site": {"uuid": SITE_UUID}}
+    finally:
+        store.close()
+
+
+def test_workflow_service_without_site_resolver_fails_closed(tmp_path: Any) -> None:
+    service_module = importlib.import_module("unilabos.workflow.service")
+    store_module = importlib.import_module("unilabos.workflow.store")
+    workflow_uuid = "90000000-0000-4000-8000-000000000002"
+    store = store_module.WorkflowStore(tmp_path / "site-ref-unconfigured.db")
+    try:
+        store.create_workflow(
+            workflow_uuid=workflow_uuid,
+            name="R3A unconfigured SiteRef",
+            tags=[],
+            description=None,
+            meta_data=_site_input_graph()["workflow"]["meta_data"],
+        )
+        service = service_module.WorkflowService(store)
+
+        with pytest.raises(service_module.WorkflowError) as failure:
+            service.create_workflow_task(
+                workflow_uuid=workflow_uuid,
+                run_mode="normal",
+                target_node_uuid=None,
+                input_value={"target_site": {"uuid": SITE_UUID}},
+                description=None,
+                meta_data={},
+            )
+
+        assert failure.value.code == "conflict"
+        assert service.list_workflow_tasks(workflow_uuid=workflow_uuid)["total"] == 0
+    finally:
+        store.close()
+
+
+def test_site_ref_annotation_rejects_resource_template_allowlist() -> None:
+    annotation_schema = importlib.import_module("unilabos.registry.annotation_schema")
+    annotation = ast.parse(
+        "Annotated[SiteRef, AllowedResourceTemplates(plate)]",
+        mode="eval",
+    ).body
+
+    with pytest.raises(annotation_schema.AnnotationSchemaError):
+        annotation_schema.parse_parameter_annotation(
+            "target_site",
+            annotation,
+            default=annotation_schema.NO_DEFAULT,
+            imports={
+                "Annotated": "typing:Annotated",
+                "SiteRef": SITE_REF_IMPORT,
+                "AllowedResourceTemplates": (
+                    "unilabos.registry.annotations:AllowedResourceTemplates"
+                ),
+                "plate": "r3a_site_ref.resources:plate",
+            },
+        )
+
+
+def test_catalog_rejects_forged_resource_symbols_on_site_ref() -> None:
+    contract = _action_contract(
+        """
+        from unilabos.registry.placeholder_type import SiteRef
+
+        def move_to_site(target_site: SiteRef) -> None:
+            pass
+        """
+    )
+    action_schema = contract.to_action_schema(action_name="move_to_site")
+    action_schema["x-unilabos-action-contract"]["resource_template_symbols"]["goal"][
+        "target_site"
+    ] = ["r3a_site_ref.resources:plate"]
+    registry_snapshot = {
+        "robot": {
+            "source_fqid": "r3a_site_ref.robot",
+            "display_name": "Robot",
+            "class": {
+                "module": "r3a_site_ref.device:Robot",
+                "action_value_mappings": {
+                    "move_to_site": {
+                        "displayname": "Move to site",
+                        "description": "Move by stable Site identity",
+                        "schema": action_schema,
+                        "goal": {},
+                        "goal_default": {},
+                        "feedback": {},
+                        "result": {},
+                        "type": "UniLabJsonCommand",
+                        "node_type": "device",
+                    }
+                },
+            },
+        }
+    }
+    catalog = importlib.import_module("unilabos.registry.catalog_consumer")
+
+    with pytest.raises(catalog.RegistryTemplateProjectionError) as failure:
+        catalog.workflow_template_imports_from_registry_snapshot(
+            registry_snapshot,
+            authority_id="os-local",
+            resource_template_identity_resolver=lambda _identity: DEVICE_TEMPLATE_UUID,
+        )
+
+    assert failure.value.code == "invalid_action_contract"
+
+
+def test_legacy_authoring_output_round_trips_canonical_site_ref(tmp_path: Any) -> None:
+    authoring_test = importlib.import_module("tests.workflow.test_authoring_engine")
+    template_uuid = "91000000-0000-4000-8000-000000000001"
+    node_uuid = "92000000-0000-4000-8000-000000000001"
+    site_source_uuid = "93000000-0000-4000-8000-000000000001"
+    ready_target_uuid = "93000000-0000-4000-8000-000000000002"
+    ready_source_uuid = "93000000-0000-4000-8000-000000000003"
+    imported_template = authoring_test._template(
+        template_uuid,
+        name="current_site",
+        class_name="lab.devices:Robot",
+        handles=[
+            authoring_test._handle(
+                site_source_uuid,
+                key="site",
+                io_type="source",
+                value_type="SiteRef",
+                data_source="executor",
+                value_schema=SITE_SCHEMA,
+            ),
+            authoring_test._handle(
+                ready_target_uuid,
+                key="ready",
+                io_type="target",
+                value_type="boolean",
+                data_source="dependency",
+                value_schema={"type": "boolean"},
+            ),
+            authoring_test._handle(
+                ready_source_uuid,
+                key="ready",
+                io_type="source",
+                value_type="boolean",
+                data_source="dependency",
+                value_schema={"type": "boolean"},
+            ),
+        ],
+    )
+    source = f'''from lab.devices import Robot
+from unilabos.workflow.authoring import device, workflow_definition, workflow_output
+
+robot: Robot = device()
+
+@workflow_definition(
+    workflow_uuid="{authoring_test.WORKFLOW_UUID}",
+    displayname="Read current site",
+)
+def read_current_site():
+    # unilab:node_uuid={node_uuid}
+    observed = robot.current_site()
+    return workflow_output(site=observed.site)
+'''
+
+    with authoring_test._opened_engine(
+        tmp_path / "site-ref-authoring.db",
+        imports=[imported_template],
+    ) as context:
+        compiled = context.engine.compile(
+            workflow_uuid=authoring_test.WORKFLOW_UUID,
+            workflow_revision=7,
+            python_source=source,
+            source_uri="package://r3a/read_current_site.py",
+            applied_graph=authoring_test._empty_graph(),
+        )
+        assert compiled.valid, compiled.diagnostics
+        assert compiled.graph is not None
+        output_contract = compiled.graph["workflow"]["meta_data"]["unilab"][
+            "output_contract"
+        ]
+        assert output_contract["outputs"] == [
+            {"name": "site", "schema": SITE_SCHEMA, "implicit": False}
+        ]
+
+        generated = context.engine.generate_python(
+            workflow_uuid=authoring_test.WORKFLOW_UUID,
+            workflow_revision=7,
+            graph=compiled.graph,
+            source_uri="package://r3a/generated.py",
+        )
+        assert generated.valid, generated.diagnostics
+        assert "import SiteRef" in str(generated.normalized_python_source)

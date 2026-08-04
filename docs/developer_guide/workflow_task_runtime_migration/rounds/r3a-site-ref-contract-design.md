@@ -126,6 +126,7 @@ Catalog 投影保留：
 | `unilabos/workflow/workflow_io.py` | 同类 SiteRef 可赋值，跨 ResourceSlot 拒绝 | 在连线/绑定编译时阻止 provider 混用 |
 | `unilabos/workflow/graph_validation.py` | Handle vocabulary 增加 SiteRef，值 shape 要求 exact `{uuid}` | Graph provider 校验不再把两类 slot 混为一类 |
 | `unilabos/workflow/task_input.py` | 新增 `ResolvedSiteRef`、`SiteRefResolver`、fail-closed adapter 与 preflight resolution | Task 首次持久化前由唯一 Site authority 关闭身份 |
+| `unilabos/workflow/service.py` | 在正常 Task 创建入口注入 SiteRefResolver，缺省装配 fail-closed adapter | 让 public WorkflowService 路径可使用该端口，而不是只允许底层 helper 测试注入 |
 | `unilabos/workflow/authoring_engine.py` | 生成 SiteRef Annotation 与 import | Published Workflow 源码可 round-trip |
 | `unilabos/workflow/device_action_task.py` | 未接 backend 前拒绝全部 `$slot` contract | 防止 typed identity 静默降级为普通 dict |
 | `CONTEXT.md` | 增加 SiteRef 领域定义与 Avoid 列表 | 固定 ubiquitous language，避免与 Site/ResourceSlot/Command 混用 |
