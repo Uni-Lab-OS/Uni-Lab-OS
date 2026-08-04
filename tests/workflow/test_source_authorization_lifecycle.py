@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import threading
 from collections.abc import Callable
 from pathlib import Path
 from typing import Any
@@ -294,3 +295,168 @@ def test_single_source_command_explicitly_replaces_active_authorization_set(
 
     assert active_workflows == {WORKFLOW_B_UUID}
     assert not hasattr(WorkflowService, "register_editable_source")
+
+
+def test_authorization_replacement_waits_for_in_flight_save_on_revoked_source(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """撤销源码授权前必须等待该工作流正在进行的草稿保存。
+
+    参数：``tmp_path`` 隔离数据库和两个授权包；``monkeypatch`` 在源码发布
+    （Source Publication）接缝建立确定性并发窗口。返回：无；替换授权不得在 A
+    的保存释放创作锁前返回，随后活动集合只能包含 B。异常：线程内异常由测试
+    收集并重新抛出，避免后台失败被静默忽略。
+    """
+
+    service = WorkflowService(WorkflowStore(tmp_path / "workflow.db"))
+    root_a = tmp_path / "alpha"
+    root_b = tmp_path / "beta"
+    source_a = _write_package(
+        root_a,
+        package_id="alpha",
+        workflow_uuid=WORKFLOW_A_UUID,
+    )
+    _write_package(
+        root_b,
+        package_id="beta",
+        workflow_uuid=WORKFLOW_B_UUID,
+    )
+    for workflow_uuid in (WORKFLOW_A_UUID, WORKFLOW_B_UUID):
+        service.create_workflow(
+            workflow_uuid=workflow_uuid,
+            name=f"workflow-{workflow_uuid[:8]}",
+            tags=[],
+            description=None,
+            meta_data={},
+        )
+    service.replace_active_editable_source_authorization(
+        workflow_uuid=WORKFLOW_A_UUID,
+        package_id="alpha",
+        package_root=root_a / "alpha",
+        relative_path="workflows/demo.py",
+    )
+    baseline = service.get_authoring(WORKFLOW_A_UUID)
+    save_entered_publication = threading.Event()
+    allow_save_to_finish = threading.Event()
+    replacement_finished = threading.Event()
+    thread_errors: list[BaseException] = []
+    original_atomic_write = service._atomic_write
+
+    def blocking_atomic_write(
+        registration: dict[str, Any],
+        content: bytes,
+        *,
+        expected_hash: Any,
+    ) -> None:
+        """在 A 持有创作锁时暂停源码发布。
+
+        参数：注册、内容与期望哈希保持被测私有发布接缝。返回：放行后委托真实
+        发布。异常：等待超时抛出 ``TimeoutError``，真实发布异常原样传播。
+        """
+
+        save_entered_publication.set()
+        if not allow_save_to_finish.wait(timeout=3):
+            raise TimeoutError("测试未放行工作流草稿保存")
+        original_atomic_write(
+            registration,
+            content,
+            expected_hash=expected_hash,
+        )
+
+    def save_source_a() -> None:
+        """在线程中保存 A 的工作流草稿（Workflow Draft）。
+
+        参数：无。返回：无；异常写入 ``thread_errors`` 供主线程断言。
+        """
+
+        try:
+            service.save_draft(
+                WORKFLOW_A_UUID,
+                python_source="value = 'saved before revoke'\n",
+                expected_draft_hash=baseline["draft"]["draft_hash"],
+                expected_workflow_revision=baseline["workflow_revision"],
+            )
+        except BaseException as error:  # pragma: no cover - 由结尾断言暴露
+            thread_errors.append(error)
+
+    def replace_with_source_b() -> None:
+        """在线程中用 B 替换完整活动源码授权集合。
+
+        参数：无。返回：无；无论成功失败均标记结束，异常交给主线程断言。
+        """
+
+        try:
+            service.replace_active_editable_source_authorization(
+                workflow_uuid=WORKFLOW_B_UUID,
+                package_id="beta",
+                package_root=root_b / "beta",
+                relative_path="workflows/demo.py",
+            )
+        except BaseException as error:  # pragma: no cover - 由结尾断言暴露
+            thread_errors.append(error)
+        finally:
+            replacement_finished.set()
+
+    monkeypatch.setattr(service, "_atomic_write", blocking_atomic_write)
+    save_thread = threading.Thread(target=save_source_a)
+    replace_thread = threading.Thread(target=replace_with_source_b)
+    try:
+        save_thread.start()
+        assert save_entered_publication.wait(timeout=1)
+        replace_thread.start()
+        assert not replacement_finished.wait(timeout=0.2)
+    finally:
+        allow_save_to_finish.set()
+        save_thread.join(timeout=3)
+        replace_thread.join(timeout=3)
+        service.close()
+
+    assert not save_thread.is_alive()
+    assert not replace_thread.is_alive()
+    assert thread_errors == []
+    assert source_a.read_text(encoding="utf-8") == "value = 'saved before revoke'\n"
+
+
+def test_revoked_source_signature_requires_current_uuid_authorization(
+    tmp_path: Path,
+) -> None:
+    """旧注册信息不得在撤权后继续读取工作流源码签名。
+
+    参数：``tmp_path`` 隔离数据库和授权包。返回：无；源码签名接口只接受工作流
+    UUID，并在每次读取时重新校验当前授权，撤销后稳定返回 ``workflow_not_found``。
+    """
+
+    service = WorkflowService(WorkflowStore(tmp_path / "workflow.db"))
+    root_a = tmp_path / "alpha"
+    root_b = tmp_path / "beta"
+    _write_package(root_a, package_id="alpha", workflow_uuid=WORKFLOW_A_UUID)
+    _write_package(root_b, package_id="beta", workflow_uuid=WORKFLOW_B_UUID)
+    for workflow_uuid in (WORKFLOW_A_UUID, WORKFLOW_B_UUID):
+        service.create_workflow(
+            workflow_uuid=workflow_uuid,
+            name=f"workflow-{workflow_uuid[:8]}",
+            tags=[],
+            description=None,
+            meta_data={},
+        )
+    try:
+        service.replace_active_editable_source_authorization(
+            workflow_uuid=WORKFLOW_A_UUID,
+            package_id="alpha",
+            package_root=root_a / "alpha",
+            relative_path="workflows/demo.py",
+        )
+        assert service.source_signature(WORKFLOW_A_UUID)[0] == "file"
+        service.replace_active_editable_source_authorization(
+            workflow_uuid=WORKFLOW_B_UUID,
+            package_id="beta",
+            package_root=root_b / "beta",
+            relative_path="workflows/demo.py",
+        )
+        with pytest.raises(WorkflowError) as caught:
+            service.source_signature(WORKFLOW_A_UUID)
+    finally:
+        service.close()
+
+    assert caught.value.code == "workflow_not_found"

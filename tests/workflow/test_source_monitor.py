@@ -67,15 +67,15 @@ class RecordingSourceChangeService:
 
     def source_signature(
         self,
-        registration: dict[str, str],
+        workflow_uuid: str,
     ) -> tuple[Any, ...]:
         """返回调用时可见的源码文件签名。
 
-        参数：``registration`` 必须是本适配器发布的规范来源注册。
+        参数：``workflow_uuid`` 必须是本适配器当前授权的工作流身份。
         返回：当前文件签名；身份不匹配时测试直接失败。
         """
 
-        assert registration is self.registration
+        assert workflow_uuid == self.registration["workflow_uuid"]
         return self.signature
 
     def submit_source_change(
@@ -513,12 +513,11 @@ def test_service_rejects_a_stale_observed_signature(tmp_path: Path) -> None:
     """
 
     service, store, source_path = _service_with_source(tmp_path)
-    registration = service.list_registered_sources()[0]
     # ``stale_signature`` 是修改前的文件世代，不能授权处理修改后的内容。
-    stale_signature = service.source_signature(registration)
+    stale_signature = service.source_signature(WORKFLOW_UUID)
     cursor = service.list_events(after_id=0)["items"][-1]["id"]
     source_path.write_text("value = 'new generation'\n", encoding="utf-8")
-    current_signature = service.source_signature(registration)
+    current_signature = service.source_signature(WORKFLOW_UUID)
     try:
         assert not service.submit_source_change(
             WORKFLOW_UUID,
@@ -551,9 +550,8 @@ def test_same_hash_external_rewrite_does_not_emit_duplicate_event(
     cursor = service.list_events(after_id=0)["items"][-1]["id"]
     original = source_path.read_bytes()
     source_path.write_bytes(original)
-    registration = service.list_registered_sources()[0]
     # ``rewrite_signature`` 可能有新时间戳，但仍指向相同内容哈希。
-    rewrite_signature = service.source_signature(registration)
+    rewrite_signature = service.source_signature(WORKFLOW_UUID)
     try:
         assert service.submit_source_change(
             WORKFLOW_UUID,
@@ -579,8 +577,7 @@ def test_delete_rename_and_restore_stay_bound_to_canonical_path(
     cursor = service.list_events(after_id=0)["items"][-1]["id"]
     renamed_path = source_path.with_name("renamed.py")
     source_path.rename(renamed_path)
-    registration = service.list_registered_sources()[0]
-    missing_signature = service.source_signature(registration)
+    missing_signature = service.source_signature(WORKFLOW_UUID)
     try:
         assert service.submit_source_change(
             WORKFLOW_UUID,
@@ -590,7 +587,7 @@ def test_delete_rename_and_restore_stay_bound_to_canonical_path(
         assert renamed_path.exists()
 
         source_path.write_text("value = 'restored canonical'\n", encoding="utf-8")
-        restored_signature = service.source_signature(registration)
+        restored_signature = service.source_signature(WORKFLOW_UUID)
         assert service.submit_source_change(
             WORKFLOW_UUID,
             observed_signature=restored_signature,

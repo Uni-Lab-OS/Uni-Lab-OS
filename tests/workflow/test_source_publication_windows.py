@@ -201,6 +201,82 @@ def test_windows_guard_precedes_temporary_open_and_cleans_both_directories(
     assert not any(path.name.endswith(".tmp") for path in detached.iterdir())
 
 
+@pytest.mark.parametrize(
+    ("winerror", "expected_error"),
+    [
+        (32, source_publication.SourcePublicationConflict),
+        (5, source_publication.SourcePublicationError),
+    ],
+)
+def test_windows_raw_os_error_uses_winerror_classification(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    winerror: int,
+    expected_error: type[RuntimeError],
+) -> None:
+    """Windows 原生接缝的裸 ``OSError`` 必须按 winerror 稳定分类。
+
+    参数：``tmp_path`` 隔离草稿；``monkeypatch`` 模拟 Windows 发布；
+    ``winerror`` 是共享冲突或权限拒绝；``expected_error`` 是期望公共错误。返回：
+    无；共享冲突为 CAS 冲突，权限错误为基础设施故障，原稿都保持不变。
+    """
+
+    parent = tmp_path / "workflows"
+    parent.mkdir()
+    target = parent / "demo.py"
+    original = b"value = 'initial'\n"
+    target.write_bytes(original)
+    windows_lock = RecordingWindowsLock()
+
+    @contextmanager
+    def directory_guard(_paths: Sequence[Path]) -> Iterator[None]:
+        """接受 Windows 目录链并保持测试发布窗口。
+
+        参数：``_paths`` 是规范目录链。返回：上下文无值；不改变宿主目录。
+        """
+
+        yield
+
+    def fail_native_replace(
+        _target: Path,
+        _replacement: Path,
+        _backup: Path,
+    ) -> None:
+        """从 Windows 原生替换接缝抛出带 winerror 的系统异常。
+
+        参数：三个路径保持被测适配器形状。返回：无；总是抛出注入错误。
+        """
+
+        error = OSError(13, "注入的 Windows 源码发布故障")
+        error.winerror = winerror  # type: ignore[attr-defined]
+        raise error
+
+    monkeypatch.setattr(source_publication, "_PLATFORM", "win32")
+    monkeypatch.setattr(source_publication, "_fcntl", None)
+    monkeypatch.setattr(source_publication, "_msvcrt", windows_lock)
+    monkeypatch.setattr(
+        source_publication,
+        "hold_windows_directory_chain",
+        directory_guard,
+    )
+    monkeypatch.setattr(
+        source_publication,
+        "replace_windows_file_with_backup",
+        fail_native_replace,
+    )
+
+    with pytest.raises(expected_error):
+        source_publication.atomic_publish_source(
+            parent_path=parent,
+            target_name=target.name,
+            content=b"value = 'changed'\n",
+            byte_limit=1024,
+            expected_hash=_draft_hash(original),
+        )
+
+    assert target.read_bytes() == original
+
+
 @pytest.mark.skipif(
     sys.platform != "win32",
     reason="真实 Windows 文件共享和 ReplaceFileW 合同只在 Windows CI 运行",
