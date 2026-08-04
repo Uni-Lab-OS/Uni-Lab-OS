@@ -5,6 +5,9 @@ opsky_ATR30007:
   class:
     action_value_mappings:
       auto-ensure_connected:
+        displayname: auto-ensure_connected
+        estimate_duration_express: ''
+        estimate_duration_fixed: 60.0
         feedback: {}
         goal: {}
         goal_default:
@@ -13,6 +16,7 @@ opsky_ATR30007:
           name: null
           port: null
         handles: {}
+        lock_resource: []
         placeholder_keys: {}
         result: {}
         schema:
@@ -42,6 +46,9 @@ opsky_ATR30007:
           type: object
         type: UniLabJsonCommand
       auto-run_once:
+        displayname: auto-run_once
+        estimate_duration_express: ''
+        estimate_duration_fixed: 60.0
         feedback: {}
         goal: {}
         goal_default:
@@ -52,6 +59,7 @@ opsky_ATR30007:
           save_csv: 'true'
           save_plot: 'true'
         handles: {}
+        lock_resource: []
         placeholder_keys: {}
         result: {}
         schema:
@@ -88,6 +96,9 @@ opsky_ATR30007:
           type: object
         type: UniLabJsonCommand
       auto-safe_read:
+        displayname: auto-safe_read
+        estimate_duration_express: ''
+        estimate_duration_fixed: 60.0
         feedback: {}
         goal: {}
         goal_default:
@@ -97,6 +108,7 @@ opsky_ATR30007:
           name: null
           retries: 3
         handles: {}
+        lock_resource: []
         placeholder_keys: {}
         result: {}
         schema:
@@ -129,6 +141,9 @@ opsky_ATR30007:
           type: object
         type: UniLabJsonCommand
       auto-safe_write:
+        displayname: auto-safe_write
+        estimate_duration_express: ''
+        estimate_duration_fixed: 60.0
         feedback: {}
         goal: {}
         goal_default:
@@ -138,6 +153,7 @@ opsky_ATR30007:
           name: null
           retries: 3
         handles: {}
+        lock_resource: []
         placeholder_keys: {}
         result: {}
         schema:
@@ -170,6 +186,9 @@ opsky_ATR30007:
           type: object
         type: UniLabJsonCommand
       auto-wait_with_quit_check:
+        displayname: auto-wait_with_quit_check
+        estimate_duration_express: ''
+        estimate_duration_fixed: 60.0
         feedback: {}
         goal: {}
         goal_default:
@@ -177,6 +196,7 @@ opsky_ATR30007:
           robot: null
           seconds: null
         handles: {}
+        lock_resource: []
         placeholder_keys: {}
         result: {}
         schema:
@@ -207,8 +227,10 @@ opsky_ATR30007:
     type: python
   config_info: []
   description: OPSKY ATR30007 光纤拉曼模块，提供单一入口大函数以执行一次完整流程。
+  displayname: opsky_ATR30007
   handles: []
   icon: ''
+  init_param_enforce: {}
   init_param_schema:
     config:
       properties:
@@ -233,4 +255,5 @@ opsky_ATR30007:
       properties: {}
       required: []
       type: object
+  metadata: {}
   version: 1.0.0

@@ -5,6 +5,7 @@ container:
     module: unilabos.resources.container:get_regular_container
     type: pylabrobot
   description: regular organic container
+  displayname: container
   handles:
   - data_key: fluid_in
     data_source: handle
@@ -29,4 +30,5 @@ container:
     side: WEST
   icon: Flask.webp
   init_param_schema: {}
+  metadata: {}
   version: 1.0.0

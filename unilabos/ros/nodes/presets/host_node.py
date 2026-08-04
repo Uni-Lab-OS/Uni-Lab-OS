@@ -124,8 +124,8 @@ class DeductResourceReturn(CreateResourceReturn):
 class TransferResourceReturn:
     """transfer_resource 返回值：透传被转移物料、目标孔位与槽位，便于下游引用。
 
-    resource / mount_resource 均为「单个物料」的扁平节点形态（list[list[ResourceDict]]，单根，
-    经 @flatten 后即一棵树的扁平节点 list），与 apply_deduct 输出一致、可直接连到下游单物料输入。
+    resource / mount_resource 均为单个物料的扁平节点形态，可直接连接到下游
+    ResourceSlot 输入。
     """
 
     resource: ResourceSlot

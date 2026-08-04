@@ -2137,6 +2137,7 @@ class WorkflowService:
         try:
             self._catalog_publisher.publish()
         except Exception:  # noqa: BLE001 - adapter boundary
+            _LOGGER.exception("Catalog publication 失败")
             try:
                 self._catalog_publisher.invalidate()
             except Exception:  # noqa: BLE001 - marker 已在 Store transaction 内删除

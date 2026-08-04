@@ -6,11 +6,15 @@ bioyond_dispensing_station:
   class:
     action_value_mappings:
       auto-brief_step_parameters:
+        displayname: auto-brief_step_parameters
+        estimate_duration_express: ''
+        estimate_duration_fixed: 60.0
         feedback: {}
         goal: {}
         goal_default:
           data: null
         handles: {}
+        lock_resource: []
         placeholder_keys: {}
         result: {}
         schema:
@@ -32,12 +36,16 @@ bioyond_dispensing_station:
           type: object
         type: UniLabJsonCommand
       auto-process_order_finish_report:
+        displayname: auto-process_order_finish_report
+        estimate_duration_express: ''
+        estimate_duration_fixed: 60.0
         feedback: {}
         goal: {}
         goal_default:
           report_request: null
           used_materials: null
         handles: {}
+        lock_resource: []
         placeholder_keys: {}
         result: {}
         schema:
@@ -64,11 +72,15 @@ bioyond_dispensing_station:
           type: object
         type: UniLabJsonCommand
       auto-project_order_report:
+        displayname: auto-project_order_report
+        estimate_duration_express: ''
+        estimate_duration_fixed: 60.0
         feedback: {}
         goal: {}
         goal_default:
           order_id: null
         handles: {}
+        lock_resource: []
         placeholder_keys: {}
         result: {}
         schema:
@@ -90,11 +102,15 @@ bioyond_dispensing_station:
           type: object
         type: UniLabJsonCommand
       auto-query_resource_by_name:
+        displayname: auto-query_resource_by_name
+        estimate_duration_express: ''
+        estimate_duration_fixed: 60.0
         feedback: {}
         goal: {}
         goal_default:
           material_name: null
         handles: {}
+        lock_resource: []
         placeholder_keys: {}
         result: {}
         schema:
@@ -116,11 +132,15 @@ bioyond_dispensing_station:
           type: object
         type: UniLabJsonCommand
       auto-workflow_sample_locations:
+        displayname: auto-workflow_sample_locations
+        estimate_duration_express: ''
+        estimate_duration_fixed: 60.0
         feedback: {}
         goal: {}
         goal_default:
           workflow_id: null
         handles: {}
+        lock_resource: []
         placeholder_keys: {}
         result: {}
         schema:
@@ -142,6 +162,9 @@ bioyond_dispensing_station:
           type: object
         type: UniLabJsonCommand
       batch_create_90_10_vial_feeding_tasks:
+        displayname: batch_create_90_10_vial_feeding_tasks
+        estimate_duration_express: ''
+        estimate_duration_fixed: 60.0
         feedback: {}
         goal:
           delay_time: delay_time
@@ -172,6 +195,7 @@ bioyond_dispensing_station:
             handler_key: BATCH_CREATE_RESULT
             io_type: sink
             label: Complete Batch Create Result JSON (contains order_codes and order_ids)
+        lock_resource: []
         placeholder_keys: {}
         result: {}
         schema:
@@ -214,6 +238,9 @@ bioyond_dispensing_station:
           type: object
         type: UniLabJsonCommand
       batch_create_diamine_solution_tasks:
+        displayname: batch_create_diamine_solution_tasks
+        estimate_duration_express: ''
+        estimate_duration_fixed: 60.0
         feedback: {}
         goal:
           delay_time: delay_time
@@ -242,6 +269,7 @@ bioyond_dispensing_station:
             handler_key: BATCH_CREATE_RESULT
             io_type: sink
             label: Complete Batch Create Result JSON (contains order_codes and order_ids)
+        lock_resource: []
         placeholder_keys: {}
         result: {}
         schema:
@@ -283,6 +311,9 @@ bioyond_dispensing_station:
           type: object
         type: UniLabJsonCommand
       compute_experiment_design:
+        displayname: compute_experiment_design
+        estimate_duration_express: ''
+        estimate_duration_fixed: 60.0
         feedback: {}
         goal:
           m_tot: m_tot
@@ -320,6 +351,7 @@ bioyond_dispensing_station:
             handler_key: feeding_order
             io_type: sink
             label: Feeding Order Data From Calculation Node
+        lock_resource: []
         placeholder_keys: {}
         result: {}
         schema:
@@ -381,6 +413,9 @@ bioyond_dispensing_station:
           type: object
         type: UniLabJsonCommand
       create_90_10_vial_feeding_task:
+        displayname: create_90_10_vial_feeding_task
+        estimate_duration_express: ''
+        estimate_duration_fixed: 60.0
         feedback: {}
         goal:
           delay_time: delay_time
@@ -431,6 +466,7 @@ bioyond_dispensing_station:
           speed: ''
           temperature: ''
         handles: {}
+        lock_resource: []
         placeholder_keys: {}
         result:
           return_info: return_info
@@ -505,6 +541,9 @@ bioyond_dispensing_station:
           type: object
         type: DispenStationVialFeed
       create_diamine_solution_task:
+        displayname: create_diamine_solution_task
+        estimate_duration_express: ''
+        estimate_duration_fixed: 60.0
         feedback: {}
         goal:
           delay_time: delay_time
@@ -527,6 +566,7 @@ bioyond_dispensing_station:
           temperature: ''
           volume: ''
         handles: {}
+        lock_resource: []
         placeholder_keys: {}
         result:
           return_info: return_info
@@ -573,10 +613,14 @@ bioyond_dispensing_station:
           type: object
         type: DispenStationSolnPrep
       scheduler_start:
+        displayname: scheduler_start
+        estimate_duration_express: ''
+        estimate_duration_fixed: 60.0
         feedback: {}
         goal: {}
         goal_default: {}
         handles: {}
+        lock_resource: []
         placeholder_keys: {}
         result: {}
         schema:
@@ -596,6 +640,9 @@ bioyond_dispensing_station:
           type: object
         type: UniLabJsonCommand
       transfer_materials_to_reaction_station:
+        displayname: transfer_materials_to_reaction_station
+        estimate_duration_express: ''
+        estimate_duration_fixed: 60.0
         feedback: {}
         goal:
           target_device_id: target_device_id
@@ -604,6 +651,7 @@ bioyond_dispensing_station:
           target_device_id: null
           transfer_groups: null
         handles: {}
+        lock_resource: []
         placeholder_keys:
           target_device_id: unilabos_devices
         result: {}
@@ -631,6 +679,9 @@ bioyond_dispensing_station:
           type: object
         type: UniLabJsonCommand
       wait_for_multiple_orders_and_get_reports:
+        displayname: wait_for_multiple_orders_and_get_reports
+        estimate_duration_express: ''
+        estimate_duration_fixed: 60.0
         feedback: {}
         goal:
           batch_create_result: batch_create_result
@@ -655,6 +706,7 @@ bioyond_dispensing_station:
             handler_key: batch_reports_result
             io_type: sink
             label: Batch Order Completion Reports
+        lock_resource: []
         placeholder_keys: {}
         result: {}
         schema:
@@ -691,8 +743,10 @@ bioyond_dispensing_station:
     type: python
   config_info: []
   description: ''
+  displayname: bioyond_dispensing_station
   handles: []
   icon: preparation_station.webp
+  init_param_enforce: {}
   init_param_schema:
     config:
       properties:
@@ -711,5 +765,6 @@ bioyond_dispensing_station:
       properties: {}
       required: []
       type: object
+  metadata: {}
   model: {}
   version: 1.0.0

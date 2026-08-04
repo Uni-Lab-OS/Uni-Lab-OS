@@ -5,9 +5,11 @@ TransformXYZDeck:
     module: unilabos.devices.liquid_handling.laiyu.laiyu:TransformXYZDeck
     type: pylabrobot
   description: Laiyu deck
+  displayname: TransformXYZDeck
   handles: []
   icon: ''
   init_param_schema: {}
+  metadata: {}
   model:
     mesh: liquid_transform_xyz
     path: https://leap-lab.oss-cn-zhangjiakou.aliyuncs.com/uni-lab/devices/liquid_transform_xyz/macro_device.xacro

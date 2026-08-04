@@ -4,11 +4,15 @@ post_process_station:
   class:
     action_value_mappings:
       auto-load_config:
+        displayname: auto-load_config
+        estimate_duration_express: ''
+        estimate_duration_fixed: 60.0
         feedback: {}
         goal: {}
         goal_default:
           config_path: null
         handles: {}
+        lock_resource: []
         placeholder_keys: {}
         result: {}
         schema:
@@ -29,10 +33,14 @@ post_process_station:
           type: object
         type: UniLabJsonCommand
       auto-print_cache_stats:
+        displayname: auto-print_cache_stats
+        estimate_duration_express: ''
+        estimate_duration_fixed: 60.0
         feedback: {}
         goal: {}
         goal_default: {}
         handles: {}
+        lock_resource: []
         placeholder_keys: {}
         result: {}
         schema:
@@ -50,12 +58,16 @@ post_process_station:
           type: object
         type: UniLabJsonCommand
       auto-set_node_value:
+        displayname: auto-set_node_value
+        estimate_duration_express: ''
+        estimate_duration_fixed: 60.0
         feedback: {}
         goal: {}
         goal_default:
           name: null
           value: null
         handles: {}
+        lock_resource: []
         placeholder_keys: {}
         result: {}
         schema:
@@ -79,6 +91,9 @@ post_process_station:
           type: object
         type: UniLabJsonCommand
       disconnect:
+        displayname: disconnect
+        estimate_duration_express: ''
+        estimate_duration_fixed: 60.0
         feedback:
           status: status
         goal:
@@ -86,6 +101,7 @@ post_process_station:
         goal_default:
           command: ''
         handles: {}
+        lock_resource: []
         placeholder_keys: {}
         result:
           return_info: return_info
@@ -122,6 +138,9 @@ post_process_station:
           type: object
         type: SendCmd
       read_node:
+        displayname: read_node
+        estimate_duration_express: ''
+        estimate_duration_fixed: 60.0
         feedback:
           status: status
         goal:
@@ -130,6 +149,7 @@ post_process_station:
         goal_default:
           command: ''
         handles: {}
+        lock_resource: []
         placeholder_keys: {}
         result:
           return_info: return_info
@@ -166,6 +186,9 @@ post_process_station:
           type: object
         type: SendCmd
       trigger_cleaning_action:
+        displayname: trigger_cleaning_action
+        estimate_duration_express: ''
+        estimate_duration_fixed: 60.0
         feedback: {}
         goal:
           acetone_inner_wall_cleaning_count: acetone_inner_wall_cleaning_count
@@ -250,6 +273,7 @@ post_process_station:
           water_stirrer_cleaning_wait_time: 0
           water_stirrer_cleaning_waste_time: 0
         handles: {}
+        lock_resource: []
         result:
           return_info: return_info
         schema:
@@ -437,6 +461,9 @@ post_process_station:
           type: object
         type: PostProcessTriggerClean
       trigger_grab_action:
+        displayname: trigger_grab_action
+        estimate_duration_express: ''
+        estimate_duration_fixed: 60.0
         feedback: {}
         goal:
           raw_tank_number: raw_tank_number
@@ -445,6 +472,7 @@ post_process_station:
           raw_tank_number: 0
           reaction_tank_number: 0
         handles: {}
+        lock_resource: []
         result:
           return_info: return_info
         schema:
@@ -480,6 +508,9 @@ post_process_station:
           type: object
         type: PostProcessGrab
       trigger_post_processing:
+        displayname: trigger_post_processing
+        estimate_duration_express: ''
+        estimate_duration_fixed: 60.0
         feedback: {}
         goal:
           atomization_fast_speed: atomization_fast_speed
@@ -512,6 +543,7 @@ post_process_station:
           second_wash_water_amount: 0.0
           wash_slow_speed: 0.0
         handles: {}
+        lock_resource: []
         result:
           return_info: return_info
         schema:
@@ -595,6 +627,9 @@ post_process_station:
           type: object
         type: PostProcessTriggerPostPro
       write_node:
+        displayname: write_node
+        estimate_duration_express: ''
+        estimate_duration_fixed: 60.0
         feedback:
           result: result
         goal:
@@ -602,6 +637,7 @@ post_process_station:
         goal_default:
           command: ''
         handles: {}
+        lock_resource: []
         result:
           success: success
         schema:
@@ -641,8 +677,10 @@ post_process_station:
     type: python
   config_info: []
   description: 后处理站
+  displayname: post_process_station
   handles: []
   icon: post_process_station.webp
+  init_param_enforce: {}
   init_param_schema:
     config:
       properties:
@@ -677,4 +715,5 @@ post_process_station:
       required:
       - cache_stats
       type: object
+  metadata: {}
   version: 1.0.0

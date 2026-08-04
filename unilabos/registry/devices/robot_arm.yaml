@@ -4,10 +4,14 @@ robotic_arm.SCARA_with_slider.moveit.virtual:
   class:
     action_value_mappings:
       auto-check_tf_update_actions:
+        displayname: auto-check_tf_update_actions
+        estimate_duration_express: ''
+        estimate_duration_fixed: 60.0
         feedback: {}
         goal: {}
         goal_default: {}
         handles: {}
+        lock_resource: []
         placeholder_keys: {}
         result: {}
         schema:
@@ -25,6 +29,9 @@ robotic_arm.SCARA_with_slider.moveit.virtual:
           type: object
         type: UniLabJsonCommand
       auto-moveit_joint_task:
+        displayname: auto-moveit_joint_task
+        estimate_duration_express: ''
+        estimate_duration_fixed: 60.0
         feedback: {}
         goal: {}
         goal_default:
@@ -34,6 +41,7 @@ robotic_arm.SCARA_with_slider.moveit.virtual:
           retry: 10
           speed: 1
         handles: {}
+        lock_resource: []
         placeholder_keys: {}
         result: {}
         schema:
@@ -65,6 +73,9 @@ robotic_arm.SCARA_with_slider.moveit.virtual:
           type: object
         type: UniLabJsonCommand
       auto-moveit_task:
+        displayname: auto-moveit_task
+        estimate_duration_express: ''
+        estimate_duration_fixed: 60.0
         feedback: {}
         goal: {}
         goal_default:
@@ -80,6 +91,7 @@ robotic_arm.SCARA_with_slider.moveit.virtual:
           speed: 1
           target_link: null
         handles: {}
+        lock_resource: []
         placeholder_keys: {}
         result: {}
         schema:
@@ -123,12 +135,16 @@ robotic_arm.SCARA_with_slider.moveit.virtual:
           type: object
         type: UniLabJsonCommand
       auto-resource_manager:
+        displayname: auto-resource_manager
+        estimate_duration_express: ''
+        estimate_duration_fixed: 60.0
         feedback: {}
         goal: {}
         goal_default:
           parent_link: null
           resource: null
         handles: {}
+        lock_resource: []
         placeholder_keys: {}
         result: {}
         schema:
@@ -152,10 +168,14 @@ robotic_arm.SCARA_with_slider.moveit.virtual:
           type: object
         type: UniLabJsonCommand
       auto-wait_for_resource_action:
+        displayname: auto-wait_for_resource_action
+        estimate_duration_express: ''
+        estimate_duration_fixed: 60.0
         feedback: {}
         goal: {}
         goal_default: {}
         handles: {}
+        lock_resource: []
         placeholder_keys: {}
         result: {}
         schema:
@@ -173,6 +193,9 @@ robotic_arm.SCARA_with_slider.moveit.virtual:
           type: object
         type: UniLabJsonCommand
       pick_and_place:
+        displayname: pick_and_place
+        estimate_duration_express: ''
+        estimate_duration_fixed: 60.0
         feedback:
           status: status
         goal:
@@ -180,6 +203,7 @@ robotic_arm.SCARA_with_slider.moveit.virtual:
         goal_default:
           command: ''
         handles: {}
+        lock_resource: []
         placeholder_keys: {}
         result:
           return_info: return_info
@@ -218,6 +242,9 @@ robotic_arm.SCARA_with_slider.moveit.virtual:
           type: object
         type: SendCmd
       set_position:
+        displayname: set_position
+        estimate_duration_express: ''
+        estimate_duration_fixed: 60.0
         feedback:
           status: status
         goal:
@@ -225,6 +252,7 @@ robotic_arm.SCARA_with_slider.moveit.virtual:
         goal_default:
           command: ''
         handles: {}
+        lock_resource: []
         placeholder_keys: {}
         result:
           return_info: return_info
@@ -263,6 +291,9 @@ robotic_arm.SCARA_with_slider.moveit.virtual:
           type: object
         type: SendCmd
       set_status:
+        displayname: set_status
+        estimate_duration_express: ''
+        estimate_duration_fixed: 60.0
         feedback:
           status: status
         goal:
@@ -270,6 +301,7 @@ robotic_arm.SCARA_with_slider.moveit.virtual:
         goal_default:
           command: ''
         handles: {}
+        lock_resource: []
         placeholder_keys: {}
         result:
           return_info: return_info
@@ -311,8 +343,10 @@ robotic_arm.SCARA_with_slider.moveit.virtual:
     type: python
   config_info: []
   description: 机械臂与滑块运动系统，基于MoveIt2运动规划框架的多自由度机械臂控制设备。该系统集成机械臂和线性滑块，通过ROS2和MoveIt2实现精确的轨迹规划和协调运动控制。支持笛卡尔空间和关节空间的运动规划、碰撞检测、逆运动学求解等功能。适用于复杂的pick-and-place操作、精密装配、多工位协作等需要高精度多轴协调运动的实验室自动化应用。
+  displayname: robotic_arm.SCARA_with_slider.moveit.virtual
   handles: []
   icon: ''
+  init_param_enforce: {}
   init_param_schema:
     config:
       properties:
@@ -332,6 +366,7 @@ robotic_arm.SCARA_with_slider.moveit.virtual:
       properties: {}
       required: []
       type: object
+  metadata: {}
   model:
     mesh: arm_slider
     path: https://leap-lab.oss-cn-zhangjiakou.aliyuncs.com/uni-lab/devices/arm_slider/macro_device.xacro
@@ -343,10 +378,14 @@ robotic_arm.UR:
   class:
     action_value_mappings:
       auto-arm_init:
+        displayname: auto-arm_init
+        estimate_duration_express: ''
+        estimate_duration_fixed: 60.0
         feedback: {}
         goal: {}
         goal_default: {}
         handles: {}
+        lock_resource: []
         placeholder_keys: {}
         result: {}
         schema:
@@ -364,11 +403,15 @@ robotic_arm.UR:
           type: object
         type: UniLabJsonCommand
       auto-load_pose_data:
+        displayname: auto-load_pose_data
+        estimate_duration_express: ''
+        estimate_duration_fixed: 60.0
         feedback: {}
         goal: {}
         goal_default:
           data: null
         handles: {}
+        lock_resource: []
         placeholder_keys: {}
         result: {}
         schema:
@@ -389,11 +432,15 @@ robotic_arm.UR:
           type: object
         type: UniLabJsonCommand
       auto-load_pose_file:
+        displayname: auto-load_pose_file
+        estimate_duration_express: ''
+        estimate_duration_fixed: 60.0
         feedback: {}
         goal: {}
         goal_default:
           file: null
         handles: {}
+        lock_resource: []
         placeholder_keys: {}
         result: {}
         schema:
@@ -414,10 +461,14 @@ robotic_arm.UR:
           type: object
         type: UniLabJsonCommand
       auto-reload_pose:
+        displayname: auto-reload_pose
+        estimate_duration_express: ''
+        estimate_duration_fixed: 60.0
         feedback: {}
         goal: {}
         goal_default: {}
         handles: {}
+        lock_resource: []
         placeholder_keys: {}
         result: {}
         schema:
@@ -435,6 +486,9 @@ robotic_arm.UR:
           type: object
         type: UniLabJsonCommand
       move_pos_task:
+        displayname: move_pos_task
+        estimate_duration_express: ''
+        estimate_duration_fixed: 60.0
         feedback:
           status: status
         goal:
@@ -442,6 +496,7 @@ robotic_arm.UR:
         goal_default:
           command: ''
         handles: {}
+        lock_resource: []
         placeholder_keys: {}
         result:
           return_info: return_info
@@ -486,8 +541,10 @@ robotic_arm.UR:
     type: python
   config_info: []
   description: Universal Robots机械臂设备，用于实验室精密操作和自动化作业。该设备集成了UR机械臂本体、Robotiq夹爪和RTDE通信接口，支持六自由度精确运动控制和力觉反馈。具备实时位置监控、状态反馈、轨迹规划等功能，可执行复杂的多点位运动任务。适用于样品抓取、精密装配、实验器具操作等需要高精度和高重复性的实验室自动化场景。
+  displayname: robotic_arm.UR
   handles: []
   icon: ''
+  init_param_enforce: {}
   init_param_schema:
     config:
       properties:
@@ -515,6 +572,7 @@ robotic_arm.UR:
       - gripper_pose
       - gripper_status
       type: object
+  metadata: {}
   version: 1.0.0
 robotic_arm.elite:
   category:
@@ -522,10 +580,14 @@ robotic_arm.elite:
   class:
     action_value_mappings:
       auto-close:
+        displayname: auto-close
+        estimate_duration_express: ''
+        estimate_duration_fixed: 60.0
         feedback: {}
         goal: {}
         goal_default: {}
         handles: {}
+        lock_resource: []
         placeholder_keys: {}
         result: {}
         schema:
@@ -543,10 +605,14 @@ robotic_arm.elite:
           type: object
         type: UniLabJsonCommand
       auto-modbus_close:
+        displayname: auto-modbus_close
+        estimate_duration_express: ''
+        estimate_duration_fixed: 60.0
         feedback: {}
         goal: {}
         goal_default: {}
         handles: {}
+        lock_resource: []
         placeholder_keys: {}
         result: {}
         schema:
@@ -564,6 +630,9 @@ robotic_arm.elite:
           type: object
         type: UniLabJsonCommand
       auto-modbus_read_holding_registers:
+        displayname: auto-modbus_read_holding_registers
+        estimate_duration_express: ''
+        estimate_duration_fixed: 60.0
         feedback: {}
         goal: {}
         goal_default:
@@ -571,6 +640,7 @@ robotic_arm.elite:
           start_addr: null
           unit_id: null
         handles: {}
+        lock_resource: []
         placeholder_keys: {}
         result: {}
         schema:
@@ -597,11 +667,15 @@ robotic_arm.elite:
           type: object
         type: UniLabJsonCommand
       auto-modbus_task:
+        displayname: auto-modbus_task
+        estimate_duration_express: ''
+        estimate_duration_fixed: 60.0
         feedback: {}
         goal: {}
         goal_default:
           job_id: null
         handles: {}
+        lock_resource: []
         placeholder_keys: {}
         result: {}
         schema:
@@ -622,6 +696,9 @@ robotic_arm.elite:
           type: object
         type: UniLabJsonCommand
       auto-modbus_write_single_register:
+        displayname: auto-modbus_write_single_register
+        estimate_duration_express: ''
+        estimate_duration_fixed: 60.0
         feedback: {}
         goal: {}
         goal_default:
@@ -629,6 +706,7 @@ robotic_arm.elite:
           unit_id: null
           value: null
         handles: {}
+        lock_resource: []
         placeholder_keys: {}
         result: {}
         schema:
@@ -655,11 +733,15 @@ robotic_arm.elite:
           type: object
         type: UniLabJsonCommand
       auto-parse_success_response:
+        displayname: auto-parse_success_response
+        estimate_duration_express: ''
+        estimate_duration_fixed: 60.0
         feedback: {}
         goal: {}
         goal_default:
           response: null
         handles: {}
+        lock_resource: []
         placeholder_keys: {}
         result: {}
         schema:
@@ -680,11 +762,15 @@ robotic_arm.elite:
           type: object
         type: UniLabJsonCommand
       auto-send_command:
+        displayname: auto-send_command
+        estimate_duration_express: ''
+        estimate_duration_fixed: 60.0
         feedback: {}
         goal: {}
         goal_default:
           command: null
         handles: {}
+        lock_resource: []
         placeholder_keys: {}
         result: {}
         schema:
@@ -705,6 +791,9 @@ robotic_arm.elite:
           type: object
         type: UniLabJsonCommand
       modbus_task_cmd:
+        displayname: modbus_task_cmd
+        estimate_duration_express: ''
+        estimate_duration_fixed: 60.0
         feedback:
           status: status
         goal:
@@ -712,6 +801,7 @@ robotic_arm.elite:
         goal_default:
           command: ''
         handles: {}
+        lock_resource: []
         placeholder_keys: {}
         result:
           return_info: return_info
@@ -754,8 +844,10 @@ robotic_arm.elite:
     type: python
   config_info: []
   description: Elite robot arm
+  displayname: robotic_arm.elite
   handles: []
   icon: ''
+  init_param_enforce: {}
   init_param_schema:
     config:
       properties:
@@ -779,6 +871,7 @@ robotic_arm.elite:
       - actual_joint_positions
       - arm_pose
       type: object
+  metadata: {}
   model:
     mesh: elite_robot
     type: device

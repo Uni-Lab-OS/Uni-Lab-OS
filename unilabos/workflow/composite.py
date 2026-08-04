@@ -147,7 +147,17 @@ class PublishedWorkflowCatalogPublisher:
 
         with self._store.catalog_guard():
             templates = list(self._base_templates)
-            if self._sources and self._host_node_resource_template_uuid is not None:
+            group_is_published = any(
+                item.template.get("name") == "group"
+                and item.template.get("class")
+                == "unilabos.workflow.authoring:group"
+                for item in templates
+            )
+            if (
+                self._sources
+                and self._host_node_resource_template_uuid is not None
+                and not group_is_published
+            ):
                 templates.append(
                     _group_template(
                         self._host_node_resource_template_uuid,
@@ -2077,6 +2087,46 @@ def _validate_composite_graph_io(
             continue
         unilab["value_schema"] = _replace_slot_allowlist(value_schema, None)
         unilab["allowed_resource_template_uuids"] = None
+
+    # Expanded child nodes retain the child's private input parameter names in
+    # their frozen metadata.  At the parent boundary those bindings are owned by
+    # the Published Workflow invocation (and its target_mappings), not by the
+    # parent Workflow input contract.  Ignore only descendant bindings while
+    # preserving bindings declared on the invocation itself.
+    raw_nodes = relaxed.get("nodes")
+    if isinstance(raw_nodes, list) and composite_template_uuids:
+        parent_by_uuid = {
+            str(node.get("uuid")): node.get("parent_uuid")
+            for node in raw_nodes
+            if isinstance(node, Mapping) and isinstance(node.get("uuid"), str)
+        }
+        composite_node_uuids = {
+            str(node["uuid"])
+            for node in raw_nodes
+            if isinstance(node, Mapping)
+            and isinstance(node.get("uuid"), str)
+            and node.get("workflow_node_template_uuid") in composite_template_uuids
+        }
+        for node in raw_nodes:
+            if not isinstance(node, dict) or not isinstance(node.get("uuid"), str):
+                continue
+            parent_uuid = parent_by_uuid.get(str(node["uuid"]))
+            visited: set[str] = set()
+            is_composite_descendant = False
+            while isinstance(parent_uuid, str) and parent_uuid not in visited:
+                if parent_uuid in composite_node_uuids:
+                    is_composite_descendant = True
+                    break
+                visited.add(parent_uuid)
+                parent_uuid = parent_by_uuid.get(parent_uuid)
+            if not is_composite_descendant:
+                continue
+            meta_data = node.get("meta_data")
+            unilab = (
+                meta_data.get("unilab") if isinstance(meta_data, dict) else None
+            )
+            if isinstance(unilab, dict):
+                unilab["input_bindings"] = {}
     return validate_workflow_graph_io(relaxed)
 
 
@@ -2172,8 +2222,13 @@ def project_published_workflow_contract(
             graph,
             host_resource_template_uuid=host_uuid,
         )
-    except (WorkflowIOValidationError, WorkflowSchemaError, TypeError, ValueError):
-        raise CompositeCatalogMismatch("/published_workflow/io_contract") from None
+    except (
+        WorkflowIOValidationError,
+        WorkflowSchemaError,
+        TypeError,
+        ValueError,
+    ) as error:
+        raise CompositeCatalogMismatch("/published_workflow/io_contract") from error
 
     input_contract = workflow_io.input_contract.to_dict()
     output_contract = workflow_io.output_contract.to_dict()

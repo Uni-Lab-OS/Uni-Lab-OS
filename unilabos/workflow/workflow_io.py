@@ -273,7 +273,8 @@ def _validate_input_bindings(
                 handle_value_schema(handle),
             ):
                 raise WorkflowIOValidationError(
-                    "input_binding 与 Workflow 参数类型不兼容"
+                    "input_binding 与 Workflow 参数类型不兼容: "
+                    f"parameter={parameter_name!r}, handle={handle_uuid!r}"
                 )
             bindings[handle_uuid] = MappingProxyType({"parameter": parameter_name})
         result[node_uuid] = MappingProxyType(bindings)

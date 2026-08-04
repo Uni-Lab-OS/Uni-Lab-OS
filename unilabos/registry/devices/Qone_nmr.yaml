@@ -4,10 +4,14 @@ Qone_nmr:
   class:
     action_value_mappings:
       abort:
+        displayname: abort
+        estimate_duration_express: ''
+        estimate_duration_fixed: 60.0
         feedback: {}
         goal: {}
         goal_default: {}
         handles: {}
+        lock_resource: []
         result: {}
         schema:
           description: ''
@@ -33,6 +37,9 @@ Qone_nmr:
           type: object
         type: EmptyIn
       auto-monitor_folder_for_new_content:
+        displayname: auto-monitor_folder_for_new_content
+        estimate_duration_express: ''
+        estimate_duration_fixed: 60.0
         feedback: {}
         goal: {}
         goal_default:
@@ -41,6 +48,7 @@ Qone_nmr:
           monitor_dir: null
           stability_checks: 3
         handles: {}
+        lock_resource: []
         placeholder_keys: {}
         result: {}
         schema:
@@ -73,6 +81,9 @@ Qone_nmr:
           type: object
         type: UniLabJsonCommand
       auto-strings_to_txt:
+        displayname: auto-strings_to_txt
+        estimate_duration_express: ''
+        estimate_duration_fixed: 60.0
         feedback: {}
         goal: {}
         goal_default:
@@ -80,6 +91,7 @@ Qone_nmr:
           string_list: null
           txt_encoding: utf-8
         handles: {}
+        lock_resource: []
         placeholder_keys: {}
         result: {}
         schema:
@@ -108,10 +120,14 @@ Qone_nmr:
           type: object
         type: UniLabJsonCommand
       get_status:
+        displayname: get_status
+        estimate_duration_express: ''
+        estimate_duration_fixed: 60.0
         feedback: {}
         goal: {}
         goal_default: {}
         handles: {}
+        lock_resource: []
         result: {}
         schema:
           description: ''
@@ -137,12 +153,16 @@ Qone_nmr:
           type: object
         type: EmptyIn
       start:
+        displayname: start
+        estimate_duration_express: ''
+        estimate_duration_fixed: 60.0
         feedback: {}
         goal:
           string: string
         goal_default:
           string: ''
         handles: {}
+        lock_resource: []
         placeholder_keys: {}
         result:
           return_info: return_info
@@ -188,8 +208,10 @@ Qone_nmr:
     type: python
   config_info: []
   description: Oxford NMR设备驱动，支持CSV字符串到TXT文件的批量转换功能，并监测对应.nmr文件的大小变化以确认结果生成完成
+  displayname: Qone_nmr
   handles: []
   icon: ''
+  init_param_enforce: {}
   init_param_schema:
     config:
       properties: {}
@@ -202,4 +224,5 @@ Qone_nmr:
       required:
       - status
       type: object
+  metadata: {}
   version: 1.0.0

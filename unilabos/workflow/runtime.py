@@ -5,6 +5,7 @@ from __future__ import annotations
 import logging
 import sqlite3
 import threading
+from copy import deepcopy
 from collections.abc import Callable, Iterable, Mapping
 from datetime import datetime, timezone
 from typing import Any, Dict, Optional, Protocol
@@ -284,6 +285,7 @@ class WorkflowRuntimeCoordinator:
         job_uuid: str,
         status: str,
         *,
+        param: Optional[Dict[str, Any]] = None,
         feedback_data: Optional[Dict[str, Any]] = None,
         return_info: Optional[Dict[str, Any]] = None,
         error_info: Optional[list[Any]] = None,
@@ -315,6 +317,7 @@ class WorkflowRuntimeCoordinator:
                 assignments.append("finished_at = ?")
                 values.append(now)
             for column, value, expected in (
+                ("param", param, dict),
                 ("feedback_data", feedback_data, dict),
                 ("return_info", return_info, dict),
                 ("error_info", error_info, list),
@@ -1116,6 +1119,9 @@ class WorkflowRuntimeCoordinator:
             self._append_invalidation(connection, task_uuid=task_uuid, now=now)
             return self._project_task(self._task_row(connection, task_uuid))
 
+    def _execution_task(self, task_uuid: str) -> Dict[str, Any]:
+        return self._store.get_task(task_uuid)
+
     def _execution_jobs(self, task_uuid: str) -> list[Dict[str, Any]]:
         return self._store.list_jobs(task_uuid)
 
@@ -1414,7 +1420,11 @@ class WorkflowRuntimeWorker:
                     incoming.get(job["workflow_node_uuid"], []),
                     jobs_by_node,
                 )
-                self._coordinator.transition_job(job["uuid"], "dispatched")
+                self._coordinator.transition_job(
+                    job["uuid"],
+                    "dispatched",
+                    param=payload["param"],
+                )
                 self._coordinator.transition_job(job["uuid"], "running")
                 _LOGGER.info(
                     "Workflow Job dispatch task_uuid=%s job_uuid=%s "
@@ -1612,6 +1622,12 @@ class WorkflowRuntimeWorker:
                 if isinstance(return_value, dict)
                 else {"value": return_value}
             )
+            task = self._coordinator._execution_task(task_uuid)
+            result = self._materialize_implicit_passthrough(
+                task=task,
+                job=job,
+                result=result,
+            )
             self._coordinator.transition_job(
                 job_uuid,
                 "succeeded",
@@ -1634,6 +1650,65 @@ class WorkflowRuntimeWorker:
             job_uuid,
         )
         return True
+
+    @staticmethod
+    def _materialize_implicit_passthrough(
+        *,
+        task: Mapping[str, Any],
+        job: Mapping[str, Any],
+        result: Mapping[str, Any],
+    ) -> dict[str, Any]:
+        """把 typed Action 的 implicit ResourceSlot 输出固化进 durable result。"""
+
+        materialized = deepcopy(dict(result))
+        snapshot = task.get("workflow_snapshot")
+        if not isinstance(snapshot, Mapping):
+            return materialized
+        nodes = snapshot.get("nodes")
+        handles = snapshot.get("handle_templates")
+        if not isinstance(nodes, list) or not isinstance(handles, list):
+            return materialized
+        node = next(
+            (
+                item
+                for item in nodes
+                if isinstance(item, Mapping)
+                and item.get("uuid") == job.get("workflow_node_uuid")
+            ),
+            None,
+        )
+        if not isinstance(node, Mapping):
+            return materialized
+        template_uuid = node.get("workflow_node_template_uuid")
+        action_input = job.get("param")
+        if not isinstance(template_uuid, str) or not isinstance(
+            action_input,
+            Mapping,
+        ):
+            return materialized
+        for handle in handles:
+            if (
+                not isinstance(handle, Mapping)
+                or handle.get("workflow_node_template_uuid") != template_uuid
+                or handle.get("io_type") != "source"
+            ):
+                continue
+            meta_data = handle.get("meta_data")
+            unilab = (
+                meta_data.get("unilab")
+                if isinstance(meta_data, Mapping)
+                else None
+            )
+            if not isinstance(unilab, Mapping) or unilab.get(
+                "implicit_passthrough"
+            ) is not True:
+                continue
+            name = str(
+                handle.get("data_key") or handle.get("handle_key") or ""
+            ).strip()
+            if name and name in action_input:
+                materialized[name] = deepcopy(action_input[name])
+        return materialized
 
     def _fail_task(
         self,

@@ -356,7 +356,9 @@ def _validate_resource_slot_template_compatibility(
 ) -> None:
     """用 producer guarantee 证明 ResourceSlot 可以进入受限 target。"""
 
-    for edge in edges:
+    edge_list = tuple(edges)
+
+    for edge in edge_list:
         source_handle = handles[edge.source_handle_uuid]
         target_handle = handles[edge.target_handle_uuid]
         if (
@@ -368,28 +370,103 @@ def _validate_resource_slot_template_compatibility(
         if target_templates is None:
             continue
 
-        source_node = nodes[edge.source_node_uuid]
-        if _node_kind(source_node, templates) == "material_source":
-            template_uuid = effective_params[source_node.uuid].get(
-                "resource_template_uuid"
-            )
-            source_templates = (
-                frozenset({template_uuid})
-                if isinstance(template_uuid, str)
-                else frozenset()
-            )
-            if not source_templates.issubset(target_templates):
+        source_templates = _resource_slot_producer_guarantee(
+            source_node_uuid=edge.source_node_uuid,
+            source_handle_uuid=edge.source_handle_uuid,
+            nodes=nodes,
+            edges=edge_list,
+            templates=templates,
+            handles=handles,
+            effective_params=effective_params,
+            seen=frozenset(),
+        )
+        if source_templates is None or not source_templates.issubset(
+            target_templates
+        ):
+            source_node = nodes[edge.source_node_uuid]
+            if _node_kind(source_node, templates) == "material_source":
                 raise MaterialSourceGraphError(
                     "material_source_conflict",
                     "MaterialSource 物料模板不被下游 ResourceSlot 接受",
                 )
-            continue
-
-        source_templates = _resource_slot_template_allowlist(source_handle)
-        if source_templates is None or not source_templates.issubset(target_templates):
             raise GraphValidationError(
                 "ResourceSlot producer 不能证明满足下游物料模板约束"
             )
+
+
+def _resource_slot_producer_guarantee(
+    *,
+    source_node_uuid: str,
+    source_handle_uuid: str,
+    nodes: Mapping[str, WorkflowNodeWrite],
+    edges: tuple[WorkflowEdgeWrite, ...],
+    templates: Mapping[str, dict[str, Any]],
+    handles: Mapping[str, dict[str, Any]],
+    effective_params: Mapping[str, dict[str, Any]],
+    seen: frozenset[tuple[str, str]],
+) -> frozenset[str] | None:
+    """沿 ResourceSlot implicit pass-through 回溯实际 producer guarantee。"""
+
+    identity = (source_node_uuid, source_handle_uuid)
+    if identity in seen:
+        return None
+    source_node = nodes[source_node_uuid]
+    if _node_kind(source_node, templates) == "material_source":
+        template_uuid = effective_params[source_node.uuid].get(
+            "resource_template_uuid"
+        )
+        return (
+            frozenset({template_uuid})
+            if isinstance(template_uuid, str)
+            else frozenset()
+        )
+
+    source_handle = handles[source_handle_uuid]
+    unilab = _handle_unilab_metadata(source_handle)
+    if unilab.get("implicit_passthrough") is True:
+        business_name = str(
+            source_handle.get("data_key")
+            or source_handle.get("handle_key")
+            or ""
+        )
+        template_uuid = source_handle.get("workflow_node_template_uuid")
+        target_handles = [
+            handle
+            for handle in handles.values()
+            if handle.get("workflow_node_template_uuid") == template_uuid
+            and handle.get("io_type") == "target"
+            and str(handle.get("data_key") or handle.get("handle_key") or "")
+            == business_name
+            and handle.get("type") == "ResourceSlot"
+        ]
+        if len(target_handles) == 1:
+            incoming = [
+                edge
+                for edge in edges
+                if edge.target_node_uuid == source_node_uuid
+                and edge.target_handle_uuid == target_handles[0].get("uuid")
+            ]
+            if len(incoming) == 1:
+                upstream = incoming[0]
+                guarantee = _resource_slot_producer_guarantee(
+                    source_node_uuid=upstream.source_node_uuid,
+                    source_handle_uuid=upstream.source_handle_uuid,
+                    nodes=nodes,
+                    edges=edges,
+                    templates=templates,
+                    handles=handles,
+                    effective_params=effective_params,
+                    seen=seen | {identity},
+                )
+                if guarantee is not None:
+                    return guarantee
+    return _resource_slot_template_allowlist(source_handle)
+
+
+def _handle_unilab_metadata(handle: Mapping[str, Any]) -> Mapping[str, Any]:
+    meta_data = handle.get("meta_data")
+    unilab = meta_data.get("unilab") if isinstance(meta_data, Mapping) else None
+    return unilab if isinstance(unilab, Mapping) else {}
 
 
 def _resource_slot_template_allowlist(
