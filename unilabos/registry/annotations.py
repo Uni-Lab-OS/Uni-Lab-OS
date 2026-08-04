@@ -17,3 +17,14 @@ class AllowedResourceTemplates:
 
     def __init__(self, *resource_templates: object) -> None:
         object.__setattr__(self, "resource_templates", tuple(resource_templates))
+
+
+@dataclass(frozen=True, slots=True)
+class MaterialLock:
+    """显式声明动作输入物料占位符（ResourceSlot）不取得物料锁。"""
+
+    free: bool
+
+    def __post_init__(self) -> None:
+        if self.free is not True:
+            raise ValueError("MaterialLock 只接受显式 free=True")

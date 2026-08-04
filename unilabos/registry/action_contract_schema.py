@@ -70,6 +70,7 @@ class ParsedActionContract:
         tuple[str, tuple[ResourceTemplateSymbol, ...]],
         ...,
     ]
+    input_material_lock_free: tuple[str, ...]
     output_resource_templates: tuple[
         tuple[str, tuple[ResourceTemplateSymbol, ...]],
         ...,
@@ -91,6 +92,7 @@ class ParsedActionContract:
             tuple[str, tuple[ResourceTemplateSymbol, ...]],
             ...,
         ],
+        input_material_lock_free: tuple[str, ...],
         *,
         token: object,
     ) -> Self:
@@ -108,6 +110,11 @@ class ParsedActionContract:
             contract,
             "output_resource_templates",
             output_resource_templates,
+        )
+        object.__setattr__(
+            contract,
+            "input_material_lock_free",
+            input_material_lock_free,
         )
         return contract
 
@@ -139,7 +146,13 @@ class ParsedActionContract:
         required_inputs: list[str] = []
         for parameter in inputs:
             name = parameter["name"]
-            field = _action_value_schema(parameter["schema"])
+            material_lock = None
+            if _has_resource_slot(parameter["schema"]):
+                material_lock = name not in self.input_material_lock_free
+            field = _action_value_schema(
+                parameter["schema"],
+                material_lock=material_lock,
+            )
             if "default" in parameter:
                 field["default"] = parameter["default"]
             for key in ("title", "description"):
@@ -178,7 +191,7 @@ class ParsedActionContract:
             },
             "required": ["goal"],
             "x-unilabos-action-contract": {
-                "version": 1,
+                "version": 2,
                 "input_order": [parameter["name"] for parameter in inputs],
                 "output_order": [output["name"] for output in outputs],
                 "resource_template_symbols": {
@@ -189,13 +202,82 @@ class ParsedActionContract:
         }
 
 
-def _action_value_schema(value: Mapping[str, Any]) -> dict[str, Any]:
+def _action_value_schema(
+    value: Mapping[str, Any],
+    *,
+    material_lock: bool | None = None,
+) -> dict[str, Any]:
     """把严格工作流（Workflow）value schema 渲染为 JSON Schema 展示形状。"""
 
+    if value.get("$slot") == "ResourceSlot":
+        rendered = _material_reference_schema()
+        if material_lock is not None:
+            rendered["x-unilabos-material-lock"] = material_lock
+        return rendered
+
+    nullable_members = value.get("anyOf")
+    if isinstance(nullable_members, list) and len(nullable_members) == 2:
+        non_null = next(
+            (
+                item
+                for item in nullable_members
+                if isinstance(item, Mapping) and item.get("type") != "null"
+            ),
+            None,
+        )
+        has_null = any(
+            isinstance(item, Mapping) and item.get("type") == "null"
+            for item in nullable_members
+        )
+        if non_null is not None and has_null:
+            rendered = _action_value_schema(
+                non_null,
+                material_lock=material_lock,
+            )
+            kind = rendered.get("type")
+            if isinstance(kind, str):
+                rendered["type"] = [kind, "null"]
+                return rendered
+
     rendered = {key: _copy_json(item) for key, item in value.items()}
+    if rendered.get("type") == "array" and isinstance(value.get("items"), Mapping):
+        rendered["items"] = _action_value_schema(
+            value["items"],
+            material_lock=material_lock,
+        )
     if rendered.get("type") == "object":
         rendered["additionalProperties"] = True
     return rendered
+
+
+def _material_reference_schema() -> dict[str, Any]:
+    return {
+        "type": "object",
+        "properties": {
+            "uuid": {
+                "type": "string",
+                "format": "uuid",
+            }
+        },
+        "required": ["uuid"],
+        "additionalProperties": False,
+    }
+
+
+def _has_resource_slot(value: Mapping[str, Any]) -> bool:
+    if value.get("$slot") == "ResourceSlot":
+        return True
+    nullable_members = value.get("anyOf")
+    if isinstance(nullable_members, list):
+        return any(
+            isinstance(item, Mapping) and _has_resource_slot(item)
+            for item in nullable_members
+        )
+    return (
+        value.get("type") == "array"
+        and isinstance(value.get("items"), Mapping)
+        and _has_resource_slot(value["items"])
+    )
 
 
 def _copy_json(value: Any) -> Any:
@@ -291,7 +373,7 @@ def _validate_legacy_handles(
         )
     for name, value_schema in goal["properties"].items():
         if (
-            _base_value_schema(value_schema).get("$slot") == "ResourceSlot"
+            _is_material_reference_schema(_base_value_schema(value_schema))
             and ("source", name) not in expected
         ):
             expected[("source", name)] = (
@@ -383,9 +465,28 @@ def _base_value_schema(schema: Mapping[str, Any]) -> Mapping[str, Any]:
 
 def _legacy_value_type(schema: Mapping[str, Any]) -> str:
     base = _base_value_schema(schema)
-    if base.get("$slot") == "ResourceSlot":
+    if _is_material_reference_schema(base):
         return "ResourceSlot"
     return str(base.get("type") or "object")
+
+
+def _is_material_reference_schema(schema: Mapping[str, Any]) -> bool:
+    if schema.get("$slot") == "ResourceSlot":
+        return True
+    kind = schema.get("type")
+    if isinstance(kind, list) and "object" not in kind:
+        return False
+    if kind != "object" and not isinstance(kind, list):
+        return False
+    properties = schema.get("properties")
+    if not isinstance(properties, Mapping):
+        return False
+    uuid_schema = properties.get("uuid")
+    return (
+        isinstance(uuid_schema, Mapping)
+        and uuid_schema.get("type") == "string"
+        and uuid_schema.get("format") == "uuid"
+    )
 
 
 def _compatibility_fail(code: str, path: str) -> Never:
@@ -541,6 +642,7 @@ def _parse_parameters(
 ) -> tuple[
     WorkflowInputContract,
     tuple[tuple[str, tuple[ResourceTemplateSymbol, ...]], ...],
+    tuple[str, ...],
 ]:
     arguments = getattr(action, "args", None)
     if not isinstance(arguments, ast.arguments):
@@ -593,6 +695,7 @@ def _parse_parameters(
 
     descriptors: list[dict[str, Any]] = []
     resource_templates: list[tuple[str, tuple[ResourceTemplateSymbol, ...]]] = []
+    material_lock_free: list[str] = []
     seen_names: set[str] = set()
     first_positional = all_positional[0] if all_positional else None
     for argument, default in scheduled:
@@ -619,6 +722,7 @@ def _parse_parameters(
                 imports=imports,
                 doc_title=titles.get(name),
                 doc_description=descriptions.get(name),
+                allow_material_lock=True,
             )
         except AnnotationSchemaError as error:
             _fail(
@@ -635,6 +739,8 @@ def _parse_parameters(
             _fail(f"/parameters/{parameter_index}/annotation")
         descriptors.append(parsed.to_dict())
         resource_templates.append((name, parsed.resource_templates))
+        if parsed.material_lock_free:
+            material_lock_free.append(name)
 
     try:
         contract = parse_input_contract({"version": 1, "parameters": descriptors})
@@ -644,7 +750,7 @@ def _parse_parameters(
             code="invalid_schema",
             message=error.message,
         )
-    return contract, tuple(resource_templates)
+    return contract, tuple(resource_templates), tuple(material_lock_free)
 
 
 def _parse_results(
@@ -760,7 +866,7 @@ def parse_action_contract(
         _fail("/module")
 
     is_method = _action_context(module, action)
-    input_contract, input_templates = _parse_parameters(
+    input_contract, input_templates, input_material_lock_free = _parse_parameters(
         action,
         is_method=is_method,
         imports=scope.annotation_bindings,
@@ -775,6 +881,7 @@ def parse_action_contract(
         output_contract,
         input_templates,
         output_templates,
+        input_material_lock_free,
         token=_PARSED_ACTION_CONTRACT_TOKEN,
     )
 
