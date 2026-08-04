@@ -327,3 +327,92 @@ def test_local_product_composition_forwards_the_exact_configured_roots(
     assert captured["inventory_store"] is inventory_service.store
     assert captured["scheduler"] is edge_scheduler
     assert captured["editable_package_roots"] == configured_roots
+
+
+def test_local_composition_failure_never_falls_back_to_uncompiled_runtime(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """本地模板/来源组合失败时不得静默发布无模板编译器的第二套服务。
+
+    参数：``tmp_path`` 提供真实产品工作目录；``monkeypatch`` 注入本地组合安全
+    失败并记录回退与 API 挂载。返回：无；失败必须使工作流合同关闭且不调用回退。
+    """
+
+    monkeypatch.setattr(BasicConfig, "working_dir", str(tmp_path / "runtime"))
+    monkeypatch.setattr(BasicConfig, "workflow_editable_package_roots", ())
+    inventory_service = SimpleNamespace(store=object())
+    edge_scheduler = object()
+    fallback_called = False
+    api_installed = False
+    scheduler_integration = importlib.import_module(
+        "unilabos.app.scheduler.integration"
+    )
+
+    def current_inventory_service() -> object:
+        """返回触发本地模板组合分支的库存权威（Inventory Authority）替身。"""
+
+        return inventory_service
+
+    def current_edge_scheduler() -> object:
+        """返回触发本地模板组合分支的调度器（Scheduler）替身。"""
+
+        return edge_scheduler
+
+    def fail_local_composition(*args: object, **kwargs: object) -> tuple[object, object]:
+        """注入本地模板投影或来源安全校验失败。
+
+        参数：``args`` 与 ``kwargs`` 捕获产品组合依赖。返回：永不返回；抛出
+        ``RuntimeError`` 模拟不得降级的启动失败。
+        """
+
+        raise RuntimeError("注入的本地工作流安全组合失败")
+
+    def record_fallback(*args: object, **kwargs: object) -> object:
+        """记录任何不允许的普通工作流运行时回退。
+
+        参数：``args`` 与 ``kwargs`` 捕获回退依赖。返回：服务替身，便于旧实现
+        继续到 API 挂载后由断言同时识别两项错误行为。
+        """
+
+        nonlocal fallback_called
+        fallback_called = True
+        return object()
+
+    def record_api_install(*args: object, **kwargs: object) -> None:
+        """记录失败后不应发生的工作流 HTTP 合同挂载。
+
+        参数：``args`` 与 ``kwargs`` 捕获应用、服务与模板投影。返回：无。
+        """
+
+        nonlocal api_installed
+        api_installed = True
+
+    monkeypatch.setattr(
+        scheduler_integration,
+        "get_inventory_service",
+        current_inventory_service,
+    )
+    monkeypatch.setattr(
+        scheduler_integration,
+        "get_edge_scheduler",
+        current_edge_scheduler,
+    )
+    monkeypatch.setattr(
+        composition,
+        "compose_local_workflow_template_runtime",
+        fail_local_composition,
+    )
+    monkeypatch.setattr(
+        composition,
+        "compose_workflow_runtime",
+        record_fallback,
+    )
+    workflow_api = importlib.import_module("unilabos.app.workflow_api")
+    monkeypatch.setattr(workflow_api, "install_workflow_api", record_api_install)
+
+    _reload_server().setup_server()
+
+    assert not fallback_called
+    assert not api_installed
+    assert composition.get_workflow_service() is None

@@ -103,6 +103,36 @@ class RecordingSourceChangeService:
         return True
 
 
+class PausingEnumerationService(RecordingSourceChangeService):
+    """在指定枚举调用中建立可控阻塞点的测试服务。"""
+
+    def __init__(self) -> None:
+        """建立暂停请求、已暂停和恢复三个同步事件。
+
+        参数：无。返回：无；默认正常枚举，测试显式请求后只暂停一次。
+        """
+
+        super().__init__()
+        self.pause_next_enumeration = threading.Event()
+        self.enumeration_paused = threading.Event()
+        self.resume_enumeration = threading.Event()
+        self._pause_consumed = False
+
+    def list_registered_sources(self) -> list[dict[str, str]]:
+        """按请求在返回活动来源前暂停一次工作线程。
+
+        参数：无。返回：父类提供的唯一来源注册；暂停期间等待测试放行，等待超时
+        抛出 ``TimeoutError`` 以避免测试永久挂起。
+        """
+
+        if self.pause_next_enumeration.is_set() and not self._pause_consumed:
+            self._pause_consumed = True
+            self.enumeration_paused.set()
+            if not self.resume_enumeration.wait(timeout=3):
+                raise TimeoutError("测试未放行源码枚举")
+        return super().list_registered_sources()
+
+
 class SourceOnlyCompiler:
     """把源码编译为不改变应用图的候选版本（Candidate Revision）。"""
 
@@ -388,6 +418,91 @@ def test_monitor_can_restart_after_an_unexpected_worker_exit() -> None:
         monitor.stop()
 
     assert service.attempts == [("file", 1)]
+
+
+def test_start_during_stop_waits_then_creates_a_new_worker_generation() -> None:
+    """停止正在 join 时并发启动必须等待并建立新的工作线程世代。
+
+    参数：无。返回：无；通过受控枚举阻塞证明 ``start`` 不会把仍存活但已收到
+    停止信号的旧线程误认为可复用运行线程。
+    """
+
+    service = PausingEnumerationService()
+    monitor = WorkflowSourceMonitor(
+        service,
+        interval_seconds=0.003,
+        settle_seconds=0.01,
+    )
+    monitor.start()
+    assert service.submitted.wait(timeout=1)
+    service.signature = ("file", 2)
+    service.submitted.clear()
+    service.pause_next_enumeration.set()
+    assert service.enumeration_paused.wait(timeout=1)
+    stop_returned = threading.Event()
+    restart_returned = threading.Event()
+
+    def stop_monitor() -> None:
+        """在线程中停止监视器并标记 join 已完成；参数无，返回无。"""
+
+        monitor.stop()
+        stop_returned.set()
+
+    def restart_monitor() -> None:
+        """在线程中请求新监视世代并标记启动调用返回；参数无，返回无。"""
+
+        monitor.start()
+        restart_returned.set()
+
+    stopping_thread = threading.Thread(target=stop_monitor)
+    stopping_thread.start()
+    _wait_for(lambda: monitor._stop_event.is_set())
+    restarting_thread = threading.Thread(target=restart_monitor)
+    restarting_thread.start()
+    try:
+        assert not restart_returned.wait(timeout=0.05)
+    finally:
+        service.resume_enumeration.set()
+    stopping_thread.join(timeout=1)
+    restarting_thread.join(timeout=1)
+    try:
+        assert stop_returned.is_set()
+        assert restart_returned.is_set()
+        assert service.submitted.wait(timeout=1)
+    finally:
+        monitor.stop()
+
+    assert service.attempts == [("file", 1), ("file", 2)]
+
+
+def test_fatal_worker_failure_is_observable_and_restart_clears_health() -> None:
+    """未分类致命异常必须形成稳定健康状态并可由显式重启恢复。
+
+    参数：无。返回：无；第一次枚举退出后公开 ``fatal`` 与稳定错误码，新启动
+    成功处理来源后公开 ``running``，停止后公开 ``stopped``。
+    """
+
+    service = RecordingSourceChangeService(fatal_enumeration_failures=1)
+    monitor = WorkflowSourceMonitor(
+        service,
+        interval_seconds=0.003,
+        settle_seconds=0.01,
+    )
+    monitor.start()
+    _wait_for(lambda: monitor.health().state == "fatal")
+    fatal_health = monitor.health()
+
+    monitor.start()
+    assert service.submitted.wait(timeout=1)
+    running_health = monitor.health()
+    monitor.stop()
+    stopped_health = monitor.health()
+
+    assert fatal_health.fatal_error_code == "unclassified_monitor_failure"
+    assert running_health.state == "running"
+    assert running_health.fatal_error_code is None
+    assert stopped_health.state == "stopped"
+    assert stopped_health.fatal_error_code is None
 
 
 def test_service_rejects_a_stale_observed_signature(tmp_path: Path) -> None:
