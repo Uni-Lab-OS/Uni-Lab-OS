@@ -19,7 +19,18 @@ from unilabos.workflow.source_file_access import (
     StableFileAccessError,
     assert_directory_identity,
     directory_identity,
+    is_reparse_point,
+    read_regular_path,
     read_stable_descriptor,
+)
+from unilabos.workflow.source_windows_publication import (
+    WindowsPublicationConflict,
+    WindowsPublicationError,
+    hold_windows_directory_chain,
+    replace_windows_file_with_backup,
+    restore_missing_windows_target,
+    verify_windows_backup_or_restore,
+    windows_directory_chain,
 )
 
 try:  # pragma: no cover - 导入分支由目标操作系统决定
@@ -275,7 +286,7 @@ def atomic_publish_source(
         location.sync()
     except SourcePublicationConflict:
         raise
-    except (OSError, SourcePublicationError, StableFileAccessError):
+    except (OSError, StableFileAccessError):
         raise SourcePublicationError("publication_failed") from None
     finally:
         if descriptor >= 0:
@@ -299,6 +310,16 @@ def _compare_and_replace(
     时无返回值。异常：缺少安全锁、身份变化或内容冲突统一抛出
     ``SourcePublicationConflict``。
     """
+
+    if _PLATFORM.startswith("win"):
+        _compare_and_replace_windows(
+            location=location,
+            target_name=target_name,
+            temporary_name=temporary_name,
+            expected_hash=expected_hash,
+            byte_limit=byte_limit,
+        )
+        return
 
     target_descriptor = -1
     temporary_descriptor = -1
@@ -369,9 +390,138 @@ def _compare_and_replace(
             byte_limit=byte_limit,
         ):
             raise SourcePublicationConflict("draft_hash_conflict")
+    except (SourcePublicationConflict, SourcePublicationError):
+        raise
+    except (OSError, StableFileAccessError):
+        raise SourcePublicationConflict("draft_hash_conflict") from None
+    finally:
+        if temporary_descriptor >= 0:
+            os.close(temporary_descriptor)
+        if target_descriptor >= 0:
+            os.close(target_descriptor)
+
+
+def _compare_and_replace_windows(
+    *,
+    location: _PublicationDirectory,
+    target_name: str,
+    temporary_name: str,
+    expected_hash: str | None,
+    byte_limit: int,
+) -> None:
+    """用 Windows 字节锁、目录 guard 和 ``ReplaceFileW`` 完成已有草稿 CAS。
+
+    参数：``location`` 必须是无 ``dir_fd`` 的固定绝对父目录；两个文件名标识规范
+    草稿与完整临时稿；``expected_hash`` 是原稿条件；``byte_limit`` 约束每次读取。
+    返回：成功时无返回值。异常：竞争映射为 ``SourcePublicationConflict``，无法
+    证明回滚的基础设施故障映射为 ``SourcePublicationError``。
+    """
+
+    if location.path is None or _msvcrt is None:
+        raise SourcePublicationConflict("draft_hash_conflict")
+    target_path = location.path / target_name
+    temporary_path = location.path / temporary_name
+    backup_path = location.path / f".{target_name}.{uuid4().hex}.cas"
+    target_descriptor = -1
+    temporary_descriptor = -1
+    try:
+        with hold_windows_directory_chain(windows_directory_chain(location.path)):
+            location.assert_current()
+            try:
+                target_descriptor = location.open_child(
+                    target_name,
+                    os.O_RDWR | getattr(os, "O_CLOEXEC", 0),
+                )
+            except FileNotFoundError:
+                if expected_hash is not None:
+                    raise SourcePublicationConflict("draft_hash_conflict") from None
+                try:
+                    location.link_child(temporary_name, target_name)
+                except FileExistsError:
+                    raise SourcePublicationConflict("draft_hash_conflict") from None
+                location.unlink_child(temporary_name)
+                return
+            if expected_hash is None:
+                raise SourcePublicationConflict("draft_hash_conflict")
+
+            with _exclusive_target_lock(target_descriptor) as lock_was_broken:
+                original_bytes = _stable_bytes(
+                    target_descriptor,
+                    byte_limit=byte_limit,
+                )
+                if (
+                    _sha256(original_bytes) != expected_hash
+                    or not _target_matches_descriptor(
+                        location,
+                        target_name,
+                        target_descriptor,
+                    )
+                ):
+                    raise SourcePublicationConflict("draft_hash_conflict")
+                temporary_descriptor = location.open_child(
+                    temporary_name,
+                    os.O_RDONLY | getattr(os, "O_CLOEXEC", 0),
+                )
+                replacement_hash = _sha256(
+                    _stable_bytes(temporary_descriptor, byte_limit=byte_limit)
+                )
+                if lock_was_broken() or not _target_matches_descriptor(
+                    location,
+                    target_name,
+                    target_descriptor,
+                ):
+                    raise SourcePublicationConflict("draft_hash_conflict")
+
+            # Windows CRT 句柄默认不共享 delete；原稿与替换稿都必须在原生替换前
+            # 解锁并关闭。替换瞬间的 backup 随后重新证明 CAS 原稿身份。
+            os.close(target_descriptor)
+            target_descriptor = -1
+            os.close(temporary_descriptor)
+            temporary_descriptor = -1
+            current_snapshot = read_regular_path(
+                target_path,
+                byte_limit=byte_limit,
+                missing_ok=False,
+            )
+            if (
+                current_snapshot is None
+                or _sha256(current_snapshot.content) != expected_hash
+            ):
+                raise SourcePublicationConflict("draft_hash_conflict")
+            location.assert_current()
+            replace_windows_file_with_backup(
+                target_path,
+                temporary_path,
+                backup_path,
+            )
+            verify_windows_backup_or_restore(
+                parent=location.path,
+                target=target_path,
+                backup=backup_path,
+                expected_hash=expected_hash,
+                replacement_hash=replacement_hash,
+                byte_limit=byte_limit,
+            )
+            published = read_regular_path(
+                target_path,
+                byte_limit=byte_limit,
+                missing_ok=False,
+            )
+            if published is None or _sha256(published.content) != replacement_hash:
+                raise SourcePublicationError("publication_failed")
+            location.assert_current()
     except SourcePublicationConflict:
         raise
-    except (OSError, SourcePublicationError, StableFileAccessError):
+    except WindowsPublicationConflict:
+        if not restore_missing_windows_target(
+            target=target_path,
+            backup=backup_path,
+        ):
+            raise SourcePublicationError("publication_failed") from None
+        raise SourcePublicationConflict("draft_hash_conflict") from None
+    except (WindowsPublicationError, StableFileAccessError):
+        raise SourcePublicationError("publication_failed") from None
+    except (OSError, TypeError, ValueError):
         raise SourcePublicationConflict("draft_hash_conflict") from None
     finally:
         if temporary_descriptor >= 0:
@@ -537,6 +687,7 @@ def _target_matches_descriptor(
     descriptor_metadata = os.fstat(descriptor)
     return (
         stat.S_ISREG(target_metadata.st_mode)
+        and not is_reparse_point(target_metadata)
         and stat.S_ISREG(descriptor_metadata.st_mode)
         and target_metadata.st_dev == descriptor_metadata.st_dev
         and target_metadata.st_ino == descriptor_metadata.st_ino

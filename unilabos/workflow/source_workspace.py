@@ -35,6 +35,7 @@ from unilabos.workflow.source_descriptor_access import (
 )
 from unilabos.workflow.source_file_access import (
     StableFileAccessError,
+    is_reparse_point,
     read_stable_descriptor,
 )
 from unilabos.workflow.source_path_access import (
@@ -577,7 +578,7 @@ def validate_declared_sources(
 
 
 def _contains_symlink(path: Path) -> bool:
-    """判断绝对路径链中是否含符号链接。
+    """判断绝对路径链中是否含符号链接或 Windows 重解析点。
 
     参数：``path`` 是待核验的显式授权目录。
     返回：任一祖先或目录本身是符号链接时为 ``True``。
@@ -587,7 +588,8 @@ def _contains_symlink(path: Path) -> bool:
     current = Path(absolute.anchor)
     for part in absolute.parts[1:]:
         current /= part
-        if current.is_symlink():
+        metadata = current.lstat()
+        if stat.S_ISLNK(metadata.st_mode) or is_reparse_point(metadata):
             return True
     return False
 

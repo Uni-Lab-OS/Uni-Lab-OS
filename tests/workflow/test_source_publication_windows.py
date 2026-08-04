@@ -273,11 +273,15 @@ def test_native_windows_blocks_parent_rename_during_publication(
     sys.platform != "win32",
     reason="真实 Windows junction 合同只在 Windows CI 运行",
 )
-def test_native_windows_rejects_junction_package_root(tmp_path: Path) -> None:
+def test_native_windows_rejects_junction_package_root(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
     """真实 Windows junction 不得成为可编辑包（Editable Package）授权根。
 
-    参数：``tmp_path`` 提供真实目录与 junction。返回：无；读取工作流源码
-    （Workflow Source）manifest 前必须以 ``invalid_package_root`` 失败关闭。
+    参数：``tmp_path`` 提供真实目录与 junction，``monkeypatch`` 临时切换到无
+    ``dir_fd`` 路径。返回：无；读取工作流源码（Workflow Source）manifest 前
+    必须以 ``invalid_package_root`` 失败关闭。
     """
 
     real_root = tmp_path / "real"
@@ -294,7 +298,7 @@ def test_native_windows_rejects_junction_package_root(tmp_path: Path) -> None:
         check=False,
     )
     assert created.returncode == 0, created.stderr
-    source_workspace._DIRECTORY_FD_PATHS_SUPPORTED = False
+    monkeypatch.setattr(source_workspace, "_DIRECTORY_FD_PATHS_SUPPORTED", False)
 
     with pytest.raises(SourceWorkspaceError) as caught:
         source_workspace.read_package_root(junction)

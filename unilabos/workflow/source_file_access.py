@@ -83,7 +83,7 @@ def _read_bounded_descriptor_once(descriptor: int, *, byte_limit: int) -> bytes:
 
 
 def directory_identity(path: Path) -> tuple[int, int]:
-    """读取无符号链接绝对目录的设备/索引节点身份。
+    """读取无链接或重解析点绝对目录的设备/索引节点身份。
 
     参数：``path`` 是待授权或复核的绝对目录。返回：设备号与索引节点元组。
     异常：路径非绝对、任一层为符号链接、目标非目录或读取失败时抛出
@@ -99,7 +99,7 @@ def directory_identity(path: Path) -> tuple[int, int]:
         raise
     except (OSError, TypeError, ValueError):
         raise StableFileAccessError("unstable_directory") from None
-    if not stat.S_ISDIR(metadata.st_mode):
+    if not stat.S_ISDIR(metadata.st_mode) or is_reparse_point(metadata):
         raise StableFileAccessError("unstable_directory")
     return metadata.st_dev, metadata.st_ino
 
@@ -143,7 +143,7 @@ def read_regular_path(
         raise StableFileAccessError("unstable_regular_file") from None
     except OSError:
         raise StableFileAccessError("unstable_regular_file") from None
-    if not stat.S_ISREG(path_metadata.st_mode):
+    if not stat.S_ISREG(path_metadata.st_mode) or is_reparse_point(path_metadata):
         raise StableFileAccessError("unstable_regular_file")
     descriptor = -1
     try:
@@ -187,7 +187,7 @@ def regular_path_signature(path: Path, *, missing_ok: bool) -> tuple[object, ...
         raise StableFileAccessError("unstable_regular_file") from None
     except OSError:
         raise StableFileAccessError("unstable_regular_file") from None
-    if not stat.S_ISREG(before.st_mode):
+    if not stat.S_ISREG(before.st_mode) or is_reparse_point(before):
         raise StableFileAccessError("unstable_regular_file")
     after = absolute.lstat()
     assert_directory_identity(absolute.parent, parent_identity)
@@ -254,7 +254,7 @@ def _physical_identity(metadata: os.stat_result) -> tuple[int, int, int]:
 
 
 def _contains_symlink(path: Path) -> bool:
-    """判断绝对路径链中是否包含符号链接。
+    """判断绝对路径链中是否包含符号链接或 Windows 重解析点。
 
     参数：``path`` 是待复核绝对路径。返回：任一祖先或自身为符号链接时为
     ``True``；不存在的中间路径视为不安全并由调用者后续 ``lstat`` 拒绝。
@@ -263,9 +263,20 @@ def _contains_symlink(path: Path) -> bool:
     current = Path(path.anchor)
     for part in path.parts[1:]:
         current /= part
-        if current.is_symlink():
+        metadata = current.lstat()
+        if stat.S_ISLNK(metadata.st_mode) or is_reparse_point(metadata):
             return True
     return False
+
+
+def is_reparse_point(metadata: os.stat_result) -> bool:
+    """判断元数据是否声明 Windows 重解析点（reparse point）。
+
+    参数：``metadata`` 是 ``stat``/``lstat`` 结果或等价测试投影。返回：
+    ``st_file_attributes`` 包含 ``0x400`` 时为 ``True``；其他平台稳定为 ``False``。
+    """
+
+    return bool(getattr(metadata, "st_file_attributes", 0) & 0x400)
 
 
 def _file_flags() -> int:
@@ -288,6 +299,7 @@ __all__ = [
     "assert_directory_identity",
     "directory_identity",
     "ensure_child_directory",
+    "is_reparse_point",
     "read_regular_path",
     "read_stable_descriptor",
     "regular_path_signature",

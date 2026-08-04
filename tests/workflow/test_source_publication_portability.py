@@ -3,6 +3,8 @@
 from __future__ import annotations
 
 import os
+from collections.abc import Iterator, Sequence
+from contextlib import contextmanager
 from pathlib import Path
 from typing import Any
 
@@ -173,8 +175,28 @@ def test_windows_without_dir_fd_can_discover_read_and_save_source(
     source_path = _write_package(selected_root)
     _seed_workflow(working_dir)
     original_open = os.open
+    original_replace = os.replace
     dir_fd_attempts: list[str] = []
     windows_lock = WindowsMsvcrt()
+
+    @contextmanager
+    def windows_directory_guard(_paths: Sequence[Path]) -> Iterator[None]:
+        """模拟已固定的 Windows 工作流草稿（Workflow Draft）目录链。
+
+        参数：``_paths`` 是待固定目录链，本测试只验证平台选择。返回：上下文无值。
+        """
+
+        yield
+
+    def windows_replace(target: Path, replacement: Path, backup: Path) -> None:
+        """在 Linux 上模拟保留旧稿 backup 的 ``ReplaceFileW``。
+
+        参数：三个路径依次是规范草稿、完整替换稿与旧稿备份。返回：无；使用测试
+        捕获的宿主原子替换完成等价文件布局。
+        """
+
+        original_replace(target, backup)
+        original_replace(replacement, target)
 
     def windows_open(
         path: str | bytes | os.PathLike[str] | os.PathLike[bytes],
@@ -212,6 +234,16 @@ def test_windows_without_dir_fd_can_discover_read_and_save_source(
         "_msvcrt",
         windows_lock,
         raising=False,
+    )
+    monkeypatch.setattr(
+        source_publication,
+        "hold_windows_directory_chain",
+        windows_directory_guard,
+    )
+    monkeypatch.setattr(
+        source_publication,
+        "replace_windows_file_with_backup",
+        windows_replace,
     )
     monkeypatch.setattr(source_publication, "fcntl", None, raising=False)
     monkeypatch.setattr(os, "open", windows_open)
