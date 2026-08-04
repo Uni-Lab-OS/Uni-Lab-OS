@@ -5,7 +5,6 @@ from __future__ import annotations
 import ast
 import keyword
 from collections.abc import Mapping
-from copy import deepcopy
 from dataclasses import dataclass
 from typing import Any
 
@@ -13,6 +12,13 @@ from unilabos.workflow.authoring_kernel import (
     AuthoringCatalogAction,
     AuthoringCatalogError,
     AuthoringCatalogSnapshot,
+)
+from unilabos.workflow.material_selector import (
+    MATERIAL_FLOW_ROLE_MEMBERS,
+    MATERIAL_FLOW_ROLE_VALUES,
+    MaterialSelectorError,
+    validate_material_source_node,
+    validate_material_source_selector,
 )
 from unilabos.workflow.models import validate_uuid
 
@@ -31,13 +37,6 @@ _SELECTOR_FIELDS = frozenset(
         "flow_role",
     }
 )
-_FLOW_ROLE_VALUES = {
-    "PRIMARY_SAMPLE": "primary_sample",
-    "ALIQUOT_SAMPLE": "aliquot_sample",
-    "REAGENT": "reagent",
-    "CONSUMABLE": "consumable",
-}
-_FLOW_ROLE_MEMBERS = {value: name for name, value in _FLOW_ROLE_VALUES.items()}
 
 
 class MaterialAuthoringError(ValueError):
@@ -202,6 +201,14 @@ def build_material_source_node(
         ),
         "flow_role": declaration.flow_role,
     }
+    try:
+        selector = validate_material_source_selector(selector)
+    except MaterialSelectorError as error:
+        raise MaterialAuthoringError(
+            error.code,
+            error.message,
+            declaration.source_node,
+        ) from error
     template = framework.template
     template_title = template.get("display_name") or template.get("name")
     node = {
@@ -248,7 +255,10 @@ def render_material_source_call(
     身份不可信时抛出 ``MaterialAuthoringError``。
     """
 
-    selector = _validated_selector(node.get("param"))
+    try:
+        selector = validate_material_source_node(node)
+    except MaterialSelectorError as error:
+        raise MaterialAuthoringError(error.code, error.message) from error
     try:
         source_symbol = catalog.require_resource_template_symbol(
             selector["resource_template_uuid"]
@@ -274,7 +284,7 @@ def render_material_source_call(
             "template_catalog_mismatch",
             "资源模板源码身份不能安全生成 Python import",
         )
-    role_member = _FLOW_ROLE_MEMBERS[selector["flow_role"]]
+    role_member = MATERIAL_FLOW_ROLE_MEMBERS[selector["flow_role"]]
     # ``arguments`` 固定字段顺序，确保同一图跨进程生成完全相同的源码。
     arguments = [
         f"resource_template={symbol}",
@@ -289,65 +299,6 @@ def render_material_source_call(
         resource_import=(module, symbol),
         call=f"material_source({', '.join(arguments)})",
     )
-
-
-def _validated_selector(raw_selector: Any) -> dict[str, Any]:
-    """验证图中物料来源选择器并返回分离副本。
-
-    参数说明：``raw_selector`` 是可疑候选节点参数。返回：字段和 UUID 均规范的
-    选择器副本；结构、模式、角色或库位组合非法时抛出
-    ``MaterialAuthoringError``。
-    """
-
-    if not isinstance(raw_selector, Mapping):
-        raise MaterialAuthoringError("candidate_invalid", "物料来源选择器必须是对象")
-    selector = deepcopy(dict(raw_selector))
-    expected_fields = {
-        "mode",
-        "resource_template_uuid",
-        "mount",
-        "material_uuid",
-        "site",
-        "slot_range",
-        "flow_role",
-    }
-    if set(selector) != expected_fields:
-        raise MaterialAuthoringError("candidate_invalid", "物料来源选择器字段不完整")
-    if selector["mode"] not in {"existing", "create_new"}:
-        raise MaterialAuthoringError("candidate_invalid", "物料来源选择器模式无效")
-    try:
-        selector["resource_template_uuid"] = validate_uuid(
-            selector["resource_template_uuid"]
-        )
-        mount = selector["mount"]
-        if not isinstance(mount, Mapping) or set(mount) != {"uuid"}:
-            raise ValueError
-        selector["mount"] = {"uuid": validate_uuid(mount["uuid"])}
-        selector["material_uuid"] = _validate_optional_uuid_value(
-            selector["material_uuid"]
-        )
-        selector["site"] = _validate_optional_uuid_value(selector["site"])
-        selector["slot_range"] = _validate_optional_uuid_list_value(
-            selector["slot_range"]
-        )
-    except (KeyError, TypeError, ValueError):
-        raise MaterialAuthoringError(
-            "candidate_invalid",
-            "物料来源选择器包含非法 UUID",
-        ) from None
-    if selector["site"] is not None and selector["slot_range"] is not None:
-        raise MaterialAuthoringError(
-            "candidate_invalid",
-            "物料来源选择器不能同时指定单一库位和库位范围",
-        )
-    if selector["mode"] == "create_new" and selector["material_uuid"] is not None:
-        raise MaterialAuthoringError(
-            "candidate_invalid",
-            "新建物料来源不能绑定现有物料",
-        )
-    if selector["flow_role"] not in _FLOW_ROLE_MEMBERS:
-        raise MaterialAuthoringError("candidate_invalid", "物料流角色不在规范闭集")
-    return selector
 
 
 def _literal_string(expression: ast.expr, *, label: str) -> str:
@@ -403,10 +354,10 @@ def _flow_role(
         not isinstance(expression, ast.Attribute)
         or not isinstance(expression.value, ast.Name)
         or imports.get(expression.value.id) != _MATERIAL_FLOW_ROLE
-        or expression.attr not in _FLOW_ROLE_VALUES
+        or expression.attr not in MATERIAL_FLOW_ROLE_VALUES
     ):
         _fail("物料流角色必须使用 MaterialFlowRole 规范成员", expression)
-    return _FLOW_ROLE_VALUES[expression.attr]
+    return MATERIAL_FLOW_ROLE_VALUES[expression.attr]
 
 
 def _optional_uuid(expression: ast.expr, *, label: str) -> str | None:

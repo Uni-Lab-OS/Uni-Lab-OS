@@ -9,6 +9,10 @@ from collections import defaultdict
 from typing import Any, Dict, Iterable, List, Mapping
 
 from unilabos.workflow.json_codec import encode_json, strict_json_equal
+from unilabos.workflow.material_selector import (
+    MaterialSelectorError,
+    validate_material_source_node,
+)
 from unilabos.workflow.models import WorkflowEdgeWrite, WorkflowNodeWrite
 from unilabos.workflow.workflow_io import (
     WorkflowIOValidationError,
@@ -21,6 +25,20 @@ _MAX_TIMEOUT_SECONDS = (2**63 - 1) // 1_000_000_000
 
 class GraphValidationError(ValueError):
     """提交的全图不满足冻结 Backend 语义。"""
+
+
+class CodedGraphValidationError(GraphValidationError):
+    """带稳定领域错误码的全图校验失败。"""
+
+    def __init__(self, code: str, message: str):
+        """保存机器码和中文诊断。
+
+        参数说明：``code`` 是服务可透传的机器码，``message`` 解释具体约束。
+        返回：无；构造全图校验异常。
+        """
+
+        super().__init__(message)
+        self.code = code
 
 
 class MissingTemplateError(GraphValidationError):
@@ -59,6 +77,19 @@ def validate_graph(
             raise MissingTemplateError(f"工作流节点模板 {template_uuid} 不存在")
         if node.parent_uuid is not None and node.parent_uuid not in node_by_uuid:
             raise GraphValidationError("父节点不在提交的完整图中")
+        if _node_kind(node, templates) == "material_source":
+            try:
+                validate_material_source_node(
+                    {
+                        "material_uuid": node.material_uuid,
+                        "param": effective_params[node.uuid],
+                    }
+                )
+            except MaterialSelectorError as error:
+                raise CodedGraphValidationError(
+                    error.code,
+                    error.message,
+                ) from error
     _validate_parent_cycles(nodes)
 
     validated_io = None

@@ -22,6 +22,7 @@ from typing import (
 from uuid import uuid4
 
 from unilabos.workflow.graph_validation import (
+    CodedGraphValidationError,
     GraphValidationError,
     MissingTemplateError,
     validate_graph,
@@ -777,6 +778,8 @@ class WorkflowStore:
             )
         except MissingTemplateError as exc:
             raise StoreNotFound(str(exc)) from exc
+        except CodedGraphValidationError as exc:
+            raise StoreAuthoringConflict(exc.code) from exc
         except GraphValidationError as exc:
             raise StoreConflict(str(exc)) from exc
         now = utc_now()
