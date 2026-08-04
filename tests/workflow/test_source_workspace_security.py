@@ -332,3 +332,71 @@ def test_service_rejects_package_root_replaced_during_registration(
 
     assert caught.value.code == "invalid_input"
     assert registrations == []
+
+
+def test_service_rejects_a_source_that_changes_during_same_descriptor_read(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """同一描述符读取期间变化的源码不得作为一致草稿返回。
+
+    参数：``tmp_path`` 隔离数据库和源码；``monkeypatch`` 在首次读取字节后用
+    同长度新内容改写规范文件。返回：无；读取关闭失败且创作记录、事件保持不变。
+    """
+
+    store = WorkflowStore(tmp_path / "workflow.db")
+    service = WorkflowService(store)
+    package_root = tmp_path / "package"
+    source_path = package_root / "workflows" / "demo.py"
+    source_path.parent.mkdir(parents=True)
+    source_path.write_text("value = 'old'\n", encoding="utf-8")
+    service.create_workflow(
+        name="撕裂读取合同",
+        tags=[],
+        description=None,
+        meta_data={},
+        workflow_uuid=WORKFLOW_UUID,
+    )
+    service.register_editable_source(
+        workflow_uuid=WORKFLOW_UUID,
+        package_id="stable_read_contract",
+        package_root=package_root,
+        relative_path="workflows/demo.py",
+    )
+    record_before = store.get_authoring_record(WORKFLOW_UUID)
+    original_read = os.read
+    target_identity = (source_path.stat().st_dev, source_path.stat().st_ino)
+    source_changed = False
+
+    def change_after_first_read(descriptor: int, length: int) -> bytes:
+        """返回首段旧字节后改写同一规范路径，制造真实撕裂读取窗口。
+
+        参数：``descriptor`` 和 ``length`` 与 ``os.read`` 一致。返回：宿主读取的
+        字节；目标文件只在首次非空读取后改写一次。
+        """
+
+        nonlocal source_changed
+        chunk = original_read(descriptor, length)
+        metadata = os.fstat(descriptor)
+        if (
+            not source_changed
+            and chunk
+            and (metadata.st_dev, metadata.st_ino) == target_identity
+        ):
+            source_path.write_text("value = 'new'\n", encoding="utf-8")
+            source_changed = True
+        return chunk
+
+    monkeypatch.setattr(source_workspace.os, "read", change_after_first_read)
+    try:
+        with pytest.raises(WorkflowError) as caught:
+            service.get_authoring(WORKFLOW_UUID)
+        record_after = store.get_authoring_record(WORKFLOW_UUID)
+        events_after = service.list_events(after_id=0)["items"]
+    finally:
+        service.close()
+
+    assert source_changed
+    assert caught.value.code == "invalid_input"
+    assert record_after == record_before
+    assert events_after == []
