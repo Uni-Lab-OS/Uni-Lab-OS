@@ -20,8 +20,12 @@ from uuid import uuid4
 
 from pydantic import ValidationError
 
+from unilabos.workflow.candidate_validation import (
+    CandidateBundleError,
+    validate_candidate_bundle,
+)
 from unilabos.workflow.graph_validation import GraphValidationError, validate_graph
-from unilabos.workflow.json_codec import encode_json, strict_json_equal
+from unilabos.workflow.json_codec import encode_json
 from unilabos.workflow.models import (
     CandidateChangeset,
     CandidateCompilation,
@@ -33,6 +37,7 @@ from unilabos.workflow.models import (
     normalize_json_object,
     validate_uuid,
 )
+from unilabos.workflow.source_coordinates import source_ranges_fit
 from unilabos.workflow.store import (
     StoreAuthoringConflict,
     StoreConflict,
@@ -214,31 +219,6 @@ def _sha256(data: bytes) -> str:
 
 def _canonical_json(value: Any) -> bytes:
     return encode_json(value, sort_keys=True)
-
-
-def _source_ranges_fit(
-    python_source: str,
-    ranges: Iterable[Dict[str, Any]],
-) -> bool:
-    """检查每个从 1 开始的范围端点是否落在原始源码内。"""
-
-    try:
-        line_byte_lengths = [
-            len(line.encode("utf-8")) for line in re.split(r"\r\n|\r|\n", python_source)
-        ]
-    except UnicodeEncodeError:
-        return False
-
-    def position_fits(line: int, column: int) -> bool:
-        return (
-            line <= len(line_byte_lengths) and column <= line_byte_lengths[line - 1] + 1
-        )
-
-    return all(
-        position_fits(item["start_line"], item["start_column"])
-        and position_fits(item["end_line"], item["end_column"])
-        for item in ranges
-    )
 
 
 def _mtime_rfc3339(timestamp: float) -> str:
@@ -1924,7 +1904,7 @@ class WorkflowService:
                 CandidateSourceMapEntry.model_validate(item).model_dump()
                 for item in compilation.source_map
             ]
-            if not _source_ranges_fit(
+            if not source_ranges_fit(
                 compilation.normalized_python_source,
                 source_map,
             ):
@@ -1932,9 +1912,11 @@ class WorkflowService:
             changeset = CandidateChangeset.model_validate(
                 compilation.changeset,
             ).model_dump()
-            self._validate_candidate_bundle_semantics(
+            validate_candidate_bundle(
                 graph=graph,
-                applied_graph=applied_graph,
+                base_graph=applied_graph,
+                workflow_uuid=graph["workflow"]["uuid"],
+                revision=workflow_revision,
                 source_map=source_map,
                 changeset=changeset,
             )
@@ -1946,6 +1928,7 @@ class WorkflowService:
                 raise ValueError
         except (
             GraphValidationError,
+            CandidateBundleError,
             KeyError,
             TypeError,
             ValidationError,
@@ -2010,163 +1993,12 @@ class WorkflowService:
                 for item in compilation.diagnostics
                 if item.get("source_range") is not None
             ]
-            if not _source_ranges_fit(python_source, source_ranges):
+            if not source_ranges_fit(python_source, source_ranges):
                 raise ValueError
         except (TypeError, ValidationError, ValueError):
             cls._set_candidate_invalid_diagnostic(compilation)
             return False
         return True
-
-    @staticmethod
-    def _semantic_node(node: Dict[str, Any]) -> Dict[str, Any]:
-        return WorkflowNodeWrite.model_validate(
-            {
-                field: node[field]
-                for field in WorkflowNodeWrite.model_fields
-                if field in node
-            }
-        ).model_dump()
-
-    @staticmethod
-    def _semantic_edge(edge: Dict[str, Any]) -> Dict[str, Any]:
-        return WorkflowEdgeWrite.model_validate(
-            {
-                field: edge[field]
-                for field in WorkflowEdgeWrite.model_fields
-                if field in edge
-            }
-        ).model_dump()
-
-    @classmethod
-    def _validate_candidate_bundle_semantics(
-        cls,
-        *,
-        graph: Dict[str, Any],
-        applied_graph: Dict[str, Any],
-        source_map: List[Dict[str, Any]],
-        changeset: Dict[str, Any],
-    ) -> None:
-        """证明编译器 bundle 精确描述了完整工作流图。"""
-
-        workflow = graph["workflow"]
-        applied_workflow = applied_graph["workflow"]
-        for field in _WORKFLOW_READ_FIELDS - {"meta_data"}:
-            if not strict_json_equal(
-                workflow.get(field),
-                applied_workflow.get(field),
-            ):
-                raise ValueError("Candidate changed an unsupported Workflow field")
-
-        workflow_meta = dict(workflow["meta_data"])
-        applied_meta = dict(applied_workflow["meta_data"])
-        reserved_changed = not strict_json_equal(
-            workflow_meta.pop("unilab", None),
-            applied_meta.pop("unilab", None),
-        )
-        if not strict_json_equal(workflow_meta, applied_meta):
-            raise ValueError("Candidate changed non-authoring Workflow metadata")
-
-        for field in ("node_templates", "handle_templates"):
-            candidate_entities = sorted(graph[field], key=lambda item: item["uuid"])
-            applied_entities = sorted(
-                applied_graph[field],
-                key=lambda item: item["uuid"],
-            )
-            if not strict_json_equal(candidate_entities, applied_entities):
-                raise ValueError("Candidate catalog projection is not authoritative")
-
-        nodes = [cls._semantic_node(item) for item in graph["nodes"]]
-        edges = [cls._semantic_edge(item) for item in graph["edges"]]
-        candidate_nodes = {item["uuid"]: item for item in nodes}
-        candidate_edges = {item["uuid"]: item for item in edges}
-        if len(candidate_nodes) != len(nodes) or len(candidate_edges) != len(edges):
-            raise ValueError("Candidate graph contains duplicate UUIDs")
-
-        templates = {item["uuid"]: item for item in graph["node_templates"]}
-        handles = {item["uuid"]: item for item in graph["handle_templates"]}
-        validate_graph(
-            nodes=[
-                WorkflowNodeWrite.model_validate(item)
-                for item in candidate_nodes.values()
-            ],
-            edges=[
-                WorkflowEdgeWrite.model_validate(item)
-                for item in candidate_edges.values()
-            ],
-            templates=templates,
-            handles=handles,
-            effective_params={
-                uuid: item["param"] or {} for uuid, item in candidate_nodes.items()
-            },
-            workflow_meta_data=workflow["meta_data"],
-            node_meta_data={
-                uuid: item["meta_data"] for uuid, item in candidate_nodes.items()
-            },
-            validate_workflow_io_contract=True,
-        )
-
-        if any(
-            entry["workflow_node_uuid"] not in candidate_nodes for entry in source_map
-        ):
-            raise ValueError("Source map references a Node outside the Candidate")
-
-        applied_nodes = {
-            item["uuid"]: cls._semantic_node(item) for item in applied_graph["nodes"]
-        }
-        applied_edges = {
-            item["uuid"]: cls._semantic_edge(item) for item in applied_graph["edges"]
-        }
-        expected = {
-            "created_node_uuids": set(candidate_nodes) - set(applied_nodes),
-            "updated_node_uuids": {
-                uuid
-                for uuid in set(candidate_nodes) & set(applied_nodes)
-                if not strict_json_equal(
-                    candidate_nodes[uuid],
-                    applied_nodes[uuid],
-                )
-            },
-            "deleted_node_uuids": set(applied_nodes) - set(candidate_nodes),
-            "created_edge_uuids": set(candidate_edges) - set(applied_edges),
-            "updated_edge_uuids": {
-                uuid
-                for uuid in set(candidate_edges) & set(applied_edges)
-                if not strict_json_equal(
-                    candidate_edges[uuid],
-                    applied_edges[uuid],
-                )
-            },
-            "deleted_edge_uuids": set(applied_edges) - set(candidate_edges),
-        }
-        node_fields = (
-            "created_node_uuids",
-            "updated_node_uuids",
-            "deleted_node_uuids",
-        )
-        edge_fields = (
-            "created_edge_uuids",
-            "updated_edge_uuids",
-            "deleted_edge_uuids",
-        )
-        for fields in (node_fields, edge_fields):
-            values = [changeset[field] for field in fields]
-            if any(len(value) != len(set(value)) for value in values):
-                raise ValueError("Changeset contains duplicate UUIDs")
-            if any(
-                set(values[left]) & set(values[right])
-                for left in range(len(values))
-                for right in range(left + 1, len(values))
-            ):
-                raise ValueError("Changeset lifecycle UUID sets overlap")
-        if any(set(changeset[field]) != expected[field] for field in expected):
-            raise ValueError("Changeset does not describe the Candidate graph")
-        if changeset["reserved_metadata_changed"] is not reserved_changed:
-            raise ValueError("Changeset reserved metadata flag is inaccurate")
-
-        graph_changed = reserved_changed or any(expected.values())
-        expected_kind = "graph" if graph_changed else "source_only"
-        if changeset["kind"] != expected_kind:
-            raise ValueError("Changeset kind does not match graph semantics")
 
     @staticmethod
     def _backend_graph_projection(

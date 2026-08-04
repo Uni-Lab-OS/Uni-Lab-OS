@@ -1,0 +1,689 @@
+"""可信工作流作者源码的纯 AST（抽象语法树）解析层。"""
+
+from __future__ import annotations
+
+import ast
+import re
+from dataclasses import dataclass
+from typing import Any, Never
+
+from unilabos.registry.annotation_schema import (
+    NO_DEFAULT,
+    AnnotationSchemaError,
+    parse_parameter_annotation,
+    parse_result_annotation,
+)
+from unilabos.workflow.models import validate_uuid
+from unilabos.workflow.source_coordinates import (
+    source_lines,
+    utf8_offset_to_utf16_column,
+)
+
+_NODE_ANCHOR = re.compile(
+    r"^[ \t]*#[ \t]*unilab:node_uuid=([0-9a-fA-F-]{36})[ \t]*$"
+)
+_AUTHORING_MARKERS = {
+    "device": "unilabos.workflow.authoring:device",
+    "workflow_definition": "unilabos.workflow.authoring:workflow_definition",
+    "workflow_output": "unilabos.workflow.authoring:workflow_output",
+}
+
+
+class AuthoringSyntaxError(ValueError):
+    """可稳定投影为编译诊断的作者源码错误。"""
+
+    def __init__(self, code: str, message: str, node: ast.AST | None = None):
+        """保存诊断码、中文消息和可选 AST 节点。
+
+        参数说明：``code`` 是稳定机器码，``message`` 是用户消息，``node`` 用于
+        生成源码范围。
+        """
+
+        super().__init__(message)
+        self.code = code
+        self.message = message
+        self.node = node
+
+
+@dataclass(frozen=True, slots=True)
+class DeviceDeclaration:
+    """静态设备声明及其设备类身份。"""
+
+    symbol: str
+    class_identity: str
+    device_id: str | None
+
+
+@dataclass(frozen=True, slots=True)
+class ValueBinding:
+    """动作参数或工作流输出的一种静态值绑定。"""
+
+    kind: str
+    value: Any
+    result_name: str | None = None
+
+
+@dataclass(frozen=True, slots=True)
+class ActionDeclaration:
+    """一个持久动作节点的作者声明。"""
+
+    node_uuid: str
+    result_name: str
+    device_symbol: str
+    action_name: str
+    arguments: tuple[tuple[str, ValueBinding], ...]
+    source_node: ast.Assign
+
+
+@dataclass(frozen=True, slots=True)
+class WorkflowProgram:
+    """作者源码静态子集解析后的不可变中间表示。"""
+
+    workflow_uuid: str
+    function_name: str
+    display_name: str
+    description: str | None
+    imports: tuple[tuple[str, str], ...]
+    devices: tuple[DeviceDeclaration, ...]
+    input_contract: dict[str, Any]
+    result_record_name: str | None
+    declared_output_schemas: tuple[tuple[str, dict[str, Any]], ...]
+    actions: tuple[ActionDeclaration, ...]
+    outputs: tuple[tuple[str, ValueBinding], ...]
+
+
+def parse_authoring_source(
+    *,
+    python_source: str,
+    expected_workflow_uuid: str,
+) -> WorkflowProgram:
+    """把不可信 Python 源码解析为静态工作流程序。
+
+    参数说明：``python_source`` 是作者草稿，``expected_workflow_uuid`` 是服务层
+    权威身份。函数只调用 ``ast.parse`` 和字面量解析，绝不 import/compile/eval/
+    execute；返回不可变中间表示，越出静态子集时抛出 ``AuthoringSyntaxError``。
+    """
+
+    try:
+        module = ast.parse(python_source)
+    except SyntaxError as error:
+        failure = AuthoringSyntaxError("syntax_error", "作者源码不是有效 Python")
+        failure.node = error
+        raise failure from None
+    imports, declarations = _module_imports(module)
+    devices: list[DeviceDeclaration] = []
+    functions: list[ast.FunctionDef] = []
+    result_records: list[ast.ClassDef] = []
+    for statement in declarations:
+        if isinstance(statement, ast.AnnAssign):
+            devices.append(_device_declaration(statement, imports))
+        elif isinstance(statement, ast.FunctionDef):
+            functions.append(statement)
+        elif isinstance(statement, ast.ClassDef):
+            result_records.append(statement)
+        else:
+            _fail(
+                "unsupported_authoring_syntax",
+                "模块级源码只允许 import、设备声明和一个工作流函数",
+                statement,
+            )
+    if len(functions) != 1:
+        _fail("invalid_workflow_declaration", "必须且只能声明一个工作流函数")
+    function = functions[0]
+    workflow_uuid, display_name, description = _workflow_declaration(
+        function,
+        imports,
+    )
+    if workflow_uuid != validate_uuid(expected_workflow_uuid):
+        _fail(
+            "invalid_workflow_declaration",
+            "作者源码中的工作流 UUID 与权威工作流不一致",
+            function,
+        )
+    input_contract = _workflow_parameters(function, imports)
+    result_record_name, declared_output_schemas = _result_record(
+        function,
+        result_records=result_records,
+        imports=imports,
+    )
+    anchors = _source_anchors(python_source)
+    actions, outputs = _workflow_body(
+        function,
+        imports=imports,
+        devices={item.symbol: item for item in devices},
+        input_names={item["name"] for item in input_contract["parameters"]},
+        anchors=anchors,
+    )
+    used_anchor_lines = {action.source_node.lineno - 1 for action in actions}
+    if set(anchors) != used_anchor_lines:
+        _fail("invalid_node_anchor", "节点 UUID 锚点必须紧邻一个动作声明")
+    return WorkflowProgram(
+        workflow_uuid=workflow_uuid,
+        function_name=function.name,
+        display_name=display_name,
+        description=description,
+        imports=tuple(sorted(imports.items())),
+        devices=tuple(devices),
+        input_contract=input_contract,
+        result_record_name=result_record_name,
+        declared_output_schemas=tuple(declared_output_schemas.items()),
+        actions=tuple(actions),
+        outputs=tuple(outputs),
+    )
+
+
+def diagnostic_source_range(
+    node: ast.AST | SyntaxError | None,
+    python_source: str,
+) -> dict[str, int] | None:
+    """把 AST 或语法错误位置转换为一基 UTF-16 源码范围。
+
+    参数说明：``node`` 是失败位置，``python_source`` 是原始源码；无法安全确定
+    位置时返回 ``None``，否则返回前端可直接消费的范围字典。
+    """
+
+    if node is None:
+        return None
+    lines = source_lines(python_source)
+    line_number = getattr(node, "lineno", None)
+    column_offset = getattr(node, "col_offset", None)
+    end_line_number = getattr(node, "end_lineno", line_number)
+    end_column_offset = getattr(node, "end_col_offset", column_offset)
+    if isinstance(node, SyntaxError):
+        line_number = node.lineno
+        column_offset = max((node.offset or 1) - 1, 0)
+        end_line_number = node.end_lineno or line_number
+        end_column_offset = max((node.end_offset or node.offset or 1) - 1, 0)
+        if line_number is not None and line_number <= len(lines):
+            start_column = min(column_offset + 1, len(lines[line_number - 1]) + 1)
+            end_column = min(end_column_offset + 1, len(lines[end_line_number - 1]) + 1)
+            return {
+                "start_line": line_number,
+                "start_column": start_column,
+                "end_line": end_line_number,
+                "end_column": max(end_column, start_column),
+            }
+    if not all(
+        type(value) is int
+        for value in (line_number, column_offset, end_line_number, end_column_offset)
+    ):
+        return None
+    try:
+        return {
+            "start_line": line_number,
+            "start_column": utf8_offset_to_utf16_column(
+                lines[line_number - 1], column_offset
+            ),
+            "end_line": end_line_number,
+            "end_column": utf8_offset_to_utf16_column(
+                lines[end_line_number - 1], end_column_offset
+            ),
+        }
+    except (IndexError, ValueError):
+        return None
+
+
+def _module_imports(
+    module: ast.Module,
+) -> tuple[dict[str, str], list[ast.stmt]]:
+    """收集静态 import 身份并返回其余模块声明。
+
+    参数说明：``module`` 是已解析 AST；返回局部名到 ``module:symbol`` 的映射
+    及非 import 语句。星号导入、相对导入和重复局部名失败关闭。
+    """
+
+    imports: dict[str, str] = {}
+    declarations: list[ast.stmt] = []
+    for statement in module.body:
+        if isinstance(statement, ast.ImportFrom):
+            if statement.level or statement.module is None:
+                _fail("unsupported_authoring_syntax", "不允许相对导入", statement)
+            for alias in statement.names:
+                if alias.name == "*":
+                    _fail("unsupported_authoring_syntax", "不允许星号导入", statement)
+                local_name = alias.asname or alias.name
+                _add_import(imports, local_name, f"{statement.module}:{alias.name}", statement)
+        elif isinstance(statement, ast.Import):
+            for alias in statement.names:
+                local_name = alias.asname or alias.name.split(".", 1)[0]
+                _add_import(imports, local_name, alias.name, statement)
+        else:
+            declarations.append(statement)
+    return imports, declarations
+
+
+def _add_import(
+    imports: dict[str, str],
+    local_name: str,
+    identity: str,
+    node: ast.AST,
+) -> None:
+    """向 import 映射加入一个无歧义局部名。
+
+    参数说明：``imports`` 是可变索引，其余参数是局部名、限定身份和错误位置；
+    重复局部名抛出 ``AuthoringSyntaxError``。
+    """
+
+    if local_name in imports:
+        _fail("unsupported_authoring_syntax", "import 局部名称重复", node)
+    imports[local_name] = identity
+
+
+def _device_declaration(
+    statement: ast.AnnAssign,
+    imports: dict[str, str],
+) -> DeviceDeclaration:
+    """解析一个带类型的设备声明。
+
+    参数说明：``statement`` 必须为 ``name: Device = device(...)``，``imports``
+    提供静态类身份；返回设备声明，动态参数或空固定身份失败关闭。
+    """
+
+    if not isinstance(statement.target, ast.Name) or not isinstance(statement.annotation, ast.Name):
+        _fail("invalid_device_selector", "设备声明必须使用简单名称和导入类型", statement)
+    class_identity = imports.get(statement.annotation.id)
+    if not isinstance(class_identity, str) or ":" not in class_identity:
+        _fail("invalid_device_selector", "设备类型必须来自显式导入", statement)
+    call = statement.value
+    if not isinstance(call, ast.Call) or not _is_marker(call.func, imports, "device"):
+        _fail("invalid_device_selector", "设备声明必须调用 device()", statement)
+    if call.keywords or len(call.args) > 1:
+        _fail("invalid_device_selector", "device() 只接受一个可选位置参数", call)
+    device_id: str | None = None
+    if call.args:
+        try:
+            device_id = ast.literal_eval(call.args[0])
+        except (ValueError, TypeError):
+            _fail("invalid_device_selector", "固定设备身份必须是字符串字面量", call)
+        if not isinstance(device_id, str) or not device_id:
+            _fail("invalid_device_selector", "固定设备身份不能为空", call)
+    return DeviceDeclaration(statement.target.id, class_identity, device_id)
+
+
+def _workflow_declaration(
+    function: ast.FunctionDef,
+    imports: dict[str, str],
+) -> tuple[str, str, str | None]:
+    """读取工作流定义装饰器的稳定元数据。
+
+    参数说明：``function`` 是唯一函数，``imports`` 用于识别装饰器；返回工作流
+    UUID、展示名和可选描述。位置参数、动态值或重复字段失败关闭。
+    """
+
+    declarations = [
+        item
+        for item in function.decorator_list
+        if isinstance(item, ast.Call)
+        and _is_marker(item.func, imports, "workflow_definition")
+    ]
+    if len(declarations) != 1 or len(function.decorator_list) != 1:
+        _fail("invalid_workflow_declaration", "工作流函数必须只有 workflow_definition 装饰器", function)
+    declaration = declarations[0]
+    if declaration.args:
+        _fail("invalid_workflow_declaration", "工作流声明不接受位置参数", declaration)
+    values = _literal_keywords(declaration, "invalid_workflow_declaration")
+    if set(values) - {"workflow_uuid", "displayname", "description"}:
+        _fail("invalid_workflow_declaration", "工作流声明包含未知字段", declaration)
+    try:
+        workflow_uuid = validate_uuid(values["workflow_uuid"])
+        display_name = values["displayname"]
+    except (KeyError, TypeError, ValueError):
+        _fail("invalid_workflow_declaration", "工作流 UUID 或展示名无效", declaration)
+    description = values.get("description")
+    if not isinstance(display_name, str) or not display_name.strip():
+        _fail("invalid_workflow_declaration", "工作流展示名不能为空", declaration)
+    if description is not None and not isinstance(description, str):
+        _fail("invalid_workflow_declaration", "工作流描述必须是字符串", declaration)
+    return workflow_uuid, display_name.strip(), description
+
+
+def _workflow_parameters(
+    function: ast.FunctionDef,
+    imports: dict[str, str],
+) -> dict[str, Any]:
+    """静态解析工作流输入合同（Workflow Input Contract）。
+
+    参数说明：只接受关键字专用参数；``imports`` 交给共享参数注解解析器。返回
+    版本 1 输入合同，注解错误转换为稳定作者语法错误。
+    """
+
+    arguments = function.args
+    if arguments.posonlyargs or arguments.args or arguments.vararg or arguments.kwarg:
+        _fail("invalid_workflow_parameters", "工作流输入必须是关键字专用参数", function)
+    parameters: list[dict[str, Any]] = []
+    try:
+        for argument, default in zip(arguments.kwonlyargs, arguments.kw_defaults, strict=True):
+            if argument.annotation is None:
+                _fail("invalid_workflow_parameters", "工作流输入必须带类型注解", argument)
+            parsed = parse_parameter_annotation(
+                argument.arg,
+                argument.annotation,
+                default=NO_DEFAULT if default is None else default,
+                imports=imports,
+            )
+            parameters.append(parsed.to_dict())
+    except AnnotationSchemaError as error:
+        raise AuthoringSyntaxError(error.code, error.message, function) from None
+    return {"version": 1, "parameters": parameters}
+
+
+def _result_record(
+    function: ast.FunctionDef,
+    *,
+    result_records: list[ast.ClassDef],
+    imports: dict[str, str],
+) -> tuple[str | None, dict[str, dict[str, Any]]]:
+    """解析可选 ``TypedDict`` 工作流结果记录。
+
+    参数说明：``function`` 提供返回注解，``result_records`` 是模块级类声明，
+    ``imports`` 用于识别 ``TypedDict`` 和字段注解；返回记录类名与字段 Schema。
+    未声明返回记录时返回 ``(None, {})``，动态或不一致声明失败关闭。
+    """
+
+    if not result_records:
+        if function.returns is not None:
+            _fail("invalid_workflow_output", "工作流返回注解必须引用 TypedDict 结果记录", function)
+        return None, {}
+    if len(result_records) != 1:
+        _fail("invalid_workflow_output", "只能声明一个工作流结果记录", function)
+    record = result_records[0]
+    if (
+        len(record.bases) != 1
+        or not isinstance(record.bases[0], ast.Name)
+        or imports.get(record.bases[0].id) != "typing:TypedDict"
+        or record.decorator_list
+        or record.keywords
+    ):
+        _fail("invalid_workflow_output", "工作流结果记录必须是普通 TypedDict", record)
+    if not isinstance(function.returns, ast.Name) or function.returns.id != record.name:
+        _fail("invalid_workflow_output", "工作流返回注解必须引用结果记录", function)
+    fields: dict[str, dict[str, Any]] = {}
+    try:
+        for statement in record.body:
+            if (
+                not isinstance(statement, ast.AnnAssign)
+                or not isinstance(statement.target, ast.Name)
+                or statement.value is not None
+            ):
+                _fail("invalid_workflow_output", "结果记录只允许带类型的字段", statement)
+            name = statement.target.id
+            if name in fields:
+                _fail("invalid_workflow_output", "结果记录字段重复", statement)
+            fields[name] = parse_result_annotation(
+                name,
+                statement.annotation,
+                imports=imports,
+            ).to_dict()["schema"]
+    except AnnotationSchemaError as error:
+        raise AuthoringSyntaxError(error.code, error.message, record) from None
+    return record.name, fields
+
+
+def _source_anchors(python_source: str) -> dict[int, str]:
+    """读取严格格式的节点 UUID 锚点。
+
+    参数说明：``python_source`` 是原始源码；返回锚点行号到 UUID 的映射。任何
+    含锚点前缀但格式不精确、UUID 重复的注释都失败关闭。
+    """
+
+    anchors: dict[int, str] = {}
+    identities: set[str] = set()
+    for line_number, line in enumerate(source_lines(python_source), start=1):
+        if "unilab:node_uuid" not in line:
+            continue
+        match = _NODE_ANCHOR.fullmatch(line)
+        if match is None:
+            _fail("invalid_node_anchor", "节点 UUID 锚点格式无效")
+        try:
+            identity = validate_uuid(match.group(1))
+        except ValueError:
+            _fail("invalid_node_anchor", "节点 UUID 锚点不是有效 UUID")
+        if identity in identities:
+            _fail("duplicate_node_uuid", "节点 UUID 锚点重复")
+        identities.add(identity)
+        anchors[line_number] = identity
+    return anchors
+
+
+def _workflow_body(
+    function: ast.FunctionDef,
+    *,
+    imports: dict[str, str],
+    devices: dict[str, DeviceDeclaration],
+    input_names: set[str],
+    anchors: dict[int, str],
+) -> tuple[list[ActionDeclaration], list[tuple[str, ValueBinding]]]:
+    """解析工作流函数中的动作序列和输出声明。
+
+    参数说明：设备与输入索引来自外层声明，``anchors`` 固定节点身份；返回动作
+    列表和命名输出。当前 F02 静态子集不接受条件、循环或任意表达式语句。
+    """
+
+    statements = list(function.body)
+    if statements and isinstance(statements[0], ast.Expr) and isinstance(
+        statements[0].value, ast.Constant
+    ) and isinstance(statements[0].value.value, str):
+        statements.pop(0)
+    if not statements or not isinstance(statements[-1], ast.Return):
+        _fail("invalid_workflow_output", "工作流函数必须以 workflow_output 返回", function)
+    return_statement = statements.pop()
+    actions: list[ActionDeclaration] = []
+    known_results: set[str] = set()
+    for statement in statements:
+        action = _action_declaration(
+            statement,
+            devices=devices,
+            input_names=input_names,
+            known_results=known_results,
+            anchors=anchors,
+        )
+        if action.result_name in known_results:
+            _fail("unsupported_authoring_syntax", "动作结果变量重复", statement)
+        known_results.add(action.result_name)
+        actions.append(action)
+    outputs = _workflow_outputs(
+        return_statement,
+        imports=imports,
+        input_names=input_names,
+        known_results=known_results,
+    )
+    return actions, outputs
+
+
+def _action_declaration(
+    statement: ast.stmt,
+    *,
+    devices: dict[str, DeviceDeclaration],
+    input_names: set[str],
+    known_results: set[str],
+    anchors: dict[int, str],
+) -> ActionDeclaration:
+    """解析一条 ``result = device.action(...)`` 动作声明。
+
+    参数说明：各索引用于验证设备、输入、前序结果和相邻锚点；返回不可变动作
+    声明，位置参数、动态调用或前向引用失败关闭。
+    """
+
+    if not isinstance(statement, ast.Assign) or len(statement.targets) != 1:
+        _fail("unsupported_authoring_syntax", "工作流函数只允许动作赋值", statement)
+    target = statement.targets[0]
+    call = statement.value
+    if not isinstance(target, ast.Name) or not isinstance(call, ast.Call):
+        _fail("unsupported_authoring_syntax", "动作必须赋值给简单名称", statement)
+    if (
+        call.args
+        or not isinstance(call.func, ast.Attribute)
+        or not isinstance(call.func.value, ast.Name)
+    ):
+        _fail("unsupported_authoring_syntax", "动作只接受命名参数和静态设备选择器", statement)
+    device_symbol = call.func.value.id
+    if device_symbol not in devices:
+        _fail("invalid_device_selector", "动作引用了未知设备选择器", statement)
+    node_uuid = anchors.get(statement.lineno - 1)
+    if node_uuid is None:
+        _fail("invalid_node_anchor", "每个动作前必须有相邻节点 UUID 锚点", statement)
+    arguments: list[tuple[str, ValueBinding]] = []
+    names: set[str] = set()
+    for keyword in call.keywords:
+        if keyword.arg is None or keyword.arg in names:
+            _fail("invalid_action_arguments", "动作命名参数重复或包含 ** 展开", call)
+        names.add(keyword.arg)
+        arguments.append(
+            (
+                keyword.arg,
+                _value_binding(
+                    keyword.value,
+                    input_names=input_names,
+                    known_results=known_results,
+                ),
+            )
+        )
+    return ActionDeclaration(
+        node_uuid=node_uuid,
+        result_name=target.id,
+        device_symbol=device_symbol,
+        action_name=call.func.attr,
+        arguments=tuple(arguments),
+        source_node=statement,
+    )
+
+
+def _workflow_outputs(
+    statement: ast.Return,
+    *,
+    imports: dict[str, str],
+    input_names: set[str],
+    known_results: set[str],
+) -> list[tuple[str, ValueBinding]]:
+    """解析命名工作流输出绑定。
+
+    参数说明：``statement`` 是末尾 return，其他索引用于静态身份解析；返回有序
+    输出二元组列表，动态输出或重复名称失败关闭。
+    """
+
+    expression = statement.value
+    if isinstance(expression, ast.Dict):
+        outputs: list[tuple[str, ValueBinding]] = []
+        names: set[str] = set()
+        for key, value in zip(expression.keys, expression.values, strict=True):
+            if not isinstance(key, ast.Constant) or not isinstance(key.value, str):
+                _fail("invalid_workflow_output", "结果记录键必须是字符串字面量", expression)
+            if key.value in names:
+                _fail("invalid_workflow_output", "工作流输出名称重复", expression)
+            names.add(key.value)
+            outputs.append(
+                (
+                    key.value,
+                    _value_binding(
+                        value,
+                        input_names=input_names,
+                        known_results=known_results,
+                        allow_literal=False,
+                    ),
+                )
+            )
+        return outputs
+    call = expression
+    if not isinstance(call, ast.Call) or not _is_marker(call.func, imports, "workflow_output"):
+        _fail("invalid_workflow_output", "工作流必须返回结果字典或 workflow_output(...) ", statement)
+    if call.args:
+        _fail("invalid_workflow_output", "workflow_output 只接受命名参数", call)
+    outputs: list[tuple[str, ValueBinding]] = []
+    names: set[str] = set()
+    for keyword in call.keywords:
+        if keyword.arg is None or keyword.arg in names:
+            _fail("invalid_workflow_output", "工作流输出名称重复或包含 ** 展开", call)
+        names.add(keyword.arg)
+        binding = _value_binding(
+            keyword.value,
+            input_names=input_names,
+            known_results=known_results,
+            allow_literal=False,
+        )
+        outputs.append((keyword.arg, binding))
+    return outputs
+
+
+def _value_binding(
+    expression: ast.expr,
+    *,
+    input_names: set[str],
+    known_results: set[str],
+    allow_literal: bool = True,
+) -> ValueBinding:
+    """把参数表达式解析为字面量、工作流输入或节点输出绑定。
+
+    参数说明：``expression`` 是 AST 表达式，两个集合限制可引用身份；返回静态
+    绑定。``allow_literal=False`` 时工作流输出不能使用字面量。
+    """
+
+    if isinstance(expression, ast.Name) and expression.id in input_names:
+        return ValueBinding("workflow_input", expression.id)
+    if (
+        isinstance(expression, ast.Attribute)
+        and isinstance(expression.value, ast.Name)
+        and expression.value.id in known_results
+    ):
+        return ValueBinding("node_output", expression.attr, expression.value.id)
+    if allow_literal:
+        try:
+            return ValueBinding("literal", ast.literal_eval(expression))
+        except (ValueError, TypeError):
+            pass
+    _fail("unsupported_authoring_syntax", "值必须是 JSON 字面量、工作流输入或前序节点输出", expression)
+
+
+def _literal_keywords(call: ast.Call, code: str) -> dict[str, Any]:
+    """读取无重复的字面量关键字参数。
+
+    参数说明：``call`` 是静态标记调用，``code`` 是失败诊断码；返回名称到 JSON
+    字面量的映射，动态值、重复名称或 ``**`` 展开失败关闭。
+    """
+
+    values: dict[str, Any] = {}
+    for keyword in call.keywords:
+        if keyword.arg is None or keyword.arg in values:
+            _fail(code, "静态标记关键字重复或包含 ** 展开", call)
+        try:
+            values[keyword.arg] = ast.literal_eval(keyword.value)
+        except (ValueError, TypeError):
+            _fail(code, "静态标记参数必须是字面量", keyword.value)
+    return values
+
+
+def _is_marker(
+    expression: ast.expr,
+    imports: dict[str, str],
+    marker_name: str,
+) -> bool:
+    """判断表达式是否引用一个显式导入的创作标记。
+
+    参数说明：``expression`` 是调用目标，``imports`` 是局部身份表，
+    ``marker_name`` 是标准标记名；返回布尔结果。
+    """
+
+    return (
+        isinstance(expression, ast.Name)
+        and imports.get(expression.id) == _AUTHORING_MARKERS[marker_name]
+    )
+
+
+def _fail(code: str, message: str, node: ast.AST | None = None) -> Never:
+    """抛出稳定作者语法错误。
+
+    参数说明：``code``、``message`` 和 ``node`` 分别是机器码、中文消息与可选
+    位置；函数永不返回。
+    """
+
+    raise AuthoringSyntaxError(code, message, node)
+
+
+__all__ = [
+    "ActionDeclaration",
+    "AuthoringSyntaxError",
+    "DeviceDeclaration",
+    "ValueBinding",
+    "WorkflowProgram",
+    "diagnostic_source_range",
+    "parse_authoring_source",
+]

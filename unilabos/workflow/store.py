@@ -1383,6 +1383,16 @@ class WorkflowStore:
                     )
                     for item in graph.get("edges", [])
                 ]
+                self._ensure_authoring_catalog_projection(
+                    conn,
+                    node_templates=graph.get("node_templates", []),
+                    handle_templates=graph.get("handle_templates", []),
+                    authority_id=(
+                        "authoring/"
+                        + str(candidate["template_catalog_fingerprint"])
+                    ),
+                    now=now,
+                )
                 resulting_revision = self._reconcile_graph(
                     conn,
                     workflow_uuid=workflow_uuid,
@@ -1402,10 +1412,16 @@ class WorkflowStore:
                 conn.execute(
                     """
                     UPDATE workflow
-                    SET meta_data = ?, update_time = ?
+                    SET meta_data = ?, name = ?, description = ?, update_time = ?
                     WHERE uuid = ? AND deleted_at IS NULL
                     """,
-                    (_json(workflow_meta), now, workflow_uuid),
+                    (
+                        _json(workflow_meta),
+                        graph_workflow["name"],
+                        graph_workflow.get("description"),
+                        now,
+                        workflow_uuid,
+                    ),
                 )
             elif kind == "source_only":
                 resulting_revision = expected_revision
@@ -1445,7 +1461,172 @@ class WorkflowStore:
                 },
                 now=now,
             )
-            return resulting_revision, writeback_generation
+        return resulting_revision, writeback_generation
+
+    def _ensure_authoring_catalog_projection(
+        self,
+        conn: sqlite3.Connection,
+        *,
+        node_templates: List[Dict[str, Any]],
+        handle_templates: List[Dict[str, Any]],
+        authority_id: str,
+        now: str,
+    ) -> None:
+        """在应用事务内确保候选引用的最小目录投影已持久化。
+
+        参数说明：``conn`` 是当前唯一写事务；两个模板数组已经过服务层候选校验；
+        ``authority_id`` 绑定本次编译目录指纹，``now`` 是事务时间。新实体原子
+        插入，已有 UUID 必须语义相同才能复用；本方法不承担 F03 持久目录的发现、
+        版本管理或删除权威。
+        """
+
+        if not isinstance(node_templates, list) or not isinstance(
+            handle_templates, list
+        ):
+            raise StoreConflict("Candidate Catalog 投影必须是数组")
+        for template in node_templates:
+            if not isinstance(template, dict):
+                raise StoreConflict("Candidate NodeTemplate 必须是对象")
+            template_uuid = str(template["uuid"])
+            existing = conn.execute(
+                "SELECT * FROM workflow_node_template WHERE uuid = ?",
+                (template_uuid,),
+            ).fetchone()
+            if existing is not None:
+                if not self._catalog_entity_matches(
+                    self._node_template_row(existing),
+                    template,
+                ):
+                    raise StoreConflict("Candidate NodeTemplate UUID 发生语义冲突")
+                conn.execute(
+                    """
+                    UPDATE workflow_node_template
+                    SET deleted_at = NULL, update_time = ?
+                    WHERE uuid = ?
+                    """,
+                    (now, template_uuid),
+                )
+                continue
+            conn.execute(
+                """
+                INSERT INTO workflow_node_template(
+                    uuid, create_time, update_time, deleted_at, description,
+                    meta_data, authority_id, resource_template_uuid, name,
+                    display_name, class, goal, goal_default, feedback, result,
+                    schema, type, icon, header, footer, node_type
+                ) VALUES (?, ?, ?, NULL, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?,
+                          ?, ?, ?, ?)
+                """,
+                (
+                    template_uuid,
+                    now,
+                    now,
+                    template.get("description"),
+                    _json(template.get("meta_data") or {}),
+                    authority_id,
+                    template["resource_template_uuid"],
+                    template["name"],
+                    template["display_name"],
+                    template.get("class"),
+                    _json(template.get("goal") or {}),
+                    _json(template.get("goal_default") or {}),
+                    _json(template.get("feedback") or {}),
+                    _json(template.get("result") or {}),
+                    self._catalog_schema_value(template.get("schema")),
+                    template["type"],
+                    template.get("icon"),
+                    template.get("header"),
+                    template.get("footer"),
+                    template["node_type"],
+                ),
+            )
+        for handle in handle_templates:
+            if not isinstance(handle, dict):
+                raise StoreConflict("Candidate HandleTemplate 必须是对象")
+            handle_uuid = str(handle["uuid"])
+            existing = conn.execute(
+                "SELECT * FROM workflow_handle_template WHERE uuid = ?",
+                (handle_uuid,),
+            ).fetchone()
+            if existing is not None:
+                if not self._catalog_entity_matches(
+                    self._handle_template_row(existing),
+                    handle,
+                ):
+                    raise StoreConflict("Candidate HandleTemplate UUID 发生语义冲突")
+                conn.execute(
+                    """
+                    UPDATE workflow_handle_template
+                    SET deleted_at = NULL, update_time = ?
+                    WHERE uuid = ?
+                    """,
+                    (now, handle_uuid),
+                )
+                continue
+            conn.execute(
+                """
+                INSERT INTO workflow_handle_template(
+                    uuid, create_time, update_time, deleted_at, description,
+                    meta_data, authority_id, workflow_node_template_uuid,
+                    handle_key, io_type, display_name, type, required,
+                    data_source, data_key
+                ) VALUES (?, ?, ?, NULL, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                """,
+                (
+                    handle_uuid,
+                    now,
+                    now,
+                    handle.get("description"),
+                    _json(handle.get("meta_data") or {}),
+                    authority_id,
+                    handle["workflow_node_template_uuid"],
+                    handle["handle_key"],
+                    handle["io_type"],
+                    handle["display_name"],
+                    handle["type"],
+                    int(bool(handle["required"])),
+                    handle.get("data_source"),
+                    handle.get("data_key"),
+                ),
+            )
+
+    @staticmethod
+    def _catalog_entity_matches(
+        persisted: Dict[str, Any],
+        candidate: Dict[str, Any],
+    ) -> bool:
+        """比较持久目录实体与候选投影的业务语义。
+
+        参数说明：两个字典分别来自 SQLite 行和已校验候选；忽略投影时间，返回
+        规范 JSON 是否相同，使相同 UUID 不可被静默改义。
+        """
+
+        ignored = {"create_time", "update_time", "deleted_at"}
+        persisted_semantic = {
+            key: value
+            for key, value in persisted.items()
+            if key not in ignored and value is not None
+        }
+        candidate_semantic = {
+            key: value
+            for key, value in candidate.items()
+            if key not in ignored and value is not None
+        }
+        return _json(persisted_semantic) == _json(candidate_semantic)
+
+    @staticmethod
+    def _catalog_schema_value(value: Any) -> Optional[str]:
+        """把候选模板 Schema 适配为当前 SQLite 文本列。
+
+        参数说明：``value`` 可以是 ``None``、字符串或 JSON 对象；返回可写文本，
+        其他类型抛出 ``StoreConflict``。F03 将负责正式目录 Schema 的版本策略。
+        """
+
+        if value is None or isinstance(value, str):
+            return value
+        if isinstance(value, dict):
+            return _json(value)
+        raise StoreConflict("Candidate NodeTemplate schema 类型无效")
 
     def settle_writeback(
         self,
