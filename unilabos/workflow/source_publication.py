@@ -26,6 +26,7 @@ from unilabos.workflow.source_file_access import (
 from unilabos.workflow.source_publication_errors import (
     SourcePublicationConflict,
     SourcePublicationError,
+    raise_classified_lock_os_error,
     raise_classified_publication_os_error,
 )
 from unilabos.workflow.source_windows_publication import (
@@ -326,8 +327,9 @@ def _compare_and_replace(
 
     参数：``location`` 固定发布目录；目标名和临时名标识两份文件；
     ``expected_hash`` 是原稿条件；``byte_limit`` 约束所有内容读取。返回：CAS 成功
-    时无返回值。异常：缺少安全锁、身份变化或内容冲突统一抛出
-    ``SourcePublicationConflict``。
+    时无返回值。异常：锁竞争、身份变化或内容冲突抛出
+    ``SourcePublicationConflict``；权限、空间和 I/O 故障抛出
+    ``SourcePublicationError``。
     """
 
     if _PLATFORM.startswith("win"):
@@ -560,8 +562,9 @@ def _exclusive_target_lock(
     """按 Linux、macOS/POSIX、Windows 顺序选择目标文件独占锁。
 
     参数：``descriptor`` 是 CAS 原稿文件。返回：上下文值是“是否观察到 Linux
-    租约中断”的无参函数；其他平台恒为 ``False``。异常：无法获得可证明的锁时
-    抛出 ``SourcePublicationConflict``，绝不无锁继续发布。
+    租约中断”的无参函数；其他平台恒为 ``False``。异常：锁已被占用时抛出
+    ``SourcePublicationConflict``；锁基础设施故障抛出
+    ``SourcePublicationError``，两种情况都绝不无锁继续发布。
     """
 
     if _linux_lease_supported():
@@ -574,7 +577,7 @@ def _exclusive_target_lock(
         try:
             _fcntl.flock(descriptor, _fcntl.LOCK_EX | _fcntl.LOCK_NB)
         except OSError as error:
-            raise_classified_publication_os_error(error)
+            raise_classified_lock_os_error(error)
         except ValueError:
             raise SourcePublicationError("publication_failed") from None
         try:
@@ -590,7 +593,7 @@ def _exclusive_target_lock(
             os.lseek(descriptor, 0, os.SEEK_SET)
             _msvcrt.locking(descriptor, _msvcrt.LK_NBLCK, 1)
         except OSError as error:
-            raise_classified_publication_os_error(error)
+            raise_classified_lock_os_error(error)
         except ValueError:
             raise SourcePublicationError("publication_failed") from None
         try:
@@ -684,7 +687,8 @@ def _published_identity_matches(
     """验证规范路径仍指向本次发布的文件身份与内容。
 
     参数：目录、目标名和发布描述符固定本次结果；哈希与上限约束内容。返回：
-    身份和稳定内容均匹配时为 ``True``，任何读取错误为 ``False``。
+    身份和稳定内容均匹配时为 ``True``；确定的文件世代变化为 ``False``。
+    异常：权限、空间或 I/O 等基础设施故障原样传播给上层分类，不能伪装为冲突。
     """
 
     try:
