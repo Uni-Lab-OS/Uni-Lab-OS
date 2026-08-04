@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import threading
 from collections.abc import Callable, Iterable
+from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Optional
 
@@ -26,6 +27,33 @@ _compiler: Optional[AuthoringCompiler] = None
 _editable_package_roots: tuple[Path, ...] = ()
 
 
+@dataclass
+class _RuntimeCleanupOwner:
+    """持有部分启动失败后仍需重试清理的完整运行时资源。"""
+
+    service: WorkflowService
+    monitor: WorkflowSourceMonitor
+    monitor_stopped: bool = False
+    service_closed: bool = False
+
+    def cleanup(self) -> None:
+        """按监视器后服务的安全顺序幂等推进清理。
+
+        参数：无。返回：全部资源关闭时无返回值；任一步失败原样抛出，并保留
+        已完成步骤标记供下一次重置继续，而不是重复关闭或遗失所有权。
+        """
+
+        if not self.monitor_stopped:
+            self.monitor.stop()
+            self.monitor_stopped = True
+        if not self.service_closed:
+            self.service.close()
+            self.service_closed = True
+
+
+_failed_runtime: Optional[_RuntimeCleanupOwner] = None
+
+
 def _configured_package_roots(
     roots: Iterable[str | Path],
 ) -> tuple[Path, ...]:
@@ -35,6 +63,10 @@ def _configured_package_roots(
     返回：保留输入顺序且不跟随符号链接的绝对路径元组；安全性由发现模块复核。
     """
 
+    if not isinstance(roots, tuple) or any(
+        not isinstance(root, (str, Path)) for root in roots
+    ):
+        raise TypeError("工作流源码授权目录必须是 tuple[str | Path, ...]")
     return tuple(Path(root).absolute() for root in roots)
 
 
@@ -58,12 +90,15 @@ def compose_workflow_runtime(
     异常：运行期间切换数据库、编译器或授权目录集合时失败关闭。
     """
 
-    global _compiler, _database_path, _editable_package_roots, _monitor, _service
+    global _compiler, _database_path, _editable_package_roots, _failed_runtime
+    global _monitor, _service
     # 后端形态合同（Backend-shaped Contract）的定义/任务与遗留执行历史共享
     # ``workflow_history.db``，但继续使用相互独立的表。
     database_path = Path(working_dir).resolve() / "workflow_history.db"
     configured_roots = _configured_package_roots(editable_package_roots)
     with _lock:
+        if _failed_runtime is not None:
+            raise RuntimeError("工作流运行时仍有部分启动资源等待显式重置清理")
         if _service is not None:
             if database_path != _database_path:
                 raise RuntimeError(
@@ -118,16 +153,23 @@ def compose_workflow_runtime(
         _monitor = new_monitor
         try:
             new_monitor.start()
-        except BaseException:
-            # 监视线程未可靠启动时撤销发布；更复杂的停机失败保留到 F04.3。
+        except BaseException as start_error:
+            # 监视线程未可靠启动时立即撤销公开权威，但完整资源所有权必须保留到
+            # 停止和服务关闭都确认成功，不能让清理错误覆盖原始启动错误。
             _service = None
             _database_path = None
             _compiler = None
             _editable_package_roots = ()
             _monitor = None
-            new_monitor.stop()
-            new_service.close()
-            raise
+            cleanup_owner = _RuntimeCleanupOwner(new_service, new_monitor)
+            _failed_runtime = cleanup_owner
+            try:
+                cleanup_owner.cleanup()
+            except BaseException as cleanup_error:
+                start_error.add_note(f"后续清理失败: {cleanup_error}")
+            else:
+                _failed_runtime = None
+            raise start_error
         return new_service
 
 
@@ -157,13 +199,15 @@ def compose_local_workflow_template_runtime(
     inventory_store: Any,
     registry: Any,
     scheduler: Optional[Any] = None,
+    editable_package_roots: Iterable[str | Path] = (),
 ) -> tuple[WorkflowService, RegistryTemplateProjection]:
     """装配本地模板权威、F02 创作编译器与工作流服务。
 
     参数说明：``working_dir`` 决定现有 ``workflow_history.db`` 路径；
     ``inventory_store`` 是 ``inventory.db`` 的只读身份来源；``registry`` 是原始
-    Registry 或不可变模板快照；``scheduler`` 是本地模式既有调度器。返回共享
-    同一已发布目录代际的服务和投影。
+    Registry 或不可变模板快照；``scheduler`` 是本地模式既有调度器；
+    ``editable_package_roots`` 是本次进程唯一授权的工作流源码（Workflow
+    Source）目录 tuple。返回共享同一已发布目录代际的服务和投影。
     """
 
     global _template_projection
@@ -174,7 +218,7 @@ def compose_local_workflow_template_runtime(
             service = compose_workflow_runtime(
                 working_dir,
                 compiler=_compiler,
-                editable_package_roots=_editable_package_roots,
+                editable_package_roots=editable_package_roots,
             )
             return service, _template_projection
         if _service is not None:
@@ -232,6 +276,7 @@ def compose_local_workflow_template_runtime(
             service = compose_workflow_runtime(
                 working_dir,
                 compiler=compiler,
+                editable_package_roots=editable_package_roots,
                 material_resolver=resolve_material_identity,
                 scheduler=scheduler,
             )
@@ -269,9 +314,14 @@ def reset_workflow_service_for_test() -> None:
     返回：无；监视器、服务、模板投影和组合身份全部恢复为空。
     """
 
-    global _compiler, _database_path, _editable_package_roots
+    global _compiler, _database_path, _editable_package_roots, _failed_runtime
     global _monitor, _service, _template_projection
     with _lock:
+        if _failed_runtime is not None:
+            # 失败运行时是一个整体清理所有者；任一步再次失败都保留原对象和已完成
+            # 标记，调用者可在外部条件修复后再次执行重置。
+            _failed_runtime.cleanup()
+            _failed_runtime = None
         if _monitor is not None:
             _monitor.stop()
         if _service is not None:

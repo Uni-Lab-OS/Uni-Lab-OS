@@ -137,6 +137,10 @@ class WorkflowSourceMonitor:
             while not stop_event.is_set():
                 try:
                     registrations = self._service.list_registered_sources()
+                except (GeneratorExit, KeyboardInterrupt, SystemExit):
+                    # 进程级终止信号结束当前工作线程；``finally`` 会释放线程身份，
+                    # 后续显式 ``start`` 可建立新生命周期世代。
+                    return
                 except (OSError, RuntimeError, WorkflowError):
                     stop_event.wait(self._interval_seconds)
                     continue

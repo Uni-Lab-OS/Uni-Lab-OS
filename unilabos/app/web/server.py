@@ -73,11 +73,11 @@ async def log_requests(request: Request, call_next) -> Response:
 
 
 def setup_server() -> FastAPI:
-    """
-    设置服务器
+    """装配当前产品配置允许的 Web 路由和本地工作流运行时。
 
-    Returns:
-        FastAPI: 配置好的FastAPI应用实例
+    参数：无。返回：进程唯一 FastAPI 应用；重复调用复用已挂载路由。工作流
+    源码（Workflow Source）授权形状或组合失败时关闭该合同路由，但不阻止无关
+    Edge 路由继续装配，错误写入产品日志。
     """
     global pages, resource_contract_routes_mounted, workflow_routes_mounted
 
@@ -119,6 +119,9 @@ def setup_server() -> FastAPI:
                             inventory_store=inventory_service.store,
                             registry=lab_registry,
                             scheduler=edge_scheduler,
+                            editable_package_roots=(
+                                BasicConfig.workflow_editable_package_roots
+                            ),
                         )
                     )
                 except Exception as projection_error:  # noqa: BLE001
@@ -127,10 +130,18 @@ def setup_server() -> FastAPI:
                         f"工作流创作暂不可用: {str(projection_error)}"
                     )
                     workflow_service = compose_workflow_runtime(
-                        BasicConfig.working_dir
+                        BasicConfig.working_dir,
+                        editable_package_roots=(
+                            BasicConfig.workflow_editable_package_roots
+                        ),
                     )
             else:
-                workflow_service = compose_workflow_runtime(BasicConfig.working_dir)
+                workflow_service = compose_workflow_runtime(
+                    BasicConfig.working_dir,
+                    editable_package_roots=(
+                        BasicConfig.workflow_editable_package_roots
+                    ),
+                )
             install_workflow_api(
                 app,
                 workflow_service,

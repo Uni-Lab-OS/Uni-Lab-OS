@@ -213,6 +213,36 @@ def configure_material_startup(args_dict: Dict[str, Any]) -> str:
     return mode
 
 
+def configure_workflow_editable_package_roots(
+    args_dict: Dict[str, Any],
+) -> tuple[str, ...]:
+    """冻结当前进程工作流源码（Workflow Source）的唯一授权目录集合。
+
+    参数：``args_dict`` 是命令行参数字典；重复 CLI 根目录存在时覆盖配置文件，
+    否则配置必须已经是不可变 ``tuple[str, ...]``。返回：保持声明顺序的绝对路径
+    tuple，并同步写入 ``BasicConfig``。异常：非 tuple 配置、空项或非字符串项
+    抛出 ``TypeError``，禁止产生第二种隐式配置解释。
+    """
+
+    cli_roots = args_dict.get("workflow_editable_package_root")
+    if cli_roots is None:
+        configured_roots = BasicConfig.workflow_editable_package_roots
+        if not isinstance(configured_roots, tuple):
+            raise TypeError("工作流源码授权目录配置必须是 tuple")
+    else:
+        if not isinstance(cli_roots, list):
+            raise TypeError("工作流源码 CLI 授权目录必须是可重复参数列表")
+        configured_roots = tuple(cli_roots)
+    if any(not isinstance(root, str) or not root.strip() for root in configured_roots):
+        raise TypeError("工作流源码授权目录必须是非空字符串")
+    # ``frozen_roots`` 只做形状与绝对路径冻结；符号链接和目录身份由发现层核验。
+    frozen_roots = tuple(
+        os.path.abspath(os.path.expanduser(root)) for root in configured_roots
+    )
+    BasicConfig.workflow_editable_package_roots = frozen_roots
+    return frozen_roots
+
+
 def should_start_embedded_material_service(
     args_dict: Dict[str, Any], *, is_host_mode: bool
 ) -> bool:
@@ -256,7 +286,11 @@ def should_request_remote_startup(
 
 
 def parse_args():
-    """解析命令行参数"""
+    """构建 UniLab-OS 主进程命令行解析器。
+
+    参数：无。返回：包含产品启动和子命令参数的 ``ArgumentParser``；本函数只
+    定义合同，不读取或修改进程参数。
+    """
     parser = argparse.ArgumentParser(description="Start Uni-Lab Edge server.")
     subparsers = parser.add_subparsers(title="Valid subcommands", dest="command")
 
@@ -283,6 +317,16 @@ def parse_args():
         type=str,
         default=None,
         help="Path to the working directory",
+    )
+    parser.add_argument(
+        "--workflow_editable_package_root",
+        type=str,
+        default=None,
+        action="append",
+        help=(
+            "Explicit editable package root for Workflow Source authoring. "
+            "Repeat to authorize multiple roots; overrides config tuple."
+        ),
     )
     parser.add_argument(
         "--backend",
@@ -852,7 +896,12 @@ def _load_graph_json_preview(file_path: str | None) -> Dict[str, Any] | None:
 
 
 def main():
-    """主函数"""
+    """解析产品配置并启动所选 UniLab-OS 运行模式。
+
+    参数：无。返回：普通服务退出时为 ``None``，部分一次性子命令返回整数状态；
+    配置、环境或子命令失败沿用现有退出策略。工作流源码（Workflow Source）
+    授权在配置文件加载后、任何 Web 组合根启动前一次冻结。
+    """
     # 解析命令行参数
     parser = parse_args()
     convert_argv_dashes_to_underscores(parser)
@@ -1124,6 +1173,7 @@ def main():
         print_status("传入了sk参数，优先采用传入参数！", "info")
     BasicConfig.working_dir = working_dir
     BasicConfig.extra_resource = bool(args_dict.get("extra_resource", False))
+    configure_workflow_editable_package_roots(args_dict)
 
     if args_dict.get("command") in ("template-sync", "template_sync"):
         from unilabos.app.template_sync import (
