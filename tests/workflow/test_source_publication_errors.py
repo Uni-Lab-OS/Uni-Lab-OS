@@ -9,6 +9,23 @@ from pathlib import Path
 import pytest
 
 from unilabos.workflow import source_publication
+from unilabos.workflow.source_publication_errors import (
+    raise_classified_lock_os_error,
+)
+
+# ``LOCK_CONTENTION_ERRNOS`` 是两个非阻塞锁后端必须共同解释的完整 errno 集合；
+# ``dict.fromkeys`` 消除 EAGAIN/EWOULDBLOCK、EDEADLK/EDEADLOCK 的平台别名重复。
+LOCK_CONTENTION_ERRNOS = tuple(
+    dict.fromkeys(
+        (
+            errno.EACCES,
+            errno.EAGAIN,
+            getattr(errno, "EWOULDBLOCK", errno.EAGAIN),
+            errno.EDEADLK,
+            getattr(errno, "EDEADLOCK", errno.EDEADLK),
+        )
+    )
+)
 
 
 class PortableFcntl:
@@ -57,14 +74,20 @@ class RefusingCrtLock:
     LK_NBLCK = 1
     LK_UNLCK = 2
 
-    def __init__(self, error_number: int) -> None:
+    def __init__(
+        self,
+        error_number: int,
+        *,
+        winerror: int | None = None,
+    ) -> None:
         """保存后续字节锁获取要抛出的系统错误码。
 
-        参数：``error_number`` 是 ``msvcrt.locking`` 返回的 errno。返回：无；
-        构造期间不访问文件描述符。
+        参数：``error_number`` 是 ``msvcrt.locking`` 返回的 errno；``winerror``
+        是可选 Windows 原生错误码。返回：无；构造期间不访问文件描述符。
         """
 
         self.error_number = error_number
+        self.winerror = winerror
 
     def locking(self, descriptor: int, mode: int, length: int) -> None:
         """拒绝目标文件的非阻塞字节锁。
@@ -74,7 +97,7 @@ class RefusingCrtLock:
         """
 
         del descriptor, mode, length
-        raise _system_error(self.error_number)
+        raise _system_error(self.error_number, winerror=self.winerror)
 
 
 def _draft_hash(content: bytes) -> str:
@@ -205,15 +228,18 @@ def test_posix_cas_race_errno_remains_a_conflict(
     assert target.read_bytes() == original
 
 
-def test_posix_flock_eacces_is_lock_contention_not_infrastructure_failure(
+@pytest.mark.parametrize("error_number", LOCK_CONTENTION_ERRNOS)
+def test_posix_flock_contention_errno_is_not_infrastructure_failure(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
+    error_number: int,
 ) -> None:
-    """POSIX 非阻塞锁返回 EACCES 时必须表达并发占用。
+    """POSIX 非阻塞锁的完整竞争 errno 集合必须表达并发占用。
 
-    参数：``tmp_path`` 隔离 CAS 原稿；``monkeypatch`` 注入 POSIX 锁后端。
-    返回：无；公共发布接口抛出 ``SourcePublicationConflict``，但同 errno 在文件
-    替换接缝仍由既有测试证明是 ``SourcePublicationError``。
+    参数：``tmp_path`` 隔离 CAS 原稿；``monkeypatch`` 注入 POSIX 锁后端；
+    ``error_number`` 是去重后的锁竞争 errno。返回：无；公共发布接口抛出
+    ``SourcePublicationConflict``，但 EACCES 在文件替换接缝仍由既有测试证明
+    是 ``SourcePublicationError``。
     """
 
     parent = tmp_path / "workflows"
@@ -225,7 +251,7 @@ def test_posix_flock_eacces_is_lock_contention_not_infrastructure_failure(
     monkeypatch.setattr(
         source_publication,
         "_fcntl",
-        RefusingPortableFcntl(errno.EACCES),
+        RefusingPortableFcntl(error_number),
     )
     monkeypatch.setattr(source_publication, "_msvcrt", None)
 
@@ -243,14 +269,14 @@ def test_posix_flock_eacces_is_lock_contention_not_infrastructure_failure(
 
 @pytest.mark.parametrize(
     "error_number",
-    [errno.EACCES, getattr(errno, "EDEADLOCK", errno.EDEADLK)],
+    LOCK_CONTENTION_ERRNOS,
 )
 def test_windows_crt_lock_contention_errno_is_not_infrastructure_failure(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
     error_number: int,
 ) -> None:
-    """Windows CRT 的 EACCES/EDEADLOCK 必须表达非阻塞锁竞争。
+    """Windows CRT 的完整竞争 errno 集合必须表达非阻塞锁竞争。
 
     参数：``tmp_path`` 隔离 CAS 原稿；``monkeypatch`` 注入 CRT 锁后端；
     ``error_number`` 是 CRT 非阻塞锁错误码。返回：无；公共发布接口抛出
@@ -271,6 +297,90 @@ def test_windows_crt_lock_contention_errno_is_not_infrastructure_failure(
     )
 
     with pytest.raises(source_publication.SourcePublicationConflict):
+        source_publication.atomic_publish_source(
+            parent_path=parent,
+            target_name=target.name,
+            content=b"value = 'changed'\n",
+            byte_limit=1024,
+            expected_hash=_draft_hash(original),
+        )
+
+    assert target.read_bytes() == original
+
+
+@pytest.mark.parametrize("error_number", LOCK_CONTENTION_ERRNOS)
+def test_lock_error_helper_classifies_complete_errno_set_as_contention(
+    error_number: int,
+) -> None:
+    """锁专用分类 helper 必须直接覆盖完整 errno 竞争集合。
+
+    参数：``error_number`` 是去重后的 EACCES、EAGAIN/EWOULDBLOCK 或
+    EDEADLK/EDEADLOCK。返回：无；每项都稳定映射为源码发布冲突。
+    """
+
+    with pytest.raises(source_publication.SourcePublicationConflict):
+        raise_classified_lock_os_error(_system_error(error_number))
+
+
+@pytest.mark.parametrize(
+    ("winerror", "expected_error"),
+    [
+        (32, source_publication.SourcePublicationConflict),
+        (33, source_publication.SourcePublicationConflict),
+        (5, source_publication.SourcePublicationError),
+    ],
+)
+def test_lock_error_helper_classifies_windows_contention_only(
+    winerror: int,
+    expected_error: type[RuntimeError],
+) -> None:
+    """锁专用分类 helper 必须区分 Windows 共享冲突与权限故障。
+
+    参数：``winerror`` 是原生锁错误码；``expected_error`` 是稳定公共错误类型。
+    返回：无；32/33 映射为源码发布冲突，5 映射为基础设施错误。
+    """
+
+    with pytest.raises(expected_error):
+        raise_classified_lock_os_error(
+            _system_error(errno.EACCES, winerror=winerror)
+        )
+
+
+@pytest.mark.parametrize(
+    ("winerror", "expected_error"),
+    [
+        (32, source_publication.SourcePublicationConflict),
+        (33, source_publication.SourcePublicationConflict),
+        (5, source_publication.SourcePublicationError),
+    ],
+)
+def test_windows_crt_lock_respects_native_winerror_classification(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    winerror: int,
+    expected_error: type[RuntimeError],
+) -> None:
+    """Windows CRT 后端必须保留锁专用 winerror 分类。
+
+    参数：``tmp_path`` 隔离 CAS 原稿；``monkeypatch`` 注入 CRT 锁后端；
+    ``winerror`` 是原生共享或权限错误码；``expected_error`` 是期望公共错误。
+    返回：无；32/33 表达并发占用，5 表达真实基础设施权限故障。
+    """
+
+    parent = tmp_path / "workflows"
+    parent.mkdir()
+    target = parent / "demo.py"
+    original = b"value = 'initial'\n"
+    target.write_bytes(original)
+    monkeypatch.setattr(source_publication, "_PLATFORM", "freebsd")
+    monkeypatch.setattr(source_publication, "_fcntl", None)
+    monkeypatch.setattr(
+        source_publication,
+        "_msvcrt",
+        RefusingCrtLock(errno.EACCES, winerror=winerror),
+    )
+
+    with pytest.raises(expected_error):
         source_publication.atomic_publish_source(
             parent_path=parent,
             target_name=target.name,
