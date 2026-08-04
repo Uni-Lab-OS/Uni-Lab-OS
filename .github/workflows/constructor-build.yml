@@ -5,7 +5,9 @@ on:
     paths:
       - '.conda/constructor/**'
       - '.github/workflows/constructor-build.yml'
+      - 'tests/integration/test_managed_runtime_supervisor_windows.py'
       - 'unilabos/__init__.py'
+      - 'unilabos/managed_runtime/**'
   workflow_run:
     workflows: ["UniLabOS Conda Build"]
     types: [completed]
@@ -155,6 +157,13 @@ jobs:
           source_version="$(python -c 'import runpy; print(runpy.run_path("unilabos/__init__.py")["__version__"])')"
           echo "UNILABOS_INSTALLER_VERSION=${REQUESTED_VERSION:-$source_version}" >> "$GITHUB_ENV"
           echo "UNILABOS_INSTALLER_PACKAGE=${REQUESTED_PACKAGE:-unilabos}" >> "$GITHUB_ENV"
+
+      - name: Validate Windows managed process-tree lifecycle
+        if: steps.select.outputs.enabled == 'true' && matrix.platform == 'win-64'
+        shell: pwsh
+        run: |
+          $env:PYTHONPATH = (Get-Location).Path
+          python tests/integration/test_managed_runtime_supervisor_windows.py
 
       - name: Solve target environment
         if: steps.select.outputs.enabled == 'true'
