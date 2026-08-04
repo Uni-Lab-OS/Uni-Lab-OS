@@ -2,8 +2,9 @@
 
 from __future__ import annotations
 
+from collections.abc import Callable
 from pathlib import Path
-from typing import Any, Callable
+from typing import Any
 
 import pytest
 
@@ -243,3 +244,53 @@ def test_single_source_compatibility_registration_activates_exact_identity_only(
         assert reopened.get_authoring(WORKFLOW_A_UUID)["draft"] is not None
     finally:
         reopened.close()
+
+
+def test_single_source_command_explicitly_replaces_active_authorization_set(
+    tmp_path: Path,
+) -> None:
+    """单项来源命令必须用 replace 名称公开其整集合替换语义。
+
+    参数：``tmp_path`` 隔离数据库和两份工作流源码（Workflow Source）。返回：
+    无；第二次命令后只有 B 保持活动授权，且不再公开误导为增量添加的旧方法名。
+    """
+
+    service = WorkflowService(WorkflowStore(tmp_path / "workflow.db"))
+    package_a = tmp_path / "alpha"
+    package_b = tmp_path / "beta"
+    for workflow_uuid, package_root in (
+        (WORKFLOW_A_UUID, package_a),
+        (WORKFLOW_B_UUID, package_b),
+    ):
+        service.create_workflow(
+            workflow_uuid=workflow_uuid,
+            name=f"workflow-{workflow_uuid[:8]}",
+            tags=[],
+            description=None,
+            meta_data={},
+        )
+        source_path = package_root / "workflows" / "demo.py"
+        source_path.parent.mkdir(parents=True)
+        source_path.write_text("value = True\n", encoding="utf-8")
+
+    try:
+        service.replace_active_editable_source_authorization(
+            workflow_uuid=WORKFLOW_A_UUID,
+            package_id="alpha",
+            package_root=package_a,
+            relative_path="workflows/demo.py",
+        )
+        service.replace_active_editable_source_authorization(
+            workflow_uuid=WORKFLOW_B_UUID,
+            package_id="beta",
+            package_root=package_b,
+            relative_path="workflows/demo.py",
+        )
+        active_workflows = {
+            row["workflow_uuid"] for row in service.list_registered_sources()
+        }
+    finally:
+        service.close()
+
+    assert active_workflows == {WORKFLOW_B_UUID}
+    assert not hasattr(WorkflowService, "register_editable_source")
