@@ -92,7 +92,7 @@ def render_authoring_python(
         lines.append(f"from {module} import {symbol}")
     if needs_resource_slot:
         lines.append("from unilabos.registry.placeholder_type import ResourceSlot")
-    marker_imports = "device, workflow_definition"
+    marker_imports = "device, workflow"
     if not output_bindings:
         marker_imports += ", workflow_output"
     lines.append(f"from unilabos.workflow.authoring import {marker_imports}")
@@ -120,7 +120,7 @@ def render_authoring_python(
     lines.extend(["", ""])
     lines.extend(
         [
-            "@workflow_definition(",
+            "@workflow(",
             f'    workflow_uuid="{workflow_uuid}",',
             f"    displayname={workflow.get('name')!r},",
         ]
@@ -152,12 +152,25 @@ def render_authoring_python(
 
     incoming = _incoming_bindings(edges)
     source_map: list[dict[str, Any]] = []
+    # Python 动作结果变量承载节点间数据依赖，必须唯一且不能被节点展示标题改写。
+    result_names: set[str] = set()
     if not ordered_nodes and not output_bindings:
         lines.append('    """空工作流。"""')
     for node in ordered_nodes:
         node_uuid = str(node["uuid"])
         action = catalog_by_node[node_uuid]
         start_line = len(lines) + 1
+        result_name = _node_result_name(node)
+        if result_name in result_names:
+            raise AuthoringGraphError("candidate_invalid", "节点作者结果变量重复")
+        result_names.add(result_name)
+        metadata_comment = _node_metadata_comment(
+            node=node,
+            action=action,
+            result_name=result_name,
+        )
+        if metadata_comment is not None:
+            lines.append(f"    {metadata_comment}")
         lines.append(f"    # unilab:node_uuid={node_uuid}")
         arguments = _render_action_arguments(
             node=node,
@@ -171,7 +184,6 @@ def render_authoring_python(
             f"{device_symbols[selector_key]}.{node.get('action_name') or action.template['name']}"
             f"({', '.join(arguments)})"
         )
-        result_name = _safe_identifier(str(node.get("name") or "result"), fallback="result")
         lines.append(f"    {result_name} = {call}")
         end_line = len(lines)
         source_map.append(
@@ -511,10 +523,7 @@ def _render_action_arguments(
             )
             if source_handle is None:
                 raise AuthoringGraphError("candidate_invalid", "数据边源连接点不在目录中")
-            source_name = _safe_identifier(
-                str(source_node.get("name") or "result"),
-                fallback="result",
-            )
+            source_name = _node_result_name(source_node)
             expression = f"{source_name}.{source_handle['handle_key']}"
         elif key in params:
             expression = repr(params[key])
@@ -555,8 +564,61 @@ def _render_output_binding(
     )
     if handle is None or handle.get("io_type") != "source":
         raise AuthoringGraphError("candidate_invalid", "工作流输出连接点无效")
-    result_name = _safe_identifier(str(node.get("name") or "result"), fallback="result")
+    result_name = _node_result_name(node)
     return f"{result_name}.{handle['handle_key']}"
+
+
+def _node_result_name(node: Mapping[str, Any]) -> str:
+    """读取与节点展示标题分离的 Python 动作结果变量。
+
+    参数说明：``node`` 是候选工作流节点（WorkflowNode）；返回可用于生成数据
+    依赖表达式的 Python 标识符。新图优先读取 ``authoring_result_name``，旧图才
+    从节点名称兼容推导；伪造或不可规范化的显式身份失败关闭。
+    """
+
+    metadata = node.get("meta_data") or {}
+    unilab = metadata.get("unilab", {}) if isinstance(metadata, Mapping) else {}
+    explicit = unilab.get("authoring_result_name") if isinstance(unilab, Mapping) else None
+    if explicit is not None:
+        if not isinstance(explicit, str) or not explicit:
+            raise AuthoringGraphError("candidate_invalid", "节点作者结果变量无效")
+        normalized = _safe_identifier(explicit, fallback="result")
+        if normalized != explicit:
+            raise AuthoringGraphError("candidate_invalid", "节点作者结果变量不是稳定标识符")
+        return explicit
+    return _safe_identifier(str(node.get("name") or "result"), fallback="result")
+
+
+def _node_metadata_comment(
+    *,
+    node: Mapping[str, Any],
+    action: AuthoringCatalogAction,
+    result_name: str,
+) -> str | None:
+    """把节点标题和描述渲染为规范单行展示注释。
+
+    参数说明：``node`` 提供当前展示字段，``action`` 提供目录默认描述，
+    ``result_name`` 是独立 Python 结果变量；当展示字段等于默认回退时返回
+    ``None``，否则返回 ``# [标题]: 描述``。无法无损表示的换行、右方括号或空
+    描述会拒绝生成，避免源码往返静默改变候选图。
+    """
+
+    title = node.get("name")
+    description = node.get("description")
+    template_description = action.template.get("description")
+    if title == result_name and description == template_description:
+        return None
+    if not isinstance(title, str) or not title.strip():
+        raise AuthoringGraphError("candidate_invalid", "节点展示标题不能为空")
+    if not isinstance(description, str) or not description.strip():
+        raise AuthoringGraphError("candidate_invalid", "自定义节点展示必须包含描述")
+    normalized_title = title.strip()
+    normalized_description = description.strip()
+    if "]" in normalized_title or "\n" in normalized_title or "\r" in normalized_title:
+        raise AuthoringGraphError("candidate_invalid", "节点展示标题不能写入单行注释")
+    if "\n" in normalized_description or "\r" in normalized_description:
+        raise AuthoringGraphError("candidate_invalid", "节点展示描述不能写入单行注释")
+    return f"# [{normalized_title}]: {normalized_description}"
 
 
 def _safe_identifier(value: str, *, fallback: str) -> str:

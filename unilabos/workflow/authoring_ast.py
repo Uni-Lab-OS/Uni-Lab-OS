@@ -22,8 +22,15 @@ from unilabos.workflow.source_coordinates import (
 _NODE_ANCHOR = re.compile(
     r"^[ \t]*#[ \t]*unilab:node_uuid=([0-9a-fA-F-]{36})[ \t]*$"
 )
+_NODE_METADATA_PREFIX = re.compile(r"^[ \t]*#[ \t]*\[")
+_NODE_METADATA = re.compile(
+    r"^(?P<indent>[ \t]*)#[ \t]*\[(?P<title>[^]\r\n]+)\]"
+    r"(?:(?:[ \t]*:[ \t]*)|(?:[ \t]+))"
+    r"(?P<description>\S(?:.*\S)?)[ \t]*$"
+)
 _AUTHORING_MARKERS = {
     "device": "unilabos.workflow.authoring:device",
+    "workflow": "unilabos.workflow.authoring:workflow",
     "workflow_definition": "unilabos.workflow.authoring:workflow_definition",
     "workflow_output": "unilabos.workflow.authoring:workflow_output",
 }
@@ -69,6 +76,8 @@ class ActionDeclaration:
 
     node_uuid: str
     result_name: str
+    title: str | None
+    description: str | None
     device_symbol: str
     action_name: str
     arguments: tuple[tuple[str, ValueBinding], ...]
@@ -147,12 +156,20 @@ def parse_authoring_source(
         imports=imports,
     )
     anchors = _source_anchors(python_source)
+    # 节点展示元数据以节点 UUID 锚点行号为键，只影响工作流节点（WorkflowNode）
+    # 的展示字段，不改变动作结果变量或执行身份。
+    node_metadata = _source_node_metadata(
+        python_source,
+        function=function,
+        anchors=anchors,
+    )
     actions, outputs = _workflow_body(
         function,
         imports=imports,
         devices={item.symbol: item for item in devices},
         input_names={item["name"] for item in input_contract["parameters"]},
         anchors=anchors,
+        node_metadata=node_metadata,
     )
     used_anchor_lines = {action.source_node.lineno - 1 for action in actions}
     if set(anchors) != used_anchor_lines:
@@ -314,10 +331,13 @@ def _workflow_declaration(
         item
         for item in function.decorator_list
         if isinstance(item, ast.Call)
-        and _is_marker(item.func, imports, "workflow_definition")
+        and (
+            _is_marker(item.func, imports, "workflow")
+            or _is_marker(item.func, imports, "workflow_definition")
+        )
     ]
     if len(declarations) != 1 or len(function.decorator_list) != 1:
-        _fail("invalid_workflow_declaration", "工作流函数必须只有 workflow_definition 装饰器", function)
+        _fail("invalid_workflow_declaration", "工作流函数必须只有 workflow 装饰器", function)
     declaration = declarations[0]
     if declaration.args:
         _fail("invalid_workflow_declaration", "工作流声明不接受位置参数", declaration)
@@ -445,6 +465,45 @@ def _source_anchors(python_source: str) -> dict[int, str]:
     return anchors
 
 
+def _source_node_metadata(
+    python_source: str,
+    *,
+    function: ast.FunctionDef,
+    anchors: dict[int, str],
+) -> dict[int, tuple[str, str]]:
+    """读取与节点 UUID 锚点相邻的节点展示注释。
+
+    参数说明：``python_source`` 是不可信作者源码，``function`` 限定工作流函数
+    范围，``anchors`` 提供合法节点锚点行号；返回以锚点行号为键的标题、描述。
+    注释格式、缩进或相邻关系不成立时抛出 ``AuthoringSyntaxError``，防止注释
+    被静默绑定到错误的工作流节点（WorkflowNode）。
+    """
+
+    lines = source_lines(python_source)
+    metadata: dict[int, tuple[str, str]] = {}
+    function_end_line = function.end_lineno or function.lineno
+    for line_number in range(function.lineno, function_end_line + 1):
+        line = lines[line_number - 1]
+        if _NODE_METADATA_PREFIX.match(line) is None:
+            continue
+        match = _NODE_METADATA.fullmatch(line)
+        if match is None:
+            _fail("invalid_node_metadata", "节点展示注释格式无效")
+        anchor_line = line_number + 1
+        if anchor_line not in anchors:
+            _fail("invalid_node_metadata", "节点展示注释必须紧邻节点 UUID 锚点")
+        anchor_source = lines[anchor_line - 1]
+        anchor_indent = anchor_source[: len(anchor_source) - len(anchor_source.lstrip())]
+        if match.group("indent") != anchor_indent:
+            _fail("invalid_node_metadata", "节点展示注释必须与节点 UUID 锚点同级")
+        title = match.group("title").strip()
+        description = match.group("description").strip()
+        if not title or not description:
+            _fail("invalid_node_metadata", "节点标题和描述不能为空")
+        metadata[anchor_line] = (title, description)
+    return metadata
+
+
 def _workflow_body(
     function: ast.FunctionDef,
     *,
@@ -452,11 +511,13 @@ def _workflow_body(
     devices: dict[str, DeviceDeclaration],
     input_names: set[str],
     anchors: dict[int, str],
+    node_metadata: dict[int, tuple[str, str]],
 ) -> tuple[list[ActionDeclaration], list[tuple[str, ValueBinding]]]:
     """解析工作流函数中的动作序列和输出声明。
 
-    参数说明：设备与输入索引来自外层声明，``anchors`` 固定节点身份；返回动作
-    列表和命名输出。当前 F02 静态子集不接受条件、循环或任意表达式语句。
+    参数说明：设备与输入索引来自外层声明，``anchors`` 固定节点身份，
+    ``node_metadata`` 保存锚点相邻的展示字段；返回动作列表和命名输出。当前
+    F02 静态子集不接受条件、循环或任意表达式语句。
     """
 
     statements = list(function.body)
@@ -476,6 +537,7 @@ def _workflow_body(
             input_names=input_names,
             known_results=known_results,
             anchors=anchors,
+            node_metadata=node_metadata,
         )
         if action.result_name in known_results:
             _fail("unsupported_authoring_syntax", "动作结果变量重复", statement)
@@ -497,11 +559,12 @@ def _action_declaration(
     input_names: set[str],
     known_results: set[str],
     anchors: dict[int, str],
+    node_metadata: dict[int, tuple[str, str]],
 ) -> ActionDeclaration:
     """解析一条 ``result = device.action(...)`` 动作声明。
 
-    参数说明：各索引用于验证设备、输入、前序结果和相邻锚点；返回不可变动作
-    声明，位置参数、动态调用或前向引用失败关闭。
+    参数说明：各索引用于验证设备、输入、前序结果、相邻锚点和可选节点展示
+    元数据；返回不可变动作声明，位置参数、动态调用或前向引用失败关闭。
     """
 
     if not isinstance(statement, ast.Assign) or len(statement.targets) != 1:
@@ -522,6 +585,9 @@ def _action_declaration(
     node_uuid = anchors.get(statement.lineno - 1)
     if node_uuid is None:
         _fail("invalid_node_anchor", "每个动作前必须有相邻节点 UUID 锚点", statement)
+    metadata = node_metadata.get(statement.lineno - 1)
+    title = metadata[0] if metadata is not None else None
+    description = metadata[1] if metadata is not None else None
     arguments: list[tuple[str, ValueBinding]] = []
     names: set[str] = set()
     for keyword in call.keywords:
@@ -541,6 +607,8 @@ def _action_declaration(
     return ActionDeclaration(
         node_uuid=node_uuid,
         result_name=target.id,
+        title=title,
+        description=description,
         device_symbol=device_symbol,
         action_name=call.func.attr,
         arguments=tuple(arguments),

@@ -234,7 +234,11 @@ def _candidate_node(
             params[argument_name] = deepcopy(binding.value)
         elif binding.kind == "workflow_input":
             input_bindings[handle_uuid] = {"parameter": str(binding.value)}
-    unilab: dict[str, Any] = {"input_bindings": input_bindings}
+    # 作者结果变量是 Python 数据依赖身份，必须与可编辑的节点标题分离保存。
+    unilab: dict[str, Any] = {
+        "input_bindings": input_bindings,
+        "authoring_result_name": declaration.result_name,
+    }
     if device.device_id is not None:
         unilab["executor_binding"] = {
             "mode": "fixed",
@@ -246,7 +250,7 @@ def _candidate_node(
         "workflow_node_template_uuid": str(template["uuid"]),
         "parent_uuid": None,
         "material_uuid": None,
-        "name": declaration.result_name,
+        "name": declaration.title or declaration.result_name,
         "type": str(template.get("node_type") or template.get("type") or "compute"),
         "icon": template.get("icon"),
         "pose": {},
@@ -258,7 +262,11 @@ def _candidate_node(
         "disabled": False,
         "minimized": False,
         "script": None,
-        "description": template.get("description"),
+        "description": (
+            declaration.description
+            if declaration.description is not None
+            else template.get("description")
+        ),
         "meta_data": {"unilab": unilab},
     }
 

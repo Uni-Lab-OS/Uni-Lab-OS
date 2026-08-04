@@ -60,8 +60,8 @@ class _AuthoringBlock(AbstractContextManager[None]):
         return False
 
 
-def workflow_definition(**metadata: Any) -> Callable[[_Function], _Function]:
-    """声明工作流定义（Workflow Definition）的静态装饰器。
+def workflow(**metadata: Any) -> Callable[[_Function], _Function]:
+    """声明工作流定义（Workflow Definition）的规范静态装饰器。
 
     参数说明：``metadata`` 包含工作流 UUID、展示名和描述；返回保持原函数不变
     的装饰器。可信编译只读取 AST，不信任这里的运行结果。
@@ -75,6 +75,16 @@ def workflow_definition(**metadata: Any) -> Callable[[_Function], _Function]:
         return function
 
     return decorate
+
+
+def workflow_definition(**metadata: Any) -> Callable[[_Function], _Function]:
+    """兼容旧作者草稿中的工作流定义装饰器。
+
+    参数说明：``metadata`` 与规范 ``workflow`` 完全相同；返回规范装饰器结果。
+    可信编译器接受该旧名称，但确定性源码只生成 ``@workflow``。
+    """
+
+    return workflow(**metadata)
 
 
 def device(device_id: str | None = None) -> DeviceSelector:
@@ -121,6 +131,7 @@ __all__ = [
     "device",
     "group",
     "parallel",
+    "workflow",
     "workflow_definition",
     "workflow_output",
 ]

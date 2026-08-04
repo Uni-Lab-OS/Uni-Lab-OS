@@ -34,7 +34,7 @@ def _typed_result_source() -> str:
 from pydantic import Field
 from lab.devices import Reactor
 from unilabos.registry.placeholder_type import ResourceSlot
-from unilabos.workflow.authoring import device, workflow_definition
+from unilabos.workflow.authoring import device, workflow
 
 
 class SamplePreparationResult(TypedDict):
@@ -45,7 +45,7 @@ class SamplePreparationResult(TypedDict):
 reactor: Reactor = device()
 
 
-@workflow_definition(
+@workflow(
     workflow_uuid="{WORKFLOW_UUID}",
     displayname="Sample preparation",
     description="Prepare and analyze one sample.",

@@ -239,13 +239,13 @@ def _source() -> str:
 from pydantic import Field
 from lab.devices import Reactor
 from unilabos.registry.placeholder_type import ResourceSlot
-from unilabos.workflow.authoring import device, workflow_definition, workflow_output
+from unilabos.workflow.authoring import device, workflow, workflow_output
 
 
 reactor: Reactor = device()
 
 
-@workflow_definition(
+@workflow(
     workflow_uuid="{WORKFLOW_UUID}",
     displayname="Sample preparation",
     description="Prepare and analyze one sample.",

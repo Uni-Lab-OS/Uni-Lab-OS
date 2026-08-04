@@ -27,7 +27,7 @@ from unilabos.workflow.authoring_python import render_authoring_python
 from unilabos.workflow.models import CandidateCompilation, validate_uuid
 from unilabos.workflow.source_coordinates import require_utf8_text
 
-_COMPILER_VERSION = "unilabos-authoring/f02-v1"
+_COMPILER_VERSION = "unilabos-authoring/f02a-v1"
 
 
 class WorkflowAuthoringEngine:
