@@ -10,9 +10,13 @@ source:
   target_directory: unilabos
 
 build:
+  # 源码内容不会进入 rattler 的 variant hash；本轮 Runtime/Supervisor 变更
+  # 必须提升 build number，避免 Constructor 缓存把旧源码同名包一起写入显式清单。
+  number: 1
   python:
     entry_points:
     - unilab = unilabos.app.main:main
+    - unilab-supervisor = unilabos.managed_runtime.supervisor:main
   script:
   - set PIP_NO_INDEX=
   - if: win
@@ -45,6 +49,7 @@ requirements:
   - fastapi
   - jinja2
   - requests
+  - rfc8785 >=0.1.4,<0.2
   - uvicorn
   - if: not osx
     then:
@@ -53,6 +58,8 @@ requirements:
   - pandas
   - pymodbus
   - matplotlib
+  - msgcenterpy >=0.1.8,<0.2
+  - pylabrobot ==0.2.1
   - pylibftdi
   - uni-lab::unilabos-env ==0.11.3
 

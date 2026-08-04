@@ -55,4 +55,19 @@ export UNILABOS_INSTALLER_PACKAGE=unilabos-full
 
 GitHub Actions 的 `platforms` 输入接受逗号分隔的平台或别名，例如
 `win-64,linux,osx-arm64,osx`。CI 会先进行原生依赖求解，再构建、静默安装并验证
-`unilabos`、`rclpy` 和 `unilab --help`，最后上传安装器及 hash、lockfile 和包清单。
+`unilabos`、`rclpy`、`unilab --help` 和 `unilab-supervisor --help`，最后上传安装器及
+hash、lockfile 和包清单。
+
+统一桌面打包必须包含当前 checkout，而不是碰巧同版本的远端包。根仓库的一键命令会先
+用 `rattler-build` 生成本地 channel，再通过 `UNILABOS_INSTALLER_CHANNEL=file:///...`
+将该 channel 放到 Constructor channel 列表首位。单独调试此流程时也可显式设置该变量。
+
+在包含 OS 与前端 submodule 的 Uni-Lab-Core 根目录运行：
+
+```bash
+pnpm package:unified -- --platform linux-64
+```
+
+该命令依次构建三个 pip-only 依赖的本地 Conda 包、当前 OS 源码包、Constructor 私有
+Runtime 以及 Electron 安装包。最终用户只安装 Electron 成品；首次启动 Edge 时由桌面端
+校验并安装私有 Runtime，不需要 Git、Conda 或 Uni-Lab-OS 源码。

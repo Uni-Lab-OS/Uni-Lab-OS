@@ -1,0 +1,38 @@
+context:
+  version: 0.2.1
+
+package:
+  name: pylabrobot
+  version: ${{ version }}
+
+source:
+  - url: https://files.pythonhosted.org/packages/source/p/pylabrobot/pylabrobot-${{ version }}.tar.gz
+    sha256: 4caff5054c003cc887e4befb6d73d93ba015fb1cf3187f2dc95506c9141bd564
+
+build:
+  number: 0
+  noarch: python
+  script: ${{ PYTHON }} -m pip install . --no-deps --no-build-isolation
+
+requirements:
+  host:
+    - python >=3.9
+    - setuptools >=68
+    - wheel
+    - pip
+  run:
+    - python >=3.9
+    - typing-extensions
+    - websockets
+
+tests:
+  - python:
+      imports:
+        - pylabrobot
+      pip_check: true
+
+about:
+  summary: Hardware-agnostic laboratory automation platform
+  license: MIT
+  license_file: LICENSE
+  repository: https://github.com/pylabrobot/pylabrobot

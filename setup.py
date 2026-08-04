@@ -11,6 +11,8 @@ setup(
         'setuptools',
         'jsonschema>=4.18',
         'rfc8785>=0.1.4,<0.2',
+        'msgcenterpy>=0.1.8,<0.2',
+        'pylabrobot==0.2.1',
     ],
     zip_safe=True,
     author="The unilabos developers",
@@ -21,7 +23,8 @@ setup(
     tests_require=['pytest'],
     entry_points={
         'console_scripts': [
-            "unilab = unilabos.app.main:main"
+            "unilab = unilabos.app.main:main",
+            "unilab-supervisor = unilabos.managed_runtime.supervisor:main",
         ],
     },
 )
