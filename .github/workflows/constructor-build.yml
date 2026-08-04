@@ -146,7 +146,11 @@ jobs:
 
       - name: Install constructor
         if: steps.select.outputs.enabled == 'true'
-        run: mamba install -n constructor-build --override-channels -c conda-forge constructor=3.16.1 -y
+        run: |
+          mamba install -n constructor-build --override-channels -c conda-forge constructor=3.16.1 micromamba=2.8.1 -y
+          micromamba_path="$(command -v micromamba)"
+          test -n "$micromamba_path"
+          echo "CONSTRUCTOR_CONDA_EXE=$micromamba_path" >> "$GITHUB_ENV"
 
       - name: Resolve installer metadata
         if: steps.select.outputs.enabled == 'true'
@@ -167,11 +171,11 @@ jobs:
 
       - name: Solve target environment
         if: steps.select.outputs.enabled == 'true'
-        run: constructor .conda/constructor --platform "${{ matrix.platform }}" --dry-run
+        run: constructor .conda/constructor --platform "${{ matrix.platform }}" --conda-exe "$CONSTRUCTOR_CONDA_EXE" --dry-run
 
       - name: Build installer
         if: steps.select.outputs.enabled == 'true'
-        run: constructor .conda/constructor --platform "${{ matrix.platform }}" --output-dir dist/constructor
+        run: constructor .conda/constructor --platform "${{ matrix.platform }}" --conda-exe "$CONSTRUCTOR_CONDA_EXE" --output-dir dist/constructor
 
       - name: Smoke test Unix installer
         if: steps.select.outputs.enabled == 'true' && matrix.platform != 'win-64'
