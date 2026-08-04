@@ -28,6 +28,7 @@ from .test_authoring_engine import (
 from .test_f05_material_source_authoring import (
     FIXED_MATERIAL_UUID,
     MATERIAL_SOURCE_NODE_UUID,
+    MOUNT_MATERIAL_UUID,
     PLATE_SOURCE_SYMBOL,
     PLATE_TEMPLATE_UUID,
     _material_source_template,
@@ -167,6 +168,10 @@ def _mutated_graph(candidate: dict[str, Any], case: str) -> dict[str, Any]:
     selector = source_node["param"]
     if case == "invalid-mode":
         selector["mode"] = "later"
+    elif case == "mode-list":
+        selector["mode"] = ["existing"]
+    elif case == "mode-object":
+        selector["mode"] = {"value": "existing"}
     elif case == "missing-mount":
         selector.pop("mount")
     elif case == "extra-field":
@@ -177,6 +182,12 @@ def _mutated_graph(candidate: dict[str, Any], case: str) -> dict[str, Any]:
     elif case == "site-and-slot-range":
         selector["site"] = SITE_UUID
         selector["slot_range"] = [SLOT_UUID]
+    elif case == "noncanonical-mount":
+        selector["mount"]["uuid"] = MOUNT_MATERIAL_UUID.upper()
+    elif case == "flow-role-list":
+        selector["flow_role"] = ["primary_sample"]
+    elif case == "flow-role-object":
+        selector["flow_role"] = {"value": "primary_sample"}
     elif case == "top-level-material":
         source_node["material_uuid"] = FIXED_MATERIAL_UUID
     else:
@@ -186,10 +197,15 @@ def _mutated_graph(candidate: dict[str, Any], case: str) -> dict[str, Any]:
 
 INVALID_GRAPH_CASES = (
     "invalid-mode",
+    "mode-list",
+    "mode-object",
     "missing-mount",
     "extra-field",
     "create-new-fixed",
     "site-and-slot-range",
+    "noncanonical-mount",
+    "flow-role-list",
+    "flow-role-object",
     "top-level-material",
 )
 
@@ -266,8 +282,9 @@ def test_invalid_direct_graph_has_one_stable_engine_diagnostic(
         _source().replace("mode='existing'", "mode='later'"),
         _source().replace("        mount=resource_ref", "        other=resource_ref"),
         _source().replace("        site=None,", "        site=None,\n        quantity=1,"),
+        _source().replace(MOUNT_MATERIAL_UUID, MOUNT_MATERIAL_UUID.upper()),
     ),
-    ids=("invalid-mode", "missing-mount", "extra-field"),
+    ids=("invalid-mode", "missing-mount", "extra-field", "noncanonical-uuid"),
 )
 def test_compile_keeps_invalid_material_source_diagnostic(source: str) -> None:
     """源码编译接缝必须继续使用同一物料来源机器诊断。

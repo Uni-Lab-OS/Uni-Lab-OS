@@ -15,6 +15,7 @@ from unilabos.workflow.store import WorkflowStore
 
 HOST_TEMPLATE_UUID = "10000000-0000-4000-8000-000000000001"
 PLATE_TEMPLATE_UUID = "10000000-0000-4000-8000-000000000002"
+PUMP_TEMPLATE_UUID = "10000000-0000-4000-8000-000000000003"
 PLATE_SOURCE_IDENTITY = "lab.resources:plate_96"
 
 
@@ -85,6 +86,77 @@ class _UnsafeSourceRegistry(_Registry):
         resources[0]["class"]["module"] = self._source_identity
         return resources
 
+
+class _ResourceOnlyRegistry(_Registry):
+    """只发布资源模板（ResourceTemplate）、不发布节点模板的设备注册表。"""
+
+    def obtain_registry_device_info(self) -> list[dict[str, Any]]:
+        """返回空设备定义代际。
+
+        参数：无。返回：空列表，明确表示当前代没有宿主节点（Host Node）或动作。
+        """
+
+        return []
+
+
+class _ActionRegistry(_Registry):
+    """发布一个无参数动作及同一资源模板的设备注册表。"""
+
+    def obtain_registry_device_info(self) -> list[dict[str, Any]]:
+        """返回可被模板投影编译的单动作设备定义。
+
+        参数：无。返回：含一个第 2 版动作合同（ActionContract）的泵定义，
+        用于证明删除最后动作时目录级资源身份仍独立存活。
+        """
+
+        return [
+            {
+                "id": "pump",
+                "display_name": "测试泵",
+                "registry_type": "device",
+                "class": {
+                    "module": "lab.devices:Pump",
+                    "type": "python",
+                    "action_value_mappings": {
+                        "prime": {
+                            "contract_kind": "typed",
+                            "display_name": "预充",
+                            "description": "预充测试泵。",
+                            "goal": {},
+                            "goal_default": {},
+                            "feedback": {},
+                            "result": {},
+                            "schema": {
+                                "type": "object",
+                                "properties": {
+                                    "goal": {
+                                        "type": "object",
+                                        "properties": {},
+                                        "required": [],
+                                        "additionalProperties": False,
+                                    },
+                                    "feedback": {},
+                                    "result": {},
+                                },
+                                "required": ["goal"],
+                                "x-unilabos-action-contract": {
+                                    "version": 2,
+                                    "input_order": [],
+                                    "output_order": [],
+                                    "resource_template_symbols": {
+                                        "goal": {},
+                                        "result": {},
+                                    },
+                                },
+                            },
+                        }
+                    },
+                },
+                "handles": [],
+                "category": [],
+            }
+        ]
+
 def _identity(source_identity: str) -> str:
     """把 Registry 唯一名称解析为本地稳定资源模板 UUID。
 
@@ -97,6 +169,7 @@ def _identity(source_identity: str) -> str:
     identities = {
         "host_node": HOST_TEMPLATE_UUID,
         "plate_96": PLATE_TEMPLATE_UUID,
+        "pump": PUMP_TEMPLATE_UUID,
     }
     return identities[source_identity]
 
@@ -255,4 +328,68 @@ def test_registry_rejects_unsafe_source_identity_without_replacing_projection(
     assert restarted.snapshot().require_resource_template_symbol(
         PLATE_TEMPLATE_UUID
     ) == PLATE_SOURCE_IDENTITY
+    restarted.close()
+
+
+def test_resource_only_generation_survives_restart_without_node_templates(
+    tmp_path: Path,
+) -> None:
+    """纯资源模板代际必须独立持久化双向身份和目录指纹。
+
+    参数说明：``tmp_path`` 提供隔离 SQLite。返回：无；断言没有节点模板时，
+    资源模板（ResourceTemplate）身份仍可双向查询且重启后的目录指纹
+    （CatalogFingerprint）完全相同。
+    """
+
+    database_path = tmp_path / "workflow_history.db"
+    projection = _projection(database_path)
+    published = projection.refresh(_ResourceOnlyRegistry())
+    assert published.actions == ()
+    assert published.require_resource_template_uuid(PLATE_SOURCE_IDENTITY) == (
+        PLATE_TEMPLATE_UUID
+    )
+    expected_fingerprint = published.fingerprint
+    projection.close()
+
+    restarted = _projection(database_path)
+    recovered = restarted.snapshot()
+    assert recovered.actions == ()
+    assert recovered.require_resource_template_symbol(PLATE_TEMPLATE_UUID) == (
+        PLATE_SOURCE_IDENTITY
+    )
+    assert recovered.fingerprint == expected_fingerprint
+    restarted.close()
+
+
+def test_resource_identity_survives_last_action_removal_without_metadata_carrier(
+    tmp_path: Path,
+) -> None:
+    """删除最后动作后目录级资源身份不得依赖节点元数据继续存在。
+
+    参数说明：``tmp_path`` 提供隔离 SQLite。返回：无；先断言动作节点没有身份
+    映射寄生字段，再发布纯资源代际并验证重启后的身份和指纹保持不变。
+    """
+
+    database_path = tmp_path / "workflow_history.db"
+    projection = _projection(database_path)
+    with_action = projection.refresh(_ActionRegistry())
+    action = with_action.require_action("lab.devices:Pump", "prime")
+    unilab_meta = action.template.get("meta_data", {}).get("unilab", {})
+    assert "resource_template_identity_projection" not in unilab_meta
+
+    without_action = projection.refresh(_ResourceOnlyRegistry())
+    assert without_action.actions == ()
+    assert without_action.require_resource_template_uuid(PLATE_SOURCE_IDENTITY) == (
+        PLATE_TEMPLATE_UUID
+    )
+    expected_fingerprint = without_action.fingerprint
+    projection.close()
+
+    restarted = _projection(database_path)
+    recovered = restarted.snapshot()
+    assert recovered.actions == ()
+    assert recovered.require_resource_template_symbol(PLATE_TEMPLATE_UUID) == (
+        PLATE_SOURCE_IDENTITY
+    )
+    assert recovered.fingerprint == expected_fingerprint
     restarted.close()
