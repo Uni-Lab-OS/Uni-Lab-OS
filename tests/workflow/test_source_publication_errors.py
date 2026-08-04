@@ -28,6 +28,55 @@ class PortableFcntl:
         del descriptor, operation
 
 
+class RefusingPortableFcntl(PortableFcntl):
+    """从 POSIX 非阻塞锁接缝注入一个指定 errno。"""
+
+    def __init__(self, error_number: int) -> None:
+        """保存后续锁获取要抛出的系统错误码。
+
+        参数：``error_number`` 是非阻塞 ``flock`` 返回的 errno。返回：无；构造
+        期间不访问文件描述符。
+        """
+
+        self.error_number = error_number
+
+    def flock(self, descriptor: int, operation: int) -> None:
+        """拒绝目标文件的非阻塞独占锁。
+
+        参数：``descriptor`` 是 CAS 原稿；``operation`` 是锁标志。返回：无；
+        总是抛出配置的 ``OSError``，用于证明锁错误使用专属语义。
+        """
+
+        del descriptor, operation
+        raise _system_error(self.error_number)
+
+
+class RefusingCrtLock:
+    """从 Windows CRT 非阻塞字节锁接缝注入一个指定 errno。"""
+
+    LK_NBLCK = 1
+    LK_UNLCK = 2
+
+    def __init__(self, error_number: int) -> None:
+        """保存后续字节锁获取要抛出的系统错误码。
+
+        参数：``error_number`` 是 ``msvcrt.locking`` 返回的 errno。返回：无；
+        构造期间不访问文件描述符。
+        """
+
+        self.error_number = error_number
+
+    def locking(self, descriptor: int, mode: int, length: int) -> None:
+        """拒绝目标文件的非阻塞字节锁。
+
+        参数：``descriptor`` 是 CAS 原稿；``mode`` 是锁操作；``length`` 是锁定
+        字节数。返回：无；总是抛出配置的 ``OSError``。
+        """
+
+        del descriptor, mode, length
+        raise _system_error(self.error_number)
+
+
 def _draft_hash(content: bytes) -> str:
     """计算工作流草稿（Workflow Draft）的稳定内容身份。
 
@@ -142,6 +191,83 @@ def test_posix_cas_race_errno_remains_a_conflict(
         source_publication._PublicationDirectory,
         "replace_child",
         fail_replace,
+    )
+
+    with pytest.raises(source_publication.SourcePublicationConflict):
+        source_publication.atomic_publish_source(
+            parent_path=parent,
+            target_name=target.name,
+            content=b"value = 'changed'\n",
+            byte_limit=1024,
+            expected_hash=_draft_hash(original),
+        )
+
+    assert target.read_bytes() == original
+
+
+def test_posix_flock_eacces_is_lock_contention_not_infrastructure_failure(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """POSIX 非阻塞锁返回 EACCES 时必须表达并发占用。
+
+    参数：``tmp_path`` 隔离 CAS 原稿；``monkeypatch`` 注入 POSIX 锁后端。
+    返回：无；公共发布接口抛出 ``SourcePublicationConflict``，但同 errno 在文件
+    替换接缝仍由既有测试证明是 ``SourcePublicationError``。
+    """
+
+    parent = tmp_path / "workflows"
+    parent.mkdir()
+    target = parent / "demo.py"
+    original = b"value = 'initial'\n"
+    target.write_bytes(original)
+    monkeypatch.setattr(source_publication, "_PLATFORM", "freebsd")
+    monkeypatch.setattr(
+        source_publication,
+        "_fcntl",
+        RefusingPortableFcntl(errno.EACCES),
+    )
+    monkeypatch.setattr(source_publication, "_msvcrt", None)
+
+    with pytest.raises(source_publication.SourcePublicationConflict):
+        source_publication.atomic_publish_source(
+            parent_path=parent,
+            target_name=target.name,
+            content=b"value = 'changed'\n",
+            byte_limit=1024,
+            expected_hash=_draft_hash(original),
+        )
+
+    assert target.read_bytes() == original
+
+
+@pytest.mark.parametrize(
+    "error_number",
+    [errno.EACCES, getattr(errno, "EDEADLOCK", errno.EDEADLK)],
+)
+def test_windows_crt_lock_contention_errno_is_not_infrastructure_failure(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    error_number: int,
+) -> None:
+    """Windows CRT 的 EACCES/EDEADLOCK 必须表达非阻塞锁竞争。
+
+    参数：``tmp_path`` 隔离 CAS 原稿；``monkeypatch`` 注入 CRT 锁后端；
+    ``error_number`` 是 CRT 非阻塞锁错误码。返回：无；公共发布接口抛出
+    ``SourcePublicationConflict``，不得把合法占用误报为基础设施故障。
+    """
+
+    parent = tmp_path / "workflows"
+    parent.mkdir()
+    target = parent / "demo.py"
+    original = b"value = 'initial'\n"
+    target.write_bytes(original)
+    monkeypatch.setattr(source_publication, "_PLATFORM", "freebsd")
+    monkeypatch.setattr(source_publication, "_fcntl", None)
+    monkeypatch.setattr(
+        source_publication,
+        "_msvcrt",
+        RefusingCrtLock(error_number),
     )
 
     with pytest.raises(source_publication.SourcePublicationConflict):
