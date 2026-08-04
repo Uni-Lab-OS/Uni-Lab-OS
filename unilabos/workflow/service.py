@@ -90,6 +90,7 @@ _ERRORS = {
     "candidate_invalid": (422, "工作流校验失败，请检查节点、连线和输入输出"),
     "invalid_material_source": (400, "物料来源选择器不符合规范"),
     "material_flow_fan_out": (409, "同一个物料输出不能连接多个物理消费者"),
+    "material_template_mismatch": (409, "物料资源模板与消费者约束不兼容"),
     "template_catalog_unavailable": (
         503,
         "设备动作模板暂不可用，请稍后重试",
