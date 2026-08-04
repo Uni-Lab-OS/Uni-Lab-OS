@@ -18,6 +18,8 @@ from urllib.request import Request, urlopen
 
 import pytest
 
+from unilabos.managed_runtime.supervisor import ManagedRuntimeSupervisor
+
 pytestmark = pytest.mark.skipif(
     os.name == "nt",
     reason="Windows runtime-prefix 可执行文件解析将在后续平台轮次覆盖",
@@ -112,6 +114,10 @@ def _wait_for_status(
 def _write_fake_unilab(runtime_prefix: Path, worker_pid_path: Path) -> None:
     executable = runtime_prefix / "bin" / "unilab"
     executable.parent.mkdir(parents=True)
+    _write_fake_process(executable, worker_pid_path)
+
+
+def _write_fake_process(executable: Path, pid_path: Path) -> None:
     executable.write_text(
         f"""#!{sys.executable}
 import os
@@ -119,7 +125,7 @@ import signal
 import time
 from pathlib import Path
 
-Path({str(worker_pid_path)!r}).write_text(str(os.getpid()), encoding="utf-8")
+Path({str(pid_path)!r}).write_text(str(os.getpid()), encoding="utf-8")
 stopping = False
 
 
@@ -377,6 +383,160 @@ while not stopping:
         }
 
 
+def test_orderly_close_preserves_loaded_interrupted_markers(tmp_path: Path) -> None:
+    state_directory = tmp_path / "state"
+    state_directory.mkdir()
+    state_path = state_directory / "supervisor-state.json"
+    state_path.write_text(
+        json.dumps(
+            {
+                "schema_version": 1,
+                "status": "running",
+                "worker_pid": 111,
+                "simulator_status": "running",
+                "simulator_pid": 222,
+                "updated_at": time.time(),
+            }
+        ),
+        encoding="utf-8",
+    )
+    supervisor = ManagedRuntimeSupervisor(
+        runtime_prefix=tmp_path / "runtime-prefix",
+        state_directory=state_directory,
+        token=_TOKEN,
+    )
+
+    assert supervisor.status()["status"] == "interrupted"
+    assert supervisor.status()["simulator"]["status"] == "interrupted"
+    supervisor.close()
+
+    persisted = json.loads(state_path.read_text(encoding="utf-8"))
+    assert persisted["status"] == "interrupted"
+    assert persisted["simulator_status"] == "interrupted"
+
+
+@pytest.mark.parametrize(
+    "invalid_state",
+    [
+        None,
+        [],
+        {"schema_version": 99},
+        {
+            "schema_version": 1,
+            "status": "garbage",
+            "worker_pid": None,
+            "simulator_status": "idle",
+            "simulator_pid": None,
+            "updated_at": 1.0,
+        },
+        {
+            "schema_version": 1,
+            "status": "running",
+            "worker_pid": None,
+            "simulator_status": "idle",
+            "simulator_pid": None,
+            "updated_at": 1.0,
+        },
+    ],
+    ids=[
+        "null",
+        "array",
+        "wrong-schema",
+        "unknown-status",
+        "running-without-pid",
+    ],
+)
+def test_structurally_invalid_state_fails_closed(
+    tmp_path: Path,
+    invalid_state: object,
+) -> None:
+    state_directory = tmp_path / "state"
+    state_directory.mkdir()
+    state_path = state_directory / "supervisor-state.json"
+    state_path.write_text(json.dumps(invalid_state), encoding="utf-8")
+
+    supervisor = ManagedRuntimeSupervisor(
+        runtime_prefix=tmp_path / "runtime-prefix",
+        state_directory=state_directory,
+        token=_TOKEN,
+    )
+    snapshot = supervisor.status()
+    assert snapshot["status"] == "interrupted"
+    assert snapshot["simulator"]["status"] == "interrupted"
+    assert "状态文件损坏" in str(snapshot["error"])
+    supervisor.close()
+
+    persisted = json.loads(state_path.read_text(encoding="utf-8"))
+    assert persisted["status"] == "interrupted"
+    assert persisted["simulator_status"] == "interrupted"
+
+
+@pytest.mark.parametrize("process_kind", ["worker", "simulator"])
+def test_running_state_persistence_failure_reaps_new_process_and_fails_closed(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    process_kind: str,
+) -> None:
+    runtime_prefix = tmp_path / "runtime-prefix"
+    state_directory = tmp_path / "state"
+    process_pid_path = tmp_path / f"fake-{process_kind}.pid"
+    if process_kind == "worker":
+        _write_fake_unilab(runtime_prefix, process_pid_path)
+        workspace = tmp_path / "workspace"
+        workspace.mkdir()
+        graph_path = workspace / "graph.json"
+        config_path = workspace / "local_config.py"
+        graph_path.write_text("{}\n", encoding="utf-8")
+        config_path.write_text("# persistence failure fixture\n", encoding="utf-8")
+        payload = {
+            "workspace_path": str(workspace),
+            "graph_path": str(graph_path),
+            "config_path": str(config_path),
+            "working_dir": str(tmp_path / "runtime-work"),
+            "backend": "simple",
+        }
+    else:
+        executable = tmp_path / "fake-simulator"
+        _write_fake_process(executable, process_pid_path)
+        payload = {"executable_path": str(executable)}
+
+    supervisor = ManagedRuntimeSupervisor(
+        runtime_prefix=runtime_prefix,
+        state_directory=state_directory,
+        token=_TOKEN,
+    )
+    original_persist = supervisor._persist_state
+
+    def fail_running_persist() -> None:
+        process = (
+            supervisor._worker if process_kind == "worker" else supervisor._simulator
+        )
+        if process is not None:
+            deadline = time.monotonic() + 5.0
+            while time.monotonic() < deadline and not process_pid_path.is_file():
+                time.sleep(0.01)
+            raise OSError("injected running-state persistence failure")
+        original_persist()
+
+    monkeypatch.setattr(supervisor, "_persist_state", fail_running_persist)
+    start = (
+        supervisor.start_worker
+        if process_kind == "worker"
+        else supervisor.start_simulator
+    )
+    with pytest.raises(OSError, match="injected running-state"):
+        start(payload)
+
+    _wait_for_file(process_pid_path)
+    _wait_for_pid_exit(int(process_pid_path.read_text(encoding="utf-8")))
+    persisted = json.loads(
+        (state_directory / "supervisor-state.json").read_text(encoding="utf-8")
+    )
+    status_field = "status" if process_kind == "worker" else "simulator_status"
+    assert persisted[status_field] == "interrupted"
+    supervisor.close()
+
+
 def _wait_for_file(path: Path, timeout: float = 5.0) -> None:
     deadline = time.monotonic() + timeout
     while time.monotonic() < deadline:
@@ -384,3 +544,14 @@ def _wait_for_file(path: Path, timeout: float = 5.0) -> None:
             return
         time.sleep(0.02)
     pytest.fail(f"worker fixture did not create {path}")
+
+
+def _wait_for_pid_exit(pid: int, timeout: float = 5.0) -> None:
+    deadline = time.monotonic() + timeout
+    while time.monotonic() < deadline:
+        try:
+            os.kill(pid, 0)
+        except ProcessLookupError:
+            return
+        time.sleep(0.02)
+    pytest.fail(f"managed process {pid} remained alive after persistence failure")
