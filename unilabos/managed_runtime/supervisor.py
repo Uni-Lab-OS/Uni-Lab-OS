@@ -5,6 +5,7 @@ from __future__ import annotations
 import argparse
 import hmac
 import json
+import math
 import os
 import signal
 import subprocess
@@ -20,6 +21,17 @@ from typing import Any
 _BACKENDS = frozenset({"ros", "dora", "simple", "automancer"})
 _LOOPBACK_HOSTS = frozenset({"127.0.0.1", "::1", "localhost"})
 _STOP_TIMEOUT_SECONDS = 10.0
+_STATE_FIELDS = frozenset(
+    {
+        "schema_version",
+        "status",
+        "worker_pid",
+        "simulator_status",
+        "simulator_pid",
+        "updated_at",
+    }
+)
+_PROCESS_STATES = frozenset({"idle", "running", "interrupted"})
 
 
 class SupervisorRequestError(ValueError):
@@ -184,6 +196,9 @@ class ManagedRuntimeSupervisor:
 
             executable = self._unilab_executable()
             log_path = self._state_directory / "edge.log"
+            self._interrupted = True
+            self._last_error = "Runtime Worker 启动尚未完成"
+            self._persist_state()
             self._worker_log = log_path.open("ab", buffering=0)
             command = [
                 str(executable),
@@ -219,11 +234,24 @@ class ManagedRuntimeSupervisor:
                         subprocess.CREATE_NEW_PROCESS_GROUP if os.name == "nt" else 0
                     ),
                 )
-            except BaseException:
+            except BaseException as error:
                 self._close_worker_log_locked()
+                self._last_error = f"Runtime Worker 启动失败：{error}"
+                self._persist_state_best_effort()
                 raise
             self._last_error = None
-            self._persist_state()
+            try:
+                self._persist_state()
+            except BaseException:
+                worker = self._worker
+                if worker is not None:
+                    self._terminate_process_locked(worker)
+                self._worker = None
+                self._close_worker_log_locked()
+                self._interrupted = True
+                self._last_error = "Runtime Worker 运行状态持久化失败"
+                self._persist_state_best_effort()
+                raise
             return self.status()
 
     def stop_worker(self) -> dict[str, object]:
@@ -266,6 +294,9 @@ class ManagedRuntimeSupervisor:
                 if request.kind == "source"
                 else [str(request.path)]
             )
+            self._simulator_interrupted = True
+            self._simulator_error = "PLC-Sim 启动尚未完成"
+            self._persist_state()
             self._simulator_log = (self._state_directory / "simulator.log").open(
                 "ab",
                 buffering=0,
@@ -283,11 +314,24 @@ class ManagedRuntimeSupervisor:
                         subprocess.CREATE_NEW_PROCESS_GROUP if os.name == "nt" else 0
                     ),
                 )
-            except BaseException:
+            except BaseException as error:
                 self._close_simulator_log_locked()
+                self._simulator_error = f"PLC-Sim 启动失败：{error}"
+                self._persist_state_best_effort()
                 raise
             self._simulator_error = None
-            self._persist_state()
+            try:
+                self._persist_state()
+            except BaseException:
+                simulator = self._simulator
+                if simulator is not None:
+                    self._terminate_process_locked(simulator)
+                self._simulator = None
+                self._close_simulator_log_locked()
+                self._simulator_interrupted = True
+                self._simulator_error = "PLC-Sim 运行状态持久化失败"
+                self._persist_state_best_effort()
+                raise
             return self.status()
 
     def stop_simulator(self) -> dict[str, object]:
@@ -304,8 +348,24 @@ class ManagedRuntimeSupervisor:
             return self.status()
 
     def close(self) -> None:
-        self.stop_worker()
-        self.stop_simulator()
+        with self._lock:
+            self._refresh_worker_locked()
+            self._refresh_simulator_locked()
+            worker = self._worker
+            if worker is not None:
+                self._terminate_process_locked(worker)
+                self._worker = None
+                self._close_worker_log_locked()
+                self._interrupted = False
+                self._last_error = None
+            simulator = self._simulator
+            if simulator is not None:
+                self._terminate_process_locked(simulator)
+                self._simulator = None
+                self._close_simulator_log_locked()
+                self._simulator_interrupted = False
+                self._simulator_error = None
+            self._persist_state()
 
     def _unilab_executable(self) -> Path:
         relative = (
@@ -407,10 +467,44 @@ class ManagedRuntimeSupervisor:
         except FileNotFoundError:
             return {}
         except (OSError, json.JSONDecodeError, UnicodeDecodeError):
-            self._last_error = "Supervisor 状态文件损坏；需要人工确认设备状态"
-            self._simulator_error = self._last_error
-            return {"status": "interrupted", "simulator_status": "interrupted"}
-        return payload if isinstance(payload, dict) else {}
+            return self._corrupt_state()
+        if not self._state_is_valid(payload):
+            return self._corrupt_state()
+        return payload
+
+    def _corrupt_state(self) -> dict[str, object]:
+        self._last_error = "Supervisor 状态文件损坏；需要人工确认设备状态"
+        self._simulator_error = self._last_error
+        return {"status": "interrupted", "simulator_status": "interrupted"}
+
+    @staticmethod
+    def _state_is_valid(payload: object) -> bool:
+        if not isinstance(payload, dict) or set(payload) != _STATE_FIELDS:
+            return False
+        schema_version = payload.get("schema_version")
+        if isinstance(schema_version, bool) or schema_version != 1:
+            return False
+        updated_at = payload.get("updated_at")
+        if (
+            isinstance(updated_at, bool)
+            or not isinstance(updated_at, (int, float))
+            or not math.isfinite(updated_at)
+        ):
+            return False
+        for status_field, pid_field in (
+            ("status", "worker_pid"),
+            ("simulator_status", "simulator_pid"),
+        ):
+            status = payload.get(status_field)
+            pid = payload.get(pid_field)
+            if not isinstance(status, str) or status not in _PROCESS_STATES:
+                return False
+            if status == "running":
+                if isinstance(pid, bool) or not isinstance(pid, int) or pid < 1:
+                    return False
+            elif pid is not None:
+                return False
+        return True
 
     def _persist_state(self) -> None:
         worker_status = (
@@ -435,27 +529,64 @@ class ManagedRuntimeSupervisor:
         )
         os.replace(temporary_path, self._state_path)
 
+    def _persist_state_best_effort(self) -> None:
+        try:
+            self._persist_state()
+        except OSError:
+            # 启动前已持久化 interrupted；清理后的二次写失败不能覆盖原异常。
+            pass
+
     def _terminate_process_locked(self, process: subprocess.Popen[bytes]) -> None:
         if process.poll() is not None:
             return
         if os.name == "nt":
-            process.terminate()
-        else:
-            try:
-                os.killpg(process.pid, signal.SIGTERM)
-            except ProcessLookupError:
-                return
+            self._terminate_windows_process_tree_locked(process)
+            return
+        try:
+            os.killpg(process.pid, signal.SIGTERM)
+        except ProcessLookupError:
+            return
         try:
             process.wait(timeout=_STOP_TIMEOUT_SECONDS)
         except subprocess.TimeoutExpired:
-            if os.name == "nt":
-                process.kill()
-            else:
-                try:
-                    os.killpg(process.pid, signal.SIGKILL)
-                except ProcessLookupError:
-                    pass
+            try:
+                os.killpg(process.pid, signal.SIGKILL)
+            except ProcessLookupError:
+                pass
             process.wait(timeout=_STOP_TIMEOUT_SECONDS)
+
+    def _terminate_windows_process_tree_locked(
+        self,
+        process: subprocess.Popen[bytes],
+    ) -> None:
+        system_root = os.environ.get("SystemRoot")
+        if not system_root:
+            raise RuntimeError("Windows 缺少 SystemRoot，无法回收受管进程树")
+        taskkill = Path(system_root) / "System32" / "taskkill.exe"
+        if not taskkill.is_file():
+            raise RuntimeError(f"Windows 缺少 taskkill.exe：{taskkill}")
+        completed = subprocess.run(
+            [
+                str(taskkill),
+                "/PID",
+                str(process.pid),
+                "/T",
+                "/F",
+            ],
+            stdin=subprocess.DEVNULL,
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+            check=False,
+            timeout=_STOP_TIMEOUT_SECONDS,
+        )
+        try:
+            process.wait(timeout=_STOP_TIMEOUT_SECONDS)
+        except subprocess.TimeoutExpired as error:
+            raise RuntimeError("Windows 受管进程树未在超时前退出") from error
+        if completed.returncode != 0 and process.returncode is None:
+            raise RuntimeError(
+                f"taskkill 回收受管进程树失败：exit_code={completed.returncode}"
+            )
 
     def _close_worker_log_locked(self) -> None:
         if self._worker_log is not None:
