@@ -7,6 +7,7 @@ import re
 import threading
 from collections import defaultdict
 from collections.abc import Callable
+from contextlib import ExitStack
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Protocol, Tuple
@@ -38,12 +39,14 @@ from unilabos.workflow.models import (
     validate_uuid,
 )
 from unilabos.workflow.source_coordinates import source_ranges_fit
+from unilabos.workflow.source_discovery import EditableSourceDiscoveryPlan
 from unilabos.workflow.source_workspace import (
     NO_EXPECTED_HASH as _NO_EXPECTED_HASH,
 )
 from unilabos.workflow.source_workspace import (
     SourceWorkspaceConflict,
     SourceWorkspaceError,
+    pin_package_roots,
     read_registered_source,
     registered_source_signature,
     validate_source_registration,
@@ -818,6 +821,72 @@ class WorkflowService:
         return kind
 
     # Authoring ----------------------------------------------------------
+
+    def register_discovered_sources(
+        self,
+        plan: EditableSourceDiscoveryPlan,
+    ) -> List[Dict[str, Any]]:
+        """原子注册一个完整工作流源码（Workflow Source）发现计划。
+
+        参数：``plan`` 是从全部显式授权目录完成预校验后生成的不可变计划。
+        返回：按计划顺序排列的持久来源记录。
+        异常：缺失工作流映射为 ``workflow_not_found``；来源身份或目录安全冲突
+        分别映射为稳定 ``invalid_input`` 错误，且不提交任何部分注册。
+        """
+
+        if not isinstance(plan, EditableSourceDiscoveryPlan):
+            raise WorkflowError("invalid_input")
+        # ``root_paths`` 是计划声称已固定的全部包目录；每项注册必须且只能引用它们。
+        root_paths = tuple(
+            package_root for package_root, _identity in plan.root_identities
+        )
+        registered_roots = {
+            registration.package_root for registration in plan.registrations
+        }
+        if (
+            len(root_paths) != len(set(root_paths))
+            or any(not package_root.is_absolute() for package_root in root_paths)
+            or registered_roots != set(root_paths)
+            or any(
+                registration.source_uri
+                != (
+                    f"package://{registration.package_id}/"
+                    f"{registration.relative_path}"
+                )
+                for registration in plan.registrations
+            )
+        ):
+            raise WorkflowError("invalid_input")
+        # ``workflow_uuids`` 以稳定顺序取得所有创作锁，避免与草稿操作交叉提交。
+        workflow_uuids = sorted(
+            {registration.workflow_uuid for registration in plan.registrations}
+        )
+        # ``registration_rows`` 是交给 SQLite 写模型的完整、不可变批次。
+        registration_rows = tuple(
+            {
+                "workflow_uuid": registration.workflow_uuid,
+                "package_id": registration.package_id,
+                "package_root": str(registration.package_root),
+                "relative_path": registration.relative_path,
+                "source_uri": registration.source_uri,
+            }
+            for registration in plan.registrations
+        )
+        with ExitStack() as locks:
+            for workflow_uuid in workflow_uuids:
+                locks.enter_context(self._authoring_lock(workflow_uuid))
+            try:
+                with pin_package_roots(plan.root_identities) as pinned_roots:
+                    return self._store.register_sources(
+                        registration_rows,
+                        before_commit=pinned_roots.assert_current,
+                    )
+            except StoreNotFound:
+                raise WorkflowError("workflow_not_found") from None
+            except SourceWorkspaceError:
+                raise WorkflowError("invalid_input") from None
+            except StoreConflict:
+                raise WorkflowConflict("invalid_input") from None
 
     def register_editable_source(
         self,

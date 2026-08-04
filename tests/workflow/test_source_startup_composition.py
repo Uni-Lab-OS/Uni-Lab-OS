@@ -5,7 +5,6 @@ from __future__ import annotations
 import threading
 from pathlib import Path
 from typing import Any, ClassVar
-from unittest.mock import ANY
 
 import pytest
 
@@ -118,8 +117,10 @@ class RecordingMonitor:
         self.__class__.observations.append(
             {
                 "workflow_uuids": workflow_uuids,
-                "drafts": tuple(
-                    self._service.get_authoring(workflow_uuid)["draft"]
+                "draft_sources": tuple(
+                    self._service.get_authoring(workflow_uuid)["draft"][
+                        "python_source"
+                    ]
                     for workflow_uuid in workflow_uuids
                 ),
                 "published": composition.get_workflow_service() is self._service,
@@ -223,17 +224,9 @@ def test_startup_registers_recovers_publishes_then_starts_monitor(
     assert RecordingMonitor.observations == [
         {
             "workflow_uuids": (WORKFLOW_A_UUID, WORKFLOW_B_UUID),
-            "drafts": (
-                {
-                    "python_source": "result = compile_workflow()\n",
-                    "draft_hash": ANY,
-                    "update_time": ANY,
-                },
-                {
-                    "python_source": "result = compile_workflow()\n",
-                    "draft_hash": ANY,
-                    "update_time": ANY,
-                },
+            "draft_sources": (
+                "result = compile_workflow()\n",
+                "result = compile_workflow()\n",
             ),
             "published": True,
         }

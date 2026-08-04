@@ -67,6 +67,79 @@ class SourceWorkspaceConflict(RuntimeError):
     """表示工作流源码 CAS 条件与当前物理文件不一致。"""
 
 
+@dataclass(frozen=True)
+class PinnedPackageRoots:
+    """固定到文件描述符的可编辑包（Editable Package）目录集合。"""
+
+    _entries: tuple[tuple[Path, tuple[int, int], int], ...]
+
+    def assert_current(self) -> None:
+        """确认规范路径仍指向发现时固定的全部包目录。
+
+        参数：无。
+        返回：无；全部路径身份与固定文件描述符一致时正常返回。
+        异常：目录被替换、变成符号链接或不可访问时抛出
+        ``SourceWorkspaceError``，供数据库事务在提交前失败关闭。
+        """
+
+        for package_root, expected_identity, pinned_descriptor in self._entries:
+            # ``expected_identity`` 来自发现计划；``pinned_descriptor`` 保持原目录
+            # 存活，二者共同防止路径在注册事务期间被静默替换。
+            pinned_metadata = os.fstat(pinned_descriptor)
+            if (
+                pinned_metadata.st_dev,
+                pinned_metadata.st_ino,
+            ) != expected_identity:
+                raise SourceWorkspaceError("invalid_package_root")
+            current_descriptor = _open_directory_chain(
+                package_root,
+                flags=_directory_flags(),
+            )
+            try:
+                current_metadata = os.fstat(current_descriptor)
+                if (
+                    current_metadata.st_dev,
+                    current_metadata.st_ino,
+                ) != expected_identity:
+                    raise SourceWorkspaceError("invalid_package_root")
+            finally:
+                os.close(current_descriptor)
+
+
+@contextmanager
+def pin_package_roots(
+    root_identities: Iterable[tuple[Path, tuple[int, int]]],
+) -> Iterator[PinnedPackageRoots]:
+    """把发现计划中的包目录身份固定到注册事务结束。
+
+    参数：``root_identities`` 逐项给出规范包路径和发现时的设备/索引节点身份。
+    返回：上下文内提供可在事务提交前复核的 ``PinnedPackageRoots``。
+    异常：任一目录身份已经变化或无法安全打开时抛出
+    ``SourceWorkspaceError``；退出上下文总会关闭全部文件描述符。
+    """
+
+    pinned_entries: list[tuple[Path, tuple[int, int], int]] = []
+    try:
+        for package_root, expected_identity in tuple(root_identities):
+            # ``package_path`` 保留发现计划的绝对规范路径，不重新解释包身份。
+            package_path = Path(package_root)
+            descriptor = _open_directory_chain(
+                package_path,
+                flags=_directory_flags(),
+            )
+            metadata = os.fstat(descriptor)
+            if (metadata.st_dev, metadata.st_ino) != expected_identity:
+                os.close(descriptor)
+                raise SourceWorkspaceError("invalid_package_root")
+            pinned_entries.append((package_path, expected_identity, descriptor))
+        pinned_roots = PinnedPackageRoots(tuple(pinned_entries))
+        pinned_roots.assert_current()
+        yield pinned_roots
+    finally:
+        for _package_root, _expected_identity, descriptor in pinned_entries:
+            os.close(descriptor)
+
+
 def validate_source_registration(
     *,
     package_root: str | Path,
@@ -665,9 +738,11 @@ __all__ = [
     "WORKFLOW_SOURCE_BYTE_LIMIT",
     "PackageRootSnapshot",
     "PackageSourceSnapshot",
+    "PinnedPackageRoots",
     "SourceDocument",
     "SourceWorkspaceConflict",
     "SourceWorkspaceError",
+    "pin_package_roots",
     "read_package_root",
     "read_registered_source",
     "registered_source_signature",
