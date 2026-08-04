@@ -39,7 +39,10 @@ from unilabos.workflow.models import (
     validate_uuid,
 )
 from unilabos.workflow.source_coordinates import source_ranges_fit
-from unilabos.workflow.source_discovery import EditableSourceDiscoveryPlan
+from unilabos.workflow.source_discovery import (
+    EditableSourceDiscoveryPlan,
+    EditableSourceRegistration,
+)
 from unilabos.workflow.source_workspace import (
     NO_EXPECTED_HASH as _NO_EXPECTED_HASH,
 )
@@ -285,6 +288,10 @@ class WorkflowService:
         self._device_action_run_bridge = device_action_run_bridge
         self._locks_guard = threading.Lock()
         self._authoring_locks: Dict[str, threading.RLock] = {}
+        # ``_active_source_workflow_uuids`` 只表达本次进程启动配置授权的工作流
+        # 源码（Workflow Source）；SQLite 注册行仅保留跨启动历史身份。
+        self._active_sources_lock = threading.RLock()
+        self._active_source_workflow_uuids: frozenset[str] = frozenset()
 
     # Workflow 与 Graph --------------------------------------------------
 
@@ -877,7 +884,7 @@ class WorkflowService:
                 locks.enter_context(self._authoring_lock(workflow_uuid))
             try:
                 with pin_package_roots(plan.root_identities) as pinned_roots:
-                    return self._store.register_sources(
+                    registered = self._store.register_sources(
                         registration_rows,
                         before_commit=pinned_roots.assert_current,
                     )
@@ -887,6 +894,12 @@ class WorkflowService:
                 raise WorkflowError("invalid_input") from None
             except StoreConflict:
                 raise WorkflowConflict("invalid_input") from None
+        # 只有完整 SQLite 注册事务成功后才一次替换当前授权集合；失败计划不得
+        # 残留部分活动来源，也不得沿用上一次计划中已经撤销的来源。
+        active_workflow_uuids = frozenset(workflow_uuids)
+        with self._active_sources_lock:
+            self._active_source_workflow_uuids = active_workflow_uuids
+        return registered
 
     def register_editable_source(
         self,
@@ -905,36 +918,58 @@ class WorkflowService:
         """
 
         workflow_uuid = self._get_authoring_workflow(workflow_uuid)["uuid"]
-        with self._authoring_lock(workflow_uuid):
-            self._get_authoring_workflow(workflow_uuid)
-            try:
-                root, relative_path = validate_source_registration(
-                    package_root=package_root,
-                    relative_path=relative_path,
-                )
-            except SourceWorkspaceError:
-                raise WorkflowError("invalid_input") from None
-            if not package_id:
-                raise WorkflowError("invalid_input")
-            source_uri = f"package://{package_id}/{relative_path}"
-            try:
-                return self._store.register_source(
+        try:
+            root, normalized_relative_path = validate_source_registration(
+                package_root=package_root,
+                relative_path=relative_path,
+            )
+            root_metadata = root.lstat()
+        except (OSError, SourceWorkspaceError):
+            raise WorkflowError("invalid_input") from None
+        if not isinstance(package_id, str) or not package_id.strip():
+            raise WorkflowError("invalid_input")
+        normalized_package_id = package_id.strip()
+        source_uri = (
+            f"package://{normalized_package_id}/{normalized_relative_path}"
+        )
+        # 单项兼容入口构造成与启动发现完全相同的不可变计划，避免绕过物理路径、
+        # 来源 URI 和“既有身份不可重绑定”等批量注册不变量。
+        plan = EditableSourceDiscoveryPlan(
+            registrations=(
+                EditableSourceRegistration(
                     workflow_uuid=workflow_uuid,
-                    package_id=package_id,
-                    package_root=str(root),
-                    relative_path=relative_path,
+                    package_id=normalized_package_id,
+                    package_root=root,
+                    relative_path=normalized_relative_path,
                     source_uri=source_uri,
-                )
-            except StoreConflict:
-                raise WorkflowConflict("invalid_input") from None
+                ),
+            ),
+            root_identities=(
+                ((root, (root_metadata.st_dev, root_metadata.st_ino))),
+            ),
+        )
+        return self.register_discovered_sources(plan)[0]
 
     def list_registered_sources(self) -> List[Dict[str, Any]]:
-        """返回 Draft 监视与启动恢复所需的已注册源码。"""
+        """返回本次进程配置仍授权的工作流源码（Workflow Source）。
 
-        return self._store.list_source_registrations()
+        参数：无。返回：按稳定工作流 UUID 排序的活动注册；持久历史注册不会因
+        数据库中仍存在就自动获得当前路径访问权。
+        """
+
+        with self._active_sources_lock:
+            active_workflow_uuids = self._active_source_workflow_uuids
+        return [
+            registration
+            for registration in self._store.list_source_registrations()
+            if registration["workflow_uuid"] in active_workflow_uuids
+        ]
 
     def recover_registered_sources(self) -> None:
-        """启动时逐一恢复已注册源码，隔离单个损坏 Draft。"""
+        """启动时逐一恢复当前授权源码并隔离单项瞬态故障。
+
+        参数：无。返回：无；只读取本轮活动注册，历史路径不会被探测。
+        """
 
         for registration in self.list_registered_sources():
             try:
@@ -1514,6 +1549,16 @@ class WorkflowService:
             raise WorkflowError("workflow_not_found") from None
 
     def _registration(self, workflow_uuid: str) -> Dict[str, Any]:
+        """读取当前进程仍授权的规范源码注册。
+
+        参数：``workflow_uuid`` 是已校验的工作流稳定身份。返回：当前活动来源
+        注册。异常：未在本次启动 allowlist 中授权或历史行缺失时统一抛出
+        ``workflow_not_found``，且在拒绝前不触碰持久路径。
+        """
+
+        with self._active_sources_lock:
+            if workflow_uuid not in self._active_source_workflow_uuids:
+                raise WorkflowError("workflow_not_found")
         try:
             return self._store.get_source_registration(workflow_uuid)
         except StoreNotFound:
@@ -1541,14 +1586,6 @@ class WorkflowService:
             "draft_hash": source.draft_hash,
             "update_time": source.update_time,
         }
-
-    def source_reconciliation_pending(self, workflow_uuid: str) -> bool:
-        """告知源码监视器一次成功调用后是否仍需重试。"""
-
-        workflow_uuid = self._get_authoring_workflow(workflow_uuid)["uuid"]
-        with self._authoring_lock(workflow_uuid):
-            record = self._store.get_authoring_record(workflow_uuid)
-            return record["writeback_status"] == "pending"
 
     def source_signature(
         self,

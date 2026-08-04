@@ -70,6 +70,7 @@ class WorkflowSourceMonitor:
         self._settle_seconds = settle_seconds
         self._stop_event = threading.Event()
         self._thread: Optional[threading.Thread] = None
+        self._lifecycle_lock = threading.RLock()
         self._processed: Dict[str, Tuple[Any, ...]] = {}
         self._pending: Dict[str, Tuple[Tuple[Any, ...], float]] = {}
         self._retries: Dict[
@@ -83,14 +84,26 @@ class WorkflowSourceMonitor:
         参数：无。返回：无；已经启动时不创建第二个线程。
         """
 
-        if self._thread is not None:
-            return
-        self._thread = threading.Thread(
-            target=self._run,
-            name="workflow-source-monitor",
-            daemon=True,
-        )
-        self._thread.start()
+        with self._lifecycle_lock:
+            current_thread = self._thread
+            if current_thread is not None and current_thread.is_alive():
+                return
+            # 每次启动都有独立停止世代；已停止事件不能泄漏到重新启动的线程。
+            stop_event = threading.Event()
+            worker = threading.Thread(
+                target=self._run,
+                args=(stop_event,),
+                name="workflow-source-monitor",
+                daemon=True,
+            )
+            self._stop_event = stop_event
+            self._thread = worker
+            try:
+                worker.start()
+            except BaseException:
+                if self._thread is worker:
+                    self._thread = None
+                raise
 
     def stop(self) -> None:
         """停止源码监视线程并等待其有界退出。
@@ -99,96 +112,120 @@ class WorkflowSourceMonitor:
         组合根误认为监视权威已经停止。
         """
 
-        self._stop_event.set()
-        thread = self._thread
+        with self._lifecycle_lock:
+            stop_event = self._stop_event
+            thread = self._thread
+            stop_event.set()
         if thread is not None and thread is not threading.current_thread():
             thread.join(timeout=5)
             if thread.is_alive():
                 raise RuntimeError("Workflow Draft 监视器未能停止")
-        self._thread = None
+        with self._lifecycle_lock:
+            if self._thread is thread:
+                self._thread = None
 
-    def _run(self) -> None:
+    def _run(self, stop_event: threading.Event) -> None:
         """轮询注册来源并只向服务提交稳定源码变化命令。
 
-        参数：无。返回：无；线程在停止事件设置后退出。确定性输入错误会等待
-        新文件世代，瞬态失败和未结算结果保留同一命令并按上限退避重试。
+        参数：``stop_event`` 是本次工作线程独占的停止世代。返回：无；确定性
+        输入错误等待新文件世代，瞬态失败和未结算结果保留同一命令并退避重试；
+        无论正常或异常退出都会释放可重新启动的线程身份。
         """
 
-        while not self._stop_event.is_set():
-            registrations = self._service.list_registered_sources()
-            # ``active`` 是本轮仍由服务确认存在的规范工作流来源身份集合。
-            active = {registration["workflow_uuid"] for registration in registrations}
-            known = set(self._processed) | set(self._pending) | set(self._retries)
-            for workflow_uuid in known - active:
-                self._processed.pop(workflow_uuid, None)
-                self._pending.pop(workflow_uuid, None)
-                self._retries.pop(workflow_uuid, None)
-            for registration in registrations:
-                if self._stop_event.is_set():
-                    return
-                workflow_uuid = registration["workflow_uuid"]
-                signature: Optional[Tuple[Any, ...]] = None
+        current_thread = threading.current_thread()
+        try:
+            while not stop_event.is_set():
                 try:
-                    # ``signature`` 只标识文件观测世代；源码身份仍由注册记录决定。
-                    signature = self._service.source_signature(registration)
-                    if self._processed.get(workflow_uuid) == signature:
-                        self._pending.pop(workflow_uuid, None)
-                        self._retries.pop(workflow_uuid, None)
-                        continue
-                    now = time.monotonic()
-                    pending = self._pending.get(workflow_uuid)
-                    if pending is None or pending[0] != signature:
-                        self._pending[workflow_uuid] = (signature, now)
-                        self._retries.pop(workflow_uuid, None)
-                        continue
-                    if now - pending[1] < self._settle_seconds:
-                        continue
-                    retry = self._retries.get(workflow_uuid)
-                    if retry is not None and retry[0] == signature and now < retry[1]:
-                        continue
-                    settled = self._service.submit_source_change(
-                        workflow_uuid,
-                        observed_signature=signature,
-                    )
-                    latest_signature = self._service.source_signature(registration)
-                    if not settled:
-                        self._processed.pop(workflow_uuid, None)
-                        self._pending[workflow_uuid] = (
-                            latest_signature,
-                            time.monotonic(),
-                        )
-                        self._schedule_retry(
+                    registrations = self._service.list_registered_sources()
+                except (OSError, RuntimeError, WorkflowError):
+                    stop_event.wait(self._interval_seconds)
+                    continue
+                # ``active`` 是本轮仍由服务确认存在的规范工作流来源身份集合。
+                active = {
+                    registration["workflow_uuid"]
+                    for registration in registrations
+                }
+                known = set(self._processed) | set(self._pending) | set(self._retries)
+                for workflow_uuid in known - active:
+                    self._processed.pop(workflow_uuid, None)
+                    self._pending.pop(workflow_uuid, None)
+                    self._retries.pop(workflow_uuid, None)
+                for registration in registrations:
+                    if stop_event.is_set():
+                        return
+                    workflow_uuid = registration["workflow_uuid"]
+                    signature: Optional[Tuple[Any, ...]] = None
+                    try:
+                        # ``signature`` 只标识文件观测世代；源码身份仍由注册记录决定。
+                        signature = self._service.source_signature(registration)
+                        if self._processed.get(workflow_uuid) == signature:
+                            self._pending.pop(workflow_uuid, None)
+                            self._retries.pop(workflow_uuid, None)
+                            continue
+                        now = time.monotonic()
+                        pending = self._pending.get(workflow_uuid)
+                        if pending is None or pending[0] != signature:
+                            self._pending[workflow_uuid] = (signature, now)
+                            self._retries.pop(workflow_uuid, None)
+                            continue
+                        if now - pending[1] < self._settle_seconds:
+                            continue
+                        retry = self._retries.get(workflow_uuid)
+                        if (
+                            retry is not None
+                            and retry[0] == signature
+                            and now < retry[1]
+                        ):
+                            continue
+                        settled = self._service.submit_source_change(
                             workflow_uuid,
-                            latest_signature,
+                            observed_signature=signature,
                         )
-                    elif latest_signature == signature:
-                        self._processed[workflow_uuid] = signature
-                        self._pending.pop(workflow_uuid, None)
-                        self._retries.pop(workflow_uuid, None)
-                    else:
-                        self._pending[workflow_uuid] = (
-                            latest_signature,
-                            time.monotonic(),
+                        latest_signature = self._service.source_signature(
+                            registration
                         )
-                        self._retries.pop(workflow_uuid, None)
-                except WorkflowError as exc:
-                    # 文件内容错误只在签名变化后重试；编译器和目录等
-                    # 暂态故障则使用有上限的指数退避。
-                    if signature is not None and exc.code in {
-                        "invalid_input",
-                        "workflow_not_found",
-                    }:
-                        self._processed[workflow_uuid] = signature
-                        self._pending.pop(workflow_uuid, None)
-                        self._retries.pop(workflow_uuid, None)
-                    elif signature is not None:
-                        self._schedule_retry(workflow_uuid, signature)
-                    continue
-                except (OSError, RuntimeError):
-                    if signature is not None:
-                        self._schedule_retry(workflow_uuid, signature)
-                    continue
-            self._stop_event.wait(self._interval_seconds)
+                        if not settled:
+                            self._processed.pop(workflow_uuid, None)
+                            self._pending[workflow_uuid] = (
+                                latest_signature,
+                                time.monotonic(),
+                            )
+                            self._schedule_retry(
+                                workflow_uuid,
+                                latest_signature,
+                            )
+                        elif latest_signature == signature:
+                            self._processed[workflow_uuid] = signature
+                            self._pending.pop(workflow_uuid, None)
+                            self._retries.pop(workflow_uuid, None)
+                        else:
+                            self._pending[workflow_uuid] = (
+                                latest_signature,
+                                time.monotonic(),
+                            )
+                            self._retries.pop(workflow_uuid, None)
+                    except WorkflowError as exc:
+                        # 文件内容错误只在签名变化后重试；编译器和目录等
+                        # 暂态故障则使用有上限的指数退避。
+                        if signature is not None and exc.code in {
+                            "invalid_input",
+                            "workflow_not_found",
+                        }:
+                            self._processed[workflow_uuid] = signature
+                            self._pending.pop(workflow_uuid, None)
+                            self._retries.pop(workflow_uuid, None)
+                        elif signature is not None:
+                            self._schedule_retry(workflow_uuid, signature)
+                        continue
+                    except (OSError, RuntimeError):
+                        if signature is not None:
+                            self._schedule_retry(workflow_uuid, signature)
+                        continue
+                stop_event.wait(self._interval_seconds)
+        finally:
+            with self._lifecycle_lock:
+                if self._thread is current_thread:
+                    self._thread = None
 
     def _schedule_retry(
         self,

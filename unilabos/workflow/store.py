@@ -1359,55 +1359,6 @@ class WorkflowStore:
             for registration in incoming
         ]
 
-    def register_source(
-        self,
-        *,
-        workflow_uuid: str,
-        package_id: str,
-        package_root: str,
-        relative_path: str,
-        source_uri: str,
-    ) -> Dict[str, Any]:
-        now = utc_now()
-        try:
-            with self.transaction() as conn:
-                self.get_workflow(workflow_uuid, conn=conn)
-                conn.execute(
-                    """
-                    INSERT INTO workflow_source_registration(
-                        workflow_uuid, package_id, package_root, relative_path,
-                        source_uri, create_time, update_time
-                    ) VALUES (?, ?, ?, ?, ?, ?, ?)
-                    ON CONFLICT(workflow_uuid) DO UPDATE SET
-                        package_id = excluded.package_id,
-                        package_root = excluded.package_root,
-                        relative_path = excluded.relative_path,
-                        source_uri = excluded.source_uri,
-                        update_time = excluded.update_time
-                    """,
-                    (
-                        workflow_uuid,
-                        package_id,
-                        package_root,
-                        relative_path,
-                        source_uri,
-                        now,
-                        now,
-                    ),
-                )
-                conn.execute(
-                    """
-                    INSERT INTO workflow_authoring(
-                        workflow_uuid, diagnostics, update_time
-                    ) VALUES (?, '[]', ?)
-                    ON CONFLICT(workflow_uuid) DO NOTHING
-                    """,
-                    (workflow_uuid, now),
-                )
-        except sqlite3.IntegrityError as exc:
-            raise StoreConflict("工作流源码身份已被占用") from exc
-        return self.get_source_registration(workflow_uuid)
-
     def get_source_registration(self, workflow_uuid: str) -> Dict[str, Any]:
         with self._lock:
             row = self._conn.execute(
