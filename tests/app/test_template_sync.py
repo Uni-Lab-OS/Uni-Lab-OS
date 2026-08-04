@@ -20,6 +20,22 @@ from unilabos.registry.template_snapshot import RegistryTemplateSnapshot
 from unilabos.workflow.store import WorkflowStore
 
 RESOURCE_TEMPLATE_UUID = "10000000-0000-4000-8000-000000000001"
+TUBE_RESOURCE_TEMPLATE_UUID = "10000000-0000-4000-8000-000000000002"
+
+
+def _local_resource_template_identity(resource_name: str) -> str:
+    """按 Registry 业务唯一名称返回本地资源模板 UUID。
+
+    参数说明：``resource_name`` 是设备或器材的业务唯一索引。返回：测试本地
+    模板数据库中既有的稳定 UUID；未知名称返回空串供投影关闭式失败。
+    """
+
+    # ``identities`` 同时覆盖动作所有者和物料资源模板，模拟完整本地身份索引。
+    identities = {
+        "pump": RESOURCE_TEMPLATE_UUID,
+        "tube_15ml": TUBE_RESOURCE_TEMPLATE_UUID,
+    }
+    return identities.get(resource_name, "")
 
 
 class FakeRegistry:
@@ -306,9 +322,7 @@ def test_local_projection_and_template_sync_share_one_registry_snapshot(
     projection = RegistryTemplateProjection(
         WorkflowStore(tmp_path / "workflow_history.db"),
         authority_id="local",
-        resource_template_identity_resolver=lambda resource_name: (
-            RESOURCE_TEMPLATE_UUID if resource_name == "pump" else ""
-        ),
+        resource_template_identity_resolver=_local_resource_template_identity,
     )
     local_action = projection.refresh(registry_snapshot).require_action(
         "drivers.pump:Pump",

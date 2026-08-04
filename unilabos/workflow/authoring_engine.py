@@ -19,6 +19,7 @@ from unilabos.workflow.authoring_graph import (
     semantic_graph_equal,
 )
 from unilabos.workflow.authoring_kernel import AuthoringCatalogSnapshot
+from unilabos.workflow.authoring_material import MaterialAuthoringError
 from unilabos.workflow.authoring_python import render_authoring_python
 from unilabos.workflow.candidate_validation import (
     CandidateBundleError,
@@ -114,6 +115,13 @@ class WorkflowAuthoringEngine:
                 template_catalog_fingerprint=self.template_catalog_fingerprint,
             )
         except AuthoringSyntaxError as error:
+            return _error_result(
+                fingerprint=self.template_catalog_fingerprint,
+                code=error.code,
+                message=error.message,
+                source_range=diagnostic_source_range(error.node, python_source),
+            )
+        except MaterialAuthoringError as error:
             return _error_result(
                 fingerprint=self.template_catalog_fingerprint,
                 code=error.code,

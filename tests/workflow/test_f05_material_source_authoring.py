@@ -281,9 +281,11 @@ def test_invalid_material_source_selector_returns_stable_diagnostic(
         "mode": ("mode='existing'", "mode='later'"),
         "create-new-fixed": (
             "mode='existing',\n        mount=",
-            "mode='create_new',\n"
-            f"        material_uuid='{FIXED_MATERIAL_UUID}',\n"
-            "        mount=",
+            (
+                "mode='create_new',\n"
+                f"        material_uuid='{FIXED_MATERIAL_UUID}',\n"
+                "        mount="
+            ),
         ),
         "free-string-role": (
             "MaterialFlowRole.PRIMARY_SAMPLE",

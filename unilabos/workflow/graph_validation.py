@@ -218,6 +218,13 @@ def _node_kind(
     node: WorkflowNodeWrite,
     templates: Mapping[str, Dict[str, Any]],
 ) -> str:
+    """把节点或模板 wire 类型规范为本地执行分类。
+
+    参数说明：``node`` 是候选工作流节点（WorkflowNode），``templates`` 是
+    当前最小节点模板投影。返回：公共校验使用的执行分类；未知类型关闭失败。
+    """
+
+    # ``raw_kind`` 优先采用节点模板的权威类型，节点字段仅兼容无模板旧图。
     raw_kind = node.type
     if node.workflow_node_template_uuid is not None:
         raw_kind = templates[node.workflow_node_template_uuid].get(
@@ -236,6 +243,7 @@ def _node_kind(
         "group": "group",
         "tool_call": "tool_call",
         "manual_confirm": "manual_confirm",
+        "material_source": "material_source",
     }
     kind = aliases.get(str(raw_kind).strip().lower())
     if kind is None:

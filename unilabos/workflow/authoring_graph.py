@@ -18,6 +18,11 @@ from unilabos.workflow.authoring_kernel import (
     AuthoringCatalogError,
     AuthoringCatalogSnapshot,
 )
+from unilabos.workflow.authoring_material import (
+    MaterialAuthoringError,
+    MaterialSourceDeclaration,
+    build_material_source_node,
+)
 from unilabos.workflow.models import CandidateChangeset
 
 
@@ -51,10 +56,26 @@ def build_candidate_graph(
     applied = _graph_containers(applied_graph)
     devices = {device.symbol: device for device in program.devices}
     action_catalog: dict[str, AuthoringCatalogAction] = {}
-    result_nodes: dict[str, tuple[ActionDeclaration, AuthoringCatalogAction]] = {}
+    result_nodes: dict[
+        str,
+        tuple[ActionDeclaration | MaterialSourceDeclaration, AuthoringCatalogAction],
+    ] = {}
     nodes: list[dict[str, Any]] = []
     edges: list[dict[str, Any]] = []
     for declaration in program.actions:
+        if isinstance(declaration, MaterialSourceDeclaration):
+            try:
+                # ``node`` 与 ``catalog_action`` 分别是候选事实和框架合同。
+                node, catalog_action = build_material_source_node(
+                    declaration,
+                    catalog=catalog,
+                )
+            except MaterialAuthoringError as error:
+                raise AuthoringGraphError(error.code, error.message) from error
+            action_catalog[declaration.node_uuid] = catalog_action
+            result_nodes[declaration.result_name] = (declaration, catalog_action)
+            nodes.append(node)
+            continue
         device = devices[declaration.device_symbol]
         try:
             catalog_action = catalog.require_action(
@@ -334,7 +355,10 @@ def _require_handle(
 
 def _output_contract(
     program: WorkflowProgram,
-    result_nodes: Mapping[str, tuple[ActionDeclaration, AuthoringCatalogAction]],
+    result_nodes: Mapping[
+        str,
+        tuple[ActionDeclaration | MaterialSourceDeclaration, AuthoringCatalogAction],
+    ],
 ) -> dict[str, Any]:
     """从输出绑定构造版本 1 工作流输出合同。
 
@@ -370,7 +394,10 @@ def _output_contract(
 
 def _output_bindings(
     program: WorkflowProgram,
-    result_nodes: Mapping[str, tuple[ActionDeclaration, AuthoringCatalogAction]],
+    result_nodes: Mapping[
+        str,
+        tuple[ActionDeclaration | MaterialSourceDeclaration, AuthoringCatalogAction],
+    ],
 ) -> dict[str, dict[str, str]]:
     """把作者输出声明映射为稳定工作流输出绑定。
 

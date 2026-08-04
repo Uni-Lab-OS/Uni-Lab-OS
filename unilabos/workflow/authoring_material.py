@@ -1,0 +1,499 @@
+"""物料来源（MaterialSource）创作语法、图投影与源码生成深模块。"""
+
+from __future__ import annotations
+
+import ast
+import keyword
+from collections.abc import Mapping
+from copy import deepcopy
+from dataclasses import dataclass
+from typing import Any
+
+from unilabos.workflow.authoring_kernel import (
+    AuthoringCatalogAction,
+    AuthoringCatalogError,
+    AuthoringCatalogSnapshot,
+)
+from unilabos.workflow.models import validate_uuid
+
+_AUTHORING_MODULE = "unilabos.workflow.authoring"
+_MATERIAL_SOURCE = f"{_AUTHORING_MODULE}:material_source"
+_MATERIAL_FLOW_ROLE = f"{_AUTHORING_MODULE}:MaterialFlowRole"
+_RESOURCE_REF = f"{_AUTHORING_MODULE}:resource_ref"
+_SELECTOR_FIELDS = frozenset(
+    {
+        "resource_template",
+        "mode",
+        "mount",
+        "material_uuid",
+        "site",
+        "slot_range",
+        "flow_role",
+    }
+)
+_FLOW_ROLE_VALUES = {
+    "PRIMARY_SAMPLE": "primary_sample",
+    "ALIQUOT_SAMPLE": "aliquot_sample",
+    "REAGENT": "reagent",
+    "CONSUMABLE": "consumable",
+}
+_FLOW_ROLE_MEMBERS = {value: name for name, value in _FLOW_ROLE_VALUES.items()}
+
+
+class MaterialAuthoringError(ValueError):
+    """物料来源（MaterialSource）不能安全编译或生成。"""
+
+    def __init__(self, code: str, message: str, node: ast.AST | None = None):
+        """保存稳定诊断、中文消息和可选源码位置。
+
+        参数说明：``code`` 供接口判断错误类别，``message`` 供用户理解，
+        ``node`` 是静态 AST（抽象语法树）位置。返回：无；构造异常对象。
+        """
+
+        super().__init__(message)
+        self.code = code
+        self.message = message
+        self.node = node
+
+
+@dataclass(frozen=True, slots=True)
+class MaterialSourceDeclaration:
+    """一个物料来源（MaterialSource）节点的静态作者声明。"""
+
+    node_uuid: str
+    result_name: str
+    title: str | None
+    description: str | None
+    resource_template_symbol: str
+    mode: str
+    mount_material_uuid: str
+    material_uuid: str | None
+    site: str | None
+    slot_range: tuple[str, ...] | None
+    flow_role: str
+    source_node: ast.Assign
+    arguments: tuple[tuple[str, Any], ...] = ()
+
+
+@dataclass(frozen=True, slots=True)
+class RenderedMaterialSource:
+    """物料来源（MaterialSource）的确定性 import 与调用表达式。"""
+
+    resource_import: tuple[str, str]
+    call: str
+
+
+def parse_material_source_declaration(
+    statement: ast.stmt,
+    *,
+    imports: Mapping[str, str],
+    anchors: Mapping[int, str],
+    node_metadata: Mapping[int, tuple[str, str]],
+) -> MaterialSourceDeclaration | None:
+    """识别并静态解析一条物料来源（MaterialSource）声明。
+
+    参数说明：``statement`` 是函数体语句，``imports`` 是局部导入身份表，
+    ``anchors`` 与 ``node_metadata`` 提供节点身份和展示覆盖。返回：非物料来源
+    调用时为 ``None``，否则返回完整声明；选择器不合法时抛出
+    ``MaterialAuthoringError``，绝不 import 或执行作者源码。
+    """
+
+    if not isinstance(statement, ast.Assign) or len(statement.targets) != 1:
+        return None
+    call = statement.value
+    if (
+        not isinstance(call, ast.Call)
+        or not isinstance(call.func, ast.Name)
+        or imports.get(call.func.id) != _MATERIAL_SOURCE
+    ):
+        return None
+    target = statement.targets[0]
+    if not isinstance(target, ast.Name):
+        _fail("物料来源必须赋值给一个新名称", statement)
+    if call.args:
+        _fail("物料来源只接受命名参数", call)
+    # ``keywords`` 是严格七字段选择器；字段缺失、扩展或重复均不能静默兼容。
+    keywords: dict[str, ast.expr] = {}
+    for item in call.keywords:
+        if item.arg is None or item.arg in keywords:
+            _fail("物料来源参数重复或包含 ** 展开", call)
+        keywords[item.arg] = item.value
+    if set(keywords) != _SELECTOR_FIELDS:
+        _fail("物料来源必须完整声明规范选择器字段", call)
+
+    resource_expression = keywords["resource_template"]
+    if not isinstance(resource_expression, ast.Name):
+        _fail("资源模板必须使用显式导入的静态符号", resource_expression)
+    resource_symbol = imports.get(resource_expression.id)
+    if not isinstance(resource_symbol, str) or ":" not in resource_symbol:
+        _fail("资源模板必须使用显式导入的静态符号", resource_expression)
+    mode = _literal_string(keywords["mode"], label="物料来源模式")
+    if mode not in {"existing", "create_new"}:
+        _fail("物料来源模式必须是 existing 或 create_new", keywords["mode"])
+    mount_material_uuid = _resource_ref_uuid(keywords["mount"], imports=imports)
+    material_uuid = _optional_uuid(
+        keywords["material_uuid"],
+        label="固定物料 UUID",
+    )
+    site = _optional_uuid(keywords["site"], label="库位 UUID")
+    slot_range = _optional_uuid_list(
+        keywords["slot_range"],
+        label="库位范围",
+    )
+    if site is not None and slot_range is not None:
+        _fail("物料来源不能同时选择单一库位和库位范围", call)
+    if mode == "create_new" and material_uuid is not None:
+        _fail("新建物料来源不能预先绑定物料 UUID", keywords["material_uuid"])
+    flow_role = _flow_role(keywords["flow_role"], imports=imports)
+    node_uuid = anchors.get(statement.lineno - 1)
+    if node_uuid is None:
+        _fail("每个物料来源前必须有相邻节点 UUID 锚点", statement)
+    metadata = node_metadata.get(statement.lineno - 1)
+    return MaterialSourceDeclaration(
+        node_uuid=node_uuid,
+        result_name=target.id,
+        title=metadata[0] if metadata is not None else None,
+        description=metadata[1] if metadata is not None else None,
+        resource_template_symbol=resource_symbol,
+        mode=mode,
+        mount_material_uuid=mount_material_uuid,
+        material_uuid=material_uuid,
+        site=site,
+        slot_range=slot_range,
+        flow_role=flow_role,
+        source_node=statement,
+    )
+
+
+def build_material_source_node(
+    declaration: MaterialSourceDeclaration,
+    *,
+    catalog: AuthoringCatalogSnapshot,
+) -> tuple[dict[str, Any], AuthoringCatalogAction]:
+    """把静态物料来源声明投影为后端形状节点。
+
+    参数说明：``declaration`` 是可信 AST 结果，``catalog`` 是同代不可变目录。
+    返回：候选节点与框架模板 aggregate；模板或资源身份缺失时抛出带
+    ``template_catalog_mismatch`` 的 ``MaterialAuthoringError``。
+    """
+
+    try:
+        framework = catalog.require_material_source()
+        resource_template_uuid = catalog.require_resource_template_uuid(
+            declaration.resource_template_symbol
+        )
+    except AuthoringCatalogError as error:
+        raise MaterialAuthoringError(
+            "template_catalog_mismatch",
+            "物料来源引用的框架或资源模板身份不在当前目录代际",
+            declaration.source_node,
+        ) from error
+    # ``selector`` 是后续运行时准入和预留消费的完整、稳定选择器事实。
+    selector = {
+        "mode": declaration.mode,
+        "resource_template_uuid": resource_template_uuid,
+        "mount": {"uuid": declaration.mount_material_uuid},
+        "material_uuid": declaration.material_uuid,
+        "site": declaration.site,
+        "slot_range": (
+            list(declaration.slot_range)
+            if declaration.slot_range is not None
+            else None
+        ),
+        "flow_role": declaration.flow_role,
+    }
+    template = framework.template
+    template_title = template.get("display_name") or template.get("name")
+    node = {
+        "uuid": declaration.node_uuid,
+        "workflow_node_template_uuid": str(template["uuid"]),
+        "parent_uuid": None,
+        "material_uuid": None,
+        "name": declaration.title or template_title,
+        "type": "material_source",
+        "icon": template.get("icon"),
+        "pose": {},
+        "param": selector,
+        "footer": template.get("footer"),
+        "action_name": "material_source",
+        "action_type": None,
+        "execution_policy": {},
+        "disabled": False,
+        "minimized": False,
+        "script": None,
+        "description": (
+            declaration.description
+            if declaration.description is not None
+            else template.get("description")
+        ),
+        "meta_data": {
+            "unilab": {
+                "input_bindings": {},
+                "authoring_result_name": declaration.result_name,
+            }
+        },
+    }
+    return node, framework
+
+
+def render_material_source_call(
+    node: Mapping[str, Any],
+    *,
+    catalog: AuthoringCatalogSnapshot,
+) -> RenderedMaterialSource:
+    """从候选节点确定性生成物料来源调用表达式。
+
+    参数说明：``node`` 是后端形状候选节点，``catalog`` 提供资源模板 UUID
+    到源码符号的冻结反向映射。返回：资源 import 与单行调用；选择器或双向
+    身份不可信时抛出 ``MaterialAuthoringError``。
+    """
+
+    selector = _validated_selector(node.get("param"))
+    try:
+        source_symbol = catalog.require_resource_template_symbol(
+            selector["resource_template_uuid"]
+        )
+        # 反向映射后立即再正向确认，防止不互逆的目录适配器污染生成结果。
+        if (
+            catalog.require_resource_template_uuid(source_symbol)
+            != selector["resource_template_uuid"]
+        ):
+            raise AuthoringCatalogError("资源模板身份映射不互逆")
+    except AuthoringCatalogError as error:
+        raise MaterialAuthoringError(
+            "template_catalog_mismatch",
+            "物料来源资源模板 UUID 不能反解为当前源码身份",
+        ) from error
+    module, symbol = source_symbol.rsplit(":", 1)
+    if (
+        not module
+        or not symbol.isidentifier()
+        or keyword.iskeyword(symbol)
+    ):
+        raise MaterialAuthoringError(
+            "template_catalog_mismatch",
+            "资源模板源码身份不能安全生成 Python import",
+        )
+    role_member = _FLOW_ROLE_MEMBERS[selector["flow_role"]]
+    # ``arguments`` 固定字段顺序，确保同一图跨进程生成完全相同的源码。
+    arguments = [
+        f"resource_template={symbol}",
+        f"mode={selector['mode']!r}",
+        f"mount=resource_ref(\"{selector['mount']['uuid']}\")",
+        f"material_uuid={selector['material_uuid']!r}",
+        f"site={selector['site']!r}",
+        f"slot_range={selector['slot_range']!r}",
+        f"flow_role=MaterialFlowRole.{role_member}",
+    ]
+    return RenderedMaterialSource(
+        resource_import=(module, symbol),
+        call=f"material_source({', '.join(arguments)})",
+    )
+
+
+def _validated_selector(raw_selector: Any) -> dict[str, Any]:
+    """验证图中物料来源选择器并返回分离副本。
+
+    参数说明：``raw_selector`` 是可疑候选节点参数。返回：字段和 UUID 均规范的
+    选择器副本；结构、模式、角色或库位组合非法时抛出
+    ``MaterialAuthoringError``。
+    """
+
+    if not isinstance(raw_selector, Mapping):
+        raise MaterialAuthoringError("candidate_invalid", "物料来源选择器必须是对象")
+    selector = deepcopy(dict(raw_selector))
+    expected_fields = {
+        "mode",
+        "resource_template_uuid",
+        "mount",
+        "material_uuid",
+        "site",
+        "slot_range",
+        "flow_role",
+    }
+    if set(selector) != expected_fields:
+        raise MaterialAuthoringError("candidate_invalid", "物料来源选择器字段不完整")
+    if selector["mode"] not in {"existing", "create_new"}:
+        raise MaterialAuthoringError("candidate_invalid", "物料来源选择器模式无效")
+    try:
+        selector["resource_template_uuid"] = validate_uuid(
+            selector["resource_template_uuid"]
+        )
+        mount = selector["mount"]
+        if not isinstance(mount, Mapping) or set(mount) != {"uuid"}:
+            raise ValueError
+        selector["mount"] = {"uuid": validate_uuid(mount["uuid"])}
+        selector["material_uuid"] = _validate_optional_uuid_value(
+            selector["material_uuid"]
+        )
+        selector["site"] = _validate_optional_uuid_value(selector["site"])
+        selector["slot_range"] = _validate_optional_uuid_list_value(
+            selector["slot_range"]
+        )
+    except (KeyError, TypeError, ValueError):
+        raise MaterialAuthoringError(
+            "candidate_invalid",
+            "物料来源选择器包含非法 UUID",
+        ) from None
+    if selector["site"] is not None and selector["slot_range"] is not None:
+        raise MaterialAuthoringError(
+            "candidate_invalid",
+            "物料来源选择器不能同时指定单一库位和库位范围",
+        )
+    if selector["mode"] == "create_new" and selector["material_uuid"] is not None:
+        raise MaterialAuthoringError(
+            "candidate_invalid",
+            "新建物料来源不能绑定现有物料",
+        )
+    if selector["flow_role"] not in _FLOW_ROLE_MEMBERS:
+        raise MaterialAuthoringError("candidate_invalid", "物料流角色不在规范闭集")
+    return selector
+
+
+def _literal_string(expression: ast.expr, *, label: str) -> str:
+    """读取一个非空字符串字面量。
+
+    参数说明：``expression`` 是 AST 表达式，``label`` 用于中文错误说明。
+    返回：原字符串；动态值、空值或非字符串抛出 ``MaterialAuthoringError``。
+    """
+
+    try:
+        value = ast.literal_eval(expression)
+    except (TypeError, ValueError):
+        _fail(f"{label}必须是字符串字面量", expression)
+    if not isinstance(value, str) or not value:
+        _fail(f"{label}必须是非空字符串", expression)
+    return value
+
+
+def _resource_ref_uuid(
+    expression: ast.expr,
+    *,
+    imports: Mapping[str, str],
+) -> str:
+    """解析 ``resource_ref`` 中的固定物料 UUID。
+
+    参数说明：``expression`` 是 mount 表达式，``imports`` 用于证明标记身份。
+    返回：规范物料 UUID；动态调用、别名未知或非法身份关闭失败。
+    """
+
+    if (
+        not isinstance(expression, ast.Call)
+        or not isinstance(expression.func, ast.Name)
+        or imports.get(expression.func.id) != _RESOURCE_REF
+        or len(expression.args) != 1
+        or expression.keywords
+    ):
+        _fail("mount 必须调用 resource_ref(物料 UUID)", expression)
+    return _required_uuid_literal(expression.args[0], label="mount 物料 UUID")
+
+
+def _flow_role(
+    expression: ast.expr,
+    *,
+    imports: Mapping[str, str],
+) -> str:
+    """把物料流角色枚举成员解析为 wire 值。
+
+    参数说明：``expression`` 必须是显式导入的 ``MaterialFlowRole`` 成员，
+    ``imports`` 证明局部名身份。返回：闭集 wire 值；自由字符串或未知成员失败。
+    """
+
+    if (
+        not isinstance(expression, ast.Attribute)
+        or not isinstance(expression.value, ast.Name)
+        or imports.get(expression.value.id) != _MATERIAL_FLOW_ROLE
+        or expression.attr not in _FLOW_ROLE_VALUES
+    ):
+        _fail("物料流角色必须使用 MaterialFlowRole 规范成员", expression)
+    return _FLOW_ROLE_VALUES[expression.attr]
+
+
+def _optional_uuid(expression: ast.expr, *, label: str) -> str | None:
+    """读取 ``None`` 或规范 UUID 字面量。
+
+    参数说明：``expression`` 是 AST 值，``label`` 是中文字段名。返回：规范
+    UUID 或 ``None``；其他值抛出 ``MaterialAuthoringError``。
+    """
+
+    try:
+        value = ast.literal_eval(expression)
+        return _validate_optional_uuid_value(value)
+    except (TypeError, ValueError):
+        _fail(f"{label}必须是 UUID 字面量或 None", expression)
+
+
+def _optional_uuid_list(
+    expression: ast.expr,
+    *,
+    label: str,
+) -> tuple[str, ...] | None:
+    """读取 ``None`` 或无重复 UUID 字面量列表。
+
+    参数说明：``expression`` 是 AST 值，``label`` 是中文字段名。返回：排序的
+    UUID 元组或 ``None``；空数组、重复或非法身份抛出错误。
+    """
+
+    try:
+        value = ast.literal_eval(expression)
+        validated = _validate_optional_uuid_list_value(value)
+    except (TypeError, ValueError):
+        _fail(f"{label}必须是无重复 UUID 列表或 None", expression)
+    return tuple(validated) if validated is not None else None
+
+
+def _required_uuid_literal(expression: ast.expr, *, label: str) -> str:
+    """读取一个规范非 nil UUID 字符串字面量。
+
+    参数说明：``expression`` 是 AST 值，``label`` 用于中文错误。返回：规范
+    UUID；动态值或非法身份抛出 ``MaterialAuthoringError``。
+    """
+
+    try:
+        value = ast.literal_eval(expression)
+        return validate_uuid(value)
+    except (TypeError, ValueError):
+        _fail(f"{label}必须是规范 UUID 字符串", expression)
+
+
+def _validate_optional_uuid_value(value: Any) -> str | None:
+    """校验运行中值是否为 ``None`` 或规范 UUID。
+
+    参数说明：``value`` 来自字面量或候选图。返回：规范 UUID 或 ``None``；
+    非法值抛出 ``ValueError``，由调用边界转换为稳定领域诊断。
+    """
+
+    return None if value is None else validate_uuid(value)
+
+
+def _validate_optional_uuid_list_value(value: Any) -> list[str] | None:
+    """校验运行中值是否为 ``None`` 或非空无重复 UUID 列表。
+
+    参数：字面量或候选图值。返回排序列表或 ``None``；非法值抛出 ``ValueError``。
+    """
+
+    if value is None:
+        return None
+    if not isinstance(value, list) or not value:
+        raise ValueError("库位范围必须是非空列表")
+    identities = [validate_uuid(item) for item in value]
+    if len(set(identities)) != len(identities):
+        raise ValueError("库位范围不能重复")
+    return sorted(identities)
+
+
+def _fail(message: str, node: ast.AST | None = None) -> None:
+    """抛出稳定物料来源语法诊断。
+
+    参数说明：``message`` 是中文错误，``node`` 是可选 AST 位置。返回：永不
+    正常返回，统一抛出 ``invalid_material_source``。
+    """
+
+    raise MaterialAuthoringError("invalid_material_source", message, node)
+
+
+__all__ = [
+    "MaterialAuthoringError", "MaterialSourceDeclaration", "RenderedMaterialSource",
+    "build_material_source_node", "parse_material_source_declaration",
+    "render_material_source_call",
+]

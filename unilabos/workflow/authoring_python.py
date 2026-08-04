@@ -15,6 +15,11 @@ from unilabos.workflow.authoring_kernel import (
     AuthoringCatalogError,
     AuthoringCatalogSnapshot,
 )
+from unilabos.workflow.authoring_material import (
+    MaterialAuthoringError,
+    RenderedMaterialSource,
+    render_material_source_call,
+)
 from unilabos.workflow.models import CandidateSourceMapEntry, validate_uuid
 from unilabos.workflow.source_coordinates import utf16_length
 
@@ -53,6 +58,23 @@ def render_authoring_python(
     catalog_by_node = _catalog_projection(node_by_uuid, catalog)
     ordered_nodes = _topological_nodes(node_by_uuid, edges)
     device_symbols, device_imports = _device_symbols(ordered_nodes, catalog_by_node)
+    # ``material_sources`` 冻结每个物料来源节点的 import 与调用表达式。
+    material_sources: dict[str, RenderedMaterialSource] = {}
+    for node in ordered_nodes:
+        node_uuid = str(node["uuid"])
+        if not _is_material_source(catalog_by_node[node_uuid]):
+            continue
+        try:
+            material_sources[node_uuid] = render_material_source_call(
+                node,
+                catalog=catalog,
+            )
+        except MaterialAuthoringError as error:
+            raise AuthoringGraphError(error.code, error.message) from error
+    # ``material_imports`` 与设备 import 合并后按限定身份稳定排序。
+    material_imports = {
+        rendered.resource_import for rendered in material_sources.values()
+    }
     input_contract, output_contract, output_bindings = _authoring_metadata(workflow)
 
     annotations = [
@@ -88,11 +110,13 @@ def render_authoring_python(
         lines.append("")
     if needs_field:
         lines.append("from pydantic import Field")
-    for module, symbol in sorted(device_imports):
+    for module, symbol in sorted(device_imports | material_imports):
         lines.append(f"from {module} import {symbol}")
     if needs_resource_slot:
         lines.append("from unilabos.registry.placeholder_type import ResourceSlot")
     marker_imports = "device, workflow"
+    if material_sources:
+        marker_imports += ", MaterialFlowRole, material_source, resource_ref"
     if not output_bindings:
         marker_imports += ", workflow_output"
     lines.append(f"from unilabos.workflow.authoring import {marker_imports}")
@@ -171,18 +195,22 @@ def render_authoring_python(
         if metadata_comment is not None:
             lines.append(f"    {metadata_comment}")
         lines.append(f"    # unilab:node_uuid={node_uuid}")
-        arguments = _render_action_arguments(
-            node=node,
-            action=action,
-            incoming=incoming,
-            node_by_uuid=node_by_uuid,
-            catalog_by_node=catalog_by_node,
-        )
-        selector_key = _selector_key(node, action)
-        call = (
-            f"{device_symbols[selector_key]}.{node.get('action_name') or action.template['name']}"
-            f"({', '.join(arguments)})"
-        )
+        if node_uuid in material_sources:
+            call = material_sources[node_uuid].call
+        else:
+            arguments = _render_action_arguments(
+                node=node,
+                action=action,
+                incoming=incoming,
+                node_by_uuid=node_by_uuid,
+                catalog_by_node=catalog_by_node,
+            )
+            selector_key = _selector_key(node, action)
+            call = (
+                f"{device_symbols[selector_key]}."
+                f"{node.get('action_name') or action.template['name']}"
+                f"({', '.join(arguments)})"
+            )
         lines.append(f"    {result_name} = {call}")
         end_line = len(lines)
         source_map.append(
@@ -315,6 +343,8 @@ def _device_symbols(
     imports: set[tuple[str, str]] = set()
     for node in nodes:
         action = catalog_by_node[str(node["uuid"])]
+        if _is_material_source(action):
+            continue
         class_identity, device_id = _selector_key(node, action)
         module, class_name = class_identity.rsplit(":", 1)
         imports.add((module, class_name))
@@ -523,7 +553,12 @@ def _render_action_arguments(
             if source_handle is None:
                 raise AuthoringGraphError("candidate_invalid", "数据边源连接点不在目录中")
             source_name = _node_result_name(source_node)
-            expression = f"{source_name}.{source_handle['handle_key']}"
+            expression = (
+                source_name
+                if _is_material_source(source_action)
+                and source_handle.get("handle_key") == "material"
+                else f"{source_name}.{source_handle['handle_key']}"
+            )
         elif key in params:
             expression = repr(params[key])
         if expression is not None:
@@ -564,7 +599,22 @@ def _render_output_binding(
     if handle is None or handle.get("io_type") != "source":
         raise AuthoringGraphError("candidate_invalid", "工作流输出连接点无效")
     result_name = _node_result_name(node)
+    if _is_material_source(action) and handle.get("handle_key") == "material":
+        return result_name
     return f"{result_name}.{handle['handle_key']}"
+
+
+def _is_material_source(action: AuthoringCatalogAction) -> bool:
+    """判断目录 aggregate 是否为框架物料来源（MaterialSource）。
+
+    参数说明：``action`` 是节点模板与连接点（Handle）的不可变聚合。返回：
+    仅当模板类型和节点类型同时为 ``material_source`` 时为真。
+    """
+
+    return (
+        action.template.get("type") == "material_source"
+        and action.template.get("node_type") == "material_source"
+    )
 
 
 def _node_result_name(node: Mapping[str, Any]) -> str:
