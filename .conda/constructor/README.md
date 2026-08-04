@@ -82,7 +82,7 @@ hash、lockfile 和包清单。
 在包含 OS 与前端 submodule 的 Uni-Lab-Core 根目录运行：
 
 ```bash
-pnpm package:unified -- --platform linux-64
+pnpm package:unified --platform linux-64
 ```
 
 该命令依次构建三个 pip-only 依赖的本地 Conda 包、当前 OS 源码包、Constructor 私有
