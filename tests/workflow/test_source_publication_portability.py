@@ -9,10 +9,54 @@ from typing import Any
 import pytest
 
 from unilabos.workflow import composition, source_publication, source_workspace
+from unilabos.workflow.models import CandidateCompilation
 from unilabos.workflow.service import WorkflowService
 from unilabos.workflow.store import WorkflowStore
 
 WORKFLOW_UUID = "11111111-1111-4111-8111-111111111111"
+CATALOG_FINGERPRINT = f"sha256:{'f' * 64}"
+
+
+class SourceOnlyCompiler:
+    """为发布测试生成不改变工作流图的候选版本（Candidate Revision）。"""
+
+    compiler_version = "portable-source-v1"
+    template_catalog_fingerprint = CATALOG_FINGERPRINT
+
+    def compile(
+        self,
+        *,
+        workflow_uuid: str,
+        workflow_revision: int,
+        python_source: str,
+        source_uri: str,
+        applied_graph: dict[str, Any],
+    ) -> CandidateCompilation:
+        """把任意测试源码编译为仅源码变化的确定性候选版本。
+
+        参数：工作流身份/修订、源码 URI 和源码提供编译上下文；``applied_graph``
+        是保持不变的已应用图。返回：合法候选编译结果；不产生外部状态。
+        """
+
+        del workflow_uuid, workflow_revision, source_uri
+        return CandidateCompilation(
+            diagnostics=[],
+            graph=applied_graph,
+            normalized_python_source=python_source,
+            source_map=[],
+            changeset={
+                "kind": "source_only",
+                "created_node_uuids": [],
+                "updated_node_uuids": [],
+                "deleted_node_uuids": [],
+                "created_edge_uuids": [],
+                "updated_edge_uuids": [],
+                "deleted_edge_uuids": [],
+                "reserved_metadata_changed": False,
+            },
+            compiler_version=self.compiler_version,
+            template_catalog_fingerprint=self.template_catalog_fingerprint,
+        )
 
 
 class WindowsMsvcrt:
@@ -174,6 +218,7 @@ def test_windows_without_dir_fd_can_discover_read_and_save_source(
 
     service = composition.compose_workflow_runtime(
         working_dir,
+        compiler=SourceOnlyCompiler(),
         editable_package_roots=(selected_root,),
     )
     baseline = service.get_authoring(WORKFLOW_UUID)
@@ -205,7 +250,10 @@ def test_macos_uses_flock_without_assuming_linux_file_leases(
     source_path = package_root / "workflows" / "demo.py"
     source_path.parent.mkdir(parents=True)
     source_path.write_text("value = 'initial'\n", encoding="utf-8")
-    service = WorkflowService(WorkflowStore(database_path))
+    service = WorkflowService(
+        WorkflowStore(database_path),
+        compiler=SourceOnlyCompiler(),
+    )
     service.create_workflow(
         workflow_uuid=WORKFLOW_UUID,
         name="macOS source",

@@ -1,21 +1,41 @@
-"""工作流源码（Workflow Source）的原子 CAS 发布内部实现。"""
+"""工作流源码（Workflow Source）的可移植原子 CAS 发布内部实现。"""
 
 from __future__ import annotations
 
-import fcntl
 import hashlib
 import os
 import signal
 import stat
 import struct
+import sys
 import threading
-from contextlib import suppress
+from collections.abc import Callable, Iterator
+from contextlib import contextmanager, suppress
+from dataclasses import dataclass
+from pathlib import Path
 from uuid import uuid4
 
+from unilabos.workflow.source_file_access import (
+    StableFileAccessError,
+    assert_directory_identity,
+    directory_identity,
+    read_stable_descriptor,
+)
+
+try:  # pragma: no cover - 导入分支由目标操作系统决定
+    import fcntl as _fcntl
+except ImportError:  # pragma: no cover - Windows 没有 fcntl
+    _fcntl = None
+
+try:  # pragma: no cover - 导入分支由目标操作系统决定
+    import msvcrt as _msvcrt
+except ImportError:  # pragma: no cover - POSIX 没有 msvcrt
+    _msvcrt = None
+
 NO_EXPECTED_HASH = object()
-_F_SETOWN_EX = getattr(fcntl, "F_SETOWN_EX", 15)
+_PLATFORM = sys.platform
 _F_OWNER_TID = 0
-_LEASE_BREAK_SIGNAL = signal.SIGRTMAX
+_LEASE_BREAK_SIGNAL = getattr(signal, "SIGRTMAX", None)
 
 
 class SourcePublicationConflict(RuntimeError):
@@ -26,34 +46,216 @@ class SourcePublicationError(RuntimeError):
     """表示原子发布无法安全完成的基础设施错误。"""
 
 
+@dataclass(frozen=True)
+class _PublicationDirectory:
+    """统一目录描述符与安全绝对路径两种发布后端。"""
+
+    descriptor: int | None
+    path: Path | None
+    identity: tuple[int, int]
+
+    @classmethod
+    def create(
+        cls,
+        *,
+        parent_descriptor: int | None,
+        parent_path: str | Path | None,
+    ) -> _PublicationDirectory:
+        """校验并固定恰好一种父目录访问方式。
+
+        参数：``parent_descriptor`` 是支持 ``dir_fd`` 平台的固定目录；
+        ``parent_path`` 是无 ``dir_fd`` 平台的规范绝对目录。返回：统一发布目录。
+        异常：两者同时提供、同时缺失或目录不安全时抛出 ``SourcePublicationError``。
+        """
+
+        if (parent_descriptor is None) == (parent_path is None):
+            raise SourcePublicationError("publication_failed")
+        try:
+            if parent_descriptor is not None:
+                metadata = os.fstat(parent_descriptor)
+                if not stat.S_ISDIR(metadata.st_mode):
+                    raise SourcePublicationError("publication_failed")
+                return cls(
+                    descriptor=parent_descriptor,
+                    path=None,
+                    identity=(metadata.st_dev, metadata.st_ino),
+                )
+            absolute_path = Path(os.path.abspath(Path(parent_path)))
+            return cls(
+                descriptor=None,
+                path=absolute_path,
+                identity=directory_identity(absolute_path),
+            )
+        except (OSError, StableFileAccessError, TypeError, ValueError):
+            raise SourcePublicationError("publication_failed") from None
+
+    def assert_current(self) -> None:
+        """复核发布父目录仍是创建时固定的同一物理目录。
+
+        参数：无。返回：身份不变时无返回值。异常：替换或不可访问时抛出
+        ``SourcePublicationError``。
+        """
+
+        try:
+            if self.descriptor is not None:
+                metadata = os.fstat(self.descriptor)
+                current = metadata.st_dev, metadata.st_ino
+                if not stat.S_ISDIR(metadata.st_mode) or current != self.identity:
+                    raise SourcePublicationError("publication_failed")
+            else:
+                assert self.path is not None
+                assert_directory_identity(self.path, self.identity)
+        except (OSError, StableFileAccessError):
+            raise SourcePublicationError("publication_failed") from None
+
+    def open_child(self, name: str, flags: int, mode: int = 0o777) -> int:
+        """在固定父目录中打开一个单段子文件。
+
+        参数：``name`` 是单段文件名；``flags`` 和 ``mode`` 与 ``os.open`` 一致。
+        返回：调用者负责关闭的描述符。异常：目录身份变化或打开失败原样交给上层。
+        """
+
+        self.assert_current()
+        if self.descriptor is not None:
+            return os.open(name, flags, mode, dir_fd=self.descriptor)
+        assert self.path is not None
+        return os.open(self.path / name, flags, mode)
+
+    def stat_child(self, name: str) -> os.stat_result:
+        """不跟随符号链接读取一个单段子文件元数据。
+
+        参数：``name`` 是目标文件名。返回：``lstat`` 等价元数据；目录身份在读取
+        前复核，系统错误原样交给调用者。
+        """
+
+        self.assert_current()
+        if self.descriptor is not None:
+            return os.stat(name, dir_fd=self.descriptor, follow_symlinks=False)
+        assert self.path is not None
+        return (self.path / name).lstat()
+
+    def replace_child(self, source_name: str, target_name: str) -> None:
+        """原子替换同一固定目录内的目标文件。
+
+        参数：``source_name`` 是完整临时文件；``target_name`` 是规范文件。返回：
+        无；目录身份变化或替换失败原样交给上层。
+        """
+
+        self.assert_current()
+        if self.descriptor is not None:
+            os.replace(
+                source_name,
+                target_name,
+                src_dir_fd=self.descriptor,
+                dst_dir_fd=self.descriptor,
+            )
+            return
+        assert self.path is not None
+        os.replace(self.path / source_name, self.path / target_name)
+
+    def link_child(self, source_name: str, target_name: str) -> None:
+        """以“不覆盖已存在目标”的硬链接完成首次发布。
+
+        参数：``source_name`` 是临时文件；``target_name`` 是缺失的规范文件。
+        返回：无；并发创建表现为 ``FileExistsError``。
+        """
+
+        self.assert_current()
+        if self.descriptor is not None:
+            os.link(
+                source_name,
+                target_name,
+                src_dir_fd=self.descriptor,
+                dst_dir_fd=self.descriptor,
+                follow_symlinks=False,
+            )
+            return
+        assert self.path is not None
+        os.link(
+            self.path / source_name,
+            self.path / target_name,
+            follow_symlinks=False,
+        )
+
+    def unlink_child(self, name: str) -> None:
+        """删除固定目录中的发布临时文件。
+
+        参数：``name`` 是单段临时名。返回：无；目录身份变化或删除失败原样抛出。
+        """
+
+        self.assert_current()
+        if self.descriptor is not None:
+            os.unlink(name, dir_fd=self.descriptor)
+            return
+        assert self.path is not None
+        os.unlink(self.path / name)
+
+    def sync(self) -> None:
+        """尽平台能力同步父目录元数据。
+
+        参数：无。返回：无；POSIX 描述符必须成功 ``fsync``，Windows 绝对路径
+        后端在系统不允许打开/同步目录时采用原子替换保证并安全降级。
+        """
+
+        self.assert_current()
+        if self.descriptor is not None:
+            os.fsync(self.descriptor)
+            return
+        assert self.path is not None
+        directory_descriptor = -1
+        try:
+            directory_descriptor = os.open(
+                self.path,
+                os.O_RDONLY | getattr(os, "O_DIRECTORY", 0),
+            )
+            os.fsync(directory_descriptor)
+        except OSError:
+            if not _PLATFORM.startswith("win"):
+                raise
+        finally:
+            if directory_descriptor >= 0:
+                os.close(directory_descriptor)
+
+
 def atomic_publish_source(
     *,
-    parent_descriptor: int,
+    parent_descriptor: int | None = None,
+    parent_path: str | Path | None = None,
     target_name: str,
     content: bytes,
     byte_limit: int,
     expected_hash: object | str | None = NO_EXPECTED_HASH,
 ) -> None:
-    """在已固定目录中原子发布一份工作流源码。
+    """在固定目录中原子发布一份工作流源码（Workflow Source）。
 
-    参数：``parent_descriptor`` 是规范源码父目录；``target_name`` 是单段文件名；
-    ``content`` 是待发布字节；``byte_limit`` 是源码硬上限；``expected_hash``
-    是可选的原稿 SHA-256 CAS 条件。
-    返回：无；成功时规范路径指向完整新文件并完成目录 ``fsync``。
-    异常：并发变化抛出 ``SourcePublicationConflict``；文件系统失败抛出
+    参数：父目录描述符或绝对路径必须恰好提供一种；``target_name`` 是单段文件名；
+    ``content`` 是待发布字节；``byte_limit`` 是硬上限；``expected_hash`` 是可选
+    SHA-256 CAS 条件。返回：成功时规范路径指向完整新文件。异常：并发变化抛出
+    ``SourcePublicationConflict``；平台能力或文件系统失败抛出
     ``SourcePublicationError``。
     """
 
-    if len(content) > byte_limit:
-        raise SourcePublicationError("source_too_large")
+    if (
+        len(content) > byte_limit
+        or not target_name
+        or Path(target_name).name != target_name
+    ):
+        raise SourcePublicationError("publication_failed")
+    location = _PublicationDirectory.create(
+        parent_descriptor=parent_descriptor,
+        parent_path=parent_path,
+    )
     temporary_name = f".{target_name}.{uuid4().hex}.tmp"
     descriptor = -1
     try:
-        descriptor = os.open(
+        descriptor = location.open_child(
             temporary_name,
-            (os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_CLOEXEC | os.O_NOFOLLOW),
+            os.O_WRONLY
+            | os.O_CREAT
+            | os.O_EXCL
+            | getattr(os, "O_CLOEXEC", 0)
+            | getattr(os, "O_NOFOLLOW", 0),
             0o600,
-            dir_fd=parent_descriptor,
         )
         with os.fdopen(descriptor, "wb") as stream:
             descriptor = -1
@@ -61,183 +263,239 @@ def atomic_publish_source(
             stream.flush()
             os.fsync(stream.fileno())
         if expected_hash is NO_EXPECTED_HASH:
-            os.replace(
-                temporary_name,
-                target_name,
-                src_dir_fd=parent_descriptor,
-                dst_dir_fd=parent_descriptor,
-            )
+            location.replace_child(temporary_name, target_name)
         else:
             _compare_and_replace(
-                parent_descriptor=parent_descriptor,
+                location=location,
                 target_name=target_name,
                 temporary_name=temporary_name,
                 expected_hash=expected_hash,
                 byte_limit=byte_limit,
             )
-        os.fsync(parent_descriptor)
+        location.sync()
     except SourcePublicationConflict:
         raise
-    except (OSError, SourcePublicationError):
+    except (OSError, SourcePublicationError, StableFileAccessError):
         raise SourcePublicationError("publication_failed") from None
     finally:
         if descriptor >= 0:
             os.close(descriptor)
-        with suppress(FileNotFoundError):
-            os.unlink(temporary_name, dir_fd=parent_descriptor)
+        with suppress(FileNotFoundError, OSError, SourcePublicationError):
+            location.unlink_child(temporary_name)
 
 
 def _compare_and_replace(
     *,
-    parent_descriptor: int,
+    location: _PublicationDirectory,
     target_name: str,
     temporary_name: str,
     expected_hash: str | None,
     byte_limit: int,
 ) -> None:
-    """在可安全中断的文件租约下执行 ``fsync`` 后的原子 CAS 替换。
+    """在平台可用独占锁下执行受限读取、比较与原子替换。
 
-    参数：父目录、目标名和临时名共同固定发布对象；``expected_hash`` 是原稿条件；
-    ``byte_limit`` 同时约束原稿、临时文件和发布后文件读取。
-    返回：无；CAS 成功时完成替换。
-    异常：无法证明原稿身份稳定时抛出 ``SourcePublicationConflict``。
+    参数：``location`` 固定发布目录；目标名和临时名标识两份文件；
+    ``expected_hash`` 是原稿条件；``byte_limit`` 约束所有内容读取。返回：CAS 成功
+    时无返回值。异常：缺少安全锁、身份变化或内容冲突统一抛出
+    ``SourcePublicationConflict``。
     """
 
     target_descriptor = -1
     temporary_descriptor = -1
-    backup_name = f".{target_name}.{uuid4().hex}.cas"
-    backup_created = False
-    replacement_attempted = False
-    lease_held = False
-    previous_signal_mask: set[signal.Signals] | None = None
     try:
         try:
-            target_descriptor = os.open(
+            target_descriptor = location.open_child(
                 target_name,
-                os.O_RDWR | os.O_CLOEXEC | os.O_NOFOLLOW,
-                dir_fd=parent_descriptor,
+                os.O_RDWR
+                | getattr(os, "O_CLOEXEC", 0)
+                | getattr(os, "O_NOFOLLOW", 0),
             )
         except FileNotFoundError:
             if expected_hash is not None:
                 raise SourcePublicationConflict("draft_hash_conflict") from None
             try:
-                os.link(
-                    temporary_name,
-                    target_name,
-                    src_dir_fd=parent_descriptor,
-                    dst_dir_fd=parent_descriptor,
-                    follow_symlinks=False,
-                )
+                location.link_child(temporary_name, target_name)
             except FileExistsError:
                 raise SourcePublicationConflict("draft_hash_conflict") from None
-            os.unlink(temporary_name, dir_fd=parent_descriptor)
+            location.unlink_child(temporary_name)
             return
-
         if expected_hash is None:
             raise SourcePublicationConflict("draft_hash_conflict")
-        try:
-            previous_signal_mask = signal.pthread_sigmask(
-                signal.SIG_BLOCK,
-                {_LEASE_BREAK_SIGNAL},
-            )
-            fcntl.fcntl(
+
+        with _exclusive_target_lock(target_descriptor) as lock_was_broken:
+            original_bytes = _stable_bytes(
                 target_descriptor,
-                _F_SETOWN_EX,
-                struct.pack("ii", _F_OWNER_TID, threading.get_native_id()),
+                byte_limit=byte_limit,
             )
-            fcntl.fcntl(target_descriptor, fcntl.F_SETSIG, _LEASE_BREAK_SIGNAL)
-            fcntl.fcntl(target_descriptor, fcntl.F_SETLEASE, fcntl.F_WRLCK)
-            lease_held = True
-        except (AttributeError, OSError, ValueError):
-            raise SourcePublicationConflict("draft_hash_conflict") from None
-
-        original_bytes = _read_regular_descriptor(
-            target_descriptor,
-            byte_limit=byte_limit,
-        )
-        if _sha256(original_bytes) != expected_hash or not _target_matches_descriptor(
-            parent_descriptor,
-            target_name,
-            target_descriptor,
-        ):
-            raise SourcePublicationConflict("draft_hash_conflict")
-
-        temporary_descriptor = os.open(
-            temporary_name,
-            os.O_RDONLY | os.O_CLOEXEC | os.O_NOFOLLOW,
-            dir_fd=parent_descriptor,
-        )
-        replacement_hash = _hash_regular_descriptor(
-            temporary_descriptor,
-            byte_limit=byte_limit,
-        )
-        os.link(
-            target_name,
-            backup_name,
-            src_dir_fd=parent_descriptor,
-            dst_dir_fd=parent_descriptor,
-            follow_symlinks=False,
-        )
-        backup_created = True
-        os.fsync(parent_descriptor)
-        if _drain_lease_break_signal():
-            raise SourcePublicationConflict("draft_hash_conflict")
-
-        replacement_attempted = True
-        os.replace(
-            temporary_name,
-            target_name,
-            src_dir_fd=parent_descriptor,
-            dst_dir_fd=parent_descriptor,
-        )
-        os.fsync(parent_descriptor)
-        if _drain_lease_break_signal() or not _published_identity_matches(
-            parent_descriptor=parent_descriptor,
+            if (
+                _sha256(original_bytes) != expected_hash
+                or not _target_matches_descriptor(
+                    location,
+                    target_name,
+                    target_descriptor,
+                )
+            ):
+                raise SourcePublicationConflict("draft_hash_conflict")
+            temporary_descriptor = location.open_child(
+                temporary_name,
+                os.O_RDONLY
+                | getattr(os, "O_CLOEXEC", 0)
+                | getattr(os, "O_NOFOLLOW", 0),
+            )
+            replacement_hash = _sha256(
+                _stable_bytes(temporary_descriptor, byte_limit=byte_limit)
+            )
+            if lock_was_broken() or not _target_matches_descriptor(
+                location,
+                target_name,
+                target_descriptor,
+            ):
+                raise SourcePublicationConflict("draft_hash_conflict")
+            location.replace_child(temporary_name, target_name)
+            location.sync()
+            if lock_was_broken() or not _published_identity_matches(
+                location=location,
+                target_name=target_name,
+                published_descriptor=temporary_descriptor,
+                expected_hash=replacement_hash,
+                byte_limit=byte_limit,
+            ):
+                raise SourcePublicationConflict("draft_hash_conflict")
+        if not _published_identity_matches(
+            location=location,
             target_name=target_name,
             published_descriptor=temporary_descriptor,
             expected_hash=replacement_hash,
             byte_limit=byte_limit,
         ):
             raise SourcePublicationConflict("draft_hash_conflict")
-
-        fcntl.fcntl(target_descriptor, fcntl.F_SETLEASE, fcntl.F_UNLCK)
-        lease_held = False
-        if _drain_lease_break_signal() or not _published_identity_matches(
-            parent_descriptor=parent_descriptor,
-            target_name=target_name,
-            published_descriptor=temporary_descriptor,
-            expected_hash=replacement_hash,
-            byte_limit=byte_limit,
-        ):
-            raise SourcePublicationConflict("draft_hash_conflict")
-        with suppress(OSError):
-            os.unlink(backup_name, dir_fd=parent_descriptor)
-            backup_created = False
-            os.fsync(parent_descriptor)
-    except Exception:
-        # 替换后不能用历史备份覆盖可能已被外部修改的规范路径。
-        if backup_created and not replacement_attempted:
-            with suppress(OSError):
-                os.unlink(backup_name, dir_fd=parent_descriptor)
-                os.fsync(parent_descriptor)
+    except SourcePublicationConflict:
         raise
+    except (OSError, SourcePublicationError, StableFileAccessError):
+        raise SourcePublicationConflict("draft_hash_conflict") from None
     finally:
-        if lease_held and target_descriptor >= 0:
-            with suppress(OSError):
-                fcntl.fcntl(target_descriptor, fcntl.F_SETLEASE, fcntl.F_UNLCK)
-        if previous_signal_mask is not None:
-            with suppress(OSError, ValueError):
-                _drain_lease_break_signal()
-            signal.pthread_sigmask(signal.SIG_SETMASK, previous_signal_mask)
         if temporary_descriptor >= 0:
             os.close(temporary_descriptor)
         if target_descriptor >= 0:
             os.close(target_descriptor)
 
 
+@contextmanager
+def _exclusive_target_lock(
+    descriptor: int,
+) -> Iterator[Callable[[], bool]]:
+    """按 Linux、macOS/POSIX、Windows 顺序选择目标文件独占锁。
+
+    参数：``descriptor`` 是 CAS 原稿文件。返回：上下文值是“是否观察到 Linux
+    租约中断”的无参函数；其他平台恒为 ``False``。异常：无法获得可证明的锁时
+    抛出 ``SourcePublicationConflict``，绝不无锁继续发布。
+    """
+
+    if _linux_lease_supported():
+        with _linux_lease(descriptor) as lease_broken:
+            yield lease_broken
+        return
+    if _fcntl is not None and all(
+        hasattr(_fcntl, name) for name in ("flock", "LOCK_EX", "LOCK_NB", "LOCK_UN")
+    ):
+        try:
+            _fcntl.flock(descriptor, _fcntl.LOCK_EX | _fcntl.LOCK_NB)
+        except (OSError, ValueError):
+            raise SourcePublicationConflict("draft_hash_conflict") from None
+        try:
+            yield _never_broken
+        finally:
+            with suppress(OSError, ValueError):
+                _fcntl.flock(descriptor, _fcntl.LOCK_UN)
+        return
+    if _msvcrt is not None and all(
+        hasattr(_msvcrt, name) for name in ("locking", "LK_NBLCK", "LK_UNLCK")
+    ):
+        try:
+            os.lseek(descriptor, 0, os.SEEK_SET)
+            _msvcrt.locking(descriptor, _msvcrt.LK_NBLCK, 1)
+        except (OSError, ValueError):
+            raise SourcePublicationConflict("draft_hash_conflict") from None
+        try:
+            yield _never_broken
+        finally:
+            with suppress(OSError, ValueError):
+                os.lseek(descriptor, 0, os.SEEK_SET)
+                _msvcrt.locking(descriptor, _msvcrt.LK_UNLCK, 1)
+        return
+    raise SourcePublicationConflict("draft_hash_conflict")
+
+
+def _linux_lease_supported() -> bool:
+    """判断当前运行时是否完整提供 Linux 可中断写租约。
+
+    参数：无。返回：平台、``fcntl`` 常量、实时信号和线程信号 API 均存在时为
+    ``True``；macOS 仅有 ``flock`` 时为 ``False``。
+    """
+
+    return bool(
+        _PLATFORM.startswith("linux")
+        and _fcntl is not None
+        and _LEASE_BREAK_SIGNAL is not None
+        and all(
+            hasattr(_fcntl, name)
+            for name in (
+                "fcntl",
+                "F_SETSIG",
+                "F_SETLEASE",
+                "F_WRLCK",
+                "F_UNLCK",
+            )
+        )
+        and hasattr(signal, "pthread_sigmask")
+        and hasattr(signal, "sigtimedwait")
+    )
+
+
+@contextmanager
+def _linux_lease(descriptor: int) -> Iterator[Callable[[], bool]]:
+    """获取可检测外部打开的 Linux 写租约并在退出时完整恢复信号状态。
+
+    参数：``descriptor`` 是 CAS 原稿。返回：租约中断探测函数。异常：租约或
+    信号配置失败时抛出 ``SourcePublicationConflict``。
+    """
+
+    assert _fcntl is not None
+    assert _LEASE_BREAK_SIGNAL is not None
+    previous_signal_mask: set[signal.Signals] | None = None
+    lease_held = False
+    try:
+        previous_signal_mask = signal.pthread_sigmask(
+            signal.SIG_BLOCK,
+            {_LEASE_BREAK_SIGNAL},
+        )
+        owner_operation = getattr(_fcntl, "F_SETOWN_EX", 15)
+        _fcntl.fcntl(
+            descriptor,
+            owner_operation,
+            struct.pack("ii", _F_OWNER_TID, threading.get_native_id()),
+        )
+        _fcntl.fcntl(descriptor, _fcntl.F_SETSIG, _LEASE_BREAK_SIGNAL)
+        _fcntl.fcntl(descriptor, _fcntl.F_SETLEASE, _fcntl.F_WRLCK)
+        lease_held = True
+        yield _drain_lease_break_signal
+    except SourcePublicationConflict:
+        raise
+    except (AttributeError, OSError, ValueError):
+        raise SourcePublicationConflict("draft_hash_conflict") from None
+    finally:
+        if lease_held:
+            with suppress(OSError):
+                _fcntl.fcntl(descriptor, _fcntl.F_SETLEASE, _fcntl.F_UNLCK)
+        if previous_signal_mask is not None:
+            with suppress(OSError, ValueError):
+                _drain_lease_break_signal()
+            signal.pthread_sigmask(signal.SIG_SETMASK, previous_signal_mask)
+
+
 def _published_identity_matches(
     *,
-    parent_descriptor: int,
+    location: _PublicationDirectory,
     target_name: str,
     published_descriptor: int,
     expected_hash: str,
@@ -245,31 +503,70 @@ def _published_identity_matches(
 ) -> bool:
     """验证规范路径仍指向本次发布的文件身份与内容。
 
-    参数：目录、文件名和已打开描述符标识本次发布；哈希和上限约束内容。
-    返回：文件身份与哈希均保持一致时为 ``True``。
+    参数：目录、目标名和发布描述符固定本次结果；哈希与上限约束内容。返回：
+    身份和稳定内容均匹配时为 ``True``，任何读取错误为 ``False``。
     """
 
-    return (
-        _target_matches_descriptor(
-            parent_descriptor,
+    try:
+        return _target_matches_descriptor(
+            location,
             target_name,
             published_descriptor,
-        )
-        and _hash_regular_descriptor(
-            published_descriptor,
-            byte_limit=byte_limit,
-        )
-        == expected_hash
+        ) and _sha256(
+            _stable_bytes(published_descriptor, byte_limit=byte_limit)
+        ) == expected_hash
+    except (OSError, SourcePublicationError, SourcePublicationConflict):
+        return False
+
+
+def _target_matches_descriptor(
+    location: _PublicationDirectory,
+    target_name: str,
+    descriptor: int,
+) -> bool:
+    """比较规范路径与已打开描述符的物理普通文件身份。
+
+    参数：``location`` 和 ``target_name`` 指定路径；``descriptor`` 指定已打开
+    文件。返回：两者是同一普通文件时为 ``True``，目标缺失时为 ``False``。
+    """
+
+    try:
+        target_metadata = location.stat_child(target_name)
+    except FileNotFoundError:
+        return False
+    descriptor_metadata = os.fstat(descriptor)
+    return (
+        stat.S_ISREG(target_metadata.st_mode)
+        and stat.S_ISREG(descriptor_metadata.st_mode)
+        and target_metadata.st_dev == descriptor_metadata.st_dev
+        and target_metadata.st_ino == descriptor_metadata.st_ino
     )
 
 
-def _drain_lease_break_signal() -> bool:
-    """同步消费当前线程收到的文件租约中断通知。
+def _stable_bytes(descriptor: int, *, byte_limit: int) -> bytes:
+    """读取 CAS 文件的受限稳定字节并统一冲突分类。
 
-    参数：无。
-    返回：至少观察到一次租约中断时为 ``True``。
+    参数：``descriptor`` 是原稿、临时或已发布文件；``byte_limit`` 是硬上限。
+    返回：完整稳定字节。异常：任何不稳定或超限均抛出
+    ``SourcePublicationConflict``。
     """
 
+    try:
+        return read_stable_descriptor(
+            descriptor,
+            byte_limit=byte_limit,
+        ).content
+    except StableFileAccessError:
+        raise SourcePublicationConflict("draft_hash_conflict") from None
+
+
+def _drain_lease_break_signal() -> bool:
+    """同步消费当前线程收到的 Linux 文件租约中断通知。
+
+    参数：无。返回：至少观察到一次租约中断时为 ``True``；非 Linux 路径不调用。
+    """
+
+    assert _LEASE_BREAK_SIGNAL is not None
     observed = False
     while True:
         try:
@@ -281,71 +578,19 @@ def _drain_lease_break_signal() -> bool:
         observed = True
 
 
-def _target_matches_descriptor(
-    parent_descriptor: int,
-    target_name: str,
-    descriptor: int,
-) -> bool:
-    """比较规范路径与已打开文件描述符的物理身份。
+def _never_broken() -> bool:
+    """为不提供租约中断通知的平台返回恒定未中断状态。
 
-    参数：父目录、目标文件名和描述符共同指定两种观察。
-    返回：二者均为同一普通文件设备/索引节点时为 ``True``。
+    参数：无。返回：始终为 ``False``；路径与内容身份复核仍独立执行。
     """
 
-    try:
-        target_metadata = os.stat(
-            target_name,
-            dir_fd=parent_descriptor,
-            follow_symlinks=False,
-        )
-    except FileNotFoundError:
-        return False
-    descriptor_metadata = os.fstat(descriptor)
-    return (
-        stat.S_ISREG(target_metadata.st_mode)
-        and target_metadata.st_dev == descriptor_metadata.st_dev
-        and target_metadata.st_ino == descriptor_metadata.st_ino
-    )
-
-
-def _read_regular_descriptor(descriptor: int, *, byte_limit: int) -> bytes:
-    """在硬上限内重读一个普通文件描述符。
-
-    参数：``descriptor`` 是已打开文件；``byte_limit`` 是最大允许字节数。
-    返回：文件全部字节。
-    异常：非普通文件、超限或短期读取故障转为 ``SourcePublicationConflict``。
-    """
-
-    metadata = os.fstat(descriptor)
-    if not stat.S_ISREG(metadata.st_mode) or metadata.st_size > byte_limit:
-        raise SourcePublicationConflict("draft_hash_conflict")
-    os.lseek(descriptor, 0, os.SEEK_SET)
-    chunks = bytearray()
-    while len(chunks) <= byte_limit:
-        chunk = os.read(descriptor, min(64 * 1024, byte_limit + 1 - len(chunks)))
-        if not chunk:
-            break
-        chunks.extend(chunk)
-    if len(chunks) > byte_limit:
-        raise SourcePublicationConflict("draft_hash_conflict")
-    return bytes(chunks)
-
-
-def _hash_regular_descriptor(descriptor: int, *, byte_limit: int) -> str:
-    """计算受限普通文件的 SHA-256 哈希。
-
-    参数：``descriptor`` 是文件描述符；``byte_limit`` 是读取上限。
-    返回：小写十六进制 SHA-256。
-    """
-
-    return _sha256(_read_regular_descriptor(descriptor, byte_limit=byte_limit))
+    return False
 
 
 def _sha256(content: bytes) -> str:
     """计算字节内容的稳定 SHA-256。
 
-    参数：``content`` 是待摘要字节。
-    返回：带 ``sha256:`` 前缀的小写十六进制摘要。
+    参数：``content`` 是完整文件字节。返回：带 ``sha256:`` 前缀的十六进制摘要。
     """
 
     return f"sha256:{hashlib.sha256(content).hexdigest()}"

@@ -6,35 +6,75 @@ import hashlib
 import os
 import stat
 from collections.abc import Iterable, Iterator, Mapping
-from contextlib import contextmanager, suppress
+from contextlib import contextmanager
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path, PurePosixPath
 from typing import Any
 
+from unilabos.workflow.source_descriptor_access import (
+    directory_flags as _directory_flags,
+)
+from unilabos.workflow.source_descriptor_access import (
+    file_flags as _file_flags,
+)
+from unilabos.workflow.source_descriptor_access import (
+    open_child_directory as _open_child_directory,
+)
+from unilabos.workflow.source_descriptor_access import (
+    open_directory_chain as _open_directory_chain,
+)
+from unilabos.workflow.source_descriptor_access import (
+    read_optional_regular_at as _read_optional_regular_at,
+)
+from unilabos.workflow.source_descriptor_access import (
+    read_regular_descriptor as _read_regular_descriptor,
+)
+from unilabos.workflow.source_descriptor_access import (
+    source_parent_descriptor as _source_parent_descriptor,
+)
+from unilabos.workflow.source_file_access import (
+    StableFileAccessError,
+    read_stable_descriptor,
+)
+from unilabos.workflow.source_path_access import (
+    assert_package_root as assert_package_root_by_path,
+)
+from unilabos.workflow.source_path_access import (
+    publish_registered_source as publish_registered_source_by_path,
+)
+from unilabos.workflow.source_path_access import (
+    read_package_manifest as read_package_manifest_by_path,
+)
+from unilabos.workflow.source_path_access import (
+    read_registered_source as read_registered_source_by_path,
+)
+from unilabos.workflow.source_path_access import (
+    registered_source_signature as registered_source_signature_by_path,
+)
+from unilabos.workflow.source_path_access import (
+    validate_declared_sources as validate_declared_sources_by_path,
+)
+from unilabos.workflow.source_path_access import (
+    validate_registered_source as validate_registered_source_by_path,
+)
 from unilabos.workflow.source_publication import (
     NO_EXPECTED_HASH,
     SourcePublicationConflict,
     SourcePublicationError,
     atomic_publish_source,
 )
+from unilabos.workflow.source_workspace_errors import (
+    SourceWorkspaceConflict,
+    SourceWorkspaceError,
+)
 
 MANIFEST_BYTE_LIMIT = 1024 * 1024
 WORKFLOW_SOURCE_BYTE_LIMIT = 8 * 1024 * 1024
-
-
-class SourceWorkspaceError(RuntimeError):
-    """表示授权源码工作区无法被安全读取。"""
-
-    def __init__(self, code: str):
-        """保存稳定工作区错误码。
-
-        参数：``code`` 表示无效包目录或无效声明文件。
-        返回：无；错误不携带文件内容。
-        """
-
-        self.code = code
-        super().__init__(code)
+_DIRECTORY_FD_PATHS_SUPPORTED = all(
+    operation in os.supports_dir_fd
+    for operation in (os.open, os.stat, os.mkdir, os.unlink)
+)
 
 
 @dataclass(frozen=True)
@@ -63,15 +103,11 @@ class SourceDocument:
     update_time: str
 
 
-class SourceWorkspaceConflict(RuntimeError):
-    """表示工作流源码 CAS 条件与当前物理文件不一致。"""
-
-
 @dataclass(frozen=True)
 class PinnedPackageRoots:
     """固定到文件描述符的可编辑包（Editable Package）目录集合。"""
 
-    _entries: tuple[tuple[Path, tuple[int, int], int], ...]
+    _entries: tuple[tuple[Path, tuple[int, int], int | None], ...]
 
     def assert_current(self) -> None:
         """确认规范路径仍指向发现时固定的全部包目录。
@@ -85,6 +121,12 @@ class PinnedPackageRoots:
         for package_root, expected_identity, pinned_descriptor in self._entries:
             # ``expected_identity`` 来自发现计划；``pinned_descriptor`` 保持原目录
             # 存活，二者共同防止路径在注册事务期间被静默替换。
+            if pinned_descriptor is None:
+                try:
+                    assert_package_root_by_path(package_root, expected_identity)
+                except StableFileAccessError:
+                    raise SourceWorkspaceError("invalid_package_root") from None
+                continue
             pinned_metadata = os.fstat(pinned_descriptor)
             if (
                 pinned_metadata.st_dev,
@@ -118,11 +160,18 @@ def pin_package_roots(
     ``SourceWorkspaceError``；退出上下文总会关闭全部文件描述符。
     """
 
-    pinned_entries: list[tuple[Path, tuple[int, int], int]] = []
+    pinned_entries: list[tuple[Path, tuple[int, int], int | None]] = []
     try:
         for package_root, expected_identity in tuple(root_identities):
             # ``package_path`` 保留发现计划的绝对规范路径，不重新解释包身份。
             package_path = Path(package_root)
+            if not _DIRECTORY_FD_PATHS_SUPPORTED:
+                try:
+                    assert_package_root_by_path(package_path, expected_identity)
+                except StableFileAccessError:
+                    raise SourceWorkspaceError("invalid_package_root") from None
+                pinned_entries.append((package_path, expected_identity, None))
+                continue
             descriptor = _open_directory_chain(
                 package_path,
                 flags=_directory_flags(),
@@ -137,7 +186,8 @@ def pin_package_roots(
         yield pinned_roots
     finally:
         for _package_root, _expected_identity, descriptor in pinned_entries:
-            os.close(descriptor)
+            if descriptor is not None:
+                os.close(descriptor)
 
 
 def validate_source_registration(
@@ -157,6 +207,16 @@ def validate_source_registration(
         "relative_path": relative_path,
     }
     root, normalized_relative, root_identity = _source_location(registration)
+    if not _DIRECTORY_FD_PATHS_SUPPORTED:
+        try:
+            validate_registered_source_by_path(
+                root,
+                normalized_relative,
+                expected_root_identity=root_identity,
+            )
+        except StableFileAccessError:
+            raise SourceWorkspaceError("invalid_input") from None
+        return root, normalized_relative.as_posix()
     with _source_parent_descriptor(
         root,
         normalized_relative,
@@ -193,6 +253,19 @@ def read_registered_source(
     """
 
     root, relative, root_identity = _source_location(registration)
+    if not _DIRECTORY_FD_PATHS_SUPPORTED:
+        try:
+            snapshot = read_registered_source_by_path(
+                root,
+                relative,
+                expected_root_identity=root_identity,
+                byte_limit=WORKFLOW_SOURCE_BYTE_LIMIT,
+            )
+        except StableFileAccessError:
+            raise SourceWorkspaceError("invalid_input") from None
+        if snapshot is None:
+            return None
+        return _source_document(snapshot.content, snapshot.metadata.st_mtime)
     with _source_parent_descriptor(
         root,
         relative,
@@ -210,23 +283,17 @@ def read_registered_source(
         except OSError:
             raise SourceWorkspaceError("invalid_input") from None
         try:
-            metadata = os.fstat(descriptor)
-            raw_source = _read_regular_descriptor(
+            snapshot = read_stable_descriptor(
                 descriptor,
                 byte_limit=WORKFLOW_SOURCE_BYTE_LIMIT,
-                error_code="invalid_input",
             )
+            metadata = snapshot.metadata
+            raw_source = snapshot.content
+        except StableFileAccessError:
+            raise SourceWorkspaceError("invalid_input") from None
         finally:
             os.close(descriptor)
-    try:
-        python_source = raw_source.decode("utf-8")
-    except UnicodeError:
-        raise SourceWorkspaceError("invalid_input") from None
-    return SourceDocument(
-        python_source=python_source,
-        draft_hash=_sha256(raw_source),
-        update_time=_mtime_rfc3339(metadata.st_mtime),
-    )
+    return _source_document(raw_source, metadata.st_mtime)
 
 
 def registered_source_signature(
@@ -240,6 +307,15 @@ def registered_source_signature(
     """
 
     root, relative, root_identity = _source_location(registration)
+    if not _DIRECTORY_FD_PATHS_SUPPORTED:
+        try:
+            return registered_source_signature_by_path(
+                root,
+                relative,
+                expected_root_identity=root_identity,
+            )
+        except StableFileAccessError:
+            raise SourceWorkspaceError("invalid_input") from None
     with _source_parent_descriptor(
         root,
         relative,
@@ -289,6 +365,23 @@ def write_registered_source(
     if len(content) > WORKFLOW_SOURCE_BYTE_LIMIT:
         raise SourceWorkspaceError("invalid_input")
     root, relative, root_identity = _source_location(registration)
+    if not _DIRECTORY_FD_PATHS_SUPPORTED:
+        try:
+            publish_registered_source_by_path(
+                root,
+                relative,
+                content,
+                expected_root_identity=root_identity,
+                byte_limit=WORKFLOW_SOURCE_BYTE_LIMIT,
+                expected_hash=expected_hash,
+            )
+            return
+        except SourcePublicationConflict:
+            raise SourceWorkspaceConflict("draft_hash_conflict") from None
+        except SourcePublicationError:
+            raise SourceWorkspaceError("internal_error") from None
+        except StableFileAccessError:
+            raise SourceWorkspaceError("invalid_input") from None
     # 首次保存允许创建固定的 workflows 目录，但不创建 manifest 声明本身。
     with _source_parent_descriptor(
         root,
@@ -335,6 +428,20 @@ def read_package_root(selected_root: str | Path) -> PackageRootSnapshot:
         raise SourceWorkspaceError("invalid_package_root") from None
     if not stat.S_ISDIR(root_metadata.st_mode) or _contains_symlink(root):
         raise SourceWorkspaceError("invalid_package_root")
+
+    if not _DIRECTORY_FD_PATHS_SUPPORTED:
+        try:
+            root_identity, manifest_bytes = read_package_manifest_by_path(
+                root,
+                byte_limit=MANIFEST_BYTE_LIMIT,
+            )
+        except StableFileAccessError:
+            raise SourceWorkspaceError("invalid_manifest") from None
+        return PackageRootSnapshot(
+            selected_root=root,
+            identity=root_identity,
+            manifest_bytes=manifest_bytes,
+        )
 
     directory_flags = _directory_flags()
     file_flags = _file_flags()
@@ -389,6 +496,27 @@ def validate_declared_sources(
     异常：目录身份变化、符号链接、非普通文件、超限或非 UTF-8 时抛出
     ``SourceWorkspaceError``；缺失源码保持合法且不会被创建。
     """
+
+    if not _DIRECTORY_FD_PATHS_SUPPORTED:
+        try:
+            package_root, package_identity = validate_declared_sources_by_path(
+                root_snapshot.selected_root,
+                expected_selected_identity=root_snapshot.identity,
+                package_id=package_id,
+                relative_paths=relative_paths,
+                source_byte_limit=WORKFLOW_SOURCE_BYTE_LIMIT,
+            )
+        except StableFileAccessError as error:
+            code = (
+                "invalid_workflow_source"
+                if str(error) == "invalid_utf8_source"
+                else "invalid_package_root"
+            )
+            raise SourceWorkspaceError(code) from None
+        return PackageSourceSnapshot(
+            package_root=package_root,
+            identity=package_identity,
+        )
 
     selected_descriptor = -1
     package_descriptor = -1
@@ -445,36 +573,6 @@ def validate_declared_sources(
     return PackageSourceSnapshot(
         package_root=root_snapshot.selected_root / package_id,
         identity=(package_metadata.st_dev, package_metadata.st_ino),
-    )
-
-
-def _directory_flags() -> int:
-    """返回当前平台可用的安全目录打开标志。
-
-    参数：无。
-    返回：禁止跟随符号链接并要求目录类型的 ``os.open`` 标志。
-    """
-
-    return (
-        os.O_RDONLY
-        | getattr(os, "O_DIRECTORY", 0)
-        | getattr(os, "O_CLOEXEC", 0)
-        | getattr(os, "O_NOFOLLOW", 0)
-    )
-
-
-def _file_flags() -> int:
-    """返回当前平台可用的安全只读文件打开标志。
-
-    参数：无。
-    返回：禁止跟随符号链接且避免 FIFO 阻塞的 ``os.open`` 标志。
-    """
-
-    return (
-        os.O_RDONLY
-        | getattr(os, "O_CLOEXEC", 0)
-        | getattr(os, "O_NOFOLLOW", 0)
-        | getattr(os, "O_NONBLOCK", 0)
     )
 
 
@@ -541,171 +639,23 @@ def _source_location(
     return root, relative, (root_metadata.st_dev, root_metadata.st_ino)
 
 
-@contextmanager
-def _source_parent_descriptor(
-    root: Path,
-    relative: PurePosixPath,
-    *,
-    expected_root_identity: tuple[int, int],
-    create: bool,
-) -> Iterator[tuple[int, str] | None]:
-    """固定已注册源码的 ``workflows`` 父目录文件描述符。
+def _source_document(raw_source: bytes, modified_at: float) -> SourceDocument:
+    """把稳定字节快照转换为公共工作流源码文档。
 
-    参数：``root`` 和 ``relative`` 是已规范来源路径；``expected_root_identity``
-    固定本次操作开始时的包目录身份；``create`` 决定是否允许创建固定父目录。
-    返回：上下文中产生父目录描述符和源码文件名；允许缺失时可产生 ``None``。
-    异常：目录链含符号链接、类型错误或发生竞态时抛出 ``SourceWorkspaceError``。
+    参数：``raw_source`` 是完整源码字节；``modified_at`` 是同一稳定快照的修改
+    时间。返回：UTF-8 源码、哈希和 RFC3339 时间。异常：非法 UTF-8 映射为
+    ``SourceWorkspaceError``。
     """
 
-    root_descriptor = _open_directory_chain(root, flags=_directory_flags())
-    parent_descriptor = -1
     try:
-        opened_root_metadata = os.fstat(root_descriptor)
-        if (
-            opened_root_metadata.st_dev,
-            opened_root_metadata.st_ino,
-        ) != expected_root_identity:
-            raise SourceWorkspaceError("invalid_input")
-        try:
-            parent_descriptor = os.open(
-                relative.parts[0],
-                _directory_flags(),
-                dir_fd=root_descriptor,
-            )
-        except FileNotFoundError:
-            if not create:
-                yield None
-                return
-            with suppress(FileExistsError):
-                os.mkdir(relative.parts[0], 0o755, dir_fd=root_descriptor)
-            parent_descriptor = os.open(
-                relative.parts[0],
-                _directory_flags(),
-                dir_fd=root_descriptor,
-            )
-        yield parent_descriptor, relative.parts[1]
-    except SourceWorkspaceError:
-        raise
-    except OSError:
+        python_source = raw_source.decode("utf-8")
+    except UnicodeError:
         raise SourceWorkspaceError("invalid_input") from None
-    finally:
-        if parent_descriptor >= 0:
-            os.close(parent_descriptor)
-        os.close(root_descriptor)
-
-
-def _open_directory_chain(path: Path, *, flags: int) -> int:
-    """逐级以 ``O_NOFOLLOW`` 打开目录并返回最终文件描述符。
-
-    参数：``path`` 是绝对目录；``flags`` 是平台可用的安全目录标志。
-    返回：调用者负责关闭的最终目录文件描述符。
-    异常：任一级目录不可安全打开时抛出 ``SourceWorkspaceError``。
-    """
-
-    current_descriptor = -1
-    try:
-        current_descriptor = os.open(path.anchor, flags)
-        for part in path.parts[1:]:
-            next_descriptor = os.open(part, flags, dir_fd=current_descriptor)
-            os.close(current_descriptor)
-            current_descriptor = next_descriptor
-        return current_descriptor
-    except (OSError, TypeError, ValueError):
-        if current_descriptor >= 0:
-            os.close(current_descriptor)
-        raise SourceWorkspaceError("invalid_package_root") from None
-
-
-def _open_child_directory(
-    parent_descriptor: int,
-    name: str,
-    *,
-    missing_ok: bool,
-) -> int | None:
-    """相对已固定目录安全打开一个直接子目录。
-
-    参数：``parent_descriptor`` 是父目录文件描述符；``name`` 是单段目录名；
-    ``missing_ok`` 决定缺失目录是否返回 ``None``。
-    返回：调用者负责关闭的子目录文件描述符，或在允许缺失时返回 ``None``。
-    异常：符号链接、非目录或不允许的缺失抛出 ``SourceWorkspaceError``。
-    """
-
-    try:
-        return os.open(name, _directory_flags(), dir_fd=parent_descriptor)
-    except FileNotFoundError:
-        if missing_ok:
-            return None
-        raise SourceWorkspaceError("invalid_package_root") from None
-    except (OSError, TypeError, ValueError):
-        raise SourceWorkspaceError("invalid_package_root") from None
-
-
-def _read_optional_regular_at(
-    parent_descriptor: int,
-    name: str,
-    *,
-    byte_limit: int,
-    error_code: str,
-) -> bytes | None:
-    """相对固定目录读取一个允许缺失的受限普通文件。
-
-    参数：``parent_descriptor`` 是父目录；``name`` 是单段文件名；
-    ``byte_limit`` 是读取上限；``error_code`` 是失败时的稳定分类。
-    返回：文件缺失时为 ``None``，否则返回不超过上限的字节。
-    异常：符号链接、非普通文件、超限或读取失败抛出 ``SourceWorkspaceError``。
-    """
-
-    descriptor = -1
-    try:
-        descriptor = os.open(name, _file_flags(), dir_fd=parent_descriptor)
-    except FileNotFoundError:
-        return None
-    except (OSError, TypeError, ValueError):
-        raise SourceWorkspaceError(error_code) from None
-    try:
-        return _read_regular_descriptor(
-            descriptor,
-            byte_limit=byte_limit,
-            error_code=error_code,
-        )
-    finally:
-        os.close(descriptor)
-
-
-def _read_regular_descriptor(
-    descriptor: int,
-    *,
-    byte_limit: int,
-    error_code: str,
-) -> bytes:
-    """在硬字节上限内读取普通文件。
-
-    参数：``descriptor`` 是已安全打开的文件；``byte_limit`` 是最大字节数；
-    ``error_code`` 是失败时稳定映射的错误码。
-    返回：不超过上限的文件字节。
-    异常：非普通文件、超限或读取失败时抛出 ``SourceWorkspaceError``。
-    """
-
-    try:
-        metadata = os.fstat(descriptor)
-        if not stat.S_ISREG(metadata.st_mode) or metadata.st_size > byte_limit:
-            raise SourceWorkspaceError(error_code)
-        chunks = bytearray()
-        while len(chunks) <= byte_limit:
-            chunk = os.read(
-                descriptor,
-                min(64 * 1024, byte_limit + 1 - len(chunks)),
-            )
-            if not chunk:
-                break
-            chunks.extend(chunk)
-        if len(chunks) > byte_limit:
-            raise SourceWorkspaceError(error_code)
-        return bytes(chunks)
-    except SourceWorkspaceError:
-        raise
-    except (OSError, OverflowError, ValueError):
-        raise SourceWorkspaceError(error_code) from None
+    return SourceDocument(
+        python_source=python_source,
+        draft_hash=_sha256(raw_source),
+        update_time=_mtime_rfc3339(modified_at),
+    )
 
 
 def _sha256(content: bytes) -> str:
