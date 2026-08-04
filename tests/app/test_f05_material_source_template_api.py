@@ -4,9 +4,8 @@ from __future__ import annotations
 
 from pathlib import Path
 
-from unilabos.app.workflow_template_api import WorkflowTemplateQueryService
-
 from tests.registry.test_f05_material_source_catalog import _projection, _Registry
+from unilabos.app.workflow_template_api import WorkflowTemplateQueryService
 
 
 def test_template_query_requires_explicit_material_source_node_type(
@@ -40,9 +39,7 @@ def test_template_query_requires_explicit_material_source_node_type(
         node_type="",
     )
 
-    assert [item["node_type"] for item in explicit_page["items"]] == [
-        "material_source"
-    ]
+    assert [item["node_type"] for item in explicit_page["items"]] == ["material_source"]
     assert default_page["items"] == []
     # ``framework_uuid`` 是列表与详情共用的节点模板稳定身份。
     framework_uuid = explicit_page["items"][0]["uuid"]

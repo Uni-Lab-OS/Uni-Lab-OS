@@ -7,18 +7,17 @@ from typing import Any
 
 import pytest
 
-from unilabos.registry.template_projection import RegistryTemplateProjectionError
-from unilabos.workflow.composition import (
-    compose_local_workflow_template_runtime,
-    get_workflow_service,
-    reset_workflow_service_for_test,
-)
-
 from tests.registry.test_f05_material_source_catalog import (
     HOST_TEMPLATE_UUID,
     PLATE_SOURCE_IDENTITY,
     PLATE_TEMPLATE_UUID,
     _Registry,
+)
+from unilabos.registry.template_projection import RegistryTemplateProjectionError
+from unilabos.workflow.composition import (
+    compose_local_workflow_template_runtime,
+    get_workflow_service,
+    reset_workflow_service_for_test,
 )
 
 
@@ -35,10 +34,12 @@ class _InventoryIdentityStore:
         self.include_plate = include_plate
 
     def query_one(self, sql: str, params: tuple[Any, ...]) -> dict[str, Any] | None:
-        """按 Registry 业务唯一名称返回已有资源模板行。
+        """按设备注册表（Registry）业务唯一名称返回已有资源模板行。
 
         参数说明：``sql`` 必须查询资源模板表，``params`` 只含业务
-        唯一名称。返回：活动身份摘要或 ``None``。
+        唯一名称。返回：活动资源模板（ResourceTemplate）身份摘要或 ``None``；
+        SQL 未查询规范资源模板表时抛出 ``AssertionError``，防止组合根绕过既有
+        身份映射生命周期。
         """
 
         assert "FROM resource_template" in sql
@@ -82,12 +83,16 @@ def test_local_composition_shares_frozen_resource_template_projection(
         assert service.compiler.template_catalog_fingerprint == (
             projection.snapshot().fingerprint
         )
-        assert projection.snapshot().require_resource_template_uuid(
-            PLATE_SOURCE_IDENTITY
-        ) == PLATE_TEMPLATE_UUID
-        assert projection.snapshot().require_material_source().template[
-            "resource_template_uuid"
-        ] == HOST_TEMPLATE_UUID
+        assert (
+            projection.snapshot().require_resource_template_uuid(PLATE_SOURCE_IDENTITY)
+            == PLATE_TEMPLATE_UUID
+        )
+        assert (
+            projection.snapshot()
+            .require_material_source()
+            .template["resource_template_uuid"]
+            == HOST_TEMPLATE_UUID
+        )
     finally:
         reset_workflow_service_for_test()
 

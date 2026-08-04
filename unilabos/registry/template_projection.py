@@ -25,6 +25,7 @@ from unilabos.workflow.source_identity import (
 )
 from unilabos.workflow.store import WorkflowStore
 from unilabos.workflow.template_projection_store import (
+    RegistryTemplateProjectionGeneration,
     RegistryTemplateProjectionStore,
     TemplateProjectionIdentityConflict,
 )
@@ -92,25 +93,42 @@ class RegistryTemplateProjection:
         resource_template_symbols = self._compile_resource_template_identities(
             resource_definitions
         )
+        # ``next_snapshot`` 由事务内完整目录校验器赋值；仅在提交成功后发布到内存。
+        next_snapshot: AuthoringCatalogSnapshot | None = None
+
+        def validate_generation(
+            generation: RegistryTemplateProjectionGeneration,
+        ) -> None:
+            """在 SQLite 提交前验证完整工作流创作目录代际。
+
+            参数说明：``generation`` 是同一事务已写入但尚未提交的节点、连接点
+            （Handle）和资源模板（ResourceTemplate）身份全集。返回：无；成功时
+            把不可变工作流创作目录（Authoring Catalog）快照保存到闭包变量；目录
+            身份、连接点或资源映射冲突时抛出 ``AuthoringCatalogError``，由投影
+            存储深模块回滚整个代际。
+            """
+
+            nonlocal next_snapshot
+            next_snapshot = AuthoringCatalogSnapshot.from_entities(
+                generation.node_templates,
+                generation.handle_templates,
+                resource_template_symbols=generation.resource_template_symbols,
+            )
+
         try:
-            persisted_generation = self._store.replace_generation(
+            self._store.replace_generation(
                 authority_id=self._authority_id,
                 node_templates=nodes,
                 handle_templates=handles,
                 resource_template_symbols=resource_template_symbols,
+                validate_generation=validate_generation,
             )
         except TemplateProjectionIdentityConflict as error:
             raise RegistryTemplateProjectionError(f"模板身份冲突: {error!s}") from error
-        try:
-            next_snapshot = AuthoringCatalogSnapshot.from_entities(
-                persisted_generation.node_templates,
-                persisted_generation.handle_templates,
-                resource_template_symbols=(
-                    persisted_generation.resource_template_symbols
-                ),
-            )
         except AuthoringCatalogError as error:
             raise RegistryTemplateProjectionError(str(error)) from error
+        if next_snapshot is None:
+            raise RegistryTemplateProjectionError("模板投影未执行完整目录校验")
         self._snapshot = next_snapshot
         return next_snapshot
 
@@ -214,7 +232,9 @@ class RegistryTemplateProjection:
 
         参数说明：``device`` 是单个设备注册表（Registry）设备条目；返回该设备
         的节点和连接点（Handle）候选，旧式或自动生成动作不进入可信工作流创作
-        投影。
+        投影。异常：条目、类合同、动作映射、资源模板（ResourceTemplate）身份
+        或第 2 版动作合同（Action Contract）非法时抛出
+        ``RegistryTemplateProjectionError``，不得返回部分设备模板。
         """
 
         if not isinstance(device, Mapping):
