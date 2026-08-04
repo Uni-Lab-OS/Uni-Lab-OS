@@ -162,12 +162,12 @@ def test_real_web_server_passes_configured_roots_into_runtime(
     def no_inventory_service() -> None:
         """表示本用例没有本地库存权威（Inventory Authority）。"""
 
-        return None
+        return
 
     def no_edge_scheduler() -> None:
         """表示本用例没有本地边缘调度器（Edge Scheduler）。"""
 
-        return None
+        return
 
     monkeypatch.setattr(
         scheduler_integration,

@@ -4,15 +4,24 @@ from __future__ import annotations
 
 import threading
 import time
-from typing import Any, Dict, List, Optional, Protocol, Tuple
+from dataclasses import dataclass
+from typing import Any, Protocol
 
 from unilabos.workflow.service import WorkflowError
+
+
+@dataclass(frozen=True)
+class SourceMonitorHealth:
+    """源码监视器（Source Monitor）的最小稳定健康投影。"""
+
+    state: str
+    fatal_error_code: str | None
 
 
 class SourceChangeService(Protocol):
     """声明源码监视器（Source Monitor）唯一依赖的命令接口。"""
 
-    def list_registered_sources(self) -> List[Dict[str, Any]]:
+    def list_registered_sources(self) -> list[dict[str, Any]]:
         """返回全部规范来源注册。
 
         参数：无。返回：每项含稳定工作流 UUID 的来源注册列表。
@@ -22,8 +31,8 @@ class SourceChangeService(Protocol):
 
     def source_signature(
         self,
-        registration: Dict[str, Any],
-    ) -> Tuple[Any, ...]:
+        registration: dict[str, Any],
+    ) -> tuple[Any, ...]:
         """读取一个来源注册当前的轻量文件签名。
 
         参数：``registration`` 是服务发布的规范来源注册。
@@ -36,7 +45,7 @@ class SourceChangeService(Protocol):
         self,
         workflow_uuid: str,
         *,
-        observed_signature: Tuple[Any, ...],
+        observed_signature: tuple[Any, ...],
     ) -> bool:
         """提交一个已经稳定观测的源码变化命令。
 
@@ -69,13 +78,19 @@ class WorkflowSourceMonitor:
         self._interval_seconds = interval_seconds
         self._settle_seconds = settle_seconds
         self._stop_event = threading.Event()
-        self._thread: Optional[threading.Thread] = None
+        self._thread: threading.Thread | None = None
         self._lifecycle_lock = threading.RLock()
-        self._processed: Dict[str, Tuple[Any, ...]] = {}
-        self._pending: Dict[str, Tuple[Tuple[Any, ...], float]] = {}
-        self._retries: Dict[
+        self._lifecycle_condition = threading.Condition(self._lifecycle_lock)
+        self._stopping = False
+        self._stop_join_active = False
+        # ``_fatal_error`` 只保留最近一次未分类工作线程异常供诊断；公共健康投影
+        # 仅公开稳定错误码，不泄漏异常消息、路径或复杂内部状态。
+        self._fatal_error: BaseException | None = None
+        self._processed: dict[str, tuple[Any, ...]] = {}
+        self._pending: dict[str, tuple[tuple[Any, ...], float]] = {}
+        self._retries: dict[
             str,
-            Tuple[Tuple[Any, ...], float, float],
+            tuple[tuple[Any, ...], float, float],
         ] = {}
 
     def start(self) -> None:
@@ -84,7 +99,9 @@ class WorkflowSourceMonitor:
         参数：无。返回：无；已经启动时不创建第二个线程。
         """
 
-        with self._lifecycle_lock:
+        with self._lifecycle_condition:
+            while self._stopping:
+                self._lifecycle_condition.wait()
             current_thread = self._thread
             if current_thread is not None and current_thread.is_alive():
                 return
@@ -98,11 +115,14 @@ class WorkflowSourceMonitor:
             )
             self._stop_event = stop_event
             self._thread = worker
+            self._fatal_error = None
             try:
                 worker.start()
-            except BaseException:
+            except BaseException as start_error:
                 if self._thread is worker:
                     self._thread = None
+                self._fatal_error = start_error
+                self._lifecycle_condition.notify_all()
                 raise
 
     def stop(self) -> None:
@@ -112,17 +132,55 @@ class WorkflowSourceMonitor:
         组合根误认为监视权威已经停止。
         """
 
-        with self._lifecycle_lock:
+        with self._lifecycle_condition:
+            while self._stopping:
+                self._lifecycle_condition.wait()
             stop_event = self._stop_event
             thread = self._thread
+            if thread is None:
+                return
+            self._stopping = True
+            self._stop_join_active = True
             stop_event.set()
         if thread is not None and thread is not threading.current_thread():
             thread.join(timeout=5)
-            if thread.is_alive():
+        with self._lifecycle_condition:
+            self._stop_join_active = False
+            if thread is not threading.current_thread() and thread.is_alive():
+                # 保持 ``stopping``，直到迟到退出的工作线程在 ``finally`` 中确认
+                # 终止；等待中的 ``start`` 不得复用已收到停止信号的旧线程。
+                self._fatal_error = RuntimeError("Workflow Draft 监视器未能停止")
                 raise RuntimeError("Workflow Draft 监视器未能停止")
-        with self._lifecycle_lock:
             if self._thread is thread:
                 self._thread = None
+            self._stopping = False
+            self._lifecycle_condition.notify_all()
+
+    def health(self) -> SourceMonitorHealth:
+        """返回不泄漏内部队列的稳定生命周期和致命错误投影。
+
+        参数：无。返回：``running``、``stopping``、``fatal`` 或 ``stopped`` 之一，
+        以及仅在致命状态存在的稳定错误码；读取本身不启动、停止或恢复线程。
+        """
+
+        with self._lifecycle_condition:
+            thread = self._thread
+            if self._stopping:
+                state = "stopping"
+            elif thread is not None and thread.is_alive():
+                state = "running"
+            elif self._fatal_error is not None:
+                state = "fatal"
+            else:
+                state = "stopped"
+            return SourceMonitorHealth(
+                state=state,
+                fatal_error_code=(
+                    "unclassified_monitor_failure"
+                    if self._fatal_error is not None
+                    else None
+                ),
+            )
 
     def _run(self, stop_event: threading.Event) -> None:
         """轮询注册来源并只向服务提交稳定源码变化命令。
@@ -133,14 +191,11 @@ class WorkflowSourceMonitor:
         """
 
         current_thread = threading.current_thread()
+        fatal_error: BaseException | None = None
         try:
             while not stop_event.is_set():
                 try:
                     registrations = self._service.list_registered_sources()
-                except (GeneratorExit, KeyboardInterrupt, SystemExit):
-                    # 进程级终止信号结束当前工作线程；``finally`` 会释放线程身份，
-                    # 后续显式 ``start`` 可建立新生命周期世代。
-                    return
                 except (OSError, RuntimeError, WorkflowError):
                     stop_event.wait(self._interval_seconds)
                     continue
@@ -158,7 +213,7 @@ class WorkflowSourceMonitor:
                     if stop_event.is_set():
                         return
                     workflow_uuid = registration["workflow_uuid"]
-                    signature: Optional[Tuple[Any, ...]] = None
+                    signature: tuple[Any, ...] | None = None
                     try:
                         # ``signature`` 只标识文件观测世代；源码身份仍由注册记录决定。
                         signature = self._service.source_signature(registration)
@@ -226,15 +281,25 @@ class WorkflowSourceMonitor:
                             self._schedule_retry(workflow_uuid, signature)
                         continue
                 stop_event.wait(self._interval_seconds)
+        except BaseException as unclassified_error:  # noqa: BLE001
+            # 未分类异常不得只作为 daemon thread stderr 消失；保留异常对象用于本地
+            # 诊断，并通过 ``health`` 公开不泄漏内容的稳定错误码。
+            if not stop_event.is_set():
+                fatal_error = unclassified_error
         finally:
-            with self._lifecycle_lock:
+            with self._lifecycle_condition:
+                if fatal_error is not None:
+                    self._fatal_error = fatal_error
                 if self._thread is current_thread:
                     self._thread = None
+                if self._stopping and not self._stop_join_active:
+                    self._stopping = False
+                self._lifecycle_condition.notify_all()
 
     def _schedule_retry(
         self,
         workflow_uuid: str,
-        signature: Tuple[Any, ...],
+        signature: tuple[Any, ...],
     ) -> None:
         """为未确认命令安排有上限的指数退避。
 
@@ -254,4 +319,8 @@ class WorkflowSourceMonitor:
         )
 
 
-__all__ = ["SourceChangeService", "WorkflowSourceMonitor"]
+__all__ = [
+    "SourceChangeService",
+    "SourceMonitorHealth",
+    "WorkflowSourceMonitor",
+]
