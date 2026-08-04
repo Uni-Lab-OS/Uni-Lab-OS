@@ -26,9 +26,14 @@ Conda subdir。Constructor 只能在目标原生系统上生成可发布安装�
 先安装固定版本的构建工具：
 
 ```bash
-conda create -n constructor-build -c conda-forge constructor=3.16.1
+conda create -n constructor-build -c conda-forge constructor=3.16.1 micromamba=2.8.1
 conda activate constructor-build
+export CONSTRUCTOR_CONDA_EXE="$(command -v micromamba)"
 ```
+
+Constructor 仍然生成 Conda Runtime；这里仅使用 micromamba 作为离线安装阶段的执行器，
+以兼容 Conda channel 中同时存在的连字符/下划线过渡元包。安装完成后的 Runtime 仍包含
+正式的 `conda` 命令。
 
 从仓库根目录构建当前平台（版本默认与当前配置中的 `0.11.3` 一致）：
 
@@ -37,6 +42,7 @@ export UNILABOS_INSTALLER_VERSION=0.11.3
 export UNILABOS_INSTALLER_PACKAGE=unilabos
 constructor .conda/constructor \
   --platform linux-64 \
+  --conda-exe "$CONSTRUCTOR_CONDA_EXE" \
   --output-dir dist/constructor
 ```
 
@@ -44,7 +50,9 @@ constructor .conda/constructor \
 
 ```bash
 constructor .conda/constructor --platform linux-64 --render
-constructor .conda/constructor --platform linux-64 --dry-run
+constructor .conda/constructor --platform linux-64 \
+  --conda-exe "$CONSTRUCTOR_CONDA_EXE" \
+  --dry-run
 ```
 
 完整版构建时设置：
