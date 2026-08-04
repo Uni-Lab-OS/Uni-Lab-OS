@@ -10,6 +10,11 @@ from contextlib import AbstractContextManager
 from dataclasses import dataclass
 from typing import Any, Callable, TypeVar
 
+from unilabos.workflow.material_source import (
+    MATERIAL_FLOW_ROLE_LABELS_ZH,
+    MaterialFlowRole,
+)
+
 _Function = TypeVar("_Function", bound=Callable[..., Any])
 
 
@@ -126,11 +131,51 @@ def workflow_output(**outputs: Any) -> dict[str, Any]:
     return dict(outputs)
 
 
+def resource_ref(resource_id: str) -> Any:
+    """声明只供创作编译的稳定资源引用。
+
+    参数说明：``resource_id`` 是作者明确给出的实例 UUID；本运行时
+    标记没有返回值，被执行时抛出 ``RuntimeError``，只允许可信静态
+    编译器从 AST（抽象语法树）解析。
+    """
+
+    del resource_id
+    raise RuntimeError("工作流创作 resource_ref() 只能由静态编译器解析")
+
+
+def material_source(
+    *,
+    resource_template: Any,
+    mode: str,
+    mount: Any,
+    material_uuid: str | None,
+    site: str | None,
+    slot_range: list[str] | None,
+    flow_role: MaterialFlowRole,
+) -> Any:
+    """声明只供创作编译的物料来源（MaterialSource）。
+
+    参数说明：``resource_template`` 是显式导入的资源模板
+    （ResourceTemplate）符号；``mode`` 是 ``existing | create_new``；
+    ``mount`` 是 ``resource_ref`` 声明；``material_uuid`` 是可选固定物料
+    （Material）身份；``site`` 与 ``slot_range`` 是库位（Site）选择；
+    ``flow_role`` 是工作流局部物料流角色。本标记没有返回值，被
+    执行时抛出 ``RuntimeError``，防止越过创作编译边界读写物料权威。
+    """
+
+    del resource_template, mode, mount, material_uuid, site, slot_range, flow_role
+    raise RuntimeError("工作流创作 material_source() 只能由静态编译器解析")
+
+
 __all__ = [
     "DeviceSelector",
+    "MATERIAL_FLOW_ROLE_LABELS_ZH",
+    "MaterialFlowRole",
     "device",
     "group",
+    "material_source",
     "parallel",
+    "resource_ref",
     "workflow",
     "workflow_definition",
     "workflow_output",
