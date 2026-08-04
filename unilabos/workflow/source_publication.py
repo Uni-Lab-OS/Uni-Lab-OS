@@ -10,7 +10,7 @@ import struct
 import sys
 import threading
 from collections.abc import Callable, Iterator
-from contextlib import contextmanager, suppress
+from contextlib import contextmanager, nullcontext, suppress
 from dataclasses import dataclass
 from pathlib import Path
 from uuid import uuid4
@@ -252,47 +252,67 @@ def atomic_publish_source(
         or Path(target_name).name != target_name
     ):
         raise SourcePublicationError("publication_failed")
+    if _PLATFORM.startswith("darwin") and expected_hash is not NO_EXPECTED_HASH:
+        # macOS ``flock`` 是 advisory lock，无法阻止外部编辑器在最终检查后以
+        # rename 覆盖竞争稿；在具备 RENAME_SWAP+backup 证据协议前明确失败关闭。
+        raise SourcePublicationConflict("draft_hash_conflict")
     location = _PublicationDirectory.create(
         parent_descriptor=parent_descriptor,
         parent_path=parent_path,
     )
     temporary_name = f".{target_name}.{uuid4().hex}.tmp"
-    descriptor = -1
-    try:
-        descriptor = location.open_child(
-            temporary_name,
-            os.O_WRONLY
-            | os.O_CREAT
-            | os.O_EXCL
-            | getattr(os, "O_CLOEXEC", 0)
-            | getattr(os, "O_NOFOLLOW", 0),
-            0o600,
+    if _PLATFORM.startswith("win"):
+        if location.path is None:
+            raise SourcePublicationError("publication_failed")
+        directory_guard = hold_windows_directory_chain(
+            windows_directory_chain(location.path)
         )
-        with os.fdopen(descriptor, "wb") as stream:
+    else:
+        directory_guard = nullcontext()
+    try:
+        with directory_guard:
+            location.assert_current()
             descriptor = -1
-            stream.write(content)
-            stream.flush()
-            os.fsync(stream.fileno())
-        if expected_hash is NO_EXPECTED_HASH:
-            location.replace_child(temporary_name, target_name)
-        else:
-            _compare_and_replace(
-                location=location,
-                target_name=target_name,
-                temporary_name=temporary_name,
-                expected_hash=expected_hash,
-                byte_limit=byte_limit,
-            )
-        location.sync()
+            try:
+                descriptor = location.open_child(
+                    temporary_name,
+                    os.O_WRONLY
+                    | os.O_CREAT
+                    | os.O_EXCL
+                    | getattr(os, "O_CLOEXEC", 0)
+                    | getattr(os, "O_NOFOLLOW", 0),
+                    0o600,
+                )
+                with os.fdopen(descriptor, "wb") as stream:
+                    descriptor = -1
+                    stream.write(content)
+                    stream.flush()
+                    os.fsync(stream.fileno())
+                if expected_hash is NO_EXPECTED_HASH:
+                    location.replace_child(temporary_name, target_name)
+                else:
+                    _compare_and_replace(
+                        location=location,
+                        target_name=target_name,
+                        temporary_name=temporary_name,
+                        expected_hash=expected_hash,
+                        byte_limit=byte_limit,
+                    )
+                location.sync()
+            finally:
+                if descriptor >= 0:
+                    os.close(descriptor)
+                with suppress(FileNotFoundError, OSError, SourcePublicationError):
+                    location.unlink_child(temporary_name)
+            location.assert_current()
     except SourcePublicationConflict:
         raise
+    except WindowsPublicationConflict:
+        raise SourcePublicationConflict("draft_hash_conflict") from None
+    except WindowsPublicationError:
+        raise SourcePublicationError("publication_failed") from None
     except (OSError, StableFileAccessError):
         raise SourcePublicationError("publication_failed") from None
-    finally:
-        if descriptor >= 0:
-            os.close(descriptor)
-        with suppress(FileNotFoundError, OSError, SourcePublicationError):
-            location.unlink_child(temporary_name)
 
 
 def _compare_and_replace(
