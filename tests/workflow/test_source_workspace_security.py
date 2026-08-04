@@ -1,6 +1,7 @@
 """工作流源码（Workflow Source）工作区的失败关闭安全测试。"""
 
 import os
+from dataclasses import dataclass
 from pathlib import Path
 
 import pytest
@@ -11,11 +12,25 @@ from unilabos.workflow.source_discovery import (
     SourceDeclarationError,
     discover_editable_sources,
 )
-from unilabos.workflow.source_workspace import MANIFEST_BYTE_LIMIT
+from unilabos.workflow.source_workspace import (
+    MANIFEST_BYTE_LIMIT,
+    SourceWorkspaceError,
+)
 from unilabos.workflow.store import WorkflowStore
 
 SOURCE_BYTE_LIMIT = 8 * 1024 * 1024
 WORKFLOW_UUID = "11111111-1111-4111-8111-111111111111"
+FILE_ATTRIBUTE_REPARSE_POINT = 0x400
+
+
+@dataclass(frozen=True)
+class ReparseDirectoryStat:
+    """提供 Windows 重解析点（reparse point）目录所需的最小元数据。"""
+
+    st_mode: int
+    st_dev: int
+    st_ino: int
+    st_file_attributes: int
 
 
 def _write_package(selected_root: Path, *, create_source: bool = True) -> Path:
@@ -137,6 +152,45 @@ def test_discovery_rejects_symlink_directory_at_every_authorized_level(
 
     with pytest.raises(SourceDeclarationError) as caught:
         discover_editable_sources((selected_root,))
+
+    assert caught.value.code == "invalid_package_root"
+
+
+def test_no_dir_fd_workspace_rejects_windows_reparse_directory(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """无 ``dir_fd`` 路径必须拒绝 junction 等 Windows 重解析目录。
+
+    参数：``tmp_path`` 提供真实可编辑包（Editable Package）；``monkeypatch``
+    只为显式授权根附加重解析属性并切换到路径回退。返回：无；即使该目录不是普通
+    符号链接，也必须以 ``invalid_package_root`` 失败关闭。
+    """
+
+    selected_root = tmp_path / "selected"
+    _write_package(selected_root)
+    original_lstat = Path.lstat
+
+    def lstat_with_reparse_attribute(
+        path: Path,
+    ) -> os.stat_result | ReparseDirectoryStat:
+        """返回原元数据，仅为授权根添加重解析点（reparse point）属性。"""
+
+        metadata = original_lstat(path)
+        if Path(path) != selected_root:
+            return metadata
+        return ReparseDirectoryStat(
+            st_mode=metadata.st_mode,
+            st_dev=metadata.st_dev,
+            st_ino=metadata.st_ino,
+            st_file_attributes=FILE_ATTRIBUTE_REPARSE_POINT,
+        )
+
+    monkeypatch.setattr(source_workspace, "_DIRECTORY_FD_PATHS_SUPPORTED", False)
+    monkeypatch.setattr(Path, "lstat", lstat_with_reparse_attribute)
+
+    with pytest.raises(SourceWorkspaceError) as caught:
+        source_workspace.read_package_root(selected_root)
 
     assert caught.value.code == "invalid_package_root"
 
