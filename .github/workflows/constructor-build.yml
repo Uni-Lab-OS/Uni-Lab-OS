@@ -176,6 +176,7 @@ jobs:
           python -c "import unilabos; print(unilabos.__version__)"
           python -c "import rclpy; print('rclpy: OK')"
           unilab --help
+          unilab-supervisor --help
 
       - name: Smoke test Windows installer
         if: steps.select.outputs.enabled == 'true' && matrix.platform == 'win-64'
@@ -201,6 +202,8 @@ jobs:
           if ($LASTEXITCODE -ne 0) { throw "rclpy import failed" }
           & "$prefix\Scripts\unilab.exe" --help
           if ($LASTEXITCODE -ne 0) { throw "unilab --help failed" }
+          & "$prefix\Scripts\unilab-supervisor.exe" --help
+          if ($LASTEXITCODE -ne 0) { throw "unilab-supervisor --help failed" }
 
       - name: Upload installer and manifests
         if: steps.select.outputs.enabled == 'true'

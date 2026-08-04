@@ -18,7 +18,6 @@ from urllib.request import Request, urlopen
 
 import pytest
 
-
 pytestmark = pytest.mark.skipif(
     os.name == "nt",
     reason="Windows runtime-prefix 可执行文件解析将在后续平台轮次覆盖",
@@ -194,6 +193,7 @@ def _start_supervisor(
         finally:
             if process.poll() is None:
                 try:
+                    _request(running, "DELETE", "/v1/simulators/current")
                     _request(running, "DELETE", "/v1/workers/current")
                 except (TimeoutError, URLError):
                     pass
@@ -247,3 +247,140 @@ def test_supervisor_controls_one_managed_unilab_worker_over_http(
         stop = _request(supervisor, "DELETE", "/v1/workers/current")
         assert 200 <= stop.status < 300, stop.body
         _wait_for_status(supervisor, "idle")
+
+
+def test_supervisor_restart_marks_previous_worker_interrupted_without_replay(
+    tmp_path: Path,
+) -> None:
+    runtime_prefix = tmp_path / "runtime-prefix"
+    worker_pid_path = tmp_path / "fake-unilab.pid"
+    _write_fake_unilab(runtime_prefix, worker_pid_path)
+
+    workspace = tmp_path / "workspace"
+    working_dir = tmp_path / "runtime-work"
+    workspace.mkdir()
+    working_dir.mkdir()
+    graph_path = workspace / "graph.json"
+    config_path = workspace / "local_config.py"
+    graph_path.write_text("{}\n", encoding="utf-8")
+    config_path.write_text("# Managed Runtime restart fixture\n", encoding="utf-8")
+
+    with _start_supervisor(
+        tmp_path,
+        runtime_prefix,
+        worker_pid_path,
+    ) as supervisor:
+        _wait_for_status(supervisor, "idle")
+        start = _request(
+            supervisor,
+            "POST",
+            "/v1/workers",
+            {
+                "workspace_path": str(workspace),
+                "graph_path": str(graph_path),
+                "config_path": str(config_path),
+                "working_dir": str(working_dir),
+                "backend": "simple",
+            },
+        )
+        assert 200 <= start.status < 300, start.body
+        _wait_for_status(supervisor, "running")
+        _wait_for_file(worker_pid_path)
+        original_worker_pid = worker_pid_path.read_text(encoding="utf-8")
+        os.killpg(supervisor.process.pid, signal.SIGKILL)
+        supervisor.process.wait(timeout=5)
+
+    with _start_supervisor(
+        tmp_path,
+        runtime_prefix,
+        worker_pid_path,
+    ) as restarted:
+        status = _wait_for_status(restarted, "interrupted")
+        assert status["worker"] is None
+        time.sleep(0.2)
+        assert worker_pid_path.read_text(encoding="utf-8") == original_worker_pid
+
+
+def test_supervisor_controls_source_plc_sim_independently_from_worker(
+    tmp_path: Path,
+) -> None:
+    runtime_prefix = tmp_path / "runtime-prefix"
+    worker_pid_path = tmp_path / "fake-unilab.pid"
+    _write_fake_unilab(runtime_prefix, worker_pid_path)
+    python_executable = runtime_prefix / "bin" / "python"
+    python_executable.write_text(
+        f'#!/bin/sh\nexec {sys.executable!s} "$@"\n',
+        encoding="utf-8",
+    )
+    python_executable.chmod(0o755)
+
+    simulator_root = tmp_path / "PLC-Sim" / "OpcUaSim"
+    backend_path = simulator_root / "gui" / "backend.py"
+    backend_path.parent.mkdir(parents=True)
+    (backend_path.parent / "__init__.py").write_text("", encoding="utf-8")
+    simulator_pid_path = tmp_path / "fake-simulator.pid"
+    backend_path.write_text(
+        f"""import os
+import signal
+import time
+from pathlib import Path
+
+Path({str(simulator_pid_path)!r}).write_text(str(os.getpid()), encoding="utf-8")
+stopping = False
+
+
+def stop(*_args):
+    global stopping
+    stopping = True
+
+
+signal.signal(signal.SIGINT, stop)
+signal.signal(signal.SIGTERM, stop)
+while not stopping:
+    time.sleep(0.05)
+""",
+        encoding="utf-8",
+    )
+
+    with _start_supervisor(
+        tmp_path,
+        runtime_prefix,
+        worker_pid_path,
+    ) as supervisor:
+        _wait_for_status(supervisor, "idle")
+        started = _request(
+            supervisor,
+            "POST",
+            "/v1/simulators",
+            {"source_path": str(simulator_root.parent)},
+        )
+        assert 200 <= started.status < 300, started.body
+        _wait_for_file(simulator_pid_path)
+        status = _request(supervisor, "GET", "/v1/status")
+        assert status.body["status"] == "idle"
+        assert status.body["simulator"] == {
+            "status": "running",
+            "pid": int(simulator_pid_path.read_text(encoding="utf-8")),
+            "error": None,
+        }
+
+        stopped = _request(
+            supervisor,
+            "DELETE",
+            "/v1/simulators/current",
+        )
+        assert 200 <= stopped.status < 300, stopped.body
+        assert stopped.body["simulator"] == {
+            "status": "idle",
+            "pid": None,
+            "error": None,
+        }
+
+
+def _wait_for_file(path: Path, timeout: float = 5.0) -> None:
+    deadline = time.monotonic() + timeout
+    while time.monotonic() < deadline:
+        if path.is_file():
+            return
+        time.sleep(0.02)
+    pytest.fail(f"worker fixture did not create {path}")
