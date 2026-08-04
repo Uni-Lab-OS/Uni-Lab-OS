@@ -104,7 +104,7 @@ def test_complete_discovery_plan_registers_atomically(
     # ``plan`` 是全量校验完成后才产生的不可变来源发现计划。
     plan = discover_editable_sources((selected_root,))
 
-    registered = registration_service.register_discovered_sources(plan)
+    registered = registration_service.replace_discovered_source_authorizations(plan)
 
     assert [row["workflow_uuid"] for row in registered] == [
         WORKFLOW_A_UUID,
@@ -135,10 +135,10 @@ def test_repeating_exact_discovery_plan_is_idempotent(
         entries=((WORKFLOW_A_UUID, "alpha_lab/workflows/a.py"),),
     )
     plan = discover_editable_sources((selected_root,))
-    registration_service.register_discovered_sources(plan)
+    registration_service.replace_discovered_source_authorizations(plan)
     first_snapshot = registration_service.list_registered_sources()
 
-    second_result = registration_service.register_discovered_sources(plan)
+    second_result = registration_service.replace_discovered_source_authorizations(plan)
 
     assert second_result == first_snapshot
     assert registration_service.list_registered_sources() == first_snapshot
@@ -166,7 +166,7 @@ def test_missing_workflow_rejects_whole_plan_without_creating_definition(
     plan = discover_editable_sources((selected_root,))
 
     with pytest.raises(WorkflowError) as caught:
-        registration_service.register_discovered_sources(plan)
+        registration_service.replace_discovered_source_authorizations(plan)
 
     assert caught.value.code == "workflow_not_found"
     assert registration_service.list_registered_sources() == []
@@ -199,7 +199,7 @@ def test_existing_identity_collision_preserves_registration_batch_exactly(
                 (WORKFLOW_C_UUID, "alpha_lab/workflows/shared.py"),
             ),
         )
-        registration_service.register_editable_source(
+        registration_service.replace_active_editable_source_authorization(
             workflow_uuid=WORKFLOW_A_UUID,
             package_id="legacy_alpha",
             package_root=package_root,
@@ -209,7 +209,7 @@ def test_existing_identity_collision_preserves_registration_batch_exactly(
     elif collision == "source_uri":
         existing_root = tmp_path / "existing-alpha"
         existing_root.mkdir()
-        registration_service.register_editable_source(
+        registration_service.replace_active_editable_source_authorization(
             workflow_uuid=WORKFLOW_A_UUID,
             package_id="alpha_lab",
             package_root=existing_root,
@@ -228,7 +228,7 @@ def test_existing_identity_collision_preserves_registration_batch_exactly(
     else:
         existing_root = tmp_path / "existing-alpha"
         existing_root.mkdir()
-        registration_service.register_editable_source(
+        registration_service.replace_active_editable_source_authorization(
             workflow_uuid=WORKFLOW_A_UUID,
             package_id="alpha_lab",
             package_root=existing_root,
@@ -253,7 +253,7 @@ def test_existing_identity_collision_preserves_registration_batch_exactly(
     plan = discover_editable_sources(roots)
 
     with pytest.raises(WorkflowConflict) as caught:
-        registration_service.register_discovered_sources(plan)
+        registration_service.replace_discovered_source_authorizations(plan)
 
     assert caught.value.code == "invalid_input"
     assert registration_service.list_registered_sources() == before
@@ -286,7 +286,7 @@ def test_discovered_package_identity_change_fails_without_partial_registration(
     )
 
     with pytest.raises(WorkflowError) as caught:
-        registration_service.register_discovered_sources(plan)
+        registration_service.replace_discovered_source_authorizations(plan)
 
     assert caught.value.code == "invalid_input"
     assert registration_service.list_registered_sources() == []

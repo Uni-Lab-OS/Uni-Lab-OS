@@ -211,7 +211,7 @@ def _service_with_source(
     )
     package_root = tmp_path / "package"
     package_root.mkdir()
-    service.register_editable_source(
+    service.replace_active_editable_source_authorization(
         workflow_uuid=WORKFLOW_UUID,
         package_id="source_monitor_contract",
         package_root=package_root,

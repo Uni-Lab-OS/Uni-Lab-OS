@@ -1,4 +1,4 @@
-"""Authoring Draft 文件的进程级轮询监视器。"""
+"""创作草稿（Authoring Draft）文件的进程级源码监视器（Source Monitor）。"""
 
 from __future__ import annotations
 

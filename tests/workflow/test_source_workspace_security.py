@@ -257,7 +257,7 @@ def test_service_rejects_external_source_larger_than_eight_mib_without_event(
         meta_data={},
         workflow_uuid=WORKFLOW_UUID,
     )
-    service.register_editable_source(
+    service.replace_active_editable_source_authorization(
         workflow_uuid=WORKFLOW_UUID,
         package_id="source_budget_contract",
         package_root=package_root,
@@ -303,7 +303,7 @@ def test_save_draft_rejects_oversized_source_before_replacing_file(
         meta_data={},
         workflow_uuid=WORKFLOW_UUID,
     )
-    service.register_editable_source(
+    service.replace_active_editable_source_authorization(
         workflow_uuid=WORKFLOW_UUID,
         package_id="save_budget_contract",
         package_root=package_root,
@@ -374,7 +374,7 @@ def test_service_rejects_package_root_replaced_during_registration(
 
     try:
         with pytest.raises(WorkflowError) as caught:
-            service.register_editable_source(
+            service.replace_active_editable_source_authorization(
                 workflow_uuid=WORKFLOW_UUID,
                 package_id="root_identity_contract",
                 package_root=package_root,
@@ -411,7 +411,7 @@ def test_service_rejects_a_source_that_changes_during_same_descriptor_read(
         meta_data={},
         workflow_uuid=WORKFLOW_UUID,
     )
-    service.register_editable_source(
+    service.replace_active_editable_source_authorization(
         workflow_uuid=WORKFLOW_UUID,
         package_id="stable_read_contract",
         package_root=package_root,

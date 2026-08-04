@@ -1,4 +1,4 @@
-"""工作区本地 Workflow Authority 的进程级组合根。"""
+"""工作区本地工作流权威（Workflow Authority）的进程级组合根。"""
 
 from __future__ import annotations
 
@@ -102,15 +102,15 @@ def compose_workflow_runtime(
         if _service is not None:
             if database_path != _database_path:
                 raise RuntimeError(
-                    "Workflow authority cannot switch working_dir at runtime"
+                    "工作流权威（Workflow Authority）运行期间不能切换 working_dir"
                 )
             if compiler is not _compiler:
                 raise RuntimeError(
-                    "Workflow authority cannot switch compiler at runtime"
+                    "工作流权威（Workflow Authority）运行期间不能切换 compiler"
                 )
             if configured_roots != _editable_package_roots:
                 raise RuntimeError(
-                    "Workflow authority cannot switch editable packages at runtime"
+                    "工作流权威（Workflow Authority）运行期间不能切换可编辑包"
                 )
             return _service
         # ``workflow_store`` 是本地标准工作流任务（WorkflowTask）/工作流节点作业
@@ -135,7 +135,7 @@ def compose_workflow_runtime(
             # ``discovery_plan`` 是全量文件预校验结果；服务在单事务中注册后，
             # 才能恢复草稿并建立一致的监视基线。
             discovery_plan = discover_editable_sources(configured_roots)
-            new_service.register_discovered_sources(discovery_plan)
+            new_service.replace_discovered_source_authorizations(discovery_plan)
             new_service.recover_registered_sources()
             new_monitor = WorkflowSourceMonitor(new_service)
         except BaseException:

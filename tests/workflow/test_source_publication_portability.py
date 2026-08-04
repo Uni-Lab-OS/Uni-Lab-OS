@@ -293,7 +293,7 @@ def test_macos_uses_flock_without_assuming_linux_file_leases(
         description=None,
         meta_data={},
     )
-    service.register_editable_source(
+    service.replace_active_editable_source_authorization(
         workflow_uuid=WORKFLOW_UUID,
         package_id="portable_lab",
         package_root=package_root,

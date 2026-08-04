@@ -198,10 +198,10 @@ def test_empty_current_roots_do_not_activate_or_read_historical_sources(
     assert empty.get_workflow(WORKFLOW_A_UUID)["uuid"] == WORKFLOW_A_UUID
 
 
-def test_single_source_compatibility_registration_activates_exact_identity_only(
+def test_single_source_replacement_activates_exact_identity_only(
     tmp_path: Path,
 ) -> None:
-    """单项兼容注册必须复用规范不变量并显式激活其唯一身份。
+    """单项来源授权替换必须复用规范不变量并显式激活其唯一身份。
 
     参数：``tmp_path`` 隔离数据库和包目录。返回：无；证明重启后历史行不活跃，
     完全相同注册可重新激活且不能静默重绑定。
@@ -220,7 +220,7 @@ def test_single_source_compatibility_registration_activates_exact_identity_only(
         description=None,
         meta_data={},
     )
-    first.register_editable_source(
+    first.replace_active_editable_source_authorization(
         workflow_uuid=WORKFLOW_A_UUID,
         package_id="alpha_lab",
         package_root=package_root,
@@ -235,7 +235,7 @@ def test_single_source_compatibility_registration_activates_exact_identity_only(
     try:
         assert reopened.list_registered_sources() == []
         _assert_source_access_rejected(reopened, WORKFLOW_A_UUID)
-        reopened.register_editable_source(
+        reopened.replace_active_editable_source_authorization(
             workflow_uuid=WORKFLOW_A_UUID,
             package_id="alpha_lab",
             package_root=package_root,

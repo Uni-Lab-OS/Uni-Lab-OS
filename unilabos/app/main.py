@@ -170,7 +170,11 @@ def convert_argv_dashes_to_underscores(args: argparse.ArgumentParser):
 
 
 def configure_material_startup(args_dict: Dict[str, Any]) -> str:
-    """Apply material CLI overrides and resolve embedded/external host mode."""
+    """应用物料（Material）命令行（CLI）覆盖并解析嵌入式/外部主机模式。
+
+    参数：``args_dict`` 是命令行参数字典。返回：``embedded`` 或 ``external``
+    物料服务模式；非法物料来源值抛出 ``ValueError``。
+    """
 
     source_arg = args_dict.get("material_source")
     production_control_enabled = "edge_control" in args_dict.get("app_bridges", [])
@@ -191,7 +195,9 @@ def configure_material_startup(args_dict: Dict[str, Any]) -> str:
     }
     source = aliases.get(source, source)
     if source not in {"microbackend", "backend", "auto"}:
-        raise ValueError("material source must be microbackend, backend, or auto")
+        raise ValueError(
+            "物料来源（Material Source）必须是 microbackend、backend 或 auto"
+        )
     HTTPConfig.material_source = source
 
     address_arg = args_dict.get("material_microbackend_addr")
@@ -206,8 +212,7 @@ def configure_material_startup(args_dict: Dict[str, Any]) -> str:
             address or "http://127.0.0.1:8092/api/v1"
         )
     else:
-        # Embedded always resolves to this host's BasicConfig.port.  Clearing a
-        # stale external address prevents accidentally bypassing the host DB.
+        # 嵌入式服务固定解析到当前主机端口；清除遗留外部地址，防止绕过主机数据库。
         HTTPConfig.material_microbackend_addr = ""
     args_dict["_material_service_mode"] = mode
     return mode
@@ -218,7 +223,7 @@ def configure_workflow_editable_package_roots(
 ) -> tuple[str, ...]:
     """冻结当前进程工作流源码（Workflow Source）的唯一授权目录集合。
 
-    参数：``args_dict`` 是命令行参数字典；重复 CLI 根目录存在时覆盖配置文件，
+    参数：``args_dict`` 是命令行参数字典；重复命令行（CLI）根目录存在时覆盖配置，
     否则配置必须已经是不可变 ``tuple[str, ...]``。返回：保持声明顺序的绝对路径
     tuple，并同步写入 ``BasicConfig``。异常：非 tuple 配置、空项或非字符串项
     抛出 ``TypeError``，禁止产生第二种隐式配置解释。
@@ -231,7 +236,7 @@ def configure_workflow_editable_package_roots(
             raise TypeError("工作流源码授权目录配置必须是 tuple")
     else:
         if not isinstance(cli_roots, list):
-            raise TypeError("工作流源码 CLI 授权目录必须是可重复参数列表")
+            raise TypeError("工作流源码命令行（CLI）授权目录必须是可重复参数列表")
         configured_roots = tuple(cli_roots)
     if any(not isinstance(root, str) or not root.strip() for root in configured_roots):
         raise TypeError("工作流源码授权目录必须是非空字符串")
@@ -246,7 +251,11 @@ def configure_workflow_editable_package_roots(
 def should_start_embedded_material_service(
     args_dict: Dict[str, Any], *, is_host_mode: bool
 ) -> bool:
-    """Only a Host using the local material source may own the SQLite DB."""
+    """判断当前主机是否应拥有嵌入式物料库存（Material Inventory）SQLite。
+
+    参数：``args_dict`` 是已规范化启动参数，``is_host_mode`` 表示当前节点是主机。
+    返回：仅本地物料来源与嵌入式服务同时启用时为 ``True``。
+    """
 
     return (
         is_host_mode
@@ -1222,8 +1231,8 @@ def main():
         )
         return 0
 
-    # Material client derives its embedded URL from the host web port, so
-    # resolve host/slave role and port before any optional startup query.
+    # 物料客户端（Material Client）的嵌入式 URL 来自主机 Web 端口，因此必须在
+    # 任一可选启动查询之前确定主从角色与端口。
     BasicConfig.port = args_dict["port"] if args_dict["port"] else BasicConfig.port
     BasicConfig.is_host_mode = not args_dict.get("is_slave", False)
     try:

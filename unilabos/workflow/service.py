@@ -1,4 +1,4 @@
-"""本地 Backend-shaped Workflow Authority 的应用服务。"""
+"""本地后端形态工作流权威（Backend-shaped Workflow Authority）的应用服务。"""
 
 from __future__ import annotations
 
@@ -283,8 +283,9 @@ class WorkflowService:
             store,
             material_resolver=material_resolver,
         )
-        # ``device_action_run_bridge`` 是可选本地执行端口；Backend-controlled
-        # 模式不装配它，避免 OS 形成第二个生产调度权威（Scheduler Authority）。
+        # ``device_action_run_bridge`` 是可选本地执行端口；后端控制
+        # （Backend-controlled）模式不装配它，避免 OS 形成第二个生产调度权威
+        # （Scheduler Authority）。
         self._device_action_run_bridge = device_action_run_bridge
         self._locks_guard = threading.Lock()
         self._authoring_locks: Dict[str, threading.RLock] = {}
@@ -293,7 +294,7 @@ class WorkflowService:
         self._active_sources_lock = threading.RLock()
         self._active_source_workflow_uuids: frozenset[str] = frozenset()
 
-    # Workflow 与 Graph --------------------------------------------------
+    # 工作流（Workflow）与图（Graph） -------------------------------------
 
     def create_workflow(
         self,
@@ -437,7 +438,7 @@ class WorkflowService:
             except StoreConflict:
                 raise WorkflowError("invalid_input") from None
 
-    # WorkflowTask 与 WorkflowNodeJob -----------------------------------
+    # 工作流任务（WorkflowTask）与工作流节点作业（WorkflowNodeJob） --------
 
     def create_workflow_task(
         self,
@@ -463,8 +464,8 @@ class WorkflowService:
             meta_data = normalize_json_object(meta_data)
         except ValueError:
             raise WorkflowError("invalid_input") from None
-        # P0-2 已冻结合同；生产 schema/compiler 属于 Phase 02。本阶段镜像
-        # Backend baseline 的空 Task input，不提前持久化未实现的解释。
+        # P0-2 已冻结合同；生产 schema/compiler 属于 Phase 02。本阶段镜像后端基线
+        # （Backend baseline）的空任务（Task）input，不提前持久化未实现的解释。
         if input_value:
             raise WorkflowError("invalid_input")
         description = self._optional_text(description)
@@ -556,7 +557,7 @@ class WorkflowService:
         status: str = "",
         cleanup_status: str = "",
     ) -> Dict[str, Any]:
-        """按 Backend 查询合同分页读取工作流任务（WorkflowTask）。
+        """按后端（Backend）查询合同分页读取工作流任务（WorkflowTask）。
 
         参数：分页字段限定结果窗口；``workflow_uuid`` 限定工作流定义；
         ``execution_kind`` 区分工作流与直接设备动作来源；状态字段限定业务和清理
@@ -827,16 +828,16 @@ class WorkflowService:
             raise StoreConflict(f"unsupported workflow node type {node_type!r}")
         return kind
 
-    # Authoring ----------------------------------------------------------
+    # 工作流创作（Authoring） ---------------------------------------------
 
-    def register_discovered_sources(
+    def replace_discovered_source_authorizations(
         self,
         plan: EditableSourceDiscoveryPlan,
     ) -> List[Dict[str, Any]]:
-        """原子注册一个完整工作流源码（Workflow Source）发现计划。
+        """原子持久化发现计划并替换当前活动源码授权集合。
 
         参数：``plan`` 是从全部显式授权目录完成预校验后生成的不可变计划。
-        返回：按计划顺序排列的持久来源记录。
+        返回：按计划顺序排列的持久来源记录；成功后活动授权恰好等于本计划。
         异常：缺失工作流映射为 ``workflow_not_found``；来源身份或目录安全冲突
         分别映射为稳定 ``invalid_input`` 错误，且不提交任何部分注册。
         """
@@ -901,7 +902,7 @@ class WorkflowService:
             self._active_source_workflow_uuids = active_workflow_uuids
         return registered
 
-    def register_editable_source(
+    def replace_active_editable_source_authorization(
         self,
         *,
         workflow_uuid: str,
@@ -909,11 +910,12 @@ class WorkflowService:
         package_root: str | Path,
         relative_path: str,
     ) -> Dict[str, Any]:
-        """把工作流（Workflow）绑定到一个受限的本地 Python 源码路径。
+        """用一项可编辑来源替换当前进程的完整活动源码授权集合。
 
-        参数：工作流 UUID 是已有定义身份；包身份、包目录和相对路径共同形成
-        工作流源码（Workflow Source）的稳定来源身份。
-        返回：持久化后的来源注册记录。
+        参数：工作流（Workflow）UUID 是已有定义身份；包身份、包目录和相对路径
+        共同形成工作流源码（Workflow Source）的稳定来源身份。
+        返回：持久化后的来源记录；此前活动的其他来源失去本进程文件访问授权，
+        但其持久历史不会被删除。
         异常：身份不存在、路径不安全或唯一性冲突时返回稳定工作流错误。
         """
 
@@ -932,8 +934,8 @@ class WorkflowService:
         source_uri = (
             f"package://{normalized_package_id}/{normalized_relative_path}"
         )
-        # 单项兼容入口构造成与启动发现完全相同的不可变计划，避免绕过物理路径、
-        # 来源 URI 和“既有身份不可重绑定”等批量注册不变量。
+        # 单项替换命令构造成与启动发现完全相同的不可变计划，避免绕过物理路径、
+        # 来源 URI 和“既有身份不可重绑定”等批量授权不变量。
         plan = EditableSourceDiscoveryPlan(
             registrations=(
                 EditableSourceRegistration(
@@ -948,7 +950,7 @@ class WorkflowService:
                 ((root, (root_metadata.st_dev, root_metadata.st_ino))),
             ),
         )
-        return self.register_discovered_sources(plan)[0]
+        return self.replace_discovered_source_authorizations(plan)[0]
 
     def list_registered_sources(self) -> List[Dict[str, Any]]:
         """返回本次进程配置仍授权的工作流源码（Workflow Source）。
@@ -1533,7 +1535,7 @@ class WorkflowService:
             "after_id": after_id,
         }
 
-    # Authoring 内部实现 -------------------------------------------------
+    # 工作流创作（Authoring）内部实现 -------------------------------------
 
     def _get_authoring_workflow(
         self,
@@ -1796,9 +1798,15 @@ class WorkflowService:
     def _backend_graph_projection(
         graph: Dict[str, Any],
     ) -> Dict[str, Any]:
-        """按 Backend JSON omitempty 语义投影 Candidate。"""
+        """按后端（Backend）JSON omitempty 语义投影候选版本（Candidate）。
+
+        参数：``graph`` 是编译器产出的完整候选图。返回：删除可选 ``None`` 字段、
+        保留后端读取容器形状的新字典；输入图不被修改。
+        """
 
         def omit_none(value: Any) -> Any:
+            """删除单个实体中的 ``None`` 字段；非字典值保持原样返回。"""
+
             if not isinstance(value, dict):
                 return value
             return {key: item for key, item in value.items() if item is not None}
@@ -1822,7 +1830,11 @@ class WorkflowService:
         *,
         applied_graph: Dict[str, Any],
     ) -> Dict[str, Any]:
-        """把编译器写实体补全为冻结的 Backend 读取形状。"""
+        """把编译器写实体补全为冻结的后端（Backend）读取形状。
+
+        参数：``graph`` 是编译器写模型，``applied_graph`` 是当前已应用图。返回：
+        补齐稳定身份、时间与读取字段的候选图；非法图抛出稳定工作流错误。
+        """
 
         applied = cls._validated_applied_backend_graph(applied_graph)
         cls._require_candidate_graph_containers(graph)
@@ -1926,7 +1938,7 @@ class WorkflowService:
         cls,
         graph: Dict[str, Any],
     ) -> Dict[str, Any]:
-        """检查 Candidate 前先校验 Authority 持有的工作流图。"""
+        """检查候选版本（Candidate）前先校验权威（Authority）持有的工作流图。"""
 
         try:
             applied = cls._backend_graph_projection(graph)
@@ -1964,9 +1976,15 @@ class WorkflowService:
 
     @staticmethod
     def _require_backend_entity_types(graph: Dict[str, Any]) -> None:
-        """在完整工作流图上强制执行冻结的 Backend JSON 类型。"""
+        """在完整工作流图上强制执行冻结的后端（Backend）JSON 类型。
+
+        参数：``graph`` 是待验证的完整工作流（Workflow）图。返回：无；任一字段
+        类型偏离冻结合同即抛出 ``ValueError``。
+        """
 
         def exact(entity: Dict[str, Any], fields: set[str], expected: type) -> None:
+            """要求 ``entity`` 指定字段严格等于 ``expected`` 类型。"""
+
             if any(type(entity[field]) is not expected for field in fields):
                 raise ValueError
 
@@ -1975,6 +1993,8 @@ class WorkflowService:
             fields: set[str],
             expected: type,
         ) -> None:
+            """要求存在的可选字段严格等于 ``expected`` 类型。"""
+
             if any(
                 field in entity and type(entity[field]) is not expected
                 for field in fields
@@ -1982,11 +2002,15 @@ class WorkflowService:
                 raise ValueError
 
         def uuids(entity: Dict[str, Any], fields: set[str]) -> None:
+            """要求指定字段均为合法 UUID 字符串；非法值抛出 ``ValueError``。"""
+
             exact(entity, fields, str)
             for field in fields:
                 validate_uuid(entity[field])
 
         def optional_uuids(entity: Dict[str, Any], fields: set[str]) -> None:
+            """验证存在的可选 UUID 字段；缺失字段保持合法。"""
+
             for field in fields:
                 if field in entity:
                     uuids(entity, {field})
