@@ -15,6 +15,12 @@ from unilabos.app.template_sync import (
     TemplateSynchronizer,
     run_template_sync_command,
 )
+from unilabos.registry.template_projection import RegistryTemplateProjection
+from unilabos.registry.template_snapshot import RegistryTemplateSnapshot
+from unilabos.workflow.store import WorkflowStore
+
+
+RESOURCE_TEMPLATE_UUID = "10000000-0000-4000-8000-000000000001"
 
 
 class FakeRegistry:
@@ -31,7 +37,9 @@ class FakeRegistry:
                     "status_types": {"status": "String"},
                     "action_value_mappings": {
                         "transfer": {
+                            "contract_kind": "typed",
                             "displayname": "输送",
+                            "description": "把物料输送到目标库位",
                             "type": "UniLabJsonCommand",
                             "goal": {
                                 "unilabos_device_id": "unilabos_device_id",
@@ -55,6 +63,15 @@ class FakeRegistry:
                                         },
                                         "required": ["unilabos_device_id", "volume"],
                                     }
+                                },
+                                "x-unilabos-action-contract": {
+                                    "version": 2,
+                                    "input_order": ["volume"],
+                                    "output_order": [],
+                                    "resource_template_symbols": {
+                                        "goal": {},
+                                        "result": {},
+                                    },
                                 },
                             },
                             "handles": {
@@ -98,6 +115,16 @@ class FakeRegistry:
                 "category": ["container"],
             }
         ]
+
+
+class DuplicateDeviceRegistry(FakeRegistry):
+    """返回两个相同设备业务名，用于验证完整快照唯一性错误。"""
+
+    def obtain_registry_device_info(self):
+        """复制同一设备定义，制造重复活动业务名。"""
+
+        devices = super().obtain_registry_device_info()
+        return [devices[0], dict(devices[0])]
 
 
 class FakeResponse:
@@ -235,3 +262,55 @@ def test_template_sync_command_builds_complete_registry_without_starting_edge():
 def test_legacy_startup_registration_is_read_only():
     with pytest.raises(RuntimeError, match="template-sync"):
         register_devices_and_resources(FakeRegistry())
+
+
+def test_local_projection_and_template_sync_share_one_registry_snapshot(
+    tmp_path,
+) -> None:
+    """本地模板投影和 Backend 同步必须消费同一不可变 Registry 定义快照。
+
+    参数说明：``tmp_path`` 隔离本地工作流数据库；测试比较两条消费路径中的动作
+    业务名和最终生产 JSON Schema，禁止二次 Registry 遍历产生漂移。
+    """
+
+    registry_snapshot = RegistryTemplateSnapshot.from_registry(FakeRegistry())
+    projection = RegistryTemplateProjection(
+        WorkflowStore(tmp_path / "workflow_history.db"),
+        authority_id="local",
+        resource_template_identity_resolver=lambda resource_name: (
+            RESOURCE_TEMPLATE_UUID if resource_name == "pump" else ""
+        ),
+    )
+    local_action = projection.refresh(registry_snapshot).require_action(
+        "drivers.pump:Pump",
+        "transfer",
+    )
+
+    session = FakeSession()
+    synchronizer = TemplateSynchronizer(
+        "http://backend:8080",
+        "developer-secret",
+        session=session,
+    )
+    synchronizer.sync(registry_snapshot)
+    payload = json.loads(gzip.decompress(session.calls[0][1]["data"]))
+    synchronized_action = payload["resources"][0]["class"][
+        "action_value_mappings"
+    ]["transfer"]
+
+    assert synchronized_action["schema"] == local_action.detached_template()["schema"]
+    assert synchronized_action["display_name"] == local_action.template["display_name"]
+    projection.close()
+
+
+def test_template_sync_maps_registry_snapshot_error_to_sync_domain_error() -> None:
+    """Registry 快照唯一性失败不得泄露模板同步模块之外的异常类型。"""
+
+    synchronizer = TemplateSynchronizer(
+        "http://backend:8080",
+        "developer-secret",
+        session=FakeSession(),
+    )
+
+    with pytest.raises(TemplateSyncError, match="重复"):
+        synchronizer.sync(DuplicateDeviceRegistry())

@@ -92,7 +92,7 @@ class AuthoringCatalogSnapshot:
                     _freeze(handle)
                     for handle in sorted(
                         handles_by_parent[node_uuid],
-                        key=lambda item: str(item["uuid"]),
+                        key=_catalog_handle_order,
                     )
                 ),
             )
@@ -104,8 +104,14 @@ class AuthoringCatalogSnapshot:
             actions.append(action)
 
         payload = {
-            "node_templates": sorted(nodes, key=lambda item: str(item["uuid"])),
-            "handle_templates": sorted(handles, key=lambda item: str(item["uuid"])),
+            "node_templates": sorted(
+                (_catalog_semantic_entity(item) for item in nodes),
+                key=lambda item: str(item["uuid"]),
+            ),
+            "handle_templates": sorted(
+                (_catalog_semantic_entity(item) for item in handles),
+                key=lambda item: str(item["uuid"]),
+            ),
         }
         fingerprint = "sha256:" + hashlib.sha256(
             json.dumps(
@@ -202,6 +208,36 @@ def _required_uuid(entity: Mapping[str, Any], field: str) -> str:
         return validate_uuid(entity[field])
     except (KeyError, TypeError, ValueError):
         raise AuthoringCatalogError(f"目录字段 {field} 不是有效 UUID") from None
+
+
+def _catalog_handle_order(handle: Mapping[str, Any]) -> tuple[int, int, str]:
+    """取得句柄模板的稳定动作合同顺序。
+
+    参数说明：``handle`` 是已验证句柄实体；F03 投影在元数据中记录跨输入/输出的
+    ``contract_order``。历史实体没有该字段时按 UUID 稳定排序，保持兼容。
+    """
+
+    meta_data = handle.get("meta_data")
+    unilab = meta_data.get("unilab") if isinstance(meta_data, Mapping) else None
+    order = unilab.get("contract_order") if isinstance(unilab, Mapping) else None
+    if isinstance(order, int) and order >= 0:
+        return 0, order, str(handle["uuid"])
+    return 1, 0, str(handle["uuid"])
+
+
+def _catalog_semantic_entity(entity: Mapping[str, Any]) -> dict[str, Any]:
+    """移除不参与模板目录指纹的数据库操作字段。
+
+    参数说明：``entity`` 是节点或句柄模板；返回新字典并排除创建、更新时间与软
+    删除标记，使相同合同的重复刷新和重启保持同一目录指纹。
+    """
+
+    operational_fields = {"create_time", "update_time", "deleted_at"}
+    return {
+        key: value
+        for key, value in entity.items()
+        if key not in operational_fields
+    }
 
 
 def _json_mapping(entity: Mapping[str, Any], label: str) -> dict[str, Any]:

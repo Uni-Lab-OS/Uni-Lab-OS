@@ -1,0 +1,492 @@
+"""设备注册表模板投影（Registry Template Projection）的公共行为测试。"""
+
+from __future__ import annotations
+
+from pathlib import Path
+from typing import Any
+
+import pytest
+
+from unilabos.registry.template_projection import (
+    RegistryTemplateProjection,
+    RegistryTemplateProjectionError,
+)
+from unilabos.workflow.authoring_kernel import AuthoringCatalogError
+from unilabos.workflow.composition import (
+    compose_local_workflow_template_runtime,
+    reset_workflow_service_for_test,
+)
+from unilabos.workflow.store import WorkflowStore
+
+
+RESOURCE_TEMPLATE_UUID = "10000000-0000-4000-8000-000000000001"
+EXPLICIT_NODE_UUID_A = "20000000-0000-4000-8000-000000000001"
+EXPLICIT_NODE_UUID_B = "20000000-0000-4000-8000-000000000002"
+
+
+class FakeInventoryStore:
+    """提供活动资源模板身份映射的最小本地库存存储替身。"""
+
+    def query_one(self, sql: str, params: tuple[Any, ...]) -> dict[str, Any] | None:
+        """按资源模板业务名返回活动 UUID。
+
+        参数说明：``sql`` 用于断言组合根只读取规范表；``params`` 包含 Registry
+        资源业务名；返回 ``pump`` 的活动资源模板摘要。
+        """
+
+        assert "resource_template" in sql
+        resource_name = str(params[0])
+        if resource_name != "pump":
+            return None
+        return {
+            "uuid": RESOURCE_TEMPLATE_UUID,
+            "name": "pump",
+            "display_name": "注射泵",
+        }
+
+
+class MissingInventoryStore:
+    """模拟本地库存权威尚未建立 Registry 资源身份映射。"""
+
+    def query_one(self, sql: str, params: tuple[Any, ...]) -> None:
+        """对任何活动资源模板查询返回缺失。
+
+        参数说明：``sql`` 和 ``params`` 仅用于符合库存只读接口；返回值固定为空。
+        """
+
+        return None
+
+
+class FakeRegistry:
+    """提供一个已完成构建的只读设备注册表（Registry）快照。"""
+
+    def __init__(
+        self,
+        *,
+        display_name: str = "输送",
+        include_action: bool = True,
+        explicit_uuid: str | None = None,
+        material_contract: bool = False,
+        invalid_typed_contract: bool = False,
+    ) -> None:
+        """保存动作显示名称。
+
+        参数说明：``display_name`` 是动作（Action）的可变展示字段，不参与稳定
+        业务身份；``include_action`` 控制完整快照是否仍发布该动作，用于验证遗漏
+        成员的软删除（Soft Delete）与重新引入生命周期；``explicit_uuid`` 模拟
+        上游已经提供的节点模板稳定身份；``material_contract`` 切换为包含默认锁定
+        和显式 free（自由传递）物料字段的第 2 版动作合同；
+        ``invalid_typed_contract`` 模拟显式 ``@action`` 编译诊断失败。
+        """
+
+        self.display_name = display_name
+        self.include_action = include_action
+        self.explicit_uuid = explicit_uuid
+        self.material_contract = material_contract
+        self.invalid_typed_contract = invalid_typed_contract
+
+    def obtain_registry_device_info(self) -> list[dict[str, Any]]:
+        """返回包含一个规范动作合同（Action Contract）的设备定义。"""
+
+        # ``action_mappings`` 是本轮设备注册表完整动作集合；空字典表示成功发布空集。
+        action_mappings = (
+            {
+                "transfer": {
+                    "contract_kind": "typed",
+                    "displayname": self.display_name,
+                    "description": "把物料输送到目标库位",
+                    "type": "UniLabJsonCommand",
+                    "goal": {"volume": "volume"},
+                    "goal_default": {"volume": 1.0},
+                    "feedback": {},
+                    "result": {"accepted": "accepted"},
+                    "schema": {
+                        "type": "object",
+                        "properties": {
+                            "goal": {
+                                "type": "object",
+                                "properties": {
+                                    "volume": {
+                                        "type": "number",
+                                        "title": "体积",
+                                    }
+                                },
+                                "required": ["volume"],
+                                "additionalProperties": False,
+                            },
+                            "feedback": {},
+                            "result": {
+                                "type": "object",
+                                "properties": {
+                                    "accepted": {
+                                        "type": "boolean",
+                                        "title": "是否接受",
+                                    }
+                                },
+                                "required": ["accepted"],
+                                "additionalProperties": False,
+                            },
+                        },
+                        "required": ["goal"],
+                        "x-unilabos-action-contract": {
+                            "version": 2,
+                            "input_order": ["volume"],
+                            "output_order": ["accepted"],
+                            "resource_template_symbols": {
+                                "goal": {},
+                                "result": {},
+                            },
+                        },
+                    },
+                }
+            }
+            if self.include_action
+            else {}
+        )
+        if self.explicit_uuid is not None:
+            action_mappings["transfer"]["uuid"] = self.explicit_uuid
+        if self.material_contract:
+            action = action_mappings["transfer"]
+            action["goal"] = {"plate": "plate", "mount_resource": "mount_resource"}
+            action["goal_default"] = {}
+            action_schema = action["schema"]
+            action_schema["properties"]["goal"] = {
+                "type": "object",
+                "properties": {
+                    "plate": {
+                        "type": "object",
+                        "title": "反应板",
+                        "x-unilabos-material-lock": True,
+                        "properties": {
+                            "uuid": {"type": "string", "format": "uuid"}
+                        },
+                        "required": ["uuid"],
+                    },
+                    "mount_resource": {
+                        "type": ["object", "null"],
+                        "title": "可选承载物料",
+                        "x-unilabos-material-lock": False,
+                        "properties": {
+                            "uuid": {"type": "string", "format": "uuid"}
+                        },
+                        "required": ["uuid"],
+                    },
+                },
+                "required": ["plate"],
+                "additionalProperties": False,
+            }
+            action_schema["x-unilabos-action-contract"]["input_order"] = [
+                "plate",
+                "mount_resource",
+            ]
+        if self.invalid_typed_contract:
+            action = action_mappings["transfer"]
+            action["contract_kind"] = "invalid_typed"
+            action["contract_diagnostic"] = {
+                "code": "invalid_action_contract",
+                "message": "动作缺少参数注解",
+            }
+            action["schema"].pop("x-unilabos-action-contract", None)
+        return [
+            {
+                "id": "pump",
+                "displayname": "注射泵",
+                "registry_type": "device",
+                "class": {
+                    "module": "lab.devices:Pump",
+                    "type": "python",
+                    "action_value_mappings": action_mappings,
+                },
+                "handles": [],
+                "category": ["pump"],
+            }
+        ]
+
+    def obtain_registry_resource_info(self) -> list[dict[str, Any]]:
+        """返回空器材模板集合；本测试只覆盖设备动作模板身份。"""
+
+        return []
+
+
+def _projection(database_path: Path) -> RegistryTemplateProjection:
+    """为同一 SQLite 文件装配设备注册表模板投影。
+
+    参数说明：``database_path`` 是本地工作流/调度存储路径；返回的投影使用固定
+    资源模板 UUID，使测试只观察节点模板和句柄模板的身份生命周期。
+    """
+
+    # ``workflow_store`` 是本地工作流权威（Workflow Authority）的持久化适配器。
+    workflow_store = WorkflowStore(database_path)
+    return RegistryTemplateProjection(
+        workflow_store,
+        authority_id="local",
+        resource_template_identity_resolver=lambda resource_name: (
+            RESOURCE_TEMPLATE_UUID if resource_name == "pump" else ""
+        ),
+    )
+
+
+def test_projection_reuses_active_business_identity_across_refresh_and_restart(
+    tmp_path: Path,
+) -> None:
+    """没有显式 UUID 的同一活动业务键跨刷新和重启必须复用稳定身份。
+
+    参数说明：``tmp_path`` 提供隔离的本地工作流数据库目录；测试同时证明展示字段
+    变化会改变目录指纹，但不会替换节点模板或句柄模板 UUID。
+    """
+
+    # ``database_path`` 是跨投影实例重启后仍应保留身份映射的 SQLite 文件。
+    database_path = tmp_path / "workflow_history.db"
+    projection = _projection(database_path)
+
+    first_snapshot = projection.refresh(FakeRegistry(display_name="输送"))
+    first_action = first_snapshot.require_action("lab.devices:Pump", "transfer")
+    # ``first_template_uuid`` 是业务键首次发布时分配的节点模板稳定身份。
+    first_template_uuid = str(first_action.template["uuid"])
+    # ``first_handle_uuids`` 是动作输入、输出和结构连接点的稳定身份集合。
+    first_handle_uuids = tuple(str(handle["uuid"]) for handle in first_action.handles)
+
+    second_snapshot = projection.refresh(FakeRegistry(display_name="转移"))
+    second_action = second_snapshot.require_action("lab.devices:Pump", "transfer")
+
+    assert second_action.template["uuid"] == first_template_uuid
+    assert tuple(str(handle["uuid"]) for handle in second_action.handles) == (
+        first_handle_uuids
+    )
+    assert second_action.template["display_name"] == "转移"
+    assert second_snapshot.fingerprint != first_snapshot.fingerprint
+
+    projection.close()
+    restarted_projection = _projection(database_path)
+    restarted_action = restarted_projection.snapshot().require_action(
+        "lab.devices:Pump",
+        "transfer",
+    )
+
+    assert restarted_action.template["uuid"] == first_template_uuid
+    assert tuple(str(handle["uuid"]) for handle in restarted_action.handles) == (
+        first_handle_uuids
+    )
+    restarted_projection.close()
+
+
+def test_projection_rejects_invalid_explicit_uuid_before_persisting(
+    tmp_path: Path,
+) -> None:
+    """非法显式 UUID 必须整批拒绝，且不得污染持久模板投影。
+
+    参数说明：``tmp_path`` 隔离数据库；测试在失败后重启投影，证明旧的成功空快照
+    与 SQLite 事实仍一致。
+    """
+
+    database_path = tmp_path / "workflow_history.db"
+    projection = _projection(database_path)
+
+    with pytest.raises(RegistryTemplateProjectionError, match="UUID"):
+        projection.refresh(FakeRegistry(explicit_uuid="not-a-uuid"))
+
+    assert projection.snapshot().actions == ()
+    projection.close()
+    restarted_projection = _projection(database_path)
+    assert restarted_projection.snapshot().actions == ()
+    restarted_projection.close()
+
+
+def test_projection_allocates_new_generation_after_omission_and_reintroduction(
+    tmp_path: Path,
+) -> None:
+    """无显式 UUID 的模板被完整刷新遗漏后，重新引入必须分配新一代身份。
+
+    参数说明：``tmp_path`` 隔离工作流数据库；测试同时确认空投影已经提交，而不是
+    继续从内存快照返回已软删除的动作。
+    """
+
+    database_path = tmp_path / "workflow_history.db"
+    projection = _projection(database_path)
+    first_action = projection.refresh(FakeRegistry()).require_action(
+        "lab.devices:Pump",
+        "transfer",
+    )
+    first_template_uuid = str(first_action.template["uuid"])
+    first_handle_uuids = tuple(str(handle["uuid"]) for handle in first_action.handles)
+
+    empty_snapshot = projection.refresh(FakeRegistry(include_action=False))
+    try:
+        empty_snapshot.require_action("lab.devices:Pump", "transfer")
+    except AuthoringCatalogError:
+        pass
+    else:
+        raise AssertionError("完整空投影不应继续暴露已遗漏动作")
+
+    next_action = projection.refresh(FakeRegistry()).require_action(
+        "lab.devices:Pump",
+        "transfer",
+    )
+    assert next_action.template["uuid"] != first_template_uuid
+    assert tuple(str(handle["uuid"]) for handle in next_action.handles) != (
+        first_handle_uuids
+    )
+    projection.close()
+
+
+def test_projection_keeps_contract_handle_order_and_material_placeholder_metadata(
+    tmp_path: Path,
+) -> None:
+    """强类型动作只生成显式合同句柄，并保留物料占位符语义和字段顺序。
+
+    参数说明：``tmp_path`` 隔离数据库；测试覆盖默认锁定物料、显式 free 物料、
+    必填性以及不合成 ``ready`` 句柄。
+    """
+
+    projection = _projection(tmp_path / "workflow_history.db")
+    action = projection.refresh(FakeRegistry(material_contract=True)).require_action(
+        "lab.devices:Pump",
+        "transfer",
+    )
+
+    assert [handle["handle_key"] for handle in action.handles] == [
+        "plate",
+        "mount_resource",
+        "accepted",
+    ]
+    assert all(handle["handle_key"] != "ready" for handle in action.handles)
+    plate_handle, free_handle, result_handle = action.handles
+    assert plate_handle["type"] == "ResourceSlot"
+    assert plate_handle["required"] is True
+    assert plate_handle["meta_data"]["unilab"]["value_schema"][
+        "x-unilabos-material-lock"
+    ] is True
+    assert free_handle["type"] == "ResourceSlot"
+    assert free_handle["required"] is False
+    assert free_handle["meta_data"]["unilab"]["value_schema"][
+        "x-unilabos-material-lock"
+    ] is False
+    assert result_handle["type"] == "boolean"
+    projection.close()
+
+
+def test_projection_fingerprint_is_stable_across_identical_refresh_and_restart(
+    tmp_path: Path,
+) -> None:
+    """相同活动身份和合同跨重复刷新与重启必须产生确定目录指纹。
+
+    参数说明：``tmp_path`` 隔离数据库；测试证明 SQLite 操作时间和 Registry 遍历
+    时机不属于目录指纹（CatalogFingerprint）的业务语义。
+    """
+
+    database_path = tmp_path / "workflow_history.db"
+    projection = _projection(database_path)
+    first_snapshot = projection.refresh(FakeRegistry())
+    second_snapshot = projection.refresh(FakeRegistry())
+
+    assert second_snapshot.fingerprint == first_snapshot.fingerprint
+    assert second_snapshot.actions[0].template["create_time"]
+    assert second_snapshot.actions[0].template["update_time"]
+    assert second_snapshot.actions[0].template["meta_data"]["unilab"][
+        "resource_template"
+    ] == {
+        "uuid": RESOURCE_TEMPLATE_UUID,
+        "name": "pump",
+        "display_name": "注射泵",
+    }
+
+    projection.close()
+    restarted_projection = _projection(database_path)
+    assert restarted_projection.snapshot().fingerprint == first_snapshot.fingerprint
+    restarted_projection.close()
+
+
+def test_local_runtime_shares_projection_with_authoring_compiler(tmp_path: Path) -> None:
+    """本地组合根必须让模板查询投影和 F02 创作编译器共享同一目录代际。
+
+    参数说明：``tmp_path`` 是本地工作流数据库目录；测试使用库存活动行解析资源
+    模板身份，并在结束时释放进程级组合根。
+    """
+
+    reset_workflow_service_for_test()
+    try:
+        workflow_service, projection = compose_local_workflow_template_runtime(
+            tmp_path,
+            inventory_store=FakeInventoryStore(),
+            registry=FakeRegistry(),
+        )
+
+        assert workflow_service.compiler is not None
+        assert workflow_service.compiler.template_catalog_fingerprint == (
+            projection.snapshot().fingerprint
+        )
+        assert projection.snapshot().require_action(
+            "lab.devices:Pump",
+            "transfer",
+        ).template["resource_template_uuid"] == RESOURCE_TEMPLATE_UUID
+    finally:
+        reset_workflow_service_for_test()
+
+
+def test_local_runtime_fails_closed_when_inventory_identity_is_missing(
+    tmp_path: Path,
+) -> None:
+    """本地库存没有活动资源模板身份时，模板运行时必须关闭式失败。
+
+    参数说明：``tmp_path`` 隔离数据库；失败不得留下半装配的进程级工作流服务。
+    """
+
+    reset_workflow_service_for_test()
+    try:
+        with pytest.raises(RegistryTemplateProjectionError, match="身份解析失败"):
+            compose_local_workflow_template_runtime(
+                tmp_path,
+                inventory_store=MissingInventoryStore(),
+                registry=FakeRegistry(),
+            )
+    finally:
+        reset_workflow_service_for_test()
+
+
+def test_invalid_typed_action_preserves_previous_complete_projection(
+    tmp_path: Path,
+) -> None:
+    """强类型动作合同诊断失败必须拒绝刷新并保留上一完整投影。
+
+    参数说明：``tmp_path`` 隔离数据库；测试在失败后同时检查内存快照和重启后的
+    SQLite 投影，禁止把无效动作误判为完整快照中的合法遗漏。
+    """
+
+    database_path = tmp_path / "workflow_history.db"
+    projection = _projection(database_path)
+    previous_snapshot = projection.refresh(FakeRegistry())
+
+    with pytest.raises(RegistryTemplateProjectionError, match="动作合同"):
+        projection.refresh(FakeRegistry(invalid_typed_contract=True))
+
+    assert projection.snapshot().fingerprint == previous_snapshot.fingerprint
+    projection.close()
+    restarted_projection = _projection(database_path)
+    assert restarted_projection.snapshot().fingerprint == previous_snapshot.fingerprint
+    restarted_projection.close()
+
+
+def test_explicit_uuid_conflict_rolls_back_without_leaking_store_error(
+    tmp_path: Path,
+) -> None:
+    """活动业务键换绑另一个显式 UUID 必须回滚并返回投影领域错误。
+
+    参数说明：``tmp_path`` 隔离数据库；测试证明显式身份优先不等于允许改写已有
+    活动身份映射，且调用方不需要理解 SQLite 存储异常。
+    """
+
+    projection = _projection(tmp_path / "workflow_history.db")
+    previous_snapshot = projection.refresh(
+        FakeRegistry(explicit_uuid=EXPLICIT_NODE_UUID_A)
+    )
+
+    with pytest.raises(RegistryTemplateProjectionError, match="身份"):
+        projection.refresh(FakeRegistry(explicit_uuid=EXPLICIT_NODE_UUID_B))
+
+    current_action = projection.snapshot().require_action(
+        "lab.devices:Pump",
+        "transfer",
+    )
+    assert current_action.template["uuid"] == EXPLICIT_NODE_UUID_A
+    assert projection.snapshot().fingerprint == previous_snapshot.fingerprint
+    projection.close()

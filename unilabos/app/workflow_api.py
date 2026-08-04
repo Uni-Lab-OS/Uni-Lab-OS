@@ -22,6 +22,11 @@ from unilabos.workflow.models import (
     normalize_json_object,
 )
 from unilabos.workflow.service import WorkflowError, WorkflowService
+from unilabos.app.workflow_template_api import (
+    TemplateSnapshotProvider,
+    WorkflowTemplateQueryService,
+    create_workflow_template_router,
+)
 
 
 class _StrictModel(BaseModel):
@@ -453,8 +458,17 @@ def create_workflow_router(service: WorkflowService) -> APIRouter:
     return router
 
 
-def install_workflow_api(app: FastAPI, service: WorkflowService) -> None:
-    """Install error mapping and routes into an OS FastAPI application."""
+def install_workflow_api(
+    app: FastAPI,
+    service: WorkflowService,
+    *,
+    template_snapshot_provider: Optional[TemplateSnapshotProvider] = None,
+) -> None:
+    """向 OS FastAPI 应用安装工作流及可选模板查询接口。
+
+    参数说明：``app`` 是共享 HTTP 应用，``service`` 是工作流权威；本地调度模式
+    传入 ``template_snapshot_provider`` 后，模板查询与 F02 编译器共享同一投影。
+    """
 
     @app.exception_handler(WorkflowError)
     async def workflow_error_handler(
@@ -472,6 +486,7 @@ def install_workflow_api(app: FastAPI, service: WorkflowService) -> None:
             "/api/v1/workflows",
             "/api/v1/workflow-tasks",
             "/api/v1/workflow-node-jobs",
+            "/api/v1/workflow-node-templates",
             "/api/v1/events",
         )
         if any(
@@ -482,13 +497,31 @@ def install_workflow_api(app: FastAPI, service: WorkflowService) -> None:
         return await request_validation_exception_handler(request, error)
 
     app.include_router(create_workflow_router(service))
+    if template_snapshot_provider is not None:
+        app.include_router(
+            create_workflow_template_router(
+                WorkflowTemplateQueryService(template_snapshot_provider)
+            )
+        )
 
 
-def create_workflow_app(service: WorkflowService) -> FastAPI:
-    """Create a focused application used by composition and contract tests."""
+def create_workflow_app(
+    service: WorkflowService,
+    *,
+    template_snapshot_provider: Optional[TemplateSnapshotProvider] = None,
+) -> FastAPI:
+    """创建工作流合同测试应用。
+
+    参数说明：``service`` 是唯一工作流权威；可选模板快照提供者用于本地完整应用
+    合同测试。返回已安装统一错误映射的 FastAPI 应用。
+    """
 
     app = FastAPI(title="Uni-Lab Workflow", version="0.1.0")
-    install_workflow_api(app, service)
+    install_workflow_api(
+        app,
+        service,
+        template_snapshot_provider=template_snapshot_provider,
+    )
     return app
 
 

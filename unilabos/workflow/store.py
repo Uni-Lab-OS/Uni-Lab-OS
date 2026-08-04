@@ -99,6 +99,9 @@ CREATE TABLE IF NOT EXISTS workflow_node_template (
 );
 CREATE INDEX IF NOT EXISTS ix_workflow_node_template_authority
     ON workflow_node_template(authority_id);
+CREATE UNIQUE INDEX IF NOT EXISTS ux_workflow_node_template_active_business_key
+    ON workflow_node_template(resource_template_uuid, name)
+    WHERE deleted_at IS NULL;
 
 CREATE TABLE IF NOT EXISTS workflow_handle_template (
     uuid TEXT PRIMARY KEY,
@@ -121,6 +124,13 @@ CREATE INDEX IF NOT EXISTS ix_workflow_handle_template_node
     ON workflow_handle_template(workflow_node_template_uuid);
 CREATE INDEX IF NOT EXISTS ix_workflow_handle_template_authority
     ON workflow_handle_template(authority_id);
+CREATE UNIQUE INDEX IF NOT EXISTS ux_workflow_handle_template_active_business_key
+    ON workflow_handle_template(
+        workflow_node_template_uuid,
+        handle_key,
+        io_type
+    )
+    WHERE deleted_at IS NULL;
 
 CREATE TABLE IF NOT EXISTS workflow_node (
     uuid TEXT PRIMARY KEY,

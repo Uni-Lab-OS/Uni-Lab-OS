@@ -6,8 +6,23 @@ from fastapi.testclient import TestClient
 
 from unilabos.app.scheduler.api import create_scheduler_router
 from unilabos.app.workflow_api import create_workflow_app
+from unilabos.workflow.authoring_kernel import AuthoringCatalogSnapshot
 from unilabos.workflow.service import WorkflowService
 from unilabos.workflow.store import WorkflowStore
+
+
+class EmptyTemplateSnapshotProvider:
+    """提供一个已成功发布的空模板投影，供组合路由测试使用。"""
+
+    def __init__(self) -> None:
+        """创建稳定的空不可变模板快照。"""
+
+        self._snapshot = AuthoringCatalogSnapshot.from_entities([], [])
+
+    def snapshot(self) -> AuthoringCatalogSnapshot:
+        """返回已发布空快照，不访问设备注册表或数据库。"""
+
+        return self._snapshot
 
 
 def _client(tmp_path):
@@ -103,4 +118,29 @@ def test_shared_workflow_routes_replace_execution_shaped_workflow_alias(tmp_path
     assert "source_handle_uuid" in edge_schema["properties"]
     assert "target_handle_uuid" in edge_schema["properties"]
     assert "source_handle_key" not in edge_schema["properties"]
+    store.close()
+
+
+def test_local_workflow_app_mounts_template_query_from_same_runtime(tmp_path) -> None:
+    """本地工作流应用传入模板投影时必须同时公开 Backend 模板查询路由。
+
+    参数说明：``tmp_path`` 隔离工作流存储；空投影仍是一次成功发布，列表应返回
+    标准空游标页而不是 404 或独立错误外壳。
+    """
+
+    store = WorkflowStore(tmp_path / "workflow_history.db")
+    service = WorkflowService(store)
+    client = TestClient(
+        create_workflow_app(
+            service,
+            template_snapshot_provider=EmptyTemplateSnapshotProvider(),
+        )
+    )
+
+    response = client.get("/api/v1/workflow-node-templates")
+    assert response.status_code == 200
+    assert response.json() == {
+        "code": 0,
+        "data": {"items": [], "has_more": False, "next_cursor_uuid": None},
+    }
     store.close()

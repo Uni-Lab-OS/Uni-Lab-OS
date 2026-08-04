@@ -93,10 +93,45 @@ def setup_server() -> FastAPI:
     if not workflow_routes_mounted and BasicConfig.working_dir:
         try:
             from unilabos.app.workflow_api import install_workflow_api
-            from unilabos.workflow.composition import compose_workflow_runtime
+            from unilabos.app.scheduler.integration import (
+                get_edge_scheduler,
+                get_inventory_service,
+            )
+            from unilabos.workflow.composition import (
+                compose_local_workflow_template_runtime,
+                compose_workflow_runtime,
+            )
 
-            workflow_service = compose_workflow_runtime(BasicConfig.working_dir)
-            install_workflow_api(app, workflow_service)
+            # ``template_projection`` 只在本地调度与库存权威同时存在时建立；
+            # Backend-controlled 模式不能在 OS 再创建第二个生产模板写权威。
+            template_projection = None
+            inventory_service = get_inventory_service()
+            if inventory_service is not None and get_edge_scheduler() is not None:
+                try:
+                    from unilabos.registry.registry import lab_registry
+
+                    workflow_service, template_projection = (
+                        compose_local_workflow_template_runtime(
+                            BasicConfig.working_dir,
+                            inventory_store=inventory_service.store,
+                            registry=lab_registry,
+                        )
+                    )
+                except Exception as projection_error:  # noqa: BLE001
+                    error(
+                        "[Web] 本地 Registry 模板投影关闭式失败，"
+                        f"工作流创作暂不可用: {str(projection_error)}"
+                    )
+                    workflow_service = compose_workflow_runtime(
+                        BasicConfig.working_dir
+                    )
+            else:
+                workflow_service = compose_workflow_runtime(BasicConfig.working_dir)
+            install_workflow_api(
+                app,
+                workflow_service,
+                template_snapshot_provider=template_projection,
+            )
             workflow_routes_mounted = True
         except Exception as e:  # noqa: BLE001 - unrelated Edge routes remain available
             error(f"[Web] 挂载 Backend Workflow 合同失败: {str(e)}")
