@@ -1,16 +1,17 @@
 context:
   version: 0.2.1
+  commit: 1317a3eec20cb28757283b1de0edcd2e1b2f252e
 
 package:
   name: pylabrobot
   version: ${{ version }}
 
 source:
-  - url: https://files.pythonhosted.org/packages/source/p/pylabrobot/pylabrobot-${{ version }}.tar.gz
-    sha256: 4caff5054c003cc887e4befb6d73d93ba015fb1cf3187f2dc95506c9141bd564
+  - url: https://github.com/Xuwznln/pylabrobot/archive/${{ commit }}.tar.gz
+    sha256: 4dac1abc3fd4cf3e84141dbd39e18f486749328ff044156fab86011a54bf5649
 
 build:
-  number: 0
+  number: 1
   noarch: python
   script: ${{ PYTHON }} -m pip install . --no-deps --no-build-isolation
 
@@ -32,7 +33,7 @@ tests:
       pip_check: true
 
 about:
-  summary: Hardware-agnostic laboratory automation platform
+  summary: Uni-Lab compatible PyLabRobot fork
   license: MIT
   license_file: LICENSE
-  repository: https://github.com/pylabrobot/pylabrobot
+  repository: https://github.com/Xuwznln/pylabrobot
