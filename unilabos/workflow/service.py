@@ -2,19 +2,13 @@
 
 from __future__ import annotations
 
-import fcntl
 import hashlib
-import os
 import re
-import signal
-import stat
-import struct
 import threading
 from collections import defaultdict
-from collections.abc import Callable, Iterable, Iterator
-from contextlib import contextmanager, suppress
+from collections.abc import Callable
 from datetime import datetime, timezone
-from pathlib import Path, PurePosixPath
+from pathlib import Path
 from typing import Any, Dict, List, Optional, Protocol, Tuple
 from uuid import uuid4
 
@@ -30,7 +24,7 @@ from unilabos.workflow.device_action_run import (
     DeviceActionRunService,
     DeviceActionRunUnavailable,
 )
-from unilabos.workflow.graph_validation import GraphValidationError, validate_graph
+from unilabos.workflow.graph_validation import GraphValidationError
 from unilabos.workflow.json_codec import encode_json
 from unilabos.workflow.models import (
     CandidateChangeset,
@@ -44,6 +38,17 @@ from unilabos.workflow.models import (
     validate_uuid,
 )
 from unilabos.workflow.source_coordinates import source_ranges_fit
+from unilabos.workflow.source_workspace import (
+    NO_EXPECTED_HASH as _NO_EXPECTED_HASH,
+)
+from unilabos.workflow.source_workspace import (
+    SourceWorkspaceConflict,
+    SourceWorkspaceError,
+    read_registered_source,
+    registered_source_signature,
+    validate_source_registration,
+    write_registered_source,
+)
 from unilabos.workflow.store import (
     StoreAuthoringConflict,
     StoreConflict,
@@ -84,10 +89,6 @@ _ERRORS = {
     "internal_error": (500, "本地工作流服务出现错误，请重试或查看日志"),
 }
 _HASH_TOKEN = re.compile(r"sha256:[0-9a-f]{64}\Z")
-_NO_EXPECTED_HASH = object()
-_F_SETOWN_EX = getattr(fcntl, "F_SETOWN_EX", 15)
-_F_OWNER_TID = 0
-_LEASE_BREAK_SIGNAL = signal.SIGRTMAX
 _WORKFLOW_READ_FIELDS = {
     "uuid",
     "create_time",
@@ -826,41 +827,33 @@ class WorkflowService:
         package_root: str | Path,
         relative_path: str,
     ) -> Dict[str, Any]:
+        """把工作流（Workflow）绑定到一个受限的本地 Python 源码路径。
+
+        参数：工作流 UUID 是已有定义身份；包身份、包目录和相对路径共同形成
+        工作流源码（Workflow Source）的稳定来源身份。
+        返回：持久化后的来源注册记录。
+        异常：身份不存在、路径不安全或唯一性冲突时返回稳定工作流错误。
+        """
+
         workflow_uuid = self._get_authoring_workflow(workflow_uuid)["uuid"]
         with self._authoring_lock(workflow_uuid):
             self._get_authoring_workflow(workflow_uuid)
-            raw_root = Path(os.path.abspath(package_root))
-            if self._path_contains_symlink(raw_root):
-                raise WorkflowError("invalid_input")
             try:
-                root = raw_root.resolve(strict=True)
-            except OSError:
+                root, relative_path = validate_source_registration(
+                    package_root=package_root,
+                    relative_path=relative_path,
+                )
+            except SourceWorkspaceError:
                 raise WorkflowError("invalid_input") from None
-            if not root.is_dir() or not package_id:
+            if not package_id:
                 raise WorkflowError("invalid_input")
-            relative = PurePosixPath(relative_path)
-            if (
-                relative.is_absolute()
-                or len(relative.parts) != 2
-                or any(part in {"", ".", ".."} for part in relative.parts)
-                or relative.parts[0] != "workflows"
-                or relative.suffix != ".py"
-                or not relative.stem
-            ):
-                raise WorkflowError("invalid_input")
-            target = root.joinpath(*relative.parts)
-            self._assert_contained_regular_target(
-                root,
-                target,
-                allow_missing=True,
-            )
-            source_uri = f"package://{package_id}/{relative.as_posix()}"
+            source_uri = f"package://{package_id}/{relative_path}"
             try:
                 return self._store.register_source(
                     workflow_uuid=workflow_uuid,
                     package_id=package_id,
                     package_root=str(root),
-                    relative_path=relative.as_posix(),
+                    relative_path=relative_path,
                     source_uri=source_uri,
                 )
             except StoreConflict:
@@ -1430,46 +1423,23 @@ class WorkflowService:
         self,
         registration: Dict[str, Any],
     ) -> Optional[Dict[str, Any]]:
-        root, target = self._source_path(registration)
-        self._assert_contained_regular_target(root, target, allow_missing=True)
-        with self._source_parent_fd(
-            registration,
-            create=False,
-        ) as source_parent:
-            if source_parent is None:
-                return None
-            parent_fd, filename = source_parent
-            try:
-                descriptor = os.open(
-                    filename,
-                    os.O_RDONLY | os.O_CLOEXEC | os.O_NOFOLLOW,
-                    dir_fd=parent_fd,
-                )
-            except FileNotFoundError:
-                return None
-            except OSError:
-                raise WorkflowError("invalid_input") from None
-            try:
-                stat_result = os.fstat(descriptor)
-                if not stat.S_ISREG(stat_result.st_mode):
-                    raise WorkflowError("invalid_input")
-                with os.fdopen(descriptor, "rb") as stream:
-                    descriptor = -1
-                    try:
-                        raw = stream.read()
-                    except OSError:
-                        raise WorkflowError("invalid_input") from None
-            finally:
-                if descriptor >= 0:
-                    os.close(descriptor)
+        """通过源码工作区（SourceWorkspace）读取一项已注册草稿。
+
+        参数：``registration`` 是持久化来源身份。
+        返回：缺失时为 ``None``，否则返回源码、草稿哈希和修改时间字典。
+        异常：不安全或超限文件映射为 ``invalid_input``。
+        """
+
         try:
-            source = raw.decode("utf-8")
-        except UnicodeError:
+            source = read_registered_source(registration)
+        except SourceWorkspaceError:
             raise WorkflowError("invalid_input") from None
+        if source is None:
+            return None
         return {
-            "python_source": source,
-            "draft_hash": _sha256(raw),
-            "update_time": _mtime_rfc3339(stat_result.st_mtime),
+            "python_source": source.python_source,
+            "draft_hash": source.draft_hash,
+            "update_time": source.update_time,
         }
 
     def source_reconciliation_pending(self, workflow_uuid: str) -> bool:
@@ -1484,37 +1454,17 @@ class WorkflowService:
         self,
         registration: Dict[str, Any],
     ) -> Tuple[Any, ...]:
-        """返回无需读取文件内容的稳定性签名，供 Draft 监视器去抖。"""
+        """返回无需读取内容的稳定签名，供源码监视器（Source Monitor）去抖。
 
-        root, target = self._source_path(registration)
-        self._assert_contained_regular_target(root, target, allow_missing=True)
-        with self._source_parent_fd(
-            registration,
-            create=False,
-        ) as source_parent:
-            if source_parent is None:
-                return ("missing",)
-            parent_fd, filename = source_parent
-            try:
-                stat_result = os.stat(
-                    filename,
-                    dir_fd=parent_fd,
-                    follow_symlinks=False,
-                )
-            except FileNotFoundError:
-                return ("missing",)
-            except OSError:
-                raise WorkflowError("invalid_input") from None
-            if not stat.S_ISREG(stat_result.st_mode):
-                raise WorkflowError("invalid_input")
-        return (
-            "file",
-            stat_result.st_dev,
-            stat_result.st_ino,
-            stat_result.st_size,
-            stat_result.st_mtime_ns,
-            stat_result.st_ctime_ns,
-        )
+        参数：``registration`` 是持久化来源身份。
+        返回：缺失标记或普通文件的身份、大小和时间签名。
+        异常：不安全路径或非普通文件映射为 ``invalid_input``。
+        """
+
+        try:
+            return registered_source_signature(registration)
+        except SourceWorkspaceError:
+            raise WorkflowError("invalid_input") from None
 
     def _atomic_write(
         self,
@@ -1523,428 +1473,27 @@ class WorkflowService:
         *,
         expected_hash: Any = _NO_EXPECTED_HASH,
     ) -> None:
-        root, target = self._source_path(registration)
-        self._assert_contained_regular_target(root, target, allow_missing=True)
-        # 先以目录 FD 安全地创建（如有需要）固定的 workflows 目录。
-        # 该上下文关闭后再次打开，避免依赖校验时拿到的字符串路径。
-        with self._source_parent_fd(registration, create=True):
-            pass
-        self._assert_contained_regular_target(root, target, allow_missing=True)
-        with self._source_parent_fd(
-            registration,
-            create=False,
-        ) as source_parent:
-            if source_parent is None:
-                raise WorkflowError("invalid_input")
-            parent_fd, filename = source_parent
-            temporary_name = f".{filename}.{uuid4().hex}.tmp"
-            descriptor = -1
-            try:
-                descriptor = os.open(
-                    temporary_name,
-                    (
-                        os.O_WRONLY
-                        | os.O_CREAT
-                        | os.O_EXCL
-                        | os.O_CLOEXEC
-                        | os.O_NOFOLLOW
-                    ),
-                    0o600,
-                    dir_fd=parent_fd,
-                )
-                with os.fdopen(descriptor, "wb") as stream:
-                    descriptor = -1
-                    stream.write(content)
-                    stream.flush()
-                    os.fsync(stream.fileno())
-                if expected_hash is _NO_EXPECTED_HASH:
-                    os.replace(
-                        temporary_name,
-                        filename,
-                        src_dir_fd=parent_fd,
-                        dst_dir_fd=parent_fd,
-                    )
-                else:
-                    self._compare_and_replace(
-                        parent_fd=parent_fd,
-                        target_name=filename,
-                        temporary_name=temporary_name,
-                        expected_hash=expected_hash,
-                    )
-                os.fsync(parent_fd)
-            except WorkflowError:
-                raise
-            except OSError:
-                raise WorkflowError("internal_error") from None
-            finally:
-                if descriptor >= 0:
-                    os.close(descriptor)
-                with suppress(FileNotFoundError):
-                    os.unlink(temporary_name, dir_fd=parent_fd)
+        """通过源码工作区（SourceWorkspace）执行原子 CAS 草稿写入。
 
-    @staticmethod
-    def _compare_and_replace(
-        *,
-        parent_fd: int,
-        target_name: str,
-        temporary_name: str,
-        expected_hash: Optional[str],
-    ) -> None:
-        """在可安全中断的 lease 下执行 fsync 后的原子 CAS replace。"""
+        参数：``registration`` 是来源身份；``content`` 是 UTF-8 源码字节；
+        ``expected_hash`` 是可选原稿哈希条件。
+        返回：无；成功时规范源码完整替换。
+        异常：CAS 变化映射为 ``draft_hash_conflict``，其他失败映射为稳定错误。
+        """
 
-        target_descriptor = -1
-        temporary_descriptor = -1
-        backup_name = f".{target_name}.{uuid4().hex}.cas"
-        backup_created = False
-        replacement_attempted = False
-        lease_held = False
-        previous_signal_mask: Optional[set[signal.Signals]] = None
         try:
-            try:
-                target_descriptor = os.open(
-                    target_name,
-                    os.O_RDWR | os.O_CLOEXEC | os.O_NOFOLLOW,
-                    dir_fd=parent_fd,
-                )
-            except FileNotFoundError:
-                if expected_hash is not None:
-                    raise WorkflowConflict("draft_hash_conflict") from None
-                try:
-                    os.link(
-                        temporary_name,
-                        target_name,
-                        src_dir_fd=parent_fd,
-                        dst_dir_fd=parent_fd,
-                        follow_symlinks=False,
-                    )
-                except FileExistsError:
-                    raise WorkflowConflict("draft_hash_conflict") from None
-                os.unlink(temporary_name, dir_fd=parent_fd)
-                return
-
-            if expected_hash is None:
-                raise WorkflowConflict("draft_hash_conflict")
-            try:
-                previous_signal_mask = signal.pthread_sigmask(
-                    signal.SIG_BLOCK,
-                    {_LEASE_BREAK_SIGNAL},
-                )
-                fcntl.fcntl(
-                    target_descriptor,
-                    _F_SETOWN_EX,
-                    struct.pack(
-                        "ii",
-                        _F_OWNER_TID,
-                        threading.get_native_id(),
-                    ),
-                )
-                fcntl.fcntl(
-                    target_descriptor,
-                    fcntl.F_SETSIG,
-                    _LEASE_BREAK_SIGNAL,
-                )
-                fcntl.fcntl(
-                    target_descriptor,
-                    fcntl.F_SETLEASE,
-                    fcntl.F_WRLCK,
-                )
-                lease_held = True
-            except (AttributeError, OSError, ValueError):
-                # 无法证明没有预打开的读写句柄时必须失败关闭。
-                raise WorkflowConflict("draft_hash_conflict") from None
-
-            original = WorkflowService._read_regular_fd(target_descriptor)
-            if _sha256(original) != expected_hash:
-                raise WorkflowConflict("draft_hash_conflict")
-            if not WorkflowService._target_matches_fd(
-                parent_fd,
-                target_name,
-                target_descriptor,
-            ):
-                raise WorkflowConflict("draft_hash_conflict")
-
-            temporary_descriptor = os.open(
-                temporary_name,
-                os.O_RDONLY | os.O_CLOEXEC | os.O_NOFOLLOW,
-                dir_fd=parent_fd,
+            write_registered_source(
+                registration,
+                content,
+                expected_hash=expected_hash,
             )
-            replacement_hash = WorkflowService._hash_regular_fd(temporary_descriptor)
-
-            os.link(
-                target_name,
-                backup_name,
-                src_dir_fd=parent_fd,
-                dst_dir_fd=parent_fd,
-                follow_symlinks=False,
+        except SourceWorkspaceConflict:
+            raise WorkflowConflict("draft_hash_conflict") from None
+        except SourceWorkspaceError as error:
+            error_code = (
+                "invalid_input" if error.code == "invalid_input" else "internal_error"
             )
-            backup_created = True
-            os.fsync(parent_fd)
-            if WorkflowService._drain_lease_break_signal():
-                raise WorkflowConflict("draft_hash_conflict")
-
-            replacement_attempted = True
-            os.replace(
-                temporary_name,
-                target_name,
-                src_dir_fd=parent_fd,
-                dst_dir_fd=parent_fd,
-            )
-            os.fsync(parent_fd)
-            if WorkflowService._drain_lease_break_signal():
-                raise WorkflowConflict("draft_hash_conflict")
-            if (
-                not WorkflowService._target_matches_fd(
-                    parent_fd,
-                    target_name,
-                    temporary_descriptor,
-                )
-                or WorkflowService._hash_regular_fd(temporary_descriptor)
-                != replacement_hash
-            ):
-                raise WorkflowConflict("draft_hash_conflict")
-
-            fcntl.fcntl(
-                target_descriptor,
-                fcntl.F_SETLEASE,
-                fcntl.F_UNLCK,
-            )
-            lease_held = False
-            if WorkflowService._drain_lease_break_signal():
-                raise WorkflowConflict("draft_hash_conflict")
-            if (
-                not WorkflowService._target_matches_fd(
-                    parent_fd,
-                    target_name,
-                    temporary_descriptor,
-                )
-                or WorkflowService._hash_regular_fd(temporary_descriptor)
-                != replacement_hash
-            ):
-                raise WorkflowConflict("draft_hash_conflict")
-
-            with suppress(OSError):
-                os.unlink(backup_name, dir_fd=parent_fd)
-                backup_created = False
-                os.fsync(parent_fd)
-        except Exception:
-            # os.replace() 一旦被调用，异常路径便无法证明 canonical
-            # 仍是本进程发布的 inode；外部 authority 可能已经原地写入
-            # 或再次原子替换。此时绝不能用历史 `.cas` 覆盖或删除它。
-            # 保留 fsync 过的原稿 artifact，只允许显式人工/Git 恢复。
-            if backup_created and not replacement_attempted:
-                with suppress(OSError):
-                    os.unlink(backup_name, dir_fd=parent_fd)
-                    backup_created = False
-                    os.fsync(parent_fd)
-            raise
-        finally:
-            if lease_held and target_descriptor >= 0:
-                with suppress(OSError):
-                    fcntl.fcntl(
-                        target_descriptor,
-                        fcntl.F_SETLEASE,
-                        fcntl.F_UNLCK,
-                    )
-            if previous_signal_mask is not None:
-                with suppress(OSError, ValueError):
-                    WorkflowService._drain_lease_break_signal()
-                signal.pthread_sigmask(
-                    signal.SIG_SETMASK,
-                    previous_signal_mask,
-                )
-            if temporary_descriptor >= 0:
-                os.close(temporary_descriptor)
-            if target_descriptor >= 0:
-                os.close(target_descriptor)
-
-    @staticmethod
-    def _drain_lease_break_signal() -> bool:
-        """同步消费发给当前线程的 lease 通知。"""
-
-        observed = False
-        while True:
-            try:
-                notification = signal.sigtimedwait(
-                    {_LEASE_BREAK_SIGNAL},
-                    0,
-                )
-            except InterruptedError:
-                continue
-            if notification is None:
-                return observed
-            observed = True
-
-    @staticmethod
-    def _target_matches_fd(
-        parent_fd: int,
-        target_name: str,
-        descriptor: int,
-    ) -> bool:
-        try:
-            target_stat = os.stat(
-                target_name,
-                dir_fd=parent_fd,
-                follow_symlinks=False,
-            )
-        except FileNotFoundError:
-            return False
-        descriptor_stat = os.fstat(descriptor)
-        return (
-            stat.S_ISREG(target_stat.st_mode)
-            and target_stat.st_dev == descriptor_stat.st_dev
-            and target_stat.st_ino == descriptor_stat.st_ino
-        )
-
-    @staticmethod
-    def _read_regular_fd(descriptor: int) -> bytes:
-        stat_result = os.fstat(descriptor)
-        if not stat.S_ISREG(stat_result.st_mode):
-            raise WorkflowError("invalid_input")
-        os.lseek(descriptor, 0, os.SEEK_SET)
-        chunks = []
-        while True:
-            chunk = os.read(descriptor, 1024 * 1024)
-            if not chunk:
-                break
-            chunks.append(chunk)
-        return b"".join(chunks)
-
-    @staticmethod
-    def _write_regular_fd(descriptor: int, content: bytes) -> None:
-        os.lseek(descriptor, 0, os.SEEK_SET)
-        offset = 0
-        while offset < len(content):
-            written = os.write(descriptor, content[offset:])
-            if written <= 0:
-                raise OSError("short write while replacing Workflow Draft")
-            offset += written
-        os.ftruncate(descriptor, len(content))
-        os.fsync(descriptor)
-
-    @staticmethod
-    def _restore_regular_fd(descriptor: int, content: bytes) -> None:
-        WorkflowService._write_regular_fd(descriptor, content)
-
-    @staticmethod
-    def _hash_regular_fd(descriptor: int) -> str:
-        return _sha256(WorkflowService._read_regular_fd(descriptor))
-
-    @classmethod
-    @contextmanager
-    def _source_parent_fd(
-        cls,
-        registration: Dict[str, Any],
-        *,
-        create: bool,
-    ) -> Iterator[Optional[Tuple[int, str]]]:
-        relative = PurePosixPath(registration["relative_path"])
-        if (
-            relative.is_absolute()
-            or len(relative.parts) != 2
-            or relative.parts[0] != "workflows"
-            or any(part in {"", ".", ".."} for part in relative.parts)
-            or relative.suffix != ".py"
-            or not relative.stem
-        ):
-            raise WorkflowError("invalid_input")
-
-        root_fd = cls._open_directory_chain(Path(registration["package_root"]))
-        parent_fd = -1
-        try:
-            flags = os.O_RDONLY | os.O_DIRECTORY | os.O_CLOEXEC | os.O_NOFOLLOW
-            try:
-                parent_fd = os.open(
-                    relative.parts[0],
-                    flags,
-                    dir_fd=root_fd,
-                )
-            except FileNotFoundError:
-                if not create:
-                    yield None
-                    return
-                with suppress(FileExistsError):
-                    os.mkdir(relative.parts[0], 0o755, dir_fd=root_fd)
-                parent_fd = os.open(
-                    relative.parts[0],
-                    flags,
-                    dir_fd=root_fd,
-                )
-            yield parent_fd, relative.parts[1]
-        except WorkflowError:
-            raise
-        except OSError:
-            raise WorkflowError("invalid_input") from None
-        finally:
-            if parent_fd >= 0:
-                os.close(parent_fd)
-            os.close(root_fd)
-
-    @staticmethod
-    def _open_directory_chain(path: Path) -> int:
-        absolute = Path(os.path.abspath(path))
-        flags = os.O_RDONLY | os.O_DIRECTORY | os.O_CLOEXEC | os.O_NOFOLLOW
-        try:
-            current_fd = os.open(absolute.anchor, flags)
-            for part in absolute.parts[1:]:
-                try:
-                    next_fd = os.open(part, flags, dir_fd=current_fd)
-                finally:
-                    os.close(current_fd)
-                current_fd = next_fd
-            return current_fd
-        except OSError:
-            raise WorkflowError("invalid_input") from None
-
-    @staticmethod
-    def _source_path(
-        registration: Dict[str, Any],
-    ) -> Tuple[Path, Path]:
-        stored_root = Path(registration["package_root"])
-        if WorkflowService._path_contains_symlink(stored_root):
-            raise WorkflowError("invalid_input")
-        try:
-            root = stored_root.resolve(strict=True)
-        except OSError:
-            raise WorkflowError("invalid_input") from None
-        relative = PurePosixPath(registration["relative_path"])
-        return root, root.joinpath(*relative.parts)
-
-    @staticmethod
-    def _path_contains_symlink(path: Path) -> bool:
-        absolute = Path(os.path.abspath(path))
-        current = Path(absolute.anchor)
-        for part in absolute.parts[1:]:
-            current = current / part
-            if current.is_symlink():
-                return True
-        return False
-
-    @staticmethod
-    def _assert_contained_regular_target(
-        root: Path,
-        target: Path,
-        *,
-        allow_missing: bool,
-    ) -> None:
-        if target.is_symlink():
-            raise WorkflowError("invalid_input")
-        try:
-            relative = target.relative_to(root)
-            current = root
-            for part in relative.parts[:-1]:
-                current = current / part
-                if current.is_symlink():
-                    raise WorkflowError("invalid_input")
-            resolved = target.resolve(strict=False)
-            resolved.relative_to(root)
-        except WorkflowError:
-            raise
-        except (OSError, ValueError):
-            raise WorkflowError("invalid_input") from None
-        if target.exists() and not target.is_file():
-            raise WorkflowError("invalid_input")
-        if not allow_missing and not target.exists():
-            raise WorkflowError("invalid_input")
+            raise WorkflowError(error_code) from None
 
     def _compile(
         self,
