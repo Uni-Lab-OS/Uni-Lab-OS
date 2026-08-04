@@ -45,18 +45,10 @@ def test_composite_target_rejects_workflow_binding_and_static_param_together(
         "resource_template_uuid": MATERIAL_TEMPLATE_B_UUID,
     }
 
-    nodes = [
-        WorkflowNodeWrite.model_validate(node) for node in candidate["nodes"]
-    ]
-    edges = [
-        WorkflowEdgeWrite.model_validate(edge) for edge in candidate["edges"]
-    ]
-    templates = {
-        template["uuid"]: template for template in candidate["node_templates"]
-    }
-    handles = {
-        handle["uuid"]: handle for handle in candidate["handle_templates"]
-    }
+    nodes = [WorkflowNodeWrite.model_validate(node) for node in candidate["nodes"]]
+    edges = [WorkflowEdgeWrite.model_validate(edge) for edge in candidate["edges"]]
+    templates = {template["uuid"]: template for template in candidate["node_templates"]}
+    handles = {handle["uuid"]: handle for handle in candidate["handle_templates"]}
 
     with pytest.raises(GraphValidationError, match="输入 'value' 存在多个 Provider"):
         validate_graph(

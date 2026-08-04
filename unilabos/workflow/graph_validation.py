@@ -163,6 +163,14 @@ def validate_graph(
             node_meta_data[node_uuid],
             handles,
         )
+    _validate_composite_input_providers(
+        nodes=node_by_uuid,
+        edges=edges,
+        templates=templates,
+        handles=handles,
+        effective_params=effective_params,
+        input_bindings=bindings_by_node,
+    )
     _validate_resource_slot_fan_out(edges=edges, handles=handles)
     _validate_resource_slot_template_compatibility(
         nodes=node_by_uuid,
@@ -889,6 +897,73 @@ def _dependency_only(handle: Mapping[str, Any]) -> bool:
         return True
     data_source = str(handle.get("data_source") or "").strip()
     return data_source.lower() == "dependency"
+
+
+def _validate_composite_input_providers(
+    *,
+    nodes: Mapping[str, WorkflowNodeWrite],
+    edges: Iterable[WorkflowEdgeWrite],
+    templates: Mapping[str, dict[str, Any]],
+    handles: Mapping[str, dict[str, Any]],
+    effective_params: Mapping[str, dict[str, Any]],
+    input_bindings: Mapping[str, Mapping[str, dict[str, Any]]],
+) -> None:
+    """验证复合工作流调用（CompositeWorkflowInvocation）的输入提供者。
+
+    参数：
+        nodes: 完整展开图中的工作流节点（WorkflowNode），以节点 UUID 为键。
+        edges: 完整展开图中的工作流边（WorkflowEdge）。
+        templates: 当前图的节点模板目录，以模板 UUID 为键。
+        handles: 当前图的句柄模板目录，以句柄 UUID 为键。
+        effective_params: 合并受保护字段后的节点有效参数，以节点 UUID 为键。
+        input_bindings: 按节点隔离后的输入绑定；公共调用使用公开绑定，展开的
+            子调用使用其 child-local 私有绑定。
+
+    返回：
+        所有启用的复合调用输入均由至多一个静态参数、入边或输入绑定提供时
+        不返回值。
+
+    异常：
+        GraphValidationError: 句柄类型不兼容、同一目标句柄存在多条入边，或
+            必填输入缺失、输入值类型错误、同一输入存在多个提供者（Provider）。
+    """
+
+    composite_nodes = {
+        node_uuid: node
+        for node_uuid, node in nodes.items()
+        if not node.disabled and _node_kind(node, templates) == "composite"
+    }
+    if not composite_nodes:
+        return
+
+    providers = {node_uuid for node_uuid, node in nodes.items() if not node.disabled}
+    incoming: dict[tuple[str, str], str] = {}
+    for edge in edges:
+        if (
+            edge.source_node_uuid not in providers
+            or edge.target_node_uuid not in composite_nodes
+        ):
+            continue
+        source_handle = handles[edge.source_handle_uuid]
+        target_handle = handles[edge.target_handle_uuid]
+        if not _handle_types_compatible(
+            source_handle.get("type"),
+            target_handle.get("type"),
+        ):
+            raise GraphValidationError("边两端 Handle 类型不兼容")
+        target_input = (edge.target_node_uuid, edge.target_handle_uuid)
+        if target_input in incoming:
+            raise GraphValidationError("同一目标 Handle 只能有一条入边")
+        incoming[target_input] = edge.uuid
+
+    for node_uuid, node in composite_nodes.items():
+        _validate_required_handles(
+            node,
+            effective_params[node_uuid],
+            handles.values(),
+            incoming,
+            input_bindings.get(node_uuid, {}),
+        )
 
 
 def _validate_required_handles(
