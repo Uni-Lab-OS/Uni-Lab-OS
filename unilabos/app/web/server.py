@@ -73,11 +73,11 @@ async def log_requests(request: Request, call_next) -> Response:
 
 
 def setup_server() -> FastAPI:
-    """
-    设置服务器
+    """装配当前产品配置允许的 Web 路由和本地工作流运行时。
 
-    Returns:
-        FastAPI: 配置好的FastAPI应用实例
+    参数：无。返回：进程唯一 FastAPI 应用；重复调用复用已挂载路由。工作流
+    源码（Workflow Source）授权形状或组合失败时关闭该合同路由，但不阻止无关
+    Edge 路由继续装配，错误写入产品日志。
     """
     global pages, resource_contract_routes_mounted, workflow_routes_mounted
 
@@ -110,27 +110,26 @@ def setup_server() -> FastAPI:
             # 已装配实例交给工作流组合根，禁止重新创建第二个调度器。
             edge_scheduler = get_edge_scheduler()
             if inventory_service is not None and edge_scheduler is not None:
-                try:
-                    from unilabos.registry.registry import lab_registry
+                from unilabos.registry.registry import lab_registry
 
-                    workflow_service, template_projection = (
-                        compose_local_workflow_template_runtime(
-                            BasicConfig.working_dir,
-                            inventory_store=inventory_service.store,
-                            registry=lab_registry,
-                            scheduler=edge_scheduler,
-                        )
+                workflow_service, template_projection = (
+                    compose_local_workflow_template_runtime(
+                        BasicConfig.working_dir,
+                        inventory_store=inventory_service.store,
+                        registry=lab_registry,
+                        scheduler=edge_scheduler,
+                        editable_package_roots=(
+                            BasicConfig.workflow_editable_package_roots
+                        ),
                     )
-                except Exception as projection_error:  # noqa: BLE001
-                    error(
-                        "[Web] 本地 Registry 模板投影关闭式失败，"
-                        f"工作流创作暂不可用: {str(projection_error)}"
-                    )
-                    workflow_service = compose_workflow_runtime(
-                        BasicConfig.working_dir
-                    )
+                )
             else:
-                workflow_service = compose_workflow_runtime(BasicConfig.working_dir)
+                workflow_service = compose_workflow_runtime(
+                    BasicConfig.working_dir,
+                    editable_package_roots=(
+                        BasicConfig.workflow_editable_package_roots
+                    ),
+                )
             install_workflow_api(
                 app,
                 workflow_service,

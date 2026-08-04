@@ -4,6 +4,8 @@
 class BasicConfig:
     ak = ""  # 实验室网页给您提供的ak代码，您可以在配置文件中指定，也可以通过运行unilabos时以 --ak 传入，优先按照传入参数解析
     sk = ""  # 实验室网页给您提供的sk代码，您可以在配置文件中指定，也可以通过运行unilabos时以 --sk 传入，优先按照传入参数解析
+    # 当前进程明确授权的工作流源码（Workflow Source）选择目录；空 tuple 禁止隐式扫描。
+    workflow_editable_package_roots = ()
 
 
 # WebSocket配置，一般无需调整

@@ -49,9 +49,14 @@ jobs:
           call conda activate check-env
           echo Installing pip dependencies...
           uv pip install -r unilabos/utils/requirements.txt
-          uv pip install pywinauto git+https://github.com/Xuwznln/pylabrobot.git
+          uv pip install pytest pywinauto git+https://github.com/Xuwznln/pylabrobot.git
           uv pip uninstall enum34 || echo enum34 not installed, skipping
           uv pip install .
+
+      - name: Run Windows workflow source safety contracts
+        run: |
+          call conda activate check-env
+          pytest -q tests/workflow/test_source_publication_windows.py tests/workflow/test_source_workspace_security.py
 
       - name: Run check mode (AST registry validation)
         # check_mode 会真实 import 所有设备类(连带 matplotlib/opencv 等原生库)。

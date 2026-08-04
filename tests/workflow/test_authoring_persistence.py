@@ -37,7 +37,7 @@ def authoring_service(tmp_path: Path) -> tuple[WorkflowService, Path]:
         description="Persisted description",
         meta_data={"owner": "keep"},
     )
-    service.register_editable_source(
+    service.replace_active_editable_source_authorization(
         workflow_uuid=WORKFLOW_UUID,
         package_id="lab",
         package_root=package_root,
