@@ -23,6 +23,11 @@ from unilabos.workflow.source_file_access import (
     read_regular_path,
     read_stable_descriptor,
 )
+from unilabos.workflow.source_publication_errors import (
+    SourcePublicationConflict,
+    SourcePublicationError,
+    raise_classified_publication_os_error,
+)
 from unilabos.workflow.source_windows_publication import (
     WindowsPublicationConflict,
     WindowsPublicationError,
@@ -47,14 +52,6 @@ NO_EXPECTED_HASH = object()
 _PLATFORM = sys.platform
 _F_OWNER_TID = 0
 _LEASE_BREAK_SIGNAL = getattr(signal, "SIGRTMAX", None)
-
-
-class SourcePublicationConflict(RuntimeError):
-    """表示规范源码在 CAS 发布期间被其他写入者改变。"""
-
-
-class SourcePublicationError(RuntimeError):
-    """表示原子发布无法安全完成的基础设施错误。"""
 
 
 @dataclass(frozen=True)
@@ -311,7 +308,9 @@ def atomic_publish_source(
         raise SourcePublicationConflict("draft_hash_conflict") from None
     except WindowsPublicationError:
         raise SourcePublicationError("publication_failed") from None
-    except (OSError, StableFileAccessError):
+    except OSError as error:
+        raise_classified_publication_os_error(error)
+    except StableFileAccessError:
         raise SourcePublicationError("publication_failed") from None
 
 
@@ -412,7 +411,9 @@ def _compare_and_replace(
             raise SourcePublicationConflict("draft_hash_conflict")
     except (SourcePublicationConflict, SourcePublicationError):
         raise
-    except (OSError, StableFileAccessError):
+    except OSError as error:
+        raise_classified_publication_os_error(error)
+    except StableFileAccessError:
         raise SourcePublicationConflict("draft_hash_conflict") from None
     finally:
         if temporary_descriptor >= 0:
@@ -541,8 +542,10 @@ def _compare_and_replace_windows(
         raise SourcePublicationConflict("draft_hash_conflict") from None
     except (WindowsPublicationError, StableFileAccessError):
         raise SourcePublicationError("publication_failed") from None
-    except (OSError, TypeError, ValueError):
-        raise SourcePublicationConflict("draft_hash_conflict") from None
+    except OSError as error:
+        raise_classified_publication_os_error(error)
+    except (TypeError, ValueError):
+        raise SourcePublicationError("publication_failed") from None
     finally:
         if temporary_descriptor >= 0:
             os.close(temporary_descriptor)
@@ -570,8 +573,10 @@ def _exclusive_target_lock(
     ):
         try:
             _fcntl.flock(descriptor, _fcntl.LOCK_EX | _fcntl.LOCK_NB)
-        except (OSError, ValueError):
-            raise SourcePublicationConflict("draft_hash_conflict") from None
+        except OSError as error:
+            raise_classified_publication_os_error(error)
+        except ValueError:
+            raise SourcePublicationError("publication_failed") from None
         try:
             yield _never_broken
         finally:
@@ -584,8 +589,10 @@ def _exclusive_target_lock(
         try:
             os.lseek(descriptor, 0, os.SEEK_SET)
             _msvcrt.locking(descriptor, _msvcrt.LK_NBLCK, 1)
-        except (OSError, ValueError):
-            raise SourcePublicationConflict("draft_hash_conflict") from None
+        except OSError as error:
+            raise_classified_publication_os_error(error)
+        except ValueError:
+            raise SourcePublicationError("publication_failed") from None
         try:
             yield _never_broken
         finally:
@@ -626,8 +633,9 @@ def _linux_lease_supported() -> bool:
 def _linux_lease(descriptor: int) -> Iterator[Callable[[], bool]]:
     """获取可检测外部打开的 Linux 写租约并在退出时完整恢复信号状态。
 
-    参数：``descriptor`` 是 CAS 原稿。返回：租约中断探测函数。异常：租约或
-    信号配置失败时抛出 ``SourcePublicationConflict``。
+    参数：``descriptor`` 是 CAS 原稿。返回：租约中断探测函数。异常：明确的
+    锁竞争抛出 ``SourcePublicationConflict``；租约或信号基础设施故障抛出
+    ``SourcePublicationError``。
     """
 
     assert _fcntl is not None
@@ -651,8 +659,10 @@ def _linux_lease(descriptor: int) -> Iterator[Callable[[], bool]]:
         yield _drain_lease_break_signal
     except SourcePublicationConflict:
         raise
-    except (AttributeError, OSError, ValueError):
-        raise SourcePublicationConflict("draft_hash_conflict") from None
+    except OSError as error:
+        raise_classified_publication_os_error(error)
+    except (AttributeError, ValueError):
+        raise SourcePublicationError("publication_failed") from None
     finally:
         if lease_held:
             with suppress(OSError):
@@ -685,7 +695,7 @@ def _published_identity_matches(
         ) and _sha256(
             _stable_bytes(published_descriptor, byte_limit=byte_limit)
         ) == expected_hash
-    except (OSError, SourcePublicationError, SourcePublicationConflict):
+    except SourcePublicationConflict:
         return False
 
 

@@ -289,6 +289,9 @@ class WorkflowService:
         self._device_action_run_bridge = device_action_run_bridge
         self._locks_guard = threading.Lock()
         self._authoring_locks: Dict[str, threading.RLock] = {}
+        # ``_source_authorization_replacement_lock`` 串行化完整授权集合替换，使“当前
+        # 集合 ∪ 新集合”的锁快照在取得所有创作锁前不会被另一替换命令改变。
+        self._source_authorization_replacement_lock = threading.RLock()
         # ``_active_source_workflow_uuids`` 只表达本次进程启动配置授权的工作流
         # 源码（Workflow Source）；SQLite 注册行仅保留跨启动历史身份。
         self._active_sources_lock = threading.RLock()
@@ -450,6 +453,16 @@ class WorkflowService:
         description: Optional[str],
         meta_data: Dict[str, Any],
     ) -> Dict[str, Any]:
+        """从已应用工作流图创建一次工作流任务（WorkflowTask）及其作业。
+
+        参数：``workflow_uuid`` 是工作流定义身份；``run_mode`` 是普通、单步或
+        单节点运行模式；``target_node_uuid`` 是单节点运行目标；``input_value``
+        是任务输入；``description`` 与 ``meta_data`` 是用户说明和公开元数据。
+        返回：同一事务创建的工作流任务及工作流节点作业（WorkflowNodeJob）投影。
+        异常：身份、运行模式、输入或执行计划不合法时抛出稳定工作流错误；本阶段
+        仍拒绝非空任务输入，避免在解释合同完成前持久化歧义语义。
+        """
+
         workflow_uuid = self.get_workflow(workflow_uuid)["uuid"]
         run_mode = "normal" if run_mode == "" else run_mode
         if run_mode not in {"normal", "step", "single_node"}:
@@ -865,8 +878,8 @@ class WorkflowService:
             )
         ):
             raise WorkflowError("invalid_input")
-        # ``workflow_uuids`` 以稳定顺序取得所有创作锁，避免与草稿操作交叉提交。
-        workflow_uuids = sorted(
+        # ``incoming_workflow_uuids`` 是计划将保留授权的完整新集合。
+        incoming_workflow_uuids = frozenset(
             {registration.workflow_uuid for registration in plan.registrations}
         )
         # ``registration_rows`` 是交给 SQLite 写模型的完整、不可变批次。
@@ -880,27 +893,34 @@ class WorkflowService:
             }
             for registration in plan.registrations
         )
-        with ExitStack() as locks:
-            for workflow_uuid in workflow_uuids:
-                locks.enter_context(self._authoring_lock(workflow_uuid))
-            try:
-                with pin_package_roots(plan.root_identities) as pinned_roots:
-                    registered = self._store.register_sources(
-                        registration_rows,
-                        before_commit=pinned_roots.assert_current,
-                    )
-            except StoreNotFound:
-                raise WorkflowError("workflow_not_found") from None
-            except SourceWorkspaceError:
-                raise WorkflowError("invalid_input") from None
-            except StoreConflict:
-                raise WorkflowConflict("invalid_input") from None
-        # 只有完整 SQLite 注册事务成功后才一次替换当前授权集合；失败计划不得
-        # 残留部分活动来源，也不得沿用上一次计划中已经撤销的来源。
-        active_workflow_uuids = frozenset(workflow_uuids)
-        with self._active_sources_lock:
-            self._active_source_workflow_uuids = active_workflow_uuids
-        return registered
+        with self._source_authorization_replacement_lock:
+            with self._active_sources_lock:
+                current_workflow_uuids = self._active_source_workflow_uuids
+            # ``locked_workflow_uuids`` 同时覆盖将撤销和将激活的身份；稳定排序避免
+            # 多工作流保存、读取与授权替换形成锁顺序反转。
+            locked_workflow_uuids = sorted(
+                current_workflow_uuids | incoming_workflow_uuids
+            )
+            with ExitStack() as locks:
+                for workflow_uuid in locked_workflow_uuids:
+                    locks.enter_context(self._authoring_lock(workflow_uuid))
+                try:
+                    with pin_package_roots(plan.root_identities) as pinned_roots:
+                        registered = self._store.register_sources(
+                            registration_rows,
+                            before_commit=pinned_roots.assert_current,
+                        )
+                except StoreNotFound:
+                    raise WorkflowError("workflow_not_found") from None
+                except SourceWorkspaceError:
+                    raise WorkflowError("invalid_input") from None
+                except StoreConflict:
+                    raise WorkflowConflict("invalid_input") from None
+                # SQLite 注册事务与进程级文件访问授权不能共用一个物理事务，但必须
+                # 在所有相关创作锁释放前一次发布，撤权返回后不得再有旧操作读写路径。
+                with self._active_sources_lock:
+                    self._active_source_workflow_uuids = incoming_workflow_uuids
+            return registered
 
     def replace_active_editable_source_authorization(
         self,
@@ -1236,12 +1256,12 @@ class WorkflowService:
             registration = self._registration(workflow_uuid)
             # ``current_signature`` 是服务在取得创作锁后复核的文件世代，防止监视
             # 线程用过期观测授权编译更新中的文件。
-            current_signature = self.source_signature(registration)
+            current_signature = self.source_signature(workflow_uuid)
             if current_signature != observed_signature:
                 return False
             self.reconcile_registered_source(workflow_uuid)
             # ``latest_signature`` 证明整个状态推进期间规范源码没有再次变化。
-            latest_signature = self.source_signature(registration)
+            latest_signature = self.source_signature(workflow_uuid)
             if latest_signature != observed_signature:
                 return False
             record = self._store.get_authoring_record(workflow_uuid)
@@ -1591,19 +1611,24 @@ class WorkflowService:
 
     def source_signature(
         self,
-        registration: Dict[str, Any],
+        workflow_uuid: str,
     ) -> Tuple[Any, ...]:
-        """返回无需读取内容的稳定签名，供源码监视器（Source Monitor）去抖。
+        """按当前授权的工作流身份返回轻量源码签名。
 
-        参数：``registration`` 是持久化来源身份。
+        参数：``workflow_uuid`` 是工作流源码（Workflow Source）绑定的稳定身份；
+        本方法不接受调用者缓存的注册路径。
         返回：缺失标记或普通文件的身份、大小和时间签名。
-        异常：不安全路径或非普通文件映射为 ``invalid_input``。
+        异常：已撤权身份稳定映射为 ``workflow_not_found``；不安全路径或非普通
+        文件映射为 ``invalid_input``。安全：每次读取都在工作流创作锁内重新取得
+        当前注册，撤权返回后旧注册信息不能继续触碰文件系统。
         """
 
-        try:
-            return registered_source_signature(registration)
-        except SourceWorkspaceError:
-            raise WorkflowError("invalid_input") from None
+        with self._authoring_lock(workflow_uuid):
+            registration = self._registration(workflow_uuid)
+            try:
+                return registered_source_signature(registration)
+            except SourceWorkspaceError:
+                raise WorkflowError("invalid_input") from None
 
     def _atomic_write(
         self,

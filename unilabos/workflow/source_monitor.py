@@ -31,12 +31,12 @@ class SourceChangeService(Protocol):
 
     def source_signature(
         self,
-        registration: dict[str, Any],
+        workflow_uuid: str,
     ) -> tuple[Any, ...]:
-        """读取一个来源注册当前的轻量文件签名。
+        """读取一个当前授权工作流来源的轻量文件签名。
 
-        参数：``registration`` 是服务发布的规范来源注册。
-        返回：仅用于去抖和文件世代比较的稳定元组。
+        参数：``workflow_uuid`` 是服务当前授权的稳定工作流身份。返回：仅用于
+        去抖和文件世代比较的稳定元组。异常：撤权或路径失效由服务稳定拒绝。
         """
 
         ...
@@ -215,8 +215,9 @@ class WorkflowSourceMonitor:
                     workflow_uuid = registration["workflow_uuid"]
                     signature: tuple[Any, ...] | None = None
                     try:
-                        # ``signature`` 只标识文件观测世代；源码身份仍由注册记录决定。
-                        signature = self._service.source_signature(registration)
+                        # ``signature`` 只标识文件观测世代；服务按 UUID 重新校验
+                        # 当前授权，监视器不得用本轮枚举得到的旧路径 DTO 读取文件。
+                        signature = self._service.source_signature(workflow_uuid)
                         if self._processed.get(workflow_uuid) == signature:
                             self._pending.pop(workflow_uuid, None)
                             self._retries.pop(workflow_uuid, None)
@@ -241,7 +242,7 @@ class WorkflowSourceMonitor:
                             observed_signature=signature,
                         )
                         latest_signature = self._service.source_signature(
-                            registration
+                            workflow_uuid
                         )
                         if not settled:
                             self._processed.pop(workflow_uuid, None)

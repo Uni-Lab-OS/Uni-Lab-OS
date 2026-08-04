@@ -10,6 +10,7 @@ from typing import Any
 import pytest
 
 from unilabos.workflow import composition
+from unilabos.workflow.models import CandidateCompilation
 from unilabos.workflow.service import WorkflowError, WorkflowService
 from unilabos.workflow.store import WorkflowStore
 
@@ -340,8 +341,27 @@ def test_authorization_replacement_waits_for_in_flight_save_on_revoked_source(
     save_entered_publication = threading.Event()
     allow_save_to_finish = threading.Event()
     replacement_finished = threading.Event()
-    thread_errors: list[BaseException] = []
+    thread_errors: list[Exception] = []
     original_atomic_write = service._atomic_write
+
+    def compile_as_invalid_candidate(**_arguments: Any) -> CandidateCompilation:
+        """让并发测试中的草稿保存完成而不依赖设备动作模板目录。
+
+        参数：``_arguments`` 接收真实编译接缝的工作流、图、注册和源码参数。
+        返回：带确定性诊断、但不生成候选图的编译结果；不触碰外部状态。
+        """
+
+        return CandidateCompilation(
+            diagnostics=[
+                {
+                    "severity": "error",
+                    "code": "test_compilation_skipped",
+                    "message": "并发授权测试不执行模板编译",
+                }
+            ],
+            compiler_version="authorization-test-v1",
+            template_catalog_fingerprint=HASH_TOKEN,
+        )
 
     def blocking_atomic_write(
         registration: dict[str, Any],
@@ -377,7 +397,8 @@ def test_authorization_replacement_waits_for_in_flight_save_on_revoked_source(
                 expected_draft_hash=baseline["draft"]["draft_hash"],
                 expected_workflow_revision=baseline["workflow_revision"],
             )
-        except BaseException as error:  # pragma: no cover - 由结尾断言暴露
+        # 线程边界必须捕获任意普通异常，再由主线程确定性断言并显示失败。
+        except Exception as error:  # noqa: BLE001  # pragma: no cover
             thread_errors.append(error)
 
     def replace_with_source_b() -> None:
@@ -393,12 +414,14 @@ def test_authorization_replacement_waits_for_in_flight_save_on_revoked_source(
                 package_root=root_b / "beta",
                 relative_path="workflows/demo.py",
             )
-        except BaseException as error:  # pragma: no cover - 由结尾断言暴露
+        # 线程边界必须捕获任意普通异常，再由主线程确定性断言并显示失败。
+        except Exception as error:  # noqa: BLE001  # pragma: no cover
             thread_errors.append(error)
         finally:
             replacement_finished.set()
 
     monkeypatch.setattr(service, "_atomic_write", blocking_atomic_write)
+    monkeypatch.setattr(service, "_compile", compile_as_invalid_candidate)
     save_thread = threading.Thread(target=save_source_a)
     replace_thread = threading.Thread(target=replace_with_source_b)
     try:

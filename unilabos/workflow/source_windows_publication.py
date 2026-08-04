@@ -42,17 +42,28 @@ class CtypesApi(Protocol):
     c_wchar_p: Any
 
     def WinDLL(self, name: str, *, use_last_error: bool) -> Any:
-        """加载 ``name`` 指定的 Win32 DLL；返回启用线程错误码的句柄。"""
+        """加载指定的 Win32 动态库。
+
+        参数：``name`` 是 DLL 名；``use_last_error`` 决定是否保存线程错误码。
+        返回：可访问 Win32 函数的动态库句柄。异常：加载失败时原样抛出系统错误。
+        """
 
         ...
 
     def WinError(self, error_number: int) -> OSError:
-        """把 ``error_number`` 转换成携带 WinError 的系统异常。"""
+        """把 Win32 错误码转换成系统异常。
+
+        参数：``error_number`` 是线程最近一次 Win32 错误码。返回：携带
+        ``winerror`` 的 ``OSError``；本转换自身不抛出异常。
+        """
 
         ...
 
     def get_last_error(self) -> int:
-        """返回当前线程最近一次 Win32 API 错误码。"""
+        """读取当前线程最近一次 Win32 API 错误码。
+
+        参数：无。返回：非负 Win32 错误码；不改变线程错误状态。
+        """
 
         ...
 
@@ -180,7 +191,11 @@ def restore_missing_windows_target(*, target: Path, backup: Path) -> bool:
 
 
 def windows_directory_chain(parent: Path) -> tuple[Path, ...]:
-    """返回从卷根到工作流草稿（Workflow Draft）父目录的有序路径链。"""
+    """建立从卷根到工作流草稿（Workflow Draft）父目录的路径链。
+
+    参数：``parent`` 是规范草稿父目录。返回：按祖先到子目录排列的绝对路径；
+    路径规范化错误原样抛出，调用者不得在不完整目录链上继续发布。
+    """
 
     absolute = Path(os.path.abspath(parent))
     parts = absolute.parts
@@ -193,7 +208,11 @@ def windows_directory_chain(parent: Path) -> tuple[Path, ...]:
 
 
 def _extended_path(path: Path) -> str:
-    """返回 ``path`` 供 Win32 Unicode API 使用的绝对长路径。"""
+    """把普通路径转换成 Win32 Unicode 长路径。
+
+    参数：``path`` 是文件或目录路径。返回：带 ``\\?\\`` 或 UNC 长路径前缀的
+    绝对字符串；路径解析错误原样抛出。
+    """
 
     absolute = str(path.absolute())
     if absolute.startswith("\\\\?\\"):
@@ -246,13 +265,21 @@ def _restore_competitor(
 
 
 def _sha256(content: bytes) -> str:
-    """返回字节内容的稳定 SHA-256，用于 Windows CAS 证据比较。"""
+    """计算 Windows CAS 证据使用的稳定内容身份。
+
+    参数：``content`` 是完整文件字节。返回：带算法前缀的 SHA-256 哈希；无异常。
+    """
 
     return f"sha256:{hashlib.sha256(content).hexdigest()}"
 
 
 def _raise_last_error(ctypes_api: CtypesApi) -> None:
-    """读取最近 WinError，并稳定分类为竞争或基础设施故障。"""
+    """读取最近 WinError，并稳定分类为竞争或基础设施故障。
+
+    参数：``ctypes_api`` 提供当前线程错误码和异常转换。返回：永不返回。
+    异常：文件消失、共享或锁冲突抛出 ``WindowsPublicationConflict``；其他错误
+    抛出 ``WindowsPublicationError``。
+    """
 
     error_number = ctypes_api.get_last_error()
     system_error = ctypes_api.WinError(error_number)
@@ -298,7 +325,11 @@ def _open_directory(path: Path, *, ctypes_api: CtypesApi) -> int:
 
 
 def _close_directory(handle: int, *, ctypes_api: CtypesApi) -> None:
-    """关闭一个目录链句柄；cleanup 结果不覆盖主要发布结论。"""
+    """关闭一个 Windows 目录链句柄。
+
+    参数：``handle`` 是 ``CreateFileW`` 返回的目录句柄；``ctypes_api`` 提供
+    ``CloseHandle``。返回：无；原生关闭结果不覆盖调用者已有的主要发布结论。
+    """
 
     kernel32 = ctypes_api.WinDLL("kernel32", use_last_error=True)
     close_handle = kernel32.CloseHandle

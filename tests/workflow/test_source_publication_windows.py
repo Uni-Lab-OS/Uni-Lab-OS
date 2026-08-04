@@ -48,7 +48,10 @@ class RecordingWindowsLock:
 
 
 def _draft_hash(content: bytes) -> str:
-    """返回 ``content`` 的工作流草稿（Workflow Draft）SHA-256 身份。"""
+    """计算工作流草稿（Workflow Draft）的稳定内容身份。
+
+    参数：``content`` 是完整草稿字节。返回：带算法前缀的 SHA-256 哈希；无异常。
+    """
 
     return f"sha256:{hashlib.sha256(content).hexdigest()}"
 
@@ -108,7 +111,11 @@ def test_windows_existing_draft_closes_lock_before_native_replace(
         original_replace(replacement_path, target_path)
 
     def forbidden_portable_replace(*_args: object, **_kwargs: object) -> None:
-        """拒绝 Windows 既有草稿路径退回 ``os.replace``；参数只用于捕获误用。"""
+        """拒绝 Windows 既有草稿路径退回可移植替换。
+
+        参数：位置与关键字参数只捕获任意误用形状。返回：无；总是抛出
+        ``AssertionError``，证明既有草稿必须经过原生 Windows 适配器。
+        """
 
         raise AssertionError("Windows existing draft used os.replace")
 
