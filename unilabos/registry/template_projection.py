@@ -5,16 +5,21 @@ from __future__ import annotations
 from collections.abc import Callable, Mapping, Sequence
 from typing import Any
 
+from unilabos.registry.action_template_projection import (
+    ActionTemplateProjectionError,
+    compile_action_template_handles,
+    goal_parameter_schema,
+)
+from unilabos.registry.template_snapshot import (
+    RegistryTemplateSnapshot,
+    RegistryTemplateSnapshotError,
+)
 from unilabos.workflow.authoring_kernel import AuthoringCatalogSnapshot
 from unilabos.workflow.models import validate_uuid
 from unilabos.workflow.store import WorkflowStore
 from unilabos.workflow.template_projection_store import (
     RegistryTemplateProjectionStore,
     TemplateProjectionIdentityConflict,
-)
-from unilabos.registry.template_snapshot import (
-    RegistryTemplateSnapshot,
-    RegistryTemplateSnapshotError,
 )
 
 
@@ -72,7 +77,7 @@ class RegistryTemplateProjection:
             )
         except TemplateProjectionIdentityConflict as error:
             raise RegistryTemplateProjectionError(
-                f"模板身份冲突: {str(error)}"
+                f"模板身份冲突: {error!s}"
             ) from error
         next_snapshot = AuthoringCatalogSnapshot.from_entities(
             persisted_nodes,
@@ -178,14 +183,20 @@ class RegistryTemplateProjection:
                 )
             if contract_kind != "typed":
                 continue
-            node, action_handles = self._compile_action(
-                action_name=str(action_name),
-                action=action,
-                class_identity=class_identity,
-                resource_template_uuid=resource_template_uuid,
-                resource_name=resource_name,
-                resource_display_name=resource_display_name,
-            )
+            try:
+                node, action_handles = self._compile_action(
+                    action_name=str(action_name),
+                    action=action,
+                    class_identity=class_identity,
+                    resource_template_uuid=resource_template_uuid,
+                    resource_name=resource_name,
+                    resource_display_name=resource_display_name,
+                    resource_template_identity_resolver=(
+                        self._resource_template_identity_resolver
+                    ),
+                )
+            except ActionTemplateProjectionError as error:
+                raise RegistryTemplateProjectionError(str(error)) from error
             nodes.append(node)
             handles.extend(action_handles)
         return nodes, handles
@@ -199,13 +210,15 @@ class RegistryTemplateProjection:
         resource_template_uuid: str,
         resource_name: str,
         resource_display_name: str,
+        resource_template_identity_resolver: Callable[[str], str],
     ) -> tuple[dict[str, Any], list[dict[str, Any]]]:
         """把一个第 2 版强类型动作合同编译为模板候选。
 
         参数说明：``action_name`` 与 ``resource_template_uuid`` 构成持久业务身份；
         ``action`` 提供 Schema 和展示字段；``class_identity`` 供 F02 工作流创作编译
         按 Python 设备类解析动作；``resource_name`` 和 ``resource_display_name``
-        固化 HTTP 摘要。返回一个节点模板及其显式输入/输出句柄模板。
+        固化 HTTP 摘要；``resource_template_identity_resolver`` 把动作中的源码资源
+        约束解析为本地模板 UUID。返回一个节点模板及其完整控制/数据连接点。
         """
 
         schema = action.get("schema")
@@ -227,12 +240,13 @@ class RegistryTemplateProjection:
             "goal_default": dict(action.get("goal_default") or {}),
             "feedback": dict(action.get("feedback") or {}),
             "result": dict(action.get("result") or {}),
-            "schema": dict(schema),
+            "schema": goal_parameter_schema(schema),
             "type": action.get("type") or "UniLabJsonCommand",
-            "node_type": "device_action",
+            "node_type": "ILab",
             "meta_data": {
                 "unilab": {
                     "contract_kind": "typed",
+                    "action_contract_schema": dict(schema),
                     "resource_template": {
                         "uuid": resource_template_uuid,
                         "name": resource_name,
@@ -249,124 +263,14 @@ class RegistryTemplateProjection:
                     "节点模板显式 UUID 非法"
                 ) from None
 
-        goal_schema = _object_property(schema, "goal")
-        result_schema = _object_property(schema, "result")
-        input_order = contract.get("input_order") or []
-        output_order = contract.get("output_order") or []
-        if not isinstance(input_order, Sequence) or isinstance(
-            input_order, (str, bytes)
-        ):
-            raise RegistryTemplateProjectionError("动作合同输入顺序必须是数组")
-        if not isinstance(output_order, Sequence) or isinstance(
-            output_order, (str, bytes)
-        ):
-            raise RegistryTemplateProjectionError("动作合同输出顺序必须是数组")
-        handles: list[dict[str, Any]] = []
-        handles.extend(
-            _compile_handles(
-                node_business_key=node_business_key,
-                io_type="target",
-                ordered_keys=input_order,
-                object_schema=goal_schema,
-                order_offset=0,
-            )
-        )
-        handles.extend(
-            _compile_handles(
-                node_business_key=node_business_key,
-                io_type="source",
-                ordered_keys=output_order,
-                object_schema=result_schema,
-                order_offset=len(input_order),
-            )
+        handles = compile_action_template_handles(
+            schema,
+            node_business_key=node_business_key,
+            resource_template_identity_resolver=(
+                resource_template_identity_resolver
+            ),
         )
         return node, handles
-
-
-def _object_property(schema: Mapping[str, Any], key: str) -> Mapping[str, Any]:
-    """取得动作合同中的对象子 Schema。
-
-    参数说明：``schema`` 是动作根 Schema，``key`` 是 goal 或 result；返回对象
-    Schema，缺失时使用空对象以支持无输入或无输出动作。
-    """
-
-    properties = schema.get("properties") or {}
-    if not isinstance(properties, Mapping):
-        raise RegistryTemplateProjectionError("动作 Schema properties 必须是对象")
-    value = properties.get(key) or {}
-    if not isinstance(value, Mapping):
-        raise RegistryTemplateProjectionError(f"动作 {key} Schema 必须是对象")
-    return value
-
-
-def _compile_handles(
-    *,
-    node_business_key: tuple[str, str],
-    io_type: str,
-    ordered_keys: Sequence[Any],
-    object_schema: Mapping[str, Any],
-    order_offset: int,
-) -> list[dict[str, Any]]:
-    """按动作合同显式顺序编译一组数据句柄模板。
-
-    参数说明：``node_business_key`` 在事务内解析父 UUID；``io_type`` 是 source 或
-    target；``ordered_keys`` 是合同顺序；``object_schema`` 提供必填性和字段类型；
-    ``order_offset`` 把输入和输出合并为一个稳定动作顺序。返回值不会猜测 ready
-    句柄或未声明字段。
-    """
-
-    if not isinstance(ordered_keys, Sequence) or isinstance(
-        ordered_keys, (str, bytes)
-    ):
-        raise RegistryTemplateProjectionError("动作合同句柄顺序必须是数组")
-    properties = object_schema.get("properties") or {}
-    required_keys = object_schema.get("required") or []
-    if not isinstance(properties, Mapping) or not isinstance(required_keys, Sequence):
-        raise RegistryTemplateProjectionError("动作字段 Schema 结构非法")
-    handles: list[dict[str, Any]] = []
-    seen_keys: set[str] = set()
-    for index, raw_key in enumerate(ordered_keys):
-        if not isinstance(raw_key, str) or not raw_key or raw_key in seen_keys:
-            raise RegistryTemplateProjectionError("动作合同句柄顺序含非法或重复字段")
-        seen_keys.add(raw_key)
-        value_schema = properties.get(raw_key)
-        if not isinstance(value_schema, Mapping):
-            raise RegistryTemplateProjectionError("动作合同顺序引用未知字段")
-        handles.append(
-            {
-                "node_business_key": node_business_key,
-                "handle_key": raw_key,
-                "io_type": io_type,
-                "display_name": value_schema.get("title") or raw_key,
-                "description": value_schema.get("description"),
-                "type": _handle_type(value_schema),
-                "required": raw_key in required_keys,
-                "data_key": raw_key,
-                "meta_data": {
-                    "unilab": {
-                        "value_schema": dict(value_schema),
-                        "contract_order": order_offset + index,
-                    }
-                },
-            }
-        )
-    return handles
-
-
-def _handle_type(value_schema: Mapping[str, Any]) -> str:
-    """把 JSON Schema 字段映射为句柄类型。
-
-    参数说明：``value_schema`` 是单个输入或输出字段；物料引用统一映射为代码类型
-    ``ResourceSlot``（中文术语：物料占位符），其他字段保留 JSON 类型。
-    """
-
-    if value_schema.get("x-unilabos-material-lock") in {True, False}:
-        return "ResourceSlot"
-    json_type = value_schema.get("type")
-    if isinstance(json_type, list):
-        non_null_types = [item for item in json_type if item != "null"]
-        return str(non_null_types[0]) if len(non_null_types) == 1 else "any"
-    return str(json_type) if isinstance(json_type, str) else "any"
 
 
 __all__ = [

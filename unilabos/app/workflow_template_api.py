@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 from collections.abc import Mapping
-from typing import Any, Protocol
+from typing import Annotated, Any, Protocol
 from uuid import UUID
 
 from fastapi import APIRouter, FastAPI, Query, Request
@@ -16,7 +16,6 @@ from unilabos.workflow.authoring_kernel import (
     AuthoringCatalogSnapshot,
 )
 from unilabos.workflow.models import validate_uuid
-
 
 _DEFAULT_LIMIT = 20
 _MAX_LIMIT = 100
@@ -50,14 +49,27 @@ class WorkflowTemplateQueryError(RuntimeError):
 class WorkflowTemplateQueryService:
     """从一个不可变快照完成列表、筛选、游标和详情查询。"""
 
-    def __init__(self, snapshot_provider: TemplateSnapshotProvider) -> None:
+    def __init__(
+        self,
+        snapshot_provider: TemplateSnapshotProvider,
+        *,
+        authority_id: str = "local",
+        authority_kind: str = "local",
+    ) -> None:
         """绑定模板快照提供者。
 
-        参数说明：``snapshot_provider`` 通常是设备注册表模板投影；每次请求只取
-        一次快照，避免一条响应混合两个发布代际。
+        参数说明：``snapshot_provider`` 通常是设备注册表模板投影；
+        ``authority_id`` 和 ``authority_kind`` 标识目录权威（Authority）。每次
+        请求只取一次快照，避免一条响应混合两个发布代际。
         """
 
+        if not authority_id.strip() or authority_kind not in {"local", "backend"}:
+            raise ValueError("模板目录权威身份非法")
         self._snapshot_provider = snapshot_provider
+        self._authority = {
+            "authority_id": authority_id.strip(),
+            "kind": authority_kind,
+        }
 
     def list_node_templates(
         self,
@@ -133,6 +145,8 @@ class WorkflowTemplateQueryService:
         page = matches[:normalized_limit]
         has_more = len(matches) > normalized_limit
         return {
+            "authority": dict(self._authority),
+            "catalog_fingerprint": snapshot.fingerprint,
             "items": [_summary(action) for action in page],
             "has_more": has_more,
             "next_cursor_uuid": (
@@ -164,6 +178,8 @@ class WorkflowTemplateQueryService:
             )
         return _omit_none(
             {
+                "authority": dict(self._authority),
+                "catalog_fingerprint": snapshot.fingerprint,
                 "template": action.detached_template(),
                 "handles": action.detached_handles(),
             }
@@ -292,13 +308,17 @@ def create_workflow_template_router(
     @router.get("/workflow-node-templates")
     def list_node_templates(
         limit: int = Query(default=0),
-        cursor_uuid: UUID | None = Query(default=None),
+        cursor_uuid: Annotated[UUID | None, Query()] = None,
         keyword: str = Query(default=""),
-        resource_template_uuid: UUID | None = Query(default=None),
+        resource_template_uuid: Annotated[UUID | None, Query()] = None,
         action_type: str = Query(default="", alias="type"),
         node_type: str = Query(default=""),
     ) -> JSONResponse:
-        """按 Backend 查询参数返回工作流节点模板摘要页。"""
+        """按 Backend 查询参数返回工作流节点模板摘要页。
+
+        参数说明：``limit`` 和 ``cursor_uuid`` 控制 UUID 游标；``keyword``、资源
+        模板 UUID、动作类型和节点类型执行服务端筛选。返回统一 JSON 外壳。
+        """
 
         return _call(
             service.list_node_templates,

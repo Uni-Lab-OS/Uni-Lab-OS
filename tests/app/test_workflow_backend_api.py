@@ -137,9 +137,21 @@ def test_local_workflow_app_mounts_template_query_from_same_runtime(tmp_path) ->
         )
     )
 
+    # ``response`` 是空目录仍携带权威身份和目录指纹的成功游标页。
     response = client.get("/api/v1/workflow-node-templates")
     assert response.status_code == 200
-    assert response.json() == {
+    # ``data`` 是模板目录响应的数据主体。
+    data = response.json()["data"]
+    assert data["authority"] == {"authority_id": "local", "kind": "local"}
+    assert data["catalog_fingerprint"].startswith("sha256:")
+    assert {
+        "code": response.json()["code"],
+        "data": {
+            key: value
+            for key, value in data.items()
+            if key not in {"authority", "catalog_fingerprint"}
+        },
+    } == {
         "code": 0,
         "data": {"items": [], "has_more": False, "next_cursor_uuid": None},
     }

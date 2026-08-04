@@ -19,7 +19,6 @@ from unilabos.registry.template_projection import RegistryTemplateProjection
 from unilabos.registry.template_snapshot import RegistryTemplateSnapshot
 from unilabos.workflow.store import WorkflowStore
 
-
 RESOURCE_TEMPLATE_UUID = "10000000-0000-4000-8000-000000000001"
 
 
@@ -102,9 +101,16 @@ class FakeRegistry:
         ]
 
     def obtain_registry_resource_info(self):
+        """返回带源码全限定身份的器材模板。
+
+        参数说明：方法无外部参数；返回值用于验证 Backend 同批身份映射所需的
+        ``source_fqid`` 不会在 Registry 快照规范化时丢失。
+        """
+
         return [
             {
                 "id": "tube_15ml",
+                "source_fqid": "resources.tube:Tube15mL",
                 "displayname": "15 mL 离心管",
                 "registry_type": "resource",
                 "class": {
@@ -156,6 +162,13 @@ class FakeSession:
 
 
 def test_sync_merges_device_and_resource_templates_into_one_transaction():
+    """同一 Registry 快照必须一次上传设备、器材和由 v2 合同派生的 Handles。
+
+    参数说明：测试无外部参数；返回值为空。关键变量分别代表 HTTP 会话、同步器、
+    同步回执和解压后的 Backend 请求载荷。
+    """
+
+    # ``session`` 记录唯一 HTTP 请求；``synchronizer`` 执行不可变快照同步。
     session = FakeSession()
     synchronizer = TemplateSynchronizer(
         "http://backend:8080",
@@ -163,6 +176,7 @@ def test_sync_merges_device_and_resource_templates_into_one_transaction():
         session=session,
     )
 
+    # ``report`` 是 Backend 返回的稳定资源模板身份回执。
     report = synchronizer.sync(FakeRegistry())
 
     assert report.device_count == 1
@@ -176,6 +190,7 @@ def test_sync_merges_device_and_resource_templates_into_one_transaction():
     assert url == "http://backend:8080/api/v1/resource-templates"
     assert request["headers"]["Authorization"] == "Bearer developer-secret"
     assert request["headers"]["Content-Encoding"] == "gzip"
+    # ``payload`` 是 Backend 实际收到的完整模板定义事务。
     payload = json.loads(gzip.decompress(request["data"]))
     assert [resource["id"] for resource in payload["resources"]] == [
         "pump",
@@ -189,6 +204,18 @@ def test_sync_merges_device_and_resource_templates_into_one_transaction():
     assert "unilabos_device_id" not in action["goal_default"]
     assert "unilabos_device_id" not in action["schema"]["properties"]["goal"]["properties"]
     assert action["schema"]["properties"]["goal"]["required"] == ["volume"]
+    assert action["handles"] == {
+        "input": [
+            {
+                "label": "volume",
+                "data_key": "volume",
+                "data_type": "number",
+                "data_source": "goal",
+                "handler_key": "volume",
+            }
+        ],
+        "output": [],
+    }
     assert device["init_param_schema"] == {
         "config": {"properties": {"port": {"type": "string"}}}
     }
@@ -196,6 +223,7 @@ def test_sync_merges_device_and_resource_templates_into_one_transaction():
     assert "status_types" not in device["class"]
     assert resource["display_name"] == "15 mL 离心管"
     assert resource["registry_type"] == "resource"
+    assert resource["source_fqid"] == "resources.tube:Tube15mL"
 
 
 def test_sync_rejects_backend_business_error():
@@ -270,7 +298,8 @@ def test_local_projection_and_template_sync_share_one_registry_snapshot(
     """本地模板投影和 Backend 同步必须消费同一不可变 Registry 定义快照。
 
     参数说明：``tmp_path`` 隔离本地工作流数据库；测试比较两条消费路径中的动作
-    业务名和最终生产 JSON Schema，禁止二次 Registry 遍历产生漂移。
+    业务名和 Backend 规范的 goal 参数模式，禁止二次 Registry 遍历产生漂移；
+    Backend 上传仍保留完整第 2 版动作合同作为唯一编译输入。
     """
 
     registry_snapshot = RegistryTemplateSnapshot.from_registry(FakeRegistry())
@@ -298,7 +327,10 @@ def test_local_projection_and_template_sync_share_one_registry_snapshot(
         "action_value_mappings"
     ]["transfer"]
 
-    assert synchronized_action["schema"] == local_action.detached_template()["schema"]
+    # ``synchronized_goal_schema`` 是完整上传合同中供节点参数校验使用的 goal 子模式。
+    synchronized_goal_schema = synchronized_action["schema"]["properties"]["goal"]
+    assert synchronized_goal_schema == local_action.detached_template()["schema"]
+    assert synchronized_action["schema"]["x-unilabos-action-contract"]["version"] == 2
     assert synchronized_action["display_name"] == local_action.template["display_name"]
     projection.close()
 

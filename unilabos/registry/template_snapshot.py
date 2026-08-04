@@ -10,8 +10,11 @@ from dataclasses import dataclass
 from types import MappingProxyType
 from typing import Any
 
+from unilabos.registry.action_template_projection import (
+    ActionTemplateProjectionError,
+    compile_backend_action_handles,
+)
 from unilabos.utils.tools import normalize_json
-
 
 _CONTROL_ACTION_PARAMETERS = frozenset({"unilabos_device_id"})
 
@@ -151,6 +154,10 @@ def _template_definition(
         "scene": _array(source.get("scene")),
         "device_params": _object(source.get("device_params")),
     }
+    source_fqid = source.get("source_fqid")
+    if isinstance(source_fqid, str) and source_fqid.strip():
+        # ``source_fqid`` 是资源模板源码身份；Backend 用它解析动作字段允许集。
+        definition["source_fqid"] = source_fqid.strip()
     schema = _initial_parameter_schema(source.get("init_param_schema"))
     if schema:
         definition["init_param_schema"] = schema
@@ -169,9 +176,27 @@ def _action_definition(raw_action: Any) -> dict[str, Any]:
     """
 
     action = raw_action if isinstance(raw_action, Mapping) else {}
+    contract_kind = action.get("contract_kind")
+    if contract_kind == "invalid_typed":
+        diagnostic = action.get("contract_diagnostic")
+        message = (
+            diagnostic.get("message") if isinstance(diagnostic, Mapping) else None
+        )
+        raise RegistryTemplateSnapshotError(
+            "强类型动作合同无效" + (f": {message}" if message else "")
+        )
+    # ``production_schema`` 是移除旧设备选择参数后的唯一 Backend 上传合同。
+    production_schema = _production_action_schema(action.get("schema"))
     handles = action.get("handles")
     if not isinstance(handles, Mapping):
         handles = {}
+    if contract_kind == "typed":
+        if not isinstance(production_schema, Mapping):
+            raise RegistryTemplateSnapshotError("强类型动作缺少第 2 版动作合同")
+        try:
+            handles = compile_backend_action_handles(production_schema)
+        except ActionTemplateProjectionError as error:
+            raise RegistryTemplateSnapshotError(str(error)) from error
     definition: dict[str, Any] = {
         "feedback": _object(action.get("feedback")),
         "goal": _without_control_action_parameters(action.get("goal")),
@@ -179,7 +204,7 @@ def _action_definition(raw_action: Any) -> dict[str, Any]:
             action.get("goal_default")
         ),
         "result": _object(action.get("result")),
-        "schema": _production_action_schema(action.get("schema")),
+        "schema": production_schema,
         "type": str(action.get("type") or "").strip(),
         "handles": {
             "input": [

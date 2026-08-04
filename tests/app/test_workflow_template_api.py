@@ -9,7 +9,6 @@ from fastapi.testclient import TestClient
 from unilabos.app.workflow_template_api import create_workflow_template_app
 from unilabos.workflow.authoring_kernel import AuthoringCatalogSnapshot
 
-
 NODE_TEMPLATE_A = "20000000-0000-4000-8000-000000000001"
 NODE_TEMPLATE_B = "20000000-0000-4000-8000-000000000002"
 HANDLE_TEMPLATE_A = "30000000-0000-4000-8000-000000000001"
@@ -126,8 +125,13 @@ def test_workflow_template_list_and_detail_match_backend_shape() -> None:
     )
 
     assert first_page.status_code == 200
-    assert first_page.json() == {
-        "code": 0,
+    # ``first_data`` 是同一不可变目录代际的游标页及权威元数据。
+    first_data = first_page.json()["data"]
+    assert first_data["authority"] == {"authority_id": "local", "kind": "local"}
+    assert first_data["catalog_fingerprint"].startswith("sha256:")
+    catalog_fingerprint = first_data["catalog_fingerprint"]
+    assert {
+        "code": first_page.json()["code"],
         "data": {
             "items": [
                 {
@@ -146,6 +150,13 @@ def test_workflow_template_list_and_detail_match_backend_shape() -> None:
             "has_more": True,
             "next_cursor_uuid": NODE_TEMPLATE_B,
         },
+    } == {
+        "code": 0,
+        "data": {
+            key: value
+            for key, value in first_data.items()
+            if key not in {"authority", "catalog_fingerprint"}
+        },
     }
 
     second_page = client.get(
@@ -159,6 +170,8 @@ def test_workflow_template_list_and_detail_match_backend_shape() -> None:
     detail = client.get(f"/api/v1/workflow-node-templates/{NODE_TEMPLATE_A}")
     assert detail.status_code == 200
     assert detail.json()["code"] == 0
+    assert detail.json()["data"]["authority"] == first_data["authority"]
+    assert detail.json()["data"]["catalog_fingerprint"] == catalog_fingerprint
     assert detail.json()["data"]["template"]["uuid"] == NODE_TEMPLATE_A
     assert detail.json()["data"]["handles"] == [
         {

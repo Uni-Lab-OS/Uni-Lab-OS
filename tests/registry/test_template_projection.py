@@ -18,8 +18,8 @@ from unilabos.workflow.composition import (
 )
 from unilabos.workflow.store import WorkflowStore
 
-
 RESOURCE_TEMPLATE_UUID = "10000000-0000-4000-8000-000000000001"
+ALLOWED_MATERIAL_TEMPLATE_UUID = "10000000-0000-4000-8000-000000000002"
 EXPLICIT_NODE_UUID_A = "20000000-0000-4000-8000-000000000001"
 EXPLICIT_NODE_UUID_B = "20000000-0000-4000-8000-000000000002"
 
@@ -54,7 +54,7 @@ class MissingInventoryStore:
         参数说明：``sql`` 和 ``params`` 仅用于符合库存只读接口；返回值固定为空。
         """
 
-        return None
+        return
 
 
 class FakeRegistry:
@@ -67,6 +67,9 @@ class FakeRegistry:
         include_action: bool = True,
         explicit_uuid: str | None = None,
         material_contract: bool = False,
+        explicit_material_output: bool = False,
+        site_and_array_contract: bool = False,
+        material_symbols: bool = False,
         invalid_typed_contract: bool = False,
     ) -> None:
         """保存动作显示名称。
@@ -76,6 +79,9 @@ class FakeRegistry:
         成员的软删除（Soft Delete）与重新引入生命周期；``explicit_uuid`` 模拟
         上游已经提供的节点模板稳定身份；``material_contract`` 切换为包含默认锁定
         和显式 free（自由传递）物料字段的第 2 版动作合同；
+        ``explicit_material_output`` 为反应板增加同名显式输出；
+        ``site_and_array_contract`` 增加库位（Site）编辑器字段和多物料数组；
+        ``material_symbols`` 声明物料允许的资源模板源码身份；
         ``invalid_typed_contract`` 模拟显式 ``@action`` 编译诊断失败。
         """
 
@@ -83,6 +89,9 @@ class FakeRegistry:
         self.include_action = include_action
         self.explicit_uuid = explicit_uuid
         self.material_contract = material_contract
+        self.explicit_material_output = explicit_material_output
+        self.site_and_array_contract = site_and_array_contract
+        self.material_symbols = material_symbols
         self.invalid_typed_contract = invalid_typed_contract
 
     def obtain_registry_device_info(self) -> list[dict[str, Any]]:
@@ -179,6 +188,75 @@ class FakeRegistry:
                 "plate",
                 "mount_resource",
             ]
+            if self.explicit_material_output:
+                action["result"] = {"plate": "plate", "accepted": "accepted"}
+                action_schema["properties"]["result"]["properties"] = {
+                    "plate": {
+                        "type": "object",
+                        "title": "处理后的反应板",
+                        "properties": {
+                            "uuid": {"type": "string", "format": "uuid"}
+                        },
+                        "required": ["uuid"],
+                        "additionalProperties": False,
+                    },
+                    "accepted": {
+                        "type": "boolean",
+                        "title": "是否接受",
+                    },
+                }
+                action_schema["properties"]["result"]["required"] = [
+                    "plate",
+                    "accepted",
+                ]
+                action_schema["x-unilabos-action-contract"]["output_order"] = [
+                    "plate",
+                    "accepted",
+                ]
+            if self.material_symbols:
+                action_schema["x-unilabos-action-contract"][
+                    "resource_template_symbols"
+                ]["goal"] = {
+                    "plate": [
+                        "lab.resources:plate_96",
+                        "lab.resources:plate_96",
+                    ]
+                }
+        if self.site_and_array_contract:
+            action = action_mappings["transfer"]
+            action["goal"] = {"tips": "tips", "destination": "destination"}
+            action["goal_default"] = {"destination": None}
+            action_schema = action["schema"]
+            action_schema["properties"]["goal"] = {
+                "type": "object",
+                "properties": {
+                    "tips": {
+                        "type": "array",
+                        "title": "吸头集合",
+                        "minItems": 1,
+                        "items": {
+                            "type": "object",
+                            "x-unilabos-material-lock": True,
+                            "properties": {
+                                "uuid": {"type": "string", "format": "uuid"}
+                            },
+                            "required": ["uuid"],
+                            "additionalProperties": False,
+                        },
+                    },
+                    "destination": {
+                        "type": ["string", "null"],
+                        "default": None,
+                        "x-unilabos-editor-control": "site_selector",
+                    },
+                },
+                "required": ["tips"],
+                "additionalProperties": False,
+            }
+            action_schema["x-unilabos-action-contract"]["input_order"] = [
+                "tips",
+                "destination",
+            ]
         if self.invalid_typed_contract:
             action = action_mappings["transfer"]
             action["contract_kind"] = "invalid_typed"
@@ -221,7 +299,10 @@ def _projection(database_path: Path) -> RegistryTemplateProjection:
         workflow_store,
         authority_id="local",
         resource_template_identity_resolver=lambda resource_name: (
-            RESOURCE_TEMPLATE_UUID if resource_name == "pump" else ""
+            {
+                "pump": RESOURCE_TEMPLATE_UUID,
+                "lab.resources:plate_96": ALLOWED_MATERIAL_TEMPLATE_UUID,
+            }.get(resource_name, "")
         ),
     )
 
@@ -332,10 +413,10 @@ def test_projection_allocates_new_generation_after_omission_and_reintroduction(
 def test_projection_keeps_contract_handle_order_and_material_placeholder_metadata(
     tmp_path: Path,
 ) -> None:
-    """强类型动作只生成显式合同句柄，并保留物料占位符语义和字段顺序。
+    """强类型动作保留物料占位符语义、必填性和显式数据连接点顺序。
 
     参数说明：``tmp_path`` 隔离数据库；测试覆盖默认锁定物料、显式 free 物料、
-    必填性以及不合成 ``ready`` 句柄。
+    必填性；结构控制连接点由独立测试固定，不参与动作参数顺序。
     """
 
     projection = _projection(tmp_path / "workflow_history.db")
@@ -344,13 +425,32 @@ def test_projection_keeps_contract_handle_order_and_material_placeholder_metadat
         "transfer",
     )
 
-    assert [handle["handle_key"] for handle in action.handles] == [
-        "plate",
-        "mount_resource",
-        "accepted",
+    # ``data_handles`` 排除 Backend 规范的 ready 控制连接点，只验证动作数据合同。
+    data_handles = [
+        handle for handle in action.handles if handle["handle_key"] != "ready"
     ]
-    assert all(handle["handle_key"] != "ready" for handle in action.handles)
-    plate_handle, free_handle, result_handle = action.handles
+    # ``handles_by_key`` 以方向和字段名表达稳定业务身份，不依赖数据库 UUID 顺序。
+    handles_by_key = {
+        (handle["io_type"], handle["handle_key"]): handle
+        for handle in data_handles
+    }
+    assert set(handles_by_key) == {
+        ("target", "plate"),
+        ("target", "mount_resource"),
+        ("source", "accepted"),
+        ("source", "plate"),
+        ("source", "mount_resource"),
+    }
+    plate_handle = handles_by_key[("target", "plate")]
+    free_handle = handles_by_key[("target", "mount_resource")]
+    result_handle = handles_by_key[("source", "accepted")]
+    # ``stored_contract`` 保留完整第 2 版动作合同，供前端从 Backend 形状详情恢复
+    # 物料占位符（ResourceSlot）与编辑器元数据；节点 ``schema`` 仍只承载 goal。
+    stored_contract = action.template["meta_data"]["unilab"][
+        "action_contract_schema"
+    ]
+    assert stored_contract["x-unilabos-action-contract"]["version"] == 2
+    assert "goal" not in action.template["schema"].get("properties", {})
     assert plate_handle["type"] == "ResourceSlot"
     assert plate_handle["required"] is True
     assert plate_handle["meta_data"]["unilab"]["value_schema"][
@@ -362,6 +462,145 @@ def test_projection_keeps_contract_handle_order_and_material_placeholder_metadat
         "x-unilabos-material-lock"
     ] is False
     assert result_handle["type"] == "boolean"
+    assert result_handle["data_source"] == "executor"
+    # ``passthrough_handles`` 是服务端管理的同名隐式物料输出。
+    passthrough_handles = [
+        handles_by_key[("source", key)] for key in ("plate", "mount_resource")
+    ]
+    assert all(
+        handle["meta_data"]["unilab"]["implicit_passthrough"] is True
+        for handle in passthrough_handles
+    )
+    assert all(
+        "x-unilabos-material-lock"
+        not in handle["meta_data"]["unilab"]["value_schema"]
+        for handle in passthrough_handles
+    )
+    projection.close()
+
+
+def test_projection_does_not_duplicate_explicit_material_output(
+    tmp_path: Path,
+) -> None:
+    """同名显式物料输出必须压制隐式物料输出，保持唯一 source 业务身份。
+
+    参数说明：``tmp_path`` 隔离数据库；显式 ``source:plate`` 保留结果字段模式，
+    并标记为非隐式传递。
+    """
+
+    projection = _projection(tmp_path / "workflow_history.db")
+    action = projection.refresh(
+        FakeRegistry(material_contract=True, explicit_material_output=True)
+    ).require_action("lab.devices:Pump", "transfer")
+
+    # ``plate_outputs`` 收集所有同名输出，用于证明没有重复业务身份。
+    plate_outputs = [
+        handle
+        for handle in action.handles
+        if handle["io_type"] == "source" and handle["handle_key"] == "plate"
+    ]
+    assert len(plate_outputs) == 1
+    assert plate_outputs[0]["type"] == "ResourceSlot"
+    assert plate_outputs[0]["meta_data"]["unilab"]["implicit_passthrough"] is False
+    projection.close()
+
+
+def test_projection_projects_site_selector_and_material_array_metadata(
+    tmp_path: Path,
+) -> None:
+    """库位编辑器提示与多物料数组必须保持各自独立的连接点语义。
+
+    参数说明：``tmp_path`` 隔离数据库；数组保留 ``type=array`` 与完整成员模式，
+    同时使用 material_port；库位（Site）字段保留 ``site_selector``。
+    """
+
+    projection = _projection(tmp_path / "workflow_history.db")
+    action = projection.refresh(
+        FakeRegistry(site_and_array_contract=True)
+    ).require_action("lab.devices:Pump", "transfer")
+
+    # ``targets`` 是动作输入连接点映射，不包含 ready 控制连接点。
+    targets = {
+        handle["handle_key"]: handle
+        for handle in action.handles
+        if handle["io_type"] == "target" and handle["handle_key"] != "ready"
+    }
+    assert targets["tips"]["type"] == "array"
+    assert targets["tips"]["meta_data"]["unilab"]["editor_control"] == (
+        "material_port"
+    )
+    assert targets["destination"]["type"] == "string"
+    assert targets["destination"]["meta_data"]["unilab"][
+        "editor_control"
+    ] == "site_selector"
+    projection.close()
+
+
+def test_projection_resolves_and_deduplicates_allowed_material_templates(
+    tmp_path: Path,
+) -> None:
+    """资源模板源码身份必须解析成本地 UUID，并按声明顺序去重。
+
+    参数说明：``tmp_path`` 隔离数据库；允许集属于物料占位符兼容性约束，不是
+    库位（Site）字段，也不能把源码符号直接暴露给前端。
+    """
+
+    projection = _projection(tmp_path / "workflow_history.db")
+    action = projection.refresh(
+        FakeRegistry(material_contract=True, material_symbols=True)
+    ).require_action("lab.devices:Pump", "transfer")
+
+    plate_handle = next(
+        handle
+        for handle in action.handles
+        if handle["io_type"] == "target" and handle["handle_key"] == "plate"
+    )
+    assert plate_handle["meta_data"]["unilab"][
+        "allowed_resource_template_uuids"
+    ] == (ALLOWED_MATERIAL_TEMPLATE_UUID,)
+    projection.close()
+
+
+def test_projection_follows_backend_ilab_and_ready_control_handles(
+    tmp_path: Path,
+) -> None:
+    """OS 动作模板必须跟随 Backend 的 ILab 节点类型和 ready 控制连接点。
+
+    参数说明：``tmp_path`` 隔离数据库；测试要求每个动作恰好生成一个输入侧
+    ``target:ready`` 和一个输出侧 ``source:ready``。两者只表达控制依赖，不得
+    携带动作参数的数据键或物料占位符（ResourceSlot）语义。
+    """
+
+    projection = _projection(tmp_path / "workflow_history.db")
+    action = projection.refresh(FakeRegistry()).require_action(
+        "lab.devices:Pump",
+        "transfer",
+    )
+
+    # ``ready_handles`` 是 Backend 规范中的结构控制连接点，不是动作数据连接点。
+    ready_handles = [
+        handle for handle in action.handles if handle["handle_key"] == "ready"
+    ]
+    assert action.template["node_type"] == "ILab"
+    assert {
+        (handle["io_type"], handle["handle_key"]): {
+            "type": handle["type"],
+            "required": handle["required"],
+            "data_key": handle["data_key"],
+        }
+        for handle in ready_handles
+    } == {
+        ("target", "ready"): {
+            "type": "default",
+            "required": False,
+            "data_key": None,
+        },
+        ("source", "ready"): {
+            "type": "default",
+            "required": False,
+            "data_key": None,
+        },
+    }
     projection.close()
 
 
