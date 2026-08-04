@@ -116,6 +116,9 @@ _NO_EXPECTED_HASH = object()
 _F_SETOWN_EX = getattr(fcntl, "F_SETOWN_EX", 15)
 _F_OWNER_TID = 0
 _LEASE_BREAK_SIGNAL = getattr(signal, "SIGIO", None)
+_DIRECTORY_FD_PATHS_SUPPORTED = os.open in getattr(
+    os, "supports_dir_fd", ()
+) and os.stat in getattr(os, "supports_dir_fd", ())
 _WORKFLOW_READ_FIELDS = {
     "uuid",
     "create_time",
@@ -126,6 +129,12 @@ _WORKFLOW_READ_FIELDS = {
     "revision",
     "description",
 }
+
+
+def _supports_directory_fd_paths() -> bool:
+    return _DIRECTORY_FD_PATHS_SUPPORTED
+
+
 _NODE_TEMPLATE_READ_FIELDS = {
     "uuid",
     "create_time",
@@ -1513,12 +1522,92 @@ class WorkflowService:
         except StoreNotFound:
             raise WorkflowError("workflow_not_found") from None
 
+    @staticmethod
+    def _read_source_by_path(
+        root: Path,
+        target: Path,
+    ) -> Optional[Dict[str, Any]]:
+        """在不支持相对目录 FD 的平台读取一个 Draft。"""
+
+        try:
+            root_before = root.lstat()
+        except (OSError, TypeError, ValueError):
+            raise WorkflowError("invalid_input") from None
+        if not stat.S_ISDIR(
+            root_before.st_mode
+        ) or WorkflowService._path_contains_symlink(root):
+            raise WorkflowError("invalid_input")
+        try:
+            parent_before = target.parent.lstat()
+            target_before = target.lstat()
+        except FileNotFoundError:
+            return None
+        except (OSError, TypeError, ValueError):
+            raise WorkflowError("invalid_input") from None
+        if (
+            not stat.S_ISDIR(parent_before.st_mode)
+            or WorkflowService._path_contains_symlink(target.parent)
+            or target.is_symlink()
+            or not stat.S_ISREG(target_before.st_mode)
+        ):
+            raise WorkflowError("invalid_input")
+        descriptor = -1
+        try:
+            descriptor = os.open(
+                target,
+                os.O_RDONLY
+                | getattr(os, "O_CLOEXEC", 0)
+                | getattr(os, "O_NOFOLLOW", 0),
+            )
+            opened = os.fstat(descriptor)
+            if not stat.S_ISREG(opened.st_mode) or (opened.st_dev, opened.st_ino) != (
+                target_before.st_dev,
+                target_before.st_ino,
+            ):
+                raise WorkflowError("invalid_input")
+            raw = WorkflowService._read_regular_fd(
+                descriptor,
+                byte_limit=AUTHORING_SOURCE_BYTE_LIMIT,
+            )
+            root_after = root.lstat()
+            parent_after = target.parent.lstat()
+            target_after = target.lstat()
+            if (
+                WorkflowService._path_contains_symlink(target.parent)
+                or target.is_symlink()
+                or (root_after.st_dev, root_after.st_ino)
+                != (root_before.st_dev, root_before.st_ino)
+                or (parent_after.st_dev, parent_after.st_ino)
+                != (parent_before.st_dev, parent_before.st_ino)
+                or (target_after.st_dev, target_after.st_ino)
+                != (opened.st_dev, opened.st_ino)
+            ):
+                raise WorkflowError("invalid_input")
+        except WorkflowError:
+            raise
+        except (OSError, OverflowError, TypeError, ValueError):
+            raise WorkflowError("invalid_input") from None
+        finally:
+            if descriptor >= 0:
+                os.close(descriptor)
+        try:
+            source = raw.decode("utf-8")
+        except UnicodeError:
+            raise WorkflowError("invalid_input") from None
+        return {
+            "python_source": source,
+            "draft_hash": _sha256(raw),
+            "update_time": _mtime_rfc3339(opened.st_mtime),
+        }
+
     def _read_source(
         self,
         registration: Dict[str, Any],
     ) -> Optional[Dict[str, Any]]:
         root, target = self._source_path(registration)
         self._assert_contained_regular_target(root, target, allow_missing=True)
+        if not _supports_directory_fd_paths():
+            return self._read_source_by_path(root, target)
         with self._source_parent_fd(
             registration,
             create=False,
@@ -1568,6 +1657,62 @@ class WorkflowService:
 
         root, target = self._source_path(registration)
         self._assert_contained_regular_target(root, target, allow_missing=True)
+        if not _supports_directory_fd_paths():
+            try:
+                root_before = root.lstat()
+            except (OSError, TypeError, ValueError):
+                raise WorkflowError("invalid_input") from None
+            if not stat.S_ISDIR(root_before.st_mode) or self._path_contains_symlink(
+                root
+            ):
+                raise WorkflowError("invalid_input")
+            try:
+                parent_before = target.parent.lstat()
+                stat_result = target.lstat()
+            except FileNotFoundError:
+                return ("missing",)
+            except (OSError, TypeError, ValueError):
+                raise WorkflowError("invalid_input") from None
+            if (
+                not stat.S_ISDIR(parent_before.st_mode)
+                or self._path_contains_symlink(target.parent)
+                or target.is_symlink()
+                or not stat.S_ISREG(stat_result.st_mode)
+            ):
+                raise WorkflowError("invalid_input")
+            try:
+                root_after = root.lstat()
+                parent_after = target.parent.lstat()
+                target_after = target.lstat()
+            except (OSError, TypeError, ValueError):
+                raise WorkflowError("invalid_input") from None
+            if (
+                (root_after.st_dev, root_after.st_ino)
+                != (
+                    root_before.st_dev,
+                    root_before.st_ino,
+                )
+                or (parent_after.st_dev, parent_after.st_ino)
+                != (
+                    parent_before.st_dev,
+                    parent_before.st_ino,
+                )
+                or (target_after.st_dev, target_after.st_ino)
+                != (
+                    stat_result.st_dev,
+                    stat_result.st_ino,
+                )
+                or self._path_contains_symlink(target.parent)
+            ):
+                raise WorkflowError("invalid_input")
+            return (
+                "file",
+                stat_result.st_dev,
+                stat_result.st_ino,
+                stat_result.st_size,
+                stat_result.st_mtime_ns,
+                stat_result.st_ctime_ns,
+            )
         with self._source_parent_fd(
             registration,
             create=False,
@@ -1605,6 +1750,10 @@ class WorkflowService:
     ) -> None:
         if len(content) > AUTHORING_SOURCE_BYTE_LIMIT:
             raise WorkflowError("invalid_input")
+        if not _supports_directory_fd_paths() or fcntl is None:
+            # Windows 没有 dir_fd/openat 或 Linux file lease。保留 editable
+            # package 发现、读取和 Apply，但不能削弱 Draft CAS 保证。
+            raise WorkflowConflict("draft_hash_conflict")
         root, target = self._source_path(registration)
         self._assert_contained_regular_target(root, target, allow_missing=True)
         # 先以目录 FD 安全地创建（如有需要）固定的 workflows 目录。

@@ -14,6 +14,7 @@ from typing import Any
 import pytest
 
 from unilabos.workflow import composition
+from unilabos.workflow import service as workflow_service_module
 from unilabos.workflow.models import CandidateCompilation
 from unilabos.workflow.service import WorkflowConflict, WorkflowError, WorkflowService
 from unilabos.workflow.source_monitor import WorkflowSourceMonitor
@@ -21,6 +22,8 @@ from unilabos.workflow.store import WorkflowStore
 
 WORKFLOW_UUID = "11111111-1111-4111-8111-111111111111"
 CATALOG_FINGERPRINT = "sha256:" + ("e" * 64)
+
+
 def _hash(source: str) -> str:
     return f"sha256:{hashlib.sha256(source.encode('utf-8')).hexdigest()}"
 
@@ -450,12 +453,23 @@ def test_monitor_retries_unchanged_source_after_transient_failure_with_backoff(
 
 
 @pytest.mark.parametrize("read_operation", ["aggregate", "signature"])
+@pytest.mark.parametrize(
+    "directory_fd_paths_supported",
+    [True, False],
+    ids=["directory-fd", "windows-path-fallback"],
+)
 def test_source_read_fails_closed_when_parent_becomes_symlink_after_check(
     service: WorkflowService,
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
     read_operation: str,
+    directory_fd_paths_supported: bool,
 ) -> None:
+    monkeypatch.setattr(
+        workflow_service_module,
+        "_DIRECTORY_FD_PATHS_SUPPORTED",
+        directory_fd_paths_supported,
+    )
     package_root = tmp_path / "package"
     package_root.mkdir()
     _create_workflow(service)

@@ -47,6 +47,7 @@ _FILE_FLAGS = (
     | getattr(os, "O_NOFOLLOW", 0)
     | getattr(os, "O_NONBLOCK", 0)
 )
+_DIRECTORY_FD_PATHS_SUPPORTED = os.open in getattr(os, "supports_dir_fd", ())
 _ERROR_MESSAGES = {
     "invalid_package_root": "editable package 根目录无效",
     "invalid_manifest": "package.yaml 声明格式不正确",
@@ -136,6 +137,28 @@ def _contains_symlink(path: Path) -> bool:
     return False
 
 
+def _supports_directory_fd_paths() -> bool:
+    """返回当前平台是否支持相对目录 FD 的路径解析。"""
+
+    return _DIRECTORY_FD_PATHS_SUPPORTED
+
+
+def _directory_identity(path: Path) -> tuple[int, int]:
+    """校验一个绝对目录路径并返回稳定身份。"""
+
+    try:
+        metadata = path.lstat()
+    except (OSError, TypeError, ValueError):
+        raise SourceDeclarationError("invalid_package_root") from None
+    if (
+        not stat.S_ISDIR(metadata.st_mode)
+        or path.is_symlink()
+        or _contains_symlink(path)
+    ):
+        raise SourceDeclarationError("invalid_package_root")
+    return metadata.st_dev, metadata.st_ino
+
+
 def _open_directory_chain(path: Path) -> int:
     absolute = Path(os.path.abspath(path))
     current = -1
@@ -188,6 +211,73 @@ def _read_regular_at(
         raise SourceDeclarationError(error_code) from None
     finally:
         os.close(descriptor)
+
+
+def _read_regular_path(
+    path: Path,
+    *,
+    byte_limit: int,
+    missing_ok: bool,
+    error_code: str,
+) -> bytes | None:
+    """不使用 dir_fd 读取常规文件，并检测路径替换。"""
+
+    parent_identity = _directory_identity(path.parent)
+    descriptor = -1
+    try:
+        before = path.lstat()
+    except FileNotFoundError:
+        if missing_ok:
+            return None
+        raise SourceDeclarationError(error_code) from None
+    except (OSError, TypeError, ValueError):
+        raise SourceDeclarationError(error_code) from None
+    if (
+        path.is_symlink()
+        or not stat.S_ISREG(before.st_mode)
+        or before.st_size > byte_limit
+    ):
+        raise SourceDeclarationError(error_code)
+    try:
+        descriptor = os.open(path, _FILE_FLAGS)
+        opened = os.fstat(descriptor)
+        if (
+            not stat.S_ISREG(opened.st_mode)
+            or (opened.st_dev, opened.st_ino) != (before.st_dev, before.st_ino)
+            or opened.st_size > byte_limit
+        ):
+            raise SourceDeclarationError(error_code)
+        chunks = bytearray()
+        while len(chunks) <= byte_limit:
+            chunk = os.read(
+                descriptor,
+                min(64 * 1024, byte_limit + 1 - len(chunks)),
+            )
+            if not chunk:
+                break
+            chunks.extend(chunk)
+        if len(chunks) > byte_limit:
+            raise SourceDeclarationError(error_code)
+        after = path.lstat()
+        if (
+            path.is_symlink()
+            or not stat.S_ISREG(after.st_mode)
+            or (after.st_dev, after.st_ino) != (opened.st_dev, opened.st_ino)
+            or _directory_identity(path.parent) != parent_identity
+        ):
+            raise SourceDeclarationError(error_code)
+        return bytes(chunks)
+    except SourceDeclarationError:
+        raise
+    except FileNotFoundError:
+        if missing_ok:
+            return None
+        raise SourceDeclarationError(error_code) from None
+    except (OSError, OverflowError, TypeError, ValueError):
+        raise SourceDeclarationError(error_code) from None
+    finally:
+        if descriptor >= 0:
+            os.close(descriptor)
 
 
 def _load_closed_yaml(raw: bytes) -> dict[str, Any]:
@@ -271,6 +361,37 @@ def _source_declaration(
     )
 
 
+def _manifest_declarations(
+    raw: bytes,
+) -> tuple[str, tuple[_WorkflowSourceDeclaration, ...]]:
+    manifest = _load_closed_yaml(raw)
+    if set(manifest) != {"package", "workflows"}:
+        raise SourceDeclarationError("invalid_manifest")
+    package = manifest["package"]
+    workflows = manifest["workflows"]
+    if not isinstance(package, dict) or set(package) != {"name"}:
+        raise SourceDeclarationError("invalid_package")
+    package_id = package["name"]
+    if not isinstance(package_id, str) or _PACKAGE_NAME.fullmatch(package_id) is None:
+        raise SourceDeclarationError("invalid_package")
+    if (
+        not isinstance(workflows, list)
+        or not workflows
+        or len(workflows) > _WORKFLOW_ENTRY_LIMIT
+    ):
+        raise SourceDeclarationError("invalid_manifest")
+    declarations = tuple(
+        _source_declaration(item, package_id=package_id) for item in workflows
+    )
+    workflow_ids = [item.workflow_uuid for item in declarations]
+    relative_paths = [item.relative_path for item in declarations]
+    if len(workflow_ids) != len(set(workflow_ids)) or len(relative_paths) != len(
+        set(relative_paths)
+    ):
+        raise SourceDeclarationError("duplicate_workflow_source")
+    return package_id, declarations
+
+
 def _open_child_directory(parent_fd: int, name: str, *, missing_ok: bool) -> int | None:
     try:
         return os.open(name, _DIRECTORY_FLAGS, dir_fd=parent_fd)
@@ -282,23 +403,68 @@ def _open_child_directory(parent_fd: int, name: str, *, missing_ok: bool) -> int
         raise SourceDeclarationError("invalid_package_root") from None
 
 
+def _load_editable_package_manifest_by_path(
+    selected_root: Path,
+    selected_root_identity: tuple[int, int],
+) -> _EditablePackageManifest:
+    """Windows 兼容读取路径，通过前后身份校验失败关闭。"""
+
+    raw = _read_regular_path(
+        selected_root / "package.yaml",
+        byte_limit=_MANIFEST_BYTE_LIMIT,
+        missing_ok=False,
+        error_code="invalid_manifest",
+    )
+    assert raw is not None
+    package_id, declarations = _manifest_declarations(raw)
+    source_root = selected_root / package_id
+    source_root_identity = _directory_identity(source_root)
+    workflows_root = source_root / "workflows"
+    if workflows_root.exists() or workflows_root.is_symlink():
+        _directory_identity(workflows_root)
+        for declaration in declarations:
+            filename = PurePosixPath(declaration.relative_path).name
+            content = _read_regular_path(
+                workflows_root / filename,
+                byte_limit=AUTHORING_SOURCE_BYTE_LIMIT,
+                missing_ok=True,
+                error_code="invalid_workflow_source",
+            )
+            if content is not None:
+                try:
+                    content.decode("utf-8")
+                except UnicodeError:
+                    raise SourceDeclarationError("invalid_workflow_source") from None
+
+    if _directory_identity(selected_root) != selected_root_identity:
+        raise SourceDeclarationError("invalid_package_root")
+    if _directory_identity(source_root) != source_root_identity:
+        raise SourceDeclarationError("invalid_package_root")
+    return _EditablePackageManifest(
+        package_id=package_id,
+        package_root=source_root,
+        package_root_identity=source_root_identity,
+        workflows=declarations,
+    )
+
+
 def load_editable_package_manifest(
     package_root: str | Path,
 ) -> _EditablePackageManifest:
     """从固定 directory identity 读取并验证一个 editable package。"""
 
     selected_root = Path(os.path.abspath(package_root))
-    try:
-        selected_identity = selected_root.lstat()
-    except (OSError, TypeError, ValueError):
-        raise SourceDeclarationError("invalid_package_root") from None
-    if not stat.S_ISDIR(selected_identity.st_mode) or _contains_symlink(selected_root):
-        raise SourceDeclarationError("invalid_package_root")
+    selected_root_identity = _directory_identity(selected_root)
+    if not _supports_directory_fd_paths():
+        return _load_editable_package_manifest_by_path(
+            selected_root,
+            selected_root_identity,
+        )
 
     root_fd = _open_directory_chain(selected_root)
     try:
         opened_identity = os.fstat(root_fd)
-        if (selected_identity.st_dev, selected_identity.st_ino) != (
+        if selected_root_identity != (
             opened_identity.st_dev,
             opened_identity.st_ino,
         ):
@@ -311,25 +477,7 @@ def load_editable_package_manifest(
             error_code="invalid_manifest",
         )
         assert raw is not None
-        manifest = _load_closed_yaml(raw)
-        if set(manifest) != {"package", "workflows"}:
-            raise SourceDeclarationError("invalid_manifest")
-        package = manifest["package"]
-        workflows = manifest["workflows"]
-        if not isinstance(package, dict) or set(package) != {"name"}:
-            raise SourceDeclarationError("invalid_package")
-        package_id = package["name"]
-        if (
-            not isinstance(package_id, str)
-            or _PACKAGE_NAME.fullmatch(package_id) is None
-        ):
-            raise SourceDeclarationError("invalid_package")
-        if (
-            not isinstance(workflows, list)
-            or not workflows
-            or len(workflows) > _WORKFLOW_ENTRY_LIMIT
-        ):
-            raise SourceDeclarationError("invalid_manifest")
+        package_id, declarations = _manifest_declarations(raw)
 
         source_root_fd = _open_child_directory(root_fd, package_id, missing_ok=False)
         assert source_root_fd is not None
@@ -339,16 +487,6 @@ def load_editable_package_manifest(
                 source_root_metadata.st_dev,
                 source_root_metadata.st_ino,
             )
-            declarations = tuple(
-                _source_declaration(item, package_id=package_id) for item in workflows
-            )
-            workflow_ids = [item.workflow_uuid for item in declarations]
-            relative_paths = [item.relative_path for item in declarations]
-            if len(workflow_ids) != len(set(workflow_ids)) or len(
-                relative_paths
-            ) != len(set(relative_paths)):
-                raise SourceDeclarationError("duplicate_workflow_source")
-
             workflows_fd = _open_child_directory(
                 source_root_fd,
                 "workflows",
@@ -417,29 +555,45 @@ def _registration_rows(
 @contextmanager
 def _pinned_package_roots(
     manifests: tuple[_EditablePackageManifest, ...],
-) -> Iterator[tuple[tuple[_EditablePackageManifest, int], ...]]:
+) -> Iterator[tuple[tuple[_EditablePackageManifest, int | None], ...]]:
     """把 loader 验证过的 package directory identity 固定到注册结束。"""
 
-    pinned: list[tuple[_EditablePackageManifest, int]] = []
+    pinned: list[tuple[_EditablePackageManifest, int | None]] = []
     try:
         for manifest in manifests:
-            descriptor = _open_directory_chain(manifest.package_root)
+            descriptor = (
+                _open_directory_chain(manifest.package_root)
+                if _supports_directory_fd_paths()
+                else None
+            )
             pinned.append((manifest, descriptor))
-            metadata = os.fstat(descriptor)
-            if (metadata.st_dev, metadata.st_ino) != manifest.package_root_identity:
+            if descriptor is not None:
+                metadata = os.fstat(descriptor)
+                identity = metadata.st_dev, metadata.st_ino
+            else:
+                identity = _directory_identity(manifest.package_root)
+            if identity != manifest.package_root_identity:
                 raise SourceDeclarationError("invalid_package_root")
         yield tuple(pinned)
     finally:
         for _manifest, descriptor in pinned:
-            os.close(descriptor)
+            if descriptor is not None:
+                os.close(descriptor)
 
 
 def _assert_pinned_package_roots(
-    pinned: tuple[tuple[_EditablePackageManifest, int], ...],
+    pinned: tuple[tuple[_EditablePackageManifest, int | None], ...],
 ) -> None:
     """在 registration transaction 提交前再次证明路径仍指向同一目录。"""
 
     for manifest, descriptor in pinned:
+        if descriptor is None:
+            if (
+                _directory_identity(manifest.package_root)
+                != manifest.package_root_identity
+            ):
+                raise SourceDeclarationError("invalid_package_root")
+            continue
         current_descriptor = _open_directory_chain(manifest.package_root)
         try:
             expected = os.fstat(descriptor)

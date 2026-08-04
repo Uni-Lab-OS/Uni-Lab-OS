@@ -11,8 +11,9 @@ from typing import Any
 import pytest
 
 from unilabos.workflow import composition
+from unilabos.workflow import service as workflow_service_module
 from unilabos.workflow.models import CandidateCompilation
-from unilabos.workflow.service import WorkflowError, WorkflowService
+from unilabos.workflow.service import WorkflowConflict, WorkflowError, WorkflowService
 from unilabos.workflow.store import WorkflowStore
 
 WORKFLOW_A_UUID = "11111111-1111-4111-8111-111111111111"
@@ -41,6 +42,15 @@ class RecordingService:
     def register_editable_source(self, **kwargs: Any) -> dict[str, Any]:
         self.calls.append(kwargs)
         return {"registered": kwargs["workflow_uuid"]}
+
+
+class WindowsMsvcrt:
+    LK_NBLCK = 1
+    LK_UNLCK = 2
+
+    @staticmethod
+    def locking(_descriptor: int, _mode: int, _size: int) -> None:
+        return None
 
 
 class SourceOnlyCompiler:
@@ -186,6 +196,121 @@ def test_closed_manifest_registers_exact_public_service_arguments(
             "relative_path": "workflows/second.py",
         },
     ]
+
+
+def test_windows_without_dir_fd_registers_reads_and_applies_materialized_source(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    working_dir = tmp_path / "unilabos_data"
+    package_root = tmp_path / "editable"
+    _write_package(package_root)
+    _seed_workflows(working_dir, WORKFLOW_A_UUID)
+    original_open = os.open
+    dir_fd_attempts: list[str] = []
+
+    def windows_open(
+        path: str | bytes | os.PathLike[str] | os.PathLike[bytes],
+        flags: int,
+        mode: int = 0o777,
+        *,
+        dir_fd: int | None = None,
+    ) -> int:
+        if dir_fd is not None:
+            dir_fd_attempts.append(os.fsdecode(path))
+            raise NotImplementedError("dir_fd is unavailable on Windows")
+        return original_open(path, flags, mode)
+
+    monkeypatch.setattr(
+        _discovery(),
+        "_DIRECTORY_FD_PATHS_SUPPORTED",
+        False,
+    )
+    monkeypatch.setattr(
+        workflow_service_module,
+        "_DIRECTORY_FD_PATHS_SUPPORTED",
+        False,
+    )
+    monkeypatch.setattr(workflow_service_module, "fcntl", None)
+    monkeypatch.setattr(workflow_service_module, "_LEASE_BREAK_SIGNAL", None)
+    monkeypatch.setattr(composition, "fcntl", None)
+    monkeypatch.setattr(composition, "msvcrt", WindowsMsvcrt())
+    monkeypatch.setattr(os, "open", windows_open)
+
+    service = composition.compose_workflow_runtime(
+        working_dir,
+        compiler=SourceOnlyCompiler(),
+        editable_package_roots=(package_root,),
+    )
+    authoring = service.get_authoring(WORKFLOW_A_UUID)
+    assert authoring["draft"]["python_source"] == "result = build()\n"
+    assert authoring["candidate"] is not None
+
+    applied = service.apply_authoring(
+        WORKFLOW_A_UUID,
+        candidate_hash=authoring["candidate"]["candidate_hash"],
+    )
+
+    assert applied["authoring"]["state"] == "applied"
+    assert dir_fd_attempts == []
+
+
+def test_windows_without_dir_fd_rejects_draft_write_without_modifying_source(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    working_dir = tmp_path / "unilabos_data"
+    package_root = tmp_path / "editable"
+    _write_package(package_root)
+    _seed_workflows(working_dir, WORKFLOW_A_UUID)
+    original_open = os.open
+
+    def windows_open(
+        path: str | bytes | os.PathLike[str] | os.PathLike[bytes],
+        flags: int,
+        mode: int = 0o777,
+        *,
+        dir_fd: int | None = None,
+    ) -> int:
+        if dir_fd is not None:
+            raise NotImplementedError("dir_fd is unavailable on Windows")
+        return original_open(path, flags, mode)
+
+    monkeypatch.setattr(
+        _discovery(),
+        "_DIRECTORY_FD_PATHS_SUPPORTED",
+        False,
+    )
+    monkeypatch.setattr(
+        workflow_service_module,
+        "_DIRECTORY_FD_PATHS_SUPPORTED",
+        False,
+    )
+    monkeypatch.setattr(workflow_service_module, "fcntl", None)
+    monkeypatch.setattr(workflow_service_module, "_LEASE_BREAK_SIGNAL", None)
+    monkeypatch.setattr(composition, "fcntl", None)
+    monkeypatch.setattr(composition, "msvcrt", WindowsMsvcrt())
+    monkeypatch.setattr(os, "open", windows_open)
+
+    service = composition.compose_workflow_runtime(
+        working_dir,
+        compiler=SourceOnlyCompiler(),
+        editable_package_roots=(package_root,),
+    )
+    authoring = service.get_authoring(WORKFLOW_A_UUID)
+    source_path = package_root / PACKAGE_A / "workflows" / "demo.py"
+    original_bytes = source_path.read_bytes()
+
+    with pytest.raises(WorkflowConflict) as captured:
+        service.save_draft(
+            WORKFLOW_A_UUID,
+            python_source="result = changed()\n",
+            expected_draft_hash=authoring["draft"]["draft_hash"],
+            expected_workflow_revision=authoring["workflow_revision"],
+        )
+
+    assert captured.value.code == "draft_hash_conflict"
+    assert source_path.read_bytes() == original_bytes
 
 
 @pytest.mark.parametrize(
@@ -422,10 +547,21 @@ def test_all_manifest_validation_precedes_first_registration(tmp_path: Path) -> 
     assert service.calls == []
 
 
+@pytest.mark.parametrize(
+    "directory_fd_paths_supported",
+    [True, False],
+    ids=["directory-fd", "windows-path-fallback"],
+)
 def test_registration_rechecks_containment_if_parent_is_swapped_after_discovery(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
+    directory_fd_paths_supported: bool,
 ) -> None:
+    monkeypatch.setattr(
+        _discovery(),
+        "_DIRECTORY_FD_PATHS_SUPPORTED",
+        directory_fd_paths_supported,
+    )
     root = tmp_path / "editable"
     _write_package(root)
     source_root = root / PACKAGE_A
