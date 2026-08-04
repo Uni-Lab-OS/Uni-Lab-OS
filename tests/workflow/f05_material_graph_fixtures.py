@@ -2,12 +2,21 @@
 
 from __future__ import annotations
 
+from collections.abc import Iterator
+from contextlib import contextmanager
 from copy import deepcopy
+from dataclasses import dataclass
+from pathlib import Path
 from typing import Any
 
 from unilabos.workflow.authoring_engine import WorkflowAuthoringEngine
 from unilabos.workflow.authoring_identity import authoring_edge_uuid
 from unilabos.workflow.authoring_kernel import AuthoringCatalogSnapshot
+from unilabos.workflow.service import WorkflowService
+from unilabos.workflow.store import WorkflowStore
+from unilabos.workflow.template_projection_store import (
+    RegistryTemplateProjectionStore,
+)
 
 from .test_authoring_engine import (
     PREPARE_SAMPLE_TARGET,
@@ -32,17 +41,63 @@ PASSTHROUGH_NODE_UUID = "20000000-0000-4000-8000-000000000013"
 PASSTHROUGH_TEMPLATE_UUID = "30000000-0000-4000-8000-000000000013"
 PASSTHROUGH_TARGET_UUID = "40000000-0000-4000-8000-000000000013"
 PASSTHROUGH_SOURCE_UUID = "40000000-0000-4000-8000-000000000014"
+INCOMPATIBLE_TEMPLATE_UUID = "32000000-0000-4000-8000-000000000099"
+
+
+@dataclass(frozen=True, slots=True)
+class MaterialGraphStoreContext:
+    """直接保存物料图（Material Graph）测试的持久化上下文。"""
+
+    service: WorkflowService
+    applied_graph: dict[str, Any]
 
 
 def material_graph_engine(
     *,
     include_passthrough: bool = False,
+    prepare_allowlist: tuple[str, ...] | None = None,
+    passthrough_input_allowlist: tuple[str, ...] | None = None,
+    passthrough_output_allowlist: tuple[str, ...] | None = None,
+    passthrough_implicit: bool = True,
 ) -> WorkflowAuthoringEngine:
     """构造 F05.2 所需的纯工作流创作编译器（Authoring Compiler）。
 
     参数说明：``include_passthrough`` 决定是否加入带同名输入/输出的普通动作
-    （Action）；函数中的模板与连接点（Handle）局部变量组成不可变目录快照。
+    （Action）；三个 ``allowlist`` 参数分别限制最终消费者、透传输入与透传输出
+    的资源模板（ResourceTemplate）；``passthrough_implicit`` 标记服务端生成的
+    同名输出。函数中的模板与连接点（Handle）局部变量组成不可变目录快照。
     返回：不访问数据库或库存（Inventory）的编译器。
+    """
+
+    templates, handles = material_graph_catalog_entities(
+        include_passthrough=include_passthrough,
+        prepare_allowlist=prepare_allowlist,
+        passthrough_input_allowlist=passthrough_input_allowlist,
+        passthrough_output_allowlist=passthrough_output_allowlist,
+        passthrough_implicit=passthrough_implicit,
+    )
+    return WorkflowAuthoringEngine(
+        catalog=AuthoringCatalogSnapshot.from_entities(
+            templates,
+            handles,
+            resource_template_symbols={PLATE_SOURCE_SYMBOL: PLATE_TEMPLATE_UUID},
+        )
+    )
+
+
+def material_graph_catalog_entities(
+    *,
+    include_passthrough: bool = False,
+    prepare_allowlist: tuple[str, ...] | None = None,
+    passthrough_input_allowlist: tuple[str, ...] | None = None,
+    passthrough_output_allowlist: tuple[str, ...] | None = None,
+    passthrough_implicit: bool = True,
+) -> tuple[list[dict[str, Any]], list[dict[str, Any]]]:
+    """构造物料图测试使用的目录实体。
+
+    参数说明：布尔参数决定是否加入透传动作；三个允许集合分别投影到最终消费
+    输入、透传输入和透传输出；``passthrough_implicit`` 决定输出保证是否应从
+    同名输入继承。返回：节点模板与连接点（Handle）模板列表。
     """
 
     source_template, source_handle = _material_source_template()
@@ -60,6 +115,7 @@ def material_graph_engine(
             )
         ],
     )
+    _set_resource_template_allowlist(prepare_handles[0], prepare_allowlist)
     templates = [source_template, prepare_template]
     handles = [source_handle, *prepare_handles]
     if include_passthrough:
@@ -84,16 +140,69 @@ def material_graph_engine(
                 ),
             ],
         )
-        passthrough_handles[1]["meta_data"]["unilab"]["implicit_passthrough"] = True
+        _set_resource_template_allowlist(
+            passthrough_handles[0],
+            passthrough_input_allowlist,
+        )
+        _set_resource_template_allowlist(
+            passthrough_handles[1],
+            passthrough_output_allowlist,
+        )
+        passthrough_handles[1]["meta_data"]["unilab"]["implicit_passthrough"] = (
+            passthrough_implicit
+        )
         templates.append(passthrough_template)
         handles.extend(passthrough_handles)
-    return WorkflowAuthoringEngine(
+    return templates, handles
+
+
+@contextmanager
+def opened_material_graph_store(
+    database_path: Path,
+    *,
+    prepare_allowlist: tuple[str, ...] | None,
+) -> Iterator[MaterialGraphStoreContext]:
+    """打开带指定消费模板约束的真实工作流写模型。
+
+    参数说明：``database_path`` 是隔离 SQLite 文件；``prepare_allowlist`` 是
+    消费动作接受的资源模板 UUID 集合。局部 ``projection_store`` 把同一目录
+    投影进数据库。返回：服务和保存前权威图；退出时关闭服务。
+    """
+
+    templates, handles = material_graph_catalog_entities(
+        prepare_allowlist=prepare_allowlist,
+    )
+    store = WorkflowStore(database_path)
+    projection_store = RegistryTemplateProjectionStore(store)
+    projected_templates, projected_handles = projection_store.replace(
+        authority_id="f05-material-graph",
+        node_templates=templates,
+        handle_templates=[
+            _projection_handle(handle, templates=templates) for handle in handles
+        ],
+    )
+    engine = WorkflowAuthoringEngine(
         catalog=AuthoringCatalogSnapshot.from_entities(
-            templates,
-            handles,
+            projected_templates,
+            projected_handles,
             resource_template_symbols={PLATE_SOURCE_SYMBOL: PLATE_TEMPLATE_UUID},
         )
     )
+    service = WorkflowService(store, compiler=engine)
+    service.create_workflow(
+        workflow_uuid=WORKFLOW_UUID,
+        name="Material template compatibility",
+        tags=[],
+        description=None,
+        meta_data={},
+    )
+    try:
+        yield MaterialGraphStoreContext(
+            service=service,
+            applied_graph=service.get_graph(WORKFLOW_UUID),
+        )
+    finally:
+        service.close()
 
 
 def compile_material_source_graph(
@@ -185,3 +294,61 @@ def fan_out_candidate(candidate: dict[str, Any]) -> dict[str, Any]:
     graph["edges"].append(duplicate_edge)
     graph["edges"].sort(key=lambda edge: edge["uuid"])
     return graph
+
+
+def candidate_with_prepare_allowlist(
+    candidate: dict[str, Any],
+    allowlist: tuple[str, ...],
+) -> dict[str, Any]:
+    """替换候选图最终消费者的资源模板允许集合。
+
+    参数说明：``candidate`` 是合法完整图，``allowlist`` 是新的非空允许集合；
+    局部 ``target`` 是最终消费连接点（Handle）。返回：不修改输入的候选图。
+    """
+
+    graph = deepcopy(candidate)
+    target = next(
+        handle
+        for handle in graph["handle_templates"]
+        if handle["uuid"] == PREPARE_SAMPLE_TARGET
+    )
+    _set_resource_template_allowlist(target, allowlist)
+    return graph
+
+
+def _set_resource_template_allowlist(
+    handle: dict[str, Any],
+    allowlist: tuple[str, ...] | None,
+) -> None:
+    """在连接点（Handle）元数据中设置可选资源模板允许集合。
+
+    参数说明：``handle`` 是可变测试目录实体；``allowlist`` 为 ``None`` 时删除
+    旁路字段，非空时写入独立列表。返回：无；只修改传入测试对象。
+    """
+
+    unilab = handle["meta_data"]["unilab"]
+    if allowlist is None:
+        unilab.pop("allowed_resource_template_uuids", None)
+    else:
+        unilab["allowed_resource_template_uuids"] = list(allowlist)
+
+
+def _projection_handle(
+    handle: dict[str, Any],
+    *,
+    templates: list[dict[str, Any]],
+) -> dict[str, Any]:
+    """把测试连接点转换为模板投影存储接受的业务键形状。
+
+    参数说明：``handle`` 是完整连接点，``templates`` 用于解析父节点模板业务
+    键。局部 ``parent`` 是唯一父模板。返回：保留显式连接点 UUID 的新字典。
+    """
+
+    candidate = deepcopy(handle)
+    parent_uuid = candidate.pop("workflow_node_template_uuid")
+    parent = next(template for template in templates if template["uuid"] == parent_uuid)
+    candidate["node_business_key"] = (
+        parent["resource_template_uuid"],
+        parent["name"],
+    )
+    return candidate
