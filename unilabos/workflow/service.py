@@ -23,6 +23,11 @@ try:
 except ModuleNotFoundError:  # pragma: no cover - exercised by Windows CI
     fcntl = None  # type: ignore[assignment]
 
+try:
+    import msvcrt
+except ModuleNotFoundError:  # pragma: no cover - exercised by POSIX CI
+    msvcrt = None  # type: ignore[assignment]
+
 from pydantic import ValidationError
 
 from unilabos.app.scheduler.inventory import (
@@ -62,6 +67,12 @@ from unilabos.workflow.task_input import (
     TaskInputError,
     UnconfiguredResourceSlotResolver,
     preflight_task_input,
+)
+from unilabos.workflow.windows_draft_cas import (
+    WindowsDraftCasConflict,
+    WindowsDraftCasInternalError,
+    WindowsDraftCasInvalidTarget,
+    write_windows_draft_cas,
 )
 
 _LOGGER = logging.getLogger(__name__)
@@ -1751,9 +1762,26 @@ class WorkflowService:
         if len(content) > AUTHORING_SOURCE_BYTE_LIMIT:
             raise WorkflowError("invalid_input")
         if not _supports_directory_fd_paths() or fcntl is None:
-            # Windows 没有 dir_fd/openat 或 Linux file lease。保留 editable
-            # package 发现、读取和 Apply，但不能削弱 Draft CAS 保证。
-            raise WorkflowConflict("draft_hash_conflict")
+            if msvcrt is None or expected_hash is _NO_EXPECTED_HASH:
+                raise WorkflowConflict("draft_hash_conflict")
+            root, target = self._source_path(registration)
+            self._assert_contained_regular_target(root, target, allow_missing=True)
+            try:
+                write_windows_draft_cas(
+                    root=root,
+                    target=target,
+                    content=content,
+                    expected_hash=expected_hash,
+                    byte_limit=AUTHORING_SOURCE_BYTE_LIMIT,
+                    locking=msvcrt,
+                )
+            except WindowsDraftCasConflict:
+                raise WorkflowConflict("draft_hash_conflict") from None
+            except WindowsDraftCasInvalidTarget:
+                raise WorkflowError("invalid_input") from None
+            except WindowsDraftCasInternalError:
+                raise WorkflowError("internal_error") from None
+            return
         root, target = self._source_path(registration)
         self._assert_contained_regular_target(root, target, allow_missing=True)
         # 先以目录 FD 安全地创建（如有需要）固定的 workflows 目录。

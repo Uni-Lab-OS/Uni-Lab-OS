@@ -12,6 +12,7 @@ from typing import Any
 import pytest
 
 from unilabos.workflow import service as workflow_service_module
+from unilabos.workflow import windows_draft_cas
 from unilabos.workflow.models import CandidateCompilation, WorkflowNodeWrite
 from unilabos.workflow.service import WorkflowConflict, WorkflowService
 from unilabos.workflow.store import WorkflowStore
@@ -313,6 +314,55 @@ def test_windows_save_draft_rejects_external_change_during_cas_window(
     assert service.get_authoring(WORKFLOW_UUID)["draft"]["python_source"] == (
         EXTERNAL_SOURCE.decode("utf-8")
     )
+    assert windows_authoring.dir_fd_attempts == []
+
+
+def test_windows_replace_backup_restores_external_gap_winner(
+    windows_authoring: WindowsAuthoringHarness,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """解锁后的外部改写必须由替换 backup 识别并恢复到 canonical。
+
+    `windows_authoring` 提供真实服务，`monkeypatch` 把外部写入放在最终 hash
+    复核与替换之间；测试没有返回值，并验证该竞争者赢得 Draft CAS。
+    """
+
+    service = windows_authoring.service
+    source_path = windows_authoring.source_path
+    before = service.get_authoring(WORKFLOW_UUID)
+    original_replace = windows_draft_cas._replace_with_backup
+    injected = False
+
+    def replace_after_external_change(
+        target: Path,
+        replacement: Path,
+        backup: Path,
+    ) -> None:
+        """在替换瞬间前写入外部 Draft，再调用原替换原语生成 CAS backup。"""
+
+        nonlocal injected
+        if not injected:
+            injected = True
+            source_path.write_bytes(EXTERNAL_SOURCE)
+        original_replace(target, replacement, backup)
+
+    monkeypatch.setattr(
+        windows_draft_cas,
+        "_replace_with_backup",
+        replace_after_external_change,
+    )
+
+    with pytest.raises(WorkflowConflict) as captured:
+        service.save_draft(
+            WORKFLOW_UUID,
+            python_source="build()",
+            expected_draft_hash=before["draft"]["draft_hash"],
+            expected_workflow_revision=before["workflow_revision"],
+        )
+
+    assert captured.value.code == "draft_hash_conflict"
+    assert source_path.read_bytes() == EXTERNAL_SOURCE
+    assert [path.name for path in source_path.parent.iterdir()] == [source_path.name]
     assert windows_authoring.dir_fd_attempts == []
 
 
