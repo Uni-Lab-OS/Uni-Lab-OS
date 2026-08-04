@@ -4,12 +4,16 @@ from __future__ import annotations
 
 import hashlib
 import os
+import subprocess
 import sys
+from collections.abc import Iterator, Sequence
+from contextlib import contextmanager
 from pathlib import Path
 
 import pytest
 
-from unilabos.workflow import source_publication
+from unilabos.workflow import source_publication, source_workspace
+from unilabos.workflow.source_workspace import SourceWorkspaceError
 
 
 class RecordingWindowsLock:
@@ -69,6 +73,23 @@ def test_windows_existing_draft_closes_lock_before_native_replace(
     windows_lock = RecordingWindowsLock()
     original_replace = os.replace
     native_calls: list[tuple[Path, Path, Path]] = []
+    guarded = False
+
+    @contextmanager
+    def directory_guard(paths: Sequence[Path]) -> Iterator[None]:
+        """记录 Windows 目录链保护窗口。
+
+        参数：``paths`` 是从卷根到草稿父目录的有序路径。返回：上下文无值；
+        退出时清除测试内保护状态。
+        """
+
+        nonlocal guarded
+        assert parent in paths
+        guarded = True
+        try:
+            yield
+        finally:
+            guarded = False
 
     def native_replace(target_path: Path, replacement_path: Path, backup: Path) -> None:
         """模拟一次 ``ReplaceFileW`` 并验证调用前的锁和描述符状态。
@@ -78,6 +99,7 @@ def test_windows_existing_draft_closes_lock_before_native_replace(
         """
 
         native_calls.append((target_path, replacement_path, backup))
+        assert guarded
         assert windows_lock.locked_descriptors == set()
         assert windows_lock.last_descriptor is not None
         with pytest.raises(OSError):
@@ -97,6 +119,12 @@ def test_windows_existing_draft_closes_lock_before_native_replace(
         source_publication,
         "replace_windows_file_with_backup",
         native_replace,
+        raising=False,
+    )
+    monkeypatch.setattr(
+        source_publication,
+        "hold_windows_directory_chain",
+        directory_guard,
         raising=False,
     )
     monkeypatch.setattr(source_publication.os, "replace", forbidden_portable_replace)
@@ -142,3 +170,133 @@ def test_native_windows_replaces_existing_draft(tmp_path: Path) -> None:
 
     assert target.read_bytes() == replacement
     assert [path.name for path in parent.iterdir()] == [target.name]
+
+
+@pytest.mark.skipif(
+    sys.platform != "win32",
+    reason="真实 Windows create-if-absent 合同只在 Windows CI 运行",
+)
+def test_native_windows_creates_missing_draft_without_clobber(tmp_path: Path) -> None:
+    """真实 Windows 首次保存必须以仅创建语义发布工作流草稿（Workflow Draft）。
+
+    参数：``tmp_path`` 提供不存在的规范路径。返回：无；新草稿完整落盘且目录中
+    不遗留临时文件。
+    """
+
+    parent = tmp_path / "workflows"
+    parent.mkdir()
+    target = parent / "new.py"
+    replacement = b"value = 'new'\n"
+
+    source_publication.atomic_publish_source(
+        parent_path=parent,
+        target_name=target.name,
+        content=replacement,
+        byte_limit=1024,
+        expected_hash=None,
+    )
+
+    assert target.read_bytes() == replacement
+    assert [path.name for path in parent.iterdir()] == [target.name]
+
+
+@pytest.mark.skipif(
+    sys.platform != "win32",
+    reason="真实 Windows 目录共享保护只在 Windows CI 运行",
+)
+def test_native_windows_blocks_parent_rename_during_publication(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """公共保存入口必须在原生替换期间阻止草稿父目录重命名。
+
+    参数：``tmp_path`` 提供真实 NTFS 目录；``monkeypatch`` 在原生替换 seam 中
+    插入子进程攻击。返回：无；攻击必须失败且新字节只发布到原规范路径。
+    """
+
+    parent = tmp_path / "workflows"
+    detached = tmp_path / "detached"
+    parent.mkdir()
+    target = parent / "demo.py"
+    original = b"value = 'initial'\n"
+    replacement = b"value = 'changed'\n"
+    target.write_bytes(original)
+    original_native_replace = source_publication.replace_windows_file_with_backup
+    rename_attempts: list[subprocess.CompletedProcess[str]] = []
+
+    def replace_after_rename_attempt(
+        target_path: Path,
+        replacement_path: Path,
+        backup: Path,
+    ) -> None:
+        """尝试从子进程重命名父目录，再委托真实 ``ReplaceFileW``。
+
+        参数：三个路径保持原生替换顺序。返回：无；重命名若成功则立即使测试失败。
+        """
+
+        attempt = subprocess.run(
+            [
+                sys.executable,
+                "-c",
+                "import os,sys; os.rename(sys.argv[1],sys.argv[2])",
+                str(parent),
+                str(detached),
+            ],
+            capture_output=True,
+            text=True,
+            check=False,
+        )
+        rename_attempts.append(attempt)
+        assert attempt.returncode != 0
+        original_native_replace(target_path, replacement_path, backup)
+
+    monkeypatch.setattr(
+        source_publication,
+        "replace_windows_file_with_backup",
+        replace_after_rename_attempt,
+    )
+
+    source_publication.atomic_publish_source(
+        parent_path=parent,
+        target_name=target.name,
+        content=replacement,
+        byte_limit=1024,
+        expected_hash=_draft_hash(original),
+    )
+
+    assert len(rename_attempts) == 1
+    assert target.read_bytes() == replacement
+    assert not detached.exists()
+
+
+@pytest.mark.skipif(
+    sys.platform != "win32",
+    reason="真实 Windows junction 合同只在 Windows CI 运行",
+)
+def test_native_windows_rejects_junction_package_root(tmp_path: Path) -> None:
+    """真实 Windows junction 不得成为可编辑包（Editable Package）授权根。
+
+    参数：``tmp_path`` 提供真实目录与 junction。返回：无；读取工作流源码
+    （Workflow Source）manifest 前必须以 ``invalid_package_root`` 失败关闭。
+    """
+
+    real_root = tmp_path / "real"
+    real_root.mkdir()
+    real_root.joinpath("package.yaml").write_text(
+        "package:\n  name: demo\nworkflows: []\n",
+        encoding="utf-8",
+    )
+    junction = tmp_path / "junction"
+    created = subprocess.run(
+        ["cmd", "/c", "mklink", "/J", str(junction), str(real_root)],
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+    assert created.returncode == 0, created.stderr
+    source_workspace._DIRECTORY_FD_PATHS_SUPPORTED = False
+
+    with pytest.raises(SourceWorkspaceError) as caught:
+        source_workspace.read_package_root(junction)
+
+    assert caught.value.code == "invalid_package_root"
