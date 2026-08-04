@@ -9,6 +9,7 @@ import sys
 import tempfile
 import time
 import unittest
+from ctypes import wintypes
 from pathlib import Path
 
 from unilabos.managed_runtime.supervisor import ManagedRuntimeSupervisor
@@ -80,6 +81,15 @@ def _wait_for_pid_file(path: Path) -> int:
 
 def _process_is_running(pid: int) -> bool:
     kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)
+    kernel32.OpenProcess.argtypes = [wintypes.DWORD, wintypes.BOOL, wintypes.DWORD]
+    kernel32.OpenProcess.restype = wintypes.HANDLE
+    kernel32.GetExitCodeProcess.argtypes = [
+        wintypes.HANDLE,
+        ctypes.POINTER(wintypes.DWORD),
+    ]
+    kernel32.GetExitCodeProcess.restype = wintypes.BOOL
+    kernel32.CloseHandle.argtypes = [wintypes.HANDLE]
+    kernel32.CloseHandle.restype = wintypes.BOOL
     handle = kernel32.OpenProcess(
         _PROCESS_QUERY_LIMITED_INFORMATION,
         False,
@@ -88,7 +98,7 @@ def _process_is_running(pid: int) -> bool:
     if not handle:
         return False
     try:
-        exit_code = ctypes.c_ulong()
+        exit_code = wintypes.DWORD()
         if not kernel32.GetExitCodeProcess(handle, ctypes.byref(exit_code)):
             return False
         return exit_code.value == _STILL_ACTIVE

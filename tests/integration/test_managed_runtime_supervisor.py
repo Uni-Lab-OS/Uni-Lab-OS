@@ -537,6 +537,42 @@ def test_running_state_persistence_failure_reaps_new_process_and_fails_closed(
     supervisor.close()
 
 
+def test_windows_taskkill_failure_is_not_hidden_by_root_process_exit(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    system_root = tmp_path / "Windows"
+    taskkill = system_root / "System32" / "taskkill.exe"
+    taskkill.parent.mkdir(parents=True)
+    taskkill.write_bytes(b"test fixture")
+    monkeypatch.setenv("SystemRoot", str(system_root))
+    monkeypatch.setattr(
+        subprocess,
+        "run",
+        lambda *_args, **_kwargs: subprocess.CompletedProcess(
+            args=[str(taskkill)],
+            returncode=5,
+        ),
+    )
+
+    class ExitedRootProcess:
+        pid = 123
+        returncode: int | None = None
+
+        def wait(self, timeout: float) -> int:
+            assert timeout > 0
+            self.returncode = 1
+            return self.returncode
+
+    supervisor = ManagedRuntimeSupervisor(
+        runtime_prefix=tmp_path / "runtime-prefix",
+        state_directory=tmp_path / "state",
+        token=_TOKEN,
+    )
+    with pytest.raises(RuntimeError, match="taskkill.*exit_code=5"):
+        supervisor._terminate_windows_process_tree_locked(ExitedRootProcess())
+
+
 def _wait_for_file(path: Path, timeout: float = 5.0) -> None:
     deadline = time.monotonic() + timeout
     while time.monotonic() < deadline:

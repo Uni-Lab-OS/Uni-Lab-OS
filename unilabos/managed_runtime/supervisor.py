@@ -583,7 +583,7 @@ class ManagedRuntimeSupervisor:
             process.wait(timeout=_STOP_TIMEOUT_SECONDS)
         except subprocess.TimeoutExpired as error:
             raise RuntimeError("Windows 受管进程树未在超时前退出") from error
-        if completed.returncode != 0 and process.returncode is None:
+        if completed.returncode != 0:
             raise RuntimeError(
                 f"taskkill 回收受管进程树失败：exit_code={completed.returncode}"
             )
