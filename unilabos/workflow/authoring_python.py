@@ -20,6 +20,10 @@ from unilabos.workflow.authoring_material import (
     RenderedMaterialSource,
     render_material_source_call,
 )
+from unilabos.workflow.material_graph_validation import (
+    MaterialGraphValidationError,
+    validate_material_graph_projection,
+)
 from unilabos.workflow.models import CandidateSourceMapEntry, validate_uuid
 from unilabos.workflow.source_coordinates import utf16_length
 
@@ -44,6 +48,10 @@ def render_authoring_python(
     抛出 ``AuthoringGraphError``。
     """
 
+    try:
+        validate_material_graph_projection(graph)
+    except MaterialGraphValidationError as error:
+        raise AuthoringGraphError(error.code, error.message) from error
     workflow = graph.get("workflow")
     nodes = graph.get("nodes")
     edges = graph.get("edges")

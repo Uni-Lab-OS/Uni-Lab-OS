@@ -9,6 +9,10 @@ from collections import defaultdict
 from typing import Any, Dict, Iterable, List, Mapping
 
 from unilabos.workflow.json_codec import encode_json, strict_json_equal
+from unilabos.workflow.material_graph_validation import (
+    MaterialGraphValidationError,
+    validate_material_graph,
+)
 from unilabos.workflow.material_selector import (
     MaterialSelectorError,
     validate_material_source_node,
@@ -129,6 +133,18 @@ def validate_graph(
             "target",
             handles,
         )
+
+    try:
+        validate_material_graph(
+            nodes=nodes,
+            edges=edges,
+            templates=templates,
+            handles=handles,
+            effective_params=effective_params,
+            validated_workflow_io=validated_io,
+        )
+    except MaterialGraphValidationError as error:
+        raise CodedGraphValidationError(error.code, error.message) from error
 
     bindings_by_node = (
         dict(validated_io.input_bindings)

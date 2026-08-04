@@ -23,6 +23,10 @@ from unilabos.workflow.authoring_material import (
     MaterialSourceDeclaration,
     build_material_source_node,
 )
+from unilabos.workflow.material_graph_validation import (
+    MaterialGraphValidationError,
+    validate_material_graph_projection,
+)
 from unilabos.workflow.models import CandidateChangeset
 
 
@@ -169,6 +173,10 @@ def build_candidate_graph(
         "node_templates": node_templates,
         "handle_templates": handle_templates,
     }
+    try:
+        validate_material_graph_projection(graph)
+    except MaterialGraphValidationError as error:
+        raise AuthoringGraphError(error.code, error.message) from error
     changeset = candidate_changeset(graph=graph, applied_graph=applied)
     return graph, changeset
 
