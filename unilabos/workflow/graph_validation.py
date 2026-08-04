@@ -10,6 +10,10 @@ from typing import Any, Dict, Iterable, List, Mapping
 
 from unilabos.workflow.json_codec import encode_json, strict_json_equal
 from unilabos.workflow.models import WorkflowEdgeWrite, WorkflowNodeWrite
+from unilabos.workflow.workflow_io import (
+    WorkflowIOValidationError,
+    validate_workflow_io,
+)
 
 _MAX_SCHEMA_DEPTH = 64
 _MAX_TIMEOUT_SECONDS = (2**63 - 1) // 1_000_000_000
@@ -32,8 +36,15 @@ def validate_graph(
     effective_params: Mapping[str, Dict[str, Any]],
     workflow_meta_data: Mapping[str, Any],
     node_meta_data: Mapping[str, Dict[str, Any]],
+    validate_workflow_io_contract: bool = False,
 ) -> None:
-    """在写事务内校验一份完整替换图。"""
+    """在写事务内校验一份完整替换图。
+
+    参数说明：节点、边、模板和连接点（Handle）共同构成冻结工作流图；
+    `effective_params` 与两级元数据是事务内实际值；
+    `validate_workflow_io_contract=True` 启用唯一公共工作流输入/输出
+    （Workflow I/O）合同，`False` 仅保留旧调用方兼容语义。
+    """
 
     node_by_uuid = {node.uuid: node for node in nodes}
     edge_by_uuid = {edge.uuid: edge for edge in edges}
@@ -49,6 +60,18 @@ def validate_graph(
         if node.parent_uuid is not None and node.parent_uuid not in node_by_uuid:
             raise GraphValidationError("父节点不在提交的完整图中")
     _validate_parent_cycles(nodes)
+
+    validated_io = None
+    if validate_workflow_io_contract:
+        try:
+            validated_io = validate_workflow_io(
+                nodes=node_by_uuid,
+                handles=handles,
+                workflow_meta_data=workflow_meta_data,
+                node_meta_data=node_meta_data,
+            )
+        except WorkflowIOValidationError as exc:
+            raise GraphValidationError("工作流输入/输出合同无效") from exc
 
     for edge in edges:
         if edge.source_node_uuid == edge.target_node_uuid:
@@ -71,15 +94,19 @@ def validate_graph(
             handles,
         )
 
-    bindings_by_node = {
-        node.uuid: _validated_input_bindings(
-            node,
-            node_meta_data[node.uuid],
-            workflow_meta_data,
-            handles,
-        )
-        for node in nodes
-    }
+    bindings_by_node = (
+        dict(validated_io.input_bindings)
+        if validated_io is not None
+        else {
+            node.uuid: _validated_input_bindings(
+                node,
+                node_meta_data[node.uuid],
+                workflow_meta_data,
+                handles,
+            )
+            for node in nodes
+        }
+    )
     enabled = {
         node.uuid: node
         for node in nodes

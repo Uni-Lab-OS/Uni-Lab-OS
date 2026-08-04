@@ -630,7 +630,15 @@ class WorkflowStore:
         nodes: List[WorkflowNodeWrite],
         edges: List[WorkflowEdgeWrite],
         protect_reserved_metadata: bool = False,
+        validate_workflow_io_contract: bool = False,
     ) -> Dict[str, Any]:
+        """事务性保存完整工作流图并返回最新投影。
+
+        参数说明：`revision` 是乐观并发版本；`nodes/edges` 是完整替换集合；
+        `protect_reserved_metadata` 保护服务端元数据；
+        `validate_workflow_io_contract` 决定是否启用严格公共输入/输出合同。
+        """
+
         with self.transaction() as conn:
             self._reconcile_graph(
                 conn,
@@ -640,6 +648,7 @@ class WorkflowStore:
                 edges=edges,
                 advance_revision=True,
                 protect_reserved_metadata=protect_reserved_metadata,
+                validate_workflow_io_contract=validate_workflow_io_contract,
             )
         return self.get_graph(workflow_uuid)
 
@@ -654,7 +663,15 @@ class WorkflowStore:
         advance_revision: bool,
         protect_reserved_metadata: bool = False,
         semantic_workflow_meta_data: Optional[Dict[str, Any]] = None,
+        validate_workflow_io_contract: bool = False,
     ) -> int:
+        """在现有事务中核对并写入完整工作流图。
+
+        参数说明：`conn` 是唯一写事务；`semantic_workflow_meta_data` 可替换待
+        校验的工作流元数据；`validate_workflow_io_contract` 选择严格公共合同，
+        其余参数控制身份、版本和服务端保留字段。返回推进后的工作流版本。
+        """
+
         workflow = self.get_workflow(workflow_uuid, conn=conn)
         if workflow["revision"] != expected_revision:
             raise StoreRevisionConflict(
@@ -734,6 +751,7 @@ class WorkflowStore:
                     else workflow["meta_data"]
                 ),
                 node_meta_data=effective_node_meta_data,
+                validate_workflow_io_contract=validate_workflow_io_contract,
             )
         except MissingTemplateError as exc:
             raise StoreNotFound(str(exc)) from exc
@@ -1374,6 +1392,7 @@ class WorkflowStore:
                     advance_revision=True,
                     protect_reserved_metadata=False,
                     semantic_workflow_meta_data=candidate_meta,
+                    validate_workflow_io_contract=True,
                 )
                 workflow_meta = dict(workflow["meta_data"])
                 workflow_meta.pop("unilab", None)

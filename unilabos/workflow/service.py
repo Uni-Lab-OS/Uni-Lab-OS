@@ -367,6 +367,13 @@ class WorkflowService:
         nodes: List[WorkflowNodeWrite | Dict[str, Any]],
         edges: List[WorkflowEdgeWrite | Dict[str, Any]],
     ) -> Dict[str, Any]:
+        """以严格工作流输入/输出（Workflow I/O）合同保存完整图。
+
+        参数说明：`workflow_uuid` 是工作流稳定身份，`revision` 是预期版本，
+        `nodes/edges` 是完整替换集合。旧形状只在存储适配器（Store Adapter）
+        内兼容，公共服务入口始终使用同一个严格校验深模块。
+        """
+
         identity = self.get_workflow(workflow_uuid)["uuid"]
         with self._authoring_lock(identity):
             self.get_workflow(identity)
@@ -389,6 +396,7 @@ class WorkflowService:
                     nodes=node_values,
                     edges=edge_values,
                     protect_reserved_metadata=True,
+                    validate_workflow_io_contract=True,
                 )
             except ValidationError:
                 raise WorkflowError("invalid_input") from None
@@ -2094,6 +2102,7 @@ class WorkflowService:
             node_meta_data={
                 uuid: item["meta_data"] for uuid, item in candidate_nodes.items()
             },
+            validate_workflow_io_contract=True,
         )
 
         if any(

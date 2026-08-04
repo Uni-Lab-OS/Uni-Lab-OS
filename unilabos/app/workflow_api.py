@@ -35,6 +35,8 @@ class _BackendModel(BaseModel):
 HashToken = Annotated[str, Field(pattern=r"^sha256:[0-9a-f]{64}$")]
 _SIGNED_DECIMAL = re.compile(r"[+-]?[0-9]+\Z")
 _INT64_MAX = (1 << 63) - 1
+_WORKFLOW_BODY_LIMIT = 8 * 1024 * 1024
+_WORKFLOW_JSON_INTEGER_DIGITS = 4096
 _GO_WHITE_SPACE = (
     "\t\n\v\f\r "
     "\u0085\u00a0\u1680"
@@ -44,19 +46,54 @@ _GO_WHITE_SPACE = (
 )
 
 
+async def _read_limited_body(request: Request) -> bytes:
+    """增量读取工作流（Workflow）请求体并在首次超限时停止。
+
+    参数说明：`request` 是当前 ASGI 请求。函数先校验声明长度，再逐块读取，
+    最多保留 8 MiB；返回缓存后的原始字节，超限或非法长度抛出 `ValueError`。
+    """
+
+    content_length = request.headers.get("content-length")
+    if content_length is not None:
+        try:
+            declared_length = int(content_length, 10)
+        except ValueError:
+            raise ValueError("Content-Length 无效") from None
+        if declared_length < 0 or declared_length > _WORKFLOW_BODY_LIMIT:
+            raise ValueError("工作流请求体超过公共预算")
+
+    body = bytearray()
+    async for chunk in request.stream():
+        if len(body) + len(chunk) > _WORKFLOW_BODY_LIMIT:
+            raise ValueError("工作流请求体超过公共预算")
+        body.extend(chunk)
+    payload = bytes(body)
+    request._body = payload
+    return payload
+
+
 class _BackendJSONRoute(APIRoute):
-    """Preload JSON with the frozen Backend depth and error-envelope rules."""
+    """限制有请求体的路由，并按后端（Backend）规则预载 JSON。"""
 
     def get_route_handler(self):
+        """构造只对有请求体路由执行预算与 JSON 解码的处理器。"""
+
         route_handler = super().get_route_handler()
+        expects_body = self.body_field is not None
 
         async def backend_json_route_handler(request: Request) -> Response:
-            content_type = request.headers.get("content-type", "")
-            mime = content_type.split(";", 1)[0].strip().lower()
-            if mime == "application/json" or mime.endswith("+json"):
-                body = await request.body()
+            """在业务处理前校验请求体；`request` 是单次 HTTP 请求。"""
+
+            if expects_body:
+                content_type = request.headers.get("content-type", "")
+                mime = content_type.split(";", 1)[0].strip().lower()
                 try:
-                    request._json = decode_json_bytes(body)
+                    body = await _read_limited_body(request)
+                    if mime == "application/json" or mime.endswith("+json"):
+                        request._json = decode_json_bytes(
+                            body,
+                            max_integer_digits=_WORKFLOW_JSON_INTEGER_DIGITS,
+                        )
                 except (
                     OverflowError,
                     UnicodeError,
