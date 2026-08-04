@@ -1,4 +1,4 @@
-"""M2A 组合工作流输入物料模板保证的公开编译回归测试。"""
+"""M2A 复合工作流（Composite Workflow）输入资源模板保证的公开编译回归测试。"""
 
 from __future__ import annotations
 
@@ -32,16 +32,16 @@ RESOURCE_SYMBOL = "tests.c1_r3.resources:material_b"
 
 
 class _ResourceTemplateIdentityIndex:
-    """为父工作流输入解析唯一的资源模板身份。"""
+    """为父工作流（Workflow）输入解析唯一的资源模板（ResourceTemplate）身份。"""
 
     def resolve_symbol(self, qualified_name: str) -> str:
-        """把测试资源符号解析为物料模板 UUID。
+        """把测试资源符号解析为资源模板（ResourceTemplate）UUID。
 
         参数：
             qualified_name: 工作流源码中的绝对资源符号。
 
         返回：
-            与该符号对应的资源模板 UUID。
+            与该符号对应的资源模板（ResourceTemplate）UUID。
 
         异常：
             LookupError: 符号不属于本测试固定目录。
@@ -52,10 +52,10 @@ class _ResourceTemplateIdentityIndex:
         return MATERIAL_TEMPLATE_B_UUID
 
     def identify_uuid(self, resource_template_uuid: str) -> str:
-        """把物料模板 UUID 反向映射为规范资源符号。
+        """把资源模板（ResourceTemplate）UUID 反向映射为规范资源符号。
 
         参数：
-            resource_template_uuid: 待识别的资源模板 UUID。
+            resource_template_uuid: 待识别的资源模板（ResourceTemplate）UUID。
 
         返回：
             规范化 Python 应使用的绝对资源符号。
@@ -70,13 +70,13 @@ class _ResourceTemplateIdentityIndex:
 
 
 def _consumer_import(*, allowed_resource_template_uuid: str) -> NodeTemplateImport:
-    """构造限制单一物料模板的下游动作模板。
+    """构造限制单一资源模板（ResourceTemplate）的下游动作模板。
 
     参数：
-        allowed_resource_template_uuid: 下游物料占位符允许的资源模板 UUID。
+        allowed_resource_template_uuid: 下游物料占位符（ResourceSlot）允许的资源模板（ResourceTemplate）UUID。
 
     返回：
-        可发布到测试模板目录的下游动作模板。
+        可发布到测试模板目录的下游动作（Action）模板。
     """
 
     imported = action_import(
@@ -94,10 +94,10 @@ def _consumer_import(*, allowed_resource_template_uuid: str) -> NodeTemplateImpo
 
 
 def _source() -> str:
-    """生成父输入穿过组合工作流边界后供给下游动作的源码。
+    """生成父输入穿过复合工作流（Composite Workflow）边界后供给下游动作（Action）的源码。
 
     返回：
-        包含受限父物料输入、组合调用和下游消费动作的规范工作流源码。
+        包含受限父物料（Material）输入、复合调用和下游消费动作（Action）的规范工作流（Workflow）源码。
     """
 
     return f'''from typing import Annotated
@@ -133,14 +133,14 @@ def _compile(
     *,
     consumer_resource_template_uuid: str,
 ) -> CandidateCompilation:
-    """通过真实创作编译 seam 编译组合物料透传案例。
+    """通过真实创作编译 seam 编译复合物料（Material）透传案例。
 
     参数：
-        tmp_path: 隔离工作流数据库所在的临时目录。
-        consumer_resource_template_uuid: 下游物料占位符允许的资源模板 UUID。
+        tmp_path: 隔离工作流（Workflow）数据库所在的临时目录。
+        consumer_resource_template_uuid: 下游物料占位符（ResourceSlot）允许的资源模板（ResourceTemplate）UUID。
 
     返回：
-        工作流创作引擎给出的候选编译结果。
+        工作流（Workflow）创作引擎给出的候选编译结果。
     """
 
     world = make_direct_world(
@@ -190,7 +190,7 @@ def _compile(
 def test_matching_parent_workflow_input_guarantee_reaches_composite_output(
     tmp_path: Path,
 ) -> None:
-    """证明同模板父输入可穿过隐式组合输出并供给受限下游物料占位符。"""
+    """证明同模板父输入可穿过隐式复合输出并供给受限下游物料占位符（ResourceSlot）。"""
 
     compiled = _compile(
         tmp_path,
@@ -204,7 +204,7 @@ def test_matching_parent_workflow_input_guarantee_reaches_composite_output(
 def test_incompatible_parent_workflow_input_guarantee_remains_rejected(
     tmp_path: Path,
 ) -> None:
-    """证明组合边界不能把不兼容父输入伪装成下游可接受的物料模板。"""
+    """证明复合边界不能把不兼容父输入伪装成下游可接受的资源模板（ResourceTemplate）。"""
 
     compiled = _compile(
         tmp_path,

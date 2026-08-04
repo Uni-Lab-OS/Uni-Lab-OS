@@ -10,6 +10,7 @@ from collections.abc import Iterable, Mapping
 from typing import Any
 from uuid import UUID
 
+from unilabos.workflow.handle_projection import resource_slot_schema
 from unilabos.workflow.json_codec import encode_json, strict_json_equal
 from unilabos.workflow.models import WorkflowEdgeWrite, WorkflowNodeWrite
 from unilabos.workflow.schema import WorkflowSchemaError, parse_output_contract
@@ -53,7 +54,25 @@ def validate_graph(
     node_meta_data: Mapping[str, dict[str, Any]],
     validate_workflow_io_contract: bool = False,
 ) -> None:
-    """在写事务内校验一份完整替换图。"""
+    """在写事务内校验一份完整替换图。
+
+    参数：
+        nodes: 本次完整替换提交中的工作流节点（WorkflowNode）。
+        edges: 本次完整替换提交中的工作流边（WorkflowEdge）。
+        templates: 当前图权威选择的节点模板目录，以模板 UUID 为键。
+        handles: 当前图权威选择的句柄模板目录，以句柄 UUID 为键。
+        effective_params: 合并受保护字段后的节点有效参数，以节点 UUID 为键。
+        workflow_meta_data: 合并受保护字段后的工作流（Workflow）元数据。
+        node_meta_data: 合并受保护字段后的节点元数据，以节点 UUID 为键。
+        validate_workflow_io_contract: 是否通过公共工作流 I/O 校验器验证合同。
+
+    返回：
+        校验成功时不返回值。
+
+    异常：
+        GraphValidationError: 图结构、I/O 或物料合同不成立。
+        MissingTemplateError: 节点引用的模板不存在。
+    """
 
     node_by_uuid = {node.uuid: node for node in nodes}
     edge_by_uuid = {edge.uuid: edge for edge in edges}
@@ -120,15 +139,6 @@ def validate_graph(
             "target",
             handles,
         )
-    _validate_resource_slot_fan_out(edges=edges, handles=handles)
-    _validate_resource_slot_template_compatibility(
-        nodes=node_by_uuid,
-        edges=edges,
-        templates=templates,
-        handles=handles,
-        effective_params=effective_params,
-    )
-
     bindings_by_node = (
         dict(validated_io.input_bindings)
         if validated_io is not None
@@ -150,6 +160,18 @@ def validate_graph(
             node_meta_data[node_uuid],
             handles,
         )
+    _validate_resource_slot_fan_out(edges=edges, handles=handles)
+    _validate_resource_slot_template_compatibility(
+        nodes=node_by_uuid,
+        edges=edges,
+        templates=templates,
+        handles=handles,
+        effective_params=effective_params,
+        input_bindings=bindings_by_node,
+        workflow_input_guarantees=_workflow_input_resource_slot_guarantees(
+            workflow_meta_data
+        ),
+    )
     enabled = {
         node.uuid: node
         for node in nodes
@@ -353,8 +375,27 @@ def _validate_resource_slot_template_compatibility(
     templates: Mapping[str, dict[str, Any]],
     handles: Mapping[str, dict[str, Any]],
     effective_params: Mapping[str, dict[str, Any]],
+    input_bindings: Mapping[str, Mapping[str, Mapping[str, Any]]],
+    workflow_input_guarantees: Mapping[str, frozenset[str] | None],
 ) -> None:
-    """用 producer guarantee 证明 ResourceSlot 可以进入受限 target。"""
+    """证明每条物料流（MaterialFlow）边的生产者模板集合可赋给消费者。
+
+    参数：
+        nodes: 以工作流节点（WorkflowNode）UUID 为键的完整节点集合。
+        edges: 待验证的完整工作流边（WorkflowEdge）集合。
+        templates: 以节点模板 UUID 为键的当前模板目录。
+        handles: 以句柄 UUID 为键的当前句柄目录。
+        effective_params: 以节点 UUID 为键的有效参数。
+        input_bindings: 以节点和目标句柄 UUID 索引的工作流（Workflow）输入绑定。
+        workflow_input_guarantees: 工作流（Workflow）输入名对应的资源模板（ResourceTemplate）允许集合；空值表示无约束。
+
+    返回：
+        所有物料边都满足模板约束时不返回值。
+
+    异常：
+        GraphValidationError: 生产者无法证明满足消费者约束。
+        MaterialSourceGraphError: 物料来源（MaterialSource）与消费者模板约束冲突。
+    """
 
     edge_list = tuple(edges)
 
@@ -378,11 +419,11 @@ def _validate_resource_slot_template_compatibility(
             templates=templates,
             handles=handles,
             effective_params=effective_params,
+            input_bindings=input_bindings,
+            workflow_input_guarantees=workflow_input_guarantees,
             seen=frozenset(),
         )
-        if source_templates is None or not source_templates.issubset(
-            target_templates
-        ):
+        if source_templates is None or not source_templates.issubset(target_templates):
             source_node = nodes[edge.source_node_uuid]
             if _node_kind(source_node, templates) == "material_source":
                 raise MaterialSourceGraphError(
@@ -403,18 +444,34 @@ def _resource_slot_producer_guarantee(
     templates: Mapping[str, dict[str, Any]],
     handles: Mapping[str, dict[str, Any]],
     effective_params: Mapping[str, dict[str, Any]],
+    input_bindings: Mapping[str, Mapping[str, Mapping[str, Any]]],
+    workflow_input_guarantees: Mapping[str, frozenset[str] | None],
     seen: frozenset[tuple[str, str]],
 ) -> frozenset[str] | None:
-    """沿 ResourceSlot implicit pass-through 回溯实际 producer guarantee。"""
+    """沿物料占位符（ResourceSlot）的隐式透传回溯实际生产者模板保证。
+
+    参数：
+        source_node_uuid: 当前待证明的生产者节点 UUID。
+        source_handle_uuid: 当前待证明的源句柄 UUID。
+        nodes: 以节点 UUID 为键的完整节点集合。
+        edges: 当前完整工作流边（WorkflowEdge）集合。
+        templates: 以节点模板 UUID 为键的模板目录。
+        handles: 以句柄 UUID 为键的句柄目录。
+        effective_params: 以节点 UUID 为键的有效参数。
+        input_bindings: 以节点和目标句柄 UUID 索引的工作流（Workflow）输入绑定。
+        workflow_input_guarantees: 工作流（Workflow）输入名对应的资源模板（ResourceTemplate）允许集合。
+        seen: 已访问的节点与源句柄身份，用于拒绝循环证明。
+
+    返回：
+        可证明的资源模板 UUID 集合；无约束或无法证明时返回 ``None``。
+    """
 
     identity = (source_node_uuid, source_handle_uuid)
     if identity in seen:
         return None
     source_node = nodes[source_node_uuid]
     if _node_kind(source_node, templates) == "material_source":
-        template_uuid = effective_params[source_node.uuid].get(
-            "resource_template_uuid"
-        )
+        template_uuid = effective_params[source_node.uuid].get("resource_template_uuid")
         return (
             frozenset({template_uuid})
             if isinstance(template_uuid, str)
@@ -425,9 +482,7 @@ def _resource_slot_producer_guarantee(
     unilab = _handle_unilab_metadata(source_handle)
     if unilab.get("implicit_passthrough") is True:
         business_name = str(
-            source_handle.get("data_key")
-            or source_handle.get("handle_key")
-            or ""
+            source_handle.get("data_key") or source_handle.get("handle_key") or ""
         )
         template_uuid = source_handle.get("workflow_node_template_uuid")
         target_handles = [
@@ -440,11 +495,12 @@ def _resource_slot_producer_guarantee(
             and handle.get("type") == "ResourceSlot"
         ]
         if len(target_handles) == 1:
+            target_handle_uuid = str(target_handles[0].get("uuid") or "")
             incoming = [
                 edge
                 for edge in edges
                 if edge.target_node_uuid == source_node_uuid
-                and edge.target_handle_uuid == target_handles[0].get("uuid")
+                and edge.target_handle_uuid == target_handle_uuid
             ]
             if len(incoming) == 1:
                 upstream = incoming[0]
@@ -456,11 +512,70 @@ def _resource_slot_producer_guarantee(
                     templates=templates,
                     handles=handles,
                     effective_params=effective_params,
+                    input_bindings=input_bindings,
+                    workflow_input_guarantees=workflow_input_guarantees,
                     seen=seen | {identity},
                 )
                 if guarantee is not None:
                     return guarantee
+            elif not incoming:
+                binding = input_bindings.get(source_node_uuid, {}).get(
+                    target_handle_uuid
+                )
+                parameter_name = (
+                    binding.get("parameter") if isinstance(binding, Mapping) else None
+                )
+                if (
+                    isinstance(parameter_name, str)
+                    and parameter_name in workflow_input_guarantees
+                ):
+                    return workflow_input_guarantees[parameter_name]
     return _resource_slot_template_allowlist(source_handle)
+
+
+def _workflow_input_resource_slot_guarantees(
+    workflow_meta_data: Mapping[str, Any],
+) -> dict[str, frozenset[str] | None]:
+    """从有效工作流（Workflow）输入合同提取物料占位符（ResourceSlot）模板保证。
+
+    参数：
+        workflow_meta_data: 包含服务端所有输入合同的工作流（Workflow）元数据。
+
+    返回：
+        以工作流（Workflow）输入名为键的资源模板（ResourceTemplate）允许集合；空值表示该输入无模板约束。
+
+    说明：
+        非物料输入不进入结果。合同形状仍由公共 I/O 校验器负责，本函数只读取
+        已验证或受保护的合同事实，不自行创造输入绑定。
+    """
+
+    unilab = workflow_meta_data.get("unilab")
+    input_contract = (
+        unilab.get("input_contract") if isinstance(unilab, Mapping) else None
+    )
+    parameters = (
+        input_contract.get("parameters")
+        if isinstance(input_contract, Mapping)
+        else None
+    )
+    if not isinstance(parameters, list):
+        return {}
+
+    guarantees: dict[str, frozenset[str] | None] = {}
+    for parameter in parameters:
+        if not isinstance(parameter, Mapping):
+            continue
+        parameter_name = parameter.get("name")
+        schema = parameter.get("schema")
+        if not isinstance(parameter_name, str) or not isinstance(schema, Mapping):
+            continue
+        slot_schema = resource_slot_schema(schema)
+        if slot_schema is None:
+            continue
+        guarantees[parameter_name] = _validated_resource_template_allowlist(
+            slot_schema.get("allowed_resource_template_uuids")
+        )
+    return guarantees
 
 
 def _handle_unilab_metadata(handle: Mapping[str, Any]) -> Mapping[str, Any]:
@@ -472,6 +587,18 @@ def _handle_unilab_metadata(handle: Mapping[str, Any]) -> Mapping[str, Any]:
 def _resource_slot_template_allowlist(
     handle: Mapping[str, Any],
 ) -> frozenset[str] | None:
+    """读取并校验句柄声明的资源模板（ResourceTemplate）允许集合。
+
+    参数：
+        handle: 当前工作流句柄模板。
+
+    返回：
+        规范资源模板（ResourceTemplate）UUID 集合；字段缺失或为空时返回 ``None``。
+
+    异常：
+        GraphValidationError: 允许列表不是规范且唯一的 UUID 数组。
+    """
+
     meta_data = handle.get("meta_data")
     unilab = meta_data.get("unilab") if isinstance(meta_data, Mapping) else None
     raw = (
@@ -479,6 +606,24 @@ def _resource_slot_template_allowlist(
         if isinstance(unilab, Mapping)
         else None
     )
+    return _validated_resource_template_allowlist(raw)
+
+
+def _validated_resource_template_allowlist(
+    raw: Any,
+) -> frozenset[str] | None:
+    """把一个资源模板（ResourceTemplate）允许列表校验并冻结为集合。
+
+    参数：
+        raw: 来自工作流合同或句柄元数据的允许列表原值。
+
+    返回：
+        规范资源模板（ResourceTemplate）UUID 集合；缺失或空列表表示无约束并返回 ``None``。
+
+    异常：
+        GraphValidationError: 原值不是规范且唯一的 UUID 数组。
+    """
+
     if raw is None or raw == [] or raw == ():
         return None
     if isinstance(raw, (str, bytes)) or not isinstance(raw, (list, tuple)):
