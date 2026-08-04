@@ -1179,6 +1179,37 @@ class WorkflowService:
             )
             return self.get_authoring(workflow_uuid)
 
+    def submit_source_change(
+        self,
+        workflow_uuid: str,
+        *,
+        observed_signature: Tuple[Any, ...],
+    ) -> bool:
+        """提交一个稳定观测到的工作流源码（Workflow Source）变化命令。
+
+        参数：``workflow_uuid`` 是已注册来源绑定的稳定工作流身份；
+        ``observed_signature`` 是源码监视器（Source Monitor）去抖后的文件世代。
+        返回：只有相同文件世代完成哈希去重、候选推进及待写回恢复时才为
+        ``True``；文件并发变化或持久恢复仍待处理时返回 ``False``。读取、编译或
+        持久化异常原样映射为稳定工作流错误，调用者不得把异常视为已确认。
+        """
+
+        workflow_uuid = self._get_authoring_workflow(workflow_uuid)["uuid"]
+        with self._authoring_lock(workflow_uuid):
+            registration = self._registration(workflow_uuid)
+            # ``current_signature`` 是服务在取得创作锁后复核的文件世代，防止监视
+            # 线程用过期观测授权编译更新中的文件。
+            current_signature = self.source_signature(registration)
+            if current_signature != observed_signature:
+                return False
+            self.reconcile_registered_source(workflow_uuid)
+            # ``latest_signature`` 证明整个状态推进期间规范源码没有再次变化。
+            latest_signature = self.source_signature(registration)
+            if latest_signature != observed_signature:
+                return False
+            record = self._store.get_authoring_record(workflow_uuid)
+            return record["writeback_status"] != "pending"
+
     def apply_authoring(
         self,
         workflow_uuid: str,
