@@ -18,6 +18,10 @@ from unilabos.workflow.composite import (
     PublishedWorkflowSource,
     project_published_workflow_contract,
 )
+from unilabos.workflow.handle_projection import (
+    resource_slot_schema as find_resource_slot_schema,
+)
+from unilabos.workflow.handle_projection import workflow_handle_type
 from unilabos.workflow.models import WorkflowEdgeWrite, WorkflowNodeWrite
 from unilabos.workflow.store import WorkflowStore
 
@@ -283,8 +287,8 @@ def _handle(
     *,
     required: bool,
 ) -> dict[str, Any]:
-    slot = value_schema.get("$slot") == "ResourceSlot"
-    allowed = value_schema.get("allowed_resource_template_uuids")
+    slot = find_resource_slot_schema(value_schema)
+    allowed = slot.get("allowed_resource_template_uuids") if slot is not None else None
     return {
         "uuid": handle_uuid,
         "workflow_node_template_uuid": template_uuid,
@@ -292,14 +296,16 @@ def _handle(
         "io_type": io_type,
         "display_name": key.title(),
         "description": "",
-        "type": "ResourceSlot" if slot else str(value_schema.get("type", "any")),
+        "type": workflow_handle_type(value_schema),
         "required": required,
         "data_source": "goal" if io_type == "target" else "result",
         "data_key": key,
         "meta_data": {
             "unilab": {
                 "value_schema": value_schema,
-                "editor_control": "material_port" if slot else "variable_selector",
+                "editor_control": (
+                    "material_port" if slot is not None else "variable_selector"
+                ),
                 "allowed_resource_template_uuids": allowed,
             }
         },

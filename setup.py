@@ -7,7 +7,12 @@ setup(
     version='0.11.3',
     packages=find_packages(),
     include_package_data=True,
-    install_requires=['setuptools', 'rfc8785>=0.1.4,<0.2'],
+    install_requires=[
+        'setuptools',
+        'rfc8785>=0.1.4,<0.2',
+        'msgcenterpy>=0.1.8,<0.2',
+        'pylabrobot==0.2.1',
+    ],
     extras_require={
         'observability': [
             'arize-phoenix==17.5.0',
@@ -25,7 +30,8 @@ setup(
     tests_require=['pytest'],
     entry_points={
         'console_scripts': [
-            "unilab = unilabos.app.main:main"
+            "unilab = unilabos.app.main:main",
+            "unilab-supervisor = unilabos.managed_runtime.supervisor:main",
         ],
     },
 )

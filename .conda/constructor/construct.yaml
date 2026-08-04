@@ -3,6 +3,7 @@
 
 {% set installer_version = environ.get("UNILABOS_INSTALLER_VERSION", "0.11.3") %}
 {% set package_name = environ.get("UNILABOS_INSTALLER_PACKAGE", "unilabos") %}
+{% set source_channel = environ.get("UNILABOS_INSTALLER_CHANNEL", "") %}
 
 name: Uni-Lab-OS
 version: {{ installer_version }}
@@ -10,6 +11,10 @@ company: Uni-Lab-OS
 reverse_domain_identifier: org.uni-lab.os
 
 channels:
+{% if source_channel %}
+  # 一键桌面打包会把当前 checkout 先构建为 Conda 包，并优先从该本地 channel 取包。
+  - {{ source_channel }}
+{% endif %}
   - https://conda.anaconda.org/uni-lab
   - https://conda.anaconda.org/robostack-staging
   - https://conda.anaconda.org/conda-forge

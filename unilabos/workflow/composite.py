@@ -1034,6 +1034,9 @@ def _business_handle_shape_matches(
     # TemplateCatalog 在只读快照中把 JSON 数组冻结为 tuple；共享投影 helper
     # 接收 JSON 外形，因此先恢复权威 schema 再派生 Handle 展示字段。
     plain_schema = _plain(schema)
+    handle_schema = _plain(plain_schema)
+    if io_type == "target":
+        handle_schema.pop("default", None)
     slot_schema = resource_slot_schema(plain_schema)
     expected_allowlist = (
         _plain(slot_schema.get("allowed_resource_template_uuids"))
@@ -1048,7 +1051,7 @@ def _business_handle_shape_matches(
         set(unilab) == _WORKFLOW_BUSINESS_HANDLE_METADATA_FIELDS
         and handle.get("type") == workflow_handle_type(plain_schema)
         and handle.get("required") is required
-        and unilab.get("value_schema") == schema
+        and _plain(unilab.get("value_schema")) == handle_schema
         and unilab.get("editor_control") == expected_control
         and _plain(unilab.get("allowed_resource_template_uuids")) == expected_allowlist
         and isinstance(implicit, bool)
@@ -1101,10 +1104,19 @@ def _published_workflow_contract_digest_matches(
     result_schema = properties["result"]
     required = set(goal_schema["required"])
     inputs: list[dict[str, Any]] = []
+    missing = object()
     for name in input_order:
+        property_schema = _plain(goal_schema["properties"][name])
+        schema_default = property_schema.pop("default", missing)
+        projected_default = goal_default.get(name, missing)
+        if schema_default is missing or projected_default is missing:
+            if schema_default is not projected_default:
+                return False
+        elif schema_default != projected_default:
+            return False
         descriptor: dict[str, Any] = {
             "name": name,
-            "schema": _plain(goal_schema["properties"][name]),
+            "schema": property_schema,
             "required": name in required,
         }
         if name in goal_default:
@@ -2159,7 +2171,12 @@ def project_published_workflow_contract(
             graph,
             host_resource_template_uuid=host_uuid,
         )
-    except (WorkflowIOValidationError, WorkflowSchemaError, TypeError, ValueError):
+    except (
+        WorkflowIOValidationError,
+        WorkflowSchemaError,
+        TypeError,
+        ValueError,
+    ):
         raise CompositeCatalogMismatch("/published_workflow/io_contract") from None
 
     input_contract = workflow_io.input_contract.to_dict()
