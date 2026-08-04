@@ -245,12 +245,18 @@ def _candidate_node(
             "device_id": device.device_id,
         }
     template = catalog_action.template
+    # 模板标题是未显式覆盖时的节点展示默认值；动作业务名仅作旧目录回退。
+    template_title = (
+        template.get("display_name")
+        or template.get("name")
+        or declaration.result_name
+    )
     return {
         "uuid": declaration.node_uuid,
         "workflow_node_template_uuid": str(template["uuid"]),
         "parent_uuid": None,
         "material_uuid": None,
-        "name": declaration.title or declaration.result_name,
+        "name": declaration.title or template_title,
         "type": str(template.get("node_type") or template.get("type") or "compute"),
         "icon": template.get("icon"),
         "pose": {},

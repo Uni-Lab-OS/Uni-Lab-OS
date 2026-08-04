@@ -88,7 +88,7 @@ def _template(
             "name": name,
             "display_name": name.title(),
             "class": "lab.devices:Reactor",
-            "description": None,
+            "description": f"{name.title()} 动作模板说明",
             "meta_data": {"owner": "test"},
             "goal": {},
             "goal_default": {},
@@ -312,6 +312,27 @@ def test_compile_builds_backend_shaped_candidate(
     assert len(result.graph["edges"]) == 1
     assert result.graph["edges"][0]["source_handle_uuid"] == PREPARE_SAMPLE_SOURCE
     assert result.graph["edges"][0]["target_handle_uuid"] == ANALYZE_SAMPLE_TARGET
+
+
+def test_unannotated_node_inherits_action_template_metadata(
+    authoring_engine: WorkflowAuthoringEngine,
+) -> None:
+    """未写节点注释时应继承动作模板（Action Template）的显示名和描述。"""
+
+    result = _compile(authoring_engine)
+
+    assert result.valid and result.graph is not None, result.diagnostics
+    prepare, analyze = result.graph["nodes"]
+    assert (prepare["name"], prepare["description"]) == (
+        "Prepare",
+        "Prepare 动作模板说明",
+    )
+    assert (analyze["name"], analyze["description"]) == (
+        "Analyze",
+        "Analyze 动作模板说明",
+    )
+    assert result.normalized_python_source is not None
+    assert "# [" not in result.normalized_python_source
 
 
 def test_compile_is_deterministic_and_emits_source_map_and_changeset(

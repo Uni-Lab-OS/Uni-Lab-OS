@@ -167,7 +167,6 @@ def render_authoring_python(
         metadata_comment = _node_metadata_comment(
             node=node,
             action=action,
-            result_name=result_name,
         )
         if metadata_comment is not None:
             lines.append(f"    {metadata_comment}")
@@ -593,20 +592,21 @@ def _node_metadata_comment(
     *,
     node: Mapping[str, Any],
     action: AuthoringCatalogAction,
-    result_name: str,
 ) -> str | None:
     """把节点标题和描述渲染为规范单行展示注释。
 
-    参数说明：``node`` 提供当前展示字段，``action`` 提供目录默认描述，
-    ``result_name`` 是独立 Python 结果变量；当展示字段等于默认回退时返回
-    ``None``，否则返回 ``# [标题]: 描述``。无法无损表示的换行、右方括号或空
-    描述会拒绝生成，避免源码往返静默改变候选图。
+    参数说明：``node`` 提供当前展示字段，``action`` 提供动作模板（Action
+    Template）的默认显示名和描述；当节点展示字段等于模板默认值时返回
+    ``None``，否则返回 ``# [标题]: 描述``。无法无损表示的换行、右方括号或
+    空描述会拒绝生成，避免源码往返静默改变候选图。
     """
 
     title = node.get("name")
     description = node.get("description")
+    # 动作模板显示名是人类可读默认值，动作业务名只用于兼容旧目录。
+    template_title = action.template.get("display_name") or action.template.get("name")
     template_description = action.template.get("description")
-    if title == result_name and description == template_description:
+    if title == template_title and description == template_description:
         return None
     if not isinstance(title, str) or not title.strip():
         raise AuthoringGraphError("candidate_invalid", "节点展示标题不能为空")

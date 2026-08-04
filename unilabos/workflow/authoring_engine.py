@@ -7,10 +7,6 @@ from contextlib import contextmanager
 from copy import deepcopy
 from typing import Any
 
-from unilabos.workflow.candidate_validation import (
-    CandidateBundleError,
-    validate_candidate_bundle,
-)
 from unilabos.workflow.authoring_ast import (
     AuthoringSyntaxError,
     diagnostic_source_range,
@@ -24,10 +20,14 @@ from unilabos.workflow.authoring_graph import (
 )
 from unilabos.workflow.authoring_kernel import AuthoringCatalogSnapshot
 from unilabos.workflow.authoring_python import render_authoring_python
+from unilabos.workflow.candidate_validation import (
+    CandidateBundleError,
+    validate_candidate_bundle,
+)
 from unilabos.workflow.models import CandidateCompilation, validate_uuid
 from unilabos.workflow.source_coordinates import require_utf8_text
 
-_COMPILER_VERSION = "unilabos-authoring/f02a-v1"
+_COMPILER_VERSION = "unilabos-authoring/f02a-v2"
 
 
 class WorkflowAuthoringEngine:

@@ -167,3 +167,24 @@ def test_invalid_or_orphan_node_display_comment_fails_closed(
         diagnostic["code"] == "invalid_node_metadata"
         for diagnostic in compiled.diagnostics
     )
+
+
+def test_inline_node_display_comment_fails_instead_of_being_ignored(
+    authoring_engine: WorkflowAuthoringEngine,
+) -> None:
+    """动作行后的节点展示注释必须明确失败，不能静默丢失覆盖语义。"""
+
+    source = _canonical_source().replace(
+        "    prepared = reactor.prepare(sample=sample, cycles=cycles)",
+        "    prepared = reactor.prepare(sample=sample, cycles=cycles)"
+        "  # [加入预混液]: PCR 中预混液的分配",
+    )
+
+    compiled = _compile(authoring_engine, source)
+
+    assert not compiled.valid
+    assert compiled.graph is None
+    assert any(
+        diagnostic["code"] == "invalid_node_metadata"
+        for diagnostic in compiled.diagnostics
+    )

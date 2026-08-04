@@ -4,7 +4,9 @@ from __future__ import annotations
 
 import ast
 import re
+import tokenize
 from dataclasses import dataclass
+from io import StringIO
 from typing import Any, Never
 
 from unilabos.registry.annotation_schema import (
@@ -482,6 +484,21 @@ def _source_node_metadata(
     lines = source_lines(python_source)
     metadata: dict[int, tuple[str, str]] = {}
     function_end_line = function.end_lineno or function.lineno
+    # 注释词法单元用于区分真正的行尾注释与字符串中的 ``# [`` 文本。
+    comment_tokens = tokenize.generate_tokens(StringIO(python_source).readline)
+    for token_info in comment_tokens:
+        if token_info.type != tokenize.COMMENT:
+            continue
+        line_number, column = token_info.start
+        if not function.lineno <= line_number <= function_end_line:
+            continue
+        if _NODE_METADATA_PREFIX.match(token_info.string) is None:
+            continue
+        if lines[line_number - 1][:column].strip():
+            _fail(
+                "invalid_node_metadata",
+                "节点展示注释必须独占一行并位于动作声明前",
+            )
     for line_number in range(function.lineno, function_end_line + 1):
         line = lines[line_number - 1]
         if _NODE_METADATA_PREFIX.match(line) is None:
