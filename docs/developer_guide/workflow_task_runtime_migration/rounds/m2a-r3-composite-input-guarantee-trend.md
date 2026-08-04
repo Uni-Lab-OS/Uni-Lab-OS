@@ -5,7 +5,7 @@
 基线：`integration/workflow-task-runtime@fef34d2ccee250eba8f03612dfd83cb196c2b56b`
 行为候选：`65ee5c86d60c179efe1e21ffd262e462d5f8ae32`
 
-状态：**三轮独立红灯、两项审查 finding 回归、SZLab 原始复现和完整仓库门禁均已转绿；等待同一独立审查者对新精确候选复核。**
+状态：**三轮独立红灯、两项审查 finding 回归、SZLab 原始复现和完整仓库门禁均已转绿；同一独立审查者已对精确行为候选给出 `ACCEPT`。**
 
 ## 1. 结果与范围
 
@@ -44,6 +44,8 @@
 
 同一审查者复核 `a72fd540` 时进一步发现：复合工作流调用（CompositeWorkflowInvocation）被普通可执行节点门禁排除，因此同一输入同时存在公开工作流（Workflow）输入绑定和非空静态参数时会被错误接受。独立测试作者先以真实编译候选固定 RED，`65ee5c86` 再为公开与展开后的复合调用统一执行输入提供者（Provider）唯一性、必填输入和类型门禁。
 
+独立审查者 `/root/composite_input_guarantee_review` 以 regression/security 视角复核精确行为候选 `65ee5c86d60c179efe1e21ffd262e462d5f8ae32`，最终结论为 `ACCEPT`。首轮 child-local 同名绑定越权和上轮 `param + input_binding` 双提供者（Provider）均为 `RESOLVED`；没有遗留 blocking 或 non-blocking finding。
+
 ## 4. 验证证据
 
 精确行为候选 `65ee5c86d60c179efe1e21ffd262e462d5f8ae32`：
@@ -51,6 +53,7 @@
 | 门禁 | 结果 |
 |---|---:|
 | M2A-R3、D-067、C1-R2 与复合输入提供者（Provider）专项 | `27 passed, 1 warning` |
+| 独立审查反例矩阵 | `37 passed, 1 warning` |
 | SZLab `single_sample_atomic_material.py` 嵌套 `material_transfer.py` 原始合同 | `1 passed` |
 | 完整 `pytest -q -rs tests` | `2605 passed, 7 skipped, 68 warnings` |
 | changed-file Ruff `E/F/I` | passed |
@@ -83,4 +86,5 @@
 
 - 本轮没有修改前端（FE）、SZLab 源码或真实设备配置。
 - 本轮没有合并到 `integration/workflow-task-runtime`，也没有 push。
-- 合并前仍需同一独立审查者对包含 finding 修复的精确候选确认 `ACCEPT`；任一生产代码变化都使该确认失效。
+- 精确行为候选已经独立审查 `ACCEPT`；任何后续生产代码变化都会使该确认失效。
+- 当前等待用户判断是否合并并 push，未擅自发布。
