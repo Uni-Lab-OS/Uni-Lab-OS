@@ -134,6 +134,41 @@ class RecordingMonitor:
         """
 
 
+class PartialStartMonitor:
+    """模拟启动失败且第一次停止也失败的监视器生命周期。"""
+
+    instances: ClassVar[list[PartialStartMonitor]] = []
+
+    def __init__(self, service: WorkflowService) -> None:
+        """记录未完成发布的服务与后续停止次数。
+
+        参数：``service`` 是启动恢复完成但尚未可靠发布的工作流服务。
+        返回：无；实例加入测试观察集合。
+        """
+
+        self.service = service
+        self.stop_calls = 0
+        self.__class__.instances.append(self)
+
+    def start(self) -> None:
+        """注入监视器部分启动失败。
+
+        参数：无。返回：无；始终抛出 ``RuntimeError`` 作为原始启动异常。
+        """
+
+        raise RuntimeError("注入的源码监视器启动失败")
+
+    def stop(self) -> None:
+        """第一次停止失败，第二次由重置流程成功接管清理。
+
+        参数：无。返回：无；首次抛出 ``RuntimeError``，后续调用幂等成功。
+        """
+
+        self.stop_calls += 1
+        if self.stop_calls == 1:
+            raise RuntimeError("注入的源码监视器停止失败")
+
+
 @pytest.fixture(autouse=True)
 def clean_composition() -> Any:
     """为每个用例隔离进程级工作流组合根。
@@ -378,3 +413,39 @@ def test_composition_identity_includes_compiler_and_authorized_roots(
             compiler=compiler,
             editable_package_roots=(root_b,),
         )
+
+
+def test_partial_monitor_start_failure_retains_retryable_cleanup_owner(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """监视器部分启动和首次停止失败时必须保留可重试清理所有权。
+
+    参数：``tmp_path`` 隔离工作目录；``monkeypatch`` 注入失败监视器。
+    返回：无；证明原始启动异常不被覆盖、服务不公开，重置可再次停止并释放服务。
+    """
+
+    working_dir = tmp_path / "runtime"
+    PartialStartMonitor.instances.clear()
+    original_monitor = composition.WorkflowSourceMonitor
+    monkeypatch.setattr(composition, "WorkflowSourceMonitor", PartialStartMonitor)
+
+    with pytest.raises(RuntimeError) as caught:
+        composition.compose_workflow_runtime(
+            working_dir,
+            editable_package_roots=(),
+        )
+
+    assert str(caught.value) == "注入的源码监视器启动失败"
+    assert "注入的源码监视器停止失败" in "\n".join(caught.value.__notes__)
+    assert composition.get_workflow_service() is None
+    assert PartialStartMonitor.instances[0].stop_calls == 1
+
+    composition.reset_workflow_service_for_test()
+    assert PartialStartMonitor.instances[0].stop_calls == 2
+    monkeypatch.setattr(composition, "WorkflowSourceMonitor", original_monitor)
+    replacement = composition.compose_workflow_runtime(
+        working_dir,
+        editable_package_roots=(),
+    )
+    assert composition.get_workflow_service() is replacement

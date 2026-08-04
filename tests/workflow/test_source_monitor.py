@@ -25,11 +25,15 @@ class RecordingSourceChangeService:
         *,
         transient_failures: int = 0,
         pending_results: int = 0,
+        enumeration_failures: int = 0,
+        fatal_enumeration_failures: int = 0,
     ) -> None:
         """建立一个可控的源码变化命令接收端。
 
         参数：``transient_failures`` 是成功前抛出的瞬态故障次数；
-        ``pending_results`` 是成功前返回未结算结果的次数。
+        ``pending_results`` 是成功前返回未结算结果的次数；
+        ``enumeration_failures`` 与 ``fatal_enumeration_failures`` 分别注入可恢复
+        枚举故障和迫使工作线程退出的异常。
         返回：无；所有调用记录在实例内，供公开命令接缝断言。
         """
 
@@ -40,14 +44,25 @@ class RecordingSourceChangeService:
         self.attempts: list[tuple[Any, ...]] = []
         self._transient_failures = transient_failures
         self._pending_results = pending_results
+        self._enumeration_failures = enumeration_failures
+        self._fatal_enumeration_failures = fatal_enumeration_failures
+        self.enumerated = threading.Event()
         self.submitted = threading.Event()
 
     def list_registered_sources(self) -> list[dict[str, str]]:
         """返回唯一已注册的工作流源码（Workflow Source）。
 
-        参数：无。返回：含规范工作流 UUID 的来源注册列表。
+        参数：无。返回：含规范工作流 UUID 的来源注册列表。注入的瞬态枚举
+        故障抛出 ``OSError``；致命枚举故障使当前工作线程退出一次。
         """
 
+        self.enumerated.set()
+        if self._fatal_enumeration_failures > 0:
+            self._fatal_enumeration_failures -= 1
+            raise SystemExit("注入的源码枚举线程退出")
+        if self._enumeration_failures > 0:
+            self._enumeration_failures -= 1
+            raise OSError("注入的瞬态源码枚举故障")
         return [self.registration]
 
     def source_signature(
@@ -273,6 +288,106 @@ def test_monitor_retries_when_service_keeps_recovery_pending() -> None:
         monitor.stop()
 
     assert service.attempts == [("file", 1), ("file", 1)]
+
+
+def test_monitor_survives_a_transient_source_enumeration_failure() -> None:
+    """一次来源枚举故障不得杀死长期运行的源码监视线程。
+
+    参数：无。返回：无；证明枚举失败后仍会提交同一活动来源的稳定变化命令。
+    """
+
+    service = RecordingSourceChangeService(enumeration_failures=1)
+    monitor = WorkflowSourceMonitor(
+        service,
+        interval_seconds=0.003,
+        settle_seconds=0.01,
+    )
+    monitor.start()
+    try:
+        assert service.submitted.wait(timeout=1)
+    finally:
+        monitor.stop()
+
+    assert service.attempts == [("file", 1)]
+
+
+def test_monitor_can_restart_after_stop_with_a_new_file_generation() -> None:
+    """停止后的同一监视器实例必须能以新停止事件重新启动。
+
+    参数：无。返回：无；证明第二次启动可以处理后续文件世代且不会复用已设置
+    的停止事件。
+    """
+
+    service = RecordingSourceChangeService()
+    monitor = WorkflowSourceMonitor(
+        service,
+        interval_seconds=0.003,
+        settle_seconds=0.01,
+    )
+    monitor.start()
+    assert service.submitted.wait(timeout=1)
+    monitor.stop()
+
+    service.signature = ("file", 2)
+    service.submitted.clear()
+    monitor.start()
+    try:
+        assert service.submitted.wait(timeout=1)
+    finally:
+        monitor.stop()
+
+    assert service.attempts == [("file", 1), ("file", 2)]
+
+
+def test_concurrent_monitor_start_calls_create_only_one_worker() -> None:
+    """并发启动调用不得创建多个源码监视工作线程。
+
+    参数：无。返回：无；通过唯一稳定源码变化命令证明生命周期锁完成单例启动。
+    """
+
+    service = RecordingSourceChangeService()
+    monitor = WorkflowSourceMonitor(
+        service,
+        interval_seconds=0.003,
+        settle_seconds=0.01,
+    )
+    callers = [threading.Thread(target=monitor.start) for _index in range(12)]
+    for caller in callers:
+        caller.start()
+    for caller in callers:
+        caller.join(timeout=1)
+    try:
+        assert service.submitted.wait(timeout=1)
+        threading.Event().wait(0.05)
+    finally:
+        monitor.stop()
+
+    assert all(not caller.is_alive() for caller in callers)
+    assert service.attempts == [("file", 1)]
+
+
+def test_monitor_can_restart_after_an_unexpected_worker_exit() -> None:
+    """工作线程异常退出后不得留下阻止恢复启动的陈旧线程身份。
+
+    参数：无。返回：无；第一次枚举主动退出，第二次启动仍能处理稳定源码命令。
+    """
+
+    service = RecordingSourceChangeService(fatal_enumeration_failures=1)
+    monitor = WorkflowSourceMonitor(
+        service,
+        interval_seconds=0.003,
+        settle_seconds=0.01,
+    )
+    monitor.start()
+    assert service.enumerated.wait(timeout=1)
+    threading.Event().wait(0.05)
+    monitor.start()
+    try:
+        assert service.submitted.wait(timeout=1)
+    finally:
+        monitor.stop()
+
+    assert service.attempts == [("file", 1)]
 
 
 def test_service_rejects_a_stale_observed_signature(tmp_path: Path) -> None:
