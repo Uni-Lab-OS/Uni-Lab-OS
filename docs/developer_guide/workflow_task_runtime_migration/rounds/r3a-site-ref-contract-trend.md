@@ -45,6 +45,7 @@
 | Annotation/Action/Catalog/I/O/Task/Authoring/DeviceAction 相关回归（初始实现） | `382 passed, 1 warning` |
 | 相关回归（首轮审查修复后） | `396 passed, 1 warning` |
 | 完整 `pytest -q -rs tests` | `2613 passed, 7 skipped, 68 warnings` |
+| 首轮审查修复后完整 `pytest -q -rs tests` | `2618 passed, 7 skipped, 68 warnings` |
 | SiteRef Pydantic exact-object smoke | passed |
 | changed Python Ruff E/F/I（排除 E501） | passed |
 | changed production/test `compileall` | passed |
@@ -78,5 +79,16 @@ Spec 报告 3 个 blocking finding：
 - 新增 5 个回归覆盖 WorkflowService success/fail-closed、Annotation/Catalog 双边界拒绝以及
   legacy authoring compile/generate round-trip。
 
-修复后的完整仓库 gate 与同一 reviewer 复审尚待执行；结果会继续追加，不把首次 rejected SHA
-写成 accepted candidate。
+修复后的精确 behavior candidate 为
+`6c62b29787f94d653200767395255928837c3e50`。完整仓库 gate 为
+`2618 passed, 7 skipped, 68 warnings`；changed Python E/F/I、compileall、新测试 formatter 与
+`git diff --check` 全部通过。
+
+同一 reviewer 对该 exact SHA 复审确认：
+
+- 3 个 blocking finding 全部关闭；
+- 额外验证生成源码包含 `site: SiteRef`，再次编译有效且 output contract 仍为
+  `{"$slot":"SiteRef"}`；
+- remaining blocking：0；
+- remaining non-blocking：0；
+- 结论：**ACCEPT**。
