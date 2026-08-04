@@ -4,10 +4,14 @@ from __future__ import annotations
 
 import threading
 from pathlib import Path
+from collections.abc import Callable
 from typing import Any, Optional
 
 from unilabos.registry.template_projection import RegistryTemplateProjection
 from unilabos.workflow.authoring_engine import WorkflowAuthoringEngine
+from unilabos.workflow.device_action_run_bridge import (
+    DeviceActionRunWorkflowSpecBridge,
+)
 from unilabos.workflow.service import AuthoringCompiler, WorkflowService
 from unilabos.workflow.source_monitor import WorkflowSourceMonitor
 from unilabos.workflow.store import WorkflowStore
@@ -23,8 +27,18 @@ def compose_workflow_runtime(
     working_dir: str | Path,
     *,
     compiler: Optional[AuthoringCompiler] = None,
+    material_resolver: Optional[
+        Callable[[str], Optional[dict[str, Any]]]
+    ] = None,
+    scheduler: Optional[Any] = None,
 ) -> WorkflowService:
-    """装配工作区唯一的 Workflow authority、启动恢复和 Draft 监视。"""
+    """装配工作区唯一的工作流权威、启动恢复和草稿监视。
+
+    参数：``working_dir`` 决定现有工作流 SQLite 路径；``compiler`` 是可信工作流
+    创作编译器；``material_resolver`` 按稳定 UUID 读取本地物料权威摘要；
+    ``scheduler`` 是仅在本地调度模式装配的现有调度器（EdgeScheduler）。返回
+    进程唯一工作流服务；运行期间禁止切换数据库身份。
+    """
 
     global _database_path, _monitor, _service
     # Backend-shaped definitions/tasks and legacy execution history share the
@@ -37,9 +51,21 @@ def compose_workflow_runtime(
                     "Workflow authority cannot switch working_dir at runtime"
                 )
             return _service
+        # ``workflow_store`` 是本地标准 Task/Job 写模型；执行桥与应用服务必须
+        # 共享同一实例，避免一个进程内出现两个互不相知的状态连接。
+        workflow_store = WorkflowStore(database_path)
+        device_action_run_bridge = None
+        if scheduler is not None and material_resolver is not None:
+            device_action_run_bridge = DeviceActionRunWorkflowSpecBridge(
+                workflow_store,
+                scheduler=scheduler,
+                material_resolver=material_resolver,
+            )
         _service = WorkflowService(
-            WorkflowStore(database_path),
+            workflow_store,
             compiler=compiler,
+            material_resolver=material_resolver,
+            device_action_run_bridge=device_action_run_bridge,
         )
         _database_path = database_path
         _service.recover_registered_sources()
@@ -63,12 +89,14 @@ def compose_local_workflow_template_runtime(
     *,
     inventory_store: Any,
     registry: Any,
+    scheduler: Optional[Any] = None,
 ) -> tuple[WorkflowService, RegistryTemplateProjection]:
     """装配本地模板权威、F02 创作编译器与工作流服务。
 
     参数说明：``working_dir`` 决定现有 ``workflow_history.db`` 路径；
     ``inventory_store`` 是 ``inventory.db`` 的只读身份来源；``registry`` 是原始
-    Registry 或不可变模板快照。返回共享同一已发布目录代际的服务和投影。
+    Registry 或不可变模板快照；``scheduler`` 是本地模式既有调度器。返回共享
+    同一已发布目录代际的服务和投影。
     """
 
     global _template_projection
@@ -100,6 +128,27 @@ def compose_local_workflow_template_runtime(
             )
             return str(resource_row["uuid"]) if resource_row is not None else ""
 
+        def resolve_material_identity(
+            material_uuid: str,
+        ) -> Optional[dict[str, Any]]:
+            """按稳定 UUID 读取活动物料（Material）身份。
+
+            参数：``material_uuid`` 是设备动作最终参数或执行器分配引用的实际物料
+            UUID。返回 UUID 与资源模板 UUID 摘要；不存在或已删除时返回 ``None``。
+            """
+
+            # ``material_row`` 来自本地库存权威，只提供合同校验所需的稳定身份，
+            # 不把可变物料快照复制进工作流写模型。
+            material_row = inventory_store.query_one(
+                """
+                SELECT uuid, resource_template_uuid, meta_data
+                FROM material
+                WHERE uuid = ? AND deleted_at IS NULL
+                """,
+                (material_uuid,),
+            )
+            return dict(material_row) if material_row is not None else None
+
         projection = RegistryTemplateProjection(
             WorkflowStore(database_path),
             authority_id="local",
@@ -108,7 +157,12 @@ def compose_local_workflow_template_runtime(
         try:
             snapshot = projection.refresh(registry)
             compiler = WorkflowAuthoringEngine(catalog=snapshot)
-            service = compose_workflow_runtime(working_dir, compiler=compiler)
+            service = compose_workflow_runtime(
+                working_dir,
+                compiler=compiler,
+                material_resolver=resolve_material_identity,
+                scheduler=scheduler,
+            )
         except BaseException:
             projection.close()
             raise

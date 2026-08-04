@@ -173,6 +173,29 @@ class WorkflowTaskCreateRequest(_BackendModel):
         return normalize_json_object(value)
 
 
+class DeviceActionRunCreateRequest(_StrictModel):
+    """Backend 规范的设备单动作运行（DeviceActionRun）创建 DTO。"""
+
+    material_uuid: str
+    workflow_node_template_uuid: str
+    param: Optional[Dict[str, Any]] = None
+    execution_policy: Dict[str, Any] = Field(default_factory=dict)
+    idempotency_key: str
+    description: Optional[str] = None
+    meta_data: Dict[str, Any] = Field(default_factory=dict)
+
+    @field_validator("execution_policy", "meta_data", mode="before")
+    @classmethod
+    def _json_object(cls, value: Any) -> Dict[str, Any]:
+        """规范化设备动作请求中的可选 JSON 对象。
+
+        参数：``value`` 是 Pydantic 解码前的策略或元数据值。返回独立 JSON
+        对象；缺失或 ``null`` 与 Backend 的零值对象语义一致。
+        """
+
+        return normalize_json_object(value)
+
+
 class DraftWriteRequest(_StrictModel):
     python_source: str
     expected_draft_hash: Optional[HashToken]
@@ -263,7 +286,11 @@ def format_sse_event(event: Dict[str, Any]) -> str:
 
 
 def create_workflow_router(service: WorkflowService) -> APIRouter:
-    """Build the public Workflow router around one injected authority."""
+    """围绕唯一工作流权威创建 Backend-shaped HTTP Router。
+
+    参数：``service`` 是注入的工作流应用服务。返回同时承载工作流、任务、作业、
+    设备单动作运行（DeviceActionRun）及创作接口的 FastAPI Router。
+    """
 
     router = APIRouter(
         prefix="/api/v1",
@@ -338,19 +365,40 @@ def create_workflow_router(service: WorkflowService) -> APIRouter:
             status=201,
         )
 
+    @router.post("/device-action-runs")
+    def create_device_action_run(
+        body: DeviceActionRunCreateRequest,
+    ) -> JSONResponse:
+        """创建或幂等复用一次设备单动作运行（DeviceActionRun）。
+
+        参数：``body`` 完全采用 Backend DTO。返回标准工作流任务（WorkflowTask）
+        与唯一工作流节点作业（WorkflowNodeJob）；首次创建为 HTTP 201，复用为 200。
+        """
+
+        result = service.create_device_action_run(**body.model_dump())
+        return _success(result, status=201 if result["created"] else 200)
+
     @router.get("/workflow-tasks")
     def list_workflow_tasks(
         page: int = Query(default=1),
         page_size: int = Query(default=20),
         workflow_uuid: Optional[str] = Query(default=None),
+        execution_kind: str = Query(default=""),
         status: str = Query(default=""),
         cleanup_status: str = Query(default=""),
     ) -> JSONResponse:
+        """按 Backend 筛选合同分页返回工作流任务（WorkflowTask）。
+
+        参数包括分页、可选工作流 UUID、执行来源、业务状态和清理状态；返回标准
+        分页 envelope，其中直接设备动作可用 ``ad_hoc_device_action`` 单独查询。
+        """
+
         return _success(
             service.list_workflow_tasks(
                 page=page,
                 page_size=page_size,
                 workflow_uuid=workflow_uuid,
+                execution_kind=execution_kind,
                 status=status,
                 cleanup_status=cleanup_status,
             )
@@ -475,6 +523,12 @@ def install_workflow_api(
         _request: Request,
         error: WorkflowError,
     ) -> JSONResponse:
+        """把工作流领域错误映射成统一业务 envelope。
+
+        参数：``_request`` 是当前 HTTP 请求但不参与裁决；``error`` 携带稳定错误
+        分类。返回与 Backend 一致的 HTTP 200 业务错误响应。
+        """
+
         return _error(error)
 
     @app.exception_handler(RequestValidationError)
@@ -482,11 +536,18 @@ def install_workflow_api(
         request: Request,
         error: RequestValidationError,
     ) -> JSONResponse:
+        """把工作流相关 DTO 校验错误映射为 Backend 业务码 1000。
+
+        参数：``request`` 用于识别合同路由；``error`` 是 FastAPI 校验详情。返回
+        工作流合同的统一错误 envelope，其他路由继续使用框架默认响应。
+        """
+
         workflow_prefixes = (
             "/api/v1/workflows",
             "/api/v1/workflow-tasks",
             "/api/v1/workflow-node-jobs",
             "/api/v1/workflow-node-templates",
+            "/api/v1/device-action-runs",
             "/api/v1/events",
         )
         if any(

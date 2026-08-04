@@ -11,7 +11,7 @@ import stat
 import struct
 import threading
 from collections import defaultdict
-from collections.abc import Iterable, Iterator
+from collections.abc import Callable, Iterable, Iterator
 from contextlib import contextmanager, suppress
 from datetime import datetime, timezone
 from pathlib import Path, PurePosixPath
@@ -23,6 +23,12 @@ from pydantic import ValidationError
 from unilabos.workflow.candidate_validation import (
     CandidateBundleError,
     validate_candidate_bundle,
+)
+from unilabos.workflow.device_action_run import (
+    DeviceActionRunConflict,
+    DeviceActionRunInputError,
+    DeviceActionRunService,
+    DeviceActionRunUnavailable,
 )
 from unilabos.workflow.graph_validation import GraphValidationError, validate_graph
 from unilabos.workflow.json_codec import encode_json
@@ -213,6 +219,20 @@ class AuthoringCompiler(Protocol):
     ) -> CandidateCompilation: ...
 
 
+class DeviceActionRunBridge(Protocol):
+    """设备单动作运行（DeviceActionRun）的本地执行端口。"""
+
+    def submit(self, aggregate: Dict[str, Any]) -> None:
+        """提交首次创建的 Task/Job 聚合；参数是标准持久投影，返回无。"""
+
+        ...
+
+    def close(self) -> None:
+        """释放执行端口持有的生命周期监听；返回无且必须幂等。"""
+
+        ...
+
+
 def _sha256(data: bytes) -> str:
     return f"sha256:{hashlib.sha256(data).hexdigest()}"
 
@@ -237,9 +257,28 @@ class WorkflowService:
         store: WorkflowStore,
         *,
         compiler: Optional[AuthoringCompiler] = None,
+        material_resolver: Optional[
+            Callable[[str], Optional[Dict[str, Any]]]
+        ] = None,
+        device_action_run_bridge: Optional[DeviceActionRunBridge] = None,
     ):
+        """装配本地工作流应用服务。
+
+        参数：``store`` 是唯一工作流写模型；``compiler`` 负责编译可信工作流源码；
+        ``material_resolver`` 按物料 UUID 读取活动物料身份，供设备单动作运行
+        （DeviceActionRun）关闭式校验；``device_action_run_bridge`` 把首次创建的
+        标准 Task/Job 提交到本地执行内核。返回无。
+        """
+
         self._store = store
         self.compiler = compiler
+        self._device_action_runs = DeviceActionRunService(
+            store,
+            material_resolver=material_resolver,
+        )
+        # ``device_action_run_bridge`` 是可选本地执行端口；Backend-controlled
+        # 模式不装配它，避免 OS 形成第二个生产调度权威（Scheduler Authority）。
+        self._device_action_run_bridge = device_action_run_bridge
         self._locks_guard = threading.Lock()
         self._authoring_locks: Dict[str, threading.RLock] = {}
 
@@ -436,6 +475,56 @@ class WorkflowService:
         except StoreConflict:
             raise WorkflowError("invalid_input") from None
 
+    def create_device_action_run(
+        self,
+        *,
+        material_uuid: str,
+        workflow_node_template_uuid: str,
+        param: Optional[Dict[str, Any]],
+        execution_policy: Optional[Dict[str, Any]],
+        idempotency_key: str,
+        description: Optional[str],
+        meta_data: Optional[Dict[str, Any]],
+    ) -> Dict[str, Any]:
+        """创建或幂等复用设备单动作运行（DeviceActionRun）。
+
+        参数与 Backend ``POST /device-action-runs`` DTO 同名；返回标准工作流任务
+        （WorkflowTask）、唯一工作流节点作业（WorkflowNodeJob）和 ``created``。
+        输入/引用错误、依赖未装配和幂等冲突分别映射为稳定 HTTP 业务错误。
+        """
+
+        try:
+            # ``aggregate`` 是已原子持久化的标准工作流任务（WorkflowTask）和
+            # 工作流节点作业（WorkflowNodeJob）；只有首次创建才允许物理派发。
+            aggregate = self._device_action_runs.create(
+                material_uuid=material_uuid,
+                workflow_node_template_uuid=workflow_node_template_uuid,
+                param=param,
+                execution_policy=execution_policy,
+                idempotency_key=idempotency_key,
+                description=description,
+                meta_data=meta_data,
+            )
+            if (
+                aggregate["created"] is True
+                and self._device_action_run_bridge is not None
+            ):
+                self._device_action_run_bridge.submit(aggregate)
+                # 旧调度器可能同步完成首次派发，必须返回刷新后的权威状态，不能把
+                # 创建事务中的 ``pending`` 快照误报给前端。
+                aggregate = {
+                    "task": self._store.get_task(aggregate["task"]["uuid"]),
+                    "job": self._store.get_job(aggregate["job"]["uuid"]),
+                    "created": True,
+                }
+            return aggregate
+        except DeviceActionRunInputError:
+            raise WorkflowError("invalid_input") from None
+        except DeviceActionRunUnavailable:
+            raise WorkflowError("template_catalog_unavailable") from None
+        except DeviceActionRunConflict:
+            raise WorkflowConflict("conflict") from None
+
     def get_workflow_task(self, task_uuid: str) -> Dict[str, Any]:
         try:
             identity = validate_uuid(task_uuid)
@@ -452,9 +541,17 @@ class WorkflowService:
         page: int = 1,
         page_size: int = 20,
         workflow_uuid: Optional[str] = None,
+        execution_kind: str = "",
         status: str = "",
         cleanup_status: str = "",
     ) -> Dict[str, Any]:
+        """按 Backend 查询合同分页读取工作流任务（WorkflowTask）。
+
+        参数：分页字段限定结果窗口；``workflow_uuid`` 限定工作流定义；
+        ``execution_kind`` 区分工作流与直接设备动作来源；状态字段限定业务和清理
+        生命周期。返回分页投影，非法枚举或 UUID 映射为稳定输入错误。
+        """
+
         page, page_size = self._normalize_page(page, page_size)
         if workflow_uuid is not None:
             try:
@@ -462,7 +559,13 @@ class WorkflowService:
             except ValueError:
                 raise WorkflowError("invalid_input") from None
         status = status.strip().lower()
+        execution_kind = execution_kind.strip().lower()
         cleanup_status = cleanup_status.strip().lower()
+        if execution_kind and execution_kind not in {
+            "workflow",
+            "ad_hoc_device_action",
+        }:
+            raise WorkflowError("invalid_input")
         if status and status not in {
             "pending",
             "running",
@@ -485,6 +588,7 @@ class WorkflowService:
             page=page,
             page_size=page_size,
             workflow_uuid=workflow_uuid,
+            execution_kind=execution_kind,
             status=status,
             cleanup_status=cleanup_status,
         )
@@ -777,8 +881,10 @@ class WorkflowService:
                 continue
 
     def close(self) -> None:
-        """关闭由该 Service 独占的 Workflow 持久存储。"""
+        """关闭本地执行桥和由该 Service 独占的工作流持久存储。"""
 
+        if self._device_action_run_bridge is not None:
+            self._device_action_run_bridge.close()
         self._store.close()
 
     def get_authoring(self, workflow_uuid: str) -> Dict[str, Any]:

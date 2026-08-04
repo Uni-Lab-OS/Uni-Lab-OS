@@ -7,6 +7,8 @@ from typing import Any
 
 import pytest
 
+from unilabos.app.scheduler.dispatch import RecordingDispatcher
+from unilabos.app.scheduler.service import EdgeScheduler
 from unilabos.registry.template_projection import (
     RegistryTemplateProjection,
     RegistryTemplateProjectionError,
@@ -22,26 +24,35 @@ RESOURCE_TEMPLATE_UUID = "10000000-0000-4000-8000-000000000001"
 ALLOWED_MATERIAL_TEMPLATE_UUID = "10000000-0000-4000-8000-000000000002"
 EXPLICIT_NODE_UUID_A = "20000000-0000-4000-8000-000000000001"
 EXPLICIT_NODE_UUID_B = "20000000-0000-4000-8000-000000000002"
+DEVICE_MATERIAL_UUID = "30000000-0000-4000-8000-000000000001"
 
 
 class FakeInventoryStore:
     """提供活动资源模板身份映射的最小本地库存存储替身。"""
 
     def query_one(self, sql: str, params: tuple[Any, ...]) -> dict[str, Any] | None:
-        """按资源模板业务名返回活动 UUID。
+        """按资源模板业务名或物料 UUID 返回活动身份。
 
         参数说明：``sql`` 用于断言组合根只读取规范表；``params`` 包含 Registry
-        资源业务名；返回 ``pump`` 的活动资源模板摘要。
+        资源业务名或设备物料 UUID。返回资源模板或设备物料的权威摘要。
         """
 
-        assert "resource_template" in sql
-        resource_name = str(params[0])
-        if resource_name != "pump":
+        if "FROM resource_template" in sql:
+            resource_name = str(params[0])
+            if resource_name != "pump":
+                return None
+            return {
+                "uuid": RESOURCE_TEMPLATE_UUID,
+                "name": "pump",
+                "display_name": "注射泵",
+            }
+        assert "FROM material" in sql
+        if str(params[0]) != DEVICE_MATERIAL_UUID:
             return None
         return {
-            "uuid": RESOURCE_TEMPLATE_UUID,
-            "name": "pump",
-            "display_name": "注射泵",
+            "uuid": DEVICE_MATERIAL_UUID,
+            "resource_template_uuid": RESOURCE_TEMPLATE_UUID,
+            "meta_data": {"edge_local_id": "pump-01"},
         }
 
 
@@ -658,6 +669,72 @@ def test_local_runtime_shares_projection_with_authoring_compiler(tmp_path: Path)
             "lab.devices:Pump",
             "transfer",
         ).template["resource_template_uuid"] == RESOURCE_TEMPLATE_UUID
+        # ``device_action_run`` 证明组合根注入了同一库存权威的设备物料解析器，
+        # 而非仅在直接构造服务的合同测试中可用。
+        action_template = projection.snapshot().require_action(
+            "lab.devices:Pump",
+            "transfer",
+        ).template
+        device_action_run = workflow_service.create_device_action_run(
+            material_uuid=DEVICE_MATERIAL_UUID,
+            workflow_node_template_uuid=action_template["uuid"],
+            param={"volume": 2.0},
+            execution_policy={},
+            idempotency_key="local-composition-device-action-run",
+            description=None,
+            meta_data={},
+        )
+        assert device_action_run["created"] is True
+        assert device_action_run["job"]["material_uuid"] == DEVICE_MATERIAL_UUID
+    finally:
+        reset_workflow_service_for_test()
+
+
+def test_local_runtime_submits_device_action_run_to_existing_scheduler(
+    tmp_path: Path,
+) -> None:
+    """本地组合根必须把设备单动作运行接入既有调度器且复用标准 Job 身份。
+
+    参数说明：``tmp_path`` 隔离工作流数据库；测试用记录派发器证明装配层完成了
+    工作流规格（WorkflowSpec）转换，而不是只在手工构造的服务测试中生效。
+    """
+
+    reset_workflow_service_for_test()
+    # ``dispatcher`` 记录真正越过执行适配器边界的命令；``scheduler`` 是产品现有
+    # 本地调度器（EdgeScheduler），物料锁解析器在此动作无物料参数时返回空集合。
+    dispatcher = RecordingDispatcher()
+    scheduler = EdgeScheduler(
+        dispatcher=dispatcher,
+        material_lock_resolver=(
+            lambda _device_id, _action_name, _param: tuple()
+        ),
+    )
+    try:
+        workflow_service, projection = compose_local_workflow_template_runtime(
+            tmp_path,
+            inventory_store=FakeInventoryStore(),
+            registry=FakeRegistry(),
+            scheduler=scheduler,
+        )
+        action_template = projection.snapshot().require_action(
+            "lab.devices:Pump",
+            "transfer",
+        ).template
+
+        created = workflow_service.create_device_action_run(
+            material_uuid=DEVICE_MATERIAL_UUID,
+            workflow_node_template_uuid=action_template["uuid"],
+            param={"volume": 2.0},
+            execution_policy={},
+            idempotency_key="local-composition-dispatch",
+            description=None,
+            meta_data={},
+        )
+
+        assert created["task"]["status"] == "running"
+        assert created["job"]["status"] == "dispatched"
+        assert dispatcher.dispatched[0]["job_id"] == created["job"]["uuid"]
+        assert dispatcher.dispatched[0]["device_id"] == "pump-01"
     finally:
         reset_workflow_service_for_test()
 

@@ -72,6 +72,7 @@ from unilabos.utils.tracing import (
 
 logger = logging.getLogger(__name__)
 
+
 class EdgeScheduler:
     def __init__(
         self,
@@ -140,6 +141,13 @@ class EdgeScheduler:
         # 长生命周期根 span：workflow → action/job。只保存上下文/句柄，不保存 payload。
         self._workflow_spans: Dict[str, DetachedSpan] = {}
         self._job_spans: Dict[str, DetachedSpan] = {}
+        # 生命周期监听器仅承载标准 Task/Job 兼容回写，不成为第二个状态权威。
+        self._job_pre_dispatch_listeners: List[
+            Callable[[Dict[str, Any]], None]
+        ] = []
+        self._job_finished_listeners: List[
+            Callable[[str, bool, Any, str], None]
+        ] = []
 
     def _emit_monitor(self, channel: str, event_type: str, data: Dict[str, Any]) -> None:
         if self._monitor is None:
@@ -159,7 +167,86 @@ class EdgeScheduler:
             logger.exception("[EdgeScheduler] history.%s failed", method)
 
     def set_workflow_state_listener(self, listener: "Callable[[str, str], None]") -> None:
+        """替换工作流终态监听器；参数 ``listener`` 接收工作流身份和旧状态值。"""
+
         self._workflow_state_listener = listener
+
+    def add_job_pre_dispatch_listener(
+        self,
+        listener: Callable[[Dict[str, Any]], None],
+    ) -> None:
+        """注册作业派发前监听器。
+
+        参数：``listener`` 接收即将派发的作业摘要。返回无；监听器必须先提交持久
+        派发意图，异常会中止物理派发，禁止形成先发设备后记数据库的窗口。
+        """
+
+        self._job_pre_dispatch_listeners.append(listener)
+
+    def remove_job_pre_dispatch_listener(
+        self,
+        listener: Callable[[Dict[str, Any]], None],
+    ) -> None:
+        """移除派发前监听器；参数 ``listener`` 必须是此前注册的同一回调。"""
+
+        self._job_pre_dispatch_listeners = [
+            current
+            for current in self._job_pre_dispatch_listeners
+            if current != listener
+        ]
+
+    def add_job_finished_listener(
+        self,
+        listener: Callable[[str, bool, Any, str], None],
+    ) -> None:
+        """注册作业完成监听器。
+
+        参数：``listener`` 接收 Job UUID、成功标记、返回值和旧异常决策类型。返回
+        无；用于把旧调度结果投影回标准工作流节点作业（WorkflowNodeJob）。
+        """
+
+        self._job_finished_listeners.append(listener)
+
+    def remove_job_finished_listener(
+        self,
+        listener: Callable[[str, bool, Any, str], None],
+    ) -> None:
+        """移除作业完成监听器；参数 ``listener`` 必须是此前注册的同一回调。"""
+
+        self._job_finished_listeners = [
+            current
+            for current in self._job_finished_listeners
+            if current != listener
+        ]
+
+    def _notify_job_pre_dispatch(self, dispatching: Dict[str, Any]) -> None:
+        """同步通知派发意图；参数 ``dispatching`` 是即将越过执行边界的摘要。
+
+        返回无；任何监听器失败都会阻止执行适配器调用，由创建请求收到错误并保留
+        可核对的持久事实。
+        """
+
+        for listener in tuple(self._job_pre_dispatch_listeners):
+            listener(dict(dispatching))
+
+    def _notify_job_finished(
+        self,
+        job_id: str,
+        success: bool,
+        ret_value: Any,
+        suc_type: str,
+    ) -> None:
+        """隔离通知一次完成事实。
+
+        参数分别是作业身份、成功标记、设备返回值和旧异常决策类型。返回无；投影
+        失败只记录日志，禁止再次执行物理动作。
+        """
+
+        for listener in tuple(self._job_finished_listeners):
+            try:
+                listener(job_id, success, ret_value, suc_type)
+            except Exception:  # noqa: BLE001 - 完成投影应由后续核对修复
+                logger.exception("[EdgeScheduler] job finished listener failed")
 
     # ── 触发点 1：任务进来 ────────────────────────────────────
 
@@ -367,6 +454,7 @@ class EdgeScheduler:
                 "dispatched": dispatched,
             }
             notifications = self._collect_terminal_notifications()
+            self._notify_job_finished(job_id, success, ret_value, suc_type)
         self._fire_notifications(notifications)
         return result
 
@@ -519,7 +607,9 @@ class EdgeScheduler:
                     run.mark_failed(task.node.id)
                     continue
 
-            job_id = uuid_mod.uuid4().hex
+            # ``job_id`` 优先复用标准工作流节点作业（WorkflowNodeJob）身份；旧整图
+            # 没有提供时才维持历史随机身份行为。
+            job_id = task.node.job_id or uuid_mod.uuid4().hex
             payload = build_job_start_payload(
                 job_id=job_id,
                 task_id=run.spec.task_id,
@@ -562,6 +652,17 @@ class EdgeScheduler:
                             "action.name": task.node.action_name,
                         },
                     ):
+                        # 标准 Task/Job 必须先提交派发意图，才能越过物理执行边界。
+                        self._notify_job_pre_dispatch(
+                            {
+                                "job_id": job_id,
+                                "workflow_id": task.workflow_id,
+                                "node_id": task.node.id,
+                                "device_action_key": key,
+                                "estimated_s": round(estimated_s, 3),
+                                "estimate_source": estimate_source,
+                            }
+                        )
                         if not manual_confirm:
                             self._dispatcher.dispatch(payload)
             except BaseException as exc:
@@ -595,16 +696,16 @@ class EdgeScheduler:
             if lock_keys:
                 self._job_resource_locks[job_id] = lock_keys
                 held_resource_locks |= lock_keys
-            dispatched.append(
-                {
-                    "job_id": job_id,
-                    "workflow_id": task.workflow_id,
-                    "node_id": task.node.id,
-                    "device_action_key": key,
-                    "estimated_s": round(estimated_s, 3),
-                    "estimate_source": estimate_source,
-                }
-            )
+            # ``dispatched_item`` 同时供返回值、监控和标准 Task/Job 状态投影使用。
+            dispatched_item = {
+                "job_id": job_id,
+                "workflow_id": task.workflow_id,
+                "node_id": task.node.id,
+                "device_action_key": key,
+                "estimated_s": round(estimated_s, 3),
+                "estimate_source": estimate_source,
+            }
+            dispatched.append(dispatched_item)
             self._emit_monitor(
                 "action",
                 "job_dispatched",

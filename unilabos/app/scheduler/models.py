@@ -88,6 +88,8 @@ class WorkflowNode:
     """WorkflowNode 子集：Edge 执行一个设备动作所需的全部信息。"""
 
     id: str                       # 节点 id（uuid 或云端 node_id 字符串化）
+    # 已存在的工作流节点作业（WorkflowNodeJob）UUID；空值保持旧路径随机生成。
+    job_id: str = ""
     device_id: str = ""           # 目标设备
     action_name: str = ""         # 设备动作名
     action_type: str = ""         # goal / goal_sequence 等
@@ -212,8 +214,15 @@ def priority_weight(priority: Any) -> float:
 
 
 def node_from_dict(data: Dict[str, Any]) -> WorkflowNode:
+    """把 wire 节点对象转换为旧调度器工作流节点（WorkflowNode）。
+
+    参数：``data`` 是整图或兼容桥输入的节点对象。返回规范化节点；其中
+    ``job_id`` 若存在，表示派发必须复用已有工作流节点作业身份。
+    """
+
     return WorkflowNode(
         id=str(data["id"]),
+        job_id=str(data.get("job_id", "") or ""),
         device_id=data.get("device_id", "") or "",
         action_name=data.get("action_name", "") or "",
         action_type=data.get("action_type", "") or "",

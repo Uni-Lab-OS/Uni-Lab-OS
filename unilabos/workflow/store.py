@@ -18,6 +18,7 @@ from unilabos.workflow.graph_validation import (
 )
 from unilabos.workflow.json_codec import decode_json_bytes, encode_json
 from unilabos.workflow.models import WorkflowEdgeWrite, WorkflowNodeWrite
+from unilabos.workflow.store_migrations import ensure_device_action_run_schema
 
 _STORE_INITIALIZATION_BUSY_TIMEOUT_SECONDS = 5.0
 _STORE_INITIALIZATION_SQLITE_BUSY_TIMEOUT_MS = 100
@@ -334,6 +335,7 @@ class WorkflowStore:
                     deadline=initialization_deadline,
                 )
                 try:
+                    ensure_device_action_run_schema(self._conn)
                     columns = {
                         row["name"]
                         for row in self._conn.execute(
@@ -1100,13 +1102,22 @@ class WorkflowStore:
         page: int,
         page_size: int,
         workflow_uuid: Optional[str] = None,
+        execution_kind: str = "",
         status: str = "",
         cleanup_status: str = "",
     ) -> Dict[str, Any]:
+        """按 Backend 查询合同分页读取工作流任务（WorkflowTask）。
+
+        参数：``page/page_size`` 控制分页；``workflow_uuid`` 限定工作流定义；
+        ``execution_kind`` 区分工作流运行与设备单动作运行（DeviceActionRun）；
+        ``status/cleanup_status`` 分别限定业务状态和清理状态。返回分页任务投影。
+        """
+
         clauses = ["deleted_at IS NULL"]
         values: List[Any] = []
         for field, value in (
             ("workflow_uuid", workflow_uuid),
+            ("execution_kind", execution_kind),
             ("status", status),
             ("cleanup_status", cleanup_status),
         ):
@@ -1160,6 +1171,25 @@ class WorkflowStore:
         if row is None:
             raise StoreNotFound(f"workflow node job {job_uuid} not found")
         return self._job_row(row)
+
+    def get_node_template(self, template_uuid: str) -> Dict[str, Any]:
+        """读取一个活动工作流节点模板（WorkflowNodeTemplate）。
+
+        参数：``template_uuid`` 是已发布模板的稳定 UUID。返回 Backend-shaped
+        模板投影；模板不存在或已软删除时抛出 ``StoreNotFound``。
+        """
+
+        with self._lock:
+            row = self._conn.execute(
+                """
+                SELECT * FROM workflow_node_template
+                WHERE uuid = ? AND deleted_at IS NULL
+                """,
+                (template_uuid,),
+            ).fetchone()
+        if row is None:
+            raise StoreNotFound(f"workflow node template {template_uuid} not found")
+        return self._node_template_row(row)
 
     # Authoring ----------------------------------------------------------
 
@@ -1884,9 +1914,16 @@ class WorkflowStore:
 
     @classmethod
     def _task_row(cls, row: sqlite3.Row) -> Dict[str, Any]:
+        """把工作流任务（WorkflowTask）数据库行恢复为公共领域投影。
+
+        参数：``row`` 是同一工作流写模型中的 SQLite 行。返回包含执行来源
+        ``execution_kind`` 的字典；内部幂等键与请求指纹不对外暴露。
+        """
+
         result = {
             **cls._base(row),
             "workflow_uuid": row["workflow_uuid"],
+            "execution_kind": row["execution_kind"],
             "status": row["status"],
             "workflow_snapshot": _load(row["workflow_snapshot"], {}),
             "execution_plan": _load(row["execution_plan"], {}),

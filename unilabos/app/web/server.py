@@ -106,7 +106,10 @@ def setup_server() -> FastAPI:
             # Backend-controlled 模式不能在 OS 再创建第二个生产模板写权威。
             template_projection = None
             inventory_service = get_inventory_service()
-            if inventory_service is not None and get_edge_scheduler() is not None:
+            # ``edge_scheduler`` 是本地调度权威（Scheduler Authority）；只把同一
+            # 已装配实例交给工作流组合根，禁止重新创建第二个调度器。
+            edge_scheduler = get_edge_scheduler()
+            if inventory_service is not None and edge_scheduler is not None:
                 try:
                     from unilabos.registry.registry import lab_registry
 
@@ -115,6 +118,7 @@ def setup_server() -> FastAPI:
                             BasicConfig.working_dir,
                             inventory_store=inventory_service.store,
                             registry=lab_registry,
+                            scheduler=edge_scheduler,
                         )
                     )
                 except Exception as projection_error:  # noqa: BLE001
