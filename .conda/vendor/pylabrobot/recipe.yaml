@@ -31,6 +31,8 @@ tests:
       imports:
         - pylabrobot
       pip_check: true
+  - script:
+      - python -c "import inspect; from pylabrobot.resources import VolumeTracker; params = inspect.signature(VolumeTracker.add_liquid).parameters; assert 'liquid_or_volume' in params and 'volume' in params"
 
 about:
   summary: Uni-Lab compatible PyLabRobot fork
