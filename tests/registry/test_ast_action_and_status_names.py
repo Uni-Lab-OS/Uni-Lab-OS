@@ -17,6 +17,15 @@ from unilabos.registry.decorators import (
 
 
 def _extract(source: str) -> dict:
+    """从测试源码提取第一个设备类的静态注册表元数据。
+
+    Args:
+        source: 只用于 AST 解析、不会执行的 Python 源码。
+
+    Returns:
+        AST 扫描器生成的设备类元数据。
+    """
+
     tree = ast.parse(source)
     class_node = next(
         node for node in tree.body if isinstance(node, ast.ClassDef)
@@ -25,42 +34,47 @@ def _extract(source: str) -> dict:
 
 
 def test_action_decorator_records_public_action_name():
+    """动作装饰器应保存公开名称、显示名和预计时长。"""
+
     @action(
         action_name="read_status",
         displayname="读取状态",
-        lock_resource=["sample"],
         estimate_duration_fixed=30,
         estimate_duration_express="{cycles} * 2",
     )
     def get_status():
+        """返回测试状态值。"""
+
         return "Ready"
 
     meta = get_action_meta(get_status)
     assert meta["action_name"] == "read_status"
     assert meta["displayname"] == "读取状态"
-    assert meta["lock_resource"] == ["sample"]
+    assert "lock_resource" not in meta
+    assert "materials_lock" not in meta
     assert meta["estimate_duration_fixed"] == 30
     assert meta["estimate_duration_express"] == "{cycles} * 2"
 
 
 def test_action_duration_defaults_to_one_minute():
+    """动作预计时长应默认一分钟，且运行时标记为规范动作。"""
+
     @action()
     def reset():
+        """执行测试复位动作。"""
+
         return True
 
     meta = get_action_meta(reset)
-    assert meta["lock_resource"] == []
+    assert "lock_resource" not in meta
     assert meta["estimate_duration_fixed"] == 60.0
     assert meta["estimate_duration_express"] == ""
-
-    @action(materials_lock="sample")
-    def legacy_lock_name():
-        return True
-
-    assert get_action_meta(legacy_lock_name)["lock_resource"] == ["sample"]
+    assert reset._action_contract_kind == "typed"
 
 
 def test_explicit_action_wins_over_get_and_topic_status_inference():
+    """显式动作声明应优先于方法名和 Topic 状态推断。"""
+
     result = _extract(
         """
 from unilabos.registry.decorators import action, topic_config
@@ -69,7 +83,6 @@ class Driver:
     @action(
         action_name="read_status",
         displayname="读取状态",
-        lock_resource=["sample"],
         estimate_duration_fixed=30,
         estimate_duration_express="{cycles} * 2",
     )
@@ -83,11 +96,13 @@ class Driver:
     action_args = result["actions"]["get_status"]["action_args"]
     assert action_args["action_name"] == "read_status"
     assert action_args["displayname"] == "读取状态"
-    assert action_args["lock_resource"] == ["sample"]
+    assert "lock_resource" not in action_args
     assert action_args["estimate_duration_fixed"] == 30
 
 
 def test_topic_name_and_implicit_get_prefix_define_public_status_names():
+    """Topic 显式名称与 ``get_`` 前缀应产生稳定公开状态名。"""
+
     result = _extract(
         """
 from unilabos.registry.decorators import topic_config
@@ -113,6 +128,8 @@ class Driver:
 
 
 def test_registry_maps_public_action_name_to_driver_method():
+    """注册表应把公开动作名映射回真实设备驱动方法。"""
+
     from unilabos.registry.registry import Registry
     from unilabos.ros.nodes.base_device_node import BaseROS2DeviceNode
 
@@ -124,7 +141,6 @@ class Driver:
     @action(
         action_name="read_status",
         displayname="读取状态",
-        lock_resource=["sample"],
         estimate_duration_fixed=30,
         estimate_duration_express="{cycles} * 2",
     )
@@ -147,13 +163,13 @@ class Driver:
     assert "get_status" not in actions
     assert actions["read_status"]["method_name"] == "get_status"
     assert actions["read_status"]["displayname"] == "读取状态"
-    assert actions["read_status"]["lock_resource"] == ["sample"]
+    assert "lock_resource" not in actions["read_status"]
     assert actions["read_status"]["estimate_duration_fixed"] == 30
     assert (
         actions["read_status"]["estimate_duration_express"] == "{cycles} * 2"
     )
     assert actions["reset"]["displayname"] == "reset"
-    assert actions["reset"]["lock_resource"] == []
+    assert "lock_resource" not in actions["reset"]
     assert actions["reset"]["estimate_duration_fixed"] == 60.0
     assert actions["reset"]["estimate_duration_express"] == ""
     assert actions["auto-ping"]["displayname"] == "auto-ping"
@@ -166,6 +182,12 @@ class Driver:
 
 
 def test_device_and_resource_metadata_runtime_and_ast(tmp_path):
+    """设备和资源元数据应在运行时装饰器与 AST 扫描中保持一致。
+
+    Args:
+        tmp_path: 保存静态扫描测试源码的隔离目录。
+    """
+
     device_metadata = {
         "vendor": "UniLab",
         "specification": "D-100",
@@ -187,6 +209,8 @@ def test_device_and_resource_metadata_runtime_and_ast(tmp_path):
         metadata=resource_metadata,
     )
     def metadata_resource(name: str):
+        """构造带测试元数据的资源实例。"""
+
         return name
 
     assert get_device_meta(MetadataDevice)["metadata"] == device_metadata

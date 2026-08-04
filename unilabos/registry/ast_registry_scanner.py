@@ -36,7 +36,7 @@ from unilabos.registry.utils import resolve_registry_displayname
 
 MAX_SCAN_DEPTH = 10      # 最大目录递归深度
 MAX_SCAN_FILES = 1000    # 最大扫描文件数量
-_CACHE_VERSION = 8       # 缓存格式版本号，格式变更时递增
+_CACHE_VERSION = 9       # 缓存格式版本号，动作合同投影变化时递增
 _DEVICE_ID_RE = re.compile(r"^[A-Za-z0-9_]+$")
 
 # 合法的装饰器来源模块
@@ -351,20 +351,23 @@ def _parse_file(
     filepath: Path,
     python_path: Path,
 ) -> Tuple[List[dict], List[dict]]:
-    """
-    Parse a single .py file using ast and extract all @device-decorated classes
-    and @resource-decorated functions/classes.
+    """只通过 AST 解析一个 Python 文件中的设备与资源声明。
+
+    Args:
+        filepath: 需要静态扫描的 Python 源文件。
+        python_path: 用于推导稳定模块路径的 Python 包根目录。
 
     Returns:
-        (devices, resources) -- two lists of metadata dicts.
+        设备元数据列表和资源元数据列表；扫描过程不导入或执行作者源码。
     """
+    # ``source`` 和 ``tree`` 只用于静态语法分析，不进入 Python import 机制。
     source = filepath.read_text(encoding="utf-8", errors="replace")
     tree = ast.parse(source, filename=str(filepath))
 
-    # Derive module path from file path
+    # ``module_path`` 是动作合同中解析导入符号所需的稳定模块身份。
     module_path = _filepath_to_module(filepath, python_path)
 
-    # Build import map from the file (includes same-file class defs)
+    # ``import_map`` 同时包含导入符号和同文件定义，仍不执行任何源码。
     import_map = _collect_imports(tree, module_path)
 
     devices: List[dict] = []
@@ -376,7 +379,12 @@ def _parse_file(
             device_decorator = _find_decorator(node, "device")
             if device_decorator is not None and _is_registry_decorator("device", import_map):
                 device_args = _extract_decorator_args(device_decorator, import_map)
-                class_body = _extract_class_body(node, import_map)
+                class_body = _extract_class_body(
+                    node,
+                    import_map,
+                    module=tree,
+                    module_name=module_path,
+                )
 
                 # Support ids + id_meta (multi-device) or id (single device)
                 device_ids: List[str] = []
@@ -829,14 +837,20 @@ def _ast_call_to_value(node: ast.Call, import_map: Dict[str, str]) -> dict:
 def _extract_class_body(
     cls_node: ast.ClassDef,
     import_map: Dict[str, str],
+    *,
+    module: Optional[ast.Module] = None,
+    module_name: str = "",
 ) -> dict:
-    """
-    Walk the class body to extract:
-      - @action-decorated methods
-      - @property with @topic_config (status properties)
-      - get_* methods with @topic_config
-      - __init__ parameters
-      - Public methods without @action (auto-actions)
+    """静态提取设备类中的动作、状态和初始化参数。
+
+    Args:
+        cls_node: 当前设备类的 AST 节点。
+        import_map: 本地符号到完整模块路径的静态导入映射。
+        module: 定义设备类的完整模块 AST，用于编译规范动作合同（ActionContract）。
+        module_name: 定义模块的稳定 Python 路径。
+
+    Returns:
+        不导入或执行作者源码的设备类静态元数据。
     """
     result: dict = {
         "actions": {},          # method_name -> action_info
@@ -866,10 +880,54 @@ def _extract_class_body(
         if _has_decorator(item, "subscribe") and _is_subscribe_decorator("subscribe", import_map):
             continue
 
-        # --- Check for @action first: explicit action always wins over get_/topic inference ---
+        # 规范动作（Action）和遗留动作都优先于 get_/topic 状态推断。
         action_dec = _find_method_decorator(item, "action")
-        if action_dec is not None and _is_registry_decorator("action", import_map):
+        typed_action = action_dec is not None and _is_registry_decorator(
+            "action", import_map
+        )
+        if not typed_action:
+            action_dec = _find_method_decorator(item, "legacy_action")
+        legacy_action = action_dec is not None and _is_registry_decorator(
+            "legacy_action", import_map
+        )
+        if typed_action or legacy_action:
+            assert action_dec is not None
             action_args = _extract_decorator_args(action_dec, import_map)
+            # ``canonical_schema`` 是静态编译成功后唯一可进入工作流目录的动作合同。
+            canonical_schema: Optional[dict] = None
+            canonical_defaults: Dict[str, Any] = {}
+            contract_diagnostic: Optional[dict] = None
+            if typed_action and module is not None and module_name:
+                from unilabos.registry import action_contract_schema
+
+                try:
+                    parsed_contract = action_contract_schema.parse_action_contract(
+                        module,
+                        item,
+                        module_name=module_name,
+                    )
+                    canonical_schema = parsed_contract.to_action_schema(
+                        action_name=method_name,
+                        description=str(action_args.get("description") or ""),
+                    )
+                    canonical_defaults = (
+                        action_contract_schema.validate_legacy_action_assertions(
+                            canonical_schema,
+                            action_name=method_name,
+                            goal_default=action_args.get("goal_default"),
+                            handles=action_args.get("handles"),
+                        )
+                    )
+                except (
+                    action_contract_schema.ActionContractError,
+                    action_contract_schema.ActionCompatibilityError,
+                ) as error:
+                    # 诊断保留旧设备启动能力，但失败动作不得获得规范动作权威。
+                    contract_diagnostic = {
+                        "code": error.code,
+                        "path": error.path,
+                        "message": error.message,
+                    }
             # 补全 @action 装饰器的默认值（与 decorators.py 中 action() 签名一致）
             action_args.setdefault("action_type", None)
             action_args.setdefault("action_name", None)
@@ -886,16 +944,6 @@ def _extract_class_body(
             action_args.setdefault("description", "")
             action_args.setdefault("auto_prefix", False)
             action_args.setdefault("parent", False)
-            raw_lock_resource = action_args.get("lock_resource")
-            if raw_lock_resource is None:
-                raw_lock_resource = action_args.get("materials_lock")
-            if raw_lock_resource is None:
-                action_args["lock_resource"] = []
-            elif isinstance(raw_lock_resource, str):
-                action_args["lock_resource"] = [raw_lock_resource]
-            else:
-                action_args["lock_resource"] = list(raw_lock_resource)
-            action_args.pop("materials_lock", None)
             action_args.setdefault("estimate_duration_fixed", 60.0)
             action_args.setdefault("estimate_duration_express", "")
             action_args.setdefault("error_policy", None)
@@ -908,13 +956,20 @@ def _extract_class_body(
             is_async = isinstance(item, ast.AsyncFunctionDef)
             method_doc = ast.get_docstring(item)
 
-            result["actions"][method_name] = {
+            action_record = {
                 "action_args": action_args,
                 "params": method_params,
                 "return_type": return_type,
                 "is_async": is_async,
                 "docstring": method_doc,
+                "contract_kind": "typed" if typed_action else "legacy",
             }
+            if canonical_schema is not None:
+                action_record["schema"] = canonical_schema
+                action_record["goal_default"] = canonical_defaults
+            if contract_diagnostic is not None:
+                action_record["contract_diagnostic"] = contract_diagnostic
+            result["actions"][method_name] = action_record
             continue
 
         # --- Check for @property or @topic_config → status property ---

@@ -2,7 +2,7 @@
 
 定位：调度器与执行器之间的解耦层——
 
-    EdgeScheduler（DAG 决策/排序）
+    本地调度器（EdgeScheduler，DAG 决策/排序）
         │ dispatch(job_start payload)         ↑ on_job_finished(job_id, ...)
         ▼                                     │
     JobExecutionBackend（本模块：job_start 生命周期 + 设备锁队列 + 状态回报路由）
@@ -29,7 +29,7 @@ import logging
 import queue
 import threading
 import time
-from typing import Any, Callable, Dict, List, Optional, Set
+from typing import Any, Callable, Dict, List, Mapping, Optional, Set
 
 from unilabos.app.scheduler.dispatch import DispatchPayload
 from unilabos.app.ws_client import (
@@ -38,6 +38,10 @@ from unilabos.app.ws_client import (
     JobStatus,
     QueueItem,
     format_job_log,
+)
+from unilabos.registry.material_lock_schema import (
+    MaterialLockSchemaError,
+    compile_material_lock_schema,
 )
 from unilabos.utils.tracing import (
     add_event,
@@ -434,12 +438,18 @@ class JobExecutionBackend:
         return HostNode.get_instance(0)
 
 
-def make_device_lock_resource_resolver(
+def make_device_material_lock_resolver(
     host_node_getter: Optional[Callable[[], Any]] = None,
-) -> Callable[[str, str], List[str]]:
-    """生产 lock_resource resolver：读取 ``@action(lock_resource=[...])`` 声明。
+) -> Callable[[str, str, Mapping[str, Any]], tuple[str, ...]]:
+    """构造按动作 Schema 提取物料 UUID 的本地解析器。
 
-    查找顺序（对齐「Slave 与 Host 同注册表副本」机制）：
+    Args:
+        host_node_getter: 返回当前 HostNode 的函数；测试可注入隔离实现。
+
+    Returns:
+        接受设备、动作和最终参数，并返回稳定物料 UUID 集合的解析函数。
+
+    查找顺序（对齐「Slave 与 Host 共用注册表副本」机制）：
 
     1. HostNode._action_value_mappings[device_id] —— Host 侧权威副本，
        覆盖本地设备（装配时写入）与 **slave 远端设备**（main_slave_run /
@@ -449,28 +459,77 @@ def make_device_lock_resource_resolver(
     """
     getter = host_node_getter or JobExecutionBackend._default_host_getter
 
-    def _lock_from(mappings: Any, action_name: str) -> Optional[List[str]]:
+    def _mapping_from(mappings: Any, action_name: str) -> Optional[Dict[str, Any]]:
+        """从一个设备的动作映射中查找公开动作条目。
+
+        Args:
+            mappings: 单个设备的 ``action_value_mappings``。
+            action_name: 工作流节点引用的公开动作名。
+
+        Returns:
+            找到时返回动作条目，否则返回 ``None``。
+        """
+
         if not isinstance(mappings, dict):
             return None
         mapping = mappings.get(action_name) or mappings.get(f"auto-{action_name}")
         if not isinstance(mapping, dict):
             return None
-        return list(mapping.get("lock_resource") or [])
+        return mapping
 
-    def resolve(device_id: str, action_name: str) -> List[str]:
+    def resolve(
+        device_id: str,
+        action_name: str,
+        final_param: Mapping[str, Any],
+    ) -> tuple[str, ...]:
+        """校验最终动作参数并解析需要申请物料锁的 UUID。
+
+        Args:
+            device_id: 执行动作的设备稳定身份。
+            action_name: 注册表中的公开动作名。
+            final_param: 合并静态参数与上游 Handle 输出后的最终参数。
+
+        Returns:
+            去重并稳定排序的物料 UUID。
+
+        Raises:
+            MaterialLockSchemaError: 设备、动作、规范合同或最终参数不合法。
+        """
+
         host_node = getter()
         if host_node is None:
-            return []
+            raise MaterialLockSchemaError(
+                "material_lock_schema_missing",
+                "/device",
+                "无法取得设备注册表，不能安全解析动作物料锁",
+            )
         # ① Host 权威副本（含 slave 设备的注册表镜像）
         host_mappings = getattr(host_node, "_action_value_mappings", None) or {}
-        found = _lock_from(host_mappings.get(device_id), action_name)
-        if found is not None:
-            return found
-        # ② 本地设备实例回退
-        wrapper = getattr(host_node, "devices_instances", {}).get(device_id)
-        base_node = getattr(wrapper, "_ros_node", None) if wrapper is not None else None
-        found = _lock_from(getattr(base_node, "_action_value_mappings", None), action_name)
-        return found if found is not None else []
+        action_mapping = _mapping_from(host_mappings.get(device_id), action_name)
+        if action_mapping is None:
+            # ② 本地设备实例回退只用于 Host 副本尚未建立的启动窗口。
+            wrapper = getattr(host_node, "devices_instances", {}).get(device_id)
+            base_node = getattr(wrapper, "_ros_node", None) if wrapper is not None else None
+            action_mapping = _mapping_from(
+                getattr(base_node, "_action_value_mappings", None),
+                action_name,
+            )
+        if action_mapping is None:
+            raise MaterialLockSchemaError(
+                "material_lock_schema_missing",
+                f"/devices/{device_id}/actions/{action_name}",
+                "设备动作没有可用的注册表 Schema",
+            )
+        if action_mapping.get("contract_kind") == "invalid_typed":
+            diagnostic = action_mapping.get("contract_diagnostic") or {}
+            raise MaterialLockSchemaError(
+                "invalid_action_contract",
+                str(diagnostic.get("path") or f"/actions/{action_name}"),
+                str(diagnostic.get("message") or "规范动作合同编译失败"),
+            )
+        action_schema = action_mapping.get("schema")
+        compiled_schema = compile_material_lock_schema(action_schema)
+        return compiled_schema.material_lock_uuids(final_param)
 
     return resolve
 
@@ -485,18 +544,31 @@ def create_edge_stack(
     device_state_store: Any = None,
     history: Any = None,
 ) -> "tuple[Any, JobExecutionBackend]":
-    """组装 EdgeScheduler + 微后端（composition root）。
+    """组装本地调度器（EdgeScheduler）与作业执行微后端（composition root）。
 
     返回 (scheduler, backend)；backend 已 start，并需由调用方注册进
     ``HostNode.bridges``（或在测试中手动回调 ``publish_job_status``）。
-    ``inventory`` 传入 InventoryService 时启用物料预留/消费衔接。
-    物料锁 resolver 默认接设备 action_value_mappings 的 lock_resource 声明。
+    ``inventory`` 传入本地库存服务（InventoryService）时启用物料预留/消费衔接。
+    动作物料锁（Action Material Lock）解析器默认消费注册表中的规范动作 Schema。
     ``estimator`` 传入 DurationEstimator 时用于泳道图预估（与 orderer 共享）。
     ``monitor`` 传入 MonitorBus 时向实时监控面板推事件。
     ``device_state_store`` 传入 DeviceStateStore 时启用设备状态落盘
     （publish_device_status bridge + REST 上报，独立 SQLite）。
-    ``history`` 传入 WorkflowHistoryStore 时持久化工作流/job 执行历史
+    ``history`` 传入工作流历史存储（WorkflowHistoryStore）时持久化工作流/作业执行历史
     （第三个独立 SQLite）。
+
+    Args:
+        orderer: 本地任务排序策略。
+        device_manager: 复用设备动作互斥与排队的执行管理器。
+        host_node_getter: 返回当前 HostNode 的函数。
+        inventory: 本地库存（Inventory）预留、消费和释放服务。
+        estimator: 动作预计时长计算器。
+        monitor: 实时监控事件输出适配器。
+        device_state_store: 设备遥测状态存储。
+        history: 遗留工作流执行历史存储。
+
+    Returns:
+        已互相接线并启动的本地调度器与作业执行微后端。
     """
     from unilabos.app.scheduler.service import EdgeScheduler
 
@@ -511,7 +583,7 @@ def create_edge_stack(
         dispatcher=backend,
         busy_key_provider=backend.busy_device_action_keys,
         inventory=inventory,
-        lock_resource_resolver=make_device_lock_resource_resolver(host_node_getter),
+        material_lock_resolver=make_device_material_lock_resolver(host_node_getter),
         estimator=estimator,
         monitor=monitor,
         history=history,
@@ -525,5 +597,5 @@ __all__ = [
     "JobExecutionBackend",
     "JobFinishedListener",
     "create_edge_stack",
-    "make_device_lock_resource_resolver",
+    "make_device_material_lock_resolver",
 ]

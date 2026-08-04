@@ -77,19 +77,27 @@ _DEFAULT_ACTION_DURATION_SECONDS = 60.0
 
 
 def _normalize_action_extensions(config: Optional[Dict[str, Any]]) -> Dict[str, Any]:
-    """补齐并归一化动作的物料锁与预计时长元数据。"""
+    """清除已废弃锁字段，并补齐动作预计时长元数据。
+
+    Args:
+        config: 装饰器、YAML 或旧注册表提供的动作扩展字段。
+
+    Returns:
+        不含字符串物料锁声明的独立动作扩展副本。
+    """
+
     normalized = dict(config or {})
-    raw_lock_resource = normalized.get("lock_resource")
-    if raw_lock_resource is None:
-        raw_lock_resource = normalized.get("materials_lock")
-    if raw_lock_resource is None:
-        lock_resource = []
-    elif isinstance(raw_lock_resource, str):
-        lock_resource = [raw_lock_resource]
-    else:
-        lock_resource = list(raw_lock_resource)
-    normalized["lock_resource"] = lock_resource
-    normalized.pop("materials_lock", None)
+    # 两个旧字段不再具有兼容语义；遇到它们必须显式迁移，不能静默忽略。
+    removed_lock_fields = {
+        field_name
+        for field_name in ("lock_resource", "materials_lock")
+        if field_name in normalized
+    }
+    if removed_lock_fields:
+        raise ValueError(
+            "字符串物料锁声明已移除，请改用物料占位符（ResourceSlot）注解生成动作 Schema："
+            + ", ".join(sorted(removed_lock_fields))
+        )
     normalized.setdefault("estimate_duration_fixed", _DEFAULT_ACTION_DURATION_SECONDS)
     normalized.setdefault("estimate_duration_express", "")
     return normalized
@@ -892,10 +900,16 @@ class Registry:
     # ------------------------------------------------------------------
 
     def _build_device_entry_from_ast(self, device_id: str, ast_meta: dict) -> Dict[str, Any]:
+        """把 AST 静态元数据投影为完整设备注册表（Registry）条目。
+
+        Args:
+            device_id: 注册表中的设备类型稳定身份。
+            ast_meta: 未执行作者源码得到的类、动作和状态静态元数据。
+
+        Returns:
+            包含动作 Schema、传输映射和状态 Schema 的设备注册表条目。
         """
-        Build a device registry entry from AST-scanned metadata.
-        Uses only string types -- no module imports required (except for TypedDict resolution).
-        """
+        # 三个变量分别保存驱动类型位置、证据文件路径和静态导入符号表。
         module_str = ast_meta.get("module", "")
         file_path = ast_meta.get("file_path", "")
         imap = ast_meta.get("import_map") or {}
@@ -931,7 +945,17 @@ class Registry:
         action_value_mappings: Dict[str, Any] = {}
 
         def _build_json_command_entry(method_name, method_info, action_args=None):
-            """构建 UniLabJsonCommand 类型的 action entry"""
+            """构建 JSON 命令动作的注册表（Registry）条目。
+
+            Args:
+                method_name: 设备驱动中的真实方法名。
+                method_info: AST 扫描得到的方法参数、Schema 和合同诊断。
+                action_args: 动作装饰器的静态参数；自动动作没有该值。
+
+            Returns:
+                对外动作名及其注册表条目。
+            """
+
             action_extensions = _normalize_action_extensions(action_args)
             is_async = method_info.get("is_async", False)
             type_str = "UniLabJsonCommandAsync" if is_async else "UniLabJsonCommand"
@@ -987,6 +1011,26 @@ class Registry:
                 # result schema 完整生成后再剥离保留字段 unilabos_samples
                 self._strip_reserved_result_fields(result_schema)
 
+            # ``canonical_schema`` 只在规范动作合同静态编译成功时存在。
+            canonical_schema = method_info.get("schema")
+            published_schema = (
+                copy.deepcopy(canonical_schema)
+                if isinstance(canonical_schema, dict)
+                else wrap_action_schema(
+                    goal_schema,
+                    action_name,
+                    description=(action_args or {}).get("description")
+                    or method_doc_info.get("description", ""),
+                    result_schema=result_schema,
+                )
+            )
+            if isinstance(canonical_schema, dict):
+                goal_default = copy.deepcopy(method_info.get("goal_default") or {})
+
+            # ``contract_kind`` 决定该动作能否成为规范工作流目录的权威条目。
+            contract_kind = method_info.get("contract_kind", "legacy")
+            if method_info.get("contract_diagnostic"):
+                contract_kind = "invalid_typed"
             entry = {
                 "type": type_str,
                 "displayname": resolve_registry_displayname(
@@ -995,19 +1039,18 @@ class Registry:
                 "goal": goal,
                 "feedback": (action_args or {}).get("feedback") or {},
                 "result": (action_args or {}).get("result") or {},
-                "schema": wrap_action_schema(
-                    goal_schema,
-                    action_name,
-                    description=(action_args or {}).get("description") or method_doc_info.get("description", ""),
-                    result_schema=result_schema,
-                ),
+                "schema": published_schema,
                 "goal_default": goal_default,
                 "handles": handles,
                 "placeholder_keys": pk,
-                "lock_resource": action_extensions["lock_resource"],
+                "contract_kind": contract_kind,
                 "estimate_duration_fixed": action_extensions["estimate_duration_fixed"],
                 "estimate_duration_express": action_extensions["estimate_duration_express"],
             }
+            if method_info.get("contract_diagnostic"):
+                entry["contract_diagnostic"] = copy.deepcopy(
+                    method_info["contract_diagnostic"]
+                )
             if action_name.removeprefix("auto-") != method_name:
                 entry["method_name"] = method_name
             if (action_args or {}).get("always_free") or method_info.get("always_free"):
@@ -1138,6 +1181,15 @@ class Registry:
             result.update(result_override)
             goal_default.update(goal_default_override)
 
+            # 编译成功的规范动作合同覆盖推导 Schema；ROS 映射只保留为传输适配信息。
+            canonical_schema = method_info.get("schema")
+            if isinstance(canonical_schema, dict):
+                schema = copy.deepcopy(canonical_schema)
+                goal_default = copy.deepcopy(method_info.get("goal_default") or {})
+            contract_kind = method_info.get("contract_kind", "legacy")
+            if method_info.get("contract_diagnostic"):
+                contract_kind = "invalid_typed"
+
             action_entry = {
                 "type": action_type.split(":")[-1],
                 "displayname": resolve_registry_displayname(
@@ -1153,10 +1205,14 @@ class Registry:
                     **detect_placeholder_keys(method_params),
                     **(action_args.get("placeholder_keys") or {}),
                 },
-                "lock_resource": action_extensions["lock_resource"],
+                "contract_kind": contract_kind,
                 "estimate_duration_fixed": action_extensions["estimate_duration_fixed"],
                 "estimate_duration_express": action_extensions["estimate_duration_express"],
             }
+            if method_info.get("contract_diagnostic"):
+                action_entry["contract_diagnostic"] = copy.deepcopy(
+                    method_info["contract_diagnostic"]
+                )
             if action_name.removeprefix("auto-") != method_name:
                 action_entry["method_name"] = method_name
             if action_args.get("always_free") or method_info.get("always_free"):
@@ -2113,7 +2169,7 @@ class Registry:
                             "goal_default": entry_goal_default,
                             "handles": old_cfg.get("handles", []),
                             "placeholder_keys": merged_pk,
-                            "lock_resource": action_extensions["lock_resource"],
+                            "contract_kind": "legacy",
                             "estimate_duration_fixed": action_extensions["estimate_duration_fixed"],
                             "estimate_duration_express": action_extensions[
                                 "estimate_duration_express"
@@ -2163,7 +2219,6 @@ class Registry:
                         action_config.get("displayname"), action_name
                     )
                     normalized_action_config = _normalize_action_extensions(action_config)
-                    action_config.pop("materials_lock", None)
                     action_config.update(normalized_action_config)
                     if "handles" not in action_config:
                         action_config["handles"] = {}

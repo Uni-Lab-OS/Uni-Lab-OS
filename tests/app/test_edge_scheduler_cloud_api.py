@@ -137,6 +137,12 @@ class TestIntegrationWiring:
         assert integration.setup_edge_inventory(str(db_path)) is inventory
 
     def test_setup_injects_scheduler_and_reports_state(self, tmp_path):
+        """缺少设备动作目录时应在派发前失败，并上报工作流终态。
+
+        Args:
+            tmp_path: 隔离设备状态库与工作流历史库的临时目录。
+        """
+
         class FakeWsClient:
             def __init__(self):
                 self.message_processor = _make_processor()
@@ -179,7 +185,7 @@ class TestIntegrationWiring:
                     }
                 )
             )
-            # host_node_getter 返回 None → send_goal 失败 → job failed → workflow failed
+            # HostNode 不存在意味着动作 Schema 也不存在，调度器必须在发送前失败关闭。
             deadline = time.time() + 5
             statuses = []
             while time.time() < deadline and not statuses:
@@ -192,6 +198,6 @@ class TestIntegrationWiring:
             assert statuses, "expected workflow_status report"
             assert statuses[0]["data"]["workflow_id"] == "wf-report"
             assert statuses[0]["data"]["status"] == "failed"
-            assert r["dispatched"][0]["node_id"] == "A"
+            assert r["dispatched"] == []
         finally:
             backend.stop()

@@ -1,4 +1,4 @@
-"""EdgeScheduler：Edge 侧执行态调度器（推进的唯一入口）。
+"""本地调度器（EdgeScheduler）：Edge 侧执行态推进的唯一入口。
 
 重排触发点（硬性约定，二者都强制全量 reschedule）：
 
@@ -14,7 +14,7 @@
 
 不做一次性拓扑序：ready 集合每次触发点都重新计算、重新排序。
 
-物料衔接（注入 InventoryService 时启用；spec 无物料字段则行为完全不变）：
+物料衔接（注入本地库存服务（InventoryService）时启用；spec 无物料字段则行为完全不变）：
 
 - submit：汇总 DAG 全部物料需求，入队前 all-or-nothing 预留；
   不足 → workflow 置 ``waiting_for_material``，不进入执行队列，每次重排重试预留
@@ -24,11 +24,11 @@
   物料状态不明，同样转 quarantined 待复核
 - 工作流终态（failed/canceled）：剩余 active 预留自动 release（依据 DB，不依赖内存）
 
-物料锁（``@action(lock_resource=[...])``，注入 lock_resource_resolver 时启用）：
+动作物料锁（Action Material Lock，注入 ``material_lock_resolver`` 时启用）：
 
-- 下发前用 resolver 取该动作声明的 ResourceSlot 参数名，从已解析参数里提取
-  资源标识生成锁键；与在执行 job 的锁键冲突 → 本轮跳过（等释放后的重排）
-- 实体型物料需求（instance_uuid / barcode）自动并入锁键，双保险防同料并用
+- 下发前校验最终参数，并从规范动作 Schema 的锁标记提取物料 UUID（Material UUID）；
+  与在执行作业（Job）的锁键冲突 → 本轮跳过（等释放后的重排）
+- 实体型物料需求的 ``instance_uuid`` 自动并入同一物料锁键
 - job 完成 / 工作流取消时释放
 """
 
@@ -62,6 +62,7 @@ from unilabos.app.scheduler.ordering import (
     TaskOrderer,
 )
 from unilabos.app.scheduler.param_resolver import ParamResolveError
+from unilabos.registry.material_lock_schema import MaterialLockSchemaError
 from unilabos.utils.tracing import (
     DetachedSpan,
     add_event,
@@ -70,42 +71,6 @@ from unilabos.utils.tracing import (
 )
 
 logger = logging.getLogger(__name__)
-
-# ResourceSlot 参数值里可作为资源标识的字段（按优先级取第一个非空）
-_RESOURCE_ID_FIELDS = ("unilabos_uuid", "uuid", "id", "name")
-
-
-def _extract_resource_ids(value: Any) -> Set[str]:
-    """从 action 参数值提取资源标识（锁键素材）。
-
-    支持形态：字符串（uuid/名称）、dict（ResourceSlot 原始入参，含
-    unilabos_uuid/uuid/id/name 任一字段，或嵌套 ``data.unilabos_uuid``）、
-    以及它们的 list/tuple。取不到标识的值直接忽略（宁可漏锁不误锁）。
-    """
-    ids: Set[str] = set()
-    if value is None:
-        return ids
-    if isinstance(value, str):
-        if value:
-            ids.add(value)
-        return ids
-    if isinstance(value, (list, tuple, set)):
-        for item in value:
-            ids |= _extract_resource_ids(item)
-        return ids
-    if isinstance(value, dict):
-        nested = value.get("data")
-        if isinstance(nested, dict) and nested.get("unilabos_uuid"):
-            ids.add(str(nested["unilabos_uuid"]))
-            return ids
-        for field_name in _RESOURCE_ID_FIELDS:
-            field_value = value.get(field_name)
-            if isinstance(field_value, str) and field_value:
-                ids.add(field_value)
-                return ids
-        return ids
-    return ids
-
 
 class EdgeScheduler:
     def __init__(
@@ -116,12 +81,30 @@ class EdgeScheduler:
         busy_key_provider: Optional["Callable[[], Set[str]]"] = None,
         workflow_state_listener: Optional["Callable[[str, str], None]"] = None,
         inventory: Any = None,
-        lock_resource_resolver: Optional["Callable[[str, str], List[str]]"] = None,
+        material_lock_resolver: Optional[
+            "Callable[[str, str, Dict[str, Any]], tuple[str, ...]]"
+        ] = None,
         estimator: Optional[DurationEstimator] = None,
         timeline_capacity: int = 400,
         monitor: Any = None,
         history: Any = None,
     ):
+        """装配本地执行态调度器（Scheduler）。
+
+        Args:
+            orderer: 对已就绪任务进行稳定排序的策略。
+            dispatcher: 把作业（Job）提交给执行器的适配器。
+            external_busy_keys: 启动时已知的外部设备占用键。
+            busy_key_provider: 实时读取设备占用键的函数。
+            workflow_state_listener: 工作流（Workflow）终态通知函数。
+            inventory: 本地库存（Inventory）预留、消费和释放服务。
+            material_lock_resolver: 根据动作 Schema 和最终参数解析物料 UUID 的函数。
+            estimator: 动作预计时长计算器。
+            timeline_capacity: 内存时间线最多保留的作业数量。
+            monitor: 实时监控事件输出适配器。
+            history: 遗留工作流执行历史存储。
+        """
+
         self._orderer = orderer or StableLocalOrderer()
         self._dispatcher = dispatcher or RecordingDispatcher()
         self._lock = threading.RLock()
@@ -142,10 +125,9 @@ class EdgeScheduler:
         self._inventory = inventory
         # 有物料需求的 workflow（其余 workflow 不产生任何 inventory 调用）
         self._material_workflows: Set[str] = set()
-        # 物料/资源锁：resolver(device_id, action_name) -> @action(lock_resource=[...])
-        # 声明的参数名列表；None = 物料锁关闭
-        self._lock_resource_resolver = lock_resource_resolver
-        # job_id -> 该 job 持有的资源锁键（job 完成/取消时释放）
+        # 动作物料锁解析器消费规范动作 Schema；None 仅用于无注册表的隔离测试。
+        self._material_lock_resolver = material_lock_resolver
+        # job_id -> 该作业（Job）持有的物料锁键；完成或取消时释放。
         self._job_resource_locks: Dict[str, Set[str]] = {}
         # 时长预估器（declared / historical / auto 三种 mode，内含两种计算模式）
         self._estimator = estimator or DurationEstimator()
@@ -409,6 +391,12 @@ class EdgeScheduler:
             return dispatched
 
     def _reschedule_impl(self) -> List[Dict[str, Any]]:
+        """执行一轮完整重排，并下发当前能够安全执行的作业（Job）。
+
+        Returns:
+            本轮成功派发的作业摘要列表；物料冲突保持等待，合同错误标记失败。
+        """
+
         self._reschedule_count += 1
 
         # 等料工作流每次重排重试预留（补料后自动恢复 RUNNING）
@@ -482,8 +470,20 @@ class EdgeScheduler:
                 run.mark_failed(task.node.id)
                 continue
 
-            # 物料锁：@action(lock_resource=[...]) 声明的资源被在执行 job 占用 → 本轮跳过
-            lock_keys = self._resource_lock_keys(task.node, resolved_args)
+            # Schema 解析失败必须关闭执行，不能退化为“没有物料锁”。
+            try:
+                lock_keys = self._resource_lock_keys(task.node, resolved_args)
+            except MaterialLockSchemaError as error:
+                logger.error(
+                    "[EdgeScheduler] 动作物料锁解析失败 wf=%s node=%s code=%s path=%s: %s",
+                    task.workflow_id,
+                    task.node.id,
+                    error.code,
+                    error.path,
+                    error.message,
+                )
+                run.mark_failed(task.node.id)
+                continue
             if lock_keys & held_resource_locks:
                 logger.info(
                     "[EdgeScheduler] node %s waits for resource lock(s) %s (wf=%s)",
@@ -719,22 +719,34 @@ class EdgeScheduler:
         return held
 
     def _resource_lock_keys(self, node: Any, resolved_args: Dict[str, Any]) -> Set[str]:
-        """节点的资源锁键集合：lock_resource 参数值 + 实体型物料需求。"""
+        """生成节点本次执行需要持有的物料锁键。
+
+        Args:
+            node: 当前准备派发的工作流节点。
+            resolved_args: 合并上游输出后的最终动作参数。
+
+        Returns:
+            使用 ``material/{uuid}/exclusive`` 规范格式的物料锁键集合。
+
+        Raises:
+            MaterialLockSchemaError: 规范动作 Schema 或最终参数不能安全解析。
+        """
+
         keys: Set[str] = set()
-        if self._lock_resource_resolver is not None:
-            try:
-                param_names = self._lock_resource_resolver(node.device_id, node.action_name) or []
-            except Exception:  # noqa: BLE001 - resolver 失败按无锁处理，不阻断下发
-                logger.exception("[EdgeScheduler] lock_resource resolver failed")
-                param_names = []
-            for name in param_names:
-                for rid in _extract_resource_ids(resolved_args.get(name)):
-                    keys.add(f"res:{rid}")
+        if self._material_lock_resolver is not None:
+            # ``material_uuids`` 是 Schema 标记解析出的实际物料稳定身份。
+            material_uuids = self._material_lock_resolver(
+                node.device_id,
+                node.action_name,
+                resolved_args,
+            )
+            keys.update(
+                f"material/{material_uuid}/exclusive"
+                for material_uuid in material_uuids
+            )
         for req in getattr(node, "material_requirements", []) or []:
             if getattr(req, "instance_uuid", ""):
-                keys.add(f"res:{req.instance_uuid}")
-            elif getattr(req, "barcode", ""):
-                keys.add(f"res:barcode:{req.barcode}")
+                keys.add(f"material/{req.instance_uuid}/exclusive")
         return keys
 
     def _busy_keys(self) -> Set[str]:

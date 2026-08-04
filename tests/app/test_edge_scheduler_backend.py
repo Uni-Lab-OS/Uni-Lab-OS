@@ -1,4 +1,4 @@
-"""JobExecutionBackend（HostNode 微后端）与 EdgeScheduler 全链路测试。
+"""作业执行微后端（JobExecutionBackend）与本地调度器（EdgeScheduler）全链路测试。
 
 FakeHostNode 模拟设备执行：send_goal 后按配置同步回报 publish_job_status，
 验证「调度器 → 微后端 → HostNode → 回报 → 调度器重排」闭环。
@@ -15,16 +15,54 @@ from unilabos.app.ws_client import QueueItem
 from unilabos.utils.type_check import serialize_result_info
 
 
+def _unlocked_action_mapping() -> Dict[str, Any]:
+    """构造不含物料参数的遗留动作注册表条目。
+
+    Returns:
+        可验证任意对象参数、但不会产生动作物料锁的动作 Schema。
+    """
+
+    return {
+        "contract_kind": "legacy",
+        "schema": {
+            "type": "object",
+            "properties": {
+                "goal": {
+                    "type": "object",
+                    "properties": {},
+                    "additionalProperties": True,
+                },
+                "feedback": {},
+                "result": {},
+            },
+            "required": ["goal"],
+        },
+    }
+
+
 class FakeHostNode:
     """记录 send_goal；auto_complete 时立即回报成功结果。"""
 
     def __init__(self, backend_ref: Dict[str, Any], auto_complete: bool = True,
                  ret_values: Optional[Dict[str, Any]] = None):
+        """初始化带最小动作目录的测试 HostNode。
+
+        Args:
+            backend_ref: 延迟绑定作业执行微后端的共享引用。
+            auto_complete: 收到设备命令后是否立即回报成功。
+            ret_values: 按 ``device/action`` 指定的模拟动作结果。
+        """
+
         self.sent_goals: List[QueueItem] = []
         self.backend_ref = backend_ref  # {"backend": JobExecutionBackend}，延迟绑定
         self.auto_complete = auto_complete
         self.ret_values = ret_values or {}
         self.lock = threading.Lock()
+        # 动作目录覆盖端到端用例中的三个设备，证明调度前已取得 Schema。
+        self._action_value_mappings = {
+            device_id: {"run": _unlocked_action_mapping()}
+            for device_id in ("dev1", "dev2", "shared")
+        }
 
     def send_goal(self, item: QueueItem, action_type: str, action_kwargs: Dict[str, Any],
                   sample_material: Dict[str, Any], server_info: Any = None) -> None:
