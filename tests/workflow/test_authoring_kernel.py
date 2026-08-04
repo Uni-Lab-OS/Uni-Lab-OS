@@ -7,7 +7,10 @@ from uuid import UUID
 import pytest
 
 from unilabos.workflow.authoring_identity import authoring_edge_uuid
-from unilabos.workflow.authoring_kernel import AuthoringCatalogSnapshot
+from unilabos.workflow.authoring_kernel import (
+    AuthoringCatalogError,
+    AuthoringCatalogSnapshot,
+)
 from unilabos.workflow.source_coordinates import (
     codepoint_offset_to_utf16_column,
     require_utf8_text,
@@ -79,6 +82,35 @@ def test_catalog_snapshot_is_detached_and_fingerprinted() -> None:
     assert action.handles[0]["handle_key"] == "sample"
     assert snapshot.fingerprint == original_fingerprint
     assert original_fingerprint.startswith("sha256:")
+
+
+@pytest.mark.parametrize(
+    "unsafe_source_identity",
+    (
+        "lab.resources\nfrom os import system:plate_96",
+        "lab.bad-module:plate_96",
+        "lab.class:plate_96",
+        "lab..resources:plate_96",
+    ),
+    ids=("control-character", "invalid-segment", "keyword-segment", "empty-segment"),
+)
+def test_catalog_snapshot_rejects_unsafe_resource_source_identity(
+    unsafe_source_identity: str,
+) -> None:
+    """创作目录快照必须独立拒绝不能安全 import 的资源源码身份。
+
+    参数说明：``unsafe_source_identity`` 是单个不可信 ``source_fqid``。返回：
+    无；断言目录快照（CatalogSnapshot）在构造边界关闭失败。
+    """
+
+    with pytest.raises(AuthoringCatalogError):
+        AuthoringCatalogSnapshot.from_entities(
+            [_node_template()],
+            [_handle_template()],
+            resource_template_symbols={
+                unsafe_source_identity: "31000000-0000-4000-8000-000000000002"
+            },
+        )
 
 
 def test_authoring_edge_uuid_is_stable_and_endpoint_sensitive() -> None:

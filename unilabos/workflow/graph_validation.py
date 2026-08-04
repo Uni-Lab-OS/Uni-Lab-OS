@@ -1,4 +1,4 @@
-"""冻结 Backend 全图 PUT 的本地语义校验。"""
+"""冻结后端（Backend）全图 PUT 的本地语义校验。"""
 
 from __future__ import annotations
 
@@ -9,6 +9,10 @@ from collections import defaultdict
 from typing import Any, Dict, Iterable, List, Mapping
 
 from unilabos.workflow.json_codec import encode_json, strict_json_equal
+from unilabos.workflow.material_selector import (
+    MaterialSelectorError,
+    validate_material_source_node,
+)
 from unilabos.workflow.models import WorkflowEdgeWrite, WorkflowNodeWrite
 from unilabos.workflow.workflow_io import (
     WorkflowIOValidationError,
@@ -20,7 +24,21 @@ _MAX_TIMEOUT_SECONDS = (2**63 - 1) // 1_000_000_000
 
 
 class GraphValidationError(ValueError):
-    """提交的全图不满足冻结 Backend 语义。"""
+    """提交的全图不满足冻结后端（Backend）语义。"""
+
+
+class CodedGraphValidationError(GraphValidationError):
+    """带稳定领域错误码的全图校验失败。"""
+
+    def __init__(self, code: str, message: str):
+        """保存机器码和中文诊断。
+
+        参数说明：``code`` 是服务可透传的机器码，``message`` 解释具体约束。
+        返回：无；构造全图校验异常。
+        """
+
+        super().__init__(message)
+        self.code = code
 
 
 class MissingTemplateError(GraphValidationError):
@@ -38,12 +56,17 @@ def validate_graph(
     node_meta_data: Mapping[str, Dict[str, Any]],
     validate_workflow_io_contract: bool = False,
 ) -> None:
-    """在写事务内校验一份完整替换图。
+    """在写事务内校验一份完整替换的工作流图（Workflow Graph）。
 
-    参数说明：节点、边、模板和连接点（Handle）共同构成冻结工作流图；
-    `effective_params` 与两级元数据是事务内实际值；
-    `validate_workflow_io_contract=True` 启用唯一公共工作流输入/输出
-    （Workflow I/O）合同，`False` 仅保留旧调用方兼容语义。
+    参数说明：``nodes`` 与 ``edges`` 是待替换的完整节点和边；``templates`` 与
+    ``handles`` 是其引用的活动节点模板和连接点（Handle）模板；
+    ``effective_params`` 是合并保留字段后的节点实参；``workflow_meta_data`` 与
+    ``node_meta_data`` 是事务内实际工作流和节点元数据；
+    ``validate_workflow_io_contract`` 为 ``True`` 时启用唯一公共工作流输入/输出
+    （Workflow I/O）合同，为 ``False`` 时保留旧调用方兼容语义。返回：无；全部
+    不变量成立才正常返回。异常：缺少模板抛出 ``MissingTemplateError``；带稳定
+    机器码的物料来源（MaterialSource）错误抛出 ``CodedGraphValidationError``；
+    其余图、连接点或工作流输入/输出错误抛出 ``GraphValidationError``。
     """
 
     node_by_uuid = {node.uuid: node for node in nodes}
@@ -59,6 +82,19 @@ def validate_graph(
             raise MissingTemplateError(f"工作流节点模板 {template_uuid} 不存在")
         if node.parent_uuid is not None and node.parent_uuid not in node_by_uuid:
             raise GraphValidationError("父节点不在提交的完整图中")
+        if _node_kind(node, templates) == "material_source":
+            try:
+                validate_material_source_node(
+                    {
+                        "material_uuid": node.material_uuid,
+                        "param": effective_params[node.uuid],
+                    }
+                )
+            except MaterialSelectorError as error:
+                raise CodedGraphValidationError(
+                    error.code,
+                    error.message,
+                ) from error
     _validate_parent_cycles(nodes)
 
     validated_io = None
@@ -218,6 +254,13 @@ def _node_kind(
     node: WorkflowNodeWrite,
     templates: Mapping[str, Dict[str, Any]],
 ) -> str:
+    """把节点或模板 wire 类型规范为本地执行分类。
+
+    参数说明：``node`` 是候选工作流节点（WorkflowNode），``templates`` 是
+    当前最小节点模板投影。返回：公共校验使用的执行分类；未知类型关闭失败。
+    """
+
+    # ``raw_kind`` 优先采用节点模板的权威类型，节点字段仅兼容无模板旧图。
     raw_kind = node.type
     if node.workflow_node_template_uuid is not None:
         raw_kind = templates[node.workflow_node_template_uuid].get(
@@ -236,6 +279,7 @@ def _node_kind(
         "group": "group",
         "tool_call": "tool_call",
         "manual_confirm": "manual_confirm",
+        "material_source": "material_source",
     }
     kind = aliases.get(str(raw_kind).strip().lower())
     if kind is None:

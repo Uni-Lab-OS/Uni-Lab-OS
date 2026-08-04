@@ -18,6 +18,11 @@ from unilabos.workflow.authoring_kernel import (
     AuthoringCatalogError,
     AuthoringCatalogSnapshot,
 )
+from unilabos.workflow.authoring_material import (
+    MaterialAuthoringError,
+    MaterialSourceDeclaration,
+    build_material_source_node,
+)
 from unilabos.workflow.models import CandidateChangeset
 
 
@@ -51,10 +56,26 @@ def build_candidate_graph(
     applied = _graph_containers(applied_graph)
     devices = {device.symbol: device for device in program.devices}
     action_catalog: dict[str, AuthoringCatalogAction] = {}
-    result_nodes: dict[str, tuple[ActionDeclaration, AuthoringCatalogAction]] = {}
+    result_nodes: dict[
+        str,
+        tuple[ActionDeclaration | MaterialSourceDeclaration, AuthoringCatalogAction],
+    ] = {}
     nodes: list[dict[str, Any]] = []
     edges: list[dict[str, Any]] = []
     for declaration in program.actions:
+        if isinstance(declaration, MaterialSourceDeclaration):
+            try:
+                # ``node`` 与 ``catalog_action`` 分别是候选事实和框架合同。
+                node, catalog_action = build_material_source_node(
+                    declaration,
+                    catalog=catalog,
+                )
+            except MaterialAuthoringError as error:
+                raise AuthoringGraphError(error.code, error.message) from error
+            action_catalog[declaration.node_uuid] = catalog_action
+            result_nodes[declaration.result_name] = (declaration, catalog_action)
+            nodes.append(node)
+            continue
         device = devices[declaration.device_symbol]
         try:
             catalog_action = catalog.require_action(
@@ -114,7 +135,9 @@ def build_candidate_graph(
             "authoring_result_record_name": (
                 program.result_record_name
                 or (
-                    "".join(part.capitalize() for part in program.function_name.split("_"))
+                    "".join(
+                        part.capitalize() for part in program.function_name.split("_")
+                    )
                     + "Result"
                     if program.outputs
                     else None
@@ -247,9 +270,7 @@ def _candidate_node(
     template = catalog_action.template
     # 模板标题是未显式覆盖时的节点展示默认值；动作业务名仅作旧目录回退。
     template_title = (
-        template.get("display_name")
-        or template.get("name")
-        or declaration.result_name
+        template.get("display_name") or template.get("name") or declaration.result_name
     )
     return {
         "uuid": declaration.node_uuid,
@@ -334,12 +355,17 @@ def _require_handle(
 
 def _output_contract(
     program: WorkflowProgram,
-    result_nodes: Mapping[str, tuple[ActionDeclaration, AuthoringCatalogAction]],
+    result_nodes: Mapping[
+        str,
+        tuple[ActionDeclaration | MaterialSourceDeclaration, AuthoringCatalogAction],
+    ],
 ) -> dict[str, Any]:
     """从输出绑定构造版本 1 工作流输出合同。
 
     参数说明：``program`` 含输入合同和输出声明，``result_nodes`` 提供节点输出
-    连接点类型；返回规范输出描述列表。
+    连接点（Handle）类型。返回：包含版本和规范输出描述列表的工作流输出合同；
+    输出引用缺失或歧义、显式结果记录 Schema 与绑定类型不一致、结果记录字段集
+    与返回字典不一致时抛出 ``AuthoringGraphError``，不生成部分合同。
     """
 
     inputs = {
@@ -370,7 +396,10 @@ def _output_contract(
 
 def _output_bindings(
     program: WorkflowProgram,
-    result_nodes: Mapping[str, tuple[ActionDeclaration, AuthoringCatalogAction]],
+    result_nodes: Mapping[
+        str,
+        tuple[ActionDeclaration | MaterialSourceDeclaration, AuthoringCatalogAction],
+    ],
 ) -> dict[str, dict[str, str]]:
     """把作者输出声明映射为稳定工作流输出绑定。
 
@@ -402,7 +431,9 @@ def _handle_schema(handle: Mapping[str, Any]) -> dict[str, Any]:
     meta_data = handle.get("meta_data")
     if isinstance(meta_data, Mapping):
         unilab = meta_data.get("unilab")
-        if isinstance(unilab, Mapping) and isinstance(unilab.get("value_schema"), Mapping):
+        if isinstance(unilab, Mapping) and isinstance(
+            unilab.get("value_schema"), Mapping
+        ):
             return deepcopy(dict(unilab["value_schema"]))
     value_type = str(handle.get("type") or "").strip()
     if value_type == "ResourceSlot":
@@ -465,9 +496,7 @@ def _semantic_graph(graph: Mapping[str, Any]) -> str:
         "workflow": workflow,
         "nodes": sorted(_semantic_entities(value["nodes"]).values()),
         "edges": sorted(_semantic_entities(value["edges"]).values()),
-        "node_templates": sorted(
-            _semantic_entities(value["node_templates"]).values()
-        ),
+        "node_templates": sorted(_semantic_entities(value["node_templates"]).values()),
         "handle_templates": sorted(
             _semantic_entities(value["handle_templates"]).values()
         ),

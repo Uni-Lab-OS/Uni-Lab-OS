@@ -15,6 +15,10 @@ from unilabos.registry.annotation_schema import (
     parse_parameter_annotation,
     parse_result_annotation,
 )
+from unilabos.workflow.authoring_material import (
+    MaterialSourceDeclaration,
+    parse_material_source_declaration,
+)
 from unilabos.workflow.models import validate_uuid
 from unilabos.workflow.source_coordinates import (
     source_lines,
@@ -99,7 +103,7 @@ class WorkflowProgram:
     input_contract: dict[str, Any]
     result_record_name: str | None
     declared_output_schemas: tuple[tuple[str, dict[str, Any]], ...]
-    actions: tuple[ActionDeclaration, ...]
+    actions: tuple[ActionDeclaration | MaterialSourceDeclaration, ...]
     outputs: tuple[tuple[str, ValueBinding], ...]
 
 
@@ -529,12 +533,11 @@ def _workflow_body(
     input_names: set[str],
     anchors: dict[int, str],
     node_metadata: dict[int, tuple[str, str]],
-) -> tuple[list[ActionDeclaration], list[tuple[str, ValueBinding]]]:
+) -> tuple[list[ActionDeclaration | MaterialSourceDeclaration], list[tuple[str, ValueBinding]]]:
     """解析工作流函数中的动作序列和输出声明。
 
     参数说明：设备与输入索引来自外层声明，``anchors`` 固定节点身份，
-    ``node_metadata`` 保存锚点相邻的展示字段；返回动作列表和命名输出。当前
-    F02 静态子集不接受条件、循环或任意表达式语句。
+    ``node_metadata`` 保存展示字段；返回动作和命名输出，不接受动态控制流。
     """
 
     statements = list(function.body)
@@ -545,26 +548,32 @@ def _workflow_body(
     if not statements or not isinstance(statements[-1], ast.Return):
         _fail("invalid_workflow_output", "工作流函数必须以 workflow_output 返回", function)
     return_statement = statements.pop()
-    actions: list[ActionDeclaration] = []
+    actions: list[ActionDeclaration | MaterialSourceDeclaration] = []
     known_results: set[str] = set()
+    material_results: set[str] = set()  # 可作为裸物料占位符传递的物料来源结果名。
     for statement in statements:
         action = _action_declaration(
             statement,
+            imports=imports,
             devices=devices,
             input_names=input_names,
             known_results=known_results,
+            material_results=material_results,
             anchors=anchors,
             node_metadata=node_metadata,
         )
         if action.result_name in known_results:
             _fail("unsupported_authoring_syntax", "动作结果变量重复", statement)
         known_results.add(action.result_name)
+        if isinstance(action, MaterialSourceDeclaration):
+            material_results.add(action.result_name)
         actions.append(action)
     outputs = _workflow_outputs(
         return_statement,
         imports=imports,
         input_names=input_names,
         known_results=known_results,
+        material_results=material_results,
     )
     return actions, outputs
 
@@ -572,18 +581,28 @@ def _workflow_body(
 def _action_declaration(
     statement: ast.stmt,
     *,
+    imports: dict[str, str],
     devices: dict[str, DeviceDeclaration],
     input_names: set[str],
     known_results: set[str],
+    material_results: set[str],
     anchors: dict[int, str],
     node_metadata: dict[int, tuple[str, str]],
-) -> ActionDeclaration:
+) -> ActionDeclaration | MaterialSourceDeclaration:
     """解析一条 ``result = device.action(...)`` 动作声明。
 
     参数说明：各索引用于验证设备、输入、前序结果、相邻锚点和可选节点展示
     元数据；返回不可变动作声明，位置参数、动态调用或前向引用失败关闭。
     """
 
+    material_source = parse_material_source_declaration(
+        statement,
+        imports=imports,
+        anchors=anchors,
+        node_metadata=node_metadata,
+    )
+    if material_source is not None:
+        return material_source
     if not isinstance(statement, ast.Assign) or len(statement.targets) != 1:
         _fail("unsupported_authoring_syntax", "工作流函数只允许动作赋值", statement)
     target = statement.targets[0]
@@ -618,6 +637,7 @@ def _action_declaration(
                     keyword.value,
                     input_names=input_names,
                     known_results=known_results,
+                    material_results=material_results,
                 ),
             )
         )
@@ -639,6 +659,7 @@ def _workflow_outputs(
     imports: dict[str, str],
     input_names: set[str],
     known_results: set[str],
+    material_results: set[str],
 ) -> list[tuple[str, ValueBinding]]:
     """解析命名工作流输出绑定。
 
@@ -663,6 +684,7 @@ def _workflow_outputs(
                         value,
                         input_names=input_names,
                         known_results=known_results,
+                        material_results=material_results,
                         allow_literal=False,
                     ),
                 )
@@ -683,6 +705,7 @@ def _workflow_outputs(
             keyword.value,
             input_names=input_names,
             known_results=known_results,
+            material_results=material_results,
             allow_literal=False,
         )
         outputs.append((keyword.arg, binding))
@@ -694,16 +717,18 @@ def _value_binding(
     *,
     input_names: set[str],
     known_results: set[str],
+    material_results: set[str],
     allow_literal: bool = True,
 ) -> ValueBinding:
     """把参数表达式解析为字面量、工作流输入或节点输出绑定。
 
-    参数说明：``expression`` 是 AST 表达式，两个集合限制可引用身份；返回静态
-    绑定。``allow_literal=False`` 时工作流输出不能使用字面量。
+    参数：AST 表达式和引用身份集合。返回静态绑定；输出可禁止字面量。
     """
 
     if isinstance(expression, ast.Name) and expression.id in input_names:
         return ValueBinding("workflow_input", expression.id)
+    if isinstance(expression, ast.Name) and expression.id in material_results:
+        return ValueBinding("node_output", "material", expression.id)
     if (
         isinstance(expression, ast.Attribute)
         and isinstance(expression.value, ast.Name)

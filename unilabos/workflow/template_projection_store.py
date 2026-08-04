@@ -3,11 +3,16 @@
 from __future__ import annotations
 
 import json
-from collections.abc import Mapping, Sequence
+from collections.abc import Callable, Mapping, Sequence
 from typing import Any
 from uuid import uuid4
 
 from unilabos.workflow.store import StoreConflict, WorkflowStore, utc_now
+from unilabos.workflow.template_projection_generation import (
+    RegistryTemplateGenerationPersistence,
+    RegistryTemplateProjectionGeneration,
+    TemplateProjectionGenerationDataError,
+)
 
 
 class TemplateProjectionIdentityConflict(StoreConflict):
@@ -21,10 +26,14 @@ class RegistryTemplateProjectionStore:
         """绑定本地工作流存储。
 
         参数说明：``workflow_store`` 持有唯一 SQLite 连接和写事务；本适配器不再
-        创建第二个数据库，也不自行推导数据库路径。
+        创建第二个数据库，也不自行推导数据库路径。返回：无；构造时只确保 OS
+        私有投影代际表存在。异常：SQLite 初始化失败原样传播并关闭式失败。
         """
 
         self._workflow_store = workflow_store
+        self._generation_persistence = RegistryTemplateGenerationPersistence(
+            workflow_store
+        )
 
     def replace(
         self,
@@ -36,15 +45,51 @@ class RegistryTemplateProjectionStore:
         """原子替换一个权威（Authority）的完整活动模板投影。
 
         参数说明：``authority_id`` 是投影来源；``node_templates`` 和
-        ``handle_templates`` 是一次完整刷新。返回值是已解析稳定 UUID 且不含
-        时间戳的语义实体，供不可变快照（Immutable Snapshot）计算稳定指纹。
+        ``handle_templates`` 是一次完整刷新。返回：已解析稳定 UUID 且不含
+        时间戳的节点与连接点（Handle）语义实体；本兼容接口会发布空资源模板
+        （ResourceTemplate）源码身份映射。异常：参数非法抛出 ``ValueError``，
+        模板身份冲突抛出 ``TemplateProjectionIdentityConflict``，事务整体回滚。
         """
 
-        if not authority_id.strip():
+        committed = self.replace_generation(
+            authority_id=authority_id,
+            node_templates=node_templates,
+            handle_templates=handle_templates,
+            resource_template_symbols={},
+        )
+        return committed.node_templates, committed.handle_templates
+
+    def replace_generation(
+        self,
+        *,
+        authority_id: str,
+        node_templates: Sequence[Mapping[str, Any]],
+        handle_templates: Sequence[Mapping[str, Any]],
+        resource_template_symbols: Mapping[str, str],
+        validate_generation: (
+            Callable[[RegistryTemplateProjectionGeneration], None] | None
+        ) = None,
+    ) -> RegistryTemplateProjectionGeneration:
+        """原子替换一个权威（Authority）的完整模板与资源身份代际。
+
+        参数说明：``authority_id`` 是投影来源；``node_templates`` 与
+        ``handle_templates`` 是本轮完整节点和连接点（Handle）集合；
+        ``resource_template_symbols`` 是资源模板（ResourceTemplate）源码身份到
+        UUID 的完整映射；``validate_generation`` 是在写入完成、提交发生前调用的
+        只读完整代际校验器。返回：通过校验并由同一 SQLite 事务提交的完整投影
+        代际。异常：空权威、非法资源身份映射抛出 ``ValueError``；模板身份冲突
+        抛出 ``TemplateProjectionIdentityConflict``；校验器异常原样传播。任一
+        异常都会回滚节点、连接点、资源身份与代际号，旧代际保持不变。
+        """
+
+        if not isinstance(authority_id, str) or not authority_id.strip():
             raise ValueError("模板投影权威不能为空")
         # ``node_candidates`` 与 ``handle_candidates`` 是脱离调用方容器的候选代际。
         node_candidates = [dict(candidate) for candidate in node_templates]
         handle_candidates = [dict(candidate) for candidate in handle_templates]
+        symbol_candidates = self._generation_persistence.normalize_symbols(
+            resource_template_symbols
+        )
         now = utc_now()
         with self._workflow_store.transaction() as connection:
             # ``node_identities`` 把本轮活动业务唯一键映射到持久 UUID。
@@ -100,7 +145,23 @@ class RegistryTemplateProjectionStore:
                 active_handle_uuids=active_handle_uuids,
                 now=now,
             )
-            return self._load(connection, authority_id=authority_id)
+            generation = self._generation_persistence.upsert_in_transaction(
+                connection,
+                authority_id=authority_id,
+                resource_template_symbols=symbol_candidates,
+                now=now,
+            )
+            nodes, handles = self._load(connection, authority_id=authority_id)
+            committed_generation = RegistryTemplateProjectionGeneration(
+                authority_id=authority_id,
+                generation=generation,
+                node_templates=nodes,
+                handle_templates=handles,
+                resource_template_symbols=dict(symbol_candidates),
+            )
+            if validate_generation is not None:
+                validate_generation(committed_generation)
+            return committed_generation
 
     def load(
         self,
@@ -109,12 +170,46 @@ class RegistryTemplateProjectionStore:
     ) -> tuple[list[dict[str, Any]], list[dict[str, Any]]]:
         """读取一个权威当前已提交的完整活动投影。
 
-        参数说明：``authority_id`` 用于隔离来源；返回值只含稳定业务语义，读取
-        不访问设备注册表（Registry）或网络。
+        参数说明：``authority_id`` 用于隔离来源。返回：当前节点与连接点
+        （Handle）活动投影，不访问设备注册表（Registry）或网络。异常：空权威
+        抛出 ``ValueError``；持久资源身份损坏抛出
+        ``TemplateProjectionIdentityConflict``，不返回部分数据。
         """
 
+        generation = self.load_generation(authority_id=authority_id)
+        return generation.node_templates, generation.handle_templates
+
+    def load_generation(
+        self,
+        *,
+        authority_id: str,
+    ) -> RegistryTemplateProjectionGeneration:
+        """读取一个权威当前提交的完整设备注册表模板投影代际。
+
+        参数说明：``authority_id`` 隔离不同投影来源。返回：在同一数据库视图中
+        读取的节点、连接点（Handle）、资源模板（ResourceTemplate）源码身份映射
+        和单调代际号；尚未发布时返回代际 ``0`` 与三个空集合。异常：持久映射被
+        破坏时抛出 ``TemplateProjectionIdentityConflict``，不返回部分快照。
+        """
+
+        if not isinstance(authority_id, str) or not authority_id.strip():
+            raise ValueError("模板投影权威不能为空")
         with self._workflow_store.transaction() as connection:
-            return self._load(connection, authority_id=authority_id)
+            nodes, handles = self._load(connection, authority_id=authority_id)
+            try:
+                generation, symbols = self._generation_persistence.load_in_transaction(
+                    connection,
+                    authority_id=authority_id,
+                )
+            except TemplateProjectionGenerationDataError as error:
+                raise TemplateProjectionIdentityConflict(str(error)) from error
+            return RegistryTemplateProjectionGeneration(
+                authority_id=authority_id,
+                generation=generation,
+                node_templates=nodes,
+                handle_templates=handles,
+                resource_template_symbols=symbols,
+            )
 
     def close(self) -> None:
         """关闭本适配器拥有的工作流存储连接。"""
@@ -170,7 +265,9 @@ class RegistryTemplateProjectionStore:
         if not isinstance(handle_key, str) or not handle_key:
             raise TemplateProjectionIdentityConflict("句柄模板缺少连接点业务名")
         if io_type not in {"source", "target"}:
-            raise TemplateProjectionIdentityConflict("句柄模板方向必须是 source 或 target")
+            raise TemplateProjectionIdentityConflict(
+                "句柄模板方向必须是 source 或 target"
+            )
         return parent_uuid, handle_key, str(io_type)
 
     def _upsert_node(
@@ -204,12 +301,21 @@ class RegistryTemplateProjectionStore:
                 "SELECT * FROM workflow_node_template WHERE uuid = ?",
                 (explicit_uuid,),
             ).fetchone()
-            if existing_by_uuid is not None and (
-                existing_by_uuid["resource_template_uuid"], existing_by_uuid["name"]
-            ) != business_key:
-                raise TemplateProjectionIdentityConflict("节点模板 UUID 不得改绑业务身份")
+            if (
+                existing_by_uuid is not None
+                and (
+                    existing_by_uuid["resource_template_uuid"],
+                    existing_by_uuid["name"],
+                )
+                != business_key
+            ):
+                raise TemplateProjectionIdentityConflict(
+                    "节点模板 UUID 不得改绑业务身份"
+                )
             if existing_by_key is not None and existing_by_key["uuid"] != explicit_uuid:
-                raise TemplateProjectionIdentityConflict("节点活动业务唯一键已有其他 UUID")
+                raise TemplateProjectionIdentityConflict(
+                    "节点活动业务唯一键已有其他 UUID"
+                )
             template_uuid = explicit_uuid
         elif existing_by_key is not None:
             template_uuid = str(existing_by_key["uuid"])
@@ -278,14 +384,22 @@ class RegistryTemplateProjectionStore:
                 "SELECT * FROM workflow_handle_template WHERE uuid = ?",
                 (explicit_uuid,),
             ).fetchone()
-            if existing_by_uuid is not None and (
-                existing_by_uuid["workflow_node_template_uuid"],
-                existing_by_uuid["handle_key"],
-                existing_by_uuid["io_type"],
-            ) != business_key:
-                raise TemplateProjectionIdentityConflict("句柄模板 UUID 不得改绑业务身份")
+            if (
+                existing_by_uuid is not None
+                and (
+                    existing_by_uuid["workflow_node_template_uuid"],
+                    existing_by_uuid["handle_key"],
+                    existing_by_uuid["io_type"],
+                )
+                != business_key
+            ):
+                raise TemplateProjectionIdentityConflict(
+                    "句柄模板 UUID 不得改绑业务身份"
+                )
             if existing_by_key is not None and existing_by_key["uuid"] != explicit_uuid:
-                raise TemplateProjectionIdentityConflict("句柄活动业务唯一键已有其他 UUID")
+                raise TemplateProjectionIdentityConflict(
+                    "句柄活动业务唯一键已有其他 UUID"
+                )
             handle_uuid = explicit_uuid
         elif existing_by_key is not None:
             handle_uuid = str(existing_by_key["uuid"])
@@ -460,9 +574,7 @@ class RegistryTemplateProjectionStore:
                 "update_time": row["update_time"],
                 "description": row["description"],
                 "meta_data": _load_json(row["meta_data"], {}),
-                "workflow_node_template_uuid": row[
-                    "workflow_node_template_uuid"
-                ],
+                "workflow_node_template_uuid": row["workflow_node_template_uuid"],
                 "handle_key": row["handle_key"],
                 "io_type": row["io_type"],
                 "display_name": row["display_name"],
@@ -567,6 +679,7 @@ def _load_schema(value: str | None) -> Any:
 
 
 __all__ = [
+    "RegistryTemplateProjectionGeneration",
     "RegistryTemplateProjectionStore",
     "TemplateProjectionIdentityConflict",
 ]

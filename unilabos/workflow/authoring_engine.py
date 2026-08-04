@@ -18,11 +18,19 @@ from unilabos.workflow.authoring_graph import (
     candidate_changeset,
     semantic_graph_equal,
 )
-from unilabos.workflow.authoring_kernel import AuthoringCatalogSnapshot
+from unilabos.workflow.authoring_kernel import (
+    AuthoringCatalogError,
+    AuthoringCatalogSnapshot,
+)
+from unilabos.workflow.authoring_material import MaterialAuthoringError
 from unilabos.workflow.authoring_python import render_authoring_python
 from unilabos.workflow.candidate_validation import (
     CandidateBundleError,
     validate_candidate_bundle,
+)
+from unilabos.workflow.material_selector import (
+    MaterialSelectorError,
+    validate_material_source_node,
 )
 from unilabos.workflow.models import CandidateCompilation, validate_uuid
 from unilabos.workflow.source_coordinates import require_utf8_text
@@ -120,6 +128,13 @@ class WorkflowAuthoringEngine:
                 message=error.message,
                 source_range=diagnostic_source_range(error.node, python_source),
             )
+        except MaterialAuthoringError as error:
+            return _error_result(
+                fingerprint=self.template_catalog_fingerprint,
+                code=error.code,
+                message=error.message,
+                source_range=diagnostic_source_range(error.node, python_source),
+            )
         except AuthoringGraphError as error:
             return _error_result(
                 fingerprint=self.template_catalog_fingerprint,
@@ -211,6 +226,14 @@ class WorkflowAuthoringEngine:
         返回保留调用方图的成功结果，语义分叉返回 ``round_trip_mismatch``。
         """
 
+        try:
+            _validate_material_source_graph(graph, catalog=self._catalog)
+        except MaterialSelectorError as error:
+            return _error_result(
+                fingerprint=self.template_catalog_fingerprint,
+                code=error.code,
+                message=error.message,
+            )
         compiled = self.compile(
             workflow_uuid=workflow_uuid,
             workflow_revision=workflow_revision,
@@ -228,6 +251,36 @@ class WorkflowAuthoringEngine:
             )
         compiled.graph = deepcopy(graph)
         return compiled
+
+
+def _validate_material_source_graph(
+    graph: Mapping[str, Any],
+    *,
+    catalog: AuthoringCatalogSnapshot,
+) -> None:
+    """只校验候选图中的物料来源节点。
+
+    参数说明：``graph`` 是共同验证接缝收到的可疑候选图，``catalog`` 是当前
+    不可变目录快照。返回：无；物料来源选择器（MaterialSourceSelector）非法时
+    抛出 ``MaterialSelectorError``，其他图语义仍交给原往返比较判断。
+    """
+
+    nodes = graph.get("nodes") if isinstance(graph, Mapping) else None
+    if not isinstance(nodes, list):
+        return
+    for node in nodes:
+        if not isinstance(node, Mapping):
+            continue
+        node_kind = node.get("type")
+        template_uuid = node.get("workflow_node_template_uuid")
+        if isinstance(template_uuid, str):
+            try:
+                template = catalog.require_template(template_uuid).template
+                node_kind = template.get("node_type") or template.get("type")
+            except AuthoringCatalogError:
+                continue
+        if str(node_kind).strip().lower() == "material_source":
+            validate_material_source_node(node)
 
 
 def _request_identity(workflow_uuid: str, revision: int) -> tuple[str, int]:

@@ -10,6 +10,10 @@ from types import MappingProxyType
 from typing import Any, Protocol
 
 from unilabos.workflow.models import CandidateCompilation, validate_uuid
+from unilabos.workflow.source_identity import (
+    PythonSourceIdentityError,
+    canonical_python_source_identity,
+)
 
 
 class AuthoringCatalogError(ValueError):
@@ -45,18 +49,23 @@ class AuthoringCatalogSnapshot:
     actions: tuple[AuthoringCatalogAction, ...]
     _by_business_key: Mapping[tuple[str, str], AuthoringCatalogAction]
     _by_template_uuid: Mapping[str, AuthoringCatalogAction]
+    _resource_template_uuid_by_symbol: Mapping[str, str]
+    _resource_template_symbol_by_uuid: Mapping[str, str]
 
     @classmethod
     def from_entities(
         cls,
         node_templates: Sequence[Mapping[str, Any]],
         handle_templates: Sequence[Mapping[str, Any]],
+        *,
+        resource_template_symbols: Mapping[str, str] | None = None,
     ) -> AuthoringCatalogSnapshot:
         """从后端形状目录实体建立不可变快照。
 
         参数说明：``node_templates`` 是完整节点模板集合，``handle_templates``
         是完整连接点集合。返回值按稳定 JSON 计算 SHA-256 指纹；重复业务身份、
-        重复 UUID 或孤儿连接点会抛出 ``AuthoringCatalogError``。
+        重复 UUID 或孤儿连接点会抛出 ``AuthoringCatalogError``；
+        ``resource_template_symbols`` 把资源模板源码符号冻结到本地模板 UUID。
         """
 
         nodes = [_json_mapping(item, "节点模板") for item in node_templates]
@@ -103,6 +112,30 @@ class AuthoringCatalogSnapshot:
             by_template_uuid[node_uuid] = action
             actions.append(action)
 
+        resource_uuid_by_symbol: dict[str, str] = {}
+        resource_symbol_by_uuid: dict[str, str] = {}
+        for raw_symbol, raw_uuid in sorted(
+            (resource_template_symbols or {}).items(),
+            key=lambda item: str(item[0]),
+        ):
+            try:
+                symbol = canonical_python_source_identity(raw_symbol)
+            except PythonSourceIdentityError as error:
+                raise AuthoringCatalogError(
+                    "资源模板源码身份不能安全生成 Python import"
+                ) from error
+            try:
+                template_uuid = validate_uuid(raw_uuid)
+            except (TypeError, ValueError):
+                raise AuthoringCatalogError("资源模板源码符号映射到非法 UUID") from None
+            if symbol in resource_uuid_by_symbol:
+                raise AuthoringCatalogError("资源模板源码符号重复")
+            previous_symbol = resource_symbol_by_uuid.get(template_uuid)
+            if previous_symbol is not None and previous_symbol != symbol:
+                raise AuthoringCatalogError("资源模板 UUID 绑定了多个源码符号")
+            resource_uuid_by_symbol[symbol] = template_uuid
+            resource_symbol_by_uuid[template_uuid] = symbol
+
         payload = {
             "node_templates": sorted(
                 (_catalog_semantic_entity(item) for item in nodes),
@@ -112,6 +145,7 @@ class AuthoringCatalogSnapshot:
                 (_catalog_semantic_entity(item) for item in handles),
                 key=lambda item: str(item["uuid"]),
             ),
+            "resource_template_symbols": resource_uuid_by_symbol,
         }
         fingerprint = "sha256:" + hashlib.sha256(
             json.dumps(
@@ -127,7 +161,67 @@ class AuthoringCatalogSnapshot:
             actions=tuple(actions),
             _by_business_key=MappingProxyType(by_business_key),
             _by_template_uuid=MappingProxyType(by_template_uuid),
+            _resource_template_uuid_by_symbol=MappingProxyType(
+                resource_uuid_by_symbol
+            ),
+            _resource_template_symbol_by_uuid=MappingProxyType(
+                resource_symbol_by_uuid
+            ),
         )
+
+    def require_material_source(self) -> AuthoringCatalogAction:
+        """取得唯一框架物料来源（MaterialSource）节点模板。
+
+        参数：无。返回：带单一 source 物料占位符（ResourceSlot）的不可变
+        框架模板；模板不存在或合同被污染时抛出 ``AuthoringCatalogError``。
+        """
+
+        framework = self.require_action(
+            "unilabos.workflow.authoring:material_source",
+            "material_source",
+        )
+        # ``source_handles`` 是框架对外发布的物料流出口，必须严格唯一。
+        source_handles = tuple(
+            handle
+            for handle in framework.handles
+            if handle.get("handle_key") == "material"
+            and handle.get("io_type") == "source"
+            and handle.get("type") == "ResourceSlot"
+        )
+        if (
+            framework.template.get("type") != "material_source"
+            or framework.template.get("node_type") != "material_source"
+            or len(framework.handles) != 1
+            or len(source_handles) != 1
+        ):
+            raise AuthoringCatalogError("物料来源框架模板合同不完整")
+        return framework
+
+    def require_resource_template_uuid(self, source_symbol: str) -> str:
+        """把资源模板源码符号解析为冻结的本地 UUID。
+
+        参数说明：``source_symbol`` 是工作流源码中的资源模板稳定符号。
+        返回：本次目录代际冻结的资源模板 UUID；未知符号关闭式失败。
+        """
+
+        try:
+            return self._resource_template_uuid_by_symbol[source_symbol]
+        except (KeyError, TypeError):
+            raise AuthoringCatalogError("工作流创作目录缺少资源模板源码身份") from None
+
+    def require_resource_template_symbol(self, template_uuid: str) -> str:
+        """把本地资源模板 UUID 反解为冻结的源码符号。
+
+        参数说明：``template_uuid`` 来自候选工作流图。返回：规范源码符号；
+        UUID 非法或不在本次目录代际时抛出 ``AuthoringCatalogError``。
+        """
+
+        try:
+            return self._resource_template_symbol_by_uuid[
+                validate_uuid(template_uuid)
+            ]
+        except (KeyError, TypeError, ValueError):
+            raise AuthoringCatalogError("工作流创作目录缺少资源模板 UUID 身份") from None
 
     def require_action(
         self,
