@@ -1,0 +1,17 @@
+Round 02G2 Windows Draft CAS migration ledger
+
+Tested SHA: 5f84c3e8fb717116003df30aa9201e84781a1928
+
+Independent test author: /root/windows_cas_test_author (Ptolemy). Initial RED commit 815fdeda76f38e4c2d379875a20a3737096d3c8a -> provenance commit 4727e6c8: 3 failed, 1 warning. Reviewer-finding RED commit 2a8794ede73b283d610b430313ef822bfb8b5d5a -> provenance commit e22814fb: 11 failed, 5 passed, 1 warning.
+
+Independent reviewer: /root/windows_cas_reviewer. First review of 9c5b8bbf: 4 blockers (directory-chain TOCTOU, rollback uncertainty reported as conflict, WinError overmapping, native Windows/ledger/docstring evidence gaps). Fix disposition on this SHA: Win32 non-delete-sharing directory handles plus reparse rejection; rollback retry and uncertain internal error; WinError 2/3/32/33 conflict with ACL/disk/I/O internal; service docstring, native Windows tests and CI job added. Same-reviewer confirmation pending.
+
+Command: /home/changjunhan/.micromamba/envs/unilab/bin/python -m pytest -q tests/workflow/test_02g2_windows_draft_cas_contract.py tests/workflow/test_02g2_windows_draft_cas_review_blockers.py tests/workflow/test_02g2_windows_file_api.py tests/workflow/test_02g2_windows_native_draft_cas.py tests/workflow/test_authoring_source_discovery.py tests/workflow/test_windows_import_portability.py tests/workflow/test_authoring_source_review_regressions.py ; result: 89 passed, 3 skipped, 1 warning.
+
+Command: /home/changjunhan/.micromamba/envs/unilab/bin/python -m pytest -q tests/workflow ; result: 1573 passed, 3 skipped, 13 warnings.
+
+Command: /home/changjunhan/.micromamba/envs/unilab/bin/python -m pytest -q tests ; result: 2601 passed, 7 skipped, 68 warnings.
+
+Command: python -m ruff check --select E,F,I --ignore E501 <8 changed Python files>; result passed. Command: python -m ruff format --check <8 changed Python files>; result passed. Command: python -m compileall -q <3 production Python files>; result passed. Command: yaml.safe_load(.github/workflows/ci-check.yml); result passed. Command: git diff --check; result passed.
+
+Root pytest -q baseline collection blockers remain the legacy Modbus Coil example missing data_type and cameraSII top-level cameraUSB import; both outside this round. Reviewer disposition: pending final confirmation.
