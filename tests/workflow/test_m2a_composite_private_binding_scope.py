@@ -65,9 +65,7 @@ def _private_binding_collision_candidate(tmp_path: Path) -> dict[str, Any]:
         if node.get("parent_uuid") == INVOCATION_NODE_UUID
     )
     private_bindings = internal_source["meta_data"]["unilab"]["input_bindings"]
-    assert {binding["parameter"] for binding in private_bindings.values()} == {
-        "value"
-    }
+    assert {binding["parameter"] for binding in private_bindings.values()} == {"value"}
 
     # 将真实子动作输出声明为无约束隐式透传，并把既有下游消费者纳入同一复合层级。
     source_handle = next(
@@ -105,18 +103,10 @@ def test_composite_private_binding_cannot_inherit_same_named_parent_guarantee(
     """证明 child-local 同名绑定不能把不兼容物料伪装成受限消费者可接受。"""
 
     candidate = _private_binding_collision_candidate(tmp_path)
-    nodes = [
-        WorkflowNodeWrite.model_validate(node) for node in candidate["nodes"]
-    ]
-    edges = [
-        WorkflowEdgeWrite.model_validate(edge) for edge in candidate["edges"]
-    ]
-    templates = {
-        template["uuid"]: template for template in candidate["node_templates"]
-    }
-    handles = {
-        handle["uuid"]: handle for handle in candidate["handle_templates"]
-    }
+    nodes = [WorkflowNodeWrite.model_validate(node) for node in candidate["nodes"]]
+    edges = [WorkflowEdgeWrite.model_validate(edge) for edge in candidate["edges"]]
+    templates = {template["uuid"]: template for template in candidate["node_templates"]}
+    handles = {handle["uuid"]: handle for handle in candidate["handle_templates"]}
 
     with pytest.raises(
         GraphValidationError,

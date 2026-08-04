@@ -139,7 +139,7 @@ def validate_graph(
             "target",
             handles,
         )
-    bindings_by_node = (
+    workflow_input_bindings = (
         dict(validated_io.input_bindings)
         if validated_io is not None
         else {
@@ -154,6 +154,9 @@ def validate_graph(
             if node.uuid not in composite_internal_uuids
         }
     )
+    # 只有公共父边界绑定可引用父工作流（Workflow）输入合同；展开子节点的
+    # child-local 私有绑定仍参与 provider 校验，但不得取得父输入权威。
+    bindings_by_node = dict(workflow_input_bindings)
     for node_uuid in composite_internal_uuids:
         bindings_by_node[node_uuid] = _validated_private_input_bindings(
             node_by_uuid[node_uuid],
@@ -167,7 +170,7 @@ def validate_graph(
         templates=templates,
         handles=handles,
         effective_params=effective_params,
-        input_bindings=bindings_by_node,
+        input_bindings=workflow_input_bindings,
         workflow_input_guarantees=_workflow_input_resource_slot_guarantees(
             workflow_meta_data
         ),
@@ -386,7 +389,7 @@ def _validate_resource_slot_template_compatibility(
         templates: 以节点模板 UUID 为键的当前模板目录。
         handles: 以句柄 UUID 为键的当前句柄目录。
         effective_params: 以节点 UUID 为键的有效参数。
-        input_bindings: 以节点和目标句柄 UUID 索引的工作流（Workflow）输入绑定。
+        input_bindings: 只含公共父边界、以节点和目标句柄 UUID 索引的工作流（Workflow）输入绑定。
         workflow_input_guarantees: 工作流（Workflow）输入名对应的资源模板（ResourceTemplate）允许集合；空值表示无约束。
 
     返回：
@@ -458,7 +461,7 @@ def _resource_slot_producer_guarantee(
         templates: 以节点模板 UUID 为键的模板目录。
         handles: 以句柄 UUID 为键的句柄目录。
         effective_params: 以节点 UUID 为键的有效参数。
-        input_bindings: 以节点和目标句柄 UUID 索引的工作流（Workflow）输入绑定。
+        input_bindings: 只含公共父边界、以节点和目标句柄 UUID 索引的工作流（Workflow）输入绑定。
         workflow_input_guarantees: 工作流（Workflow）输入名对应的资源模板（ResourceTemplate）允许集合。
         seen: 已访问的节点与源句柄身份，用于拒绝循环证明。
 
