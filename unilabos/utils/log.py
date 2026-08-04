@@ -5,11 +5,15 @@ from datetime import datetime
 import ctypes
 import atexit
 import inspect
+from logging.handlers import RotatingFileHandler
 from typing import Tuple, cast
 
 # 添加TRACE级别到logging模块
 TRACE_LEVEL = 5
 logging.addLevelName(TRACE_LEVEL, "TRACE")
+
+DEFAULT_LOG_MAX_BYTES = 20 * 1024 * 1024
+DEFAULT_LOG_BACKUP_COUNT = 5
 
 
 class CustomRecord:
@@ -183,13 +187,47 @@ def _to_numeric_level(loglevel, default=logging.DEBUG) -> int:
     return loglevel
 
 
+def _positive_environment_integer(name: str, default: int) -> int:
+    """读取正整数环境配置；缺失或无效时返回稳定默认值。"""
+
+    raw_value = os.environ.get(name)
+    if raw_value is None:
+        return default
+    try:
+        parsed = int(raw_value)
+    except ValueError:
+        return default
+    return parsed if parsed > 0 else default
+
+
+def _create_rotating_file_handler(log_filepath: str) -> RotatingFileHandler:
+    """创建有界诊断日志处理器，容量和保留份数由环境变量控制。"""
+
+    return RotatingFileHandler(
+        log_filepath,
+        maxBytes=_positive_environment_integer(
+            "UNILABOS_LOG_MAX_BYTES",
+            DEFAULT_LOG_MAX_BYTES,
+        ),
+        backupCount=_positive_environment_integer(
+            "UNILABOS_LOG_BACKUP_COUNT",
+            DEFAULT_LOG_BACKUP_COUNT,
+        ),
+        encoding="utf-8",
+    )
+
+
 # 配置日志处理器
 def configure_logger(loglevel=None, working_dir=None):
-    """配置日志记录器
+    """配置控制台与有界主诊断日志记录器。
 
     Args:
         loglevel: 日志级别，可以是字符串（'TRACE', 'DEBUG', 'INFO', 'WARNING', 'ERROR', 'CRITICAL'）
                  或logging模块的常量（如logging.DEBUG）或TRACE_LEVEL
+        working_dir: 运行工作目录；为空时只配置控制台。
+
+    Returns:
+        当前主诊断日志绝对路径；未启用文件日志时返回 ``None``。
     """
     # 获取根日志记录器
     root_logger = logging.getLogger()
@@ -200,6 +238,7 @@ def configure_logger(loglevel=None, working_dir=None):
     # 移除已存在的处理器
     for handler in root_logger.handlers[:]:
         root_logger.removeHandler(handler)
+        handler.close()
 
     # 创建控制台处理器
     console_handler = logging.StreamHandler()
@@ -223,7 +262,7 @@ def configure_logger(loglevel=None, working_dir=None):
         log_filepath = os.path.join(logs_dir, log_filename)
 
         # 创建文件处理器
-        file_handler = logging.FileHandler(log_filepath, encoding="utf-8")
+        file_handler = _create_rotating_file_handler(log_filepath)
         file_handler.setLevel(TRACE_LEVEL)
 
         # 使用不带颜色的格式化器
@@ -290,6 +329,11 @@ def configure_comm_logger(working_dir=None, loglevel=None):
     comm_logger.setLevel(TRACE_LEVEL)
     comm_logger.propagate = False  # 与根 logger 解耦，单独成文件
 
+    ws_lib_logger = logging.getLogger("websockets")
+    if _comm_file_handler is not None and _comm_file_handler in ws_lib_logger.handlers:
+        ws_lib_logger.removeHandler(_comm_file_handler)
+    _comm_file_handler = None
+
     # 移除旧 handler，支持重启重复调用
     for handler in comm_logger.handlers[:]:
         comm_logger.removeHandler(handler)
@@ -309,7 +353,7 @@ def configure_comm_logger(working_dir=None, loglevel=None):
         log_filename = "ws_comm_" + datetime.now().strftime("%Y-%m-%d %H-%M-%S") + ".log"
         log_filepath = os.path.join(logs_dir, log_filename)
 
-        file_handler = logging.FileHandler(log_filepath, encoding="utf-8")
+        file_handler = _create_rotating_file_handler(log_filepath)
         file_handler.setLevel(TRACE_LEVEL)  # 全量保留到本地
         # 文件不带颜色，开启微秒精度 + 线程名
         file_handler.setFormatter(ColoredFormatter(use_colors=False, microseconds=True, show_thread=True))
@@ -317,9 +361,6 @@ def configure_comm_logger(working_dir=None, loglevel=None):
 
         # websockets 库自身日志(协议层)也归集到同一文件，方便排查链路问题；
         # 保持其 propagate=True，不影响主日志原有行为。
-        ws_lib_logger = logging.getLogger("websockets")
-        if _comm_file_handler is not None and _comm_file_handler in ws_lib_logger.handlers:
-            ws_lib_logger.removeHandler(_comm_file_handler)
         ws_lib_logger.addHandler(file_handler)
         _comm_file_handler = file_handler
 

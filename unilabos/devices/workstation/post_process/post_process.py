@@ -129,6 +129,9 @@ class BaseClient(UniversalDriver):
         # 初始化线程锁（在子类中会被重新创建，这里提供默认实现）
         import threading
         self._client_lock = threading.RLock()
+        # OPC UA 浏览失败后进入短暂退避，避免每个遥测变量都重复整树扫描。
+        self._node_discovery_retry_after = 0.0
+        self._node_discovery_failure_count = 0
 
     def _set_client(self, client: Optional[Client]) -> None:
         if client is None:
@@ -152,9 +155,13 @@ class BaseClient(UniversalDriver):
             raise ValueError('client is not initialized')
     
     def _find_nodes(self) -> None:
-        """查找服务器中的节点"""
+        """浏览并注册 OPC UA 节点；连接失败时按指数退避后再尝试。"""
         if not self.client:
             raise ValueError('client is not connected')
+
+        now = time.monotonic()
+        if now < self._node_discovery_retry_after:
+            return
             
         logger.info(f'开始查找 {len(self._variables_to_find)} 个节点...')
         try:
@@ -188,10 +195,22 @@ class BaseClient(UniversalDriver):
                     logger.info(f"尝试在服务器中查找第一个未找到的节点 '{not_found[0]}' 的相似节点...")
             else:
                 logger.info(f"✓ 所有 {len(self._variables_to_find)} 个节点均已找到并注册")
-                
+
+            self._node_discovery_failure_count = 0
+            self._node_discovery_retry_after = 0.0
         except Exception as e:
-            logger.error(f"查找节点失败: {e}")
-            traceback.print_exc()
+            self._node_discovery_failure_count += 1
+            retry_delay = min(
+                30.0,
+                5.0 * (2 ** (self._node_discovery_failure_count - 1)),
+            )
+            self._node_discovery_retry_after = time.monotonic() + retry_delay
+            logger.warning(
+                "OPC UA 节点浏览失败，%.1f 秒后重试：%s: %s",
+                retry_delay,
+                type(e).__name__,
+                e,
+            )
 
     def _find_nodes_recursive(self, node) -> None:
         """递归查找节点"""
@@ -320,8 +339,8 @@ class BaseClient(UniversalDriver):
                 logger.debug(f"使用节点: '{name}' -> '{chinese_name}', NodeId: {node.node_id}")
                 return node
             elif chinese_name in self._variables_to_find:
-                logger.warning(f"节点 {chinese_name} (英文名: {name}) 尚未找到，尝试重新查找")
-                if self.client:
+                if self.client and time.monotonic() >= self._node_discovery_retry_after:
+                    logger.warning(f"节点 {chinese_name} (英文名: {name}) 尚未找到，尝试重新查找")
                     self._find_nodes()
                     if chinese_name in self._node_registry:
                         node = self._node_registry[chinese_name]
@@ -332,14 +351,15 @@ class BaseClient(UniversalDriver):
         # 直接使用原始名称查找
         if name not in self._node_registry:
             if name in self._variables_to_find:
-                logger.warning(f"节点 {name} 尚未找到，尝试重新查找")
-                if self.client:
+                if self.client and time.monotonic() >= self._node_discovery_retry_after:
+                    logger.warning(f"节点 {name} 尚未找到，尝试重新查找")
                     self._find_nodes()
                     if name in self._node_registry:
                         node = self._node_registry[name]
                         logger.info(f"重新查找成功: '{name}', NodeId: {node.node_id}")
                         return node
-            logger.error(f"❌ 节点 '{name}' 未注册或未找到。已注册节点: {list(self._node_registry.keys())[:5]}...")
+            if name not in self._variables_to_find:
+                logger.error(f"❌ 节点 '{name}' 未注册。已注册节点: {list(self._node_registry.keys())[:5]}...")
             raise ValueError(f'节点 {name} 未注册或未找到')
         node = self._node_registry[name]
         logger.debug(f"使用节点: '{name}', NodeId: {node.node_id}")
@@ -1777,5 +1797,4 @@ if __name__ == '__main__':
     except Exception as e:
         print(f"错误: {e}")
         traceback.print_exc()
-
 
