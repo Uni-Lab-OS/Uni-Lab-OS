@@ -10,6 +10,10 @@ from types import MappingProxyType
 from typing import Any, Protocol
 
 from unilabos.workflow.models import CandidateCompilation, validate_uuid
+from unilabos.workflow.source_identity import (
+    PythonSourceIdentityError,
+    canonical_python_source_identity,
+)
 
 
 class AuthoringCatalogError(ValueError):
@@ -114,9 +118,12 @@ class AuthoringCatalogSnapshot:
             (resource_template_symbols or {}).items(),
             key=lambda item: str(item[0]),
         ):
-            if not isinstance(raw_symbol, str) or not raw_symbol.strip():
-                raise AuthoringCatalogError("资源模板源码符号不能为空")
-            symbol = raw_symbol.strip()
+            try:
+                symbol = canonical_python_source_identity(raw_symbol)
+            except PythonSourceIdentityError as error:
+                raise AuthoringCatalogError(
+                    "资源模板源码身份不能安全生成 Python import"
+                ) from error
             try:
                 template_uuid = validate_uuid(raw_uuid)
             except (TypeError, ValueError):

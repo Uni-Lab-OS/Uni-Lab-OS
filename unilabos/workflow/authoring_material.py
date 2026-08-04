@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 import ast
-import keyword
 from collections.abc import Mapping
 from dataclasses import dataclass
 from typing import Any
@@ -21,6 +20,10 @@ from unilabos.workflow.material_selector import (
     validate_material_source_selector,
 )
 from unilabos.workflow.models import validate_uuid
+from unilabos.workflow.source_identity import (
+    PythonSourceIdentityError,
+    validate_python_source_identity,
+)
 
 _AUTHORING_MODULE = "unilabos.workflow.authoring"
 _MATERIAL_SOURCE = f"{_AUTHORING_MODULE}:material_source"
@@ -134,13 +137,13 @@ def parse_material_source_declaration(
         keywords["material_uuid"],
         label="固定物料 UUID",
     )
-    site = _optional_uuid(keywords["site"], label="库位 UUID")
+    site = _optional_uuid(keywords["site"], label="库位（Site）UUID")
     slot_range = _optional_uuid_list(
         keywords["slot_range"],
-        label="库位范围",
+        label="库位（Slot）范围",
     )
     if site is not None and slot_range is not None:
-        _fail("物料来源不能同时选择单一库位和库位范围", call)
+        _fail("物料来源不能同时选择库位（Site）和库位（Slot）范围", call)
     if mode == "create_new" and material_uuid is not None:
         _fail("新建物料来源不能预先绑定物料 UUID", keywords["material_uuid"])
     flow_role = _flow_role(keywords["flow_role"], imports=imports)
@@ -274,16 +277,13 @@ def render_material_source_call(
             "template_catalog_mismatch",
             "物料来源资源模板 UUID 不能反解为当前源码身份",
         ) from error
-    module, symbol = source_symbol.rsplit(":", 1)
-    if (
-        not module
-        or not symbol.isidentifier()
-        or keyword.iskeyword(symbol)
-    ):
+    try:
+        module, symbol = validate_python_source_identity(source_symbol)
+    except PythonSourceIdentityError as error:
         raise MaterialAuthoringError(
             "template_catalog_mismatch",
             "资源模板源码身份不能安全生成 Python import",
-        )
+        ) from error
     role_member = MATERIAL_FLOW_ROLE_MEMBERS[selector["flow_role"]]
     # ``arguments`` 固定字段顺序，确保同一图跨进程生成完全相同的源码。
     arguments = [
@@ -426,10 +426,10 @@ def _validate_optional_uuid_list_value(value: Any) -> list[str] | None:
     if value is None:
         return None
     if not isinstance(value, list) or not value:
-        raise ValueError("库位范围必须是非空列表")
+        raise ValueError("库位（Slot）范围必须是非空列表")
     identities = [validate_uuid(item) for item in value]
     if len(set(identities)) != len(identities):
-        raise ValueError("库位范围不能重复")
+        raise ValueError("库位（Slot）范围不能重复")
     return sorted(identities)
 
 

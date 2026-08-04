@@ -7,6 +7,10 @@ from copy import deepcopy
 from typing import Any
 
 from unilabos.workflow.models import validate_uuid
+from unilabos.workflow.source_identity import (
+    PythonSourceIdentityError,
+    canonical_python_source_identity,
+)
 
 _PROJECTION_KEY = "resource_template_identity_projection"
 _PROJECTION_VERSION = 1
@@ -98,11 +102,12 @@ def _normalize_identities(raw_identities: Any) -> dict[str, str]:
         raw_identities.items(),
         key=lambda item: str(item[0]),
     ):
-        if not isinstance(raw_symbol, str) or not raw_symbol.strip():
+        try:
+            symbol = canonical_python_source_identity(raw_symbol)
+        except PythonSourceIdentityError as error:
             raise ResourceTemplateIdentityProjectionError(
-                "资源模板 source_fqid 不能为空"
-            )
-        symbol = raw_symbol.strip()
+                "资源模板 source_fqid 不是可信 Python 源码身份"
+            ) from error
         try:
             template_uuid = validate_uuid(raw_uuid)
         except (TypeError, ValueError):

@@ -24,6 +24,10 @@ from unilabos.workflow.authoring_kernel import (
     AuthoringCatalogSnapshot,
 )
 from unilabos.workflow.models import validate_uuid
+from unilabos.workflow.source_identity import (
+    PythonSourceIdentityError,
+    canonical_python_source_identity,
+)
 from unilabos.workflow.store import WorkflowStore
 from unilabos.workflow.template_projection_store import (
     RegistryTemplateProjectionStore,
@@ -186,6 +190,12 @@ class RegistryTemplateProjection:
                 raise RegistryTemplateProjectionError("资源模板缺少业务唯一名称")
             if not isinstance(source_symbol, str) or not source_symbol:
                 raise RegistryTemplateProjectionError("资源模板缺少源码身份")
+            try:
+                source_symbol = canonical_python_source_identity(source_symbol)
+            except PythonSourceIdentityError as error:
+                raise RegistryTemplateProjectionError(
+                    "资源模板源码身份不能安全生成 Python import"
+                ) from error
             try:
                 template_uuid = validate_uuid(
                     self._resource_template_identity_resolver(resource_name)
