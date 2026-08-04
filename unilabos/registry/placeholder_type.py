@@ -26,6 +26,31 @@ class ResourceSlot(Resource):
         return core_schema.dict_schema()
 
 
+class SiteRef:
+    """Workflow 中对 Site authority 稳定身份的类型标记。
+
+    ``SiteRef`` 的 wire value 只有 ``{"uuid": <site_uuid>}``。它既不是物料，
+    也不继承 ``ResourceSlot`` 的资源树、模板 allowlist 或 implicit pass-through
+    语义；Task preflight 会通过 Site authority resolver 关闭并冻结该身份。
+    """
+
+    @classmethod
+    def __get_pydantic_core_schema__(cls, source_type: Any, handler: Any) -> Any:
+        del source_type, handler
+        from pydantic_core import core_schema
+
+        return core_schema.typed_dict_schema(
+            {
+                "uuid": core_schema.typed_dict_field(
+                    core_schema.str_schema(),
+                    required=True,
+                )
+            },
+            extra_behavior="forbid",
+            total=True,
+        )
+
+
 # 单 ResourceSlot 的「原始入参形态」——**仅框架内部解析阶段**使用，用于标注解析前的 raw 值：
 #   - dict：资源引用 {id, uuid}（前端 schema 填写形态，object）→ 按 uuid with_children 拉取；
 #   - List[Dict]：一棵树的扁平节点组（handle @flatten 运行期形态）；

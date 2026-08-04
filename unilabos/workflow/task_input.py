@@ -45,6 +45,13 @@ class ResolvedResourceSlot:
     resource_template_uuid: str
 
 
+@dataclass(frozen=True)
+class ResolvedSiteRef:
+    """Site authority 返回给 Workflow 的最小 immutable identity。"""
+
+    uuid: str
+
+
 class ResourceSlotResolver(Protocol):
     """由未来 Material Module 实现的 ResourceSlot lookup port。"""
 
@@ -54,6 +61,12 @@ class ResourceSlotResolver(Protocol):
         material_uuid: str,
         allowed_resource_template_uuids: tuple[str, ...] | None,
     ) -> ResolvedResourceSlot: ...
+
+
+class SiteRefResolver(Protocol):
+    """由 Site authority 实现的稳定 Site identity lookup port。"""
+
+    def resolve(self, *, site_uuid: str) -> ResolvedSiteRef: ...
 
 
 class UnconfiguredResourceSlotResolver:
@@ -66,6 +79,14 @@ class UnconfiguredResourceSlotResolver:
         allowed_resource_template_uuids: tuple[str, ...] | None,
     ) -> ResolvedResourceSlot:
         del material_uuid, allowed_resource_template_uuids
+        raise TaskInputError("conflict")
+
+
+class UnconfiguredSiteRefResolver:
+    """Site authority 尚未装配时的显式 fail-closed adapter。"""
+
+    def resolve(self, *, site_uuid: str) -> ResolvedSiteRef:
+        del site_uuid
         raise TaskInputError("conflict")
 
 
@@ -87,6 +108,7 @@ def preflight_task_input(
     execution_plan: Mapping[str, Any],
     jobs: Sequence[Mapping[str, Any]],
     resource_resolver: ResourceSlotResolver | None,
+    site_ref_resolver: SiteRefResolver | None = None,
 ) -> PreparedTaskInput:
     """在 Task/Job 写入前完成合同、slot、binding 与 provider 校验。"""
 
@@ -100,6 +122,7 @@ def preflight_task_input(
             contract,
             raw_input,
             resource_resolver=resource_resolver,
+            site_ref_resolver=site_ref_resolver,
         )
         bindings = _task_input_bindings(validated_io)
         bound_plan, bound_jobs = _bind_active_plan(
@@ -109,6 +132,7 @@ def preflight_task_input(
             bindings=bindings,
             resolved_input=resolved_input,
             resource_resolver=resource_resolver,
+            site_ref_resolver=site_ref_resolver,
         )
         material_roots = _material_root_uuids_from_contract(
             workflow_snapshot,
@@ -286,6 +310,24 @@ def _schema_contains_resource_slot(schema: Mapping[str, Any]) -> bool:
     return False
 
 
+def _schema_contains_site_ref(schema: Mapping[str, Any]) -> bool:
+    if schema.get("$slot") == "SiteRef":
+        return True
+    if "anyOf" in schema:
+        return any(
+            _schema_contains_site_ref(member)
+            for member in schema.get("anyOf", ())
+            if type(member) is dict
+        )
+    if schema.get("type") == "array" and type(schema.get("items")) is dict:
+        return _schema_contains_site_ref(schema["items"])
+    return False
+
+
+def _schema_contains_typed_slot(schema: Mapping[str, Any]) -> bool:
+    return _schema_contains_resource_slot(schema) or _schema_contains_site_ref(schema)
+
+
 def _contains_closed_resource_slot_value(
     schema: Mapping[str, Any],
     value: Any,
@@ -358,12 +400,13 @@ def _typed_handle_value_schema(
         raise TaskInputError()
     raw_schema = unilab.get("value_schema")
     if raw_schema is None:
-        if handle.get("type") != "ResourceSlot":
+        handle_type = handle.get("type")
+        if handle_type not in {"ResourceSlot", "SiteRef"}:
             return None
-        raw_schema = {"$slot": "ResourceSlot"}
+        raw_schema = {"$slot": handle_type}
     if type(raw_schema) is not dict:
         raise TaskInputError()
-    if not _schema_contains_resource_slot(raw_schema):
+    if not _schema_contains_typed_slot(raw_schema):
         return None
     with_allowlist = _apply_handle_slot_allowlist(
         raw_schema,
@@ -399,6 +442,7 @@ def _resolve_input_values(
     raw_input: Mapping[str, Any],
     *,
     resource_resolver: ResourceSlotResolver | None,
+    site_ref_resolver: SiteRefResolver | None,
 ) -> dict[str, Any]:
     if type(raw_input) is not dict or any(type(key) is not str for key in raw_input):
         raise TaskInputError()
@@ -425,6 +469,7 @@ def _resolve_input_values(
             parameter["schema"],
             normalized,
             resource_resolver=resource_resolver,
+            site_ref_resolver=site_ref_resolver,
         )
     return resolved
 
@@ -434,6 +479,7 @@ def _resolve_slots(
     value: Any,
     *,
     resource_resolver: ResourceSlotResolver | None,
+    site_ref_resolver: SiteRefResolver | None,
 ) -> Any:
     if "anyOf" in schema:
         if value is None:
@@ -443,6 +489,7 @@ def _resolve_slots(
             members[0],
             value,
             resource_resolver=resource_resolver,
+            site_ref_resolver=site_ref_resolver,
         )
     if schema.get("$slot") == "ResourceSlot":
         allowed_raw = schema.get("allowed_resource_template_uuids")
@@ -452,12 +499,18 @@ def _resolve_slots(
             allowed_resource_template_uuids=allowed,
             resource_resolver=resource_resolver,
         )
+    if schema.get("$slot") == "SiteRef":
+        return _resolve_one_site_ref(
+            value,
+            site_ref_resolver=site_ref_resolver,
+        )
     if schema.get("type") == "array":
         return [
             _resolve_slots(
                 schema["items"],
                 item,
                 resource_resolver=resource_resolver,
+                site_ref_resolver=site_ref_resolver,
             )
             for item in value
         ]
@@ -524,6 +577,43 @@ def _closed_resolved_slot(value: Any) -> ResolvedResourceSlot:
     return ResolvedResourceSlot(identity, template_identity)
 
 
+def _resolve_one_site_ref(
+    value: Any,
+    *,
+    site_ref_resolver: SiteRefResolver | None,
+) -> dict[str, str]:
+    site_uuid = value["uuid"]
+    if site_ref_resolver is None:
+        raise TaskInputError("conflict")
+    try:
+        returned = site_ref_resolver.resolve(site_uuid=site_uuid)
+    except TaskInputError:
+        raise
+    except Exception as error:  # noqa: BLE001
+        code = getattr(error, "code", "conflict")
+        raise TaskInputError(code) from None
+
+    identity = _closed_resolved_site_ref(returned)
+    if identity.uuid != site_uuid:
+        raise TaskInputError()
+    return {"uuid": identity.uuid}
+
+
+def _closed_resolved_site_ref(value: Any) -> ResolvedSiteRef:
+    if not is_dataclass(value) or isinstance(value, type):
+        raise TaskInputError()
+    if {field.name for field in fields(value)} != {"uuid"}:
+        raise TaskInputError()
+    parameters = getattr(type(value), "__dataclass_params__", None)
+    if parameters is None or not parameters.frozen or type(value.uuid) is not str:
+        raise TaskInputError()
+    try:
+        identity = validate_uuid(value.uuid)
+    except (TypeError, ValueError):
+        raise TaskInputError() from None
+    return ResolvedSiteRef(identity)
+
+
 def _task_input_bindings(
     validated_io: ValidatedWorkflowIO,
 ) -> dict[str, dict[str, Any]]:
@@ -549,6 +639,7 @@ def _bind_active_plan(
     bindings: Mapping[str, Mapping[str, Any]],
     resolved_input: Mapping[str, Any],
     resource_resolver: ResourceSlotResolver | None,
+    site_ref_resolver: SiteRefResolver | None,
 ) -> tuple[dict[str, Any], list[dict[str, Any]]]:
     plan = clone_json(execution_plan)
     bound_jobs = clone_json(list(jobs))
@@ -633,7 +724,7 @@ def _bind_active_plan(
             if (
                 has_static
                 and value_schema is not None
-                and _schema_contains_resource_slot(value_schema)
+                and _schema_contains_typed_slot(value_schema)
             ):
                 raw_static = raw_param[data_key]
                 if _contains_closed_resource_slot_value(value_schema, raw_static):
@@ -651,6 +742,7 @@ def _bind_active_plan(
                         value_schema,
                         normalized_static,
                         resource_resolver=resource_resolver,
+                        site_ref_resolver=site_ref_resolver,
                     )
                 plan_param[data_key] = clone_json(resolved_static)
                 job_param[data_key] = clone_json(resolved_static)
@@ -704,9 +796,12 @@ def _final_target_data_key(data_key: str) -> str:
 __all__ = [
     "PreparedTaskInput",
     "ResolvedResourceSlot",
+    "ResolvedSiteRef",
     "ResourceSlotResolver",
+    "SiteRefResolver",
     "TaskInputError",
     "UnconfiguredResourceSlotResolver",
+    "UnconfiguredSiteRefResolver",
     "material_root_uuids_from_task_snapshot",
     "preflight_task_input",
 ]

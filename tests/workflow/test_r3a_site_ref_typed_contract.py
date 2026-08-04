@@ -223,9 +223,7 @@ def test_action_contract_and_catalog_preserve_site_ref_without_passthrough() -> 
 
     assert len(business_handles) == 2
     target = next(
-        handle
-        for handle in business_handles
-        if handle["handle_key"] == "target_site"
+        handle for handle in business_handles if handle["handle_key"] == "target_site"
     )
     assert target["handle_key"] == "target_site"
     assert target["io_type"] == "target"
@@ -233,9 +231,7 @@ def test_action_contract_and_catalog_preserve_site_ref_without_passthrough() -> 
     assert target["meta_data"]["unilab"]["value_schema"] == SITE_SCHEMA
     assert target["meta_data"]["unilab"]["implicit_passthrough"] is False
     result = next(
-        handle
-        for handle in business_handles
-        if handle["handle_key"] == "reached_site"
+        handle for handle in business_handles if handle["handle_key"] == "reached_site"
     )
     assert result["io_type"] == "source"
     assert result["type"] == "SiteRef"

@@ -383,8 +383,9 @@ def _base_value_schema(schema: Mapping[str, Any]) -> Mapping[str, Any]:
 
 def _legacy_value_type(schema: Mapping[str, Any]) -> str:
     base = _base_value_schema(schema)
-    if base.get("$slot") == "ResourceSlot":
-        return "ResourceSlot"
+    slot_kind = base.get("$slot")
+    if slot_kind in {"ResourceSlot", "SiteRef"}:
+        return str(slot_kind)
     return str(base.get("type") or "object")
 
 

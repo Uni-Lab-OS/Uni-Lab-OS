@@ -67,7 +67,7 @@ def _detached(value: Any) -> Any:
 
 def _contains_unsupported_contract(value: Any) -> bool:
     if isinstance(value, Mapping):
-        if value.get("$slot") == "ResourceSlot":
+        if "$slot" in value:
             return True
         if value.get("x-unilabos-editor-control") == "site_selector":
             return True

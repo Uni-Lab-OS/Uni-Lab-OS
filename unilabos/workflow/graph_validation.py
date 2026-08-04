@@ -1205,13 +1205,17 @@ def _handle_type_shape(declared_type: Any) -> tuple[str, str | None] | None:
     if raw in {"", "any", "default"}:
         return "any", None
     if raw == "resourceslot":
-        return "slot", None
+        return "slot", "ResourceSlot"
+    if raw == "siteref":
+        return "slot", "SiteRef"
     if raw in {"array", "list"}:
         return "array", None
     if raw.startswith("list[") and raw.endswith("]"):
         item = raw[5:-1].strip()
         if item == "resourceslot":
-            return "array", "slot"
+            return "array", "ResourceSlot"
+        if item == "siteref":
+            return "array", "SiteRef"
         normalized_item = _HANDLE_SCALAR_TYPES.get(item)
         return ("array", normalized_item) if normalized_item is not None else None
     normalized = _HANDLE_SCALAR_TYPES.get(raw)
@@ -1220,6 +1224,10 @@ def _handle_type_shape(declared_type: Any) -> tuple[str, str | None] | None:
 
 def _resource_slot_reference_matches(value: Any) -> bool:
     return type(value) is dict and type(value.get("uuid")) is str
+
+
+def _site_ref_reference_matches(value: Any) -> bool:
+    return type(value) is dict and set(value) == {"uuid"} and type(value["uuid"]) is str
 
 
 def _resource_slot_handle_value_matches(value: Any) -> bool:
@@ -1233,8 +1241,10 @@ def _resource_slot_handle_value_matches(value: Any) -> bool:
 
 
 def _handle_item_matches(value: Any, item_type: str) -> bool:
-    if item_type == "slot":
+    if item_type == "ResourceSlot":
         return _resource_slot_reference_matches(value)
+    if item_type == "SiteRef":
+        return _site_ref_reference_matches(value)
     return _json_type_matches(value, item_type)
 
 
@@ -1248,6 +1258,8 @@ def declared_handle_type_matches(value: Any, declared_type: Any) -> bool:
         return True
     kind, item_type = shape
     if kind == "slot":
+        if item_type == "SiteRef":
+            return _site_ref_reference_matches(value)
         return _resource_slot_handle_value_matches(value)
     if kind == "scalar":
         assert item_type is not None
@@ -1275,7 +1287,7 @@ def workflow_schema_matches_handle_type(
         schema = members[0]
     kind, item_type = shape
     if kind == "slot":
-        return schema.get("$slot") == "ResourceSlot"
+        return schema.get("$slot") == item_type
     if kind == "scalar":
         assert item_type is not None
         actual = schema.get("type")
@@ -1287,8 +1299,8 @@ def workflow_schema_matches_handle_type(
     items = schema.get("items")
     if type(items) is not dict:
         return False
-    if item_type == "slot":
-        return items.get("$slot") == "ResourceSlot"
+    if item_type in {"ResourceSlot", "SiteRef"}:
+        return items.get("$slot") == item_type
     actual_item = items.get("type")
     return actual_item == item_type or (
         item_type == "number" and actual_item == "integer"

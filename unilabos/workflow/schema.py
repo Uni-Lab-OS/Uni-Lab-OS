@@ -338,6 +338,17 @@ def _parse_nullable(raw: dict[str, Any], *, path: str) -> dict[str, Any]:
 
 
 def _parse_slot(raw: dict[str, Any], *, path: str) -> dict[str, Any]:
+    slot_kind = raw.get("$slot")
+    if slot_kind == "SiteRef":
+        _reject_unknown(
+            raw,
+            {"$slot"},
+            code="invalid_schema",
+            path=path,
+            message=_INVALID_SCHEMA,
+        )
+        return {"$slot": "SiteRef"}
+
     _reject_unknown(
         raw,
         {"$slot", "allowed_resource_template_uuids"},
@@ -345,7 +356,7 @@ def _parse_slot(raw: dict[str, Any], *, path: str) -> dict[str, Any]:
         path=path,
         message=_INVALID_SCHEMA,
     )
-    if raw["$slot"] != "ResourceSlot":
+    if slot_kind != "ResourceSlot":
         _fail("invalid_schema", _pointer(path, "$slot"), _INVALID_SCHEMA)
     result: dict[str, Any] = {"$slot": "ResourceSlot"}
     if "allowed_resource_template_uuids" in raw:

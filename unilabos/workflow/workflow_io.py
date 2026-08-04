@@ -407,10 +407,13 @@ def _schema_dict_is_assignable(
         return False
 
     if "$slot" in producer_base or "$slot" in consumer_base:
-        if (
-            producer_base.get("$slot") != "ResourceSlot"
-            or consumer_base.get("$slot") != "ResourceSlot"
-        ):
+        producer_slot = producer_base.get("$slot")
+        consumer_slot = consumer_base.get("$slot")
+        if producer_slot != consumer_slot:
+            return False
+        if producer_slot == "SiteRef":
+            return True
+        if producer_slot != "ResourceSlot":
             return False
         producer_allowed = producer_base.get("allowed_resource_template_uuids")
         consumer_allowed = consumer_base.get("allowed_resource_template_uuids")
@@ -592,6 +595,8 @@ def _legacy_handle_schema(value: Any) -> dict[str, Any]:
     }
     if raw == "resourceslot":
         return {"$slot": "ResourceSlot"}
+    if raw == "siteref":
+        return {"$slot": "SiteRef"}
     if raw.startswith("list[") and raw.endswith("]"):
         item = _legacy_handle_schema(raw[5:-1])
         return {"type": "array", "items": item}

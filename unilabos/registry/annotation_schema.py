@@ -29,6 +29,7 @@ _LIST = "typing:List"
 _LITERAL = "typing:Literal"
 _OPTIONAL = "typing:Optional"
 _RESOURCE_SLOT = "unilabos.registry.placeholder_type:ResourceSlot"
+_SITE_REF = "unilabos.registry.placeholder_type:SiteRef"
 _RESOURCE_TEMPLATES = "unilabos.registry.annotations:AllowedResourceTemplates"
 _ERROR_MESSAGE = "参数注解不符合 Workflow 版本 1 合同"
 _AUTHORING_INTEGER_DIGITS = 4096
@@ -284,6 +285,8 @@ def _parse_type(
 
     if _is_import(node, _RESOURCE_SLOT, imports):
         return {"$slot": "ResourceSlot"}
+    if _is_import(node, _SITE_REF, imports):
+        return {"$slot": "SiteRef"}
 
     if not isinstance(node, ast.Subscript):
         _fail(path)
@@ -629,7 +632,7 @@ def _render_schema(schema: dict[str, Any]) -> ast.expr:
             right=_constant(None),
         )
     if "$slot" in schema:
-        return ast.Name(id="ResourceSlot", ctx=ast.Load())
+        return ast.Name(id=str(schema["$slot"]), ctx=ast.Load())
     kind = schema["type"]
     if "enum" in schema:
         values = [_constant(value) for value in schema["enum"]]

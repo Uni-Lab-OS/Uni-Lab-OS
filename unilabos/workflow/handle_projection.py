@@ -35,18 +35,31 @@ def structural_ready_handle(io_type: str) -> dict[str, Any]:
 def resource_slot_schema(schema: Mapping[str, Any]) -> Mapping[str, Any] | None:
     """返回 scalar/list/nullable value schema 内唯一可见的 ResourceSlot schema。"""
 
-    if schema.get("$slot") == "ResourceSlot":
+    return _slot_schema(schema, "ResourceSlot")
+
+
+def site_ref_schema(schema: Mapping[str, Any]) -> Mapping[str, Any] | None:
+    """返回 scalar/list/nullable value schema 内唯一可见的 SiteRef schema。"""
+
+    return _slot_schema(schema, "SiteRef")
+
+
+def _slot_schema(
+    schema: Mapping[str, Any],
+    slot_kind: str,
+) -> Mapping[str, Any] | None:
+    if schema.get("$slot") == slot_kind:
         return schema
     items = schema.get("items")
     if isinstance(items, Mapping):
-        found = resource_slot_schema(items)
+        found = _slot_schema(items, slot_kind)
         if found is not None:
             return found
     members = schema.get("anyOf")
     if isinstance(members, list):
         for member in members:
             if isinstance(member, Mapping):
-                found = resource_slot_schema(member)
+                found = _slot_schema(member, slot_kind)
                 if found is not None:
                     return found
     return None
@@ -60,6 +73,8 @@ def workflow_handle_type(schema: Mapping[str, Any]) -> str:
         return "array"
     if resource_slot_schema(base) is not None:
         return "ResourceSlot"
+    if site_ref_schema(base) is not None:
+        return "SiteRef"
     value_type = base.get("type")
     return str(value_type) if isinstance(value_type, str) else "object"
 
@@ -75,6 +90,7 @@ def _non_null_schema(schema: Mapping[str, Any]) -> Mapping[str, Any]:
 
 __all__ = [
     "resource_slot_schema",
+    "site_ref_schema",
     "structural_ready_handle",
     "workflow_handle_type",
 ]

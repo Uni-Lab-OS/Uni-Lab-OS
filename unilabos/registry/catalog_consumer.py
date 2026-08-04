@@ -15,6 +15,7 @@ from unilabos.package_manager.consumers import (
 from unilabos.workflow.catalog import NodeTemplateImport
 from unilabos.workflow.handle_projection import (
     resource_slot_schema,
+    site_ref_schema,
     structural_ready_handle,
     workflow_handle_type,
 )
@@ -432,16 +433,20 @@ def _handle(
                 ) from None
             if identity not in allowed:
                 allowed.append(identity)
-    is_slot = resource_slot_schema(value_schema) is not None
+    is_resource_slot = resource_slot_schema(value_schema) is not None
+    is_site_ref = site_ref_schema(value_schema) is not None
+    is_typed_slot = is_resource_slot or is_site_ref
     control = str(value_schema.get("x-unilabos-editor-control") or "")
-    if is_slot:
+    if is_resource_slot:
         control = "material_port"
+    elif is_site_ref:
+        control = "site_selector"
     elif control != "site_selector":
         control = "variable_selector"
     value_type = workflow_handle_type(value_schema)
     workflow_value_schema = (
         _without_presentation_fields(value_schema)
-        if is_slot
+        if is_typed_slot
         else _plain_mapping(value_schema)
     )
     return {
@@ -465,7 +470,7 @@ def _handle(
 
 
 def _without_presentation_fields(value: Any) -> Any:
-    """Keep ResourceSlot handle schemas within the strict Workflow v1 dialect."""
+    """Keep typed-slot Handle schemas within the strict Workflow v1 dialect."""
 
     if isinstance(value, Mapping):
         return {

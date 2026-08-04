@@ -3902,6 +3902,7 @@ def _render_graph(
         "Field",
         "JSONValue",
         "ResourceSlot",
+        "SiteRef",
         result_record_name,
     }
     class_import_names: dict[str, str] = {}
@@ -4024,8 +4025,16 @@ def _render_graph(
             "from unilabos.registry.annotations import "
             + ", ".join(registry_annotation_imports)
         )
+    placeholder_types = []
     if needs["resource_slot"]:
-        emitter.emit("from unilabos.registry.placeholder_type import ResourceSlot")
+        placeholder_types.append("ResourceSlot")
+    if needs["site_ref"]:
+        placeholder_types.append("SiteRef")
+    if placeholder_types:
+        emitter.emit(
+            "from unilabos.registry.placeholder_type import "
+            + ", ".join(placeholder_types)
+        )
     emitter.emit(
         "from unilabos.workflow.authoring import " + ", ".join(sorted(markers))
     )
@@ -4401,6 +4410,7 @@ def _annotation_import_needs(contract: Mapping[str, Any]) -> dict[str, Any]:
     typing_names: set[str] = set()
     field_needed = False
     resource_slot = False
+    site_ref = False
     allowed_resource_templates = False
     json_value = False
     for parameter in contract.get("parameters", []):
@@ -4428,14 +4438,17 @@ def _annotation_import_needs(contract: Mapping[str, Any]) -> dict[str, Any]:
             allowed_resource_templates = True
         if _schema_contains_key(constraint_schema, "enum"):
             typing_names.add("Literal")
-        if _schema_contains_key(constraint_schema, "$slot"):
+        if _schema_contains_slot(constraint_schema, "ResourceSlot"):
             resource_slot = True
+        if _schema_contains_slot(constraint_schema, "SiteRef"):
+            site_ref = True
         if _schema_contains_kind(constraint_schema, "object"):
             json_value = True
     return {
         "typing": typing_names,
         "field": field_needed,
         "resource_slot": resource_slot,
+        "site_ref": site_ref,
         "allowed_resource_templates": allowed_resource_templates,
         "json_value": json_value,
     }
@@ -4453,6 +4466,13 @@ def _schema_contains_key(schema: Mapping[str, Any], key: str) -> bool:
         return True
     items = schema.get("items")
     return isinstance(items, Mapping) and _schema_contains_key(items, key)
+
+
+def _schema_contains_slot(schema: Mapping[str, Any], slot_kind: str) -> bool:
+    if schema.get("$slot") == slot_kind:
+        return True
+    items = schema.get("items")
+    return isinstance(items, Mapping) and _schema_contains_slot(items, slot_kind)
 
 
 def _resource_template_allowlist(schema: Mapping[str, Any]) -> tuple[str, ...]:
@@ -4537,8 +4557,9 @@ def _annotation_source(
 
 
 def _base_annotation_source(schema: Mapping[str, Any]) -> str:
-    if schema.get("$slot") == "ResourceSlot":
-        return "ResourceSlot"
+    slot_kind = schema.get("$slot")
+    if slot_kind in {"ResourceSlot", "SiteRef"}:
+        return str(slot_kind)
     kind = schema.get("type")
     if kind == "array":
         return f"list[{_base_annotation_source(schema['items'])}]"

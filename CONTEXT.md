@@ -125,6 +125,12 @@ A stable, named position owned by one Material, with an optional Material
 occupant and an allowlist describing which ResourceTemplates may occupy it.
 _Avoid_: Material child, PLR resource name, laboratory zone, scheduler lock
 
+**SiteRef**:
+A closed Workflow value that names exactly one Site by its stable Site UUID.
+It carries identity only and has neither Material movement nor implicit
+pass-through semantics.
+_Avoid_: ResourceSlot, site selector display value, Robot command, Site occupancy
+
 **Site Occupancy**:
 The placement relationship from one Site to at most one occupying Material;
 one Material may occupy at most one Site at a time.
