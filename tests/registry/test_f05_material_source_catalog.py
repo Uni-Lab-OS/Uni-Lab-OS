@@ -158,3 +158,31 @@ def test_catalog_snapshot_freezes_bidirectional_resource_template_identity(
         PLATE_SOURCE_IDENTITY
     )
     projection.close()
+
+
+def test_catalog_restart_restores_resource_identity_and_fingerprint(
+    tmp_path: Path,
+) -> None:
+    """重启后应从 SQLite 恢复资源模板身份和相同目录指纹。
+
+    参数说明：``tmp_path`` 提供跨进程生命周期的隔离数据库路径。返回：无；
+    断言资源模板（ResourceTemplate）源码身份双向映射与目录指纹
+    （CatalogFingerprint）在只读重启后保持不变。
+    """
+
+    database_path = tmp_path / "workflow_history.db"
+    projection = _projection(database_path)
+    before_restart = projection.refresh(_Registry())
+    expected_fingerprint = before_restart.fingerprint
+    projection.close()
+
+    restarted = _projection(database_path)
+    recovered = restarted.snapshot()
+    assert recovered.require_resource_template_uuid(PLATE_SOURCE_IDENTITY) == (
+        PLATE_TEMPLATE_UUID
+    )
+    assert recovered.require_resource_template_symbol(PLATE_TEMPLATE_UUID) == (
+        PLATE_SOURCE_IDENTITY
+    )
+    assert recovered.fingerprint == expected_fingerprint
+    restarted.close()
