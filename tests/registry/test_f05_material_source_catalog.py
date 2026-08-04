@@ -5,7 +5,12 @@ from __future__ import annotations
 from pathlib import Path
 from typing import Any
 
-from unilabos.registry.template_projection import RegistryTemplateProjection
+import pytest
+
+from unilabos.registry.template_projection import (
+    RegistryTemplateProjection,
+    RegistryTemplateProjectionError,
+)
 from unilabos.workflow.store import WorkflowStore
 
 HOST_TEMPLATE_UUID = "10000000-0000-4000-8000-000000000001"
@@ -55,6 +60,30 @@ class _Registry:
             }
         ]
 
+
+class _UnsafeSourceRegistry(_Registry):
+    """把单个资源模板源码身份替换为不可信反例。"""
+
+    def __init__(self, source_identity: str) -> None:
+        """保存待投影的不可信 ``source_fqid``。
+
+        参数说明：``source_identity`` 是单个模块/符号反例。返回：无；只构造
+        测试注册表，不访问文件或网络。
+        """
+
+        self._source_identity = source_identity
+
+    def obtain_registry_resource_info(self) -> list[dict[str, Any]]:
+        """返回带不可信源码身份的资源模板定义。
+
+        参数：无。返回：从合法注册表分离复制且只替换 ``source_fqid`` 与类模块
+        身份的资源定义集。
+        """
+
+        resources = super().obtain_registry_resource_info()
+        resources[0]["source_fqid"] = self._source_identity
+        resources[0]["class"]["module"] = self._source_identity
+        return resources
 
 def _identity(source_identity: str) -> str:
     """把 Registry 唯一名称解析为本地稳定资源模板 UUID。
@@ -185,4 +214,45 @@ def test_catalog_restart_restores_resource_identity_and_fingerprint(
         PLATE_SOURCE_IDENTITY
     )
     assert recovered.fingerprint == expected_fingerprint
+    restarted.close()
+
+
+@pytest.mark.parametrize(
+    "unsafe_source_identity",
+    (
+        "lab.resources\nfrom os import system:plate_96",
+        "lab.bad-module:plate_96",
+        "lab.class:plate_96",
+        "lab..resources:plate_96",
+    ),
+    ids=("control-character", "invalid-segment", "keyword-segment", "empty-segment"),
+)
+def test_registry_rejects_unsafe_source_identity_without_replacing_projection(
+    tmp_path: Path,
+    unsafe_source_identity: str,
+) -> None:
+    """不可信资源源码身份必须在 SQLite 写入前失败关闭。
+
+    参数说明：``tmp_path`` 提供隔离数据库，``unsafe_source_identity`` 是单一
+    Python 模块反例。返回：无；断言当前内存和重启后的可信目录投影均未变化。
+    """
+
+    database_path = tmp_path / "workflow_history.db"
+    projection = _projection(database_path)
+    trusted = projection.refresh(_Registry())
+
+    with pytest.raises(RegistryTemplateProjectionError):
+        projection.refresh(_UnsafeSourceRegistry(unsafe_source_identity))
+
+    assert projection.snapshot().fingerprint == trusted.fingerprint
+    assert projection.snapshot().require_resource_template_uuid(
+        PLATE_SOURCE_IDENTITY
+    ) == PLATE_TEMPLATE_UUID
+    projection.close()
+
+    restarted = _projection(database_path)
+    assert restarted.snapshot().fingerprint == trusted.fingerprint
+    assert restarted.snapshot().require_resource_template_symbol(
+        PLATE_TEMPLATE_UUID
+    ) == PLATE_SOURCE_IDENTITY
     restarted.close()
