@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import hashlib
 import os
 from collections.abc import Iterator, Sequence
 from contextlib import contextmanager
@@ -17,6 +18,12 @@ from unilabos.workflow.store import WorkflowStore
 
 WORKFLOW_UUID = "11111111-1111-4111-8111-111111111111"
 CATALOG_FINGERPRINT = f"sha256:{'f' * 64}"
+
+
+def _draft_hash(content: bytes) -> str:
+    """返回工作流草稿（Workflow Draft）字节的稳定 SHA-256 身份。"""
+
+    return f"sha256:{hashlib.sha256(content).hexdigest()}"
 
 
 class SourceOnlyCompiler:
@@ -267,40 +274,46 @@ def test_windows_without_dir_fd_can_discover_read_and_save_source(
     assert windows_lock.calls
 
 
-def test_macos_uses_flock_without_assuming_linux_file_leases(
+def test_macos_cas_fails_closed_before_advisory_flock_or_temporary_write(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """macOS CAS 发布必须用 ``flock``，不能假设 Linux 租约常量存在。
+    """当前 macOS CAS 不受支持，必须在 advisory ``flock`` 和临时写入前失败。
 
-    参数：``tmp_path`` 隔离服务和规范源码；``monkeypatch`` 注入仅含 ``flock``
-    的模块。返回：无；保存成功且观察到同一目标描述符的锁定与解锁。
+    参数：``tmp_path`` 隔离规范工作流草稿（Workflow Draft）；``monkeypatch`` 在
+    当前实现最后身份检查 seam 注入外部 rename/替换竞争。返回：无；安全实现必须
+    明确拒绝 CAS，既不调用 advisory 锁，也不创建临时稿或覆盖外部字节。
     """
 
-    database_path = tmp_path / "workflow.db"
-    package_root = tmp_path / "portable_lab"
-    source_path = package_root / "workflows" / "demo.py"
-    source_path.parent.mkdir(parents=True)
-    source_path.write_text("value = 'initial'\n", encoding="utf-8")
-    service = WorkflowService(
-        WorkflowStore(database_path),
-        compiler=SourceOnlyCompiler(),
-    )
-    service.create_workflow(
-        workflow_uuid=WORKFLOW_UUID,
-        name="macOS source",
-        tags=[],
-        description=None,
-        meta_data={},
-    )
-    service.replace_active_editable_source_authorization(
-        workflow_uuid=WORKFLOW_UUID,
-        package_id="portable_lab",
-        package_root=package_root,
-        relative_path="workflows/demo.py",
-    )
-    baseline = service.get_authoring(WORKFLOW_UUID)
+    parent = tmp_path / "workflows"
+    parent.mkdir()
+    source_path = parent / "demo.py"
+    original = b"value = 'initial'\n"
+    source_path.write_bytes(original)
+    displaced = parent / "external-old.py"
     macos_lock = MacOSFcntl()
+    original_target_matches = source_publication._target_matches_descriptor
+    identity_checks = 0
+
+    def inject_external_replace_after_identity_check(
+        location: object,
+        target_name: str,
+        descriptor: int,
+    ) -> bool:
+        """在第二次身份检查返回前，用外部版本替换规范路径。
+
+        参数：目录、目标名和描述符保持被测 seam 形状。返回：攻击前的身份检查结果；
+        当前不安全实现会据此继续 ``os.replace`` 并覆盖竞争字节。
+        """
+
+        nonlocal identity_checks
+        matches = original_target_matches(location, target_name, descriptor)
+        identity_checks += 1
+        if matches and identity_checks == 2:
+            source_path.rename(displaced)
+            source_path.write_bytes(b"value = 'external'\n")
+        return matches
+
     monkeypatch.setattr(
         source_publication,
         "_PLATFORM",
@@ -309,20 +322,23 @@ def test_macos_uses_flock_without_assuming_linux_file_leases(
     )
     monkeypatch.setattr(source_publication, "_fcntl", macos_lock, raising=False)
     monkeypatch.setattr(source_publication, "_msvcrt", None, raising=False)
-    monkeypatch.setattr(source_publication, "fcntl", macos_lock, raising=False)
+    monkeypatch.setattr(
+        source_publication,
+        "_target_matches_descriptor",
+        inject_external_replace_after_identity_check,
+    )
 
-    try:
-        saved = service.save_draft(
-            WORKFLOW_UUID,
-            python_source="value = 'changed'\n",
-            expected_draft_hash=baseline["draft"]["draft_hash"],
-            expected_workflow_revision=baseline["workflow_revision"],
+    with pytest.raises(source_publication.SourcePublicationConflict):
+        source_publication.atomic_publish_source(
+            parent_path=parent,
+            target_name=source_path.name,
+            content=b"value = 'changed'\n",
+            byte_limit=1024,
+            expected_hash=_draft_hash(original),
         )
-    finally:
-        service.close()
 
-    assert saved["draft"]["python_source"] == "value = 'changed'\n"
-    assert [operation for _descriptor, operation in macos_lock.calls] == [
-        MacOSFcntl.LOCK_EX | MacOSFcntl.LOCK_NB,
-        MacOSFcntl.LOCK_UN,
-    ]
+    assert identity_checks == 0
+    assert macos_lock.calls == []
+    assert source_path.read_bytes() == original
+    assert displaced.exists() is False
+    assert [path.name for path in parent.iterdir()] == [source_path.name]

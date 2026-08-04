@@ -142,6 +142,65 @@ def test_windows_existing_draft_closes_lock_before_native_replace(
     assert [path.name for path in parent.iterdir()] == [target.name]
 
 
+def test_windows_guard_precedes_temporary_open_and_cleans_both_directories(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Windows 目录 guard 必须在临时稿创建前固定完整发布窗口。
+
+    参数：``tmp_path`` 提供原授权父目录、移走目录和攻击者替换目录；
+    ``monkeypatch`` 在 guard 进入时发起重命名攻击。返回：无；保存必须失败关闭，
+    原授权目录与攻击者目录都不得出现临时工作流草稿（Workflow Draft）artifact。
+    """
+
+    parent = tmp_path / "workflows"
+    detached = tmp_path / "detached"
+    parent.mkdir()
+    target = parent / "demo.py"
+    original = b"value = 'initial'\n"
+    target.write_bytes(original)
+    windows_lock = RecordingWindowsLock()
+    guard_entries = 0
+
+    @contextmanager
+    def attack_before_guard_yield(_paths: Sequence[Path]) -> Iterator[None]:
+        """在 guard 建立前调换父目录，再允许被测发布逻辑继续。
+
+        参数：``_paths`` 是被测目录链，本攻击只使用规范父路径。返回：上下文无值；
+        攻击只执行一次，避免嵌套 guard 重复重命名。
+        """
+
+        nonlocal guard_entries
+        guard_entries += 1
+        if guard_entries == 1:
+            parent.rename(detached)
+            parent.mkdir()
+        yield
+
+    monkeypatch.setattr(source_publication, "_PLATFORM", "win32")
+    monkeypatch.setattr(source_publication, "_fcntl", None)
+    monkeypatch.setattr(source_publication, "_msvcrt", windows_lock)
+    monkeypatch.setattr(
+        source_publication,
+        "hold_windows_directory_chain",
+        attack_before_guard_yield,
+    )
+
+    with pytest.raises(source_publication.SourcePublicationError):
+        source_publication.atomic_publish_source(
+            parent_path=parent,
+            target_name=target.name,
+            content=b"value = 'changed'\n",
+            byte_limit=1024,
+            expected_hash=_draft_hash(original),
+        )
+
+    assert target.exists() is False
+    assert (detached / target.name).read_bytes() == original
+    assert not any(path.name.endswith(".tmp") for path in parent.iterdir())
+    assert not any(path.name.endswith(".tmp") for path in detached.iterdir())
+
+
 @pytest.mark.skipif(
     sys.platform != "win32",
     reason="真实 Windows 文件共享和 ReplaceFileW 合同只在 Windows CI 运行",
