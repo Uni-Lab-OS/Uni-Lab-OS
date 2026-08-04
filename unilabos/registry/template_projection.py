@@ -14,7 +14,10 @@ from unilabos.registry.template_snapshot import (
     RegistryTemplateSnapshot,
     RegistryTemplateSnapshotError,
 )
-from unilabos.workflow.authoring_kernel import AuthoringCatalogSnapshot
+from unilabos.workflow.authoring_kernel import (
+    AuthoringCatalogError,
+    AuthoringCatalogSnapshot,
+)
 from unilabos.workflow.models import validate_uuid
 from unilabos.workflow.store import WorkflowStore
 from unilabos.workflow.template_projection_store import (
@@ -68,7 +71,11 @@ class RegistryTemplateProjection:
         except RegistryTemplateSnapshotError as error:
             raise RegistryTemplateProjectionError(str(error)) from error
         device_definitions = registry_snapshot.detached_devices()
+        resource_definitions = registry_snapshot.detached_resources()
         nodes, handles = self._compile(device_definitions)
+        resource_template_symbols = self._compile_resource_template_identities(
+            resource_definitions
+        )
         try:
             persisted_nodes, persisted_handles = self._store.replace(
                 authority_id=self._authority_id,
@@ -79,10 +86,14 @@ class RegistryTemplateProjection:
             raise RegistryTemplateProjectionError(
                 f"模板身份冲突: {error!s}"
             ) from error
-        next_snapshot = AuthoringCatalogSnapshot.from_entities(
-            persisted_nodes,
-            persisted_handles,
-        )
+        try:
+            next_snapshot = AuthoringCatalogSnapshot.from_entities(
+                persisted_nodes,
+                persisted_handles,
+                resource_template_symbols=resource_template_symbols,
+            )
+        except AuthoringCatalogError as error:
+            raise RegistryTemplateProjectionError(str(error)) from error
         self._snapshot = next_snapshot
         return next_snapshot
 
@@ -123,6 +134,53 @@ class RegistryTemplateProjection:
             nodes.extend(node_candidates)
             handles.extend(handle_candidates)
         return nodes, handles
+
+    def _compile_resource_template_identities(
+        self,
+        resource_definitions: Sequence[Mapping[str, Any]],
+    ) -> dict[str, str]:
+        """冻结源码资源符号到既有资源模板 UUID 的一一映射。
+
+        参数说明：``resource_definitions`` 是同代 Registry 资源模板全集。
+        返回：以源码符号为键、本地模板 UUID 为值的新字典；业务唯一名缺失、
+        身份解析失败或 UUID 被多个符号复用时关闭式失败。
+        """
+
+        # ``template_uuid_by_symbol`` 供工作流源码（Workflow Source）编译使用；
+        # ``symbol_by_template_uuid`` 防止两个源码符号静默绑定同一模板身份。
+        template_uuid_by_symbol: dict[str, str] = {}
+        symbol_by_template_uuid: dict[str, str] = {}
+        for definition in sorted(
+            resource_definitions,
+            key=lambda item: str(item.get("id", "")),
+        ):
+            resource_name = definition.get("id")
+            class_definition = definition.get("class")
+            source_symbol = definition.get("source_fqid")
+            if not source_symbol and isinstance(class_definition, Mapping):
+                source_symbol = class_definition.get("module")
+            if not isinstance(resource_name, str) or not resource_name:
+                raise RegistryTemplateProjectionError("资源模板缺少业务唯一名称")
+            if not isinstance(source_symbol, str) or not source_symbol:
+                raise RegistryTemplateProjectionError("资源模板缺少源码身份")
+            try:
+                template_uuid = validate_uuid(
+                    self._resource_template_identity_resolver(resource_name)
+                )
+            except (KeyError, TypeError, ValueError):
+                raise RegistryTemplateProjectionError(
+                    f"资源模板身份解析失败: {resource_name}"
+                ) from None
+            if source_symbol in template_uuid_by_symbol:
+                raise RegistryTemplateProjectionError("资源模板源码身份重复")
+            previous_symbol = symbol_by_template_uuid.get(template_uuid)
+            if previous_symbol is not None and previous_symbol != source_symbol:
+                raise RegistryTemplateProjectionError(
+                    "资源模板 UUID 不得绑定多个源码身份"
+                )
+            template_uuid_by_symbol[source_symbol] = template_uuid
+            symbol_by_template_uuid[template_uuid] = source_symbol
+        return template_uuid_by_symbol
 
     def _compile_device(
         self,
@@ -199,7 +257,72 @@ class RegistryTemplateProjection:
                 raise RegistryTemplateProjectionError(str(error)) from error
             nodes.append(node)
             handles.extend(action_handles)
+        if resource_name == "host_node":
+            framework_node, framework_handle = self._compile_material_source(
+                resource_template_uuid=resource_template_uuid,
+                resource_name=resource_name,
+                resource_display_name=resource_display_name,
+            )
+            nodes.append(framework_node)
+            handles.append(framework_handle)
         return nodes, handles
+
+    @staticmethod
+    def _compile_material_source(
+        *,
+        resource_template_uuid: str,
+        resource_name: str,
+        resource_display_name: str,
+    ) -> tuple[dict[str, Any], dict[str, Any]]:
+        """编译 Host 唯一拥有的物料来源（MaterialSource）框架模板。
+
+        参数说明：``resource_template_uuid`` 是本地 Host 模板稳定身份，名称字段
+        用于 HTTP 资源摘要。返回：一个框架节点和一个 source 物料占位符
+        （ResourceSlot）；稳定 UUID 由持久投影按业务唯一键复用或首次分配。
+        """
+
+        node_business_key = (resource_template_uuid, "material_source")
+        node = {
+            "resource_template_uuid": resource_template_uuid,
+            "name": "material_source",
+            "display_name": "Material Source",
+            "description": "声明工作流进入边界的物料来源。",
+            "class": "unilabos.workflow.authoring:material_source",
+            "goal": {},
+            "goal_default": {},
+            "feedback": {},
+            "result": {},
+            "schema": None,
+            "type": "material_source",
+            "node_type": "material_source",
+            "meta_data": {
+                "unilab": {
+                    "framework_owner_only": True,
+                    "resource_template": {
+                        "uuid": resource_template_uuid,
+                        "name": resource_name,
+                        "display_name": resource_display_name,
+                    },
+                }
+            },
+        }
+        handle = {
+            "node_business_key": node_business_key,
+            "handle_key": "material",
+            "io_type": "source",
+            "display_name": "Material",
+            "description": "向下游节点传递具体物料实例的物料占位符。",
+            "type": "ResourceSlot",
+            "required": False,
+            "data_source": "executor",
+            "data_key": "material",
+            "meta_data": {
+                "unilab": {
+                    "value_schema": {"$slot": "ResourceSlot"},
+                }
+            },
+        }
+        return node, handle
 
     @staticmethod
     def _compile_action(
