@@ -24,12 +24,13 @@ def embed_resource_template_identities(
     node_templates: Sequence[Mapping[str, Any]],
     identities: Mapping[str, str],
 ) -> list[dict[str, Any]]:
-    """把同代资源模板身份写入唯一物料来源框架模板元数据。
+    """把同代资源模板身份写入稳定的目录模板载体元数据。
 
     参数说明：``node_templates`` 是尚未持久化的完整节点模板代际，
     ``identities`` 把 ``source_fqid`` 映射到资源模板 UUID。返回：完全分离且
-    带版本化 OS 私有投影的新节点列表；框架缺失或映射非法时抛出
-    ``ResourceTemplateIdentityProjectionError``。
+    带版本化 OS 私有投影的新节点列表；优先使用唯一物料来源
+    （MaterialSource）框架，否则使用稳定排序的首个动作模板；无可用载体或
+    映射非法时抛出 ``ResourceTemplateIdentityProjectionError``。
     """
 
     normalized = _normalize_identities(identities)
@@ -37,19 +38,32 @@ def embed_resource_template_identities(
     if not normalized:
         return nodes
     framework_nodes = [node for node in nodes if _is_material_source(node)]
-    if len(framework_nodes) != 1:
+    if len(framework_nodes) > 1:
         raise ResourceTemplateIdentityProjectionError(
-            "资源模板身份必须依附唯一物料来源（MaterialSource）框架模板"
+            "活动模板代际包含多个物料来源（MaterialSource）框架"
         )
-    framework = framework_nodes[0]
-    meta_data = _mapping_copy(framework.get("meta_data"), label="框架模板元数据")
+    if framework_nodes:
+        carrier = framework_nodes[0]
+    elif nodes:
+        carrier = min(
+            nodes,
+            key=lambda node: (
+                str(node.get("resource_template_uuid", "")),
+                str(node.get("name", "")),
+            ),
+        )
+    else:
+        raise ResourceTemplateIdentityProjectionError(
+            "资源模板身份投影缺少可持久化的目录模板载体"
+        )
+    meta_data = _mapping_copy(carrier.get("meta_data"), label="目录模板元数据")
     unilab = _mapping_copy(meta_data.get("unilab"), label="Uni-Lab 模板元数据")
     unilab[_PROJECTION_KEY] = {
         "version": _PROJECTION_VERSION,
         "source_fqid_to_uuid": normalized,
     }
     meta_data["unilab"] = unilab
-    framework["meta_data"] = meta_data
+    carrier["meta_data"] = meta_data
     return nodes
 
 
