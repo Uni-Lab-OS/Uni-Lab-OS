@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-import logging
+import sys
 from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 from threading import Event
@@ -16,6 +16,7 @@ from unilabos.package_manager.consumers import (
 from unilabos.registry.catalog_consumer import (
     workflow_template_imports_from_registry_snapshot,
 )
+from unilabos.workflow import service as workflow_service_module
 from unilabos.workflow.authoring_engine import WorkflowAuthoringEngine
 from unilabos.workflow.catalog import TemplateCatalog
 from unilabos.workflow.composite import (
@@ -188,9 +189,7 @@ def _save_candidate(
         )
         candidate = aggregate["candidate"]
         assert candidate is not None, aggregate["draft"]["diagnostics"]
-    assert aggregate["draft"]["python_source"] == candidate[
-        "normalized_python_source"
-    ]
+    assert aggregate["draft"]["python_source"] == candidate["normalized_python_source"]
     return aggregate
 
 
@@ -339,8 +338,7 @@ def test_breaking_child_contract_recompiles_already_applied_parent(
         assert parent_after_child_v2["workflow_revision"] == parent_revision
         assert parent_after_child_v2["candidate"] is None
         assert [
-            item["code"]
-            for item in parent_after_child_v2["draft"]["diagnostics"]
+            item["code"] for item in parent_after_child_v2["draft"]["diagnostics"]
         ] == ["composite_boundary_mapping_invalid"]
     finally:
         service.close()
@@ -349,14 +347,12 @@ def test_breaking_child_contract_recompiles_already_applied_parent(
 def test_refresh_enumeration_failure_does_not_turn_committed_apply_into_failure(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
-    caplog: pytest.LogCaptureFixture,
 ) -> None:
     """证明 post-commit 注册源码枚举失败不改变已提交 Apply 的成功结果。
 
     参数：
         tmp_path: 隔离工作流数据库与可编辑包源码的临时目录。
         monkeypatch: 在公共注册源码枚举 seam 注入异常的 pytest fixture。
-        caplog: 验证派生刷新失败已记录错误日志的 pytest fixture。
 
     返回：
         无；断言 Apply 返回成功、修订推进、目录已发布且异常留有日志。
@@ -371,6 +367,7 @@ def test_refresh_enumeration_failure_does_not_turn_committed_apply_into_failure(
     try:
         candidate_hash = _prepare_child_apply(service, working_dir)
         previous_revision = service.get_workflow(WORKFLOW_UUID)["revision"]
+        logged_refresh_failures: list[tuple[object, BaseException | None]] = []
 
         def fail_registered_source_enumeration() -> list[dict[str, Any]]:
             """注入 post-commit 注册源码枚举故障。
@@ -384,23 +381,48 @@ def test_refresh_enumeration_failure_does_not_turn_committed_apply_into_failure(
 
             raise RuntimeError("injected registered source enumeration failure")
 
+        def record_refresh_exception(
+            message: object, *args: object, **kwargs: object
+        ) -> None:
+            """记录刷新日志调用及调用点仍活跃的异常上下文。
+
+            参数：
+                message: ``Logger.exception`` 接收的格式字符串。
+                args: 日志格式化位置参数。
+                kwargs: 日志调用关键字参数。
+
+            返回：
+                无；把消息与 ``sys.exc_info`` 当前异常写入测试观测列表。
+
+            不变量：
+                spy 必须在生产 ``except`` 块内被调用，因而异常上下文不得为空。
+            """
+
+            del args, kwargs
+            logged_refresh_failures.append((message, sys.exc_info()[1]))
+
         monkeypatch.setattr(
             service,
             "list_registered_sources",
             fail_registered_source_enumeration,
         )
-        with caplog.at_level(logging.ERROR, logger="unilabos.workflow.service"):
-            applied = service.apply_authoring(
-                WORKFLOW_UUID,
-                candidate_hash=candidate_hash,
-            )
+        monkeypatch.setattr(
+            workflow_service_module._LOGGER,
+            "exception",
+            record_refresh_exception,
+        )
+        applied = service.apply_authoring(
+            WORKFLOW_UUID,
+            candidate_hash=candidate_hash,
+        )
 
         assert applied["apply_result"]["workflow_revision"] == previous_revision + 1
         assert service.get_workflow(WORKFLOW_UUID)["revision"] == previous_revision + 1
         assert WORKFLOW_TEMPLATE_NAME in _catalog_identities(service)
-        assert any(
-            record.levelno >= logging.ERROR and record.exc_info is not None
-            for record in caplog.records
-        )
+        assert len(logged_refresh_failures) == 1
+        logged_message, logged_exception = logged_refresh_failures[0]
+        assert "刷新" in str(logged_message)
+        assert isinstance(logged_exception, RuntimeError)
+        assert str(logged_exception) == "injected registered source enumeration failure"
     finally:
         service.close()
