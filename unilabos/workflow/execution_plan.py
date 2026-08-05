@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from collections import defaultdict
 from collections.abc import Mapping, Sequence
+from copy import deepcopy
 from typing import Any
 from uuid import UUID, uuid4
 
@@ -107,7 +108,7 @@ class ExecutionPlanBuilder:
             policy = dict(node.get("execution_policy") or {})
             # ``planned_param`` 是任务提交时冻结的动作输入，不是运行时回退视图。
             planned_param = dict(node.get("param") or {})
-            # ``fixed_params`` 是固定物料来源沿物料占位符链投影的实例引用。
+            # ``fixed_params`` 是固定的 ``existing`` 物料来源（MaterialSource）沿物料占位符链投影的实例引用。
             fixed_params = material_params.get(node_uuid, {})
             planned_param.update(fixed_params)
             node_handles = handles_by_node.get(node_uuid, [])
@@ -135,11 +136,19 @@ class ExecutionPlanBuilder:
             }
             if kind == "device_action":
                 planned_node.update(self._device_action_contract(node))
+                # ``action_schema`` 是标准计划不可从实时注册表回退的冻结合同。
+                action_schema = template.get("schema")
+                if not isinstance(action_schema, Mapping):
+                    raise ExecutionPlanBuildError(
+                        "invalid_action_contract",
+                        f"设备动作模板缺少参数 Schema：{node_uuid}",
+                    )
+                planned_node["param_schema"] = deepcopy(dict(action_schema))
             if node.get("material_uuid") is not None:
                 planned_node["material_uuid"] = node["material_uuid"]
             if node.get("script") is not None:
                 planned_node["script"] = node["script"]
-            if template.get("schema") is not None:
+            if kind != "device_action" and template.get("schema") is not None:
                 planned_node["param_schema"] = template["schema"]
             if requirements.get(node_uuid):
                 planned_node["material_requirements"] = requirements[node_uuid]
@@ -178,7 +187,7 @@ class ExecutionPlanBuilder:
         dict[str, list[dict[str, Any]]],
         dict[str, dict[str, dict[str, str]]],
     ]:
-        """投影 fixed existing 物料来源的运行输入。
+        """投影固定的 `existing` 物料来源（MaterialSource）运行输入。
 
         参数：完整节点、活动节点、执行种类、边与连接点来自同一应用图。返回：
         首个启用设备动作的遗留库存预留（inventory_reservation）
@@ -218,7 +227,7 @@ class ExecutionPlanBuilder:
             if selector.get("mode") != "existing":
                 raise ExecutionPlanBuildError(
                     "unsupported_material_source_mode",
-                    "短期调度桥只接受 fixed existing 物料来源",
+                    "短期调度桥只接受固定的 existing 物料来源",
                 )
             material_uuid = str(selector.get("material_uuid") or "")
             if not material_uuid:
@@ -259,7 +268,7 @@ class ExecutionPlanBuilder:
             ):
                 raise ExecutionPlanBuildError(
                     "invalid_execution_graph",
-                    "多个固定物料来源冲突写入同一动作参数",
+                    "多个固定的 existing 物料来源冲突写入同一动作参数",
                 )
             material_params[consumer][param_key] = material_reference
         return dict(requirements), dict(material_params)

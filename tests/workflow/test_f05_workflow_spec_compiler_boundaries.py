@@ -233,6 +233,7 @@ def _planned_action(
         "device_id": device_id,
         "action_name": action_name,
         "action_type": "UniLabJsonCommand",
+        "param_schema": {"type": "object"},
         "param": {"plate": {"uuid": MATERIAL_UUID}},
         "execution_policy": {},
         "inputs": [],

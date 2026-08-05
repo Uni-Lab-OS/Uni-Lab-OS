@@ -164,10 +164,12 @@ def _task_snapshot(
             {
                 "uuid": "71000000-0000-4000-8000-000000000002",
                 "node_type": "ILab",
+                "schema": {"type": "object"},
             },
             {
                 "uuid": "71000000-0000-4000-8000-000000000003",
                 "node_type": "ILab",
+                "schema": {"type": "object"},
             },
         ],
         "handle_templates": handle_templates,

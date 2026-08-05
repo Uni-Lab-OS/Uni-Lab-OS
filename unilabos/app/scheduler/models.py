@@ -10,9 +10,10 @@
 from __future__ import annotations
 
 import time
+from collections.abc import Mapping
 from dataclasses import dataclass, field
 from enum import Enum
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, List
 
 from unilabos.app.scheduler.inventory.domain import MaterialRequirement
 
@@ -97,7 +98,7 @@ class WorkflowNode:
         default_factory=dict
     )  # action 参数（会被父节点传参覆写）
     # 任务创建时冻结的动作合同（Action Contract）；None 仅表示遗留直接调用。
-    param_schema: Optional[Dict[str, Any]] = None
+    param_schema: dict[str, Any] | None = None
     # 与云端 workflow_node 类型枚举一致：Group / ILab / py_script / tool_call /
     # manual_confirm / Transfer（Edge 目前只执行 ILab；Transfer 仅规范化/透传，
     # 比较请用 is_ilab()，容忍大小写差异）
@@ -223,11 +224,14 @@ def node_from_dict(data: Dict[str, Any]) -> WorkflowNode:
     参数：``data`` 是整图或兼容桥输入的节点对象。返回规范化节点；其中
     ``job_id`` 若存在，表示派发必须复用已有工作流节点作业身份；
     ``param_schema`` 是已冻结动作合同（Action Contract）。异常：
-    缺失必需节点身份时保留 ``KeyError``，非对象 Schema 时保留 ``TypeError``。
+    缺失必需节点身份时保留 ``KeyError``；``param_schema`` 非对象且
+    非 ``None`` 时抛带中文诊断的 ``TypeError``。
     """
 
     # ``param_schema`` 隔离 wire 字典顶层，避免后续更换容器改变节点合同。
     raw_param_schema = data.get("param_schema")
+    if raw_param_schema is not None and not isinstance(raw_param_schema, Mapping):
+        raise TypeError("param_schema 必须是对象或 None")
     param_schema = dict(raw_param_schema) if raw_param_schema is not None else None
     return WorkflowNode(
         id=str(data["id"]),

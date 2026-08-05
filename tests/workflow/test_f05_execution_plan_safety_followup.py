@@ -67,7 +67,7 @@ def _real_authoring_graph(*, explicit_executor: bool = True) -> dict[str, Any]:
     """构造未预填消费动作参数的真实工作流创作图。
 
     参数：``explicit_executor`` 决定动作节点是否声明固定执行器
-    （Executor）。返回：固定物料来源（Fixed MaterialSource）通过
+    （Executor）。返回：固定的 `existing` 物料来源（MaterialSource）通过
     物料占位符（ResourceSlot）连到动作的应用图。异常：无。
     """
 
@@ -248,7 +248,7 @@ def test_empty_job_list_cannot_erase_frozen_resource_slot_materials() -> None:
 
 
 def test_fixed_material_source_populates_first_consumer_final_param() -> None:
-    """固定物料来源必须写入首个消费动作的最终参数。
+    """固定的 `existing` 物料来源必须写入首个消费动作参数。
 
     参数：无。返回：无；断言未预填动作参数的真实创作图
     仍沿物料占位符（ResourceSlot）生成 ``plate`` 物料引用。异常：
@@ -329,6 +329,29 @@ def test_standard_plan_requires_frozen_param_schema(
 
     with pytest.raises(WorkflowSpecCompilationError) as caught:
         _compile_real_plan(plan, jobs)
+
+    assert caught.value.code == "invalid_action_contract"
+
+
+def test_execution_plan_builder_rejects_missing_action_schema() -> None:
+    """执行计划构建器必须在持久前拒绝缺失的动作 Schema。
+
+    参数：无。返回：无；断言设备动作模板缺少冻结动作合同
+    （Action Contract）时，不会生成可持久的标准执行计划
+    （ExecutionPlan）。异常：预期稳定计划构建错误。
+    """
+
+    graph = _real_authoring_graph()
+    # ``action_template`` 是设备动作的冻结模板，本测试只删除 Schema 边界。
+    action_template = graph["node_templates"][1]
+    action_template.pop("schema")
+
+    with pytest.raises(ExecutionPlanBuildError) as caught:
+        ExecutionPlanBuilder().build(
+            graph,
+            run_mode="normal",
+            target_node_uuid=None,
+        )
 
     assert caught.value.code == "invalid_action_contract"
 

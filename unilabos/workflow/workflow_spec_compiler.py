@@ -217,15 +217,13 @@ class WorkflowSpecCompiler:
         """隔离执行计划冻结的动作参数 Schema。
 
         参数：``node`` 是设备动作计划，``node_uuid`` 是诊断身份。
-        返回：可独立使用的冻结动作合同（Action Contract）；缺失时返回
-        ``None`` 供遗留直接调用兼容。异常：非对象 Schema 以稳定编译错误
-        失败关闭。
+        返回：可独立使用的冻结动作合同（Action Contract）。异常：
+        标准执行计划（ExecutionPlan）中的 Schema 缺失、为空或非对象时，
+        以 `invalid_action_contract` 稳定编译错误失败关闭。
         """
 
         raw_schema = node.get("param_schema")
-        if raw_schema is None:
-            return None
-        if not isinstance(raw_schema, Mapping):
+        if raw_schema is None or not isinstance(raw_schema, Mapping):
             raise WorkflowSpecCompilationError(
                 "invalid_action_contract",
                 f"设备动作参数 Schema 必须是对象：{node_uuid}",
