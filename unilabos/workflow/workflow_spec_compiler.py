@@ -98,14 +98,24 @@ class WorkflowSpecCompiler:
             jobs_by_node=jobs_by_node,
         )
         active_node_uuids = {node.id for node in compiled_nodes}
+        # ``coordinator_node_uuids`` 在执行计划中保留图身份，但不会进入旧调度器。
+        coordinator_node_uuids = {
+            node_uuid
+            for node_uuid, node in nodes.items()
+            if str(node.get("kind") or "").strip() == "material_source"
+        }
         compiled_handles = self._compile_handles(
             ordered_handle_uuids=ordered_handle_uuids,
             handles=handles,
             active_node_uuids=active_node_uuids,
+            coordinator_node_uuids=coordinator_node_uuids,
+            planned_node_uuids=set(nodes),
         )
         compiled_edges = self._compile_edges(
             raw_edges,
             active_node_uuids=active_node_uuids,
+            coordinator_node_uuids=coordinator_node_uuids,
+            planned_node_uuids=set(nodes),
             handles=handles,
         )
         return WorkflowSpec(
@@ -303,11 +313,14 @@ class WorkflowSpecCompiler:
         ordered_handle_uuids: Sequence[str],
         handles: Mapping[str, Mapping[str, Any]],
         active_node_uuids: set[str],
+        coordinator_node_uuids: set[str],
+        planned_node_uuids: set[str],
     ) -> list[Handle]:
         """编译节点作用域运行连接点（Handle）。
 
-        参数：身份顺序、连接点索引与活动节点集合来自同一计划。返回：旧调度
-        连接点。异常：拥有者非法时抛编译错误，禁止模板身份碰撞。
+        参数：身份顺序、连接点索引、可派发节点、协调器节点及全部计划节点来自
+        同一计划。返回：只含旧调度节点的连接点。异常：拥有者非法或不属于计划时
+        抛编译错误，禁止模板身份碰撞。
         """
 
         compiled: list[Handle] = []
@@ -318,10 +331,17 @@ class WorkflowSpecCompiler:
                 "invalid_handle_identity",
                 f"execution_plan.handles[{handle_uuid}].node_uuid",
             )
-            if owner_uuid not in active_node_uuids:
+            if owner_uuid not in planned_node_uuids:
                 raise WorkflowSpecCompilationError(
                     "edge_handle_identity_mismatch",
                     f"运行连接点引用计划外节点：{owner_uuid}",
+                )
+            if owner_uuid in coordinator_node_uuids:
+                continue
+            if owner_uuid not in active_node_uuids:
+                raise WorkflowSpecCompilationError(
+                    "edge_handle_identity_mismatch",
+                    f"运行连接点引用不可派发节点：{owner_uuid}",
                 )
             compiled.append(
                 Handle(
@@ -340,13 +360,16 @@ class WorkflowSpecCompiler:
         raw_edges: Sequence[Mapping[str, Any]],
         *,
         active_node_uuids: set[str],
+        coordinator_node_uuids: set[str],
+        planned_node_uuids: set[str],
         handles: Mapping[str, Mapping[str, Any]],
     ) -> list[WorkflowEdge]:
         """编译执行计划的直接依赖与虚拟旁路依赖。
 
-        参数：``raw_edges`` 是计划边，``active_node_uuids`` 是唯一可派发节点，
-        ``handles`` 是节点作用域端点索引。返回：旧调度边。异常：节点或端点引用
-        不一致时抛闭集错误；``dependency_only`` 边允许空连接点且不传数据。
+        参数：``raw_edges`` 是计划边；可派发、协调器和全部计划节点集合划定旧调度
+        边界；``handles`` 是节点作用域端点索引。返回：排除协调器边的旧调度边。
+        异常：节点或端点引用不一致时抛闭集错误；``dependency_only`` 边允许空
+        连接点且不传数据。
         """
 
         compiled: list[WorkflowEdge] = []
@@ -367,11 +390,25 @@ class WorkflowSpecCompiler:
                 f"execution_plan.edges[{index}].target_node_uuid",
             )
             if (
+                source_uuid not in planned_node_uuids
+                or target_uuid not in planned_node_uuids
+            ):
+                raise WorkflowSpecCompilationError(
+                    "edge_node_identity_mismatch", "计划边引用计划外节点"
+                )
+            # 物料来源边是任务物料绑定（TaskMaterialBinding）的冻结审计事实；
+            # 参数已经在准入前写入首消费者，旧调度器不得再次调度协调器端点。
+            if (
+                source_uuid in coordinator_node_uuids
+                or target_uuid in coordinator_node_uuids
+            ):
+                continue
+            if (
                 source_uuid not in active_node_uuids
                 or target_uuid not in active_node_uuids
             ):
                 raise WorkflowSpecCompilationError(
-                    "edge_node_identity_mismatch", "计划边引用计划外活动节点"
+                    "edge_node_identity_mismatch", "计划边引用不可派发节点"
                 )
             dependency_only = edge.get("dependency_only") is True
             source_handle_uuid, source_handle = WorkflowSpecCompiler._edge_handle(

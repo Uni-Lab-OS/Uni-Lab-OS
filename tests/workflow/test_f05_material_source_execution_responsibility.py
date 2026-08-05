@@ -88,6 +88,38 @@ def test_enabled_source_creates_one_material_source_resolution_job() -> None:
     assert source_jobs[0]["executor_kind"] == "material_source"
 
 
+def test_enabled_source_keeps_runtime_handle_and_direct_material_edge() -> None:
+    """执行计划必须保留物料来源的运行连接点与直连物料边。
+
+    参数：无。返回：无；断言来源输出连接点、动作输入连接点及它们之间的直连
+    物料占位符（ResourceSlot）边都使用运行身份。异常：来源被错误排除在计划图时
+    由集合和字段断言失败。
+    """
+
+    plan, _jobs = _source_plan()
+    # ``handles_by_node`` 证明协调责任虽不派发，仍是冻结运行图中的正式端点。
+    handles_by_node = {
+        node_uuid: [
+            handle for handle in plan["handles"] if handle["node_uuid"] == node_uuid
+        ]
+        for node_uuid in (SOURCE_NODE_UUID,)
+    }
+    source_handles = handles_by_node[SOURCE_NODE_UUID]
+    direct_edge = next(
+        edge
+        for edge in plan["edges"]
+        if edge["source_node_uuid"] == SOURCE_NODE_UUID
+    )
+
+    assert len(source_handles) == 1
+    assert source_handles[0]["io_type"] == "source"
+    assert direct_edge["target_node_uuid"] != SOURCE_NODE_UUID
+    assert direct_edge["source_handle_uuid"] == source_handles[0]["uuid"]
+    assert direct_edge["source_type"] == "ResourceSlot"
+    assert direct_edge["target_type"] == "ResourceSlot"
+    assert direct_edge.get("dependency_only") is not True
+
+
 def test_source_only_graph_still_creates_one_persistable_job() -> None:
     """只含来源的工作流也必须有可持久执行责任。
 

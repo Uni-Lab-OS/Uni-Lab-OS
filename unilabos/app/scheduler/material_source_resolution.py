@@ -144,6 +144,20 @@ class MaterialSourceResolutionCoordinator:
         self._projection.project_material_source_admission(task_uuid, bindings)
         return MaterialSourceResolution(status="admitted")
 
+    def release_terminal_reservations(self, task_uuid: str, *, reason: str) -> None:
+        """幂等释放终态任务仍活跃的短期物料预留。
+
+        参数：``task_uuid`` 是已完成准入的工作流任务（WorkflowTask）身份，
+        ``reason`` 是稳定终态清理原因。返回：无。异常：库存权威缺失或释放失败时
+        原样传播，禁止把仍活跃的预留静默当作已清理。
+        """
+
+        if self._inventory is None:
+            raise MaterialSourceResolutionError(
+                "工作流声明了物料来源，但本地调度器没有装配库存权威"
+            )
+        self._inventory.release_workflow(task_uuid, reason=reason)
+
     @staticmethod
     def _required_text(value: Any, *, field: str) -> str:
         """校验协调器使用的必填文本。

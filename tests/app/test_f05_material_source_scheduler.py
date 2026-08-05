@@ -38,6 +38,7 @@ class _ToggleInventory:
 
         self.available = available
         self.reserve_calls: list[tuple[str, dict[str, Any]]] = []
+        self.release_calls: list[tuple[str, str]] = []
 
     def reserve_workflow(
         self,
@@ -62,7 +63,9 @@ class _ToggleInventory:
         """保留既有失败隔离调用面；参数是任务和节点身份，返回无。"""
 
     def release_workflow(self, workflow_uuid: str, *, reason: str) -> None:
-        """保留既有终态释放调用面；参数是任务身份和原因，返回无。"""
+        """记录终态释放；参数是任务身份和原因，返回无；异常：无。"""
+
+        self.release_calls.append((workflow_uuid, reason))
 
 
 @pytest.fixture()
@@ -229,6 +232,7 @@ def test_source_only_admission_never_calls_dispatcher(store: WorkflowStore) -> N
     assert aggregate["jobs"][0]["return_info"] == {
         "material": {"uuid": MATERIAL_UUID, "resource_template_uuid": TEMPLATE_UUID}
     }
+    assert inventory.release_calls == [(TASK_UUID, "workflow_succeeded")]
 
 
 def test_blocked_admission_retry_reuses_task_and_job_identities(

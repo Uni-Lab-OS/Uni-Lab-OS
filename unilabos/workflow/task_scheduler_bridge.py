@@ -104,6 +104,12 @@ class TaskSchedulerBridge:
                 return self._aggregate(task_uuid)
             self._admission_pending_tasks.discard(task_uuid)
             if not spec.nodes:
+                # 仅来源任务没有普通作业可触发调度器终态清理；协调器必须在返回成功
+                # 前幂等释放仍活跃的短期预留，不能让测试或调用方承担内部清理。
+                self._material_sources.release_terminal_reservations(
+                    task_uuid,
+                    reason="workflow_succeeded",
+                )
                 return self._aggregate(task_uuid)
 
             dispatch_job_uuids = {node.job_id for node in spec.nodes}

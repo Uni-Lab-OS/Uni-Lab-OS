@@ -70,14 +70,17 @@ class ExecutionPlanBuilder:
             if node.get("disabled") is not True
             and kinds[node_uuid] not in {"group", "material_source"}
         }
+        # ``planned_graph_nodes`` 同时保留协调责任与普通执行责任，使来源运行连接点
+        # 和来源到首消费动作的直连边成为冻结执行计划（ExecutionPlan）事实。
+        planned_graph_nodes = {**material_sources, **active}
         graph_normalizer = ExecutionPlanGraphNormalizer()
         runtime_handles, runtime_handle_ids = graph_normalizer.runtime_handles(
-            active=active,
+            active=planned_graph_nodes,
             handles=handles,
         )
         planned_edges = graph_normalizer.contract_edges(
             nodes=nodes,
-            active=active,
+            active=planned_graph_nodes,
             edges=edges,
             handles=handles,
             runtime_handle_ids=runtime_handle_ids,
@@ -89,9 +92,16 @@ class ExecutionPlanBuilder:
             edges=edges,
             handles=handles,
         )
-        ordered = graph_normalizer.topological_order(active, planned_edges)
-        # ``ordered_sources`` 保留应用图中的确定性顺序，并保证协调责任先于动作。
-        ordered_sources = list(material_sources)
+        graph_order = graph_normalizer.topological_order(
+            planned_graph_nodes,
+            planned_edges,
+        )
+        # 来源与普通节点都先遵守冻结图拓扑，再由计划作业序列保证全部协调责任先于
+        # 任何物理动作；这样不会让无边来源受创建时间影响而落到动作之后。
+        ordered_sources = [
+            node_uuid for node_uuid in graph_order if node_uuid in material_sources
+        ]
+        ordered = [node_uuid for node_uuid in graph_order if node_uuid in active]
         if run_mode == "single_node":
             if target_node_uuid is None:
                 candidates = [*ordered_sources, *ordered]
