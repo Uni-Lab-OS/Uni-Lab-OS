@@ -63,6 +63,26 @@ class _Registry:
         return []
 
 
+class _SharedImplementationRegistry(_Registry):
+    """提供两个合法复用同一 Python 实现类的设备资源模板。"""
+
+    def obtain_registry_device_info(self) -> list[dict[str, Any]]:
+        """返回业务 ID 不同但实现类相同的两个设备模板。
+
+        参数：无。返回：主设备和次设备定义；二者共享实现类身份，但资源图只按
+        唯一业务 ID 引用主设备。异常：无；每次调用都返回无共享引用的新字典。
+        """
+
+        primary = super().obtain_registry_device_info()[0]
+        secondary = {
+            **primary,
+            "id": "m2b_mount_secondary",
+            "display_name": "M2B Mount Secondary",
+            "class": dict(primary["class"]),
+        }
+        return [primary, secondary]
+
+
 class _ResourceTree:
     """以产品 ``ResourceTreeSet.dump`` 形状暴露固定资源树。
 
@@ -162,15 +182,22 @@ def _pose(
     }
 
 
-def _bootstrap(store: InventoryStore, tree: _ResourceTree) -> dict[str, Any]:
+def _bootstrap(
+    store: InventoryStore,
+    tree: _ResourceTree,
+    *,
+    registry: _Registry | None = None,
+) -> dict[str, Any]:
     """通过正式深模块接口执行一次启动投影。
 
-    参数：``store`` 是本地库存权威，``tree`` 是资源树集合替身。返回：导入回执。
-    异常：资源图非法或与既有权威冲突时传播 ``ResourceGraphBootstrapError``。
+    参数：``store`` 是本地库存权威，``tree`` 是资源树集合替身；``registry``
+    可注入含共享实现类的注册表（Registry），缺省使用单模板注册表。返回：导入
+    回执。异常：资源图非法或与既有权威冲突时传播
+    ``ResourceGraphBootstrapError``。
     """
 
     # ``registry_snapshot`` 是模板同步与资源投影共同消费的单代注册表事实。
-    registry_snapshot = RegistryTemplateSnapshot.from_registry(_Registry())
+    registry_snapshot = RegistryTemplateSnapshot.from_registry(registry or _Registry())
     return bootstrap_local_resource_graph(
         store=store,
         resource_tree_set=tree,
@@ -203,6 +230,31 @@ def test_first_bootstrap_exposes_stable_device_material_and_ordered_sites() -> N
     ]
     assert [site["sort_order"] for site in sites] == [0, 1]
     assert all(site["material_uuid"] == MOUNT_MATERIAL_UUID for site in sites)
+
+
+def test_shared_implementation_class_keeps_unique_business_aliases() -> None:
+    """共享 Python 实现类不得阻止按唯一业务 ID 投影本地资源图。
+
+    参数：无。返回：无。断言：两个资源模板（ResourceTemplate）合法复用同一
+    实现类时，模糊类别名不进入解析表，但资源图中的 ``m2b_mount`` 业务 ID 仍
+    唯一解析并提交；这复现 SZLab 多设备复用 ``MoveitInterface`` 的启动形状。
+    """
+
+    store = InventoryStore(":memory:")
+    try:
+        receipt = _bootstrap(
+            store,
+            _ResourceTree(),
+            registry=_SharedImplementationRegistry(),
+        )
+        graph = BackendResourceService(store).material_graph()
+    finally:
+        store.close()
+
+    assert receipt["status"] == "imported"
+    assert [node["material"]["uuid"] for node in graph["nodes"]] == [
+        MOUNT_MATERIAL_UUID
+    ]
 
 
 def test_restart_with_same_source_and_fingerprint_is_idempotent(tmp_path: Path) -> None:
