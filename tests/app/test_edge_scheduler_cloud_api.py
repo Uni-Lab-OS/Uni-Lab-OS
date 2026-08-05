@@ -136,6 +136,33 @@ class TestIntegrationWiring:
         assert db_path.exists()
         assert integration.setup_edge_inventory(str(db_path)) is inventory
 
+    def test_inventory_composition_retains_workspace_material_shapes(self, tmp_path):
+        """库存组合根必须保留工作区编译后的静态物料外形。
+
+        参数：``tmp_path`` 提供隔离的库存数据库。返回：无；断言 Web 组合可从
+        同一进程装配接缝读取外形副本。异常：静态外形丢失或被调用者修改时测试失败。
+        """
+
+        # ``material_shapes`` 是包资产编译阶段完成校验的公共只读投影。
+        material_shapes = (
+            {
+                "id": "beaker",
+                "bundle": "szlab-poly-studio",
+                "categories": ["beaker"],
+                "categoryTokens": [],
+                "parts": [{"type": "box"}],
+            },
+        )
+
+        integration.setup_edge_inventory(
+            str(tmp_path / "host-material.db"),
+            material_shapes=material_shapes,
+        )
+        first_read = integration.get_material_shapes()
+        first_read[0]["id"] = "tampered"
+
+        assert integration.get_material_shapes() == list(material_shapes)
+
     def test_setup_injects_scheduler_and_reports_state(self, tmp_path):
         """缺少设备动作目录时应在派发前失败，并上报工作流终态。
 

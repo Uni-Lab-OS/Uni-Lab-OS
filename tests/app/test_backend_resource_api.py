@@ -23,6 +23,48 @@ def _client(tmp_path):
     return TestClient(app), store
 
 
+def test_material_shapes_use_backend_envelope_without_inventory_routes(
+    tmp_path,
+) -> None:
+    """静态物料外形必须通过公共 Backend 信封独立发布。
+
+    参数：``tmp_path`` 提供隔离的库存数据库。返回：无；断言前端可直接读取
+    ``/api/v1/material-shapes``，且响应不依赖私有库存路由。异常：路由缺失或
+    wire 数据被改写时测试失败。
+    """
+
+    store = InventoryStore(str(tmp_path / "inventory.db"))
+    app = FastAPI()
+    # ``material_shapes`` 是工作区资产编译器已经校验过的静态公共投影。
+    material_shapes = (
+        {
+            "id": "beaker",
+            "bundle": "szlab-poly-studio",
+            "categories": ["beaker"],
+            "categoryTokens": [],
+            "parts": [
+                {
+                    "type": "box",
+                    "style": "glass",
+                    "from": [0, 0, 0],
+                    "to": [1, 1, 1],
+                }
+            ],
+        },
+    )
+    install_backend_resource_api(
+        app,
+        BackendResourceService(store),
+        material_shapes=material_shapes,
+    )
+
+    response = TestClient(app).get("/api/v1/material-shapes")
+
+    assert response.status_code == 200
+    assert response.json() == {"code": 0, "data": {"items": list(material_shapes)}}
+    store.close()
+
+
 def _sync_template(client: TestClient) -> str:
     response = client.post(
         "/api/v1/resource-templates",
