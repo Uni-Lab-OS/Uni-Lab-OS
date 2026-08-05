@@ -204,7 +204,9 @@ def validate_graph(
                 _handle_data_key(handles[handle_uuid])
             )
         template_uuid = node.workflow_node_template_uuid
-        if template_uuid is not None:
+        # 工作流调用模板的 ``schema`` 是发布合同 envelope，不是节点 ``param``
+        # 的动作输入 JSON Schema；业务输入仍由边界连接点（Handle）校验。
+        if template_uuid is not None and _node_kind(node, templates) != "workflow":
             schema = _parse_schema(templates[template_uuid].get("schema"))
             if schema is not None:
                 _validate_schema_value(
@@ -302,6 +304,9 @@ def _node_kind(
         "tool_call": "tool_call",
         "manual_confirm": "manual_confirm",
         "material_source": "material_source",
+        # 已发布工作流调用（CompositeWorkflowInvocation）是创作层层级节点；
+        # 运行时仍只执行其静态展开的叶动作，不创建嵌套工作流任务（WorkflowTask）。
+        "workflow": "workflow",
     }
     kind = aliases.get(str(raw_kind).strip().lower())
     if kind is None:

@@ -12,10 +12,12 @@ from unilabos.workflow.applied_authoring_projection import (
 )
 from unilabos.workflow.authoring_ast import (
     ActionDeclaration,
+    CompositeDeclaration,
     DeviceDeclaration,
     GroupDeclaration,
     WorkflowProgram,
 )
+from unilabos.workflow.composite import CompositeAuthoring, CompositeExpansion
 from unilabos.workflow.authoring_graph_semantics import (
     AuthoringGraphError,
     candidate_changeset,
@@ -59,13 +61,15 @@ def build_candidate_graph(
     catalog: AuthoringCatalogSnapshot,
     applied_graph: Mapping[str, Any],
     resource_reference_resolver: ResourceReferenceResolver | None = None,
+    composite_authoring: CompositeAuthoring | None = None,
 ) -> tuple[dict[str, Any], dict[str, Any]]:
     """把静态作者程序构造为完整候选图和变更集（Changeset）。
 
     参数说明：``program`` 是纯 AST 解析结果，``catalog`` 是不可变目录快照，
     ``applied_graph`` 是当前权威图；``resource_reference_resolver`` 是只读库存
-    权威（Inventory Authority）资源身份端口。返回最小目录投影候选图和精确变更集；目录
-    缺失、连接点不匹配或输出不成立时抛出 ``AuthoringGraphError``。物料图违反
+    权威（Inventory Authority）资源身份端口；``composite_authoring`` 是可选的
+    已发布工作流只读展开端口。返回最小目录投影候选图和精确变更集；目录缺失、
+    连接点不匹配、组合展开或输出不成立时抛出 ``AuthoringGraphError``。物料图违反
     物料流线性（MaterialFlowLinearity）或资源模板兼容
     （ResourceTemplate Compatibility）时，也会把内部物料图异常转换为
     ``AuthoringGraphError`` 并保留稳定错误码。
@@ -76,7 +80,10 @@ def build_candidate_graph(
     action_catalog: dict[str, AuthoringCatalogAction] = {}
     result_nodes: dict[
         str,
-        tuple[ActionDeclaration | MaterialSourceDeclaration, AuthoringCatalogAction],
+        tuple[
+            ActionDeclaration | CompositeDeclaration | MaterialSourceDeclaration,
+            AuthoringCatalogAction,
+        ],
     ] = {}
     nodes: list[dict[str, Any]] = []
     edges: list[dict[str, Any]] = []
@@ -84,6 +91,7 @@ def build_candidate_graph(
     source_order = {
         node_uuid: index for index, node_uuid in enumerate(program.source_order)
     }
+    effective_input_contract = deepcopy(program.input_contract)
     for declaration in program.groups:
         try:
             group_catalog = catalog.require_action(
@@ -104,6 +112,64 @@ def build_candidate_graph(
             )
         )
     for declaration in program.actions:
+        if isinstance(declaration, CompositeDeclaration):
+            if composite_authoring is None:
+                raise AuthoringGraphError(
+                    "composite_catalog_mismatch",
+                    "工作流创作编译器未配置已发布工作流展开端口",
+                )
+            keyword_arguments = _composite_keyword_arguments(
+                declaration,
+                result_nodes=result_nodes,
+            )
+            expansion = composite_authoring.compile_invocation(
+                parent_workflow_uuid=program.workflow_uuid,
+                invocation_uuid=declaration.node_uuid,
+                module=declaration.module,
+                symbol=declaration.symbol,
+                keyword_arguments=keyword_arguments,
+                parent_input_contract=effective_input_contract,
+            )
+            _require_composite_expansion(expansion)
+            assert expansion.invocation_node is not None
+            _assert_composite_pin_compatible(
+                applied,
+                declaration.node_uuid,
+                expansion.contract_pin,
+            )
+            invocation = _composite_invocation_node(
+                declaration,
+                expansion=expansion,
+                catalog=catalog,
+                source_order=source_order[declaration.node_uuid],
+            )
+            nodes.append(invocation)
+            internal_nodes = [
+                _generated_composite_node(node, catalog=catalog)
+                for node in expansion.nodes
+            ]
+            nodes.extend(internal_nodes)
+            edges.extend(deepcopy(list(expansion.edges)))
+            for expanded_node in [invocation, *internal_nodes]:
+                try:
+                    expanded_action = catalog.require_template(
+                        str(expanded_node["workflow_node_template_uuid"])
+                    )
+                except (AuthoringCatalogError, KeyError) as error:
+                    raise AuthoringGraphError(
+                        "composite_catalog_mismatch",
+                        "组合工作流展开节点引用了目录外模板",
+                    ) from error
+                action_catalog[str(expanded_node["uuid"])] = expanded_action
+            invocation_action = action_catalog[declaration.node_uuid]
+            result_nodes[declaration.result_name] = (
+                declaration,
+                invocation_action,
+            )
+            effective_input_contract = deepcopy(
+                expansion.effective_parent_input_contract
+            )
+            continue
         if isinstance(declaration, MaterialSourceDeclaration):
             try:
                 # ``node`` 与 ``catalog_action`` 分别是候选事实和框架合同。
@@ -226,7 +292,7 @@ def build_candidate_graph(
                     else None
                 )
             ),
-            "input_contract": deepcopy(program.input_contract),
+            "input_contract": effective_input_contract,
             "output_contract": _output_contract(program, result_nodes),
             "output_bindings": _output_bindings(program, result_nodes),
         }
@@ -234,14 +300,35 @@ def build_candidate_graph(
     workflow_meta["unilab"] = unilab_meta
     workflow["meta_data"] = workflow_meta
 
-    def generated_node_source_sort_key(item: Mapping[str, Any]) -> int:
+    def generated_node_source_sort_key(item: Mapping[str, Any]) -> tuple[int, int, str]:
         """读取生成节点的作者源码顺序。
 
         参数：``item`` 是已生成工作流节点。返回：该节点在源码中的非负顺序。
         异常：身份缺失时由映射访问抛出并由创作入口失败关闭。
         """
 
-        return source_order[str(item["uuid"])]
+        node_uuid = str(item["uuid"])
+        if node_uuid in source_order:
+            return source_order[node_uuid], 0, node_uuid
+        parent_uuid = item.get("parent_uuid")
+        visited: set[str] = set()
+        while isinstance(parent_uuid, str) and parent_uuid not in visited:
+            if parent_uuid in source_order:
+                return source_order[parent_uuid], 1, node_uuid
+            visited.add(parent_uuid)
+            parent = next(
+                (
+                    candidate
+                    for candidate in nodes
+                    if str(candidate.get("uuid")) == parent_uuid
+                ),
+                None,
+            )
+            parent_uuid = parent.get("parent_uuid") if parent is not None else None
+        raise AuthoringGraphError(
+            "composite_catalog_mismatch",
+            "组合工作流内部节点缺少可追溯调用父级",
+        )
 
     def generated_edge_uuid_sort_key(item: Mapping[str, Any]) -> str:
         """读取生成边的稳定 UUID 排序键。
@@ -281,6 +368,188 @@ def build_candidate_graph(
         raise AuthoringGraphError(error.code, error.message) from error
     changeset = candidate_changeset(graph=graph, applied_graph=applied)
     return graph, changeset
+
+
+def _composite_keyword_arguments(
+    declaration: CompositeDeclaration,
+    *,
+    result_nodes: Mapping[
+        str,
+        tuple[
+            ActionDeclaration | CompositeDeclaration | MaterialSourceDeclaration,
+            AuthoringCatalogAction,
+        ],
+    ],
+) -> dict[str, object]:
+    """把静态值绑定转换为组合展开端口接受的边界来源。
+
+    参数：``declaration`` 是调用声明，``result_nodes`` 解析前序节点输出连接点。
+    返回：按参数名排序语义无关的来源字典。异常：未知绑定或输出连接点不唯一时
+    抛出 ``AuthoringGraphError``。
+    """
+
+    result: dict[str, object] = {}
+    for name, binding in declaration.arguments:
+        if binding.kind == "literal":
+            result[name] = deepcopy(binding.value)
+        elif binding.kind == "workflow_input":
+            result[name] = {
+                "kind": "workflow_input",
+                "parameter": str(binding.value),
+            }
+        elif binding.kind == "node_output":
+            source_declaration, source_action = result_nodes[
+                binding.result_name or ""
+            ]
+            source_handle = _require_handle(
+                source_action,
+                key=str(binding.value),
+                io_type="source",
+            )
+            result[name] = {
+                "kind": "node_output",
+                "workflow_node_uuid": source_declaration.node_uuid,
+                "source_handle_uuid": str(source_handle["uuid"]),
+            }
+        else:
+            raise AuthoringGraphError(
+                "composite_boundary_mapping_invalid",
+                "已发布工作流参数来源不受支持",
+            )
+    return result
+
+
+def _require_composite_expansion(expansion: CompositeExpansion) -> None:
+    """把组合展开的首个稳定诊断提升为创作图错误。
+
+    参数：``expansion`` 是只读组合端口结果。返回：成功时无。异常：结果类型或
+    候选不完整时抛出保留公共错误码的 ``AuthoringGraphError``。
+    """
+
+    if not isinstance(expansion, CompositeExpansion):
+        raise AuthoringGraphError(
+            "composite_catalog_mismatch",
+            "组合展开端口返回了非法结果",
+        )
+    if expansion.invocation_node is not None and not expansion.diagnostics:
+        return
+    diagnostic = expansion.diagnostics[0] if expansion.diagnostics else {}
+    raise AuthoringGraphError(
+        str(diagnostic.get("code") or "composite_catalog_mismatch"),
+        str(diagnostic.get("message") or "组合工作流展开失败"),
+    )
+
+
+def _assert_composite_pin_compatible(
+    applied_graph: Mapping[str, Any],
+    invocation_uuid: str,
+    current_pin: Mapping[str, Any],
+) -> None:
+    """拒绝已应用调用节点的发布合同发生破坏性漂移。
+
+    参数：已应用图、调用 UUID 和当前发布 pin。返回：兼容或首次调用时无。
+    异常：身份、合同摘要或组合模式变化时抛出 ``AuthoringGraphError``。
+    """
+
+    applied_node = next(
+        (
+            node
+            for node in applied_graph["nodes"]
+            if isinstance(node, Mapping) and node.get("uuid") == invocation_uuid
+        ),
+        None,
+    )
+    if applied_node is None:
+        return
+    meta_data = applied_node.get("meta_data")
+    unilab = meta_data.get("unilab") if isinstance(meta_data, Mapping) else None
+    stored = unilab.get("composite") if isinstance(unilab, Mapping) else None
+    if not isinstance(stored, Mapping):
+        raise AuthoringGraphError(
+            "composite_contract_stale",
+            "已应用工作流调用缺少冻结合同 pin",
+        )
+    compatibility_fields = (
+        "child_workflow_uuid",
+        "contract_digest",
+        "composition_allow_transparent",
+    )
+    if any(stored.get(key) != current_pin.get(key) for key in compatibility_fields):
+        raise AuthoringGraphError(
+            "composite_contract_stale",
+            "已发布工作流合同发生破坏性变化",
+        )
+
+
+def _composite_invocation_node(
+    declaration: CompositeDeclaration,
+    *,
+    expansion: CompositeExpansion,
+    catalog: AuthoringCatalogSnapshot,
+    source_order: int,
+) -> dict[str, Any]:
+    """把展开调用节点补齐作者结果、输入绑定和展示元数据。
+
+    参数：调用声明、成功展开、不可变目录和源码顺序。返回：不含数据库读字段的
+    候选调用节点。异常：边界连接点或模板缺失时抛出 ``AuthoringGraphError``。
+    """
+
+    assert expansion.invocation_node is not None
+    node = deepcopy(dict(expansion.invocation_node))
+    for field in ("create_time", "update_time", "workflow_uuid"):
+        node.pop(field, None)
+    action = catalog.require_template(str(node["workflow_node_template_uuid"]))
+    params: dict[str, Any] = {}
+    input_bindings: dict[str, dict[str, str]] = {}
+    for name, binding in declaration.arguments:
+        handle = _require_handle(action, key=name, io_type="target")
+        if binding.kind == "literal":
+            params[name] = deepcopy(binding.value)
+        elif binding.kind == "workflow_input":
+            input_bindings[str(handle["uuid"])] = {
+                "parameter": str(binding.value)
+            }
+    node["param"] = params
+    template = action.template
+    node["name"] = declaration.title or str(
+        template.get("display_name") or template.get("name") or declaration.symbol
+    )
+    node["description"] = (
+        declaration.description
+        if declaration.description is not None
+        else template.get("description")
+    )
+    meta_data = node.setdefault("meta_data", {})
+    unilab = meta_data.setdefault("unilab", {})
+    unilab.update(
+        {
+            "input_bindings": input_bindings,
+            "authoring_result_name": declaration.result_name,
+            "authoring_source_order": source_order,
+        }
+    )
+    return node
+
+
+def _generated_composite_node(
+    node: Mapping[str, Any],
+    *,
+    catalog: AuthoringCatalogSnapshot,
+) -> dict[str, Any]:
+    """移除只属于数据库读投影的组合内部节点字段。
+
+    参数：``node`` 是只读子快照节点，``catalog`` 提供展示默认值。返回：可交给
+    候选投影的分离节点。异常：模板不存在时抛出 ``AuthoringCatalogError``。
+    """
+
+    result = deepcopy(dict(node))
+    for field in ("create_time", "update_time", "workflow_uuid"):
+        result.pop(field, None)
+    action = catalog.require_template(str(result["workflow_node_template_uuid"]))
+    template = action.template
+    if result.get("description") is None:
+        result["description"] = template.get("description")
+    return result
 
 
 def _group_node(
@@ -584,7 +853,10 @@ def _output_contract(
     program: WorkflowProgram,
     result_nodes: Mapping[
         str,
-        tuple[ActionDeclaration | MaterialSourceDeclaration, AuthoringCatalogAction],
+        tuple[
+            ActionDeclaration | CompositeDeclaration | MaterialSourceDeclaration,
+            AuthoringCatalogAction,
+        ],
     ],
 ) -> dict[str, Any]:
     """从输出绑定构造版本 1 工作流输出合同。
@@ -656,7 +928,10 @@ def _output_bindings(
     program: WorkflowProgram,
     result_nodes: Mapping[
         str,
-        tuple[ActionDeclaration | MaterialSourceDeclaration, AuthoringCatalogAction],
+        tuple[
+            ActionDeclaration | CompositeDeclaration | MaterialSourceDeclaration,
+            AuthoringCatalogAction,
+        ],
     ],
 ) -> dict[str, dict[str, str]]:
     """把作者输出声明映射为稳定工作流输出绑定。

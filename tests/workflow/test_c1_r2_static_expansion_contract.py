@@ -189,6 +189,7 @@ def _applied_snapshot() -> dict[str, Any]:
                 "uuid": CHILD_NODE_UUID,
                 "workflow_uuid": CHILD_WORKFLOW_UUID,
                 "workflow_node_template_uuid": ACTION_TEMPLATE_UUID,
+                "material_uuid": "a8000000-0000-4000-8000-000000000001",
                 "parent_uuid": None,
                 "name": "measure",
                 "status": "idle",

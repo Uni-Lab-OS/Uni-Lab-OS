@@ -65,10 +65,33 @@ def render_authoring_python(
     ):
         raise AuthoringGraphError("candidate_invalid", "候选图缺少工作流、节点或边")
     workflow_uuid = validate_uuid(workflow.get("uuid"))
-    node_by_uuid = _node_index(nodes)
-    catalog_by_node = _catalog_projection(node_by_uuid, catalog)
-    ordered_nodes = _authoring_ordered_nodes(node_by_uuid, edges)
+    all_nodes = _node_index(nodes)
+    all_catalog = _catalog_projection(all_nodes, catalog)
+    hidden_composite_nodes = _composite_internal_node_uuids(
+        all_nodes,
+        all_catalog,
+    )
+    node_by_uuid = {
+        key: value for key, value in all_nodes.items() if key not in hidden_composite_nodes
+    }
+    catalog_by_node = {
+        key: all_catalog[key] for key in node_by_uuid
+    }
+    visible_edges = [
+        edge
+        for edge in edges
+        if isinstance(edge, Mapping)
+        and edge.get("source_node_uuid") in node_by_uuid
+        and edge.get("target_node_uuid") in node_by_uuid
+    ]
+    ordered_nodes = _authoring_ordered_nodes(node_by_uuid, visible_edges)
     device_symbols, device_imports = _device_symbols(ordered_nodes, catalog_by_node)
+    published_workflow_imports = {
+        tuple(str(action.template["class"]).rsplit(":", 1))
+        for node in ordered_nodes
+        for action in [catalog_by_node[str(node["uuid"])]]
+        if _is_published_workflow(action)
+    }
     # ``material_sources`` 冻结每个物料来源节点的 import 与调用表达式。
     material_sources: dict[str, RenderedMaterialSource] = {}
     for node in ordered_nodes:
@@ -133,7 +156,9 @@ def render_authoring_python(
         lines.append("")
     if needs_field:
         lines.append("from pydantic import Field")
-    for module, symbol in sorted(device_imports | material_imports):
+    for module, symbol in sorted(
+        device_imports | material_imports | published_workflow_imports
+    ):
         lines.append(f"from {module} import {symbol}")
     if needs_resource_slot:
         lines.append("from unilabos.registry.placeholder_type import ResourceSlot")
@@ -217,7 +242,7 @@ def render_authoring_python(
         )
         lines.append(f"def {function_name}(){return_annotation}:")
 
-    incoming = _incoming_bindings(edges)
+    incoming = _incoming_bindings(visible_edges)
     source_map: list[dict[str, Any]] = []
     # Python 动作结果变量承载节点间数据依赖，必须唯一且不能被节点展示标题改写。
     result_names: set[str] = set()
@@ -409,6 +434,21 @@ def _append_action_source(
     lines.append(f"{indent}# unilab:node_uuid={node_uuid}")
     if node_uuid in material_sources:
         call = material_sources[node_uuid].call
+    elif _is_published_workflow(action):
+        arguments = _render_action_arguments(
+            node=node,
+            action=action,
+            incoming=incoming,
+            node_by_uuid=node_by_uuid,
+            catalog_by_node=catalog_by_node,
+        )
+        class_identity = action.template.get("class")
+        if not isinstance(class_identity, str) or class_identity.count(":") != 1:
+            raise AuthoringGraphError(
+                "composite_catalog_mismatch",
+                "已发布工作流模板缺少绝对导入身份",
+            )
+        call = f"{class_identity.rsplit(':', 1)[1]}({', '.join(arguments)})"
     else:
         arguments = _render_action_arguments(
             node=node,
@@ -631,6 +671,53 @@ def _is_group(action: AuthoringCatalogAction) -> bool:
     )
 
 
+def _is_published_workflow(action: AuthoringCatalogAction) -> bool:
+    """判断目录动作是否为框架发布的工作流调用模板。
+
+    参数：``action`` 是目录聚合。返回：类型和来源元数据同时满足发布合同时为
+    ``True``。异常：无；不完整模板返回 ``False``。
+    """
+
+    template = action.template
+    meta_data = template.get("meta_data")
+    unilab = meta_data.get("unilab") if isinstance(meta_data, Mapping) else None
+    return (
+        template.get("type") == "workflow"
+        and template.get("node_type") == "workflow"
+        and isinstance(unilab, Mapping)
+        and isinstance(unilab.get("workflow_source"), Mapping)
+    )
+
+
+def _composite_internal_node_uuids(
+    nodes: Mapping[str, Mapping[str, Any]],
+    catalog_by_node: Mapping[str, AuthoringCatalogAction],
+) -> set[str]:
+    """返回所有已发布工作流调用节点的私有后代 UUID。
+
+    参数：完整节点索引和同代目录映射。返回：规范源码不得直接呈现的内部节点
+    UUID 集合。异常：无；父引用错误由后续公共图校验关闭失败。
+    """
+
+    invocation_uuids = {
+        node_uuid
+        for node_uuid, action in catalog_by_node.items()
+        if _is_published_workflow(action)
+    }
+    hidden: set[str] = set()
+    for node_uuid, node in nodes.items():
+        parent = node.get("parent_uuid")
+        seen: set[str] = set()
+        while isinstance(parent, str) and parent not in seen:
+            if parent in invocation_uuids:
+                hidden.add(node_uuid)
+                break
+            seen.add(parent)
+            parent_node = nodes.get(parent)
+            parent = parent_node.get("parent_uuid") if parent_node is not None else None
+    return hidden
+
+
 def _device_symbols(
     nodes: list[dict[str, Any]],
     catalog_by_node: Mapping[str, AuthoringCatalogAction],
@@ -645,7 +732,11 @@ def _device_symbols(
     imports: set[tuple[str, str]] = set()
     for node in nodes:
         action = catalog_by_node[str(node["uuid"])]
-        if _is_material_source(action) or _is_group(action):
+        if (
+            _is_material_source(action)
+            or _is_group(action)
+            or _is_published_workflow(action)
+        ):
             continue
         class_identity, device_id = _selector_key(node, action)
         module, class_name = class_identity.rsplit(":", 1)

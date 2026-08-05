@@ -28,6 +28,7 @@ from unilabos.workflow.candidate_validation import (
     CandidateBundleError,
     validate_candidate_bundle,
 )
+from unilabos.workflow.composite import CompositeAuthoring
 from unilabos.workflow.material_graph_validation import (
     MaterialGraphValidationError,
     validate_material_graph_projection,
@@ -53,19 +54,28 @@ class WorkflowAuthoringEngine:
         *,
         catalog: AuthoringCatalogSnapshot,
         resource_reference_resolver: ResourceReferenceResolver | None = None,
+        composite_authoring: CompositeAuthoring | None = None,
     ):
         """创建带不可变目录和可选只读资源身份端口的创作编译器。
 
         参数说明：``catalog`` 是构造时固定的目录快照（Catalog Snapshot）；编译
         期间只读该快照，不导入作者源码，也不修改外部状态；
         ``resource_reference_resolver`` 只读取库存权威（Inventory Authority）并
-        把部署业务 ID 解析为实际物料 UUID，不取得预留或执行占用。
+        把部署业务 ID 解析为实际物料 UUID，不取得预留或执行占用；
+        ``composite_authoring`` 可选提供已发布工作流的只读静态展开。返回：无。
+        异常：目录或组合端口类型不合法时抛出 ``TypeError``。
         """
 
         if not isinstance(catalog, AuthoringCatalogSnapshot):
             raise TypeError("catalog 必须是 AuthoringCatalogSnapshot")
+        if composite_authoring is not None and not isinstance(
+            composite_authoring,
+            CompositeAuthoring,
+        ):
+            raise TypeError("composite_authoring 必须是 CompositeAuthoring")
         self._catalog = catalog
         self._resource_reference_resolver = resource_reference_resolver
+        self._composite_authoring = composite_authoring
 
     @property
     def template_catalog_fingerprint(self) -> str:
@@ -112,6 +122,7 @@ class WorkflowAuthoringEngine:
                 catalog=self._catalog,
                 applied_graph=applied_graph,
                 resource_reference_resolver=self._resource_reference_resolver,
+                composite_authoring=self._composite_authoring,
             )
             if graph["workflow"].get("revision") != revision:
                 raise AuthoringGraphError(

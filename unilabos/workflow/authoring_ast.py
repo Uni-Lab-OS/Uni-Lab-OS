@@ -96,6 +96,20 @@ class ActionDeclaration:
 
 
 @dataclass(frozen=True, slots=True)
+class CompositeDeclaration:
+    """一个绝对导入的已发布工作流调用声明。"""
+
+    node_uuid: str
+    result_name: str
+    title: str | None
+    description: str | None
+    module: str
+    symbol: str
+    arguments: tuple[tuple[str, ValueBinding], ...]
+    source_node: ast.Assign
+
+
+@dataclass(frozen=True, slots=True)
 class GroupDeclaration:
     """一个只表达展示层级的分组（Group）节点声明。"""
 
@@ -121,7 +135,10 @@ class WorkflowProgram:
     input_contract: dict[str, Any]
     result_record_name: str | None
     declared_output_schemas: tuple[tuple[str, dict[str, Any]], ...]
-    actions: tuple[ActionDeclaration | MaterialSourceDeclaration, ...]
+    actions: tuple[
+        ActionDeclaration | CompositeDeclaration | MaterialSourceDeclaration,
+        ...,
+    ]
     groups: tuple[GroupDeclaration, ...]
     parent_by_node: tuple[tuple[str, str], ...]
     order_dependencies: tuple[tuple[str, str], ...]
@@ -147,7 +164,9 @@ class _BodyState:
     input_names: set[str]
     anchors: dict[int, str]
     node_metadata: dict[int, tuple[str, str]]
-    actions: list[ActionDeclaration | MaterialSourceDeclaration]
+    actions: list[
+        ActionDeclaration | CompositeDeclaration | MaterialSourceDeclaration
+    ]
     groups: list[GroupDeclaration]
     parent_by_node: dict[str, str]
     order_dependencies: list[tuple[str, str]]
@@ -609,7 +628,7 @@ def _workflow_body(
     anchors: dict[int, str],
     node_metadata: dict[int, tuple[str, str]],
 ) -> tuple[
-    list[ActionDeclaration | MaterialSourceDeclaration],
+    list[ActionDeclaration | CompositeDeclaration | MaterialSourceDeclaration],
     list[GroupDeclaration],
     dict[str, str],
     list[tuple[str, str]],
@@ -925,11 +944,12 @@ def _action_declaration(
     material_results: set[str],
     anchors: dict[int, str],
     node_metadata: dict[int, tuple[str, str]],
-) -> ActionDeclaration | MaterialSourceDeclaration:
+) -> ActionDeclaration | CompositeDeclaration | MaterialSourceDeclaration:
     """解析一条 ``result = device.action(...)`` 动作声明。
 
     参数说明：各索引用于验证设备、输入、前序结果、相邻锚点和可选节点展示
-    元数据；返回不可变动作声明，位置参数、动态调用或前向引用失败关闭。
+    元数据；返回不可变动作、已发布工作流调用或物料来源声明，位置参数、动态
+    调用或前向引用通过 ``AuthoringSyntaxError`` 失败关闭。
     """
 
     material_source = parse_material_source_declaration(
@@ -946,6 +966,52 @@ def _action_declaration(
     call = statement.value
     if not isinstance(target, ast.Name) or not isinstance(call, ast.Call):
         _fail("unsupported_authoring_syntax", "动作必须赋值给简单名称", statement)
+    if isinstance(call.func, ast.Name):
+        import_identity = imports.get(call.func.id)
+        if (
+            call.args
+            or not isinstance(import_identity, str)
+            or import_identity.count(":") != 1
+            or import_identity in _AUTHORING_MARKERS.values()
+            or import_identity == _RESOURCE_REF
+        ):
+            _fail(
+                "unsupported_authoring_syntax",
+                "已发布工作流必须通过绝对导入并只接受命名参数",
+                statement,
+            )
+        node_uuid = anchors.get(statement.lineno - 1)
+        if node_uuid is None:
+            _fail("invalid_node_anchor", "每个工作流调用前必须有相邻节点 UUID 锚点", statement)
+        metadata = node_metadata.get(statement.lineno - 1)
+        arguments: list[tuple[str, ValueBinding]] = []
+        names: set[str] = set()
+        for item in call.keywords:
+            if item.arg is None or item.arg in names:
+                _fail("invalid_action_arguments", "工作流调用参数重复或包含 ** 展开", call)
+            names.add(item.arg)
+            arguments.append(
+                (
+                    item.arg,
+                    _value_binding(
+                        item.value,
+                        input_names=input_names,
+                        known_results=known_results,
+                        material_results=material_results,
+                    ),
+                )
+            )
+        module, symbol = import_identity.split(":", 1)
+        return CompositeDeclaration(
+            node_uuid=node_uuid,
+            result_name=target.id,
+            title=metadata[0] if metadata is not None else None,
+            description=metadata[1] if metadata is not None else None,
+            module=module,
+            symbol=symbol,
+            arguments=tuple(arguments),
+            source_node=statement,
+        )
     if (
         call.args
         or not isinstance(call.func, ast.Attribute)
@@ -1179,6 +1245,7 @@ def _fail(code: str, message: str, node: ast.AST | None = None) -> Never:
 __all__ = [
     "ActionDeclaration",
     "AuthoringSyntaxError",
+    "CompositeDeclaration",
     "DeviceDeclaration",
     "GroupDeclaration",
     "ValueBinding",
