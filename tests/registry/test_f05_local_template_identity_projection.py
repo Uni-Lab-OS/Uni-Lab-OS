@@ -9,9 +9,9 @@ from typing import Any
 import pytest
 
 from unilabos.app.scheduler.inventory.backend_contract import (
+    TEMPLATE_DATA_CONFLICT,
     BackendContractError,
     BackendResourceService,
-    TEMPLATE_DATA_CONFLICT,
 )
 from unilabos.app.scheduler.inventory.store import InventoryStore
 from unilabos.registry.ast_registry_scanner import _parse_file
@@ -167,6 +167,28 @@ def _active_template_identities(store: InventoryStore) -> dict[str, str]:
     return {str(row["name"]): str(row["uuid"]) for row in template_rows}
 
 
+def _template_storage_facts(store: InventoryStore) -> tuple[list[dict[str, Any]], list[dict[str, Any]]]:
+    """读取完整模板事实与聚合版本，用于证明失败前后零新增、零更新。
+
+    参数说明：``store`` 是真实本地库存存储。返回：按稳定身份排序的资源模板
+    （ResourceTemplate）行和模板库存聚合行；调用者只比较公开组合操作前后的
+    权威事实，不把数据库旁路用作产品身份解析。
+    """
+
+    # 两组事实同时覆盖模板字段更新和聚合版本递增，避免只检查活动行数漏报更新。
+    template_rows = [
+        dict(row)
+        for row in store.query_all("SELECT * FROM resource_template ORDER BY uuid")
+    ]
+    inventory_rows = [
+        dict(row)
+        for row in store.query_all(
+            "SELECT * FROM resource_template_inventory ORDER BY resource_template_uuid"
+        )
+    ]
+    return template_rows, inventory_rows
+
+
 def test_local_composition_creates_missing_inventory_template_identities(
     tmp_path: Path,
 ) -> None:
@@ -303,6 +325,12 @@ def test_local_composition_rejects_conflicting_resource_source_aliases(
     inventory_store = InventoryStore(str(tmp_path / "inventory.db"))
     try:
         registry = _build_registry(tmp_path)
+        # ``stable_snapshot`` 先建立合法同代事实；冲突组合不得更新既有模板版本。
+        stable_snapshot = RegistryTemplateSnapshot.from_registry(registry)
+        BackendResourceService(inventory_store).sync_resource_templates(
+            stable_snapshot.detached_definitions()
+        )
+        facts_before_conflict = _template_storage_facts(inventory_store)
         original_resource = registry.obtain_registry_resource_info()[0]
         conflicting_resource = {
             **original_resource,
@@ -321,6 +349,41 @@ def test_local_composition_rejects_conflicting_resource_source_aliases(
                 registry=registry,
             )
         assert get_workflow_service() is None
+        assert _template_storage_facts(inventory_store) == facts_before_conflict
+    finally:
+        reset_workflow_service_for_test()
+        inventory_store.close()
+
+
+def test_local_composition_rejects_unresolvable_alias_before_inventory_write(
+    tmp_path: Path,
+) -> None:
+    """不可解析源码别名必须在任何库存模板写事务之前关闭式失败。
+
+    参数说明：``tmp_path`` 隔离真实库存数据库。返回：无；断言非法
+    ``source_fqid`` 和类模块别名不能留下资源模板（ResourceTemplate）或模板库存
+    聚合事实，也不能发布半成品工作流权威（Workflow Authority）。
+    """
+
+    reset_workflow_service_for_test()
+    inventory_store = InventoryStore(str(tmp_path / "inventory.db"))
+    try:
+        registry = _build_registry(tmp_path)
+        invalid_resource = registry.obtain_registry_resource_info()[0]
+        # 两个字段共同构成无效 Python 源码别名，不能延迟到库存提交后才校验。
+        invalid_resource["source_fqid"] = "not a python source identity"
+        invalid_resource["class"]["module"] = "not a python source identity"
+        registry._resources = [invalid_resource]
+
+        with pytest.raises(RegistryTemplateProjectionError, match="源码身份"):
+            compose_local_workflow_template_runtime(
+                tmp_path,
+                inventory_store=inventory_store,
+                registry=registry,
+            )
+
+        assert get_workflow_service() is None
+        assert _template_storage_facts(inventory_store) == ([], [])
     finally:
         reset_workflow_service_for_test()
         inventory_store.close()
