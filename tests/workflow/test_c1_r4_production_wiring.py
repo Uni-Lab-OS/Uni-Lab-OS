@@ -1,0 +1,217 @@
+"""F06 R4 已发布工作流目录的生产组合与重启恢复 RED。"""
+
+from __future__ import annotations
+
+import hashlib
+import json
+from pathlib import Path
+
+from tests.registry.test_f05_material_source_catalog import _Registry
+from unilabos.app.scheduler.inventory.store import InventoryStore
+from unilabos.app.workflow_template_api import WorkflowTemplateQueryService
+from unilabos.workflow.composition import (
+    compose_local_workflow_template_runtime,
+    reset_workflow_service_for_test,
+)
+from unilabos.workflow.source_discovery import discover_editable_sources
+from unilabos.workflow.store import WorkflowStore
+
+from .test_c1_r2_static_expansion_contract import (
+    CHILD_WORKFLOW_UUID,
+    INVOCATION_UUID,
+    PARENT_WORKFLOW_UUID,
+)
+
+PACKAGE_ID = "c1_product_lab"
+CHILD_MODULE = f"{PACKAGE_ID}.workflows.child"
+
+
+def _child_source() -> str:
+    """返回可被启动恢复与静态目录共同消费的空叶工作流源码。"""
+
+    return f'''from unilabos.workflow.authoring import workflow, workflow_output
+
+
+@workflow(
+    workflow_uuid="{CHILD_WORKFLOW_UUID}",
+    displayname="Published child",
+)
+def prepare_sample():
+    return workflow_output()
+'''
+
+
+def _write_package(selected_root: Path) -> None:
+    """写入一项显式授权的可编辑包（Editable Package）声明与源码。"""
+
+    source_path = selected_root / PACKAGE_ID / "workflows" / "child.py"
+    source_path.parent.mkdir(parents=True)
+    source_path.write_text(_child_source(), encoding="utf-8")
+    selected_root.joinpath("package.yaml").write_text(
+        "package:\n"
+        f"  name: {PACKAGE_ID}\n"
+        "workflows:\n"
+        f"  - workflow_uuid: {CHILD_WORKFLOW_UUID}\n"
+        f"    source: {PACKAGE_ID}/workflows/child.py\n",
+        encoding="utf-8",
+    )
+
+
+def _seed_applied_child(working_dir: Path, selected_root: Path) -> None:
+    """在产品启动前写入同修订已应用的叶工作流与来源注册事实。"""
+
+    plan = discover_editable_sources((selected_root,))
+    store = WorkflowStore(working_dir / "workflow_history.db")
+    try:
+        store.install_discovered_sources(
+            [
+                {
+                    "workflow_uuid": item.workflow_uuid,
+                    "package_id": item.package_id,
+                    "package_root": str(item.package_root),
+                    "relative_path": item.relative_path,
+                    "source_uri": item.source_uri,
+                }
+                for item in plan.registrations
+            ]
+        )
+        graph = store.get_graph(CHILD_WORKFLOW_UUID)
+        source_hash = "sha256:" + hashlib.sha256(
+            _child_source().encode("utf-8")
+        ).hexdigest()
+        meta_data = {
+            "unilab": {
+                "authoring_function_name": "prepare_sample",
+                "input_contract": {"version": 1, "parameters": []},
+                "output_contract": {"version": 1, "outputs": []},
+                "output_bindings": {},
+            }
+        }
+        applied_source = {
+            "workflow_revision": graph["workflow"]["revision"],
+            "python_source": _child_source(),
+            "source_hash": source_hash,
+            "source_map": [],
+            "compiler_version": "fixture",
+            "template_catalog_fingerprint": "sha256:" + "4" * 64,
+        }
+        with store.transaction() as connection:
+            connection.execute(
+                "UPDATE workflow SET name = ?, description = ?, meta_data = ? "
+                "WHERE uuid = ?",
+                (
+                    "Published child",
+                    "Production fixture",
+                    json.dumps(meta_data, sort_keys=True),
+                    CHILD_WORKFLOW_UUID,
+                ),
+            )
+            connection.execute(
+                "UPDATE workflow_authoring SET applied_source = ? "
+                "WHERE workflow_uuid = ?",
+                (
+                    json.dumps(applied_source, sort_keys=True),
+                    CHILD_WORKFLOW_UUID,
+                ),
+            )
+    finally:
+        store.close()
+
+
+def _parent_source() -> str:
+    """返回只调用发布叶工作流、不创建任务或物理动作的父作者源码。"""
+
+    return f'''from {CHILD_MODULE} import prepare_sample
+from unilabos.workflow.authoring import workflow, workflow_output
+
+
+@workflow(
+    workflow_uuid="{PARENT_WORKFLOW_UUID}",
+    displayname="Product parent",
+)
+def product_parent():
+    # unilab:node_uuid={INVOCATION_UUID}
+    result = prepare_sample()
+    return workflow_output()
+'''
+
+
+def _empty_parent_graph() -> dict[str, object]:
+    """构造生产编译器首次调用使用的空父工作流图。"""
+
+    return {
+        "workflow": {
+            "uuid": PARENT_WORKFLOW_UUID,
+            "revision": 1,
+            "name": "Product parent",
+            "tags": [],
+            "description": None,
+            "meta_data": {},
+        },
+        "nodes": [],
+        "edges": [],
+        "node_templates": [],
+        "handle_templates": [],
+    }
+
+
+def test_product_composition_publishes_and_restores_workflow_templates(
+    tmp_path: Path,
+) -> None:
+    """生产组合发布同代工作流模板，并在重启后保留身份与可编译性。"""
+
+    reset_workflow_service_for_test()
+    selected_root = tmp_path / "editable"
+    selected_root.mkdir()
+    _write_package(selected_root)
+    _seed_applied_child(tmp_path, selected_root)
+    inventory_store = InventoryStore(str(tmp_path / "inventory.db"))
+    try:
+        service, projection = compose_local_workflow_template_runtime(
+            tmp_path,
+            inventory_store=inventory_store,
+            registry=_Registry(),
+            editable_package_roots=(selected_root,),
+        )
+        action = projection.snapshot().require_action(
+            f"{CHILD_MODULE}:prepare_sample",
+            f"workflow:{CHILD_WORKFLOW_UUID}",
+        )
+        first_template_uuid = str(action.template["uuid"])
+        assert action.template["type"] == "workflow"
+        assert service.compiler is not None
+        compiled = service.compiler.compile(
+            workflow_uuid=PARENT_WORKFLOW_UUID,
+            workflow_revision=1,
+            python_source=_parent_source(),
+            source_uri=f"package://{PACKAGE_ID}/workflows/parent.py",
+            applied_graph=_empty_parent_graph(),
+        )
+        assert compiled.valid and compiled.graph is not None, compiled.diagnostics
+        query = WorkflowTemplateQueryService(projection)
+        page = query.list_node_templates(
+            limit=20,
+            cursor_uuid=None,
+            keyword="",
+            resource_template_uuid=None,
+            action_type="",
+            node_type="workflow",
+        )
+        assert [item["uuid"] for item in page["items"]] == [first_template_uuid]
+
+        reset_workflow_service_for_test()
+        restarted, restarted_projection = compose_local_workflow_template_runtime(
+            tmp_path,
+            inventory_store=inventory_store,
+            registry=_Registry(),
+            editable_package_roots=(selected_root,),
+        )
+        restored = restarted_projection.snapshot().require_action(
+            f"{CHILD_MODULE}:prepare_sample",
+            f"workflow:{CHILD_WORKFLOW_UUID}",
+        )
+        assert restored.template["uuid"] == first_template_uuid
+        assert restarted.compiler is not None
+    finally:
+        reset_workflow_service_for_test()
+        inventory_store.close()
