@@ -21,6 +21,7 @@ from unilabos.registry.template_snapshot import RegistryTemplateSnapshot
 _SITE_TYPES = frozenset({"well", "tipspot", "tip_spot", "tip-spot"})
 _SOURCE_KEY = "resource_graph_bootstrap_source"
 _FINGERPRINT_KEY = "resource_graph_bootstrap_fingerprint"
+_HOST_EXECUTOR_ID = "host_node"
 
 
 class ResourceGraphBootstrapError(RuntimeError):
@@ -51,6 +52,13 @@ def bootstrap_local_resource_graph(
         raw_trees = resource_tree_set.dump()
     except (AttributeError, TypeError, ValueError) as error:
         raise ResourceGraphBootstrapError("资源树集合缺少可用 dump 快照") from error
+    # ``raw_trees`` 还需包含 OS 内建 Host 平台执行器；它有正式资源模板，但不由
+    # 用户资源树显式声明，仍必须在同一库存事务获得实际设备物料身份。
+    raw_trees = _with_implicit_host_executor(
+        raw_trees,
+        registry_snapshot=registry_snapshot,
+        source_name=source_name,
+    )
     aliases = _template_aliases(registry_snapshot)
     # ``projection`` 在任何模板或库存写入前完成结构验证，避免非法图留下部分事实。
     projection = _compile_projection(raw_trees, source_name, aliases)
@@ -73,6 +81,64 @@ def bootstrap_local_resource_graph(
         "material_count": len(projection["materials"]),
         "site_count": len(projection["sites"]),
     }
+
+
+def _with_implicit_host_executor(
+    raw_trees: object,
+    *,
+    registry_snapshot: RegistryTemplateSnapshot,
+    source_name: str,
+) -> object:
+    """在资源图缺失时追加 OS 内建 Host 平台执行器节点。
+
+    参数：``raw_trees`` 是未信任资源树快照；``registry_snapshot`` 证明
+    ``host_node`` 资源模板存在；``source_name`` 生成稳定运行时关系身份。返回：
+    模板不存在或资源图已显式声明 Host 时返回原输入，否则返回追加一棵独立
+    Host 树的新列表。异常：不提前接管非法资源树诊断，结构错误仍由编译阶段处理。
+    """
+
+    host_definitions = [
+        definition
+        for definition in registry_snapshot.detached_definitions()
+        if definition.get("id") == _HOST_EXECUTOR_ID
+        and definition.get("registry_type") == "device"
+    ]
+    if len(host_definitions) != 1:
+        return raw_trees
+    if not isinstance(raw_trees, Sequence) or isinstance(raw_trees, (str, bytes)):
+        return raw_trees
+    # ``node_ids`` 仅用于避免重复追加；任何非法成员仍交给 ``_compile_projection``。
+    node_ids = {
+        node.get("id")
+        for tree in raw_trees
+        if isinstance(tree, Sequence) and not isinstance(tree, (str, bytes))
+        for node in tree
+        if isinstance(node, Mapping)
+    }
+    if _HOST_EXECUTOR_ID in node_ids:
+        return raw_trees
+    host_definition = host_definitions[0]
+    # ``host_node`` 没有物理位置和库位，但相对位置表要求完整有限数值；零尺寸与
+    # 单位缩放表达虚拟平台执行器，不冒充实验台上的物理占位。
+    host_node = {
+        "id": _HOST_EXECUTOR_ID,
+        "uuid": _stable_uuid(source_name, "runtime", _HOST_EXECUTOR_ID),
+        "name": str(host_definition.get("display_name") or "Host Node"),
+        "description": str(host_definition.get("description") or "Host Node"),
+        "parent_uuid": None,
+        "type": "device",
+        "class": _HOST_EXECUTOR_ID,
+        "pose": {
+            "position": {"x": 0, "y": 0, "z": 0},
+            "size": {"width": 0, "height": 0, "depth": 0},
+            "scale": {"x": 1, "y": 1, "z": 1},
+            "rotation": {"x": 0, "y": 0, "z": 0},
+        },
+        "config": {"category": "platform-executor", "virtual": True},
+        "data": {},
+        "barcode": "",
+    }
+    return [*raw_trees, [host_node]]
 
 
 def _template_aliases(snapshot: RegistryTemplateSnapshot) -> dict[str, str]:
