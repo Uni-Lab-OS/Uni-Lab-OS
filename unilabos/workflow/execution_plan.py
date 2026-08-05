@@ -106,14 +106,14 @@ class ExecutionPlanBuilder:
         ordered = [node_uuid for node_uuid in graph_order if node_uuid in active]
         if run_mode == "single_node":
             if target_node_uuid is None:
-                candidates = [*ordered_sources, *ordered]
-                if not candidates:
+                if not graph_order:
                     raise StoreConflict("workflow has no enabled nodes")
-                target_node_uuid = candidates[0]
+                target_node_uuid = graph_order[0]
             if target_node_uuid in material_sources:
                 ordered_sources = [target_node_uuid]
                 ordered = []
             elif target_node_uuid in active:
+                ordered_sources = []
                 ordered = [target_node_uuid]
             else:
                 raise StoreConflict("single_node target is not enabled")
