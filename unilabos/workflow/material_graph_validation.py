@@ -55,20 +55,32 @@ def validate_material_graph(
     # ``node_by_uuid`` 固定每条物料边的生产节点身份；已验证工作流输入/输出
     # （Workflow I/O）只提供合同和绑定，不触发任何外部存储读取。
     node_by_uuid = {_field(node, "uuid"): node for node in nodes}
-    _validate_workflow_input_linearity(validated_workflow_io)
+    # ``reachability`` 是候选 DAG 的传递可达关系；同一物料来源允许被多个严格
+    # 排序的动作复用，但任何一对可并发兄弟消费者仍然关闭失败。
+    reachability = _node_reachability(nodes=nodes, edges=edges)
+    _validate_workflow_input_linearity(
+        validated_workflow_io,
+        reachability=reachability,
+    )
     # ``outgoing_edges`` 按来源节点和来源连接点聚合全部提交边；禁用节点也不能把
     # 非法物料分叉藏进持久图，因此这里不按运行状态过滤。
-    outgoing_edges: dict[tuple[str, str], list[str]] = defaultdict(list)
+    outgoing_consumers: dict[tuple[str, str], list[str]] = defaultdict(list)
     for edge in edges:
         source_node_uuid = _field(edge, "source_node_uuid")
         source_handle_uuid = _field(edge, "source_handle_uuid")
         handle = handles.get(source_handle_uuid)
         if handle is None or not _is_resource_slot_handle(handle):
             continue
-        outgoing_edges[(source_node_uuid, source_handle_uuid)].append(
-            _field(edge, "uuid")
+        outgoing_consumers[(source_node_uuid, source_handle_uuid)].append(
+            _field(edge, "target_node_uuid")
         )
-    if any(len(edge_uuids) > 1 for edge_uuids in outgoing_edges.values()):
+    if any(
+        not _consumer_nodes_are_strictly_ordered(
+            consumer_nodes,
+            reachability=reachability,
+        )
+        for consumer_nodes in outgoing_consumers.values()
+    ):
         raise MaterialGraphValidationError(
             "material_flow_fan_out",
             "同一个物料占位符（ResourceSlot）输出不能连接多个物理消费者",
@@ -227,13 +239,16 @@ def _producer_schema(
 
 def _validate_workflow_input_linearity(
     validated_workflow_io: ValidatedWorkflowIO | None,
+    *,
+    reachability: Mapping[str, frozenset[str]],
 ) -> None:
     """把工作流输入物料绑定计入物理消费路径。
 
-    参数说明：``validated_workflow_io`` 是公共校验器产生的规范合同和节点绑定；
-    局部 ``schemas`` 按参数名索引输入 Schema，``consumers`` 收集每个物料输入的
-    节点/连接点消费身份。返回：无；同一物料输入绑定多个动作时抛出稳定物料流
-    分叉异常。缺失规范事实只用于旧内部调用兼容，不产生推测。
+    参数说明：``validated_workflow_io`` 是公共校验器产生的规范合同和节点绑定，
+    ``reachability`` 是候选 DAG 的传递可达关系；局部 ``schemas`` 按参数名索引
+    输入 Schema，``consumers`` 收集每个物料输入的节点消费身份。返回：无；同一
+    物料输入存在任意一对无严格先后关系的动作时抛出稳定物料流分叉异常。缺失
+    规范事实只用于旧内部调用兼容，不产生推测。
     """
 
     if validated_workflow_io is None:
@@ -242,17 +257,86 @@ def _validate_workflow_input_linearity(
         parameter["name"]: parameter["schema"]
         for parameter in validated_workflow_io.input_contract.to_dict()["parameters"]
     }
-    consumers: dict[str, list[tuple[str, str]]] = defaultdict(list)
+    consumers: dict[str, list[str]] = defaultdict(list)
     for node_uuid, bindings in validated_workflow_io.input_bindings.items():
-        for handle_uuid, binding in bindings.items():
+        for binding in bindings.values():
             parameter = binding["parameter"]
             if schema_contains_resource_slot(schemas[parameter]):
-                consumers[parameter].append((node_uuid, handle_uuid))
-    if any(len(paths) > 1 for paths in consumers.values()):
+                consumers[parameter].append(node_uuid)
+    if any(
+        not _consumer_nodes_are_strictly_ordered(
+            consumer_nodes,
+            reachability=reachability,
+        )
+        for consumer_nodes in consumers.values()
+    ):
         raise MaterialGraphValidationError(
             "material_flow_fan_out",
             "同一个工作流输入物料不能绑定多个物理消费者",
         )
+
+
+def _node_reachability(
+    *,
+    nodes: Sequence[Any],
+    edges: Sequence[Any],
+) -> dict[str, frozenset[str]]:
+    """计算候选 DAG 中每个工作流节点（WorkflowNode）的严格后继闭包。
+
+    参数说明：``nodes`` 和 ``edges`` 是同一候选五集合中的节点与有向边；局部
+    ``successors`` 保存直接后继，``pending`` 保存尚未展开的节点。返回：节点
+    UUID 到全部可达后继 UUID 的不可变集合；字段形状非法时由 ``_field`` 抛出
+    ``TypeError``，环由候选图的通用 DAG 校验负责拒绝，本函数不掩盖该诊断。
+    """
+
+    successors: dict[str, set[str]] = {
+        str(_field(node, "uuid")): set() for node in nodes
+    }
+    for edge in edges:
+        source_node_uuid = str(_field(edge, "source_node_uuid"))
+        target_node_uuid = str(_field(edge, "target_node_uuid"))
+        successors.setdefault(source_node_uuid, set()).add(target_node_uuid)
+        successors.setdefault(target_node_uuid, set())
+    reachability: dict[str, frozenset[str]] = {}
+    for node_uuid, direct_successors in successors.items():
+        visited: set[str] = set()
+        pending = list(direct_successors)
+        while pending:
+            successor_uuid = pending.pop()
+            if successor_uuid in visited:
+                continue
+            visited.add(successor_uuid)
+            pending.extend(successors.get(successor_uuid, ()))
+        reachability[node_uuid] = frozenset(visited)
+    return reachability
+
+
+def _consumer_nodes_are_strictly_ordered(
+    consumer_nodes: Sequence[str],
+    *,
+    reachability: Mapping[str, frozenset[str]],
+) -> bool:
+    """判断同一物料来源的所有消费者是否形成严格全序。
+
+    参数说明：``consumer_nodes`` 保留每条物料消费绑定的节点身份，
+    ``reachability`` 提供候选 DAG 的传递可达关系。返回：零或一个消费者时为真；
+    多个消费者仅在每一对节点恰有一个方向可达时为真。相同节点重复消费、无序
+    兄弟或环中的双向可达都返回假，继续由调用者报告 ``material_flow_fan_out``。
+    """
+
+    for index, left_node_uuid in enumerate(consumer_nodes):
+        for right_node_uuid in consumer_nodes[index + 1 :]:
+            left_before_right = right_node_uuid in reachability.get(
+                left_node_uuid,
+                frozenset(),
+            )
+            right_before_left = left_node_uuid in reachability.get(
+                right_node_uuid,
+                frozenset(),
+            )
+            if left_before_right == right_before_left:
+                return False
+    return True
 
 
 def _is_material_source_node(

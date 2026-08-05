@@ -5,12 +5,12 @@ import json
 import os
 import platform
 import shutil
-import signal
 import subprocess
 import sys
 import threading
 import time
 from typing import Any, Dict, List, Optional
+
 import networkx as nx
 import yaml
 
@@ -36,14 +36,15 @@ unilabos_dir = os.path.dirname(os.path.dirname(current_dir))
 if unilabos_dir not in sys.path:
     sys.path.append(unilabos_dir)
 
+from unilabos.app.process_shutdown import install_host_shutdown_handlers
 from unilabos.app.utils import cleanup_for_restart
-from unilabos.utils.banner_print import print_status, print_unilab_banner
 from unilabos.config.config import (
-    load_config,
     BasicConfig,
     EdgeControlConfig,
     HTTPConfig,
+    load_config,
 )
+from unilabos.utils.banner_print import print_status, print_unilab_banner
 
 # Global restart flags (used by ws_client and web/server)
 _restart_requested: bool = False
@@ -1647,15 +1648,10 @@ def main():
                 "info",
             )
 
-        if communication_clients:
-
-            def _exit(signum, frame):
-                for communication_client in communication_clients:
-                    communication_client.stop()
-                sys.exit(0)
-
-            signal.signal(signal.SIGINT, _exit)
-            signal.signal(signal.SIGTERM, _exit)
+        # Host 即使没有远端通信客户端也拥有 HostLink 和 ROS2 定向发现服务；正常
+        # TERM 必须显式关闭这些独立进程资源，不能只依赖不会由默认 TERM 运行的
+        # ``atexit``。
+        install_host_shutdown_handlers(communication_clients)
 
         # Host owns the embedded material DB even when workflow scheduling is
         # disabled.  Slaves never execute this branch and therefore never open
