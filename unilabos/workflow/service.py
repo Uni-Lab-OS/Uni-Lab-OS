@@ -1585,7 +1585,14 @@ class WorkflowService:
         root: Path,
         target: Path,
     ) -> Optional[Dict[str, Any]]:
-        """在不支持相对目录 FD 的平台读取一个 Draft。"""
+        """在不支持相对目录 FD 的平台按原始字节读取工作流源码 Draft。
+
+        ``root`` 是已授权的可编辑包根目录，``target`` 是其中已注册的工作流源码
+        （Workflow Source）路径。目标不存在时返回 ``None``；成功时返回源码、字节
+        大小、mtime 与基于原始 UTF-8 字节的 hash。路径越界、符号链接、非普通文件
+        或读取期间身份变化会抛出 ``WorkflowError``。Windows 必须显式请求二进制
+        模式，确保 Authoring GET 与 Draft PUT CAS 观察完全相同的 CRLF 字节。
+        """
 
         try:
             root_before = root.lstat()
@@ -1614,6 +1621,7 @@ class WorkflowService:
             descriptor = os.open(
                 target,
                 os.O_RDONLY
+                | getattr(os, "O_BINARY", 0)
                 | getattr(os, "O_CLOEXEC", 0)
                 | getattr(os, "O_NOFOLLOW", 0),
             )
