@@ -299,6 +299,63 @@ def test_szlab_action_resource_ref_freezes_uuid_and_preserves_authoring_id() -> 
     assert repeated.valid and repeated.graph == compiled.graph, repeated.diagnostics
 
 
+def test_action_resource_ref_accepts_projected_nested_material_schema() -> None:
+    """真实动作模板投影的嵌套物料 Schema 必须可用于资源引用解析。
+
+    参数：无。返回：无。断言：连接点（Handle）仍以 ``ResourceSlot`` 标识
+    物料占位符、值 Schema 使用嵌套 ``properties.uuid`` 和物料锁标记时，冻结
+    目录不会因只读容器深拷贝失败，也不要求遗留 ``$slot`` 字段；本测试不创建
+    工作流任务（WorkflowTask）或执行动作。
+    """
+
+    # ``source_template`` 与 ``source_handle`` 保持目录中的框架物料来源合同。
+    source_template, source_handle = _material_source_template()
+    # ``action_template`` 与 ``action_handles`` 模拟注册表投影产生的真实嵌套合同。
+    action_template, action_handles = _template(
+        PREPARE_TEMPLATE_UUID,
+        name="prepare",
+        handles=[
+            _handle(
+                PREPARE_SAMPLE_TARGET,
+                node_template_uuid=PREPARE_TEMPLATE_UUID,
+                key="sample",
+                io_type="target",
+                value_type="ResourceSlot",
+                required=True,
+            )
+        ],
+    )
+    action_handles[0]["meta_data"]["unilab"]["value_schema"] = {
+        "additionalProperties": False,
+        "properties": {"uuid": {"format": "uuid", "type": "string"}},
+        "required": ["uuid"],
+        "type": "object",
+        "x-unilabos-material-lock": True,
+    }
+    # ``catalog`` 递归冻结嵌套对象，覆盖 SZLab 启动时暴露的只读映射路径。
+    catalog = AuthoringCatalogSnapshot.from_entities(
+        [source_template, action_template],
+        [source_handle, *action_handles],
+        resource_template_symbols={PLATE_SOURCE_SYMBOL: PLATE_TEMPLATE_UUID},
+    )
+    # ``compiled`` 必须识别连接点的物料占位符语义并保留稳定实际 UUID。
+    compiled = WorkflowAuthoringEngine(
+        catalog=catalog,
+        resource_reference_resolver=_resolver(),
+    ).compile(
+        workflow_uuid=WORKFLOW_UUID,
+        workflow_revision=7,
+        python_source=_action_code(),
+        source_uri="package://szlab/workflows/projected_resource_ref.py",
+        applied_graph=_applied_graph(),
+    )
+
+    assert compiled.valid and compiled.graph is not None, compiled.diagnostics
+    assert compiled.graph["nodes"][0]["param"]["sample"] == {
+        "uuid": POWDER_WAREHOUSE_UUID
+    }
+
+
 @pytest.mark.parametrize(
     "resolver",
     [
