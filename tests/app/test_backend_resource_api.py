@@ -11,6 +11,8 @@ from unilabos.app.scheduler.inventory.backend_api import (
 from unilabos.app.scheduler.inventory.backend_contract import (
     BackendResourceService,
 )
+from unilabos.app.scheduler.inventory.domain import MaterialRequirement
+from unilabos.app.scheduler.inventory.service import InventoryService
 from unilabos.app.scheduler.inventory.store import InventoryStore
 
 
@@ -92,6 +94,56 @@ def test_material_routes_use_backend_envelope_and_soft_delete(tmp_path):
     assert store.query_one(
         "SELECT deleted_at FROM material WHERE uuid=?", (material_uuid,)
     )["deleted_at"] is not None
+    store.close()
+
+
+def test_created_material_is_immediately_reservable_by_stable_uuid(tmp_path):
+    """HTTP 创建的固定物料应立即进入同一库存权威的预留路径。
+
+    参数：``tmp_path`` 提供隔离的 ``inventory.db``。返回：无；断言
+    ``POST /api/v1/materials`` 返回的稳定物料 UUID 可由真实库存服务
+    （InventoryService）直接建立短期遗留库存预留（inventory_reservation），且
+    预留结果仍引用原工作流任务和节点身份；该兼容事实不是正式任务物料预留
+    （TaskMaterialReservation）。异常：模板同步、HTTP 创建或预留任一步失败都
+    应直接使测试失败，禁止退化为第二份物料身份映射。
+    """
+
+    client, store = _client(tmp_path)
+    # ``template_uuid`` 是 HTTP 创建具体物料时引用的资源模板（ResourceTemplate）
+    # 稳定身份。
+    template_uuid = _sync_template(client)
+    created = client.post(
+        "/api/v1/materials",
+        json={
+            "resource_template_uuid": template_uuid,
+            "barcode": "RESERVABLE-001",
+            "name": "Reservable material",
+        },
+    )
+    # ``material_uuid`` 是 HTTP 与短期预留兼容路径必须共享的稳定物料身份。
+    material_uuid = created.json()["data"]["uuid"]
+    # ``workflow_task_uuid`` 与 ``workflow_node_uuid`` 分别代表本次测试预留的
+    # 工作流任务（WorkflowTask）及其首个物理消费者节点身份。
+    workflow_task_uuid = "21000000-0000-4000-8000-000000000401"
+    workflow_node_uuid = "31000000-0000-4000-8000-000000000401"
+    inventory = InventoryService(store)
+
+    reserved = inventory.reserve_workflow(
+        workflow_task_uuid,
+        {
+            workflow_node_uuid: [
+                MaterialRequirement(instance_uuid=material_uuid),
+            ]
+        },
+    )
+
+    assert created.status_code == 201
+    assert created.json()["code"] == 0
+    assert reserved == {
+        "workflow_id": workflow_task_uuid,
+        "reserved_nodes": [workflow_node_uuid],
+    }
+    inventory.release_workflow(workflow_task_uuid, reason="test_cleanup")
     store.close()
 
 

@@ -23,6 +23,22 @@ MATERIAL_UUID = "50000000-0000-4000-8000-000000000001"
 DEVICE_UUID = "60000000-0000-4000-8000-000000000001"
 
 
+def _action_contract_schema() -> dict[str, Any]:
+    """构造工作流规格编译测试使用的完整动作合同（Action Contract）。
+
+    参数：无。返回：允许任意 Goal 参数的动作 Schema envelope；本夹具不声明
+    额外物料锁标记，短期物料需求仍由物料来源链产生。异常：无。
+    """
+
+    return {
+        "type": "object",
+        "properties": {
+            "goal": {"type": "object", "additionalProperties": True},
+        },
+        "required": ["goal"],
+    }
+
+
 def _compiler_contract() -> tuple[type[Any], type[BaseException]]:
     """取得待实现编译器及其稳定错误类型。
 
@@ -153,6 +169,10 @@ def _task_snapshot(
             "type": "ResourceSlot",
         },
     ]
+    # ``first_action_contract``/``second_action_contract`` 分别模拟真实模板投影中
+    # Goal 子模式和保留完整合同的双层表示。
+    first_action_contract = _action_contract_schema()
+    second_action_contract = _action_contract_schema()
     graph = {
         "nodes": snapshot_nodes,
         "edges": snapshot_edges,
@@ -164,12 +184,24 @@ def _task_snapshot(
             {
                 "uuid": "71000000-0000-4000-8000-000000000002",
                 "node_type": "ILab",
-                "schema": {"type": "object"},
+                "schema": first_action_contract["properties"]["goal"],
+                "meta_data": {
+                    "unilab": {
+                        "contract_kind": "typed",
+                        "action_contract_schema": first_action_contract,
+                    }
+                },
             },
             {
                 "uuid": "71000000-0000-4000-8000-000000000003",
                 "node_type": "ILab",
-                "schema": {"type": "object"},
+                "schema": second_action_contract["properties"]["goal"],
+                "meta_data": {
+                    "unilab": {
+                        "contract_kind": "typed",
+                        "action_contract_schema": second_action_contract,
+                    }
+                },
             },
         ],
         "handle_templates": handle_templates,

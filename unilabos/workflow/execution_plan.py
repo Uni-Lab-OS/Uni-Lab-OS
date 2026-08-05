@@ -136,14 +136,13 @@ class ExecutionPlanBuilder:
             }
             if kind == "device_action":
                 planned_node.update(self._device_action_contract(node))
-                # ``action_schema`` 是标准计划不可从实时注册表回退的冻结合同。
-                action_schema = template.get("schema")
-                if not isinstance(action_schema, Mapping):
-                    raise ExecutionPlanBuildError(
-                        "invalid_action_contract",
-                        f"设备动作模板缺少参数 Schema：{node_uuid}",
-                    )
-                planned_node["param_schema"] = deepcopy(dict(action_schema))
+                # ``action_contract`` 来自模板投影保留元数据，而 ``template.schema``
+                # 只承载 Backend 规范的 Goal 参数子模式。
+                action_contract = self._frozen_action_contract(
+                    template,
+                    node_uuid=node_uuid,
+                )
+                planned_node["param_schema"] = action_contract
             if node.get("material_uuid") is not None:
                 planned_node["material_uuid"] = node["material_uuid"]
             if node.get("script") is not None:
@@ -307,6 +306,41 @@ class ExecutionPlanBuilder:
             current, target_param_key = targets[0]
             if current in active and kinds[current] == "device_action":
                 return current, target_param_key
+
+    @staticmethod
+    def _frozen_action_contract(
+        template: Mapping[str, Any], *, node_uuid: str
+    ) -> dict[str, Any]:
+        """从节点模板保留元数据冻结完整动作合同（Action Contract）。
+
+        参数：``template`` 是应用图冻结的工作流节点模板，``node_uuid`` 是诊断
+        使用的动作节点身份。返回：与模板容器隔离的完整动作 Schema envelope。
+        异常：保留元数据、完整合同或 ``properties.goal`` 缺失/非对象时抛
+        ``ExecutionPlanBuildError``；禁止回退实时注册表或 Goal 子模式。
+        """
+
+        # ``metadata``/``unilab`` 定位模板投影保留的 Uni-Lab 执行合同边界。
+        metadata = template.get("meta_data")
+        unilab = metadata.get("unilab") if isinstance(metadata, Mapping) else None
+        # ``contract`` 是本工作流任务（WorkflowTask）唯一可冻结的完整动作合同。
+        contract = (
+            unilab.get("action_contract_schema")
+            if isinstance(unilab, Mapping)
+            else None
+        )
+        properties = (
+            contract.get("properties") if isinstance(contract, Mapping) else None
+        )
+        # ``goal_schema`` 只用于证明完整合同能被动作物料锁编译器安全消费。
+        goal_schema = (
+            properties.get("goal") if isinstance(properties, Mapping) else None
+        )
+        if not isinstance(goal_schema, Mapping):
+            raise ExecutionPlanBuildError(
+                "invalid_action_contract",
+                f"设备动作模板缺少完整动作合同：{node_uuid}",
+            )
+        return deepcopy(dict(contract))
 
     @staticmethod
     def _device_action_contract(node: Mapping[str, Any]) -> dict[str, Any]:
