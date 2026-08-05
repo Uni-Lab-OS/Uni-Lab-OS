@@ -239,9 +239,14 @@ def compose_local_workflow_template_runtime(
 
     参数说明：``working_dir`` 决定现有 ``workflow_history.db`` 路径；
     ``inventory_store`` 是同步并持有资源模板身份的 ``inventory.db`` 权威；
-    ``registry`` 是原始注册表（Registry）或不可变模板快照；``scheduler`` 是本地模式既有调度器；
+    ``registry`` 是原始注册表（Registry）或不可变注册表快照（Registry Snapshot）；
+    ``scheduler`` 是仅在本地调度模式装配的既有调度器（EdgeScheduler）；
     ``editable_package_roots`` 是本次进程唯一授权的工作流源码（Workflow
-    Source）目录 tuple。返回共享同一已发布目录代际的服务和投影。
+    Source）目录 tuple。返回：共享同一已发布目录代际的工作流服务
+    （WorkflowService）与模板投影（Template Projection）。异常：注册表快照构造、
+    本地模板身份同步或模板投影失败时统一抛出
+    ``RegistryTemplateProjectionError``，不发布工作流权威（Workflow Authority）；
+    若失败前已经创建模板投影，则先关闭其持有的工作流存储连接再传播异常。
     """
 
     global _template_projection

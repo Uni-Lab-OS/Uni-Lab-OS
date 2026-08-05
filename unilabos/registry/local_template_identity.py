@@ -22,6 +22,10 @@ from unilabos.workflow.source_identity import (
     canonical_python_source_identity,
 )
 
+# ``_ACTION_CONTRACT_PREFLIGHT_UUID`` 仅为无副作用动作合同（Action Contract）
+# 编译提供格式有效的占位 UUID，不是持久资源模板（ResourceTemplate）身份。
+_ACTION_CONTRACT_PREFLIGHT_UUID = "00000000-0000-4000-8000-000000000001"
+
 
 def synchronize_local_template_identities(
     *,
@@ -149,7 +153,7 @@ def _prevalidate_action_resource_template_aliases(
         """
 
         return (
-            "00000000-0000-4000-8000-000000000001"
+            _ACTION_CONTRACT_PREFLIGHT_UUID
             if source_alias in template_name_by_alias
             else ""
         )
