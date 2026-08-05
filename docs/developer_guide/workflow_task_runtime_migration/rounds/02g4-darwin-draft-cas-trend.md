@@ -34,7 +34,8 @@ Darwin 的 Python 运行时可以提供目录 FD 路径和 `fcntl` 模块，却�
 
 原始测试提交：`78ea5ba1`，以非 squash 提交 `7b00272` 带入本分支；同一测试作者
 修正 credentialed CORS 断言并补 missing Draft 基线控制的提交为 `42f89397`，以
-非 squash 提交 `595a304` 带入本分支。
+非 squash 提交 `595a304` 带入本分支。首次 reviewer finding 测试提交为
+`8f7aeb0e`，以非 squash 提交 `b9794fe` 带入本分支。
 
 RED 命令：
 
@@ -52,6 +53,10 @@ FastAPI `PUT /api/v1/workflows/{uuid}/authoring/draft` 证明：
 - 两条失败都错误调用了 Linux lease/signal 接缝；
 - 缺失 Draft 的 `expected_draft_hash=null` 仍可用 exclusive link 安全创建。
 
+首次 reviewer 进一步指出，原合同没有证明相同字节保存保持 inode，也没有覆盖首次
+读取后 Draft 被外部删除的竞争。finding 合同证明 inode 在 no-op 保存前后不变，并
+把删除竞争稳定复现为 `3 passed, 1 failed`：旧候选返回空 500 且无 CORS。
+
 ## 3. 实现结论
 
 平台选择现在检查完整 Linux 强 CAS 能力：Linux 平台、目录 FD、`fcntl` 的 lease
@@ -60,7 +65,8 @@ Linux 实现。
 
 `WorkflowService.save_draft()` 在请求字节已经等于当前 Draft hash 时不替换权威
 文件，但会再次读取、校验并编译，因而“接受并保存规范化源码”可以安全完成并返回
-自洽 Candidate。若读取窗口内发生外部变化，最终 hash 复核仍返回冲突。
+自洽 Candidate。若读取窗口内发生外部变化或源码被删除，最终复核显式返回冲突，
+不再由内部断言泄漏为空 500。
 
 缺失 Draft 继续使用同目录 exclusive link 作为可证明的原子创建；已有 Draft 需要
 替换而平台没有 Linux/Windows 强 CAS Adapter 时，返回带生产 CORS 和统一错误
@@ -84,7 +90,7 @@ envelope 的 `draft_hash_conflict`，并保留原始权威字节。该行为不�
 - `service.py` 是既有 3188 行工作流应用服务。本轮只在现有平台分派 seam 增加
   精确能力探测，并在现有保存流程增加同字节 no-op；没有把新的文件 CAS 算法继续
   内联到超大 Service。
-- 独立 Darwin HTTP 合同测试为 366 行，保持在 500 行预算内。
+- 独立 Darwin HTTP 合同测试为 453 行，保持在 500 行预算内。
 - 若后续实现 Darwin 原生强 CAS，应把原子交换、冲突恢复和 artifact 生命周期放入
   独立 `darwin_draft_cas.py` 深模块，`service.py` 只保留 Adapter 选择与领域错误映射；
   本轮不把事故修复与新的原生文件算法混为一次变更。
