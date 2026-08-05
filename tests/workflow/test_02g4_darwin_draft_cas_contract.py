@@ -228,15 +228,61 @@ def _save_draft(
     编辑开始时的创作聚合；返回原始 HTTP 响应供调用测试检查 envelope 与 CORS。
     """
 
+    # 该可空值是调用方观察到的 Draft CAS 令牌；缺失源码只能发送 null。
+    expected_draft_hash = (
+        observed["draft"]["draft_hash"] if observed["draft"] is not None else None
+    )
     return harness.client.put(
         f"/api/v1/workflows/{WORKFLOW_UUID}/authoring/draft",
         headers={"Origin": ORIGIN},
         json={
             "python_source": python_source,
-            "expected_draft_hash": observed["draft"]["draft_hash"],
+            "expected_draft_hash": expected_draft_hash,
             "expected_workflow_revision": observed["workflow_revision"],
         },
     )
+
+
+def test_darwin缺失源码的draft_put保持exclusive_create基线(
+    darwin_authoring: DarwinAuthoringHarness,
+) -> None:
+    """缺失工作流源码可用 exclusive link 创建，且不进入 Linux lease 接缝。
+
+    `darwin_authoring` 提供缺少强 CAS 原语的 Darwin HTTP 环境；测试没有返回值，
+    并证明调用方观察到 `draft=null` 后仍能安全创建源码、编译候选、保持工作流
+    修订不变，同时不触发 Linux file lease 或 signal cleanup。
+    """
+
+    darwin_authoring.source_path.unlink()
+    observed = _observed_authoring(darwin_authoring)
+    assert observed["draft"] is None
+
+    response = _save_draft(
+        darwin_authoring,
+        python_source=INITIAL_SOURCE,
+        observed=observed,
+    )
+
+    assert {
+        "status": response.status_code,
+        "cors": response.headers.get("access-control-allow-origin"),
+        "source_bytes": darwin_authoring.source_path.read_bytes(),
+        "compiler_sources": darwin_authoring.compiler.sources,
+        "linux_fcntl_call_count": len(darwin_authoring.fcntl_probe.calls),
+        "linux_signal_mask_call_count": len(darwin_authoring.signal_probe.mask_calls),
+    } == {
+        "status": 200,
+        "cors": ORIGIN,
+        "source_bytes": INITIAL_SOURCE.encode("utf-8"),
+        "compiler_sources": [INITIAL_SOURCE],
+        "linux_fcntl_call_count": 0,
+        "linux_signal_mask_call_count": 0,
+    }
+    payload = response.json()
+    assert payload["code"] == 0
+    assert payload["data"]["workflow_revision"] == observed["workflow_revision"]
+    assert payload["data"]["draft"]["python_source"] == INITIAL_SOURCE
+    assert payload["data"]["candidate"] is not None
 
 
 def test_darwin相同源码的draft_put无需替换即可成功核对并编译(
@@ -265,7 +311,7 @@ def test_darwin相同源码的draft_put无需替换即可成功核对并编译(
         "linux_signal_mask_call_count": len(darwin_authoring.signal_probe.mask_calls),
     } == {
         "status": 200,
-        "cors": "*",
+        "cors": ORIGIN,
         "source_bytes": INITIAL_SOURCE.encode("utf-8"),
         "compiler_sources": [INITIAL_SOURCE],
         "linux_fcntl_call_count": 0,
@@ -305,7 +351,7 @@ def test_darwin不同源码的draft_put受控冲突且保留包内权威字节(
         "linux_signal_mask_call_count": len(darwin_authoring.signal_probe.mask_calls),
     } == {
         "status": 409,
-        "cors": "*",
+        "cors": ORIGIN,
         "source_bytes": INITIAL_SOURCE.encode("utf-8"),
         "compiler_sources": [],
         "linux_fcntl_call_count": 0,
