@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-from collections import Counter
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
 from typing import Any
@@ -145,11 +144,7 @@ def _bind_active_plan(
         key="workflow_node_uuid",
         label="计划作业节点",
     )
-    incoming = Counter(
-        str(edge.get("target_handle_uuid") or "")
-        for edge in _object_list(plan.get("edges"), label="计划边")
-        if edge.get("dependency_only") is not True
-    )
+    incoming = _incoming_edges(_object_list(plan.get("edges"), label="计划边"))
     for handle_uuid, handle in plan_handles.items():
         if handle.get("io_type") != "target":
             continue
@@ -177,9 +172,22 @@ def _bind_active_plan(
         job_param = job.get("param")
         if not isinstance(node_param, dict) or not isinstance(job_param, dict):
             raise TaskInputError("计划节点或作业参数不是对象")
+        incoming_edges = incoming.get(handle_uuid, [])
         static_provider = data_key in node_param and node_param[data_key] is not None
+        # 固定 existing 物料来源（MaterialSource）在计划构建时把同一条物料边
+        # 解析出的具体引用预投影到动作参数；它与该边是一个提供者，不能重复计数。
+        if static_provider and any(
+            _is_prebound_material_edge(
+                edge=edge,
+                plan_nodes=plan_nodes,
+                target_data_key=data_key,
+                target_param=node_param,
+            )
+            for edge in incoming_edges
+        ):
+            static_provider = False
         provider_count = (
-            int(static_provider) + incoming[handle_uuid] + int(binding is not None)
+            int(static_provider) + len(incoming_edges) + int(binding is not None)
         )
         if provider_count > 1:
             raise TaskInputError("计划目标输入存在多个提供者")
@@ -192,6 +200,56 @@ def _bind_active_plan(
             raise TaskInputError("计划输入绑定引用未解析参数")
         node_param[data_key] = clone_json(resolved_input[parameter])
         job_param[data_key] = clone_json(resolved_input[parameter])
+
+
+def _incoming_edges(
+    edges: Sequence[Mapping[str, Any]],
+) -> dict[str, list[Mapping[str, Any]]]:
+    """按目标运行连接点索引提供值的计划边。
+
+    参数：``edges`` 是已验证为对象的冻结计划边。返回：排除纯依赖边后按目标
+    连接点 UUID 分组的边列表。异常：本函数不抛异常；缺失目标身份的边保留在
+    空字符串组，并由后续必填提供者校验失败关闭。
+    """
+
+    result: dict[str, list[Mapping[str, Any]]] = {}
+    for edge in edges:
+        if edge.get("dependency_only") is True:
+            continue
+        result.setdefault(str(edge.get("target_handle_uuid") or ""), []).append(edge)
+    return result
+
+
+def _is_prebound_material_edge(
+    *,
+    edge: Mapping[str, Any],
+    plan_nodes: Mapping[str, Mapping[str, Any]],
+    target_data_key: str,
+    target_param: Mapping[str, Any],
+) -> bool:
+    """识别已由同一物料边预投影的固定物料引用。
+
+    参数：``edge`` 是目标输入的计划边，``plan_nodes`` 是活动计划节点索引，
+    ``target_data_key``/``target_param`` 定位动作参数。返回：来源确为固定
+    existing 物料来源（MaterialSource），且动作参数等于该来源 UUID 引用时为真。
+    异常：不抛异常；任何形状或语义不匹配都返回假并继续按独立静态提供者计数。
+    """
+
+    if (
+        edge.get("source_type") != "ResourceSlot"
+        or edge.get("target_type") != "ResourceSlot"
+    ):
+        return False
+    source = plan_nodes.get(str(edge.get("source_node_uuid") or ""))
+    if source is None or source.get("kind") != "material_source":
+        return False
+    source_param = source.get("param")
+    if not isinstance(source_param, Mapping) or source_param.get("mode") != "existing":
+        return False
+    material_uuid = source_param.get("material_uuid")
+    return isinstance(material_uuid, str) and target_param.get(target_data_key) == {
+        "uuid": material_uuid
+    }
 
 
 def _indexed_objects(

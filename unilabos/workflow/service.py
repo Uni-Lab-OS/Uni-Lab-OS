@@ -498,6 +498,23 @@ class WorkflowService:
         except ValueError:
             raise WorkflowError("invalid_input") from None
         description = self._optional_text(description)
+
+        def plan_builder(graph: Dict[str, Any]) -> PreparedTaskInput:
+            """在创建事务内冻结本次工作流任务（WorkflowTask）输入和计划。
+
+            参数：``graph`` 是同一事务读取的已应用工作流图。返回：规范输入、
+            工作流快照、执行计划（ExecutionPlan）和首次工作流节点作业
+            （WorkflowNodeJob）的不可变创建载荷。异常：计划构建或输入绑定失败
+            时保留原始领域错误，使外层映射为稳定公共错误且事务零写入。
+            """
+
+            return self._prepare_task_input(
+                graph,
+                input_value=input_value,
+                run_mode=run_mode,
+                target_node_uuid=target_node_uuid,
+            )
+
         try:
             task = self._store.create_task_with_jobs(
                 workflow_uuid=workflow_uuid,
@@ -506,12 +523,7 @@ class WorkflowService:
                 target_node_uuid=target_node_uuid,
                 description=description,
                 meta_data=meta_data,
-                plan_builder=lambda graph: self._prepare_task_input(
-                    graph,
-                    input_value=input_value,
-                    run_mode=run_mode,
-                    target_node_uuid=target_node_uuid,
-                ),
+                plan_builder=plan_builder,
             )
             if self._task_scheduler_bridge is None:
                 return task
