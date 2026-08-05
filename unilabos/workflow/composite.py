@@ -21,6 +21,12 @@ from unilabos.workflow.workflow_io import (
     WorkflowIOValidationError,
     validate_workflow_graph_io,
 )
+from unilabos.workflow.composite_expansion import (
+    CompositeAuthoring,
+    CompositeExpansion,
+    PublishedWorkflowResolver,
+    PublishedWorkflowSnapshotProvider,
+)
 
 _SHA256 = re.compile(r"sha256:[0-9a-f]{64}\Z")
 
@@ -411,6 +417,10 @@ def _plain(value: Any) -> Any:
 
 
 __all__ = [
+    "CompositeAuthoring",
+    "CompositeExpansion",
+    "PublishedWorkflowResolver",
+    "PublishedWorkflowSnapshotProvider",
     "PublishedWorkflowContract",
     "PublishedWorkflowContractError",
     "project_published_workflow_contract",
