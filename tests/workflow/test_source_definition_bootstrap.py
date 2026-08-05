@@ -308,3 +308,109 @@ def test_before_commit_failure_rolls_back_definition_source_and_authoring(
         )
 
     _assert_absent(workflow_store, WORKFLOW_A_UUID)
+
+
+def test_legacy_registration_cannot_create_missing_workflow_definition(
+    workflow_store: WorkflowStore,
+) -> None:
+    """旧兼容注册入口不得把合法清单行升级为缺失工作流定义。
+
+    参数：``workflow_store`` 是真实 SQLite 工作流权威（Workflow Authority）。
+    返回：无；测试证明只有显式发现安装入口能够创建缺失工作流（Workflow）骨架，
+    旧 ``register_sources`` 必须关闭式失败（Fail-closed）且零写入。
+    """
+
+    # ``registration`` 具有完整、规范的清单身份，但其工作流定义尚不存在。
+    registration = _registration()
+
+    with pytest.raises(StoreConflict):
+        workflow_store.register_sources((registration,))
+
+    _assert_absent(workflow_store, WORKFLOW_A_UUID)
+
+
+@pytest.mark.parametrize(
+    ("invalid_field", "invalid_value"),
+    (
+        ("workflow_uuid", "not-a-uuid"),
+        ("package_root", "relative/package"),
+        ("relative_path", "../outside.py"),
+    ),
+    ids=("invalid-workflow-uuid", "relative-package-root", "escaping-source-path"),
+)
+def test_legacy_registration_rejects_untrusted_identity_fields_without_writes(
+    workflow_store: WorkflowStore,
+    invalid_field: str,
+    invalid_value: str,
+) -> None:
+    """旧兼容入口必须完整验证 UUID、绝对包根与受限源码路径。
+
+    参数：``workflow_store`` 是真实工作流权威（Workflow Authority）；
+    ``invalid_field`` 和 ``invalid_value`` 指定一项不可信注册字段。返回：无；测试
+    证明活动定义路径也不能绕过验证，失败后定义、来源和工作流创作（Authoring）
+    事实保持调用前状态。
+    """
+
+    # ``registration`` 先形成完整行，再替换一项不可信字段并同步来源 URI。
+    registration = _registration()
+    registration[invalid_field] = invalid_value
+    registration["source_uri"] = (
+        f"package://{registration['package_id']}/{registration['relative_path']}"
+    )
+    if invalid_field == "workflow_uuid":
+        # 非 UUID 没有可复用定义，旧入口也不得把它创建成数据库主键。
+        expected_workflow_count = 0
+        existing_workflow = None
+    else:
+        workflow_store.create_workflow(
+            workflow_uuid=WORKFLOW_A_UUID,
+            name="已有活动定义",
+            tags=["人工维护"],
+            description="不得被兼容注册修改",
+            meta_data={"owner": "operator"},
+        )
+        expected_workflow_count = 1
+        # ``existing_workflow`` 是失败前必须逐字段保持的活动工作流（Workflow）事实。
+        existing_workflow = workflow_store.get_workflow(WORKFLOW_A_UUID)
+
+    with pytest.raises(StoreConflict):
+        workflow_store.register_sources((registration,))
+
+    assert workflow_store.list_workflows(page=1, page_size=100)["total"] == (
+        expected_workflow_count
+    )
+    assert workflow_store.list_source_registrations() == []
+    assert (
+        workflow_store.get_authoring_record(registration["workflow_uuid"])[
+            "update_time"
+        ]
+        is None
+    )
+    if existing_workflow is not None:
+        assert workflow_store.get_workflow(WORKFLOW_A_UUID) == existing_workflow
+
+
+def test_legacy_registration_still_supports_existing_active_workflow(
+    workflow_store: WorkflowStore,
+) -> None:
+    """旧兼容入口可为已存在活动工作流定义注册规范来源。
+
+    参数：``workflow_store`` 是真实 SQLite 工作流权威（Workflow Authority）。
+    返回：无；测试冻结兼容范围只包括活动工作流（Workflow），且不修改定义字段。
+    """
+
+    workflow_store.create_workflow(
+        workflow_uuid=WORKFLOW_A_UUID,
+        name="已有活动定义",
+        tags=["人工维护"],
+        description="兼容注册保留",
+        meta_data={"owner": "operator"},
+    )
+    # ``before`` 是兼容注册前的活动工作流（Workflow）权威事实。
+    before = workflow_store.get_workflow(WORKFLOW_A_UUID)
+
+    registered = workflow_store.register_sources((_registration(),))
+
+    assert registered == [workflow_store.get_source_registration(WORKFLOW_A_UUID)]
+    assert workflow_store.get_workflow(WORKFLOW_A_UUID) == before
+    assert workflow_store.get_authoring_record(WORKFLOW_A_UUID)["update_time"]
