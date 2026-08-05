@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import errno
+import os
 from collections.abc import Iterator
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -295,6 +296,88 @@ def test_darwin相同源码的draft_put无需替换即可成功核对并编译(
     """
 
     observed = _observed_authoring(darwin_authoring)
+    source_stat_before = darwin_authoring.source_path.stat()
+    # 该二元组是 PUT 前可编辑包内权威工作流源码的文件系统身份。
+    source_identity_before = (source_stat_before.st_dev, source_stat_before.st_ino)
+
+    response = _save_draft(
+        darwin_authoring,
+        python_source=INITIAL_SOURCE,
+        observed=observed,
+    )
+    source_stat_after = darwin_authoring.source_path.stat()
+    # no-op 保存不得用相同字节的新 inode 替换权威工作流源码。
+    source_identity_after = (source_stat_after.st_dev, source_stat_after.st_ino)
+
+    assert {
+        "status": response.status_code,
+        "cors": response.headers.get("access-control-allow-origin"),
+        "source_bytes": darwin_authoring.source_path.read_bytes(),
+        "source_identity": source_identity_after,
+        "compiler_sources": darwin_authoring.compiler.sources,
+        "linux_fcntl_call_count": len(darwin_authoring.fcntl_probe.calls),
+        "linux_signal_mask_call_count": len(darwin_authoring.signal_probe.mask_calls),
+    } == {
+        "status": 200,
+        "cors": ORIGIN,
+        "source_bytes": INITIAL_SOURCE.encode("utf-8"),
+        "source_identity": source_identity_before,
+        "compiler_sources": [INITIAL_SOURCE],
+        "linux_fcntl_call_count": 0,
+        "linux_signal_mask_call_count": 0,
+    }
+    payload = response.json()
+    assert payload["code"] == 0
+    assert payload["data"]["workflow_revision"] == observed["workflow_revision"]
+    assert payload["data"]["draft"]["draft_hash"] == observed["draft"]["draft_hash"]
+    assert payload["data"]["candidate"] is not None
+
+
+def test_darwin相同源码首次读取后被外部删除时返回受控冲突(
+    darwin_authoring: DarwinAuthoringHarness,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """no-op PUT 最终重读前源码被删除时必须返回 409 并保持 missing。
+
+    `darwin_authoring` 提供真实 HTTP 路由与可编辑包，`monkeypatch` 仅包裹真实
+    `os.read` 外围接缝，在首次源码 FD 读到 EOF 后删除 canonical。测试没有返回值，
+    并证明失败使用既有 `draft_hash_conflict` envelope 与 credentialed CORS，未调用
+    编译器或 Linux lease/signal，也不会重建已被外部删除的工作流源码。
+    """
+
+    observed = _observed_authoring(darwin_authoring)
+    source_stat = darwin_authoring.source_path.stat()
+    # 该身份只允许 hook 响应权威源码 FD，不能影响数据库或 HTTP 的其他读取。
+    source_identity = (source_stat.st_dev, source_stat.st_ino)
+    original_read = os.read
+    external_delete_triggered = False
+
+    def read_then_delete_canonical(descriptor: int, size: int) -> bytes:
+        """转发一次真实 FD 读取，并在权威源码首次读完后模拟外部删除。
+
+        `descriptor` 是 production 正在读取的 FD，`size` 是真实读取上限；返回原始
+        `os.read` 字节。只有 FD 身份匹配且本次返回 EOF 时删除一次 canonical，
+        其他文件读取完全透传；删除失败按原始文件系统异常暴露给测试。
+        """
+
+        nonlocal external_delete_triggered
+        chunk = original_read(descriptor, size)
+        descriptor_stat = os.fstat(descriptor)
+        descriptor_identity = (descriptor_stat.st_dev, descriptor_stat.st_ino)
+        if (
+            not external_delete_triggered
+            and descriptor_identity == source_identity
+            and chunk == b""
+        ):
+            darwin_authoring.source_path.unlink()
+            external_delete_triggered = True
+        return chunk
+
+    monkeypatch.setattr(
+        workflow_service_module.os,
+        "read",
+        read_then_delete_canonical,
+    )
 
     response = _save_draft(
         darwin_authoring,
@@ -305,23 +388,27 @@ def test_darwin相同源码的draft_put无需替换即可成功核对并编译(
     assert {
         "status": response.status_code,
         "cors": response.headers.get("access-control-allow-origin"),
-        "source_bytes": darwin_authoring.source_path.read_bytes(),
+        "external_delete_triggered": external_delete_triggered,
+        "source_exists": darwin_authoring.source_path.exists(),
         "compiler_sources": darwin_authoring.compiler.sources,
         "linux_fcntl_call_count": len(darwin_authoring.fcntl_probe.calls),
         "linux_signal_mask_call_count": len(darwin_authoring.signal_probe.mask_calls),
     } == {
-        "status": 200,
+        "status": 409,
         "cors": ORIGIN,
-        "source_bytes": INITIAL_SOURCE.encode("utf-8"),
-        "compiler_sources": [INITIAL_SOURCE],
+        "external_delete_triggered": True,
+        "source_exists": False,
+        "compiler_sources": [],
         "linux_fcntl_call_count": 0,
         "linux_signal_mask_call_count": 0,
     }
-    payload = response.json()
-    assert payload["code"] == 0
-    assert payload["data"]["workflow_revision"] == observed["workflow_revision"]
-    assert payload["data"]["draft"]["draft_hash"] == observed["draft"]["draft_hash"]
-    assert payload["data"]["candidate"] is not None
+    assert response.json() == {
+        "code": 409,
+        "error": {
+            "code": "draft_hash_conflict",
+            "message": "草稿已被其他程序修改，请查看差异后再保存",
+        },
+    }
 
 
 def test_darwin不同源码的draft_put受控冲突且保留包内权威字节(
