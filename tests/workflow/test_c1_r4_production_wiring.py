@@ -42,17 +42,25 @@ def prepare_sample():
 
 
 def _write_package(selected_root: Path) -> None:
-    """写入一项显式授权的可编辑包（Editable Package）声明与源码。"""
+    """写入子/父工作流显式授权的可编辑包（Editable Package）。
+
+    参数：``selected_root`` 是测试独占包根。返回：无；在包根写入两项源码和
+    一份声明。异常：目录创建或写文件失败时原样抛出 ``OSError``。
+    """
 
     source_path = selected_root / PACKAGE_ID / "workflows" / "child.py"
     source_path.parent.mkdir(parents=True)
     source_path.write_text(_child_source(), encoding="utf-8")
+    parent_path = selected_root / PACKAGE_ID / "workflows" / "parent.py"
+    parent_path.write_text(_parent_source(), encoding="utf-8")
     selected_root.joinpath("package.yaml").write_text(
         "package:\n"
         f"  name: {PACKAGE_ID}\n"
         "workflows:\n"
         f"  - workflow_uuid: {CHILD_WORKFLOW_UUID}\n"
-        f"    source: {PACKAGE_ID}/workflows/child.py\n",
+        f"    source: {PACKAGE_ID}/workflows/child.py\n"
+        f"  - workflow_uuid: {PARENT_WORKFLOW_UUID}\n"
+        f"    source: {PACKAGE_ID}/workflows/parent.py\n",
         encoding="utf-8",
     )
 
@@ -245,6 +253,61 @@ def test_product_composition_publishes_and_restores_workflow_templates(
         )
         assert restored.template["uuid"] == first_template_uuid
         assert restarted.compiler is not None
+    finally:
+        reset_workflow_service_for_test()
+        inventory_store.close()
+
+
+def test_composite_task_persists_only_parent_workflow_authority(
+    tmp_path: Path,
+) -> None:
+    """组合调用只建立父工作流任务（WorkflowTask）写权威。
+
+    参数：``tmp_path`` 隔离源码包、工作流数据库与库存数据库。返回：无；断言
+    应用含组合调用的父图后只持久化一个归属父工作流的任务，不为子工作流另建
+    任务。异常：产品组合、应用、计划或持久化失败时由 pytest 直接报告。
+    """
+
+    reset_workflow_service_for_test()
+    selected_root = tmp_path / "editable"
+    selected_root.mkdir()
+    _write_package(selected_root)
+    _seed_applied_child(tmp_path, selected_root)
+    inventory_store = InventoryStore(str(tmp_path / "inventory.db"))
+    try:
+        service, _projection = compose_local_workflow_template_runtime(
+            tmp_path,
+            inventory_store=inventory_store,
+            registry=_Registry(),
+            editable_package_roots=(selected_root,),
+        )
+        parent_authoring = service.get_authoring(PARENT_WORKFLOW_UUID)
+        candidate = parent_authoring["candidate"]
+        assert candidate is not None, parent_authoring["draft"]["diagnostics"]
+        service.apply_authoring(
+            PARENT_WORKFLOW_UUID,
+            candidate_hash=candidate["candidate_hash"],
+        )
+        parent_graph = service.get_graph(PARENT_WORKFLOW_UUID)
+        assert {node["uuid"] for node in parent_graph["nodes"]} == {
+            INVOCATION_UUID
+        }
+
+        task = service.create_workflow_task(
+            workflow_uuid=PARENT_WORKFLOW_UUID,
+            run_mode="normal",
+            target_node_uuid=None,
+            input_value={},
+            description=None,
+            meta_data={},
+        )
+
+        page = service.list_workflow_tasks(page=1, page_size=20)
+        assert page["total"] == 1
+        assert [item["uuid"] for item in page["items"]] == [task["uuid"]]
+        assert page["items"][0]["workflow_uuid"] == PARENT_WORKFLOW_UUID
+        assert page["items"][0]["workflow_uuid"] != CHILD_WORKFLOW_UUID
+        assert service.list_workflow_node_jobs(task["uuid"]) == []
     finally:
         reset_workflow_service_for_test()
         inventory_store.close()
