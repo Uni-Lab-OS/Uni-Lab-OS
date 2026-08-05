@@ -1,0 +1,29 @@
+Round 02G3 Windows CRLF Draft read/CAS gate
+
+Candidate SHA: 4f469dfccb2edba92daaef4b61e061f5771f1fa9
+Baseline: 33e79963
+Test author: /root/windows_crlf_test_author
+Independent RED: 0af98261; carried as 463d901c
+Reviewer finding test follow-up: 0f53c19f; carried as 9508fcc8
+Reviewer: /root/windows_crlf_reviewer (regression/security)
+
+RED command:
+PYTEST_DISABLE_PLUGIN_AUTOLOAD=1 /home/changjunhan/.micromamba/envs/unilab/bin/python -m pytest tests/workflow/test_02g2_windows_draft_cas_contract.py::test_windows_crlf_draft_read_uses_binary_mode_and_hash_saves -q
+Result before production fix: 1 failed (missing O_BINARY flag), reproduced twice.
+
+Focused final gate:
+- Windows CRLF/CAS + persistent authoring + Windows file boundaries: 80 passed, 3 skipped, 1 warning
+- compileall: passed
+- ruff check --select E,F,I: passed
+- ruff format --check: passed
+- git diff --check: passed
+
+Complete final gate:
+/home/changjunhan/.micromamba/envs/unilab/bin/python -m pytest tests/ -q
+Result: 2602 passed, 7 skipped, 68 warnings.
+
+Review disposition:
+- Initial review at 615159ff: 1 blocking finding (fixture stripped native Windows O_BINARY), 1 non-blocking docstring accuracy finding.
+- Test-author follow-up 9508fcc8 preserves native Windows O_BINARY and uses a synthetic flag only where unavailable.
+- 4f469dfc corrects the docstring.
+- Final review at 4f469dfc: 0 blocking findings; no non-blocking findings.
