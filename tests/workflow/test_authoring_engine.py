@@ -314,6 +314,95 @@ def test_compile_builds_backend_shaped_candidate(
     assert result.graph["edges"][0]["target_handle_uuid"] == ANALYZE_SAMPLE_TARGET
 
 
+def test_compile_preserves_sequential_control_when_nodes_share_no_data() -> None:
+    """相邻动作没有数据绑定时仍应生成一条确定性的 ready 控制边。
+
+    参数：无。返回：无。断言：两个无数据参数的连续动作由前一动作的 source
+    ready 连接后一动作的 target ready，不把顺序语义静默并行化。
+    异常：候选图或连接点身份不符合合同（Contract）时测试失败。
+    安全：只编译内存源码，不执行设备动作或外部 I/O。
+    """
+
+    prepare, prepare_handles = _template(
+        PREPARE_TEMPLATE_UUID,
+        name="prepare",
+        handles=[
+            _handle(
+                PREPARE_READY_TARGET,
+                node_template_uuid=PREPARE_TEMPLATE_UUID,
+                key="ready",
+                io_type="target",
+                value_type="any",
+                data_source="dependency",
+            ),
+            _handle(
+                PREPARE_READY_SOURCE,
+                node_template_uuid=PREPARE_TEMPLATE_UUID,
+                key="ready",
+                io_type="source",
+                value_type="any",
+                data_source="dependency",
+            ),
+        ],
+    )
+    analyze, analyze_handles = _template(
+        ANALYZE_TEMPLATE_UUID,
+        name="analyze",
+        handles=[
+            _handle(
+                ANALYZE_READY_TARGET,
+                node_template_uuid=ANALYZE_TEMPLATE_UUID,
+                key="ready",
+                io_type="target",
+                value_type="any",
+                data_source="dependency",
+            ),
+            _handle(
+                ANALYZE_READY_SOURCE,
+                node_template_uuid=ANALYZE_TEMPLATE_UUID,
+                key="ready",
+                io_type="source",
+                value_type="any",
+                data_source="dependency",
+            ),
+        ],
+    )
+    engine = WorkflowAuthoringEngine(
+        catalog=AuthoringCatalogSnapshot.from_entities(
+            [prepare, analyze],
+            [*prepare_handles, *analyze_handles],
+        )
+    )
+    source = f'''from lab.devices import Reactor
+from unilabos.workflow.authoring import device, workflow, workflow_output
+
+
+reactor: Reactor = device()
+
+
+@workflow(workflow_uuid="{WORKFLOW_UUID}", displayname="Sequential controls")
+def sequential_controls():
+    # unilab:node_uuid={PREPARE_NODE_UUID}
+    prepared = reactor.prepare()
+    # unilab:node_uuid={ANALYZE_NODE_UUID}
+    analyzed = reactor.analyze()
+    return workflow_output()
+'''
+
+    result = _compile(
+        engine,
+        source,
+    )
+
+    assert result.valid and result.graph is not None, result.diagnostics
+    assert len(result.graph["edges"]) == 1
+    edge = result.graph["edges"][0]
+    assert edge["source_node_uuid"] == PREPARE_NODE_UUID
+    assert edge["source_handle_uuid"] == PREPARE_READY_SOURCE
+    assert edge["target_node_uuid"] == ANALYZE_NODE_UUID
+    assert edge["target_handle_uuid"] == ANALYZE_READY_TARGET
+
+
 def test_unannotated_node_inherits_action_template_metadata(
     authoring_engine: WorkflowAuthoringEngine,
 ) -> None:

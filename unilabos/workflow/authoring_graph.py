@@ -130,6 +130,34 @@ def build_candidate_graph(
                 )
             )
 
+    # ``incoming_data_nodes`` 冻结显式节点输出绑定；只有完全没有数据入边的后继
+    # 动作才需要兼容旧创作语义的 ready 控制边，避免把同一依赖重复表达两次。
+    incoming_data_nodes = {str(edge["target_node_uuid"]) for edge in edges}
+    for previous, current in zip(program.actions, program.actions[1:], strict=False):
+        if current.node_uuid in incoming_data_nodes:
+            continue
+        previous_ready = _optional_handle(
+            action_catalog[previous.node_uuid],
+            key="ready",
+            io_type="source",
+        )
+        current_ready = _optional_handle(
+            action_catalog[current.node_uuid],
+            key="ready",
+            io_type="target",
+        )
+        if previous_ready is None or current_ready is None:
+            continue
+        edges.append(
+            _candidate_edge(
+                workflow_uuid=program.workflow_uuid,
+                source_node_uuid=previous.node_uuid,
+                source_handle_uuid=str(previous_ready["uuid"]),
+                target_node_uuid=current.node_uuid,
+                target_handle_uuid=str(current_ready["uuid"]),
+            )
+        )
+
     workflow = deepcopy(applied["workflow"])
     workflow["uuid"] = program.workflow_uuid
     workflow["name"] = program.display_name
@@ -370,6 +398,34 @@ def _require_handle(
         raise AuthoringGraphError(
             "template_catalog_mismatch",
             f"动作连接点 {io_type}:{key} 缺失或不唯一",
+        )
+    return matches[0]
+
+
+def _optional_handle(
+    action: AuthoringCatalogAction,
+    *,
+    key: str,
+    io_type: str,
+) -> Mapping[str, Any] | None:
+    """取得可选且唯一的结构连接点（Handle）。
+
+    参数：``action`` 是目录动作，``key`` 与 ``io_type`` 标识连接点业务端点。
+    返回：端点不存在时为 ``None``，唯一时返回不可变投影。异常：同一端点重复时
+    抛 ``AuthoringGraphError``，禁止生成歧义控制边。安全：只读目录快照。
+    """
+
+    matches = [
+        handle
+        for handle in action.handles
+        if handle.get("handle_key") == key and handle.get("io_type") == io_type
+    ]
+    if not matches:
+        return None
+    if len(matches) != 1:
+        raise AuthoringGraphError(
+            "template_catalog_mismatch",
+            f"动作连接点 {io_type}:{key} 不唯一",
         )
     return matches[0]
 
