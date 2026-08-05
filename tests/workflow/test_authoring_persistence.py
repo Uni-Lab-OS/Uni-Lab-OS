@@ -52,7 +52,12 @@ def authoring_service(tmp_path: Path) -> tuple[WorkflowService, Path]:
 def test_draft_candidate_apply_is_atomic_and_backend_shaped(
     authoring_service: tuple[WorkflowService, Path],
 ) -> None:
-    """草稿应产生候选，应用应原子更新图、修订和规范源码。"""
+    """单一候选哈希应原子更新图、修订和规范源码。
+
+    参数：``authoring_service`` 提供真实 SQLite 与源码工作区（Source
+    Workspace）。返回：无；断言候选版本（Candidate）只凭哈希即可应用且不会
+    留下候选。异常：任一图、修订或源码事实未共同提交时测试失败。
+    """
 
     service, source_path = authoring_service
     draft = service.save_draft(
@@ -62,6 +67,7 @@ def test_draft_candidate_apply_is_atomic_and_backend_shaped(
         expected_workflow_revision=1,
     )
 
+    # ``candidate`` 是服务端持久并签发的候选版本（Candidate）。
     candidate = draft["candidate"]
     assert candidate is not None
     assert candidate["candidate_hash"].startswith("sha256:")
@@ -89,7 +95,12 @@ def test_draft_candidate_apply_is_atomic_and_backend_shaped(
 def test_stale_candidate_fails_without_partial_graph_or_source_writeback(
     authoring_service: tuple[WorkflowService, Path],
 ) -> None:
-    """候选哈希冲突必须保持已应用图和作者草稿不变。"""
+    """候选哈希冲突必须保持已应用图和作者草稿不变。
+
+    参数：``authoring_service`` 提供真实 SQLite 与源码工作区（Source
+    Workspace）。返回：无；断言伪造候选哈希（Candidate Hash）稳定失败。
+    异常：若冲突留下部分图或源码写回，测试失败。
+    """
 
     service, source_path = authoring_service
     service.save_draft(

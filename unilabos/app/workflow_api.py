@@ -207,13 +207,9 @@ class DraftWriteRequest(_StrictModel):
 
 
 class ApplyRequest(_StrictModel):
-    expected_draft_hash: HashToken
-    expected_workflow_revision: int = Field(
-        ge=1,
-        le=_INT64_MAX,
-        strict=True,
-    )
-    expected_candidate_hash: HashToken
+    """只携带服务端签发候选哈希（Candidate Hash）的应用命令。"""
+
+    candidate_hash: HashToken
 
 
 class _BackendJSONResponse(JSONResponse):
@@ -439,12 +435,17 @@ def create_workflow_router(service: WorkflowService) -> APIRouter:
         workflow_uuid: str,
         body: ApplyRequest,
     ) -> JSONResponse:
+        """应用服务端持久候选并返回后端形状响应。
+
+        参数：``workflow_uuid`` 是工作流（Workflow）身份；``body`` 只允许包含
+        候选哈希（Candidate Hash）。返回：统一后端响应外层。异常：请求字段或
+        领域前置条件错误由公共异常处理器转换成稳定业务错误。
+        """
+
         return _success(
             service.apply_authoring(
                 workflow_uuid,
-                expected_draft_hash=body.expected_draft_hash,
-                expected_workflow_revision=body.expected_workflow_revision,
-                expected_candidate_hash=body.expected_candidate_hash,
+                candidate_hash=body.candidate_hash,
             )
         )
 

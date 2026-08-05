@@ -1106,33 +1106,24 @@ class WorkflowService:
         self,
         workflow_uuid: str,
         *,
-        expected_draft_hash: str,
-        expected_workflow_revision: int,
-        expected_candidate_hash: str,
+        candidate_hash: str,
     ) -> Dict[str, Any]:
-        self._validate_hash(expected_draft_hash, nullable=False)
-        self._validate_hash(expected_candidate_hash, nullable=False)
+        """按服务端候选哈希线性化应用可信工作流创作结果。
+
+        参数：``workflow_uuid`` 是工作流（Workflow）稳定身份；``candidate_hash``
+        是服务端持久并签发的候选哈希（Candidate Hash），客户端不得重述草稿、
+        工作流修订或候选包。返回：应用结果与最新创作聚合。异常：候选、源码
+        权威（Source Authority）、工作流修订（Workflow Revision）或目录指纹已
+        变化时抛出稳定 ``WorkflowConflict``；候选无效时抛出 ``WorkflowError``。
+        """
+
+        self._validate_hash(candidate_hash, nullable=False)
         workflow_uuid = self._get_authoring_workflow(workflow_uuid)["uuid"]
         with self._authoring_lock(workflow_uuid):
             workflow = self._get_authoring_workflow(workflow_uuid)
             registration = self._registration(workflow_uuid)
-            source = self._read_source(registration)
-            actual_hash = source["draft_hash"] if source is not None else None
-
-            # D-079 固定了这里的冲突顺序。
-            if actual_hash != expected_draft_hash:
-                raise WorkflowConflict("draft_hash_conflict")
-            if workflow["revision"] != expected_workflow_revision:
-                raise WorkflowConflict("workflow_revision_conflict")
-
             record = self._store.get_authoring_record(workflow_uuid)
             candidate = record.get("candidate")
-            current_catalog = self._catalog_fingerprint()
-            if (
-                candidate is not None
-                and candidate["template_catalog_fingerprint"] != current_catalog
-            ):
-                raise WorkflowConflict("template_catalog_conflict")
             if candidate is None:
                 if any(
                     str(item.get("severity", "")).lower() == "error"
@@ -1140,10 +1131,34 @@ class WorkflowService:
                 ):
                     raise WorkflowError("draft_invalid")
                 raise WorkflowConflict("candidate_not_ready")
-            if candidate["candidate_hash"] != expected_candidate_hash:
+            if candidate.get("candidate_hash") != candidate_hash:
                 raise WorkflowConflict("candidate_hash_conflict")
+            try:
+                # 这些前置事实只从持久候选推导，客户端无法混搭不同世代。
+                expected_draft_hash = candidate["draft_hash"]
+                expected_workflow_revision = candidate["base_workflow_revision"]
+                expected_catalog_fingerprint = candidate["template_catalog_fingerprint"]
+            except (KeyError, TypeError):
+                raise WorkflowError("candidate_invalid") from None
+            self._validate_hash(expected_draft_hash, nullable=False)
+            if (
+                type(expected_workflow_revision) is not int
+                or expected_workflow_revision < 1
+            ):
+                raise WorkflowError("candidate_invalid")
+            self._validate_hash(expected_catalog_fingerprint, nullable=False)
+
+            source = self._read_source(registration)
             if source is None:
                 raise WorkflowConflict("draft_hash_conflict")
+            # D-079 的源码、修订、目录冲突顺序继续保持稳定。
+            actual_hash = source["draft_hash"]
+            if actual_hash != expected_draft_hash:
+                raise WorkflowConflict("draft_hash_conflict")
+            if workflow["revision"] != expected_workflow_revision:
+                raise WorkflowConflict("workflow_revision_conflict")
+            if self._catalog_fingerprint() != expected_catalog_fingerprint:
+                raise WorkflowConflict("template_catalog_conflict")
 
             applied_graph = self.get_graph(workflow_uuid)
             compilation = self._compile(
@@ -1175,26 +1190,32 @@ class WorkflowService:
                 raise WorkflowError("candidate_invalid")
             if (
                 revalidated["template_catalog_fingerprint"]
-                != candidate["template_catalog_fingerprint"]
+                != expected_catalog_fingerprint
             ):
                 raise WorkflowConflict("template_catalog_conflict")
-            if revalidated["candidate_hash"] != candidate["candidate_hash"]:
+            if revalidated["candidate_hash"] != candidate_hash:
                 raise WorkflowConflict("candidate_hash_conflict")
 
-            def validate_authorities() -> None:
+            def validate_authoring_authorities(
+                linearized_draft_hash: str,
+                linearized_catalog_fingerprint: str,
+            ) -> None:
+                """在写事务内复核源码与目录两项创作权威。
+
+                参数：``linearized_draft_hash`` 是存储从持久候选推导的草稿哈希。
+                ``linearized_catalog_fingerprint`` 是同一候选的目录指纹
+                （Catalog Fingerprint）。返回：无；源码或目录世代变化时抛出稳定
+                冲突，使同一 SQLite 事务回滚。该回调不接受客户端事实。
+                """
+
                 latest_source = self._read_source(registration)
                 if (
                     latest_source is None
-                    or latest_source["draft_hash"] != expected_draft_hash
+                    or latest_source["draft_hash"] != linearized_draft_hash
                 ):
                     raise WorkflowConflict("draft_hash_conflict")
-                if (
-                    self._catalog_fingerprint()
-                    != candidate["template_catalog_fingerprint"]
-                ):
+                if self._catalog_fingerprint() != linearized_catalog_fingerprint:
                     raise WorkflowConflict("template_catalog_conflict")
-
-            validate_authorities()
 
             normalized_source = candidate["normalized_python_source"]
             normalized_bytes = normalized_source.encode("utf-8")
@@ -1208,27 +1229,18 @@ class WorkflowService:
                     "template_catalog_fingerprint"
                 ],
             }
-            previous_revision = workflow["revision"]
+            # 在进入唯一写事务前最后复核目录权威（Catalog Authority）。
+            if self._catalog_fingerprint() != expected_catalog_fingerprint:
+                raise WorkflowConflict("template_catalog_conflict")
+            previous_revision = expected_workflow_revision
             try:
                 (
                     resulting_revision,
                     writeback_generation,
                 ) = self._store.apply_authoring_candidate(
                     workflow_uuid=workflow_uuid,
-                    expected_revision=previous_revision,
-                    expected_draft_hash=expected_draft_hash,
-                    expected_candidate_hash=expected_candidate_hash,
-                    expected_catalog_fingerprint=candidate[
-                        "template_catalog_fingerprint"
-                    ],
-                    candidate=candidate,
-                    applied_source=applied_source,
-                    event_data={
-                        "workflow_uuid": workflow_uuid,
-                        "cause": "applied",
-                        "draft_hash": normalized_hash,
-                        "candidate_hash": None,
-                    },
+                    candidate_hash=candidate_hash,
+                    authoring_authority_validator=validate_authoring_authorities,
                 )
             except StoreAuthoringConflict as error:
                 raise WorkflowConflict(error.code) from None

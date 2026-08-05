@@ -126,6 +126,56 @@ def test_apply_rejects_candidate_when_derived_revision_is_stale(
     assert service.get_graph(WORKFLOW_UUID)["nodes"] == []
 
 
+def test_apply_rechecks_catalog_authority_inside_write_transaction(
+    authoring_runtime: tuple[WorkflowService, Path, Path],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """目录指纹在事务线性化点变化时必须回滚候选应用。
+
+    参数：``authoring_runtime`` 提供真实源码和 SQLite；``monkeypatch`` 控制目录
+    权威（Catalog Authority）只在事务内复核时切换世代。返回：无；断言公共应用
+    返回 ``template_catalog_conflict``，且图和修订均未推进。异常：不接受事务外
+    预检成功后继续提交旧目录候选。
+    """
+
+    service, _source_path, _database_path = authoring_runtime
+    candidate = _save_candidate(service)
+    expected_fingerprint = candidate["template_catalog_fingerprint"]
+    changed_fingerprint = "sha256:" + "f" * 64
+    # ``authority_reads`` 只记录本次应用中目录权威的可观察读取次数。
+    authority_reads = 0
+
+    def catalog_fingerprint_at_linearization() -> str:
+        """在事务外两次预检后模拟目录权威世代变化。
+
+        参数：无；闭包读取当前调用次数。返回：前两次返回候选目录指纹，第三次
+        返回新指纹。异常：无，用于验证事务内回调确实再次读取目录权威。
+        """
+
+        nonlocal authority_reads
+        authority_reads += 1
+        if authority_reads <= 2:
+            return expected_fingerprint
+        return changed_fingerprint
+
+    monkeypatch.setattr(
+        service,
+        "_catalog_fingerprint",
+        catalog_fingerprint_at_linearization,
+    )
+
+    with pytest.raises(WorkflowConflict) as failure:
+        service.apply_authoring(
+            WORKFLOW_UUID,
+            candidate_hash=candidate["candidate_hash"],
+        )
+
+    assert failure.value.code == "template_catalog_conflict"
+    assert authority_reads == 3
+    assert service.get_graph(WORKFLOW_UUID)["workflow"]["revision"] == 1
+    assert service.get_graph(WORKFLOW_UUID)["nodes"] == []
+
+
 def test_apply_rereads_revision_after_real_sqlite_writer_contention(
     authoring_runtime: tuple[WorkflowService, Path, Path],
 ) -> None:

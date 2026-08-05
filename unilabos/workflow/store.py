@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import hashlib
 import sqlite3
 import threading
 from contextlib import contextmanager
@@ -1390,17 +1391,20 @@ class WorkflowStore:
         self,
         *,
         workflow_uuid: str,
-        expected_revision: int,
-        expected_draft_hash: str,
-        expected_candidate_hash: str,
-        expected_catalog_fingerprint: str,
-        candidate: Dict[str, Any],
-        applied_source: Dict[str, Any],
-        event_data: Dict[str, Any],
+        candidate_hash: str,
+        authoring_authority_validator: Callable[[str, str], None],
     ) -> Tuple[int, str]:
-        changeset = candidate["changeset"]
-        kind = changeset["kind"]
-        graph = candidate["graph"]
+        """在线性化写事务内应用服务端持久候选版本（Candidate）。
+
+        参数：``workflow_uuid`` 是工作流（Workflow）身份；``candidate_hash``
+        是调用者持有的服务端签发候选哈希（Candidate Hash）；
+        ``authoring_authority_validator`` 在同一 ``BEGIN IMMEDIATE`` 内复核存储
+        候选推导出的源码权威（Source Authority）草稿哈希与目录指纹（Catalog
+        Fingerprint）。返回：结果工作流修订（Workflow Revision）与提交后写回
+        世代。异常：任何候选、草稿、目录或修订冲突都在图、事件和写回标记写入
+        前失败，并由事务整体回滚。
+        """
+
         now = utc_now()
         with self.transaction() as conn:
             writeback_generation = str(uuid4())
@@ -1412,24 +1416,49 @@ class WorkflowStore:
                 """,
                 (workflow_uuid,),
             ).fetchone()
-            if (
-                authoring is None
-                or authoring["observed_draft_hash"] != expected_draft_hash
-            ):
-                raise StoreAuthoringConflict("draft_hash_conflict")
-            workflow = self.get_workflow(workflow_uuid, conn=conn)
-            if workflow["revision"] != expected_revision:
-                raise StoreRevisionConflict("workflow revision changed before apply")
+            if authoring is None:
+                raise StoreAuthoringConflict("candidate_not_ready")
             stored_candidate = _load(authoring["candidate"], None)
             if not isinstance(stored_candidate, dict):
                 raise StoreAuthoringConflict("candidate_not_ready")
             if (
-                stored_candidate.get("template_catalog_fingerprint")
-                != expected_catalog_fingerprint
+                authoring["candidate_hash"] != candidate_hash
+                or stored_candidate.get("candidate_hash") != candidate_hash
             ):
-                raise StoreAuthoringConflict("template_catalog_conflict")
-            if authoring["candidate_hash"] != expected_candidate_hash:
                 raise StoreAuthoringConflict("candidate_hash_conflict")
+            try:
+                # 事务前置条件只从同一持久候选推导，禁止客户端混搭世代。
+                expected_draft_hash = stored_candidate["draft_hash"]
+                expected_revision = stored_candidate["base_workflow_revision"]
+                expected_catalog_fingerprint = stored_candidate[
+                    "template_catalog_fingerprint"
+                ]
+                changeset = stored_candidate["changeset"]
+                kind = changeset["kind"]
+                graph = stored_candidate["graph"]
+                normalized_source = stored_candidate["normalized_python_source"]
+            except (KeyError, TypeError):
+                raise StoreConflict("候选版本（Candidate）持久包缺少应用事实") from None
+            if (
+                not isinstance(expected_draft_hash, str)
+                or type(expected_revision) is not int
+                or expected_revision < 1
+                or not isinstance(expected_catalog_fingerprint, str)
+                or not isinstance(normalized_source, str)
+            ):
+                raise StoreConflict("候选版本（Candidate）持久包应用事实类型无效")
+            if authoring["observed_draft_hash"] != expected_draft_hash:
+                raise StoreAuthoringConflict("draft_hash_conflict")
+            workflow = self.get_workflow(workflow_uuid, conn=conn)
+            if workflow["revision"] != expected_revision:
+                raise StoreRevisionConflict("workflow revision changed before apply")
+
+            # 文件系统不能与 SQLite 共用锁；在首个领域写入前完成线性化复核。
+            authoring_authority_validator(
+                expected_draft_hash,
+                expected_catalog_fingerprint,
+            )
+            candidate = stored_candidate
             if kind == "graph":
                 graph_workflow = graph.get("workflow")
                 if not isinstance(graph_workflow, dict):
@@ -1467,8 +1496,7 @@ class WorkflowStore:
                     node_templates=graph.get("node_templates", []),
                     handle_templates=graph.get("handle_templates", []),
                     authority_id=(
-                        "authoring/"
-                        + str(candidate["template_catalog_fingerprint"])
+                        "authoring/" + str(candidate["template_catalog_fingerprint"])
                     ),
                     now=now,
                 )
@@ -1506,8 +1534,16 @@ class WorkflowStore:
                 resulting_revision = expected_revision
             else:
                 raise StoreConflict(f"unsupported Authoring changeset kind {kind!r}")
+            normalized_hash = (
+                "sha256:"
+                + hashlib.sha256(normalized_source.encode("utf-8")).hexdigest()
+            )
             applied_source = {
-                **applied_source,
+                "python_source": normalized_source,
+                "source_hash": normalized_hash,
+                "source_map": candidate["source_map"],
+                "compiler_version": candidate["compiler_version"],
+                "template_catalog_fingerprint": expected_catalog_fingerprint,
                 "workflow_revision": resulting_revision,
                 "update_time": now,
             }
@@ -1535,7 +1571,10 @@ class WorkflowStore:
                 conn,
                 event="workflow.authoring.changed",
                 data={
-                    **event_data,
+                    "workflow_uuid": workflow_uuid,
+                    "cause": "applied",
+                    "draft_hash": normalized_hash,
+                    "candidate_hash": None,
                     "workflow_revision": resulting_revision,
                 },
                 now=now,
