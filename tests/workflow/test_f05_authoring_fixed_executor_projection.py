@@ -18,8 +18,8 @@ from .test_authoring_engine import WORKFLOW_UUID, _applied_graph, _template
 # ``DEVICE_MATERIAL_UUID`` 是可信工作流（Workflow）源码固定选择的实际设备
 # 物料（Material）稳定身份。
 DEVICE_MATERIAL_UUID = "51000000-0000-4000-8000-000000000001"
-# ``ACTION_NODE_UUID`` 是固定执行器（Fixed Executor）设备动作节点（Device
-# Action Node）的稳定身份。
+# ``ACTION_NODE_UUID`` 是固定执行器（Fixed Executor）执行设备动作的
+# 工作流节点（WorkflowNode）稳定身份。
 ACTION_NODE_UUID = "52000000-0000-4000-8000-000000000001"
 # ``ACTION_TEMPLATE_UUID`` 只标识动作模板（Action Template）。
 # 它绝不能冒充实际设备物料（Material）身份。
@@ -30,13 +30,13 @@ def _catalog() -> AuthoringCatalogSnapshot:
     """构造带完整动作合同（Action Contract）的 ``ILab`` 目录快照（Catalog Snapshot）。
 
     参数说明：无。返回：仅含一个设备动作模板（Action Template）、不含
-    连接点合同（Handle Contract）的不可变目录快照（Catalog Snapshot）。
+    连接点（Handle）定义的不可变目录快照（Catalog Snapshot）。
     异常：夹具实体不满足目录约束时让构造异常直接暴露。
     """
 
     # ``action_template`` 是唯一设备动作模板（Action Template）。
     # 可信工作流（Workflow）编译会冻结该模板。
-    # ``handles`` 是该无参数动作（Action）的空连接点合同（Handle Contract）集合。
+    # ``handles`` 是该无参数动作（Action）的空连接点（Handle）集合。
     action_template, handles = _template(
         ACTION_TEMPLATE_UUID,
         name="prepare",
@@ -91,7 +91,7 @@ def fixed_executor_projection():
 def _build_graph(device_identity: str | None) -> dict[str, Any]:
     """经公共接缝生成尚未进入候选包（Candidate Bundle）校验的候选图（Candidate Graph）。
 
-    参数说明：``device_identity`` 控制固定或动态执行器绑定（Executor Binding）。
+    参数说明：``device_identity`` 控制固定或动态执行器绑定（ExecutorBinding）。
     返回：``build_candidate_graph`` 生成的完整五集合候选图（Candidate Graph）。
     异常：可信工作流（Workflow）源码或 ``catalog`` 映射非法时保留公共解析或
     构建候选图（Candidate Graph）时的异常。
@@ -115,7 +115,7 @@ def _build_graph(device_identity: str | None) -> dict[str, Any]:
 def _compile(device_identity: str | None) -> CandidateCompilation:
     """经可信工作流编译器（Authoring Compiler）编译设备选择源码。
 
-    参数说明：``device_identity`` 控制固定或动态执行器绑定（Executor Binding）。
+    参数说明：``device_identity`` 控制固定或动态执行器绑定（ExecutorBinding）。
     返回：公共编译接口产生的候选编译结果（CandidateCompilation）。异常：
     可信工作流编译器（Authoring Compiler）把领域失败收敛为诊断，不应向测试
     泄漏预期异常。
@@ -134,7 +134,7 @@ def test_fixed_device_material_identity_projects_to_both_candidate_fields() -> N
     """固定实际设备物料（Material）身份必须完成双投影。
 
     参数说明：无。返回：无。异常/断言：公共候选图（Candidate Graph）构建结果
-    的 ``material_uuid`` 或执行器绑定（Executor Binding）元数据
+    的 ``material_uuid`` 或执行器绑定（ExecutorBinding）元数据
     ``executor_binding.device_id`` 不等于同一个规范 UUID 时测试失败。
     """
 
@@ -182,11 +182,11 @@ def test_trusted_compile_freezes_same_device_identity_into_execution_plan() -> N
 
 
 def test_fixed_device_projection_survives_authoring_round_trip() -> None:
-    """固定执行器（Fixed Executor）双投影必须达到语义固定点（Semantic Fixed Point）。
+    """固定执行器（Fixed Executor）双投影必须在重复编译后结果不变。
 
     参数说明：无。返回：无。异常/断言：候选图（Candidate Graph）与
     可信工作流（Workflow）源码往返失败，或重复候选图（Candidate Graph）改变
-    实际设备物料（Material）身份与执行器绑定（Executor Binding）时测试失败。
+    实际设备物料（Material）身份与执行器绑定（ExecutorBinding）时测试失败。
     """
 
     # ``engine`` 持有同一不可变目录快照（Catalog Snapshot），是
@@ -206,7 +206,7 @@ def test_fixed_device_projection_survives_authoring_round_trip() -> None:
     )
     assert generated.valid and generated.normalized_python_source is not None
     # ``repeated`` 是规范源码重新编译后的候选编译结果（CandidateCompilation），
-    # 用于证明语义固定点（Semantic Fixed Point）。
+    # 用于证明重复编译后结果不变。
     repeated = engine.compile(
         workflow_uuid=WORKFLOW_UUID,
         workflow_revision=7,
@@ -234,7 +234,7 @@ def test_dynamic_device_does_not_fabricate_concrete_material_identity() -> None:
     # ``action_node`` 是必须保持空实际设备物料（Material）身份的设备动作节点。
     action_node = graph["nodes"][0]
     # ``compilation`` 是动态声明的候选编译结果（CandidateCompilation）。
-    # 公共图校验（Graph Validation）必须对其动态执行器绑定（Executor Binding）
+    # 公共图校验（Graph Validation）必须对其动态执行器绑定（ExecutorBinding）
     # 关闭失败（Fail-closed）。
     compilation = _compile(None)
 

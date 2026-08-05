@@ -252,13 +252,13 @@ def _candidate_node(
     """构造一个后端写形状节点。
 
     参数说明：动作声明（ActionDeclaration）提供源码身份；设备声明提供
-    执行器绑定（Executor Binding）；目录动作（AuthoringCatalogAction）提供
-    动作模板（Action Template）和连接点合同（Handle Contract）。返回：不含
+    执行器绑定（ExecutorBinding）；目录动作（AuthoringCatalogAction）提供
+    动作模板（Action Template）和连接点（Handle）定义。返回：不含
     数据库时间字段的节点字典；固定执行器（Fixed Executor）的
     实际设备物料（Material）UUID 同时进入顶层 ``material_uuid`` 和保留
-    执行器绑定（Executor Binding）元数据；动态执行器绑定（Executor Binding）
-    保持空值。异常：动作（Action）参数缺少唯一目标
-    连接点合同（Handle Contract）时抛出 ``AuthoringGraphError``。
+    执行器绑定（ExecutorBinding）元数据；动态执行器绑定（ExecutorBinding）
+    保持空值。异常：动作（Action）参数缺少唯一目标连接点（Handle）定义时
+    抛出 ``AuthoringGraphError``。
     """
 
     params: dict[str, Any] = {}
