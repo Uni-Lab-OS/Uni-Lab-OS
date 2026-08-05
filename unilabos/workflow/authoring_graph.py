@@ -459,16 +459,40 @@ def _candidate_node(
     }
     if resource_refs:
         unilab["resource_refs"] = dict(sorted(resource_refs.items()))
+    template = catalog_action.template
     if device.device_id is not None:
         unilab["executor_binding"] = {
             "mode": "fixed",
             "device_id": device.device_id,
         }
-    # ``device_material_uuid`` 只来自已由静态解析器规范化的固定 ``device()``
-    # 声明；动态 ``device()`` 保持 ``None``，不能用动作模板（Action Template）
-    # UUID 或设备名称猜测实际物料（Material）身份。
-    device_material_uuid = device.device_id
-    template = catalog_action.template
+    # ``device_material_uuid`` 必须是库存权威证明的实际设备物料身份；部署业务
+    # ID 只保留在执行器绑定（ExecutorBinding）中供运行时派发。未注入解析端口
+    # 时仅兼容作者直接声明规范 UUID，动态 ``device()`` 继续保持空值。
+    device_material_uuid = None
+    if device.device_id is not None:
+        try:
+            resolved_device = resolve_resource_reference(
+                device.device_id,
+                resource_reference_resolver,
+            )
+        except ResourceReferenceResolutionError as error:
+            raise AuthoringGraphError(
+                "invalid_executor_binding",
+                "固定执行器无法解析为实际设备物料身份",
+            ) from error
+        # ``expected_device_template_uuid`` 是动作模板声明的设备类型；库存回执若
+        # 提供模板身份，必须与它一致，不能把另一类设备绑定到该动作。
+        expected_device_template_uuid = template.get("resource_template_uuid")
+        resolved_device_template_uuid = resolved_device.get("resource_template_uuid")
+        if (
+            resolved_device_template_uuid is not None
+            and resolved_device_template_uuid != expected_device_template_uuid
+        ):
+            raise AuthoringGraphError(
+                "invalid_executor_binding",
+                "固定执行器资源模板与动作模板不一致",
+            )
+        device_material_uuid = resolved_device["uuid"]
     # 模板标题是未显式覆盖时的节点展示默认值；动作业务名仅作旧目录回退。
     template_title = (
         template.get("display_name") or template.get("name") or declaration.result_name

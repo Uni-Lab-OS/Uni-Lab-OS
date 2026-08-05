@@ -296,7 +296,7 @@ def test_dynamic_device_does_not_fabricate_concrete_material_identity() -> None:
     ("device_identity", "expected_code"),
     [
         pytest.param("", "invalid_device_selector", id="empty"),
-        pytest.param("reactor-a", "candidate_invalid", id="non-uuid"),
+        pytest.param("reactor-a", "invalid_executor_binding", id="unresolved-business-id"),
     ],
 )
 def test_invalid_fixed_device_identity_fails_closed(
