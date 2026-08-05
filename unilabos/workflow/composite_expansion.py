@@ -160,9 +160,12 @@ class CompositeAuthoring:
             return self._compile_snapshot(
                 parent_workflow_uuid=parent_uuid,
                 invocation_uuid=invocation,
+                invocation_parent_uuid=None,
                 source=source,
                 keyword_arguments=dict(keyword_arguments),
                 snapshot=snapshot,
+                workflow_stack=(parent_uuid,),
+                base_node=None,
             )
         except _CompositeFailure as error:
             return _failed_expansion(error.code, error.path)
@@ -172,11 +175,20 @@ class CompositeAuthoring:
         *,
         parent_workflow_uuid: str,
         invocation_uuid: str,
+        invocation_parent_uuid: str | None,
         source: PublishedWorkflowSource,
         keyword_arguments: dict[str, object],
         snapshot: Mapping[str, Any],
+        workflow_stack: tuple[str, ...],
+        base_node: Mapping[str, Any] | None,
     ) -> CompositeExpansion:
         """验证一个快照并构造直接子工作流的平面展开结果。"""
+
+        if source.workflow_uuid in workflow_stack:
+            raise _CompositeFailure(
+                "composite_recursive_reference",
+                "/composite/child_workflow_uuid",
+            )
 
         workflow = _mapping(snapshot.get("workflow"), "/child/workflow")
         if workflow.get("uuid") != source.workflow_uuid:
@@ -223,15 +235,12 @@ class CompositeAuthoring:
             input_contract,
             keyword_arguments,
         )
-        nodes, node_uuid_map = _expand_nodes(
-            graph["nodes"],
+        nodes, edges, node_uuid_map = self._expand_graph(
+            graph,
+            source=source,
             invocation_uuid=invocation_uuid,
-            catalog=self._catalog,
-        )
-        edges = _expand_edges(
-            graph["edges"],
-            node_uuid_map=node_uuid_map,
             parent_workflow_uuid=parent_workflow_uuid,
+            workflow_stack=workflow_stack,
         )
         boundary_handles = template_action.handles
         target_mappings = _target_mappings(
@@ -263,6 +272,7 @@ class CompositeAuthoring:
         invocation_node = _invocation_node(
             parent_workflow_uuid=parent_workflow_uuid,
             invocation_uuid=invocation_uuid,
+            parent_uuid=invocation_parent_uuid,
             template_uuid=str(template_action.template["uuid"]),
             symbol=source.symbol,
             keyword_arguments=normalized_arguments,
@@ -270,6 +280,7 @@ class CompositeAuthoring:
             target_mappings=target_mappings,
             source_mappings=source_mappings,
             structural_mappings=structural,
+            base_node=base_node,
         )
         referenced_nodes, referenced_handles = _referenced_templates(
             self._catalog,
@@ -290,6 +301,121 @@ class CompositeAuthoring:
             effective_parent_input_contract={},
             diagnostics=(),
         )
+
+    def _expand_graph(
+        self,
+        graph: Mapping[str, Any],
+        *,
+        source: PublishedWorkflowSource,
+        invocation_uuid: str,
+        parent_workflow_uuid: str,
+        workflow_stack: tuple[str, ...],
+    ) -> tuple[list[dict[str, Any]], list[dict[str, Any]], dict[str, str]]:
+        """递归复制直接节点，并把嵌套调用收敛到同一父候选图。
+
+        参数：``graph`` 是已验证子快照，其他身份决定层级与环检测。返回：完整
+        节点、边和直接子节点 UUID 映射。异常：目录、pin、父关系或递归不安全时
+        抛出稳定组合失败；只通过只读端口取得下一层快照。
+        """
+
+        raw_nodes = [_mapping(item, "/child/nodes") for item in graph["nodes"]]
+        by_uuid: dict[str, dict[str, Any]] = {}
+        templates: dict[str, AuthoringCatalogAction] = {}
+        for node in raw_nodes:
+            node_uuid = _canonical_uuid(
+                node.get("uuid"),
+                "composite_boundary_mapping_invalid",
+                "/child/nodes/uuid",
+            )
+            if node_uuid in by_uuid:
+                raise _CompositeFailure(
+                    "composite_boundary_mapping_invalid",
+                    "/child/nodes/uuid",
+                )
+            try:
+                action = self._catalog.require_template(
+                    str(node["workflow_node_template_uuid"])
+                )
+            except (AuthoringCatalogError, KeyError):
+                raise _CompositeFailure(
+                    "composite_catalog_mismatch",
+                    "/child/nodes/template",
+                ) from None
+            by_uuid[node_uuid] = node
+            templates[node_uuid] = action
+        _validate_parent_tree(by_uuid)
+        node_uuid_map = {
+            node_uuid: expanded_node_uuid(invocation_uuid, node_uuid)
+            for node_uuid in by_uuid
+        }
+        nodes: list[dict[str, Any]] = []
+        nested_edges: list[dict[str, Any]] = []
+        next_stack = (*workflow_stack, source.workflow_uuid)
+        for node_uuid in sorted(by_uuid):
+            node = by_uuid[node_uuid]
+            mapped_uuid = node_uuid_map[node_uuid]
+            raw_parent = node.get("parent_uuid")
+            mapped_parent = (
+                invocation_uuid
+                if raw_parent is None
+                else node_uuid_map.get(str(raw_parent))
+            )
+            if mapped_parent is None:
+                raise _CompositeFailure(
+                    "composite_boundary_mapping_invalid",
+                    "/child/nodes/parent_uuid",
+                )
+            action = templates[node_uuid]
+            if action.template.get("node_type") != "workflow":
+                copied = _plain(node)
+                copied["uuid"] = mapped_uuid
+                copied["parent_uuid"] = mapped_parent
+                nodes.append(copied)
+                continue
+            nested_source = _source_from_template(self._resolver, action)
+            if nested_source.workflow_uuid in next_stack:
+                raise _CompositeFailure(
+                    "composite_recursive_reference",
+                    "/composite/child_workflow_uuid",
+                )
+            try:
+                nested_snapshot = (
+                    self._snapshot_provider.get_published_workflow_snapshot(
+                        nested_source.workflow_uuid
+                    )
+                )
+            except LookupError:
+                raise _CompositeFailure(
+                    "composite_child_not_found",
+                    "/child/workflow_uuid",
+                ) from None
+            nested = self._compile_snapshot(
+                parent_workflow_uuid=parent_workflow_uuid,
+                invocation_uuid=mapped_uuid,
+                invocation_parent_uuid=mapped_parent,
+                source=nested_source,
+                keyword_arguments=_node_keyword_arguments(node),
+                snapshot=nested_snapshot,
+                workflow_stack=next_stack,
+                base_node=node,
+            )
+            _assert_nested_pin(node, nested.contract_pin)
+            if nested.invocation_node is None:
+                raise _CompositeFailure(
+                    "composite_catalog_mismatch",
+                    "/child/nodes/composite",
+                )
+            nodes.append(_plain(nested.invocation_node))
+            nodes.extend(_plain(nested.nodes))
+            nested_edges.extend(_plain(nested.edges))
+        direct_edges = _expand_edges(
+            graph["edges"],
+            node_uuid_map=node_uuid_map,
+            parent_workflow_uuid=parent_workflow_uuid,
+        )
+        edges = _unique_edges([*direct_edges, *nested_edges])
+        _assert_acyclic(nodes, edges)
+        return nodes, edges, node_uuid_map
 
 
 def _published_template(
@@ -372,61 +498,134 @@ def _normalize_arguments(
     return normalized
 
 
-def _expand_nodes(
-    raw_nodes: Sequence[Any],
-    *,
-    invocation_uuid: str,
-    catalog: AuthoringCatalogSnapshot,
-) -> tuple[list[dict[str, Any]], dict[str, str]]:
-    """复制直接内部节点并派生调用局部 UUID 与父关系。"""
+def _source_from_template(
+    resolver: PublishedWorkflowResolver,
+    action: AuthoringCatalogAction,
+) -> PublishedWorkflowSource:
+    """从封闭工作流模板取得绝对导入身份并解析冻结来源。"""
 
-    nodes = [_mapping(item, "/child/nodes") for item in raw_nodes]
-    by_uuid: dict[str, dict[str, Any]] = {}
-    for node in nodes:
-        node_uuid = _canonical_uuid(
-            node.get("uuid"),
+    class_name = action.template.get("class")
+    if not isinstance(class_name, str) or class_name.count(":") != 1:
+        raise _CompositeFailure("composite_catalog_mismatch", "/catalog/class")
+    module, symbol = class_name.split(":", 1)
+    try:
+        source = resolver.resolve(module, symbol)
+    except (LookupError, PublishedSourceCatalogError):
+        raise _CompositeFailure("composite_child_not_found", "/source") from None
+    if not isinstance(source, PublishedWorkflowSource):
+        raise _CompositeFailure("composite_catalog_mismatch", "/source")
+    return source
+
+
+def _node_keyword_arguments(node: Mapping[str, Any]) -> dict[str, object]:
+    """复制已应用组合节点保存的边界参数。"""
+
+    arguments = node.get("param")
+    if not isinstance(arguments, Mapping) or any(
+        not isinstance(key, str) for key in arguments
+    ):
+        raise _CompositeFailure(
             "composite_boundary_mapping_invalid",
-            "/child/nodes/uuid",
+            "/child/nodes/param",
         )
-        if node_uuid in by_uuid:
-            raise _CompositeFailure(
-                "composite_boundary_mapping_invalid",
-                "/child/nodes/uuid",
-            )
-        try:
-            template = catalog.require_template(str(node["workflow_node_template_uuid"]))
-        except (AuthoringCatalogError, KeyError):
+    return _plain(arguments)
+
+
+def _assert_nested_pin(
+    node: Mapping[str, Any],
+    contract_pin: Mapping[str, Any],
+) -> None:
+    """证明已应用嵌套节点仍指向本次解析的发布合同。"""
+
+    meta_data = node.get("meta_data")
+    unilab = meta_data.get("unilab") if isinstance(meta_data, Mapping) else None
+    composite = unilab.get("composite") if isinstance(unilab, Mapping) else None
+    if not isinstance(composite, Mapping):
+        raise _CompositeFailure(
+            "composite_catalog_mismatch",
+            "/child/nodes/composite",
+        )
+    for key, value in contract_pin.items():
+        if composite.get(key) != value:
             raise _CompositeFailure(
                 "composite_catalog_mismatch",
-                "/child/nodes/template",
-            ) from None
-        if template.template.get("node_type") == "workflow":
-            raise _CompositeFailure(
-                "composite_nested_requires_recursive_expansion",
-                "/child/nodes/template",
+                f"/child/nodes/composite/{key}",
             )
-        by_uuid[node_uuid] = node
-    node_uuid_map = {
-        node_uuid: expanded_node_uuid(invocation_uuid, node_uuid)
-        for node_uuid in by_uuid
-    }
-    result: list[dict[str, Any]] = []
-    for node_uuid in sorted(by_uuid):
-        node = _plain(by_uuid[node_uuid])
-        raw_parent = node.get("parent_uuid")
-        if raw_parent is None:
-            parent_uuid = invocation_uuid
-        else:
-            parent_uuid = node_uuid_map.get(str(raw_parent))
-            if parent_uuid is None:
+
+
+def _validate_parent_tree(nodes: Mapping[str, Mapping[str, Any]]) -> None:
+    """验证直接子图父引用存在且层级无环。"""
+
+    for node_uuid, node in nodes.items():
+        seen = {node_uuid}
+        parent = node.get("parent_uuid")
+        while parent is not None:
+            parent_uuid = str(parent)
+            if parent_uuid not in nodes:
                 raise _CompositeFailure(
                     "composite_boundary_mapping_invalid",
                     "/child/nodes/parent_uuid",
                 )
-        node["uuid"] = node_uuid_map[node_uuid]
-        node["parent_uuid"] = parent_uuid
-        result.append(node)
-    return result, node_uuid_map
+            if parent_uuid in seen:
+                raise _CompositeFailure(
+                    "composite_recursive_reference",
+                    "/child/nodes/parent_uuid",
+                )
+            seen.add(parent_uuid)
+            parent = nodes[parent_uuid].get("parent_uuid")
+
+
+def _unique_edges(edges: Sequence[Mapping[str, Any]]) -> list[dict[str, Any]]:
+    """按 UUID 去重完整展开边并拒绝身份碰撞。"""
+
+    result: dict[str, dict[str, Any]] = {}
+    for raw in edges:
+        edge = _plain(raw)
+        edge_uuid = str(edge.get("uuid"))
+        existing = result.get(edge_uuid)
+        if existing is not None and existing != edge:
+            raise _CompositeFailure(
+                "composite_boundary_mapping_invalid",
+                "/child/edges/uuid",
+            )
+        result[edge_uuid] = edge
+    return [result[key] for key in sorted(result)]
+
+
+def _assert_acyclic(
+    nodes: Sequence[Mapping[str, Any]],
+    edges: Sequence[Mapping[str, Any]],
+) -> None:
+    """验证展开后的完整业务边图仍为有向无环图。"""
+
+    node_uuids = {str(node["uuid"]) for node in nodes}
+    incoming = {node_uuid: 0 for node_uuid in node_uuids}
+    outgoing: dict[str, list[str]] = {node_uuid: [] for node_uuid in node_uuids}
+    for edge in edges:
+        source = str(edge["source_node_uuid"])
+        target = str(edge["target_node_uuid"])
+        if source not in node_uuids or target not in node_uuids:
+            raise _CompositeFailure(
+                "composite_boundary_mapping_invalid",
+                "/child/edges/node",
+            )
+        outgoing[source].append(target)
+        incoming[target] += 1
+    ready = sorted(key for key, degree in incoming.items() if degree == 0)
+    visited = 0
+    while ready:
+        current = ready.pop(0)
+        visited += 1
+        for target in sorted(outgoing[current]):
+            incoming[target] -= 1
+            if incoming[target] == 0:
+                ready.append(target)
+                ready.sort()
+    if visited != len(node_uuids):
+        raise _CompositeFailure(
+            "composite_recursive_reference",
+            "/child/edges/cycle",
+        )
 
 
 def _expand_edges(
@@ -630,6 +829,7 @@ def _invocation_node(
     *,
     parent_workflow_uuid: str,
     invocation_uuid: str,
+    parent_uuid: str | None,
     template_uuid: str,
     symbol: str,
     keyword_arguments: Mapping[str, object],
@@ -637,6 +837,7 @@ def _invocation_node(
     target_mappings: Mapping[str, Sequence[Mapping[str, str]]],
     source_mappings: Mapping[str, Mapping[str, str]],
     structural_mappings: Mapping[str, Sequence[Mapping[str, str]]],
+    base_node: Mapping[str, Any] | None,
 ) -> dict[str, Any]:
     """构造父图中真实存在但不拥有运行时任务权威的调用节点。"""
 
@@ -647,21 +848,29 @@ def _invocation_node(
         "source_mappings": _plain(source_mappings),
         "structural_mappings": _plain(structural_mappings),
     }
-    return {
+    result = _plain(base_node) if base_node is not None else {}
+    meta_data = result.get("meta_data")
+    meta_data = _plain(meta_data) if isinstance(meta_data, Mapping) else {}
+    unilab = meta_data.get("unilab")
+    unilab = _plain(unilab) if isinstance(unilab, Mapping) else {}
+    unilab["composite"] = composite
+    meta_data["unilab"] = unilab
+    result.update({
         "uuid": invocation_uuid,
         "workflow_uuid": parent_workflow_uuid,
         "workflow_node_template_uuid": template_uuid,
-        "parent_uuid": None,
-        "name": symbol,
+        "parent_uuid": parent_uuid,
+        "name": str(result.get("name") or symbol),
         "status": "idle",
         "type": "workflow",
-        "pose": {},
+        "pose": _plain(result.get("pose") or {}),
         "param": _plain(keyword_arguments),
-        "execution_policy": {},
-        "disabled": False,
-        "minimized": False,
-        "meta_data": {"unilab": {"composite": composite}},
-    }
+        "execution_policy": _plain(result.get("execution_policy") or {}),
+        "disabled": bool(result.get("disabled", False)),
+        "minimized": bool(result.get("minimized", False)),
+        "meta_data": meta_data,
+    })
+    return result
 
 
 def _referenced_templates(

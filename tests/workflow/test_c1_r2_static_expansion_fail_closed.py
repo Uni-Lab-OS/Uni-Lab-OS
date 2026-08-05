@@ -19,8 +19,10 @@ from .test_c1_r2_static_expansion_contract import (
     EXPANDED_CHILD_NODE_UUID,
     INVOCATION_UUID,
     PARENT_WORKFLOW_UUID,
+    APPLIED_SOURCE_HASH,
     _world,
     _world_components,
+    _nested_world,
 )
 
 
@@ -183,3 +185,67 @@ def test_self_nested_workflow_reference_uses_stable_cycle_diagnostic() -> None:
     snapshot["handle_templates"] = workflow_action.detached_handles()
 
     _assert_closed(_compile(authoring), "composite_recursive_reference")
+
+
+def test_cross_workflow_cycle_uses_same_stable_diagnostic() -> None:
+    """子工作流经叶工作流回指祖先时复用统一递归诊断。"""
+
+    authoring, provider = _nested_world()
+    _unused, _provider, base_catalog, _resolver = _world_components()
+    child_action = next(
+        action
+        for action in base_catalog.actions
+        if action.template["uuid"] == CHILD_TEMPLATE_UUID
+    )
+    leaf_snapshot = provider.snapshots[
+        "a1000000-0000-4000-8000-000000000002"
+    ]
+    leaf_node = leaf_snapshot["nodes"][0]
+    leaf_node.update(
+        {
+            "workflow_node_template_uuid": CHILD_TEMPLATE_UUID,
+            "type": "workflow",
+            "param": {"value": 1},
+            "meta_data": {
+                "unilab": {
+                    "input_bindings": {
+                        CHILD_VALUE_TARGET_UUID: {"parameter": "value"}
+                    },
+                    "composite": {
+                        "version": 1,
+                        "child_workflow_uuid": CHILD_WORKFLOW_UUID,
+                        "child_workflow_revision": 7,
+                        "child_applied_source_hash": APPLIED_SOURCE_HASH,
+                        "contract_digest": (
+                            "sha256:689aaac733eba27d13279d242a71fc3c8bc41f0c"
+                            "144d41261dc160a52b46a1cf"
+                        ),
+                        "composition_allow_transparent": False,
+                    },
+                }
+            },
+        }
+    )
+    leaf_snapshot["workflow"]["meta_data"]["unilab"]["output_bindings"][
+        "result"
+    ] = {
+        "kind": "node_output",
+        "workflow_node_uuid": leaf_node["uuid"],
+        "source_handle_uuid": CHILD_VALUE_SOURCE_UUID,
+    }
+    leaf_snapshot["node_templates"] = [child_action.detached_template()]
+    leaf_snapshot["handle_templates"] = child_action.detached_handles()
+
+    _assert_closed(_compile(authoring), "composite_recursive_reference")
+
+
+def test_nested_applied_pin_mismatch_fails_closed() -> None:
+    """嵌套调用保存的应用 pin 与当前发布合同时不得静默漂移。"""
+
+    authoring, provider = _nested_world()
+    child_snapshot = provider.snapshots[CHILD_WORKFLOW_UUID]
+    child_snapshot["nodes"][0]["meta_data"]["unilab"]["composite"][
+        "child_applied_source_hash"
+    ] = "sha256:" + "6" * 64
+
+    _assert_closed(_compile(authoring), "composite_catalog_mismatch")
