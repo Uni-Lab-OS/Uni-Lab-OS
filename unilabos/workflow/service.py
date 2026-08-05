@@ -1405,7 +1405,6 @@ class WorkflowService:
         return self._reconcile_registered_source(
             workflow_uuid,
             refresh_catalog_dependent_state=True,
-            event_cause=None,
         )
 
     def _reconcile_registered_source(
@@ -1413,7 +1412,6 @@ class WorkflowService:
         workflow_uuid: str,
         *,
         refresh_catalog_dependent_state: bool,
-        event_cause: str | None,
     ) -> Dict[str, Any]:
         """协调一个 Draft，并可刷新由模板 Catalog 决定的派生编译状态。
 
@@ -1421,7 +1419,6 @@ class WorkflowService:
             workflow_uuid: 已注册源码所属工作流（Workflow）UUID。
             refresh_catalog_dependent_state: 为真时，即使源码 hash 未变，也检查候选、
                 诊断和已应用源码是否仍足以证明当前创作状态。
-            event_cause: 强制重编译成功后写入的事件原因；为空时沿用文件变化原因。
 
         返回：
             自洽的工作流创作聚合。
@@ -1471,7 +1468,7 @@ class WorkflowService:
                     draft_python_source=source["python_source"],
                 )
                 diagnostics = compilation.diagnostics
-            cause = event_cause or (
+            cause = (
                 "draft_compiled"
                 if source_state_unchanged
                 else (
@@ -1523,8 +1520,8 @@ class WorkflowService:
             现有记录不能证明对应当前 Catalog、修订和源码时返回 ``True``。
 
         不变量：
-            完整且仍匹配源码/修订的 Applied Source 不因无关 Catalog 发布产生新候选；
-            诊断和候选属于可重建派生状态，必须随 Catalog 指纹变化失效。
+            Applied Source、诊断和候选均属于可重建派生状态；只要其绑定的 Catalog
+            指纹不再是当前值，即使源码 hash 未变也必须重新编译。
         """
 
         if source is None:
@@ -1546,11 +1543,16 @@ class WorkflowService:
             return True
 
         applied_source = record.get("applied_source")
-        return not (
-            isinstance(applied_source, dict)
-            and applied_source.get("workflow_revision") == workflow["revision"]
-            and applied_source.get("source_hash") == source["draft_hash"]
-        )
+        try:
+            return not (
+                isinstance(applied_source, dict)
+                and applied_source.get("workflow_revision") == workflow["revision"]
+                and applied_source.get("source_hash") == source["draft_hash"]
+                and applied_source.get("template_catalog_fingerprint")
+                == self._catalog_fingerprint()
+            )
+        except WorkflowError:
+            return True
 
     def apply_authoring(
         self,
@@ -2634,21 +2636,29 @@ class WorkflowService:
 
         不变量：
             调用方不得持有 Catalog guard 或被修改工作流的创作锁。每个依赖 Draft
-            独立刷新；单个派生刷新失败只记录诊断日志，不改变已经提交的工作流事实
-            或 Catalog 可用性。
+            独立刷新；注册源枚举或单个派生刷新失败只记录诊断日志，不改变已经提交
+            的工作流事实或 Catalog 可用性。
         """
 
         if self._catalog_publisher is None:
             return
-        for registration in self.list_registered_sources():
-            workflow_uuid = registration["workflow_uuid"]
-            if workflow_uuid == mutated_workflow_uuid:
-                continue
+        try:
+            registrations = self.list_registered_sources()
+        except Exception:  # noqa: BLE001 - 已提交 mutation 的派生刷新必须隔离
+            _LOGGER.exception(
+                "Catalog 发布后刷新工作流创作草稿时枚举失败: mutated_workflow_uuid=%s",
+                mutated_workflow_uuid,
+            )
+            return
+        for registration in registrations:
+            workflow_uuid = "<unknown>"
             try:
+                workflow_uuid = registration["workflow_uuid"]
+                if workflow_uuid == mutated_workflow_uuid:
+                    continue
                 self._reconcile_registered_source(
                     workflow_uuid,
                     refresh_catalog_dependent_state=True,
-                    event_cause="draft_compiled",
                 )
             except Exception:  # noqa: BLE001 - 已提交 mutation 的派生刷新必须隔离
                 _LOGGER.exception(
