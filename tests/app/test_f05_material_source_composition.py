@@ -3,63 +3,16 @@
 from __future__ import annotations
 
 from pathlib import Path
-from typing import Any
-
-import pytest
 
 from tests.registry.test_f05_material_source_catalog import (
-    HOST_TEMPLATE_UUID,
     PLATE_SOURCE_IDENTITY,
-    PLATE_TEMPLATE_UUID,
     _Registry,
 )
-from unilabos.registry.template_projection import RegistryTemplateProjectionError
+from unilabos.app.scheduler.inventory.store import InventoryStore
 from unilabos.workflow.composition import (
     compose_local_workflow_template_runtime,
-    get_workflow_service,
     reset_workflow_service_for_test,
 )
-
-
-class _InventoryIdentityStore:
-    """提供组合根所需的只读资源模板身份映射。"""
-
-    def __init__(self, *, include_plate: bool = True) -> None:
-        """配置是否存在物料资源模板身份。
-
-        参数说明：``include_plate`` 为假时模拟生产身份缺失。
-        返回：无；实例仅作为读取边界。
-        """
-
-        self.include_plate = include_plate
-
-    def query_one(self, sql: str, params: tuple[Any, ...]) -> dict[str, Any] | None:
-        """按设备注册表（Registry）业务唯一名称返回已有资源模板行。
-
-        参数说明：``sql`` 必须查询资源模板表，``params`` 只含业务
-        唯一名称。返回：活动资源模板（ResourceTemplate）身份摘要或 ``None``；
-        SQL 未查询规范资源模板表时抛出 ``AssertionError``，防止组合根绕过既有
-        身份映射生命周期。
-        """
-
-        assert "FROM resource_template" in sql
-        source_identity = str(params[0])
-        # ``rows`` 是模拟已存在的本地模板数据库业务唯一索引。
-        rows = {
-            "host_node": {
-                "uuid": HOST_TEMPLATE_UUID,
-                "name": "host_node",
-                "display_name": "Host Node",
-            },
-            "plate_96": {
-                "uuid": PLATE_TEMPLATE_UUID,
-                "name": "plate_96",
-                "display_name": "96 孔板",
-            },
-        }
-        if not self.include_plate and source_identity == "plate_96":
-            return None
-        return rows.get(source_identity)
 
 
 def test_local_composition_shares_frozen_resource_template_projection(
@@ -72,12 +25,24 @@ def test_local_composition_shares_frozen_resource_template_projection(
     """
 
     reset_workflow_service_for_test()
+    # ``inventory_store`` 是真实 Backend 形态库存模板写权威，启动前为空。
+    inventory_store = InventoryStore(str(tmp_path / "inventory.db"))
     try:
         service, projection = compose_local_workflow_template_runtime(
             tmp_path,
-            inventory_store=_InventoryIdentityStore(),
+            inventory_store=inventory_store,
             registry=_Registry(),
         )
+        template_rows = {
+            str(row["name"]): str(row["uuid"])
+            for row in inventory_store.query_all(
+                """
+                SELECT uuid, name
+                FROM resource_template
+                WHERE deleted_at IS NULL
+                """
+            )
+        }
 
         assert service.compiler is not None
         assert service.compiler.template_catalog_fingerprint == (
@@ -85,36 +50,49 @@ def test_local_composition_shares_frozen_resource_template_projection(
         )
         assert (
             projection.snapshot().require_resource_template_uuid(PLATE_SOURCE_IDENTITY)
-            == PLATE_TEMPLATE_UUID
+            == template_rows["plate_96"]
         )
         assert (
             projection.snapshot()
             .require_material_source()
             .template["resource_template_uuid"]
-            == HOST_TEMPLATE_UUID
+            == template_rows["host_node"]
         )
     finally:
         reset_workflow_service_for_test()
+        inventory_store.close()
 
 
-def test_local_composition_fails_closed_when_material_template_identity_is_missing(
+def test_local_composition_creates_missing_material_template_identity(
     tmp_path: Path,
 ) -> None:
-    """物料资源模板身份缺失时组合必须失败关闭且不发布半成品服务。
+    """物料资源模板身份缺失时组合必须在库存权威中创建稳定身份。
 
-    参数说明：``tmp_path`` 提供隔离存储。返回：无；断言预期领域
-    错误和空进程级工作流服务。
-    异常：缺失身份必须对外抛出 ``RegistryTemplateProjectionError``。
+    参数说明：``tmp_path`` 提供隔离存储。返回：无；断言工作流模板投影引用
+    同一事务同步后 inventory.db 中的物料资源模板（ResourceTemplate）UUID。
     """
 
     reset_workflow_service_for_test()
+    inventory_store = InventoryStore(str(tmp_path / "inventory.db"))
     try:
-        with pytest.raises(RegistryTemplateProjectionError, match="身份"):
-            compose_local_workflow_template_runtime(
-                tmp_path,
-                inventory_store=_InventoryIdentityStore(include_plate=False),
-                registry=_Registry(),
-            )
-        assert get_workflow_service() is None
+        _service, projection = compose_local_workflow_template_runtime(
+            tmp_path,
+            inventory_store=inventory_store,
+            registry=_Registry(),
+        )
+        plate_row = inventory_store.query_one(
+            """
+            SELECT uuid
+            FROM resource_template
+            WHERE name = ? AND deleted_at IS NULL
+            """,
+            ("plate_96",),
+        )
+
+        assert plate_row is not None
+        assert projection.snapshot().require_resource_template_uuid(
+            PLATE_SOURCE_IDENTITY
+        ) == str(plate_row["uuid"])
     finally:
         reset_workflow_service_for_test()
+        inventory_store.close()

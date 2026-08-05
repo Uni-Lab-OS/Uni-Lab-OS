@@ -2,12 +2,17 @@
 
 from __future__ import annotations
 
+from contextlib import contextmanager
 from pathlib import Path
 from typing import Any
 
 import pytest
 
-from unilabos.app.scheduler.inventory.backend_contract import BackendResourceService
+from unilabos.app.scheduler.inventory.backend_contract import (
+    BackendContractError,
+    BackendResourceService,
+    TEMPLATE_DATA_CONFLICT,
+)
 from unilabos.app.scheduler.inventory.store import InventoryStore
 from unilabos.registry.ast_registry_scanner import _parse_file
 from unilabos.registry.registry import Registry
@@ -54,6 +59,21 @@ class _BuiltRegistry:
         """
 
         return self._resources
+
+
+class _FailingInventoryStore(InventoryStore):
+    """模拟库存模板同步事务明确拒绝写入。"""
+
+    @contextmanager
+    def transaction(self) -> Any:
+        """在模板同步开始时返回稳定 Backend 合同错误。
+
+        参数：无。返回：本生成器不会产生事务连接。异常：始终抛出模板数据冲突，
+        用于证明组合根不能在库存写权威拒绝后继续发布工作流模板投影。
+        """
+
+        raise BackendContractError(TEMPLATE_DATA_CONFLICT, "测试模板身份冲突")
+        yield  # pragma: no cover - contextmanager 语法所需，不可到达
 
 
 def _build_registry(tmp_path: Path) -> _BuiltRegistry:
@@ -299,6 +319,31 @@ def test_local_composition_rejects_conflicting_resource_source_aliases(
                 tmp_path,
                 inventory_store=inventory_store,
                 registry=registry,
+            )
+        assert get_workflow_service() is None
+    finally:
+        reset_workflow_service_for_test()
+        inventory_store.close()
+
+
+def test_local_composition_fails_closed_when_inventory_sync_is_rejected(
+    tmp_path: Path,
+) -> None:
+    """本地库存拒绝资源模板身份同步时，模板运行时必须关闭式失败。
+
+    参数说明：``tmp_path`` 隔离数据库。返回：无；断言同步错误被转换为模板投影
+    （Template Projection）领域错误，且不发布半装配工作流权威（Workflow
+    Authority）。
+    """
+
+    reset_workflow_service_for_test()
+    inventory_store = _FailingInventoryStore(str(tmp_path / "inventory.db"))
+    try:
+        with pytest.raises(RegistryTemplateProjectionError, match="同步失败"):
+            compose_local_workflow_template_runtime(
+                tmp_path,
+                inventory_store=inventory_store,
+                registry=_build_registry(tmp_path),
             )
         assert get_workflow_service() is None
     finally:

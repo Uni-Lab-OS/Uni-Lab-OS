@@ -8,6 +8,7 @@ from typing import Any
 
 import pytest
 
+from unilabos.app.scheduler.inventory.store import InventoryStore
 from unilabos.registry.template_projection import (
     RegistryTemplateProjection,
     RegistryTemplateProjectionError,
@@ -26,45 +27,71 @@ EXPLICIT_NODE_UUID_B = "20000000-0000-4000-8000-000000000002"
 DEVICE_MATERIAL_UUID = "30000000-0000-4000-8000-000000000001"
 
 
-class FakeInventoryStore:
-    """提供活动资源模板身份映射的最小本地库存存储替身。"""
+class FakeInventoryStore(InventoryStore):
+    """提供真实同步事务和固定设备物料身份的内存库存存储。"""
 
-    def query_one(self, sql: str, params: tuple[Any, ...]) -> dict[str, Any] | None:
-        """按资源模板业务名或物料 UUID 返回活动身份。
+    def __init__(self) -> None:
+        """建立含固定设备模板与设备物料的 Backend 形态库存事实。
 
-        参数说明：``sql`` 用于断言组合根只读取规范表；``params`` 包含 Registry
-        资源业务名或设备物料 UUID。返回资源模板或设备物料的权威摘要。
+        参数：无。返回：无；资源模板（ResourceTemplate）和物料（Material）使用
+        测试固定 UUID，后续组合根必须通过真实同步事务复用该业务身份。
         """
 
-        if "FROM resource_template" in sql:
-            resource_name = str(params[0])
-            if resource_name != "pump":
-                return None
-            return {
-                "uuid": RESOURCE_TEMPLATE_UUID,
-                "name": "pump",
-                "display_name": "注射泵",
-            }
-        assert "FROM material" in sql
-        if str(params[0]) != DEVICE_MATERIAL_UUID:
-            return None
-        return {
-            "uuid": DEVICE_MATERIAL_UUID,
-            "resource_template_uuid": RESOURCE_TEMPLATE_UUID,
-            "meta_data": {"edge_local_id": "pump-01"},
-        }
-
-
-class MissingInventoryStore:
-    """模拟本地库存权威尚未建立 Registry 资源身份映射。"""
-
-    def query_one(self, sql: str, params: tuple[Any, ...]) -> None:
-        """对任何活动资源模板查询返回缺失。
-
-        参数说明：``sql`` 和 ``params`` 仅用于符合库存只读接口；返回值固定为空。
-        """
-
-        return
+        super().__init__()
+        # ``seed_transaction`` 使用基类事务，确保故障测试子类只影响后续同步阶段。
+        with InventoryStore.transaction(self) as seed_transaction:
+            seed_transaction.execute(
+                """
+                INSERT INTO resource_template(
+                    uuid, create_time, update_time, name, display_name,
+                    resource_type, module
+                ) VALUES (?,?,?,?,?,?,?)
+                """,
+                (
+                    RESOURCE_TEMPLATE_UUID,
+                    "2026-01-01T00:00:00.000Z",
+                    "2026-01-01T00:00:00.000Z",
+                    "pump",
+                    "注射泵",
+                    "device",
+                    "lab.devices:Pump",
+                ),
+            )
+            seed_transaction.execute(
+                """
+                INSERT INTO resource_template_inventory(
+                    resource_template_uuid, aggregate_version
+                ) VALUES (?,1)
+                """,
+                (RESOURCE_TEMPLATE_UUID,),
+            )
+            seed_transaction.execute(
+                """
+                INSERT INTO material(
+                    uuid, create_time, update_time, meta_data,
+                    resource_template_uuid, class, barcode, name
+                ) VALUES (?,?,?,?,?,?,?,?)
+                """,
+                (
+                    DEVICE_MATERIAL_UUID,
+                    "2026-01-01T00:00:00.000Z",
+                    "2026-01-01T00:00:00.000Z",
+                    '{"edge_local_id":"pump-01"}',
+                    RESOURCE_TEMPLATE_UUID,
+                    "device",
+                    "",
+                    "pump-01",
+                ),
+            )
+            seed_transaction.execute(
+                """
+                INSERT INTO material_inventory(
+                    material_uuid, aggregate_version
+                )
+                VALUES (?,1)
+                """,
+                (DEVICE_MATERIAL_UUID,),
+            )
 
 
 class FakeRegistry:
@@ -687,26 +714,6 @@ def test_local_runtime_shares_projection_with_authoring_compiler(tmp_path: Path)
         )
         assert device_action_run["created"] is True
         assert device_action_run["job"]["material_uuid"] == DEVICE_MATERIAL_UUID
-    finally:
-        reset_workflow_service_for_test()
-
-
-def test_local_runtime_fails_closed_when_inventory_identity_is_missing(
-    tmp_path: Path,
-) -> None:
-    """本地库存没有活动资源模板身份时，模板运行时必须关闭式失败。
-
-    参数说明：``tmp_path`` 隔离数据库；失败不得留下半装配的进程级工作流服务。
-    """
-
-    reset_workflow_service_for_test()
-    try:
-        with pytest.raises(RegistryTemplateProjectionError, match="身份解析失败"):
-            compose_local_workflow_template_runtime(
-                tmp_path,
-                inventory_store=MissingInventoryStore(),
-                registry=FakeRegistry(),
-            )
     finally:
         reset_workflow_service_for_test()
 
