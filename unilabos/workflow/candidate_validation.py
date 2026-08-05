@@ -56,6 +56,8 @@ def validate_candidate_bundle(
     UUID/修订来自服务层；``source_map`` 和 ``changeset`` 必须精确描述候选；
     ``require_unchanged_graph`` 用于只验证源码的场景。返回已校验候选图的普通
     字典，任何伪造、漂移或不完整关系抛出 ``CandidateBundleError``。
+    异常：身份、目录、源码映射、变更集或图语义不一致时抛出
+    ``CandidateBundleError``。
     """
 
     try:
@@ -312,6 +314,8 @@ def _catalog_projection(
     参数说明：候选目录只能含被节点引用的模板；新模板可由当前目录加入；两个
     节点索引用于认证已发布工作流调用 pin。基线模板及连接点通常必须严格相同，
     只有所有保留调用都证明为精确或可加演进时才允许整代替换。
+    返回：无；仅验证传入目录投影。异常：目录非最小、跨代混用或 pin 认证失败
+    时抛出 ``CandidateBundleError``。
     """
 
     referenced = {

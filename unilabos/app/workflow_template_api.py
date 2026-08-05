@@ -215,6 +215,7 @@ def _summary(action: AuthoringCatalogAction) -> dict[str, Any]:
 
     参数说明：``action`` 是一个聚合后的节点与句柄；返回值仅包含 Backend 列表
     字段，资源模板摘要来自投影时固化的元数据。
+    异常：资源模板摘要缺失时抛出 ``WorkflowTemplateQueryError``。
     """
 
     template = action.template

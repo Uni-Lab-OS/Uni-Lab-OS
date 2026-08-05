@@ -27,7 +27,10 @@ CHILD_MODULE = f"{PACKAGE_ID}.workflows.child"
 
 
 def _child_source() -> str:
-    """返回可被启动恢复与静态目录共同消费的空叶工作流源码。"""
+    """返回可被启动恢复与静态目录共同消费的空叶工作流源码。
+
+    参数：无。返回：固定身份的空叶工作流 Python 源码。异常：无。
+    """
 
     return f'''from unilabos.workflow.authoring import workflow, workflow_output
 
@@ -66,7 +69,11 @@ def _write_package(selected_root: Path) -> None:
 
 
 def _seed_applied_child(working_dir: Path, selected_root: Path) -> None:
-    """在产品启动前写入同修订已应用的叶工作流与来源注册事实。"""
+    """在产品启动前写入同修订已应用的叶工作流与来源注册事实。
+
+    参数：``working_dir`` 是产品工作目录，``selected_root`` 是授权包根。返回：
+    无；提交来源与应用快照。异常：发现、SQLite 或文件读取失败时原样传播。
+    """
 
     plan = discover_editable_sources((selected_root,))
     store = WorkflowStore(working_dir / "workflow_history.db")
@@ -127,7 +134,10 @@ def _seed_applied_child(working_dir: Path, selected_root: Path) -> None:
 
 
 def _parent_source() -> str:
-    """返回只调用发布叶工作流、不创建任务或物理动作的父作者源码。"""
+    """返回只调用发布叶工作流、不创建任务或物理动作的父作者源码。
+
+    参数：无。返回：带稳定调用节点身份的父工作流 Python 源码。异常：无。
+    """
 
     return f'''from {CHILD_MODULE} import prepare_sample
 from unilabos.workflow.authoring import workflow, workflow_output
@@ -145,7 +155,10 @@ def product_parent():
 
 
 def _empty_parent_graph() -> dict[str, object]:
-    """构造生产编译器首次调用使用的空父工作流图。"""
+    """构造生产编译器首次调用使用的空父工作流图。
+
+    参数：无。返回：修订为一的空父图。异常：无。
+    """
 
     return {
         "workflow": {
@@ -164,7 +177,11 @@ def _empty_parent_graph() -> dict[str, object]:
 
 
 def _contract_extension(template: object) -> dict[str, object]:
-    """从目录模板对象或持久 JSON 文本读取发布工作流扩展。"""
+    """从目录模板对象或持久 JSON 文本读取发布工作流扩展。
+
+    参数：``template`` 是目录模板字典，其中 Schema 可为字典或 JSON 文本。
+    返回：发布工作流合同扩展。异常：形状错误时由断言或 JSON 解析抛出。
+    """
 
     assert isinstance(template, dict)
     schema = template["schema"]
@@ -179,7 +196,11 @@ def _contract_extension(template: object) -> dict[str, object]:
 def test_product_composition_publishes_and_restores_workflow_templates(
     tmp_path: Path,
 ) -> None:
-    """生产组合发布同代工作流模板，并在重启后保留身份与可编译性。"""
+    """生产组合发布同代工作流模板，并在重启后保留身份与可编译性。
+
+    参数：``tmp_path`` 隔离产品数据库与包根。返回：无；断言发布、应用重建与
+    重启恢复。异常：产品组合或断言失败时由 pytest 报告。
+    """
 
     reset_workflow_service_for_test()
     selected_root = tmp_path / "editable"

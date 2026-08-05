@@ -16,10 +16,10 @@ from unilabos.workflow.composite import (
     PublishedWorkflowContractError,
     project_published_workflow_contract,
 )
+from unilabos.workflow.store import WorkflowStore
 from unilabos.workflow.template_projection_store import (
     RegistryTemplateProjectionStore,
 )
-from unilabos.workflow.store import WorkflowStore
 
 WORKFLOW_UUID = "51000000-0000-4000-8000-000000000001"
 HOST_RESOURCE_TEMPLATE_UUID = "52000000-0000-4000-8000-000000000001"
@@ -36,7 +36,10 @@ CONTRACT_DIGEST = (
 
 
 def _source_records() -> list[dict[str, str]]:
-    """返回不依赖文件扫描或 Python import 的已发布源码记录。"""
+    """返回不依赖文件扫描或 Python import 的已发布源码记录。
+
+    参数：无。返回：唯一子工作流的冻结来源记录列表。异常：无。
+    """
 
     return [
         {
@@ -55,7 +58,11 @@ def _handle(
     key: str,
     io_type: str,
 ) -> dict[str, Any]:
-    """构造一个与数值工作流输入/输出相容的连接点（Handle）模板。"""
+    """构造一个与数值工作流输入/输出相容的连接点（Handle）模板。
+
+    参数：``handle_uuid`` 是模板身份，``key`` 是业务键，``io_type`` 是方向。
+    返回：可供发布投影校验的数值连接点字典。异常：无。
+    """
 
     return {
         "uuid": handle_uuid,
@@ -73,7 +80,10 @@ def _handle(
 
 
 def _applied_snapshot() -> dict[str, Any]:
-    """返回通过当前公共工作流输入/输出校验的已应用平面图快照。"""
+    """返回通过当前公共工作流输入/输出校验的已应用平面图快照。
+
+    参数：无。返回：包含应用源码、单动作图与目录投影的冻结快照。异常：无。
+    """
 
     timestamp = "2026-08-02T00:00:00Z"
     return {
@@ -176,7 +186,10 @@ def _applied_snapshot() -> dict[str, Any]:
 
 
 def _group_template() -> dict[str, Any]:
-    """构造宿主节点（Host Node）所有的既有分组模板。"""
+    """构造宿主节点（Host Node）所有的既有分组模板。
+
+    参数：无。返回：框架所有的展示分组模板字典。异常：无。
+    """
 
     return {
         "resource_template_uuid": HOST_RESOURCE_TEMPLATE_UUID,
@@ -203,7 +216,11 @@ def _group_template() -> dict[str, Any]:
 
 
 def _projected_contract() -> Any:
-    """通过公共目录解析并投影一个有效已发布工作流合同。"""
+    """通过公共目录解析并投影一个有效已发布工作流合同。
+
+    参数：无。返回：有效的已发布工作流合同投影。异常：来源或快照合同无效时
+    抛出对应目录或 ``PublishedWorkflowContractError``。
+    """
 
     catalog = PublishedSourceCatalog.from_records(_source_records())
     source = catalog.resolve("c1_published_lab.workflows.child", "prepare_sample")
@@ -219,7 +236,11 @@ def _projected_contract() -> Any:
 
 
 def test_published_source_catalog_resolves_one_frozen_static_source() -> None:
-    """已发布源码目录按绝对模块和静态符号唯一解析且顺序不影响摘要。"""
+    """已发布源码目录按绝对模块和静态符号唯一解析且顺序不影响摘要。
+
+    参数：无。返回：无；断言来源身份与摘要稳定。异常：目录解析或断言失败时
+    由 pytest 报告。
+    """
 
     first = PublishedSourceCatalog.from_records(_source_records())
     second = PublishedSourceCatalog.from_records(list(reversed(_source_records())))
@@ -237,7 +258,11 @@ def test_published_source_catalog_resolves_one_frozen_static_source() -> None:
 def test_published_source_catalog_rejects_missing_duplicate_and_dynamic_identity() -> (
     None
 ):
-    """目录对缺失、重复和相对模块身份稳定关闭失败。"""
+    """目录对缺失、重复和相对模块身份稳定关闭失败。
+
+    参数：无。返回：无；断言三类非法来源得到稳定错误码。异常：预期错误未抛
+    或断言不成立时由 pytest 报告。
+    """
 
     catalog = PublishedSourceCatalog.from_records(_source_records())
     with pytest.raises(PublishedSourceCatalogError) as missing:
@@ -256,7 +281,11 @@ def test_published_source_catalog_rejects_missing_duplicate_and_dynamic_identity
 
 
 def test_applied_workflow_projects_exact_contract_digest_and_provenance() -> None:
-    """已应用工作流投影封闭合同、稳定摘要和 package 来源证据。"""
+    """已应用工作流投影封闭合同、稳定摘要和 package 来源证据。
+
+    参数：无。返回：无；断言模板、来源与合同扩展逐字段一致。异常：投影或断言
+    失败时由 pytest 报告。
+    """
 
     projected = _projected_contract()
     assert projected is not None
@@ -293,7 +322,11 @@ def test_applied_workflow_projects_exact_contract_digest_and_provenance() -> Non
 
 
 def test_projection_emits_business_handles_then_separate_ready_handles() -> None:
-    """工作流边界按输入、输出和两个 ready 结构连接点的顺序发布。"""
+    """工作流边界按输入、输出和两个 ready 结构连接点的顺序发布。
+
+    参数：无。返回：无；断言业务与结构连接点（Handle）顺序及语义。异常：投影
+    或断言失败时由 pytest 报告。
+    """
 
     projected = _projected_contract()
     assert projected is not None
@@ -350,7 +383,11 @@ def test_projection_emits_business_handles_then_separate_ready_handles() -> None
 def test_stale_contract_and_missing_host_owner_preserve_previous_generation(
     tmp_path: Path,
 ) -> None:
-    """陈旧修订不发布，宿主所有者缺失也不改变既有模板代际。"""
+    """陈旧修订不发布，宿主所有者缺失也不改变既有模板代际。
+
+    参数：``tmp_path`` 隔离投影存储。返回：无；断言失败发布不污染既有代际。
+    异常：预期错误未抛、存储或断言失败时由 pytest 报告。
+    """
 
     catalog = PublishedSourceCatalog.from_records(_source_records())
     source = catalog.resolve("c1_published_lab.workflows.child", "prepare_sample")

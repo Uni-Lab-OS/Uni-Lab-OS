@@ -185,7 +185,11 @@ def _normalize_record(record: Mapping[str, Any], *, index: int) -> dict[str, str
 
 
 def _absolute_module(value: Any) -> bool:
-    """判断字符串是否由一个或多个 Python 标识符组成且不是相对模块。"""
+    """判断字符串是否由一个或多个 Python 标识符组成且不是相对模块。
+
+    参数：``value`` 是待校验值。返回：绝对模块身份合法时为 ``True``。
+    异常：无；非字符串和值为空时返回 ``False``。
+    """
 
     return isinstance(value, str) and bool(value) and all(
         _identifier(part) for part in value.split(".")
@@ -193,7 +197,11 @@ def _absolute_module(value: Any) -> bool:
 
 
 def _identifier(value: Any) -> bool:
-    """判断值是否为非关键字约束之外的静态 Python 标识符。"""
+    """判断值是否为非关键字约束之外的静态 Python 标识符。
+
+    参数：``value`` 是待校验值。返回：非空 Python 标识符时为 ``True``。
+    异常：无；非字符串和值为空时返回 ``False``。
+    """
 
     return isinstance(value, str) and bool(value) and value.isidentifier()
 

@@ -11,6 +11,12 @@ from typing import Any
 import rfc8785
 
 from unilabos.workflow.catalog import PublishedWorkflowSource
+from unilabos.workflow.composite_expansion import (
+    CompositeAuthoring,
+    CompositeExpansion,
+    PublishedWorkflowResolver,
+    PublishedWorkflowSnapshotProvider,
+)
 from unilabos.workflow.handle_projection import (
     resource_slot_schema,
     structural_ready_handle,
@@ -20,12 +26,6 @@ from unilabos.workflow.models import validate_uuid
 from unilabos.workflow.workflow_io import (
     WorkflowIOValidationError,
     validate_workflow_graph_io,
-)
-from unilabos.workflow.composite_expansion import (
-    CompositeAuthoring,
-    CompositeExpansion,
-    PublishedWorkflowResolver,
-    PublishedWorkflowSnapshotProvider,
 )
 
 _SHA256 = re.compile(r"sha256:[0-9a-f]{64}\Z")
@@ -38,6 +38,7 @@ class PublishedWorkflowContractError(ValueError):
         """保存稳定错误码和诊断路径。
 
         参数：``code`` 是关闭失败分类，``path`` 是 JSON Pointer。返回：无。
+        异常：无；构造器只保存已判定的失败结果。
         """
 
         self.code = code
@@ -207,7 +208,12 @@ def _workflow_schema(
     contract_digest: str,
     composition_allow_transparent: bool,
 ) -> dict[str, Any]:
-    """构造前端与 OS 共同验证的封闭工作流节点 Schema。"""
+    """构造前端与 OS 共同验证的封闭工作流节点 Schema。
+
+    参数：``inputs``/``outputs`` 是规范边界描述，工作流身份、修订、源码摘要、
+    合同摘要和组合模式构成冻结 pin。返回：封闭节点 JSON Schema。异常：描述符
+    缺少规范名称或 Schema 时抛出 ``KeyError``。
+    """
 
     return {
         "type": "object",
@@ -253,7 +259,12 @@ def _contract_digest(
     outputs: Sequence[Mapping[str, Any]],
     composition_allow_transparent: bool,
 ) -> str:
-    """计算 C1 v1 字节稳定合同摘要，排除展示文字与运行身份。"""
+    """计算 C1 v1 字节稳定合同摘要，排除展示文字与运行身份。
+
+    参数：``inputs``/``outputs`` 是边界描述，``composition_allow_transparent``
+    是冻结组合模式。返回：带 ``sha256:`` 前缀的规范摘要。异常：描述含不可规范
+    JSON 值时由 RFC 8785 编码器抛出。
+    """
 
     payload = {
         "version": 1,
@@ -265,7 +276,10 @@ def _contract_digest(
 
 
 def _semantic_descriptor(raw: Mapping[str, Any]) -> dict[str, Any]:
-    """移除不影响兼容性的标题和说明并返回分离 JSON 对象。"""
+    """移除不影响兼容性的标题和说明并返回分离 JSON 对象。
+
+    参数：``raw`` 是规范边界描述符。返回：去除展示字段的递归副本。异常：无。
+    """
 
     return {
         str(key): _plain(value)
@@ -280,7 +294,12 @@ def _value_handle(
     io_type: str,
     node_business_key: tuple[str, str],
 ) -> dict[str, Any]:
-    """把一个规范输入或输出描述符投影为业务连接点候选。"""
+    """把一个规范输入或输出描述符投影为业务连接点候选。
+
+    参数：``descriptor`` 是规范边界描述，``io_type`` 是方向，
+    ``node_business_key`` 是父模板业务身份。返回：业务连接点候选。异常：描述符
+    缺少名称或 Schema 时抛出 ``KeyError``。
+    """
 
     name = str(descriptor["name"])
     schema = _plain(descriptor["schema"])
@@ -321,7 +340,11 @@ def _ready_handle(
     *,
     node_business_key: tuple[str, str],
 ) -> dict[str, Any]:
-    """为结构性 ready 连接点补充父节点稳定业务身份。"""
+    """为结构性 ready 连接点补充父节点稳定业务身份。
+
+    参数：``io_type`` 是方向，``node_business_key`` 是父模板业务身份。返回：
+    带父身份的 ready 连接点候选。异常：方向不合法时由投影器抛出 ``ValueError``。
+    """
 
     handle = structural_ready_handle(io_type)
     handle["node_business_key"] = node_business_key
@@ -329,7 +352,11 @@ def _ready_handle(
 
 
 def _composition_mode(workflow: Mapping[str, Any]) -> bool:
-    """读取当前仅允许布尔值的透明组合声明。"""
+    """读取当前仅允许布尔值的透明组合声明。
+
+    参数：``workflow`` 是已应用工作流投影。返回：透明组合布尔声明。异常：声明
+    非布尔值时抛出 ``PublishedWorkflowContractError``。
+    """
 
     meta_data = workflow.get("meta_data")
     unilab = meta_data.get("unilab") if isinstance(meta_data, Mapping) else None
@@ -347,7 +374,11 @@ def _composition_mode(workflow: Mapping[str, Any]) -> bool:
 
 
 def _host_summary(value: Mapping[str, Any] | None) -> dict[str, str]:
-    """校验并复制宿主节点资源模板的最小摘要。"""
+    """校验并复制宿主节点资源模板的最小摘要。
+
+    参数：``value`` 是宿主节点资源模板摘要。返回：只含规范身份和名称的副本。
+    异常：字段集、UUID 或名称无效时抛出 ``PublishedWorkflowContractError``。
+    """
 
     if not isinstance(value, Mapping) or set(value) != {
         "uuid",
@@ -370,7 +401,11 @@ def _host_summary(value: Mapping[str, Any] | None) -> dict[str, str]:
 
 
 def _uuid(value: Any, path: str) -> str:
-    """校验规范 UUID 并把失败映射为发布合同错误。"""
+    """校验规范 UUID 并把失败映射为发布合同错误。
+
+    参数：``value`` 是待校验身份，``path`` 是诊断路径。返回：规范 UUID 字符串。
+    异常：身份无效或非规范表示时抛出 ``PublishedWorkflowContractError``。
+    """
 
     try:
         identity = validate_uuid(value)
@@ -388,7 +423,11 @@ def _uuid(value: Any, path: str) -> str:
 
 
 def _digest(value: Any, path: str) -> str:
-    """校验小写 SHA-256 wire 字符串。"""
+    """校验小写 SHA-256 wire 字符串。
+
+    参数：``value`` 是待校验摘要，``path`` 是诊断路径。返回：规范摘要字符串。
+    异常：类型或格式无效时抛出 ``PublishedWorkflowContractError``。
+    """
 
     if not isinstance(value, str) or _SHA256.fullmatch(value) is None:
         raise PublishedWorkflowContractError(
@@ -399,7 +438,11 @@ def _digest(value: Any, path: str) -> str:
 
 
 def _array(value: Any, path: str) -> list[Any]:
-    """复制必填数组外壳并为非法结构提供稳定路径。"""
+    """复制必填数组外壳并为非法结构提供稳定路径。
+
+    参数：``value`` 是数组候选，``path`` 是诊断路径。返回：递归分离的列表。
+    异常：候选不是列表时抛出 ``PublishedWorkflowContractError``。
+    """
 
     if not isinstance(value, list):
         raise PublishedWorkflowContractError("composite_catalog_mismatch", path)
@@ -407,7 +450,11 @@ def _array(value: Any, path: str) -> list[Any]:
 
 
 def _plain(value: Any) -> Any:
-    """递归复制 JSON 映射与数组，避免发布候选共享调用方容器。"""
+    """递归复制 JSON 映射与数组，避免发布候选共享调用方容器。
+
+    参数：``value`` 是 JSON 兼容值。返回：容器递归分离后的等价值。异常：无；
+    标量按原值返回。
+    """
 
     if isinstance(value, Mapping):
         return {str(key): _plain(item) for key, item in value.items()}
@@ -419,9 +466,9 @@ def _plain(value: Any) -> Any:
 __all__ = [
     "CompositeAuthoring",
     "CompositeExpansion",
-    "PublishedWorkflowResolver",
-    "PublishedWorkflowSnapshotProvider",
     "PublishedWorkflowContract",
     "PublishedWorkflowContractError",
+    "PublishedWorkflowResolver",
+    "PublishedWorkflowSnapshotProvider",
     "project_published_workflow_contract",
 ]

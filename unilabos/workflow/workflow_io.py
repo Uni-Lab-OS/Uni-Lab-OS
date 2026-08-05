@@ -675,6 +675,7 @@ def _projected_material_value_schema(
     参数说明：``schema`` 是动作合同投影保留的对象、数组或可空物料引用；返回
     对应的 ``ResourceSlot``、物料数组或可空规范 Schema，非物料字段返回
     ``None``。物料锁标记只决定执行占用，不进入工作流值类型。
+    异常：无；无法识别的 Schema 关闭式返回 ``None``。
     """
 
     # 已规范化工作流连接点（Handle）会直接携带物料占位符

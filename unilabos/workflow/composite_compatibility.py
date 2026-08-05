@@ -6,7 +6,7 @@ import hashlib
 import json
 import re
 from collections.abc import Mapping, Sequence
-from typing import Any
+from typing import Any, Literal
 
 import rfc8785
 
@@ -17,6 +17,7 @@ from unilabos.workflow.handle_projection import (
 from unilabos.workflow.models import validate_uuid
 
 _SHA256 = re.compile(r"sha256:[0-9a-f]{64}\Z")
+PublishedWorkflowCompatibility = Literal["exact", "additive", "breaking"]
 _CONTRACT_FIELDS = {
     "version",
     "compatibility_version",
@@ -38,11 +39,11 @@ def published_workflow_compatibility_projection(
 
     参数：``template`` 与 ``handles`` 是同一已发布工作流模板聚合。返回：只含
     稳定身份、模式、摘要和有序输入/输出描述符的独立 JSON 对象。异常：聚合
-    不是框架生成的封闭 v1 合同时抛出 ``ValueError``。
+    不是框架生成的封闭 v1 合同时抛出 ``TypeError`` 或 ``ValueError``。
     """
 
     if not isinstance(template, Mapping) or not isinstance(handles, Sequence):
-        raise ValueError("已发布工作流合同聚合无效")
+        raise TypeError("已发布工作流合同聚合无效")
     template_uuid = _uuid(template.get("uuid"))
     _uuid(template.get("resource_template_uuid"))
     schema = _schema_object(template.get("schema"))
@@ -167,11 +168,12 @@ def published_workflow_projection_is_canonical(
 def classify_published_workflow_compatibility_projections(
     previous: Mapping[str, Any],
     current: Mapping[str, Any],
-) -> str:
+) -> PublishedWorkflowCompatibility:
     """按 v1 规则分类两个已认证兼容性投影。
 
     参数：``previous`` 是调用节点冻结值，``current`` 是当前目录值。返回：
     ``exact``、``additive`` 或 ``breaking``；形状不可信一律为 ``breaking``。
+    异常：无；所有不可信输入均收敛为 ``breaking``。
     """
 
     required = {
@@ -328,7 +330,11 @@ def classify_pinned_published_workflow_invocation(
 
 
 def _validate_provenance(template: Mapping[str, Any]) -> None:
-    """认证模板来源证据与可调用类身份。"""
+    """认证模板来源证据与可调用类身份。
+
+    参数：``template`` 是已发布工作流节点模板。返回：无。异常：所有者标志、
+    package 来源证据或可调用类身份不自洽时抛出 ``ValueError``。
+    """
 
     meta_data = template.get("meta_data")
     unilab = meta_data.get("unilab") if isinstance(meta_data, Mapping) else None
@@ -354,7 +360,12 @@ def _contract_envelopes(
     input_order: Sequence[str],
     output_order: Sequence[str],
 ) -> tuple[Mapping[str, Any], Mapping[str, Any]]:
-    """认证封闭输入/输出 Schema 并返回两个信封。"""
+    """认证封闭输入/输出 Schema 并返回两个信封。
+
+    参数：``schema`` 是节点合同，两个顺序固定输入/输出字段。返回：goal 与 result
+    封闭 Schema。异常：信封类型错误时抛出 ``TypeError``；字段集、必填集或
+    顺序不一致时抛出 ``ValueError``。
+    """
 
     properties = schema.get("properties")
     if not isinstance(properties, Mapping) or set(properties) != {"goal", "result"}:
@@ -366,7 +377,7 @@ def _contract_envelopes(
         (result, output_order, True),
     ):
         if not isinstance(envelope, Mapping):
-            raise ValueError("已发布工作流 Schema 信封无效")
+            raise TypeError("已发布工作流 Schema 信封无效")
         values = envelope.get("properties")
         required = envelope.get("required")
         if (
@@ -387,7 +398,12 @@ def _handle_index(
     handles: Sequence[Mapping[str, Any]],
     template_uuid: str,
 ) -> dict[tuple[str, str], Mapping[str, Any]]:
-    """认证连接点父身份并按方向与业务键索引。"""
+    """认证连接点父身份并按方向与业务键索引。
+
+    参数：``handles`` 是聚合连接点，``template_uuid`` 是唯一父模板身份。返回：
+    按 ``(方向, 业务键)`` 索引的连接点。异常：父身份、方向、业务键或唯一性
+    无效时抛出 ``ValueError``。
+    """
 
     indexed: dict[tuple[str, str], Mapping[str, Any]] = {}
     for handle in handles:
@@ -413,7 +429,12 @@ def _validate_value_handle(
     required: bool,
     io_type: str,
 ) -> Mapping[str, Any]:
-    """认证一个业务值连接点并返回框架元数据。"""
+    """认证一个业务值连接点并返回框架元数据。
+
+    参数：``handle`` 是业务连接点，``schema``/``required``/``io_type`` 是合同
+    期望。返回：认证后的 ``meta_data.unilab`` 映射。异常：方向、类型、必填性、
+    数据键或 Schema 不一致时抛出 ``ValueError``。
+    """
 
     name = str(handle.get("handle_key"))
     meta_data = handle.get("meta_data")
@@ -443,7 +464,11 @@ def _validate_value_handle(
 
 
 def _validate_ready_handle(handle: Mapping[str, Any], io_type: str) -> None:
-    """认证结构性 ready 连接点（Handle）。"""
+    """认证结构性 ready 连接点（Handle）。
+
+    参数：``handle`` 是连接点，``io_type`` 是期望方向。返回：无。异常：结构
+    角色、方向或固定布尔合同不一致时抛出 ``ValueError``。
+    """
 
     meta_data = handle.get("meta_data")
     unilab = meta_data.get("unilab") if isinstance(meta_data, Mapping) else None
@@ -461,7 +486,11 @@ def _validate_ready_handle(handle: Mapping[str, Any], io_type: str) -> None:
 
 
 def _pin_matches_projection(pin: Mapping[str, Any], projection: Mapping[str, Any]) -> bool:
-    """判断实现 pin 与兼容性投影的公共字段是否自洽。"""
+    """判断实现 pin 与兼容性投影的公共字段是否自洽。
+
+    参数：``pin`` 是调用冻结实现身份，``projection`` 是认证兼容性投影。返回：
+    所有公共字段一致时为 ``True``。异常：无；缺字段视为不匹配。
+    """
 
     return all(
         pin.get(key) == projection.get(projection_key)
@@ -479,7 +508,11 @@ def _contract_digest(
     outputs: Sequence[Mapping[str, Any]],
     mode: bool,
 ) -> str:
-    """从兼容性描述符重算 C1 v1 合同摘要。"""
+    """从兼容性描述符重算 C1 v1 合同摘要。
+
+    参数：``inputs``/``outputs`` 是认证边界描述符，``mode`` 是组合模式。返回：
+    规范 SHA-256 摘要。异常：描述符字段缺失或含不可编码值时抛出相应异常。
+    """
 
     input_descriptors = []
     for item in inputs:
@@ -509,7 +542,11 @@ def _contract_digest(
 
 
 def _schema_object(value: Any) -> dict[str, Any]:
-    """把冻结映射或持久 JSON 文本恢复为独立 Schema 对象。"""
+    """把冻结映射或持久 JSON 文本恢复为独立 Schema 对象。
+
+    参数：``value`` 是映射或持久 JSON 文本。返回：独立 Schema 字典。异常：
+    JSON 无效或解码结果不是对象时抛出 ``ValueError``/``JSONDecodeError``。
+    """
 
     if isinstance(value, Mapping):
         return _plain(value)
@@ -521,7 +558,11 @@ def _schema_object(value: Any) -> dict[str, Any]:
 
 
 def _uuid(value: Any) -> str:
-    """返回规范 UUID；非法或非规范值抛出 ``ValueError``。"""
+    """返回规范 UUID。
+
+    参数：``value`` 是待校验身份。返回：规范 UUID 字符串。异常：非法或非规范
+    表示时抛出 ``ValueError``。
+    """
 
     identity = validate_uuid(value)
     if identity != value:
@@ -530,13 +571,20 @@ def _uuid(value: Any) -> str:
 
 
 def _digest(value: Any) -> bool:
-    """判断值是否为规范小写 SHA-256 wire 字符串。"""
+    """判断值是否为规范小写 SHA-256 wire 字符串。
+
+    参数：``value`` 是待检查值。返回：格式规范时为 ``True``。异常：无。
+    """
 
     return isinstance(value, str) and _SHA256.fullmatch(value) is not None
 
 
 def _dotted(value: Any) -> bool:
-    """判断值是否为非相对点分 Python 身份。"""
+    """判断值是否为非相对点分 Python 身份。
+
+    参数：``value`` 是待检查值。返回：每段均为标识符且非相对时为 ``True``。
+    异常：无；非字符串返回 ``False``。
+    """
 
     return isinstance(value, str) and not value.startswith(".") and all(
         part.isidentifier() for part in value.split(".")
@@ -544,7 +592,11 @@ def _dotted(value: Any) -> bool:
 
 
 def _order(value: Any) -> list[str]:
-    """认证无重复非空字符串顺序并返回独立数组。"""
+    """认证无重复非空字符串顺序并返回独立数组。
+
+    参数：``value`` 是输入或输出顺序候选。返回：独立字符串列表。异常：容器、
+    元素或唯一性无效时抛出 ``ValueError``。
+    """
 
     if (
         not isinstance(value, (list, tuple))
@@ -556,7 +608,10 @@ def _order(value: Any) -> list[str]:
 
 
 def _plain(value: Any) -> Any:
-    """递归复制冻结 JSON 容器。"""
+    """递归复制冻结 JSON 容器。
+
+    参数：``value`` 是 JSON 兼容值。返回：容器递归分离后的等价值。异常：无。
+    """
 
     if isinstance(value, Mapping):
         return {str(key): _plain(item) for key, item in value.items()}

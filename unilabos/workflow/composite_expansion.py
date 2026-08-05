@@ -40,14 +40,22 @@ class PublishedWorkflowSnapshotProvider(Protocol):
         self,
         workflow_uuid: str,
     ) -> Mapping[str, Any]:
-        """返回已应用工作流快照；不存在时抛出 ``LookupError``。"""
+        """返回已应用工作流快照。
+
+        参数：``workflow_uuid`` 是工作流身份。返回：同视图冻结快照。异常：身份
+        不存在时抛出 ``LookupError``。
+        """
 
 
 class PublishedWorkflowResolver(Protocol):
     """按绝对模块与静态符号解析已发布工作流来源的窄端口。"""
 
     def resolve(self, module: str, symbol: str) -> PublishedWorkflowSource:
-        """返回唯一冻结来源；不存在或歧义时抛出目录错误。"""
+        """返回唯一冻结来源。
+
+        参数：``module`` 与 ``symbol`` 是绝对导入身份。返回：发布来源值对象。
+        异常：不存在或歧义时抛出目录错误。
+        """
 
 
 @dataclass(frozen=True, slots=True)
@@ -71,7 +79,11 @@ class _CompositeFailure(RuntimeError):
     """把内部失败收敛成稳定诊断而不泄漏快照内容。"""
 
     def __init__(self, code: str, path: str) -> None:
-        """保存公共错误码和 JSON Pointer 路径。"""
+        """保存公共错误码和 JSON Pointer 路径。
+
+        参数：``code`` 是稳定诊断码，``path`` 是失败位置。返回：无。异常：无；
+        构造器只保存已判定结果。
+        """
 
         self.code = code
         self.path = path
@@ -189,7 +201,13 @@ class CompositeAuthoring:
         base_node: Mapping[str, Any] | None,
         parent_input_contract: Mapping[str, object] | None,
     ) -> CompositeExpansion:
-        """验证一个快照并构造直接子工作流的平面展开结果。"""
+        """验证一个快照并构造直接子工作流的平面展开结果。
+
+        参数：父/调用/父层级身份决定展开命名空间，``source`` 与 ``snapshot``
+        是同一发布来源，关键字参数、工作流栈、基础节点和父输入合同提供递归上下文。
+        返回：完整组合展开结果。异常：快照、目录、边界、pin 或递归不安全时抛出
+        ``_CompositeFailure``，由公共入口收敛为零写诊断。
+        """
 
         if source.workflow_uuid in workflow_stack:
             raise _CompositeFailure(
@@ -478,7 +496,12 @@ def _published_template(
     revision: int,
     applied_source_hash: Any,
 ) -> tuple[AuthoringCatalogAction, dict[str, Any]]:
-    """取得并鉴别与来源、修订和应用哈希一致的工作流模板。"""
+    """取得并鉴别与来源、修订和应用哈希一致的工作流模板。
+
+    参数：``catalog`` 是冻结目录，``source`` 是发布来源，``revision`` 与
+    ``applied_source_hash`` 是快照 pin。返回：目录聚合及其合同扩展。异常：模板
+    缺失、重复、来源或 pin 不一致时抛出 ``_CompositeFailure``。
+    """
 
     matches = [
         action
@@ -523,7 +546,12 @@ def _normalize_arguments(
     input_contract: Mapping[str, Any],
     keyword_arguments: Mapping[str, object],
 ) -> dict[str, object]:
-    """核对关键字边界覆盖并补入合同默认值。"""
+    """核对关键字边界覆盖并补入合同默认值。
+
+    参数：``input_contract`` 是规范输入合同，``keyword_arguments`` 是作者实参。
+    返回：按合同顺序补齐默认值的独立实参字典。异常：字段、覆盖、必填或额外
+    参数不合法时抛出 ``_CompositeFailure``。
+    """
 
     parameters = input_contract.get("parameters")
     if not isinstance(parameters, list):
@@ -555,7 +583,12 @@ def _source_from_template(
     resolver: PublishedWorkflowResolver,
     action: AuthoringCatalogAction,
 ) -> PublishedWorkflowSource:
-    """从封闭工作流模板取得绝对导入身份并解析冻结来源。"""
+    """从封闭工作流模板取得绝对导入身份并解析冻结来源。
+
+    参数：``resolver`` 是只读来源端口，``action`` 是封闭工作流模板聚合。返回：
+    唯一发布来源。异常：类身份无效、来源缺失或解析结果类型错误时抛出
+    ``_CompositeFailure``。
+    """
 
     class_name = action.template.get("class")
     if not isinstance(class_name, str) or class_name.count(":") != 1:
@@ -571,7 +604,11 @@ def _source_from_template(
 
 
 def _node_keyword_arguments(node: Mapping[str, Any]) -> dict[str, object]:
-    """复制已应用组合节点保存的边界参数。"""
+    """复制已应用组合节点保存的边界参数。
+
+    参数：``node`` 是已应用组合调用节点。返回：字符串键的独立参数字典。异常：
+    参数不是映射或含非字符串键时抛出 ``_CompositeFailure``。
+    """
 
     arguments = node.get("param")
     if not isinstance(arguments, Mapping) or any(
@@ -611,7 +648,11 @@ def _assert_nested_pin(
 
 
 def _validate_parent_tree(nodes: Mapping[str, Mapping[str, Any]]) -> None:
-    """验证直接子图父引用存在且层级无环。"""
+    """验证直接子图父引用存在且层级无环。
+
+    参数：``nodes`` 是按 UUID 索引的直接子图。返回：无。异常：父引用不存在或
+    父层级成环时抛出 ``_CompositeFailure``。
+    """
 
     for node_uuid, node in nodes.items():
         seen = {node_uuid}
@@ -633,7 +674,11 @@ def _validate_parent_tree(nodes: Mapping[str, Mapping[str, Any]]) -> None:
 
 
 def _unique_edges(edges: Sequence[Mapping[str, Any]]) -> list[dict[str, Any]]:
-    """按 UUID 去重完整展开边并拒绝身份碰撞。"""
+    """按 UUID 去重完整展开边并拒绝身份碰撞。
+
+    参数：``edges`` 是直接与递归展开边。返回：按 UUID 排序的独立边列表。
+    异常：相同 UUID 对应不同边事实时抛出 ``_CompositeFailure``。
+    """
 
     result: dict[str, dict[str, Any]] = {}
     for raw in edges:
@@ -653,7 +698,11 @@ def _assert_acyclic(
     nodes: Sequence[Mapping[str, Any]],
     edges: Sequence[Mapping[str, Any]],
 ) -> None:
-    """验证展开后的完整业务边图仍为有向无环图。"""
+    """验证展开后的完整业务边图仍为有向无环图。
+
+    参数：``nodes`` 与 ``edges`` 是完整展开图。返回：无。异常：边引用图外节点
+    或图成环时抛出 ``_CompositeFailure``。
+    """
 
     node_uuids = {str(node["uuid"]) for node in nodes}
     incoming = {node_uuid: 0 for node_uuid in node_uuids}
@@ -691,7 +740,12 @@ def _expand_edges(
     node_uuid_map: Mapping[str, str],
     parent_workflow_uuid: str,
 ) -> list[dict[str, Any]]:
-    """复制内部边并按父工作流创作边规则重算身份。"""
+    """复制内部边并按父工作流创作边规则重算身份。
+
+    参数：``raw_edges`` 是子图边，``node_uuid_map`` 是展开身份映射，
+    ``parent_workflow_uuid`` 是父图命名空间。返回：重算身份后的独立边列表。
+    异常：字段、端点、方向或重复身份无效时抛出 ``_CompositeFailure``。
+    """
 
     edges: list[dict[str, Any]] = []
     seen: set[str] = set()
@@ -747,7 +801,12 @@ def _target_mappings(
     boundary_handles: Sequence[Mapping[str, Any]],
     node_uuid_map: Mapping[str, str],
 ) -> dict[str, list[dict[str, str]]]:
-    """把工作流输入绑定投影到真实展开节点目标连接点。"""
+    """把工作流输入绑定投影到真实展开节点目标连接点。
+
+    参数：输入合同、节点输入绑定、边界连接点与节点身份映射来自同一快照。返回：
+    按边界连接点索引的内部目标列表。异常：覆盖、节点或连接点身份无效时抛出
+    ``_CompositeFailure``。
+    """
 
     result: dict[str, list[dict[str, str]]] = {}
     for descriptor in input_contract["parameters"]:
@@ -784,7 +843,12 @@ def _source_mappings(
     boundary_handles: Sequence[Mapping[str, Any]],
     node_uuid_map: Mapping[str, str],
 ) -> dict[str, dict[str, str]]:
-    """把工作流输出绑定投影到展开节点输出或父输入。"""
+    """把工作流输出绑定投影到展开节点输出或父输入。
+
+    参数：输出合同、输出绑定、边界连接点与节点身份映射来自同一快照。返回：
+    按边界连接点索引的来源绑定。异常：输出节点或边界身份无效时抛出
+    ``_CompositeFailure``。
+    """
 
     result: dict[str, dict[str, str]] = {}
     for descriptor in output_contract["outputs"]:
@@ -867,7 +931,12 @@ def _ready_handle_uuid(
     node: Mapping[str, Any],
     io_type: str,
 ) -> str:
-    """取得一个内部节点模板唯一 ready 连接点身份。"""
+    """取得一个内部节点模板唯一 ready 连接点身份。
+
+    参数：``catalog`` 是冻结目录，``node`` 是内部节点，``io_type`` 是方向。
+    返回：唯一 ready 连接点 UUID。异常：模板缺失或连接点不唯一时抛出
+    ``_CompositeFailure``。
+    """
 
     try:
         action = catalog.require_template(str(node["workflow_node_template_uuid"]))
@@ -888,7 +957,11 @@ def _boundary_handle_uuid(
     name: str,
     io_type: str,
 ) -> str:
-    """取得发布工作流边界唯一业务连接点身份。"""
+    """取得发布工作流边界唯一业务连接点身份。
+
+    参数：``handles`` 是边界全集，``name`` 是业务键，``io_type`` 是方向。返回：
+    唯一边界连接点 UUID。异常：缺失或不唯一时抛出 ``_CompositeFailure``。
+    """
 
     matches = [
         handle
@@ -918,7 +991,12 @@ def _invocation_node(
     structural_mappings: Mapping[str, Sequence[Mapping[str, str]]],
     base_node: Mapping[str, Any] | None,
 ) -> dict[str, Any]:
-    """构造父图中真实存在但不拥有运行时任务权威的调用节点。"""
+    """构造父图中真实存在但不拥有运行时任务权威的调用节点。
+
+    参数：父/调用/父层级/模板身份与 ``symbol`` 定义节点；实参、pin、兼容性及
+    三类映射形成组合元数据；``base_node`` 可保留已应用展示形状。返回：独立调用
+    节点字典。异常：无；调用方已认证全部输入。
+    """
 
     composite = {
         "version": 1,
@@ -1045,7 +1123,12 @@ def _referenced_templates(
     template_action: AuthoringCatalogAction,
     nodes: Sequence[Mapping[str, Any]],
 ) -> tuple[list[dict[str, Any]], list[dict[str, Any]]]:
-    """返回调用节点和内部节点实际引用的去重模板/连接点全集。"""
+    """返回调用节点和内部节点实际引用的去重模板/连接点全集。
+
+    参数：``catalog`` 是冻结目录，``template_action`` 是调用模板，``nodes`` 是
+    展开内部节点。返回：按模板身份排序的模板及其连接点全集。异常：节点引用
+    目录外模板时抛出 ``_CompositeFailure``。
+    """
 
     actions = {str(template_action.template["uuid"]): template_action}
     for node in nodes:
@@ -1070,7 +1153,12 @@ def _effective_parent_input_contract(
     child_input_contract: Mapping[str, Any],
     keyword_arguments: Mapping[str, object],
 ) -> dict[str, Any]:
-    """沿工作流输入绑定传播物料占位符（ResourceSlot）允许集合交集。"""
+    """沿工作流输入绑定传播物料占位符（ResourceSlot）允许集合交集。
+
+    参数：父/子输入合同与调用实参描述同一边界绑定。返回：更新允许集合后的
+    独立父输入合同。异常：合同形状、Schema 可赋值性或集合交集不成立时抛出
+    ``_CompositeFailure``。
+    """
 
     effective = _plain(parent_input_contract)
     parameters = effective.get("parameters")
@@ -1147,7 +1235,12 @@ def _effective_parent_input_contract(
 
 
 def _slot_allowlist(slot_schema: Mapping[str, Any]) -> list[str] | None:
-    """读取规范物料占位符（ResourceSlot）的可选非空 UUID 允许集合。"""
+    """读取规范物料占位符（ResourceSlot）的可选非空 UUID 允许集合。
+
+    参数：``slot_schema`` 是已定位的物料占位符 Schema。返回：排序、去重验证过
+    的 UUID 列表，省略约束时为 ``None``。异常：集合为空、重复或身份无效时抛出
+    ``_CompositeFailure``。
+    """
 
     raw = slot_schema.get("allowed_resource_template_uuids")
     if raw is None:
@@ -1179,7 +1272,11 @@ def _replace_slot_allowlist(
     schema: Mapping[str, Any],
     allowlist: list[str] | None,
 ) -> dict[str, Any]:
-    """在保留数组/可空包装的同时替换唯一物料模板允许集合。"""
+    """在保留数组/可空包装的同时替换唯一物料模板允许集合。
+
+    参数：``schema`` 是物料值 Schema，``allowlist`` 是新集合或全集标志。返回：
+    保留数组/可空外壳的独立 Schema。异常：无；调用方已认证唯一占位符形状。
+    """
 
     result = _plain(schema)
     if result.get("$slot") == "ResourceSlot":
@@ -1217,7 +1314,11 @@ def _reject_private_providers(
     private_node_uuids = {str(node["uuid"]) for node in nodes}
 
     def visit(value: object, path: str) -> None:
-        """递归检查一个 JSON 值中的节点输出来源引用。"""
+        """递归检查一个 JSON 值中的节点输出来源引用。
+
+        参数：``value`` 是当前 JSON 值，``path`` 是诊断路径。返回：无。异常：
+        引用本次展开私有节点时抛出 ``_CompositeFailure``。
+        """
 
         if isinstance(value, Mapping):
             if (
@@ -1236,7 +1337,11 @@ def _reject_private_providers(
 
 
 def _failed_expansion(code: str, path: str) -> CompositeExpansion:
-    """构造不含任何候选事实的单诊断失败结果。"""
+    """构造不含任何候选事实的单诊断失败结果。
+
+    参数：``code`` 是稳定错误码，``path`` 是 JSON Pointer。返回：零图事实、
+    单诊断的组合展开结果。异常：无。
+    """
 
     return CompositeExpansion(
         invocation_node=None,
@@ -1261,7 +1366,11 @@ def _failed_expansion(code: str, path: str) -> CompositeExpansion:
 
 
 def _canonical_uuid(value: Any, code: str, path: str) -> str:
-    """校验规范 UUID 并映射为稳定组合诊断。"""
+    """校验规范 UUID 并映射为稳定组合诊断。
+
+    参数：``value`` 是身份候选，``code``/``path`` 是失败诊断。返回：规范 UUID。
+    异常：身份非法或非规范表示时抛出 ``_CompositeFailure``。
+    """
 
     try:
         identity = validate_uuid(value)
@@ -1273,7 +1382,11 @@ def _canonical_uuid(value: Any, code: str, path: str) -> str:
 
 
 def _mapping(value: Any, path: str) -> dict[str, Any]:
-    """复制必填 JSON 对象并在形状非法时关闭失败。"""
+    """复制必填 JSON 对象并在形状非法时关闭失败。
+
+    参数：``value`` 是对象候选，``path`` 是诊断路径。返回：递归分离字典。
+    异常：候选不是映射时抛出 ``_CompositeFailure``。
+    """
 
     if not isinstance(value, Mapping):
         raise _CompositeFailure("composite_boundary_mapping_invalid", path)
@@ -1281,7 +1394,11 @@ def _mapping(value: Any, path: str) -> dict[str, Any]:
 
 
 def _sequence(value: Any, path: str) -> list[Any]:
-    """复制必填 JSON 数组并在形状非法时关闭失败。"""
+    """复制必填 JSON 数组并在形状非法时关闭失败。
+
+    参数：``value`` 是数组候选，``path`` 是诊断路径。返回：递归分离列表。
+    异常：候选不是列表时抛出 ``_CompositeFailure``。
+    """
 
     if not isinstance(value, list):
         raise _CompositeFailure("composite_boundary_mapping_invalid", path)
@@ -1289,7 +1406,11 @@ def _sequence(value: Any, path: str) -> list[Any]:
 
 
 def _schema_object(value: Any) -> dict[str, Any]:
-    """把目录中对象或 JSON 文本 Schema 规范为分离字典。"""
+    """把目录中对象或 JSON 文本 Schema 规范为分离字典。
+
+    参数：``value`` 是映射或 JSON 文本 Schema。返回：独立 Schema 字典。异常：
+    JSON 无效或解码结果不是对象时抛出 ``_CompositeFailure``。
+    """
 
     if isinstance(value, Mapping):
         return _plain(value)
@@ -1304,7 +1425,10 @@ def _schema_object(value: Any) -> dict[str, Any]:
 
 
 def _plain(value: Any) -> Any:
-    """递归复制冻结映射/元组为普通 JSON 容器。"""
+    """递归复制冻结映射/元组为普通 JSON 容器。
+
+    参数：``value`` 是 JSON 兼容值。返回：容器递归分离后的等价值。异常：无。
+    """
 
     if isinstance(value, Mapping):
         return {str(key): _plain(item) for key, item in value.items()}

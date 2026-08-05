@@ -7,10 +7,11 @@ from copy import deepcopy
 import pytest
 
 from unilabos.workflow.authoring_kernel import AuthoringCatalogSnapshot
-from unilabos.workflow.composite import CompositeAuthoring
+from unilabos.workflow.composite import CompositeAuthoring, CompositeExpansion
 
 from .test_c1_r2_static_expansion_contract import (
     ACTION_VALUE_SOURCE_UUID,
+    APPLIED_SOURCE_HASH,
     CHILD_NODE_UUID,
     CHILD_TEMPLATE_UUID,
     CHILD_VALUE_SOURCE_UUID,
@@ -19,15 +20,21 @@ from .test_c1_r2_static_expansion_contract import (
     EXPANDED_CHILD_NODE_UUID,
     INVOCATION_UUID,
     PARENT_WORKFLOW_UUID,
-    APPLIED_SOURCE_HASH,
+    _nested_world,
     _world,
     _world_components,
-    _nested_world,
 )
 
 
-def _compile(authoring: CompositeAuthoring, **arguments: object):
-    """用稳定父图身份编译一次子工作流调用并返回展开结果。"""
+def _compile(
+    authoring: CompositeAuthoring,
+    **arguments: object,
+) -> CompositeExpansion:
+    """用稳定父图身份编译一次子工作流调用并返回展开结果。
+
+    参数：``authoring`` 是被测组合接口，``arguments`` 覆盖可选编译参数。返回：
+    成功或失败关闭的组合展开结果。异常：被测公共接口未收敛的异常原样传播。
+    """
 
     keyword_arguments = arguments.pop("keyword_arguments", {"value": 1})
     return authoring.compile_invocation(
@@ -40,13 +47,17 @@ def _compile(authoring: CompositeAuthoring, **arguments: object):
     )
 
 
-def _assert_closed(expansion: object, code: str) -> None:
-    """断言组合失败没有泄露任何候选图事实且只返回稳定错误码。"""
+def _assert_closed(expansion: CompositeExpansion, code: str) -> None:
+    """断言组合失败没有泄露任何候选图事实且只返回稳定错误码。
 
-    assert getattr(expansion, "invocation_node") is None
-    assert getattr(expansion, "nodes") == ()
-    assert getattr(expansion, "edges") == ()
-    diagnostics = getattr(expansion, "diagnostics")
+    参数：``expansion`` 是失败结果，``code`` 是预期稳定错误码。返回：无。
+    异常：结果泄露图事实或错误码不符时由 pytest 断言报告。
+    """
+
+    assert expansion.invocation_node is None
+    assert expansion.nodes == ()
+    assert expansion.edges == ()
+    diagnostics = expansion.diagnostics
     assert [item["code"] for item in diagnostics] == [code]
 
 
@@ -62,7 +73,11 @@ def test_missing_unapplied_and_stale_child_fail_closed(
     damage: str,
     expected: str,
 ) -> None:
-    """缺失、未应用或陈旧的子工作流快照不得产生任何父候选事实。"""
+    """缺失、未应用或陈旧的子工作流快照不得产生任何父候选事实。
+
+    参数：``damage`` 选择快照损坏，``expected`` 是预期错误码。返回：无。
+    异常：关闭失败合同不成立时由 pytest 报告。
+    """
 
     authoring, provider = _world()
     if damage == "missing":
@@ -79,7 +94,11 @@ def test_missing_unapplied_and_stale_child_fail_closed(
 
 
 def test_published_template_provenance_mismatch_fails_closed() -> None:
-    """已发布模板的 package 来源与解析结果不一致时拒绝展开。"""
+    """已发布模板的 package 来源与解析结果不一致时拒绝展开。
+
+    参数：无。返回：无；断言来源漂移得到目录不匹配。异常：被测调用或断言
+    失败时由 pytest 报告。
+    """
 
     _authoring, provider, catalog, source_catalog = _world_components()
     templates = [action.detached_template() for action in catalog.actions]
@@ -107,7 +126,11 @@ def test_published_template_provenance_mismatch_fails_closed() -> None:
     ["foreign_node", "missing_handle", "wrong_direction", "missing_coverage"],
 )
 def test_invalid_boundary_mapping_fails_closed(damage: str) -> None:
-    """外部节点、缺失连接点、错误方向或未覆盖输入都被公共校验器拒绝。"""
+    """外部节点、缺失连接点、错误方向或未覆盖输入都被公共校验器拒绝。
+
+    参数：``damage`` 选择边界映射损坏类型。返回：无；断言统一关闭失败。
+    异常：被测调用或断言失败时由 pytest 报告。
+    """
 
     authoring, provider = _world()
     snapshot = provider.snapshots[CHILD_WORKFLOW_UUID]
@@ -131,7 +154,11 @@ def test_invalid_boundary_mapping_fails_closed(damage: str) -> None:
 
 
 def test_parent_argument_cannot_reference_expanded_private_handle() -> None:
-    """父工作流参数不能绕过调用边界直连展开后的内部私有连接点。"""
+    """父工作流参数不能绕过调用边界直连展开后的内部私有连接点。
+
+    参数：无。返回：无；断言私有引用被拒且快照不变。异常：被测调用或断言
+    失败时由 pytest 报告。
+    """
 
     authoring, provider = _world()
     before = deepcopy(provider.snapshots)
@@ -154,7 +181,11 @@ def test_parent_argument_cannot_reference_expanded_private_handle() -> None:
 
 
 def test_self_nested_workflow_reference_uses_stable_cycle_diagnostic() -> None:
-    """已应用子图再次调用自身时，以统一递归诊断关闭失败。"""
+    """已应用子图再次调用自身时，以统一递归诊断关闭失败。
+
+    参数：无。返回：无；断言自环得到稳定递归诊断。异常：夹具变换或断言失败
+    时由 pytest 报告。
+    """
 
     authoring, provider, catalog, _source_catalog = _world_components()
     snapshot = provider.snapshots[CHILD_WORKFLOW_UUID]
@@ -188,7 +219,11 @@ def test_self_nested_workflow_reference_uses_stable_cycle_diagnostic() -> None:
 
 
 def test_cross_workflow_cycle_uses_same_stable_diagnostic() -> None:
-    """子工作流经叶工作流回指祖先时复用统一递归诊断。"""
+    """子工作流经叶工作流回指祖先时复用统一递归诊断。
+
+    参数：无。返回：无；断言跨工作流环得到相同诊断。异常：夹具变换或断言
+    失败时由 pytest 报告。
+    """
 
     authoring, provider = _nested_world()
     _unused, _provider, base_catalog, _resolver = _world_components()
@@ -240,7 +275,11 @@ def test_cross_workflow_cycle_uses_same_stable_diagnostic() -> None:
 
 
 def test_nested_applied_pin_mismatch_fails_closed() -> None:
-    """嵌套调用保存的应用 pin 与当前发布合同时不得静默漂移。"""
+    """嵌套调用保存的应用 pin 与当前发布合同时不得静默漂移。
+
+    参数：无。返回：无；断言嵌套 pin 漂移关闭失败。异常：被测调用或断言失败
+    时由 pytest 报告。
+    """
 
     authoring, provider = _nested_world()
     child_snapshot = provider.snapshots[CHILD_WORKFLOW_UUID]

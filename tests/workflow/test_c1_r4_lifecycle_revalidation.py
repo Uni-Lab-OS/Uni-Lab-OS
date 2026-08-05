@@ -18,8 +18,8 @@ from unilabos.workflow.composite_compatibility import (
 )
 
 from .test_c1_r2_static_expansion_contract import (
-    APPLIED_SOURCE_HASH,
     ACTION_VALUE_TARGET_UUID,
+    APPLIED_SOURCE_HASH,
     CHILD_READY_SOURCE_UUID,
     CHILD_READY_TARGET_UUID,
     CHILD_TEMPLATE_UUID,
@@ -42,10 +42,15 @@ ADDITIVE_CHILD_NODE_UUID = "22222222-2222-4222-8222-222222222223"
 EVOLVED_SOURCE_HASH = "sha256:" + "9" * 64
 
 
-def _projection(*, digest: str, extra_input: dict[str, Any] | None = None):
+def _projection(
+    *,
+    digest: str,
+    extra_input: dict[str, Any] | None = None,
+) -> dict[str, Any]:
     """构造兼容性分类器使用的最小冻结投影。
 
     参数：``digest`` 是合同摘要；``extra_input`` 是可选追加输入。返回：独立投影。
+    异常：无；输入按原值复制到测试投影。
     """
 
     inputs = [
@@ -77,7 +82,11 @@ def _projection(*, digest: str, extra_input: dict[str, Any] | None = None):
 
 
 def test_compatibility_classifier_distinguishes_exact_additive_and_breaking() -> None:
-    """兼容性分类必须只接受带默认值的末尾可选输入。"""
+    """兼容性分类必须只接受带默认值的末尾可选输入。
+
+    参数：无。返回：无；断言精确、可加与破坏性分类。异常：分类或断言失败时
+    由 pytest 报告。
+    """
 
     previous = _projection(digest="sha256:" + "1" * 64)
     assert (
@@ -202,7 +211,11 @@ def _evolved_engine(kind: str) -> WorkflowAuthoringEngine:
 
 @pytest.mark.parametrize("kind", ["exact", "additive"])
 def test_compatible_child_evolution_recompiles_to_current_fixed_point(kind: str) -> None:
-    """实现替换和末尾可选输入应升级父候选并保持新代际固定点。"""
+    """实现替换和末尾可选输入应升级父候选并保持新代际固定点。
+
+    参数：``kind`` 选择精确或可加演进。返回：无；断言父候选升级并固定。
+    异常：编译或断言失败时由 pytest 报告。
+    """
 
     original = _compile(_engine(), _source(), _applied_parent_graph())
     assert original.valid and original.graph is not None, original.diagnostics
@@ -224,7 +237,11 @@ def test_compatible_child_evolution_recompiles_to_current_fixed_point(kind: str)
 
 
 def test_breaking_mode_change_and_tampered_previous_projection_fail_closed() -> None:
-    """组合模式变化或旧连接点投影篡改必须在候选写入前拒绝。"""
+    """组合模式变化或旧连接点投影篡改必须在候选写入前拒绝。
+
+    参数：无。返回：无；断言两种破坏性变化均关闭失败。异常：编译或断言失败
+    时由 pytest 报告。
+    """
 
     original = _compile(_engine(), _source(), _applied_parent_graph())
     assert original.valid and original.graph is not None, original.diagnostics

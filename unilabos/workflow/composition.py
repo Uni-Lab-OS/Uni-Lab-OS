@@ -437,6 +437,7 @@ def reset_workflow_service_for_test() -> None:
 
     参数：无。
     返回：无；监视器、服务、模板投影和组合身份全部恢复为空。
+    异常：清理任一运行时所有者失败时原样传播，并保留失败运行时供重试。
     """
 
     global _compiler, _compiler_rebuilder, _database_path
@@ -464,8 +465,8 @@ def reset_workflow_service_for_test() -> None:
 
 
 __all__ = [
-    "compose_workflow_runtime",
     "compose_local_workflow_template_runtime",
+    "compose_workflow_runtime",
     "get_registry_template_projection",
     "get_workflow_service",
     "reset_workflow_service_for_test",

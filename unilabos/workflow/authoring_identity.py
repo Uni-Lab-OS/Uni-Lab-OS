@@ -6,7 +6,6 @@ from uuid import UUID, uuid5
 
 from unilabos.workflow.models import validate_uuid
 
-
 _COMPOSITE_NODE_PREFIX = "unilabos:c1:node:v1:"
 
 
@@ -16,6 +15,7 @@ def expanded_node_uuid(invocation_uuid: str, child_node_uuid: str) -> str:
     参数：``invocation_uuid`` 是真实调用节点 UUID，``child_node_uuid`` 是已应用
     子工作流中的规范节点 UUID。返回：C1 v1 固定 UUIDv5；非法身份抛出
     ``ValueError``。
+    异常：任一身份非规范或为 nil UUID 时抛出 ``ValueError``。
     """
 
     namespace = UUID(validate_uuid(invocation_uuid))
@@ -36,6 +36,7 @@ def authoring_edge_uuid(
     参数说明：``workflow_uuid`` 是身份命名空间；其余四个 UUID 是源节点、
     源连接点（Handle）、目标节点和目标连接点身份。返回值对相同端点稳定，
     任一端点变化都会产生不同 UUID；非法或 nil UUID 会抛出 ``ValueError``。
+    异常：任一身份非规范或为 nil UUID 时抛出 ``ValueError``。
     """
 
     normalized_workflow = validate_uuid(workflow_uuid)

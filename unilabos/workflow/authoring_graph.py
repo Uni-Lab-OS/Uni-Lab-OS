@@ -17,10 +17,6 @@ from unilabos.workflow.authoring_ast import (
     GroupDeclaration,
     WorkflowProgram,
 )
-from unilabos.workflow.composite import CompositeAuthoring, CompositeExpansion
-from unilabos.workflow.composite_compatibility import (
-    classify_pinned_published_workflow_invocation,
-)
 from unilabos.workflow.authoring_graph_semantics import (
     AuthoringGraphError,
     candidate_changeset,
@@ -39,6 +35,10 @@ from unilabos.workflow.authoring_material import (
     MaterialAuthoringError,
     MaterialSourceDeclaration,
     build_material_source_node,
+)
+from unilabos.workflow.composite import CompositeAuthoring, CompositeExpansion
+from unilabos.workflow.composite_compatibility import (
+    classify_pinned_published_workflow_invocation,
 )
 from unilabos.workflow.material_graph_validation import (
     MaterialGraphValidationError,
@@ -879,6 +879,7 @@ def _output_contract(
     连接点（Handle）类型。返回：包含版本和规范输出描述列表的工作流输出合同；
     输出引用缺失或歧义、显式结果记录 Schema 与绑定类型不一致、结果记录字段集
     与返回字典不一致时抛出 ``AuthoringGraphError``，不生成部分合同。
+    异常：上述输出引用或 Schema 合同不成立时抛出 ``AuthoringGraphError``。
     """
 
     inputs = {
@@ -951,6 +952,7 @@ def _output_bindings(
     """把作者输出声明映射为稳定工作流输出绑定。
 
     参数说明：程序输出引用工作流输入或节点结果；返回按输出名索引的绑定字典。
+    异常：节点结果连接点（Handle）缺失或歧义时抛出 ``AuthoringGraphError``。
     """
 
     bindings: dict[str, dict[str, str]] = {}

@@ -55,7 +55,7 @@ class WorkflowAuthoringEngine:
         catalog: AuthoringCatalogSnapshot,
         resource_reference_resolver: ResourceReferenceResolver | None = None,
         composite_authoring: CompositeAuthoring | None = None,
-    ):
+    ) -> None:
         """创建带不可变目录和可选只读资源身份端口的创作编译器。
 
         参数说明：``catalog`` 是构造时固定的目录快照（Catalog Snapshot）；编译
@@ -108,6 +108,8 @@ class WorkflowAuthoringEngine:
         草稿，``source_uri`` 仅用于诊断来源，``applied_graph`` 是变更集基线。
         返回结构化成功或失败结果；绝不执行作者源码或修改外部状态，仅允许
         注入的资源身份端口读取库存权威（Inventory Authority）。
+        异常：预期的语法、目录、图或候选错误收敛为诊断；只读依赖端口发生的
+        未声明基础设施异常原样传播。
         """
 
         try:

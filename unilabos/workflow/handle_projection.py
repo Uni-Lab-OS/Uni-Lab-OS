@@ -66,6 +66,7 @@ def workflow_handle_type(schema: Mapping[str, Any]) -> str:
 
     参数：``schema`` 是规范值 Schema。返回：数组保持 ``array``，物料引用使用
     ``ResourceSlot``，其他类型保留 JSON 类型，未知形状为 ``object``。
+    异常：无；未知形状保守投影为 ``object``。
     """
 
     base = _non_null_schema(schema)
@@ -78,7 +79,11 @@ def workflow_handle_type(schema: Mapping[str, Any]) -> str:
 
 
 def _non_null_schema(schema: Mapping[str, Any]) -> Mapping[str, Any]:
-    """从规范可空 Schema 中返回非 null 成员，否则返回原 Schema。"""
+    """从规范可空 Schema 中返回非 null 成员，否则返回原 Schema。
+
+    参数：``schema`` 是规范或可空值 Schema。返回：首个非 null 映射成员，找不到
+    时返回原映射。异常：无；非列表 ``anyOf`` 按普通 Schema 处理。
+    """
 
     members = schema.get("anyOf")
     if isinstance(members, list):

@@ -7,6 +7,7 @@ from copy import deepcopy
 from typing import Any
 
 from unilabos.workflow.authoring_engine import WorkflowAuthoringEngine
+from unilabos.workflow.models import CandidateCompilation
 
 from .test_c1_r2_static_expansion_contract import (
     CHILD_WORKFLOW_UUID,
@@ -20,7 +21,10 @@ CHILD_SYMBOL = "prepare_sample"
 
 
 def _applied_parent_graph() -> dict[str, Any]:
-    """构造首次编译使用的空父工作流应用图。"""
+    """构造首次编译使用的空父工作流应用图。
+
+    参数：无。返回：修订为一的空父图。异常：无。
+    """
 
     return {
         "workflow": {
@@ -39,7 +43,10 @@ def _applied_parent_graph() -> dict[str, Any]:
 
 
 def _source() -> str:
-    """返回一个通过绝对导入调用已发布子工作流的规范作者源码。"""
+    """返回一个通过绝对导入调用已发布子工作流的规范作者源码。
+
+    参数：无。返回：包含固定调用身份的 Python 源码。异常：无。
+    """
 
     return f'''from typing import TypedDict
 
@@ -63,7 +70,11 @@ def composite_parent(*, value: float) -> ParentResult:
 
 
 def _engine() -> WorkflowAuthoringEngine:
-    """装配固定目录与只读组合创作端口的工作流创作编译器。"""
+    """装配固定目录与只读组合创作端口的工作流创作编译器。
+
+    参数：无。返回：绑定冻结目录和组合端口的编译器。异常：夹具目录无效时
+    由构造器抛出。
+    """
 
     authoring, _provider, catalog, _resolver = _world_components()
     return WorkflowAuthoringEngine(
@@ -76,8 +87,12 @@ def _compile(
     engine: WorkflowAuthoringEngine,
     source: str,
     graph: dict[str, Any],
-):
-    """经公共编译接口生成父工作流候选结果。"""
+) -> CandidateCompilation:
+    """经公共编译接口生成父工作流候选结果。
+
+    参数：``engine`` 是编译器，``source`` 是作者源码，``graph`` 是应用基线。
+    返回：结构化候选编译结果。异常：公共编译接口未收敛的异常原样传播。
+    """
 
     return engine.compile(
         workflow_uuid=PARENT_WORKFLOW_UUID,
@@ -89,7 +104,11 @@ def _compile(
 
 
 def test_absolute_published_workflow_call_is_a_canonical_fixed_point() -> None:
-    """绝对调用静态展开后，生成源码和再次编译保持完整语义固定点。"""
+    """绝对调用静态展开后，生成源码和再次编译保持完整语义固定点。
+
+    参数：无。返回：无；断言图、源码和来源映射固定。异常：编译或断言失败时
+    由 pytest 报告。
+    """
 
     engine = _engine()
     assert CHILD_MODULE not in sys.modules
@@ -127,7 +146,11 @@ def test_absolute_published_workflow_call_is_a_canonical_fixed_point() -> None:
 
 
 def test_breaking_child_pin_fails_closed_at_compile_seam() -> None:
-    """已应用调用节点的合同摘要被篡改时不得静默重写候选图。"""
+    """已应用调用节点的合同摘要被篡改时不得静默重写候选图。
+
+    参数：无。返回：无；断言篡改 pin 只产生稳定诊断。异常：编译或断言失败时
+    由 pytest 报告。
+    """
 
     engine = _engine()
     compiled = _compile(engine, _source(), _applied_parent_graph())

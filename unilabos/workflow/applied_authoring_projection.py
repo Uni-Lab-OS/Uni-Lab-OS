@@ -88,6 +88,8 @@ def reconcile_applied_authoring_projection(
     ``compatible_catalog_replacements`` 是已由组合调用 pin 认证、可整代升级的
     已发布工作流模板 UUID 集合。
     返回四类已排序投影：保留实体沿用数据库时间和空值形状，新实体沿用当前生成
+    形状。异常：身份、父关系或目录代际不一致时抛出
+    ``AppliedAuthoringProjectionError``，不返回部分投影。
     形状；重复身份、外部工作流、非法时间或目录语义漂移抛出稳定错误且不返回
     部分结果。
     """
@@ -323,6 +325,8 @@ def _catalog_projection(
     可复用读投影；``compatible_replacements`` 已在调用 pin 边界认证旧聚合。
     返回按 UUID 排序的模板和连接点：严格等价时整体复用旧读形状，经认证的合同
     演进整体换为当前代际；其他漂移或混用即 ``template_catalog_mismatch``。
+    异常：目录缺项、未认证漂移或跨代混用时抛出
+    ``AppliedAuthoringProjectionError``。
     """
 
     # ``current_actions`` 按模板身份去重，确保同一模板只能投影一个当前目录代际。

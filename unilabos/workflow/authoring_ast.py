@@ -950,6 +950,7 @@ def _action_declaration(
     参数说明：各索引用于验证设备、输入、前序结果、相邻锚点和可选节点展示
     元数据；返回不可变动作、已发布工作流调用或物料来源声明，位置参数、动态
     调用或前向引用通过 ``AuthoringSyntaxError`` 失败关闭。
+    异常：语法、身份或引用不合法时抛出 ``AuthoringSyntaxError``。
     """
 
     material_source = parse_material_source_declaration(

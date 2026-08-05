@@ -274,7 +274,7 @@ class WorkflowService:
         compiler_rebuilder: Callable[[], AuthoringCompiler] | None = None,
         material_resolver: Optional[Callable[[str], Optional[Dict[str, Any]]]] = None,
         task_scheduler_bridge: WorkflowTaskSchedulerBridge | None = None,
-    ):
+    ) -> None:
         """装配本地工作流应用服务。
 
         参数：``store`` 是唯一工作流写模型；``compiler`` 负责编译可信工作流源码；
@@ -282,6 +282,7 @@ class WorkflowService:
         ``material_resolver`` 按物料 UUID 读取活动物料身份，供设备单动作运行
         （DeviceActionRun）关闭式校验；``task_scheduler_bridge`` 把普通工作流任务
         （WorkflowTask）与首次创建的设备单动作聚合交给同一本地调度器。返回无。
+        异常：编译器重建器不可调用时抛出 ``TypeError``。
         """
 
         self._store = store

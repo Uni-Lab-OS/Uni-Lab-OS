@@ -726,6 +726,8 @@ def _device_symbols(
 
     参数说明：节点顺序和目录映射共同确定设备类及固定设备身份；返回选择器键到
     局部名映射，以及需要导入的 ``(module, class)`` 集合。
+    异常：节点缺目录项或设备类身份不能拆分时抛出 ``KeyError`` 或
+    ``ValueError``。
     """
 
     keys: set[tuple[str, str | None]] = set()

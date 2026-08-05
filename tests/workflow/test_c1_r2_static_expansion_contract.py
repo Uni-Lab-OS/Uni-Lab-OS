@@ -11,8 +11,7 @@ from unilabos.workflow.authoring_identity import (
     expanded_node_uuid,
 )
 from unilabos.workflow.authoring_kernel import AuthoringCatalogSnapshot
-from unilabos.workflow.catalog import PublishedSourceCatalog
-from unilabos.workflow.catalog import PublishedWorkflowSource
+from unilabos.workflow.catalog import PublishedSourceCatalog, PublishedWorkflowSource
 from unilabos.workflow.composite import (
     CompositeAuthoring,
     project_published_workflow_contract,
@@ -65,7 +64,11 @@ class MemorySnapshotProvider:
     read_count: int = 0
 
     def get_published_workflow_snapshot(self, workflow_uuid: str) -> dict[str, Any]:
-        """按工作流 UUID 返回快照副本；不存在时抛出 ``LookupError``。"""
+        """按工作流 UUID 返回快照副本。
+
+        参数：``workflow_uuid`` 是子工作流身份。返回：对应冻结快照。异常：身份
+        不存在时抛出 ``LookupError``。
+        """
 
         self.read_count += 1
         try:
@@ -81,7 +84,11 @@ class MemorySourceResolver:
     sources: dict[tuple[str, str], PublishedWorkflowSource]
 
     def resolve(self, module: str, symbol: str) -> PublishedWorkflowSource:
-        """返回唯一来源；不存在时抛出 ``LookupError``。"""
+        """返回唯一来源。
+
+        参数：``module`` 与 ``symbol`` 是绝对导入身份。返回：冻结发布来源。
+        异常：身份不存在时抛出 ``LookupError``。
+        """
 
         try:
             return self.sources[(module, symbol)]
@@ -90,7 +97,10 @@ class MemorySourceResolver:
 
 
 def _source_catalog() -> PublishedSourceCatalog:
-    """构造只含一个子工作流来源的已发布源码目录。"""
+    """构造只含一个子工作流来源的已发布源码目录。
+
+    参数：无。返回：冻结发布源码目录。异常：夹具身份非法时由目录构造抛出。
+    """
 
     return PublishedSourceCatalog.from_records(
         [
@@ -113,7 +123,11 @@ def _handle(
     *,
     ready: bool = False,
 ) -> dict[str, Any]:
-    """构造动作节点的数值或 ready 连接点（Handle）模板。"""
+    """构造动作节点的数值或 ready 连接点（Handle）模板。
+
+    参数：``handle_uuid``、``key``、``io_type`` 定义身份、业务键和方向，
+    ``ready`` 选择结构语义。返回：连接点模板字典。异常：无。
+    """
 
     value_type = "boolean" if ready else "number"
     return {
@@ -137,7 +151,10 @@ def _handle(
 
 
 def _applied_snapshot() -> dict[str, Any]:
-    """构造一个单动作且输入输出边界完整的已应用子工作流。"""
+    """构造一个单动作且输入输出边界完整的已应用子工作流。
+
+    参数：无。返回：含源码、图和目录的冻结快照。异常：无。
+    """
 
     timestamp = "2026-08-02T00:00:00Z"
     return {
@@ -222,7 +239,10 @@ def _applied_snapshot() -> dict[str, Any]:
 
 
 def _action_template() -> dict[str, Any]:
-    """构造内部动作节点模板。"""
+    """构造内部动作节点模板。
+
+    参数：无。返回：数值测量动作模板字典。异常：无。
+    """
 
     return {
         "uuid": ACTION_TEMPLATE_UUID,
@@ -243,7 +263,10 @@ def _action_template() -> dict[str, Any]:
 
 
 def _action_handles() -> list[dict[str, Any]]:
-    """返回内部动作的业务与结构连接点全集。"""
+    """返回内部动作的业务与结构连接点全集。
+
+    参数：无。返回：输入、输出及 ready 连接点模板列表。异常：无。
+    """
 
     return [
         _handle(ACTION_VALUE_TARGET_UUID, "value", "target"),
@@ -283,7 +306,11 @@ def _world_components() -> tuple[
     AuthoringCatalogSnapshot,
     PublishedSourceCatalog,
 ]:
-    """装配并暴露失败关闭测试所需的四个只读组件。"""
+    """装配并暴露失败关闭测试所需的四个只读组件。
+
+    参数：无。返回：组合创作接口、快照端口、创作目录与源码目录。异常：夹具
+    发布合同或目录无效时由构造器抛出。
+    """
 
     source_catalog = _source_catalog()
     source = source_catalog.resolve(
@@ -330,7 +357,11 @@ def _world_components() -> tuple[
 
 
 def _world() -> tuple[CompositeAuthoring, MemorySnapshotProvider]:
-    """装配纯内存目录、只读快照端口和组合创作接口。"""
+    """装配纯内存目录、只读快照端口和组合创作接口。
+
+    参数：无。返回：组合创作接口及可观察读取次数的快照端口。异常：夹具合同
+    无效时由组件构造抛出。
+    """
 
     authoring, provider, _catalog, _source_catalog = _world_components()
     return authoring, provider
@@ -384,7 +415,11 @@ def _group_world() -> CompositeAuthoring:
 
 
 def _nested_world() -> tuple[CompositeAuthoring, MemorySnapshotProvider]:
-    """装配父工作流调用已发布叶工作流的两层只读世界。"""
+    """装配父工作流调用已发布叶工作流的两层只读世界。
+
+    参数：无。返回：可递归展开的组合创作接口及快照端口。异常：来源、目录或
+    发布合同夹具无效时由构造器抛出。
+    """
 
     _authoring, provider, catalog, source_catalog = _world_components()
     child_source = source_catalog.resolve(
@@ -506,7 +541,11 @@ def _nested_world() -> tuple[CompositeAuthoring, MemorySnapshotProvider]:
 
 
 def test_direct_invocation_returns_hierarchical_expansion_mappings_and_pin() -> None:
-    """直接调用生成真实调用节点、确定性内部节点、边界映射和冻结 pin。"""
+    """直接调用生成真实调用节点、确定性内部节点、边界映射和冻结 pin。
+
+    参数：无。返回：无；断言完整展开合同。异常：编译或断言失败时由 pytest
+    报告。
+    """
 
     authoring, provider = _world()
     expansion = authoring.compile_invocation(
@@ -606,7 +645,11 @@ def test_presentation_group_does_not_require_structural_ready_handles() -> None:
         ),
     }
 def test_two_invocations_share_templates_but_not_expanded_node_identity() -> None:
-    """重复调用共享目录模板，但每次调用拥有不同展开节点身份。"""
+    """重复调用共享目录模板，但每次调用拥有不同展开节点身份。
+
+    参数：无。返回：无；断言模板复用且节点身份分离。异常：展开或断言失败时
+    由 pytest 报告。
+    """
 
     authoring, _provider = _world()
     first = authoring.compile_invocation(
@@ -636,7 +679,11 @@ def test_two_invocations_share_templates_but_not_expanded_node_identity() -> Non
 
 
 def test_nested_published_workflow_expands_into_one_hierarchical_parent_graph() -> None:
-    """嵌套已发布工作流递归展开，且不产生嵌套工作流任务（WorkflowTask）。"""
+    """嵌套已发布工作流递归展开，且不产生嵌套工作流任务（WorkflowTask）。
+
+    参数：无。返回：无；断言递归调用与叶动作都归入父图。异常：展开或断言
+    失败时由 pytest 报告。
+    """
 
     authoring, provider = _nested_world()
     expansion = authoring.compile_invocation(
@@ -663,7 +710,11 @@ def test_nested_published_workflow_expands_into_one_hierarchical_parent_graph() 
 
 
 def test_recursive_or_uncovered_invocation_fails_without_snapshot_write_port() -> None:
-    """递归引用和缺失必填边界参数只返回诊断，端口保持只读。"""
+    """递归引用和缺失必填边界参数只返回诊断，端口保持只读。
+
+    参数：无。返回：无；断言诊断稳定且端口没有写方法。异常：预期关闭失败
+    未发生或断言不成立时由 pytest 报告。
+    """
 
     authoring, provider = _world()
     recursive = authoring.compile_invocation(
@@ -691,7 +742,11 @@ def test_recursive_or_uncovered_invocation_fails_without_snapshot_write_port() -
 
 
 def test_composite_uuid_and_root_edge_vectors_remain_byte_stable() -> None:
-    """C1 冻结的节点与父工作流边 UUID 向量保持字节级稳定。"""
+    """C1 冻结的节点与父工作流边 UUID 向量保持字节级稳定。
+
+    参数：无。返回：无；断言身份算法字节稳定。异常：算法漂移导致断言失败时
+    由 pytest 报告。
+    """
 
     assert expanded_node_uuid(INVOCATION_UUID, CHILD_NODE_UUID) == (
         EXPANDED_CHILD_NODE_UUID

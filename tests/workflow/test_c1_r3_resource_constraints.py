@@ -13,13 +13,12 @@ from unilabos.workflow.composite import (
 )
 
 from .test_c1_r2_static_expansion_contract import (
-    ACTION_TEMPLATE_UUID,
     CHILD_TEMPLATE_UUID,
     CHILD_WORKFLOW_UUID,
     HOST_RESOURCE_TEMPLATE_UUID,
     INVOCATION_UUID,
-    MemorySnapshotProvider,
     PARENT_WORKFLOW_UUID,
+    MemorySnapshotProvider,
     _action_handles,
     _action_template,
     _applied_snapshot,
@@ -32,7 +31,11 @@ MATERIAL_C_UUID = "a2000000-0000-4000-8000-000000000013"
 
 
 def _slot(*allowlist: str) -> dict[str, object]:
-    """构造省略或显式限制资源模板的物料占位符（ResourceSlot）Schema。"""
+    """构造省略或显式限制资源模板的物料占位符（ResourceSlot）Schema。
+
+    参数：``allowlist`` 是允许的资源模板 UUID。返回：物料占位符 Schema。
+    异常：无。
+    """
 
     schema: dict[str, object] = {"$slot": "ResourceSlot"}
     if allowlist:
@@ -41,7 +44,11 @@ def _slot(*allowlist: str) -> dict[str, object]:
 
 
 def _wrapper(*allowlist: str) -> dict[str, object]:
-    """构造可空物料占位符（ResourceSlot）数组 Schema。"""
+    """构造可空物料占位符（ResourceSlot）数组 Schema。
+
+    参数：``allowlist`` 是数组元素允许的资源模板 UUID。返回：可空数组 Schema。
+    异常：无。
+    """
 
     return {
         "anyOf": [
@@ -54,7 +61,11 @@ def _wrapper(*allowlist: str) -> dict[str, object]:
 def _resource_world(
     child_schema: dict[str, object],
 ) -> tuple[CompositeAuthoring, MemorySnapshotProvider]:
-    """装配输入边界承载物料占位符（ResourceSlot）的发布工作流。"""
+    """装配输入边界承载物料占位符（ResourceSlot）的发布工作流。
+
+    参数：``child_schema`` 是子工作流边界 Schema。返回：组合创作接口与快照
+    端口。异常：发布合同或目录夹具不一致时由构造器抛出。
+    """
 
     snapshot = _applied_snapshot()
     unilab = snapshot["workflow"]["meta_data"]["unilab"]
@@ -148,7 +159,11 @@ def test_resource_slot_constraints_intersect_without_losing_wrapper_shape(
     child_schema: dict[str, object],
     expected: dict[str, object],
 ) -> None:
-    """省略表示全集，显式集合求交，并保留数组与可空包装。"""
+    """省略表示全集，显式集合求交，并保留数组与可空包装。
+
+    参数：父/子 ``Schema`` 与 ``expected`` 由参数化夹具提供。返回：无；断言
+    有效合同交集。异常：展开或断言失败时由 pytest 报告。
+    """
 
     authoring, _provider = _resource_world(child_schema)
     expansion = authoring.compile_invocation(
@@ -179,7 +194,11 @@ def test_resource_slot_constraints_intersect_without_losing_wrapper_shape(
 
 
 def test_empty_resource_slot_intersection_fails_closed() -> None:
-    """互斥物料模板集合只返回稳定诊断且不产生部分候选。"""
+    """互斥物料模板集合只返回稳定诊断且不产生部分候选。
+
+    参数：无。返回：无；断言空交集关闭失败且快照不变。异常：展开或断言失败
+    时由 pytest 报告。
+    """
 
     authoring, provider = _resource_world(_slot(MATERIAL_B_UUID))
     before = deepcopy(provider.snapshots)
