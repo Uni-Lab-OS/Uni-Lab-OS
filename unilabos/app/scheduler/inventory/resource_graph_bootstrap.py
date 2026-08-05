@@ -78,24 +78,22 @@ def bootstrap_local_resource_graph(
 def _template_aliases(snapshot: RegistryTemplateSnapshot) -> dict[str, str]:
     """建立注册表别名到资源模板业务 ID 的唯一映射。
 
-    参数：``snapshot`` 是单代注册表快照。返回：业务 ID 与源码身份的唯一映射。
-    异常：空身份或跨模板别名冲突时抛出 ``ResourceGraphBootstrapError``。
+    参数：``snapshot`` 是单代注册表快照。返回：业务 ID、显式源码身份及全代唯一
+    实现类身份的映射；多个模板共享的实现类不会进入返回值。异常：空业务身份，
+    或业务 ID/显式源码身份相互冲突时抛出 ``ResourceGraphBootstrapError``。
     """
 
+    # ``aliases`` 保存作者显式业务身份，以及稍后证明全代唯一的遗留实现类别名。
     aliases: dict[str, str] = {}
+    # ``class_owners`` 汇总同代每个 Python 实现类的所有业务模板所有者。
+    class_owners: dict[str, set[str]] = {}
     for definition in snapshot.detached_definitions():
         template_name = str(definition.get("id") or "").strip()
         class_definition = definition.get("class")
-        candidates = [
-            template_name,
-            definition.get("source_fqid"),
-            class_definition.get("module")
-            if isinstance(class_definition, Mapping)
-            else None,
-        ]
         if not template_name:
             raise ResourceGraphBootstrapError("资源模板业务 ID 不能为空")
-        for candidate in candidates:
+        # 业务 ID 与 ``source_fqid`` 都是作者明确选择的一一身份；冲突必须关闭。
+        for candidate in (template_name, definition.get("source_fqid")):
             if not isinstance(candidate, str) or not candidate.strip():
                 continue
             alias = candidate.strip()
@@ -103,6 +101,18 @@ def _template_aliases(snapshot: RegistryTemplateSnapshot) -> dict[str, str]:
             if previous is not None and previous != template_name:
                 raise ResourceGraphBootstrapError(f"资源模板别名不唯一: {alias}")
             aliases[alias] = template_name
+        class_module = (
+            class_definition.get("module")
+            if isinstance(class_definition, Mapping)
+            else None
+        )
+        if isinstance(class_module, str) and class_module.strip():
+            class_owners.setdefault(class_module.strip(), set()).add(template_name)
+    for class_alias, owners in class_owners.items():
+        # 共享实现类没有唯一业务语义；保留业务 ID，丢弃该遗留便利别名。
+        if len(owners) != 1 or class_alias in aliases:
+            continue
+        aliases[class_alias] = next(iter(owners))
     return aliases
 
 
