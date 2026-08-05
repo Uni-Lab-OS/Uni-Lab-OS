@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import json
 import keyword
 import re
 from collections import defaultdict
@@ -134,6 +135,13 @@ def render_authoring_python(
             marker_imports += ", parallel"
     if material_sources:
         marker_imports += ", MaterialFlowRole, material_source, resource_ref"
+    elif any(
+        isinstance((node.get("meta_data") or {}).get("unilab"), Mapping)
+        and bool((node.get("meta_data") or {})["unilab"].get("resource_refs"))
+        for node in ordered_nodes
+    ):
+        # 普通动作也可用 ``resource_ref``；只有真实节点元数据声明时才生成 import。
+        marker_imports += ", resource_ref"
     if not output_bindings:
         marker_imports += ", workflow_output"
     lines.append(f"from unilabos.workflow.authoring import {marker_imports}")
@@ -807,6 +815,11 @@ def _render_action_arguments(
     input_bindings = (
         unilab.get("input_bindings", {}) if isinstance(unilab, Mapping) else {}
     )
+    # ``resource_refs`` 以目标连接点 UUID 保存原部署业务 ID，使实际 UUID 参数
+    # 在规范源码中仍能恢复作者声明，而不是退化为匿名字典字面量。
+    resource_refs = (
+        unilab.get("resource_refs", {}) if isinstance(unilab, Mapping) else {}
+    )
     # ``rendered`` 按动作合同（Action Contract）业务键顺序收集最终命名参数。
     rendered: list[str] = []
     # ``target_handles`` 只包含动作（Action）数据输入；ready 等结构连接点
@@ -829,7 +842,30 @@ def _render_action_arguments(
         # ``expression`` 只接受工作流输入绑定、精确入边或静态参数三种可证明
         # 来源；空值表示当前没有合法提供者。
         expression: str | None = None
-        if handle_uuid in input_bindings:
+        if handle_uuid in resource_refs:
+            # ``resource_binding`` 必须是含唯一非空业务 ID 的保留元数据；对应静态
+            # 参数仍须存在实际物料 UUID，避免伪造元数据生成未验证引用。
+            resource_binding = resource_refs[handle_uuid]
+            resource_id = (
+                resource_binding.get("resource_id")
+                if isinstance(resource_binding, Mapping)
+                else None
+            )
+            material_reference = params.get(key)
+            if (
+                not isinstance(resource_id, str)
+                or not resource_id.strip()
+                or resource_id != resource_id.strip()
+                or not isinstance(material_reference, Mapping)
+                or not isinstance(material_reference.get("uuid"), str)
+            ):
+                raise AuthoringGraphError(
+                    "candidate_invalid", "动作资源引用元数据或实际物料身份无效"
+                )
+            expression = (
+                f"resource_ref({json.dumps(resource_id, ensure_ascii=False)})"
+            )
+        elif handle_uuid in input_bindings:
             # ``binding`` 是当前目标连接点（Handle）对应的工作流输入绑定事实；
             # 必须按连接点 UUID 查询，避免根据动作参数名称猜测绑定。
             binding = input_bindings[handle_uuid]

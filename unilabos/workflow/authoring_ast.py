@@ -5,6 +5,7 @@ from __future__ import annotations
 import ast
 import re
 import tokenize
+from collections.abc import Mapping
 from dataclasses import dataclass
 from io import StringIO
 from typing import Any, Never
@@ -42,6 +43,7 @@ _AUTHORING_MARKERS = {
     "workflow_definition": "unilabos.workflow.authoring:workflow_definition",
     "workflow_output": "unilabos.workflow.authoring:workflow_output",
 }
+_RESOURCE_REF = "unilabos.workflow.authoring:resource_ref"
 
 
 class AuthoringSyntaxError(ValueError):
@@ -951,10 +953,14 @@ def _action_declaration(
         if keyword.arg is None or keyword.arg in names:
             _fail("invalid_action_arguments", "动作命名参数重复或包含 ** 展开", call)
         names.add(keyword.arg)
+        # ``resource_binding`` 只识别显式导入的编译标记；解析发生在候选图层，
+        # 这里保留部署业务资源 ID，绝不把它误当成实际物料 UUID。
+        resource_binding = _resource_ref_binding(keyword.value, imports=imports)
         arguments.append(
             (
                 keyword.arg,
-                _value_binding(
+                resource_binding
+                or _value_binding(
                     keyword.value,
                     input_names=input_names,
                     known_results=known_results,
@@ -972,6 +978,53 @@ def _action_declaration(
         arguments=tuple(arguments),
         source_node=statement,
     )
+
+
+def _resource_ref_binding(
+    expression: ast.expr,
+    *,
+    imports: Mapping[str, str],
+) -> ValueBinding | None:
+    """识别普通动作参数中的静态 ``resource_ref`` 声明。
+
+    参数：``expression`` 是动作参数 AST，``imports`` 证明局部函数身份。返回：
+    非 ``resource_ref`` 调用时为 ``None``，合法调用返回保存部署业务资源 ID 的
+    ``resource_ref`` 绑定。异常：参数不是单个无首尾空白字符串时抛出稳定
+    ``AuthoringSyntaxError``，不得降级成普通字面量。
+    """
+
+    if (
+        not isinstance(expression, ast.Call)
+        or not isinstance(expression.func, ast.Name)
+        or imports.get(expression.func.id) != _RESOURCE_REF
+    ):
+        return None
+    if len(expression.args) != 1 or expression.keywords:
+        _fail(
+            "invalid_action_arguments",
+            "resource_ref 必须接收单个静态资源 ID",
+            expression,
+        )
+    try:
+        # ``resource_id`` 是部署资源业务身份，仍需由库存权威解析为实际物料 UUID。
+        resource_id = ast.literal_eval(expression.args[0])
+    except (TypeError, ValueError):
+        _fail(
+            "invalid_action_arguments",
+            "resource_ref 必须接收单个静态资源 ID",
+            expression,
+        )
+    if (
+        not isinstance(resource_id, str)
+        or not resource_id.strip()
+        or resource_id != resource_id.strip()
+    ):
+        _fail(
+            "invalid_action_arguments",
+            "resource_ref 必须接收无首尾空白的非空资源 ID",
+            expression,
+        )
+    return ValueBinding("resource_ref", resource_id)
 
 
 def _workflow_outputs(

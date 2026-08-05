@@ -37,26 +37,35 @@ from unilabos.workflow.material_selector import (
     validate_material_source_node,
 )
 from unilabos.workflow.models import CandidateCompilation, validate_uuid
+from unilabos.workflow.resource_reference import ResourceReferenceResolver
 from unilabos.workflow.source_coordinates import require_utf8_text
 
 _COMPILER_VERSION = "unilabos-authoring/f02a-v2"
 
 
 class WorkflowAuthoringEngine:
-    """以不可变目录快照提供三个纯工作流创作转换。"""
+    """以不可变目录快照和只读身份端口提供三个可信工作流创作转换。"""
 
     compiler_version = _COMPILER_VERSION
 
-    def __init__(self, *, catalog: AuthoringCatalogSnapshot):
-        """创建无 I/O、无数据库权威的创作编译器。
+    def __init__(
+        self,
+        *,
+        catalog: AuthoringCatalogSnapshot,
+        resource_reference_resolver: ResourceReferenceResolver | None = None,
+    ):
+        """创建带不可变目录和可选只读资源身份端口的创作编译器。
 
         参数说明：``catalog`` 是构造时固定的目录快照（Catalog Snapshot）；编译
-        期间只读该快照，不导入作者源码，也不修改外部状态。
+        期间只读该快照，不导入作者源码，也不修改外部状态；
+        ``resource_reference_resolver`` 只读取库存权威（Inventory Authority）并
+        把部署业务 ID 解析为实际物料 UUID，不取得预留或执行占用。
         """
 
         if not isinstance(catalog, AuthoringCatalogSnapshot):
             raise TypeError("catalog 必须是 AuthoringCatalogSnapshot")
         self._catalog = catalog
+        self._resource_reference_resolver = resource_reference_resolver
 
     @property
     def template_catalog_fingerprint(self) -> str:
@@ -87,7 +96,8 @@ class WorkflowAuthoringEngine:
 
         参数说明：工作流 UUID/修订是服务权威身份，``python_source`` 是不可信
         草稿，``source_uri`` 仅用于诊断来源，``applied_graph`` 是变更集基线。
-        返回结构化成功或失败结果，绝不执行作者源码和外部 I/O。
+        返回结构化成功或失败结果；绝不执行作者源码或修改外部状态，仅允许
+        注入的资源身份端口读取库存权威（Inventory Authority）。
         """
 
         try:
@@ -101,6 +111,7 @@ class WorkflowAuthoringEngine:
                 program=program,
                 catalog=self._catalog,
                 applied_graph=applied_graph,
+                resource_reference_resolver=self._resource_reference_resolver,
             )
             if graph["workflow"].get("revision") != revision:
                 raise AuthoringGraphError(

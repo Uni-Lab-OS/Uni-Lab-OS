@@ -8,6 +8,9 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Optional
 
+from unilabos.app.scheduler.inventory.resource_reference import (
+    build_inventory_resource_reference_resolver,
+)
 from unilabos.registry.local_template_identity import (
     synchronize_local_template_identities,
 )
@@ -307,7 +310,15 @@ def compose_local_workflow_template_runtime(
         )
         try:
             snapshot = projection.refresh(registry_snapshot)
-            compiler = WorkflowAuthoringEngine(catalog=snapshot)
+            # ``resource_reference_resolver`` 只读取 C3 已提交的本地资源图物料事实，
+            # 让物料来源（MaterialSource）和普通动作共享同一业务 ID→UUID 规则。
+            resource_reference_resolver = (
+                build_inventory_resource_reference_resolver(inventory_store)
+            )
+            compiler = WorkflowAuthoringEngine(
+                catalog=snapshot,
+                resource_reference_resolver=resource_reference_resolver,
+            )
             service = compose_workflow_runtime(
                 working_dir,
                 compiler=compiler,

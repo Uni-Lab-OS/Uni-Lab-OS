@@ -29,6 +29,11 @@ from unilabos.workflow.material_graph_validation import (
     validate_material_graph_projection,
 )
 from unilabos.workflow.models import CandidateChangeset
+from unilabos.workflow.resource_reference import (
+    ResourceReferenceResolutionError,
+    ResourceReferenceResolver,
+    resolve_resource_reference,
+)
 
 
 class AuthoringGraphError(ValueError):
@@ -50,11 +55,13 @@ def build_candidate_graph(
     program: WorkflowProgram,
     catalog: AuthoringCatalogSnapshot,
     applied_graph: Mapping[str, Any],
+    resource_reference_resolver: ResourceReferenceResolver | None = None,
 ) -> tuple[dict[str, Any], dict[str, Any]]:
     """把静态作者程序构造为完整候选图和变更集（Changeset）。
 
     参数说明：``program`` 是纯 AST 解析结果，``catalog`` 是不可变目录快照，
-    ``applied_graph`` 是当前权威图。返回最小目录投影候选图和精确变更集；目录
+    ``applied_graph`` 是当前权威图；``resource_reference_resolver`` 是只读库存
+    权威（Inventory Authority）资源身份端口。返回最小目录投影候选图和精确变更集；目录
     缺失、连接点不匹配或输出不成立时抛出 ``AuthoringGraphError``。物料图违反
     物料流线性（MaterialFlowLinearity）或资源模板兼容
     （ResourceTemplate Compatibility）时，也会把内部物料图异常转换为
@@ -100,6 +107,7 @@ def build_candidate_graph(
                 node, catalog_action = build_material_source_node(
                     declaration,
                     catalog=catalog,
+                    resource_reference_resolver=resource_reference_resolver,
                 )
             except MaterialAuthoringError as error:
                 raise AuthoringGraphError(error.code, error.message) from error
@@ -132,6 +140,7 @@ def build_candidate_graph(
                     declaration=declaration,
                     device=device,
                     catalog_action=catalog_action,
+                    resource_reference_resolver=resource_reference_resolver,
                 ),
                 parent_uuid=parent_by_node.get(declaration.node_uuid),
                 source_order=source_order[declaration.node_uuid],
@@ -388,6 +397,7 @@ def _candidate_node(
     declaration: ActionDeclaration,
     device: DeviceDeclaration,
     catalog_action: AuthoringCatalogAction,
+    resource_reference_resolver: ResourceReferenceResolver | None = None,
 ) -> dict[str, Any]:
     """构造一个后端写形状节点。
 
@@ -397,12 +407,16 @@ def _candidate_node(
     数据库时间字段的节点字典；固定执行器（Fixed Executor）的
     实际设备物料（Material）UUID 同时进入顶层 ``material_uuid`` 和保留
     执行器绑定（ExecutorBinding）元数据；动态执行器绑定（ExecutorBinding）
-    保持空值。异常：动作（Action）参数缺少唯一目标连接点（Handle）定义时
-    抛出 ``AuthoringGraphError``。
+    保持空值；``resource_reference_resolver`` 把部署业务资源 ID 关闭式解析为
+    实际物料 UUID。异常：动作参数连接点或资源身份无法证明时抛出
+    ``AuthoringGraphError``。
     """
 
     params: dict[str, Any] = {}
     input_bindings: dict[str, dict[str, str]] = {}
+    # ``resource_refs`` 仅保留规范源码往返需要的部署业务 ID，键使用真实目标
+    # 连接点（Handle）UUID；实际物料身份单独进入 ``params``。
+    resource_refs: dict[str, dict[str, str]] = {}
     for argument_name, binding in declaration.arguments:
         target_handle = _require_handle(
             catalog_action,
@@ -414,11 +428,32 @@ def _candidate_node(
             params[argument_name] = deepcopy(binding.value)
         elif binding.kind == "workflow_input":
             input_bindings[handle_uuid] = {"parameter": str(binding.value)}
+        elif binding.kind == "resource_ref":
+            try:
+                # ``resolved_reference`` 是库存权威证明的实际物料与模板身份。
+                resolved_reference = resolve_resource_reference(
+                    str(binding.value),
+                    resource_reference_resolver,
+                )
+                _validate_action_resource_reference(
+                    resolved_reference,
+                    target_handle=target_handle,
+                    argument_name=argument_name,
+                )
+            except ResourceReferenceResolutionError as error:
+                raise AuthoringGraphError(
+                    "resource_reference_resolution_error",
+                    str(error),
+                ) from error
+            params[argument_name] = {"uuid": resolved_reference["uuid"]}
+            resource_refs[handle_uuid] = {"resource_id": str(binding.value)}
     # 作者结果变量是 Python 数据依赖身份，必须与可编辑的节点标题分离保存。
     unilab: dict[str, Any] = {
         "input_bindings": input_bindings,
         "authoring_result_name": declaration.result_name,
     }
+    if resource_refs:
+        unilab["resource_refs"] = dict(sorted(resource_refs.items()))
     if device.device_id is not None:
         unilab["executor_binding"] = {
             "mode": "fixed",
@@ -457,6 +492,39 @@ def _candidate_node(
         ),
         "meta_data": {"unilab": unilab},
     }
+
+
+def _validate_action_resource_reference(
+    reference: Mapping[str, str | None],
+    *,
+    target_handle: Mapping[str, Any],
+    argument_name: str,
+) -> None:
+    """证明动作 ``resource_ref`` 只绑定兼容物料占位符（ResourceSlot）。
+
+    参数：``reference`` 是已解析实际物料身份，``target_handle`` 是动作参数的
+    真实目标连接点，``argument_name`` 用于稳定中文诊断。返回：无。异常：目标
+    不是物料占位符（ResourceSlot），或资源模板不在允许集合时抛出
+    ``AuthoringGraphError``，不能把业务 ID 当普通 JSON 参数放行。
+    """
+
+    # ``value_schema`` 是当前目录代际冻结的动作输入值合同。
+    value_schema = _handle_schema(target_handle)
+    if value_schema.get("$slot") != "ResourceSlot":
+        raise AuthoringGraphError(
+            "resource_reference_resolution_error",
+            f"动作参数 {argument_name} 不是物料占位符（ResourceSlot）",
+        )
+    # ``allowed_templates`` 是该动作输入明确接受的资源模板 UUID 集合；省略表示
+    # 不在创作期缩窄模板，但实际物料 UUID 仍已由库存权威验证。
+    allowed_templates = value_schema.get("allowed_resource_template_uuids")
+    if allowed_templates not in (None, [], ()) and reference.get(
+        "resource_template_uuid"
+    ) not in allowed_templates:
+        raise AuthoringGraphError(
+            "resource_reference_resolution_error",
+            f"动作参数 {argument_name} 不接受该物料资源模板",
+        )
 
 
 def _candidate_edge(

@@ -5,6 +5,8 @@ from __future__ import annotations
 from collections.abc import Mapping
 from typing import Any
 
+import pytest
+
 from unilabos.workflow.authoring_engine import WorkflowAuthoringEngine
 from unilabos.workflow.authoring_kernel import AuthoringCatalogSnapshot
 
@@ -29,6 +31,8 @@ from .test_f05_material_source_authoring import (
 S3_WAREHOUSE_UUID = "61000000-0000-4000-8000-000000000001"
 # ``S3_WAREHOUSE_TEMPLATE_UUID`` 是该挂载资源对应的资源模板（ResourceTemplate）身份。
 S3_WAREHOUSE_TEMPLATE_UUID = "62000000-0000-4000-8000-000000000001"
+# ``POWDER_WAREHOUSE_UUID`` 是粉桶仓启动资源的实际物料（Material）UUID。
+POWDER_WAREHOUSE_UUID = "61000000-0000-4000-8000-000000000002"
 # ``ACTION_NODE_UUID`` 是直接消费 SZLab 启动资源的动作节点稳定身份。
 ACTION_NODE_UUID = "63000000-0000-4000-8000-000000000001"
 
@@ -58,6 +62,35 @@ class _ResourceReferenceResolver:
         # ``resolved`` 是本次编译读取的库存身份摘要，修改它不能污染夹具。
         resolved = self._resources.get(resource_id)
         return dict(resolved) if resolved is not None else None
+
+
+class _AmbiguousResourceReferenceResolver:
+    """模拟库存中同一部署业务 ID 命中多个物料的非法状态。"""
+
+    def __call__(self, resource_id: str) -> dict[str, str]:
+        """拒绝歧义业务资源 ID。
+
+        参数：``resource_id`` 是待解析部署业务 ID。返回：永不正常返回。
+        异常：固定抛出 ``ValueError``，模拟库存唯一性证明失败。
+        """
+
+        raise ValueError(f"资源 ID 不唯一: {resource_id}")
+
+
+class _ForgedResourceReferenceResolver:
+    """模拟把部署业务 ID 错当成物料 UUID 的非法适配器。"""
+
+    def __call__(self, resource_id: str) -> dict[str, str]:
+        """返回伪造的非 UUID 物料身份。
+
+        参数：``resource_id`` 是待解析部署业务 ID。返回：故意把同一业务 ID
+        放入 ``uuid``，同时给出合法模板 UUID。异常：无；被测边界必须拒绝。
+        """
+
+        return {
+            "uuid": resource_id,
+            "resource_template_uuid": S3_WAREHOUSE_TEMPLATE_UUID,
+        }
 
 
 def _catalog() -> AuthoringCatalogSnapshot:
@@ -99,9 +132,10 @@ def _catalog() -> AuthoringCatalogSnapshot:
 
 
 def _resolver() -> _ResourceReferenceResolver:
-    """返回能解析真实 SZLab S3 空烧杯仓的库存端口替身。
+    """返回能解析真实 SZLab 挂载资源的库存端口替身。
 
-    参数：无。返回：业务 ID 唯一映射到实际物料 UUID 与模板 UUID 的解析器。
+    参数：无。返回：S3 空烧杯仓与粉桶仓业务 ID 唯一映射到实际物料 UUID 与
+    模板 UUID 的解析器。
     异常：无。
     """
 
@@ -110,7 +144,11 @@ def _resolver() -> _ResourceReferenceResolver:
             "s3_unused_beaker": {
                 "uuid": S3_WAREHOUSE_UUID,
                 "resource_template_uuid": S3_WAREHOUSE_TEMPLATE_UUID,
-            }
+            },
+            "powder_container_warehouse": {
+                "uuid": POWDER_WAREHOUSE_UUID,
+                "resource_template_uuid": S3_WAREHOUSE_TEMPLATE_UUID,
+            },
         }
     )
 
@@ -180,4 +218,121 @@ def test_szlab_material_source_resource_id_resolves_to_actual_material_uuid() ->
     )
     assert source_node["param"]["mount"] == {"uuid": S3_WAREHOUSE_UUID}
     assert source_node["param"]["mount"]["uuid"] != "s3_unused_beaker"
+    assert compiled.normalized_python_source is not None
+    assert 'resource_ref("s3_unused_beaker")' in compiled.normalized_python_source
+    # ``repeated`` 证明规范源码往返仍通过库存解析，不把实际 UUID 改写成作者 ID。
+    repeated = engine.compile(
+        workflow_uuid=WORKFLOW_UUID,
+        workflow_revision=7,
+        python_source=compiled.normalized_python_source,
+        source_uri="package://szlab/workflows/s07_material_source.py",
+        applied_graph=compiled.graph,
+    )
+    assert repeated.valid and repeated.graph == compiled.graph, repeated.diagnostics
 
+
+def _action_code() -> str:
+    """生成普通动作参数使用真实 SZLab 粉桶仓业务 ID 的作者源码。
+
+    参数：无。返回：``sample`` 通过 ``resource_ref`` 静态提供的工作流源码。
+    异常：无；源码不创建工作流任务（WorkflowTask）或执行动作。
+    """
+
+    return f'''from lab.devices import Reactor
+from unilabos.workflow.authoring import device, resource_ref, workflow, workflow_output
+
+
+reactor: Reactor = device()
+
+
+@workflow(workflow_uuid="{WORKFLOW_UUID}", displayname="S07 action resource")
+def s07_action_resource():
+    # unilab:node_uuid={ACTION_NODE_UUID}
+    prepared = reactor.prepare(
+        sample=resource_ref("powder_container_warehouse"),
+    )
+    return workflow_output()
+'''
+
+
+def test_szlab_action_resource_ref_freezes_uuid_and_preserves_authoring_id() -> None:
+    """普通动作的 ``resource_ref`` 必须冻结 UUID 且往返保留部署业务 ID。
+
+    参数：无。返回：无。断言：动作参数只含实际物料 UUID，连接点元数据保留
+    ``powder_container_warehouse`` 用于规范源码往返，重复编译语义不漂移；本
+    测试不创建工作流任务（WorkflowTask）或执行动作。
+    """
+
+    # ``engine`` 复用同一库存代际解析器，保证首次编译与重复编译身份一致。
+    engine = WorkflowAuthoringEngine(
+        catalog=_catalog(),
+        resource_reference_resolver=_resolver(),
+    )
+    # ``compiled`` 是普通动作（Action）静态参数已解析的候选编译结果。
+    compiled = engine.compile(
+        workflow_uuid=WORKFLOW_UUID,
+        workflow_revision=7,
+        python_source=_action_code(),
+        source_uri="package://szlab/workflows/s07_action_resource.py",
+        applied_graph=_applied_graph(),
+    )
+
+    assert compiled.valid and compiled.graph is not None, compiled.diagnostics
+    # ``action_node`` 是唯一普通动作节点，其 ``param`` 不能保留业务名称。
+    action_node = compiled.graph["nodes"][0]
+    assert action_node["param"]["sample"] == {"uuid": POWDER_WAREHOUSE_UUID}
+    assert action_node["meta_data"]["unilab"]["resource_refs"] == {
+        PREPARE_SAMPLE_TARGET: {"resource_id": "powder_container_warehouse"}
+    }
+    assert compiled.normalized_python_source is not None
+    assert 'resource_ref("powder_container_warehouse")' in (
+        compiled.normalized_python_source
+    )
+    # ``repeated`` 证明规范源码只重放身份解析，不把业务 ID 改写成 UUID 字面量。
+    repeated = engine.compile(
+        workflow_uuid=WORKFLOW_UUID,
+        workflow_revision=7,
+        python_source=compiled.normalized_python_source,
+        source_uri="package://szlab/workflows/s07_action_resource.py",
+        applied_graph=compiled.graph,
+    )
+    assert repeated.valid and repeated.graph == compiled.graph, repeated.diagnostics
+
+
+@pytest.mark.parametrize(
+    "resolver",
+    [
+        _ResourceReferenceResolver({}),
+        _AmbiguousResourceReferenceResolver(),
+        _ForgedResourceReferenceResolver(),
+    ],
+    ids=["unknown", "ambiguous", "forged-business-id-as-uuid"],
+)
+def test_resource_ref_resolution_failures_never_create_candidate_graph(
+    resolver: Any,
+) -> None:
+    """未知、歧义和伪造 UUID 的资源解析必须统一关闭式失败。
+
+    参数：``resolver`` 分别模拟不存在、命中多个物料和把业务 ID 冒充 UUID 的
+    库存适配器。返回：无。断言：公共编译结果只有稳定
+    ``resource_reference_resolution_error``，且不产生候选图；不创建工作流任务
+    （WorkflowTask）或执行动作。
+    """
+
+    # ``compiled`` 是不可信解析回执穿越公共编译边界后的稳定失败结果。
+    compiled = WorkflowAuthoringEngine(
+        catalog=_catalog(),
+        resource_reference_resolver=resolver,
+    ).compile(
+        workflow_uuid=WORKFLOW_UUID,
+        workflow_revision=7,
+        python_source=_action_code(),
+        source_uri="package://szlab/workflows/invalid_resource_ref.py",
+        applied_graph=_applied_graph(),
+    )
+
+    assert not compiled.valid
+    assert compiled.graph is None
+    assert [item["code"] for item in compiled.diagnostics] == [
+        "resource_reference_resolution_error"
+    ]

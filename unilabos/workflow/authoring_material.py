@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import ast
+import json
 from collections.abc import Mapping
 from dataclasses import dataclass
 from typing import Any
@@ -19,6 +20,11 @@ from unilabos.workflow.material_selector import (
     validate_canonical_uuid,
     validate_material_source_node,
     validate_material_source_selector,
+)
+from unilabos.workflow.resource_reference import (
+    ResourceReferenceResolutionError,
+    ResourceReferenceResolver,
+    resolve_resource_reference,
 )
 from unilabos.workflow.source_identity import (
     PythonSourceIdentityError,
@@ -68,7 +74,7 @@ class MaterialSourceDeclaration:
     description: str | None
     resource_template_symbol: str
     mode: str
-    mount_material_uuid: str
+    mount_resource_id: str
     material_uuid: str | None
     site: str | None
     slot_range: tuple[str, ...] | None
@@ -132,7 +138,7 @@ def parse_material_source_declaration(
     mode = _literal_string(keywords["mode"], label="物料来源模式")
     if mode not in {"existing", "create_new"}:
         _fail("物料来源模式必须是 existing 或 create_new", keywords["mode"])
-    mount_material_uuid = _resource_ref_uuid(keywords["mount"], imports=imports)
+    mount_resource_id = _resource_ref_id(keywords["mount"], imports=imports)
     material_uuid = _optional_uuid(
         keywords["material_uuid"],
         label="固定物料 UUID",
@@ -158,7 +164,7 @@ def parse_material_source_declaration(
         description=metadata[1] if metadata is not None else None,
         resource_template_symbol=resource_symbol,
         mode=mode,
-        mount_material_uuid=mount_material_uuid,
+        mount_resource_id=mount_resource_id,
         material_uuid=material_uuid,
         site=site,
         slot_range=slot_range,
@@ -171,12 +177,15 @@ def build_material_source_node(
     declaration: MaterialSourceDeclaration,
     *,
     catalog: AuthoringCatalogSnapshot,
+    resource_reference_resolver: ResourceReferenceResolver | None = None,
 ) -> tuple[dict[str, Any], AuthoringCatalogAction]:
     """把静态物料来源声明投影为后端形状节点。
 
     参数说明：``declaration`` 是可信 AST 结果，``catalog`` 是同代不可变目录。
     返回：候选节点与框架模板 aggregate；模板或资源身份缺失时抛出带
-    ``template_catalog_mismatch`` 的 ``MaterialAuthoringError``。
+    ``resource_reference_resolver`` 把挂载业务 ID 解析成实际物料 UUID。返回候选
+    节点与框架模板 aggregate；模板、资源或物料身份缺失时抛出稳定的
+    ``MaterialAuthoringError``。
     """
 
     try:
@@ -190,11 +199,31 @@ def build_material_source_node(
             "物料来源引用的框架或资源模板身份不在当前目录代际",
             declaration.source_node,
         ) from error
+    try:
+        # ``mount_reference`` 是库存权威证明的实际挂载物料身份；业务 ID 只进入
+        # 保留源码元数据，绝不冒充候选选择器中的 UUID。
+        mount_reference = resolve_resource_reference(
+            declaration.mount_resource_id,
+            resource_reference_resolver,
+        )
+    except ResourceReferenceResolutionError as error:
+        # ``diagnostic_code`` 在无解析器的旧纯编译路径保留已发布诊断；注入库存
+        # 解析器后的身份失败使用新的稳定资源解析诊断。
+        diagnostic_code = (
+            "invalid_material_source"
+            if resource_reference_resolver is None
+            else "resource_reference_resolution_error"
+        )
+        raise MaterialAuthoringError(
+            diagnostic_code,
+            str(error),
+            declaration.source_node,
+        ) from error
     # ``selector`` 是后续运行时准入和预留消费的完整、稳定选择器事实。
     selector = {
         "mode": declaration.mode,
         "resource_template_uuid": resource_template_uuid,
-        "mount": {"uuid": declaration.mount_material_uuid},
+        "mount": {"uuid": mount_reference["uuid"]},
         "material_uuid": declaration.material_uuid,
         "site": declaration.site,
         "slot_range": (
@@ -238,6 +267,9 @@ def build_material_source_node(
             "unilab": {
                 "input_bindings": {},
                 "authoring_result_name": declaration.result_name,
+                "resource_refs": {
+                    "mount": {"resource_id": declaration.mount_resource_id}
+                },
             }
         },
     }
@@ -284,10 +316,26 @@ def render_material_source_call(
         ) from error
     role_member = MATERIAL_FLOW_ROLE_MEMBERS[selector["flow_role"]]
     # ``arguments`` 固定字段顺序，确保同一图跨进程生成完全相同的源码。
+    # ``resource_refs`` 保留作者使用的部署业务 ID；旧候选没有该元数据时只生成
+    # 已冻结 UUID，保证读取兼容且不反向猜测业务名称。
+    unilab = (node.get("meta_data") or {}).get("unilab", {})
+    resource_refs = (
+        unilab.get("resource_refs", {}) if isinstance(unilab, Mapping) else {}
+    )
+    mount_binding = (
+        resource_refs.get("mount") if isinstance(resource_refs, Mapping) else None
+    )
+    mount_resource_id = (
+        mount_binding.get("resource_id")
+        if isinstance(mount_binding, Mapping)
+        and isinstance(mount_binding.get("resource_id"), str)
+        and mount_binding.get("resource_id")
+        else selector["mount"]["uuid"]
+    )
     arguments = [
         f"resource_template={symbol}",
         f"mode={selector['mode']!r}",
-        f'mount=resource_ref("{selector["mount"]["uuid"]}")',
+        f"mount=resource_ref({json.dumps(mount_resource_id, ensure_ascii=False)})",
         f"material_uuid={selector['material_uuid']!r}",
         f"site={selector['site']!r}",
         f"slot_range={selector['slot_range']!r}",
@@ -315,15 +363,15 @@ def _literal_string(expression: ast.expr, *, label: str) -> str:
     return value
 
 
-def _resource_ref_uuid(
+def _resource_ref_id(
     expression: ast.expr,
     *,
     imports: Mapping[str, str],
 ) -> str:
-    """解析 ``resource_ref`` 中的固定物料 UUID。
+    """解析 ``resource_ref`` 中的部署资源 ID。
 
     参数说明：``expression`` 是 mount 表达式，``imports`` 用于证明标记身份。
-    返回：规范物料 UUID；动态调用、别名未知或非法身份关闭失败。
+    返回：非空且无首尾空白的静态资源 ID；动态调用或别名未知时关闭失败。
     """
 
     if (
@@ -333,8 +381,29 @@ def _resource_ref_uuid(
         or len(expression.args) != 1
         or expression.keywords
     ):
-        _fail("mount 必须调用 resource_ref(物料 UUID)", expression)
-    return _required_uuid_literal(expression.args[0], label="mount 物料 UUID")
+        _fail("mount 必须调用 resource_ref(资源 ID)", expression)
+    return _literal_resource_id(expression.args[0], label="mount 资源 ID")
+
+
+def _literal_resource_id(expression: ast.expr, *, label: str) -> str:
+    """读取一个不带首尾空白的非空资源 ID 字面量。
+
+    参数：``expression`` 是 AST 值，``label`` 用于错误定位。返回原始稳定业务
+    ID 或 UUID 字符串；动态值、空值和首尾空白抛出 ``MaterialAuthoringError``。
+    """
+
+    try:
+        # ``resource_id`` 是作者声明的部署业务身份，尚不是物料 UUID。
+        resource_id = ast.literal_eval(expression)
+    except (TypeError, ValueError):
+        _fail(f"{label}必须是字符串字面量", expression)
+    if (
+        not isinstance(resource_id, str)
+        or not resource_id.strip()
+        or resource_id != resource_id.strip()
+    ):
+        _fail(f"{label}必须是无首尾空白的非空字符串", expression)
+    return resource_id
 
 
 def _flow_role(
