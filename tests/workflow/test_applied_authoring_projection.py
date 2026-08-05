@@ -364,7 +364,7 @@ def test_catalog_projection_accepts_browser_json_number_lexical_collapse() -> No
 
     engine, applied_graph, normalized_source = _persisted_standard_graph()
     # ``catalog`` 是测试夹具冻结的当前目录，用于构造同语义的浮点默认值代际。
-    catalog = getattr(engine, "_catalog")
+    catalog = engine._catalog
     node_templates = [action.detached_template() for action in catalog.actions]
     handle_templates = [
         handle

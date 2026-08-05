@@ -9,7 +9,6 @@ from datetime import datetime
 from typing import Any
 
 from unilabos.workflow.authoring_kernel import AuthoringCatalogAction
-from unilabos.workflow.json_codec import strict_json_equal
 from unilabos.workflow.models import validate_uuid
 
 _DATABASE_OPERATION_FIELDS = {
@@ -409,8 +408,9 @@ def _catalog_entity_equal(
     """按受控 wire 等价比较一项已应用和当前目录实体。
 
     参数说明：两项实体分别来自数据库读投影和当前目录；``nullable_fields`` 是
-    Backend ``omitempty`` 白名单。返回是否严格等价：只忽略数据库操作字段，且
-    只把白名单字段的缺失与 ``null`` 视作相同；数字类型等其他差异均保留。
+    Backend ``omitempty`` 白名单。返回是否受控等价：只忽略数据库操作字段，
+    只把白名单字段的缺失与 ``null`` 视作相同，并接受浏览器对等值 JSON number
+    的词法重编码；其他差异均保留。
     """
 
     return not _catalog_entity_difference_fields(
@@ -429,8 +429,8 @@ def _catalog_entity_difference_fields(
     """列出已应用实体与当前目录之间的严格 wire 漂移字段。
 
     参数说明：两项实体分别来自数据库读投影和当前目录；``nullable_fields`` 是
-    Backend ``omitempty`` 白名单。返回稳定排序的不同字段名；比较保留 JSON
-    数字类型差异，且不把具体合同值写入用户诊断。
+    Backend ``omitempty`` 白名单。返回稳定排序的不同字段名；相等整数和浮点数
+    按同一 JSON number 比较，且不把具体合同值写入用户诊断。
     """
 
     applied_semantic = _catalog_semantic_entity(
@@ -446,11 +446,46 @@ def _catalog_entity_difference_fields(
         for field_name in set(applied_semantic) | set(current_semantic)
         if field_name not in applied_semantic
         or field_name not in current_semantic
-        or not strict_json_equal(
+        or not _catalog_json_equal(
             applied_semantic[field_name],
             current_semantic[field_name],
         )
     )
+
+
+def _catalog_json_equal(left: Any, right: Any) -> bool:
+    """比较目录 JSON，并把相等整数与浮点数视为同一 JSON number。
+
+    参数说明：``left`` 与 ``right`` 是已验证的有限 JSON 值。返回：浏览器重编码
+    ``300.0`` 为 ``300`` 时仍为真；布尔值、容器类型、字段集合、数组顺序和
+    其他标量继续严格比较。该规则只用于目录读投影固定点，不改变公共 JSON
+    编解码器或工作流业务值的类型语义。
+    """
+
+    pending = [(left, right)]
+    while pending:
+        left_item, right_item = pending.pop()
+        left_type = type(left_item)
+        right_type = type(right_item)
+        if left_type in {int, float} and right_type in {int, float}:
+            if left_item != right_item:
+                return False
+            continue
+        if left_type is not right_type:
+            return False
+        if isinstance(left_item, dict):
+            if left_item.keys() != right_item.keys():
+                return False
+            pending.extend(
+                (value, right_item[key]) for key, value in left_item.items()
+            )
+        elif isinstance(left_item, list):
+            if len(left_item) != len(right_item):
+                return False
+            pending.extend(zip(left_item, right_item, strict=True))
+        elif left_item != right_item:
+            return False
+    return True
 
 
 def _catalog_semantic_entity(
