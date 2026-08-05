@@ -252,6 +252,105 @@ def test_local_composition_creates_missing_inventory_template_identities(
         inventory_store.close()
 
 
+def test_local_composition_preserves_business_identities_for_shared_implementations(
+    tmp_path: Path,
+) -> None:
+    """多个模板复用同一 Python 实现类时仍须按业务 ID 稳定投影。
+
+    参数说明：``tmp_path`` 隔离库存与工作流数据库。返回：无；测试通过公开本地
+    工作流模板组合接缝证明，两个设备模板和两个遗留资源模板即使分别复用同一
+    ``class.module``，也会获得互不相同的资源模板（ResourceTemplate）UUID；
+    同代显式 ``source_fqid`` 及动作合同（Action Contract）合法资源别名仍解析到
+    原资源模板 UUID。任一实现类复用被误判为源码声明冲突时测试失败。
+    """
+
+    reset_workflow_service_for_test()
+    # ``inventory_store`` 是本轮业务 ID 到稳定资源模板 UUID 的唯一库存权威。
+    inventory_store = InventoryStore(str(tmp_path / "inventory.db"))
+    try:
+        # ``registry`` 保留原合法强类型动作与显式物料资源源码身份，并增加历史
+        # YAML 注册表中常见的“多个业务模板复用一个实现类”形状。
+        registry = _build_registry(tmp_path)
+        # ``shared_device_module`` 是两个设备业务模板共同使用的驱动实现类身份；
+        # 它不是任一设备资源模板的业务唯一身份。
+        shared_device_module = "lab.devices.shared:SharedDevice"
+        # ``shared_resource_module`` 是两个遗留资源业务模板共同使用的容器实现类；
+        # 它没有显式源码声明身份，因而不能被猜成唯一物料资源符号。
+        shared_resource_module = "lab.resources.shared:SharedContainer"
+        registry._devices.extend(
+            [
+                {
+                    "id": business_id,
+                    "displayname": business_id,
+                    "class": {
+                        "module": shared_device_module,
+                        "type": "python",
+                        "action_value_mappings": {},
+                    },
+                }
+                for business_id in ("shared_device_a", "shared_device_b")
+            ]
+        )
+        registry._resources.extend(
+            [
+                {
+                    "id": business_id,
+                    "displayname": business_id,
+                    "class": {
+                        "module": shared_resource_module,
+                        "type": "python",
+                        "action_value_mappings": {},
+                    },
+                }
+                for business_id in ("shared_resource_a", "shared_resource_b")
+            ]
+        )
+
+        # ``projection`` 是同一注册表代际成功同步后发布的可信模板投影。
+        _service, projection = compose_local_workflow_template_runtime(
+            tmp_path,
+            inventory_store=inventory_store,
+            registry=registry,
+        )
+        # ``template_identities`` 按注册表业务 ID 读取活动资源模板稳定 UUID。
+        template_identities = _active_template_identities(inventory_store)
+        # ``plate_input`` 是合法显式资源源码身份驱动的动作物料输入连接点。
+        plate_input = next(
+            handle
+            for handle in projection.snapshot()
+            .require_action("local_templates:Pump", "transfer")
+            .handles
+            if handle["io_type"] == "target" and handle["handle_key"] == "plate"
+        )
+
+        assert set(template_identities) == {
+            "plate_96",
+            "pump",
+            "shared_device_a",
+            "shared_device_b",
+            "shared_resource_a",
+            "shared_resource_b",
+        }
+        assert template_identities["shared_device_a"] != template_identities[
+            "shared_device_b"
+        ]
+        assert template_identities["shared_resource_a"] != template_identities[
+            "shared_resource_b"
+        ]
+        assert (
+            projection.snapshot().require_resource_template_uuid(
+                "local_templates:plate_96"
+            )
+            == template_identities["plate_96"]
+        )
+        assert plate_input["meta_data"]["unilab"][
+            "allowed_resource_template_uuids"
+        ] == (template_identities["plate_96"],)
+    finally:
+        reset_workflow_service_for_test()
+        inventory_store.close()
+
+
 def test_local_composition_reuses_existing_business_identity_uuid(
     tmp_path: Path,
 ) -> None:
