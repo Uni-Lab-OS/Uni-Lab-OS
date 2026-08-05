@@ -1,0 +1,216 @@
+"""F05.4-C0c 注册模板投影（Registry Template Projection）服务合同测试。"""
+
+from __future__ import annotations
+
+import json
+from copy import deepcopy
+from pathlib import Path
+from typing import Any
+
+from fastapi.testclient import TestClient
+
+from tests.registry.test_template_projection import (
+    DEVICE_MATERIAL_UUID,
+    FakeRegistry,
+    RESOURCE_TEMPLATE_UUID,
+)
+from tests.workflow.test_authoring_engine import WORKFLOW_UUID
+from unilabos.app.workflow_api import create_workflow_app
+from unilabos.registry.template_projection import RegistryTemplateProjection
+from unilabos.workflow.authoring_engine import WorkflowAuthoringEngine
+from unilabos.workflow.service import WorkflowService
+from unilabos.workflow.store import WorkflowStore
+
+# ``ACTION_NODE_UUID`` 是真实注册动作在候选工作流图（Candidate Workflow
+# Graph）中的稳定节点身份。
+ACTION_NODE_UUID = "22000000-0000-4000-8000-000000000001"
+
+
+class _StaticRegistry:
+    """让测试把同一份可变注册输入交给真实注册模板投影深模块。"""
+
+    def __init__(self, devices: list[dict[str, Any]]) -> None:
+        """保存调用方持有的设备注册表（Registry）输入。
+
+        参数说明：``devices`` 是设备注册表完成构建后的设备定义集合。返回：无。
+        异常：无；测试刻意保留同一容器，以验证投影结果与输入深分离。
+        """
+
+        self._devices = devices
+
+    def obtain_registry_device_info(self) -> list[dict[str, Any]]:
+        """返回调用方持有的设备定义集合。
+
+        参数说明：无。返回：未复制的设备注册表（Registry）设备定义；投影深模块
+        必须自行建立快照。异常：无。
+        """
+
+        return self._devices
+
+    def obtain_registry_resource_info(self) -> list[dict[str, Any]]:
+        """返回本用例不需要的空资源模板（ResourceTemplate）定义集合。
+
+        参数说明：无。返回：空列表。异常：无。
+        """
+
+        return []
+
+
+def _resolve_resource_template_uuid(resource_name: str) -> str:
+    """把测试设备业务身份解析为稳定资源模板（ResourceTemplate）UUID。
+
+    参数说明：``resource_name`` 来自注册设备定义。返回：``pump`` 对应的规范
+    UUID；未知身份返回空字符串，使真实投影按关闭失败（Fail-closed）规则拒绝。
+    异常：无。
+    """
+
+    return RESOURCE_TEMPLATE_UUID if resource_name == "pump" else ""
+
+
+def _workflow_source() -> str:
+    """生成调用真实注册动作的可信工作流源码（Workflow Source）。
+
+    参数说明：无。返回：含固定执行器（Fixed Executor）、数字参数和稳定节点身份
+    的 Python 源码；该源码可经过公共候选签发和应用链。异常：无。
+    """
+
+    return f'''from lab.devices import Pump
+from unilabos.workflow.authoring import device, workflow, workflow_output
+
+
+pump: Pump = device("{DEVICE_MATERIAL_UUID}")
+
+
+@workflow(
+    workflow_uuid="{WORKFLOW_UUID}",
+    displayname="Registry schema service contract",
+)
+def registry_schema_service_contract():
+    # unilab:node_uuid={ACTION_NODE_UUID}
+    accepted = pump.transfer(volume=1.5)
+    return workflow_output()
+'''
+
+
+def test_registry_schema_is_backend_string_through_candidate_apply_and_restart(
+    tmp_path: Path,
+) -> None:
+    """真实注册参数 Schema 必须以 Backend 字符串形状完成候选签发、应用与重读。
+
+    参数说明：``tmp_path`` 隔离工作流/调度存储和可编辑包。返回：无。异常/断言：
+    注册模板投影（Registry Template Projection）若共享输入容器、重启后恢复为
+    ``dict``，或工作流服务（WorkflowService）无法签发、保存及以 HTTP 读取同一
+    字符串 Schema，测试失败。
+    """
+
+    # ``database_path`` 是跨注册投影和工作流服务重启共享的本地工作流事实文件。
+    database_path = tmp_path / "workflow_history.db"
+    # ``registry_devices`` 是调用方仍可修改的注册输入，用来证明投影边界深分离。
+    registry_devices = FakeRegistry().obtain_registry_device_info()
+    # ``goal_schema`` 是 Backend `workflow_node_template.schema` 表达的 goal 子模式。
+    goal_schema = deepcopy(
+        registry_devices[0]["class"]["action_value_mappings"]["transfer"]["schema"]
+        ["properties"]["goal"]
+    )
+    # ``expected_schema_text`` 按 Backend 文本列语义确定性编码参数 Schema。
+    expected_schema_text = json.dumps(
+        goal_schema,
+        ensure_ascii=False,
+        allow_nan=False,
+        sort_keys=True,
+        separators=(",", ":"),
+    )
+
+    first_projection = RegistryTemplateProjection(
+        WorkflowStore(database_path),
+        authority_id="f05-c0c",
+        resource_template_identity_resolver=_resolve_resource_template_uuid,
+    )
+    first_snapshot = first_projection.refresh(_StaticRegistry(registry_devices))
+    first_action = first_snapshot.require_action("lab.devices:Pump", "transfer")
+    assert first_action.template["schema"] == expected_schema_text
+    first_projection.close()
+
+    registry_devices[0]["class"]["action_value_mappings"]["transfer"]["schema"][
+        "properties"
+    ]["goal"]["properties"]["volume"]["type"] = "string"
+
+    restarted_projection = RegistryTemplateProjection(
+        WorkflowStore(database_path),
+        authority_id="f05-c0c",
+        resource_template_identity_resolver=_resolve_resource_template_uuid,
+    )
+    restarted_action = restarted_projection.snapshot().require_action(
+        "lab.devices:Pump",
+        "transfer",
+    )
+    assert restarted_action.template["schema"] == expected_schema_text
+
+    # ``service_store`` 与已恢复投影读取同一 SQLite 事实，但拥有独立服务连接。
+    service_store = WorkflowStore(database_path)
+    service = WorkflowService(
+        service_store,
+        compiler=WorkflowAuthoringEngine(catalog=restarted_projection.snapshot()),
+    )
+    package_root = tmp_path / "package"
+    source_path = package_root / "workflows" / "schema_contract.py"
+    source_path.parent.mkdir(parents=True)
+    service.create_workflow(
+        workflow_uuid=WORKFLOW_UUID,
+        name="Registry schema service contract",
+        tags=[],
+        description=None,
+        meta_data={},
+    )
+    service.replace_active_editable_source_authorization(
+        workflow_uuid=WORKFLOW_UUID,
+        package_id="lab",
+        package_root=package_root,
+        relative_path="workflows/schema_contract.py",
+    )
+    try:
+        draft = service.save_draft(
+            WORKFLOW_UUID,
+            python_source=_workflow_source(),
+            expected_draft_hash=None,
+            expected_workflow_revision=1,
+        )
+        # ``candidate`` 是服务已签发并持久化的创作候选（Authoring Candidate）。
+        candidate = draft["candidate"]
+        assert candidate is not None, draft["draft"]["diagnostics"]
+        assert candidate["graph"]["node_templates"][0]["schema"] == (
+            expected_schema_text
+        )
+
+        candidate["graph"]["node_templates"][0]["schema"] = "false"
+        # ``stored_candidate`` 是重新读取的候选事实，不能与调用方返回值共享容器。
+        stored_candidate = service.get_authoring(WORKFLOW_UUID)["candidate"]
+        assert stored_candidate is not None
+        assert stored_candidate["graph"]["node_templates"][0]["schema"] == (
+            expected_schema_text
+        )
+
+        service.apply_authoring(
+            WORKFLOW_UUID,
+            expected_draft_hash=draft["draft"]["draft_hash"],
+            expected_workflow_revision=1,
+            expected_candidate_hash=stored_candidate["candidate_hash"],
+        )
+        graph_response = TestClient(create_workflow_app(service)).get(
+            f"/api/v1/workflows/{WORKFLOW_UUID}/graph"
+        )
+        assert graph_response.status_code == 200
+        assert graph_response.json()["data"]["node_templates"][0]["schema"] == (
+            expected_schema_text
+        )
+    finally:
+        service.close()
+        restarted_projection.close()
+
+    reopened_store = WorkflowStore(database_path)
+    try:
+        assert reopened_store.get_graph(WORKFLOW_UUID)["node_templates"][0][
+            "schema"
+        ] == expected_schema_text
+    finally:
+        reopened_store.close()
