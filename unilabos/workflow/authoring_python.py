@@ -536,7 +536,7 @@ def _render_action_arguments(
     参数说明：``node`` 与 ``action`` 提供节点事实和不可变动作合同（Action
     Contract），``incoming`` 提供按目标连接点（Handle）索引的稳定入边，
     ``node_by_uuid`` 与 ``catalog_by_node`` 分别解析源工作流节点（WorkflowNode）
-    及其目录动作（Catalog Action）和输出连接点。返回：按业务键排序的
+    及其目录中的动作（Action）和输出连接点。返回：按业务键排序的
     ``name=value`` 片段；只渲染遗留 ``executor`` 或第 2 版动作合同 ``goal``
     输入，结构依赖不成为动作参数。异常：连接点身份、输入绑定或必填参数无法
     证明时抛出 ``AuthoringGraphError``，不得按节点顺序或名称猜测。
@@ -555,8 +555,8 @@ def _render_action_arguments(
     )
     # ``rendered`` 按动作合同（Action Contract）业务键顺序收集最终命名参数。
     rendered: list[str] = []
-    # ``target_handles`` 只包含动作数据输入；ready 等结构连接点（Handle）不得
-    # 被渲染成设备动作（Action）参数。
+    # ``target_handles`` 只包含动作（Action）数据输入；ready 等结构连接点
+    # （Handle）不得被渲染成设备动作（Action）参数。
     target_handles = sorted(
         (
             handle
@@ -576,6 +576,8 @@ def _render_action_arguments(
         # 来源；空值表示当前没有合法提供者。
         expression: str | None = None
         if handle_uuid in input_bindings:
+            # ``binding`` 是当前目标连接点（Handle）对应的工作流输入绑定事实；
+            # 必须按连接点 UUID 查询，避免根据动作参数名称猜测绑定。
             binding = input_bindings[handle_uuid]
             if not isinstance(binding, Mapping) or not isinstance(
                 binding.get("parameter"), str
