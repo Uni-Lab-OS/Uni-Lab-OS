@@ -134,6 +134,7 @@ def setup_server() -> FastAPI:
                 app,
                 workflow_service,
                 template_snapshot_provider=template_projection,
+                authoring_transform=workflow_service.compiler,
             )
             workflow_routes_mounted = True
         except Exception as e:  # noqa: BLE001 - unrelated Edge routes remain available

@@ -11,10 +11,10 @@ import pytest
 from fastapi import FastAPI
 
 from tests.app.test_authoring_transform_api import (
+    HTTP_BODY_LIMIT,
     INTEGER_DIGIT_LIMIT,
     INVALID_INPUT,
     JSON_DEPTH_LIMIT,
-    HTTP_BODY_LIMIT,
     WORKFLOW_UUID,
     RecordingTransformEngine,
     _graph,
@@ -59,6 +59,12 @@ def _invoke_asgi(
 
     receive = _ReceiveSpy([body])
     sent: list[dict[str, Any]] = []
+
+    async def send(message: dict[str, Any]) -> None:
+        """记录 ASGI 响应消息；参数是单条消息，返回无且不执行网络 I/O。"""
+
+        sent.append(message)
+
     headers = [(b"content-type", b"application/json")]
     if content_length is not None:
         headers.append((b"content-length", str(content_length).encode("ascii")))
@@ -76,8 +82,10 @@ def _invoke_asgi(
         "client": ("127.0.0.1", 12345),
         "server": ("testserver", 80),
     }
-    asyncio.run(app(scope, receive, sent.append))
-    status = next(item["status"] for item in sent if item["type"] == "http.response.start")
+    asyncio.run(app(scope, receive, send))
+    status = next(
+        item["status"] for item in sent if item["type"] == "http.response.start"
+    )
     raw = b"".join(
         item.get("body", b"") for item in sent if item["type"] == "http.response.body"
     )
@@ -94,9 +102,7 @@ def _raw_compile_body(graph: bytes) -> bytes:
         b'{"workflow_uuid":"'
         + WORKFLOW_UUID.encode("ascii")
         + b'","revision":7,"python_source":"value = 1\\n",'
-        b'"source_uri":"package://lab/f05.py","applied_graph":'
-        + graph
-        + b"}"
+        b'"source_uri":"package://lab/f05.py","applied_graph":' + graph + b"}"
     )
 
 
@@ -162,9 +168,18 @@ def test_complete_json_depth_budget(
     参数：深度、业务码和调用数由边界矩阵提供。返回：无；断言预算先于引擎。
     """
 
-    # 请求根与 ``applied_graph`` 已占两层，数组只补足剩余深度。
+    # 请求根与 ``applied_graph`` 已占两层，数组只补足剩余深度；``valid_graph``
+    # 同时保留入口所要求的规范工作流（Workflow）身份。
     array_depth = depth - 2
-    graph = b'{"deep":' + b"[" * array_depth + b"0" + b"]" * array_depth + b"}"
+    valid_graph = json.dumps(_graph(), separators=(",", ":")).encode()[:-1]
+    graph = (
+        valid_graph
+        + b',"deep":'
+        + b"[" * array_depth
+        + b"0"
+        + b"]" * array_depth
+        + b"}"
+    )
     body = _raw_compile_body(graph)
     engine = RecordingTransformEngine("diagnostic")
     status, payload, _receive = _invoke_asgi(

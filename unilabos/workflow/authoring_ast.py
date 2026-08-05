@@ -22,6 +22,7 @@ from unilabos.workflow.authoring_material import (
 )
 from unilabos.workflow.models import validate_uuid
 from unilabos.workflow.source_coordinates import (
+    codepoint_offset_to_utf16_column,
     source_lines,
     utf8_offset_to_utf16_column,
 )
@@ -278,9 +279,22 @@ def diagnostic_source_range(
         column_offset = max((node.offset or 1) - 1, 0)
         end_line_number = node.end_lineno or line_number
         end_column_offset = max((node.end_offset or node.offset or 1) - 1, 0)
-        if line_number is not None and line_number <= len(lines):
-            start_column = min(column_offset + 1, len(lines[line_number - 1]) + 1)
-            end_column = min(end_column_offset + 1, len(lines[end_line_number - 1]) + 1)
+        # ``SyntaxError.offset`` 使用 Python 字符偏移；普通 AST 列偏移使用 UTF-8
+        # 字节。这里必须走独立转换，才能让非 BMP 字符后的前端列号保持 UTF-16。
+        if (
+            type(line_number) is int
+            and type(end_line_number) is int
+            and 1 <= line_number <= len(lines)
+            and 1 <= end_line_number <= len(lines)
+        ):
+            start_column = codepoint_offset_to_utf16_column(
+                lines[line_number - 1],
+                min(column_offset, len(lines[line_number - 1])),
+            )
+            end_column = codepoint_offset_to_utf16_column(
+                lines[end_line_number - 1],
+                min(end_column_offset, len(lines[end_line_number - 1])),
+            )
             return {
                 "start_line": line_number,
                 "start_column": start_column,

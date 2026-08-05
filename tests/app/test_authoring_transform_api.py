@@ -149,9 +149,7 @@ class RecordingTransformEngine:
             result_graph["workflow"]["uuid"] = OTHER_WORKFLOW_UUID
         changeset = _source_only_changeset()
         if self.mode == "nonempty-source-only":
-            changeset["created_node_uuids"] = [
-                "20000000-0000-4000-8000-000000000001"
-            ]
+            changeset["created_node_uuids"] = ["20000000-0000-4000-8000-000000000001"]
         normalized_source = values.get("python_source") or "# generated\n"
         return CandidateCompilation(
             diagnostics=[],
@@ -254,7 +252,13 @@ def _assert_success(payload: dict[str, Any]) -> dict[str, Any]:
             "/api/v1/authoring/compile",
             _compile_body(),
             "compile",
-            {"workflow_uuid", "workflow_revision", "python_source", "source_uri", "applied_graph"},
+            {
+                "workflow_uuid",
+                "workflow_revision",
+                "python_source",
+                "source_uri",
+                "applied_graph",
+            },
         ),
         (
             "/api/v1/authoring/generate-python",
@@ -266,7 +270,13 @@ def _assert_success(payload: dict[str, Any]) -> dict[str, Any]:
             "/api/v1/authoring/validate",
             _validate_body(),
             "validate",
-            {"workflow_uuid", "workflow_revision", "graph", "python_source", "source_uri"},
+            {
+                "workflow_uuid",
+                "workflow_revision",
+                "graph",
+                "python_source",
+                "source_uri",
+            },
         ),
     ],
     ids=["compile", "generate-python", "validate"],
@@ -303,7 +313,9 @@ def test_router_contains_only_the_three_pure_routes() -> None:
     """
 
     router = create_authoring_transform_router(RecordingTransformEngine())
-    routes = {(route.path, frozenset(route.methods or set())) for route in router.routes}
+    routes = {
+        (route.path, frozenset(route.methods or set())) for route in router.routes
+    }
     assert routes == {
         ("/api/v1/authoring/compile", frozenset({"POST"})),
         ("/api/v1/authoring/generate-python", frozenset({"POST"})),
@@ -327,11 +339,21 @@ def test_router_contains_only_the_three_pure_routes() -> None:
         ("/api/v1/authoring/compile", _compile_body(applied_graph=[])),
         (
             "/api/v1/authoring/compile",
-            _compile_body(applied_graph={**_graph(), "workflow": {**_graph()["workflow"], "revision": 8}}),
+            _compile_body(
+                applied_graph={
+                    **_graph(),
+                    "workflow": {**_graph()["workflow"], "revision": 8},
+                }
+            ),
         ),
         (
             "/api/v1/authoring/generate-python",
-            _generate_body(graph={**_graph(), "workflow": {**_graph()["workflow"], "uuid": OTHER_WORKFLOW_UUID}}),
+            _generate_body(
+                graph={
+                    **_graph(),
+                    "workflow": {**_graph()["workflow"], "uuid": OTHER_WORKFLOW_UUID},
+                }
+            ),
         ),
     ],
     ids=[
@@ -447,4 +469,3 @@ def test_generate_and_validate_require_exact_graph_and_empty_source_only_changes
     assert response.status_code == 200
     assert response.json() == INTERNAL_ERROR
     assert len(engine.calls) == 1
-

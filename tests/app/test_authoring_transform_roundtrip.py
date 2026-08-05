@@ -196,26 +196,24 @@ def _utf16_column(line: str, codepoint_offset: int) -> int:
     return len(line[:codepoint_offset].encode("utf-16-le")) // 2 + 1
 
 
-def test_real_http_diagnostic_uses_utf16_for_chinese_emoji_and_tab() -> None:
-    """中文、emoji 和 Tab 前缀后的诊断范围必须使用一基 UTF-16 坐标。
+def test_real_http_ast_diagnostic_uses_utf16_for_chinese_emoji_and_tab() -> None:
+    """含中文、emoji 和 Tab 的 AST 诊断范围必须使用一基 UTF-16 坐标。
 
-    参数：无。返回：无；断言 ``unknown()`` 的起止列与独立固定向量一致。
+    参数：无。返回：无；断言整个非法赋值的起止列与独立固定向量一致。
     """
 
-    original_action = '''    # unilab:node_uuid=20000000-0000-4000-8000-000000000001
-    prepared = reactor.prepare(sample=sample, cycles=cycles)'''
+    original_action = """    # unilab:node_uuid=20000000-0000-4000-8000-000000000001
+    prepared = reactor.prepare(sample=sample, cycles=cycles)"""
     source = _source().replace(
         original_action,
-        '    "中😀\t"; invalid = unknown()',
+        '    中 =\tunknown(label="😀")',
         1,
     )
     line_number = next(
-        index
-        for index, line in enumerate(source.splitlines(), 1)
-        if "unknown()" in line
+        index for index, line in enumerate(source.splitlines(), 1) if "unknown(" in line
     )
     line = source.splitlines()[line_number - 1]
-    start = line.index("unknown()")
+    start = line.index("中")
 
     with TestClient(create_authoring_transform_app(_engine())) as client:
         result = _post(
@@ -225,12 +223,12 @@ def test_real_http_diagnostic_uses_utf16_for_chinese_emoji_and_tab() -> None:
         )
 
     diagnostic = result["diagnostics"][0]
-    assert diagnostic["code"] == "invalid_action_call"
+    assert diagnostic["code"] == "unsupported_authoring_syntax"
     assert diagnostic["source_range"] == {
         "start_line": line_number,
         "start_column": _utf16_column(line, start),
         "end_line": line_number,
-        "end_column": _utf16_column(line, start + len("unknown()")),
+        "end_column": _utf16_column(line, len(line)),
     }
 
 

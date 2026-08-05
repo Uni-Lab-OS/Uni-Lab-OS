@@ -511,11 +511,14 @@ def install_workflow_api(
     service: WorkflowService,
     *,
     template_snapshot_provider: Optional[TemplateSnapshotProvider] = None,
+    authoring_transform: Any | None = None,
 ) -> None:
-    """向 OS FastAPI 应用安装工作流及可选模板查询接口。
+    """向 OS FastAPI 应用安装工作流及可选可信创作转换接口。
 
     参数说明：``app`` 是共享 HTTP 应用，``service`` 是工作流权威；本地调度模式
-    传入 ``template_snapshot_provider`` 后，模板查询与 F02 编译器共享同一投影。
+    传入 ``template_snapshot_provider`` 后，模板查询与 F02 编译器共享同一投影；
+    ``authoring_transform`` 是同一目录代际的可信创作转换（Trusted Authoring
+    Transform），缺失时不发布三条纯转换路由。返回：无。
     """
 
     @app.exception_handler(WorkflowError)
@@ -549,6 +552,7 @@ def install_workflow_api(
             "/api/v1/workflow-node-templates",
             "/api/v1/device-action-runs",
             "/api/v1/events",
+            "/api/v1/authoring",
         )
         if any(
             request.url.path == prefix or request.url.path.startswith(f"{prefix}/")
@@ -564,17 +568,25 @@ def install_workflow_api(
                 WorkflowTemplateQueryService(template_snapshot_provider)
             )
         )
+    if authoring_transform is not None:
+        from unilabos.app.workflow_authoring_transform import (
+            create_authoring_transform_router,
+        )
+
+        app.include_router(create_authoring_transform_router(authoring_transform))
 
 
 def create_workflow_app(
     service: WorkflowService,
     *,
     template_snapshot_provider: Optional[TemplateSnapshotProvider] = None,
+    authoring_transform: Any | None = None,
 ) -> FastAPI:
     """创建工作流合同测试应用。
 
     参数说明：``service`` 是唯一工作流权威；可选模板快照提供者用于本地完整应用
-    合同测试。返回已安装统一错误映射的 FastAPI 应用。
+    合同测试；``authoring_transform`` 显式安装纯转换接缝。返回已安装统一错误映射
+    的 FastAPI 应用。
     """
 
     app = FastAPI(title="Uni-Lab Workflow", version="0.1.0")
@@ -582,13 +594,26 @@ def create_workflow_app(
         app,
         service,
         template_snapshot_provider=template_snapshot_provider,
+        authoring_transform=authoring_transform,
     )
     return app
 
 
+# 以下别名是可信创作转换（Trusted Authoring Transform）适配器复用的公共 HTTP
+# 接缝；保留旧私有名称，避免扩大现有工作流路由的机械修改范围。
+BackendJSONRoute = _BackendJSONRoute
+BackendJSONResponse = _BackendJSONResponse
+workflow_success_response = _success
+workflow_error_response = _error
+
+
 __all__ = [
+    "BackendJSONResponse",
+    "BackendJSONRoute",
     "create_workflow_app",
     "create_workflow_router",
     "format_sse_event",
     "install_workflow_api",
+    "workflow_error_response",
+    "workflow_success_response",
 ]
