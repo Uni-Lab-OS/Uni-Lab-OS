@@ -19,6 +19,11 @@ from tests.workflow.test_authoring_engine import (
     _source,
     _template,
 )
+from tests.workflow.test_qg01_group_parallel_authoring import (
+    GROUP_A_NODE_UUID,
+    _group_engine,
+    _group_source,
+)
 from unilabos.workflow.authoring_engine import WorkflowAuthoringEngine
 from unilabos.workflow.authoring_kernel import AuthoringCatalogSnapshot
 
@@ -169,6 +174,38 @@ def test_retained_nodes_and_edges_preserve_the_exact_persisted_read_shape() -> N
     assert result.valid and result.graph is not None, result.diagnostics
     assert result.graph["nodes"] == applied_graph["nodes"]
     assert result.graph["edges"] == applied_graph["edges"]
+
+
+def test_retained_group_preserves_omitted_nullable_action_name() -> None:
+    """展示分组节点必须保留 Backend 省略的空动作名读形状。
+
+    参数：无。返回：无；先编译真实展示分组节点（Presentation Group Node），
+    再模拟 Backend ``omitempty`` 省略 ``action_name`` 后回编译，断言候选达到同一
+    wire 固定点，避免浏览器校验误报 ``round_trip_mismatch``。
+    """
+
+    engine = _group_engine()
+    compiled = _compile(engine, graph=_applied_graph(), source=_group_source())
+    assert compiled.valid and compiled.graph is not None, compiled.diagnostics
+    assert compiled.normalized_python_source is not None
+    applied_graph = _persisted_read_graph(compiled.graph)
+    # ``group_node`` 是 Backend 会省略空动作名的展示分组读投影。
+    group_node = next(
+        node for node in applied_graph["nodes"] if node["uuid"] == GROUP_A_NODE_UUID
+    )
+    assert group_node.pop("action_name") is None
+
+    result = _compile(
+        engine,
+        graph=applied_graph,
+        source=compiled.normalized_python_source,
+    )
+
+    assert result.valid and result.graph is not None, result.diagnostics
+    retained_group = next(
+        node for node in result.graph["nodes"] if node["uuid"] == GROUP_A_NODE_UUID
+    )
+    assert "action_name" not in retained_group
 
 
 @pytest.mark.parametrize(
