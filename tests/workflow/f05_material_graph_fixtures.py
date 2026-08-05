@@ -367,7 +367,9 @@ def _projection_handle(
     """把测试连接点转换为模板投影存储接受的业务键形状。
 
     参数说明：``handle`` 是完整连接点，``templates`` 用于解析父节点模板业务
-    键。局部 ``parent`` 是唯一父模板。返回：保留显式连接点 UUID 的新字典。
+    键。局部 ``parent`` 是唯一父模板。返回：保留显式连接点 UUID 的新字典；
+    找不到匹配父模板时，``next()`` 抛出 ``StopIteration``，使测试目录装配失败
+    关闭而不伪造父模板身份。
     """
 
     candidate = deepcopy(handle)

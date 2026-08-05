@@ -54,7 +54,10 @@ def build_candidate_graph(
 
     参数说明：``program`` 是纯 AST 解析结果，``catalog`` 是不可变目录快照，
     ``applied_graph`` 是当前权威图。返回最小目录投影候选图和精确变更集；目录
-    缺失、连接点不匹配或输出不成立时抛出 ``AuthoringGraphError``。
+    缺失、连接点不匹配或输出不成立时抛出 ``AuthoringGraphError``。物料图违反
+    物料流线性（MaterialFlowLinearity）或资源模板兼容
+    （ResourceTemplate Compatibility）时，也会把内部物料图异常转换为
+    ``AuthoringGraphError`` 并保留稳定错误码。
     """
 
     applied = _graph_containers(applied_graph)
