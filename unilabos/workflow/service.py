@@ -243,6 +243,20 @@ class DeviceActionRunBridge(Protocol):
         ...
 
 
+class WorkflowTaskSchedulerBridge(Protocol):
+    """普通工作流任务（WorkflowTask）的本地调度端口。"""
+
+    def submit(self, task: Dict[str, Any]) -> Dict[str, Any]:
+        """提交已持久任务；参数是标准任务投影，返回刷新任务/作业聚合。"""
+
+        ...
+
+    def close(self) -> None:
+        """幂等释放调度生命周期监听器；参数无，返回无。"""
+
+        ...
+
+
 def _sha256(data: bytes) -> str:
     return f"sha256:{hashlib.sha256(data).hexdigest()}"
 
@@ -271,13 +285,15 @@ class WorkflowService:
             Callable[[str], Optional[Dict[str, Any]]]
         ] = None,
         device_action_run_bridge: Optional[DeviceActionRunBridge] = None,
+        task_scheduler_bridge: Optional[WorkflowTaskSchedulerBridge] = None,
     ):
         """装配本地工作流应用服务。
 
         参数：``store`` 是唯一工作流写模型；``compiler`` 负责编译可信工作流源码；
         ``material_resolver`` 按物料 UUID 读取活动物料身份，供设备单动作运行
         （DeviceActionRun）关闭式校验；``device_action_run_bridge`` 把首次创建的
-        标准 Task/Job 提交到本地执行内核。返回无。
+        标准 Task/Job 提交到本地执行内核；``task_scheduler_bridge`` 把普通工作流
+        任务（WorkflowTask）交给既有本地调度器。返回无。
         """
 
         self._store = store
@@ -290,6 +306,8 @@ class WorkflowService:
         # （Backend-controlled）模式不装配它，避免 OS 形成第二个生产调度权威
         # （Scheduler Authority）。
         self._device_action_run_bridge = device_action_run_bridge
+        # ``_task_scheduler_bridge`` 只在本地调度权威配置装配；后端控制配置保持空。
+        self._task_scheduler_bridge = task_scheduler_bridge
         self._locks_guard = threading.Lock()
         self._authoring_locks: Dict[str, threading.RLock] = {}
         # ``_source_authorization_replacement_lock`` 串行化完整授权集合替换，使“当前
@@ -491,7 +509,7 @@ class WorkflowService:
             raise WorkflowError("invalid_input")
         description = self._optional_text(description)
         try:
-            return self._store.create_task_with_jobs(
+            task = self._store.create_task_with_jobs(
                 workflow_uuid=workflow_uuid,
                 task_uuid=str(uuid4()),
                 run_mode=run_mode,
@@ -505,6 +523,12 @@ class WorkflowService:
                     target_node_uuid=target_node_uuid,
                 ),
             )
+            if self._task_scheduler_bridge is None:
+                return task
+            # ``aggregate`` 来自调度同步推进后的标准持久投影，不返回创建事务中的
+            # 过期 ``pending`` 快照。
+            aggregate = self._task_scheduler_bridge.submit(task)
+            return aggregate["task"]
         except StoreConflict:
             raise WorkflowError("invalid_input") from None
 
@@ -821,6 +845,8 @@ class WorkflowService:
     def close(self) -> None:
         """关闭本地执行桥和由该 Service 独占的工作流持久存储。"""
 
+        if self._task_scheduler_bridge is not None:
+            self._task_scheduler_bridge.close()
         if self._device_action_run_bridge is not None:
             self._device_action_run_bridge.close()
         self._store.close()

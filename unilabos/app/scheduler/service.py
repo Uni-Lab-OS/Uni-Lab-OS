@@ -151,6 +151,16 @@ class EdgeScheduler:
         self._job_pre_dispatch_listeners: List[Callable[[Dict[str, Any]], None]] = []
         self._job_finished_listeners: List[Callable[[str, bool, Any, str], None]] = []
 
+    @property
+    def inventory_service(self) -> Any:
+        """返回本地调度器持有的库存服务（InventoryService）。
+
+        参数：无。返回：同一库存权威（Inventory Authority）实例；未装配时为
+        ``None``。该只读属性只供组合与桥接层验证和复用，禁止替换权威。
+        """
+
+        return self._inventory
+
     def _emit_monitor(
         self, channel: str, event_type: str, data: Dict[str, Any]
     ) -> None:

@@ -17,6 +17,7 @@ from unilabos.workflow.service import AuthoringCompiler, WorkflowService
 from unilabos.workflow.source_discovery import discover_editable_sources
 from unilabos.workflow.source_monitor import WorkflowSourceMonitor
 from unilabos.workflow.store import WorkflowStore
+from unilabos.workflow.task_scheduler_bridge import TaskSchedulerBridge
 
 _lock = threading.RLock()
 _service: Optional[WorkflowService] = None
@@ -117,9 +118,15 @@ def compose_workflow_runtime(
         # （WorkflowNodeJob）写模型；执行桥与应用服务必须共享同一实例。
         workflow_store = WorkflowStore(database_path)
         device_action_run_bridge = None
+        task_scheduler_bridge = None
         new_service: Optional[WorkflowService] = None
         new_monitor: Optional[WorkflowSourceMonitor] = None
         try:
+            if scheduler is not None:
+                task_scheduler_bridge = TaskSchedulerBridge(
+                    workflow_store,
+                    scheduler=scheduler,
+                )
             if scheduler is not None and material_resolver is not None:
                 device_action_run_bridge = DeviceActionRunWorkflowSpecBridge(
                     workflow_store,
@@ -131,6 +138,7 @@ def compose_workflow_runtime(
                 compiler=compiler,
                 material_resolver=material_resolver,
                 device_action_run_bridge=device_action_run_bridge,
+                task_scheduler_bridge=task_scheduler_bridge,
             )
             # ``discovery_plan`` 是全量文件预校验结果；服务在单事务中注册后，
             # 才能恢复草稿并建立一致的监视基线。

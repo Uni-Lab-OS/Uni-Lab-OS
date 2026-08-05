@@ -93,9 +93,7 @@ def _seed_task(store: WorkflowStore, *, with_material: bool) -> dict[str, Any]:
     )
     # ``material_requirements`` 是短期交给高靖库存预留路径的冻结需求，不创建第二
     # 库存权威（Inventory Authority）。
-    material_requirements = (
-        [{"instance_uuid": MATERIAL_UUID}] if with_material else []
-    )
+    material_requirements = [{"instance_uuid": MATERIAL_UUID}] if with_material else []
     execution_plan = {
         "version": 1,
         "run_mode": "normal",
@@ -108,7 +106,17 @@ def _seed_task(store: WorkflowStore, *, with_material: bool) -> dict[str, Any]:
                 "action_name": "distribute",
                 "action_type": "UniLabJsonCommand",
                 "param": {},
-                "param_schema": {"type": "object", "properties": {}},
+                "param_schema": {
+                    "type": "object",
+                    "properties": {
+                        "goal": {
+                            "type": "object",
+                            "properties": {},
+                            "additionalProperties": True,
+                        }
+                    },
+                    "additionalProperties": False,
+                },
                 "material_requirements": material_requirements,
             }
         ],
@@ -274,7 +282,9 @@ def test_admission_retry_keeps_task_and_job_identities(store: WorkflowStore) -> 
     assert len(store.list_jobs(TASK_UUID)) == 1
 
 
-def test_predispatch_projection_conflict_blocks_dispatcher(store: WorkflowStore) -> None:
+def test_predispatch_projection_conflict_blocks_dispatcher(
+    store: WorkflowStore,
+) -> None:
     """派发前投影冲突不得越过执行适配器边界。
 
     参数：``store`` 是隔离任务权威。返回无；先制造作业终态冲突，再断言桥抛错且

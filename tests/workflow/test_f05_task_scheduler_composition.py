@@ -142,7 +142,9 @@ def test_local_composition_builds_bridge_from_existing_scheduler_inventory(
             """满足服务清理合同；参数无，返回无。"""
 
     composition.reset_workflow_service_for_test()
-    monkeypatch.setattr(composition, "TaskSchedulerBridge", _CompositionBridge, raising=False)
+    monkeypatch.setattr(
+        composition, "TaskSchedulerBridge", _CompositionBridge, raising=False
+    )
     try:
         service = composition.compose_workflow_runtime(tmp_path, scheduler=scheduler)
 
