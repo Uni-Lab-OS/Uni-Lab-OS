@@ -37,6 +37,8 @@ from unilabos.workflow.resource_reference import (
 from unilabos.workflow.workflow_io import (
     WorkflowIOValidationError,
     handle_value_schema,
+    resource_slot_passthrough_is_compatible,
+    schema_contains_resource_slot,
     schema_is_assignable,
 )
 
@@ -659,6 +661,37 @@ def _output_contract(
             "invalid_workflow_output",
             "结果记录字段与返回字典不一致",
         )
+    # ``outputs_by_name`` 只用于检查作者显式输出；服务端隐式输出随后按工作流
+    # 输入合同顺序追加，保持 integration D-068 的确定性身份和渲染固定点。
+    outputs_by_name = {str(item["name"]): item for item in outputs}
+    for parameter in program.input_contract["parameters"]:
+        parameter_name = str(parameter["name"])
+        parameter_schema = parameter["schema"]
+        if not schema_contains_resource_slot(parameter_schema):
+            continue
+        existing = outputs_by_name.get(parameter_name)
+        if existing is not None:
+            if not resource_slot_passthrough_is_compatible(
+                parameter_schema,
+                existing["schema"],
+            ):
+                raise AuthoringGraphError(
+                    "invalid_workflow_output",
+                    "同名显式输出与物料占位符输入透传不兼容",
+                )
+            continue
+        implicit_output = {
+            "name": parameter_name,
+            "schema": deepcopy(parameter_schema),
+            "implicit": True,
+        }
+        for presentation_field in ("title", "description"):
+            if presentation_field in parameter:
+                implicit_output[presentation_field] = deepcopy(
+                    parameter[presentation_field]
+                )
+        outputs.append(implicit_output)
+        outputs_by_name[parameter_name] = implicit_output
     return {"version": 1, "outputs": outputs}
 
 
@@ -685,6 +718,17 @@ def _output_bindings(
                 "kind": "node_output",
                 "workflow_node_uuid": declaration.node_uuid,
                 "source_handle_uuid": str(handle["uuid"]),
+            }
+    explicit_names = set(bindings)
+    for parameter in program.input_contract["parameters"]:
+        parameter_name = str(parameter["name"])
+        if (
+            parameter_name not in explicit_names
+            and schema_contains_resource_slot(parameter["schema"])
+        ):
+            bindings[parameter_name] = {
+                "kind": "workflow_input",
+                "parameter": parameter_name,
             }
     return bindings
 

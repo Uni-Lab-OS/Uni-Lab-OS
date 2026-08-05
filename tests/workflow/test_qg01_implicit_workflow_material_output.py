@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import ast
+
 from unilabos.workflow.models import CandidateCompilation
 
 from .test_authoring_engine import (
@@ -107,8 +109,19 @@ def test_material_workflow_input_gets_server_managed_output_fixed_point() -> Non
     assert "class TransferResult(TypedDict):\n    report: str" in (
         compiled.normalized_python_source
     )
-    assert "    sample: ResourceSlot" not in compiled.normalized_python_source
+    module = ast.parse(compiled.normalized_python_source)
+    result_record = next(
+        statement
+        for statement in module.body
+        if isinstance(statement, ast.ClassDef)
+        and statement.name == "TransferResult"
+    )
+    assert [
+        statement.target.id
+        for statement in result_record.body
+        if isinstance(statement, ast.AnnAssign)
+        and isinstance(statement.target, ast.Name)
+    ] == ["report"]
     repeated = _compile(compiled.normalized_python_source)
     assert repeated.valid and repeated.graph is not None, repeated.diagnostics
     assert repeated.graph == compiled.graph
-

@@ -87,21 +87,35 @@ def render_authoring_python(
         rendered.resource_import for rendered in material_sources.values()
     }
     input_contract, output_contract, output_bindings = _authoring_metadata(workflow)
+    # 隐式物料输出是服务端工作流输入/输出（Workflow I/O）权威事实，不属于作者
+    # 结果记录。只渲染显式输出，重新编译时再由服务端确定性合成隐式透传。
+    explicit_outputs = [
+        item
+        for item in output_contract.get("outputs", [])
+        if isinstance(item, Mapping) and not bool(item.get("implicit", False))
+    ]
+    explicit_output_names = [str(item["name"]) for item in explicit_outputs]
+    explicit_output_bindings = {
+        name: output_bindings[name] for name in explicit_output_names
+    }
 
     annotations = [
         _render_parameter(item) for item in input_contract.get("parameters", [])
     ]
     output_schemas = {
         item["name"]: item["schema"]
-        for item in output_contract.get("outputs", [])
+        for item in explicit_outputs
         if isinstance(item, Mapping)
         and isinstance(item.get("name"), str)
         and isinstance(item.get("schema"), Mapping)
     }
     output_annotations = {
-        name: _render_schema(dict(output_schemas[name])) for name in output_bindings
+        name: _render_schema(dict(output_schemas[name]))
+        for name in explicit_output_bindings
     }
-    typing_names: set[str] = {"TypedDict"} if output_bindings else set()
+    typing_names: set[str] = (
+        {"TypedDict"} if explicit_output_bindings else set()
+    )
     needs_field = False
     needs_resource_slot = False
     for _name, annotation, _default, imports in annotations:
@@ -142,7 +156,7 @@ def render_authoring_python(
     ):
         # 普通动作也可用 ``resource_ref``；只有真实节点元数据声明时才生成 import。
         marker_imports += ", resource_ref"
-    if not output_bindings:
+    if not explicit_output_bindings:
         marker_imports += ", workflow_output"
     lines.append(f"from unilabos.workflow.authoring import {marker_imports}")
     lines.extend(["", ""])
@@ -155,9 +169,9 @@ def render_authoring_python(
         ),
         fallback="WorkflowResult",
     )
-    if output_bindings:
+    if explicit_output_bindings:
         lines.append(f"class {result_record_name}(TypedDict):")
-        for output_name in output_bindings:
+        for output_name in explicit_output_bindings:
             annotation, _imports = output_annotations[output_name]
             lines.append(f"    {output_name}: {annotation}")
         lines.extend(["", ""])
@@ -193,17 +207,21 @@ def render_authoring_python(
         for name, annotation, default, _imports in annotations:
             suffix = "" if default is _NO_DEFAULT else f" = {default!r}"
             lines.append(f"    {name}: {annotation}{suffix},")
-        return_annotation = f" -> {result_record_name}" if output_bindings else ""
+        return_annotation = (
+            f" -> {result_record_name}" if explicit_output_bindings else ""
+        )
         lines.append(f"){return_annotation}:")
     else:
-        return_annotation = f" -> {result_record_name}" if output_bindings else ""
+        return_annotation = (
+            f" -> {result_record_name}" if explicit_output_bindings else ""
+        )
         lines.append(f"def {function_name}(){return_annotation}:")
 
     incoming = _incoming_bindings(edges)
     source_map: list[dict[str, Any]] = []
     # Python 动作结果变量承载节点间数据依赖，必须唯一且不能被节点展示标题改写。
     result_names: set[str] = set()
-    if not ordered_nodes and not output_bindings:
+    if not ordered_nodes and not explicit_output_bindings:
         lines.append('    """空工作流。"""')
     children_by_parent: dict[str, list[dict[str, Any]]] = defaultdict(list)
     for node in ordered_nodes:
@@ -292,16 +310,20 @@ def render_authoring_python(
                 device_symbols=device_symbols,
             )
             rendered_node_uuids.add(str(child["uuid"]))
-    if output_bindings:
+    if explicit_output_bindings:
         # 输出绑定字典由编译器按作者声明顺序建立；保留该顺序才能让输出合同
         # 在 Python→图→Python 往返中达到固定点。
         rendered_outputs = [
             f"{name}={_render_output_binding(binding, node_by_uuid, catalog_by_node)}"
-            for name, binding in output_bindings.items()
+            for name, binding in explicit_output_bindings.items()
         ]
         rendered_values = ", ".join(
             f"{name!r}: {expression.split('=', 1)[1]}"
-            for name, expression in zip(output_bindings, rendered_outputs, strict=True)
+            for name, expression in zip(
+                explicit_output_bindings,
+                rendered_outputs,
+                strict=True,
+            )
         )
         lines.append(f"    return {{{rendered_values}}}")
     else:
