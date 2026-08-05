@@ -59,6 +59,7 @@ class TaskSchedulerBridge:
         # ``_admission_pending_tasks`` 只保存尚未交给旧调度器的受阻任务身份。
         self._admission_pending_tasks: set[str] = set()
         self._closed = False
+        scheduler.add_admission_retry_listener(self._retry_pending_admissions)
         scheduler.add_job_pre_dispatch_listener(self._on_job_pre_dispatch)
         scheduler.add_job_finished_listener(self._on_job_finished)
 
@@ -164,11 +165,26 @@ class TaskSchedulerBridge:
         if self._closed:
             return
         self._closed = True
+        self._scheduler.remove_admission_retry_listener(
+            self._retry_pending_admissions
+        )
         self._scheduler.remove_job_pre_dispatch_listener(self._on_job_pre_dispatch)
         self._scheduler.remove_job_finished_listener(self._on_job_finished)
         self._task_by_job.clear()
         self._submitted_tasks.clear()
         self._admission_pending_tasks.clear()
+
+    def _retry_pending_admissions(self) -> None:
+        """重试全部尚未注册到旧调度器的物料来源准入。
+
+        参数：无。返回无；每个工作流任务（WorkflowTask）只在本轮重试一次，仍
+        受阻时由 ``submit`` 重新登记。异常：存储、准入或调度失败原样传播，禁止
+        在公开重排失败时继续派发其他普通动作。
+        """
+
+        for task_uuid in tuple(self._admission_pending_tasks):
+            self._admission_pending_tasks.discard(task_uuid)
+            self.submit(self._store.get_task(task_uuid))
 
     def _on_job_pre_dispatch(self, dispatching: Mapping[str, Any]) -> None:
         """在物理派发前提交标准作业派发意图。

@@ -186,10 +186,10 @@ def test_fixed_existing_waits_then_reschedules_with_same_task_and_job(
 
     参数：``runtime`` 是真实组合运行时。返回无；断言公开 HTTP 创建物料和
     工作流任务（WorkflowTask），外部工作流任务（WorkflowTask）/工作流
-    节点作业（WorkflowNodeJob）保持 ``pending``，内部为 ``waiting_for_material``；
-    释放夹具占用后，``POST /reschedule`` 使同一工作流任务（WorkflowTask）/工作流
-    节点作业（WorkflowNodeJob）进入运行。异常：任何私有替代接口、新工作流任务
-    （WorkflowTask）身份或提前设备派发都会使断言失败。
+    节点作业（WorkflowNodeJob）保持 ``pending``，且不向旧调度器注册普通动作；
+    释放夹具占用后，``POST /reschedule`` 使同一工作流任务（WorkflowTask）和两项
+    工作流节点作业（WorkflowNodeJob）继续推进。异常：任何私有替代接口、新工作流
+    任务（WorkflowTask）身份或提前设备派发都会使断言失败。
     """
 
     # ``material_template_uuid`` 是来源物料 API 与模板投影共享的类型身份。
@@ -249,12 +249,14 @@ def test_fixed_existing_waits_then_reschedules_with_same_task_and_job(
     ]
 
     assert created.json()["data"]["status"] == "pending"
-    assert [job["status"] for job in jobs_before] == ["pending"]
+    assert [job["executor_kind"] for job in jobs_before] == [
+        "material_source",
+        "device_action",
+    ]
+    assert [job["status"] for job in jobs_before] == ["pending", "pending"]
     assert runtime.dispatcher.dispatched == []
     assert runtime.client.get("/api/v1/materials/graph").json()["code"] == 0
-    assert runtime.scheduler.workflow_snapshot(task_uuid)["state"] == (
-        "waiting_for_material"
-    )
+    assert runtime.scheduler.workflow_snapshot(task_uuid) is None
 
     runtime.inventory.release_workflow(HOLDER_TASK_UUID, reason="fixture_release")
     rescheduled = runtime.client.post("/api/v1/reschedule")
@@ -266,11 +268,13 @@ def test_fixed_existing_waits_then_reschedules_with_same_task_and_job(
     ]
 
     assert rescheduled.status_code == 200
-    assert len(rescheduled.json()["dispatched"]) == 1
     assert task_after["uuid"] == task_uuid
     assert task_after["status"] == "running"
-    assert [job["uuid"] for job in jobs_after] == [jobs_before[0]["uuid"]]
-    assert [job["status"] for job in jobs_after] == ["dispatched"]
+    assert [job["uuid"] for job in jobs_after] == [
+        job["uuid"] for job in jobs_before
+    ]
+    assert [job["status"] for job in jobs_after] == ["succeeded", "dispatched"]
+    assert len(runtime.dispatcher.dispatched) == 1
 
 
 def test_create_new_fails_closed_without_task_or_material_graph_change(

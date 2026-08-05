@@ -150,6 +150,9 @@ class EdgeScheduler:
         # 生命周期监听器仅承载标准 Task/Job 兼容回写，不成为第二个状态权威。
         self._job_pre_dispatch_listeners: List[Callable[[Dict[str, Any]], None]] = []
         self._job_finished_listeners: List[Callable[[str, bool, Any, str], None]] = []
+        # 准入重试监听器把尚未注册为旧调度运行的来源受阻任务接到同一个公开
+        # 重排触发点；监听器本身仍由工作流任务桥拥有。
+        self._admission_retry_listeners: List[Callable[[], None]] = []
 
     @property
     def inventory_service(self) -> Any:
@@ -186,6 +189,27 @@ class EdgeScheduler:
         """替换工作流终态监听器；参数 ``listener`` 接收工作流身份和旧状态值。"""
 
         self._workflow_state_listener = listener
+
+    def add_admission_retry_listener(self, listener: Callable[[], None]) -> None:
+        """注册公开重排前的准入重试（AdmissionRetry）监听器。
+
+        参数：``listener`` 负责重试尚未注册到旧调度器的持久任务。返回无；监听器
+        异常会关闭失败并阻止本轮旧调度重排。
+        """
+
+        self._admission_retry_listeners.append(listener)
+
+    def remove_admission_retry_listener(self, listener: Callable[[], None]) -> None:
+        """移除准入重试（AdmissionRetry）监听器。
+
+        参数：``listener`` 必须是此前注册的同一回调。返回无；重复移除保持幂等。
+        """
+
+        self._admission_retry_listeners = [
+            current
+            for current in self._admission_retry_listeners
+            if current != listener
+        ]
 
     def add_job_pre_dispatch_listener(
         self,
@@ -479,7 +503,16 @@ class EdgeScheduler:
     # ── 重排核心 ─────────────────────────────────────────────
 
     def reschedule(self) -> List[Dict[str, Any]]:
-        """手动触发重排（API 暴露；正常推进依赖两个自动触发点）。"""
+        """手动触发重排并先通知来源准入重试监听器。
+
+        参数：无。返回：本轮旧调度器实际派发摘要。异常：准入监听器或调度
+        失败原样传播；监听器在调度锁外运行，可把受阻任务安全注册到本调度器。
+        """
+
+        with self._lock:
+            admission_retry_listeners = tuple(self._admission_retry_listeners)
+        for listener in admission_retry_listeners:
+            listener()
         with self._lock:
             return self._reschedule_locked()
 
