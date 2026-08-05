@@ -179,9 +179,9 @@ def test_fixed_existing_source_compiles_only_physical_consumers() -> None:
 def test_material_requirement_is_not_duplicated_on_downstream_consumer() -> None:
     """同一线性物料链的后续消费者不得重复申请任务物料预留。
 
-    参数：无。返回：无；断言只有首个启用物理消费者携带物料需求，后续动作
-    依赖同一已建立任务物料预留（TaskMaterialReservation）。异常：编译失败即
-    测试失败。
+    参数：无。返回：无；断言只有首个启用物理消费者携带短期整图物料预留输入，
+    后续动作不重复；该兼容输入将在 K11 被正式任务物料预留
+    （TaskMaterialReservation）替换。异常：编译失败即测试失败。
     """
 
     compiler_type, _error_type = _compiler_contract()
