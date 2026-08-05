@@ -74,6 +74,22 @@ def test_deployment_only_deck_setup_does_not_reach_plr_constructor() -> None:
     assert projected_resources[0].name == "deck-repro"
 
 
+def test_nested_warehouse_layout_metadata_does_not_reach_plr_constructor() -> None:
+    """证明工作台下仓库的库位元数据不会泄漏给 PLR 构造器。"""
+    deck_node = _deployment_deck_node()
+    warehouse_node = _warehouse_node(logical_mount=False)
+    # 公开资源树用双向父子关系表达工作台下挂的仓库资源。
+    warehouse_node.res_content.parent = deck_node.res_content
+    deck_node.children = [warehouse_node]
+
+    projected_resources = ResourceTreeSet(
+        [ResourceTreeInstance(deck_node)]
+    ).to_plr_resources()
+
+    assert len(projected_resources[0].children) == 1
+    assert projected_resources[0].children[0].name == "warehouse-repro"
+
+
 def test_plain_warehouse_projects_to_generic_plr_resource() -> None:
     """证明普通仓库能降级为通用 PLR 资源且保留稳定 UUID。"""
     # 普通仓库节点代表需要进入设备资源跟踪器的实际资源树根。
