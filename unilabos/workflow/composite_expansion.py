@@ -276,6 +276,7 @@ class CompositeAuthoring:
             template_action=template_action,
             nodes=nodes,
         )
+        _reject_private_providers(normalized_arguments, nodes)
         return CompositeExpansion(
             invocation_node=invocation_node,
             nodes=tuple(nodes),
@@ -687,6 +688,37 @@ def _referenced_templates(
         for handle in actions[key].detached_handles()
     ]
     return node_templates, handles
+
+
+def _reject_private_providers(
+    keyword_arguments: Mapping[str, object],
+    nodes: Sequence[Mapping[str, Any]],
+) -> None:
+    """拒绝父参数绕过调用边界引用本次展开的内部节点。
+
+    参数：关键字参数可包含标准来源引用，``nodes`` 是本次展开的私有层级。
+    返回：无。异常：命中内部节点来源时抛出稳定组合失败；不修改输入对象。
+    """
+
+    private_node_uuids = {str(node["uuid"]) for node in nodes}
+
+    def visit(value: object, path: str) -> None:
+        """递归检查一个 JSON 值中的节点输出来源引用。"""
+
+        if isinstance(value, Mapping):
+            if (
+                value.get("kind") == "node_output"
+                and value.get("workflow_node_uuid") in private_node_uuids
+            ):
+                raise _CompositeFailure("composite_external_private_edge", path)
+            for key, item in value.items():
+                visit(item, f"{path}/{key}")
+        elif isinstance(value, (list, tuple)):
+            for index, item in enumerate(value):
+                visit(item, f"{path}/{index}")
+
+    for name, value in keyword_arguments.items():
+        visit(value, f"/keyword_arguments/{name}")
 
 
 def _failed_expansion(code: str, path: str) -> CompositeExpansion:
