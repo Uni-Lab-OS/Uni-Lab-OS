@@ -277,6 +277,23 @@ def should_start_edge_scheduler(
     )
 
 
+def should_bootstrap_local_resource_graph(
+    args_dict: dict[str, Any], *, is_host_mode: bool
+) -> bool:
+    """判断本次启动是否应建立本地资源图投影（Resource Graph Projection）。
+
+    参数：``args_dict`` 是已规范化启动参数，``is_host_mode`` 表示当前节点是否为
+    主机。返回：仅当同一主机同时拥有嵌入式库存权威（Inventory Authority）和本地
+    调度权威（Scheduler Authority）时为 ``True``。异常：无；生产控制模式、外部
+    物料服务、从节点或显式关闭调度器时都不得写入本地资源图。
+    """
+
+    return should_start_embedded_material_service(
+        args_dict,
+        is_host_mode=is_host_mode,
+    ) and should_start_edge_scheduler(args_dict, is_host_mode=is_host_mode)
+
+
 def should_attach_legacy_http_bridge(args_dict: Dict[str, Any]) -> bool:
     """Legacy backend callbacks must not run beside the production protocol."""
 
@@ -1653,17 +1670,36 @@ def main():
             is_host_mode=BasicConfig.is_host_mode,
         ):
             from unilabos.app.scheduler.integration import setup_edge_inventory
+            from unilabos.registry.template_snapshot import RegistryTemplateSnapshot
 
             inventory_db = str(args_dict.get("edge_inventory_db") or "").strip()
             if not inventory_db:
                 raise ValueError("embedded material service requires --material_db")
             inventory_db = os.path.abspath(os.path.expanduser(inventory_db))
+            # ``bootstrap_resource_graph`` 只在本地主机同时拥有调度和库存权威时为真。
+            bootstrap_resource_graph = should_bootstrap_local_resource_graph(
+                args_dict,
+                is_host_mode=BasicConfig.is_host_mode,
+            )
             setup_edge_inventory(
                 inventory_db,
                 ws_client=(
                     comm_client
                     if "websocket" in args_dict["app_bridges"]
                     else None
+                ),
+                resource_tree_set=(
+                    resource_tree_set if bootstrap_resource_graph else None
+                ),
+                registry_snapshot=(
+                    RegistryTemplateSnapshot.from_registry(lab_registry)
+                    if bootstrap_resource_graph
+                    else None
+                ),
+                resource_graph_source_id=(
+                    str(file_path or "remote-startup.json")
+                    if bootstrap_resource_graph
+                    else ""
                 ),
             )
             print_status(

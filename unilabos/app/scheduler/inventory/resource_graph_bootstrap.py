@@ -1,0 +1,630 @@
+"""把本地资源树一次性投影为库存权威（Inventory Authority）事实。"""
+
+from __future__ import annotations
+
+import hashlib
+import json
+import math
+import sqlite3
+import uuid
+from collections.abc import Mapping, Sequence
+from datetime import datetime, timezone
+from pathlib import Path
+from typing import Any
+
+from unilabos.app.scheduler.inventory.store import InventoryStore
+from unilabos.registry.local_template_identity import (
+    synchronize_local_template_identities,
+)
+from unilabos.registry.template_snapshot import RegistryTemplateSnapshot
+
+_SITE_TYPES = frozenset({"well", "tipspot", "tip_spot", "tip-spot"})
+_SOURCE_KEY = "resource_graph_bootstrap_source"
+_FINGERPRINT_KEY = "resource_graph_bootstrap_fingerprint"
+
+
+class ResourceGraphBootstrapError(RuntimeError):
+    """本地资源图无法安全建立首次库存事实。"""
+
+
+def bootstrap_local_resource_graph(
+    *,
+    store: InventoryStore,
+    resource_tree_set: Any,
+    registry_snapshot: RegistryTemplateSnapshot,
+    source_id: str,
+) -> dict[str, Any]:
+    """预校验并原子提交本地资源图的物料（Material）与库位（Site）。
+
+    参数：``store`` 是当前主机唯一库存 SQLite；``resource_tree_set`` 提供产品
+    ``dump()`` 快照；``registry_snapshot`` 冻结同代资源模板定义；``source_id``
+    标识资源图来源。返回：``imported`` 或 ``unchanged`` 幂等回执。异常：身份、
+    拓扑、数值、模板、既有权威或指纹冲突时抛出 ``ResourceGraphBootstrapError``；
+    物料、位置、库位与指纹始终在同一事务提交或全部回滚。
+    """
+
+    # ``source_name`` 是持久来源身份和 UUID5 命名空间的一部分；目录位置不参与。
+    source_name = Path(str(source_id or "").strip()).name
+    if not source_name:
+        raise ResourceGraphBootstrapError("资源图来源不能为空")
+    try:
+        raw_trees = resource_tree_set.dump()
+    except (AttributeError, TypeError, ValueError) as error:
+        raise ResourceGraphBootstrapError("资源树集合缺少可用 dump 快照") from error
+    aliases = _template_aliases(registry_snapshot)
+    # ``projection`` 在任何模板或库存写入前完成结构验证，避免非法图留下部分事实。
+    projection = _compile_projection(raw_trees, source_name, aliases)
+    try:
+        resolve_template_uuid = synchronize_local_template_identities(
+            inventory_store=store,
+            registry_snapshot=registry_snapshot,
+        )
+        _resolve_projection_templates(projection, resolve_template_uuid)
+        fingerprint = _fingerprint(source_name, registry_snapshot, projection)
+        status = _commit_projection(store, source_name, fingerprint, projection)
+    except ResourceGraphBootstrapError:
+        raise
+    except Exception as error:
+        raise ResourceGraphBootstrapError(f"本地资源图启动投影失败: {error}") from error
+    return {
+        "status": status,
+        "source_id": source_name,
+        "fingerprint": fingerprint,
+        "material_count": len(projection["materials"]),
+        "site_count": len(projection["sites"]),
+    }
+
+
+def _template_aliases(snapshot: RegistryTemplateSnapshot) -> dict[str, str]:
+    """建立注册表别名到资源模板业务 ID 的唯一映射。
+
+    参数：``snapshot`` 是单代注册表快照。返回：业务 ID 与源码身份的唯一映射。
+    异常：空身份或跨模板别名冲突时抛出 ``ResourceGraphBootstrapError``。
+    """
+
+    aliases: dict[str, str] = {}
+    for definition in snapshot.detached_definitions():
+        template_name = str(definition.get("id") or "").strip()
+        class_definition = definition.get("class")
+        candidates = [
+            template_name,
+            definition.get("source_fqid"),
+            class_definition.get("module")
+            if isinstance(class_definition, Mapping)
+            else None,
+        ]
+        if not template_name:
+            raise ResourceGraphBootstrapError("资源模板业务 ID 不能为空")
+        for candidate in candidates:
+            if not isinstance(candidate, str) or not candidate.strip():
+                continue
+            alias = candidate.strip()
+            previous = aliases.get(alias)
+            if previous is not None and previous != template_name:
+                raise ResourceGraphBootstrapError(f"资源模板别名不唯一: {alias}")
+            aliases[alias] = template_name
+    return aliases
+
+
+def _compile_projection(
+    raw_trees: object,
+    source_name: str,
+    aliases: Mapping[str, str],
+) -> dict[str, list[dict[str, Any]]]:
+    """把可疑资源树快照编译成无数据库依赖的规范投影。
+
+    参数：``raw_trees`` 是嵌套树列表；``source_name`` 提供稳定命名空间；
+    ``aliases`` 校验资源类已进入注册表。返回：物料、位置和库位候选集合。
+    异常：集合形状、重复身份、模板、父关系或数值非法时关闭式失败。
+    """
+
+    if not isinstance(raw_trees, Sequence) or isinstance(raw_trees, (str, bytes)):
+        raise ResourceGraphBootstrapError("资源树快照必须是树列表")
+    nodes: list[dict[str, Any]] = []
+    for raw_tree in raw_trees:
+        if not isinstance(raw_tree, Sequence) or isinstance(raw_tree, (str, bytes)):
+            raise ResourceGraphBootstrapError("资源树成员必须是节点列表")
+        for raw_node in raw_tree:
+            nodes.append(_json_object(raw_node, "资源树节点"))
+    if not nodes:
+        raise ResourceGraphBootstrapError("资源树不得为空")
+    # ``node_by_runtime_uuid`` 只解析本次快照关系，不升级为持久物料身份。
+    node_by_runtime_uuid: dict[str, dict[str, Any]] = {}
+    node_ids: set[str] = set()
+    for node in nodes:
+        node_id = _required_text(node.get("id"), "node.id")
+        runtime_uuid = _required_text(node.get("uuid"), f"node {node_id} uuid")
+        if node_id in node_ids or runtime_uuid in node_by_runtime_uuid:
+            raise ResourceGraphBootstrapError("资源树节点 ID/运行时 UUID 必须唯一")
+        node_ids.add(node_id)
+        node_by_runtime_uuid[runtime_uuid] = node
+
+    material_nodes = [node for node in nodes if not _is_site_node(node)]
+    if not material_nodes:
+        raise ResourceGraphBootstrapError("资源树至少需要一个物料节点")
+    material_uuid_by_runtime = {
+        _required_text(node.get("uuid"), "material.uuid"): _stable_uuid(
+            source_name,
+            "material",
+            _required_text(node.get("id"), "material.id"),
+        )
+        for node in material_nodes
+    }
+    material_runtime_ids = set(material_uuid_by_runtime)
+    site_runtime_ids = {
+        _required_text(node.get("uuid"), "site.uuid")
+        for node in nodes
+        if _is_site_node(node)
+    }
+    materials: list[dict[str, Any]] = []
+    positions: list[dict[str, Any]] = []
+    for node in material_nodes:
+        node_id = _required_text(node.get("id"), "material.id")
+        runtime_uuid = _required_text(node.get("uuid"), "material.uuid")
+        graph_class = _required_text(node.get("class"), f"Material {node_id} class")
+        template_name = aliases.get(graph_class)
+        if template_name is None:
+            raise ResourceGraphBootstrapError(
+                f"Material {node_id} 资源模板身份未进入注册表: {graph_class}"
+            )
+        parent_runtime = _optional_text(node.get("parent_uuid"))
+        if parent_runtime in site_runtime_ids:
+            site_parent = node_by_runtime_uuid[parent_runtime]
+            parent_runtime = _optional_text(site_parent.get("parent_uuid"))
+        if parent_runtime is not None and parent_runtime not in material_runtime_ids:
+            raise ResourceGraphBootstrapError(f"Material {node_id} 父关系悬空")
+        material_uuid = material_uuid_by_runtime[runtime_uuid]
+        pose = _pose(node)
+        materials.append(
+            {
+                "uuid": material_uuid,
+                "template_name": template_name,
+                "template_uuid": "",
+                "parent_uuid": material_uuid_by_runtime.get(parent_runtime or ""),
+                "class": graph_class,
+                "barcode": str(node.get("barcode") or ""),
+                "name": _required_text(node.get("name") or node_id, "material.name"),
+                "description": _optional_text(node.get("description")),
+                "meta_data": {
+                    "source": "resource-tree-set",
+                    "source_graph": source_name,
+                    "source_node_id": node_id,
+                    "source_runtime_uuid": runtime_uuid,
+                },
+                "config": _json_object(node.get("config"), "material.config"),
+                "data": _json_object(node.get("data"), "material.data"),
+            }
+        )
+        positions.append(
+            {
+                "uuid": _stable_uuid(source_name, "relative-position", node_id),
+                "material_uuid": material_uuid,
+                **pose,
+            }
+        )
+
+    sites: list[dict[str, Any]] = []
+    site_order_by_owner: dict[str, int] = {}
+    occupied_materials: set[str] = set()
+    for node in nodes:
+        if not _is_site_node(node):
+            continue
+        node_id = _required_text(node.get("id"), "site.id")
+        runtime_uuid = _required_text(node.get("uuid"), "site.uuid")
+        owner_runtime = _optional_text(node.get("parent_uuid"))
+        owner_uuid = material_uuid_by_runtime.get(owner_runtime or "")
+        if owner_uuid is None:
+            raise ResourceGraphBootstrapError(f"库位（Site）{node_id} 父物料悬空")
+        occupant_runtime = [
+            candidate_runtime
+            for candidate_runtime, candidate in node_by_runtime_uuid.items()
+            if _optional_text(candidate.get("parent_uuid")) == runtime_uuid
+            and candidate_runtime in material_runtime_ids
+        ]
+        if len(occupant_runtime) > 1:
+            raise ResourceGraphBootstrapError(f"库位（Site）{node_id} 有多个占用物料")
+        occupant_uuid = (
+            material_uuid_by_runtime[occupant_runtime[0]] if occupant_runtime else None
+        )
+        if occupant_uuid is not None and occupant_uuid in occupied_materials:
+            raise ResourceGraphBootstrapError("一个物料不能占用多个库位（Site）")
+        if occupant_uuid is not None:
+            occupied_materials.add(occupant_uuid)
+        sort_order = site_order_by_owner.get(owner_uuid, 0)
+        site_order_by_owner[owner_uuid] = sort_order + 1
+        sites.append(
+            {
+                "uuid": _stable_uuid(source_name, "site", node_id),
+                "material_uuid": owner_uuid,
+                "name": _required_text(node.get("name") or node_id, "site.name"),
+                "sort_order": sort_order,
+                "occupied_material_uuid": occupant_uuid,
+                "description": _optional_text(node.get("description")),
+                "meta_data": {
+                    "source": "resource-tree-set",
+                    "source_node_id": node_id,
+                    "source_runtime_uuid": runtime_uuid,
+                },
+                "allowed_template_names": _site_content_types(node, aliases),
+                "allowed_template_uuids": [],
+                **_site_pose(node),
+            }
+        )
+    return {"materials": materials, "relative_positions": positions, "sites": sites}
+
+
+def _resolve_projection_templates(
+    projection: dict[str, list[dict[str, Any]]],
+    resolve_template_uuid: Any,
+) -> None:
+    """把已校验业务模板名解析为本代稳定 UUID。
+
+    参数：``projection`` 是可写候选；``resolve_template_uuid`` 是单代只读解析器。
+    返回：无，原地补齐模板 UUID。异常：任一身份缺失时关闭式失败。
+    """
+
+    for material in projection["materials"]:
+        template_uuid = resolve_template_uuid(material["template_name"])
+        if not template_uuid:
+            raise ResourceGraphBootstrapError("物料资源模板 UUID 未解析")
+        material["template_uuid"] = template_uuid
+    for site in projection["sites"]:
+        resolved = [
+            resolve_template_uuid(name) for name in site["allowed_template_names"]
+        ]
+        if any(not value for value in resolved):
+            raise ResourceGraphBootstrapError("库位（Site）允许模板 UUID 未解析")
+        site["allowed_template_uuids"] = sorted(set(resolved))
+
+
+def _commit_projection(
+    store: InventoryStore,
+    source_name: str,
+    fingerprint: str,
+    projection: Mapping[str, list[dict[str, Any]]],
+) -> str:
+    """在单一 SQLite 事务中提交投影与幂等指纹。
+
+    参数：存储、来源、指纹和完整投影。返回：``imported`` 或 ``unchanged``。
+    异常：既有库存未由同一指纹创建或 SQL 约束失败时回滚并关闭式失败。
+    """
+
+    now = (
+        datetime.now(timezone.utc)
+        .isoformat(timespec="milliseconds")
+        .replace("+00:00", "Z")
+    )
+    try:
+        with store.transaction() as connection:
+            material_count = int(
+                connection.execute("SELECT COUNT(*) FROM material").fetchone()[0]
+            )
+            stored_source = _meta(connection, _SOURCE_KEY)
+            stored_fingerprint = _meta(connection, _FINGERPRINT_KEY)
+            if (
+                material_count
+                or stored_source is not None
+                or stored_fingerprint is not None
+            ):
+                if stored_source == source_name and stored_fingerprint == fingerprint:
+                    return "unchanged"
+                raise ResourceGraphBootstrapError(
+                    "既有库存权威与资源图来源或 fingerprint 指纹冲突"
+                )
+            for material in projection["materials"]:
+                connection.execute(
+                    """
+                    INSERT INTO material(
+                        uuid,create_time,update_time,deleted_at,description,meta_data,
+                        resource_template_uuid,parent_uuid,class,barcode,name,config,data
+                    ) VALUES (?,?,?,NULL,?,?,?,NULL,?,?,?,?,?)
+                    """,
+                    (
+                        material["uuid"],
+                        now,
+                        now,
+                        material["description"],
+                        _dump(material["meta_data"]),
+                        material["template_uuid"],
+                        material["class"],
+                        material["barcode"],
+                        material["name"],
+                        _dump(material["config"]),
+                        _dump(material["data"]),
+                    ),
+                )
+                connection.execute(
+                    "INSERT INTO material_inventory(material_uuid,legacy_template_id) VALUES (?,?)",
+                    (material["uuid"], material["template_uuid"]),
+                )
+            for material in projection["materials"]:
+                if material["parent_uuid"] is not None:
+                    connection.execute(
+                        "UPDATE material SET parent_uuid=? WHERE uuid=?",
+                        (material["parent_uuid"], material["uuid"]),
+                    )
+            for position in projection["relative_positions"]:
+                connection.execute(
+                    """
+                    INSERT INTO relative_position(
+                        uuid,create_time,update_time,deleted_at,description,meta_data,
+                        material_uuid,position_x,position_y,position_z,depth,length,width,
+                        scale_x,scale_y,scale_z,rotation_x,rotation_y,rotation_z
+                    ) VALUES (?,?,?,NULL,NULL,'{}',?,?,?,?,?,?,?,?,?,?,?,?,?)
+                    """,
+                    (
+                        position["uuid"],
+                        now,
+                        now,
+                        position["material_uuid"],
+                        position["position_x"],
+                        position["position_y"],
+                        position["position_z"],
+                        position["depth"],
+                        position["length"],
+                        position["width"],
+                        position["scale_x"],
+                        position["scale_y"],
+                        position["scale_z"],
+                        position["rotation_x"],
+                        position["rotation_y"],
+                        position["rotation_z"],
+                    ),
+                )
+            for site in projection["sites"]:
+                connection.execute(
+                    """
+                    INSERT INTO site(
+                        uuid,create_time,update_time,deleted_at,description,meta_data,
+                        material_uuid,name,sort_order,allowed_resource_template_uuids,
+                        occupied_material_uuid,position_x,position_y,position_z,
+                        depth,length,width
+                    ) VALUES (?,?,?,NULL,?,?,?,?,?,?,NULL,?,?,?,?,?,?)
+                    """,
+                    (
+                        site["uuid"],
+                        now,
+                        now,
+                        site["description"],
+                        _dump(site["meta_data"]),
+                        site["material_uuid"],
+                        site["name"],
+                        site["sort_order"],
+                        _dump(site["allowed_template_uuids"]),
+                        site["position_x"],
+                        site["position_y"],
+                        site["position_z"],
+                        site["depth"],
+                        site["length"],
+                        site["width"],
+                    ),
+                )
+            for site in projection["sites"]:
+                if site["occupied_material_uuid"] is not None:
+                    connection.execute(
+                        "UPDATE site SET occupied_material_uuid=? WHERE uuid=?",
+                        (site["occupied_material_uuid"], site["uuid"]),
+                    )
+            connection.executemany(
+                "INSERT INTO lab_meta(meta_key,meta_value) VALUES (?,?)",
+                ((_SOURCE_KEY, source_name), (_FINGERPRINT_KEY, fingerprint)),
+            )
+    except ResourceGraphBootstrapError:
+        raise
+    except sqlite3.IntegrityError as error:
+        raise ResourceGraphBootstrapError("资源图投影违反库存唯一性或外键") from error
+    except sqlite3.Error as error:
+        raise ResourceGraphBootstrapError("资源图投影事务失败") from error
+    return "imported"
+
+
+def _is_site_node(node: Mapping[str, Any]) -> bool:
+    """判断资源树节点是否表达库位（Site）。
+
+    参数：``node`` 是规范 JSON 对象。返回：类型、类或配置类别命中库位集合时为真。
+    异常：配置不是对象时由 JSON 校验原样关闭式失败。
+    """
+
+    config = _json_object(node.get("config"), "node.config")
+    candidates = {
+        str(node.get("type") or "").replace("-", "_").casefold(),
+        str(node.get("class") or "").replace("-", "_").casefold(),
+        str(config.get("category") or "").replace("-", "_").casefold(),
+        str(config.get("type") or "").replace("-", "_").casefold(),
+    }
+    return bool(candidates & {value.replace("-", "_") for value in _SITE_TYPES})
+
+
+def _site_content_types(
+    node: Mapping[str, Any], aliases: Mapping[str, str]
+) -> list[str]:
+    """解析库位允许的资源模板业务身份。
+
+    参数：节点和注册表别名映射。返回：去重且保持声明顺序的业务 ID 列表。
+    异常：字段不是数组或包含未知模板时关闭式失败。
+    """
+
+    config = _json_object(node.get("config"), "site.config")
+    values = config.get("content_type", [])
+    if not isinstance(values, Sequence) or isinstance(values, (str, bytes)):
+        raise ResourceGraphBootstrapError("库位（Site）content_type 必须是数组")
+    result: list[str] = []
+    for value in values:
+        alias = _required_text(value, "site.content_type")
+        template_name = aliases.get(alias)
+        if template_name is None:
+            raise ResourceGraphBootstrapError(f"库位允许模板未进入注册表: {alias}")
+        if template_name not in result:
+            result.append(template_name)
+    return result
+
+
+def _pose(node: Mapping[str, Any]) -> dict[str, float]:
+    """读取物料相对位置、尺寸、缩放和旋转。
+
+    参数：资源树节点。返回：产品 ``relative_position`` 数值字段。异常：任一值
+    非有限数、尺寸为负或缩放非正时抛出 ``ResourceGraphBootstrapError``。
+    """
+
+    pose = _json_object(node.get("pose"), "node.pose")
+    position = _json_object(pose.get("position"), "pose.position")
+    size = _json_object(pose.get("size"), "pose.size")
+    scale = _json_object(pose.get("scale"), "pose.scale")
+    rotation = _json_object(pose.get("rotation"), "pose.rotation")
+    result = {
+        "position_x": _number(position.get("x"), "position.x"),
+        "position_y": _number(position.get("y"), "position.y"),
+        "position_z": _number(position.get("z"), "position.z"),
+        "depth": _number(size.get("depth"), "size.depth"),
+        "length": _number(size.get("height"), "size.height"),
+        "width": _number(size.get("width"), "size.width"),
+        "scale_x": _number(scale.get("x", 1), "scale.x"),
+        "scale_y": _number(scale.get("y", 1), "scale.y"),
+        "scale_z": _number(scale.get("z", 1), "scale.z"),
+        "rotation_x": _number(rotation.get("x"), "rotation.x"),
+        "rotation_y": _number(rotation.get("y"), "rotation.y"),
+        "rotation_z": _number(rotation.get("z"), "rotation.z"),
+    }
+    if any(result[key] < 0 for key in ("depth", "length", "width")):
+        raise ResourceGraphBootstrapError("资源尺寸不得为负数")
+    if any(result[key] <= 0 for key in ("scale_x", "scale_y", "scale_z")):
+        raise ResourceGraphBootstrapError("资源缩放必须为正数")
+    return result
+
+
+def _site_pose(node: Mapping[str, Any]) -> dict[str, float]:
+    """从资源位置中选择库位（Site）需要的坐标与尺寸。
+
+    参数：资源树库位节点。返回：库位持久字段。异常：沿用 ``_pose`` 的数值校验。
+    """
+
+    pose = _pose(node)
+    return {
+        key: pose[key]
+        for key in (
+            "position_x",
+            "position_y",
+            "position_z",
+            "depth",
+            "length",
+            "width",
+        )
+    }
+
+
+def _fingerprint(
+    source_name: str,
+    snapshot: RegistryTemplateSnapshot,
+    projection: Mapping[str, Any],
+) -> str:
+    """计算资源图与模板代际的规范 SHA-256 指纹。
+
+    参数：来源、注册表快照和已解析投影。返回：``sha256:`` 前缀指纹。
+    异常：非 JSON 值由 ``json.dumps`` 原样拒绝并由公开入口包装。
+    """
+
+    payload = json.dumps(
+        {"source_id": source_name, "registry": snapshot.fingerprint, **projection},
+        ensure_ascii=False,
+        allow_nan=False,
+        sort_keys=True,
+        separators=(",", ":"),
+    ).encode("utf-8")
+    return "sha256:" + hashlib.sha256(payload).hexdigest()
+
+
+def _stable_uuid(source_name: str, domain: str, node_id: str) -> str:
+    """生成跨重启稳定的库存身份。
+
+    参数：资源图文件名、身份领域和节点 ID。返回：规范 UUID5 字符串。异常：无。
+    """
+
+    return str(
+        uuid.uuid5(uuid.NAMESPACE_URL, f"unilabos:{source_name}:{domain}:{node_id}")
+    )
+
+
+def _meta(connection: sqlite3.Connection, key: str) -> str | None:
+    """读取一个启动元数据值。
+
+    参数：当前事务连接与键。返回：存在时的字符串，否则 ``None``。异常：SQL 错误传播。
+    """
+
+    row = connection.execute(
+        "SELECT meta_value FROM lab_meta WHERE meta_key=?", (key,)
+    ).fetchone()
+    return str(row[0]) if row is not None else None
+
+
+def _json_object(value: object, field: str) -> dict[str, Any]:
+    """复制并校验 JSON 对象。
+
+    参数：可疑值与诊断字段名。返回：无共享引用字典。异常：非对象或非 JSON 值关闭式失败。
+    """
+
+    if value is None:
+        return {}
+    if not isinstance(value, Mapping):
+        raise ResourceGraphBootstrapError(f"{field} 必须是 JSON 对象")
+    try:
+        return json.loads(json.dumps(dict(value), allow_nan=False, ensure_ascii=False))
+    except (TypeError, ValueError) as error:
+        raise ResourceGraphBootstrapError(f"{field} 不是合法 JSON") from error
+
+
+def _required_text(value: object, field: str) -> str:
+    """校验非空字符串。
+
+    参数：可疑值与字段名。返回：去除首尾空白的字符串。异常：非法值关闭式失败。
+    """
+
+    if not isinstance(value, str) or not value.strip():
+        raise ResourceGraphBootstrapError(f"{field} 必须是非空字符串")
+    return value.strip()
+
+
+def _optional_text(value: object) -> str | None:
+    """规范化可空字符串。
+
+    参数：可疑值。返回：非空字符串或 ``None``。异常：非字符串非空值关闭式失败。
+    """
+
+    if value in (None, ""):
+        return None
+    if not isinstance(value, str):
+        raise ResourceGraphBootstrapError("可空文本字段必须是字符串")
+    return value.strip() or None
+
+
+def _number(value: object, field: str) -> float:
+    """校验有限浮点数。
+
+    参数：可疑数值与字段名。返回：有限浮点数。异常：布尔、无穷或非法值关闭式失败。
+    """
+
+    if value is None:
+        return 0.0
+    if isinstance(value, bool):
+        raise ResourceGraphBootstrapError(f"{field} 必须是有限数值")
+    try:
+        result = float(value)
+    except (TypeError, ValueError, OverflowError) as error:
+        raise ResourceGraphBootstrapError(f"{field} 必须是有限数值") from error
+    if not math.isfinite(result):
+        raise ResourceGraphBootstrapError(f"{field} 必须是有限数值")
+    return result
+
+
+def _dump(value: object) -> str:
+    """序列化规范 JSON 列。
+
+    参数：已校验 JSON 值。返回：紧凑 JSON 文本。异常：非法值由 JSON 库传播。
+    """
+
+    return json.dumps(value, ensure_ascii=False, allow_nan=False, separators=(",", ":"))
+
+
+__all__ = [
+    "ResourceGraphBootstrapError",
+    "bootstrap_local_resource_graph",
+]

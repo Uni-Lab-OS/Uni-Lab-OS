@@ -173,11 +173,17 @@ def setup_edge_inventory(
     lab_id: str = "edge-lab",
     ws_client: Any = None,
     sync_sender: Any = None,
+    resource_tree_set: Any = None,
+    registry_snapshot: Any = None,
+    resource_graph_source_id: str = "",
 ) -> Any:
-    """Start the host-owned inventory service independently of EdgeScheduler.
+    """启动主机库存服务并可选建立资源图投影（Resource Graph Projection）。
 
-    The SQLite connection remains private to the host process.  REST and
-    HostLink expose service-level queries; slave processes never open this DB.
+    参数：``inventory_db_path`` 是主机私有 SQLite 路径；``edge_id`` 与
+    ``lab_id`` 是库存事件身份；``ws_client`` 和 ``sync_sender`` 分别接入主机链路
+    与发件箱（Outbox）；后三项共同提供资源树、注册表快照和来源身份。返回：进程内
+    唯一库存服务。异常：路径切换、投影参数不完整或资源图不安全时关闭式失败；从节点
+    不调用本函数，因此不会打开此数据库。
     """
 
     global _inventory, _outbox_worker
@@ -207,6 +213,31 @@ def setup_edge_inventory(
             raise RuntimeError(
                 f"inventory already initialized at {active_path}, cannot switch to {path}"
             )
+
+    # 三项启动输入必须全有或全无，防止调用者绕过稳定模板身份或来源指纹。
+    resource_graph_source = str(resource_graph_source_id or "").strip()
+    has_bootstrap_input = (
+        resource_tree_set is not None
+        or registry_snapshot is not None
+        or bool(resource_graph_source)
+    )
+    if has_bootstrap_input:
+        if (
+            resource_tree_set is None
+            or registry_snapshot is None
+            or not resource_graph_source
+        ):
+            raise ValueError("资源图启动投影参数必须同时提供")
+        from unilabos.app.scheduler.inventory.resource_graph_bootstrap import (
+            bootstrap_local_resource_graph,
+        )
+
+        bootstrap_local_resource_graph(
+            store=_inventory.store,
+            resource_tree_set=resource_tree_set,
+            registry_snapshot=registry_snapshot,
+            source_id=resource_graph_source,
+        )
 
     if ws_client is not None:
         _wire_inventory_ws_client(_inventory, ws_client)

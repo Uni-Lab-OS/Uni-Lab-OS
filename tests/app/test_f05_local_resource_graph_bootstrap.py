@@ -8,6 +8,7 @@ from typing import Any
 import pytest
 
 from unilabos.app.main import should_bootstrap_local_resource_graph
+from unilabos.app.scheduler import integration
 from unilabos.app.scheduler.inventory.backend_contract import BackendResourceService
 from unilabos.app.scheduler.inventory.resource_graph_bootstrap import (
     ResourceGraphBootstrapError,
@@ -297,3 +298,51 @@ def test_bootstrap_gate_requires_local_scheduler_and_embedded_inventory(
         scheduler_off_args, is_host_mode=True
     )
     assert not should_bootstrap_local_resource_graph(local_args, is_host_mode=False)
+
+
+def test_inventory_composition_bootstraps_before_legacy_cloud_upload(
+    tmp_path: Path,
+) -> None:
+    """库存组合根必须先建立公共物料图且不依赖旧云端上传成功。
+
+    参数：``tmp_path`` 提供隔离的库存 SQLite。返回：无。断言：正式
+    ``setup_edge_inventory`` 接线公开稳定设备物料；随后模拟旧云端资源树上传失败，
+    本地公共物料图（MaterialGraph）仍保持可查询。异常：上传失败只属于旧桥接路径，
+    不得回滚已经提交的本地库存权威（Inventory Authority）事实。
+    """
+
+    class _FailingLegacyCloudBridge:
+        """模拟拒绝旧资源树上传的云端桥接器。
+
+        参数：无。返回：无。异常：``resource_tree_add`` 固定抛出网络错误。
+        """
+
+        def resource_tree_add(self, _resource_tree: object) -> None:
+            """拒绝一次旧资源树上传。
+
+            参数：``_resource_tree`` 是不参与断言的旧上传负载。返回：无。
+            异常：固定抛出 ``RuntimeError``，模拟云端不可达。
+            """
+
+            raise RuntimeError("legacy cloud unavailable")
+
+    integration.reset_for_test()
+    try:
+        # ``inventory_service`` 是主机组合根创建的唯一嵌入式库存服务。
+        inventory_service = integration.setup_edge_inventory(
+            str(tmp_path / "inventory.db"),
+            resource_tree_set=_ResourceTree(),
+            registry_snapshot=RegistryTemplateSnapshot.from_registry(_Registry()),
+            resource_graph_source_id="/workspace/m2b-native-workspace/graph.json",
+        )
+        before_upload = BackendResourceService(inventory_service.store).material_graph()
+        with pytest.raises(RuntimeError, match="legacy cloud unavailable"):
+            _FailingLegacyCloudBridge().resource_tree_add(_ResourceTree())
+        after_upload = BackendResourceService(inventory_service.store).material_graph()
+    finally:
+        integration.reset_for_test()
+
+    assert [node["material"]["uuid"] for node in before_upload["nodes"]] == [
+        MOUNT_MATERIAL_UUID
+    ]
+    assert after_upload == before_upload
