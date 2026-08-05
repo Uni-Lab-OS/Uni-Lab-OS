@@ -6,6 +6,9 @@ import logging
 from collections.abc import Mapping
 from typing import Any
 
+from unilabos.app.scheduler.material_source_resolution import (
+    MaterialSourceResolutionCoordinator,
+)
 from unilabos.app.scheduler.service import EdgeScheduler
 from unilabos.workflow.store import StoreConflict, WorkflowStore
 from unilabos.workflow.task_runtime_projection import TaskRuntimeProjection
@@ -43,10 +46,18 @@ class TaskSchedulerBridge:
         self._scheduler = scheduler
         self._compiler = compiler or WorkflowSpecCompiler()
         self._projection = projection or TaskRuntimeProjection(store)
+        # ``_material_sources`` 复用调度器持有的同一库存权威，先于任何普通派发
+        # 协调整个任务的物料来源解析作业（MaterialSourceResolutionJob）。
+        self._material_sources = MaterialSourceResolutionCoordinator(
+            inventory=scheduler.inventory_service,
+            projection=self._projection,
+        )
         # ``_task_by_job`` 只过滤本桥提交到共享调度器的作业，不承担持久恢复。
         self._task_by_job: dict[str, str] = {}
         # ``_submitted_tasks`` 标识仍可进行准入重试（AdmissionRetry）的本地运行。
         self._submitted_tasks: set[str] = set()
+        # ``_admission_pending_tasks`` 只保存尚未交给旧调度器的受阻任务身份。
+        self._admission_pending_tasks: set[str] = set()
         self._closed = False
         scheduler.add_job_pre_dispatch_listener(self._on_job_pre_dispatch)
         scheduler.add_job_finished_listener(self._on_job_finished)
@@ -65,6 +76,8 @@ class TaskSchedulerBridge:
         task_uuid = self._required_text(task.get("uuid"), field="task.uuid")
         if task_uuid in self._submitted_tasks:
             return self._aggregate(task_uuid)
+        if task_uuid in self._admission_pending_tasks:
+            return self._aggregate(task_uuid)
         jobs: list[dict[str, Any]] = []
         registered = False
         try:
@@ -79,10 +92,25 @@ class TaskSchedulerBridge:
                 raise TaskSchedulerBridgeError(
                     "工作流声明了物料需求，但本地调度器没有装配库存权威"
                 )
+            # 物料来源解析必须先提交完整短期预留和逐来源结果；受阻时不注册普通
+            # 动作，也不让任何作业越过物理派发边界。
+            material_resolution = self._material_sources.reconcile(
+                persisted_task,
+                jobs,
+            )
+            if material_resolution.status == "blocked":
+                self._admission_pending_tasks.add(task_uuid)
+                return self._aggregate(task_uuid)
+            self._admission_pending_tasks.discard(task_uuid)
+            if not spec.nodes:
+                return self._aggregate(task_uuid)
 
+            dispatch_job_uuids = {node.job_id for node in spec.nodes}
             for job in jobs:
                 # ``job_uuid`` 是监听器回调与标准持久作业之间的稳定路由身份。
                 job_uuid = self._required_text(job.get("uuid"), field="jobs[].uuid")
+                if job_uuid not in dispatch_job_uuids:
+                    continue
                 self._task_by_job[job_uuid] = task_uuid
             self._submitted_tasks.add(task_uuid)
             registered = True
@@ -116,6 +144,11 @@ class TaskSchedulerBridge:
         if self._closed:
             raise TaskSchedulerBridgeError("工作流任务调度桥已经关闭")
         normalized_uuid = self._required_text(task_uuid, field="task_uuid")
+        if normalized_uuid in self._admission_pending_tasks:
+            # 显式准入重试复用同一持久任务/作业身份；先移除内存标记，让 ``submit``
+            # 真正重做整图预留，若仍受阻会原样重新登记。
+            self._admission_pending_tasks.discard(normalized_uuid)
+            return self.submit(self._store.get_task(normalized_uuid))
         if normalized_uuid not in self._submitted_tasks:
             raise TaskSchedulerBridgeError("工作流任务尚未提交到本地调度器")
         self._scheduler.reschedule()
@@ -135,6 +168,7 @@ class TaskSchedulerBridge:
         self._scheduler.remove_job_finished_listener(self._on_job_finished)
         self._task_by_job.clear()
         self._submitted_tasks.clear()
+        self._admission_pending_tasks.clear()
 
     def _on_job_pre_dispatch(self, dispatching: Mapping[str, Any]) -> None:
         """在物理派发前提交标准作业派发意图。
@@ -228,6 +262,7 @@ class TaskSchedulerBridge:
         except Exception:  # 清理失败不能覆盖原始安全错误
             logger.exception("失败的工作流任务提交无法清理遗留调度运行")
         self._submitted_tasks.discard(task_uuid)
+        self._admission_pending_tasks.discard(task_uuid)
         for job in jobs:
             self._task_by_job.pop(str(job.get("uuid") or ""), None)
 
