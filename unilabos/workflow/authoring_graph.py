@@ -251,11 +251,14 @@ def _candidate_node(
 ) -> dict[str, Any]:
     """构造一个后端写形状节点。
 
-    参数说明：动作声明提供源码身份，设备声明提供执行器绑定，目录动作提供模板
-    和连接点合同。返回：不含数据库时间字段的节点字典；固定执行器（Fixed
-    Executor）的实际设备物料（Material）UUID 同时进入顶层 ``material_uuid``
-    和保留绑定元数据，动态绑定保持空值。异常：动作参数缺少唯一目标连接点
-    （Handle）时抛出 ``AuthoringGraphError``。
+    参数说明：动作声明（ActionDeclaration）提供源码身份；设备声明提供
+    执行器绑定（Executor Binding）；目录动作（AuthoringCatalogAction）提供
+    动作模板（Action Template）和连接点合同（Handle Contract）。返回：不含
+    数据库时间字段的节点字典；固定执行器（Fixed Executor）的
+    实际设备物料（Material）UUID 同时进入顶层 ``material_uuid`` 和保留
+    执行器绑定（Executor Binding）元数据；动态执行器绑定（Executor Binding）
+    保持空值。异常：动作（Action）参数缺少唯一目标
+    连接点合同（Handle Contract）时抛出 ``AuthoringGraphError``。
     """
 
     params: dict[str, Any] = {}
@@ -281,9 +284,9 @@ def _candidate_node(
             "mode": "fixed",
             "device_id": device.device_id,
         }
-    # ``device_material_uuid`` 只来自已由静态解析器规范化的固定设备选择；动态
-    # ``device()`` 保持 ``None``，不能用模板 UUID 或设备名称猜测实际物料
-    # （Material）身份。
+    # ``device_material_uuid`` 只来自已由静态解析器规范化的固定 ``device()``
+    # 声明；动态 ``device()`` 保持 ``None``，不能用动作模板（Action Template）
+    # UUID 或设备名称猜测实际物料（Material）身份。
     device_material_uuid = device.device_id
     template = catalog_action.template
     # 模板标题是未显式覆盖时的节点展示默认值；动作业务名仅作旧目录回退。
