@@ -18,17 +18,20 @@ MANIFEST_FILENAME = "manifest.json"
 
 
 class CommunityPackageError(RuntimeError):
-    """Raised when a graph references community packages that cannot be loaded."""
+    """物理图引用的社区包无法安全加载时抛出的准备错误。"""
 
 
 @dataclass
 class CommunityPackagePrepareResult:
+    # ``devices_dirs`` 是本轮新增且可交给注册表（Registry）扫描的远端缓存目录。
     devices_dirs: List[str] = field(default_factory=list)
+    # ``aliases`` 把物理图社区类名映射到注册表内的实际类身份。
     aliases: Dict[str, str] = field(default_factory=dict)
+    # ``classes`` 是物理图中去重并稳定排序后的社区类名全集。
     classes: List[str] = field(default_factory=list)
+    # ``dependencies`` 是远端社区包声明且去重后的 Python 运行依赖。
     dependencies: List[str] = field(default_factory=list)
-    # 已解析的包目录(resolve 后绝对路径) -> class_namespace(community.<ns>)。
-    # 注册表扫描据此把社区包内的 device/resource id 命名空间化为 community.<ns>.<id>。
+    # ``namespaces`` 把规范包目录映射到社区命名空间，并以本地工作区映射为权威。
     namespaces: Dict[str, str] = field(default_factory=dict)
 
 
@@ -99,7 +102,10 @@ def prepare_community_packages(
     ``CommunityPackageError``，禁止无定义继续启动。
     """
 
+    # ``provided_namespaces`` 是显式工作区已提供的目录到命名空间映射。
     provided_namespaces = dict(available_namespaces or {})
+    # ``provided_namespace_values`` 是不得由缓存或远端响应覆盖的本地命名空间集合。
+    provided_namespace_values = set(provided_namespaces.values())
     classes = extract_community_classes(graph_data)
     if not classes:
         return CommunityPackagePrepareResult(namespaces=provided_namespaces)
@@ -111,28 +117,54 @@ def prepare_community_packages(
         f"[CommunityPackage] 准备开始: classes={classes} working_dir={working_dir} "
         f"manifest 已缓存包={list(packages.keys())}"
     )
-    remote_items = _resolve_remote_packages(classes, manifest, http_client)
+    # ``remote_classes`` 只包含尚未由本地工作区提供的社区类名。
+    remote_classes = [
+        class_name
+        for class_name in classes
+        if community_namespace(class_name) not in provided_namespace_values
+    ]
+    # ``remote_items`` 只能回答确实缺失的命名空间，不能参与本地包发现。
+    remote_items = (
+        _resolve_remote_packages(remote_classes, manifest, http_client)
+        if remote_classes
+        else []
+    )
 
     devices_dirs: List[str] = []
     aliases: Dict[str, str] = {}
     dependencies: List[str] = []
     namespaces: Dict[str, str] = provided_namespaces
+    # ``missing_namespaces`` 是仍需缓存或远端社区包满足的命名空间。
     missing_namespaces = {
         community_namespace(class_name) for class_name in classes
-    } - set(provided_namespaces.values())
+    } - provided_namespace_values
 
     for item in remote_items:
-        package_dir = _ensure_remote_item_cached(item, working_dir, manifest, http_client=http_client)
+        # ``namespace`` 是远端项目声称提供的社区包身份，必须先检查权威冲突。
+        namespace = item.get("class_namespace") or (item.get("package_info") or {}).get(
+            "class_namespace"
+        )
+        if namespace in provided_namespace_values:
+            raise CommunityPackageError(
+                f"远端社区包不得覆盖本地工作区命名空间: {namespace}"
+            )
+        package_dir = _ensure_remote_item_cached(
+            item,
+            working_dir,
+            manifest,
+            http_client=http_client,
+        )
         if package_dir:
             devices_dirs.append(str(package_dir))
 
-        namespace = item.get("class_namespace") or (item.get("package_info") or {}).get("class_namespace")
         if namespace:
             missing_namespaces.discard(namespace)
             if package_dir:
                 namespaces[str(Path(package_dir).resolve())] = namespace
             # 依赖直接取自 resolve 响应（命中与否都携带），避免旧 manifest 缺字段导致丢依赖
-            dependencies.extend((item.get("package_info") or {}).get("dependencies") or [])
+            dependencies.extend(
+                (item.get("package_info") or {}).get("dependencies") or []
+            )
         aliases.update(_normalize_aliases(item, classes))
 
     for namespace in list(missing_namespaces):

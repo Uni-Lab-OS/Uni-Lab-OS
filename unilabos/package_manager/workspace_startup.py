@@ -26,11 +26,17 @@ from .sources import WorkspaceSource
 class WorkspaceStartupPlan:
     """完成静态校验、尚未激活设备或工作流的启动计划。"""
 
+    # ``source`` 是本轮启动唯一被授权的工作区文件来源。
     source: WorkspaceSource
+    # ``import_package`` 是从发行元数据规范化得到的 Python 导入包身份。
     import_package: str
+    # ``package_directory`` 是注册表（Registry）唯一允许扫描的本地包目录。
     package_directory: Path
+    # ``community_namespace`` 是本地包对物理图公开的社区命名空间。
     community_namespace: str
+    # ``has_workflow_manifest`` 表示工作区是否声明了工作流源码清单。
     has_workflow_manifest: bool
+    # ``workflow_source_count`` 是清单静态校验通过的工作流源码数量。
     workflow_source_count: int
 
     def apply(self, arguments: dict[str, Any]) -> None:
@@ -77,14 +83,22 @@ class WorkspaceStartupPlan:
         ``ValueError``。
         """
 
+        # ``graph_path`` 保留调用者选择的路径身份，供符号链接检查使用。
         graph_path = Path(graph_argument).expanduser()
         if graph_path.is_absolute():
             try:
-                resolved_graph = graph_path.resolve(strict=True)
-            except (OSError, RuntimeError) as error:
-                raise ValueError(f"物理图文件不存在: {graph_argument}") from error
-            if not resolved_graph.is_file():
-                raise ValueError(f"物理图路径不是普通文件: {graph_argument}")
+                # ``logical_graph`` 把绝对路径重新约束为工作区来源的安全相对路径。
+                logical_graph = graph_path.relative_to(self.source.root).as_posix()
+            except ValueError as error:
+                raise ValueError(
+                    f"绝对物理图文件必须位于工作区内: {graph_argument}"
+                ) from error
+            if not self.source.has_file(logical_graph):
+                raise ValueError(f"工作区内物理图文件不存在: {graph_argument}")
+            # ``resolved_graph`` 已经过 WorkspaceSource 的全路径符号链接校验。
+            resolved_graph = self.source.root.joinpath(
+                *Path(logical_graph).parts
+            ).resolve()
             return resolved_graph
         logical_graph = graph_path.as_posix()
         if not self.source.has_file(logical_graph):
@@ -135,6 +149,7 @@ def compile_workspace_startup(source: WorkspaceSource) -> WorkspaceStartupPlan:
         raise ValueError(
             f"工作区缺少规范 Python 包目录或 __init__.py: {import_package}"
         )
+    _validate_registry_python_tree(source, package_directory)
 
     # ``has_workflow_manifest`` 决定是否授权工作流源码（Workflow Source）发现。
     has_workflow_manifest = source.has_file("package.yaml")
@@ -228,6 +243,50 @@ def _validate_workflow_manifest(
     except (SourceManifestError, SourceDeclarationError) as error:
         raise ValueError("工作区 package.yaml 或工作流源码声明无效") from error
     return len(discovery_plan.registrations)
+
+
+def _validate_registry_python_tree(
+    source: WorkspaceSource,
+    package_directory: Path,
+) -> None:
+    """验证注册表（Registry）扫描树中的 Python 文件没有符号链接路径。
+
+    参数：``source`` 是工作区授权来源；``package_directory`` 是将交给注册表扫描
+    的本地包目录。
+    返回：无；所有 Python 文件和可递归目录均位于同一工作区授权边界时正常结束。
+    异常：目录不可读，或 Python 文件/递归目录经过符号链接时抛出 ``ValueError``。
+    """
+
+    # ``pending_directories`` 保存尚未检查的真实包目录，拒绝跟随任何符号链接目录。
+    pending_directories = [package_directory]
+    while pending_directories:
+        # ``current_directory`` 是本轮读取目录项的真实注册表扫描目录。
+        current_directory = pending_directories.pop()
+        try:
+            # ``entries`` 使用稳定排序，保证错误定位和测试结果可重复。
+            entries = sorted(current_directory.iterdir())
+        except OSError as error:
+            raise ValueError(
+                f"注册表 Python 扫描目录不可访问: {current_directory}"
+            ) from error
+        for entry in entries:
+            # ``entry`` 是包目录中可能被注册表递归访问的一个文件系统对象。
+            if entry.is_symlink():
+                if entry.suffix == ".py" or (
+                    entry.is_dir() and not entry.name.startswith(("__", "."))
+                ):
+                    raise ValueError(f"注册表 Python 扫描路径不得经过符号链接: {entry}")
+                continue
+            if entry.is_dir():
+                if not entry.name.startswith(("__", ".")):
+                    pending_directories.append(entry)
+                continue
+            if entry.suffix != ".py":
+                continue
+            # ``logical_python`` 是 Python 文件相对工作区根的安全逻辑身份。
+            logical_python = entry.relative_to(source.root).as_posix()
+            if not source.has_file(logical_python):
+                raise ValueError(f"注册表 Python 文件不存在: {entry}")
 
 
 __all__ = [

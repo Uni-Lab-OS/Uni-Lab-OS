@@ -12,6 +12,7 @@ from typing import Literal
 class WorkspaceSource:
     """由公共命令行（CLI）显式授权的一次工作区文件来源。"""
 
+    # ``root`` 是不经过符号链接的规范工作区根目录，也是全部文件读取的授权边界。
     root: Path
 
     def __init__(self, root: str | Path):

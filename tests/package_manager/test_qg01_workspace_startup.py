@@ -11,6 +11,45 @@ from typing import Any
 import pytest
 
 
+class _RecordingCommunityClient:
+    """记录社区包远端解析调用并返回评审场景指定的数据。
+
+    参数：``remote_items`` 是远端端口将返回的社区包解析项目。
+    返回：构造后的测试替身会保留每次请求的类名列表。
+    异常：无；测试通过调用记录和返回项目表达预期边界。
+    """
+
+    def __init__(self, remote_items: list[dict[str, Any]]) -> None:
+        """保存远端响应并初始化调用记录。
+
+        参数：``remote_items`` 是每次解析调用返回的社区包项目。
+        返回：无；实例随后可模拟 ``resolve_community_packages``。
+        异常：无。
+        """
+
+        # ``remote_items`` 是评审测试控制的远端社区包响应，不代表可信事实。
+        self.remote_items = remote_items
+        # ``requested_classes`` 逐次记录真正发送到远端的社区类名。
+        self.requested_classes: list[list[str]] = []
+
+    def resolve_community_packages(
+        self,
+        classes: list[str],
+        *,
+        current_packages: list[dict[str, Any]],
+    ) -> dict[str, list[dict[str, Any]]]:
+        """模拟社区包远端解析端口并记录请求。
+
+        参数：``classes`` 是待解析类名；``current_packages`` 是本地缓存指纹。
+        返回：包含构造时指定项目的远端响应信封。
+        异常：无；冲突响应由被测代码负责失败关闭。
+        """
+
+        del current_packages
+        self.requested_classes.append(list(classes))
+        return {"data": list(self.remote_items)}
+
+
 def _workspace_api() -> ModuleType:
     """读取本轮工作区（Workspace）公开模块并报告清晰 RED。
 
@@ -46,8 +85,11 @@ def _write_szlab_shaped_workspace(workspace_root: Path) -> dict[str, Path]:
 
     # ``workflow_uuid`` 是测试工作流（Workflow）的稳定身份，不代表运行任务。
     workflow_uuid = "5e7ce142-bf5a-5d30-8666-fdf5374941f1"
+    # ``package_root`` 是注册表（Registry）将扫描的本地设备包根目录。
     package_root = workspace_root / "szlab_poly_studio"
+    # ``workflow_path`` 是工作流源码（Workflow Source）清单授权的真实文件。
     workflow_path = package_root / "workflows" / "material_transfer.py"
+    # ``graph_path`` 是公共命令行（CLI）将加载的物理图文件。
     graph_path = workspace_root / "deployment" / "graphs" / "szlab-local-debug.json"
     workflow_path.parent.mkdir(parents=True)
     graph_path.parent.mkdir(parents=True)
@@ -232,3 +274,185 @@ def test_local_workspace_namespace_satisfies_community_graph_without_remote_pack
 
     assert result.namespaces == local_namespaces
     assert result.devices_dirs == []
+
+
+def test_local_workspace_namespace_is_filtered_before_remote_resolution(
+    tmp_path: Path,
+) -> None:
+    """证明本地工作区命名空间不会发送到社区包远端解析端口。
+
+    参数：``tmp_path`` 提供隔离工作目录和本地包目录。
+    返回：无；断言远端端口未被调用且本地目录保持唯一发现权威。
+    异常：若实现仍把本地类名发往远端，调用记录断言失败。
+    """
+
+    from unilabos.app.community_packages import prepare_community_packages
+
+    # ``package_root`` 是当前启动已授权的本地设备包目录。
+    package_root = tmp_path / "szlab_poly_studio"
+    package_root.mkdir()
+    # ``local_namespaces`` 固定本地目录对社区命名空间的唯一映射。
+    local_namespaces = {str(package_root.resolve()): "community.szlab_poly_studio"}
+    # ``remote_client`` 会记录任何不应发生的远端解析调用。
+    remote_client = _RecordingCommunityClient([])
+    # ``graph_document`` 只引用已由工作区提供的社区设备类。
+    graph_document = {
+        "nodes": [
+            {
+                "id": "robot",
+                "class": "community.szlab_poly_studio.robot",
+            }
+        ],
+        "links": [],
+    }
+
+    result = prepare_community_packages(
+        graph_document,
+        working_dir=tmp_path,
+        http_client=remote_client,
+        available_namespaces=local_namespaces,
+    )
+
+    assert remote_client.requested_classes == []
+    assert result.namespaces == local_namespaces
+    assert result.devices_dirs == []
+
+
+def test_remote_response_cannot_override_local_workspace_namespace(
+    tmp_path: Path,
+) -> None:
+    """证明远端返回本地同名命名空间时启动失败关闭。
+
+    参数：``tmp_path`` 提供隔离工作目录和本地包目录。
+    返回：无；断言远端仅收到缺失类且同名响应不能覆盖本地工作区。
+    异常：预期抛出 ``CommunityPackageError``；未抛出即表示发现权威冲突。
+    """
+
+    from unilabos.app.community_packages import (
+        CommunityPackageError,
+        prepare_community_packages,
+    )
+
+    # ``package_root`` 是已被启动计划授权的本地设备包目录。
+    package_root = tmp_path / "szlab_poly_studio"
+    package_root.mkdir()
+    # ``local_namespaces`` 声明不得被远端结果替换的本地命名空间。
+    local_namespaces = {str(package_root.resolve()): "community.szlab_poly_studio"}
+    # ``remote_client`` 故意在解析另一包时返回与本地工作区同名的冲突项目。
+    remote_client = _RecordingCommunityClient(
+        [{"class_namespace": "community.szlab_poly_studio"}]
+    )
+    # ``graph_document`` 同时引用本地类与确实需要远端解析的类。
+    graph_document = {
+        "nodes": [
+            {
+                "id": "robot",
+                "class": "community.szlab_poly_studio.robot",
+            },
+            {
+                "id": "remote-reader",
+                "class": "community.remote_reader.reader",
+            },
+        ],
+        "links": [],
+    }
+
+    with pytest.raises(CommunityPackageError, match="本地工作区.*命名空间"):
+        prepare_community_packages(
+            graph_document,
+            working_dir=tmp_path,
+            http_client=remote_client,
+            available_namespaces=local_namespaces,
+        )
+
+    assert remote_client.requested_classes == [["community.remote_reader.reader"]]
+
+
+def test_prepare_workspace_startup_rejects_absolute_graph_outside_workspace(
+    tmp_path: Path,
+) -> None:
+    """证明绝对物理图路径也必须位于显式工作区内。
+
+    参数：``tmp_path`` 隔离合法工作区和越界物理图文件。
+    返回：无；断言越界绝对路径在注册表（Registry）扫描前失败关闭。
+    异常：预期 ``ValueError``；接受越界路径会使测试失败。
+    """
+
+    workspace_api = _workspace_api()
+    # ``workspace_root`` 是公共命令行（CLI）显式授权的唯一根目录。
+    workspace_root = tmp_path / "workspace"
+    _write_szlab_shaped_workspace(workspace_root)
+    # ``outside_graph`` 是存在但未被工作区授权的绝对物理图文件。
+    outside_graph = tmp_path / "outside-graph.json"
+    outside_graph.write_text('{"nodes":[],"links":[]}', encoding="utf-8")
+    # ``startup_arguments`` 模拟公共命令行完成解析后的启动参数。
+    startup_arguments: dict[str, Any] = {
+        "workspace": str(workspace_root),
+        "devices": None,
+        "workflow_editable_package_root": None,
+        "graph": str(outside_graph),
+    }
+
+    with pytest.raises(ValueError, match="工作区"):
+        workspace_api.prepare_workspace_startup(startup_arguments)
+
+
+def test_prepare_workspace_startup_rejects_absolute_graph_symlink(
+    tmp_path: Path,
+) -> None:
+    """证明工作区内的绝对物理图路径不得经过符号链接。
+
+    参数：``tmp_path`` 创建真实物理图和同目录符号链接。
+    返回：无；断言符号链接不能成为公共命令行（CLI）的图输入。
+    异常：预期 ``ValueError``；接受符号链接会使测试失败。
+    """
+
+    workspace_api = _workspace_api()
+    # ``workspace_root`` 是启动计划唯一授权的工作区目录。
+    workspace_root = tmp_path / "workspace"
+    fixture_paths = _write_szlab_shaped_workspace(workspace_root)
+    # ``graph_symlink`` 位于工作区内，但路径身份经过符号链接。
+    graph_symlink = fixture_paths["graph"].with_name("linked-graph.json")
+    graph_symlink.symlink_to(fixture_paths["graph"])
+    # ``startup_arguments`` 模拟携带绝对符号链接图路径的公共命令行结果。
+    startup_arguments: dict[str, Any] = {
+        "workspace": str(workspace_root),
+        "devices": None,
+        "workflow_editable_package_root": None,
+        "graph": str(graph_symlink),
+    }
+
+    with pytest.raises(ValueError, match="符号链接"):
+        workspace_api.prepare_workspace_startup(startup_arguments)
+
+
+def test_prepare_workspace_startup_rejects_registry_python_symlink_escape(
+    tmp_path: Path,
+) -> None:
+    """证明注册表扫描包内的 Python 文件不得通过符号链接越界。
+
+    参数：``tmp_path`` 隔离合法工作区与越界 Python 文件。
+    返回：无；断言启动编译在注册表（Registry）读取越界源码前失败关闭。
+    异常：预期 ``ValueError``；允许符号链接源码会使测试失败。
+    """
+
+    workspace_api = _workspace_api()
+    # ``workspace_root`` 是公共命令行（CLI）显式授权的唯一根目录。
+    workspace_root = tmp_path / "workspace"
+    fixture_paths = _write_szlab_shaped_workspace(workspace_root)
+    # ``outside_python`` 模拟攻击者希望注册表（Registry）扫描的越界源码。
+    outside_python = tmp_path / "outside_device.py"
+    outside_python.write_text("UNTRUSTED = True\n", encoding="utf-8")
+    # ``escaped_python`` 是包目录内指向越界源码的符号链接。
+    escaped_python = fixture_paths["package"] / "escaped_device.py"
+    escaped_python.symlink_to(outside_python)
+    # ``startup_arguments`` 模拟公共命令行完成解析后的启动参数。
+    startup_arguments: dict[str, Any] = {
+        "workspace": str(workspace_root),
+        "devices": None,
+        "workflow_editable_package_root": None,
+        "graph": str(fixture_paths["graph"]),
+    }
+
+    with pytest.raises(ValueError, match="Python.*符号链接"):
+        workspace_api.prepare_workspace_startup(startup_arguments)
