@@ -129,7 +129,7 @@ def _handle(
     ``ready`` 选择结构语义。返回：连接点模板字典。异常：无。
     """
 
-    value_type = "boolean" if ready else "number"
+    value_type = "default" if ready else "number"
     return {
         "uuid": handle_uuid,
         "workflow_node_template_uuid": ACTION_TEMPLATE_UUID,
@@ -139,14 +139,13 @@ def _handle(
         "description": "",
         "type": value_type,
         "required": io_type == "target" and not ready,
-        "data_source": "dependency" if ready else "executor",
-        "data_key": key,
-        "meta_data": {
-            "unilab": {
-                "value_schema": {"type": value_type},
-                **({"structural_role": "ready"} if ready else {}),
-            }
-        },
+        "data_source": None if ready else "executor",
+        "data_key": None if ready else key,
+        "meta_data": (
+            {}
+            if ready
+            else {"unilab": {"value_schema": {"type": value_type}}}
+        ),
     }
 
 

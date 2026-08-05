@@ -10,6 +10,7 @@ from unilabos.workflow.authoring_engine import WorkflowAuthoringEngine
 from unilabos.workflow.models import CandidateCompilation
 
 from .test_c1_r2_static_expansion_contract import (
+    ACTION_RESOURCE_TEMPLATE_UUID,
     CHILD_WORKFLOW_UUID,
     INVOCATION_UUID,
     PARENT_WORKFLOW_UUID,
@@ -18,6 +19,8 @@ from .test_c1_r2_static_expansion_contract import (
 
 CHILD_MODULE = "c1_published_lab.workflows.child"
 CHILD_SYMBOL = "prepare_sample"
+PRECEDING_ACTION_UUID = "11111111-1111-4111-8111-111111111121"
+FOLLOWING_ACTION_UUID = "11111111-1111-4111-8111-111111111122"
 
 
 def _applied_parent_graph() -> dict[str, Any]:
@@ -66,6 +69,41 @@ def composite_parent(*, value: float) -> ParentResult:
     # unilab:node_uuid={INVOCATION_UUID}
     result = {CHILD_SYMBOL}(value=value)
     return {{"result": result.result}}
+'''
+
+
+def _source_with_surrounding_actions() -> str:
+    """返回把已发布工作流调用放在两个普通动作之间的作者源码。
+
+    参数：无。返回：包含两个结构性 ready 依赖的 Python 源码。异常：无。
+    """
+
+    return f'''from typing import TypedDict
+
+from c1_published_lab.devices import Measure
+from {CHILD_MODULE} import {CHILD_SYMBOL}
+from unilabos.workflow.authoring import device, workflow
+
+
+class ParentResult(TypedDict):
+    result: float
+
+
+measure: Measure = device("{ACTION_RESOURCE_TEMPLATE_UUID}")
+
+
+@workflow(
+    workflow_uuid="{PARENT_WORKFLOW_UUID}",
+    displayname="Composite parent",
+)
+def composite_parent(*, value: float) -> ParentResult:
+    # unilab:node_uuid={PRECEDING_ACTION_UUID}
+    prepared = measure.measure(value=value)
+    # unilab:node_uuid={INVOCATION_UUID}
+    child = {CHILD_SYMBOL}(value=value)
+    # unilab:node_uuid={FOLLOWING_ACTION_UUID}
+    finalized = measure.measure(value=value)
+    return {{"result": finalized.result}}
 '''
 
 
@@ -170,3 +208,25 @@ def test_breaking_child_pin_fails_closed_at_compile_seam() -> None:
     assert [item["code"] for item in rejected.diagnostics] == [
         "composite_contract_stale"
     ]
+
+
+def test_composite_between_actions_keeps_structural_ready_out_of_arguments() -> None:
+    """组合工作流调用夹在普通动作间时仍保持可回编译固定点。
+
+    参数：无。返回：无；断言结构性 ready 连接点（Handle）只形成边，不进入已
+    发布工作流业务实参。异常：编译或断言失败时由 pytest 报告。
+    """
+
+    engine = _engine()
+    compiled = _compile(
+        engine,
+        _source_with_surrounding_actions(),
+        _applied_parent_graph(),
+    )
+
+    assert compiled.valid and compiled.graph is not None, compiled.diagnostics
+    normalized = compiled.normalized_python_source
+    assert normalized is not None
+    assert "ready=" not in normalized
+    repeated = _compile(engine, normalized, compiled.graph)
+    assert repeated.valid and repeated.graph == compiled.graph, repeated.diagnostics
