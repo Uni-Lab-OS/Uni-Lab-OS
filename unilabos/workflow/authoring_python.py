@@ -88,8 +88,7 @@ def render_authoring_python(
     input_contract, output_contract, output_bindings = _authoring_metadata(workflow)
 
     annotations = [
-        _render_parameter(item)
-        for item in input_contract.get("parameters", [])
+        _render_parameter(item) for item in input_contract.get("parameters", [])
     ]
     output_schemas = {
         item["name"]: item["schema"]
@@ -99,8 +98,7 @@ def render_authoring_python(
         and isinstance(item.get("schema"), Mapping)
     }
     output_annotations = {
-        name: _render_schema(dict(output_schemas[name]))
-        for name in output_bindings
+        name: _render_schema(dict(output_schemas[name])) for name in output_bindings
     }
     typing_names: set[str] = {"TypedDict"} if output_bindings else set()
     needs_field = False
@@ -361,7 +359,9 @@ def _device_symbols(
         keys.add((class_identity, device_id))
     result: dict[tuple[str, str | None], str] = {}
     used: set[str] = set()
-    for index, key in enumerate(sorted(keys, key=lambda item: (item[0], item[1] or "")), start=1):
+    for index, key in enumerate(
+        sorted(keys, key=lambda item: (item[0], item[1] or "")), start=1
+    ):
         base = _safe_identifier(key[0].rsplit(":", 1)[1], fallback="device").lower()
         symbol = base
         suffix = 2
@@ -456,7 +456,11 @@ def _render_schema(schema: dict[str, Any]) -> tuple[str, set[str]]:
         return "ResourceSlot", set()
     if "anyOf" in schema:
         members = schema["anyOf"]
-        if not isinstance(members, list) or len(members) != 2 or members[1] != {"type": "null"}:
+        if (
+            not isinstance(members, list)
+            or len(members) != 2
+            or members[1] != {"type": "null"}
+        ):
             raise AuthoringGraphError("candidate_invalid", "nullable Schema 无效")
         base, imports = _render_schema(dict(members[0]))
         return f"{base} | None", imports
@@ -486,7 +490,9 @@ def _render_schema(schema: dict[str, Any]) -> tuple[str, set[str]]:
         if schema_key in schema:
             field_arguments.append(f"{field_key}={schema[schema_key]!r}")
     if field_arguments:
-        return f"Annotated[{annotation}, Field({', '.join(field_arguments)})]", {"Annotated"}
+        return f"Annotated[{annotation}, Field({', '.join(field_arguments)})]", {
+            "Annotated"
+        }
     return annotation, set()
 
 
@@ -503,8 +509,14 @@ def _incoming_bindings(
     for value in edges:
         if not isinstance(value, Mapping):
             raise AuthoringGraphError("candidate_invalid", "候选边必须是对象")
-        target = (str(value.get("target_node_uuid")), str(value.get("target_handle_uuid")))
-        source = (str(value.get("source_node_uuid")), str(value.get("source_handle_uuid")))
+        target = (
+            str(value.get("target_node_uuid")),
+            str(value.get("target_handle_uuid")),
+        )
+        source = (
+            str(value.get("source_node_uuid")),
+            str(value.get("source_handle_uuid")),
+        )
         if target in result:
             raise AuthoringGraphError("candidate_invalid", "目标连接点存在多条入边")
         result[target] = source
@@ -519,39 +531,66 @@ def _render_action_arguments(
     node_by_uuid: Mapping[str, dict[str, Any]],
     catalog_by_node: Mapping[str, AuthoringCatalogAction],
 ) -> list[str]:
-    """渲染一个动作调用的确定性命名参数。
+    """渲染一个动作（Action）调用的确定性命名参数。
 
-    参数说明：节点参数、输入绑定和数据边共同决定最终表达式；返回按业务键排序
-    的 ``name=value`` 片段，无法证明的绑定失败关闭。
+    参数说明：``node`` 与 ``action`` 提供节点事实和不可变动作合同（Action
+    Contract），``incoming`` 提供按目标连接点（Handle）索引的稳定入边，
+    ``node_by_uuid`` 与 ``catalog_by_node`` 分别解析源工作流节点（WorkflowNode）
+    及其目录动作（Catalog Action）和输出连接点。返回：按业务键排序的
+    ``name=value`` 片段；只渲染遗留 ``executor`` 或第 2 版动作合同 ``goal``
+    输入，结构依赖不成为动作参数。异常：连接点身份、输入绑定或必填参数无法
+    证明时抛出 ``AuthoringGraphError``，不得按节点顺序或名称猜测。
     """
 
+    # ``node_uuid`` 是待渲染工作流节点（WorkflowNode）的稳定身份，用于精确
+    # 查询以目标连接点（Handle）为端点的入边。
     node_uuid = str(node["uuid"])
+    # ``params`` 是没有工作流输入或上游边提供者时可使用的节点静态参数事实。
     params = node.get("param") or {}
+    # ``unilab`` 与 ``input_bindings`` 保存工作流输入到动作输入连接点（Handle）
+    # 的稳定绑定，不允许从参数名称反向猜测绑定。
     unilab = (node.get("meta_data") or {}).get("unilab", {})
-    input_bindings = unilab.get("input_bindings", {}) if isinstance(unilab, Mapping) else {}
+    input_bindings = (
+        unilab.get("input_bindings", {}) if isinstance(unilab, Mapping) else {}
+    )
+    # ``rendered`` 按动作合同（Action Contract）业务键顺序收集最终命名参数。
     rendered: list[str] = []
+    # ``target_handles`` 只包含动作数据输入；ready 等结构连接点（Handle）不得
+    # 被渲染成设备动作（Action）参数。
     target_handles = sorted(
         (
             handle
             for handle in action.handles
             if handle.get("io_type") == "target"
-            and str(handle.get("data_source") or "executor").lower() == "executor"
+            and str(handle.get("data_source") or "executor").lower()
+            in {"executor", "goal"}
         ),
         key=lambda item: str(item.get("handle_key")),
     )
     for handle in target_handles:
+        # ``handle_uuid`` 是动作输入连接点（Handle）的稳定身份；``key`` 是动作
+        # 合同（Action Contract）冻结的业务参数名。
         handle_uuid = str(handle["uuid"])
         key = str(handle["handle_key"])
+        # ``expression`` 只接受工作流输入绑定、精确入边或静态参数三种可证明
+        # 来源；空值表示当前没有合法提供者。
         expression: str | None = None
         if handle_uuid in input_bindings:
             binding = input_bindings[handle_uuid]
-            if not isinstance(binding, Mapping) or not isinstance(binding.get("parameter"), str):
+            if not isinstance(binding, Mapping) or not isinstance(
+                binding.get("parameter"), str
+            ):
                 raise AuthoringGraphError("candidate_invalid", "节点输入绑定无效")
             expression = str(binding["parameter"])
         elif (node_uuid, handle_uuid) in incoming:
+            # ``source_node_uuid`` 与 ``source_handle_uuid`` 是候选边冻结的源端点
+            # 身份，不能替换成节点顺序或展示名称。
             source_node_uuid, source_handle_uuid = incoming[(node_uuid, handle_uuid)]
+            # ``source_node`` 与 ``source_action`` 共同解析源结果变量和真实输出
+            # 连接点（Handle），保持物料来源（MaterialSource）与普通动作共用路径。
             source_node = node_by_uuid[source_node_uuid]
             source_action = catalog_by_node[source_node_uuid]
+            # ``source_handle`` 必须由边上的稳定 UUID 在源目录聚合中唯一命中。
             source_handle = next(
                 (
                     item
@@ -561,7 +600,11 @@ def _render_action_arguments(
                 None,
             )
             if source_handle is None:
-                raise AuthoringGraphError("candidate_invalid", "数据边源连接点不在目录中")
+                raise AuthoringGraphError(
+                    "candidate_invalid", "数据边源连接点不在目录中"
+                )
+            # ``source_name`` 是源节点冻结的作者结果变量；只有物料来源
+            # （MaterialSource）唯一输出直接引用变量本身，普通动作引用具名结果。
             source_name = _node_result_name(source_node)
             expression = (
                 source_name
@@ -637,13 +680,17 @@ def _node_result_name(node: Mapping[str, Any]) -> str:
 
     metadata = node.get("meta_data") or {}
     unilab = metadata.get("unilab", {}) if isinstance(metadata, Mapping) else {}
-    explicit = unilab.get("authoring_result_name") if isinstance(unilab, Mapping) else None
+    explicit = (
+        unilab.get("authoring_result_name") if isinstance(unilab, Mapping) else None
+    )
     if explicit is not None:
         if not isinstance(explicit, str) or not explicit:
             raise AuthoringGraphError("candidate_invalid", "节点作者结果变量无效")
         normalized = _safe_identifier(explicit, fallback="result")
         if normalized != explicit:
-            raise AuthoringGraphError("candidate_invalid", "节点作者结果变量不是稳定标识符")
+            raise AuthoringGraphError(
+                "candidate_invalid", "节点作者结果变量不是稳定标识符"
+            )
         return explicit
     return _safe_identifier(str(node.get("name") or "result"), fallback="result")
 
