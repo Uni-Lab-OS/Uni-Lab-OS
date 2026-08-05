@@ -1229,18 +1229,11 @@ class WorkflowStore:
         ``StoreConflict``；提交前复核异常原样传播，整个事务不提交。
         """
 
-        try:
-            with self.transaction() as conn:
-                return source_bootstrap.install_discovered_sources(
-                    conn,
-                    registrations,
-                    now=utc_now(),
-                    before_commit=before_commit,
-                )
-        except source_bootstrap.SourceBootstrapConflict as exc:
-            raise StoreConflict(str(exc)) from exc
-        except sqlite3.IntegrityError as exc:
-            raise StoreConflict("工作流源码身份已被占用") from exc
+        return self._commit_source_registrations(
+            registrations,
+            before_commit=before_commit,
+            allow_create_missing=True,
+        )
 
     def register_sources(
         self,
@@ -1254,10 +1247,39 @@ class WorkflowStore:
         后的来源注册行；异常语义与 ``install_discovered_sources`` 相同。
         """
 
-        return self.install_discovered_sources(
+        return self._commit_source_registrations(
             registrations,
             before_commit=before_commit,
+            allow_create_missing=False,
         )
+
+    def _commit_source_registrations(
+        self,
+        registrations: Iterable[Mapping[str, str]],
+        *,
+        before_commit: Optional[Callable[[], None]],
+        allow_create_missing: bool,
+    ) -> List[Dict[str, Any]]:
+        """在唯一 ``BEGIN IMMEDIATE`` 接缝（Seam）调用源码启动深模块（Deep Module）。
+
+        参数：``registrations`` 是完整来源批次；``before_commit`` 是固定包根复核；
+        ``allow_create_missing`` 区分显式安装与旧兼容入口。返回：提交后的注册行。
+        异常：深模块冲突统一映射为 ``StoreConflict``，SQLite 唯一冲突整体回滚。
+        """
+
+        try:
+            with self.transaction() as conn:
+                return source_bootstrap.install_discovered_sources(
+                    conn,
+                    registrations,
+                    now=utc_now(),
+                    before_commit=before_commit,
+                    allow_create_missing=allow_create_missing,
+                )
+        except source_bootstrap.SourceBootstrapConflict as exc:
+            raise StoreConflict(str(exc)) from exc
+        except sqlite3.IntegrityError as exc:
+            raise StoreConflict("工作流源码身份已被占用") from exc
 
     def get_source_registration(self, workflow_uuid: str) -> Dict[str, Any]:
         with self._lock:

@@ -2,12 +2,14 @@
 
 from __future__ import annotations
 
+import re
 import sqlite3
 from collections.abc import Callable, Iterable, Mapping
 from pathlib import PurePosixPath
 from typing import Any
 
 from unilabos.workflow.json_codec import encode_json
+from unilabos.workflow.models import validate_uuid
 
 _REGISTRATION_FIELDS = (
     "workflow_uuid",
@@ -16,6 +18,7 @@ _REGISTRATION_FIELDS = (
     "relative_path",
     "source_uri",
 )
+_PACKAGE_ID = re.compile(r"[A-Za-z_][A-Za-z0-9_]*\Z")
 
 
 class SourceBootstrapConflict(RuntimeError):
@@ -28,13 +31,15 @@ def install_discovered_sources(
     *,
     now: str,
     before_commit: Callable[[], None] | None = None,
+    allow_create_missing: bool = True,
 ) -> list[dict[str, Any]]:
     """在一个现有事务中安装完整源码发现（Source Discovery）计划。
 
     参数：``conn`` 是已经执行 ``BEGIN IMMEDIATE`` 的 ``workflow_history.db``
     连接；``registrations`` 是显式授权清单的完整、已发现来源集合；``now`` 是本次
-    提交共享的 UTC 时间；``before_commit`` 在所有 SQL 写入后复核固定包根身份。
-    返回：按输入顺序排列的持久工作流源码（Workflow Source）注册行。
+    提交共享的 UTC 时间；``before_commit`` 在所有 SQL 写入后复核固定包根身份；
+    ``allow_create_missing`` 只有显式源码发现安装入口设为 ``True``，旧兼容入口必须
+    设为 ``False``。返回：按输入顺序排列的持久工作流源码（Workflow Source）注册行。
     异常：字段、身份、活动/软删除（Soft Deletion）生命周期或既有归属冲突时抛出
     ``SourceBootstrapConflict``；提交前复核异常原样传播，外层事务必须整体回滚。
     """
@@ -50,6 +55,8 @@ def install_discovered_sources(
     _validate_existing_identities(incoming, existing_rows)
     # ``missing`` 只含从未存在的定义；活动定义复用，软删除（Soft Deletion）定义拒绝。
     missing = _classify_workflow_definitions(conn, incoming)
+    if missing and not allow_create_missing:
+        raise SourceBootstrapConflict("旧兼容入口不能创建缺失工作流定义")
 
     for registration in missing:
         _insert_workflow_skeleton(conn, registration=registration, now=now)
@@ -79,18 +86,36 @@ def _normalize_registrations(
     """
 
     try:
-        normalized = tuple(
-            {field: registration[field] for field in _REGISTRATION_FIELDS}
-            for registration in registrations
-        )
+        incoming_rows = tuple(registrations)
     except (KeyError, TypeError):
         raise SourceBootstrapConflict("工作流源码注册字段不完整") from None
+    if any(
+        not isinstance(registration, Mapping)
+        or set(registration) != set(_REGISTRATION_FIELDS)
+        for registration in incoming_rows
+    ):
+        raise SourceBootstrapConflict("工作流源码注册字段不完整")
+    normalized = tuple(
+        {field: registration[field] for field in _REGISTRATION_FIELDS}
+        for registration in incoming_rows
+    )
     for registration in normalized:
         if any(
             not isinstance(registration[field], str) or not registration[field]
             for field in _REGISTRATION_FIELDS
         ):
             raise SourceBootstrapConflict("工作流源码注册字段无效")
+        try:
+            # ``canonical_workflow_uuid`` 是不可由宽松字符串改写得到的规范工作流身份。
+            canonical_workflow_uuid = validate_uuid(registration["workflow_uuid"])
+        except (TypeError, ValueError):
+            raise SourceBootstrapConflict("工作流 UUID 不是规范非空身份") from None
+        if canonical_workflow_uuid != registration["workflow_uuid"]:
+            raise SourceBootstrapConflict("工作流 UUID 不是规范非空身份")
+        if _PACKAGE_ID.fullmatch(registration["package_id"]) is None:
+            raise SourceBootstrapConflict("可编辑包身份不符合规范")
+        _validate_package_root(registration["package_root"])
+        _validate_relative_source_path(registration["relative_path"])
         # ``expected_source_uri`` 由包身份与相对路径唯一确定，调用者不能注入别名。
         expected_source_uri = (
             f"package://{registration['package_id']}/{registration['relative_path']}"
@@ -98,6 +123,50 @@ def _normalize_registrations(
         if registration["source_uri"] != expected_source_uri:
             raise SourceBootstrapConflict("工作流源码 URI 与清单身份不一致")
     return normalized
+
+
+def _validate_package_root(package_root: str) -> None:
+    """验证持久包根是规范绝对 POSIX 路径。
+
+    参数：``package_root`` 是工作流源码（Workflow Source）的包目录身份。返回：合法
+    时无返回值。异常：相对路径、控制字符、父级穿越或需规范化改写时抛出
+    ``SourceBootstrapConflict``；本函数只验证身份形状，不授予文件系统权限。
+    """
+
+    # ``root_path`` 只用于纯词法验证，不访问或解析真实文件系统。
+    root_path = PurePosixPath(package_root)
+    if (
+        "\x00" in package_root
+        or "\\" in package_root
+        or not root_path.is_absolute()
+        or package_root != root_path.as_posix()
+        or ".." in root_path.parts
+        or len(root_path.parts) < 2
+    ):
+        raise SourceBootstrapConflict("可编辑包根目录身份无效")
+
+
+def _validate_relative_source_path(relative_path: str) -> None:
+    """验证持久源码路径严格位于 ``workflows/*.py``。
+
+    参数：``relative_path`` 是包根内的工作流源码（Workflow Source）位置。返回：
+    合法时无返回值。异常：绝对路径、穿越、嵌套、反斜线、控制字符或非 Python
+    文件时抛出 ``SourceBootstrapConflict``。
+    """
+
+    # ``source_path`` 是不依赖当前工作目录的纯 POSIX 相对身份。
+    source_path = PurePosixPath(relative_path)
+    if (
+        "\x00" in relative_path
+        or "\\" in relative_path
+        or source_path.is_absolute()
+        or relative_path != source_path.as_posix()
+        or len(source_path.parts) != 2
+        or source_path.parts[0] != "workflows"
+        or source_path.suffix != ".py"
+        or not source_path.stem
+    ):
+        raise SourceBootstrapConflict("工作流源码相对路径无效")
 
 
 def _validate_batch_identities(
@@ -311,10 +380,7 @@ def _ensure_empty_authoring(
     )
 
 
-def _read_registration(
-    conn: sqlite3.Connection,
-    workflow_uuid: str,
-) -> dict[str, Any]:
+def _read_registration(conn: sqlite3.Connection, workflow_uuid: str) -> dict[str, Any]:
     """在同一事务中读取刚确认的来源注册。
 
     参数：``conn`` 是当前事务；``workflow_uuid`` 是工作流（Workflow）身份。
@@ -329,6 +395,3 @@ def _read_registration(
     if row is None:
         raise SourceBootstrapConflict("工作流源码注册提交前不可见")
     return dict(row)
-
-
-__all__ = ["SourceBootstrapConflict", "install_discovered_sources"]
