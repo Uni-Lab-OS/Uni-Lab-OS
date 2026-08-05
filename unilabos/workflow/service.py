@@ -1279,8 +1279,7 @@ class WorkflowService:
                 except OSError:
                     raise WorkflowError("internal_error") from None
             source = self._read_source(registration)
-            assert source is not None
-            if source["draft_hash"] != encoded_hash:
+            if source is None or source["draft_hash"] != encoded_hash:
                 raise WorkflowConflict("draft_hash_conflict")
             applied_graph = self.get_graph(workflow_uuid)
             compilation = self._compile(
