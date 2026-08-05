@@ -163,7 +163,14 @@ def handle_value_schema(handle: Mapping[str, Any]) -> WorkflowValueSchema:
         raw_schema = _legacy_handle_schema(handle.get("type"))
     if not isinstance(raw_schema, Mapping):
         raise WorkflowIOValidationError("连接点（Handle）value_schema 无效")
-    schema = _value_set_schema(_plain_mapping(raw_schema))
+    # ``plain_schema`` 是与冻结目录分离的动作字段 JSON Schema；物料字段需先
+    # 投影成工作流唯一的物料占位符（ResourceSlot）值 Schema，再做 I/O 校验。
+    plain_schema = _plain_mapping(raw_schema)
+    schema = _projected_material_value_schema(plain_schema)
+    if schema is None and str(handle.get("type") or "").lower() == "resourceslot":
+        schema = {"$slot": "ResourceSlot"}
+    if schema is None:
+        schema = _value_set_schema(plain_schema)
     allowlist = unilab.get("allowed_resource_template_uuids")
     if allowlist is not None:
         schema, applied = _apply_placeholder_allowlist(schema, allowlist)
@@ -649,11 +656,77 @@ def _plain_mapping(value: Mapping[str, Any]) -> dict[str, Any]:
                 _plain_mapping(child) if isinstance(child, Mapping) else child
                 for child in item
             ]
-            if isinstance(item, list)
+            if isinstance(item, (list, tuple))
             else item
         )
         for key, item in value.items()
     }
+
+
+def _projected_material_value_schema(
+    schema: Mapping[str, Any],
+) -> dict[str, Any] | None:
+    """把动作字段 JSON Schema 投影为规范物料占位符值 Schema。
+
+    参数说明：``schema`` 是动作合同投影保留的对象、数组或可空物料引用；返回
+    对应的 ``ResourceSlot``、物料数组或可空规范 Schema，非物料字段返回
+    ``None``。物料锁标记只决定执行占用，不进入工作流值类型。
+    """
+
+    # ``members`` 接受动作合同的标准 ``anyOf`` 可空形态，并只保留一个非空成员。
+    members = schema.get("anyOf")
+    if isinstance(members, (list, tuple)):
+        non_null_members = [
+            member
+            for member in members
+            if isinstance(member, Mapping) and member.get("type") != "null"
+        ]
+        has_null = any(
+            isinstance(member, Mapping) and member.get("type") == "null"
+            for member in members
+        )
+        if len(non_null_members) == 1 and has_null:
+            projected = _projected_material_value_schema(non_null_members[0])
+            if projected is not None:
+                return {"anyOf": [projected, {"type": "null"}]}
+
+    # ``json_types`` 接受 Pydantic 生成的 ``["object", "null"]`` 可空形态。
+    json_type = schema.get("type")
+    if isinstance(json_type, (list, tuple)) and "null" in json_type:
+        non_null_types = [item for item in json_type if item != "null"]
+        if len(non_null_types) == 1:
+            non_null_schema = _plain_mapping(schema)
+            non_null_schema["type"] = non_null_types[0]
+            projected = _projected_material_value_schema(non_null_schema)
+            if projected is not None:
+                return {"anyOf": [projected, {"type": "null"}]}
+
+    if json_type == "array" and isinstance(schema.get("items"), Mapping):
+        projected_items = _projected_material_value_schema(schema["items"])
+        if projected_items is None:
+            return None
+        result: dict[str, Any] = {"type": "array", "items": projected_items}
+        for bound in ("minItems", "maxItems"):
+            if bound in schema:
+                result[bound] = schema[bound]
+        return result
+
+    # ``properties`` 的唯一 UUID 字段是无锁动作结果的稳定物料引用形态；输入还
+    # 可以用 true/false 锁标记显式表达默认占用或 ``free``。
+    properties = schema.get("properties")
+    required = schema.get("required") or []
+    uuid_schema = properties.get("uuid") if isinstance(properties, Mapping) else None
+    is_material_reference = isinstance(
+        schema.get("x-unilabos-material-lock"), bool
+    ) or (
+        isinstance(properties, Mapping)
+        and set(properties) == {"uuid"}
+        and isinstance(uuid_schema, Mapping)
+        and uuid_schema.get("type") == "string"
+        and uuid_schema.get("format") == "uuid"
+        and "uuid" in required
+    )
+    return {"$slot": "ResourceSlot"} if is_material_reference else None
 
 
 def _apply_placeholder_allowlist(

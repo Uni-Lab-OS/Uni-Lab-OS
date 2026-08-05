@@ -34,6 +34,11 @@ from unilabos.workflow.resource_reference import (
     ResourceReferenceResolver,
     resolve_resource_reference,
 )
+from unilabos.workflow.workflow_io import (
+    WorkflowIOValidationError,
+    handle_value_schema,
+    schema_is_assignable,
+)
 
 
 class AuthoringGraphError(ValueError):
@@ -510,7 +515,13 @@ def _validate_action_resource_reference(
 
     # ``value_schema`` 是当前目录代际冻结的动作输入值合同。
     value_schema = _handle_schema(target_handle)
-    if value_schema.get("$slot") != "ResourceSlot":
+    # ``is_resource_slot`` 同时接受规范连接点类型和旧值 Schema 标记；注册表
+    # 投影已经把物料参数发布为 ``ResourceSlot``，无需再重复写入 ``$slot``。
+    is_resource_slot = (
+        target_handle.get("type") == "ResourceSlot"
+        or value_schema.get("$slot") == "ResourceSlot"
+    )
+    if not is_resource_slot:
         raise AuthoringGraphError(
             "resource_reference_resolution_error",
             f"动作参数 {argument_name} 不是物料占位符（ResourceSlot）",
@@ -562,16 +573,20 @@ def _require_handle(
     *,
     key: str,
     io_type: str,
-) -> Mapping[str, Any]:
+) -> dict[str, Any]:
     """按业务键和方向取得唯一连接点（Handle）。
 
     参数说明：``action`` 是目录 aggregate，``key`` 和 ``io_type`` 来自作者绑定；
-    返回不可变连接点投影，缺失或歧义抛出 ``AuthoringGraphError``。
+    返回与不可变目录分离的连接点投影，缺失或歧义抛出
+    ``AuthoringGraphError``；递归解冻由目录 aggregate 的公共接口完成。
     """
 
+    # ``detached_handles`` 把目录内嵌套只读映射递归还原为普通 JSON 容器；调用方
+    # 后续读取或深拷贝值 Schema 时不会尝试 pickle ``mappingproxy``。
+    detached_handles = action.detached_handles()
     matches = [
         handle
-        for handle in action.handles
+        for handle in detached_handles
         if handle.get("handle_key") == key and handle.get("io_type") == io_type
     ]
     if len(matches) != 1:
@@ -609,7 +624,7 @@ def _output_contract(
             _declaration, action = result_nodes[binding.result_name or ""]
             handle = _require_handle(action, key=str(binding.value), io_type="source")
             schema = _handle_schema(handle)
-        if name in declared and _canonical(declared[name]) != _canonical(schema):
+        if name in declared and not schema_is_assignable(schema, declared[name]):
             raise AuthoringGraphError(
                 "invalid_workflow_output",
                 f"结果记录字段 {name} 与绑定类型不一致",
@@ -657,19 +672,15 @@ def _handle_schema(handle: Mapping[str, Any]) -> dict[str, Any]:
     返回独立 Schema 字典，未知类型退化为无约束 JSON 对象。
     """
 
-    meta_data = handle.get("meta_data")
-    if isinstance(meta_data, Mapping):
-        unilab = meta_data.get("unilab")
-        if isinstance(unilab, Mapping) and isinstance(
-            unilab.get("value_schema"), Mapping
-        ):
-            return deepcopy(dict(unilab["value_schema"]))
-    value_type = str(handle.get("type") or "").strip()
-    if value_type == "ResourceSlot":
-        return {"$slot": "ResourceSlot"}
-    if value_type in {"string", "integer", "number", "boolean", "object"}:
-        return {"type": value_type}
-    return {"type": "object"}
+    try:
+        # ``handle_value_schema`` 是动作 JSON Schema 到工作流值 Schema 的唯一
+        # 适配器，统一处理冻结容器、物料引用、数组、可空和允许集合。
+        return handle_value_schema(handle).to_dict()
+    except WorkflowIOValidationError as error:
+        raise AuthoringGraphError(
+            "template_catalog_mismatch",
+            "动作连接点值 Schema 无法解析",
+        ) from error
 
 
 def _graph_containers(graph: Mapping[str, Any]) -> dict[str, Any]:

@@ -35,6 +35,8 @@ S3_WAREHOUSE_TEMPLATE_UUID = "62000000-0000-4000-8000-000000000001"
 POWDER_WAREHOUSE_UUID = "61000000-0000-4000-8000-000000000002"
 # ``ACTION_NODE_UUID`` 是直接消费 SZLab 启动资源的动作节点稳定身份。
 ACTION_NODE_UUID = "63000000-0000-4000-8000-000000000001"
+# ``ACTION_SAMPLE_SOURCE`` 是动作返回实际物料引用的源连接点（Handle）身份。
+ACTION_SAMPLE_SOURCE = "63000000-0000-4000-8000-000000000002"
 
 
 class _ResourceReferenceResolver:
@@ -353,6 +355,96 @@ def test_action_resource_ref_accepts_projected_nested_material_schema() -> None:
     assert compiled.valid and compiled.graph is not None, compiled.diagnostics
     assert compiled.graph["nodes"][0]["param"]["sample"] == {
         "uuid": POWDER_WAREHOUSE_UUID
+    }
+
+
+def test_projected_material_output_satisfies_resource_slot_result_record() -> None:
+    """动作结果物料 JSON Schema 必须满足工作流的物料占位符结果声明。
+
+    参数：无。返回：无。断言：注册表动作结果使用 ``properties.uuid`` JSON
+    Schema、连接点（Handle）类型为 ``ResourceSlot`` 时，可赋给作者源码声明的
+    ``ResourceSlot`` 结果字段，并保留动作输出的资源模板允许集合；本测试不创建
+    工作流任务（WorkflowTask）或执行动作。
+    """
+
+    # ``action_template`` 与 ``action_handles`` 同时提供物料输入和显式物料输出。
+    action_template, action_handles = _template(
+        PREPARE_TEMPLATE_UUID,
+        name="prepare",
+        handles=[
+            _handle(
+                PREPARE_SAMPLE_TARGET,
+                node_template_uuid=PREPARE_TEMPLATE_UUID,
+                key="sample",
+                io_type="target",
+                value_type="ResourceSlot",
+                required=True,
+            ),
+            _handle(
+                ACTION_SAMPLE_SOURCE,
+                node_template_uuid=PREPARE_TEMPLATE_UUID,
+                key="sample",
+                io_type="source",
+                value_type="ResourceSlot",
+                required=False,
+            ),
+        ],
+    )
+    # ``projected_schema`` 是动作合同投影实际写入两个连接点的嵌套 JSON Schema。
+    projected_schema = {
+        "additionalProperties": False,
+        "properties": {"uuid": {"format": "uuid", "type": "string"}},
+        "required": ["uuid"],
+        "type": "object",
+    }
+    for handle in action_handles:
+        handle["meta_data"]["unilab"]["value_schema"] = dict(projected_schema)
+        handle["meta_data"]["unilab"][
+            "allowed_resource_template_uuids"
+        ] = [S3_WAREHOUSE_TEMPLATE_UUID]
+    # ``catalog`` 冻结真实动作投影，确保编译不依赖测试专用 ``$slot`` 旁路。
+    catalog = AuthoringCatalogSnapshot.from_entities(
+        [action_template],
+        action_handles,
+    )
+    # ``python_source`` 用显式结果记录承诺标准物料占位符（ResourceSlot）。
+    python_source = f'''from typing import TypedDict
+from lab.devices import Reactor
+from unilabos.registry.placeholder_type import ResourceSlot
+from unilabos.workflow.authoring import device, resource_ref, workflow
+
+
+class ProjectedMaterialResult(TypedDict):
+    sample: ResourceSlot
+
+
+reactor: Reactor = device()
+
+
+@workflow(workflow_uuid="{WORKFLOW_UUID}", displayname="Projected material output")
+def projected_material_output() -> ProjectedMaterialResult:
+    # unilab:node_uuid={ACTION_NODE_UUID}
+    prepared = reactor.prepare(sample=resource_ref("powder_container_warehouse"))
+    return {{"sample": prepared.sample}}
+'''
+    # ``compiled`` 必须采用生产者可赋给消费者的集合关系，而非两种表示的文本相等。
+    compiled = WorkflowAuthoringEngine(
+        catalog=catalog,
+        resource_reference_resolver=_resolver(),
+    ).compile(
+        workflow_uuid=WORKFLOW_UUID,
+        workflow_revision=7,
+        python_source=python_source,
+        source_uri="package://szlab/workflows/projected_material_output.py",
+        applied_graph=_applied_graph(),
+    )
+
+    assert compiled.valid and compiled.graph is not None, compiled.diagnostics
+    assert compiled.graph["workflow"]["meta_data"]["unilab"]["output_contract"][
+        "outputs"
+    ][0]["schema"] == {
+        "$slot": "ResourceSlot",
+        "allowed_resource_template_uuids": [S3_WAREHOUSE_TEMPLATE_UUID],
     }
 
 
