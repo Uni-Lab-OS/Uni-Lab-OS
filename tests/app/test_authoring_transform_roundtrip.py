@@ -232,6 +232,7 @@ def test_persisted_material_source_generate_validate_fixed_point_is_read_only(
     # ``persisted_graph`` 复现真实 trace：实体带数据库时间和工作流身份，可空字段
     # 遵循 Backend ``omitempty``，物料来源（MaterialSource）选择器保持完整。
     persisted_graph = _persisted_read_graph(compiled.graph)
+    persisted_graph["nodes"][0]["pose"] = {"position": {"x": 236, "y": 16}}
     store = WorkflowStore(tmp_path / "workflow_history.db")
     service = WorkflowService(store, compiler=engine)
     persistent_tables = (

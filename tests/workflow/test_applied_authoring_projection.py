@@ -10,6 +10,7 @@ import pytest
 from tests.workflow.test_authoring_engine import (
     ANALYZE_NODE_UUID,
     ANALYZE_TEMPLATE_UUID,
+    PREPARE_NODE_UUID,
     PREPARE_SAMPLE_TARGET,
     PREPARE_TEMPLATE_UUID,
     WORKFLOW_UUID,
@@ -168,6 +169,104 @@ def test_retained_nodes_and_edges_preserve_the_exact_persisted_read_shape() -> N
     assert result.valid and result.graph is not None, result.diagnostics
     assert result.graph["nodes"] == applied_graph["nodes"]
     assert result.graph["edges"] == applied_graph["edges"]
+
+
+@pytest.mark.parametrize(
+    ("field_name", "field_value"),
+    [
+        pytest.param("pose", {"position": {"x": 236, "y": 16}}, id="pose"),
+        pytest.param(
+            "execution_policy", {"priority": 7, "queue": "manual"}, id="policy"
+        ),
+        pytest.param("disabled", False, id="disabled"),
+        pytest.param("minimized", True, id="minimized"),
+    ],
+)
+def test_retained_node_preserves_explicit_graph_owned_field(
+    field_name: str,
+    field_value: Any,
+) -> None:
+    """同 UUID 节点必须精确保留显式图拥有字段并与候选深拷贝隔离。
+
+    参数：``field_name`` 是图拥有字段名，``field_value`` 是显式值。返回：无；
+    断言位置、执行策略、禁用和最小化形状不被源码默认值覆盖，候选修改也不污染
+    已应用工作流图（Workflow Graph）。
+    """
+
+    engine, applied_graph, normalized_source = _persisted_standard_graph()
+    # ``applied_node`` 是同 UUID 节点的已应用图权威形状。
+    applied_node = next(
+        node for node in applied_graph["nodes"] if node["uuid"] == PREPARE_NODE_UUID
+    )
+    applied_node[field_name] = deepcopy(field_value)
+    applied_node["future_canvas_state"] = {"must_not": "survive"}
+
+    result = _compile(engine, graph=applied_graph, source=normalized_source)
+
+    assert result.valid and result.graph is not None, result.diagnostics
+    # ``candidate_node`` 是合并后的独立候选节点，不得共享嵌套容器。
+    candidate_node = next(
+        node for node in result.graph["nodes"] if node["uuid"] == PREPARE_NODE_UUID
+    )
+    assert candidate_node[field_name] == field_value
+    assert "future_canvas_state" not in candidate_node
+    if isinstance(field_value, dict):
+        candidate_node[field_name]["candidate_only"] = True
+        assert "candidate_only" not in applied_node[field_name]
+
+
+@pytest.mark.parametrize(
+    "field_name", ["pose", "execution_policy", "disabled", "minimized"]
+)
+def test_retained_node_preserves_missing_graph_owned_field_shape(
+    field_name: str,
+) -> None:
+    """已应用图缺失的图拥有字段不得被编译器默认值补造。
+
+    参数：``field_name`` 选择一种图拥有字段。返回：无；断言缺失与显式空值或
+    ``false`` 仍是不同 wire 形状。
+    """
+
+    engine, applied_graph, normalized_source = _persisted_standard_graph()
+    # ``applied_node`` 是被刻意删除一个字段的已应用节点读投影。
+    applied_node = next(
+        node for node in applied_graph["nodes"] if node["uuid"] == PREPARE_NODE_UUID
+    )
+    applied_node.pop(field_name)
+
+    result = _compile(engine, graph=applied_graph, source=normalized_source)
+
+    assert result.valid and result.graph is not None, result.diagnostics
+    retained_node = next(
+        node for node in result.graph["nodes"] if node["uuid"] == PREPARE_NODE_UUID
+    )
+    assert field_name not in retained_node
+
+
+def test_graph_owned_fields_do_not_cross_node_identity_or_preserve_unknowns() -> None:
+    """图拥有字段只按稳定节点身份保留，未知字段不得进入候选。
+
+    参数：无。返回：无；把准备节点改成新 UUID 后，断言旧节点的位置和未知字段
+    均不转移到新节点，从而同时固定新节点不继承与跨身份不传递语义。
+    """
+
+    engine, applied_graph, normalized_source = _persisted_standard_graph()
+    old_node = next(
+        node for node in applied_graph["nodes"] if node["uuid"] == PREPARE_NODE_UUID
+    )
+    old_node["pose"] = {"position": {"x": 236, "y": 16}}
+    old_node["future_canvas_state"] = {"must_not": "survive"}
+    new_node_uuid = "20000000-0000-4000-8000-000000000099"
+    changed_source = normalized_source.replace(PREPARE_NODE_UUID, new_node_uuid)
+
+    result = _compile(engine, graph=applied_graph, source=changed_source)
+
+    assert result.valid and result.graph is not None, result.diagnostics
+    new_node = next(
+        node for node in result.graph["nodes"] if node["uuid"] == new_node_uuid
+    )
+    assert new_node["pose"] == {}
+    assert "future_canvas_state" not in new_node
 
 
 def test_retained_catalog_uses_applied_projection_and_new_catalog_uses_current() -> (
