@@ -14,6 +14,10 @@ from uuid import uuid4
 
 from pydantic import ValidationError
 
+from unilabos.workflow.authoring_candidate_hash import (
+    AuthoringCandidateHashError,
+    compute_authoring_candidate_hash,
+)
 from unilabos.workflow.candidate_validation import (
     CandidateBundleError,
     validate_candidate_bundle,
@@ -26,7 +30,6 @@ from unilabos.workflow.device_action_run import (
 )
 from unilabos.workflow.execution_plan import ExecutionPlanBuilder
 from unilabos.workflow.graph_validation import GraphValidationError
-from unilabos.workflow.json_codec import encode_json
 from unilabos.workflow.models import (
     CandidateChangeset,
     CandidateCompilation,
@@ -250,10 +253,6 @@ class WorkflowTaskSchedulerBridge(Protocol):
 
 def _sha256(data: bytes) -> str:
     return f"sha256:{hashlib.sha256(data).hexdigest()}"
-
-
-def _canonical_json(value: Any) -> bytes:
-    return encode_json(value, sort_keys=True)
 
 
 def _mtime_rfc3339(timestamp: float) -> str:
@@ -1550,6 +1549,15 @@ class WorkflowService:
         applied_graph: Dict[str, Any],
         draft_python_source: str,
     ) -> Optional[Dict[str, Any]]:
+        """校验编译结果并签发一个可信候选版本（Candidate）。
+
+        参数：``workflow_revision`` 与 ``draft_hash`` 固定候选基线；``compilation``
+        是编译结果；``applied_graph`` 是当前应用图；``draft_python_source`` 用于
+        诊断和源码映射校验。返回：包含规范八字段、候选哈希（Candidate Hash）
+        和更新时间的候选字典；编译结果不能证明时返回 ``None``。异常：目录不可
+        用等非候选错误原样传播，其他候选结构或编码错误转为稳定诊断。
+        """
+
         applied_graph = self._validated_applied_backend_graph(applied_graph)
         if not self._normalize_candidate_diagnostics(
             compilation,
@@ -1616,12 +1624,13 @@ class WorkflowService:
             "template_catalog_fingerprint": template_catalog_fingerprint,
         }
         try:
-            canonical_bundle = _canonical_json(bundle)
-        except (TypeError, UnicodeError, ValueError):
+            # ``candidate_hash`` 是共享八字段规则对本次签发正文的唯一稳定摘要。
+            candidate_hash = compute_authoring_candidate_hash(bundle)
+        except AuthoringCandidateHashError:
             self._set_candidate_invalid_diagnostic(compilation)
             return None
         return {
-            "candidate_hash": _sha256(canonical_bundle),
+            "candidate_hash": candidate_hash,
             **bundle,
             "update_time": utc_now(),
         }

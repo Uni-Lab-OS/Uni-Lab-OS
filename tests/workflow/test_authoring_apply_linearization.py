@@ -247,6 +247,7 @@ def test_apply_recomputes_persisted_candidate_hash_after_sqlite_contention(
 
     service, source_path, database_path = authoring_runtime
     candidate = _save_candidate(service)
+    # 以下快照是并发写者提交前既有的工作流、源码、事件与写回事实。
     before_graph = service.get_graph(WORKFLOW_UUID)
     before_source = source_path.read_text(encoding="utf-8")
     observer = sqlite3.connect(database_path)

@@ -23,6 +23,10 @@ from typing import (
 from uuid import uuid4
 
 from unilabos.workflow import source_bootstrap
+from unilabos.workflow.authoring_candidate_hash import (
+    AuthoringCandidateHashError,
+    compute_authoring_candidate_hash,
+)
 from unilabos.workflow.graph_validation import (
     CodedGraphValidationError,
     GraphValidationError,
@@ -1421,8 +1425,16 @@ class WorkflowStore:
             stored_candidate = _load(authoring["candidate"], None)
             if not isinstance(stored_candidate, dict):
                 raise StoreAuthoringConflict("candidate_not_ready")
+            try:
+                # ``recomputed_candidate_hash`` 绑定事务内刚重读的完整八字段正文。
+                recomputed_candidate_hash = compute_authoring_candidate_hash(
+                    stored_candidate
+                )
+            except AuthoringCandidateHashError:
+                raise StoreAuthoringConflict("candidate_hash_conflict") from None
             if (
-                authoring["candidate_hash"] != candidate_hash
+                recomputed_candidate_hash != candidate_hash
+                or authoring["candidate_hash"] != candidate_hash
                 or stored_candidate.get("candidate_hash") != candidate_hash
             ):
                 raise StoreAuthoringConflict("candidate_hash_conflict")
