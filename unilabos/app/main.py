@@ -305,6 +305,12 @@ def parse_args():
 
     parser.add_argument("-g", "--graph", help="Physical setup graph file path.")
     parser.add_argument(
+        "--workspace",
+        type=str,
+        default=None,
+        help="显式 Uni-Lab 工作区（Workspace）根目录。",
+    )
+    parser.add_argument(
         "-c", "--controllers", default=None, help="Controllers config file path."
     )
     parser.add_argument(
@@ -1023,6 +1029,21 @@ def main():
         _run_as_supervisor(args_dict.get("auto_restart_count", 5))
         return
 
+    # 工作区（Workspace）只在常驻启动路径投影一次；模块内部隐藏目录、命名空间、
+    # 工作流源码授权和相对物理图解析，不把包管理细节继续堆进历史主函数。
+    from unilabos.package_manager import prepare_workspace_startup
+
+    try:
+        workspace_startup_plan = prepare_workspace_startup(args_dict)
+    except (TypeError, ValueError) as error:
+        parser.error(str(error))
+    if workspace_startup_plan is not None:
+        print_status(
+            "已加载工作区（Workspace）启动计划: "
+            f"{workspace_startup_plan.import_package}",
+            "info",
+        )
+
     # 环境检查 - 检查并自动安装必需的包 (可选)
     skip_env_check = args_dict.get("skip_env_check", False)
     check_mode = args_dict.get("check_mode", False)
@@ -1380,6 +1401,7 @@ def main():
                     graph_preview,
                     working_dir=BasicConfig.working_dir,
                     http_client=http_client_for_community,
+                    available_namespaces=args_dict.get("_community_namespaces"),
                 )
             except CommunityPackageError as exc:
                 print_status(str(exc), "error")

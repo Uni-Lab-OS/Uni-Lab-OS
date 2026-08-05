@@ -87,10 +87,22 @@ def prepare_community_packages(
     graph_data: Optional[Dict[str, Any]],
     working_dir: str | Path,
     http_client: Any = None,
+    available_namespaces: Optional[Dict[str, str]] = None,
 ) -> CommunityPackagePrepareResult:
+    """准备物理图尚未由本地工作区提供的社区设备包。
+
+    参数：``graph_data`` 是物理图 JSON；``working_dir`` 是社区包缓存目录；
+    ``http_client`` 是可选远端解析端口；``available_namespaces`` 把已经由显式
+    工作区提供的设备扫描目录映射到 ``community.<package>`` 命名空间。
+    返回：同时保留本地命名空间和新解析远端包的准备结果。
+    异常：图引用的任一社区命名空间既未本地提供也不能从缓存/远端解析时抛出
+    ``CommunityPackageError``，禁止无定义继续启动。
+    """
+
+    provided_namespaces = dict(available_namespaces or {})
     classes = extract_community_classes(graph_data)
     if not classes:
-        return CommunityPackagePrepareResult()
+        return CommunityPackagePrepareResult(namespaces=provided_namespaces)
 
     print_status(f"发现 community 设备引用: {', '.join(classes)}", "info")
     manifest = load_manifest(working_dir)
@@ -104,8 +116,10 @@ def prepare_community_packages(
     devices_dirs: List[str] = []
     aliases: Dict[str, str] = {}
     dependencies: List[str] = []
-    namespaces: Dict[str, str] = {}
-    missing_namespaces = {community_namespace(class_name) for class_name in classes}
+    namespaces: Dict[str, str] = provided_namespaces
+    missing_namespaces = {
+        community_namespace(class_name) for class_name in classes
+    } - set(provided_namespaces.values())
 
     for item in remote_items:
         package_dir = _ensure_remote_item_cached(item, working_dir, manifest, http_client=http_client)

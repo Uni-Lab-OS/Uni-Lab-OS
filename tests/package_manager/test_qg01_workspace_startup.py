@@ -60,9 +60,7 @@ def _write_szlab_shaped_workspace(workspace_root: Path) -> dict[str, Path]:
         encoding="utf-8",
     )
     (workspace_root / "pyproject.toml").write_text(
-        "[project]\n"
-        'name = "szlab-poly-studio"\n'
-        'version = "0.1.0"\n',
+        '[project]\nname = "szlab-poly-studio"\nversion = "0.1.0"\n',
         encoding="utf-8",
     )
     (workspace_root / "package.yaml").write_text(
@@ -101,9 +99,10 @@ def test_workspace_source_reads_only_regular_files_below_explicit_root(
     source = workspace_api.WorkspaceSource(workspace_root)
 
     assert source.source_kind == "workspace"
-    assert source.read_bytes("package.yaml") == (
-        workspace_root / "package.yaml"
-    ).read_bytes()
+    assert (
+        source.read_bytes("package.yaml")
+        == (workspace_root / "package.yaml").read_bytes()
+    )
     with pytest.raises(ValueError):
         source.read_bytes("../outside.py")
     assert fixture_paths["workflow"].is_file()
@@ -136,10 +135,9 @@ def test_prepare_workspace_startup_projects_one_szlab_package_without_activation
 
     assert startup_plan is not None
     assert startup_plan.import_package == "szlab_poly_studio"
+    assert startup_plan.workflow_source_count == 1
     assert startup_arguments["devices"] == [str(fixture_paths["package"])]
-    assert startup_arguments["workflow_editable_package_root"] == [
-        str(workspace_root)
-    ]
+    assert startup_arguments["workflow_editable_package_root"] == [str(workspace_root)]
     assert startup_arguments["_community_namespaces"] == {
         str(fixture_paths["package"]): "community.szlab_poly_studio"
     }
@@ -215,9 +213,7 @@ def test_local_workspace_namespace_satisfies_community_graph_without_remote_pack
     package_root = tmp_path / "szlab_poly_studio"
     package_root.mkdir()
     # ``local_namespaces`` 是设备扫描目录到社区类名前缀的唯一显式映射。
-    local_namespaces = {
-        str(package_root.resolve()): "community.szlab_poly_studio"
-    }
+    local_namespaces = {str(package_root.resolve()): "community.szlab_poly_studio"}
     graph_document = {
         "nodes": [
             {
@@ -236,4 +232,3 @@ def test_local_workspace_namespace_satisfies_community_graph_without_remote_pack
 
     assert result.namespaces == local_namespaces
     assert result.devices_dirs == []
-
