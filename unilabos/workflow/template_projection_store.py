@@ -663,19 +663,17 @@ def _schema_text(value: Any) -> str | None:
     return _json(value)
 
 
-def _load_schema(value: str | None) -> Any:
-    """把数据库 Schema 文本恢复为 JSON 对象或原文本。
+def _load_schema(value: str | None) -> str | None:
+    """按 Backend 线合同读取节点模板参数 Schema 文本。
 
-    参数说明：``value`` 是可空 Schema 列；合法 JSON 返回解码值，旧普通文本原样
-    返回，以维持历史兼容。
+    参数说明：``value`` 是 SQLite 可空 Schema 文本列。返回：非空值保持原始
+    JSON 字符串，空值返回 ``None``，使注册模板投影（Registry Template
+    Projection）、工作流服务（WorkflowService）和 HTTP 始终共享 Backend
+    ``*string`` 语义。异常：无；JSON Schema 的语法与值语义由公共全图校验器
+    （Graph Validator）在候选签发时关闭式校验。
     """
 
-    if value is None or value == "":
-        return None
-    try:
-        return json.loads(value)
-    except json.JSONDecodeError:
-        return value
+    return None if value is None or value == "" else value
 
 
 __all__ = [

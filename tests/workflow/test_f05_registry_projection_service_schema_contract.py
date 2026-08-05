@@ -11,8 +11,8 @@ from fastapi.testclient import TestClient
 
 from tests.registry.test_template_projection import (
     DEVICE_MATERIAL_UUID,
-    FakeRegistry,
     RESOURCE_TEMPLATE_UUID,
+    FakeRegistry,
 )
 from tests.workflow.test_authoring_engine import WORKFLOW_UUID
 from unilabos.app.workflow_api import create_workflow_app
@@ -109,8 +109,9 @@ def test_registry_schema_is_backend_string_through_candidate_apply_and_restart(
     registry_devices = FakeRegistry().obtain_registry_device_info()
     # ``goal_schema`` 是 Backend `workflow_node_template.schema` 表达的 goal 子模式。
     goal_schema = deepcopy(
-        registry_devices[0]["class"]["action_value_mappings"]["transfer"]["schema"]
-        ["properties"]["goal"]
+        registry_devices[0]["class"]["action_value_mappings"]["transfer"]["schema"][
+            "properties"
+        ]["goal"]
     )
     # ``expected_schema_text`` 按 Backend 文本列语义确定性编码参数 Schema。
     expected_schema_text = json.dumps(
@@ -209,8 +210,9 @@ def test_registry_schema_is_backend_string_through_candidate_apply_and_restart(
 
     reopened_store = WorkflowStore(database_path)
     try:
-        assert reopened_store.get_graph(WORKFLOW_UUID)["node_templates"][0][
-            "schema"
-        ] == expected_schema_text
+        assert (
+            reopened_store.get_graph(WORKFLOW_UUID)["node_templates"][0]["schema"]
+            == expected_schema_text
+        )
     finally:
         reopened_store.close()

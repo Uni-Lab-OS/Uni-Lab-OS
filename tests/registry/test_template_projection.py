@@ -2,10 +2,12 @@
 
 from __future__ import annotations
 
+import json
 from pathlib import Path
 from typing import Any
 
 import pytest
+
 from unilabos.registry.template_projection import (
     RegistryTemplateProjection,
     RegistryTemplateProjectionError,
@@ -439,8 +441,7 @@ def test_projection_keeps_contract_handle_order_and_material_placeholder_metadat
     ]
     # ``handles_by_key`` 以方向和字段名表达稳定业务身份，不依赖数据库 UUID 顺序。
     handles_by_key = {
-        (handle["io_type"], handle["handle_key"]): handle
-        for handle in data_handles
+        (handle["io_type"], handle["handle_key"]): handle for handle in data_handles
     }
     assert set(handles_by_key) == {
         ("target", "plate"),
@@ -454,11 +455,12 @@ def test_projection_keeps_contract_handle_order_and_material_placeholder_metadat
     result_handle = handles_by_key[("source", "accepted")]
     # ``stored_contract`` 保留完整第 2 版动作合同，供前端从 Backend 形状详情恢复
     # 物料占位符（ResourceSlot）与编辑器元数据；节点 ``schema`` 仍只承载 goal。
-    stored_contract = action.template["meta_data"]["unilab"][
-        "action_contract_schema"
-    ]
+    stored_contract = action.template["meta_data"]["unilab"]["action_contract_schema"]
+    # ``projected_goal_schema`` 是从 Backend 文本合同解码出的动作 goal 参数子模式；
+    # 完整动作合同（Action Contract）只保存在元数据投影中。
+    projected_goal_schema = json.loads(action.template["schema"])
     assert stored_contract["x-unilabos-action-contract"]["version"] == 2
-    assert "goal" not in action.template["schema"].get("properties", {})
+    assert "goal" not in projected_goal_schema.get("properties", {})
     assert plate_handle["type"] == "ResourceSlot"
     assert plate_handle["required"] is True
     assert plate_handle["meta_data"]["unilab"]["value_schema"][
