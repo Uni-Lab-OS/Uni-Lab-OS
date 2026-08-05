@@ -9,6 +9,7 @@ import re
 import signal
 import stat
 import struct
+import sys
 import threading
 from collections import defaultdict
 from collections.abc import Iterator
@@ -161,6 +162,35 @@ _WORKFLOW_READ_FIELDS = {
 
 def _supports_directory_fd_paths() -> bool:
     return _DIRECTORY_FD_PATHS_SUPPORTED
+
+
+def _supports_linux_file_lease_cas() -> bool:
+    """判断当前进程是否具备 Linux Draft 强 CAS 所需的全部原语。
+
+    本函数没有参数；返回值为 ``True`` 时，调用方可以使用目录 FD、Linux 文件
+    lease 和同步信号消费保护工作流源码（Workflow Source）的比较并替换窗口。
+    任何平台或原语缺失都返回 ``False``，调用方必须选择其他 Adapter 或失败关闭，
+    不能仅凭 ``fcntl`` 模块或目录 FD 存在就进入 Linux 实现。
+    """
+
+    if not sys.platform.startswith("linux"):
+        return False
+    if not _supports_directory_fd_paths() or fcntl is None:
+        return False
+    return all(
+        hasattr(owner, name)
+        for owner, name in (
+            (fcntl, "F_SETSIG"),
+            (fcntl, "F_SETLEASE"),
+            (fcntl, "F_WRLCK"),
+            (fcntl, "F_UNLCK"),
+            (signal, "SIGIO"),
+            (signal, "SIG_BLOCK"),
+            (signal, "SIG_SETMASK"),
+            (signal, "pthread_sigmask"),
+            (signal, "sigtimedwait"),
+        )
+    )
 
 
 _NODE_TEMPLATE_READ_FIELDS = {
@@ -1209,6 +1239,17 @@ class WorkflowService:
         expected_draft_hash: Optional[str],
         expected_workflow_revision: int,
     ) -> Dict[str, Any]:
+        """以双 CAS 保存并编译一个工作流创作草稿（Authoring Draft）。
+
+        ``workflow_uuid`` 标识现有工作流（Workflow），``python_source`` 是完整待保存
+        源码，``expected_draft_hash`` 是调用方开始编辑时观察到的工作流源码
+        （Workflow Source）字节 hash，``expected_workflow_revision`` 是同时观察到的
+        工作流修订（Workflow Revision）。成功返回自洽的工作流创作聚合；相同字节
+        不替换权威文件，但仍重新编译并刷新派生候选状态。hash 或修订冲突抛出
+        ``WorkflowConflict``，非法输入或基础设施故障抛出 ``WorkflowError``；失败不得
+        改写可编辑包（Editable Package）中的权威源码。
+        """
+
         self._validate_hash(expected_draft_hash, nullable=True)
         workflow_uuid = self._get_authoring_workflow(workflow_uuid)["uuid"]
         with self._authoring_lock(workflow_uuid):
@@ -1227,17 +1268,19 @@ class WorkflowService:
                 raise WorkflowError("invalid_input") from None
             if len(encoded) > AUTHORING_SOURCE_BYTE_LIMIT:
                 raise WorkflowError("invalid_input")
-            try:
-                self._atomic_write(
-                    registration,
-                    encoded,
-                    expected_hash=current_hash,
-                )
-            except OSError:
-                raise WorkflowError("internal_error") from None
+            encoded_hash = _sha256(encoded)
+            if encoded_hash != current_hash:
+                try:
+                    self._atomic_write(
+                        registration,
+                        encoded,
+                        expected_hash=current_hash,
+                    )
+                except OSError:
+                    raise WorkflowError("internal_error") from None
             source = self._read_source(registration)
             assert source is not None
-            if source["draft_hash"] != _sha256(encoded):
+            if source["draft_hash"] != encoded_hash:
                 raise WorkflowConflict("draft_hash_conflict")
             applied_graph = self.get_graph(workflow_uuid)
             compilation = self._compile(
@@ -1814,37 +1857,46 @@ class WorkflowService:
         *,
         expected_hash: Any = _NO_EXPECTED_HASH,
     ) -> None:
-        """按平台把 `content` 以 Draft hash CAS 写入 registered source。
+        """按平台把 ``content`` 以 Draft hash CAS 写入已注册工作流源码。
 
         `registration` 固定 editable package 根和相对路径，`content` 是有界源码，
         `expected_hash` 是调用方观察到的旧 Draft hash。成功没有返回值；函数保证
-        Windows 与 POSIX 都只在目录链、文件身份及旧 hash 可证明稳定时发布，路径
-        变化映射为输入错误或冲突，基础设施故障映射为内部错误。
+        Linux 与 Windows 只在目录链、文件身份及旧 hash 可证明稳定时发布；其他
+        平台的受保护写入在选择 Adapter 前失败关闭。路径变化映射为输入错误或冲突，
+        基础设施故障映射为内部错误。
         """
 
         if len(content) > AUTHORING_SOURCE_BYTE_LIMIT:
             raise WorkflowError("invalid_input")
-        if not _supports_directory_fd_paths() or fcntl is None:
-            if msvcrt is None or expected_hash is _NO_EXPECTED_HASH:
+        if (
+            expected_hash is not _NO_EXPECTED_HASH
+            and not _supports_linux_file_lease_cas()
+        ):
+            if msvcrt is not None:
+                root, target = self._source_path(registration)
+                self._assert_contained_regular_target(root, target, allow_missing=True)
+                try:
+                    write_windows_draft_cas(
+                        root=root,
+                        target=target,
+                        content=content,
+                        expected_hash=expected_hash,
+                        byte_limit=AUTHORING_SOURCE_BYTE_LIMIT,
+                        locking=msvcrt,
+                    )
+                except WindowsDraftCasConflict:
+                    raise WorkflowConflict("draft_hash_conflict") from None
+                except WindowsDraftCasInvalidTarget:
+                    raise WorkflowError("invalid_input") from None
+                except WindowsDraftCasInternalError:
+                    raise WorkflowError("internal_error") from None
+                return
+            if expected_hash is not None:
                 raise WorkflowConflict("draft_hash_conflict")
-            root, target = self._source_path(registration)
-            self._assert_contained_regular_target(root, target, allow_missing=True)
-            try:
-                write_windows_draft_cas(
-                    root=root,
-                    target=target,
-                    content=content,
-                    expected_hash=expected_hash,
-                    byte_limit=AUTHORING_SOURCE_BYTE_LIMIT,
-                    locking=msvcrt,
-                )
-            except WindowsDraftCasConflict:
-                raise WorkflowConflict("draft_hash_conflict") from None
-            except WindowsDraftCasInvalidTarget:
-                raise WorkflowError("invalid_input") from None
-            except WindowsDraftCasInternalError:
-                raise WorkflowError("internal_error") from None
-            return
+            # POSIX 目录 FD 可以用 exclusive link 原子证明 Draft 不存在；这条
+            # missing-target CAS 不依赖 Linux file lease，并在 Darwin 保持可用。
+        if not _supports_directory_fd_paths() or fcntl is None:
+            raise WorkflowConflict("draft_hash_conflict")
         root, target = self._source_path(registration)
         self._assert_contained_regular_target(root, target, allow_missing=True)
         # 先以目录 FD 安全地创建（如有需要）固定的 workflows 目录。
@@ -1912,12 +1964,13 @@ class WorkflowService:
         temporary_name: str,
         expected_hash: Optional[str],
     ) -> None:
-        """在可安全中断的 lease 下执行 fsync 后的原子 CAS replace。"""
+        """在 Linux 可安全中断 lease 下执行 fsync 后的原子 CAS replace。
 
-        if fcntl is None or _LEASE_BREAK_SIGNAL is None:
-            # Windows 没有 Linux file lease / lease break signal；导入和只读
-            # Registry 检查必须可用，但无法证明 CAS 安全时继续失败关闭。
-            raise WorkflowConflict("draft_hash_conflict")
+        ``parent_fd`` 固定已验证源码父目录，``target_name`` 是权威工作流源码文件名，
+        ``temporary_name`` 是同目录且已 fsync 的候选文件，``expected_hash`` 是调用方
+        观察到的旧源码 hash。成功没有返回值；目标身份、内容或 lease 证明变化时抛出
+        ``WorkflowConflict``，并保留任何无法安全回滚的恢复 artifact。
+        """
 
         target_descriptor = -1
         temporary_descriptor = -1
@@ -1950,6 +2003,10 @@ class WorkflowService:
                 return
 
             if expected_hash is None:
+                raise WorkflowConflict("draft_hash_conflict")
+            if not _supports_linux_file_lease_cas():
+                # 非 Linux 或缺少完整 lease/signal 原语时，不能进入部分初始化后再
+                # 清理；否则 Darwin 会用第二个 AttributeError 覆盖受控冲突。
                 raise WorkflowConflict("draft_hash_conflict")
             try:
                 previous_signal_mask = signal.pthread_sigmask(
