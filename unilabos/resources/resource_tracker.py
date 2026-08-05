@@ -697,6 +697,9 @@ class ResourceTreeSet(object):
             # （PLR Barcode dict {data, symbology, position_on_resource}），与
             # get_resource_instance_from_dict 从 config 读取的逻辑对称；position 未保留，默认兜底。
             config = dict(res.config)
+            # 部署包的库位（Site）声明已经展开为资源树 children，并由公共物料图
+            # 保留完整元数据；PLR 构造器只接收展开后的资源层级。
+            config.pop("sites", None)
             if res.type == "deck":
                 # setup 只控制部署包工作台类的首次构造；恢复通用 PLR Deck 时
                 # 子资源已由 children 提供，不能再次执行初始化或传入未知参数。
