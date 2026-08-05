@@ -19,6 +19,7 @@ from unilabos.workflow.composite_compatibility import (
 
 from .test_c1_r2_static_expansion_contract import (
     APPLIED_SOURCE_HASH,
+    ACTION_VALUE_TARGET_UUID,
     CHILD_READY_SOURCE_UUID,
     CHILD_READY_TARGET_UUID,
     CHILD_TEMPLATE_UUID,
@@ -37,6 +38,7 @@ from .test_c1_r3_authoring_fixed_point import (
 )
 
 NEW_INPUT_HANDLE_UUID = "a5000000-0000-4000-8000-000000000009"
+ADDITIVE_CHILD_NODE_UUID = "22222222-2222-4222-8222-222222222223"
 EVOLVED_SOURCE_HASH = "sha256:" + "9" * 64
 
 
@@ -134,6 +136,13 @@ def _evolved_engine(kind: str) -> WorkflowAuthoringEngine:
                 "default": 2.5,
             }
         )
+        added_node = deepcopy(snapshot["nodes"][0])
+        added_node["uuid"] = ADDITIVE_CHILD_NODE_UUID
+        added_node["name"] = "measure_threshold"
+        added_node["meta_data"]["unilab"]["input_bindings"] = {
+            ACTION_VALUE_TARGET_UUID: {"parameter": "threshold"}
+        }
+        snapshot["nodes"].append(added_node)
     elif kind == "mode":
         snapshot["workflow"]["meta_data"]["unilab"][
             "composition_allow_transparent"

@@ -18,6 +18,9 @@ from unilabos.workflow.authoring_ast import (
     WorkflowProgram,
 )
 from unilabos.workflow.composite import CompositeAuthoring, CompositeExpansion
+from unilabos.workflow.composite_compatibility import (
+    classify_pinned_published_workflow_invocation,
+)
 from unilabos.workflow.authoring_graph_semantics import (
     AuthoringGraphError,
     candidate_changeset,
@@ -92,6 +95,7 @@ def build_candidate_graph(
         node_uuid: index for index, node_uuid in enumerate(program.source_order)
     }
     effective_input_contract = deepcopy(program.input_contract)
+    compatible_catalog_replacements: set[str] = set()
     for declaration in program.groups:
         try:
             group_catalog = catalog.require_action(
@@ -132,11 +136,13 @@ def build_candidate_graph(
             )
             _require_composite_expansion(expansion)
             assert expansion.invocation_node is not None
-            _assert_composite_pin_compatible(
+            compatible_template_uuid = _assert_composite_pin_compatible(
                 applied,
                 declaration.node_uuid,
-                expansion.contract_pin,
+                expansion,
             )
+            if compatible_template_uuid is not None:
+                compatible_catalog_replacements.add(compatible_template_uuid)
             invocation = _composite_invocation_node(
                 declaration,
                 expansion=expansion,
@@ -351,6 +357,7 @@ def build_candidate_graph(
             ),
             generated_edges=sorted(edges, key=generated_edge_uuid_sort_key),
             action_catalog=action_catalog,
+            compatible_catalog_replacements=compatible_catalog_replacements,
         )
     except AppliedAuthoringProjectionError as error:
         raise AuthoringGraphError(error.code, error.message) from error
@@ -443,12 +450,13 @@ def _require_composite_expansion(expansion: CompositeExpansion) -> None:
 def _assert_composite_pin_compatible(
     applied_graph: Mapping[str, Any],
     invocation_uuid: str,
-    current_pin: Mapping[str, Any],
-) -> None:
+    expansion: CompositeExpansion,
+) -> str | None:
     """拒绝已应用调用节点的发布合同发生破坏性漂移。
 
-    参数：已应用图、调用 UUID 和当前发布 pin。返回：兼容或首次调用时无。
-    异常：身份、合同摘要或组合模式变化时抛出 ``AuthoringGraphError``。
+    参数：已应用图、调用 UUID 和当前展开。返回：首次调用时为 ``None``；旧
+    调用精确或可加兼容时返回允许整代替换的模板 UUID。异常：旧投影未经认证、
+    身份混代或合同破坏时抛出 ``AuthoringGraphError``。
     """
 
     applied_node = next(
@@ -460,25 +468,31 @@ def _assert_composite_pin_compatible(
         None,
     )
     if applied_node is None:
-        return
-    meta_data = applied_node.get("meta_data")
-    unilab = meta_data.get("unilab") if isinstance(meta_data, Mapping) else None
-    stored = unilab.get("composite") if isinstance(unilab, Mapping) else None
-    if not isinstance(stored, Mapping):
+        return None
+    current_node = expansion.invocation_node
+    if not isinstance(current_node, Mapping):
         raise AuthoringGraphError(
             "composite_contract_stale",
-            "已应用工作流调用缺少冻结合同 pin",
+            "当前已发布工作流调用缺少冻结合同投影",
         )
-    compatibility_fields = (
-        "child_workflow_uuid",
-        "contract_digest",
-        "composition_allow_transparent",
+    compatibility = classify_pinned_published_workflow_invocation(
+        previous_node=applied_node,
+        current_node=current_node,
+        previous_templates=applied_graph["node_templates"],
+        previous_handles=applied_graph["handle_templates"],
     )
-    if any(stored.get(key) != current_pin.get(key) for key in compatibility_fields):
+    if compatibility == "breaking":
         raise AuthoringGraphError(
             "composite_contract_stale",
             "已发布工作流合同发生破坏性变化",
         )
+    template_uuid = current_node.get("workflow_node_template_uuid")
+    if not isinstance(template_uuid, str):
+        raise AuthoringGraphError(
+            "composite_contract_stale",
+            "当前已发布工作流模板身份无效",
+        )
+    return template_uuid
 
 
 def _composite_invocation_node(

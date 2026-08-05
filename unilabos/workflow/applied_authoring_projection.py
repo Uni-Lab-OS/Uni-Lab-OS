@@ -78,12 +78,15 @@ def reconcile_applied_authoring_projection(
     generated_nodes: Sequence[Mapping[str, Any]],
     generated_edges: Sequence[Mapping[str, Any]],
     action_catalog: Mapping[str, AuthoringCatalogAction],
+    compatible_catalog_replacements: set[str] | None = None,
 ) -> AppliedAuthoringProjection:
     """把新生成语义与已应用数据库读投影合并为可信固定点。
 
     参数说明：``workflow_uuid`` 是当前工作流（Workflow）权威身份；
     ``applied_graph`` 是已应用五集合；``generated_nodes``/``generated_edges`` 是
-    本轮从源码生成的写形状；``action_catalog`` 按节点 UUID 提供当前不可变目录。
+    本轮从源码生成的写形状；``action_catalog`` 按节点 UUID 提供当前不可变目录；
+    ``compatible_catalog_replacements`` 是已由组合调用 pin 认证、可整代升级的
+    已发布工作流模板 UUID 集合。
     返回四类已排序投影：保留实体沿用数据库时间和空值形状，新实体沿用当前生成
     形状；重复身份、外部工作流、非法时间或目录语义漂移抛出稳定错误且不返回
     部分结果。
@@ -147,6 +150,7 @@ def reconcile_applied_authoring_projection(
         action_catalog=action_catalog,
         applied_templates=applied_templates,
         applied_handles=applied_handles,
+        compatible_replacements=(compatible_catalog_replacements or set()),
     )
     return AppliedAuthoringProjection(
         nodes=nodes,
@@ -311,13 +315,14 @@ def _catalog_projection(
     action_catalog: Mapping[str, AuthoringCatalogAction],
     applied_templates: Mapping[str, Mapping[str, Any]],
     applied_handles: Mapping[str, Mapping[str, Any]],
+    compatible_replacements: set[str],
 ) -> tuple[list[dict[str, Any]], list[dict[str, Any]]]:
     """生成最小且不可混代的模板与连接点（Handle）目录投影。
 
     参数说明：``action_catalog`` 是当前节点到目录聚合的索引；两个已应用索引是
-    可复用读投影。返回按 UUID 排序的模板和连接点：保留代际必须与当前目录严格
-    等价后整体复用，新代际整体使用当前目录；任一成员漂移或混用即
-    ``template_catalog_mismatch``。
+    可复用读投影；``compatible_replacements`` 已在调用 pin 边界认证旧聚合。
+    返回按 UUID 排序的模板和连接点：严格等价时整体复用旧读形状，经认证的合同
+    演进整体换为当前代际；其他漂移或混用即 ``template_catalog_mismatch``。
     """
 
     # ``current_actions`` 按模板身份去重，确保同一模板只能投影一个当前目录代际。
@@ -356,6 +361,10 @@ def _catalog_projection(
         if set(applied_generation_handles) != set(current_handles):
             template_difference_fields.append("handle_templates")
         if template_difference_fields:
+            if template_uuid in compatible_replacements:
+                projected_templates.append(current_template)
+                projected_handles.extend(current_handles.values())
+                continue
             _fail(
                 "template_catalog_mismatch",
                 "已应用节点模板目录语义已漂移: "
@@ -369,6 +378,10 @@ def _catalog_projection(
             )
             for handle_uuid in current_handles
         ):
+            if template_uuid in compatible_replacements:
+                projected_templates.append(current_template)
+                projected_handles.extend(current_handles.values())
+                continue
             _fail("template_catalog_mismatch", "已应用连接点模板目录语义已漂移")
         projected_templates.append(deepcopy(dict(applied_template)))
         projected_handles.extend(applied_generation_handles.values())

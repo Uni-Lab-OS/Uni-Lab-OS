@@ -12,6 +12,9 @@ from unilabos.workflow.authoring_graph import (
     candidate_changeset,
     semantic_graph_equal,
 )
+from unilabos.workflow.composite_compatibility import (
+    classify_pinned_published_workflow_invocation,
+)
 from unilabos.workflow.graph_validation import GraphValidationError, validate_graph
 from unilabos.workflow.json_codec import strict_json_equal
 from unilabos.workflow.models import (
@@ -69,7 +72,10 @@ def validate_candidate_bundle(
         edges = _edges(candidate["edges"])
         templates = _node_templates(candidate["node_templates"])
         handles = _handle_templates(candidate["handle_templates"])
-        _nodes(base["nodes"], workflow_uuid=identity)
+        _base_nodes, base_node_entities = _nodes(
+            base["nodes"],
+            workflow_uuid=identity,
+        )
         _edges(base["edges"])
         base_templates = _node_templates(base["node_templates"])
         base_handles = _handle_templates(base["handle_templates"])
@@ -79,6 +85,8 @@ def validate_candidate_bundle(
             handles=handles,
             base_templates=base_templates,
             base_handles=base_handles,
+            node_entities=node_entities,
+            base_node_entities=base_node_entities,
         )
         validate_graph(
             nodes=nodes,
@@ -296,11 +304,14 @@ def _catalog_projection(
     handles: dict[str, dict[str, Any]],
     base_templates: dict[str, dict[str, Any]],
     base_handles: dict[str, dict[str, Any]],
+    node_entities: Mapping[str, Mapping[str, Any]],
+    base_node_entities: Mapping[str, Mapping[str, Any]],
 ) -> None:
     """验证最小目录投影并保护已保留目录事实。
 
-    参数说明：候选目录只能含被节点引用的模板；新模板可由当前目录加入，已在
-    基线中的模板及其全部连接点必须与权威投影严格相同。
+    参数说明：候选目录只能含被节点引用的模板；新模板可由当前目录加入；两个
+    节点索引用于认证已发布工作流调用 pin。基线模板及连接点通常必须严格相同，
+    只有所有保留调用都证明为精确或可加演进时才允许整代替换。
     """
 
     referenced = {
@@ -313,23 +324,88 @@ def _catalog_projection(
     if any(handle["workflow_node_template_uuid"] not in templates for handle in handles.values()):
         _fail("候选连接点的父模板不在最小目录投影中")
     retained = set(templates) & set(base_templates)
-    if any(
-        not strict_json_equal(templates[identity], base_templates[identity])
-        for identity in retained
-    ):
-        _fail("候选结果改变了已保留节点模板投影")
-    candidate_retained_handles = {
-        identity: value
-        for identity, value in handles.items()
-        if value["workflow_node_template_uuid"] in retained
-    }
-    base_retained_handles = {
-        identity: value
-        for identity, value in base_handles.items()
-        if value["workflow_node_template_uuid"] in retained
-    }
-    if not strict_json_equal(candidate_retained_handles, base_retained_handles):
-        _fail("候选结果改变了已保留连接点投影")
+    for template_uuid in retained:
+        candidate_generation_handles = {
+            identity: value
+            for identity, value in handles.items()
+            if value["workflow_node_template_uuid"] == template_uuid
+        }
+        base_generation_handles = {
+            identity: value
+            for identity, value in base_handles.items()
+            if value["workflow_node_template_uuid"] == template_uuid
+        }
+        if strict_json_equal(
+            templates[template_uuid],
+            base_templates[template_uuid],
+        ) and strict_json_equal(
+            candidate_generation_handles,
+            base_generation_handles,
+        ):
+            continue
+        if not _published_replacement_is_compatible(
+            template_uuid=template_uuid,
+            node_entities=node_entities,
+            base_node_entities=base_node_entities,
+            templates=templates,
+            handles=handles,
+            base_templates=base_templates,
+            base_handles=base_handles,
+        ):
+            _fail("候选结果改变了未经认证的已保留目录投影")
+
+
+def _published_replacement_is_compatible(
+    *,
+    template_uuid: str,
+    node_entities: Mapping[str, Mapping[str, Any]],
+    base_node_entities: Mapping[str, Mapping[str, Any]],
+    templates: Mapping[str, Mapping[str, Any]],
+    handles: Mapping[str, Mapping[str, Any]],
+    base_templates: Mapping[str, Mapping[str, Any]],
+    base_handles: Mapping[str, Mapping[str, Any]],
+) -> bool:
+    """复核一个目录整代替换由全部保留组合调用共同授权。
+
+    参数：模板 UUID、候选/基线节点和目录索引。返回：至少一个同 UUID 保留调用
+    存在，且每个保留调用的旧聚合都真实、当前演进均非破坏性时为 ``True``。
+    异常：无；任何结构问题由兼容性深模块收敛为 ``False``。
+    """
+
+    retained_nodes = [
+        (base_node, node_entities[node_uuid])
+        for node_uuid, base_node in base_node_entities.items()
+        if base_node.get("workflow_node_template_uuid") == template_uuid
+        and node_uuid in node_entities
+        and node_entities[node_uuid].get("workflow_node_template_uuid")
+        == template_uuid
+    ]
+    if not retained_nodes:
+        return False
+    previous_template = base_templates.get(template_uuid)
+    if not isinstance(previous_template, Mapping):
+        return False
+    previous_handles = [
+        value
+        for value in base_handles.values()
+        if value.get("workflow_node_template_uuid") == template_uuid
+    ]
+    return all(
+        classify_pinned_published_workflow_invocation(
+            previous_node=previous,
+            current_node=current,
+            previous_templates=[previous_template],
+            previous_handles=previous_handles,
+            current_templates=[templates[template_uuid]],
+            current_handles=[
+                value
+                for value in handles.values()
+                if value.get("workflow_node_template_uuid") == template_uuid
+            ],
+        )
+        != "breaking"
+        for previous, current in retained_nodes
+    )
 
 
 def _changeset_semantics(

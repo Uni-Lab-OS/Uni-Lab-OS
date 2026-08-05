@@ -17,6 +17,9 @@ from unilabos.workflow.composite import (
     CompositeAuthoring,
     project_published_workflow_contract,
 )
+from unilabos.workflow.composite_compatibility import (
+    published_workflow_compatibility_projection,
+)
 
 PARENT_WORKFLOW_UUID = "44444444-4444-4444-8444-444444444444"
 INVOCATION_UUID = "11111111-1111-4111-8111-111111111111"
@@ -386,6 +389,12 @@ def _nested_world() -> tuple[CompositeAuthoring, MemorySnapshotProvider]:
                 }
             },
         }
+    )
+    child_node["meta_data"]["unilab"]["composite"][
+        "contract_compatibility"
+    ] = published_workflow_compatibility_projection(
+        leaf_template,
+        leaf_handles,
     )
     child_snapshot["workflow"]["meta_data"]["unilab"]["output_bindings"][
         "result"

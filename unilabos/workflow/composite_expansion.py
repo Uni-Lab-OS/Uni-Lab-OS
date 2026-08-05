@@ -20,6 +20,10 @@ from unilabos.workflow.catalog import (
     PublishedSourceCatalogError,
     PublishedWorkflowSource,
 )
+from unilabos.workflow.composite_compatibility import (
+    classify_pinned_published_workflow_invocation,
+    published_workflow_compatibility_projection,
+)
 from unilabos.workflow.handle_projection import resource_slot_schema
 from unilabos.workflow.models import validate_uuid
 from unilabos.workflow.workflow_io import (
@@ -255,6 +259,13 @@ class CompositeAuthoring:
             boundary_handles,
             node_uuid_map,
         )
+        _materialize_boundary_arguments(
+            nodes,
+            target_mappings=target_mappings,
+            boundary_handles=boundary_handles,
+            keyword_arguments=normalized_arguments,
+            catalog=self._catalog,
+        )
         source_mappings = _source_mappings(
             output_contract,
             workflow_io.output_bindings,
@@ -275,6 +286,16 @@ class CompositeAuthoring:
                 extension["composition_allow_transparent"]
             ),
         }
+        try:
+            contract_compatibility = published_workflow_compatibility_projection(
+                template_action.template,
+                boundary_handles,
+            )
+        except (KeyError, TypeError, ValueError):
+            raise _CompositeFailure(
+                "composite_catalog_mismatch",
+                "/catalog/compatibility",
+            ) from None
         invocation_node = _invocation_node(
             parent_workflow_uuid=parent_workflow_uuid,
             invocation_uuid=invocation_uuid,
@@ -283,6 +304,7 @@ class CompositeAuthoring:
             symbol=source.symbol,
             keyword_arguments=normalized_arguments,
             contract_pin=contract_pin,
+            contract_compatibility=contract_compatibility,
             target_mappings=target_mappings,
             source_mappings=source_mappings,
             structural_mappings=structural,
@@ -422,12 +444,17 @@ class CompositeAuthoring:
                 base_node=node,
                 parent_input_contract=effective_input_contract,
             )
-            _assert_nested_pin(node, nested.contract_pin)
             if nested.invocation_node is None:
                 raise _CompositeFailure(
                     "composite_catalog_mismatch",
                     "/child/nodes/composite",
                 )
+            _assert_nested_pin(
+                node,
+                nested.invocation_node,
+                previous_templates=graph["node_templates"],
+                previous_handles=graph["handle_templates"],
+            )
             nodes.append(_plain(nested.invocation_node))
             nodes.extend(_plain(nested.nodes))
             nested_edges.extend(_plain(nested.edges))
@@ -558,25 +585,29 @@ def _node_keyword_arguments(node: Mapping[str, Any]) -> dict[str, object]:
 
 
 def _assert_nested_pin(
-    node: Mapping[str, Any],
-    contract_pin: Mapping[str, Any],
+    previous_node: Mapping[str, Any],
+    current_node: Mapping[str, Any],
+    *,
+    previous_templates: Sequence[Mapping[str, Any]],
+    previous_handles: Sequence[Mapping[str, Any]],
 ) -> None:
-    """证明已应用嵌套节点仍指向本次解析的发布合同。"""
+    """认证旧嵌套投影并拒绝破坏性发布合同演进。
 
-    meta_data = node.get("meta_data")
-    unilab = meta_data.get("unilab") if isinstance(meta_data, Mapping) else None
-    composite = unilab.get("composite") if isinstance(unilab, Mapping) else None
-    if not isinstance(composite, Mapping):
+    参数：新旧调用节点与旧子图的模板/连接点全集。返回：精确或可加演进时无。
+    异常：投影被篡改、混代或破坏性变化时抛出稳定目录不匹配。
+    """
+
+    compatibility = classify_pinned_published_workflow_invocation(
+        previous_node=previous_node,
+        current_node=current_node,
+        previous_templates=previous_templates,
+        previous_handles=previous_handles,
+    )
+    if compatibility == "breaking":
         raise _CompositeFailure(
             "composite_catalog_mismatch",
-            "/child/nodes/composite",
+            "/child/nodes/composite/contract_compatibility",
         )
-    for key, value in contract_pin.items():
-        if composite.get(key) != value:
-            raise _CompositeFailure(
-                "composite_catalog_mismatch",
-                f"/child/nodes/composite/{key}",
-            )
 
 
 def _validate_parent_tree(nodes: Mapping[str, Mapping[str, Any]]) -> None:
@@ -860,6 +891,7 @@ def _invocation_node(
     symbol: str,
     keyword_arguments: Mapping[str, object],
     contract_pin: Mapping[str, Any],
+    contract_compatibility: Mapping[str, Any],
     target_mappings: Mapping[str, Sequence[Mapping[str, str]]],
     source_mappings: Mapping[str, Mapping[str, str]],
     structural_mappings: Mapping[str, Sequence[Mapping[str, str]]],
@@ -870,6 +902,7 @@ def _invocation_node(
     composite = {
         "version": 1,
         **_plain(contract_pin),
+        "contract_compatibility": _plain(contract_compatibility),
         "target_mappings": _plain(target_mappings),
         "source_mappings": _plain(source_mappings),
         "structural_mappings": _plain(structural_mappings),
@@ -897,6 +930,92 @@ def _invocation_node(
         "meta_data": meta_data,
     })
     return result
+
+
+def _materialize_boundary_arguments(
+    nodes: Sequence[dict[str, Any]],
+    *,
+    target_mappings: Mapping[str, Sequence[Mapping[str, str]]],
+    boundary_handles: Sequence[Mapping[str, Any]],
+    keyword_arguments: Mapping[str, object],
+    catalog: AuthoringCatalogSnapshot,
+) -> None:
+    """把边界默认值和父输入引用下推到平面内部节点。
+
+    参数：展开节点、边界到内部目标映射、边界连接点、规范实参和当前目录。
+    返回：原地更新本次新建的分离节点；不写外部状态。异常：连接点身份或节点
+    模板不属于同一目录代际时抛出稳定组合失败。
+    """
+
+    node_by_uuid = {str(node["uuid"]): node for node in nodes}
+    boundary_by_name = {
+        str(handle["handle_key"]): str(handle["uuid"])
+        for handle in boundary_handles
+        if handle.get("io_type") == "target"
+        and handle.get("handle_key") != "ready"
+    }
+    for name, value in keyword_arguments.items():
+        boundary_uuid = boundary_by_name.get(name)
+        if boundary_uuid is None:
+            raise _CompositeFailure(
+                "composite_boundary_mapping_invalid",
+                f"/keyword_arguments/{name}",
+            )
+        for target in target_mappings.get(boundary_uuid, ()):
+            node = node_by_uuid.get(str(target.get("workflow_node_uuid")))
+            target_uuid = str(target.get("target_handle_uuid") or "")
+            if node is None:
+                raise _CompositeFailure(
+                    "composite_boundary_mapping_invalid",
+                    f"/target_mappings/{name}",
+                )
+            try:
+                action = catalog.require_template(
+                    str(node["workflow_node_template_uuid"])
+                )
+            except (AuthoringCatalogError, KeyError):
+                raise _CompositeFailure(
+                    "composite_catalog_mismatch",
+                    f"/target_mappings/{name}",
+                ) from None
+            handles = [
+                handle
+                for handle in action.handles
+                if str(handle.get("uuid")) == target_uuid
+                and handle.get("io_type") == "target"
+            ]
+            if len(handles) != 1 or not isinstance(handles[0].get("data_key"), str):
+                raise _CompositeFailure(
+                    "composite_boundary_mapping_invalid",
+                    f"/target_mappings/{name}",
+                )
+            meta_data = node.setdefault("meta_data", {})
+            unilab = meta_data.setdefault("unilab", {})
+            bindings = unilab.setdefault("input_bindings", {})
+            if not isinstance(bindings, dict):
+                raise _CompositeFailure(
+                    "composite_boundary_mapping_invalid",
+                    f"/target_mappings/{name}",
+                )
+            if (
+                isinstance(value, Mapping)
+                and value.get("kind") == "workflow_input"
+                and isinstance(value.get("parameter"), str)
+            ):
+                bindings[target_uuid] = {"parameter": str(value["parameter"])}
+                continue
+            if isinstance(value, Mapping) and value.get("kind") == "node_output":
+                # 节点输出仍由父调用边界和 ``target_mappings`` 表达；执行计划
+                # （ExecutionPlan）在 F07 冻结时完成平面来源替换。
+                continue
+            bindings.pop(target_uuid, None)
+            param = node.setdefault("param", {})
+            if not isinstance(param, dict):
+                raise _CompositeFailure(
+                    "composite_boundary_mapping_invalid",
+                    f"/target_mappings/{name}",
+                )
+            param[str(handles[0]["data_key"])] = _plain(value)
 
 
 def _referenced_templates(
