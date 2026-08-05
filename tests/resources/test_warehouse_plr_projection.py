@@ -43,6 +43,37 @@ def _warehouse_node(*, logical_mount: bool) -> ResourceDictInstance:
     )
 
 
+def _deployment_deck_node() -> ResourceDictInstance:
+    """构造带部署期初始化开关的最小工作台资源节点。"""
+    return ResourceDictInstance.get_resource_instance_from_dict(
+        {
+            "id": "deck-repro",
+            "uuid": "00000000-0000-4000-8000-000000000002",
+            "name": "deck-repro",
+            "type": "deck",
+            "class": "test.deck",
+            "position": {
+                "size": {"width": 100, "height": 100, "depth": 10},
+            },
+            # setup 只控制部署类构造，不属于 PLR Deck 的序列化合同。
+            "config": {"setup": False},
+            "data": {},
+        }
+    )
+
+
+def test_deployment_only_deck_setup_does_not_reach_plr_constructor() -> None:
+    """证明部署期工作台初始化开关不会泄漏给 PLR 构造器。"""
+    deck_node = _deployment_deck_node()
+
+    projected_resources = ResourceTreeSet(
+        [ResourceTreeInstance(deck_node)]
+    ).to_plr_resources()
+
+    assert len(projected_resources) == 1
+    assert projected_resources[0].name == "deck-repro"
+
+
 def test_plain_warehouse_projects_to_generic_plr_resource() -> None:
     """证明普通仓库能降级为通用 PLR 资源且保留稳定 UUID。"""
     # 普通仓库节点代表需要进入设备资源跟踪器的实际资源树根。
