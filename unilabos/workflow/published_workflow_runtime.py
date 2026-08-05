@@ -48,7 +48,6 @@ def build_published_workflow_generation(
         (str, bytes),
     ):
         raise PublishedWorkflowGenerationError("活动工作流来源必须是数组")
-    host_summary = _host_summary(base_node_templates)
     snapshots: dict[str, Mapping[str, Any]] = {}
     records: list[dict[str, str]] = []
     for index, registration in enumerate(registrations):
@@ -89,6 +88,13 @@ def build_published_workflow_generation(
         source_catalog = PublishedSourceCatalog.from_records(records)
     except (TypeError, ValueError) as error:
         raise PublishedWorkflowGenerationError(str(error)) from error
+    if not source_catalog.sources:
+        return PublishedWorkflowGeneration(
+            source_catalog=source_catalog,
+            node_templates=(),
+            handle_templates=(),
+        )
+    host_summary = _host_summary(base_node_templates)
     nodes: list[dict[str, Any]] = []
     handles: list[dict[str, Any]] = []
     for source in source_catalog.sources:
