@@ -677,6 +677,11 @@ def _projected_material_value_schema(
     ``None``。物料锁标记只决定执行占用，不进入工作流值类型。
     """
 
+    # 已规范化工作流连接点（Handle）会直接携带物料占位符
+    # （ResourceSlot）；不能把它降级为旧 ``type`` 推断，否则数组/可空包装会丢失。
+    if schema.get("$slot") == "ResourceSlot":
+        return _plain_mapping(schema)
+
     # ``members`` 接受动作合同的标准 ``anyOf`` 可空形态，并只保留一个非空成员。
     members = schema.get("anyOf")
     if isinstance(members, (list, tuple)):

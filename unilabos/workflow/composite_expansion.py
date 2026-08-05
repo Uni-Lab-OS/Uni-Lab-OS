@@ -20,9 +20,11 @@ from unilabos.workflow.catalog import (
     PublishedSourceCatalogError,
     PublishedWorkflowSource,
 )
+from unilabos.workflow.handle_projection import resource_slot_schema
 from unilabos.workflow.models import validate_uuid
 from unilabos.workflow.workflow_io import (
     WorkflowIOValidationError,
+    schema_is_assignable,
     validate_workflow_graph_io,
 )
 
@@ -118,7 +120,6 @@ class CompositeAuthoring:
         诊断。异常：非领域编程错误不吞并；该接口没有写端口。
         """
 
-        del parent_input_contract
         try:
             parent_uuid = _canonical_uuid(
                 parent_workflow_uuid,
@@ -166,6 +167,7 @@ class CompositeAuthoring:
                 snapshot=snapshot,
                 workflow_stack=(parent_uuid,),
                 base_node=None,
+                parent_input_contract=parent_input_contract,
             )
         except _CompositeFailure as error:
             return _failed_expansion(error.code, error.path)
@@ -181,6 +183,7 @@ class CompositeAuthoring:
         snapshot: Mapping[str, Any],
         workflow_stack: tuple[str, ...],
         base_node: Mapping[str, Any] | None,
+        parent_input_contract: Mapping[str, object] | None,
     ) -> CompositeExpansion:
         """验证一个快照并构造直接子工作流的平面展开结果。"""
 
@@ -235,12 +238,15 @@ class CompositeAuthoring:
             input_contract,
             keyword_arguments,
         )
-        nodes, edges, node_uuid_map = self._expand_graph(
+        nodes, edges, node_uuid_map, effective_child_input_contract = (
+            self._expand_graph(
             graph,
             source=source,
             invocation_uuid=invocation_uuid,
             parent_workflow_uuid=parent_workflow_uuid,
             workflow_stack=workflow_stack,
+            input_contract=input_contract,
+            )
         )
         boundary_handles = template_action.handles
         target_mappings = _target_mappings(
@@ -288,6 +294,15 @@ class CompositeAuthoring:
             nodes=nodes,
         )
         _reject_private_providers(normalized_arguments, nodes)
+        effective_parent_input_contract = (
+            effective_child_input_contract
+            if parent_input_contract is None
+            else _effective_parent_input_contract(
+                parent_input_contract,
+                effective_child_input_contract,
+                normalized_arguments,
+            )
+        )
         return CompositeExpansion(
             invocation_node=invocation_node,
             nodes=tuple(nodes),
@@ -298,7 +313,7 @@ class CompositeAuthoring:
             node_templates=tuple(referenced_nodes),
             handle_templates=tuple(referenced_handles),
             contract_pin=contract_pin,
-            effective_parent_input_contract={},
+            effective_parent_input_contract=effective_parent_input_contract,
             diagnostics=(),
         )
 
@@ -310,7 +325,13 @@ class CompositeAuthoring:
         invocation_uuid: str,
         parent_workflow_uuid: str,
         workflow_stack: tuple[str, ...],
-    ) -> tuple[list[dict[str, Any]], list[dict[str, Any]], dict[str, str]]:
+        input_contract: Mapping[str, Any],
+    ) -> tuple[
+        list[dict[str, Any]],
+        list[dict[str, Any]],
+        dict[str, str],
+        dict[str, Any],
+    ]:
         """递归复制直接节点，并把嵌套调用收敛到同一父候选图。
 
         参数：``graph`` 是已验证子快照，其他身份决定层级与环检测。返回：完整
@@ -350,6 +371,7 @@ class CompositeAuthoring:
         }
         nodes: list[dict[str, Any]] = []
         nested_edges: list[dict[str, Any]] = []
+        effective_input_contract = _plain(input_contract)
         next_stack = (*workflow_stack, source.workflow_uuid)
         for node_uuid in sorted(by_uuid):
             node = by_uuid[node_uuid]
@@ -398,6 +420,7 @@ class CompositeAuthoring:
                 snapshot=nested_snapshot,
                 workflow_stack=next_stack,
                 base_node=node,
+                parent_input_contract=effective_input_contract,
             )
             _assert_nested_pin(node, nested.contract_pin)
             if nested.invocation_node is None:
@@ -408,6 +431,9 @@ class CompositeAuthoring:
             nodes.append(_plain(nested.invocation_node))
             nodes.extend(_plain(nested.nodes))
             nested_edges.extend(_plain(nested.edges))
+            effective_input_contract = _plain(
+                nested.effective_parent_input_contract
+            )
         direct_edges = _expand_edges(
             graph["edges"],
             node_uuid_map=node_uuid_map,
@@ -415,7 +441,7 @@ class CompositeAuthoring:
         )
         edges = _unique_edges([*direct_edges, *nested_edges])
         _assert_acyclic(nodes, edges)
-        return nodes, edges, node_uuid_map
+        return nodes, edges, node_uuid_map, effective_input_contract
 
 
 def _published_template(
@@ -897,6 +923,145 @@ def _referenced_templates(
         for handle in actions[key].detached_handles()
     ]
     return node_templates, handles
+
+
+def _effective_parent_input_contract(
+    parent_input_contract: Mapping[str, object],
+    child_input_contract: Mapping[str, Any],
+    keyword_arguments: Mapping[str, object],
+) -> dict[str, Any]:
+    """沿工作流输入绑定传播物料占位符（ResourceSlot）允许集合交集。"""
+
+    effective = _plain(parent_input_contract)
+    parameters = effective.get("parameters")
+    child_parameters = child_input_contract.get("parameters")
+    if not isinstance(parameters, list) or not isinstance(child_parameters, list):
+        raise _CompositeFailure(
+            "composite_boundary_mapping_invalid",
+            "/parent/input_contract",
+        )
+    parent_by_name = {
+        item.get("name"): item
+        for item in parameters
+        if isinstance(item, dict) and isinstance(item.get("name"), str)
+    }
+    child_by_name = {
+        item.get("name"): item
+        for item in child_parameters
+        if isinstance(item, Mapping) and isinstance(item.get("name"), str)
+    }
+    for child_name, provider in keyword_arguments.items():
+        if (
+            not isinstance(provider, Mapping)
+            or provider.get("kind") != "workflow_input"
+        ):
+            continue
+        parent_name = provider.get("parameter")
+        parent_parameter = parent_by_name.get(parent_name)
+        child_parameter = child_by_name.get(child_name)
+        if parent_parameter is None or child_parameter is None:
+            raise _CompositeFailure(
+                "composite_boundary_mapping_invalid",
+                f"/keyword_arguments/{child_name}",
+            )
+        parent_schema = parent_parameter.get("schema")
+        child_schema = child_parameter.get("schema")
+        if not isinstance(parent_schema, Mapping) or not isinstance(
+            child_schema,
+            Mapping,
+        ):
+            raise _CompositeFailure(
+                "composite_boundary_mapping_invalid",
+                f"/keyword_arguments/{child_name}/schema",
+            )
+        parent_slot = resource_slot_schema(parent_schema)
+        child_slot = resource_slot_schema(child_schema)
+        if parent_slot is None and child_slot is None:
+            continue
+        if parent_slot is None or child_slot is None or not schema_is_assignable(
+            _replace_slot_allowlist(parent_schema, None),
+            _replace_slot_allowlist(child_schema, None),
+        ):
+            raise _CompositeFailure(
+                "composite_boundary_mapping_invalid",
+                f"/keyword_arguments/{child_name}/schema",
+            )
+        parent_allowed = _slot_allowlist(parent_slot)
+        child_allowed = _slot_allowlist(child_slot)
+        if parent_allowed is None:
+            intersection = child_allowed
+        elif child_allowed is None:
+            intersection = parent_allowed
+        else:
+            intersection = sorted(set(parent_allowed) & set(child_allowed))
+            if not intersection:
+                raise _CompositeFailure(
+                    "composite_resource_constraint_empty",
+                    f"/keyword_arguments/{child_name}/schema",
+                )
+        parent_parameter["schema"] = _replace_slot_allowlist(
+            parent_schema,
+            intersection,
+        )
+    return effective
+
+
+def _slot_allowlist(slot_schema: Mapping[str, Any]) -> list[str] | None:
+    """读取规范物料占位符（ResourceSlot）的可选非空 UUID 允许集合。"""
+
+    raw = slot_schema.get("allowed_resource_template_uuids")
+    if raw is None:
+        return None
+    if not isinstance(raw, list) or not raw or any(
+        not isinstance(item, str) for item in raw
+    ):
+        raise _CompositeFailure(
+            "composite_catalog_mismatch",
+            "/catalog/handle/allowed_resource_template_uuids",
+        )
+    values = [
+        _canonical_uuid(
+            item,
+            "composite_catalog_mismatch",
+            "/catalog/handle/allowed_resource_template_uuids",
+        )
+        for item in raw
+    ]
+    if len(set(values)) != len(values):
+        raise _CompositeFailure(
+            "composite_catalog_mismatch",
+            "/catalog/handle/allowed_resource_template_uuids",
+        )
+    return sorted(values)
+
+
+def _replace_slot_allowlist(
+    schema: Mapping[str, Any],
+    allowlist: list[str] | None,
+) -> dict[str, Any]:
+    """在保留数组/可空包装的同时替换唯一物料模板允许集合。"""
+
+    result = _plain(schema)
+    if result.get("$slot") == "ResourceSlot":
+        if allowlist is None:
+            result.pop("allowed_resource_template_uuids", None)
+        else:
+            result["allowed_resource_template_uuids"] = list(allowlist)
+        return result
+    items = result.get("items")
+    if isinstance(items, Mapping) and resource_slot_schema(items) is not None:
+        result["items"] = _replace_slot_allowlist(items, allowlist)
+        return result
+    members = result.get("anyOf")
+    if isinstance(members, list):
+        result["anyOf"] = [
+            _replace_slot_allowlist(member, allowlist)
+            if isinstance(member, Mapping)
+            and resource_slot_schema(member) is not None
+            else _plain(member)
+            for member in members
+        ]
+    return result
 
 
 def _reject_private_providers(
