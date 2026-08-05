@@ -1218,8 +1218,8 @@ class WorkflowStore:
         self,
         registrations: Iterable[Mapping[str, str]],
         *,
-        before_commit: Optional[Callable[[], None]] = None,
-    ) -> List[Dict[str, Any]]:
+        before_commit: Callable[[], None] | None = None,
+    ) -> list[dict[str, Any]]:
         """以单事务安装定义、来源和空工作流创作（Authoring）事实。
 
         参数：``registrations`` 是已完成文件系统校验的完整来源集合；
@@ -1239,8 +1239,8 @@ class WorkflowStore:
         self,
         registrations: Iterable[Mapping[str, str]],
         *,
-        before_commit: Optional[Callable[[], None]] = None,
-    ) -> List[Dict[str, Any]]:
+        before_commit: Callable[[], None] | None = None,
+    ) -> list[dict[str, Any]]:
         """兼容旧调用并委托工作流源码定义安装深模块（Deep Module）。
 
         参数：``registrations`` 与 ``before_commit`` 保持旧接口含义。返回：完整安装
@@ -1257,9 +1257,9 @@ class WorkflowStore:
         self,
         registrations: Iterable[Mapping[str, str]],
         *,
-        before_commit: Optional[Callable[[], None]],
+        before_commit: Callable[[], None] | None,
         allow_create_missing: bool,
-    ) -> List[Dict[str, Any]]:
+    ) -> list[dict[str, Any]]:
         """在唯一 ``BEGIN IMMEDIATE`` 接缝（Seam）调用源码启动深模块（Deep Module）。
 
         参数：``registrations`` 是完整来源批次；``before_commit`` 是固定包根复核；
