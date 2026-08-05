@@ -186,7 +186,7 @@ def windows_authoring(
 
     `tmp_path` 提供隔离持久化目录，`monkeypatch` 安装 Windows 能力边界。
     产出真实 `WorkflowService`、Draft 路径、锁模拟器、违规调用记录、打开
-    flags 记录及合成 `O_BINARY`；fixture 退出时关闭服务及其持久存储。
+    flags 记录及有效 `O_BINARY`；fixture 退出时关闭服务及其持久存储。
     """
 
     package_root = tmp_path / "package"
@@ -211,8 +211,11 @@ def windows_authoring(
 
     original_open = os.open
     dir_fd_attempts: list[str] = []
-    # 合成位只表达 Windows 二进制读取请求，传给 Linux 内核前必须剥离。
-    binary_flag = 1 << 29
+    # 原生 Windows 的真实 O_BINARY 是文件读取语义的一部分，必须原样下传。
+    native_binary_flag = getattr(os, "O_BINARY", 0)
+    uses_synthetic_binary_flag = native_binary_flag == 0
+    # 无原生能力的平台才借合成位观测调用合同，转交内核前会将其剥离。
+    binary_flag = 1 << 29 if uses_synthetic_binary_flag else native_binary_flag
     open_flags: list[int] = []
 
     def windows_open(
@@ -226,15 +229,17 @@ def windows_authoring(
 
         `path`、`flags`、`mode` 保持 `os.open` 含义，`dir_fd` 在 Windows
         必须为空。返回绝对路径打开的文件描述符；收到 `dir_fd` 时记录违规调用
-        并抛出 `NotImplementedError`。调用 flags 会被记录，合成 `O_BINARY`
-        在转交真实 Linux `os.open` 前剥离。
+        并抛出 `NotImplementedError`。调用 flags 会被记录；只有测试主机没有
+        原生 `O_BINARY` 时，合成位才会在转交真实 `os.open` 前剥离，原生
+        Windows 的真实 flag 始终原样下传。
         """
 
         if dir_fd is not None:
             dir_fd_attempts.append(os.fsdecode(path))
             raise NotImplementedError("dir_fd is unavailable on Windows")
         open_flags.append(flags)
-        return original_open(path, flags & ~binary_flag, mode)
+        forwarded_flags = flags & ~binary_flag if uses_synthetic_binary_flag else flags
+        return original_open(path, forwarded_flags, mode)
 
     windows_msvcrt = WindowsMsvcrt()
     monkeypatch.setattr(
@@ -250,7 +255,8 @@ def windows_authoring(
         windows_msvcrt,
         raising=False,
     )
-    monkeypatch.setattr(os, "O_BINARY", binary_flag, raising=False)
+    if uses_synthetic_binary_flag:
+        monkeypatch.setattr(os, "O_BINARY", binary_flag, raising=False)
     monkeypatch.setattr(os, "open", windows_open)
 
     try:
@@ -271,7 +277,7 @@ def test_windows_crlf_draft_read_uses_binary_mode_and_hash_saves(
 ) -> None:
     """Windows Draft GET 必须按原始 CRLF 字节取 hash，并允许后续 CAS 保存。
 
-    `windows_authoring` 提供无目录 FD 的 Windows 创作服务、合成
+    `windows_authoring` 提供无目录 FD 的 Windows 创作服务、有效
     `O_BINARY` 及打开 flags 观测；测试没有返回值，并验证工作流源码
     （Workflow Source）的 GET hash 可直接作为 `save_draft()` 的 CAS 令牌。
     """
