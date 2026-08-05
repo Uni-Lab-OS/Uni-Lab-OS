@@ -334,15 +334,26 @@ class DeviceActionRunService:
     ) -> tuple[dict[str, Any], dict[str, Any]]:
         """冻结一次直接设备动作的 Task、计划与唯一 Job。
 
-        参数均为已校验领域事实；``edge_local_id`` 是已解析的固定执行器；模板与
-        实际设备物料已经匹配。返回可在单事务中写入的工作流任务（WorkflowTask）
-        和工作流节点作业（WorkflowNodeJob）；随机 UUID 只用于新聚合，幂等复用
-        会由持久层返回既有聚合。异常：冻结动作合同缺失时关闭失败。
+        参数：``material_uuid`` 是实际设备物料（Material）的稳定身份；
+        ``edge_local_id`` 是已解析并冻结的具体执行器身份；``template`` 是与设备
+        物料匹配的已发布动作模板；``param`` 是已校验的最终动作参数；
+        ``execution_policy`` 是规范化执行期限策略；``idempotency_key`` 标识同一
+        逻辑创建命令；``request_fingerprint`` 固定该命令的执行与审计语义；
+        ``description`` 是可空展示说明；``meta_data`` 是规范化追踪元数据。
+        返回：可在单事务中写入的工作流任务（WorkflowTask）和工作流节点作业
+        （WorkflowNodeJob）；随机 UUID 只用于新聚合，幂等复用由持久层返回既有
+        聚合。异常：``template`` 缺少第 2 版冻结动作合同时抛出
+        ``DeviceActionRunUnavailable``，其他映射读取或复制错误原样传播。
         """
 
-        # ``node_uuid`` 是一次性冻结节点身份，不会创建可编辑工作流节点定义。
+        # ``node_uuid`` 是计划工作流节点（Planned Workflow Node）的稳定身份，
+        # 仅属于本次冻结执行，不会创建可编辑工作流节点定义。
         node_uuid = str(uuid4())
+        # ``task_uuid`` 是本次设备单动作调试（D1A）完整运行的稳定工作流任务
+        # （WorkflowTask）身份，持久重放不会另行授权新身份。
         task_uuid = str(uuid4())
+        # ``job_uuid`` 是该计划节点首次工作流节点作业尝试
+        # （WorkflowNodeJobAttempt）的稳定身份，不与任务或节点身份混用。
         job_uuid = str(uuid4())
         node_name = str(template.get("display_name") or template.get("name") or "")
         template_meta_data = template.get("meta_data")

@@ -189,7 +189,12 @@ def _request(template_uuid: str) -> dict[str, Any]:
 
 
 def test_device_action_run_creates_backend_shaped_task_and_job(tmp_path: Any) -> None:
-    """首次创建返回 201，并可经标准 Task/Job 接口恢复同一持久事实。"""
+    """首次创建返回 201，并可经标准任务/作业接口恢复同一持久事实。
+
+    参数：``tmp_path`` 是隔离工作流 SQLite 文件的 pytest 临时目录。返回：无；
+    断言响应、工作流任务（WorkflowTask）和工作流节点作业（WorkflowNodeJob）的
+    Backend 形状及持久恢复结果，HTTP 客户端或存储异常原样传播。
+    """
 
     client, store, template_uuid, _dispatcher, bridge = _client(tmp_path)
     try:

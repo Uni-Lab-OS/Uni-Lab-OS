@@ -7,6 +7,7 @@ import sqlite3
 from collections.abc import Iterator, Mapping
 from pathlib import Path
 from typing import Any
+from unittest.mock import patch
 
 import pytest
 
@@ -71,7 +72,11 @@ def test_composition_closes_store_when_shared_bridge_construction_fails(
     real_store_type = composition.WorkflowStore
 
     def open_store(database_path: Path) -> WorkflowStore:
-        """记录组合根创建的存储；参数是数据库路径，返回真实存储。"""
+        """记录组合根创建的工作流存储（WorkflowStore）。
+
+        参数：``database_path`` 是待打开的 SQLite 数据库路径。返回：真实存储并
+        保留其身份供关闭断言使用；异常：真实存储构造错误原样传播。
+        """
 
         opened_store = real_store_type(database_path)
         captured_stores.append(opened_store)
@@ -81,7 +86,12 @@ def test_composition_closes_store_when_shared_bridge_construction_fails(
         """模拟共享工作流任务调度桥在构造阶段失败。"""
 
         def __init__(self, *_args: Any, **_kwargs: Any) -> None:
-            """拒绝构造；参数仅匹配生产签名，异常用于验证反向清理。"""
+            """注入公共任务调度桥构造故障。
+
+            参数：``_args`` 接收位置构造参数，``_kwargs`` 接收关键字构造参数，
+            二者仅匹配生产签名。返回：无；异常：始终抛出 ``RuntimeError``，并由
+            组合根原样传播以验证反向清理。
+            """
 
             raise RuntimeError("公共任务调度桥构造失败")
 
@@ -91,15 +101,39 @@ def test_composition_closes_store_when_shared_bridge_construction_fails(
         "TaskSchedulerBridge",
         _FailingTaskBridge,
     )
-    with pytest.raises(RuntimeError, match="公共任务调度桥构造失败"):
+    with (
+        patch.object(
+            scheduler,
+            "add_job_pre_dispatch_listener",
+            wraps=scheduler.add_job_pre_dispatch_listener,
+        ) as add_pre_dispatch_listener,
+        patch.object(
+            scheduler,
+            "remove_job_pre_dispatch_listener",
+            wraps=scheduler.remove_job_pre_dispatch_listener,
+        ) as remove_pre_dispatch_listener,
+        patch.object(
+            scheduler,
+            "add_job_finished_listener",
+            wraps=scheduler.add_job_finished_listener,
+        ) as add_finished_listener,
+        patch.object(
+            scheduler,
+            "remove_job_finished_listener",
+            wraps=scheduler.remove_job_finished_listener,
+        ) as remove_finished_listener,
+        pytest.raises(RuntimeError, match="公共任务调度桥构造失败"),
+    ):
         composition.compose_workflow_runtime(
             tmp_path,
             scheduler=scheduler,
             material_resolver=lambda _uuid: None,
         )
 
-    assert scheduler._job_pre_dispatch_listeners == []
-    assert scheduler._job_finished_listeners == []
+    assert add_pre_dispatch_listener.call_count == 0
+    assert remove_pre_dispatch_listener.call_count == 0
+    assert add_finished_listener.call_count == 0
+    assert remove_finished_listener.call_count == 0
     _assert_store_closed(captured_stores[0])
 
 
@@ -118,7 +152,11 @@ def test_composition_closes_shared_bridge_when_service_construction_fails(
     real_store_type = composition.WorkflowStore
 
     def open_store(database_path: Path) -> WorkflowStore:
-        """记录组合根创建的存储；参数是数据库路径，返回真实存储。"""
+        """记录组合根创建的工作流存储（WorkflowStore）。
+
+        参数：``database_path`` 是待打开的 SQLite 数据库路径。返回：真实存储并
+        保留其身份供关闭断言使用；异常：真实存储构造错误原样传播。
+        """
 
         opened_store = real_store_type(database_path)
         captured_stores.append(opened_store)
@@ -128,21 +166,54 @@ def test_composition_closes_shared_bridge_when_service_construction_fails(
         """模拟唯一公共桥创建后工作流服务构造失败。"""
 
         def __init__(self, *_args: Any, **_kwargs: Any) -> None:
-            """拒绝构造；参数仅匹配生产签名，异常用于验证所有权回滚。"""
+            """注入工作流服务构造故障。
+
+            参数：``_args`` 接收位置构造参数，``_kwargs`` 接收关键字构造参数，
+            二者仅匹配生产签名。返回：无；异常：始终抛出 ``RuntimeError``，并由
+            组合根原样传播以验证所有权回滚。
+            """
 
             raise RuntimeError("工作流服务构造失败")
 
     monkeypatch.setattr(composition, "WorkflowStore", open_store)
     monkeypatch.setattr(composition, "WorkflowService", _FailingWorkflowService)
-    with pytest.raises(RuntimeError, match="工作流服务构造失败"):
+    with (
+        patch.object(
+            scheduler,
+            "add_job_pre_dispatch_listener",
+            wraps=scheduler.add_job_pre_dispatch_listener,
+        ) as add_pre_dispatch_listener,
+        patch.object(
+            scheduler,
+            "remove_job_pre_dispatch_listener",
+            wraps=scheduler.remove_job_pre_dispatch_listener,
+        ) as remove_pre_dispatch_listener,
+        patch.object(
+            scheduler,
+            "add_job_finished_listener",
+            wraps=scheduler.add_job_finished_listener,
+        ) as add_finished_listener,
+        patch.object(
+            scheduler,
+            "remove_job_finished_listener",
+            wraps=scheduler.remove_job_finished_listener,
+        ) as remove_finished_listener,
+        pytest.raises(RuntimeError, match="工作流服务构造失败"),
+    ):
         composition.compose_workflow_runtime(
             tmp_path,
             scheduler=scheduler,
             material_resolver=lambda _uuid: None,
         )
 
-    assert scheduler._job_pre_dispatch_listeners == []
-    assert scheduler._job_finished_listeners == []
+    add_pre_dispatch_listener.assert_called_once()
+    remove_pre_dispatch_listener.assert_called_once_with(
+        add_pre_dispatch_listener.call_args.args[0]
+    )
+    add_finished_listener.assert_called_once()
+    remove_finished_listener.assert_called_once_with(
+        add_finished_listener.call_args.args[0]
+    )
     _assert_store_closed(captured_stores[0])
 
 
