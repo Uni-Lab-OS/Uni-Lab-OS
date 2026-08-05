@@ -657,6 +657,23 @@ class ResourceTreeSet(object):
             # PLR 构造合同；需要进入驱动的普通仓库只降级为通用 Resource。
             "warehouse": "Resource",
         }
+        # 通用 PLR Resource 的完整入站合同；仓库自己的库存（Inventory）与
+        # 库位（Site）布局继续由公共物料图持有，不进入设备动作资源。
+        GENERIC_RESOURCE_KEYS = {
+            "name",
+            "type",
+            "size_x",
+            "size_y",
+            "size_z",
+            "location",
+            "rotation",
+            "category",
+            "model",
+            "barcode",
+            "preferred_pickup_location",
+            "children",
+            "parent_name",
+        }
 
         def collect_node_data(node: ResourceDictInstance, name_to_uuid: dict, all_states: dict, name_to_extra: dict):
             """一次遍历收集 name_to_uuid, all_states 和 name_to_extra"""
@@ -710,6 +727,14 @@ class ResourceTreeSet(object):
             }
             if has_model:
                 d["model"] = res.config.get("model", None)
+            if res.type == "warehouse":
+                # 每个仓库节点都降级为通用资源；在递归构造阶段过滤，才能同时
+                # 覆盖根仓库与工作台下的嵌套仓库。
+                d = {
+                    key: value
+                    for key, value in d.items()
+                    if key in GENERIC_RESOURCE_KEYS
+                }
             return d
 
         plr_resources = []
@@ -731,29 +756,6 @@ class ResourceTreeSet(object):
                     raise ValueError(
                         f"无法找到类型 {plr_dict['type']} 对应的 PLR 资源类。原始信息：{tree.root_node.res_content}"
                     )
-                if tree.root_node.res_content.type == "warehouse":
-                    # 这些键是通用 PLR Resource 的完整入站合同；仓库自己的
-                    # 库位（Site）声明继续由公共物料图和库存权威持有。
-                    generic_resource_keys = {
-                        "name",
-                        "type",
-                        "size_x",
-                        "size_y",
-                        "size_z",
-                        "location",
-                        "rotation",
-                        "category",
-                        "model",
-                        "barcode",
-                        "preferred_pickup_location",
-                        "children",
-                        "parent_name",
-                    }
-                    plr_dict = {
-                        key: value
-                        for key, value in plr_dict.items()
-                        if key in generic_resource_keys
-                    }
                 spec = inspect.signature(sub_cls)
                 if "category" not in spec.parameters:
                     plr_dict.pop("category", None)
