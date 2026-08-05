@@ -12,6 +12,9 @@ from unilabos.workflow.composite import CompositeAuthoring
 from .test_c1_r2_static_expansion_contract import (
     ACTION_VALUE_SOURCE_UUID,
     CHILD_NODE_UUID,
+    CHILD_TEMPLATE_UUID,
+    CHILD_VALUE_SOURCE_UUID,
+    CHILD_VALUE_TARGET_UUID,
     CHILD_WORKFLOW_UUID,
     EXPANDED_CHILD_NODE_UUID,
     INVOCATION_UUID,
@@ -146,3 +149,37 @@ def test_parent_argument_cannot_reference_expanded_private_handle() -> None:
     assert provider.snapshots[CHILD_WORKFLOW_UUID]["nodes"][0]["uuid"] == (
         CHILD_NODE_UUID
     )
+
+
+def test_self_nested_workflow_reference_uses_stable_cycle_diagnostic() -> None:
+    """已应用子图再次调用自身时，以统一递归诊断关闭失败。"""
+
+    authoring, provider, catalog, _source_catalog = _world_components()
+    snapshot = provider.snapshots[CHILD_WORKFLOW_UUID]
+    workflow_action = next(
+        action for action in catalog.actions if action.template["type"] == "workflow"
+    )
+    node = snapshot["nodes"][0]
+    node.update(
+        {
+            "workflow_node_template_uuid": CHILD_TEMPLATE_UUID,
+            "type": "workflow",
+            "param": {"value": 1},
+            "meta_data": {
+                "unilab": {
+                    "input_bindings": {
+                        CHILD_VALUE_TARGET_UUID: {"parameter": "value"}
+                    }
+                }
+            },
+        }
+    )
+    snapshot["workflow"]["meta_data"]["unilab"]["output_bindings"]["result"] = {
+        "kind": "node_output",
+        "workflow_node_uuid": CHILD_NODE_UUID,
+        "source_handle_uuid": CHILD_VALUE_SOURCE_UUID,
+    }
+    snapshot["node_templates"] = [workflow_action.detached_template()]
+    snapshot["handle_templates"] = workflow_action.detached_handles()
+
+    _assert_closed(_compile(authoring), "composite_recursive_reference")

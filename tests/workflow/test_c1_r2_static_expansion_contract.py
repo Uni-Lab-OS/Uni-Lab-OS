@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from copy import deepcopy
 from dataclasses import dataclass
 from typing import Any
 
@@ -11,6 +12,7 @@ from unilabos.workflow.authoring_identity import (
 )
 from unilabos.workflow.authoring_kernel import AuthoringCatalogSnapshot
 from unilabos.workflow.catalog import PublishedSourceCatalog
+from unilabos.workflow.catalog import PublishedWorkflowSource
 from unilabos.workflow.composite import (
     CompositeAuthoring,
     project_published_workflow_contract,
@@ -20,7 +22,9 @@ PARENT_WORKFLOW_UUID = "44444444-4444-4444-8444-444444444444"
 INVOCATION_UUID = "11111111-1111-4111-8111-111111111111"
 OTHER_INVOCATION_UUID = "11111111-1111-4111-8111-111111111112"
 CHILD_WORKFLOW_UUID = "a1000000-0000-4000-8000-000000000001"
+LEAF_WORKFLOW_UUID = "a1000000-0000-4000-8000-000000000002"
 CHILD_NODE_UUID = "22222222-2222-4222-8222-222222222222"
+LEAF_NODE_UUID = "33333333-3333-4333-8333-333333333333"
 EXPANDED_CHILD_NODE_UUID = "b6b35f79-80d0-5b77-a0eb-9646bcb36808"
 EXPANDED_GRANDCHILD_NODE_UUID = "7b221513-105e-5c92-9859-1a3c2015fafb"
 EXPANDED_EDGE_UUID = "b3e67370-ee6e-54b5-9dd1-6d44c5a5854f"
@@ -28,6 +32,7 @@ HOST_RESOURCE_TEMPLATE_UUID = "a2000000-0000-4000-8000-000000000001"
 ACTION_RESOURCE_TEMPLATE_UUID = "a2000000-0000-4000-8000-000000000002"
 ACTION_TEMPLATE_UUID = "a3000000-0000-4000-8000-000000000001"
 CHILD_TEMPLATE_UUID = "a3000000-0000-4000-8000-000000000011"
+LEAF_TEMPLATE_UUID = "a3000000-0000-4000-8000-000000000012"
 ACTION_VALUE_TARGET_UUID = "a4000000-0000-4000-8000-000000000001"
 ACTION_VALUE_SOURCE_UUID = "55555555-5555-4555-8555-555555555555"
 ACTION_READY_TARGET_UUID = "a4000000-0000-4000-8000-000000000003"
@@ -37,6 +42,10 @@ CHILD_VALUE_TARGET_UUID = "a5000000-0000-4000-8000-000000000001"
 CHILD_VALUE_SOURCE_UUID = "a5000000-0000-4000-8000-000000000002"
 CHILD_READY_TARGET_UUID = "a5000000-0000-4000-8000-000000000003"
 CHILD_READY_SOURCE_UUID = "a5000000-0000-4000-8000-000000000004"
+LEAF_VALUE_TARGET_UUID = "a5000000-0000-4000-8000-000000000005"
+LEAF_VALUE_SOURCE_UUID = "a5000000-0000-4000-8000-000000000006"
+LEAF_READY_TARGET_UUID = "a5000000-0000-4000-8000-000000000007"
+LEAF_READY_SOURCE_UUID = "a5000000-0000-4000-8000-000000000008"
 APPLIED_SOURCE_HASH = "sha256:" + "3" * 64
 CONTRACT_DIGEST = (
     "sha256:689aaac733eba27d13279d242a71fc3c8bc41f0c144d41261dc160a52b46a1cf"
@@ -58,6 +67,21 @@ class MemorySnapshotProvider:
             return self.snapshots[workflow_uuid]
         except KeyError:
             raise LookupError(workflow_uuid) from None
+
+
+@dataclass
+class MemorySourceResolver:
+    """为嵌套组合测试按绝对导入身份返回冻结来源。"""
+
+    sources: dict[tuple[str, str], PublishedWorkflowSource]
+
+    def resolve(self, module: str, symbol: str) -> PublishedWorkflowSource:
+        """返回唯一来源；不存在时抛出 ``LookupError``。"""
+
+        try:
+            return self.sources[(module, symbol)]
+        except KeyError:
+            raise LookupError((module, symbol)) from None
 
 
 def _source_catalog() -> PublishedSourceCatalog:
@@ -282,6 +306,122 @@ def _world() -> tuple[CompositeAuthoring, MemorySnapshotProvider]:
     return authoring, provider
 
 
+def _nested_world() -> tuple[CompositeAuthoring, MemorySnapshotProvider]:
+    """装配父工作流调用已发布叶工作流的两层只读世界。"""
+
+    _authoring, provider, catalog, source_catalog = _world_components()
+    child_source = source_catalog.resolve(
+        "c1_published_lab.workflows.child",
+        "prepare_sample",
+    )
+    leaf_source = PublishedWorkflowSource(
+        workflow_uuid=LEAF_WORKFLOW_UUID,
+        definition_fqid="c1_published_lab.workflows.measure_leaf",
+        module="c1_published_lab.workflows.leaf",
+        symbol="measure_leaf",
+        source_uri="package://c1_published_lab/workflows/leaf.py",
+        package_catalog_digest="sha256:" + "8" * 64,
+        definition_content_hash="sha256:" + "7" * 64,
+    )
+    leaf_snapshot = deepcopy(provider.snapshots[CHILD_WORKFLOW_UUID])
+    leaf_snapshot["workflow"]["uuid"] = LEAF_WORKFLOW_UUID
+    leaf_snapshot["nodes"][0]["uuid"] = LEAF_NODE_UUID
+    leaf_snapshot["nodes"][0]["workflow_uuid"] = LEAF_WORKFLOW_UUID
+    leaf_snapshot["workflow"]["meta_data"]["unilab"]["output_bindings"][
+        "result"
+    ]["workflow_node_uuid"] = LEAF_NODE_UUID
+    projected_leaf = project_published_workflow_contract(
+        source=leaf_source,
+        applied_snapshot=leaf_snapshot,
+        host_node_resource_template={
+            "uuid": HOST_RESOURCE_TEMPLATE_UUID,
+            "name": "host_node",
+            "display_name": "Host Node",
+        },
+    )
+    assert projected_leaf is not None
+    leaf_template = {**projected_leaf.template, "uuid": LEAF_TEMPLATE_UUID}
+    leaf_handle_ids = (
+        LEAF_VALUE_TARGET_UUID,
+        LEAF_VALUE_SOURCE_UUID,
+        LEAF_READY_TARGET_UUID,
+        LEAF_READY_SOURCE_UUID,
+    )
+    leaf_handles = [
+        {
+            **handle,
+            "uuid": handle_uuid,
+            "workflow_node_template_uuid": LEAF_TEMPLATE_UUID,
+        }
+        for handle, handle_uuid in zip(
+            projected_leaf.handles,
+            leaf_handle_ids,
+            strict=True,
+        )
+    ]
+    child_snapshot = provider.snapshots[CHILD_WORKFLOW_UUID]
+    child_node = child_snapshot["nodes"][0]
+    child_node.update(
+        {
+            "workflow_node_template_uuid": LEAF_TEMPLATE_UUID,
+            "name": "measure_leaf",
+            "type": "workflow",
+            "param": {
+                "value": {"kind": "workflow_input", "parameter": "value"}
+            },
+            "meta_data": {
+                "unilab": {
+                    "input_bindings": {
+                        LEAF_VALUE_TARGET_UUID: {"parameter": "value"}
+                    },
+                    "composite": {
+                        "version": 1,
+                        "child_workflow_uuid": LEAF_WORKFLOW_UUID,
+                        "child_workflow_revision": 7,
+                        "child_applied_source_hash": APPLIED_SOURCE_HASH,
+                        "contract_digest": CONTRACT_DIGEST,
+                        "composition_allow_transparent": False,
+                    },
+                }
+            },
+        }
+    )
+    child_snapshot["workflow"]["meta_data"]["unilab"]["output_bindings"][
+        "result"
+    ] = {
+        "kind": "node_output",
+        "workflow_node_uuid": CHILD_NODE_UUID,
+        "source_handle_uuid": LEAF_VALUE_SOURCE_UUID,
+    }
+    child_snapshot["node_templates"] = [leaf_template]
+    child_snapshot["handle_templates"] = leaf_handles
+    templates = [action.detached_template() for action in catalog.actions]
+    handles = [
+        handle
+        for action in catalog.actions
+        for handle in action.detached_handles()
+    ]
+    nested_catalog = AuthoringCatalogSnapshot.from_entities(
+        [*templates, leaf_template],
+        [*handles, *leaf_handles],
+    )
+    provider.snapshots[LEAF_WORKFLOW_UUID] = leaf_snapshot
+    resolver = MemorySourceResolver(
+        {
+            (child_source.module, child_source.symbol): child_source,
+            (leaf_source.module, leaf_source.symbol): leaf_source,
+        }
+    )
+    return (
+        CompositeAuthoring(
+            snapshot_provider=provider,
+            catalog=nested_catalog,
+            resolver=resolver,
+        ),
+        provider,
+    )
+
+
 def test_direct_invocation_returns_hierarchical_expansion_mappings_and_pin() -> None:
     """直接调用生成真实调用节点、确定性内部节点、边界映射和冻结 pin。"""
 
@@ -370,6 +510,33 @@ def test_two_invocations_share_templates_but_not_expanded_node_identity() -> Non
     assert {item["uuid"] for item in first.node_templates} == {
         item["uuid"] for item in second.node_templates
     }
+
+
+def test_nested_published_workflow_expands_into_one_hierarchical_parent_graph() -> None:
+    """嵌套已发布工作流递归展开，且不产生嵌套工作流任务（WorkflowTask）。"""
+
+    authoring, provider = _nested_world()
+    expansion = authoring.compile_invocation(
+        parent_workflow_uuid=PARENT_WORKFLOW_UUID,
+        invocation_uuid=INVOCATION_UUID,
+        module="c1_published_lab.workflows.child",
+        symbol="prepare_sample",
+        keyword_arguments={"value": 2},
+    )
+
+    nested_invocation_uuid = expanded_node_uuid(INVOCATION_UUID, CHILD_NODE_UUID)
+    nested_leaf_uuid = expanded_node_uuid(nested_invocation_uuid, LEAF_NODE_UUID)
+    assert expansion.diagnostics == ()
+    assert [node["uuid"] for node in expansion.nodes] == [
+        nested_invocation_uuid,
+        nested_leaf_uuid,
+    ]
+    assert expansion.nodes[0]["parent_uuid"] == INVOCATION_UUID
+    assert expansion.nodes[1]["parent_uuid"] == nested_invocation_uuid
+    assert expansion.nodes[0]["meta_data"]["unilab"]["composite"][
+        "child_workflow_uuid"
+    ] == LEAF_WORKFLOW_UUID
+    assert provider.read_count == 2
 
 
 def test_recursive_or_uncovered_invocation_fails_without_snapshot_write_port() -> None:
