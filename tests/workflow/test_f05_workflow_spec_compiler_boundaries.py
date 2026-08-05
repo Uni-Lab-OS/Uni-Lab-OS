@@ -73,18 +73,44 @@ def _template(
     *,
     node_type: str = "ILab",
 ) -> dict[str, Any]:
-    """构造当前执行计划生成器消费的节点模板。
+    """构造注册表投影形状的节点模板。
 
     参数：``template_uuid`` 是稳定模板身份，``node_type`` 决定执行器种类。
-    返回：带动作参数 Schema 的最小真实模板。异常：无。
+    返回：公开 ``schema`` 仅含 Goal 子模式、保留元数据冻结完整动作合同
+    （Action Contract）的真实模板。异常：无。
     """
 
+    # ``action_contract_schema`` 是创建任务时必须冻结的完整动作合同。
+    action_contract_schema = {
+        "type": "object",
+        "properties": {
+            "goal": {
+                "type": "object",
+                "properties": {
+                    "plate": {
+                        "type": "object",
+                        "x-unilabos-material-lock": True,
+                        "properties": {"uuid": {"type": "string", "format": "uuid"}},
+                        "required": ["uuid"],
+                    }
+                },
+                "required": ["plate"],
+            }
+        },
+        "required": ["goal"],
+    }
     return {
         "uuid": template_uuid,
         "node_type": node_type,
         "type": node_type,
         "name": "distribute",
-        "schema": {"type": "object"},
+        "schema": deepcopy(action_contract_schema["properties"]["goal"]),
+        "meta_data": {
+            "unilab": {
+                "contract_kind": "typed",
+                "action_contract_schema": action_contract_schema,
+            }
+        },
     }
 
 

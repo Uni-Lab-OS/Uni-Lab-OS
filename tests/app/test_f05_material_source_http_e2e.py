@@ -3,15 +3,15 @@
 from __future__ import annotations
 
 from collections.abc import Iterator
-from copy import deepcopy
 from dataclasses import dataclass
 from pathlib import Path
 
 import pytest
 from fastapi.testclient import TestClient
 
-from tests.workflow.test_f05_execution_plan_safety_followup import (
-    _real_authoring_graph,
+from tests.app.f05_material_source_http_fixture import (
+    SchedulerGetter,
+    install_applied_graph,
 )
 from unilabos.app.scheduler.api import create_scheduler_router
 from unilabos.app.scheduler.dispatch import RecordingDispatcher
@@ -22,32 +22,38 @@ from unilabos.app.scheduler.inventory.service import InventoryService
 from unilabos.app.scheduler.inventory.store import InventoryStore
 from unilabos.app.scheduler.service import EdgeScheduler
 from unilabos.app.workflow_api import create_workflow_app
-from unilabos.workflow.execution_plan import ExecutionPlanBuilder
 from unilabos.workflow.service import WorkflowService
 from unilabos.workflow.store import WorkflowStore
 from unilabos.workflow.task_scheduler_bridge import TaskSchedulerBridge
 
-WORKFLOW_UUID = "11000000-0000-4000-8000-000000000404"
+# 以下 UUID 分别代表夹具占用预留的工作流任务（WorkflowTask）与消费节点身份。
 HOLDER_TASK_UUID = "61000000-0000-4000-8000-000000000404"
 HOLDER_NODE_UUID = "61000000-0000-4000-8000-000000000405"
 
 
 @dataclass(slots=True)
 class _Runtime:
-    """汇总一套真实本地 HTTP 调度运行时及其可观察公共接缝。"""
+    """汇总真实本地 HTTP 运行时的公开客户端、两类权威与可观察派发边界。"""
 
     client: TestClient
-    workflow_service: WorkflowService
+    workflow_store: WorkflowStore
     inventory: InventoryService
     scheduler: EdgeScheduler
     dispatcher: RecordingDispatcher
 
 
-def _create_resource_template(client: TestClient) -> str:
+def _create_resource_template(
+    client: TestClient,
+    *,
+    resource_id: str,
+    display_name: str,
+    registry_type: str,
+) -> str:
     """通过公开 HTTP 创建物料使用的资源模板（ResourceTemplate）。
 
-    参数：``client`` 是组合应用客户端。返回：服务端生成的稳定模板 UUID。
-    异常：公开接口失败由断言终止夹具，禁止绕过合同直接写库存数据库。
+    参数：``client`` 是组合应用客户端；其余字段声明业务身份、显示名和资源类型。
+    返回：服务端生成的稳定模板 UUID。异常：公开接口失败由断言终止夹具，禁止
+    绕过合同直接写库存数据库。
     """
 
     response = client.post(
@@ -55,9 +61,9 @@ def _create_resource_template(client: TestClient) -> str:
         json={
             "resources": [
                 {
-                    "id": "lab.plate",
-                    "display_name": "96 孔板",
-                    "registry_type": "material",
+                    "id": resource_id,
+                    "display_name": display_name,
+                    "registry_type": registry_type,
                     "model": {},
                     "class": {"module": "lab.plate", "type": "python"},
                     "handles": [],
@@ -70,60 +76,57 @@ def _create_resource_template(client: TestClient) -> str:
     return str(response.json()["data"]["templates"][0]["uuid"])
 
 
-def _apply_workflow_graph(
-    runtime: _Runtime, *, resource_template_uuid: str, material_uuid: str, mode: str
-) -> None:
-    """准备已应用图并冻结本轮关注的物料来源执行计划。
+def _create_material(
+    client: TestClient,
+    *,
+    resource_template_uuid: str,
+    barcode: str,
+    name: str,
+) -> str:
+    """通过公开 HTTP 创建具体物料（Material）。
 
-    参数：``runtime`` 持有唯一工作流权威；资源模板和物料 UUID 冻结 ``existing``
-    选择器，``mode`` 可切换失败关闭反例。返回无。异常：执行计划构建错误在公开
-    任务创建入口失败关闭。F05.3 已独立覆盖图到计划，本测试只替换服务的计划
-    构建接缝，以聚焦 HTTP、真实库存预留和准入重试（AdmissionRetry）。
+    参数：客户端提交所属资源模板、条码和名称。返回：服务端生成的稳定物料 UUID。
+    异常：接口未返回 201/成功 envelope 时由断言失败，不直接写库存数据库。
     """
 
-    runtime.workflow_service.create_workflow(
-        workflow_uuid=WORKFLOW_UUID,
-        name="F05 HTTP 物料来源",
-        tags=[],
-        description=None,
-        meta_data={},
+    response = client.post(
+        "/api/v1/materials",
+        json={
+            "resource_template_uuid": resource_template_uuid,
+            "barcode": barcode,
+            "name": name,
+        },
     )
-    # ``frozen_graph`` 复用已经由 F05.3 证明可编译的真实物料占位符链，仅替换
-    # 本场景经 HTTP 创建的稳定物料身份和选择器模式。
-    frozen_graph = deepcopy(_real_authoring_graph())
-    source_selector = frozen_graph["nodes"][0]["param"]
-    source_selector["mode"] = mode
-    source_selector["resource_template_uuid"] = resource_template_uuid
-    source_selector["material_uuid"] = material_uuid if mode == "existing" else None
-    runtime.workflow_service.save_graph(
-        WORKFLOW_UUID,
-        revision=1,
-        nodes=[],
-        edges=[],
+    assert response.status_code == 201
+    assert response.json()["code"] == 0
+    return str(response.json()["data"]["uuid"])
+
+
+def _apply_workflow_graph(
+    runtime: _Runtime,
+    *,
+    material_resource_template_uuid: str,
+    device_resource_template_uuid: str,
+    material_uuid: str,
+    device_material_uuid: str,
+    mode: str,
+) -> str:
+    """通过共享正式夹具保存本轮物料来源工作流图。
+
+    参数：``runtime`` 持有唯一工作流权威；两类资源模板和物料 UUID 分别冻结来源
+    与执行设备，``mode`` 切换失败关闭反例。返回：公开创建并保存真实图的工作流
+    UUID。异常：模板投影、图保存或公开接口失败直接传播；不替换生产私有方法。
+    """
+
+    return install_applied_graph(
+        runtime.client,
+        runtime.workflow_store,
+        material_resource_template_uuid=material_resource_template_uuid,
+        device_resource_template_uuid=device_resource_template_uuid,
+        material_uuid=material_uuid,
+        device_material_uuid=device_material_uuid,
+        mode=mode,
     )
-
-    # ``build_execution_plan`` 是本运行时唯一计划构建接缝；任务仍由公开 HTTP
-    # 创建并在标准事务中持久化任务/作业身份。
-    def build_execution_plan(
-        _applied_graph: dict[str, object],
-        *,
-        run_mode: str,
-        target_node_uuid: str | None,
-    ) -> tuple[dict[str, object], list[dict[str, object]]]:
-        """从冻结真实图构建执行计划。
-
-        参数：``_applied_graph`` 是服务读取的已应用空图，本测试不重复验证；运行
-        模式和目标节点来自 HTTP。返回：正式构建器产出的计划与作业；非法
-        ``create_new`` 选择器抛稳定计划错误并使创建事务回滚。
-        """
-
-        return ExecutionPlanBuilder().build(
-            frozen_graph,
-            run_mode=run_mode,
-            target_node_uuid=target_node_uuid,
-        )
-
-    runtime.workflow_service._build_execution_plan = build_execution_plan
 
 
 @pytest.fixture()
@@ -137,11 +140,19 @@ def runtime(tmp_path: Path) -> Iterator[_Runtime]:
     # ``inventory_store`` 是本测试唯一库存权威（Inventory Authority）。
     inventory_store = InventoryStore(str(tmp_path / "inventory.db"))
     inventory = InventoryService(inventory_store)
-    # ``workflow_store`` 是标准任务/作业的唯一工作流权威。
+    # ``workflow_store`` 是工作流任务（WorkflowTask）和工作流节点作业
+    # （WorkflowNodeJob）的唯一工作流权威。
     workflow_store = WorkflowStore(tmp_path / "workflow_history.db")
+    # ``dispatcher`` 记录是否越过真实设备派发边界，不承担领域状态权威。
     dispatcher = RecordingDispatcher()
+    # ``scheduler`` 复用真实库存服务并负责本地工作流任务
+    # （WorkflowTask）推进。
     scheduler = EdgeScheduler(dispatcher=dispatcher, inventory=inventory)
+    # ``bridge`` 将工作流任务（WorkflowTask）/工作流节点作业
+    # （WorkflowNodeJob）状态投影与同一本地调度器（Scheduler）绑定。
     bridge = TaskSchedulerBridge(workflow_store, scheduler=scheduler)
+    # ``workflow_service`` 是公开工作流（Workflow）HTTP 路由使用的
+    # 唯一应用服务。
     workflow_service = WorkflowService(
         workflow_store,
         task_scheduler_bridge=bridge,
@@ -150,7 +161,7 @@ def runtime(tmp_path: Path) -> Iterator[_Runtime]:
     install_backend_resource_api(app, BackendResourceService(inventory_store))
     app.include_router(
         create_scheduler_router(
-            lambda: scheduler,
+            SchedulerGetter(scheduler),
             include_execution_shaped_workflow_routes=False,
         )
     )
@@ -158,7 +169,7 @@ def runtime(tmp_path: Path) -> Iterator[_Runtime]:
         with TestClient(app) as client:
             yield _Runtime(
                 client=client,
-                workflow_service=workflow_service,
+                workflow_store=workflow_store,
                 inventory=inventory,
                 scheduler=scheduler,
                 dispatcher=dispatcher,
@@ -173,28 +184,49 @@ def test_fixed_existing_waits_then_reschedules_with_same_task_and_job(
 ) -> None:
     """固定既有物料被占用时等待，释放后以同一身份完成准入重试。
 
-    参数：``runtime`` 是真实组合运行时。返回无；断言公开 HTTP 创建物料和任务，
-    外部任务/作业保持 ``pending``，内部为 ``waiting_for_material``；释放夹具占用
-    后，``POST /reschedule`` 使同一任务/作业进入运行。异常：任何私有替代接口、
-    新任务身份或提前设备派发都会使断言失败。
+    参数：``runtime`` 是真实组合运行时。返回无；断言公开 HTTP 创建物料和
+    工作流任务（WorkflowTask），外部工作流任务（WorkflowTask）/工作流
+    节点作业（WorkflowNodeJob）保持 ``pending``，内部为 ``waiting_for_material``；
+    释放夹具占用后，``POST /reschedule`` 使同一工作流任务/工作流节点作业进入
+    运行。异常：任何私有替代接口、新工作流任务身份或提前设备派发都会使断言失败。
     """
 
-    resource_template_uuid = _create_resource_template(runtime.client)
-    material_response = runtime.client.post(
-        "/api/v1/materials",
-        json={
-            "resource_template_uuid": resource_template_uuid,
-            "barcode": "F05-PLATE-001",
-            "name": "F05 固定孔板",
-        },
+    # ``material_template_uuid`` 是来源物料 API 与模板投影共享的类型身份。
+    material_template_uuid = _create_resource_template(
+        runtime.client,
+        resource_id="lab.plate",
+        display_name="96 孔板",
+        registry_type="material",
     )
-    assert material_response.status_code == 201
+    # ``device_template_uuid`` 是执行设备物料与 ILab 模板共享的类型身份。
+    device_template_uuid = _create_resource_template(
+        runtime.client,
+        resource_id="lab.reactor",
+        display_name="反应器",
+        registry_type="device",
+    )
     # ``material_uuid`` 是 HTTP、冻结选择器和短期遗留预留共享的稳定物料身份。
-    material_uuid = str(material_response.json()["data"]["uuid"])
-    _apply_workflow_graph(
+    material_uuid = _create_material(
+        runtime.client,
+        resource_template_uuid=material_template_uuid,
+        barcode="F05-PLATE-001",
+        name="F05 固定孔板",
+    )
+    # ``device_material_uuid`` 是动作节点绑定的实际执行设备物料身份。
+    device_material_uuid = _create_material(
+        runtime.client,
+        resource_template_uuid=device_template_uuid,
+        barcode="F05-REACTOR-001",
+        name="F05 反应器",
+    )
+    # ``workflow_uuid`` 是公开定义、图和工作流任务（WorkflowTask）三条接口
+    # 共享的工作流（Workflow）身份。
+    workflow_uuid = _apply_workflow_graph(
         runtime,
-        resource_template_uuid=resource_template_uuid,
+        material_resource_template_uuid=material_template_uuid,
+        device_resource_template_uuid=device_template_uuid,
         material_uuid=material_uuid,
+        device_material_uuid=device_material_uuid,
         mode="existing",
     )
     runtime.inventory.reserve_workflow(
@@ -204,11 +236,12 @@ def test_fixed_existing_waits_then_reschedules_with_same_task_and_job(
 
     created = runtime.client.post(
         "/api/v1/workflow-tasks",
-        json={"workflow_uuid": WORKFLOW_UUID, "run_mode": "normal", "meta_data": {}},
+        json={"workflow_uuid": workflow_uuid, "run_mode": "normal", "meta_data": {}},
     )
-    assert created.status_code == 201
+    assert created.status_code == 201, created.json()
     assert created.json()["code"] == 0
-    # ``task_uuid`` 与 ``job_uuid`` 是本次准入重试前后必须保持不变的持久身份。
+    # ``task_uuid`` 与下方工作流节点作业（WorkflowNodeJob）UUID 是本次
+    # 准入重试（AdmissionRetry）前后必须保持不变的持久身份。
     task_uuid = str(created.json()["data"]["uuid"])
     jobs_before = runtime.client.get(f"/api/v1/workflow-tasks/{task_uuid}/jobs").json()[
         "data"
@@ -242,29 +275,49 @@ def test_fixed_existing_waits_then_reschedules_with_same_task_and_job(
 def test_create_new_fails_closed_without_task_or_material_graph_change(
     runtime: _Runtime,
 ) -> None:
-    """短期 ``create_new`` 应在任务事务内失败关闭并保持物料图不变。
+    """短期 ``create_new`` 应在工作流任务（WorkflowTask）事务内失败关闭并保持物料图不变。
 
-    参数：``runtime`` 是真实组合运行时。返回无；断言公开任务接口返回 Backend
-    业务错误，任务列表零新增，前后公开物料图完全相同且没有设备派发。异常：若
-    不支持模式创建了部分任务、物料或作业，任一公共响应断言都会失败。
+    参数：``runtime`` 是真实组合运行时。返回无；断言公开工作流任务
+    （WorkflowTask）接口返回 Backend 业务错误，工作流任务列表零新增，前后公开
+    物料图完全相同且没有设备派发。异常：若不支持模式创建了部分工作流任务、
+    物料或工作流节点作业（WorkflowNodeJob），任一公共响应断言都会失败。
     """
 
-    resource_template_uuid = _create_resource_template(runtime.client)
-    material_response = runtime.client.post(
-        "/api/v1/materials",
-        json={
-            "resource_template_uuid": resource_template_uuid,
-            "barcode": "F05-MOUNT-001",
-            "name": "F05 新建来源挂载物料",
-        },
+    # ``material_template_uuid`` 是 create_new 图声明的来源资源类型身份。
+    material_template_uuid = _create_resource_template(
+        runtime.client,
+        resource_id="lab.plate",
+        display_name="96 孔板",
+        registry_type="material",
     )
-    assert material_response.status_code == 201
+    # ``device_template_uuid`` 是 ILab 动作模板和执行设备共享的类型身份。
+    device_template_uuid = _create_resource_template(
+        runtime.client,
+        resource_id="lab.reactor",
+        display_name="反应器",
+        registry_type="device",
+    )
     # ``mount_material_uuid`` 只满足物料来源选择器的挂载引用，不是待新建物料。
-    mount_material_uuid = str(material_response.json()["data"]["uuid"])
-    _apply_workflow_graph(
+    mount_material_uuid = _create_material(
+        runtime.client,
+        resource_template_uuid=material_template_uuid,
+        barcode="F05-MOUNT-001",
+        name="F05 新建来源挂载物料",
+    )
+    # ``device_material_uuid`` 是 create_new 图仍需绑定的实际执行设备物料身份。
+    device_material_uuid = _create_material(
+        runtime.client,
+        resource_template_uuid=device_template_uuid,
+        barcode="F05-REACTOR-002",
+        name="F05 create_new 反应器",
+    )
+    # ``workflow_uuid`` 是失败关闭前已经公开持久化的工作流定义身份。
+    workflow_uuid = _apply_workflow_graph(
         runtime,
-        resource_template_uuid=resource_template_uuid,
+        material_resource_template_uuid=material_template_uuid,
+        device_resource_template_uuid=device_template_uuid,
         material_uuid=mount_material_uuid,
+        device_material_uuid=device_material_uuid,
         mode="create_new",
     )
     material_graph_before = runtime.client.get("/api/v1/materials/graph").json()
@@ -272,7 +325,7 @@ def test_create_new_fails_closed_without_task_or_material_graph_change(
 
     failed = runtime.client.post(
         "/api/v1/workflow-tasks",
-        json={"workflow_uuid": WORKFLOW_UUID, "run_mode": "normal", "meta_data": {}},
+        json={"workflow_uuid": workflow_uuid, "run_mode": "normal", "meta_data": {}},
     )
 
     material_graph_after = runtime.client.get("/api/v1/materials/graph").json()

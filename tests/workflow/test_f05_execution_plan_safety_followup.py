@@ -78,6 +78,8 @@ def _real_authoring_graph(*, explicit_executor: bool = True) -> dict[str, Any]:
             "mode": "fixed",
             "device_id": DEVICE_ID,
         }
+    # ``action_contract`` 是注册表保存并经模板保留元数据冻结的完整动作合同。
+    action_contract = _action_schema()
     # ``source_selector`` 是已固定到具体物料的物料来源选择器。
     source_selector = {
         "mode": "existing",
@@ -123,7 +125,13 @@ def _real_authoring_graph(*, explicit_executor: bool = True) -> dict[str, Any]:
             {
                 "uuid": ACTION_TEMPLATE_UUID,
                 "node_type": "ILab",
-                "schema": _action_schema(),
+                "schema": action_contract["properties"]["goal"],
+                "meta_data": {
+                    "unilab": {
+                        "contract_kind": "typed",
+                        "action_contract_schema": action_contract,
+                    }
+                },
             },
         ],
         "handle_templates": [
@@ -333,18 +341,39 @@ def test_standard_plan_requires_frozen_param_schema(
     assert caught.value.code == "invalid_action_contract"
 
 
-def test_execution_plan_builder_rejects_missing_action_schema() -> None:
-    """执行计划构建器必须在持久前拒绝缺失的动作 Schema。
+@pytest.mark.parametrize(
+    ("contract_present", "invalid_contract"),
+    [
+        pytest.param(False, None, id="missing"),
+        pytest.param(True, None, id="null"),
+        pytest.param(True, "not-an-object", id="non-object"),
+        pytest.param(
+            True,
+            {"properties": {"goal": "not-an-object"}},
+            id="goal-non-object",
+        ),
+    ],
+)
+def test_execution_plan_builder_rejects_invalid_action_contract(
+    contract_present: bool,
+    invalid_contract: Any,
+) -> None:
+    """执行计划构建器必须在持久前拒绝不完整的动作合同。
 
-    参数：无。返回：无；断言设备动作模板缺少冻结动作合同
-    （Action Contract）时，不会生成可持久的标准执行计划
-    （ExecutionPlan）。异常：预期稳定计划构建错误。
+    参数：``contract_present`` 区分字段缺失与显式空值，
+    ``invalid_contract`` 是待验证的保留合同值。返回：无；断言设备动作模板
+    没有合法冻结动作合同（Action Contract）时，不会生成可持久的标准
+    执行计划（ExecutionPlan）。异常：预期稳定计划构建错误。
     """
 
     graph = _real_authoring_graph()
-    # ``action_template`` 是设备动作的冻结模板，本测试只删除 Schema 边界。
+    # ``action_template`` 是设备动作的冻结模板，本测试只破坏完整合同边界。
     action_template = graph["node_templates"][1]
-    action_template.pop("schema")
+    action_unilab = action_template["meta_data"]["unilab"]
+    if contract_present:
+        action_unilab["action_contract_schema"] = invalid_contract
+    else:
+        action_unilab.pop("action_contract_schema")
 
     with pytest.raises(ExecutionPlanBuildError) as caught:
         ExecutionPlanBuilder().build(

@@ -109,6 +109,8 @@ def test_created_material_is_immediately_reservable_by_stable_uuid(tmp_path):
     """
 
     client, store = _client(tmp_path)
+    # ``template_uuid`` 是 HTTP 创建具体物料时引用的资源模板（ResourceTemplate）
+    # 稳定身份。
     template_uuid = _sync_template(client)
     created = client.post(
         "/api/v1/materials",
