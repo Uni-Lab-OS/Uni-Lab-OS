@@ -12,8 +12,10 @@ from starlette.responses import Response
 
 from unilabos.utils.fastapi.log_adapter import setup_fastapi_logging
 from unilabos.utils.log import info, error
+from unilabos.utils.tracing import install_http_tracing
 from unilabos.app.web.api import setup_api_routes
 from unilabos.app.web.pages import setup_web_pages
+from unilabos.config.config import BasicConfig
 
 # 创建FastAPI应用
 app = FastAPI(
@@ -23,9 +25,12 @@ app = FastAPI(
     redoc_url="/api/redoc",
     openapi_url="/api/openapi.json",
 )
+install_http_tracing(app)
 
 # 创建页面路由
 pages = None
+workflow_routes_mounted = False
+resource_contract_routes_mounted = False
 
 # noinspection PyTypeChecker
 app.add_middleware(
@@ -33,7 +38,7 @@ app.add_middleware(
     allow_origins=["*"],
     allow_credentials=True,
     allow_methods=["GET", "POST", "PUT", "DELETE", "PATCH", "OPTIONS"],
-    allow_headers=["Authorization", "Content-Type", "Accept"],
+    allow_headers=["Authorization", "Content-Type", "Accept", "Last-Event-ID"],
 )
 
 
@@ -68,13 +73,13 @@ async def log_requests(request: Request, call_next) -> Response:
 
 
 def setup_server() -> FastAPI:
-    """
-    设置服务器
+    """装配当前产品配置允许的 Web 路由和本地工作流运行时。
 
-    Returns:
-        FastAPI: 配置好的FastAPI应用实例
+    参数：无。返回：进程唯一 FastAPI 应用；重复调用复用已挂载路由。工作流
+    源码（Workflow Source）授权形状或组合失败时关闭该合同路由，但不阻止无关
+    Edge 路由继续装配，错误写入产品日志。
     """
-    global pages
+    global pages, resource_contract_routes_mounted, workflow_routes_mounted
 
     # 创建页面路由
     if pages is None:
@@ -83,7 +88,58 @@ def setup_server() -> FastAPI:
     # 设置API路由
     setup_api_routes(app)
 
-    # Edge 调度器/仓储路由（--edge_scheduler 未启用时端点返回 503/不挂载）
+    # 共享 Workflow Interface 必须先于 Edge-only scheduler adapter 挂载，
+    # /workflows 表示定义，/workflow-tasks 表示运行。
+    if not workflow_routes_mounted and BasicConfig.working_dir:
+        try:
+            from unilabos.app.workflow_api import install_workflow_api
+            from unilabos.app.scheduler.integration import (
+                get_edge_scheduler,
+                get_inventory_service,
+            )
+            from unilabos.workflow.composition import (
+                compose_local_workflow_template_runtime,
+                compose_workflow_runtime,
+            )
+
+            # ``template_projection`` 只在本地调度与库存权威同时存在时建立；
+            # Backend-controlled 模式不能在 OS 再创建第二个生产模板写权威。
+            template_projection = None
+            inventory_service = get_inventory_service()
+            # ``edge_scheduler`` 是本地调度权威（Scheduler Authority）；只把同一
+            # 已装配实例交给工作流组合根，禁止重新创建第二个调度器。
+            edge_scheduler = get_edge_scheduler()
+            if inventory_service is not None and edge_scheduler is not None:
+                from unilabos.registry.registry import lab_registry
+
+                workflow_service, template_projection = (
+                    compose_local_workflow_template_runtime(
+                        BasicConfig.working_dir,
+                        inventory_store=inventory_service.store,
+                        registry=lab_registry,
+                        scheduler=edge_scheduler,
+                        editable_package_roots=(
+                            BasicConfig.workflow_editable_package_roots
+                        ),
+                    )
+                )
+            else:
+                workflow_service = compose_workflow_runtime(
+                    BasicConfig.working_dir,
+                    editable_package_roots=(
+                        BasicConfig.workflow_editable_package_roots
+                    ),
+                )
+            install_workflow_api(
+                app,
+                workflow_service,
+                template_snapshot_provider=template_projection,
+            )
+            workflow_routes_mounted = True
+        except Exception as e:  # noqa: BLE001 - unrelated Edge routes remain available
+            error(f"[Web] 挂载 Backend Workflow 合同失败: {str(e)}")
+
+    # Edge 调度器与 Host 物料路由独立挂载；默认 embedded 物料服务不要求 --edge_scheduler。
     try:
         from unilabos.app.scheduler.api import create_scheduler_router
         from unilabos.app.scheduler.integration import (
@@ -92,13 +148,34 @@ def setup_server() -> FastAPI:
             get_inventory_service,
         )
 
-        app.include_router(create_scheduler_router(get_edge_scheduler, get_edge_backend))
+        app.include_router(
+            create_scheduler_router(
+                get_edge_scheduler,
+                get_edge_backend,
+                include_execution_shaped_workflow_routes=False,
+            )
+        )
         inventory_service = get_inventory_service()
         if inventory_service is not None:
-            from unilabos.app.scheduler.inventory.api import create_router as create_inventory_router
+            from unilabos.app.scheduler.inventory.backend_api import (
+                install_backend_resource_api,
+            )
+            from unilabos.app.scheduler.inventory.backend_contract import (
+                BackendResourceService,
+            )
+            from unilabos.app.scheduler.inventory.api import (
+                create_legacy_material_router,
+                create_router as create_inventory_router,
+            )
             from unilabos.app.scheduler.inventory.layout import create_lab_router
 
+            if not resource_contract_routes_mounted:
+                install_backend_resource_api(
+                    app, BackendResourceService(inventory_service.store)
+                )
+                resource_contract_routes_mounted = True
             app.include_router(create_inventory_router(inventory_service))
+            app.include_router(create_legacy_material_router(inventory_service))
             app.include_router(create_lab_router(inventory_service))
     except Exception as e:  # noqa: BLE001 - 调度器路由挂载失败不影响主服务
         error(f"[Web] 挂载 Edge 调度器路由失败: {str(e)}")

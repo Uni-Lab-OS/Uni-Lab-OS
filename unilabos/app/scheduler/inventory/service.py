@@ -13,6 +13,8 @@ import threading
 import time
 import uuid
 from contextlib import contextmanager
+from functools import wraps
+from inspect import signature
 from typing import Any, Callable, Dict, Iterator, List, Optional
 
 from unilabos.app.scheduler.inventory.domain import (
@@ -31,8 +33,50 @@ from unilabos.app.scheduler.inventory.domain import (
     new_event_id,
 )
 from unilabos.app.scheduler.inventory.store import InventoryStore
+from unilabos.utils.tracing import add_event, inject_trace_context, span
 
 _ACTIVE_STATES_TUPLE = tuple(s.value for s in ACTIVE_INSTANCE_STATES)
+
+
+def _traced_operation(operation: str):
+    """为仓储写操作生成低基数 span；只提取标识/版本，不记录业务 payload。"""
+
+    def decorate(function):
+        function_signature = signature(function)
+
+        @wraps(function)
+        def wrapped(self, *args, **kwargs):
+            try:
+                arguments = function_signature.bind_partial(self, *args, **kwargs).arguments
+            except TypeError:
+                arguments = {}
+            attributes: Dict[str, Any] = {
+                "inventory.operation": operation,
+                "edge.uuid": getattr(self, "edge_id", ""),
+                "lab.id": getattr(self, "lab_id", ""),
+            }
+            keys = {
+                "workflow_id": "workflow.uuid",
+                "node_id": "workflow.node.uuid",
+                "attempt": "workflow.node.attempt",
+                "template_id": "resource_template.uuid",
+                "lot_id": "inventory.lot.id",
+                "edge_uuid": "material.uuid",
+                "instance_uuid": "material.uuid",
+                "parent_uuid": "material.parent.uuid",
+                "causation_id": "inventory.causation.id",
+                "expected_version": "inventory.expected_version",
+            }
+            for argument_name, attribute_name in keys.items():
+                value = arguments.get(argument_name)
+                if value not in (None, ""):
+                    attributes[attribute_name] = value
+            with span(f"material.{operation}", attributes=attributes):
+                return function(self, *args, **kwargs)
+
+        return wrapped
+
+    return decorate
 
 
 class InventoryService:
@@ -60,14 +104,27 @@ class InventoryService:
 
     @contextmanager
     def _tx(self) -> Iterator[sqlite3.Connection]:
-        """业务事务 + 监控事件缓冲：commit 成功后才把 material 事件发到总线."""
+        """业务事务 + 监控事件缓冲.
+
+        Command execution may establish one ambient transaction around a
+        service method.  Nested service calls reuse that connection, so the
+        command claim, business mutation, ledger/outbox and final result commit
+        atomically instead of opening a second crash window.
+        """
+        ambient = getattr(self._tx_local, "connection", None)
+        if ambient is not None:
+            yield ambient
+            return
+
         events: List[Dict[str, Any]] = []
         self._tx_local.events = events
         store = self.store
         try:
             with store.transaction() as conn:
+                self._tx_local.connection = conn
                 yield conn
         finally:
+            self._tx_local.connection = None
             self._tx_local.events = None
         # 到这里说明事务已提交（异常路径在 finally 清理后向上抛，不会执行到此）
         if self._monitor is not None:
@@ -76,6 +133,35 @@ class InventoryService:
                     self._monitor.emit("material", data.pop("event_type"), data)
                 except Exception:  # noqa: BLE001 - 监控故障不影响业务
                     pass
+
+    @contextmanager
+    def command_transaction(self) -> Iterator[sqlite3.Connection]:
+        """命令原子事务入口；commands.py 之外不应写 processed_command."""
+
+        with self._tx() as conn:
+            yield conn
+
+    @contextmanager
+    def command_attempt(self, conn: sqlite3.Connection) -> Iterator[None]:
+        """用 SAVEPOINT 隔离可预期拒绝，避免提交半截业务变更.
+
+        领域拒绝需要持久化为幂等结果，因此不能回滚整个命令事务；这里只回滚
+        handler 产生的业务/ledger/outbox，并同步丢弃尚未发布的监控事件。
+        """
+
+        events = getattr(self._tx_local, "events", None)
+        checkpoint = len(events) if isinstance(events, list) else 0
+        conn.execute("SAVEPOINT inventory_command_attempt")
+        try:
+            yield
+        except BaseException:
+            conn.execute("ROLLBACK TO SAVEPOINT inventory_command_attempt")
+            conn.execute("RELEASE SAVEPOINT inventory_command_attempt")
+            if isinstance(events, list):
+                del events[checkpoint:]
+            raise
+        else:
+            conn.execute("RELEASE SAVEPOINT inventory_command_attempt")
 
     # ------------------------------------------------------------------
     # 事务内公共 helper
@@ -95,15 +181,32 @@ class InventoryService:
         reason: str = "",
     ) -> None:
         """同事务写 ledger + outbox."""
+        common_attributes = {
+            "inventory.aggregate.type": aggregate_type,
+            "inventory.aggregate.id": aggregate_id,
+            "inventory.aggregate.version": aggregate_version,
+            "inventory.event.type": event_type,
+            "inventory.causation.id": causation_id,
+        }
+        add_event("inventory.ledger.append", common_attributes)
+        trace_carrier: Dict[str, Any] = {}
+        inject_trace_context(trace_carrier)
         InventoryStore.tx_insert_ledger(
             conn, now_ms, event_type, aggregate_type, aggregate_id, payload,
             actor=actor, reason=reason, causation_id=causation_id,
+            trace_id=str(trace_carrier.get("trace_id") or ""),
+            span_id=str(trace_carrier.get("span_id") or ""),
         )
         InventoryStore.tx_insert_outbox(
             conn, new_event_id(now_ms), self.edge_id, self.lab_id,
             aggregate_type, aggregate_id, aggregate_version, event_type,
             now_ms, causation_id, payload,
+            traceparent=str(trace_carrier.get("traceparent") or ""),
+            tracestate=str(trace_carrier.get("tracestate") or ""),
+            trace_id=str(trace_carrier.get("trace_id") or ""),
+            span_id=str(trace_carrier.get("span_id") or ""),
         )
+        add_event("inventory.outbox.enqueue", common_attributes)
         # 事务缓冲监控事件：commit 成功后由 _tx 发布到 material 通道
         buffered = getattr(self._tx_local, "events", None)
         if buffered is not None:
@@ -164,6 +267,7 @@ class InventoryService:
         instance: Dict[str, Any],
         target: InstanceState,
     ) -> Dict[str, Any]:
+        previous = instance["status"]
         check_instance_transition(InstanceState(instance["status"]), target)
         new_version = instance["version"] + 1
         conn.execute(
@@ -172,12 +276,22 @@ class InventoryService:
         )
         instance = dict(instance)
         instance.update(status=target.value, version=new_version)
+        add_event(
+            "material.state.transition",
+            {
+                "material.instance.id": instance["edge_uuid"],
+                "material.state.from": previous,
+                "material.state.to": target.value,
+                "inventory.aggregate.version": new_version,
+            },
+        )
         return instance
 
     # ------------------------------------------------------------------
     # template / 品类模板
     # ------------------------------------------------------------------
 
+    @_traced_operation("template.upsert")
     def upsert_template(
         self,
         template_id: str,
@@ -195,7 +309,7 @@ class InventoryService:
         now = self._now_ms()
         with self._tx() as conn:
             row = conn.execute(
-                "SELECT * FROM resource_template WHERE template_id = ?", (template_id,)
+                "SELECT * FROM inventory_resource_template WHERE template_id = ?", (template_id,)
             ).fetchone()
             if row is None:
                 if expected_version not in (None, 0):
@@ -204,7 +318,7 @@ class InventoryService:
                     )
                 version = 1
                 conn.execute(
-                    "INSERT INTO resource_template"
+                    "INSERT INTO inventory_resource_template"
                     "(template_id, name, category, spec_json, version) VALUES (?,?,?,?,?)",
                     (
                         template_id,
@@ -220,7 +334,7 @@ class InventoryService:
                 self._tx_check_version(current, expected_version)
                 version = current["version"] + 1
                 conn.execute(
-                    "UPDATE resource_template SET name = ?, category = ?, spec_json = ?, "
+                    "UPDATE inventory_resource_template SET name = ?, category = ?, spec_json = ?, "
                     "version = ? WHERE template_id = ?",
                     (
                         name if name != "" else current["name"],
@@ -235,7 +349,7 @@ class InventoryService:
                 )
                 event_type = "template.updated"
             result = conn.execute(
-                "SELECT * FROM resource_template WHERE template_id = ?", (template_id,)
+                "SELECT * FROM inventory_resource_template WHERE template_id = ?", (template_id,)
             ).fetchone()
             assert result is not None
             self._emit(
@@ -255,6 +369,7 @@ class InventoryService:
             )
         return dict(result)
 
+    @_traced_operation("template.delete")
     def delete_template(
         self,
         template_id: str,
@@ -266,7 +381,7 @@ class InventoryService:
         now = self._now_ms()
         with self._tx() as conn:
             row = conn.execute(
-                "SELECT * FROM resource_template WHERE template_id = ?", (template_id,)
+                "SELECT * FROM inventory_resource_template WHERE template_id = ?", (template_id,)
             ).fetchone()
             if row is None:
                 raise NotFound(f"template {template_id} not found")
@@ -284,7 +399,7 @@ class InventoryService:
                     f"{lot_count} lot(s) and {instance_count} instance(s)"
                 )
             conn.execute(
-                "DELETE FROM resource_template WHERE template_id = ?", (template_id,)
+                "DELETE FROM inventory_resource_template WHERE template_id = ?", (template_id,)
             )
             self._emit(
                 conn,
@@ -303,6 +418,7 @@ class InventoryService:
     # inbound / 登记
     # ------------------------------------------------------------------
 
+    @_traced_operation("inbound")
     def inbound_lot(
         self,
         template_id: str,
@@ -345,6 +461,7 @@ class InventoryService:
             )
         return lot
 
+    @_traced_operation("instance.register")
     def register_instance(
         self,
         template_id: str = "",
@@ -389,18 +506,12 @@ class InventoryService:
                     raise DuplicateBarcode(f"barcode {barcode} already active on {dup['edge_uuid']}")
             conn.execute(
                 "INSERT INTO material_instance(edge_uuid, legacy_cloud_id, lot_id, template_id, "
-                "barcode, status, version) VALUES (?,?,?,?,?,?,1)",
+                "barcode, status, parent_uuid, version) VALUES (?,?,?,?,?,?,?,1)",
                 (edge_uuid, legacy_cloud_id, lot_id, template_id, barcode,
-                 InstanceState.WAREHOUSE.value),
+                 InstanceState.WAREHOUSE.value, ""),
             )
             if parent_uuid:
-                conn.execute(
-                    "INSERT INTO resource_relation(parent_uuid, slot_id, child_uuid, version) "
-                    "VALUES (?,?,?,1) ON CONFLICT(child_uuid) DO UPDATE SET "
-                    "parent_uuid = excluded.parent_uuid, slot_id = excluded.slot_id, "
-                    "version = resource_relation.version + 1",
-                    (parent_uuid, slot_id, edge_uuid),
-                )
+                self._tx_upsert_relation(conn, parent_uuid, slot_id, edge_uuid)
             self._emit(
                 conn, now, "instance", edge_uuid, 1, "instance.registered",
                 {"template_id": template_id, "lot_id": lot_id, "barcode": barcode,
@@ -414,6 +525,7 @@ class InventoryService:
     # reserve / release / consume（workflow 幂等键）
     # ------------------------------------------------------------------
 
+    @_traced_operation("reserve")
     def reserve_workflow(
         self,
         workflow_id: str,
@@ -553,6 +665,7 @@ class InventoryService:
         ).fetchall()
         return [dict(r) for r in rows]
 
+    @_traced_operation("consume")
     def consume_reservation(
         self,
         workflow_id: str,
@@ -617,6 +730,7 @@ class InventoryService:
             )
         return {"status": "consumed", "reservation_id": rsv["reservation_id"], "amounts": amounts}
 
+    @_traced_operation("release")
     def release_reservation(
         self,
         workflow_id: str,
@@ -685,6 +799,7 @@ class InventoryService:
                     causation_id=causation_id, actor=actor, reason=reason,
                 )
 
+    @_traced_operation("quarantine")
     def quarantine_reservation(
         self,
         workflow_id: str,
@@ -731,6 +846,7 @@ class InventoryService:
             )
         return {"status": "quarantined", "reservation_id": rsv["reservation_id"]}
 
+    @_traced_operation("workflow.release")
     def release_workflow(
         self, workflow_id: str, reason: str = "workflow_cancelled",
         actor: str = "", causation_id: str = "",
@@ -761,18 +877,86 @@ class InventoryService:
         parent_uuid），relation 只补充「父物料的哪个具名位」（slot_id = PLR site
         名，↔ 云端 sites.label；uuid 仅后端索引）。每次 upsert 同步父列。
         """
+        current = conn.execute(
+            "SELECT version FROM resource_relation WHERE child_uuid = ?",
+            (child_uuid,),
+        ).fetchone()
+        version = int(current["version"]) + 1 if current is not None else 1
+        if current is not None:
+            conn.execute(
+                "DELETE FROM resource_relation WHERE child_uuid = ?", (child_uuid,)
+            )
         conn.execute(
             "INSERT INTO resource_relation(parent_uuid, slot_id, child_uuid, version) "
-            "VALUES (?,?,?,1) ON CONFLICT(child_uuid) DO UPDATE SET "
-            "parent_uuid = excluded.parent_uuid, slot_id = excluded.slot_id, "
-            "version = resource_relation.version + 1",
-            (parent_uuid, slot_id, child_uuid),
+            "VALUES (?,?,?,?)",
+            (parent_uuid, slot_id, child_uuid, version),
         )
         conn.execute(
             "UPDATE material_instance SET parent_uuid = ? WHERE edge_uuid = ?",
             (parent_uuid, child_uuid),
         )
 
+    def check_parent_consistency(self) -> List[Dict[str, Any]]:
+        """只读列出 parent_uuid 与 relation 的确定性冲突."""
+
+        return self.store.parent_consistency_issues()
+
+    @_traced_operation("parent.repair")
+    def repair_parent_consistency(
+        self,
+        actor: str,
+        reason: str,
+        causation_id: str = "",
+    ) -> Dict[str, Any]:
+        """只填补空 parent_uuid，不覆盖冲突值、不删除孤儿 relation.
+
+        老 v3 数据可能由早期 ``register_instance`` 写出 relation、却漏写实例
+        parent_uuid。relation 提供唯一且确定的父时可审计修复；双方非空但不一致
+        或 relation 指向不存在实例时只报告，由操作者人工裁决。
+        """
+
+        if not actor or not reason:
+            raise CommandRejected("parent consistency repair requires actor and reason")
+        now = self._now_ms()
+        repaired: List[str] = []
+        unresolved: List[Dict[str, Any]] = []
+        with self._tx() as conn:
+            for issue in InventoryStore.tx_parent_consistency_issues(conn):
+                if (
+                    issue["kind"] == "parent_mismatch"
+                    and not issue["instance_parent_uuid"]
+                    and issue["relation_parent_uuid"]
+                ):
+                    edge_uuid = issue["child_uuid"]
+                    row = self._tx_get_instance(conn, edge_uuid)
+                    version = row["version"] + 1
+                    conn.execute(
+                        "UPDATE material_instance SET parent_uuid = ?, version = ? "
+                        "WHERE edge_uuid = ? AND parent_uuid = ''",
+                        (issue["relation_parent_uuid"], version, edge_uuid),
+                    )
+                    self._emit(
+                        conn,
+                        now,
+                        "instance",
+                        edge_uuid,
+                        version,
+                        "instance.parent_repaired",
+                        {
+                            "from_parent": "",
+                            "parent_uuid": issue["relation_parent_uuid"],
+                            "repair_source": "resource_relation",
+                        },
+                        causation_id=causation_id,
+                        actor=actor,
+                        reason=reason,
+                    )
+                    repaired.append(edge_uuid)
+                else:
+                    unresolved.append(issue)
+        return {"repaired": repaired, "unresolved": unresolved}
+
+    @_traced_operation("deploy")
     def deploy_instance(
         self, edge_uuid: str, parent_uuid: str = "", slot_id: str = "",
         actor: str = "", causation_id: str = "", expected_version: Optional[int] = None,
@@ -791,6 +975,7 @@ class InventoryService:
             )
         return inst
 
+    @_traced_operation("move")
     def move_instance(
         self, edge_uuid: str, parent_uuid: str, slot_id: str = "",
         actor: str = "", causation_id: str = "", expected_version: Optional[int] = None,
@@ -819,6 +1004,7 @@ class InventoryService:
             inst = self._tx_get_instance(conn, edge_uuid)
         return inst
 
+    @_traced_operation("detach")
     def detach_instance(
         self,
         edge_uuid: str,
@@ -834,11 +1020,12 @@ class InventoryService:
             old = conn.execute(
                 "SELECT * FROM resource_relation WHERE child_uuid = ?", (edge_uuid,)
             ).fetchone()
-            if old is None:
+            if old is None and not inst.get("parent_uuid"):
                 return inst
-            conn.execute(
-                "DELETE FROM resource_relation WHERE child_uuid = ?", (edge_uuid,)
-            )
+            if old is not None:
+                conn.execute(
+                    "DELETE FROM resource_relation WHERE child_uuid = ?", (edge_uuid,)
+                )
             version = inst["version"] + 1
             # 单一父不变量：取下即脱离父物料（回到顶层/未分配）
             conn.execute(
@@ -852,13 +1039,19 @@ class InventoryService:
                 edge_uuid,
                 version,
                 "instance.detached",
-                {"from_parent": old["parent_uuid"], "from_slot": old["slot_id"]},
+                {
+                    "from_parent": (
+                        old["parent_uuid"] if old is not None else inst["parent_uuid"]
+                    ),
+                    "from_slot": old["slot_id"] if old is not None else "",
+                },
                 causation_id=causation_id,
                 actor=actor,
             )
             inst = self._tx_get_instance(conn, edge_uuid)
         return inst
 
+    @_traced_operation("set_parent")
     def set_instance_parent(
         self, edge_uuid: str, parent_uuid: str = "", slot_id: Optional[str] = None,
         actor: str = "", causation_id: str = "", expected_version: Optional[int] = None,
@@ -934,6 +1127,7 @@ class InventoryService:
             inst = self._tx_get_instance(conn, edge_uuid)
         return inst
 
+    @_traced_operation("instance.consume")
     def consume_instance(
         self, edge_uuid: str, actor: str = "", causation_id: str = "",
         expected_version: Optional[int] = None,
@@ -943,6 +1137,7 @@ class InventoryService:
             actor, causation_id, expected_version,
         )
 
+    @_traced_operation("discard")
     def discard_instance(
         self, edge_uuid: str, reason: str = "", actor: str = "", causation_id: str = "",
         expected_version: Optional[int] = None,
@@ -981,6 +1176,7 @@ class InventoryService:
             )
         return inst
 
+    @_traced_operation("adjust")
     def adjust_lot(
         self,
         lot_id: str,
@@ -1008,6 +1204,7 @@ class InventoryService:
             )
         return lot
 
+    @_traced_operation("content.set")
     def update_content(
         self, instance_uuid: str, state: Dict[str, Any],
         actor: str = "", causation_id: str = "",
@@ -1028,18 +1225,26 @@ class InventoryService:
             if row is not None:
                 self._tx_check_version(dict(row), expected_version)
             version = (row["version"] + 1) if row is not None else 1
-            conn.execute(
-                "INSERT INTO substance_content(instance_uuid, state_json, version) VALUES (?,?,?) "
-                "ON CONFLICT(instance_uuid) DO UPDATE SET state_json = excluded.state_json, "
-                "version = excluded.version",
-                (instance_uuid, json.dumps(state, ensure_ascii=False), version),
-            )
+            encoded_state = json.dumps(state, ensure_ascii=False)
+            if row is None:
+                conn.execute(
+                    "INSERT INTO substance_content(instance_uuid, state_json, version) "
+                    "VALUES (?,?,?)",
+                    (instance_uuid, encoded_state, version),
+                )
+            else:
+                conn.execute(
+                    "UPDATE substance_content SET state_json=?, version=? "
+                    "WHERE instance_uuid=?",
+                    (encoded_state, version, instance_uuid),
+                )
             self._emit(
                 conn, now, "content", instance_uuid, version, event_type,
                 {"state": state}, causation_id=causation_id, actor=actor,
             )
         return {"instance_uuid": instance_uuid, "version": version, "state": state}
 
+    @_traced_operation("content.clear")
     def clear_content(
         self,
         instance_uuid: str,
