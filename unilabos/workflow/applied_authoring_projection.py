@@ -42,6 +42,8 @@ _NODE_NULLABLE_READ_FIELDS = {
 }
 _EDGE_NULLABLE_READ_FIELDS = {"description"}
 _RETAINED_PROJECTION_FIELDS = {"create_time", "update_time", "workflow_uuid"}
+# 节点图拥有字段只由同 UUID 已应用工作流图决定，源码编译默认值无权覆盖。
+_NODE_GRAPH_OWNED_FIELDS = {"pose", "execution_policy", "disabled", "minimized"}
 
 
 class AppliedAuthoringProjectionError(ValueError):
@@ -128,6 +130,7 @@ def reconcile_applied_authoring_projection(
             generated,
             applied_nodes.get(node_uuid),
             nullable_fields=_NODE_NULLABLE_READ_FIELDS,
+            exact_shape_fields=_NODE_GRAPH_OWNED_FIELDS,
         )
         for node_uuid, generated in generated_node_index.items()
     ]
@@ -136,6 +139,7 @@ def reconcile_applied_authoring_projection(
             generated,
             applied_edges.get(edge_uuid),
             nullable_fields=_EDGE_NULLABLE_READ_FIELDS,
+            exact_shape_fields=set(),
         )
         for edge_uuid, generated in generated_edge_index.items()
     ]
@@ -268,19 +272,26 @@ def _retained_runtime_entity(
     applied: Mapping[str, Any] | None,
     *,
     nullable_fields: set[str],
+    exact_shape_fields: set[str],
 ) -> dict[str, Any]:
     """合并一个节点或边的业务语义与持久读取形状。
 
     参数说明：``generated`` 是当前源码语义，``applied`` 是同 UUID 旧读投影；
-    ``nullable_fields`` 是 Backend ``omitempty`` 可空白名单。返回独立实体：新实体
-    原样返回，保留实体复制原数据库时间/归属，并仅在当前值仍为空时沿用旧省略或
-    显式 ``null`` 形状。
+    ``nullable_fields`` 是 Backend ``omitempty`` 可空白名单；
+    ``exact_shape_fields`` 是同 UUID 已应用实体完全拥有的字段白名单。返回独立
+    实体：新实体原样返回；保留实体复制原数据库时间/归属，精确保留图拥有字段
+    的缺失或显式值，并仅在当前值仍为空时沿用旧可空字段形状。
     """
 
     result = deepcopy(dict(generated))
     if applied is None:
         return result
     for field_name in _RETAINED_PROJECTION_FIELDS:
+        if field_name in applied:
+            result[field_name] = deepcopy(applied[field_name])
+        else:
+            result.pop(field_name, None)
+    for field_name in exact_shape_fields:
         if field_name in applied:
             result[field_name] = deepcopy(applied[field_name])
         else:
