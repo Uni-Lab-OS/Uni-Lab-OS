@@ -31,6 +31,7 @@ _HANDLE_TEMPLATE_NULLABLE_READ_FIELDS = {
     "description",
 }
 _NODE_NULLABLE_READ_FIELDS = {
+    "action_name",
     "action_type",
     "description",
     "footer",
