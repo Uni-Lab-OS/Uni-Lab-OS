@@ -631,11 +631,16 @@ class ResourceTreeSet(object):
         return cls(trees)
 
     def to_plr_resources(self, skip_devices=True) -> List["PLRResource"]:
-        """
-        将 ResourceTreeSet 转换为 PLR 资源列表
+        """将资源树集合转换为 PLR 资源列表。
+
+        Args:
+            skip_devices: 是否跳过只表示设备根节点的资源树。
 
         Returns:
-            List[PLRResource]: PLR 资源实例列表
+            保留资源身份、层级和跟踪状态的 PLR 资源实例列表。
+
+        Raises:
+            ValueError: 资源类型无法安全投影为 PLR 类型时抛出。
         """
         register()
         from pylabrobot.resources import Resource as PLRResource
@@ -648,6 +653,9 @@ class ResourceTreeSet(object):
             "deck": "Deck",
             "container": "RegularContainer",
             "tip_spot": "TipSpot",
+            # 仓库（Warehouse）的库存（Inventory）/库位（Site）元数据不属于
+            # PLR 构造合同；需要进入驱动的普通仓库只降级为通用 Resource。
+            "warehouse": "Resource",
         }
 
         def collect_node_data(node: ResourceDictInstance, name_to_uuid: dict, all_states: dict, name_to_extra: dict):
@@ -719,6 +727,29 @@ class ResourceTreeSet(object):
                     raise ValueError(
                         f"无法找到类型 {plr_dict['type']} 对应的 PLR 资源类。原始信息：{tree.root_node.res_content}"
                     )
+                if tree.root_node.res_content.type == "warehouse":
+                    # 这些键是通用 PLR Resource 的完整入站合同；仓库自己的
+                    # 库位（Site）声明继续由公共物料图和库存权威持有。
+                    generic_resource_keys = {
+                        "name",
+                        "type",
+                        "size_x",
+                        "size_y",
+                        "size_z",
+                        "location",
+                        "rotation",
+                        "category",
+                        "model",
+                        "barcode",
+                        "preferred_pickup_location",
+                        "children",
+                        "parent_name",
+                    }
+                    plr_dict = {
+                        key: value
+                        for key, value in plr_dict.items()
+                        if key in generic_resource_keys
+                    }
                 spec = inspect.signature(sub_cls)
                 if "category" not in spec.parameters:
                     plr_dict.pop("category", None)

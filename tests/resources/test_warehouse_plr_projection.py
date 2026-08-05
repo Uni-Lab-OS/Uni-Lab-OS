@@ -1,8 +1,7 @@
 """验证仓库资源进入 PLR 与设备驱动时的安全投影边界。"""
 
-from unittest.mock import Mock
-
 from unilabos.resources.resource_tracker import (
+    DeviceNodeResourceTracker,
     ResourceDictInstance,
     ResourceTreeInstance,
     ResourceTreeSet,
@@ -65,8 +64,8 @@ def test_logical_mount_warehouse_never_attaches_to_device_driver() -> None:
     """证明只承担库存与库位投影的仓库不会被误当成驱动物理资源。"""
     # 逻辑挂载仓库只提供公共物料图中的库存与库位事实。
     logical_warehouse_node = _warehouse_node(logical_mount=True)
-    # 跟踪器替身用于证明设备附着边界没有接收任何逻辑挂载资源。
-    resource_tracker = Mock()
+    # 独立跟踪器用于观测设备附着完成后的公开资源集合。
+    resource_tracker = DeviceNodeResourceTracker()
     creator = DeviceClassCreator(
         object,
         [logical_warehouse_node],
@@ -76,4 +75,4 @@ def test_logical_mount_warehouse_never_attaches_to_device_driver() -> None:
 
     creator.attach_resource()
 
-    resource_tracker.add_resource.assert_not_called()
+    assert resource_tracker.resources == []
