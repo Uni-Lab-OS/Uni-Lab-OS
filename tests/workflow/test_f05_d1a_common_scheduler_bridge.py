@@ -3,7 +3,10 @@
 from __future__ import annotations
 
 from pathlib import Path
+from typing import Any
 from unittest.mock import patch
+
+import pytest
 
 from tests.registry.test_template_projection import (
     DEVICE_MATERIAL_UUID,
@@ -16,7 +19,35 @@ from unilabos.workflow.composition import (
     compose_local_workflow_template_runtime,
     reset_workflow_service_for_test,
 )
+from unilabos.workflow.service import WorkflowError
 from unilabos.workflow.workflow_spec_compiler import WorkflowSpecCompiler
+
+
+class _MissingEdgeLocalIdInventoryStore(FakeInventoryStore):
+    """提供缺少 Edge 本地执行器身份的设备物料摘要。"""
+
+    def query_one(
+        self,
+        sql: str,
+        params: tuple[Any, ...],
+    ) -> dict[str, Any] | None:
+        """读取测试库存身份并移除设备 ``edge_local_id``。
+
+        参数：``sql`` 是组合根发出的规范查询，``params`` 是资源模板业务名或
+        设备物料 UUID。返回：资源模板查询沿用父实现；设备物料查询返回不含
+        Edge 本地执行器身份的摘要，用于证明创建阶段关闭失败。
+        """
+
+        # ``resolved_row`` 是库存权威返回的活动身份；设备物料行只保留匹配模板
+        # 所需事实，刻意不提供可冻结进执行计划（ExecutionPlan）的执行器身份。
+        resolved_row = super().query_one(sql, params)
+        if resolved_row is None or "FROM material" not in sql:
+            return resolved_row
+        return {
+            "uuid": resolved_row["uuid"],
+            "resource_template_uuid": resolved_row["resource_template_uuid"],
+            "meta_data": {},
+        }
 
 
 def test_device_action_run_freezes_compiler_valid_execution_plan(
@@ -79,6 +110,99 @@ def test_device_action_run_freezes_compiler_valid_execution_plan(
         )
         assert compiled_spec.task_id == created["task"]["uuid"]
         assert compiled_spec.nodes[0].job_id == created["job"]["uuid"]
+    finally:
+        reset_workflow_service_for_test()
+
+
+def test_device_action_run_requires_edge_executor_before_persistence(
+    tmp_path: Path,
+) -> None:
+    """缺少 Edge 执行器身份时必须在设备单动作创建事务前关闭失败。
+
+    参数：``tmp_path`` 隔离工作流数据库。返回无；断言创建抛稳定目录不可用
+    错误，且工作流任务（WorkflowTask）列表总数仍为零，不遗留待处理聚合。
+    """
+
+    reset_workflow_service_for_test()
+    try:
+        # ``workflow_service`` 是公开设备单动作创建接缝；``projection`` 提供本次
+        # 请求引用的已发布动作模板稳定身份。
+        workflow_service, projection = compose_local_workflow_template_runtime(
+            tmp_path,
+            inventory_store=_MissingEdgeLocalIdInventoryStore(),
+            registry=FakeRegistry(),
+        )
+        action_template = projection.snapshot().require_action(
+            "lab.devices:Pump",
+            "transfer",
+        ).template
+
+        with pytest.raises(WorkflowError) as captured_error:
+            workflow_service.create_device_action_run(
+                material_uuid=DEVICE_MATERIAL_UUID,
+                workflow_node_template_uuid=action_template["uuid"],
+                param={"volume": 2.0},
+                execution_policy={},
+                idempotency_key="d1a-missing-edge-executor",
+                description=None,
+                meta_data={},
+            )
+
+        assert captured_error.value.code == "template_catalog_unavailable"
+        # ``task_page`` 是创建失败后的公开任务读模型，证明失败发生在持久化之前。
+        task_page = workflow_service.list_workflow_tasks(page=1, page_size=20)
+        assert task_page["total"] == 0
+    finally:
+        reset_workflow_service_for_test()
+
+
+def test_d1a_terminal_projection_does_not_claim_physical_settlement(
+    tmp_path: Path,
+) -> None:
+    """公共桥完成设备单动作后不得把业务终态冒充物理结算。
+
+    参数：``tmp_path`` 隔离工作流数据库。返回无；断言同一工作流任务
+    （WorkflowTask）与工作流节点作业（WorkflowNodeJob）进入 ``succeeded``，
+    但共享投影保留 ``cleanup_status=none``，因为没有物理结算证据。
+    """
+
+    reset_workflow_service_for_test()
+    scheduler = EdgeScheduler(dispatcher=RecordingDispatcher())
+    try:
+        # ``workflow_service`` 通过生产组合根接入公共任务调度桥；``projection``
+        # 提供设备单动作请求所引用的冻结动作模板。
+        workflow_service, projection = compose_local_workflow_template_runtime(
+            tmp_path,
+            inventory_store=FakeInventoryStore(),
+            registry=FakeRegistry(),
+            scheduler=scheduler,
+        )
+        action_template = projection.snapshot().require_action(
+            "lab.devices:Pump",
+            "transfer",
+        ).template
+        created = workflow_service.create_device_action_run(
+            material_uuid=DEVICE_MATERIAL_UUID,
+            workflow_node_template_uuid=action_template["uuid"],
+            param={"volume": 2.0},
+            execution_policy={},
+            idempotency_key="d1a-unsettled-terminal",
+            description=None,
+            meta_data={},
+        )
+
+        scheduler.on_job_finished(
+            created["job"]["uuid"],
+            True,
+            {"accepted": True},
+        )
+
+        # ``terminal_task`` 与 ``terminal_job`` 是完成回调后的标准持久投影。
+        terminal_task = workflow_service.get_workflow_task(created["task"]["uuid"])
+        terminal_job = workflow_service.get_workflow_node_job(created["job"]["uuid"])
+        assert terminal_task["status"] == "succeeded"
+        assert terminal_job["status"] == "succeeded"
+        assert terminal_task["cleanup_status"] == "none"
     finally:
         reset_workflow_service_for_test()
 
