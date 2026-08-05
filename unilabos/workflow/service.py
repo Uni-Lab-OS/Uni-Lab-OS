@@ -230,25 +230,15 @@ class AuthoringCompiler(Protocol):
     ) -> CandidateCompilation: ...
 
 
-class DeviceActionRunBridge(Protocol):
-    """设备单动作运行（DeviceActionRun）的本地执行端口。"""
-
-    def submit(self, aggregate: Dict[str, Any]) -> None:
-        """提交首次创建的 Task/Job 聚合；参数是标准持久投影，返回无。"""
-
-        ...
-
-    def close(self) -> None:
-        """释放执行端口持有的生命周期监听；返回无且必须幂等。"""
-
-        ...
-
-
 class WorkflowTaskSchedulerBridge(Protocol):
-    """普通工作流任务（WorkflowTask）的本地调度端口。"""
+    """普通任务与设备单动作共享的工作流任务（WorkflowTask）调度端口。"""
 
     def submit(self, task: dict[str, Any]) -> dict[str, Any]:
-        """提交已持久任务；参数是标准任务投影，返回刷新任务/作业聚合。"""
+        """提交已持久任务。
+
+        参数：``task`` 是标准工作流任务（WorkflowTask）投影。返回：同步推进后的
+        任务/作业聚合。异常：编译、准入或派发前投影失败时由实现抛稳定桥接错误。
+        """
 
         ...
 
@@ -282,19 +272,15 @@ class WorkflowService:
         store: WorkflowStore,
         *,
         compiler: Optional[AuthoringCompiler] = None,
-        material_resolver: Optional[
-            Callable[[str], Optional[Dict[str, Any]]]
-        ] = None,
-        device_action_run_bridge: Optional[DeviceActionRunBridge] = None,
+        material_resolver: Optional[Callable[[str], Optional[Dict[str, Any]]]] = None,
         task_scheduler_bridge: WorkflowTaskSchedulerBridge | None = None,
     ):
         """装配本地工作流应用服务。
 
         参数：``store`` 是唯一工作流写模型；``compiler`` 负责编译可信工作流源码；
         ``material_resolver`` 按物料 UUID 读取活动物料身份，供设备单动作运行
-        （DeviceActionRun）关闭式校验；``device_action_run_bridge`` 把首次创建的
-        标准任务/作业提交到本地执行内核；``task_scheduler_bridge`` 把普通工作流
-        任务（WorkflowTask）交给既有本地调度器。返回无。
+        （DeviceActionRun）关闭式校验；``task_scheduler_bridge`` 把普通工作流任务
+        （WorkflowTask）与首次创建的设备单动作聚合交给同一本地调度器。返回无。
         """
 
         self._store = store
@@ -303,11 +289,8 @@ class WorkflowService:
             store,
             material_resolver=material_resolver,
         )
-        # ``device_action_run_bridge`` 是可选本地执行端口；后端控制
-        # （Backend-controlled）模式不装配它，避免 OS 形成第二个生产调度权威
-        # （Scheduler Authority）。
-        self._device_action_run_bridge = device_action_run_bridge
-        # ``_task_scheduler_bridge`` 只在本地调度权威配置装配；后端控制配置保持空。
+        # ``_task_scheduler_bridge`` 是普通任务与设备单动作共享的唯一监听器所有者；
+        # 后端控制（Backend-controlled）配置保持空，避免第二个调度权威。
         self._task_scheduler_bridge = task_scheduler_bridge
         self._locks_guard = threading.Lock()
         self._authoring_locks: Dict[str, threading.RLock] = {}
@@ -551,6 +534,7 @@ class WorkflowService:
         参数与 Backend ``POST /device-action-runs`` DTO 同名；返回标准工作流任务
         （WorkflowTask）、唯一工作流节点作业（WorkflowNodeJob）和 ``created``。
         输入/引用错误、依赖未装配和幂等冲突分别映射为稳定 HTTP 业务错误。
+        公共任务调度桥失败映射为 ``internal_error``，且不创建第二套执行身份。
         """
 
         try:
@@ -565,16 +549,24 @@ class WorkflowService:
                 description=description,
                 meta_data=meta_data,
             )
-            if (
-                aggregate["created"] is True
-                and self._device_action_run_bridge is not None
-            ):
-                self._device_action_run_bridge.submit(aggregate)
-                # 旧调度器可能同步完成首次派发，必须返回刷新后的权威状态，不能把
-                # 创建事务中的 ``pending`` 快照误报给前端。
+            if aggregate["created"] is True and self._task_scheduler_bridge is not None:
+                scheduled = self._task_scheduler_bridge.submit(aggregate["task"])
+                # ``scheduled_jobs`` 是公共桥返回的同一任务作业集合；设备单动作
+                # 必须仍精确包含创建事务生成的唯一作业身份。
+                scheduled_jobs = [
+                    job
+                    for job in scheduled["jobs"]
+                    if job.get("uuid") == aggregate["job"]["uuid"]
+                ]
+                if len(scheduled_jobs) != 1:
+                    raise TaskSchedulerBridgeError(
+                        "设备单动作调度结果缺少唯一原始作业身份"
+                    )
+                # 公共桥可能同步推进首次派发，必须返回同一任务/作业身份的刷新状态，
+                # 不能把创建事务中的 ``pending`` 快照误报给前端。
                 aggregate = {
-                    "task": self._store.get_task(aggregate["task"]["uuid"]),
-                    "job": self._store.get_job(aggregate["job"]["uuid"]),
+                    "task": scheduled["task"],
+                    "job": scheduled_jobs[0],
                     "created": True,
                 }
             return aggregate
@@ -584,6 +576,8 @@ class WorkflowService:
             raise WorkflowError("template_catalog_unavailable") from None
         except DeviceActionRunConflict:
             raise WorkflowConflict("conflict") from None
+        except TaskSchedulerBridgeError:
+            raise WorkflowError("internal_error") from None
 
     def get_workflow_task(self, task_uuid: str) -> Dict[str, Any]:
         try:
@@ -716,10 +710,7 @@ class WorkflowService:
             or registered_roots != set(root_paths)
             or any(
                 registration.source_uri
-                != (
-                    f"package://{registration.package_id}/"
-                    f"{registration.relative_path}"
-                )
+                != (f"package://{registration.package_id}/{registration.relative_path}")
                 for registration in plan.registrations
             )
         ):
@@ -797,9 +788,7 @@ class WorkflowService:
         if not isinstance(package_id, str) or not package_id.strip():
             raise WorkflowError("invalid_input")
         normalized_package_id = package_id.strip()
-        source_uri = (
-            f"package://{normalized_package_id}/{normalized_relative_path}"
-        )
+        source_uri = f"package://{normalized_package_id}/{normalized_relative_path}"
         # 单项替换命令构造成与启动发现完全相同的不可变计划，避免绕过物理路径、
         # 来源 URI 和“既有身份不可重绑定”等批量授权不变量。
         plan = EditableSourceDiscoveryPlan(
@@ -812,9 +801,7 @@ class WorkflowService:
                     source_uri=source_uri,
                 ),
             ),
-            root_identities=(
-                ((root, (root_metadata.st_dev, root_metadata.st_ino))),
-            ),
+            root_identities=(((root, (root_metadata.st_dev, root_metadata.st_ino))),),
         )
         return self.replace_discovered_source_authorizations(plan)[0]
 
@@ -846,12 +833,14 @@ class WorkflowService:
                 continue
 
     def close(self) -> None:
-        """关闭本地执行桥和由该 Service 独占的工作流持久存储。"""
+        """关闭共享本地调度桥和由服务独占的工作流存储。
+
+        参数：无。返回：无；桥必须幂等注销监听器，随后关闭持久存储。异常：清理
+        失败原样传播，调用方据此保留未完成资源所有权并可重试。
+        """
 
         if self._task_scheduler_bridge is not None:
             self._task_scheduler_bridge.close()
-        if self._device_action_run_bridge is not None:
-            self._device_action_run_bridge.close()
         self._store.close()
 
     def get_authoring(self, workflow_uuid: str) -> Dict[str, Any]:

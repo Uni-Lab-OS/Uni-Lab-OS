@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from collections.abc import Mapping
 from pathlib import Path
 from typing import Any
 from unittest.mock import patch
@@ -48,6 +49,21 @@ class _MissingEdgeLocalIdInventoryStore(FakeInventoryStore):
             "resource_template_uuid": resolved_row["resource_template_uuid"],
             "meta_data": {},
         }
+
+
+def _thaw_json(value: Any) -> Any:
+    """把只读目录 JSON 容器恢复为持久化可比较形状。
+
+    参数：``value`` 是由映射代理、元组和 JSON 标量组成的动作合同值。返回：映射
+    递归转换为字典、元组递归转换为列表后的等价 JSON 值。异常：无；目录已经
+    保证输入只含受支持的 JSON 值。
+    """
+
+    if isinstance(value, Mapping):
+        return {key: _thaw_json(child) for key, child in value.items()}
+    if isinstance(value, tuple):
+        return [_thaw_json(child) for child in value]
+    return value
 
 
 def test_device_action_run_freezes_compiler_valid_execution_plan(
@@ -98,10 +114,12 @@ def test_device_action_run_freezes_compiler_valid_execution_plan(
         assert plan["nodes"][0]["device_id"] == "pump-01"
         assert plan["nodes"][0]["action_name"] == "transfer"
         assert plan["nodes"][0]["action_type"] == "UniLabJsonCommand"
-        assert (
-            plan["nodes"][0]["param_schema"]
-            == action_template["meta_data"]["unilab"]["action_contract_schema"]
+        # ``expected_param_schema`` 把只读目录容器规范化为持久 JSON 形状；字段和值
+        # 仍完整来自发布时的动作合同（Action Contract），不手写任何子集。
+        expected_param_schema = _thaw_json(
+            action_template["meta_data"]["unilab"]["action_contract_schema"]
         )
+        assert plan["nodes"][0]["param_schema"] == expected_param_schema
 
         # ``compiled_spec`` 证明执行只依赖冻结计划和既有作业，不再调度期补事实。
         compiled_spec = WorkflowSpecCompiler().compile(
@@ -132,10 +150,14 @@ def test_device_action_run_requires_edge_executor_before_persistence(
             inventory_store=_MissingEdgeLocalIdInventoryStore(),
             registry=FakeRegistry(),
         )
-        action_template = projection.snapshot().require_action(
-            "lab.devices:Pump",
-            "transfer",
-        ).template
+        action_template = (
+            projection.snapshot()
+            .require_action(
+                "lab.devices:Pump",
+                "transfer",
+            )
+            .template
+        )
 
         with pytest.raises(WorkflowError) as captured_error:
             workflow_service.create_device_action_run(
@@ -177,10 +199,14 @@ def test_d1a_terminal_projection_does_not_claim_physical_settlement(
             registry=FakeRegistry(),
             scheduler=scheduler,
         )
-        action_template = projection.snapshot().require_action(
-            "lab.devices:Pump",
-            "transfer",
-        ).template
+        action_template = (
+            projection.snapshot()
+            .require_action(
+                "lab.devices:Pump",
+                "transfer",
+            )
+            .template
+        )
         created = workflow_service.create_device_action_run(
             material_uuid=DEVICE_MATERIAL_UUID,
             workflow_node_template_uuid=action_template["uuid"],

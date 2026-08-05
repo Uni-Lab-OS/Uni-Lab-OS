@@ -10,9 +10,6 @@ from typing import Any, Optional
 
 from unilabos.registry.template_projection import RegistryTemplateProjection
 from unilabos.workflow.authoring_engine import WorkflowAuthoringEngine
-from unilabos.workflow.device_action_run_bridge import (
-    DeviceActionRunWorkflowSpecBridge,
-)
 from unilabos.workflow.service import AuthoringCompiler, WorkflowService
 from unilabos.workflow.source_discovery import discover_editable_sources
 from unilabos.workflow.source_monitor import WorkflowSourceMonitor
@@ -60,20 +57,19 @@ def _cleanup_partial_composition(
     original_error: BaseException,
     workflow_store: WorkflowStore,
     task_scheduler_bridge: Any,
-    device_action_run_bridge: Any,
 ) -> None:
     """按反向所有权清理尚未发布的工作流运行时组合。
 
     参数：``original_error`` 是必须保留的启动异常；``workflow_store`` 是待关闭的
-    工作流存储（WorkflowStore）；两个桥参数是可能已注册调度监听器的部分资源。
-    返回无；每个清理异常只附加为原异常说明，不掩盖首个构造或恢复故障。
+    工作流存储（WorkflowStore）；``task_scheduler_bridge`` 是可能已注册调度监听器
+    的唯一公共桥。返回无；每个清理异常只附加为原异常说明，不掩盖首个构造或
+    恢复故障。
     """
 
     # ``owned_resources`` 按创建顺序列出，关闭时反向遍历，先注销桥再关闭存储。
     owned_resources = (
         ("工作流存储", workflow_store),
         ("工作流任务调度桥", task_scheduler_bridge),
-        ("设备单动作运行桥", device_action_run_bridge),
     )
     for resource_name, resource in reversed(owned_resources):
         if resource is None:
@@ -105,9 +101,7 @@ def compose_workflow_runtime(
     *,
     compiler: Optional[AuthoringCompiler] = None,
     editable_package_roots: Iterable[str | Path] = (),
-    material_resolver: Optional[
-        Callable[[str], Optional[dict[str, Any]]]
-    ] = None,
+    material_resolver: Optional[Callable[[str], Optional[dict[str, Any]]]] = None,
     scheduler: Optional[Any] = None,
 ) -> WorkflowService:
     """装配工作区唯一的工作流权威、启动恢复和草稿监视。
@@ -146,7 +140,6 @@ def compose_workflow_runtime(
         # ``workflow_store`` 是本地标准工作流任务（WorkflowTask）/工作流节点作业
         # （WorkflowNodeJob）写模型；执行桥与应用服务必须共享同一实例。
         workflow_store = WorkflowStore(database_path)
-        device_action_run_bridge = None
         task_scheduler_bridge = None
         new_service: Optional[WorkflowService] = None
         new_monitor: Optional[WorkflowSourceMonitor] = None
@@ -156,17 +149,10 @@ def compose_workflow_runtime(
                     workflow_store,
                     scheduler=scheduler,
                 )
-            if scheduler is not None and material_resolver is not None:
-                device_action_run_bridge = DeviceActionRunWorkflowSpecBridge(
-                    workflow_store,
-                    scheduler=scheduler,
-                    material_resolver=material_resolver,
-                )
             new_service = WorkflowService(
                 workflow_store,
                 compiler=compiler,
                 material_resolver=material_resolver,
-                device_action_run_bridge=device_action_run_bridge,
                 task_scheduler_bridge=task_scheduler_bridge,
             )
             # ``discovery_plan`` 是全量文件预校验结果；服务在单事务中注册后，
@@ -180,7 +166,6 @@ def compose_workflow_runtime(
                 original_error=startup_error,
                 workflow_store=workflow_store,
                 task_scheduler_bridge=task_scheduler_bridge,
-                device_action_run_bridge=device_action_run_bridge,
             )
             raise
 
@@ -261,9 +246,7 @@ def compose_local_workflow_template_runtime(
             )
             return service, _template_projection
         if _service is not None:
-            raise RuntimeError(
-                "本地工作流服务已在没有模板投影的情况下完成装配"
-            )
+            raise RuntimeError("本地工作流服务已在没有模板投影的情况下完成装配")
 
         def resolve_resource_template_identity(resource_name: str) -> str:
             """按库存活动业务名解析资源模板稳定 UUID。

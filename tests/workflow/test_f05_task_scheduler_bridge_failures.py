@@ -56,14 +56,14 @@ def _assert_store_closed(store: WorkflowStore) -> None:
         store.get_workflow("10000000-0000-4000-8000-000000000001")
 
 
-def test_composition_closes_task_bridge_when_d1a_bridge_construction_fails(
+def test_composition_closes_store_when_shared_bridge_construction_fails(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """下游设备单动作桥构造失败必须反向清理任务桥和存储。
+    """唯一公共任务调度桥构造失败必须清理工作流存储。
 
-    参数：``tmp_path`` 隔离 SQLite；``monkeypatch`` 注入构造故障。返回无；断言
-    调度器（Scheduler）的两类监听器归零，且存储不泄漏。
+    参数：``tmp_path`` 隔离 SQLite；``monkeypatch`` 注入公共桥构造故障。返回
+    无；断言调度器（Scheduler）没有残留监听器，且工作流存储不泄漏。
     """
 
     scheduler = EdgeScheduler(dispatcher=RecordingDispatcher())
@@ -77,21 +77,21 @@ def test_composition_closes_task_bridge_when_d1a_bridge_construction_fails(
         captured_stores.append(opened_store)
         return opened_store
 
-    class _FailingD1ABridge:
-        """模拟设备单动作运行（DeviceActionRun）桥在构造阶段失败。"""
+    class _FailingTaskBridge:
+        """模拟共享工作流任务调度桥在构造阶段失败。"""
 
         def __init__(self, *_args: Any, **_kwargs: Any) -> None:
             """拒绝构造；参数仅匹配生产签名，异常用于验证反向清理。"""
 
-            raise RuntimeError("设备单动作桥构造失败")
+            raise RuntimeError("公共任务调度桥构造失败")
 
     monkeypatch.setattr(composition, "WorkflowStore", open_store)
     monkeypatch.setattr(
         composition,
-        "DeviceActionRunWorkflowSpecBridge",
-        _FailingD1ABridge,
+        "TaskSchedulerBridge",
+        _FailingTaskBridge,
     )
-    with pytest.raises(RuntimeError, match="设备单动作桥构造失败"):
+    with pytest.raises(RuntimeError, match="公共任务调度桥构造失败"):
         composition.compose_workflow_runtime(
             tmp_path,
             scheduler=scheduler,
@@ -103,14 +103,14 @@ def test_composition_closes_task_bridge_when_d1a_bridge_construction_fails(
     _assert_store_closed(captured_stores[0])
 
 
-def test_composition_closes_both_bridges_when_service_construction_fails(
+def test_composition_closes_shared_bridge_when_service_construction_fails(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """工作流服务构造失败必须按反向所有权清理两个桥。
+    """工作流服务构造失败必须按反向所有权清理唯一公共桥。
 
     参数：``tmp_path`` 隔离 SQLite；``monkeypatch`` 注入服务构造故障。返回无；
-    断言任务桥和设备单动作桥注册的全部监听器均被注销，存储被关闭。
+    断言普通任务与设备单动作共享的监听器均被注销，存储被关闭。
     """
 
     scheduler = EdgeScheduler(dispatcher=RecordingDispatcher())
@@ -125,7 +125,7 @@ def test_composition_closes_both_bridges_when_service_construction_fails(
         return opened_store
 
     class _FailingWorkflowService:
-        """模拟两个执行桥均创建后工作流服务构造失败。"""
+        """模拟唯一公共桥创建后工作流服务构造失败。"""
 
         def __init__(self, *_args: Any, **_kwargs: Any) -> None:
             """拒绝构造；参数仅匹配生产签名，异常用于验证所有权回滚。"""
