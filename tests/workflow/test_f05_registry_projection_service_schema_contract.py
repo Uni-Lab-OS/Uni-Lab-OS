@@ -229,9 +229,7 @@ def test_registry_schema_is_backend_string_through_candidate_apply_and_restart(
 
         service.apply_authoring(
             WORKFLOW_UUID,
-            expected_draft_hash=draft["draft"]["draft_hash"],
-            expected_workflow_revision=1,
-            expected_candidate_hash=stored_candidate["candidate_hash"],
+            candidate_hash=stored_candidate["candidate_hash"],
         )
         # ``graph_response`` 是应用候选版本（Candidate）后通过后端形态契约
         # （Backend-shaped Contract）读取工作流图（Workflow Graph）的 HTTP

@@ -503,9 +503,7 @@ def test_material_source_candidate_apply_does_not_need_inventory_authority(
 
         applied = context.service.apply_authoring(
             WORKFLOW_UUID,
-            expected_draft_hash=draft["draft"]["draft_hash"],
-            expected_workflow_revision=1,
-            expected_candidate_hash=candidate["candidate_hash"],
+            candidate_hash=candidate["candidate_hash"],
         )
 
         assert applied["apply_result"]["workflow_revision"] == 2

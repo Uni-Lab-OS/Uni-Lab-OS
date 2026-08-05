@@ -72,9 +72,7 @@ def test_draft_candidate_apply_is_atomic_and_backend_shaped(
 
     applied = service.apply_authoring(
         WORKFLOW_UUID,
-        expected_draft_hash=draft["draft"]["draft_hash"],
-        expected_workflow_revision=1,
-        expected_candidate_hash=candidate["candidate_hash"],
+        candidate_hash=candidate["candidate_hash"],
     )
 
     graph = service.get_graph(WORKFLOW_UUID)
@@ -82,7 +80,9 @@ def test_draft_candidate_apply_is_atomic_and_backend_shaped(
     assert len(graph["nodes"]) == 2
     assert applied["apply_result"]["workflow_revision"] == 2
     authoring = applied["authoring"]
-    assert source_path.read_text(encoding="utf-8") == authoring["draft"]["python_source"]
+    assert (
+        source_path.read_text(encoding="utf-8") == authoring["draft"]["python_source"]
+    )
     assert authoring["candidate"] is None
 
 
@@ -92,7 +92,7 @@ def test_stale_candidate_fails_without_partial_graph_or_source_writeback(
     """候选哈希冲突必须保持已应用图和作者草稿不变。"""
 
     service, source_path = authoring_service
-    draft = service.save_draft(
+    service.save_draft(
         WORKFLOW_UUID,
         python_source=_source(),
         expected_draft_hash=None,
@@ -104,9 +104,7 @@ def test_stale_candidate_fails_without_partial_graph_or_source_writeback(
     with pytest.raises(WorkflowConflict) as failure:
         service.apply_authoring(
             WORKFLOW_UUID,
-            expected_draft_hash=draft["draft"]["draft_hash"],
-            expected_workflow_revision=1,
-            expected_candidate_hash="sha256:" + "0" * 64,
+            candidate_hash="sha256:" + "0" * 64,
         )
 
     assert failure.value.code == "candidate_hash_conflict"
@@ -136,3 +134,50 @@ def test_authoring_http_keeps_backend_response_envelope(
     assert set(payload) == {"code", "data"}
     assert payload["code"] == 0
     assert payload["data"]["candidate"]["candidate_hash"].startswith("sha256:")
+
+
+@pytest.mark.parametrize("request_variant", ["legacy_three_tokens", "candidate_bundle"])
+def test_authoring_apply_http_rejects_client_supplied_candidate_facts(
+    authoring_service: tuple[WorkflowService, Path],
+    request_variant: str,
+) -> None:
+    """应用接口只接受服务器签发的候选哈希并拒绝客户端事实组合。
+
+    参数：``authoring_service`` 提供真实 SQLite 与源码工作区（Source Workspace）；
+    ``request_variant`` 选择旧三令牌或额外候选包。返回：无；断言严格请求模型以
+    Backend 业务码 1000 拒绝，且工作流修订（Workflow Revision）不推进。
+    """
+
+    service, _source_path = authoring_service
+    draft = service.save_draft(
+        WORKFLOW_UUID,
+        python_source=_source(),
+        expected_draft_hash=None,
+        expected_workflow_revision=1,
+    )
+    # ``candidate`` 是服务端持久并签发的候选版本（Candidate），客户端只能回传哈希。
+    candidate = draft["candidate"]
+    assert candidate is not None
+    if request_variant == "legacy_three_tokens":
+        body = {
+            "expected_draft_hash": draft["draft"]["draft_hash"],
+            "expected_workflow_revision": 1,
+            "expected_candidate_hash": candidate["candidate_hash"],
+        }
+    else:
+        body = {
+            "candidate_hash": candidate["candidate_hash"],
+            "candidate": candidate,
+        }
+
+    response = TestClient(create_workflow_app(service)).post(
+        f"/api/v1/workflows/{WORKFLOW_UUID}/authoring/apply",
+        json=body,
+    )
+
+    assert response.status_code == 200
+    assert response.json() == {
+        "code": 1000,
+        "error": {"msg": "提交内容格式不正确"},
+    }
+    assert service.get_graph(WORKFLOW_UUID)["workflow"]["revision"] == 1

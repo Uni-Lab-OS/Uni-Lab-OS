@@ -80,7 +80,9 @@ def _write_package(
     return source_path
 
 
-def _assert_source_access_rejected(service: WorkflowService, workflow_uuid: str) -> None:
+def _assert_source_access_rejected(
+    service: WorkflowService, workflow_uuid: str
+) -> None:
     """证明未授权来源的全部创作文件入口返回同一稳定错误。
 
     参数：``service`` 是本轮本地工作流权威；``workflow_uuid`` 是持久存在但未在
@@ -98,9 +100,7 @@ def _assert_source_access_rejected(service: WorkflowService, workflow_uuid: str)
         ),
         lambda: service.apply_authoring(
             workflow_uuid,
-            expected_draft_hash=HASH_TOKEN,
-            expected_workflow_revision=1,
-            expected_candidate_hash=HASH_TOKEN,
+            candidate_hash=HASH_TOKEN,
         ),
     )
     for operation in operations:
