@@ -31,6 +31,9 @@ AUTHORITY = CatalogAuthority(authority_id="os-c1-lifecycle", kind="local")
 DEVICE_SOURCE_IDENTITY = "community.c1_lifecycle.measurement_device"
 DEVICE_RESOURCE_TEMPLATE_UUID = "62000000-0000-4000-8000-000000000001"
 WORKFLOW_TEMPLATE_NAME = f"workflow:{WORKFLOW_UUID}"
+# 父工作流（Workflow）与组合调用节点（WorkflowNode）的稳定测试身份。
+PARENT_WORKFLOW_UUID = "51000000-0000-4000-8000-000000000002"
+PARENT_INVOCATION_NODE_UUID = "55000000-0000-4000-8000-000000000002"
 SOURCE = f'''from unilabos.workflow.authoring import workflow_definition
 
 
@@ -40,6 +43,18 @@ SOURCE = f'''from unilabos.workflow.authoring import workflow_definition
 )
 def prepare_sample():
     pass
+'''
+PARENT_SOURCE = f'''from c1_published_lab.workflows.child import prepare_sample
+from unilabos.workflow.authoring import workflow_definition
+
+
+@workflow_definition(
+    workflow_uuid="{PARENT_WORKFLOW_UUID}",
+    displayname="Lifecycle parent",
+)
+def prepare_parent():
+    # unilab:node_uuid={PARENT_INVOCATION_NODE_UUID}
+    prepared = prepare_sample()
 '''
 
 
@@ -293,6 +308,63 @@ def test_child_apply_waits_for_catalog_guard_then_publishes_new_graph_and_contra
     assert applied["apply_result"]["workflow_revision"] == previous_revision + 1
     assert service.get_workflow(WORKFLOW_UUID)["revision"] == previous_revision + 1
     assert WORKFLOW_TEMPLATE_NAME in _catalog_identities(service)
+
+
+def test_child_apply_recompiles_registered_parent_without_parent_draft_save(
+    tmp_path: Path,
+) -> None:
+    """证明子工作流 Apply 后自动刷新依赖它的父工作流候选且无需重存父 Draft。
+
+    参数：
+        tmp_path: 隔离工作流权威数据库与可编辑包源码的临时目录。
+
+    返回：
+        无；断言发布后的父工作流候选与诊断已由同一源码重新编译。
+
+    不变量：
+        父工作流源码字节不变；子工作流 Apply 发布目录后不得保留旧的
+        ``composite_child_unapplied`` 派生诊断。
+    """
+
+    working_dir = tmp_path / "authority"
+    service = _compose(working_dir, include_host=True)
+    _register_child_source(service, working_dir)
+    service.create_workflow(
+        workflow_uuid=PARENT_WORKFLOW_UUID,
+        name="Lifecycle parent",
+        tags=[],
+        description=None,
+        meta_data={},
+    )
+    # 父工作流源码（Workflow Source）与子源码共享同一个获授权可编辑包边界。
+    package_root = working_dir / "c1_published_lab"
+    service.register_editable_source(
+        workflow_uuid=PARENT_WORKFLOW_UUID,
+        package_id="c1_published_lab",
+        package_root=package_root,
+        relative_path="workflows/parent.py",
+    )
+    parent_workflow = service.get_workflow(PARENT_WORKFLOW_UUID)
+    parent_before_apply = service.save_draft(
+        PARENT_WORKFLOW_UUID,
+        python_source=PARENT_SOURCE,
+        expected_draft_hash=None,
+        expected_workflow_revision=parent_workflow["revision"],
+    )
+
+    assert parent_before_apply["candidate"] is None
+    assert [item["code"] for item in parent_before_apply["draft"]["diagnostics"]] == [
+        "composite_child_unapplied"
+    ]
+
+    service.apply_authoring(
+        WORKFLOW_UUID,
+        candidate_hash=_prepare_child_apply(service, working_dir),
+    )
+
+    parent_after_apply = service.get_authoring(PARENT_WORKFLOW_UUID)
+    assert parent_after_apply["draft"]["diagnostics"] == []
+    assert parent_after_apply["candidate"] is not None
 
 
 def test_replace_failure_marks_catalog_unavailable_until_restart_rebuilds(
