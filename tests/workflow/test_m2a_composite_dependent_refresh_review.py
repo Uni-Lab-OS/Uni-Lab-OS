@@ -31,12 +31,12 @@ from .test_c1_catalog_publication_lifecycle import (
     PARENT_WORKFLOW_UUID,
     SOURCE,
     WORKFLOW_TEMPLATE_NAME,
-    _StaticResourceTemplateIdentityIndex,
     _catalog_identities,
     _package_catalog,
     _prepare_child_apply,
     _register_child_source,
     _registry_snapshot,
+    _StaticResourceTemplateIdentityIndex,
 )
 from .test_c1_published_workflow_contract import (
     HOST_RESOURCE_TEMPLATE_UUID,
