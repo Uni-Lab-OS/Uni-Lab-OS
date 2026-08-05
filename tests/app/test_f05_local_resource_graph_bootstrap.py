@@ -14,6 +14,9 @@ from unilabos.app.scheduler.inventory.resource_graph_bootstrap import (
     ResourceGraphBootstrapError,
     bootstrap_local_resource_graph,
 )
+from unilabos.app.scheduler.inventory.resource_reference import (
+    build_inventory_resource_reference_resolver,
+)
 from unilabos.app.scheduler.inventory.store import InventoryStore
 from unilabos.config.config import HTTPConfig
 from unilabos.registry.template_snapshot import RegistryTemplateSnapshot
@@ -81,6 +84,36 @@ class _SharedImplementationRegistry(_Registry):
             "class": dict(primary["class"]),
         }
         return [primary, secondary]
+
+
+class _RegistryWithHostExecutor(_Registry):
+    """在资源图设备之外发布 OS 内建 Host 平台执行器模板。"""
+
+    def obtain_registry_device_info(self) -> list[dict[str, Any]]:
+        """返回资源树设备与内建 Host 平台执行器资源模板。
+
+        参数：无。返回：保留原设备并追加 ``host_node`` 模板的新列表。异常：无；
+        Host 不出现在资源树快照中，用于验证启动投影补齐实际设备物料身份。
+        """
+
+        return [
+            *super().obtain_registry_device_info(),
+            {
+                "id": "host_node",
+                "display_name": "Host Node",
+                "type": "device",
+                "class": {
+                    "module": "unilabos.ros.nodes.presets.host_node:HostNode",
+                    "type": "HostNode",
+                    "action_value_mappings": {},
+                },
+                "handles": [],
+                "category": ["platform-executor"],
+                "config_info": [],
+                "scene": [],
+                "device_params": {},
+            },
+        ]
 
 
 class _ResourceTree:
@@ -265,6 +298,38 @@ def test_shared_implementation_class_keeps_unique_business_aliases() -> None:
     assert [node["material"]["uuid"] for node in graph["nodes"]] == [
         MOUNT_MATERIAL_UUID
     ]
+
+
+def test_bootstrap_persists_implicit_host_executor_material_identity() -> None:
+    """内建 Host 平台执行器必须在同一启动事务获得实际设备物料身份。
+
+    参数：无。返回：无。断言：注册表（Registry）发布 ``host_node`` 但资源树
+    未显式包含它时，库存权威（Inventory Authority）仍持久化唯一实际设备物料
+    （Material），业务 ID 解析器可返回规范物料与资源模板 UUID；不创建工作流
+    任务（WorkflowTask）或执行动作。
+    """
+
+    store = InventoryStore(":memory:")
+    try:
+        _bootstrap(
+            store,
+            _ResourceTree(),
+            registry=_RegistryWithHostExecutor(),
+        )
+        # ``resolved_host`` 是工作流创作与执行器绑定共用的最小库存身份回执。
+        resolved_host = build_inventory_resource_reference_resolver(store)("host_node")
+        material_count = store.query_one("SELECT COUNT(*) AS count FROM material")
+        host_row = store.query_one(
+            "SELECT name,meta_data FROM material WHERE uuid=?",
+            (resolved_host["uuid"],) if resolved_host is not None else ("",),
+        )
+    finally:
+        store.close()
+
+    assert resolved_host is not None
+    assert material_count == {"count": 2}
+    assert host_row is not None and host_row["name"] == "Host Node"
+    assert '"source_node_id":"host_node"' in host_row["meta_data"]
 
 
 def test_legacy_zero_scale_is_normalized_to_identity_scale() -> None:
