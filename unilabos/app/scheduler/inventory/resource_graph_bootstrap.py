@@ -145,14 +145,15 @@ def _template_aliases(snapshot: RegistryTemplateSnapshot) -> dict[str, str]:
     """建立注册表别名到资源模板业务 ID 的唯一映射。
 
     参数：``snapshot`` 是单代注册表快照。返回：业务 ID、显式源码身份及全代唯一
-    实现类身份的映射；多个模板共享的实现类不会进入返回值。异常：空业务身份，
-    或业务 ID/显式源码身份相互冲突时抛出 ``ResourceGraphBootstrapError``。
+    实现类身份与全代唯一社区包短 ID 的映射；歧义别名不会进入返回值。异常：空
+    业务身份，或业务 ID/显式源码身份相互冲突时抛出 ``ResourceGraphBootstrapError``。
     """
 
     # ``aliases`` 保存作者显式业务身份，以及稍后证明全代唯一的遗留实现类别名。
     aliases: dict[str, str] = {}
     # ``class_owners`` 汇总同代每个 Python 实现类的所有业务模板所有者。
     class_owners: dict[str, set[str]] = {}
+    package_short_owners: dict[str, set[str]] = {}
     for definition in snapshot.detached_definitions():
         template_name = str(definition.get("id") or "").strip()
         class_definition = definition.get("class")
@@ -174,6 +175,13 @@ def _template_aliases(snapshot: RegistryTemplateSnapshot) -> dict[str, str]:
         )
         if isinstance(class_module, str) and class_module.strip():
             class_owners.setdefault(class_module.strip(), set()).add(template_name)
+        if template_name.startswith("community."):
+            package_short_owners.setdefault(
+                template_name.rsplit(".", 1)[-1], set()
+            ).add(template_name)
+    for short_alias, owners in package_short_owners.items():
+        if len(owners) == 1 and short_alias not in aliases:
+            aliases[short_alias] = next(iter(owners))
     for class_alias, owners in class_owners.items():
         # 共享实现类没有唯一业务语义；保留业务 ID，丢弃该遗留便利别名。
         if len(owners) != 1 or class_alias in aliases:
