@@ -334,7 +334,7 @@ def test_projection_emits_business_handles_then_separate_ready_handles() -> None
             "type": "boolean",
             "required": False,
             "data_source": "dependency",
-            "structural_role": "ready_target",
+            "structural_role": "ready",
         },
         {
             "key": "ready",
@@ -342,7 +342,7 @@ def test_projection_emits_business_handles_then_separate_ready_handles() -> None
             "type": "boolean",
             "required": False,
             "data_source": "dependency",
-            "structural_role": "ready_source",
+            "structural_role": "ready",
         },
     ]
 
