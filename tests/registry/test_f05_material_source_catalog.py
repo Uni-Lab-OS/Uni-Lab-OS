@@ -243,6 +243,56 @@ def test_registry_projects_one_stable_material_source_framework_template(
     restarted.close()
 
 
+def test_registry_projects_one_stable_group_framework_template(tmp_path: Path) -> None:
+    """宿主节点（Host Node）应发布唯一、无连接点的展示分组模板。
+
+    参数说明：``tmp_path`` 提供跨刷新和重启的隔离 SQLite 路径。返回：无。
+    断言：展示分组（Group）使用稳定业务身份，类型为 ``group``，没有执行连接点
+    （Handle），且刷新与重启后复用同一 UUID。
+    """
+
+    # ``database_path`` 保存展示分组业务唯一键到模板 UUID 的生命周期映射。
+    database_path = tmp_path / "workflow_history.db"
+    projection = _projection(database_path)
+    first = projection.refresh(_Registry()).require_action(
+        "unilabos.workflow.authoring:group",
+        "group",
+    )
+    # ``group_uuid`` 是展示分组框架模板首次发布或从旧代际复用的身份。
+    group_uuid = str(first.template["uuid"])
+
+    assert {
+        "resource_template_uuid": first.template["resource_template_uuid"],
+        "name": first.template["name"],
+        "class": first.template["class"],
+        "type": first.template["type"],
+        "node_type": first.template["node_type"],
+    } == {
+        "resource_template_uuid": HOST_TEMPLATE_UUID,
+        "name": "group",
+        "class": "unilabos.workflow.authoring:group",
+        "type": "group",
+        "node_type": "group",
+    }
+    assert first.handles == ()
+    assert (
+        projection.refresh(_Registry())
+        .require_action("unilabos.workflow.authoring:group", "group")
+        .template["uuid"]
+        == group_uuid
+    )
+    projection.close()
+
+    restarted = _projection(database_path)
+    assert (
+        restarted.snapshot()
+        .require_action("unilabos.workflow.authoring:group", "group")
+        .template["uuid"]
+        == group_uuid
+    )
+    restarted.close()
+
+
 def test_catalog_snapshot_freezes_bidirectional_resource_template_identity(
     tmp_path: Path,
 ) -> None:

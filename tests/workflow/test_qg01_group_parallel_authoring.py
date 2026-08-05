@@ -101,7 +101,7 @@ def grouped(*, sample: ResourceSlot):
         prepared = reactor.prepare(sample=sample, cycles=1)
         # unilab:node_uuid={ANALYZE_NODE_UUID}
         analyzed = reactor.analyze(prepared=prepared.prepared, label="grouped")
-    return workflow_output(report=analyzed.report)
+    return workflow_output(sample=prepared.prepared, report=analyzed.report)
 '''
 
 
@@ -121,19 +121,23 @@ reactor: Reactor = device()
 
 
 @workflow(workflow_uuid="{WORKFLOW_UUID}", displayname="Parallel preparation")
-def parallel_preparation(*, sample: ResourceSlot):
+def parallel_preparation(*, sample_a: ResourceSlot, sample_b: ResourceSlot):
     with parallel():
         # unilab:node_uuid={GROUP_A_NODE_UUID}
         with group(name="Branch A"):
             # unilab:node_uuid={PREPARE_NODE_UUID}
-            branch_a = reactor.prepare(sample=sample, cycles=1)
+            branch_a = reactor.prepare(sample=sample_a, cycles=1)
         # unilab:node_uuid={GROUP_B_NODE_UUID}
         with group(name="Branch B"):
             # unilab:node_uuid={BRANCH_B_NODE_UUID}
-            branch_b = reactor.prepare(sample=sample, cycles=2)
+            branch_b = reactor.prepare(sample=sample_b, cycles=2)
     # unilab:node_uuid={ANALYZE_NODE_UUID}
     final = reactor.analyze(prepared=branch_a.prepared, label="complete")
-    return workflow_output(report=final.report)
+    return workflow_output(
+        sample_a=branch_a.prepared,
+        sample_b=branch_b.prepared,
+        report=final.report,
+    )
 '''
 
 
@@ -249,7 +253,7 @@ def test_parallel_branch_cannot_read_a_sibling_result() -> None:
     """
 
     source = _parallel_source().replace(
-        "sample=sample, cycles=2",
+        "sample=sample_b, cycles=2",
         "sample=branch_a.prepared, cycles=2",
     )
     result = _compile(_group_engine(), source)
