@@ -10,6 +10,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 from time import monotonic, sleep
 from typing import (
+    TYPE_CHECKING,
     Any,
     Callable,
     Dict,
@@ -36,6 +37,9 @@ from unilabos.workflow.graph_validation import (
 from unilabos.workflow.json_codec import decode_json_bytes, encode_json
 from unilabos.workflow.models import WorkflowEdgeWrite, WorkflowNodeWrite
 from unilabos.workflow.store_migrations import ensure_device_action_run_schema
+
+if TYPE_CHECKING:
+    from unilabos.workflow.task_input import PreparedTaskInput
 
 _STORE_INITIALIZATION_BUSY_TIMEOUT_SECONDS = 5.0
 _STORE_INITIALIZATION_SQLITE_BUSY_TIMEOUT_MS = 100
@@ -1068,17 +1072,24 @@ class WorkflowStore:
         task_uuid: str,
         run_mode: str,
         target_node_uuid: Optional[str],
-        input_value: Dict[str, Any],
         description: Optional[str],
         meta_data: Dict[str, Any],
-        plan_builder: Callable[
-            [Dict[str, Any]], Tuple[Dict[str, Any], List[Dict[str, Any]]]
-        ],
+        plan_builder: Callable[[Dict[str, Any]], PreparedTaskInput],
     ) -> Dict[str, Any]:
+        """原子创建工作流任务（WorkflowTask）及首次节点作业。
+
+        参数：工作流、任务、运行模式与目标标识创建意图；说明和元数据是公开
+        请求事实；``plan_builder`` 必须从事务内读取的同一应用图返回已解析输入、
+        冻结快照、执行计划（ExecutionPlan）及作业。返回：提交后的任务投影。
+        异常：图不存在、计划或输入无效及数据库失败均回滚任务和全部作业写入。
+        """
+
         now = utc_now()
         with self.transaction() as conn:
             graph = self.get_graph(workflow_uuid, conn=conn)
-            plan, jobs = plan_builder(graph)
+            prepared = plan_builder(graph)
+            plan = prepared.execution_plan
+            jobs = prepared.jobs
             effective_run_mode = str(plan["run_mode"])
             effective_target = plan.get("target_node_uuid")
             control_status = "paused" if effective_run_mode == "step" else "active"
@@ -1099,12 +1110,12 @@ class WorkflowStore:
                     description,
                     _json(meta_data),
                     workflow_uuid,
-                    _json(graph),
+                    _json(prepared.workflow_snapshot),
                     _json(plan),
                     effective_run_mode,
                     effective_target,
                     control_status,
-                    _json(input_value),
+                    _json(prepared.resolved_input),
                 ),
             )
             for job in jobs:

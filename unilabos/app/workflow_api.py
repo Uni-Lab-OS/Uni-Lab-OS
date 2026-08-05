@@ -14,6 +14,11 @@ from fastapi.responses import JSONResponse, Response, StreamingResponse
 from fastapi.routing import APIRoute
 from pydantic import BaseModel, ConfigDict, Field, field_validator
 
+from unilabos.app.workflow_template_api import (
+    TemplateSnapshotProvider,
+    WorkflowTemplateQueryService,
+    create_workflow_template_router,
+)
 from unilabos.workflow.json_codec import decode_json_bytes, encode_json
 from unilabos.workflow.models import (
     WorkflowEdgeWrite,
@@ -22,11 +27,6 @@ from unilabos.workflow.models import (
     normalize_json_object,
 )
 from unilabos.workflow.service import WorkflowError, WorkflowService
-from unilabos.app.workflow_template_api import (
-    TemplateSnapshotProvider,
-    WorkflowTemplateQueryService,
-    create_workflow_template_router,
-)
 
 
 class _StrictModel(BaseModel):
@@ -164,12 +164,20 @@ class WorkflowTaskCreateRequest(_BackendModel):
     workflow_uuid: str
     run_mode: str = "normal"
     target_node_uuid: Optional[str] = None
+    input: Dict[str, Any] = Field(default_factory=dict)
     description: Optional[str] = None
     meta_data: Dict[str, Any] = Field(default_factory=dict)
 
-    @field_validator("meta_data", mode="before")
+    @field_validator("input", "meta_data", mode="before")
     @classmethod
     def _json_object(cls, value: Any) -> Dict[str, Any]:
+        """规范化任务输入和公开元数据对象。
+
+        参数：``value`` 是 Pydantic 解码前的 JSON 值。返回：独立 JSON 对象，
+        显式 ``null`` 按后端（Backend）零值对象处理。异常：非对象或非法 JSON
+        值由 ``normalize_json_object`` 抛出并映射为请求错误。
+        """
+
         return normalize_json_object(value)
 
 
@@ -220,7 +228,11 @@ class _BackendJSONResponse(JSONResponse):
 
 
 def _public_data(data: Any) -> Any:
-    """Remove fields dropped by Backend migrations 000037/000040/000042."""
+    """递归移除后端（Backend）迁移已删除的公共字段。
+
+    参数：``data`` 是服务层投影或嵌套集合。返回：不共享容器的公共投影；任务
+    输入保留，尚未进入当前迁移合同的输出隐藏。异常：无。
+    """
 
     if isinstance(data, list):
         return [_public_data(value) for value in data]
@@ -228,7 +240,6 @@ def _public_data(data: Any) -> Any:
         return data
     result = {key: _public_data(value) for key, value in data.items()}
     if "workflow_snapshot" in result and "workflow_uuid" in result:
-        result.pop("input", None)
         result.pop("output", None)
     if "workflow_uuid" in result and "pose" in result and "param" in result:
         result.pop("status", None)
@@ -349,12 +360,19 @@ def create_workflow_router(service: WorkflowService) -> APIRouter:
     def create_workflow_task(
         body: WorkflowTaskCreateRequest,
     ) -> JSONResponse:
+        """通过公共接口创建一次工作流任务（WorkflowTask）。
+
+        参数：``body`` 携带工作流身份、运行模式和任务输入。返回：HTTP 201 的
+        标准任务投影，包含已规范化输入与冻结执行计划（ExecutionPlan）。异常：
+        服务层稳定错误由应用异常处理器转换为后端业务响应。
+        """
+
         return _success(
             service.create_workflow_task(
                 workflow_uuid=body.workflow_uuid,
                 run_mode=body.run_mode,
                 target_node_uuid=body.target_node_uuid,
-                input_value={},
+                input_value=body.input,
                 description=body.description,
                 meta_data=body.meta_data,
             ),

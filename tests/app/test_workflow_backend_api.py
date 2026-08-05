@@ -32,6 +32,12 @@ def _client(tmp_path):
 
 
 def test_workflow_definition_task_snapshot_and_soft_delete_match_backend(tmp_path):
+    """公共定义、任务快照和软删除须保持后端（Backend）合同。
+
+    参数：``tmp_path`` 隔离工作流数据库。返回：无。异常：HTTP、任务输入公开
+    投影、快照或软删除回归由断言暴露。
+    """
+
     client, store = _client(tmp_path)
 
     created = client.post(
@@ -81,7 +87,7 @@ def test_workflow_definition_task_snapshot_and_soft_delete_match_backend(tmp_pat
     assert task_response.status_code == 201
     task = task_response.json()["data"]
     assert task["status"] == "pending"
-    assert "input" not in task
+    assert task["input"] == {}
     assert "output" not in task
     assert "status" not in task["workflow_snapshot"]["nodes"][0]
 

@@ -66,6 +66,11 @@ from unilabos.workflow.store import (
     WorkflowStore,
     utc_now,
 )
+from unilabos.workflow.task_input import (
+    PreparedTaskInput,
+    TaskInputError,
+    prepare_task_input,
+)
 from unilabos.workflow.task_scheduler_bridge import TaskSchedulerBridgeError
 
 _ERRORS = {
@@ -474,8 +479,8 @@ class WorkflowService:
         单节点运行模式；``target_node_uuid`` 是单节点运行目标；``input_value``
         是任务输入；``description`` 与 ``meta_data`` 是用户说明和公开元数据。
         返回：同一事务创建的工作流任务及工作流节点作业（WorkflowNodeJob）投影。
-        异常：身份、运行模式、输入或执行计划不合法时抛出稳定工作流错误；本阶段
-        仍拒绝非空任务输入，避免在解释合同完成前持久化歧义语义。
+        异常：身份、运行模式、输入或执行计划不合法时抛出稳定工作流错误；输入
+        合同解析、默认值填充与计划绑定全部在同一创建事务的首次写入前完成。
         """
 
         workflow_uuid = self.get_workflow(workflow_uuid)["uuid"]
@@ -492,10 +497,6 @@ class WorkflowService:
             meta_data = normalize_json_object(meta_data)
         except ValueError:
             raise WorkflowError("invalid_input") from None
-        # P0-2 已冻结合同；生产 schema/compiler 属于 Phase 02。本阶段镜像后端基线
-        # （Backend baseline）的空任务（Task）input，不提前持久化未实现的解释。
-        if input_value:
-            raise WorkflowError("invalid_input")
         description = self._optional_text(description)
         try:
             task = self._store.create_task_with_jobs(
@@ -503,11 +504,11 @@ class WorkflowService:
                 task_uuid=str(uuid4()),
                 run_mode=run_mode,
                 target_node_uuid=target_node_uuid,
-                input_value={},
                 description=description,
                 meta_data=meta_data,
-                plan_builder=lambda graph: self._build_execution_plan(
+                plan_builder=lambda graph: self._prepare_task_input(
                     graph,
+                    input_value=input_value,
                     run_mode=run_mode,
                     target_node_uuid=target_node_uuid,
                 ),
@@ -520,6 +521,8 @@ class WorkflowService:
             return aggregate["task"]
         except TaskSchedulerBridgeError:
             raise WorkflowError("internal_error") from None
+        except TaskInputError:
+            raise WorkflowError("invalid_input") from None
         except StoreConflict:
             raise WorkflowError("invalid_input") from None
 
@@ -684,6 +687,34 @@ class WorkflowService:
             graph,
             run_mode=run_mode,
             target_node_uuid=target_node_uuid,
+        )
+
+    def _prepare_task_input(
+        self,
+        graph: Dict[str, Any],
+        *,
+        input_value: Dict[str, Any],
+        run_mode: str,
+        target_node_uuid: Optional[str],
+    ) -> PreparedTaskInput:
+        """从同一应用图构造计划并冻结工作流任务（WorkflowTask）输入。
+
+        参数：``graph`` 是创建事务读取的应用图；``input_value`` 是规范 JSON
+        请求对象；``run_mode`` 和 ``target_node_uuid`` 决定活动计划范围。返回：
+        已解析输入、快照、执行计划（ExecutionPlan）和首次作业。异常：计划或
+        输入绑定不合法时保留构建器/``TaskInputError`` 以映射稳定业务错误。
+        """
+
+        plan, jobs = self._build_execution_plan(
+            graph,
+            run_mode=run_mode,
+            target_node_uuid=target_node_uuid,
+        )
+        return prepare_task_input(
+            graph=graph,
+            raw_input=input_value,
+            execution_plan=plan,
+            jobs=jobs,
         )
 
     # 工作流创作（Authoring） ---------------------------------------------
