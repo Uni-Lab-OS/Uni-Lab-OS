@@ -1,0 +1,299 @@
+"""本地资源树进入公共物料图（MaterialGraph）的启动合同测试。"""
+
+from __future__ import annotations
+
+from pathlib import Path
+from typing import Any
+
+import pytest
+
+from unilabos.app.main import should_bootstrap_local_resource_graph
+from unilabos.app.scheduler.inventory.backend_contract import BackendResourceService
+from unilabos.app.scheduler.inventory.resource_graph_bootstrap import (
+    ResourceGraphBootstrapError,
+    bootstrap_local_resource_graph,
+)
+from unilabos.app.scheduler.inventory.store import InventoryStore
+from unilabos.config.config import HTTPConfig
+from unilabos.registry.template_snapshot import RegistryTemplateSnapshot
+
+MOUNT_MATERIAL_UUID = "97539b08-24de-5003-8b2e-9eb6e983c68a"
+FIRST_SITE_UUID = "1962ab7c-b006-5e44-a1bd-9b1fde81d529"
+
+
+class _Registry:
+    """提供启动投影所需的最小设备注册表（Registry）快照。
+
+    参数：构造时无参数。返回：两个读取方法分别返回设备与器材模板定义。
+    异常：无；测试只提供一个身份唯一的设备资源模板（ResourceTemplate）。
+    """
+
+    def obtain_registry_device_info(self) -> list[dict[str, Any]]:
+        """返回固定设备资源模板定义。
+
+        参数：无。返回：包含稳定业务 ID 与 Python 源码身份的单元素列表。
+        异常：无；``m2b_mount`` 是资源图设备类和资源模板的共同业务身份。
+        """
+
+        return [
+            {
+                "id": "m2b_mount",
+                "display_name": "M2B Mount",
+                "type": "device",
+                "class": {
+                    "module": "m2b_native_e2e.mount:M2BMount",
+                    "type": "M2BMount",
+                    "action_value_mappings": {},
+                },
+                "handles": [],
+                "category": ["stacker"],
+                "config_info": [],
+                "scene": [],
+                "device_params": {},
+            }
+        ]
+
+    def obtain_registry_resource_info(self) -> list[dict[str, Any]]:
+        """返回空器材资源模板集合。
+
+        参数：无。返回：空列表。异常：无；本夹具只验证设备物料与库位（Site）。
+        """
+
+        return []
+
+
+class _ResourceTree:
+    """以产品 ``ResourceTreeSet.dump`` 形状暴露固定资源树。
+
+    参数：``site_parent_uuid`` 可覆盖库位（Site）的父运行时 UUID；
+    ``mount_name`` 可改变资源图内容以制造指纹冲突。返回：``dump`` 提供一棵树。
+    异常：无；非法父引用由被测深模块关闭式拒绝。
+    """
+
+    def __init__(
+        self,
+        *,
+        site_parent_uuid: str = "64000000-0000-4000-8000-0000000002b0",
+        mount_name: str = "Stacker A",
+    ) -> None:
+        """保存测试资源树的可变输入。
+
+        参数：两个参数分别表示库位父身份与设备展示名。返回：无。
+        异常：无；``site_parent_uuid`` 是运行时父引用，不是正式物料 UUID。
+        """
+
+        self._site_parent_uuid = site_parent_uuid
+        self._mount_name = mount_name
+
+    def dump(self) -> list[list[dict[str, Any]]]:
+        """返回设备物料和两个有序库位（Site）的序列化树。
+
+        参数：无。返回：与 ``ResourceTreeSet.dump`` 相同的嵌套列表。
+        异常：无；运行时 UUID 只用于关系解析，正式身份由资源图来源生成。
+        """
+
+        # ``runtime_mount_uuid`` 是资源树内部关系身份，不得成为库存权威物料身份。
+        runtime_mount_uuid = "64000000-0000-4000-8000-0000000002b0"
+        return [
+            [
+                {
+                    "id": "m2b_mount",
+                    "uuid": runtime_mount_uuid,
+                    "name": self._mount_name,
+                    "description": "",
+                    "parent_uuid": None,
+                    "type": "device",
+                    "class": "m2b_mount",
+                    "pose": _pose(0, 0, 0, 360, 300, 720),
+                    "config": {"category": "stacker"},
+                    "data": {},
+                    "barcode": "",
+                },
+                {
+                    "id": "slot_a",
+                    "uuid": "64000000-0000-4000-8000-0000000002b1",
+                    "name": "Slot 1",
+                    "description": "",
+                    "parent_uuid": self._site_parent_uuid,
+                    "type": "well",
+                    "class": "",
+                    "pose": _pose(0, 0, 40, 100, 100, 24),
+                    "config": {"category": "well"},
+                    "data": {},
+                    "barcode": "",
+                },
+                {
+                    "id": "slot_b",
+                    "uuid": "64000000-0000-4000-8000-0000000002b2",
+                    "name": "Slot 2",
+                    "description": "",
+                    "parent_uuid": runtime_mount_uuid,
+                    "type": "well",
+                    "class": "",
+                    "pose": _pose(120, 0, 40, 100, 100, 24),
+                    "config": {"category": "well"},
+                    "data": {},
+                    "barcode": "",
+                },
+            ]
+        ]
+
+
+def _pose(
+    x: float,
+    y: float,
+    z: float,
+    width: float,
+    height: float,
+    depth: float,
+) -> dict[str, Any]:
+    """构造资源树位置与尺寸。
+
+    参数：前三项是位置，后三项是宽、高、深。返回：产品 ``pose`` 字典。
+    异常：无；数值均是已知有限测试向量。
+    """
+
+    return {
+        "position": {"x": x, "y": y, "z": z},
+        "size": {"width": width, "height": height, "depth": depth},
+        "scale": {"x": 1, "y": 1, "z": 1},
+        "rotation": {"x": 0, "y": 0, "z": 0},
+    }
+
+
+def _bootstrap(store: InventoryStore, tree: _ResourceTree) -> dict[str, Any]:
+    """通过正式深模块接口执行一次启动投影。
+
+    参数：``store`` 是本地库存权威，``tree`` 是资源树集合替身。返回：导入回执。
+    异常：资源图非法或与既有权威冲突时传播 ``ResourceGraphBootstrapError``。
+    """
+
+    # ``registry_snapshot`` 是模板同步与资源投影共同消费的单代注册表事实。
+    registry_snapshot = RegistryTemplateSnapshot.from_registry(_Registry())
+    return bootstrap_local_resource_graph(
+        store=store,
+        resource_tree_set=tree,
+        registry_snapshot=registry_snapshot,
+        source_id="/workspace/m2b-native-workspace/graph.json",
+    )
+
+
+def test_first_bootstrap_exposes_stable_device_material_and_ordered_sites() -> None:
+    """首次启动必须通过公共接口发布稳定设备物料和业务顺序库位。
+
+    参数：无。返回：无。断言：UUID5 固定向量、父物料与 ``sort_order`` 不漂移。
+    """
+
+    store = InventoryStore(":memory:")
+    try:
+        receipt = _bootstrap(store, _ResourceTree())
+        graph = BackendResourceService(store).material_graph()
+    finally:
+        store.close()
+
+    assert receipt["status"] == "imported"
+    assert [node["material"]["uuid"] for node in graph["nodes"]] == [
+        MOUNT_MATERIAL_UUID
+    ]
+    sites = graph["nodes"][0]["sites"]
+    assert [site["uuid"] for site in sites] == [
+        FIRST_SITE_UUID,
+        "56dfa4a8-06b8-5750-bff9-b2290766a57d",
+    ]
+    assert [site["sort_order"] for site in sites] == [0, 1]
+    assert all(site["material_uuid"] == MOUNT_MATERIAL_UUID for site in sites)
+
+
+def test_restart_with_same_source_and_fingerprint_is_idempotent(tmp_path: Path) -> None:
+    """同一资源图跨进程重启只返回幂等回执。
+
+    参数：``tmp_path`` 隔离 SQLite 文件。返回：无。断言：正式身份和行数不重复。
+    """
+
+    database_path = tmp_path / "inventory.db"
+    first = InventoryStore(str(database_path))
+    try:
+        assert _bootstrap(first, _ResourceTree())["status"] == "imported"
+    finally:
+        first.close()
+    reopened = InventoryStore(str(database_path))
+    try:
+        receipt = _bootstrap(reopened, _ResourceTree())
+        material_count = reopened.query_one("SELECT COUNT(*) AS count FROM material")
+        site_count = reopened.query_one("SELECT COUNT(*) AS count FROM site")
+    finally:
+        reopened.close()
+
+    assert receipt["status"] == "unchanged"
+    assert material_count == {"count": 1}
+    assert site_count == {"count": 2}
+
+
+def test_changed_fingerprint_fails_closed_without_overwriting_public_graph() -> None:
+    """既有权威遇到同来源不同指纹时必须关闭式失败且保持原图。
+
+    参数：无。返回：无。断言：冲突不会改名、追加物料或改变库位（Site）。
+    """
+
+    store = InventoryStore(":memory:")
+    try:
+        _bootstrap(store, _ResourceTree())
+        before = BackendResourceService(store).material_graph()
+        with pytest.raises(ResourceGraphBootstrapError, match="指纹|fingerprint"):
+            _bootstrap(store, _ResourceTree(mount_name="Changed"))
+        after = BackendResourceService(store).material_graph()
+    finally:
+        store.close()
+
+    assert after == before
+
+
+def test_dangling_site_parent_rolls_back_all_projection_rows() -> None:
+    """悬空库位父引用必须在任何投影行提交前失败。
+
+    参数：无。返回：无。断言：物料、库位和启动指纹全部保持空集合。
+    """
+
+    store = InventoryStore(":memory:")
+    try:
+        with pytest.raises(ResourceGraphBootstrapError, match="父|owner|parent"):
+            _bootstrap(store, _ResourceTree(site_parent_uuid="missing-runtime-parent"))
+        material_count = store.query_one("SELECT COUNT(*) AS count FROM material")
+        site_count = store.query_one("SELECT COUNT(*) AS count FROM site")
+        bootstrap_meta = store.query_all(
+            "SELECT * FROM lab_meta WHERE meta_key LIKE 'resource_graph_bootstrap_%'"
+        )
+    finally:
+        store.close()
+
+    assert material_count == {"count": 0}
+    assert site_count == {"count": 0}
+    assert bootstrap_meta == []
+
+
+def test_bootstrap_gate_requires_local_scheduler_and_embedded_inventory(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """启动投影只允许本地调度与嵌入式库存共同启用。
+
+    参数：``monkeypatch`` 隔离全局物料来源配置。返回：无。断言：后端控制、
+    外部库存和显式关闭调度器均不得打开启动投影路径。
+    """
+
+    monkeypatch.setattr(HTTPConfig, "material_source", "microbackend")
+    local_args = {
+        "app_bridges": ["fastapi"],
+        "edge_scheduler": True,
+        "_material_service_mode": "embedded",
+    }
+    assert should_bootstrap_local_resource_graph(local_args, is_host_mode=True)
+
+    backend_args = {**local_args, "app_bridges": ["edge_control", "fastapi"]}
+    external_args = {**local_args, "_material_service_mode": "external"}
+    scheduler_off_args = {**local_args, "edge_scheduler": False}
+    assert not should_bootstrap_local_resource_graph(backend_args, is_host_mode=True)
+    assert not should_bootstrap_local_resource_graph(external_args, is_host_mode=True)
+    assert not should_bootstrap_local_resource_graph(
+        scheduler_off_args, is_host_mode=True
+    )
+    assert not should_bootstrap_local_resource_graph(local_args, is_host_mode=False)
