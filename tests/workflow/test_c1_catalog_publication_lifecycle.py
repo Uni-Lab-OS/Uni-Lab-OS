@@ -409,9 +409,7 @@ def test_restart_recompiles_unchanged_parent_after_child_was_applied(
     )
     stale_draft = parent_before_apply["draft"]
     stale_diagnostics = stale_draft["diagnostics"]
-    assert [item["code"] for item in stale_diagnostics] == [
-        "composite_child_unapplied"
-    ]
+    assert [item["code"] for item in stale_diagnostics] == ["composite_child_unapplied"]
 
     service.apply_authoring(
         WORKFLOW_UUID,

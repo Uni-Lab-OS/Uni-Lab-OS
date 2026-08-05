@@ -472,6 +472,26 @@ class WorkflowService:
         description: Optional[str],
         meta_data: Dict[str, Any],
     ) -> Dict[str, Any]:
+        """更新工作流展示事实并刷新受发布目录影响的工作流创作草稿。
+
+        参数：
+            workflow_uuid: 待更新的工作流（Workflow）UUID。
+            name: 去除首尾空白后必须非空的工作流名称。
+            tags: Backend 形态的 JSON 标签数组。
+            description: 可空工作流说明。
+            meta_data: 不得覆盖 ``unilab`` 保留区的展示元数据。
+
+        返回：
+            更新后的 Backend 形态工作流。
+
+        异常：
+            WorkflowError: 输入、目录发布或持久化失败。
+
+        不变量：
+            已发布工作流目录先在 Catalog guard 内完整替换；依赖 Draft 只在相关
+            工作流锁和 Catalog guard 全部释放后重新编译。
+        """
+
         current = self.get_workflow(workflow_uuid)
         identity = current["uuid"]
         with self._authoring_lock(identity):
@@ -497,9 +517,26 @@ class WorkflowService:
                     catalog_authority_id=catalog_authority_id,
                 )
                 self._publish_catalog_after_mutation()
-                return updated
+        self._refresh_registered_sources_after_catalog_mutation(identity)
+        return updated
 
     def delete_workflow(self, workflow_uuid: str) -> None:
+        """软删除工作流并在发布完成后重编译其余已注册工作流创作草稿。
+
+        参数：
+            workflow_uuid: 待删除的工作流（Workflow）UUID。
+
+        返回：
+            无。
+
+        异常：
+            WorkflowError: 工作流不存在或目录发布失败。
+
+        不变量：
+            删除和 Catalog 失效属于同一持久事务；依赖 Draft 刷新不持有被删除
+            工作流的创作锁，也不把派生刷新失败改写为删除失败。
+        """
+
         identity = self.get_workflow(workflow_uuid)["uuid"]
         with self._authoring_lock(identity):
             self.get_workflow(identity)
@@ -509,6 +546,7 @@ class WorkflowService:
                     catalog_authority_id=catalog_authority_id,
                 )
                 self._publish_catalog_after_mutation()
+        self._refresh_registered_sources_after_catalog_mutation(identity)
 
     def get_graph(self, workflow_uuid: str) -> Dict[str, Any]:
         identity = self.get_workflow(workflow_uuid)["uuid"]
@@ -538,6 +576,26 @@ class WorkflowService:
         nodes: List[WorkflowNodeWrite | Dict[str, Any]],
         edges: List[WorkflowEdgeWrite | Dict[str, Any]],
     ) -> Dict[str, Any]:
+        """保存完整工作流图并刷新依赖已发布合同的工作流创作草稿。
+
+        参数：
+            workflow_uuid: 图所属工作流（Workflow）UUID。
+            revision: 调用方观察到的工作流修订号。
+            nodes: 完整替换图中的工作流节点（WorkflowNode）。
+            edges: 完整替换图中的工作流边（WorkflowEdge）。
+
+        返回：
+            保存后的 Backend 形态工作流图。
+
+        异常：
+            WorkflowConflict: 修订号冲突。
+            WorkflowError: 图、物料来源（MaterialSource）或目录发布无效。
+
+        不变量：
+            图事务和目录发布完成前不重编译其他 Draft；刷新不得嵌套取得另一个
+            工作流创作锁与 Catalog guard。
+        """
+
         identity = self.get_workflow(workflow_uuid)["uuid"]
         with self._authoring_lock(identity):
             self.get_workflow(identity)
@@ -568,7 +626,6 @@ class WorkflowService:
                         catalog_authority_id=catalog_authority_id,
                     )
                     self._publish_catalog_after_mutation()
-                    return saved
             except ValidationError:
                 raise WorkflowError("invalid_input") from None
             except MaterialSourceAuthorityError as error:
@@ -581,6 +638,8 @@ class WorkflowService:
                 raise WorkflowError("not_found") from None
             except StoreConflict:
                 raise WorkflowError("invalid_input") from None
+        self._refresh_registered_sources_after_catalog_mutation(identity)
+        return saved
 
     # WorkflowTask 与 WorkflowNodeJob -----------------------------------
 
@@ -1202,12 +1261,18 @@ class WorkflowService:
         return self._store.list_source_registrations()
 
     def recover_registered_sources(self) -> None:
-        """启动时逐一恢复已注册源码，隔离单个损坏 Draft。"""
+        """启动时恢复全部已注册工作流源码及其 Catalog 相关派生状态。
+
+        本方法没有参数和返回值。每个注册项独立恢复；损坏路径、编译器故障或
+        单个工作流创作错误不会阻止其余 Draft。源码 hash 未变只证明文件未变，
+        不能证明子工作流或模板 Catalog 未变，因此有诊断、过期候选或不完整派生
+        状态时仍会重新编译。
+        """
 
         for registration in self.list_registered_sources():
             try:
                 self.reconcile_registered_source(registration["workflow_uuid"])
-            except (OSError, RuntimeError):
+            except (OSError, RuntimeError, WorkflowError):
                 continue
 
     def close(self) -> None:
@@ -1321,6 +1386,53 @@ class WorkflowService:
         self,
         workflow_uuid: str,
     ) -> Dict[str, Any]:
+        """把一个已注册工作流源码的文件变化协调为最新创作聚合。
+
+        参数：
+            workflow_uuid: 已注册源码所属工作流（Workflow）UUID。
+
+        返回：
+            自洽的工作流创作聚合。
+
+        异常：
+            WorkflowError: 工作流、注册路径或编译结果无效。
+
+        不变量：
+            源码、修订、候选指纹和 Applied Source 均可证明仍为当前状态时按 hash
+            去重；诊断或过期候选不能仅凭源码 hash 未变跳过重编译。
+        """
+
+        return self._reconcile_registered_source(
+            workflow_uuid,
+            refresh_catalog_dependent_state=True,
+            event_cause=None,
+        )
+
+    def _reconcile_registered_source(
+        self,
+        workflow_uuid: str,
+        *,
+        refresh_catalog_dependent_state: bool,
+        event_cause: str | None,
+    ) -> Dict[str, Any]:
+        """协调一个 Draft，并可刷新由模板 Catalog 决定的派生编译状态。
+
+        参数：
+            workflow_uuid: 已注册源码所属工作流（Workflow）UUID。
+            refresh_catalog_dependent_state: 为真时，即使源码 hash 未变，也检查候选、
+                诊断和已应用源码是否仍足以证明当前创作状态。
+            event_cause: 强制重编译成功后写入的事件原因；为空时沿用文件变化原因。
+
+        返回：
+            自洽的工作流创作聚合。
+
+        异常：
+            WorkflowError: 工作流、注册路径、Catalog 或编译结果无效。
+
+        不变量：
+            读取、编译和记录更新均在同一工作流创作锁下完成；本方法不发布 Catalog。
+        """
+
         workflow_uuid = self._get_authoring_workflow(workflow_uuid)["uuid"]
         with self._authoring_lock(workflow_uuid):
             workflow = self._get_authoring_workflow(workflow_uuid)
@@ -1328,8 +1440,16 @@ class WorkflowService:
             source = self._read_source(registration)
             record = self._store.get_authoring_record(workflow_uuid)
             actual_hash = source["draft_hash"] if source is not None else None
-            if actual_hash == record["observed_draft_hash"] and not (
-                actual_hash is None and record.get("candidate") is not None
+            source_state_unchanged = actual_hash == record[
+                "observed_draft_hash"
+            ] and not (actual_hash is None and record.get("candidate") is not None)
+            if source_state_unchanged and not (
+                refresh_catalog_dependent_state
+                and self._authoring_record_requires_catalog_refresh(
+                    workflow=workflow,
+                    source=source,
+                    record=record,
+                )
             ):
                 return self.get_authoring(workflow_uuid)
 
@@ -1351,12 +1471,16 @@ class WorkflowService:
                     draft_python_source=source["python_source"],
                 )
                 diagnostics = compilation.diagnostics
-            cause = (
-                "recovered"
-                if source is not None
-                and record["observed_draft_hash"] is None
-                and record["update_time"] is not None
-                else "external_draft_changed"
+            cause = event_cause or (
+                "draft_compiled"
+                if source_state_unchanged
+                else (
+                    "recovered"
+                    if source is not None
+                    and record["observed_draft_hash"] is None
+                    and record["update_time"] is not None
+                    else "external_draft_changed"
+                )
             )
             self._store.record_draft_compilation(
                 workflow_uuid=workflow_uuid,
@@ -1381,12 +1505,78 @@ class WorkflowService:
             )
             return self.get_authoring(workflow_uuid)
 
+    def _authoring_record_requires_catalog_refresh(
+        self,
+        *,
+        workflow: Dict[str, Any],
+        source: Dict[str, Any] | None,
+        record: Dict[str, Any],
+    ) -> bool:
+        """判断同 hash 创作记录是否仍需依据当前模板 Catalog 重新编译。
+
+        参数：
+            workflow: 当前 Backend 形态工作流（Workflow）。
+            source: 当前已注册工作流源码；文件缺失时为空。
+            record: SQLite 中保存的派生工作流创作记录。
+
+        返回：
+            现有记录不能证明对应当前 Catalog、修订和源码时返回 ``True``。
+
+        不变量：
+            完整且仍匹配源码/修订的 Applied Source 不因无关 Catalog 发布产生新候选；
+            诊断和候选属于可重建派生状态，必须随 Catalog 指纹变化失效。
+        """
+
+        if source is None:
+            return record.get("candidate") is not None
+
+        candidate = record.get("candidate")
+        if isinstance(candidate, dict):
+            try:
+                return (
+                    candidate["template_catalog_fingerprint"]
+                    != self._catalog_fingerprint()
+                    or candidate["base_workflow_revision"] != workflow["revision"]
+                    or candidate["draft_hash"] != source["draft_hash"]
+                )
+            except (KeyError, TypeError, WorkflowError):
+                return True
+
+        if record.get("diagnostics"):
+            return True
+
+        applied_source = record.get("applied_source")
+        return not (
+            isinstance(applied_source, dict)
+            and applied_source.get("workflow_revision") == workflow["revision"]
+            and applied_source.get("source_hash") == source["draft_hash"]
+        )
+
     def apply_authoring(
         self,
         workflow_uuid: str,
         *,
         candidate_hash: str,
     ) -> Dict[str, Any]:
+        """原子应用一个服务端候选并刷新依赖其发布合同的工作流创作草稿。
+
+        参数：
+            workflow_uuid: 待应用候选所属工作流（Workflow）UUID。
+            candidate_hash: 服务端签发且已物化到 Draft 的不透明候选 hash。
+
+        返回：
+            Apply 结果和提交后的自洽工作流创作聚合。
+
+        异常：
+            WorkflowConflict: Draft、修订、候选或 Catalog 快照发生冲突。
+            WorkflowError: Draft、候选、物料来源或目录发布无效。
+
+        不变量：
+            Catalog guard 覆盖候选重校验、SQLite Apply 和完整目录发布；依赖 Draft
+            只在该 guard 与当前工作流创作锁释放后刷新，且刷新失败不得把已提交
+            Apply 伪装成失败。
+        """
+
         self._validate_hash(candidate_hash, nullable=False)
         workflow_uuid = self._get_authoring_workflow(workflow_uuid)["uuid"]
         with self._authoring_lock(workflow_uuid):
@@ -1574,7 +1764,7 @@ class WorkflowService:
                         record=fallback_record,
                     )
 
-            return {
+            result = {
                 "apply_result": {
                     "kind": candidate["changeset"]["kind"],
                     "previous_workflow_revision": previous_revision,
@@ -1585,6 +1775,8 @@ class WorkflowService:
                 },
                 "authoring": authoring,
             }
+        self._refresh_registered_sources_after_catalog_mutation(workflow_uuid)
+        return result
 
     def list_events(
         self,
@@ -2426,6 +2618,43 @@ class WorkflowService:
             return
         with self._catalog_snapshot():
             yield self._catalog_authority_id()
+
+    def _refresh_registered_sources_after_catalog_mutation(
+        self,
+        mutated_workflow_uuid: str,
+    ) -> None:
+        """在 Catalog 发布锁释放后刷新其他已注册工作流的派生编译状态。
+
+        参数：
+            mutated_workflow_uuid: 刚完成持久变更与目录发布的工作流（Workflow）UUID；
+                该工作流自己的 Apply 记录不在本轮重新编译。
+
+        返回：
+            无。
+
+        不变量：
+            调用方不得持有 Catalog guard 或被修改工作流的创作锁。每个依赖 Draft
+            独立刷新；单个派生刷新失败只记录诊断日志，不改变已经提交的工作流事实
+            或 Catalog 可用性。
+        """
+
+        if self._catalog_publisher is None:
+            return
+        for registration in self.list_registered_sources():
+            workflow_uuid = registration["workflow_uuid"]
+            if workflow_uuid == mutated_workflow_uuid:
+                continue
+            try:
+                self._reconcile_registered_source(
+                    workflow_uuid,
+                    refresh_catalog_dependent_state=True,
+                    event_cause="draft_compiled",
+                )
+            except Exception:  # noqa: BLE001 - 已提交 mutation 的派生刷新必须隔离
+                _LOGGER.exception(
+                    "Catalog 发布后刷新工作流创作草稿失败: workflow_uuid=%s",
+                    workflow_uuid,
+                )
 
     def _publish_catalog_after_mutation(self) -> None:
         if self._catalog_publisher is None:
