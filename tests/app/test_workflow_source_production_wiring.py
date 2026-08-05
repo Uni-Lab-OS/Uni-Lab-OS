@@ -225,7 +225,8 @@ def test_local_product_composition_forwards_the_exact_configured_roots(
     selected_root = tmp_path / "editable"
     configured_roots = (str(selected_root),)
     captured: dict[str, Any] = {}
-    workflow_service = object()
+    authoring_transform = object()
+    workflow_service = SimpleNamespace(compiler=authoring_transform)
     template_projection = object()
     inventory_service = SimpleNamespace(store=object())
     edge_scheduler = object()
@@ -287,15 +288,18 @@ def test_local_product_composition_forwards_the_exact_configured_roots(
         installed_service: object,
         *,
         template_snapshot_provider: object,
+        authoring_transform: object,
     ) -> None:
-        """记录产品只挂载本地组合返回的同一工作流服务。
+        """记录产品只挂载本地组合返回的同一工作流服务和纯转换引擎。
 
-        参数：应用、服务和模板投影均来自产品入口。返回：无；仅执行身份断言。
+        参数：应用、服务、模板投影和可信创作引擎均来自产品入口。返回：无；
+        仅执行身份断言，证明 HTTP 纯转换不会另建第二个目录代际。
         """
 
         assert target_app is server.app
         assert installed_service is workflow_service
         assert template_snapshot_provider is template_projection
+        assert authoring_transform is workflow_service.compiler
 
     monkeypatch.setattr(
         scheduler_integration,
