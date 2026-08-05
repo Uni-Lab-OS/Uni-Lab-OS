@@ -1873,9 +1873,16 @@ class WorkflowStore:
     def list_events(
         self,
         *,
-        after_id: int = 0,
+        after_sequence: int = 0,
         limit: int = 200,
     ) -> List[Dict[str, Any]]:
+        """读取严格晚于全局持久游标的失效通知。
+
+        参数：``after_sequence`` 是排他事件序号，``limit`` 是物理读取上限。
+        返回：按 SQLite 自增主键严格递增的事件副本。异常：查询失败时传播 SQLite
+        异常；参数边界由 ``DurableEventReader`` 统一校验。本方法只读。
+        """
+
         with self._lock:
             rows = self._conn.execute(
                 """
@@ -1884,7 +1891,7 @@ class WorkflowStore:
                 ORDER BY id
                 LIMIT ?
                 """,
-                (after_id, limit),
+                (after_sequence, limit),
             ).fetchall()
         return [
             {

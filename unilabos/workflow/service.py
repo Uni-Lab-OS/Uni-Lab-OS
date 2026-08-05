@@ -29,6 +29,7 @@ from unilabos.workflow.device_action_run import (
     DeviceActionRunUnavailable,
 )
 from unilabos.workflow.execution_plan import ExecutionPlanBuilder
+from unilabos.workflow.event_reader import DurableEventReader
 from unilabos.workflow.graph_validation import GraphValidationError
 from unilabos.workflow.models import (
     CandidateChangeset,
@@ -291,6 +292,7 @@ class WorkflowService:
         """
 
         self._store = store
+        self._event_reader = DurableEventReader(store)
         self.compiler = compiler
         if compiler_rebuilder is not None and not callable(compiler_rebuilder):
             raise TypeError("compiler_rebuilder 必须是可调用对象")
@@ -1458,15 +1460,32 @@ class WorkflowService:
     def list_events(
         self,
         *,
-        after_id: int = 0,
+        after_sequence: int = 0,
         limit: int = 200,
+        after_id: int | None = None,
     ) -> Dict[str, Any]:
-        if after_id < 0 or not 1 <= limit <= 1000:
+        """读取服务器发送事件（SSE）使用的持久失效通知页。
+
+        参数：``after_sequence`` 是规范排他游标，``limit`` 是公开页长；
+        ``after_id`` 仅兼容现有进程内调用，不能与非零规范游标并用。返回：含事件、
+        下一游标与是否还有后页的只读投影，并保留旧 ``after_id`` 回显。异常：
+        参数非法时抛稳定 ``WorkflowError``；持久投影损坏时传播
+        ``EventProjectionError`` 形成服务器失败，不误报为客户端输入错误。本方法
+        不写任何运行状态。
+        """
+
+        if after_id is not None:
+            if after_sequence != 0:
+                raise WorkflowError("invalid_input")
+            after_sequence = after_id
+        try:
+            page = self._event_reader.read(
+                after_sequence=after_sequence,
+                limit=limit,
+            )
+        except ValueError:
             raise WorkflowError("invalid_input")
-        return {
-            "items": self._store.list_events(after_id=after_id, limit=limit),
-            "after_id": after_id,
-        }
+        return {**page, "after_id": after_sequence}
 
     # 工作流创作（Authoring）内部实现 -------------------------------------
 

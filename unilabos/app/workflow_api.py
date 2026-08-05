@@ -111,7 +111,11 @@ class _BackendJSONRoute(APIRoute):
 
 
 def _parse_non_negative_int64_decimal(value: str) -> int:
-    """Match Go strconv.ParseInt(value, 10, 64) for an SSE cursor."""
+    """按后端（Backend）规则解析 SSE 游标。
+
+    参数：``value`` 是已按 Go 空白规则裁剪的十进制文本。返回：非负 int64。
+    异常：格式、负值或上溢时抛 ``ValueError``；不接受小数或指数形式。
+    """
 
     if _SIGNED_DECIMAL.fullmatch(value) is None:
         raise ValueError
@@ -284,6 +288,13 @@ def _error(error: WorkflowError) -> _BackendJSONResponse:
 
 
 def format_sse_event(event: Dict[str, Any]) -> str:
+    """把一个持久失效通知编码为服务器发送事件（SSE）帧。
+
+    参数：``event`` 含全局序号、事件类型和小型身份载荷。返回：UTF-8 文本帧；
+    客户端必须再用 REST 复原（Rehydrate）权威事实。异常：记录缺字段或载荷不能
+    JSON 编码时传播，不从内存历史补值。
+    """
+
     payload = json.dumps(
         event["data"],
         ensure_ascii=False,
@@ -475,6 +486,14 @@ def create_workflow_router(service: WorkflowService) -> APIRouter:
             alias="Last-Event-ID",
         ),
     ) -> Response:
+        """从持久全局游标建立只作失效通知的 SSE 流。
+
+        参数：``request`` 提供断开状态，``last_event_id`` 是规范请求头；为避免
+        框架合并重复头，原始 ASGI 头仍由适配器唯一解析。返回：非法游标的稳定
+        错误或从排他游标续传的事件流。异常：持久读取/编码错误终止当前流；不从
+        MonitorBus 环形缓冲恢复，也不从 SSE 重建业务状态。
+        """
+
         try:
             raw_cursor = next(
                 (
@@ -499,11 +518,17 @@ def create_workflow_router(service: WorkflowService) -> APIRouter:
             return _error(WorkflowError("invalid_input"))
 
         async def stream():
+            """持续读取持久事件页并发送保活帧。
+
+            参数：无，闭包持有请求与当前游标。返回：异步 SSE 文本迭代器。异常：
+            存储或编码失败时终止连接，让客户端携带最后已收序号重连。
+            """
+
             nonlocal cursor
             yield "retry: 3000\n: connected\n\n"
             while not await request.is_disconnected():
                 events_page = service.list_events(
-                    after_id=cursor,
+                    after_sequence=cursor,
                     limit=100,
                 )["items"]
                 for event in events_page:
