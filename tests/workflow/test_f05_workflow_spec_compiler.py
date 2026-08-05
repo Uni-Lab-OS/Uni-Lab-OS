@@ -7,12 +7,16 @@ from typing import Any
 
 import pytest
 
+from unilabos.workflow.execution_plan import (
+    ExecutionPlanBuilder,
+    ExecutionPlanBuildError,
+)
+
 WORKFLOW_UUID = "10000000-0000-4000-8000-000000000001"
 TASK_UUID = "20000000-0000-4000-8000-000000000001"
 SOURCE_NODE_UUID = "30000000-0000-4000-8000-000000000001"
 FIRST_NODE_UUID = "30000000-0000-4000-8000-000000000002"
 SECOND_NODE_UUID = "30000000-0000-4000-8000-000000000003"
-SOURCE_JOB_UUID = "40000000-0000-4000-8000-000000000001"
 FIRST_JOB_UUID = "40000000-0000-4000-8000-000000000002"
 SECOND_JOB_UUID = "40000000-0000-4000-8000-000000000003"
 MATERIAL_UUID = "50000000-0000-4000-8000-000000000001"
@@ -77,6 +81,11 @@ def _task_snapshot(
             "action_type": "UniLabJsonCommand",
             "param": {"plate": {"uuid": MATERIAL_UUID}},
             "disabled": disable_first_consumer,
+            "meta_data": {
+                "unilab": {
+                    "executor_binding": {"mode": "fixed", "device_id": DEVICE_UUID}
+                }
+            },
         },
         {
             "uuid": SECOND_NODE_UUID,
@@ -88,6 +97,11 @@ def _task_snapshot(
             "action_type": "UniLabJsonCommand",
             "param": {"plate": {"uuid": MATERIAL_UUID}},
             "disabled": False,
+            "meta_data": {
+                "unilab": {
+                    "executor_binding": {"mode": "fixed", "device_id": DEVICE_UUID}
+                }
+            },
         },
     ]
     # ``snapshot_edges`` 冻结同一物料占位符（ResourceSlot）的线性消费顺序。
@@ -139,21 +153,45 @@ def _task_snapshot(
             "type": "ResourceSlot",
         },
     ]
+    graph = {
+        "nodes": snapshot_nodes,
+        "edges": snapshot_edges,
+        "node_templates": [
+            {
+                "uuid": "71000000-0000-4000-8000-000000000001",
+                "node_type": "material_source",
+            },
+            {
+                "uuid": "71000000-0000-4000-8000-000000000002",
+                "node_type": "ILab",
+            },
+            {
+                "uuid": "71000000-0000-4000-8000-000000000003",
+                "node_type": "ILab",
+            },
+        ],
+        "handle_templates": handle_templates,
+    }
+    # ``execution_plan`` 是从冻结应用图一次性产生的唯一运行静态输入；测试不再
+    # 允许编译器回退读取 ``workflow_snapshot``。
+    execution_plan, jobs = ExecutionPlanBuilder().build(
+        graph,
+        run_mode="normal",
+        target_node_uuid=None,
+    )
+    job_identities = {
+        FIRST_NODE_UUID: FIRST_JOB_UUID,
+        SECOND_NODE_UUID: SECOND_JOB_UUID,
+    }
+    for job in jobs:
+        # ``job`` 是构建器首次作业；替换随机 UUID 只为断言持久身份保持不变。
+        job["uuid"] = job_identities[job["workflow_node_uuid"]]
     task_snapshot = {
         "uuid": TASK_UUID,
         "workflow_uuid": WORKFLOW_UUID,
-        "workflow_snapshot": {
-            "nodes": snapshot_nodes,
-            "edges": snapshot_edges,
-            "handle_templates": handle_templates,
-        },
+        "workflow_snapshot": graph,
+        "execution_plan": execution_plan,
     }
-    # ``jobs`` 是任务创建事务已经分配的稳定作业身份；编译不得重新生成 UUID。
-    jobs = [
-        {"uuid": SOURCE_JOB_UUID, "workflow_node_uuid": SOURCE_NODE_UUID},
-        {"uuid": FIRST_JOB_UUID, "workflow_node_uuid": FIRST_NODE_UUID},
-        {"uuid": SECOND_JOB_UUID, "workflow_node_uuid": SECOND_NODE_UUID},
-    ]
     return task_snapshot, jobs
 
 
@@ -241,11 +279,8 @@ def test_create_new_material_source_fails_closed_before_scheduling() -> None:
     Authority）或生成可派发节点。异常：预期稳定编译错误码。
     """
 
-    compiler_type, error_type = _compiler_contract()
-    task_snapshot, jobs = _task_snapshot(mode="create_new", material_uuid=None)
-
-    with pytest.raises(error_type) as caught:
-        compiler_type().compile(task_snapshot, jobs)
+    with pytest.raises(ExecutionPlanBuildError) as caught:
+        _task_snapshot(mode="create_new", material_uuid=None)
 
     assert caught.value.code == "unsupported_material_source_mode"
 
@@ -257,10 +292,7 @@ def test_unresolved_existing_material_source_fails_closed_before_scheduling() ->
     （Inventory）或产生派发。异常：预期稳定物料解析错误码。
     """
 
-    compiler_type, error_type = _compiler_contract()
-    task_snapshot, jobs = _task_snapshot(material_uuid=None)
-
-    with pytest.raises(error_type) as caught:
-        compiler_type().compile(task_snapshot, jobs)
+    with pytest.raises(ExecutionPlanBuildError) as caught:
+        _task_snapshot(material_uuid=None)
 
     assert caught.value.code == "material_source_resolution_required"

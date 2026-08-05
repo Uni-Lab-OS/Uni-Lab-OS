@@ -5,7 +5,6 @@ from __future__ import annotations
 import hashlib
 import re
 import threading
-from collections import defaultdict
 from collections.abc import Callable
 from contextlib import ExitStack
 from datetime import datetime, timezone
@@ -25,6 +24,7 @@ from unilabos.workflow.device_action_run import (
     DeviceActionRunService,
     DeviceActionRunUnavailable,
 )
+from unilabos.workflow.execution_plan import ExecutionPlanBuilder
 from unilabos.workflow.graph_validation import GraphValidationError
 from unilabos.workflow.json_codec import encode_json
 from unilabos.workflow.models import (
@@ -647,207 +647,18 @@ class WorkflowService:
         run_mode: str,
         target_node_uuid: Optional[str],
     ) -> Tuple[Dict[str, Any], List[Dict[str, Any]]]:
-        templates = {
-            template["uuid"]: template for template in graph.get("node_templates", [])
-        }
-        handles = {
-            handle["uuid"]: handle for handle in graph.get("handle_templates", [])
-        }
-        graph_nodes = graph["nodes"]
-        graph_edges = graph["edges"]
-        if run_mode == "single_node" and target_node_uuid is not None:
-            selected_node = next(
-                (node for node in graph_nodes if node["uuid"] == target_node_uuid),
-                None,
-            )
-            if selected_node is None or selected_node["disabled"]:
-                raise StoreConflict("single_node target is not enabled")
-            graph_nodes = [selected_node]
-            graph_edges = []
+        """委托深模块构造执行计划（ExecutionPlan）与首次作业集合。
 
-        def stable_key(node_uuid: str) -> Tuple[str, str]:
-            node = enabled[node_uuid]
-            return str(node.get("create_time") or ""), node_uuid
+        参数：``graph`` 是冻结应用图，``run_mode`` 是运行模式，
+        ``target_node_uuid`` 是单节点目标。返回：唯一版本化计划和待持久化作业。
+        异常：图、物料来源（MaterialSource）或目标非法时由构建器失败关闭。
+        """
 
-        enabled: Dict[str, Dict[str, Any]] = {}
-        node_kinds: Dict[str, str] = {}
-        for node in graph_nodes:
-            template = templates.get(node.get("workflow_node_template_uuid"))
-            raw_kind = (
-                template.get("node_type") if template is not None else node["type"]
-            )
-            kind = self._executor_kind(raw_kind)
-            if node["disabled"] or kind == "group":
-                continue
-            enabled[node["uuid"]] = node
-            node_kinds[node["uuid"]] = kind
-
-        indegree = {node_uuid: 0 for node_uuid in enabled}
-        outgoing: Dict[str, List[str]] = defaultdict(list)
-        planned_edges: List[Dict[str, Any]] = []
-        for edge in graph_edges:
-            source = edge["source_node_uuid"]
-            target = edge["target_node_uuid"]
-            if source not in enabled or target not in enabled:
-                continue
-            source_handle = handles.get(edge["source_handle_uuid"])
-            target_handle = handles.get(edge["target_handle_uuid"])
-            if source_handle is None or target_handle is None:
-                raise StoreConflict("workflow edge references a missing handle")
-            outgoing[source].append(target)
-            indegree[target] += 1
-            planned_edge = {
-                "uuid": edge["uuid"],
-                "source_node_uuid": source,
-                "target_node_uuid": target,
-                "source_handle_uuid": edge["source_handle_uuid"],
-                "target_handle_uuid": edge["target_handle_uuid"],
-                "source_data_key": self._handle_data_key(source_handle),
-                "target_data_key": self._handle_data_key(target_handle),
-                "source_type": str(source_handle.get("type") or "").strip(),
-                "target_type": str(target_handle.get("type") or "").strip(),
-            }
-            if self._dependency_only(source_handle):
-                planned_edge["dependency_only"] = True
-            planned_edges.append(planned_edge)
-
-        available = sorted(
-            (node_uuid for node_uuid, degree in indegree.items() if degree == 0),
-            key=stable_key,
+        return ExecutionPlanBuilder().build(
+            graph,
+            run_mode=run_mode,
+            target_node_uuid=target_node_uuid,
         )
-        ordered: List[str] = []
-        while available:
-            node_uuid = available.pop(0)
-            ordered.append(node_uuid)
-            for target in outgoing[node_uuid]:
-                indegree[target] -= 1
-                if indegree[target] == 0:
-                    available.append(target)
-                    available.sort(key=stable_key)
-        if len(ordered) != len(enabled):
-            raise StoreConflict("workflow graph contains a cycle")
-        if run_mode == "single_node":
-            if target_node_uuid is None:
-                if not ordered:
-                    raise StoreConflict("workflow has no enabled nodes")
-                target_node_uuid = ordered[0]
-            if target_node_uuid not in enabled:
-                raise StoreConflict("single_node target is not enabled")
-            ordered = [target_node_uuid]
-            enabled = {target_node_uuid: enabled[target_node_uuid]}
-            planned_edges = []
-
-        planned_nodes: List[Dict[str, Any]] = []
-        jobs: List[Dict[str, Any]] = []
-        for index, node_uuid in enumerate(ordered):
-            node = enabled[node_uuid]
-            kind = node_kinds[node_uuid]
-            if kind == "script":
-                raise StoreConflict("script executor is not configured")
-            policy = node.get("execution_policy") or {}
-            template_uuid = node.get("workflow_node_template_uuid")
-            template = templates.get(template_uuid)
-            target_handles = sorted(
-                (
-                    handle
-                    for handle in handles.values()
-                    if template_uuid is not None
-                    and handle.get("workflow_node_template_uuid") == template_uuid
-                    and handle.get("io_type") == "target"
-                ),
-                key=lambda item: item["uuid"],
-            )
-            source_handle_uuids = sorted(
-                handle["uuid"]
-                for handle in handles.values()
-                if template_uuid is not None
-                and handle.get("workflow_node_template_uuid") == template_uuid
-                and handle.get("io_type") == "source"
-            )
-            planned_node: Dict[str, Any] = {
-                "uuid": node_uuid,
-                "topological_index": index,
-                "kind": kind,
-                "param": node.get("param") or {},
-                "execution_policy": policy,
-                "inputs": [
-                    {
-                        "handle_uuid": handle["uuid"],
-                        "data_key": self._final_target_data_key(
-                            self._handle_data_key(handle)
-                        ),
-                        "type": str(handle.get("type") or "").strip(),
-                        "required": bool(handle.get("required")),
-                    }
-                    for handle in target_handles
-                ],
-            }
-            if node.get("material_uuid") is not None:
-                planned_node["material_uuid"] = node["material_uuid"]
-            if node.get("script") is not None:
-                planned_node["script"] = node["script"]
-            if source_handle_uuids:
-                planned_node["source_handle_uuids"] = source_handle_uuids
-            if template is not None and template.get("schema") is not None:
-                planned_node["param_schema"] = template["schema"]
-            planned_nodes.append(planned_node)
-            jobs.append(
-                {
-                    "uuid": str(uuid4()),
-                    "workflow_node_uuid": node_uuid,
-                    "topological_index": index,
-                    "executor_kind": kind,
-                    "execution_policy": policy,
-                    "execution_timeout_seconds": 0,
-                    "param": node.get("param") or {},
-                }
-            )
-        plan = {
-            "run_mode": run_mode,
-            "nodes": planned_nodes,
-            "edges": planned_edges,
-        }
-        if target_node_uuid is not None:
-            plan["target_node_uuid"] = target_node_uuid
-        return plan, jobs
-
-    @staticmethod
-    def _handle_data_key(handle: Dict[str, Any]) -> str:
-        return str(handle.get("data_key") or handle.get("handle_key") or "").strip()
-
-    @staticmethod
-    def _final_target_data_key(data_key: str) -> str:
-        return data_key.split("@@@")[-1].strip()
-
-    @staticmethod
-    def _dependency_only(handle: Dict[str, Any]) -> bool:
-        if str(handle.get("handle_key") or "").strip().lower() == "ready":
-            return True
-        data_source = str(handle.get("data_source") or "").strip()
-        return bool(data_source) and data_source.lower() != "executor"
-
-    @staticmethod
-    def _executor_kind(node_type: str) -> str:
-        normalized = node_type.strip().lower()
-        aliases = {
-            "ilab": "device_action",
-            "device": "device_action",
-            "action": "device_action",
-            "resource_action": "device_action",
-            "py_script": "script",
-        }
-        kind = aliases.get(normalized, normalized)
-        if kind not in {
-            "device_action",
-            "compute",
-            "condition",
-            "script",
-            "group",
-            "tool_call",
-            "manual_confirm",
-        }:
-            raise StoreConflict(f"unsupported workflow node type {node_type!r}")
-        return kind
 
     # 工作流创作（Authoring） ---------------------------------------------
 

@@ -194,6 +194,11 @@ def _task_from_plan(
     异常：无；测试故意允许审计快照缺少运行字段以禁止运行时回退。
     """
 
+    # ``frozen_plan`` 补齐本轮正式版本和运行连接点集合；各测试仍只改变其关注的
+    # 计划节点/边，不再手工重复公共 envelope。
+    frozen_plan = deepcopy(execution_plan)
+    frozen_plan.setdefault("version", 1)
+    frozen_plan.setdefault("handles", [])
     return {
         "uuid": TASK_UUID,
         "workflow_uuid": WORKFLOW_UUID,
@@ -204,7 +209,7 @@ def _task_from_plan(
             "node_templates": [],
             "handle_templates": [],
         },
-        "execution_plan": deepcopy(execution_plan),
+        "execution_plan": frozen_plan,
     }
 
 

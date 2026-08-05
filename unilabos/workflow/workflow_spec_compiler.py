@@ -1,8 +1,7 @@
-"""把冻结工作流任务（WorkflowTask）纯编译为旧调度器工作流规格。"""
+"""把执行计划（ExecutionPlan）纯编译为旧调度器工作流规格。"""
 
 from __future__ import annotations
 
-from collections import defaultdict
 from collections.abc import Mapping, Sequence
 from typing import Any
 
@@ -12,23 +11,20 @@ from unilabos.app.scheduler.models import (
     WorkflowEdge,
     WorkflowNode,
     WorkflowSpec,
-    normalize_node_type,
 )
 from unilabos.workflow._workflow_spec_snapshot import (
     WorkflowSpecCompilationError,
     canonical_uuid,
-    first_enabled_physical_consumer,
-    index_handles,
     index_jobs,
-    index_nodes,
+    index_objects,
     mapping,
     mapping_sequence,
-    material_outgoing_edges,
 )
+from unilabos.workflow.execution_plan import PLAN_VERSION
 
 
 class WorkflowSpecCompiler:
-    """封装冻结任务到 ``WorkflowSpec`` 的全部确定性转换规则。"""
+    """封装版本化执行计划到旧调度输入的全部确定性转换。"""
 
     def compile(
         self,
@@ -37,93 +33,78 @@ class WorkflowSpecCompiler:
     ) -> WorkflowSpec:
         """编译已持久化身份的工作流任务（WorkflowTask）。
 
-        参数是任务不可变应用图和已有作业；返回 ``WorkflowSpec``；结构、身份、
-        物料来源（MaterialSource）或物料流非法时抛编译错误，且不执行 I/O。
+        参数：``task_snapshot`` 提供任务身份和唯一运行静态输入
+        ``execution_plan``，``jobs`` 提供已有作业身份与最终参数。返回：纯
+        ``WorkflowSpec``。异常：计划、身份、执行器合同或端点非法时抛闭集编译
+        错误，且不读取库存（Inventory）、执行占用（Claim）或设备实时状态。
         """
+
         task = mapping(task_snapshot, "invalid_task_snapshot", "task_snapshot")
-        # ``task_uuid`` 是旧调度运行必须复用的工作流任务稳定身份。
+        # ``task_uuid`` 是旧调度运行复用的工作流任务稳定身份。
         task_uuid = canonical_uuid(
             task.get("uuid"), "invalid_task_identity", "task_snapshot.uuid"
         )
-        graph = mapping(
-            task.get("workflow_snapshot"),
-            "invalid_workflow_snapshot",
-            "task_snapshot.workflow_snapshot",
+        audit_snapshot = task.get("workflow_snapshot")
+        if audit_snapshot is not None:
+            mapping(
+                audit_snapshot,
+                "invalid_workflow_snapshot",
+                "task_snapshot.workflow_snapshot",
+            )
+        plan = mapping(
+            task.get("execution_plan"),
+            "invalid_execution_plan",
+            "task_snapshot.execution_plan",
         )
+        version = plan.get("version")
+        if isinstance(version, bool) or version != PLAN_VERSION:
+            raise WorkflowSpecCompilationError(
+                "invalid_execution_plan",
+                f"执行计划版本必须是 {PLAN_VERSION}",
+            )
         raw_nodes = mapping_sequence(
-            graph.get("nodes"),
-            "invalid_workflow_snapshot",
-            "task_snapshot.workflow_snapshot.nodes",
-        )
-        raw_edges = mapping_sequence(
-            graph.get("edges", []),
-            "invalid_workflow_snapshot",
-            "task_snapshot.workflow_snapshot.edges",
+            plan.get("nodes"),
+            "invalid_execution_plan",
+            "task_snapshot.execution_plan.nodes",
         )
         raw_handles = mapping_sequence(
-            graph.get("handle_templates", graph.get("handles", [])),
-            "invalid_workflow_snapshot",
-            "task_snapshot.workflow_snapshot.handle_templates",
+            plan.get("handles", []),
+            "invalid_execution_plan",
+            "task_snapshot.execution_plan.handles",
         )
-        nodes, ordered_node_uuids = index_nodes(raw_nodes)
+        raw_edges = mapping_sequence(
+            plan.get("edges", []),
+            "invalid_execution_plan",
+            "task_snapshot.execution_plan.edges",
+        )
+        nodes, ordered_node_uuids = index_objects(
+            raw_nodes,
+            identity_code="invalid_node_identity",
+            duplicate_code="duplicate_node_identity",
+            field="execution_plan.nodes",
+        )
+        handles, ordered_handle_uuids = index_objects(
+            raw_handles,
+            identity_code="invalid_handle_identity",
+            duplicate_code="duplicate_handle_identity",
+            field="execution_plan.handles",
+        )
         jobs_by_node = index_jobs(jobs, nodes=nodes)
-        handles_by_uuid = index_handles(raw_handles)
-        requirements_by_node = self._material_requirements(
+        compiled_nodes = self._compile_nodes(
+            ordered_node_uuids=ordered_node_uuids,
             nodes=nodes,
-            edges=raw_edges,
-            handles=handles_by_uuid,
+            jobs_by_node=jobs_by_node,
         )
-
-        compiled_nodes: list[WorkflowNode] = []
-        for node_uuid in ordered_node_uuids:
-            node = nodes[node_uuid]
-            if node.get("type") == "material_source" or node.get("disabled") is True:
-                continue
-            job = jobs_by_node.get(node_uuid)
-            if job is None:
-                raise WorkflowSpecCompilationError(
-                    "missing_workflow_node_job",
-                    f"启用工作流节点缺少持久作业身份：{node_uuid}",
-                )
-            # ``job_uuid`` 是已有作业身份；编译器绝不生成替代 UUID。
-            job_uuid = canonical_uuid(
-                job.get("uuid"), "invalid_job_identity", f"jobs[{node_uuid}].uuid"
-            )
-            # ``final_param`` 优先采用作业已冻结参数；没有独立作业参数时才使用
-            # 同一任务快照中的节点参数，并复制以隔离调用者后续修改。
-            raw_param = job.get("param", node.get("param"))
-            if raw_param is not None and not isinstance(raw_param, Mapping):
-                raise WorkflowSpecCompilationError(
-                    "invalid_job_param", "工作流节点最终参数必须是对象"
-                )
-            final_param = dict(raw_param or {})
-            compiled_nodes.append(
-                WorkflowNode(
-                    id=node_uuid,
-                    job_id=job_uuid,
-                    device_id=str(
-                        node.get("device_id") or node.get("material_uuid") or ""
-                    ).strip(),
-                    action_name=str(node.get("action_name") or "").strip(),
-                    action_type=str(node.get("action_type") or "").strip(),
-                    param=final_param,
-                    node_type=normalize_node_type(node.get("type")),
-                    disabled=False,
-                    material_requirements=list(requirements_by_node.get(node_uuid, ())),
-                )
-            )
-
-        # ``active_node_uuids`` 是本次旧调度运行唯一允许推进的节点集合。
         active_node_uuids = {node.id for node in compiled_nodes}
+        compiled_handles = self._compile_handles(
+            ordered_handle_uuids=ordered_handle_uuids,
+            handles=handles,
+            active_node_uuids=active_node_uuids,
+        )
         compiled_edges = self._compile_edges(
             raw_edges,
             active_node_uuids=active_node_uuids,
-            handles=handles_by_uuid,
-        )
-        compiled_handles = self._compile_handles(
-            raw_handles,
-            nodes=nodes,
-            active_node_uuids=active_node_uuids,
+            handles=handles,
         )
         return WorkflowSpec(
             workflow_id=task_uuid,
@@ -135,116 +116,225 @@ class WorkflowSpecCompiler:
             lab_id=str(task.get("lab_id") or "").strip(),
         )
 
-    def _material_requirements(
+    def _compile_nodes(
         self,
         *,
+        ordered_node_uuids: Sequence[str],
         nodes: Mapping[str, Mapping[str, Any]],
-        edges: Sequence[Mapping[str, Any]],
-        handles: Mapping[str, Mapping[str, Any]],
-    ) -> dict[str, list[MaterialRequirement]]:
-        """投影首个消费者的短期物料需求。
+        jobs_by_node: Mapping[str, Mapping[str, Any]],
+    ) -> list[WorkflowNode]:
+        """编译执行计划中的设备动作节点。
 
-        参数是同一冻结图的节点、边和连接点；返回逐节点需求；不支持的来源模式、
-        未固定 UUID 或非线性物料流抛错，且不代表正式任务物料预留。
+        参数：``ordered_node_uuids`` 保留确定性拓扑顺序，``nodes`` 是计划节点
+        索引，``jobs_by_node`` 是持久作业绑定。返回：旧调度节点。异常：非设备
+        动作、缺作业、空设备或空动作合同时抛稳定编译错误并失败关闭。
         """
-        outgoing = material_outgoing_edges(edges, handles=handles, nodes=nodes)
-        requirements: dict[str, list[MaterialRequirement]] = defaultdict(list)
-        seen_by_consumer: dict[str, set[str]] = defaultdict(set)
-        for source_uuid, source in nodes.items():
-            if (
-                source.get("type") != "material_source"
-                or source.get("disabled") is True
-            ):
-                continue
-            selector = mapping(
-                source.get("param"),
-                "invalid_material_source_selector",
-                f"material_source[{source_uuid}].param",
-            )
-            mode = str(selector.get("mode") or "").strip()
-            if mode != "existing":
-                raise WorkflowSpecCompilationError(
-                    "unsupported_material_source_mode",
-                    "短期调度桥只接受已固定 UUID 的 existing 物料来源",
-                )
-            material_value = selector.get("material_uuid")
-            if material_value is None or not str(material_value).strip():
-                raise WorkflowSpecCompilationError(
-                    "material_source_resolution_required",
-                    "existing 物料来源尚未由物料权威固定具体物料 UUID",
-                )
-            # ``material_uuid`` 是短期整图物料预留必须使用的规范实例身份。
-            material_uuid = canonical_uuid(
-                material_value,
-                "invalid_material_uuid",
-                f"material_source[{source_uuid}].param.material_uuid",
-            )
-            consumer_uuid = first_enabled_physical_consumer(
-                source_uuid,
-                nodes=nodes,
-                outgoing=outgoing,
-            )
-            if (
-                consumer_uuid is None
-                or material_uuid in seen_by_consumer[consumer_uuid]
-            ):
-                continue
-            requirements[consumer_uuid].append(
-                MaterialRequirement(instance_uuid=material_uuid)
-            )
-            seen_by_consumer[consumer_uuid].add(material_uuid)
-        return dict(requirements)
 
+        compiled: list[WorkflowNode] = []
+        for node_uuid in ordered_node_uuids:
+            node = nodes[node_uuid]
+            kind = str(node.get("kind") or "").strip()
+            if kind != "device_action":
+                raise WorkflowSpecCompilationError(
+                    "unsupported_executor_kind", f"旧调度器不支持执行种类：{kind}"
+                )
+            job = jobs_by_node.get(node_uuid)
+            if job is None:
+                raise WorkflowSpecCompilationError(
+                    "missing_workflow_node_job",
+                    f"执行计划节点缺少持久作业身份：{node_uuid}",
+                )
+            job_uuid = canonical_uuid(
+                job.get("uuid"), "invalid_job_identity", f"jobs[{node_uuid}].uuid"
+            )
+            device_id = str(node.get("device_id") or "").strip()
+            if not device_id:
+                raise WorkflowSpecCompilationError(
+                    "invalid_executor_binding", f"设备动作缺少固定执行器：{node_uuid}"
+                )
+            action_name = str(node.get("action_name") or "").strip()
+            action_type = str(node.get("action_type") or "").strip()
+            if not action_name or not action_type:
+                raise WorkflowSpecCompilationError(
+                    "invalid_action_contract", f"设备动作合同不完整：{node_uuid}"
+                )
+            planned_param = node.get("param", {})
+            if not isinstance(planned_param, Mapping):
+                raise WorkflowSpecCompilationError(
+                    "invalid_execution_plan", f"计划节点参数必须是对象：{node_uuid}"
+                )
+            job_param = job.get("param", {})
+            if not isinstance(job_param, Mapping):
+                raise WorkflowSpecCompilationError(
+                    "invalid_job_param", f"作业最终参数必须是对象：{job_uuid}"
+                )
+            requirements = self._material_requirements(node, node_uuid=node_uuid)
+            compiled.append(
+                WorkflowNode(
+                    id=node_uuid,
+                    job_id=job_uuid,
+                    device_id=device_id,
+                    action_name=action_name,
+                    action_type=action_type,
+                    param=self._merge_final_param(planned_param, job_param),
+                    node_type="ILab",
+                    disabled=False,
+                    material_requirements=requirements,
+                )
+            )
+        return compiled
+
+    @staticmethod
+    def _material_requirements(
+        node: Mapping[str, Any], *, node_uuid: str
+    ) -> list[MaterialRequirement]:
+        """读取计划已冻结的短期物料需求。
+
+        参数：``node`` 是设备动作计划，``node_uuid`` 是诊断身份。返回：旧库存
+        预留（Reservation）入口需要的需求值对象。异常：结构非法时抛计划错误；
+        不在编译时重新遍历物料来源（MaterialSource）或查询库存。
+        """
+
+        raw_requirements = mapping_sequence(
+            node.get("material_requirements", []),
+            "invalid_execution_plan",
+            f"execution_plan.nodes[{node_uuid}].material_requirements",
+        )
+        return [
+            MaterialRequirement.from_dict(requirement)
+            for requirement in raw_requirements
+        ]
+
+    @classmethod
+    def _merge_final_param(
+        cls,
+        planned: Mapping[str, Any],
+        job: Mapping[str, Any],
+    ) -> dict[str, Any]:
+        """合并计划参数与作业最终参数并保护稳定物料引用。
+
+        参数：``planned`` 是创建任务时冻结的参数，``job`` 是参数解析器产出的最终
+        参数。返回：作业值优先的隔离对象，但作业不得把计划中的 ``{"uuid":
+        ...}`` 物料引用删除或替换为空值。异常：无；其他值按作业结果覆盖。
+        """
+
+        merged: dict[str, Any] = dict(planned)
+        for key, job_value in job.items():
+            planned_value = planned.get(key)
+            if cls._is_material_reference(planned_value):
+                if not cls._is_material_reference(job_value):
+                    continue
+                merged[key] = dict(job_value)
+                continue
+            if isinstance(planned_value, Mapping) and isinstance(job_value, Mapping):
+                merged[key] = cls._merge_final_param(planned_value, job_value)
+                continue
+            merged[key] = job_value
+        return merged
+
+    @staticmethod
+    def _is_material_reference(value: Any) -> bool:
+        """判断值是否是稳定物料引用。
+
+        参数：``value`` 是任意参数值。返回：仅含有非空 ``uuid`` 语义的对象为
+        真；额外展示字段不影响稳定身份。异常：无。
+        """
+
+        return isinstance(value, Mapping) and bool(str(value.get("uuid") or "").strip())
+
+    @staticmethod
+    def _compile_handles(
+        *,
+        ordered_handle_uuids: Sequence[str],
+        handles: Mapping[str, Mapping[str, Any]],
+        active_node_uuids: set[str],
+    ) -> list[Handle]:
+        """编译节点作用域运行连接点（Handle）。
+
+        参数：身份顺序、连接点索引与活动节点集合来自同一计划。返回：旧调度
+        连接点。异常：拥有者非法时抛编译错误，禁止模板身份碰撞。
+        """
+
+        compiled: list[Handle] = []
+        for handle_uuid in ordered_handle_uuids:
+            raw_handle = handles[handle_uuid]
+            owner_uuid = canonical_uuid(
+                raw_handle.get("node_uuid", raw_handle.get("node_id")),
+                "invalid_handle_identity",
+                f"execution_plan.handles[{handle_uuid}].node_uuid",
+            )
+            if owner_uuid not in active_node_uuids:
+                raise WorkflowSpecCompilationError(
+                    "edge_handle_identity_mismatch",
+                    f"运行连接点引用计划外节点：{owner_uuid}",
+                )
+            compiled.append(
+                Handle(
+                    uuid=handle_uuid,
+                    data_source=str(raw_handle.get("data_source") or "").strip(),
+                    handle_key=str(raw_handle.get("handle_key") or "").strip(),
+                    data_key=str(raw_handle.get("data_key") or "").strip(),
+                    node_id=owner_uuid,
+                    io_type=str(raw_handle.get("io_type") or "").strip(),
+                )
+            )
+        return compiled
+
+    @staticmethod
     def _compile_edges(
-        self,
         raw_edges: Sequence[Mapping[str, Any]],
         *,
         active_node_uuids: set[str],
         handles: Mapping[str, Mapping[str, Any]],
     ) -> list[WorkflowEdge]:
-        """编译活动节点依赖。
+        """编译执行计划的直接依赖与虚拟旁路依赖。
 
-        参数是冻结边、活动节点和连接点；返回调度边；身份/端点非法时抛错。
+        参数：``raw_edges`` 是计划边，``active_node_uuids`` 是唯一可派发节点，
+        ``handles`` 是节点作用域端点索引。返回：旧调度边。异常：节点或端点引用
+        不一致时抛闭集错误；``dependency_only`` 边允许空连接点且不传数据。
         """
+
         compiled: list[WorkflowEdge] = []
         for index, edge in enumerate(raw_edges):
-            source_uuid = canonical_uuid(
-                edge.get("source_node_uuid", edge.get("source_node_id")),
+            edge_uuid = canonical_uuid(
+                edge.get("uuid"),
                 "invalid_edge_identity",
-                f"workflow_snapshot.edges[{index}].source_node_uuid",
+                f"execution_plan.edges[{index}].uuid",
+            )
+            source_uuid = canonical_uuid(
+                edge.get("source_node_uuid"),
+                "invalid_edge_identity",
+                f"execution_plan.edges[{index}].source_node_uuid",
             )
             target_uuid = canonical_uuid(
-                edge.get("target_node_uuid", edge.get("target_node_id")),
+                edge.get("target_node_uuid"),
                 "invalid_edge_identity",
-                f"workflow_snapshot.edges[{index}].target_node_uuid",
+                f"execution_plan.edges[{index}].target_node_uuid",
             )
             if (
                 source_uuid not in active_node_uuids
                 or target_uuid not in active_node_uuids
             ):
-                continue
-            edge_uuid = canonical_uuid(
-                edge.get("uuid"),
-                "invalid_edge_identity",
-                f"workflow_snapshot.edges[{index}].uuid",
-            )
-            source_handle_uuid = canonical_uuid(
-                edge.get("source_handle_uuid"),
-                "invalid_edge_identity",
-                f"workflow_snapshot.edges[{index}].source_handle_uuid",
-            )
-            target_handle_uuid = canonical_uuid(
-                edge.get("target_handle_uuid"),
-                "invalid_edge_identity",
-                f"workflow_snapshot.edges[{index}].target_handle_uuid",
-            )
-            source_handle = handles.get(source_handle_uuid)
-            target_handle = handles.get(target_handle_uuid)
-            if source_handle is None or target_handle is None:
                 raise WorkflowSpecCompilationError(
-                    "edge_handle_identity_mismatch",
-                    "活动工作流边引用快照外连接点",
+                    "edge_node_identity_mismatch", "计划边引用计划外活动节点"
                 )
+            dependency_only = edge.get("dependency_only") is True
+            source_handle_uuid, source_handle = WorkflowSpecCompiler._edge_handle(
+                edge,
+                field="source",
+                edge_index=index,
+                node_uuid=source_uuid,
+                handles=handles,
+                optional=dependency_only,
+            )
+            target_handle_uuid, target_handle = WorkflowSpecCompiler._edge_handle(
+                edge,
+                field="target",
+                edge_index=index,
+                node_uuid=target_uuid,
+                handles=handles,
+                optional=dependency_only,
+            )
             compiled.append(
                 WorkflowEdge(
                     uuid=edge_uuid,
@@ -253,56 +343,47 @@ class WorkflowSpecCompiler:
                     source_handle_uuid=source_handle_uuid,
                     target_handle_uuid=target_handle_uuid,
                     source_handle_key=str(
-                        source_handle.get("handle_key") or ""
-                    ).strip(),
+                        (source_handle or {}).get("handle_key") or ""
+                    ),
                     target_handle_key=str(
-                        target_handle.get("handle_key") or ""
-                    ).strip(),
+                        (target_handle or {}).get("handle_key") or ""
+                    ),
                 )
             )
         return compiled
 
-    def _compile_handles(
-        self,
-        raw_handles: Sequence[Mapping[str, Any]],
+    @staticmethod
+    def _edge_handle(
+        edge: Mapping[str, Any],
         *,
-        nodes: Mapping[str, Mapping[str, Any]],
-        active_node_uuids: set[str],
-    ) -> list[Handle]:
-        """投影活动节点连接点。
+        field: str,
+        edge_index: int,
+        node_uuid: str,
+        handles: Mapping[str, Mapping[str, Any]],
+        optional: bool,
+    ) -> tuple[str, Mapping[str, Any] | None]:
+        """读取并校验计划边的一个运行连接点。
 
-        参数是模板、节点和活动集合；返回保留数据路径的连接点；无适用异常。
+        参数：``edge`` 是计划边，``field`` 是 ``source``/``target``，
+        ``edge_index`` 是诊断序号，``node_uuid`` 是预期拥有者，``handles`` 是
+        端点索引，``optional`` 表示纯依赖边可为空。返回：端点 UUID 与对象。
+        异常：身份缺失、端点不存在或拥有者不匹配时抛编译错误。
         """
-        nodes_by_template: dict[str, list[str]] = defaultdict(list)
-        for node_uuid, node in nodes.items():
-            if node_uuid not in active_node_uuids:
-                continue
-            template_uuid = str(node.get("workflow_node_template_uuid") or "").strip()
-            if template_uuid:
-                nodes_by_template[template_uuid].append(node_uuid)
-        compiled: list[Handle] = []
-        for raw_handle in raw_handles:
-            template_uuid = str(
-                raw_handle.get("workflow_node_template_uuid") or ""
-            ).strip()
-            explicit_node_uuid = str(raw_handle.get("node_id") or "").strip()
-            owner_node_uuids = (
-                [explicit_node_uuid]
-                if explicit_node_uuid in active_node_uuids
-                else nodes_by_template.get(template_uuid, [])
+
+        raw_uuid = str(edge.get(f"{field}_handle_uuid") or "").strip()
+        if optional and not raw_uuid:
+            return "", None
+        handle_uuid = canonical_uuid(
+            raw_uuid,
+            "invalid_edge_identity",
+            f"execution_plan.edges[{edge_index}].{field}_handle_uuid",
+        )
+        handle = handles.get(handle_uuid)
+        if handle is None or str(handle.get("node_uuid") or "") != node_uuid:
+            raise WorkflowSpecCompilationError(
+                "edge_handle_identity_mismatch", "计划边端点与节点作用域不一致"
             )
-            for owner_node_uuid in owner_node_uuids:
-                compiled.append(
-                    Handle(
-                        uuid=str(raw_handle.get("uuid") or "").strip(),
-                        data_source=str(raw_handle.get("data_source") or "").strip(),
-                        handle_key=str(raw_handle.get("handle_key") or "").strip(),
-                        data_key=str(raw_handle.get("data_key") or "").strip(),
-                        node_id=owner_node_uuid,
-                        io_type=str(raw_handle.get("io_type") or "").strip(),
-                    )
-                )
-        return compiled
+        return handle_uuid, handle
 
 
 __all__ = ["WorkflowSpecCompilationError", "WorkflowSpecCompiler"]
