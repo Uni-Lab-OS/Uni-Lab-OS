@@ -680,6 +680,10 @@ class ResourceTreeSet(object):
             # （PLR Barcode dict {data, symbology, position_on_resource}），与
             # get_resource_instance_from_dict 从 config 读取的逻辑对称；position 未保留，默认兜底。
             config = dict(res.config)
+            if res.type == "deck":
+                # setup 只控制部署包工作台类的首次构造；恢复通用 PLR Deck 时
+                # 子资源已由 children 提供，不能再次执行初始化或传入未知参数。
+                config.pop("setup", None)
             if res.barcode:
                 config["barcode"] = {
                     "data": res.barcode,
