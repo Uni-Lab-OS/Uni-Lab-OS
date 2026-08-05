@@ -268,10 +268,11 @@ def single_chain_source() -> str:
     return _source()
 
 
-def fan_out_source() -> str:
-    """返回同一物料占位符（ResourceSlot）被两个动作消费的非法源码。
+def ordered_reuse_source() -> str:
+    """返回同一物料占位符（ResourceSlot）被两个顺序动作复用的源码。
 
-    参数：无。返回：带两个物理消费者的确定性 Python 文本。异常：无。
+    参数：无。返回：带两个物理消费者且由作者源码顺序形成严格全序的确定性
+    Python 文本。异常：无；真正无序的兄弟分叉由 ``fan_out_candidate`` 构造。
     """
 
     return _source().replace(

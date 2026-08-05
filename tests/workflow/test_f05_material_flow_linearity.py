@@ -13,8 +13,8 @@ from .f05_material_graph_fixtures import (
     PASSTHROUGH_SOURCE_UUID,
     compile_material_source_graph,
     fan_out_candidate,
-    fan_out_source,
     material_graph_engine,
+    ordered_reuse_source,
     passthrough_chain_source,
     single_chain_source,
 )
@@ -52,22 +52,22 @@ def test_single_material_source_chain_is_valid() -> None:
     assert len(result.graph["edges"]) == 1
 
 
-def test_compile_rejects_one_material_output_consumed_twice() -> None:
-    """源码编译必须拒绝同一物料输出的两条物理消费边。
+def test_compile_accepts_strictly_ordered_material_output_reuse() -> None:
+    """源码编译必须接受同一物料输出被严格排序的两个动作复用。
 
-    参数：无。返回：无；断言稳定 ``material_flow_fan_out`` 且没有候选图或
-    规范源码。异常：公共编译接缝不得泄漏内部异常。
+    参数：无。返回：无；断言源码顺序产生的依赖使两个物理消费者形成全序并
+    生成候选图。异常：公共编译接缝不得泄漏内部异常；无序候选仍由后续公共
+    接缝测试以 ``material_flow_fan_out`` 拒绝。
     """
 
     result = compile_material_source_graph(
         material_graph_engine(),
-        fan_out_source(),
+        ordered_reuse_source(),
     )
 
-    assert not result.valid
-    assert result.graph is None
-    assert result.normalized_python_source is None
-    assert _diagnostic_codes(result) == ["material_flow_fan_out"]
+    assert result.valid and result.graph is not None, result.diagnostics
+    assert result.normalized_python_source is not None
+    assert _diagnostic_codes(result) == []
 
 
 @pytest.mark.parametrize("public_seam", ("generate_python", "validate"))

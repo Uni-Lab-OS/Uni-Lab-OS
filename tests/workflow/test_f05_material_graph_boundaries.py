@@ -50,19 +50,21 @@ def _diagnostic_codes(result: CandidateCompilation) -> list[str]:
     return [diagnostic["code"] for diagnostic in result.diagnostics]
 
 
-def _workflow_input_source(*, fan_out: bool) -> str:
+def _workflow_input_source(*, fan_out: bool, ordered: bool = False) -> str:
     """构造工作流输入（Workflow Input）物料占位符作者源码。
 
     参数说明：``fan_out`` 为真时让同一 ``sample`` 输入绑定到两个动作（Action），
-    否则只绑定首个动作。返回：可由公共静态编译器解析的确定性 Python 文本；
-    文本只声明工作流创作（Workflow Authoring）事实，不访问物料权威。
+    ``ordered`` 为真时再用首个动作的 ``ready`` 输出建立严格先后关系，否则两个
+    动作是可并发兄弟。返回：可由公共静态编译器解析的确定性 Python 文本；文本
+    只声明工作流创作（Workflow Authoring）事实，不访问物料权威。异常：无。
     """
 
     # ``second_consumer`` 是非法第二物理消费者的完整静态声明；关闭时不留下节点。
+    ordering_argument = ", ready=primary.ready" if ordered else ""
     second_consumer = (
         (
             f"    # unilab:node_uuid={SECOND_CONSUMER_NODE_UUID}\n"
-            "    duplicate = reactor.prepare(sample=sample)\n"
+            f"    duplicate = reactor.prepare(sample=sample{ordering_argument})\n"
         )
         if fan_out
         else ""
@@ -90,17 +92,20 @@ def _compile_workflow_input(
     engine: WorkflowAuthoringEngine,
     *,
     fan_out: bool,
+    ordered: bool = False,
 ) -> CandidateCompilation:
     """通过公共编译接缝解析工作流输入（Workflow Input）边界源码。
 
-    参数说明：``engine`` 是冻结目录的工作流创作编译器，``fan_out`` 选择单链
-    或双物理消费者。返回：公共候选编译结果；编译不执行作者源码或查询库存。
+    参数说明：``engine`` 是冻结目录的工作流创作编译器，``fan_out`` 选择单个
+    或两个物理消费者，``ordered`` 决定两个消费者间是否存在严格依赖。返回：
+    公共候选编译结果；编译不执行作者源码或查询库存。异常：公共编译器把失败
+    转换为候选诊断，不从本辅助函数泄漏内部异常。
     """
 
     return engine.compile(
         workflow_uuid=WORKFLOW_UUID,
         workflow_revision=7,
-        python_source=_workflow_input_source(fan_out=fan_out),
+        python_source=_workflow_input_source(fan_out=fan_out, ordered=ordered),
         source_uri=_SOURCE_URI,
         applied_graph=_applied_graph(),
     )
@@ -260,19 +265,58 @@ def _list_boundary_candidate(
     return engine, graph
 
 
-def test_compile_rejects_workflow_input_material_bound_to_two_actions() -> None:
-    """编译必须拒绝同一工作流输入物料被两个动作消费。
+def test_compile_accepts_ordered_workflow_input_material_reuse() -> None:
+    """编译必须接受同一工作流输入物料被两个顺序动作复用。
 
-    参数：无。返回：无；断言关闭失败且只产生 ``material_flow_fan_out``，不得
-    泄漏候选图或规范源码。异常：公共编译接缝不得泄漏内部异常。
+    参数：无。返回：无；断言作者源码顺序产生严格全序并生成候选图和规范源码。
+    异常：公共编译接缝不得泄漏内部异常；无序兄弟候选仍由后续测试关闭失败。
     """
 
     result = _compile_workflow_input(material_graph_engine(), fan_out=True)
 
-    assert not result.valid
-    assert result.graph is None
-    assert result.normalized_python_source is None
-    assert _diagnostic_codes(result) == ["material_flow_fan_out"]
+    assert result.valid and result.graph is not None, result.diagnostics
+    assert result.normalized_python_source is not None
+    assert _diagnostic_codes(result) == []
+
+
+def test_ordered_workflow_input_material_reuse_is_a_fixed_point() -> None:
+    """同一工作流输入物料被严格排序的动作复用时必须保持合法固定点。
+
+    参数：无。返回：无；断言有序复用生成候选图，两个消费者间存在依赖边，且
+    Python→图→Python→图保持相同语义。异常：公共编译和源码生成接缝不得泄漏
+    内部异常；无序兄弟分叉继续由相邻测试关闭失败。
+    """
+
+    engine = material_graph_engine()
+    compiled = _compile_workflow_input(engine, fan_out=True, ordered=True)
+
+    assert compiled.valid and compiled.graph is not None, compiled.diagnostics
+    assert any(
+        edge["source_node_uuid"] == PREPARE_NODE_UUID
+        and edge["target_node_uuid"] == SECOND_CONSUMER_NODE_UUID
+        for edge in compiled.graph["edges"]
+    )
+    generated = engine.generate_python(
+        workflow_uuid=WORKFLOW_UUID,
+        workflow_revision=7,
+        graph=compiled.graph,
+        source_uri=_SOURCE_URI,
+    )
+    assert generated.valid and generated.normalized_python_source is not None, (
+        generated.diagnostics
+    )
+    repeated = engine.compile(
+        workflow_uuid=WORKFLOW_UUID,
+        workflow_revision=7,
+        python_source=generated.normalized_python_source,
+        source_uri=_SOURCE_URI,
+        applied_graph=_applied_graph(),
+    )
+    assert repeated.valid and repeated.graph is not None, repeated.diagnostics
+    assert repeated.graph == compiled.graph
+    assert (
+        generated.normalized_python_source.count("reactor.prepare(sample=sample)") == 2
+    )
 
 
 @pytest.mark.parametrize("public_seam", ("generate_python", "validate"))
