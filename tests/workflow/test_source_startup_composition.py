@@ -10,7 +10,7 @@ import pytest
 
 from unilabos.workflow import composition
 from unilabos.workflow.models import CandidateCompilation
-from unilabos.workflow.service import WorkflowError, WorkflowService
+from unilabos.workflow.service import WorkflowService
 from unilabos.workflow.store import WorkflowStore
 
 # 两个 UUID 表示启动前已经由其他明确流程创建的工作流（Workflow）定义。

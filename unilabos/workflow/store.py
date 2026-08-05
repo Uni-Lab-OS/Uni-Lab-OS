@@ -1,4 +1,4 @@
-"""Backend-shaped Workflow 与 Authoring 事实的 SQLite Authority。"""
+"""后端形态工作流权威（Backend-shaped Workflow Authority）的 SQLite 事实。"""
 
 from __future__ import annotations
 
@@ -21,6 +21,7 @@ from typing import (
 )
 from uuid import uuid4
 
+from unilabos.workflow import source_bootstrap
 from unilabos.workflow.graph_validation import (
     CodedGraphValidationError,
     GraphValidationError,
@@ -1213,161 +1214,50 @@ class WorkflowStore:
 
     # Authoring ----------------------------------------------------------
 
+    def install_discovered_sources(
+        self,
+        registrations: Iterable[Mapping[str, str]],
+        *,
+        before_commit: Optional[Callable[[], None]] = None,
+    ) -> List[Dict[str, Any]]:
+        """以单事务安装定义、来源和空工作流创作（Authoring）事实。
+
+        参数：``registrations`` 是已完成文件系统校验的完整来源集合；
+        ``before_commit`` 在所有 SQL 写入后、事务提交前复核外部目录身份。
+        返回：按输入顺序排列的持久注册记录。
+        异常：任一工作流生命周期、物理路径、来源 URI 或包身份冲突抛出
+        ``StoreConflict``；提交前复核异常原样传播，整个事务不提交。
+        """
+
+        try:
+            with self.transaction() as conn:
+                return source_bootstrap.install_discovered_sources(
+                    conn,
+                    registrations,
+                    now=utc_now(),
+                    before_commit=before_commit,
+                )
+        except source_bootstrap.SourceBootstrapConflict as exc:
+            raise StoreConflict(str(exc)) from exc
+        except sqlite3.IntegrityError as exc:
+            raise StoreConflict("工作流源码身份已被占用") from exc
+
     def register_sources(
         self,
         registrations: Iterable[Mapping[str, str]],
         *,
         before_commit: Optional[Callable[[], None]] = None,
     ) -> List[Dict[str, Any]]:
-        """以单事务幂等注册完整工作流源码（Workflow Source）计划。
+        """兼容旧调用并委托工作流源码定义安装深模块（Deep Module）。
 
-        参数：``registrations`` 是已完成文件系统校验的完整来源集合；
-        ``before_commit`` 在所有 SQL 写入后、事务提交前复核外部目录身份。
-        返回：按输入顺序排列的持久注册记录。
-        异常：缺失工作流抛出 ``StoreNotFound``；任一工作流、物理路径、来源 URI
-        或包身份冲突抛出 ``StoreConflict``，整个事务不提交。
+        参数：``registrations`` 与 ``before_commit`` 保持旧接口含义。返回：完整安装
+        后的来源注册行；异常语义与 ``install_discovered_sources`` 相同。
         """
 
-        try:
-            # ``incoming`` 是本次事务的不可变规范来源行，拒绝空字段和非字符串。
-            incoming = tuple(
-                {
-                    field: registration[field]
-                    for field in (
-                        "workflow_uuid",
-                        "package_id",
-                        "package_root",
-                        "relative_path",
-                        "source_uri",
-                    )
-                }
-                for registration in registrations
-            )
-        except (KeyError, TypeError):
-            raise StoreConflict("工作流源码注册字段不完整") from None
-        if any(
-            not isinstance(value, str) or not value
-            for registration in incoming
-            for value in registration.values()
-        ):
-            raise StoreConflict("工作流源码注册字段无效")
-
-        now = utc_now()
-        try:
-            with self.transaction() as conn:
-                # ``existing_rows`` 是事务开始时全部持久来源身份的权威快照。
-                existing_rows = tuple(
-                    dict(row)
-                    for row in conn.execute(
-                        "SELECT * FROM workflow_source_registration"
-                    ).fetchall()
-                )
-                # 四组索引分别守护工作流归属、物理文件、来源 URI 和包目录身份。
-                existing_by_workflow = {
-                    row["workflow_uuid"]: row for row in existing_rows
-                }
-                physical_owners = {
-                    (row["package_root"], row["relative_path"]): row[
-                        "workflow_uuid"
-                    ]
-                    for row in existing_rows
-                }
-                uri_owners = {
-                    row["source_uri"]: row["workflow_uuid"] for row in existing_rows
-                }
-                package_roots: Dict[str, str] = {}
-                for row in existing_rows:
-                    prior_root = package_roots.setdefault(
-                        row["package_id"], row["package_root"]
-                    )
-                    if prior_root != row["package_root"]:
-                        raise StoreConflict("既有包身份指向多个目录")
-
-                # 三个批内集合拒绝新计划自身的工作流、文件和 URI 身份重复。
-                batch_workflows: set[str] = set()
-                batch_physical: set[Tuple[str, str]] = set()
-                batch_uris: set[str] = set()
-                for registration in incoming:
-                    # ``workflow_uuid`` 是定义身份；注册不能代替显式创建工作流。
-                    workflow_uuid = registration["workflow_uuid"]
-                    self.get_workflow(workflow_uuid, conn=conn)
-                    physical_identity = (
-                        registration["package_root"],
-                        registration["relative_path"],
-                    )
-                    source_uri = registration["source_uri"]
-                    if (
-                        workflow_uuid in batch_workflows
-                        or physical_identity in batch_physical
-                        or source_uri in batch_uris
-                    ):
-                        raise StoreConflict("批次内工作流源码身份重复")
-                    batch_workflows.add(workflow_uuid)
-                    batch_physical.add(physical_identity)
-                    batch_uris.add(source_uri)
-
-                    current = existing_by_workflow.get(workflow_uuid)
-                    if current is not None and any(
-                        current[field] != registration[field]
-                        for field in (
-                            "package_id",
-                            "package_root",
-                            "relative_path",
-                            "source_uri",
-                        )
-                    ):
-                        raise StoreConflict("工作流源码身份不能在启动时重绑定")
-                    if physical_owners.get(physical_identity, workflow_uuid) != (
-                        workflow_uuid
-                    ):
-                        raise StoreConflict("工作流源码物理路径已被占用")
-                    if uri_owners.get(source_uri, workflow_uuid) != workflow_uuid:
-                        raise StoreConflict("工作流源码 URI 已被占用")
-                    prior_root = package_roots.setdefault(
-                        registration["package_id"],
-                        registration["package_root"],
-                    )
-                    if prior_root != registration["package_root"]:
-                        raise StoreConflict("包身份不能指向多个目录")
-
-                for registration in incoming:
-                    workflow_uuid = registration["workflow_uuid"]
-                    if workflow_uuid not in existing_by_workflow:
-                        conn.execute(
-                            """
-                            INSERT INTO workflow_source_registration(
-                                workflow_uuid, package_id, package_root,
-                                relative_path, source_uri, create_time, update_time
-                            ) VALUES (?, ?, ?, ?, ?, ?, ?)
-                            """,
-                            (
-                                workflow_uuid,
-                                registration["package_id"],
-                                registration["package_root"],
-                                registration["relative_path"],
-                                registration["source_uri"],
-                                now,
-                                now,
-                            ),
-                        )
-                    conn.execute(
-                        """
-                        INSERT INTO workflow_authoring(
-                            workflow_uuid, diagnostics, update_time
-                        ) VALUES (?, '[]', ?)
-                        ON CONFLICT(workflow_uuid) DO NOTHING
-                        """,
-                        (workflow_uuid, now),
-                    )
-                if before_commit is not None:
-                    # 外部目录身份必须在 SQL 已完成但尚未提交的最后窗口复核。
-                    before_commit()
-        except sqlite3.IntegrityError as exc:
-            raise StoreConflict("工作流源码身份已被占用") from exc
-        return [
-            self.get_source_registration(registration["workflow_uuid"])
-            for registration in incoming
-        ]
+        return self.install_discovered_sources(
+            registrations,
+            before_commit=before_commit,
+        )
 
     def get_source_registration(self, workflow_uuid: str) -> Dict[str, Any]:
         with self._lock:

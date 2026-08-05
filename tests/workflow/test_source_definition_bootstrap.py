@@ -2,8 +2,9 @@
 
 from __future__ import annotations
 
+import sqlite3
+from collections.abc import Callable, Iterator
 from pathlib import Path
-from typing import Any, Callable
 
 import pytest
 
@@ -45,8 +46,9 @@ def _assert_absent(
 ) -> None:
     """断言一个身份没有留下定义、来源或空创作事实。
 
-    参数：``store`` 是本用例唯一工作流写模型；``workflow_uuid`` 是应完全回滚的
-    工作流（Workflow）身份。返回：无；任一事实残留都会触发断言失败。
+    参数：``store`` 是本用例唯一工作流写模型（Workflow Write Model）；
+    ``workflow_uuid`` 是应完全回滚的工作流（Workflow）身份。返回：无；任一事实
+    残留都会触发断言失败。
     """
 
     with pytest.raises(StoreNotFound):
@@ -59,14 +61,15 @@ def _assert_absent(
 
 
 @pytest.fixture()
-def workflow_store(tmp_path: Path) -> WorkflowStore:
+def workflow_store(tmp_path: Path) -> Iterator[WorkflowStore]:
     """创建隔离的真实 SQLite 工作流写模型。
 
     参数：``tmp_path`` 是 pytest 提供的独立目录。返回：初始化完成的
     ``WorkflowStore``；用例结束后关闭连接。
     """
 
-    # ``store`` 是单个测试内唯一允许提交工作流（Workflow）事实的本地权威。
+    # ``store`` 是单个测试内唯一允许提交工作流（Workflow）事实的工作流权威
+    # （Workflow Authority）。
     store = WorkflowStore(tmp_path / "workflow_history.db")
     try:
         yield store
@@ -79,8 +82,8 @@ def test_missing_definition_is_created_with_stable_manifest_provenance(
 ) -> None:
     """缺失身份应创建最小工作流骨架、来源注册与空创作事实。
 
-    参数：``workflow_store`` 是真实 SQLite 工作流权威。返回：无；测试冻结首次名称、
-    修订和清单来源追溯（Manifest Provenance），且不触发源码执行或应用。
+    参数：``workflow_store`` 是真实 SQLite 工作流权威（Workflow Authority）。
+    返回：无；测试冻结首次名称、修订和清单来源坐标，且不触发源码执行或应用。
     """
 
     # ``registration`` 是显式授权清单产生的唯一可信身份输入。
@@ -88,7 +91,7 @@ def test_missing_definition_is_created_with_stable_manifest_provenance(
 
     installed = workflow_store.install_discovered_sources((registration,))
 
-    # ``workflow`` 是首次安装生成的 Backend-shaped 工作流（Workflow）骨架。
+    # ``workflow`` 是首次安装生成的后端形态（Backend-shaped）工作流（Workflow）骨架。
     workflow = workflow_store.get_workflow(WORKFLOW_A_UUID)
     assert installed == [workflow_store.get_source_registration(WORKFLOW_A_UUID)]
     assert workflow == {
@@ -157,8 +160,8 @@ def test_soft_deleted_definition_blocks_whole_batch_without_resurrection(
 ) -> None:
     """软删除工作流定义必须关闭式拒绝整批安装且不得复活。
 
-    参数：``workflow_store`` 保存一个已软删除身份。返回：无；测试把缺失身份放在
-    被删除身份之前，证明分类完成后才写入并且整批零部分提交。
+    参数：``workflow_store`` 保存一个已软删除（Soft Deletion）身份。返回：无；
+    测试把缺失身份放在被删除身份之前，证明分类完成后才写入并且整批零部分提交。
     """
 
     workflow_store.create_workflow(
@@ -207,15 +210,14 @@ def test_batch_uuid_path_uri_and_package_root_conflicts_leave_no_facts(
             _registration(),
             _registration(
                 workflow_uuid=WORKFLOW_B_UUID,
-                source_uri="package://alpha_lab/workflows/other.py",
+                package_id="beta_lab",
             ),
         ),
         "source_uri": (
             _registration(),
             _registration(
                 workflow_uuid=WORKFLOW_B_UUID,
-                relative_path="workflows/other.py",
-                source_uri="package://alpha_lab/workflows/demo.py",
+                package_root="/workspace/other-alpha",
             ),
         ),
         "package_root": (
@@ -239,27 +241,41 @@ def test_batch_uuid_path_uri_and_package_root_conflicts_leave_no_facts(
             store.close()
 
 
-def test_late_invalid_registration_rolls_back_earlier_missing_definition(
+def test_late_sql_failure_rolls_back_earlier_definition_source_and_authoring(
     workflow_store: WorkflowStore,
 ) -> None:
-    """后项注册字段失败时不得留下前项工作流骨架。
+    """后项 SQLite 写入失败时不得留下前项工作流骨架或来源。
 
-    参数：``workflow_store`` 是真实 SQLite 权威。返回：无；测试用后项缺失 URI 模拟
-    整批预检失败，并断言前项定义、来源和创作事实全部不存在。
+    参数：``workflow_store`` 是真实 SQLite 工作流权威（Workflow Authority）。
+    返回：无；测试让第二项来源插入由数据库适配器（Adapter）拒绝，并断言此前
+    写入的定义、来源和工作流创作（Authoring）事实全部回滚。
     """
 
-    valid_registration = _registration()
-    # ``late_invalid_registration`` 缺少稳定来源 URI，代表后项确定性无效输入。
-    late_invalid_registration: dict[str, Any] = _registration(
-        workflow_uuid=WORKFLOW_B_UUID,
-        relative_path="workflows/b.py",
+    # ``failure_injector`` 只安装测试触发器，不参与被测事务或读取领域事实。
+    failure_injector = sqlite3.connect(workflow_store.path)
+    failure_injector.execute(
+        """
+        CREATE TRIGGER reject_second_source_registration
+        BEFORE INSERT ON workflow_source_registration
+        WHEN NEW.workflow_uuid = '22222222-2222-4222-8222-222222222222'
+        BEGIN
+            SELECT RAISE(ABORT, '注入后项来源写入失败');
+        END
+        """
     )
-    late_invalid_registration.pop("source_uri")
+    failure_injector.commit()
+    failure_injector.close()
+    # ``registrations`` 使 A 的定义与来源先写入，再在 B 的来源插入处失败。
+    registrations = (
+        _registration(),
+        _registration(
+            workflow_uuid=WORKFLOW_B_UUID,
+            relative_path="workflows/b.py",
+        ),
+    )
 
     with pytest.raises(StoreConflict):
-        workflow_store.install_discovered_sources(
-            (valid_registration, late_invalid_registration)
-        )
+        workflow_store.install_discovered_sources(registrations)
 
     _assert_absent(workflow_store, WORKFLOW_A_UUID)
     _assert_absent(workflow_store, WORKFLOW_B_UUID)
@@ -270,8 +286,9 @@ def test_before_commit_failure_rolls_back_definition_source_and_authoring(
 ) -> None:
     """提交前固定目录复核失败必须回滚同事务中的全部新事实。
 
-    参数：``workflow_store`` 是真实 SQLite 权威。返回：无；注入的回调模拟固定包根
-    目录发生变化，原异常向上传播且定义、来源与创作事实均不可见。
+    参数：``workflow_store`` 是真实 SQLite 工作流权威（Workflow Authority）。
+    返回：无；注入的回调模拟固定包根目录发生变化，原异常向上传播且定义、来源与
+    工作流创作（Authoring）事实均不可见。
     """
 
     def reject_changed_root() -> None:

@@ -691,8 +691,8 @@ class WorkflowService:
 
         参数：``plan`` 是从全部显式授权目录完成预校验后生成的不可变计划。
         返回：按计划顺序排列的持久来源记录；成功后活动授权恰好等于本计划。
-        异常：缺失工作流映射为 ``workflow_not_found``；来源身份或目录安全冲突
-        分别映射为稳定 ``invalid_input`` 错误，且不提交任何部分注册。
+        异常：软删除工作流、来源身份或目录安全冲突映射为稳定
+        ``invalid_input``，且不提交任何部分定义、来源或创作事实。
         """
 
         if not isinstance(plan, EditableSourceDiscoveryPlan):
@@ -743,12 +743,10 @@ class WorkflowService:
                     locks.enter_context(self._authoring_lock(workflow_uuid))
                 try:
                     with pin_package_roots(plan.root_identities) as pinned_roots:
-                        registered = self._store.register_sources(
+                        registered = self._store.install_discovered_sources(
                             registration_rows,
                             before_commit=pinned_roots.assert_current,
                         )
-                except StoreNotFound:
-                    raise WorkflowError("workflow_not_found") from None
                 except SourceWorkspaceError:
                     raise WorkflowError("invalid_input") from None
                 except StoreConflict:
