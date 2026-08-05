@@ -155,6 +155,85 @@ def test_active_definition_is_reused_without_overwriting_user_fields_on_restart(
     assert after["revision"] == 2
 
 
+def test_bootstrapped_definition_replays_without_changing_any_persisted_fact(
+    tmp_path: Path,
+) -> None:
+    """自动首装后重开同一数据库应逐字段复用全部持久事实。
+
+    参数：``tmp_path`` 保存首次自动首装后关闭并重开的 ``workflow_history.db``。
+    返回：无；断言最小工作流定义（Workflow Definition）、工作流源码（Workflow
+    Source）注册、空工作流创作（Authoring）事实及其创建/更新时间戳均不变化。
+    异常：数据库打开、首装或重放失败时原样传播，使测试不能跳过持久生命周期。
+    """
+
+    database_path = tmp_path / "workflow_history.db"
+    # ``registration`` 是两个进程生命周期重放的同一显式源码发现计划事实。
+    registration = _registration()
+    first = WorkflowStore(database_path)
+    first.install_discovered_sources((registration,))
+    # 三份 ``before`` 快照共同形成首装后不得被幂等重放改写的持久基线。
+    before_workflow = first.get_workflow(WORKFLOW_A_UUID)
+    before_source = first.get_source_registration(WORKFLOW_A_UUID)
+    before_authoring = first.get_authoring_record(WORKFLOW_A_UUID)
+    first.close()
+
+    reopened = WorkflowStore(database_path)
+    try:
+        reopened.install_discovered_sources((registration,))
+        after_workflow = reopened.get_workflow(WORKFLOW_A_UUID)
+        after_source = reopened.get_source_registration(WORKFLOW_A_UUID)
+        after_authoring = reopened.get_authoring_record(WORKFLOW_A_UUID)
+    finally:
+        reopened.close()
+
+    assert after_workflow == before_workflow
+    assert after_source == before_source
+    assert after_authoring == before_authoring
+    assert (after_workflow["create_time"], after_workflow["update_time"]) == (
+        before_workflow["create_time"],
+        before_workflow["update_time"],
+    )
+    assert (after_source["create_time"], after_source["update_time"]) == (
+        before_source["create_time"],
+        before_source["update_time"],
+    )
+    assert after_authoring["update_time"] == before_authoring["update_time"]
+
+
+def test_discovered_install_rejects_all_c0_and_del_path_characters_without_writes(
+    workflow_store: WorkflowStore,
+) -> None:
+    """包根与源码路径中的全部 C0/DEL 控制字符必须关闭式拒绝。
+
+    参数：``workflow_store`` 是隔离的真实 SQLite 工作流权威（Workflow
+    Authority）。返回：无；逐项覆盖 U+0000..U+001F 与 U+007F，包含换行、制表和
+    DEL，并在每次失败后证明定义、来源和空创作事实均为零部分写入。异常：任一
+    控制字符被接受时断言失败，定位到对应字段和码点。
+    """
+
+    # ``control_characters`` 是词法身份必须拒绝的完整 C0 与 DEL 闭集。
+    control_characters = tuple(chr(code) for code in (*range(0x20), 0x7F))
+    # ``invalid_fields`` 是必须使用同一控制字符拒绝规则的两个持久路径字段。
+    invalid_fields = ("package_root", "relative_path")
+    for invalid_field in invalid_fields:
+        for control_character in control_characters:
+            # ``registration`` 是只在一个路径字段含当前控制码的不可信注册行。
+            registration = _registration()
+            registration[invalid_field] = (
+                f"/workspace/alpha{control_character}lab"
+                if invalid_field == "package_root"
+                else f"workflows/de{control_character}mo.py"
+            )
+            registration["source_uri"] = (
+                f"package://{registration['package_id']}/"
+                f"{registration['relative_path']}"
+            )
+
+            with pytest.raises(StoreConflict):
+                workflow_store.install_discovered_sources((registration,))
+            _assert_absent(workflow_store, WORKFLOW_A_UUID)
+
+
 def test_soft_deleted_definition_blocks_whole_batch_without_resurrection(
     workflow_store: WorkflowStore,
 ) -> None:

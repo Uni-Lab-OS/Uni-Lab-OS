@@ -25,6 +25,17 @@ class SourceBootstrapConflict(RuntimeError):
     """表示整批工作流源码（Workflow Source）安装不能安全提交。"""
 
 
+def _contains_path_control_character(value: str) -> bool:
+    """判断持久路径身份是否包含 C0 或 DEL 控制字符。
+
+    参数：``value`` 是待写入包根或源码相对路径的字符串。返回：存在
+    U+0000..U+001F 或 U+007F 时为 ``True``，其余字符为 ``False``。异常：无；
+    调用方已经在来源注册规范化阶段保证输入为字符串。
+    """
+
+    return any(ord(character) < 0x20 or character == "\x7f" for character in value)
+
+
 def install_discovered_sources(
     conn: sqlite3.Connection,
     registrations: Iterable[Mapping[str, str]],
@@ -136,7 +147,7 @@ def _validate_package_root(package_root: str) -> None:
     # ``root_path`` 只用于纯词法验证，不访问或解析真实文件系统。
     root_path = PurePosixPath(package_root)
     if (
-        "\x00" in package_root
+        _contains_path_control_character(package_root)
         or "\\" in package_root
         or not root_path.is_absolute()
         or package_root != root_path.as_posix()
@@ -157,7 +168,7 @@ def _validate_relative_source_path(relative_path: str) -> None:
     # ``source_path`` 是不依赖当前工作目录的纯 POSIX 相对身份。
     source_path = PurePosixPath(relative_path)
     if (
-        "\x00" in relative_path
+        _contains_path_control_character(relative_path)
         or "\\" in relative_path
         or source_path.is_absolute()
         or relative_path != source_path.as_posix()
