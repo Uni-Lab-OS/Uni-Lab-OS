@@ -173,11 +173,127 @@ class TaskRuntimeProjection:
             job_statuses = {job["status"] for job in aggregate["jobs"]}
             if task_status == "pending" and job_statuses == {"pending"}:
                 return aggregate
-            if task_status == "running" and job_statuses <= _ACTIVE_JOB_STATES:
+            # 协调器所有的物料来源解析作业可能已经成功；它不属于设备在途状态，
+            # 但不应阻止普通动作提交后的任务聚合校验。
+            if task_status == "running" and job_statuses <= (
+                _ACTIVE_JOB_STATES | {"succeeded"}
+            ):
                 return aggregate
             raise StoreConflict(
                 f"本地提交状态与任务聚合冲突：{task_uuid}/{scheduler_state}"
             )
+
+    def project_material_source_blocked(self, task_uuid: str) -> dict[str, Any]:
+        """验证并返回一次受阻的任务物料准入投影。
+
+        参数：``task_uuid`` 是保持待处理的工作流任务（WorkflowTask）身份。返回：
+        未发生写入的标准任务/作业聚合。异常：任务不为 ``pending``、没有物料来源
+        解析作业（MaterialSourceResolutionJob），或来源作业已离开 ``pending`` 时
+        抛出 ``StoreConflict``；身份不存在时传播 ``StoreNotFound``。
+        """
+
+        with self._store.transaction() as connection:
+            aggregate = self._aggregate(connection, task_uuid)
+            if aggregate["task"]["status"] != "pending":
+                raise StoreConflict(f"任务不能保持准入受阻：{task_uuid}")
+            # ``source_jobs`` 是本次全有或全无准入共同拥有的协调器作业。
+            source_jobs = [
+                job
+                for job in aggregate["jobs"]
+                if job.get("executor_kind") == "material_source"
+            ]
+            if not source_jobs or any(job["status"] != "pending" for job in source_jobs):
+                raise StoreConflict(f"物料来源作业不能保持待处理：{task_uuid}")
+            return aggregate
+
+    def project_material_source_admission(
+        self,
+        task_uuid: str,
+        bindings: Mapping[str, Mapping[str, str]],
+    ) -> dict[str, Any]:
+        """原子提交成功任务物料准入（TaskMaterialAdmission）的逐来源结果。
+
+        参数：``task_uuid`` 是父工作流任务（WorkflowTask）身份；``bindings`` 按
+        物料来源节点 UUID 提供已预留的 ``uuid`` 与
+        ``resource_template_uuid``。返回：全部来源作业已直接变为 ``succeeded``
+        的标准聚合；若没有普通动作，父任务也直接成功。异常：绑定集合、字段、
+        状态或重放载荷冲突时抛出 ``StoreConflict``，整笔事务零部分写入。
+        """
+
+        if not isinstance(bindings, Mapping):
+            raise StoreConflict("物料来源绑定必须是对象")
+        # ``normalized_bindings`` 隔离调用方容器并验证有类型物料占位符身份。
+        normalized_bindings: dict[str, dict[str, str]] = {}
+        for node_uuid, raw_binding in bindings.items():
+            if not isinstance(raw_binding, Mapping):
+                raise StoreConflict("物料来源绑定成员必须是对象")
+            material_uuid = str(raw_binding.get("uuid") or "").strip()
+            template_uuid = str(
+                raw_binding.get("resource_template_uuid") or ""
+            ).strip()
+            if not node_uuid or not material_uuid or not template_uuid:
+                raise StoreConflict("物料来源绑定身份不能为空")
+            normalized_bindings[str(node_uuid)] = {
+                "uuid": material_uuid,
+                "resource_template_uuid": template_uuid,
+            }
+
+        with self._store.transaction() as connection:
+            task_row = self._task_row(connection, task_uuid)
+            job_rows = self._job_rows(connection, task_uuid)
+            # ``source_rows`` 必须与成功准入一次提交的完整绑定集合严格相等。
+            source_rows = [
+                row for row in job_rows if row["executor_kind"] == "material_source"
+            ]
+            source_node_uuids = {str(row["workflow_node_uuid"]) for row in source_rows}
+            if not source_rows or set(normalized_bindings) != source_node_uuids:
+                raise StoreConflict(f"物料来源绑定集合不完整：{task_uuid}")
+            if task_row["status"] not in {"pending", "succeeded"}:
+                raise StoreConflict(f"任务不能提交物料来源结果：{task_uuid}")
+
+            projected_at = utc_now()
+            for row in source_rows:
+                node_uuid = str(row["workflow_node_uuid"])
+                return_info = {"material": normalized_bindings[node_uuid]}
+                return_info_json = _encode_json_field(
+                    return_info,
+                    field_name="return_info",
+                )
+                if row["status"] == "succeeded":
+                    if _decode_json_field(row["return_info"], fallback={}) != return_info:
+                        raise StoreConflict(f"物料来源终态载荷冲突：{row['uuid']}")
+                    continue
+                if row["status"] != "pending":
+                    raise StoreConflict(f"物料来源作业不能成功：{row['uuid']}")
+                updated_jobs = connection.execute(
+                    """
+                    UPDATE workflow_node_job
+                    SET status = 'succeeded', return_info = ?, error_info = '[]',
+                        finished_at = ?, update_time = ?
+                    WHERE uuid = ? AND status = 'pending' AND deleted_at IS NULL
+                    """,
+                    (return_info_json, projected_at, projected_at, row["uuid"]),
+                ).rowcount
+                if updated_jobs != 1:
+                    raise StoreConflict(f"物料来源作业状态发生并发变化：{row['uuid']}")
+
+            # 没有普通动作表示任务业务目标就是完成供料绑定；协调器工作不经历
+            # ``running``，也不产生设备执行开始时间。
+            ordinary_rows = [
+                row for row in job_rows if row["executor_kind"] != "material_source"
+            ]
+            if not ordinary_rows and task_row["status"] == "pending":
+                updated_tasks = connection.execute(
+                    """
+                    UPDATE workflow_task
+                    SET status = 'succeeded', finished_at = ?, update_time = ?
+                    WHERE uuid = ? AND status = 'pending' AND deleted_at IS NULL
+                    """,
+                    (projected_at, projected_at, task_uuid),
+                ).rowcount
+                if updated_tasks != 1:
+                    raise StoreConflict(f"来源任务终态发生并发变化：{task_uuid}")
+            return self._aggregate(connection, task_uuid)
 
     def project_pre_dispatch(
         self,

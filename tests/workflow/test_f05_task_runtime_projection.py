@@ -130,6 +130,117 @@ def _aggregate(store: WorkflowStore) -> dict[str, Any]:
     }
 
 
+def _seed_material_source_task(
+    store: WorkflowStore,
+    *,
+    with_action: bool,
+) -> tuple[str, ...]:
+    """写入一个含物料来源解析作业的标准工作流任务。
+
+    参数：``store`` 是唯一写权威；``with_action`` 决定来源之后是否还有普通设备
+    动作。返回：按拓扑顺序排列的作业 UUID。异常：数据库约束原样传播。
+    """
+
+    # ``job_uuids`` 的首项稳定归属于物料来源（MaterialSource）节点。
+    job_uuids = _seed_task(store, job_count=2 if with_action else 1)
+    with store.transaction() as connection:
+        connection.execute(
+            """
+            UPDATE workflow_node_job
+            SET executor_kind = 'material_source'
+            WHERE uuid = ?
+            """,
+            (job_uuids[0],),
+        )
+    return job_uuids
+
+
+def test_material_source_admission_projects_typed_result_atomically(
+    store: WorkflowStore,
+) -> None:
+    """成功准入必须原子完成来源作业并保留普通动作待处理。
+
+    参数：``store`` 是隔离工作流权威。返回无；断言物料来源解析作业
+    （MaterialSourceResolutionJob）从 ``pending`` 直接到 ``succeeded``，写入
+    有类型物料占位符（ResourceSlot）结果，父任务和普通动作仍为 ``pending``。
+    """
+
+    source_job_uuid, action_job_uuid = _seed_material_source_task(
+        store,
+        with_action=True,
+    )
+    projection = _projection(store)
+    # ``binding`` 是任务物料准入（TaskMaterialAdmission）提交的稳定物料绑定。
+    binding = {
+        "uuid": "50000000-0000-4000-8000-000000000001",
+        "resource_template_uuid": "60000000-0000-4000-8000-000000000001",
+    }
+
+    projection.project_material_source_admission(
+        TASK_UUID,
+        {NODE_UUIDS[0]: binding},
+    )
+
+    aggregate = _aggregate(store)
+    jobs_by_uuid = {job["uuid"]: job for job in aggregate["jobs"]}
+    assert aggregate["task"]["status"] == "pending"
+    assert jobs_by_uuid[source_job_uuid]["status"] == "succeeded"
+    assert jobs_by_uuid[source_job_uuid]["return_info"] == {"material": binding}
+    assert jobs_by_uuid[action_job_uuid]["status"] == "pending"
+
+
+def test_source_only_admission_completes_task_without_running_state(
+    store: WorkflowStore,
+) -> None:
+    """只含来源的任务在准入成功后必须直接成功。
+
+    参数：``store`` 是隔离工作流权威。返回无；断言协调器工作不会伪造
+    ``running`` 或设备派发，唯一来源作业和父工作流任务（WorkflowTask）直接
+    进入 ``succeeded``。异常：非法状态转换使测试失败。
+    """
+
+    (source_job_uuid,) = _seed_material_source_task(store, with_action=False)
+    projection = _projection(store)
+
+    projection.project_material_source_admission(
+        TASK_UUID,
+        {
+            NODE_UUIDS[0]: {
+                "uuid": "50000000-0000-4000-8000-000000000001",
+                "resource_template_uuid": "60000000-0000-4000-8000-000000000001",
+            }
+        },
+    )
+
+    aggregate = _aggregate(store)
+    assert aggregate["task"]["status"] == "succeeded"
+    assert "started_at" not in aggregate["task"]
+    assert aggregate["jobs"] == [store.get_job(source_job_uuid)]
+    assert aggregate["jobs"][0]["status"] == "succeeded"
+
+
+def test_blocked_material_source_admission_is_zero_write(
+    store: WorkflowStore,
+) -> None:
+    """受阻准入必须保持任务和来源作业待处理且不发布部分绑定。
+
+    参数：``store`` 是隔离工作流权威。返回无；断言任务物料准入受阻
+    （TaskMaterialAdmissionBlocked）不刷新时间戳、不写 ``return_info``，允许同一
+    身份后续准入重试（AdmissionRetry）。异常：非法聚合由投影失败关闭。
+    """
+
+    _seed_material_source_task(store, with_action=True)
+    projection = _projection(store)
+    before = _aggregate(store)
+
+    projection.project_material_source_blocked(TASK_UUID)
+
+    assert _aggregate(store) == before
+    assert before["task"]["status"] == "pending"
+    assert before["jobs"][0]["status"] == "pending"
+    assert before["jobs"][0]["return_info"] == {}
+
+
 def test_waiting_for_material_projects_to_pending_without_job_mutation(
     store: WorkflowStore,
 ) -> None:
