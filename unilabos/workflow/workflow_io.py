@@ -646,7 +646,11 @@ def _unilab_metadata(
 
 
 def _plain_mapping(value: Mapping[str, Any]) -> dict[str, Any]:
-    """深复制映射和数组，避免规范化修改调用者持有的目录投影。"""
+    """深复制动作合同映射和数组。
+
+    参数：``value`` 是调用方持有的目录投影映射。返回：递归分离映射、列表和
+    元组容器后的普通字典。异常：无；非容器叶值按原值保留。
+    """
 
     return {
         str(key): (

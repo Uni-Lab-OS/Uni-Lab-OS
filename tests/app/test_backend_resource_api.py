@@ -26,7 +26,7 @@ def _client(tmp_path):
 def test_material_shapes_use_backend_envelope_without_inventory_routes(
     tmp_path,
 ) -> None:
-    """静态物料外形必须通过公共 Backend 信封独立发布。
+    """静态物料外形必须通过公共后端（Backend）信封独立发布。
 
     参数：``tmp_path`` 提供隔离的库存数据库。返回：无；断言前端可直接读取
     ``/api/v1/material-shapes``，且响应不依赖私有库存路由。异常：路由缺失或

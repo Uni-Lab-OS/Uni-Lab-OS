@@ -461,7 +461,7 @@ def _commit_projection(
                 if stored_source == source_name and stored_fingerprint == fingerprint:
                     return "unchanged"
                 raise ResourceGraphBootstrapError(
-                    "既有库存权威与资源图来源或 fingerprint 指纹冲突"
+                    "既有库存权威与资源图来源或指纹（fingerprint）冲突"
                 )
             for material in projection["materials"]:
                 connection.execute(

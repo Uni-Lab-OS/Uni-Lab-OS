@@ -687,7 +687,12 @@ class ResourceTreeSet(object):
                 collect_node_data(child, name_to_uuid, all_states, name_to_extra)
 
         def node_to_plr_dict(node: ResourceDictInstance, has_model: bool):
-            """转换节点为 PLR 字典格式"""
+            """把一个资源树节点转换为 PLR 构造字典。
+
+            参数：``node`` 是待恢复的资源节点，``has_model`` 决定是否保留模型
+            字段。返回：过滤库存（Inventory）/库位（Site）私有配置后的 PLR
+            字典。异常：节点字段缺失或类型非法时由资源模型访问原样传播。
+            """
             res = node.res_content
             plr_type = TYPE_MAP.get(res.type, res.type)
             if res.type not in TYPE_MAP:
