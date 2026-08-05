@@ -320,13 +320,18 @@ def test_terminal_replay_is_idempotent_and_conflicting_terminal_is_zero_write(
     assert _aggregate(store) == terminal
 
 
+@pytest.mark.parametrize(
+    "unsupported_scheduler_state",
+    ["execution_unknown", "interrupted"],
+)
 def test_projection_never_writes_legacy_history_or_execution_unknown(
     store: WorkflowStore,
+    unsupported_scheduler_state: str,
 ) -> None:
     """短期投影不得写遗留历史，也不得伪造执行未知事实。
 
-    参数：``store`` 是隔离工作流权威。返回无；断言遗留 ``workflow_runs`` 与
-    ``job_runs`` 哨兵保持不变，``execution_unknown`` 输入关闭失败且零写入。
+    参数：``store`` 是隔离工作流权威；``unsupported_scheduler_state`` 是禁止写入
+    标准表的遗留或未来状态。返回无；断言遗留历史哨兵保持不变，非法输入关闭失败。
     """
 
     (job_uuid,) = _seed_task(store, job_count=1)
@@ -343,7 +348,7 @@ def test_projection_never_writes_legacy_history_or_execution_unknown(
     with pytest.raises(StoreConflict):
         projection.project_job_finished(
             job_uuid=job_uuid,
-            scheduler_state="execution_unknown",
+            scheduler_state=unsupported_scheduler_state,
         )
     assert _aggregate(store) == before
 
