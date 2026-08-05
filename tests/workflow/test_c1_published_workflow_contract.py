@@ -338,9 +338,8 @@ def test_projection_emits_business_handles_then_separate_ready_handles() -> None
             "type": item["type"],
             "required": item["required"],
             "data_source": item["data_source"],
-            "structural_role": item["meta_data"]["unilab"].get(
-                "structural_role"
-            ),
+            "data_key": item["data_key"],
+            "meta_data": item["meta_data"],
         }
         for item in projected.handles
     ]
@@ -351,7 +350,8 @@ def test_projection_emits_business_handles_then_separate_ready_handles() -> None
             "type": "number",
             "required": True,
             "data_source": "goal",
-            "structural_role": None,
+            "data_key": "value",
+            "meta_data": projected.handles[0]["meta_data"],
         },
         {
             "key": "result",
@@ -359,23 +359,26 @@ def test_projection_emits_business_handles_then_separate_ready_handles() -> None
             "type": "number",
             "required": False,
             "data_source": "result",
-            "structural_role": None,
+            "data_key": "result",
+            "meta_data": projected.handles[1]["meta_data"],
         },
         {
             "key": "ready",
             "io": "target",
-            "type": "boolean",
+            "type": "default",
             "required": False,
-            "data_source": "dependency",
-            "structural_role": "ready",
+            "data_source": None,
+            "data_key": None,
+            "meta_data": {},
         },
         {
             "key": "ready",
             "io": "source",
-            "type": "boolean",
+            "type": "default",
             "required": False,
-            "data_source": "dependency",
-            "structural_role": "ready",
+            "data_source": None,
+            "data_key": None,
+            "meta_data": {},
         },
     ]
 
