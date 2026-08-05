@@ -34,6 +34,7 @@ EXPANDED_EDGE_UUID = "b3e67370-ee6e-54b5-9dd1-6d44c5a5854f"
 HOST_RESOURCE_TEMPLATE_UUID = "a2000000-0000-4000-8000-000000000001"
 ACTION_RESOURCE_TEMPLATE_UUID = "a2000000-0000-4000-8000-000000000002"
 ACTION_TEMPLATE_UUID = "a3000000-0000-4000-8000-000000000001"
+GROUP_TEMPLATE_UUID = "a3000000-0000-4000-8000-000000000002"
 CHILD_TEMPLATE_UUID = "a3000000-0000-4000-8000-000000000011"
 LEAF_TEMPLATE_UUID = "a3000000-0000-4000-8000-000000000012"
 ACTION_VALUE_TARGET_UUID = "a4000000-0000-4000-8000-000000000001"
@@ -53,6 +54,7 @@ APPLIED_SOURCE_HASH = "sha256:" + "3" * 64
 CONTRACT_DIGEST = (
     "sha256:689aaac733eba27d13279d242a71fc3c8bc41f0c144d41261dc160a52b46a1cf"
 )
+GROUP_NODE_UUID = "77777777-7777-4777-8777-777777777777"
 
 
 @dataclass
@@ -251,6 +253,30 @@ def _action_handles() -> list[dict[str, Any]]:
     ]
 
 
+def _group_template() -> dict[str, Any]:
+    """构造无执行连接点（Handle）的展示分组模板。
+
+    参数：无。返回：可放入创作目录的展示分组模板字典。异常：无。
+    """
+
+    return {
+        "uuid": GROUP_TEMPLATE_UUID,
+        "resource_template_uuid": ACTION_RESOURCE_TEMPLATE_UUID,
+        "name": "group",
+        "display_name": "Group",
+        "description": "presentation-only fixture",
+        "class": "unilabos.workflow.authoring:group",
+        "goal": {},
+        "goal_default": {},
+        "feedback": {},
+        "result": {},
+        "schema": None,
+        "type": "group",
+        "node_type": "group",
+        "meta_data": {},
+    }
+
+
 def _world_components() -> tuple[
     CompositeAuthoring,
     MemorySnapshotProvider,
@@ -308,6 +334,53 @@ def _world() -> tuple[CompositeAuthoring, MemorySnapshotProvider]:
 
     authoring, provider, _catalog, _source_catalog = _world_components()
     return authoring, provider
+
+
+def _group_world() -> CompositeAuthoring:
+    """装配包含展示分组与一个可执行子节点的组合创作接口。
+
+    参数：无。返回：只读展开合法分组子工作流的组合创作接口。异常：测试夹具
+    合同不一致时由目录或发布投影构造直接抛出。
+    """
+
+    _authoring, provider, catalog, source_catalog = _world_components()
+    snapshot = provider.snapshots[CHILD_WORKFLOW_UUID]
+    snapshot["nodes"][0]["parent_uuid"] = GROUP_NODE_UUID
+    snapshot["nodes"].append(
+        {
+            "uuid": GROUP_NODE_UUID,
+            "workflow_uuid": CHILD_WORKFLOW_UUID,
+            "workflow_node_template_uuid": GROUP_TEMPLATE_UUID,
+            "material_uuid": None,
+            "parent_uuid": None,
+            "name": "Preparation",
+            "status": "idle",
+            "type": "group",
+            "pose": {},
+            "param": {"name": "Preparation"},
+            "execution_policy": {},
+            "disabled": False,
+            "minimized": False,
+            "meta_data": {"unilab": {"presentation_group": True}},
+        }
+    )
+    snapshot["node_templates"].append(_group_template())
+    expanded_catalog = AuthoringCatalogSnapshot.from_entities(
+        [
+            *(action.detached_template() for action in catalog.actions),
+            _group_template(),
+        ],
+        [
+            handle
+            for action in catalog.actions
+            for handle in action.detached_handles()
+        ],
+    )
+    return CompositeAuthoring(
+        snapshot_provider=provider,
+        catalog=expanded_catalog,
+        resolver=source_catalog,
+    )
 
 
 def _nested_world() -> tuple[CompositeAuthoring, MemorySnapshotProvider]:
@@ -492,6 +565,46 @@ def test_direct_invocation_returns_hierarchical_expansion_mappings_and_pin() -> 
         "composition_allow_transparent": False,
     }
     assert provider.read_count == 1
+
+
+def test_presentation_group_does_not_require_structural_ready_handles() -> None:
+    """展示分组不参与执行结构根/终点的连接点（Handle）投影。
+
+    参数：无。返回：无；断言展开保留分组层级但结构映射只引用可执行动作。
+    异常：展开失败或映射不符合合同，由 pytest 断言报告。
+    """
+
+    expansion = _group_world().compile_invocation(
+        parent_workflow_uuid=PARENT_WORKFLOW_UUID,
+        invocation_uuid=INVOCATION_UUID,
+        module="c1_published_lab.workflows.child",
+        symbol="prepare_sample",
+        keyword_arguments={"value": 7.5},
+    )
+
+    expanded_group_uuid = expanded_node_uuid(INVOCATION_UUID, GROUP_NODE_UUID)
+    assert expansion.diagnostics == ()
+    assert {node["uuid"] for node in expansion.nodes} == {
+        EXPANDED_CHILD_NODE_UUID,
+        expanded_group_uuid,
+    }
+    assert next(
+        node for node in expansion.nodes if node["uuid"] == EXPANDED_CHILD_NODE_UUID
+    )["parent_uuid"] == expanded_group_uuid
+    assert expansion.structural_mappings == {
+        "entry_targets": (
+            {
+                "workflow_node_uuid": EXPANDED_CHILD_NODE_UUID,
+                "target_handle_uuid": ACTION_READY_TARGET_UUID,
+            },
+        ),
+        "completion_sources": (
+            {
+                "workflow_node_uuid": EXPANDED_CHILD_NODE_UUID,
+                "source_handle_uuid": ACTION_READY_SOURCE_UUID,
+            },
+        ),
+    }
 def test_two_invocations_share_templates_but_not_expanded_node_identity() -> None:
     """重复调用共享目录模板，但每次调用拥有不同展开节点身份。"""
 
