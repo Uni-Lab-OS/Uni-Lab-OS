@@ -1,5 +1,6 @@
 import copy
 import threading
+import time
 from enum import Enum
 from typing import Any, List, Optional, Tuple, Union
 
@@ -269,6 +270,7 @@ class MoveIt2:
 
         self.__joint_state_mutex = threading.Lock()
         self.__joint_state = None
+        self.__joint_state_received_at: float | None = None
         self.__new_joint_state_available = False
         self.__move_action_goal = self.__init_move_action_goal(
             frame_id=base_link_name,
@@ -745,7 +747,7 @@ class MoveIt2:
 
         self._send_goal_async_execute_trajectory(goal=execute_trajectory_goal)
 
-    def wait_until_executed(self) -> bool:
+    def wait_until_executed(self, timeout_sec: float | None = None) -> bool:
         """
         Wait until the previously requested motion is finalised through either a success or failure.
         """
@@ -756,7 +758,16 @@ class MoveIt2:
             )
             return False
 
+        started_at = time.monotonic()
         while self.__is_motion_requested or self.__is_executing:
+            if (
+                timeout_sec is not None
+                and time.monotonic() - started_at >= max(0.0, float(timeout_sec))
+            ):
+                self._node.get_logger().error(
+                    "Timed out waiting for MoveIt motion terminal state."
+                )
+                return False
             self.__wait_until_executed_rate.sleep()
 
         return self.motion_suceeded
@@ -1964,6 +1975,7 @@ class MoveIt2:
 
         self.__joint_state_mutex.acquire()
         self.__joint_state = msg
+        self.__joint_state_received_at = time.monotonic()
         self.__new_joint_state_available = True
         self.__joint_state_mutex.release()
 
@@ -2074,6 +2086,7 @@ class MoveIt2:
             self._node.get_logger().warn(
                 f"Action server '{self.__move_action_client._action_name}' is not yet available. Better luck next time!"
             )
+            self.__execution_mutex.release()
             return
 
         self.__last_error_code = None
@@ -2097,6 +2110,7 @@ class MoveIt2:
                 f"Action '{self.__move_action_client._action_name}' was rejected."
             )
             self.__is_motion_requested = False
+            self.__execution_mutex.release()
             return
 
         self.__execution_goal_handle = goal_handle
@@ -2136,6 +2150,7 @@ class MoveIt2:
             self._node.get_logger().warn(
                 f"Action server '{self._execute_trajectory_action_client._action_name}' is not yet available. Better luck next time!"
             )
+            self.__execution_mutex.release()
             return
 
         self.__last_error_code = None
@@ -2160,6 +2175,7 @@ class MoveIt2:
                 f"Action '{self._execute_trajectory_action_client._action_name}' was rejected."
             )
             self.__is_motion_requested = False
+            self.__execution_mutex.release()
             return
 
         self.__execution_goal_handle = goal_handle
@@ -2303,6 +2319,18 @@ class MoveIt2:
         joint_state = self.__joint_state
         self.__joint_state_mutex.release()
         return joint_state
+
+    @property
+    def joint_state_age_seconds(self) -> float | None:
+        self.__joint_state_mutex.acquire()
+        received_at = self.__joint_state_received_at
+        self.__joint_state_mutex.release()
+        if received_at is None:
+            return None
+        return max(0.0, time.monotonic() - received_at)
+
+    def move_action_server_ready(self) -> bool:
+        return bool(self.__move_action_client.server_is_ready())
 
     @property
     def new_joint_state_available(self):

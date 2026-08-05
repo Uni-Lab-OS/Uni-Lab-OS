@@ -35,6 +35,7 @@ class MoveitInterface:
         self.resource_action = None
         self.resource_client = None
         self.resource_action_ok = False
+        self._last_resource_wait_log = 0.0
 
 
     def post_init(self, ros_node: BaseROS2DeviceNode):
@@ -64,15 +65,27 @@ class MoveitInterface:
 
 
     def wait_for_resource_action(self):
-        if not self.resource_action_ok:
+        """Advance discovery one step without blocking an executor callback."""
 
-            while self.resource_action is None:
-                self.resource_action = self.check_tf_update_actions()
-                time.sleep(1)
-            self.resource_client = ActionClient(self._ros_node, SendCmd, self.resource_action)
+        if self.resource_action_ok:
+            return
+        if self.resource_action is None:
+            self.resource_action = self.check_tf_update_actions()
+            if self.resource_action is None:
+                return
+        if self.resource_client is None:
+            self.resource_client = ActionClient(
+                self._ros_node,
+                SendCmd,
+                self.resource_action,
+            )
+        if self.resource_client.wait_for_server(timeout_sec=0.0):
             self.resource_action_ok = True
-            while not self.resource_client.wait_for_server(timeout_sec=5.0):
-                self._ros_node.lab_logger().info("等待 TfUpdate 服务器...")
+            return
+        now = time.monotonic()
+        if now - self._last_resource_wait_log >= 5.0:
+            self._ros_node.lab_logger().info("等待 TfUpdate 服务器...")
+            self._last_resource_wait_log = now
 
     def check_tf_update_actions(self):
         topics = self._ros_node.get_topic_names_and_types()

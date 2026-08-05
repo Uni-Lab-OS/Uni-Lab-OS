@@ -11,9 +11,7 @@ import rclpy
 from unilabos_msgs.srv._serial_command import SerialCommand_Response
 
 from unilabos.app.register import register_devices_and_resources
-from unilabos.ros.nodes.presets.resource_mesh_manager import ResourceMeshManager
 from unilabos.resources.resource_tracker import DeviceNodeResourceTracker, ResourceTreeSet
-from unilabos.devices.ros_dev.liquid_handler_joint_publisher import LiquidHandlerJointPublisher
 from unilabos_msgs.srv import SerialCommand  # type: ignore
 from rclpy.executors import MultiThreadedExecutor
 from rclpy.node import Node
@@ -52,6 +50,7 @@ def main(
     bridges: List[Any] = [],
     visual: str = "disable",
     resources_mesh_config: dict = {},
+    motion_runtime_enabled: bool = False,
     rclpy_init_args: List[str] = ["--log-level", "debug"],
     discovery_interval: float = 15.0,
 ) -> None:
@@ -78,8 +77,10 @@ def main(
     # HostLink：host 侧 TCP 通路（物料本地事实源 + slave 在线监控 + ROS 组网协助下发）
     _start_hostlink_server(host_node)
 
-    if visual != "disable":
-        from unilabos.ros.nodes.presets.joint_republisher import JointRepublisher
+    if visual != "disable" or (motion_runtime_enabled and resources_mesh_config):
+        from unilabos.ros.nodes.presets.resource_mesh_manager import (
+            ResourceMeshManager,
+        )
 
         # 将 ResourceTreeSet 转换为 list 用于 visual 组件
         resources_list = (
@@ -94,13 +95,14 @@ def main(
             device_id="resource_mesh_manager",
             device_uuid=str(uuid.uuid4()),
         )
-        joint_republisher = JointRepublisher("joint_republisher", host_node.resource_tracker)
-        # lh_joint_pub = LiquidHandlerJointPublisher(
-        #     resources_config=resources_list, resource_tracker=host_node.resource_tracker
-        # )
         executor.add_node(resource_mesh_manager)
-        executor.add_node(joint_republisher)
-        # executor.add_node(lh_joint_pub)
+        if visual != "disable":
+            from unilabos.ros.nodes.presets.joint_republisher import JointRepublisher
+
+            joint_republisher = JointRepublisher(
+                "joint_republisher", host_node.resource_tracker
+            )
+            executor.add_node(joint_republisher)
 
     thread = threading.Thread(target=executor.spin, daemon=True, name="host_executor_thread")
     thread.start()
@@ -174,6 +176,7 @@ def slave(
     bridges: List[Any] = [],
     visual: str = "disable",
     resources_mesh_config: dict = {},
+    motion_runtime_enabled: bool = False,
     rclpy_init_args: List[str] = ["--log-level", "debug"],
 ) -> None:
     """从节点函数"""
@@ -318,8 +321,10 @@ def slave(
                 logger.warning(f"Device {device_id} initialization failed.")
 
     # 5. 如果启用可视化，创建可视化相关节点
-    if visual != "disable":
-        from unilabos.ros.nodes.presets.joint_republisher import JointRepublisher
+    if visual != "disable" or (motion_runtime_enabled and resources_mesh_config):
+        from unilabos.ros.nodes.presets.resource_mesh_manager import (
+            ResourceMeshManager,
+        )
 
         # 将 ResourceTreeSet 转换为 list 用于 visual 组件
         resources_list = (
@@ -333,13 +338,22 @@ def slave(
             resource_tracker=DeviceNodeResourceTracker(),
             device_id="resource_mesh_manager",
         )
-        joint_republisher = JointRepublisher("joint_republisher", DeviceNodeResourceTracker())
-        lh_joint_pub = LiquidHandlerJointPublisher(
-            resources_config=resources_list, resource_tracker=DeviceNodeResourceTracker()
-        )
         executor.add_node(resource_mesh_manager)
-        executor.add_node(joint_republisher)
-        executor.add_node(lh_joint_pub)
+        if visual != "disable":
+            from unilabos.devices.ros_dev.liquid_handler_joint_publisher import (
+                LiquidHandlerJointPublisher,
+            )
+            from unilabos.ros.nodes.presets.joint_republisher import JointRepublisher
+
+            joint_republisher = JointRepublisher(
+                "joint_republisher", DeviceNodeResourceTracker()
+            )
+            lh_joint_pub = LiquidHandlerJointPublisher(
+                resources_config=resources_list,
+                resource_tracker=DeviceNodeResourceTracker(),
+            )
+            executor.add_node(joint_republisher)
+            executor.add_node(lh_joint_pub)
 
     # 7. 保持运行
     while True:

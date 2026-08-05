@@ -16,6 +16,7 @@ def start_backend(
     is_slave: bool = False,
     visual: str = "None",
     resources_mesh_config: dict = {},
+    motion_runtime_enabled: bool = False,
     **kwargs,
 ):
     if backend == "ros":
@@ -34,18 +35,21 @@ def start_backend(
     else:
         raise ValueError(f"Unsupported backend: {backend}")
 
+    backend_args = (
+        devices_config,
+        resources_config,
+        resources_edge_config,
+        graph,
+        controllers_config,
+        bridges,
+        visual,
+        resources_mesh_config,
+    )
+    if backend == "ros":
+        backend_args = (*backend_args, motion_runtime_enabled)
     backend_thread = threading.Thread(
         target=main if not is_slave else slave,
-        args=(
-            devices_config,
-            resources_config,
-            resources_edge_config,
-            graph,
-            controllers_config,
-            bridges,
-            visual,
-            resources_mesh_config,
-        ),
+        args=backend_args,
         name="backend_thread",
         daemon=True,
     )

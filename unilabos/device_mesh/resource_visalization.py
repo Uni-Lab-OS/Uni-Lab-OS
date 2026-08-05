@@ -2,6 +2,8 @@ import json
 import os
 from pathlib import Path
 import re
+import shutil
+import tempfile
 
 import yaml
 from launch import LaunchService
@@ -13,6 +15,7 @@ from launch_param_builder import load_yaml
 from launch_ros.parameter_descriptions import ParameterFile
 from unilabos.registry.registry import lab_registry
 from ament_index_python.packages import get_package_share_directory
+from unilabos.device_mesh.motion_runtime_plan import legacy_node_requests_moveit
 
 
 def get_pattern_matches(folder, pattern):
@@ -55,6 +58,7 @@ class ResourceVisualization:
         self.resource_type = ['deck', 'plate', 'container', 'tip_rack']
         self.mesh_path = Path(__file__).parent.absolute()
         self.enable_rviz = enable_rviz
+        self.runtime_dir = Path(tempfile.mkdtemp(prefix="unilab-visual-"))
         registry = lab_registry
 
         self.srdf_str = '''<?xml version="1.0" ?>
@@ -108,6 +112,11 @@ class ResourceVisualization:
                     elif "model" in registry.device_type_registry[device_class].keys():
                         model_config = registry.device_type_registry[device_class]['model']
                 if model_config:
+                    # PackageCatalog models are assembled by MoveItRuntime. This
+                    # class remains a compatibility Adapter for legacy built-in
+                    # {type, mesh} model metadata.
+                    if "type" not in model_config:
+                        continue
                     if model_config['type'] == 'resource':
                         self.resource_model[node['id']] = {
                             'mesh': f"{str(self.mesh_path)}/resources/{model_config['mesh']}",
@@ -148,7 +157,7 @@ class ResourceVisualization:
                                 new_dev.set(key, str(value))
 
                         # 添加ros2_controller
-                        if node['class'].find('moveit.')!= -1:
+                        if legacy_node_requests_moveit(node):
                             new_include_controller = etree.SubElement(self.root, f"{{{xacro_uri}}}include")
                             new_include_controller.set("filename", f"{str(self.mesh_path)}/devices/{model_config['mesh']}/config/macro.ros2_control.xacro")
                             new_controller = etree.SubElement(self.root, f"{{{xacro_uri}}}{model_config['mesh']}_ros2_control")
@@ -257,7 +266,13 @@ class ResourceVisualization:
             if "planner_configs" not in ompl_config:
                 ompl_config.update(load_yaml(default_folder / "ompl_defaults.yaml"))
 
-        yaml.safe_dump(self.ros2_controllers_yaml, open(f"{str(self.mesh_path)}/ros2_controllers.yaml", "w"))
+        controllers_path = self.runtime_dir / "ros2_controllers.yaml"
+        staged_controllers_path = self.runtime_dir / "ros2_controllers.yaml.tmp"
+        staged_controllers_path.write_text(
+            yaml.safe_dump(self.ros2_controllers_yaml, sort_keys=False),
+            encoding="utf-8",
+        )
+        staged_controllers_path.replace(controllers_path)
 
         robot_description_planning = {
             "default_velocity_scaling_factor": 0.1,
@@ -279,7 +294,7 @@ class ResourceVisualization:
         if self.moveit_nodes:
 
             controllers = []
-            ros2_controllers = ParameterFile(f"{str(self.mesh_path)}/ros2_controllers.yaml", allow_substs=True)
+            ros2_controllers = ParameterFile(str(controllers_path), allow_substs=True)
 
             controllers.append(
                 nd(
@@ -356,19 +371,18 @@ class ResourceVisualization:
         if self.moveit_controllers_yaml['moveit_simple_controller_manager']['controller_names']:
             moveit_params.append(self.moveit_controllers_yaml)
 
-        move_group = nd(
-            package='moveit_ros_move_group',
-            executable='move_group',
-            output='screen',
-            parameters=moveit_params,
-            env=dict(os.environ)
-        )
-
-
         # 将节点添加到launch描述中
         self.launch_description.add_action(robot_state_publisher)
         # self.launch_description.add_action(joint_state_publisher_node)
-        self.launch_description.add_action(move_group)
+        if self.moveit_nodes:
+            move_group = nd(
+                package='moveit_ros_move_group',
+                executable='move_group',
+                output='screen',
+                parameters=moveit_params,
+                env=dict(os.environ)
+            )
+            self.launch_description.add_action(move_group)
 
         # 如果启用RViz,添加RViz节点
         if self.enable_rviz:
@@ -406,3 +420,9 @@ class ResourceVisualization:
         # print('--------------------------------')
         self.launch_service.include_launch_description(launch_description)
         self.launch_service.run()
+
+    def stop(self) -> None:
+        shutdown = getattr(self.launch_service, "shutdown", None)
+        if callable(shutdown):
+            shutdown()
+        shutil.rmtree(self.runtime_dir, ignore_errors=True)
