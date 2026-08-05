@@ -7,11 +7,21 @@ from typing import Any
 
 from fastapi.testclient import TestClient
 
+from tests.workflow.test_applied_authoring_projection import _persisted_read_graph
 from tests.workflow.test_authoring_engine import (
     WORKFLOW_UUID,
     _applied_graph,
     _engine,
     _source,
+)
+from tests.workflow.test_f05_material_source_authoring import (
+    PREPARE_NODE_UUID,
+)
+from tests.workflow.test_f05_material_source_authoring import (
+    _engine as _material_source_engine,
+)
+from tests.workflow.test_f05_material_source_authoring import (
+    _source as _material_source,
 )
 from unilabos.app.workflow_api import create_workflow_app
 from unilabos.app.workflow_authoring_transform import create_authoring_transform_app
@@ -182,6 +192,80 @@ def test_transform_routes_do_not_write_workflow_history(
                 _compile_body(source=_source(), graph=graph, revision=revision),
             )
         assert result["graph"] is not None
+        assert {table: store.count_rows(table) for table in persistent_tables} == before
+    finally:
+        service.close()
+
+
+def test_persisted_material_source_generate_validate_fixed_point_is_read_only(
+    tmp_path: Path,
+) -> None:
+    """真实持久物料来源图必须经生成与校验达到零写入固定点。
+
+    参数：``tmp_path`` 提供隔离工作流 SQLite 文件。返回：无；通过产品 HTTP
+    响应封装（Envelope）断言持久节点、物料占位符（ResourceSlot）、选择器、
+    模板和连接点（Handle）读形状完全不变，且定义/创作/任务/作业表零写入。
+    异常：任一转换返回业务错误、图漂移或数据库行变化时断言失败。
+    """
+
+    engine = _material_source_engine()
+    # ``source_only_text`` 复现追踪中的单物料来源（MaterialSource）节点：它没有
+    # 动作消费节点和边，因此产品 HTTP 的边字段集合不会遮蔽本轮固定点缺口。
+    source_only_text = _material_source(mode="create_new", flow_role="CONSUMABLE")
+    action_block = f"""    # unilab:node_uuid={PREPARE_NODE_UUID}
+    prepared = reactor.prepare(sample=assay_plate)
+    return workflow_output()
+"""
+    assert action_block in source_only_text
+    source_only_text = source_only_text.replace(
+        action_block,
+        "    return workflow_output()\n",
+    )
+    compiled = engine.compile(
+        workflow_uuid=WORKFLOW_UUID,
+        workflow_revision=7,
+        python_source=source_only_text,
+        source_uri=SOURCE_URI,
+        applied_graph=_applied_graph(),
+    )
+    assert compiled.valid and compiled.graph is not None, compiled.diagnostics
+    # ``persisted_graph`` 复现真实 trace：实体带数据库时间和工作流身份，可空字段
+    # 遵循 Backend ``omitempty``，物料来源（MaterialSource）选择器保持完整。
+    persisted_graph = _persisted_read_graph(compiled.graph)
+    store = WorkflowStore(tmp_path / "workflow_history.db")
+    service = WorkflowService(store, compiler=engine)
+    persistent_tables = (
+        "workflow",
+        "workflow_node",
+        "workflow_edge",
+        "workflow_authoring",
+        "workflow_task",
+        "workflow_node_job",
+    )
+    # ``before`` 是三条纯转换不得改变的持久事实基线。
+    before = {table: store.count_rows(table) for table in persistent_tables}
+
+    try:
+        with TestClient(
+            create_workflow_app(service, authoring_transform=engine)
+        ) as client:
+            generated = _post(
+                client,
+                "/api/v1/authoring/generate-python",
+                _generate_body(persisted_graph),
+            )
+            validated = _post(
+                client,
+                "/api/v1/authoring/validate",
+                _validate_body(
+                    persisted_graph,
+                    generated["normalized_python_source"],
+                ),
+            )
+        assert generated["graph"] == persisted_graph
+        assert validated["graph"] == persisted_graph
+        assert generated["changeset"] == validated["changeset"]
+        assert generated["changeset"]["kind"] == "source_only"
         assert {table: store.count_rows(table) for table in persistent_tables} == before
     finally:
         service.close()
