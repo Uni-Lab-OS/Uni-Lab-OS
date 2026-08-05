@@ -473,7 +473,8 @@ def _pose(node: Mapping[str, Any]) -> dict[str, float]:
     """读取物料相对位置、尺寸、缩放和旋转。
 
     参数：资源树节点。返回：产品 ``relative_position`` 数值字段。异常：任一值
-    非有限数、尺寸为负或缩放非正时抛出 ``ResourceGraphBootstrapError``。
+    非有限数、尺寸为负或缩放为负时抛出 ``ResourceGraphBootstrapError``；旧资源
+    跟踪器（ResourceTracker）的显式零缩放按“未指定”规范化为单位缩放。
     """
 
     pose = _json_object(node.get("pose"), "node.pose")
@@ -488,17 +489,15 @@ def _pose(node: Mapping[str, Any]) -> dict[str, float]:
         "depth": _number(size.get("depth"), "size.depth"),
         "length": _number(size.get("height"), "size.height"),
         "width": _number(size.get("width"), "size.width"),
-        "scale_x": _number(scale.get("x", 1), "scale.x"),
-        "scale_y": _number(scale.get("y", 1), "scale.y"),
-        "scale_z": _number(scale.get("z", 1), "scale.z"),
+        "scale_x": _scale_number(scale.get("x", 1), "scale.x"),
+        "scale_y": _scale_number(scale.get("y", 1), "scale.y"),
+        "scale_z": _scale_number(scale.get("z", 1), "scale.z"),
         "rotation_x": _number(rotation.get("x"), "rotation.x"),
         "rotation_y": _number(rotation.get("y"), "rotation.y"),
         "rotation_z": _number(rotation.get("z"), "rotation.z"),
     }
     if any(result[key] < 0 for key in ("depth", "length", "width")):
         raise ResourceGraphBootstrapError("资源尺寸不得为负数")
-    if any(result[key] <= 0 for key in ("scale_x", "scale_y", "scale_z")):
-        raise ResourceGraphBootstrapError("资源缩放必须为正数")
     return result
 
 
@@ -623,6 +622,20 @@ def _number(value: object, field: str) -> float:
     if not math.isfinite(result):
         raise ResourceGraphBootstrapError(f"{field} 必须是有限数值")
     return result
+
+
+def _scale_number(value: object, field: str) -> float:
+    """规范化资源树缩放并兼容旧资源跟踪器零默认值。
+
+    参数：``value`` 是可疑单轴缩放，``field`` 是诊断字段名。返回：正有限缩放；
+    显式 ``0`` 返回单位缩放 ``1.0``。异常：负数、布尔值、无穷或非法数值抛出
+    ``ResourceGraphBootstrapError``，确保 SQLite 的 ``scale_* > 0`` 约束成立。
+    """
+
+    result = _number(value, field)
+    if result < 0:
+        raise ResourceGraphBootstrapError(f"{field} 不得为负数")
+    return 1.0 if result == 0 else result
 
 
 def _dump(value: object) -> str:
