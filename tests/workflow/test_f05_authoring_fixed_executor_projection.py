@@ -24,6 +24,8 @@ ACTION_NODE_UUID = "52000000-0000-4000-8000-000000000001"
 # ``ACTION_TEMPLATE_UUID`` 只标识动作模板（Action Template）。
 # 它绝不能冒充实际设备物料（Material）身份。
 ACTION_TEMPLATE_UUID = "53000000-0000-4000-8000-000000000001"
+# ``DEVICE_RESOURCE_TEMPLATE_UUID`` 是测试动作所属实际设备类型的资源模板身份。
+DEVICE_RESOURCE_TEMPLATE_UUID = "31000000-0000-4000-8000-000000000001"
 
 
 def _catalog() -> AuthoringCatalogSnapshot:
@@ -149,6 +151,51 @@ def test_fixed_device_material_identity_projects_to_both_candidate_fields() -> N
     assert action_node["meta_data"]["unilab"]["executor_binding"] == {
         "mode": "fixed",
         "device_id": DEVICE_MATERIAL_UUID,
+    }
+
+
+def test_fixed_device_business_id_resolves_to_material_uuid() -> None:
+    """部署设备业务 ID 必须解析为实际设备物料 UUID 并保留派发身份。
+
+    参数：无。返回：无。断言：库存权威（Inventory Authority）把
+    ``reactor-a`` 解析为实际设备物料（Material）后，节点顶层写规范 UUID，
+    执行器绑定（ExecutorBinding）仍保留运行时设备 ID；解析出的资源模板必须
+    与动作模板设备类型一致。本测试不创建工作流任务（WorkflowTask）或执行动作。
+    """
+
+    def resolve_device_identity(resource_id: str) -> dict[str, str] | None:
+        """返回测试设备业务 ID 对应的最小库存身份摘要。
+
+        参数：``resource_id`` 是作者源码声明的设备业务 ID。返回：命中
+        ``reactor-a`` 时返回实际物料与资源模板 UUID，否则返回 ``None``。
+        异常：无。
+        """
+
+        if resource_id != "reactor-a":
+            return None
+        return {
+            "uuid": DEVICE_MATERIAL_UUID,
+            "resource_template_uuid": DEVICE_RESOURCE_TEMPLATE_UUID,
+        }
+
+    # ``compilation`` 只读取注入的库存身份端口，不查询名称或设备模板猜测 UUID。
+    compilation = WorkflowAuthoringEngine(
+        catalog=_catalog(),
+        resource_reference_resolver=resolve_device_identity,
+    ).compile(
+        workflow_uuid=WORKFLOW_UUID,
+        workflow_revision=7,
+        python_source=_source("reactor-a"),
+        source_uri="package://lab/workflows/fixed_executor_business_id.py",
+        applied_graph=_applied_graph(),
+    )
+
+    assert compilation.valid and compilation.graph is not None, compilation.diagnostics
+    action_node = compilation.graph["nodes"][0]
+    assert action_node["material_uuid"] == DEVICE_MATERIAL_UUID
+    assert action_node["meta_data"]["unilab"]["executor_binding"] == {
+        "mode": "fixed",
+        "device_id": "reactor-a",
     }
 
 
