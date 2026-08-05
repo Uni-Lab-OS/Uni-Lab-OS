@@ -87,8 +87,9 @@ class _ResourceTree:
     """以产品 ``ResourceTreeSet.dump`` 形状暴露固定资源树。
 
     参数：``site_parent_uuid`` 可覆盖库位（Site）的父运行时 UUID；
-    ``mount_name`` 可改变资源图内容以制造指纹冲突。返回：``dump`` 提供一棵树。
-    异常：无；非法父引用由被测深模块关闭式拒绝。
+    ``mount_name`` 可改变资源图内容以制造指纹冲突；``mount_scale`` 模拟旧资源
+    跟踪器（ResourceTracker）的零值缩放。返回：``dump`` 提供一棵树。异常：无；
+    非法父引用与缩放由被测深模块关闭式处理。
     """
 
     def __init__(
@@ -96,15 +97,17 @@ class _ResourceTree:
         *,
         site_parent_uuid: str = "64000000-0000-4000-8000-0000000002b0",
         mount_name: str = "Stacker A",
+        mount_scale: float = 1,
     ) -> None:
         """保存测试资源树的可变输入。
 
-        参数：两个参数分别表示库位父身份与设备展示名。返回：无。
-        异常：无；``site_parent_uuid`` 是运行时父引用，不是正式物料 UUID。
+        参数：三个参数分别表示库位父身份、设备展示名与设备三轴缩放值。返回：
+        无。异常：无；``site_parent_uuid`` 是运行时父引用，不是正式物料 UUID。
         """
 
         self._site_parent_uuid = site_parent_uuid
         self._mount_name = mount_name
+        self._mount_scale = mount_scale
 
     def dump(self) -> list[list[dict[str, Any]]]:
         """返回设备物料和两个有序库位（Site）的序列化树。
@@ -115,6 +118,13 @@ class _ResourceTree:
 
         # ``runtime_mount_uuid`` 是资源树内部关系身份，不得成为库存权威物料身份。
         runtime_mount_uuid = "64000000-0000-4000-8000-0000000002b0"
+        # ``mount_pose`` 允许精确复现 ResourceTracker 未显式配置时的三轴零缩放。
+        mount_pose = _pose(0, 0, 0, 360, 300, 720)
+        mount_pose["scale"] = {
+            "x": self._mount_scale,
+            "y": self._mount_scale,
+            "z": self._mount_scale,
+        }
         return [
             [
                 {
@@ -125,7 +135,7 @@ class _ResourceTree:
                     "parent_uuid": None,
                     "type": "device",
                     "class": "m2b_mount",
-                    "pose": _pose(0, 0, 0, 360, 300, 720),
+                    "pose": mount_pose,
                     "config": {"category": "stacker"},
                     "data": {},
                     "barcode": "",
@@ -255,6 +265,29 @@ def test_shared_implementation_class_keeps_unique_business_aliases() -> None:
     assert [node["material"]["uuid"] for node in graph["nodes"]] == [
         MOUNT_MATERIAL_UUID
     ]
+
+
+def test_legacy_zero_scale_is_normalized_to_identity_scale() -> None:
+    """旧资源跟踪器的零缩放应按“未指定”规范化为单位缩放。
+
+    参数：无。返回：无。断言：SZLab 形状的 ``scale=(0,0,0)`` 不阻止首次投影，
+    且 SQLite 中仍满足 Backend 形状 ``scale_* > 0`` 约束并保存三轴单位缩放；
+    负缩放与非有限值不在本兼容规则内。
+    """
+
+    store = InventoryStore(":memory:")
+    try:
+        receipt = _bootstrap(store, _ResourceTree(mount_scale=0))
+        position = store.query_one(
+            "SELECT scale_x,scale_y,scale_z FROM relative_position "
+            "WHERE material_uuid=?",
+            (MOUNT_MATERIAL_UUID,),
+        )
+    finally:
+        store.close()
+
+    assert receipt["status"] == "imported"
+    assert position == {"scale_x": 1.0, "scale_y": 1.0, "scale_z": 1.0}
 
 
 def test_restart_with_same_source_and_fingerprint_is_idempotent(tmp_path: Path) -> None:
