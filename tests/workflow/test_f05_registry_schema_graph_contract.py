@@ -99,6 +99,7 @@ def test_compatible_serialized_and_boolean_schemas_remain_valid(
     "raw_schema",
     [
         pytest.param([{"type": "object"}], id="array-root"),
+        pytest.param({"x-invalid": object()}, id="non-json-object-member"),
         pytest.param("{'type': 'object'}", id="python-repr-string"),
         pytest.param("{", id="malformed-json-string"),
     ],

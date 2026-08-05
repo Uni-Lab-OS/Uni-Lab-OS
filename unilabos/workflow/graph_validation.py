@@ -6,6 +6,7 @@ import json
 import math
 import re
 from collections import defaultdict
+from copy import deepcopy
 from typing import Any, Dict, Iterable, List, Mapping
 
 from unilabos.workflow.json_codec import encode_json, strict_json_equal
@@ -17,7 +18,11 @@ from unilabos.workflow.material_selector import (
     MaterialSelectorError,
     validate_material_source_node,
 )
-from unilabos.workflow.models import WorkflowEdgeWrite, WorkflowNodeWrite
+from unilabos.workflow.models import (
+    WorkflowEdgeWrite,
+    WorkflowNodeWrite,
+    validate_json_value,
+)
 from unilabos.workflow.workflow_io import (
     WorkflowIOValidationError,
     validate_workflow_io,
@@ -453,11 +458,23 @@ def _validate_execution_policy(policy: Mapping[str, Any]) -> None:
 
 
 def _parse_schema(raw_schema: Any) -> Any:
-    if raw_schema is None or str(raw_schema).strip() == "":
+    """把模板存储表示解析为与调用方分离的节点参数 JSON Schema。
+
+    参数说明：``raw_schema`` 是模板投影写入的字典、布尔值或既有 JSON 字符串。
+    返回：独立的 JSON Schema 对象、布尔值或缺省 ``None``。异常：容器、JSON
+    编码或根类型无效时抛出 ``GraphValidationError``，不得按 Python repr 解码。
+    """
+
+    if raw_schema is None or isinstance(raw_schema, str) and not raw_schema.strip():
         return None
     try:
-        schema = json.loads(str(raw_schema))
-    except (TypeError, ValueError) as exc:
+        schema = (
+            json.loads(raw_schema)
+            if isinstance(raw_schema, str)
+            else deepcopy(raw_schema)
+        )
+        validate_json_value(schema)
+    except (TypeError, ValueError, RecursionError) as exc:
         raise GraphValidationError("节点参数 JSON Schema 无效") from exc
     if not isinstance(schema, (dict, bool)):
         raise GraphValidationError("节点参数 JSON Schema 必须是对象或布尔值")
