@@ -10,6 +10,7 @@
 from __future__ import annotations
 
 import time
+from collections.abc import Mapping
 from dataclasses import dataclass, field
 from enum import Enum
 from typing import Any, Dict, List
@@ -45,24 +46,24 @@ def normalize_node_type(value: Any) -> str:
 # Edge 额外扩展：ready/dispatched（节点内部推进态）、waiting_for_material（等料）、
 # interrupted（进程重启标记，仅历史库）；上报云端时终态词汇与云端枚举一字不差。
 class NodeState(str, Enum):
-    PENDING = "pending"      # 尚有未完成的前置依赖
-    READY = "ready"          # 依赖已清零，等待排序/下发
+    PENDING = "pending"  # 尚有未完成的前置依赖
+    READY = "ready"  # 依赖已清零，等待排序/下发
     DISPATCHED = "dispatched"  # 已下发给设备执行（对应云端 job running）
     SUCCESS = "success"
     FAILED = "failed"
     CANCELED = "canceled"
-    TIMEOUT = "timeout"      # 词汇对齐云端 job 状态；Edge 调度器当前不主动产生
+    TIMEOUT = "timeout"  # 词汇对齐云端 job 状态；Edge 调度器当前不主动产生
 
 
 class WorkflowState(str, Enum):
-    PENDING = "pending"      # 词汇对齐云端 workflow_task；Edge 提交即 running
+    PENDING = "pending"  # 词汇对齐云端 workflow_task；Edge 提交即 running
     RUNNING = "running"
     WAITING_MATERIAL = "waiting_for_material"  # Edge 扩展：物料预留不足，等待补料后重试
-    PAUSED = "paused"        # 词汇对齐云端；Edge 调度器当前不主动产生
+    PAUSED = "paused"  # 词汇对齐云端；Edge 调度器当前不主动产生
     SUCCESS = "success"
     FAILED = "failed"
     CANCELED = "canceled"
-    TIMEOUT = "timeout"      # 词汇对齐云端；超时判定由云端 Cron/调度器负责
+    TIMEOUT = "timeout"  # 词汇对齐云端；超时判定由云端 Cron/调度器负责
 
 
 @dataclass
@@ -76,24 +77,28 @@ class Handle:
     """
 
     uuid: str = ""
-    data_source: str = ""   # "executor" 表示取自父节点执行返回值
-    handle_key: str = ""    # "ready" 的 handle 只表达顺序依赖，不传参
-    data_key: str = ""      # gjson 取值路径；target 侧可含 "@@@" 分隔的嵌套键
-    node_id: str = ""       # 该 handle 挂在哪个 workflow_node 上（key 寻址时必需）
-    io_type: str = ""       # source / target（对齐 workflow_handle_template.io_type）
+    data_source: str = ""  # "executor" 表示取自父节点执行返回值
+    handle_key: str = ""  # "ready" 的 handle 只表达顺序依赖，不传参
+    data_key: str = ""  # gjson 取值路径；target 侧可含 "@@@" 分隔的嵌套键
+    node_id: str = ""  # 该 handle 挂在哪个 workflow_node 上（key 寻址时必需）
+    io_type: str = ""  # source / target（对齐 workflow_handle_template.io_type）
 
 
 @dataclass
 class WorkflowNode:
     """WorkflowNode 子集：Edge 执行一个设备动作所需的全部信息。"""
 
-    id: str                       # 节点 id（uuid 或云端 node_id 字符串化）
+    id: str  # 节点 id（uuid 或云端 node_id 字符串化）
     # 已存在的工作流节点作业（WorkflowNodeJob）UUID；空值保持旧路径随机生成。
     job_id: str = ""
-    device_id: str = ""           # 目标设备
-    action_name: str = ""         # 设备动作名
-    action_type: str = ""         # goal / goal_sequence 等
-    param: Dict[str, Any] = field(default_factory=dict)  # action 参数（会被父节点传参覆写）
+    device_id: str = ""  # 目标设备
+    action_name: str = ""  # 设备动作名
+    action_type: str = ""  # goal / goal_sequence 等
+    param: Dict[str, Any] = field(
+        default_factory=dict
+    )  # action 参数（会被父节点传参覆写）
+    # 任务创建时冻结的动作合同（Action Contract）；None 仅表示遗留直接调用。
+    param_schema: dict[str, Any] | None = None
     # 与云端 workflow_node 类型枚举一致：Group / ILab / py_script / tool_call /
     # manual_confirm / Transfer（Edge 目前只执行 ILab；Transfer 仅规范化/透传，
     # 比较请用 is_ilab()，容忍大小写差异）
@@ -144,7 +149,7 @@ class WorkflowSpec:
     priority: Any = 1.0
     submitted_at: float = field(default_factory=time.time)
     lab_id: str = ""
-    task_id: str = ""             # 云端 WorkflowTask uuid（可空，Edge 本地提交时等于 workflow_id）
+    task_id: str = ""  # 云端 WorkflowTask uuid（可空，Edge 本地提交时等于 workflow_id）
 
     def __post_init__(self) -> None:
         if not self.task_id:
@@ -217,9 +222,17 @@ def node_from_dict(data: Dict[str, Any]) -> WorkflowNode:
     """把 wire 节点对象转换为旧调度器工作流节点（WorkflowNode）。
 
     参数：``data`` 是整图或兼容桥输入的节点对象。返回规范化节点；其中
-    ``job_id`` 若存在，表示派发必须复用已有工作流节点作业身份。
+    ``job_id`` 若存在，表示派发必须复用已有工作流节点作业身份；
+    ``param_schema`` 是已冻结动作合同（Action Contract）。异常：
+    缺失必需节点身份时保留 ``KeyError``；``param_schema`` 非对象且
+    非 ``None`` 时抛带中文诊断的 ``TypeError``。
     """
 
+    # ``param_schema`` 隔离 wire 字典顶层，避免后续更换容器改变节点合同。
+    raw_param_schema = data.get("param_schema")
+    if raw_param_schema is not None and not isinstance(raw_param_schema, Mapping):
+        raise TypeError("param_schema 必须是对象或 None")
+    param_schema = dict(raw_param_schema) if raw_param_schema is not None else None
     return WorkflowNode(
         id=str(data["id"]),
         job_id=str(data.get("job_id", "") or ""),
@@ -227,17 +240,22 @@ def node_from_dict(data: Dict[str, Any]) -> WorkflowNode:
         action_name=data.get("action_name", "") or "",
         action_type=data.get("action_type", "") or "",
         param=dict(data.get("param") or {}),
+        param_schema=param_schema,
         node_type=normalize_node_type(data.get("node_type") or data.get("type")),
         disabled=bool(data.get("disabled", False)),
         material_requirements=[
-            MaterialRequirement.from_dict(r) for r in (data.get("material_requirements") or [])
+            MaterialRequirement.from_dict(r)
+            for r in (data.get("material_requirements") or [])
         ],
     )
 
 
 def edge_from_dict(data: Dict[str, Any]) -> WorkflowEdge:
     return WorkflowEdge(
-        uuid=str(data.get("uuid", "") or f"{data['source_node_id']}->{data['target_node_id']}"),
+        uuid=str(
+            data.get("uuid", "")
+            or f"{data['source_node_id']}->{data['target_node_id']}"
+        ),
         source_node_id=str(data["source_node_id"]),
         target_node_id=str(data["target_node_id"]),
         source_handle_uuid=str(data.get("source_handle_uuid", "") or ""),

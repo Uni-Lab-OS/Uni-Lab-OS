@@ -5,7 +5,6 @@ from __future__ import annotations
 import hashlib
 import re
 import threading
-from collections import defaultdict
 from collections.abc import Callable
 from contextlib import ExitStack
 from datetime import datetime, timezone
@@ -25,6 +24,7 @@ from unilabos.workflow.device_action_run import (
     DeviceActionRunService,
     DeviceActionRunUnavailable,
 )
+from unilabos.workflow.execution_plan import ExecutionPlanBuilder
 from unilabos.workflow.graph_validation import GraphValidationError
 from unilabos.workflow.json_codec import encode_json
 from unilabos.workflow.models import (
@@ -63,6 +63,7 @@ from unilabos.workflow.store import (
     WorkflowStore,
     utc_now,
 )
+from unilabos.workflow.task_scheduler_bridge import TaskSchedulerBridgeError
 
 _ERRORS = {
     "invalid_input": (400, "提交内容格式不正确"),
@@ -229,16 +230,20 @@ class AuthoringCompiler(Protocol):
     ) -> CandidateCompilation: ...
 
 
-class DeviceActionRunBridge(Protocol):
-    """设备单动作运行（DeviceActionRun）的本地执行端口。"""
+class WorkflowTaskSchedulerBridge(Protocol):
+    """普通任务与设备单动作共享的工作流任务（WorkflowTask）调度端口。"""
 
-    def submit(self, aggregate: Dict[str, Any]) -> None:
-        """提交首次创建的 Task/Job 聚合；参数是标准持久投影，返回无。"""
+    def submit(self, task: dict[str, Any]) -> dict[str, Any]:
+        """提交已持久任务。
+
+        参数：``task`` 是标准工作流任务（WorkflowTask）投影。返回：同步推进后的
+        任务/作业聚合。异常：编译、准入或派发前投影失败时由实现抛稳定桥接错误。
+        """
 
         ...
 
     def close(self) -> None:
-        """释放执行端口持有的生命周期监听；返回无且必须幂等。"""
+        """幂等释放调度生命周期监听器；参数无，返回无。"""
 
         ...
 
@@ -267,17 +272,15 @@ class WorkflowService:
         store: WorkflowStore,
         *,
         compiler: Optional[AuthoringCompiler] = None,
-        material_resolver: Optional[
-            Callable[[str], Optional[Dict[str, Any]]]
-        ] = None,
-        device_action_run_bridge: Optional[DeviceActionRunBridge] = None,
+        material_resolver: Optional[Callable[[str], Optional[Dict[str, Any]]]] = None,
+        task_scheduler_bridge: WorkflowTaskSchedulerBridge | None = None,
     ):
         """装配本地工作流应用服务。
 
         参数：``store`` 是唯一工作流写模型；``compiler`` 负责编译可信工作流源码；
         ``material_resolver`` 按物料 UUID 读取活动物料身份，供设备单动作运行
-        （DeviceActionRun）关闭式校验；``device_action_run_bridge`` 把首次创建的
-        标准 Task/Job 提交到本地执行内核。返回无。
+        （DeviceActionRun）关闭式校验；``task_scheduler_bridge`` 把普通工作流任务
+        （WorkflowTask）与首次创建的设备单动作聚合交给同一本地调度器。返回无。
         """
 
         self._store = store
@@ -286,10 +289,9 @@ class WorkflowService:
             store,
             material_resolver=material_resolver,
         )
-        # ``device_action_run_bridge`` 是可选本地执行端口；后端控制
-        # （Backend-controlled）模式不装配它，避免 OS 形成第二个生产调度权威
-        # （Scheduler Authority）。
-        self._device_action_run_bridge = device_action_run_bridge
+        # ``_task_scheduler_bridge`` 是普通任务与设备单动作共享的唯一监听器所有者；
+        # 后端控制（Backend-controlled）配置保持空，避免第二个调度权威。
+        self._task_scheduler_bridge = task_scheduler_bridge
         self._locks_guard = threading.Lock()
         self._authoring_locks: Dict[str, threading.RLock] = {}
         # ``_source_authorization_replacement_lock`` 串行化完整授权集合替换，使“当前
@@ -491,7 +493,7 @@ class WorkflowService:
             raise WorkflowError("invalid_input")
         description = self._optional_text(description)
         try:
-            return self._store.create_task_with_jobs(
+            task = self._store.create_task_with_jobs(
                 workflow_uuid=workflow_uuid,
                 task_uuid=str(uuid4()),
                 run_mode=run_mode,
@@ -505,6 +507,14 @@ class WorkflowService:
                     target_node_uuid=target_node_uuid,
                 ),
             )
+            if self._task_scheduler_bridge is None:
+                return task
+            # ``aggregate`` 来自调度同步推进后的标准持久投影，不返回创建事务中的
+            # 过期 ``pending`` 快照。
+            aggregate = self._task_scheduler_bridge.submit(task)
+            return aggregate["task"]
+        except TaskSchedulerBridgeError:
+            raise WorkflowError("internal_error") from None
         except StoreConflict:
             raise WorkflowError("invalid_input") from None
 
@@ -524,6 +534,7 @@ class WorkflowService:
         参数与 Backend ``POST /device-action-runs`` DTO 同名；返回标准工作流任务
         （WorkflowTask）、唯一工作流节点作业（WorkflowNodeJob）和 ``created``。
         输入/引用错误、依赖未装配和幂等冲突分别映射为稳定 HTTP 业务错误。
+        公共任务调度桥失败映射为 ``internal_error``，且不创建第二套执行身份。
         """
 
         try:
@@ -538,16 +549,24 @@ class WorkflowService:
                 description=description,
                 meta_data=meta_data,
             )
-            if (
-                aggregate["created"] is True
-                and self._device_action_run_bridge is not None
-            ):
-                self._device_action_run_bridge.submit(aggregate)
-                # 旧调度器可能同步完成首次派发，必须返回刷新后的权威状态，不能把
-                # 创建事务中的 ``pending`` 快照误报给前端。
+            if aggregate["created"] is True and self._task_scheduler_bridge is not None:
+                scheduled = self._task_scheduler_bridge.submit(aggregate["task"])
+                # ``scheduled_jobs`` 是公共桥返回的同一任务作业集合；设备单动作
+                # 必须仍精确包含创建事务生成的唯一作业身份。
+                scheduled_jobs = [
+                    job
+                    for job in scheduled["jobs"]
+                    if job.get("uuid") == aggregate["job"]["uuid"]
+                ]
+                if len(scheduled_jobs) != 1:
+                    raise TaskSchedulerBridgeError(
+                        "设备单动作调度结果缺少唯一原始作业身份"
+                    )
+                # 公共桥可能同步推进首次派发，必须返回同一任务/作业身份的刷新状态，
+                # 不能把创建事务中的 ``pending`` 快照误报给前端。
                 aggregate = {
-                    "task": self._store.get_task(aggregate["task"]["uuid"]),
-                    "job": self._store.get_job(aggregate["job"]["uuid"]),
+                    "task": scheduled["task"],
+                    "job": scheduled_jobs[0],
                     "created": True,
                 }
             return aggregate
@@ -557,6 +576,8 @@ class WorkflowService:
             raise WorkflowError("template_catalog_unavailable") from None
         except DeviceActionRunConflict:
             raise WorkflowConflict("conflict") from None
+        except TaskSchedulerBridgeError:
+            raise WorkflowError("internal_error") from None
 
     def get_workflow_task(self, task_uuid: str) -> Dict[str, Any]:
         try:
@@ -647,207 +668,18 @@ class WorkflowService:
         run_mode: str,
         target_node_uuid: Optional[str],
     ) -> Tuple[Dict[str, Any], List[Dict[str, Any]]]:
-        templates = {
-            template["uuid"]: template for template in graph.get("node_templates", [])
-        }
-        handles = {
-            handle["uuid"]: handle for handle in graph.get("handle_templates", [])
-        }
-        graph_nodes = graph["nodes"]
-        graph_edges = graph["edges"]
-        if run_mode == "single_node" and target_node_uuid is not None:
-            selected_node = next(
-                (node for node in graph_nodes if node["uuid"] == target_node_uuid),
-                None,
-            )
-            if selected_node is None or selected_node["disabled"]:
-                raise StoreConflict("single_node target is not enabled")
-            graph_nodes = [selected_node]
-            graph_edges = []
+        """委托深模块构造执行计划（ExecutionPlan）与首次作业集合。
 
-        def stable_key(node_uuid: str) -> Tuple[str, str]:
-            node = enabled[node_uuid]
-            return str(node.get("create_time") or ""), node_uuid
+        参数：``graph`` 是冻结应用图，``run_mode`` 是运行模式，
+        ``target_node_uuid`` 是单节点目标。返回：唯一版本化计划和待持久化作业。
+        异常：图、物料来源（MaterialSource）或目标非法时由构建器失败关闭。
+        """
 
-        enabled: Dict[str, Dict[str, Any]] = {}
-        node_kinds: Dict[str, str] = {}
-        for node in graph_nodes:
-            template = templates.get(node.get("workflow_node_template_uuid"))
-            raw_kind = (
-                template.get("node_type") if template is not None else node["type"]
-            )
-            kind = self._executor_kind(raw_kind)
-            if node["disabled"] or kind == "group":
-                continue
-            enabled[node["uuid"]] = node
-            node_kinds[node["uuid"]] = kind
-
-        indegree = {node_uuid: 0 for node_uuid in enabled}
-        outgoing: Dict[str, List[str]] = defaultdict(list)
-        planned_edges: List[Dict[str, Any]] = []
-        for edge in graph_edges:
-            source = edge["source_node_uuid"]
-            target = edge["target_node_uuid"]
-            if source not in enabled or target not in enabled:
-                continue
-            source_handle = handles.get(edge["source_handle_uuid"])
-            target_handle = handles.get(edge["target_handle_uuid"])
-            if source_handle is None or target_handle is None:
-                raise StoreConflict("workflow edge references a missing handle")
-            outgoing[source].append(target)
-            indegree[target] += 1
-            planned_edge = {
-                "uuid": edge["uuid"],
-                "source_node_uuid": source,
-                "target_node_uuid": target,
-                "source_handle_uuid": edge["source_handle_uuid"],
-                "target_handle_uuid": edge["target_handle_uuid"],
-                "source_data_key": self._handle_data_key(source_handle),
-                "target_data_key": self._handle_data_key(target_handle),
-                "source_type": str(source_handle.get("type") or "").strip(),
-                "target_type": str(target_handle.get("type") or "").strip(),
-            }
-            if self._dependency_only(source_handle):
-                planned_edge["dependency_only"] = True
-            planned_edges.append(planned_edge)
-
-        available = sorted(
-            (node_uuid for node_uuid, degree in indegree.items() if degree == 0),
-            key=stable_key,
+        return ExecutionPlanBuilder().build(
+            graph,
+            run_mode=run_mode,
+            target_node_uuid=target_node_uuid,
         )
-        ordered: List[str] = []
-        while available:
-            node_uuid = available.pop(0)
-            ordered.append(node_uuid)
-            for target in outgoing[node_uuid]:
-                indegree[target] -= 1
-                if indegree[target] == 0:
-                    available.append(target)
-                    available.sort(key=stable_key)
-        if len(ordered) != len(enabled):
-            raise StoreConflict("workflow graph contains a cycle")
-        if run_mode == "single_node":
-            if target_node_uuid is None:
-                if not ordered:
-                    raise StoreConflict("workflow has no enabled nodes")
-                target_node_uuid = ordered[0]
-            if target_node_uuid not in enabled:
-                raise StoreConflict("single_node target is not enabled")
-            ordered = [target_node_uuid]
-            enabled = {target_node_uuid: enabled[target_node_uuid]}
-            planned_edges = []
-
-        planned_nodes: List[Dict[str, Any]] = []
-        jobs: List[Dict[str, Any]] = []
-        for index, node_uuid in enumerate(ordered):
-            node = enabled[node_uuid]
-            kind = node_kinds[node_uuid]
-            if kind == "script":
-                raise StoreConflict("script executor is not configured")
-            policy = node.get("execution_policy") or {}
-            template_uuid = node.get("workflow_node_template_uuid")
-            template = templates.get(template_uuid)
-            target_handles = sorted(
-                (
-                    handle
-                    for handle in handles.values()
-                    if template_uuid is not None
-                    and handle.get("workflow_node_template_uuid") == template_uuid
-                    and handle.get("io_type") == "target"
-                ),
-                key=lambda item: item["uuid"],
-            )
-            source_handle_uuids = sorted(
-                handle["uuid"]
-                for handle in handles.values()
-                if template_uuid is not None
-                and handle.get("workflow_node_template_uuid") == template_uuid
-                and handle.get("io_type") == "source"
-            )
-            planned_node: Dict[str, Any] = {
-                "uuid": node_uuid,
-                "topological_index": index,
-                "kind": kind,
-                "param": node.get("param") or {},
-                "execution_policy": policy,
-                "inputs": [
-                    {
-                        "handle_uuid": handle["uuid"],
-                        "data_key": self._final_target_data_key(
-                            self._handle_data_key(handle)
-                        ),
-                        "type": str(handle.get("type") or "").strip(),
-                        "required": bool(handle.get("required")),
-                    }
-                    for handle in target_handles
-                ],
-            }
-            if node.get("material_uuid") is not None:
-                planned_node["material_uuid"] = node["material_uuid"]
-            if node.get("script") is not None:
-                planned_node["script"] = node["script"]
-            if source_handle_uuids:
-                planned_node["source_handle_uuids"] = source_handle_uuids
-            if template is not None and template.get("schema") is not None:
-                planned_node["param_schema"] = template["schema"]
-            planned_nodes.append(planned_node)
-            jobs.append(
-                {
-                    "uuid": str(uuid4()),
-                    "workflow_node_uuid": node_uuid,
-                    "topological_index": index,
-                    "executor_kind": kind,
-                    "execution_policy": policy,
-                    "execution_timeout_seconds": 0,
-                    "param": node.get("param") or {},
-                }
-            )
-        plan = {
-            "run_mode": run_mode,
-            "nodes": planned_nodes,
-            "edges": planned_edges,
-        }
-        if target_node_uuid is not None:
-            plan["target_node_uuid"] = target_node_uuid
-        return plan, jobs
-
-    @staticmethod
-    def _handle_data_key(handle: Dict[str, Any]) -> str:
-        return str(handle.get("data_key") or handle.get("handle_key") or "").strip()
-
-    @staticmethod
-    def _final_target_data_key(data_key: str) -> str:
-        return data_key.split("@@@")[-1].strip()
-
-    @staticmethod
-    def _dependency_only(handle: Dict[str, Any]) -> bool:
-        if str(handle.get("handle_key") or "").strip().lower() == "ready":
-            return True
-        data_source = str(handle.get("data_source") or "").strip()
-        return bool(data_source) and data_source.lower() != "executor"
-
-    @staticmethod
-    def _executor_kind(node_type: str) -> str:
-        normalized = node_type.strip().lower()
-        aliases = {
-            "ilab": "device_action",
-            "device": "device_action",
-            "action": "device_action",
-            "resource_action": "device_action",
-            "py_script": "script",
-        }
-        kind = aliases.get(normalized, normalized)
-        if kind not in {
-            "device_action",
-            "compute",
-            "condition",
-            "script",
-            "group",
-            "tool_call",
-            "manual_confirm",
-        }:
-            raise StoreConflict(f"unsupported workflow node type {node_type!r}")
-        return kind
 
     # 工作流创作（Authoring） ---------------------------------------------
 
@@ -878,10 +710,7 @@ class WorkflowService:
             or registered_roots != set(root_paths)
             or any(
                 registration.source_uri
-                != (
-                    f"package://{registration.package_id}/"
-                    f"{registration.relative_path}"
-                )
+                != (f"package://{registration.package_id}/{registration.relative_path}")
                 for registration in plan.registrations
             )
         ):
@@ -959,9 +788,7 @@ class WorkflowService:
         if not isinstance(package_id, str) or not package_id.strip():
             raise WorkflowError("invalid_input")
         normalized_package_id = package_id.strip()
-        source_uri = (
-            f"package://{normalized_package_id}/{normalized_relative_path}"
-        )
+        source_uri = f"package://{normalized_package_id}/{normalized_relative_path}"
         # 单项替换命令构造成与启动发现完全相同的不可变计划，避免绕过物理路径、
         # 来源 URI 和“既有身份不可重绑定”等批量授权不变量。
         plan = EditableSourceDiscoveryPlan(
@@ -974,9 +801,7 @@ class WorkflowService:
                     source_uri=source_uri,
                 ),
             ),
-            root_identities=(
-                ((root, (root_metadata.st_dev, root_metadata.st_ino))),
-            ),
+            root_identities=(((root, (root_metadata.st_dev, root_metadata.st_ino))),),
         )
         return self.replace_discovered_source_authorizations(plan)[0]
 
@@ -1008,10 +833,14 @@ class WorkflowService:
                 continue
 
     def close(self) -> None:
-        """关闭本地执行桥和由该 Service 独占的工作流持久存储。"""
+        """关闭共享本地调度桥和由服务独占的工作流存储。
 
-        if self._device_action_run_bridge is not None:
-            self._device_action_run_bridge.close()
+        参数：无。返回：无；桥必须幂等注销监听器，随后关闭持久存储。异常：清理
+        失败原样传播，调用方据此保留未完成资源所有权并可重试。
+        """
+
+        if self._task_scheduler_bridge is not None:
+            self._task_scheduler_bridge.close()
         self._store.close()
 
     def get_authoring(self, workflow_uuid: str) -> Dict[str, Any]:

@@ -3,7 +3,9 @@
 from __future__ import annotations
 
 import hashlib
+import json
 from collections.abc import Callable, Mapping
+from copy import deepcopy
 from typing import Any
 from uuid import uuid4
 
@@ -12,6 +14,7 @@ from unilabos.registry.material_lock_schema import (
     compile_material_lock_schema,
 )
 from unilabos.workflow.device_action_run_store import DeviceActionRunStore
+from unilabos.workflow.execution_plan import PLAN_VERSION
 from unilabos.workflow.json_codec import encode_json
 from unilabos.workflow.models import validate_uuid
 from unilabos.workflow.store import StoreConflict, StoreNotFound, WorkflowStore
@@ -87,6 +90,9 @@ class DeviceActionRunService:
 
         # ``device_material`` 是执行器（Executor）的实际物料身份，不是前端设备别名。
         device_material = self._resolve_material(device_material_uuid)
+        # ``edge_local_id`` 是本次执行计划（ExecutionPlan）冻结的具体执行器身份；
+        # 创建事务后不允许调度器再从可变物料摘要补齐该事实。
+        edge_local_id = self._edge_local_id(device_material)
         try:
             template = self._workflow_store.get_node_template(template_uuid)
         except StoreNotFound:
@@ -100,7 +106,9 @@ class DeviceActionRunService:
 
         effective_param = normalized_param
         if param is None:
-            effective_param = dict(template.get("goal_default") or template.get("goal") or {})
+            effective_param = dict(
+                template.get("goal_default") or template.get("goal") or {}
+            )
         # ``locked_material_uuids`` 是动作合同声明会被物理操作的业务物料集合；
         # 这里只校验身份存在，后续持久调度器统一建立作业执行占用（JobExecutionClaim）。
         locked_material_uuids = self._validate_action_param(template, effective_param)
@@ -117,6 +125,7 @@ class DeviceActionRunService:
         )
         task, job = self._build_execution(
             material_uuid=device_material_uuid,
+            edge_local_id=edge_local_id,
             template=template,
             param=effective_param,
             execution_policy=normalized_policy,
@@ -157,6 +166,33 @@ class DeviceActionRunService:
         return material
 
     @staticmethod
+    def _edge_local_id(material: Mapping[str, Any]) -> str:
+        """从设备物料摘要解析 Edge 本地执行器身份。
+
+        参数：``material`` 是创建阶段读取的活动设备物料（Material）摘要。
+        返回：去除首尾空白的 ``edge_local_id``。异常：直接字段及 ``meta_data``
+        映射/JSON 均未提供有效身份时抛 ``DeviceActionRunUnavailable``，确保失败
+        发生在任务持久化之前。
+        """
+
+        direct_identity = str(material.get("edge_local_id") or "").strip()
+        if direct_identity:
+            return direct_identity
+        # ``material_meta_data`` 是库存权威保存的设备路由元数据；字符串只接受
+        # JSON 对象，不从名称、条码或物料 UUID 推断执行器。
+        material_meta_data = material.get("meta_data")
+        if isinstance(material_meta_data, str):
+            try:
+                material_meta_data = json.loads(material_meta_data)
+            except (TypeError, ValueError):
+                material_meta_data = None
+        if isinstance(material_meta_data, Mapping):
+            nested_identity = str(material_meta_data.get("edge_local_id") or "").strip()
+            if nested_identity:
+                return nested_identity
+        raise DeviceActionRunUnavailable("设备物料缺少明确 edge_local_id")
+
+    @staticmethod
     def _validate_action_param(
         template: Mapping[str, Any],
         param: Mapping[str, Any],
@@ -168,7 +204,9 @@ class DeviceActionRunService:
         """
 
         meta_data = template.get("meta_data")
-        unilab_meta = meta_data.get("unilab") if isinstance(meta_data, Mapping) else None
+        unilab_meta = (
+            meta_data.get("unilab") if isinstance(meta_data, Mapping) else None
+        )
         action_schema = (
             unilab_meta.get("action_contract_schema")
             if isinstance(unilab_meta, Mapping)
@@ -177,7 +215,9 @@ class DeviceActionRunService:
         if not isinstance(action_schema, Mapping):
             raise DeviceActionRunUnavailable("动作模板缺少第 2 版冻结 Schema")
         try:
-            return compile_material_lock_schema(action_schema).material_lock_uuids(param)
+            return compile_material_lock_schema(action_schema).material_lock_uuids(
+                param
+            )
         except MaterialLockSchemaError as error:
             raise DeviceActionRunInputError(error.message) from None
 
@@ -283,6 +323,7 @@ class DeviceActionRunService:
     def _build_execution(
         *,
         material_uuid: str,
+        edge_local_id: str,
         template: Mapping[str, Any],
         param: Mapping[str, Any],
         execution_policy: Mapping[str, Any],
@@ -293,16 +334,41 @@ class DeviceActionRunService:
     ) -> tuple[dict[str, Any], dict[str, Any]]:
         """冻结一次直接设备动作的 Task、计划与唯一 Job。
 
-        参数均为已校验领域事实；模板与实际设备物料已经匹配。返回可在单事务中
-        写入的工作流任务（WorkflowTask）和工作流节点作业（WorkflowNodeJob）；
-        随机 UUID 只用于新聚合，幂等复用会由持久层返回既有聚合。
+        参数：``material_uuid`` 是实际设备物料（Material）的稳定身份；
+        ``edge_local_id`` 是已解析并冻结的具体执行器身份；``template`` 是与设备
+        物料匹配的已发布动作模板；``param`` 是已校验的最终动作参数；
+        ``execution_policy`` 是规范化执行期限策略；``idempotency_key`` 标识同一
+        逻辑创建命令；``request_fingerprint`` 固定该命令的执行与审计语义；
+        ``description`` 是可空展示说明；``meta_data`` 是规范化追踪元数据。
+        返回：可在单事务中写入的工作流任务（WorkflowTask）和工作流节点作业
+        （WorkflowNodeJob）；随机 UUID 只用于新聚合，幂等复用由持久层返回既有
+        聚合。异常：``template`` 缺少第 2 版冻结动作合同时抛出
+        ``DeviceActionRunUnavailable``，其他映射读取或复制错误原样传播。
         """
 
-        # ``node_uuid`` 是一次性冻结节点身份，不会创建可编辑工作流节点定义。
+        # ``node_uuid`` 是计划工作流节点（Planned Workflow Node）的稳定身份，
+        # 仅属于本次冻结执行，不会创建可编辑工作流节点定义。
         node_uuid = str(uuid4())
+        # ``task_uuid`` 是本次设备单动作调试（D1A）完整运行的稳定工作流任务
+        # （WorkflowTask）身份，持久重放不会另行授权新身份。
         task_uuid = str(uuid4())
+        # ``job_uuid`` 是该计划节点首次工作流节点作业尝试
+        # （WorkflowNodeJobAttempt）的稳定身份，不与任务或节点身份混用。
         job_uuid = str(uuid4())
         node_name = str(template.get("display_name") or template.get("name") or "")
+        template_meta_data = template.get("meta_data")
+        unilab_meta_data = (
+            template_meta_data.get("unilab")
+            if isinstance(template_meta_data, Mapping)
+            else None
+        )
+        action_contract_schema = (
+            unilab_meta_data.get("action_contract_schema")
+            if isinstance(unilab_meta_data, Mapping)
+            else None
+        )
+        if not isinstance(action_contract_schema, Mapping):
+            raise DeviceActionRunUnavailable("动作模板缺少第 2 版冻结 Schema")
         node_snapshot = {
             "uuid": node_uuid,
             "workflow_node_template_uuid": template["uuid"],
@@ -321,6 +387,7 @@ class DeviceActionRunService:
             "node_templates": [dict(template)],
         }
         execution_plan = {
+            "version": PLAN_VERSION,
             "run_mode": "single_node",
             "target_node_uuid": node_uuid,
             "nodes": [
@@ -328,14 +395,20 @@ class DeviceActionRunService:
                     "uuid": node_uuid,
                     "topological_index": 0,
                     "kind": "device_action",
+                    "device_id": edge_local_id,
+                    "action_name": template["name"],
+                    "action_type": template["type"],
                     "material_uuid": material_uuid,
-                    "param_schema": template.get("schema"),
+                    "param_schema": deepcopy(dict(action_contract_schema)),
                     "param": dict(param),
                     "execution_policy": dict(execution_policy),
                     "inputs": [],
+                    "source_handle_uuids": [],
+                    "material_requirements": [],
                 }
             ],
             "edges": [],
+            "handles": [],
         }
         task = {
             "uuid": task_uuid,
