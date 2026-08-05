@@ -123,7 +123,7 @@ class _RegistryWithConfigSite(_Registry):
         """返回挂载设备与其库位中子设备的唯一资源模板定义。"""
         child = {
             **super().obtain_registry_device_info()[0],
-            "id": "m2b_child",
+            "id": "community.m2b_native_e2e.m2b_child",
             "display_name": "M2B Child",
             "class": {
                 "module": "m2b_native_e2e.child:M2BChild",
@@ -167,7 +167,7 @@ class _ConfigSiteResourceTree:
                 "name": "Child A",
                 "parent_uuid": owner_runtime_uuid,
                 "type": "device",
-                "class": "m2b_child",
+                "class": "community.m2b_native_e2e.m2b_child",
                 "pose": _pose(10, 20, 30, 100, 90, 80),
                 "config": {},
                 "data": {},
