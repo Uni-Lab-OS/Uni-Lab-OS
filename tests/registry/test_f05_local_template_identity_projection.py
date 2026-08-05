@@ -213,14 +213,18 @@ def test_local_composition_creates_missing_inventory_template_identities(
     # ``inventory_store`` 是本地库存模板身份权威；启动前没有任何模板行。
     inventory_store = InventoryStore(str(tmp_path / "inventory.db"))
     try:
+        # ``registry`` 是合法资源模板与动作源码别名共享的冻结前注册表代际。
         registry = _build_registry(tmp_path)
+        # ``projection`` 是公开组合成功发布的工作流模板投影。
         _service, projection = compose_local_workflow_template_runtime(
             tmp_path,
             inventory_store=inventory_store,
             registry=registry,
         )
 
+        # ``template_identities`` 是库存权威提交的设备/物料模板活动 UUID 映射。
         template_identities = _active_template_identities(inventory_store)
+        # ``action`` 是从同代投影查询到的转移动作（Action）模板及连接点集合。
         action = projection.snapshot().require_action(
             "local_templates:Pump",
             "transfer",
@@ -249,23 +253,29 @@ def test_local_composition_reuses_existing_business_identity_uuid(
     """
 
     reset_workflow_service_for_test()
+    # ``inventory_store`` 是预置同步与公开组合共同使用的真实库存权威。
     inventory_store = InventoryStore(str(tmp_path / "inventory.db"))
     try:
+        # ``registry`` 是同一合法设备/物料模板定义代际。
         registry = _build_registry(tmp_path)
         # ``frozen_registry`` 是预置和组合必须共同遵守的同一规范定义代际。
         frozen_registry = RegistryTemplateSnapshot.from_registry(registry)
+        # ``first_result`` 是公开组合前第一次同步的稳定身份回执（Receipt）。
         first_result = BackendResourceService(inventory_store).sync_resource_templates(
             frozen_registry.detached_definitions()
         )
+        # ``expected_identities`` 是回执承诺且后续组合必须复用的活动 UUID 映射。
         expected_identities = {
             str(item["name"]): str(item["uuid"]) for item in first_result["templates"]
         }
 
+        # ``projection`` 必须引用预置回执中的同一活动资源模板身份。
         _service, projection = compose_local_workflow_template_runtime(
             tmp_path,
             inventory_store=inventory_store,
             registry=frozen_registry,
         )
+        # ``action`` 是复用既有设备模板 UUID 的转移动作投影。
         action = projection.snapshot().require_action(
             "local_templates:Pump",
             "transfer",
@@ -288,16 +298,22 @@ def test_local_composition_restart_keeps_template_identity_stable(
     """
 
     reset_workflow_service_for_test()
+    # ``inventory_path`` 是两个进程组合周期共同使用的持久库存数据库路径。
     inventory_path = tmp_path / "inventory.db"
+    # ``first_store`` 持有首次组合周期的库存权威连接。
     first_store = InventoryStore(str(inventory_path))
+    # ``registry`` 在两个周期保持同一资源模板及合法动作源码别名代际。
     registry = _build_registry(tmp_path)
     try:
+        # ``first_projection`` 是首次组合发布的模板投影。
         _first_service, first_projection = compose_local_workflow_template_runtime(
             tmp_path,
             inventory_store=first_store,
             registry=registry,
         )
+        # ``first_identities`` 冻结首次组合提交的活动业务 ID/UUID 映射。
         first_identities = _active_template_identities(first_store)
+        # ``first_owner_uuid`` 是首次转移动作引用的设备资源模板稳定身份。
         first_owner_uuid = (
             first_projection.snapshot()
             .require_action(
@@ -310,8 +326,10 @@ def test_local_composition_restart_keeps_template_identity_stable(
         reset_workflow_service_for_test()
         first_store.close()
 
+    # ``restarted_store`` 模拟进程重启后重新打开同一库存数据库。
     restarted_store = InventoryStore(str(inventory_path))
     try:
+        # ``second_projection`` 是重启后从同一注册表代际重新发布的模板投影。
         _second_service, second_projection = compose_local_workflow_template_runtime(
             tmp_path,
             inventory_store=restarted_store,
@@ -343,16 +361,21 @@ def test_local_composition_rejects_conflicting_resource_source_aliases(
     """
 
     reset_workflow_service_for_test()
+    # ``inventory_store`` 持有冲突探针前后需要逐字段比较的库存权威事实。
     inventory_store = InventoryStore(str(tmp_path / "inventory.db"))
     try:
+        # ``registry`` 初始为合法注册表代际，随后仅引入源码别名冲突。
         registry = _build_registry(tmp_path)
         # ``stable_snapshot`` 先建立合法同代事实；冲突组合不得更新既有模板版本。
         stable_snapshot = RegistryTemplateSnapshot.from_registry(registry)
         BackendResourceService(inventory_store).sync_resource_templates(
             stable_snapshot.detached_definitions()
         )
+        # ``facts_before_conflict`` 冻结全部模板行与聚合版本作为原子性基线。
         facts_before_conflict = _template_storage_facts(inventory_store)
+        # ``original_resource`` 是合法反应板资源模板定义的可变测试副本。
         original_resource = registry.obtain_registry_resource_info()[0]
+        # ``conflicting_resource`` 是绑定相同源码别名的第二业务模板定义。
         conflicting_resource = {
             **original_resource,
             "id": "plate_384",
@@ -387,11 +410,14 @@ def test_local_composition_rejects_unresolvable_alias_before_inventory_write(
     """
 
     reset_workflow_service_for_test()
+    # ``inventory_store`` 用真实事务证明非法模板别名不会产生任何写入。
     inventory_store = InventoryStore(str(tmp_path / "inventory.db"))
     try:
         # ``facts_before_invalid_alias`` 包含迁移生成的软删除兼容占位事实；失败后也不得更新。
         facts_before_invalid_alias = _template_storage_facts(inventory_store)
+        # ``registry`` 是将被注入非法 Python 源码身份的注册表代际。
         registry = _build_registry(tmp_path)
+        # ``invalid_resource`` 是同时破坏两个源码身份字段的物料模板定义。
         invalid_resource = registry.obtain_registry_resource_info()[0]
         # 两个字段共同构成无效 Python 源码别名，不能延迟到库存提交后才校验。
         invalid_resource["source_fqid"] = "not a python source identity"
@@ -482,6 +508,7 @@ def test_local_composition_fails_closed_when_inventory_sync_is_rejected(
     """
 
     reset_workflow_service_for_test()
+    # ``inventory_store`` 固定抛出同步冲突，验证组合根的失败关闭转换。
     inventory_store = _FailingInventoryStore(str(tmp_path / "inventory.db"))
     try:
         with pytest.raises(RegistryTemplateProjectionError, match="同步失败"):

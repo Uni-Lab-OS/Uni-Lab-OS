@@ -43,8 +43,10 @@ MATERIAL_IDENTITY_CONFLICT = 6010
 
 
 def _now() -> str:
-    return datetime.now(timezone.utc).isoformat(timespec="milliseconds").replace(
-        "+00:00", "Z"
+    return (
+        datetime.now(timezone.utc)
+        .isoformat(timespec="milliseconds")
+        .replace("+00:00", "Z")
     )
 
 
@@ -68,14 +70,16 @@ def _optional(value: Any) -> Any:
 
 
 class BackendResourceService:
-    """Resource Template, Material, Site and state-history authority."""
+    """提供资源模板（ResourceTemplate）、物料（Material）与库位（Site）权威写入。"""
 
     def __init__(self, store: InventoryStore):
         self.store = store
 
     # Resource Template -------------------------------------------------
 
-    def sync_resource_templates(self, resources: List[Dict[str, Any]]) -> Dict[str, Any]:
+    def sync_resource_templates(
+        self, resources: List[Dict[str, Any]]
+    ) -> Dict[str, Any]:
         """同步一代活动资源模板并返回稳定身份回执。
 
         参数说明：``resources`` 是同批设备与物料资源模板（ResourceTemplate）
@@ -89,10 +93,12 @@ class BackendResourceService:
                 TEMPLATE_DEFINITION_INVALID, "resources is required"
             )
         # ``normalized_names`` 是本批注册表（Registry）业务 ID 的规范唯一集合。
-        normalized_names = [str(resource.get("id") or "").strip() for resource in resources]
-        if any(not name for name in normalized_names) or len(set(normalized_names)) != len(
-            normalized_names
-        ):
+        normalized_names = [
+            str(resource.get("id") or "").strip() for resource in resources
+        ]
+        if any(not name for name in normalized_names) or len(
+            set(normalized_names)
+        ) != len(normalized_names):
             raise BackendContractError(
                 TEMPLATE_DEFINITION_INVALID,
                 "resource names are required and must be unique",
@@ -109,10 +115,14 @@ class BackendResourceService:
                         (name,),
                     ).fetchone()
                     template_uuid = str(existing["uuid"]) if existing else str(uuid4())
+                    # ``class_definition`` 是当前模板冻结的 Python 实现身份合同。
                     class_definition = resource.get("class") or {}
+                    # ``schema`` 是资源模板初始化参数的数据/配置命名空间合同。
                     schema = resource.get("init_param_schema") or {}
-                    data_schema = ((schema.get("data") or {}).get("properties") or {})
-                    config_schema = ((schema.get("config") or {}).get("properties") or {})
+                    # ``data_schema`` 与 ``config_schema`` 分别持久化初始化状态字段合同。
+                    data_schema = (schema.get("data") or {}).get("properties") or {}
+                    config_schema = (schema.get("config") or {}).get("properties") or {}
+                    # ``values`` 是一次 upsert 使用的完整后端（Backend）形态模板行。
                     values = (
                         template_uuid,
                         _now(),
@@ -339,7 +349,9 @@ class BackendResourceService:
                     )
                 placement = values.get("site_placement")
                 if placement:
-                    self._apply_site_placement(conn, material_uuid, template_uuid, placement)
+                    self._apply_site_placement(
+                        conn, material_uuid, template_uuid, placement
+                    )
         except BackendContractError:
             raise
         except sqlite3.IntegrityError as exc:
@@ -407,14 +419,15 @@ class BackendResourceService:
         )
         result["sites"] = self.list_sites(material_uuid)
         current_site = self.store.query_one(
-            "SELECT * FROM site WHERE occupied_material_uuid=? "
-            "AND deleted_at IS NULL",
+            "SELECT * FROM site WHERE occupied_material_uuid=? AND deleted_at IS NULL",
             (material_uuid,),
         )
         result["current_site"] = self._site_row(current_site) if current_site else None
         return result
 
-    def update_material(self, material_uuid: str, values: Dict[str, Any]) -> Dict[str, Any]:
+    def update_material(
+        self, material_uuid: str, values: Dict[str, Any]
+    ) -> Dict[str, Any]:
         try:
             with self.store.transaction() as conn:
                 current = self._require_material(conn, material_uuid)
@@ -458,7 +471,9 @@ class BackendResourceService:
                         )
                 placement = values.get("site_placement")
                 if placement:
-                    self._apply_site_placement(conn, material_uuid, template_uuid, placement)
+                    self._apply_site_placement(
+                        conn, material_uuid, template_uuid, placement
+                    )
                 conn.execute(
                     "UPDATE material_inventory SET aggregate_version=aggregate_version+1 "
                     "WHERE material_uuid=?",
@@ -551,7 +566,9 @@ class BackendResourceService:
             "SELECT * FROM site WHERE uuid=? AND deleted_at IS NULL", (site_uuid,)
         )
         if row is None:
-            raise BackendContractError(MATERIAL_SITE_NOT_FOUND, "Material site not found")
+            raise BackendContractError(
+                MATERIAL_SITE_NOT_FOUND, "Material site not found"
+            )
         return self._site_row(row)
 
     def append_material_state(
@@ -822,7 +839,8 @@ class BackendResourceService:
         while cursor:
             if cursor in seen:
                 raise BackendContractError(
-                    MATERIAL_PARENT_CYCLE, "Material parent relationship creates a cycle"
+                    MATERIAL_PARENT_CYCLE,
+                    "Material parent relationship creates a cycle",
                 )
             seen.add(cursor)
             row = conn.execute(
@@ -859,7 +877,9 @@ class BackendResourceService:
             "SELECT * FROM site WHERE uuid=? AND deleted_at IS NULL", (site_uuid,)
         ).fetchone()
         if site is None:
-            raise BackendContractError(MATERIAL_SITE_NOT_FOUND, "Material site not found")
+            raise BackendContractError(
+                MATERIAL_SITE_NOT_FOUND, "Material site not found"
+            )
         if site["material_uuid"] == material_uuid:
             raise BackendContractError(
                 MATERIAL_SITE_CYCLE, "Material cannot occupy its own Site"

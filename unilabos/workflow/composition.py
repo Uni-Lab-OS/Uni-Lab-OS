@@ -267,6 +267,8 @@ def compose_local_workflow_template_runtime(
             )
         except RegistryTemplateSnapshotError as error:
             raise RegistryTemplateProjectionError(str(error)) from error
+        # ``resolve_resource_template_identity`` 是当前注册表（Registry）代际唯一的
+        # 资源模板（ResourceTemplate）业务 ID/源码别名到活动 UUID 解析器。
         resolve_resource_template_identity = synchronize_local_template_identities(
             inventory_store=inventory_store,
             registry_snapshot=registry_snapshot,

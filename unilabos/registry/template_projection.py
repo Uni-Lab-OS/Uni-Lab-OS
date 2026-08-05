@@ -240,7 +240,7 @@ class RegistryTemplateProjection:
         if not isinstance(device, Mapping):
             raise RegistryTemplateProjectionError("设备注册表条目必须是对象")
         # ``resource_identity`` 是库存资源模板的业务唯一名；设备源码身份描述驱动
-        # 实现位置，不能代替 inventory.db 中由 Registry ``id`` 管理的模板身份。
+        # 实现位置，不能代替 inventory.db 中由注册表（Registry）``id`` 管理的模板身份。
         resource_identity = device.get("id")
         if not isinstance(resource_identity, str) or not resource_identity:
             raise RegistryTemplateProjectionError("设备定义缺少稳定资源身份")

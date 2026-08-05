@@ -31,7 +31,7 @@ class FakeInventoryStore(InventoryStore):
     """提供真实同步事务和固定设备物料身份的内存库存存储。"""
 
     def __init__(self) -> None:
-        """建立含固定设备模板与设备物料的 Backend 形态库存事实。
+        """建立含固定设备模板与设备物料的后端（Backend）形态库存事实。
 
         参数：无。返回：无；资源模板（ResourceTemplate）和物料（Material）使用
         测试固定 UUID，后续组合根必须通过真实同步事务复用该业务身份。
@@ -203,18 +203,14 @@ class FakeRegistry:
                         "type": "object",
                         "title": "反应板",
                         "x-unilabos-material-lock": True,
-                        "properties": {
-                            "uuid": {"type": "string", "format": "uuid"}
-                        },
+                        "properties": {"uuid": {"type": "string", "format": "uuid"}},
                         "required": ["uuid"],
                     },
                     "mount_resource": {
                         "type": ["object", "null"],
                         "title": "可选承载物料",
                         "x-unilabos-material-lock": False,
-                        "properties": {
-                            "uuid": {"type": "string", "format": "uuid"}
-                        },
+                        "properties": {"uuid": {"type": "string", "format": "uuid"}},
                         "required": ["uuid"],
                     },
                 },
@@ -231,9 +227,7 @@ class FakeRegistry:
                     "plate": {
                         "type": "object",
                         "title": "处理后的反应板",
-                        "properties": {
-                            "uuid": {"type": "string", "format": "uuid"}
-                        },
+                        "properties": {"uuid": {"type": "string", "format": "uuid"}},
                         "required": ["uuid"],
                         "additionalProperties": False,
                     },
@@ -335,12 +329,10 @@ def _projection(database_path: Path) -> RegistryTemplateProjection:
     return RegistryTemplateProjection(
         workflow_store,
         authority_id="local",
-        resource_template_identity_resolver=lambda resource_name: (
-            {
-                "pump": RESOURCE_TEMPLATE_UUID,
-                "lab.resources:plate_96": ALLOWED_MATERIAL_TEMPLATE_UUID,
-            }.get(resource_name, "")
-        ),
+        resource_template_identity_resolver=lambda resource_name: {
+            "pump": RESOURCE_TEMPLATE_UUID,
+            "lab.resources:plate_96": ALLOWED_MATERIAL_TEMPLATE_UUID,
+        }.get(resource_name, ""),
     )
 
 
@@ -492,14 +484,16 @@ def test_projection_keeps_contract_handle_order_and_material_placeholder_metadat
     assert "goal" not in projected_goal_schema.get("properties", {})
     assert plate_handle["type"] == "ResourceSlot"
     assert plate_handle["required"] is True
-    assert plate_handle["meta_data"]["unilab"]["value_schema"][
-        "x-unilabos-material-lock"
-    ] is True
+    assert (
+        plate_handle["meta_data"]["unilab"]["value_schema"]["x-unilabos-material-lock"]
+        is True
+    )
     assert free_handle["type"] == "ResourceSlot"
     assert free_handle["required"] is False
-    assert free_handle["meta_data"]["unilab"]["value_schema"][
-        "x-unilabos-material-lock"
-    ] is False
+    assert (
+        free_handle["meta_data"]["unilab"]["value_schema"]["x-unilabos-material-lock"]
+        is False
+    )
     assert result_handle["type"] == "boolean"
     assert result_handle["data_source"] == "executor"
     # ``passthrough_handles`` 是服务端管理的同名隐式物料输出。
@@ -511,8 +505,7 @@ def test_projection_keeps_contract_handle_order_and_material_placeholder_metadat
         for handle in passthrough_handles
     )
     assert all(
-        "x-unilabos-material-lock"
-        not in handle["meta_data"]["unilab"]["value_schema"]
+        "x-unilabos-material-lock" not in handle["meta_data"]["unilab"]["value_schema"]
         for handle in passthrough_handles
     )
     projection.close()
@@ -565,13 +558,12 @@ def test_projection_projects_site_selector_and_material_array_metadata(
         if handle["io_type"] == "target" and handle["handle_key"] != "ready"
     }
     assert targets["tips"]["type"] == "array"
-    assert targets["tips"]["meta_data"]["unilab"]["editor_control"] == (
-        "material_port"
-    )
+    assert targets["tips"]["meta_data"]["unilab"]["editor_control"] == ("material_port")
     assert targets["destination"]["type"] == "string"
-    assert targets["destination"]["meta_data"]["unilab"][
-        "editor_control"
-    ] == "site_selector"
+    assert (
+        targets["destination"]["meta_data"]["unilab"]["editor_control"]
+        == "site_selector"
+    )
     projection.close()
 
 
@@ -594,16 +586,16 @@ def test_projection_resolves_and_deduplicates_allowed_material_templates(
         for handle in action.handles
         if handle["io_type"] == "target" and handle["handle_key"] == "plate"
     )
-    assert plate_handle["meta_data"]["unilab"][
-        "allowed_resource_template_uuids"
-    ] == (ALLOWED_MATERIAL_TEMPLATE_UUID,)
+    assert plate_handle["meta_data"]["unilab"]["allowed_resource_template_uuids"] == (
+        ALLOWED_MATERIAL_TEMPLATE_UUID,
+    )
     projection.close()
 
 
 def test_projection_follows_backend_ilab_and_ready_control_handles(
     tmp_path: Path,
 ) -> None:
-    """OS 动作模板必须跟随 Backend 的 ILab 节点类型和 ready 控制连接点。
+    """OS 动作模板必须跟随后端（Backend）的 ILab 节点类型和 ready 控制连接点。
 
     参数说明：``tmp_path`` 隔离数据库；测试要求每个动作恰好生成一个输入侧
     ``target:ready`` 和一个输出侧 ``source:ready``。两者只表达控制依赖，不得
@@ -616,7 +608,7 @@ def test_projection_follows_backend_ilab_and_ready_control_handles(
         "transfer",
     )
 
-    # ``ready_handles`` 是 Backend 规范中的结构控制连接点，不是动作数据连接点。
+    # ``ready_handles`` 是后端（Backend）规范中的结构控制连接点，不是动作数据连接点。
     ready_handles = [
         handle for handle in action.handles if handle["handle_key"] == "ready"
     ]
@@ -648,7 +640,7 @@ def test_projection_fingerprint_is_stable_across_identical_refresh_and_restart(
 ) -> None:
     """相同活动身份和合同跨重复刷新与重启必须产生确定目录指纹。
 
-    参数说明：``tmp_path`` 隔离数据库；测试证明 SQLite 操作时间和 Registry 遍历
+    参数说明：``tmp_path`` 隔离数据库；测试证明 SQLite 操作时间和注册表（Registry）遍历
     时机不属于目录指纹（CatalogFingerprint）的业务语义。
     """
 
@@ -674,7 +666,9 @@ def test_projection_fingerprint_is_stable_across_identical_refresh_and_restart(
     restarted_projection.close()
 
 
-def test_local_runtime_shares_projection_with_authoring_compiler(tmp_path: Path) -> None:
+def test_local_runtime_shares_projection_with_authoring_compiler(
+    tmp_path: Path,
+) -> None:
     """本地组合根必须让模板查询投影和 F02 创作编译器共享同一目录代际。
 
     参数说明：``tmp_path`` 是本地工作流数据库目录；测试使用库存活动行解析资源
@@ -682,10 +676,12 @@ def test_local_runtime_shares_projection_with_authoring_compiler(tmp_path: Path)
     """
 
     reset_workflow_service_for_test()
+    # ``inventory_store`` 是组合根共享且必须由测试显式关闭的真实库存存储。
+    inventory_store = FakeInventoryStore()
     try:
         workflow_service, projection = compose_local_workflow_template_runtime(
             tmp_path,
-            inventory_store=FakeInventoryStore(),
+            inventory_store=inventory_store,
             registry=FakeRegistry(),
         )
 
@@ -693,16 +689,25 @@ def test_local_runtime_shares_projection_with_authoring_compiler(tmp_path: Path)
         assert workflow_service.compiler.template_catalog_fingerprint == (
             projection.snapshot().fingerprint
         )
-        assert projection.snapshot().require_action(
-            "lab.devices:Pump",
-            "transfer",
-        ).template["resource_template_uuid"] == RESOURCE_TEMPLATE_UUID
+        assert (
+            projection.snapshot()
+            .require_action(
+                "lab.devices:Pump",
+                "transfer",
+            )
+            .template["resource_template_uuid"]
+            == RESOURCE_TEMPLATE_UUID
+        )
         # ``device_action_run`` 证明组合根注入了同一库存权威的设备物料解析器，
         # 而非仅在直接构造服务的合同测试中可用。
-        action_template = projection.snapshot().require_action(
-            "lab.devices:Pump",
-            "transfer",
-        ).template
+        action_template = (
+            projection.snapshot()
+            .require_action(
+                "lab.devices:Pump",
+                "transfer",
+            )
+            .template
+        )
         device_action_run = workflow_service.create_device_action_run(
             material_uuid=DEVICE_MATERIAL_UUID,
             workflow_node_template_uuid=action_template["uuid"],
@@ -716,6 +721,7 @@ def test_local_runtime_shares_projection_with_authoring_compiler(tmp_path: Path)
         assert device_action_run["job"]["material_uuid"] == DEVICE_MATERIAL_UUID
     finally:
         reset_workflow_service_for_test()
+        inventory_store.close()
 
 
 def test_invalid_typed_action_preserves_previous_complete_projection(

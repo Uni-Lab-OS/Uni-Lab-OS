@@ -44,13 +44,16 @@ def test_soft_deleted_template_is_reintroduced_with_new_uuid(tmp_path: Path) -> 
     旧身份。
     """
 
+    # ``inventory_store`` 持有软删除历史与重新引入身份的真实库存权威。
     inventory_store = InventoryStore(str(tmp_path / "inventory.db"))
     try:
+        # ``service`` 是所有模板生命周期写入共用的后端（Backend）形态资源接口。
         service = BackendResourceService(inventory_store)
         # 两个 UUID 分别表示已软删除历史和重新引入后的活动模板身份。
         deleted_template_uuid = _synchronize_pump(service)
         service.delete_resource_template(deleted_template_uuid)
         active_template_uuid = _synchronize_pump(service)
+        # ``template_rows`` 同时保留软删除历史与唯一活动模板的持久事实。
         template_rows = inventory_store.query_all(
             "SELECT uuid, deleted_at FROM resource_template WHERE name=? ORDER BY uuid",
             ("pump",),
@@ -77,15 +80,19 @@ def test_active_template_wins_over_same_name_soft_deleted_history(
     当前活动资源模板（ResourceTemplate），不按历史行顺序选择或复活旧 UUID。
     """
 
+    # ``inventory_store`` 持有同名历史与活动模板并存的真实库存权威。
     inventory_store = InventoryStore(str(tmp_path / "inventory.db"))
     try:
+        # ``service`` 负责三个连续同步周期中的身份选择与回执（Receipt）。
         service = BackendResourceService(inventory_store)
         # ``historical_template_uuid`` 是软删除历史；``active_template_uuid`` 是唯一活动身份。
         historical_template_uuid = _synchronize_pump(service)
         service.delete_resource_template(historical_template_uuid)
         active_template_uuid = _synchronize_pump(service)
 
+        # ``reused_template_uuid`` 是第三次同步必须返回的唯一活动模板 UUID。
         reused_template_uuid = _synchronize_pump(service)
+        # ``historical_row`` 证明旧身份仍保持软删除，未被同步过程复活。
         historical_row = inventory_store.query_one(
             "SELECT deleted_at FROM resource_template WHERE uuid=?",
             (historical_template_uuid,),

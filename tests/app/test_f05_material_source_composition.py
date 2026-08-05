@@ -25,14 +25,16 @@ def test_local_composition_shares_frozen_resource_template_projection(
     """
 
     reset_workflow_service_for_test()
-    # ``inventory_store`` 是真实 Backend 形态库存模板写权威，启动前为空。
+    # ``inventory_store`` 是真实后端（Backend）形态库存模板写权威，启动前为空。
     inventory_store = InventoryStore(str(tmp_path / "inventory.db"))
     try:
+        # ``service`` 与 ``projection`` 必须共享同一注册表（Registry）模板代际。
         service, projection = compose_local_workflow_template_runtime(
             tmp_path,
             inventory_store=inventory_store,
             registry=_Registry(),
         )
+        # ``template_rows`` 是库存权威提交的活动资源模板业务 ID/UUID 映射。
         template_rows = {
             str(row["name"]): str(row["uuid"])
             for row in inventory_store.query_all(
@@ -73,13 +75,16 @@ def test_local_composition_creates_missing_material_template_identity(
     """
 
     reset_workflow_service_for_test()
+    # ``inventory_store`` 是缺失模板身份首次创建的真实库存权威。
     inventory_store = InventoryStore(str(tmp_path / "inventory.db"))
     try:
+        # ``projection`` 必须引用本次同步事务新建的反应板模板 UUID。
         _service, projection = compose_local_workflow_template_runtime(
             tmp_path,
             inventory_store=inventory_store,
             registry=_Registry(),
         )
+        # ``plate_row`` 是库存权威中唯一活动反应板资源模板事实。
         plate_row = inventory_store.query_one(
             """
             SELECT uuid
