@@ -173,6 +173,8 @@ class WindowsAuthoringHarness:
     source_path: Path
     msvcrt: WindowsMsvcrt
     dir_fd_attempts: list[str]
+    open_flags: list[int]
+    binary_flag: int
 
 
 @pytest.fixture()
@@ -183,8 +185,8 @@ def windows_authoring(
     """创建无 `dir_fd`/`fcntl`、但有 `msvcrt` 的 Windows 服务环境。
 
     `tmp_path` 提供隔离持久化目录，`monkeypatch` 安装 Windows 能力边界。
-    产出真实 `WorkflowService`、Draft 路径、锁模拟器和违规调用记录；fixture
-    退出时关闭服务及其持久存储。
+    产出真实 `WorkflowService`、Draft 路径、锁模拟器、违规调用记录、打开
+    flags 记录及合成 `O_BINARY`；fixture 退出时关闭服务及其持久存储。
     """
 
     package_root = tmp_path / "package"
@@ -209,6 +211,9 @@ def windows_authoring(
 
     original_open = os.open
     dir_fd_attempts: list[str] = []
+    # 合成位只表达 Windows 二进制读取请求，传给 Linux 内核前必须剥离。
+    binary_flag = 1 << 29
+    open_flags: list[int] = []
 
     def windows_open(
         path: str | bytes | os.PathLike[str] | os.PathLike[bytes],
@@ -221,13 +226,15 @@ def windows_authoring(
 
         `path`、`flags`、`mode` 保持 `os.open` 含义，`dir_fd` 在 Windows
         必须为空。返回绝对路径打开的文件描述符；收到 `dir_fd` 时记录违规调用
-        并抛出 `NotImplementedError`。
+        并抛出 `NotImplementedError`。调用 flags 会被记录，合成 `O_BINARY`
+        在转交真实 Linux `os.open` 前剥离。
         """
 
         if dir_fd is not None:
             dir_fd_attempts.append(os.fsdecode(path))
             raise NotImplementedError("dir_fd is unavailable on Windows")
-        return original_open(path, flags, mode)
+        open_flags.append(flags)
+        return original_open(path, flags & ~binary_flag, mode)
 
     windows_msvcrt = WindowsMsvcrt()
     monkeypatch.setattr(
@@ -243,6 +250,7 @@ def windows_authoring(
         windows_msvcrt,
         raising=False,
     )
+    monkeypatch.setattr(os, "O_BINARY", binary_flag, raising=False)
     monkeypatch.setattr(os, "open", windows_open)
 
     try:
@@ -251,9 +259,50 @@ def windows_authoring(
             source_path=source_path,
             msvcrt=windows_msvcrt,
             dir_fd_attempts=dir_fd_attempts,
+            open_flags=open_flags,
+            binary_flag=binary_flag,
         )
     finally:
         service.close()
+
+
+def test_windows_crlf_draft_read_uses_binary_mode_and_hash_saves(
+    windows_authoring: WindowsAuthoringHarness,
+) -> None:
+    """Windows Draft GET 必须按原始 CRLF 字节取 hash，并允许后续 CAS 保存。
+
+    `windows_authoring` 提供无目录 FD 的 Windows 创作服务、合成
+    `O_BINARY` 及打开 flags 观测；测试没有返回值，并验证工作流源码
+    （Workflow Source）的 GET hash 可直接作为 `save_draft()` 的 CAS 令牌。
+    """
+
+    service = windows_authoring.service
+    source_path = windows_authoring.source_path
+    # 这些字节代表 Windows 文件系统中的权威 Draft，CRLF 不得被文本模式改写。
+    raw_draft_bytes = b"seed()\r\n"
+    source_path.write_bytes(raw_draft_bytes)
+    windows_authoring.open_flags.clear()
+
+    before = service.get_authoring(WORKFLOW_UUID)
+
+    assert windows_authoring.open_flags
+    assert windows_authoring.open_flags[0] & windows_authoring.binary_flag
+    assert before["draft"]["python_source"] == "seed()\r\n"
+    assert before["draft"]["draft_hash"] == (
+        "sha256:225b424ca0f64a82277d72b7a469e7e39ac19065da8f41ed3d46eafd61137426"
+    )
+
+    saved = service.save_draft(
+        WORKFLOW_UUID,
+        python_source="build()\r\n",
+        expected_draft_hash=before["draft"]["draft_hash"],
+        expected_workflow_revision=before["workflow_revision"],
+    )
+
+    assert source_path.read_bytes() == b"build()\r\n"
+    assert saved["draft"]["python_source"] == "build()\r\n"
+    assert saved["candidate"] is not None
+    assert saved["candidate"]["draft_hash"] == saved["draft"]["draft_hash"]
 
 
 def test_windows_save_draft_with_matching_cas_persists_and_returns_candidate(
