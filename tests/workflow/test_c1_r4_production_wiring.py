@@ -155,6 +155,19 @@ def _empty_parent_graph() -> dict[str, object]:
     }
 
 
+def _contract_extension(template: object) -> dict[str, object]:
+    """从目录模板对象或持久 JSON 文本读取发布工作流扩展。"""
+
+    assert isinstance(template, dict)
+    schema = template["schema"]
+    if isinstance(schema, str):
+        schema = json.loads(schema)
+    assert isinstance(schema, dict)
+    extension = schema["x-unilabos-workflow-contract"]
+    assert isinstance(extension, dict)
+    return extension
+
+
 def test_product_composition_publishes_and_restores_workflow_templates(
     tmp_path: Path,
 ) -> None:
@@ -198,6 +211,26 @@ def test_product_composition_publishes_and_restores_workflow_templates(
             node_type="workflow",
         )
         assert [item["uuid"] for item in page["items"]] == [first_template_uuid]
+
+        authoring = service.get_authoring(CHILD_WORKFLOW_UUID)
+        candidate = authoring["candidate"]
+        assert candidate is not None, authoring["draft"]["diagnostics"]
+        applied = service.apply_authoring(
+            CHILD_WORKFLOW_UUID,
+            candidate_hash=candidate["candidate_hash"],
+        )
+        refreshed = projection.snapshot().require_action(
+            f"{CHILD_MODULE}:prepare_sample",
+            f"workflow:{CHILD_WORKFLOW_UUID}",
+        )
+        extension = _contract_extension(refreshed.detached_template())
+        assert extension["workflow_revision"] == applied["apply_result"][
+            "workflow_revision"
+        ]
+        assert service.compiler is not None
+        assert service.compiler.template_catalog_fingerprint == (
+            projection.snapshot().fingerprint
+        )
 
         reset_workflow_service_for_test()
         restarted, restarted_projection = compose_local_workflow_template_runtime(
