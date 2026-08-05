@@ -7,12 +7,16 @@ from typing import Any
 import pytest
 
 from unilabos.app.scheduler.dispatch import RecordingDispatcher
+from unilabos.app.scheduler.models import node_from_dict
 from unilabos.app.scheduler.service import EdgeScheduler
 from unilabos.workflow.execution_plan import (
     ExecutionPlanBuilder,
     ExecutionPlanBuildError,
 )
-from unilabos.workflow.workflow_spec_compiler import WorkflowSpecCompiler
+from unilabos.workflow.workflow_spec_compiler import (
+    WorkflowSpecCompilationError,
+    WorkflowSpecCompiler,
+)
 
 # 这些 UUID 分别代表工作流任务、节点、模板、具体物料与设备物料的稳定身份。
 TASK_UUID = "21000000-0000-4000-8000-000000000001"
@@ -296,3 +300,55 @@ def test_frozen_action_contract_wins_over_changed_registry() -> None:
     assert len(result["dispatched"]) == 1
     assert resource_locks == [f"material/{MATERIAL_UUID}/exclusive"]
     assert stale_registry.calls == 0
+
+
+@pytest.mark.parametrize(
+    ("schema_present", "schema_value"),
+    [
+        pytest.param(False, None, id="missing"),
+        pytest.param(True, None, id="null"),
+        pytest.param(True, "not-an-object", id="non-object"),
+    ],
+)
+def test_standard_plan_requires_frozen_param_schema(
+    schema_present: bool,
+    schema_value: Any,
+) -> None:
+    """标准执行计划的设备动作必须带冻结参数 Schema。
+
+    参数：``schema_present`` 表示字段是否存在，``schema_value`` 是待验证
+    合同值。返回：无；断言缺失、空值和非对象合同都以稳定
+    错误码失败关闭。异常：预期工作流规格编译错误。
+    """
+
+    plan, jobs = _build_real_plan()
+    if schema_present:
+        plan["nodes"][0]["param_schema"] = schema_value
+    else:
+        plan["nodes"][0].pop("param_schema")
+
+    with pytest.raises(WorkflowSpecCompilationError) as caught:
+        _compile_real_plan(plan, jobs)
+
+    assert caught.value.code == "invalid_action_contract"
+
+
+@pytest.mark.parametrize(
+    "invalid_schema",
+    [
+        pytest.param([("type", "object")], id="key-value-array"),
+        pytest.param("not-an-object", id="string"),
+    ],
+)
+def test_legacy_node_parser_rejects_non_object_param_schema(
+    invalid_schema: Any,
+) -> None:
+    """遗留节点解析器不得把其他容器猜测为动作合同。
+
+    参数：``invalid_schema`` 是键值对数组或字符串。返回：无；断言
+    ``node_from_dict`` 仅接受对象或 ``None``。异常：预期稳定 ``TypeError``
+    与中文诊断。
+    """
+
+    with pytest.raises(TypeError, match="param_schema 必须是对象或 None"):
+        node_from_dict({"id": "legacy-node", "param_schema": invalid_schema})
