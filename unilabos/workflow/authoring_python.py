@@ -954,6 +954,7 @@ def _render_action_arguments(
             handle
             for handle in action.handles
             if handle.get("io_type") == "target"
+            and handle.get("handle_key") != "ready"
             and str(handle.get("data_source") or "executor").lower()
             in {"executor", "goal"}
         ),
@@ -1130,7 +1131,10 @@ def _node_metadata_comment(
     # 动作模板显示名是人类可读默认值，动作业务名只用于兼容旧目录。
     template_title = action.template.get("display_name") or action.template.get("name")
     template_description = action.template.get("description")
-    if title == template_title and description == template_description:
+    descriptions_match = description == template_description or (
+        description in (None, "") and template_description in (None, "")
+    )
+    if title == template_title and descriptions_match:
         return None
     if not isinstance(title, str) or not title.strip():
         raise AuthoringGraphError("candidate_invalid", "节点展示标题不能为空")

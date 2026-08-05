@@ -466,21 +466,17 @@ def _validate_value_handle(
 def _validate_ready_handle(handle: Mapping[str, Any], io_type: str) -> None:
     """认证结构性 ready 连接点（Handle）。
 
-    参数：``handle`` 是连接点，``io_type`` 是期望方向。返回：无。异常：结构
-    角色、方向或固定布尔合同不一致时抛出 ``ValueError``。
+    参数：``handle`` 是连接点，``io_type`` 是期望方向。返回：无。异常：方向或
+    后端（Backend）结构控制合同不一致时抛出 ``ValueError``。
     """
 
-    meta_data = handle.get("meta_data")
-    unilab = meta_data.get("unilab") if isinstance(meta_data, Mapping) else None
     if (
-        not isinstance(unilab, Mapping)
-        or handle.get("io_type") != io_type
-        or handle.get("data_key") != "ready"
-        or handle.get("data_source") != "dependency"
-        or handle.get("type") != "boolean"
+        handle.get("io_type") != io_type
+        or handle.get("data_key") is not None
+        or handle.get("data_source") is not None
+        or handle.get("type") != "default"
         or handle.get("required") is not False
-        or unilab.get("structural_role") != "ready"
-        or _plain(unilab.get("value_schema")) != {"type": "boolean"}
+        or _plain(handle.get("meta_data")) != {}
     ):
         raise ValueError("已发布工作流 ready 连接点无效")
 

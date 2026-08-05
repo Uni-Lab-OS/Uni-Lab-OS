@@ -9,8 +9,10 @@ from typing import Any
 def structural_ready_handle(io_type: str) -> dict[str, Any]:
     """投影结构性 ready 连接点（Handle）。
 
-    参数：``io_type`` 只能是 ``target`` 或 ``source``。返回：与前端封闭目录合同
-    一致的结构连接点候选。异常：方向非法时抛出 ``ValueError``。
+    参数：``io_type`` 只能是 ``target`` 或 ``source``。返回：与后端（Backend）
+    动作模板一致的结构连接点候选，确保组合工作流调用
+    （CompositeWorkflowInvocation）可与普通动作相连。异常：方向非法时抛出
+    ``ValueError``。
     """
 
     if io_type not in {"target", "source"}:
@@ -18,21 +20,13 @@ def structural_ready_handle(io_type: str) -> dict[str, Any]:
     return {
         "handle_key": "ready",
         "io_type": io_type,
-        "display_name": "Ready",
-        "description": "Lexical source-order dependency",
-        "type": "boolean",
+        "display_name": "ready",
+        "description": None,
+        "type": "default",
         "required": False,
-        "data_source": "dependency",
-        "data_key": "ready",
-        "meta_data": {
-            "unilab": {
-                "value_schema": {"type": "boolean"},
-                "editor_control": "variable_selector",
-                "allowed_resource_template_uuids": None,
-                "implicit_passthrough": False,
-                "structural_role": "ready",
-            }
-        },
+        "data_source": None,
+        "data_key": None,
+        "meta_data": {},
     }
 
 

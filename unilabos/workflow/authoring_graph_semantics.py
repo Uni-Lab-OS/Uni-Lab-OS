@@ -150,6 +150,9 @@ def _semantic_graph(graph: Mapping[str, Any]) -> str:
         for key, child in value["workflow"].items()
         if key not in {"create_time", "update_time"}
     }
+    # 数据库存储投影省略空工作流描述，而候选编译器显式生成 ``None``；两者是
+    # 同一创作语义，必须在固定点比较前收敛为同一规范形。
+    workflow.setdefault("description", None)
     payload = {
         "workflow": workflow,
         "nodes": sorted(_semantic_entities(value["nodes"]).values()),

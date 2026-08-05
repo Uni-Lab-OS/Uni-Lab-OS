@@ -7,10 +7,13 @@ from copy import deepcopy
 from typing import Any
 
 from unilabos.workflow.authoring_engine import WorkflowAuthoringEngine
+from unilabos.workflow.authoring_kernel import AuthoringCatalogSnapshot
+from unilabos.workflow.composite import CompositeAuthoring
 from unilabos.workflow.models import CandidateCompilation
 
 from .test_c1_r2_static_expansion_contract import (
     ACTION_RESOURCE_TEMPLATE_UUID,
+    CHILD_TEMPLATE_UUID,
     CHILD_WORKFLOW_UUID,
     INVOCATION_UUID,
     PARENT_WORKFLOW_UUID,
@@ -117,6 +120,39 @@ def _engine() -> WorkflowAuthoringEngine:
     authoring, _provider, catalog, _resolver = _world_components()
     return WorkflowAuthoringEngine(
         catalog=catalog,
+        composite_authoring=authoring,
+    )
+
+
+def _blank_description_engine() -> WorkflowAuthoringEngine:
+    """装配发布模板默认空描述的工作流创作编译器。
+
+    参数：无。返回：目录里发布模板描述为 ``""`` 的隔离编译器。异常：重建
+    目录或组合端口失败时由对应构造器原样抛出。
+    """
+
+    _authoring, provider, catalog, resolver = _world_components()
+    templates = []
+    for action in catalog.actions:
+        template = action.detached_template()
+        if template["uuid"] == CHILD_TEMPLATE_UUID:
+            template["description"] = ""
+        templates.append(template)
+    blank_catalog = AuthoringCatalogSnapshot.from_entities(
+        templates,
+        [
+            handle
+            for action in catalog.actions
+            for handle in action.detached_handles()
+        ],
+    )
+    authoring = CompositeAuthoring(
+        snapshot_provider=provider,
+        catalog=blank_catalog,
+        resolver=resolver,
+    )
+    return WorkflowAuthoringEngine(
+        catalog=blank_catalog,
         composite_authoring=authoring,
     )
 
@@ -230,3 +266,41 @@ def test_composite_between_actions_keeps_structural_ready_out_of_arguments() -> 
     assert "ready=" not in normalized
     repeated = _compile(engine, normalized, compiled.graph)
     assert repeated.valid and repeated.graph == compiled.graph, repeated.diagnostics
+
+
+def test_persisted_blank_workflow_description_remains_renderable() -> None:
+    """持久化空描述的形状差异不得阻断已发布工作流调用回到源码。
+
+    参数：无。返回：无；断言数据库把空字符串恢复为 ``None`` 后，图到 Python
+    的公共生成接口仍接受模板默认空描述。异常：生成或断言失败时由 pytest 报告。
+    """
+
+    engine = _blank_description_engine()
+    compiled = _compile(engine, _source(), _applied_parent_graph())
+    assert compiled.valid and compiled.graph is not None, compiled.diagnostics
+    persisted = deepcopy(compiled.graph)
+    persisted["workflow"].pop("description", None)
+    for node in persisted["nodes"]:
+        node.pop("status", None)
+    invocation = next(
+        node for node in persisted["nodes"] if node["uuid"] == INVOCATION_UUID
+    )
+    invocation["description"] = None
+
+    generated = engine.generate_python(
+        workflow_uuid=PARENT_WORKFLOW_UUID,
+        workflow_revision=1,
+        graph=persisted,
+        source_uri="package://c1_published_lab/workflows/persisted_parent.py",
+    )
+
+    assert generated.valid, generated.diagnostics
+    assert generated.normalized_python_source is not None
+    validated = engine.validate(
+        workflow_uuid=PARENT_WORKFLOW_UUID,
+        workflow_revision=1,
+        graph=persisted,
+        python_source=generated.normalized_python_source,
+        source_uri="package://c1_published_lab/workflows/persisted_parent.py",
+    )
+    assert validated.valid, validated.diagnostics
