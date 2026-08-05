@@ -329,14 +329,14 @@ def test_service_is_not_published_until_startup_recovery_finishes(
     assert composition.get_workflow_service() is outcome["service"]
 
 
-def test_failed_startup_is_not_published_and_can_retry(
+def test_startup_bootstraps_missing_definition_before_recovery_and_publication(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """缺失工作流导致的启动失败必须清理未发布服务并允许修复后重试。
+    """启动应在恢复与公开前原子创建清单声明的缺失工作流骨架。
 
     参数：``tmp_path`` 隔离运行目录；``monkeypatch`` 使用无线程监视适配器。
-    返回：无；测试验证失败不创建工作流，显式补建后同配置可成功启动。
+    返回：无；测试验证不需夹具预建定义，监视器首次观察即看到已恢复源码。
     """
 
     working_dir = tmp_path / "unilabos-data"
@@ -349,17 +349,6 @@ def test_failed_startup_is_not_published_and_can_retry(
     compiler = SourceOnlyCompiler()
     monkeypatch.setattr(composition, "WorkflowSourceMonitor", RecordingMonitor)
 
-    with pytest.raises(WorkflowError) as caught:
-        composition.compose_workflow_runtime(
-            working_dir,
-            compiler=compiler,
-            editable_package_roots=(selected_root,),
-        )
-
-    assert caught.value.code == "workflow_not_found"
-    assert composition.get_workflow_service() is None
-    _seed_workflows(working_dir, WORKFLOW_A_UUID)
-
     service = composition.compose_workflow_runtime(
         working_dir,
         compiler=compiler,
@@ -367,6 +356,14 @@ def test_failed_startup_is_not_published_and_can_retry(
     )
 
     assert composition.get_workflow_service() is service
+    assert service.get_workflow(WORKFLOW_A_UUID)["name"] == "alpha_lab.demo"
+    assert RecordingMonitor.observations == [
+        {
+            "workflow_uuids": (WORKFLOW_A_UUID,),
+            "draft_sources": ("result = compile_workflow()\n",),
+            "published": True,
+        }
+    ]
 
 
 def test_composition_identity_includes_compiler_and_authorized_roots(

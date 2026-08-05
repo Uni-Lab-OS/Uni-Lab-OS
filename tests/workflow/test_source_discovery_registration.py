@@ -18,7 +18,7 @@ from unilabos.workflow.store import WorkflowStore
 WORKFLOW_A_UUID = "11111111-1111-4111-8111-111111111111"
 WORKFLOW_B_UUID = "22222222-2222-4222-8222-222222222222"
 WORKFLOW_C_UUID = "33333333-3333-4333-8333-333333333333"
-# 该 UUID 刻意不写入数据库，用于证明发现过程不能自动创建工作流（Workflow）。
+# 该 UUID 刻意不预写数据库，用于证明显式安装可以原子创建工作流（Workflow）骨架。
 MISSING_WORKFLOW_UUID = "44444444-4444-4444-8444-444444444444"
 
 
@@ -144,14 +144,15 @@ def test_repeating_exact_discovery_plan_is_idempotent(
     assert registration_service.list_registered_sources() == first_snapshot
 
 
-def test_missing_workflow_rejects_whole_plan_without_creating_definition(
+def test_missing_workflow_is_bootstrapped_only_during_explicit_plan_install(
     tmp_path: Path,
     registration_service: WorkflowService,
 ) -> None:
-    """缺失工作流（Workflow）必须拒绝整个计划且不得自动创建定义。
+    """缺失工作流（Workflow）只在显式安装完整发现计划时创建骨架。
 
     参数：``tmp_path`` 保存同时含既有和缺失身份的包；``registration_service``
-    提供工作流服务（WorkflowService）。返回：无；测试验证零部分注册。
+    提供工作流服务（WorkflowService）。返回：无；测试证明只读发现不写库，而安装
+    在同一事务中提交既有来源与缺失定义。
     """
 
     selected_root = tmp_path / "editable"
@@ -164,13 +165,19 @@ def test_missing_workflow_rejects_whole_plan_without_creating_definition(
         ),
     )
     plan = discover_editable_sources((selected_root,))
+    before_install = registration_service.list_workflows(page_size=100)["total"]
 
-    with pytest.raises(WorkflowError) as caught:
-        registration_service.replace_discovered_source_authorizations(plan)
+    registered = registration_service.replace_discovered_source_authorizations(plan)
 
-    assert caught.value.code == "workflow_not_found"
-    assert registration_service.list_registered_sources() == []
-    assert registration_service.list_workflows(page_size=100)["total"] == 3
+    assert before_install == 3
+    assert [row["workflow_uuid"] for row in registered] == [
+        WORKFLOW_A_UUID,
+        MISSING_WORKFLOW_UUID,
+    ]
+    assert registration_service.list_workflows(page_size=100)["total"] == 4
+    assert registration_service.get_workflow(MISSING_WORKFLOW_UUID)["name"] == (
+        "alpha_lab.missing"
+    )
 
 
 @pytest.mark.parametrize(
