@@ -20,6 +20,8 @@ from unilabos.workflow.template_projection_store import (
 )
 
 from .test_authoring_engine import (
+    PREPARE_READY_SOURCE,
+    PREPARE_READY_TARGET,
     PREPARE_SAMPLE_TARGET,
     PREPARE_TEMPLATE_UUID,
     WORKFLOW_UUID,
@@ -118,7 +120,23 @@ def material_graph_catalog_entities(
                 io_type="target",
                 value_type="ResourceSlot",
                 required=True,
-            )
+            ),
+            _handle(
+                PREPARE_READY_TARGET,
+                node_template_uuid=PREPARE_TEMPLATE_UUID,
+                key="ready",
+                io_type="target",
+                value_type="any",
+                data_source="dependency",
+            ),
+            _handle(
+                PREPARE_READY_SOURCE,
+                node_template_uuid=PREPARE_TEMPLATE_UUID,
+                key="ready",
+                io_type="source",
+                value_type="any",
+                data_source="dependency",
+            ),
         ],
     )
     _set_resource_template_allowlist(prepare_handles[0], prepare_allowlist)
