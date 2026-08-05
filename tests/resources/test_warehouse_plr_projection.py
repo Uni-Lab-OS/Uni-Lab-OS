@@ -62,6 +62,39 @@ def _deployment_deck_node() -> ResourceDictInstance:
     )
 
 
+def _site_declaring_container_node() -> ResourceDictInstance:
+    """构造带部署期库位声明的最小容器资源节点。"""
+    return ResourceDictInstance.get_resource_instance_from_dict(
+        {
+            "id": "container-repro",
+            "uuid": "00000000-0000-4000-8000-000000000003",
+            "name": "container-repro",
+            "type": "container",
+            "class": "test.container",
+            "position": {
+                "size": {"width": 10, "height": 10, "depth": 10},
+            },
+            "config": {
+                "category": "container",
+                "sites": [{"label": "C01", "name": "C01"}],
+            },
+            "data": {},
+        }
+    )
+
+
+def test_deployment_site_declaration_does_not_reach_plr_constructor() -> None:
+    """证明已展开的库位声明不会泄漏给任意 PLR 资源构造器。"""
+    container_node = _site_declaring_container_node()
+
+    projected_resources = ResourceTreeSet(
+        [ResourceTreeInstance(container_node)]
+    ).to_plr_resources()
+
+    assert len(projected_resources) == 1
+    assert projected_resources[0].name == "container-repro"
+
+
 def test_deployment_only_deck_setup_does_not_reach_plr_constructor() -> None:
     """证明部署期工作台初始化开关不会泄漏给 PLR 构造器。"""
     deck_node = _deployment_deck_node()
