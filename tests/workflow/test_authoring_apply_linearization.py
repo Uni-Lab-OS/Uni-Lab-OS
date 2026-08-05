@@ -11,6 +11,7 @@ from typing import Any
 import pytest
 
 import unilabos.workflow.service as workflow_service_module
+from unilabos.workflow.json_codec import decode_json_bytes, encode_json
 from unilabos.workflow.service import WorkflowConflict, WorkflowService
 from unilabos.workflow.store import WorkflowStore
 
@@ -230,6 +231,112 @@ def test_apply_rereads_revision_after_real_sqlite_writer_contention(
     assert failures[0].code == "workflow_revision_conflict"
     assert service.get_graph(WORKFLOW_UUID)["workflow"]["revision"] == 2
     assert service.get_graph(WORKFLOW_UUID)["nodes"] == []
+
+
+def test_apply_recomputes_persisted_candidate_hash_after_sqlite_contention(
+    authoring_runtime: tuple[WorkflowService, Path, Path],
+) -> None:
+    """写事务必须重算并拒绝正文变化但旧哈希未变的持久候选。
+
+    参数：``authoring_runtime`` 提供共享数据库、源码工作区（Source Workspace）
+    与服务。返回：无；真实 SQLite 写者在服务重验证后改变候选版本（Candidate）
+    正文但保留列内和 JSON 内旧候选哈希（Candidate Hash），应用必须返回
+    ``candidate_hash_conflict``。异常断言：工作流修订（Workflow Revision）、图、
+    事件、源码、待写回状态和并发写者正文均不得被应用事务部分覆盖。
+    """
+
+    service, source_path, database_path = authoring_runtime
+    candidate = _save_candidate(service)
+    before_graph = service.get_graph(WORKFLOW_UUID)
+    before_source = source_path.read_text(encoding="utf-8")
+    observer = sqlite3.connect(database_path)
+    before_events = observer.execute("SELECT COUNT(*) FROM frontend_event").fetchone()[
+        0
+    ]
+    before_writeback = observer.execute(
+        """
+        SELECT writeback_status, writeback_source, writeback_expected_hash,
+               writeback_generation
+        FROM workflow_authoring
+        WHERE workflow_uuid = ?
+        """,
+        (WORKFLOW_UUID,),
+    ).fetchone()
+    observer.close()
+
+    writer = sqlite3.connect(database_path)
+    writer.execute("PRAGMA busy_timeout = 5000")
+    writer.execute("BEGIN IMMEDIATE")
+    candidate_row = writer.execute(
+        "SELECT candidate FROM workflow_authoring WHERE workflow_uuid = ?",
+        (WORKFLOW_UUID,),
+    ).fetchone()
+    assert candidate_row is not None and candidate_row[0] is not None
+    # ``tampered_candidate`` 保持合法 JSON 与两处旧哈希，只改变签名覆盖的源码正文。
+    tampered_candidate = decode_json_bytes(candidate_row[0].encode("utf-8"))
+    tampered_candidate["normalized_python_source"] += "\n# 并发正文变化\n"
+    tampered_candidate_text = encode_json(
+        tampered_candidate,
+        sort_keys=True,
+    ).decode("utf-8")
+    writer.execute(
+        "UPDATE workflow_authoring SET candidate = ? WHERE workflow_uuid = ?",
+        (tampered_candidate_text, WORKFLOW_UUID),
+    )
+    started = threading.Event()
+    # ``failures`` 保存应用线程的稳定领域冲突，不承担持久事实权威。
+    failures: list[BaseException] = []
+
+    def apply_after_service_revalidation() -> None:
+        """在独立线程越过服务重验证并等待真实 SQLite 写锁。
+
+        参数：无；闭包使用服务端签发的旧候选哈希。返回：无；捕获全部线程异常
+        供主线程断言。异常：正常目标只允许 ``candidate_hash_conflict``，其他异常
+        同样进入 ``failures`` 以暴露错误映射。
+        """
+
+        started.set()
+        try:
+            service.apply_authoring(
+                WORKFLOW_UUID,
+                candidate_hash=candidate["candidate_hash"],
+            )
+        except BaseException as error:  # noqa: BLE001 - 测试需回传线程异常
+            failures.append(error)
+
+    worker = threading.Thread(target=apply_after_service_revalidation, daemon=True)
+    worker.start()
+    assert started.wait(timeout=1)
+    worker.join(timeout=0.1)
+    assert worker.is_alive()
+    writer.commit()
+    writer.close()
+    worker.join(timeout=5)
+
+    assert not worker.is_alive()
+    assert len(failures) == 1
+    assert isinstance(failures[0], WorkflowConflict)
+    assert failures[0].code == "candidate_hash_conflict"
+    assert service.get_graph(WORKFLOW_UUID) == before_graph
+    assert source_path.read_text(encoding="utf-8") == before_source
+
+    verifier = sqlite3.connect(database_path)
+    after_events = verifier.execute("SELECT COUNT(*) FROM frontend_event").fetchone()[0]
+    after_authoring = verifier.execute(
+        """
+        SELECT candidate, candidate_hash, writeback_status, writeback_source,
+               writeback_expected_hash, writeback_generation
+        FROM workflow_authoring
+        WHERE workflow_uuid = ?
+        """,
+        (WORKFLOW_UUID,),
+    ).fetchone()
+    verifier.close()
+    assert after_authoring is not None
+    assert after_authoring[0] == tampered_candidate_text
+    assert after_authoring[1] == candidate["candidate_hash"]
+    assert after_authoring[2:] == before_writeback
+    assert after_events == before_events
 
 
 def test_external_edit_after_linearization_survives_postcommit_writeback(
