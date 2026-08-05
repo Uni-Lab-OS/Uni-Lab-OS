@@ -319,8 +319,10 @@ class ExecutionPlanBuilder:
         ``ExecutionPlanBuildError``；禁止回退实时注册表或 Goal 子模式。
         """
 
+        # ``metadata``/``unilab`` 定位模板投影保留的 Uni-Lab 执行合同边界。
         metadata = template.get("meta_data")
         unilab = metadata.get("unilab") if isinstance(metadata, Mapping) else None
+        # ``contract`` 是本工作流任务（WorkflowTask）唯一可冻结的完整动作合同。
         contract = (
             unilab.get("action_contract_schema")
             if isinstance(unilab, Mapping)
@@ -329,6 +331,7 @@ class ExecutionPlanBuilder:
         properties = (
             contract.get("properties") if isinstance(contract, Mapping) else None
         )
+        # ``goal_schema`` 只用于证明完整合同能被动作物料锁编译器安全消费。
         goal_schema = (
             properties.get("goal") if isinstance(properties, Mapping) else None
         )

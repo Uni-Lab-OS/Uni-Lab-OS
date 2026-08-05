@@ -159,6 +159,8 @@ def handle_templates(
             "meta_data": {"unilab": {"value_schema": {"$slot": "ResourceSlot"}}},
         },
         {
+            # ``node_business_key`` 是动作输入连接点（Handle）所属节点模板的
+            # 持久业务身份，不是待消费物料的身份。
             "uuid": TARGET_HANDLE_UUID,
             "node_business_key": (
                 device_resource_template_uuid,
@@ -232,6 +234,8 @@ def graph_payload(
                 "minimized": False,
                 "meta_data": {
                     "unilab": {
+                        # ``executor_binding`` 是执行器分配（ExecutorAssignment）的
+                        # 创作期固定输入，调度时不从物料身份反推。
                         "executor_binding": {
                             "mode": "fixed",
                             "device_id": "reactor-a",
@@ -265,9 +269,9 @@ def install_applied_graph(
 ) -> str:
     """投影模板并经公开 HTTP 保存真实已应用工作流图。
 
-    参数：客户端调用公开工作流接口；``workflow_store`` 是相同运行时的唯一工作流
+    参数：客户端调用公开工作流（Workflow）接口；``workflow_store`` 是相同运行时的唯一工作流
     写模型；两个资源模板与两个物料身份分别生成来源和执行设备绑定。返回：公开
-    接口生成并被真实图采用的工作流 UUID。异常：模板投影、服务端保留元数据播种
+    接口生成并被真实图采用的工作流（Workflow）UUID。异常：模板投影、服务端保留元数据播种
     或 HTTP 图校验失败直接传播/断言失败，不替换任何生产私有方法。
     """
 

@@ -187,8 +187,9 @@ def test_fixed_existing_waits_then_reschedules_with_same_task_and_job(
     参数：``runtime`` 是真实组合运行时。返回无；断言公开 HTTP 创建物料和
     工作流任务（WorkflowTask），外部工作流任务（WorkflowTask）/工作流
     节点作业（WorkflowNodeJob）保持 ``pending``，内部为 ``waiting_for_material``；
-    释放夹具占用后，``POST /reschedule`` 使同一工作流任务/工作流节点作业进入
-    运行。异常：任何私有替代接口、新工作流任务身份或提前设备派发都会使断言失败。
+    释放夹具占用后，``POST /reschedule`` 使同一工作流任务（WorkflowTask）/工作流
+    节点作业（WorkflowNodeJob）进入运行。异常：任何私有替代接口、新工作流任务
+    （WorkflowTask）身份或提前设备派发都会使断言失败。
     """
 
     # ``material_template_uuid`` 是来源物料 API 与模板投影共享的类型身份。
@@ -278,8 +279,9 @@ def test_create_new_fails_closed_without_task_or_material_graph_change(
     """短期 ``create_new`` 应在工作流任务（WorkflowTask）事务内失败关闭并保持物料图不变。
 
     参数：``runtime`` 是真实组合运行时。返回无；断言公开工作流任务
-    （WorkflowTask）接口返回 Backend 业务错误，工作流任务列表零新增，前后公开
-    物料图完全相同且没有设备派发。异常：若不支持模式创建了部分工作流任务、
+    （WorkflowTask）接口返回 Backend 业务错误，工作流任务（WorkflowTask）列表零新增，前后公开
+    物料图完全相同且没有设备派发。异常：若不支持模式创建了部分工作流任务
+    （WorkflowTask）、
     物料或工作流节点作业（WorkflowNodeJob），任一公共响应断言都会失败。
     """
 
