@@ -242,6 +242,27 @@ def resource_slot_passthrough_is_compatible(
     return _schema_dict_is_assignable(input_dict, output_dict)
 
 
+def schema_contains_resource_slot(
+    schema: WorkflowValueSchema | Mapping[str, Any],
+) -> bool:
+    """判断规范 Schema 是否在根、可空成员或数组成员中承载物料占位符。
+
+    参数说明：``schema`` 是已解析的工作流值 Schema 或待解析映射。返回：只有
+    完整合法 Schema 包含物料占位符（ResourceSlot）时为真；非法 Schema 失败
+    关闭并返回假，不向调用者暴露第三套递归规则。
+    """
+
+    try:
+        parsed = (
+            schema
+            if isinstance(schema, WorkflowValueSchema)
+            else parse_value_schema(schema)
+        )
+    except WorkflowSchemaError:
+        return False
+    return _schema_contains_resource_slot(parsed.to_dict())
+
+
 def _value_set_schema(schema: dict[str, Any]) -> dict[str, Any]:
     """删除只影响展示或默认值、不影响可赋值集合的 Schema 注解。
 
@@ -708,6 +729,7 @@ __all__ = [
     "WorkflowIOValidationError",
     "handle_value_schema",
     "resource_slot_passthrough_is_compatible",
+    "schema_contains_resource_slot",
     "schema_is_assignable",
     "validate_workflow_graph_io",
     "validate_workflow_io",

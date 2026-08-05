@@ -6,18 +6,21 @@ from collections import defaultdict
 from collections.abc import Mapping, Sequence
 from typing import Any
 
+from unilabos.workflow.schema import WorkflowValueSchema
 from unilabos.workflow.workflow_io import (
     ValidatedWorkflowIO,
     WorkflowIOValidationError,
     handle_value_schema,
+    schema_contains_resource_slot,
     schema_is_assignable,
+    validate_workflow_graph_io,
 )
 
 
 class MaterialGraphValidationError(ValueError):
     """物料图（Material Graph）违反稳定领域不变量。"""
 
-    def __init__(self, code: str, message: str):
+    def __init__(self, code: str, message: str) -> None:
         """保存稳定机器码与中文诊断。
 
         参数说明：``code`` 是服务和编译器共同透传的错误码，``message`` 是中文
@@ -49,10 +52,10 @@ def validate_material_graph(
     消费边，或生产保证不能赋给消费者时抛出 ``MaterialGraphValidationError``。
     """
 
-    # ``node_by_uuid`` 固定每条物料边的生产节点身份；工作流输入/输出
-    # （Workflow I/O）事实留给 F05.2-C，且不让本模块越权查询外部存储。
-    del validated_workflow_io
+    # ``node_by_uuid`` 固定每条物料边的生产节点身份；已验证工作流输入/输出
+    # （Workflow I/O）只提供合同和绑定，不触发任何外部存储读取。
     node_by_uuid = {_field(node, "uuid"): node for node in nodes}
+    _validate_workflow_input_linearity(validated_workflow_io)
     # ``outgoing_edges`` 按来源节点和来源连接点聚合全部提交边；禁用节点也不能把
     # 非法物料分叉藏进持久图，因此这里不按运行状态过滤。
     outgoing_edges: dict[tuple[str, str], list[str]] = defaultdict(list)
@@ -103,7 +106,8 @@ def validate_material_graph_projection(graph: Mapping[str, Any]) -> None:
 
     参数说明：``graph`` 是含节点、边和模板投影的完整五集合；局部索引只把数组
     转换为 ``validate_material_graph`` 所需形状。返回：无；结构错误保留为普通
-    ``TypeError``，领域冲突透传 ``MaterialGraphValidationError``。
+    ``TypeError``，工作流输入/输出合同错误抛出 ``WorkflowIOValidationError``，
+    领域冲突透传 ``MaterialGraphValidationError``。
     """
 
     nodes = graph.get("nodes")
@@ -122,13 +126,14 @@ def validate_material_graph_projection(graph: Mapping[str, Any]) -> None:
         )
         for node in nodes
     }
+    validated_workflow_io = validate_workflow_graph_io(graph)
     validate_material_graph(
         nodes=nodes,
         edges=edges,
         templates=templates,
         handles=handles,
         effective_params=effective_params,
-        validated_workflow_io=None,
+        validated_workflow_io=validated_workflow_io,
     )
 
 
@@ -183,7 +188,7 @@ def _is_resource_slot_handle(handle: Mapping[str, Any]) -> bool:
         schema = handle_value_schema(handle).to_dict()
     except WorkflowIOValidationError:
         return False
-    return _schema_contains_resource_slot(schema)
+    return schema_contains_resource_slot(schema)
 
 
 def _producer_schema(
@@ -193,7 +198,7 @@ def _producer_schema(
     templates: Mapping[str, Mapping[str, Any]],
     handles: Mapping[str, Mapping[str, Any]],
     effective_param: Mapping[str, Any],
-):
+) -> WorkflowValueSchema | Mapping[str, Any]:
     """解析一条物料边的生产端规范保证。
 
     参数说明：``node`` 是生产节点；``source_handle`` 是实际输出连接点；
@@ -218,6 +223,36 @@ def _producer_schema(
         )
         return handle_value_schema(passthrough_input)
     return handle_value_schema(source_handle)
+
+
+def _validate_workflow_input_linearity(
+    validated_workflow_io: ValidatedWorkflowIO | None,
+) -> None:
+    """把工作流输入物料绑定计入物理消费路径。
+
+    参数说明：``validated_workflow_io`` 是公共校验器产生的规范合同和节点绑定；
+    局部 ``schemas`` 按参数名索引输入 Schema，``consumers`` 收集每个物料输入的
+    节点/连接点消费身份。返回：无；同一物料输入绑定多个动作时抛出稳定物料流
+    分叉异常。缺失规范事实只用于旧内部调用兼容，不产生推测。
+    """
+
+    if validated_workflow_io is None:
+        return
+    schemas = {
+        parameter["name"]: parameter["schema"]
+        for parameter in validated_workflow_io.input_contract.to_dict()["parameters"]
+    }
+    consumers: dict[str, list[tuple[str, str]]] = defaultdict(list)
+    for node_uuid, bindings in validated_workflow_io.input_bindings.items():
+        for handle_uuid, binding in bindings.items():
+            parameter = binding["parameter"]
+            if schema_contains_resource_slot(schemas[parameter]):
+                consumers[parameter].append((node_uuid, handle_uuid))
+    if any(len(paths) > 1 for paths in consumers.values()):
+        raise MaterialGraphValidationError(
+            "material_flow_fan_out",
+            "同一个工作流输入物料不能绑定多个物理消费者",
+        )
 
 
 def _is_material_source_node(
@@ -278,22 +313,6 @@ def _same_name_input(
     if len(matches) != 1:
         raise TypeError("隐式物料输出缺少唯一同名输入连接点")
     return matches[0]
-
-
-def _schema_contains_resource_slot(schema: Mapping[str, Any]) -> bool:
-    """递归判断规范值 Schema 是否包含物料占位符。
-
-    参数说明：``schema`` 是已解析普通字典；局部 ``members`` 是可空联合成员。
-    返回：根或任一 ``anyOf`` 成员声明 ``ResourceSlot`` 时为真。
-    """
-
-    if schema.get("$slot") == "ResourceSlot":
-        return True
-    members = schema.get("anyOf")
-    return isinstance(members, list) and any(
-        isinstance(member, Mapping) and _schema_contains_resource_slot(member)
-        for member in members
-    )
 
 
 __all__ = [

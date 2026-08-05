@@ -24,7 +24,10 @@ from .test_f05_material_source_authoring import PLATE_TEMPLATE_UUID
 
 
 def test_consumer_without_allowlist_accepts_material_source_guarantee() -> None:
-    """省略允许集合的消费者应接受物料来源（MaterialSource）的精确保证。"""
+    """省略允许集合的消费者应接受物料来源（MaterialSource）的精确保证。
+
+    参数：无。返回：无；断言编译成功。异常：公共编译接缝不得泄漏内部异常。
+    """
 
     result = compile_material_source_graph(
         material_graph_engine(),
@@ -35,7 +38,11 @@ def test_consumer_without_allowlist_accepts_material_source_guarantee() -> None:
 
 
 def test_consumer_allowlist_containing_source_template_is_compatible() -> None:
-    """包含生产者资源模板的消费者允许集合应通过编译。"""
+    """包含生产者资源模板的消费者允许集合应通过编译。
+
+    参数：无。返回：无；断言物料来源精确模板保留且候选有效。异常：公共编译
+    接缝不得泄漏内部异常。
+    """
 
     result = compile_material_source_graph(
         material_graph_engine(prepare_allowlist=(PLATE_TEMPLATE_UUID,)),
@@ -50,7 +57,11 @@ def test_consumer_allowlist_containing_source_template_is_compatible() -> None:
 
 
 def test_compile_rejects_consumer_excluding_source_template() -> None:
-    """源码编译必须以稳定诊断拒绝排除物料来源模板的消费者。"""
+    """源码编译必须以稳定诊断拒绝排除物料来源模板的消费者。
+
+    参数：无。返回：无；断言 ``material_template_mismatch`` 且没有候选图或
+    规范源码。异常：公共编译接缝不得泄漏内部异常。
+    """
 
     result = compile_material_source_graph(
         material_graph_engine(
@@ -144,7 +155,11 @@ def test_direct_save_rejects_template_mismatch_without_revision_write(
 def test_explicit_action_output_schema_not_device_template_proves_compatibility() -> (
     None
 ):
-    """普通动作输出保证必须来自输出连接点而不是设备资源模板。"""
+    """普通动作输出保证必须来自输出连接点而不是设备资源模板。
+
+    参数：无。返回：无；断言设备资源模板不同仍可由输出 Schema 证明兼容。
+    异常：公共编译接缝不得泄漏内部异常。
+    """
 
     engine = material_graph_engine(
         include_passthrough=True,
@@ -165,7 +180,11 @@ def test_explicit_action_output_schema_not_device_template_proves_compatibility(
 
 
 def test_implicit_same_name_output_inherits_input_schema_guarantee() -> None:
-    """隐式同名输出应沿用输入物料占位符（ResourceSlot）的模板保证。"""
+    """隐式同名输出应沿用输入物料占位符（ResourceSlot）的模板保证。
+
+    参数：无。返回：无；断言输出无需复制允许集合仍可沿用输入保证。异常：公共
+    编译接缝不得泄漏内部异常。
+    """
 
     engine = material_graph_engine(
         include_passthrough=True,

@@ -12,6 +12,7 @@ from typing import Any
 from unilabos.workflow.authoring_engine import WorkflowAuthoringEngine
 from unilabos.workflow.authoring_identity import authoring_edge_uuid
 from unilabos.workflow.authoring_kernel import AuthoringCatalogSnapshot
+from unilabos.workflow.models import CandidateCompilation
 from unilabos.workflow.service import WorkflowService
 from unilabos.workflow.store import WorkflowStore
 from unilabos.workflow.template_projection_store import (
@@ -224,7 +225,7 @@ def opened_material_graph_store(
 def compile_material_source_graph(
     engine: WorkflowAuthoringEngine,
     source: str,
-):
+) -> CandidateCompilation:
     """通过公共接缝编译一份物料来源（MaterialSource）作者源码。
 
     参数说明：``engine`` 是纯编译器，``source`` 是待验证 Python 文本。
@@ -241,13 +242,19 @@ def compile_material_source_graph(
 
 
 def single_chain_source() -> str:
-    """返回物料来源到单一消费动作的合法线性源码。"""
+    """返回物料来源到单一消费动作的合法线性源码。
+
+    参数：无。返回：不访问物料权威的确定性 Python 文本。异常：无。
+    """
 
     return _source()
 
 
 def fan_out_source() -> str:
-    """返回同一物料占位符（ResourceSlot）被两个动作消费的非法源码。"""
+    """返回同一物料占位符（ResourceSlot）被两个动作消费的非法源码。
+
+    参数：无。返回：带两个物理消费者的确定性 Python 文本。异常：无。
+    """
 
     return _source().replace(
         "    prepared = reactor.prepare(sample=assay_plate)",
@@ -260,7 +267,10 @@ def fan_out_source() -> str:
 
 
 def passthrough_chain_source() -> str:
-    """返回同名物料输入/输出顺序透传到最终动作的合法源码。"""
+    """返回同名物料输入/输出顺序透传到最终动作的合法源码。
+
+    参数：无。返回：含隐式物料透传的确定性 Python 文本。异常：无。
+    """
 
     return _source().replace(
         (

@@ -424,3 +424,45 @@ def test_disabled_second_material_consumer_still_counts_as_fan_out() -> None:
     assert result.graph is None
     assert result.normalized_python_source is None
     assert _diagnostic_codes(result) == ["material_flow_fan_out"]
+
+
+def test_material_source_candidate_apply_does_not_need_inventory_authority(
+    tmp_path: Path,
+) -> None:
+    """合法物料来源候选应用不得依赖库存权威（Inventory Authority）。
+
+    参数说明：``tmp_path`` 提供 SQLite 与作者包隔离目录。返回：无；以不装配
+    任何库存、物料实例、库位（Site）或预留（Reservation）端口的服务完成草稿、
+    候选和应用，并断言修订推进。异常：公共创作接缝不得泄漏内部异常。
+    """
+
+    package_root = tmp_path / "package"
+    (package_root / "workflows").mkdir(parents=True)
+    with opened_material_graph_store(
+        tmp_path / "workflow.db",
+        prepare_allowlist=None,
+    ) as context:
+        context.service.replace_active_editable_source_authorization(
+            workflow_uuid=WORKFLOW_UUID,
+            package_id="lab",
+            package_root=package_root,
+            relative_path="workflows/material_boundary.py",
+        )
+        draft = context.service.save_draft(
+            WORKFLOW_UUID,
+            python_source=single_chain_source(),
+            expected_draft_hash=None,
+            expected_workflow_revision=1,
+        )
+        candidate = draft["candidate"]
+        assert candidate is not None
+
+        applied = context.service.apply_authoring(
+            WORKFLOW_UUID,
+            expected_draft_hash=draft["draft"]["draft_hash"],
+            expected_workflow_revision=1,
+            expected_candidate_hash=candidate["candidate_hash"],
+        )
+
+        assert applied["apply_result"]["workflow_revision"] == 2
+        assert context.service.get_graph(WORKFLOW_UUID)["workflow"]["revision"] == 2

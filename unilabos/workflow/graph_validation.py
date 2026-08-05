@@ -68,9 +68,10 @@ def validate_graph(
     ``node_meta_data`` 是事务内实际工作流和节点元数据；
     ``validate_workflow_io_contract`` 为 ``True`` 时启用唯一公共工作流输入/输出
     （Workflow I/O）合同，为 ``False`` 时保留旧调用方兼容语义。返回：无；全部
-    不变量成立才正常返回。异常：缺少模板抛出 ``MissingTemplateError``；带稳定
-    机器码的物料来源（MaterialSource）错误抛出 ``CodedGraphValidationError``；
-    其余图、连接点或工作流输入/输出错误抛出 ``GraphValidationError``。
+    不变量成立才正常返回。异常：缺少模板抛出 ``MissingTemplateError``；物料来源
+    （MaterialSource）、物料流线性（MaterialFlowLinearity）或资源模板兼容
+    （ResourceTemplate Compatibility）抛出 ``CodedGraphValidationError``；其余图、
+    连接点或工作流输入/输出错误抛出 ``GraphValidationError``。
     """
 
     node_by_uuid = {node.uuid: node for node in nodes}

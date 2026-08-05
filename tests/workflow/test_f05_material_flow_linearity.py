@@ -36,7 +36,11 @@ def _diagnostic_codes(result: Any) -> list[str]:
 
 
 def test_single_material_source_chain_is_valid() -> None:
-    """单一物料来源到单一消费者应满足物料流线性。"""
+    """单一物料来源到单一消费者应满足物料流线性。
+
+    参数：无。返回：无；断言候选图只含一条物料边。异常：公共编译接缝不得
+    泄漏内部异常。
+    """
 
     result = compile_material_source_graph(
         material_graph_engine(),
@@ -49,7 +53,11 @@ def test_single_material_source_chain_is_valid() -> None:
 
 
 def test_compile_rejects_one_material_output_consumed_twice() -> None:
-    """源码编译必须拒绝同一物料输出的两条物理消费边。"""
+    """源码编译必须拒绝同一物料输出的两条物理消费边。
+
+    参数：无。返回：无；断言稳定 ``material_flow_fan_out`` 且没有候选图或
+    规范源码。异常：公共编译接缝不得泄漏内部异常。
+    """
 
     result = compile_material_source_graph(
         material_graph_engine(),
@@ -125,7 +133,11 @@ def test_direct_save_rejects_material_fan_out_without_writes(
 
 
 def test_implicit_passthrough_is_an_ordered_python_graph_fixed_point() -> None:
-    """同名隐式物料透传必须形成单链并达到 Python↔图固定点。"""
+    """同名隐式物料透传必须形成单链并达到 Python↔图固定点。
+
+    参数：无。返回：无；断言唯一出边、确定性源码和重复编译图相等。异常：
+    公共创作接缝不得泄漏内部异常。
+    """
 
     engine = material_graph_engine(include_passthrough=True)
     compiled = compile_material_source_graph(engine, passthrough_chain_source())
