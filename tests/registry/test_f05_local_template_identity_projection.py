@@ -66,7 +66,7 @@ class _FailingInventoryStore(InventoryStore):
 
     @contextmanager
     def transaction(self) -> Any:
-        """在模板同步开始时返回稳定 Backend 合同错误。
+        """在模板同步开始时返回稳定后端（Backend）合同错误。
 
         参数：无。返回：本生成器不会产生事务连接。异常：始终抛出模板数据冲突，
         用于证明组合根不能在库存写权威拒绝后继续发布工作流模板投影。
@@ -80,7 +80,7 @@ def _build_registry(tmp_path: Path) -> _BuiltRegistry:
     """从 Python 声明构建含设备动作和物料模板的真实注册表输入。
 
     参数说明：``tmp_path`` 是隔离的 Python 包根目录。返回：通过产品 AST 扫描器
-    与 Registry 构建器产生的测试注册表。异常：源码合同无法扫描或构建时原样
+    与注册表（Registry）构建器产生的测试注册表。异常：源码合同无法扫描或构建时原样
     抛出，让测试不能退化为手写前端模板夹具。
     """
 
@@ -167,7 +167,9 @@ def _active_template_identities(store: InventoryStore) -> dict[str, str]:
     return {str(row["name"]): str(row["uuid"]) for row in template_rows}
 
 
-def _template_storage_facts(store: InventoryStore) -> tuple[list[dict[str, Any]], list[dict[str, Any]]]:
+def _template_storage_facts(
+    store: InventoryStore,
+) -> tuple[list[dict[str, Any]], list[dict[str, Any]]]:
     """读取完整模板事实与聚合版本，用于证明失败前后零新增、零更新。
 
     参数说明：``store`` 是真实本地库存存储。返回：按稳定身份排序的资源模板
@@ -218,9 +220,12 @@ def test_local_composition_creates_missing_inventory_template_identities(
 
         assert set(template_identities) == {"plate_96", "pump"}
         assert action.template["resource_template_uuid"] == template_identities["pump"]
-        assert projection.snapshot().require_resource_template_uuid(
-            "local_templates:plate_96"
-        ) == template_identities["plate_96"]
+        assert (
+            projection.snapshot().require_resource_template_uuid(
+                "local_templates:plate_96"
+            )
+            == template_identities["plate_96"]
+        )
     finally:
         reset_workflow_service_for_test()
         inventory_store.close()
@@ -245,8 +250,7 @@ def test_local_composition_reuses_existing_business_identity_uuid(
             frozen_registry.detached_definitions()
         )
         expected_identities = {
-            str(item["name"]): str(item["uuid"])
-            for item in first_result["templates"]
+            str(item["name"]): str(item["uuid"]) for item in first_result["templates"]
         }
 
         _service, projection = compose_local_workflow_template_runtime(
@@ -286,10 +290,14 @@ def test_local_composition_restart_keeps_template_identity_stable(
             registry=registry,
         )
         first_identities = _active_template_identities(first_store)
-        first_owner_uuid = first_projection.snapshot().require_action(
-            "local_templates:Pump",
-            "transfer",
-        ).template["resource_template_uuid"]
+        first_owner_uuid = (
+            first_projection.snapshot()
+            .require_action(
+                "local_templates:Pump",
+                "transfer",
+            )
+            .template["resource_template_uuid"]
+        )
     finally:
         reset_workflow_service_for_test()
         first_store.close()
@@ -303,10 +311,15 @@ def test_local_composition_restart_keeps_template_identity_stable(
         )
 
         assert _active_template_identities(restarted_store) == first_identities
-        assert second_projection.snapshot().require_action(
-            "local_templates:Pump",
-            "transfer",
-        ).template["resource_template_uuid"] == first_owner_uuid
+        assert (
+            second_projection.snapshot()
+            .require_action(
+                "local_templates:Pump",
+                "transfer",
+            )
+            .template["resource_template_uuid"]
+            == first_owner_uuid
+        )
     finally:
         reset_workflow_service_for_test()
         restarted_store.close()
@@ -368,6 +381,8 @@ def test_local_composition_rejects_unresolvable_alias_before_inventory_write(
     reset_workflow_service_for_test()
     inventory_store = InventoryStore(str(tmp_path / "inventory.db"))
     try:
+        # ``facts_before_invalid_alias`` 包含迁移生成的软删除兼容占位事实；失败后也不得更新。
+        facts_before_invalid_alias = _template_storage_facts(inventory_store)
         registry = _build_registry(tmp_path)
         invalid_resource = registry.obtain_registry_resource_info()[0]
         # 两个字段共同构成无效 Python 源码别名，不能延迟到库存提交后才校验。
@@ -383,7 +398,7 @@ def test_local_composition_rejects_unresolvable_alias_before_inventory_write(
             )
 
         assert get_workflow_service() is None
-        assert _template_storage_facts(inventory_store) == ([], [])
+        assert _template_storage_facts(inventory_store) == facts_before_invalid_alias
     finally:
         reset_workflow_service_for_test()
         inventory_store.close()

@@ -3,14 +3,13 @@
 from __future__ import annotations
 
 import threading
-from collections.abc import Callable, Iterable, Mapping
+from collections.abc import Callable, Iterable
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Optional
 
-from unilabos.app.scheduler.inventory.backend_contract import (
-    BackendContractError,
-    BackendResourceService,
+from unilabos.registry.local_template_identity import (
+    synchronize_local_template_identities,
 )
 from unilabos.registry.template_projection import (
     RegistryTemplateProjection,
@@ -21,7 +20,6 @@ from unilabos.registry.template_snapshot import (
     RegistryTemplateSnapshotError,
 )
 from unilabos.workflow.authoring_engine import WorkflowAuthoringEngine
-from unilabos.workflow.models import validate_uuid
 from unilabos.workflow.service import AuthoringCompiler, WorkflowService
 from unilabos.workflow.source_discovery import discover_editable_sources
 from unilabos.workflow.source_monitor import WorkflowSourceMonitor
@@ -62,110 +60,6 @@ class _RuntimeCleanupOwner:
 
 
 _failed_runtime: Optional[_RuntimeCleanupOwner] = None
-
-
-def _synchronize_registry_template_identities(
-    *,
-    inventory_store: Any,
-    registry: Any,
-) -> tuple[RegistryTemplateSnapshot, Callable[[str], str]]:
-    """同步一次注册表快照并建立本代只读模板身份解析器。
-
-    参数说明：``inventory_store`` 是本地库存资源模板（ResourceTemplate）写权威；
-    ``registry`` 是原始设备注册表（Registry）或已冻结快照。返回：同一个不可变
-    注册表快照及其业务名/资源源码身份到库存 UUID 的关闭式解析器。异常：快照、
-    Backend 形态同步回执、UUID 或源码别名冲突时抛出
-    ``RegistryTemplateProjectionError``；不得发布部分工作流模板投影。
-    """
-
-    try:
-        # ``registry_snapshot`` 是库存同步与工作流模板投影共同消费的唯一定义代际。
-        registry_snapshot = (
-            registry
-            if isinstance(registry, RegistryTemplateSnapshot)
-            else RegistryTemplateSnapshot.from_registry(registry)
-        )
-        # ``template_definitions`` 是本代全部设备/物料资源模板定义；
-        # ``synchronization`` 是库存写事务提交后返回的规范身份回执。
-        template_definitions = registry_snapshot.detached_definitions()
-        synchronization = (
-            BackendResourceService(inventory_store).sync_resource_templates(
-                template_definitions
-            )
-            if template_definitions
-            else {"templates": []}
-        )
-    except RegistryTemplateSnapshotError as error:
-        raise RegistryTemplateProjectionError(str(error)) from error
-    except BackendContractError as error:
-        raise RegistryTemplateProjectionError(
-            f"本地资源模板同步失败: {error.message}"
-        ) from error
-
-    # ``synchronized_templates`` 是回执中的业务名称与稳定 UUID 成员列表。
-    synchronized_templates = synchronization.get("templates")
-    if not isinstance(synchronized_templates, list):
-        raise RegistryTemplateProjectionError("本地资源模板同步回执缺少模板身份列表")
-    # ``template_uuid_by_name`` 是 BackendResourceService 已提交的活动业务身份全集。
-    template_uuid_by_name: dict[str, str] = {}
-    for identity in synchronized_templates:
-        if not isinstance(identity, Mapping):
-            raise RegistryTemplateProjectionError("本地资源模板同步回执成员必须是对象")
-        template_name = identity.get("name")
-        template_uuid = identity.get("uuid")
-        if not isinstance(template_name, str) or not template_name:
-            raise RegistryTemplateProjectionError("本地资源模板同步回执缺少业务名称")
-        try:
-            validated_uuid = validate_uuid(template_uuid)
-        except (TypeError, ValueError):
-            raise RegistryTemplateProjectionError(
-                f"本地资源模板同步回执 UUID 无效: {template_name}"
-            ) from None
-        if template_name in template_uuid_by_name:
-            raise RegistryTemplateProjectionError("本地资源模板同步回执业务名称重复")
-        template_uuid_by_name[template_name] = validated_uuid
-
-    # ``expected_names`` 用于证明回执没有遗漏、增加或改写注册表业务身份。
-    expected_names = {
-        str(definition.get("id") or "") for definition in template_definitions
-    }
-    if set(template_uuid_by_name) != expected_names:
-        raise RegistryTemplateProjectionError("本地资源模板同步回执与注册表快照不一致")
-
-    # ``template_uuid_by_alias`` 同时支持设备业务名和物料资源源码身份；它只在本次
-    # 冻结代际内存活，不建立第二个数据库映射权威。
-    template_uuid_by_alias = dict(template_uuid_by_name)
-    for resource_definition in registry_snapshot.detached_resources():
-        # 三个变量分别表示物料模板业务名、类定义和可导入源码身份。
-        resource_name = str(resource_definition.get("id") or "")
-        class_definition = resource_definition.get("class")
-        source_identity = resource_definition.get("source_fqid")
-        if not source_identity and isinstance(class_definition, Mapping):
-            source_identity = class_definition.get("module")
-        if not isinstance(source_identity, str) or not source_identity:
-            raise RegistryTemplateProjectionError(
-                f"资源模板缺少源码身份: {resource_name}"
-            )
-        # ``template_uuid`` 是当前模板权威身份；``previous_uuid`` 检测别名歧义。
-        template_uuid = template_uuid_by_name[resource_name]
-        previous_uuid = template_uuid_by_alias.get(source_identity)
-        if previous_uuid is not None and previous_uuid != template_uuid:
-            raise RegistryTemplateProjectionError(
-                f"资源模板源码身份不得绑定多个 UUID: {source_identity}"
-            )
-        template_uuid_by_alias[source_identity] = template_uuid
-
-    def resolve_resource_template_identity(resource_identity: str) -> str:
-        """解析本代资源模板业务名或源码身份。
-
-        参数说明：``resource_identity`` 来自同一冻结注册表快照的设备业务名或物料
-        模板源码身份。返回：对应的稳定库存 UUID；缺失时返回空串，让投影层关闭式
-        报告具体使用位置，而不是猜测或创建第二映射。
-        """
-
-        return template_uuid_by_alias.get(resource_identity, "")
-
-    return registry_snapshot, resolve_resource_template_identity
 
 
 def _cleanup_partial_composition(
@@ -345,7 +239,7 @@ def compose_local_workflow_template_runtime(
 
     参数说明：``working_dir`` 决定现有 ``workflow_history.db`` 路径；
     ``inventory_store`` 是同步并持有资源模板身份的 ``inventory.db`` 权威；
-    ``registry`` 是原始 Registry 或不可变模板快照；``scheduler`` 是本地模式既有调度器；
+    ``registry`` 是原始注册表（Registry）或不可变模板快照；``scheduler`` 是本地模式既有调度器；
     ``editable_package_roots`` 是本次进程唯一授权的工作流源码（Workflow
     Source）目录 tuple。返回共享同一已发布目录代际的服务和投影。
     """
@@ -364,11 +258,18 @@ def compose_local_workflow_template_runtime(
         if _service is not None:
             raise RuntimeError("本地工作流服务已在没有模板投影的情况下完成装配")
 
-        registry_snapshot, resolve_resource_template_identity = (
-            _synchronize_registry_template_identities(
-                inventory_store=inventory_store,
-                registry=registry,
+        try:
+            # ``registry_snapshot`` 是库存同步与模板投影共同消费的唯一注册表代际。
+            registry_snapshot = (
+                registry
+                if isinstance(registry, RegistryTemplateSnapshot)
+                else RegistryTemplateSnapshot.from_registry(registry)
             )
+        except RegistryTemplateSnapshotError as error:
+            raise RegistryTemplateProjectionError(str(error)) from error
+        resolve_resource_template_identity = synchronize_local_template_identities(
+            inventory_store=inventory_store,
+            registry_snapshot=registry_snapshot,
         )
 
         def resolve_material_identity(
@@ -427,7 +328,7 @@ def get_workflow_service() -> Optional[WorkflowService]:
 def get_registry_template_projection() -> Optional[RegistryTemplateProjection]:
     """返回本地模式最近装配的设备注册表模板投影。
 
-    返回值：尚未建立本地模板权威时为 ``None``；Backend-controlled 模式不得用
+    返回值：尚未建立本地模板权威时为 ``None``；后端控制（Backend-controlled）模式不得用
     此函数隐式创建第二写权威。
     """
 

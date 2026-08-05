@@ -1,8 +1,8 @@
-"""Backend-shaped resource module backed by the Edge inventory SQLite.
+"""由边缘端（Edge）库存 SQLite 支撑的后端形态资源模块。
 
-This is the domain implementation behind the shared frontend Interface.  The
-legacy ``/inventory`` adapter remains an Edge-only operational surface; both
-adapters write the same canonical ``resource_template/material/site`` rows.
+它是共享前端接口（Frontend Interface）背后的领域实现。遗留 ``/inventory``
+适配器仍是边缘端专用操作面；两个适配器写入同一组规范
+``resource_template/material/site`` 行。
 """
 
 from __future__ import annotations
@@ -17,7 +17,7 @@ from unilabos.app.scheduler.inventory.store import InventoryStore
 
 
 class BackendContractError(RuntimeError):
-    """Business error encoded with the Backend numeric response contract."""
+    """使用后端（Backend）数值响应合同编码的业务错误。"""
 
     def __init__(self, code: int, message: str):
         super().__init__(message)
@@ -76,10 +76,19 @@ class BackendResourceService:
     # Resource Template -------------------------------------------------
 
     def sync_resource_templates(self, resources: List[Dict[str, Any]]) -> Dict[str, Any]:
+        """同步一代活动资源模板并返回稳定身份回执。
+
+        参数说明：``resources`` 是同批设备与物料资源模板（ResourceTemplate）
+        定义。返回：每个注册表（Registry）业务 ID 对应的活动 UUID；已有活动名
+        复用 UUID，只有软删除历史时创建新 UUID。异常：空定义、重复业务 ID 或
+        SQLite 约束冲突转换为 ``BackendContractError``，整个事务回滚。
+        """
+
         if not resources:
             raise BackendContractError(
                 TEMPLATE_DEFINITION_INVALID, "resources is required"
             )
+        # ``normalized_names`` 是本批注册表（Registry）业务 ID 的规范唯一集合。
         normalized_names = [str(resource.get("id") or "").strip() for resource in resources]
         if any(not name for name in normalized_names) or len(set(normalized_names)) != len(
             normalized_names
@@ -88,12 +97,15 @@ class BackendResourceService:
                 TEMPLATE_DEFINITION_INVALID,
                 "resource names are required and must be unique",
             )
+        # ``identities`` 只记录本次事务最终采用的活动资源模板稳定身份。
         identities: List[Dict[str, str]] = []
         try:
             with self.store.transaction() as conn:
                 for resource, name in zip(resources, normalized_names):
+                    # ``existing`` 只能是当前活动业务 ID；软删除历史不得被复活。
                     existing = conn.execute(
-                        "SELECT uuid FROM resource_template WHERE name = ?",
+                        "SELECT uuid FROM resource_template "
+                        "WHERE name = ? AND deleted_at IS NULL",
                         (name,),
                     ).fetchone()
                     template_uuid = str(existing["uuid"]) if existing else str(uuid4())
