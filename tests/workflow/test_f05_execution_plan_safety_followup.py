@@ -233,7 +233,10 @@ def test_empty_job_list_cannot_erase_frozen_resource_slot_materials() -> None:
     # ``frozen_tips`` 是创建任务时已确定的物料占位符实例列表。
     frozen_tips = [{"uuid": MATERIAL_UUID}, {"uuid": SECOND_MATERIAL_UUID}]
     plan["nodes"][0]["param"]["tips"] = frozen_tips
-    jobs[0]["param"]["tips"] = []
+    # ``job_param`` 模拟从持久层独立读回的作业最终参数，不与计划容器共享。
+    job_param = dict(jobs[0]["param"])
+    job_param["tips"] = []
+    jobs[0]["param"] = job_param
 
     spec = _compile_real_plan(plan, jobs)
 

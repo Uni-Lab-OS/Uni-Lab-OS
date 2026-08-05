@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from collections.abc import Mapping, Sequence
+from copy import deepcopy
 from typing import Any
 
 from unilabos.app.scheduler.inventory.domain import MaterialRequirement
@@ -36,7 +37,8 @@ class WorkflowSpecCompiler:
         参数：``task_snapshot`` 提供任务身份和唯一运行静态输入
         ``execution_plan``，``jobs`` 提供已有作业身份与最终参数。返回：纯
         ``WorkflowSpec``。异常：计划、身份、执行器合同或端点非法时抛闭集编译
-        错误，且不读取库存（Inventory）、执行占用（Claim）或设备实时状态。
+        错误，且不读取库存（Inventory）、作业执行占用
+        （JobExecutionClaim）或设备实时状态。
         """
 
         task = mapping(task_snapshot, "invalid_task_snapshot", "task_snapshot")
@@ -169,6 +171,7 @@ class WorkflowSpecCompiler:
                     "invalid_job_param", f"作业最终参数必须是对象：{job_uuid}"
                 )
             requirements = self._material_requirements(node, node_uuid=node_uuid)
+            param_schema = self._param_schema(node, node_uuid=node_uuid)
             compiled.append(
                 WorkflowNode(
                     id=node_uuid,
@@ -177,6 +180,7 @@ class WorkflowSpecCompiler:
                     action_name=action_name,
                     action_type=action_type,
                     param=self._merge_final_param(planned_param, job_param),
+                    param_schema=param_schema,
                     node_type="ILab",
                     disabled=False,
                     material_requirements=requirements,
@@ -190,9 +194,10 @@ class WorkflowSpecCompiler:
     ) -> list[MaterialRequirement]:
         """读取计划已冻结的短期物料需求。
 
-        参数：``node`` 是设备动作计划，``node_uuid`` 是诊断身份。返回：旧库存
-        预留（Reservation）入口需要的需求值对象。异常：结构非法时抛计划错误；
-        不在编译时重新遍历物料来源（MaterialSource）或查询库存。
+        参数：``node`` 是设备动作计划，``node_uuid`` 是诊断身份。返回：
+        遗留库存预留（inventory_reservation）入口需要的需求值对象；
+        它不是任务物料预留（TaskMaterialReservation）。异常：结构非法时
+        抛计划错误；不在编译时重新遍历物料来源（MaterialSource）或查询库存。
         """
 
         raw_requirements = mapping_sequence(
@@ -205,6 +210,28 @@ class WorkflowSpecCompiler:
             for requirement in raw_requirements
         ]
 
+    @staticmethod
+    def _param_schema(
+        node: Mapping[str, Any], *, node_uuid: str
+    ) -> dict[str, Any] | None:
+        """隔离执行计划冻结的动作参数 Schema。
+
+        参数：``node`` 是设备动作计划，``node_uuid`` 是诊断身份。
+        返回：可独立使用的冻结动作合同（Action Contract）；缺失时返回
+        ``None`` 供遗留直接调用兼容。异常：非对象 Schema 以稳定编译错误
+        失败关闭。
+        """
+
+        raw_schema = node.get("param_schema")
+        if raw_schema is None:
+            return None
+        if not isinstance(raw_schema, Mapping):
+            raise WorkflowSpecCompilationError(
+                "invalid_action_contract",
+                f"设备动作参数 Schema 必须是对象：{node_uuid}",
+            )
+        return deepcopy(dict(raw_schema))
+
     @classmethod
     def _merge_final_param(
         cls,
@@ -215,7 +242,8 @@ class WorkflowSpecCompiler:
 
         参数：``planned`` 是创建任务时冻结的参数，``job`` 是参数解析器产出的最终
         参数。返回：作业值优先的隔离对象，但作业不得把计划中的 ``{"uuid":
-        ...}`` 物料引用删除或替换为空值。异常：无；其他值按作业结果覆盖。
+        ...}`` 物料引用或非空物料引用列表删除或替换为空值。异常：
+        无；其他值按作业结果覆盖。
         """
 
         merged: dict[str, Any] = dict(planned)
@@ -225,6 +253,11 @@ class WorkflowSpecCompiler:
                 if not cls._is_material_reference(job_value):
                     continue
                 merged[key] = dict(job_value)
+                continue
+            if cls._is_material_reference_list(planned_value):
+                if not cls._is_material_reference_list(job_value):
+                    continue
+                merged[key] = [dict(item) for item in job_value]
                 continue
             if isinstance(planned_value, Mapping) and isinstance(job_value, Mapping):
                 merged[key] = cls._merge_final_param(planned_value, job_value)
@@ -241,6 +274,21 @@ class WorkflowSpecCompiler:
         """
 
         return isinstance(value, Mapping) and bool(str(value.get("uuid") or "").strip())
+
+    @classmethod
+    def _is_material_reference_list(cls, value: Any) -> bool:
+        """判断值是否为非空物料引用列表。
+
+        参数：``value`` 是任意参数值。返回：仅当值是非空数组，且每项
+        都是带非空 UUID 的物料引用时为真。异常：无。
+        """
+
+        return (
+            isinstance(value, Sequence)
+            and not isinstance(value, (str, bytes))
+            and bool(value)
+            and all(cls._is_material_reference(item) for item in value)
+        )
 
     @staticmethod
     def _compile_handles(
