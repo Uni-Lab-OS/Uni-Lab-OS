@@ -36,6 +36,13 @@ from unilabos.app.scheduler.inventory import (
     TaskMaterialReleaseResult,
 )
 from unilabos.workflow.candidate_validation import validate_candidate_bundle
+from unilabos.workflow.darwin_draft_cas import (
+    DarwinDraftCasConflict,
+    DarwinDraftCasInternalError,
+    DarwinDraftCasInvalidTarget,
+    supports_darwin_draft_cas,
+    write_darwin_draft_cas,
+)
 from unilabos.workflow.json_codec import encode_json
 from unilabos.workflow.material_source import (
     MaterialSourceAuthorityError,
@@ -1053,10 +1060,10 @@ class WorkflowService:
                     available.sort(key=stable_key)
         if len(ordered) != len(enabled):
             raise StoreConflict("workflow graph contains a cycle")
+        if not ordered:
+            raise StoreConflict("workflow has no enabled nodes")
         if run_mode == "single_node":
             if target_node_uuid is None:
-                if not ordered:
-                    raise StoreConflict("workflow has no enabled nodes")
                 target_node_uuid = ordered[0]
             if target_node_uuid not in enabled:
                 raise StoreConflict("single_node target is not enabled")
@@ -2083,6 +2090,31 @@ class WorkflowService:
                     raise WorkflowError("invalid_input") from None
                 except WindowsDraftCasInternalError:
                     raise WorkflowError("internal_error") from None
+                return
+            if expected_hash is not None and supports_darwin_draft_cas():
+                root, target = self._source_path(registration)
+                self._assert_contained_regular_target(root, target, allow_missing=False)
+                with self._source_parent_fd(
+                    registration,
+                    create=False,
+                ) as source_parent:
+                    if source_parent is None:
+                        raise WorkflowConflict("draft_hash_conflict")
+                    parent_fd, filename = source_parent
+                    try:
+                        write_darwin_draft_cas(
+                            parent_fd=parent_fd,
+                            target_name=filename,
+                            content=content,
+                            expected_hash=expected_hash,
+                            byte_limit=AUTHORING_SOURCE_BYTE_LIMIT,
+                        )
+                    except DarwinDraftCasConflict:
+                        raise WorkflowConflict("draft_hash_conflict") from None
+                    except DarwinDraftCasInvalidTarget:
+                        raise WorkflowError("invalid_input") from None
+                    except DarwinDraftCasInternalError:
+                        raise WorkflowError("internal_error") from None
                 return
             if expected_hash is not None:
                 raise WorkflowConflict("draft_hash_conflict")
