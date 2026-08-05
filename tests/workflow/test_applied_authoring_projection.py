@@ -393,6 +393,11 @@ def test_retained_catalog_semantic_drift_returns_template_catalog_mismatch(
     result = _compile(engine, graph=applied_graph, source=normalized_source)
 
     assert _diagnostic_code(result) == "template_catalog_mismatch"
+    if mutation == "template_title":
+        # ``diagnostic`` 必须定位到具体模板和漂移字段，不能只给出泛化目录错误。
+        diagnostic = result.diagnostics[0]
+        assert PREPARE_TEMPLATE_UUID in diagnostic["message"]
+        assert "display_name" in diagnostic["message"]
     assert result.graph is None
 
 
