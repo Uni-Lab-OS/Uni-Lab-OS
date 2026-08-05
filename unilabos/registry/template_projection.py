@@ -136,13 +136,20 @@ class RegistryTemplateProjection:
         *,
         authority_id: str,
         resource_template_identity_resolver: Callable[[str], str],
+        generation_extension: Callable[
+            [Sequence[Mapping[str, Any]], Sequence[Mapping[str, Any]]],
+            tuple[Sequence[Mapping[str, Any]], Sequence[Mapping[str, Any]]],
+        ]
+        | None = None,
     ) -> None:
         """装配设备注册表（Registry）模板投影及资源模板身份解析器。
 
         参数说明：``workflow_store`` 持有现有工作流模板表和唯一 SQLite 事务；
         ``authority_id`` 标识本地投影来源；
         ``resource_template_identity_resolver`` 把设备注册身份映射为稳定资源模板
-        （ResourceTemplate）UUID。返回：无；构造时从同一投影代际恢复内存快照。
+        （ResourceTemplate）UUID；``generation_extension`` 可在持久提交前追加
+        同代框架拥有模板，不能执行第二次替换。返回：无；构造时从同一投影代际
+        恢复内存快照。
         异常：已持久化目录或资源身份不一致时抛出
         ``RegistryTemplateProjectionError``，不得发布部分目录。
         """
@@ -150,6 +157,9 @@ class RegistryTemplateProjection:
         self._store = RegistryTemplateProjectionStore(workflow_store)
         self._authority_id = authority_id
         self._resource_template_identity_resolver = resource_template_identity_resolver
+        if generation_extension is not None and not callable(generation_extension):
+            raise TypeError("generation_extension 必须是可调用对象")
+        self._generation_extension = generation_extension
         try:
             generation = self._store.load_generation(authority_id=authority_id)
             self._snapshot = AuthoringCatalogSnapshot.from_entities(
@@ -182,6 +192,18 @@ class RegistryTemplateProjection:
         device_definitions = registry_snapshot.detached_devices()
         resource_definitions = registry_snapshot.detached_resources()
         nodes, handles = self._compile(device_definitions)
+        if self._generation_extension is not None:
+            try:
+                extension_nodes, extension_handles = self._generation_extension(
+                    tuple(nodes),
+                    tuple(handles),
+                )
+                nodes.extend(dict(item) for item in extension_nodes)
+                handles.extend(dict(item) for item in extension_handles)
+            except RegistryTemplateProjectionError:
+                raise
+            except (TypeError, ValueError) as error:
+                raise RegistryTemplateProjectionError(str(error)) from error
         resource_template_symbols = self._compile_resource_template_identities(
             resource_definitions
         )

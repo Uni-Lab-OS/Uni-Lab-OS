@@ -271,12 +271,14 @@ class WorkflowService:
         store: WorkflowStore,
         *,
         compiler: Optional[AuthoringCompiler] = None,
+        compiler_rebuilder: Callable[[], AuthoringCompiler] | None = None,
         material_resolver: Optional[Callable[[str], Optional[Dict[str, Any]]]] = None,
         task_scheduler_bridge: WorkflowTaskSchedulerBridge | None = None,
     ):
         """装配本地工作流应用服务。
 
         参数：``store`` 是唯一工作流写模型；``compiler`` 负责编译可信工作流源码；
+        ``compiler_rebuilder`` 在成功应用后重建包含已发布工作流的完整目录代际；
         ``material_resolver`` 按物料 UUID 读取活动物料身份，供设备单动作运行
         （DeviceActionRun）关闭式校验；``task_scheduler_bridge`` 把普通工作流任务
         （WorkflowTask）与首次创建的设备单动作聚合交给同一本地调度器。返回无。
@@ -284,6 +286,9 @@ class WorkflowService:
 
         self._store = store
         self.compiler = compiler
+        if compiler_rebuilder is not None and not callable(compiler_rebuilder):
+            raise TypeError("compiler_rebuilder 必须是可调用对象")
+        self._compiler_rebuilder = compiler_rebuilder
         self._device_action_runs = DeviceActionRunService(
             store,
             material_resolver=material_resolver,
@@ -1249,6 +1254,24 @@ class WorkflowService:
                 raise WorkflowError("candidate_invalid") from None
 
             warnings: List[Dict[str, str]] = []
+            if self._compiler_rebuilder is not None:
+                try:
+                    rebuilt_compiler = self._compiler_rebuilder()
+                except Exception:  # noqa: BLE001 - 主事务已提交，只能关闭目录
+                    # 应用图已经提交，目录刷新失败时撤销编译入口，禁止继续用陈旧
+                    # 指纹签发父候选；下次进程启动会从持久图重建完整代际。
+                    self.compiler = None
+                    warnings.append(
+                        {
+                            "code": "template_catalog_rebuild_pending",
+                            "message": (
+                                "工作流已应用，但模板目录重建失败；"
+                                "创作编译已关闭，重启后将自动恢复。"
+                            ),
+                        }
+                    )
+                else:
+                    self.compiler = rebuilt_compiler
             response_source = source
 
             def warn_writeback() -> None:

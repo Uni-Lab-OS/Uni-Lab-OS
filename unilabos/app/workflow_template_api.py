@@ -223,6 +223,10 @@ def _summary(action: AuthoringCatalogAction) -> dict[str, Any]:
     resource_template = (
         unilab.get("resource_template") if isinstance(unilab, Mapping) else None
     )
+    # 已发布工作流的 ``meta_data.unilab`` 是与前端冻结的封闭来源合同；框架
+    # 所有者摘要因此位于相邻 ``meta_data.resource_template``，避免扩张 wire。
+    if not isinstance(resource_template, Mapping) and isinstance(meta_data, Mapping):
+        resource_template = meta_data.get("resource_template")
     if not isinstance(resource_template, Mapping):
         raise WorkflowTemplateQueryError(
             5004,

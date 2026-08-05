@@ -23,6 +23,12 @@ from unilabos.registry.template_snapshot import (
     RegistryTemplateSnapshotError,
 )
 from unilabos.workflow.authoring_engine import WorkflowAuthoringEngine
+from unilabos.workflow.composite import CompositeAuthoring
+from unilabos.workflow.published_workflow_runtime import (
+    PublishedWorkflowGeneration,
+    PublishedWorkflowGenerationError,
+    build_published_workflow_generation,
+)
 from unilabos.workflow.service import AuthoringCompiler, WorkflowService
 from unilabos.workflow.source_discovery import discover_editable_sources
 from unilabos.workflow.source_monitor import WorkflowSourceMonitor
@@ -35,6 +41,7 @@ _database_path: Optional[Path] = None
 _monitor: Optional[WorkflowSourceMonitor] = None
 _template_projection: Optional[RegistryTemplateProjection] = None
 _compiler: Optional[AuthoringCompiler] = None
+_compiler_rebuilder: Optional[Callable[[], AuthoringCompiler]] = None
 _editable_package_roots: tuple[Path, ...] = ()
 
 
@@ -113,6 +120,7 @@ def compose_workflow_runtime(
     working_dir: str | Path,
     *,
     compiler: Optional[AuthoringCompiler] = None,
+    compiler_rebuilder: Optional[Callable[[], AuthoringCompiler]] = None,
     editable_package_roots: Iterable[str | Path] = (),
     material_resolver: Optional[Callable[[str], Optional[dict[str, Any]]]] = None,
     scheduler: Optional[Any] = None,
@@ -120,14 +128,16 @@ def compose_workflow_runtime(
     """装配工作区唯一的工作流权威、启动恢复和草稿监视。
 
     参数：``working_dir`` 决定现有工作流 SQLite 路径；``compiler`` 是可信工作流
-    创作编译器；``editable_package_roots`` 是唯一允许发现源码的显式授权目录；
+    创作编译器；``compiler_rebuilder`` 在应用后原子刷新完整模板代际；
+    ``editable_package_roots`` 是唯一允许发现源码的显式授权目录；
     ``material_resolver`` 按稳定 UUID 读取本地物料权威摘要；``scheduler`` 是仅在
     本地调度模式装配的现有调度器（EdgeScheduler）。
     返回：完成来源注册与启动恢复后发布的进程唯一工作流服务（WorkflowService）。
     异常：运行期间切换数据库、编译器或授权目录集合时失败关闭。
     """
 
-    global _compiler, _database_path, _editable_package_roots, _failed_runtime
+    global _compiler, _compiler_rebuilder, _database_path
+    global _editable_package_roots, _failed_runtime
     global _monitor, _service
     # 后端形态合同（Backend-shaped Contract）的定义/任务与遗留执行历史共享
     # ``workflow_history.db``，但继续使用相互独立的表。
@@ -144,6 +154,10 @@ def compose_workflow_runtime(
             if compiler is not _compiler:
                 raise RuntimeError(
                     "工作流权威（Workflow Authority）运行期间不能切换 compiler"
+                )
+            if compiler_rebuilder is not _compiler_rebuilder:
+                raise RuntimeError(
+                    "工作流权威（Workflow Authority）运行期间不能切换目录重建器"
                 )
             if configured_roots != _editable_package_roots:
                 raise RuntimeError(
@@ -165,6 +179,7 @@ def compose_workflow_runtime(
             new_service = WorkflowService(
                 workflow_store,
                 compiler=compiler,
+                compiler_rebuilder=compiler_rebuilder,
                 material_resolver=material_resolver,
                 task_scheduler_bridge=task_scheduler_bridge,
             )
@@ -186,6 +201,7 @@ def compose_workflow_runtime(
         _service = new_service
         _database_path = database_path
         _compiler = compiler
+        _compiler_rebuilder = compiler_rebuilder
         _editable_package_roots = configured_roots
         _monitor = new_monitor
         try:
@@ -196,6 +212,7 @@ def compose_workflow_runtime(
             _service = None
             _database_path = None
             _compiler = None
+            _compiler_rebuilder = None
             _editable_package_roots = ()
             _monitor = None
             cleanup_owner = _RuntimeCleanupOwner(new_service, new_monitor)
@@ -260,6 +277,7 @@ def compose_local_workflow_template_runtime(
             service = compose_workflow_runtime(
                 working_dir,
                 compiler=_compiler,
+                compiler_rebuilder=_compiler_rebuilder,
                 editable_package_roots=editable_package_roots,
             )
             return service, _template_projection
@@ -303,25 +321,86 @@ def compose_local_workflow_template_runtime(
             )
             return dict(material_row) if material_row is not None else None
 
+        configured_roots = _configured_package_roots(editable_package_roots)
+        publication_plan = discover_editable_sources(configured_roots)
+        active_registrations = tuple(
+            {
+                "workflow_uuid": item.workflow_uuid,
+                "package_id": item.package_id,
+                "package_root": str(item.package_root),
+                "relative_path": item.relative_path,
+                "source_uri": item.source_uri,
+            }
+            for item in publication_plan.registrations
+        )
+        publication_store = WorkflowStore(database_path)
+        published_generation: PublishedWorkflowGeneration | None = None
+
+        def extend_template_generation(
+            base_nodes: Any,
+            base_handles: Any,
+        ) -> tuple[Any, Any]:
+            """在同一模板替换事务候选中追加全部已发布工作流合同。
+
+            参数：``base_nodes``/``base_handles`` 是本次注册表编译出的设备与框架
+            模板全集。返回：只含已发布工作流的节点和连接点候选。异常：来源或
+            应用快照不一致时转换为 ``RegistryTemplateProjectionError``。
+            """
+
+            del base_handles
+            nonlocal published_generation
+            try:
+                generation = build_published_workflow_generation(
+                    registrations=active_registrations,
+                    snapshot_provider=publication_store,
+                    base_node_templates=base_nodes,
+                )
+            except PublishedWorkflowGenerationError as error:
+                raise RegistryTemplateProjectionError(str(error)) from error
+            published_generation = generation
+            return generation.node_templates, generation.handle_templates
+
         projection = RegistryTemplateProjection(
-            WorkflowStore(database_path),
+            publication_store,
             authority_id="local",
             resource_template_identity_resolver=resolve_resource_template_identity,
+            generation_extension=extend_template_generation,
         )
         try:
-            snapshot = projection.refresh(registry_snapshot)
             # ``resource_reference_resolver`` 只读取 C3 已提交的本地资源图物料事实，
             # 让物料来源（MaterialSource）和普通动作共享同一业务 ID→UUID 规则。
             resource_reference_resolver = (
                 build_inventory_resource_reference_resolver(inventory_store)
             )
-            compiler = WorkflowAuthoringEngine(
-                catalog=snapshot,
-                resource_reference_resolver=resource_reference_resolver,
-            )
+
+            def rebuild_compiler() -> AuthoringCompiler:
+                """刷新完整模板代际并返回与该代际绑定的新创作编译器。
+
+                参数：无。返回：共享同一不可变目录快照的编译器与组合展开端口。
+                异常：注册表、发布来源或模板替换失败时原样传播，调用服务据此
+                关闭陈旧编译入口。
+                """
+
+                snapshot = projection.refresh(registry_snapshot)
+                if published_generation is None:
+                    raise RegistryTemplateProjectionError(
+                        "已发布工作流目录扩展未执行"
+                    )
+                return WorkflowAuthoringEngine(
+                    catalog=snapshot,
+                    resource_reference_resolver=resource_reference_resolver,
+                    composite_authoring=CompositeAuthoring(
+                        snapshot_provider=publication_store,
+                        catalog=snapshot,
+                        resolver=published_generation.source_catalog,
+                    ),
+                )
+
+            compiler = rebuild_compiler()
             service = compose_workflow_runtime(
                 working_dir,
                 compiler=compiler,
+                compiler_rebuilder=rebuild_compiler,
                 editable_package_roots=editable_package_roots,
                 material_resolver=resolve_material_identity,
                 scheduler=scheduler,
@@ -360,7 +439,8 @@ def reset_workflow_service_for_test() -> None:
     返回：无；监视器、服务、模板投影和组合身份全部恢复为空。
     """
 
-    global _compiler, _database_path, _editable_package_roots, _failed_runtime
+    global _compiler, _compiler_rebuilder, _database_path
+    global _editable_package_roots, _failed_runtime
     global _monitor, _service, _template_projection
     with _lock:
         if _failed_runtime is not None:
@@ -378,6 +458,7 @@ def reset_workflow_service_for_test() -> None:
         _service = None
         _database_path = None
         _compiler = None
+        _compiler_rebuilder = None
         _editable_package_roots = ()
         _template_projection = None
 

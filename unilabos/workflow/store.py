@@ -651,6 +651,30 @@ class WorkflowStore:
             "handle_templates": handle_templates,
         }
 
+    def get_published_workflow_snapshot(
+        self,
+        workflow_uuid: str,
+    ) -> Dict[str, Any]:
+        """一次冻结工作流图与应用源码发布资格事实。
+
+        参数：``workflow_uuid`` 是活动工作流（Workflow）稳定身份。返回：同一
+        SQLite 锁视图中的完整图及 ``applied_source``；尚未应用时该字段为
+        ``None``。异常：工作流缺失或软删除时抛出 ``StoreNotFound``，持久 JSON
+        损坏等读取错误原样传播。
+        """
+
+        with self._lock:
+            graph = self.get_graph(workflow_uuid, conn=self._conn)
+            row = self._conn.execute(
+                "SELECT applied_source FROM workflow_authoring "
+                "WHERE workflow_uuid = ?",
+                (workflow_uuid,),
+            ).fetchone()
+            applied_source = (
+                _load(row["applied_source"], None) if row is not None else None
+            )
+            return {**graph, "applied_source": applied_source}
+
     def save_graph(
         self,
         workflow_uuid: str,
