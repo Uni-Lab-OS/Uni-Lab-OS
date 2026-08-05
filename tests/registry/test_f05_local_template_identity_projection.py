@@ -229,9 +229,18 @@ def test_local_composition_creates_missing_inventory_template_identities(
             "local_templates:Pump",
             "transfer",
         )
+        # ``plate_input`` 是声明合法反应板源码别名的动作物料输入连接点（Handle）。
+        plate_input = next(
+            handle
+            for handle in action.handles
+            if handle["io_type"] == "target" and handle["handle_key"] == "plate"
+        )
 
         assert set(template_identities) == {"plate_96", "pump"}
         assert action.template["resource_template_uuid"] == template_identities["pump"]
+        assert plate_input["meta_data"]["unilab"][
+            "allowed_resource_template_uuids"
+        ] == (template_identities["plate_96"],)
         assert (
             projection.snapshot().require_resource_template_uuid(
                 "local_templates:plate_96"
@@ -280,9 +289,18 @@ def test_local_composition_reuses_existing_business_identity_uuid(
             "local_templates:Pump",
             "transfer",
         )
+        # ``plate_input`` 必须复用回执中的同一反应板资源模板 UUID。
+        plate_input = next(
+            handle
+            for handle in action.handles
+            if handle["io_type"] == "target" and handle["handle_key"] == "plate"
+        )
 
         assert _active_template_identities(inventory_store) == expected_identities
         assert action.template["resource_template_uuid"] == expected_identities["pump"]
+        assert plate_input["meta_data"]["unilab"][
+            "allowed_resource_template_uuids"
+        ] == (expected_identities["plate_96"],)
     finally:
         reset_workflow_service_for_test()
         inventory_store.close()
@@ -335,17 +353,23 @@ def test_local_composition_restart_keeps_template_identity_stable(
             inventory_store=restarted_store,
             registry=registry,
         )
+        # ``restarted_action`` 必须同时保持设备所有者和反应板允许集稳定。
+        restarted_action = second_projection.snapshot().require_action(
+            "local_templates:Pump",
+            "transfer",
+        )
+        # ``restarted_plate_input`` 是重启后再次从合法源码别名解析的物料输入。
+        restarted_plate_input = next(
+            handle
+            for handle in restarted_action.handles
+            if handle["io_type"] == "target" and handle["handle_key"] == "plate"
+        )
 
         assert _active_template_identities(restarted_store) == first_identities
-        assert (
-            second_projection.snapshot()
-            .require_action(
-                "local_templates:Pump",
-                "transfer",
-            )
-            .template["resource_template_uuid"]
-            == first_owner_uuid
-        )
+        assert restarted_action.template["resource_template_uuid"] == first_owner_uuid
+        assert restarted_plate_input["meta_data"]["unilab"][
+            "allowed_resource_template_uuids"
+        ] == (first_identities["plate_96"],)
     finally:
         reset_workflow_service_for_test()
         restarted_store.close()
