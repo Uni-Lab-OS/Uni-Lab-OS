@@ -145,6 +145,14 @@ class Pump:
         }
         for definition in scanned_resources
     ]
+    # ``transfer_action`` 是真实构建器生成的动作（Action）合同；这里声明合法
+    # 资源模板源码别名，让复用与重启测试同时覆盖动作允许模板的稳定身份解析。
+    transfer_action = built_devices[0]["class"]["action_value_mappings"]["transfer"]
+    # ``action_contract`` 是第 2 版动作合同（Action Contract）的版本扩展。
+    action_contract = transfer_action["schema"]["x-unilabos-action-contract"]
+    action_contract["resource_template_symbols"]["goal"] = {
+        "plate": ["local_templates:plate_96"]
+    }
     return _BuiltRegistry(devices=built_devices, resources=built_resources)
 
 
@@ -399,6 +407,65 @@ def test_local_composition_rejects_unresolvable_alias_before_inventory_write(
 
         assert get_workflow_service() is None
         assert _template_storage_facts(inventory_store) == facts_before_invalid_alias
+    finally:
+        reset_workflow_service_for_test()
+        inventory_store.close()
+
+
+def test_local_composition_rejects_unknown_action_alias_without_inventory_write(
+    tmp_path: Path,
+) -> None:
+    """未知动作源码别名必须在库存同步前失败且保持全部模板事实不变。
+
+    参数说明：``tmp_path`` 隔离真实 ``inventory.db`` 与工作流数据库。返回：无；
+    测试先通过注册表快照同步接缝建立合法资源模板（ResourceTemplate）回执，再经
+    公开工作流运行时组合（``compose_local_workflow_template_runtime``）提交包含
+    未知源码别名的动作合同（Action Contract）。断言失败前后的活动/历史模板行、
+    UUID、``deleted_at``、聚合版本与既有回执身份完全一致，并且不发布工作流权威
+    （Workflow Authority）。
+    """
+
+    reset_workflow_service_for_test()
+    # ``inventory_store`` 是本轮唯一库存权威，用真实 SQLite 事务暴露部分写入。
+    inventory_store = InventoryStore(str(tmp_path / "inventory.db"))
+    try:
+        # ``registry`` 是由真实 AST 扫描器和注册表（Registry）构建器产生的代际。
+        registry = _build_registry(tmp_path)
+        # ``stable_snapshot`` 是失败探针前已成功提交的同一规范模板代际。
+        stable_snapshot = RegistryTemplateSnapshot.from_registry(registry)
+        # ``stable_receipt`` 冻结失败前活动业务 ID 到 UUID 的同步回执（Receipt）。
+        stable_receipt = BackendResourceService(
+            inventory_store
+        ).sync_resource_templates(stable_snapshot.detached_definitions())
+        # ``stable_receipt_identities`` 是回执承诺的活动模板稳定身份全集。
+        stable_receipt_identities = {
+            str(identity["name"]): str(identity["uuid"])
+            for identity in stable_receipt["templates"]
+        }
+        # ``facts_before_unknown_alias`` 包含活动/历史行、软删除时间与聚合版本。
+        facts_before_unknown_alias = _template_storage_facts(inventory_store)
+        # ``transfer_action`` 是公开组合将消费的真实已构建动作定义。
+        transfer_action = registry.obtain_registry_device_info()[0]["class"][
+            "action_value_mappings"
+        ]["transfer"]
+        # ``action_contract`` 是故意改为未知资源模板源码别名的动作合同版本扩展。
+        action_contract = transfer_action["schema"]["x-unilabos-action-contract"]
+        action_contract["resource_template_symbols"]["goal"] = {
+            "plate": ["lab.resources:plate_96"]
+        }
+
+        with pytest.raises(RegistryTemplateProjectionError, match="源码身份"):
+            compose_local_workflow_template_runtime(
+                tmp_path,
+                inventory_store=inventory_store,
+                registry=registry,
+            )
+
+        assert get_workflow_service() is None
+        assert _active_template_identities(inventory_store) == (
+            stable_receipt_identities
+        )
+        assert _template_storage_facts(inventory_store) == (facts_before_unknown_alias)
     finally:
         reset_workflow_service_for_test()
         inventory_store.close()
