@@ -206,13 +206,13 @@ def _compile_projection(
         raise ResourceGraphBootstrapError("资源树不得为空")
     # ``node_by_runtime_uuid`` 只解析本次快照关系，不升级为持久物料身份。
     node_by_runtime_uuid: dict[str, dict[str, Any]] = {}
-    node_ids: set[str] = set()
+    node_by_id: dict[str, dict[str, Any]] = {}
     for node in nodes:
         node_id = _required_text(node.get("id"), "node.id")
         runtime_uuid = _required_text(node.get("uuid"), f"node {node_id} uuid")
-        if node_id in node_ids or runtime_uuid in node_by_runtime_uuid:
+        if node_id in node_by_id or runtime_uuid in node_by_runtime_uuid:
             raise ResourceGraphBootstrapError("资源树节点 ID/运行时 UUID 必须唯一")
-        node_ids.add(node_id)
+        node_by_id[node_id] = node
         node_by_runtime_uuid[runtime_uuid] = node
 
     material_nodes = [node for node in nodes if not _is_site_node(node)]
@@ -326,6 +326,74 @@ def _compile_projection(
                 **_site_pose(node),
             }
         )
+    for owner_node in material_nodes:
+        owner_node_id = _required_text(owner_node.get("id"), "material.id")
+        owner_runtime = _required_text(owner_node.get("uuid"), "material.uuid")
+        owner_uuid = material_uuid_by_runtime[owner_runtime]
+        config = _json_object(owner_node.get("config"), "material.config")
+        declared_sites = config.get("sites", [])
+        if not isinstance(declared_sites, Sequence) or isinstance(
+            declared_sites, (str, bytes)
+        ):
+            raise ResourceGraphBootstrapError("配置式库位（Site）sites 必须是数组")
+        for raw_site in declared_sites:
+            site = _json_object(raw_site, "config.sites[]")
+            site_name = _required_text(
+                site.get("name") or site.get("label"), "config site.name"
+            )
+            occupant_node_id = _optional_text(site.get("occupied_by"))
+            occupant_node = node_by_id.get(occupant_node_id or "")
+            if occupant_node_id is not None and occupant_node is None:
+                raise ResourceGraphBootstrapError(
+                    f"库位（Site）{site_name} 占用物料悬空"
+                )
+            occupant_runtime = (
+                _required_text(occupant_node.get("uuid"), "occupied material.uuid")
+                if occupant_node is not None
+                else None
+            )
+            occupant_uuid = material_uuid_by_runtime.get(occupant_runtime or "")
+            if occupant_node is not None and (
+                occupant_uuid is None
+                or _optional_text(occupant_node.get("parent_uuid")) != owner_runtime
+            ):
+                raise ResourceGraphBootstrapError(
+                    f"库位（Site）{site_name} 占用物料必须是父物料的直接子物料"
+                )
+            if occupant_uuid is not None and occupant_uuid in occupied_materials:
+                raise ResourceGraphBootstrapError("一个物料不能占用多个库位（Site）")
+            if occupant_uuid is not None:
+                occupied_materials.add(occupant_uuid)
+            sort_order = site_order_by_owner.get(owner_uuid, 0)
+            site_order_by_owner[owner_uuid] = sort_order + 1
+            site_pose = {
+                "pose": {
+                    "position": site.get("position"),
+                    "size": site.get("size"),
+                }
+            }
+            sites.append(
+                {
+                    "uuid": _stable_uuid(
+                        source_name, "site", f"{owner_node_id}:{site_name}"
+                    ),
+                    "material_uuid": owner_uuid,
+                    "name": site_name,
+                    "sort_order": sort_order,
+                    "occupied_material_uuid": occupant_uuid,
+                    "description": _optional_text(site.get("description")),
+                    "meta_data": {
+                        "source": "resource-tree-set-config",
+                        "source_node_id": owner_node_id,
+                    },
+                    "allowed_template_names": _site_content_types(
+                        {"config": {"content_type": site.get("content_type", [])}},
+                        aliases,
+                    ),
+                    "allowed_template_uuids": [],
+                    **_site_pose(site_pose),
+                }
+            )
     return {"materials": materials, "relative_positions": positions, "sites": sites}
 
 
