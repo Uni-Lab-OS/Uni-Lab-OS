@@ -46,8 +46,13 @@ INCOMPATIBLE_TEMPLATE_UUID = "32000000-0000-4000-8000-000000000099"
 
 @dataclass(frozen=True, slots=True)
 class MaterialGraphStoreContext:
-    """直接保存物料图（Material Graph）测试的持久化上下文。"""
+    """直接保存物料图（Material Graph）测试的持久化上下文。
 
+    ``store`` 是真实 SQLite 存储适配器（Store Adapter），``service`` 提供公共
+    读取投影，``applied_graph`` 是测试动作前的工作流权威快照。
+    """
+
+    store: WorkflowStore
     service: WorkflowService
     applied_graph: dict[str, Any]
 
@@ -161,12 +166,14 @@ def opened_material_graph_store(
     database_path: Path,
     *,
     prepare_allowlist: tuple[str, ...] | None,
+    workflow_meta_data: dict[str, Any] | None = None,
 ) -> Iterator[MaterialGraphStoreContext]:
     """打开带指定消费模板约束的真实工作流写模型。
 
     参数说明：``database_path`` 是隔离 SQLite 文件；``prepare_allowlist`` 是
-    消费动作接受的资源模板 UUID 集合。局部 ``projection_store`` 把同一目录
-    投影进数据库。返回：服务和保存前权威图；退出时关闭服务。
+    消费动作接受的资源模板 UUID 集合；``workflow_meta_data`` 可冻结工作流
+    输入/输出（Workflow I/O）合同。局部 ``projection_store`` 把同一目录投影进
+    数据库。返回：服务和保存前权威图；退出时关闭服务。
     """
 
     templates, handles = material_graph_catalog_entities(
@@ -189,15 +196,24 @@ def opened_material_graph_store(
         )
     )
     service = WorkflowService(store, compiler=engine)
-    service.create_workflow(
-        workflow_uuid=WORKFLOW_UUID,
-        name="Material template compatibility",
-        tags=[],
-        description=None,
-        meta_data={},
-    )
+    workflow_values = {
+        "workflow_uuid": WORKFLOW_UUID,
+        "name": "Material template compatibility",
+        "tags": [],
+        "description": None,
+        "meta_data": (
+            deepcopy(workflow_meta_data) if workflow_meta_data is not None else {}
+        ),
+    }
+    if workflow_meta_data is None:
+        service.create_workflow(**workflow_values)
+    else:
+        # ``workflow_values`` 在存储适配器测试中冻结服务端管理的 Workflow I/O
+        # 元数据；公共创建接口按设计会移除该保留命名空间。
+        store.create_workflow(**workflow_values)
     try:
         yield MaterialGraphStoreContext(
+            store=store,
             service=service,
             applied_graph=service.get_graph(WORKFLOW_UUID),
         )
