@@ -20,6 +20,7 @@ from __future__ import annotations
 import logging
 import os
 import time
+from copy import deepcopy
 from typing import Any, Optional, Tuple
 
 from unilabos.app.scheduler.backend import JobExecutionBackend, create_edge_stack
@@ -34,6 +35,8 @@ _scheduler: Optional[EdgeScheduler] = None
 _backend: Optional[JobExecutionBackend] = None
 _inventory: Optional[Any] = None
 _outbox_worker: Optional[Any] = None
+# 工作区物料外形是包资产编译结果，不属于库存数据库私有事实。
+_material_shapes: tuple[dict[str, Any], ...] = ()
 
 
 class CloudBusinessError(RuntimeError):
@@ -71,6 +74,15 @@ def get_edge_backend() -> Optional[JobExecutionBackend]:
 
 def get_inventory_service() -> Optional[Any]:
     return _inventory
+
+
+def get_material_shapes() -> list[dict[str, Any]]:
+    """返回工作区编译后的静态物料外形副本。
+
+    参数：无。返回：容器不与组合根共享的公共外形列表。异常：无。
+    """
+
+    return deepcopy(list(_material_shapes))
 
 
 def make_http_sync_sender() -> Any:
@@ -176,20 +188,32 @@ def setup_edge_inventory(
     resource_tree_set: Any = None,
     registry_snapshot: Any = None,
     resource_graph_source_id: str = "",
+    material_shapes: Any = None,
 ) -> Any:
     """启动主机库存服务并可选建立资源图投影（Resource Graph Projection）。
 
     参数：``inventory_db_path`` 是主机私有 SQLite 路径；``edge_id`` 与
     ``lab_id`` 是库存事件身份；``ws_client`` 和 ``sync_sender`` 分别接入主机链路
-    与发件箱（Outbox）；后三项共同提供资源树、注册表快照和来源身份。返回：进程内
-    唯一库存服务。异常：路径切换、投影参数不完整或资源图不安全时关闭式失败；从节点
-    不调用本函数，因此不会打开此数据库。
+    与发件箱（Outbox）；资源树、注册表快照和来源身份共同提供资源图投影；
+    ``material_shapes`` 是工作区包资产编译后的静态公共投影。返回：进程内唯一库存
+    服务。异常：路径切换、外形形状、投影参数不完整或资源图不安全时关闭式失败；
+    从节点不调用本函数，因此不会打开此数据库。
     """
 
-    global _inventory, _outbox_worker
+    global _inventory, _material_shapes, _outbox_worker
     path = str(inventory_db_path or "").strip()
     if not path:
         raise ValueError("inventory_db_path is required")
+    if material_shapes is not None:
+        if not isinstance(material_shapes, (list, tuple)) or any(
+            not isinstance(shape, dict) for shape in material_shapes
+        ):
+            raise TypeError("material_shapes 必须是对象列表或 tuple")
+        # ``_material_shapes`` 固定本进程启动代际，读取端只获得深复制副本。
+        compiled_shapes = tuple(deepcopy(material_shapes))
+        if _inventory is not None and _material_shapes != compiled_shapes:
+            raise RuntimeError("库存服务启动后不得切换工作区物料外形代际")
+        _material_shapes = compiled_shapes
     if path != ":memory:":
         path = os.path.abspath(os.path.expanduser(path))
         os.makedirs(os.path.dirname(path) or ".", exist_ok=True)
@@ -413,9 +437,12 @@ def _wire_ws_client(scheduler: EdgeScheduler, ws_client: Any) -> None:
 
 
 def shutdown_edge_services() -> None:
-    """Stop every process-owned Edge microbackend service and clear singletons."""
+    """关闭进程拥有的全部 Edge 服务并清除启动代际。
 
-    global _scheduler, _backend, _inventory, _outbox_worker
+    参数：无。返回：无。异常：底层关闭错误原样抛出，避免遗留半关闭单例。
+    """
+
+    global _scheduler, _backend, _inventory, _material_shapes, _outbox_worker
     from unilabos.app.scheduler.host_network import shutdown_network_services
 
     # 先拒绝新 Slave/物料请求，再关闭请求会触达的调度与存储组件。
@@ -436,6 +463,7 @@ def shutdown_edge_services() -> None:
     _scheduler = None
     _backend = None
     _inventory = None
+    _material_shapes = ()
     _outbox_worker = None
 
 
@@ -450,6 +478,7 @@ __all__ = [
     "get_edge_backend",
     "get_edge_scheduler",
     "get_inventory_service",
+    "get_material_shapes",
     "make_http_snapshot_sender",
     "make_http_sync_sender",
     "report_http_inventory_command_result",

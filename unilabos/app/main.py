@@ -1465,6 +1465,15 @@ def main():
         complete_registry=complete_registry,
         external_only=external_only,
     )
+    # 工作区外形只从注册表（Registry）已发现的装饰器绑定编译；不做第二次目录发现。
+    workspace_material_shapes = ()
+    if workspace_startup_plan is not None:
+        from unilabos.package_manager import compile_workspace_material_shapes
+
+        workspace_material_shapes = compile_workspace_material_shapes(
+            workspace_startup_plan,
+            lab_registry,
+        )
 
     # Check mode: 注册表验证完成后直接退出
     if check_mode:
@@ -1697,6 +1706,7 @@ def main():
                     if bootstrap_resource_graph
                     else ""
                 ),
+                material_shapes=workspace_material_shapes,
             )
             print_status(
                 f"Host Edge 物料服务已启用 (SQLite WAL: {inventory_db})",

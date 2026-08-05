@@ -28,6 +28,8 @@ class WorkspaceStartupPlan:
 
     # ``source`` 是本轮启动唯一被授权的工作区文件来源。
     source: WorkspaceSource
+    # ``distribution_name`` 是 pyproject.toml 声明的原始发行包身份。
+    distribution_name: str
     # ``import_package`` 是从发行元数据规范化得到的 Python 导入包身份。
     import_package: str
     # ``package_directory`` 是注册表（Registry）唯一允许扫描的本地包目录。
@@ -162,6 +164,7 @@ def compile_workspace_startup(source: WorkspaceSource) -> WorkspaceStartupPlan:
         )
     return WorkspaceStartupPlan(
         source=source,
+        distribution_name=project_name.strip(),
         import_package=import_package,
         package_directory=package_directory,
         community_namespace=f"community.{import_package}",

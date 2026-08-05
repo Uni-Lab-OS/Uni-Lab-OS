@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+from collections.abc import Mapping, Sequence
+from copy import deepcopy
 from typing import Any, Dict, List, Optional
 from uuid import UUID
 
@@ -107,10 +109,30 @@ def _call(callback, *args, status_code: int = 200, **kwargs) -> JSONResponse:
         return _error(error)
 
 
-def create_backend_resource_router(service: BackendResourceService) -> APIRouter:
-    """Create the frontend-facing Resource adapter; Edge-only routes stay separate."""
+def create_backend_resource_router(
+    service: BackendResourceService,
+    *,
+    material_shapes: Sequence[Mapping[str, Any]] = (),
+) -> APIRouter:
+    """创建前端资源合同路由并附带静态物料外形。
+
+    参数：``service`` 提供公共资源读写；``material_shapes`` 是已由包资产编译器
+    校验的静态外形投影。返回：不包含 Edge 私有库存路由的 ``APIRouter``。
+    异常：外形项目不是对象时抛出 ``TypeError``。
+    """
 
     router = APIRouter(prefix="/api/v1", tags=["backend-resource-contract"])
+    # ``frozen_material_shapes`` 与调用者容器隔离，保证启动代际不会随请求漂移。
+    frozen_material_shapes = tuple(deepcopy(dict(shape)) for shape in material_shapes)
+
+    @router.get("/material-shapes")
+    def list_material_shapes() -> JSONResponse:
+        """返回工作区包声明的静态物料外形。
+
+        参数：无。返回：Backend 公共信封中的外形项目列表。异常：无。
+        """
+
+        return _success({"items": deepcopy(list(frozen_material_shapes))})
 
     @router.post("/resource-templates")
     def sync_resource_templates(body: ResourceTemplateSyncRequest) -> JSONResponse:
@@ -257,9 +279,17 @@ def create_backend_resource_router(service: BackendResourceService) -> APIRouter
 
 
 def install_backend_resource_api(
-    app: FastAPI, service: BackendResourceService
+    app: FastAPI,
+    service: BackendResourceService,
+    *,
+    material_shapes: Sequence[Mapping[str, Any]] = (),
 ) -> None:
-    """Install the shared routes and Backend validation envelope once."""
+    """安装公共资源路由与 Backend 校验信封。
+
+    参数：``app`` 是产品 FastAPI 应用；``service`` 是资源合同服务；
+    ``material_shapes`` 是工作区包资产的静态公共投影。返回：无。
+    异常：路由或外形装配错误原样抛出。
+    """
 
     @app.exception_handler(RequestValidationError)
     async def backend_validation_error(
@@ -278,7 +308,9 @@ def install_backend_resource_api(
             return _error(BackendContractError(1000, "Invalid request parameter"))
         return await request_validation_exception_handler(request, error)
 
-    app.include_router(create_backend_resource_router(service))
+    app.include_router(
+        create_backend_resource_router(service, material_shapes=material_shapes)
+    )
 
 
 __all__ = [
