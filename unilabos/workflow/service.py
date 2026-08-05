@@ -77,6 +77,23 @@ from unilabos.workflow.windows_draft_cas import (
 
 _LOGGER = logging.getLogger(__name__)
 AUTHORING_SOURCE_BYTE_LIMIT = 8 * 1024 * 1024
+_CANDIDATE_HASH_FIELDS = (
+    "base_workflow_revision",
+    "draft_hash",
+    "graph",
+    "normalized_python_source",
+    "source_map",
+    "changeset",
+    "compiler_version",
+    "template_catalog_fingerprint",
+)
+_GRAPH_AUDIT_FIELDS = frozenset({"create_time", "update_time"})
+_GRAPH_ENTITY_COLLECTIONS = (
+    "nodes",
+    "edges",
+    "node_templates",
+    "handle_templates",
+)
 _ERRORS = {
     "invalid_input": (400, "提交内容格式不正确"),
     "not_found": (404, "请求的资源不存在"),
@@ -300,6 +317,30 @@ def _sha256(data: bytes) -> str:
 
 def _canonical_json(value: Any) -> bytes:
     return encode_json(value, sort_keys=True)
+
+
+def _candidate_semantic_hash(candidate: Dict[str, Any]) -> str:
+    """对完整 Candidate 语义求哈希，排除 Backend 只读审计时间。"""
+
+    graph = candidate["graph"]
+
+    def semantic_entity(entity: Dict[str, Any]) -> Dict[str, Any]:
+        return {
+            key: value
+            for key, value in entity.items()
+            if key not in _GRAPH_AUDIT_FIELDS
+        }
+
+    semantic_graph = {
+        "workflow": semantic_entity(graph["workflow"]),
+        **{
+            field: [semantic_entity(item) for item in graph[field]]
+            for field in _GRAPH_ENTITY_COLLECTIONS
+        },
+    }
+    payload = {field: candidate[field] for field in _CANDIDATE_HASH_FIELDS}
+    payload["graph"] = semantic_graph
+    return _sha256(_canonical_json(payload))
 
 
 def _mtime_rfc3339(timestamp: float) -> str:
@@ -1363,7 +1404,13 @@ class WorkflowService:
                 != candidate["template_catalog_fingerprint"]
             ):
                 raise WorkflowConflict("template_catalog_conflict")
-            if revalidated["candidate_hash"] != candidate["candidate_hash"]:
+            try:
+                candidate_changed = _candidate_semantic_hash(
+                    revalidated
+                ) != _candidate_semantic_hash(candidate)
+            except (KeyError, TypeError, UnicodeError, ValueError):
+                raise WorkflowError("candidate_invalid") from None
+            if candidate_changed:
                 raise WorkflowConflict("candidate_hash_conflict")
 
             normalized_source = candidate["normalized_python_source"]
@@ -2457,12 +2504,12 @@ class WorkflowService:
             "template_catalog_fingerprint": template_catalog_fingerprint,
         }
         try:
-            canonical_bundle = _canonical_json(bundle)
-        except (TypeError, UnicodeError, ValueError):
+            candidate_hash = _candidate_semantic_hash(bundle)
+        except (KeyError, TypeError, UnicodeError, ValueError):
             self._set_candidate_invalid_diagnostic(compilation)
             return None
         return {
-            "candidate_hash": _sha256(canonical_bundle),
+            "candidate_hash": candidate_hash,
             **bundle,
             "update_time": utc_now(),
         }
