@@ -42,8 +42,9 @@ def compile_resource_template_source_aliases(
 
     参数说明：``resource_definitions`` 是同一注册表快照（Registry Snapshot）的
     完整资源模板（ResourceTemplate）定义。返回：规范 Python 源码身份到资源
-    模板业务 ID 的映射；显式 ``source_fqid`` 优先，缺少显式声明时仅保留当前
-    代际唯一的 ``class.module`` 遗留兼容别名。异常：业务 ID、显式源码身份或
+    模板业务 ID 的映射；显式 ``source_fqid`` 优先。仅当 ``class.module`` 在
+    全代际恰好有一个资源模板（ResourceTemplate）所有者，且该所有者没有显式
+    ``source_fqid`` 时，才保留遗留兼容别名。异常：业务 ID、显式源码身份或
     实现类身份缺失、非法，或两个业务模板显式声明同一 ``source_fqid`` 时抛出
     ``RegistryTemplateProjectionError``。多个业务模板合法复用同一实现类时，
     该实现类因无法唯一解析而不进入返回映射，不得猜测其中任一模板。
@@ -51,8 +52,11 @@ def compile_resource_template_source_aliases(
 
     # ``explicit_owner_by_alias`` 保存作者明确声明的一一源码身份及其业务模板。
     explicit_owner_by_alias: dict[str, str] = {}
-    # ``fallback_owners_by_alias`` 汇总没有显式声明时复用实现类的业务模板集合。
-    fallback_owners_by_alias: dict[str, set[str]] = {}
+    # ``class_owners_by_alias`` 汇总全代际所有实现类所有者；显式源码身份不能把
+    # 自身从计数中隐藏，否则“显式 + 遗留”共享类会被误判为唯一兼容别名。
+    class_owners_by_alias: dict[str, set[str]] = {}
+    # ``templates_with_explicit_source`` 标记已脱离遗留兼容策略的业务模板。
+    templates_with_explicit_source: set[str] = set()
     for definition in resource_definitions:
         # ``template_name`` 是库存同步和 UUID 生命周期使用的资源模板业务 ID。
         template_name = definition.get("id")
@@ -89,6 +93,8 @@ def compile_resource_template_source_aliases(
             raise RegistryTemplateProjectionError(
                 f"资源模板源码身份不能安全解析: {template_name}"
             ) from error
+        if class_module is not None:
+            class_owners_by_alias.setdefault(class_module, set()).add(template_name)
         if source_fqid is not None:
             # ``previous_name`` 检测两个显式声明争用同一稳定资源源码身份。
             previous_name = explicit_owner_by_alias.get(source_fqid)
@@ -98,19 +104,26 @@ def compile_resource_template_source_aliases(
                     f"{source_fqid}"
                 )
             explicit_owner_by_alias[source_fqid] = template_name
+            templates_with_explicit_source.add(template_name)
             continue
         if class_module is None:
             raise RegistryTemplateProjectionError(
                 f"资源模板缺少源码身份: {template_name}"
             )
-        fallback_owners_by_alias.setdefault(class_module, set()).add(template_name)
 
     # ``template_name_by_alias`` 先保留所有显式声明，使遗留回退不能覆盖作者身份。
     template_name_by_alias = dict(explicit_owner_by_alias)
-    for source_alias, template_names in fallback_owners_by_alias.items():
-        # 只有单一业务模板拥有且未被显式声明占用的实现类才可作为兼容源码别名。
-        if len(template_names) == 1 and source_alias not in template_name_by_alias:
-            template_name_by_alias[source_alias] = next(iter(template_names))
+    for source_alias, template_names in class_owners_by_alias.items():
+        # ``template_name`` 只有在全代际唯一时才是候选兼容来源所有者。
+        if len(template_names) != 1:
+            continue
+        template_name = next(iter(template_names))
+        # 显式声明模板不再同时发布实现类别名；已有显式别名也不能被遗留入口覆盖。
+        if (
+            template_name not in templates_with_explicit_source
+            and source_alias not in template_name_by_alias
+        ):
+            template_name_by_alias[source_alias] = template_name
     return template_name_by_alias
 
 

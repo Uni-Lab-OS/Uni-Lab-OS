@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from contextlib import contextmanager
+from copy import deepcopy
 from pathlib import Path
 from typing import Any
 
@@ -617,6 +618,60 @@ def test_local_composition_rejects_unknown_action_alias_without_inventory_write(
             stable_receipt_identities
         )
         assert _template_storage_facts(inventory_store) == (facts_before_unknown_alias)
+    finally:
+        reset_workflow_service_for_test()
+        inventory_store.close()
+
+
+def test_local_composition_rejects_shared_class_action_alias_before_inventory_write(
+    tmp_path: Path,
+) -> None:
+    """Action（动作）不得通过共享实现类猜测物料资源模板。
+
+    参数说明：``tmp_path`` 隔离真实库存（Inventory）与工作流数据库。返回：无；
+    断言显式资源模板和遗留资源模板共享 ``class.module`` 时，引用该歧义实现类的
+    动作合同（Action Contract）在库存同步前关闭式失败，且不留下任何资源模板
+    （ResourceTemplate）或模板库存聚合的部分写入。
+    """
+
+    reset_workflow_service_for_test()
+    # ``inventory_store`` 是用于证明预检失败前后零部分写入的本地库存权威。
+    inventory_store = InventoryStore(str(tmp_path / "inventory.db"))
+    try:
+        # ``facts_before_ambiguous_alias`` 是组合开始前完整模板与聚合事实基线。
+        facts_before_ambiguous_alias = _template_storage_facts(inventory_store)
+        # ``registry`` 提供一个真实强类型动作和可修改的资源模板定义代际。
+        registry = _build_registry(tmp_path)
+        # ``shared_class`` 是显式与遗留资源模板共同复用的实现类身份。
+        shared_class = "lab.resources.shared:Container"
+        # ``explicit_resource`` 保留作者显式声明的稳定来源身份。
+        explicit_resource = registry.obtain_registry_resource_info()[0]
+        explicit_resource["class"]["module"] = shared_class
+        explicit_resource["source_fqid"] = "lab.resources:explicit_plate"
+        # ``legacy_resource`` 只有业务 ID 与共享实现类，不声明稳定来源身份。
+        legacy_resource = deepcopy(explicit_resource)
+        legacy_resource["id"] = "legacy_plate"
+        legacy_resource["displayname"] = "遗留反应板"
+        legacy_resource.pop("source_fqid", None)
+        registry._resources = [explicit_resource, legacy_resource]
+        # ``action_contract`` 故意引用无法证明唯一所有者的实现类兼容别名。
+        transfer_action = registry.obtain_registry_device_info()[0]["class"][
+            "action_value_mappings"
+        ]["transfer"]
+        action_contract = transfer_action["schema"]["x-unilabos-action-contract"]
+        action_contract["resource_template_symbols"]["goal"] = {"plate": [shared_class]}
+
+        with pytest.raises(RegistryTemplateProjectionError, match="源码身份"):
+            compose_local_workflow_template_runtime(
+                tmp_path,
+                inventory_store=inventory_store,
+                registry=registry,
+            )
+
+        assert get_workflow_service() is None
+        assert _template_storage_facts(inventory_store) == (
+            facts_before_ambiguous_alias
+        )
     finally:
         reset_workflow_service_for_test()
         inventory_store.close()
