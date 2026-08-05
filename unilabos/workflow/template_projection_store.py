@@ -664,13 +664,14 @@ def _schema_text(value: Any) -> str | None:
 
 
 def _load_schema(value: str | None) -> str | None:
-    """按 Backend 线合同读取节点模板参数 Schema 文本。
+    """按后端（Backend）线合同读取工作流节点模板（WorkflowNodeTemplate）参数 Schema。
 
-    参数说明：``value`` 是 SQLite 可空 Schema 文本列。返回：非空值保持原始
-    JSON 字符串，空值返回 ``None``，使注册模板投影（Registry Template
-    Projection）、工作流服务（WorkflowService）和 HTTP 始终共享 Backend
-    ``*string`` 语义。异常：无；JSON Schema 的语法与值语义由公共全图校验器
-    （Graph Validator）在候选签发时关闭式校验。
+    参数说明：``value`` 是 SQLite 可空 Schema 文本列。返回：非空值保持原始 JSON
+    字符串，空值返回 ``None``，使注册表模板投影（Registry Template
+    Projection）、工作流服务（WorkflowService）和 HTTP 始终共享后端（Backend）
+    工作流节点模板（WorkflowNodeTemplate）的 ``*string`` 语义。异常：无；JSON
+    Schema 的语法与值语义由图校验（Graph Validation）在候选版本（Candidate）
+    签发时关闭式校验。
     """
 
     return None if value is None or value == "" else value

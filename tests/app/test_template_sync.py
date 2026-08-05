@@ -417,8 +417,8 @@ def test_local_projection_and_template_sync_share_one_registry_snapshot(
 
     # ``synchronized_goal_schema`` 是完整上传合同中供节点参数校验使用的 goal 子模式。
     synchronized_goal_schema = synchronized_action["schema"]["properties"]["goal"]
-    # ``local_goal_schema`` 从 Backend 文本字段解码，仅在测试中比较两条投影路径
-    # 共享的 JSON Schema 语义；公共工作流节点模板仍保持字符串线合同。
+    # ``local_goal_schema`` 从后端（Backend）文本字段解码，仅在测试中比较两条
+    # 投影路径共享的 JSON Schema 语义；公共工作流节点模板仍保持字符串线合同。
     local_goal_schema = json.loads(local_action.detached_template()["schema"])
     assert synchronized_goal_schema == local_goal_schema
     assert synchronized_action["schema"]["x-unilabos-action-contract"]["version"] == 2

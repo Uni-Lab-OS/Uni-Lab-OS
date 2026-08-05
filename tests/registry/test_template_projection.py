@@ -435,7 +435,8 @@ def test_projection_keeps_contract_handle_order_and_material_placeholder_metadat
         "transfer",
     )
 
-    # ``data_handles`` 排除 Backend 规范的 ready 控制连接点，只验证动作数据合同。
+    # ``data_handles`` 排除后端（Backend）规范的 ready 控制连接点，只验证动作
+    # 数据合同。
     data_handles = [
         handle for handle in action.handles if handle["handle_key"] != "ready"
     ]
@@ -453,11 +454,12 @@ def test_projection_keeps_contract_handle_order_and_material_placeholder_metadat
     plate_handle = handles_by_key[("target", "plate")]
     free_handle = handles_by_key[("target", "mount_resource")]
     result_handle = handles_by_key[("source", "accepted")]
-    # ``stored_contract`` 保留完整第 2 版动作合同，供前端从 Backend 形状详情恢复
-    # 物料占位符（ResourceSlot）与编辑器元数据；节点 ``schema`` 仍只承载 goal。
+    # ``stored_contract`` 保留完整第 2 版动作合同（Action Contract），供前端从
+    # 后端（Backend）形状详情恢复物料占位符（ResourceSlot）与编辑器元数据；
+    # 节点 ``schema`` 仍只承载 goal。
     stored_contract = action.template["meta_data"]["unilab"]["action_contract_schema"]
-    # ``projected_goal_schema`` 是从 Backend 文本合同解码出的动作 goal 参数子模式；
-    # 完整动作合同（Action Contract）只保存在元数据投影中。
+    # ``projected_goal_schema`` 是从后端（Backend）文本合同解码出的动作 goal
+    # 参数子模式；完整动作合同（Action Contract）只保存在元数据投影中。
     projected_goal_schema = json.loads(action.template["schema"])
     assert stored_contract["x-unilabos-action-contract"]["version"] == 2
     assert "goal" not in projected_goal_schema.get("properties", {})
