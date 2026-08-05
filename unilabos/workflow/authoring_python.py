@@ -20,6 +20,10 @@ from unilabos.workflow.authoring_material import (
     RenderedMaterialSource,
     render_material_source_call,
 )
+from unilabos.workflow.material_graph_validation import (
+    MaterialGraphValidationError,
+    validate_material_graph_projection,
+)
 from unilabos.workflow.models import CandidateSourceMapEntry, validate_uuid
 from unilabos.workflow.source_coordinates import utf16_length
 
@@ -41,9 +45,15 @@ def render_authoring_python(
 
     参数说明：``graph`` 是后端五集合候选图，``catalog`` 是同一编译事务目录
     快照；返回可回编译的规范源码和 UTF-16 源码映射。身份或目录投影不一致时
-    抛出 ``AuthoringGraphError``。
+    抛出 ``AuthoringGraphError``；物料图违反物料流线性
+    （MaterialFlowLinearity）或资源模板兼容（ResourceTemplate Compatibility）
+    时，也会把内部物料图异常转换为 ``AuthoringGraphError`` 并保留稳定错误码。
     """
 
+    try:
+        validate_material_graph_projection(graph)
+    except MaterialGraphValidationError as error:
+        raise AuthoringGraphError(error.code, error.message) from error
     workflow = graph.get("workflow")
     nodes = graph.get("nodes")
     edges = graph.get("edges")

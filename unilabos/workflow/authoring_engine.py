@@ -28,6 +28,10 @@ from unilabos.workflow.candidate_validation import (
     CandidateBundleError,
     validate_candidate_bundle,
 )
+from unilabos.workflow.material_graph_validation import (
+    MaterialGraphValidationError,
+    validate_material_graph_projection,
+)
 from unilabos.workflow.material_selector import (
     MaterialSelectorError,
     validate_material_source_node,
@@ -228,7 +232,14 @@ class WorkflowAuthoringEngine:
 
         try:
             _validate_material_source_graph(graph, catalog=self._catalog)
+            validate_material_graph_projection(graph)
         except MaterialSelectorError as error:
+            return _error_result(
+                fingerprint=self.template_catalog_fingerprint,
+                code=error.code,
+                message=error.message,
+            )
+        except MaterialGraphValidationError as error:
             return _error_result(
                 fingerprint=self.template_catalog_fingerprint,
                 code=error.code,
