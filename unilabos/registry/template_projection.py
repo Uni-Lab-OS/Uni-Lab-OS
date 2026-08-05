@@ -35,6 +35,85 @@ class RegistryTemplateProjectionError(ValueError):
     """设备注册表不能安全投影为规范模板。"""
 
 
+def compile_resource_template_source_aliases(
+    resource_definitions: Sequence[Mapping[str, Any]],
+) -> dict[str, str]:
+    """编译可安全用于创作的资源模板源码别名。
+
+    参数说明：``resource_definitions`` 是同一注册表快照（Registry Snapshot）的
+    完整资源模板（ResourceTemplate）定义。返回：规范 Python 源码身份到资源
+    模板业务 ID 的映射；显式 ``source_fqid`` 优先，缺少显式声明时仅保留当前
+    代际唯一的 ``class.module`` 遗留兼容别名。异常：业务 ID、显式源码身份或
+    实现类身份缺失、非法，或两个业务模板显式声明同一 ``source_fqid`` 时抛出
+    ``RegistryTemplateProjectionError``。多个业务模板合法复用同一实现类时，
+    该实现类因无法唯一解析而不进入返回映射，不得猜测其中任一模板。
+    """
+
+    # ``explicit_owner_by_alias`` 保存作者明确声明的一一源码身份及其业务模板。
+    explicit_owner_by_alias: dict[str, str] = {}
+    # ``fallback_owners_by_alias`` 汇总没有显式声明时复用实现类的业务模板集合。
+    fallback_owners_by_alias: dict[str, set[str]] = {}
+    for definition in resource_definitions:
+        # ``template_name`` 是库存同步和 UUID 生命周期使用的资源模板业务 ID。
+        template_name = definition.get("id")
+        if not isinstance(template_name, str) or not template_name:
+            raise RegistryTemplateProjectionError("资源模板缺少业务唯一名称")
+        # ``class_definition`` 提供遗留 YAML 模板可复用的 Python 实现类身份。
+        class_definition = definition.get("class")
+        # ``raw_class_module`` 是尚未规范化的实现类身份；它可以被多个模板复用。
+        raw_class_module = (
+            class_definition.get("module")
+            if isinstance(class_definition, Mapping)
+            else None
+        )
+        # ``raw_source_fqid`` 是作者明确声明、必须一一对应的资源源码身份。
+        raw_source_fqid = definition.get("source_fqid")
+        if raw_source_fqid in (None, "") and raw_class_module in (None, ""):
+            raise RegistryTemplateProjectionError(
+                f"资源模板缺少源码身份: {template_name}"
+            )
+        try:
+            # ``class_module`` 只验证实际声明的实现类；显式源码身份不掩盖非法驱动路径。
+            class_module = (
+                canonical_python_source_identity(raw_class_module)
+                if raw_class_module not in (None, "")
+                else None
+            )
+            # ``source_fqid`` 保持作者声明优先，不由可复用实现类覆盖。
+            source_fqid = (
+                canonical_python_source_identity(raw_source_fqid)
+                if raw_source_fqid not in (None, "")
+                else None
+            )
+        except PythonSourceIdentityError as error:
+            raise RegistryTemplateProjectionError(
+                f"资源模板源码身份不能安全解析: {template_name}"
+            ) from error
+        if source_fqid is not None:
+            # ``previous_name`` 检测两个显式声明争用同一稳定资源源码身份。
+            previous_name = explicit_owner_by_alias.get(source_fqid)
+            if previous_name is not None and previous_name != template_name:
+                raise RegistryTemplateProjectionError(
+                    "资源模板源码身份不得绑定多个注册表（Registry）业务 ID: "
+                    f"{source_fqid}"
+                )
+            explicit_owner_by_alias[source_fqid] = template_name
+            continue
+        if class_module is None:
+            raise RegistryTemplateProjectionError(
+                f"资源模板缺少源码身份: {template_name}"
+            )
+        fallback_owners_by_alias.setdefault(class_module, set()).add(template_name)
+
+    # ``template_name_by_alias`` 先保留所有显式声明，使遗留回退不能覆盖作者身份。
+    template_name_by_alias = dict(explicit_owner_by_alias)
+    for source_alias, template_names in fallback_owners_by_alias.items():
+        # 只有单一业务模板拥有且未被显式声明占用的实现类才可作为兼容源码别名。
+        if len(template_names) == 1 and source_alias not in template_name_by_alias:
+            template_name_by_alias[source_alias] = next(iter(template_names))
+    return template_name_by_alias
+
+
 class RegistryTemplateProjection:
     """发布并提供单代不可变设备动作模板快照的深模块。"""
 
@@ -174,37 +253,28 @@ class RegistryTemplateProjection:
         self,
         resource_definitions: Sequence[Mapping[str, Any]],
     ) -> dict[str, str]:
-        """冻结源码资源符号到既有资源模板 UUID 的一一映射。
+        """冻结无歧义源码资源符号到既有资源模板 UUID 的一一映射。
 
         参数说明：``resource_definitions`` 是同代设备注册表（Registry）资源模板
         （ResourceTemplate）全集。
-        返回：以源码符号为键、本地模板 UUID 为值的新字典；业务唯一名缺失、
-        身份解析失败或 UUID 被多个符号复用时关闭式失败。
+        返回：以显式 ``source_fqid`` 或唯一遗留实现类源码符号为键、本地模板
+        UUID 为值的新字典；业务唯一名缺失、身份解析失败、显式身份冲突或 UUID
+        被多个符号复用时关闭式失败。共享 ``class.module`` 的遗留模板仍按业务 ID
+        同步库存身份，但不猜测源码符号映射。
         """
 
         # ``template_uuid_by_symbol`` 供工作流源码（Workflow Source）编译使用；
         # ``symbol_by_template_uuid`` 防止两个源码符号静默绑定同一模板身份。
         template_uuid_by_symbol: dict[str, str] = {}
         symbol_by_template_uuid: dict[str, str] = {}
-        for definition in sorted(
-            resource_definitions,
-            key=lambda item: str(item.get("id", "")),
+        # ``resource_name_by_symbol`` 是已执行显式优先和实现复用消歧的源码映射。
+        resource_name_by_symbol = compile_resource_template_source_aliases(
+            resource_definitions
+        )
+        for source_symbol, resource_name in sorted(
+            resource_name_by_symbol.items(),
+            key=lambda item: item[0],
         ):
-            resource_name = definition.get("id")
-            class_definition = definition.get("class")
-            source_symbol = definition.get("source_fqid")
-            if not source_symbol and isinstance(class_definition, Mapping):
-                source_symbol = class_definition.get("module")
-            if not isinstance(resource_name, str) or not resource_name:
-                raise RegistryTemplateProjectionError("资源模板缺少业务唯一名称")
-            if not isinstance(source_symbol, str) or not source_symbol:
-                raise RegistryTemplateProjectionError("资源模板缺少源码身份")
-            try:
-                source_symbol = canonical_python_source_identity(source_symbol)
-            except PythonSourceIdentityError as error:
-                raise RegistryTemplateProjectionError(
-                    "资源模板源码身份不能安全生成 Python import"
-                ) from error
             try:
                 template_uuid = validate_uuid(
                     self._resource_template_identity_resolver(resource_name)

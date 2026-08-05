@@ -331,12 +331,14 @@ def test_local_composition_preserves_business_identities_for_shared_implementati
             "shared_resource_a",
             "shared_resource_b",
         }
-        assert template_identities["shared_device_a"] != template_identities[
-            "shared_device_b"
-        ]
-        assert template_identities["shared_resource_a"] != template_identities[
-            "shared_resource_b"
-        ]
+        assert (
+            template_identities["shared_device_a"]
+            != template_identities["shared_device_b"]
+        )
+        assert (
+            template_identities["shared_resource_a"]
+            != template_identities["shared_resource_b"]
+        )
         assert (
             projection.snapshot().require_resource_template_uuid(
                 "local_templates:plate_96"

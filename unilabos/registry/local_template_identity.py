@@ -14,7 +14,10 @@ from unilabos.registry.action_template_projection import (
     ActionTemplateProjectionError,
     compile_action_template_handles,
 )
-from unilabos.registry.template_projection import RegistryTemplateProjectionError
+from unilabos.registry.template_projection import (
+    RegistryTemplateProjectionError,
+    compile_resource_template_source_aliases,
+)
 from unilabos.registry.template_snapshot import RegistryTemplateSnapshot
 from unilabos.workflow.models import validate_uuid
 from unilabos.workflow.source_identity import (
@@ -36,8 +39,9 @@ def synchronize_local_template_identities(
 
     参数说明：``inventory_store`` 是本地库存资源模板写权威；
     ``registry_snapshot`` 是组合根冻结的不可变注册表快照（Registry Snapshot）。
-    返回：解析本代注册表（Registry）业务 ID、``source_fqid`` 或
-    ``class.module`` 别名的只读函数，未知身份返回空串供投影层关闭式失败。
+    返回：解析本代注册表（Registry）业务 ID、显式资源 ``source_fqid`` 或唯一
+    资源 ``class.module`` 兼容别名的只读函数；未知或实现复用导致歧义的身份返回
+    空串供投影层关闭式失败。
     异常：业务 ID、源码别名、同步回执或 UUID 不完整、不唯一、不可解析时抛出
     ``RegistryTemplateProjectionError``；所有快照预校验均发生在库存写事务之前。
     """
@@ -91,16 +95,20 @@ def synchronize_local_template_identities(
 def _prevalidate_template_aliases(
     template_definitions: list[dict[str, Any]],
 ) -> dict[str, str]:
-    """在库存写入前验证本代模板业务 ID 与全部源码别名。
+    """在库存写入前验证本代模板业务 ID 与可解析资源源码别名。
 
     参数说明：``template_definitions`` 是同一冻结代际的完整模板定义。返回：每个
-    业务 ID、``source_fqid`` 和 ``class.module`` 规范别名到唯一业务 ID 的映射。
-    异常：空业务 ID、跨设备/物料重复业务 ID、缺少源码身份、非法 Python 源码
-    身份或跨模板别名冲突时抛出 ``RegistryTemplateProjectionError``。
+    业务 ID、显式资源 ``source_fqid`` 和无歧义资源 ``class.module`` 兼容别名到
+    唯一业务 ID 的映射。异常：空业务 ID、跨设备/资源重复业务 ID、缺少源码
+    身份、非法 Python 源码身份或显式资源别名冲突时抛出
+    ``RegistryTemplateProjectionError``。设备和遗留资源可以共享实现类；共享
+    实现类不是稳定业务身份，也不会被猜成任一资源源码别名。
     """
 
-    # ``template_name_by_alias`` 先登记业务 ID，再登记源码别名以检测跨种类冲突。
+    # ``template_name_by_alias`` 先登记所有业务 ID，它们是本地模板 UUID 的唯一索引。
     template_name_by_alias: dict[str, str] = {}
+    # ``resource_definitions`` 只包含可能进入动作物料资源约束的资源模板定义。
+    resource_definitions: list[dict[str, Any]] = []
     for definition in template_definitions:
         # ``template_name`` 是当前定义声明的注册表（Registry）业务 ID。
         template_name = definition.get("id")
@@ -111,21 +119,24 @@ def _prevalidate_template_aliases(
                 f"注册表（Registry）模板业务 ID 重复: {template_name}"
             )
         template_name_by_alias[template_name] = template_name
+        # ``source_aliases`` 仅做完整 Python 身份格式预校验；设备实现类不注册为
+        # 资源源码别名，因此多个设备业务模板复用驱动类不会形成伪冲突。
+        _canonical_source_aliases(definition, template_name)
+        if definition.get("registry_type") == "resource":
+            resource_definitions.append(definition)
 
-    for definition in template_definitions:
-        # ``template_name`` 是已经通过全集唯一性验证的注册表（Registry）业务 ID。
-        template_name = str(definition["id"])
-        # ``source_aliases`` 是当前业务 ID 声明且可安全解析的全部源码别名。
-        source_aliases = _canonical_source_aliases(definition, template_name)
-        for source_alias in source_aliases:
-            # ``previous_name`` 是同一别名已登记的业务 ID，用于拒绝跨模板歧义。
-            previous_name = template_name_by_alias.get(source_alias)
-            if previous_name is not None and previous_name != template_name:
-                raise RegistryTemplateProjectionError(
-                    "资源模板源码身份不得绑定多个注册表（Registry）业务 ID: "
-                    f"{source_alias}"
-                )
-            template_name_by_alias[source_alias] = template_name
+    # ``resource_name_by_alias`` 与后续模板投影共用显式优先、实现复用消歧规则。
+    resource_name_by_alias = compile_resource_template_source_aliases(
+        resource_definitions
+    )
+    for source_alias, template_name in resource_name_by_alias.items():
+        # ``previous_name`` 保护极端情况下源码符号与另一个业务 ID 的字符串冲突。
+        previous_name = template_name_by_alias.get(source_alias)
+        if previous_name is not None and previous_name != template_name:
+            raise RegistryTemplateProjectionError(
+                f"资源模板源码身份不得绑定多个注册表（Registry）业务 ID: {source_alias}"
+            )
+        template_name_by_alias[source_alias] = template_name
     return template_name_by_alias
 
 
@@ -204,12 +215,13 @@ def _canonical_source_aliases(
     definition: Mapping[str, Any],
     template_name: str,
 ) -> set[str]:
-    """校验一个模板的 ``source_fqid`` 与 ``class.module`` 源码别名。
+    """预校验一个模板声明的 ``source_fqid`` 与 ``class.module``。
 
     参数说明：``definition`` 是单个冻结模板定义；``template_name`` 是已验证的
-    注册表（Registry）业务 ID。返回：去重后的规范 Python 源码身份集合。
-    异常：两个字段均缺失或任一已声明字段不可安全解析时抛出
-    ``RegistryTemplateProjectionError``，不得进入库存写事务。
+    注册表（Registry）业务 ID。返回：仅供格式验证的规范 Python 身份集合，不
+    表示这些身份都可作为唯一资源源码别名。异常：两个字段均缺失或任一已声明
+    字段不可安全解析时抛出 ``RegistryTemplateProjectionError``，不得进入库存
+    写事务。
     """
 
     # ``class_definition`` 是资源模板实现合同，可能提供类模块源码别名。
