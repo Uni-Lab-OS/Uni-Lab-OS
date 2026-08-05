@@ -348,12 +348,19 @@ def _catalog_projection(
             for handle_uuid, handle in applied_handles.items()
             if handle.get("workflow_node_template_uuid") == template_uuid
         }
-        if not _catalog_entity_equal(
+        template_difference_fields = _catalog_entity_difference_fields(
             applied_template,
             current_template,
             nullable_fields=_NODE_TEMPLATE_NULLABLE_READ_FIELDS,
-        ) or set(applied_generation_handles) != set(current_handles):
-            _fail("template_catalog_mismatch", "已应用节点模板目录语义已漂移")
+        )
+        if set(applied_generation_handles) != set(current_handles):
+            template_difference_fields.append("handle_templates")
+        if template_difference_fields:
+            _fail(
+                "template_catalog_mismatch",
+                "已应用节点模板目录语义已漂移: "
+                f"{template_uuid}; 字段={','.join(template_difference_fields)}",
+            )
         if any(
             not _catalog_entity_equal(
                 applied_generation_handles[handle_uuid],
@@ -406,9 +413,43 @@ def _catalog_entity_equal(
     只把白名单字段的缺失与 ``null`` 视作相同；数字类型等其他差异均保留。
     """
 
-    return strict_json_equal(
-        _catalog_semantic_entity(applied, nullable_fields=nullable_fields),
-        _catalog_semantic_entity(current, nullable_fields=nullable_fields),
+    return not _catalog_entity_difference_fields(
+        applied,
+        current,
+        nullable_fields=nullable_fields,
+    )
+
+
+def _catalog_entity_difference_fields(
+    applied: Mapping[str, Any],
+    current: Mapping[str, Any],
+    *,
+    nullable_fields: set[str],
+) -> list[str]:
+    """列出已应用实体与当前目录之间的严格 wire 漂移字段。
+
+    参数说明：两项实体分别来自数据库读投影和当前目录；``nullable_fields`` 是
+    Backend ``omitempty`` 白名单。返回稳定排序的不同字段名；比较保留 JSON
+    数字类型差异，且不把具体合同值写入用户诊断。
+    """
+
+    applied_semantic = _catalog_semantic_entity(
+        applied,
+        nullable_fields=nullable_fields,
+    )
+    current_semantic = _catalog_semantic_entity(
+        current,
+        nullable_fields=nullable_fields,
+    )
+    return sorted(
+        field_name
+        for field_name in set(applied_semantic) | set(current_semantic)
+        if field_name not in applied_semantic
+        or field_name not in current_semantic
+        or not strict_json_equal(
+            applied_semantic[field_name],
+            current_semantic[field_name],
+        )
     )
 
 
