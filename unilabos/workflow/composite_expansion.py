@@ -810,12 +810,33 @@ def _structural_mappings(
     *,
     catalog: AuthoringCatalogSnapshot,
 ) -> dict[str, list[dict[str, str]]]:
-    """从平面有向无环图根/终点投影 ready 结构映射。"""
+    """从平面有向无环图根/终点投影 ready 结构映射。
 
-    node_ids = {str(node["uuid"]) for node in nodes}
+    参数：``nodes`` 与 ``edges`` 是已展开子图，``catalog`` 是冻结创作目录。
+    返回：仅覆盖可执行节点的入口目标与完成来源映射。异常：节点模板缺失或可执行
+    根/终点没有唯一 ready 连接点（Handle）时抛出 ``_CompositeFailure``。
+    """
+
+    by_uuid = {str(node["uuid"]): node for node in nodes}
+    node_ids: set[str] = set()
+    for node_uuid, node in by_uuid.items():
+        try:
+            action = catalog.require_template(
+                str(node["workflow_node_template_uuid"])
+            )
+        except (AuthoringCatalogError, KeyError):
+            raise _CompositeFailure(
+                "composite_catalog_mismatch",
+                "/catalog/structural",
+            ) from None
+        if (
+            node.get("type") == "group"
+            or action.template.get("node_type") == "group"
+        ):
+            continue
+        node_ids.add(node_uuid)
     incoming = {str(edge["target_node_uuid"]) for edge in edges}
     outgoing = {str(edge["source_node_uuid"]) for edge in edges}
-    by_uuid = {str(node["uuid"]): node for node in nodes}
     entries = [
         {
             "workflow_node_uuid": node_uuid,
