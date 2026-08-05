@@ -307,6 +307,7 @@ def executor_kind(node_type: str) -> str:
         "manual_confirm",
         "material_source",
         "Transfer",
+        "workflow",
     }
     if kind not in allowed:
         raise StoreConflict(f"unsupported workflow node type {node_type!r}")

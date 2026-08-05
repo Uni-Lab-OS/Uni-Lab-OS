@@ -63,12 +63,14 @@ class ExecutionPlanBuilder:
             and kinds[node_uuid] == "material_source"
         }
         # ``active`` 只包含既有本地调度器能够执行的普通节点；物料来源由任务桥
-        # 在普通动作之前统一完成任务物料准入（TaskMaterialAdmission）。
+        # 在普通动作之前统一完成任务物料准入（TaskMaterialAdmission）。组合
+        # 工作流调用（Composite Workflow Invocation）仅保留父图层级与边界映射，
+        # 其展开内部节点直接归属父工作流任务（WorkflowTask），自身不创建作业。
         active = {
             node_uuid: node
             for node_uuid, node in nodes.items()
             if node.get("disabled") is not True
-            and kinds[node_uuid] not in {"group", "material_source"}
+            and kinds[node_uuid] not in {"group", "material_source", "workflow"}
         }
         # ``planned_graph_nodes`` 同时保留协调责任与普通执行责任，使来源运行连接点
         # 和来源到首消费动作的直连边成为冻结执行计划（ExecutionPlan）事实。
