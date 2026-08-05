@@ -141,7 +141,8 @@ def _semantic_entities(values: list[dict[str, Any]]) -> dict[str, str]:
 def _semantic_graph(graph: Mapping[str, Any]) -> str:
     """生成忽略投影时间与数组顺序的候选图规范 JSON。
 
-    参数说明：``graph`` 是后端五集合形状；返回稳定 JSON 字符串。
+    参数说明：``graph`` 是后端五集合形状；返回稳定 JSON 字符串。异常：图容器
+    缺失或形状非法时传播 ``graph_containers`` 的 ``ValueError``。
     """
 
     value = graph_containers(graph)

@@ -280,7 +280,7 @@ def build_candidate_graph(
 
     # 候选图（Candidate Graph）必须在写入前采用与 ``WorkflowNodeWrite`` 相同
     # 的可选文本规范形；否则模板默认空字符串会被数据库恢复为 ``None``，破坏
-    # 已发布工作流调用（PublishedWorkflowInvocation）的语义固定点。
+    # 组合工作流调用（CompositeWorkflowInvocation）的语义固定点。
     for node in nodes:
         description = node.get("description")
         if isinstance(description, str):

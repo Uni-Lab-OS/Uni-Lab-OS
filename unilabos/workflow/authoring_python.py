@@ -1123,7 +1123,7 @@ def _node_metadata_comment(
     参数说明：``node`` 提供当前展示字段，``action`` 提供动作模板（Action
     Template）的默认显示名和描述；当节点展示字段等于模板默认值时返回
     ``None``，否则返回 ``# [标题]: 描述``。无法无损表示的换行、右方括号或
-    空描述会拒绝生成，避免源码往返静默改变候选图。
+    空描述会抛 ``AuthoringGraphError`` 拒绝生成，避免源码往返静默改变候选图。
     """
 
     title = node.get("name")
