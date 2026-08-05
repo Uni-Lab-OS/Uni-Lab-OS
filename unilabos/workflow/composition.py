@@ -55,6 +55,35 @@ class _RuntimeCleanupOwner:
 _failed_runtime: Optional[_RuntimeCleanupOwner] = None
 
 
+def _cleanup_partial_composition(
+    *,
+    original_error: BaseException,
+    workflow_store: WorkflowStore,
+    task_scheduler_bridge: Any,
+    device_action_run_bridge: Any,
+) -> None:
+    """按反向所有权清理尚未发布的工作流运行时组合。
+
+    参数：``original_error`` 是必须保留的启动异常；``workflow_store`` 是待关闭的
+    工作流存储（WorkflowStore）；两个桥参数是可能已注册调度监听器的部分资源。
+    返回无；每个清理异常只附加为原异常说明，不掩盖首个构造或恢复故障。
+    """
+
+    # ``owned_resources`` 按创建顺序列出，关闭时反向遍历，先注销桥再关闭存储。
+    owned_resources = (
+        ("工作流存储", workflow_store),
+        ("工作流任务调度桥", task_scheduler_bridge),
+        ("设备单动作运行桥", device_action_run_bridge),
+    )
+    for resource_name, resource in reversed(owned_resources):
+        if resource is None:
+            continue
+        try:
+            resource.close()
+        except BaseException as cleanup_error:  # noqa: BLE001 - 清理不能掩盖原始异常
+            original_error.add_note(f"{resource_name}清理失败: {cleanup_error}")
+
+
 def _configured_package_roots(
     roots: Iterable[str | Path],
 ) -> tuple[Path, ...]:
@@ -146,11 +175,13 @@ def compose_workflow_runtime(
             new_service.replace_discovered_source_authorizations(discovery_plan)
             new_service.recover_registered_sources()
             new_monitor = WorkflowSourceMonitor(new_service)
-        except BaseException:
-            if new_service is not None:
-                new_service.close()
-            else:
-                workflow_store.close()
+        except BaseException as startup_error:
+            _cleanup_partial_composition(
+                original_error=startup_error,
+                workflow_store=workflow_store,
+                task_scheduler_bridge=task_scheduler_bridge,
+                device_action_run_bridge=device_action_run_bridge,
+            )
             raise
 
         # 启动恢复已经完成，此处才一次发布进程内工作流权威及其完整组合身份。

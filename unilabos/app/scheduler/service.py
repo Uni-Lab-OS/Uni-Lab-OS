@@ -250,17 +250,15 @@ class EdgeScheduler:
         ret_value: Any,
         suc_type: str,
     ) -> None:
-        """隔离通知一次完成事实。
+        """在清理本地在途状态前通知一次完成事实。
 
         参数分别是作业身份、成功标记、设备返回值和旧异常决策类型。返回无；投影
-        失败只记录日志，禁止再次执行物理动作。
+        失败向上抛出，使同一完成事实可以投递重放（DeliveryReplay）；调用方不得
+        在全部监听器确认前释放在途作业或动作物料锁（Action Material Lock）。
         """
 
         for listener in tuple(self._job_finished_listeners):
-            try:
-                listener(job_id, success, ret_value, suc_type)
-            except Exception:  # noqa: BLE001 - 完成投影应由后续核对修复
-                logger.exception("[EdgeScheduler] job finished listener failed")
+            listener(job_id, success, ret_value, suc_type)
 
     # ── 触发点 1：任务进来 ────────────────────────────────────
 
@@ -402,18 +400,23 @@ class EdgeScheduler:
         ret_value: Any = None,
         suc_type: str = "normal",
     ) -> Dict[str, Any]:
-        """job 完成回调（成功或失败）：写回结果 → 清依赖 → 强制重排。
+        """作业（Job）完成回调：写回结果、清理依赖并强制重排。
 
         ``suc_type`` 来自设备侧异常决策（registry.action_policy）：
         normal / skip / operator_intervention。skip 表示动作报错后人工选择
         跳过——节点按成功推进，但其已消费物料隔离待复核。
         """
         with self._lock:
-            job = self._inflight.pop(job_id, None)
-            self._job_resource_locks.pop(job_id, None)
+            job = self._inflight.get(job_id)
             if job is None:
                 logger.warning("[EdgeScheduler] unknown job finished: %s", job_id)
                 return {"dispatched": []}
+
+            # 标准完成事实必须先持久化；任一监听器失败时保留在途作业与资源锁，
+            # 允许设备对同一结果进行投递重放（DeliveryReplay）。
+            self._notify_job_finished(job_id, success, ret_value, suc_type)
+            self._inflight.pop(job_id, None)
+            self._job_resource_locks.pop(job_id, None)
 
             # 泳道图时间线：记录实际起止 + 喂给历史统计（EMA）+ 历史库落盘
             self._record_timeline(
@@ -470,7 +473,6 @@ class EdgeScheduler:
                 "dispatched": dispatched,
             }
             notifications = self._collect_terminal_notifications()
-            self._notify_job_finished(job_id, success, ret_value, suc_type)
         self._fire_notifications(notifications)
         return result
 
@@ -671,7 +673,7 @@ class EdgeScheduler:
                             "action.name": task.node.action_name,
                         },
                     ):
-                        # 标准 Task/Job 必须先提交派发意图，才能越过物理执行边界。
+                        # 标准任务/作业必须先提交派发意图，才能越过物理执行边界。
                         self._notify_job_pre_dispatch(
                             {
                                 "job_id": job_id,
@@ -682,6 +684,22 @@ class EdgeScheduler:
                                 "estimate_source": estimate_source,
                             }
                         )
+                        # 派发意图持久化后，先保守登记本地在途作业和动作物料锁，再
+                        # 调用不可原子确认的执行适配器。适配器异常不得回滚这些事实。
+                        run.mark_dispatched(task.node.id)
+                        self._inflight[job_id] = DispatchedJob(
+                            job_id=job_id,
+                            workflow_id=task.workflow_id,
+                            node_id=task.node.id,
+                            device_action_key=key,
+                            device_id=task.node.device_id,
+                            action_name=task.node.action_name,
+                            estimated_s=estimated_s,
+                            estimate_source=estimate_source,
+                        )
+                        if lock_keys:
+                            self._job_resource_locks[job_id] = lock_keys
+                            held_resource_locks |= lock_keys
                         if not manual_confirm:
                             self._dispatcher.dispatch(payload)
             except BaseException as exc:
@@ -689,19 +707,8 @@ class EdgeScheduler:
                 action_trace.end()
                 self._job_spans.pop(job_id, None)
                 raise
-            # manual_confirm 不进执行器：job 停驻在 inflight，
-            # 由 POST /jobs/{job_id}/finish（人工确认）走统一完成路径
-            run.mark_dispatched(task.node.id)
-            self._inflight[job_id] = DispatchedJob(
-                job_id=job_id,
-                workflow_id=task.workflow_id,
-                node_id=task.node.id,
-                device_action_key=key,
-                device_id=task.node.device_id,
-                action_name=task.node.action_name,
-                estimated_s=estimated_s,
-                estimate_source=estimate_source,
-            )
+            # 人工确认节点不进入执行器，但仍已在上方登记为在途作业，由统一完成
+            # 接口提交明确结果。
             action_trace.event(
                 "action.dispatched",
                 {
@@ -712,9 +719,6 @@ class EdgeScheduler:
             )
             if not manual_confirm:
                 busy.add(key)
-            if lock_keys:
-                self._job_resource_locks[job_id] = lock_keys
-                held_resource_locks |= lock_keys
             # ``dispatched_item`` 同时供返回值、监控和标准 Task/Job 状态投影使用。
             dispatched_item = {
                 "job_id": job_id,

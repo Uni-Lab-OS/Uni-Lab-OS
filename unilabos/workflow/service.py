@@ -63,6 +63,7 @@ from unilabos.workflow.store import (
     WorkflowStore,
     utc_now,
 )
+from unilabos.workflow.task_scheduler_bridge import TaskSchedulerBridgeError
 
 _ERRORS = {
     "invalid_input": (400, "提交内容格式不正确"),
@@ -246,7 +247,7 @@ class DeviceActionRunBridge(Protocol):
 class WorkflowTaskSchedulerBridge(Protocol):
     """普通工作流任务（WorkflowTask）的本地调度端口。"""
 
-    def submit(self, task: Dict[str, Any]) -> Dict[str, Any]:
+    def submit(self, task: dict[str, Any]) -> dict[str, Any]:
         """提交已持久任务；参数是标准任务投影，返回刷新任务/作业聚合。"""
 
         ...
@@ -285,14 +286,14 @@ class WorkflowService:
             Callable[[str], Optional[Dict[str, Any]]]
         ] = None,
         device_action_run_bridge: Optional[DeviceActionRunBridge] = None,
-        task_scheduler_bridge: Optional[WorkflowTaskSchedulerBridge] = None,
+        task_scheduler_bridge: WorkflowTaskSchedulerBridge | None = None,
     ):
         """装配本地工作流应用服务。
 
         参数：``store`` 是唯一工作流写模型；``compiler`` 负责编译可信工作流源码；
         ``material_resolver`` 按物料 UUID 读取活动物料身份，供设备单动作运行
         （DeviceActionRun）关闭式校验；``device_action_run_bridge`` 把首次创建的
-        标准 Task/Job 提交到本地执行内核；``task_scheduler_bridge`` 把普通工作流
+        标准任务/作业提交到本地执行内核；``task_scheduler_bridge`` 把普通工作流
         任务（WorkflowTask）交给既有本地调度器。返回无。
         """
 
@@ -529,6 +530,8 @@ class WorkflowService:
             # 过期 ``pending`` 快照。
             aggregate = self._task_scheduler_bridge.submit(task)
             return aggregate["task"]
+        except TaskSchedulerBridgeError:
+            raise WorkflowError("internal_error") from None
         except StoreConflict:
             raise WorkflowError("invalid_input") from None
 

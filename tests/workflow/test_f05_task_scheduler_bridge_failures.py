@@ -13,7 +13,6 @@ import pytest
 from tests.workflow.test_f05_task_scheduler_bridge import (
     JOB_UUID,
     MATERIAL_UUID,
-    NODE_UUID,
     TASK_UUID,
     _seed_task,
 )
@@ -159,7 +158,7 @@ def _locked_task(store: WorkflowStore) -> dict[str, Any]:
     # 构造一个真实物料锁合同。
     execution_plan = dict(task["execution_plan"])
     planned_node = dict(execution_plan["nodes"][0])
-    planned_node["param"] = {"goal": {"plate": {"uuid": MATERIAL_UUID}}}
+    planned_node["param"] = {"plate": {"uuid": MATERIAL_UUID}}
     planned_node["param_schema"] = {
         "type": "object",
         "properties": {
@@ -180,7 +179,7 @@ def _locked_task(store: WorkflowStore) -> dict[str, Any]:
     }
     execution_plan["nodes"] = [planned_node]
     # ``final_param`` 是派发时解析动作物料锁所使用的实际物料引用。
-    final_param = {"goal": {"plate": {"uuid": MATERIAL_UUID}}}
+    final_param = {"plate": {"uuid": MATERIAL_UUID}}
     with store.transaction() as connection:
         connection.execute(
             "UPDATE workflow_task SET execution_plan = ? WHERE uuid = ?",
@@ -256,7 +255,9 @@ class _FailOnceProjection:
         self._delegate = TaskRuntimeProjection(store)
         self._remaining_failures = 1
 
-    def project_submission(self, task_uuid: str, scheduler_state: str) -> dict[str, Any]:
+    def project_submission(
+        self, task_uuid: str, scheduler_state: str
+    ) -> dict[str, Any]:
         """委托首次提交投影；参数是任务身份和内部状态，返回标准聚合。"""
 
         return self._delegate.project_submission(task_uuid, scheduler_state)

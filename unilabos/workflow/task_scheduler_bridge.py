@@ -56,7 +56,7 @@ class TaskSchedulerBridge:
 
         参数：``task`` 是创建事务返回的标准任务投影。返回：调度同步推进后的标准
         任务/作业聚合。异常：桥关闭、任务身份非法、冻结计划编译失败、缺少库存权威
-        或派发前投影冲突时失败关闭；失败不会创建新的 Task/Job 身份。
+        或派发前投影冲突时失败关闭；失败不会创建新的任务/作业身份。
         """
 
         if self._closed:
@@ -65,33 +65,45 @@ class TaskSchedulerBridge:
         task_uuid = self._required_text(task.get("uuid"), field="task.uuid")
         if task_uuid in self._submitted_tasks:
             return self._aggregate(task_uuid)
-        persisted_task = self._store.get_task(task_uuid)
-        # ``jobs`` 是创建事务已经确定的工作流节点作业（WorkflowNodeJob）集合。
-        jobs = self._store.list_jobs(task_uuid)
-        spec = self._compiler.compile(persisted_task, jobs)
-        if (
-            spec.material_requirements_by_node()
-            and self._scheduler.inventory_service is None
-        ):
-            raise TaskSchedulerBridgeError(
-                "工作流声明了物料需求，但本地调度器没有装配库存权威"
-            )
-
-        for job in jobs:
-            # ``job_uuid`` 是监听器回调与标准持久作业之间的稳定路由身份。
-            job_uuid = self._required_text(job.get("uuid"), field="jobs[].uuid")
-            self._task_by_job[job_uuid] = task_uuid
-        self._submitted_tasks.add(task_uuid)
+        jobs: list[dict[str, Any]] = []
+        registered = False
         try:
+            persisted_task = self._store.get_task(task_uuid)
+            # ``jobs`` 是创建事务已经确定的工作流节点作业（WorkflowNodeJob）集合。
+            jobs = self._store.list_jobs(task_uuid)
+            spec = self._compiler.compile(persisted_task, jobs)
+            if (
+                spec.material_requirements_by_node()
+                and self._scheduler.inventory_service is None
+            ):
+                raise TaskSchedulerBridgeError(
+                    "工作流声明了物料需求，但本地调度器没有装配库存权威"
+                )
+
+            for job in jobs:
+                # ``job_uuid`` 是监听器回调与标准持久作业之间的稳定路由身份。
+                job_uuid = self._required_text(job.get("uuid"), field="jobs[].uuid")
+                self._task_by_job[job_uuid] = task_uuid
+            self._submitted_tasks.add(task_uuid)
+            registered = True
             submission = self._scheduler.submit_workflow(spec)
             # ``scheduler_state`` 是内部等料或运行状态；投影层负责限制 wire 状态。
             scheduler_state = self._required_text(
                 submission.get("state"), field="scheduler.state"
             )
             return self._projection.project_submission(task_uuid, scheduler_state)
-        except BaseException:
-            self._cancel_failed_submission(task_uuid, jobs)
-            raise
+        except Exception as error:
+            if self._crossed_dispatch_boundary(jobs):
+                raise TaskSchedulerBridgeError(
+                    "工作流任务派发结果不确定，已保留在途执行等待明确结果"
+                ) from error
+            if registered:
+                self._cancel_failed_submission(task_uuid, jobs)
+            if isinstance(error, TaskSchedulerBridgeError):
+                raise
+            raise TaskSchedulerBridgeError(
+                "工作流任务无法安全提交到本地调度器"
+            ) from error
 
     def retry_admission(self, task_uuid: str) -> dict[str, Any]:
         """对同一待处理任务触发准入重试（AdmissionRetry）。
@@ -218,6 +230,24 @@ class TaskSchedulerBridge:
         self._submitted_tasks.discard(task_uuid)
         for job in jobs:
             self._task_by_job.pop(str(job.get("uuid") or ""), None)
+
+    def _crossed_dispatch_boundary(self, jobs: list[dict[str, Any]]) -> bool:
+        """判断标准作业是否已经越过持久派发边界。
+
+        参数：``jobs`` 是本次提交的既有工作流节点作业（WorkflowNodeJob）集合。
+        返回：任一作业已为 ``dispatched`` 或 ``running`` 时为真。异常：存储读取
+        故障视为不能证明未派发，保守返回真并禁止取消或清除回调路由。
+        """
+
+        try:
+            # ``persisted_statuses`` 是物理派发前投影提交后的标准状态集合。
+            persisted_statuses = {
+                self._store.get_job(str(job.get("uuid") or ""))["status"]
+                for job in jobs
+            }
+        except Exception:  # noqa: BLE001 - 无法证明未派发时必须保守保留在途事实
+            return True
+        return bool(persisted_statuses & {"dispatched", "running"})
 
     @staticmethod
     def _required_text(value: Any, *, field: str) -> str:
