@@ -252,7 +252,10 @@ def _candidate_node(
     """构造一个后端写形状节点。
 
     参数说明：动作声明提供源码身份，设备声明提供执行器绑定，目录动作提供模板
-    和连接点合同；返回不含数据库时间字段的节点字典。
+    和连接点合同。返回：不含数据库时间字段的节点字典；固定执行器（Fixed
+    Executor）的实际设备物料 UUID 同时进入顶层 ``material_uuid`` 和保留绑定
+    元数据，动态绑定保持空值。异常：动作参数缺少唯一目标连接点（Handle）时
+    抛出 ``AuthoringGraphError``。
     """
 
     params: dict[str, Any] = {}
@@ -278,6 +281,9 @@ def _candidate_node(
             "mode": "fixed",
             "device_id": device.device_id,
         }
+    # ``device_material_uuid`` 只来自已由静态解析器规范化的固定设备选择；动态
+    # ``device()`` 保持 ``None``，不能用模板 UUID 或设备名称猜测实际物料身份。
+    device_material_uuid = device.device_id
     template = catalog_action.template
     # 模板标题是未显式覆盖时的节点展示默认值；动作业务名仅作旧目录回退。
     template_title = (
@@ -287,7 +293,7 @@ def _candidate_node(
         "uuid": declaration.node_uuid,
         "workflow_node_template_uuid": str(template["uuid"]),
         "parent_uuid": None,
-        "material_uuid": None,
+        "material_uuid": device_material_uuid,
         "name": declaration.title or template_title,
         "type": str(template.get("node_type") or template.get("type") or "compute"),
         "icon": template.get("icon"),
