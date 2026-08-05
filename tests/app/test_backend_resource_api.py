@@ -102,9 +102,10 @@ def test_created_material_is_immediately_reservable_by_stable_uuid(tmp_path):
 
     参数：``tmp_path`` 提供隔离的 ``inventory.db``。返回：无；断言
     ``POST /api/v1/materials`` 返回的稳定物料 UUID 可由真实库存服务
-    （InventoryService）直接建立任务物料预留（TaskMaterialReservation），且
-    预留结果仍引用原工作流任务和节点身份。异常：模板同步、HTTP 创建或预留
-    任一步失败都应直接使测试失败，禁止退化为第二份物料身份映射。
+    （InventoryService）直接建立短期遗留库存预留（inventory_reservation），且
+    预留结果仍引用原工作流任务和节点身份；该兼容事实不是正式任务物料预留
+    （TaskMaterialReservation）。异常：模板同步、HTTP 创建或预留任一步失败都
+    应直接使测试失败，禁止退化为第二份物料身份映射。
     """
 
     client, store = _client(tmp_path)
