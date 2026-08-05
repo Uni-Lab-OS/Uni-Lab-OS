@@ -557,7 +557,17 @@ def _authoring_ordered_nodes(
         if has_group:
             raise AuthoringGraphError("candidate_invalid", "展示分组候选图缺少作者源码顺序")
         return topological
-    ordered = sorted(nodes.values(), key=lambda node: source_positions[str(node["uuid"])])
+
+    def source_position_sort_key(node: Mapping[str, Any]) -> int:
+        """读取候选节点的作者源码位置。
+
+        参数：``node`` 是已验证候选节点。返回：非负且唯一的源码位置。异常：身份
+        缺失时由映射访问抛出，调用方不会以猜测顺序继续。
+        """
+
+        return source_positions[str(node["uuid"])]
+
+    ordered = sorted(nodes.values(), key=source_position_sort_key)
     # ``ordered_index`` 用于证明所有真实执行边仍保持正向拓扑关系。
     ordered_index = {str(node["uuid"]): index for index, node in enumerate(ordered)}
     for edge in edges:

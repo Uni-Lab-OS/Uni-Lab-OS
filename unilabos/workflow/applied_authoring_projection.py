@@ -150,7 +150,7 @@ def reconcile_applied_authoring_projection(
     )
     return AppliedAuthoringProjection(
         nodes=nodes,
-        edges=sorted(edges, key=lambda item: str(item["uuid"])),
+        edges=sorted(edges, key=_entity_uuid_sort_key),
         node_templates=node_templates,
         handle_templates=handle_templates,
     )
@@ -372,8 +372,18 @@ def _catalog_projection(
             _fail("template_catalog_mismatch", "已应用连接点模板目录语义已漂移")
         projected_templates.append(deepcopy(dict(applied_template)))
         projected_handles.extend(applied_generation_handles.values())
-    projected_handles.sort(key=lambda item: str(item["uuid"]))
+    projected_handles.sort(key=_entity_uuid_sort_key)
     return projected_templates, projected_handles
+
+
+def _entity_uuid_sort_key(item: Mapping[str, Any]) -> str:
+    """读取已应用创作实体的稳定 UUID 排序键。
+
+    参数：``item`` 是已经通过当前投影校验的实体映射。返回：字符串 UUID。
+    异常：无；缺失值只会规范为字符串并由上游身份校验拒绝。
+    """
+
+    return str(item["uuid"])
 
 
 def _index_current_handles(

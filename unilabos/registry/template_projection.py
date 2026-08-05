@@ -284,9 +284,18 @@ class RegistryTemplateProjection:
         resource_name_by_symbol = compile_resource_template_source_aliases(
             resource_definitions
         )
+        def source_alias_sort_key(item: tuple[str, str]) -> str:
+            """读取资源模板源码别名的稳定排序键。
+
+            参数：``item`` 是源码符号与资源业务名二元组。返回：源码符号。
+            异常：无；输入由已验证别名映射产生。
+            """
+
+            return item[0]
+
         for source_symbol, resource_name in sorted(
             resource_name_by_symbol.items(),
-            key=lambda item: item[0],
+            key=source_alias_sort_key,
         ):
             try:
                 template_uuid = validate_uuid(

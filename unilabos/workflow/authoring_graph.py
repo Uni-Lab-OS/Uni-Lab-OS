@@ -234,6 +234,24 @@ def build_candidate_graph(
     workflow_meta["unilab"] = unilab_meta
     workflow["meta_data"] = workflow_meta
 
+    def generated_node_source_sort_key(item: Mapping[str, Any]) -> int:
+        """读取生成节点的作者源码顺序。
+
+        参数：``item`` 是已生成工作流节点。返回：该节点在源码中的非负顺序。
+        异常：身份缺失时由映射访问抛出并由创作入口失败关闭。
+        """
+
+        return source_order[str(item["uuid"])]
+
+    def generated_edge_uuid_sort_key(item: Mapping[str, Any]) -> str:
+        """读取生成边的稳定 UUID 排序键。
+
+        参数：``item`` 是已生成工作流边。返回：字符串 UUID。异常：无；边身份
+        已在图构造阶段校验。
+        """
+
+        return str(item["uuid"])
+
     try:
         # ``projection`` 在一个深模块（Deep Module）内完成已应用读形状、当前目录
         # 语义与新生成实体的固定点合并，不把混代规则泄漏给图构造调用者。
@@ -242,9 +260,9 @@ def build_candidate_graph(
             applied_graph=applied,
             generated_nodes=sorted(
                 nodes,
-                key=lambda item: source_order[str(item["uuid"])],
+                key=generated_node_source_sort_key,
             ),
-            generated_edges=sorted(edges, key=lambda item: str(item["uuid"])),
+            generated_edges=sorted(edges, key=generated_edge_uuid_sort_key),
             action_catalog=action_catalog,
         )
     except AppliedAuthoringProjectionError as error:

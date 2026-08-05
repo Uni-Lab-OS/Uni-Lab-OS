@@ -89,6 +89,18 @@ def _assert_source_access_rejected(
     当前 allowlist 的工作流身份。返回：无；任何文件访问成功或错误不一致均失败。
     """
 
+    def apply_authoring() -> Any:
+        """尝试应用未授权来源候选。
+
+        参数：无；使用外层服务与工作流身份。返回：仅在安全门失效时返回应用结果。
+        异常：预期抛出 ``WorkflowError``，由统一断言核对稳定错误码。
+        """
+
+        return service.apply_authoring(
+            workflow_uuid,
+            candidate_hash=HASH_TOKEN,
+        )
+
     operations: tuple[Callable[[], Any], ...] = (
         lambda: service.get_authoring(workflow_uuid),
         lambda: service.reconcile_registered_source(workflow_uuid),
@@ -98,10 +110,7 @@ def _assert_source_access_rejected(
             expected_draft_hash=None,
             expected_workflow_revision=1,
         ),
-        lambda: service.apply_authoring(
-            workflow_uuid,
-            candidate_hash=HASH_TOKEN,
-        ),
+        apply_authoring,
     )
     for operation in operations:
         with pytest.raises(WorkflowError) as caught:
