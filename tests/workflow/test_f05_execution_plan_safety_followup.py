@@ -191,6 +191,26 @@ def _compile_real_plan(plan: dict[str, Any], jobs: list[dict[str, Any]]) -> Any:
     return WorkflowSpecCompiler().compile(task_snapshot, jobs)
 
 
+def _action_plan_node(plan: dict[str, Any]) -> dict[str, Any]:
+    """按稳定节点身份取得设备动作计划节点。
+
+    参数：``plan`` 是同时包含协调器与设备责任的执行计划（ExecutionPlan）。
+    返回：唯一设备动作节点。异常：夹具缺失或重复时由 ``next``/断言暴露。
+    """
+
+    return next(node for node in plan["nodes"] if node["uuid"] == ACTION_NODE_UUID)
+
+
+def _action_job(jobs: list[dict[str, Any]]) -> dict[str, Any]:
+    """按稳定节点身份取得设备动作工作流节点作业。
+
+    参数：``jobs`` 是首次工作流节点作业（WorkflowNodeJob）集合。返回：唯一
+    设备动作作业。异常：夹具缺失或重复时由 ``next``/断言暴露。
+    """
+
+    return next(job for job in jobs if job["workflow_node_uuid"] == ACTION_NODE_UUID)
+
+
 class _StaleRegistryResolver:
     """模拟任务创建后已变更的实时注册表（Registry）。"""
 
@@ -244,11 +264,13 @@ def test_empty_job_list_cannot_erase_frozen_resource_slot_materials() -> None:
     plan, jobs = _build_real_plan()
     # ``frozen_tips`` 是创建任务时已确定的物料占位符实例列表。
     frozen_tips = [{"uuid": MATERIAL_UUID}, {"uuid": SECOND_MATERIAL_UUID}]
-    plan["nodes"][0]["param"]["tips"] = frozen_tips
+    action_node = _action_plan_node(plan)
+    action_node["param"]["tips"] = frozen_tips
     # ``job_param`` 模拟从持久层独立读回的作业最终参数，不与计划容器共享。
-    job_param = dict(jobs[0]["param"])
+    action_job = _action_job(jobs)
+    job_param = dict(action_job["param"])
     job_param["tips"] = []
-    jobs[0]["param"] = job_param
+    action_job["param"] = job_param
 
     spec = _compile_real_plan(plan, jobs)
 
@@ -265,7 +287,9 @@ def test_fixed_material_source_populates_first_consumer_final_param() -> None:
 
     plan, jobs = _build_real_plan()
 
-    assert plan["nodes"][0]["param"] == {"plate": {"uuid": MATERIAL_UUID}}
+    assert _action_plan_node(plan)["param"] == {
+        "plate": {"uuid": MATERIAL_UUID}
+    }
     spec = _compile_real_plan(plan, jobs)
     assert spec.nodes[0].param == {"plate": {"uuid": MATERIAL_UUID}}
 
@@ -330,10 +354,11 @@ def test_standard_plan_requires_frozen_param_schema(
     """
 
     plan, jobs = _build_real_plan()
+    action_node = _action_plan_node(plan)
     if schema_present:
-        plan["nodes"][0]["param_schema"] = schema_value
+        action_node["param_schema"] = schema_value
     else:
-        plan["nodes"][0].pop("param_schema")
+        action_node.pop("param_schema")
 
     with pytest.raises(WorkflowSpecCompilationError) as caught:
         _compile_real_plan(plan, jobs)

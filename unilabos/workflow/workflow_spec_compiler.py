@@ -128,23 +128,32 @@ class WorkflowSpecCompiler:
         """编译执行计划中的设备动作节点。
 
         参数：``ordered_node_uuids`` 保留确定性拓扑顺序，``nodes`` 是计划节点
-        索引，``jobs_by_node`` 是持久作业绑定。返回：旧调度节点。异常：非设备
-        动作、缺作业、空设备或空动作合同时抛稳定编译错误并失败关闭。
+        索引，``jobs_by_node`` 是持久作业绑定。返回：旧调度节点；协调器所有的
+        物料来源解析作业（MaterialSourceResolutionJob）完成校验后跳过。异常：
+        未知执行种类、缺作业、空设备或空动作合同时抛稳定编译错误并失败关闭。
         """
 
         compiled: list[WorkflowNode] = []
         for node_uuid in ordered_node_uuids:
             node = nodes[node_uuid]
             kind = str(node.get("kind") or "").strip()
-            if kind != "device_action":
-                raise WorkflowSpecCompilationError(
-                    "unsupported_executor_kind", f"旧调度器不支持执行种类：{kind}"
-                )
             job = jobs_by_node.get(node_uuid)
             if job is None:
                 raise WorkflowSpecCompilationError(
                     "missing_workflow_node_job",
                     f"执行计划节点缺少持久作业身份：{node_uuid}",
+                )
+            if kind == "material_source":
+                # ``executor_kind`` 明确证明该作业属于协调器，不能伪装成动作节点。
+                if str(job.get("executor_kind") or "") != "material_source":
+                    raise WorkflowSpecCompilationError(
+                        "unsupported_executor_kind",
+                        f"物料来源作业执行种类非法：{node_uuid}",
+                    )
+                continue
+            if kind != "device_action":
+                raise WorkflowSpecCompilationError(
+                    "unsupported_executor_kind", f"旧调度器不支持执行种类：{kind}"
                 )
             job_uuid = canonical_uuid(
                 job.get("uuid"), "invalid_job_identity", f"jobs[{node_uuid}].uuid"

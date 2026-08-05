@@ -55,6 +55,15 @@ class ExecutionPlanBuilder:
             )
             for node_uuid, node in nodes.items()
         }
+        # ``material_sources`` 是由协调器承担的物料来源解析作业，不进入设备派发图。
+        material_sources = {
+            node_uuid: node
+            for node_uuid, node in nodes.items()
+            if node.get("disabled") is not True
+            and kinds[node_uuid] == "material_source"
+        }
+        # ``active`` 只包含既有本地调度器能够执行的普通节点；物料来源由任务桥
+        # 在普通动作之前统一完成任务物料准入（TaskMaterialAdmission）。
         active = {
             node_uuid: node
             for node_uuid, node in nodes.items()
@@ -81,14 +90,21 @@ class ExecutionPlanBuilder:
             handles=handles,
         )
         ordered = graph_normalizer.topological_order(active, planned_edges)
+        # ``ordered_sources`` 保留应用图中的确定性顺序，并保证协调责任先于动作。
+        ordered_sources = list(material_sources)
         if run_mode == "single_node":
             if target_node_uuid is None:
-                if not ordered:
+                candidates = [*ordered_sources, *ordered]
+                if not candidates:
                     raise StoreConflict("workflow has no enabled nodes")
-                target_node_uuid = ordered[0]
-            if target_node_uuid not in active:
+                target_node_uuid = candidates[0]
+            if target_node_uuid in material_sources:
+                ordered_sources = [target_node_uuid]
+                ordered = []
+            elif target_node_uuid in active:
+                ordered = [target_node_uuid]
+            else:
                 raise StoreConflict("single_node target is not enabled")
-            ordered = [target_node_uuid]
             planned_edges = []
             runtime_handles = [
                 handle
@@ -101,8 +117,10 @@ class ExecutionPlanBuilder:
         handles_by_node: dict[str, list[dict[str, Any]]] = defaultdict(list)
         for handle in runtime_handles:
             handles_by_node[handle["node_uuid"]].append(handle)
-        for index, node_uuid in enumerate(ordered):
-            node = active[node_uuid]
+        # ``planned_order`` 把协调器责任和物理执行责任放进同一持久作业序列。
+        planned_order = [*ordered_sources, *ordered]
+        for index, node_uuid in enumerate(planned_order):
+            node = nodes[node_uuid]
             kind = kinds[node_uuid]
             template = templates.get(node.get("workflow_node_template_uuid")) or {}
             policy = dict(node.get("execution_policy") or {})
@@ -240,6 +258,9 @@ class ExecutionPlanBuilder:
                 raise ExecutionPlanBuildError(
                     "invalid_material_uuid", "物料来源 UUID 非法"
                 ) from exc
+            # 短期遗留预留（inventory_reservation）归属来源协调责任；普通设备
+            # 动作只消费已经准入的稳定物料引用，不再次取得任务级预留。
+            requirements[source_uuid].append({"instance_uuid": material_uuid})
             consumer_binding = self._first_device_consumer(
                 source_uuid,
                 active=active,
@@ -254,11 +275,6 @@ class ExecutionPlanBuilder:
                     "invalid_execution_graph",
                     "物料占位符目标连接点缺少参数键",
                 )
-            if all(
-                item["instance_uuid"] != material_uuid
-                for item in requirements[consumer]
-            ):
-                requirements[consumer].append({"instance_uuid": material_uuid})
             material_reference = {"uuid": material_uuid}
             existing_reference = material_params[consumer].get(param_key)
             if (
