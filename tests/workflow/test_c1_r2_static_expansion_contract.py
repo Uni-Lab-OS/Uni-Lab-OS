@@ -223,8 +223,13 @@ def _action_handles() -> list[dict[str, Any]]:
     ]
 
 
-def _world() -> tuple[CompositeAuthoring, MemorySnapshotProvider]:
-    """装配纯内存目录、只读快照端口和组合创作接口。"""
+def _world_components() -> tuple[
+    CompositeAuthoring,
+    MemorySnapshotProvider,
+    AuthoringCatalogSnapshot,
+    PublishedSourceCatalog,
+]:
+    """装配并暴露失败关闭测试所需的四个只读组件。"""
 
     source_catalog = _source_catalog()
     source = source_catalog.resolve(
@@ -262,14 +267,19 @@ def _world() -> tuple[CompositeAuthoring, MemorySnapshotProvider]:
         [*_action_handles(), *workflow_handles],
     )
     provider = MemorySnapshotProvider({CHILD_WORKFLOW_UUID: snapshot})
-    return (
-        CompositeAuthoring(
-            snapshot_provider=provider,
-            catalog=catalog,
-            resolver=source_catalog,
-        ),
-        provider,
+    authoring = CompositeAuthoring(
+        snapshot_provider=provider,
+        catalog=catalog,
+        resolver=source_catalog,
     )
+    return authoring, provider, catalog, source_catalog
+
+
+def _world() -> tuple[CompositeAuthoring, MemorySnapshotProvider]:
+    """装配纯内存目录、只读快照端口和组合创作接口。"""
+
+    authoring, provider, _catalog, _source_catalog = _world_components()
+    return authoring, provider
 
 
 def test_direct_invocation_returns_hierarchical_expansion_mappings_and_pin() -> None:
