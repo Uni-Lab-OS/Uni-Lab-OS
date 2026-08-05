@@ -354,6 +354,63 @@ def no_handles():
     assert result.graph["handle_templates"] == []
 
 
+def test_catalog_projection_accepts_browser_json_number_lexical_collapse() -> None:
+    """浏览器把 ``300.0`` 重编码为 ``300`` 时目录语义必须保持等价。
+
+    参数：无。返回：无；构造当前目录浮点默认值和浏览器往返后的整数读投影，
+    断言公共编译仍达到固定点，同时保留已应用 wire 形状。布尔值、字段集合和
+    其他目录语义仍由既有漂移用例严格关闭。
+    """
+
+    engine, applied_graph, normalized_source = _persisted_standard_graph()
+    # ``catalog`` 是测试夹具冻结的当前目录，用于构造同语义的浮点默认值代际。
+    catalog = getattr(engine, "_catalog")
+    node_templates = [action.detached_template() for action in catalog.actions]
+    handle_templates = [
+        handle
+        for action in catalog.actions
+        for handle in action.detached_handles()
+    ]
+    current_template = next(
+        item for item in node_templates if item["uuid"] == PREPARE_TEMPLATE_UUID
+    )
+    current_template["goal_default"] = {"timeout": 300.0}
+    current_template["meta_data"] = {
+        "owner": "test",
+        "contract": {"timeout": {"default": 300.0}},
+    }
+    browser_template = next(
+        item
+        for item in applied_graph["node_templates"]
+        if item["uuid"] == PREPARE_TEMPLATE_UUID
+    )
+    browser_template["goal_default"] = {"timeout": 300}
+    browser_template["meta_data"] = {
+        "owner": "test",
+        "contract": {"timeout": {"default": 300}},
+    }
+    browser_engine = WorkflowAuthoringEngine(
+        catalog=AuthoringCatalogSnapshot.from_entities(
+            node_templates,
+            handle_templates,
+        )
+    )
+
+    result = _compile(
+        browser_engine,
+        graph=applied_graph,
+        source=normalized_source,
+    )
+
+    assert result.valid and result.graph is not None, result.diagnostics
+    projected_template = next(
+        item
+        for item in result.graph["node_templates"]
+        if item["uuid"] == PREPARE_TEMPLATE_UUID
+    )
+    assert projected_template == browser_template
+
+
 @pytest.mark.parametrize(
     "mutation",
     [
