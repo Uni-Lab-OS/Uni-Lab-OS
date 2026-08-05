@@ -393,7 +393,55 @@ class RegistryTemplateProjection:
             )
             nodes.append(framework_node)
             handles.append(framework_handle)
+            nodes.append(
+                self._compile_group(
+                    resource_template_uuid=resource_template_uuid,
+                    resource_name=resource_name,
+                    resource_display_name=resource_display_name,
+                )
+            )
         return nodes, handles
+
+    @staticmethod
+    def _compile_group(
+        *,
+        resource_template_uuid: str,
+        resource_name: str,
+        resource_display_name: str,
+    ) -> dict[str, Any]:
+        """编译宿主节点（Host Node）唯一拥有的展示分组框架模板。
+
+        参数说明：``resource_template_uuid`` 是宿主节点资源模板
+        （ResourceTemplate）的稳定身份；``resource_name`` 与
+        ``resource_display_name`` 进入可审计框架所有者摘要。返回：一个没有执行
+        连接点（Handle）的 ``group`` 节点模板；持久投影按资源模板 UUID 和名称
+        复用稳定模板身份。异常：无，入参已由调用者完成身份校验。
+        """
+
+        return {
+            "resource_template_uuid": resource_template_uuid,
+            "name": "group",
+            "display_name": "分组",
+            "description": "组织工作流节点的展示层级，不参与执行依赖。",
+            "class": "unilabos.workflow.authoring:group",
+            "goal": {},
+            "goal_default": {},
+            "feedback": {},
+            "result": {},
+            "schema": None,
+            "type": "group",
+            "node_type": "group",
+            "meta_data": {
+                "unilab": {
+                    "framework_owner_only": True,
+                    "resource_template": {
+                        "uuid": resource_template_uuid,
+                        "name": resource_name,
+                        "display_name": resource_display_name,
+                    },
+                }
+            },
+        }
 
     @staticmethod
     def _compile_material_source(

@@ -186,7 +186,7 @@ def test_group_is_a_presentation_node_without_execution_edges() -> None:
         ANALYZE_NODE_UUID,
     }
     assert result.normalized_python_source is not None
-    assert 'with group(name="Preparation"):' in result.normalized_python_source
+    assert "with group(name='Preparation'):" in result.normalized_python_source
 
     repeated = _compile(
         engine,

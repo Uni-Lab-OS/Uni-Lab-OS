@@ -36,6 +36,8 @@ _NODE_METADATA = re.compile(
 )
 _AUTHORING_MARKERS = {
     "device": "unilabos.workflow.authoring:device",
+    "group": "unilabos.workflow.authoring:group",
+    "parallel": "unilabos.workflow.authoring:parallel",
     "workflow": "unilabos.workflow.authoring:workflow",
     "workflow_definition": "unilabos.workflow.authoring:workflow_definition",
     "workflow_output": "unilabos.workflow.authoring:workflow_output",
@@ -91,6 +93,19 @@ class ActionDeclaration:
 
 
 @dataclass(frozen=True, slots=True)
+class GroupDeclaration:
+    """一个只表达展示层级的分组（Group）节点声明。"""
+
+    node_uuid: str
+    name: str
+    title: str | None
+    description: str | None
+    parallel_scope: str | None
+    parallel_order: int | None
+    source_node: ast.With
+
+
+@dataclass(frozen=True, slots=True)
 class WorkflowProgram:
     """作者源码静态子集解析后的不可变中间表示。"""
 
@@ -104,7 +119,37 @@ class WorkflowProgram:
     result_record_name: str | None
     declared_output_schemas: tuple[tuple[str, dict[str, Any]], ...]
     actions: tuple[ActionDeclaration | MaterialSourceDeclaration, ...]
+    groups: tuple[GroupDeclaration, ...]
+    parent_by_node: tuple[tuple[str, str], ...]
+    order_dependencies: tuple[tuple[str, str], ...]
+    source_order: tuple[str, ...]
     outputs: tuple[tuple[str, ValueBinding], ...]
+
+
+@dataclass(frozen=True, slots=True)
+class _Flow:
+    """一段作者源码对执行图公开的入口、出口和新结果名。"""
+
+    entries: tuple[str, ...]
+    exits: tuple[str, ...]
+    result_names: frozenset[str]
+
+
+@dataclass(slots=True)
+class _BodyState:
+    """工作流函数体静态解析期间唯一的可变收集状态。"""
+
+    imports: dict[str, str]
+    devices: dict[str, DeviceDeclaration]
+    input_names: set[str]
+    anchors: dict[int, str]
+    node_metadata: dict[int, tuple[str, str]]
+    actions: list[ActionDeclaration | MaterialSourceDeclaration]
+    groups: list[GroupDeclaration]
+    parent_by_node: dict[str, str]
+    order_dependencies: list[tuple[str, str]]
+    source_order: list[str]
+    material_results: set[str]
 
 
 def parse_authoring_source(
@@ -169,7 +214,14 @@ def parse_authoring_source(
         function=function,
         anchors=anchors,
     )
-    actions, outputs = _workflow_body(
+    (
+        actions,
+        groups,
+        parent_by_node,
+        order_dependencies,
+        authoring_source_order,
+        outputs,
+    ) = _workflow_body(
         function,
         imports=imports,
         devices={item.symbol: item for item in devices},
@@ -177,7 +229,10 @@ def parse_authoring_source(
         anchors=anchors,
         node_metadata=node_metadata,
     )
-    used_anchor_lines = {action.source_node.lineno - 1 for action in actions}
+    used_anchor_lines = {
+        declaration.source_node.lineno - 1
+        for declaration in (*actions, *groups)
+    }
     if set(anchors) != used_anchor_lines:
         _fail("invalid_node_anchor", "节点 UUID 锚点必须紧邻一个动作声明")
     return WorkflowProgram(
@@ -191,6 +246,10 @@ def parse_authoring_source(
         result_record_name=result_record_name,
         declared_output_schemas=tuple(declared_output_schemas.items()),
         actions=tuple(actions),
+        groups=tuple(groups),
+        parent_by_node=tuple(sorted(parent_by_node.items())),
+        order_dependencies=tuple(order_dependencies),
+        source_order=tuple(authoring_source_order),
         outputs=tuple(outputs),
     )
 
@@ -533,11 +592,20 @@ def _workflow_body(
     input_names: set[str],
     anchors: dict[int, str],
     node_metadata: dict[int, tuple[str, str]],
-) -> tuple[list[ActionDeclaration | MaterialSourceDeclaration], list[tuple[str, ValueBinding]]]:
-    """解析工作流函数中的动作序列和输出声明。
+) -> tuple[
+    list[ActionDeclaration | MaterialSourceDeclaration],
+    list[GroupDeclaration],
+    dict[str, str],
+    list[tuple[str, str]],
+    list[str],
+    list[tuple[str, ValueBinding]],
+]:
+    """解析工作流函数中的动作、展示结构、执行顺序与输出声明。
 
-    参数说明：设备与输入索引来自外层声明，``anchors`` 固定节点身份，
-    ``node_metadata`` 保存展示字段；返回动作和命名输出，不接受动态控制流。
+    参数说明：``function`` 是唯一工作流函数；``imports``、``devices`` 与
+    ``input_names`` 是可信静态身份索引；``anchors`` 固定所有持久节点身份；
+    ``node_metadata`` 保存展示覆盖。返回：动作、分组、父子关系、顺序依赖、源码
+    节点顺序与命名输出。异常：动态控制流、非法分组或并行分支失败关闭。
     """
 
     statements = list(function.body)
@@ -548,34 +616,287 @@ def _workflow_body(
     if not statements or not isinstance(statements[-1], ast.Return):
         _fail("invalid_workflow_output", "工作流函数必须以 workflow_output 返回", function)
     return_statement = statements.pop()
-    actions: list[ActionDeclaration | MaterialSourceDeclaration] = []
+    state = _BodyState(
+        imports=imports,
+        devices=devices,
+        input_names=input_names,
+        anchors=anchors,
+        node_metadata=node_metadata,
+        actions=[],
+        groups=[],
+        parent_by_node={},
+        order_dependencies=[],
+        source_order=[],
+        material_results=set(),
+    )
+    # ``known_results`` 只在递归边界复制，保证同级并行分支互不可见。
     known_results: set[str] = set()
-    material_results: set[str] = set()  # 可作为裸物料占位符传递的物料来源结果名。
-    for statement in statements:
-        action = _action_declaration(
-            statement,
-            imports=imports,
-            devices=devices,
-            input_names=input_names,
-            known_results=known_results,
-            material_results=material_results,
-            anchors=anchors,
-            node_metadata=node_metadata,
-        )
-        if action.result_name in known_results:
-            _fail("unsupported_authoring_syntax", "动作结果变量重复", statement)
-        known_results.add(action.result_name)
-        if isinstance(action, MaterialSourceDeclaration):
-            material_results.add(action.result_name)
-        actions.append(action)
+    _parse_sequence(
+        statements,
+        state=state,
+        available_results=known_results,
+        parent_uuid=None,
+    )
     outputs = _workflow_outputs(
         return_statement,
         imports=imports,
         input_names=input_names,
         known_results=known_results,
-        material_results=material_results,
+        material_results=state.material_results,
     )
-    return actions, outputs
+    return (
+        state.actions,
+        state.groups,
+        state.parent_by_node,
+        state.order_dependencies,
+        state.source_order,
+        outputs,
+    )
+
+
+def _parse_sequence(
+    statements: list[ast.stmt],
+    *,
+    state: _BodyState,
+    available_results: set[str],
+    parent_uuid: str | None,
+) -> _Flow:
+    """解析一个严格顺序片段并建立相邻执行片段依赖。
+
+    参数说明：``statements`` 是同一词法层级的语句；``state`` 收集不可变 IR
+    所需事实；``available_results`` 是当前作用域可读且由本函数原位扩充的结果名；
+    ``parent_uuid`` 是可选展示分组父节点。返回：片段真实执行入口、出口及本层新增
+    结果名。异常：任一语句超出静态子集时原样传播。
+    """
+
+    initial_results = set(available_results)
+    first_entries: tuple[str, ...] = ()
+    previous_exits: tuple[str, ...] = ()
+    for statement in statements:
+        segment = _parse_statement(
+            statement,
+            state=state,
+            available_results=available_results,
+            parent_uuid=parent_uuid,
+        )
+        if segment.entries:
+            if previous_exits:
+                state.order_dependencies.extend(
+                    (source_uuid, target_uuid)
+                    for source_uuid in previous_exits
+                    for target_uuid in segment.entries
+                )
+            elif not first_entries:
+                first_entries = segment.entries
+            previous_exits = segment.exits
+        available_results.update(segment.result_names)
+    return _Flow(
+        entries=first_entries,
+        exits=previous_exits,
+        result_names=frozenset(available_results - initial_results),
+    )
+
+
+def _parse_statement(
+    statement: ast.stmt,
+    *,
+    state: _BodyState,
+    available_results: set[str],
+    parent_uuid: str | None,
+) -> _Flow:
+    """把一条动作、分组或并行语句解析为执行流片段。
+
+    参数说明：``statement`` 是当前 AST 语句；``state`` 是本次函数体收集状态；
+    ``available_results`` 限定合法反向引用；``parent_uuid`` 指定动作展示父节点。
+    返回：无合成节点的入口/出口流。异常：未知 ``with`` 或动态语句失败关闭。
+    """
+
+    if isinstance(statement, ast.With):
+        marker = _with_marker(statement, state.imports)
+        if marker == "group":
+            return _parse_group(
+                statement,
+                state=state,
+                available_results=available_results,
+                parent_uuid=parent_uuid,
+                parallel_scope=None,
+                parallel_order=None,
+            )
+        if marker == "parallel":
+            if parent_uuid is not None:
+                _fail(
+                    "unsupported_authoring_syntax",
+                    "并行结构不能嵌套在展示分组中",
+                    statement,
+                )
+            return _parse_parallel(
+                statement,
+                state=state,
+                available_results=available_results,
+            )
+        _fail("unsupported_authoring_syntax", "工作流不支持该 with 语句", statement)
+
+    action = _action_declaration(
+        statement,
+        imports=state.imports,
+        devices=state.devices,
+        input_names=state.input_names,
+        known_results=available_results,
+        material_results=state.material_results & available_results,
+        anchors=state.anchors,
+        node_metadata=state.node_metadata,
+    )
+    if action.result_name in available_results or any(
+        existing.result_name == action.result_name for existing in state.actions
+    ):
+        _fail("unsupported_authoring_syntax", "动作结果变量重复", statement)
+    state.actions.append(action)
+    state.source_order.append(action.node_uuid)
+    if parent_uuid is not None:
+        state.parent_by_node[action.node_uuid] = parent_uuid
+    if isinstance(action, MaterialSourceDeclaration):
+        state.material_results.add(action.result_name)
+        return _Flow((), (), frozenset({action.result_name}))
+    return _Flow(
+        (action.node_uuid,),
+        (action.node_uuid,),
+        frozenset({action.result_name}),
+    )
+
+
+def _with_marker(statement: ast.With, imports: dict[str, str]) -> str | None:
+    """识别单上下文 ``with group`` 或 ``with parallel`` 标记。
+
+    参数说明：``statement`` 是静态 ``with``；``imports`` 证明标记来源。返回：
+    ``group``、``parallel`` 或 ``None``。异常：多个上下文或 ``as`` 绑定不属于
+    可信作者子集，直接返回 ``None`` 交由调用者产生稳定诊断。
+    """
+
+    if len(statement.items) != 1 or statement.items[0].optional_vars is not None:
+        return None
+    context = statement.items[0].context_expr
+    if not isinstance(context, ast.Call):
+        return None
+    for marker_name in ("group", "parallel"):
+        if _is_marker(context.func, imports, marker_name):
+            return marker_name
+    return None
+
+
+def _parse_group(
+    statement: ast.With,
+    *,
+    state: _BodyState,
+    available_results: set[str],
+    parent_uuid: str | None,
+    parallel_scope: str | None,
+    parallel_order: int | None,
+) -> _Flow:
+    """解析一个真实展示分组节点并递归解析其动作子节点。
+
+    参数说明：``statement`` 是 ``with group``；``state`` 收集节点；
+    ``available_results`` 是进入分组前可见结果；``parent_uuid`` 用于拒绝当前未支持
+    的嵌套分组；``parallel_scope``/``parallel_order`` 标记可选并行同级关系。
+    返回：忽略分组节点本身后的真实动作入口/出口。异常：名称、锚点、空分组或
+    嵌套不合法时失败关闭。
+    """
+
+    if parent_uuid is not None:
+        _fail("unsupported_authoring_syntax", "暂不支持嵌套展示分组", statement)
+    context = statement.items[0].context_expr
+    assert isinstance(context, ast.Call)
+    if context.args or any(item.arg is None for item in context.keywords):
+        _fail("invalid_group", "group 只接受 name 命名参数", context)
+    keyword_names = [str(item.arg) for item in context.keywords]
+    if len(keyword_names) != len(set(keyword_names)) or set(keyword_names) != {"name"}:
+        _fail("invalid_group", "group 必须且只能声明唯一 name", context)
+    name_expression = context.keywords[0].value
+    if not isinstance(name_expression, ast.Constant) or not isinstance(
+        name_expression.value, str
+    ) or not name_expression.value.strip():
+        _fail("invalid_group", "group name 必须是非空字符串字面量", name_expression)
+    node_uuid = state.anchors.get(statement.lineno - 1)
+    if node_uuid is None:
+        _fail("invalid_node_anchor", "每个展示分组前必须有相邻节点 UUID 锚点", statement)
+    metadata = state.node_metadata.get(statement.lineno - 1)
+    declaration = GroupDeclaration(
+        node_uuid=node_uuid,
+        name=name_expression.value.strip(),
+        title=metadata[0] if metadata is not None else None,
+        description=metadata[1] if metadata is not None else None,
+        parallel_scope=parallel_scope,
+        parallel_order=parallel_order,
+        source_node=statement,
+    )
+    state.groups.append(declaration)
+    state.source_order.append(node_uuid)
+    child_results = set(available_results)
+    flow = _parse_sequence(
+        list(statement.body),
+        state=state,
+        available_results=child_results,
+        parent_uuid=node_uuid,
+    )
+    if not flow.entries:
+        _fail("invalid_group", "展示分组必须至少包含一个可执行动作", statement)
+    return flow
+
+
+def _parse_parallel(
+    statement: ast.With,
+    *,
+    state: _BodyState,
+    available_results: set[str],
+) -> _Flow:
+    """解析由直接展示分组构成的并行结构且隔离同级结果作用域。
+
+    参数说明：``statement`` 是 ``with parallel``；``state`` 收集各分支事实；
+    ``available_results`` 是并行开始前已完成且所有分支共享的结果。返回：所有分支
+    入口、出口与合并后结果。异常：参数、非分组分支、嵌套并行、同级跨分支引用
+    或重复结果失败关闭。
+    """
+
+    context = statement.items[0].context_expr
+    assert isinstance(context, ast.Call)
+    if context.args or context.keywords:
+        _fail("invalid_parallel", "parallel 不接受参数", context)
+    if len(statement.body) < 2 or any(
+        not isinstance(branch, ast.With)
+        or _with_marker(branch, state.imports) != "group"
+        for branch in statement.body
+    ):
+        _fail("invalid_parallel", "parallel 必须直接包含至少两个展示分组", statement)
+    group_uuids = [
+        state.anchors.get(branch.lineno - 1)
+        for branch in statement.body
+        if isinstance(branch, ast.With)
+    ]
+    if any(group_uuid is None for group_uuid in group_uuids):
+        _fail("invalid_node_anchor", "并行分组前必须有相邻节点 UUID 锚点", statement)
+    parallel_scope = str(group_uuids[0])
+    entries: list[str] = []
+    exits: list[str] = []
+    merged_results: set[str] = set()
+    base_results = set(available_results)
+    for branch_order, branch in enumerate(statement.body):
+        assert isinstance(branch, ast.With)
+        branch_results = set(base_results)
+        branch_flow = _parse_group(
+            branch,
+            state=state,
+            available_results=branch_results,
+            parent_uuid=None,
+            parallel_scope=parallel_scope,
+            parallel_order=branch_order,
+        )
+        duplicated = merged_results & set(branch_flow.result_names)
+        if duplicated:
+            _fail("unsupported_authoring_syntax", "并行分支结果变量重复", branch)
+        merged_results.update(branch_flow.result_names)
+        entries.extend(branch_flow.entries)
+        exits.extend(branch_flow.exits)
+    available_results.update(merged_results)
+    return _Flow(tuple(entries), tuple(exits), frozenset(merged_results))
 
 
 def _action_declaration(
@@ -792,6 +1113,7 @@ __all__ = [
     "ActionDeclaration",
     "AuthoringSyntaxError",
     "DeviceDeclaration",
+    "GroupDeclaration",
     "ValueBinding",
     "WorkflowProgram",
     "diagnostic_source_range",

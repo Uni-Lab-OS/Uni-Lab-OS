@@ -10,6 +10,7 @@ from typing import Any
 from unilabos.workflow.authoring_ast import (
     ActionDeclaration,
     DeviceDeclaration,
+    GroupDeclaration,
     WorkflowProgram,
 )
 from unilabos.workflow.authoring_identity import authoring_edge_uuid
@@ -69,6 +70,29 @@ def build_candidate_graph(
     ] = {}
     nodes: list[dict[str, Any]] = []
     edges: list[dict[str, Any]] = []
+    parent_by_node = dict(program.parent_by_node)
+    source_order = {
+        node_uuid: index for index, node_uuid in enumerate(program.source_order)
+    }
+    for declaration in program.groups:
+        try:
+            group_catalog = catalog.require_action(
+                "unilabos.workflow.authoring:group",
+                "group",
+            )
+        except AuthoringCatalogError as error:
+            raise AuthoringGraphError(
+                "template_catalog_mismatch",
+                "工作流创作目录缺少唯一展示分组模板",
+            ) from error
+        action_catalog[declaration.node_uuid] = group_catalog
+        nodes.append(
+            _group_node(
+                declaration=declaration,
+                catalog_action=group_catalog,
+                source_order=source_order[declaration.node_uuid],
+            )
+        )
     for declaration in program.actions:
         if isinstance(declaration, MaterialSourceDeclaration):
             try:
@@ -81,7 +105,13 @@ def build_candidate_graph(
                 raise AuthoringGraphError(error.code, error.message) from error
             action_catalog[declaration.node_uuid] = catalog_action
             result_nodes[declaration.result_name] = (declaration, catalog_action)
-            nodes.append(node)
+            nodes.append(
+                _apply_authoring_structure(
+                    node,
+                    parent_uuid=parent_by_node.get(declaration.node_uuid),
+                    source_order=source_order[declaration.node_uuid],
+                )
+            )
             continue
         device = devices[declaration.device_symbol]
         try:
@@ -97,10 +127,14 @@ def build_candidate_graph(
         action_catalog[declaration.node_uuid] = catalog_action
         result_nodes[declaration.result_name] = (declaration, catalog_action)
         nodes.append(
-            _candidate_node(
-                declaration=declaration,
-                device=device,
-                catalog_action=catalog_action,
+            _apply_authoring_structure(
+                _candidate_node(
+                    declaration=declaration,
+                    device=device,
+                    catalog_action=catalog_action,
+                ),
+                parent_uuid=parent_by_node.get(declaration.node_uuid),
+                source_order=source_order[declaration.node_uuid],
             )
         )
 
@@ -129,6 +163,36 @@ def build_candidate_graph(
                     target_handle_uuid=str(target_handle["uuid"]),
                 )
             )
+
+    # ``order_dependencies`` 只在相邻执行片段没有真实数据边时补 ready 控制边。
+    data_pairs = {
+        (edge["source_node_uuid"], edge["target_node_uuid"])
+        for edge in edges
+    }
+    for source_node_uuid, target_node_uuid in dict.fromkeys(
+        program.order_dependencies
+    ):
+        if (source_node_uuid, target_node_uuid) in data_pairs:
+            continue
+        source_handle = _require_handle(
+            action_catalog[source_node_uuid],
+            key="ready",
+            io_type="source",
+        )
+        target_handle = _require_handle(
+            action_catalog[target_node_uuid],
+            key="ready",
+            io_type="target",
+        )
+        edges.append(
+            _candidate_edge(
+                workflow_uuid=program.workflow_uuid,
+                source_node_uuid=source_node_uuid,
+                source_handle_uuid=str(source_handle["uuid"]),
+                target_node_uuid=target_node_uuid,
+                target_handle_uuid=str(target_handle["uuid"]),
+            )
+        )
 
     workflow = deepcopy(applied["workflow"])
     workflow["uuid"] = program.workflow_uuid
@@ -171,7 +235,10 @@ def build_candidate_graph(
 
     graph = {
         "workflow": workflow,
-        "nodes": nodes,
+        "nodes": sorted(
+            nodes,
+            key=lambda item: source_order[str(item["uuid"])],
+        ),
         "edges": sorted(edges, key=lambda item: str(item["uuid"])),
         "node_templates": node_templates,
         "handle_templates": handle_templates,
@@ -241,6 +308,79 @@ def semantic_graph_equal(left: Any, right: Any) -> bool:
         return _semantic_graph(left) == _semantic_graph(right)
     except (KeyError, TypeError, ValueError):
         return False
+
+
+def _group_node(
+    *,
+    declaration: GroupDeclaration,
+    catalog_action: AuthoringCatalogAction,
+    source_order: int,
+) -> dict[str, Any]:
+    """构造一个不参与执行边的展示分组节点（Presentation Group Node）。
+
+    参数说明：``declaration`` 提供稳定节点身份、展示名和并行归属；
+    ``catalog_action`` 是唯一框架模板；``source_order`` 是确定性源码顺序。返回：
+    后端形状分组节点，其 ``meta_data.unilab`` 足以恢复 ``group/parallel`` 源码；
+    异常：目录模板字段缺失时由调用后的候选校验失败关闭。
+    """
+
+    template = catalog_action.template
+    # ``parallel_scope`` 只关联同一个并行结构内的同级展示分组，不成为执行身份。
+    parallel_scope = declaration.parallel_scope
+    return {
+        "uuid": declaration.node_uuid,
+        "workflow_node_template_uuid": str(template["uuid"]),
+        "parent_uuid": None,
+        "material_uuid": None,
+        "name": declaration.title or declaration.name,
+        "type": "group",
+        "icon": template.get("icon"),
+        "pose": {},
+        "param": {"name": declaration.name},
+        "footer": template.get("footer"),
+        "action_name": None,
+        "action_type": None,
+        "execution_policy": {},
+        "disabled": False,
+        "minimized": False,
+        "script": None,
+        "description": (
+            declaration.description
+            if declaration.description is not None
+            else template.get("description")
+        ),
+        "meta_data": {
+            "unilab": {
+                "authoring_source_order": source_order,
+                "presentation_group": True,
+                "parallel_scope": parallel_scope,
+                "parallel_order": declaration.parallel_order,
+            }
+        },
+    }
+
+
+def _apply_authoring_structure(
+    node: dict[str, Any],
+    *,
+    parent_uuid: str | None,
+    source_order: int,
+) -> dict[str, Any]:
+    """把展示父关系与确定性源码顺序加入一个已构造候选节点。
+
+    参数说明：``node`` 是本轮新建、可原位修改的动作或物料来源节点；
+    ``parent_uuid`` 是可选展示分组 UUID；``source_order`` 是节点在作者源码中的
+    零基顺序。返回：同一节点字典。异常：既有元数据形状非法时抛出 ``TypeError``，
+    防止覆盖其他创作事实。
+    """
+
+    node["parent_uuid"] = parent_uuid
+    meta_data = node.setdefault("meta_data", {})
+    unilab = meta_data.setdefault("unilab", {})
+    if not isinstance(unilab, dict):
+        raise TypeError("候选节点创作元数据必须是对象")
+    unilab["authoring_source_order"] = source_order
+    return node
 
 
 def _candidate_node(
