@@ -43,6 +43,7 @@ from unilabos.registry.decorators import (
     ActionOutputHandle,
     DataSource,
     NodeType,
+    action,
     device,
     legacy_action,
 )
@@ -113,17 +114,19 @@ class DeductResourceReturn(CreateResourceReturn):
     mount_resource: List[List[ResourceDictType]]
 
 
-class TransferResourceReturn(TypedDict):
-    """transfer_resource 返回值：透传被转移物料、目标孔位与库位，便于下游引用。
+@dataclass(frozen=True, slots=True, kw_only=True)
+class TransferResourceReturn:
+    """转移记账动作的类型化结果合同，同时保留运行时字典返回形状。
 
-    resource / mount_resource 均为「单个物料」的扁平节点形态（list[list[ResourceDict]]，单根，
-    经 @flatten 后即一棵树的扁平节点 list），与 apply_deduct 输出一致、可直接连到下游单物料输入。
+    ``resource`` 与 ``mount_resource`` 在工作流创作合同中都是物料占位符
+    （ResourceSlot），从而可以继续连接下游动作；运行时仍返回原有四键字典，
+    不改变旧调用方读取 ``resource/mount_resource/site/result`` 的方式。
     """
 
-    resource: List[List[ResourceDictType]]
-    mount_resource: List[List[ResourceDictType]]
+    resource: ResourceSlot
+    mount_resource: ResourceSlot
     site: str
-    result: Any
+    result: str
 
 
 class TransferManualReturn(TypedDict):
@@ -2325,7 +2328,7 @@ class HostNode(BaseROS2DeviceNode):
         mount_resource: "ResourceSlot",
         site: str = "",
     ) -> TransferResourceReturn:
-        """transfer_resource / transfer_manual 共用的转移核心：把已物理就位的物料在系统中改挂到目标设备孔位。
+        """把已经物理就位的物料在系统中改挂到目标设备孔位。
 
         与 apply_deduct_resource 一致：入参均为「单个物料」（单 ResourceSlot），框架在 send_goal 已把
         list（一棵树扁平节点组→装配成一个物料）或 dict（资源引用→with_children 拉取）解析为单个 PLR 实例。
@@ -2342,6 +2345,19 @@ class HostNode(BaseROS2DeviceNode):
         注意：底层按"运行该动作的节点"作为来源执行本地移除，host 运行时来源即 host（根节点）。
         若物料此前已被 apply_deduct_resource 挂到某边缘设备，该设备的本地副本不会在此处被移除，
         需依赖下次同步对齐（详见 cursor_docs 记录的源设备移除限制）。
+
+        Args:
+            resource: 待转移的具体物料（Material）实例。
+            target_device: 接收物料的目标设备身份；可带 ``/devices/`` 前缀。
+            mount_resource: 目标设备上承载该物料的父物料实例。
+            site: 目标父物料中的库位（Site）名称；空串表示使用默认排布。
+
+        Returns:
+            保留旧调用兼容的四键字典；物料和目标父物料仍用原扁平树形态返回，
+            ``site`` 回传库位名，``result`` 是底层转移结果的稳定字符串。
+
+        Raises:
+            ValueError: 待转移物料或目标父物料缺失，或底层转移拒绝时抛出。
         """
         if resource is None:
             raise ValueError("转移失败：未接收到待转移物料")
@@ -2355,72 +2371,21 @@ class HostNode(BaseROS2DeviceNode):
             "resource": ResourceTreeSet.from_plr_resources([resource]).dump(),
             "mount_resource": ResourceTreeSet.from_plr_resources([mount_resource]).dump(),
             "site": site,
-            "result": result,
+            "result": str(result),
         }
 
-    @legacy_action(
+    @action(
         description="转移物料（系统派发）：把已物理就位的物料在系统中改挂到目标设备的目标孔位（人工/机械臂工作流的统一末步）",
         always_free=True,
         placeholder_keys={
             "target_device": PLACEHOLDER_DEVICES,
             "mount_resource": PLACEHOLDER_NODES,
         },
-        handles=[
-            ActionInputHandle(
-                key="resource",
-                data_type="resource",
-                label="待转移物料",
-                data_key="resource",
-                data_source=DataSource.HANDLE,
-            ),
-            ActionInputHandle(
-                key="target_device",
-                data_type="device_id",
-                label="目标设备",
-                data_key="target_device",
-                data_source=DataSource.HANDLE,
-            ),
-            ActionInputHandle(
-                key="mount_resource",
-                data_type="resource",
-                label="目标孔位",
-                data_key="mount_resource",
-                data_source=DataSource.HANDLE,
-            ),
-            ActionInputHandle(
-                key="site",
-                data_type="site",
-                label="目标库位",
-                data_key="site",
-                data_source=DataSource.HANDLE,
-            ),
-            ActionOutputHandle(
-                key="resource",
-                data_type="resource",
-                label="已转移物料",
-                data_key="resource.@flatten",
-                data_source=DataSource.EXECUTOR,
-            ),
-            ActionOutputHandle(
-                key="mount_resource",
-                data_type="resource",
-                label="目标孔位",
-                data_key="mount_resource.@flatten",
-                data_source=DataSource.EXECUTOR,
-            ),
-            ActionOutputHandle(
-                key="site",
-                data_type="site",
-                label="目标库位",
-                data_key="site",
-                data_source=DataSource.EXECUTOR,
-            ),
-        ],
     )
     async def transfer_resource(
         self,
         resource: ResourceSlot,
-        target_device: DeviceSlot,
+        target_device: str,
         mount_resource: ResourceSlot,
         site: str = "",
     ) -> TransferResourceReturn:
@@ -2440,6 +2405,13 @@ class HostNode(BaseROS2DeviceNode):
             mount_resource[目标孔位]: 目标设备上的单个挂载孔位/父物料（list/dict 两形态）。
             site[目标库位]: 目标父级容器上的库位名，显式指定物料落在哪个库位（carrier/deck/plate 等按
                 _ordering 换算成 spot）；不传则由父级默认排布。
+
+        Returns:
+            原有四键运行结果字典；静态类型化动作（Typed Action）合同把两个物料
+            字段发布为物料占位符（ResourceSlot），供下游工作流节点继续连接。
+
+        Raises:
+            ValueError: 必需物料缺失或转移执行失败时由既有执行核心抛出。
         """
         return await self._do_transfer_resource(resource, target_device, mount_resource, site)
 

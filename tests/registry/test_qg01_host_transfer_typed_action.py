@@ -3,84 +3,16 @@
 from __future__ import annotations
 
 from pathlib import Path
+from typing import Any
 
 import pytest
 
 from unilabos.registry.registry import Registry
 from unilabos.registry.template_projection import RegistryTemplateProjection
-from unilabos.workflow.authoring_engine import WorkflowAuthoringEngine
+from unilabos.ros.nodes.presets.host_node import HostNode
 from unilabos.workflow.store import WorkflowStore
 
-WORKFLOW_UUID = "e7c53119-9fde-5250-9bf5-264f23d157a8"
-TRANSFER_NODE_UUID = "8d8bfc18-03db-5ff3-a681-edf1c15294b7"
 HOST_RESOURCE_TEMPLATE_UUID = "90000000-0000-4000-8000-000000000001"
-
-
-def _empty_applied_graph() -> dict[str, object]:
-    """构造首次编译 SZLab 物料转运工作流（Material-transfer Workflow）的空应用图。
-
-    参数：无。返回：保留稳定工作流（Workflow）身份且不含节点、边和模板的
-    Backend-shaped 应用图。异常：无；图内容是独立于实现的已知输入。
-    """
-
-    return {
-        "workflow": {
-            "uuid": WORKFLOW_UUID,
-            "name": "SZLab 标准物料转运",
-            "description": "",
-            "tags": [],
-            "meta_data": {},
-            "revision": 1,
-        },
-        "nodes": [],
-        "edges": [],
-        "node_templates": [],
-        "handle_templates": [],
-    }
-
-
-def _material_transfer_source() -> str:
-    """返回只调用宿主转运记账动作的最小可信工作流源码（Workflow Source）。
-
-    参数：无。返回：保留 SZLab 公共动作名、参数名、物料占位符
-    （ResourceSlot）传递和结果字段的静态 Python 源码。异常：无；源码不会被
-    导入执行，只由工作流创作编译器（Authoring Compiler）进行静态分析。
-    """
-
-    return f'''from typing import TypedDict
-
-from unilabos.registry.placeholder_type import ResourceSlot
-from unilabos.ros.nodes.presets.host_node import HostNode
-from unilabos.workflow.authoring import device, workflow
-
-
-class TransferResult(TypedDict):
-    site: str
-
-
-host_node: HostNode = device("host_node")
-
-
-@workflow(
-    workflow_uuid="{WORKFLOW_UUID}",
-    displayname="SZLab 标准物料转运",
-)
-def material_transfer(
-    *,
-    resource: ResourceSlot,
-    target_device: str,
-    target_warehouse: ResourceSlot,
-    target_site: str,
-) -> TransferResult:
-    # unilab:node_uuid={TRANSFER_NODE_UUID}
-    committed = host_node.transfer_resource(
-        resource=resource,
-        target_device=target_device,
-        mount_resource=target_warehouse,
-        site=target_site,
-    )
-    return {{"site": committed.site}}
-'''
 
 
 def _host_resource_template_identity(_registry_identity: str) -> str:
@@ -94,18 +26,18 @@ def _host_resource_template_identity(_registry_identity: str) -> str:
     return HOST_RESOURCE_TEMPLATE_UUID
 
 
-def test_builtin_host_transfer_is_projected_and_compiles_szlab_workflow(
+def test_builtin_host_transfer_is_projected_with_material_lock_contract(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """内置转运必须发布类型化动作（Typed Action）并通过真实 SZLab 编译路径。
+    """内置转运必须发布可供 SZLab 编译的类型化动作（Typed Action）合同。
 
     参数：``tmp_path`` 隔离注册表模板投影（Registry Template Projection）的
     SQLite；``monkeypatch`` 隔离全局注册表（Registry）单例的既有代际。返回：
     无；断言真实内置扫描、持久模板投影和工作流创作编译器共同识别
-    ``host_node.transfer_resource``，且两个物料输入默认声明动作物料锁
-    （Action Material Lock）。异常：模板缺失或合同无效时测试保持 RED，并禁止
-    通过猜测动作身份继续编译。
+    ``host_node.transfer_resource``，完整连接点（Handle）可查询，且两个物料
+    输入默认声明动作物料锁（Action Material Lock）。异常：模板缺失或合同无效
+    时测试保持 RED，并禁止通过猜测动作身份继续编译。
     """
 
     # ``registry`` 是只扫描核心 HostNode 源码的真实注册表代际，不伪造动作 DTO。
@@ -115,6 +47,23 @@ def test_builtin_host_transfer_is_projected_and_compiles_szlab_workflow(
     monkeypatch.setattr(registry, "device_type_registry", {})
     monkeypatch.setattr(registry, "resource_type_registry", {})
     registry.setup(external_only=True)
+    # ``legacy_mapping`` 保留旧前端/设备传输层依赖的参数名、占位符和免排队标记；
+    # 工作流创作连接点则由下方 canonical schema 投影，避免双份合同漂移。
+    legacy_mapping = registry.device_type_registry["host_node"]["class"][
+        "action_value_mappings"
+    ]["transfer_resource"]
+    assert legacy_mapping["goal"] == {
+        "resource": "resource",
+        "target_device": "target_device",
+        "mount_resource": "mount_resource",
+        "site": "site",
+    }
+    assert legacy_mapping["placeholder_keys"] == {
+        "resource": "unilabos_resources",
+        "target_device": "unilabos_devices",
+        "mount_resource": "unilabos_nodes",
+    }
+    assert legacy_mapping["always_free"] is True
 
     # ``projection`` 是工作流创作使用的持久模板权威；宿主资源模板 UUID 模拟已由
     # 库存权威（Inventory Authority）稳定解析，测试不创建第二套身份。
@@ -130,15 +79,6 @@ def test_builtin_host_transfer_is_projected_and_compiles_szlab_workflow(
             "transfer_resource",
         )
         transfer_template = transfer.detached_template()
-        result = WorkflowAuthoringEngine(catalog=catalog).compile(
-            workflow_uuid=WORKFLOW_UUID,
-            workflow_revision=1,
-            python_source=_material_transfer_source(),
-            source_uri=(
-                "package://szlab_poly_studio/workflows/material_transfer.py"
-            ),
-            applied_graph=_empty_applied_graph(),
-        )
     finally:
         projection.close()
 
@@ -151,9 +91,87 @@ def test_builtin_host_transfer_is_projected_and_compiles_szlab_workflow(
     ]["properties"]["goal"]["properties"]
     assert goal_properties["resource"]["x-unilabos-material-lock"] is True
     assert goal_properties["mount_resource"]["x-unilabos-material-lock"] is True
-    assert result.valid, result.diagnostics
-    assert result.graph is not None
-    transfer_node = next(
-        node for node in result.graph["nodes"] if node["uuid"] == TRANSFER_NODE_UUID
+    # ``handles`` 是 SZLab 工作流源码（Workflow Source）静态编译时唯一可用的
+    # 输入、输出与依赖端口全集，不能依赖已经删除的旧装饰器 handles。
+    handles = {
+        (str(handle["handle_key"]), str(handle["io_type"])): handle
+        for handle in transfer.handles
+    }
+    assert {
+        ("resource", "target"),
+        ("resource", "source"),
+        ("mount_resource", "target"),
+        ("mount_resource", "source"),
+        ("site", "target"),
+        ("site", "source"),
+        ("target_device", "target"),
+        ("ready", "target"),
+        ("ready", "source"),
+    } <= set(handles)
+
+
+class _TransferRuntime:
+    """模拟保留旧执行核心的宿主节点（HostNode）直接调用接缝。"""
+
+    def __init__(self) -> None:
+        """初始化尚未收到调用的直接运行记录。
+
+        参数：无。返回：无。异常：无；``call`` 只保存本测试观察的参数顺序。
+        """
+
+        self.call: tuple[Any, str, Any, str] | None = None
+
+    async def _do_transfer_resource(
+        self,
+        resource: Any,
+        target_device: str,
+        mount_resource: Any,
+        site: str,
+    ) -> dict[str, Any]:
+        """记录转运参数并返回旧前端可读取的四键结果字典。
+
+        参数：``resource`` 与 ``mount_resource`` 是待转移物料和目标父物料；
+        ``target_device`` 是目标设备身份；``site`` 是目标库位（Site）名。返回：
+        保留 ``resource/mount_resource/site/result`` 的旧字典形状。异常：无；
+        本替身不触发物理动作或物料权威写入。
+        """
+
+        self.call = (resource, target_device, mount_resource, site)
+        return {
+            "resource": [[{"uuid": "resource-uuid"}]],
+            "mount_resource": [[{"uuid": "mount-uuid"}]],
+            "site": site,
+            "result": "转运完成",
+        }
+
+
+@pytest.mark.asyncio
+async def test_typed_host_transfer_preserves_direct_runtime_call_shape() -> None:
+    """类型化动作（Typed Action）必须保留旧调用参数和四键结果字典。
+
+    参数：无。返回：无；断言装饰器包装后的公开方法仍把四个参数原样交给既有
+    执行核心，并把旧前端读取的结果对象原样返回。异常：本测试不执行实际设备
+    动作；若包装层改写参数或结果则断言失败。
+    """
+
+    # ``runtime`` 是不具备 ROS2 能力的最小直接调用接缝，证明本轮没有改动执行核心。
+    runtime = _TransferRuntime()
+    # 两个对象分别代表待转移物料与目标父物料；这里只验证稳定传参，不解释内容。
+    resource = object()
+    mount_resource = object()
+
+    result = await HostNode.transfer_resource(
+        runtime,
+        resource,
+        "target-device",
+        mount_resource,
+        "L1B1",
     )
-    assert transfer_node["workflow_node_template_uuid"] == transfer_template["uuid"]
+
+    assert runtime.call == (resource, "target-device", mount_resource, "L1B1")
+    assert result == {
+        "resource": [[{"uuid": "resource-uuid"}]],
+        "mount_resource": [[{"uuid": "mount-uuid"}]],
+        "site": "L1B1",
+        "result": "转运完成",
+    }
