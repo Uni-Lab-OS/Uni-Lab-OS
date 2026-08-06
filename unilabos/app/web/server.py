@@ -133,7 +133,7 @@ def setup_server() -> FastAPI:
 
     参数：无。返回：进程唯一 FastAPI 应用；重复调用复用已挂载路由。工作流
     源码（Workflow Source）授权形状或组合失败时关闭该合同路由，但不阻止无关
-    Edge 路由继续装配，错误写入产品日志。
+    边缘侧（Edge）路由继续装配，错误写入产品日志。
     """
     global pages, resource_contract_routes_mounted, workflow_routes_mounted
 
@@ -144,7 +144,8 @@ def setup_server() -> FastAPI:
     # 设置API路由
     setup_api_routes(app)
 
-    # 共享 Workflow Interface 必须先于 Edge-only scheduler adapter 挂载，
+    # 共享工作流接口（Workflow Interface）必须先于仅边缘侧（Edge-only）的
+    # 调度器适配器挂载，
     # /workflows 表示定义，/workflow-tasks 表示运行。
     if not workflow_routes_mounted and BasicConfig.working_dir:
         try:
@@ -159,7 +160,8 @@ def setup_server() -> FastAPI:
             )
 
             # ``template_projection`` 只在本地调度与库存权威同时存在时建立；
-            # Backend-controlled 模式不能在 OS 再创建第二个生产模板写权威。
+            # 后端控制（backend_controlled）模式不能在操作系统（OS）再创建
+            # 第二个生产模板写权威。
             template_projection = None
             inventory_service = get_inventory_service()
             # ``edge_scheduler`` 是本地调度权威（Scheduler Authority）；只把同一
@@ -197,10 +199,11 @@ def setup_server() -> FastAPI:
                 ),
             )
             workflow_routes_mounted = True
-        except Exception as e:  # noqa: BLE001 - unrelated Edge routes remain available
+        except Exception as e:  # noqa: BLE001 - 无关边缘侧（Edge）路由仍可用
             error(f"[Web] 挂载后端（Backend）工作流（Workflow）合同失败: {e!s}")
 
-    # Edge 调度器与 Host 物料路由独立挂载；默认 embedded 物料服务不要求 --edge_scheduler。
+    # 边缘调度器（Edge Scheduler）与主机（Host）物料路由独立挂载；默认
+    # 内嵌（embedded）物料服务不要求 --edge_scheduler。
     try:
         from unilabos.app.scheduler.api import create_scheduler_router
         from unilabos.app.scheduler.integration import (
@@ -246,7 +249,7 @@ def setup_server() -> FastAPI:
             app.include_router(create_legacy_material_router(inventory_service))
             app.include_router(create_lab_router(inventory_service))
     except Exception as e:  # noqa: BLE001 - 调度器路由挂载失败不影响主服务
-        error(f"[Web] 挂载 Edge 调度器路由失败: {e!s}")
+        error(f"[Web] 挂载边缘调度器（Edge Scheduler）路由失败: {e!s}")
 
     # 设置页面路由
     try:
