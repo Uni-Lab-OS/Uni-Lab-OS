@@ -41,16 +41,22 @@ def compile_workflow_definitions(
 
     if manifest is None:
         return ()
+    # ``definitions`` 收集本清单同代的完整工作流目录候选，函数结束前不会发布。
     definitions: list[PackageDefinition] = []
+    # ``identities`` 按规范 FQID 关闭式拒绝包内重复工作流定义。
     identities: set[str] = set()
     for entry in manifest.workflows:
+        # ``workflow_uuid`` 是清单与源码装饰器必须共同确认的稳定工作流身份。
+        workflow_uuid = entry.workflow_uuid
+        # ``logical_path`` 是源码证据和诊断共用的包内路径身份。
         logical_path = f"{import_package}/{entry.relative_path}"
         try:
+            # ``python_source`` 只进入可信静态解析器，不执行作者模块。
             python_source = source.read_bytes(logical_path).decode("utf-8")
             # ``program`` 是不执行源码得到的可信工作流静态程序。
             program = parse_authoring_source(
                 python_source=python_source,
-                expected_workflow_uuid=entry.workflow_uuid,
+                expected_workflow_uuid=workflow_uuid,
             )
         except (UnicodeError, ValueError, AuthoringSyntaxError) as error:
             diagnostic_code = (
@@ -67,6 +73,7 @@ def compile_workflow_definitions(
                     ),
                 )
             ) from error
+        # ``fqid`` 是跨包查询和冲突检测使用的规范工作流定义身份。
         fqid = f"{namespace}.{program.function_name}"
         if fqid in identities:
             raise PackageCompileError(
@@ -79,6 +86,7 @@ def compile_workflow_definitions(
                 )
             )
         identities.add(fqid)
+        # ``module`` 与函数符号共同保存源码映射，不承担工作流 UUID 身份。
         module = logical_path.removesuffix(".py").replace("/", ".")
         definitions.append(
             PackageDefinition(
@@ -99,7 +107,7 @@ def compile_workflow_definitions(
                         for name, schema in program.declared_output_schemas
                     ],
                     "source_uri": (f"package://{import_package}/{entry.relative_path}"),
-                    "workflow_uuid": entry.workflow_uuid,
+                    "workflow_uuid": workflow_uuid,
                 },
             )
         )

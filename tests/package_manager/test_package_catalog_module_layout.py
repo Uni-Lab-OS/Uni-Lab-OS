@@ -40,10 +40,12 @@ def test_new_package_catalog_interface_compiles_the_same_catalog(
     source = WorkspaceSource(workspace_root)
     startup_plan = compile_workspace_startup(source)
 
+    # ``legacy_catalog`` 是根兼容编排入口产生的行为基准包目录（PackageCatalog）。
     legacy_catalog = compile_legacy_package_source(
         source,
         startup_plan=startup_plan,
     )
+    # ``layered_catalog`` 是新 Module 对同一冻结输入产生的包目录（PackageCatalog）。
     layered_catalog = compile_layered_package_source(
         source,
         startup_plan=startup_plan,
@@ -63,6 +65,7 @@ def test_legacy_catalog_imports_retain_the_new_public_type_identities() -> None:
     异常：兼容 wrapper 复制实现或新 Interface 遗漏公开类型时测试失败。
     """
 
+    # 三组 import 别名分别捕获根门面、历史模块和新 Module 的实际类型对象身份。
     from unilabos.package_manager import PackageCatalog as root_package_catalog
     from unilabos.package_manager import WorkspaceSource as root_workspace_source
     from unilabos.package_manager.catalog import (
@@ -105,6 +108,7 @@ def test_legacy_compiler_preserves_invalid_source_diagnostic(tmp_path: Path) -> 
     invalid_workspace_root = tmp_path / "invalid-workspace"
     invalid_workspace_root.mkdir()
 
+    # ``caught`` 保存根兼容入口对非法来源产生的结构化编译诊断。
     with pytest.raises(PackageCompileError) as caught:
         compile_package_source(WorkspaceSource(invalid_workspace_root))
 
@@ -141,12 +145,16 @@ def test_package_catalog_module_has_no_reverse_dependency_on_parent_layers() -> 
         "unilabos.package_manager.workspace_runtime",
         "unilabos.package_manager.driver_runtime",
     )
+    # ``violations`` 记录源码路径、行号和越层导入身份，便于直接定位依赖反转。
     violations: list[str] = []
     for source_file in sorted(module_root.rglob("*.py")):
+        # ``relative_file`` 是守卫报告使用的 Module 内路径，不绑定工作树绝对位置。
         relative_file = source_file.relative_to(module_root)
+        # ``module_parts`` 从源码相对路径恢复 Python Module 身份的组成部分。
         module_parts = list(relative_file.with_suffix("").parts)
         if module_parts[-1] == "__init__":
             module_parts.pop()
+        # ``package_name`` 是解析相对 import 所需的当前 Python 包身份。
         package_name = ".".join(
             ["unilabos", "package_manager", "package_catalog", *module_parts[:-1]]
         )
@@ -154,11 +162,14 @@ def test_package_catalog_module_has_no_reverse_dependency_on_parent_layers() -> 
             package_name = ".".join(
                 ["unilabos", "package_manager", "package_catalog", *module_parts]
             )
+        # ``syntax_tree`` 只用于检查 import 依赖，不执行被审查 Module。
         syntax_tree = ast.parse(source_file.read_text(encoding="utf-8"))
         for node in ast.walk(syntax_tree):
             if isinstance(node, ast.Import):
+                # ``imported_names`` 是普通 import 声明的完整绝对 Module 身份集合。
                 imported_names = [alias.name for alias in node.names]
             elif isinstance(node, ast.ImportFrom):
+                # ``imported_name`` 先保留源码声明，再结合当前包解析为绝对身份。
                 imported_name = node.module or ""
                 if node.level:
                     imported_name = importlib.util.resolve_name(
@@ -169,8 +180,9 @@ def test_package_catalog_module_has_no_reverse_dependency_on_parent_layers() -> 
             else:
                 continue
             for imported_name in imported_names:
-                if imported_name == "unilabos.package_manager" or imported_name.startswith(
-                    forbidden_prefixes
+                if (
+                    imported_name == "unilabos.package_manager"
+                    or imported_name.startswith(forbidden_prefixes)
                 ):
                     violations.append(f"{relative_file}:{node.lineno}:{imported_name}")
 

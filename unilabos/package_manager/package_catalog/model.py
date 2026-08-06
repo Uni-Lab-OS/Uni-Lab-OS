@@ -66,7 +66,9 @@ def _freeze_json(value: Any) -> JSONValue:
         )
     if isinstance(value, (list, tuple)):
         return tuple(_freeze_json(item) for item in value)
-    raise TypeError(f"包目录（PackageCatalog）只接受 JSON 值，收到 {type(value).__name__}")
+    raise TypeError(
+        f"包目录（PackageCatalog）只接受 JSON 值，收到 {type(value).__name__}"
+    )
 
 
 def _thaw_json(value: JSONValue) -> Any:
@@ -227,9 +229,7 @@ class PackageDefinitionCatalog:
 
         for field_name in ("devices", "resources", "workflows"):
             # ``definitions`` 是某一类完整定义，按 FQID 保证规范序列化稳定。
-            definitions = tuple(
-                sorted(getattr(self, field_name), key=_definition_fqid)
-            )
+            definitions = tuple(sorted(getattr(self, field_name), key=_definition_fqid))
             object.__setattr__(self, field_name, definitions)
 
     def to_dict(self) -> dict[str, list[dict[str, Any]]]:

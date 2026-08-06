@@ -133,6 +133,7 @@ class RegistrySnapshot:
             raise RegistrySnapshotError(f"不支持的注册表定义种类: {kind}")
         if not isinstance(identity, str) or not identity.strip():
             raise RegistrySnapshotError("注册表定义身份不能为空")
+        # ``normalized_identity`` 是查询本次快照的调用方身份，规范 FQID 不得回退短名。
         normalized_identity = identity.strip()
         # ``canonical_definition`` 是规范 FQID 精确命中的定义，绝不降级短名。
         canonical_definition = self._definitions_by_kind[kind].get(normalized_identity)
@@ -166,19 +167,25 @@ class RegistrySnapshot:
 
         if not isinstance(graph_data, Mapping):
             raise RegistrySnapshotError("物理图必须是对象")
+        # ``raw_nodes`` 是物理图（Graph）本次固定观察的节点集合，不是目录定义来源。
         raw_nodes = graph_data.get("nodes", ())
         if not isinstance(raw_nodes, (list, tuple)):
             raise RegistrySnapshotError("物理图 nodes 必须是数组")
+        # ``selected_devices`` 与 ``selected_resources`` 按规范 FQID 去重图中有限选择。
         selected_devices: dict[str, PackageDefinition] = {}
         selected_resources: dict[str, PackageDefinition] = {}
+        # ``node_definitions`` 保存图节点身份到规范定义 FQID 的确定性绑定。
         node_definitions: dict[str, str] = {}
         for node_index, raw_node in enumerate(raw_nodes):
             if not isinstance(raw_node, Mapping):
                 raise RegistrySnapshotError("物理图节点必须是对象")
+            # ``raw_identity`` 是图声明的规范 FQID 或遗留短身份，尚未完成解析。
             raw_identity = raw_node.get("class")
             if not isinstance(raw_identity, str) or not raw_identity.strip():
                 continue
+            # ``identity`` 只消除边界空白，不改写图声明的定义身份语义。
             identity = raw_identity.strip()
+            # ``raw_node_type`` 决定到设备或资源定义索引解析，不代表运行状态。
             raw_node_type = raw_node.get("type")
             # ``node_kind`` 兼容历史图中缺失 ``type`` 的设备节点；只有明确的非设备
             # 类型才按资源定义解析，避免旧设备被错误投影为资源。
@@ -191,11 +198,14 @@ class RegistrySnapshot:
                 and identity not in self._short_identities[node_kind]
             ):
                 continue
+            # ``definition`` 是当前不可变注册表快照（Registry Snapshot）解析出的原对象。
             definition = self.resolve(node_kind, identity)
+            # ``destination`` 按节点种类收集有限激活定义，避免跨种类身份混入。
             destination = (
                 selected_devices if node_kind == "device" else selected_resources
             )
             destination[definition.fqid] = definition
+            # ``node_identity`` 是物理图节点稳定身份；缺失遗留 id 时才使用固定序号。
             node_identity = str(raw_node.get("id") or node_index)
             node_definitions[node_identity] = definition.fqid
         return RegistryActivationPlan(
@@ -217,11 +227,13 @@ class RegistrySnapshot:
         两个原映射，产品运行路径必须使用内部原子接缝。
         """
 
+        # ``publish_snapshot`` 是产品注册表提供的原子发布接缝，优先于通用回滚 Adapter。
         publish_snapshot = getattr(registry, "publish_package_snapshot", None)
         if callable(publish_snapshot):
             publish_snapshot(self)
             return
         try:
+            # ``original_devices`` 与 ``original_resources`` 是发布失败时的恢复基线。
             original_devices = copy.deepcopy(dict(registry.device_type_registry))
             original_resources = copy.deepcopy(dict(registry.resource_type_registry))
         except (AttributeError, TypeError) as error:
@@ -342,6 +354,7 @@ def compile_registry_snapshot(
     """
 
     try:
+        # ``package_catalogs`` 按命名空间和目录摘要稳定排序，固定整个快照输入代。
         package_catalogs = tuple(
             sorted(
                 catalogs,
@@ -352,18 +365,23 @@ def compile_registry_snapshot(
         raise RegistrySnapshotError("输入必须全部是包目录（PackageCatalog）") from error
     if any(not isinstance(item, PackageCatalog) for item in package_catalogs):
         raise RegistrySnapshotError("输入必须全部是包目录（PackageCatalog）")
+    # ``namespaces`` 关闭式拒绝两个包目录（PackageCatalog）争用同一跨包身份域。
     namespaces: set[str] = set()
+    # ``definitions_by_kind`` 以规范 FQID 保存三类完整定义，不接受跨种类混用。
     definitions_by_kind: dict[str, dict[str, PackageDefinition]] = {
         "device": {},
         "resource": {},
         "workflow": {},
     }
+    # ``short_identities`` 仅建立遗留查询索引；存在歧义时绝不选择任一候选。
     short_identities: dict[str, dict[str, list[PackageDefinition]]] = {
         "device": {},
         "resource": {},
         "workflow": {},
     }
+    # ``workflow_uuids`` 保证跨包工作流（Workflow）稳定身份全代唯一。
     workflow_uuids: set[str] = set()
+    # ``assets_by_identity`` 以命名空间和逻辑路径组成的 FQID 去重静态资产。
     assets_by_identity: dict[str, RegistryAsset] = {}
     for catalog in package_catalogs:
         if catalog.namespace in namespaces:
@@ -384,6 +402,7 @@ def compile_registry_snapshot(
                 definitions_by_kind[kind][definition.fqid] = definition
                 short_identities[kind].setdefault(definition.id, []).append(definition)
                 if kind == "workflow":
+                    # ``workflow_uuid`` 是工作流定义的稳定领域身份，不能仅靠 FQID 区分。
                     workflow_uuid = definition.details.get("workflow_uuid")
                     if isinstance(workflow_uuid, str) and workflow_uuid:
                         if workflow_uuid in workflow_uuids:
@@ -392,6 +411,7 @@ def compile_registry_snapshot(
                             )
                         workflow_uuids.add(workflow_uuid)
         for package_asset in catalog.assets:
+            # ``registry_asset`` 把包内逻辑路径提升为跨包唯一且带摘要的资产身份。
             registry_asset = RegistryAsset.from_package_asset(
                 namespace=catalog.namespace,
                 asset=package_asset,
@@ -402,19 +422,19 @@ def compile_registry_snapshot(
                 )
             assets_by_identity[registry_asset.fqid] = registry_asset
 
+    # ``frozen_definitions`` 是按种类和 FQID 排序的不可变规范查询索引。
     frozen_definitions = MappingProxyType(
         {
             kind: MappingProxyType(dict(sorted(definitions.items())))
             for kind, definitions in definitions_by_kind.items()
         }
     )
+    # ``frozen_short_identities`` 保留全部短名候选，以便歧义时关闭式失败。
     frozen_short_identities = MappingProxyType(
         {
             kind: MappingProxyType(
                 {
-                    short_identity: tuple(
-                        sorted(definitions, key=_definition_fqid)
-                    )
+                    short_identity: tuple(sorted(definitions, key=_definition_fqid))
                     for short_identity, definitions in sorted(short_map.items())
                 }
             )
@@ -469,6 +489,7 @@ def _merge_registry_definitions(
     catalog_digests = {
         catalog.namespace: catalog.catalog_digest for catalog in catalogs
     }
+    # ``candidate`` 是尚未发布的完整注册表候选，先剔除上一代包托管成员。
     candidate = {
         key: copy.deepcopy(value)
         for key, value in originals.items()
@@ -479,10 +500,13 @@ def _merge_registry_definitions(
             raise RegistrySnapshotError(
                 f"软件包定义与既有注册表身份冲突: {definition.fqid}"
             )
+        # ``details`` 是与不可变定义分离的新容器，后续 Adapter 修改不污染快照。
         details = definition.to_dict()["details"]
+        # ``registry_entry`` 是设备/资源定义提供的规范注册表 JSON 投影。
         registry_entry = details.get("registry_entry")
         if not isinstance(registry_entry, dict):
             raise RegistrySnapshotError(f"软件包定义缺少注册表条目: {definition.fqid}")
+        # ``entry`` 是本次候选独占副本，并附加定义、源码与目录摘要证据。
         entry = copy.deepcopy(registry_entry)
         entry["id"] = definition.fqid
         # ``source_fqid`` 是产品模板投影使用的 Python 源码身份，必须保持
@@ -513,6 +537,7 @@ def _restore_registry_mapping(
     """
 
     try:
+        # ``current`` 是失败后的实时映射；已恢复时不重复覆盖其他恢复动作。
         current = getattr(registry, attribute)
         if dict(current) == dict(original):
             return

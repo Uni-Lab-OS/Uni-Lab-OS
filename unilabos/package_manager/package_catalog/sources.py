@@ -15,7 +15,7 @@ class WorkspaceSource:
     # ``root`` 是不经过符号链接的规范工作区根目录，也是全部文件读取的授权边界。
     root: Path
 
-    def __init__(self, root: str | Path):
+    def __init__(self, root: str | Path) -> None:
         """固定不经过符号链接的工作区根目录。
 
         参数：``root`` 是调用者显式选择的工作区目录。
@@ -23,8 +23,10 @@ class WorkspaceSource:
         异常：目录缺失、不是目录或任一路径段是符号链接时抛出 ``ValueError``。
         """
 
+        # ``selected_root`` 保留调用者选择的无符号链接绝对边界，禁止静默换根。
         selected_root = Path(os.path.abspath(Path(root).expanduser()))
         try:
+            # ``resolved_root`` 是文件读取最终采用的规范工作区身份。
             resolved_root = selected_root.resolve(strict=True)
         except (OSError, RuntimeError) as error:
             raise ValueError("工作区（Workspace）根目录不存在或不可访问") from error
@@ -56,6 +58,7 @@ class WorkspaceSource:
         ``ValueError``。
         """
 
+        # ``resolved_file`` 是已验证位于授权根内且不经过符号链接的文件身份。
         resolved_file = self._resolve_regular_file(logical_path, required=True)
         assert resolved_file is not None
         try:
@@ -87,7 +90,9 @@ class WorkspaceSource:
         异常：非法路径、符号链接、目录逃逸或非普通文件抛出 ``ValueError``。
         """
 
+        # ``logical_file`` 是完成逃逸语义校验后的 POSIX 包内路径身份。
         logical_file = _safe_logical_path(logical_path)
+        # ``selected_file`` 保留授权根与逻辑路径的直接拼接结果，供符号链接检查。
         selected_file = self.root.joinpath(*logical_file.parts)
         if not selected_file.exists():
             if required:
@@ -100,6 +105,7 @@ class WorkspaceSource:
         ):
             raise ValueError(f"工作区文件不得经过符号链接: {logical_path}")
         try:
+            # ``resolved_file`` 是最终读取目标，必须仍从属于工作区授权根。
             resolved_file = selected_file.resolve(strict=True)
         except (OSError, RuntimeError) as error:
             raise ValueError(f"工作区文件不可访问: {logical_path}") from error
@@ -118,6 +124,7 @@ def _safe_logical_path(logical_path: str) -> PurePosixPath:
 
     if not isinstance(logical_path, str) or not logical_path or "\\" in logical_path:
         raise ValueError("工作区逻辑路径必须是非空 POSIX 相对路径")
+    # ``logical_file`` 仅表达包内逻辑身份，不解析宿主文件系统或跟随链接。
     logical_file = PurePosixPath(logical_path)
     if (
         logical_file.is_absolute()

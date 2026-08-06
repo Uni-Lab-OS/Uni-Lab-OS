@@ -83,6 +83,7 @@ def compile_package_source(
         resolved_startup_plan = startup_plan
         if resolved_startup_plan.source.root != source.root:
             raise ValueError("startup_plan 必须属于当前显式工作区来源")
+        # ``logical_files`` 是本次输入代允许进入摘要和定义编译的完整相对路径集。
         logical_files = _collect_package_files(
             source,
             resolved_startup_plan.package_directory,
@@ -101,20 +102,24 @@ def compile_package_source(
     file_contents = {
         logical_path: source.read_bytes(logical_path) for logical_path in logical_files
     }
+    # ``python_files`` 只含通过 UTF-8 和语法门禁的规范绝对源码路径。
     python_files = _validate_python_sources(
         source=source,
         file_contents=file_contents,
     )
+    # ``content_hashes`` 以工作区逻辑路径为键，绑定本次固定文件观察的内容身份。
     content_hashes = {
         logical_path: _sha256(content)
         for logical_path, content in file_contents.items()
     }
+    # ``devices`` 与 ``resources`` 是同一输入代产生、尚未发布的完整静态定义。
     devices, resources = compile_registry_definitions(
         workspace_root=source.root,
         namespace=resolved_startup_plan.community_namespace,
         python_files=python_files,
         content_hashes=content_hashes,
     )
+    # ``workflows`` 只包含清单显式授权且 UUID 已与源码核对的工作流定义。
     workflows = compile_workflow_definitions(
         source=source,
         import_package=resolved_startup_plan.import_package,
@@ -122,6 +127,7 @@ def compile_package_source(
         manifest=resolved_startup_plan.workflow_manifest,
         content_hashes=content_hashes,
     )
+    # ``all_fqids`` 汇总跨种类规范定义身份，任何重复都会使整包关闭式失败。
     all_fqids = [item.fqid for item in (*devices, *resources, *workflows)]
     if len(set(all_fqids)) != len(all_fqids):
         raise PackageCompileError(
@@ -132,6 +138,7 @@ def compile_package_source(
                 ),
             )
         )
+    # ``assets`` 是非 Python 文件的不可变目录证据，逻辑路径和摘要共同标识内容。
     assets = tuple(
         PackageAsset(
             logical_path=logical_path,
@@ -143,6 +150,7 @@ def compile_package_source(
     )
     # ``project`` 是工作区启动和目录编译共用的项目元数据事实。
     project = resolved_startup_plan.project_metadata
+    # ``distribution`` 冻结发行包身份，不包含工作区绝对路径或运行时安装状态。
     distribution = PackageDistributionIdentity(
         name=project.name,
         normalized_name=project.normalized_name,
@@ -153,6 +161,7 @@ def compile_package_source(
         requires_python=project.requires_python,
         dependencies=project.dependencies,
     )
+    # ``content_items`` 是完整来源内容摘要的输入闭包，清单原始字节只读取一次。
     content_items = [
         ("pyproject.toml", resolved_startup_plan.project_file_bytes),
         *(
@@ -192,6 +201,7 @@ def _required_workflow_manifest_bytes(
     读取磁盘并形成混合输入代。
     """
 
+    # ``manifest_bytes`` 与解析后的工作流清单属于同一固定输入代。
     manifest_bytes = startup_plan.workflow_manifest_bytes
     if manifest_bytes is None:
         raise ValueError("工作流源码清单缺少同代固定原始字节")
@@ -209,11 +219,15 @@ def _collect_package_files(
     异常：遇到符号链接、不可读目录或越界对象时抛出 ``ValueError``。
     """
 
+    # ``pending_directories`` 只遍历已验证导入包边界，不递归整个工作区。
     pending_directories = [package_directory]
+    # ``logical_files`` 保存相对授权根的路径身份，禁止绝对路径进入目录摘要。
     logical_files: list[str] = []
     while pending_directories:
+        # ``current_directory`` 始终来自导入包边界内的待访问集合。
         current_directory = pending_directories.pop()
         try:
+            # ``entries`` 先按文件名稳定排序，消除文件系统遍历顺序差异。
             entries = sorted(current_directory.iterdir(), key=_path_name)
         except OSError as error:
             raise ValueError("软件包工作区不可读取") from error
@@ -227,6 +241,7 @@ def _collect_package_files(
                 continue
             if not entry.is_file() or entry.suffix in _IGNORED_SUFFIXES:
                 continue
+            # ``logical_path`` 是资产、诊断和源码摘要共同使用的包内稳定路径身份。
             logical_path = entry.relative_to(source.root).as_posix()
             if not source.has_file(logical_path):
                 raise ValueError("软件包文件不在授权来源内")
@@ -246,12 +261,15 @@ def _validate_python_sources(
     异常：任一文件编码或语法无效时抛出单个 ``PackageCompileError``，不会继续投影。
     """
 
+    # ``python_files`` 收集可交给 AST 编译器的规范源码路径，不代表已导入模块。
     python_files: list[Path] = []
+    # ``diagnostics`` 聚合整包语法门禁结果，禁止先发布部分有效源码。
     diagnostics: list[PackageDiagnostic] = []
     for logical_path, content in sorted(file_contents.items()):
         if not logical_path.endswith(".py"):
             continue
         try:
+            # ``source_text`` 仅供静态语法校验，不执行也不导入作者代码。
             source_text = content.decode("utf-8")
             ast.parse(source_text, filename=logical_path)
         except UnicodeError:
@@ -298,8 +316,10 @@ def _content_digest(items: list[tuple[str, bytes]]) -> str:
     异常：路径不是 UTF-8 可编码文本时传播编码异常。
     """
 
+    # ``digest`` 按路径和内容长度分隔累计，避免不同边界组合产生同一输入序列。
     digest = hashlib.sha256()
     for logical_path, content in sorted(items):
+        # ``path_bytes`` 编码稳定逻辑路径身份，绝对工作区路径从不进入摘要。
         path_bytes = logical_path.encode("utf-8")
         digest.update(len(path_bytes).to_bytes(8, "big"))
         digest.update(path_bytes)
