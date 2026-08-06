@@ -1,0 +1,37 @@
+{
+  "directed": false,
+  "multigraph": false,
+  "graph": {
+    "description": "Uni-Lab SZLab mock package local validation graph"
+  },
+  "nodes": [
+    {
+      "id": "mock_szlab_s08_cap_station",
+      "uuid": "4a3901c6-755a-4e31-8317-2b912be0cf79",
+      "name": "Mock S08 开关盖工位",
+      "children": [],
+      "parent": null,
+      "type": "device",
+      "class": "community.unilab_szlab_mock.mock_s08_cap_station",
+      "position": {
+        "x": 0,
+        "y": 0,
+        "z": 0
+      },
+      "config": {
+        "station_name": "Mock S08 Cap Station",
+        "auto_connect": true,
+        "cycle_delay_ms": 20,
+        "cap_slot_count": 5,
+        "initial_occupied_slots": 0,
+        "channel_map": {
+          "cap_sensor": "memory://s08/cap-sensor",
+          "station_state": "memory://s08/station-state"
+        }
+      },
+      "data": {},
+      "extra": {}
+    }
+  ],
+  "links": []
+}
