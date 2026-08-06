@@ -1,4 +1,4 @@
-"""Workflow v1 Contract 与严格值 Schema 的公共接口合同测试。"""
+"""工作流（Workflow）v1 合同与严格值 Schema 的公共接口合同测试。"""
 
 from __future__ import annotations
 
@@ -654,7 +654,7 @@ def test_parsed_schema_is_an_immutable_typed_value_object() -> None:
     schema = _parse_schema({"type": "string"})
 
     with pytest.raises((AttributeError, TypeError)):
-        setattr(schema, "_mutation_probe", True)
+        setattr(schema, "_mutation_probe", True)  # noqa: B010
 
 
 def test_parse_input_contract_accepts_exactly_the_three_declaration_shapes() -> None:
@@ -1004,7 +1004,7 @@ def test_input_contract_owns_defaults_and_returns_fresh_dumps() -> None:
     raw["parameters"][0]["default"]["nested"][0] = 2
     assert contract.to_dict() == original
     with pytest.raises((AttributeError, TypeError)):
-        setattr(contract, "_mutation_probe", True)
+        setattr(contract, "_mutation_probe", True)  # noqa: B010
 
 
 def test_parse_output_contract_defaults_implicit_to_false_and_preserves_order() -> None:

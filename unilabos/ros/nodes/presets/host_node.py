@@ -1,15 +1,26 @@
 import collections
-import copy
+import importlib
 import json
 import threading
 import time
 import traceback
 import uuid
-from concurrent.futures import Future as ConcurrentFuture, ThreadPoolExecutor
+from copy import deepcopy
 
 from unilabos.utils.tools import fast_dumps_str as _fast_dumps_str, fast_loads as _fast_loads
 from dataclasses import dataclass, field
-from typing import TYPE_CHECKING, Optional, Dict, Any, List, ClassVar, Set, Tuple, Union
+from typing import (
+    TYPE_CHECKING,
+    Optional,
+    Dict,
+    Any,
+    Iterable,
+    List,
+    ClassVar,
+    Set,
+    Tuple,
+    Union,
+)
 
 from action_msgs.msg import GoalStatus
 from geometry_msgs.msg import Point
@@ -28,13 +39,6 @@ from unilabos_msgs.srv import (
 from unilabos_msgs.srv._serial_command import SerialCommand_Request, SerialCommand_Response
 from unique_identifier_msgs.msg import UUID
 
-from unilabos.observability import runtime as runtime_tracing
-from unilabos.observability.runtime import (
-    TRACE_CONTEXT_KEY,
-    fail_open_span,
-    normalize_trace_context,
-    safe_capture_context,
-)
 from unilabos.registry.decorators import (
     ActionInputHandle,
     ActionOutputHandle,
@@ -78,9 +82,9 @@ from unilabos.ros.msgs.message_converter import (
 )
 from unilabos.ros.nodes.base_device_node import (
     BaseROS2DeviceNode,
-    ROS2DeviceNode,
     DeviceNodeResourceTracker,
-    registered_devices,
+    ROS2DeviceNode,
+    _stable_resource_uuid,
 )
 from unilabos.ros.nodes.presets.controller_node import ControllerNode
 from unilabos.utils import logger
@@ -91,10 +95,6 @@ from unilabos.config.config import BasicConfig
 
 if TYPE_CHECKING:
     from unilabos.app.ws_client import QueueItem
-
-_TRACE_ACTION_SERVER_WAIT_TIMEOUT_SECONDS = 5.0
-_WORKFLOW_NODE_JOB_UUID_PARAM = "workflow_node_job_uuid"
-_WORKFLOW_TASK_UUID_PARAM = "workflow_task_uuid"
 
 
 @dataclass
@@ -122,10 +122,11 @@ class DeductResourceReturn(CreateResourceReturn):
 
 @dataclass(frozen=True, slots=True, kw_only=True)
 class TransferResourceReturn:
-    """transfer_resource 返回值：透传被转移物料、目标孔位与槽位，便于下游引用。
+    """转移记账动作的类型化结果合同，同时保留运行时字典返回形状。
 
-    resource / mount_resource 均为单个物料的扁平节点形态，可直接连接到下游
-    ResourceSlot 输入。
+    ``resource`` 与 ``mount_resource`` 在工作流创作合同中都是物料占位符
+    （ResourceSlot），从而可以继续连接下游动作；运行时仍返回原有四键字典，
+    不改变旧调用方读取 ``resource/mount_resource/site/result`` 的方式。
     """
 
     resource: ResourceSlot
@@ -135,7 +136,7 @@ class TransferResourceReturn:
 
 
 class TransferManualReturn(TypedDict):
-    """transfer_manual 返回值：人工搬运闸门，仅透传物料/目标设备/目标孔位/槽位，不做系统转移。
+    """transfer_manual 返回值：人工搬运闸门，仅透传物料/目标设备/目标孔位/库位，不做系统转移。
 
     resource / mount_resource 均为「单个物料」的扁平节点形态（list[list[ResourceDict]]，单根）。
     """
@@ -144,6 +145,14 @@ class TransferManualReturn(TypedDict):
     mount_resource: List[List[ResourceDictType]]
     target_device: str
     site: str
+
+
+def _dump_resource_slot(resource: Any) -> List[List[ResourceDictType]]:
+    """序列化 PLR 物料或设备型父资源原始映射。"""
+
+    if isinstance(resource, dict):
+        return [[dict(resource)]]
+    return ResourceTreeSet.from_plr_resources([resource]).dump()
 
 
 class TestLatencyReturn(TypedDict):
@@ -195,7 +204,6 @@ class HostNode(BaseROS2DeviceNode):
             timeout: Maximum time to wait for each thread (seconds)
         """
         cls._shutting_down = True
-        cls._shutdown_trace_registration_executor()
 
         # Wait for background threads to finish
         active_threads = []
@@ -213,25 +221,11 @@ class HostNode(BaseROS2DeviceNode):
         logger.info(f"[Host Node] Background threads shutdown complete")
 
     @classmethod
-    def _shutdown_trace_registration_executor(cls) -> None:
-        """取消未开始的 trace 登记，并阻止旧 Host 在 reset 后继续发设备 goal。"""
-
-        instance = cls._instance
-        if instance is None:
-            return
-        instance._shutting_down = True
-        executor = getattr(instance, "_trace_registration_executor", None)
-        instance._trace_registration_executor = None
-        if executor is not None:
-            executor.shutdown(wait=False, cancel_futures=True)
-
-    @classmethod
     def reset_state(cls) -> None:
         """
         Reset the HostNode singleton state for restart or clean exit.
         Call this after destroying the instance.
         """
-        cls._shutdown_trace_registration_executor()
         cls._instance = None
         cls._ready_event.clear()
         cls._shutting_down = False
@@ -402,16 +396,6 @@ class HostNode(BaseROS2DeviceNode):
         }  # device_id -> action_value_mappings(本地+远程设备统一存储)
         self._slave_registry_configs: Dict[str, Dict] = {}  # registry_name -> registry_config(含action_value_mappings)
         self._goals: Dict[str, Any] = {}  # 用来存储多个目标的状态
-        self._goal_trace_contexts: Dict[str, Dict[str, str]] = {}
-        self._goals_lock = threading.RLock()
-        self._pending_goal_requests: Set[str] = set()
-        # 手动解锁可能发生在 send_goal_async 返回、goal response 到达之前。
-        # 这里保存待接受 goal 的取消意图，避免旧 goal 迟到接受后无人取消。
-        self._pending_goal_cancellations: Set[str] = set()
-        self._trace_registration_executor = ThreadPoolExecutor(
-            max_workers=4,
-            thread_name_prefix="HostTraceRegistration",
-        )
         self._online_devices: Set[str] = {f"{self.namespace}/{device_id}"}  # 用于跟踪在线设备
         self._last_discovery_time = 0.0  # 上次设备发现的时间
         self._discovery_lock = threading.Lock()  # 设备发现的互斥锁
@@ -428,7 +412,6 @@ class HostNode(BaseROS2DeviceNode):
 
         # 初始化所有本机设备节点，多一次过滤，防止重复初始化
         local_machine = BasicConfig.machine_name
-        initialization_failures: list[str] = []
         for device_config in devices_config.root_nodes:
             device_id = device_config.res_content.id
             if device_config.res_content.type != "device":
@@ -441,8 +424,7 @@ class HostNode(BaseROS2DeviceNode):
                 )
                 continue
             if device_id not in self.devices_names:
-                if not self.initialize_device(device_id, device_config):
-                    initialization_failures.append(device_id)
+                self.initialize_device(device_id, device_config)
             else:
                 self.lab_logger().warning(f"[Host Node] Device {device_id} already existed, skipping.")
         self.update_device_status_subscriptions()
@@ -464,12 +446,6 @@ class HostNode(BaseROS2DeviceNode):
         self._ping_responses = {}  # 存储ping响应
         self._ping_lock = threading.Lock()
 
-        if initialization_failures:
-            failed = ", ".join(sorted(initialization_failures))
-            self.lab_logger().error(
-                f"[Host Node] Host node initialization failed; devices unavailable: {failed}"
-            )
-            return
         self.lab_logger().info("[Host Node] Host node initialized.")
         HostNode._ready_event.set()
 
@@ -562,6 +538,31 @@ class HostNode(BaseROS2DeviceNode):
                 self._background_threads.append(t)
                 t.start()
 
+        # Discovery Server v2 may withhold the remote node graph while still
+        # matching the Action endpoints we created from Slave registration.
+        # Keep a device online only when at least one of those ROS clients is
+        # actually ready; HostLink heartbeat alone never satisfies this test.
+        for edge_device_id, namespace in self.devices_names.items():
+            if edge_device_id == self.device_id or not namespace.startswith(
+                "/devices/"
+            ):
+                continue
+            device_key = f"{namespace}/{edge_device_id}"
+            if device_key in current_devices:
+                continue
+            action_prefix = f"{namespace}/"
+            action_clients = [
+                client
+                for action_id, client in self._action_clients.items()
+                if action_id.startswith(action_prefix)
+            ]
+            if self._has_ready_action_client(action_clients):
+                current_devices.add(device_key)
+                if device_key not in self._online_devices:
+                    self._report_action_locks_free(
+                        self._routable_reported_action_pairs(edge_device_id)
+                    )
+
         # 检测离线设备
         offline_devices = self._online_devices - current_devices
         for device_key in offline_devices:
@@ -636,7 +637,7 @@ class HostNode(BaseROS2DeviceNode):
 
         # 补充 _action_value_mappings 中其余动作：UniLabJsonCommand 类型动作不建独立
         # ROS ActionServer，不会出现在 get_action_server_names_and_types_by_node 的结果里；
-        # @action(auto_prefix=True) 注册成的 "auto-" 动作(如 workbench 的 prepare_materials 等)
+        # ``auto_prefix=True`` 注册成的遗留 ``auto-`` 动作（如 workbench.prepare_materials）。
         # 同理。它们仍是可经 _execute_driver_command 调用的能力，发现新设备时必须全量补报其
         # free 锁，否则服务端永远感知不到这些动作。_execute_driver_command[_async] 由
         # _report_action_locks_free 统一过滤，不在此处特判。
@@ -648,6 +649,177 @@ class HostNode(BaseROS2DeviceNode):
 
         # 发现新 action 后主动上报其 free 锁状态
         self._report_action_locks_free(new_action_pairs)
+
+    @staticmethod
+    def _resolve_reported_action_type(action_type: Any) -> Any:
+        """Resolve a Slave registry's JSON-safe action type back to a ROS class."""
+
+        if isinstance(action_type, type):
+            return action_type
+        type_name = str(action_type or "").strip()
+        if type_name.startswith("<class '") and type_name.endswith("'>"):
+            type_name = type_name[8:-2]
+        if not type_name:
+            raise ValueError("empty ROS action type")
+        if "/" in type_name:
+            return get_ros_type_by_msgname(type_name)
+        if "." in type_name:
+            module_name, class_name = type_name.rsplit(".", 1)
+            return getattr(importlib.import_module(module_name), class_name)
+        # Old YAML/HTTP registries may contain only the exported class name.
+        from unilabos.config.config import ROSConfig
+
+        for module_name in ROSConfig.modules:
+            if not module_name.endswith(".action"):
+                continue
+            module = importlib.import_module(module_name)
+            resolved = getattr(module, type_name, None)
+            if resolved is not None:
+                return resolved
+        raise ValueError(f"unknown ROS action type: {type_name}")
+
+    @staticmethod
+    def _has_ready_action_client(
+        clients: Iterable[Any],
+        wait_timeout: float = 0.0,
+    ) -> bool:
+        """Return whether any ROS Action endpoint has actually matched.
+
+        ``server_is_ready`` may raise while an rclpy context is shutting down;
+        discovery polling must treat that as unavailable instead of killing its
+        timer callback.  ``wait_timeout`` is a total budget shared by every
+        client, not a per-action delay.
+        """
+
+        candidates = list(clients)
+        deadline = time.monotonic() + max(float(wait_timeout), 0.0)
+        while candidates:
+            for client in candidates:
+                try:
+                    if client.server_is_ready():
+                        return True
+                except Exception:  # noqa: BLE001 - rclpy teardown/race
+                    continue
+            if time.monotonic() >= deadline:
+                return False
+            time.sleep(min(0.05, max(deadline - time.monotonic(), 0.0)))
+        return False
+
+    def _routable_reported_action_pairs(
+        self,
+        device_id: str,
+    ) -> List[Tuple[str, str]]:
+        """Actions with a concrete ROS client, including JSON command multiplexing."""
+
+        namespace = f"/devices/{device_id}"
+        pairs: List[Tuple[str, str]] = []
+        for action_name, mapping in self._action_value_mappings.get(device_id, {}).items():
+            if not isinstance(mapping, dict):
+                continue
+            mapping_type = str(mapping.get("type") or "")
+            if action_name.startswith("auto-") or mapping_type.startswith("UniLabJsonCommand"):
+                generic = (
+                    "_execute_driver_command_async"
+                    if mapping_type.startswith("UniLabJsonCommandAsync")
+                    else "_execute_driver_command"
+                )
+                action_id = f"{namespace}/{generic}"
+            else:
+                action_id = f"{namespace}/{action_name}"
+            if action_id in self._action_clients:
+                pairs.append((device_id, action_name))
+        return pairs
+
+    def _register_reported_remote_device(
+        self,
+        device_id: str,
+        action_mappings: Dict[str, Any],
+    ) -> None:
+        """Create matching ROS ActionClients when a Slave reports device readiness.
+
+        Discovery Server v2 intentionally forwards only matching endpoints.  The
+        Slave's ``SYNC_SLAVE_NODE_INFO`` therefore acts as the deterministic cue
+        for HostNode to create its clients; the command and result remain normal
+        ROS Action traffic.
+        """
+
+        namespace = f"/devices/{device_id}"
+        self.devices_names[device_id] = namespace
+        self._action_value_mappings[device_id] = action_mappings
+        needs_json_sync = False
+        needs_json_async = False
+
+        for action_name, mapping in action_mappings.items():
+            if not isinstance(mapping, dict):
+                continue
+            mapping_type = mapping.get("type")
+            mapping_type_name = str(mapping_type or "")
+            if action_name.startswith("auto-") or mapping_type_name.startswith(
+                "UniLabJsonCommand"
+            ):
+                if mapping_type_name.startswith("UniLabJsonCommandAsync"):
+                    needs_json_async = True
+                else:
+                    needs_json_sync = True
+                continue
+
+            action_id = f"{namespace}/{action_name}"
+            if action_id in self._action_clients:
+                continue
+            try:
+                resolved_type = self._resolve_reported_action_type(mapping_type)
+                self._action_clients[action_id] = ActionClient(
+                    self,
+                    resolved_type,
+                    action_id,
+                    callback_group=self.callback_group,
+                )
+                self.lab_logger().info(
+                    f"[Host Node] Created directed ActionClient: {action_id}"
+                )
+            except Exception as exc:
+                self.lab_logger().warning(
+                    f"[Host Node] Could not create directed ActionClient "
+                    f"{action_id}: {exc}; periodic ROS graph discovery will retry"
+                )
+
+        generic_actions = []
+        if needs_json_sync:
+            generic_actions.append("_execute_driver_command")
+        if needs_json_async:
+            generic_actions.append("_execute_driver_command_async")
+        for generic_action in generic_actions:
+            action_id = f"{namespace}/{generic_action}"
+            if action_id not in self._action_clients:
+                self._action_clients[action_id] = ActionClient(
+                    self,
+                    StrSingleInput,
+                    action_id,
+                    callback_group=self.callback_group,
+                )
+                self.lab_logger().info(
+                    f"[Host Node] Created directed ActionClient: {action_id}"
+                )
+
+        routable_action_pairs = self._routable_reported_action_pairs(device_id)
+        action_clients = [
+            client
+            for action_id, client in self._action_clients.items()
+            if action_id.startswith(f"{namespace}/")
+        ]
+        if self._has_ready_action_client(action_clients, wait_timeout=1.0):
+            device_key = f"{namespace}/{device_id}"
+            self._online_devices.add(device_key)
+            self._report_action_locks_free(routable_action_pairs)
+            self.lab_logger().info(
+                f"[Host Node] Remote device ready through ROS: {device_id} "
+                f"({len(routable_action_pairs)} actions)"
+            )
+        else:
+            self.lab_logger().info(
+                f"[Host Node] Remote device registered: {device_id}; waiting for "
+                "ROS Action endpoint matching"
+            )
 
     async def create_resource_detailed(
         self,
@@ -754,7 +926,7 @@ class HostNode(BaseROS2DeviceNode):
             return res
         raise ValueError(f"创建资源时失败！响应为空")
 
-    def initialize_device(self, device_id: str, device_config: ResourceDictInstance) -> bool:
+    def initialize_device(self, device_id: str, device_config: ResourceDictInstance) -> None:
         """
         根据配置初始化设备，
 
@@ -773,9 +945,14 @@ class HostNode(BaseROS2DeviceNode):
             self.lab_logger().error(f"[Host Node] Device class invalid: {e}")
             d = None
         if d is None:
-            return False
+            return
+        # noinspection PyProtectedMember
+        self.devices_names[device_id] = d._ros_node.namespace  # 这里不涉及二级device_id
+        self.device_machine_names[device_id] = "本地"
+        self.devices_instances[device_id] = d
+        # noinspection PyProtectedMember
+        self._action_value_mappings[device_id] = d._ros_node._action_value_mappings
         new_action_pairs: List[Tuple[str, str]] = []
-        staged_action_clients: Dict[str, ActionClient] = {}
         # 仅为建独立 ROS ActionServer 的动作创建 ActionClient：
         # auto-/UniLabJsonCommand 动作无 ROS action server，无法也无需建 ActionClient。
         # noinspection PyProtectedMember
@@ -788,37 +965,17 @@ class HostNode(BaseROS2DeviceNode):
             if action_id not in self._action_clients:
                 action_type = action_value_mapping["type"]
                 try:
-                    staged_action_clients[action_id] = ActionClient(
-                        self, action_type, action_id
-                    )
+                    self._action_clients[action_id] = ActionClient(self, action_type, action_id)
                 except Exception as e:
                     self.lab_logger().error(
                         f"创建ActionClient失败，Device: {device_id}, Action Name: {action_name}, Action Type: {action_type}, Error: {e}")
-                    for client in staged_action_clients.values():
-                        try:
-                            client.destroy()
-                        except Exception:
-                            pass
-                    try:
-                        d._ros_node.destroy_node()
-                    except Exception:
-                        pass
-                    return False
+                    continue
                 self.lab_logger().trace(
                     f"[Host Node] Created ActionClient (Local): {action_id}"
                 )  # 子设备再创建用的是Discover发现的
                 new_action_pairs.append((device_id, action_name))
             else:
                 self.lab_logger().warning(f"[Host Node] ActionClient {action_id} already exists.")
-        # Device readiness is published atomically only after every required
-        # ActionClient exists.  A partially callable device must stay offline.
-        # noinspection PyProtectedMember
-        self.devices_names[device_id] = d._ros_node.namespace  # 这里不涉及二级device_id
-        self.device_machine_names[device_id] = "本地"
-        self.devices_instances[device_id] = d
-        # noinspection PyProtectedMember
-        self._action_value_mappings[device_id] = d._ros_node._action_value_mappings
-        self._action_clients.update(staged_action_clients)
         # 锁上报需全量：auto-/UniLabJsonCommand 动作虽不建 ActionClient，但仍是可经
         # _execute_driver_command 调用的能力(如 workbench 的 prepare_materials 等)，必须一并
         # 上报 free 锁，与 report_all_action_locks 的全量快照保持一致。_execute_driver_command
@@ -834,7 +991,6 @@ class HostNode(BaseROS2DeviceNode):
         self._online_devices.add(device_key)
         # 新注册本地设备 action 后主动上报其 free 锁状态
         self._report_action_locks_free(new_action_pairs)
-        return True
 
     def update_device_status_subscriptions(self) -> None:
         """
@@ -933,49 +1089,7 @@ class HostNode(BaseROS2DeviceNode):
         action_kwargs: Dict[str, Any],
         sample_material: Dict[str, str],
         server_info: Optional[Dict[str, Any]] = None,
-    ) -> Optional[ConcurrentFuture]:
-        """在 fail-open span 中向设备发送 ROS action goal。"""
-
-        parent_trace_context = normalize_trace_context(
-            getattr(item, "trace_context", {})
-        )
-        trace_context = parent_trace_context
-        with fail_open_span(
-            runtime_tracing,
-            "ros2.action.send_goal",
-            parent=parent_trace_context,
-            attributes={
-                "workflow.node_job.uuid": item.job_id,
-                "workflow.task.uuid": item.task_id,
-                "device.id": item.device_id,
-                "device.action.name": item.action_name,
-                "ros.action.type": action_type,
-                "ros.goal.uuid": item.job_id,
-            },
-        ):
-            captured_context = safe_capture_context(runtime_tracing)
-            if captured_context:
-                trace_context = captured_context
-            item.trace_context = trace_context
-            return HostNode._send_goal_with_trace(
-                self,
-                item,
-                action_type=action_type,
-                action_kwargs=action_kwargs,
-                sample_material=sample_material,
-                server_info=server_info,
-                trace_context=trace_context,
-            )
-
-    def _send_goal_with_trace(
-        self,
-        item: "QueueItem",
-        action_type: str,
-        action_kwargs: Dict[str, Any],
-        sample_material: Dict[str, str],
-        server_info: Optional[Dict[str, Any]] = None,
-        trace_context: Optional[Dict[str, str]] = None,
-    ) -> Optional[ConcurrentFuture]:
+    ) -> None:
         """
         向设备发送目标请求
 
@@ -984,6 +1098,7 @@ class HostNode(BaseROS2DeviceNode):
             action_kwargs: 动作参数
             server_info: 服务器发送信息，包含发送时间戳等
         """
+        u = uuid.UUID(item.job_id)
         device_id = item.device_id
         action_name = item.action_name
 
@@ -1006,9 +1121,6 @@ class HostNode(BaseROS2DeviceNode):
                 "function_args": action_kwargs,
                 JSON_UNILABOS_PARAM: {
                     PARAM_SAMPLE_UUIDS: sample_material,
-                    TRACE_CONTEXT_KEY: normalize_trace_context(trace_context),
-                    _WORKFLOW_NODE_JOB_UUID_PARAM: item.job_id,
-                    _WORKFLOW_TASK_UUID_PARAM: item.task_id,
                 },
             }
             action_kwargs = {"string": json.dumps(json_command)}
@@ -1024,391 +1136,106 @@ class HostNode(BaseROS2DeviceNode):
         action_client: ActionClient = self._action_clients[action_id]
         goal_msg = convert_to_ros_msg(action_client._action_type.Goal(), action_kwargs)
 
-        # 必须在任何可能阻塞或切到 trace executor 的步骤之前登记请求。
-        # 这样人工解锁可以在 ROS 真正提交前留下取消意图。
-        with HostNode._goal_tracking_lock(self):
-            self._pending_goal_requests.add(item.job_id)
-
-        try:
-            target_wrapper = self.devices_instances.get(device_id)
-            target_node = getattr(target_wrapper, "_ros_node", None) if target_wrapper is not None else None
-            if target_node is not None and hasattr(target_node, "register_job_context"):
-                try:
-                    target_node.register_job_context(
-                        item.job_id,
-                        item.task_id,
-                        item.action_name,
-                        trace_context=trace_context,
-                    )
-                except TypeError:
-                    # 兼容尚未升级 tracing seam 的本地自定义节点。
-                    target_node.register_job_context(
-                        item.job_id,
-                        item.task_id,
-                        item.action_name,
-                    )
-            elif not action_type.startswith("UniLabJsonCommand") and normalize_trace_context(
-                trace_context
-            ):
-                executor = self._trace_registration_executor
-                if executor is None or getattr(self, "_shutting_down", False):
-                    raise RuntimeError("Host is shutting down")
-                deferred = executor.submit(
-                    HostNode._register_then_send_goal,
-                    self,
-                    item,
-                    action_id,
-                    action_client,
-                    goal_msg,
-                    action_kwargs,
-                    trace_context,
-                )
-                deferred.add_done_callback(
-                    lambda future: HostNode._deferred_goal_send_callback(
-                        self,
-                        item,
-                        action_id,
-                        future,
-                    )
-                )
-                return deferred
-
-            HostNode._send_action_goal(
-                self,
-                item,
-                action_id,
-                action_client,
-                goal_msg,
-                action_kwargs,
+        target_wrapper = self.devices_instances.get(device_id)
+        target_node = getattr(target_wrapper, "_ros_node", None) if target_wrapper is not None else None
+        if target_node is not None and hasattr(target_node, "register_job_context"):
+            target_node.register_job_context(
+                item.job_id,
+                item.task_id,
+                item.action_name,
+                trace_context=item.trace_context,
             )
-        except Exception:
-            HostNode._clear_goal_tracking(self, item.job_id)
-            raise
-        return None
-
-    def _send_action_goal(
-        self,
-        item: "QueueItem",
-        action_id: str,
-        action_client: ActionClient,
-        goal_msg: Any,
-        action_kwargs: Dict[str, Any],
-        server_wait_timeout: Optional[float] = None,
-    ) -> None:
-        """执行既有 ROS goal 发送；允许从 trace 登记线程安全调用。"""
-
-        if getattr(self, "_shutting_down", False):
-            raise RuntimeError("Host is shutting down")
 
         # self.lab_logger().trace(f"[Host Node] Sending goal for {action_id}: {str(goal_msg)[:1000]}")
         self.lab_logger().trace(f"[Host Node] Sending goal for {action_id}: {action_kwargs}")
         self.lab_logger().trace(f"[Host Node] Sending goal for {action_id}: {goal_msg}")
-        if server_wait_timeout is None:
-            action_client.wait_for_server()
-        elif not action_client.wait_for_server(timeout_sec=server_wait_timeout):
-            raise TimeoutError(
-                f"Action server {action_id} unavailable after "
-                f"{server_wait_timeout:g}s"
-            )
-        if getattr(self, "_shutting_down", False):
-            raise RuntimeError("Host is shutting down")
+        action_client.wait_for_server()
+        goal_uuid_obj = UUID(uuid=list(u.bytes))
 
-        # cancel_goal_or_defer 使用同一把锁。检查和 send_goal_async 必须处于
-        # 同一临界区：解锁先拿锁则完全不提交，提交先拿锁则解锁随后登记取消。
-        with HostNode._goal_tracking_lock(self):
-            if item.job_id in self._pending_goal_cancellations:
-                self._pending_goal_requests.discard(item.job_id)
-                self._pending_goal_cancellations.discard(item.job_id)
-                self.lab_logger().warning(
-                    f"[Host Node] Drop goal {item.job_id[:8]} before ROS submit "
-                    "because manual unlock won"
-                )
-                return
-            goal_uuid_obj = UUID(uuid=list(uuid.UUID(item.job_id).bytes))
-            try:
-                future = action_client.send_goal_async(
-                    goal_msg,
-                    feedback_callback=lambda feedback_msg: self.feedback_callback(item, action_id, feedback_msg),
-                    goal_uuid=goal_uuid_obj,
-                )
-            except Exception:
-                self._pending_goal_requests.discard(item.job_id)
-                self._pending_goal_cancellations.discard(item.job_id)
-                raise
-        future.add_done_callback(lambda f: self.goal_response_callback(item, action_id, f))
-
-    def _register_then_send_goal(
-        self,
-        item: "QueueItem",
-        action_id: str,
-        action_client: ActionClient,
-        goal_msg: Any,
-        action_kwargs: Dict[str, Any],
-        trace_context: Optional[Dict[str, str]],
-    ) -> None:
-        """在专用线程按序完成 side-channel 和业务 goal，不占调度 worker。"""
-
-        HostNode._register_remote_trace_context(self, item, trace_context)
-        if getattr(self, "_shutting_down", False):
-            raise RuntimeError("Host is shutting down")
-        HostNode._send_action_goal(
-            self,
-            item,
-            action_id,
-            action_client,
+        future = action_client.send_goal_async(
             goal_msg,
-            action_kwargs,
-            _TRACE_ACTION_SERVER_WAIT_TIMEOUT_SECONDS,
+            feedback_callback=lambda feedback_msg: self.feedback_callback(item, action_id, feedback_msg),
+            goal_uuid=goal_uuid_obj,
         )
-
-    def _deferred_goal_send_callback(
-        self,
-        item: "QueueItem",
-        action_id: str,
-        future: ConcurrentFuture,
-    ) -> None:
-        """后台 goal 发送失败时走普通失败回报，确保设备锁可释放。"""
-
-        try:
-            future.result()
-            return
-        except Exception as exc:  # noqa: BLE001 - 后台边界必须收敛异常
-            HostNode._clear_goal_tracking(self, item.job_id)
-            self.lab_logger().error(
-                f"[Host Node] Deferred goal send failed for {item.job_id[:8]}: "
-                f"{type(exc).__name__}"
-            )
-            with fail_open_span(
-                runtime_tracing,
-                "ros2.action.goal_response",
-                parent=getattr(item, "trace_context", {}),
-                attributes={
-                    "workflow.node_job.uuid": item.job_id,
-                    "device.id": item.device_id,
-                    "device.action.name": item.action_name,
-                    "ros.action.accepted": False,
-                    "error.type": type(exc).__name__,
-                },
-            ):
-                pass
-
-        return_info = serialize_result_info("ROS goal send failed", False, {})
-        try:
-            HostNode._store_job_result_unless_fenced(
-                self,
-                item.job_id,
-                "failed",
-                return_info,
-                {},
-            )
-        except Exception as exc:  # noqa: BLE001 - bridge 回报仍须继续
-            self.lab_logger().error(
-                f"[Host Node] Failed to store deferred send result: "
-                f"{type(exc).__name__}"
-            )
-        for bridge in self.bridges:
-            if hasattr(bridge, "publish_job_status"):
-                try:
-                    bridge.publish_job_status({}, item, "failed", return_info)
-                except Exception as exc:  # noqa: BLE001 - 单一 bridge 不阻断锁释放
-                    self.lab_logger().error(
-                        f"[Host Node] Deferred send bridge failed: "
-                        f"{type(exc).__name__}"
-                    )
-
-    def _register_remote_trace_context(
-        self,
-        item: "QueueItem",
-        trace_context: Optional[Dict[str, str]],
-    ) -> bool:
-        """原生 ROS Action 无扩展字段，先通过有确认的 service 注册 parent。"""
-
-        return BaseROS2DeviceNode._register_remote_action_trace_context(
-            self,
-            device_id=item.device_id,
-            ros_goal_uuid=item.job_id,
-            node_job_uuid=item.job_id,
-            task_uuid=item.task_id,
-            action_name=item.action_name,
-            trace_context=trace_context,
-        )
+        future.add_done_callback(lambda f: self.goal_response_callback(item, action_id, f))
 
     def _build_test_mode_return(
         self, device_id: str, action_name: str, action_kwargs: Dict[str, Any]
     ) -> Dict[str, Any]:
-        """
-        根据注册表 action schema 或 legacy handles 构建测试模式的模拟返回值。
+        """按冻结动作合同构建测试模式回执。
 
-        Typed action 的同名输出会深拷贝输入值（例如 ResourceSlot），其余输出按
-        JSON Schema 生成稳定的成功值。Legacy handle 则继续根据 data_key 中
-        @flatten 的层数决定嵌套数组层数，叶子值为空字典。
-        例如: "vessel" → {}, "plate.@flatten" → [{}], "a.@flatten.@flatten" → [[{}]]
+        同名输出优先透传输入，保证物料（Material）在动作链中保持
+        UUID；其余字段按 JSON 结果模式生成确定性值。旧 ``handles``
+        合同继续根据 ``@flatten`` 层数构造数组。
         """
+
+        def schema_value(schema: Any) -> Any:
+            if not isinstance(schema, dict):
+                return None
+            enum_values = schema.get("enum")
+            if isinstance(enum_values, list) and enum_values:
+                return "SUCCEEDED" if "SUCCEEDED" in enum_values else deepcopy(enum_values[0])
+            value_type = schema.get("type")
+            if value_type == "boolean":
+                return True
+            if value_type == "string":
+                return ""
+            if value_type == "integer":
+                return 0
+            if value_type == "number":
+                return 0.0
+            if value_type == "array":
+                return []
+            if value_type == "object":
+                return {}
+            return None
+
         mock_return: Dict[str, Any] = {"test_mode": True, "action_name": action_name}
         action_mappings = self._action_value_mappings.get(device_id, {})
         action_mapping = action_mappings.get(action_name, {})
-        mapping_source = "host"
-        device_info = registered_devices.get(device_id, {})
-        base_node = (
-            device_info.get("base_node_instance")
-            if isinstance(device_info, dict)
-            else None
-        )
-        local_mappings = getattr(base_node, "_action_value_mappings", {})
-        if isinstance(local_mappings, dict):
-            local_action_mapping = local_mappings.get(action_name, {})
-            if local_action_mapping:
-                # 本地设备节点持有完整 canonical action contract；Host 的副本
-                # 可能来自较早的 ROS discovery，只含 transport type。
-                action_mapping = local_action_mapping
-                mapping_source = "registered_device"
-        if mapping_source == "host":
-            device_class = None
-            devices_config = getattr(self, "devices_config", None)
-            for tree in getattr(devices_config, "trees", []):
-                resource = getattr(
-                    getattr(tree, "root_node", None),
-                    "res_content",
-                    None,
-                )
-                if getattr(resource, "id", None) == device_id:
-                    device_class = getattr(resource, "klass", None)
-                    break
-            device_type_registry = getattr(
-                lab_registry,
-                "device_type_registry",
-                {},
-            )
-            type_entry = (
-                device_type_registry.get(device_class, {})
-                if isinstance(device_type_registry, dict)
-                else {}
-            )
-            registry_mappings = (
-                type_entry.get("class", {}).get("action_value_mappings", {})
-                if isinstance(type_entry, dict)
-                else {}
-            )
-            if isinstance(registry_mappings, dict):
-                registry_action_mapping = registry_mappings.get(action_name, {})
-                if registry_action_mapping:
-                    action_mapping = registry_action_mapping
-                    mapping_source = "device_type_registry"
-        action_schema = action_mapping.get("schema", {})
-        if isinstance(action_schema, dict):
-            schema_properties = action_schema.get("properties", {})
-            result_schema = (
-                schema_properties.get("result", {})
-                if isinstance(schema_properties, dict)
-                else {}
-            )
-            result_properties = (
-                result_schema.get("properties", {})
-                if isinstance(result_schema, dict)
-                else {}
-            )
-            if isinstance(result_properties, dict) and result_properties:
-                contract = action_schema.get("x-unilabos-action-contract", {})
-                output_order = (
-                    contract.get("output_order", [])
-                    if isinstance(contract, dict)
-                    else []
-                )
-                ordered_names = [
-                    name
-                    for name in output_order
-                    if isinstance(name, str) and name in result_properties
-                ]
-                ordered_names.extend(
-                    name for name in result_properties if name not in ordered_names
-                )
-                for output_name in ordered_names:
-                    if output_name in action_kwargs:
-                        mock_return[output_name] = copy.deepcopy(
-                            action_kwargs[output_name]
-                        )
-                    else:
-                        mock_return[output_name] = HostNode._test_mode_schema_value(
-                            result_properties[output_name]
-                        )
-                lab_logger = getattr(self, "lab_logger", None)
-                if callable(lab_logger):
-                    lab_logger().info(
-                        f"[TEST MODE] Contract for {device_id}/{action_name}: "
-                        f"source={mapping_source}, outputs={ordered_names}"
-                    )
-                return mock_return
-
         handles = action_mapping.get("handles", {})
         if isinstance(handles, dict):
             for output_handle in handles.get("output", []):
                 data_key = output_handle.get("data_key", "")
                 handler_key = output_handle.get("handler_key", "")
+                output_key = handler_key or data_key.split(".@flatten", 1)[0]
+                if not output_key:
+                    continue
+                if output_key in action_kwargs:
+                    mock_return[output_key] = deepcopy(action_kwargs[output_key])
+                    continue
                 # 根据 @flatten 层数构建嵌套数组，叶子为空字典
                 flatten_count = data_key.count("@flatten")
                 value: Any = {}
                 for _ in range(flatten_count):
                     value = [value]
-                mock_return[handler_key] = value
-        lab_logger = getattr(self, "lab_logger", None)
-        if callable(lab_logger):
-            lab_logger().info(
-                f"[TEST MODE] Contract for {device_id}/{action_name}: "
-                f"source={mapping_source}, outputs={list(mock_return)[2:]}"
+                mock_return[output_key] = value
+
+        result_schema = action_mapping.get("result", {})
+        if not (
+            isinstance(result_schema, dict)
+            and isinstance(result_schema.get("properties"), dict)
+        ):
+            action_schema = action_mapping.get("schema", {})
+            action_properties = (
+                action_schema.get("properties", {})
+                if isinstance(action_schema, dict)
+                else {}
             )
+            result_schema = (
+                action_properties.get("result", {})
+                if isinstance(action_properties, dict)
+                else {}
+            )
+        if isinstance(result_schema, dict):
+            properties = result_schema.get("properties", {})
+            if isinstance(properties, dict):
+                for output_key, property_schema in properties.items():
+                    if output_key in action_kwargs:
+                        mock_return[output_key] = deepcopy(action_kwargs[output_key])
+                    else:
+                        mock_return[output_key] = schema_value(property_schema)
         return mock_return
-
-    @staticmethod
-    def _test_mode_schema_value(schema: Any) -> Any:
-        """为 typed action 的测试模式输出生成保守、可序列化的默认值。"""
-
-        if not isinstance(schema, dict):
-            return None
-        if "const" in schema:
-            return copy.deepcopy(schema["const"])
-        if "default" in schema:
-            return copy.deepcopy(schema["default"])
-        enum_values = schema.get("enum")
-        if isinstance(enum_values, list) and enum_values:
-            for preferred in ("SUCCEEDED", "SUCCESS", "COMPLETED", "DONE"):
-                if preferred in enum_values:
-                    return preferred
-            return copy.deepcopy(enum_values[0])
-        for alternatives_key in ("oneOf", "anyOf"):
-            alternatives = schema.get(alternatives_key)
-            if isinstance(alternatives, list):
-                non_null = [
-                    option
-                    for option in alternatives
-                    if not (isinstance(option, dict) and option.get("type") == "null")
-                ]
-                if non_null:
-                    return HostNode._test_mode_schema_value(non_null[0])
-                return None
-
-        schema_type = schema.get("type")
-        if isinstance(schema_type, list):
-            non_null_types = [value for value in schema_type if value != "null"]
-            schema_type = non_null_types[0] if non_null_types else "null"
-        if schema_type == "boolean":
-            return True
-        if schema_type == "string":
-            return ""
-        if schema_type == "integer":
-            return 0
-        if schema_type == "number":
-            return 0.0
-        if schema_type == "array":
-            return []
-        if schema_type == "object":
-            properties = schema.get("properties", {})
-            if isinstance(properties, dict) and properties:
-                return {
-                    key: HostNode._test_mode_schema_value(value)
-                    for key, value in properties.items()
-                }
-            return {}
-        return None
 
     def _handle_test_mode_result(
         self, item: "QueueItem", action_id: str, mock_return: Dict[str, Any]
@@ -1425,6 +1252,8 @@ class HostNode(BaseROS2DeviceNode):
         from unilabos.app.web.controller import store_job_result
         store_job_result(job_id, status, return_info, mock_return)
 
+        self._publish_job_started(item)
+
         # 发布状态到桥接器
         for bridge in self.bridges:
             if hasattr(bridge, "publish_job_status"):
@@ -1433,54 +1262,30 @@ class HostNode(BaseROS2DeviceNode):
     def goal_response_callback(self, item: "QueueItem", action_id: str, future) -> None:
         """目标响应回调"""
         goal_handle = future.result()
-        with fail_open_span(
-            runtime_tracing,
-            "ros2.action.goal_response",
-            parent=getattr(item, "trace_context", {}),
-            attributes={
-                "workflow.node_job.uuid": item.job_id,
-                "device.id": item.device_id,
-                "device.action.name": item.action_name,
-                "ros.action.accepted": bool(goal_handle.accepted),
-            },
-        ):
-            pass
         if not goal_handle.accepted:
-            with HostNode._goal_tracking_lock(self):
-                self._pending_goal_requests.discard(item.job_id)
-                self._pending_goal_cancellations.discard(item.job_id)
             self.lab_logger().warning(f"[Host Node] Goal {item.action_name} ({item.job_id}) rejected")
+            return_info = serialize_result_info("ROS goal rejected", False, {})
+            for bridge in self.bridges:
+                if hasattr(bridge, "publish_job_status"):
+                    bridge.publish_job_status({}, item, "failed", return_info)
             return
 
         self.lab_logger().info(f"[Host Node] Goal {action_id} ({item.job_id}) accepted")
-        with HostNode._goal_tracking_lock(self):
-            self._pending_goal_requests.discard(item.job_id)
-            self._goals[item.job_id] = goal_handle
-            self._goal_trace_contexts[item.job_id] = normalize_trace_context(
-                getattr(item, "trace_context", {})
-            )
-            cancel_on_accept = item.job_id in self._pending_goal_cancellations
-            self._pending_goal_cancellations.discard(item.job_id)
-        if cancel_on_accept:
-            self.lab_logger().warning(
-                f"[Host Node] Goal {item.job_id[:8]} accepted after manual unlock; cancelling immediately"
-            )
-            HostNode._request_registered_goal_cancel(
-                self,
-                item.job_id,
-                goal_handle,
-            )
+        self._publish_job_started(item)
+        self._goals[item.job_id] = goal_handle
         goal_future = goal_handle.get_result_async()
         goal_future.add_done_callback(lambda f: self.get_result_callback(item, action_id, f))
         goal_future.result()
 
+    def _publish_job_started(self, item: "QueueItem") -> None:
+        """ROS 接受 Goal 后，通过支持该能力的 Bridge 发送短 started 通知。"""
+
+        for bridge in self.bridges:
+            if hasattr(bridge, "publish_job_started"):
+                bridge.publish_job_started(item)
+
     def feedback_callback(self, item: "QueueItem", action_id: str, feedback_msg) -> None:
         """反馈回调"""
-        if HostNode._is_manual_unlock_fenced(self, item.job_id):
-            self.lab_logger().warning(
-                f"[Host Node] Skip late feedback for manually unlocked goal {item.job_id[:8]}"
-            )
-            return
         feedback_data = convert_from_ros_msg(feedback_msg)
         feedback_data.pop("goal_id")
         self.lab_logger().trace(f"[Host Node] Feedback for {action_id} ({item.job_id}): {feedback_data}")
@@ -1495,12 +1300,6 @@ class HostNode(BaseROS2DeviceNode):
 
         try:
             result = future.result()
-            if HostNode._is_manual_unlock_fenced(self, job_id):
-                self.lab_logger().warning(
-                    f"[Host Node] Skip late result for manually unlocked goal {job_id[:8]}"
-                )
-                HostNode._clear_goal_tracking(self, job_id)
-                return
             result_msg = result.result
             goal_status = result.status
 
@@ -1546,42 +1345,24 @@ class HostNode(BaseROS2DeviceNode):
                         return_info = serialize_result_info("缺少return_info", False, result_data)
 
             self.lab_logger().info(f"[Host Node] Result for {action_id} ({job_id[:8]}): {status}")
-            with fail_open_span(
-                runtime_tracing,
-                "ros2.action.result",
-                parent=getattr(item, "trace_context", {}),
-                attributes={
-                    "workflow.node_job.uuid": job_id,
-                    "device.id": item.device_id,
-                    "device.action.name": item.action_name,
-                    "job.result.status": status,
-                    "ros.goal.status": int(goal_status),
-                },
-            ):
-                pass
             if goal_status != GoalStatus.STATUS_CANCELED:
                 self.lab_logger().trace(f"[Host Node] Result data: {result_data}")
 
             # 清理 _goals 中的记录
-            HostNode._clear_goal_tracking(self, job_id)
+            if job_id in self._goals:
+                del self._goals[job_id]
+                self.lab_logger().trace(f"[Host Node] Removed goal {job_id[:8]} from _goals")
 
             # 存储结果供 HTTP API 查询
-            if goal_status == GoalStatus.STATUS_CANCELED:
-                HostNode._store_job_result_unless_fenced(
-                    self,
-                    job_id,
-                    status,
-                    return_info,
-                    {},
-                )
-            else:
-                HostNode._store_job_result_unless_fenced(
-                    self,
-                    job_id,
-                    status,
-                    return_info,
-                    result_data,
-                )
+            try:
+                from unilabos.app.web.controller import store_job_result
+
+                if goal_status == GoalStatus.STATUS_CANCELED:
+                    store_job_result(job_id, status, return_info, {})
+                else:
+                    store_job_result(job_id, status, return_info, result_data)
+            except ImportError:
+                pass  # controller 模块可能未加载
 
             # 发布状态到桥接器
             if job_id:
@@ -1593,19 +1374,6 @@ class HostNode(BaseROS2DeviceNode):
                             bridge.publish_job_status(result_data, item, status, return_info)
 
         except Exception as e:
-            with fail_open_span(
-                runtime_tracing,
-                "ros2.action.result",
-                parent=getattr(item, "trace_context", {}),
-                attributes={
-                    "workflow.node_job.uuid": job_id,
-                    "device.id": item.device_id,
-                    "device.action.name": item.action_name,
-                    "job.result.status": "failed",
-                    "error.type": type(e).__name__,
-                },
-            ):
-                pass
             self.lab_logger().error(
                 f"[Host Node] Error in get_result_callback for {action_id} ({job_id[:8]}): {str(e)}"
             )
@@ -1614,7 +1382,8 @@ class HostNode(BaseROS2DeviceNode):
             self.lab_logger().error(traceback.format_exc())
 
             # 清理 _goals 中的记录
-            HostNode._clear_goal_tracking(self, job_id)
+            if job_id in self._goals:
+                del self._goals[job_id]
 
             # 发布失败状态
             for bridge in self.bridges:
@@ -1622,89 +1391,6 @@ class HostNode(BaseROS2DeviceNode):
                     bridge.publish_job_status(
                         {}, item, "failed", serialize_result_info(f"Callback error: {str(e)}", False, {})
                     )
-
-    def _is_manual_unlock_fenced(self, job_id: str) -> bool:
-        """查询 bridge 中的人工解锁 fence，不把 Job 状态权威复制到 HostNode。"""
-
-        for bridge in self.bridges:
-            checker = getattr(bridge, "is_manual_unlock_fenced", None)
-            if callable(checker) and checker(job_id):
-                return True
-        return False
-
-    def _store_job_result_unless_fenced(
-        self,
-        job_id: str,
-        status: str,
-        result: Optional[Dict[str, Any]],
-        feedback: Optional[Dict[str, Any]] = None,
-    ) -> bool:
-        """优先由 bridge 在其 fence 临界区内写旧 HTTP 结果仓。"""
-
-        for bridge in self.bridges:
-            writer = getattr(bridge, "store_job_result_if_unfenced", None)
-            if callable(writer):
-                return bool(writer(job_id, status, result, feedback))
-
-        try:
-            from unilabos.app.web.controller import store_job_result
-
-            store_job_result(job_id, status, result, feedback)
-            return True
-        except ImportError:
-            return False
-
-    def _goal_tracking_lock(self) -> threading.RLock:
-        """为完整 Host 与历史轻量测试替身提供一致的 goal 跟踪状态。"""
-
-        lock = getattr(self, "_goals_lock", None)
-        if lock is None:
-            lock = threading.RLock()
-            self._goals_lock = lock
-        if not hasattr(self, "_goals"):
-            self._goals = {}
-        if not hasattr(self, "_goal_trace_contexts"):
-            self._goal_trace_contexts = {}
-        if not hasattr(self, "_pending_goal_requests"):
-            self._pending_goal_requests = set()
-        if not hasattr(self, "_pending_goal_cancellations"):
-            self._pending_goal_cancellations = set()
-        return lock
-
-    def _clear_goal_tracking(self, job_id: str) -> None:
-        """原子清理 goal handle、trace context 和待接受取消意图。"""
-
-        with HostNode._goal_tracking_lock(self):
-            removed = self._goals.pop(job_id, None)
-            self._goal_trace_contexts.pop(job_id, None)
-            self._pending_goal_requests.discard(job_id)
-            self._pending_goal_cancellations.discard(job_id)
-        if removed is not None:
-            self.lab_logger().trace(
-                f"[Host Node] Removed goal {job_id[:8]} from _goals"
-            )
-
-    def cancel_goal_or_defer(self, goal_uuid: str) -> bool:
-        """取消已登记 goal，或保存其尚未 accepted 时的取消意图。"""
-
-        with HostNode._goal_tracking_lock(self):
-            goal_handle = self._goals.get(goal_uuid)
-            if goal_handle is None:
-                if goal_uuid not in self._pending_goal_requests:
-                    self.lab_logger().warning(
-                        f"[Host Node] Goal {goal_uuid[:8]} was never submitted; cannot defer cancel"
-                    )
-                    return False
-                self._pending_goal_cancellations.add(goal_uuid)
-                self.lab_logger().warning(
-                    f"[Host Node] Goal {goal_uuid[:8]} pending acceptance; defer cancel"
-                )
-                return True
-        return HostNode._request_registered_goal_cancel(
-            self,
-            goal_uuid,
-            goal_handle,
-        )
 
     def cancel_goal(self, goal_uuid: str) -> bool:
         """
@@ -1716,97 +1402,38 @@ class HostNode(BaseROS2DeviceNode):
         Returns:
             bool: 如果找到目标并发起取消请求返回True，否则返回False
         """
-        with HostNode._goal_tracking_lock(self):
-            goal_handle = self._goals.get(goal_uuid)
-        if goal_handle is None:
+        if goal_uuid in self._goals:
+            self.lab_logger().info(f"[Host Node] Cancelling goal {goal_uuid[:8]}")
+            goal_handle = self._goals[goal_uuid]
+
+            # 发起异步取消请求
+            cancel_future = goal_handle.cancel_goal_async()
+
+            # 添加取消完成的回调
+            cancel_future.add_done_callback(lambda future: self._cancel_goal_callback(goal_uuid, future))
+            return True
+        else:
             self.lab_logger().warning(f"[Host Node] Goal {goal_uuid[:8]} not found in _goals, cannot cancel")
             return False
-        return HostNode._request_registered_goal_cancel(
-            self,
-            goal_uuid,
-            goal_handle,
-        )
 
-    def _request_registered_goal_cancel(
-        self,
-        goal_uuid: str,
-        goal_handle: Any,
-    ) -> bool:
-        """向已 accepted 的 goal handle 发起异步取消。"""
-
-        with HostNode._goal_tracking_lock(self):
-            cancel_parent = normalize_trace_context(
-                self._goal_trace_contexts.get(goal_uuid)
-            )
-        cancel_trace_context = cancel_parent
-        try:
-            with fail_open_span(
-                runtime_tracing,
-                "ros2.action.cancel",
-                parent=cancel_parent,
-                attributes={"workflow.node_job.uuid": goal_uuid},
-            ):
-                captured_context = safe_capture_context(runtime_tracing)
-                if captured_context:
-                    cancel_trace_context = captured_context
-                self.lab_logger().info(f"[Host Node] Cancelling goal {goal_uuid[:8]}")
-                cancel_future = goal_handle.cancel_goal_async()
-        except Exception as exc:
-            self.lab_logger().error(
-                f"[Host Node] Failed to request goal cancellation {goal_uuid[:8]}: {exc}"
-            )
-            return False
-
-        cancel_future.add_done_callback(
-            lambda future: self._cancel_goal_callback(
-                goal_uuid,
-                future,
-                cancel_trace_context,
-            )
-        )
-        return True
-
-    def _cancel_goal_callback(
-        self,
-        goal_uuid: str,
-        future,
-        parent_trace_context: Optional[Dict[str, str]] = None,
-    ) -> None:
+    def _cancel_goal_callback(self, goal_uuid: str, future) -> None:
         """取消目标的回调"""
-        accepted = False
-        error_type: Optional[str] = None
         try:
             cancel_response = future.result()
-            accepted = bool(cancel_response.goals_canceling)
-            if accepted:
+            if cancel_response.goals_canceling:
                 self.lab_logger().info(f"[Host Node] Goal {goal_uuid[:8]} cancel request accepted")
             else:
                 self.lab_logger().warning(f"[Host Node] Goal {goal_uuid[:8]} cancel request rejected")
         except Exception as e:
-            error_type = type(e).__name__
             self.lab_logger().error(f"[Host Node] Error cancelling goal {goal_uuid[:8]}: {str(e)}")
             import traceback
 
             self.lab_logger().error(traceback.format_exc())
-        attributes = {
-            "workflow.node_job.uuid": goal_uuid,
-            "ros.cancel.accepted": accepted,
-        }
-        if error_type is not None:
-            attributes["error.type"] = error_type
-        with fail_open_span(
-            runtime_tracing,
-            "ros2.action.cancel_response",
-            parent=parent_trace_context,
-            attributes=attributes,
-        ):
-            pass
 
     def get_goal_status(self, job_id: str) -> int:
         """获取目标状态"""
-        with HostNode._goal_tracking_lock(self):
-            g = self._goals.get(job_id)
-        if g is not None:
+        if job_id in self._goals:
+            g = self._goals[job_id]
             status = g.status
             self.lab_logger().debug(f"[Host Node] Goal status for {job_id}: {status}")
             return status
@@ -1841,19 +1468,6 @@ class HostNode(BaseROS2DeviceNode):
         # rclpy.get_global_executor().add_node(controller)
 
     """Resource"""
-
-    def _material_resource_sync_client(self) -> Optional[Any]:
-        """Return an explicitly configured material-sync bridge, if one exists.
-
-        Workflow execution, websocket status and edge-scheduler bridges are not
-        material HTTP clients.  Treating any non-empty bridge list as permission
-        to use the process-global cloud client makes loopback/local bookkeeping
-        emit authentication errors even though the local transfer succeeds.
-        """
-        for bridge in self.bridges:
-            if callable(getattr(bridge, "resource_tree_add", None)):
-                return bridge
-        return None
 
     def _init_host_service(self):
         self._resource_services: Dict[str, Service] = {
@@ -1903,38 +1517,37 @@ class HostNode(BaseROS2DeviceNode):
         )
 
         # 处理资源添加逻辑
-        success = True
+        success = False
         uuid_mapping = {}
-        material_sync_client = self._material_resource_sync_client()
-        if material_sync_client is not None:
+        if len(self.bridges) > 0:
+            from unilabos.app.web.client import HTTPClient, http_client
+
             resource_start_time = time.time()
-            uuid_mapping = material_sync_client.resource_tree_add(resource_tree_set, mount_uuid, first_add)
+            uuid_mapping = http_client.resource_tree_add(resource_tree_set, mount_uuid, first_add)
+            success = True
             resource_end_time = time.time()
             self.lab_logger().info(
                 f"[Host Node-Resource] 物料创建上传 {round(resource_end_time - resource_start_time, 5) * 1000} ms"
             )
             if uuid_mapping:
                 self.lab_logger().info(f"[Host Node-Resource] UUID映射: {len(uuid_mapping)} 个节点")
-        else:
-            self.lab_logger().trace(
-                "[Host Node-Resource] 未配置物料同步 bridge；仅更新 Host 本地物料图"
-            )
 
-        from unilabos.resources.graphio import physical_setup_graph
-        from unilabos.resources.resource_tracker import TRACKER_STATE_KEYS
+        if success:
+            from unilabos.resources.graphio import physical_setup_graph
+            from unilabos.resources.resource_tracker import TRACKER_STATE_KEYS
 
-        # Host 本地物料图是本地运行的事实源；云同步是否启用不影响本地记账。
-        for node in resource_tree_set.all_nodes:
-            resource_dict = node.res_content.model_dump(by_alias=True)
-            if resource_dict.get("id") not in physical_setup_graph.nodes:
-                physical_setup_graph.add_node(resource_dict["id"], **resource_dict)
-            else:
-                graph_node = physical_setup_graph.nodes[resource_dict["id"]]
-                graph_node["data"].update(resource_dict.get("data", {}))
-                # 液体状态在根字段（与 dump 形态一致），已存在节点同步刷新，避免与 data 双真相漂移
-                for state_key in TRACKER_STATE_KEYS:
-                    if resource_dict.get(state_key) is not None:
-                        graph_node[state_key] = resource_dict[state_key]
+            # 将资源添加到本地图中
+            for node in resource_tree_set.all_nodes:
+                resource_dict = node.res_content.model_dump(by_alias=True)
+                if resource_dict.get("id") not in physical_setup_graph.nodes:
+                    physical_setup_graph.add_node(resource_dict["id"], **resource_dict)
+                else:
+                    graph_node = physical_setup_graph.nodes[resource_dict["id"]]
+                    graph_node["data"].update(resource_dict.get("data", {}))
+                    # 液体状态在根字段（与 dump 形态一致），已存在节点同步刷新，避免与 data 双真相漂移
+                    for state_key in TRACKER_STATE_KEYS:
+                        if resource_dict.get(state_key) is not None:
+                            graph_node[state_key] = resource_dict[state_key]
 
         response.response = _fast_dumps_str(uuid_mapping) if success else "FAILED"
         self.lab_logger().info(f"[Host Node-Resource] Resource tree add completed, success: {success}")
@@ -1942,38 +1555,13 @@ class HostNode(BaseROS2DeviceNode):
     def _local_resource_nodes(
         self, uuid: Optional[str] = None, res_id: Optional[str] = None, with_children: bool = True
     ) -> Optional[List[dict]]:
-        """host 本地树解析（物料唯一事实源，云端物料接口已下线）；未命中返回 None。"""
-        from unilabos.hostlink.resolver import (
-            InventoryResourceAliasResolver,
-            LocalResourceResolver,
-            ResourceNotFound,
-        )
+        """Host 内存树兼容兜底；未命中返回 None。"""
+        from unilabos.hostlink.resolver import LocalResourceResolver, ResourceNotFound
 
         if not hasattr(self, "_hostlink_resolver"):
             self._hostlink_resolver = LocalResourceResolver(lambda: self.resources_config)
         try:
-            if uuid:
-                if not hasattr(self, "_inventory_resource_alias_resolver"):
-                    def _inventory_snapshot() -> dict[str, Any]:
-                        from unilabos.workflow.composition import (
-                            get_workflow_inventory_service,
-                        )
-
-                        inventory = get_workflow_inventory_service()
-                        return inventory.inventory_snapshot() if inventory is not None else {"materials": []}
-
-                    self._inventory_resource_alias_resolver = InventoryResourceAliasResolver(
-                        self._hostlink_resolver,
-                        _inventory_snapshot,
-                    )
-                return self._inventory_resource_alias_resolver.resolve(
-                    uuid=uuid,
-                    with_children=with_children,
-                )
-            return self._hostlink_resolver.resolve(
-                res_id=res_id,
-                with_children=with_children,
-            )
+            return self._hostlink_resolver.resolve(uuid=uuid, res_id=res_id, with_children=with_children)
         except ResourceNotFound:
             return None
 
@@ -1981,8 +1569,23 @@ class HostNode(BaseROS2DeviceNode):
         uuid_list: List[str] = data["data"]
         with_children: bool = data["with_children"]
 
-        # 本地树优先：全部命中直接返回；任一未命中回退旧云端接口（过渡期兜底，
-        # 云端物料下线后该兜底只会失败并抛错，行为与旧链路一致）。
+        # 可切换 HTTP material component 优先；微后端模式通过 localhost HTTP
+        # 与独立 scheduler 进程通信，返回形状仍是旧 ResourceDict 扁平列表。
+        from unilabos.app.web.client import http_client
+
+        resource_response = http_client.material_query(
+            uuids=uuid_list,
+            with_children=with_children,
+        )
+        if resource_response:
+            response.response = json.dumps(resource_response)
+            self.lab_logger().trace(
+                f"[Host Node-Resource] Resource tree get served by material component "
+                f"({len(resource_response)} nodes)"
+            )
+            return
+
+        # 兼容尚未导入微后端库存的本地配置树。
         local_nodes: List[dict] = []
         for res_uuid in uuid_list:
             nodes = self._local_resource_nodes(uuid=res_uuid, with_children=with_children)
@@ -1993,15 +1596,14 @@ class HostNode(BaseROS2DeviceNode):
         if local_nodes:
             response.response = json.dumps(local_nodes)
             self.lab_logger().trace(
-                f"[Host Node-Resource] Resource tree get served locally ({len(local_nodes)} nodes)"
+                f"[Host Node-Resource] Resource tree get fell back to host memory "
+                f"({len(local_nodes)} nodes)"
             )
             return
-
-        from unilabos.app.web.client import http_client
-
-        resource_response = http_client.resource_tree_get(uuid_list, with_children)
-        response.response = json.dumps(resource_response)
-        self.lab_logger().trace(f"[Host Node-Resource] Resource tree get request callback {response.response}")
+        response.response = "[]"
+        self.lab_logger().trace(
+            f"[Host Node-Resource] Resource tree get request callback {response.response}"
+        )
 
     async def _resource_tree_action_remove_callback(self, data: dict, response: SerialCommand_Response):
         """
@@ -2022,35 +1624,29 @@ class HostNode(BaseROS2DeviceNode):
             f"{len(resource_tree_set.all_nodes)} total nodes"
         )
 
-        material_sync_client = self._material_resource_sync_client()
-        all_uuid_mapping: Dict[str, str] = {}
+        from unilabos.app.web.client import http_client
+
         uuid_to_trees: Dict[str, List[ResourceTreeInstance]] = collections.defaultdict(list)
         for tree in resource_tree_set.trees:
             uuid_to_trees[tree.root_node.res_content.parent_uuid].append(tree)
 
         for uid, trees in uuid_to_trees.items():
             new_tree_set = ResourceTreeSet(trees)
-            uuid_mapping: Dict[str, str] = {}
-            if material_sync_client is not None:
-                resource_start_time = time.time()
-                self.lab_logger().info(
-                    f"[Host Node-Resource] 物料 {[root_node.res_content.id for root_node in new_tree_set.root_nodes]} {uid} 挂载 {trees[0].root_node.res_content.parent_uuid} 请求更新上传"
-                )
-                uuid_mapping = material_sync_client.resource_tree_add(new_tree_set, uid, False)
-                resource_end_time = time.time()
-                self.lab_logger().info(
-                    f"[Host Node-Resource] 物料更新上传 {round(resource_end_time - resource_start_time, 5) * 1000} ms"
-                )
-                if uuid_mapping:
-                    self.lab_logger().info(f"[Host Node-Resource] UUID映射: {len(uuid_mapping)} 个节点")
-            else:
-                self.lab_logger().trace(
-                    "[Host Node-Resource] 未配置物料同步 bridge；转运仅更新本地设备树"
-                )
-            all_uuid_mapping.update(uuid_mapping)
+            resource_start_time = time.time()
+            self.lab_logger().info(
+                f"[Host Node-Resource] 物料 {[root_node.res_content.id for root_node in new_tree_set.root_nodes]} {uid} 挂载 {trees[0].root_node.res_content.parent_uuid} 请求更新上传"
+            )
+            uuid_mapping = http_client.resource_tree_add(new_tree_set, uid, False)
+            success = bool(uuid_mapping)
+            resource_end_time = time.time()
+            self.lab_logger().info(
+                f"[Host Node-Resource] 物料更新上传 {round(resource_end_time - resource_start_time, 5) * 1000} ms"
+            )
+            if uuid_mapping:
+                self.lab_logger().info(f"[Host Node-Resource] UUID映射: {len(uuid_mapping)} 个节点")
             # 还需要加入到资源图中，暂不实现，考虑资源图新的获取方式
-        response.response = json.dumps(all_uuid_mapping)
-        self.lab_logger().info("[Host Node-Resource] Resource tree update completed, success: True")
+            response.response = json.dumps(uuid_mapping)
+            self.lab_logger().info(f"[Host Node-Resource] Resource tree update completed, success: {success}")
 
     async def _resource_tree_update_callback(self, request: SerialCommand_Request, response: SerialCommand_Response):
         """
@@ -2121,12 +1717,32 @@ class HostNode(BaseROS2DeviceNode):
                 self.device_machine_names[edge_device_id] = machine_name
 
                 # 用 registry_name 索引已存储的 registry_config,获取 action_value_mappings
-                if registry_name and registry_name in self._slave_registry_configs:
-                    action_mappings = (
-                        self._slave_registry_configs[registry_name].get("class", {}).get("action_value_mappings", {})
+                if registry_name:
+                    reported_registry = self._slave_registry_configs.get(
+                        registry_name, {}
                     )
+                    action_mappings = (
+                        reported_registry.get("class", {}).get(
+                            "action_value_mappings", {}
+                        )
+                        if isinstance(reported_registry, dict)
+                        else {}
+                    )
+                    local_registry = lab_registry.device_type_registry.get(
+                        registry_name, {}
+                    )
+                    local_mappings = (
+                        local_registry.get("class", {}).get("action_value_mappings", {})
+                        if isinstance(local_registry, dict)
+                        else {}
+                    )
+                    if local_mappings:
+                        action_mappings = local_mappings
                     if action_mappings:
-                        self._action_value_mappings[edge_device_id] = action_mappings
+                        self._register_reported_remote_device(
+                            edge_device_id,
+                            action_mappings,
+                        )
                         self.lab_logger().info(
                             f"[Host Node] Loaded {len(action_mappings)} action mappings "
                             f"for remote device {edge_device_id} (registry: {registry_name})"
@@ -2157,6 +1773,18 @@ class HostNode(BaseROS2DeviceNode):
                                     .get("class", {})
                                     .get("action_value_mappings", {})
                                 )
+                                local_registry = lab_registry.device_type_registry.get(
+                                    class_name, {}
+                                )
+                                local_mappings = (
+                                    local_registry.get("class", {}).get(
+                                        "action_value_mappings", {}
+                                    )
+                                    if isinstance(local_registry, dict)
+                                    else {}
+                                )
+                                if local_mappings:
+                                    action_mappings = local_mappings
                                 if action_mappings:
                                     self._action_value_mappings[device_id] = action_mappings
                                     self.lab_logger().info(
@@ -2243,21 +1871,28 @@ class HostNode(BaseROS2DeviceNode):
             if not req_uuid and not req_id:
                 raise ValueError("没有使用正确的物料 id 或 uuid")
 
-            # 本地树优先（物料唯一事实源）；未命中回退旧云端接口（过渡期兜底）
+            with_children = data.get("with_children", True)
+            from unilabos.app.web import http_client
+
+            remote_nodes = http_client.material_query(
+                uuids=[req_uuid] if req_uuid else None,
+                resource_id=req_id,
+                with_children=with_children,
+            )
+            if remote_nodes:
+                response.response = json.dumps(remote_nodes)
+                return response
+
+            # 兼容尚未导入微后端库存的本地配置树。
             local_nodes = self._local_resource_nodes(
-                uuid=req_uuid, res_id=req_id, with_children=data.get("with_children", True)
+                uuid=req_uuid,
+                res_id=req_id,
+                with_children=with_children,
             )
             if local_nodes is not None:
                 response.response = json.dumps(local_nodes)
                 return response
-
-            from unilabos.app.web import http_client
-
-            if req_uuid:
-                http_req = http_client.resource_tree_get([req_uuid], data["with_children"])
-            else:
-                http_req = http_client.resource_get(req_id, data["with_children"])
-            response.response = json.dumps(http_req["data"])
+            response.response = "[]"
             return response
         except Exception as e:
             self.lab_logger().error(f"[Host Node-Resource] Error retrieving from bridge: {str(e)}")
@@ -2567,7 +2202,7 @@ class HostNode(BaseROS2DeviceNode):
             device_id[目标设备]: 挂载到的边缘设备 id（可选；不传则仅登记/透传，可由图 handle 连入）。
             mount_resource[挂载目标]: 实际挂载到的单个目标物料/父节点（可选；不传则仅登记/透传，可由图 handle 连入，dict/list 两形态）。
             bind_locations[挂载位置]: 挂载目标坐标系下的挂载坐标（挂载时使用）。
-            slot_on_deck[Deck槽位]: 挂载目标为 Deck 时按槽位挂载（可选）。
+            slot_on_deck[Deck库位]: 挂载目标为 Deck 时按库位挂载（可选）。
         """
         if resource is None:
             raise ValueError("申请扣减失败：未接收到已扣减物料")
@@ -2598,7 +2233,7 @@ class HostNode(BaseROS2DeviceNode):
             f"[apply_deduct_resource] 挂载物料 name={getattr(resource, 'name', '')} "
             f"barcode={barcode} -> device={device_id} mount_resource={mount_name}"
         )
-        # 挂载坐标归一化：@action 路径可能传 dict，ROS 路径为 Point；缺省取原点
+        # 挂载坐标归一化：动作装饰器路径可能传 dict，ROS 路径为 Point；缺省取原点。
         if isinstance(bind_locations, dict):
             point = Point(
                 x=float(bind_locations.get("x", 0.0)),
@@ -2760,7 +2395,7 @@ class HostNode(BaseROS2DeviceNode):
         mount_resource: "ResourceSlot",
         site: str = "",
     ) -> TransferResourceReturn:
-        """transfer_resource / transfer_manual 共用的转移核心：把已物理就位的物料在系统中改挂到目标设备孔位。
+        """把已经物理就位的物料在系统中改挂到目标设备孔位。
 
         与 apply_deduct_resource 一致：入参均为「单个物料」（单 ResourceSlot），框架在 send_goal 已把
         list（一棵树扁平节点组→装配成一个物料）或 dict（资源引用→with_children 拉取）解析为单个 PLR 实例。
@@ -2768,7 +2403,7 @@ class HostNode(BaseROS2DeviceNode):
         复用 base_device_node.transfer_resource_to_another（移除来源 → 云端改父 → 增加到目标）。
         transfer 只负责"系统记账"，物理搬运由前序节点（manual_confirm/机械臂 pick+place）保证。
 
-        site：目标父级（carrier/deck/plate 等带 _ordering 的容器）上的槽位名，显式指定物料落在哪个槽位；
+        site：目标父级（carrier/deck/plate 等带 _ordering 的容器）上的库位名，显式指定物料落在哪个库位；
         目标端通过 resolve_site_spot（与 set_substance 同一套 slot/site 解析：int 索引 / "A1" 标签 /
         名称匹配）换算成 assign_child_resource 的 spot。空串视作不指定（由父级默认排布）。注意：若物料 extra
         里带了前端隐式写入的 update_resource_site，目标端会用 extra 的值覆盖此处显式 site
@@ -2777,6 +2412,19 @@ class HostNode(BaseROS2DeviceNode):
         注意：底层按"运行该动作的节点"作为来源执行本地移除，host 运行时来源即 host（根节点）。
         若物料此前已被 apply_deduct_resource 挂到某边缘设备，该设备的本地副本不会在此处被移除，
         需依赖下次同步对齐（详见 cursor_docs 记录的源设备移除限制）。
+
+        Args:
+            resource: 待转移的具体物料（Material）实例。
+            target_device: 接收物料的目标设备身份；可带 ``/devices/`` 前缀。
+            mount_resource: 目标设备上承载该物料的父物料实例。
+            site: 目标父物料中的库位（Site）名称；空串表示使用默认排布。
+
+        Returns:
+            保留旧调用兼容的四键字典；物料和目标父物料仍用原扁平树形态返回，
+            ``site`` 回传库位名，``result`` 是底层转移结果的稳定字符串。
+
+        Raises:
+            ValueError: 待转移物料或目标父物料缺失，或底层转移拒绝时抛出。
         """
         if resource is None:
             raise ValueError("转移失败：未接收到待转移物料")
@@ -2786,9 +2434,19 @@ class HostNode(BaseROS2DeviceNode):
         result = await self.transfer_resource_to_another(
             [resource], target_id, [mount_resource], [site if site else None]
         )
+        from unilabos.app.scheduler.integration import get_inventory_service
+
+        inventory = get_inventory_service()
+        if inventory is not None:
+            inventory.move_instance(
+                _stable_resource_uuid(resource),
+                parent_uuid=_stable_resource_uuid(mount_resource),
+                slot_id=site,
+                actor="host_node.transfer_resource",
+            )
         return {
-            "resource": ResourceTreeSet.from_plr_resources([resource]).dump(),
-            "mount_resource": ResourceTreeSet.from_plr_resources([mount_resource]).dump(),
+            "resource": _dump_resource_slot(resource),
+            "mount_resource": _dump_resource_slot(mount_resource),
             "site": site,
             "result": str(result),
         }
@@ -2822,8 +2480,15 @@ class HostNode(BaseROS2DeviceNode):
             resource[待转移物料]: 待转移的单个物料（须带 unilabos_uuid，可由图 handle 连入，list/dict 两形态）。
             target_device[目标设备]: 接收物料的目标设备 id。
             mount_resource[目标孔位]: 目标设备上的单个挂载孔位/父物料（list/dict 两形态）。
-            site[目标槽位]: 目标父级容器上的槽位名，显式指定物料落在哪个槽位（carrier/deck/plate 等按
+            site[目标库位]: 目标父级容器上的库位名，显式指定物料落在哪个库位（carrier/deck/plate 等按
                 _ordering 换算成 spot）；不传则由父级默认排布。
+
+        Returns:
+            原有四键运行结果字典；静态类型化动作（Typed Action）合同把两个物料
+            字段发布为物料占位符（ResourceSlot），供下游工作流节点继续连接。
+
+        Raises:
+            ValueError: 必需物料缺失或转移执行失败时由既有执行核心抛出。
         """
         return await self._do_transfer_resource(resource, target_device, mount_resource, site)
 
@@ -2865,7 +2530,7 @@ class HostNode(BaseROS2DeviceNode):
             ActionInputHandle(
                 key="site",
                 data_type="site",
-                label="目标槽位",
+                label="目标库位",
                 data_key="site",
                 data_source=DataSource.HANDLE,
             ),
@@ -2893,7 +2558,7 @@ class HostNode(BaseROS2DeviceNode):
             ActionOutputHandle(
                 key="site",
                 data_type="site",
-                label="目标槽位",
+                label="目标库位",
                 data_key="site",
                 data_source=DataSource.EXECUTOR,
             ),
@@ -2910,7 +2575,7 @@ class HostNode(BaseROS2DeviceNode):
     ) -> TransferManualReturn:
         """
         人工搬运闸门：工作流执行到本节点时暂停、等待人工确认（确认即表示人工已把物料搬运到位），
-        本身**只透传**物料/目标设备/目标孔位/槽位，不做任何系统转移——它是机械臂 pick/place 的人工对应物。
+        本身**只透传**物料/目标设备/目标孔位/库位，不做任何系统转移——它是机械臂 pick/place 的人工对应物。
 
         实际的系统转移（记账）由工作流末步 transfer_resource 统一完成（两条流一致）：
         - 人工：apply_deduct_resource → transfer_manual → transfer_manual → transfer_resource
@@ -2921,7 +2586,7 @@ class HostNode(BaseROS2DeviceNode):
         dict（资源引用→with_children 拉取）解析为一个 PLR 实例。
 
         site 在此显式指定/透传，避免只能依赖前端隐式写入物料 extra（update_resource_site）；
-        透传到末步 transfer_resource 后据此把物料落到目标父级的对应槽位。
+        透传到末步 transfer_resource 后据此把物料落到目标父级的对应库位。
 
         Args:
             resource[待搬运物料]: 待人工搬运的单个物料（须带 unilabos_uuid，可由图 handle 连入并透传，list/dict 两形态）。
@@ -2929,7 +2594,7 @@ class HostNode(BaseROS2DeviceNode):
             mount_resource[目标孔位]: 目标设备上的单个目标孔位/父物料（透传给下游，list/dict 两形态）。
             timeout_seconds[超时时间]: 人工确认超时时间，单位秒，默认 3600。
             assignee_user_ids[确认人]: 指定处理人工确认的用户 id 列表。
-            site[目标槽位]: 目标父级容器上的槽位名，显式指定物料落在哪个槽位（透传给下游）。
+            site[目标库位]: 目标父级容器上的库位名，显式指定物料落在哪个库位（透传给下游）。
         """
         return {
             "resource": (ResourceTreeSet.from_plr_resources([resource]).dump() if resource is not None else []),

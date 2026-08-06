@@ -1,17 +1,15 @@
 import argparse
 import asyncio
-import copy
 import faulthandler
 import json
 import os
 import platform
 import shutil
-import signal
 import subprocess
 import sys
 import threading
 import time
-from typing import Any
+from typing import Any, Dict, List, Optional
 
 import networkx as nx
 import yaml
@@ -38,8 +36,14 @@ unilabos_dir = os.path.dirname(os.path.dirname(current_dir))
 if unilabos_dir not in sys.path:
     sys.path.append(unilabos_dir)
 
+from unilabos.app.process_shutdown import install_host_shutdown_handlers
 from unilabos.app.utils import cleanup_for_restart
-from unilabos.config.config import BasicConfig, HTTPConfig, load_config
+from unilabos.config.config import (
+    BasicConfig,
+    EdgeControlConfig,
+    HTTPConfig,
+    load_config,
+)
 from unilabos.utils.banner_print import print_status, print_unilab_banner
 
 # Global restart flags (used by ws_client and web/server)
@@ -47,36 +51,6 @@ _restart_requested: bool = False
 _restart_reason: str = ""
 
 RESTART_EXIT_CODE = 42
-
-
-def _build_workflow_device_identity_map(resource_tree_set: Any) -> dict[str, str]:
-    """Build the frozen workflow-executor identity map for local ROS dispatch."""
-
-    device_ids_by_identity = {"host_node": "host_node"}
-    for node in resource_tree_set.all_nodes:
-        if node.res_content.type != "device":
-            continue
-        device_ids_by_identity[node.res_content.uuid] = node.res_content.id
-        device_ids_by_identity[node.res_content.id] = node.res_content.id
-    return device_ids_by_identity
-
-
-def _workflow_ros_execution_mode(
-    *,
-    workspace_attached: bool,
-    backend: str | None,
-    test_mode: bool,
-    physical_execution_enabled: bool,
-) -> str | None:
-    """Select the explicitly authorized local WorkflowTask ROS executor mode."""
-
-    if not workspace_attached or backend != "ros":
-        return None
-    if test_mode:
-        return "simulated"
-    if physical_execution_enabled:
-        return "physical"
-    return None
 
 
 def _build_child_argv():
@@ -92,7 +66,9 @@ def _build_child_argv():
         if arg in ("--auto_restart_count", "--auto-restart-count"):
             skip_next = True
             continue
-        if arg.startswith(("--auto_restart_count=", "--auto-restart-count=")):
+        if arg.startswith("--auto_restart_count=") or arg.startswith(
+            "--auto-restart-count="
+        ):
             continue
         result.append(arg)
     return result
@@ -194,8 +170,154 @@ def convert_argv_dashes_to_underscores(args: argparse.ArgumentParser):
                 break
 
 
+def configure_material_startup(args_dict: Dict[str, Any]) -> str:
+    """应用物料（Material）命令行（CLI）覆盖并解析嵌入式/外部主机模式。
+
+    参数：``args_dict`` 是命令行参数字典。返回：``embedded`` 或 ``external``
+    物料服务模式；非法物料来源值抛出 ``ValueError``。
+    """
+
+    source_arg = args_dict.get("material_source")
+    production_control_enabled = "edge_control" in args_dict.get("app_bridges", [])
+    source = (
+        str(
+            source_arg
+            or ("backend" if production_control_enabled else HTTPConfig.material_source)
+            or "microbackend"
+        )
+        .strip()
+        .lower()
+    )
+    aliases = {
+        "edge": "microbackend",
+        "local": "microbackend",
+        "cloud": "backend",
+        "remote": "backend",
+    }
+    source = aliases.get(source, source)
+    if source not in {"microbackend", "backend", "auto"}:
+        raise ValueError(
+            "物料来源（Material Source）必须是 microbackend、backend 或 auto"
+        )
+    HTTPConfig.material_source = source
+
+    address_arg = args_dict.get("material_microbackend_addr")
+    if address_arg is not None:
+        HTTPConfig.material_microbackend_addr = str(address_arg).strip()
+    address = str(HTTPConfig.material_microbackend_addr or "").strip()
+
+    explicit_mode = args_dict.get("material_service_mode")
+    mode = str(explicit_mode or ("external" if address else "embedded"))
+    if mode == "external":
+        HTTPConfig.material_microbackend_addr = (
+            address or "http://127.0.0.1:8092/api/v1"
+        )
+    else:
+        # 嵌入式服务固定解析到当前主机端口；清除遗留外部地址，防止绕过主机数据库。
+        HTTPConfig.material_microbackend_addr = ""
+    args_dict["_material_service_mode"] = mode
+    return mode
+
+
+def configure_workflow_editable_package_roots(
+    args_dict: Dict[str, Any],
+) -> tuple[str, ...]:
+    """冻结当前进程工作流源码（Workflow Source）的唯一授权目录集合。
+
+    参数：``args_dict`` 是命令行参数字典；重复命令行（CLI）根目录存在时覆盖配置，
+    否则配置必须已经是不可变 ``tuple[str, ...]``。返回：保持声明顺序的绝对路径
+    tuple，并同步写入 ``BasicConfig``。异常：非 tuple 配置、空项或非字符串项
+    抛出 ``TypeError``，禁止产生第二种隐式配置解释。
+    """
+
+    cli_roots = args_dict.get("workflow_editable_package_root")
+    if cli_roots is None:
+        configured_roots = BasicConfig.workflow_editable_package_roots
+        if not isinstance(configured_roots, tuple):
+            raise TypeError("工作流源码授权目录配置必须是 tuple")
+    else:
+        if not isinstance(cli_roots, list):
+            raise TypeError("工作流源码命令行（CLI）授权目录必须是可重复参数列表")
+        configured_roots = tuple(cli_roots)
+    if any(not isinstance(root, str) or not root.strip() for root in configured_roots):
+        raise TypeError("工作流源码授权目录必须是非空字符串")
+    # ``frozen_roots`` 只做形状与绝对路径冻结；符号链接和目录身份由发现层核验。
+    frozen_roots = tuple(
+        os.path.abspath(os.path.expanduser(root)) for root in configured_roots
+    )
+    BasicConfig.workflow_editable_package_roots = frozen_roots
+    return frozen_roots
+
+
+def should_start_embedded_material_service(
+    args_dict: Dict[str, Any], *, is_host_mode: bool
+) -> bool:
+    """判断当前主机是否应拥有嵌入式物料库存（Material Inventory）SQLite。
+
+    参数：``args_dict`` 是已规范化启动参数，``is_host_mode`` 表示当前节点是主机。
+    返回：仅本地物料来源与嵌入式服务同时启用时为 ``True``。
+    """
+
+    return (
+        is_host_mode
+        and HTTPConfig.material_source in {"microbackend", "auto"}
+        and args_dict.get("_material_service_mode") == "embedded"
+    )
+
+
+def should_start_edge_scheduler(
+    args_dict: Dict[str, Any], *, is_host_mode: bool
+) -> bool:
+    """独立运行默认启用微后端；生产控制面启用时由云端负责调度。"""
+
+    production_control_enabled = "edge_control" in args_dict.get("app_bridges", [])
+    return (
+        is_host_mode
+        and bool(args_dict.get("edge_scheduler", True))
+        and not production_control_enabled
+    )
+
+
+def should_bootstrap_local_resource_graph(
+    args_dict: dict[str, Any], *, is_host_mode: bool
+) -> bool:
+    """判断本次启动是否应建立本地资源图投影（Resource Graph Projection）。
+
+    参数：``args_dict`` 是已规范化启动参数，``is_host_mode`` 表示当前节点是否为
+    主机。返回：仅当同一主机同时拥有嵌入式库存权威（Inventory Authority）和本地
+    调度权威（Scheduler Authority）时为 ``True``。异常：无；生产控制模式、外部
+    物料服务、从节点或显式关闭调度器时都不得写入本地资源图。
+    """
+
+    return should_start_embedded_material_service(
+        args_dict,
+        is_host_mode=is_host_mode,
+    ) and should_start_edge_scheduler(args_dict, is_host_mode=is_host_mode)
+
+
+def should_attach_legacy_http_bridge(args_dict: Dict[str, Any]) -> bool:
+    """Legacy backend callbacks must not run beside the production protocol."""
+
+    return (
+        "fastapi" in args_dict.get("app_bridges", [])
+        and "edge_control" not in args_dict.get("app_bridges", [])
+    )
+
+
+def should_request_remote_startup(
+    *, startup_json: Optional[Dict[str, Any]], graph_file_path: Optional[str]
+) -> bool:
+    """Fetch the legacy startup graph only when no graph was supplied locally."""
+
+    return startup_json is None and graph_file_path is None
+
+
 def parse_args():
-    """解析命令行参数"""
+    """构建 UniLab-OS 主进程命令行解析器。
+
+    参数：无。返回：包含产品启动和子命令参数的 ``ArgumentParser``；本函数只
+    定义合同，不读取或修改进程参数。
+    """
     parser = argparse.ArgumentParser(description="Start Uni-Lab Edge server.")
     subparsers = parser.add_subparsers(title="Valid subcommands", dest="command")
 
@@ -204,10 +326,7 @@ def parse_args():
         "--workspace",
         type=str,
         default=None,
-        help=(
-            "Explicit Uni-Lab Package Workspace root. The package is compiled "
-            "to a read-only Catalog before any domain module is activated."
-        ),
+        help="显式 Uni-Lab 工作区（Workspace）根目录。",
     )
     parser.add_argument(
         "-c", "--controllers", default=None, help="Controllers config file path."
@@ -233,21 +352,61 @@ def parse_args():
         help="Path to the working directory",
     )
     parser.add_argument(
+        "--workflow_editable_package_root",
+        type=str,
+        default=None,
+        action="append",
+        help=(
+            "Explicit editable package root for Workflow Source authoring. "
+            "Repeat to authorize multiple roots; overrides config tuple."
+        ),
+    )
+    parser.add_argument(
         "--backend",
-        choices=["ros", "dora", "simple", "automancer"],
+        choices=["ros", "simple", "automancer"],
         default="ros",
-        help="Choose the backend to run with: 'ros', 'dora', 'simple', or 'automancer'.",
+        help="Choose the backend to run with: 'ros', 'simple', or 'automancer'.",
     )
     parser.add_argument(
         "--app_bridges",
         nargs="+",
         default=["websocket", "fastapi"],
-        help="Bridges to connect to. Now support 'websocket' and 'fastapi'.",
+        help="Bridges to connect to: websocket (legacy), edge_control (production), fastapi.",
     )
     parser.add_argument(
+        "--material_source",
+        choices=["microbackend", "backend", "auto"],
+        default=None,
+        help="Host material query source. Default: microbackend; auto falls back "
+        "to the formal backend on a local miss. Ignored by slaves, which use HostLink.",
+    )
+    parser.add_argument(
+        "--material_service_mode",
+        choices=["embedded", "external"],
+        default=None,
+        help="Host material service mode. embedded starts the inventory DB in this "
+        "UniLabOS host (default); external connects to a separate microbackend process.",
+    )
+    parser.add_argument(
+        "--material_microbackend_addr",
+        type=str,
+        default=None,
+        help="External material microbackend API base. With external mode, defaults "
+        "to http://127.0.0.1:8092/api/v1.",
+    )
+    scheduler_group = parser.add_mutually_exclusive_group()
+    scheduler_group.add_argument(
         "--edge_scheduler",
+        dest="edge_scheduler",
         action="store_true",
-        help="Enable the edge workflow scheduler (DAG decomposition/rescheduling on edge).",
+        default=True,
+        help="Enable the host Edge workflow scheduler (default).",
+    )
+    scheduler_group.add_argument(
+        "--no_edge_scheduler",
+        dest="edge_scheduler",
+        action="store_false",
+        help="Disable the host Edge scheduler and its device-state/workflow-history stores.",
     )
     parser.add_argument(
         "--edge_scheduler_ordering_url",
@@ -255,6 +414,33 @@ def parse_args():
         default="",
         help="uni-lab-scheduler base url for task ordering (e.g. http://127.0.0.1:8090); "
         "empty = local stable ordering.",
+    )
+    parser.add_argument(
+        "--edge_inventory_db",
+        "--material_db",
+        dest="edge_inventory_db",
+        type=str,
+        default="~/.unilabos/inventory.db",
+        help="Host-only SQLite path for the edge-authoritative material store "
+        "(default: ~/.unilabos/inventory.db). Slaves never open this file.",
+    )
+    parser.add_argument(
+        "--edge_device_state_db",
+        "--device_state_db",
+        dest="edge_device_state_db",
+        type=str,
+        default="~/.unilabos/device_state.db",
+        help="Host scheduler device-state SQLite path (default: "
+        "~/.unilabos/device_state.db; 'off' disables persistence).",
+    )
+    parser.add_argument(
+        "--edge_workflow_history_db",
+        "--workflow_history_db",
+        dest="edge_workflow_history_db",
+        type=str,
+        default="~/.unilabos/workflow_history.db",
+        help="Host scheduler workflow-history SQLite path (default: "
+        "~/.unilabos/workflow_history.db; 'off' disables persistence).",
     )
     parser.add_argument(
         "--is_slave",
@@ -265,7 +451,7 @@ def parse_args():
         "--hostlink_addr",
         type=str,
         default="",
-        help="HostLink TCP channel address. Slave: host node 'ip[:port]' to join the "
+        help="HostLink TCP channel address. Slave: Host microbackend 'ip[:port]' to join the "
         "network; Host: 'bind[:port]' to listen on (default 0.0.0.0:7302). "
         "Material queries and ROS discovery assist go through this channel.",
     )
@@ -275,12 +461,27 @@ def parse_args():
         default=None,
         help="ROS_DOMAIN_ID for this process. Host: also advertised to slaves via "
         "HostLink handshake (network-wide domain). Slave: local fallback only — "
-        "the value downloaded from host wins once connected.",
+            "the value downloaded from host wins once connected.",
+    )
+    parser.add_argument(
+        "--ros_discovery_port",
+        type=int,
+        default=None,
+        help="UDP port for the Host-managed Fast DDS discovery server. Default 0 "
+        "reuses the HostLink numeric port (TCP and UDP do not conflict).",
+    )
+    parser.add_argument(
+        "--ros_discovery_server",
+        type=str,
+        default=None,
+        help="Use an external Fast DDS discovery server (ip:port), or 'off' to "
+        "disable the Host-managed directed discovery server.",
     )
     parser.add_argument(
         "--slave_no_host",
         action="store_true",
-        help="Skip waiting for host service in slave mode",
+        help="Allow an intentional offline Slave start without waiting for Host. "
+        "HostLink continues reconnecting in the background and local ROS config is used.",
     )
     parser.add_argument(
         "--upload_registry",
@@ -348,6 +549,36 @@ def parse_args():
         ),
     )
     parser.add_argument(
+        "--edge_api_key",
+        type=str,
+        default="",
+        help="Shared EDGE_API_KEY used by the production Edge control/data planes.",
+    )
+    parser.add_argument(
+        "--edge_key",
+        type=str,
+        default="",
+        help="Stable Edge registration key; defaults to the machine name.",
+    )
+    parser.add_argument(
+        "--edge_instance_uuid",
+        type=str,
+        default="",
+        help="Optional stable Edge instance UUID; generated in edge_state_db when empty.",
+    )
+    parser.add_argument(
+        "--edge_capability_revision",
+        type=str,
+        default="",
+        help="Edge capability revision sent during production registration.",
+    )
+    parser.add_argument(
+        "--edge_state_db",
+        type=str,
+        default="",
+        help="SQLite path for durable production Command, Job, and Event Outbox state.",
+    )
+    parser.add_argument(
         "--skip_env_check",
         action="store_true",
         help="Skip environment dependency check on startup",
@@ -376,15 +607,6 @@ def parse_args():
         help="Test mode: all actions simulate execution and return mock results without running real hardware",
     )
     parser.add_argument(
-        "--enable_workflow_physical_execution",
-        action="store_true",
-        default=False,
-        help=(
-            "Explicitly allow local WorkflowTask jobs to invoke real ROS device "
-            "actions. Without this opt-in, non-test workflow tasks remain pending."
-        ),
-    )
-    parser.add_argument(
         "--external_devices_only",
         action="store_true",
         default=False,
@@ -407,6 +629,22 @@ def parse_args():
         type=int,
         default=500,
         help="Maximum number of automatic restarts in restart mode (default: 500)",
+    )
+    subparsers.add_parser(
+        "template-sync",
+        aliases=["template_sync"],
+        help="Collect the complete Edge Registry and transactionally sync templates",
+    )
+    instance_sync_parser = subparsers.add_parser(
+        "instance-sync",
+        aliases=["instance_sync"],
+        help="Create missing backend material instances from an Edge device graph",
+    )
+    instance_sync_parser.add_argument(
+        "--check_only",
+        dest="instance_check_only",
+        action="store_true",
+        help="Only verify that every graph node has a matching backend instance",
     )
     # workflow upload subcommand
     workflow_parser = subparsers.add_parser(
@@ -524,10 +762,68 @@ def parse_args():
         help="Skip host registration service visibility check",
     )
 
-    # package_manager owns package verbs; app/main.py is only the CLI adapter.
-    from unilabos.package_manager.cli import register_package_subcommands
+    # package subcommand: 社区设备包 inspect / upload
+    package_parser = subparsers.add_parser(
+        "package",
+        aliases=["pkg"],
+        help="Community device package tools: inspect / upload / install",
+    )
+    package_actions = package_parser.add_subparsers(
+        title="package actions", dest="package_action"
+    )
+    for action_name in ("inspect", "upload"):
+        action_parser = package_actions.add_parser(
+            action_name,
+            help=(
+                "Scan package dir and generate package_info/archive (local only)"
+                if action_name == "inspect"
+                else "Inspect then upload archive + package_info to backend /lab/resource"
+            ),
+        )
+        action_parser.add_argument(
+            "--path",
+            dest="package_path",
+            type=str,
+            required=True,
+            help="Path to the community device package directory (contains pyproject.toml)",
+        )
+        action_parser.add_argument(
+            "--namespace",
+            type=str,
+            default=None,
+            help="Class namespace, e.g. community.acme; defaults to community.<normalized pyproject name>",
+        )
+        action_parser.add_argument(
+            "--out",
+            type=str,
+            default=None,
+            help="Output dir for archive/package_info.json (default: <package>/../dist)",
+        )
+        if action_name == "upload":
+            action_parser.add_argument(
+                "--download-url",
+                dest="download_url",
+                type=str,
+                default="",
+                help="Explicit reachable archive URL (skips OSS upload; handy for local static server)",
+            )
 
-    register_package_subcommands(subparsers)
+    # install：开发者本地调试入口
+    install_parser = package_actions.add_parser(
+        "install",
+        help="Install a pip spec / git URL locally (uv pip > pip), then scan @device IDs",
+    )
+    install_parser.add_argument(
+        "install_spec",
+        type=str,
+        help="pip spec (name==version / name) or git URL (git+https://...)",
+    )
+    install_parser.add_argument(
+        "--no-inspect",
+        dest="no_inspect",
+        action="store_true",
+        help="Skip post-install @device scan / device listing",
+    )
 
     # HTTP 客户端子命令（与现有 --ak/--sk/--addr 复用）
     parser.add_argument(
@@ -605,20 +901,11 @@ def parse_args():
     return parser
 
 
-def _resolve_graph_file_path(
-    file_path: str | None,
-    *,
-    workspace_root: str | None = None,
-) -> str | None:
+def _resolve_graph_file_path(file_path: str | None) -> str | None:
     if file_path is None:
         return None
     if os.path.isfile(file_path):
         return file_path
-    if workspace_root:
-        workspace_file = os.path.abspath(os.path.join(workspace_root, file_path))
-        if os.path.isfile(workspace_file):
-            print_status(f"使用 Package Workspace 内 graph {workspace_file}", "info")
-            return workspace_file
     temp_file_path = os.path.abspath(str(os.path.join(__file__, "..", "..", file_path)))
     if os.path.isfile(temp_file_path):
         print_status(f"使用相对路径{temp_file_path}", "info")
@@ -626,7 +913,7 @@ def _resolve_graph_file_path(
     return file_path
 
 
-def _load_graph_json_preview(file_path: str | None) -> dict[str, Any] | None:
+def _load_graph_json_preview(file_path: str | None) -> Dict[str, Any] | None:
     if (
         not file_path
         or not file_path.endswith(".json")
@@ -636,13 +923,18 @@ def _load_graph_json_preview(file_path: str | None) -> dict[str, Any] | None:
     try:
         with open(file_path, encoding="utf-8") as f:
             return json.load(f)
-    except (OSError, json.JSONDecodeError) as exc:
+    except Exception as exc:
         print_status(f"预读取 graph JSON 失败，跳过 community 包解析: {exc}", "warning")
         return None
 
 
 def main():
-    """主函数"""
+    """解析产品配置并启动所选 UniLab-OS 运行模式。
+
+    参数：无。返回：普通服务退出时为 ``None``，部分一次性子命令返回整数状态；
+    配置、环境或子命令失败沿用现有退出策略。工作流源码（Workflow Source）
+    授权在配置文件加载后、任何 Web 组合根启动前一次冻结。
+    """
     # 解析命令行参数
     parser = parse_args()
     convert_argv_dashes_to_underscores(parser)
@@ -654,24 +946,6 @@ def main():
         from unilabos.hostlink.doctor import run_doctor
 
         sys.exit(run_doctor(args_dict))
-
-    # inspect/build/install are package-manager operations. They do not need
-    # runtime configuration, credentials, or device bootstrap.
-    if (
-        args_dict.get("command") in ("package", "pkg")
-        and args_dict.get("package_action") != "upload"
-    ):
-        from unilabos.package_manager.cli import (
-            PackageCommandError,
-            run_package_command,
-        )
-
-        try:
-            run_package_command(args_dict)
-        except PackageCommandError as exc:
-            print(str(exc), file=sys.stderr)
-            raise SystemExit(2) from exc
-        return
 
     # 处理 HTTP 客户端子命令（login, logout, whoami, config, lab, material, workflow）
     # 这些命令不需要加载完整的 UniLab-OS 环境，提前处理并退出
@@ -685,18 +959,19 @@ def main():
         "workflow",
     ]
     if args_dict.get("command") in http_client_commands:
+        from unilabos.client import (
+            SessionManager,
+            set_output_format,
+            OutputFormat,
+            print_error,
+            print_output,
+            resolve_addr,
+        )
         from unilabos.app.cli.auth import cmd_login, cmd_logout, cmd_whoami
         from unilabos.app.cli.config import cmd_config_show
         from unilabos.app.cli.lab import cmd_lab_list
         from unilabos.app.cli.material import cmd_material_list
         from unilabos.app.cli.workflow import cmd_workflow_upload
-        from unilabos.client import (
-            OutputFormat,
-            SessionManager,
-            print_error,
-            resolve_addr,
-            set_output_format,
-        )
 
         # 设置输出格式
         if args_dict.get("json", False):
@@ -772,40 +1047,20 @@ def main():
         _run_as_supervisor(args_dict.get("auto_restart_count", 5))
         return
 
-    # A Package Workspace is observed exactly once before it is made
-    # importable. The resulting Catalog is the only input to Registry and
-    # other OS consumers; no second directory scan is performed.
-    workspace_source = None
-    workspace_catalog = None
-    workspace_path = args_dict.get("workspace")
-    if workspace_path:
-        if args_dict.get("devices"):
-            parser.error("--workspace 不可与 legacy --devices 同时使用")
-        from unilabos.package_manager import (
-            PackageCompileError,
-            WorkspaceSource,
-            compile_package_source,
-        )
+    # 工作区（Workspace）只在常驻启动路径投影一次；模块内部隐藏目录、命名空间、
+    # 工作流源码授权和相对物理图解析，不把包管理细节继续堆进历史主函数。
+    from unilabos.package_manager import prepare_workspace_startup
 
-        workspace_source = WorkspaceSource(workspace_path)
-        try:
-            workspace_catalog = compile_package_source(workspace_source)
-        except PackageCompileError as exc:
-            for diagnostic in exc.diagnostics:
-                location = diagnostic.path or "package"
-                if diagnostic.line is not None:
-                    location += f":{diagnostic.line}"
-                print(
-                    f"{location}: {diagnostic.code}: {diagnostic.message}",
-                    file=sys.stderr,
-                )
-            raise SystemExit(2) from exc
-        workspace_root = str(workspace_source.root.resolve())
-        if workspace_root not in sys.path:
-            sys.path.insert(0, workspace_root)
-        args_dict["_package_sources"] = [workspace_source]
-        args_dict["_package_catalogs"] = [workspace_catalog]
-        args_dict["_workspace_root"] = workspace_root
+    try:
+        workspace_startup_plan = prepare_workspace_startup(args_dict)
+    except (TypeError, ValueError) as error:
+        parser.error(str(error))
+    if workspace_startup_plan is not None:
+        print_status(
+            "已加载工作区（Workspace）启动计划: "
+            f"{workspace_startup_plan.import_package}",
+            "info",
+        )
 
     # 环境检查 - 检查并自动安装必需的包 (可选)
     skip_env_check = args_dict.get("skip_env_check", False)
@@ -813,33 +1068,20 @@ def main():
 
     if not skip_env_check:
         from unilabos.utils.environment_check import (
-            check_device_package_requirements,
             check_environment,
-            install_requirements_list,
+            check_device_package_requirements,
         )
 
         if not check_environment(auto_install=True):
             print_status("环境检查失败，程序退出", "error")
             os._exit(1)
 
-        if (
-            workspace_catalog is not None
-            and workspace_catalog.distribution.dependencies
-            and not install_requirements_list(
-                list(workspace_catalog.distribution.dependencies),
-                label=workspace_catalog.distribution.name,
-            )
-        ):
-            print_status("Package Workspace 依赖安装失败，程序退出", "error")
-            os._exit(1)
-
         # 第一次设备包依赖检查：build_registry 之前，确保 import map 可用
         devices_dirs_for_req = args_dict.get("devices", None)
-        if devices_dirs_for_req and not check_device_package_requirements(
-            devices_dirs_for_req
-        ):
-            print_status("设备包依赖检查失败，程序退出", "error")
-            os._exit(1)
+        if devices_dirs_for_req:
+            if not check_device_package_requirements(devices_dirs_for_req):
+                print_status("设备包依赖检查失败，程序退出", "error")
+                os._exit(1)
     else:
         print_status("跳过环境依赖检查", "warning")
 
@@ -855,8 +1097,6 @@ def main():
         working_dir = os.path.abspath(raw_working_dir)
     elif config_path and os.path.exists(config_path):
         working_dir = os.path.dirname(os.path.abspath(config_path))
-    elif workspace_source is not None:
-        working_dir = str(workspace_source.root.resolve())
     else:
         working_dir = os.path.abspath(os.getcwd())
 
@@ -867,12 +1107,7 @@ def main():
             working_dir = unilabos_data_sub
         elif not raw_working_dir and not (config_path and os.path.exists(config_path)):
             # 未显式指定路径，默认使用 cwd/unilabos_data
-            default_root = (
-                str(workspace_source.root.resolve())
-                if workspace_source is not None
-                else os.getcwd()
-            )
-            working_dir = os.path.abspath(os.path.join(default_root, "unilabos_data"))
+            working_dir = os.path.abspath(os.path.join(os.getcwd(), "unilabos_data"))
 
     # === 解析 config_path ===
     if config_path and not os.path.exists(config_path):
@@ -896,7 +1131,7 @@ def main():
             print_status(f"发现本地配置文件: {config_path}", "info")
         else:
             print_status(
-                "未指定config路径，可通过 --config 传入 local_config.py 文件路径",
+                f"未指定config路径，可通过 --config 传入 local_config.py 文件路径",
                 "info",
             )
             print_status(
@@ -924,7 +1159,7 @@ def main():
         load_config_from_file(config_path)
 
     # 根据配置重新设置日志级别
-    from unilabos.utils.log import configure_comm_logger, configure_logger, logger
+    from unilabos.utils.log import configure_logger, configure_comm_logger, logger
 
     if hasattr(BasicConfig, "log_level"):
         logger.info(f"Log level set to '{BasicConfig.log_level}' from config file.")
@@ -940,6 +1175,11 @@ def main():
     )
     if comm_log_path is not None:
         logger.info(f"[COMM_LOG_FILE] {comm_log_path}")
+
+    # 配置完成后再初始化可选 OTel，避免默认配置在 env/file 覆盖前抢先生效。
+    from unilabos.utils.tracing import initialize_tracing
+
+    initialize_tracing()
 
     if args.addr != parser.get_default("addr"):
         if args.addr == "test":
@@ -959,6 +1199,19 @@ def main():
         HTTPConfig.schedule_addr = args_dict["schedule_addr"]
         print_status(f"使用独立 schedule 地址: {HTTPConfig.schedule_addr}", "info")
 
+    if args_dict.get("edge_api_key", ""):
+        EdgeControlConfig.api_key = args_dict["edge_api_key"]
+    if args_dict.get("edge_key", ""):
+        EdgeControlConfig.edge_key = args_dict["edge_key"]
+    if args_dict.get("edge_instance_uuid", ""):
+        EdgeControlConfig.instance_uuid = args_dict["edge_instance_uuid"]
+    if args_dict.get("edge_capability_revision", ""):
+        EdgeControlConfig.capability_revision = args_dict[
+            "edge_capability_revision"
+        ]
+    if args_dict.get("edge_state_db", ""):
+        EdgeControlConfig.state_db = args_dict["edge_state_db"]
+
     # 设置BasicConfig参数
     if args_dict.get("ak", ""):
         BasicConfig.ak = args_dict.get("ak", "")
@@ -967,34 +1220,78 @@ def main():
         BasicConfig.sk = args_dict.get("sk", "")
         print_status("传入了sk参数，优先采用传入参数！", "info")
     BasicConfig.working_dir = working_dir
-    from unilabos.workflow.catalog import CatalogAuthority
+    BasicConfig.extra_resource = bool(args_dict.get("extra_resource", False))
+    configure_workflow_editable_package_roots(args_dict)
 
-    if workspace_source is not None:
-        workspace_root = workspace_source.root.resolve()
-        # PackageCatalog workspaces may contain devices/resources only.  The
-        # editable Workflow source protocol is an additional, explicit
-        # capability whose closed manifest is package.yaml; do not make that
-        # manifest mandatory merely because --workspace was selected.
-        BasicConfig.workflow_editable_package_roots = (
-            (str(workspace_root),)
-            if (workspace_root / "package.yaml").is_file()
-            else ()
+    if args_dict.get("command") in ("template-sync", "template_sync"):
+        from unilabos.app.template_sync import (
+            TemplateSyncError,
+            run_template_sync_command,
         )
-    # A domain Package Workspace is optional for local Edge debugging. The OS
-    # registry still publishes a Catalog snapshot, so it needs the same local
-    # Graph Authority even when only built-in device capabilities are loaded.
-    if BasicConfig.workflow_graph_authority is None:
-        BasicConfig.workflow_graph_authority = CatalogAuthority(
-            authority_id="os-local",
-            kind="local",
+
+        try:
+            report = run_template_sync_command(
+                args_dict,
+                backend_address=HTTPConfig.remote_addr,
+            )
+        except TemplateSyncError as exc:
+            print_status(f"模板同步失败: {exc}", "error")
+            return 1
+        print_status(
+            "模板同步完成: "
+            f"{report.device_count} 个设备模板，"
+            f"{report.resource_count} 个器材模板",
+            "info",
+        )
+        return 0
+
+    if args_dict.get("command") in ("instance-sync", "instance_sync"):
+        from unilabos.app.instance_sync import (
+            InstanceSyncError,
+            run_instance_sync_command,
+        )
+
+        try:
+            report = run_instance_sync_command(
+                args_dict,
+                backend_address=HTTPConfig.remote_addr,
+            )
+        except InstanceSyncError as exc:
+            print_status(f"资源实例初始化失败: {exc}", "error")
+            return 1
+        print_status(
+            (
+                "资源实例启动检查完成: "
+                if args_dict.get("instance_check_only", False)
+                else "资源实例初始化完成: "
+            )
+            + f"新建 {report.created_count} 个，复用 {report.existing_count} 个",
+            "info",
+        )
+        return 0
+
+    # 物料客户端（Material Client）的嵌入式 URL 来自主机 Web 端口，因此必须在
+    # 任一可选启动查询之前确定主从角色与端口。
+    BasicConfig.port = args_dict["port"] if args_dict["port"] else BasicConfig.port
+    BasicConfig.is_host_mode = not args_dict.get("is_slave", False)
+    try:
+        material_service_mode = configure_material_startup(args_dict)
+    except ValueError as exc:
+        print_status(f"物料服务启动参数错误: {exc}", "error")
+        os._exit(2)
+    if BasicConfig.is_host_mode:
+        print_status(
+            f"物料查询来源: {HTTPConfig.material_source}; host 服务模式: {material_service_mode}",
+            "info",
+        )
+    else:
+        print_status(
+            "Slave 不启动物料数据库，物料查询仅通过 HostLink 访问 Host", "info"
         )
 
     # package 子命令：在配置/鉴权就绪后尽早处理，不进入设备 bootstrap
     if args_dict.get("command") in ("package", "pkg"):
-        from unilabos.package_manager.cli import (
-            PackageCommandError,
-            run_package_command,
-        )
+        from unilabos.app.package_cli import PackageCLIError, cmd_package
 
         package_http_client = None
         if args_dict.get("package_action") == "upload":
@@ -1005,8 +1302,8 @@ def main():
 
             package_http_client = _http_client_for_package
         try:
-            run_package_command(args_dict, http_client=package_http_client)
-        except PackageCommandError as exc:
+            cmd_package(args_dict, http_client=package_http_client)
+        except PackageCLIError as exc:
             print_status(str(exc), "error")
             os._exit(1)
         return
@@ -1025,11 +1322,9 @@ def main():
         else:
             print_status("远程资源不存在，本地将进行首次上报！", "info")
 
-    BasicConfig.port = args_dict["port"] if args_dict["port"] else BasicConfig.port
     BasicConfig.disable_browser = (
         args_dict["disable_browser"] or BasicConfig.disable_browser
     )
-    BasicConfig.is_host_mode = not args_dict.get("is_slave", False)
     BasicConfig.slave_no_host = args_dict.get("slave_no_host", False)
     BasicConfig.upload_registry = args_dict.get("upload_registry", False)
     BasicConfig.no_update_feedback = args_dict.get("no_update_feedback", False)
@@ -1052,6 +1347,18 @@ def main():
             HostLinkConfig.bind = addr or HostLinkConfig.bind
         else:
             HostLinkConfig.host = addr or HostLinkConfig.host
+    ros_discovery_port = args_dict.get("ros_discovery_port")
+    if ros_discovery_port is not None:
+        if not 0 <= int(ros_discovery_port) <= 65535:
+            raise ValueError("--ros_discovery_port must be between 0 and 65535")
+        from unilabos.config.config import HostLinkConfig
+
+        HostLinkConfig.ros_discovery_port = int(ros_discovery_port)
+    ros_discovery_server = args_dict.get("ros_discovery_server")
+    if ros_discovery_server is not None:
+        from unilabos.config.config import HostLinkConfig
+
+        HostLinkConfig.ros_discovery_server = str(ros_discovery_server).strip()
     # --ros_domain_id：写环境变量（本进程 rclpy.init 与子进程/命令行工具生效）；
     # host 同时记入 HostLinkConfig 经握手统一下发全网；slave 连上 host 后以下发值为准
     ros_domain_id = args_dict.get("ros_domain_id")
@@ -1086,8 +1393,7 @@ def main():
     if not check_mode and not workflow_upload:
         startup_json_preview = None
         graph_file_path = _resolve_graph_file_path(
-            args_dict.get("graph") or BasicConfig.startup_json_path,
-            workspace_root=args_dict.get("_workspace_root"),
+            args_dict.get("graph") or BasicConfig.startup_json_path
         )
         args_dict["_graph_file_path"] = graph_file_path
         graph_preview = _load_graph_json_preview(graph_file_path)
@@ -1103,49 +1409,47 @@ def main():
                 graph_preview = startup_json_preview
 
         if graph_preview:
-            from unilabos.package_manager.community import (
+            from unilabos.app.community_packages import (
                 CommunityPackageError,
-                HttpClientCommunityAdapter,
-                resolve_graph_packages,
+                prepare_community_packages,
             )
 
-            community_port = (
-                HttpClientCommunityAdapter(http_client_for_community)
-                if http_client_for_community is not None
-                else None
-            )
             try:
-                community_result = resolve_graph_packages(
+                community_result = prepare_community_packages(
                     graph_preview,
                     working_dir=BasicConfig.working_dir,
-                    port=community_port,
-                    available_catalogs=args_dict.get("_package_catalogs", ()),
+                    http_client=http_client_for_community,
+                    available_namespaces=args_dict.get("_community_namespaces"),
                 )
             except CommunityPackageError as exc:
                 print_status(str(exc), "error")
                 os._exit(1)
 
-            args_dict.setdefault("_package_sources", []).extend(
-                community_result.sources
-            )
-            args_dict.setdefault("_package_catalogs", []).extend(
-                community_result.catalogs
-            )
-            for source in community_result.sources:
-                wheel_path = str(source.wheel.resolve())
-                if wheel_path not in sys.path:
-                    sys.path.insert(0, wheel_path)
-            if community_result.dependencies and not skip_env_check:
-                from unilabos.utils.environment_check import (
-                    install_requirements_list,
+            if community_result.devices_dirs:
+                existing_devices_dirs = args_dict.get("devices") or []
+                args_dict["devices"] = (
+                    existing_devices_dirs + community_result.devices_dirs
                 )
+                if not skip_env_check:
+                    from unilabos.utils.environment_check import (
+                        check_device_package_requirements,
+                        install_requirements_list,
+                    )
 
-                if not install_requirements_list(
-                    list(community_result.dependencies),
-                    label="community",
-                ):
-                    print_status("community package 依赖安装失败，程序退出", "error")
-                    os._exit(1)
+                    # 社区包依赖：pyproject [project].dependencies 为标准来源，只装依赖不装包体
+                    # （保持源码挂载，便于 track/卸载）；requirements.txt 作为补充兜底
+                    if community_result.dependencies and not install_requirements_list(
+                        community_result.dependencies, label="community"
+                    ):
+                        print_status(
+                            "community 设备包 pyproject 依赖安装失败，程序退出", "error"
+                        )
+                        os._exit(1)
+                    if not check_device_package_requirements(args_dict["devices"]):
+                        print_status("community 设备包依赖检查失败，程序退出", "error")
+                        os._exit(1)
+            # 社区包设备直接以 community.<ns>.<id> 注册（扫描期命名空间化），不做 alias 桥接
+            args_dict["_community_namespaces"] = community_result.namespaces
 
     # Step 0: AST 分析优先 + YAML 注册表加载
     # check_mode 和 upload_registry 都会执行实际 import 验证
@@ -1155,20 +1459,30 @@ def main():
     lab_registry = build_registry(
         registry_paths=args_dict["registry_path"],
         devices_dirs=devices_dirs,
+        community_namespaces=args_dict.get("_community_namespaces"),
         upload_registry=BasicConfig.upload_registry,
         check_mode=check_mode,
         complete_registry=complete_registry,
         external_only=external_only,
-        package_catalogs=args_dict.get("_package_catalogs"),
     )
-    # Registry 已完成全部来源的构建后再冻结快照；TemplateCatalog adapter 自行筛选
-    # 显式 typed @action，production composition 不按来源复制第二套筛选规则。
-    args_dict["_workflow_registry_snapshot"] = copy.deepcopy(
-        lab_registry.device_type_registry
-    )
-    args_dict["_workflow_resource_registry_snapshot"] = copy.deepcopy(
-        lab_registry.resource_type_registry
-    )
+    # 工作区外形与 3D 模型只从注册表（Registry）已发现的装饰器绑定编译。
+    workspace_material_shapes = ()
+    workspace_material_models = None
+    if workspace_startup_plan is not None:
+        from unilabos.package_manager import (
+            compile_workspace_material_models,
+            compile_workspace_material_shapes,
+        )
+
+        workspace_material_shapes = compile_workspace_material_shapes(
+            workspace_startup_plan,
+            lab_registry,
+        )
+        # ``workspace_material_models`` 只发布 OS 公开 HTTP URL，不向前端暴露本地路径。
+        workspace_material_models = compile_workspace_material_models(
+            workspace_startup_plan,
+            lab_registry,
+        )
 
     # Check mode: 注册表验证完成后直接退出
     if check_mode:
@@ -1181,32 +1495,22 @@ def main():
         os._exit(0)
 
     # 以下导入依赖 ROS2 环境，check_mode 已退出不需要
-    from unilabos.app.backend import start_backend
-    from unilabos.app.communication import get_communication_client
-    from unilabos.app.register import register_devices_and_resources
-    from unilabos.app.web import http_client, start_server
     from unilabos.resources.graphio import (
+        read_node_link_json,
+        read_graphml,
         dict_from_graph,
         modify_to_backend_format,
-        read_graphml,
-        read_node_link_json,
     )
-    from unilabos.resources.resource_tracker import ResourceDict, ResourceTreeSet
+    from unilabos.app.communication import get_communication_client
+    from unilabos.app.backend import start_backend
+    from unilabos.app.web import http_client
+    from unilabos.app.web import start_server
+    from unilabos.resources.resource_tracker import ResourceTreeSet, ResourceDict
 
-    # Step 1: 上传全部注册表到服务端，同步保存到 unilabos_data
+    # 模板写入只允许独立 template-sync 初始化 Job；常驻 Edge 不持有开发者身份。
     if BasicConfig.upload_registry:
-        if BasicConfig.ak and BasicConfig.sk:
-            # print_status("开始注册设备到服务端...", "info")
-            try:
-                register_devices_and_resources(lab_registry)
-                # print_status("设备注册完成", "info")
-            except Exception as e:  # noqa: BLE001 - 云端注册失败不阻断本地启动
-                print_status(f"设备注册失败: {e}", "error")
-        else:
-            print_status("未提供 ak 和 sk，跳过设备注册", "info")
-    else:
         print_status(
-            "本次启动注册表不报送云端，如果您需要联网调试，请在启动命令增加--upload_registry",
+            "--upload_registry 已停用；请先运行独立 template-sync 初始化 Job",
             "warning",
         )
 
@@ -1221,15 +1525,17 @@ def main():
         os._exit(1)
     graph: nx.Graph
     resource_tree_set: ResourceTreeSet
-    resource_links: list[dict[str, Any]]
+    resource_links: List[Dict[str, Any]]
     file_path = args_dict.get("_graph_file_path")
     if file_path is None:
         file_path = _resolve_graph_file_path(
-            args_dict.get("graph") or BasicConfig.startup_json_path,
-            workspace_root=args_dict.get("_workspace_root"),
+            args_dict.get("graph") or BasicConfig.startup_json_path
         )
     request_startup_json = args_dict.get("_startup_json")
-    if request_startup_json is None and file_path is None:
+    if should_request_remote_startup(
+        startup_json=request_startup_json,
+        graph_file_path=file_path,
+    ):
         request_startup_json = http_client.request_startup_json()
     if file_path is None:
         if not request_startup_json:
@@ -1316,219 +1622,207 @@ def main():
     args_dict["devices_config"] = resource_tree_set
     args_dict["graph"] = graph_res.physical_setup_graph
 
+    slave_device_ids: List[str] = []
+    if not BasicConfig.is_host_mode:
+        from unilabos.app.scheduler.host_network import (
+            require_slave_startup_device_ids,
+        )
+
+        try:
+            slave_device_ids = require_slave_startup_device_ids(resource_tree_set)
+        except ValueError as exc:
+            print_status(str(exc), "error")
+            os._exit(2)
+
     if args_dict["controllers"] is not None:
-        with open(args_dict["controllers"], encoding="utf-8") as controller_file:
-            args_dict["controllers_config"] = yaml.safe_load(controller_file)
+        args_dict["controllers_config"] = yaml.safe_load(
+            open(args_dict["controllers"], encoding="utf-8")
+        )
     else:
         args_dict["controllers_config"] = None
 
     args_dict["bridges"] = []
-    workflow_job_dispatcher = None
-    device_identity_resolver = None
-    workflow_package_catalogs = (
-        (workspace_catalog,) if workspace_catalog is not None else ()
-    )
-    # 获取通信客户端（仅支持WebSocket）
+
+    if should_attach_legacy_http_bridge(args_dict):
+        args_dict["bridges"].append(http_client)
     if BasicConfig.is_host_mode:
-        comm_client = get_communication_client()
+        comm_client = None
+        edge_control_client = None
+        communication_clients = []
         if "websocket" in args_dict["app_bridges"]:
+            comm_client = get_communication_client()
             args_dict["bridges"].append(comm_client)
-
-            def _exit(signum, frame):
-                comm_client.stop()
-                sys.exit(0)
-
-            signal.signal(signal.SIGINT, _exit)
-            signal.signal(signal.SIGTERM, _exit)
+            communication_clients.append(comm_client)
             comm_client.start()
+        if "edge_control" in args_dict["app_bridges"]:
+            from unilabos.app.edge_control import EdgeControlClient
 
-        # Persistent WorkflowTask execution is a separate local authority from
-        # the legacy cloud workflow_start Edge scheduler. Wire its Jobs to the
-        # same HostNode/ROS execution backend whenever a Package Workspace owns
-        # the local Workflow authority.
-        workflow_execution_mode = _workflow_ros_execution_mode(
-            workspace_attached=workspace_source is not None,
-            backend=args_dict.get("backend"),
-            test_mode=BasicConfig.test_mode,
-            physical_execution_enabled=bool(
-                args_dict.get("enable_workflow_physical_execution", False)
-            ),
-        )
-        if workflow_execution_mode is not None:
-            from unilabos.app.scheduler.backend import JobExecutionBackend
-
-            device_ids_by_identity = _build_workflow_device_identity_map(
-                resource_tree_set
-            )
-            device_identity_resolver = device_ids_by_identity.get
-            workflow_job_dispatcher = JobExecutionBackend()
-            workflow_job_dispatcher.start()
-            args_dict["bridges"].append(workflow_job_dispatcher)
-            if workflow_execution_mode == "physical":
-                print_status(
-                    "WorkflowTask ROS 物理执行后端已显式启用：动作将调用真实设备",
-                    "warning",
-                )
-            else:
-                print_status(
-                    "WorkflowTask ROS 执行后端已启用（test_mode 模拟动作）",
-                    "info",
-                )
-        elif workspace_source is not None and args_dict.get("backend") == "ros":
+            edge_control_client = EdgeControlClient()
+            args_dict["bridges"].append(edge_control_client)
+            communication_clients.append(edge_control_client)
+            edge_control_client.start()
             print_status(
-                "WorkflowTask ROS 物理执行未启用：durable Execution Claims 尚未接入",
-                "warning",
+                "Edge 生产控制面已启用（HTTP 事实数据 + WebSocket 短通知）",
+                "info",
+            )
+
+        # Host 即使没有远端通信客户端也拥有 HostLink 和 ROS2 定向发现服务；正常
+        # TERM 必须显式关闭这些独立进程资源，不能只依赖不会由默认 TERM 运行的
+        # ``atexit``。
+        install_host_shutdown_handlers(communication_clients)
+
+        # Host owns the embedded material DB even when workflow scheduling is
+        # disabled.  Slaves never execute this branch and therefore never open
+        # the SQLite file; their device queries terminate at HostLink.
+        inventory_db = ""
+        material_uses_microbackend = HTTPConfig.material_source in {
+            "microbackend",
+            "auto",
+        }
+        if should_start_embedded_material_service(
+            args_dict,
+            is_host_mode=BasicConfig.is_host_mode,
+        ):
+            from unilabos.app.scheduler.integration import setup_edge_inventory
+            from unilabos.registry.template_snapshot import RegistryTemplateSnapshot
+
+            inventory_db = str(args_dict.get("edge_inventory_db") or "").strip()
+            if not inventory_db:
+                raise ValueError("embedded material service requires --material_db")
+            inventory_db = os.path.abspath(os.path.expanduser(inventory_db))
+            # ``bootstrap_resource_graph`` 只在本地主机同时拥有调度和库存权威时为真。
+            bootstrap_resource_graph = should_bootstrap_local_resource_graph(
+                args_dict,
+                is_host_mode=BasicConfig.is_host_mode,
+            )
+            setup_edge_inventory(
+                inventory_db,
+                ws_client=(
+                    comm_client
+                    if "websocket" in args_dict["app_bridges"]
+                    else None
+                ),
+                resource_tree_set=(
+                    resource_tree_set if bootstrap_resource_graph else None
+                ),
+                registry_snapshot=(
+                    RegistryTemplateSnapshot.from_registry(lab_registry)
+                    if bootstrap_resource_graph
+                    else None
+                ),
+                resource_graph_source_id=(
+                    str(file_path or "remote-startup.json")
+                    if bootstrap_resource_graph
+                    else ""
+                ),
+                material_shapes=workspace_material_shapes,
+                material_model_catalog=workspace_material_models,
+            )
+            print_status(
+                f"Host Edge 物料服务已启用 (SQLite WAL: {inventory_db})",
+                "info",
+            )
+        elif material_uses_microbackend:
+            print_status(
+                f"Host 使用独立物料微后端: {HTTPConfig.material_microbackend_addr}",
+                "info",
             )
 
         # Edge 工作流调度器：接收 workflow_start 整图、拆解 DAG、每个 job 完成后重排
-        if args_dict.get("edge_scheduler"):
+        if should_start_edge_scheduler(
+            args_dict,
+            is_host_mode=BasicConfig.is_host_mode,
+        ):
             from unilabos.app.scheduler.integration import setup_edge_scheduler
-            from unilabos.workflow.composition import (
-                compose_workflow_runtime,
-                get_workflow_inventory_service,
-            )
-
-            workflow_service = compose_workflow_runtime(
-                BasicConfig.working_dir,
-                authority=BasicConfig.workflow_graph_authority,
-                editable_package_roots=BasicConfig.workflow_editable_package_roots,
-                registry_snapshot=args_dict.get("_workflow_registry_snapshot"),
-                resource_registry_snapshot=args_dict.get(
-                    "_workflow_resource_registry_snapshot"
-                ),
-                inventory_graph_snapshot=(
-                    {
-                        "source_id": os.path.basename(
-                            str(args_dict.get("_graph_file_path") or "os-current")
-                        ),
-                        "nodes": [
-                            node.res_content.model_dump(by_alias=True)
-                            for node in resource_tree_set.all_nodes
-                        ],
-                    }
-                    if workspace_catalog is not None
-                    else None
-                ),
-                package_sources=args_dict.get("_package_sources", ()),
-                package_catalogs=args_dict.get("_package_catalogs", ()),
-                workflow_job_dispatcher=workflow_job_dispatcher,
-                device_identity_resolver=device_identity_resolver,
-                workflow_package_catalogs=workflow_package_catalogs,
-            )
-            inventory_service = get_workflow_inventory_service()
-            if inventory_service is None:
-                raise RuntimeError("Workflow Inventory authority is not ready")
 
             _edge_sched, edge_exec_backend = setup_edge_scheduler(
-                ws_client=comm_client
-                if "websocket" in args_dict["app_bridges"]
-                else None,
+                ws_client=(
+                    comm_client
+                    if "websocket" in args_dict["app_bridges"]
+                    else None
+                ),
                 ordering_url=args_dict.get("edge_scheduler_ordering_url", ""),
-                inventory_service=inventory_service,
-                workflow_tasks=workflow_service,
+                inventory_db_path=inventory_db,
+                device_state_db_path=str(args_dict.get("edge_device_state_db") or ""),
+                workflow_history_db_path=str(
+                    args_dict.get("edge_workflow_history_db") or ""
+                ),
             )
             # backend 是 bridge 形状(publish_job_status)，注册进 HostNode.bridges 收执行回报
             args_dict["bridges"].append(edge_exec_backend)
-            print_status("Edge 调度器已启用 (workflow_start 整图下沉执行)", "info")
             print_status(
-                f"Edge 仓储已启用 (SQLite WAL: {BasicConfig.working_dir}/inventory.db)",
+                "Edge 调度微后端已启用 (DAG 调度 + 设备状态 + 工作流历史)",
+                "info",
+            )
+        else:
+            print_status(
+                "Edge 调度微后端已显式关闭；微前端的调度、"
+                "设备状态和工作流历史接口将不可用",
+                "warning",
+            )
+
+        # Host/Slave 连接、心跳和 ROS 组网配置由 Edge 微后端拥有。
+        # HostNode 稍后创建时只向已启动的服务挂接运行时资源树。
+        from unilabos.app.scheduler.host_network import setup_host_network_service
+        from unilabos.config.config import HostLinkConfig
+
+        host_network = setup_host_network_service()
+        if host_network is not None:
+            print_status(
+                f"Edge 微后端已监听 Slave 连接: "
+                f"{HostLinkConfig.bind}:{host_network.server.port}",
                 "info",
             )
     else:
         print_status("SlaveMode跳过Websocket连接")
+        from unilabos.app.scheduler.host_network import setup_slave_network_client
+
+        setup_slave_network_client(device_ids=slave_device_ids)
 
     args_dict["resources_mesh_config"] = {}
     args_dict["resources_edge_config"] = resource_edge_info
-    devices_and_resources = dict_from_graph(graph_res.physical_setup_graph)
-    from unilabos.device_mesh.motion_runtime_plan import plan_motion_runtime
-
-    motion_plan = plan_motion_runtime(
-        devices_and_resources or {},
-        visual=args_dict["visual"],
-    )
-    if motion_plan.unsupported_physical_device_ids:
-        raise RuntimeError(
-            "当前 package MoveIt runtime 只有 mock_components 仿真 HardwareProfile；"
-            "禁止把 backend=moveit 当作实机启动: "
-            + ", ".join(motion_plan.unsupported_physical_device_ids)
-        )
-    args_dict["motion_runtime_enabled"] = motion_plan.moveit_enabled
-    moveit_runtime = None
-    if motion_plan.moveit_enabled:
-        if args_dict["backend"] != "ros":
-            raise RuntimeError("MoveIt execution backend 必须使用 --backend ros")
-        from unilabos.device_mesh.moveit_runtime import MoveItRuntime
-
-        moveit_runtime = MoveItRuntime(
-            devices_and_resources or {},
-            moveit_device_ids=motion_plan.moveit_device_ids,
-            package_sources=args_dict.get("_package_sources", ()),
-            package_catalogs=args_dict.get("_package_catalogs", ()),
-            enable_rviz=motion_plan.enable_rviz_view,
-        )
-        moveit_runtime.start()
-        import atexit
-
-        atexit.register(moveit_runtime.stop)
-        print_status(
-            "MoveIt 仿真 launch tree 已按 graph 提交；动作入口仍会等待 /move_action 与新鲜 joint_states，且生命周期不依赖 --visual",
-            "info",
-        )
     # web visiualize 2D
     if args_dict["visual"] != "disable":
-        # Explicit package MoveIt runtime owns its optional RViz view. The legacy
-        # visualizer must not start a second motion stack or RViz process.
-        enable_rviz = args_dict["visual"] == "rviz" and not motion_plan.moveit_enabled
+        enable_rviz = args_dict["visual"] == "rviz"
+        devices_and_resources = dict_from_graph(graph_res.physical_setup_graph)
         if devices_and_resources is not None:
-            resource_visualization = None
-            if not motion_plan.moveit_enabled:
-                from unilabos.device_mesh.resource_visalization import (
-                    ResourceVisualization,
-                )  # 此处开启后，logger会变更为INFO，有需要请调整
+            from unilabos.device_mesh.resource_visalization import (
+                ResourceVisualization,
+            )  # 此处开启后，logger会变更为INFO，有需要请调整
 
-                resource_visualization = ResourceVisualization(
-                    devices_and_resources,
-                    [n.res_content for n in args_dict["resources_config"].all_nodes],  # type: ignore  # FIXME
-                    enable_rviz=enable_rviz,
-                )
-                args_dict["resources_mesh_config"] = (
-                    resource_visualization.resource_model
-                )
+            resource_visualization = ResourceVisualization(
+                devices_and_resources,
+                [n.res_content for n in args_dict["resources_config"].all_nodes],  # type: ignore  # FIXME
+                enable_rviz=enable_rviz,
+            )
+            args_dict["resources_mesh_config"] = resource_visualization.resource_model
             start_backend(**args_dict)
             server_thread = threading.Thread(
                 target=start_server,
-                kwargs={
-                    "open_browser": not BasicConfig.disable_browser,
-                    "port": BasicConfig.port,
-                    "registry_snapshot": args_dict.get("_workflow_registry_snapshot"),
-                    "resource_registry_snapshot": args_dict.get(
-                        "_workflow_resource_registry_snapshot"
-                    ),
-                    "workflow_job_dispatcher": workflow_job_dispatcher,
-                    "device_identity_resolver": device_identity_resolver,
-                    "workflow_package_catalogs": workflow_package_catalogs,
-                },
+                kwargs=dict(
+                    open_browser=not BasicConfig.disable_browser,
+                    port=BasicConfig.port,
+                ),
             )
             server_thread.start()
             asyncio.set_event_loop(asyncio.new_event_loop())
-            if resource_visualization is not None:
-                try:
-                    resource_visualization.start()
-                except OSError as e:
-                    if "AMENT_PREFIX_PATH" in str(e):
-                        print_status(
-                            f"ROS 2环境未正确设置，跳过3D可视化启动。错误详情: {e}",
-                            "warning",
-                        )
-                        print_status(
-                            "建议解决方案：\n"
-                            "1. 激活Conda环境: conda activate unilab\n"
-                            "2. 或使用 --backend simple 参数\n"
-                            "3. 或使用 --visual disable 参数禁用可视化",
-                            "info",
-                        )
-                    else:
-                        raise
+            try:
+                resource_visualization.start()
+            except OSError as e:
+                if "AMENT_PREFIX_PATH" in str(e):
+                    print_status(
+                        f"ROS 2环境未正确设置，跳过3D可视化启动。错误详情: {e}",
+                        "warning",
+                    )
+                    print_status(
+                        "建议解决方案：\n"
+                        "1. 激活Conda环境: conda activate unilab\n"
+                        "2. 或使用 --backend simple 参数\n"
+                        "3. 或使用 --visual disable 参数禁用可视化",
+                        "info",
+                    )
+                else:
+                    raise
             while True:
                 time.sleep(1)
         else:
@@ -1536,18 +1830,9 @@ def main():
             restart_requested = start_server(
                 open_browser=not args_dict["disable_browser"],
                 port=BasicConfig.port,
-                registry_snapshot=args_dict.get("_workflow_registry_snapshot"),
-                resource_registry_snapshot=args_dict.get(
-                    "_workflow_resource_registry_snapshot"
-                ),
-                workflow_job_dispatcher=workflow_job_dispatcher,
-                device_identity_resolver=device_identity_resolver,
-                workflow_package_catalogs=workflow_package_catalogs,
             )
             if restart_requested:
                 print_status("[Main] Restart requested, cleaning up...", "info")
-                if moveit_runtime is not None:
-                    moveit_runtime.stop()
                 cleanup_for_restart()
                 return
     else:
@@ -1557,18 +1842,9 @@ def main():
         restart_requested = start_server(
             open_browser=not args_dict["disable_browser"],
             port=BasicConfig.port,
-            registry_snapshot=args_dict.get("_workflow_registry_snapshot"),
-            resource_registry_snapshot=args_dict.get(
-                "_workflow_resource_registry_snapshot"
-            ),
-            workflow_job_dispatcher=workflow_job_dispatcher,
-            device_identity_resolver=device_identity_resolver,
-            workflow_package_catalogs=workflow_package_catalogs,
         )
         if restart_requested:
             print_status("[Main] Restart requested, cleaning up...", "info")
-            if moveit_runtime is not None:
-                moveit_runtime.stop()
             cleanup_for_restart()
             os._exit(RESTART_EXIT_CODE)
 

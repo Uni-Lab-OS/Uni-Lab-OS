@@ -363,10 +363,8 @@ def action(
     action_name: Optional[str] = None,
     displayname: str = "",
     error_policy: Optional[Dict[str, Any]] = None,
-    lock_resource: Optional[List[str]] = None,
     estimate_duration_fixed: Optional[float] = 60.0,
     estimate_duration_express: str = "",
-    materials_lock: Optional[Any] = None,
 ):
     """
     动作方法装饰器
@@ -403,37 +401,40 @@ def action(
                    不填写时不写入注册表。
         error_policy: 按异常类名匹配审批选项的策略。结构见
                       unilabos.registry.action_policy.ErrorPolicy。
-        lock_resource: 执行期间需要唯一锁定的 ResourceSlot 参数名列表
         estimate_duration_fixed: 预计时长兜底值（秒），默认 60 秒；None 表示不提供兜底
         estimate_duration_express: 根据动作入参计算预计时长的中缀表达式
-        materials_lock: lock_resource 的兼容别名；新代码请使用 lock_resource
+
+    Returns:
+        把方法标记为规范动作合同（ActionContract）的装饰器。
     """
 
     def decorator(func: F) -> F:
+        """把动作元数据附加到原始设备方法。
+
+        Args:
+            func: 需要注册为规范动作（Action）的设备方法。
+
+        Returns:
+            保留原函数签名和元数据的包装函数。
+        """
+
         import asyncio as _asyncio
 
         if _asyncio.iscoroutinefunction(func):
             @wraps(func)
             async def wrapper(*args, **kwargs):
+                """透明调用异步设备动作，并保留注册表元数据。"""
+
                 return await func(*args, **kwargs)
         else:
             @wraps(func)
             def wrapper(*args, **kwargs):
+                """透明调用同步设备动作，并保留注册表元数据。"""
+
                 return func(*args, **kwargs)
 
         # action_type 为哨兵值 => 用户没传, 视为 None (UniLabJsonCommand)
         resolved_type = None if action_type is _ACTION_TYPE_UNSET else action_type
-        raw_lock_resource = lock_resource if lock_resource is not None else materials_lock
-        if raw_lock_resource is None:
-            normalized_lock_resource: List[str] = []
-        elif isinstance(raw_lock_resource, str):
-            normalized_lock_resource = [raw_lock_resource]
-        elif isinstance(raw_lock_resource, (list, tuple, set)):
-            normalized_lock_resource = list(raw_lock_resource)
-        else:
-            raise TypeError("lock_resource 必须是参数名字符串或字符串列表")
-        if not all(isinstance(name, str) and name for name in normalized_lock_resource):
-            raise ValueError("lock_resource 中的参数名必须是非空字符串")
         if estimate_duration_fixed is not None:
             if not isinstance(estimate_duration_fixed, (int, float)):
                 raise TypeError("estimate_duration_fixed 必须是秒数或 None")
@@ -457,7 +458,6 @@ def action(
             "description": description,
             "auto_prefix": auto_prefix,
             "parent": parent,
-            "lock_resource": normalized_lock_resource,
             "estimate_duration_fixed": estimate_duration_fixed,
             "estimate_duration_express": estimate_duration_express,
         }
@@ -473,6 +473,7 @@ def action(
             meta["error_policy"] = normalized_error_policy
         wrapper._action_registry_meta = meta  # type: ignore[attr-defined]
         wrapper._action_error_policy = normalized_error_policy  # type: ignore[attr-defined]
+        wrapper._action_contract_kind = "typed"  # type: ignore[attr-defined]
 
         # 设置 _is_always_free 保持与旧 @always_free 装饰器兼容
         if always_free:
@@ -484,14 +485,33 @@ def action(
 
 
 def legacy_action(*args: Any, **kwargs: Any):
-    """声明仅供旧设备 transport 使用、不可进入 typed Workflow 的动作。
+    """声明只供遗留设备传输层使用、不可成为规范工作流权威的动作。
 
-    Runtime metadata 与 :func:`action` 保持兼容；静态 Registry scanner 会保留
-    原动作名和 transport 配置，但不会把它误报为 canonical ``@action`` contract。
-    新的 Workflow-capable 方法必须使用 ``@action`` 并通过 strict parser。
+    Args:
+        args: 原 ``action`` 装饰器的兼容位置参数。
+        kwargs: 原 ``action`` 装饰器的兼容关键字参数；不再接受字符串物料锁声明。
+
+    Returns:
+        具有遗留动作标记的设备方法装饰器。
     """
 
-    return action(*args, **kwargs)
+    typed_decorator = action(*args, **kwargs)
+
+    def decorator(func: F) -> F:
+        """把设备方法明确标记为遗留动作。
+
+        Args:
+            func: 仍需通过旧设备传输合同执行的方法。
+
+        Returns:
+            带遗留动作标记的包装函数。
+        """
+
+        wrapped = typed_decorator(func)
+        wrapped._action_contract_kind = "legacy"  # type: ignore[attr-defined]
+        return wrapped
+
+    return decorator
 
 
 def get_action_meta(func) -> Optional[Dict[str, Any]]:

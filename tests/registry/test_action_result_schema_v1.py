@@ -1,4 +1,4 @@
-"""Action named result record 三种声明形式的公共合同测试。"""
+"""动作具名结果记录（Action named result record）三种声明形式的公共合同测试。"""
 
 from __future__ import annotations
 

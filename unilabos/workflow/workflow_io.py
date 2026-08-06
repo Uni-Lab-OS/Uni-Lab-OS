@@ -1,4 +1,4 @@
-"""Workflow Input/Output 合同、binding identity 与 schema assignability。"""
+"""工作流输入/输出（Workflow I/O）合同、绑定身份与类型可赋值规则。"""
 
 from __future__ import annotations
 
@@ -24,12 +24,12 @@ _EMPTY_OUTPUT_CONTRACT = {"version": 1, "outputs": []}
 
 
 class WorkflowIOValidationError(ValueError):
-    """Graph 中的 Workflow I/O authority 不自洽。"""
+    """工作流图（Workflow Graph）的输入/输出权威事实不自洽。"""
 
 
 @dataclass(frozen=True)
 class ValidatedWorkflowIO:
-    """一次公共校验产生的 canonical I/O 事实。"""
+    """一次公共校验产生的不可变工作流输入/输出规范事实。"""
 
     input_contract: WorkflowInputContract
     output_contract: WorkflowOutputContract
@@ -44,10 +44,16 @@ def validate_workflow_io(
     workflow_meta_data: Mapping[str, Any],
     node_meta_data: Mapping[str, Mapping[str, Any]],
 ) -> ValidatedWorkflowIO:
-    """在 transport 之外验证完整 Workflow I/O authority。"""
+    """在传输层之外验证完整工作流输入/输出权威事实。
+
+    参数说明：`nodes` 和 `handles` 是按 UUID 索引的冻结图实体；
+    `workflow_meta_data` 保存输入/输出合同，`node_meta_data` 保存输入绑定。
+    返回值是只读的规范合同和绑定；任何不一致统一抛出
+    `WorkflowIOValidationError`。
+    """
 
     try:
-        unilab = _unilab_metadata(workflow_meta_data, label="Workflow")
+        unilab = _unilab_metadata(workflow_meta_data, label="工作流")
         input_contract = parse_input_contract(
             unilab.get("input_contract", _EMPTY_INPUT_CONTRACT)
         )
@@ -55,7 +61,8 @@ def validate_workflow_io(
             unilab.get("output_contract", _EMPTY_OUTPUT_CONTRACT)
         )
         input_parameters = {
-            item["name"]: item for item in input_contract.to_dict()["parameters"]
+            item["name"]: item
+            for item in input_contract.to_dict()["parameters"]
         }
         input_bindings = _validate_input_bindings(
             nodes=nodes,
@@ -63,9 +70,15 @@ def validate_workflow_io(
             node_meta_data=node_meta_data,
             input_parameters=input_parameters,
         )
+        _validate_node_output_schema_overrides(
+            nodes=nodes,
+            handles=handles,
+            node_meta_data=node_meta_data,
+        )
         output_bindings = _validate_output_bindings(
             nodes=nodes,
             handles=handles,
+            node_meta_data=node_meta_data,
             raw_bindings=unilab.get("output_bindings", {}),
             input_parameters=input_parameters,
             output_contract=output_contract,
@@ -73,7 +86,7 @@ def validate_workflow_io(
     except WorkflowIOValidationError:
         raise
     except (KeyError, TypeError, ValueError, WorkflowSchemaError) as exc:
-        raise WorkflowIOValidationError("Workflow I/O 合同无效") from exc
+        raise WorkflowIOValidationError("工作流输入/输出合同无效") from exc
     return ValidatedWorkflowIO(
         input_contract=input_contract,
         output_contract=output_contract,
@@ -82,8 +95,15 @@ def validate_workflow_io(
     )
 
 
-def validate_workflow_graph_io(graph: Mapping[str, Any]) -> ValidatedWorkflowIO:
-    """从 Backend-shaped graph 构造并验证唯一的 Workflow I/O authority。"""
+def validate_workflow_graph_io(
+    graph: Mapping[str, Any],
+) -> ValidatedWorkflowIO:
+    """从后端（Backend）形状的工作流图构造并验证唯一输入/输出权威事实。
+
+    参数说明：`graph` 必须包含工作流、节点和连接点（Handle）模板投影。
+    返回值与 `validate_workflow_io` 相同；此适配器（Adapter）只负责 DTO
+    转换，不另写校验规则。
+    """
 
     try:
         workflow = graph.get("workflow")
@@ -94,29 +114,33 @@ def validate_workflow_graph_io(graph: Mapping[str, Any]) -> ValidatedWorkflowIO:
             or not isinstance(raw_nodes, list)
             or not isinstance(raw_handles, list)
         ):
-            raise WorkflowIOValidationError("Workflow graph I/O projection 无效")
+            raise WorkflowIOValidationError("工作流图输入/输出投影无效")
 
         nodes: dict[str, WorkflowNodeWrite] = {}
         node_meta_data: dict[str, Mapping[str, Any]] = {}
         for raw_node in raw_nodes:
             if not isinstance(raw_node, Mapping):
-                raise WorkflowIOValidationError("Workflow Node projection 无效")
+                raise WorkflowIOValidationError("工作流节点投影无效")
             node = WorkflowNodeWrite.model_validate(raw_node)
             if node.uuid in nodes:
-                raise WorkflowIOValidationError("Workflow Node UUID 重复")
+                raise WorkflowIOValidationError("工作流节点 UUID 重复")
             nodes[node.uuid] = node
             node_meta_data[node.uuid] = node.meta_data
 
         handles: dict[str, Mapping[str, Any]] = {}
         for handle in raw_handles:
             if not isinstance(handle, Mapping):
-                raise WorkflowIOValidationError("Workflow Handle projection 无效")
+                raise WorkflowIOValidationError("工作流连接点（Handle）投影无效")
             handle_uuid = handle.get("uuid")
             if not isinstance(handle_uuid, str):
-                raise WorkflowIOValidationError("Workflow Handle UUID 无效或重复")
-            canonical_handle_uuid = validate_uuid(handle_uuid)
-            if canonical_handle_uuid != handle_uuid or handle_uuid in handles:
-                raise WorkflowIOValidationError("Workflow Handle UUID 无效或重复")
+                raise WorkflowIOValidationError(
+                    "工作流连接点（Handle）UUID 无效或重复"
+                )
+            canonical_uuid = validate_uuid(handle_uuid)
+            if canonical_uuid != handle_uuid or handle_uuid in handles:
+                raise WorkflowIOValidationError(
+                    "工作流连接点（Handle）UUID 无效或重复"
+                )
             handles[handle_uuid] = handle
 
         return validate_workflow_io(
@@ -128,57 +152,55 @@ def validate_workflow_graph_io(graph: Mapping[str, Any]) -> ValidatedWorkflowIO:
     except WorkflowIOValidationError:
         raise
     except (KeyError, TypeError, ValueError, WorkflowSchemaError) as exc:
-        raise WorkflowIOValidationError("Workflow graph I/O projection 无效") from exc
+        raise WorkflowIOValidationError("工作流图输入/输出投影无效") from exc
 
 
 def handle_value_schema(handle: Mapping[str, Any]) -> WorkflowValueSchema:
-    """从 A1 Handle projection 读取 canonical value schema。"""
+    """读取连接点（Handle）的规范值 Schema。
+
+    参数说明：`handle` 是目录中的连接点（Handle）投影。优先读取规范
+    `value_schema`，旧 `type` 只作为兼容输入；返回严格解析后的不可变 Schema。
+    """
 
     meta_data = handle.get("meta_data", {})
-    unilab = _unilab_metadata(meta_data, label="Handle")
+    unilab = _unilab_metadata(meta_data, label="连接点（Handle）")
     raw_schema = unilab.get("value_schema")
     if raw_schema is None:
         raw_schema = _legacy_handle_schema(handle.get("type"))
     if not isinstance(raw_schema, Mapping):
-        raise WorkflowIOValidationError("Handle value_schema 无效")
-    schema = _value_set_schema(_plain_mapping(raw_schema))
+        raise WorkflowIOValidationError("连接点（Handle）value_schema 无效")
+    # ``plain_schema`` 是与冻结目录分离的动作字段 JSON Schema；物料字段需先
+    # 投影成工作流唯一的物料占位符（ResourceSlot）值 Schema，再做 I/O 校验。
+    plain_schema = _plain_mapping(raw_schema)
+    schema = _projected_material_value_schema(plain_schema)
+    if schema is None and str(handle.get("type") or "").lower() == "resourceslot":
+        schema = {"$slot": "ResourceSlot"}
+    if schema is None:
+        schema = _value_set_schema(plain_schema)
     allowlist = unilab.get("allowed_resource_template_uuids")
     if allowlist is not None:
-        schema, applied = _apply_slot_allowlist(schema, allowlist)
+        schema, applied = _apply_placeholder_allowlist(schema, allowlist)
         if not applied:
-            raise WorkflowIOValidationError("非 ResourceSlot Handle 携带物料模板约束")
+            raise WorkflowIOValidationError(
+                "非物料占位符（ResourceSlot）连接点（Handle）携带物料模板约束"
+            )
     try:
         return parse_value_schema(schema)
     except WorkflowSchemaError as exc:
-        raise WorkflowIOValidationError("Handle value_schema 无效") from exc
-
-
-def _value_set_schema(schema: dict[str, Any]) -> dict[str, Any]:
-    """从 A1 JSON Schema property 投影出只影响可赋值集的 I1 schema。"""
-
-    for key in ("default", "title", "description"):
-        schema.pop(key, None)
-    if "anyOf" in schema:
-        members = schema.get("anyOf")
-        if not isinstance(members, list):
-            return schema
-        schema["anyOf"] = [
-            _value_set_schema(member) if isinstance(member, dict) else member
-            for member in members
-        ]
-    items = schema.get("items")
-    if isinstance(items, dict):
-        schema["items"] = _value_set_schema(items)
-    if schema.get("type") == "object" and schema.get("additionalProperties") is True:
-        schema.pop("additionalProperties")
-    return schema
+        raise WorkflowIOValidationError(
+            "连接点（Handle）value_schema 无效"
+        ) from exc
 
 
 def schema_is_assignable(
     producer: WorkflowValueSchema | Mapping[str, Any],
     consumer: WorkflowValueSchema | Mapping[str, Any],
 ) -> bool:
-    """证明 producer 的全部 canonical value 都可赋给 consumer。"""
+    """判断生产端全部规范值是否都可赋给消费端。
+
+    参数说明：`producer` 是值来源保证，`consumer` 是接收方允许集合。任一
+    Schema 非法时失败关闭并返回 `False`，不把解析错误当成宽松兼容。
+    """
 
     try:
         producer_schema = (
@@ -205,7 +227,11 @@ def resource_slot_passthrough_is_compatible(
     *,
     exact: bool = False,
 ) -> bool:
-    """验证同名 ResourceSlot input/output 是否可作为安全透传合同。"""
+    """验证同名物料占位符（ResourceSlot）输入/输出能否安全透传。
+
+    参数说明：`input_schema` 是进入工作流的物料集合，`output_schema` 是离开
+    工作流的承诺；`exact=True` 要求服务端隐式输出完全相等，否则允许扩宽。
+    """
 
     try:
         parsed_input = (
@@ -229,6 +255,52 @@ def resource_slot_passthrough_is_compatible(
     return _schema_dict_is_assignable(input_dict, output_dict)
 
 
+def schema_contains_resource_slot(
+    schema: WorkflowValueSchema | Mapping[str, Any],
+) -> bool:
+    """判断规范 Schema 是否在根、可空成员或数组成员中承载物料占位符。
+
+    参数说明：``schema`` 是已解析的工作流值 Schema 或待解析映射。返回：只有
+    完整合法 Schema 包含物料占位符（ResourceSlot）时为真；非法 Schema 失败
+    关闭并返回假，不向调用者暴露第三套递归规则。
+    """
+
+    try:
+        parsed = (
+            schema
+            if isinstance(schema, WorkflowValueSchema)
+            else parse_value_schema(schema)
+        )
+    except WorkflowSchemaError:
+        return False
+    return _schema_contains_resource_slot(parsed.to_dict())
+
+
+def _value_set_schema(schema: dict[str, Any]) -> dict[str, Any]:
+    """删除只影响展示或默认值、不影响可赋值集合的 Schema 注解。
+
+    参数说明：`schema` 是调用者已复制的普通字典；函数原地规范嵌套成员并
+    返回同一逻辑对象，使目录注解不改变工作流类型兼容结论。
+    """
+
+    for key in ("default", "title", "description"):
+        schema.pop(key, None)
+    if "anyOf" in schema:
+        members = schema.get("anyOf")
+        if not isinstance(members, list):
+            return schema
+        schema["anyOf"] = [
+            _value_set_schema(member) if isinstance(member, dict) else member
+            for member in members
+        ]
+    items = schema.get("items")
+    if isinstance(items, dict):
+        schema["items"] = _value_set_schema(items)
+    if schema.get("type") == "object" and schema.get("additionalProperties") is True:
+        schema.pop("additionalProperties")
+    return schema
+
+
 def _validate_input_bindings(
     *,
     nodes: Mapping[str, WorkflowNodeWrite],
@@ -236,11 +308,17 @@ def _validate_input_bindings(
     node_meta_data: Mapping[str, Mapping[str, Any]],
     input_parameters: Mapping[str, Mapping[str, Any]],
 ) -> dict[str, Mapping[str, Mapping[str, str]]]:
+    """校验每个节点的工作流输入绑定并生成只读规范映射。
+
+    参数说明：四个映射分别提供节点、连接点（Handle）、节点元数据和已解析
+    输入参数。返回值按节点 UUID、目标连接点（Handle）UUID 两级索引绑定。
+    """
+
     result: dict[str, Mapping[str, Mapping[str, str]]] = {}
     for node_uuid, node in nodes.items():
         unilab = _unilab_metadata(
             node_meta_data.get(node_uuid, {}),
-            label="Node",
+            label="节点",
         )
         raw_bindings = unilab.get("input_bindings", {})
         if not isinstance(raw_bindings, Mapping):
@@ -258,7 +336,7 @@ def _validate_input_bindings(
                 or handle.get("io_type") != "target"
             ):
                 raise WorkflowIOValidationError(
-                    "input_binding 未引用本节点的 target Handle"
+                    "input_binding 未引用本节点的目标连接点（Handle）"
                 )
             if (
                 not isinstance(raw_binding, Mapping)
@@ -273,10 +351,13 @@ def _validate_input_bindings(
                 handle_value_schema(handle),
             ):
                 raise WorkflowIOValidationError(
-                    "input_binding 与 Workflow 参数类型不兼容: "
-                    f"parameter={parameter_name!r}, handle={handle_uuid!r}"
+                    "input_binding "
+                    f"{node_uuid}:{handle.get('handle_key')} 与工作流参数 "
+                    f"{parameter_name} 类型不兼容"
                 )
-            bindings[handle_uuid] = MappingProxyType({"parameter": parameter_name})
+            bindings[handle_uuid] = MappingProxyType(
+                {"parameter": parameter_name}
+            )
         result[node_uuid] = MappingProxyType(bindings)
     return result
 
@@ -285,13 +366,22 @@ def _validate_output_bindings(
     *,
     nodes: Mapping[str, WorkflowNodeWrite],
     handles: Mapping[str, Mapping[str, Any]],
+    node_meta_data: Mapping[str, Mapping[str, Any]],
     raw_bindings: Any,
     input_parameters: Mapping[str, Mapping[str, Any]],
     output_contract: WorkflowOutputContract,
 ) -> dict[str, Mapping[str, str]]:
-    outputs = {item["name"]: item for item in output_contract.to_dict()["outputs"]}
+    """校验工作流输出根绑定的完整性、身份和类型承诺。
+
+    参数说明：`raw_bindings` 是未信任元数据，其余参数提供图身份、输入参数和
+    已解析输出合同。返回值按输出名称索引规范闭合绑定。
+    """
+
+    outputs = {
+        item["name"]: item for item in output_contract.to_dict()["outputs"]
+    }
     if not isinstance(raw_bindings, Mapping) or set(raw_bindings) != set(outputs):
-        raise WorkflowIOValidationError("Workflow output bindings 不完整")
+        raise WorkflowIOValidationError("工作流输出绑定不完整")
     _validate_resource_slot_output_authority(
         input_parameters=input_parameters,
         outputs=outputs,
@@ -301,7 +391,7 @@ def _validate_output_bindings(
     for output_name, output in outputs.items():
         binding = raw_bindings[output_name]
         if not isinstance(binding, Mapping):
-            raise WorkflowIOValidationError("Workflow output binding 必须是对象")
+            raise WorkflowIOValidationError("工作流输出绑定必须是对象")
         kind = binding.get("kind")
         if kind == "workflow_input":
             if set(binding) != {"kind", "parameter"}:
@@ -316,7 +406,9 @@ def _validate_output_bindings(
                 parameter["schema"],
                 output["schema"],
             ):
-                raise WorkflowIOValidationError("Workflow input 不能满足 output schema")
+                raise WorkflowIOValidationError(
+                    "工作流输入不能满足输出 Schema"
+                )
             normalized = {
                 "kind": "workflow_input",
                 "parameter": parameter_name,
@@ -340,14 +432,18 @@ def _validate_output_bindings(
                 or handle.get("io_type") != "source"
             ):
                 raise WorkflowIOValidationError(
-                    "node_output 未引用本 Node 的 source Handle"
+                    "node_output 未引用本节点的来源连接点（Handle）"
                 )
-            if not schema_is_assignable(
-                handle_value_schema(handle),
-                output["schema"],
-            ):
+            producer_schema = node_output_value_schema(
+                node_uuid=node_uuid,
+                handle_uuid=handle_uuid,
+                handle=handle,
+                handles=handles,
+                node_meta_data=node_meta_data,
+            )
+            if not schema_is_assignable(producer_schema, output["schema"]):
                 raise WorkflowIOValidationError(
-                    "Node output 不能满足 Workflow output schema"
+                    "节点输出不能满足工作流输出 Schema"
                 )
             normalized = {
                 "kind": "node_output",
@@ -355,9 +451,112 @@ def _validate_output_bindings(
                 "source_handle_uuid": handle_uuid,
             }
         else:
-            raise WorkflowIOValidationError("未知 Workflow output binding kind")
+            raise WorkflowIOValidationError("未知工作流输出绑定 kind")
         result[output_name] = MappingProxyType(normalized)
     return result
+
+
+def node_output_value_schema(
+    *,
+    node_uuid: str,
+    handle_uuid: str,
+    handle: Mapping[str, Any],
+    handles: Mapping[str, Mapping[str, Any]],
+    node_meta_data: Mapping[str, Mapping[str, Any]],
+) -> dict[str, Any]:
+    """读取节点输出的有效 Schema，并验证组合透传类型覆盖。
+
+    参数：节点与来源连接点（Handle）身份、目录连接点和节点元数据。
+    返回：默认为目录 Schema；经证明的隐式物料透传则返回窄化 Schema。
+    异常：覆盖形状、来源映射或可赋值关系不合法时抛出
+    ``WorkflowIOValidationError``。
+    """
+
+    base_schema = handle_value_schema(handle)
+    unilab = _unilab_metadata(
+        node_meta_data.get(node_uuid, {}),
+        label="节点",
+    )
+    raw_overrides = unilab.get("output_schema_overrides", {})
+    if not isinstance(raw_overrides, Mapping):
+        raise WorkflowIOValidationError("output_schema_overrides 必须是对象")
+    override = raw_overrides.get(handle_uuid)
+    if override is None:
+        return base_schema
+    composite = unilab.get("composite")
+    source_mappings = (
+        composite.get("source_mappings")
+        if isinstance(composite, Mapping)
+        else None
+    )
+    source_mapping = (
+        source_mappings.get(handle_uuid)
+        if isinstance(source_mappings, Mapping)
+        else None
+    )
+    composite_passthrough = (
+        isinstance(source_mapping, Mapping)
+        and source_mapping.get("kind") == "workflow_input"
+    )
+    raw_passthroughs = unilab.get("material_passthrough_handles", {})
+    target_uuid = (
+        raw_passthroughs.get(handle_uuid)
+        if isinstance(raw_passthroughs, Mapping)
+        else None
+    )
+    target_handle = handles.get(target_uuid) if isinstance(target_uuid, str) else None
+    action_passthrough = (
+        isinstance(override, Mapping)
+        and isinstance(target_handle, Mapping)
+        and target_handle.get("workflow_node_template_uuid")
+        == handle.get("workflow_node_template_uuid")
+        and target_handle.get("io_type") == "target"
+        and target_handle.get("handle_key") == handle.get("handle_key")
+        and schema_is_assignable(override, handle_value_schema(target_handle))
+    )
+    if (
+        not isinstance(override, Mapping)
+        or not (composite_passthrough or action_passthrough)
+        or not schema_is_assignable(override, base_schema)
+    ):
+        raise WorkflowIOValidationError("组合工作流输出类型覆盖无效")
+    return _plain_mapping(override)
+
+
+def _validate_node_output_schema_overrides(
+    *,
+    nodes: Mapping[str, WorkflowNodeWrite],
+    handles: Mapping[str, Mapping[str, Any]],
+    node_meta_data: Mapping[str, Mapping[str, Any]],
+) -> None:
+    """对所有节点输出类型覆盖执行一次全图闭合验证。"""
+
+    for node_uuid, node in nodes.items():
+        unilab = _unilab_metadata(
+            node_meta_data.get(node_uuid, {}),
+            label="节点",
+        )
+        overrides = unilab.get("output_schema_overrides", {})
+        if not isinstance(overrides, Mapping):
+            raise WorkflowIOValidationError("output_schema_overrides 必须是对象")
+        for handle_uuid in overrides:
+            handle = handles.get(handle_uuid) if isinstance(handle_uuid, str) else None
+            if (
+                handle is None
+                or handle.get("workflow_node_template_uuid")
+                != node.workflow_node_template_uuid
+                or handle.get("io_type") != "source"
+            ):
+                raise WorkflowIOValidationError(
+                    "output_schema_overrides 未引用本节点来源连接点（Handle）"
+                )
+            node_output_value_schema(
+                node_uuid=node_uuid,
+                handle_uuid=handle_uuid,
+                handle=handle,
+                handles=handles,
+                node_meta_data=node_meta_data,
+            )
 
 
 def _validate_resource_slot_output_authority(
@@ -366,6 +565,12 @@ def _validate_resource_slot_output_authority(
     outputs: Mapping[str, Mapping[str, Any]],
     raw_bindings: Mapping[str, Any],
 ) -> None:
+    """保证物料占位符（ResourceSlot）输入具有唯一同名透传输出。
+
+    参数说明：`input_parameters` 和 `outputs` 是规范合同实体，`raw_bindings`
+    是待校验根绑定。函数只验证不变量，不产生第二份投影。
+    """
+
     for output_name, output in outputs.items():
         if not output.get("implicit", False):
             continue
@@ -379,10 +584,11 @@ def _validate_resource_slot_output_authority(
                 exact=True,
             )
             or not isinstance(binding, Mapping)
-            or dict(binding) != {"kind": "workflow_input", "parameter": output_name}
+            or dict(binding)
+            != {"kind": "workflow_input", "parameter": output_name}
         ):
             raise WorkflowIOValidationError(
-                "implicit output 必须是 server-managed 同名 ResourceSlot 透传"
+                "隐式输出必须是服务端管理的同名物料占位符（ResourceSlot）透传"
             )
 
     for parameter_name, parameter in input_parameters.items():
@@ -394,26 +600,31 @@ def _validate_resource_slot_output_authority(
             output["schema"],
             exact=bool(output.get("implicit", False)),
         ):
-            raise WorkflowIOValidationError("ResourceSlot input 缺少兼容的同名 output")
+            raise WorkflowIOValidationError(
+                "物料占位符（ResourceSlot）输入缺少兼容的同名输出"
+            )
 
 
 def _schema_dict_is_assignable(
     producer: Mapping[str, Any],
     consumer: Mapping[str, Any],
 ) -> bool:
+    """递归判断两个已解析 Schema 的值集合包含关系。
+
+    参数说明：`producer` 是来源值集合，`consumer` 是目标集合。返回 `True`
+    仅表示生产端集合是消费端集合的子集。
+    """
+
     producer_base, producer_nullable = _unwrap_nullable(producer)
     consumer_base, consumer_nullable = _unwrap_nullable(consumer)
     if producer_nullable and not consumer_nullable:
         return False
 
     if "$slot" in producer_base or "$slot" in consumer_base:
-        producer_slot = producer_base.get("$slot")
-        consumer_slot = consumer_base.get("$slot")
-        if producer_slot != consumer_slot:
-            return False
-        if producer_slot == "SiteRef":
-            return True
-        if producer_slot != "ResourceSlot":
+        if (
+            producer_base.get("$slot") != "ResourceSlot"
+            or consumer_base.get("$slot") != "ResourceSlot"
+        ):
             return False
         producer_allowed = producer_base.get("allowed_resource_template_uuids")
         consumer_allowed = consumer_base.get("allowed_resource_template_uuids")
@@ -451,7 +662,8 @@ def _schema_dict_is_assignable(
     consumer_enum = consumer_base.get("enum")
     if producer_enum is not None:
         return all(
-            _value_satisfies_schema(value, consumer_base) for value in producer_enum
+            _value_satisfies_schema(value, consumer_base)
+            for value in producer_enum
         )
     if consumer_enum is not None:
         return False
@@ -479,6 +691,12 @@ def _bounds_are_subset(
     minimum: str,
     maximum: str,
 ) -> bool:
+    """判断生产端上下界是否不宽于消费端。
+
+    参数说明：`minimum` 与 `maximum` 是当前类型使用的约束键名；两个 Schema
+    已通过严格解析。返回值表示边界集合包含关系成立。
+    """
+
     consumer_minimum = consumer.get(minimum)
     producer_minimum = producer.get(minimum)
     if consumer_minimum is not None and (
@@ -494,6 +712,8 @@ def _bounds_are_subset(
 
 
 def _value_satisfies_schema(value: Any, schema: Mapping[str, Any]) -> bool:
+    """判断单个枚举值是否满足消费端 Schema；非法值返回 `False`。"""
+
     try:
         normalize_value(parse_value_schema(schema), value)
     except WorkflowSchemaError:
@@ -504,6 +724,8 @@ def _value_satisfies_schema(value: Any, schema: Mapping[str, Any]) -> bool:
 def _unwrap_nullable(
     schema: Mapping[str, Any],
 ) -> tuple[Mapping[str, Any], bool]:
+    """拆出严格可空 Schema 的实体成员，并返回是否允许空值。"""
+
     members = schema.get("anyOf")
     if not isinstance(members, list):
         return schema, False
@@ -511,6 +733,8 @@ def _unwrap_nullable(
 
 
 def _schema_contains_resource_slot(schema: Mapping[str, Any]) -> bool:
+    """递归判断 Schema 是否承载物料占位符（ResourceSlot）值。"""
+
     base, _ = _unwrap_nullable(schema)
     if base.get("$slot") == "ResourceSlot":
         return True
@@ -527,6 +751,8 @@ def _unilab_metadata(
     *,
     label: str,
 ) -> Mapping[str, Any]:
+    """读取闭合领域元数据；`label` 用于形成可定位的中文错误。"""
+
     if not isinstance(meta_data, Mapping):
         raise WorkflowIOValidationError(f"{label} meta_data 必须是对象")
     unilab = meta_data.get("unilab", {})
@@ -536,6 +762,12 @@ def _unilab_metadata(
 
 
 def _plain_mapping(value: Mapping[str, Any]) -> dict[str, Any]:
+    """深复制动作合同映射和数组。
+
+    参数：``value`` 是调用方持有的目录投影映射。返回：递归分离映射、列表和
+    元组容器后的普通字典。异常：无；非容器叶值按原值保留。
+    """
+
     return {
         str(key): (
             _plain_mapping(item)
@@ -544,26 +776,106 @@ def _plain_mapping(value: Mapping[str, Any]) -> dict[str, Any]:
                 _plain_mapping(child) if isinstance(child, Mapping) else child
                 for child in item
             ]
-            if isinstance(item, list)
+            if isinstance(item, (list, tuple))
             else item
         )
         for key, item in value.items()
     }
 
 
-def _apply_slot_allowlist(
+def _projected_material_value_schema(
+    schema: Mapping[str, Any],
+) -> dict[str, Any] | None:
+    """把动作字段 JSON Schema 投影为规范物料占位符值 Schema。
+
+    参数说明：``schema`` 是动作合同投影保留的对象、数组或可空物料引用；返回
+    对应的 ``ResourceSlot``、物料数组或可空规范 Schema，非物料字段返回
+    ``None``。物料锁标记只决定执行占用，不进入工作流值类型。
+    异常：无；无法识别的 Schema 关闭式返回 ``None``。
+    """
+
+    # 已规范化工作流连接点（Handle）会直接携带物料占位符
+    # （ResourceSlot）；不能把它降级为旧 ``type`` 推断，否则数组/可空包装会丢失。
+    if schema.get("$slot") == "ResourceSlot":
+        return _plain_mapping(schema)
+
+    # ``members`` 接受动作合同的标准 ``anyOf`` 可空形态，并只保留一个非空成员。
+    members = schema.get("anyOf")
+    if isinstance(members, (list, tuple)):
+        non_null_members = [
+            member
+            for member in members
+            if isinstance(member, Mapping) and member.get("type") != "null"
+        ]
+        has_null = any(
+            isinstance(member, Mapping) and member.get("type") == "null"
+            for member in members
+        )
+        if len(non_null_members) == 1 and has_null:
+            projected = _projected_material_value_schema(non_null_members[0])
+            if projected is not None:
+                return {"anyOf": [projected, {"type": "null"}]}
+
+    # ``json_types`` 接受 Pydantic 生成的 ``["object", "null"]`` 可空形态。
+    json_type = schema.get("type")
+    if isinstance(json_type, (list, tuple)) and "null" in json_type:
+        non_null_types = [item for item in json_type if item != "null"]
+        if len(non_null_types) == 1:
+            non_null_schema = _plain_mapping(schema)
+            non_null_schema["type"] = non_null_types[0]
+            projected = _projected_material_value_schema(non_null_schema)
+            if projected is not None:
+                return {"anyOf": [projected, {"type": "null"}]}
+
+    if json_type == "array" and isinstance(schema.get("items"), Mapping):
+        projected_items = _projected_material_value_schema(schema["items"])
+        if projected_items is None:
+            return None
+        result: dict[str, Any] = {"type": "array", "items": projected_items}
+        for bound in ("minItems", "maxItems"):
+            if bound in schema:
+                result[bound] = schema[bound]
+        return result
+
+    # ``properties`` 的唯一 UUID 字段是无锁动作结果的稳定物料引用形态；输入还
+    # 可以用 true/false 锁标记显式表达默认占用或 ``free``。
+    properties = schema.get("properties")
+    required = schema.get("required") or []
+    uuid_schema = properties.get("uuid") if isinstance(properties, Mapping) else None
+    is_material_reference = isinstance(
+        schema.get("x-unilabos-material-lock"), bool
+    ) or (
+        isinstance(properties, Mapping)
+        and set(properties) == {"uuid"}
+        and isinstance(uuid_schema, Mapping)
+        and uuid_schema.get("type") == "string"
+        and uuid_schema.get("format") == "uuid"
+        and "uuid" in required
+    )
+    return {"$slot": "ResourceSlot"} if is_material_reference else None
+
+
+def _apply_placeholder_allowlist(
     schema: dict[str, Any],
     allowlist: Any,
 ) -> tuple[dict[str, Any], bool]:
+    """把旧连接点（Handle）物料模板允许集合投影到物料占位符 Schema。
+
+    参数说明：`schema` 是规范值 Schema，`allowlist` 是旧目录旁路字段。返回
+    新 Schema 与是否找到物料占位符；双重声明不一致时失败关闭。
+    """
+
     result = _plain_mapping(schema)
     if result.get("$slot") == "ResourceSlot":
         existing = result.get("allowed_resource_template_uuids")
         if existing is not None and existing != allowlist:
-            raise WorkflowIOValidationError("ResourceSlot allowlist 双真相冲突")
+            raise WorkflowIOValidationError(
+                "物料占位符（ResourceSlot）允许集合存在双重事实冲突"
+            )
         result["allowed_resource_template_uuids"] = allowlist
         return result, True
     if result.get("type") == "array" and isinstance(result.get("items"), dict):
-        items, applied = _apply_slot_allowlist(result["items"], allowlist)
+        items, applied = _apply_placeholder_allowlist(result["items"], allowlist)
         result["items"] = items
         return result, applied
     if isinstance(result.get("anyOf"), list):
@@ -571,7 +883,7 @@ def _apply_slot_allowlist(
         applied = False
         for member in result["anyOf"]:
             if isinstance(member, dict) and member.get("type") != "null":
-                member, applied = _apply_slot_allowlist(member, allowlist)
+                member, applied = _apply_placeholder_allowlist(member, allowlist)
             members.append(member)
         result["anyOf"] = members
         return result, applied
@@ -579,6 +891,12 @@ def _apply_slot_allowlist(
 
 
 def _legacy_handle_schema(value: Any) -> dict[str, Any]:
+    """把旧连接点（Handle）`type` 映射为最小规范 Schema。
+
+    参数说明：`value` 是未信任旧类型文本。未知类型失败关闭；返回值仅是兼容
+    适配器（Adapter），不成为第二套工作流输入/输出类型规范。
+    """
+
     raw = str(value or "").strip().lower()
     scalars = {
         "str": "string",
@@ -595,21 +913,23 @@ def _legacy_handle_schema(value: Any) -> dict[str, Any]:
     }
     if raw == "resourceslot":
         return {"$slot": "ResourceSlot"}
-    if raw == "siteref":
-        return {"$slot": "SiteRef"}
     if raw.startswith("list[") and raw.endswith("]"):
-        item = _legacy_handle_schema(raw[5:-1])
-        return {"type": "array", "items": item}
+        return {
+            "type": "array",
+            "items": _legacy_handle_schema(raw[5:-1]),
+        }
     if raw in scalars:
         return {"type": scalars[raw]}
-    raise WorkflowIOValidationError("Handle 缺少 canonical value_schema")
+    raise WorkflowIOValidationError("连接点（Handle）缺少规范 value_schema")
 
 
 __all__ = [
     "ValidatedWorkflowIO",
     "WorkflowIOValidationError",
     "handle_value_schema",
+    "node_output_value_schema",
     "resource_slot_passthrough_is_compatible",
+    "schema_contains_resource_slot",
     "schema_is_assignable",
     "validate_workflow_graph_io",
     "validate_workflow_io",

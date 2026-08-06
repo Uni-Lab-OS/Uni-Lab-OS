@@ -1,4 +1,4 @@
-"""公共 Workflow HTTP 边界使用的有界非递归 JSON 编解码器。"""
+"""公共工作流（Workflow）HTTP 边界使用的有界非递归 JSON 编解码器。"""
 
 from __future__ import annotations
 
@@ -251,7 +251,10 @@ def encode_json(value: Any, *, sort_keys: bool = False) -> bytes:
             for index in range(len(entries) - 1, -1, -1):
                 key, child = entries[index]
                 if not isinstance(key, str):
-                    raise ValueError("JSON object keys must be strings")
+                    # 保持公共 JSON 编码合同既有的 ValueError 语义。
+                    raise ValueError(  # noqa: TRY004
+                        "JSON object keys must be strings"
+                    )
                 stack.append(("value", child))
                 stack.append(("token", ":"))
                 stack.append(("token", encode_basestring(key)))

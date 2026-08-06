@@ -1,4 +1,4 @@
-"""Workflow Schema canonical value 与 JSON 大整数 codec 加固测试。"""
+"""工作流（Workflow）Schema 规范值与 JSON 大整数 codec 加固测试。"""
 
 from __future__ import annotations
 

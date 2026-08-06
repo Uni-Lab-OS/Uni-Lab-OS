@@ -7,10 +7,18 @@ Edge 是仓储/物料实例/物理层级/内容物/预留的唯一事实源（�
 from __future__ import annotations
 
 import uuid
-from collections.abc import Callable
 from dataclasses import dataclass, field
 from enum import Enum
-from typing import Any
+from typing import Dict, List, Mapping, TypeAlias, Union
+
+JsonPrimitive: TypeAlias = Union[str, int, float, bool, None]
+JsonValue: TypeAlias = Union[
+    JsonPrimitive,
+    List["JsonValue"],
+    Dict[str, "JsonValue"],
+]
+JsonObject: TypeAlias = Dict[str, JsonValue]
+
 
 # ---------------------------------------------------------------------------
 # 领域错误
@@ -59,48 +67,6 @@ class CommandRejected(InventoryError):
     code = "command_rejected"
 
 
-class MaterialError(InventoryError):
-    """Material public error 基类。"""
-
-    code = "material_error"
-
-
-class MaterialInvalidInput(MaterialError):
-    """调用者提交了无效的 Material identity 或字段。"""
-
-    code = "invalid_input"
-
-
-class MaterialNotFound(MaterialError):
-    """未找到可见的 Material。"""
-
-    code = "not_found"
-
-
-class MaterialConflict(MaterialError):
-    """Material identity 或持久约束冲突。"""
-
-    code = "conflict"
-
-
-class MaterialAuthorityUnavailable(MaterialError):
-    """Material durable store 无法完成请求。"""
-
-    code = "material_authority_unavailable"
-
-
-class MaterialClaimBlocked(MaterialConflict):
-    """完整 Job Claim 集合暂时不可用。"""
-
-    code = "claim_blocked"
-
-
-class MaterialClaimCorrupt(MaterialAuthorityUnavailable):
-    """持久 Claim、fence 或 receipt 事实违反权威不变量。"""
-
-    code = "claim_authority_corrupt"
-
-
 # ---------------------------------------------------------------------------
 # 状态机
 # ---------------------------------------------------------------------------
@@ -108,7 +74,7 @@ class MaterialClaimCorrupt(MaterialAuthorityUnavailable):
 
 class LotState(str, Enum):
     AVAILABLE = "available"
-    RESERVED = "reserved"  # 全部数量都被预留
+    RESERVED = "reserved"      # 全部数量都被预留
     DEPLETED = "depleted"
     QUARANTINED = "quarantined"
 
@@ -116,7 +82,7 @@ class LotState(str, Enum):
 class InstanceState(str, Enum):
     WAREHOUSE = "warehouse"
     RESERVED = "reserved"
-    BENCH = "bench"  # 已上台（deploy）
+    BENCH = "bench"            # 已上台（deploy）
     IN_USE = "in_use"
     CONSUMED = "consumed"
     DISCARDED = "discarded"
@@ -125,43 +91,23 @@ class InstanceState(str, Enum):
 
 class ReservationState(str, Enum):
     ACTIVE = "active"
-    CONSUMED = "consumed"  # 预留已转为实际消费
+    CONSUMED = "consumed"      # 预留已转为实际消费
     RELEASED = "released"
     QUARANTINED = "quarantined"  # 节点失败但物理已使用，转人工复核
 
 
 #: instance 状态机允许的迁移（from -> {to}）
-INSTANCE_TRANSITIONS: dict[InstanceState, set] = {
-    InstanceState.WAREHOUSE: {
-        InstanceState.RESERVED,
-        InstanceState.BENCH,
-        InstanceState.DISCARDED,
-        InstanceState.QUARANTINED,
-    },
-    InstanceState.RESERVED: {
-        InstanceState.WAREHOUSE,
-        InstanceState.BENCH,
-        InstanceState.QUARANTINED,
-    },
-    InstanceState.BENCH: {
-        InstanceState.IN_USE,
-        InstanceState.WAREHOUSE,
-        InstanceState.CONSUMED,
-        InstanceState.DISCARDED,
-        InstanceState.QUARANTINED,
-    },
-    InstanceState.IN_USE: {
-        InstanceState.BENCH,
-        InstanceState.CONSUMED,
-        InstanceState.DISCARDED,
-        InstanceState.QUARANTINED,
-    },
+INSTANCE_TRANSITIONS: Dict[InstanceState, set] = {
+    InstanceState.WAREHOUSE: {InstanceState.RESERVED, InstanceState.BENCH, InstanceState.DISCARDED,
+                              InstanceState.QUARANTINED},
+    InstanceState.RESERVED: {InstanceState.WAREHOUSE, InstanceState.BENCH, InstanceState.QUARANTINED},
+    InstanceState.BENCH: {InstanceState.IN_USE, InstanceState.WAREHOUSE, InstanceState.CONSUMED,
+                          InstanceState.DISCARDED, InstanceState.QUARANTINED},
+    InstanceState.IN_USE: {InstanceState.BENCH, InstanceState.CONSUMED, InstanceState.DISCARDED,
+                           InstanceState.QUARANTINED},
     InstanceState.CONSUMED: set(),
     InstanceState.DISCARDED: set(),
-    InstanceState.QUARANTINED: {
-        InstanceState.WAREHOUSE,
-        InstanceState.DISCARDED,
-    },  # 人工复核后放行/报废
+    InstanceState.QUARANTINED: {InstanceState.WAREHOUSE, InstanceState.DISCARDED},  # 人工复核后放行/报废
 }
 
 #: active（占用 barcode / 占用库存）的实例状态
@@ -176,14 +122,10 @@ ACTIVE_INSTANCE_STATES = {
 
 def check_instance_transition(current: InstanceState, target: InstanceState) -> None:
     if target not in INSTANCE_TRANSITIONS[current]:
-        raise CommandRejected(
-            f"instance transition {current.value} -> {target.value} not allowed"
-        )
+        raise CommandRejected(f"instance transition {current.value} -> {target.value} not allowed")
 
 
-def lot_state_for(
-    total: float, available: float, reserved: float, quarantined: bool
-) -> LotState:
+def lot_state_for(total: float, available: float, reserved: float, quarantined: bool) -> LotState:
     """根据数量推导 lot 状态（状态是数量的函数，不单独维护）."""
     if quarantined:
         return LotState.QUARANTINED
@@ -198,8 +140,7 @@ def check_lot_invariants(total: float, available: float, reserved: float) -> Non
     """数量非负，available + reserved <= total."""
     if total < 0 or available < 0 or reserved < 0:
         raise InvariantViolation(
-            "negative quantity: "
-            f"total={total} available={available} reserved={reserved}"
+            f"negative quantity: total={total} available={available} reserved={reserved}"
         )
     # 浮点容差
     if available + reserved > total + 1e-9:
@@ -213,416 +154,14 @@ def check_lot_invariants(total: float, available: float, reserved: float) -> Non
 # ---------------------------------------------------------------------------
 
 
-@dataclass(frozen=True, slots=True)
-class ResourceTemplateIdentity:
-    """Registry/PackageCatalog 提供给 InventoryService 的最小 identity。"""
-
-    uuid: str
-    material_class: str
-
-
-@dataclass(frozen=True, slots=True)
-class MaterialModelAsset:
-    """Catalog-audited model asset exposed through an opaque read callback."""
-
-    public_path: str
-    media_type: str
-    digest: str
-    size: int
-    read_bytes: Callable[[], bytes] = field(repr=False, compare=False)
-
-
-@dataclass(frozen=True, slots=True)
-class ResourceSlotResolution:
-    """InventoryService 对 concrete ResourceSlot 的 canonical resolution。"""
-
-    uuid: str
-    resource_template_uuid: str
-
-
-@dataclass(frozen=True, slots=True)
-class TaskMaterialAdmissionSource:
-    """One closed MaterialSource entry in a Task admission command。"""
-
-    material_source_node_uuid: str
-    mode: str
-    resource_template_uuid: str
-    mount: dict[str, Any]
-    material_uuid: str | None
-    site_uuid: str | None
-    candidate_site_uuids: tuple[str, ...]
-    flow_role: str
-
-
-@dataclass(frozen=True, slots=True)
-class TaskMaterialAdmissionCommand:
-    """Versioned Task-wide Material admission command。"""
-
-    schema_version: int
-    command_uuid: str
-    idempotency_key: str
-    workflow_task_uuid: str
-    workflow_snapshot_fingerprint: str
-    sources: tuple[TaskMaterialAdmissionSource, ...]
-
-
-@dataclass(frozen=True, slots=True)
-class TaskMaterialBinding:
-    """Canonical Material binding for one MaterialSource node。"""
-
-    material_source_node_uuid: str
-    resource_slot: dict[str, Any]
-    site_uuid: str | None
-
-
-@dataclass(frozen=True, slots=True)
-class TaskMaterialAdmissionResult:
-    """Closed durable result of one Task-wide admission command。"""
-
-    schema_version: int
-    command_uuid: str
-    workflow_task_uuid: str
-    status: str
-    reservation_uuid: str | None
-    bindings: tuple[TaskMaterialBinding, ...]
-    diagnostics: tuple[dict[str, Any], ...]
-    outbox_sequence: int
-
-
-@dataclass(frozen=True, slots=True)
-class TaskMaterialReleaseCommand:
-    """Versioned terminal release command for one WorkflowTask。"""
-
-    schema_version: int
-    command_uuid: str
-    idempotency_key: str
-    workflow_task_uuid: str
-    reason: str
-
-
-@dataclass(frozen=True, slots=True)
-class TaskMaterialReleaseResult:
-    """Closed durable result of one Task Reservation release。"""
-
-    schema_version: int
-    command_uuid: str
-    workflow_task_uuid: str
-    status: str
-    reservation_uuid: str | None
-    outbox_sequence: int
-
-
-@dataclass(frozen=True, slots=True)
-class JobClaimAcquireCommand:
-    """为一个 Job attempt 获取完整、typed 的 physical-resource 集合。"""
-
-    schema_version: int
-    command_uuid: str
-    idempotency_key: str
-    workflow_task_uuid: str
-    workflow_node_job_uuid: str
-    attempt: int
-    device_material_uuid: str
-    mutable_material_root_uuids: tuple[str, ...]
-    occupancy_changing_site_uuids: tuple[str, ...]
-
-
-@dataclass(frozen=True, slots=True)
-class JobClaimStateCommand:
-    """给精确 fenced Job Claim 附加 accepted/running evidence。"""
-
-    schema_version: int
-    command_uuid: str
-    idempotency_key: str
-    workflow_node_job_uuid: str
-    attempt: int
-    claim_uuid: str
-    fencing_token: int
-    evidence_kind: str
-    evidence_fingerprint: str
-    expected_state: str | None = None
-
-
-@dataclass(frozen=True, slots=True)
-class JobClaimUncertainCommand:
-    """physical dispatch/result reality 未知时 fail closed。"""
-
-    schema_version: int
-    command_uuid: str
-    idempotency_key: str
-    workflow_node_job_uuid: str
-    attempt: int
-    claim_uuid: str
-    fencing_token: int
-    uncertainty_reason: str
-    evidence_fingerprint: str
-    expected_state: str | None = None
-
-
-@dataclass(frozen=True, slots=True)
-class MaterialChangeSetEffect:
-    """terminal ChangeSet 中一个已声明的 Material/Site mutation。"""
-
-    effect_key: str
-    resource_kind: str
-    resource_uuid: str
-    operation: str
-    expected_version: int | None
-    before: dict[str, Any]
-    after: dict[str, Any]
-
-
-@dataclass(frozen=True, slots=True)
-class MaterialChangeSetCommand:
-    """提交一个 Job attempt 的 terminal physical-reality effect。"""
-
-    schema_version: int
-    command_uuid: str
-    idempotency_key: str
-    workflow_task_uuid: str
-    workflow_node_job_uuid: str
-    attempt: int
-    claim_uuid: str
-    fencing_token: int
-    effect_identity: str
-    outcome: str
-    result: dict[str, Any]
-    effects: tuple[MaterialChangeSetEffect, ...]
-    expected_claim_state: str | None = None
-
-
-@dataclass(frozen=True, slots=True)
-class JobClaimReleaseCommand:
-    """仅凭 durable no-send 或 terminal proof 释放精确 Claim。"""
-
-    schema_version: int
-    command_uuid: str
-    idempotency_key: str
-    workflow_node_job_uuid: str
-    attempt: int
-    claim_uuid: str
-    fencing_token: int
-    release_proof_kind: str
-    material_changeset_uuid: str | None
-    material_changeset_fingerprint: str | None
-    workflow_terminal_fingerprint: str | None
-    reason: str
-    no_send_proof_fingerprint: str | None = None
-    expected_state: str | None = None
-
-
-@dataclass(frozen=True, slots=True)
-class JobClaimResolutionCommand:
-    """对一个 uncertain Claim 做可审计的 device/human resolution。"""
-
-    schema_version: int
-    command_uuid: str
-    idempotency_key: str
-    workflow_node_job_uuid: str
-    attempt: int
-    claim_uuid: str
-    fencing_token: int
-    expected_state: str
-    resolution: str
-    evidence_kind: str
-    evidence_fingerprint: str
-    observed_at: str
-    actor_identity: str
-    reason: str
-    no_send_proof_fingerprint: str | None = None
-    terminal_changeset: MaterialChangeSetCommand | None = None
-    workflow_terminal_fingerprint: str | None = None
-
-
-@dataclass(frozen=True, slots=True)
-class JobClaimMemberRecord:
-    """完整 Job Claim 集合中的一个 member。"""
-
-    resource_kind: str
-    resource_uuid: str
-    acquired_version: int
-    expected_version: int
-    released_at: str | None
-
-
-@dataclass(frozen=True, slots=True)
-class JobClaimRecord:
-    """durable Claim authority 的公开不可变 projection。"""
-
-    uuid: str
-    workflow_task_uuid: str
-    workflow_node_job_uuid: str
-    attempt: int
-    set_fingerprint: str
-    fencing_token: int
-    state: str
-    uncertainty_reason: str | None
-    acquired_at: str
-    create_time: str
-    running_at: str | None
-    release_proof_kind: str | None
-    release_proof_fingerprint: str | None
-    release_reason: str | None
-    terminal_changeset_uuid: str | None
-    workflow_terminal_fingerprint: str | None
-    release_command_uuid: str | None
-    released_at: str | None
-    update_time: str
-    members: tuple[JobClaimMemberRecord, ...]
-
-
-@dataclass(frozen=True, slots=True)
-class JobClaimResult:
-    """acquire/state/release/resolve 命令的封闭 durable result。"""
-
-    schema_version: int
-    command_uuid: str
-    status: str
-    claim: JobClaimRecord | None
-    diagnostics: tuple[dict[str, Any], ...]
-    outbox_sequence: int | None
-
-
-@dataclass(frozen=True, slots=True)
-class MaterialChangeSetReceipt:
-    """durable、可重放的 terminal Material reality receipt。"""
-
-    schema_version: int
-    command_uuid: str
-    uuid: str
-    workflow_task_uuid: str
-    workflow_node_job_uuid: str
-    attempt: int
-    claim_uuid: str
-    fencing_token: int
-    effect_identity: str
-    deterministic_fingerprint: str
-    outcome: str
-    result: dict[str, Any]
-    effects: tuple[MaterialChangeSetEffect, ...]
-    create_time: str
-    outbox_sequence: int
-
-
-@dataclass(frozen=True, slots=True)
-class InventoryEvent:
-    """Public immutable projection of one durable Inventory outbox event。"""
-
-    sequence: int
-    event_id: str
-    edge_id: str
-    lab_id: str
-    aggregate_type: str
-    aggregate_id: str
-    aggregate_version: int
-    event_type: str
-    occurred_at: int
-    causation_id: str
-    payload: dict[str, Any]
-
-
-@dataclass(frozen=True, slots=True)
-class MaterialRecord:
-    """Backend-field-aligned durable Material projection。"""
-
-    uuid: str
-    create_time: str
-    update_time: str
-    deleted_at: str | None
-    description: str | None
-    meta_data: dict[str, Any]
-    resource_template_uuid: str
-    parent_uuid: str | None
-    klass: str
-    barcode: str
-    name: str
-    config: dict[str, Any]
-    data: dict[str, Any]
-    disposition: str | None
-    material_kind: str
-    version: int
-
-    def to_dict(self) -> dict[str, Any]:
-        """投影为 Backend exact-baseline 的结构化 Material 字段。"""
-
-        return {
-            "uuid": self.uuid,
-            "create_time": self.create_time,
-            "update_time": self.update_time,
-            "deleted_at": self.deleted_at,
-            "description": self.description,
-            "meta_data": dict(self.meta_data),
-            "resource_template_uuid": self.resource_template_uuid,
-            "parent_uuid": self.parent_uuid,
-            "class": self.klass,
-            "barcode": self.barcode,
-            "name": self.name,
-            "config": dict(self.config),
-            "data": dict(self.data),
-            "disposition": self.disposition,
-            "material_kind": self.material_kind,
-            "version": self.version,
-        }
-
-
-@dataclass(frozen=True, slots=True)
-class SiteRecord:
-    """Backend-field-aligned durable Site projection。"""
-
-    uuid: str
-    create_time: str
-    update_time: str
-    deleted_at: str | None
-    description: str | None
-    meta_data: dict[str, Any]
-    material_uuid: str
-    name: str
-    sort_order: int
-    allowed_resource_template_uuids: tuple[str, ...]
-    occupied_material_uuid: str | None
-    position_x: float
-    position_y: float
-    position_z: float
-    depth: float
-    length: float
-    width: float
-    version: int
-
-    def to_dict(self) -> dict[str, Any]:
-        """Project one active Site to the Backend-shaped public record."""
-
-        projection: dict[str, Any] = {
-            "uuid": self.uuid,
-            "create_time": self.create_time,
-            "update_time": self.update_time,
-            "meta_data": dict(self.meta_data),
-            "material_uuid": self.material_uuid,
-            "name": self.name,
-            "sort_order": self.sort_order,
-            "allowed_resource_template_uuids": list(
-                self.allowed_resource_template_uuids
-            ),
-            "position_x": self.position_x,
-            "position_y": self.position_y,
-            "position_z": self.position_z,
-            "depth": self.depth,
-            "length": self.length,
-            "width": self.width,
-            "version": self.version,
-        }
-        if self.description is not None:
-            projection["description"] = self.description
-        if self.occupied_material_uuid is not None:
-            projection["occupied_material_uuid"] = self.occupied_material_uuid
-        return projection
-
-
 @dataclass
 class MaterialRequirement:
     """一个节点对物料的需求（挂在 WorkflowNode 上，可选字段）.
 
     - lot 需求：template_id/lot_id + quantity（数量型，FIFO 扣 lot）
     - instance 需求：instance_uuid 或 barcode（实体型，deploy 具体实例）
+    - 自动实例需求：template_id + mount_uuid，可选 site_uuid 或 slot_uuids
+      （在挂载物料的库位（Site）集合中确定性选择占用物料）
     """
 
     template_id: str = ""
@@ -631,11 +170,20 @@ class MaterialRequirement:
     unit: str = ""
     instance_uuid: str = ""
     barcode: str = ""
+    mount_uuid: str = ""
+    site_uuid: str = ""
+    slot_uuids: List[str] = field(default_factory=list)
 
     def is_instance_requirement(self) -> bool:
-        return bool(self.instance_uuid or self.barcode)
+        return bool(
+            self.instance_uuid
+            or self.barcode
+            or self.mount_uuid
+            or self.site_uuid
+            or self.slot_uuids
+        )
 
-    def to_dict(self) -> dict[str, Any]:
+    def to_dict(self) -> JsonObject:
         return {
             "template_id": self.template_id,
             "lot_id": self.lot_id,
@@ -643,19 +191,28 @@ class MaterialRequirement:
             "unit": self.unit,
             "instance_uuid": self.instance_uuid,
             "barcode": self.barcode,
+            "mount_uuid": self.mount_uuid,
+            "site_uuid": self.site_uuid,
+            "slot_uuids": list(self.slot_uuids),
         }
 
     @classmethod
-    def from_dict(cls, data: dict[str, Any]) -> MaterialRequirement:
+    def from_dict(cls, data: Mapping[str, object]) -> "MaterialRequirement":
         return cls(
             template_id=str(data.get("template_id") or data.get("templateId") or ""),
             lot_id=str(data.get("lot_id") or data.get("lotId") or ""),
             quantity=float(data.get("quantity") or 0.0),
             unit=str(data.get("unit") or ""),
-            instance_uuid=str(
-                data.get("instance_uuid") or data.get("instanceUuid") or ""
-            ),
+            instance_uuid=str(data.get("instance_uuid") or data.get("instanceUuid") or ""),
             barcode=str(data.get("barcode") or ""),
+            mount_uuid=str(data.get("mount_uuid") or data.get("mountUuid") or ""),
+            site_uuid=str(data.get("site_uuid") or data.get("siteUuid") or ""),
+            slot_uuids=[
+                str(value)
+                for value in (
+                    data.get("slot_uuids") or data.get("slotUuids") or []
+                )
+            ],
         )
 
 
@@ -672,10 +229,10 @@ class OutboxEvent:
     event_type: str
     occurred_at: int  # 毫秒
     causation_id: str
-    payload: dict[str, Any] = field(default_factory=dict)
+    payload: JsonObject = field(default_factory=dict)
     sequence: int = 0
 
-    def to_dict(self) -> dict[str, Any]:
+    def to_dict(self) -> JsonObject:
         return {
             "event_id": self.event_id,
             "edge_id": self.edge_id,
@@ -705,11 +262,9 @@ def idempotency_key(workflow_id: str, node_id: str, attempt: int) -> str:
 # 需求聚合 --------------------------------------------------------------------
 
 
-def aggregate_lot_requirements(
-    requirements: list[MaterialRequirement],
-) -> dict[str, float]:
+def aggregate_lot_requirements(requirements: List[MaterialRequirement]) -> Dict[str, float]:
     """按 (lot_id 或 template:xxx) 汇总数量型需求，用于整 DAG 预留."""
-    totals: dict[str, float] = {}
+    totals: Dict[str, float] = {}
     for req in requirements:
         if req.is_instance_requirement() or req.quantity <= 0:
             continue

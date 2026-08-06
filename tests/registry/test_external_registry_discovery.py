@@ -1,8 +1,8 @@
-"""Package CLI registry path discovery."""
+"""社区设备包目录式注册表发现合同。"""
 
 from pathlib import Path
 
-from unilabos.package_manager.legacy import discover_registry_paths_from_project
+from unilabos.app.package_cli import discover_registry_paths_from_project
 
 
 def test_discover_registry_paths_from_pyproject_tool_section():

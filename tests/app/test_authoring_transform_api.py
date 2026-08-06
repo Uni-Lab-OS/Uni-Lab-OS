@@ -1,73 +1,71 @@
-"""Round 02E pure Authoring HTTP Interface 的独立合同测试。"""
+"""可信工作流创作纯转换 HTTP 合同的公共接缝测试。"""
 
 from __future__ import annotations
 
-import asyncio
-import json
-from collections.abc import Iterator, Sequence
 from copy import deepcopy
-from pathlib import Path
 from typing import Any, Literal
 
 import pytest
-from fastapi import FastAPI
 from fastapi.testclient import TestClient
 
-from tests.workflow.test_authoring_engine import (
-    PREPARE_NODE_UUID,
-    WORKFLOW_UUID,
-    EngineContext,
-    _compile,
-    _empty_graph,
-    _opened_engine,
-    _source,
+from unilabos.app.workflow_authoring_transform import (
+    create_authoring_transform_app,
+    create_authoring_transform_router,
 )
-from unilabos.app import workflow_api
 from unilabos.workflow.models import CandidateCompilation
 
-SOURCE_URI = "package://lab/workflows/round02e.py"
+WORKFLOW_UUID = "10000000-0000-4000-8000-000000000001"
 OTHER_WORKFLOW_UUID = "10000000-0000-4000-8000-000000000002"
-OUTSIDE_NODE_UUID = "20000000-0000-4000-8000-000000000099"
-FINGERPRINT = "sha256:" + "e" * 64
+SOURCE_URI = "package://lab/workflows/f05.py"
+FINGERPRINT = "sha256:" + "7" * 64
 HTTP_BODY_LIMIT = 8 * 1024 * 1024
-EXTERNAL_INTEGER_DIGITS = 4096
-MAX_JSON_DEPTH = 10_000
+INTEGER_DIGIT_LIMIT = 4096
+JSON_DEPTH_LIMIT = 10_000
 
-INVALID_INPUT = {
-    "code": 400,
-    "error": {
-        "code": "invalid_input",
-        "message": "提交内容格式不正确",
-    },
-}
+INVALID_INPUT = {"code": 1000, "error": {"msg": "提交内容格式不正确"}}
 CATALOG_UNAVAILABLE = {
-    "code": 503,
-    "error": {
-        "code": "template_catalog_unavailable",
-        "message": "设备动作模板暂不可用，请稍后重试",
-    },
+    "code": 5001,
+    "error": {"msg": "设备动作模板暂不可用，请稍后重试"},
 }
 INTERNAL_ERROR = {
-    "code": 500,
-    "error": {
-        "code": "internal_error",
-        "message": "本地工作流服务出现错误，请重试或查看日志",
-    },
+    "code": 1,
+    "error": {"msg": "本地工作流服务出现错误，请重试或查看日志"},
 }
 
 
-def _changeset(
-    *,
-    kind: Literal["graph", "source_only"] = "source_only",
-    created_node_uuids: list[str] | None = None,
-    updated_node_uuids: list[str] | None = None,
-    deleted_node_uuids: list[str] | None = None,
-) -> dict[str, Any]:
+def _graph() -> dict[str, Any]:
+    """构造属于固定工作流（Workflow）身份和修订的空五集合图。
+
+    参数：无。返回：可作为纯转换请求和基线的独立工作流图；调用方可安全修改。
+    """
+
     return {
-        "kind": kind,
-        "created_node_uuids": created_node_uuids or [],
-        "updated_node_uuids": updated_node_uuids or [],
-        "deleted_node_uuids": deleted_node_uuids or [],
+        "workflow": {
+            "uuid": WORKFLOW_UUID,
+            "name": "F05 trusted authoring",
+            "tags": [],
+            "description": None,
+            "meta_data": {},
+            "revision": 7,
+        },
+        "nodes": [],
+        "edges": [],
+        "node_templates": [],
+        "handle_templates": [],
+    }
+
+
+def _source_only_changeset() -> dict[str, Any]:
+    """返回图生命周期集合全部为空的源码变更集（Source-only ChangeSet）。
+
+    参数：无。返回：生成 Python 与共同校验成功时唯一允许的空变更集。
+    """
+
+    return {
+        "kind": "source_only",
+        "created_node_uuids": [],
+        "updated_node_uuids": [],
+        "deleted_node_uuids": [],
         "created_edge_uuids": [],
         "updated_edge_uuids": [],
         "deleted_edge_uuids": [],
@@ -75,69 +73,8 @@ def _changeset(
     }
 
 
-def _candidate_node(
-    *,
-    name: str = "candidate node",
-) -> dict[str, Any]:
-    """一个不依赖 Template Catalog 的 Backend-shaped compute Node。"""
-
-    return {
-        "uuid": PREPARE_NODE_UUID,
-        "workflow_node_template_uuid": None,
-        "parent_uuid": None,
-        "material_uuid": None,
-        "name": name,
-        "status": "idle",
-        "type": "compute",
-        "icon": None,
-        "pose": {},
-        "param": {},
-        "footer": None,
-        "action_name": None,
-        "action_type": None,
-        "execution_policy": {},
-        "disabled": False,
-        "minimized": False,
-        "script": None,
-        "description": None,
-        "meta_data": {},
-    }
-
-
-def _graph_with_node(*, name: str = "candidate node") -> dict[str, Any]:
-    graph = _empty_graph()
-    graph["nodes"] = [_candidate_node(name=name)]
-    return graph
-
-
-def _diagnostic_result(
-    code: str,
-    *,
-    source_range: dict[str, int] | None = None,
-) -> CandidateCompilation:
-    diagnostic: dict[str, Any] = {
-        "severity": "error",
-        "code": code,
-        "message": f"stable {code} diagnostic",
-    }
-    if source_range is not None:
-        diagnostic["source_range"] = source_range
-    return CandidateCompilation(
-        diagnostics=[diagnostic],
-        graph=None,
-        normalized_python_source=None,
-        source_map=[],
-        changeset=None,
-        compiler_version="round02e-spy/v1",
-        template_catalog_fingerprint=FINGERPRINT,
-    )
-
-
 class RecordingTransformEngine:
-    """只实现冻结的三个 transform，并记录唯一允许的边界调用。"""
-
-    compiler_version = "round02e-spy/v1"
-    template_catalog_fingerprint = FINGERPRINT
+    """记录纯转换调用，并可注入非法出站结果验证适配器关闭失败。"""
 
     def __init__(
         self,
@@ -145,174 +82,151 @@ class RecordingTransformEngine:
             "valid",
             "diagnostic",
             "catalog-unavailable",
-            "compile-created-mismatch",
-            "compile-deleted-mismatch",
-            "compile-updated-mismatch",
-            "foreign-source-map",
-            "invalid-graph-field",
-            "invalid-graph-root",
-            "invalid-node-field",
             "internal-error",
-            "invalid-dto",
-            "invalid-range",
-            "source-only-graph-mutated",
-            "source-only-nonempty",
-            "workflow-revision-mismatch",
-            "workflow-uuid-mismatch",
+            "private-diagnostic",
+            "private-graph",
+            "changed-graph",
+            "nonempty-source-only",
+            "foreign-identity",
         ] = "valid",
     ) -> None:
+        """创建指定行为的引擎替身。
+
+        参数：``mode`` 决定成功、诊断或不可信内部输出。返回：无；调用记录初始为空。
+        """
+
         self.mode = mode
         self.calls: list[tuple[str, dict[str, Any]]] = []
 
     def _result(
         self,
-        method: str,
+        operation: str,
         values: dict[str, Any],
     ) -> CandidateCompilation:
-        self.calls.append((method, values))
-        if self.mode == "diagnostic":
-            code = (
-                "python_syntax_error"
-                if values.get("python_source") == "syntax error"
-                else "template_catalog_mismatch"
-            )
-            return _diagnostic_result(code)
-        if self.mode == "catalog-unavailable":
-            return _diagnostic_result("template_catalog_unavailable")
-        if self.mode == "internal-error":
-            raise RuntimeError("secret database password must never cross HTTP")
-        if self.mode == "invalid-dto":
-            result = _diagnostic_result("invalid_action_call")
-            result.diagnostics[0]["private_detail"] = "must not leak"
-            return result
-        if self.mode == "invalid-range":
-            # “中”只有一个 UTF-16 code unit，公开 end column 最大为 2；UTF-8 byte
-            # 长度却为 3。这个出站值专门防止 adapter 继续按 byte 验证。
-            return _diagnostic_result(
-                "invalid_action_call",
-                source_range={
-                    "start_line": 1,
-                    "start_column": 1,
-                    "end_line": 1,
-                    "end_column": 3,
-                },
-            )
+        """记录一次操作并生成与该请求对应的候选编译结果。
 
-        graph = deepcopy(values.get("applied_graph", values.get("graph")))
-        source = values.get("python_source", "")
-        source_map: list[dict[str, Any]] = []
-        changeset = _changeset()
-        if self.mode == "invalid-graph-root":
-            graph = {"canonical_private": "root graph secret"}
-        elif self.mode == "invalid-graph-field":
-            graph["workflow"]["canonical_private"] = "workflow secret"
-        elif self.mode == "invalid-node-field":
-            graph["nodes"][0]["canonical_private"] = "node secret"
-        elif self.mode == "workflow-uuid-mismatch":
-            graph["workflow"]["uuid"] = OTHER_WORKFLOW_UUID
-        elif self.mode == "workflow-revision-mismatch":
-            graph["workflow"]["revision"] = 8
-        elif self.mode == "foreign-source-map":
-            source_map = [
-                {
-                    "workflow_node_uuid": OUTSIDE_NODE_UUID,
-                    "start_line": 1,
-                    "start_column": 1,
-                    "end_line": 1,
-                    "end_column": 2,
-                }
-            ]
-        elif self.mode == "compile-created-mismatch":
-            graph["nodes"] = [_candidate_node()]
-            changeset = _changeset(kind="graph")
-        elif self.mode == "compile-updated-mismatch":
-            graph["nodes"][0]["name"] = "updated without changeset"
-            changeset = _changeset(kind="graph")
-        elif self.mode == "compile-deleted-mismatch":
-            graph["nodes"] = []
-            changeset = _changeset(kind="graph")
-        elif self.mode == "source-only-graph-mutated":
-            graph["workflow"]["name"] = "mutated despite source_only"
-        elif self.mode == "source-only-nonempty":
-            changeset = _changeset(
-                created_node_uuids=[PREPARE_NODE_UUID],
+        参数：``operation`` 是三个公开操作之一；``values`` 是适配器传入的闭合参数。
+        返回：成功或诊断结果；``internal-error`` 模式抛出含秘密文本的异常。
+        """
+
+        self.calls.append((operation, values))
+        if self.mode == "internal-error":
+            raise RuntimeError("secret database password")
+        if self.mode in {"diagnostic", "catalog-unavailable", "private-diagnostic"}:
+            # ``diagnostic_code`` 是稳定公开诊断身份；目录不可用稍后由适配器提升为业务错误。
+            diagnostic_code = (
+                "template_catalog_unavailable"
+                if self.mode == "catalog-unavailable"
+                else "python_syntax_error"
             )
+            result = CandidateCompilation(
+                diagnostics=[
+                    {
+                        "severity": "error",
+                        "code": diagnostic_code,
+                        "message": "稳定编译诊断",
+                    }
+                ],
+                graph=None,
+                normalized_python_source=None,
+                source_map=[],
+                changeset=None,
+                compiler_version="f05-c7-spy/v1",
+                template_catalog_fingerprint=FINGERPRINT,
+            )
+            if self.mode == "private-diagnostic":
+                result.diagnostics[0]["private_detail"] = "must not leak"
+            return result
+
+        # ``request_graph`` 是调用方提供的图快照；引擎返回前必须复制，避免污染请求证据。
+        request_graph = values.get("applied_graph", values.get("graph"))
+        result_graph = deepcopy(request_graph)
+        if self.mode == "private-graph":
+            result_graph["canonical_ir"] = "must not leak"
+        elif self.mode == "changed-graph":
+            result_graph["workflow"]["name"] = "unexpected mutation"
+        elif self.mode == "foreign-identity":
+            result_graph["workflow"]["uuid"] = OTHER_WORKFLOW_UUID
+        changeset = _source_only_changeset()
+        if self.mode == "nonempty-source-only":
+            changeset["created_node_uuids"] = ["20000000-0000-4000-8000-000000000001"]
+        normalized_source = values.get("python_source") or "# generated\n"
         return CandidateCompilation(
             diagnostics=[],
-            graph=graph,
-            normalized_python_source=(
-                source if source.endswith("\n") else source + "\n"
-            ),
-            source_map=source_map,
+            graph=result_graph,
+            normalized_python_source=normalized_source,
+            source_map=[],
             changeset=changeset,
-            compiler_version=self.compiler_version,
-            template_catalog_fingerprint=self.template_catalog_fingerprint,
+            compiler_version="f05-c7-spy/v1",
+            template_catalog_fingerprint=FINGERPRINT,
         )
 
     def compile(self, **values: Any) -> CandidateCompilation:
+        """执行源码编译替身；参数是闭合编译 DTO，返回记录后的候选结果。"""
+
         return self._result("compile", values)
 
     def generate_python(self, **values: Any) -> CandidateCompilation:
+        """执行图到 Python 替身；参数是闭合生成 DTO，返回记录后的候选结果。"""
+
         return self._result("generate_python", values)
 
     def validate(self, **values: Any) -> CandidateCompilation:
+        """执行共同校验替身；参数是闭合校验 DTO，返回记录后的候选结果。"""
+
         return self._result("validate", values)
 
 
-def _transform_router(engine: Any):
-    factory = getattr(workflow_api, "create_authoring_transform_router", None)
-    assert callable(factory), "缺少冻结 seam: create_authoring_transform_router(engine)"
-    return factory(engine)
+def _compile_body(**overrides: Any) -> dict[str, Any]:
+    """构造规范编译请求并按调用方字段覆盖。
 
+    参数：``overrides`` 用于生成单一边界反例。返回：新的请求对象。
+    """
 
-def _transform_app(engine: Any) -> FastAPI:
-    factory = getattr(workflow_api, "create_authoring_transform_app", None)
-    assert callable(factory), (
-        "缺少 focused seam: create_authoring_transform_app(engine)"
-    )
-    app = factory(engine)
-    assert isinstance(app, FastAPI)
-    return app
-
-
-def _compile_body(
-    *,
-    python_source: str = "value = 1\n",
-    applied_graph: dict[str, Any] | None = None,
-) -> dict[str, Any]:
-    return {
+    body = {
         "workflow_uuid": WORKFLOW_UUID,
         "revision": 7,
-        "python_source": python_source,
+        "python_source": "value = 1\n",
         "source_uri": SOURCE_URI,
-        "applied_graph": _empty_graph() if applied_graph is None else applied_graph,
+        "applied_graph": _graph(),
     }
+    body.update(overrides)
+    return body
 
 
-def _generate_body(graph: dict[str, Any] | None = None) -> dict[str, Any]:
-    return {
+def _generate_body(**overrides: Any) -> dict[str, Any]:
+    """构造规范 Python 生成请求并按调用方字段覆盖。
+
+    参数：``overrides`` 用于生成单一边界反例。返回：新的请求对象。
+    """
+
+    body = {
         "workflow_uuid": WORKFLOW_UUID,
         "revision": 7,
-        "graph": _empty_graph() if graph is None else graph,
+        "graph": _graph(),
         "source_uri": SOURCE_URI,
     }
+    body.update(overrides)
+    return body
 
 
-def _validate_body(
-    graph: dict[str, Any] | None = None,
-    *,
-    python_source: str = "value = 1\n",
-) -> dict[str, Any]:
-    return {
-        "workflow_uuid": WORKFLOW_UUID,
-        "revision": 7,
-        "graph": _empty_graph() if graph is None else graph,
-        "python_source": python_source,
-        "source_uri": SOURCE_URI,
-    }
+def _validate_body(**overrides: Any) -> dict[str, Any]:
+    """构造规范共同校验请求并按调用方字段覆盖。
+
+    参数：``overrides`` 用于生成单一边界反例。返回：新的请求对象。
+    """
+
+    body = {**_generate_body(), "python_source": "value = 1\n"}
+    body.update(overrides)
+    return body
 
 
-def _assert_success_shape(payload: dict[str, Any]) -> dict[str, Any]:
+def _assert_success(payload: dict[str, Any]) -> dict[str, Any]:
+    """断言产品成功封装与纯转换数据都是闭合结构。
+
+    参数：``payload`` 是 HTTP JSON 响应。返回：闭合 ``data``，供用例继续断言。
+    """
+
     assert set(payload) == {"code", "data"}
     assert payload["code"] == 0
     data = payload["data"]
@@ -327,14 +241,14 @@ def _assert_success_shape(payload: dict[str, Any]) -> dict[str, Any]:
     }
     assert "candidate_hash" not in data
     assert "draft_hash" not in data
-    assert "expected_workflow_revision" not in data
+    assert "canonical_ir" not in data
     return data
 
 
 @pytest.mark.parametrize(
-    ("path", "body", "method", "expected_keys"),
+    ("path", "body", "operation", "expected_keys"),
     [
-        pytest.param(
+        (
             "/api/v1/authoring/compile",
             _compile_body(),
             "compile",
@@ -345,16 +259,14 @@ def _assert_success_shape(payload: dict[str, Any]) -> dict[str, Any]:
                 "source_uri",
                 "applied_graph",
             },
-            id="compile",
         ),
-        pytest.param(
+        (
             "/api/v1/authoring/generate-python",
             _generate_body(),
             "generate_python",
             {"workflow_uuid", "workflow_revision", "graph", "source_uri"},
-            id="generate-python",
         ),
-        pytest.param(
+        (
             "/api/v1/authoring/validate",
             _validate_body(),
             "validate",
@@ -365,682 +277,195 @@ def _assert_success_shape(payload: dict[str, Any]) -> dict[str, Any]:
                 "python_source",
                 "source_uri",
             },
-            id="validate",
         ),
     ],
+    ids=["compile", "generate-python", "validate"],
 )
-def test_three_routes_use_backend_identity_closed_success_and_one_engine_call(
+def test_three_routes_are_closed_and_call_the_engine_once(
     path: str,
     body: dict[str, Any],
-    method: str,
+    operation: str,
     expected_keys: set[str],
 ) -> None:
-    engine = RecordingTransformEngine()
+    """三个纯转换路由必须仅传闭合参数并恰好调用一次可信创作引擎。
 
-    with TestClient(_transform_app(engine)) as client:
+    参数：路径、请求、预期操作及键集由参数矩阵提供。返回：无；断言 HTTP 200。
+    """
+
+    engine = RecordingTransformEngine()
+    with TestClient(create_authoring_transform_app(engine)) as client:
         response = client.post(path, json=body)
 
     assert response.status_code == 200
-    data = _assert_success_shape(response.json())
-    assert data["diagnostics"] == []
+    _assert_success(response.json())
     assert len(engine.calls) == 1
-    called_method, values = engine.calls[0]
-    assert called_method == method
+    called_operation, values = engine.calls[0]
+    assert called_operation == operation
     assert set(values) == expected_keys
     assert values["workflow_uuid"] == WORKFLOW_UUID
     assert values["workflow_revision"] == 7
-    assert "workflow_id" not in values
-    assert "base_revision_id" not in values
-    assert "candidate_hash" not in values
 
 
-def test_transform_router_contains_only_three_pure_routes_and_no_apply() -> None:
-    router = _transform_router(RecordingTransformEngine())
+def test_router_contains_only_the_three_pure_routes() -> None:
+    """独立纯转换路由不得夹带草稿保存或候选应用写操作。
+
+    参数：无。返回：无；断言路由集合严格等于三个 POST 接口。
+    """
+
+    router = create_authoring_transform_router(RecordingTransformEngine())
     routes = {
         (route.path, frozenset(route.methods or set())) for route in router.routes
     }
-
     assert routes == {
         ("/api/v1/authoring/compile", frozenset({"POST"})),
         ("/api/v1/authoring/generate-python", frozenset({"POST"})),
         ("/api/v1/authoring/validate", frozenset({"POST"})),
     }
-    assert all("apply" not in path and "draft" not in path for path, _ in routes)
 
 
 @pytest.mark.parametrize(
     ("path", "body"),
     [
-        pytest.param(
-            "/api/v1/authoring/compile",
-            {**_compile_body(), "candidate_hash": "sha256:" + "a" * 64},
-            id="compile-extra-apply-token",
-        ),
-        pytest.param(
-            "/api/v1/authoring/generate-python",
-            {**_generate_body(), "workflow_id": WORKFLOW_UUID},
-            id="generate-workflow-id-alias",
-        ),
-        pytest.param(
-            "/api/v1/authoring/validate",
-            {**_validate_body(), "base_revision_id": 7},
-            id="validate-revision-alias",
-        ),
-        pytest.param(
-            "/api/v1/authoring/compile",
-            {**_compile_body(), "revision": True},
-            id="bool-revision",
-        ),
-        pytest.param(
-            "/api/v1/authoring/compile",
-            {**_compile_body(), "revision": 0},
-            id="zero-revision",
-        ),
-        pytest.param(
-            "/api/v1/authoring/compile",
-            {
-                **_compile_body(),
-                "workflow_uuid": "00000000-0000-0000-0000-000000000000",
-            },
-            id="nil-workflow-uuid",
-        ),
-        pytest.param(
-            "/api/v1/authoring/compile",
-            {**_compile_body(), "source_uri": "  "},
-            id="blank-source-uri",
-        ),
-        pytest.param(
-            "/api/v1/authoring/compile",
-            {**_compile_body(), "applied_graph": []},
-            id="non-object-applied-graph",
-        ),
-        pytest.param(
-            "/api/v1/authoring/generate-python",
-            {**_generate_body(), "graph": []},
-            id="non-object-graph",
-        ),
-    ],
-)
-def test_malformed_or_noncanonical_request_is_400_without_engine_call(
-    path: str,
-    body: dict[str, Any],
-) -> None:
-    engine = RecordingTransformEngine()
-
-    with TestClient(_transform_app(engine)) as client:
-        response = client.post(path, json=body)
-
-    assert response.status_code == 400
-    assert response.json() == INVALID_INPUT
-    assert engine.calls == []
-
-
-@pytest.mark.parametrize(
-    "body",
-    [
-        b"{not-json",
+        ("/api/v1/authoring/compile", _compile_body(workflow_id=WORKFLOW_UUID)),
+        ("/api/v1/authoring/compile", _compile_body(base_revision_id=7)),
+        ("/api/v1/authoring/compile", _compile_body(canonical_ir={})),
+        ("/api/v1/authoring/compile", _compile_body(revision=True)),
+        ("/api/v1/authoring/compile", _compile_body(revision=0)),
         (
-            b'{"workflow_uuid":"'
-            + WORKFLOW_UUID.encode("ascii")
-            + b'","revision":7,"python_source":"\\ud800",'
-            b'"source_uri":"package://lab/bad.py","applied_graph":{}}'
-        ),
-    ],
-    ids=["malformed-json", "unpaired-surrogate-source"],
-)
-def test_invalid_json_or_non_utf8_encodable_source_is_400_before_engine(
-    body: bytes,
-) -> None:
-    engine = RecordingTransformEngine()
-
-    with TestClient(_transform_app(engine)) as client:
-        response = client.post(
             "/api/v1/authoring/compile",
-            content=body,
-            headers={"Content-Type": "application/json"},
-        )
-
-    assert response.status_code == 400
-    assert response.json() == INVALID_INPUT
-    assert engine.calls == []
-
-
-@pytest.mark.parametrize(
-    ("source", "graph", "expected_code"),
-    [
-        ("syntax error", _empty_graph(), "python_syntax_error"),
+            _compile_body(workflow_uuid="00000000-0000-0000-0000-000000000000"),
+        ),
+        ("/api/v1/authoring/compile", _compile_body(source_uri="\t ")),
+        ("/api/v1/authoring/compile", _compile_body(applied_graph=[])),
         (
-            "valid source",
-            {"canonical_private": "untrusted request graph"},
-            "template_catalog_mismatch",
-        ),
-    ],
-    ids=["syntax", "semantic-graph"],
-)
-def test_well_formed_transform_diagnostic_stays_http_200_data(
-    source: str,
-    graph: dict[str, Any],
-    expected_code: str,
-) -> None:
-    engine = RecordingTransformEngine("diagnostic")
-
-    with TestClient(_transform_app(engine)) as client:
-        response = client.post(
-            "/api/v1/authoring/compile",
-            json=_compile_body(python_source=source, applied_graph=graph),
-        )
-
-    assert response.status_code == 200
-    data = _assert_success_shape(response.json())
-    assert data["diagnostics"][0]["code"] == expected_code
-    assert data["graph"] is None
-    assert data["normalized_python_source"] is None
-    assert data["source_map"] == []
-    assert data["changeset"] is None
-    assert len(engine.calls) == 1
-
-
-def test_catalog_unavailable_is_503_not_a_compilation_diagnostic() -> None:
-    engine = RecordingTransformEngine("catalog-unavailable")
-
-    with TestClient(_transform_app(engine)) as client:
-        response = client.post("/api/v1/authoring/compile", json=_compile_body())
-
-    assert response.status_code == 503
-    assert response.json() == CATALOG_UNAVAILABLE
-    assert len(engine.calls) == 1
-
-
-@pytest.mark.parametrize(
-    "mode",
-    ["internal-error", "invalid-dto", "invalid-range"],
-    ids=["engine-exception", "open-diagnostic-dto", "illegal-outbound-range"],
-)
-def test_internal_or_illegal_engine_result_is_sanitized_500(
-    mode: Literal["internal-error", "invalid-dto", "invalid-range"],
-) -> None:
-    engine = RecordingTransformEngine(mode)
-    body = _compile_body(python_source="中")
-
-    with TestClient(_transform_app(engine), raise_server_exceptions=False) as client:
-        response = client.post("/api/v1/authoring/compile", json=body)
-
-    assert response.status_code == 500
-    assert response.json() == INTERNAL_ERROR
-    assert "secret database password" not in response.text
-    assert len(engine.calls) == 1
-
-
-def _assert_sanitized_internal_error(response: Any, *secrets: str) -> None:
-    assert response.status_code == 500
-    assert response.json() == INTERNAL_ERROR
-    for secret in secrets:
-        assert secret not in response.text
-
-
-@pytest.mark.parametrize(
-    ("mode", "applied_graph", "secret"),
-    [
-        ("invalid-graph-root", _empty_graph(), "root graph secret"),
-        ("invalid-graph-field", _empty_graph(), "workflow secret"),
-        ("invalid-node-field", _graph_with_node(), "node secret"),
-    ],
-    ids=["non-five-set-root", "unknown-workflow-field", "unknown-node-field"],
-)
-def test_engine_graph_shape_or_private_field_is_sanitized_500(
-    mode: Literal[
-        "invalid-graph-root",
-        "invalid-graph-field",
-        "invalid-node-field",
-    ],
-    applied_graph: dict[str, Any],
-    secret: str,
-) -> None:
-    engine = RecordingTransformEngine(mode)
-
-    with TestClient(_transform_app(engine)) as client:
-        response = client.post(
-            "/api/v1/authoring/compile",
-            json=_compile_body(applied_graph=applied_graph),
-        )
-
-    _assert_sanitized_internal_error(response, "canonical_private", secret)
-    assert len(engine.calls) == 1
-
-
-@pytest.mark.parametrize(
-    ("mode", "foreign_identity"),
-    [
-        ("workflow-uuid-mismatch", OTHER_WORKFLOW_UUID),
-        ("workflow-revision-mismatch", '"revision":8'),
-    ],
-    ids=["workflow-uuid", "workflow-revision"],
-)
-def test_engine_graph_request_identity_mismatch_is_sanitized_500(
-    mode: Literal["workflow-uuid-mismatch", "workflow-revision-mismatch"],
-    foreign_identity: str,
-) -> None:
-    engine = RecordingTransformEngine(mode)
-
-    with TestClient(_transform_app(engine)) as client:
-        response = client.post(
-            "/api/v1/authoring/compile",
-            json=_compile_body(),
-        )
-
-    _assert_sanitized_internal_error(response, foreign_identity)
-    assert len(engine.calls) == 1
-
-
-def test_source_map_node_must_belong_to_candidate_graph() -> None:
-    engine = RecordingTransformEngine("foreign-source-map")
-
-    with TestClient(_transform_app(engine)) as client:
-        response = client.post(
-            "/api/v1/authoring/compile",
-            json=_compile_body(python_source="x\n"),
-        )
-
-    _assert_sanitized_internal_error(response, OUTSIDE_NODE_UUID)
-    assert len(engine.calls) == 1
-
-
-@pytest.mark.parametrize(
-    ("mode", "applied_graph"),
-    [
-        ("compile-created-mismatch", _empty_graph()),
-        ("compile-updated-mismatch", _graph_with_node(name="before update")),
-        ("compile-deleted-mismatch", _graph_with_node()),
-    ],
-    ids=["created", "updated", "deleted"],
-)
-def test_compile_changeset_must_equal_actual_graph_lifecycle(
-    mode: Literal[
-        "compile-created-mismatch",
-        "compile-updated-mismatch",
-        "compile-deleted-mismatch",
-    ],
-    applied_graph: dict[str, Any],
-) -> None:
-    engine = RecordingTransformEngine(mode)
-
-    with TestClient(_transform_app(engine)) as client:
-        response = client.post(
-            "/api/v1/authoring/compile",
-            json=_compile_body(applied_graph=applied_graph),
-        )
-
-    _assert_sanitized_internal_error(response, "updated without changeset")
-    assert len(engine.calls) == 1
-
-
-@pytest.mark.parametrize(
-    ("path", "body"),
-    [
-        ("/api/v1/authoring/generate-python", _generate_body()),
-        ("/api/v1/authoring/validate", _validate_body()),
-    ],
-    ids=["generate-python", "validate"],
-)
-@pytest.mark.parametrize(
-    "mode",
-    ["source-only-nonempty", "source-only-graph-mutated"],
-    ids=["nonempty-changeset", "changed-graph"],
-)
-def test_generate_and_validate_require_empty_source_only_changeset_and_same_graph(
-    path: str,
-    body: dict[str, Any],
-    mode: Literal["source-only-nonempty", "source-only-graph-mutated"],
-) -> None:
-    engine = RecordingTransformEngine(mode)
-
-    with TestClient(_transform_app(engine)) as client:
-        response = client.post(path, json=body)
-
-    _assert_sanitized_internal_error(
-        response,
-        "mutated despite source_only",
-        PREPARE_NODE_UUID,
-    )
-    assert len(engine.calls) == 1
-
-
-@pytest.fixture()
-def engine_context(tmp_path: Path) -> Iterator[EngineContext]:
-    with _opened_engine(tmp_path / "workflow.db") as context:
-        yield context
-
-
-def _post(client: TestClient, path: str, body: dict[str, Any]) -> dict[str, Any]:
-    response = client.post(path, json=body)
-    assert response.status_code == 200, response.text
-    return _assert_success_shape(response.json())
-
-
-def _semantic_node_uuids(graph: dict[str, Any]) -> set[str]:
-    return {node["uuid"] for node in graph["nodes"]}
-
-
-def test_real_engine_generate_compile_validate_is_pure_proof_roundtrip(
-    engine_context: EngineContext,
-) -> None:
-    store = engine_context.store
-    persistent_tables = (
-        "workflow",
-        "workflow_node",
-        "workflow_edge",
-        "workflow_authoring",
-        "workflow_task",
-        "workflow_node_job",
-    )
-    before = {table: store.count_rows(table) for table in persistent_tables}
-
-    with TestClient(_transform_app(engine_context.engine)) as client:
-        initial = _post(
-            client, "/api/v1/authoring/compile", _compile_body(python_source=_source())
-        )
-        assert initial["graph"] is not None
-        generated = _post(
-            client,
-            "/api/v1/authoring/generate-python",
-            _generate_body(initial["graph"]),
-        )
-        recompiled = _post(
-            client,
             "/api/v1/authoring/compile",
             _compile_body(
-                python_source=generated["normalized_python_source"],
-                applied_graph=initial["graph"],
+                applied_graph={
+                    **_graph(),
+                    "workflow": {**_graph()["workflow"], "revision": 8},
+                }
             ),
-        )
-        validated = _post(
-            client,
-            "/api/v1/authoring/validate",
-            _validate_body(
-                initial["graph"],
-                python_source=generated["normalized_python_source"],
+        ),
+        (
+            "/api/v1/authoring/generate-python",
+            _generate_body(
+                graph={
+                    **_graph(),
+                    "workflow": {**_graph()["workflow"], "uuid": OTHER_WORKFLOW_UUID},
+                }
             ),
-        )
-
-    assert _semantic_node_uuids(recompiled["graph"]) == _semantic_node_uuids(
-        initial["graph"]
-    )
-    assert PREPARE_NODE_UUID in _semantic_node_uuids(initial["graph"])
-    assert (
-        recompiled["normalized_python_source"] == generated["normalized_python_source"]
-    )
-    assert validated["graph"] == initial["graph"]
-    assert (
-        validated["normalized_python_source"] == generated["normalized_python_source"]
-    )
-    assert recompiled["changeset"]["kind"] == "source_only"
-    assert {table: store.count_rows(table) for table in persistent_tables} == before
-
-
-def _utf16_column(line: str, codepoint_index: int) -> int:
-    """把 Python 的零基 code-point index 独立换算成公开一基 UTF-16 column。"""
-
-    return len(line[:codepoint_index].encode("utf-16-le")) // 2 + 1
-
-
-def _substring_range(line_number: int, line: str, text: str) -> dict[str, int]:
-    start = line.index(text)
-    return {
-        "start_line": line_number,
-        "start_column": _utf16_column(line, start),
-        "end_line": line_number,
-        "end_column": _utf16_column(line, start + len(text)),
-    }
-
-
-def _unicode_semantic_source() -> str:
-    action = f"""    # unilab:node_uuid={PREPARE_NODE_UUID}
-    prepared = reactor.prepare(
-        sample=sample,
-        cycles=cycles,
-        note=note,
-    )"""
-    return _source().replace(action, '    "中😀\t"; invalid = unknown()', 1)
-
-
-def test_engine_diagnostic_uses_utf16_for_chinese_emoji_and_tab(
-    engine_context: EngineContext,
+        ),
+    ],
+    ids=[
+        "workflow-id-alias",
+        "base-revision-alias",
+        "canonical-ir-alias",
+        "boolean-revision",
+        "zero-revision",
+        "nil-workflow-uuid",
+        "blank-source-uri",
+        "non-object-graph",
+        "graph-revision-mismatch",
+        "graph-workflow-mismatch",
+    ],
+)
+def test_noncanonical_request_fails_before_engine(
+    path: str,
+    body: dict[str, Any],
 ) -> None:
-    source = _unicode_semantic_source()
-    line_number = next(
-        index
-        for index, line in enumerate(source.splitlines(), 1)
-        if "invalid = unknown()" in line
-    )
-    line = source.splitlines()[line_number - 1]
+    """未知字段、旧别名、非法身份和图身份分叉必须在引擎前关闭失败。
 
-    result = _compile(engine_context.engine, source)
+    参数：``path`` 与 ``body`` 描述单一非法请求。返回：无；断言业务码 1000。
+    """
 
-    diagnostic = result.diagnostics[0]
-    assert diagnostic["code"] == "invalid_action_call"
-    assert diagnostic["source_range"] == _substring_range(
-        line_number,
-        line,
-        "unknown()",
-    )
-
-
-def test_engine_syntax_range_uses_utf16(
-    engine_context: EngineContext,
-) -> None:
-    syntax_source = 'value = "中😀\t"; )\n'
-    syntax = _compile(engine_context.engine, syntax_source)
-    assert syntax.diagnostics[0]["code"] == "python_syntax_error"
-    assert syntax.diagnostics[0]["source_range"] == {
-        "start_line": 1,
-        "start_column": 17,
-        "end_line": 1,
-        "end_column": 17,
-    }
-
-
-def test_engine_duplicate_anchor_repair_ranges_use_utf16(
-    engine_context: EngineContext,
-) -> None:
-    duplicate_source = (
-        _source()
-        .replace(
-            f"    # unilab:node_uuid={PREPARE_NODE_UUID}",
-            f'    "中😀\t"; # unilab:node_uuid={PREPARE_NODE_UUID}',
-        )
-        .replace(
-            "20000000-0000-4000-8000-000000000002",
-            PREPARE_NODE_UUID,
-        )
-    )
-    duplicate = _compile(engine_context.engine, duplicate_source)
-    diagnostic = duplicate.diagnostics[0]
-    assert diagnostic["code"] == "DUPLICATE_NODE_UUID"
-    occurrences = diagnostic["occurrence_ranges"]
-    assert len(occurrences) == 2
-    for occurrence in occurrences:
-        line_number = occurrence["start_line"]
-        line = duplicate_source.splitlines()[line_number - 1]
-        assert occurrence == _substring_range(
-            line_number,
-            line,
-            f"# unilab:node_uuid={PREPARE_NODE_UUID}",
-        )
-    assert {
-        tuple(repair["retained_range"].values())
-        for repair in diagnostic["repair_alternatives"]
-    } == {tuple(item.values()) for item in occurrences}
-
-
-def test_real_http_source_map_end_is_utf16_end_exclusive(
-    engine_context: EngineContext,
-) -> None:
-    source = _source().replace("note=note,", 'note="中😀\t",', 1)
-
-    with TestClient(_transform_app(engine_context.engine)) as client:
-        data = _post(
-            client,
-            "/api/v1/authoring/compile",
-            _compile_body(python_source=source),
-        )
-
-    normalized = data["normalized_python_source"]
-    entry = next(
-        item
-        for item in data["source_map"]
-        if item["workflow_node_uuid"] == PREPARE_NODE_UUID
-    )
-    end_line = normalized.splitlines()[entry["end_line"] - 1]
-    assert "中😀\\t" in end_line
-    assert entry["start_column"] == 5
-    assert entry["end_column"] == len(end_line.encode("utf-16-le")) // 2 + 1
-
-
-class _ReceiveSpy:
-    def __init__(self, chunks: Sequence[bytes]) -> None:
-        self.chunks = chunks
-        self.calls = 0
-
-    async def __call__(self) -> dict[str, Any]:
-        if self.calls >= len(self.chunks):
-            raise AssertionError("Authoring route 在 body 结束后仍继续 receive")
-        index = self.calls
-        self.calls += 1
-        return {
-            "type": "http.request",
-            "body": self.chunks[index],
-            "more_body": index + 1 < len(self.chunks),
-        }
-
-
-def _invoke_asgi(
-    app: FastAPI,
-    *,
-    body: bytes,
-    content_length: int | None = None,
-) -> tuple[int, dict[str, Any], _ReceiveSpy]:
-    receive = _ReceiveSpy([body])
-    sent: list[dict[str, Any]] = []
-
-    async def send(message: dict[str, Any]) -> None:
-        sent.append(message)
-
-    headers = [(b"content-type", b"application/json")]
-    if content_length is not None:
-        headers.append((b"content-length", str(content_length).encode("ascii")))
-    scope = {
-        "type": "http",
-        "asgi": {"version": "3.0", "spec_version": "2.3"},
-        "http_version": "1.1",
-        "scheme": "http",
-        "method": "POST",
-        "root_path": "",
-        "path": "/api/v1/authoring/compile",
-        "raw_path": b"/api/v1/authoring/compile",
-        "query_string": b"",
-        "headers": headers,
-        "client": ("127.0.0.1", 12345),
-        "server": ("testserver", 80),
-    }
-    asyncio.run(app(scope, receive, send))
-    status = next(
-        message["status"]
-        for message in sent
-        if message["type"] == "http.response.start"
-    )
-    raw = b"".join(
-        message.get("body", b"")
-        for message in sent
-        if message["type"] == "http.response.body"
-    )
-    return status, json.loads(raw), receive
-
-
-def _raw_compile_body(graph: bytes) -> bytes:
-    return (
-        b'{"workflow_uuid":"'
-        + WORKFLOW_UUID.encode("ascii")
-        + b'","revision":7,"python_source":"semantic_error",'
-        b'"source_uri":"package://lab/limits.py","applied_graph":' + graph + b"}"
-    )
-
-
-def test_authoring_body_budget_rejects_declared_oversize_before_receive() -> None:
     engine = RecordingTransformEngine()
-    app = _transform_app(engine)
+    with TestClient(create_authoring_transform_app(engine)) as client:
+        response = client.post(path, json=body)
 
-    status, payload, receive = _invoke_asgi(
-        app,
-        body=_raw_compile_body(b"{}"),
-        content_length=HTTP_BODY_LIMIT + 1,
-    )
-
-    assert status == 400
-    assert payload == INVALID_INPUT
-    assert receive.calls == 0
+    assert response.status_code == 200
+    assert response.json() == INVALID_INPUT
     assert engine.calls == []
 
 
 @pytest.mark.parametrize(
-    ("digits", "expected_status", "expected_calls"),
+    ("mode", "expected"),
     [
-        (EXTERNAL_INTEGER_DIGITS, 200, 1),
-        (EXTERNAL_INTEGER_DIGITS + 1, 400, 0),
+        ("catalog-unavailable", CATALOG_UNAVAILABLE),
+        ("internal-error", INTERNAL_ERROR),
+        ("private-diagnostic", INTERNAL_ERROR),
+        ("private-graph", INTERNAL_ERROR),
+        ("foreign-identity", INTERNAL_ERROR),
     ],
-    ids=["4096-accepted", "4097-rejected"],
 )
-def test_authoring_external_integer_budget(
-    digits: int,
-    expected_status: int,
-    expected_calls: int,
+def test_unavailable_or_illegal_engine_result_is_a_sanitized_business_error(
+    mode: Any,
+    expected: dict[str, Any],
 ) -> None:
+    """目录不可用及内部非法结果必须返回产品业务错误且不泄漏内部字段。
+
+    参数：``mode`` 注入失败类型，``expected`` 是稳定封装。返回：无；断言一次调用。
+    """
+
+    engine = RecordingTransformEngine(mode)
+    with TestClient(create_authoring_transform_app(engine)) as client:
+        response = client.post("/api/v1/authoring/compile", json=_compile_body())
+
+    assert response.status_code == 200
+    assert response.json() == expected
+    assert "secret" not in response.text
+    assert "private" not in response.text
+    assert len(engine.calls) == 1
+
+
+def test_well_formed_diagnostic_remains_success_data() -> None:
+    """确定性编译诊断必须作为 HTTP 200 成功数据返回，而非业务异常。
+
+    参数：无。返回：无；断言诊断结构闭合且没有候选图。
+    """
+
     engine = RecordingTransformEngine("diagnostic")
-    integer = b"1" + b"0" * (digits - 1)
-    body = _raw_compile_body(b'{"external":' + integer + b"}")
+    with TestClient(create_authoring_transform_app(engine)) as client:
+        response = client.post("/api/v1/authoring/compile", json=_compile_body())
 
-    status, payload, _receive = _invoke_asgi(
-        _transform_app(engine),
-        body=body,
-        content_length=len(body),
-    )
-
-    assert status == expected_status
-    assert len(engine.calls) == expected_calls
-    if expected_status == 400:
-        assert payload == INVALID_INPUT
-    else:
-        assert payload["code"] == 0
-        assert payload["data"]["diagnostics"][0]["code"] == "template_catalog_mismatch"
+    data = _assert_success(response.json())
+    assert data["diagnostics"] == [
+        {
+            "severity": "error",
+            "code": "python_syntax_error",
+            "message": "稳定编译诊断",
+        }
+    ]
+    assert data["graph"] is None
+    assert data["changeset"] is None
 
 
 @pytest.mark.parametrize(
-    ("depth", "expected_status", "expected_calls"),
+    ("path", "body", "mode"),
     [
-        (MAX_JSON_DEPTH, 200, 1),
-        (MAX_JSON_DEPTH + 1, 400, 0),
+        ("/api/v1/authoring/generate-python", _generate_body(), "changed-graph"),
+        ("/api/v1/authoring/validate", _validate_body(), "changed-graph"),
+        (
+            "/api/v1/authoring/generate-python",
+            _generate_body(),
+            "nonempty-source-only",
+        ),
+        ("/api/v1/authoring/validate", _validate_body(), "nonempty-source-only"),
     ],
-    ids=["depth-10000-accepted", "depth-10001-rejected"],
 )
-def test_authoring_complete_json_depth_budget(
-    depth: int,
-    expected_status: int,
-    expected_calls: int,
+def test_generate_and_validate_require_exact_graph_and_empty_source_only_changeset(
+    path: str,
+    body: dict[str, Any],
+    mode: Any,
 ) -> None:
-    engine = RecordingTransformEngine("diagnostic")
-    # request root + applied_graph object + arrays == complete document depth.
-    array_depth = depth - 2
-    graph = b'{"deep":' + b"[" * array_depth + b"0" + b"]" * array_depth + b"}"
-    body = _raw_compile_body(graph)
+    """生成与校验不得改变输入图，也不得宣称任何图生命周期变化。
 
-    status, payload, _receive = _invoke_asgi(
-        _transform_app(engine),
-        body=body,
-        content_length=len(body),
-    )
+    参数：路径、请求和非法模式由矩阵提供。返回：无；断言净化后的内部业务错误。
+    """
 
-    assert status == expected_status
-    assert len(engine.calls) == expected_calls
-    if expected_status == 400:
-        assert payload == INVALID_INPUT
-    else:
-        assert payload["code"] == 0
+    engine = RecordingTransformEngine(mode)
+    with TestClient(create_authoring_transform_app(engine)) as client:
+        response = client.post(path, json=body)
+
+    assert response.status_code == 200
+    assert response.json() == INTERNAL_ERROR
+    assert len(engine.calls) == 1

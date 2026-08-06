@@ -1,4 +1,4 @@
-"""Workflow 版本 1 Contract 与严格 JSON 值 Schema。"""
+"""工作流（Workflow）版本 1 合同与严格 JSON 值 Schema。"""
 
 from __future__ import annotations
 
@@ -82,13 +82,13 @@ class WorkflowValueSchema(_CanonicalValue):
 
 
 class WorkflowInputContract(_CanonicalValue):
-    """有序、闭合的版本 1 Workflow Input Contract。"""
+    """有序、闭合的版本 1 工作流输入合同（WorkflowInputContract）。"""
 
     __slots__ = ()
 
 
 class WorkflowOutputContract(_CanonicalValue):
-    """有序、闭合的版本 1 Workflow Output Contract。"""
+    """有序、闭合的版本 1 工作流输出合同（WorkflowOutputContract）。"""
 
     __slots__ = ()
 
@@ -338,17 +338,6 @@ def _parse_nullable(raw: dict[str, Any], *, path: str) -> dict[str, Any]:
 
 
 def _parse_slot(raw: dict[str, Any], *, path: str) -> dict[str, Any]:
-    slot_kind = raw.get("$slot")
-    if slot_kind == "SiteRef":
-        _reject_unknown(
-            raw,
-            {"$slot"},
-            code="invalid_schema",
-            path=path,
-            message=_INVALID_SCHEMA,
-        )
-        return {"$slot": "SiteRef"}
-
     _reject_unknown(
         raw,
         {"$slot", "allowed_resource_template_uuids"},
@@ -356,7 +345,7 @@ def _parse_slot(raw: dict[str, Any], *, path: str) -> dict[str, Any]:
         path=path,
         message=_INVALID_SCHEMA,
     )
-    if slot_kind != "ResourceSlot":
+    if raw["$slot"] != "ResourceSlot":
         _fail("invalid_schema", _pointer(path, "$slot"), _INVALID_SCHEMA)
     result: dict[str, Any] = {"$slot": "ResourceSlot"}
     if "allowed_resource_template_uuids" in raw:
@@ -502,7 +491,7 @@ def _parse_schema_dict(
 
 
 def parse_value_schema(raw: Any) -> WorkflowValueSchema:
-    """校验并规范化一个闭合的 Workflow v1 值 Schema。"""
+    """校验并规范化一个闭合的工作流（Workflow）v1 值 Schema。"""
 
     return WorkflowValueSchema._from_canonical(
         _parse_schema_dict(
@@ -740,7 +729,7 @@ def _parse_contract_envelope(
 
 
 def parse_input_contract(raw: Any) -> WorkflowInputContract:
-    """校验有序、闭合的 Workflow v1 Input Contract。"""
+    """校验有序、闭合的工作流输入合同（WorkflowInputContract）。"""
 
     _, parameters = _parse_contract_envelope(raw, collection_key="parameters")
     normalized: list[dict[str, Any]] = []
@@ -855,7 +844,7 @@ def parse_input_contract(raw: Any) -> WorkflowInputContract:
 
 
 def parse_output_contract(raw: Any) -> WorkflowOutputContract:
-    """校验有序、闭合的 Workflow v1 Output Contract。"""
+    """校验有序、闭合的工作流输出合同（WorkflowOutputContract）。"""
 
     _, outputs = _parse_contract_envelope(raw, collection_key="outputs")
     normalized: list[dict[str, Any]] = []

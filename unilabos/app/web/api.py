@@ -4,39 +4,31 @@ API模块
 提供API路由和处理函数
 """
 
+from fastapi import APIRouter, WebSocket, WebSocketDisconnect
 import asyncio
-import ipaddress
-from collections.abc import Mapping
-from typing import Any, Literal
 
 import yaml
-from fastapi import APIRouter, Request, WebSocket, WebSocketDisconnect
-from fastapi.responses import JSONResponse
-from pydantic import BaseModel, ConfigDict, Field, ValidationError
 
-from unilabos.app.communication import CommunicationClientFactory
-from unilabos.app.device_catalog import build_public_device_catalog
-from unilabos.app.model import (
-    JobAddReq,
-    JobAddResp,
-    JobData,
-    JobStatusResp,
-    Resp,
-    RespCode,
-)
 from unilabos.app.web.controller import (
     devices,
-    get_action_schema,
-    get_all_available_actions,
-    get_device_actions,
-    get_online_devices,
     job_add,
     job_info,
+    get_online_devices,
+    get_device_actions,
+    get_action_schema,
+    get_all_available_actions,
+)
+from unilabos.app.model import (
+    Resp,
+    RespCode,
+    JobStatusResp,
+    JobAddResp,
+    JobAddReq,
+    JobData,
 )
 from unilabos.app.web.utils.host_utils import get_host_node_info
-from unilabos.config.config import BasicConfig
+from unilabos.app.web.device_catalog import project_device_catalog
 from unilabos.registry.registry import lab_registry
-from unilabos.ros.nodes.presets.host_node import HostNode
 from unilabos.utils.type_check import NoAliasDumper
 
 # 创建API路由器
@@ -125,15 +117,14 @@ async def broadcast_status_page_data():
     while True:
         try:
             if status_page_connections:
-                import json
-
-                from unilabos.app.web.utils.device_utils import get_registry_info
                 from unilabos.app.web.utils.host_utils import get_host_node_info
                 from unilabos.app.web.utils.ros_utils import get_ros_node_info
+                from unilabos.app.web.utils.device_utils import get_registry_info
                 from unilabos.config.config import BasicConfig
                 from unilabos.registry.registry import lab_registry
                 from unilabos.ros.msgs.message_converter import msg_converter_manager
                 from unilabos.utils.type_check import TypeEncoder
+                import json
 
                 # 获取当前数据
                 host_node_info = get_host_node_info()
@@ -306,7 +297,7 @@ async def websocket_status_page(websocket: WebSocket):
     try:
         while True:
             # 接收来自客户端的消息（用于保持连接活跃）
-            await websocket.receive_text()
+            message = await websocket.receive_text()
             # 状态页面通常只需要接收数据，不需要发送复杂指令
 
     except WebSocketDisconnect:
@@ -319,13 +310,12 @@ async def websocket_status_page(websocket: WebSocket):
 
 async def handle_file_analysis(websocket: WebSocket, request_data: dict):
     """处理文件分析请求，获取文件中的类列表"""
-    import inspect
     import json
     import os
     import sys
+    import inspect
     import traceback
     from pathlib import Path
-
     from unilabos.config.config import BasicConfig
 
     file_path = request_data.get("file_path")
@@ -457,12 +447,12 @@ async def handle_file_analysis(websocket: WebSocket, request_data: dict):
 
 async def handle_file_content_analysis(websocket: WebSocket, request_data: dict):
     """处理文件内容分析请求，直接分析上传的文件内容"""
-    import inspect
     import json
     import os
     import sys
-    import tempfile
+    import inspect
     import traceback
+    import tempfile
     from pathlib import Path
 
     file_name = request_data.get("file_name")
@@ -615,8 +605,8 @@ async def handle_file_content_import(websocket: WebSocket, request_data: dict):
     import json
     import os
     import sys
-    import tempfile
     import traceback
+    import tempfile
     from pathlib import Path
 
     file_name = request_data.get("file_name")
@@ -714,6 +704,7 @@ async def handle_file_content_import(websocket: WebSocket, request_data: dict):
             await send_error(f"模块中未找到类: {class_name}")
             return
 
+        target_class = getattr(module, class_name)
         await send_log(f"找到目标类: {class_name}")
 
         # 使用registry.py的增强类信息功能进行分析
@@ -869,7 +860,6 @@ async def handle_file_import(websocket: WebSocket, request_data: dict):
     import sys
     import traceback
     from pathlib import Path
-
     from unilabos.config.config import BasicConfig
 
     file_path = request_data.get("file_path")
@@ -1169,7 +1159,6 @@ def get_file_browser_data(path: str = ""):
     """获取文件浏览器数据"""
     import os
     from pathlib import Path
-
     from unilabos.config.config import BasicConfig
 
     try:
@@ -1245,147 +1234,26 @@ def get_resources():
     return Resp(data=dict(data))
 
 
-def _api_success(data: Any) -> JSONResponse:
-    return JSONResponse({"code": 0, "data": data})
+@api.get("/devices", summary="Device list", response_model=Resp)
+def get_devices():
+    """获取设备列表"""
+    isok, data = devices()
+    if not isok:
+        return Resp(code=RespCode.ErrorHostNotInit, message=str(data))
 
-
-def _api_error(status: int, code: str, message: str) -> JSONResponse:
-    return JSONResponse(
-        status_code=status,
-        content={
-            "code": status,
-            "error": {"code": code, "message": message},
-        },
-    )
-
-
-def _device_api_forbidden(request: Request) -> JSONResponse | None:
-    client = request.client
-    if client is None:
-        return _api_error(
-            403,
-            "DEVICE_UNLOCK_FORBIDDEN",
-            "设备控制 Interface 仅允许本机 Edge profile 访问",
-        )
-    try:
-        is_loopback = ipaddress.ip_address(client.host).is_loopback
-    except ValueError:
-        is_loopback = False
-    if (
-        not is_loopback
-        or str(BasicConfig.communication_protocol).lower() != "websocket"
-    ):
-        return _api_error(
-            403,
-            "DEVICE_UNLOCK_FORBIDDEN",
-            "设备控制 Interface 仅允许本机 Edge profile 访问",
-        )
-    return None
-
-
-def _live_device_client() -> Any | None:
-    client = CommunicationClientFactory.current_client()
-    if client is None or not hasattr(client, "device_manager"):
-        return None
-    return client
-
-
-@api.get("/devices", summary="Live device and Action catalog")
-def get_devices(request: Request):
-    """从 live HostNode 与唯一 DeviceActionManager 投影设备目录。"""
-
-    if denied := _device_api_forbidden(request):
-        return denied
-    client = _live_device_client()
-    host_node = HostNode.get_instance(0)
-    if client is None or host_node is None:
-        return _api_error(
-            503,
-            "DEVICE_CATALOG_UNAVAILABLE",
-            "设备 runtime 尚未就绪",
-        )
-    manager = client.device_manager
-    return _api_success(
-        build_public_device_catalog(
-            host_node,
-            machine_name=BasicConfig.machine_name,
-            is_action_busy=manager.is_action_busy,
-            current_action_job_id=manager.current_action_job_id,
-        )
-    )
-
-
-class DeviceActionCommand(BaseModel):
-    model_config = ConfigDict(extra="forbid")
-
-    command: Literal["force_unlock"]
-    expected_job_id: str = Field(alias="expectedJobId", min_length=1)
-    reason: Literal["operator_confirmed_device_safe"]
-
-
-async def command_device_action(
-    device_id: str,
-    action_name: str,
-    request: Request,
-):
-    """操作员确认安全后，以 CAS 释放一个 live Action holder。"""
-
-    if denied := _device_api_forbidden(request):
-        return denied
-    try:
-        body = await request.json()
-        command = DeviceActionCommand.model_validate(body)
-    except (ValidationError, ValueError):
-        return _api_error(
-            422,
-            "INVALID_DEVICE_COMMAND",
-            "command、expectedJobId 或安全确认 reason 不合法",
-        )
-
-    client = _live_device_client()
-    host_node = HostNode.get_instance(0)
-    if client is None or host_node is None:
-        return _api_error(
-            503,
-            "DEVICE_CONTROL_UNAVAILABLE",
-            "设备控制 runtime 尚未就绪",
-        )
-    action_mappings = getattr(host_node, "_action_value_mappings", {})
-    device_actions = (
-        action_mappings.get(device_id, {})
-        if isinstance(action_mappings, Mapping)
+    online_ok, online_data = get_online_devices()
+    online_devices = (
+        online_data.get("online_devices", {})
+        if online_ok and isinstance(online_data, dict)
         else {}
     )
-    if (
-        not isinstance(device_actions, Mapping)
-        or action_name.startswith("_execute_driver_command")
-        or action_name not in device_actions
-    ):
-        return _api_error(
-            404,
-            "DEVICE_ACTION_NOT_FOUND",
-            "设备 Action 不存在",
+    return Resp(
+        data=project_device_catalog(
+            resources=data,
+            registry_devices=lab_registry.obtain_registry_device_info(),
+            online_devices=online_devices,
         )
-    force_unlock = getattr(client, "force_unlock_action", None)
-    if not callable(force_unlock):
-        return _api_error(
-            503,
-            "DEVICE_CONTROL_UNAVAILABLE",
-            "设备控制 runtime 尚未就绪",
-        )
-    result = force_unlock(
-        device_id,
-        action_name,
-        expected_job_id=command.expected_job_id,
-        reason=command.reason,
     )
-    if result.get("status") == "lock_changed":
-        return _api_error(
-            409,
-            "DEVICE_LOCK_CHANGED",
-            "设备 Action 锁持有者已变化，请刷新后重新确认",
-        )
-    return _api_success(result)
 
 
 @api.get("/online-devices", summary="Online devices list", response_model=Resp)
@@ -1479,17 +1347,6 @@ def post_job_add(req: JobAddReq):
 
 def setup_api_routes(app):
     """设置API路由"""
-    if getattr(app.state, "unilabos_api_routes_mounted", False):
-        return
-    app.state.unilabos_api_routes_mounted = True
-    # 危险设备命令直接挂到当前 composition root；不经过已退役的
-    # local bridge，也不在 handler 内构造第二个 communication client。
-    app.add_api_route(
-        "/api/v1/devices/{device_id}/actions/{action_name}/commands",
-        command_device_action,
-        methods=["POST"],
-        tags=["api"],
-    )
     app.include_router(admin, prefix="/admin/v1", tags=["admin"])
     app.include_router(api, prefix="/api/v1", tags=["api"])
 

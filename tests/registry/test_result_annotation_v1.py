@@ -1,4 +1,4 @@
-"""Action 单字段 result annotation 的公共接口合同测试。"""
+"""动作（Action）单字段结果注解（result annotation）的公共接口合同测试。"""
 
 from __future__ import annotations
 

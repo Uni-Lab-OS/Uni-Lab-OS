@@ -5,18 +5,17 @@ Web服务器模块
 """
 
 import webbrowser
-from collections.abc import Callable, Mapping
-from typing import Any
 
 from fastapi import FastAPI, Request
 from fastapi.middleware.cors import CORSMiddleware
 from starlette.responses import Response
 
+from unilabos.utils.fastapi.log_adapter import setup_fastapi_logging
+from unilabos.utils.log import info, error
+from unilabos.utils.tracing import install_http_tracing
 from unilabos.app.web.api import setup_api_routes
 from unilabos.app.web.pages import setup_web_pages
-from unilabos.config.config import BasicConfig, ObservabilityConfig
-from unilabos.utils.fastapi.log_adapter import setup_fastapi_logging
-from unilabos.utils.log import error, info
+from unilabos.config.config import BasicConfig
 
 # 创建FastAPI应用
 app = FastAPI(
@@ -26,12 +25,12 @@ app = FastAPI(
     redoc_url="/api/redoc",
     openapi_url="/api/openapi.json",
 )
+install_http_tracing(app)
 
 # 创建页面路由
 pages = None
 workflow_routes_mounted = False
-observability_routes_mounted = False
-observability_gateway = None
+resource_contract_routes_mounted = False
 
 # noinspection PyTypeChecker
 app.add_middleware(
@@ -39,12 +38,7 @@ app.add_middleware(
     allow_origins=["*"],
     allow_credentials=True,
     allow_methods=["GET", "POST", "PUT", "DELETE", "PATCH", "OPTIONS"],
-    allow_headers=[
-        "Authorization",
-        "Content-Type",
-        "Accept",
-        "Last-Event-ID",
-    ],
+    allow_headers=["Authorization", "Content-Type", "Accept", "Last-Event-ID"],
 )
 
 
@@ -78,22 +72,14 @@ async def log_requests(request: Request, call_next) -> Response:
     return response
 
 
-def setup_server(
-    *,
-    registry_snapshot: Mapping[str, Any] | None = None,
-    resource_registry_snapshot: Mapping[str, Any] | None = None,
-    workflow_job_dispatcher: Any = None,
-    device_identity_resolver: Callable[[str], str | None] | None = None,
-    workflow_package_catalogs: tuple[Any, ...] = (),
-) -> FastAPI:
-    """
-    设置服务器
+def setup_server() -> FastAPI:
+    """装配当前产品配置允许的 Web 路由和本地工作流运行时。
 
-    Returns:
-        FastAPI: 配置好的FastAPI应用实例
+    参数：无。返回：进程唯一 FastAPI 应用；重复调用复用已挂载路由。工作流
+    源码（Workflow Source）授权形状或组合失败时关闭该合同路由，但不阻止无关
+    Edge 路由继续装配，错误写入产品日志。
     """
-    global pages, workflow_routes_mounted
-    global observability_routes_mounted, observability_gateway
+    global pages, resource_contract_routes_mounted, workflow_routes_mounted
 
     # 创建页面路由
     if pages is None:
@@ -102,90 +88,67 @@ def setup_server(
     # 设置API路由
     setup_api_routes(app)
 
-    # Electron 只通过 Uni-Lab-OS 上报和查询 trace；Phoenix 保持 loopback 私有实现。
-    if not observability_routes_mounted:
-        try:
-            from unilabos.app.observability_api import install_observability_api
-            from unilabos.observability.config import ObservabilitySettings
-            from unilabos.observability.gateway import ObservabilityGateway
-
-            observability_settings = ObservabilitySettings.from_runtime_config(
-                BasicConfig,
-                ObservabilityConfig,
-            )
-            observability_gateway = ObservabilityGateway(observability_settings)
-            install_observability_api(app, observability_gateway)
-            observability_routes_mounted = True
-        except Exception as e:  # noqa: BLE001 - 可观测性不阻断设备运行
-            error(f"[Web] 挂载 Phoenix trace 日志路由失败: {e!s}")
-
-    # Backend-shaped Workflow authority 统一拥有本工作区的 workflow.db。
+    # 共享 Workflow Interface 必须先于 Edge-only scheduler adapter 挂载，
+    # /workflows 表示定义，/workflow-tasks 表示运行。
     if not workflow_routes_mounted and BasicConfig.working_dir:
         try:
-            from unilabos.app.workflow_api import (
-                install_composed_workflow_authoring_api,
+            from unilabos.app.workflow_api import install_workflow_api
+            from unilabos.app.scheduler.integration import (
+                get_edge_scheduler,
+                get_inventory_service,
             )
-            from unilabos.workflow.catalog import CatalogAuthority
             from unilabos.workflow.composition import (
+                compose_local_workflow_template_runtime,
                 compose_workflow_runtime,
-                get_device_action_task_service,
             )
 
-            authority = BasicConfig.workflow_graph_authority
-            if not isinstance(authority, CatalogAuthority) or authority.kind != "local":
-                raise TypeError("未配置有效的 Workflow Graph Authority")
-            editable_package_roots = BasicConfig.workflow_editable_package_roots
-            if not isinstance(editable_package_roots, tuple):
-                raise TypeError("Workflow editable package roots 必须是 tuple")
-            workflow_service = compose_workflow_runtime(
-                BasicConfig.working_dir,
-                authority=authority,
-                editable_package_roots=editable_package_roots,
-                registry_snapshot=registry_snapshot,
-                resource_registry_snapshot=resource_registry_snapshot,
-                workflow_job_dispatcher=workflow_job_dispatcher,
-                device_identity_resolver=device_identity_resolver,
-                workflow_package_catalogs=workflow_package_catalogs,
-            )
-            if workflow_service.compiler is None:
-                raise RuntimeError("Workflow Authoring engine 未完成组合")
-            template_catalog = getattr(
-                workflow_service.compiler,
-                "template_catalog",
-                None,
-            )
-            catalog_authority = getattr(
-                workflow_service.compiler,
-                "catalog_authority",
-                None,
-            )
-            from unilabos.app.scheduler.integration import get_edge_scheduler
-
+            # ``template_projection`` 只在本地调度与库存权威同时存在时建立；
+            # Backend-controlled 模式不能在 OS 再创建第二个生产模板写权威。
+            template_projection = None
+            inventory_service = get_inventory_service()
+            # ``edge_scheduler`` 是本地调度权威（Scheduler Authority）；只把同一
+            # 已装配实例交给工作流组合根，禁止重新创建第二个调度器。
             edge_scheduler = get_edge_scheduler()
-            install_composed_workflow_authoring_api(
+            if inventory_service is not None and edge_scheduler is not None:
+                from unilabos.registry.registry import lab_registry
+
+                workflow_service, template_projection = (
+                    compose_local_workflow_template_runtime(
+                        BasicConfig.working_dir,
+                        inventory_store=inventory_service.store,
+                        registry=lab_registry,
+                        scheduler=edge_scheduler,
+                        editable_package_roots=(
+                            BasicConfig.workflow_editable_package_roots
+                        ),
+                    )
+                )
+            else:
+                workflow_service = compose_workflow_runtime(
+                    BasicConfig.working_dir,
+                    editable_package_roots=(
+                        BasicConfig.workflow_editable_package_roots
+                    ),
+                )
+            install_workflow_api(
                 app,
                 workflow_service,
-                workflow_service.compiler,
-                template_catalog=template_catalog,
-                catalog_authority=catalog_authority,
-                device_action_tasks=get_device_action_task_service(),
-                task_admission_coordinator=(
-                    edge_scheduler.reconcile_task_admission
-                    if edge_scheduler is not None
-                    else None
-                ),
+                template_snapshot_provider=template_projection,
+                authoring_transform=workflow_service.compiler,
             )
             workflow_routes_mounted = True
-        except Exception as e:  # noqa: BLE001 - keep unrelated web surfaces alive
-            error(f"[Web] 挂载 Workflow authority 路由失败: {e!s}")
+        except Exception as e:  # noqa: BLE001 - unrelated Edge routes remain available
+            error(f"[Web] 挂载 Backend Workflow 合同失败: {str(e)}")
 
-    # Edge 调度器/仓储路由（--edge_scheduler 未启用时端点返回 503/不挂载）
+    # Edge 调度器与 Host 物料路由独立挂载；默认 embedded 物料服务不要求 --edge_scheduler。
     try:
         from unilabos.app.scheduler.api import create_scheduler_router
         from unilabos.app.scheduler.integration import (
             get_edge_backend,
             get_edge_scheduler,
             get_inventory_service,
+            get_material_model_catalog,
+            get_material_shapes,
         )
 
         app.include_router(
@@ -197,41 +160,45 @@ def setup_server(
         )
         inventory_service = get_inventory_service()
         if inventory_service is not None:
+            from unilabos.app.scheduler.inventory.backend_api import (
+                install_backend_resource_api,
+            )
+            from unilabos.app.scheduler.inventory.backend_contract import (
+                BackendResourceService,
+            )
             from unilabos.app.scheduler.inventory.api import (
-                create_backend_material_router,
+                create_legacy_material_router,
                 create_router as create_inventory_router,
             )
             from unilabos.app.scheduler.inventory.layout import create_lab_router
 
+            if not resource_contract_routes_mounted:
+                install_backend_resource_api(
+                    app,
+                    BackendResourceService(inventory_service.store),
+                    material_shapes=get_material_shapes(),
+                    material_model_catalog=get_material_model_catalog(),
+                )
+                resource_contract_routes_mounted = True
             app.include_router(create_inventory_router(inventory_service))
-            app.include_router(create_backend_material_router(inventory_service))
+            app.include_router(create_legacy_material_router(inventory_service))
             app.include_router(create_lab_router(inventory_service))
     except Exception as e:  # noqa: BLE001 - 调度器路由挂载失败不影响主服务
-        error(f"[Web] 挂载 Edge 调度器路由失败: {e!s}")
+        error(f"[Web] 挂载 Edge 调度器路由失败: {str(e)}")
 
     # 设置页面路由
     try:
         setup_web_pages(pages)
         # info("[Web] 已加载Web UI模块")
     except ImportError as e:
-        info(f"[Web] 未找到Web页面模块: {e!s}")
-    except Exception as e:  # noqa: BLE001 - 页面装配错误不阻断 API
-        error(f"[Web] 加载Web页面模块时出错: {e!s}")
+        info(f"[Web] 未找到Web页面模块: {str(e)}")
+    except Exception as e:
+        error(f"[Web] 加载Web页面模块时出错: {str(e)}")
 
     return app
 
 
-def start_server(
-    host: str = "0.0.0.0",
-    port: int = 8002,
-    open_browser: bool = True,
-    *,
-    registry_snapshot: Mapping[str, Any] | None = None,
-    resource_registry_snapshot: Mapping[str, Any] | None = None,
-    workflow_job_dispatcher: Any = None,
-    device_identity_resolver: Callable[[str], str | None] | None = None,
-    workflow_package_catalogs: tuple[Any, ...] = (),
-) -> bool:
+def start_server(host: str = "0.0.0.0", port: int = 8002, open_browser: bool = True) -> bool:
     """
     启动服务器
 
@@ -245,17 +212,10 @@ def start_server(
     """
     import threading
     import time
-
     from uvicorn import Config, Server
 
     # 设置服务器
-    setup_server(
-        registry_snapshot=registry_snapshot,
-        resource_registry_snapshot=resource_registry_snapshot,
-        workflow_job_dispatcher=workflow_job_dispatcher,
-        device_identity_resolver=device_identity_resolver,
-        workflow_package_catalogs=workflow_package_catalogs,
-    )
+    setup_server()
 
     # 配置日志
     log_config = setup_fastapi_logging()
@@ -267,8 +227,8 @@ def start_server(
         info(f"[Web] 正在打开浏览器访问: {url}")
         try:
             webbrowser.open(url)
-        except Exception as e:  # noqa: BLE001 - 浏览器启动失败不阻断服务
-            error(f"[Web] 无法打开浏览器: {e!s}")
+        except Exception as e:
+            error(f"[Web] 无法打开浏览器: {str(e)}")
 
     # 启动服务器
     info(f"[Web] 启动FastAPI服务器: {host}:{port}")
@@ -278,9 +238,7 @@ def start_server(
     server = Server(config)
 
     # 启动服务器线程
-    server_thread = threading.Thread(
-        target=server.run, daemon=True, name="uvicorn_server"
-    )
+    server_thread = threading.Thread(target=server.run, daemon=True, name="uvicorn_server")
     server_thread.start()
 
     # info("[Web] Server started, monitoring for restart requests...")
@@ -289,12 +247,10 @@ def start_server(
     import unilabos.app.main as main_module
 
     while server_thread.is_alive():
-        if (
-            hasattr(main_module, "_restart_requested")
-            and main_module._restart_requested
-        ):
-            restart_reason = getattr(main_module, "_restart_reason", "unknown")
-            info(f"[Web] Restart requested via WebSocket, reason: {restart_reason}")
+        if hasattr(main_module, "_restart_requested") and main_module._restart_requested:
+            info(
+                f"[Web] Restart requested via WebSocket, reason: {getattr(main_module, '_restart_reason', 'unknown')}"
+            )
             main_module._restart_requested = False
 
             # 停止服务器

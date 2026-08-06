@@ -27,9 +27,9 @@ _FIELD = "pydantic:Field"
 _JSON_VALUE = "unilabos.registry.annotations:JSONValue"
 _LIST = "typing:List"
 _LITERAL = "typing:Literal"
+_MATERIAL_LOCK = "unilabos.registry.annotations:MaterialLock"
 _OPTIONAL = "typing:Optional"
 _RESOURCE_SLOT = "unilabos.registry.placeholder_type:ResourceSlot"
-_SITE_REF = "unilabos.registry.placeholder_type:SiteRef"
 _RESOURCE_TEMPLATES = "unilabos.registry.annotations:AllowedResourceTemplates"
 _ERROR_MESSAGE = "参数注解不符合 Workflow 版本 1 合同"
 _AUTHORING_INTEGER_DIGITS = 4096
@@ -60,6 +60,7 @@ class ParsedParameter:
 
     _contract: WorkflowInputContract
     resource_templates: tuple[ResourceTemplateSymbol, ...]
+    material_lock_free: bool
 
     def __new__(cls, *_args: Any, **_kwargs: Any) -> Never:
         raise TypeError("请通过 parse_parameter_annotation 创建 ParsedParameter")
@@ -69,6 +70,7 @@ class ParsedParameter:
         cls,
         contract: WorkflowInputContract,
         resource_templates: tuple[ResourceTemplateSymbol, ...],
+        material_lock_free: bool,
         *,
         token: object,
     ) -> Self:
@@ -81,6 +83,7 @@ class ParsedParameter:
             "resource_templates",
             resource_templates,
         )
+        object.__setattr__(parameter, "material_lock_free", material_lock_free)
         return parameter
 
     def to_dict(self) -> dict[str, Any]:
@@ -285,8 +288,6 @@ def _parse_type(
 
     if _is_import(node, _RESOURCE_SLOT, imports):
         return {"$slot": "ResourceSlot"}
-    if _is_import(node, _SITE_REF, imports):
-        return {"$slot": "SiteRef"}
 
     if not isinstance(node, ast.Subscript):
         _fail(path)
@@ -335,14 +336,11 @@ def _schema_base(schema: dict[str, Any]) -> dict[str, Any]:
     return schema
 
 
-def _resource_slot_shape(schema: dict[str, Any]) -> bool:
+def _slot_shape(schema: dict[str, Any]) -> bool:
     base = _schema_base(schema)
-    if base.get("$slot") == "ResourceSlot":
+    if "$slot" in base:
         return True
-    return (
-        base.get("type") == "array"
-        and base.get("items", {}).get("$slot") == "ResourceSlot"
-    )
+    return base.get("type") == "array" and "$slot" in base.get("items", {})
 
 
 def _trim_presentation(value: Any, *, path: str) -> str:
@@ -440,7 +438,7 @@ def _parse_resource_templates(
     *,
     path: str,
 ) -> tuple[ResourceTemplateSymbol, ...]:
-    if not _resource_slot_shape(schema) or not call.args or call.keywords:
+    if not _slot_shape(schema) or not call.args or call.keywords:
         _fail(path)
     symbols: list[ResourceTemplateSymbol] = []
     local_names: set[str] = set()
@@ -465,14 +463,36 @@ def _parse_resource_templates(
     return tuple(symbols)
 
 
+def _parse_material_lock(
+    call: ast.Call,
+    schema: dict[str, Any],
+    *,
+    path: str,
+) -> bool:
+    """解析动作输入物料锁（Material Lock）的唯一显式免锁形式。"""
+
+    if not _slot_shape(schema) or call.args or len(call.keywords) != 1:
+        _fail(path)
+    keyword = call.keywords[0]
+    if keyword.arg != "free":
+        _fail(path)
+    free = _literal_value(keyword.value, path=f"{path}/free")
+    if free is not True:
+        _fail(f"{path}/free")
+    return True
+
+
 def _parse_annotation(
     annotation: ast.expr,
     imports: Mapping[str, str],
+    *,
+    allow_material_lock: bool,
 ) -> tuple[
     dict[str, Any],
     str | None,
     str | None,
     tuple[ResourceTemplateSymbol, ...],
+    bool,
 ]:
     metadata: list[ast.expr] = []
     type_node = annotation
@@ -493,7 +513,9 @@ def _parse_annotation(
     description = None
     templates: tuple[ResourceTemplateSymbol, ...] = ()
     field_seen = False
+    material_lock_seen = False
     templates_seen = False
+    material_lock_free = False
     for index, item in enumerate(metadata):
         path = f"/annotation/metadata/{index}"
         if not isinstance(item, ast.Call):
@@ -513,9 +535,14 @@ def _parse_annotation(
                 imports,
                 path=path,
             )
+        elif allow_material_lock and _is_import(item.func, _MATERIAL_LOCK, imports):
+            if material_lock_seen:
+                _fail(path)
+            material_lock_seen = True
+            material_lock_free = _parse_material_lock(item, schema, path=path)
         else:
             _fail(path)
-    return schema, title, description, templates
+    return schema, title, description, templates, material_lock_free
 
 
 def _optional_presentation(value: str | None, *, path: str) -> str | None:
@@ -539,6 +566,7 @@ def parse_parameter_annotation(
     imports: Mapping[str, str],
     doc_title: str | None = None,
     doc_description: str | None = None,
+    allow_material_lock: bool = False,
 ) -> ParsedParameter:
     """把一个源码参数静态解析为 canonical v1 contract。"""
 
@@ -547,9 +575,12 @@ def parse_parameter_annotation(
     if not isinstance(imports, Mapping):
         _fail("/imports")
 
-    schema, field_title, field_description, templates = _parse_annotation(
-        annotation,
-        imports,
+    schema, field_title, field_description, templates, material_lock_free = (
+        _parse_annotation(
+            annotation,
+            imports,
+            allow_material_lock=allow_material_lock,
+        )
     )
     title = field_title or _optional_presentation(
         doc_title,
@@ -581,6 +612,7 @@ def parse_parameter_annotation(
     return ParsedParameter._from_canonical(
         contract,
         templates,
+        material_lock_free,
         token=_PARSED_PARAMETER_TOKEN,
     )
 
@@ -598,9 +630,10 @@ def parse_result_annotation(
     if not isinstance(imports, Mapping):
         _fail("/imports")
 
-    schema, title, description, templates = _parse_annotation(
+    schema, title, description, templates, _material_lock_free = _parse_annotation(
         annotation,
         imports,
+        allow_material_lock=False,
     )
     descriptor: dict[str, Any] = {
         "name": name,
@@ -635,7 +668,7 @@ def _render_schema(schema: dict[str, Any]) -> ast.expr:
             right=_constant(None),
         )
     if "$slot" in schema:
-        return ast.Name(id=str(schema["$slot"]), ctx=ast.Load())
+        return ast.Name(id="ResourceSlot", ctx=ast.Load())
     kind = schema["type"]
     if "enum" in schema:
         values = [_constant(value) for value in schema["enum"]]
@@ -688,6 +721,14 @@ def _render_templates(
     )
 
 
+def _render_material_lock_free() -> ast.Call:
+    return ast.Call(
+        func=ast.Name(id="MaterialLock", ctx=ast.Load()),
+        args=[],
+        keywords=[ast.keyword(arg="free", value=_constant(True))],
+    )
+
+
 def _field_keywords(descriptor: dict[str, Any]) -> list[ast.keyword]:
     keywords: list[ast.keyword] = []
     if "title" in descriptor:
@@ -728,6 +769,8 @@ def render_parameter_annotation(parameter: ParsedParameter) -> ast.expr:
     metadata: list[ast.expr] = []
     if parameter.resource_templates:
         metadata.append(_render_templates(parameter.resource_templates))
+    if parameter.material_lock_free:
+        metadata.append(_render_material_lock_free())
     field_keywords = _field_keywords(descriptor)
     if field_keywords:
         metadata.append(

@@ -35,23 +35,8 @@ from rclpy.callback_groups import ReentrantCallbackGroup
 from rclpy.service import Service
 from unilabos_msgs.action import SendCmd, StrSingleInput
 from unilabos_msgs.srv._serial_command import SerialCommand_Request, SerialCommand_Response
-from unique_identifier_msgs.msg import UUID as RosUUID
 
 from unilabos.config.config import BasicConfig
-from unilabos.observability import runtime as runtime_tracing
-from unilabos.observability.runtime import (
-    ROS_GOAL_UUID_KEY,
-    TRACE_CONTEXT_KEY,
-    TRACE_CONTEXT_SERVICE_SUFFIX,
-    attach_workflow_execution_identity,
-    capture_workflow_execution_identity,
-    decode_job_trace_context,
-    encode_job_trace_context,
-    fail_open_span,
-    normalize_trace_context,
-    safe_capture_context,
-    safe_submit,
-)
 from unilabos.registry.decorators import get_topic_config
 from unilabos.registry.action_policy import (
     ActionDecisionOutcome,
@@ -100,6 +85,19 @@ from unilabos.ros.utils.driver_creator import WorkstationNodeCreator, PyLabRobot
 from rclpy.task import Task, Future
 from unilabos.utils.import_manager import default_manager
 from unilabos.utils.log import info, debug, warning, error, critical, logger, trace
+from unilabos.utils.tracing import (
+    add_event,
+    attach_workflow_execution_identity,
+    await_with_context,
+    capture_context,
+    extract_trace_context,
+    inject_trace_context,
+    record_exception,
+    set_error,
+    span,
+    start_detached_span,
+    submit_with_context,
+)
 from unilabos.utils.type_check import get_type_class, TypeEncoder, get_result_info_str
 from unilabos.utils.exception import DeviceActionError
 
@@ -107,33 +105,85 @@ if TYPE_CHECKING:
     from pylabrobot.resources import Resource as ResourcePLR
 
 T = TypeVar("T")
-_JOB_CONTEXT_TTL_SECONDS = 60.0
-_MAX_PENDING_JOB_CONTEXTS = 2048
-_WORKFLOW_NODE_JOB_UUID_PARAM = "workflow_node_job_uuid"
-_WORKFLOW_TASK_UUID_PARAM = "workflow_task_uuid"
 
 
-def _is_resource_slot_annotation(annotation: Any) -> bool:
-    """Accept both workspace-short and canonical ResourceSlot type identities."""
+def _resource_lookup_identity(
+    resource_data: Dict[str, Any],
+) -> Optional[Tuple[str, str]]:
+    """Return a backend lookup identity, or None for an empty ROS placeholder."""
 
-    return isinstance(annotation, str) and (
-        annotation == "ResourceSlot" or annotation.endswith(":ResourceSlot")
+    nested_data = resource_data.get("data")
+    unilabos_uuid = (
+        str(nested_data.get("unilabos_uuid") or "").strip()
+        if isinstance(nested_data, dict)
+        else ""
+    )
+    if unilabos_uuid:
+        return "uuid", unilabos_uuid
+    resource_id = str(resource_data.get("id") or "").strip()
+    if resource_id:
+        return "id", resource_id
+    return None
+
+
+def _is_blank_resource_placeholder(value: Any) -> bool:
+    return isinstance(value, dict) and _resource_lookup_identity(value) is None
+
+
+def _stable_resource_uuid(value: Any) -> str:
+    """读取 PLR 实例或资源接口原始映射中的稳定 UUID。"""
+
+    if isinstance(value, dict):
+        return str(value.get("uuid") or value.get("unilabos_uuid") or value.get("id") or "")
+    return str(
+        getattr(value, "unilabos_uuid", None)
+        or getattr(value, "uuid", None)
+        or getattr(value, "id", None)
+        or ""
     )
 
 
-def _resource_slot_uuid(value: Any) -> str | None:
-    """Return the inventory UUID from either ResourceSlot wire shape.
+def _device_root_mapping(tree: Any) -> Optional[Dict[str, Any]]:
+    """保留会被 PLR 默认投影跳过的设备型资源根。"""
 
-    Inventory references use ``uuid``.  A ResourceSlot returned by a ROS
-    device action is serialized from the PLR instance and therefore carries
-    ``unilabos_uuid`` instead.  Both shapes identify the same inventory
-    resource and must be accepted when the value is wired into a downstream
-    ResourceSlot parameter.
-    """
-
-    if not isinstance(value, dict):
+    content = tree.root_node.res_content
+    resource_type = content.get("type") if isinstance(content, dict) else getattr(content, "type", None)
+    if str(getattr(resource_type, "value", resource_type)).casefold() != "device":
         return None
-    return value.get("uuid") or value.get("unilabos_uuid")
+    if isinstance(content, dict):
+        return dict(content)
+    model_dump = getattr(content, "model_dump", None)
+    if callable(model_dump):
+        return dict(model_dump(by_alias=True))
+    return None
+
+
+def _is_resource_slot_arg_type(arg_type: Any) -> bool:
+    """识别普通或 Annotated 包装的物料占位符（ResourceSlot）参数。"""
+
+    if not isinstance(arg_type, str):
+        return False
+    normalized = arg_type.strip()
+    for prefix in ("Annotated[", "typing.Annotated["):
+        if normalized.startswith(prefix):
+            normalized = normalized[len(prefix) :].split(",", 1)[0].strip()
+            break
+    return normalized == "ResourceSlot" or normalized.endswith(":ResourceSlot")
+
+
+def _native_driver_result_failed(
+    action_name: str, action_type: Any, value: Any
+) -> bool:
+    """原生 ROS Action 的 bool/dict success 是业务成功位；JSON Command 可返回 bool 数据。"""
+
+    type_name = str(getattr(action_type, "__name__", ""))
+    if action_name.startswith("_execute_driver_command") or type_name.startswith(
+        "UniLabJsonCommand"
+    ):
+        return False
+    if value is False:
+        return True
+    return isinstance(value, dict) and value.get("success") is False
 
 
 class RclpyAsyncMutex:
@@ -510,8 +560,6 @@ class BaseROS2DeviceNode(Node, Generic[T]):
         self._cross_device_action_clients: Dict[str, ActionClient] = {}
         # 跨设备动作类型探测缓存（key: "<clean_device_id>/<function_name>"，value: 原生 Action 类型或 None）
         self._remote_action_type_cache: Dict[str, Any] = {}
-        self._trace_context_clients: Dict[str, Client] = {}
-        self._trace_context_clients_lock = threading.Lock()
         # HostNode 在发送 goal 前按 job UUID 注入上下文；action server 消费后立即删除。
         self._job_contexts: Dict[str, Dict[str, Any]] = {}
         self._job_contexts_lock = threading.Lock()
@@ -807,12 +855,6 @@ class BaseROS2DeviceNode(Node, Generic[T]):
                 self.s2c_device_manage,  # type: ignore
                 callback_group=self.callback_group,
             ),
-            TRACE_CONTEXT_SERVICE_SUFFIX: self.create_service(
-                SerialCommand,
-                f"/srv{self.namespace}/{TRACE_CONTEXT_SERVICE_SUFFIX}",
-                self._register_trace_context_service,
-                callback_group=self.callback_group,
-            ),
         }
 
         # 向全局在线设备注册表添加设备信息
@@ -853,7 +895,7 @@ class BaseROS2DeviceNode(Node, Generic[T]):
     def _hostlink_get_nodes(
         self, uuid: Optional[str] = None, res_id: Optional[str] = None, with_children: bool = True
     ) -> Optional[List[Dict[str, Any]]]:
-        """HostLink TCP 通路查询物料（云端物料已下线，事实源在 host 本地树）。
+        """HostLink TCP 通路查询 Host 持有的物料数据库服务。
 
         通路不可用/查询失败返回 None，由调用方回退旧 ROS service 链路——
         host-slave 去 ROS 化过渡期的双通道策略：TCP 优先、ROS 兜底。
@@ -880,7 +922,7 @@ class BaseROS2DeviceNode(Node, Generic[T]):
         Returns:
             ResourceTreeSet: 资源树集合
         """
-        # TCP 优先：HostLink 在线时逐 uuid 向 host 查询本地树
+        # TCP 优先：HostLink 在线时逐 uuid 向 host 的物料服务查询
         link_nodes: Optional[List[Dict[str, Any]]] = None
         if resources_uuid:
             collected: List[Dict[str, Any]] = []
@@ -922,7 +964,7 @@ class BaseROS2DeviceNode(Node, Generic[T]):
         Returns:
             ResourcePLR: PLR资源实例
         """
-        # TCP 优先：HostLink 在线时直接查 host 本地树
+        # TCP 优先：HostLink 在线时直接查 host 的物料服务
         raw_data = self._hostlink_get_nodes(res_id=resource_id, with_children=with_children)
         if raw_data is None:
             r = SerialCommand.Request()
@@ -1418,14 +1460,14 @@ class BaseROS2DeviceNode(Node, Generic[T]):
         uids = []
         target_uids = []
         for plr_resource in plr_resources:
-            uid = getattr(plr_resource, "unilabos_uuid", None)
-            if uid is None:
-                raise ValueError(f"来源物料{plr_resource}没有unilabos_uuid属性，无法转运")
+            uid = _stable_resource_uuid(plr_resource)
+            if not uid:
+                raise ValueError(f"来源物料{plr_resource}没有稳定 UUID，无法转运")
             uids.append(uid)
         for target_resource in target_resources:
-            uid = getattr(target_resource, "unilabos_uuid", None)
-            if uid is None:
-                raise ValueError(f"目标物料{target_resource}没有unilabos_uuid属性，无法转运")
+            uid = _stable_resource_uuid(target_resource)
+            if not uid:
+                raise ValueError(f"目标物料{target_resource}没有稳定 UUID，无法转运")
             target_uids.append(uid)
         _ns = target_device_id if target_device_id.startswith("/devices/") else f"/devices/{target_device_id.lstrip('/')}"
         srv_address = f"/srv{_ns}/s2c_resource_tree"
@@ -1534,10 +1576,8 @@ class BaseROS2DeviceNode(Node, Generic[T]):
         is_async_command: bool,
         sample_uuids: Optional[Dict[str, str]],
         action_type: Optional[Any] = None,
-        trace_context: Optional[Dict[str, str]] = None,
-        workflow_identity: Optional[Dict[str, str]] = None,
-    ) -> Tuple[str, ActionClient, Any, bool]:
-        """构造 ``(action_id, client, goal, is_native)`` 跨设备调用。
+    ) -> Tuple[str, ActionClient, Any]:
+        """构造跨设备动作调用的 ``(action_id, action_client, goal_msg)``。
 
         ``action_kwargs`` 必须是 **dict**（``None`` 视为 ``{}``）；序列化由本函数内部完成，
         调用方不要自己 ``json.dumps``。
@@ -1574,7 +1614,7 @@ class BaseROS2DeviceNode(Node, Generic[T]):
             if client is None:
                 client = ActionClient(self, action_type, action_id, callback_group=self.callback_group)
                 self._cross_device_action_clients[action_id] = client
-            return action_id, client, goal, True
+            return action_id, client, goal
 
         # serial JSON 指令通道（unilabos command）：入参 json dumps 到 string 字段
         suffix = "_execute_driver_command_async" if is_async_command else "_execute_driver_command"
@@ -1585,13 +1625,6 @@ class BaseROS2DeviceNode(Node, Generic[T]):
             "function_args": action_kwargs,
             JSON_UNILABOS_PARAM: {
                 PARAM_SAMPLE_UUIDS: sample_uuids or {},
-                TRACE_CONTEXT_KEY: normalize_trace_context(trace_context),
-                _WORKFLOW_NODE_JOB_UUID_PARAM: (workflow_identity or {}).get(
-                    "node_job_uuid", ""
-                ),
-                _WORKFLOW_TASK_UUID_PARAM: (workflow_identity or {}).get(
-                    "task_uuid", ""
-                ),
             },
         }
         goal = convert_to_ros_msg(
@@ -1603,7 +1636,7 @@ class BaseROS2DeviceNode(Node, Generic[T]):
         if client is None:
             client = ActionClient(self, StrSingleInput, action_id, callback_group=self.callback_group)
             self._cross_device_action_clients[action_id] = client
-        return action_id, client, goal, False
+        return action_id, client, goal
 
     def _parse_action_result(self, device_id: str, action_name: str, result_msg) -> Any:
         """把动作结果消息解析成 python 值/字典（两通道统一，与 host_node.get_result_callback 一致）。
@@ -1700,64 +1733,17 @@ class BaseROS2DeviceNode(Node, Generic[T]):
         Raises:
             DeviceActionError: 服务不可用 / 目标被拒绝 / 超时 / 远端执行失败 / 结果解析失败。
         """
-        parent_trace_context = safe_capture_context(runtime_tracing)
-        workflow_identity = capture_workflow_execution_identity()
-        with fail_open_span(
-            runtime_tracing,
-            "ros2.action.send_goal",
-            parent=parent_trace_context,
-            attributes={
-                "device.id": device_id,
-                "device.action.name": action_name,
-            },
-        ):
-            trace_context = (
-                safe_capture_context(runtime_tracing) or parent_trace_context
+        action_id, client, goal = self._build_action_call(
+            device_id, action_name, action_kwargs, is_async_command, sample_uuids, action_type
+        )
+        if not client.wait_for_server(timeout_sec=server_wait_timeout):
+            raise DeviceActionError(
+                device_id, action_name, f"动作服务 {action_id} 不可用（等待 {server_wait_timeout}s 超时）"
             )
-            action_id, client, goal, is_native = self._build_action_call(
-                device_id,
-                action_name,
-                action_kwargs,
-                is_async_command,
-                sample_uuids,
-                action_type,
-                trace_context,
-                workflow_identity,
-            )
-            if not client.wait_for_server(timeout_sec=server_wait_timeout):
-                raise DeviceActionError(
-                    device_id,
-                    action_name,
-                    f"动作服务 {action_id} 不可用（等待 {server_wait_timeout}s 超时）",
-                )
-            nested_goal_uuid = uuid.uuid4() if is_native else None
-            if nested_goal_uuid is not None:
-                self._register_remote_action_trace_context(
-                    device_id=device_id,
-                    ros_goal_uuid=str(nested_goal_uuid),
-                    node_job_uuid=workflow_identity.get("node_job_uuid", ""),
-                    task_uuid=workflow_identity.get("task_uuid", ""),
-                    action_name=action_name,
-                    trace_context=trace_context,
-                )
 
-            self.lab_logger().debug(
-                f"[call_device_action] -> {action_id}, args={str(action_kwargs)[:500]}"
-            )
-            send_kwargs = {}
-            if nested_goal_uuid is not None:
-                send_kwargs["goal_uuid"] = RosUUID(
-                    uuid=list(nested_goal_uuid.bytes)
-                )
-            send_future = client.send_goal_async(goal, **send_kwargs)
-            self._wait_future_blocking(
-                send_future,
-                timeout,
-                device_id,
-                action_name,
-                "发送目标",
-                poll_interval,
-            )
+        self.lab_logger().debug(f"[call_device_action] -> {action_id}, args={str(action_kwargs)[:500]}")
+        send_future = client.send_goal_async(goal)
+        self._wait_future_blocking(send_future, timeout, device_id, action_name, "发送目标", poll_interval)
         goal_handle = send_future.result()
         if goal_handle is None or not goal_handle.accepted:
             raise DeviceActionError(device_id, action_name, "目标被拒绝", rejected=True)
@@ -1787,63 +1773,21 @@ class BaseROS2DeviceNode(Node, Generic[T]):
         Raises:
             DeviceActionError: 服务不可用 / 目标被拒绝 / 远端执行失败 / 结果解析失败。
         """
-        parent_trace_context = safe_capture_context(runtime_tracing)
-        workflow_identity = capture_workflow_execution_identity()
-        with fail_open_span(
-            runtime_tracing,
-            "ros2.action.send_goal",
-            parent=parent_trace_context,
-            attributes={
-                "device.id": device_id,
-                "device.action.name": action_name,
-            },
-        ):
-            trace_context = (
-                safe_capture_context(runtime_tracing) or parent_trace_context
-            )
-            action_id, client, goal, is_native = self._build_action_call(
-                device_id,
-                action_name,
-                action_kwargs,
-                is_async_command,
-                sample_uuids,
-                action_type,
-                trace_context,
-                workflow_identity,
-            )
+        action_id, client, goal = self._build_action_call(
+            device_id, action_name, action_kwargs, is_async_command, sample_uuids, action_type
+        )
 
-            waited = 0.0
-            while not client.server_is_ready():
-                if waited >= server_wait_timeout:
-                    raise DeviceActionError(
-                        device_id,
-                        action_name,
-                        f"动作服务 {action_id} 不可用（等待 {server_wait_timeout}s 超时）",
-                    )
-                await self.sleep(0.1)
-                waited += 0.1
-
-            nested_goal_uuid = uuid.uuid4() if is_native else None
-            if nested_goal_uuid is not None:
-                await self._register_remote_action_trace_context_async(
-                    device_id=device_id,
-                    ros_goal_uuid=str(nested_goal_uuid),
-                    node_job_uuid=workflow_identity.get("node_job_uuid", ""),
-                    task_uuid=workflow_identity.get("task_uuid", ""),
-                    action_name=action_name,
-                    trace_context=trace_context,
+        waited = 0.0
+        while not client.server_is_ready():
+            if waited >= server_wait_timeout:
+                raise DeviceActionError(
+                    device_id, action_name, f"动作服务 {action_id} 不可用（等待 {server_wait_timeout}s 超时）"
                 )
+            await self.sleep(0.1)
+            waited += 0.1
 
-            self.lab_logger().debug(
-                f"[call_device_action_async] -> {action_id}, "
-                f"args={str(action_kwargs)[:500]}"
-            )
-            send_kwargs = {}
-            if nested_goal_uuid is not None:
-                send_kwargs["goal_uuid"] = RosUUID(
-                    uuid=list(nested_goal_uuid.bytes)
-                )
-            goal_handle = await client.send_goal_async(goal, **send_kwargs)
+        self.lab_logger().debug(f"[call_device_action_async] -> {action_id}, args={str(action_kwargs)[:500]}")
+        goal_handle = await client.send_goal_async(goal)
         if goal_handle is None or not goal_handle.accepted:
             raise DeviceActionError(device_id, action_name, "目标被拒绝", rejected=True)
 
@@ -2247,279 +2191,35 @@ class BaseROS2DeviceNode(Node, Generic[T]):
         task_id: str,
         action_name: str,
         trace_context: Optional[Dict[str, str]] = None,
-        *,
-        ros_goal_uuid: Optional[str] = None,
     ) -> None:
-        """按 ROS goal UUID 登记其 Workflow 身份和 trace carrier。"""
+        """Register HostNode context before the ROS goal with UUID=job_id is sent."""
 
-        if not (job_id or ros_goal_uuid):
+        if not job_id:
             return
-        try:
-            context_key = str(uuid.UUID(ros_goal_uuid or job_id))
-        except (AttributeError, TypeError, ValueError):
-            context_key = str(ros_goal_uuid or job_id)
         with self._job_contexts_lock:
-            self._job_contexts[context_key] = {
+            context: Dict[str, Any] = {
                 "job_id": job_id,
-                ROS_GOAL_UUID_KEY: context_key,
                 "task_id": task_id,
                 "action_name": action_name,
-                TRACE_CONTEXT_KEY: normalize_trace_context(trace_context),
-                "registered_at": time.monotonic(),
             }
-            self._prune_job_contexts_locked()
+            if trace_context:
+                context["trace_context"] = dict(trace_context)
+            self._job_contexts[job_id] = context
 
-    def _get_trace_context_client(self, device_id: str):
-        clean_device_id = device_id.strip("/")
-        if clean_device_id.startswith("devices/"):
-            clean_device_id = clean_device_id[len("devices/") :]
-        service_name = (
-            f"/srv/devices/{clean_device_id}/{TRACE_CONTEXT_SERVICE_SUFFIX}"
-        )
-        clients = getattr(self, "_trace_context_clients", None)
-        if clients is None:
-            clients = {}
-            self._trace_context_clients = clients
-        clients_lock = getattr(self, "_trace_context_clients_lock", None)
-        if clients_lock is None:
-            clients_lock = threading.Lock()
-            self._trace_context_clients_lock = clients_lock
-        with clients_lock:
-            client = clients.get(service_name)
-            if client is None:
-                client = self.create_client(
-                    SerialCommand,
-                    service_name,
-                    callback_group=self.callback_group,
-                )
-                clients[service_name] = client
-        return service_name, client
-
-    @staticmethod
-    def _build_trace_context_request(
-        *,
-        ros_goal_uuid: str,
-        node_job_uuid: str,
-        task_uuid: str,
-        action_name: str,
-        trace_context: Optional[Dict[str, str]],
-    ) -> SerialCommand_Request:
-        request = SerialCommand.Request()
-        request.command = encode_job_trace_context(
-            ros_goal_uuid=ros_goal_uuid,
-            node_job_uuid=node_job_uuid,
-            task_uuid=task_uuid,
-            action_name=action_name,
-            trace_context=trace_context,
-        )
-        return request
-
-    def _register_remote_action_trace_context(
-        self,
-        *,
-        device_id: str,
-        ros_goal_uuid: str,
-        node_job_uuid: str,
-        task_uuid: str,
-        action_name: str,
-        trace_context: Optional[Dict[str, str]],
-    ) -> bool:
-        """同步驱动调用原生 Action 前登记 carrier；失败不影响业务 goal。"""
-
-        carrier = normalize_trace_context(trace_context)
-        if not carrier:
-            return False
-        service_name, client = BaseROS2DeviceNode._get_trace_context_client(
-            self, device_id
-        )
-        try:
-            if not client.wait_for_service(timeout_sec=0.05):
-                return False
-            request = BaseROS2DeviceNode._build_trace_context_request(
-                ros_goal_uuid=ros_goal_uuid,
-                node_job_uuid=node_job_uuid,
-                task_uuid=task_uuid,
-                action_name=action_name,
-                trace_context=carrier,
-            )
-            future = client.call_async(request)
-            deadline = time.monotonic() + 0.5
-            while not future.done() and time.monotonic() < deadline:
-                time.sleep(0.005)
-            if not future.done():
-                future.cancel()
-                return False
-            response = json.loads(future.result().response)
-            return bool(response.get("accepted"))
-        except Exception as exc:  # noqa: BLE001 - trace 旁路不得阻断动作
-            self.lab_logger().warning(
-                f"Trace context registration failed for {service_name}: "
-                f"{type(exc).__name__}"
-            )
-            return False
-
-    async def _register_remote_action_trace_context_async(
-        self,
-        *,
-        device_id: str,
-        ros_goal_uuid: str,
-        node_job_uuid: str,
-        task_uuid: str,
-        action_name: str,
-        trace_context: Optional[Dict[str, str]],
-    ) -> bool:
-        """异步驱动调用的非阻塞 trace side-channel。"""
-
-        carrier = normalize_trace_context(trace_context)
-        if not carrier:
-            return False
-        service_name, client = BaseROS2DeviceNode._get_trace_context_client(
-            self, device_id
-        )
-        try:
-            discovery_deadline = time.monotonic() + 0.05
-            while (
-                not client.service_is_ready()
-                and time.monotonic() < discovery_deadline
-            ):
-                await self.sleep(0.005)
-            if not client.service_is_ready():
-                return False
-            request = BaseROS2DeviceNode._build_trace_context_request(
-                ros_goal_uuid=ros_goal_uuid,
-                node_job_uuid=node_job_uuid,
-                task_uuid=task_uuid,
-                action_name=action_name,
-                trace_context=carrier,
-            )
-            future = client.call_async(request)
-            deadline = time.monotonic() + 0.5
-            while not future.done() and time.monotonic() < deadline:
-                await self.sleep(0.005)
-            if not future.done():
-                future.cancel()
-                return False
-            response = json.loads(future.result().response)
-            return bool(response.get("accepted"))
-        except Exception as exc:  # noqa: BLE001 - trace 旁路不得阻断动作
-            self.lab_logger().warning(
-                f"Trace context registration failed for {service_name}: "
-                f"{type(exc).__name__}"
-            )
-            return False
-
-    def _prune_job_contexts_locked(self) -> None:
-        now = time.monotonic()
-        stale_job_ids = [
-            job_id
-            for job_id, context in self._job_contexts.items()
-            if now - float(context.get("registered_at", now))
-            > _JOB_CONTEXT_TTL_SECONDS
-        ]
-        for job_id in stale_job_ids:
-            self._job_contexts.pop(job_id, None)
-        overflow = len(self._job_contexts) - _MAX_PENDING_JOB_CONTEXTS
-        if overflow > 0:
-            oldest = sorted(
-                self._job_contexts,
-                key=lambda job_id: float(
-                    self._job_contexts[job_id].get("registered_at", 0.0)
-                ),
-            )
-            for job_id in oldest[:overflow]:
-                self._job_contexts.pop(job_id, None)
-
-    def _register_trace_context_service(
-        self,
-        request: SerialCommand_Request,
-        response: SerialCommand_Response,
-    ) -> SerialCommand_Response:
-        """在原生 ROS Action goal 到达前登记其 W3C parent context。"""
-
-        try:
-            payload = decode_job_trace_context(request.command)
-            self.register_job_context(
-                payload["node_job_uuid"],
-                payload["task_uuid"],
-                payload["action_name"],
-                trace_context=payload[TRACE_CONTEXT_KEY],
-                ros_goal_uuid=payload[ROS_GOAL_UUID_KEY],
-            )
-            response.response = json.dumps({"accepted": True})
-        except Exception as exc:  # noqa: BLE001 - 无效 trace 不影响后续业务 goal
-            self.lab_logger().warning(
-                f"拒绝无效 trace context：{type(exc).__name__}"
-            )
-            response.response = json.dumps(
-                {"accepted": False, "error": "invalid_trace_context"}
-            )
-        return response
-
-    def _consume_job_context(
-        self,
-        goal_handle: ServerGoalHandle,
-        action_name: str,
-    ) -> Dict[str, Any]:
+    def _consume_job_context(self, goal_handle: ServerGoalHandle, action_name: str) -> Dict[str, Any]:
         job_id = ""
         try:
             job_id = str(uuid.UUID(bytes=bytes(goal_handle.goal_id.uuid)))
         except (AttributeError, TypeError, ValueError):
             pass
         with self._job_contexts_lock:
-            self._prune_job_contexts_locked()
             context = self._job_contexts.pop(job_id, {}) if job_id else {}
-        system_parameters = self._system_parameters_from_goal_request(goal_handle)
-        trace_context = normalize_trace_context(context.get(TRACE_CONTEXT_KEY))
-        if not trace_context:
-            trace_context = normalize_trace_context(
-                system_parameters.get(TRACE_CONTEXT_KEY)
-            )
-        workflow_job_id = (
-            context.get("job_id", "")
-            if context
-            else system_parameters.get(_WORKFLOW_NODE_JOB_UUID_PARAM, "")
-            or job_id
-        )
         return {
-            "job_id": workflow_job_id,
-            "task_id": context.get("task_id")
-            or system_parameters.get(_WORKFLOW_TASK_UUID_PARAM, ""),
+            "job_id": context.get("job_id", job_id),
+            "task_id": context.get("task_id", ""),
             "action_name": context.get("action_name", action_name),
-            ROS_GOAL_UUID_KEY: job_id,
-            TRACE_CONTEXT_KEY: trace_context,
+            "trace_context": context.get("trace_context") or {},
         }
-
-    @staticmethod
-    def _trace_context_from_goal_request(
-        goal_handle: ServerGoalHandle,
-    ) -> Dict[str, str]:
-        """从 UniLabJsonCommand 的系统参数中读取远端 W3C carrier。"""
-
-        return normalize_trace_context(
-            BaseROS2DeviceNode._system_parameters_from_goal_request(
-                goal_handle
-            ).get(TRACE_CONTEXT_KEY)
-        )
-
-    @staticmethod
-    def _system_parameters_from_goal_request(
-        goal_handle: ServerGoalHandle,
-    ) -> Dict[str, Any]:
-        """读取 UniLabJsonCommand 的受控系统参数。"""
-
-        command = getattr(getattr(goal_handle, "request", None), "string", None)
-        if not isinstance(command, str) or not command.startswith("{"):
-            return {}
-        try:
-            payload = json.loads(command)
-        except (TypeError, ValueError):
-            return {}
-        if not isinstance(payload, dict):
-            return {}
-        system_parameters = payload.get(JSON_UNILABOS_PARAM)
-        if not isinstance(system_parameters, dict):
-            return {}
-        return system_parameters
 
     def _resolve_runtime_error_policy(
         self,
@@ -2619,7 +2319,7 @@ class BaseROS2DeviceNode(Node, Generic[T]):
         self,
         exc: BaseException,
         action_name: str,
-        context: Dict[str, str],
+        context: Dict[str, Any],
         options: List[Dict[str, Any]],
         timeout_seconds: float,
         default_on_timeout: str,
@@ -2648,6 +2348,17 @@ class BaseROS2DeviceNode(Node, Generic[T]):
             "options": options,
             "require_confirmation": True,
         }
+        inject_trace_context(report)
+        add_event(
+            "action.decision.requested",
+            {
+                "action.decision.id": decision_id,
+                "workflow.job.uuid": context.get("job_id", ""),
+                "device.name": self.device_id,
+                "action.name": action_name,
+                "exception.type": type(exc).__name__,
+            },
+        )
         sent = self._publish_error_decision_report(report)
         if not sent:
             with self._pending_action_error_decisions_lock:
@@ -2659,6 +2370,13 @@ class BaseROS2DeviceNode(Node, Generic[T]):
             while not pending["event"].is_set():
                 remaining = deadline - time.monotonic()
                 if remaining <= 0:
+                    add_event(
+                        "action.decision.timeout",
+                        {
+                            "action.decision.id": decision_id,
+                            "action.decision.default": default_on_timeout,
+                        },
+                    )
                     return {
                         "decision_id": decision_id,
                         "job_id": context.get("job_id", ""),
@@ -2692,7 +2410,7 @@ class BaseROS2DeviceNode(Node, Generic[T]):
         initial_exc: BaseException,
         retry_action,
         action_name: str,
-        context: Dict[str, str],
+        context: Dict[str, Any],
         policy: Dict[str, Any],
     ) -> ActionDecisionOutcome:
         """Resolve an action exception through retry, skip, or operator intervention."""
@@ -2702,6 +2420,21 @@ class BaseROS2DeviceNode(Node, Generic[T]):
         max_retries = int(policy.get("max_retries", 3))
         timeout_seconds = float(policy.get("decision_timeout_seconds", 300.0))
         default_on_timeout = str(policy.get("default_on_decision_timeout", "abort"))
+        add_event(
+            "exception",
+            {
+                "exception.type": type(initial_exc).__name__,
+                "exception.message": str(initial_exc),
+                "exception.stacktrace": "".join(
+                    traceback.format_exception(
+                        type(initial_exc),
+                        initial_exc,
+                        initial_exc.__traceback__,
+                    )
+                ),
+                "exception.escaped": False,
+            },
+        )
         while True:
             options = resolve_error_options(policy, exc)
             if not options:
@@ -2729,18 +2462,66 @@ class BaseROS2DeviceNode(Node, Generic[T]):
                 if retries >= max_retries:
                     raise RuntimeError(f"action {action_name} exceeded {max_retries} retries") from exc
                 retries += 1
+                add_event(
+                    "action.retry",
+                    {
+                        "action.name": action_name,
+                        "action.retry.count": retries,
+                        "action.retry.max": max_retries,
+                    },
+                )
                 try:
-                    return ActionDecisionOutcome(await retry_action(), SUCCESS_TYPE_NORMAL)
+                    result = await retry_action()
+                    add_event(
+                        "action.retry.succeeded",
+                        {
+                            "action.name": action_name,
+                            "action.retry.count": retries,
+                        },
+                    )
+                    return ActionDecisionOutcome(result, SUCCESS_TYPE_NORMAL)
                 except Exception as retry_exc:
+                    add_event(
+                        "exception",
+                        {
+                            "exception.type": type(retry_exc).__name__,
+                            "exception.message": str(retry_exc),
+                            "exception.stacktrace": "".join(
+                                traceback.format_exception(
+                                    type(retry_exc),
+                                    retry_exc,
+                                    retry_exc.__traceback__,
+                                )
+                            ),
+                            "exception.escaped": False,
+                            "action.retry.count": retries,
+                        },
+                    )
                     exc = retry_exc
                     continue
             if selected == "skip":
+                add_event(
+                    "action.skipped",
+                    {"action.name": action_name, "action.retry.count": retries},
+                )
                 return ActionDecisionOutcome(
                     decision.get("result", decision.get("return_value")),
                     SUCCESS_TYPE_SKIP,
                 )
             if selected == "abort":
+                add_event(
+                    "action.aborted",
+                    {"action.name": action_name, "action.retry.count": retries},
+                )
                 raise exc
+            add_event(
+                "action.operator_intervention",
+                {
+                    "action.name": action_name,
+                    "action.retry.count": retries,
+                    "action.decision": selected,
+                },
+            )
             return ActionDecisionOutcome(
                 self._approved_result_value(decision),
                 SUCCESS_TYPE_OPERATOR_INTERVENTION,
@@ -2749,13 +2530,12 @@ class BaseROS2DeviceNode(Node, Generic[T]):
     def _create_execute_callback(self, action_name, action_value_mapping):
         """创建动作执行回调函数"""
 
-        async def _execute_callback_body(
-            goal_handle: ServerGoalHandle,
-            job_context: Dict[str, Any],
-            driver_parent_context: Dict[str, str],
+        async def _execute_callback_impl(
+            goal_handle: ServerGoalHandle, job_context: Dict[str, Any]
         ):
             # 初始化结果信息变量
             execution_error = ""
+            execution_exception: Optional[BaseException] = None
             execution_success = False
             action_return_value = None
             execution_suc_type = SUCCESS_TYPE_NORMAL
@@ -2792,47 +2572,11 @@ class BaseROS2DeviceNode(Node, Generic[T]):
                 action_kwargs,
             )
 
-            driver_trace_attributes = {
-                "workflow.node_job.uuid": job_context.get("job_id", ""),
-                "workflow.task.uuid": job_context.get("task_id", ""),
-                "device.id": getattr(self, "device_id", ""),
-                "device.action.name": job_context.get("action_name", action_name),
-                "driver.method.name": getattr(ACTION, "__name__", action_name),
-            }
-
-            def _run_sync_action():
-                with attach_workflow_execution_identity(
-                    job_context.get("job_id", ""),
-                    job_context.get("task_id", ""),
-                ):
-                    with fail_open_span(
-                        runtime_tracing,
-                        "device.driver.execute",
-                        parent=driver_parent_context,
-                        attributes=driver_trace_attributes,
-                    ):
-                        return ACTION(**action_kwargs)
-
-            async def _run_async_action():
-                with attach_workflow_execution_identity(
-                    job_context.get("job_id", ""),
-                    job_context.get("task_id", ""),
-                ):
-                    with fail_open_span(
-                        runtime_tracing,
-                        "device.driver.execute",
-                        parent=driver_parent_context,
-                        attributes=driver_trace_attributes,
-                    ):
-                        return await ACTION(**action_kwargs)
-
             async def _retry_action_once():
                 if asyncio.iscoroutinefunction(ACTION):
-                    return await _run_async_action()
-                retry_future = safe_submit(
-                    runtime_tracing,
-                    self._executor,
-                    _run_sync_action,
+                    return await ACTION(**action_kwargs)
+                retry_future = submit_with_context(
+                    self._executor, ACTION, **action_kwargs
                 )
                 while not retry_future.done():
                     await self.sleep(0.02)
@@ -2854,18 +2598,21 @@ class BaseROS2DeviceNode(Node, Generic[T]):
                             queried_resources: list = [None] * len(resource_inputs)
                             uuid_indices: list[tuple[int, str, dict]] = []  # (index, uuid, resource_data)
 
-                            # 第一遍：处理没有uuid的资源，收集有uuid的资源信息
+                            # 第一遍：空 Resource 是 ROS 为可选参数生成的占位符，
+                            # 保留原值交给驱动，不能拿空 id 请求后端。
                             for idx, resource_data in enumerate(resource_inputs):
-                                unilabos_uuid = resource_data.get("data", {}).get("unilabos_uuid")
-                                if unilabos_uuid is None:
+                                identity = _resource_lookup_identity(resource_data)
+                                if identity is None:
+                                    queried_resources[idx] = resource_data
+                                elif identity[0] == "id":
                                     plr_resource = await self.get_resource_with_dir(
-                                        resource_id=resource_data["id"], with_children=True
+                                        resource_id=identity[1], with_children=True
                                     )
                                     if "sample_id" in resource_data:
                                         plr_resource.unilabos_extra[EXTRA_SAMPLE_UUID] = resource_data["sample_id"]
                                     queried_resources[idx] = plr_resource
                                 else:
-                                    uuid_indices.append((idx, unilabos_uuid, resource_data))
+                                    uuid_indices.append((idx, identity[1], resource_data))
 
                             # 第二遍：批量查询有uuid的资源
                             if uuid_indices:
@@ -2883,20 +2630,24 @@ class BaseROS2DeviceNode(Node, Generic[T]):
                             # 通过资源跟踪器获取本地实例
                             final_resources = queried_resources if is_sequence else queried_resources[0]
                             if not is_sequence:
-                                plr = self.resource_tracker.figure_resource(
-                                    {"name": final_resources.name}, try_mode=False
-                                )
-                                # 保留unilabos_extra
-                                if hasattr(final_resources, "unilabos_extra") and hasattr(plr, "unilabos_extra"):
-                                    plr.unilabos_extra = getattr(final_resources, "unilabos_extra", {}).copy()
-                                final_resources = plr
+                                if not isinstance(final_resources, dict):
+                                    plr = self.resource_tracker.figure_resource(
+                                        {"name": final_resources.name}, try_mode=False
+                                    )
+                                    # 保留unilabos_extra
+                                    if hasattr(final_resources, "unilabos_extra") and hasattr(plr, "unilabos_extra"):
+                                        plr.unilabos_extra = getattr(final_resources, "unilabos_extra", {}).copy()
+                                    final_resources = plr
                             else:
                                 new_resources = []
                                 for res in queried_resources:
-                                    plr = self.resource_tracker.figure_resource({"name": res.name}, try_mode=False)
-                                    if hasattr(res, "unilabos_extra") and hasattr(plr, "unilabos_extra"):
-                                        plr.unilabos_extra = getattr(res, "unilabos_extra", {}).copy()
-                                    new_resources.append(plr)
+                                    if isinstance(res, dict):
+                                        new_resources.append(res)
+                                    else:
+                                        plr = self.resource_tracker.figure_resource({"name": res.name}, try_mode=False)
+                                        if hasattr(res, "unilabos_extra") and hasattr(plr, "unilabos_extra"):
+                                            plr.unilabos_extra = getattr(res, "unilabos_extra", {}).copy()
+                                        new_resources.append(plr)
                                 final_resources = new_resources
                             action_kwargs[k] = final_resources
 
@@ -2904,6 +2655,7 @@ class BaseROS2DeviceNode(Node, Generic[T]):
                             self.lab_logger().error(f"{action_name} 物料实例获取失败: {e}\n{traceback.format_exc()}")
                             error_skip = True
                             execution_error = traceback.format_exc()
+                            execution_exception = e
                             break
 
             time_start = time.time()
@@ -2916,14 +2668,15 @@ class BaseROS2DeviceNode(Node, Generic[T]):
                         self.lab_logger().trace(f"异步执行动作 {ACTION}")
 
                         def _handle_future_exception(fut: Future):
-                            nonlocal execution_error, execution_success, action_return_value
+                            nonlocal execution_error, execution_exception, execution_success, action_return_value
                             try:
                                 action_return_value = fut.result()
                                 if isinstance(action_return_value, BaseException):
                                     raise action_return_value
                                 execution_success = True
-                            except Exception as _:
+                            except Exception as exc:
                                 execution_error = traceback.format_exc()
+                                execution_exception = exc
                                 error(
                                     f"异步任务 {ACTION.__name__} 报错了\n{traceback.format_exc()}\n原始输入：{str(action_kwargs)[:1000]}"
                                 )
@@ -2931,30 +2684,27 @@ class BaseROS2DeviceNode(Node, Generic[T]):
                                     f"异步任务 {ACTION.__name__} 报错了\n{traceback.format_exc()}\n原始输入：{action_kwargs}"
                                 )
 
-                        future = ROS2DeviceNode.run_async_func(
-                            _run_async_action,
-                            trace_error=False,
-                        )
+                        future = ROS2DeviceNode.run_async_func(ACTION, trace_error=False, **action_kwargs)
                         future.add_done_callback(_handle_future_exception)
                     except Exception as e:
                         execution_error = traceback.format_exc()
+                        execution_exception = e
                         execution_success = False
                         self.lab_logger().error(f"创建异步任务失败: {traceback.format_exc()}")
                 else:
                     self.lab_logger().trace(f"同步执行动作 {ACTION}")
-                    future = safe_submit(
-                        runtime_tracing,
-                        self._executor,
-                        _run_sync_action,
+                    future = submit_with_context(
+                        self._executor, ACTION, **action_kwargs
                     )
 
                     def _handle_future_exception(fut: Future):
-                        nonlocal execution_error, execution_success, action_return_value
+                        nonlocal execution_error, execution_exception, execution_success, action_return_value
                         try:
                             action_return_value = fut.result()
                             execution_success = True
-                        except Exception as _:
+                        except Exception as exc:
                             execution_error = traceback.format_exc()
+                            execution_exception = exc
                             error(
                                 f"同步任务 {ACTION.__name__} 报错了\n{traceback.format_exc()}\n原始输入：{str(action_kwargs)[:1000]}"
                             )
@@ -3036,17 +2786,16 @@ class BaseROS2DeviceNode(Node, Generic[T]):
                         execution_error = "".join(execution_error)
                     execution_success = False
                     action_return_value = _raw_result
+                    execution_exception = _raw_result
                 elif not execution_error:
-                    execution_success = True
                     action_return_value = _raw_result
-                    if (
-                        isinstance(_raw_result, dict)
-                        and _raw_result.get("success") is False
-                    ):
-                        execution_success = False
-                        execution_error = str(
-                            _raw_result.get("message")
-                            or "设备动作返回 success=false"
+                    execution_success = not _native_driver_result_failed(
+                        action_name, action_type, _raw_result
+                    )
+                    if not execution_success:
+                        execution_error = (
+                            "driver returned an unsuccessful native action result: "
+                            f"{_raw_result!r}"
                         )
 
                 if isinstance(_raw_result, BaseException) and error_policy:
@@ -3061,6 +2810,7 @@ class BaseROS2DeviceNode(Node, Generic[T]):
                         action_return_value = decision_outcome.value
                         execution_suc_type = decision_outcome.suc_type
                         execution_error = ""
+                        execution_exception = None
                         execution_success = True
                     except Exception as resolved_exc:
                         execution_error = "".join(
@@ -3071,6 +2821,7 @@ class BaseROS2DeviceNode(Node, Generic[T]):
                             )
                         )
                         action_return_value = resolved_exc
+                        execution_exception = resolved_exc
                         execution_success = False
 
             # 清理 feedback timer
@@ -3096,6 +2847,16 @@ class BaseROS2DeviceNode(Node, Generic[T]):
                     self.lab_logger().info(f"更新资源状态: {k}")
                     # 仅当action_kwargs[k]不为None时尝试转换
                     akv = action_kwargs[k]  # 已经是完成转换的物料了
+                    if _is_blank_resource_placeholder(akv):
+                        continue
+                    if isinstance(akv, list):
+                        akv = [
+                            item
+                            for item in akv
+                            if not _is_blank_resource_placeholder(item)
+                        ]
+                        if not akv:
+                            continue
                     apv = action_paramtypes[k]
                     final_type = get_type_class(apv)
                     if final_type is None:
@@ -3158,37 +2919,61 @@ class BaseROS2DeviceNode(Node, Generic[T]):
                         ),
                     )
 
+            if execution_error:
+                if execution_exception is not None:
+                    record_exception(execution_exception)
+                else:
+                    add_event(
+                        "exception",
+                        {
+                            "exception.type": "ActionExecutionError",
+                            "exception.message": "action execution failed",
+                            "exception.stacktrace": execution_error,
+                            "exception.escaped": True,
+                        },
+                    )
+                    set_error("action execution failed")
+            else:
+                add_event(
+                    "action.completed",
+                    {
+                        "action.name": action_name,
+                        "action.success": execution_success,
+                        "action.success.type": execution_suc_type,
+                    },
+                )
             self.lab_logger().trace(f"动作 {action_name} 完成并返回结果")
             return result_msg
 
         async def execute_callback(goal_handle: ServerGoalHandle):
             job_context = self._consume_job_context(goal_handle, action_name)
-            parent_trace_context = normalize_trace_context(
-                job_context.get(TRACE_CONTEXT_KEY)
-            )
-            driver_parent_context = parent_trace_context
-            with fail_open_span(
-                runtime_tracing,
-                "ros2.action.execute",
-                parent=parent_trace_context,
+            parent = extract_trace_context(job_context)
+            action_span = start_detached_span(
+                "action.execute",
+                kind="consumer",
+                parent_context=parent,
                 attributes={
-                    "workflow.node_job.uuid": job_context.get("job_id", ""),
+                    "workflow.job.uuid": job_context.get("job_id", ""),
                     "workflow.task.uuid": job_context.get("task_id", ""),
-                    "device.id": getattr(self, "device_id", ""),
-                    "device.action.name": job_context.get(
-                        "action_name", action_name
-                    ),
-                    "ros.goal.uuid": job_context.get(ROS_GOAL_UUID_KEY, ""),
+                    "device.name": self.device_id,
+                    "action.name": job_context.get("action_name", action_name),
                 },
-            ):
-                captured_context = safe_capture_context(runtime_tracing)
-                if captured_context:
-                    driver_parent_context = captured_context
-                return await _execute_callback_body(
-                    goal_handle,
-                    job_context,
-                    driver_parent_context,
-                )
+            )
+            try:
+                with attach_workflow_execution_identity(
+                    job_context.get("job_id", ""),
+                    job_context.get("task_id", ""),
+                ):
+                    contextual_awaitable = await_with_context(
+                        action_span.context,
+                        _execute_callback_impl(goal_handle, job_context),
+                    )
+                return await contextual_awaitable
+            except BaseException as exc:
+                action_span.fail(exc)
+                raise
+            finally:
+                action_span.end()
 
         return execute_callback
 
@@ -3242,14 +3027,19 @@ class BaseROS2DeviceNode(Node, Generic[T]):
                 # 处理单个 ResourceSlot（单物料两种入参形态：
                 #   dict = 资源引用，按 uuid 重新 with_children 拉取；
                 #   list = 一棵树的扁平节点组（上游 handle 的 @flatten），就地装配成一个物料）
-                if _is_resource_slot_annotation(arg_type):
+                if _is_resource_slot_arg_type(arg_type):
                     # 内部解析层：raw 值可能是 list（@flatten 节点组）或 dict（资源引用）
                     resource_data: ResourceSlotRawInput = function_args[arg_name]
                     try:
                         if isinstance(resource_data, list):
                             function_args[arg_name] = self._assemble_single_resource(resource_data)
-                        elif resource_uuid := _resource_slot_uuid(resource_data):
-                            function_args[arg_name] = self._convert_resources_sync(resource_uuid)[0]
+                        elif isinstance(resource_data, dict) and (
+                            "uuid" in resource_data or "unilabos_uuid" in resource_data
+                        ):
+                            resource_uuid = resource_data.get("uuid") or resource_data.get(
+                                "unilabos_uuid"
+                            )
+                            function_args[arg_name] = self._convert_resources_sync(str(resource_uuid))[0]
                     except Exception as e:
                         self.lab_logger().error(
                             f"转换ResourceSlot参数 {arg_name} 失败: {e}\n{traceback.format_exc()}"
@@ -3258,14 +3048,19 @@ class BaseROS2DeviceNode(Node, Generic[T]):
 
                 # 处理 ResourceSlot 列表
                 elif isinstance(arg_type, tuple) and len(arg_type) == 2:
-                    if arg_type[0] == "list" and _is_resource_slot_annotation(arg_type[1]):
+                    resource_slot_types = {
+                        "ResourceSlot",
+                        "unilabos.registry.placeholder_type:ResourceSlot",
+                    }
+                    if arg_type[0] == "list" and arg_type[1] in resource_slot_types:
                         resource_list = function_args[arg_name]
                         if isinstance(resource_list, list):
                             try:
                                 uuids = [
-                                    resource_uuid
+                                    str(r.get("uuid") or r.get("unilabos_uuid"))
                                     for r in resource_list
-                                    if (resource_uuid := _resource_slot_uuid(r))
+                                    if isinstance(r, dict)
+                                    and (r.get("uuid") or r.get("unilabos_uuid"))
                                 ]
                                 function_args[arg_name] = self._convert_resources_sync(*uuids) if uuids else []
                             except Exception as e:
@@ -3330,24 +3125,70 @@ class BaseROS2DeviceNode(Node, Generic[T]):
         plr_resources = tree_set.to_plr_resources()
 
         # 通过资源跟踪器获取本地实例
-        figured_resources: List[ResourcePLR] = []
-        for plr_resource, tree in zip(plr_resources, tree_set.trees):
+        figured_resources: List[Any] = []
+        resolved_roots: List[tuple[Any, Any]] = []
+        plr_by_uuid = {
+            _stable_resource_uuid(plr_resource): plr_resource
+            for plr_resource in plr_resources
+            if _stable_resource_uuid(plr_resource)
+        }
+        for tree in tree_set.trees:
+            root_content = tree.root_node.res_content
+            plr_resource = plr_by_uuid.get(_stable_resource_uuid(root_content))
+            if plr_resource is None:
+                device_root = _device_root_mapping(tree)
+                if device_root is None:
+                    raise ValueError(f"资源树根未生成 PLR 实例: {root_content}")
+                figured_resources.append(device_root)
+                resolved_roots.append((device_root, device_root))
+                continue
             res = self.resource_tracker.figure_resource(plr_resource, try_mode=True)
             if len(res) == 0:
                 self.lab_logger().warning(f"资源转换未能索引到实例: {tree.root_node.res_content}，返回新建实例")
-                figured_resources.append(plr_resource)
+                resolved_resource = plr_resource
             elif len(res) == 1:
-                figured_resources.append(res[0])
+                resolved_resource = res[0]
             else:
                 raise ValueError(f"资源转换得到多个实例: {res}")
+            figured_resources.append(resolved_resource)
+            resolved_roots.append((plr_resource, resolved_resource))
 
         mapped_plr_resources = []
         for uuid in uuids_list:
             found = None
             for plr_resource in figured_resources:
+                if _stable_resource_uuid(plr_resource) == uuid:
+                    found = plr_resource
+                    break
                 r = self.resource_tracker.loop_find_with_uuid(plr_resource, uuid)
                 if r is not None:
                     found = r
+                    break
+            if found is None:
+                # EdgeScheduler 返回库存稳定 UUID；设备资源跟踪器可能把同一根资源
+                # 解析为图中的运行时 UUID。保留查询根与本地根的成对关系，避免稳定
+                # 身份在 ``figure_resource`` 后消失。
+                for source_root, resolved_root in resolved_roots:
+                    if _stable_resource_uuid(source_root) == uuid:
+                        found = resolved_root
+                        break
+                    source_match = self.resource_tracker.loop_find_with_uuid(
+                        source_root, uuid
+                    )
+                    if source_match is None:
+                        continue
+                    if source_match is source_root:
+                        found = resolved_root
+                        break
+                    local_matches = self.resource_tracker.figure_resource(
+                        source_match, try_mode=True
+                    )
+                    if len(local_matches) == 1:
+                        found = local_matches[0]
+                        break
+                    if len(local_matches) > 1:
+                        raise ValueError(f"资源转换得到多个实例: {local_matches}")
+                    found = source_match
                     break
             if found is None:
                 raise Exception(f"未能在已解析的资源树中找到 uuid={uuid} 对应的资源")
@@ -3355,40 +3196,16 @@ class BaseROS2DeviceNode(Node, Generic[T]):
 
         return mapped_plr_resources
 
-    def _assemble_single_resource(
-        self,
-        raw_nodes: List[Dict[str, Any]] | List[List[Dict[str, Any]]],
-    ) -> "ResourcePLR":
-        """把单树 wire payload 装配成「单个物料」。
+    def _assemble_single_resource(self, raw_nodes: List[Dict[str, Any]]) -> "ResourcePLR":
+        """把一组扁平节点 dict 装配成「单个物料」（单 ResourceSlot 的 list 输入形态）。
 
-        接受上游 handle 的扁平 ``[node, ...]``，也接受 action 输出使用的
-        ``ResourceTreeSet.dump()`` 单树形态 ``[[node, ...]]``。两者都必须
-        **恰好一棵树、一个根**；多树或混合层级视为非法。
+        list 输入形态：通常来自上游 handle 的 `xxx.@flatten`（一棵树的扁平节点列表，root + children），
+        必须**恰好一个根** → 装配成一个物料；多根视为非法（一组必须变成一个物料）。
         与 dict 形态（按 uuid 重新 with_children 拉取）相对：此处直接就地装配，不回服务端拉取。
         """
         if not raw_nodes:
             raise ValueError("单物料 list 输入为空")
-
-        first_item = raw_nodes[0]
-        if isinstance(first_item, list):
-            if not all(isinstance(tree_nodes, list) for tree_nodes in raw_nodes):
-                raise ValueError("单物料输入不能混用扁平节点与嵌套资源树")
-            if len(raw_nodes) != 1:
-                raise ValueError(
-                    f"单物料输入要求恰好一棵资源树，实际得到 {len(raw_nodes)} 棵"
-                )
-            normalized_nodes = raw_nodes[0]
-        else:
-            if not all(isinstance(node, dict) for node in raw_nodes):
-                raise ValueError("单物料扁平输入中的每个节点都必须是对象")
-            normalized_nodes = raw_nodes
-
-        if not normalized_nodes:
-            raise ValueError("单物料资源树为空")
-        if not all(isinstance(node, dict) for node in normalized_nodes):
-            raise ValueError("单物料资源树中的每个节点都必须是对象")
-
-        tree_set = ResourceTreeSet.from_raw_dict_list(normalized_nodes)
+        tree_set = ResourceTreeSet.from_raw_dict_list(raw_nodes)
         if len(tree_set.trees) != 1:
             names = [t.root_node.res_content.name for t in tree_set.trees]
             raise ValueError(f"单物料输入要求恰好一个根物料，实际得到 {len(tree_set.trees)} 个根：{names}")
@@ -3456,17 +3273,16 @@ class BaseROS2DeviceNode(Node, Generic[T]):
                 # 处理单个 ResourceSlot（单物料两种入参形态：
                 #   dict = 资源引用，按 uuid 重新 with_children 拉取；
                 #   list = 一棵树的扁平节点组（上游 handle 的 @flatten），就地装配成一个物料）
-                _is_resource_slot = _is_resource_slot_annotation(arg_type)
+                _is_resource_slot = _is_resource_slot_arg_type(arg_type)
                 if _is_resource_slot:
                     # 内部解析层：raw 值可能是 list（@flatten 节点组）或 dict（资源引用）
                     resource_data: ResourceSlotRawInput = function_args[arg_name]
                     try:
                         if isinstance(resource_data, list):
                             function_args[arg_name] = self._assemble_single_resource(resource_data)
-                        elif isinstance(resource_data, dict) and (
-                            _resource_slot_uuid(resource_data)
-                            or resource_data.get("id")
-                            or resource_data.get("name")
+                        elif isinstance(resource_data, dict) and any(
+                            resource_data.get(key)
+                            for key in ("uuid", "unilabos_uuid", "id")
                         ):
                             function_args[arg_name] = await self._convert_resource_async(resource_data)
                     except Exception as e:
@@ -3477,16 +3293,22 @@ class BaseROS2DeviceNode(Node, Generic[T]):
 
                 # 处理 ResourceSlot 列表
                 elif isinstance(arg_type, tuple) and len(arg_type) == 2:
-                    if arg_type[0] == "list" and _is_resource_slot_annotation(arg_type[1]):
+                    if (
+                        arg_type[0] == "list"
+                        and isinstance(arg_type[1], str)
+                        and (
+                            arg_type[1] == "ResourceSlot"
+                            or arg_type[1].endswith(":ResourceSlot")
+                        )
+                    ):
                         resource_list = function_args[arg_name]
                         if isinstance(resource_list, list):
                             try:
                                 converted_resources = []
                                 for resource_data in resource_list:
-                                    if isinstance(resource_data, dict) and (
-                                        _resource_slot_uuid(resource_data)
-                                        or resource_data.get("id")
-                                        or resource_data.get("name")
+                                    if isinstance(resource_data, dict) and any(
+                                        resource_data.get(key)
+                                        for key in ("uuid", "unilabos_uuid", "id")
                                     ):
                                         converted_resource = await self._convert_resource_async(resource_data)
                                         converted_resources.append(converted_resource)
@@ -3505,7 +3327,9 @@ class BaseROS2DeviceNode(Node, Generic[T]):
 
     async def _convert_resource_async(self, resource_data: "ResourceDictType"):
         """异步转换 ResourceDictType 为 PLR 实例，优先用 uuid 查询"""
-        unilabos_uuid = _resource_slot_uuid(resource_data)
+        unilabos_uuid = resource_data.get("uuid") or resource_data.get(
+            "unilabos_uuid"
+        )
 
         if unilabos_uuid:
             resource_tree = await self.get_resource([unilabos_uuid], with_children=True)
@@ -3513,7 +3337,11 @@ class BaseROS2DeviceNode(Node, Generic[T]):
             if plr_resources:
                 plr_resource = plr_resources[0]
             else:
-                raise ValueError(f"通过 uuid={unilabos_uuid} 查询资源为空")
+                trees = resource_tree.trees
+                device_root = _device_root_mapping(trees[0]) if len(trees) == 1 else None
+                if device_root is None or _stable_resource_uuid(device_root) != str(unilabos_uuid):
+                    raise ValueError(f"通过 uuid={unilabos_uuid} 查询资源为空")
+                return device_root
         else:
             res_id = resource_data.get("id") or resource_data.get("name", "")
             if not res_id:
@@ -3575,9 +3403,10 @@ class ROS2DeviceNode:
     @staticmethod
     async def safe_task_wrapper(trace_callback, func, **kwargs):
         try:
+            result = await func(**kwargs)
             if callable(trace_callback):
-                trace_callback(await func(**kwargs))
-            return await func(**kwargs)
+                trace_callback(result)
+            return result
         except Exception as e:
             if callable(trace_callback):
                 trace_callback(e)
@@ -3594,9 +3423,19 @@ class ROS2DeviceNode:
                 error(f"异步任务 {func.__name__} 获取结果失败")
                 error(traceback.format_exc())
 
-        future = rclpy.get_global_executor().create_task(
-            ROS2DeviceNode.safe_task_wrapper(inner_trace_callback, func, **kwargs)
-        )
+        trace_context = capture_context()
+
+        async def _run_with_trace_context():
+            # rclpy executor 可能在不同 Python Context 中逐步推进同一协程；
+            # 每一步单独 attach/detach，避免跨 Context 重置 token。
+            return await await_with_context(
+                trace_context,
+                ROS2DeviceNode.safe_task_wrapper(
+                    inner_trace_callback, func, **kwargs
+                ),
+            )
+
+        future = rclpy.get_global_executor().create_task(_run_with_trace_context())
         if trace_error:
             future.add_done_callback(_handle_future_exception)
         return future

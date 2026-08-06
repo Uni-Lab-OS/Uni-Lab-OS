@@ -1,4 +1,4 @@
-"""Action named result record 的纯 AST 解析与 canonical 合并。"""
+"""动作具名结果记录（Action named result record）的纯 AST 解析与规范合并。"""
 
 from __future__ import annotations
 
@@ -25,7 +25,7 @@ _PARSED_RESULTS_TOKEN = object()
 
 
 class ActionResultSchemaError(ValueError):
-    """可稳定投影为 Registry 或编译诊断的 Action 结果声明错误。"""
+    """可稳定投影为注册表（Registry）或编译诊断的动作（Action）结果声明错误。"""
 
     def __init__(self, code: str, path: str, message: str) -> None:
         super().__init__(message)
@@ -36,7 +36,7 @@ class ActionResultSchemaError(ValueError):
 
 @dataclass(frozen=True, slots=True, init=False)
 class ParsedActionResults:
-    """不保存来源语法形式的 canonical Action 显式结果合同。"""
+    """不保存来源语法形式的规范动作（Action）显式结果合同。"""
 
     _contract: WorkflowOutputContract
     resource_templates: tuple[
@@ -352,7 +352,7 @@ def parse_action_result_declaration(
     *,
     imports: Mapping[str, str],
 ) -> ParsedActionResults:
-    """静态解析一个已解析到定义节点的 Action result declaration。"""
+    """静态解析一个已定位定义节点的动作结果声明（Action result declaration）。"""
 
     if not isinstance(imports, Mapping):
         _fail("/return")

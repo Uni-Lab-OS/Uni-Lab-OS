@@ -1,4 +1,4 @@
-"""EdgeScheduler：Edge 侧执行态调度器（推进的唯一入口）。
+"""本地调度器（EdgeScheduler）：Edge 侧执行态推进的唯一入口。
 
 重排触发点（硬性约定，二者都强制全量 reschedule）：
 
@@ -14,29 +14,32 @@
 
 不做一次性拓扑序：ready 集合每次触发点都重新计算、重新排序。
 
-Material admission/release only serves durable WorkflowTasks. Legacy
-``WorkflowSpec.material_requirements`` is rejected instead of guessed or
-silently dispatched.
+物料衔接（注入本地库存服务（InventoryService）时启用；spec 无物料字段则行为完全不变）：
 
-物料锁（``@action(lock_resource=[...])``，注入 lock_resource_resolver 时启用）：
+- submit：汇总 DAG 全部物料需求，入队前 all-or-nothing 预留；
+  不足 → workflow 置 ``waiting_for_material``，不进入执行队列，每次重排重试预留
+- 节点下发前：预留 → FIFO lot 消费 + 实例 deploy（幂等键 workflow:node:attempt）
+- 节点失败：该节点已消费的物料转 quarantined（人工复核，不虚假加回）
+- 节点异常后人工选择 skip（suc_type=skip）：节点算成功继续推进，但其已消费
+  物料状态不明，同样转 quarantined 待复核
+- 工作流终态（failed/canceled）：剩余 active 预留自动 release（依据 DB，不依赖内存）
 
-- 下发前用 resolver 取该动作声明的 ResourceSlot 参数名，从已解析参数里提取
-  资源标识生成锁键；与在执行 job 的锁键冲突 → 本轮跳过（等释放后的重排）
+动作物料锁（Action Material Lock，注入 ``material_lock_resolver`` 时启用）：
+
+- 下发前校验最终参数，并从规范动作 Schema 的锁标记提取物料 UUID（Material UUID）；
+  与在执行作业（Job）的锁键冲突 → 本轮跳过（等释放后的重排）
+- 实体型物料需求的 ``instance_uuid`` 自动并入同一物料锁键
 - job 完成 / 工作流取消时释放
 """
 
 from __future__ import annotations
 
-import hashlib
-import json
 import logging
 import threading
 import time
 import uuid as uuid_mod
 from collections import deque
-from collections.abc import Callable, Iterator, Mapping
-from contextlib import contextmanager
-from typing import Any
+from typing import Any, Callable, Deque, Dict, List, Optional, Set
 
 from unilabos.app.scheduler.dag_state import WorkflowRun
 from unilabos.app.scheduler.dispatch import (
@@ -45,22 +48,7 @@ from unilabos.app.scheduler.dispatch import (
     build_job_start_payload,
 )
 from unilabos.app.scheduler.estimation import DurationEstimator
-from unilabos.app.scheduler.inventory.domain import (
-    InventoryError,
-    JobClaimAcquireCommand,
-    JobClaimRecord,
-    JobClaimReleaseCommand,
-    JobClaimResult,
-    JobClaimStateCommand,
-    JobClaimUncertainCommand,
-    MaterialChangeSetCommand,
-    MaterialChangeSetReceipt,
-    TaskMaterialAdmissionCommand,
-    TaskMaterialAdmissionResult,
-    TaskMaterialAdmissionSource,
-    TaskMaterialReleaseCommand,
-    TaskMaterialReleaseResult,
-)
+from unilabos.app.scheduler.inventory.domain import InsufficientStock, InventoryError
 from unilabos.app.scheduler.models import (
     DispatchedJob,
     ReadyTask,
@@ -74,153 +62,116 @@ from unilabos.app.scheduler.ordering import (
     TaskOrderer,
 )
 from unilabos.app.scheduler.param_resolver import ParamResolveError
-
-logger = logging.getLogger(__name__)
-
-# ResourceSlot 参数值里可作为资源标识的字段（按优先级取第一个非空）
-_RESOURCE_ID_FIELDS = ("unilabos_uuid", "uuid", "id", "name")
-_MATERIAL_WAKE_EVENT_TYPES = frozenset(
-    {
-        "material.created",
-        "material.updated",
-        "material.disposition_updated",
-        "site.created",
-        "site.occupancy_updated",
-        "material_graph.bootstrapped",
-    }
+from unilabos.registry.material_lock_schema import (
+    MaterialLockSchemaError,
+    compile_material_lock_schema,
+)
+from unilabos.utils.tracing import (
+    DetachedSpan,
+    add_event,
+    span,
+    start_detached_span,
 )
 
-
-def _extract_resource_ids(value: Any) -> set[str]:
-    """从 action 参数值提取资源标识（锁键素材）。
-
-    支持形态：字符串（uuid/名称）、dict（ResourceSlot 原始入参，含
-    unilabos_uuid/uuid/id/name 任一字段，或嵌套 ``data.unilabos_uuid``）、
-    以及它们的 list/tuple。取不到标识的值直接忽略（宁可漏锁不误锁）。
-    """
-    ids: set[str] = set()
-    if value is None:
-        return ids
-    if isinstance(value, str):
-        if value:
-            ids.add(value)
-        return ids
-    if isinstance(value, (list, tuple, set)):
-        for item in value:
-            ids |= _extract_resource_ids(item)
-        return ids
-    if isinstance(value, dict):
-        nested = value.get("data")
-        if isinstance(nested, dict) and nested.get("unilabos_uuid"):
-            ids.add(str(nested["unilabos_uuid"]))
-            return ids
-        for field_name in _RESOURCE_ID_FIELDS:
-            field_value = value.get(field_name)
-            if isinstance(field_value, str) and field_value:
-                ids.add(field_value)
-                return ids
-        return ids
-    return ids
+logger = logging.getLogger(__name__)
 
 
 class EdgeScheduler:
     def __init__(
         self,
-        orderer: TaskOrderer | None = None,
-        dispatcher: Dispatcher | None = None,
-        external_busy_keys: set[str] | None = None,
-        busy_key_provider: Callable[[], set[str]] | None = None,
-        workflow_state_listener: Callable[[str, str], None] | None = None,
+        orderer: Optional[TaskOrderer] = None,
+        dispatcher: Optional[Dispatcher] = None,
+        external_busy_keys: Optional[Set[str]] = None,
+        busy_key_provider: Optional["Callable[[], Set[str]]"] = None,
+        workflow_state_listener: Optional["Callable[[str, str], None]"] = None,
         inventory: Any = None,
-        lock_resource_resolver: Callable[[str, str], list[str]] | None = None,
-        estimator: DurationEstimator | None = None,
+        material_lock_resolver: Optional[
+            "Callable[[str, str, Dict[str, Any]], tuple[str, ...]]"
+        ] = None,
+        estimator: Optional[DurationEstimator] = None,
         timeline_capacity: int = 400,
         monitor: Any = None,
         history: Any = None,
-        pre_dispatch_hook: Callable[[dict[str, Any]], bool | None] | None = None,
-        dispatch_error_hook: (
-            Callable[[dict[str, Any], BaseException], None] | None
-        ) = None,
-        workflow_tasks: Any = None,
-        admission_fault_hook: Callable[[str], None] | None = None,
     ):
+        """装配本地执行态调度器（Scheduler）。
+
+        Args:
+            orderer: 对已就绪任务进行稳定排序的策略。
+            dispatcher: 把作业（Job）提交给执行器的适配器。
+            external_busy_keys: 启动时已知的外部设备占用键。
+            busy_key_provider: 实时读取设备占用键的函数。
+            workflow_state_listener: 工作流（Workflow）终态通知函数。
+            inventory: 本地库存（Inventory）预留、消费和释放服务。
+            material_lock_resolver: 遗留直接调用根据实时注册表
+                （Registry）Schema 与最终参数解析物料 UUID 的兼容函数。
+            estimator: 动作预计时长计算器。
+            timeline_capacity: 内存时间线最多保留的作业数量。
+            monitor: 实时监控事件输出适配器。
+            history: 遗留工作流执行历史存储。
+        """
+
         self._orderer = orderer or StableLocalOrderer()
         self._dispatcher = dispatcher or RecordingDispatcher()
         self._lock = threading.RLock()
-        self._material_saga_condition = threading.Condition()
-        self._active_material_sagas: set[str] = set()
 
-        self._workflows: dict[str, WorkflowRun] = {}
+        self._workflows: Dict[str, WorkflowRun] = {}
         # job_id -> DispatchedJob（完成回调路由 + 资源锁）
-        self._inflight: dict[str, DispatchedJob] = {}
+        self._inflight: Dict[str, DispatchedJob] = {}
         # 外部注入的锁（例如 DeviceActionManager 已占用的设备），可选
         self._external_busy_keys = (
             external_busy_keys if external_busy_keys is not None else set()
         )
         # 实时锁视图提供者（微后端 busy_device_action_keys），可选
         self._busy_key_provider = busy_key_provider
-        self._device_action_fence_provider: Callable[[], set[str]] | None = None
         # 工作流终态通知（success/failed/canceled 各通知一次；锁外触发）
         self._workflow_state_listener = workflow_state_listener
-        self._notified_workflows: set[str] = set()
+        self._notified_workflows: Set[str] = set()
         self._reschedule_count = 0
-        # Canonical InventoryService 只供 durable WorkflowTask saga 使用。
+        # 可选 InventoryService（duck-typed：reserve_workflow / consume_reservation /
+        # quarantine_reservation / release_workflow）；None = 物料衔接整体关闭
         self._inventory = inventory
-        # 物料/资源锁：resolver(device_id, action_name) -> @action(lock_resource=[...])
-        # 声明的参数名列表；None = 物料锁关闭
-        self._lock_resource_resolver = lock_resource_resolver
-        # job_id -> 该 job 持有的资源锁键（job 完成/取消时释放）
-        self._job_resource_locks: dict[str, set[str]] = {}
+        # 有物料需求的 workflow（其余 workflow 不产生任何 inventory 调用）
+        self._material_workflows: Set[str] = set()
+        # 动作物料锁解析器消费规范动作 Schema；None 仅用于无注册表的隔离测试。
+        self._material_lock_resolver = material_lock_resolver
+        # job_id -> 该作业（Job）持有的物料锁键；完成或取消时释放。
+        self._job_resource_locks: Dict[str, Set[str]] = {}
         # 时长预估器（declared / historical / auto 三种 mode，内含两种计算模式）
         self._estimator = estimator or DurationEstimator()
         # 泳道图时间线：已完结 job 的起止记录（环形缓冲）
-        self._timeline: deque[dict[str, Any]] = deque(maxlen=timeline_capacity)
+        self._timeline: Deque[Dict[str, Any]] = deque(maxlen=timeline_capacity)
         # 实时监控总线（duck-typed emit(channel, type, data)）；None = 关闭
         self._monitor = monitor
         # 工作流执行历史（WorkflowHistoryStore，独立 SQLite）；None = 不落盘
         self._history = history
-        self._pre_dispatch_hook = pre_dispatch_hook
-        self._dispatch_error_hook = dispatch_error_hook
-        # D1A 只消费 formal Task/Job port；legacy DAG identity 转换止于本模块。
-        self._device_action_tasks_by_job_uuid: dict[str, str] = {}
-        self._device_action_task_before_dispatch: Callable[..., bool | None] | None = (
-            None
-        )
-        self._device_action_task_dispatch_error: Callable[..., None] | None = None
-        # 新 WorkflowTask kernel 的持久投影 port；不参与 legacy WorkflowRun DAG。
-        self._workflow_tasks = workflow_tasks
-        self._admission_fault_hook = admission_fault_hook
-        set_change_listener = getattr(inventory, "set_change_listener", None)
-        if workflow_tasks is not None and callable(set_change_listener):
-            set_change_listener(self._on_inventory_change)
+        # 长生命周期根 span：workflow → action/job。只保存上下文/句柄，不保存 payload。
+        self._workflow_spans: Dict[str, DetachedSpan] = {}
+        self._job_spans: Dict[str, DetachedSpan] = {}
+        # 生命周期监听器仅承载标准 Task/Job 兼容回写，不成为第二个状态权威。
+        self._job_pre_dispatch_listeners: List[Callable[[Dict[str, Any]], None]] = []
+        self._job_finished_listeners: List[Callable[[str, bool, Any, str], None]] = []
+        # 准入重试监听器把尚未注册为旧调度运行的来源受阻任务接到同一个公开
+        # 重排触发点；监听器本身仍由工作流任务桥拥有。
+        self._admission_retry_listeners: List[Callable[[], None]] = []
 
-    def _on_inventory_change(self, event: Any) -> None:
-        """外部 Material/Site 持久变化提交后唤醒 blocked Tasks。"""
+    @property
+    def inventory_service(self) -> Any:
+        """返回本地调度器持有的库存服务（InventoryService）。
 
-        if not isinstance(event, Mapping):
-            return
-        if event.get("event_type") not in _MATERIAL_WAKE_EVENT_TYPES:
-            return
-        # Admission 自有事件发出时 coordinator 仍持有 per-Task saga slot；release
-        # 已在 saga 结束后自行 sweep，因此这里只有外部资源变化进入提交后唤醒。
-        if event.get("causation_id"):
-            return
-        try:
-            self.reconcile_pending_task_admissions()
-        except Exception:
-            logger.exception(
-                "[EdgeScheduler] Material 变化唤醒失败：%s",
-                event.get("event_type"),
-            )
+        参数：无。返回：同一库存权威（Inventory Authority）实例；未装配时为
+        ``None``。该只读属性只供组合与桥接层验证和复用，禁止替换权威。
+        """
+
+        return self._inventory
 
     def _emit_monitor(
-        self, channel: str, event_type: str, data: dict[str, Any]
+        self, channel: str, event_type: str, data: Dict[str, Any]
     ) -> None:
         if self._monitor is None:
             return
         try:
             self._monitor.emit(channel, event_type, data)
-        except Exception:  # noqa: BLE001, S110 - 监控故障不影响调度
+        except Exception:  # noqa: BLE001 - 监控故障不影响调度
             pass
 
     def _safe_history(self, method: str, *args: Any, **kwargs: Any) -> None:
@@ -229,822 +180,174 @@ class EdgeScheduler:
             return
         try:
             getattr(self._history, method)(*args, **kwargs)
-        except Exception:
+        except Exception:  # noqa: BLE001
             logger.exception("[EdgeScheduler] history.%s failed", method)
 
-    def set_workflow_state_listener(self, listener: Callable[[str, str], None]) -> None:
+    def set_workflow_state_listener(
+        self, listener: "Callable[[str, str], None]"
+    ) -> None:
+        """替换工作流终态监听器；参数 ``listener`` 接收工作流身份和旧状态值。"""
+
         self._workflow_state_listener = listener
 
-    def set_dispatch_hooks(
-        self,
-        *,
-        before: Callable[[dict[str, Any]], bool | None] | None = None,
-        on_error: Callable[[dict[str, Any], BaseException], None] | None = None,
-    ) -> None:
-        """安装 dispatch 事务缝；组合根必须在接收工作流前调用。"""
+    def add_admission_retry_listener(self, listener: Callable[[], None]) -> None:
+        """注册公开重排前的准入重试（AdmissionRetry）监听器。
 
-        with self._lock:
-            self._pre_dispatch_hook = before
-            self._dispatch_error_hook = on_error
-
-    def set_device_action_task_hooks(
-        self,
-        *,
-        before: Callable[..., bool | None] | None = None,
-        on_error: Callable[..., None] | None = None,
-    ) -> None:
-        """安装 formal device-action Task dispatch 事务缝。"""
-
-        with self._lock:
-            self._device_action_task_before_dispatch = before
-            self._device_action_task_dispatch_error = on_error
-
-    @staticmethod
-    def _m1ef_command_uuid(job_uuid: str, attempt: int, phase: str) -> str:
-        return str(
-            uuid_mod.uuid5(
-                uuid_mod.UUID(job_uuid),
-                f"m1ef:{attempt}:{phase}",
-            )
-        )
-
-    def acquire_device_action_job_claim(
-        self,
-        *,
-        task_uuid: str,
-        job_uuid: str,
-        device_id: str,
-        attempt: int = 1,
-    ) -> JobClaimResult:
-        """通过 Inventory authority 获取 device-only D1A Claim。"""
-
-        if self._inventory is None:
-            raise RuntimeError("Inventory Job Claim authority is unavailable")
-        executor = self._inventory.resolve_executor_material(device_id)
-        command_uuid = self._m1ef_command_uuid(job_uuid, attempt, "claim-acquire")
-        return self._inventory.acquire_job_claim(
-            JobClaimAcquireCommand(
-                schema_version=1,
-                command_uuid=command_uuid,
-                idempotency_key=f"m1ef:{job_uuid}:{attempt}:claim-acquire",
-                workflow_task_uuid=task_uuid,
-                workflow_node_job_uuid=job_uuid,
-                attempt=attempt,
-                device_material_uuid=executor.uuid,
-                mutable_material_root_uuids=(),
-                occupancy_changing_site_uuids=(),
-            )
-        )
-
-    def mark_device_action_job_claim_running(
-        self,
-        *,
-        claim: JobClaimRecord,
-        evidence_fingerprint: str,
-    ) -> JobClaimResult:
-        """把 driver accepted/running evidence 附加到精确 D1A fence。"""
-
-        if self._inventory is None:
-            raise RuntimeError("Inventory Job Claim authority is unavailable")
-        command_uuid = self._m1ef_command_uuid(
-            claim.workflow_node_job_uuid,
-            claim.attempt,
-            f"claim-running:{evidence_fingerprint}",
-        )
-        return self._inventory.mark_job_claim_running(
-            JobClaimStateCommand(
-                schema_version=1,
-                command_uuid=command_uuid,
-                idempotency_key=(
-                    f"m1ef:{claim.workflow_node_job_uuid}:"
-                    f"{claim.attempt}:claim-running:{evidence_fingerprint}"
-                ),
-                workflow_node_job_uuid=claim.workflow_node_job_uuid,
-                attempt=claim.attempt,
-                claim_uuid=claim.uuid,
-                fencing_token=claim.fencing_token,
-                evidence_kind="driver_accepted",
-                evidence_fingerprint=evidence_fingerprint,
-            )
-        )
-
-    def mark_device_action_job_claim_uncertain(
-        self,
-        *,
-        claim: JobClaimRecord,
-        reason: str,
-        evidence_fingerprint: str,
-    ) -> JobClaimResult:
-        """fence 住不明确的 D1A dispatch/cancel/result，且不释放它。"""
-
-        if self._inventory is None:
-            raise RuntimeError("Inventory Job Claim authority is unavailable")
-        command_uuid = self._m1ef_command_uuid(
-            claim.workflow_node_job_uuid,
-            claim.attempt,
-            f"claim-uncertain:{reason}:{evidence_fingerprint}",
-        )
-        return self._inventory.mark_job_claim_uncertain(
-            JobClaimUncertainCommand(
-                schema_version=1,
-                command_uuid=command_uuid,
-                idempotency_key=(
-                    f"m1ef:{claim.workflow_node_job_uuid}:"
-                    f"{claim.attempt}:claim-uncertain:{reason}:"
-                    f"{evidence_fingerprint}"
-                ),
-                workflow_node_job_uuid=claim.workflow_node_job_uuid,
-                attempt=claim.attempt,
-                claim_uuid=claim.uuid,
-                fencing_token=claim.fencing_token,
-                uncertainty_reason=reason,
-                evidence_fingerprint=evidence_fingerprint,
-            )
-        )
-
-    def commit_device_action_terminal_changeset(
-        self,
-        *,
-        claim: JobClaimRecord,
-        outcome: str,
-        result: dict[str, Any],
-    ) -> MaterialChangeSetReceipt:
-        """提交 D1A deterministic device-only no-op terminal receipt。"""
-
-        if self._inventory is None:
-            raise RuntimeError("Inventory ChangeSet authority is unavailable")
-        command_uuid = self._m1ef_command_uuid(
-            claim.workflow_node_job_uuid,
-            claim.attempt,
-            "terminal-changeset",
-        )
-        return self._inventory.commit_material_changeset(
-            MaterialChangeSetCommand(
-                schema_version=1,
-                command_uuid=command_uuid,
-                idempotency_key=(
-                    f"m1ef:{claim.workflow_node_job_uuid}:"
-                    f"{claim.attempt}:terminal-changeset"
-                ),
-                workflow_task_uuid=claim.workflow_task_uuid,
-                workflow_node_job_uuid=claim.workflow_node_job_uuid,
-                attempt=claim.attempt,
-                claim_uuid=claim.uuid,
-                fencing_token=claim.fencing_token,
-                effect_identity="terminal",
-                outcome=outcome,
-                result=result,
-                effects=(),
-            )
-        )
-
-    def release_device_action_job_claim(
-        self,
-        *,
-        claim: JobClaimRecord,
-        receipt: MaterialChangeSetReceipt,
-        workflow_terminal_fingerprint: str,
-    ) -> JobClaimResult:
-        """两个 durable terminal commit 后 settle 精确 D1A Claim。"""
-
-        if self._inventory is None:
-            raise RuntimeError("Inventory Job Claim authority is unavailable")
-        command_uuid = self._m1ef_command_uuid(
-            claim.workflow_node_job_uuid,
-            claim.attempt,
-            "claim-release-terminal",
-        )
-        released = self._inventory.release_job_claim(
-            JobClaimReleaseCommand(
-                schema_version=1,
-                command_uuid=command_uuid,
-                idempotency_key=(
-                    f"m1ef:{claim.workflow_node_job_uuid}:"
-                    f"{claim.attempt}:claim-release-terminal"
-                ),
-                workflow_node_job_uuid=claim.workflow_node_job_uuid,
-                attempt=claim.attempt,
-                claim_uuid=claim.uuid,
-                fencing_token=claim.fencing_token,
-                release_proof_kind="terminal_settled",
-                material_changeset_uuid=receipt.uuid,
-                material_changeset_fingerprint=receipt.deterministic_fingerprint,
-                workflow_terminal_fingerprint=workflow_terminal_fingerprint,
-                reason="workflow_job_terminal_settled",
-                no_send_proof_fingerprint=None,
-            )
-        )
-        # D1A device-only Claim 按约定没有 Task Material Reservation。
-        # 普通 Workflow terminal saga 在全部 business-material Claim settle 后
-        # 调用 reconcile_task_release。
-        return released
-
-    def release_unsubmitted_device_action_job_claim(
-        self,
-        *,
-        claim: JobClaimRecord,
-        no_send_proof_fingerprint: str,
-        reason: str,
-    ) -> JobClaimResult:
-        """由 Scheduler 用 durable zero-send proof 释放尚未派发的 D1A Claim。"""
-
-        if self._inventory is None:
-            raise RuntimeError("Inventory Job Claim authority is unavailable")
-        command_uuid = self._m1ef_command_uuid(
-            claim.workflow_node_job_uuid,
-            claim.attempt,
-            "claim-release-not-submitted",
-        )
-        return self._inventory.release_job_claim(
-            JobClaimReleaseCommand(
-                schema_version=1,
-                command_uuid=command_uuid,
-                idempotency_key=(
-                    f"m1ef:{claim.workflow_node_job_uuid}:"
-                    f"{claim.attempt}:claim-release-not-submitted"
-                ),
-                workflow_node_job_uuid=claim.workflow_node_job_uuid,
-                attempt=claim.attempt,
-                claim_uuid=claim.uuid,
-                fencing_token=claim.fencing_token,
-                release_proof_kind="not_submitted",
-                material_changeset_uuid=None,
-                material_changeset_fingerprint=None,
-                workflow_terminal_fingerprint=None,
-                reason=reason,
-                no_send_proof_fingerprint=no_send_proof_fingerprint,
-                expected_state="reserved",
-            )
-        )
-
-    def inventory_job_claim(
-        self,
-        job_uuid: str,
-        attempt: int = 1,
-    ) -> JobClaimRecord:
-        if self._inventory is None:
-            raise RuntimeError("Inventory Job Claim authority is unavailable")
-        return self._inventory.get_job_claim(job_uuid, attempt)
-
-    def find_inventory_job_claim(
-        self,
-        job_uuid: str,
-        attempt: int = 1,
-    ) -> JobClaimRecord | None:
-        """读取可选 Claim，且不向 adapter 泄漏 Inventory errors。"""
-
-        try:
-            return self.inventory_job_claim(job_uuid, attempt)
-        except InventoryError as error:
-            if error.code == "not_found":
-                return None
-            raise
-
-    def terminal_material_changeset(
-        self,
-        job_uuid: str,
-        attempt: int = 1,
-    ) -> MaterialChangeSetReceipt | None:
-        if self._inventory is None:
-            raise RuntimeError("Inventory ChangeSet authority is unavailable")
-        return self._inventory.get_terminal_material_changeset(job_uuid, attempt)
-
-    def unsettled_inventory_job_claims(self) -> tuple[JobClaimRecord, ...]:
-        """枚举启动恢复必须与 Workflow facts 双向核对的 live Claims。"""
-
-        if self._inventory is None:
-            raise RuntimeError("Inventory Claim authority is unavailable")
-        return self._inventory.list_unsettled_claims()
-
-    def acknowledge_inventory_result(self, sequence: int | None) -> None:
-        """只推进 Scheduler 自己的 durable Inventory consumer cursor。"""
-
-        if sequence is None:
-            return
-        if self._inventory is None:
-            raise RuntimeError("Inventory authority is unavailable")
-        self._inventory.acknowledge(sequence, consumer="scheduler")
-
-    def busy_inventory_device_action_keys(self) -> set[str]:
-        """只从 live Inventory Claims 构建 Scheduler device fences。"""
-
-        if self._inventory is None:
-            return set()
-        busy: set[str] = set()
-        for claim in self._inventory.list_unsettled_claims():
-            for member in claim.members:
-                if member.resource_kind != "device_material":
-                    continue
-                material = self._inventory.get_material(member.resource_uuid)
-                source_node_id = material.meta_data.get("source_node_id")
-                if isinstance(source_node_id, str) and source_node_id:
-                    busy.add(f"/devices/{source_node_id}")
-        return busy
-
-    def audit_inventory_job_claims(self) -> tuple[JobClaimRecord, ...]:
-        """启动后允许 physical dispatch 前先 fail-closed 审计。"""
-
-        if self._inventory is None:
-            raise RuntimeError("Inventory Claim authority is unavailable")
-        return self._inventory.audit_job_claim_authority()
-
-    def owns_live_inventory_claim(self, job_uuid: str | None) -> bool:
-        """允许 owner Job 重放 C1，但不能绕过其他 Job 的 fence。"""
-
-        if not job_uuid or self._inventory is None:
-            return False
-        claim = self.find_inventory_job_claim(job_uuid, 1)
-        return claim is not None and claim.state in {
-            "reserved",
-            "running",
-            "uncertain",
-        }
-
-    def submit_device_action_task(
-        self,
-        *,
-        task_uuid: str,
-        job_uuid: str,
-        device_id: str,
-        action_name: str,
-        action_type: str,
-        input_value: dict[str, Any],
-    ) -> dict[str, Any]:
-        """以 formal Task/Job identity 提交一个冻结的设备 Action。
-
-        EdgeScheduler 的 legacy DAG model 转换只存在于这里；Workflow runtime
-        与公开 wire 不得看到该内部兼容模型。
+        参数：``listener`` 负责重试尚未注册到旧调度器的持久任务。返回无；监听器
+        异常会关闭失败并阻止本轮旧调度重排。
         """
 
-        from unilabos.app.scheduler.models import WorkflowNode, WorkflowSpec
+        self._admission_retry_listeners.append(listener)
 
-        values = (task_uuid, job_uuid, device_id, action_name, action_type)
-        if any(not isinstance(value, str) or not value for value in values):
-            raise ValueError("formal device-action Task fields must be non-empty")
-        with self._lock:
-            if task_uuid in self._workflows:
-                raise ValueError(f"device-action Task {task_uuid} already submitted")
-            if job_uuid in self._device_action_tasks_by_job_uuid:
-                raise ValueError(f"device-action Job {job_uuid} already submitted")
-            self._device_action_tasks_by_job_uuid[job_uuid] = task_uuid
-            try:
-                return self.submit_workflow(
-                    WorkflowSpec(
-                        workflow_id=task_uuid,
-                        task_id=task_uuid,
-                        nodes=[
-                            WorkflowNode(
-                                id=job_uuid,
-                                job_id=job_uuid,
-                                device_id=device_id,
-                                action_name=action_name,
-                                action_type=action_type,
-                                param=dict(input_value),
-                                node_type="ILab",
-                            )
-                        ],
-                    )
-                )
-            except BaseException:
-                self._device_action_tasks_by_job_uuid.pop(job_uuid, None)
-                self._workflows.pop(task_uuid, None)
-                self._notified_workflows.discard(task_uuid)
-                for inflight_uuid, inflight in tuple(self._inflight.items()):
-                    if inflight.workflow_id == task_uuid:
-                        self._inflight.pop(inflight_uuid, None)
-                        self._job_resource_locks.pop(inflight_uuid, None)
-                raise
+    def remove_admission_retry_listener(self, listener: Callable[[], None]) -> None:
+        """移除准入重试（AdmissionRetry）监听器。
 
-    def has_device_action_task(self, task_uuid: str) -> bool:
-        """Return whether the formal Task is already registered in this generation."""
+        参数：``listener`` 必须是此前注册的同一回调。返回无；重复移除保持幂等。
+        """
 
-        with self._lock:
-            return task_uuid in self._workflows
+        self._admission_retry_listeners = [
+            current
+            for current in self._admission_retry_listeners
+            if current != listener
+        ]
 
-    def cancel_device_action_task(self, task_uuid: str) -> bool:
-        """Cancel one formal Task without exporting the legacy DAG model."""
-
-        with self._lock:
-            canceled = self.cancel_workflow(task_uuid)
-            if canceled:
-                for job_uuid, owner_uuid in tuple(
-                    self._device_action_tasks_by_job_uuid.items()
-                ):
-                    if owner_uuid == task_uuid:
-                        self._device_action_tasks_by_job_uuid.pop(job_uuid, None)
-            return canceled
-
-    def reconcile_task_admission(
+    def add_job_pre_dispatch_listener(
         self,
-        task_uuid: str,
-    ) -> TaskMaterialAdmissionResult | None:
-        """Drive one replay-safe workflow.db ↔ inventory.db admission saga."""
+        listener: Callable[[Dict[str, Any]], None],
+    ) -> None:
+        """注册作业派发前监听器。
 
-        if self._workflow_tasks is None or self._inventory is None:
-            raise RuntimeError("Workflow Task Material coordination is not configured")
-        with self._material_saga_slot(task_uuid):
-            task = self._workflow_tasks.get_workflow_task(task_uuid)
-            if task.get("status") in {
-                "succeeded",
-                "failed",
-                "canceled",
-                "timeout",
-            }:
-                return self._ack_projected_admission_result(task_uuid)
-            return self._reconcile_task_admission_serialized(task_uuid)
+        参数：``listener`` 接收即将派发的作业摘要。返回无；监听器必须先提交持久
+        派发意图，异常会中止物理派发，禁止形成先发设备后记数据库的窗口。
+        """
 
-    def _ack_projected_admission_result(
+        self._job_pre_dispatch_listeners.append(listener)
+
+    def remove_job_pre_dispatch_listener(
         self,
-        task_uuid: str,
-    ) -> TaskMaterialAdmissionResult | None:
-        """不从已完成的 resolution Jobs 重建 command，直接完成 W2。"""
+        listener: Callable[[Dict[str, Any]], None],
+    ) -> None:
+        """移除派发前监听器；参数 ``listener`` 必须是此前注册的同一回调。"""
 
-        if self._workflow_tasks is None or self._inventory is None:
-            raise RuntimeError("Workflow Task Material coordination is not configured")
-        projection = self._workflow_tasks.get_material_admission(task_uuid)
-        if not isinstance(projection, dict):
-            return None
-        result = self._inventory.get_command_result(str(projection["command_uuid"]))
-        if not isinstance(result, TaskMaterialAdmissionResult):
-            raise TypeError(
-                "Inventory admission projection points to a non-admission result"
-            )
-        self._inventory.acknowledge(result.outbox_sequence)
-        return result
+        self._job_pre_dispatch_listeners = [
+            current
+            for current in self._job_pre_dispatch_listeners
+            if current != listener
+        ]
 
-    @contextmanager
-    def _material_saga_slot(self, task_uuid: str) -> Iterator[None]:
-        """Serialize one Task without holding a mutex across durable operations."""
-
-        try:
-            task_uuid = str(uuid_mod.UUID(task_uuid))
-        except (AttributeError, TypeError, ValueError):
-            if self._workflow_tasks is None:
-                raise RuntimeError(
-                    "Workflow Task Material coordination is not configured"
-                ) from None
-            self._workflow_tasks.get_workflow_task(task_uuid)
-            raise
-        with self._material_saga_condition:
-            while task_uuid in self._active_material_sagas:
-                self._material_saga_condition.wait()
-            self._active_material_sagas.add(task_uuid)
-        try:
-            yield
-        finally:
-            with self._material_saga_condition:
-                self._active_material_sagas.remove(task_uuid)
-                self._material_saga_condition.notify_all()
-
-    def _reconcile_task_admission_serialized(
+    def add_job_finished_listener(
         self,
-        task_uuid: str,
-    ) -> TaskMaterialAdmissionResult | None:
-        """Run admission after the caller has acquired the Task saga slot."""
+        listener: Callable[[str, bool, Any, str], None],
+    ) -> None:
+        """注册作业完成监听器。
 
-        if self._workflow_tasks is None or self._inventory is None:
-            raise RuntimeError("Workflow Task Material coordination is not configured")
-        task = self._workflow_tasks.get_workflow_task(task_uuid)
-        snapshot = task.get("workflow_snapshot")
-        if not isinstance(snapshot, dict):
-            raise TypeError("Workflow Task snapshot is invalid")
-        nodes = snapshot.get("nodes")
-        if not isinstance(nodes, list):
-            raise TypeError("Workflow Task snapshot nodes are invalid")
-        encoded_snapshot = json.dumps(
-            snapshot,
-            ensure_ascii=False,
-            separators=(",", ":"),
-            sort_keys=True,
-        ).encode("utf-8")
-        snapshot_fingerprint = f"sha256:{hashlib.sha256(encoded_snapshot).hexdigest()}"
-        canonical_task_uuid = str(task["uuid"])
-        command_uuid = str(
-            uuid_mod.uuid5(
-                uuid_mod.UUID(canonical_task_uuid),
-                f"material-admission:{snapshot_fingerprint}",
-            )
-        )
-        jobs = self._workflow_tasks.list_workflow_node_jobs(canonical_task_uuid)
-        pending_resolution_node_uuids = {
-            str(job.get("workflow_node_uuid") or "")
-            for job in jobs
-            if job.get("status") == "pending"
-        }
-        sources: list[TaskMaterialAdmissionSource] = []
-        for node in sorted(
-            (
-                item
-                for item in nodes
-                if isinstance(item, dict)
-                and item.get("type") == "material_source"
-                and str(item.get("uuid") or "") in pending_resolution_node_uuids
-            ),
-            key=lambda item: str(item.get("uuid") or ""),
-        ):
-            param = node.get("param")
-            if not isinstance(param, dict):
-                raise TypeError("MaterialSource snapshot parameter is invalid")
-            slot_range = param.get("slot_range")
-            candidate_site_uuids = (
-                tuple(slot_range) if isinstance(slot_range, list) else ()
-            )
-            sources.append(
-                TaskMaterialAdmissionSource(
-                    material_source_node_uuid=str(node.get("uuid") or ""),
-                    mode=str(param.get("mode") or ""),
-                    resource_template_uuid=str(
-                        param.get("resource_template_uuid") or ""
-                    ),
-                    mount=dict(param.get("mount") or {}),
-                    material_uuid=(
-                        str(param["material_uuid"])
-                        if param.get("material_uuid") is not None
-                        else None
-                    ),
-                    site_uuid=(
-                        str(param["site"]) if param.get("site") is not None else None
-                    ),
-                    candidate_site_uuids=candidate_site_uuids,
-                    flow_role=str(param.get("flow_role") or ""),
-                )
-            )
-        if not sources:
-            projection = self._workflow_tasks.get_material_admission(
-                canonical_task_uuid
-            )
-            if (
-                isinstance(projection, dict)
-                and projection.get("command_uuid") == command_uuid
-            ):
-                return self._ack_projected_admission_result(canonical_task_uuid)
-            return None
-        command = TaskMaterialAdmissionCommand(
-            schema_version=1,
-            command_uuid=command_uuid,
-            idempotency_key=(
-                f"workflow-task:{canonical_task_uuid}:material-admission:"
-                f"{snapshot_fingerprint}"
-            ),
-            workflow_task_uuid=canonical_task_uuid,
-            workflow_snapshot_fingerprint=snapshot_fingerprint,
-            sources=tuple(sources),
-        )
-        result = self._inventory.admit_task(command)
-        self._inject_admission_fault("after_inventory_commit")
-        self._workflow_tasks.project_material_admission(result)
-        self._inject_admission_fault("after_workflow_projection")
-        self._inventory.acknowledge(result.outbox_sequence)
-        return result
+        参数：``listener`` 接收 Job UUID、成功标记、返回值和旧异常决策类型。返回
+        无；用于把旧调度结果投影回标准工作流节点作业（WorkflowNodeJob）。
+        """
 
-    def reconcile_pending_task_admissions(self) -> tuple[str, ...]:
-        """Replay pending Task admissions in durable creation order at startup."""
+        self._job_finished_listeners.append(listener)
 
-        if self._workflow_tasks is None or self._inventory is None:
-            raise RuntimeError("Workflow Task Material coordination is not configured")
-        pending: list[dict[str, Any]] = []
-        reconciled: list[str] = []
-        for status in ("pending", "admission_blocked"):
-            page = 1
-            while True:
-                tasks = self._workflow_tasks.list_workflow_tasks(
-                    page=page,
-                    page_size=100,
-                    status=status,
-                )
-                items = tasks.get("items")
-                if not isinstance(items, list):
-                    raise TypeError("Workflow Task list projection is invalid")
-                pending.extend(items)
-                if page * 100 >= int(tasks.get("total") or 0):
-                    break
-                page += 1
-        for task in sorted(
-            pending,
-            key=lambda item: (
-                str(item.get("create_time") or ""),
-                str(item.get("uuid") or ""),
-            ),
-        ):
-            task_uuid = str(task.get("uuid") or "")
-            if (
-                self._reconcile_task_material_state(
-                    task_uuid,
-                    retry_pending_after_release=False,
-                )
-                is not None
-            ):
-                reconciled.append(task_uuid)
-        return tuple(reconciled)
-
-    def reconcile_terminal_task_releases(self) -> tuple[str, ...]:
-        """Replay terminal Task release sagas in durable creation order at startup."""
-
-        if self._workflow_tasks is None or self._inventory is None:
-            raise RuntimeError("Workflow Task Material coordination is not configured")
-        terminal: list[dict[str, Any]] = []
-        for status in ("succeeded", "failed", "canceled", "timeout"):
-            page = 1
-            while True:
-                tasks = self._workflow_tasks.list_workflow_tasks(
-                    page=page,
-                    page_size=100,
-                    status=status,
-                )
-                items = tasks.get("items")
-                if not isinstance(items, list):
-                    raise TypeError("Workflow Task list projection is invalid")
-                terminal.extend(items)
-                if page * 100 >= int(tasks.get("total") or 0):
-                    break
-                page += 1
-        reconciled: list[str] = []
-        for task in sorted(
-            terminal,
-            key=lambda item: (
-                str(item.get("create_time") or ""),
-                str(item.get("uuid") or ""),
-            ),
-        ):
-            task_uuid = str(task.get("uuid") or "")
-            if (
-                self._reconcile_task_material_state(
-                    task_uuid,
-                    retry_pending_after_release=False,
-                )
-                is not None
-            ):
-                reconciled.append(task_uuid)
-        return tuple(reconciled)
-
-    def reconcile_workflow_task_materials(self) -> tuple[str, ...]:
-        """Recover every startup admission/release saga currently needing work."""
-
-        return (
-            *self.reconcile_terminal_task_releases(),
-            *self.reconcile_pending_task_admissions(),
-        )
-
-    def reconcile_task_material_state(
+    def remove_job_finished_listener(
         self,
-        task_uuid: str,
-    ) -> TaskMaterialAdmissionResult | TaskMaterialReleaseResult | None:
-        """Choose admission or terminal release from the latest durable Task state."""
+        listener: Callable[[str, bool, Any, str], None],
+    ) -> None:
+        """移除作业完成监听器；参数 ``listener`` 必须是此前注册的同一回调。"""
 
-        return self._reconcile_task_material_state(
-            task_uuid,
-            retry_pending_after_release=True,
-        )
+        self._job_finished_listeners = [
+            current for current in self._job_finished_listeners if current != listener
+        ]
 
-    def _reconcile_task_material_state(
+    def _notify_job_pre_dispatch(self, dispatching: Dict[str, Any]) -> None:
+        """同步通知派发意图；参数 ``dispatching`` 是即将越过执行边界的摘要。
+
+        返回无；任何监听器失败都会阻止执行适配器调用，由创建请求收到错误并保留
+        可核对的持久事实。
+        """
+
+        for listener in tuple(self._job_pre_dispatch_listeners):
+            listener(dict(dispatching))
+
+    def _notify_job_finished(
         self,
-        task_uuid: str,
-        *,
-        retry_pending_after_release: bool,
-    ) -> TaskMaterialAdmissionResult | TaskMaterialReleaseResult | None:
-        """Reconcile one Task and optionally wake pending Tasks after release."""
+        job_id: str,
+        success: bool,
+        ret_value: Any,
+        suc_type: str,
+    ) -> None:
+        """在清理本地在途状态前通知一次完成事实。
 
-        if self._workflow_tasks is None or self._inventory is None:
-            raise RuntimeError("Workflow Task Material coordination is not configured")
-        with self._material_saga_slot(task_uuid):
-            task = self._workflow_tasks.get_workflow_task(task_uuid)
-            snapshot = task.get("workflow_snapshot")
-            nodes = snapshot.get("nodes") if isinstance(snapshot, dict) else None
-            has_material_source = isinstance(nodes, list) and any(
-                isinstance(node, dict) and node.get("type") == "material_source"
-                for node in nodes
-            )
-            if not has_material_source:
-                return None
-            if task.get("status") in {"succeeded", "failed", "canceled", "timeout"}:
-                self._ack_projected_admission_result(task_uuid)
-                release_result = self._reconcile_task_release_serialized(
-                    task_uuid,
-                    "workflow_task_terminal",
-                )
-            else:
-                return self._reconcile_task_admission_serialized(task_uuid)
-        if retry_pending_after_release:
-            self.reconcile_pending_task_admissions()
-        return release_result
+        参数分别是作业身份、成功标记、设备返回值和旧异常决策类型。返回无；投影
+        失败向上抛出，使同一完成事实可以投递重放（DeliveryReplay）；调用方不得
+        在全部监听器确认前释放在途作业或动作物料锁（Action Material Lock）。
+        """
 
-    def _inject_admission_fault(self, stage: str) -> None:
-        hook = self._admission_fault_hook
-        if hook is not None:
-            hook(stage)
-
-    def can_dispatch_task_materials(self, task_uuid: str) -> bool:
-        """Fail-closed proof used before WorkflowTask Job dispatch admission."""
-
-        if self._workflow_tasks is None or self._inventory is None:
-            return False
-        try:
-            task = self._workflow_tasks.get_workflow_task(task_uuid)
-            if task.get("status") not in {"pending", "running"}:
-                return False
-            snapshot = task.get("workflow_snapshot")
-            nodes = snapshot.get("nodes") if isinstance(snapshot, dict) else None
-            material_source_node_uuids = {
-                str(node.get("uuid") or "")
-                for node in nodes or []
-                if isinstance(node, dict) and node.get("type") == "material_source"
-            }
-            jobs = self._workflow_tasks.list_workflow_node_jobs(task_uuid)
-            material_source_jobs = [
-                job
-                for job in jobs
-                if job.get("workflow_node_uuid") in material_source_node_uuids
-            ]
-            if not material_source_jobs:
-                return True
-            if any(job.get("status") != "succeeded" for job in material_source_jobs):
-                return False
-        except (KeyError, TypeError, ValueError):
-            return False
-        projection = self._workflow_tasks.get_material_admission(task_uuid)
-        if not isinstance(projection, dict) or projection.get("status") != "admitted":
-            return False
-        reservation_uuid = projection.get("reservation_uuid")
-        if not isinstance(reservation_uuid, str) or not reservation_uuid:
-            return False
-        try:
-            return bool(
-                self._inventory.has_active_task_reservation(
-                    task_uuid,
-                    reservation_uuid,
-                )
-            )
-        except InventoryError:
-            return False
-
-    def reconcile_task_release(
-        self,
-        task_uuid: str,
-        reason: str,
-    ) -> TaskMaterialReleaseResult:
-        """Drive one replay-safe terminal Task Material release saga."""
-
-        with self._material_saga_slot(task_uuid):
-            return self._reconcile_task_release_serialized(task_uuid, reason)
-
-    def _reconcile_task_release_serialized(
-        self,
-        task_uuid: str,
-        reason: str,
-    ) -> TaskMaterialReleaseResult:
-        """Run release after the caller has acquired the Task saga slot."""
-
-        if self._workflow_tasks is None or self._inventory is None:
-            raise RuntimeError("Workflow Task Material coordination is not configured")
-        task = self._workflow_tasks.get_workflow_task(task_uuid)
-        canonical_task_uuid = str(task["uuid"])
-        normalized_reason = reason.strip()
-        if not normalized_reason:
-            raise ValueError("Material release reason must not be blank")
-        command_uuid = str(
-            uuid_mod.uuid5(
-                uuid_mod.UUID(canonical_task_uuid),
-                f"material-release:{normalized_reason}",
-            )
-        )
-        command = TaskMaterialReleaseCommand(
-            schema_version=1,
-            command_uuid=command_uuid,
-            idempotency_key=(
-                f"workflow-task:{canonical_task_uuid}:material-release:"
-                f"{normalized_reason}"
-            ),
-            workflow_task_uuid=canonical_task_uuid,
-            reason=normalized_reason,
-        )
-        result = self._inventory.release_task(command)
-        self._inject_admission_fault("after_inventory_release_commit")
-        self._workflow_tasks.project_material_release(result)
-        self._inject_admission_fault("after_workflow_release_projection")
-        self._inventory.acknowledge(result.outbox_sequence)
-        return result
+        for listener in tuple(self._job_finished_listeners):
+            listener(job_id, success, ret_value, suc_type)
 
     # ── 触发点 1：任务进来 ────────────────────────────────────
 
-    def submit_workflow(self, spec: WorkflowSpec) -> dict[str, Any]:
+    def submit_workflow(self, spec: WorkflowSpec) -> Dict[str, Any]:
+        with self._lock:
+            if (
+                spec.workflow_id in self._workflows
+                or spec.workflow_id in self._workflow_spans
+            ):
+                raise ValueError(f"workflow {spec.workflow_id} already submitted")
+            workflow_trace = start_detached_span(
+                "workflow.task.run",
+                attributes={
+                    "workflow.uuid": spec.workflow_id,
+                    "workflow.task.uuid": spec.task_id,
+                    "lab.id": spec.lab_id,
+                    "workflow.plan.node_count": len(spec.nodes),
+                    "workflow.priority": str(spec.priority),
+                },
+            )
+            # 先登记 span 也充当 submit 占位，避免并发同 ID 覆盖对方的追踪句柄。
+            self._workflow_spans[spec.workflow_id] = workflow_trace
+        try:
+            with workflow_trace.activate():
+                with span(
+                    "workflow.task.submit",
+                    attributes={
+                        "workflow.uuid": spec.workflow_id,
+                        "workflow.task.uuid": spec.task_id,
+                    },
+                ):
+                    return self._submit_workflow(spec)
+        except BaseException as exc:
+            workflow_trace.fail(exc)
+            workflow_trace.end()
+            self._workflow_spans.pop(spec.workflow_id, None)
+            raise
+
+    def _submit_workflow(self, spec: WorkflowSpec) -> Dict[str, Any]:
         """提交工作流并立即重排。返回本次下发结果。
 
-        Legacy material requirements are not an admission contract and fail closed.
+        带物料需求时：入队前整 DAG all-or-nothing 预留；不足则置
+        ``waiting_for_material``（不进入执行队列，后续每次重排自动重试）。
         """
         with self._lock:
             if spec.workflow_id in self._workflows:
                 raise ValueError(f"workflow {spec.workflow_id} already submitted")
-            if spec.material_requirements_by_node():
-                raise ValueError(
-                    "WorkflowSpec material requirements are retired; "
-                    "use WorkflowTask Material admission"
-                )
             run = WorkflowRun(spec)  # 构图 + 环检测，失败直接抛
             self._workflows[spec.workflow_id] = run
 
+            requirements = spec.material_requirements_by_node()
+            if requirements:
+                if self._inventory is None:
+                    logger.warning(
+                        "[EdgeScheduler] workflow %s declares materials but no inventory "
+                        "service wired; proceeding without reservation",
+                        spec.workflow_id,
+                    )
+                else:
+                    self._material_workflows.add(spec.workflow_id)
+                    if not self._try_reserve(run):
+                        run.state = WorkflowState.WAITING_MATERIAL
+
             logger.info(
-                "[EdgeScheduler] workflow %s submitted "
-                "(%d nodes, state=%s), reschedule",
+                "[EdgeScheduler] workflow %s submitted (%d nodes, state=%s), reschedule",
                 spec.workflow_id,
                 len(spec.nodes),
                 run.state.value,
@@ -1069,6 +372,100 @@ class EdgeScheduler:
             "dispatched": dispatched,
         }
 
+    def restore_workflow(
+        self,
+        spec: WorkflowSpec,
+        completed_results: Dict[str, Any],
+    ) -> Dict[str, Any]:
+        """从持久成功事实恢复一个未终态工作流（Workflow）。
+
+        参数：``spec`` 是原任务冻结规格；``completed_results`` 按节点
+        UUID 提供已持久成功的返回值。返回：恢复后状态与本轮新派
+        发摘要。异常：未知完成节点、重复运行或派发失败原样传播；
+        已完成节点只恢复 DAG 状态，绝不重放设备动作。
+        """
+
+        completed_node_ids = set(completed_results)
+        known_node_ids = {node.id for node in spec.nodes if not node.disabled}
+        unknown_node_ids = completed_node_ids - known_node_ids
+        if unknown_node_ids:
+            raise ValueError(
+                f"workflow {spec.workflow_id} has unknown completed nodes: "
+                f"{sorted(unknown_node_ids)}"
+            )
+        with self._lock:
+            if (
+                spec.workflow_id in self._workflows
+                or spec.workflow_id in self._workflow_spans
+            ):
+                raise ValueError(f"workflow {spec.workflow_id} already submitted")
+            workflow_trace = start_detached_span(
+                "workflow.task.run",
+                attributes={
+                    "workflow.uuid": spec.workflow_id,
+                    "workflow.task.uuid": spec.task_id,
+                    "workflow.plan.node_count": len(spec.nodes),
+                    "workflow.recovered.node_count": len(completed_results),
+                },
+            )
+            self._workflow_spans[spec.workflow_id] = workflow_trace
+        try:
+            with workflow_trace.activate(), self._lock:
+                run = WorkflowRun(spec)
+                self._workflows[spec.workflow_id] = run
+                requirements = spec.material_requirements_by_node()
+                if requirements and self._inventory is not None:
+                    self._material_workflows.add(spec.workflow_id)
+                    if not self._try_reserve(run):
+                        run.state = WorkflowState.WAITING_MATERIAL
+                for node in spec.nodes:
+                    if node.id in completed_results:
+                        run.mark_finished(node.id, completed_results[node.id])
+                logger.info(
+                    "[EdgeScheduler] workflow %s restored (%d/%d nodes completed)",
+                    spec.workflow_id,
+                    len(completed_results),
+                    len(spec.nodes),
+                )
+                self._emit_monitor(
+                    "scheduler",
+                    "workflow_restored",
+                    {
+                        "workflow_id": spec.workflow_id,
+                        "completed_nodes": len(completed_results),
+                        "nodes": len(spec.nodes),
+                        "state": run.state.value,
+                    },
+                )
+                dispatched = self._reschedule_locked()
+                notifications = self._collect_terminal_notifications()
+            self._fire_notifications(notifications)
+            return {
+                "workflow_id": spec.workflow_id,
+                "state": run.state.value,
+                "dispatched": dispatched,
+            }
+        except BaseException as exc:
+            workflow_trace.fail(exc)
+            workflow_trace.end()
+            self._workflow_spans.pop(spec.workflow_id, None)
+            raise
+
+    def _try_reserve(self, run: WorkflowRun) -> bool:
+        """尝试整 DAG 预留；不足返回 False（幂等，可反复重试）。"""
+        try:
+            self._inventory.reserve_workflow(
+                run.spec.workflow_id, run.spec.material_requirements_by_node()
+            )
+            return True
+        except InsufficientStock as exc:
+            logger.info(
+                "[EdgeScheduler] workflow %s waiting for material: %s",
+                run.spec.workflow_id,
+                exc,
+            )
+            return False
+
     # ── 触发点 2：子 action 完成 ──────────────────────────────
 
     def on_job_finished(
@@ -1077,19 +474,52 @@ class EdgeScheduler:
         success: bool,
         ret_value: Any = None,
         suc_type: str = "normal",
-    ) -> dict[str, Any]:
-        """job 完成回调（成功或失败）：写回结果 → 清依赖 → 强制重排。
+    ) -> Dict[str, Any]:
+        action_trace = self._job_spans.get(job_id)
+        if action_trace is None:
+            return self._on_job_finished(job_id, success, ret_value, suc_type)
+        try:
+            with action_trace.activate():
+                add_event(
+                    "action.result",
+                    {
+                        "workflow.job.uuid": job_id,
+                        "action.success": success,
+                        "action.success.type": suc_type,
+                    },
+                    span=action_trace.span,
+                )
+                if not success:
+                    action_trace.error("action execution failed")
+                return self._on_job_finished(job_id, success, ret_value, suc_type)
+        finally:
+            action_trace.end()
+            self._job_spans.pop(job_id, None)
+
+    def _on_job_finished(
+        self,
+        job_id: str,
+        success: bool,
+        ret_value: Any = None,
+        suc_type: str = "normal",
+    ) -> Dict[str, Any]:
+        """作业（Job）完成回调：写回结果、清理依赖并强制重排。
 
         ``suc_type`` 来自设备侧异常决策（registry.action_policy）：
         normal / skip / operator_intervention。skip 表示动作报错后人工选择
         跳过——节点按成功推进，但其已消费物料隔离待复核。
         """
         with self._lock:
-            job = self._inflight.pop(job_id, None)
-            self._job_resource_locks.pop(job_id, None)
+            job = self._inflight.get(job_id)
             if job is None:
                 logger.warning("[EdgeScheduler] unknown job finished: %s", job_id)
                 return {"dispatched": []}
+
+            # 标准完成事实必须先持久化；任一监听器失败时保留在途作业与资源锁，
+            # 允许设备对同一结果进行投递重放（DeliveryReplay）。
+            self._notify_job_finished(job_id, success, ret_value, suc_type)
+            self._inflight.pop(job_id, None)
+            self._job_resource_locks.pop(job_id, None)
 
             # 泳道图时间线：记录实际起止 + 喂给历史统计（EMA）+ 历史库落盘
             self._record_timeline(
@@ -1102,8 +532,29 @@ class EdgeScheduler:
 
             if success:
                 run.mark_finished(job.node_id, ret_value)
+                if suc_type == "skip" and job.workflow_id in self._material_workflows:
+                    # 异常后跳过：动作未真正完成，该节点已消费物料状态不明 → 隔离
+                    logger.warning(
+                        "[EdgeScheduler] node %s skipped after error, "
+                        "quarantine its consumed materials (wf=%s)",
+                        job.node_id,
+                        job.workflow_id,
+                    )
+                    self._safe_inventory_call(
+                        "quarantine_reservation",
+                        job.workflow_id,
+                        job.node_id,
+                        reason="node_skipped_after_error",
+                    )
             else:
                 run.mark_failed(job.node_id)
+                # 失败节点已物理使用的物料转 quarantined（不虚假加回）
+                if job.workflow_id in self._material_workflows:
+                    self._safe_inventory_call(
+                        "quarantine_reservation",
+                        job.workflow_id,
+                        job.node_id,
+                    )
                 # 失败工作流的未下发节点不再推进；已下发的等它们各自回调
                 logger.warning(
                     "[EdgeScheduler] node %s failed, workflow %s stops advancing",
@@ -1112,8 +563,7 @@ class EdgeScheduler:
                 )
 
             logger.info(
-                "[EdgeScheduler] job %s (wf=%s node=%s success=%s) "
-                "finished, reschedule",
+                "[EdgeScheduler] job %s (wf=%s node=%s success=%s) finished, reschedule",
                 job_id[:8],
                 job.workflow_id,
                 job.node_id,
@@ -1131,15 +581,73 @@ class EdgeScheduler:
 
     # ── 重排核心 ─────────────────────────────────────────────
 
-    def reschedule(self) -> list[dict[str, Any]]:
-        """手动触发重排（API 暴露；正常推进依赖两个自动触发点）。"""
+    def reschedule(self) -> List[Dict[str, Any]]:
+        """手动触发重排并先通知来源准入重试监听器。
+
+        参数：无。返回：本轮旧调度器实际派发摘要。异常：准入监听器或调度
+        失败原样传播；监听器在调度锁外运行，可把受阻任务安全注册到本调度器。
+        """
+
+        with self._lock:
+            admission_retry_listeners = tuple(self._admission_retry_listeners)
+        for listener in admission_retry_listeners:
+            listener()
         with self._lock:
             return self._reschedule_locked()
 
-    def _reschedule_locked(self) -> list[dict[str, Any]]:
+    def _reschedule_locked(self) -> List[Dict[str, Any]]:
+        with span(
+            "workflow.task.reconcile",
+            attributes={"scheduler.round": self._reschedule_count + 1},
+        ) as reschedule_span:
+            dispatched = self._reschedule_impl()
+            add_event(
+                "workflow.task.reconcile.result",
+                {"scheduler.dispatched.count": len(dispatched)},
+                span=reschedule_span,
+            )
+            return dispatched
+
+    def _reschedule_impl(self) -> List[Dict[str, Any]]:
+        """执行一轮完整重排，并下发当前能够安全执行的作业（Job）。
+
+        Returns:
+            本轮成功派发的作业摘要列表；物料冲突保持等待，合同错误标记失败。
+        """
+
         self._reschedule_count += 1
 
-        ready: list[ReadyTask] = []
+        # 等料工作流每次重排重试预留（补料后自动恢复 RUNNING）
+        if self._inventory is not None:
+            for run in self._workflows.values():
+                workflow_trace = self._workflow_spans.get(run.spec.workflow_id)
+                activation = (
+                    workflow_trace.activate()
+                    if workflow_trace is not None
+                    else span("workflow.material.retry")
+                )
+                with activation:
+                    reserved = (
+                        run.state is WorkflowState.WAITING_MATERIAL
+                        and self._try_reserve(run)
+                    )
+                if reserved:
+                    run.state = WorkflowState.RUNNING
+                    logger.info(
+                        "[EdgeScheduler] workflow %s material reserved, resume running",
+                        run.spec.workflow_id,
+                    )
+                    self._emit_monitor(
+                        "scheduler",
+                        "workflow_resumed",
+                        {
+                            "workflow_id": run.spec.workflow_id,
+                            "reason": "material_reserved",
+                        },
+                    )
+                    self._safe_history("record_state", run.spec.workflow_id, "running")
+
+        ready: List[ReadyTask] = []
         for run in self._workflows.values():
             if run.state is not WorkflowState.RUNNING:
                 continue
@@ -1161,19 +669,13 @@ class EdgeScheduler:
         held_resource_locks = self._held_resource_locks()
         ordered = self._orderer.order(ready, OrderingContext(set(busy)))
 
-        dispatched: list[dict[str, Any]] = []
+        dispatched: List[Dict[str, Any]] = []
         for task in ordered:
             key = task.node.device_action_key
-            device_key = task.node.device_lock_key
-            job_id = task.node.job_id or uuid_mod.uuid4().hex
             # manual_confirm 是 always-free 特殊节点：不占设备动作锁，也不受其阻塞
             manual_confirm = task.node.is_manual_confirm()
-            if (
-                not manual_confirm
-                and (key in busy or device_key in busy)
-                and not self.owns_live_inventory_claim(job_id)
-            ):
-                # v1 锁整个设备实例；任一 Action/Claim/fence 占用都阻止同设备下发。
+            if not manual_confirm and key in busy:
+                # 设备/动作被占用：本轮跳过，等占用 job 完成的那次重排再下发
                 continue
 
             run = self._workflows[task.workflow_id]
@@ -1189,8 +691,20 @@ class EdgeScheduler:
                 run.mark_failed(task.node.id)
                 continue
 
-            # 物料锁：被在执行 job 占用的 @action lock_resource 本轮跳过。
-            lock_keys = self._resource_lock_keys(task.node, resolved_args)
+            # Schema 解析失败必须关闭执行，不能退化为“没有物料锁”。
+            try:
+                lock_keys = self._resource_lock_keys(task.node, resolved_args)
+            except MaterialLockSchemaError as error:
+                logger.error(
+                    "[EdgeScheduler] 动作物料锁解析失败 wf=%s node=%s code=%s path=%s: %s",
+                    task.workflow_id,
+                    task.node.id,
+                    error.code,
+                    error.path,
+                    error.message,
+                )
+                run.mark_failed(task.node.id)
+                continue
             if lock_keys & held_resource_locks:
                 logger.info(
                     "[EdgeScheduler] node %s waits for resource lock(s) %s (wf=%s)",
@@ -1200,6 +714,35 @@ class EdgeScheduler:
                 )
                 continue
 
+            # 节点开始：预留 → FIFO lot 消费 + 实例 deploy（同一 SQLite 事务，幂等）
+            if (
+                task.workflow_id in self._material_workflows
+                and task.node.material_requirements
+            ):
+                try:
+                    workflow_trace = self._workflow_spans.get(task.workflow_id)
+                    activation = (
+                        workflow_trace.activate()
+                        if workflow_trace is not None
+                        else span("workflow.material.consume")
+                    )
+                    with activation:
+                        self._inventory.consume_reservation(
+                            task.workflow_id, task.node.id
+                        )
+                except InventoryError as exc:
+                    logger.error(
+                        "[EdgeScheduler] material consume failed for wf=%s node=%s: %s",
+                        task.workflow_id,
+                        task.node.id,
+                        exc,
+                    )
+                    run.mark_failed(task.node.id)
+                    continue
+
+            # ``job_id`` 优先复用标准工作流节点作业（WorkflowNodeJob）身份；旧整图
+            # 没有提供时才维持历史随机身份行为。
+            job_id = task.node.job_id or uuid_mod.uuid4().hex
             payload = build_job_start_payload(
                 job_id=job_id,
                 task_id=run.spec.task_id,
@@ -1213,90 +756,92 @@ class EdgeScheduler:
             # 预估基于 sjson 覆写后的 resolved 参数：父节点经 gjson/sjson 传下来的
             # 实际值（如 time）直接决定声明式预估结果
             estimated_s, estimate_source = self._estimator.estimate(key, resolved_args)
-            if not manual_confirm:
-                committed = False
-                formal_task_uuid = self._device_action_tasks_by_job_uuid.get(job_id)
-                try:
-                    if formal_task_uuid is not None:
-                        if self._device_action_task_before_dispatch is None:
-                            raise RuntimeError(
-                                "formal device-action Task claim hook is unavailable"
-                            )
-                        committed = (
-                            self._device_action_task_before_dispatch(
-                                task_uuid=formal_task_uuid,
-                                job_uuid=job_id,
-                                device_id=task.node.device_id,
-                                action_name=task.node.action_name,
-                            )
-                            is True
-                        )
-                        if not committed:
-                            logger.info(
-                                "[EdgeScheduler] formal Task waits for Inventory Claim "
-                                "(task=%s job=%s)",
-                                formal_task_uuid,
-                                job_id,
-                            )
-                            continue
-                    elif self._pre_dispatch_hook is not None:
-                        committed = self._pre_dispatch_hook(payload) is True
-                    self._dispatcher.dispatch(payload)
-                except Exception as error:
-                    if (
-                        committed
-                        and formal_task_uuid is not None
-                        and self._device_action_task_dispatch_error is not None
+            workflow_trace = self._workflow_spans.get(task.workflow_id)
+            action_trace = start_detached_span(
+                "action.run",
+                parent_context=(
+                    workflow_trace.context if workflow_trace is not None else None
+                ),
+                attributes={
+                    "workflow.job.uuid": job_id,
+                    "workflow.uuid": task.workflow_id,
+                    "workflow.node.uuid": task.node.id,
+                    "device.name": task.node.device_id,
+                    "action.name": task.node.action_name,
+                    "action.type": task.node.action_type,
+                    "action.manual_confirm": manual_confirm,
+                },
+            )
+            self._job_spans[job_id] = action_trace
+            try:
+                with action_trace.activate():
+                    with span(
+                        "workflow.job.dispatch",
+                        attributes={
+                            "workflow.job.uuid": job_id,
+                            "workflow.uuid": task.workflow_id,
+                            "workflow.node.uuid": task.node.id,
+                            "device.name": task.node.device_id,
+                            "action.name": task.node.action_name,
+                        },
                     ):
-                        self._device_action_task_dispatch_error(
-                            task_uuid=formal_task_uuid,
-                            job_uuid=job_id,
+                        # 标准任务/作业必须先提交派发意图，才能越过物理执行边界。
+                        self._notify_job_pre_dispatch(
+                            {
+                                "job_id": job_id,
+                                "workflow_id": task.workflow_id,
+                                "node_id": task.node.id,
+                                "device_action_key": key,
+                                "estimated_s": round(estimated_s, 3),
+                                "estimate_source": estimate_source,
+                                "resolved_args": resolved_args,
+                            }
+                        )
+                        # 派发意图持久化后，先保守登记本地在途作业和动作物料锁，再
+                        # 调用不可原子确认的执行适配器。适配器异常不得回滚这些事实。
+                        run.mark_dispatched(task.node.id)
+                        self._inflight[job_id] = DispatchedJob(
+                            job_id=job_id,
+                            workflow_id=task.workflow_id,
+                            node_id=task.node.id,
+                            device_action_key=key,
                             device_id=task.node.device_id,
                             action_name=task.node.action_name,
-                            error=error,
+                            estimated_s=estimated_s,
+                            estimate_source=estimate_source,
                         )
-                        run.mark_failed(task.node.id)
-                        logger.exception(
-                            "[EdgeScheduler] formal Task dispatch failed after "
-                            "durable pre-commit"
-                        )
-                        continue
-                    if committed and self._dispatch_error_hook is not None:
-                        self._dispatch_error_hook(payload, error)
-                        run.mark_failed(task.node.id)
-                        logger.exception(
-                            "[EdgeScheduler] dispatch failed after durable pre-commit"
-                        )
-                        continue
-                    raise
-            # manual_confirm 不进执行器：job 停驻在 inflight，
-            # 由 POST /jobs/{job_id}/finish（人工确认）走统一完成路径
-            run.mark_dispatched(task.node.id)
-            self._inflight[job_id] = DispatchedJob(
-                job_id=job_id,
-                workflow_id=task.workflow_id,
-                node_id=task.node.id,
-                device_action_key=key,
-                device_id=task.node.device_id,
-                action_name=task.node.action_name,
-                estimated_s=estimated_s,
-                estimate_source=estimate_source,
+                        if lock_keys:
+                            self._job_resource_locks[job_id] = lock_keys
+                            held_resource_locks |= lock_keys
+                        if not manual_confirm:
+                            self._dispatcher.dispatch(payload)
+            except BaseException as exc:
+                action_trace.fail(exc)
+                action_trace.end()
+                self._job_spans.pop(job_id, None)
+                raise
+            # 人工确认节点不进入执行器，但仍已在上方登记为在途作业，由统一完成
+            # 接口提交明确结果。
+            action_trace.event(
+                "action.dispatched",
+                {
+                    "workflow.job.uuid": job_id,
+                    "action.estimate.seconds": estimated_s,
+                    "action.estimate.source": estimate_source,
+                },
             )
             if not manual_confirm:
-                busy.update((key, device_key))
-            if lock_keys:
-                self._job_resource_locks[job_id] = lock_keys
-                held_resource_locks |= lock_keys
-            dispatched.append(
-                {
-                    "job_id": job_id,
-                    "workflow_id": task.workflow_id,
-                    "node_id": task.node.id,
-                    "device_action_key": key,
-                    "estimated_s": round(estimated_s, 3),
-                    "estimate_source": estimate_source,
-                }
-            )
+                busy.add(key)
+            # ``dispatched_item`` 同时供返回值、监控和标准 Task/Job 状态投影使用。
+            dispatched_item = {
+                "job_id": job_id,
+                "workflow_id": task.workflow_id,
+                "node_id": task.node.id,
+                "device_action_key": key,
+                "estimated_s": round(estimated_s, 3),
+                "estimate_source": estimate_source,
+            }
+            dispatched.append(dispatched_item)
             self._emit_monitor(
                 "action",
                 "job_dispatched",
@@ -1346,9 +891,9 @@ class EdgeScheduler:
         WorkflowState.TIMEOUT,
     )
 
-    def _collect_terminal_notifications(self) -> list[tuple[str, str]]:
+    def _collect_terminal_notifications(self) -> List["tuple[str, str]"]:
         """收集未处理过的终态工作流（须在锁内调用；通知/释放在锁外做）。"""
-        pending: list[tuple[str, str]] = []
+        pending: List["tuple[str, str]"] = []
         for wid, run in self._workflows.items():
             if (
                 run.state not in self._TERMINAL_STATES
@@ -1363,71 +908,109 @@ class EdgeScheduler:
                 {"workflow_id": wid, "state": run.state.value},
             )
             self._safe_history("record_state", wid, run.state.value)
-            for job_uuid, task_uuid in tuple(
-                self._device_action_tasks_by_job_uuid.items()
-            ):
-                if task_uuid == wid:
-                    self._device_action_tasks_by_job_uuid.pop(job_uuid, None)
         return pending
 
-    def _fire_notifications(self, notifications: list[tuple[str, str]]) -> None:
+    def _fire_notifications(self, notifications: List["tuple[str, str]"]) -> None:
         for wid, state in notifications:
-            if self._workflow_state_listener is None:
-                continue
-            try:
-                self._workflow_state_listener(wid, state)
-            except Exception:
-                logger.exception("[EdgeScheduler] workflow state listener failed")
+            workflow_trace = self._workflow_spans.get(wid)
+            activation = (
+                workflow_trace.activate()
+                if workflow_trace is not None
+                else span("workflow.task.terminal")
+            )
+            with activation:
+                add_event(
+                    "workflow.task.terminal",
+                    {"workflow.uuid": wid, "workflow.state": state},
+                    span=workflow_trace.span if workflow_trace is not None else None,
+                )
+                if workflow_trace is not None and state != WorkflowState.SUCCESS.value:
+                    workflow_trace.error(f"workflow {state}")
+                # 终态工作流释放剩余 active 预留（幂等，依据 DB 状态而非内存）
+                if (
+                    wid in self._material_workflows
+                    and state != WorkflowState.SUCCESS.value
+                ):
+                    self._safe_inventory_call(
+                        "release_workflow",
+                        wid,
+                        reason=f"workflow_{state}",
+                    )
+                if self._workflow_state_listener is not None:
+                    try:
+                        self._workflow_state_listener(wid, state)
+                    except Exception:  # noqa: BLE001 - 通知失败不影响调度
+                        logger.exception(
+                            "[EdgeScheduler] workflow state listener failed"
+                        )
+            if workflow_trace is not None:
+                workflow_trace.end()
+                self._workflow_spans.pop(wid, None)
+
+    def _safe_inventory_call(self, method: str, *args: Any, **kwargs: Any) -> None:
+        """调用 inventory（release/quarantine 等善后操作）；失败记日志不阻断调度。"""
+        if self._inventory is None:
+            return
+        try:
+            getattr(self._inventory, method)(*args, **kwargs)
+        except Exception:  # noqa: BLE001 - 善后失败可由人工经 inventory API 补救
+            logger.exception("[EdgeScheduler] inventory.%s failed", method)
 
     # ── 物料/资源锁 ──────────────────────────────────────────
 
-    def _held_resource_locks(self) -> set[str]:
-        held: set[str] = set()
+    def _held_resource_locks(self) -> Set[str]:
+        held: Set[str] = set()
         for keys in self._job_resource_locks.values():
             held |= keys
         return held
 
-    def _resource_lock_keys(self, node: Any, resolved_args: dict[str, Any]) -> set[str]:
-        """节点的资源锁键集合只来自 explicit action lock_resource。"""
-        keys: set[str] = set()
-        if self._lock_resource_resolver is not None:
-            try:
-                param_names = (
-                    self._lock_resource_resolver(node.device_id, node.action_name) or []
-                )
-            except Exception:
-                logger.exception("[EdgeScheduler] lock_resource resolver failed")
-                param_names = []
-            for name in param_names:
-                for rid in _extract_resource_ids(resolved_args.get(name)):
-                    keys.add(f"res:{rid}")
+    def _resource_lock_keys(self, node: Any, resolved_args: Dict[str, Any]) -> Set[str]:
+        """生成节点本次执行需要持有的物料锁键。
+
+        参数：``node`` 是当前准备派发的工作流节点（WorkflowNode），
+        ``resolved_args`` 是合并上游输出后的最终动作参数。返回：使用
+        ``material/{uuid}/exclusive`` 规范格式的物料锁键集合。异常：
+        冻结动作合同（Action Contract）、遗留注册表（Registry）Schema
+        或最终参数不能安全解析时抛 ``MaterialLockSchemaError``。
+        """
+
+        keys: Set[str] = set()
+        frozen_schema = getattr(node, "param_schema", None)
+        if frozen_schema is not None:
+            # ``material_uuids`` 优先来自任务创建时的冻结动作合同。
+            material_uuids = compile_material_lock_schema(
+                frozen_schema
+            ).material_lock_uuids(resolved_args)
+            keys.update(
+                f"material/{material_uuid}/exclusive"
+                for material_uuid in material_uuids
+            )
+        elif self._material_lock_resolver is not None:
+            # ``material_uuids`` 只为无冻结合同的遗留直接调用读取实时注册表。
+            material_uuids = self._material_lock_resolver(
+                node.device_id,
+                node.action_name,
+                resolved_args,
+            )
+            keys.update(
+                f"material/{material_uuid}/exclusive"
+                for material_uuid in material_uuids
+            )
+        for req in getattr(node, "material_requirements", []) or []:
+            if getattr(req, "instance_uuid", ""):
+                keys.add(f"material/{req.instance_uuid}/exclusive")
         return keys
 
-    def _busy_keys(self) -> set[str]:
+    def _busy_keys(self) -> Set[str]:
         busy = set(self._external_busy_keys)
         if self._busy_key_provider is not None:
             try:
                 busy |= set(self._busy_key_provider())
-            except Exception:
+            except Exception:  # noqa: BLE001 - 锁视图失败时退化为 inflight 视图
                 logger.exception("[EdgeScheduler] busy_key_provider failed")
-        if self._device_action_fence_provider is not None:
-            try:
-                busy |= set(self._device_action_fence_provider())
-            except Exception:
-                logger.exception("[EdgeScheduler] device_action_fence_provider failed")
         for job in self._inflight.values():
             busy.add(job.device_action_key)
-            busy.add(f"/devices/{job.device_id}")
         return busy
-
-    def set_device_action_fence_provider(
-        self,
-        provider: Callable[[], set[str]] | None,
-    ) -> None:
-        """绑定 D1A durable claimed/unknown fence projection。"""
-
-        with self._lock:
-            self._device_action_fence_provider = provider
 
     # ── 泳道图时间线 ─────────────────────────────────────────
 
@@ -1492,7 +1075,7 @@ class EdgeScheduler:
             },
         )
 
-    def timeline(self, window_s: float = 3600.0) -> dict[str, Any]:
+    def timeline(self, window_s: float = 3600.0) -> Dict[str, Any]:
         """泳道图数据：执行中 job + 窗口内已完结 job + 预估器状态。
 
         泳道由前端按 device_id（或 device_action_key）分组；running 条目
@@ -1529,11 +1112,11 @@ class EdgeScheduler:
                 },
             }
 
-    def device_status(self) -> list[dict[str, Any]]:
+    def device_status(self) -> List[Dict[str, Any]]:
         """设备占用视图（监控面板）：busy 来自 inflight，idle 来自时间线痕迹。"""
         now = time.time()
         with self._lock:
-            devices: dict[str, dict[str, Any]] = {}
+            devices: Dict[str, Dict[str, Any]] = {}
             # 时间线里出现过的设备默认 idle（带最近一次动作）
             for entry in self._timeline:
                 dev = entry["device_id"] or entry["device_action_key"]
@@ -1565,7 +1148,7 @@ class EdgeScheduler:
 
     # ── 查询 ─────────────────────────────────────────────────
 
-    def workflow_snapshot(self, workflow_id: str) -> dict[str, Any] | None:
+    def workflow_snapshot(self, workflow_id: str) -> Optional[Dict[str, Any]]:
         with self._lock:
             run = self._workflows.get(workflow_id)
             if run is None:
@@ -1578,7 +1161,7 @@ class EdgeScheduler:
                     nodes[job.node_id]["job_id"] = job_id
             return snap
 
-    def snapshot(self) -> dict[str, Any]:
+    def snapshot(self) -> Dict[str, Any]:
         with self._lock:
             return {
                 "workflows": {
@@ -1615,6 +1198,11 @@ class EdgeScheduler:
             for job_id in removed:
                 job = self._inflight.pop(job_id, None)
                 self._job_resource_locks.pop(job_id, None)
+                action_trace = self._job_spans.pop(job_id, None)
+                if action_trace is not None:
+                    action_trace.error("action canceled")
+                    action_trace.event("action.canceled", {"workflow.job.uuid": job_id})
+                    action_trace.end()
                 if job is not None:
                     self._record_timeline(job, success=False, state="canceled")
             notifications = self._collect_terminal_notifications()

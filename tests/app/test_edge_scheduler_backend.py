@@ -1,4 +1,4 @@
-"""JobExecutionBackend（HostNode 微后端）与 EdgeScheduler 全链路测试。
+"""作业执行微后端（JobExecutionBackend）与本地调度器（EdgeScheduler）全链路测试。
 
 FakeHostNode 模拟设备执行：send_goal 后按配置同步回报 publish_job_status，
 验证「调度器 → 微后端 → HostNode → 回报 → 调度器重排」闭环。
@@ -15,16 +15,54 @@ from unilabos.app.ws_client import QueueItem
 from unilabos.utils.type_check import serialize_result_info
 
 
+def _unlocked_action_mapping() -> Dict[str, Any]:
+    """构造不含物料参数的遗留动作注册表条目。
+
+    Returns:
+        可验证任意对象参数、但不会产生动作物料锁的动作 Schema。
+    """
+
+    return {
+        "contract_kind": "legacy",
+        "schema": {
+            "type": "object",
+            "properties": {
+                "goal": {
+                    "type": "object",
+                    "properties": {},
+                    "additionalProperties": True,
+                },
+                "feedback": {},
+                "result": {},
+            },
+            "required": ["goal"],
+        },
+    }
+
+
 class FakeHostNode:
     """记录 send_goal；auto_complete 时立即回报成功结果。"""
 
     def __init__(self, backend_ref: Dict[str, Any], auto_complete: bool = True,
                  ret_values: Optional[Dict[str, Any]] = None):
+        """初始化带最小动作目录的测试 HostNode。
+
+        Args:
+            backend_ref: 延迟绑定作业执行微后端的共享引用。
+            auto_complete: 收到设备命令后是否立即回报成功。
+            ret_values: 按 ``device/action`` 指定的模拟动作结果。
+        """
+
         self.sent_goals: List[QueueItem] = []
         self.backend_ref = backend_ref  # {"backend": JobExecutionBackend}，延迟绑定
         self.auto_complete = auto_complete
         self.ret_values = ret_values or {}
         self.lock = threading.Lock()
+        # 动作目录覆盖端到端用例中的三个设备，证明调度前已取得 Schema。
+        self._action_value_mappings = {
+            device_id: {"run": _unlocked_action_mapping()}
+            for device_id in ("dev1", "dev2", "shared")
+        }
 
     def send_goal(self, item: QueueItem, action_type: str, action_kwargs: Dict[str, Any],
                   sample_material: Dict[str, Any], server_info: Any = None) -> None:
@@ -57,6 +95,23 @@ def _make_backend(auto_complete: bool = True):
 
 
 class TestBackendAlone:
+    def test_default_host_getter_waits_for_host_startup(self, monkeypatch):
+        """默认执行后端应等待 Host 节点完成启动，不应在启动窗口误判失败。"""
+
+        from unilabos.ros.nodes.presets.host_node import HostNode
+
+        observed_timeouts = []
+        expected = object()
+
+        def get_instance(timeout):
+            observed_timeouts.append(timeout)
+            return expected
+
+        monkeypatch.setattr(HostNode, "get_instance", get_instance)
+
+        assert JobExecutionBackend._default_host_getter() is expected
+        assert observed_timeouts == [30]
+
     def test_dispatch_sends_goal(self):
         backend, host = _make_backend(auto_complete=False)
         try:
@@ -108,6 +163,35 @@ class TestBackendAlone:
         finally:
             backend.stop()
 
+    def test_explicit_device_business_failure_is_not_reported_as_job_success(self):
+        backend, host = _make_backend(auto_complete=False)
+        received: List[tuple] = []
+        backend.add_job_finished_listener(lambda *args: received.append(args))
+        try:
+            backend.dispatch(build_job_start_payload(
+                job_id="j-business-failed", task_id="t", workflow_id="wf", node_id="A",
+                device_id="d1", action_name="run", action_type="goal", action_args={},
+            ))
+            assert backend.wait_idle()
+            rejection = {
+                "success": False,
+                "state": "REJECTED",
+                "message": "设备拒绝执行",
+            }
+            backend.publish_job_status(
+                {},
+                host.sent_goals[0],
+                "success",
+                serialize_result_info("", True, rejection),
+            )
+            assert backend.wait_idle()
+
+            assert received == [
+                ("j-business-failed", False, rejection, "normal")
+            ]
+        finally:
+            backend.stop()
+
     def test_foreign_job_status_ignored(self):
         backend, _ = _make_backend(auto_complete=False)
         received: List[tuple] = []
@@ -136,6 +220,40 @@ class TestBackendAlone:
             assert backend.wait_idle()
             assert received == []
             assert backend.busy_device_action_keys() == {"/devices/d1/run"}
+        finally:
+            backend.stop()
+
+    def test_missing_ros_action_fails_without_hostlink_fallback(self):
+        class MissingRosHost:
+            def send_goal(self, *_args, **_kwargs):
+                raise ValueError("ActionClient /devices/d1/run not found.")
+
+        backend = JobExecutionBackend(host_node_getter=lambda: MissingRosHost())
+        received = []
+        done = threading.Event()
+
+        def finished(*args):
+            received.append(args)
+            done.set()
+
+        backend.add_job_finished_listener(finished)
+        backend.start()
+        try:
+            backend.dispatch(
+                build_job_start_payload(
+                    job_id="j-ros-missing",
+                    task_id="t",
+                    workflow_id="wf",
+                    node_id="A",
+                    device_id="d1",
+                    action_name="run",
+                    action_type="goal",
+                    action_args={"x": 7.5},
+                )
+            )
+            assert done.wait(3.0)
+            assert backend.wait_idle()
+            assert received == [("j-ros-missing", False, None, "normal")]
         finally:
             backend.stop()
 

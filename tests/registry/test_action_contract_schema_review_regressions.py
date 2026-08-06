@@ -1,4 +1,4 @@
-"""Action Contract facade reviewer findings 的公共 seam 回归测试。"""
+"""动作合同（ActionContract）门面审查发现的公共接缝（seam）回归测试。"""
 
 from __future__ import annotations
 

@@ -1,4 +1,4 @@
-"""Workflow 与 Action 源码可使用的有限注解辅助类型。"""
+"""工作流（Workflow）与动作（Action）源码可使用的有限注解辅助类型。"""
 
 from __future__ import annotations
 
@@ -17,3 +17,14 @@ class AllowedResourceTemplates:
 
     def __init__(self, *resource_templates: object) -> None:
         object.__setattr__(self, "resource_templates", tuple(resource_templates))
+
+
+@dataclass(frozen=True, slots=True)
+class MaterialLock:
+    """显式声明动作输入物料占位符（ResourceSlot）不取得物料锁。"""
+
+    free: bool
+
+    def __post_init__(self) -> None:
+        if self.free is not True:
+            raise ValueError("MaterialLock 只接受显式 free=True")

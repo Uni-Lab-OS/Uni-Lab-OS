@@ -1,4 +1,4 @@
-"""Action 参数与 named result 组合 facade 的公共行为合同。"""
+"""动作（Action）参数与具名结果（named result）组合门面的公共行为合同。"""
 
 from __future__ import annotations
 

@@ -20,34 +20,81 @@ from __future__ import annotations
 import logging
 import os
 import time
-from typing import Any
+from copy import deepcopy
+from typing import Any, Optional, Tuple
 
 from unilabos.app.scheduler.backend import JobExecutionBackend, create_edge_stack
 from unilabos.app.scheduler.ordering import HttpSchedulerOrderer, StableLocalOrderer
 from unilabos.app.scheduler.service import EdgeScheduler
+from unilabos.utils.tracing import inject_trace_context
 
 logger = logging.getLogger(__name__)
 
 # 进程内单例（主进程装配一次，ws_client/api 层共享）
-_scheduler: EdgeScheduler | None = None
-_backend: JobExecutionBackend | None = None
-_inventory: Any | None = None
-_outbox_worker: Any | None = None
-_owns_inventory = False
-_workflow_tasks: Any | None = None
-_workflow_reconciler_attached = False
+_scheduler: Optional[EdgeScheduler] = None
+_backend: Optional[JobExecutionBackend] = None
+_inventory: Optional[Any] = None
+_outbox_worker: Optional[Any] = None
+# 工作区物料外形是包资产编译结果，不属于库存数据库私有事实。
+_material_shapes: tuple[dict[str, Any], ...] = ()
+# 工作区模型目录仅授权 OS 公开 HTTP 路由，不经过 local_bridge。
+_material_model_catalog: Optional[Any] = None
 
 
-def get_edge_scheduler() -> EdgeScheduler | None:
+class CloudBusinessError(RuntimeError):
+    """Cloud returned HTTP success but a non-zero ``common.Resp.code``."""
+
+    def __init__(self, code: int, message: str, info: Optional[list[str]] = None):
+        super().__init__(message)
+        self.code = code
+        self.info = info or []
+
+
+def unwrap_cloud_response(body: object) -> Any:
+    """Validate and unwrap the Go Cloud envelope without hiding business errors."""
+    from unilabos.app.scheduler.inventory.schemas import CloudResponse
+
+    envelope = CloudResponse.model_validate(body)
+    if envelope.code != 0:
+        message = (
+            envelope.error.msg
+            if envelope.error is not None
+            else f"Cloud business error {envelope.code}"
+        )
+        info = envelope.error.info if envelope.error is not None else []
+        raise CloudBusinessError(envelope.code, message, info)
+    return envelope.data
+
+
+def get_edge_scheduler() -> Optional[EdgeScheduler]:
     return _scheduler
 
 
-def get_edge_backend() -> JobExecutionBackend | None:
+def get_edge_backend() -> Optional[JobExecutionBackend]:
     return _backend
 
 
-def get_inventory_service() -> Any | None:
+def get_inventory_service() -> Optional[Any]:
     return _inventory
+
+
+def get_material_shapes() -> list[dict[str, Any]]:
+    """返回工作区编译后的静态物料外形副本。
+
+    参数：无。返回：容器不与组合根共享的公共外形列表。异常：无。
+    """
+
+    return deepcopy(list(_material_shapes))
+
+
+def get_material_model_catalog() -> Optional[Any]:
+    """返回当前启动代际的 OS 公开物料模型目录。
+
+    参数：无。返回：尚未组装时为 ``None``，否则返回受限目录同一
+    对象，供 HTTP 资产路由读取。异常：无；目录自身是不可变启动快照。
+    """
+
+    return _material_model_catalog
 
 
 def make_http_sync_sender() -> Any:
@@ -56,20 +103,217 @@ def make_http_sync_sender() -> Any:
     复用 HTTPClient 的 remote_addr + Lab auth 会话；云端未部署该端点时请求会
     失败，OutboxWorker 按指数退避保留事件重试（不丢数据、自愈）。
     """
+    from unilabos.app.scheduler.inventory.schemas import (
+        CloudInventoryEventBatch,
+        CloudSyncAck,
+    )
     from unilabos.app.web.client import http_client
 
     def send(events: Any) -> int:
+        if not events:
+            raise ValueError("inventory event batch cannot be empty")
+        batch = CloudInventoryEventBatch.model_validate(
+            {"edge_id": events[0].get("edge_id", ""), "events": events}
+        )
+        trace_headers: dict[str, Any] = {}
+        inject_trace_context(trace_headers)
         resp = http_client._session.post(
             f"{http_client.remote_addr}/edge/sync/events",
-            json={"edge_id": events[0]["edge_id"], "events": events},
+            json=batch.model_dump(mode="json", exclude_none=True),
+            headers=trace_headers,
             timeout=30,
         )
         resp.raise_for_status()
-        body = resp.json()
-        data = body.get("data") or body
-        return int(data.get("acked_sequence") or 0)
+        data = unwrap_cloud_response(resp.json())
+        return CloudSyncAck.model_validate(data).acked_sequence
 
     return send
+
+
+def make_http_snapshot_sender(edge_id: str) -> Any:
+    """Build a sender for the Cloud snapshot envelope (not the Local REST DTO)."""
+    from unilabos.app.scheduler.inventory.schemas import (
+        CloudInventorySnapshotRequest,
+    )
+    from unilabos.app.web.client import http_client
+
+    def send(snapshot: Any) -> None:
+        request = CloudInventorySnapshotRequest.from_edge_snapshot(edge_id, snapshot)
+        trace_headers: dict[str, Any] = {}
+        inject_trace_context(trace_headers)
+        resp = http_client._session.post(
+            f"{http_client.remote_addr}/edge/sync/snapshot",
+            json=request.model_dump(mode="json", exclude_none=True),
+            headers=trace_headers,
+            timeout=30,
+        )
+        resp.raise_for_status()
+        unwrap_cloud_response(resp.json())
+
+    return send
+
+
+def report_http_inventory_command_result(response: object) -> None:
+    """POST a typed command result and validate the Cloud business envelope."""
+    from unilabos.app.scheduler.inventory.schemas import (
+        CloudInventoryCommandResultRequest,
+        InventoryCommandResult,
+    )
+    from unilabos.app.web.client import http_client
+
+    local = InventoryCommandResult.model_validate(response)
+    request = CloudInventoryCommandResultRequest(
+        command_id=local.command_id,
+        status=local.status,
+        result=local.result,
+        error=local.error,
+    )
+    trace_headers: dict[str, Any] = {}
+    inject_trace_context(trace_headers)
+    resp = http_client._session.post(
+        f"{http_client.remote_addr}/edge/inventory/command_result",
+        json=request.model_dump(mode="json", exclude_none=True),
+        headers=trace_headers,
+        timeout=15,
+    )
+    resp.raise_for_status()
+    unwrap_cloud_response(resp.json())
+
+
+def _wire_inventory_ws_client(inventory: Any, ws_client: Any) -> None:
+    """Expose the host-owned inventory command target without requiring scheduler."""
+
+    message_processor = getattr(ws_client, "message_processor", None)
+    if message_processor is None:
+        logger.warning("[EdgeInventoryIntegration] ws_client has no message_processor")
+        return
+    message_processor.inventory_service = inventory
+
+
+def setup_edge_inventory(
+    inventory_db_path: str,
+    *,
+    edge_id: str = "edge-default",
+    lab_id: str = "edge-lab",
+    ws_client: Any = None,
+    sync_sender: Any = None,
+    resource_tree_set: Any = None,
+    registry_snapshot: Any = None,
+    resource_graph_source_id: str = "",
+    material_shapes: Any = None,
+    material_model_catalog: Any = None,
+) -> Any:
+    """启动主机库存服务并可选建立资源图投影（Resource Graph Projection）。
+
+    参数：``inventory_db_path`` 是主机私有 SQLite 路径；``edge_id`` 与
+    ``lab_id`` 是库存事件身份；``ws_client`` 和 ``sync_sender`` 分别接入主机链路
+    与发件箱（Outbox）；资源树、注册表快照和来源身份共同提供资源图投影；
+    ``material_shapes`` 是工作区包资产编译后的静态公共投影；
+    ``material_model_catalog`` 是只通过 OS 公开 HTTP 路由读取的同代模型目录。
+    返回：进程内唯一库存服务。异常：路径切换、外形形状、模型目录换代、
+    投影参数不完整或资源图不安全时关闭式失败；
+    从节点不调用本函数，因此不会打开此数据库。
+    """
+
+    global _inventory, _material_model_catalog, _material_shapes, _outbox_worker
+    path = str(inventory_db_path or "").strip()
+    if not path:
+        raise ValueError("inventory_db_path is required")
+    if material_shapes is not None:
+        if not isinstance(material_shapes, (list, tuple)) or any(
+            not isinstance(shape, dict) for shape in material_shapes
+        ):
+            raise TypeError("material_shapes 必须是对象列表或 tuple")
+        # ``_material_shapes`` 固定本进程启动代际，读取端只获得深复制副本。
+        compiled_shapes = tuple(deepcopy(material_shapes))
+        if _inventory is not None and _material_shapes != compiled_shapes:
+            raise RuntimeError("库存服务启动后不得切换工作区物料外形代际")
+        _material_shapes = compiled_shapes
+    if material_model_catalog is not None:
+        models_by_template = getattr(
+            material_model_catalog,
+            "models_by_template",
+            None,
+        )
+        if not isinstance(models_by_template, dict) and not hasattr(
+            models_by_template,
+            "items",
+        ):
+            raise TypeError("物料模型目录必须提供 models_by_template 映射")
+        if (
+            _inventory is not None
+            and _material_model_catalog is not material_model_catalog
+        ):
+            raise RuntimeError("库存服务启动后不得切换工作区物料模型目录代际")
+        # ``_material_model_catalog`` 固定资产授权根和模板模型的同一启动快照。
+        _material_model_catalog = material_model_catalog
+    if path != ":memory:":
+        path = os.path.abspath(os.path.expanduser(path))
+        os.makedirs(os.path.dirname(path) or ".", exist_ok=True)
+
+    if _inventory is None:
+        from unilabos.app.scheduler.inventory.service import InventoryService
+        from unilabos.app.scheduler.inventory.store import InventoryStore
+
+        from unilabos.app.scheduler.monitor import monitor_bus
+
+        _inventory = InventoryService(
+            InventoryStore(path),
+            edge_id=edge_id,
+            lab_id=lab_id,
+            monitor=monitor_bus,
+        )
+        logger.info("[EdgeInventoryIntegration] inventory ready: %s", path)
+    else:
+        active_path = str(getattr(_inventory.store, "path", ""))
+        if active_path and active_path != path:
+            raise RuntimeError(
+                f"inventory already initialized at {active_path}, cannot switch to {path}"
+            )
+
+    # 三项启动输入必须全有或全无，防止调用者绕过稳定模板身份或来源指纹。
+    resource_graph_source = str(resource_graph_source_id or "").strip()
+    has_bootstrap_input = (
+        resource_tree_set is not None
+        or registry_snapshot is not None
+        or bool(resource_graph_source)
+    )
+    if has_bootstrap_input:
+        if (
+            resource_tree_set is None
+            or registry_snapshot is None
+            or not resource_graph_source
+        ):
+            raise ValueError("资源图启动投影参数必须同时提供")
+        from unilabos.app.scheduler.inventory.resource_graph_bootstrap import (
+            bootstrap_local_resource_graph,
+        )
+
+        bootstrap_local_resource_graph(
+            store=_inventory.store,
+            resource_tree_set=resource_tree_set,
+            registry_snapshot=registry_snapshot,
+            source_id=resource_graph_source,
+            material_rendering_by_template=(
+                _material_model_catalog.models_by_template
+                if _material_model_catalog is not None
+                else None
+            ),
+        )
+
+    if ws_client is not None:
+        _wire_inventory_ws_client(_inventory, ws_client)
+
+    if sync_sender is not None and _outbox_worker is None:
+        from unilabos.app.scheduler.inventory.sync import OutboxWorker
+
+        _outbox_worker = OutboxWorker(_inventory.store, sync_sender)
+        _outbox_worker.start()
+    elif sync_sender is None:
+        logger.info(
+            "[EdgeInventoryIntegration] cloud sync disabled; outbox retained locally"
+        )
+    return _inventory
 
 
 def setup_edge_scheduler(
@@ -78,15 +322,12 @@ def setup_edge_scheduler(
     ordering_algorithm: str = "WeightedCriticalPath",
     lab_id: str = "edge-lab",
     host_node_getter: Any = None,
-    working_dir: str = "",
-    inventory_resource_templates: Any = None,
-    inventory_service: Any = None,
-    workflow_tasks: Any = None,
+    inventory_db_path: str = "",
     edge_id: str = "edge-default",
     sync_sender: Any = None,
     device_state_db_path: str = "",
     workflow_history_db_path: str = "",
-) -> tuple[EdgeScheduler, JobExecutionBackend]:
+) -> Tuple[EdgeScheduler, JobExecutionBackend]:
     """装配 EdgeScheduler + 微后端，并接通云端 ws 链路（幂等）。
 
     Args:
@@ -95,10 +336,7 @@ def setup_edge_scheduler(
             - 注入 message_processor.inventory_service（inventory_command 执行目标）
             - 注册工作流终态上报（workflow_status 消息）
         ordering_url: uni-lab-scheduler 地址（空则本地稳定排序）
-        working_dir: OS workspace；Inventory 固定使用其下的 ``inventory.db``。
-        inventory_resource_templates: Registry 注入的只读 ResourceTemplate identities。
-        inventory_service: workspace composition 已打开的唯一 InventoryService。
-        workflow_tasks: 同一 composition 的 WorkflowService durable Task authority。
+        inventory_db_path: Edge 仓储 SQLite 路径（空 = 不启用仓储/物料衔接）
         sync_sender: outbox 上报 callable（events → acked_sequence）；
             传入时启动 OutboxWorker，不传则事件保留在 outbox（云端端点就绪后再挂）
         device_state_db_path: 设备状态 SQLite 路径（独立于仓储/工作流库；
@@ -112,20 +350,8 @@ def setup_edge_scheduler(
     Returns:
         (scheduler, backend)；backend 需由调用方追加进 HostNode bridges 列表。
     """
-    global _scheduler, _backend, _inventory, _outbox_worker, _owns_inventory
-    global _workflow_tasks, _workflow_reconciler_attached
+    global _scheduler, _backend, _inventory, _outbox_worker
     if _scheduler is not None and _backend is not None:
-        if workflow_tasks is not None:
-            from unilabos.workflow.composition import (
-                configure_device_action_runtime,
-            )
-
-            _workflow_tasks = workflow_tasks
-            configure_device_action_runtime(
-                workflow_tasks,
-                _scheduler,
-                _backend,
-            )
         logger.warning(
             "[EdgeSchedulerIntegration] already set up, reusing existing stack"
         )
@@ -149,35 +375,17 @@ def setup_edge_scheduler(
     else:
         orderer = StableLocalOrderer()
 
-    if inventory_service is not None and working_dir:
-        raise ValueError("inventory_service and working_dir are mutually exclusive")
-    inventory = inventory_service
-    if working_dir:
-        from unilabos.app.scheduler.inventory.service import InventoryService
-        from unilabos.app.scheduler.monitor import monitor_bus as _monitor_bus
-
-        inventory = InventoryService.open(
-            working_dir=working_dir,
-            resource_templates=inventory_resource_templates or {},
+    inventory = _inventory
+    if inventory_db_path:
+        inventory = setup_edge_inventory(
+            inventory_db_path,
             edge_id=edge_id,
             lab_id=lab_id,
-            monitor=_monitor_bus,
+            ws_client=ws_client,
+            sync_sender=sync_sender,
         )
-        _owns_inventory = True
-    if inventory is not None:
-        _inventory = inventory
-        # 本地优先：仅显式传入 sync_sender 时才启动云端同步；纯本地模式下
-        # 领域事件留在 sync_outbox（SQLite），后续接入云端时挂 worker 重放即可。
-        if sync_sender is not None:
-            from unilabos.app.scheduler.inventory.sync import OutboxWorker
-
-            _outbox_worker = OutboxWorker(inventory, sync_sender)
-            _outbox_worker.start()
-        else:
-            logger.info(
-                "[EdgeSchedulerIntegration] cloud sync disabled (local-only mode); "
-                "outbox events retained in workspace inventory.db",
-            )
+    elif inventory is not None and ws_client is not None:
+        _wire_inventory_ws_client(inventory, ws_client)
 
     from unilabos.app.scheduler.monitor import monitor_bus
 
@@ -215,38 +423,16 @@ def setup_edge_scheduler(
             )
         logger.info("[EdgeSchedulerIntegration] workflow history store: %s", history_db)
 
-    shared_device_manager = (
-        getattr(ws_client, "device_manager", None) if ws_client is not None else None
-    )
     scheduler, backend = create_edge_stack(
         orderer=orderer,
-        device_manager=shared_device_manager,
         host_node_getter=host_node_getter,
         inventory=inventory,
         estimator=estimator,
         monitor=monitor_bus,
         device_state_store=device_state_store,
         history=history_store,
-        workflow_tasks=workflow_tasks,
     )
     _scheduler, _backend = scheduler, backend
-
-    if workflow_tasks is not None:
-        from unilabos.workflow.composition import configure_device_action_runtime
-
-        _workflow_tasks = workflow_tasks
-        configure_device_action_runtime(workflow_tasks, scheduler, backend)
-
-    if workflow_tasks is not None and inventory is not None:
-        from unilabos.workflow.composition import configure_workflow_task_reconciler
-
-        _workflow_tasks = workflow_tasks
-        _workflow_reconciler_attached = configure_workflow_task_reconciler(
-            workflow_tasks,
-            scheduler.reconcile_task_material_state,
-            scheduler.can_dispatch_task_materials,
-        )
-        scheduler.reconcile_workflow_task_materials()
 
     if ws_client is not None:
         _wire_ws_client(scheduler, ws_client)
@@ -282,46 +468,64 @@ def _wire_ws_client(scheduler: EdgeScheduler, ws_client: Any) -> None:
         try:
             if message_processor is not None:
                 message_processor.send_message(message)
-        except Exception:
+        except Exception:  # noqa: BLE001 - 上报失败不影响调度
             logger.exception("[EdgeSchedulerIntegration] workflow_status report failed")
 
     scheduler.set_workflow_state_listener(_report_workflow_state)
 
 
-def reset_for_test() -> None:
-    """测试用：清掉进程内单例。"""
-    global _scheduler, _backend, _inventory, _outbox_worker, _owns_inventory
-    global _workflow_tasks, _workflow_reconciler_attached
-    if _workflow_tasks is not None:
-        from unilabos.workflow.composition import configure_device_action_runtime
+def shutdown_edge_services() -> None:
+    """关闭进程拥有的全部 Edge 服务并清除启动代际。
 
-        configure_device_action_runtime(_workflow_tasks, None, None)
-    if _workflow_reconciler_attached and _workflow_tasks is not None:
-        from unilabos.workflow.composition import configure_workflow_task_reconciler
+    参数：无。返回：无。异常：底层关闭错误原样抛出，避免遗留半关闭单例。
+    """
 
-        configure_workflow_task_reconciler(_workflow_tasks, None)
+    global _scheduler, _backend, _inventory
+    global _material_model_catalog, _material_shapes, _outbox_worker
+    from unilabos.app.scheduler.host_network import shutdown_network_services
+
+    # 先拒绝新 Slave/物料请求，再关闭请求会触达的调度与存储组件。
+    shutdown_network_services()
     if _backend is not None:
         _backend.stop()
+        device_state = getattr(_backend, "device_state", None)
+        if device_state is not None:
+            device_state.close()
+    if _scheduler is not None:
+        history = getattr(_scheduler, "_history", None)
+        if history is not None:
+            history.close()
     if _outbox_worker is not None:
         _outbox_worker.stop()
     if _inventory is not None:
-        _inventory.set_change_listener(None)
-        if _owns_inventory:
-            _inventory.close()
+        _inventory.store.close()
     _scheduler = None
     _backend = None
     _inventory = None
+    _material_model_catalog = None
+    _material_shapes = ()
     _outbox_worker = None
-    _owns_inventory = False
-    _workflow_tasks = None
-    _workflow_reconciler_attached = False
+
+
+def reset_for_test() -> None:
+    """测试用：清掉进程内 Edge 微后端单例。"""
+
+    shutdown_edge_services()
 
 
 __all__ = [
+    "CloudBusinessError",
     "get_edge_backend",
     "get_edge_scheduler",
     "get_inventory_service",
+    "get_material_model_catalog",
+    "get_material_shapes",
+    "make_http_snapshot_sender",
     "make_http_sync_sender",
+    "report_http_inventory_command_result",
     "reset_for_test",
+    "shutdown_edge_services",
+    "setup_edge_inventory",
     "setup_edge_scheduler",
+    "unwrap_cloud_response",
 ]

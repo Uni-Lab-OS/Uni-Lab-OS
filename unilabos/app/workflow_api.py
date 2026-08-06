@@ -4,11 +4,8 @@ from __future__ import annotations
 
 import asyncio
 import json
-import logging
 import re
-from collections.abc import Callable, Mapping
-from typing import Annotated, Any, Protocol
-from uuid import UUID
+from typing import Annotated, Any, Dict, List, Optional
 
 from fastapi import APIRouter, FastAPI, Header, Query, Request
 from fastapi.exception_handlers import request_validation_exception_handler
@@ -17,33 +14,19 @@ from fastapi.responses import JSONResponse, Response, StreamingResponse
 from fastapi.routing import APIRoute
 from pydantic import BaseModel, ConfigDict, Field, field_validator
 
-from unilabos.workflow.candidate_validation import validate_candidate_bundle
-from unilabos.workflow.catalog import (
-    CatalogAuthority,
-    TemplateCatalog,
-    TemplateCatalogUnavailable,
+from unilabos.app.workflow_template_api import (
+    TemplateSnapshotProvider,
+    WorkflowTemplateQueryService,
+    create_workflow_template_router,
 )
-from unilabos.workflow.device_action_task import DeviceActionTaskService
 from unilabos.workflow.json_codec import decode_json_bytes, encode_json
 from unilabos.workflow.models import (
-    CandidateChangeset,
-    CandidateCompilation,
-    CandidateDiagnostic,
-    CandidateSourceMapEntry,
     WorkflowEdgeWrite,
     WorkflowNodeWrite,
     normalize_json_array,
     normalize_json_object,
-    validate_json_value,
-    validate_uuid,
 )
 from unilabos.workflow.service import WorkflowError, WorkflowService
-from unilabos.workflow.source_coordinates import (
-    require_utf8_text,
-    source_ranges_fit,
-)
-
-_LOGGER = logging.getLogger(__name__)
 
 
 class _StrictModel(BaseModel):
@@ -69,21 +52,25 @@ _GO_WHITE_SPACE = (
 
 
 async def _read_limited_body(request: Request) -> bytes:
-    """增量读取公共 Workflow 请求体，并在超限 chunk 后立即停止。"""
+    """增量读取工作流（Workflow）请求体并在首次超限时停止。
+
+    参数说明：`request` 是当前 ASGI 请求。函数先校验声明长度，再逐块读取，
+    最多保留 8 MiB；返回缓存后的原始字节，超限或非法长度抛出 `ValueError`。
+    """
 
     content_length = request.headers.get("content-length")
     if content_length is not None:
         try:
             declared_length = int(content_length, 10)
         except ValueError:
-            raise ValueError("invalid Content-Length") from None
+            raise ValueError("Content-Length 无效") from None
         if declared_length < 0 or declared_length > _WORKFLOW_BODY_LIMIT:
-            raise ValueError("Workflow body exceeds the public limit")
+            raise ValueError("工作流请求体超过公共预算")
 
     body = bytearray()
     async for chunk in request.stream():
         if len(body) + len(chunk) > _WORKFLOW_BODY_LIMIT:
-            raise ValueError("Workflow body exceeds the public limit")
+            raise ValueError("工作流请求体超过公共预算")
         body.extend(chunk)
     payload = bytes(body)
     request._body = payload
@@ -91,13 +78,17 @@ async def _read_limited_body(request: Request) -> bytes:
 
 
 class _BackendJSONRoute(APIRoute):
-    """限制有请求体的路由，再按冻结 Backend 规则预载 JSON。"""
+    """限制有请求体的路由，并按后端（Backend）规则预载 JSON。"""
 
     def get_route_handler(self):
+        """构造只对有请求体路由执行预算与 JSON 解码的处理器。"""
+
         route_handler = super().get_route_handler()
         expects_body = self.body_field is not None
 
         async def backend_json_route_handler(request: Request) -> Response:
+            """在业务处理前校验请求体；`request` 是单次 HTTP 请求。"""
+
             if expects_body:
                 content_type = request.headers.get("content-type", "")
                 mime = content_type.split(";", 1)[0].strip().lower()
@@ -120,7 +111,11 @@ class _BackendJSONRoute(APIRoute):
 
 
 def _parse_non_negative_int64_decimal(value: str) -> int:
-    """Match Go strconv.ParseInt(value, 10, 64) for an SSE cursor."""
+    """按后端（Backend）规则解析 SSE 游标。
+
+    参数：``value`` 是已按 Go 空白规则裁剪的十进制文本。返回：非负 int64。
+    异常：格式、负值或上溢时抛 ``ValueError``；不接受小数或指数形式。
+    """
 
     if _SIGNED_DECIMAL.fullmatch(value) is None:
         raise ValueError
@@ -137,31 +132,20 @@ def _parse_non_negative_int64_decimal(value: str) -> int:
     return int(significant, 10)
 
 
-def _parse_positive_decimal(value: str, *, maximum: int) -> int:
-    """Match Go strconv.Atoi followed by a positive bounded range check."""
-
-    if _SIGNED_DECIMAL.fullmatch(value) is None:
-        raise ValueError
-    parsed = int(value, 10)
-    if parsed < 1 or parsed > maximum:
-        raise ValueError
-    return parsed
-
-
 class WorkflowCreateRequest(_BackendModel):
     name: str
-    tags: list[Any] = Field(default_factory=list)
-    description: str | None = None
-    meta_data: dict[str, Any] = Field(default_factory=dict)
+    tags: List[Any] = Field(default_factory=list)
+    description: Optional[str] = None
+    meta_data: Dict[str, Any] = Field(default_factory=dict)
 
     @field_validator("tags", mode="before")
     @classmethod
-    def _json_array(cls, value: Any) -> list[Any]:
+    def _json_array(cls, value: Any) -> List[Any]:
         return normalize_json_array(value)
 
     @field_validator("meta_data", mode="before")
     @classmethod
-    def _json_object(cls, value: Any) -> dict[str, Any]:
+    def _json_object(cls, value: Any) -> Dict[str, Any]:
         return normalize_json_object(value)
 
 
@@ -169,128 +153,75 @@ class WorkflowUpdateRequest(WorkflowCreateRequest):
     pass
 
 
-class DeviceActionTaskCreateRequest(_StrictModel):
-    """前端设备页提交的 closed D1A-S1 请求。"""
-
-    authority_id: str = Field(min_length=1, strict=True)
-    template_catalog_fingerprint: HashToken
-    workflow_node_template_uuid: UUID
-    device_id: str = Field(min_length=1, strict=True)
-    input: dict[str, Any]
-    idempotency_key: UUID
-    description: str | None = None
-
-    @field_validator("authority_id", "device_id")
-    @classmethod
-    def _closed_identity(cls, value: str) -> str:
-        if value.strip() != value:
-            raise ValueError("identity must not contain surrounding whitespace")
-        return value
-
-
 class GraphWriteRequest(_BackendModel):
     revision: int = Field(ge=1, le=_INT64_MAX, strict=True)
-    nodes: list[WorkflowNodeWrite] = Field(default_factory=list)
-    edges: list[WorkflowEdgeWrite] = Field(default_factory=list)
+    nodes: List[WorkflowNodeWrite] = Field(default_factory=list)
+    edges: List[WorkflowEdgeWrite] = Field(default_factory=list)
 
     @field_validator("nodes", "edges", mode="before")
     @classmethod
-    def _json_array(cls, value: Any) -> list[Any]:
+    def _json_array(cls, value: Any) -> List[Any]:
         return [] if value is None else value
 
 
 class WorkflowTaskCreateRequest(_BackendModel):
     workflow_uuid: str
     run_mode: str = "normal"
-    target_node_uuid: str | None = None
-    input: dict[str, Any] = Field(default_factory=dict)
-    description: str | None = None
-    meta_data: dict[str, Any] = Field(default_factory=dict)
+    target_node_uuid: Optional[str] = None
+    input: Dict[str, Any] = Field(default_factory=dict)
+    description: Optional[str] = None
+    meta_data: Dict[str, Any] = Field(default_factory=dict)
 
     @field_validator("input", "meta_data", mode="before")
     @classmethod
-    def _json_object(cls, value: Any) -> dict[str, Any]:
+    def _json_object(cls, value: Any) -> Dict[str, Any]:
+        """规范化任务输入和公开元数据对象。
+
+        参数：``value`` 是 Pydantic 解码前的 JSON 值。返回：独立 JSON 对象，
+        显式 ``null`` 按后端（Backend）零值对象处理。异常：非对象或非法 JSON
+        值由 ``normalize_json_object`` 抛出并映射为请求错误。
+        """
+
         return normalize_json_object(value)
 
 
-class WorkflowTaskCommandRequest(_BackendModel):
-    type: str
-    target_node_uuid: UUID | None = None
-    idempotency_key: str
-    description: str | None = None
-    meta_data: dict[str, Any] = Field(default_factory=dict)
+class DeviceActionRunCreateRequest(_StrictModel):
+    """Backend 规范的设备单动作运行（DeviceActionRun）创建 DTO。"""
 
-    @field_validator("meta_data", mode="before")
+    material_uuid: str
+    workflow_node_template_uuid: str
+    param: Optional[Dict[str, Any]] = None
+    execution_policy: Dict[str, Any] = Field(default_factory=dict)
+    idempotency_key: str
+    description: Optional[str] = None
+    meta_data: Dict[str, Any] = Field(default_factory=dict)
+
+    @field_validator("execution_policy", "meta_data", mode="before")
     @classmethod
-    def _json_object(cls, value: Any) -> dict[str, Any]:
+    def _json_object(cls, value: Any) -> Dict[str, Any]:
+        """规范化设备动作请求中的可选 JSON 对象。
+
+        参数：``value`` 是 Pydantic 解码前的策略或元数据值。返回独立 JSON
+        对象；缺失或 ``null`` 与 Backend 的零值对象语义一致。
+        """
+
         return normalize_json_object(value)
 
 
 class DraftWriteRequest(_StrictModel):
     python_source: str
-    expected_draft_hash: HashToken | None
+    expected_draft_hash: Optional[HashToken]
     expected_workflow_revision: int = Field(
         ge=1,
         le=_INT64_MAX,
         strict=True,
     )
 
-    @field_validator("python_source")
-    @classmethod
-    def _utf8_source(cls, value: str) -> str:
-        return require_utf8_text(value)
-
 
 class ApplyRequest(_StrictModel):
+    """只携带服务端签发候选哈希（Candidate Hash）的应用命令。"""
+
     candidate_hash: HashToken
-
-
-class _AuthoringTransformRequest(_StrictModel):
-    workflow_uuid: str
-    revision: int = Field(ge=1, le=_INT64_MAX, strict=True)
-    source_uri: str
-
-    @field_validator("workflow_uuid")
-    @classmethod
-    def _workflow_uuid(cls, value: str) -> str:
-        return validate_uuid(value)
-
-    @field_validator("source_uri")
-    @classmethod
-    def _source_uri(cls, value: str) -> str:
-        require_utf8_text(value)
-        if not value.strip():
-            raise ValueError("source_uri must not be blank")
-        return value
-
-    @field_validator("python_source", check_fields=False)
-    @classmethod
-    def _python_source(cls, value: str) -> str:
-        return require_utf8_text(value)
-
-
-class AuthoringCompileRequest(_AuthoringTransformRequest):
-    python_source: str
-    applied_graph: dict[str, Any]
-
-
-class AuthoringGeneratePythonRequest(_AuthoringTransformRequest):
-    graph: dict[str, Any]
-
-
-class AuthoringValidateRequest(_AuthoringTransformRequest):
-    graph: dict[str, Any]
-    python_source: str
-
-
-class AuthoringTransform(Protocol):
-    """02D production engine 的三个只读操作。"""
-
-    def compile(self, **values: Any) -> CandidateCompilation: ...
-
-    def generate_python(self, **values: Any) -> CandidateCompilation: ...
-
-    def validate(self, **values: Any) -> CandidateCompilation: ...
 
 
 class _BackendJSONResponse(JSONResponse):
@@ -300,155 +231,76 @@ class _BackendJSONResponse(JSONResponse):
         return encode_json(content)
 
 
-def _success(data: Any, *, status: int = 200) -> _BackendJSONResponse:
-    return _BackendJSONResponse(status_code=status, content={"code": 0, "data": data})
+def _public_data(data: Any) -> Any:
+    """递归移除后端（Backend）迁移已删除的公共字段。
+
+    参数：``data`` 是服务层投影或嵌套集合。返回：不共享容器的公共投影；任务
+    输入保留，尚未进入当前迁移合同的输出隐藏。异常：无。
+    """
+
+    if isinstance(data, list):
+        return [_public_data(value) for value in data]
+    if not isinstance(data, dict):
+        return data
+    result = {key: _public_data(value) for key, value in data.items()}
+    if "workflow_snapshot" in result and "workflow_uuid" in result:
+        result.pop("output", None)
+    if "workflow_uuid" in result and "pose" in result and "param" in result:
+        result.pop("status", None)
+    return result
+
+
+def _success(data: Any = None, *, status: int = 200) -> _BackendJSONResponse:
+    content: Dict[str, Any] = {"code": 0}
+    if data is not None:
+        content["data"] = _public_data(data)
+    return _BackendJSONResponse(status_code=status, content=content)
 
 
 def _error(error: WorkflowError) -> _BackendJSONResponse:
+    conflict_codes = {
+        "conflict",
+        "draft_hash_conflict",
+        "workflow_revision_conflict",
+        "candidate_hash_conflict",
+        "template_catalog_conflict",
+        "candidate_not_ready",
+        "draft_invalid",
+        "candidate_invalid",
+        "workflow_identity_mismatch",
+    }
+    if error.code == "invalid_input":
+        business_code = 1000
+    elif error.code in {"not_found", "workflow_not_found"}:
+        business_code = 3002
+    elif error.code in conflict_codes:
+        business_code = 3003
+    elif error.code == "template_catalog_unavailable":
+        business_code = 5001
+    else:
+        business_code = 1
+    error_content = {"msg": error.message}
+    if error.code == "workflow_identity_mismatch":
+        # product Backend 包络保持 HTTP 200；该窄符号码让前端区分身份拒绝与
+        # 需要重读远端版本的普通 3003 CAS 冲突。
+        error_content["code"] = error.code
     return _BackendJSONResponse(
-        status_code=error.status,
+        status_code=200,
         content={
-            "code": error.status,
-            "error": {
-                "code": error.code,
-                "message": error.message,
-            },
+            "code": business_code,
+            "error": error_content,
         },
     )
 
 
-def _diagnostic_ranges(
-    diagnostics: list[dict[str, Any]],
-) -> list[dict[str, Any]]:
-    ranges: list[dict[str, Any]] = []
-    for item in diagnostics:
-        source_range = item.get("source_range")
-        if source_range is not None:
-            ranges.append(source_range)
-        ranges.extend(item.get("occurrence_ranges") or [])
-        for alternative in item.get("repair_alternatives") or []:
-            ranges.append(alternative["retained_range"])
-            ranges.extend(
-                replacement["source_range"]
-                for replacement in alternative["replacements"]
-            )
-    return ranges
+def format_sse_event(event: Dict[str, Any]) -> str:
+    """把一个持久失效通知编码为服务器发送事件（SSE）帧。
 
+    参数：``event`` 含全局序号、事件类型和小型身份载荷。返回：UTF-8 文本帧；
+    客户端必须再用 REST 复原（Rehydrate）权威事实。异常：记录缺字段或载荷不能
+    JSON 编码时传播，不从内存历史补值。
+    """
 
-def _transform_data(
-    result: Any,
-    *,
-    input_source: str | None,
-    workflow_uuid: str,
-    revision: int,
-    base_graph: dict[str, Any],
-    require_unchanged_graph: bool,
-) -> dict[str, Any]:
-    """把 engine 结果收紧为唯一公开 DTO，拒绝内部或越界值。"""
-
-    compilation = CandidateCompilation.model_validate(result)
-    if not isinstance(compilation.diagnostics, list):
-        raise TypeError("diagnostics must be an array")
-    diagnostics = [
-        CandidateDiagnostic.model_validate(item).model_dump(exclude_none=True)
-        for item in compilation.diagnostics
-    ]
-    ranges = _diagnostic_ranges(diagnostics)
-    if ranges and (input_source is None or not source_ranges_fit(input_source, ranges)):
-        raise ValueError("diagnostic range is outside the request source")
-
-    if not isinstance(compilation.source_map, list):
-        raise TypeError("source_map must be an array")
-    source_map = [
-        CandidateSourceMapEntry.model_validate(item).model_dump()
-        for item in compilation.source_map
-    ]
-    normalized_source = compilation.normalized_python_source
-    graph = compilation.graph
-    changeset: dict[str, Any] | None = None
-    has_error = any(item["severity"].strip().lower() == "error" for item in diagnostics)
-
-    if graph is None:
-        if (
-            not diagnostics
-            or not has_error
-            or normalized_source is not None
-            or source_map
-            or compilation.changeset is not None
-        ):
-            raise ValueError("invalid failed transform result")
-    else:
-        if has_error or not isinstance(normalized_source, str):
-            raise ValueError("invalid successful transform result")
-        validate_json_value(graph)
-        require_utf8_text(normalized_source)
-        if not source_ranges_fit(normalized_source, source_map):
-            raise ValueError("source map is outside normalized source")
-        changeset = CandidateChangeset.model_validate(
-            compilation.changeset
-        ).model_dump()
-        graph = validate_candidate_bundle(
-            graph=graph,
-            base_graph=base_graph,
-            workflow_uuid=workflow_uuid,
-            revision=revision,
-            source_map=source_map,
-            changeset=changeset,
-            require_unchanged_graph=require_unchanged_graph,
-        )
-
-    compiler_version = compilation.compiler_version
-    fingerprint = compilation.template_catalog_fingerprint
-    if not isinstance(compiler_version, str) or not compiler_version.strip():
-        raise ValueError("compiler_version must not be blank")
-    require_utf8_text(compiler_version)
-    if (
-        not isinstance(fingerprint, str)
-        or re.fullmatch(r"sha256:[0-9a-f]{64}", fingerprint) is None
-    ):
-        raise ValueError("invalid template catalog fingerprint")
-
-    return {
-        "diagnostics": diagnostics,
-        "graph": graph,
-        "normalized_python_source": normalized_source,
-        "source_map": source_map,
-        "changeset": changeset,
-        "compiler_version": compiler_version,
-        "template_catalog_fingerprint": fingerprint,
-    }
-
-
-def _transform_response(
-    operation: Callable[[], Any],
-    *,
-    input_source: str | None,
-    workflow_uuid: str,
-    revision: int,
-    base_graph: dict[str, Any],
-    require_unchanged_graph: bool = False,
-) -> _BackendJSONResponse:
-    try:
-        data = _transform_data(
-            operation(),
-            input_source=input_source,
-            workflow_uuid=workflow_uuid,
-            revision=revision,
-            base_graph=base_graph,
-            require_unchanged_graph=require_unchanged_graph,
-        )
-        if any(
-            item["code"] == "template_catalog_unavailable"
-            for item in data["diagnostics"]
-        ):
-            return _error(WorkflowError("template_catalog_unavailable"))
-        return _success(data)
-    except Exception:
-        _LOGGER.exception("Authoring pure transform 失败")
-        return _error(WorkflowError("internal_error"))
-
-
-def format_sse_event(event: dict[str, Any]) -> str:
     payload = json.dumps(
         event["data"],
         ensure_ascii=False,
@@ -457,110 +309,18 @@ def format_sse_event(event: dict[str, Any]) -> str:
     return f"id: {event['id']}\nevent: {event['event']}\ndata: {payload}\n\n"
 
 
-def create_authoring_transform_router(
-    engine: AuthoringTransform,
-) -> APIRouter:
-    """创建仅含 D-040 三个纯转换操作的 OS-only router。"""
+def create_workflow_router(service: WorkflowService) -> APIRouter:
+    """围绕唯一工作流权威创建 Backend-shaped HTTP Router。
 
-    router = APIRouter(
-        prefix="/api/v1/authoring",
-        tags=["authoring-transform"],
-        route_class=_BackendJSONRoute,
-    )
-
-    @router.post("/compile")
-    def compile_authoring(body: AuthoringCompileRequest) -> JSONResponse:
-        values = {
-            "workflow_uuid": body.workflow_uuid,
-            "workflow_revision": body.revision,
-            "python_source": body.python_source,
-            "source_uri": body.source_uri,
-            "applied_graph": body.applied_graph,
-        }
-        return _transform_response(
-            lambda: engine.compile(**values),
-            input_source=body.python_source,
-            workflow_uuid=body.workflow_uuid,
-            revision=body.revision,
-            base_graph=body.applied_graph,
-        )
-
-    @router.post("/generate-python")
-    def generate_authoring_python(
-        body: AuthoringGeneratePythonRequest,
-    ) -> JSONResponse:
-        values = {
-            "workflow_uuid": body.workflow_uuid,
-            "workflow_revision": body.revision,
-            "graph": body.graph,
-            "source_uri": body.source_uri,
-        }
-        return _transform_response(
-            lambda: engine.generate_python(**values),
-            input_source=None,
-            workflow_uuid=body.workflow_uuid,
-            revision=body.revision,
-            base_graph=body.graph,
-            require_unchanged_graph=True,
-        )
-
-    @router.post("/validate")
-    def validate_authoring(body: AuthoringValidateRequest) -> JSONResponse:
-        values = {
-            "workflow_uuid": body.workflow_uuid,
-            "workflow_revision": body.revision,
-            "graph": body.graph,
-            "python_source": body.python_source,
-            "source_uri": body.source_uri,
-        }
-        return _transform_response(
-            lambda: engine.validate(**values),
-            input_source=body.python_source,
-            workflow_uuid=body.workflow_uuid,
-            revision=body.revision,
-            base_graph=body.graph,
-            require_unchanged_graph=True,
-        )
-
-    return router
-
-
-def create_workflow_router(
-    service: WorkflowService,
-    *,
-    device_action_tasks: DeviceActionTaskService | None = None,
-    task_admission_coordinator: Callable[[str], object] | None = None,
-) -> APIRouter:
-    """Build the public Workflow router around one injected authority."""
+    参数：``service`` 是注入的工作流应用服务。返回同时承载工作流、任务、作业、
+    设备单动作运行（DeviceActionRun）及创作接口的 FastAPI Router。
+    """
 
     router = APIRouter(
         prefix="/api/v1",
         tags=["workflow"],
         route_class=_BackendJSONRoute,
     )
-
-    if device_action_tasks is not None:
-
-        @router.post("/device-action-tasks")
-        def create_device_action_task(
-            body: DeviceActionTaskCreateRequest,
-        ) -> JSONResponse:
-            return _success(
-                device_action_tasks.create(
-                    authority_id=body.authority_id,
-                    template_catalog_fingerprint=body.template_catalog_fingerprint,
-                    workflow_node_template_uuid=str(body.workflow_node_template_uuid),
-                    device_id=body.device_id,
-                    input_value=body.input,
-                    idempotency_key=str(body.idempotency_key),
-                    description=body.description,
-                ),
-                status=201,
-            )
-
-        @router.get("/device-action-tasks/{task_uuid}")
-        def get_device_action_task(task_uuid: UUID) -> JSONResponse:
-            return _success(device_action_tasks.get(str(task_uuid)))
 
     @router.post("/workflows")
     def create_workflow(body: WorkflowCreateRequest) -> JSONResponse:
@@ -590,10 +350,10 @@ def create_workflow_router(
     ) -> JSONResponse:
         return _success(service.update_workflow(workflow_uuid, **body.model_dump()))
 
-    @router.delete("/workflows/{workflow_uuid}", status_code=204)
-    def delete_workflow(workflow_uuid: str) -> Response:
+    @router.delete("/workflows/{workflow_uuid}")
+    def delete_workflow(workflow_uuid: str) -> JSONResponse:
         service.delete_workflow(workflow_uuid)
-        return Response(status_code=204)
+        return _success()
 
     @router.get("/workflows/{workflow_uuid}/graph")
     def get_graph(workflow_uuid: str) -> JSONResponse:
@@ -617,55 +377,59 @@ def create_workflow_router(
     def create_workflow_task(
         body: WorkflowTaskCreateRequest,
     ) -> JSONResponse:
-        task = service.create_workflow_task(
-            workflow_uuid=body.workflow_uuid,
-            run_mode=body.run_mode,
-            target_node_uuid=body.target_node_uuid,
-            input_value=body.input,
-            description=body.description,
-            meta_data=body.meta_data,
-        )
-        if task_admission_coordinator is not None:
-            task_admission_coordinator(task["uuid"])
-        return _success(
-            task,
-            status=201,
-        )
+        """通过公共接口创建一次工作流任务（WorkflowTask）。
 
-    @router.post("/workflow-tasks/{task_uuid}/commands")
-    def create_workflow_task_command(
-        task_uuid: str,
-        body: WorkflowTaskCommandRequest,
-    ) -> JSONResponse:
+        参数：``body`` 携带工作流身份、运行模式和任务输入。返回：HTTP 201 的
+        标准任务投影，包含已规范化输入与冻结执行计划（ExecutionPlan）。异常：
+        服务层稳定错误由应用异常处理器转换为后端业务响应。
+        """
+
         return _success(
-            service.create_workflow_task_command(
-                task_uuid,
-                command_type=body.type,
-                target_node_uuid=(
-                    str(body.target_node_uuid)
-                    if body.target_node_uuid is not None
-                    else None
-                ),
-                idempotency_key=body.idempotency_key,
+            service.create_workflow_task(
+                workflow_uuid=body.workflow_uuid,
+                run_mode=body.run_mode,
+                target_node_uuid=body.target_node_uuid,
+                input_value=body.input,
                 description=body.description,
                 meta_data=body.meta_data,
             ),
             status=201,
         )
 
+    @router.post("/device-action-runs")
+    def create_device_action_run(
+        body: DeviceActionRunCreateRequest,
+    ) -> JSONResponse:
+        """创建或幂等复用一次设备单动作运行（DeviceActionRun）。
+
+        参数：``body`` 完全采用 Backend DTO。返回标准工作流任务（WorkflowTask）
+        与唯一工作流节点作业（WorkflowNodeJob）；首次创建为 HTTP 201，复用为 200。
+        """
+
+        result = service.create_device_action_run(**body.model_dump())
+        return _success(result, status=201 if result["created"] else 200)
+
     @router.get("/workflow-tasks")
     def list_workflow_tasks(
         page: int = Query(default=1),
         page_size: int = Query(default=20),
-        workflow_uuid: str | None = Query(default=None),
+        workflow_uuid: Optional[str] = Query(default=None),
+        execution_kind: str = Query(default=""),
         status: str = Query(default=""),
         cleanup_status: str = Query(default=""),
     ) -> JSONResponse:
+        """按 Backend 筛选合同分页返回工作流任务（WorkflowTask）。
+
+        参数包括分页、可选工作流 UUID、执行来源、业务状态和清理状态；返回标准
+        分页 envelope，其中直接设备动作可用 ``ad_hoc_device_action`` 单独查询。
+        """
+
         return _success(
             service.list_workflow_tasks(
                 page=page,
                 page_size=page_size,
                 workflow_uuid=workflow_uuid,
+                execution_kind=execution_kind,
                 status=status,
                 cleanup_status=cleanup_status,
             )
@@ -678,56 +442,6 @@ def create_workflow_router(
     @router.get("/workflow-tasks/{task_uuid}/jobs")
     def list_workflow_node_jobs(task_uuid: str) -> JSONResponse:
         return _success(service.list_workflow_node_jobs(task_uuid))
-
-    @router.get("/workflow-tasks/{task_uuid}/events")
-    def list_workflow_task_runtime_events(
-        task_uuid: str,
-        after_sequence: str = Query(default=""),
-        limit: str = Query(default=""),
-    ) -> JSONResponse:
-        try:
-            after_text = after_sequence.strip(_GO_WHITE_SPACE)
-            limit_text = limit.strip(_GO_WHITE_SPACE)
-            parsed_after = (
-                _parse_non_negative_int64_decimal(after_text) if after_text else 0
-            )
-            parsed_limit = (
-                _parse_positive_decimal(limit_text, maximum=500) if limit_text else 100
-            )
-        except ValueError:
-            raise WorkflowError("invalid_input") from None
-        return _success(
-            service.list_workflow_task_runtime_events(
-                task_uuid,
-                after_sequence=parsed_after,
-                limit=parsed_limit,
-            )
-        )
-
-    @router.get("/workflow-node-jobs/{job_uuid}/feedback")
-    def list_workflow_node_job_feedback(
-        job_uuid: str,
-        after_sequence: str = Query(default=""),
-        limit: str = Query(default=""),
-    ) -> JSONResponse:
-        try:
-            after_text = after_sequence.strip(_GO_WHITE_SPACE)
-            limit_text = limit.strip(_GO_WHITE_SPACE)
-            parsed_after = (
-                _parse_non_negative_int64_decimal(after_text) if after_text else 0
-            )
-            parsed_limit = (
-                _parse_positive_decimal(limit_text, maximum=500) if limit_text else 100
-            )
-        except ValueError:
-            raise WorkflowError("invalid_input") from None
-        return _success(
-            service.list_workflow_node_job_feedback(
-                job_uuid,
-                after_sequence=parsed_after,
-                limit=parsed_limit,
-            )
-        )
 
     @router.get("/workflow-node-jobs/{job_uuid}")
     def get_workflow_node_job(job_uuid: str) -> JSONResponse:
@@ -756,6 +470,13 @@ def create_workflow_router(
         workflow_uuid: str,
         body: ApplyRequest,
     ) -> JSONResponse:
+        """应用服务端持久候选并返回后端形状响应。
+
+        参数：``workflow_uuid`` 是工作流（Workflow）身份；``body`` 只允许包含
+        候选哈希（Candidate Hash）。返回：统一后端响应外层。异常：请求字段或
+        领域前置条件错误由公共异常处理器转换成稳定业务错误。
+        """
+
         return _success(
             service.apply_authoring(
                 workflow_uuid,
@@ -766,11 +487,19 @@ def create_workflow_router(
     @router.get("/events")
     async def events(
         request: Request,
-        last_event_id: str | None = Header(
+        last_event_id: Optional[str] = Header(
             default=None,
             alias="Last-Event-ID",
         ),
     ) -> Response:
+        """从持久全局游标建立只作失效通知的 SSE 流。
+
+        参数：``request`` 提供断开状态，``last_event_id`` 是规范请求头；为避免
+        框架合并重复头，原始 ASGI 头仍由适配器唯一解析。返回：非法游标的稳定
+        错误或从排他游标续传的事件流。异常：持久读取/编码错误终止当前流；不从
+        MonitorBus 环形缓冲恢复，也不从 SSE 重建业务状态。
+        """
+
         try:
             raw_cursor = next(
                 (
@@ -792,22 +521,20 @@ def create_workflow_router(
         except (UnicodeError, ValueError):
             cursor = -1
         if cursor == -1:
-            return JSONResponse(
-                status_code=400,
-                content={
-                    "error": {
-                        "code": "invalid_input",
-                        "message": ("Last-Event-ID must be a non-negative integer"),
-                    }
-                },
-            )
+            return _error(WorkflowError("invalid_input"))
 
         async def stream():
+            """持续读取持久事件页并发送保活帧。
+
+            参数：无，闭包持有请求与当前游标。返回：异步 SSE 文本迭代器。异常：
+            存储或编码失败时终止连接，让客户端携带最后已收序号重连。
+            """
+
             nonlocal cursor
             yield "retry: 3000\n: connected\n\n"
             while not await request.is_disconnected():
                 events_page = service.list_events(
-                    after_id=cursor,
+                    after_sequence=cursor,
                     limit=100,
                 )["items"]
                 for event in events_page:
@@ -829,230 +556,32 @@ def create_workflow_router(
     return router
 
 
-def create_workflow_template_catalog_router(
-    catalog: TemplateCatalog,
-    authority: CatalogAuthority,
-) -> APIRouter:
-    """以 Backend DTO 形状公开同一份持久 TemplateCatalog snapshot。"""
+def install_workflow_api(
+    app: FastAPI,
+    service: WorkflowService,
+    *,
+    template_snapshot_provider: Optional[TemplateSnapshotProvider] = None,
+    authoring_transform: Any | None = None,
+) -> None:
+    """向 OS FastAPI 应用安装工作流及可选可信创作转换接口。
 
-    if not isinstance(catalog, TemplateCatalog):
-        raise TypeError("catalog 必须是 TemplateCatalog")
-    if not isinstance(authority, CatalogAuthority):
-        raise TypeError("authority 必须是 CatalogAuthority")
-    router = APIRouter(prefix="/api/v1")
+    参数说明：``app`` 是共享 HTTP 应用，``service`` 是工作流权威；本地调度模式
+    传入 ``template_snapshot_provider`` 后，模板查询与 F02 编译器共享同一投影；
+    ``authoring_transform`` 是同一目录代际的可信创作转换（Trusted Authoring
+    Transform），缺失时不发布三条纯转换路由。返回：无。
+    """
 
-    def read_snapshot() -> tuple[str, list[dict[str, Any]], list[dict[str, Any]]]:
-        try:
-            with catalog.snapshot(authority) as snapshot:
-                return (
-                    snapshot.fingerprint,
-                    [_detached_catalog_value(item) for item in snapshot.node_templates],
-                    [
-                        _detached_catalog_value(item)
-                        for item in snapshot.handle_templates
-                    ],
-                )
-        except TemplateCatalogUnavailable:
-            raise WorkflowError("template_catalog_unavailable") from None
-
-    def envelope(fingerprint: str) -> dict[str, Any]:
-        return {
-            "authority": {
-                "authority_id": authority.authority_id,
-                "kind": authority.kind,
-            },
-            "catalog_fingerprint": fingerprint,
-        }
-
-    @router.get("/workflow-node-templates")
-    def list_workflow_node_templates(
-        page: str = Query(default="1"),
-        page_size: str = Query(default="20"),
-        resource_template_uuid: str | None = Query(default=None),
-        name: str | None = Query(default=None),
-        type: str | None = Query(default=None),
-        node_type: str | None = Query(default=None),
-    ) -> JSONResponse:
-        try:
-            parsed_page = _parse_catalog_integer(page)
-            parsed_page_size = _parse_catalog_integer(page_size)
-            resource_uuid = (
-                str(UUID(resource_template_uuid))
-                if resource_template_uuid not in (None, "")
-                else None
-            )
-        except (TypeError, ValueError):
-            return _error(WorkflowError("invalid_input"))
-        fingerprint, nodes, _handles = read_snapshot()
-        normalized_page = max(parsed_page, 1)
-        normalized_page_size = (
-            20 if parsed_page_size < 1 else min(parsed_page_size, 100)
-        )
-        name_query = name.strip().casefold() if name is not None else None
-        type_query = type.strip() if type is not None else None
-        node_type_query = node_type.strip() if node_type is not None else None
-        type_query = type_query or None
-        node_type_query = node_type_query or None
-        filtered = [
-            item
-            for item in nodes
-            if (
-                resource_uuid is None
-                or item.get("resource_template_uuid") == resource_uuid
-            )
-            and (
-                not name_query
-                or name_query in str(item.get("name") or "").casefold()
-                or name_query in str(item.get("display_name") or "").casefold()
-            )
-            and (type_query is None or item.get("type") == type_query)
-            and (node_type_query is None or item.get("node_type") == node_type_query)
-        ]
-        filtered.sort(
-            key=lambda item: (
-                str(item.get("create_time") or ""),
-                str(item.get("uuid") or ""),
-            ),
-            reverse=True,
-        )
-        offset = (normalized_page - 1) * normalized_page_size
-        items = [
-            _workflow_node_template_summary(item)
-            for item in filtered[offset : offset + normalized_page_size]
-        ]
-        return _success(
-            {
-                **envelope(fingerprint),
-                "items": items,
-                "total": len(filtered),
-                "page": normalized_page,
-                "page_size": normalized_page_size,
-            }
-        )
-
-    @router.get("/workflow-node-templates/{template_uuid}")
-    def get_workflow_node_template(template_uuid: str) -> JSONResponse:
-        try:
-            template_identity = validate_uuid(template_uuid)
-        except (TypeError, ValueError):
-            return _error(WorkflowError("invalid_input"))
-        fingerprint, nodes, handles = read_snapshot()
-        template = next(
-            (item for item in nodes if item.get("uuid") == template_identity),
-            None,
-        )
-        if template is None:
-            return _template_catalog_not_found()
-        owned_handles = [
-            item
-            for item in handles
-            if item.get("workflow_node_template_uuid") == template_identity
-        ]
-        return _success(
-            {
-                **envelope(fingerprint),
-                "template": template,
-                "handles": owned_handles,
-            }
-        )
-
-    @router.get("/workflow-node-templates/{template_uuid}/handles")
-    def list_workflow_node_template_handles(template_uuid: str) -> JSONResponse:
-        try:
-            template_identity = validate_uuid(template_uuid)
-        except (TypeError, ValueError):
-            return _error(WorkflowError("invalid_input"))
-        fingerprint, nodes, handles = read_snapshot()
-        if not any(item.get("uuid") == template_identity for item in nodes):
-            return _template_catalog_not_found()
-        return _success(
-            {
-                **envelope(fingerprint),
-                "items": [
-                    item
-                    for item in handles
-                    if item.get("workflow_node_template_uuid") == template_identity
-                ],
-            }
-        )
-
-    @router.get("/workflow-handle-templates/{handle_uuid}")
-    def get_workflow_handle_template(handle_uuid: str) -> JSONResponse:
-        try:
-            handle_identity = validate_uuid(handle_uuid)
-        except (TypeError, ValueError):
-            return _error(WorkflowError("invalid_input"))
-        fingerprint, _nodes, handles = read_snapshot()
-        handle = next(
-            (item for item in handles if item.get("uuid") == handle_identity),
-            None,
-        )
-        if handle is None:
-            return _template_catalog_not_found()
-        return _success({**envelope(fingerprint), "handle": handle})
-
-    return router
-
-
-def _parse_catalog_integer(value: str) -> int:
-    if _SIGNED_DECIMAL.fullmatch(value) is None:
-        raise ValueError("catalog pagination must be an integer")
-    parsed = int(value, 10)
-    if parsed < -(1 << 63) or parsed > _INT64_MAX:
-        raise ValueError("catalog pagination exceeds int64")
-    return parsed
-
-
-def _workflow_node_template_summary(template: Mapping[str, Any]) -> dict[str, Any]:
-    unilab = template.get("meta_data", {}).get("unilab", {})
-    resource = unilab.get("resource_template") if isinstance(unilab, Mapping) else None
-    if not isinstance(resource, Mapping):
-        resource = {
-            "uuid": template["resource_template_uuid"],
-            "name": template["resource_template_uuid"],
-            "display_name": template["resource_template_uuid"],
-        }
-    summary = {
-        "uuid": template["uuid"],
-        "name": template["name"],
-        "display_name": template["display_name"],
-        "type": template["type"],
-        "node_type": template["node_type"],
-        "resource_template": {
-            "uuid": resource["uuid"],
-            "name": resource["name"],
-            "display_name": resource["display_name"],
-        },
-    }
-    if template.get("icon") is not None:
-        summary["icon"] = template["icon"]
-    return summary
-
-
-def _detached_catalog_value(value: Any) -> Any:
-    if isinstance(value, Mapping):
-        return {str(key): _detached_catalog_value(item) for key, item in value.items()}
-    if isinstance(value, (list, tuple)):
-        return [_detached_catalog_value(item) for item in value]
-    return value
-
-
-def _template_catalog_not_found() -> _BackendJSONResponse:
-    return _BackendJSONResponse(
-        status_code=404,
-        content={
-            "code": 404,
-            "error": {"code": "not_found", "message": "资源不存在"},
-        },
-    )
-
-
-def _install_error_handlers(app: FastAPI) -> None:
     @app.exception_handler(WorkflowError)
     async def workflow_error_handler(
         _request: Request,
         error: WorkflowError,
     ) -> JSONResponse:
+        """把工作流领域错误映射成统一业务 envelope。
+
+        参数：``_request`` 是当前 HTTP 请求但不参与裁决；``error`` 携带稳定错误
+        分类。返回与 Backend 一致的 HTTP 200 业务错误响应。
+        """
+
         return _error(error)
 
     @app.exception_handler(RequestValidationError)
@@ -1060,13 +589,18 @@ def _install_error_handlers(app: FastAPI) -> None:
         request: Request,
         error: RequestValidationError,
     ) -> JSONResponse:
+        """把工作流相关 DTO 校验错误映射为 Backend 业务码 1000。
+
+        参数：``request`` 用于识别合同路由；``error`` 是 FastAPI 校验详情。返回
+        工作流合同的统一错误 envelope，其他路由继续使用框架默认响应。
+        """
+
         workflow_prefixes = (
-            "/api/v1/device-action-tasks",
             "/api/v1/workflows",
             "/api/v1/workflow-tasks",
             "/api/v1/workflow-node-jobs",
             "/api/v1/workflow-node-templates",
-            "/api/v1/workflow-handle-templates",
+            "/api/v1/device-action-runs",
             "/api/v1/events",
             "/api/v1/authoring",
         )
@@ -1077,98 +611,59 @@ def _install_error_handlers(app: FastAPI) -> None:
             return _error(WorkflowError("invalid_input"))
         return await request_validation_exception_handler(request, error)
 
-
-def install_workflow_api(
-    app: FastAPI,
-    service: WorkflowService,
-    *,
-    device_action_tasks: DeviceActionTaskService | None = None,
-) -> None:
-    """Install error mapping and routes into an OS FastAPI application."""
-
-    _install_error_handlers(app)
-
-    app.include_router(
-        create_workflow_router(service, device_action_tasks=device_action_tasks)
-    )
-
-
-def install_authoring_transform_api(
-    app: FastAPI,
-    engine: AuthoringTransform,
-) -> None:
-    """把 pure Authoring router 安装到显式选择的 OS application。"""
-
-    _install_error_handlers(app)
-    app.include_router(create_authoring_transform_router(engine))
-
-
-def install_composed_workflow_authoring_api(
-    app: FastAPI,
-    service: WorkflowService,
-    engine: AuthoringTransform,
-    *,
-    template_catalog: TemplateCatalog | None = None,
-    catalog_authority: CatalogAuthority | None = None,
-    device_action_tasks: DeviceActionTaskService | None = None,
-    task_admission_coordinator: Callable[[str], object] | None = None,
-) -> None:
-    """完整构造 production Authoring 路由后，以一次 app mutation 安装。"""
-
-    if (template_catalog is None) != (catalog_authority is None):
-        raise ValueError("TemplateCatalog 与 CatalogAuthority 必须同时配置")
-    router = APIRouter()
-    if template_catalog is not None and catalog_authority is not None:
-        router.include_router(
-            create_workflow_template_catalog_router(
-                template_catalog,
-                catalog_authority,
+    app.include_router(create_workflow_router(service))
+    if template_snapshot_provider is not None:
+        app.include_router(
+            create_workflow_template_router(
+                WorkflowTemplateQueryService(template_snapshot_provider)
             )
         )
-    router.include_router(
-        create_workflow_router(
-            service,
-            device_action_tasks=device_action_tasks,
-            task_admission_coordinator=task_admission_coordinator,
+    if authoring_transform is not None:
+        from unilabos.app.workflow_authoring_transform import (
+            create_authoring_transform_router,
         )
-    )
-    router.include_router(create_authoring_transform_router(engine))
-    _install_error_handlers(app)
-    app.include_router(router)
+
+        app.include_router(create_authoring_transform_router(authoring_transform))
 
 
 def create_workflow_app(
     service: WorkflowService,
     *,
-    device_action_tasks: DeviceActionTaskService | None = None,
+    template_snapshot_provider: Optional[TemplateSnapshotProvider] = None,
+    authoring_transform: Any | None = None,
 ) -> FastAPI:
-    """Create a focused application used by composition and contract tests."""
+    """创建工作流合同测试应用。
+
+    参数说明：``service`` 是唯一工作流权威；可选模板快照提供者用于本地完整应用
+    合同测试；``authoring_transform`` 显式安装纯转换接缝。返回已安装统一错误映射
+    的 FastAPI 应用。
+    """
 
     app = FastAPI(title="Uni-Lab Workflow", version="0.1.0")
-    install_workflow_api(app, service, device_action_tasks=device_action_tasks)
+    install_workflow_api(
+        app,
+        service,
+        template_snapshot_provider=template_snapshot_provider,
+        authoring_transform=authoring_transform,
+    )
     return app
 
 
-def create_authoring_transform_app(engine: AuthoringTransform) -> FastAPI:
-    """创建只暴露三个 pure transform 的 focused application。"""
-
-    app = FastAPI(title="Uni-Lab Authoring Transform", version="0.1.0")
-    install_authoring_transform_api(app, engine)
-    return app
+# 以下别名是可信创作转换（Trusted Authoring Transform）适配器复用的公共 HTTP
+# 接缝；保留旧私有名称，避免扩大现有工作流路由的机械修改范围。
+BackendJSONRoute = _BackendJSONRoute
+BackendJSONResponse = _BackendJSONResponse
+workflow_success_response = _success
+workflow_error_response = _error
 
 
 __all__ = [
-    "AuthoringCompileRequest",
-    "AuthoringGeneratePythonRequest",
-    "AuthoringValidateRequest",
-    "DeviceActionTaskCreateRequest",
-    "create_authoring_transform_app",
-    "create_authoring_transform_router",
+    "BackendJSONResponse",
+    "BackendJSONRoute",
     "create_workflow_app",
     "create_workflow_router",
-    "create_workflow_template_catalog_router",
     "format_sse_event",
-    "install_authoring_transform_api",
-    "install_composed_workflow_authoring_api",
     "install_workflow_api",
+    "workflow_error_response",
+    "workflow_success_response",
 ]

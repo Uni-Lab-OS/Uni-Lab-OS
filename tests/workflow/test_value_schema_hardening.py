@@ -1,4 +1,4 @@
-"""Workflow v1 Schema canonical value 加固回归测试。"""
+"""工作流（Workflow）v1 Schema 规范值加固回归测试。"""
 
 from __future__ import annotations
 

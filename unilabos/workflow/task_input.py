@@ -1,807 +1,289 @@
-"""WorkflowTask input preflight、ResourceSlot 解析与 Handle binding。"""
+"""工作流任务（WorkflowTask）输入解析与冻结执行计划（ExecutionPlan）绑定。"""
 
 from __future__ import annotations
 
 from collections.abc import Mapping, Sequence
-from dataclasses import dataclass, fields, is_dataclass
-from typing import Any, Protocol
+from dataclasses import dataclass
+from typing import Any
 
-from unilabos.workflow.graph_validation import (
-    declared_handle_type_matches,
-    workflow_schema_matches_handle_type,
-)
 from unilabos.workflow.json_codec import clone_json
-from unilabos.workflow.models import validate_uuid
 from unilabos.workflow.schema import (
     WorkflowSchemaError,
     normalize_value,
-    parse_input_contract,
     parse_value_schema,
 )
 from unilabos.workflow.workflow_io import (
-    ValidatedWorkflowIO,
+    WorkflowIOValidationError,
+    schema_contains_resource_slot,
     validate_workflow_graph_io,
 )
 
-_EMPTY_INPUT_CONTRACT = {"version": 1, "parameters": []}
-_STABLE_ERROR_CODES = {"invalid_input", "not_found", "conflict"}
-
 
 class TaskInputError(ValueError):
-    """可在 transport 边界稳定映射的 Task input preflight 失败。"""
-
-    def __init__(self, code: str = "invalid_input") -> None:
-        if code not in _STABLE_ERROR_CODES:
-            code = "conflict"
-        super().__init__(code)
-        self.code = code
-
-
-@dataclass(frozen=True)
-class ResolvedResourceSlot:
-    """Material authority 返回给 Workflow 的最小 immutable identity。"""
-
-    uuid: str
-    resource_template_uuid: str
-
-
-@dataclass(frozen=True)
-class ResolvedSiteRef:
-    """Site authority 返回给 Workflow 的最小 immutable identity。"""
-
-    uuid: str
-
-
-class ResourceSlotResolver(Protocol):
-    """由未来 Material Module 实现的 ResourceSlot lookup port。"""
-
-    def resolve(
-        self,
-        *,
-        material_uuid: str,
-        allowed_resource_template_uuids: tuple[str, ...] | None,
-    ) -> ResolvedResourceSlot: ...
-
-
-class SiteRefResolver(Protocol):
-    """由 Site authority 实现的稳定 Site identity lookup port。"""
-
-    def resolve(self, *, site_uuid: str) -> ResolvedSiteRef: ...
-
-
-class UnconfiguredResourceSlotResolver:
-    """02H production 的显式 fail-closed Material adapter。"""
-
-    def resolve(
-        self,
-        *,
-        material_uuid: str,
-        allowed_resource_template_uuids: tuple[str, ...] | None,
-    ) -> ResolvedResourceSlot:
-        del material_uuid, allowed_resource_template_uuids
-        raise TaskInputError("conflict")
-
-
-class UnconfiguredSiteRefResolver:
-    """Site authority 尚未装配时的显式 fail-closed adapter。"""
-
-    def resolve(self, *, site_uuid: str) -> ResolvedSiteRef:
-        del site_uuid
-        raise TaskInputError("conflict")
+    """任务输入无法在任何持久写入前形成唯一冻结解释。"""
 
 
 @dataclass(frozen=True)
 class PreparedTaskInput:
-    """Task transaction 在首次 INSERT 前准备好的全部 JSON 事实。"""
+    """同一工作流快照中已规范化并绑定的任务创建事实。"""
 
     workflow_snapshot: dict[str, Any]
     resolved_input: dict[str, Any]
     execution_plan: dict[str, Any]
     jobs: list[dict[str, Any]]
-    material_root_uuids: tuple[str, ...]
 
 
-def preflight_task_input(
+def prepare_task_input(
     *,
     graph: Mapping[str, Any],
     raw_input: Mapping[str, Any],
     execution_plan: Mapping[str, Any],
     jobs: Sequence[Mapping[str, Any]],
-    resource_resolver: ResourceSlotResolver | None,
-    site_ref_resolver: SiteRefResolver | None = None,
 ) -> PreparedTaskInput:
-    """在 Task/Job 写入前完成合同、slot、binding 与 provider 校验。"""
+    """在持久写入前解析任务输入并绑定活动计划节点。
 
-    try:
-        workflow_snapshot = clone_json(graph)
-        if type(workflow_snapshot) is not dict:
-            raise TaskInputError()
-        validated_io = validate_workflow_graph_io(workflow_snapshot)
-        contract = validated_io.input_contract.to_dict()
-        resolved_input = _resolve_input_values(
-            contract,
-            raw_input,
-            resource_resolver=resource_resolver,
-            site_ref_resolver=site_ref_resolver,
-        )
-        bindings = _task_input_bindings(validated_io)
-        bound_plan, bound_jobs = _bind_active_plan(
-            workflow_snapshot,
-            execution_plan,
-            jobs,
-            bindings=bindings,
-            resolved_input=resolved_input,
-            resource_resolver=resource_resolver,
-            site_ref_resolver=site_ref_resolver,
-        )
-        material_roots = _material_root_uuids_from_contract(
-            workflow_snapshot,
-            resolved_input,
-            bound_plan,
-            contract=contract,
-        )
-    except TaskInputError:
-        raise
-    except (KeyError, TypeError, ValueError, WorkflowSchemaError):
-        raise TaskInputError("invalid_input") from None
-    return PreparedTaskInput(
-        workflow_snapshot=workflow_snapshot,
-        resolved_input=clone_json(resolved_input),
-        execution_plan=bound_plan,
-        jobs=bound_jobs,
-        material_root_uuids=material_roots,
-    )
+    参数：``graph`` 是当前应用图，``raw_input`` 是请求输入，
+    ``execution_plan`` 与 ``jobs`` 来自同一图的计划构造。返回：彼此独立的冻结
+    快照、规范输入、计划和首次作业。异常：合同、值、绑定或提供者不唯一时抛
+    ``TaskInputError``；K11 前物料占位符（ResourceSlot）输入同样失败关闭。
+    """
 
-
-def material_root_uuids_from_task_snapshot(
-    graph: Mapping[str, Any],
-    resolved_input: Mapping[str, Any],
-    execution_plan: Mapping[str, Any],
-) -> tuple[str, ...]:
-    """按 frozen Input Contract 与 active typed target Handles 提取 roots。"""
-
-    try:
-        contract = _parse_frozen_input_contract(graph)
-        return _material_root_uuids_from_contract(
-            graph,
-            resolved_input,
-            execution_plan,
-            contract=contract,
-        )
-    except TaskInputError:
-        raise
-    except (KeyError, TypeError, ValueError, WorkflowSchemaError):
-        raise TaskInputError("invalid_input") from None
-
-
-def _material_root_uuids_from_contract(
-    graph: Mapping[str, Any],
-    resolved_input: Mapping[str, Any],
-    execution_plan: Mapping[str, Any],
-    *,
-    contract: Mapping[str, Any],
-) -> tuple[str, ...]:
-    if type(resolved_input) is not dict:
-        raise TaskInputError()
-    parameters = contract["parameters"]
-    expected_names = {parameter["name"] for parameter in parameters}
-    if set(resolved_input) != expected_names:
-        raise TaskInputError()
-    roots: set[str] = set()
-    for parameter in parameters:
-        roots.update(
-            _material_roots_for_value(
-                parameter["schema"],
-                resolved_input[parameter["name"]],
-            )
-        )
-    plan_nodes = execution_plan.get("nodes")
-    graph_handles = graph.get("handle_templates")
-    graph_nodes = graph.get("nodes")
-    if (
-        type(plan_nodes) is not list
-        or type(graph_handles) is not list
-        or type(graph_nodes) is not list
+    if not isinstance(raw_input, Mapping) or any(
+        not isinstance(key, str) for key in raw_input
     ):
-        raise TaskInputError()
-    handles: dict[str, Mapping[str, Any]] = {}
-    for handle in graph_handles:
-        if type(handle) is not dict or type(handle.get("uuid")) is not str:
-            raise TaskInputError()
-        if handle["uuid"] in handles:
-            raise TaskInputError()
-        handles[handle["uuid"]] = handle
-    nodes: dict[str, Mapping[str, Any]] = {}
-    for node in graph_nodes:
-        if type(node) is not dict or type(node.get("uuid")) is not str:
-            raise TaskInputError()
-        if node["uuid"] in nodes:
-            raise TaskInputError()
-        nodes[node["uuid"]] = node
-    seen_plan_nodes: set[str] = set()
-    for planned_node in plan_nodes:
-        if type(planned_node) is not dict or type(planned_node.get("uuid")) is not str:
-            raise TaskInputError()
-        node_uuid = planned_node["uuid"]
-        if node_uuid in seen_plan_nodes:
-            raise TaskInputError()
-        seen_plan_nodes.add(node_uuid)
-        graph_node = nodes.get(node_uuid)
-        if graph_node is None:
-            raise TaskInputError()
-        param = planned_node.get("param")
-        if type(param) is not dict:
-            raise TaskInputError()
-        template_uuid = graph_node.get("workflow_node_template_uuid")
-        target_handles = (
-            handle
-            for handle in handles.values()
-            if handle.get("workflow_node_template_uuid") == template_uuid
-            and handle.get("io_type") == "target"
+        raise TaskInputError("工作流任务输入必须是字符串键对象")
+    try:
+        snapshot = clone_json(dict(graph))
+        plan = clone_json(dict(execution_plan))
+        prepared_jobs = clone_json(list(jobs))
+        supplied = clone_json(dict(raw_input))
+        validated = validate_workflow_graph_io(snapshot)
+        resolved = _resolve_values(
+            validated.input_contract.to_dict()["parameters"],
+            supplied,
         )
-        for handle in target_handles:
-            data_key = _final_target_data_key(_handle_data_key(handle))
-            if not data_key:
-                raise TaskInputError()
-            value_schema = _typed_handle_value_schema(handle)
-            if (
-                value_schema is None
-                or not _schema_contains_resource_slot(value_schema)
-                or data_key not in param
-                or param[data_key] is None
-            ):
-                continue
-            roots.update(_material_roots_for_value(value_schema, param[data_key]))
-    return tuple(sorted(roots))
-
-
-def _material_roots_for_value(
-    schema: Mapping[str, Any],
-    value: Any,
-) -> tuple[str, ...]:
-    if "anyOf" in schema:
-        if value is None:
-            return ()
-        members = schema["anyOf"]
-        concrete = next(
-            (member for member in members if member.get("type") != "null"),
-            None,
+        _bind_active_plan(
+            plan=plan,
+            jobs=prepared_jobs,
+            input_bindings=validated.input_bindings,
+            resolved_input=resolved,
         )
-        if concrete is None:
-            raise TaskInputError()
-        return _material_roots_for_value(concrete, value)
-    if schema.get("$slot") == "ResourceSlot":
-        if type(value) is not dict or set(value) != {
-            "uuid",
-            "resource_template_uuid",
-        }:
-            raise TaskInputError()
-        try:
-            material_uuid = validate_uuid(value["uuid"])
-            template_uuid = validate_uuid(value["resource_template_uuid"])
-        except (TypeError, ValueError):
-            raise TaskInputError() from None
-        allowed = schema.get("allowed_resource_template_uuids")
-        if allowed is not None and template_uuid not in allowed:
-            raise TaskInputError()
-        return (material_uuid,)
-    if schema.get("type") == "array":
-        if type(value) is not list:
-            raise TaskInputError()
-        return tuple(
-            root
-            for item in value
-            for root in _material_roots_for_value(schema["items"], item)
-        )
-    return ()
-
-
-def _schema_contains_resource_slot(schema: Mapping[str, Any]) -> bool:
-    if schema.get("$slot") == "ResourceSlot":
-        return True
-    if "anyOf" in schema:
-        return any(
-            _schema_contains_resource_slot(member)
-            for member in schema.get("anyOf", ())
-            if type(member) is dict
-        )
-    if schema.get("type") == "array" and type(schema.get("items")) is dict:
-        return _schema_contains_resource_slot(schema["items"])
-    return False
-
-
-def _schema_contains_site_ref(schema: Mapping[str, Any]) -> bool:
-    if schema.get("$slot") == "SiteRef":
-        return True
-    if "anyOf" in schema:
-        return any(
-            _schema_contains_site_ref(member)
-            for member in schema.get("anyOf", ())
-            if type(member) is dict
-        )
-    if schema.get("type") == "array" and type(schema.get("items")) is dict:
-        return _schema_contains_site_ref(schema["items"])
-    return False
-
-
-def _schema_contains_typed_slot(schema: Mapping[str, Any]) -> bool:
-    return _schema_contains_resource_slot(schema) or _schema_contains_site_ref(schema)
-
-
-def _contains_closed_resource_slot_value(
-    schema: Mapping[str, Any],
-    value: Any,
-) -> bool:
-    if "anyOf" in schema:
-        if value is None:
-            return False
-        return any(
-            _contains_closed_resource_slot_value(member, value)
-            for member in schema.get("anyOf", ())
-            if type(member) is dict and member.get("type") != "null"
-        )
-    if schema.get("$slot") == "ResourceSlot":
-        return type(value) is dict and "resource_template_uuid" in value
-    if schema.get("type") == "array" and type(schema.get("items")) is dict:
-        return type(value) is list and any(
-            _contains_closed_resource_slot_value(schema["items"], item)
-            for item in value
-        )
-    return False
-
-
-def _apply_handle_slot_allowlist(
-    schema: Mapping[str, Any],
-    allowed: Any,
-) -> dict[str, Any]:
-    result = clone_json(dict(schema))
-    if result.get("$slot") == "ResourceSlot":
-        if allowed is not None:
-            result["allowed_resource_template_uuids"] = clone_json(allowed)
-        return result
-    if "anyOf" in result:
-        result["anyOf"] = [
-            _apply_handle_slot_allowlist(member, allowed)
-            if type(member) is dict
-            else member
-            for member in result["anyOf"]
-        ]
-    if result.get("type") == "array" and type(result.get("items")) is dict:
-        result["items"] = _apply_handle_slot_allowlist(result["items"], allowed)
-    return result
-
-
-def _strip_handle_schema_annotations(schema: Mapping[str, Any]) -> dict[str, Any]:
-    """Remove catalog presentation metadata before strict execution parsing."""
-
-    result = clone_json(dict(schema))
-    result.pop("title", None)
-    result.pop("description", None)
-    if "anyOf" in result:
-        result["anyOf"] = [
-            _strip_handle_schema_annotations(member)
-            if type(member) is dict
-            else member
-            for member in result["anyOf"]
-        ]
-    if result.get("type") == "array" and type(result.get("items")) is dict:
-        result["items"] = _strip_handle_schema_annotations(result["items"])
-    return result
-
-
-def _typed_handle_value_schema(
-    handle: Mapping[str, Any],
-) -> dict[str, Any] | None:
-    meta_data = handle.get("meta_data", {})
-    if type(meta_data) is not dict:
-        raise TaskInputError()
-    unilab = meta_data.get("unilab", {})
-    if type(unilab) is not dict:
-        raise TaskInputError()
-    raw_schema = unilab.get("value_schema")
-    if raw_schema is None:
-        handle_type = handle.get("type")
-        if handle_type not in {"ResourceSlot", "SiteRef"}:
-            return None
-        raw_schema = {"$slot": handle_type}
-    if type(raw_schema) is not dict:
-        raise TaskInputError()
-    if not _schema_contains_typed_slot(raw_schema):
-        return None
-    with_allowlist = _apply_handle_slot_allowlist(
-        raw_schema,
-        unilab.get("allowed_resource_template_uuids"),
+    except TaskInputError:
+        raise
+    except (
+        TypeError,
+        ValueError,
+        WorkflowIOValidationError,
+        WorkflowSchemaError,
+    ) as exc:
+        raise TaskInputError("工作流任务输入或绑定无效") from exc
+    return PreparedTaskInput(
+        workflow_snapshot=snapshot,
+        resolved_input=resolved,
+        execution_plan=plan,
+        jobs=prepared_jobs,
     )
-    execution_schema = _strip_handle_schema_annotations(with_allowlist)
-    return parse_value_schema(execution_schema).to_dict()
 
 
-def _parse_frozen_input_contract(
-    graph: Mapping[str, Any],
+def _resolve_values(
+    parameters: Sequence[Mapping[str, Any]],
+    supplied: Mapping[str, Any],
 ) -> dict[str, Any]:
-    """读取已创建 Task 的 immutable input contract，不重验其历史 output。"""
+    """按闭合输入合同解析请求值并填入合同默认值。
 
-    workflow = graph.get("workflow")
-    if type(workflow) is not dict:
-        raise TaskInputError()
-    meta_data = workflow.get("meta_data", {})
-    if type(meta_data) is not dict:
-        raise TaskInputError()
-    if "unilab" not in meta_data:
-        raw_contract: Any = _EMPTY_INPUT_CONTRACT
-    else:
-        unilab = meta_data["unilab"]
-        if type(unilab) is not dict:
-            raise TaskInputError()
-        raw_contract = unilab.get("input_contract", _EMPTY_INPUT_CONTRACT)
-    return parse_input_contract(raw_contract).to_dict()
+    参数：``parameters`` 是已验证的有序参数声明，``supplied`` 是独立请求对象。
+    返回：按合同顺序排列的规范输入。异常：未知、缺失、类型不符或含物料占位符
+    （ResourceSlot）时抛 ``TaskInputError``。
+    """
 
-
-def _resolve_input_values(
-    contract: Mapping[str, Any],
-    raw_input: Mapping[str, Any],
-    *,
-    resource_resolver: ResourceSlotResolver | None,
-    site_ref_resolver: SiteRefResolver | None,
-) -> dict[str, Any]:
-    if type(raw_input) is not dict or any(type(key) is not str for key in raw_input):
-        raise TaskInputError()
-    parameters = contract.get("parameters")
-    if type(parameters) is not list:
-        raise TaskInputError()
-    names = {parameter["name"] for parameter in parameters}
-    if any(key not in names for key in raw_input):
-        raise TaskInputError()
-
+    declared = {str(parameter["name"]) for parameter in parameters}
+    if any(name not in declared for name in supplied):
+        raise TaskInputError("工作流任务输入包含未声明参数")
     resolved: dict[str, Any] = {}
     for parameter in parameters:
-        name = parameter["name"]
-        supplied = name in raw_input and raw_input[name] is not None
-        if not supplied:
-            if parameter["required"]:
-                raise TaskInputError()
-            raw_value = clone_json(parameter["default"])
+        name = str(parameter["name"])
+        schema = parse_value_schema(parameter["schema"])
+        if schema_contains_resource_slot(schema):
+            raise TaskInputError("K11 前不接受物料占位符任务输入")
+        if name in supplied:
+            value = supplied[name]
+        elif parameter["required"]:
+            raise TaskInputError("工作流任务缺少必填输入")
         else:
-            raw_value = raw_input[name]
-        value_schema = parse_value_schema(parameter["schema"])
-        normalized = normalize_value(value_schema, raw_value)
-        resolved[name] = _resolve_slots(
-            parameter["schema"],
-            normalized,
-            resource_resolver=resource_resolver,
-            site_ref_resolver=site_ref_resolver,
-        )
+            value = parameter["default"]
+        try:
+            resolved[name] = normalize_value(schema, value)
+        except WorkflowSchemaError as exc:
+            raise TaskInputError("工作流任务输入值不符合 Schema") from exc
     return resolved
 
 
-def _resolve_slots(
-    schema: Mapping[str, Any],
-    value: Any,
-    *,
-    resource_resolver: ResourceSlotResolver | None,
-    site_ref_resolver: SiteRefResolver | None,
-) -> Any:
-    if "anyOf" in schema:
-        if value is None:
-            return None
-        members = schema["anyOf"]
-        return _resolve_slots(
-            members[0],
-            value,
-            resource_resolver=resource_resolver,
-            site_ref_resolver=site_ref_resolver,
-        )
-    if schema.get("$slot") == "ResourceSlot":
-        allowed_raw = schema.get("allowed_resource_template_uuids")
-        allowed = tuple(allowed_raw) if allowed_raw is not None else None
-        return _resolve_one_slot(
-            value,
-            allowed_resource_template_uuids=allowed,
-            resource_resolver=resource_resolver,
-        )
-    if schema.get("$slot") == "SiteRef":
-        return _resolve_one_site_ref(
-            value,
-            site_ref_resolver=site_ref_resolver,
-        )
-    if schema.get("type") == "array":
-        return [
-            _resolve_slots(
-                schema["items"],
-                item,
-                resource_resolver=resource_resolver,
-                site_ref_resolver=site_ref_resolver,
-            )
-            for item in value
-        ]
-    return clone_json(value)
-
-
-def _resolve_one_slot(
-    value: Any,
-    *,
-    allowed_resource_template_uuids: tuple[str, ...] | None,
-    resource_resolver: ResourceSlotResolver | None,
-) -> dict[str, str]:
-    material_uuid = value["uuid"]
-    if resource_resolver is None:
-        raise TaskInputError("conflict")
-    try:
-        returned = resource_resolver.resolve(
-            material_uuid=material_uuid,
-            allowed_resource_template_uuids=allowed_resource_template_uuids,
-        )
-    except TaskInputError:
-        raise
-    # 这是外部 Material adapter 的 fail-closed 边界；未知实现异常不能越过
-    # preflight 形成 500 或 partial write。
-    except Exception as error:  # noqa: BLE001
-        code = getattr(error, "code", "conflict")
-        raise TaskInputError(code) from None
-
-    identity = _closed_resolved_slot(returned)
-    if identity.uuid != material_uuid:
-        raise TaskInputError()
-    if (
-        allowed_resource_template_uuids is not None
-        and identity.resource_template_uuid not in allowed_resource_template_uuids
-    ):
-        raise TaskInputError()
-    return {
-        "uuid": identity.uuid,
-        "resource_template_uuid": identity.resource_template_uuid,
-    }
-
-
-def _closed_resolved_slot(value: Any) -> ResolvedResourceSlot:
-    if is_dataclass(value) and not isinstance(value, type):
-        if {field.name for field in fields(value)} != {
-            "uuid",
-            "resource_template_uuid",
-        }:
-            raise TaskInputError()
-        parameters = getattr(type(value), "__dataclass_params__", None)
-        if parameters is None or not parameters.frozen:
-            raise TaskInputError()
-        raw_uuid = value.uuid
-        raw_template_uuid = value.resource_template_uuid
-    else:
-        raise TaskInputError()
-    if type(raw_uuid) is not str or type(raw_template_uuid) is not str:
-        raise TaskInputError()
-    try:
-        identity = validate_uuid(raw_uuid)
-        template_identity = validate_uuid(raw_template_uuid)
-    except (TypeError, ValueError):
-        raise TaskInputError() from None
-    return ResolvedResourceSlot(identity, template_identity)
-
-
-def _resolve_one_site_ref(
-    value: Any,
-    *,
-    site_ref_resolver: SiteRefResolver | None,
-) -> dict[str, str]:
-    site_uuid = value["uuid"]
-    if site_ref_resolver is None:
-        raise TaskInputError("conflict")
-    try:
-        returned = site_ref_resolver.resolve(site_uuid=site_uuid)
-    except TaskInputError:
-        raise
-    except Exception as error:  # noqa: BLE001
-        code = getattr(error, "code", "conflict")
-        raise TaskInputError(code) from None
-
-    identity = _closed_resolved_site_ref(returned)
-    if identity.uuid != site_uuid:
-        raise TaskInputError()
-    return {"uuid": identity.uuid}
-
-
-def _closed_resolved_site_ref(value: Any) -> ResolvedSiteRef:
-    if not is_dataclass(value) or isinstance(value, type):
-        raise TaskInputError()
-    if {field.name for field in fields(value)} != {"uuid"}:
-        raise TaskInputError()
-    parameters = getattr(type(value), "__dataclass_params__", None)
-    if parameters is None or not parameters.frozen or type(value.uuid) is not str:
-        raise TaskInputError()
-    try:
-        identity = validate_uuid(value.uuid)
-    except (TypeError, ValueError):
-        raise TaskInputError() from None
-    return ResolvedSiteRef(identity)
-
-
-def _task_input_bindings(
-    validated_io: ValidatedWorkflowIO,
-) -> dict[str, dict[str, Any]]:
-    contract = validated_io.input_contract.to_dict()
-    parameters = {parameter["name"]: parameter for parameter in contract["parameters"]}
-    bindings: dict[str, dict[str, Any]] = {}
-    for node_uuid, node_bindings in validated_io.input_bindings.items():
-        for handle_uuid, binding in node_bindings.items():
-            parameter_name = binding["parameter"]
-            parameter = parameters[parameter_name]
-            bindings[f"{node_uuid}:{handle_uuid}"] = {
-                "parameter": parameter_name,
-                "schema": clone_json(parameter["schema"]),
-            }
-    return bindings
-
-
 def _bind_active_plan(
-    graph: Mapping[str, Any],
-    execution_plan: Mapping[str, Any],
-    jobs: Sequence[Mapping[str, Any]],
     *,
-    bindings: Mapping[str, Mapping[str, Any]],
+    plan: dict[str, Any],
+    jobs: list[dict[str, Any]],
+    input_bindings: Mapping[str, Mapping[str, Mapping[str, str]]],
     resolved_input: Mapping[str, Any],
-    resource_resolver: ResourceSlotResolver | None,
-    site_ref_resolver: SiteRefResolver | None,
-) -> tuple[dict[str, Any], list[dict[str, Any]]]:
-    plan = clone_json(execution_plan)
-    bound_jobs = clone_json(list(jobs))
-    if type(plan) is not dict or type(plan.get("nodes")) is not list:
-        raise TaskInputError()
-    graph_nodes = {
-        node["uuid"]: node
-        for node in graph["nodes"]
-        if type(node) is dict and type(node.get("uuid")) is str
-    }
-    handles = {
-        handle["uuid"]: handle
-        for handle in graph["handle_templates"]
-        if type(handle) is dict and type(handle.get("uuid")) is str
-    }
-    active_nodes = {
-        node["uuid"]: node
-        for node in plan["nodes"]
-        if type(node) is dict and type(node.get("uuid")) is str
-    }
-    if len(active_nodes) != len(plan["nodes"]):
-        raise TaskInputError()
-    job_by_node: dict[str, dict[str, Any]] = {}
-    for job in bound_jobs:
-        if type(job) is not dict or type(job.get("workflow_node_uuid")) is not str:
-            raise TaskInputError()
-        node_uuid = job["workflow_node_uuid"]
-        if node_uuid in job_by_node:
-            raise TaskInputError()
-        job_by_node[node_uuid] = job
-    if set(job_by_node) != set(active_nodes):
-        raise TaskInputError()
+) -> None:
+    """把已解析输入绑定到活动计划节点与对应首次作业。
 
-    active_edges: dict[tuple[str, str], int] = {}
-    plan_edges = plan.get("edges")
-    if type(plan_edges) is not list:
-        raise TaskInputError()
-    for edge in plan_edges:
-        if type(edge) is not dict:
-            raise TaskInputError()
+    参数：``plan``/``jobs`` 是独立可修改副本，``input_bindings`` 是公共校验器
+    产出的节点绑定，``resolved_input`` 是规范值。返回：无，原地完成冻结绑定。
+    异常：静态值、图边和工作流输入同时提供，或必填目标无提供者时抛
+    ``TaskInputError``。
+    """
+
+    plan_nodes = _indexed_objects(plan.get("nodes"), key="uuid", label="计划节点")
+    plan_handles = _indexed_objects(
+        plan.get("handles"),
+        key="uuid",
+        label="计划连接点",
+    )
+    jobs_by_node = _indexed_objects(
+        jobs,
+        key="workflow_node_uuid",
+        label="计划作业节点",
+    )
+    incoming = _incoming_edges(_object_list(plan.get("edges"), label="计划边"))
+    for handle_uuid, handle in plan_handles.items():
+        if handle.get("io_type") != "target":
+            continue
+        node_uuid = str(handle.get("node_uuid") or "")
+        node = plan_nodes.get(node_uuid)
+        job = jobs_by_node.get(node_uuid)
+        if node is None or job is None:
+            raise TaskInputError("计划连接点未归属唯一活动作业")
+        template_handle_uuid = str(handle.get("template_handle_uuid") or "")
+        binding = input_bindings.get(node_uuid, {}).get(template_handle_uuid)
+        input_projection = next(
+            (
+                item
+                for item in _object_list(node.get("inputs"), label="计划节点输入")
+                if item.get("handle_uuid") == handle_uuid
+            ),
+            None,
+        )
+        if input_projection is None:
+            raise TaskInputError("计划目标连接点缺少节点输入投影")
+        data_key = str(input_projection.get("data_key") or "")
+        if not data_key:
+            raise TaskInputError("计划目标连接点缺少参数键")
+        node_param = node.get("param")
+        job_param = job.get("param")
+        if not isinstance(node_param, dict) or not isinstance(job_param, dict):
+            raise TaskInputError("计划节点或作业参数不是对象")
+        incoming_edges = incoming.get(handle_uuid, [])
+        static_provider = data_key in node_param and node_param[data_key] is not None
+        # 固定 existing 物料来源（MaterialSource）在计划构建时把同一条物料边
+        # 解析出的具体引用预投影到动作参数；它与该边是一个提供者，不能重复计数。
+        if static_provider and any(
+            _is_prebound_material_edge(
+                edge=edge,
+                plan_nodes=plan_nodes,
+                target_data_key=data_key,
+                target_param=node_param,
+            )
+            for edge in incoming_edges
+        ):
+            static_provider = False
+        provider_count = (
+            int(static_provider) + len(incoming_edges) + int(binding is not None)
+        )
+        if provider_count > 1:
+            raise TaskInputError("计划目标输入存在多个提供者")
+        if bool(input_projection.get("required")) and provider_count == 0:
+            raise TaskInputError("计划必填目标输入没有提供者")
+        if binding is None:
+            continue
+        parameter = binding["parameter"]
+        if parameter not in resolved_input:
+            raise TaskInputError("计划输入绑定引用未解析参数")
+        node_param[data_key] = clone_json(resolved_input[parameter])
+        job_param[data_key] = clone_json(resolved_input[parameter])
+
+
+def _incoming_edges(
+    edges: Sequence[Mapping[str, Any]],
+) -> dict[str, list[Mapping[str, Any]]]:
+    """按目标运行连接点索引提供值的计划边。
+
+    参数：``edges`` 是已验证为对象的冻结计划边。返回：排除纯依赖边后按目标
+    连接点 UUID 分组的边列表。异常：本函数不抛异常；缺失目标身份的边保留在
+    空字符串组，并由后续必填提供者校验失败关闭。
+    """
+
+    result: dict[str, list[Mapping[str, Any]]] = {}
+    for edge in edges:
         if edge.get("dependency_only") is True:
             continue
-        node_uuid = edge.get("target_node_uuid")
-        handle_uuid = edge.get("target_handle_uuid")
-        if type(node_uuid) is str and type(handle_uuid) is str:
-            edge_target = (node_uuid, handle_uuid)
-            active_edges[edge_target] = active_edges.get(edge_target, 0) + 1
-
-    for node_uuid, planned_node in active_nodes.items():
-        graph_node = graph_nodes.get(node_uuid)
-        if graph_node is None:
-            raise TaskInputError()
-        raw_param = graph_node.get("param", {})
-        if type(raw_param) is not dict:
-            raise TaskInputError()
-        plan_param = clone_json(raw_param)
-        job_param = clone_json(raw_param)
-        snapshot_param = clone_json(raw_param)
-        template_uuid = graph_node.get("workflow_node_template_uuid")
-        target_handles = [
-            handle
-            for handle in handles.values()
-            if handle.get("workflow_node_template_uuid") == template_uuid
-            and handle.get("io_type") == "target"
-        ]
-        for handle in target_handles:
-            handle_uuid = handle["uuid"]
-            data_key = _final_target_data_key(_handle_data_key(handle))
-            if not data_key:
-                raise TaskInputError()
-            binding = bindings.get(f"{node_uuid}:{handle_uuid}")
-            has_static = data_key in raw_param and raw_param[data_key] is not None
-            edge_count = active_edges.get((node_uuid, handle_uuid), 0)
-            has_binding = binding is not None
-            provider_count = int(has_static) + edge_count + int(has_binding)
-            if provider_count > 1:
-                raise TaskInputError()
-            binding_value = (
-                resolved_input[binding["parameter"]] if binding is not None else None
-            )
-            value_schema = _typed_handle_value_schema(handle)
-            if (
-                has_static
-                and value_schema is not None
-                and _schema_contains_typed_slot(value_schema)
-            ):
-                raw_static = raw_param[data_key]
-                if _contains_closed_resource_slot_value(value_schema, raw_static):
-                    # Applied Authoring graphs already carry the Material
-                    # Authority-owned identity. Validate its exact closed shape
-                    # and Handle allowlist without performing a second lookup.
-                    _material_roots_for_value(value_schema, raw_static)
-                    resolved_static = clone_json(raw_static)
-                else:
-                    normalized_static = normalize_value(
-                        parse_value_schema(value_schema),
-                        raw_static,
-                    )
-                    resolved_static = _resolve_slots(
-                        value_schema,
-                        normalized_static,
-                        resource_resolver=resource_resolver,
-                        site_ref_resolver=site_ref_resolver,
-                    )
-                plan_param[data_key] = clone_json(resolved_static)
-                job_param[data_key] = clone_json(resolved_static)
-                snapshot_param[data_key] = clone_json(resolved_static)
-            if (
-                binding is not None
-                and binding_value is not None
-                and value_schema is not None
-                and _schema_contains_resource_slot(value_schema)
-            ):
-                # Workflow input 已由 Material Authority 规范化；这里只按
-                # A1 target Handle schema/allowlist 验证 authority-owned identity，
-                # 不做第二次 lookup。
-                _material_roots_for_value(value_schema, binding_value)
-            if binding is not None and not workflow_schema_matches_handle_type(
-                binding["schema"],
-                handle.get("type"),
-            ):
-                raise TaskInputError()
-            if has_static and not declared_handle_type_matches(
-                plan_param[data_key],
-                handle.get("type"),
-            ):
-                raise TaskInputError()
-            if has_binding and not declared_handle_type_matches(
-                binding_value,
-                handle.get("type"),
-            ):
-                raise TaskInputError()
-            if handle.get("required") and (
-                provider_count != 1 or (has_binding and binding_value is None)
-            ):
-                raise TaskInputError()
-            if binding is not None:
-                plan_param[data_key] = clone_json(binding_value)
-                job_param[data_key] = clone_json(binding_value)
-        graph_node["param"] = snapshot_param
-        planned_node["param"] = plan_param
-        job_by_node[node_uuid]["param"] = job_param
-    return plan, bound_jobs
+        result.setdefault(str(edge.get("target_handle_uuid") or ""), []).append(edge)
+    return result
 
 
-def _handle_data_key(handle: Mapping[str, Any]) -> str:
-    return str(handle.get("data_key") or handle.get("handle_key") or "").strip()
+def _is_prebound_material_edge(
+    *,
+    edge: Mapping[str, Any],
+    plan_nodes: Mapping[str, Mapping[str, Any]],
+    target_data_key: str,
+    target_param: Mapping[str, Any],
+) -> bool:
+    """识别已由同一物料边预投影的固定物料引用。
+
+    参数：``edge`` 是目标输入的计划边，``plan_nodes`` 是活动计划节点索引，
+    ``target_data_key``/``target_param`` 定位动作参数。返回：来源确为固定
+    existing 物料来源（MaterialSource），且动作参数等于该来源 UUID 引用时为真。
+    异常：不抛异常；任何形状或语义不匹配都返回假并继续按独立静态提供者计数。
+    """
+
+    if (
+        edge.get("source_type") != "ResourceSlot"
+        or edge.get("target_type") != "ResourceSlot"
+    ):
+        return False
+    source = plan_nodes.get(str(edge.get("source_node_uuid") or ""))
+    if source is None or source.get("kind") != "material_source":
+        return False
+    source_param = source.get("param")
+    if not isinstance(source_param, Mapping) or source_param.get("mode") != "existing":
+        return False
+    material_uuid = source_param.get("material_uuid")
+    return isinstance(material_uuid, str) and target_param.get(target_data_key) == {
+        "uuid": material_uuid
+    }
 
 
-def _final_target_data_key(data_key: str) -> str:
-    return data_key.split("@@@")[-1].strip()
+def _indexed_objects(
+    raw: Any,
+    *,
+    key: str,
+    label: str,
+) -> dict[str, dict[str, Any]]:
+    """把对象列表按必填字符串字段建立唯一索引。
+
+    参数：``raw`` 是候选列表，``key`` 是身份字段，``label`` 用于中文诊断。
+    返回：保持原对象引用的索引。异常：形状、身份或唯一性不合法时抛
+    ``TaskInputError``。
+    """
+
+    result: dict[str, dict[str, Any]] = {}
+    for item in _object_list(raw, label=label):
+        identity = item.get(key)
+        if not isinstance(identity, str) or not identity or identity in result:
+            raise TaskInputError(f"{label}身份无效或重复")
+        result[identity] = item
+    return result
 
 
-__all__ = [
-    "PreparedTaskInput",
-    "ResolvedResourceSlot",
-    "ResolvedSiteRef",
-    "ResourceSlotResolver",
-    "SiteRefResolver",
-    "TaskInputError",
-    "UnconfiguredResourceSlotResolver",
-    "UnconfiguredSiteRefResolver",
-    "material_root_uuids_from_task_snapshot",
-    "preflight_task_input",
-]
+def _object_list(raw: Any, *, label: str) -> list[dict[str, Any]]:
+    """把不受信任值收窄为对象列表。
+
+    参数：``raw`` 是候选 JSON 值，``label`` 是中文诊断名称。返回：原对象列表。
+    异常：不是列表或成员不是对象时抛 ``TaskInputError``。
+    """
+
+    if not isinstance(raw, list) or any(not isinstance(item, dict) for item in raw):
+        raise TaskInputError(f"{label}必须是对象列表")
+    return raw
+
+
+__all__ = ["PreparedTaskInput", "TaskInputError", "prepare_task_input"]

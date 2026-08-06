@@ -12,7 +12,8 @@
                              不设则用本地稳定排序 stub
     ULAB_ORDERING_ALGORITHM  远端排序算法名，默认 WeightedCriticalPath
     ULAB_LAB_ID              提交远端排序时的 lab_id，默认 edge-lab
-    ULAB_WORKING_DIR         独立进程 workspace；Inventory 固定使用其中 inventory.db
+    ULAB_INVENTORY_DB        Edge 仓储 SQLite 路径（如 ~/.unilabos/inventory.db）；
+                             设置后启用仓储路由并接入调度器物料预留
     ULAB_DEVICE_STATE_DB     设备状态 SQLite 路径（默认 ~/.unilabos/device_state.db，
                              与仓储/工作流库分开；设为 "off" 关闭落盘）
     ULAB_WORKFLOW_HISTORY_DB 工作流执行历史 SQLite 路径（默认
@@ -31,6 +32,7 @@ from unilabos.app.scheduler.estimation import DurationEstimator
 from unilabos.app.scheduler.monitor import monitor_bus
 from unilabos.app.scheduler.ordering import HttpSchedulerOrderer, StableLocalOrderer
 from unilabos.app.scheduler.service import EdgeScheduler
+from unilabos.utils.tracing import initialize_tracing
 
 
 def build_estimator() -> DurationEstimator:
@@ -41,9 +43,7 @@ def build_estimator() -> DurationEstimator:
 
 
 def _build_device_state():
-    db_path = os.environ.get(
-        "ULAB_DEVICE_STATE_DB", "~/.unilabos/device_state.db"
-    ).strip()
+    db_path = os.environ.get("ULAB_DEVICE_STATE_DB", "~/.unilabos/device_state.db").strip()
     if not db_path or db_path.lower() == "off":
         return None
     from unilabos.app.scheduler.device_state import DeviceStateStore
@@ -54,9 +54,7 @@ def _build_device_state():
 
 
 def _build_history():
-    db_path = os.environ.get(
-        "ULAB_WORKFLOW_HISTORY_DB", "~/.unilabos/workflow_history.db"
-    ).strip()
+    db_path = os.environ.get("ULAB_WORKFLOW_HISTORY_DB", "~/.unilabos/workflow_history.db").strip()
     if not db_path or db_path.lower() == "off":
         return None
     from unilabos.app.scheduler.history import WorkflowHistoryStore
@@ -73,19 +71,16 @@ def _build_history():
 
 
 def _build_inventory():
-    from unilabos.config.config import BasicConfig
-
-    working_dir = (
-        os.environ.get("ULAB_WORKING_DIR", "").strip()
-        or str(BasicConfig.working_dir or "").strip()
-    )
-    if not working_dir:
+    db_path = os.environ.get("ULAB_INVENTORY_DB", "").strip()
+    if not db_path:
         return None
     from unilabos.app.scheduler.inventory.service import InventoryService
+    from unilabos.app.scheduler.inventory.store import InventoryStore
 
-    return InventoryService.open(
-        working_dir=os.path.abspath(os.path.expanduser(working_dir)),
-        resource_templates={},
+    db_path = os.path.abspath(os.path.expanduser(db_path))
+    os.makedirs(os.path.dirname(db_path) or ".", exist_ok=True)
+    return InventoryService(
+        InventoryStore(db_path),
         edge_id=os.environ.get("ULAB_EDGE_ID", "edge-default"),
         lab_id=os.environ.get("ULAB_LAB_ID", "edge-lab"),
         monitor=monitor_bus,
@@ -114,22 +109,46 @@ def build_scheduler(inventory=None, history=None) -> EdgeScheduler:
     )
 
 
+initialize_tracing()
 _inventory = _build_inventory()
 _history = _build_history()
 app = create_app(
     build_scheduler(inventory=_inventory, history=_history),
     device_state=_build_device_state(),
     history=_history,
+    include_execution_shaped_workflow_routes=False,
 )
+
+_workflow_history_path = os.environ.get(
+    "ULAB_WORKFLOW_HISTORY_DB", "~/.unilabos/workflow_history.db"
+).strip()
+if _workflow_history_path and _workflow_history_path.lower() != "off":
+    from unilabos.app.workflow_api import install_workflow_api
+    from unilabos.workflow.service import WorkflowService
+    from unilabos.workflow.store import WorkflowStore
+
+    install_workflow_api(
+        app,
+        WorkflowService(
+            WorkflowStore(os.path.abspath(os.path.expanduser(_workflow_history_path)))
+        ),
+    )
 if _inventory is not None:
+    from unilabos.app.scheduler.inventory.backend_api import (
+        install_backend_resource_api,
+    )
+    from unilabos.app.scheduler.inventory.backend_contract import (
+        BackendResourceService,
+    )
     from unilabos.app.scheduler.inventory.api import (
+        create_legacy_material_router as _create_legacy_material_router,
         create_router as _create_inventory_router,
     )
-    from unilabos.app.scheduler.inventory.layout import (
-        create_lab_router as _create_lab_router,
-    )
+    from unilabos.app.scheduler.inventory.layout import create_lab_router as _create_lab_router
 
+    install_backend_resource_api(app, BackendResourceService(_inventory.store))
     app.include_router(_create_inventory_router(_inventory))
+    app.include_router(_create_legacy_material_router(_inventory))
     app.include_router(_create_lab_router(_inventory))
 
 

@@ -1,4 +1,4 @@
-"""共享 Parameter Annotation v1 公共接口合同测试。"""
+"""共享参数注解（parameter annotation）v1 公共接口合同测试。"""
 
 from __future__ import annotations
 

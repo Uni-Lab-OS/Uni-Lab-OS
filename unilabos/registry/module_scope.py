@@ -1,4 +1,4 @@
-"""Workflow/Action 源模块的纯 AST 顶层名称解析。"""
+"""工作流（Workflow）/动作（Action）源模块的纯 AST 顶层名称解析。"""
 
 from __future__ import annotations
 
@@ -16,7 +16,7 @@ DefinitionNode = ast.ClassDef | ast.FunctionDef | ast.AsyncFunctionDef
 
 
 class ModuleScopeError(ValueError):
-    """可稳定投影为 Registry/Compiler 诊断的模块作用域错误。"""
+    """可稳定投影为注册表（Registry）或编译诊断的模块作用域错误。"""
 
     def __init__(self, code: str, path: str, message: str) -> None:
         super().__init__(message)

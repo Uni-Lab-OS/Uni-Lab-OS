@@ -1,4 +1,4 @@
-"""Parameter Annotation 模块安全阻塞项的公共接口回归测试。"""
+"""参数注解（parameter annotation）模块安全阻塞项的公共接口回归测试。"""
 
 from __future__ import annotations
 

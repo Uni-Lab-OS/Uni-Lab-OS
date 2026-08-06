@@ -1,13 +1,25 @@
-"""Backend-shaped Authoring Candidate bundle 的纯验证边界。"""
+"""可信工作流创作候选结果（Authoring Candidate）的公共校验边界。"""
 
 from __future__ import annotations
 
-from typing import Any
+from collections.abc import Mapping
+from typing import Any, Never
 
+from pydantic import ValidationError
+
+from unilabos.workflow.authoring_graph import (
+    AuthoringGraphError,
+    candidate_changeset,
+    semantic_graph_equal,
+)
+from unilabos.workflow.composite_compatibility import (
+    classify_pinned_published_workflow_invocation,
+)
 from unilabos.workflow.graph_validation import GraphValidationError, validate_graph
 from unilabos.workflow.json_codec import strict_json_equal
 from unilabos.workflow.models import (
     CandidateChangeset,
+    CandidateSourceMapEntry,
     WorkflowEdgeWrite,
     WorkflowNodeWrite,
     normalize_json_array,
@@ -22,410 +34,10 @@ _GRAPH_FIELDS = {
     "node_templates",
     "handle_templates",
 }
-_WORKFLOW_FIELDS = {
-    "uuid",
-    "create_time",
-    "update_time",
-    "meta_data",
-    "name",
-    "tags",
-    "revision",
-    "description",
-}
-_WORKFLOW_REQUIRED_FIELDS = _WORKFLOW_FIELDS - {"description"}
-_NODE_FIELDS = set(WorkflowNodeWrite.model_fields) | {
-    "create_time",
-    "update_time",
-    "workflow_uuid",
-}
-_EDGE_FIELDS = set(WorkflowEdgeWrite.model_fields) | {
-    "create_time",
-    "update_time",
-}
-_NODE_TEMPLATE_FIELDS = {
-    "uuid",
-    "create_time",
-    "update_time",
-    "meta_data",
-    "resource_template_uuid",
-    "name",
-    "display_name",
-    "goal",
-    "goal_default",
-    "feedback",
-    "result",
-    "type",
-    "node_type",
-    "description",
-    "class",
-    "schema",
-    "icon",
-    "header",
-    "footer",
-}
-_NODE_TEMPLATE_REQUIRED_FIELDS = {
-    "uuid",
-    "create_time",
-    "update_time",
-    "meta_data",
-    "resource_template_uuid",
-    "name",
-    "display_name",
-    "goal",
-    "goal_default",
-    "feedback",
-    "result",
-    "type",
-    "node_type",
-}
-_HANDLE_TEMPLATE_FIELDS = {
-    "uuid",
-    "create_time",
-    "update_time",
-    "meta_data",
-    "workflow_node_template_uuid",
-    "handle_key",
-    "io_type",
-    "display_name",
-    "type",
-    "required",
-    "description",
-    "data_source",
-    "data_key",
-}
-_HANDLE_TEMPLATE_REQUIRED_FIELDS = {
-    "uuid",
-    "create_time",
-    "update_time",
-    "meta_data",
-    "workflow_node_template_uuid",
-    "handle_key",
-    "io_type",
-    "display_name",
-    "type",
-    "required",
-}
 
 
 class CandidateBundleError(ValueError):
-    """Engine 返回值不是可公开的 Backend-shaped Candidate bundle。"""
-
-
-def _closed_entity(
-    value: Any,
-    *,
-    allowed: set[str],
-    required: set[str],
-) -> dict[str, Any]:
-    if (
-        not isinstance(value, dict)
-        or not required.issubset(value)
-        or not set(value).issubset(allowed)
-    ):
-        raise CandidateBundleError("Candidate entity is not a closed wire object")
-    return value
-
-
-def _required_text(entity: dict[str, Any], fields: set[str]) -> None:
-    if any(not isinstance(entity[field], str) or not entity[field] for field in fields):
-        raise CandidateBundleError("Candidate text field is invalid")
-
-
-def _optional_text(entity: dict[str, Any], fields: set[str]) -> None:
-    if any(
-        field in entity
-        and entity[field] is not None
-        and not isinstance(entity[field], str)
-        for field in fields
-    ):
-        raise CandidateBundleError("Candidate optional text field is invalid")
-
-
-def _unique(values: list[str], *, label: str) -> None:
-    if len(values) != len(set(values)):
-        raise CandidateBundleError(f"Candidate {label} UUID is duplicated")
-
-
-def _validate_workflow(
-    value: Any,
-    *,
-    workflow_uuid: str,
-    revision: int,
-) -> dict[str, Any]:
-    workflow = _closed_entity(
-        value,
-        allowed=_WORKFLOW_FIELDS,
-        required=_WORKFLOW_REQUIRED_FIELDS,
-    )
-    if validate_uuid(workflow["uuid"]) != workflow_uuid:
-        raise CandidateBundleError("Candidate Workflow UUID does not match request")
-    if workflow["revision"] != revision or type(workflow["revision"]) is not int:
-        raise CandidateBundleError("Candidate Workflow revision does not match request")
-    _required_text(workflow, {"create_time", "update_time", "name"})
-    _optional_text(workflow, {"description"})
-    normalize_json_object(workflow["meta_data"])
-    normalize_json_array(workflow["tags"])
-    return workflow
-
-
-def _validate_nodes(
-    values: Any,
-    *,
-    workflow_uuid: str,
-) -> tuple[list[WorkflowNodeWrite], dict[str, dict[str, Any]]]:
-    if not isinstance(values, list):
-        raise CandidateBundleError("Candidate nodes must be an array")
-    models: list[WorkflowNodeWrite] = []
-    by_uuid: dict[str, dict[str, Any]] = {}
-    for item in values:
-        entity = _closed_entity(
-            item,
-            allowed=_NODE_FIELDS,
-            required=set(WorkflowNodeWrite.model_fields)
-            - {
-                "workflow_node_template_uuid",
-                "parent_uuid",
-                "material_uuid",
-                "icon",
-                "footer",
-                "action_name",
-                "action_type",
-                "script",
-                "description",
-            },
-        )
-        if (
-            "workflow_uuid" in entity
-            and validate_uuid(entity["workflow_uuid"]) != workflow_uuid
-        ):
-            raise CandidateBundleError("Candidate Node belongs to another Workflow")
-        for field in ("create_time", "update_time"):
-            if field in entity and (
-                not isinstance(entity[field], str) or not entity[field]
-            ):
-                raise CandidateBundleError("Candidate Node timestamp is invalid")
-        model = WorkflowNodeWrite.model_validate(
-            {
-                key: entity[key]
-                for key in WorkflowNodeWrite.model_fields
-                if key in entity
-            }
-        )
-        models.append(model)
-        by_uuid[model.uuid] = entity
-    _unique([model.uuid for model in models], label="Node")
-    return models, by_uuid
-
-
-def _validate_edges(
-    values: Any,
-) -> tuple[list[WorkflowEdgeWrite], dict[str, dict[str, Any]]]:
-    if not isinstance(values, list):
-        raise CandidateBundleError("Candidate edges must be an array")
-    models: list[WorkflowEdgeWrite] = []
-    by_uuid: dict[str, dict[str, Any]] = {}
-    for item in values:
-        entity = _closed_entity(
-            item,
-            allowed=_EDGE_FIELDS,
-            required=set(WorkflowEdgeWrite.model_fields) - {"description"},
-        )
-        for field in ("create_time", "update_time"):
-            if field in entity and (
-                not isinstance(entity[field], str) or not entity[field]
-            ):
-                raise CandidateBundleError("Candidate Edge timestamp is invalid")
-        model = WorkflowEdgeWrite.model_validate(
-            {
-                key: entity[key]
-                for key in WorkflowEdgeWrite.model_fields
-                if key in entity
-            }
-        )
-        models.append(model)
-        by_uuid[model.uuid] = entity
-    _unique([model.uuid for model in models], label="Edge")
-    return models, by_uuid
-
-
-def _validate_node_templates(values: Any) -> dict[str, dict[str, Any]]:
-    if not isinstance(values, list):
-        raise CandidateBundleError("Candidate node_templates must be an array")
-    result: dict[str, dict[str, Any]] = {}
-    for item in values:
-        entity = _closed_entity(
-            item,
-            allowed=_NODE_TEMPLATE_FIELDS,
-            required=_NODE_TEMPLATE_REQUIRED_FIELDS,
-        )
-        template_uuid = validate_uuid(entity["uuid"])
-        validate_uuid(entity["resource_template_uuid"])
-        _required_text(
-            entity,
-            {
-                "create_time",
-                "update_time",
-                "name",
-                "display_name",
-                "type",
-                "node_type",
-            },
-        )
-        _optional_text(
-            entity,
-            {"description", "class", "icon", "header", "footer"},
-        )
-        schema = entity.get("schema")
-        if schema is not None:
-            if type(schema) not in {str, dict}:
-                raise CandidateBundleError("Candidate schema field is invalid")
-            if type(schema) is dict:
-                normalize_json_object(schema)
-        for field in ("meta_data", "goal", "goal_default", "feedback", "result"):
-            normalize_json_object(entity[field])
-        result[template_uuid] = entity
-    _unique(list(result), label="NodeTemplate")
-    if len(result) != len(values):
-        raise CandidateBundleError("Candidate NodeTemplate UUID is duplicated")
-    return result
-
-
-def _validate_handle_templates(values: Any) -> dict[str, dict[str, Any]]:
-    if not isinstance(values, list):
-        raise CandidateBundleError("Candidate handle_templates must be an array")
-    result: dict[str, dict[str, Any]] = {}
-    for item in values:
-        entity = _closed_entity(
-            item,
-            allowed=_HANDLE_TEMPLATE_FIELDS,
-            required=_HANDLE_TEMPLATE_REQUIRED_FIELDS,
-        )
-        handle_uuid = validate_uuid(entity["uuid"])
-        validate_uuid(entity["workflow_node_template_uuid"])
-        _required_text(
-            entity,
-            {
-                "create_time",
-                "update_time",
-                "handle_key",
-                "io_type",
-                "display_name",
-                "type",
-            },
-        )
-        _optional_text(entity, {"description", "data_source", "data_key"})
-        if type(entity["required"]) is not bool:
-            raise CandidateBundleError("Candidate Handle required must be boolean")
-        normalize_json_object(entity["meta_data"])
-        result[handle_uuid] = entity
-    if len(result) != len(values):
-        raise CandidateBundleError("Candidate HandleTemplate UUID is duplicated")
-    return result
-
-
-def _semantic_node(value: dict[str, Any]) -> dict[str, Any]:
-    return WorkflowNodeWrite.model_validate(
-        {key: value[key] for key in WorkflowNodeWrite.model_fields if key in value}
-    ).model_dump()
-
-
-def _semantic_edge(value: dict[str, Any]) -> dict[str, Any]:
-    return WorkflowEdgeWrite.model_validate(
-        {key: value[key] for key in WorkflowEdgeWrite.model_fields if key in value}
-    ).model_dump()
-
-
-def _changeset_expected(
-    *,
-    graph: dict[str, Any],
-    base_graph: dict[str, Any],
-) -> tuple[dict[str, set[str]], bool, bool]:
-    candidate_nodes = {item["uuid"]: _semantic_node(item) for item in graph["nodes"]}
-    base_nodes = {item["uuid"]: _semantic_node(item) for item in base_graph["nodes"]}
-    candidate_edges = {item["uuid"]: _semantic_edge(item) for item in graph["edges"]}
-    base_edges = {item["uuid"]: _semantic_edge(item) for item in base_graph["edges"]}
-    expected = {
-        "created_node_uuids": set(candidate_nodes) - set(base_nodes),
-        "updated_node_uuids": {
-            uuid
-            for uuid in set(candidate_nodes) & set(base_nodes)
-            if not strict_json_equal(candidate_nodes[uuid], base_nodes[uuid])
-        },
-        "deleted_node_uuids": set(base_nodes) - set(candidate_nodes),
-        "created_edge_uuids": set(candidate_edges) - set(base_edges),
-        "updated_edge_uuids": {
-            uuid
-            for uuid in set(candidate_edges) & set(base_edges)
-            if not strict_json_equal(candidate_edges[uuid], base_edges[uuid])
-        },
-        "deleted_edge_uuids": set(base_edges) - set(candidate_edges),
-    }
-    candidate_unilab = (graph["workflow"].get("meta_data") or {}).get("unilab")
-    base_unilab = (base_graph["workflow"].get("meta_data") or {}).get("unilab")
-    reserved_changed = not strict_json_equal(candidate_unilab, base_unilab)
-    workflow_changed = any(
-        not strict_json_equal(
-            graph["workflow"].get(field),
-            base_graph["workflow"].get(field),
-        )
-        for field in ("name", "description")
-    )
-    return expected, reserved_changed, workflow_changed
-
-
-def _validate_workflow_authoring_boundary(
-    candidate: dict[str, Any],
-    base: dict[str, Any],
-) -> None:
-    """只允许源码拥有的 Workflow 字段越过 Candidate 边界。"""
-
-    for field in ("uuid", "create_time", "update_time", "tags", "revision"):
-        if not strict_json_equal(candidate.get(field), base.get(field)):
-            raise CandidateBundleError(
-                "Candidate changed a non-authoring Workflow field"
-            )
-    candidate_meta = dict(candidate["meta_data"])
-    base_meta = dict(base["meta_data"])
-    candidate_meta.pop("unilab", None)
-    base_meta.pop("unilab", None)
-    if not strict_json_equal(candidate_meta, base_meta):
-        raise CandidateBundleError("Candidate changed non-authoring Workflow metadata")
-
-
-def _validate_retained_catalog_projection(
-    *,
-    candidate_templates: dict[str, dict[str, Any]],
-    candidate_handles: dict[str, dict[str, Any]],
-    base_templates: dict[str, dict[str, Any]],
-    base_handles: dict[str, dict[str, Any]],
-) -> None:
-    """已在 applied graph 中出现的 Catalog 实体必须保持 Authority 投影。"""
-
-    retained_templates = set(candidate_templates) & set(base_templates)
-    if any(
-        not strict_json_equal(
-            candidate_templates[template_uuid],
-            base_templates[template_uuid],
-        )
-        for template_uuid in retained_templates
-    ):
-        raise CandidateBundleError("Candidate changed retained Catalog projection")
-
-    candidate_retained_handles = {
-        uuid: value
-        for uuid, value in candidate_handles.items()
-        if value["workflow_node_template_uuid"] in retained_templates
-    }
-    base_retained_handles = {
-        uuid: value
-        for uuid, value in base_handles.items()
-        if value["workflow_node_template_uuid"] in retained_templates
-    }
-    if not strict_json_equal(
-        candidate_retained_handles,
-        base_retained_handles,
-    ):
-        raise CandidateBundleError("Candidate changed retained Handle projection")
+    """候选图、源码映射或变更集不能共同证明时的稳定错误。"""
 
 
 def validate_candidate_bundle(
@@ -436,66 +48,48 @@ def validate_candidate_bundle(
     revision: int,
     source_map: list[dict[str, Any]],
     changeset: dict[str, Any],
-    require_unchanged_graph: bool,
+    require_unchanged_graph: bool = False,
 ) -> dict[str, Any]:
-    """验证成功 transform 的完整公开 graph/source-map/changeset 关系。"""
+    """验证完整候选 bundle 的身份、图、目录和变更语义。
 
-    workflow_uuid = validate_uuid(workflow_uuid)
-    if type(revision) is not int or revision < 1:
-        raise CandidateBundleError("request revision is invalid")
-    candidate = _closed_entity(
-        graph,
-        allowed=_GRAPH_FIELDS,
-        required=_GRAPH_FIELDS,
-    )
-    base = _closed_entity(
-        base_graph,
-        allowed=_GRAPH_FIELDS,
-        required=_GRAPH_FIELDS,
-    )
-    workflow = _validate_workflow(
-        candidate["workflow"],
-        workflow_uuid=workflow_uuid,
-        revision=revision,
-    )
-    base_workflow = _validate_workflow(
-        base["workflow"],
-        workflow_uuid=workflow_uuid,
-        revision=revision,
-    )
-    _validate_workflow_authoring_boundary(workflow, base_workflow)
-    nodes, nodes_by_uuid = _validate_nodes(
-        candidate["nodes"],
-        workflow_uuid=workflow_uuid,
-    )
-    edges, _edges_by_uuid = _validate_edges(candidate["edges"])
-    templates = _validate_node_templates(candidate["node_templates"])
-    handles = _validate_handle_templates(candidate["handle_templates"])
-    _validate_nodes(base["nodes"], workflow_uuid=workflow_uuid)
-    _validate_edges(base["edges"])
-    base_templates = _validate_node_templates(base["node_templates"])
-    base_handles = _validate_handle_templates(base["handle_templates"])
-
-    referenced_templates = {
-        node.workflow_node_template_uuid
-        for node in nodes
-        if node.workflow_node_template_uuid is not None
-    }
-    if set(templates) != referenced_templates:
-        raise CandidateBundleError("Candidate Catalog projection is not minimal")
-    if any(
-        handle["workflow_node_template_uuid"] not in templates
-        for handle in handles.values()
-    ):
-        raise CandidateBundleError("Candidate Handle parent is outside projection")
-    _validate_retained_catalog_projection(
-        candidate_templates=templates,
-        candidate_handles=handles,
-        base_templates=base_templates,
-        base_handles=base_handles,
-    )
+    参数说明：``graph`` 是编译候选，``base_graph`` 是当前已应用权威图；工作流
+    UUID/修订来自服务层；``source_map`` 和 ``changeset`` 必须精确描述候选；
+    ``require_unchanged_graph`` 用于只验证源码的场景。返回已校验候选图的普通
+    字典，任何伪造、漂移或不完整关系抛出 ``CandidateBundleError``。
+    异常：身份、目录、源码映射、变更集或图语义不一致时抛出
+    ``CandidateBundleError``。
+    """
 
     try:
+        identity = validate_uuid(workflow_uuid)
+        if type(revision) is not int or revision < 1:
+            _fail("工作流修订无效")
+        candidate = _closed_graph(graph)
+        base = _closed_graph(base_graph)
+        workflow = _workflow(candidate["workflow"], identity=identity, revision=revision)
+        base_workflow = _workflow(base["workflow"], identity=identity, revision=revision)
+        _workflow_authoring_boundary(workflow, base_workflow)
+
+        nodes, node_entities = _nodes(candidate["nodes"], workflow_uuid=identity)
+        edges = _edges(candidate["edges"])
+        templates = _node_templates(candidate["node_templates"])
+        handles = _handle_templates(candidate["handle_templates"])
+        _base_nodes, base_node_entities = _nodes(
+            base["nodes"],
+            workflow_uuid=identity,
+        )
+        _edges(base["edges"])
+        base_templates = _node_templates(base["node_templates"])
+        base_handles = _handle_templates(base["handle_templates"])
+        _catalog_projection(
+            nodes=nodes,
+            templates=templates,
+            handles=handles,
+            base_templates=base_templates,
+            base_handles=base_handles,
+            node_entities=node_entities,
+            base_node_entities=base_node_entities,
+        )
         validate_graph(
             nodes=nodes,
             edges=edges,
@@ -506,15 +100,334 @@ def validate_candidate_bundle(
             node_meta_data={node.uuid: node.meta_data for node in nodes},
             validate_workflow_io_contract=True,
         )
-    except GraphValidationError as exc:
+        normalized_map = [
+            CandidateSourceMapEntry.model_validate(item).model_dump()
+            for item in source_map
+        ]
+        if any(item["workflow_node_uuid"] not in node_entities for item in normalized_map):
+            _fail("源码映射引用了候选图之外的节点")
+        normalized_changeset = CandidateChangeset.model_validate(changeset).model_dump()
+        _changeset_semantics(
+            graph=candidate,
+            base_graph=base,
+            changeset=normalized_changeset,
+        )
+        if require_unchanged_graph and not semantic_graph_equal(candidate, base):
+            _fail("只验证源码的候选结果改变了工作流图")
+        return candidate
+    except CandidateBundleError:
+        raise
+    except (
+        AuthoringGraphError,
+        GraphValidationError,
+        KeyError,
+        TypeError,
+        ValidationError,
+        ValueError,
+    ) as error:
         raise CandidateBundleError(
-            "Candidate graph violates Workflow contract"
-        ) from exc
-    if any(item["workflow_node_uuid"] not in nodes_by_uuid for item in source_map):
-        raise CandidateBundleError("Source map references a Node outside Candidate")
+            "候选结果不满足可信工作流合同："
+            f"{type(error).__name__}: {error}"
+        ) from error
 
-    normalized_changeset = CandidateChangeset.model_validate(changeset).model_dump()
-    lifecycle_fields = (
+
+def _closed_graph(value: Any) -> dict[str, Any]:
+    """验证候选图只含且完整包含后端五集合。
+
+    参数说明：``value`` 是待校验对象；返回浅复制字典，顶层字段或集合类型错误
+    抛出 ``CandidateBundleError``。
+    """
+
+    if not isinstance(value, Mapping) or set(value) != _GRAPH_FIELDS:
+        _fail("候选图必须且只能包含完整五集合")
+    graph = dict(value)
+    if not isinstance(graph["workflow"], Mapping) or any(
+        not isinstance(graph[field], list) for field in _GRAPH_FIELDS - {"workflow"}
+    ):
+        _fail("候选图集合类型无效")
+    return graph
+
+
+def _workflow(
+    value: Any,
+    *,
+    identity: str,
+    revision: int,
+) -> dict[str, Any]:
+    """校验工作流投影的稳定身份和 JSON 类型。
+
+    参数说明：``value`` 是工作流实体，``identity``/``revision`` 是服务权威；
+    返回普通字典，不一致时抛出 ``CandidateBundleError``。
+    """
+
+    if not isinstance(value, Mapping):
+        _fail("候选工作流必须是对象")
+    workflow = dict(value)
+    required = {"uuid", "name", "tags", "revision", "meta_data"}
+    if not required <= set(workflow):
+        _fail("候选工作流缺少必填字段")
+    if validate_uuid(workflow["uuid"]) != identity or workflow["revision"] != revision:
+        _fail("候选工作流身份或修订不匹配")
+    if not isinstance(workflow["name"], str) or not workflow["name"].strip():
+        _fail("候选工作流名称无效")
+    if "description" in workflow and workflow["description"] is not None and not isinstance(
+        workflow["description"], str
+    ):
+        _fail("候选工作流描述无效")
+    normalize_json_array(workflow["tags"])
+    normalize_json_object(workflow["meta_data"])
+    return workflow
+
+
+def _workflow_authoring_boundary(
+    candidate: Mapping[str, Any],
+    base: Mapping[str, Any],
+) -> None:
+    """限制作者源码可以改变的工作流字段。
+
+    参数说明：候选可改变名称、描述和保留 ``meta_data.unilab``；UUID、修订、
+    标签、投影时间和非保留元数据必须保持权威值，否则失败关闭。
+    """
+
+    for field in ("uuid", "revision", "tags", "create_time", "update_time"):
+        if field in candidate or field in base:
+            if not strict_json_equal(candidate.get(field), base.get(field)):
+                _fail("候选结果改变了非创作工作流字段")
+    candidate_meta = dict(candidate["meta_data"])
+    base_meta = dict(base["meta_data"])
+    candidate_meta.pop("unilab", None)
+    base_meta.pop("unilab", None)
+    if not strict_json_equal(candidate_meta, base_meta):
+        _fail("候选结果改变了非创作工作流元数据")
+
+
+def _nodes(
+    values: list[Any],
+    *,
+    workflow_uuid: str,
+) -> tuple[list[WorkflowNodeWrite], dict[str, Mapping[str, Any]]]:
+    """校验节点数组并建立 UUID 索引。
+
+    参数说明：``values`` 是候选节点，``workflow_uuid`` 是所属工作流；返回模型
+    列表和原实体索引，重复 UUID 或外部归属失败关闭。
+    """
+
+    models: list[WorkflowNodeWrite] = []
+    entities: dict[str, Mapping[str, Any]] = {}
+    for value in values:
+        if not isinstance(value, Mapping):
+            _fail("候选节点必须是对象")
+        if "workflow_uuid" in value and validate_uuid(value["workflow_uuid"]) != workflow_uuid:
+            _fail("候选节点属于另一个工作流")
+        model = WorkflowNodeWrite.model_validate(
+            {key: value[key] for key in WorkflowNodeWrite.model_fields if key in value}
+        )
+        if model.uuid in entities:
+            _fail("候选节点 UUID 重复")
+        models.append(model)
+        entities[model.uuid] = value
+    return models, entities
+
+
+def _edges(values: list[Any]) -> list[WorkflowEdgeWrite]:
+    """校验边数组及唯一身份。
+
+    参数说明：``values`` 是候选边对象列表；返回 Pydantic 模型列表，重复 UUID
+    或字段非法时失败关闭。
+    """
+
+    models: list[WorkflowEdgeWrite] = []
+    identities: set[str] = set()
+    for value in values:
+        if not isinstance(value, Mapping):
+            _fail("候选边必须是对象")
+        model = WorkflowEdgeWrite.model_validate(
+            {key: value[key] for key in WorkflowEdgeWrite.model_fields if key in value}
+        )
+        if model.uuid in identities:
+            _fail("候选边 UUID 重复")
+        identities.add(model.uuid)
+        models.append(model)
+    return models
+
+
+def _node_templates(values: list[Any]) -> dict[str, dict[str, Any]]:
+    """校验节点模板目录投影。
+
+    参数说明：``values`` 是节点模板数组；返回 UUID 索引，确保模板身份、资源
+    模板身份、业务名称和 JSON 字段合法。
+    """
+
+    result: dict[str, dict[str, Any]] = {}
+    for value in values:
+        if not isinstance(value, Mapping):
+            _fail("候选节点模板必须是对象")
+        template = dict(value)
+        identity = validate_uuid(template.get("uuid"))
+        validate_uuid(template.get("resource_template_uuid"))
+        for field in ("name", "display_name", "type", "node_type"):
+            if not isinstance(template.get(field), str) or not template[field].strip():
+                _fail("候选节点模板文本字段无效")
+        for field in ("meta_data", "goal", "goal_default", "feedback", "result"):
+            normalize_json_object(template.get(field))
+        if identity in result:
+            _fail("候选节点模板 UUID 重复")
+        result[identity] = template
+    return result
+
+
+def _handle_templates(values: list[Any]) -> dict[str, dict[str, Any]]:
+    """校验连接点（Handle）模板目录投影。
+
+    参数说明：``values`` 是连接点数组；返回 UUID 索引，确保父模板、方向、业务
+    键、必填标志和元数据类型合法。
+    """
+
+    result: dict[str, dict[str, Any]] = {}
+    for value in values:
+        if not isinstance(value, Mapping):
+            _fail("候选连接点模板必须是对象")
+        handle = dict(value)
+        identity = validate_uuid(handle.get("uuid"))
+        validate_uuid(handle.get("workflow_node_template_uuid"))
+        for field in ("handle_key", "io_type", "display_name", "type"):
+            if not isinstance(handle.get(field), str) or not handle[field].strip():
+                _fail("候选连接点模板文本字段无效")
+        if type(handle.get("required")) is not bool:
+            _fail("候选连接点必填标志无效")
+        normalize_json_object(handle.get("meta_data"))
+        if identity in result:
+            _fail("候选连接点模板 UUID 重复")
+        result[identity] = handle
+    return result
+
+
+def _catalog_projection(
+    *,
+    nodes: list[WorkflowNodeWrite],
+    templates: dict[str, dict[str, Any]],
+    handles: dict[str, dict[str, Any]],
+    base_templates: dict[str, dict[str, Any]],
+    base_handles: dict[str, dict[str, Any]],
+    node_entities: Mapping[str, Mapping[str, Any]],
+    base_node_entities: Mapping[str, Mapping[str, Any]],
+) -> None:
+    """验证最小目录投影并保护已保留目录事实。
+
+    参数说明：候选目录只能含被节点引用的模板；新模板可由当前目录加入；两个
+    节点索引用于认证已发布工作流调用 pin。基线模板及连接点通常必须严格相同，
+    只有所有保留调用都证明为精确或可加演进时才允许整代替换。
+    返回：无；仅验证传入目录投影。异常：目录非最小、跨代混用或 pin 认证失败
+    时抛出 ``CandidateBundleError``。
+    """
+
+    referenced = {
+        node.workflow_node_template_uuid
+        for node in nodes
+        if node.workflow_node_template_uuid is not None
+    }
+    if set(templates) != referenced:
+        _fail("候选目录投影不是被引用模板的最小集合")
+    if any(handle["workflow_node_template_uuid"] not in templates for handle in handles.values()):
+        _fail("候选连接点的父模板不在最小目录投影中")
+    retained = set(templates) & set(base_templates)
+    for template_uuid in retained:
+        candidate_generation_handles = {
+            identity: value
+            for identity, value in handles.items()
+            if value["workflow_node_template_uuid"] == template_uuid
+        }
+        base_generation_handles = {
+            identity: value
+            for identity, value in base_handles.items()
+            if value["workflow_node_template_uuid"] == template_uuid
+        }
+        if strict_json_equal(
+            templates[template_uuid],
+            base_templates[template_uuid],
+        ) and strict_json_equal(
+            candidate_generation_handles,
+            base_generation_handles,
+        ):
+            continue
+        if not _published_replacement_is_compatible(
+            template_uuid=template_uuid,
+            node_entities=node_entities,
+            base_node_entities=base_node_entities,
+            templates=templates,
+            handles=handles,
+            base_templates=base_templates,
+            base_handles=base_handles,
+        ):
+            _fail("候选结果改变了未经认证的已保留目录投影")
+
+
+def _published_replacement_is_compatible(
+    *,
+    template_uuid: str,
+    node_entities: Mapping[str, Mapping[str, Any]],
+    base_node_entities: Mapping[str, Mapping[str, Any]],
+    templates: Mapping[str, Mapping[str, Any]],
+    handles: Mapping[str, Mapping[str, Any]],
+    base_templates: Mapping[str, Mapping[str, Any]],
+    base_handles: Mapping[str, Mapping[str, Any]],
+) -> bool:
+    """复核一个目录整代替换由全部保留组合调用共同授权。
+
+    参数：模板 UUID、候选/基线节点和目录索引。返回：至少一个同 UUID 保留调用
+    存在，且每个保留调用的旧聚合都真实、当前演进均非破坏性时为 ``True``。
+    异常：无；任何结构问题由兼容性深模块收敛为 ``False``。
+    """
+
+    retained_nodes = [
+        (base_node, node_entities[node_uuid])
+        for node_uuid, base_node in base_node_entities.items()
+        if base_node.get("workflow_node_template_uuid") == template_uuid
+        and node_uuid in node_entities
+        and node_entities[node_uuid].get("workflow_node_template_uuid")
+        == template_uuid
+    ]
+    if not retained_nodes:
+        return False
+    previous_template = base_templates.get(template_uuid)
+    if not isinstance(previous_template, Mapping):
+        return False
+    previous_handles = [
+        value
+        for value in base_handles.values()
+        if value.get("workflow_node_template_uuid") == template_uuid
+    ]
+    return all(
+        classify_pinned_published_workflow_invocation(
+            previous_node=previous,
+            current_node=current,
+            previous_templates=[previous_template],
+            previous_handles=previous_handles,
+            current_templates=[templates[template_uuid]],
+            current_handles=[
+                value
+                for value in handles.values()
+                if value.get("workflow_node_template_uuid") == template_uuid
+            ],
+        )
+        != "breaking"
+        for previous, current in retained_nodes
+    )
+
+
+def _changeset_semantics(
+    *,
+    graph: Mapping[str, Any],
+    base_graph: Mapping[str, Any],
+    changeset: dict[str, Any],
+) -> None:
+    """证明变更集精确描述候选图相对基线的变化。
+
+    参数说明：两个图决定期望集合，``changeset`` 是编译器声明；集合内容、排序
+    无关但生命周期集合不得重复或交叠，种类和保留元数据标志必须精确。
+    """
+
+    fields = (
         "created_node_uuids",
         "updated_node_uuids",
         "deleted_node_uuids",
@@ -522,31 +435,35 @@ def validate_candidate_bundle(
         "updated_edge_uuids",
         "deleted_edge_uuids",
     )
-    lifecycle = [normalized_changeset[field] for field in lifecycle_fields]
-    if any(len(items) != len(set(items)) for items in lifecycle):
-        raise CandidateBundleError("Changeset contains duplicate UUIDs")
-    if any(
-        set(lifecycle[left]) & set(lifecycle[right])
-        for left in range(len(lifecycle))
-        for right in range(left + 1, len(lifecycle))
+    values = [changeset[field] for field in fields]
+    if any(len(value) != len(set(value)) for value in values):
+        _fail("变更集包含重复 UUID")
+    node_sets = [set(changeset[field]) for field in fields[:3]]
+    edge_sets = [set(changeset[field]) for field in fields[3:]]
+    for family in (node_sets, edge_sets):
+        if any(
+            family[left] & family[right]
+            for left in range(len(family))
+            for right in range(left + 1, len(family))
+        ):
+            _fail("变更集生命周期集合互相重叠")
+    expected = candidate_changeset(graph=graph, applied_graph=base_graph)
+    if any(set(changeset[field]) != set(expected[field]) for field in fields):
+        _fail("变更集没有精确描述候选图")
+    if changeset["kind"] != expected["kind"] or (
+        changeset["reserved_metadata_changed"]
+        is not expected["reserved_metadata_changed"]
     ):
-        raise CandidateBundleError("Changeset lifecycle UUID sets overlap")
+        _fail("变更集种类或保留元数据标志不准确")
 
-    expected, reserved_changed, workflow_changed = _changeset_expected(
-        graph=candidate,
-        base_graph=base,
-    )
-    if any(set(normalized_changeset[field]) != expected[field] for field in expected):
-        raise CandidateBundleError("Changeset does not describe Candidate graph")
-    if normalized_changeset["reserved_metadata_changed"] is not reserved_changed:
-        raise CandidateBundleError("Changeset reserved metadata flag is inaccurate")
-    graph_changed = reserved_changed or workflow_changed or any(expected.values())
-    expected_kind = "graph" if graph_changed else "source_only"
-    if normalized_changeset["kind"] != expected_kind:
-        raise CandidateBundleError("Changeset kind does not match graph semantics")
-    if require_unchanged_graph and not strict_json_equal(candidate, base):
-        raise CandidateBundleError("Source-only transform changed Candidate graph")
-    return candidate
+
+def _fail(message: str) -> Never:
+    """抛出候选 bundle 校验错误。
+
+    参数说明：``message`` 是内部中文原因；函数永不返回。
+    """
+
+    raise CandidateBundleError(message)
 
 
 __all__ = ["CandidateBundleError", "validate_candidate_bundle"]

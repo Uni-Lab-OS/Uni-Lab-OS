@@ -641,7 +641,7 @@ class VirtualWorkbench:
         print(capacity)
         print(battery_system)
 
-    @action(
+    @legacy_action(
         auto_prefix=True,
         description="批量准备物料 - 虚拟起始节点, 生成A1-A5物料, 输出5个handle供后续节点使用",
         handles=[
@@ -695,7 +695,7 @@ class VirtualWorkbench:
             ],
         }
 
-    @action(
+    @legacy_action(
         auto_prefix=True,
         description="将物料从An位置移动到空闲加热台, 返回分配的加热台ID",
         handles=[
@@ -828,7 +828,7 @@ class VirtualWorkbench:
                 ],
             }
 
-    @action(
+    @legacy_action(
         auto_prefix=True,
         always_free=True,
         description="启动指定加热台的加热程序",
@@ -1020,7 +1020,7 @@ class VirtualWorkbench:
             ],
         }
 
-    @action(
+    @legacy_action(
         auto_prefix=True,
         description="将物料从加热台移动到输出位置Cn",
         handles=[

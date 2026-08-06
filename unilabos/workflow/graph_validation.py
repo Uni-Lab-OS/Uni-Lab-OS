@@ -1,4 +1,4 @@
-"""冻结 Backend 全图 PUT 的本地语义校验。"""
+"""冻结后端（Backend）全图 PUT 的本地语义校验。"""
 
 from __future__ import annotations
 
@@ -6,13 +6,23 @@ import json
 import math
 import re
 from collections import defaultdict
-from collections.abc import Iterable, Mapping
-from typing import Any
-from uuid import UUID
+from copy import deepcopy
+from typing import Any, Dict, Iterable, List, Mapping
 
 from unilabos.workflow.json_codec import encode_json, strict_json_equal
-from unilabos.workflow.models import WorkflowEdgeWrite, WorkflowNodeWrite
-from unilabos.workflow.schema import WorkflowSchemaError, parse_output_contract
+from unilabos.workflow.material_graph_validation import (
+    MaterialGraphValidationError,
+    validate_material_graph,
+)
+from unilabos.workflow.material_selector import (
+    MaterialSelectorError,
+    validate_material_source_node,
+)
+from unilabos.workflow.models import (
+    WorkflowEdgeWrite,
+    WorkflowNodeWrite,
+    validate_json_value,
+)
 from unilabos.workflow.workflow_io import (
     WorkflowIOValidationError,
     validate_workflow_io,
@@ -23,37 +33,51 @@ _MAX_TIMEOUT_SECONDS = (2**63 - 1) // 1_000_000_000
 
 
 class GraphValidationError(ValueError):
-    """提交的全图不满足冻结 Backend 语义。"""
+    """提交的全图不满足冻结后端（Backend）语义。"""
+
+
+class CodedGraphValidationError(GraphValidationError):
+    """带稳定领域错误码的全图校验失败。"""
+
+    def __init__(self, code: str, message: str):
+        """保存机器码和中文诊断。
+
+        参数说明：``code`` 是服务可透传的机器码，``message`` 解释具体约束。
+        返回：无；构造全图校验异常。
+        """
+
+        super().__init__(message)
+        self.code = code
 
 
 class MissingTemplateError(GraphValidationError):
     """节点引用的模板不在当前 OS 模板目录中。"""
 
 
-class CodedGraphValidationError(GraphValidationError):
-    """可由 public Workflow seam 稳定暴露的图合同错误。"""
-
-    def __init__(self, code: str, message: str):
-        super().__init__(message)
-        self.code = code
-
-
-class MaterialSourceGraphError(CodedGraphValidationError):
-    """MaterialSource 的 closed graph 合同错误。"""
-
-
 def validate_graph(
     *,
-    nodes: list[WorkflowNodeWrite],
-    edges: list[WorkflowEdgeWrite],
-    templates: Mapping[str, dict[str, Any]],
-    handles: Mapping[str, dict[str, Any]],
-    effective_params: Mapping[str, dict[str, Any]],
+    nodes: List[WorkflowNodeWrite],
+    edges: List[WorkflowEdgeWrite],
+    templates: Mapping[str, Dict[str, Any]],
+    handles: Mapping[str, Dict[str, Any]],
+    effective_params: Mapping[str, Dict[str, Any]],
     workflow_meta_data: Mapping[str, Any],
-    node_meta_data: Mapping[str, dict[str, Any]],
+    node_meta_data: Mapping[str, Dict[str, Any]],
     validate_workflow_io_contract: bool = False,
 ) -> None:
-    """在写事务内校验一份完整替换图。"""
+    """在写事务内校验一份完整替换的工作流图（Workflow Graph）。
+
+    参数说明：``nodes`` 与 ``edges`` 是待替换的完整节点和边；``templates`` 与
+    ``handles`` 是其引用的活动节点模板和连接点（Handle）模板；
+    ``effective_params`` 是合并保留字段后的节点实参；``workflow_meta_data`` 与
+    ``node_meta_data`` 是事务内实际工作流和节点元数据；
+    ``validate_workflow_io_contract`` 为 ``True`` 时启用唯一公共工作流输入/输出
+    （Workflow I/O）合同，为 ``False`` 时保留旧调用方兼容语义。返回：无；全部
+    不变量成立才正常返回。异常：缺少模板抛出 ``MissingTemplateError``；物料来源
+    （MaterialSource）、物料流线性（MaterialFlowLinearity）或资源模板兼容
+    （ResourceTemplate Compatibility）抛出 ``CodedGraphValidationError``；其余图、
+    连接点或工作流输入/输出错误抛出 ``GraphValidationError``。
+    """
 
     node_by_uuid = {node.uuid: node for node in nodes}
     edge_by_uuid = {edge.uuid: edge for edge in edges}
@@ -68,37 +92,32 @@ def validate_graph(
             raise MissingTemplateError(f"工作流节点模板 {template_uuid} 不存在")
         if node.parent_uuid is not None and node.parent_uuid not in node_by_uuid:
             raise GraphValidationError("父节点不在提交的完整图中")
+        if _node_kind(node, templates) == "material_source":
+            try:
+                validate_material_source_node(
+                    {
+                        "material_uuid": node.material_uuid,
+                        "param": effective_params[node.uuid],
+                    }
+                )
+            except MaterialSelectorError as error:
+                raise CodedGraphValidationError(
+                    error.code,
+                    error.message,
+                ) from error
     _validate_parent_cycles(nodes)
-    composite_internal_uuids = _composite_internal_node_uuids(
-        nodes,
-        templates,
-    )
-    public_nodes = {
-        node_uuid: node
-        for node_uuid, node in node_by_uuid.items()
-        if node_uuid not in composite_internal_uuids
-    }
+
     validated_io = None
     if validate_workflow_io_contract:
         try:
             validated_io = validate_workflow_io(
-                nodes=public_nodes,
+                nodes=node_by_uuid,
                 handles=handles,
                 workflow_meta_data=workflow_meta_data,
-                node_meta_data={
-                    node_uuid: node_meta_data[node_uuid] for node_uuid in public_nodes
-                },
+                node_meta_data=node_meta_data,
             )
         except WorkflowIOValidationError as exc:
-            raise GraphValidationError("Workflow I/O 合同无效") from exc
-    else:
-        _validate_output_binding_coverage(workflow_meta_data)
-    _validate_material_source_nodes(
-        nodes=nodes,
-        templates=templates,
-        handles=handles,
-        effective_params=effective_params,
-    )
+            raise GraphValidationError("工作流输入/输出合同无效") from exc
 
     for edge in edges:
         if edge.source_node_uuid == edge.target_node_uuid:
@@ -120,14 +139,18 @@ def validate_graph(
             "target",
             handles,
         )
-    _validate_resource_slot_fan_out(edges=edges, handles=handles)
-    _validate_resource_slot_template_compatibility(
-        nodes=node_by_uuid,
-        edges=edges,
-        templates=templates,
-        handles=handles,
-        effective_params=effective_params,
-    )
+
+    try:
+        validate_material_graph(
+            nodes=nodes,
+            edges=edges,
+            templates=templates,
+            handles=handles,
+            effective_params=effective_params,
+            validated_workflow_io=validated_io,
+        )
+    except MaterialGraphValidationError as error:
+        raise CodedGraphValidationError(error.code, error.message) from error
 
     bindings_by_node = (
         dict(validated_io.input_bindings)
@@ -138,34 +161,21 @@ def validate_graph(
                 node_meta_data[node.uuid],
                 workflow_meta_data,
                 handles,
-                validate_schema_compatibility=False,
             )
             for node in nodes
-            if node.uuid not in composite_internal_uuids
         }
     )
-    for node_uuid in composite_internal_uuids:
-        bindings_by_node[node_uuid] = _validated_private_input_bindings(
-            node_by_uuid[node_uuid],
-            node_meta_data[node_uuid],
-            handles,
-        )
     enabled = {
         node.uuid: node
         for node in nodes
-        if not node.disabled
-        and _node_kind(node, templates) not in {"group", "composite"}
+        if not node.disabled and _node_kind(node, templates) != "group"
     }
-    providers = {node.uuid for node in nodes if not node.disabled}
-    enabled_edges: list[WorkflowEdgeWrite] = []
-    incoming: dict[tuple[str, str], str] = {}
-    connected_inputs: dict[tuple[str, str], str] = {}
-    available_data_keys: dict[str, list[str]] = defaultdict(list)
+    enabled_edges: List[WorkflowEdgeWrite] = []
+    incoming: Dict[tuple[str, str], str] = {}
+    connected_inputs: Dict[tuple[str, str], str] = {}
+    available_data_keys: Dict[str, List[str]] = defaultdict(list)
     for edge in edges:
-        if (
-            edge.source_node_uuid not in providers
-            or edge.target_node_uuid not in enabled
-        ):
+        if edge.source_node_uuid not in enabled or edge.target_node_uuid not in enabled:
             continue
         source_handle = handles[edge.source_handle_uuid]
         target_handle = handles[edge.target_handle_uuid]
@@ -175,16 +185,26 @@ def validate_graph(
         ):
             raise GraphValidationError("边两端 Handle 类型不兼容")
         target_input = (edge.target_node_uuid, edge.target_handle_uuid)
+        enabled_edges.append(edge)
+        if _dependency_only(source_handle):
+            continue
         if target_input in incoming:
-            raise GraphValidationError("同一目标 Handle 只能有一条入边")
+            raise GraphValidationError("同一目标 Handle 只能有一条数据入边")
         incoming[target_input] = edge.uuid
-        if edge.source_node_uuid in enabled:
-            enabled_edges.append(edge)
-        if not _dependency_only(source_handle):
-            connected_inputs[target_input] = edge.uuid
-            available_data_keys[edge.target_node_uuid].append(
-                _handle_data_key(target_handle)
-            )
+        connected_inputs[target_input] = edge.uuid
+        available_data_keys[edge.target_node_uuid].append(
+            _handle_data_key(target_handle)
+        )
+
+    _project_composite_boundary_inputs(
+        nodes=enabled,
+        handles=handles,
+        effective_params=effective_params,
+        node_meta_data=node_meta_data,
+        bindings_by_node=bindings_by_node,
+        connected_inputs=connected_inputs,
+        available_data_keys=available_data_keys,
+    )
 
     _validate_edge_cycles(enabled, enabled_edges)
     for node_uuid, node in enabled.items():
@@ -195,7 +215,9 @@ def validate_graph(
                 _handle_data_key(handles[handle_uuid])
             )
         template_uuid = node.workflow_node_template_uuid
-        if template_uuid is not None:
+        # 工作流调用模板的 ``schema`` 是发布合同 envelope，不是节点 ``param``
+        # 的动作输入 JSON Schema；业务输入仍由边界连接点（Handle）校验。
+        if template_uuid is not None and _node_kind(node, templates) != "workflow":
             schema = _parse_schema(templates[template_uuid].get("schema"))
             if schema is not None:
                 _validate_schema_value(
@@ -226,29 +248,99 @@ def validate_graph(
             bindings,
         )
         _validate_execution_policy(node.execution_policy)
-        # D-092: executor 选择属于 Scheduler admission；固定 selector 写入保留
-        # executor_binding，未绑定 selector 不得被迫滥用 material_uuid。
+        if _node_kind(node, templates) == "device_action":
+            if node.material_uuid is None:
+                raise GraphValidationError("设备动作节点必须绑定 material_uuid")
 
 
-def _validate_output_binding_coverage(
-    workflow_meta_data: Mapping[str, Any],
+def _project_composite_boundary_inputs(
+    *,
+    nodes: Mapping[str, WorkflowNodeWrite],
+    handles: Mapping[str, Dict[str, Any]],
+    effective_params: Mapping[str, Dict[str, Any]],
+    node_meta_data: Mapping[str, Dict[str, Any]],
+    bindings_by_node: Mapping[str, Mapping[str, Mapping[str, str]]],
+    connected_inputs: Dict[tuple[str, str], str],
+    available_data_keys: Dict[str, List[str]],
 ) -> None:
-    """普通 Graph PUT 仍只执行已经冻结的 root coverage 门。"""
+    """把组合调用边界已提供的值投影到展开内部目标。
 
-    unilab = workflow_meta_data.get("unilab", {})
-    if not isinstance(unilab, dict):
-        raise GraphValidationError("Workflow meta_data.unilab 必须是对象")
-    try:
-        output_contract = parse_output_contract(
-            unilab.get("output_contract", {"version": 1, "outputs": []})
-        ).to_dict()
-    except WorkflowSchemaError as exc:
-        raise GraphValidationError("output_contract 不符合 Workflow 合同") from exc
-    output_bindings = unilab.get("output_bindings", {})
-    if not isinstance(output_bindings, dict) or set(output_bindings) != {
-        item["name"] for item in output_contract["outputs"]
-    }:
-        raise GraphValidationError("Workflow output bindings 不完整")
+    参数：已启用节点、目录连接点（Handle）、实参、元数据、输入绑定
+    和已连线事实。返回：无；原地补充内部目标的可用键。异常：
+    边界映射不闭合、跨调用层级或引用错误连接点时抛出
+    ``GraphValidationError``。
+    """
+
+    for invocation_uuid, invocation in nodes.items():
+        metadata = node_meta_data.get(invocation_uuid, {})
+        unilab = metadata.get("unilab") if isinstance(metadata, Mapping) else None
+        composite = unilab.get("composite") if isinstance(unilab, Mapping) else None
+        mappings = (
+            composite.get("target_mappings")
+            if isinstance(composite, Mapping)
+            else None
+        )
+        if mappings is None:
+            continue
+        if not isinstance(mappings, Mapping):
+            raise GraphValidationError("组合工作流目标映射必须是对象")
+        for boundary_handle_uuid, targets in mappings.items():
+            boundary_handle = (
+                handles.get(boundary_handle_uuid)
+                if isinstance(boundary_handle_uuid, str)
+                else None
+            )
+            if (
+                boundary_handle is None
+                or boundary_handle.get("workflow_node_template_uuid")
+                != invocation.workflow_node_template_uuid
+                or boundary_handle.get("io_type") != "target"
+                or not isinstance(targets, list)
+            ):
+                raise GraphValidationError("组合工作流目标映射边界无效")
+            boundary_key = _handle_data_key(boundary_handle)
+            provided = (
+                (invocation_uuid, boundary_handle_uuid) in connected_inputs
+                or boundary_handle_uuid in bindings_by_node.get(invocation_uuid, {})
+                or boundary_key in effective_params.get(invocation_uuid, {})
+            )
+            if not provided:
+                continue
+            for target in targets:
+                if not isinstance(target, Mapping):
+                    raise GraphValidationError("组合工作流内部目标映射无效")
+                target_node_uuid = target.get("workflow_node_uuid")
+                target_handle_uuid = target.get("target_handle_uuid")
+                target_node = (
+                    nodes.get(target_node_uuid)
+                    if isinstance(target_node_uuid, str)
+                    else None
+                )
+                target_handle = (
+                    handles.get(target_handle_uuid)
+                    if isinstance(target_handle_uuid, str)
+                    else None
+                )
+                if (
+                    target_node is None
+                    or target_handle is None
+                    or target_node.parent_uuid != invocation_uuid
+                    or target_handle.get("workflow_node_template_uuid")
+                    != target_node.workflow_node_template_uuid
+                    or target_handle.get("io_type") != "target"
+                ):
+                    raise GraphValidationError("组合工作流内部目标越过调用边界")
+                target_input = (target_node_uuid, target_handle_uuid)
+                target_key = _handle_data_key(target_handle)
+                if (
+                    target_input in connected_inputs
+                    or target_handle_uuid
+                    in bindings_by_node.get(target_node_uuid, {})
+                    or target_key in effective_params.get(target_node_uuid, {})
+                ):
+                    continue
+                connected_inputs[target_input] = f"composite:{invocation_uuid}"
+                available_data_keys[target_node_uuid].append(target_key)
 
 
 def _validate_parent_cycles(nodes: Iterable[WorkflowNodeWrite]) -> None:
@@ -265,53 +357,11 @@ def _validate_parent_cycles(nodes: Iterable[WorkflowNodeWrite]) -> None:
             current = parents.get(current)
 
 
-def _composite_internal_node_uuids(
-    nodes: Iterable[WorkflowNodeWrite],
-    templates: Mapping[str, dict[str, Any]],
-) -> set[str]:
-    node_by_uuid = {node.uuid: node for node in nodes}
-    composite_uuids = {
-        node.uuid
-        for node in node_by_uuid.values()
-        if _is_composite_template(
-            templates.get(node.workflow_node_template_uuid or "", {})
-        )
-    }
-    internal: set[str] = set()
-    for node_uuid, node in node_by_uuid.items():
-        parent = node.parent_uuid
-        seen = {node_uuid}
-        while parent is not None:
-            if parent in seen or parent not in node_by_uuid:
-                raise GraphValidationError("Composite parent hierarchy 不完整")
-            if parent in composite_uuids:
-                internal.add(node_uuid)
-                break
-            seen.add(parent)
-            parent = node_by_uuid[parent].parent_uuid
-    return internal
-
-
-def _is_composite_template(template: Mapping[str, Any]) -> bool:
-    schema = template.get("schema")
-    extension = (
-        schema.get("x-unilabos-workflow-contract")
-        if isinstance(schema, Mapping)
-        else None
-    )
-    return (
-        template.get("type") == "workflow"
-        and template.get("node_type") == "workflow"
-        and isinstance(extension, Mapping)
-        and extension.get("version") == 1
-    )
-
-
 def _validate_edge_handle(
     node: WorkflowNodeWrite,
     handle_uuid: str,
     io_type: str,
-    handles: Mapping[str, dict[str, Any]],
+    handles: Mapping[str, Dict[str, Any]],
 ) -> None:
     template_uuid = node.workflow_node_template_uuid
     if template_uuid is None:
@@ -325,190 +375,18 @@ def _validate_edge_handle(
         raise GraphValidationError("Handle 不属于节点模板或方向错误")
 
 
-def _validate_resource_slot_fan_out(
-    *,
-    edges: Iterable[WorkflowEdgeWrite],
-    handles: Mapping[str, dict[str, Any]],
-) -> None:
-    """一个物理 ResourceSlot 输出只能沿一条物料链继续传递。"""
-
-    outgoing: dict[tuple[str, str], int] = defaultdict(int)
-    for edge in edges:
-        source_handle = handles[edge.source_handle_uuid]
-        if source_handle.get("type") != "ResourceSlot":
-            continue
-        source = (edge.source_node_uuid, edge.source_handle_uuid)
-        outgoing[source] += 1
-        if outgoing[source] > 1:
-            raise CodedGraphValidationError(
-                "material_flow_fan_out",
-                "同一个 ResourceSlot 输出不能同时进入多个下游节点",
-            )
-
-
-def _validate_resource_slot_template_compatibility(
-    *,
-    nodes: Mapping[str, WorkflowNodeWrite],
-    edges: Iterable[WorkflowEdgeWrite],
-    templates: Mapping[str, dict[str, Any]],
-    handles: Mapping[str, dict[str, Any]],
-    effective_params: Mapping[str, dict[str, Any]],
-) -> None:
-    """用 producer guarantee 证明 ResourceSlot 可以进入受限 target。"""
-
-    edge_list = tuple(edges)
-
-    for edge in edge_list:
-        source_handle = handles[edge.source_handle_uuid]
-        target_handle = handles[edge.target_handle_uuid]
-        if (
-            source_handle.get("type") != "ResourceSlot"
-            or target_handle.get("type") != "ResourceSlot"
-        ):
-            continue
-        target_templates = _resource_slot_template_allowlist(target_handle)
-        if target_templates is None:
-            continue
-
-        source_templates = _resource_slot_producer_guarantee(
-            source_node_uuid=edge.source_node_uuid,
-            source_handle_uuid=edge.source_handle_uuid,
-            nodes=nodes,
-            edges=edge_list,
-            templates=templates,
-            handles=handles,
-            effective_params=effective_params,
-            seen=frozenset(),
-        )
-        if source_templates is None or not source_templates.issubset(
-            target_templates
-        ):
-            source_node = nodes[edge.source_node_uuid]
-            if _node_kind(source_node, templates) == "material_source":
-                raise MaterialSourceGraphError(
-                    "material_source_conflict",
-                    "MaterialSource 物料模板不被下游 ResourceSlot 接受",
-                )
-            raise GraphValidationError(
-                "ResourceSlot producer 不能证明满足下游物料模板约束"
-            )
-
-
-def _resource_slot_producer_guarantee(
-    *,
-    source_node_uuid: str,
-    source_handle_uuid: str,
-    nodes: Mapping[str, WorkflowNodeWrite],
-    edges: tuple[WorkflowEdgeWrite, ...],
-    templates: Mapping[str, dict[str, Any]],
-    handles: Mapping[str, dict[str, Any]],
-    effective_params: Mapping[str, dict[str, Any]],
-    seen: frozenset[tuple[str, str]],
-) -> frozenset[str] | None:
-    """沿 ResourceSlot implicit pass-through 回溯实际 producer guarantee。"""
-
-    identity = (source_node_uuid, source_handle_uuid)
-    if identity in seen:
-        return None
-    source_node = nodes[source_node_uuid]
-    if _node_kind(source_node, templates) == "material_source":
-        template_uuid = effective_params[source_node.uuid].get(
-            "resource_template_uuid"
-        )
-        return (
-            frozenset({template_uuid})
-            if isinstance(template_uuid, str)
-            else frozenset()
-        )
-
-    source_handle = handles[source_handle_uuid]
-    unilab = _handle_unilab_metadata(source_handle)
-    if unilab.get("implicit_passthrough") is True:
-        business_name = str(
-            source_handle.get("data_key")
-            or source_handle.get("handle_key")
-            or ""
-        )
-        template_uuid = source_handle.get("workflow_node_template_uuid")
-        target_handles = [
-            handle
-            for handle in handles.values()
-            if handle.get("workflow_node_template_uuid") == template_uuid
-            and handle.get("io_type") == "target"
-            and str(handle.get("data_key") or handle.get("handle_key") or "")
-            == business_name
-            and handle.get("type") == "ResourceSlot"
-        ]
-        if len(target_handles) == 1:
-            incoming = [
-                edge
-                for edge in edges
-                if edge.target_node_uuid == source_node_uuid
-                and edge.target_handle_uuid == target_handles[0].get("uuid")
-            ]
-            if len(incoming) == 1:
-                upstream = incoming[0]
-                guarantee = _resource_slot_producer_guarantee(
-                    source_node_uuid=upstream.source_node_uuid,
-                    source_handle_uuid=upstream.source_handle_uuid,
-                    nodes=nodes,
-                    edges=edges,
-                    templates=templates,
-                    handles=handles,
-                    effective_params=effective_params,
-                    seen=seen | {identity},
-                )
-                if guarantee is not None:
-                    return guarantee
-    return _resource_slot_template_allowlist(source_handle)
-
-
-def _handle_unilab_metadata(handle: Mapping[str, Any]) -> Mapping[str, Any]:
-    meta_data = handle.get("meta_data")
-    unilab = meta_data.get("unilab") if isinstance(meta_data, Mapping) else None
-    return unilab if isinstance(unilab, Mapping) else {}
-
-
-def _resource_slot_template_allowlist(
-    handle: Mapping[str, Any],
-) -> frozenset[str] | None:
-    meta_data = handle.get("meta_data")
-    unilab = meta_data.get("unilab") if isinstance(meta_data, Mapping) else None
-    raw = (
-        unilab.get("allowed_resource_template_uuids")
-        if isinstance(unilab, Mapping)
-        else None
-    )
-    if raw is None or raw == [] or raw == ():
-        return None
-    if isinstance(raw, (str, bytes)) or not isinstance(raw, (list, tuple)):
-        raise GraphValidationError(
-            "ResourceSlot allowed_resource_template_uuids 必须是 UUID 数组"
-        )
-    result: set[str] = set()
-    for value in raw:
-        if not isinstance(value, str):
-            raise GraphValidationError(
-                "ResourceSlot allowed_resource_template_uuids 必须是 UUID 数组"
-            )
-        try:
-            parsed = UUID(value)
-        except (AttributeError, ValueError):
-            raise GraphValidationError(
-                "ResourceSlot allowed_resource_template_uuids 包含无效 UUID"
-            ) from None
-        if parsed.int == 0 or str(parsed) != value or value in result:
-            raise GraphValidationError(
-                "ResourceSlot allowed_resource_template_uuids 不是规范唯一 UUID 数组"
-            )
-        result.add(value)
-    return frozenset(result)
-
-
 def _node_kind(
     node: WorkflowNodeWrite,
-    templates: Mapping[str, dict[str, Any]],
+    templates: Mapping[str, Dict[str, Any]],
 ) -> str:
+    """把节点或模板 wire 类型规范为本地执行分类。
+
+    参数说明：``node`` 是候选工作流节点（WorkflowNode），``templates`` 是
+    当前最小节点模板投影。返回：公共校验使用的执行分类；未知类型关闭失败。
+    异常：模板缺失或类型不受支持时抛出 ``GraphValidationError``。
+    """
+
+    # ``raw_kind`` 优先采用节点模板的权威类型，节点字段仅兼容无模板旧图。
     raw_kind = node.type
     if node.workflow_node_template_uuid is not None:
         raw_kind = templates[node.workflow_node_template_uuid].get(
@@ -528,7 +406,9 @@ def _node_kind(
         "tool_call": "tool_call",
         "manual_confirm": "manual_confirm",
         "material_source": "material_source",
-        "workflow": "composite",
+        # 组合工作流调用（CompositeWorkflowInvocation）是创作层层级节点；
+        # 运行时仍只执行其静态展开的叶动作，不创建嵌套工作流任务（WorkflowTask）。
+        "workflow": "workflow",
     }
     kind = aliases.get(str(raw_kind).strip().lower())
     if kind is None:
@@ -536,172 +416,12 @@ def _node_kind(
     return kind
 
 
-def _validate_material_source_nodes(
-    *,
-    nodes: Iterable[WorkflowNodeWrite],
-    templates: Mapping[str, dict[str, Any]],
-    handles: Mapping[str, dict[str, Any]],
-    effective_params: Mapping[str, dict[str, Any]],
-) -> None:
-    for node in nodes:
-        template_uuid = node.workflow_node_template_uuid
-        template = templates.get(template_uuid or "", {})
-        is_material_source = node.type == "material_source" or any(
-            (
-                template.get("class") == "unilabos.workflow.authoring:material_source",
-                template.get("name") == "material_source",
-                template.get("type") == "material_source",
-                template.get("node_type") == "material_source",
-            )
-        )
-        if not is_material_source:
-            continue
-        material_handles = [
-            handle
-            for handle in handles.values()
-            if handle.get("workflow_node_template_uuid") == template_uuid
-        ]
-        if (
-            template.get("class") != "unilabos.workflow.authoring:material_source"
-            or template.get("name") != "material_source"
-            or template.get("type") != "material_source"
-            or template.get("node_type") != "material_source"
-            or node.type != "material_source"
-            or node.action_name is not None
-            or len(material_handles) != 1
-        ):
-            raise MaterialSourceGraphError(
-                "template_catalog_mismatch",
-                "MaterialSource framework template 不符合合同",
-            )
-        handle = material_handles[0]
-        if (
-            handle.get("handle_key") != "material"
-            or handle.get("io_type") != "source"
-            or handle.get("type") != "ResourceSlot"
-            or handle.get("required") is not False
-            or handle.get("data_source") != "executor"
-            or handle.get("data_key") != "material"
-        ):
-            raise MaterialSourceGraphError(
-                "template_catalog_mismatch",
-                "MaterialSource framework Handle 不符合合同",
-            )
-        if node.material_uuid is not None:
-            raise MaterialSourceGraphError(
-                "invalid_material_source",
-                "MaterialSource 顶层 material_uuid 必须为 null",
-            )
-        _validate_material_source_selector(effective_params[node.uuid])
-
-
-def _validate_material_source_selector(param: Mapping[str, Any]) -> None:
-    expected_keys = {
-        "mode",
-        "resource_template_uuid",
-        "mount",
-        "material_uuid",
-        "site",
-        "slot_range",
-        "flow_role",
-    }
-    if set(param) != expected_keys:
-        raise MaterialSourceGraphError(
-            "invalid_material_source",
-            "MaterialSource selector 必须是 closed object",
-        )
-    mode = param.get("mode")
-    if mode not in {"existing", "create_new"}:
-        raise MaterialSourceGraphError(
-            "invalid_material_source",
-            "MaterialSource mode 不在闭合目录中",
-        )
-    _require_canonical_uuid(
-        param.get("resource_template_uuid"),
-        "resource_template_uuid",
-    )
-    mount = param.get("mount")
-    if not isinstance(mount, dict) or set(mount) != {"uuid"}:
-        raise MaterialSourceGraphError(
-            "invalid_material_source",
-            "MaterialSource mount 必须是 closed ResourceSlot",
-        )
-    _require_canonical_uuid(mount.get("uuid"), "mount.uuid")
-    material_uuid = param.get("material_uuid")
-    if mode == "create_new" and material_uuid is not None:
-        raise MaterialSourceGraphError(
-            "invalid_material_source",
-            "create_new 禁止指定 material_uuid",
-        )
-    if material_uuid is not None:
-        _require_canonical_uuid(material_uuid, "material_uuid")
-    site = param.get("site")
-    slot_range = param.get("slot_range")
-    if site is not None and slot_range is not None:
-        raise MaterialSourceGraphError(
-            "invalid_material_source",
-            "site 与 slot_range 互斥",
-        )
-    if site is not None:
-        _require_canonical_uuid(site, "site")
-    if slot_range is not None:
-        if not isinstance(slot_range, list) or not slot_range:
-            raise MaterialSourceGraphError(
-                "invalid_material_source",
-                "slot_range 必须是非空 Site UUID 数组",
-            )
-        canonical_range = [
-            _require_canonical_uuid(value, "slot_range") for value in slot_range
-        ]
-        if len(set(canonical_range)) != len(canonical_range):
-            raise MaterialSourceGraphError(
-                "invalid_material_source",
-                "slot_range 不能包含重复 Site UUID",
-            )
-        if canonical_range != sorted(canonical_range):
-            raise MaterialSourceGraphError(
-                "invalid_material_source",
-                "slot_range 必须按 Site UUID 规范排序",
-            )
-    if param.get("flow_role") not in {
-        "primary_sample",
-        "aliquot_sample",
-        "reagent",
-        "consumable",
-    }:
-        raise MaterialSourceGraphError(
-            "invalid_material_source",
-            "flow_role 不在闭合目录中",
-        )
-
-
-def _require_canonical_uuid(value: Any, field: str) -> str:
-    if not isinstance(value, str):
-        raise MaterialSourceGraphError(
-            "invalid_material_source",
-            f"MaterialSource {field} 必须是 canonical non-nil UUID",
-        )
-    try:
-        parsed = UUID(value)
-    except (AttributeError, ValueError):
-        raise MaterialSourceGraphError(
-            "invalid_material_source",
-            f"MaterialSource {field} 必须是 canonical non-nil UUID",
-        ) from None
-    if parsed.int == 0 or str(parsed) != value:
-        raise MaterialSourceGraphError(
-            "invalid_material_source",
-            f"MaterialSource {field} 必须是 canonical non-nil UUID",
-        )
-    return value
-
-
 def _validate_edge_cycles(
     enabled: Mapping[str, WorkflowNodeWrite],
     edges: Iterable[WorkflowEdgeWrite],
 ) -> None:
     indegree = {node_uuid: 0 for node_uuid in enabled}
-    outgoing: dict[str, list[str]] = defaultdict(list)
+    outgoing: Dict[str, List[str]] = defaultdict(list)
     for edge in edges:
         indegree[edge.target_node_uuid] += 1
         outgoing[edge.source_node_uuid].append(edge.target_node_uuid)
@@ -740,15 +460,17 @@ def _dependency_only(handle: Mapping[str, Any]) -> bool:
     if str(handle.get("handle_key") or "").strip().lower() == "ready":
         return True
     data_source = str(handle.get("data_source") or "").strip()
-    return data_source.lower() == "dependency"
+    # 已发布工作流边界的业务输出使用 ``result``；它与普通
+    # 动作的 ``executor`` 输出一样承载值，不能被降级为纯依赖边。
+    return bool(data_source) and data_source.lower() not in {"executor", "result"}
 
 
 def _validate_required_handles(
     node: WorkflowNodeWrite,
     param: Mapping[str, Any],
-    handles: Iterable[dict[str, Any]],
+    handles: Iterable[Dict[str, Any]],
     incoming: Mapping[tuple[str, str], str],
-    bindings: Mapping[str, dict[str, Any]],
+    bindings: Mapping[str, Dict[str, Any]],
 ) -> None:
     template_uuid = node.workflow_node_template_uuid
     if template_uuid is None:
@@ -768,7 +490,7 @@ def _validate_required_handles(
             raise GraphValidationError(f"输入 {data_key!r} 存在多个 Provider")
         if handle.get("required") and provider_count != 1:
             raise GraphValidationError(f"缺少必填输入 {data_key!r}")
-        if has_default and not declared_handle_type_matches(
+        if has_default and not _declared_type_matches(
             param[data_key],
             handle.get("type"),
         ):
@@ -779,12 +501,8 @@ def _validated_input_bindings(
     node: WorkflowNodeWrite,
     meta_data: Mapping[str, Any],
     workflow_meta_data: Mapping[str, Any],
-    handles: Mapping[str, dict[str, Any]],
-    *,
-    validate_schema_compatibility: bool,
-) -> dict[str, dict[str, Any]]:
-    """兼容普通 Graph PUT；Authoring 路径使用公共 I/O validator。"""
-
+    handles: Mapping[str, Dict[str, Any]],
+) -> Dict[str, Dict[str, Any]]:
     unilab = meta_data.get("unilab", {})
     if not isinstance(unilab, dict):
         raise GraphValidationError("Node meta_data.unilab 必须是对象")
@@ -805,9 +523,13 @@ def _validated_input_bindings(
     parameters = input_contract.get("parameters", [])
     if not isinstance(parameters, list):
         raise GraphValidationError("input_contract.parameters 必须是数组")
-    parameter_entries = [item for item in parameters if isinstance(item, dict)]
+    parameter_names = [
+        item.get("name")
+        for item in parameters
+        if isinstance(item, dict) and isinstance(item.get("name"), str)
+    ]
 
-    result: dict[str, dict[str, Any]] = {}
+    result: Dict[str, Dict[str, Any]] = {}
     for handle_uuid, raw_binding in raw_bindings.items():
         handle = handles.get(handle_uuid)
         if (
@@ -817,56 +539,16 @@ def _validated_input_bindings(
             or handle.get("io_type") != "target"
         ):
             raise GraphValidationError("input_binding 未引用本节点的目标 Handle")
-        if not isinstance(raw_binding, dict) or set(raw_binding) != {"parameter"}:
-            raise GraphValidationError("input_binding 必须是闭合对象")
+        if not isinstance(raw_binding, dict):
+            raise GraphValidationError("input_binding 必须是对象")
         parameter = raw_binding.get("parameter")
         if not isinstance(parameter, str) or not parameter:
             raise GraphValidationError("input_binding.parameter 无效")
-        matches = [item for item in parameter_entries if item.get("name") == parameter]
-        if len(matches) != 1:
+        if parameter_names.count(parameter) != 1:
             raise GraphValidationError("input_binding 必须唯一引用 Workflow 参数")
-        parameter_schema = matches[0].get("schema")
-        if validate_schema_compatibility and (
-            not isinstance(parameter_schema, dict)
-            or not workflow_schema_matches_handle_type(
-                parameter_schema,
-                handle.get("type"),
-            )
-        ):
-            raise GraphValidationError("input_binding 与 Workflow 参数类型不兼容")
-        result[handle_uuid] = dict(raw_binding)
-    return result
-
-
-def _validated_private_input_bindings(
-    node: WorkflowNodeWrite,
-    meta_data: Mapping[str, Any],
-    handles: Mapping[str, dict[str, Any]],
-) -> dict[str, dict[str, Any]]:
-    """校验 Composite 内部 binding 形状；child-local 参数已由展开器验证。"""
-
-    unilab = meta_data.get("unilab", {})
-    if not isinstance(unilab, dict):
-        raise GraphValidationError("Node meta_data.unilab 必须是对象")
-    raw_bindings = unilab.get("input_bindings", {})
-    if not isinstance(raw_bindings, dict):
-        raise GraphValidationError("input_bindings 必须是对象")
-    result: dict[str, dict[str, Any]] = {}
-    for handle_uuid, raw_binding in raw_bindings.items():
-        handle = handles.get(handle_uuid)
-        if (
-            node.workflow_node_template_uuid is None
-            or handle is None
-            or handle.get("workflow_node_template_uuid")
-            != node.workflow_node_template_uuid
-            or handle.get("io_type") != "target"
-        ):
-            raise GraphValidationError("input_binding 未引用本节点的目标 Handle")
-        if not isinstance(raw_binding, dict) or set(raw_binding) != {"parameter"}:
-            raise GraphValidationError("input_binding 必须是闭合对象")
-        parameter = raw_binding.get("parameter")
-        if not isinstance(parameter, str) or not parameter:
-            raise GraphValidationError("input_binding.parameter 无效")
+        source = raw_binding.get("source")
+        if source is not None and source != "workflow_input":
+            raise GraphValidationError("input_binding.source 无效")
         result[handle_uuid] = dict(raw_binding)
     return result
 
@@ -885,27 +567,26 @@ def _validate_execution_policy(policy: Mapping[str, Any]) -> None:
 
 
 def _parse_schema(raw_schema: Any) -> Any:
-    if raw_schema is None:
+    """把模板存储表示解析为与调用方分离的节点参数 JSON Schema。
+
+    参数说明：``raw_schema`` 是模板投影写入的字典、布尔值或既有 JSON 字符串。
+    返回：独立的 JSON Schema 对象、布尔值或缺省 ``None``。异常：容器、JSON
+    编码或根类型无效时抛出 ``GraphValidationError``，不得按 Python repr 解码。
+    """
+
+    if raw_schema is None or isinstance(raw_schema, str) and not raw_schema.strip():
         return None
-    if isinstance(raw_schema, dict):
-        schema = raw_schema
-    else:
-        if not isinstance(raw_schema, str) or raw_schema.strip() == "":
-            return None
-        try:
-            schema = json.loads(raw_schema)
-        except (TypeError, ValueError) as exc:
-            raise GraphValidationError("节点参数 JSON Schema 无效") from exc
+    try:
+        schema = (
+            json.loads(raw_schema)
+            if isinstance(raw_schema, str)
+            else deepcopy(raw_schema)
+        )
+        validate_json_value(schema)
+    except (TypeError, ValueError, RecursionError) as exc:
+        raise GraphValidationError("节点参数 JSON Schema 无效") from exc
     if not isinstance(schema, (dict, bool)):
         raise GraphValidationError("节点参数 JSON Schema 必须是对象或布尔值")
-    if isinstance(schema, dict):
-        extension = schema.get("x-unilabos-action-contract")
-        if isinstance(extension, dict):
-            properties = schema.get("properties")
-            goal = properties.get("goal") if isinstance(properties, dict) else None
-            if extension.get("version") != 1 or not isinstance(goal, dict):
-                raise GraphValidationError("Action 参数 JSON Schema 无效")
-            return goal
     return schema
 
 
@@ -1182,129 +863,30 @@ def _json_type_matches(value: Any, declared_type: Any) -> bool:
     return False
 
 
-_HANDLE_SCALAR_TYPES = {
-    "str": "string",
-    "string": "string",
-    "int": "integer",
-    "integer": "integer",
-    "float": "number",
-    "double": "number",
-    "number": "number",
-    "bool": "boolean",
-    "boolean": "boolean",
-    "dict": "object",
-    "map": "object",
-    "object": "object",
-    "json": "object",
-    "null": "null",
-}
-
-
-def _handle_type_shape(declared_type: Any) -> tuple[str, str | None] | None:
-    raw = str(declared_type or "").strip().lower()
-    if raw in {"", "any", "default"}:
-        return "any", None
-    if raw == "resourceslot":
-        return "slot", "ResourceSlot"
-    if raw == "siteref":
-        return "slot", "SiteRef"
-    if raw in {"array", "list"}:
-        return "array", None
-    if raw.startswith("list[") and raw.endswith("]"):
-        item = raw[5:-1].strip()
-        if item == "resourceslot":
-            return "array", "ResourceSlot"
-        if item == "siteref":
-            return "array", "SiteRef"
-        normalized_item = _HANDLE_SCALAR_TYPES.get(item)
-        return ("array", normalized_item) if normalized_item is not None else None
-    normalized = _HANDLE_SCALAR_TYPES.get(raw)
-    return ("scalar", normalized) if normalized is not None else None
-
-
-def _resource_slot_reference_matches(value: Any) -> bool:
-    return type(value) is dict and type(value.get("uuid")) is str
-
-
-def _site_ref_reference_matches(value: Any) -> bool:
-    return type(value) is dict and set(value) == {"uuid"} and type(value["uuid"]) is str
-
-
-def _resource_slot_handle_value_matches(value: Any) -> bool:
-    if _resource_slot_reference_matches(value):
+def _declared_type_matches(value: Any, declared_type: Any) -> bool:
+    expected = str(declared_type or "").strip().lower()
+    if value is None or expected in {"", "any", "default"}:
         return True
-    return (
-        type(value) is list
-        and bool(value)
-        and all(_resource_slot_reference_matches(item) for item in value)
-    )
-
-
-def _handle_item_matches(value: Any, item_type: str) -> bool:
-    if item_type == "ResourceSlot":
-        return _resource_slot_reference_matches(value)
-    if item_type == "SiteRef":
-        return _site_ref_reference_matches(value)
-    return _json_type_matches(value, item_type)
-
-
-def declared_handle_type_matches(value: Any, declared_type: Any) -> bool:
-    """按 Catalog Handle 的完整 v1 vocabulary 判断一个 provider 值。"""
-
-    if value is None:
+    aliases = {
+        "float": "number",
+        "double": "number",
+        "int": "integer",
+        "bool": "boolean",
+        "list": "array",
+        "map": "object",
+    }
+    normalized = aliases.get(expected, expected)
+    if normalized not in {
+        "null",
+        "boolean",
+        "integer",
+        "number",
+        "string",
+        "array",
+        "object",
+    }:
         return True
-    shape = _handle_type_shape(declared_type)
-    if shape is None or shape[0] == "any":
-        return True
-    kind, item_type = shape
-    if kind == "slot":
-        if item_type == "SiteRef":
-            return _site_ref_reference_matches(value)
-        return _resource_slot_handle_value_matches(value)
-    if kind == "scalar":
-        assert item_type is not None
-        return _json_type_matches(value, item_type)
-    if type(value) is not list:
-        return False
-    if item_type is None:
-        return True
-    return all(_handle_item_matches(item, item_type) for item in value)
-
-
-def workflow_schema_matches_handle_type(
-    schema: Mapping[str, Any],
-    declared_type: Any,
-) -> bool:
-    """证明 v1 Workflow schema 可为一个 Catalog Handle 供应非空值。"""
-
-    shape = _handle_type_shape(declared_type)
-    if shape is None or shape[0] == "any":
-        return True
-    if "anyOf" in schema:
-        members = schema.get("anyOf")
-        if type(members) is not list or not members:
-            return False
-        schema = members[0]
-    kind, item_type = shape
-    if kind == "slot":
-        return schema.get("$slot") == item_type
-    if kind == "scalar":
-        assert item_type is not None
-        actual = schema.get("type")
-        return actual == item_type or (item_type == "number" and actual == "integer")
-    if schema.get("type") != "array":
-        return False
-    if item_type is None:
-        return True
-    items = schema.get("items")
-    if type(items) is not dict:
-        return False
-    if item_type in {"ResourceSlot", "SiteRef"}:
-        return items.get("$slot") == item_type
-    actual_item = items.get("type")
-    return actual_item == item_type or (
-        item_type == "number" and actual_item == "integer"
-    )
+    return _json_type_matches(value, normalized)
 
 
 def _is_number(value: Any) -> bool:
@@ -1320,11 +902,7 @@ def _json_equal(left: Any, right: Any) -> bool:
 
 
 __all__ = [
-    "CodedGraphValidationError",
     "GraphValidationError",
-    "MaterialSourceGraphError",
     "MissingTemplateError",
-    "declared_handle_type_matches",
     "validate_graph",
-    "workflow_schema_matches_handle_type",
 ]

@@ -1,4 +1,4 @@
-"""Registry-owned initialization parameters are JSON data, not factories."""
+"""注册表强制初始化参数合同。"""
 
 import pytest
 
@@ -7,58 +7,45 @@ from unilabos.registry.init_enforce import (
     validate_init_param_enforce,
 )
 
-CONFIG_SCHEMA = {
-    "config": {
-        "type": "object",
-        "required": ["channels"],
-        "properties": {
-            "channels": {"type": "integer"},
-            "transport": {"type": "object"},
-        },
-    }
-}
 
-
-def test_merge_init_param_enforce_applies_registry_values_recursively():
+def test_merge_init_param_enforce_preserves_runtime_values_outside_registry_boundary():
     runtime_config = {
-        "channels": 1,
-        "transport": {"host": "127.0.0.1", "port": 9000},
+        "host": "10.0.0.9",
+        "port": 7001,
+        "channels": 8,
+        "transport": {"timeout": 5, "retries": 2},
     }
-    enforced = {
+    registry_config = {
         "channels": 96,
-        "transport": {"port": 5000},
+        "transport": {"retries": 4},
     }
 
-    merged = merge_init_param_enforce(runtime_config, enforced)
+    merged = merge_init_param_enforce(runtime_config, registry_config)
 
     assert merged == {
+        "host": "10.0.0.9",
+        "port": 7001,
         "channels": 96,
-        "transport": {"host": "127.0.0.1", "port": 5000},
+        "transport": {"timeout": 5, "retries": 4},
     }
-    assert runtime_config["channels"] == 1
-    assert enforced["transport"]["port"] == 5000
+    assert runtime_config["channels"] == 8
+    assert registry_config["transport"]["retries"] == 4
 
 
-def test_validate_init_param_enforce_accepts_json_config():
-    validate_init_param_enforce(
-        "vendor.lh.model_a",
-        CONFIG_SCHEMA,
-        {"channels": 8, "transport": {"kind": "mock"}},
-    )
+def test_validate_init_param_enforce_normalizes_missing_value():
+    assert validate_init_param_enforce("vendor.device", None, None) == {}
 
 
 @pytest.mark.parametrize(
     "legacy_value",
     [
-        {"channels": 8, "backend": {"factory": "example:Backend"}},
-        {"channels": 8, "name": "${node.id}"},
-        {"channels": 8, "deck": {"value": "model-a"}},
+        {"backend": {"factory": "vendor.driver:Backend"}},
+        {"args": ["${config.host}"]},
+        {"kwargs": {"host": "127.0.0.1"}},
+        {"name": {"value": "constant"}},
+        {"host": "${config.host}"},
     ],
 )
-def test_validate_init_param_enforce_rejects_class_init_dsl(legacy_value):
-    with pytest.raises(ValueError, match="不支持"):
-        validate_init_param_enforce(
-            "vendor.lh.model_a",
-            CONFIG_SCHEMA,
-            legacy_value,
-        )
+def test_validate_init_param_enforce_rejects_legacy_object_factory_dsl(legacy_value):
+    with pytest.raises(ValueError, match="init_param_enforce"):
+        validate_init_param_enforce("vendor.device", None, legacy_value)

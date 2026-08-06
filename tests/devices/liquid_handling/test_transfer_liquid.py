@@ -3,25 +3,35 @@ from dataclasses import dataclass
 from typing import Any, Iterable, List, Optional, Sequence, Tuple
 
 import pytest
-from pylabrobot.resources import Container
 
-from unilabos.devices.liquid_handling.liquid_handler_abstract import (
-    LiquidHandlerAbstract,
-)
+from unilabos.devices.liquid_handling.liquid_handler_abstract import LiquidHandlerAbstract
 
 
-class DummyContainer(Container):
-    """最小的真实 PLR Container；满足 transfer_liquid 的公开输入合同。"""
+@dataclass
+class DummyContainer:
+    name: str
+    parent: Any = None
+    children: Tuple[Any, ...] = ()
+    unilabos_uuid: str = ""
 
-    def __init__(self, name: str):
-        super().__init__(
-            name=name,
-            size_x=1,
-            size_y=1,
-            size_z=1,
-            max_volume=1000,
-            category="container",
-        )
+    def __repr__(self) -> str:  # pragma: no cover
+        return f"DummyContainer({self.name})"
+
+    def serialize(self) -> dict:
+        return {
+            "name": self.name,
+            "children": [],
+            "parent_name": None,
+            "location": None,
+            "rotation": {"x": 0, "y": 0, "z": 0},
+            "size_x": 1,
+            "size_y": 1,
+            "size_z": 1,
+            "category": "container",
+        }
+
+    def serialize_all_state(self) -> dict:
+        return {self.name: {}}
 
 
 @dataclass(frozen=True)

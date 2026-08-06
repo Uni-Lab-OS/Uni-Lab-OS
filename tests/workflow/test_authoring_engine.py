@@ -1,119 +1,71 @@
-"""Round 02D production Authoring engine 的公开行为合同。"""
+"""可信工作流创作编译器（Authoring Compiler）的公共接口测试。"""
 
 from __future__ import annotations
 
 import ast
-import json
-from collections.abc import Iterator, Mapping
-from contextlib import contextmanager
-from copy import deepcopy
-from dataclasses import dataclass
-from importlib import import_module
 from pathlib import Path
 from typing import Any
-from uuid import UUID
 
 import pytest
 
-from unilabos.workflow.catalog import (
-    CatalogAuthority,
-    NodeTemplateImport,
-    TemplateCatalog,
-)
+from unilabos.workflow.authoring_engine import WorkflowAuthoringEngine
+from unilabos.workflow.authoring_kernel import AuthoringCatalogSnapshot
 from unilabos.workflow.models import (
     CandidateChangeset,
-    CandidateCompilation,
     CandidateDiagnostic,
     CandidateSourceMapEntry,
 )
-from unilabos.workflow.store import WorkflowStore
-
-_AUTHORING_IMPORT_ERROR: ModuleNotFoundError | None = None
-try:
-    _authoring_api = import_module("unilabos.workflow.authoring_engine")
-except ModuleNotFoundError as error:
-    if error.name != "unilabos.workflow.authoring_engine":
-        raise
-    _AUTHORING_IMPORT_ERROR = error
-    _authoring_api = None
 
 WORKFLOW_UUID = "10000000-0000-4000-8000-000000000001"
-OTHER_WORKFLOW_UUID = "10000000-0000-4000-8000-000000000002"
 PREPARE_NODE_UUID = "20000000-0000-4000-8000-000000000001"
 ANALYZE_NODE_UUID = "20000000-0000-4000-8000-000000000002"
-GROUP_A_NODE_UUID = "20000000-0000-4000-8000-000000000003"
-GROUP_B_NODE_UUID = "20000000-0000-4000-8000-000000000004"
-FINAL_NODE_UUID = "20000000-0000-4000-8000-000000000005"
-
 PREPARE_TEMPLATE_UUID = "30000000-0000-4000-8000-000000000001"
 ANALYZE_TEMPLATE_UUID = "30000000-0000-4000-8000-000000000002"
-GROUP_TEMPLATE_UUID = "30000000-0000-4000-8000-000000000003"
-FINAL_TEMPLATE_UUID = "30000000-0000-4000-8000-000000000004"
-RESOURCE_TEMPLATE_UUID = "31000000-0000-4000-8000-000000000001"
-
 PREPARE_SAMPLE_TARGET = "40000000-0000-4000-8000-000000000001"
 PREPARE_CYCLES_TARGET = "40000000-0000-4000-8000-000000000002"
-PREPARE_NOTE_TARGET = "40000000-0000-4000-8000-000000000003"
+PREPARE_SAMPLE_SOURCE = "40000000-0000-4000-8000-000000000003"
 PREPARE_READY_TARGET = "40000000-0000-4000-8000-000000000004"
-PREPARE_SAMPLE_SOURCE = "40000000-0000-4000-8000-000000000005"
-PREPARE_REPORT_SOURCE = "40000000-0000-4000-8000-000000000006"
-PREPARE_READY_SOURCE = "40000000-0000-4000-8000-000000000007"
-
+PREPARE_READY_SOURCE = "40000000-0000-4000-8000-000000000005"
 ANALYZE_SAMPLE_TARGET = "41000000-0000-4000-8000-000000000001"
 ANALYZE_LABEL_TARGET = "41000000-0000-4000-8000-000000000002"
-ANALYZE_READY_TARGET = "41000000-0000-4000-8000-000000000003"
-ANALYZE_REPORT_SOURCE = "41000000-0000-4000-8000-000000000004"
+ANALYZE_REPORT_SOURCE = "41000000-0000-4000-8000-000000000003"
+ANALYZE_READY_TARGET = "41000000-0000-4000-8000-000000000004"
 ANALYZE_READY_SOURCE = "41000000-0000-4000-8000-000000000005"
-
-FINAL_REPORT_TARGET = "42000000-0000-4000-8000-000000000001"
-FINAL_READY_TARGET = "42000000-0000-4000-8000-000000000002"
-FINAL_REPORT_SOURCE = "42000000-0000-4000-8000-000000000003"
-FINAL_READY_SOURCE = "42000000-0000-4000-8000-000000000004"
-
-AUTHORITY = CatalogAuthority(authority_id="backend-primary", kind="backend")
-TIMESTAMP = "2026-08-01T00:00:00Z"
-
-
-@dataclass
-class EngineContext:
-    store: WorkflowStore
-    catalog: TemplateCatalog
-    engine: Any
-    fingerprint: str
-
-
-def _engine_class() -> type[Any]:
-    assert _AUTHORING_IMPORT_ERROR is None, (
-        "缺少冻结 production seam: unilabos.workflow.authoring_engine"
-    )
-    assert _authoring_api is not None
-    return _authoring_api.WorkflowAuthoringEngine
 
 
 def _handle(
     handle_uuid: str,
     *,
+    node_template_uuid: str,
     key: str,
     io_type: str,
     value_type: str,
     required: bool = False,
-    data_source: str | None = None,
-    value_schema: dict[str, Any] | None = None,
+    data_source: str = "executor",
 ) -> dict[str, Any]:
-    meta_data: dict[str, Any] = {"contract": "declared"}
-    if value_schema is not None:
-        meta_data["unilab"] = {"value_schema": deepcopy(value_schema)}
+    """构造一个连接点（Handle）目录投影。
+
+    参数说明：UUID 与所属模板固定身份，``key``/``io_type`` 描述业务键和方向，
+    ``value_type`` 描述旧兼容类型；返回可直接进入创作目录快照的字典。
+    """
+
+    value_schema = (
+        {"$slot": "ResourceSlot"}
+        if value_type == "ResourceSlot"
+        else {"type": value_type}
+    )
     return {
         "uuid": handle_uuid,
-        "description": f"{key} contract",
-        "meta_data": meta_data,
+        "workflow_node_template_uuid": node_template_uuid,
         "handle_key": key,
         "io_type": io_type,
-        "display_name": key.replace("_", " ").title(),
+        "display_name": key.title(),
         "type": value_type,
         "required": required,
         "data_source": data_source,
         "data_key": key,
+        "description": None,
+        "meta_data": {"unilab": {"value_schema": value_schema}},
     }
 
 
@@ -121,195 +73,157 @@ def _template(
     template_uuid: str,
     *,
     name: str,
-    class_name: str = "lab.devices:Reactor",
-    node_type: str = "compute",
-    handles: list[dict[str, Any]] | None = None,
-    resource_template_uuid: str = RESOURCE_TEMPLATE_UUID,
-) -> NodeTemplateImport:
-    return NodeTemplateImport(
-        template={
+    handles: list[dict[str, Any]],
+) -> tuple[dict[str, Any], list[dict[str, Any]]]:
+    """构造动作模板及其连接点（Handle）集合。
+
+    参数说明：``template_uuid`` 和 ``name`` 标识目录动作，``handles`` 是完整
+    连接点集合；返回节点模板与连接点二元组。
+    """
+
+    return (
+        {
             "uuid": template_uuid,
-            "description": f"{name} action",
-            "meta_data": {"catalog_owner": "backend"},
-            "resource_template_uuid": resource_template_uuid,
+            "resource_template_uuid": "31000000-0000-4000-8000-000000000001",
             "name": name,
-            "display_name": name.replace("_", " ").title(),
-            "class": class_name,
+            "display_name": name.title(),
+            "class": "lab.devices:Reactor",
+            "description": f"{name.title()} 动作模板说明",
+            "meta_data": {"owner": "test"},
             "goal": {},
             "goal_default": {},
             "feedback": {},
             "result": {},
             "schema": None,
-            "type": "group" if node_type == "group" else "action",
+            "type": "action",
+            "node_type": "compute",
             "icon": None,
             "header": None,
             "footer": None,
-            "node_type": node_type,
         },
-        handles=[] if handles is None else handles,
+        handles,
     )
 
 
-def _catalog_imports() -> list[NodeTemplateImport]:
-    ready_target = {
-        "key": "ready",
-        "io_type": "target",
-        "value_type": "any",
-        "required": False,
-        "data_source": "dependency",
-    }
-    ready_source = {
-        "key": "ready",
-        "io_type": "source",
-        "value_type": "any",
-        "data_source": "dependency",
-    }
-    return [
-        _template(
-            PREPARE_TEMPLATE_UUID,
-            name="prepare",
-            handles=[
-                _handle(
-                    PREPARE_SAMPLE_TARGET,
-                    key="sample",
-                    io_type="target",
-                    value_type="ResourceSlot",
-                    required=True,
-                    data_source="executor",
-                ),
-                _handle(
-                    PREPARE_CYCLES_TARGET,
-                    key="cycles",
-                    io_type="target",
-                    value_type="integer",
-                    required=True,
-                    data_source="executor",
-                ),
-                _handle(
-                    PREPARE_NOTE_TARGET,
-                    key="note",
-                    io_type="target",
-                    value_type="string",
-                    data_source="executor",
-                    value_schema={
-                        "anyOf": [{"type": "string"}, {"type": "null"}],
-                        "default": None,
-                    },
-                ),
-                _handle(PREPARE_READY_TARGET, **ready_target),
-                _handle(
-                    PREPARE_SAMPLE_SOURCE,
-                    key="prepared",
-                    io_type="source",
-                    value_type="ResourceSlot",
-                    data_source="executor",
-                ),
-                _handle(
-                    PREPARE_REPORT_SOURCE,
-                    key="report",
-                    io_type="source",
-                    value_type="string",
-                    data_source="executor",
-                ),
-                _handle(PREPARE_READY_SOURCE, **ready_source),
-            ],
-        ),
-        _template(
-            ANALYZE_TEMPLATE_UUID,
-            name="analyze",
-            handles=[
-                _handle(
-                    ANALYZE_SAMPLE_TARGET,
-                    key="prepared",
-                    io_type="target",
-                    value_type="ResourceSlot",
-                    required=True,
-                    data_source="executor",
-                ),
-                _handle(
-                    ANALYZE_LABEL_TARGET,
-                    key="label",
-                    io_type="target",
-                    value_type="string",
-                    required=True,
-                    data_source="executor",
-                ),
-                _handle(ANALYZE_READY_TARGET, **ready_target),
-                _handle(
-                    ANALYZE_REPORT_SOURCE,
-                    key="report",
-                    io_type="source",
-                    value_type="string",
-                    data_source="executor",
-                ),
-                _handle(ANALYZE_READY_SOURCE, **ready_source),
-            ],
-        ),
-        _template(
-            GROUP_TEMPLATE_UUID,
-            name="group",
-            class_name="unilabos.workflow.authoring:group",
-            node_type="group",
-        ),
-        _template(
-            FINAL_TEMPLATE_UUID,
-            name="finalize",
-            handles=[
-                _handle(
-                    FINAL_REPORT_TARGET,
-                    key="report",
-                    io_type="target",
-                    value_type="string",
-                    data_source="executor",
-                ),
-                _handle(FINAL_READY_TARGET, **ready_target),
-                _handle(
-                    FINAL_REPORT_SOURCE,
-                    key="report",
-                    io_type="source",
-                    value_type="string",
-                    data_source="executor",
-                ),
-                _handle(FINAL_READY_SOURCE, **ready_source),
-            ],
-        ),
-    ]
+def _engine() -> WorkflowAuthoringEngine:
+    """创建只持有不可变目录快照的工作流创作编译器。"""
+
+    prepare, prepare_handles = _template(
+        PREPARE_TEMPLATE_UUID,
+        name="prepare",
+        handles=[
+            _handle(
+                PREPARE_SAMPLE_TARGET,
+                node_template_uuid=PREPARE_TEMPLATE_UUID,
+                key="sample",
+                io_type="target",
+                value_type="ResourceSlot",
+                required=True,
+            ),
+            _handle(
+                PREPARE_CYCLES_TARGET,
+                node_template_uuid=PREPARE_TEMPLATE_UUID,
+                key="cycles",
+                io_type="target",
+                value_type="integer",
+                required=True,
+            ),
+            _handle(
+                PREPARE_SAMPLE_SOURCE,
+                node_template_uuid=PREPARE_TEMPLATE_UUID,
+                key="prepared",
+                io_type="source",
+                value_type="ResourceSlot",
+            ),
+            _handle(
+                PREPARE_READY_TARGET,
+                node_template_uuid=PREPARE_TEMPLATE_UUID,
+                key="ready",
+                io_type="target",
+                value_type="any",
+                data_source="dependency",
+            ),
+            _handle(
+                PREPARE_READY_SOURCE,
+                node_template_uuid=PREPARE_TEMPLATE_UUID,
+                key="ready",
+                io_type="source",
+                value_type="any",
+                data_source="dependency",
+            ),
+        ],
+    )
+    analyze, analyze_handles = _template(
+        ANALYZE_TEMPLATE_UUID,
+        name="analyze",
+        handles=[
+            _handle(
+                ANALYZE_SAMPLE_TARGET,
+                node_template_uuid=ANALYZE_TEMPLATE_UUID,
+                key="prepared",
+                io_type="target",
+                value_type="ResourceSlot",
+                required=True,
+            ),
+            _handle(
+                ANALYZE_LABEL_TARGET,
+                node_template_uuid=ANALYZE_TEMPLATE_UUID,
+                key="label",
+                io_type="target",
+                value_type="string",
+                required=True,
+            ),
+            _handle(
+                ANALYZE_REPORT_SOURCE,
+                node_template_uuid=ANALYZE_TEMPLATE_UUID,
+                key="report",
+                io_type="source",
+                value_type="string",
+            ),
+            _handle(
+                ANALYZE_READY_TARGET,
+                node_template_uuid=ANALYZE_TEMPLATE_UUID,
+                key="ready",
+                io_type="target",
+                value_type="any",
+                data_source="dependency",
+            ),
+            _handle(
+                ANALYZE_READY_SOURCE,
+                node_template_uuid=ANALYZE_TEMPLATE_UUID,
+                key="ready",
+                io_type="source",
+                value_type="any",
+                data_source="dependency",
+            ),
+        ],
+    )
+    catalog = AuthoringCatalogSnapshot.from_entities(
+        [prepare, analyze],
+        [*prepare_handles, *analyze_handles],
+    )
+    return WorkflowAuthoringEngine(catalog=catalog)
 
 
-def _workflow(
-    *,
-    workflow_uuid: str = WORKFLOW_UUID,
-    revision: int = 7,
-    meta_data: dict[str, Any] | None = None,
-) -> dict[str, Any]:
+@pytest.fixture()
+def authoring_engine() -> WorkflowAuthoringEngine:
+    """向单元测试提供隔离的工作流创作编译器。"""
+
+    return _engine()
+
+
+def _applied_graph() -> dict[str, Any]:
+    """构造首次编译使用的空工作流图（Workflow Graph）。"""
+
     return {
-        "uuid": workflow_uuid,
-        "create_time": TIMESTAMP,
-        "update_time": TIMESTAMP,
-        "meta_data": (
-            {"owner": "keep", "unilab": {"presentation": "keep"}}
-            if meta_data is None
-            else meta_data
-        ),
-        "name": "Persisted workflow",
-        "tags": ["keep"],
-        "revision": revision,
-        "description": "Persisted description",
-    }
-
-
-def _empty_graph(
-    *,
-    workflow_uuid: str = WORKFLOW_UUID,
-    revision: int = 7,
-    meta_data: dict[str, Any] | None = None,
-) -> dict[str, Any]:
-    return {
-        "workflow": _workflow(
-            workflow_uuid=workflow_uuid,
-            revision=revision,
-            meta_data=meta_data,
-        ),
+        "workflow": {
+            "uuid": WORKFLOW_UUID,
+            "name": "Persisted name",
+            "tags": ["keep"],
+            "description": "Persisted description",
+            "meta_data": {"owner": "keep"},
+            "revision": 7,
+        },
         "nodes": [],
         "edges": [],
         "node_templates": [],
@@ -317,25 +231,22 @@ def _empty_graph(
     }
 
 
-def _source(
-    *,
-    workflow_uuid: str = WORKFLOW_UUID,
-    fixed_device_id: str | None = None,
-) -> str:
-    selector = "device()" if fixed_device_id is None else f'device("{fixed_device_id}")'
+def _source() -> str:
+    """返回覆盖输入绑定、节点输出绑定和确定性锚点的作者源码。"""
+
     return f'''from typing import Annotated, Literal
 
 from pydantic import Field
 from lab.devices import Reactor
 from unilabos.registry.placeholder_type import ResourceSlot
-from unilabos.workflow.authoring import device, workflow_definition, workflow_output
+from unilabos.workflow.authoring import device, workflow, workflow_output
 
 
-reactor: Reactor = {selector}
+reactor: Reactor = device()
 
 
-@workflow_definition(
-    workflow_uuid="{workflow_uuid}",
+@workflow(
+    workflow_uuid="{WORKFLOW_UUID}",
     displayname="Sample preparation",
     description="Prepare and analyze one sample.",
 )
@@ -344,862 +255,156 @@ def prepare_sample(
     sample: ResourceSlot,
     cycles: Annotated[int, Field(ge=1, le=10)] = 3,
     mode: Literal["fast", "safe"] = "safe",
-    note: Annotated[str | None, Field(max_length=200)] = None,
 ):
     # unilab:node_uuid={PREPARE_NODE_UUID}
-    prepared = reactor.prepare(
-        sample=sample,
-        cycles=cycles,
-        note=note,
-    )
+    prepared = reactor.prepare(sample=sample, cycles=cycles)
     # unilab:node_uuid={ANALYZE_NODE_UUID}
-    analyzed = reactor.analyze(
-        prepared=prepared.prepared,
-        label=mode,
-    )
-    return workflow_output(
-        sample=prepared.prepared,
-        report=analyzed.report,
-    )
+    analyzed = reactor.analyze(prepared=prepared.prepared, label=mode)
+    return workflow_output(sample=prepared.prepared, report=analyzed.report)
 '''
-
-
-def _grouped_source() -> str:
-    return f'''from lab.devices import Reactor
-from unilabos.registry.placeholder_type import ResourceSlot
-from unilabos.workflow.authoring import (
-    device,
-    group,
-    workflow_definition,
-    workflow_output,
-)
-
-
-reactor: Reactor = device()
-
-
-@workflow_definition(
-    workflow_uuid="{WORKFLOW_UUID}",
-    displayname="Grouped preparation",
-)
-def grouped(*, sample: ResourceSlot):
-    # unilab:node_uuid={GROUP_A_NODE_UUID}
-    with group(name="Preparation"):
-        # unilab:node_uuid={PREPARE_NODE_UUID}
-        prepared = reactor.prepare(sample=sample, cycles=1, note=None)
-        # unilab:node_uuid={ANALYZE_NODE_UUID}
-        analyzed = reactor.analyze(prepared=prepared.prepared, label="grouped")
-    return workflow_output(report=analyzed.report)
-'''
-
-
-@contextmanager
-def _opened_engine(
-    database_path: Path,
-    *,
-    imports: list[NodeTemplateImport] | None = None,
-    resource_template_identity_index: Any | None = None,
-) -> Iterator[EngineContext]:
-    store = WorkflowStore(database_path)
-    try:
-        catalog = TemplateCatalog(store)
-        snapshot = catalog.replace(
-            AUTHORITY,
-            _catalog_imports() if imports is None else imports,
-        )
-        engine = _engine_class()(
-            catalog=catalog,
-            authority=AUTHORITY,
-            resource_template_identity_index=resource_template_identity_index,
-        )
-        yield EngineContext(store, catalog, engine, snapshot.fingerprint)
-    finally:
-        store.close()
-
-
-@pytest.fixture()
-def engine_context(tmp_path: Path) -> Iterator[EngineContext]:
-    with _opened_engine(tmp_path / "workflow.db") as context:
-        yield context
 
 
 def _compile(
-    engine: Any,
+    engine: WorkflowAuthoringEngine,
     source: str | None = None,
     *,
     graph: dict[str, Any] | None = None,
-) -> CandidateCompilation:
+):
+    """经公共编译接口生成候选结果。
+
+    参数说明：``engine`` 是被测编译器，``source`` 可覆盖标准源码，``graph``
+    可覆盖当前已应用图；返回候选编译结果（CandidateCompilation）。
+    """
+
     return engine.compile(
         workflow_uuid=WORKFLOW_UUID,
         workflow_revision=7,
         python_source=_source() if source is None else source,
         source_uri="package://lab/workflows/sample.py",
-        applied_graph=_empty_graph() if graph is None else graph,
+        applied_graph=_applied_graph() if graph is None else graph,
     )
 
 
-def _assert_error_result(
-    result: CandidateCompilation,
-    *,
-    code: str | None = None,
+def test_compile_builds_backend_shaped_candidate(
+    authoring_engine: WorkflowAuthoringEngine,
 ) -> None:
-    assert not result.valid
-    assert result.graph is None
-    assert result.normalized_python_source is None
-    assert result.source_map == []
-    assert result.changeset is None
-    assert result.diagnostics
-    validated = [
-        CandidateDiagnostic.model_validate(item).model_dump(exclude_none=True)
-        for item in result.diagnostics
-    ]
-    assert validated == result.diagnostics
-    if code is not None:
-        assert code in {item["code"] for item in result.diagnostics}
+    """静态源码应编译为后端形状候选图与完整绑定。"""
 
+    result = _compile(authoring_engine)
 
-def _node_by_uuid(graph: Mapping[str, Any], node_uuid: str) -> dict[str, Any]:
-    return next(node for node in graph["nodes"] if node["uuid"] == node_uuid)
-
-
-def test_engine_implements_the_frozen_public_transform_seam(
-    engine_context: EngineContext,
-) -> None:
-    engine = engine_context.engine
-
-    assert isinstance(engine.compiler_version, str) and engine.compiler_version
-    assert engine.template_catalog_fingerprint == engine_context.fingerprint
-    with engine.catalog_snapshot() as fingerprint:
-        assert fingerprint == engine_context.fingerprint
-    for method_name in ("compile", "generate_python", "validate"):
-        assert callable(getattr(engine, method_name))
-
-
-def test_compile_returns_backend_identity_contracts_bindings_and_catalog(
-    engine_context: EngineContext,
-) -> None:
-    result = _compile(engine_context.engine)
-
-    assert result.valid
-    assert result.compiler_version == engine_context.engine.compiler_version
-    assert result.template_catalog_fingerprint == engine_context.fingerprint
+    assert result.valid, result.diagnostics
     assert result.graph is not None
-    graph = result.graph
-    assert set(graph) == {
-        "workflow",
-        "nodes",
-        "edges",
-        "node_templates",
-        "handle_templates",
-    }
-    assert graph["workflow"]["uuid"] == WORKFLOW_UUID
-    assert graph["workflow"]["revision"] == 7
-    assert graph["workflow"]["name"] == "Sample preparation"
-    assert graph["workflow"]["description"] == "Prepare and analyze one sample."
-    assert graph["workflow"]["tags"] == ["keep"]
-    assert graph["workflow"]["meta_data"]["owner"] == "keep"
-    assert graph["workflow"]["meta_data"]["unilab"]["presentation"] == "keep"
-
-    unilab = graph["workflow"]["meta_data"]["unilab"]
-    assert unilab["input_contract"] == {
-        "version": 1,
-        "parameters": [
-            {
-                "name": "sample",
-                "schema": {"$slot": "ResourceSlot"},
-                "required": True,
-            },
-            {
-                "name": "cycles",
-                "schema": {
-                    "type": "integer",
-                    "minimum": 1,
-                    "maximum": 10,
-                },
-                "required": False,
-                "default": 3,
-            },
-            {
-                "name": "mode",
-                "schema": {
-                    "type": "string",
-                    "enum": ["fast", "safe"],
-                },
-                "required": False,
-                "default": "safe",
-            },
-            {
-                "name": "note",
-                "schema": {
-                    "anyOf": [{"type": "string", "maxLength": 200}, {"type": "null"}]
-                },
-                "required": False,
-                "default": None,
-            },
-        ],
-    }
-    assert unilab["output_contract"] == {
-        "version": 1,
-        "outputs": [
-            {
-                "name": "sample",
-                "schema": {"$slot": "ResourceSlot"},
-                "implicit": False,
-            },
-            {
-                "name": "report",
-                "schema": {"type": "string"},
-                "implicit": False,
-            },
-        ],
-    }
-    assert unilab["output_bindings"] == {
-        "sample": {
-            "kind": "node_output",
-            "workflow_node_uuid": PREPARE_NODE_UUID,
-            "source_handle_uuid": PREPARE_SAMPLE_SOURCE,
-        },
-        "report": {
-            "kind": "node_output",
-            "workflow_node_uuid": ANALYZE_NODE_UUID,
-            "source_handle_uuid": ANALYZE_REPORT_SOURCE,
-        },
-    }
-
-    prepare = _node_by_uuid(graph, PREPARE_NODE_UUID)
-    analyze = _node_by_uuid(graph, ANALYZE_NODE_UUID)
-    assert prepare["workflow_node_template_uuid"] == PREPARE_TEMPLATE_UUID
-    assert analyze["workflow_node_template_uuid"] == ANALYZE_TEMPLATE_UUID
+    assert result.graph["workflow"]["name"] == "Sample preparation"
+    assert result.graph["workflow"]["tags"] == ["keep"]
+    assert [node["uuid"] for node in result.graph["nodes"]] == [
+        PREPARE_NODE_UUID,
+        ANALYZE_NODE_UUID,
+    ]
+    prepare = result.graph["nodes"][0]
+    analyze = result.graph["nodes"][1]
     assert prepare["meta_data"]["unilab"]["input_bindings"] == {
         PREPARE_SAMPLE_TARGET: {"parameter": "sample"},
         PREPARE_CYCLES_TARGET: {"parameter": "cycles"},
-        PREPARE_NOTE_TARGET: {"parameter": "note"},
     }
     assert analyze["meta_data"]["unilab"]["input_bindings"] == {
         ANALYZE_LABEL_TARGET: {"parameter": "mode"}
     }
-    assert len(graph["edges"]) == 1
-    edge = graph["edges"][0]
-    assert {
-        "source_node_uuid": edge["source_node_uuid"],
-        "target_node_uuid": edge["target_node_uuid"],
-        "source_handle_uuid": edge["source_handle_uuid"],
-        "target_handle_uuid": edge["target_handle_uuid"],
-    } == {
-        "source_node_uuid": PREPARE_NODE_UUID,
-        "target_node_uuid": ANALYZE_NODE_UUID,
-        "source_handle_uuid": PREPARE_SAMPLE_SOURCE,
-        "target_handle_uuid": ANALYZE_SAMPLE_TARGET,
-    }
-    assert {item["uuid"] for item in graph["node_templates"]} == {
-        PREPARE_TEMPLATE_UUID,
-        ANALYZE_TEMPLATE_UUID,
-    }
-    assert {
-        item["workflow_node_template_uuid"] for item in graph["handle_templates"]
-    } == {
-        PREPARE_TEMPLATE_UUID,
-        ANALYZE_TEMPLATE_UUID,
-    }
-    note_handle = next(
-        item
-        for item in graph["handle_templates"]
-        if item["uuid"] == PREPARE_NOTE_TARGET
-    )
-    assert note_handle["required"] is False
-    assert note_handle["meta_data"]["unilab"]["value_schema"] == {
-        "anyOf": [{"type": "string"}, {"type": "null"}],
-        "default": None,
-    }
-    json.dumps(graph, ensure_ascii=False, allow_nan=False)
+    assert len(result.graph["edges"]) == 1
+    assert result.graph["edges"][0]["source_handle_uuid"] == PREPARE_SAMPLE_SOURCE
+    assert result.graph["edges"][0]["target_handle_uuid"] == ANALYZE_SAMPLE_TARGET
 
 
-def test_compile_is_deterministic_and_emits_valid_source_map_and_changeset(
-    engine_context: EngineContext,
+def test_unannotated_node_inherits_action_template_metadata(
+    authoring_engine: WorkflowAuthoringEngine,
 ) -> None:
-    first = _compile(engine_context.engine)
-    second = _compile(engine_context.engine)
+    """未写节点注释时应继承动作模板（Action Template）的显示名和描述。"""
+
+    result = _compile(authoring_engine)
+
+    assert result.valid and result.graph is not None, result.diagnostics
+    prepare, analyze = result.graph["nodes"]
+    assert (prepare["name"], prepare["description"]) == (
+        "Prepare",
+        "Prepare 动作模板说明",
+    )
+    assert (analyze["name"], analyze["description"]) == (
+        "Analyze",
+        "Analyze 动作模板说明",
+    )
+    assert result.normalized_python_source is not None
+    assert "# [" not in result.normalized_python_source
+
+
+def test_compile_is_deterministic_and_emits_source_map_and_changeset(
+    authoring_engine: WorkflowAuthoringEngine,
+) -> None:
+    """同一输入必须生成相同源码映射与变更集（Changeset）。"""
+
+    first = _compile(authoring_engine)
+    second = _compile(authoring_engine)
 
     assert first.model_dump() == second.model_dump()
     assert first.normalized_python_source is not None
     ast.parse(first.normalized_python_source)
-    assert f"# unilab:node_uuid={PREPARE_NODE_UUID}" in first.normalized_python_source
-    assert f"# unilab:node_uuid={ANALYZE_NODE_UUID}" in first.normalized_python_source
-    assert "typing.Optional" not in first.normalized_python_source
-    assert "Optional[" not in first.normalized_python_source
-    assert "note: Annotated[str | None" in first.normalized_python_source
-
-    source_map = [
-        CandidateSourceMapEntry.model_validate(item) for item in first.source_map
-    ]
-    assert [entry.workflow_node_uuid for entry in source_map] == [
-        PREPARE_NODE_UUID,
-        ANALYZE_NODE_UUID,
-    ]
-    assert [(entry.start_line, entry.start_column) for entry in source_map] == sorted(
-        (entry.start_line, entry.start_column) for entry in source_map
-    )
-
+    assert [
+        CandidateSourceMapEntry.model_validate(item).workflow_node_uuid
+        for item in first.source_map
+    ] == [PREPARE_NODE_UUID, ANALYZE_NODE_UUID]
     changeset = CandidateChangeset.model_validate(first.changeset)
     assert changeset.kind == "graph"
-    assert changeset.created_node_uuids == sorted(
-        [PREPARE_NODE_UUID, ANALYZE_NODE_UUID]
-    )
-    assert changeset.updated_node_uuids == []
-    assert changeset.deleted_node_uuids == []
-    assert changeset.created_edge_uuids == sorted(changeset.created_edge_uuids)
-    assert changeset.reserved_metadata_changed is True
+    assert changeset.created_node_uuids == [PREPARE_NODE_UUID, ANALYZE_NODE_UUID]
 
 
-def test_compile_never_imports_or_executes_authoring_source(
-    engine_context: EngineContext,
+def test_compile_never_executes_author_source(
+    authoring_engine: WorkflowAuthoringEngine,
     tmp_path: Path,
 ) -> None:
-    marker = tmp_path / "authoring-source-was-executed"
-    executable_statement = f'open({str(marker)!r}, "w").write("executed")'
-    source = _source().replace(
+    """不可信作者源码即使含副作用语句也绝不能被执行。"""
+
+    marker = tmp_path / "executed"
+    hostile = _source().replace(
         "reactor: Reactor = device()",
-        f"{executable_statement}\nreactor: Reactor = device()",
+        f'open({str(marker)!r}, "w").write("executed")\nreactor: Reactor = device()',
     )
 
-    result = _compile(engine_context.engine, source)
+    result = _compile(authoring_engine, hostile)
 
-    _assert_error_result(result)
+    assert not result.valid
     assert not marker.exists()
+    assert any(item["code"] == "unsupported_authoring_syntax" for item in result.diagnostics)
 
 
-def test_fixed_selector_only_projects_reserved_executor_binding(
-    engine_context: EngineContext,
+def test_compile_reports_syntax_and_anchor_errors(
+    authoring_engine: WorkflowAuthoringEngine,
 ) -> None:
-    result = _compile(engine_context.engine, _source(fixed_device_id="reactor-1"))
+    """语法错误和非法节点锚点必须成为结构化诊断而非异常泄漏。"""
 
-    assert result.valid and result.graph is not None
-    for node_uuid in (PREPARE_NODE_UUID, ANALYZE_NODE_UUID):
-        node = _node_by_uuid(result.graph, node_uuid)
-        assert node["meta_data"]["unilab"]["executor_binding"] == {
-            "mode": "fixed",
-            "device_id": "reactor-1",
-        }
-        assert node.get("material_uuid") is None
-        assert "device_id" not in node
-
-
-@pytest.mark.parametrize(
-    "selector",
-    [
-        "reactor = device()",
-        'reactor: Reactor = device("")',
-        'reactor: Reactor = device(device_id="reactor-1")',
-        "reactor: Reactor = device(get_device_id())",
-        'reactor: Reactor = device("a", "b")',
-    ],
-    ids=[
-        "untyped",
-        "blank-fixed-id",
-        "keyword",
-        "dynamic",
-        "too-many-arguments",
-    ],
-)
-def test_invalid_device_selectors_return_diagnostics(
-    engine_context: EngineContext,
-    selector: str,
-) -> None:
-    source = _source().replace("reactor: Reactor = device()", selector)
-
-    _assert_error_result(_compile(engine_context.engine, source))
-
-
-def test_missing_or_ambiguous_catalog_identity_fails_closed(tmp_path: Path) -> None:
-    missing_action = [
-        item for item in _catalog_imports() if item.template["name"] != "prepare"
-    ]
-    duplicate_prepare = _template(
-        "30000000-0000-4000-8000-000000000009",
-        name="prepare",
-        resource_template_uuid="31000000-0000-4000-8000-000000000009",
-        handles=[],
-    )
-
-    for index, imports in enumerate(
-        (missing_action, [*_catalog_imports(), duplicate_prepare])
-    ):
-        with _opened_engine(
-            tmp_path / f"catalog-{index}.db", imports=imports
-        ) as context:
-            result = _compile(context.engine)
-        _assert_error_result(result, code="template_catalog_mismatch")
-
-
-def test_catalog_result_is_detached_and_uses_exact_snapshot_identity(
-    engine_context: EngineContext,
-) -> None:
-    first = _compile(engine_context.engine)
-    assert first.graph is not None
-    first.graph["node_templates"][0]["meta_data"]["catalog_owner"] = "mutated"
-
-    second = _compile(engine_context.engine)
-
-    assert second.graph is not None
-    assert {
-        template["meta_data"]["catalog_owner"]
-        for template in second.graph["node_templates"]
-    } == {"backend"}
-    assert second.template_catalog_fingerprint == engine_context.fingerprint
-
-
-def test_outer_catalog_snapshot_is_reused_for_the_complete_conversion(
-    engine_context: EngineContext,
-) -> None:
-    engine = engine_context.engine
-    with engine.catalog_snapshot() as held_fingerprint:
-        engine_context.catalog.replace(AUTHORITY, [])
-        held_result = _compile(engine)
-
-    current_result = _compile(engine)
-
-    assert held_result.valid
-    assert held_result.template_catalog_fingerprint == held_fingerprint
-    _assert_error_result(current_result, code="template_catalog_mismatch")
-    assert current_result.template_catalog_fingerprint != held_fingerprint
-
-
-def test_unavailable_catalog_is_a_stable_transform_diagnostic(tmp_path: Path) -> None:
-    store = WorkflowStore(tmp_path / "unavailable.db")
-    try:
-        engine = _engine_class()(catalog=TemplateCatalog(store), authority=AUTHORITY)
-        result = _compile(engine)
-    finally:
-        store.close()
-
-    _assert_error_result(result, code="template_catalog_unavailable")
-
-
-@pytest.mark.parametrize(
-    "mutation",
-    [
-        lambda source: source.replace(
-            f'workflow_uuid="{WORKFLOW_UUID}"',
-            f'workflow_uuid="{OTHER_WORKFLOW_UUID}"',
-        ),
-        lambda source: source.replace(
-            "def prepare_sample(\n    *,",
-            "def prepare_sample(sample: ResourceSlot,\n    *,",
-        ),
-        lambda source: source.replace(
-            "sample=sample,",
-            "sample,",
-            1,
-        ),
-        lambda source: source.replace(
-            "prepared = reactor.prepare(",
-            "prepared, extra = reactor.prepare(",
-        ),
-        lambda source: source.replace(
-            "label=mode,",
-            "unknown=mode,",
-        ),
-    ],
-    ids=[
-        "decorator-identity",
-        "workflow-positional-parameter",
-        "action-positional-argument",
-        "tuple-result",
-        "unknown-handle",
-    ],
-)
-def test_static_subset_violations_are_structured_diagnostics(
-    engine_context: EngineContext,
-    mutation: Any,
-) -> None:
-    result = _compile(engine_context.engine, mutation(_source()))
-
-    _assert_error_result(result)
-
-
-@pytest.mark.parametrize(
-    "source",
-    [
+    syntax_result = _compile(authoring_engine, "def broken(:\n")
+    anchor_result = _compile(
+        authoring_engine,
         _source().replace(
-            f"    # unilab:node_uuid={ANALYZE_NODE_UUID}",
-            f"    # unilab:node_uuid={PREPARE_NODE_UUID}",
+            f"# unilab:node_uuid={PREPARE_NODE_UUID}",
+            "# unilab:node_uuid=not-a-uuid",
         ),
-        _source().replace(PREPARE_NODE_UUID, "00000000-0000-0000-0000-000000000000"),
-        _source().replace(
-            f"    # unilab:node_uuid={PREPARE_NODE_UUID}\n    prepared",
-            (
-                f"    # unilab:node_uuid={PREPARE_NODE_UUID}\n"
-                "    note = note\n"
-                "    prepared"
-            ),
-        ),
-    ],
-    ids=["duplicate", "nil", "not-adjacent"],
-)
-def test_invalid_uuid_anchors_block_the_candidate(
-    engine_context: EngineContext,
-    source: str,
-) -> None:
-    _assert_error_result(_compile(engine_context.engine, source))
-
-
-def test_anchor_preserves_node_identity_and_non_authoring_metadata(
-    engine_context: EngineContext,
-) -> None:
-    initial = _compile(engine_context.engine)
-    assert initial.graph is not None
-    applied = deepcopy(initial.graph)
-    prepare = _node_by_uuid(applied, PREPARE_NODE_UUID)
-    prepare["meta_data"]["operator_note"] = "preserve"
-    prepare["meta_data"]["unilab"]["ui_color"] = "blue"
-    changed_source = _source().replace("cycles=cycles,", "cycles=5,")
-
-    changed = _compile(engine_context.engine, changed_source, graph=applied)
-
-    assert changed.valid and changed.graph is not None
-    changed_prepare = _node_by_uuid(changed.graph, PREPARE_NODE_UUID)
-    assert changed_prepare["uuid"] == PREPARE_NODE_UUID
-    assert changed_prepare["param"]["cycles"] == 5
-    assert changed_prepare["meta_data"]["operator_note"] == "preserve"
-    assert changed_prepare["meta_data"]["unilab"]["ui_color"] == "blue"
-    changeset = CandidateChangeset.model_validate(changed.changeset)
-    assert changeset.updated_node_uuids == [PREPARE_NODE_UUID]
-    assert changeset.created_node_uuids == []
-
-
-def test_missing_anchor_gets_uuid4_then_normalized_anchor_preserves_identity(
-    engine_context: EngineContext,
-) -> None:
-    source = _source().replace(
-        f"    # unilab:node_uuid={ANALYZE_NODE_UUID}\n",
-        "",
     )
 
-    first = _compile(engine_context.engine, source)
+    assert any(item["code"] == "syntax_error" for item in syntax_result.diagnostics)
+    assert any(item["code"] == "invalid_node_anchor" for item in anchor_result.diagnostics)
+    for result in (syntax_result, anchor_result):
+        for item in result.diagnostics:
+            CandidateDiagnostic.model_validate(item)
 
-    assert first.valid and first.graph is not None
-    allocated = next(
-        node["uuid"]
-        for node in first.graph["nodes"]
-        if node["workflow_node_template_uuid"] == ANALYZE_TEMPLATE_UUID
-    )
-    assert allocated != ANALYZE_NODE_UUID
-    assert UUID(allocated).version == 4
-    assert first.normalized_python_source is not None
-    assert f"# unilab:node_uuid={allocated}" in first.normalized_python_source
 
-    reapplied = _compile(
-        engine_context.engine,
-        first.normalized_python_source,
-        graph=first.graph,
+def test_missing_action_catalog_identity_fails_closed() -> None:
+    """目录中缺少动作身份时不得猜测或继续编译。"""
+
+    engine = WorkflowAuthoringEngine(
+        catalog=AuthoringCatalogSnapshot.from_entities([], [])
     )
 
-    assert reapplied.valid and reapplied.graph is not None
-    assert allocated == next(
-        node["uuid"]
-        for node in reapplied.graph["nodes"]
-        if node["workflow_node_template_uuid"] == ANALYZE_TEMPLATE_UUID
-    )
+    result = _compile(engine)
 
-
-def test_syntax_and_dynamic_python_fail_with_deterministic_diagnostics(
-    engine_context: EngineContext,
-) -> None:
-    cases = [
-        "def broken(:\n",
-        _source().replace(
-            (
-                f"    # unilab:node_uuid={PREPARE_NODE_UUID}\n"
-                "    prepared = reactor.prepare("
-            ),
-            (
-                '    if mode == "fast":\n'
-                f"        # unilab:node_uuid={PREPARE_NODE_UUID}\n"
-                "        prepared = reactor.prepare("
-            ),
-        ),
-        _source().replace("cycles=cycles,", "cycles=compute_cycles(),"),
-        _source().replace(
-            "from lab.devices import Reactor",
-            "from .devices import Reactor",
-        ),
-    ]
-
-    for source in cases:
-        first = _compile(engine_context.engine, source)
-        second = _compile(engine_context.engine, source)
-        _assert_error_result(first)
-        assert first.model_dump() == second.model_dump()
-
-
-def test_generate_python_and_validate_are_pure_public_transforms(
-    engine_context: EngineContext,
-) -> None:
-    compiled = _compile(engine_context.engine)
-    assert compiled.valid and compiled.graph is not None
-
-    generated = engine_context.engine.generate_python(
-        workflow_uuid=WORKFLOW_UUID,
-        workflow_revision=7,
-        graph=compiled.graph,
-        source_uri="package://lab/workflows/generated.py",
-    )
-    validated = engine_context.engine.validate(
-        workflow_uuid=WORKFLOW_UUID,
-        workflow_revision=7,
-        graph=compiled.graph,
-        python_source=compiled.normalized_python_source,
-        source_uri="package://lab/workflows/generated.py",
-    )
-
-    assert generated.valid
-    assert generated.graph == compiled.graph
-    assert CandidateChangeset.model_validate(generated.changeset).kind == "source_only"
-    assert validated.valid
-    assert validated.graph == compiled.graph
-    assert validated.normalized_python_source == compiled.normalized_python_source
-
-
-def test_compile_retains_wire_equivalent_applied_catalog_read_projection(
-    tmp_path: Path,
-) -> None:
-    imports = _catalog_imports()
-    prepare_import = next(
-        item for item in imports if item.template["uuid"] == PREPARE_TEMPLATE_UUID
-    )
-    for handle in prepare_import.handles:
-        handle["description"] = None
-
-    with _opened_engine(
-        tmp_path / "retained-catalog-projection.db",
-        imports=imports,
-    ) as context:
-        prepare_only_source = _source().replace(
-            f"""    # unilab:node_uuid={ANALYZE_NODE_UUID}
-    analyzed = reactor.analyze(
-        prepared=prepared.prepared,
-        label=mode,
-    )
-    return workflow_output(
-        sample=prepared.prepared,
-        report=analyzed.report,
-    )
-""",
-            "    return workflow_output(sample=prepared.prepared)\n",
-        )
-        applied = _compile(context.engine, prepare_only_source)
-        assert applied.valid and applied.graph is not None
-        applied_graph = deepcopy(applied.graph)
-        for template in applied_graph["node_templates"]:
-            for field_name in ("schema", "icon", "header", "footer"):
-                assert template.pop(field_name) is None
-        for handle in applied_graph["handle_templates"]:
-            assert handle.pop("description") is None
-
-        expanded = _compile(context.engine, graph=applied_graph)
-        assert expanded.valid and expanded.graph is not None
-        candidate_graph = deepcopy(expanded.graph)
-        candidate_graph["node_templates"] = [
-            deepcopy(applied_graph["node_templates"][0])
-            if item["uuid"] == PREPARE_TEMPLATE_UUID
-            else item
-            for item in candidate_graph["node_templates"]
-        ]
-        retained_handles = {
-            item["uuid"]: item for item in applied_graph["handle_templates"]
-        }
-        candidate_graph["handle_templates"] = [
-            deepcopy(retained_handles[item["uuid"]])
-            if item["uuid"] in retained_handles
-            else item
-            for item in candidate_graph["handle_templates"]
-        ]
-
-        generated = context.engine.generate_python(
-            workflow_uuid=WORKFLOW_UUID,
-            workflow_revision=7,
-            graph=candidate_graph,
-            source_uri="package://lab/workflows/expanded.py",
-        )
-        assert generated.valid and generated.normalized_python_source is not None
-        recompiled = _compile(
-            context.engine,
-            generated.normalized_python_source,
-            graph=applied_graph,
-        )
-
-    assert recompiled.valid and recompiled.graph is not None
-    retained_template = next(
-        item
-        for item in recompiled.graph["node_templates"]
-        if item["uuid"] == PREPARE_TEMPLATE_UUID
-    )
-    assert retained_template == applied_graph["node_templates"][0]
-    assert {
-        item["uuid"]: item
-        for item in recompiled.graph["handle_templates"]
-        if item["workflow_node_template_uuid"] == PREPARE_TEMPLATE_UUID
-    } == retained_handles
-
-    new_template = next(
-        item
-        for item in recompiled.graph["node_templates"]
-        if item["uuid"] == ANALYZE_TEMPLATE_UUID
-    )
-    expected_new_template = next(
-        item
-        for item in candidate_graph["node_templates"]
-        if item["uuid"] == ANALYZE_TEMPLATE_UUID
-    )
-    assert new_template == expected_new_template
-    assert [
-        item
-        for item in recompiled.graph["handle_templates"]
-        if item["workflow_node_template_uuid"] == ANALYZE_TEMPLATE_UUID
-    ] == [
-        item
-        for item in candidate_graph["handle_templates"]
-        if item["workflow_node_template_uuid"] == ANALYZE_TEMPLATE_UUID
-    ]
-
-
-def test_compile_rejects_retained_node_template_semantic_drift(
-    engine_context: EngineContext,
-) -> None:
-    applied = _compile(engine_context.engine)
-    assert applied.valid and applied.graph is not None
-    applied_graph = deepcopy(applied.graph)
-    prepare_template = next(
-        item
-        for item in applied_graph["node_templates"]
-        if item["uuid"] == PREPARE_TEMPLATE_UUID
-    )
-    prepare_template["display_name"] = "Stale Prepare Display Name"
-
-    result = _compile(engine_context.engine, graph=applied_graph)
-
-    _assert_error_result(result, code="template_catalog_mismatch")
-
-
-def test_compile_rejects_retained_handle_template_semantic_drift(
-    engine_context: EngineContext,
-) -> None:
-    applied = _compile(engine_context.engine)
-    assert applied.valid and applied.graph is not None
-    applied_graph = deepcopy(applied.graph)
-    sample_handle = next(
-        item
-        for item in applied_graph["handle_templates"]
-        if item["uuid"] == PREPARE_SAMPLE_TARGET
-    )
-    assert sample_handle["required"] is True
-    sample_handle["required"] = False
-
-    result = _compile(engine_context.engine, graph=applied_graph)
-
-    _assert_error_result(result, code="template_catalog_mismatch")
-
-
-def test_compile_allows_nullable_read_projection_and_retained_zero_handle_template(
-    tmp_path: Path,
-) -> None:
-    imports = _catalog_imports()
-    prepare_import = next(
-        item for item in imports if item.template["uuid"] == PREPARE_TEMPLATE_UUID
-    )
-    for handle in prepare_import.handles:
-        handle["description"] = None
-
-    with _opened_engine(
-        tmp_path / "zero-handle-read-projection.db",
-        imports=imports,
-    ) as context:
-        applied = _compile(context.engine, _grouped_source())
-        assert applied.valid and applied.graph is not None
-        applied_graph = deepcopy(applied.graph)
-        for template in applied_graph["node_templates"]:
-            for field_name in ("schema", "icon", "header", "footer"):
-                assert template.pop(field_name) is None
-        for handle in applied_graph["handle_templates"]:
-            if handle["workflow_node_template_uuid"] == PREPARE_TEMPLATE_UUID:
-                assert handle.pop("description") is None
-        group_template = next(
-            item
-            for item in applied_graph["node_templates"]
-            if item["uuid"] == GROUP_TEMPLATE_UUID
-        )
-        assert not any(
-            item["workflow_node_template_uuid"] == GROUP_TEMPLATE_UUID
-            for item in applied_graph["handle_templates"]
-        )
-
-        result = _compile(
-            context.engine,
-            applied.normalized_python_source,
-            graph=applied_graph,
-        )
-
-    assert result.valid and result.graph is not None
+    assert not result.valid
     assert any(
-        item["uuid"] == group_template["uuid"]
-        for item in result.graph["node_templates"]
+        item["code"] == "template_catalog_mismatch" for item in result.diagnostics
     )
-    assert not any(
-        item["workflow_node_template_uuid"] == GROUP_TEMPLATE_UUID
-        for item in result.graph["handle_templates"]
-    )
-
-
-def test_workflow_output_import_alias_normalizes_to_the_result_record(
-    engine_context: EngineContext,
-) -> None:
-    source = (
-        _source()
-        .replace(
-            "device, workflow_definition, workflow_output",
-            "device, workflow_definition, workflow_output as output",
-        )
-        .replace("return workflow_output(", "return output(")
-    )
-
-    result = _compile(engine_context.engine, source)
-
-    assert result.valid and result.normalized_python_source is not None
-    assert "workflow_output" not in result.normalized_python_source
-    assert "class SamplePreparationResult(TypedDict):" in (
-        result.normalized_python_source
-    )
-    assert "return {'sample': prepared.prepared, 'report': analyzed.report}" in (
-        result.normalized_python_source
-    )
-
-
-def test_validate_rejects_a_source_graph_semantic_mismatch(
-    engine_context: EngineContext,
-) -> None:
-    compiled = _compile(engine_context.engine)
-    assert compiled.valid and compiled.graph is not None
-    changed_source = _source().replace("cycles=cycles,", "cycles=5,")
-
-    result = engine_context.engine.validate(
-        workflow_uuid=WORKFLOW_UUID,
-        workflow_revision=7,
-        graph=compiled.graph,
-        python_source=changed_source,
-        source_uri="package://lab/workflows/sample.py",
-    )
-
-    _assert_error_result(result)
-
-
-def test_programming_contract_rejects_non_uuid_workflow_identity(
-    engine_context: EngineContext,
-) -> None:
-    with pytest.raises(ValueError):
-        engine_context.engine.compile(
-            workflow_uuid="not-a-uuid",
-            workflow_revision=7,
-            python_source=_source(),
-            source_uri="package://lab/workflows/sample.py",
-            applied_graph=_empty_graph(),
-        )

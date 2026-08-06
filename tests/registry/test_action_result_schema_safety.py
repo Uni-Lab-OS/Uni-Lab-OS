@@ -1,4 +1,4 @@
-"""Action result declaration 的纯 AST、安全与资源增长守护。"""
+"""动作结果声明（Action result declaration）的纯 AST、安全与资源增长守护。"""
 
 from __future__ import annotations
 

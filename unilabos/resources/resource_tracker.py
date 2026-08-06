@@ -631,11 +631,16 @@ class ResourceTreeSet(object):
         return cls(trees)
 
     def to_plr_resources(self, skip_devices=True) -> List["PLRResource"]:
-        """
-        将 ResourceTreeSet 转换为 PLR 资源列表
+        """将资源树集合转换为 PLR 资源列表。
+
+        Args:
+            skip_devices: 是否跳过只表示设备根节点的资源树。
 
         Returns:
-            List[PLRResource]: PLR 资源实例列表
+            保留资源身份、层级和跟踪状态的 PLR 资源实例列表。
+
+        Raises:
+            ValueError: 资源类型无法安全投影为 PLR 类型时抛出。
         """
         register()
         from pylabrobot.resources import Resource as PLRResource
@@ -643,15 +648,32 @@ class ResourceTreeSet(object):
 
         # 类型映射
         TYPE_MAP = {
+            "resource": "Resource",
             "plate": "Plate",
             "well": "Well",
             "deck": "Deck",
             "container": "RegularContainer",
             "tip_spot": "TipSpot",
-            # Deployment packages also contain logical warehouses used for
-            # Inventory/Site addressing.  They are valid ResourceSlots even
-            # when they do not define a dedicated pylabrobot subclass.
+            # 仓库（Warehouse）的库存（Inventory）/库位（Site）元数据不属于
+            # PLR 构造合同；需要进入驱动的普通仓库只降级为通用 Resource。
             "warehouse": "Resource",
+        }
+        # 通用 PLR Resource 的完整入站合同；仓库自己的库存（Inventory）与
+        # 库位（Site）布局继续由公共物料图持有，不进入设备动作资源。
+        GENERIC_RESOURCE_KEYS = {
+            "name",
+            "type",
+            "size_x",
+            "size_y",
+            "size_z",
+            "location",
+            "rotation",
+            "category",
+            "model",
+            "barcode",
+            "preferred_pickup_location",
+            "children",
+            "parent_name",
         }
 
         def collect_node_data(node: ResourceDictInstance, name_to_uuid: dict, all_states: dict, name_to_extra: dict):
@@ -666,7 +688,12 @@ class ResourceTreeSet(object):
                 collect_node_data(child, name_to_uuid, all_states, name_to_extra)
 
         def node_to_plr_dict(node: ResourceDictInstance, has_model: bool):
-            """转换节点为 PLR 字典格式"""
+            """把一个资源树节点转换为 PLR 构造字典。
+
+            参数：``node`` 是待恢复的资源节点，``has_model`` 决定是否保留模型
+            字段。返回：过滤库存（Inventory）/库位（Site）私有配置后的 PLR
+            字典。异常：节点字段缺失或类型非法时由资源模型访问原样传播。
+            """
             res = node.res_content
             plr_type = TYPE_MAP.get(res.type, res.type)
             if res.type not in TYPE_MAP:
@@ -676,6 +703,13 @@ class ResourceTreeSet(object):
             # （PLR Barcode dict {data, symbology, position_on_resource}），与
             # get_resource_instance_from_dict 从 config 读取的逻辑对称；position 未保留，默认兜底。
             config = dict(res.config)
+            # 部署包的库位（Site）声明已经展开为资源树 children，并由公共物料图
+            # 保留完整元数据；PLR 构造器只接收展开后的资源层级。
+            config.pop("sites", None)
+            if res.type == "deck":
+                # setup 只控制部署包工作台类的首次构造；恢复通用 PLR Deck 时
+                # 子资源已由 children 提供，不能再次执行初始化或传入未知参数。
+                config.pop("setup", None)
             if res.barcode:
                 config["barcode"] = {
                     "data": res.barcode,
@@ -702,6 +736,14 @@ class ResourceTreeSet(object):
             }
             if has_model:
                 d["model"] = res.config.get("model", None)
+            if plr_type == "Resource":
+                # 每个通用资源节点都只保留 PLR Resource 构造合同；在递归构造
+                # 阶段过滤，才能覆盖仓库、自定义资源及其嵌套子资源。
+                d = {
+                    key: value
+                    for key, value in d.items()
+                    if key in GENERIC_RESOURCE_KEYS
+                }
             return d
 
         plr_resources = []
@@ -723,31 +765,6 @@ class ResourceTreeSet(object):
                     raise ValueError(
                         f"无法找到类型 {plr_dict['type']} 对应的 PLR 资源类。原始信息：{tree.root_node.res_content}"
                     )
-                if tree.root_node.res_content.type == "warehouse":
-                    # Resource.deserialize forwards custom config keys to the
-                    # constructor.  Keep only the generic PLR wire contract;
-                    # warehouse-specific layout metadata remains authoritative
-                    # in Inventory and is not needed by device actions.
-                    generic_resource_keys = {
-                        "name",
-                        "type",
-                        "size_x",
-                        "size_y",
-                        "size_z",
-                        "location",
-                        "rotation",
-                        "category",
-                        "model",
-                        "barcode",
-                        "preferred_pickup_location",
-                        "children",
-                        "parent_name",
-                    }
-                    plr_dict = {
-                        key: value
-                        for key, value in plr_dict.items()
-                        if key in generic_resource_keys
-                    }
                 spec = inspect.signature(sub_cls)
                 if "category" not in spec.parameters:
                     plr_dict.pop("category", None)

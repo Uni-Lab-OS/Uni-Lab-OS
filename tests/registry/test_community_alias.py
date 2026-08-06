@@ -1,74 +1,15 @@
-"""Community device classes use their namespaced registry keys directly."""
+"""社区设备使用稳定完整命名空间，不再建立本地 alias。"""
 
-from types import SimpleNamespace
-
-import pytest
-
-import unilabos.ros.initialize_device as device_initializer
-from unilabos.utils.exception import DeviceClassInvalid
+from unilabos.app.package_cli import resolve_class_namespace
 
 
-def _device_config(class_name, config=None):
-    return SimpleNamespace(
-        res_content=SimpleNamespace(
-            klass=class_name,
-            uuid="test-device-uuid",
-            config=config or {},
-        )
-    )
+def test_default_community_namespace_is_derived_from_normalized_project_name():
+    assert resolve_class_namespace("Vendor Liquid-Handler", None) == "community.vendor_liquid_handler"
 
 
-def test_initialize_device_uses_exact_community_registry_key(monkeypatch):
-    class_name = "community.test_package.pump"
-    registry_entry = {
-        "class": {
-            "module": "tests.registry.fixtures.initializer_drivers:SharedDevice",
-            "type": "python",
-            "status_types": {},
-            "action_value_mappings": {},
-        },
-        "init_param_enforce": {
-            "channels": 8,
-            "transport": {"port": 5000},
-        },
-    }
-    monkeypatch.setitem(device_initializer.lab_registry.device_type_registry, class_name, registry_entry)
-
-    captured = {}
-
-    class _WrappedDevice:
-        def __init__(self, **kwargs):
-            captured.update(kwargs)
-
-    monkeypatch.setattr(device_initializer.default_manager, "get_class", lambda _module: object())
-    monkeypatch.setattr(device_initializer, "ros2_device_node", lambda _device, **_kwargs: _WrappedDevice)
-
-    result = device_initializer.initialize_device_from_dict(
-        "pump-1",
-        _device_config(
-            class_name,
-            {
-                "channels": 1,
-                "transport": {"host": "127.0.0.1", "port": 9000},
-            },
-        ),
-    )
-
-    assert isinstance(result, _WrappedDevice)
-    assert captured["driver_params"] == {
-        "channels": 8,
-        "transport": {"host": "127.0.0.1", "port": 5000},
-    }
+def test_explicit_namespace_gets_community_prefix():
+    assert resolve_class_namespace("ignored", "vendor.lh") == "community.vendor.lh"
 
 
-def test_initialize_device_does_not_fall_back_to_an_unprefixed_alias(monkeypatch):
-    class_name = "community.test_package.alias_only"
-    monkeypatch.delitem(device_initializer.lab_registry.device_type_registry, class_name, raising=False)
-    monkeypatch.setitem(
-        device_initializer.lab_registry.device_type_registry,
-        "test_package.alias_only",
-        {"class": {"module": "unused:Driver"}},
-    )
-
-    with pytest.raises(DeviceClassInvalid, match=class_name):
-        device_initializer.initialize_device_from_dict("alias-1", _device_config(class_name))
+def test_explicit_full_namespace_is_preserved():
+    assert resolve_class_namespace("ignored", "community.vendor.lh") == "community.vendor.lh"

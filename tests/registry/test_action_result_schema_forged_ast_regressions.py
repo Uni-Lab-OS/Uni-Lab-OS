@@ -1,4 +1,4 @@
-"""Action result parser 对伪造 AST 节点形状的失败关闭回归测试。"""
+"""动作结果解析器（Action result parser）对伪造 AST 节点形状的失败关闭回归测试。"""
 
 from __future__ import annotations
 
