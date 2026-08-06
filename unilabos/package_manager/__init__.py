@@ -11,6 +11,16 @@ from .dependency_lock import (
     load_locked_package_catalogs,
 )
 from .inspection import inspect_package
+from .product_lifecycle import (
+    PreparedWorkspaceProductGeneration,
+    WorkspaceGenerationChangedError,
+    WorkspaceProductLifecycle,
+    close_workspace_product_lifecycle,
+    compose_workspace_product_lifecycle,
+    get_workspace_product_lifecycle,
+    install_workspace_product_lifecycle,
+    prepare_stable_workspace_product_generation,
+)
 from .project_metadata import PackageProject, parse_project_metadata
 from .publication import upload_package
 from .refresh_coordinator import (
@@ -28,6 +38,7 @@ from .runtime_activation import (
     prepare_workspace_registry_runtime,
 )
 from .sources import WorkspaceSource
+from .workspace_file_monitor import StableWorkspaceFileMonitor
 from .workspace_material_shapes import (
     compile_catalog_material_shapes,
     compile_workspace_material_shapes,
@@ -54,28 +65,37 @@ __all__ = [
     "PackageDependencyLock",
     "PackageDependencyManager",
     "PackageProject",
+    "PreparedWorkspaceProductGeneration",
     "RegistryActivationPlan",
     "RegistrySnapshot",
     "RegistrySnapshotError",
+    "StableWorkspaceFileMonitor",
     "StableWorkspaceGenerationMonitor",
+    "WorkspaceGenerationChangedError",
     "WorkspaceGenerationPublisher",
     "WorkspaceInputGeneration",
     "WorkspacePackageRuntime",
+    "WorkspaceProductLifecycle",
     "WorkspaceRefreshCoordinator",
     "WorkspaceRefreshResult",
     "WorkspaceRegistryRuntime",
     "WorkspaceRuntimeStatus",
     "WorkspaceSource",
     "WorkspaceStartupPlan",
+    "close_workspace_product_lifecycle",
     "cmd_package",
     "compile_catalog_material_shapes",
     "compile_package_source",
     "compile_registry_snapshot",
     "compile_workspace_material_shapes",
     "compile_workspace_startup",
+    "compose_workspace_product_lifecycle",
+    "get_workspace_product_lifecycle",
     "inspect_package",
+    "install_workspace_product_lifecycle",
     "load_locked_package_catalogs",
     "parse_project_metadata",
+    "prepare_stable_workspace_product_generation",
     "prepare_workspace_registry_runtime",
     "prepare_workspace_startup",
     "register_package_subcommands",

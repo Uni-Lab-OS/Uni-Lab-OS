@@ -190,19 +190,28 @@ from unilabos.utils.banner_print import print_status
 
 
 def cleanup_for_restart() -> bool:
-    """
-    Clean up all resources for restart without exiting the process.
+    """按安全所有权顺序清理当前进程，为监督器重启做准备。
 
-    This function prepares the system for re-initialization by:
-    1. Stopping all communication clients
-    2. Destroying ROS nodes
-    3. Resetting singletons
-    4. Waiting for threads to finish
-
-    Returns:
-        bool: True if cleanup was successful, False otherwise
+    参数：无。
+    返回：核心 ROS 清理完成时返回 ``True``；ROS 清理出现未恢复故障时返回
+    ``False``。工作区文件监视、通信客户端、ROS 节点、Edge 微后端、进程单例、
+    追踪导出器依次关闭，最后等待后台线程并执行垃圾回收。
+    异常：各可选组件的普通清理异常转换为警告并继续后续步骤；导入或 ROS 清理
+    故障按既有策略返回 ``False``。本函数不直接退出进程。
     """
     print_status("[Restart] Starting cleanup for restart...", "info")
+
+    # 先停止工作区文件世代监视，避免后续关闭数据库和设备时继续提交刷新。
+    try:
+        from unilabos.package_manager import close_workspace_product_lifecycle
+
+        close_workspace_product_lifecycle()
+        print_status("[Restart] Workspace product lifecycle stopped", "info")
+    except Exception as e:
+        print_status(
+            f"[Restart] Error stopping workspace lifecycle: {e}",
+            "warning",
+        )
 
     # Step 1: Stop WebSocket communication client
     print_status("[Restart] Step 1: Stopping WebSocket client...", "info")

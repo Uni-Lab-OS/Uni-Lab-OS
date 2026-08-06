@@ -53,8 +53,27 @@ _restart_reason: str = ""
 RESTART_EXIT_CODE = 42
 
 
+def _request_workspace_restart(reasons: tuple[str, ...]) -> None:
+    """把安全工作区待重启原因提交给现有产品重启循环。
+
+    参数：``reasons`` 是工作区包运行时（Workspace Package Runtime）给出的稳定
+    原因集合。
+    返回：无；仅设置现有进程级重启标志，不直接退出或停止设备。
+    异常：无。
+    """
+
+    global _restart_reason, _restart_requested
+    _restart_reason = ",".join(reasons)
+    _restart_requested = True
+
+
 def _build_child_argv():
-    """Build sys.argv for child process, stripping supervisor-only arguments."""
+    """构造移除监督器专用参数的子进程命令行。
+
+    参数：无；读取当前 ``sys.argv``。
+    返回：保留普通产品参数、删除 ``restart_mode`` 与最大重启次数的字符串列表。
+    异常：无。
+    """
     result = []
     skip_next = False
     for arg in sys.argv:
@@ -75,12 +94,13 @@ def _build_child_argv():
 
 
 def _run_as_supervisor(max_restarts: int):
-    """
-    Supervisor process that spawns and monitors child processes.
+    """运行只负责启动和重启产品子进程的监督器。
 
-    Similar to Uvicorn's --reload: the supervisor itself does no heavy work,
-    it only launches the real process as a child and restarts it when the child
-    exits with RESTART_EXIT_CODE.
+    参数：``max_restarts`` 是接受专用重启退出码后的最大重启次数。
+    返回：正常路径不返回；子进程普通退出、超过次数或人工中断时以对应状态退出
+    监督器进程。
+    异常：子进程创建失败时传播 ``OSError``；人工中断会先终止子进程再退出。
+    监督器自身不加载设备、工作流（Workflow）或物料（Material）运行时。
     """
     child_argv = [sys.executable] + _build_child_argv()
     restart_count = 0
@@ -98,7 +118,11 @@ def _run_as_supervisor(max_restarts: int):
         )
 
         try:
-            process = subprocess.Popen(child_argv)
+            # ``child_environment`` 明确告诉子进程存在监督器；子进程仍不能自行
+            # 退出，只能在确认执行安全后提交既有重启标志。
+            child_environment = os.environ.copy()
+            child_environment["UNILABOS_RESTART_SUPERVISED"] = "1"
+            process = subprocess.Popen(child_argv, env=child_environment)
             exit_code = process.wait()
         except KeyboardInterrupt:
             print_status(
@@ -310,6 +334,18 @@ def should_request_remote_startup(
     """Fetch the legacy startup graph only when no graph was supplied locally."""
 
     return startup_json is None and graph_file_path is None
+
+
+def should_prepare_workspace_product_runtime(args_dict: dict[str, Any]) -> bool:
+    """判断当前命令是否属于需要工作区产品运行时的常驻启动。
+
+    参数：``args_dict`` 是公共命令行（CLI）参数。
+    返回：软件包管理命令返回 ``False``，普通常驻启动返回 ``True``；软件包查询、
+    上传和依赖增改删不得预读物理图（Graph）或现有依赖锁并启动监视线程。
+    异常：无。
+    """
+
+    return args_dict.get("command") not in {"package", "pkg"}
 
 
 def parse_args():
@@ -998,12 +1034,29 @@ def main():
     # Snapshot）、有限激活与工作流源码（Workflow Source）计划。
     from unilabos.package_manager import (
         PackageCompileError,
-        prepare_workspace_registry_runtime,
+        PackageDependencyError,
+        WorkspaceGenerationChangedError,
+        prepare_stable_workspace_product_generation,
     )
 
     try:
-        workspace_registry_runtime = prepare_workspace_registry_runtime(args_dict)
-    except (PackageCompileError, TypeError, ValueError) as error:
+        prepared_workspace_generation = (
+            prepare_stable_workspace_product_generation(args_dict)
+            if should_prepare_workspace_product_runtime(args_dict)
+            else None
+        )
+        workspace_registry_runtime = (
+            prepared_workspace_generation.candidate
+            if prepared_workspace_generation is not None
+            else None
+        )
+    except (
+        PackageCompileError,
+        PackageDependencyError,
+        TypeError,
+        ValueError,
+        WorkspaceGenerationChangedError,
+    ) as error:
         parser.error(str(error))
     if workspace_registry_runtime is not None:
         # ``workspace_package_directory`` 只用于告知社区包解析器本地命名
@@ -1440,9 +1493,25 @@ def main():
     if workspace_registry_runtime is not None:
         # 完整注册表快照（Registry Snapshot）只在内置定义成功后原子
         # 发布；作者导入路径必须更晚激活，禁止静态编译期导入驱动。
-        workspace_registry_runtime.publish(lab_registry)
-        workspace_registry_runtime.activate_import_path()
-        from unilabos.package_manager import compile_catalog_material_shapes
+        from unilabos.package_manager import (
+            compile_catalog_material_shapes,
+            install_workspace_product_lifecycle,
+        )
+
+        assert prepared_workspace_generation is not None
+        if check_mode:
+            # 静态检查只验证首代发布形状并立即退出，不安装后台文件监视生命周期。
+            workspace_registry_runtime.publish(lab_registry)
+            workspace_registry_runtime.activate_import_path()
+        else:
+            install_workspace_product_lifecycle(
+                prepared_workspace_generation,
+                registry=lab_registry,
+                restart_mode=(
+                    os.environ.get("UNILABOS_RESTART_SUPERVISED") == "1"
+                ),
+                request_restart=_request_workspace_restart,
+            )
 
         # ``workspace_material_shapes`` 只消费同一静态编译代的软件包目录
         # （PackageCatalog）和工作区来源，不再依赖注册表 AST ``file_path``。

@@ -178,3 +178,29 @@ def test_package_inspect_parser_keeps_legacy_argument_contract(
     assert parsed.package_path == "/tmp/example-package"
     assert parsed.namespace == "community.example"
     assert parsed.out == "/tmp/dist"
+
+
+@pytest.mark.parametrize(
+    "package_action",
+    ("inspect", "upload", "add", "update", "remove"),
+)
+def test_package_commands_skip_workspace_product_runtime_preparation(
+    package_action: str,
+) -> None:
+    """软件包管理命令不得在修改依赖锁前创建产品运行时代。
+
+    参数：``package_action`` 覆盖全部查询、上传和显式依赖变更动作。
+    返回：无；断言公共主流程关闭工作区产品准备，而普通常驻启动仍然开启。
+    异常：命令会预读物理图（Graph）、旧依赖锁或安装监视线程时测试失败。
+    """
+
+    from unilabos.app.main import should_prepare_workspace_product_runtime
+
+    assert not should_prepare_workspace_product_runtime(
+        {
+            "command": "package",
+            "package_action": package_action,
+            "workspace": ".",
+        }
+    )
+    assert should_prepare_workspace_product_runtime({"command": None, "workspace": "."})

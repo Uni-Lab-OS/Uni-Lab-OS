@@ -30,6 +30,7 @@ def clean_product_runtime(monkeypatch: pytest.MonkeyPatch) -> Any:
     monkeypatch.setattr(BasicConfig, "working_dir", "")
     if hasattr(BasicConfig, "workflow_editable_package_roots"):
         monkeypatch.setattr(BasicConfig, "workflow_editable_package_roots", ())
+    monkeypatch.setattr(BasicConfig, "workflow_source_discovery_plan", None)
     try:
         yield
     finally:
@@ -43,9 +44,7 @@ def _seed_workflow(working_dir: Path) -> None:
     创建后立即关闭播种服务。
     """
 
-    service = WorkflowService(
-        WorkflowStore(working_dir / "workflow_history.db")
-    )
+    service = WorkflowService(WorkflowStore(working_dir / "workflow_history.db"))
     try:
         service.create_workflow(
             workflow_uuid=WORKFLOW_UUID,
@@ -159,6 +158,7 @@ def test_real_web_server_passes_configured_roots_into_runtime(
     scheduler_integration = importlib.import_module(
         "unilabos.app.scheduler.integration"
     )
+
     def no_inventory_service() -> None:
         """表示本用例没有本地库存权威（Inventory Authority）。"""
 
@@ -258,6 +258,7 @@ def test_local_product_composition_forwards_the_exact_configured_roots(
         registry: object,
         scheduler: object,
         editable_package_roots: tuple[str, ...],
+        start_source_monitor: bool,
     ) -> tuple[object, object]:
         """记录本地组合根收到的工作目录、依赖和源码授权。
 
@@ -271,6 +272,7 @@ def test_local_product_composition_forwards_the_exact_configured_roots(
             registry=registry,
             scheduler=scheduler,
             editable_package_roots=editable_package_roots,
+            start_source_monitor=start_source_monitor,
         )
         return workflow_service, template_projection
 
@@ -331,6 +333,7 @@ def test_local_product_composition_forwards_the_exact_configured_roots(
     assert captured["inventory_store"] is inventory_service.store
     assert captured["scheduler"] is edge_scheduler
     assert captured["editable_package_roots"] == configured_roots
+    assert captured["start_source_monitor"] is True
 
 
 def test_local_composition_failure_never_falls_back_to_uncompiled_runtime(
@@ -363,7 +366,9 @@ def test_local_composition_failure_never_falls_back_to_uncompiled_runtime(
 
         return edge_scheduler
 
-    def fail_local_composition(*args: object, **kwargs: object) -> tuple[object, object]:
+    def fail_local_composition(
+        *args: object, **kwargs: object
+    ) -> tuple[object, object]:
         """注入本地模板投影或来源安全校验失败。
 
         参数：``args`` 与 ``kwargs`` 捕获产品组合依赖。返回：永不返回；抛出

@@ -12,7 +12,23 @@ from .runtime_diff import candidate_fingerprint, restart_reasons
 
 RuntimeState = Literal["created", "running", "closed"]
 RefreshOutcome = Literal["noop", "hot_published", "pending_restart", "failed"]
-_RESTART_BLOCKING_EXECUTION_STATES = frozenset(("dispatched", "running", "cancel_requested", "execution_unknown"))
+_RESTART_BLOCKING_EXECUTION_STATES = frozenset(
+    ("dispatched", "running", "cancel_requested", "execution_unknown")
+)
+
+
+def _allow_hot_publication(
+    _previous: Any,
+    _candidate: Any,
+) -> tuple[str, ...]:
+    """默认允许通过通用安全分类的候选执行完整代热发布。
+
+    参数：``_previous`` 与 ``_candidate`` 是旧、新完整工作区候选代。
+    返回：固定空原因集合，表示调用产品已经提供原子完整代发布能力。
+    异常：无。
+    """
+
+    return ()
 
 
 @dataclass(frozen=True, slots=True)
@@ -107,13 +123,17 @@ class WorkspacePackageRuntime:
         restart_mode: bool = False,
         execution_states: Callable[[], Iterable[str]] = lambda: (),
         request_restart: Callable[[tuple[str, ...]], None] = lambda _reasons: None,
+        hot_publish_guard: Callable[[Any, Any], tuple[str, ...]] = (
+            _allow_hot_publication
+        ),
     ) -> None:
         """建立尚未发布的工作区包运行时。
 
         参数：``initial_input`` 是首个稳定输入代；``prepare_generation`` 负责解释
         输入并产生完整候选；``publisher`` 原子发布跨注册表、模板与授权的完整代；
         ``restart_mode`` 决定是否可请求监督器重启；``execution_states`` 返回当前
-        持久执行状态；``request_restart`` 向外部监督器提交重启原因。
+        持久执行状态；``request_restart`` 向外部监督器提交重启原因；
+        ``hot_publish_guard`` 允许产品在完整代原子发布尚不可用时关闭热发布。
         返回：无；构造不编译、不发布、不重启。
         异常：依赖不可调用或初始输入类型错误时抛出 ``TypeError``。
         """
@@ -124,6 +144,7 @@ class WorkspacePackageRuntime:
             (prepare_generation, "prepare_generation"),
             (execution_states, "execution_states"),
             (request_restart, "request_restart"),
+            (hot_publish_guard, "hot_publish_guard"),
         ):
             if not callable(dependency):
                 raise TypeError(f"{name} 必须可调用")
@@ -137,6 +158,7 @@ class WorkspacePackageRuntime:
         self._restart_mode = bool(restart_mode)
         self._execution_states = execution_states
         self._request_restart = request_restart
+        self._hot_publish_guard = hot_publish_guard
         self._lock = threading.RLock()
         self._active_candidate: Any | None = None
         self._active_input: WorkspaceInputGeneration | None = None
@@ -227,6 +249,21 @@ class WorkspacePackageRuntime:
                 previous_input=self._active_input,
                 candidate_input=generation,
             )
+            if not unsafe_reasons:
+                # ``product_reasons`` 只补充产品组合根能力边界，不重新解释文件。
+                product_reasons = self._hot_publish_guard(
+                    self._active_candidate,
+                    candidate,
+                )
+                if not isinstance(product_reasons, tuple) or any(
+                    not isinstance(reason, str) or not reason
+                    for reason in product_reasons
+                ):
+                    return self._record_refresh_failure(
+                        generation,
+                        TypeError("hot_publish_guard 必须返回非空字符串原因元组"),
+                    )
+                unsafe_reasons = tuple(sorted(set(product_reasons)))
             if unsafe_reasons:
                 return self._record_pending_restart(
                     generation=generation,
@@ -289,8 +326,7 @@ class WorkspacePackageRuntime:
                 ):
                     raise TypeError("执行状态 Adapter 必须返回字符串集合")
                 if not restart_requested and not (
-                    set(current_execution_states)
-                    & _RESTART_BLOCKING_EXECUTION_STATES
+                    set(current_execution_states) & _RESTART_BLOCKING_EXECUTION_STATES
                 ):
                     self._request_restart(reasons)
                     restart_requested = True
@@ -369,4 +405,10 @@ class WorkspacePackageRuntime:
             self._status = replace(self._status, state="closed")
 
 
-__all__ = ["WorkspaceGenerationPublisher", "WorkspaceInputGeneration", "WorkspacePackageRuntime", "WorkspaceRefreshResult", "WorkspaceRuntimeStatus"]
+__all__ = [
+    "WorkspaceGenerationPublisher",
+    "WorkspaceInputGeneration",
+    "WorkspacePackageRuntime",
+    "WorkspaceRefreshResult",
+    "WorkspaceRuntimeStatus",
+]

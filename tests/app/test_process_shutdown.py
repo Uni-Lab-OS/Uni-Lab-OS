@@ -68,8 +68,24 @@ def test_sigterm_explicitly_shuts_down_edge_network_after_clients(
 
         events.append("edge")
 
+    def close_workspace_product_lifecycle() -> None:
+        """记录统一工作区文件监视生命周期先于 Edge 服务关闭。
+
+        参数：无。返回：无。异常：无。
+        """
+
+        events.append("workspace")
+
     monkeypatch.setattr(process_shutdown.signal, "signal", record_signal)
     monkeypatch.setattr(integration, "shutdown_edge_services", shutdown_edge_services)
+    package_manager = __import__(
+        "unilabos.package_manager", fromlist=["package_manager"]
+    )
+    monkeypatch.setattr(
+        package_manager,
+        "close_workspace_product_lifecycle",
+        close_workspace_product_lifecycle,
+    )
     returned_handler = process_shutdown.install_host_shutdown_handlers(
         [_CommunicationClient(events, fail=True)]
     )
@@ -79,6 +95,6 @@ def test_sigterm_explicitly_shuts_down_edge_network_after_clients(
     with pytest.raises(SystemExit) as caught:
         returned_handler(signal.SIGTERM, None)
     assert caught.value.code == 0
-    assert events == ["communication", "edge"]
+    assert events == ["communication", "workspace", "edge"]
     assert handlers[signal.SIGINT] is signal.SIG_IGN
     assert handlers[signal.SIGTERM] is signal.SIG_IGN

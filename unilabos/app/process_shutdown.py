@@ -44,6 +44,12 @@ def install_host_shutdown_handlers(
             except BaseException as error:  # noqa: BLE001 - 必须继续关闭网络所有权
                 failures.append(error)
         try:
+            from unilabos.package_manager import close_workspace_product_lifecycle
+
+            close_workspace_product_lifecycle()
+        except BaseException as error:  # noqa: BLE001 - 必须继续关闭设备与网络
+            failures.append(error)
+        try:
             from unilabos.app.scheduler.integration import shutdown_edge_services
 
             shutdown_edge_services()

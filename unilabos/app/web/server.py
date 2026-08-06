@@ -116,6 +116,11 @@ def setup_server() -> FastAPI:
                 source_plan_arguments["editable_source_discovery_plan"] = (
                     BasicConfig.workflow_source_discovery_plan
                 )
+            # 工作区（Workspace）由统一文件世代监视器拥有刷新；逐工作流源码
+            # 监视器（Workflow Source Monitor）只保留给非工作区遗留入口。
+            source_plan_arguments["start_source_monitor"] = (
+                BasicConfig.workflow_source_discovery_plan is None
+            )
             if inventory_service is not None and edge_scheduler is not None:
                 from unilabos.registry.registry import lab_registry
 
