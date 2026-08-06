@@ -4,10 +4,13 @@ from __future__ import annotations
 
 from typing import Any
 
+import pytest
+
 from unilabos.workflow.authoring_kernel import AuthoringCatalogSnapshot
 from unilabos.workflow.composite import CompositeAuthoring
 from unilabos.workflow.published_workflow_runtime import (
     PublishedWorkflowGeneration,
+    PublishedWorkflowGenerationError,
     build_published_workflow_generation,
 )
 
@@ -124,6 +127,63 @@ def test_similar_source_prefix_is_not_mistaken_for_package_root() -> None:
     assert generation.source_catalog.sources[0].module == (
         "szlab_poly.szlab_poly_studio.workflows.material_transfer"
     )
+
+
+def test_python_module_named_like_package_is_not_a_repeated_root_segment() -> None:
+    """与包同名的 Python 文件仍是模块，不得被误删为重复包根。
+
+    参数：无。返回：无；断言 ``package_id=pkg`` 与 ``relative_path=pkg.py``
+    形成 ``pkg.pkg``。异常：发布代际构造或断言失败时由 pytest 报告。
+    """
+
+    # ``generation`` 表达包根下恰有一个同名 Python 模块的合法来源身份。
+    generation = _published_generation(
+        package_id="pkg",
+        relative_path="pkg.py",
+    )
+
+    assert generation.source_catalog.sources[0].module == "pkg.pkg"
+
+
+@pytest.mark.parametrize(
+    "relative_path",
+    (
+        "workflows/demo.txt",
+        "workflows/demo",
+        "./workflows/demo.py",
+        "workflows/./demo.py",
+        "workflows//demo.py",
+        "/workflows/demo.py",
+        "workflows/../demo.py",
+    ),
+    ids=(
+        "non-python-suffix",
+        "missing-python-suffix",
+        "leading-dot-segment",
+        "inner-dot-segment",
+        "empty-segment",
+        "absolute-path",
+        "parent-segment",
+    ),
+)
+def test_noncanonical_or_non_python_source_path_is_rejected(
+    relative_path: str,
+) -> None:
+    """已发布来源只接受规范相对路径和精确 ``.py`` 后缀。
+
+    参数：``relative_path`` 是缺少 Python 后缀、含路径归一化歧义、绝对根或
+    父目录跳转的非规范来源身份。返回：无；断言构造关闭式拒绝。
+    异常：未抛出稳定 ``PublishedWorkflowGenerationError`` 时由 pytest 报告。
+    """
+
+    with pytest.raises(
+        PublishedWorkflowGenerationError,
+        match="工作流来源不能转换为绝对模块",
+    ):
+        _published_generation(
+            package_id="pkg",
+            relative_path=relative_path,
+        )
 
 
 def test_package_rooted_published_source_resolves_composite_invocation() -> None:

@@ -157,17 +157,24 @@ def _authoring_symbol(workflow: Mapping[str, Any]) -> str:
 def _source_module(package_id: str, relative_path: str) -> str:
     """把已授权包身份和规范相对路径转换为绝对 Python 模块。
 
-    参数：包 ID 与源码相对路径来自来源注册；路径既可相对包根，也可包含与
-    包 ID 精确相等的首段。返回：包根恰好出现一次且不导入模块的静态点分身份。
-    异常：任一分段不是 Python 标识符时抛出发布代际错误；只按完整首段去重，
-    不对前缀相似的包名做模糊裁剪。
+    参数：包 ID 与源码相对路径来自来源注册；路径必须是规范 POSIX 相对路径、
+    以 ``.py`` 结尾，且既可相对包根，也可包含与包 ID 精确相等的首段。
+    返回：包根恰好出现一次且不导入模块的静态点分身份。异常：路径不规范、
+    后缀不是 ``.py`` 或任一分段不是 Python 标识符时抛出发布代际错误；只按
+    原始完整首段去重，不对去除后缀后的文件名或前缀相似包名做模糊裁剪。
     """
 
     # ``path`` 是来源注册交付的 POSIX 源码身份，不访问本地文件系统。
     path = PurePosixPath(relative_path)
-    # ``relative_parts`` 去除扩展名后只消除精确重复的包根，保留真实子包层级。
+    if path.is_absolute() or relative_path != path.as_posix() or path.suffix != ".py":
+        raise PublishedWorkflowGenerationError("工作流来源不能转换为绝对模块")
+    # ``source_parts`` 保留文件后缀，确保同名 ``pkg.py`` 不会被误当成包根。
+    source_parts = path.parts
+    # ``has_package_root`` 只记录原始首段是否为完整包身份，不做字符串前缀匹配。
+    has_package_root = source_parts[:1] == (package_id,)
+    # ``relative_parts`` 仅在判断原始首段后移除精确 ``.py``，保留真实子包层级。
     relative_parts = path.with_suffix("").parts
-    if relative_parts[:1] == (package_id,):
+    if has_package_root:
         relative_parts = relative_parts[1:]
     # ``parts`` 是最终绝对 Python 模块的有序身份分段。
     parts = (package_id, *relative_parts)
