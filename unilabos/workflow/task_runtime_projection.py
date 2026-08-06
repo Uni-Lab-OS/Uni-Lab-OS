@@ -67,6 +67,22 @@ class TaskRuntimeProjection:
         self._store = store
 
     @staticmethod
+    def _append_invalidation(
+        connection: sqlite3.Connection,
+        *,
+        task_uuid: str,
+        now: str,
+    ) -> None:
+        """在状态事实同一事务内追加一次前端失效通知。"""
+
+        WorkflowStore._append_event(
+            connection,
+            event="workflow.runtime.changed",
+            data={"workflow_task_uuid": task_uuid},
+            now=now,
+        )
+
+    @staticmethod
     def _task_row(
         connection: sqlite3.Connection,
         task_uuid: str,
@@ -259,6 +275,7 @@ class TaskRuntimeProjection:
                 bindings=normalized_bindings,
             )
             projected_at = utc_now()
+            changed = False
             for row in source_rows:
                 node_uuid = str(row["workflow_node_uuid"])
                 return_info = {"material": normalized_bindings[node_uuid]}
@@ -283,6 +300,16 @@ class TaskRuntimeProjection:
                 ).rowcount
                 if updated_jobs != 1:
                     raise StoreConflict(f"物料来源作业状态发生并发变化：{row['uuid']}")
+                changed = True
+                WorkflowStore._append_runtime_event(
+                    connection,
+                    task_uuid=task_uuid,
+                    job_uuid=str(row["uuid"]),
+                    kind="job_transition",
+                    from_status="pending",
+                    to_status="succeeded",
+                    now=projected_at,
+                )
 
             # 没有普通动作表示任务业务目标就是完成供料绑定；协调器工作不经历
             # ``running``，也不产生设备执行开始时间。
@@ -300,6 +327,21 @@ class TaskRuntimeProjection:
                 ).rowcount
                 if updated_tasks != 1:
                     raise StoreConflict(f"来源任务终态发生并发变化：{task_uuid}")
+                changed = True
+                WorkflowStore._append_runtime_event(
+                    connection,
+                    task_uuid=task_uuid,
+                    kind="task_transition",
+                    from_status="pending",
+                    to_status="succeeded",
+                    now=projected_at,
+                )
+            if changed:
+                self._append_invalidation(
+                    connection,
+                    task_uuid=task_uuid,
+                    now=projected_at,
+                )
             return self._aggregate(connection, task_uuid)
 
     @staticmethod
@@ -471,6 +513,28 @@ class TaskRuntimeProjection:
                 ).rowcount
                 if updated_tasks != 1:
                     raise StoreConflict(f"任务启动状态发生并发变化：{task_uuid}")
+                WorkflowStore._append_runtime_event(
+                    connection,
+                    task_uuid=task_uuid,
+                    kind="task_transition",
+                    from_status="pending",
+                    to_status="running",
+                    now=projected_at,
+                )
+            WorkflowStore._append_runtime_event(
+                connection,
+                task_uuid=task_uuid,
+                job_uuid=job_uuid,
+                kind="job_transition",
+                from_status="pending",
+                to_status="dispatched",
+                now=projected_at,
+            )
+            self._append_invalidation(
+                connection,
+                task_uuid=task_uuid,
+                now=projected_at,
+            )
             return self._aggregate(connection, task_uuid)
 
     def project_job_finished(
@@ -564,6 +628,15 @@ class TaskRuntimeProjection:
             ).rowcount
             if updated_jobs != 1:
                 raise StoreConflict(f"作业完成状态发生并发变化：{job_uuid}")
+            WorkflowStore._append_runtime_event(
+                connection,
+                task_uuid=task_uuid,
+                job_uuid=job_uuid,
+                kind="job_transition",
+                from_status=str(current_job_status),
+                to_status=target_job_status,
+                now=finished_at,
+            )
 
             job_rows = self._job_rows(connection, task_uuid)
             # ``job_statuses`` 是决定父任务业务终态的完整兄弟作业状态集合。
@@ -585,6 +658,19 @@ class TaskRuntimeProjection:
                 ).rowcount
                 if updated_tasks != 1:
                     raise StoreConflict(f"任务终态发生并发变化：{task_uuid}")
+                WorkflowStore._append_runtime_event(
+                    connection,
+                    task_uuid=task_uuid,
+                    kind="task_transition",
+                    from_status=str(task_row["status"]),
+                    to_status=target_task_status,
+                    now=finished_at,
+                )
+            self._append_invalidation(
+                connection,
+                task_uuid=task_uuid,
+                now=finished_at,
+            )
             return self._aggregate(connection, task_uuid)
 
 

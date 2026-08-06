@@ -2,11 +2,12 @@
 
 from __future__ import annotations
 
-from collections.abc import Mapping, Sequence
+from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass
 from typing import Any
 
 from unilabos.workflow.json_codec import clone_json
+from unilabos.workflow.models import validate_uuid
 from unilabos.workflow.schema import (
     WorkflowSchemaError,
     normalize_value,
@@ -14,13 +15,15 @@ from unilabos.workflow.schema import (
 )
 from unilabos.workflow.workflow_io import (
     WorkflowIOValidationError,
-    schema_contains_resource_slot,
     validate_workflow_graph_io,
 )
 
 
 class TaskInputError(ValueError):
     """任务输入无法在任何持久写入前形成唯一冻结解释。"""
+
+
+ResourceSlotResolver = Callable[[str], Mapping[str, Any] | None]
 
 
 @dataclass(frozen=True)
@@ -39,13 +42,14 @@ def prepare_task_input(
     raw_input: Mapping[str, Any],
     execution_plan: Mapping[str, Any],
     jobs: Sequence[Mapping[str, Any]],
+    resource_resolver: ResourceSlotResolver | None = None,
 ) -> PreparedTaskInput:
     """在持久写入前解析任务输入并绑定活动计划节点。
 
     参数：``graph`` 是当前应用图，``raw_input`` 是请求输入，
     ``execution_plan`` 与 ``jobs`` 来自同一图的计划构造。返回：彼此独立的冻结
     快照、规范输入、计划和首次作业。异常：合同、值、绑定或提供者不唯一时抛
-    ``TaskInputError``；K11 前物料占位符（ResourceSlot）输入同样失败关闭。
+        ``TaskInputError``；物料占位符（ResourceSlot）必须由物料权威唯一解析。
     """
 
     if not isinstance(raw_input, Mapping) or any(
@@ -61,6 +65,7 @@ def prepare_task_input(
         resolved = _resolve_values(
             validated.input_contract.to_dict()["parameters"],
             supplied,
+            resource_resolver=resource_resolver,
         )
         _bind_active_plan(
             plan=plan,
@@ -88,6 +93,8 @@ def prepare_task_input(
 def _resolve_values(
     parameters: Sequence[Mapping[str, Any]],
     supplied: Mapping[str, Any],
+    *,
+    resource_resolver: ResourceSlotResolver | None,
 ) -> dict[str, Any]:
     """按闭合输入合同解析请求值并填入合同默认值。
 
@@ -103,8 +110,6 @@ def _resolve_values(
     for parameter in parameters:
         name = str(parameter["name"])
         schema = parse_value_schema(parameter["schema"])
-        if schema_contains_resource_slot(schema):
-            raise TaskInputError("K11 前不接受物料占位符任务输入")
         if name in supplied:
             value = supplied[name]
         elif parameter["required"]:
@@ -112,10 +117,77 @@ def _resolve_values(
         else:
             value = parameter["default"]
         try:
-            resolved[name] = normalize_value(schema, value)
+            normalized = normalize_value(schema, value)
+            resolved[name] = _resolve_resource_slot_values(
+                schema.to_dict(),
+                normalized,
+                resource_resolver=resource_resolver,
+            )
         except WorkflowSchemaError as exc:
             raise TaskInputError("工作流任务输入值不符合 Schema") from exc
     return resolved
+
+
+def _resolve_resource_slot_values(
+    schema: Mapping[str, Any],
+    value: Any,
+    *,
+    resource_resolver: ResourceSlotResolver | None,
+) -> Any:
+    """以物料权威解析 Schema 中的每个 ResourceSlot，并保留最小 UUID 值。"""
+
+    if "anyOf" in schema:
+        if value is None:
+            return None
+        members = schema.get("anyOf")
+        if not isinstance(members, list) or not members:
+            raise TaskInputError("工作流任务 ResourceSlot Schema 无效")
+        base = members[0]
+        if not isinstance(base, Mapping):
+            raise TaskInputError("工作流任务 ResourceSlot Schema 无效")
+        return _resolve_resource_slot_values(
+            base,
+            value,
+            resource_resolver=resource_resolver,
+        )
+    if schema.get("$slot") == "ResourceSlot":
+        if resource_resolver is None:
+            raise TaskInputError("工作流任务缺少物料权威解析器")
+        if not isinstance(value, Mapping) or not isinstance(value.get("uuid"), str):
+            raise TaskInputError("工作流任务 ResourceSlot 值无效")
+        material_uuid = validate_uuid(value["uuid"])
+        try:
+            material = resource_resolver(material_uuid)
+        except Exception as exc:  # noqa: BLE001 - 解析器错误统一关闭为任务输入失败
+            raise TaskInputError("工作流任务物料解析失败") from exc
+        if not isinstance(material, Mapping):
+            raise TaskInputError("工作流任务引用的物料不存在")
+        try:
+            resolved_uuid = validate_uuid(str(material.get("uuid") or ""))
+            template_uuid = validate_uuid(
+                str(material.get("resource_template_uuid") or "")
+            )
+        except (TypeError, ValueError):
+            raise TaskInputError("工作流任务物料权威缺少稳定身份") from None
+        if resolved_uuid != material_uuid:
+            raise TaskInputError("工作流任务物料权威返回了不一致身份")
+        allowed = schema.get("allowed_resource_template_uuids")
+        if allowed is not None and template_uuid not in allowed:
+            raise TaskInputError("工作流任务物料模板不符合输入约束")
+        return {"uuid": resolved_uuid}
+    if schema.get("type") == "array":
+        items = schema.get("items")
+        if not isinstance(items, Mapping) or not isinstance(value, list):
+            raise TaskInputError("工作流任务 ResourceSlot 数组无效")
+        return [
+            _resolve_resource_slot_values(
+                items,
+                item,
+                resource_resolver=resource_resolver,
+            )
+            for item in value
+        ]
+    return value
 
 
 def _bind_active_plan(
@@ -286,4 +358,9 @@ def _object_list(raw: Any, *, label: str) -> list[dict[str, Any]]:
     return raw
 
 
-__all__ = ["PreparedTaskInput", "TaskInputError", "prepare_task_input"]
+__all__ = [
+    "PreparedTaskInput",
+    "ResourceSlotResolver",
+    "TaskInputError",
+    "prepare_task_input",
+]

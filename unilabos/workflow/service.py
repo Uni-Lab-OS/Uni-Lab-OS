@@ -318,6 +318,7 @@ class WorkflowService:
             store,
             material_resolver=material_resolver,
         )
+        self._material_resolver = material_resolver
         # ``_task_scheduler_bridge`` 是普通任务与设备单动作共享的唯一监听器所有者；
         # 后端控制（Backend-controlled）配置保持空，避免第二个调度权威。
         self._task_scheduler_bridge = task_scheduler_bridge
@@ -693,6 +694,38 @@ class WorkflowService:
         identity = self.get_workflow_task(task_uuid)["uuid"]
         return self._store.list_jobs(identity)
 
+    def list_workflow_task_runtime_events(
+        self,
+        task_uuid: str,
+        *,
+        after_sequence: int = 0,
+        limit: int = 100,
+    ) -> Dict[str, Any]:
+        """分页读取任务的持久运行事件与动作下发/结果载荷。"""
+
+        try:
+            identity = validate_uuid(task_uuid)
+        except ValueError:
+            raise WorkflowError("invalid_input") from None
+        if (
+            isinstance(after_sequence, bool)
+            or not isinstance(after_sequence, int)
+            or after_sequence < 0
+            or after_sequence > (1 << 63) - 1
+            or isinstance(limit, bool)
+            or not isinstance(limit, int)
+            or not 1 <= limit <= 500
+        ):
+            raise WorkflowError("invalid_input")
+        try:
+            return self._store.list_task_runtime_events(
+                identity,
+                after_sequence=after_sequence,
+                limit=limit,
+            )
+        except StoreNotFound:
+            raise WorkflowError("not_found") from None
+
     def get_workflow_node_job(self, job_uuid: str) -> Dict[str, Any]:
         try:
             identity = validate_uuid(job_uuid)
@@ -749,6 +782,7 @@ class WorkflowService:
             raw_input=input_value,
             execution_plan=plan,
             jobs=jobs,
+            resource_resolver=self._material_resolver,
         )
 
     # 工作流创作（Authoring） ---------------------------------------------

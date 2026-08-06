@@ -309,6 +309,37 @@ CREATE TABLE IF NOT EXISTS frontend_event (
     data TEXT NOT NULL,
     create_time TEXT NOT NULL
 );
+
+CREATE TABLE IF NOT EXISTS workflow_runtime_journal (
+    sequence INTEGER PRIMARY KEY AUTOINCREMENT,
+    workflow_task_uuid TEXT NOT NULL,
+    workflow_node_job_uuid TEXT,
+    workflow_task_command_uuid TEXT,
+    kind TEXT NOT NULL CHECK (
+        kind IN (
+            'task_transition',
+            'job_transition',
+            'command_consumed',
+            'feedback_committed',
+            'uncertainty_opened',
+            'uncertainty_resolved',
+            'startup_recovered'
+        )
+    ),
+    from_status TEXT,
+    to_status TEXT,
+    data TEXT NOT NULL DEFAULT '{}'
+        CHECK (json_valid(data) AND json_type(data) = 'object'),
+    create_time TEXT NOT NULL,
+    FOREIGN KEY(workflow_task_uuid)
+        REFERENCES workflow_task(uuid) ON DELETE CASCADE,
+    FOREIGN KEY(workflow_node_job_uuid)
+        REFERENCES workflow_node_job(uuid) ON DELETE CASCADE
+);
+CREATE INDEX IF NOT EXISTS ix_workflow_runtime_journal_task_sequence
+    ON workflow_runtime_journal(workflow_task_uuid, sequence);
+CREATE INDEX IF NOT EXISTS ix_workflow_runtime_journal_job_sequence
+    ON workflow_runtime_journal(workflow_node_job_uuid, sequence);
 """
 
 
@@ -1118,6 +1149,14 @@ class WorkflowStore:
                     _json(prepared.resolved_input),
                 ),
             )
+            self._append_runtime_event(
+                conn,
+                task_uuid=task_uuid,
+                kind="task_transition",
+                from_status=None,
+                to_status="pending",
+                now=now,
+            )
             for job in jobs:
                 conn.execute(
                     """
@@ -1145,6 +1184,21 @@ class WorkflowStore:
                         _json(job.get("param") or {}),
                     ),
                 )
+                self._append_runtime_event(
+                    conn,
+                    task_uuid=task_uuid,
+                    job_uuid=job["uuid"],
+                    kind="job_transition",
+                    from_status=None,
+                    to_status="pending",
+                    now=now,
+                )
+            self._append_event(
+                conn,
+                event="workflow.runtime.changed",
+                data={"workflow_task_uuid": task_uuid},
+                now=now,
+            )
         return self.get_task(task_uuid)
 
     def get_task(self, task_uuid: str) -> Dict[str, Any]:
@@ -1232,6 +1286,61 @@ class WorkflowStore:
         if row is None:
             raise StoreNotFound(f"workflow node job {job_uuid} not found")
         return self._job_row(row)
+
+    def list_task_runtime_events(
+        self,
+        task_uuid: str,
+        *,
+        after_sequence: int,
+        limit: int,
+    ) -> Dict[str, Any]:
+        """读取一次工作流任务的持久运行时间线。
+
+        参数：``task_uuid`` 是工作流任务身份；``after_sequence`` 是排他全局序号；
+        ``limit`` 是公开页长。返回按序号递增的运行事件页，并把作业下发参数与
+        明确执行结果补充到对应状态转换。异常：任务不存在时抛 ``StoreNotFound``。
+        """
+
+        self.get_task(task_uuid)
+        with self._lock:
+            rows = self._conn.execute(
+                """
+                SELECT
+                    journal.sequence AS event_sequence,
+                    journal.workflow_task_uuid AS event_task_uuid,
+                    journal.workflow_node_job_uuid AS event_job_uuid,
+                    journal.workflow_task_command_uuid AS event_command_uuid,
+                    journal.kind AS event_kind,
+                    journal.from_status AS event_from_status,
+                    journal.to_status AS event_to_status,
+                    journal.data AS event_data,
+                    journal.create_time AS event_create_time,
+                    job.workflow_node_uuid AS job_workflow_node_uuid,
+                    job.executor_kind AS job_executor_kind,
+                    job.attempt AS job_attempt,
+                    job.param AS job_param,
+                    job.return_info AS job_return_info,
+                    job.error_info AS job_error_info
+                FROM workflow_runtime_journal AS journal
+                LEFT JOIN workflow_node_job AS job
+                  ON job.uuid = journal.workflow_node_job_uuid
+                 AND job.deleted_at IS NULL
+                WHERE journal.workflow_task_uuid = ?
+                  AND journal.sequence > ?
+                ORDER BY journal.sequence
+                LIMIT ?
+                """,
+                (task_uuid, after_sequence, limit + 1),
+            ).fetchall()
+        has_more = len(rows) > limit
+        selected = rows[:limit]
+        return {
+            "items": [self._runtime_event_row(row) for row in selected],
+            "next_cursor": (
+                selected[-1]["event_sequence"] if selected else after_sequence
+            ),
+            "has_more": has_more,
+        }
 
     def get_node_template(self, template_uuid: str) -> Dict[str, Any]:
         """读取一个活动工作流节点模板（WorkflowNodeTemplate）。
@@ -1917,6 +2026,42 @@ class WorkflowStore:
         )
         return int(cursor.lastrowid)
 
+    @staticmethod
+    def _append_runtime_event(
+        conn: sqlite3.Connection,
+        *,
+        task_uuid: str,
+        kind: str,
+        now: str,
+        job_uuid: Optional[str] = None,
+        command_uuid: Optional[str] = None,
+        from_status: Optional[str] = None,
+        to_status: Optional[str] = None,
+        data: Optional[Dict[str, Any]] = None,
+    ) -> int:
+        """在调用方事务内追加一个可重放的任务运行事实。"""
+
+        cursor = conn.execute(
+            """
+            INSERT INTO workflow_runtime_journal(
+                workflow_task_uuid, workflow_node_job_uuid,
+                workflow_task_command_uuid, kind, from_status, to_status,
+                data, create_time
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+            """,
+            (
+                task_uuid,
+                job_uuid,
+                command_uuid,
+                kind,
+                from_status,
+                to_status,
+                _json(data or {}),
+                now,
+            ),
+        )
+        return int(cursor.lastrowid)
+
     def count_rows(self, table: str, *, include_deleted: bool = False) -> int:
         allowed = {
             "workflow",
@@ -1926,6 +2071,7 @@ class WorkflowStore:
             "workflow_node_job",
             "workflow_authoring",
             "frontend_event",
+            "workflow_runtime_journal",
         }
         if table not in allowed:
             raise ValueError(f"unsupported table {table!r}")
@@ -2114,6 +2260,45 @@ class WorkflowStore:
             "started_at",
             "finished_at",
         )
+        return result
+
+    @staticmethod
+    def _runtime_event_row(row: sqlite3.Row) -> Dict[str, Any]:
+        """把运行日志查询行投影成前端稳定合同。"""
+
+        result: Dict[str, Any] = {
+            "sequence": row["event_sequence"],
+            "workflow_task_uuid": row["event_task_uuid"],
+            "kind": row["event_kind"],
+            "data": _load(row["event_data"], {}),
+            "create_time": row["event_create_time"],
+        }
+        for column, output in (
+            ("event_job_uuid", "workflow_node_job_uuid"),
+            ("event_command_uuid", "workflow_task_command_uuid"),
+            ("event_from_status", "from_status"),
+            ("event_to_status", "to_status"),
+            ("job_workflow_node_uuid", "workflow_node_uuid"),
+            ("job_executor_kind", "executor_kind"),
+            ("job_attempt", "attempt"),
+        ):
+            value = row[column]
+            if value is not None:
+                result[output] = value
+
+        kind = row["event_kind"]
+        to_status = row["event_to_status"]
+        if kind == "job_transition" and to_status == "dispatched":
+            result["param"] = _load(row["job_param"], {})
+        if kind == "job_transition" and to_status in {
+            "succeeded",
+            "failed",
+            "skipped",
+            "canceled",
+            "timeout",
+        }:
+            result["return_info"] = _load(row["job_return_info"], {})
+            result["error_info"] = _load(row["job_error_info"], [])
         return result
 
     @staticmethod
