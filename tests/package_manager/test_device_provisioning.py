@@ -477,3 +477,71 @@ def test_package_add_device_cli_explicitly_adopts_uuidless_legacy_instance(
     with pytest.raises(DeviceProvisioningError, match="UUID 与请求不一致"):
         stage_device_instance(**conflicting_request, adopt_existing=True)
     assert graph_path.read_bytes() == adopted_bytes
+
+
+def test_stage_device_instance_reuses_semantically_identical_backup(
+    tmp_path: Path,
+) -> None:
+    """同一设备图仅改变 JSON 排版后重试时必须复用既有语义备份。
+
+    ``tmp_path`` 提供隔离设备包缓存、设备图与备份目录。测试返回 ``None``；
+    它证明备份身份由完整设备图语义决定，而不是由缩进、空白或键顺序决定，
+    同时确保重试不会覆盖第一次接入前的可恢复备份。
+    """
+
+    cache_key, working_dir = _cache_device_package(tmp_path)
+    graph_path, original_bytes = _write_graph(tmp_path)
+    # 初始备份保存第一次接入前的权威设备图字节，后续重试不得覆盖它。
+    first_result = stage_device_instance(
+        **_stage_kwargs(graph_path, working_dir, cache_key)
+    )
+    restore_device_graph(
+        graph_path=graph_path,
+        backup_path=str(first_result.backup_path),
+    )
+    original_graph = json.loads(original_bytes)
+    graph_path.write_text(
+        json.dumps(original_graph, ensure_ascii=False, separators=(",", ":")) + "\n",
+        encoding="utf-8",
+    )
+
+    retried_result = stage_device_instance(
+        **_stage_kwargs(graph_path, working_dir, cache_key)
+    )
+
+    assert retried_result.changed is True
+    assert retried_result.backup_path == first_result.backup_path
+    assert Path(str(first_result.backup_path)).read_bytes() == original_bytes
+
+
+def test_stage_device_instance_rejects_different_graph_at_existing_backup_path(
+    tmp_path: Path,
+) -> None:
+    """既有备份内容属于不同设备图时必须拒绝接入并保持当前图不变。
+
+    ``tmp_path`` 提供隔离设备包缓存、设备图与备份目录。测试返回 ``None``；
+    它模拟同名备份被替换为另一张合法设备图，证明语义复用不会覆盖冲突备份，
+    也不会在冲突后部分写入当前设备图。
+    """
+
+    cache_key, working_dir = _cache_device_package(tmp_path)
+    graph_path, _ = _write_graph(tmp_path)
+    first_result = stage_device_instance(
+        **_stage_kwargs(graph_path, working_dir, cache_key)
+    )
+    restore_device_graph(
+        graph_path=graph_path,
+        backup_path=str(first_result.backup_path),
+    )
+    current_graph_bytes = graph_path.read_bytes()
+    # 冲突备份是合法 JSON，但不再代表当前接入操作变更前的设备图事实。
+    conflicting_backup = Path(str(first_result.backup_path))
+    conflicting_backup.write_text(
+        json.dumps({"nodes": [{"id": "other-device"}], "links": []}) + "\n",
+        encoding="utf-8",
+    )
+
+    with pytest.raises(DeviceProvisioningError, match="属于不同设备图"):
+        stage_device_instance(**_stage_kwargs(graph_path, working_dir, cache_key))
+
+    assert graph_path.read_bytes() == current_graph_bytes
