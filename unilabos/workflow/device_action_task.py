@@ -23,6 +23,7 @@ from unilabos.workflow.device_action_preconditions import (
     evaluate_device_action_preconditions,
 )
 from unilabos.workflow.json_codec import decode_json_bytes, encode_json
+from unilabos.workflow.runtime_feedback import commit_runtime_job_feedback
 from unilabos.workflow.schema import (
     WorkflowSchemaError,
     normalize_value,
@@ -1895,7 +1896,7 @@ class DeviceActionTaskRuntimeBridge:
         with self._store.transaction() as connection:
             job = connection.execute(
                 """
-                SELECT status, feedback_sequence
+                SELECT status
                 FROM workflow_node_job WHERE uuid = ?
                 """,
                 (job_uuid,),
@@ -1903,7 +1904,6 @@ class DeviceActionTaskRuntimeBridge:
             if job is None:
                 return
             current_status = job["status"]
-            sequence = int(job["feedback_sequence"]) + 1
         if current_status not in {"dispatched", "running"}:
             return
         claim = self._scheduler.inventory_job_claim(job_uuid, 1)
@@ -1931,21 +1931,11 @@ class DeviceActionTaskRuntimeBridge:
         elif current_status != "running":
             return
         if feedback_data:
-            observed_at = utc_now()
-            fingerprint = hashlib.sha256(
-                encode_json(feedback_data, sort_keys=True)
-            ).hexdigest()
-            self._coordinator.commit_job_feedback(
-                job_uuid,
-                [
-                    {
-                        "sequence": sequence,
-                        "feedback_type": "feedback",
-                        "data": feedback_data,
-                        "observed_at": observed_at,
-                        "idempotency_key": f"d1a:{job_uuid}:{sequence}:{fingerprint}",
-                    }
-                ],
+            commit_runtime_job_feedback(
+                self._coordinator,
+                source="d1a",
+                job_uuid=job_uuid,
+                feedback_data=feedback_data,
             )
         if running_result is not None:
             self._scheduler.acknowledge_inventory_result(running_result.outbox_sequence)

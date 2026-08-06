@@ -33,6 +33,7 @@ from rclpy.action.server import ServerGoalHandle
 from rclpy.client import Client
 from rclpy.callback_groups import ReentrantCallbackGroup
 from rclpy.service import Service
+from std_msgs.msg import String as RosString
 from unilabos_msgs.action import SendCmd, StrSingleInput
 from unilabos_msgs.srv._serial_command import SerialCommand_Request, SerialCommand_Response
 from unique_identifier_msgs.msg import UUID as RosUUID
@@ -53,6 +54,7 @@ from unilabos.observability.runtime import (
     safe_submit,
 )
 from unilabos.registry.decorators import get_topic_config
+from unilabos.ros.action_feedback import ACTION_FEEDBACK_TOPIC, attach_action_feedback
 from unilabos.registry.action_policy import (
     ActionDecisionOutcome,
     SUCCESS_TYPE_NORMAL,
@@ -479,6 +481,11 @@ class BaseROS2DeviceNode(Node, Generic[T]):
         self._action_value_mappings = action_value_mappings
         self._hardware_interface = hardware_interface
         self._print_publish = print_publish
+        self._action_feedback_publisher = self.create_publisher(
+            RosString,
+            ACTION_FEEDBACK_TOPIC,
+            50,
+        )
 
         # 创建属性发布者
         for attr_name, msg_type in self._status_types.items():
@@ -2791,6 +2798,19 @@ class BaseROS2DeviceNode(Node, Generic[T]):
                 ACTION,
                 action_kwargs,
             )
+            action_type = action_value_mapping["type"]
+
+            def _publish_structured_feedback(payload: dict[str, Any]) -> bool:
+                self._action_feedback_publisher.publish(
+                    RosString(
+                        data=json.dumps(
+                            payload,
+                            ensure_ascii=False,
+                            cls=TypeEncoder,
+                        )
+                    )
+                )
+                return True
 
             driver_trace_attributes = {
                 "workflow.node_job.uuid": job_context.get("job_id", ""),
@@ -2805,26 +2825,40 @@ class BaseROS2DeviceNode(Node, Generic[T]):
                     job_context.get("job_id", ""),
                     job_context.get("task_id", ""),
                 ):
-                    with fail_open_span(
-                        runtime_tracing,
-                        "device.driver.execute",
-                        parent=driver_parent_context,
-                        attributes=driver_trace_attributes,
+                    with attach_action_feedback(
+                        _publish_structured_feedback,
+                        job_uuid=job_context.get("job_id", ""),
+                        task_uuid=job_context.get("task_id", ""),
+                        device_id=getattr(self, "device_id", ""),
+                        action_name=report_action_name,
                     ):
-                        return ACTION(**action_kwargs)
+                        with fail_open_span(
+                            runtime_tracing,
+                            "device.driver.execute",
+                            parent=driver_parent_context,
+                            attributes=driver_trace_attributes,
+                        ):
+                            return ACTION(**action_kwargs)
 
             async def _run_async_action():
                 with attach_workflow_execution_identity(
                     job_context.get("job_id", ""),
                     job_context.get("task_id", ""),
                 ):
-                    with fail_open_span(
-                        runtime_tracing,
-                        "device.driver.execute",
-                        parent=driver_parent_context,
-                        attributes=driver_trace_attributes,
+                    with attach_action_feedback(
+                        _publish_structured_feedback,
+                        job_uuid=job_context.get("job_id", ""),
+                        task_uuid=job_context.get("task_id", ""),
+                        device_id=getattr(self, "device_id", ""),
+                        action_name=report_action_name,
                     ):
-                        return await ACTION(**action_kwargs)
+                        with fail_open_span(
+                            runtime_tracing,
+                            "device.driver.execute",
+                            parent=driver_parent_context,
+                            attributes=driver_trace_attributes,
+                        ):
+                            return await ACTION(**action_kwargs)
 
             async def _retry_action_once():
                 if asyncio.iscoroutinefunction(ACTION):
@@ -2964,7 +2998,6 @@ class BaseROS2DeviceNode(Node, Generic[T]):
 
                     future.add_done_callback(_handle_future_exception)
 
-            action_type = action_value_mapping["type"]
             feedback_msg_types = action_type.Feedback.get_fields_and_field_types()
             result_msg_types = action_type.Result.get_fields_and_field_types()
 

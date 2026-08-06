@@ -12,7 +12,8 @@ from unilabos.workflow.job_claims import (
     workflow_terminal_fingerprint,
 )
 from unilabos.workflow.json_codec import encode_json
-from unilabos.workflow.store import StoreConflict, utc_now
+from unilabos.workflow.runtime_feedback import commit_runtime_job_feedback
+from unilabos.workflow.store import StoreConflict
 
 
 def _fingerprint(payload: Mapping[str, Any]) -> str:
@@ -113,22 +114,11 @@ class WorkflowJobClaimExecution:
         if job["status"] == "dispatched":
             self._coordinator.transition_job(job_uuid, "running")
         if feedback_data:
-            current = self._coordinator._execution_job(job_uuid)
-            sequence = int(current["feedback_sequence"]) + 1
-            feedback_fingerprint = _fingerprint(feedback_data)
-            self._coordinator.commit_job_feedback(
-                job_uuid,
-                [
-                    {
-                        "sequence": sequence,
-                        "feedback_type": "feedback",
-                        "data": feedback_data,
-                        "observed_at": utc_now(),
-                        "idempotency_key": (
-                            f"workflow:{job_uuid}:{sequence}:{feedback_fingerprint}"
-                        ),
-                    }
-                ],
+            commit_runtime_job_feedback(
+                self._coordinator,
+                source="workflow",
+                job_uuid=job_uuid,
+                feedback_data=feedback_data,
             )
 
     def commit_terminal(

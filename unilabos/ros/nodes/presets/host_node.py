@@ -6,6 +6,7 @@ import time
 import traceback
 import uuid
 from concurrent.futures import Future as ConcurrentFuture, ThreadPoolExecutor
+from types import SimpleNamespace
 
 from unilabos.utils.tools import fast_dumps_str as _fast_dumps_str, fast_loads as _fast_loads
 from dataclasses import dataclass, field
@@ -15,6 +16,7 @@ from action_msgs.msg import GoalStatus
 from geometry_msgs.msg import Point
 from rclpy.action import ActionClient, get_action_server_names_and_types_by_node
 from rclpy.service import Service
+from std_msgs.msg import String as RosString
 from typing_extensions import TypedDict
 from unilabos_msgs.action import EmptyIn, StrSingleInput, ResourceCreateFromOuterEasy, ResourceCreateFromOuter
 from unilabos_msgs.msg import Resource  # type: ignore
@@ -69,6 +71,10 @@ from unilabos.resources.resource_tracker import (
     PARAM_SAMPLE_UUIDS, SampleUUIDsType, LabSample,
 )
 from unilabos.ros.initialize_device import initialize_device_from_dict
+from unilabos.ros.action_feedback import (
+    ACTION_FEEDBACK_TOPIC,
+    decode_action_feedback,
+)
 from unilabos.ros.msgs.message_converter import (
     get_msg_type,
     get_ros_type_by_msgname,
@@ -351,6 +357,13 @@ class HostNode(BaseROS2DeviceNode):
             hardware_interface={},
             print_publish=False,
             resource_tracker=self._resource_tracker,  # host node并不是通过initialize 包一层传进来的
+        )
+        self._structured_action_feedback_subscription = self.create_subscription(
+            RosString,
+            ACTION_FEEDBACK_TOPIC,
+            self.structured_action_feedback_callback,
+            50,
+            callback_group=self.callback_group,
         )
 
         # 创建设备、动作客户端和目标存储
@@ -1461,6 +1474,12 @@ class HostNode(BaseROS2DeviceNode):
             )
             cancel_on_accept = item.job_id in self._pending_goal_cancellations
             self._pending_goal_cancellations.discard(item.job_id)
+        # goal accepted 是设备执行器已经接管作业的权威边界。不能等到第一条
+        # feedback 才把作业从 dispatched 推进到 running；无反馈动作也必须
+        # 及时记录 started_at。
+        for bridge in self.bridges:
+            if hasattr(bridge, "publish_job_status"):
+                bridge.publish_job_status({}, item, "running")
         if cancel_on_accept:
             self.lab_logger().warning(
                 f"[Host Node] Goal {item.job_id[:8]} accepted after manual unlock; cancelling immediately"
@@ -1482,9 +1501,42 @@ class HostNode(BaseROS2DeviceNode):
             )
             return
         feedback_data = convert_from_ros_msg(feedback_msg)
-        feedback_data.pop("goal_id")
+        feedback_data.pop("goal_id", None)
+        feedback_data = decode_action_feedback(feedback_data)
         self.lab_logger().trace(f"[Host Node] Feedback for {action_id} ({item.job_id}): {feedback_data}")
 
+        for bridge in self.bridges:
+            if hasattr(bridge, "publish_job_status"):
+                bridge.publish_job_status(feedback_data, item, "running")
+
+    def structured_action_feedback_callback(self, message: RosString) -> None:
+        """接收通用设备动作的 JSON 阶段反馈并转入统一作业状态桥。"""
+
+        try:
+            feedback_data = json.loads(message.data)
+        except (TypeError, ValueError):
+            return
+        if not isinstance(feedback_data, dict):
+            return
+        job_uuid = feedback_data.get("job_uuid")
+        task_uuid = feedback_data.get("task_uuid")
+        goal = feedback_data.get("goal")
+        if (
+            not isinstance(job_uuid, str)
+            or not job_uuid
+            or not isinstance(task_uuid, str)
+            or not isinstance(goal, dict)
+        ):
+            return
+        item = SimpleNamespace(
+            job_id=job_uuid,
+            task_id=task_uuid,
+            device_id=str(goal.get("device_id") or ""),
+            action_name=str(goal.get("action_name") or ""),
+            trace_context={},
+        )
+        if HostNode._is_manual_unlock_fenced(self, job_uuid):
+            return
         for bridge in self.bridges:
             if hasattr(bridge, "publish_job_status"):
                 bridge.publish_job_status(feedback_data, item, "running")
