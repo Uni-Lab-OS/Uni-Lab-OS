@@ -300,6 +300,111 @@ def test_publication_port_uploads_artifact_before_publishing_resources() -> None
     assert published["response_status"] == 201
 
 
+def test_http_publication_adapter_preserves_delegate_contract() -> None:
+    """HTTP 发布 Adapter 保持委托参数及发布传输异常的原始身份。
+
+    参数：无。
+    返回：无；断言归档场景、资源 DTO 和软件包信息原样委托，并且
+    ``publish_inspection`` 不改包传输 Adapter 抛出的异常对象。
+    异常：参数被复制或改写、传输异常被包装成 ``PackageCLIError`` 时测试失败。
+    """
+
+    from unilabos.package_manager.package_distribution import (
+        HttpClientPublicationAdapter,
+        publish_inspection,
+    )
+
+    class PublicationTransportError(RuntimeError):
+        """表示测试云端资源发布边界返回的固定传输失败。"""
+
+    # ``transport_error`` 是必须穿过发布编排保持对象身份的传输失败实例。
+    transport_error = PublicationTransportError("publication transport unavailable")
+
+    class RecordingHttpClient:
+        """记录现有 HTTP 客户端两个发布操作收到的原始参数。"""
+
+        def __init__(self) -> None:
+            """初始化调用记录和可切换的资源发布失败状态。
+
+            参数：无。
+            返回：无。
+            异常：无。
+            """
+
+            # 两类调用分别保留委托参数身份；``fail_publication`` 控制固定点失败。
+            self.upload_calls: list[tuple[str, str]] = []
+            self.publication_calls: list[
+                tuple[list[dict[str, object]], dict[str, object]]
+            ] = []
+            self.fail_publication = False
+
+        def upload_file_to_oss(
+            self,
+            path: str,
+            *,
+            scene: str,
+        ) -> tuple[str, str]:
+            """记录归档路径和 OSS 场景并返回固定产物身份。
+
+            参数：``path`` 是归档路径；``scene`` 是现有 HTTP 合同要求的上传场景。
+            返回：公开下载地址和对象键。
+            异常：无。
+            """
+
+            self.upload_calls.append((path, scene))
+            return "https://packages.example/direct.tar.gz", "models/direct.tar.gz"
+
+        def upload_package_resources(
+            self,
+            resources: list[dict[str, object]],
+            package_info: dict[str, object],
+        ) -> object:
+            """记录资源发布参数并按测试状态返回成功或原始传输失败。
+
+            参数：``resources`` 是兼容资源 DTO；``package_info`` 是软件包发布信息。
+            返回：未启用失败时返回 HTTP 200 的最小响应对象。
+            异常：启用失败时抛出同一 ``transport_error`` 对象。
+            """
+
+            self.publication_calls.append((resources, package_info))
+            if self.fail_publication:
+                raise transport_error
+            return SimpleNamespace(status_code=200, text="ok")
+
+    # ``http_client`` 是被适配的现有传输实现；``adapter`` 是待验证的真实 Adapter。
+    http_client = RecordingHttpClient()
+    adapter = HttpClientPublicationAdapter(http_client)
+    # ``resources`` 与 ``package_info`` 用于证明直接委托不复制参数容器。
+    resources = [{"id": "community.lab.reader"}]
+    package_info = {"class_namespace": "community.lab"}
+
+    assert adapter.upload_artifact("/tmp/direct.tar.gz") == (
+        "https://packages.example/direct.tar.gz",
+        "models/direct.tar.gz",
+    )
+    adapter.publish_resources(resources, package_info)
+
+    assert http_client.upload_calls == [("/tmp/direct.tar.gz", "models")]
+    assert http_client.publication_calls[0][0] is resources
+    assert http_client.publication_calls[0][1] is package_info
+
+    http_client.fail_publication = True
+    # ``inspection`` 是进入发布编排但使用显式地址跳过第二次归档上传的检查产物。
+    inspection = {
+        "archive_path": "/tmp/lab.tar.gz",
+        "package_info": {"class_namespace": "community.lab"},
+        "resources": [{"id": "community.lab.reader"}],
+    }
+    with pytest.raises(PublicationTransportError) as caught:
+        publish_inspection(
+            inspection,
+            adapter,
+            download_url="https://packages.example/lab.tar.gz",
+        )
+
+    assert caught.value is transport_error
+
+
 def test_publication_port_rejects_backend_error_status() -> None:
     """云端资源发布返回非成功状态时必须保留诊断并关闭式失败。
 

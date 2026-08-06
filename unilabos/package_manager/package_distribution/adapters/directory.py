@@ -136,9 +136,11 @@ def _local_dist_name(spec: str) -> str:
     异常：项目解析错误被兼容为空结果，不向外传播。
     """
 
+    # ``normalized_spec`` 是完成空白归一化、尚未解释来源种类的安装声明。
     normalized_spec = spec.strip()
     if normalized_spec.startswith(("git+", "http://", "https://")):
         return ""
+    # 去掉 file 协议后，该值只用于解析本地文件系统来源，不再作为 pip 身份。
     normalized_spec = normalized_spec.removeprefix("file:")
     # ``selected_path`` 是本地安装规格解析后的文件系统候选。
     selected_path = Path(normalized_spec).expanduser()

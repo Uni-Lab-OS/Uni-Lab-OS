@@ -11,8 +11,10 @@ import rfc8785
 
 from ..package_catalog import PackageCatalog
 
+# 声明文件与规范锁文件共同保存同一完整软件包依赖代际，必须成对读写。
 DEPENDENCY_DECLARATION_FILE = "unilabos.packages.yaml"
 DEPENDENCY_LOCK_FILE = "unilabos.packages.lock.json"
+# 变更互斥文件只协调同一主工作区的依赖写入，不属于可发布依赖事实。
 DEPENDENCY_MUTATION_GUARD = ".unilabos.packages.mutation.lock"
 
 

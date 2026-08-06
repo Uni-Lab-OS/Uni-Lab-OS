@@ -237,8 +237,11 @@ def test_runtime_compiles_each_explicit_package_exactly_once(
     异常：若实现丢弃已编译目录或在验证阶段二次编译，调用次数断言失败。
     """
 
+    # ``workspace_root`` 是主包来源；``external_root`` 是锁定外部包的唯一来源根。
     workspace_root, external_root = _prepare_external_workspace(tmp_path)
+    # ``compile_roots`` 记录依赖编排实际观察的来源根，证明每项只编译一次。
     compile_roots: list[Path] = []
+    # ``original_compile`` 是新包分发（Package Distribution）Module 的编译接缝。
     original_compile = dependency_manager_module.compile_package_source
 
     def compile_dependency_once(source: WorkspaceSource):

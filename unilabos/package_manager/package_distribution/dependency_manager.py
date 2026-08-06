@@ -51,6 +51,7 @@ class PackageDependencyManager:
 
         # 当前声明和锁共同定义变更前不可分割的依赖代际。
         declarations, current_lock = load_dependency_state(self._workspace.root)
+        # ``source_path`` 是安全规范绝对来源；``portable_source`` 是待写入锁的相对来源。
         source_path, portable_source = resolve_dependency_source(
             self._workspace.root,
             source,
@@ -114,11 +115,13 @@ class PackageDependencyManager:
         时关闭式抛出；验证失败不修改声明和锁。
         """
 
+        # ``declarations`` 与 ``current_lock`` 共同固定更新前完整依赖代际。
         declarations, current_lock = load_dependency_state(self._workspace.root)
         # ``current_entry`` 是用户身份在当前完整依赖代际中的唯一匹配条目。
         current_entry = find_locked_package(current_lock, identity)
         # ``selected_source`` 保留显式新来源或回用锁中的可移植既有来源。
         selected_source = source if source is not None else current_entry.source
+        # ``source_path`` 是重新编译根；``portable_source`` 是候选锁保存的来源身份。
         source_path, portable_source = resolve_dependency_source(
             self._workspace.root,
             selected_source,
@@ -144,6 +147,7 @@ class PackageDependencyManager:
                 for item in current_lock.packages
             )
         )
+        # ``next_declarations`` 只推进目标来源，并与候选锁保持完整一一对应。
         next_declarations = {
             **declarations,
             next_entry.normalized_name: (
@@ -183,6 +187,7 @@ class PackageDependencyManager:
         失败不会切换到 ambient site-packages。
         """
 
+        # ``declarations`` 与 ``current_lock`` 共同固定删除前完整依赖代际。
         declarations, current_lock = load_dependency_state(self._workspace.root)
         # ``current_entry`` 是删除命令唯一允许移除的既有锁条目。
         current_entry = find_locked_package(current_lock, identity)
@@ -259,11 +264,14 @@ def load_locked_package_sources(
     ``PackageDependencyError``，不返回部分集合；本函数不重复编译主包。
     """
 
+    # ``workspace_source`` 固定全部相对外部来源解析使用的主工作区根。
     workspace_source = WorkspaceSource(workspace)
+    # ``dependency_lock`` 是本次加载唯一授权的完整外部包代际；声明仅用于成对校验。
     _declarations, dependency_lock = load_dependency_state(workspace_source.root)
     # ``package_sources`` 让后续有限运行激活不必从目录字段反推物理路径。
     package_sources: list[PackageCatalogSource] = []
     for entry in dependency_lock.packages:
+        # ``source_path`` 是条目的安全绝对来源；相对身份已由锁校验，不再另行使用。
         source_path, _portable_source = resolve_dependency_source(
             workspace_source.root,
             entry.source,
@@ -363,6 +371,7 @@ def catalog_for_entry(
     ``PackageDependencyError``。
     """
 
+    # ``source_path`` 用于重编译；``portable_source`` 用于逐字段重建锁身份。
     source_path, portable_source = resolve_dependency_source(
         workspace_root,
         entry.source,

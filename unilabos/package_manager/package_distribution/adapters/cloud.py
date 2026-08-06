@@ -90,14 +90,16 @@ def publish_inspection(
     参数：``inspection`` 是 ``inspect_package`` 的冻结结果；``port`` 是注入的
     传输 Adapter；``download_url`` 是可选的调用者指定归档地址。
     返回：发布后的软件包信息、资源 DTO、下载地址和 HTTP 状态。
-    异常：归档上传没有身份、传输失败或资源接口返回非成功状态时抛出
-    ``PackageCLIError``；不会重新扫描工作区或重建包目录（PackageCatalog）。
+    异常：归档上传没有身份或资源接口返回非成功状态时抛出
+    ``PackageCLIError``；``port.publish_resources`` 的传输异常保持原对象和类型
+    传播。函数不会重新扫描工作区或重建包目录（PackageCatalog）。
     """
 
     # ``package_info`` 是检查产物生成的兼容软件包投影，本发布独占一份容器。
     package_info = dict(inspection["package_info"])
     # ``archive_path`` 是已检查且与当前包目录对应的本地归档路径。
     archive_path = str(inspection["archive_path"])
+    # ``final_url`` 与 ``object_key`` 共同标识本次发布可引用的同一归档产物。
     final_url, object_key = _resolve_download_target(
         port,
         archive_path,
@@ -112,11 +114,8 @@ def publish_inspection(
     for item in resources:
         item["package_info"] = package_info
 
-    try:
-        # ``response`` 是云端资源发布调用的原始传输结果。
-        response = port.publish_resources(resources, package_info)
-    except Exception as error:
-        raise PackageCLIError(f"上传 /lab/resource 失败：{error}") from error
+    # ``response`` 是云端资源发布调用的原始传输结果；传输异常必须原样传播。
+    response = port.publish_resources(resources, package_info)
     # ``status`` 与 ``response_text`` 维持历史 HTTP 成功和诊断合同。
     status = getattr(response, "status_code", None)
     response_text = getattr(response, "text", "")
