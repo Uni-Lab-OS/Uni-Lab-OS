@@ -267,6 +267,7 @@ def _error(error: WorkflowError) -> _BackendJSONResponse:
         "candidate_not_ready",
         "draft_invalid",
         "candidate_invalid",
+        "workflow_identity_mismatch",
     }
     if error.code == "invalid_input":
         business_code = 1000

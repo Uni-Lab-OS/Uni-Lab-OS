@@ -18,6 +18,7 @@ from unilabos.workflow.authoring_candidate_hash import (
     AuthoringCandidateHashError,
     compute_authoring_candidate_hash,
 )
+from unilabos.workflow.authoring_identity import declared_workflow_uuid
 from unilabos.workflow.candidate_validation import (
     CandidateBundleError,
     validate_candidate_bundle,
@@ -28,8 +29,8 @@ from unilabos.workflow.device_action_run import (
     DeviceActionRunService,
     DeviceActionRunUnavailable,
 )
-from unilabos.workflow.execution_plan import ExecutionPlanBuilder
 from unilabos.workflow.event_reader import DurableEventReader
+from unilabos.workflow.execution_plan import ExecutionPlanBuilder
 from unilabos.workflow.graph_validation import GraphValidationError
 from unilabos.workflow.models import (
     CandidateChangeset,
@@ -86,6 +87,10 @@ _ERRORS = {
     "workflow_revision_conflict": (
         409,
         "工作流已在其他位置更新，请刷新并重新确认本次修改",
+    ),
+    "workflow_identity_mismatch": (
+        409,
+        "导入的 Python workflow_uuid 与当前工作流不一致",
     ),
     "candidate_hash_conflict": (
         409,
@@ -212,8 +217,15 @@ _HANDLE_TEMPLATE_REQUIRED_READ_FIELDS = {
 class WorkflowError(RuntimeError):
     """面向前端的稳定 Workflow 错误。"""
 
-    def __init__(self, code: str):
-        status, message = _ERRORS[code]
+    def __init__(self, code: str, *, message: str | None = None):
+        """创建稳定业务错误并允许安全的可行动消息覆盖。
+
+        参数：``code`` 是公共错误码，``message`` 可提供不含源码内容的具体提示。
+        返回：无。异常：未知错误码抛出 ``KeyError``，保持开发期失败关闭。
+        """
+
+        status, default_message = _ERRORS[code]
+        message = message or default_message
         super().__init__(message)
         self.status = status
         self.code = code
@@ -931,6 +943,10 @@ class WorkflowService:
                 encoded = python_source.encode("utf-8")
             except UnicodeEncodeError:
                 raise WorkflowError("invalid_input") from None
+            self._reject_cross_workflow_source(
+                workflow_uuid=workflow_uuid,
+                python_source=python_source,
+            )
             try:
                 self._atomic_write(
                     registration,
@@ -978,6 +994,34 @@ class WorkflowService:
                 event_data=event_data,
             )
             return self.get_authoring(workflow_uuid)
+
+    @staticmethod
+    def _reject_cross_workflow_source(
+        *, workflow_uuid: str, python_source: str
+    ) -> None:
+        """拒绝把明确属于其他工作流的源码写入当前登记路径。
+
+        参数：``workflow_uuid`` 是当前登记路径的权威工作流 UUID；
+        ``python_source`` 是待保存的完整 Python 文本。返回：身份一致或无法静态
+        确认时无返回。异常：唯一声明另一个有效 UUID 时抛
+        ``WorkflowConflict(workflow_identity_mismatch)``。
+
+        安全不变量：语法错误、缺失/动态/歧义声明仍可作为无效草稿保存；这里只
+        拦截能够静态证明属于另一工作流的源码，且拒绝发生在任何物理写入之前。
+        """
+
+        expected_uuid = validate_uuid(workflow_uuid)
+        declared_uuid = declared_workflow_uuid(python_source)
+        if declared_uuid is None or declared_uuid == expected_uuid:
+            return
+        raise WorkflowConflict(
+            "workflow_identity_mismatch",
+            message=(
+                f"导入的 Python 声明工作流 {declared_uuid}，当前编辑的是 "
+                f"{expected_uuid}；请选择匹配的工作流，或修改 "
+                "@workflow.workflow_uuid 后再保存"
+            ),
+        )
 
     def reconcile_registered_source(
         self,
