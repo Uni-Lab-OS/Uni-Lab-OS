@@ -25,6 +25,29 @@ def test_package_upload_parser_accepts_final_json_flag() -> None:
     assert parsed["package_json"] is True
 
 
+def test_package_upload_parser_accepts_stdin_auth_flag() -> None:
+    """上传子命令必须显式区分一次性 stdin 凭据与遗留配置文件路径。"""
+
+    parser = parse_args()
+    parsed = vars(
+        parser.parse_args(
+            [
+                "--addr",
+                "uat",
+                "package",
+                "upload",
+                "--path",
+                "/workspace/package",
+                "--auth-stdin",
+                "--json",
+            ]
+        )
+    )
+
+    assert parsed["addr"] == "uat"
+    assert parsed["auth_stdin"] is True
+
+
 def test_package_upload_json_reports_published_identity(
     monkeypatch,
     tmp_path: Path,

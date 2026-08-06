@@ -37,7 +37,11 @@ class PackageCommandError(RuntimeError):
 
 
 def register_package_subcommands(subparsers: Any) -> None:
-    """向应用根 parser 注册设备包管理命令，不启动本地设备 Runtime。"""
+    """向应用根 parser 注册设备包管理命令，不启动本地设备 Runtime。
+
+    参数 ``subparsers`` 是根 argparse 子命令集合。函数无返回值；注册后的 upload
+    同时保留遗留配置模式并提供显式 ``--auth-stdin`` 安全入口。
+    """
 
     package_parser = subparsers.add_parser(
         "package",
@@ -77,6 +81,11 @@ def register_package_subcommands(subparsers: Any) -> None:
                 "--download-url",
                 default="",
                 help="Explicit artifact URL; skips artifact upload",
+            )
+            command.add_argument(
+                "--auth-stdin",
+                action="store_true",
+                help="Read one-shot Lab AK/SK from stdin instead of local_config.py",
             )
             command.add_argument(
                 "--json",
@@ -192,8 +201,8 @@ def run_package_command(
 
     ``args`` 是 argparse 投影；可注入 ``http_client``/``download_port``；
     ``working_dir`` 与 ``remote_addr`` 覆盖运行环境；``stream`` 接收最终输出；
-    ``input_stream`` 仅承载设备配置 JSON。返回具体命令结果；合同、构建、下载、
-    配置或设备图错误统一转换为 :class:`PackageCommandError`。
+    ``input_stream`` 承载设备配置或一次性上传凭据 JSON。返回具体命令结果；合同、
+    构建、下载、配置或设备图错误统一转换为 :class:`PackageCommandError`。
     """
 
     output = stream or sys.stdout
@@ -270,10 +279,10 @@ def run_package_command(
                 definition_fqid=str(args.get("definition_fqid") or ""),
                 artifact_digest=str(args.get("artifact_digest") or ""),
                 backend_base_url=(
-                    remote_addr or _download_remote_addr(args.get("addr"))
+                    remote_addr or resolve_package_remote_addr(args.get("addr"))
                 ),
                 working_dir=str(
-                    working_dir or _download_working_dir(args.get("working_dir"))
+                    working_dir or resolve_package_working_dir(args.get("working_dir"))
                 ),
                 port=download_port or RequestsCommunityDownloadAdapter(),
             )
@@ -310,7 +319,7 @@ def run_package_command(
             common = {
                 "graph_path": str(args.get("graph") or ""),
                 "working_dir": str(
-                    working_dir or _download_working_dir(args.get("working_dir"))
+                    working_dir or resolve_package_working_dir(args.get("working_dir"))
                 ),
                 "cache_key": str(args.get("cache_key") or ""),
                 "definition_fqid": str(args.get("definition_fqid") or ""),
@@ -384,8 +393,13 @@ def _write_graph_mutation_result(
         )
 
 
-def _download_working_dir(raw_value: Any) -> Path:
-    """按现有显式 working_dir 规则解析非交互设备包缓存目录。"""
+def resolve_package_working_dir(raw_value: Any) -> Path:
+    """按现有显式 working_dir 规则解析非交互设备包受管目录。
+
+    参数 ``raw_value`` 是根 CLI 的可选 ``--working_dir`` 值。返回规范化绝对
+    :class:`Path`；当调用方传入项目根且其中已有 ``unilabos_data`` 时返回该子目录，
+    未传值时返回当前目录下的 ``unilabos_data``。
+    """
 
     raw = str(raw_value or "").strip()
     if not raw:
@@ -397,8 +411,12 @@ def _download_working_dir(raw_value: Any) -> Path:
     return root
 
 
-def _download_remote_addr(raw_value: Any) -> str:
-    """解析 CLI 既有 test/uat/local 地址别名，不加载 local_config.py。"""
+def resolve_package_remote_addr(raw_value: Any) -> str:
+    """解析设备包 CLI 的固定地址别名且不加载 ``local_config.py``。
+
+    参数 ``raw_value`` 是根 CLI ``--addr`` 值。返回 test、uat、local 对应的完整
+    API 根地址，其他非空值保持原样；函数不读取凭据或本地 Python 配置。
+    """
 
     value = str(raw_value or "").strip()
     aliases = {

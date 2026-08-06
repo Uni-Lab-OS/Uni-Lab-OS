@@ -21,12 +21,12 @@ class HTTPClient:
     """HTTP客户端，用于与远程服务器通信"""
 
     def __init__(self, remote_addr: Optional[str] = None, auth: Optional[str] = None) -> None:
-        """
-        初始化HTTP客户端
+        """初始化不会记录鉴权载荷的 HTTP 客户端。
 
-        Args:
-            remote_addr: 远程服务器地址，如果不提供则从配置中获取
-            auth: 授权信息
+        参数 ``remote_addr`` 是可选远程 API 根地址，省略时使用
+        ``HTTPConfig.remote_addr``；参数 ``auth`` 是可选 ``base64(ak:sk)``，省略
+        时从 ``BasicConfig`` 读取。构造函数无返回值；鉴权载荷只写入请求头，绝不
+        输出到日志，因为 Base64 可逆且等同于秘密。
         """
         self.initialized = False
         self.remote_addr = remote_addr or HTTPConfig.remote_addr
@@ -35,7 +35,6 @@ class HTTPClient:
         else:
             auth_secret = BasicConfig.auth_secret()
             self.auth = auth_secret
-            info(f"正在使用ak sk作为授权信息：[{auth_secret}]")
         # 复用 TCP/TLS 连接，避免每次请求重新握手
         self._session = requests.Session()
         self._session.headers.update({"Authorization": f"Lab {self.auth}"})
