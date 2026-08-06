@@ -12,6 +12,7 @@ from fastapi.testclient import TestClient
 
 from tests.app.test_authoring_transform_api import (
     CATALOG_UNAVAILABLE,
+    INTERNAL_ERROR,
     RecordingTransformEngine,
     _assert_success,
     _generate_body,
@@ -19,6 +20,7 @@ from tests.app.test_authoring_transform_api import (
 from unilabos.config.config import BasicConfig
 from unilabos.workflow import composition
 from unilabos.workflow.models import CandidateCompilation
+from unilabos.workflow.service import WorkflowError
 
 GENERATION_A_FINGERPRINT = "sha256:" + "a" * 64
 GENERATION_B_FINGERPRINT = "sha256:" + "b" * 64
@@ -27,6 +29,7 @@ AUTHORING_TRANSFORM_PATHS = {
     "/api/v1/authoring/generate-python",
     "/api/v1/authoring/validate",
 }
+SECRET_COMPILER_MESSAGE = "secret-token-from-compiler"
 
 
 class _GenerationTransformEngine(RecordingTransformEngine):
@@ -56,6 +59,37 @@ class _GenerationTransformEngine(RecordingTransformEngine):
         result = super()._result(operation, values)
         result.template_catalog_fingerprint = self._fingerprint
         return result
+
+
+class _SecretWorkflowErrorTransformEngine(RecordingTransformEngine):
+    """模拟编译器抛出带私密自定义消息的工作流（Workflow）错误。"""
+
+    def __init__(self, *, error_code: str) -> None:
+        """保存待伪造的工作流（Workflow）错误码。
+
+        参数：``error_code`` 是编译器试图越权选择的公共错误身份。返回：无；
+        每次转换均通过同一异常携带秘密文本。
+        """
+
+        super().__init__()
+        self._error_code = error_code
+
+    def _result(
+        self,
+        operation: str,
+        values: dict[str, Any],
+    ) -> CandidateCompilation:
+        """记录转换调用并抛出带秘密文本的工作流（Workflow）错误。
+
+        参数：``operation`` 是公开转换操作名；``values`` 是闭合请求字段。
+        返回：无；始终抛出 ``WorkflowError``，验证产品适配器的信任边界。
+        """
+
+        self.calls.append((operation, values))
+        raise WorkflowError(
+            self._error_code,
+            message=SECRET_COMPILER_MESSAGE,
+        )
 
 
 @pytest.fixture(autouse=True)
@@ -185,6 +219,48 @@ def test_installed_authoring_transform_maps_lost_compiler_to_catalog_unavailable
 
     assert response.status_code == 200
     assert response.json() == CATALOG_UNAVAILABLE
+
+
+@pytest.mark.parametrize(
+    ("compiler_error_code", "expected_response"),
+    [
+        ("internal_error", INTERNAL_ERROR),
+        ("invalid_input", INTERNAL_ERROR),
+        ("template_catalog_unavailable", CATALOG_UNAVAILABLE),
+    ],
+)
+def test_product_sanitizes_compiler_workflow_error_message_and_code(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    compiler_error_code: str,
+    expected_response: dict[str, Any],
+) -> None:
+    """编译器产生的工作流（Workflow）错误不得越过产品转换信任边界。
+
+    参数：``tmp_path`` 提供隔离产品目录；``monkeypatch`` 注入带秘密消息的
+    编译器；``compiler_error_code`` 是编译器抛出的错误身份；
+    ``expected_response`` 是适配器允许发布的稳定后端信封（Backend Envelope）。
+    返回：无；断言秘密不出站、非允许错误码净化为默认内部错误，而目录不可用
+    只能保留其稳定默认文案。
+    """
+
+    engine = _SecretWorkflowErrorTransformEngine(error_code=compiler_error_code)
+    app = _setup_product_app(
+        tmp_path,
+        monkeypatch,
+        SimpleNamespace(compiler=engine),
+    )
+
+    with TestClient(app) as client:
+        response = client.post(
+            "/api/v1/authoring/generate-python",
+            json=_generate_body(),
+        )
+
+    assert response.status_code == 200
+    assert response.json() == expected_response
+    assert SECRET_COMPILER_MESSAGE not in response.text
+    assert len(engine.calls) == 1
 
 
 def test_installed_authoring_transform_observes_rebuilt_compiler_generation(
