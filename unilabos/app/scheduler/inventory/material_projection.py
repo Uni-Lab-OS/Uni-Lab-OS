@@ -1,0 +1,866 @@
+"""PackageCatalog 与 ResourceTreeSet 到 Backend MaterialGraph 的受控投影。"""
+
+from __future__ import annotations
+
+import hashlib
+import json
+import math
+import uuid
+from collections.abc import Mapping, Sequence
+from dataclasses import dataclass
+from pathlib import Path
+from typing import Any
+from urllib.parse import quote
+
+import yaml
+
+from unilabos.app.scheduler.inventory.domain import MaterialModelAsset
+from unilabos.package_manager import PackageAssetResolver, PackageCatalog
+from unilabos.package_manager.consumers import (
+    DefinitionIdentityAmbiguous,
+    DefinitionIdentityNotFound,
+    resolve_definition_identity,
+)
+from unilabos.package_manager.sources import PackageSource
+
+_INTERNAL_SITE_TYPES = frozenset({"tipspot", "tip_spot", "well"})
+_PART_TYPES = frozenset(
+    {"box", "slab", "cylinder", "lathe", "disc", "rect", "edge", "grid", "sites"}
+)
+_STYLE_TOKENS = frozenset(
+    {
+        "plain",
+        "frame",
+        "plate",
+        "board",
+        "body",
+        "column",
+        "module",
+        "shell",
+        "beam",
+        "shaft",
+        "probe",
+        "deck",
+        "gear",
+        "motor",
+        "foot",
+        "glass",
+        "cap",
+        "hole",
+        "bore",
+        "port",
+        "seat",
+        "pad",
+        "rim",
+        "hairline",
+    }
+)
+_SITE_GENERATORS = frozenset(
+    {"open-rack", "stack-shelves", "site-holes", "site-markers"}
+)
+
+
+@dataclass(frozen=True, slots=True)
+class MaterialDefinitionProjection:
+    """一个 PackageCatalog definition 对 ResourceTreeSet class 的读模型。"""
+
+    graph_class: str
+    source_identity: str
+    kind: str
+    categories: tuple[str, ...]
+    envelope_mm: tuple[float, float, float] | None
+    model: Mapping[str, Any] | None
+    canonical_identity: str | None = None
+
+
+@dataclass(frozen=True, slots=True)
+class PackageMaterialProjection:
+    """PackageCatalog 的物料渲染子集，不复制 Registry 或 TemplateCatalog。"""
+
+    definitions: Mapping[str, MaterialDefinitionProjection]
+    shapes: tuple[dict[str, Any], ...]
+    model_assets: tuple[MaterialModelAsset, ...]
+    fingerprint: str
+
+
+def build_package_material_projection(
+    sources: Sequence[PackageSource],
+    catalogs: Sequence[PackageCatalog],
+) -> PackageMaterialProjection:
+    """只通过已审计 PackageCatalog asset closure 读取 shape manifest。"""
+
+    if len(sources) != len(catalogs):
+        raise ValueError("Package source 与 PackageCatalog 数量不一致")
+    definitions: dict[str, MaterialDefinitionProjection] = {}
+    local_definitions: dict[str, list[MaterialDefinitionProjection]] = {}
+    shapes_by_identity: dict[tuple[str, str], dict[str, Any]] = {}
+    model_assets_by_path: dict[str, MaterialModelAsset] = {}
+    digests: list[str] = []
+    for source, catalog in zip(sources, catalogs, strict=True):
+        resolver = PackageAssetResolver(source, catalog)
+        digests.append(catalog.catalog_digest)
+        for asset in catalog.assets:
+            public_path = _model_asset_path(catalog.namespace, asset.logical_path)
+            projected_asset = MaterialModelAsset(
+                public_path=public_path,
+                media_type=asset.media_type,
+                digest=asset.digest,
+                size=asset.size,
+                read_bytes=lambda resolver=resolver, logical_path=asset.logical_path: (
+                    resolver.open_binary(logical_path).read()
+                ),
+            )
+            existing_asset = model_assets_by_path.get(public_path)
+            if existing_asset is not None and (
+                existing_asset.digest != projected_asset.digest
+                or existing_asset.size != projected_asset.size
+            ):
+                raise ValueError(
+                    f"同一 Package model asset path 指向不同内容: {public_path}"
+                )
+            model_assets_by_path[public_path] = projected_asset
+        records = (*catalog.definitions.devices, *catalog.definitions.resources)
+        for record in records:
+            shape = _shape_for_definition(
+                resolver,
+                record.details.get("model"),
+                bundle=catalog.namespace,
+            )
+            if shape is not None:
+                shape_identity = (shape["bundle"], shape["id"])
+                existing_shape = shapes_by_identity.get(shape_identity)
+                if existing_shape is not None and existing_shape != shape:
+                    raise ValueError(
+                        "同一 Package shape identity 指向不同内容: "
+                        f"{shape_identity[0]}/{shape_identity[1]}"
+                    )
+                shapes_by_identity[shape_identity] = shape
+            categories = tuple(_normalize_category(item) for item in record.category)
+            kind = _definition_kind(shape, categories, record.kind)
+            envelope = _shape_envelope(shape)
+            source_identity = (
+                record.fqid
+                if record.kind == "device"
+                else f"{record.module}:{record.symbol}"
+            )
+            if record.fqid in definitions:
+                raise ValueError(f"Package definition FQID 重复: {record.fqid}")
+            definition = MaterialDefinitionProjection(
+                graph_class=record.id,
+                source_identity=source_identity,
+                kind=kind,
+                categories=categories,
+                envelope_mm=envelope,
+                model=_model_for_definition(
+                    resolver,
+                    record.details.get("model"),
+                    bundle=catalog.namespace,
+                ),
+                canonical_identity=record.fqid,
+            )
+            definitions[record.fqid] = definition
+            local_definitions.setdefault(record.id, []).append(definition)
+    canonical_definitions = dict(definitions)
+    for local_id, matches in local_definitions.items():
+        if len(matches) == 1 and local_id not in definitions:
+            definitions[local_id] = matches[0]
+    shapes = sorted(
+        shapes_by_identity.values(), key=lambda item: (item["bundle"], item["id"])
+    )
+    canonical = json.dumps(
+        {
+            "catalogs": sorted(digests),
+            "definitions": {
+                key: {
+                    "source_identity": value.source_identity,
+                    "kind": value.kind,
+                    "categories": value.categories,
+                    "envelope_mm": value.envelope_mm,
+                    "model": value.model,
+                }
+                for key, value in sorted(canonical_definitions.items())
+            },
+            "shapes": shapes,
+        },
+        ensure_ascii=False,
+        separators=(",", ":"),
+        sort_keys=True,
+    ).encode()
+    return PackageMaterialProjection(
+        definitions=definitions,
+        shapes=tuple(shapes),
+        model_assets=tuple(
+            model_assets_by_path[key] for key in sorted(model_assets_by_path)
+        ),
+        fingerprint="sha256:" + hashlib.sha256(canonical).hexdigest(),
+    )
+
+
+def build_resource_graph_import(
+    snapshot: Mapping[str, Any],
+    package_projection: PackageMaterialProjection,
+    resolved_identities: Mapping[str, str],
+) -> dict[str, Any]:
+    """把 ResourceTreeSet snapshot 规范化成 Inventory 首次导入命令。"""
+
+    source_id = Path(str(snapshot.get("source_id") or "os-current")).name
+    raw_nodes = snapshot.get("nodes")
+    if not isinstance(raw_nodes, Sequence) or isinstance(raw_nodes, (str, bytes)):
+        raise ValueError("ResourceTreeSet snapshot 缺少 nodes")
+    nodes = [_json_object(item) for item in raw_nodes if isinstance(item, Mapping)]
+    if len(nodes) != len(raw_nodes):
+        raise ValueError("ResourceTreeSet snapshot nodes 必须全是对象")
+    material_nodes = [node for node in nodes if not _is_internal_site(node)]
+    material_uuid_by_runtime_uuid = {
+        str(node["uuid"]): _canonical_material_uuid(
+            source_id,
+            runtime_uuid=str(node["uuid"]),
+            node_id=str(node["id"]),
+        )
+        for node in material_nodes
+    }
+    material_node_by_runtime_uuid = {str(node["uuid"]): node for node in material_nodes}
+    materials: list[dict[str, Any]] = []
+    positions: list[dict[str, Any]] = []
+    for node in material_nodes:
+        node_id = _required_string(node.get("id"), "node.id")
+        runtime_uuid = _required_string(node.get("uuid"), f"nodes[{node_id}].uuid")
+        graph_class = _required_string(node.get("class"), f"nodes[{node_id}].class")
+        definition = _resolve_graph_definition(package_projection, graph_class)
+        template_uuid = resolved_identities.get(definition.source_identity)
+        if template_uuid is None:
+            raise ValueError(
+                f"ResourceTemplate identity 未解析: {definition.source_identity}"
+            )
+        material_uuid = material_uuid_by_runtime_uuid[runtime_uuid]
+        parent_runtime_uuid = _optional_string(node.get("parent_uuid"))
+        parent_uuid = material_uuid_by_runtime_uuid.get(parent_runtime_uuid or "")
+        dimensions = _dimensions(node, definition)
+        raw_config = _json_object(node.get("config"))
+        config = {
+            **raw_config,
+            "rendering": {
+                "kind": definition.kind,
+                "dimensions_mm": list(dimensions),
+                "categories": list(definition.categories),
+                **({"model": dict(definition.model)} if definition.model else {}),
+            },
+        }
+        materials.append(
+            {
+                "uuid": material_uuid,
+                "resource_template_uuid": template_uuid,
+                "parent_uuid": parent_uuid,
+                "class": graph_class,
+                "barcode": str(node.get("barcode") or ""),
+                "name": str(node.get("name") or node_id),
+                "description": str(node.get("description") or "") or None,
+                "meta_data": {
+                    "source": "resource-tree-set",
+                    "source_graph": source_id,
+                    "source_node_id": node_id,
+                    "source_runtime_uuid": runtime_uuid,
+                },
+                "config": config,
+                "data": _json_object(node.get("data")),
+                "material_kind": "device"
+                if node.get("type") == "device"
+                else "business",
+            }
+        )
+        position = _position(node)
+        positions.append(
+            {
+                "uuid": _stable_uuid(source_id, "relative-position", node_id),
+                "material_uuid": material_uuid,
+                "description": None,
+                "meta_data": {"source": "resource-tree-set"},
+                "position_x": position[0],
+                "position_y": position[1],
+                "position_z": position[2],
+                "depth": dimensions[2],
+                "length": dimensions[1],
+                "width": dimensions[0],
+                **_scale_and_rotation(node),
+            }
+        )
+
+    sites: list[dict[str, Any]] = []
+    site_sort_order_by_owner: dict[str, int] = {}
+    for node in nodes:
+        if not _is_internal_site(node):
+            continue
+        node_id = _required_string(node.get("id"), "site node.id")
+        parent_runtime_uuid = _optional_string(node.get("parent_uuid"))
+        owner_uuid = material_uuid_by_runtime_uuid.get(parent_runtime_uuid or "")
+        if owner_uuid is None:
+            raise ValueError(f"Site {node_id} 的 owner 不是 Material")
+        dimensions = _raw_dimensions(node)
+        position = _position(node)
+        sort_order = site_sort_order_by_owner.get(owner_uuid, 0)
+        site_sort_order_by_owner[owner_uuid] = sort_order + 1
+        sites.append(
+            {
+                "uuid": _stable_uuid(source_id, "site", node_id),
+                "material_uuid": owner_uuid,
+                "name": str(node.get("name") or node_id),
+                "sort_order": sort_order,
+                "allowed_resource_template_uuids": [],
+                "occupied_material_uuid": None,
+                "description": str(node.get("description") or "") or None,
+                "meta_data": {
+                    "source": "resource-tree-set",
+                    "source_node_id": node_id,
+                },
+                "position_x": position[0],
+                "position_y": position[1],
+                "position_z": position[2],
+                "depth": dimensions[2],
+                "length": dimensions[1],
+                "width": dimensions[0],
+            }
+        )
+
+    for owner_runtime_uuid, owner_node in material_node_by_runtime_uuid.items():
+        owner_config = _json_object(owner_node.get("config"))
+        declared_sites = owner_config.get("sites")
+        if declared_sites is None:
+            continue
+        if not isinstance(declared_sites, Sequence) or isinstance(
+            declared_sites, (str, bytes)
+        ):
+            raise ValueError("Material config.sites 必须是数组")
+        owner_uuid = material_uuid_by_runtime_uuid[owner_runtime_uuid]
+        occupied_material_by_reference = _occupied_material_index(
+            owner_runtime_uuid,
+            material_nodes,
+            material_uuid_by_runtime_uuid,
+        )
+        for raw_site in declared_sites:
+            if not isinstance(raw_site, Mapping):
+                raise ValueError("Material config.sites 项必须是对象")
+            site = _json_object(raw_site)
+            label = _required_string(
+                site.get("label") or site.get("name"),
+                "site.label",
+            )
+            position = _declared_site_position(site, label)
+            dimensions = _declared_site_dimensions(site, label)
+            allowed_templates = _declared_site_template_uuids(
+                site,
+                package_projection,
+                resolved_identities,
+                label,
+            )
+            occupied_material_uuid = _declared_site_occupant(
+                site,
+                occupied_material_by_reference,
+                label,
+            )
+            kind = _declared_site_kind(site, owner_node)
+            visible = site.get("visible", True)
+            if not isinstance(visible, bool):
+                raise ValueError(f"Site {label} visible 必须是布尔值")
+            sort_order = site_sort_order_by_owner.get(owner_uuid, 0)
+            site_sort_order_by_owner[owner_uuid] = sort_order + 1
+            sites.append(
+                {
+                    "uuid": _stable_uuid(
+                        source_id,
+                        "site",
+                        f"{owner_node['id']}:{label}",
+                    ),
+                    "material_uuid": owner_uuid,
+                    "name": str(site.get("name") or label),
+                    "sort_order": sort_order,
+                    "allowed_resource_template_uuids": allowed_templates,
+                    "occupied_material_uuid": occupied_material_uuid,
+                    "description": None,
+                    "meta_data": {
+                        "source": "resource-tree-set-config",
+                        "source_owner_node_id": str(owner_node["id"]),
+                        "key": label,
+                        "kind": kind,
+                        "shape": "circle"
+                        if kind in {"well", "tip-spot"}
+                        else "rectangle",
+                        "visible": visible,
+                    },
+                    "position_x": position[0],
+                    "position_y": position[1],
+                    "position_z": position[2],
+                    "depth": dimensions[2],
+                    "length": dimensions[1],
+                    "width": dimensions[0],
+                }
+            )
+
+    canonical = json.dumps(
+        {
+            "source_id": source_id,
+            "package_fingerprint": package_projection.fingerprint,
+            "materials": materials,
+            "relative_positions": positions,
+            "sites": sites,
+        },
+        allow_nan=False,
+        ensure_ascii=False,
+        separators=(",", ":"),
+        sort_keys=True,
+    ).encode()
+    return {
+        "source_id": source_id,
+        "fingerprint": "sha256:" + hashlib.sha256(canonical).hexdigest(),
+        "materials": materials,
+        "relative_positions": positions,
+        "sites": sites,
+    }
+
+
+def _shape_for_definition(
+    resolver: PackageAssetResolver,
+    model: object,
+    *,
+    bundle: str,
+) -> dict[str, Any] | None:
+    if not isinstance(model, Mapping):
+        return None
+    representation = model.get("shape")
+    if not isinstance(representation, Mapping):
+        return None
+    if representation.get("format") != "unilab.shape/v1":
+        return None
+    entry = representation.get("entry")
+    if not isinstance(entry, str) or not entry:
+        return None
+    with resolver.open_binary(entry) as stream:
+        manifest = yaml.safe_load(stream.read().decode("utf-8"))
+    if not isinstance(manifest, Mapping) or manifest.get("schema_version") != 1:
+        raise ValueError(f"shape manifest 格式无效: {entry}")
+    raw_shape = manifest.get("shape")
+    if raw_shape is None:
+        values = manifest.get("shapes")
+        raw_shape = values[0] if isinstance(values, list) and len(values) == 1 else None
+    if not isinstance(raw_shape, Mapping):
+        raise ValueError(f"shape manifest 必须包含唯一 shape: {entry}")
+    return _public_shape(raw_shape, bundle=bundle)
+
+
+def _model_for_definition(
+    resolver: PackageAssetResolver,
+    model: object,
+    *,
+    bundle: str,
+) -> dict[str, Any] | None:
+    if not isinstance(model, Mapping):
+        return None
+    entry = model.get("entry")
+    model_format = model.get("format")
+    if not isinstance(entry, str) or not entry:
+        return None
+    if not isinstance(model_format, str) or not model_format:
+        return None
+    metadata = resolver.public_metadata(entry)
+    public_path = _model_asset_path(bundle, entry)
+    result: dict[str, Any] = {
+        "path": public_path,
+        "format": model_format,
+        "meshDir": public_path.rsplit("/", 1)[0],
+        "version": metadata.digest,
+    }
+    for key in ("macro", "color", "position", "rotation", "scale"):
+        value = model.get(key)
+        if value is not None:
+            result[key] = value
+    return result
+
+
+def _model_asset_path(bundle: str, logical_path: str) -> str:
+    return (
+        "/api/v1/material-models/"
+        + quote(bundle, safe="")
+        + "/"
+        + quote(logical_path, safe="/")
+    )
+
+
+def _public_shape(raw: Mapping[str, Any], *, bundle: str) -> dict[str, Any]:
+    shape_id = _required_string(raw.get("id"), "shape.id")
+    raw_parts = raw.get("parts")
+    if not isinstance(raw_parts, list) or not raw_parts:
+        raise ValueError(f"shape {shape_id} 缺少 parts")
+    for part in raw_parts:
+        _validate_part(part)
+    categories: list[str] = []
+    tokens: list[str] = []
+    for rule in raw.get("applies_to", []):
+        if not isinstance(rule, Mapping):
+            continue
+        if rule.get("category"):
+            categories.append(_normalize_category(str(rule["category"])))
+        if rule.get("category_contains"):
+            tokens.append(_normalize_category(str(rule["category_contains"])))
+    if not categories and not tokens:
+        raise ValueError(f"shape {shape_id} 缺少 applies_to")
+    result: dict[str, Any] = {
+        "id": shape_id,
+        "bundle": bundle,
+        "categories": categories,
+        "categoryTokens": tokens,
+        "priority": int(raw.get("priority") or 0),
+        "units": str(raw.get("units") or "mm"),
+        "shadow": str(raw.get("shadow") or "box"),
+        "sort": str(raw.get("sort") or "center"),
+        "parts": [_json_object(part) for part in raw_parts],
+    }
+    if raw.get("display_name"):
+        result["displayName"] = str(raw["display_name"])
+    envelope = raw.get("envelope")
+    if isinstance(envelope, list) and len(envelope) == 3:
+        result["envelope"] = [
+            _finite_number(value, "shape.envelope") for value in envelope
+        ]
+    return result
+
+
+def _validate_part(raw: object, *, nested: bool = False) -> None:
+    if not isinstance(raw, Mapping):
+        raise ValueError("shape part 必须是对象")
+    part_type = str(raw.get("type") or "")
+    if part_type not in _PART_TYPES:
+        raise ValueError(f"shape part type 无效: {part_type}")
+    style = str(raw.get("style") or "plain")
+    if style not in _STYLE_TOKENS:
+        raise ValueError(f"shape style 无效: {style}")
+    if part_type == "sites" and raw.get("generator") not in _SITE_GENERATORS:
+        raise ValueError(f"shape sites generator 无效: {raw.get('generator')}")
+    if part_type == "grid":
+        if nested:
+            raise ValueError("shape grid 不得嵌套 grid")
+        _validate_part(raw.get("part"), nested=True)
+
+
+def _definition_kind(
+    shape: Mapping[str, Any] | None,
+    categories: tuple[str, ...],
+    definition_kind: str,
+) -> str:
+    if shape is not None and shape["categories"]:
+        return str(shape["categories"][0])
+    return categories[-1] if categories else definition_kind
+
+
+def _shape_envelope(
+    shape: Mapping[str, Any] | None,
+) -> tuple[float, float, float] | None:
+    if shape is None or "envelope" not in shape:
+        return None
+    value = shape["envelope"]
+    return (float(value[0]), float(value[1]), float(value[2]))
+
+
+def _dimensions(
+    node: Mapping[str, Any],
+    definition: MaterialDefinitionProjection,
+) -> tuple[float, float, float]:
+    raw = _raw_dimensions(node)
+    fallback = definition.envelope_mm or _default_dimensions(definition.kind)
+    return tuple(
+        raw[index] if raw[index] > 0 else fallback[index] for index in range(3)
+    )  # type: ignore[return-value]
+
+
+def _raw_dimensions(node: Mapping[str, Any]) -> tuple[float, float, float]:
+    pose = _json_object(node.get("pose"))
+    size = _json_object(pose.get("size"))
+    config = _json_object(node.get("config"))
+    return (
+        max(_number(size.get("width"), config.get("size_x")), 0.0),
+        max(_number(size.get("height"), config.get("size_y")), 0.0),
+        max(_number(size.get("depth"), config.get("size_z")), 0.0),
+    )
+
+
+def _default_dimensions(kind: str) -> tuple[float, float, float]:
+    normalized = _normalize_category(kind)
+    if "deck" in normalized:
+        return (2400.0, 1800.0, 60.0)
+    if "stack" in normalized or "warehouse" in normalized:
+        return (360.0, 300.0, 720.0)
+    if "robot" in normalized or "arm" in normalized:
+        return (420.0, 420.0, 850.0)
+    if "container" in normalized or "bottle" in normalized or "vial" in normalized:
+        return (100.0, 100.0, 180.0)
+    if "tip-box" in normalized:
+        return (130.0, 90.0, 75.0)
+    if "workstation" in normalized or "liquid-handler" in normalized:
+        return (480.0, 420.0, 520.0)
+    return (320.0, 280.0, 320.0)
+
+
+def _position(node: Mapping[str, Any]) -> tuple[float, float, float]:
+    pose = _json_object(node.get("pose"))
+    position = _json_object(pose.get("position"))
+    return (
+        _number(position.get("x")),
+        _number(position.get("y")),
+        _number(position.get("z")),
+    )
+
+
+def _scale_and_rotation(node: Mapping[str, Any]) -> dict[str, float]:
+    pose = _json_object(node.get("pose"))
+    scale = _json_object(pose.get("scale"))
+    rotation = _json_object(pose.get("rotation"))
+    return {
+        "scale_x": _positive_number(scale.get("x"), 1.0),
+        "scale_y": _positive_number(scale.get("y"), 1.0),
+        "scale_z": _positive_number(scale.get("z"), 1.0),
+        "rotation_x": _number(rotation.get("x")),
+        "rotation_y": _number(rotation.get("y")),
+        "rotation_z": _number(rotation.get("z")),
+    }
+
+
+def _is_internal_site(node: Mapping[str, Any]) -> bool:
+    config = _json_object(node.get("config"))
+    candidates = {
+        str(node.get("type") or "").replace("-", "_").casefold(),
+        str(config.get("type") or "").replace("-", "_").casefold(),
+        str(config.get("category") or "").replace("-", "_").casefold(),
+    }
+    return bool(candidates & _INTERNAL_SITE_TYPES)
+
+
+def _occupied_material_index(
+    owner_runtime_uuid: str,
+    material_nodes: Sequence[Mapping[str, Any]],
+    material_uuid_by_runtime_uuid: Mapping[str, str],
+) -> dict[str, str]:
+    """Index one owner's direct Material children by stable source references."""
+
+    result: dict[str, str] = {}
+    for child in material_nodes:
+        if _optional_string(child.get("parent_uuid")) != owner_runtime_uuid:
+            continue
+        runtime_uuid = _required_string(child.get("uuid"), "child.uuid")
+        material_uuid = material_uuid_by_runtime_uuid[runtime_uuid]
+        references = {
+            runtime_uuid,
+            _required_string(child.get("id"), "child.id"),
+            _required_string(child.get("name") or child.get("id"), "child.name"),
+        }
+        for reference in references:
+            existing = result.get(reference)
+            if existing is not None and existing != material_uuid:
+                raise ValueError(f"同一 owner 下的 occupied_by 引用不唯一: {reference}")
+            result[reference] = material_uuid
+    return result
+
+
+def _declared_site_position(
+    site: Mapping[str, Any],
+    label: str,
+) -> tuple[float, float, float]:
+    position = _json_object(site.get("position"))
+    return (
+        _finite_number(position.get("x"), f"Site {label} position.x"),
+        _finite_number(position.get("y"), f"Site {label} position.y"),
+        _finite_number(position.get("z"), f"Site {label} position.z"),
+    )
+
+
+def _declared_site_dimensions(
+    site: Mapping[str, Any],
+    label: str,
+) -> tuple[float, float, float]:
+    size = _json_object(site.get("size"))
+    dimensions = (
+        _finite_number(size.get("width"), f"Site {label} size.width"),
+        _finite_number(size.get("height"), f"Site {label} size.height"),
+        _finite_number(size.get("depth"), f"Site {label} size.depth"),
+    )
+    if any(value < 0 for value in dimensions):
+        raise ValueError(f"Site {label} size 不得为负数")
+    return dimensions
+
+
+def _declared_site_template_uuids(
+    site: Mapping[str, Any],
+    package_projection: PackageMaterialProjection,
+    resolved_identities: Mapping[str, str],
+    label: str,
+) -> list[str]:
+    content_types = site.get("content_type", [])
+    if not isinstance(content_types, Sequence) or isinstance(
+        content_types, (str, bytes)
+    ):
+        raise ValueError(f"Site {label} content_type 必须是数组")
+    template_uuids: list[str] = []
+    for content_type in content_types:
+        graph_class = _required_string(content_type, f"Site {label} content_type")
+        definition = _resolve_graph_definition(
+            package_projection,
+            graph_class,
+            field=f"Site {label} content_type",
+        )
+        template_uuid = resolved_identities.get(definition.source_identity)
+        if template_uuid is None:
+            raise ValueError(
+                f"Site {label} ResourceTemplate identity 未解析: "
+                f"{definition.source_identity}"
+            )
+        if template_uuid not in template_uuids:
+            template_uuids.append(template_uuid)
+    return template_uuids
+
+
+def _declared_site_occupant(
+    site: Mapping[str, Any],
+    occupied_material_by_reference: Mapping[str, str],
+    label: str,
+) -> str | None:
+    raw_occupant = site.get("occupied_by")
+    if raw_occupant is None or raw_occupant == "":
+        return None
+    occupant = _required_string(raw_occupant, f"Site {label} occupied_by")
+    material_uuid = occupied_material_by_reference.get(occupant)
+    if material_uuid is None:
+        raise ValueError(
+            f"Site {label} occupied_by 未解析为 owner 的直接 Material: {occupant}"
+        )
+    return material_uuid
+
+
+def _resolve_graph_definition(
+    package_projection: PackageMaterialProjection,
+    graph_class: str,
+    *,
+    field: str = "ResourceTreeSet class",
+) -> MaterialDefinitionProjection:
+    """按 canonical FQID 解析 Graph definition，并窄兼容唯一 local id。"""
+
+    try:
+        exact = package_projection.definitions.get(graph_class)
+        if exact is not None:
+            return exact
+        canonical_definitions = {
+            definition.canonical_identity or identity: definition
+            for identity, definition in package_projection.definitions.items()
+            if definition.canonical_identity is not None
+        }
+        _canonical_identity, definition = resolve_definition_identity(
+            canonical_definitions,
+            graph_class,
+        )
+    except DefinitionIdentityAmbiguous:
+        raise ValueError(f"{field} legacy short id 歧义: {graph_class}")
+    except DefinitionIdentityNotFound:
+        raise ValueError(f"{field} 未进入 PackageCatalog: {graph_class}")
+    return definition
+
+
+def _declared_site_kind(
+    site: Mapping[str, Any],
+    owner_node: Mapping[str, Any],
+) -> str:
+    declared = _optional_string(site.get("kind"))
+    if declared is not None:
+        normalized = _normalize_category(declared)
+        if normalized in {"site", "deck-slot", "well", "tip-spot"}:
+            return normalized
+    owner_config = _json_object(owner_node.get("config"))
+    owner_tokens = " ".join(
+        str(value or "")
+        for value in (
+            owner_node.get("type"),
+            owner_node.get("class"),
+            owner_config.get("type"),
+            owner_config.get("category"),
+        )
+    )
+    normalized_owner = _normalize_category(owner_tokens)
+    if "tip-box" in normalized_owner or "tip-rack" in normalized_owner:
+        return "tip-spot"
+    if "well" in normalized_owner:
+        return "well"
+    if "deck" in normalized_owner:
+        return "deck-slot"
+    return "site"
+
+
+def _stable_uuid(source_id: str, domain: str, value: str) -> str:
+    return str(uuid.uuid5(uuid.NAMESPACE_URL, f"unilabos:{source_id}:{domain}:{value}"))
+
+
+def _canonical_material_uuid(
+    source_id: str,
+    *,
+    runtime_uuid: str,
+    node_id: str,
+) -> str:
+    try:
+        parsed = uuid.UUID(runtime_uuid)
+    except (AttributeError, ValueError):
+        return _stable_uuid(source_id, "material", node_id)
+    if parsed.int != 0 and str(parsed) == runtime_uuid:
+        return runtime_uuid
+    return _stable_uuid(source_id, "material", node_id)
+
+
+def _normalize_category(value: str) -> str:
+    return value.strip().replace("_", "-").casefold()
+
+
+def _json_object(value: object) -> dict[str, Any]:
+    if value is None:
+        return {}
+    if not isinstance(value, Mapping):
+        raise ValueError("投影字段必须是 JSON object")
+    return json.loads(json.dumps(dict(value), allow_nan=False, ensure_ascii=False))
+
+
+def _required_string(value: object, field: str) -> str:
+    if not isinstance(value, str) or not value.strip():
+        raise ValueError(f"{field} 必须是非空字符串")
+    return value.strip()
+
+
+def _optional_string(value: object) -> str | None:
+    return value.strip() if isinstance(value, str) and value.strip() else None
+
+
+def _finite_number(value: object, field: str) -> float:
+    if isinstance(value, bool):
+        raise ValueError(f"{field} 必须是有限数值")
+    try:
+        result = float(value)
+    except (TypeError, ValueError, OverflowError) as exc:
+        raise ValueError(f"{field} 必须是有限数值") from exc
+    if not math.isfinite(result):
+        raise ValueError(f"{field} 必须是有限数值")
+    return result
+
+
+def _number(primary: object, fallback: object = 0.0) -> float:
+    for value in (primary, fallback):
+        try:
+            result = float(value)
+        except (TypeError, ValueError, OverflowError):
+            continue
+        if math.isfinite(result):
+            return result
+    return 0.0
+
+
+def _positive_number(value: object, fallback: float) -> float:
+    result = _number(value, fallback)
+    return result if result > 0 else fallback
+
+
+__all__ = [
+    "MaterialDefinitionProjection",
+    "PackageMaterialProjection",
+    "build_package_material_projection",
+    "build_resource_graph_import",
+]

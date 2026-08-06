@@ -8,6 +8,13 @@ class BasicConfig:
     workflow_editable_package_roots = ()
 
 
+class ObservabilityConfig:
+    # 安装 `pip install -e '.[observability]'` 后设为 True，Uni-Lab-OS 会自动启动 Phoenix。
+    enabled = False
+    project_name = "uni-lab-electron"
+    retention_days = 30
+
+
 # WebSocket配置，一般无需调整
 class WSConfig:
     reconnect_interval = 5  # 重连间隔（秒）

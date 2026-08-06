@@ -15,6 +15,7 @@
 from __future__ import annotations
 
 import threading
+from collections.abc import Mapping
 from typing import Any, Callable, Dict, List, Optional
 
 
@@ -88,4 +89,86 @@ class LocalResourceResolver:
         return None
 
 
-__all__ = ["LocalResourceResolver", "ResourceNotFound"]
+class InventoryResourceAliasResolver:
+    """Resolve durable Inventory UUIDs through ResourceTree source identities.
+
+    Resource graph nodes without explicit UUIDs may receive a new runtime UUID
+    after an OS restart, while Inventory intentionally preserves the UUID first
+    admitted into its durable store.  ``meta_data.source_node_id`` is the stable
+    join key between those two representations.  Returned nodes are rebound to
+    Inventory UUIDs so downstream ResourceSlot conversion and material
+    accounting use the same identity.
+    """
+
+    def __init__(
+        self,
+        local_resolver: LocalResourceResolver,
+        inventory_snapshot_getter: Callable[[], Mapping[str, Any]],
+    ) -> None:
+        self._local_resolver = local_resolver
+        self._get_inventory_snapshot = inventory_snapshot_getter
+
+    def resolve(self, *, uuid: str, with_children: bool = True) -> List[Dict[str, Any]]:
+        try:
+            return self._local_resolver.resolve(
+                uuid=uuid,
+                with_children=with_children,
+            )
+        except ResourceNotFound as local_error:
+            snapshot = self._get_inventory_snapshot()
+            materials = snapshot.get("materials", []) if isinstance(snapshot, Mapping) else []
+            if not isinstance(materials, list):
+                raise local_error
+
+            active_materials = [
+                material
+                for material in materials
+                if isinstance(material, Mapping) and material.get("deleted_at") is None
+            ]
+            by_uuid = {
+                str(material.get("uuid")): material
+                for material in active_materials
+                if material.get("uuid")
+            }
+            target = by_uuid.get(uuid)
+            if target is None:
+                raise local_error
+            target_meta = target.get("meta_data")
+            source_node_id = (
+                str(target_meta.get("source_node_id"))
+                if isinstance(target_meta, Mapping) and target_meta.get("source_node_id")
+                else ""
+            )
+            if not source_node_id:
+                raise local_error
+
+            runtime_nodes = self._local_resolver.resolve(
+                res_id=source_node_id,
+                with_children=with_children,
+            )
+            by_source_node_id = {}
+            for material in active_materials:
+                meta_data = material.get("meta_data")
+                if isinstance(meta_data, Mapping) and meta_data.get("source_node_id"):
+                    by_source_node_id[str(meta_data["source_node_id"])] = material
+
+            rebound_nodes: List[Dict[str, Any]] = []
+            for runtime_node in runtime_nodes:
+                rebound = dict(runtime_node)
+                material = by_source_node_id.get(str(runtime_node.get("id") or ""))
+                if material is not None:
+                    rebound["uuid"] = str(material["uuid"])
+                    rebound["parent_uuid"] = material.get("parent_uuid")
+                    rebound["resource_template_uuid"] = material.get(
+                        "resource_template_uuid"
+                    )
+                    rebound["meta_data"] = dict(material.get("meta_data") or {})
+                rebound_nodes.append(rebound)
+            return rebound_nodes
+
+
+__all__ = [
+    "InventoryResourceAliasResolver",
+    "LocalResourceResolver",
+    "ResourceNotFound",
+]

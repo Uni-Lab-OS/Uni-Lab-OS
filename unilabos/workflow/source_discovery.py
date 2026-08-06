@@ -12,6 +12,7 @@ from unilabos.workflow.source_manifest import (
 )
 from unilabos.workflow.source_workspace import (
     SourceWorkspaceError,
+    pin_package_roots,
     read_package_root,
     validate_declared_sources,
 )
@@ -58,6 +59,16 @@ class EditableSourceDiscoveryPlan:
     root_identities: tuple[tuple[Path, tuple[int, int]], ...]
 
 
+@dataclass(frozen=True)
+class EditablePackageManifest:
+    """为领域包编译器保留的已验证可编辑包声明。"""
+
+    package_id: str
+    package_root: Path
+    package_root_identity: tuple[int, int]
+    workflows: tuple[object, ...]
+
+
 def discover_editable_sources(
     authorized_roots: Iterable[str | Path],
 ) -> EditableSourceDiscoveryPlan:
@@ -102,6 +113,80 @@ def discover_editable_sources(
     )
 
 
+def load_editable_package_manifest(
+    package_root: str | Path,
+) -> EditablePackageManifest:
+    """读取一个可编辑包并返回兼容的静态声明投影。
+
+    实际文件安全和身份固定仍由产品基线的源码工作区
+    （Source Workspace）实现统一负责。
+    """
+
+    try:
+        snapshot = read_package_root(package_root)
+        manifest = parse_editable_package_manifest(snapshot.manifest_bytes)
+        source_snapshot = validate_declared_sources(
+            snapshot,
+            package_id=manifest.package_id,
+            relative_paths=(entry.relative_path for entry in manifest.workflows),
+        )
+    except (SourceWorkspaceError, SourceManifestError) as error:
+        raise SourceDeclarationError(error.code) from None
+    return EditablePackageManifest(
+        package_id=manifest.package_id,
+        package_root=source_snapshot.package_root,
+        package_root_identity=source_snapshot.identity,
+        workflows=manifest.workflows,
+    )
+
+
+def register_editable_package_sources(
+    service: object,
+    package_root: str | Path | tuple[str | Path, ...],
+) -> tuple[dict[str, object], ...]:
+    """全量预检后原子注册可编辑包的工作流源码。"""
+
+    roots = (
+        (package_root,)
+        if isinstance(package_root, (str, Path))
+        else tuple(package_root)
+    )
+    plan = discover_editable_sources(roots)
+    replace_authorizations = getattr(
+        service,
+        "replace_discovered_source_authorizations",
+        None,
+    )
+    if callable(replace_authorizations):
+        return tuple(replace_authorizations(plan))
+
+    register_source = getattr(service, "register_editable_source", None)
+    if not callable(register_source):
+        raise TypeError("工作流服务缺少可编辑源码注册接口")
+    rows = tuple(
+        {
+            "workflow_uuid": registration.workflow_uuid,
+            "package_id": registration.package_id,
+            "package_root": registration.package_root,
+            "relative_path": registration.relative_path,
+        }
+        for registration in plan.registrations
+    )
+    try:
+        with pin_package_roots(plan.root_identities) as pinned_roots:
+            batch = getattr(service, "editable_source_registration_batch", None)
+            if callable(batch):
+                with batch():
+                    registered = tuple(register_source(**row) for row in rows)
+                    pinned_roots.assert_current()
+                    return registered
+            registered = tuple(register_source(**row) for row in rows)
+            pinned_roots.assert_current()
+            return registered
+    except SourceWorkspaceError:
+        raise SourceDeclarationError("invalid_package_root") from None
+
+
 def _validate_unique_registrations(
     registrations: Iterable[EditableSourceRegistration],
 ) -> None:
@@ -140,8 +225,11 @@ def _validate_unique_registrations(
 
 
 __all__ = [
+    "EditablePackageManifest",
     "EditableSourceDiscoveryPlan",
     "EditableSourceRegistration",
     "SourceDeclarationError",
     "discover_editable_sources",
+    "load_editable_package_manifest",
+    "register_editable_package_sources",
 ]
