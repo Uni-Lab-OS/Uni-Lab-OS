@@ -154,14 +154,14 @@ def test_package_subcommand_preserves_explicit_top_level_workspace(
     assert parsed.workspace == str(workspace_root)
 
 
-def test_package_inspect_parser_keeps_legacy_argument_contract(
+def test_package_inspect_parser_keeps_public_argument_contract(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """解析职责迁入 package_manager 后仍保留既有 inspect 参数字段。
 
     参数：``monkeypatch`` 隔离公共命令行参数。
     返回：无；断言路径、命名空间和产物目录继续使用原字段名。
-    异常：若删除兼容模块时误改公开命令形状，argparse 或断言失败。
+    异常：若分层目录迁移误改公开命令形状，argparse 或断言失败。
     """
 
     from unilabos.app.main import parse_args

@@ -264,12 +264,12 @@ def load_locked_package_catalogs(
 
     # ``workspace_source`` 固定依赖来源相对路径与主包聚合校验的共同根。
     workspace_source = WorkspaceSource(workspace)
-    # ``package_sources`` 保留每个依赖目录对应的显式来源，但兼容接口只返回目录。
+    # ``package_sources`` 保留每个依赖目录对应的显式来源，正式查询接口只返回目录。
     package_sources = load_locked_package_sources(
         workspace_source.root,
         compile_catalog=compile_catalog,
     )
-    # ``catalogs`` 是不暴露物理来源的兼容包目录返回集合。
+    # ``catalogs`` 是正式查询接口不暴露物理来源的包目录（PackageCatalog）结果。
     catalogs = tuple(item.catalog for item in package_sources)
     validate_complete_generation(
         workspace=workspace_source,

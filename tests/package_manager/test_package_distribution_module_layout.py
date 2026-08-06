@@ -36,7 +36,7 @@ def _package_distribution_reverse_dependency_violations(
     # ``violations`` 按文件和 AST 顺序保存精确越层依赖位置。
     violations: list[str] = []
     for source_file in sorted(module_root.rglob("*.py")):
-        # ``relative_file`` 是报告和唯一兼容桥匹配使用的 Module 内稳定路径。
+        # ``relative_file`` 是报告依赖方向违规时使用的 Module 内稳定路径。
         relative_file = source_file.relative_to(module_root)
         # ``module_parts`` 用于恢复相对 import 所在 Python 包身份。
         module_parts = list(relative_file.with_suffix("").parts)
@@ -188,9 +188,9 @@ def test_internal_callers_depend_on_package_distribution_interface() -> None:
     """命令行与运行时调用者必须直接依赖包分发（Package Distribution）Interface。
 
     参数：无。
-    返回：无；断言产品调用者不再穿过历史 ``dependency_lock`` 或
-    ``publication`` wrapper。
-    异常：内部调用者保留遗留导入或没有采用新 Module 时测试失败。
+    返回：无；断言产品调用者不再穿过已删除的 ``dependency_lock`` 或
+    ``publication`` 平铺路径。
+    异常：内部调用者重新引入已删除路径或没有采用新 Module 时测试失败。
     """
 
     # ``package_manager_root`` 是需要验证内部调用依赖方向的源码根。
@@ -206,8 +206,8 @@ def test_internal_callers_depend_on_package_distribution_interface() -> None:
             "unilabos.package_manager.package_distribution",
         },
     }
-    # ``legacy_modules`` 是只能供外部兼容、不能供产品内部调用的历史路径。
-    legacy_modules = {
+    # ``deleted_flat_modules`` 是本次迁移后禁止重新引入的平铺路径。
+    deleted_flat_modules = {
         "unilabos.package_manager.dependency_lock",
         "unilabos.package_manager.installation",
         "unilabos.package_manager.publication",
@@ -236,11 +236,11 @@ def test_internal_callers_depend_on_package_distribution_interface() -> None:
                 )
             imported_modules.add(imported_name)
         assert required_modules <= imported_modules
-        assert imported_modules.isdisjoint(legacy_modules)
+        assert imported_modules.isdisjoint(deleted_flat_modules)
 
 
 def test_package_distribution_module_has_no_reverse_layer_dependency() -> None:
-    """包分发（Package Distribution）全树不反向依赖历史实现或运行时层。
+    """包分发（Package Distribution）全树不依赖已删除路径或运行时层。
 
     参数：无。
     返回：无；解析新 Module 的全部顶层和函数内 import，不允许任何高层反向桥。

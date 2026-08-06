@@ -23,7 +23,7 @@ def test_new_package_catalog_interface_compiles_the_same_catalog(
         WorkspaceSource,
     )
     from unilabos.package_manager import (
-        compile_package_source as compile_legacy_package_source,
+        compile_package_source as compile_facade_package_source,
     )
     from unilabos.package_manager.package_catalog import (
         PackageCatalog,
@@ -41,7 +41,7 @@ def test_new_package_catalog_interface_compiles_the_same_catalog(
     startup_plan = compile_workspace_startup(source)
 
     # ``facade_catalog`` 是根门面编排入口产生的行为基准包目录（PackageCatalog）。
-    facade_catalog = compile_legacy_package_source(
+    facade_catalog = compile_facade_package_source(
         source,
         startup_plan=startup_plan,
     )
@@ -82,11 +82,11 @@ def test_flat_package_catalog_wrapper_modules_do_not_exist() -> None:
     )
 
 
-def test_legacy_compiler_preserves_invalid_source_diagnostic(tmp_path: Path) -> None:
-    """根兼容编译入口继续把工作区发现失败归一为既有结构化诊断。
+def test_facade_compiler_preserves_invalid_source_diagnostic(tmp_path: Path) -> None:
+    """正式根门面（Facade）把工作区发现失败归一为既有结构化诊断。
 
     参数：``tmp_path`` 提供缺少项目清单的隔离工作区来源。
-    返回：无；断言遗留入口仍抛出 ``package_source_invalid``。
+    返回：无；断言正式门面（Facade）仍抛出 ``package_source_invalid``。
     异常：输入反转使高层解析异常泄漏为原始 ``ValueError`` 时测试失败。
     """
 
@@ -102,7 +102,7 @@ def test_legacy_compiler_preserves_invalid_source_diagnostic(tmp_path: Path) -> 
     invalid_workspace_root = tmp_path / "invalid-workspace"
     invalid_workspace_root.mkdir()
 
-    # ``caught`` 保存根兼容入口对非法来源产生的结构化编译诊断。
+    # ``caught`` 保存正式根门面（Facade）对非法来源产生的结构化编译诊断。
     with pytest.raises(PackageCompileError) as caught:
         compile_package_source(WorkspaceSource(invalid_workspace_root))
 
@@ -116,7 +116,8 @@ def test_package_catalog_module_has_no_reverse_dependency_on_parent_layers() -> 
 
     参数：无。
     返回：无；逐个解析新 Module 的 import，并断言只依赖自身或更底层能力。
-    异常：出现遗留根实现、包分发、工作区运行时或候选驱动运行时依赖时测试失败。
+    异常：出现已删除平铺路径、包分发、工作区运行时或候选驱动运行时依赖时
+    测试失败。
     """
 
     # ``module_root`` 是包目录（PackageCatalog）新 Module 的唯一源码边界。

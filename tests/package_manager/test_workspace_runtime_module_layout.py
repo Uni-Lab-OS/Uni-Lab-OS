@@ -123,11 +123,11 @@ def test_registry_snapshot_publication_is_owned_by_workspace_runtime(
 
 
 def test_product_callers_depend_directly_on_workspace_runtime_module() -> None:
-    """产品调用者依赖新工作区运行时（Workspace Runtime），不穿过历史 wrapper。
+    """产品调用者依赖工作区运行时（Workspace Runtime），不穿过已删除平铺路径。
 
     参数：无。
     返回：无；断言根门面、投影编译器和产品组合根采用新 Module 路径。
-    异常：内部调用者继续引用历史平铺实现时测试失败。
+    异常：内部调用者重新引用已删除平铺路径时测试失败。
     """
 
     # ``repository_root`` 是解析 OS 产品调用者导入方向的源码根。
@@ -150,8 +150,8 @@ def test_product_callers_depend_directly_on_workspace_runtime_module() -> None:
             "unilabos.package_manager.workspace_runtime",
         },
     }
-    # ``legacy_modules`` 只能保留给外部兼容调用，产品实现不得继续依赖。
-    legacy_modules = {
+    # ``deleted_flat_modules`` 是本次迁移后禁止重新引入的平铺路径。
+    deleted_flat_modules = {
         "unilabos.package_manager.compiler",
         "unilabos.package_manager.product_lifecycle",
         "unilabos.package_manager.refresh_coordinator",
@@ -181,10 +181,10 @@ def test_product_callers_depend_directly_on_workspace_runtime_module() -> None:
                 )
             imported_modules.add(imported_name)
         assert required_modules <= imported_modules
-        assert imported_modules.isdisjoint(legacy_modules)
+        assert imported_modules.isdisjoint(deleted_flat_modules)
 
 
-def test_workspace_runtime_dependency_direction_has_no_legacy_bridge() -> None:
+def test_workspace_runtime_dependency_direction_has_no_deleted_flat_bridge() -> None:
     """新运行时不依赖平铺模块，纯快照也不反向依赖实时发布层。
 
     参数：无。
@@ -193,12 +193,12 @@ def test_workspace_runtime_dependency_direction_has_no_legacy_bridge() -> None:
     异常：出现越层 import 或任一运行时桥时测试失败。
     """
 
-    # ``package_manager_root`` 是新 Module、纯快照与历史 wrapper 的共同源码根。
+    # ``package_manager_root`` 是分层 Module 与纯快照所在的共同源码根。
     package_manager_root = (
         Path(__file__).resolve().parents[2] / "unilabos" / "package_manager"
     )
-    # ``legacy_module_names`` 是新工作区运行时（Workspace Runtime）禁止依赖的路径。
-    legacy_module_names = {
+    # ``deleted_flat_module_names`` 是工作区运行时（Workspace Runtime）禁止依赖的路径。
+    deleted_flat_module_names = {
         "unilabos.package_manager.compiler",
         "unilabos.package_manager.product_lifecycle",
         "unilabos.package_manager.refresh_coordinator",
@@ -207,7 +207,7 @@ def test_workspace_runtime_dependency_direction_has_no_legacy_bridge() -> None:
         "unilabos.package_manager.workspace_file_monitor",
         "unilabos.package_manager.workspace_startup",
     }
-    # ``violations`` 保存新 Module 对历史 wrapper 的精确依赖位置。
+    # ``violations`` 保存新 Module 对已删除平铺路径的精确依赖位置。
     violations: list[str] = []
     runtime_root = package_manager_root / "workspace_runtime"
     for source_file in sorted(runtime_root.rglob("*.py")):
@@ -226,7 +226,7 @@ def test_workspace_runtime_dependency_direction_has_no_legacy_bridge() -> None:
                     "." * node.level + imported_name,
                     package_name,
                 )
-            if imported_name in legacy_module_names:
+            if imported_name in deleted_flat_module_names:
                 violations.append(
                     f"{source_file.relative_to(runtime_root)}:{node.lineno}:"
                     f"{imported_name}"
