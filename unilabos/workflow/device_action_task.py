@@ -700,7 +700,12 @@ class DeviceActionTaskService:
                    t.create_time AS task_create_time,
                    t.update_time AS task_update_time,
                    t.started_at, t.finished_at,
-                   j.status AS job_status, j.feedback_sequence
+                   j.status AS job_status, j.feedback_sequence,
+                   j.claim_status AS job_claim_status,
+                   j.inventory_claim_uuid AS job_claim_uuid,
+                   j.inventory_fencing_token AS job_fencing_token,
+                   j.inventory_claim_members AS job_claim_members,
+                   j.blocking_claim_uuid AS job_blocking_claim_uuid
             FROM device_action_task AS d
             JOIN workflow_task AS t ON t.uuid = d.workflow_task_uuid
             JOIN workflow_node_job AS j ON j.uuid = d.workflow_node_job_uuid
@@ -728,6 +733,19 @@ class DeviceActionTaskService:
             "error_info": _load(row["error_info"], []),
             "job_status": row["job_status"],
             "feedback_cursor": row["feedback_sequence"],
+            "execution_claim": {
+                "status": (
+                    row["job_claim_status"]
+                    if row["job_claim_status"] != "pending"
+                    else row["claim_status"]
+                ),
+                "uuid": row["job_claim_uuid"] or row["inventory_claim_uuid"],
+                "fencing_token": (
+                    row["job_fencing_token"] or row["inventory_fencing_token"]
+                ),
+                "members": _load(row["job_claim_members"], []),
+                "blocking_claim_uuid": row["job_blocking_claim_uuid"],
+            },
             "create_time": row["task_create_time"],
             "update_time": row["task_update_time"],
             "started_at": row["started_at"],
@@ -860,6 +878,16 @@ class DeviceActionTaskRuntimeBridge:
         claims_by_job: dict[str, Any] = {}
         for claim in audited_claims:
             job_uuid = claim.workflow_node_job_uuid
+            if job_uuid not in rows_by_job:
+                if self._store.is_device_action_job(job_uuid):
+                    raise WorkflowError("reconciliation_required")
+                # 普通工作流作业由 WorkflowJobClaimCoordinator 恢复；D1A 不得
+                # 把共享 Inventory authority 中的合法占用误判为孤儿。
+                try:
+                    self._store.get_job(job_uuid)
+                except Exception:  # noqa: BLE001 - 跨权威孤儿必须关闭失败
+                    raise WorkflowError("reconciliation_required") from None
+                continue
             if job_uuid in claims_by_job:
                 raise WorkflowError("reconciliation_required")
             claims_by_job[job_uuid] = claim
@@ -1612,6 +1640,32 @@ class DeviceActionTaskRuntimeBridge:
             attempt=1,
         )
         if claim_result.status == "blocked":
+            blocker = next(
+                (
+                    str(item["blocking_claim_uuid"])
+                    for item in claim_result.diagnostics
+                    if item.get("code") == "claim_blocked"
+                    and item.get("blocking_claim_uuid")
+                ),
+                None,
+            )
+            with self._store.transaction() as connection:
+                now = utc_now()
+                connection.execute(
+                    """
+                    UPDATE workflow_node_job
+                    SET claim_status = 'waiting_for_claim',
+                        blocking_claim_uuid = ?, update_time = ?
+                    WHERE uuid = ? AND status = 'pending'
+                    """,
+                    (blocker, now, job_uuid),
+                )
+                WorkflowStore._append_event(
+                    connection,
+                    event="device_action_task.changed",
+                    data={"task_uuid": task_uuid},
+                    now=now,
+                )
             return False
         if claim_result.status != "acquired" or claim_result.claim is None:
             raise WorkflowError("conflict")
@@ -1653,9 +1707,30 @@ class DeviceActionTaskRuntimeBridge:
             connection.execute(
                 """
                 UPDATE workflow_node_job
-                SET status = 'dispatched', update_time = ? WHERE uuid = ?
+                SET status = 'dispatched', claim_status = 'claimed',
+                    inventory_claim_uuid = ?, inventory_fencing_token = ?,
+                    inventory_claim_set_fingerprint = ?,
+                    inventory_claim_members = ?, blocking_claim_uuid = NULL,
+                    update_time = ? WHERE uuid = ?
                 """,
-                (now, job_uuid),
+                (
+                    claim.uuid,
+                    claim.fencing_token,
+                    claim.set_fingerprint,
+                    _json(
+                        [
+                            {
+                                "resource_kind": member.resource_kind,
+                                "resource_uuid": member.resource_uuid,
+                                "acquired_version": member.acquired_version,
+                                "expected_version": member.expected_version,
+                            }
+                            for member in claim.members
+                        ]
+                    ),
+                    now,
+                    job_uuid,
+                ),
             )
             connection.execute(
                 """
@@ -1748,6 +1823,13 @@ class DeviceActionTaskRuntimeBridge:
                 UPDATE device_action_task
                 SET claim_status = 'unknown', update_time = ?
                 WHERE workflow_node_job_uuid = ?
+                """,
+                (now, job_uuid),
+            )
+            connection.execute(
+                """
+                UPDATE workflow_node_job
+                SET claim_status = 'unknown', update_time = ? WHERE uuid = ?
                 """,
                 (now, job_uuid),
             )
@@ -2028,7 +2110,7 @@ class DeviceActionTaskRuntimeBridge:
                 """
                 UPDATE workflow_node_job
                 SET status = ?, return_info = ?, error_info = ?,
-                    uncertainty_reason = NULL,
+                    uncertainty_reason = NULL, claim_status = 'claimed',
                     finished_at = COALESCE(finished_at, ?), update_time = ?
                 WHERE uuid = ?
                 """,
@@ -2121,6 +2203,13 @@ class DeviceActionTaskRuntimeBridge:
                   AND workflow_terminal_fingerprint = ?
                 """,
                 (now, job_uuid, terminal_fingerprint),
+            )
+            connection.execute(
+                """
+                UPDATE workflow_node_job
+                SET claim_status = 'released', update_time = ? WHERE uuid = ?
+                """,
+                (now, job_uuid),
             )
             connection.execute(
                 """

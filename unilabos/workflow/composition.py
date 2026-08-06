@@ -652,6 +652,7 @@ def compose_workflow_runtime(
                     runtime_coordinator,
                     dispatcher=workflow_job_dispatcher,
                     device_identity_resolver=device_identity_resolver,
+                    inventory=new_inventory_service,
                 )
             # Reconciliation 已完成，可以读取一致 baseline；monitor 从空签名集启动，
             # 会捕获此发布点与线程启动之间发生的变化。

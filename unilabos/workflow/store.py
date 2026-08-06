@@ -316,6 +316,18 @@ CREATE TABLE IF NOT EXISTS workflow_node_job (
     cancel_ack_deadline_at TEXT,
     cancel_complete_deadline_at TEXT,
     uncertainty_reason TEXT,
+    claim_status TEXT NOT NULL DEFAULT 'pending'
+        CHECK (claim_status IN
+               ('pending', 'waiting_for_claim', 'claimed', 'unknown', 'released')),
+    inventory_claim_uuid TEXT,
+    inventory_fencing_token INTEGER CHECK (
+        inventory_fencing_token IS NULL OR inventory_fencing_token > 0
+    ),
+    inventory_claim_set_fingerprint TEXT,
+    inventory_claim_members TEXT NOT NULL DEFAULT '[]'
+        CHECK (json_valid(inventory_claim_members)
+               AND json_type(inventory_claim_members) = 'array'),
+    blocking_claim_uuid TEXT,
     started_at TEXT,
     finished_at TEXT,
     FOREIGN KEY(workflow_task_uuid) REFERENCES workflow_task(uuid)
@@ -626,6 +638,7 @@ class WorkflowStore:
                 self._conn.execute("PRAGMA synchronous = NORMAL")
                 self._conn.executescript(_SCHEMA)
                 self._migrate_m1ef_projection_schema()
+                self._migrate_job_claim_projection_schema()
                 self._install_m1ef_projection_guards()
         except BaseException:
             self._conn.close()
@@ -735,6 +748,55 @@ class WorkflowStore:
                 self._conn.execute("PRAGMA foreign_keys = ON")
         else:
             self._conn.commit()
+
+    def _migrate_job_claim_projection_schema(self) -> None:
+        """给历史 Workflow DB 补共享作业执行占用只读投影。"""
+
+        columns = {
+            str(row[1])
+            for row in self._conn.execute('PRAGMA table_info("workflow_node_job")')
+        }
+        additions = (
+            (
+                "claim_status",
+                """ALTER TABLE workflow_node_job
+                   ADD COLUMN claim_status TEXT NOT NULL DEFAULT 'pending'
+                   CHECK (claim_status IN
+                          ('pending', 'waiting_for_claim', 'claimed',
+                           'unknown', 'released'))""",
+            ),
+            (
+                "inventory_claim_uuid",
+                "ALTER TABLE workflow_node_job ADD COLUMN inventory_claim_uuid TEXT",
+            ),
+            (
+                "inventory_fencing_token",
+                """ALTER TABLE workflow_node_job
+                   ADD COLUMN inventory_fencing_token INTEGER
+                   CHECK (inventory_fencing_token IS NULL
+                          OR inventory_fencing_token > 0)""",
+            ),
+            (
+                "inventory_claim_set_fingerprint",
+                """ALTER TABLE workflow_node_job
+                   ADD COLUMN inventory_claim_set_fingerprint TEXT""",
+            ),
+            (
+                "inventory_claim_members",
+                """ALTER TABLE workflow_node_job
+                   ADD COLUMN inventory_claim_members TEXT NOT NULL DEFAULT '[]'
+                   CHECK (json_valid(inventory_claim_members)
+                          AND json_type(inventory_claim_members) = 'array')""",
+            ),
+            (
+                "blocking_claim_uuid",
+                "ALTER TABLE workflow_node_job ADD COLUMN blocking_claim_uuid TEXT",
+            ),
+        )
+        for name, statement in additions:
+            if name not in columns:
+                self._conn.execute(statement)
+        self._conn.commit()
 
     def _install_m1ef_projection_guards(self) -> None:
         """给新建与原位升级的 Workflow DB 安装相同的组合约束。"""
@@ -2913,6 +2975,8 @@ class WorkflowStore:
             "return_info": _load(row["return_info"], {}),
             "control_data": _load(row["control_data"], {}),
             "error_info": _load(row["error_info"], []),
+            "claim_status": row["claim_status"],
+            "claim_members": _load(row["inventory_claim_members"], []),
         }
         cls._add_optional(
             result,
@@ -2926,6 +2990,10 @@ class WorkflowStore:
             "cancel_ack_deadline_at",
             "cancel_complete_deadline_at",
             "uncertainty_reason",
+            ("inventory_claim_uuid", "claim_uuid"),
+            ("inventory_fencing_token", "fencing_token"),
+            ("inventory_claim_set_fingerprint", "claim_set_fingerprint"),
+            "blocking_claim_uuid",
             "started_at",
             "finished_at",
         )

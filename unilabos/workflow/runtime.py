@@ -11,6 +11,8 @@ from datetime import datetime, timezone
 from typing import Any, Dict, Optional, Protocol
 from uuid import uuid4
 
+from unilabos.app.scheduler.inventory.domain import InventoryError
+from unilabos.workflow.job_claim_execution import WorkflowJobClaimExecution
 from unilabos.workflow.json_codec import decode_json_bytes, encode_json
 from unilabos.workflow.store import (
     StoreConflict,
@@ -1151,6 +1153,7 @@ class WorkflowRuntimeWorker:
         *,
         dispatcher: WorkflowJobDispatcher | None = None,
         device_identity_resolver: Callable[[str], str | None] | None = None,
+        inventory: Any = None,
         poll_interval_seconds: float = 0.25,
     ):
         if poll_interval_seconds <= 0:
@@ -1172,7 +1175,13 @@ class WorkflowRuntimeWorker:
         self._job_settlement_lock = threading.RLock()
         self._listener_registered = False
         self._uses_completion_listener = False
+        self._status_listener_registered = False
         self._cancel_requests_inflight: set[str] = set()
+        self._job_claim_execution = (
+            WorkflowJobClaimExecution(coordinator, inventory)
+            if dispatcher is not None and inventory is not None
+            else None
+        )
         if dispatcher is not None:
             self._register_dispatcher_listener(dispatcher)
         self._task_reconciler: Callable[[str], object] | None = None
@@ -1227,6 +1236,9 @@ class WorkflowRuntimeWorker:
                 dispatcher.remove_job_completion_listener(self._on_job_completion)
             else:
                 dispatcher.remove_job_finished_listener(self._on_job_finished)
+            if self._status_listener_registered:
+                dispatcher.remove_job_status_listener(self._on_job_status)
+                self._status_listener_registered = False
 
     def _register_dispatcher_listener(
         self,
@@ -1244,6 +1256,10 @@ class WorkflowRuntimeWorker:
             dispatcher.add_job_finished_listener(self._on_job_finished)
             self._uses_completion_listener = False
         self._listener_registered = True
+        add_status_listener = getattr(dispatcher, "add_job_status_listener", None)
+        if callable(add_status_listener):
+            add_status_listener(self._on_job_status)
+            self._status_listener_registered = True
 
     def join(self, timeout: Optional[float] = None) -> None:
         thread = self._thread
@@ -1269,7 +1285,7 @@ class WorkflowRuntimeWorker:
                 if self._dispatcher is not None:
                     self._sweep_execution_cancellations()
                     self._sweep_execution_tasks()
-            except (sqlite3.Error, StoreConflict, StoreNotFound):
+            except (sqlite3.Error, InventoryError, StoreConflict, StoreNotFound):
                 _LOGGER.exception("Workflow runtime execution sweep failed")
             if self._stop_event.is_set():
                 return
@@ -1322,6 +1338,12 @@ class WorkflowRuntimeWorker:
                             job_uuid,
                         )
                         continue
+                    if self._job_claim_execution is not None:
+                        self._job_claim_execution.mark_dispatch_unknown(
+                            current,
+                            "workflow_job_cancel_unconfirmed",
+                            phase="cancel_unconfirmed",
+                        )
                     self._coordinator.mark_job_unknown(
                         job_uuid,
                         "workflow_job_cancel_unconfirmed",
@@ -1420,21 +1442,7 @@ class WorkflowRuntimeWorker:
                     incoming.get(job["workflow_node_uuid"], []),
                     jobs_by_node,
                 )
-                self._coordinator.transition_job(
-                    job["uuid"],
-                    "dispatched",
-                    param=payload["param"],
-                )
-                self._coordinator.transition_job(job["uuid"], "running")
-                _LOGGER.info(
-                    "Workflow Job dispatch task_uuid=%s job_uuid=%s "
-                    "device_id=%s action_name=%s",
-                    task_uuid,
-                    job["uuid"],
-                    payload["device_id"],
-                    payload["action_name"],
-                )
-            except (KeyError, TypeError, ValueError, StoreConflict) as error:
+            except (KeyError, TypeError, ValueError) as error:
                 self._fail_task(
                     task_uuid,
                     job["uuid"],
@@ -1442,6 +1450,49 @@ class WorkflowRuntimeWorker:
                     detail=str(error),
                 )
                 return
+            if self._job_claim_execution is not None:
+                try:
+                    admission = self._job_claim_execution.admit_dispatch(
+                        task=task,
+                        job=job,
+                        planned_node=planned_node,
+                        payload=payload,
+                    )
+                    if admission.status == "blocked":
+                        _LOGGER.info(
+                            "Workflow Job waiting_for_claim task_uuid=%s "
+                            "job_uuid=%s blocking_claim_uuid=%s",
+                            task_uuid,
+                            job["uuid"],
+                            admission.blocking_claim_uuid,
+                        )
+                        return
+                except (InventoryError, StoreConflict):
+                    # Claim authority 与 Workflow DB 是可重放的双写 saga。任一侧
+                    # 的暂态冲突都保持同一 attempt 为 pending，由下一轮重放；
+                    # 在持久派发意图提交前绝不发送物理命令。
+                    _LOGGER.exception(
+                        "Workflow Job claim admission retry task_uuid=%s "
+                        "job_uuid=%s",
+                        task_uuid,
+                        job["uuid"],
+                    )
+                    return
+            else:
+                self._coordinator.transition_job(
+                    job["uuid"],
+                    "dispatched",
+                    param=payload["param"],
+                )
+                self._coordinator.transition_job(job["uuid"], "running")
+            _LOGGER.info(
+                "Workflow Job dispatch task_uuid=%s job_uuid=%s "
+                "device_id=%s action_name=%s",
+                task_uuid,
+                job["uuid"],
+                payload["device_id"],
+                payload["action_name"],
+            )
             assert self._dispatcher is not None
             try:
                 self._dispatcher.dispatch(payload)
@@ -1454,10 +1505,23 @@ class WorkflowRuntimeWorker:
                     job["uuid"],
                 )
                 uncertainty_reason = str(error).strip() or "dispatch_outcome_unknown"
+                if self._job_claim_execution is not None:
+                    self._job_claim_execution.mark_dispatch_unknown(
+                        job,
+                        reason=uncertainty_reason,
+                        phase="dispatch_exception",
+                        error_type=type(error).__name__,
+                    )
                 self._coordinator.mark_job_unknown(
                     job["uuid"],
                     uncertainty_reason,
                 )
+            else:
+                if (
+                    self._job_claim_execution is not None
+                    and not self._status_listener_registered
+                ):
+                    self._coordinator.transition_job(job["uuid"], "running")
             return
 
     def _dispatch_payload(
@@ -1532,6 +1596,22 @@ class WorkflowRuntimeWorker:
             value = value[part]
         return value
 
+    def _on_job_status(
+        self,
+        job_uuid: str,
+        feedback_data: dict[str, Any],
+        status: str,
+    ) -> None:
+        """把真实执行器 accepted/running 证据推进到同一持久占用。"""
+
+        if (
+            self._stop_event.is_set()
+            or not self._status_listener_registered
+            or self._job_claim_execution is None
+        ):
+            return
+        self._job_claim_execution.on_job_status(job_uuid, feedback_data, status)
+
     def _on_job_completion(
         self,
         job_uuid: str,
@@ -1594,6 +1674,12 @@ class WorkflowRuntimeWorker:
         if job["status"] in _JOB_TERMINAL:
             return True
         if success_type == "transport_unknown":
+            if self._job_claim_execution is not None:
+                self._job_claim_execution.mark_dispatch_unknown(
+                    job,
+                    "workflow_job_dispatch_transport_unknown",
+                    phase="terminal_transport_unknown",
+                )
             self._coordinator.mark_job_unknown(
                 job_uuid,
                 "workflow_job_dispatch_transport_unknown",
@@ -1606,7 +1692,25 @@ class WorkflowRuntimeWorker:
             )
             return True
         if job["status"] == "cancel_requested":
+            receipt = (
+                self._job_claim_execution.commit_terminal(
+                    job,
+                    outcome="canceled",
+                    return_info={},
+                    error_info=[],
+                )
+                if self._job_claim_execution is not None
+                else None
+            )
             self._coordinator.transition_job(job_uuid, "canceled")
+            if self._job_claim_execution is not None:
+                self._job_claim_execution.release_terminal(
+                    job,
+                    receipt,
+                    outcome="canceled",
+                    return_info={},
+                    error_info=[],
+                )
             self._cancel_requests_inflight.discard(job_uuid)
             self._coordinator.reconcile_task_cancellation(task_uuid)
             self._queue_task_reconciliation(task_uuid)
@@ -1628,22 +1732,59 @@ class WorkflowRuntimeWorker:
                 job=job,
                 result=result,
             )
+            receipt = (
+                self._job_claim_execution.commit_terminal(
+                    job,
+                    outcome="succeeded",
+                    return_info=result,
+                    error_info=[],
+                )
+                if self._job_claim_execution is not None
+                else None
+            )
             self._coordinator.transition_job(
                 job_uuid,
                 "succeeded",
                 return_info=result,
             )
+            if self._job_claim_execution is not None:
+                self._job_claim_execution.release_terminal(
+                    job,
+                    receipt,
+                    outcome="succeeded",
+                    return_info=result,
+                    error_info=[],
+                )
             _LOGGER.info(
                 "Workflow Job succeeded task_uuid=%s job_uuid=%s",
                 task_uuid,
                 job_uuid,
             )
             return True
+        error_info = [{"code": "device_action_failed"}]
+        receipt = (
+            self._job_claim_execution.commit_terminal(
+                job,
+                outcome="failed",
+                return_info={},
+                error_info=error_info,
+            )
+            if self._job_claim_execution is not None
+            else None
+        )
         self._coordinator.transition_job(
             job_uuid,
             "failed",
-            error_info=[{"code": "device_action_failed"}],
+            error_info=error_info,
         )
+        if self._job_claim_execution is not None:
+            self._job_claim_execution.release_terminal(
+                job,
+                receipt,
+                outcome="failed",
+                return_info={},
+                error_info=error_info,
+            )
         _LOGGER.error(
             "Workflow Job failed task_uuid=%s job_uuid=%s",
             task_uuid,

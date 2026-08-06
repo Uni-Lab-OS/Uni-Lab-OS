@@ -1158,6 +1158,8 @@ class EdgeScheduler:
             return []
 
         busy = self._busy_keys()
+        inventory_busy = self.busy_inventory_device_action_keys()
+        non_claim_busy = busy - inventory_busy
         held_resource_locks = self._held_resource_locks()
         ordered = self._orderer.order(ready, OrderingContext(set(busy)))
 
@@ -1168,9 +1170,19 @@ class EdgeScheduler:
             job_id = task.node.job_id or uuid_mod.uuid4().hex
             # manual_confirm 是 always-free 特殊节点：不占设备动作锁，也不受其阻塞
             manual_confirm = task.node.is_manual_confirm()
+            formal_device_action = job_id in self._device_action_tasks_by_job_uuid
+            blocked_by_non_claim_runtime = (
+                key in non_claim_busy or device_key in non_claim_busy
+            )
+            blocked_by_inventory_claim = (
+                key in inventory_busy or device_key in inventory_busy
+            )
             if (
                 not manual_confirm
-                and (key in busy or device_key in busy)
+                and (
+                    blocked_by_non_claim_runtime
+                    or (blocked_by_inventory_claim and not formal_device_action)
+                )
                 and not self.owns_live_inventory_claim(job_id)
             ):
                 # v1 锁整个设备实例；任一 Action/Claim/fence 占用都阻止同设备下发。
@@ -1284,6 +1296,7 @@ class EdgeScheduler:
             )
             if not manual_confirm:
                 busy.update((key, device_key))
+                non_claim_busy.update((key, device_key))
             if lock_keys:
                 self._job_resource_locks[job_id] = lock_keys
                 held_resource_locks |= lock_keys
