@@ -655,11 +655,22 @@ def main():
 
         sys.exit(run_doctor(args_dict))
 
-    # inspect/build/install are package-manager operations. They do not need
-    # runtime configuration, credentials, or device bootstrap.
+    # 除 upload 外的设备包命令不需要 Runtime 配置、凭据或设备 bootstrap。
     if (
         args_dict.get("command") in ("package", "pkg")
-        and args_dict.get("package_action") != "upload"
+        and (
+            args_dict.get("package_action")
+            in {
+                "inspect",
+                "build",
+                "download",
+                "add-device",
+                "update-device",
+                "remove-device",
+                "restore-graph",
+                "install",
+            }
+        )
     ):
         from unilabos.package_manager.cli import (
             PackageCommandError,
