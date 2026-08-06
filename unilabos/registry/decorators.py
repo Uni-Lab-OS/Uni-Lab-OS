@@ -367,6 +367,7 @@ def action(
     estimate_duration_fixed: Optional[float] = 60.0,
     estimate_duration_express: str = "",
     materials_lock: Optional[Any] = None,
+    preconditions: list[dict[str, Any]] | None = None,
 ):
     """
     动作方法装饰器
@@ -407,6 +408,7 @@ def action(
         estimate_duration_fixed: 预计时长兜底值（秒），默认 60 秒；None 表示不提供兜底
         estimate_duration_express: 根据动作入参计算预计时长的中缀表达式
         materials_lock: lock_resource 的兼容别名；新代码请使用 lock_resource
+        preconditions: 物理派发前必须满足的设备状态条件；当前仅支持 fail_fast
     """
 
     def decorator(func: F) -> F:
@@ -441,6 +443,11 @@ def action(
                 raise ValueError("estimate_duration_fixed 不能小于 0")
         if not isinstance(estimate_duration_express, str):
             raise TypeError("estimate_duration_express 必须是字符串")
+        from unilabos.registry.action_preconditions import (
+            normalize_action_preconditions,
+        )
+
+        normalized_preconditions = normalize_action_preconditions(preconditions)
 
         meta = {
             "action_type": resolved_type,
@@ -460,6 +467,7 @@ def action(
             "lock_resource": normalized_lock_resource,
             "estimate_duration_fixed": estimate_duration_fixed,
             "estimate_duration_express": estimate_duration_express,
+            "preconditions": normalized_preconditions,
         }
         if feedback_interval is not None:
             meta["feedback_interval"] = feedback_interval

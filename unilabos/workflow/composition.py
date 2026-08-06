@@ -638,6 +638,9 @@ def compose_workflow_runtime(
                         authority=authority,
                     ),
                     admission=new_device_action_runtime,
+                    precondition_state=getattr(
+                        get_edge_backend(), "device_state", None
+                    ),
                 )
             register_editable_package_sources(
                 new_service,

@@ -17,6 +17,11 @@ from unilabos.workflow.catalog import (
     TemplateCatalogStale,
     TemplateCatalogUnavailable,
 )
+from unilabos.workflow.device_action_preconditions import (
+    DeviceActionPreconditionFailure,
+    DeviceActionPreconditionState,
+    evaluate_device_action_preconditions,
+)
 from unilabos.workflow.json_codec import decode_json_bytes, encode_json
 from unilabos.workflow.schema import (
     WorkflowSchemaError,
@@ -79,6 +84,19 @@ def _contains_unsupported_contract(value: Any) -> bool:
     if isinstance(value, (list, tuple)):
         return any(_contains_unsupported_contract(item) for item in value)
     return False
+
+
+def _action_preconditions(template: Mapping[str, Any]) -> list[dict[str, Any]]:
+    meta_data = template.get("meta_data")
+    unilab = meta_data.get("unilab") if isinstance(meta_data, Mapping) else None
+    value = (
+        unilab.get("action_preconditions")
+        if isinstance(unilab, Mapping)
+        else None
+    )
+    if not isinstance(value, (list, tuple)):
+        return []
+    return [_detached(item) for item in value if isinstance(item, Mapping)]
 
 
 def _workflow_value_schema(raw: Any) -> dict[str, Any]:
@@ -201,12 +219,14 @@ class DeviceActionTaskService:
         authority: CatalogAuthority,
         live_catalog: DeviceActionLiveCatalog,
         admission: DeviceActionAdmission,
+        precondition_state: DeviceActionPreconditionState | None = None,
     ) -> None:
         self._store = store
         self._template_catalog = template_catalog
         self._authority = authority
         self._live_catalog = live_catalog
         self._admission = admission
+        self._precondition_state = precondition_state
         self._workflow_service = WorkflowService(store)
 
     def create(
@@ -304,6 +324,25 @@ class DeviceActionTaskService:
                             raise WorkflowError("invalid_input") from None
                         if len(prepared.jobs) != 1:
                             raise WorkflowError("internal_error")
+                        effective_input = {
+                            item["name"]: item["default"]
+                            for item in input_contract["parameters"]
+                            if "default" in item
+                        }
+                        effective_input.update(input_value)
+                        try:
+                            evaluate_device_action_preconditions(
+                                state=self._precondition_state,
+                                device_id=device_id,
+                                input_value=effective_input,
+                                conditions=_action_preconditions(template),
+                            )
+                        except DeviceActionPreconditionFailure as error:
+                            raise WorkflowError(
+                                "precondition_not_met",
+                                details=error.details,
+                                message=str(error),
+                            ) from None
                         task_uuid = str(uuid4())
                         job_uuid = prepared.jobs[0]["uuid"]
                         now = utc_now()
@@ -398,6 +437,10 @@ class DeviceActionTaskService:
             or action.get("type") != template.get("type")
             or encode_json(_detached(action.get("schema")), sort_keys=True)
             != encode_json(_detached(template.get("schema")), sort_keys=True)
+            or encode_json(
+                _detached(action.get("preconditions") or []), sort_keys=True
+            )
+            != encode_json(_action_preconditions(template), sort_keys=True)
         ):
             raise WorkflowError("device_action_mismatch")
 
@@ -2325,6 +2368,9 @@ class HostNodeDeviceActionLiveCatalog:
                 projected_actions[name] = {
                     "type": live_type,
                     "schema": _detached(schema),
+                    "preconditions": _detached(
+                        raw_action.get("preconditions") or []
+                    ),
                 }
             if not projected_actions or len(owner_uuids) != 1:
                 continue

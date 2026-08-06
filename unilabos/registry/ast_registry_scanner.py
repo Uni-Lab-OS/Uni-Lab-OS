@@ -950,6 +950,13 @@ def _extract_class_body(
             action_args.pop("materials_lock", None)
             action_args.setdefault("estimate_duration_fixed", 60.0)
             action_args.setdefault("estimate_duration_express", "")
+            from unilabos.registry.action_preconditions import (
+                normalize_action_preconditions,
+            )
+
+            action_args["preconditions"] = normalize_action_preconditions(
+                action_args.get("preconditions")
+            )
             action_args.setdefault("error_policy", None)
             if action_args["error_policy"]:
                 from unilabos.registry.action_policy import normalize_error_policy

@@ -130,6 +130,7 @@ _ERRORS = {
     ),
     "idempotency_conflict": (409, "幂等键已用于不同的设备动作请求"),
     "device_action_mismatch": (409, "设备当前 Action 与模板合同不一致"),
+    "precondition_not_met": (409, "设备动作前置条件不满足"),
     "unsupported_contract": (422, "该 Action 合同超出单动作运行范围"),
     "admission_unavailable": (503, "设备动作调度暂不可用"),
     "candidate_not_ready": (409, "当前草稿尚未生成可应用的工作流"),
@@ -303,12 +304,20 @@ _HANDLE_TEMPLATE_REQUIRED_READ_FIELDS = {
 class WorkflowError(RuntimeError):
     """面向前端的稳定 Workflow 错误。"""
 
-    def __init__(self, code: str):
-        status, message = _ERRORS[code]
-        super().__init__(message)
+    def __init__(
+        self,
+        code: str,
+        *,
+        details: dict[str, Any] | None = None,
+        message: str | None = None,
+    ):
+        status, default_message = _ERRORS[code]
+        resolved_message = message or default_message
+        super().__init__(resolved_message)
         self.status = status
         self.code = code
-        self.message = message
+        self.message = resolved_message
+        self.details = details
 
 
 class WorkflowConflict(WorkflowError):

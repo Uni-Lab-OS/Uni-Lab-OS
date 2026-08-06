@@ -305,14 +305,17 @@ def _success(data: Any, *, status: int = 200) -> _BackendJSONResponse:
 
 
 def _error(error: WorkflowError) -> _BackendJSONResponse:
+    payload = {
+        "code": error.code,
+        "message": error.message,
+    }
+    if error.details is not None:
+        payload["details"] = error.details
     return _BackendJSONResponse(
         status_code=error.status,
         content={
             "code": error.status,
-            "error": {
-                "code": error.code,
-                "message": error.message,
-            },
+            "error": payload,
         },
     )
 

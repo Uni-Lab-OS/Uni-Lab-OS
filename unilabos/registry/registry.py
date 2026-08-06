@@ -220,6 +220,11 @@ def _normalize_action_extensions(config: Optional[Dict[str, Any]]) -> Dict[str, 
     normalized.pop("materials_lock", None)
     normalized.setdefault("estimate_duration_fixed", _DEFAULT_ACTION_DURATION_SECONDS)
     normalized.setdefault("estimate_duration_express", "")
+    from unilabos.registry.action_preconditions import normalize_action_preconditions
+
+    normalized["preconditions"] = normalize_action_preconditions(
+        normalized.get("preconditions")
+    )
     return normalized
 
 
@@ -1248,6 +1253,7 @@ class Registry:
                 "estimate_duration_express": action_extensions[
                     "estimate_duration_express"
                 ],
+                "preconditions": action_extensions["preconditions"],
                 "feedback_interval": action_args.get(
                     "feedback_interval", method_info.get("feedback_interval", 1.0)
                 ),
@@ -1350,6 +1356,7 @@ class Registry:
                 "lock_resource": action_extensions["lock_resource"],
                 "estimate_duration_fixed": action_extensions["estimate_duration_fixed"],
                 "estimate_duration_express": action_extensions["estimate_duration_express"],
+                "preconditions": action_extensions["preconditions"],
             }
             if action_args is not None and method_info.get("contract_diagnostic"):
                 entry["contract_diagnostic"] = copy.deepcopy(
@@ -1511,6 +1518,7 @@ class Registry:
                 "lock_resource": action_extensions["lock_resource"],
                 "estimate_duration_fixed": action_extensions["estimate_duration_fixed"],
                 "estimate_duration_express": action_extensions["estimate_duration_express"],
+                "preconditions": action_extensions["preconditions"],
             }
             if method_info.get("contract_diagnostic"):
                 action_entry["contract_diagnostic"] = copy.deepcopy(
@@ -2496,6 +2504,7 @@ class Registry:
                             "estimate_duration_express": action_extensions[
                                 "estimate_duration_express"
                             ],
+                            "preconditions": action_extensions["preconditions"],
                         }
                         if v.get("always_free"):
                             entry["always_free"] = True

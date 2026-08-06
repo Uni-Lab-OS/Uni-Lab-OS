@@ -256,6 +256,13 @@ def workflow_template_imports_from_package_catalog(
             result_mapping = decorator.get("result")
             if isinstance(result_mapping, Mapping):
                 handles.extend(_result_handle(str(name)) for name in result_mapping)
+            from unilabos.registry.action_preconditions import (
+                normalize_action_preconditions,
+            )
+
+            preconditions = normalize_action_preconditions(
+                decorator.get("preconditions")
+            )
             imports.append(
                 NodeTemplateImport(
                     template={
@@ -284,6 +291,7 @@ def workflow_template_imports_from_package_catalog(
                             "unilab": {
                                 "source_fqid": source_fqid,
                                 "content_hash": device.content_hash,
+                                "action_preconditions": preconditions,
                             }
                         },
                     },
