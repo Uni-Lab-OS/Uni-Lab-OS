@@ -128,6 +128,124 @@ class TestResourceLock:
         # 同一设备只能有一个在跑
         assert len(r3["dispatched"]) == 1
 
+    def test_same_device_different_actions_are_serialized(self):
+        """证明同一设备的不同动作仍共享设备级互斥，后提交作业保持待处理。
+
+        参数：无；测试构造两个指向同一设备、动作名不同的工作流（Workflow）。
+        返回：无；通过派发摘要和记录适配器断言设备级准入行为。
+        异常：若第二个动作越过执行器（Executor）边界，断言失败。
+        """
+        scheduler, dispatcher = _make()
+        # 两个工作流身份分别代表已取得同一设备执行器分配的独立运行。
+        first_result = scheduler.submit_workflow(
+            WorkflowSpec(
+                workflow_id="wf-device-run",
+                nodes=[_node("run-node", device="shared", action="run")],
+            )
+        )
+        second_result = scheduler.submit_workflow(
+            WorkflowSpec(
+                workflow_id="wf-device-inspect",
+                nodes=[_node("inspect-node", device="shared", action="inspect")],
+            )
+        )
+
+        assert len(first_result["dispatched"]) == 1
+        assert second_result["dispatched"] == []
+        assert [item["action"] for item in dispatcher.dispatched] == ["run"]
+
+    def test_device_level_external_busy_key_blocks_every_action(self):
+        """证明设备级外部占用键会阻止该设备的任意动作进入物理派发。
+
+        参数：无；测试向调度器注入设备级外部忙碌键。
+        返回：无；断言动作级键不同也不能绕过设备级互斥。
+        异常：若动作被派发到执行器（Executor），断言失败。
+        """
+        # 设备级外部忙碌键表示该设备已被本调度器之外的执行占用。
+        external_device_busy_keys = {"/devices/shared"}
+        dispatcher = RecordingDispatcher()
+        scheduler = EdgeScheduler(
+            dispatcher=dispatcher,
+            external_busy_keys=external_device_busy_keys,
+        )
+        result = scheduler.submit_workflow(
+            WorkflowSpec(
+                workflow_id="wf-external-device-busy",
+                nodes=[_node("inspect-node", device="shared", action="inspect")],
+            )
+        )
+
+        assert result["dispatched"] == []
+        assert dispatcher.dispatched == []
+
+    def test_completion_releases_device_for_only_one_waiting_action(self):
+        """证明设备完成一个作业后，同轮准入只放行一个等待中的不同动作。
+
+        参数：无；测试构造同一设备上的一个在途作业和两个等待作业。
+        返回：无；断言完成回调触发的重排只产生一个新派发。
+        异常：若同轮放行多个动作而形成设备并发，断言失败。
+        """
+        scheduler, dispatcher = _make()
+        first_result = scheduler.submit_workflow(
+            WorkflowSpec(
+                workflow_id="wf-active",
+                nodes=[_node("active-node", device="shared", action="run")],
+            )
+        )
+        for workflow_id, action_name in (
+            ("wf-waiting-inspect", "inspect"),
+            ("wf-waiting-clean", "clean"),
+        ):
+            # 每个等待工作流都持有独立身份，但共享同一执行设备。
+            waiting_result = scheduler.submit_workflow(
+                WorkflowSpec(
+                    workflow_id=workflow_id,
+                    nodes=[
+                        _node(
+                            f"{action_name}-node",
+                            device="shared",
+                            action=action_name,
+                        )
+                    ],
+                )
+            )
+            assert waiting_result["dispatched"] == []
+
+        # 完成作业身份来自第一次派发；其释放只允许下一项取得设备级互斥。
+        active_job_uuid = first_result["dispatched"][0]["job_id"]
+        completion_result = scheduler.on_job_finished(active_job_uuid, success=True)
+
+        assert len(completion_result["dispatched"]) == 1
+        assert len(dispatcher.dispatched) == 2
+
+    def test_different_devices_keep_parallel_admission(self):
+        """证明设备级互斥不会扩大成全局互斥，不同设备仍可并行派发。
+
+        参数：无；测试构造两个设备上动作名不同的独立工作流（Workflow）。
+        返回：无；断言两个执行器分配均越过派发边界。
+        异常：若第二个设备被无关占用阻塞，断言失败。
+        """
+        scheduler, dispatcher = _make()
+        scheduler.submit_workflow(
+            WorkflowSpec(
+                workflow_id="wf-device-one",
+                nodes=[_node("one", device="device-one", action="run")],
+            )
+        )
+        scheduler.submit_workflow(
+            WorkflowSpec(
+                workflow_id="wf-device-two",
+                nodes=[_node("two", device="device-two", action="inspect")],
+            )
+        )
+
+        assert {
+            (item["device_id"], item["action"]) for item in dispatcher.dispatched
+        } == {
+            ("device-one", "run"),
+            ("device-two", "inspect"),
+        }
+
     def test_different_devices_parallel(self):
         scheduler, dispatcher = _make()
         scheduler.submit_workflow(_chain_spec("wf1", device="d1"))
@@ -286,3 +404,36 @@ class TestManualConfirmNodes:
         scheduler.submit_workflow(manual_only)
         snap = scheduler.workflow_snapshot("wf-manual3")
         assert snap["nodes"]["M"]["state"] == "dispatched"
+
+    def test_manual_confirm_does_not_occupy_device_for_an_action(self):
+        """证明人工确认节点停驻期间不建立设备级或动作级内存互斥。
+
+        参数：无；测试先停驻人工确认节点，再提交同设备同动作的普通节点。
+        返回：无；断言普通动作仍可越过执行器（Executor）派发边界。
+        异常：若人工确认被错误计入设备忙碌集合，断言失败。
+        """
+        scheduler, dispatcher = _make()
+        manual_only = WorkflowSpec(
+            workflow_id="wf-manual-free",
+            nodes=[
+                WorkflowNode(
+                    id="manual-node",
+                    device_id="operator",
+                    action_name="confirm",
+                    node_type="manual_confirm",
+                )
+            ],
+        )
+        scheduler.submit_workflow(manual_only)
+        # 普通动作与人工确认复用相同设备和动作身份，仍应立即实际派发。
+        ordinary_result = scheduler.submit_workflow(
+            WorkflowSpec(
+                workflow_id="wf-ordinary-after-manual",
+                nodes=[_node("ordinary-node", device="operator", action="confirm")],
+            )
+        )
+
+        assert len(ordinary_result["dispatched"]) == 1
+        assert [
+            (item["device_id"], item["action"]) for item in dispatcher.dispatched
+        ] == [("operator", "confirm")]

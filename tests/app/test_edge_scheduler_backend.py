@@ -307,3 +307,39 @@ class TestEdgeStackEndToEnd:
             assert len(host.sent_goals) == 4
         finally:
             backend.stop()
+
+    def test_composition_root_serializes_different_actions_on_one_device(self):
+        """证明真实组合根在派发器边界前串行同一设备的不同动作。
+
+        参数：无；测试通过 ``create_edge_stack`` 装配真实作业执行微后端。
+        返回：无；断言只有第一个动作到达模拟 HostNode。
+        异常：若第二个动作越过真实派发器（Dispatcher）边界，断言失败。
+        """
+        backend_ref: dict[str, Any] = {}
+        host = FakeHostNode(backend_ref, auto_complete=False)
+        # 为第二个动作提供合法注册表 Schema，避免合同缺失掩盖设备级互斥行为。
+        host._action_value_mappings["shared"]["inspect"] = _unlocked_action_mapping()
+        scheduler, backend = create_edge_stack(host_node_getter=lambda: host)
+        backend_ref["backend"] = backend
+        try:
+            first_result = scheduler.submit_workflow(
+                WorkflowSpec(
+                    workflow_id="wf-real-run",
+                    nodes=[_node("run-node", device="shared", action="run")],
+                )
+            )
+            second_result = scheduler.submit_workflow(
+                WorkflowSpec(
+                    workflow_id="wf-real-inspect",
+                    nodes=[_node("inspect-node", device="shared", action="inspect")],
+                )
+            )
+
+            assert backend.wait_idle()
+            assert len(first_result["dispatched"]) == 1
+            assert second_result["dispatched"] == []
+            assert [(goal.device_id, goal.action_name) for goal in host.sent_goals] == [
+                ("shared", "run")
+            ]
+        finally:
+            backend.stop()
