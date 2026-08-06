@@ -441,6 +441,80 @@ def test_pre_dispatch_replay_is_zero_write(store: WorkflowStore) -> None:
     assert _aggregate(store) == first
 
 
+def test_runtime_journal_and_sse_invalidation_capture_dispatch_and_result(
+    store: WorkflowStore,
+) -> None:
+    """派发与结果必须持久记录，并各自触发一次可重放的前端失效通知。"""
+
+    (job_uuid,) = _seed_task(store, job_count=1)
+    projection = _projection(store)
+
+    projection.project_pre_dispatch(
+        task_uuid=TASK_UUID,
+        job_uuid=job_uuid,
+        resolved_param={"resource": {"uuid": "material-1"}},
+    )
+    projection.project_job_finished(
+        job_uuid=job_uuid,
+        scheduler_state="success",
+        return_info={"message": "done"},
+    )
+
+    page = store.list_task_runtime_events(
+        TASK_UUID,
+        after_sequence=0,
+        limit=10,
+    )
+    assert [
+        (event["kind"], event.get("from_status"), event.get("to_status"))
+        for event in page["items"]
+    ] == [
+        ("task_transition", "pending", "running"),
+        ("job_transition", "pending", "dispatched"),
+        ("job_transition", "dispatched", "succeeded"),
+        ("task_transition", "running", "succeeded"),
+    ]
+    assert page["items"][1]["param"] == {
+        "resource": {"uuid": "material-1"}
+    }
+    assert page["items"][2]["return_info"] == {"message": "done"}
+    assert page["next_cursor"] == page["items"][-1]["sequence"]
+    assert page["has_more"] is False
+
+    invalidations = [
+        event
+        for event in store.list_events(after_sequence=0, limit=100)
+        if event["event"] == "workflow.runtime.changed"
+    ]
+    assert [event["data"] for event in invalidations] == [
+        {"workflow_task_uuid": TASK_UUID},
+        {"workflow_task_uuid": TASK_UUID},
+    ]
+
+
+def test_runtime_event_page_uses_exclusive_cursor(store: WorkflowStore) -> None:
+    """任务运行日志页必须使用严格排他、单调递增的持久游标。"""
+
+    (job_uuid,) = _seed_task(store, job_count=1)
+    projection = _projection(store)
+    projection.project_pre_dispatch(task_uuid=TASK_UUID, job_uuid=job_uuid)
+
+    first = store.list_task_runtime_events(
+        TASK_UUID,
+        after_sequence=0,
+        limit=1,
+    )
+    second = store.list_task_runtime_events(
+        TASK_UUID,
+        after_sequence=first["next_cursor"],
+        limit=1,
+    )
+
+    assert first["has_more"] is True
+    assert second["has_more"] is False
+    assert first["items"][0]["sequence"] < second["items"][0]["sequence"]
+
+
 def test_first_legacy_success_maps_job_to_succeeded_but_task_stays_running(
     store: WorkflowStore,
 ) -> None:

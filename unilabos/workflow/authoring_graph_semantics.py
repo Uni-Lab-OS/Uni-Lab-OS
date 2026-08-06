@@ -119,21 +119,44 @@ def canonical_json(value: Any) -> str:
     )
 
 
-def _semantic_entities(values: list[dict[str, Any]]) -> dict[str, str]:
+def _semantic_entities(
+    values: list[dict[str, Any]],
+    *,
+    collection_name: str | None = None,
+) -> dict[str, str]:
     """按 UUID 索引实体的稳定创作语义。
 
-    参数说明：``values`` 是节点、边或目录实体数组；返回 UUID 到规范 JSON 的
-    映射，忽略数据库时间和所属工作流投影字段。
+    参数说明：``values`` 是节点、边或目录实体数组；``collection_name`` 标识
+    需要收敛 Backend wire 省略值或目录代际证据的集合。返回 UUID 到规范 JSON
+    的映射，忽略数据库时间、所属工作流投影字段及非作者语义目录字段。
     """
 
     result: dict[str, str] = {}
     for value in values:
         identity = str(value["uuid"])
-        semantic = {
+        semantic = deepcopy({
             key: child
             for key, child in value.items()
             if key not in {"create_time", "update_time", "workflow_uuid"}
-        }
+        })
+        if collection_name == "handle_templates":
+            # Backend ``omitempty`` 会省略结构性 ready handle 的三个空字段；目录
+            # 重投影则显式返回 ``None``，两种 wire 形状没有作者语义差异。
+            for field_name in ("description", "data_source", "data_key"):
+                semantic.setdefault(field_name, None)
+        elif collection_name == "node_templates":
+            # package 目录摘要证明模板来自哪个完整发布代际；同一模板的定义内容
+            # 与调用合同已由其余 provenance/schema 字段固定，其他工作流发布导致
+            # 的整包摘要变化不应让当前作者图失去 Python 往返固定点。
+            metadata = semantic.get("meta_data")
+            unilab = metadata.get("unilab") if isinstance(metadata, Mapping) else None
+            source = (
+                unilab.get("workflow_source")
+                if isinstance(unilab, Mapping)
+                else None
+            )
+            if isinstance(source, dict):
+                source.pop("package_catalog_digest", None)
         result[identity] = canonical_json(semantic)
     return result
 
@@ -158,9 +181,17 @@ def _semantic_graph(graph: Mapping[str, Any]) -> str:
         "workflow": workflow,
         "nodes": sorted(_semantic_entities(value["nodes"]).values()),
         "edges": sorted(_semantic_entities(value["edges"]).values()),
-        "node_templates": sorted(_semantic_entities(value["node_templates"]).values()),
+        "node_templates": sorted(
+            _semantic_entities(
+                value["node_templates"],
+                collection_name="node_templates",
+            ).values()
+        ),
         "handle_templates": sorted(
-            _semantic_entities(value["handle_templates"]).values()
+            _semantic_entities(
+                value["handle_templates"],
+                collection_name="handle_templates",
+            ).values()
         ),
     }
     return canonical_json(payload)

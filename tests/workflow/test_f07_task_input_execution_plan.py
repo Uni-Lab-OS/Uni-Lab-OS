@@ -20,6 +20,7 @@ WORKFLOW_UUID = "61000000-0000-4000-8000-000000000001"
 NODE_UUID = "62000000-0000-4000-8000-000000000001"
 TEMPLATE_UUID = "63000000-0000-4000-8000-000000000001"
 TARGET_HANDLE_UUID = "64000000-0000-4000-8000-000000000001"
+MATERIAL_UUID = "65000000-0000-4000-8000-000000000001"
 
 
 def _input_contract() -> dict[str, Any]:
@@ -334,10 +335,10 @@ def test_http_task_input_and_snapshot_remain_frozen_after_workflow_evolves(
         store.close()
 
 
-def test_resource_slot_task_input_stays_disabled_until_k11() -> None:
-    """K11 前任务输入不得提前解释物料占位符（ResourceSlot）。
+def test_resource_slot_task_input_is_resolved_by_material_authority() -> None:
+    """ResourceSlot 任务输入须由物料权威解析并校验模板允许集合。
 
-    参数：无。返回：无。异常：预期抛 ``TaskInputError``；未抛则断言失败。
+    参数：无。返回：无。异常：解析或模板约束回归由断言暴露。
     """
 
     graph = _binding_graph()
@@ -346,22 +347,58 @@ def test_resource_slot_task_input_stays_disabled_until_k11() -> None:
         "parameters": [
             {
                 "name": "sample",
-                "schema": {"$slot": "ResourceSlot"},
+                "schema": {
+                    "$slot": "ResourceSlot",
+                    "allowed_resource_template_uuids": [TEMPLATE_UUID],
+                },
                 "required": True,
             }
         ],
     }
+    graph["workflow"]["meta_data"]["unilab"]["output_contract"] = {
+        "version": 1,
+        "outputs": [
+            {
+                "name": "sample",
+                "schema": {
+                    "$slot": "ResourceSlot",
+                    "allowed_resource_template_uuids": [TEMPLATE_UUID],
+                },
+                "implicit": True,
+            }
+        ],
+    }
+    graph["workflow"]["meta_data"]["unilab"]["output_bindings"] = {
+        "sample": {"kind": "workflow_input", "parameter": "sample"}
+    }
     graph["nodes"][0]["meta_data"] = {}
+    graph["handle_templates"][0]["required"] = False
     plan, jobs = ExecutionPlanBuilder().build(
         graph,
         run_mode="normal",
         target_node_uuid=None,
     )
 
+    prepared = prepare_task_input(
+        graph=graph,
+        raw_input={"sample": {"uuid": MATERIAL_UUID}},
+        execution_plan=plan,
+        jobs=jobs,
+        resource_resolver=lambda material_uuid: {
+            "uuid": material_uuid,
+            "resource_template_uuid": TEMPLATE_UUID,
+        },
+    )
+    assert prepared.resolved_input == {"sample": {"uuid": MATERIAL_UUID}}
+
     with pytest.raises(TaskInputError):
         prepare_task_input(
             graph=graph,
-            raw_input={"sample": {"resource_template_uuid": TEMPLATE_UUID}},
+            raw_input={"sample": {"uuid": MATERIAL_UUID}},
             execution_plan=plan,
             jobs=jobs,
+            resource_resolver=lambda material_uuid: {
+                "uuid": material_uuid,
+                "resource_template_uuid": WORKFLOW_UUID,
+            },
         )

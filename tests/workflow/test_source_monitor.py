@@ -8,6 +8,9 @@ from collections.abc import Callable
 from pathlib import Path
 from typing import Any
 
+import pytest
+
+from unilabos.workflow import source_publication
 from unilabos.workflow.models import CandidateCompilation
 from unilabos.workflow.service import WorkflowService
 from unilabos.workflow.source_monitor import WorkflowSourceMonitor
@@ -171,6 +174,33 @@ class SourceOnlyCompiler:
                 "deleted_edge_uuids": [],
                 "reserved_metadata_changed": False,
             },
+            compiler_version=self.compiler_version,
+            template_catalog_fingerprint=self.template_catalog_fingerprint,
+        )
+
+
+class NextGenerationSourceOnlyCompiler(SourceOnlyCompiler):
+    """模拟子工作流应用后形成的新发布目录代际。"""
+
+    compiler_version = "f04-source-monitor-v2"
+    template_catalog_fingerprint = f"sha256:{'e' * 64}"
+
+
+class InvalidCompositeCompiler(SourceOnlyCompiler):
+    """模拟父组合工作流在子工作流尚未发布时的稳定失败。"""
+
+    compiler_version = "f04-source-monitor-composite-missing"
+    template_catalog_fingerprint = f"sha256:{'d' * 64}"
+
+    def compile(self, **_arguments: Any) -> CandidateCompilation:
+        return CandidateCompilation(
+            diagnostics=[
+                {
+                    "severity": "error",
+                    "code": "composite_child_not_found",
+                    "message": "组合工作流创作合同校验失败",
+                }
+            ],
             compiler_version=self.compiler_version,
             template_catalog_fingerprint=self.template_catalog_fingerprint,
         )
@@ -505,13 +535,17 @@ def test_fatal_worker_failure_is_observable_and_restart_clears_health() -> None:
     assert stopped_health.fatal_error_code is None
 
 
-def test_service_rejects_a_stale_observed_signature(tmp_path: Path) -> None:
+def test_service_rejects_a_stale_observed_signature(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
     """过期文件世代不得触发对更新源码的越权编译。
 
     参数：``tmp_path`` 隔离真实源码和数据库。返回：无；证明签名变化时关闭失败
     （Fail-closed），只有重新稳定观测后的命令可推进候选。
     """
 
+    monkeypatch.setattr(source_publication, "_PLATFORM", "linux")
     service, store, source_path = _service_with_source(tmp_path)
     # ``stale_signature`` 是修改前的文件世代，不能授权处理修改后的内容。
     stale_signature = service.source_signature(WORKFLOW_UUID)
@@ -539,6 +573,7 @@ def test_service_rejects_a_stale_observed_signature(tmp_path: Path) -> None:
 
 def test_same_hash_external_rewrite_does_not_emit_duplicate_event(
     tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """同内容外部重写不得重复生成候选版本或创作事件。
 
@@ -546,6 +581,7 @@ def test_same_hash_external_rewrite_does_not_emit_duplicate_event(
     修改时间决定工作流创作（Authoring）状态推进。
     """
 
+    monkeypatch.setattr(source_publication, "_PLATFORM", "linux")
     service, store, source_path = _service_with_source(tmp_path)
     cursor = service.list_events(after_id=0)["items"][-1]["id"]
     original = source_path.read_bytes()
@@ -564,8 +600,81 @@ def test_same_hash_external_rewrite_does_not_emit_duplicate_event(
     assert events == []
 
 
+def test_catalog_generation_change_recompiles_unchanged_parent_source(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """发布目录变化必须让源码未变的组合父工作流重新校验。"""
+
+    monkeypatch.setattr(source_publication, "_PLATFORM", "linux")
+    service, store, _source_path = _service_with_source(tmp_path)
+    old_signature = service.source_signature(WORKFLOW_UUID)
+    cursor = service.list_events(after_id=0)["items"][-1]["id"]
+    service.compiler = NextGenerationSourceOnlyCompiler()
+    new_signature = service.source_signature(WORKFLOW_UUID)
+    try:
+        assert new_signature != old_signature
+        assert service.submit_source_change(
+            WORKFLOW_UUID,
+            observed_signature=new_signature,
+        )
+        authoring = service.get_authoring(WORKFLOW_UUID)
+        events = service.list_events(after_id=cursor)["items"]
+    finally:
+        store.close()
+
+    assert authoring["candidate"]["template_catalog_fingerprint"] == (
+        NextGenerationSourceOnlyCompiler.template_catalog_fingerprint
+    )
+    assert [event["data"]["cause"] for event in events] == ["catalog_changed"]
+
+
+def test_startup_recovery_recompiles_persisted_composite_failure(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """重启后当前发布目录必须取代旧的 composite_child_not_found 诊断。"""
+
+    monkeypatch.setattr(source_publication, "_PLATFORM", "linux")
+    service, store, source_path = _service_with_source(tmp_path)
+    service.compiler = InvalidCompositeCompiler()
+    source_path.write_text("value = 'parent composite'\n", encoding="utf-8")
+    invalid_signature = service.source_signature(WORKFLOW_UUID)
+    assert service.submit_source_change(
+        WORKFLOW_UUID,
+        observed_signature=invalid_signature,
+    )
+    assert service.get_authoring(WORKFLOW_UUID)["state"] == "draft_invalid"
+    store.close()
+
+    restarted_store = WorkflowStore(tmp_path / "workflow.db")
+    restarted = WorkflowService(
+        restarted_store,
+        compiler=NextGenerationSourceOnlyCompiler(),
+    )
+    package_root = tmp_path / "package"
+    restarted.replace_active_editable_source_authorization(
+        workflow_uuid=WORKFLOW_UUID,
+        package_id="source_monitor_contract",
+        package_root=package_root,
+        relative_path="workflows/demo.py",
+    )
+    try:
+        restarted.recover_registered_sources()
+        authoring = restarted.get_authoring(WORKFLOW_UUID)
+    finally:
+        restarted_store.close()
+
+    assert authoring["state"] == "unapplied_source_only"
+    assert authoring["draft"]["diagnostics"] == []
+    assert authoring["candidate"]["template_catalog_fingerprint"] == (
+        NextGenerationSourceOnlyCompiler.template_catalog_fingerprint
+    )
+
+
 def test_delete_rename_and_restore_stay_bound_to_canonical_path(
     tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """删除、重命名和恢复必须始终使用注册的规范来源身份。
 
@@ -573,6 +682,7 @@ def test_delete_rename_and_restore_stay_bound_to_canonical_path(
     不会成为新权威，恢复规范路径后产生同一工作流的恢复事件。
     """
 
+    monkeypatch.setattr(source_publication, "_PLATFORM", "linux")
     service, store, source_path = _service_with_source(tmp_path)
     cursor = service.list_events(after_id=0)["items"][-1]["id"]
     renamed_path = source_path.with_name("renamed.py")

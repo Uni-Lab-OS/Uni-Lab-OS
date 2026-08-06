@@ -132,6 +132,23 @@ def _parse_non_negative_int64_decimal(value: str) -> int:
     return int(significant, 10)
 
 
+def _parse_positive_decimal(value: str, *, maximum: int) -> int:
+    """解析严格正十进制页长并限制公开上界。"""
+
+    if _SIGNED_DECIMAL.fullmatch(value) is None or value.startswith("-"):
+        raise ValueError
+    digits = value[1:] if value.startswith("+") else value
+    significant = digits.lstrip("0") or "0"
+    if significant == "0":
+        raise ValueError
+    maximum_text = str(maximum)
+    if len(significant) > len(maximum_text) or (
+        len(significant) == len(maximum_text) and significant > maximum_text
+    ):
+        raise ValueError
+    return int(significant, 10)
+
+
 class WorkflowCreateRequest(_BackendModel):
     name: str
     tags: List[Any] = Field(default_factory=list)
@@ -442,6 +459,33 @@ def create_workflow_router(service: WorkflowService) -> APIRouter:
     @router.get("/workflow-tasks/{task_uuid}/jobs")
     def list_workflow_node_jobs(task_uuid: str) -> JSONResponse:
         return _success(service.list_workflow_node_jobs(task_uuid))
+
+    @router.get("/workflow-tasks/{task_uuid}/events")
+    def list_workflow_task_runtime_events(
+        task_uuid: str,
+        after_sequence: str = Query(default=""),
+        limit: str = Query(default=""),
+    ) -> JSONResponse:
+        """分页返回持久任务运行日志，包括动作下发与明确执行结果。"""
+
+        try:
+            after_text = after_sequence.strip(_GO_WHITE_SPACE)
+            limit_text = limit.strip(_GO_WHITE_SPACE)
+            parsed_after = (
+                _parse_non_negative_int64_decimal(after_text) if after_text else 0
+            )
+            parsed_limit = (
+                _parse_positive_decimal(limit_text, maximum=500) if limit_text else 100
+            )
+        except ValueError:
+            raise WorkflowError("invalid_input") from None
+        return _success(
+            service.list_workflow_task_runtime_events(
+                task_uuid,
+                after_sequence=parsed_after,
+                limit=parsed_limit,
+            )
+        )
 
     @router.get("/workflow-node-jobs/{job_uuid}")
     def get_workflow_node_job(job_uuid: str) -> JSONResponse:

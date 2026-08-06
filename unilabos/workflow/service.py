@@ -313,6 +313,7 @@ class WorkflowService:
             store,
             material_resolver=material_resolver,
         )
+        self._material_resolver = material_resolver
         # ``_task_scheduler_bridge`` 是普通任务与设备单动作共享的唯一监听器所有者；
         # 后端控制（Backend-controlled）配置保持空，避免第二个调度权威。
         self._task_scheduler_bridge = task_scheduler_bridge
@@ -325,6 +326,10 @@ class WorkflowService:
         # 源码（Workflow Source）；SQLite 注册行仅保留跨启动历史身份。
         self._active_sources_lock = threading.RLock()
         self._active_source_workflow_uuids: frozenset[str] = frozenset()
+        # 每个来源在本进程内最后一次完成编译时使用的目录指纹。它与文件签名
+        # 共同决定组合父工作流是否需要重新校验；进程重启时为空，恢复阶段会
+        # 强制建立当前目录基线，不能沿用数据库里由旧发布目录产生的诊断。
+        self._compiled_catalog_fingerprints: Dict[str, str] = {}
 
     # 工作流（Workflow）与图（Graph） -------------------------------------
 
@@ -685,6 +690,38 @@ class WorkflowService:
         identity = self.get_workflow_task(task_uuid)["uuid"]
         return self._store.list_jobs(identity)
 
+    def list_workflow_task_runtime_events(
+        self,
+        task_uuid: str,
+        *,
+        after_sequence: int = 0,
+        limit: int = 100,
+    ) -> Dict[str, Any]:
+        """分页读取任务的持久运行事件与动作下发/结果载荷。"""
+
+        try:
+            identity = validate_uuid(task_uuid)
+        except ValueError:
+            raise WorkflowError("invalid_input") from None
+        if (
+            isinstance(after_sequence, bool)
+            or not isinstance(after_sequence, int)
+            or after_sequence < 0
+            or after_sequence > (1 << 63) - 1
+            or isinstance(limit, bool)
+            or not isinstance(limit, int)
+            or not 1 <= limit <= 500
+        ):
+            raise WorkflowError("invalid_input")
+        try:
+            return self._store.list_task_runtime_events(
+                identity,
+                after_sequence=after_sequence,
+                limit=limit,
+            )
+        except StoreNotFound:
+            raise WorkflowError("not_found") from None
+
     def get_workflow_node_job(self, job_uuid: str) -> Dict[str, Any]:
         try:
             identity = validate_uuid(job_uuid)
@@ -741,6 +778,7 @@ class WorkflowService:
             raw_input=input_value,
             execution_plan=plan,
             jobs=jobs,
+            resource_resolver=self._material_resolver,
         )
 
     # 工作流创作（Authoring） ---------------------------------------------
@@ -888,7 +926,10 @@ class WorkflowService:
 
         for registration in self.list_registered_sources():
             try:
-                self.reconcile_registered_source(registration["workflow_uuid"])
+                self.reconcile_registered_source(
+                    registration["workflow_uuid"],
+                    force_compile=True,
+                )
             except (OSError, RuntimeError):
                 continue
 
@@ -993,6 +1034,9 @@ class WorkflowService:
                 candidate=candidate,
                 event_data=event_data,
             )
+            self._compiled_catalog_fingerprints[workflow_uuid] = (
+                compilation.template_catalog_fingerprint
+            )
             return self.get_authoring(workflow_uuid)
 
     @staticmethod
@@ -1026,7 +1070,15 @@ class WorkflowService:
     def reconcile_registered_source(
         self,
         workflow_uuid: str,
+        *,
+        force_compile: bool = False,
     ) -> Dict[str, Any]:
+        """把规范源码与当前工作流修订及模板目录重新对齐。
+
+        ``force_compile`` 用于启动恢复和模板目录换代：即使源码哈希未变，也必须
+        用当前发布目录重新验证组合子工作流引用，避免持久化旧目录的失败诊断。
+        """
+
         workflow_uuid = self._get_authoring_workflow(workflow_uuid)["uuid"]
         with self._authoring_lock(workflow_uuid):
             workflow = self._get_authoring_workflow(workflow_uuid)
@@ -1114,6 +1166,7 @@ class WorkflowService:
                 actual_hash == record["observed_draft_hash"]
                 and not invalid_writeback_marker
                 and not (actual_hash is None and record.get("candidate") is not None)
+                and not force_compile
             ):
                 return self.get_authoring(workflow_uuid)
 
@@ -1136,7 +1189,10 @@ class WorkflowService:
                     draft_python_source=source["python_source"],
                 )
             cause = (
-                "recovered"
+                "catalog_changed"
+                if force_compile
+                and actual_hash == record["observed_draft_hash"]
+                else "recovered"
                 if source is not None
                 and record["observed_draft_hash"] is None
                 and record["update_time"] is not None
@@ -1163,6 +1219,14 @@ class WorkflowService:
                     ),
                 },
             )
+            if source is not None:
+                self._compiled_catalog_fingerprints[workflow_uuid] = (
+                    compilation.template_catalog_fingerprint
+                )
+            else:
+                self._compiled_catalog_fingerprints[workflow_uuid] = (
+                    self._catalog_fingerprint()
+                )
             return self.get_authoring(workflow_uuid)
 
     def submit_source_change(
@@ -1182,13 +1246,20 @@ class WorkflowService:
 
         workflow_uuid = self._get_authoring_workflow(workflow_uuid)["uuid"]
         with self._authoring_lock(workflow_uuid):
-            registration = self._registration(workflow_uuid)
             # ``current_signature`` 是服务在取得创作锁后复核的文件世代，防止监视
             # 线程用过期观测授权编译更新中的文件。
             current_signature = self.source_signature(workflow_uuid)
             if current_signature != observed_signature:
                 return False
-            self.reconcile_registered_source(workflow_uuid)
+            catalog_fingerprint = current_signature[1]
+            force_compile = (
+                self._compiled_catalog_fingerprints.get(workflow_uuid)
+                != catalog_fingerprint
+            )
+            self.reconcile_registered_source(
+                workflow_uuid,
+                force_compile=force_compile,
+            )
             # ``latest_signature`` 证明整个状态推进期间规范源码没有再次变化。
             latest_signature = self.source_signature(workflow_uuid)
             if latest_signature != observed_signature:
@@ -1602,7 +1673,11 @@ class WorkflowService:
         with self._authoring_lock(workflow_uuid):
             registration = self._registration(workflow_uuid)
             try:
-                return registered_source_signature(registration)
+                return (
+                    "catalog",
+                    self._catalog_fingerprint(),
+                    *registered_source_signature(registration),
+                )
             except SourceWorkspaceError:
                 raise WorkflowError("invalid_input") from None
 

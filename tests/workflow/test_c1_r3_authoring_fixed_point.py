@@ -606,3 +606,54 @@ def test_persisted_blank_workflow_description_remains_renderable() -> None:
         source_uri="package://c1_published_lab/workflows/persisted_parent.py",
     )
     assert validated.valid, validated.diagnostics
+
+
+def test_canvas_round_trip_accepts_catalog_generation_and_omitted_ready_nulls() -> (
+    None
+):
+    """画布切换不得把目录代际和 Backend 省略空值误判为作者语义变化。
+
+    参数：无。返回：无；先构造已应用组合图，再模拟目录其他来源变化造成的
+    package 摘要换代以及 Backend ``omitempty`` 的 ready 连接点读形状，最后
+    通过画布实际使用的 generate-python → validate 链证明仍是同一作者语义。
+    """
+
+    engine = _engine()
+    compiled = _compile(engine, _source(), _applied_parent_graph())
+    assert compiled.valid and compiled.graph is not None, compiled.diagnostics
+    persisted = deepcopy(compiled.graph)
+    child_template = next(
+        template
+        for template in persisted["node_templates"]
+        if template["uuid"] == CHILD_TEMPLATE_UUID
+    )
+    child_template["meta_data"]["unilab"]["workflow_source"][
+        "package_catalog_digest"
+    ] = "sha256:" + "e" * 64
+    for handle in persisted["handle_templates"]:
+        if (
+            handle["workflow_node_template_uuid"] == CHILD_TEMPLATE_UUID
+            and handle["handle_key"] == "ready"
+        ):
+            handle.pop("description", None)
+            handle.pop("data_source", None)
+            handle.pop("data_key", None)
+
+    generated = engine.generate_python(
+        workflow_uuid=PARENT_WORKFLOW_UUID,
+        workflow_revision=1,
+        graph=persisted,
+        source_uri="package://c1_published_lab/workflows/persisted_parent.py",
+    )
+    assert generated.valid and generated.graph is not None, generated.diagnostics
+    assert generated.normalized_python_source is not None
+
+    validated = engine.validate(
+        workflow_uuid=PARENT_WORKFLOW_UUID,
+        workflow_revision=1,
+        graph=generated.graph,
+        python_source=generated.normalized_python_source,
+        source_uri="package://c1_published_lab/workflows/persisted_parent.py",
+    )
+
+    assert validated.valid, validated.diagnostics
