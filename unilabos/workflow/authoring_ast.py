@@ -501,7 +501,7 @@ def _result_record(
     """
 
     if not result_records:
-        if function.returns is not None:
+        if not _is_none_return_annotation(function.returns):
             _fail("invalid_workflow_output", "工作流返回注解必须引用 TypedDict 结果记录", function)
         return None, {}
     if len(result_records) != 1:
@@ -537,6 +537,19 @@ def _result_record(
     except AnnotationSchemaError as error:
         raise AuthoringSyntaxError(error.code, error.message, record) from None
     return record.name, fields
+
+
+def _is_none_return_annotation(annotation: ast.expr | None) -> bool:
+    """判断返回注解是否表示无工作流输出。
+
+    参数：``annotation`` 是工作流函数的可选返回注解。
+    返回：未注解或显式 ``None`` 时返回真，其余注解返回假。
+    异常：无；本函数只检查静态语法节点，不解析或执行名称。
+    """
+
+    return annotation is None or (
+        isinstance(annotation, ast.Constant) and annotation.value is None
+    )
 
 
 def _source_anchors(python_source: str) -> dict[int, str]:
@@ -648,9 +661,13 @@ def _workflow_body(
         statements[0].value, ast.Constant
     ) and isinstance(statements[0].value.value, str):
         statements.pop(0)
-    if not statements or not isinstance(statements[-1], ast.Return):
-        _fail("invalid_workflow_output", "工作流函数必须以 workflow_output 返回", function)
-    return_statement = statements.pop()
+    if statements and isinstance(statements[-1], ast.Return):
+        # ``return_statement`` 是显式工作流输出，继续接受结果字典或 workflow_output。
+        return_statement = statements.pop()
+    else:
+        # ``return_statement`` 把 Python 的隐式 ``return None`` 规范化为空输出合同；
+        # 声明了 TypedDict 结果记录时，后续合同一致性校验仍会关闭式拒绝缺失字段。
+        return_statement = ast.Return(value=ast.Dict(keys=[], values=[]))
     state = _BodyState(
         imports=imports,
         devices=devices,
@@ -991,10 +1008,15 @@ def _action_declaration(
             if item.arg is None or item.arg in names:
                 _fail("invalid_action_arguments", "工作流调用参数重复或包含 ** 展开", call)
             names.add(item.arg)
+            # ``resource_binding`` 让组合工作流（Composite Workflow）与普通
+            # 动作共享同一部署资源引用语法；此处只保存静态业务身份，实际物料
+            # UUID 仍由工作流创作组合根注入的库存权威（Inventory Authority）解析。
+            resource_binding = _resource_ref_binding(item.value, imports=imports)
             arguments.append(
                 (
                     item.arg,
-                    _value_binding(
+                    resource_binding
+                    or _value_binding(
                         item.value,
                         input_names=input_names,
                         known_results=known_results,

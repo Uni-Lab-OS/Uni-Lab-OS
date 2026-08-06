@@ -215,3 +215,48 @@ def test_empty_package_compiles_to_a_stable_empty_definition_catalog(
     assert catalog.definitions.workflows == ()
     assert catalog.assets == ()
     assert catalog.catalog_digest.startswith("sha256:")
+
+
+def test_legacy_no_output_workflow_compiles_as_empty_output_contract(
+    tmp_path: Path,
+) -> None:
+    """证明遗留无输出工作流可进入完整软件包目录（PackageCatalog）。
+
+    参数：``tmp_path`` 提供隔离工作区并复用完整设备/资源夹具。
+    返回：无；断言旧 ``@workflow_definition``、``-> None`` 与隐式函数返回被
+    规范化为空工作流输出合同（Workflow Output Contract）。
+    异常：动作或输入的其他静态错误仍必须由完整编译关闭式拒绝。
+    """
+
+    from unilabos.package_manager import WorkspaceSource, compile_package_source
+
+    # ``workspace_root`` 模拟当前 SZLab 中尚未改写为显式 ``workflow_output`` 的源码。
+    workspace_root = tmp_path / "workspace"
+    _write_package(workspace_root)
+    workspace_root.joinpath("catalog_lab/workflows/child.py").write_text(
+        "def child(*, value):\n    return value\n",
+        encoding="utf-8",
+    )
+    workspace_root.joinpath("catalog_lab/workflows/prepare.py").write_text(
+        "from catalog_lab.workflows.child import child\n"
+        "from unilabos.workflow.authoring import resource_ref, workflow_definition\n\n"
+        f'@workflow_definition(workflow_uuid="{WORKFLOW_UUID}", displayname="准备实验")\n'
+        "def prepare(*, batch: int = 1) -> None:\n"
+        "    # unilab:node_uuid=22222222-2222-4222-8222-222222222222\n"
+        '    run = child(value=resource_ref("warehouse"))\n',
+        encoding="utf-8",
+    )
+
+    # ``catalog`` 只兼容无输出表达，不绕过动作、身份或文件安全检查。
+    catalog = compile_package_source(WorkspaceSource(workspace_root))
+
+    workflow = catalog.definitions.workflows[0]
+    assert workflow.details["input_contract"]["parameters"][0]["name"] == "batch"
+    assert workflow.details["output_contract"] == ()
+    assert workflow.details["action_references"] == (
+        {
+            "kind": "workflow",
+            "module": "catalog_lab.workflows.child",
+            "symbol": "child",
+        },
+    )
