@@ -2,23 +2,26 @@
 
 from __future__ import annotations
 
-import re
 import sys
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
-
-import tomllib
 
 from unilabos.workflow.source_discovery import (
     SourceDeclarationError,
     discover_editable_sources,
 )
 from unilabos.workflow.source_manifest import (
+    EditablePackageManifest,
     SourceManifestError,
     parse_editable_package_manifest,
 )
 
+from .project_metadata import (
+    PackageProject,
+    normalize_distribution_name,
+    parse_project_metadata,
+)
 from .sources import WorkspaceSource
 
 
@@ -28,6 +31,8 @@ class WorkspaceStartupPlan:
 
     # ``source`` 是本轮启动唯一被授权的工作区文件来源。
     source: WorkspaceSource
+    # ``project_metadata`` 是工作区、注册表（Registry）和包工具共用的项目声明。
+    project_metadata: PackageProject
     # ``distribution_name`` 是 pyproject.toml 声明的原始发行包身份。
     distribution_name: str
     # ``import_package`` 是从发行元数据规范化得到的 Python 导入包身份。
@@ -40,6 +45,8 @@ class WorkspaceStartupPlan:
     has_workflow_manifest: bool
     # ``workflow_source_count`` 是清单静态校验通过的工作流源码数量。
     workflow_source_count: int
+    # ``workflow_manifest`` 是本次完整解析后的封闭来源清单；缺失文件时为 None。
+    workflow_manifest: EditablePackageManifest | None
 
     def apply(self, arguments: dict[str, Any]) -> None:
         """把启动计划一次应用到现有产品参数字典。
@@ -110,22 +117,6 @@ class WorkspaceStartupPlan:
         return resolved_graph
 
 
-def normalize_distribution_name(distribution_name: str) -> str:
-    """把发行包名称规范化为当前工作区导入包身份。
-
-    参数：``distribution_name`` 是 ``pyproject.toml`` 的 ``project.name``。
-    返回：小写并把连字符、点和下划线段统一为下划线的 Python 包名。
-    异常：参数不是非空字符串或不能形成 Python 标识符时抛出 ``ValueError``。
-    """
-
-    if not isinstance(distribution_name, str) or not distribution_name.strip():
-        raise ValueError("pyproject.toml project.name 必须是非空字符串")
-    import_package = re.sub(r"[-_.]+", "_", distribution_name.strip().lower())
-    if not import_package.isidentifier():
-        raise ValueError("工作区发行包名称不能规范化为 Python 包身份")
-    return import_package
-
-
 def compile_workspace_startup(source: WorkspaceSource) -> WorkspaceStartupPlan:
     """静态编译启动门禁所需的最小工作区计划。
 
@@ -137,9 +128,10 @@ def compile_workspace_startup(source: WorkspaceSource) -> WorkspaceStartupPlan:
 
     if not isinstance(source, WorkspaceSource):
         raise TypeError("source 必须是 WorkspaceSource")
-    # ``project_name`` 是发行元数据身份；``import_package`` 是规范 Python 包身份。
-    project_name = _read_project_name(source)
-    import_package = normalize_distribution_name(project_name)
+    # ``project_metadata`` 是所有包调用者共用的唯一 TOML 解析结果。
+    project_metadata = parse_project_metadata(source.read_bytes("pyproject.toml"))
+    # ``import_package`` 是发行身份规范化后的唯一 Python 包身份。
+    import_package = project_metadata.normalized_name
     # ``package_directory`` 是注册表（Registry）唯一允许扫描的包目录。
     package_directory = source.root / import_package
     if (
@@ -157,19 +149,24 @@ def compile_workspace_startup(source: WorkspaceSource) -> WorkspaceStartupPlan:
     has_workflow_manifest = source.has_file("package.yaml")
     # ``workflow_source_count`` 证明本次计划确实加载了封闭来源声明。
     workflow_source_count = 0
+    # ``workflow_manifest`` 保留本次已验证模型，后续目录编译不得再次解释 YAML。
+    workflow_manifest: EditablePackageManifest | None = None
     if has_workflow_manifest:
-        workflow_source_count = _validate_workflow_manifest(
+        workflow_manifest = _validate_workflow_manifest(
             source,
             import_package=import_package,
         )
+        workflow_source_count = len(workflow_manifest.workflows)
     return WorkspaceStartupPlan(
         source=source,
-        distribution_name=project_name.strip(),
+        project_metadata=project_metadata,
+        distribution_name=project_metadata.name,
         import_package=import_package,
         package_directory=package_directory,
         community_namespace=f"community.{import_package}",
         has_workflow_manifest=has_workflow_manifest,
         workflow_source_count=workflow_source_count,
+        workflow_manifest=workflow_manifest,
     )
 
 
@@ -199,40 +196,15 @@ def prepare_workspace_startup(
     return startup_plan
 
 
-def _read_project_name(source: WorkspaceSource) -> str:
-    """读取工作区项目的稳定发行包名称。
-
-    参数：``source`` 是已固定根目录的工作区来源。
-    返回：``pyproject.toml`` 中非空 ``project.name``。
-    异常：UTF-8、TOML 或字段形状无效时抛出 ``ValueError``。
-    """
-
-    try:
-        project_document = tomllib.loads(
-            source.read_bytes("pyproject.toml").decode("utf-8")
-        )
-    except (UnicodeError, tomllib.TOMLDecodeError) as error:
-        raise ValueError("工作区 pyproject.toml 无效") from error
-    project_table = project_document.get("project")
-    if project_table is None:
-        raise ValueError("pyproject.toml 缺少 [project]")
-    if not isinstance(project_table, dict):
-        raise TypeError("pyproject.toml [project] 必须是表")
-    project_name = project_table.get("name")
-    if not isinstance(project_name, str) or not project_name.strip():
-        raise ValueError("pyproject.toml project.name 必须是非空字符串")
-    return project_name
-
-
 def _validate_workflow_manifest(
     source: WorkspaceSource,
     *,
     import_package: str,
-) -> int:
+) -> EditablePackageManifest:
     """验证工作流源码（Workflow Source）声明与项目包身份一致。
 
     参数：``source`` 是已固定工作区来源；``import_package`` 是项目规范导入身份。
-    返回：完整声明中的工作流源码（Workflow Source）数量。
+    返回：完成身份与源码路径校验的封闭可编辑包（Editable Package）清单。
     异常：YAML、身份或源码路径无效时转换为不泄漏内容的 ``ValueError``。
     """
 
@@ -245,7 +217,9 @@ def _validate_workflow_manifest(
         discovery_plan = discover_editable_sources((source.root,))
     except (SourceManifestError, SourceDeclarationError) as error:
         raise ValueError("工作区 package.yaml 或工作流源码声明无效") from error
-    return len(discovery_plan.registrations)
+    if len(discovery_plan.registrations) != len(manifest.workflows):
+        raise ValueError("工作区工作流源码发现结果不完整")
+    return manifest
 
 
 def _validate_registry_python_tree(

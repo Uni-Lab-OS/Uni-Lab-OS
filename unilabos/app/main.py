@@ -325,8 +325,10 @@ def parse_args():
     parser.add_argument(
         "--workspace",
         type=str,
+        nargs="?",
+        const=".",
         default=None,
-        help="显式 Uni-Lab 工作区（Workspace）根目录。",
+        help="显式 Uni-Lab 工作区（Workspace）根目录；省略路径时使用当前目录。",
     )
     parser.add_argument(
         "-c", "--controllers", default=None, help="Controllers config file path."
@@ -1291,7 +1293,7 @@ def main():
 
     # package 子命令：在配置/鉴权就绪后尽早处理，不进入设备 bootstrap
     if args_dict.get("command") in ("package", "pkg"):
-        from unilabos.app.package_cli import PackageCLIError, cmd_package
+        from unilabos.package_manager.cli import PackageCLIError, cmd_package
 
         package_http_client = None
         if args_dict.get("package_action") == "upload":

@@ -121,9 +121,10 @@ def parse_editable_package_manifest(raw: bytes) -> EditablePackageManifest:
     package_id = package["name"]
     if not isinstance(package_id, str) or _PACKAGE_NAME.fullmatch(package_id) is None:
         raise SourceManifestError("invalid_package")
+    # ``workflow_rows`` 允许显式空列表，使新建可编辑包先形成合法身份，再逐步加入
+    # 工作流源码（Workflow Source）；null 或缺失字段仍不是空声明。
     if (
         not isinstance(workflow_rows, list)
-        or not workflow_rows
         or len(workflow_rows) > WORKFLOW_ENTRY_LIMIT
     ):
         raise SourceManifestError("invalid_manifest")
