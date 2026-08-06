@@ -41,12 +41,14 @@ def render_authoring_python(
     *,
     graph: Mapping[str, Any],
     catalog: AuthoringCatalogSnapshot,
+    function_docstring: str | None = None,
 ) -> RenderedAuthoringSource:
     """把完整候选图渲染为规范作者 Python。
 
     参数说明：``graph`` 是后端五集合候选图，``catalog`` 是同一编译事务目录
-    快照；返回可回编译的规范源码和 UTF-16 源码映射。身份或目录投影不一致时
-    抛出 ``AuthoringGraphError``；物料图违反物料流线性
+    快照；``function_docstring`` 是可信 AST 提取并清理的可选工作流函数文档。
+    返回可回编译的规范源码和 UTF-16 源码映射。身份或目录投影不一致时
+    抛出 ``AuthoringGraphError``；函数文档非字符串时也失败关闭；物料图违反物料流线性
     （MaterialFlowLinearity）或资源模板兼容（ResourceTemplate Compatibility）
     时，也会把内部物料图异常转换为 ``AuthoringGraphError`` 并保留稳定错误码。
     """
@@ -256,6 +258,8 @@ def render_authoring_python(
             f" -> {result_record_name}" if explicit_output_bindings else ""
         )
         lines.append(f"def {function_name}(){return_annotation}:")
+    if function_docstring is not None:
+        _append_function_docstring(lines=lines, docstring=function_docstring)
 
     incoming = _incoming_bindings(
         visible_edges,
@@ -264,7 +268,11 @@ def render_authoring_python(
     source_map: list[dict[str, Any]] = []
     # Python 动作结果变量承载节点间数据依赖，必须唯一且不能被节点展示标题改写。
     result_names: set[str] = set()
-    if not ordered_nodes and not explicit_output_bindings:
+    if (
+        not ordered_nodes
+        and not explicit_output_bindings
+        and function_docstring is None
+    ):
         lines.append('    """空工作流。"""')
     children_by_parent: dict[str, list[dict[str, Any]]] = defaultdict(list)
     for node in ordered_nodes:
@@ -375,6 +383,31 @@ def render_authoring_python(
         python_source="\n".join(lines).rstrip() + "\n",
         source_map=source_map,
     )
+
+
+def _append_function_docstring(*, lines: list[str], docstring: str) -> None:
+    """向规范工作流函数体追加确定性的中文函数文档字面量。
+
+    参数：``lines`` 是统一源码行账本；``docstring`` 是可信 AST 已按 Python 文档
+    规则清理的语义文本。返回：无，原位追加可再次静态解析的三引号文档行。
+    异常：``docstring`` 不是字符串时抛出 ``AuthoringGraphError``，不生成部分文档。
+    """
+
+    if not isinstance(docstring, str):
+        raise AuthoringGraphError("candidate_invalid", "工作流函数文档必须是字符串")
+    # ``docstring_lines`` 按语义换行保留中文函数合同的段落结构。
+    docstring_lines = docstring.split("\n")
+    # ``escaped_lines`` 使用 JSON 字符串的兼容转义规则保护引号、反斜线与控制字符；
+    # 截去外层双引号后仍是合法 Python 三引号字面量内容。
+    escaped_lines = [
+        json.dumps(line, ensure_ascii=False)[1:-1] for line in docstring_lines
+    ]
+    if len(escaped_lines) == 1:
+        lines.append(f'    """{escaped_lines[0]}"""')
+        return
+    lines.append(f'    """{escaped_lines[0]}')
+    lines.extend(f"    {line}" for line in escaped_lines[1:-1])
+    lines.append(f'    {escaped_lines[-1]}"""')
 
 
 def _append_group_source(

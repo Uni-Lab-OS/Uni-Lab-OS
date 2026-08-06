@@ -131,7 +131,11 @@ class WorkflowAuthoringEngine:
                     "candidate_invalid",
                     "已应用工作流修订与编译请求不一致",
                 )
-            rendered = render_authoring_python(graph=graph, catalog=self._catalog)
+            rendered = render_authoring_python(
+                graph=graph,
+                catalog=self._catalog,
+                function_docstring=program.function_docstring,
+            )
             validate_candidate_bundle(
                 graph=graph,
                 base_graph=applied_graph,

@@ -128,6 +128,7 @@ class WorkflowProgram:
 
     workflow_uuid: str
     function_name: str
+    function_docstring: str | None
     display_name: str
     description: str | None
     imports: tuple[tuple[str, str], ...]
@@ -214,6 +215,9 @@ def parse_authoring_source(
     if len(functions) != 1:
         _fail("invalid_workflow_declaration", "必须且只能声明一个工作流函数")
     function = functions[0]
+    # ``function_docstring`` 只由 Python AST 的规范函数文档语义读取；普通首表达式
+    # 不会成为文档，且整个过程不 import、compile 或执行作者代码。
+    function_docstring = ast.get_docstring(function, clean=True)
     workflow_uuid, display_name, description = _workflow_declaration(
         function,
         imports,
@@ -269,6 +273,7 @@ def parse_authoring_source(
     return WorkflowProgram(
         workflow_uuid=workflow_uuid,
         function_name=function.name,
+        function_docstring=function_docstring,
         display_name=display_name,
         description=description,
         imports=tuple(sorted(imports.items())),
