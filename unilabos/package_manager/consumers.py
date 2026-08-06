@@ -136,11 +136,25 @@ def resolve_registry_definition(
 
 
 def register_package_catalog(registry: Any, catalog: PackageCatalog) -> None:
-    """登记完整定义元数据；不 import definition module，也不创建实例。"""
+    """幂等登记完整定义元数据，不 import module 或创建设备实例。
+
+    ``registry`` 是当前进程唯一 Registry，``catalog`` 是已校验的完整包目录。
+    返回 ``None``。相同 FQID 与 content hash 的 Catalog 重放会保留原条目；
+    任一同名不同内容定义会在写入前失败，避免 Registry 进入部分更新状态。
+    """
+
+    _reject_conflicting_definition_replays(
+        registry.device_type_registry,
+        catalog.definitions.devices,
+    )
+    _reject_conflicting_definition_replays(
+        registry.resource_type_registry,
+        catalog.definitions.resources,
+    )
 
     for record in catalog.definitions.devices:
         if record.fqid in registry.device_type_registry:
-            raise ValueError(f"Registry definition 重复: {record.fqid}")
+            continue
         entry = registry._build_device_entry_from_ast(
             record.fqid,
             _device_ast_metadata(record),
@@ -152,13 +166,37 @@ def register_package_catalog(registry: Any, catalog: PackageCatalog) -> None:
 
     for record in catalog.definitions.resources:
         if record.fqid in registry.resource_type_registry:
-            raise ValueError(f"Registry definition 重复: {record.fqid}")
+            continue
         entry = registry._build_resource_entry_from_ast(
             record.fqid, _resource_ast_metadata(record)
         )
         entry["source_fqid"] = record.fqid
         entry["content_hash"] = record.content_hash
         registry.resource_type_registry[record.fqid] = entry
+
+
+def _reject_conflicting_definition_replays(
+    registry_entries: Mapping[str, Any],
+    records: tuple[DefinitionRecord, ...],
+) -> None:
+    """预检一组定义重放，只允许身份和内容摘要完全相同的已有条目。
+
+    ``registry_entries`` 是设备或资源 Registry 映射，``records`` 是同类 Catalog
+    定义。返回 ``None``。发现同 FQID 但来源或内容摘要不同时立即抛出异常；调用方
+    必须在任何写入前完成设备、资源两组预检，以防止部分注册。
+    """
+
+    for record in records:
+        existing = registry_entries.get(record.fqid)
+        if existing is None:
+            continue
+        if (
+            isinstance(existing, Mapping)
+            and existing.get("source_fqid") == record.fqid
+            and existing.get("content_hash") == record.content_hash
+        ):
+            continue
+        raise ValueError(f"Registry definition 重复: {record.fqid}")
 
 
 def action_catalog_from_package_catalog(

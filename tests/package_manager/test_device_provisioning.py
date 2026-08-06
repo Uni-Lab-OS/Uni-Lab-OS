@@ -9,8 +9,13 @@ from pathlib import Path
 import pytest
 
 from unilabos.app.main import parse_args
+from unilabos.package_manager import WorkspaceSource, compile_package_source
 from unilabos.package_manager.cli import run_package_command
-from unilabos.package_manager.community import resolve_graph_packages
+from unilabos.package_manager.community import (
+    CommunityPackageError,
+    resolve_graph_packages,
+)
+from unilabos.package_manager.consumers import register_package_catalog
 from unilabos.package_manager.device_package import download_device_package
 from unilabos.package_manager.device_provisioning import (
     DeviceProvisioningError,
@@ -21,6 +26,7 @@ from unilabos.package_manager.device_provisioning import (
 )
 from unilabos.package_manager.device_secrets import resolve_device_configuration
 from unilabos.package_manager.distribution import BuildArtifact, build_workspace_wheel
+from unilabos.registry.registry import Registry
 
 _TEMPLATE_UUID = "d8f0fe85-d34a-4eb7-965a-5af0e2cf6939"
 _DEFINITION_FQID = "community.provisioning_lab.pump"
@@ -290,6 +296,104 @@ def test_graph_activation_keeps_the_staged_package_release(
     assert [source.expected_digest for source in resolution.sources] == [
         first_artifact.artifact_digest
     ]
+
+
+def test_graph_activation_deduplicates_identical_workspace_and_cached_catalog(
+    tmp_path: Path,
+) -> None:
+    """同内容 Workspace 与设备图固定 wheel 只能向 Registry 提供一个 Catalog。
+
+    ``tmp_path`` 同时承载测试 Workspace 与受管 wheel 缓存。函数返回 ``None``；
+    它证明 Graph 仍会校验固定缓存身份，但不会把相同 Catalog 再次交给启动链路。
+    """
+
+    cache_key, working_dir = _cache_device_package(tmp_path)
+    workspace_catalog = compile_package_source(
+        WorkspaceSource(tmp_path / "workspace")
+    )
+    graph = {
+        "nodes": [
+            {
+                "class": _DEFINITION_FQID,
+                "extra": {"unilab": {"package_cache_key": cache_key}},
+            }
+        ]
+    }
+
+    resolution = resolve_graph_packages(
+        graph,
+        working_dir=working_dir,
+        available_catalogs=(workspace_catalog,),
+    )
+
+    assert resolution.sources == ()
+    assert resolution.catalogs == ()
+    assert resolution.classes == (_DEFINITION_FQID,)
+
+
+def test_graph_activation_rejects_conflicting_workspace_and_cached_catalog(
+    tmp_path: Path,
+) -> None:
+    """同 namespace 的 Workspace 与固定 wheel 内容不同时必须失败关闭。
+
+    ``tmp_path`` 提供隔离源码和缓存；测试先固定发布 wheel，再修改 Workspace
+    初始化合同。函数返回 ``None``，并验证启动不会在两套驱动定义间猜测来源。
+    """
+
+    cache_key, working_dir = _cache_device_package(tmp_path)
+    device_source = tmp_path / "workspace" / "provisioning_lab" / "device.py"
+    device_source.write_text(
+        device_source.read_text(encoding="utf-8").replace(
+            "retries: int = 3",
+            "retries: int = 5",
+        ),
+        encoding="utf-8",
+    )
+    workspace_catalog = compile_package_source(
+        WorkspaceSource(tmp_path / "workspace")
+    )
+    graph = {
+        "nodes": [
+            {
+                "class": _DEFINITION_FQID,
+                "extra": {"unilab": {"package_cache_key": cache_key}},
+            }
+        ]
+    }
+
+    with pytest.raises(
+        CommunityPackageError,
+        match="Workspace Catalog 与设备图固定版本不一致",
+    ):
+        resolve_graph_packages(
+            graph,
+            working_dir=working_dir,
+            available_catalogs=(workspace_catalog,),
+        )
+
+
+def test_register_package_catalog_identical_replay_is_idempotent(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Registry 必须允许同一 Catalog 重放且不得重建已有定义条目。
+
+    ``tmp_path`` 提供隔离 Workspace，``monkeypatch`` 隔离 Registry 映射。函数
+    返回 ``None``；它保护组合根重复传入相同 Catalog 时的最后一道幂等边界。
+    """
+
+    _build_device_artifact(tmp_path)
+    catalog = compile_package_source(WorkspaceSource(tmp_path / "workspace"))
+    registry = Registry()
+    monkeypatch.setattr(registry, "device_type_registry", {})
+    monkeypatch.setattr(registry, "resource_type_registry", {})
+
+    register_package_catalog(registry, catalog)
+    original_entry = registry.device_type_registry[_DEFINITION_FQID]
+    register_package_catalog(registry, catalog)
+
+    assert registry.device_type_registry == {_DEFINITION_FQID: original_entry}
+    assert registry.device_type_registry[_DEFINITION_FQID] is original_entry
 
 
 @pytest.mark.parametrize(
