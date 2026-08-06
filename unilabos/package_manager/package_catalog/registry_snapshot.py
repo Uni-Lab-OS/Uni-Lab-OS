@@ -217,20 +217,6 @@ class RegistrySnapshot:
             node_definitions=node_definitions,
         )
 
-    def publish(self, registry: Any) -> None:
-        """通过工作区运行时（Workspace Runtime）兼容桥发布完整快照。
-
-        参数：``registry`` 是需要接收本快照的实时注册表（Registry）。
-        返回：无；委托唯一运行时发布 Interface，保持历史 ``snapshot.publish``。
-        异常：注册表形状、身份冲突或原子替换失败时传播原异常。
-        """
-
-        # 函数内导入是唯一允许的遗留兼容桥，避免纯包目录（PackageCatalog）模块
-        # 加载时反向拥有实时发布职责或形成初始化环。
-        from ..workspace_runtime.activation import publish_registry_snapshot
-
-        publish_registry_snapshot(self, registry)
-
     def registry_candidates(
         self,
         original_devices: Mapping[str, Any],

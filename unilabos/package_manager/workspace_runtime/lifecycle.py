@@ -8,7 +8,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
-from ..catalog import PackageCatalog
+from ..package_catalog import PackageCatalog
 from ..package_catalog.sources import WorkspaceSource
 from .activation import (
     WorkspaceRegistryRuntime,

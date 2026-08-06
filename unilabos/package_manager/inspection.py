@@ -12,10 +12,9 @@ from unilabos.registry.init_enforce import validate_init_param_enforce
 from unilabos.utils import logger
 from unilabos.utils.banner_print import print_status
 
-from .catalog import PackageCatalog, PackageCompileError
 from .errors import PackageCLIError
+from .package_catalog import PackageCatalog, PackageCompileError, WorkspaceSource
 from .project_metadata import parse_project_metadata, project_to_legacy_dict
-from .sources import WorkspaceSource
 from .workspace_runtime.discovery import compile_package_source
 
 COMMUNITY_PREFIX = "community."
@@ -625,7 +624,9 @@ def inspect_package(
         except PackageCompileError as error:
             # ``diagnostic_codes`` 是完整失败诊断的稳定代码摘要，不含部分目录。
             diagnostic_codes = ", ".join(item.code for item in error.diagnostics)
-            raise PackageCLIError(f"包目录（PackageCatalog）编译失败：{diagnostic_codes}") from error
+            raise PackageCLIError(
+                f"包目录（PackageCatalog）编译失败：{diagnostic_codes}"
+            ) from error
         except (TypeError, ValueError) as error:
             raise PackageCLIError("包目录（PackageCatalog）编译失败") from error
 

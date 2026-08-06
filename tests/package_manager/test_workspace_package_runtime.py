@@ -16,7 +16,7 @@ from unilabos.package_manager import (
     WorkspaceSource,
     compile_registry_snapshot,
 )
-from unilabos.package_manager.catalog import (
+from unilabos.package_manager.package_catalog import (
     PackageCatalog,
     PackageDefinition,
     PackageDefinitionCatalog,
@@ -107,7 +107,9 @@ def _freeze_json(value: Any) -> Any:
     if value is None or isinstance(value, (str, int, float, bool)):
         return value
     if isinstance(value, Mapping):
-        return MappingProxyType({key: _freeze_json(item) for key, item in value.items()})
+        return MappingProxyType(
+            {key: _freeze_json(item) for key, item in value.items()}
+        )
     if isinstance(value, (list, tuple)):
         return tuple(_freeze_json(item) for item in value)
     raise TypeError(f"测试 JSON 值无效: {type(value).__name__}")

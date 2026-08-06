@@ -11,8 +11,7 @@ from typing import Any
 
 import yaml
 
-from .catalog import PackageCatalog, PackageDefinition
-from .sources import WorkspaceSource
+from .package_catalog import PackageCatalog, PackageDefinition, WorkspaceSource
 from .workspace_runtime.discovery import WorkspaceStartupPlan
 
 _PART_TYPES = frozenset(
@@ -90,7 +89,9 @@ def compile_catalog_material_shapes(
         expected_digest = catalog_assets.get(logical_shape_path)
         actual_digest = "sha256:" + hashlib.sha256(shape_bytes).hexdigest()
         if expected_digest is None or expected_digest != actual_digest:
-            raise ValueError(f"外形资产不属于当前包目录（PackageCatalog）代或摘要漂移: {logical_shape_path}")
+            raise ValueError(
+                f"外形资产不属于当前包目录（PackageCatalog）代或摘要漂移: {logical_shape_path}"
+            )
         shape = _load_public_shape_bytes(
             shape_bytes,
             logical_shape_path=logical_shape_path,
@@ -381,9 +382,7 @@ def _public_shape(raw: Mapping[str, Any], *, bundle: str) -> dict[str, Any]:
         if rule.get("category"):
             categories.append(_normalize_category(str(rule["category"])))
         if rule.get("category_contains"):
-            category_tokens.append(
-                _normalize_category(str(rule["category_contains"]))
-            )
+            category_tokens.append(_normalize_category(str(rule["category_contains"])))
     if not categories and not category_tokens:
         raise ValueError(f"外形 {shape_id} 缺少 applies_to")
     result: dict[str, Any] = {

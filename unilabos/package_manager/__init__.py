@@ -1,8 +1,16 @@
 """工作区（Workspace）和包目录（PackageCatalog）的公开接口。"""
 
-from .catalog import PackageCatalog, PackageCompileError
 from .cli import PackageCLIError, cmd_package, register_package_subcommands
 from .inspection import inspect_package
+from .package_catalog import (
+    PackageCatalog,
+    PackageCompileError,
+    RegistryActivationPlan,
+    RegistrySnapshot,
+    RegistrySnapshotError,
+    WorkspaceSource,
+    compile_registry_snapshot,
+)
 from .package_distribution import (
     LockedPackage,
     PackageDependencyError,
@@ -12,13 +20,6 @@ from .package_distribution import (
     upload_package,
 )
 from .project_metadata import PackageProject, parse_project_metadata
-from .registry_snapshot import (
-    RegistryActivationPlan,
-    RegistrySnapshot,
-    RegistrySnapshotError,
-    compile_registry_snapshot,
-)
-from .sources import WorkspaceSource
 from .workspace_material_models import (
     WorkspaceMaterialModelAsset,
     WorkspaceMaterialModelCatalog,

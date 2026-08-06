@@ -8,6 +8,7 @@ from pathlib import Path
 import pytest
 
 from tests.package_manager.test_package_dependency_lock import _write_package
+from unilabos.package_manager.workspace_runtime import compile_package_source
 
 
 @pytest.mark.parametrize(
@@ -99,7 +100,10 @@ def test_package_command_add_update_remove_runs_without_ambient_install(
     )
     assert tuple(
         item.id
-        for item in load_locked_package_catalogs(workspace_root)[0].definitions.devices
+        for item in load_locked_package_catalogs(
+            workspace_root,
+            compile_catalog=compile_package_source,
+        )[0].definitions.devices
     ) == ("incubator", "reader")
 
     cmd_package(
@@ -109,7 +113,13 @@ def test_package_command_add_update_remove_runs_without_ambient_install(
             "workspace": str(workspace_root),
         }
     )
-    assert load_locked_package_catalogs(workspace_root) == ()
+    assert (
+        load_locked_package_catalogs(
+            workspace_root,
+            compile_catalog=compile_package_source,
+        )
+        == ()
+    )
 
 
 def test_package_subcommand_preserves_explicit_top_level_workspace(

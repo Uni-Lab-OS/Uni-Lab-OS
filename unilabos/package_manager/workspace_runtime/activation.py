@@ -21,12 +21,12 @@ from unilabos.workflow.source_file_access import (
     directory_identity,
 )
 
-from ..catalog import PackageCatalog, PackageDefinition
 from ..catalog_source import (
     PackageCatalogSource,
     compile_generation_material_shapes,
     selected_package_import_roots,
 )
+from ..package_catalog import PackageCatalog, PackageDefinition
 from ..package_catalog.registry_snapshot import (
     RegistryActivationPlan,
     RegistrySnapshot,

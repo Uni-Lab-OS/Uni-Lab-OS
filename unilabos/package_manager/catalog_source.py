@@ -5,9 +5,11 @@ from __future__ import annotations
 from dataclasses import dataclass
 from pathlib import Path
 
-from .catalog import PackageCatalog
-from .registry_snapshot import RegistryActivationPlan
-from .sources import WorkspaceSource
+from .package_catalog import (
+    PackageCatalog,
+    RegistryActivationPlan,
+    WorkspaceSource,
+)
 from .workspace_material_shapes import compile_catalog_material_shapes
 
 

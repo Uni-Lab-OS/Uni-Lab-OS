@@ -1,4 +1,4 @@
-"""工作区运行时（Workspace Runtime）分层 Module 的公开兼容合同。"""
+"""工作区运行时（Workspace Runtime）分层 Module 的规范依赖合同。"""
 
 from __future__ import annotations
 
@@ -51,70 +51,42 @@ def test_workspace_runtime_exposes_complete_public_interface() -> None:
     assert all(hasattr(runtime_module, member) for member in expected_members)
 
 
-def test_legacy_workspace_runtime_imports_keep_public_object_identity() -> None:
-    """根门面与历史模块继续指向工作区运行时（Workspace Runtime）同一对象。
+def test_flat_workspace_runtime_wrapper_modules_do_not_exist() -> None:
+    """本次尚未发布的平铺模块必须直接删除，不能保留兼容包装。
 
     参数：无。
-    返回：无；断言兼容入口只重导出，不保留第二套实现或状态权威。
-    异常：任一历史入口复制类或函数时测试失败。
+    返回：无；断言工作区运行时（Workspace Runtime）只有分层目录和根门面。
+    异常：任一未发布平铺模块仍存在时测试失败。
     """
 
-    from unilabos.package_manager import (
-        WorkspacePackageRuntime as root_package_runtime,
+    # ``package_manager_root`` 是尚未发布分层重构的源码边界。
+    package_manager_root = (
+        Path(__file__).resolve().parents[2] / "unilabos" / "package_manager"
     )
-    from unilabos.package_manager import (
-        WorkspaceRegistryRuntime as root_registry_runtime,
-    )
-    from unilabos.package_manager import (
-        compile_package_source as root_compile_package_source,
-    )
-    from unilabos.package_manager.compiler import (
-        compile_package_source as legacy_compile_package_source,
-    )
-    from unilabos.package_manager.product_lifecycle import (
-        WorkspaceProductLifecycle as legacy_product_lifecycle,
-    )
-    from unilabos.package_manager.refresh_coordinator import (
-        WorkspaceRefreshCoordinator as legacy_refresh_coordinator,
-    )
-    from unilabos.package_manager.runtime_activation import (
-        WorkspaceRegistryRuntime as legacy_registry_runtime,
-    )
-    from unilabos.package_manager.runtime_diff import (
-        candidate_fingerprint as legacy_candidate_fingerprint,
-    )
-    from unilabos.package_manager.workspace_file_monitor import (
-        StableWorkspaceFileMonitor as legacy_file_monitor,
-    )
-    from unilabos.package_manager.workspace_runtime import (
-        StableWorkspaceFileMonitor,
-        WorkspacePackageRuntime,
-        WorkspaceProductLifecycle,
-        WorkspaceRefreshCoordinator,
-        WorkspaceRegistryRuntime,
-        candidate_fingerprint,
-        compile_package_source,
-    )
+    # ``flat_wrapper_names`` 是本轮必须物理删除的工作区运行时平铺包装文件。
+    flat_wrapper_names = {
+        "compiler.py",
+        "product_lifecycle.py",
+        "refresh_coordinator.py",
+        "runtime_activation.py",
+        "runtime_diff.py",
+        "workspace_file_monitor.py",
+        "workspace_startup.py",
+    }
 
-    assert compile_package_source is root_compile_package_source
-    assert compile_package_source is legacy_compile_package_source
-    assert WorkspaceRegistryRuntime is root_registry_runtime
-    assert WorkspaceRegistryRuntime is legacy_registry_runtime
-    assert WorkspacePackageRuntime is root_package_runtime
-    assert WorkspaceProductLifecycle is legacy_product_lifecycle
-    assert WorkspaceRefreshCoordinator is legacy_refresh_coordinator
-    assert StableWorkspaceFileMonitor is legacy_file_monitor
-    assert candidate_fingerprint is legacy_candidate_fingerprint
+    assert {path.name for path in package_manager_root.glob("*.py")}.isdisjoint(
+        flat_wrapper_names
+    )
 
 
 def test_registry_snapshot_publication_is_owned_by_workspace_runtime(
     tmp_path: Path,
 ) -> None:
-    """新发布 Interface 与历史快照方法都原子发布完整注册表快照。
+    """工作区运行时（Workspace Runtime）独占实时注册表快照发布职责。
 
     参数：``tmp_path`` 提供含设备和资源定义的隔离工作区。
-    返回：无；断言两条兼容调用都保留内置定义并发布同一完整候选代。
-    异常：运行时发布职责缺失、历史桥失效或发生部分发布时测试失败。
+    返回：无；断言新 Interface 保留内置定义，纯快照不携带实时发布方法。
+    异常：运行时发布职责缺失、快照保留越层桥或发生部分发布时测试失败。
     """
 
     from unilabos.package_manager.workspace_runtime import publish_registry_snapshot
@@ -127,25 +99,21 @@ def test_registry_snapshot_publication_is_owned_by_workspace_runtime(
         device_ids=("reactor",),
         resource_ids=("plate",),
     )
-    # ``snapshot`` 是新旧发布入口必须共同消费的不可变候选代。
+    # ``snapshot`` 是运行时发布入口消费的不可变注册表快照（Registry Snapshot）。
     snapshot = _compile_snapshot(source)
-    # 两个 ``registry`` 分别观察新 Interface 与遗留方法的等价结果。
+    # ``registry`` 是观察完整候选代原子发布结果的隔离注册表（Registry）。
     direct_registry = SimpleNamespace(
-        device_type_registry={"host_node": {"source": "builtin"}},
-        resource_type_registry={"builtin_plate": {"source": "builtin"}},
-    )
-    legacy_registry = SimpleNamespace(
         device_type_registry={"host_node": {"source": "builtin"}},
         resource_type_registry={"builtin_plate": {"source": "builtin"}},
     )
 
     publish_registry_snapshot(snapshot, direct_registry)
-    snapshot.publish(legacy_registry)
 
-    assert direct_registry.device_type_registry == legacy_registry.device_type_registry
-    assert (
-        direct_registry.resource_type_registry == legacy_registry.resource_type_registry
-    )
+    assert not hasattr(snapshot, "publish")
+    assert direct_registry.device_type_registry["host_node"] == {"source": "builtin"}
+    assert direct_registry.resource_type_registry["builtin_plate"] == {
+        "source": "builtin"
+    }
     assert "community.runtime_publish_lab.reactor" in (
         direct_registry.device_type_registry
     )
@@ -216,13 +184,13 @@ def test_product_callers_depend_directly_on_workspace_runtime_module() -> None:
         assert imported_modules.isdisjoint(legacy_modules)
 
 
-def test_workspace_runtime_dependency_direction_has_one_legacy_publish_bridge() -> None:
-    """新运行时不依赖旧 wrapper，纯快照只保留一个函数内发布兼容桥。
+def test_workspace_runtime_dependency_direction_has_no_legacy_bridge() -> None:
+    """新运行时不依赖平铺模块，纯快照也不反向依赖实时发布层。
 
     参数：无。
-    返回：无；断言新 Module 没有反向旧实现，且包目录（PackageCatalog）不会在
-    加载时拥有实时发布职责。
-    异常：出现越层 import 或新增第二个运行时兼容桥时测试失败。
+    返回：无；断言新 Module 没有反向旧实现，且包目录（PackageCatalog）完全
+    不拥有实时发布职责。
+    异常：出现越层 import 或任一运行时桥时测试失败。
     """
 
     # ``package_manager_root`` 是新 Module、纯快照与历史 wrapper 的共同源码根。
@@ -265,19 +233,16 @@ def test_workspace_runtime_dependency_direction_has_one_legacy_publish_bridge() 
                 )
     assert violations == []
 
-    # ``snapshot_tree`` 用于精确限定纯快照对实时发布 Module 的唯一函数内桥。
+    # ``snapshot_tree`` 用于证明纯快照完全不依赖实时发布 Module。
     snapshot_file = package_manager_root / "package_catalog" / "registry_snapshot.py"
     snapshot_tree = ast.parse(snapshot_file.read_text(encoding="utf-8"))
-    # ``runtime_imports`` 保存包目录快照内所有指向运行时层的 import 位置与父函数。
-    runtime_imports: list[tuple[str | None, str]] = []
-    for parent in ast.walk(snapshot_tree):
-        if not isinstance(parent, (ast.FunctionDef, ast.AsyncFunctionDef)):
-            continue
-        for node in ast.walk(parent):
-            if (
-                isinstance(node, ast.ImportFrom)
-                and node.module == "workspace_runtime.activation"
-            ):
-                runtime_imports.append((parent.name, node.names[0].name))
+    # ``runtime_imports`` 保存包目录快照内所有指向运行时层的越层 import。
+    runtime_imports = [
+        node.module
+        for node in ast.walk(snapshot_tree)
+        if isinstance(node, ast.ImportFrom)
+        and node.module is not None
+        and "workspace_runtime" in node.module
+    ]
 
-    assert runtime_imports == [("publish", "publish_registry_snapshot")]
+    assert runtime_imports == []

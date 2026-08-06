@@ -1,4 +1,4 @@
-"""包目录（PackageCatalog）分层 Module 的公开兼容合同。"""
+"""包目录（PackageCatalog）分层 Module 的规范依赖合同。"""
 
 from __future__ import annotations
 
@@ -12,10 +12,10 @@ from tests.package_manager.test_package_catalog_compiler import _write_package
 def test_new_package_catalog_interface_compiles_the_same_catalog(
     tmp_path: Path,
 ) -> None:
-    """新 Module 接收已解析输入并产生与遗留入口相同的包目录（PackageCatalog）。
+    """根门面与分层编译 Interface 产生相同包目录（PackageCatalog）。
 
     参数：``tmp_path`` 提供唯一隔离软件包来源。
-    返回：无；断言新旧公开 Interface 产生同类对象和相同规范字节。
+    返回：无；断言正式根门面与底层编译 Interface 产生相同规范字节。
     异常：新路径、公开编译入口或输入反转接缝缺失时测试失败。
     """
 
@@ -31,17 +31,17 @@ def test_new_package_catalog_interface_compiles_the_same_catalog(
     from unilabos.package_manager.package_catalog import (
         compile_package_source as compile_layered_package_source,
     )
-    from unilabos.package_manager.workspace_startup import compile_workspace_startup
+    from unilabos.package_manager.workspace_runtime import compile_workspace_startup
 
-    # ``workspace_root`` 是新旧编译入口共同观察的唯一可编辑包来源根。
+    # ``workspace_root`` 是两个正式编译入口共同观察的唯一可编辑包来源根。
     workspace_root = tmp_path / "workspace"
     _write_package(workspace_root)
     # ``source`` 固定文件读取权威；``startup_plan`` 是根编排层交给纯编译层的输入。
     source = WorkspaceSource(workspace_root)
     startup_plan = compile_workspace_startup(source)
 
-    # ``legacy_catalog`` 是根兼容编排入口产生的行为基准包目录（PackageCatalog）。
-    legacy_catalog = compile_legacy_package_source(
+    # ``facade_catalog`` 是根门面编排入口产生的行为基准包目录（PackageCatalog）。
+    facade_catalog = compile_legacy_package_source(
         source,
         startup_plan=startup_plan,
     )
@@ -52,40 +52,34 @@ def test_new_package_catalog_interface_compiles_the_same_catalog(
     )
 
     assert isinstance(layered_catalog, PackageCatalog)
-    assert type(layered_catalog) is type(legacy_catalog)
-    assert layered_catalog.to_canonical_bytes() == legacy_catalog.to_canonical_bytes()
+    assert type(layered_catalog) is type(facade_catalog)
+    assert layered_catalog.to_canonical_bytes() == facade_catalog.to_canonical_bytes()
 
 
-def test_legacy_catalog_imports_retain_the_new_public_type_identities() -> None:
-    """遗留根入口和历史模块继续指向新 Module 的同一公开类型。
+def test_flat_package_catalog_wrapper_modules_do_not_exist() -> None:
+    """本次尚未发布的包目录（PackageCatalog）平铺包装必须直接删除。
 
     参数：无。
-    返回：无；断言包目录（PackageCatalog）、来源与注册表快照
-    （Registry Snapshot）没有因路径迁移产生平行类型。
-    异常：兼容 wrapper 复制实现或新 Interface 遗漏公开类型时测试失败。
+    返回：无；断言根目录只保留正式门面和有独立职责的产品模块。
+    异常：任一未发布平铺包装仍存在时测试失败。
     """
 
-    # 三组 import 别名分别捕获根门面、历史模块和新 Module 的实际类型对象身份。
-    from unilabos.package_manager import PackageCatalog as root_package_catalog
-    from unilabos.package_manager import WorkspaceSource as root_workspace_source
-    from unilabos.package_manager.catalog import (
-        PackageCatalog as legacy_package_catalog,
+    # ``package_manager_root`` 是尚未发布分层重构的源码边界。
+    package_manager_root = (
+        Path(__file__).resolve().parents[2] / "unilabos" / "package_manager"
     )
-    from unilabos.package_manager.package_catalog import (
-        PackageCatalog,
-        RegistrySnapshot,
-        WorkspaceSource,
-    )
-    from unilabos.package_manager.registry_snapshot import (
-        RegistrySnapshot as legacy_registry_snapshot,
-    )
-    from unilabos.package_manager.sources import (
-        WorkspaceSource as legacy_workspace_source,
-    )
+    # ``flat_wrapper_names`` 是本轮必须物理删除的包目录平铺包装文件。
+    flat_wrapper_names = {
+        "_registry_catalog.py",
+        "_workflow_catalog.py",
+        "catalog.py",
+        "registry_snapshot.py",
+        "sources.py",
+    }
 
-    assert PackageCatalog is root_package_catalog is legacy_package_catalog
-    assert WorkspaceSource is root_workspace_source is legacy_workspace_source
-    assert RegistrySnapshot is legacy_registry_snapshot
+    assert {path.name for path in package_manager_root.glob("*.py")}.isdisjoint(
+        flat_wrapper_names
+    )
 
 
 def test_legacy_compiler_preserves_invalid_source_diagnostic(tmp_path: Path) -> None:
@@ -180,18 +174,6 @@ def test_package_catalog_module_has_no_reverse_dependency_on_parent_layers() -> 
             else:
                 continue
             for imported_name in imported_names:
-                # 注册表快照（Registry Snapshot）的历史 ``publish`` 方法只保留
-                # 一个函数内兼容桥；新运行时分层测试会精确限定其父函数和符号。
-                legacy_publish_bridge = (
-                    relative_file.as_posix() == "registry_snapshot.py"
-                    and isinstance(node, ast.ImportFrom)
-                    and imported_name
-                    == "unilabos.package_manager.workspace_runtime.activation"
-                    and [alias.name for alias in node.names]
-                    == ["publish_registry_snapshot"]
-                )
-                if legacy_publish_bridge:
-                    continue
                 if (
                     imported_name == "unilabos.package_manager"
                     or imported_name.startswith(forbidden_prefixes)

@@ -23,7 +23,10 @@ from unilabos.package_manager import (
     compile_package_source,
     compile_registry_snapshot,
 )
-from unilabos.package_manager.registry_snapshot import RegistrySnapshotError
+from unilabos.package_manager.package_catalog import RegistrySnapshotError
+from unilabos.package_manager.workspace_runtime.activation import (
+    publish_registry_snapshot,
+)
 from unilabos.registry.registry import lab_registry
 from unilabos.registry.template_snapshot import RegistryTemplateSnapshot
 
@@ -49,8 +52,7 @@ def _runtime_api() -> ModuleType:
     ]
     if missing_members:
         pytest.fail(
-            "F03.3-R3 缺少工作区注册表运行时公开接缝: "
-            + ", ".join(missing_members),
+            "F03.3-R3 缺少工作区注册表运行时公开接缝: " + ", ".join(missing_members),
             pytrace=False,
         )
     return package_manager
@@ -81,9 +83,7 @@ def _write_workspace(
     workflow_root.mkdir(parents=True)
     package_root.joinpath("__init__.py").write_text("", encoding="utf-8")
     root.joinpath("pyproject.toml").write_text(
-        "[project]\n"
-        f'name = "{package_id.replace("_", "-")}"\n'
-        'version = "1.0.0"\n',
+        f'[project]\nname = "{package_id.replace("_", "-")}"\nversion = "1.0.0"\n',
         encoding="utf-8",
     )
     workflow_manifest = "workflows: []\n"
@@ -101,7 +101,7 @@ def _write_workspace(
             encoding="utf-8",
         )
     root.joinpath("package.yaml").write_text(
-        "package:\n" f"  name: {package_id}\n" + workflow_manifest,
+        f"package:\n  name: {package_id}\n" + workflow_manifest,
         encoding="utf-8",
     )
     for device_id in device_ids:
@@ -444,9 +444,7 @@ def test_workflow_source_plan_reuses_compiled_catalog_without_manifest_reread(
     assert registrations[0].package_id == "runtime_lab"
     assert registrations[0].package_root == source.root / "runtime_lab"
     assert registrations[0].relative_path == "workflows/prepare.py"
-    assert registrations[0].source_uri == (
-        "package://runtime_lab/workflows/prepare.py"
-    )
+    assert registrations[0].source_uri == ("package://runtime_lab/workflows/prepare.py")
     assert startup_arguments["workflow_editable_package_root"] is None
     assert not hasattr(runtime.workflow_source_plan, "workflow_task")
 
@@ -594,7 +592,7 @@ def test_ambiguous_short_identity_fails_before_device_import(
     monkeypatch.setattr(lab_registry, "device_type_registry", {})
     monkeypatch.setattr(lab_registry, "resource_type_registry", {})
     monkeypatch.setattr(lab_registry, "_package_snapshot", None, raising=False)
-    snapshot.publish(lab_registry)
+    publish_registry_snapshot(snapshot, lab_registry)
 
     with pytest.raises(RegistrySnapshotError, match="歧义"):
         lab_registry.resolve_definition("device", "shared_device")
@@ -646,6 +644,5 @@ def test_selected_resource_bootstraps_material_and_site_without_idle_projection(
         "Rack Site A"
     ]
     assert all(
-        node["material"]["name"] != "Idle Rack"
-        for node in material_graph["nodes"]
+        node["material"]["name"] != "Idle Rack" for node in material_graph["nodes"]
     )

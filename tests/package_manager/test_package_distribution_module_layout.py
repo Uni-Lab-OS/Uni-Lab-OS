@@ -1,10 +1,10 @@
-"""包分发（Package Distribution）分层 Module 的公开兼容合同。"""
+"""包分发（Package Distribution）分层 Module 的规范依赖合同。"""
 
 from __future__ import annotations
 
 import ast
 import importlib.util
-from collections.abc import Iterable
+import inspect
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -14,43 +14,14 @@ from tests.package_manager.test_package_dependency_lock import _write_package
 from unilabos.package_manager.package_catalog import PackageCatalog
 
 
-def _iter_imports_with_enclosing_function(
-    node: ast.AST,
-    *,
-    enclosing_function: str | None = None,
-) -> Iterable[tuple[ast.Import | ast.ImportFrom, str | None]]:
-    """递归枚举导入节点及其最内层所属函数。
-
-    参数：``node`` 是当前 AST 子树；``enclosing_function`` 是父子树所属的最内层
-    函数名，模块级为 ``None``。
-    返回：按源码树顺序产生导入节点与所属函数名，不执行被检查源码。
-    异常：无；Python 解析错误由调用者在进入本函数前传播。
-    """
-
-    # ``current_function`` 在进入同步或异步函数时推进精确白名单上下文。
-    current_function = (
-        node.name
-        if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef))
-        else enclosing_function
-    )
-    if isinstance(node, (ast.Import, ast.ImportFrom)):
-        yield node, current_function
-    for child_node in ast.iter_child_nodes(node):
-        # ``child_node`` 继承当前最内层函数，嵌套函数会在下一层自行替换。
-        yield from _iter_imports_with_enclosing_function(
-            child_node,
-            enclosing_function=current_function,
-        )
-
-
 def _package_distribution_reverse_dependency_violations(
     module_root: Path,
 ) -> list[str]:
     """检查包分发（Package Distribution）全部源码的反向层依赖。
 
     参数：``module_root`` 是待检查 Module 根，文件按相对路径稳定排序。
-    返回：``文件:行号:模块`` 格式的稳定违规列表；只允许规范默认编译器函数内
-    唯一、无别名地延迟导入工作区目录编译器。
+    返回：``文件:行号:模块`` 格式的稳定违规列表；任何函数内延迟导入也不能
+    绕过分层边界。
     异常：源码不可读或语法无效时传播文件系统或 ``SyntaxError``，不得跳过检查。
     """
 
@@ -91,13 +62,11 @@ def _package_distribution_reverse_dependency_violations(
             )
         # ``syntax_tree`` 只观察依赖方向，不导入或执行被检查 Module。
         syntax_tree = ast.parse(source_file.read_text(encoding="utf-8"))
-        for node, enclosing_function in _iter_imports_with_enclosing_function(
-            syntax_tree
-        ):
+        for node in ast.walk(syntax_tree):
             if isinstance(node, ast.Import):
                 # ``imported_names`` 是普通 import 声明的完整模块身份集合。
                 imported_names = [alias.name for alias in node.names]
-            else:
+            elif isinstance(node, ast.ImportFrom):
                 # ``imported_name`` 结合当前包把相对声明解析为绝对模块身份。
                 imported_name = node.module or ""
                 if node.level:
@@ -106,20 +75,9 @@ def _package_distribution_reverse_dependency_violations(
                         package_name,
                     )
                 imported_names = [imported_name]
+            else:
+                continue
             for imported_name in imported_names:
-                # ``allowed_default_compiler_bridge`` 是唯一接受的函数内反向依赖：
-                # 历史调用未注入编译器时，延迟取得规范工作区目录编译器。
-                allowed_default_compiler_bridge = (
-                    relative_file.as_posix() == "dependency_manager.py"
-                    and enclosing_function == "_default_compile_package_source"
-                    and isinstance(node, ast.ImportFrom)
-                    and imported_name
-                    == "unilabos.package_manager.workspace_runtime.discovery"
-                    and [(alias.name, alias.asname) for alias in node.names]
-                    == [("compile_package_source", None)]
-                )
-                if allowed_default_compiler_bridge:
-                    continue
                 if (
                     imported_name == "unilabos.package_manager"
                     or imported_name.startswith(forbidden_prefixes)
@@ -202,47 +160,28 @@ def test_new_package_distribution_interface_manages_explicit_dependency(
     ]
 
 
-def test_legacy_distribution_imports_retain_new_public_object_identities() -> None:
-    """根门面和历史模块继续指向包分发（Package Distribution）的同一对象。
+def test_flat_package_distribution_wrapper_modules_do_not_exist() -> None:
+    """本次尚未发布的包分发（Package Distribution）包装必须直接删除。
 
     参数：无。
-    返回：无；断言依赖模型、管理器、安装与发布入口没有形成平行实现。
-    异常：兼容 wrapper 复制实现或新 Module 遗漏公开对象时测试失败。
+    返回：无；断言安装、依赖和发布只从分层 Module 或正式根门面公开。
+    异常：任一未发布平铺包装仍存在时测试失败。
     """
 
-    # 新 Module 对象是历史入口必须保持的唯一公开实现身份。
-    from unilabos.package_manager import (
-        LockedPackage as root_locked_package,
+    # ``package_manager_root`` 是尚未发布分层重构的源码边界。
+    package_manager_root = (
+        Path(__file__).resolve().parents[2] / "unilabos" / "package_manager"
     )
-    from unilabos.package_manager import (
-        PackageDependencyManager as root_dependency_manager,
-    )
-    from unilabos.package_manager import upload_package as root_upload_package
-    from unilabos.package_manager.dependency_lock import (
-        LockedPackage as legacy_locked_package,
-    )
-    from unilabos.package_manager.dependency_lock import (
-        PackageDependencyManager as legacy_dependency_manager,
-    )
-    from unilabos.package_manager.installation import (
-        install_package as legacy_install_package,
-    )
-    from unilabos.package_manager.package_distribution import (
-        LockedPackage,
-        PackageDependencyManager,
-        install_package,
-        upload_package,
-    )
-    from unilabos.package_manager.publication import (
-        upload_package as legacy_upload_package,
-    )
+    # ``flat_wrapper_names`` 是本轮必须物理删除的包分发平铺包装文件。
+    flat_wrapper_names = {
+        "dependency_lock.py",
+        "installation.py",
+        "publication.py",
+    }
 
-    assert LockedPackage is root_locked_package is legacy_locked_package
-    assert (
-        PackageDependencyManager is root_dependency_manager is legacy_dependency_manager
+    assert {path.name for path in package_manager_root.glob("*.py")}.isdisjoint(
+        flat_wrapper_names
     )
-    assert install_package is legacy_install_package
-    assert upload_package is root_upload_package is legacy_upload_package
 
 
 def test_internal_callers_depend_on_package_distribution_interface() -> None:
@@ -304,8 +243,7 @@ def test_package_distribution_module_has_no_reverse_layer_dependency() -> None:
     """包分发（Package Distribution）全树不反向依赖历史实现或运行时层。
 
     参数：无。
-    返回：无；解析新 Module 的全部顶层和函数内 import，仅允许默认编译器函数内
-    的精确延迟兼容桥。
+    返回：无；解析新 Module 的全部顶层和函数内 import，不允许任何高层反向桥。
     异常：其他位置出现历史根实现、工作区运行时或驱动运行时依赖时测试失败。
     """
 
@@ -322,20 +260,57 @@ def test_package_distribution_module_has_no_reverse_layer_dependency() -> None:
     assert violations == []
 
 
-def test_reverse_dependency_guard_rejects_non_whitelisted_function_import(
+def test_package_distribution_requires_explicit_catalog_compiler() -> None:
+    """所有目录加载编排都必须由组合根显式注入统一编译器。
+
+    参数：无。
+    返回：无；断言公开与内部编排函数的 ``compile_catalog`` 均为必填关键字参数。
+    异常：任一入口恢复可选默认值或位置参数时测试失败，防止重新产生反向依赖。
+    """
+
+    from unilabos.package_manager.package_distribution import (
+        PackageDependencyManager,
+        load_locked_package_catalogs,
+        load_locked_package_sources,
+    )
+    from unilabos.package_manager.package_distribution.dependency_manager import (
+        catalog_for_entry,
+        compile_dependency_catalog,
+        validate_complete_generation,
+    )
+
+    # ``compiler_owners`` 是所有可能启动软件包目录编译的正式编排入口。
+    compiler_owners = (
+        PackageDependencyManager,
+        load_locked_package_catalogs,
+        load_locked_package_sources,
+        catalog_for_entry,
+        compile_dependency_catalog,
+        validate_complete_generation,
+    )
+    for compiler_owner in compiler_owners:
+        # ``compiler_parameter`` 是调用者必须显式承担的唯一编译器依赖。
+        compiler_parameter = inspect.signature(compiler_owner).parameters[
+            "compile_catalog"
+        ]
+        assert compiler_parameter.kind is inspect.Parameter.KEYWORD_ONLY
+        assert compiler_parameter.default is inspect.Parameter.empty
+
+
+def test_reverse_dependency_guard_rejects_function_local_runtime_import(
     tmp_path: Path,
 ) -> None:
-    """依赖方向守卫必须拒绝白名单函数以外的函数内运行时反向导入。
+    """依赖方向守卫必须拒绝任意函数内运行时反向导入。
 
     参数：``tmp_path`` 提供一个隔离的伪包分发（Package Distribution）源码根。
-    返回：无；断言相同运行时导入出现在其他函数时仍被报告为越层依赖。
-    异常：守卫错误跳过全部函数内导入时，精确违规列表断言失败。
+    返回：无；断言延迟导入也会被报告为越层依赖。
+    异常：守卫错误跳过函数内导入时，精确违规列表断言失败。
     """
 
     # ``module_root`` 是只包含一个非法函数内反向导入的伪 Module 边界。
     module_root = tmp_path / "package_distribution"
     module_root.mkdir()
-    # ``source_file`` 模拟非白名单函数偷偷依赖工作区运行时（Workspace Runtime）。
+    # ``source_file`` 模拟函数内偷偷依赖工作区运行时（Workspace Runtime）。
     source_file = module_root / "rogue.py"
     source_file.write_text(
         "def load_runtime_compiler():\n"
@@ -345,7 +320,7 @@ def test_reverse_dependency_guard_rejects_non_whitelisted_function_import(
         encoding="utf-8",
     )
 
-    # ``violations`` 必须包含非法函数内导入，证明白名单不会扩大到整棵 AST。
+    # ``violations`` 必须包含非法函数内导入，证明延迟导入没有例外。
     violations = _package_distribution_reverse_dependency_violations(module_root)
 
     assert violations == [

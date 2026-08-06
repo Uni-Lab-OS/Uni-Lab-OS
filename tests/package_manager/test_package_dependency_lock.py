@@ -8,6 +8,8 @@ from pathlib import Path
 
 import pytest
 
+from unilabos.package_manager.workspace_runtime import compile_package_source
+
 
 def _write_package(
     root: Path,
@@ -29,9 +31,7 @@ def _write_package(
     package_root = root / package_name
     package_root.mkdir(parents=True, exist_ok=True)
     root.joinpath("pyproject.toml").write_text(
-        "[project]\n"
-        f'name = "{distribution_name}"\n'
-        'version = "1.0.0"\n',
+        f'[project]\nname = "{distribution_name}"\nversion = "1.0.0"\n',
         encoding="utf-8",
     )
     root.joinpath("package.yaml").write_text(
@@ -100,10 +100,14 @@ def test_add_publishes_explicit_declaration_and_verified_lock(
     )
 
     # ``dependency_lock`` 是显式软件包来源成功校验后发布的当前依赖代际。
-    dependency_lock = PackageDependencyManager(workspace_root).add(
-        "../external_lab"
+    dependency_lock = PackageDependencyManager(
+        workspace_root,
+        compile_catalog=compile_package_source,
+    ).add("../external_lab")
+    catalogs = load_locked_package_catalogs(
+        workspace_root,
+        compile_catalog=compile_package_source,
     )
-    catalogs = load_locked_package_catalogs(workspace_root)
 
     assert workspace_root.joinpath("unilabos.packages.yaml").is_file()
     assert workspace_root.joinpath("unilabos.packages.lock.json").is_file()
@@ -147,7 +151,10 @@ def test_update_relocks_changed_source_without_changing_dependency_identity(
         package_name="external_lab",
         device_ids=("reader",),
     )
-    manager = PackageDependencyManager(workspace_root)
+    manager = PackageDependencyManager(
+        workspace_root,
+        compile_catalog=compile_package_source,
+    )
     first_lock = manager.add("../external_lab")
     _write_package(
         external_root,
@@ -158,7 +165,10 @@ def test_update_relocks_changed_source_without_changing_dependency_identity(
 
     # ``second_lock`` 是同一显式依赖在源码更新后的新锁定代际。
     second_lock = manager.update("external-lab")
-    catalogs = load_locked_package_catalogs(workspace_root)
+    catalogs = load_locked_package_catalogs(
+        workspace_root,
+        compile_catalog=compile_package_source,
+    )
 
     assert len(second_lock.packages) == 1
     assert second_lock.packages[0].normalized_name == "external_lab"
@@ -199,13 +209,22 @@ def test_remove_revalidates_remaining_dependencies_and_publishes_empty_lock(
         package_name="external_lab",
         resource_ids=("plate",),
     )
-    manager = PackageDependencyManager(workspace_root)
+    manager = PackageDependencyManager(
+        workspace_root,
+        compile_catalog=compile_package_source,
+    )
     manager.add("../external_lab")
 
     dependency_lock = manager.remove("community.external_lab")
 
     assert dependency_lock.packages == ()
-    assert load_locked_package_catalogs(workspace_root) == ()
+    assert (
+        load_locked_package_catalogs(
+            workspace_root,
+            compile_catalog=compile_package_source,
+        )
+        == ()
+    )
     assert workspace_root.joinpath("unilabos.packages.yaml").is_file()
     assert workspace_root.joinpath("unilabos.packages.lock.json").is_file()
 
@@ -239,7 +258,13 @@ def test_ambient_site_packages_are_never_discovered_without_explicit_lock(
     )
     monkeypatch.setattr(sys, "path", [str(ambient_root), *sys.path])
 
-    assert load_locked_package_catalogs(workspace_root) == ()
+    assert (
+        load_locked_package_catalogs(
+            workspace_root,
+            compile_catalog=compile_package_source,
+        )
+        == ()
+    )
 
 
 def test_failed_conflicting_add_keeps_declaration_and_lock_byte_identical(
@@ -277,7 +302,10 @@ def test_failed_conflicting_add_keeps_declaration_and_lock_byte_identical(
         package_name="shared_lab",
         resource_ids=("plate",),
     )
-    manager = PackageDependencyManager(workspace_root)
+    manager = PackageDependencyManager(
+        workspace_root,
+        compile_catalog=compile_package_source,
+    )
     manager.add("../first")
     declaration_path = workspace_root / "unilabos.packages.yaml"
     lock_path = workspace_root / "unilabos.packages.lock.json"
@@ -319,7 +347,10 @@ def test_source_drift_fails_closed_until_explicit_update(
         package_name="external_lab",
         device_ids=("reader",),
     )
-    PackageDependencyManager(workspace_root).add("../external")
+    PackageDependencyManager(
+        workspace_root,
+        compile_catalog=compile_package_source,
+    ).add("../external")
     _write_package(
         external_root,
         distribution_name="external-lab",
@@ -328,7 +359,10 @@ def test_source_drift_fails_closed_until_explicit_update(
     )
 
     with pytest.raises(PackageDependencyError, match="update"):
-        load_locked_package_catalogs(workspace_root)
+        load_locked_package_catalogs(
+            workspace_root,
+            compile_catalog=compile_package_source,
+        )
 
 
 def test_update_rejects_replacement_with_different_distribution_before_write(
@@ -366,7 +400,10 @@ def test_update_rejects_replacement_with_different_distribution_before_write(
         package_name="other_lab",
         device_ids=("reader",),
     )
-    manager = PackageDependencyManager(workspace_root)
+    manager = PackageDependencyManager(
+        workspace_root,
+        compile_catalog=compile_package_source,
+    )
     manager.add("../external")
     declaration_path = workspace_root / "unilabos.packages.yaml"
     lock_path = workspace_root / "unilabos.packages.lock.json"

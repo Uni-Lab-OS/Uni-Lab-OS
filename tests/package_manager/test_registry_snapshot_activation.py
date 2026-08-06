@@ -12,6 +12,9 @@ from typing import Any
 import pytest
 
 from unilabos.package_manager import WorkspaceSource, compile_package_source
+from unilabos.package_manager.workspace_runtime.activation import (
+    publish_registry_snapshot,
+)
 
 
 class _RejectingRegistryMap(dict[str, Any]):
@@ -123,9 +126,7 @@ def _write_registry_workspace(
     package_root.mkdir(parents=True)
     package_root.joinpath("__init__.py").write_text("", encoding="utf-8")
     root.joinpath("pyproject.toml").write_text(
-        "[project]\n"
-        f'name = "{distribution}"\n'
-        'version = "1.0.0"\n',
+        f'[project]\nname = "{distribution}"\nversion = "1.0.0"\n',
         encoding="utf-8",
     )
     root.joinpath("package.yaml").write_text(
@@ -226,9 +227,10 @@ def test_complete_package_is_queryable_while_graph_selects_one_device(
         "community.finite_activation_lab.heater",
         "community.finite_activation_lab.reactor",
     )
-    assert snapshot.resolve(
-        "device", "community.finite_activation_lab.reactor"
-    ).id == "reactor"
+    assert (
+        snapshot.resolve("device", "community.finite_activation_lab.reactor").id
+        == "reactor"
+    )
 
     # ``activation_plan`` 是物理图有限选择出的运行激活责任，不是完整目录替身。
     activation_plan = snapshot.select(
@@ -323,9 +325,10 @@ def test_cross_package_short_identity_ambiguity_fails_closed(
     )
     snapshot = _compile_snapshot(first_source, second_source)
 
-    assert snapshot.resolve(
-        "device", "community.ambiguous_first.shared"
-    ).fqid == "community.ambiguous_first.shared"
+    assert (
+        snapshot.resolve("device", "community.ambiguous_first.shared").fqid
+        == "community.ambiguous_first.shared"
+    )
     with pytest.raises(ValueError, match="歧义"):
         snapshot.select(_device_graph("shared"))
 
@@ -377,7 +380,7 @@ def test_publish_preserves_builtins_and_registers_the_complete_package(
         resource_type_registry={"builtin_plate": {"source": "builtin"}},
     )
 
-    snapshot.publish(registry)
+    publish_registry_snapshot(snapshot, registry)
 
     assert set(registry.device_type_registry) == {
         "host_node",
@@ -415,7 +418,7 @@ def test_publish_failure_leaves_both_registry_collections_unchanged(
     original_resources = dict(registry.resource_type_registry)
 
     with pytest.raises(RuntimeError, match="模拟资源注册表"):
-        snapshot.publish(registry)
+        publish_registry_snapshot(snapshot, registry)
 
     assert registry.device_type_registry == original_devices
     assert registry.resource_type_registry == original_resources

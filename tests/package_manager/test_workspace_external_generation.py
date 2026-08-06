@@ -56,7 +56,10 @@ def _prepare_external_workspace(tmp_path: Path) -> tuple[Path, Path]:
         ),
         encoding="utf-8",
     )
-    PackageDependencyManager(workspace_root).add("../external_lab")
+    PackageDependencyManager(
+        workspace_root,
+        compile_catalog=compile_package_source,
+    ).add("../external_lab")
     return workspace_root, external_root
 
 
@@ -284,7 +287,10 @@ def test_selected_external_package_root_is_finitely_activated(
         package_name="idle_lab",
         device_ids=("idle_reader",),
     )
-    PackageDependencyManager(workspace_root).add("../idle_lab")
+    PackageDependencyManager(
+        workspace_root,
+        compile_catalog=compile_package_source,
+    ).add("../idle_lab")
     runtime = prepare_workspace_registry_runtime(
         {
             "workspace": str(workspace_root),
@@ -370,7 +376,10 @@ def test_complete_generation_exposes_external_shapes_and_read_only_workflows(
         json.dumps({"nodes": []}),
         encoding="utf-8",
     )
-    PackageDependencyManager(workspace_root).add("../external_lab")
+    PackageDependencyManager(
+        workspace_root,
+        compile_catalog=compile_package_source,
+    ).add("../external_lab")
 
     runtime = prepare_workspace_registry_runtime(
         {
