@@ -11,7 +11,7 @@ from unilabos.app.community_packages import (
     prepare_community_packages,
 )
 from unilabos.config.config import BasicConfig
-from unilabos.package_manager.runtime_activation import WorkspaceRegistryRuntime
+from unilabos.package_manager.workspace_runtime import WorkspaceRegistryRuntime
 
 
 class WorkspaceCommunityBootstrapError(RuntimeError):

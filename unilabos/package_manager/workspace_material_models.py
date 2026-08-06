@@ -11,7 +11,7 @@ from types import MappingProxyType
 from typing import Any
 from urllib.parse import quote
 
-from .workspace_startup import WorkspaceStartupPlan
+from .workspace_runtime.discovery import WorkspaceStartupPlan
 
 _MODEL_MEDIA_TYPES = {
     ".dae": "model/vnd.collada+xml",

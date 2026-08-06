@@ -10,6 +10,7 @@ from unilabos.utils.banner_print import print_status
 from .errors import PackageCLIError
 from .inspection import inspect_package
 from .package_distribution import PackageDependencyManager, upload_package
+from .workspace_runtime.discovery import compile_package_source
 
 
 def register_package_subcommands(subparsers: Any) -> None:
@@ -141,7 +142,10 @@ def cmd_package(args_dict: dict[str, Any], http_client: Any = None) -> None:
         )
     if action in {"add", "update", "remove"}:
         try:
-            manager = PackageDependencyManager(args_dict.get("workspace") or ".")
+            manager = PackageDependencyManager(
+                args_dict.get("workspace") or ".",
+                compile_catalog=compile_package_source,
+            )
             if action == "add":
                 result = manager.add(args_dict.get("dependency_source") or "")
             elif action == "update":

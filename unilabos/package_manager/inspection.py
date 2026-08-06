@@ -13,10 +13,10 @@ from unilabos.utils import logger
 from unilabos.utils.banner_print import print_status
 
 from .catalog import PackageCatalog, PackageCompileError
-from .compiler import compile_package_source
 from .errors import PackageCLIError
 from .project_metadata import parse_project_metadata, project_to_legacy_dict
 from .sources import WorkspaceSource
+from .workspace_runtime.discovery import compile_package_source
 
 COMMUNITY_PREFIX = "community."
 DEFAULT_SOURCE_TYPE = "community"

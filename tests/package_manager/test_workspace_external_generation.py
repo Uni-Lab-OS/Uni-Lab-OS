@@ -6,8 +6,6 @@ import json
 import sys
 from pathlib import Path
 
-import pytest
-
 from tests.package_manager.test_package_dependency_lock import _write_package
 from unilabos.app.community_packages import prepare_community_packages
 from unilabos.app.workspace_package_bootstrap import local_package_namespaces
@@ -16,9 +14,6 @@ from unilabos.package_manager import (
     WorkspaceSource,
     compile_package_source,
     prepare_workspace_registry_runtime,
-)
-from unilabos.package_manager.package_distribution import (
-    dependency_manager as dependency_manager_module,
 )
 
 EXTERNAL_WORKFLOW_UUID = "73333333-3333-4333-8333-333333333333"
@@ -226,14 +221,12 @@ def test_dependency_declaration_and_lock_bytes_belong_to_input_digest(
 
 def test_runtime_compiles_each_explicit_package_exactly_once(
     tmp_path: Path,
-    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """一个稳定输入代内主包和每个显式外部包只能完整静态编译一次。
+    """工作区运行时（Workspace Runtime）对主包和每个显式外部包各编译一次。
 
-    参数：``tmp_path`` 提供主工作区和外部包；``monkeypatch`` 记录依赖加载使用
-    的统一编译接缝。
-    返回：无；断言准备工作区运行代不会为了聚合校验再次编译主包，也不会重复
-    编译依赖包目录（PackageCatalog）。
+    参数：``tmp_path`` 提供主工作区和外部包。
+    返回：无；断言公开运行时准备 Interface 使用调用者注入的统一编译器，且不会
+    为聚合校验重复编译主包或依赖包目录（PackageCatalog）。
     异常：若实现丢弃已编译目录或在验证阶段二次编译，调用次数断言失败。
     """
 
@@ -241,13 +234,11 @@ def test_runtime_compiles_each_explicit_package_exactly_once(
     workspace_root, external_root = _prepare_external_workspace(tmp_path)
     # ``compile_roots`` 记录依赖编排实际观察的来源根，证明每项只编译一次。
     compile_roots: list[Path] = []
-    # ``original_compile`` 是新包分发（Package Distribution）Module 的编译接缝。
-    original_compile = dependency_manager_module.compile_package_source
 
-    def compile_dependency_once(source: WorkspaceSource):
-        """记录显式依赖加载执行的每次完整静态编译。
+    def compile_generation_once(source: WorkspaceSource):
+        """记录完整工作区候选代执行的每次静态目录编译。
 
-        参数：``source`` 是依赖加载器提供的显式工作区来源。
+        参数：``source`` 是主包或锁定外部包的显式工作区来源。
         返回：统一编译器生成的不可变包目录（PackageCatalog）。
         异常：编译失败时传播原始异常，且不返回部分目录。
         """
@@ -255,29 +246,9 @@ def test_runtime_compiles_each_explicit_package_exactly_once(
         # ``compiled_source_root`` 标识本稳定输入代实际编译的软件包来源。
         compiled_source_root = source.root
         compile_roots.append(compiled_source_root)
-        return original_compile(source)
+        return compile_package_source(source)
 
-    monkeypatch.setattr(
-        dependency_manager_module,
-        "compile_package_source",
-        compile_dependency_once,
-    )
-    # ``root_catalog`` 模拟产品组合根已经完成且只能复用一次的主包静态编译结果。
-    root_catalog = compile_package_source(WorkspaceSource(workspace_root))
-    root_compile_calls = 0
-
-    def reuse_root_catalog(_source: WorkspaceSource):
-        """返回本代已经静态编译的主包目录并记录产品编译次数。
-
-        参数：``_source`` 是同一主工作区来源。
-        返回：预编译的主包目录（PackageCatalog）。
-        异常：调用超过一次时由最终计数断言失败。
-        """
-
-        nonlocal root_compile_calls
-        root_compile_calls += 1
-        return root_catalog
-
+    # ``runtime`` 是从主包与全部锁定外部包恰好各编译一次的完整候选代。
     runtime = prepare_workspace_registry_runtime(
         {
             "workspace": str(workspace_root),
@@ -285,12 +256,11 @@ def test_runtime_compiles_each_explicit_package_exactly_once(
             "devices": None,
             "workflow_editable_package_root": None,
         },
-        compile_catalog=reuse_root_catalog,
+        compile_catalog=compile_generation_once,
     )
 
     assert runtime is not None
-    assert root_compile_calls == 1
-    assert compile_roots == [external_root.resolve()]
+    assert compile_roots == [workspace_root.resolve(), external_root.resolve()]
 
 
 def test_selected_external_package_root_is_finitely_activated(

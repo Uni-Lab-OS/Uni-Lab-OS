@@ -180,6 +180,18 @@ def test_package_catalog_module_has_no_reverse_dependency_on_parent_layers() -> 
             else:
                 continue
             for imported_name in imported_names:
+                # 注册表快照（Registry Snapshot）的历史 ``publish`` 方法只保留
+                # 一个函数内兼容桥；新运行时分层测试会精确限定其父函数和符号。
+                legacy_publish_bridge = (
+                    relative_file.as_posix() == "registry_snapshot.py"
+                    and isinstance(node, ast.ImportFrom)
+                    and imported_name
+                    == "unilabos.package_manager.workspace_runtime.activation"
+                    and [alias.name for alias in node.names]
+                    == ["publish_registry_snapshot"]
+                )
+                if legacy_publish_bridge:
+                    continue
                 if (
                     imported_name == "unilabos.package_manager"
                     or imported_name.startswith(forbidden_prefixes)

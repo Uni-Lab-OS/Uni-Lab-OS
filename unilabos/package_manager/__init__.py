@@ -2,7 +2,7 @@
 
 from .catalog import PackageCatalog, PackageCompileError
 from .cli import PackageCLIError, cmd_package, register_package_subcommands
-from .compiler import compile_package_source
+from .inspection import inspect_package
 from .package_distribution import (
     LockedPackage,
     PackageDependencyError,
@@ -11,34 +11,14 @@ from .package_distribution import (
     load_locked_package_catalogs,
     upload_package,
 )
-from .inspection import inspect_package
-from .product_lifecycle import (
-    PreparedWorkspaceProductGeneration,
-    WorkspaceGenerationChangedError,
-    WorkspaceProductLifecycle,
-    close_workspace_product_lifecycle,
-    compose_workspace_product_lifecycle,
-    get_workspace_product_lifecycle,
-    install_workspace_product_lifecycle,
-    prepare_stable_workspace_product_generation,
-)
 from .project_metadata import PackageProject, parse_project_metadata
-from .refresh_coordinator import (
-    StableWorkspaceGenerationMonitor,
-    WorkspaceRefreshCoordinator,
-)
 from .registry_snapshot import (
     RegistryActivationPlan,
     RegistrySnapshot,
     RegistrySnapshotError,
     compile_registry_snapshot,
 )
-from .runtime_activation import (
-    WorkspaceRegistryRuntime,
-    prepare_workspace_registry_runtime,
-)
 from .sources import WorkspaceSource
-from .workspace_file_monitor import StableWorkspaceFileMonitor
 from .workspace_material_models import (
     WorkspaceMaterialModelAsset,
     WorkspaceMaterialModelCatalog,
@@ -49,15 +29,27 @@ from .workspace_material_shapes import (
     compile_workspace_material_shapes,
 )
 from .workspace_runtime import (
+    PreparedWorkspaceProductGeneration,
+    StableWorkspaceFileMonitor,
+    StableWorkspaceGenerationMonitor,
+    WorkspaceGenerationChangedError,
     WorkspaceGenerationPublisher,
     WorkspaceInputGeneration,
     WorkspacePackageRuntime,
+    WorkspaceProductLifecycle,
+    WorkspaceRefreshCoordinator,
     WorkspaceRefreshResult,
+    WorkspaceRegistryRuntime,
     WorkspaceRuntimeStatus,
-)
-from .workspace_startup import (
     WorkspaceStartupPlan,
+    close_workspace_product_lifecycle,
+    compile_package_source,
     compile_workspace_startup,
+    compose_workspace_product_lifecycle,
+    get_workspace_product_lifecycle,
+    install_workspace_product_lifecycle,
+    prepare_stable_workspace_product_generation,
+    prepare_workspace_registry_runtime,
     prepare_workspace_startup,
 )
 
@@ -79,6 +71,8 @@ __all__ = [
     "WorkspaceGenerationChangedError",
     "WorkspaceGenerationPublisher",
     "WorkspaceInputGeneration",
+    "WorkspaceMaterialModelAsset",
+    "WorkspaceMaterialModelCatalog",
     "WorkspacePackageRuntime",
     "WorkspaceProductLifecycle",
     "WorkspaceRefreshCoordinator",
@@ -92,10 +86,8 @@ __all__ = [
     "compile_catalog_material_shapes",
     "compile_package_source",
     "compile_registry_snapshot",
-    "compile_workspace_material_shapes",
-    "WorkspaceMaterialModelAsset",
-    "WorkspaceMaterialModelCatalog",
     "compile_workspace_material_models",
+    "compile_workspace_material_shapes",
     "compile_workspace_startup",
     "compose_workspace_product_lifecycle",
     "get_workspace_product_lifecycle",

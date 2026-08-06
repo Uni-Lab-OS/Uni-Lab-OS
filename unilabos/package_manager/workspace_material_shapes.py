@@ -13,7 +13,7 @@ import yaml
 
 from .catalog import PackageCatalog, PackageDefinition
 from .sources import WorkspaceSource
-from .workspace_startup import WorkspaceStartupPlan
+from .workspace_runtime.discovery import WorkspaceStartupPlan
 
 _PART_TYPES = frozenset(
     {"box", "slab", "cylinder", "lathe", "disc", "rect", "edge", "grid", "sites"}

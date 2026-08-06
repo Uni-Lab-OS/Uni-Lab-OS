@@ -3,10 +3,10 @@
 from __future__ import annotations
 
 import os
+from collections.abc import Callable
 from pathlib import Path
 
 from ..catalog_source import PackageCatalogSource
-from ..compiler import compile_package_source
 from ..package_catalog import (
     PackageCatalog,
     WorkspaceSource,
@@ -23,14 +23,23 @@ from .transaction import (
     serialized_dependency_mutation,
 )
 
+CatalogCompiler = Callable[[WorkspaceSource], PackageCatalog]
+
 
 class PackageDependencyManager:
     """在一个小 Interface 后完成依赖解析、全局校验和双文件事务发布。"""
 
-    def __init__(self, workspace: str | Path) -> None:
+    def __init__(
+        self,
+        workspace: str | Path,
+        *,
+        compile_catalog: CatalogCompiler | None = None,
+    ) -> None:
         """固定主工作区并恢复其当前显式依赖代际。
 
-        参数：``workspace`` 是当前可编辑主工作区根。
+        参数：``workspace`` 是当前可编辑主工作区根；``compile_catalog`` 是产品
+        工作区运行时（Workspace Runtime）显式注入的目录编译器，省略时仅在真正
+        编译时延迟解析历史默认实现。
         返回：无；构造函数只验证根目录，不写文件或发现环境软件包。
         异常：工作区缺失、包含符号链接或不可访问时传播 ``WorkspaceSource`` 的
         ``ValueError``。
@@ -38,6 +47,8 @@ class PackageDependencyManager:
 
         # ``_workspace`` 是全部依赖声明、锁和相对来源解析的唯一主工作区权威。
         self._workspace = WorkspaceSource(workspace)
+        # ``_compile_catalog`` 是本管理器全部来源必须共用的目录编译 Interface。
+        self._compile_catalog = compile_catalog
 
     @serialized_dependency_mutation
     def add(self, source: str | Path) -> PackageDependencyLock:
@@ -57,7 +68,10 @@ class PackageDependencyManager:
             source,
         )
         # ``catalog`` 是新来源在任何文件写入前完整编译的包目录（PackageCatalog）。
-        catalog = compile_dependency_catalog(WorkspaceSource(source_path))
+        catalog = compile_dependency_catalog(
+            WorkspaceSource(source_path),
+            self._compile_catalog,
+        )
         if any(
             item.normalized_name == catalog.distribution.normalized_name
             for item in current_lock.packages
@@ -87,11 +101,13 @@ class PackageDependencyManager:
                     workspace_root=self._workspace.root,
                     entry=item,
                     verify_lock=item.normalized_name != new_entry.normalized_name,
+                    compile_catalog=self._compile_catalog,
                 )
                 if item.normalized_name != new_entry.normalized_name
                 else catalog
                 for item in next_lock.packages
             ),
+            compile_catalog=self._compile_catalog,
         )
         publish_dependency_state(
             workspace_root=self._workspace.root,
@@ -127,7 +143,10 @@ class PackageDependencyManager:
             selected_source,
         )
         # ``catalog`` 是候选更新来源重新完整静态编译得到的包目录。
-        catalog = compile_dependency_catalog(WorkspaceSource(source_path))
+        catalog = compile_dependency_catalog(
+            WorkspaceSource(source_path),
+            self._compile_catalog,
+        )
         # ``next_entry`` 是更新后候选摘要，不得改变发行规范身份。
         next_entry = LockedPackage.from_catalog(
             catalog=catalog,
@@ -163,12 +182,14 @@ class PackageDependencyManager:
                 workspace_root=self._workspace.root,
                 entry=item,
                 verify_lock=True,
+                compile_catalog=self._compile_catalog,
             )
             for item in next_lock.packages
         )
         validate_complete_generation(
             workspace=self._workspace,
             dependency_catalogs=dependency_catalogs,
+            compile_catalog=self._compile_catalog,
         )
         publish_dependency_state(
             workspace_root=self._workspace.root,
@@ -211,12 +232,14 @@ class PackageDependencyManager:
                 workspace_root=self._workspace.root,
                 entry=item,
                 verify_lock=True,
+                compile_catalog=self._compile_catalog,
             )
             for item in next_lock.packages
         )
         validate_complete_generation(
             workspace=self._workspace,
             dependency_catalogs=remaining_catalogs,
+            compile_catalog=self._compile_catalog,
         )
         publish_dependency_state(
             workspace_root=self._workspace.root,
@@ -228,11 +251,13 @@ class PackageDependencyManager:
 
 def load_locked_package_catalogs(
     workspace: str | Path,
+    *,
+    compile_catalog: CatalogCompiler | None = None,
 ) -> tuple[PackageCatalog, ...]:
     """只从显式声明和锁文件加载外部包目录（PackageCatalog）。
 
-    参数：``workspace`` 是主工作区根；函数从不扫描 ``sys.path`` 或 ambient
-    site-packages。
+    参数：``workspace`` 是主工作区根；``compile_catalog`` 是可选目录编译器；
+    函数从不扫描 ``sys.path`` 或 ambient site-packages。
     返回：按命名空间排序、重新完整编译且摘要与锁一致的包目录元组。
     异常：声明/锁缺一、身份或摘要漂移、来源无效、跨包冲突时抛出
     ``PackageDependencyError``，不返回部分集合。
@@ -241,23 +266,29 @@ def load_locked_package_catalogs(
     # ``workspace_source`` 固定依赖来源相对路径与主包聚合校验的共同根。
     workspace_source = WorkspaceSource(workspace)
     # ``package_sources`` 保留每个依赖目录对应的显式来源，但兼容接口只返回目录。
-    package_sources = load_locked_package_sources(workspace_source.root)
+    package_sources = load_locked_package_sources(
+        workspace_source.root,
+        compile_catalog=compile_catalog,
+    )
     # ``catalogs`` 是不暴露物理来源的兼容包目录返回集合。
     catalogs = tuple(item.catalog for item in package_sources)
     validate_complete_generation(
         workspace=workspace_source,
         dependency_catalogs=catalogs,
+        compile_catalog=compile_catalog,
     )
     return tuple(sorted(catalogs, key=catalog_namespace))
 
 
 def load_locked_package_sources(
     workspace: str | Path,
+    *,
+    compile_catalog: CatalogCompiler | None = None,
 ) -> tuple[PackageCatalogSource, ...]:
     """一次编译并返回显式锁定外部包的来源/目录配对。
 
-    参数：``workspace`` 是主工作区根；只读取成对依赖声明与锁定的 workspace
-    来源，绝不发现 ambient site-packages。
+    参数：``workspace`` 是主工作区根；``compile_catalog`` 是可选目录编译器；
+    只读取成对依赖声明与锁定的 workspace 来源，绝不发现 ambient site-packages。
     返回：按包命名空间稳定排序、摘要与锁完全一致的 ``PackageCatalogSource``
     元组；主包不在结果中，由完整候选代组合者复用其已有编译结果。
     异常：声明、锁、来源、摘要或静态编译无效时抛出
@@ -281,6 +312,7 @@ def load_locked_package_sources(
             workspace_root=workspace_source.root,
             entry=entry,
             verify_lock=True,
+            compile_catalog=compile_catalog,
         )
         package_sources.append(
             PackageCatalogSource(
@@ -361,11 +393,12 @@ def catalog_for_entry(
     workspace_root: Path,
     entry: LockedPackage,
     verify_lock: bool,
+    compile_catalog: CatalogCompiler | None = None,
 ) -> PackageCatalog:
     """重新编译一项锁定来源并按需核对全部身份摘要。
 
     参数：``workspace_root`` 是主工作区；``entry`` 是锁条目；``verify_lock``
-    决定是否要求重编译目录与现有锁完全一致。
+    决定是否要求重编译目录与现有锁完全一致；``compile_catalog`` 是可选编译器。
     返回：只从显式路径观察得到的包目录（PackageCatalog）。
     异常：来源越界、编译失败或任一锁字段漂移时抛出
     ``PackageDependencyError``。
@@ -377,7 +410,10 @@ def catalog_for_entry(
         entry.source,
     )
     # ``catalog`` 是锁定来源当前磁盘内容重新完整编译的包目录。
-    catalog = compile_dependency_catalog(WorkspaceSource(source_path))
+    catalog = compile_dependency_catalog(
+        WorkspaceSource(source_path),
+        compile_catalog,
+    )
     # ``rebuilt`` 把当前目录投影回锁模型，供逐字段确定性比较。
     rebuilt = LockedPackage.from_catalog(catalog=catalog, source=portable_source)
     if verify_lock and rebuilt != entry:
@@ -391,38 +427,59 @@ def validate_complete_generation(
     *,
     workspace: WorkspaceSource,
     dependency_catalogs: tuple[PackageCatalog, ...],
+    compile_catalog: CatalogCompiler | None = None,
 ) -> None:
     """完整校验主包与全部依赖的聚合注册表代际。
 
     参数：``workspace`` 是主工作区来源；``dependency_catalogs`` 是候选依赖完整
-    目录集合。
+    目录集合；``compile_catalog`` 是整个候选代共享的可选目录编译器。
     返回：无；全部规范身份和别名关系合法时完成。
     异常：主包编译或跨包注册表冲突时传播原始关闭式异常；调用者尚未写文件。
     """
 
     # ``root_catalog`` 让外部定义不能与当前产品工作区共享规范命名空间。
-    root_catalog = compile_dependency_catalog(workspace)
+    root_catalog = compile_dependency_catalog(workspace, compile_catalog)
     try:
         compile_registry_snapshot((root_catalog, *dependency_catalogs))
     except (TypeError, ValueError, RuntimeError) as error:
         raise PackageDependencyError("软件包依赖聚合注册表校验失败") from error
 
 
-def compile_dependency_catalog(source: WorkspaceSource) -> PackageCatalog:
+def compile_dependency_catalog(
+    source: WorkspaceSource,
+    compile_catalog: CatalogCompiler | None = None,
+) -> PackageCatalog:
     """通过唯一静态编译器规范化依赖错误边界。
 
-    参数：``source`` 是主工作区或显式外部工作区来源。
+    参数：``source`` 是主工作区或显式外部工作区来源；``compile_catalog`` 是产品
+    路径显式注入的统一编译器，省略时延迟解析兼容默认。
     返回：完整、不可变且没有导入作者模块的包目录（PackageCatalog）。
     异常：来源、语法、动作合同（Action Contract）或身份无效时统一抛出
     ``PackageDependencyError``，保留原异常作为诊断链。
     """
 
     try:
-        return compile_package_source(source)
+        # ``resolved_compiler`` 不在 Module 加载时反向依赖工作区运行时，只有历史
+        # 直接调用未注入时才通过函数内兼容桥解析默认编译器。
+        resolved_compiler = compile_catalog or _default_compile_package_source()
+        return resolved_compiler(source)
     except (TypeError, ValueError, RuntimeError) as error:
         raise PackageDependencyError(
             f"软件包依赖完整静态编译失败: {source.root}"
         ) from error
+
+
+def _default_compile_package_source() -> CatalogCompiler:
+    """延迟取得历史默认工作区目录编译器。
+
+    参数：无。
+    返回：工作区运行时（Workspace Runtime）的规范目录编译函数对象。
+    异常：模块缺失或初始化失败时传播导入异常；包分发 Module 加载本身不触发它。
+    """
+
+    from ..workspace_runtime.discovery import compile_package_source
+
+    return compile_package_source
 
 
 def catalog_namespace(catalog: PackageCatalog) -> str:

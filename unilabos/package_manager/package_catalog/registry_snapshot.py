@@ -218,45 +218,18 @@ class RegistrySnapshot:
         )
 
     def publish(self, registry: Any) -> None:
-        """把完整设备和资源集合原子并入现有注册表（Registry）。
+        """通过工作区运行时（Workspace Runtime）兼容桥发布完整快照。
 
-        参数：``registry`` 提供设备与资源注册表映射；产品注册表可实现
-        ``publish_package_snapshot`` 以在内部锁内完成真正原子替换。
-        返回：无；成功后保留内置定义并一次发布完整软件包定义。
-        异常：注册表形状、身份冲突或替换失败时传播异常；通用 Adapter 会尽力恢复
-        两个原映射，产品运行路径必须使用内部原子接缝。
+        参数：``registry`` 是需要接收本快照的实时注册表（Registry）。
+        返回：无；委托唯一运行时发布 Interface，保持历史 ``snapshot.publish``。
+        异常：注册表形状、身份冲突或原子替换失败时传播原异常。
         """
 
-        # ``publish_snapshot`` 是产品注册表提供的原子发布接缝，优先于通用回滚 Adapter。
-        publish_snapshot = getattr(registry, "publish_package_snapshot", None)
-        if callable(publish_snapshot):
-            publish_snapshot(self)
-            return
-        try:
-            # ``original_devices`` 与 ``original_resources`` 是发布失败时的恢复基线。
-            original_devices = copy.deepcopy(dict(registry.device_type_registry))
-            original_resources = copy.deepcopy(dict(registry.resource_type_registry))
-        except (AttributeError, TypeError) as error:
-            raise RegistrySnapshotError("注册表必须提供设备和资源定义映射") from error
-        candidate_devices, candidate_resources = self.registry_candidates(
-            original_devices,
-            original_resources,
-        )
-        try:
-            registry.device_type_registry = candidate_devices
-            registry.resource_type_registry = candidate_resources
-        except Exception:
-            _restore_registry_mapping(
-                registry,
-                attribute="device_type_registry",
-                original=original_devices,
-            )
-            _restore_registry_mapping(
-                registry,
-                attribute="resource_type_registry",
-                original=original_resources,
-            )
-            raise
+        # 函数内导入是唯一允许的遗留兼容桥，避免纯包目录（PackageCatalog）模块
+        # 加载时反向拥有实时发布职责或形成初始化环。
+        from ..workspace_runtime.activation import publish_registry_snapshot
+
+        publish_registry_snapshot(self, registry)
 
     def registry_candidates(
         self,
@@ -519,31 +492,6 @@ def _merge_registry_definitions(
         ]
         candidate[definition.fqid] = entry
     return candidate
-
-
-def _restore_registry_mapping(
-    registry: Any,
-    *,
-    attribute: str,
-    original: Mapping[str, Any],
-) -> None:
-    """在通用发布 Adapter 失败后恢复一个注册表集合。
-
-    参数：``registry`` 是通用注册表对象；``attribute`` 是待恢复属性；``original``
-    是发布前分离副本。
-    返回：无；若目标已经等于原值则不重复写入。
-    异常：恢复失败会被吞掉，让调用者仍收到最初发布异常；产品路径不得依赖此
-    通用 Adapter 获得强原子保证。
-    """
-
-    try:
-        # ``current`` 是失败后的实时映射；已恢复时不重复覆盖其他恢复动作。
-        current = getattr(registry, attribute)
-        if dict(current) == dict(original):
-            return
-        setattr(registry, attribute, copy.deepcopy(dict(original)))
-    except Exception:  # noqa: BLE001 - 回滚不得遮蔽最初的发布异常。
-        return
 
 
 __all__ = [

@@ -21,7 +21,9 @@ from unilabos.package_manager import (
     compose_workspace_product_lifecycle,
     prepare_stable_workspace_product_generation,
 )
-from unilabos.package_manager import workspace_startup as workspace_startup_module
+from unilabos.package_manager.workspace_runtime import (
+    discovery as workspace_startup_module,
+)
 
 
 def test_product_lifecycle_reuses_precompiled_initial_candidate(

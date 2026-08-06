@@ -26,6 +26,10 @@ def test_new_package_distribution_interface_manages_explicit_dependency(
         PackageDependencyManager,
         load_locked_package_catalogs,
     )
+    from unilabos.package_manager.workspace_runtime import (
+        WorkspaceSource,
+        compile_package_source,
+    )
 
     # ``workspace_root`` 是依赖声明与锁的写权威所在主工作区。
     workspace_root = tmp_path / "workspace"
@@ -43,15 +47,43 @@ def test_new_package_distribution_interface_manages_explicit_dependency(
         device_ids=("reader",),
     )
 
+    # ``compiled_roots`` 记录两个公开操作实际委托给同一目录编译 Interface 的来源。
+    compiled_roots: list[Path] = []
+
+    def compile_catalog(source: WorkspaceSource):
+        """记录包分发（Package Distribution）公开 Interface 的每次目录编译。
+
+        参数：``source`` 是主工作区或显式外部包的安全来源。
+        返回：统一工作区编译器产生的不可变包目录（PackageCatalog）。
+        异常：来源或静态合同无效时传播规范编译异常。
+        """
+
+        # ``compiled_root`` 是本次编译唯一观察的来源根身份。
+        compiled_root = source.root
+        compiled_roots.append(compiled_root)
+        return compile_package_source(source)
+
     # ``dependency_lock`` 是新 Module 完整校验后发布的依赖代际。
-    dependency_lock = PackageDependencyManager(workspace_root).add("../external")
+    dependency_lock = PackageDependencyManager(
+        workspace_root,
+        compile_catalog=compile_catalog,
+    ).add("../external")
     # ``catalogs`` 是从显式来源和锁重新编译得到的包目录集合。
-    catalogs = load_locked_package_catalogs(workspace_root)
+    catalogs = load_locked_package_catalogs(
+        workspace_root,
+        compile_catalog=compile_catalog,
+    )
 
     assert tuple(item.distribution_name for item in dependency_lock.packages) == (
         "external-lab",
     )
     assert tuple(item.id for item in catalogs[0].definitions.devices) == ("reader",)
+    assert compiled_roots == [
+        external_root.resolve(),
+        workspace_root.resolve(),
+        external_root.resolve(),
+        workspace_root.resolve(),
+    ]
 
 
 def test_legacy_distribution_imports_retain_new_public_object_identities() -> None:
@@ -115,7 +147,7 @@ def test_internal_callers_depend_on_package_distribution_interface() -> None:
         "cli.py": {
             "unilabos.package_manager.package_distribution",
         },
-        "runtime_activation.py": {
+        "workspace_runtime/activation.py": {
             "unilabos.package_manager.package_distribution",
         },
     }
@@ -131,6 +163,11 @@ def test_internal_callers_depend_on_package_distribution_interface() -> None:
         source_file = package_manager_root / filename
         # ``syntax_tree`` 只解析导入，不执行产品启动逻辑。
         syntax_tree = ast.parse(source_file.read_text(encoding="utf-8"))
+        # ``caller_package`` 是相对 import 解析所需的实际调用者包身份。
+        caller_package = "unilabos.package_manager"
+        relative_parent = source_file.parent.relative_to(package_manager_root)
+        if relative_parent.parts:
+            caller_package += "." + ".".join(relative_parent.parts)
         # ``imported_modules`` 保存解析成绝对身份的直接 import 集合。
         imported_modules: set[str] = set()
         for node in ast.walk(syntax_tree):
@@ -140,7 +177,7 @@ def test_internal_callers_depend_on_package_distribution_interface() -> None:
             if node.level:
                 imported_name = importlib.util.resolve_name(
                     "." * node.level + imported_name,
-                    "unilabos.package_manager",
+                    caller_package,
                 )
             imported_modules.add(imported_name)
         assert required_modules <= imported_modules
@@ -148,11 +185,12 @@ def test_internal_callers_depend_on_package_distribution_interface() -> None:
 
 
 def test_package_distribution_module_has_no_reverse_layer_dependency() -> None:
-    """包分发（Package Distribution）Module 不反向依赖历史实现或运行时层。
+    """包分发（Package Distribution）加载时不反向导入历史实现或运行时层。
 
     参数：无。
-    返回：无；解析新 Module 的全部 import 并断言依赖只指向自身或底层能力。
-    异常：出现历史根实现、工作区运行时或驱动运行时依赖时测试失败。
+    返回：无；解析新 Module 的模块级 import 并断言依赖只指向自身或底层能力。
+    异常：加载阶段出现历史根实现、工作区运行时或驱动运行时依赖时测试失败；
+    未注入编译器的遗留直接调用允许函数内延迟兼容桥。
     """
 
     # ``module_root`` 是包分发（Package Distribution）新 Module 的源码边界。
@@ -199,7 +237,8 @@ def test_package_distribution_module_has_no_reverse_layer_dependency() -> None:
             )
         # ``syntax_tree`` 只用于读取 import 依赖，不触发任何安装或网络操作。
         syntax_tree = ast.parse(source_file.read_text(encoding="utf-8"))
-        for node in ast.walk(syntax_tree):
+        # 只检查模块加载会执行的顶层 import；函数内延迟默认编译器属于明确兼容桥。
+        for node in syntax_tree.body:
             if isinstance(node, ast.Import):
                 # ``imported_names`` 是普通 import 的绝对 Module 身份集合。
                 imported_names = [alias.name for alias in node.names]
