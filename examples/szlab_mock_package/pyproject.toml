@@ -1,0 +1,14 @@
+[build-system]
+requires = ["setuptools>=68", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "unilab-szlab-mock"
+version = "0.1.0"
+description = "No-hardware SZLab-shaped device package for Uni-Lab cloud and Electron validation"
+readme = "README.md"
+requires-python = ">=3.11"
+dependencies = []
+
+[tool.setuptools.packages.find]
+include = ["unilab_szlab_mock*"]
