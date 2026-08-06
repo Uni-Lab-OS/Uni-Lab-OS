@@ -1,8 +1,9 @@
 import base64
-import traceback
-import os
 import importlib.util
-from typing import Optional, Literal
+import os
+import traceback
+from typing import Literal
+
 from unilabos.utils import logger
 
 
@@ -28,7 +29,7 @@ class BasicConfig:
     disable_browser = False  # 禁止浏览器自动打开
     port = 8002  # 本地HTTP服务
     check_mode = False  # CI 检查模式，用于验证 registry 导入和文件一致性
-    test_mode = False  # 测试模式，所有动作不实际执行，返回模拟结果
+    action_mode: Literal["real", "simulate"] = "real"  # 动作派发或模拟成功回执
     extra_resource = False  # 是否加载lab_开头的额外资源
     # 'TRACE', 'DEBUG', 'INFO', 'WARNING', 'ERROR', 'CRITICAL'
     log_level: Literal["TRACE", "DEBUG", "INFO", "WARNING", "ERROR", "CRITICAL"] = (
@@ -54,8 +55,8 @@ class WSConfig:
     ws_ping_timeout = 8  # pong等待超时（秒），对齐服务端 PongWait
 
 
-# Uni-Lab 后端生产控制面配置。该客户端与旧 schedule WebSocket 分离，
-# 只传短通知；Job 参数、反馈和结果统一经 HTTPConfig 对应的数据面传输。
+# 历史实验配置，仅为旧模块导入兼容保留。主启动不会读取或启动该链路；
+# OS 运行时禁止把正式后端（Backend）作为控制面或数据源。
 class EdgeControlConfig:
     api_key = ""
     edge_key = ""
@@ -74,10 +75,7 @@ class HTTPConfig:
     remote_addr = "https://leap-lab.bohrium.com/api/v1"
     # schedule 通道（WebSocket）地址；为空时从 remote_addr 派生：带端口则 +1，否则沿用原 netloc
     schedule_addr = ""
-    # Edge 微后端的物料查询来源：microbackend（默认）/ backend / auto（本地未命中再查正式后端）
-    material_source = "microbackend"
-    # 空时使用主进程 http://127.0.0.1:{BasicConfig.port}/api/v1；独立 scheduler 可填 :8092/api/v1
-    material_microbackend_addr = ""
+    # OS 物料查询固定使用当前主进程的本地库存权威；正式后端由前端直接选择。
     material_query_timeout = 10
 
 
@@ -235,7 +233,7 @@ def load_config(config_path=None):
             _update_config_from_module(module)
             logger.info(f"[ENV] 配置文件 {config_path} 加载成功")
             _update_config_from_env()
-        except Exception as e:
+        except Exception:
             logger.error(f"[ENV] 加载配置文件 {config_path} 失败")
             traceback.print_exc()
             exit(1)

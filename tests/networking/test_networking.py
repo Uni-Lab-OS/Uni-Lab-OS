@@ -201,8 +201,8 @@ def duo(tmp_path_factory):
     common_args = [
         "--backend",
         "ros",
-        "--test_mode",
-        "--skip_env_check",
+        "--action_mode",
+        "simulate",
         "--disable_browser",
         "--app_bridges",
         "fastapi",

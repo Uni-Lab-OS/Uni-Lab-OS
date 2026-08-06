@@ -17,9 +17,8 @@ unilab --graph <graph.json> --config <config.py> --backend simple  # no ROS2 nee
 
 # Common CLI flags
 unilab --app_bridges websocket fastapi    # communication bridges
-unilab --test_mode                        # simulate hardware, no real execution
+unilab --action_mode simulate             # simulate hardware action results
 unilab --check_mode                       # CI validation of registry imports
-unilab --skip_env_check                   # skip auto-install of dependencies
 unilab --visual rviz|web|disable          # visualization mode
 unilab --is_slave                         # run as slave node
 

@@ -91,6 +91,8 @@ def _write_szlab_shaped_workspace(workspace_root: Path) -> dict[str, Path]:
     workflow_path = package_root / "workflows" / "material_transfer.py"
     # ``graph_path`` 是公共命令行（CLI）将加载的物理图文件。
     graph_path = workspace_root / "deployment" / "graphs" / "szlab-local-debug.json"
+    # ``config_path`` 是工作区启动计划声明的本地部署配置，不属于运行时数据目录。
+    config_path = workspace_root / "deployment" / "local_config.py"
     workflow_path.parent.mkdir(parents=True)
     graph_path.parent.mkdir(parents=True)
     (package_root / "__init__.py").write_text("", encoding="utf-8")
@@ -102,7 +104,12 @@ def _write_szlab_shaped_workspace(workspace_root: Path) -> dict[str, Path]:
         encoding="utf-8",
     )
     (workspace_root / "pyproject.toml").write_text(
-        '[project]\nname = "szlab-poly-studio"\nversion = "0.1.0"\n',
+        '[project]\nname = "szlab-poly-studio"\nversion = "0.1.0"\n'
+        "\n[tool.unilabos.startup]\n"
+        'graph = "deployment/graphs/szlab-local-debug.json"\n'
+        'config = "deployment/local_config.py"\n'
+        'app_bridges = ["fastapi"]\n'
+        'ensure_dependencies = false\n',
         encoding="utf-8",
     )
     (workspace_root / "package.yaml").write_text(
@@ -118,10 +125,15 @@ def _write_szlab_shaped_workspace(workspace_root: Path) -> dict[str, Path]:
         '"community.szlab_poly_studio.robot"}],"links":[]}',
         encoding="utf-8",
     )
+    config_path.write_text(
+        "class BasicConfig:\n    disable_browser = True\n",
+        encoding="utf-8",
+    )
     return {
         "package": package_root,
         "workflow": workflow_path,
         "graph": graph_path,
+        "config": config_path,
     }
 
 
@@ -171,6 +183,7 @@ def test_prepare_workspace_startup_projects_one_szlab_package_without_activation
         "devices": None,
         "workflow_editable_package_root": None,
         "graph": "deployment/graphs/szlab-local-debug.json",
+        "working_dir": str(tmp_path / "isolated-runtime"),
     }
 
     startup_plan = workspace_api.prepare_workspace_startup(startup_arguments)
@@ -184,8 +197,44 @@ def test_prepare_workspace_startup_projects_one_szlab_package_without_activation
         str(fixture_paths["package"]): "community.szlab_poly_studio"
     }
     assert startup_arguments["graph"] == str(fixture_paths["graph"])
+    assert startup_arguments["working_dir"] == str(tmp_path / "isolated-runtime")
     assert str(workspace_root) == sys.path[0]
     assert "workflow_task" not in startup_arguments
+
+
+def test_workspace_startup_defaults_remove_redundant_graph_config_and_bridges(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """证明只给工作区即可补全默认图、配置、桥接器与隔离运行目录。
+
+    参数：``tmp_path`` 创建最小工作区；``monkeypatch`` 隔离 ``sys.path``。
+    返回：无；断言工作区声明只填补缺省值，且文件均受工作区边界约束。
+    异常：声明缺失、越界或形状无效时准备函数必须失败关闭。
+    """
+
+    workspace_api = _workspace_api()
+    workspace_root = tmp_path / "workspace"
+    fixture_paths = _write_szlab_shaped_workspace(workspace_root)
+    monkeypatch.setattr(sys, "path", list(sys.path))
+    # ``startup_arguments`` 使用公共解析器默认桥接值模拟未显式覆盖的启动命令。
+    startup_arguments: dict[str, Any] = {
+        "workspace": str(workspace_root),
+        "devices": None,
+        "workflow_editable_package_root": None,
+        "graph": None,
+        "config": None,
+        "app_bridges": ["websocket", "fastapi"],
+    }
+
+    startup_plan = workspace_api.prepare_workspace_startup(startup_arguments)
+
+    assert startup_plan is not None
+    assert startup_arguments["graph"] == str(fixture_paths["graph"])
+    assert startup_arguments["config"] == str(fixture_paths["config"])
+    assert startup_arguments["app_bridges"] == ["fastapi"]
+    assert startup_arguments["working_dir"] == str(workspace_root / ".unilabos")
+    assert startup_arguments["_ensure_dependencies"] is False
 
 
 def test_prepare_workspace_startup_rejects_parallel_legacy_device_roots(
@@ -232,12 +281,78 @@ def test_public_cli_parser_accepts_workspace_argument(
     monkeypatch.setattr(
         sys,
         "argv",
-        ["unilab", "--workspace", str(workspace_root), "--skip_env_check"],
+        ["unilab", "--workspace", str(workspace_root)],
     )
 
     parsed_arguments = parse_args().parse_args()
 
     assert parsed_arguments.workspace == str(workspace_root)
+
+
+def test_workspace_dependency_policy_rejects_non_boolean_value(
+    tmp_path: Path,
+) -> None:
+    """证明工作区依赖保障策略必须是明确布尔值。
+
+    参数：``tmp_path`` 创建损坏的工作区声明。返回：无；断言配置在环境检查前
+    失败关闭。异常：若字符串被隐式当作布尔值，测试断言失败。
+    """
+
+    workspace_api = _workspace_api()
+    workspace_root = tmp_path / "workspace"
+    _write_szlab_shaped_workspace(workspace_root)
+    pyproject_path = workspace_root / "pyproject.toml"
+    pyproject_path.write_text(
+        pyproject_path.read_text(encoding="utf-8").replace(
+            "ensure_dependencies = false",
+            'ensure_dependencies = "false"',
+        ),
+        encoding="utf-8",
+    )
+
+    with pytest.raises(ValueError, match="ensure_dependencies"):
+        workspace_api.prepare_workspace_startup(
+            {
+                "workspace": str(workspace_root),
+                "devices": None,
+                "graph": None,
+                "config": None,
+                "app_bridges": ["websocket", "fastapi"],
+            }
+        )
+
+
+def test_workspace_dependency_policy_defaults_to_ensure(
+    tmp_path: Path,
+) -> None:
+    """证明未声明依赖策略的工作区仍执行检查和自动补齐。
+
+    参数：``tmp_path`` 创建省略策略的合法工作区。返回：无；断言启动计划使用
+    安全默认值。异常：若默认值退回跳过，测试断言失败。
+    """
+
+    workspace_api = _workspace_api()
+    workspace_root = tmp_path / "workspace"
+    _write_szlab_shaped_workspace(workspace_root)
+    pyproject_path = workspace_root / "pyproject.toml"
+    pyproject_path.write_text(
+        pyproject_path.read_text(encoding="utf-8").replace(
+            "ensure_dependencies = false\n",
+            "",
+        ),
+        encoding="utf-8",
+    )
+    arguments: dict[str, Any] = {
+        "workspace": str(workspace_root),
+        "devices": None,
+        "graph": None,
+        "config": None,
+        "app_bridges": ["websocket", "fastapi"],
+    }
+
+    workspace_api.prepare_workspace_startup(arguments)
+
+    assert arguments["_ensure_dependencies"] is True
 
 
 def test_local_workspace_namespace_satisfies_community_graph_without_remote_package(

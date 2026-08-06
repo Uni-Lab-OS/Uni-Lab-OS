@@ -70,8 +70,6 @@ class WSConfig:
 # HTTP配置
 class HTTPConfig:
     remote_addr = "https://leap-lab.bohrium.com/api/v1"  # 远程服务器地址
-    material_source = "microbackend"  # microbackend / backend / auto
-    material_microbackend_addr = ""  # 空 = 当前主进程；独立微后端可填 http://127.0.0.1:8092/api/v1
     material_query_timeout = 10
 
 # Host/Slave 网络服务（由 Edge 微后端拥有）
@@ -124,8 +122,6 @@ class ROSConfig:
 | `working_dir`     | `--working_dir`     | **灵活性**：不同环境可能使用不同目录 |
 | `is_host_mode`    | `--is_slave`        | **运行模式**：由启动场景决定，不固定 |
 | `slave_no_host`   | `--slave_no_host`   | **离线降级**：仅故障排查/隔离测试时使用 |
-| `upload_registry` | `--upload_registry` | **临时操作**：仅首次启动或更新时需要 |
-| `vis_2d_enable`   | `--2d_vis`          | **调试功能**：按需临时启用           |
 | `remote_addr`     | `--addr`            | **环境切换**：测试/生产环境快速切换  |
 
 **推荐用法示例：**
@@ -140,8 +136,8 @@ unilab --addr test --ak your_ak --sk your_sk -g graph.json
 # 从站模式
 unilab --is_slave --ak your_ak --sk your_sk
 
-# 首次启动上传注册表
-unilab --ak your_ak --sk your_sk -g graph.json --upload_registry
+# 独立同步模板
+unilab --ak your_ak --sk your_sk template-sync
 ```
 
 ### 适合在配置文件中配置的参数
@@ -186,8 +182,7 @@ Uni-Lab 允许通过命令行参数覆盖配置文件中的设置，提供更灵
 | `BasicConfig` | `working_dir`     | `--working_dir`     | 工作目录路径                     |
 | `BasicConfig` | `is_host_mode`    | `--is_slave`        | 主站模式（参数为从站模式，取反） |
 | `BasicConfig` | `slave_no_host`   | `--slave_no_host`   | 允许从站离线启动并后台重连 Host  |
-| `BasicConfig` | `upload_registry` | `--upload_registry` | 启动时上传注册表信息             |
-| `BasicConfig` | `vis_2d_enable`   | `--2d_vis`          | 启用 2D 可视化                   |
+| `BasicConfig` | `action_mode`     | `--action_mode`     | 真实派发或模拟动作成功回执       |
 | `HTTPConfig`  | `remote_addr`     | `--addr`            | 远程服务地址                     |
 
 ### 特殊命令行参数
@@ -200,7 +195,7 @@ Uni-Lab 允许通过命令行参数覆盖配置文件中的设置，提供更灵
 | `--port`            | Web 服务端口（不影响配置文件）       |
 | `--disable_browser` | 禁用自动打开浏览器（不影响配置文件） |
 | `--visual`          | 可视化工具选择（不影响配置文件）     |
-| `--skip_env_check`  | 跳过环境检查（不影响配置文件）       |
+| `--action_mode`     | 选择 `real` 或 `simulate` 动作执行模式 |
 
 ### 命令行覆盖使用示例
 
@@ -214,11 +209,8 @@ unilab --ak ak --sk sk --addr "https://custom.server.com/api/v1" -g graph.json
 # 隔离测试：允许从站不等 Host 即启动
 unilab --is_slave --slave_no_host --ak ak --sk sk
 
-# 启用上传注册表和2D可视化
-unilab --upload_registry --2d_vis --ak ak --sk sk -g graph.json
-
-# 组合使用多个覆盖参数
-unilab --ak "key" --sk "secret" --addr "test" --upload_registry --2d_vis -g graph.json
+# 2D 可视化由部署配置中的 BasicConfig.vis_2d_enable 控制
+unilab --ak "key" --sk "secret" --addr "test" -g graph.json
 ```
 
 ### 预设环境地址
@@ -289,14 +281,12 @@ WebSocket 是 Uni-Lab 的主要通信方式：
 
 ### 3. HTTPConfig - HTTP 配置
 
-HTTP 客户端配置用于与云端服务及 Edge 物料微后端通信：
+HTTP 客户端配置用于旧云端兼容和 OS 本地物料（Material）查询超时：
 
-| 参数                         | 类型 | 默认值                                  | 说明                                                    |
-| ---------------------------- | ---- | --------------------------------------- | ------------------------------------------------------- |
-| `remote_addr`                | str  | `"https://leap-lab.bohrium.com/api/v1"` | 正式后端地址                                            |
-| `material_source`            | str  | `"microbackend"`                       | `microbackend`、`backend` 或本地未命中再查远端的 `auto` |
-| `material_microbackend_addr` | str  | `""`                                   | 空值派生当前主进程地址；独立进程通常填 `:8092/api/v1`   |
-| `material_query_timeout`     | int  | `10`                                    | 物料查询超时（秒）                                      |
+| 参数                     | 类型 | 默认值                                  | 说明                     |
+| ------------------------ | ---- | --------------------------------------- | ------------------------ |
+| `remote_addr`            | str  | `"https://leap-lab.bohrium.com/api/v1"` | 旧云端兼容地址           |
+| `material_query_timeout` | int  | `10`                                    | OS 本地物料查询超时（秒） |
 
 **预设环境地址**：
 
@@ -305,53 +295,30 @@ HTTP 客户端配置用于与云端服务及 Edge 物料微后端通信：
 - UAT 环境：`https://leap-lab.uat.bohrium.com/api/v1`
 - 本地环境：`http://127.0.0.1:48197/api/v1`
 
-Host 微后端的 HostLink 处理器使用同一个 `HTTPClient.material_query()`。微后端暴露兼容端点
+Host 的 HostLink 处理器使用同一个 `HTTPClient.material_query()`。OS 暴露兼容端点
 `POST /api/v1/edge/material/query`，请求仍为 `uuids` / 可选 `id` +
 `with_children`，响应仍为 `{"code": 0, "data": {"nodes": [...]}}`；库存内部的
 模板、实例、父子关系和内容物会先转换成扁平 `ResourceDict`，现有设备调用方无需改协议。
 
-Host 默认启动完整 Edge 调度微后端，并在主进程中打开：
+Host 默认启动完整 Edge 调度微后端，并在统一运行目录中打开：
 
-- `~/.unilabos/inventory.db`
-- `~/.unilabos/device_state.db`
-- `~/.unilabos/workflow_history.db`
+- `inventory.db`
+- `device_state.db`
+- `workflow_history.db`
 
-因此微前端直连 Host `:8002` 时默认就能读取调度、物料实体、设备状态和
-工作流历史。推荐通过 UniLabOS 启动参数切换：
-
-```bash
-# 默认等价形式：Host 内嵌微后端
-unilab -g graph.json --material_source microbackend \
-  --material_service_mode embedded --material_db ~/.unilabos/inventory.db
-
-# 正式后端 / 自动回源
-unilab -g graph.json --material_source backend
-unilab -g graph.json --material_source auto
-
-# 显式降级：关闭调度、设备状态与工作流历史
-unilab -g graph.json --no_edge_scheduler
-
-# 覆盖三库路径；device/history 也可传 off 关闭单库落盘
-unilab -g graph.json \
-  --material_db /data/inventory.db \
-  --device_state_db /data/device_state.db \
-  --workflow_history_db /data/workflow_history.db
-```
-
-也可把仓储作为 scheduler 独立进程，通过 HTTP 做进程间通信：
+因此前端直连 OS Host 时默认就能读取调度、物料实体、设备状态和工作流历史：
 
 ```bash
-ULAB_INVENTORY_DB=~/.unilabos/inventory.db \
-python -m unilabos.app.scheduler.main
+unilab -g graph.json
 
-unilab -g graph.json --material_source microbackend \
-  --material_service_mode external \
-  --material_microbackend_addr http://127.0.0.1:8092/api/v1
+# 隔离三类本地数据库
+unilab -g graph.json --working_dir /data/unilabos-runtime
 ```
 
-需要强制恢复正式后端查询时，把 `material_source` 设为 `backend`；迁移期需要本地
-优先、未命中自动回源时设为 `auto`。slave 不执行 embedded/external 服务装配，
-也不打开 SQLite，只通过 HostLink 请求 Host 微后端。
+后端权威由前端的一项连接配置直接选择 OS 或正式后端（Backend）。选择 OS 时，
+OS 固定使用 `app/scheduler` 与本地库存权威（Inventory Authority）；选择正式后端
+时，前端直接请求正式后端，OS 不作为查询代理。Slave 不打开 SQLite，只通过
+HostLink 请求 Host 持有的本地物料服务。
 
 ### 3.1 HostLinkConfig - 微后端组网配置
 
@@ -688,7 +655,7 @@ configs/
 unilab --config configs/dev_config.py --addr local --ak ak --sk sk -g graph.json
 
 # 测试环境
-unilab --config configs/test_config.py --addr test --ak ak --sk sk --upload_registry -g graph.json
+unilab --config configs/test_config.py --addr test --ak ak --sk sk -g graph.json
 
 # 生产环境
 unilab --config configs/prod_config.py --ak "$PROD_AK" --sk "$PROD_SK" -g graph.json
@@ -735,8 +702,6 @@ unilab --config base_config.py \
        --ak "$AK" \
        --sk "$SK" \
        --addr "test" \
-       --upload_registry \
-       --2d_vis \
        -g graph.json
 ```
 
@@ -883,22 +848,6 @@ HTTP 路由模板 server span / ws.receive
         ├── action.execute
         │   └── action.retry / action.skipped / action.operator_intervention
         └── action.status.publish
-```
-
-生产 `edge_control` 会把下行命令上下文保存到本地 SQLite；进程重启后，待拉取 Job、待提交 outcome 和 WebSocket outbox 都从该上下文继续。HTTP 事实数据面请求注入当前 client span，WebSocket 上行通知注入实际发送 span，因此后端 HTTP server span 和 `edge.event.accept` 可以与设备执行落在同一个 trace 中。下图的驱动链路适用于由当前 HostNode 实例化的本地设备节点；若设备 ActionServer 位于另一个 ROS 进程且其 Goal schema 不带 trace 字段，还需要部署侧提供 trace side-channel 才能跨过该进程边界：
-
-```text
-backend: edge.command.send
-└── edge: edge.command.receive
-    ├── edge.job.dispatch
-    │   ├── edge.http.job.fetch → backend HTTP server
-    │   └── action.execute → sync/async driver
-    ├── edge.job.feedback.publish
-    │   ├── edge.http.job.feedback.commit → backend HTTP server
-    │   └── edge.control.event.send → backend edge.event.accept
-    └── edge.job.outcome.publish
-        ├── edge.http.job.outcome.commit → backend HTTP server
-        └── edge.control.event.send → backend edge.event.accept
 ```
 
 启用追踪后，现有文本日志会自动附加 `trace_id` 和 `span_id`，可直接在 SigNoz 中关联检索。

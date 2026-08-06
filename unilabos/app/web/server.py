@@ -140,7 +140,7 @@ def setup_server() -> FastAPI:
         except Exception as e:  # noqa: BLE001 - unrelated Edge routes remain available
             error(f"[Web] 挂载 Backend Workflow 合同失败: {str(e)}")
 
-    # Edge 调度器与 Host 物料路由独立挂载；默认 embedded 物料服务不要求 --edge_scheduler。
+    # Edge 调度器与 Host 物料路由独立挂载；本地调度默认启用，无需正向开关。
     try:
         from unilabos.app.scheduler.api import create_scheduler_router
         from unilabos.app.scheduler.integration import (

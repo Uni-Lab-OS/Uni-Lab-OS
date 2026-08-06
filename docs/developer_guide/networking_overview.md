@@ -221,10 +221,10 @@ Laboratory A    Laboratory B
 
 ```bash
 # 实验室A
-unilab --ak your_ak --sk your_sk --upload_registry
+unilab --ak your_ak --sk your_sk template-sync
 
 # 实验室B
-unilab --ak your_ak --sk your_sk --upload_registry
+unilab --ak your_ak --sk your_sk template-sync
 ```
 
 ---
@@ -251,7 +251,7 @@ unilab --ak your_ak --sk your_sk --upload_registry
 unilab --ak your_ak --sk your_sk -g host.json --hostlink_addr 0.0.0.0:7302
 
 # 带云端集成
-unilab --ak your_ak --sk your_sk -g host.json --upload_registry
+unilab --ak your_ak --sk your_sk -g host.json
 
 # 指定端口
 unilab --ak your_ak --sk your_sk -g host.json --port 8002

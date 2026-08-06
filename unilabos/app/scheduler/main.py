@@ -8,10 +8,7 @@
 
     ULAB_SCHEDULER_HOST      默认 127.0.0.1
     ULAB_SCHEDULER_PORT      默认 8092
-    ULAB_ORDERING_URL        uni-lab-scheduler 地址（如 http://127.0.0.1:8091）；
-                             不设则用本地稳定排序 stub
-    ULAB_ORDERING_ALGORITHM  远端排序算法名，默认 WeightedCriticalPath
-    ULAB_LAB_ID              提交远端排序时的 lab_id，默认 edge-lab
+    ULAB_LAB_ID              本地实验室身份，默认 edge-lab
     ULAB_INVENTORY_DB        Edge 仓储 SQLite 路径（如 ~/.unilabos/inventory.db）；
                              设置后启用仓储路由并接入调度器物料预留
     ULAB_DEVICE_STATE_DB     设备状态 SQLite 路径（默认 ~/.unilabos/device_state.db，
@@ -30,7 +27,7 @@ import os
 from unilabos.app.scheduler.api import create_app
 from unilabos.app.scheduler.estimation import DurationEstimator
 from unilabos.app.scheduler.monitor import monitor_bus
-from unilabos.app.scheduler.ordering import HttpSchedulerOrderer, StableLocalOrderer
+from unilabos.app.scheduler.ordering import StableLocalOrderer
 from unilabos.app.scheduler.service import EdgeScheduler
 from unilabos.utils.tracing import initialize_tracing
 
@@ -88,20 +85,17 @@ def _build_inventory():
 
 
 def build_scheduler(inventory=None, history=None) -> EdgeScheduler:
-    # estimator 与 orderer 共享：历史样本一处积累，排序与泳道图口径一致
+    """装配固定使用本地稳定排序的 OS 调度器（Scheduler）。
+
+    参数：``inventory`` 是可选库存权威（Inventory Authority），``history`` 是
+    可选工作流（Workflow）历史存储。返回：不访问外部排序服务的调度器实例。
+    异常：预估器或调度器初始化错误原样传播。
+    """
+
+    # ``estimator`` 由排序展示与调度器共享，历史样本只积累一份。
     estimator = build_estimator()
-    ordering_url = os.environ.get("ULAB_ORDERING_URL", "").strip()
-    if ordering_url:
-        orderer = HttpSchedulerOrderer(
-            base_url=ordering_url,
-            lab_id=os.environ.get("ULAB_LAB_ID", "edge-lab"),
-            algorithm=os.environ.get("ULAB_ORDERING_ALGORITHM", "WeightedCriticalPath"),
-            estimator=estimator,
-        )
-    else:
-        orderer = StableLocalOrderer()
     return EdgeScheduler(
-        orderer=orderer,
+        orderer=StableLocalOrderer(),
         inventory=inventory,
         estimator=estimator,
         monitor=monitor_bus,
@@ -134,17 +128,21 @@ if _workflow_history_path and _workflow_history_path.lower() != "off":
         ),
     )
 if _inventory is not None:
+    from unilabos.app.scheduler.inventory.api import (
+        create_legacy_material_router as _create_legacy_material_router,
+    )
+    from unilabos.app.scheduler.inventory.api import (
+        create_router as _create_inventory_router,
+    )
     from unilabos.app.scheduler.inventory.backend_api import (
         install_backend_resource_api,
     )
     from unilabos.app.scheduler.inventory.backend_contract import (
         BackendResourceService,
     )
-    from unilabos.app.scheduler.inventory.api import (
-        create_legacy_material_router as _create_legacy_material_router,
-        create_router as _create_inventory_router,
+    from unilabos.app.scheduler.inventory.layout import (
+        create_lab_router as _create_lab_router,
     )
-    from unilabos.app.scheduler.inventory.layout import create_lab_router as _create_lab_router
 
     install_backend_resource_api(app, BackendResourceService(_inventory.store))
     app.include_router(_create_inventory_router(_inventory))

@@ -288,7 +288,7 @@ class TaskSchedulerBridge:
             # 按冻结拓扑顺序重建当时最终参数；这只读取已成功
             # 父节点事实，不派发任何动作。
             resolved_param = recovery_run.resolve_params(node.id)
-            recovered_result = self._recover_test_mode_return(
+            recovered_result = self._recover_simulated_action_return(
                 job,
                 nodes_by_uuid.get(node.id, {}),
                 resolved_param=resolved_param,
@@ -310,18 +310,18 @@ class TaskSchedulerBridge:
         return self._aggregate(task_uuid)
 
     @staticmethod
-    def _recover_test_mode_return(
+    def _recover_simulated_action_return(
         job: Mapping[str, Any],
         plan_node: Mapping[str, Any],
         *,
         resolved_param: Mapping[str, Any] | None = None,
     ) -> Any:
-        """为历史测试模式回执重建同名输入的物料透传。"""
+        """为模拟动作回执重建同名输入的物料透传并兼容历史标记。"""
 
         return_info = job.get("return_info")
-        if (
-            not isinstance(return_info, Mapping)
-            or return_info.get("test_mode") is not True
+        if not isinstance(return_info, Mapping) or not (
+            return_info.get("action_mode") == "simulate"
+            or return_info.get("test_mode") is True
         ):
             return deepcopy(return_info)
         recovered = deepcopy(dict(return_info))

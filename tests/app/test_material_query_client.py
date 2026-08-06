@@ -1,8 +1,10 @@
-"""Switchable formal-backend / Edge-microbackend material HTTP client."""
+"""OS 本地库存权威（Inventory Authority）的物料 HTTP 客户端合同。"""
 
 from __future__ import annotations
 
 from typing import Any, Dict, List
+
+import pytest
 
 from unilabos.app.web.client import HTTPClient
 from unilabos.config.config import BasicConfig
@@ -32,12 +34,28 @@ class _Session:
         return self.responses.pop(0)
 
 
-def _client(source: str, responses: List[_Response]) -> tuple[HTTPClient, _Session]:
+@pytest.fixture(autouse=True)
+def _local_os_authority(monkeypatch: pytest.MonkeyPatch) -> None:
+    """固定测试中的 OS 主机身份和本地 HTTP 端口。
+
+    参数：``monkeypatch`` 隔离全局配置。返回：无。异常：无；每个用例结束后由
+    pytest 恢复配置。
+    """
+
+    monkeypatch.setattr(BasicConfig, "is_host_mode", True)
+    monkeypatch.setattr(BasicConfig, "port", 8092)
+
+
+def _client(responses: List[_Response]) -> tuple[HTTPClient, _Session]:
+    """建立只查询 OS 本地库存的客户端夹具。
+
+    参数：``responses`` 是本地接口的顺序响应。返回：客户端及记录请求的会话。
+    异常：无。
+    """
+
     client = HTTPClient(
         remote_addr="https://formal.example/api/v1",
         auth="test-token",
-        material_source=source,
-        material_microbackend_addr="http://127.0.0.1:8092",
     )
     session = _Session(responses)
     client._session = session  # type: ignore[assignment]
@@ -45,8 +63,9 @@ def _client(source: str, responses: List[_Response]) -> tuple[HTTPClient, _Sessi
 
 
 def test_microbackend_uses_local_legacy_compat_endpoint() -> None:
+    """证明物料（Material）查询固定请求当前 OS，而不访问正式后端。"""
+
     client, session = _client(
-        "microbackend",
         [_Response({"code": 0, "data": {"nodes": [{"uuid": "edge-a"}]}})],
     )
 
@@ -63,25 +82,27 @@ def test_microbackend_uses_local_legacy_compat_endpoint() -> None:
     ]
 
 
-def test_backend_switch_preserves_original_uuid_query() -> None:
+def test_resource_tree_query_cannot_switch_to_formal_backend() -> None:
+    """证明资源树兼容调用同样只能读取 OS 本地库存权威。"""
+
     client, session = _client(
-        "backend",
-        [_Response({"code": 0, "data": {"nodes": [{"uuid": "cloud-a"}]}})],
+        [_Response({"code": 0, "data": {"nodes": [{"uuid": "local-a"}]}})],
     )
 
-    assert client.resource_tree_get(["cloud-a"], True) == [{"uuid": "cloud-a"}]
+    assert client.resource_tree_get(["local-a"], True) == [{"uuid": "local-a"}]
     assert (
-        session.calls[0]["url"] == "https://formal.example/api/v1/edge/material/query"
+        session.calls[0]["url"] == "http://127.0.0.1:8092/api/v1/edge/material/query"
     )
     assert session.calls[0]["json"] == {
-        "uuids": ["cloud-a"],
+        "uuids": ["local-a"],
         "with_children": True,
     }
 
 
 def test_backend_id_query_and_legacy_resource_get_envelope() -> None:
+    """证明只有显式旧云端资源入口仍保留原正式后端请求形状。"""
+
     client, session = _client(
-        "backend",
         [_Response({"code": 0, "data": [{"id": "rack-a", "uuid": "u-a"}]})],
     )
 
@@ -96,27 +117,23 @@ def test_backend_id_query_and_legacy_resource_get_envelope() -> None:
     }
 
 
-def test_auto_falls_through_empty_microbackend_to_formal_backend() -> None:
-    client, session = _client(
-        "auto",
-        [
-            _Response({"nodes": []}),
-            _Response([{"uuid": "cloud-a"}]),
-        ],
-    )
+def test_empty_local_query_never_falls_through_to_formal_backend() -> None:
+    """证明本地未命中不会把 OS 变成正式后端（Backend）代理。"""
+
+    client, session = _client([_Response({"nodes": []})])
 
     nodes = client.material_query(uuids=["cloud-a"])
 
-    assert nodes == [{"uuid": "cloud-a"}]
+    assert nodes == []
     assert [call["url"] for call in session.calls] == [
         "http://127.0.0.1:8092/api/v1/edge/material/query",
-        "https://formal.example/api/v1/edge/material/query",
     ]
 
 
 def test_microbackend_failure_returns_empty_for_host_memory_fallback() -> None:
+    """证明本地接口失败时返回空集合，允许主机内存兼容路径接管。"""
+
     client, _session = _client(
-        "microbackend",
         [_Response({"detail": "inventory disabled"}, status_code=503)],
     )
 
@@ -126,12 +143,10 @@ def test_microbackend_failure_returns_empty_for_host_memory_fallback() -> None:
 def test_default_slave_client_cannot_open_a_direct_material_channel(
     monkeypatch,
 ) -> None:
+    """证明从节点不能绕过 HostLink 直接打开物料（Material）HTTP 通道。"""
+
     monkeypatch.setattr(BasicConfig, "is_host_mode", False)
-    client = HTTPClient(
-        auth="test-token",
-        material_source="microbackend",
-        material_microbackend_addr="http://127.0.0.1:8092",
-    )
+    client = HTTPClient(auth="test-token")
     session = _Session(
         [_Response({"code": 0, "data": {"nodes": [{"uuid": "forbidden"}]}})]
     )

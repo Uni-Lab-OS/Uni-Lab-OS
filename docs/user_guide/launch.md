@@ -14,25 +14,11 @@ options:
   --registry_path REGISTRY_PATH
                         Path to the registry directory
   --working_dir WORKING_DIR
-                        Path to the working directory
+                        可选运行目录；工作区启动默认 <workspace>/.unilabos
   --backend {ros,simple,automancer}
                         Choose the backend to run with: 'ros', 'simple', or 'automancer'.
   --app_bridges APP_BRIDGES [APP_BRIDGES ...]
-                        Bridges to connect to. Now support 'websocket' and 'fastapi'.
-  --material_source {microbackend,backend,auto}
-                        Host material query source (default: microbackend).
-  --material_service_mode {embedded,external}
-                        Start the DB in this host or use a separate microbackend process.
-  --material_microbackend_addr MATERIAL_MICROBACKEND_ADDR
-                        External microbackend API base (default external address: :8092/api/v1).
-  --edge_scheduler      Enable the host Edge workflow scheduler (default).
-  --no_edge_scheduler   Disable scheduler, device-state and workflow-history services.
-  --edge_inventory_db EDGE_INVENTORY_DB, --material_db EDGE_INVENTORY_DB
-                        Host-only SQLite path (default: ~/.unilabos/inventory.db).
-  --edge_device_state_db EDGE_DEVICE_STATE_DB, --device_state_db EDGE_DEVICE_STATE_DB
-                        Device-state SQLite path (default: ~/.unilabos/device_state.db).
-  --edge_workflow_history_db EDGE_WORKFLOW_HISTORY_DB, --workflow_history_db EDGE_WORKFLOW_HISTORY_DB
-                        Workflow-history SQLite path (default: ~/.unilabos/workflow_history.db).
+                        Bridges to connect to: 'websocket' and 'fastapi'.
   --is_slave            Run the backend as slave node (without host privileges).
   --hostlink_addr HOSTLINK_ADDR
                         Slave 连接的 Host 微后端或 Host 监听地址（默认端口 7302）。
@@ -43,17 +29,17 @@ options:
   --ros_discovery_server ROS_DISCOVERY_SERVER
                         外部 Fast DDS ip:port；传 off 可禁用 Host 托管服务。
   --slave_no_host       显式允许 Slave 离线启动；HostLink 仍在后台重连。
-  --upload_registry     已停用；模板写入请使用独立 template-sync 初始化 Job
+  --use_remote_resource 兼容旧云端版本，复用已上传的远程资源图。
   --config CONFIG       Configuration file path, supports .py format Python config files
   --port PORT           Port for web service information page
   --disable_browser     Disable opening information page on startup
-  --2d_vis              Enable 2D visualization when starting pylabrobot instance
   --visual {rviz,web,disable}
                         Choose visualization tool: rviz, web, or disable
   --ak AK               Access key for laboratory requests
   --sk SK               Secret key for laboratory requests
   --addr ADDR           Laboratory backend address
-  --skip_env_check      Skip environment dependency check on startup
+  --action_mode {real,simulate}
+                        动作执行模式；simulate 不调用真实硬件，但仍推进任务状态。
   --complete_registry   Complete registry information
 ```
 
@@ -66,18 +52,27 @@ Uni-Lab 的启动过程分为以下几个阶段：
 - 解析命令行参数
 - 处理参数格式转换（支持 dash 和 underscore 格式）
 
-### 2. 环境检查阶段 (可选)
+### 2. 环境依赖保障阶段
 
 - 默认进行环境依赖检查并自动安装必需包
-- 使用 `--skip_env_check` 可跳过此步骤
+- 工作区（Workspace）确需跳过时，在 `pyproject.toml` 中显式声明：
+
+  ```toml
+  [tool.unilabos.startup]
+  ensure_dependencies = false
+  ```
+
+  该策略只关闭 Python 环境依赖检查和自动补齐，不改变 ROS2、OPC 或动作
+  （Action）执行模式。
 
 ### 3. 配置文件处理阶段
 
 您可以直接跟随 unilabos 的提示进行，无需查阅本节
 
 - **工作目录设置**：
-  - 如果当前目录以 `unilabos_data` 结尾，则使用当前目录
-  - 否则使用 `当前目录/unilabos_data` 作为工作目录
+  - 工作区（Workspace）启动默认使用 `<workspace>/.unilabos`
+  - 无工作区、无配置启动默认使用 `当前目录/.unilabos`
+  - 新目录不存在但旧 `unilabos_data` 已存在时继续兼容旧目录
   - 可通过 `--working_dir` 指定自定义工作目录
 
 - **配置文件查找顺序**：
@@ -85,24 +80,25 @@ Uni-Lab 的启动过程分为以下几个阶段：
   2. 在工作目录中查找 `local_config.py`
   3. 首次使用时会引导创建配置文件
 
-### 4. 服务器地址配置
+### 4. 旧云端与独立同步子命令地址
 
-支持多种后端环境：
+`--addr` 不改变 OS 的本地后端权威，也不会让 OS 常驻进程代理正式后端
+（Backend）。它只供显式 `--use_remote_resource` 旧云端兼容和独立同步子命令使用：
 
 - `--addr test`：测试环境 (`https://leap-lab.test.bohrium.com/api/v1`)
 - `--addr uat`：UAT 环境 (`https://leap-lab.uat.bohrium.com/api/v1`)
 - `--addr local`：本地环境 (`http://127.0.0.1:48197/api/v1`)
 - 自定义地址：直接指定完整 URL
 
-### 5. 认证配置
+### 5. 旧云端认证配置
 
-- **必需参数**：`--ak` 和 `--sk` 必须同时提供
+- `--ak` 和 `--sk` 只在上述旧云端或独立上传流程中同时提供
 - 命令行参数优先于配置文件中的设置
-- 未提供认证信息会导致启动失败并提示注册实验室
+- 普通本地 OS 启动不需要认证信息，也不会因此连接远端
 
-### 5.1 Host Edge 微后端
+### 5.1 OS 本地后端权威
 
-Host 默认启用完整 Edge 微后端，无需额外参数：
+Host 固定启用 `app/scheduler` 和本地库存权威（Inventory Authority），无需额外参数：
 
 - Edge Scheduler：DAG 拆解、锁和重排；
 - `inventory.db`：物料、关系、预留和账本；
@@ -112,43 +108,27 @@ Host 默认启用完整 Edge 微后端，无需额外参数：
 - ROS 网络策略：由微后端在握手中统一下发 domain、发现范围、静态对端和
   Discovery Server。
 
-微前端默认连接 Host `:8002` 即可使用调度、实体、设备状态和
+前端默认连接 Host `:18003` 即可使用调度、实体、设备状态和
 工作流历史接口：
 
 ```bash
 unilab -g graph.json
 ```
 
-三个数据库路径均可覆盖：
+三个数据库路径由同一个运行目录自动确定：
 
 ```bash
-unilab -g graph.json \
-  --material_db ~/.unilabos/inventory.db \
-  --device_state_db ~/.unilabos/device_state.db \
-  --workflow_history_db ~/.unilabos/workflow_history.db
+unilab -g graph.json --working_dir /data/unilabos-runtime
+# /data/unilabos-runtime/{inventory,device_state,workflow_history}.db
 ```
 
-仅在明确需要降级运行时使用 `--no_edge_scheduler`；这会同时关闭微前端的
-调度、设备状态和工作流历史能力，物料查询服务仍可保留。
+后端权威只在前端连接配置中选择一次：选择 OS 时，全部服务读取 OS 的
+后端形态契约（Backend-shaped Contract）；选择正式后端（Backend）时，前端直接
+请求正式后端。OS 不接受正式后端作为物料（Material）查询上游，也不存在本地未
+命中后自动回源。
 
-查询来源和部署方式均可通过 UniLabOS 启动参数切换：
-
-```bash
-# 强制查询正式后端
-unilab -g graph.json --material_source backend
-
-# 微后端优先，未命中后查询正式后端
-unilab -g graph.json --material_source auto
-
-# 物料微后端作为独立进程运行；Host 只通过 HTTP IPC 访问
-ULAB_INVENTORY_DB=~/.unilabos/inventory.db \
-python -m unilabos.app.scheduler.main
-unilab -g graph.json --material_service_mode external \
-  --material_microbackend_addr http://127.0.0.1:8092/api/v1
-```
-
-Slave 不启动物料服务，也不会打开 `--material_db` 指定的 SQLite；它只能经
-HostLink 请求 Host 微后端持有的物料服务：
+Slave 不启动物料服务，也不会打开运行目录中的 SQLite；它只能经 HostLink 请求
+Host 微后端持有的物料服务：
 
 ```bash
 unilab --is_slave --hostlink_addr 192.168.1.10:7302 -g slave-graph.json
@@ -178,7 +158,8 @@ Host 以 `device_ids` 作为逻辑 Slave 身份：同一设备集合重连不会
 支持两种方式：
 
 - **本地文件**：使用 `-g` 指定图谱文件（支持 JSON 和 GraphML 格式）
-- **远程资源**：不指定本地文件即可
+- **旧云端远程资源**：显式提供 `--use_remote_resource`；普通启动不会因缺少
+  本地文件而隐式连接后端（Backend）
 
 ### 7. 注册表构建
 
@@ -239,29 +220,17 @@ unilab --config path/to/your/config.py
 目前 Uni-Lab 提供以下端云通信方式：
 
 - **websocket**：旧协议和 Edge 独立运行测试使用
-- **edge_control**：生产协议；WebSocket 只传 UUID、命令类别和 ACK，HTTP 传运行参数、反馈和结果
-- **FastAPI**：负责端对云物料更新和 HTTP API
+- **FastAPI**：提供 OS 本地后端形态 HTTP API
 
-生产模式使用后端调度器，不启动 Edge 内置调度微后端，示例：
-
-```bash
-unilab --graph graph.json --backend ros \
-  --app_bridges edge_control fastapi \
-  --addr http://backend:8080/api/v1 \
-  --schedule_addr http://scheduler:8081 \
-  --edge_api_key "$EDGE_API_KEY" \
-  --edge_key lab-edge-01
-```
-
-启用 `edge_control` 时，默认将物料事实来源切换到正式后端，并自动关闭本地
-`EdgeScheduler`。只有显式指定 `--material_source microbackend` 时才保留本地物料服务。
-设备根节点必须配置非空且与后端 Material 一致的 `barcode`，注册才能成功。
+`unilab` 主启动不提供 `edge_control` 或正式后端（Backend）代理模式。旧云端
+资源复用只保留显式 `--use_remote_resource` 遗留兼容入口。
 
 ## 分布式组网
 
 启动 Uni-Lab 时，加入 `--is_slave` 将作为从站，不加将作为主站：
 
-- **主站 (host)**：Edge 微后端持有数据库、监听所有 Slave、下发 ROS 配置，同时负责对云端通信
+- **主站 (host)**：Edge 微后端持有数据库、监听所有 Slave、下发 ROS 配置；
+  普通 OS 模式不连接正式后端（Backend）
 - **从站 (slave)**：不持有数据库文件；物料查询只能经 HostLink 访问 Host 微后端。
   默认必须等待 Host；仅故障排查或隔离测试时用 `--slave_no_host` 离线降级
 
@@ -273,7 +242,8 @@ HostNode 通过 ROS Action 收发。只有 ROS Action endpoint 已匹配的设�
 
 ### 2D 可视化
 
-使用 `--2d_vis` 在 PyLabRobot 实例启动时同时启动 2D 可视化。
+在部署配置的 `BasicConfig` 中设置 `vis_2d_enable = True`，即可在 PyLabRobot
+实例启动时同时启动 2D 可视化。
 
 ### 3D 可视化
 
@@ -318,7 +288,7 @@ unilab --addr https://backend.example/api/v1 \
   --graph path/to/graph.json instance-sync --check_only
 
 # 使用远程资源启动
-unilab --ak your_ak --sk your_sk
+unilab --use_remote_resource --ak your_ak --sk your_sk
 
 # 更新注册表
 unilab --ak your_ak --sk your_sk --complete_registry
@@ -326,8 +296,8 @@ unilab --ak your_ak --sk your_sk --complete_registry
 # 启动从站模式
 unilab --ak your_ak --sk your_sk --is_slave
 
-# 启用可视化
-unilab --ak your_ak --sk your_sk --visual web --2d_vis
+# 启用 3D 可视化
+unilab --ak your_ak --sk your_sk --visual web
 
 # 指定本地信息网页服务端口和禁用自动跳出浏览器
 unilab --ak your_ak --sk your_sk --port 8080 --disable_browser

@@ -1102,14 +1102,17 @@ class HostNode(BaseROS2DeviceNode):
         device_id = item.device_id
         action_name = item.action_name
 
-        if BasicConfig.test_mode:
+        if BasicConfig.action_mode == "simulate":
             action_id = f"/devices/{device_id}/{action_name}"
             self.lab_logger().info(
-                f"[TEST MODE] 模拟执行: {action_id} (job={item.job_id[:8]}), 参数: {str(action_kwargs)[:500]}"
+                f"[SIMULATE ACTION] 模拟执行: {action_id} "
+                f"(job={item.job_id[:8]}), 参数: {str(action_kwargs)[:500]}"
             )
             # 根据注册表 handles 构建模拟返回值
-            mock_return = self._build_test_mode_return(device_id, action_name, action_kwargs)
-            self._handle_test_mode_result(item, action_id, mock_return)
+            mock_return = self._build_simulated_action_return(
+                device_id, action_name, action_kwargs
+            )
+            self._handle_simulated_action_result(item, action_id, mock_return)
             return
 
         if action_type.startswith("UniLabJsonCommand"):
@@ -1159,10 +1162,10 @@ class HostNode(BaseROS2DeviceNode):
         )
         future.add_done_callback(lambda f: self.goal_response_callback(item, action_id, f))
 
-    def _build_test_mode_return(
+    def _build_simulated_action_return(
         self, device_id: str, action_name: str, action_kwargs: Dict[str, Any]
     ) -> Dict[str, Any]:
-        """按冻结动作合同构建测试模式回执。
+        """按冻结动作合同构建模拟动作回执。
 
         同名输出优先透传输入，保证物料（Material）在动作链中保持
         UUID；其余字段按 JSON 结果模式生成确定性值。旧 ``handles``
@@ -1190,7 +1193,10 @@ class HostNode(BaseROS2DeviceNode):
                 return {}
             return None
 
-        mock_return: Dict[str, Any] = {"test_mode": True, "action_name": action_name}
+        mock_return: Dict[str, Any] = {
+            "action_mode": "simulate",
+            "action_name": action_name,
+        }
         action_mappings = self._action_value_mappings.get(device_id, {})
         action_mapping = action_mappings.get(action_name, {})
         handles = action_mapping.get("handles", {})
@@ -1237,17 +1243,19 @@ class HostNode(BaseROS2DeviceNode):
                         mock_return[output_key] = schema_value(property_schema)
         return mock_return
 
-    def _handle_test_mode_result(
+    def _handle_simulated_action_result(
         self, item: "QueueItem", action_id: str, mock_return: Dict[str, Any]
     ) -> None:
         """
-        测试模式下直接构建结果并走正常的结果回调流程（跳过 ROS）
+        模拟动作模式下直接构建结果并走正常的结果回调流程（跳过 ROS）
         """
         job_id = item.job_id
         status = "success"
         return_info = serialize_result_info("", True, mock_return)
 
-        self.lab_logger().info(f"[TEST MODE] Result for {action_id} ({job_id[:8]}): {status}")
+        self.lab_logger().info(
+            f"[SIMULATE ACTION] Result for {action_id} ({job_id[:8]}): {status}"
+        )
 
         from unilabos.app.web.controller import store_job_result
         store_job_result(job_id, status, return_info, mock_return)
@@ -1517,14 +1525,24 @@ class HostNode(BaseROS2DeviceNode):
         )
 
         # 处理资源添加逻辑
-        success = False
+        success = True
         uuid_mapping = {}
-        if len(self.bridges) > 0:
-            from unilabos.app.web.client import HTTPClient, http_client
+        legacy_http_bridge = next(
+            (
+                bridge
+                for bridge in self.bridges
+                if hasattr(bridge, "resource_tree_add")
+            ),
+            None,
+        )
+        if legacy_http_bridge is not None:
 
             resource_start_time = time.time()
-            uuid_mapping = http_client.resource_tree_add(resource_tree_set, mount_uuid, first_add)
-            success = True
+            uuid_mapping = legacy_http_bridge.resource_tree_add(
+                resource_tree_set,
+                mount_uuid,
+                first_add,
+            )
             resource_end_time = time.time()
             self.lab_logger().info(
                 f"[Host Node-Resource] 物料创建上传 {round(resource_end_time - resource_start_time, 5) * 1000} ms"
@@ -1624,29 +1642,43 @@ class HostNode(BaseROS2DeviceNode):
             f"{len(resource_tree_set.all_nodes)} total nodes"
         )
 
-        from unilabos.app.web.client import http_client
-
         uuid_to_trees: Dict[str, List[ResourceTreeInstance]] = collections.defaultdict(list)
         for tree in resource_tree_set.trees:
             uuid_to_trees[tree.root_node.res_content.parent_uuid].append(tree)
 
         for uid, trees in uuid_to_trees.items():
             new_tree_set = ResourceTreeSet(trees)
-            resource_start_time = time.time()
             self.lab_logger().info(
                 f"[Host Node-Resource] 物料 {[root_node.res_content.id for root_node in new_tree_set.root_nodes]} {uid} 挂载 {trees[0].root_node.res_content.parent_uuid} 请求更新上传"
             )
-            uuid_mapping = http_client.resource_tree_add(new_tree_set, uid, False)
-            success = bool(uuid_mapping)
-            resource_end_time = time.time()
-            self.lab_logger().info(
-                f"[Host Node-Resource] 物料更新上传 {round(resource_end_time - resource_start_time, 5) * 1000} ms"
+            legacy_http_bridge = next(
+                (
+                    bridge
+                    for bridge in self.bridges
+                    if hasattr(bridge, "resource_tree_add")
+                ),
+                None,
             )
+            uuid_mapping = {}
+            if legacy_http_bridge is not None:
+                resource_start_time = time.time()
+                uuid_mapping = legacy_http_bridge.resource_tree_add(
+                    new_tree_set,
+                    uid,
+                    False,
+                )
+                resource_end_time = time.time()
+                self.lab_logger().info(
+                    f"[Host Node-Resource] 物料更新上传 {round(resource_end_time - resource_start_time, 5) * 1000} ms"
+                )
             if uuid_mapping:
                 self.lab_logger().info(f"[Host Node-Resource] UUID映射: {len(uuid_mapping)} 个节点")
             # 还需要加入到资源图中，暂不实现，考虑资源图新的获取方式
             response.response = json.dumps(uuid_mapping)
-            self.lab_logger().info(f"[Host Node-Resource] Resource tree update completed, success: {success}")
+            self.lab_logger().info(
+                "[Host Node-Resource] Resource tree update completed, "
+                f"legacy_cloud_sync={legacy_http_bridge is not None}"
+            )
 
     async def _resource_tree_update_callback(self, request: SerialCommand_Request, response: SerialCommand_Response):
         """
@@ -1705,9 +1737,6 @@ class HostNode(BaseROS2DeviceNode):
         """
         self.lab_logger().trace(f"[Host Node] Node info update request received: {request}")
         try:
-            from unilabos.app.communication import get_communication_client
-            from unilabos.app.web.client import HTTPClient, http_client
-
             info = json.loads(request.command)
             if "SYNC_SLAVE_NODE_INFO" in info:
                 info = info["SYNC_SLAVE_NODE_INFO"]
@@ -1751,7 +1780,18 @@ class HostNode(BaseROS2DeviceNode):
                 devices_config = info.pop("devices_config")
                 registry_config = info.pop("registry_config")
                 if registry_config:
-                    http_client.resource_registry({"resources": registry_config})
+                    legacy_registry_bridge = next(
+                        (
+                            bridge
+                            for bridge in self.bridges
+                            if hasattr(bridge, "resource_registry")
+                        ),
+                        None,
+                    )
+                    if legacy_registry_bridge is not None:
+                        legacy_registry_bridge.resource_registry(
+                            {"resources": registry_config}
+                        )
 
                     # 存储 slave 的 registry_config,用于后续 SYNC_SLAVE_NODE_INFO 索引
                     for reg_name, reg_data in registry_config.items():
@@ -1827,11 +1867,17 @@ class HostNode(BaseROS2DeviceNode):
         resources = [convert_from_ros_msg(resource) for resource in request.resources]
         self.lab_logger().info(f"[Host Node-Resource] Add request received: {len(resources)} resources")
 
-        success = False
-        if len(self.bridges) > 0:  # 边的提交待定
-            from unilabos.app.web.client import HTTPClient, http_client
-
-            r = http_client.resource_add(add_schema(resources))
+        success = True
+        legacy_resource_bridge = next(
+            (
+                bridge
+                for bridge in self.bridges
+                if hasattr(bridge, "resource_add")
+            ),
+            None,
+        )
+        if legacy_resource_bridge is not None:
+            r = legacy_resource_bridge.resource_add(add_schema(resources))
             success = bool(r)
 
         response.success = success
@@ -1913,10 +1959,18 @@ class HostNode(BaseROS2DeviceNode):
         """
         self.lab_logger().info(f"[Host Node-Resource] Delete request for ID: {request.id}")
 
-        success = False
-        if len(self.bridges) > 0:
+        success = True
+        legacy_resource_bridge = next(
+            (
+                bridge
+                for bridge in self.bridges
+                if hasattr(bridge, "resource_delete")
+            ),
+            None,
+        )
+        if legacy_resource_bridge is not None:
             try:
-                r = self.bridges[-1].resource_delete(request.id)
+                r = legacy_resource_bridge.resource_delete(request.id)
                 success = bool(r)
             except Exception as e:
                 self.lab_logger().error(f"[Host Node-Resource] Error deleting resource: {str(e)}")
@@ -1941,10 +1995,18 @@ class HostNode(BaseROS2DeviceNode):
         resources = [convert_from_ros_msg(resource) for resource in request.resources]
         self.lab_logger().info(f"[Host Node-Resource] Update request received: {len(resources)} resources")
 
-        success = False
-        if len(self.bridges) > 0:
+        success = True
+        legacy_resource_bridge = next(
+            (
+                bridge
+                for bridge in self.bridges
+                if hasattr(bridge, "resource_update")
+            ),
+            None,
+        )
+        if legacy_resource_bridge is not None:
             try:
-                r = self.bridges[-1].resource_update(add_schema(resources))
+                r = legacy_resource_bridge.resource_update(add_schema(resources))
                 success = bool(r)
             except Exception as e:
                 self.lab_logger().error(f"[Host Node-Resource] Error updating resources: {str(e)}")
@@ -2346,16 +2408,14 @@ class HostNode(BaseROS2DeviceNode):
         ],
     )
     async def discard_resource(self, resource: ResourceSlot, device_id: DeviceSlot) -> dict:
-        """
-        废弃单个台面物料。
+        """在 OS 本地库存权威（Inventory Authority）中废弃单个台面物料。
 
         与 apply_deduct_resource 对称（扣减→挂载到设备 / 废弃→从设备移除并销毁）：接收单个
-        已存在物料（前端用节点选择器选择，或图 handle 传入，框架在 send_goal 已解析为 PLR
-        实例）与所属设备，先调用云端 POST /edge/material/bench/discard 执行销毁（实验室归属
-        由认证上下文确定），成功后再通知对应边缘设备本地移除该物料。物料被销毁后无图输出 handle。
+        已存在物料（前端用节点选择器选择，或图 handle 传入，框架在 send_goal 已解析为
+        PLR 实例）与所属设备，先原子更新本地库存（Inventory），再通知对应边缘设备
+        移除该物料。OS 不连接正式后端（Backend）。
 
-        说明：物料无法从实例反查所属设备（host 仅维护 device→namespace/在线状态，云端查询
-        with_children 也不含父链/设备），故设备需显式指定，与 apply_deduct_resource 对称。
+        说明：设备需显式指定，与 ``apply_deduct_resource`` 对称。
 
         Args:
             resource[废弃物料]: 要废弃的单个台面物料（须带 unilabos_uuid）。
@@ -2373,20 +2433,30 @@ class HostNode(BaseROS2DeviceNode):
             f"[discard_resource] 废弃物料 name={getattr(resource, 'name', '')} "
             f"barcode={barcode} uuid={res_uuid} device={edge_id}"
         )
-        from unilabos.app.web.client import http_client
+        from unilabos.app.scheduler.integration import get_inventory_service
 
-        res = http_client.material_bench_discard([res_uuid])
-        code = res.get("code") if isinstance(res, dict) else None
-        if code != 0:
-            raise ValueError(f"台面物料废弃失败：{res}")
-        # 云端销毁成功后，通知对应边缘设备本地移除（卸载父节点 + tracker 移除）
+        inventory = get_inventory_service()
+        if inventory is None:
+            raise RuntimeError("废弃失败：OS 本地库存权威尚未初始化")
+        discarded = inventory.discard_instance(
+            str(res_uuid),
+            reason="host_node.discard_resource",
+            actor="host_node",
+        )
+        # 本地事务提交后，通知对应边缘设备移除（卸载父节点 + tracker 移除）。
         notified = self.notify_resource_tree_update(edge_id, "remove", [res_uuid])
         if notified is not True:
             self.lab_logger().warning(
-                f"[discard_resource] 云端已销毁 uuid={res_uuid}，但通知设备 {edge_id} 本地移除未成功"
-                f"（notified={notified}），边缘侧将于下次同步对齐"
+                f"[discard_resource] 本地库存已废弃 uuid={res_uuid}，但通知设备 "
+                f"{edge_id} 移除未成功（notified={notified}）"
             )
-        return {"code": 0, "uuids": [res_uuid], "device_id": edge_id}
+        return {
+            "code": 0,
+            "uuids": [res_uuid],
+            "device_id": edge_id,
+            "status": discarded.get("status"),
+            "version": discarded.get("version"),
+        }
 
     async def _do_transfer_resource(
         self,

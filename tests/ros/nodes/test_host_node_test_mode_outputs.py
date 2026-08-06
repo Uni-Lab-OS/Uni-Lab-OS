@@ -1,4 +1,4 @@
-"""Host 测试模式动作结果的合同化模拟回归。"""
+"""Host 模拟动作结果的合同化回归。"""
 
 from __future__ import annotations
 
@@ -8,7 +8,7 @@ from unilabos.ros.nodes.presets.host_node import HostNode
 def test_json_command_mock_preserves_material_passthrough_outputs() -> None:
     """JSON 命令模拟结果按输出合同透传同名物料并填充标量。
 
-    参数：无。返回：无；断言测试模式不会丢失后续调度所需的物料 UUID。异常：
+    参数：无。返回：无；断言模拟动作不会丢失后续调度所需的物料 UUID。异常：
     合同投影或结果生成回归时由 pytest 报告。
     """
 
@@ -40,14 +40,14 @@ def test_json_command_mock_preserves_material_passthrough_outputs() -> None:
         }
     }
 
-    result = host._build_test_mode_return(
+    result = host._build_simulated_action_return(
         "robot",
         "pick",
         {"resource": {"uuid": "material-1"}, "site": "A1"},
     )
 
     assert result == {
-        "test_mode": True,
+        "action_mode": "simulate",
         "action_name": "pick",
         "command_id": "",
         "state": "SUCCEEDED",
@@ -79,7 +79,7 @@ def test_handle_mock_uses_data_key_when_handler_key_is_empty() -> None:
         }
     }
 
-    result = host._build_test_mode_return(
+    result = host._build_simulated_action_return(
         "robot",
         "place",
         {"resource": {"uuid": "material-2"}},

@@ -333,7 +333,6 @@ def test_template_sync_command_builds_complete_registry_without_starting_edge() 
                 "/registry-a",
                 "--devices",
                 "/drivers-a",
-                "--skip_env_check",
                 "template-sync",
             ]
         )
