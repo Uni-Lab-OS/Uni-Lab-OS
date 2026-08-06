@@ -44,7 +44,7 @@ class _ToggleInventory:
         self,
         workflow_uuid: str,
         requirements: dict[str, Any],
-    ) -> None:
+    ) -> dict[str, Any]:
         """模拟 gaojing 整图单事务短期预留。
 
         参数：``workflow_uuid`` 是工作流任务（WorkflowTask）身份；
@@ -55,6 +55,13 @@ class _ToggleInventory:
         self.reserve_calls.append((workflow_uuid, requirements))
         if not self.available:
             raise InsufficientStock("测试固定物料已被其他任务预留")
+        return {
+            "workflow_id": workflow_uuid,
+            "reserved_nodes": list(requirements),
+            "allocations": {
+                node_uuid: [MATERIAL_UUID] for node_uuid in requirements
+            },
+        }
 
     def consume_reservation(self, workflow_uuid: str, node_uuid: str) -> None:
         """保留既有调度器调用面；参数是任务和节点身份，返回无。"""
@@ -82,7 +89,7 @@ def store(tmp_path: Path) -> Iterator[WorkflowStore]:
         opened_store.close()
 
 
-def _source_plan_node() -> dict[str, Any]:
+def _source_plan_node(*, automatic: bool = False) -> dict[str, Any]:
     """构造固定 existing 物料来源的协调器计划节点。
 
     参数：无。返回：包含冻结选择器和唯一实例需求的计划对象。异常：无。
@@ -95,8 +102,8 @@ def _source_plan_node() -> dict[str, Any]:
         "param": {
             "mode": "existing",
             "resource_template_uuid": TEMPLATE_UUID,
-            "material_uuid": MATERIAL_UUID,
-            "mount": None,
+            "material_uuid": None if automatic else MATERIAL_UUID,
+            "mount": {"uuid": "72000000-0000-4000-8000-000000000001"},
             "site": None,
             "slot_range": None,
             "flow_role": "primary_sample",
@@ -104,11 +111,32 @@ def _source_plan_node() -> dict[str, Any]:
         "execution_policy": {},
         "inputs": [],
         "source_handle_uuids": [],
-        "material_requirements": [{"instance_uuid": MATERIAL_UUID}],
+        "material_requirements": (
+            [
+                {
+                    "template_id": TEMPLATE_UUID,
+                    "mount_uuid": "72000000-0000-4000-8000-000000000001",
+                    "site_uuid": "",
+                    "slot_uuids": [],
+                }
+            ]
+            if automatic
+            else [{"instance_uuid": MATERIAL_UUID}]
+        ),
+        "material_binding_targets": (
+            [
+                {
+                    "workflow_node_uuid": ACTION_NODE_UUID,
+                    "param_key": "plate",
+                }
+            ]
+            if automatic
+            else []
+        ),
     }
 
 
-def _action_plan_node() -> dict[str, Any]:
+def _action_plan_node(*, automatic: bool = False) -> dict[str, Any]:
     """构造来源之后唯一普通设备动作计划节点。
 
     参数：无。返回：带固定执行器和完整动作合同的计划对象。异常：无。
@@ -121,7 +149,7 @@ def _action_plan_node() -> dict[str, Any]:
         "device_id": "reactor-a",
         "action_name": "distribute",
         "action_type": "UniLabJsonCommand",
-        "param": {"plate": {"uuid": MATERIAL_UUID}},
+        "param": {} if automatic else {"plate": {"uuid": MATERIAL_UUID}},
         "param_schema": {
             "type": "object",
             "properties": {"goal": {"type": "object", "additionalProperties": True}},
@@ -133,7 +161,12 @@ def _action_plan_node() -> dict[str, Any]:
     }
 
 
-def _seed_task(store: WorkflowStore, *, with_action: bool) -> dict[str, Any]:
+def _seed_task(
+    store: WorkflowStore,
+    *,
+    with_action: bool,
+    automatic: bool = False,
+) -> dict[str, Any]:
     """持久化含来源协调责任的待处理工作流任务。
 
     参数：``store`` 是唯一写权威；``with_action`` 决定准入后是否需要物理派发。
@@ -147,9 +180,9 @@ def _seed_task(store: WorkflowStore, *, with_action: bool) -> dict[str, Any]:
         description=None,
         meta_data={},
     )
-    nodes = [_source_plan_node()]
+    nodes = [_source_plan_node(automatic=automatic)]
     if with_action:
-        nodes.append(_action_plan_node())
+        nodes.append(_action_plan_node(automatic=automatic))
     execution_plan = {
         "version": 1,
         "run_mode": "normal",
@@ -316,3 +349,91 @@ def test_source_admission_commits_before_ordinary_action_dispatch(
         )
     ]
     assert dispatcher.dispatched[0]["job_id"] == ACTION_JOB_UUID
+
+
+def test_automatic_source_projects_selected_material_before_dispatch(
+    store: WorkflowStore,
+) -> None:
+    """自动来源应先把库存选择结果写入原动作作业，再越过派发边界。
+
+    参数：``store`` 是隔离任务权威。返回无；断言物料来源解析作业
+    （MaterialSourceResolutionJob）和工作流节点作业（WorkflowNodeJob）使用同一
+    次准入结果，派发参数包含具体物料（Material）UUID。异常：任何临时作业、
+    空参数派发或计划改写都会使断言失败。
+    """
+
+    task = _seed_task(store, with_action=True, automatic=True)
+    inventory = _ToggleInventory(available=True)
+    dispatcher = RecordingDispatcher()
+    scheduler = EdgeScheduler(dispatcher=dispatcher, inventory=inventory)
+    bridge = TaskSchedulerBridge(store, scheduler=scheduler)
+    try:
+        aggregate = bridge.submit(task)
+    finally:
+        bridge.close()
+
+    source_job, action_job = aggregate["jobs"]
+    assert source_job["return_info"] == {
+        "material": {
+            "uuid": MATERIAL_UUID,
+            "resource_template_uuid": TEMPLATE_UUID,
+        }
+    }
+    assert action_job["param"] == {"plate": {"uuid": MATERIAL_UUID}}
+    assert dispatcher.dispatched[0]["action_args"] == {
+        "plate": {"uuid": MATERIAL_UUID}
+    }
+
+
+def test_successful_material_task_releases_source_reservations(
+    store: WorkflowStore,
+) -> None:
+    """带来源任务成功后必须释放协调器持有的短期预留。
+
+    参数：``store`` 是隔离任务权威。返回无；断言最后一个普通动作成功投影后，
+    调度桥以同一工作流任务（WorkflowTask）身份幂等释放物料来源
+    （MaterialSource）预留，避免阻塞后续自动分配。
+    """
+
+    task = _seed_task(store, with_action=True, automatic=True)
+    inventory = _ToggleInventory(available=True)
+    scheduler = EdgeScheduler(
+        dispatcher=RecordingDispatcher(),
+        inventory=inventory,
+    )
+    bridge = TaskSchedulerBridge(store, scheduler=scheduler)
+    try:
+        bridge.submit(task)
+        scheduler.on_job_finished(ACTION_JOB_UUID, True, {"success": True})
+    finally:
+        bridge.close()
+
+    assert store.get_task(TASK_UUID)["status"] == "succeeded"
+    assert inventory.release_calls == [(TASK_UUID, "workflow_succeeded")]
+
+
+def test_failed_material_task_releases_source_reservations(
+    store: WorkflowStore,
+) -> None:
+    """带来源任务失败后也必须释放协调器持有的短期预留。
+
+    参数：``store`` 是隔离任务权威。返回无；断言普通设备动作明确失败并把父任务
+    推进到失败终态后，调度桥以同一工作流任务（WorkflowTask）身份释放物料来源
+    （MaterialSource）预留，避免一次设备故障永久占住自动分配候选。
+    """
+
+    task = _seed_task(store, with_action=True, automatic=True)
+    inventory = _ToggleInventory(available=True)
+    scheduler = EdgeScheduler(
+        dispatcher=RecordingDispatcher(),
+        inventory=inventory,
+    )
+    bridge = TaskSchedulerBridge(store, scheduler=scheduler)
+    try:
+        bridge.submit(task)
+        scheduler.on_job_finished(ACTION_JOB_UUID, False, {"success": False})
+    finally:
+        bridge.close()
+
+    assert store.get_task(TASK_UUID)["status"] == "failed"
+    assert inventory.release_calls == [(TASK_UUID, "workflow_failed")]

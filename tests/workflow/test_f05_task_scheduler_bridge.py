@@ -20,6 +20,10 @@ TASK_UUID = "21000000-0000-4000-8000-000000000001"
 NODE_UUID = "31000000-0000-4000-8000-000000000001"
 JOB_UUID = "41000000-0000-4000-8000-000000000001"
 MATERIAL_UUID = "51000000-0000-4000-8000-000000000001"
+SECOND_NODE_UUID = "31000000-0000-4000-8000-000000000002"
+SECOND_JOB_UUID = "41000000-0000-4000-8000-000000000002"
+SOURCE_HANDLE_UUID = "61000000-0000-4000-8000-000000000001"
+TARGET_HANDLE_UUID = "61000000-0000-4000-8000-000000000002"
 _CREATED_AT = "2026-08-05T00:00:00Z"
 
 
@@ -169,6 +173,163 @@ def _bridge(store: WorkflowStore, scheduler: EdgeScheduler) -> Any:
     # ``bridge_module`` 是本轮新增的唯一生产模块接缝。
     bridge_module = importlib.import_module("unilabos.workflow.task_scheduler_bridge")
     return bridge_module.TaskSchedulerBridge(store, scheduler=scheduler)
+
+
+def _seed_recoverable_test_mode_task(store: WorkflowStore) -> None:
+    """持久化一个已完成取料、待执行放料的测试模式任务。
+
+    参数：``store`` 是隔离工作流存储（WorkflowStore）。返回无；
+    任务的首个回执故意缺少同名物料（Material）输出，模拟旧
+    ``--test_mode`` 进程中断后的持久事实。
+    """
+
+    store.create_workflow(
+        workflow_uuid=WORKFLOW_UUID,
+        name="F05.3-C 可恢复调度桥",
+        tags=[],
+        description=None,
+        meta_data={},
+    )
+    resource_schema = {
+        "type": "object",
+        "properties": {"uuid": {"type": "string", "format": "uuid"}},
+        "required": ["uuid"],
+        "additionalProperties": False,
+    }
+    execution_plan = {
+        "version": 1,
+        "run_mode": "normal",
+        "target_node_uuid": None,
+        "nodes": [
+            {
+                "uuid": NODE_UUID,
+                "kind": "device_action",
+                "device_id": "robot-a",
+                "action_name": "pick",
+                "action_type": "UniLabJsonCommand",
+                "param": {"resource": {"uuid": MATERIAL_UUID}},
+                "param_schema": {
+                    "type": "object",
+                    "properties": {
+                        "goal": {
+                            "type": "object",
+                            "properties": {"resource": resource_schema},
+                        },
+                        "result": {
+                            "type": "object",
+                            "properties": {"resource": resource_schema},
+                        },
+                    },
+                },
+                "material_requirements": [],
+            },
+            {
+                "uuid": SECOND_NODE_UUID,
+                "kind": "device_action",
+                "device_id": "robot-a",
+                "action_name": "place",
+                "action_type": "UniLabJsonCommand",
+                "param": {},
+                "param_schema": {
+                    "type": "object",
+                    "properties": {
+                        "goal": {
+                            "type": "object",
+                            "properties": {"resource": resource_schema},
+                        }
+                    },
+                },
+                "material_requirements": [],
+            },
+        ],
+        "handles": [
+            {
+                "uuid": SOURCE_HANDLE_UUID,
+                "node_uuid": NODE_UUID,
+                "io_type": "source",
+                "handle_key": "resource",
+                "data_key": "resource",
+                "data_source": "executor",
+                "type": "ResourceSlot",
+                "required": False,
+            },
+            {
+                "uuid": TARGET_HANDLE_UUID,
+                "node_uuid": SECOND_NODE_UUID,
+                "io_type": "target",
+                "handle_key": "resource",
+                "data_key": "resource",
+                "data_source": "goal",
+                "type": "ResourceSlot",
+                "required": True,
+            },
+        ],
+        "edges": [
+            {
+                "uuid": "71000000-0000-4000-8000-000000000001",
+                "source_node_uuid": NODE_UUID,
+                "target_node_uuid": SECOND_NODE_UUID,
+                "source_handle_uuid": SOURCE_HANDLE_UUID,
+                "target_handle_uuid": TARGET_HANDLE_UUID,
+                "source_data_key": "resource",
+                "target_data_key": "resource",
+                "source_type": "ResourceSlot",
+                "target_type": "ResourceSlot",
+            }
+        ],
+    }
+    with store.transaction() as connection:
+        connection.execute(
+            """
+            INSERT INTO workflow_task(
+                uuid, create_time, update_time, deleted_at, description,
+                meta_data, workflow_uuid, status, workflow_snapshot,
+                execution_plan, run_mode, target_node_uuid, control_status,
+                cleanup_status, trace_context, input, output, error_info
+            ) VALUES (?, ?, ?, NULL, NULL, '{}', ?, 'running', '{}', ?,
+                      'normal', NULL, 'active', 'none', '{}', '{}', '{}', '[]')
+            """,
+            (
+                TASK_UUID,
+                _CREATED_AT,
+                _CREATED_AT,
+                WORKFLOW_UUID,
+                json.dumps(execution_plan),
+            ),
+        )
+        for job_uuid, node_uuid, status, param, return_info in (
+            (
+                JOB_UUID,
+                NODE_UUID,
+                "succeeded",
+                {"resource": {"uuid": MATERIAL_UUID}},
+                {"action_name": "pick", "test_mode": True},
+            ),
+            (SECOND_JOB_UUID, SECOND_NODE_UUID, "pending", {}, {}),
+        ):
+            connection.execute(
+                """
+                INSERT INTO workflow_node_job(
+                    uuid, create_time, update_time, deleted_at, description,
+                    meta_data, workflow_task_uuid, workflow_node_uuid,
+                    feedback_sequence, topological_index, executor_kind,
+                    execution_policy, execution_timeout_seconds, status, attempt,
+                    param, feedback_data, return_info, control_data, error_info
+                ) VALUES (?, ?, ?, NULL, NULL, '{}', ?, ?, 0, ?,
+                          'device_action', '{}', 0, ?, 1, ?, '{}', ?, '{}', '[]')
+                """,
+                (
+                    job_uuid,
+                    _CREATED_AT,
+                    _CREATED_AT,
+                    TASK_UUID,
+                    node_uuid,
+                    0 if node_uuid == NODE_UUID else 1,
+                    status,
+                    json.dumps(param),
+                    json.dumps(return_info),
+                ),
+            )
 
 
 def test_persisted_task_compiles_and_dispatches_with_stable_identities(
@@ -388,3 +549,33 @@ def test_close_is_idempotent_and_unregisters_scheduler_listeners(
 
     assert scheduler._job_pre_dispatch_listeners == []
     assert scheduler._job_finished_listeners == []
+
+
+def test_restart_recovers_succeeded_test_mode_passthrough_without_replay(
+    store: WorkflowStore,
+) -> None:
+    """重启恢复只派发待处理作业，且可重建旧测试模式物料透传。
+
+    参数：``store`` 是隔离任务权威。返回无；断言已成功的取料
+    作业不重放，放料作业取得同一物料 UUID。
+    """
+
+    _seed_recoverable_test_mode_task(store)
+    dispatcher = RecordingDispatcher()
+    scheduler = EdgeScheduler(dispatcher=dispatcher)
+    bridge = _bridge(store, scheduler)
+    try:
+        recovered = bridge.recover_active_tasks()
+    finally:
+        bridge.close()
+
+    assert [item["task"]["uuid"] for item in recovered] == [TASK_UUID]
+    assert [item["job_id"] for item in dispatcher.dispatched] == [SECOND_JOB_UUID]
+    assert dispatcher.dispatched[0]["action_args"]["resource"] == {
+        "uuid": MATERIAL_UUID
+    }
+    assert store.get_job(JOB_UUID)["status"] == "succeeded"
+    assert store.get_job(SECOND_JOB_UUID)["status"] == "dispatched"
+    assert store.get_job(SECOND_JOB_UUID)["param"]["resource"] == {
+        "uuid": MATERIAL_UUID
+    }

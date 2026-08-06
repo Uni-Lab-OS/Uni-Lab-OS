@@ -95,6 +95,23 @@ def _make_backend(auto_complete: bool = True):
 
 
 class TestBackendAlone:
+    def test_default_host_getter_waits_for_host_startup(self, monkeypatch):
+        """默认执行后端应等待 Host 节点完成启动，不应在启动窗口误判失败。"""
+
+        from unilabos.ros.nodes.presets.host_node import HostNode
+
+        observed_timeouts = []
+        expected = object()
+
+        def get_instance(timeout):
+            observed_timeouts.append(timeout)
+            return expected
+
+        monkeypatch.setattr(HostNode, "get_instance", get_instance)
+
+        assert JobExecutionBackend._default_host_getter() is expected
+        assert observed_timeouts == [30]
+
     def test_dispatch_sends_goal(self):
         backend, host = _make_backend(auto_complete=False)
         try:
@@ -143,6 +160,35 @@ class TestBackendAlone:
             assert backend.wait_idle()
             # 第 4 参 suc_type：normal / skip / operator_intervention（异常决策来源）
             assert received == [("j1", True, {"volume": 7}, "normal")]
+        finally:
+            backend.stop()
+
+    def test_explicit_device_business_failure_is_not_reported_as_job_success(self):
+        backend, host = _make_backend(auto_complete=False)
+        received: List[tuple] = []
+        backend.add_job_finished_listener(lambda *args: received.append(args))
+        try:
+            backend.dispatch(build_job_start_payload(
+                job_id="j-business-failed", task_id="t", workflow_id="wf", node_id="A",
+                device_id="d1", action_name="run", action_type="goal", action_args={},
+            ))
+            assert backend.wait_idle()
+            rejection = {
+                "success": False,
+                "state": "REJECTED",
+                "message": "设备拒绝执行",
+            }
+            backend.publish_job_status(
+                {},
+                host.sent_goals[0],
+                "success",
+                serialize_result_info("", True, rejection),
+            )
+            assert backend.wait_idle()
+
+            assert received == [
+                ("j-business-failed", False, rejection, "normal")
+            ]
         finally:
             backend.stop()
 

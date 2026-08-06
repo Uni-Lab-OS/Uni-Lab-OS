@@ -230,6 +230,49 @@ def test_context_propagates_across_carrier_and_thread(recorder):
     assert remote_server.parent_span_id == root.span_id
 
 
+def test_workflow_execution_identity_reaches_driver_thread_and_is_restored():
+    job_uuid = "6199359e-c8e4-4a86-b709-1c50fc192ff7"
+    task_uuid = "89326717-9448-47ce-825a-e679d6556c27"
+
+    assert tracing.capture_workflow_execution_identity() == {}
+    with tracing.attach_workflow_execution_identity(job_uuid, task_uuid):
+        with ThreadPoolExecutor(max_workers=1) as executor:
+            captured = tracing.submit_with_context(
+                executor,
+                tracing.capture_workflow_execution_identity,
+            ).result()
+
+        assert captured == {
+            "node_job_uuid": job_uuid,
+            "task_uuid": task_uuid,
+        }
+
+    assert tracing.capture_workflow_execution_identity() == {}
+
+
+def test_await_with_context_restores_workflow_identity_for_each_coroutine_step():
+    job_uuid = "6199359e-c8e4-4a86-b709-1c50fc192ff7"
+    task_uuid = "89326717-9448-47ce-825a-e679d6556c27"
+
+    async def capture_after_yield():
+        await asyncio.sleep(0)
+        return tracing.capture_workflow_execution_identity()
+
+    async def exercise():
+        with tracing.attach_workflow_execution_identity(job_uuid, task_uuid):
+            contextual_awaitable = tracing.await_with_context(
+                None,
+                capture_after_yield(),
+            )
+        assert tracing.capture_workflow_execution_identity() == {}
+        return await contextual_awaitable
+
+    assert asyncio.run(exercise()) == {
+        "node_job_uuid": job_uuid,
+        "task_uuid": task_uuid,
+    }
+
+
 def test_edge_http_data_plane_injects_client_span_context(recorder):
     from unilabos.app.edge_control.http import EdgeDataPlane
     from unilabos.app.edge_control.store import StoredJob

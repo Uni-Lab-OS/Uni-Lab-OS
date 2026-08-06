@@ -14,14 +14,15 @@ from pydantic import (
     BaseModel,
     ConfigDict,
     Field,
-    JsonValue as PydanticJsonValue,
     StringConstraints,
     TypeAdapter,
     model_validator,
 )
+from pydantic import (
+    JsonValue as PydanticJsonValue,
+)
 
 from unilabos.app.scheduler.inventory.domain import InstanceState, ReservationState
-
 
 JsonValue: TypeAlias = PydanticJsonValue
 JsonObject: TypeAlias = Dict[str, JsonValue]
@@ -83,16 +84,33 @@ class MaterialRequirementPayload(WireModel):
     unit: str = ""
     instance_uuid: Optional[NonEmptyString] = None
     barcode: Optional[NonEmptyString] = None
+    mount_uuid: Optional[NonEmptyString] = None
+    site_uuid: Optional[NonEmptyString] = None
+    slot_uuids: List[NonEmptyString] = Field(default_factory=list)
 
     @model_validator(mode="after")
     def validate_selector(self) -> "MaterialRequirementPayload":
         instance_selectors = [self.instance_uuid, self.barcode]
         lot_selectors = [self.template_id, self.lot_id]
         if any(instance_selectors):
+            if self.mount_uuid or self.site_uuid or self.slot_uuids:
+                raise ValueError("fixed instance and site selectors cannot be combined")
             if sum(value is not None for value in instance_selectors) != 1:
                 raise ValueError("exactly one of instance_uuid or barcode is required")
             if self.quantity != 0:
                 raise ValueError("instance requirements cannot include quantity")
+            return self
+        if self.mount_uuid or self.site_uuid or self.slot_uuids:
+            if not self.mount_uuid or not self.template_id or self.lot_id:
+                raise ValueError(
+                    "site allocation requires mount_uuid and template_id only"
+                )
+            if self.site_uuid and self.slot_uuids:
+                raise ValueError("site_uuid and slot_uuids are mutually exclusive")
+            if len(set(self.slot_uuids)) != len(self.slot_uuids):
+                raise ValueError("slot_uuids cannot contain duplicates")
+            if self.quantity != 0:
+                raise ValueError("site allocation cannot include quantity")
             return self
         if sum(value is not None for value in lot_selectors) != 1:
             raise ValueError("exactly one of template_id or lot_id is required")

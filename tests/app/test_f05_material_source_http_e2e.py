@@ -82,6 +82,8 @@ def _create_material(
     resource_template_uuid: str,
     barcode: str,
     name: str,
+    parent_uuid: str | None = None,
+    site_uuid: str | None = None,
 ) -> str:
     """通过公开 HTTP 创建具体物料（Material）。
 
@@ -89,13 +91,18 @@ def _create_material(
     异常：接口未返回 201/成功 envelope 时由断言失败，不直接写库存数据库。
     """
 
+    payload = {
+        "resource_template_uuid": resource_template_uuid,
+        "barcode": barcode,
+        "name": name,
+    }
+    if parent_uuid is not None:
+        payload["parent_uuid"] = parent_uuid
+    if site_uuid is not None:
+        payload["site_placement"] = {"action": "place", "site_uuid": site_uuid}
     response = client.post(
         "/api/v1/materials",
-        json={
-            "resource_template_uuid": resource_template_uuid,
-            "barcode": barcode,
-            "name": name,
-        },
+        json=payload,
     )
     assert response.status_code == 201
     assert response.json()["code"] == 0
@@ -110,6 +117,9 @@ def _apply_workflow_graph(
     material_uuid: str,
     device_material_uuid: str,
     mode: str,
+    automatic: bool = False,
+    site_uuid: str | None = None,
+    slot_uuids: list[str] | None = None,
 ) -> str:
     """通过共享正式夹具保存本轮物料来源工作流图。
 
@@ -126,6 +136,9 @@ def _apply_workflow_graph(
         material_uuid=material_uuid,
         device_material_uuid=device_material_uuid,
         mode=mode,
+        automatic=automatic,
+        site_uuid=site_uuid,
+        slot_uuids=slot_uuids,
     )
 
 

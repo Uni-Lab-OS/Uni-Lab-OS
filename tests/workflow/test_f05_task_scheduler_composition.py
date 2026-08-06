@@ -138,6 +138,9 @@ def test_local_composition_builds_bridge_from_existing_scheduler_inventory(
             captured["store"] = store
             captured["scheduler"] = scheduler
 
+        def recover_active_tasks(self) -> None:
+            """满足组合根的启动恢复合同；本测试不构造活动任务。"""
+
         def close(self) -> None:
             """满足服务清理合同；参数无，返回无。"""
 

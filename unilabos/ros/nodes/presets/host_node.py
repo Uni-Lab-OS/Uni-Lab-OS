@@ -5,6 +5,7 @@ import threading
 import time
 import traceback
 import uuid
+from copy import deepcopy
 
 from unilabos.utils.tools import fast_dumps_str as _fast_dumps_str, fast_loads as _fast_loads
 from dataclasses import dataclass, field
@@ -79,7 +80,12 @@ from unilabos.ros.msgs.message_converter import (
     convert_to_ros_msg,
     msg_converter_manager,
 )
-from unilabos.ros.nodes.base_device_node import BaseROS2DeviceNode, ROS2DeviceNode, DeviceNodeResourceTracker
+from unilabos.ros.nodes.base_device_node import (
+    BaseROS2DeviceNode,
+    DeviceNodeResourceTracker,
+    ROS2DeviceNode,
+    _stable_resource_uuid,
+)
 from unilabos.ros.nodes.presets.controller_node import ControllerNode
 from unilabos.utils import logger
 from unilabos.utils.exception import DeviceClassInvalid
@@ -139,6 +145,14 @@ class TransferManualReturn(TypedDict):
     mount_resource: List[List[ResourceDictType]]
     target_device: str
     site: str
+
+
+def _dump_resource_slot(resource: Any) -> List[List[ResourceDictType]]:
+    """序列化 PLR 物料或设备型父资源原始映射。"""
+
+    if isinstance(resource, dict):
+        return [[dict(resource)]]
+    return ResourceTreeSet.from_plr_resources([resource]).dump()
 
 
 class TestLatencyReturn(TypedDict):
@@ -1148,12 +1162,34 @@ class HostNode(BaseROS2DeviceNode):
     def _build_test_mode_return(
         self, device_id: str, action_name: str, action_kwargs: Dict[str, Any]
     ) -> Dict[str, Any]:
-        """
-        根据注册表 handles 的 output 定义构建测试模式的模拟返回值
+        """按冻结动作合同构建测试模式回执。
 
-        根据 data_key 中 @flatten 的层数决定嵌套数组层数，叶子值为空字典。
-        例如: "vessel" → {}, "plate.@flatten" → [{}], "a.@flatten.@flatten" → [[{}]]
+        同名输出优先透传输入，保证物料（Material）在动作链中保持
+        UUID；其余字段按 JSON 结果模式生成确定性值。旧 ``handles``
+        合同继续根据 ``@flatten`` 层数构造数组。
         """
+
+        def schema_value(schema: Any) -> Any:
+            if not isinstance(schema, dict):
+                return None
+            enum_values = schema.get("enum")
+            if isinstance(enum_values, list) and enum_values:
+                return "SUCCEEDED" if "SUCCEEDED" in enum_values else deepcopy(enum_values[0])
+            value_type = schema.get("type")
+            if value_type == "boolean":
+                return True
+            if value_type == "string":
+                return ""
+            if value_type == "integer":
+                return 0
+            if value_type == "number":
+                return 0.0
+            if value_type == "array":
+                return []
+            if value_type == "object":
+                return {}
+            return None
+
         mock_return: Dict[str, Any] = {"test_mode": True, "action_name": action_name}
         action_mappings = self._action_value_mappings.get(device_id, {})
         action_mapping = action_mappings.get(action_name, {})
@@ -1162,12 +1198,43 @@ class HostNode(BaseROS2DeviceNode):
             for output_handle in handles.get("output", []):
                 data_key = output_handle.get("data_key", "")
                 handler_key = output_handle.get("handler_key", "")
+                output_key = handler_key or data_key.split(".@flatten", 1)[0]
+                if not output_key:
+                    continue
+                if output_key in action_kwargs:
+                    mock_return[output_key] = deepcopy(action_kwargs[output_key])
+                    continue
                 # 根据 @flatten 层数构建嵌套数组，叶子为空字典
                 flatten_count = data_key.count("@flatten")
                 value: Any = {}
                 for _ in range(flatten_count):
                     value = [value]
-                mock_return[handler_key] = value
+                mock_return[output_key] = value
+
+        result_schema = action_mapping.get("result", {})
+        if not (
+            isinstance(result_schema, dict)
+            and isinstance(result_schema.get("properties"), dict)
+        ):
+            action_schema = action_mapping.get("schema", {})
+            action_properties = (
+                action_schema.get("properties", {})
+                if isinstance(action_schema, dict)
+                else {}
+            )
+            result_schema = (
+                action_properties.get("result", {})
+                if isinstance(action_properties, dict)
+                else {}
+            )
+        if isinstance(result_schema, dict):
+            properties = result_schema.get("properties", {})
+            if isinstance(properties, dict):
+                for output_key, property_schema in properties.items():
+                    if output_key in action_kwargs:
+                        mock_return[output_key] = deepcopy(action_kwargs[output_key])
+                    else:
+                        mock_return[output_key] = schema_value(property_schema)
         return mock_return
 
     def _handle_test_mode_result(
@@ -2367,9 +2434,19 @@ class HostNode(BaseROS2DeviceNode):
         result = await self.transfer_resource_to_another(
             [resource], target_id, [mount_resource], [site if site else None]
         )
+        from unilabos.app.scheduler.integration import get_inventory_service
+
+        inventory = get_inventory_service()
+        if inventory is not None:
+            inventory.move_instance(
+                _stable_resource_uuid(resource),
+                parent_uuid=_stable_resource_uuid(mount_resource),
+                slot_id=site,
+                actor="host_node.transfer_resource",
+            )
         return {
-            "resource": ResourceTreeSet.from_plr_resources([resource]).dump(),
-            "mount_resource": ResourceTreeSet.from_plr_resources([mount_resource]).dump(),
+            "resource": _dump_resource_slot(resource),
+            "mount_resource": _dump_resource_slot(mount_resource),
             "site": site,
             "result": str(result),
         }

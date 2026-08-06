@@ -91,6 +91,66 @@ def _instance_by_uuid(store: InventoryStore, value: str) -> Optional[Dict[str, A
     )
 
 
+def _canonical_material(
+    store: InventoryStore, material_uuid: str
+) -> Optional[Dict[str, Any]]:
+    """Return the Backend-shaped material row hidden by the legacy view."""
+
+    return store.query_one(
+        "SELECT * FROM material WHERE uuid = ? AND deleted_at IS NULL",
+        (material_uuid,),
+    )
+
+
+def _canonical_pose(
+    store: InventoryStore,
+    material_uuid: str,
+    *,
+    config: Dict[str, Any],
+    fallback: Any,
+) -> Dict[str, Any]:
+    """Project authoritative relative geometry back to ResourceDict shape."""
+
+    pose = deepcopy(fallback) if isinstance(fallback, dict) else {}
+    relative = store.query_one(
+        "SELECT * FROM relative_position "
+        "WHERE material_uuid = ? AND deleted_at IS NULL LIMIT 1",
+        (material_uuid,),
+    )
+    if relative is not None:
+        pose.update(
+            {
+                "position": {
+                    "x": float(relative.get("position_x") or 0),
+                    "y": float(relative.get("position_y") or 0),
+                    "z": float(relative.get("position_z") or 0),
+                },
+                "size": {
+                    "width": float(relative.get("width") or 0),
+                    "height": float(relative.get("length") or 0),
+                    "depth": float(relative.get("depth") or 0),
+                },
+                "scale": {
+                    "x": float(relative.get("scale_x") or 1),
+                    "y": float(relative.get("scale_y") or 1),
+                    "z": float(relative.get("scale_z") or 1),
+                },
+                "rotation": {
+                    "x": float(relative.get("rotation_x") or 0),
+                    "y": float(relative.get("rotation_y") or 0),
+                    "z": float(relative.get("rotation_z") or 0),
+                },
+            }
+        )
+    elif any(key in config for key in ("size_x", "size_y", "size_z")):
+        pose["size"] = {
+            "width": float(config.get("size_x") or 0),
+            "height": float(config.get("size_y") or 0),
+            "depth": float(config.get("size_z") or 0),
+        }
+    return pose
+
+
 def _node_from_instance(
     store: InventoryStore, instance: Dict[str, Any]
 ) -> Dict[str, Any]:
@@ -98,7 +158,15 @@ def _node_from_instance(
     base = _resource_spec(template)
 
     edge_uuid = str(instance.get("edge_uuid") or "")
-    barcode = str(instance.get("barcode") or base.get("barcode") or "")
+    material = _canonical_material(store, edge_uuid) or {}
+    material_config = _json_object(material.get("config", "{}"))
+    material_data = _json_object(material.get("data", "{}"))
+    barcode = str(
+        instance.get("barcode")
+        or material.get("barcode")
+        or base.get("barcode")
+        or ""
+    )
     node_id = str(base.get("id") or barcode or edge_uuid)
     template_name = str((template or {}).get("name") or "")
 
@@ -108,6 +176,7 @@ def _node_from_instance(
     config = deepcopy(config)
     data = deepcopy(data)
     extra = deepcopy(extra)
+    config.update(material_config)
 
     relation = store.get_relation(edge_uuid)
     slot_id = str((relation or {}).get("slot_id") or "")
@@ -131,7 +200,9 @@ def _node_from_instance(
     )
 
     content = store.get_content(edge_uuid)
-    state = _json_object((content or {}).get("state_json", "{}"))
+    state = _json_object(
+        (content or {}).get("state_json", material_data)
+    )
     nested_data = state.pop("data", None)
     if isinstance(nested_data, dict):
         data.update(nested_data)
@@ -146,8 +217,12 @@ def _node_from_instance(
         **base,
         "id": node_id,
         "uuid": edge_uuid,
-        "name": str(base.get("name") or template_name or node_id),
-        "description": str(base.get("description") or ""),
+        "name": str(
+            material.get("name") or base.get("name") or template_name or node_id
+        ),
+        "description": str(
+            material.get("description") or base.get("description") or ""
+        ),
         "schema": base.get("schema") if isinstance(base.get("schema"), dict) else {},
         "model": base.get("model") if isinstance(base.get("model"), dict) else {},
         "icon": str(base.get("icon") or ""),
@@ -157,7 +232,13 @@ def _node_from_instance(
         "type": str(
             base.get("type") or (template or {}).get("category") or "container"
         ),
-        "class": str(base.get("class") or ""),
+        "class": str(material.get("class") or base.get("class") or ""),
+        "pose": _canonical_pose(
+            store,
+            edge_uuid,
+            config=config,
+            fallback=base.get("pose"),
+        ),
         "config": config,
         "data": data,
         "extra": extra,

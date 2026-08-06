@@ -139,6 +139,7 @@ def test_bridge_commit_failure_cannot_leave_a_dispatchable_scheduler_run(
             *,
             task_uuid: str,
             job_uuid: str,
+            resolved_param: dict[str, Any] | None = None,
         ) -> dict[str, Any]:
             """拒绝派发意图投影。
 
@@ -146,7 +147,7 @@ def test_bridge_commit_failure_cannot_leave_a_dispatchable_scheduler_run(
             返回：永不返回。异常：始终抛运行时错误以模拟数据库不可用。
             """
 
-            del task_uuid, job_uuid
+            del task_uuid, job_uuid, resolved_param
             raise RuntimeError("workflow database unavailable")
 
     bridge = TaskSchedulerBridge(

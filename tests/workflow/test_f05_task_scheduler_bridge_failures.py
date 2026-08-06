@@ -338,12 +338,14 @@ class _FailOnceProjection:
         *,
         task_uuid: str,
         job_uuid: str,
+        resolved_param: Mapping[str, Any],
     ) -> dict[str, Any]:
-        """委托派发前投影；参数是任务和作业身份，返回标准聚合。"""
+        """委托派发前投影；参数含最终解析参数，返回标准聚合。"""
 
         return self._delegate.project_pre_dispatch(
             task_uuid=task_uuid,
             job_uuid=job_uuid,
+            resolved_param=resolved_param,
         )
 
     def project_job_finished(self, **values: Any) -> dict[str, Any]:

@@ -133,8 +133,10 @@ class WorkflowProgram:
     imports: tuple[tuple[str, str], ...]
     devices: tuple[DeviceDeclaration, ...]
     input_contract: dict[str, Any]
+    input_resource_template_symbols: tuple[tuple[str, tuple[str, ...]], ...]
     result_record_name: str | None
     declared_output_schemas: tuple[tuple[str, dict[str, Any]], ...]
+    output_resource_template_symbols: tuple[tuple[str, tuple[str, ...]], ...]
     actions: tuple[
         ActionDeclaration | CompositeDeclaration | MaterialSourceDeclaration,
         ...,
@@ -222,8 +224,15 @@ def parse_authoring_source(
             "作者源码中的工作流 UUID 与权威工作流不一致",
             function,
         )
-    input_contract = _workflow_parameters(function, imports)
-    result_record_name, declared_output_schemas = _result_record(
+    input_contract, input_resource_template_symbols = _workflow_parameters(
+        function,
+        imports,
+    )
+    (
+        result_record_name,
+        declared_output_schemas,
+        output_resource_template_symbols,
+    ) = _result_record(
         function,
         result_records=result_records,
         imports=imports,
@@ -265,8 +274,10 @@ def parse_authoring_source(
         imports=tuple(sorted(imports.items())),
         devices=tuple(devices),
         input_contract=input_contract,
+        input_resource_template_symbols=input_resource_template_symbols,
         result_record_name=result_record_name,
         declared_output_schemas=tuple(declared_output_schemas.items()),
+        output_resource_template_symbols=output_resource_template_symbols,
         actions=tuple(actions),
         groups=tuple(groups),
         parent_by_node=tuple(sorted(parent_by_node.items())),
@@ -460,17 +471,19 @@ def _workflow_declaration(
 def _workflow_parameters(
     function: ast.FunctionDef,
     imports: dict[str, str],
-) -> dict[str, Any]:
+) -> tuple[dict[str, Any], tuple[tuple[str, tuple[str, ...]], ...]]:
     """静态解析工作流输入合同（Workflow Input Contract）。
 
     参数说明：只接受关键字专用参数；``imports`` 交给共享参数注解解析器。返回
-    版本 1 输入合同，注解错误转换为稳定作者语法错误。
+    版本 1 输入合同及按参数保存的资源模板源码身份；注解错误转换为稳定作者
+    语法错误。
     """
 
     arguments = function.args
     if arguments.posonlyargs or arguments.args or arguments.vararg or arguments.kwarg:
         _fail("invalid_workflow_parameters", "工作流输入必须是关键字专用参数", function)
     parameters: list[dict[str, Any]] = []
+    resource_templates: list[tuple[str, tuple[str, ...]]] = []
     try:
         for argument, default in zip(arguments.kwonlyargs, arguments.kw_defaults, strict=True):
             if argument.annotation is None:
@@ -482,9 +495,22 @@ def _workflow_parameters(
                 imports=imports,
             )
             parameters.append(parsed.to_dict())
+            if parsed.resource_templates:
+                resource_templates.append(
+                    (
+                        argument.arg,
+                        tuple(
+                            symbol.qualified_name
+                            for symbol in parsed.resource_templates
+                        ),
+                    )
+                )
     except AnnotationSchemaError as error:
         raise AuthoringSyntaxError(error.code, error.message, function) from None
-    return {"version": 1, "parameters": parameters}
+    return (
+        {"version": 1, "parameters": parameters},
+        tuple(resource_templates),
+    )
 
 
 def _result_record(
@@ -492,18 +518,23 @@ def _result_record(
     *,
     result_records: list[ast.ClassDef],
     imports: dict[str, str],
-) -> tuple[str | None, dict[str, dict[str, Any]]]:
+) -> tuple[
+    str | None,
+    dict[str, dict[str, Any]],
+    tuple[tuple[str, tuple[str, ...]], ...],
+]:
     """解析可选 ``TypedDict`` 工作流结果记录。
 
     参数说明：``function`` 提供返回注解，``result_records`` 是模块级类声明，
-    ``imports`` 用于识别 ``TypedDict`` 和字段注解；返回记录类名与字段 Schema。
-    未声明返回记录时返回 ``(None, {})``，动态或不一致声明失败关闭。
+    ``imports`` 用于识别 ``TypedDict`` 和字段注解；返回记录类名、字段 Schema
+    及按字段保存的资源模板源码身份。未声明返回记录时返回空记录，动态或不一致
+    声明失败关闭。
     """
 
     if not result_records:
         if function.returns is not None:
             _fail("invalid_workflow_output", "工作流返回注解必须引用 TypedDict 结果记录", function)
-        return None, {}
+        return None, {}, ()
     if len(result_records) != 1:
         _fail("invalid_workflow_output", "只能声明一个工作流结果记录", function)
     record = result_records[0]
@@ -518,6 +549,7 @@ def _result_record(
     if not isinstance(function.returns, ast.Name) or function.returns.id != record.name:
         _fail("invalid_workflow_output", "工作流返回注解必须引用结果记录", function)
     fields: dict[str, dict[str, Any]] = {}
+    resource_templates: list[tuple[str, tuple[str, ...]]] = []
     try:
         for statement in record.body:
             if (
@@ -529,14 +561,25 @@ def _result_record(
             name = statement.target.id
             if name in fields:
                 _fail("invalid_workflow_output", "结果记录字段重复", statement)
-            fields[name] = parse_result_annotation(
+            parsed = parse_result_annotation(
                 name,
                 statement.annotation,
                 imports=imports,
-            ).to_dict()["schema"]
+            )
+            fields[name] = parsed.to_dict()["schema"]
+            if parsed.resource_templates:
+                resource_templates.append(
+                    (
+                        name,
+                        tuple(
+                            symbol.qualified_name
+                            for symbol in parsed.resource_templates
+                        ),
+                    )
+                )
     except AnnotationSchemaError as error:
         raise AuthoringSyntaxError(error.code, error.message, record) from None
-    return record.name, fields
+    return record.name, fields, tuple(resource_templates)
 
 
 def _source_anchors(python_source: str) -> dict[int, str]:
@@ -991,10 +1034,12 @@ def _action_declaration(
             if item.arg is None or item.arg in names:
                 _fail("invalid_action_arguments", "工作流调用参数重复或包含 ** 展开", call)
             names.add(item.arg)
+            resource_binding = _resource_ref_binding(item.value, imports=imports)
             arguments.append(
                 (
                     item.arg,
-                    _value_binding(
+                    resource_binding
+                    or _value_binding(
                         item.value,
                         input_names=input_names,
                         known_results=known_results,
@@ -1066,7 +1111,7 @@ def _resource_ref_binding(
     *,
     imports: Mapping[str, str],
 ) -> ValueBinding | None:
-    """识别普通动作参数中的静态 ``resource_ref`` 声明。
+    """识别动作或已发布工作流参数中的静态 ``resource_ref`` 声明。
 
     参数：``expression`` 是动作参数 AST，``imports`` 证明局部函数身份。返回：
     非 ``resource_ref`` 调用时为 ``None``，合法调用返回保存部署业务资源 ID 的

@@ -102,7 +102,7 @@ class MaterialSourceResolutionCoordinator:
             raise MaterialSourceResolutionError("物料来源与解析作业集合不一致")
 
         requirements: dict[str, list[MaterialRequirement]] = {}
-        bindings: dict[str, dict[str, str]] = {}
+        selectors: dict[str, Mapping[str, Any]] = {}
         for node in source_nodes:
             node_uuid = str(node["uuid"])
             raw_requirements = node.get("material_requirements")
@@ -123,24 +123,50 @@ class MaterialSourceResolutionCoordinator:
             selector = node.get("param")
             if not isinstance(selector, Mapping):
                 raise MaterialSourceResolutionError("物料来源选择器必须是对象")
+            selectors[node_uuid] = selector
+
+        try:
+            # gaojing ``reserve_workflow`` 在一个 SQLite 事务内完成整集合预留，
+            # 任一来源不足会整体回滚；同一任务/来源/attempt 重放保持幂等。
+            reservation = self._inventory.reserve_workflow(task_uuid, requirements)
+        except InsufficientStock:
+            self._projection.project_material_source_blocked(task_uuid)
+            return MaterialSourceResolution(status="blocked")
+        allocations = (
+            reservation.get("allocations")
+            if isinstance(reservation, Mapping)
+            else None
+        )
+        bindings: dict[str, dict[str, str]] = {}
+        for node_uuid, selector in selectors.items():
+            fixed_uuid = str(selector.get("material_uuid") or "").strip()
+            if fixed_uuid:
+                material_uuid = fixed_uuid
+            else:
+                raw_allocated = (
+                    allocations.get(node_uuid)
+                    if isinstance(allocations, Mapping)
+                    else None
+                )
+                if (
+                    not isinstance(raw_allocated, Sequence)
+                    or isinstance(raw_allocated, (str, bytes))
+                    or len(raw_allocated) != 1
+                ):
+                    raise MaterialSourceResolutionError(
+                        "自动物料来源必须取得唯一库存分配结果"
+                    )
+                material_uuid = self._required_text(
+                    raw_allocated[0],
+                    field="material_source.allocated_material_uuid",
+                )
             bindings[node_uuid] = {
-                "uuid": self._required_text(
-                    selector.get("material_uuid"),
-                    field="material_source.material_uuid",
-                ),
+                "uuid": material_uuid,
                 "resource_template_uuid": self._required_text(
                     selector.get("resource_template_uuid"),
                     field="material_source.resource_template_uuid",
                 ),
             }
-
-        try:
-            # gaojing ``reserve_workflow`` 在一个 SQLite 事务内完成整集合预留，
-            # 任一来源不足会整体回滚；同一任务/来源/attempt 重放保持幂等。
-            self._inventory.reserve_workflow(task_uuid, requirements)
-        except InsufficientStock:
-            self._projection.project_material_source_blocked(task_uuid)
-            return MaterialSourceResolution(status="blocked")
         self._projection.project_material_source_admission(task_uuid, bindings)
         return MaterialSourceResolution(status="admitted")
 

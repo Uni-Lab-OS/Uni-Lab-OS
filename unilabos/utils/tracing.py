@@ -14,6 +14,7 @@ from __future__ import annotations
 
 import atexit
 import contextlib
+import contextvars
 import logging
 import os
 import re
@@ -33,6 +34,10 @@ TRACESTATE = "tracestate"
 TRACE_ID = "trace_id"
 SPAN_ID = "span_id"
 
+_WORKFLOW_EXECUTION_IDENTITY: contextvars.ContextVar[Dict[str, str]] = (
+    contextvars.ContextVar("unilabos_workflow_execution_identity", default={})
+)
+
 _SENSITIVE_KEY = re.compile(
     r"(authorization|cookie|password|passwd|secret|token|api[_-]?key|access[_-]?key)",
     re.IGNORECASE,
@@ -42,6 +47,31 @@ _SECRET_ASSIGNMENT = re.compile(
     r"(?i)\b(token|password|passwd|secret|api[_-]?key|access[_-]?key)"
     r"(\s*[:=]\s*)[^\s,;]+"
 )
+
+
+@contextlib.contextmanager
+def attach_workflow_execution_identity(
+    node_job_uuid: str,
+    task_uuid: str,
+) -> Iterator[None]:
+    """让驱动调用沿 Python context 继承已认证的工作流执行身份。"""
+
+    token = _WORKFLOW_EXECUTION_IDENTITY.set(
+        {
+            "node_job_uuid": str(node_job_uuid or ""),
+            "task_uuid": str(task_uuid or ""),
+        }
+    )
+    try:
+        yield None
+    finally:
+        _WORKFLOW_EXECUTION_IDENTITY.reset(token)
+
+
+def capture_workflow_execution_identity() -> Dict[str, str]:
+    """读取当前驱动调用所属的工作流节点作业与工作流任务身份。"""
+
+    return dict(_WORKFLOW_EXECUTION_IDENTITY.get())
 
 
 def _env_bool(name: str, default: bool) -> bool:
@@ -532,6 +562,8 @@ def use_context(context_value: Any) -> Iterator[None]:
 def await_with_context(context_value: Any, awaitable: Any) -> Any:
     """逐次恢复异步上下文，兼容会跨 Context 推进协程的 rclpy Task。"""
 
+    python_context = contextvars.copy_context()
+
     @types.coroutine
     def _runner():
         iterator = awaitable.__await__()
@@ -539,15 +571,20 @@ def await_with_context(context_value: Any, awaitable: Any) -> Any:
         pending_error: Optional[BaseException] = None
         while True:
             try:
-                with use_context(context_value):
-                    if pending_error is None:
-                        yielded = iterator.send(value)
-                    else:
+                def _advance():
+                    nonlocal pending_error
+                    with use_context(context_value):
+                        if pending_error is None:
+                            return iterator.send(value)
                         error_value = pending_error
                         pending_error = None
-                        yielded = iterator.throw(
-                            type(error_value), error_value, error_value.__traceback__
+                        return iterator.throw(
+                            type(error_value),
+                            error_value,
+                            error_value.__traceback__,
                         )
+
+                yielded = python_context.run(_advance)
             except StopIteration as stopped:
                 return stopped.value
             try:
@@ -786,16 +823,29 @@ def run_with_context(
 
 def submit_with_context(executor: Any, function: Any, *args: Any, **kwargs: Any):
     context_value = capture_context()
+    python_context = contextvars.copy_context()
     return executor.submit(
-        run_with_context, context_value, function, *args, **kwargs
+        python_context.run,
+        run_with_context,
+        context_value,
+        function,
+        *args,
+        **kwargs,
     )
 
 
 def wrap_with_current_context(function: Any):
     context_value = capture_context()
+    python_context = contextvars.copy_context()
 
     def _wrapped(*args: Any, **kwargs: Any):
-        return run_with_context(context_value, function, *args, **kwargs)
+        return python_context.copy().run(
+            run_with_context,
+            context_value,
+            function,
+            *args,
+            **kwargs,
+        )
 
     return _wrapped
 

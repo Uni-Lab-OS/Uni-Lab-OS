@@ -69,8 +69,17 @@ class CompiledMaterialLockSchema:
                 "/",
                 "最终动作参数必须是对象",
             )
+        # 上游 Handle 可把内部 PLR ``Resource`` 富对象传给后续动作；设备边界会
+        # 按 ``ResourceSlot`` UUID 重新取回实例。物料锁解析只投影这类带锁标记
+        # 的值，避免内部字段破坏稳定引用合同，同时保持其他参数严格校验。
+        validation_param = _project_runtime_material_values(
+            self._goal_schema,
+            param,
+            root_schema=self._goal_schema,
+            ref_stack=(),
+        )
         try:
-            self._validator.validate(param)
+            self._validator.validate(validation_param)
         except ValidationError as error:
             # ``error.absolute_path`` 是相对于 Goal 参数根对象的稳定字段路径。
             error_path = _json_pointer(tuple(error.absolute_path))
@@ -89,7 +98,7 @@ class CompiledMaterialLockSchema:
         material_uuids: set[str] = set()
         _collect_material_uuids(
             self._goal_schema,
-            param,
+            validation_param,
             root_schema=self._goal_schema,
             path=(),
             output=material_uuids,
@@ -148,6 +157,104 @@ def compile_material_lock_schema(
             f"动作参数 Schema 非法：{error.message}",
         ) from error
     return CompiledMaterialLockSchema(canonical_goal_schema, validator)
+
+
+def _project_runtime_material_values(
+    schema: Mapping[str, Any],
+    value: Any,
+    *,
+    root_schema: Mapping[str, Any],
+    ref_stack: tuple[str, ...],
+) -> Any:
+    """把内部 PLR 物料富对象投影为动作合同中的稳定引用形状。
+
+    只处理带动作物料锁（Action Material Lock）布尔标记的字段；普通对象保留
+    未知键，交给原 JSON Schema 继续失败关闭。这样既允许工作流（Workflow）
+    Handle 传递完整资源，也不会放宽非物料动作参数。
+    """
+
+    reference = schema.get("$ref")
+    if isinstance(reference, str):
+        if reference in ref_stack:
+            return value
+        resolved_schema = dict(_resolve_local_ref(root_schema, reference))
+        resolved_schema.update(
+            {key: item for key, item in schema.items() if key != "$ref"}
+        )
+        return _project_runtime_material_values(
+            resolved_schema,
+            value,
+            root_schema=root_schema,
+            ref_stack=ref_stack + (reference,),
+        )
+
+    marker = schema.get(_LOCK_MARKER)
+    properties = schema.get("properties")
+    if type(marker) is bool and isinstance(value, Mapping):
+        if not isinstance(properties, Mapping):
+            return value
+        projected = {
+            name: _project_runtime_material_values(
+                child_schema,
+                value[name],
+                root_schema=root_schema,
+                ref_stack=ref_stack,
+            )
+            for name, child_schema in properties.items()
+            if name in value and isinstance(child_schema, Mapping)
+        }
+        if (
+            "uuid" in properties
+            and "uuid" not in projected
+            and "unilabos_uuid" in value
+        ):
+            # ROS 结果序列化保留 PLR 属性名；动作合同使用稳定线格式 ``uuid``。
+            projected["uuid"] = value["unilabos_uuid"]
+        return projected
+
+    for union_key in ("anyOf", "oneOf"):
+        union_members = schema.get(union_key)
+        if isinstance(union_members, Sequence):
+            for member in union_members:
+                if not isinstance(member, Mapping):
+                    continue
+                projected = _project_runtime_material_values(
+                    member,
+                    value,
+                    root_schema=root_schema,
+                    ref_stack=ref_stack,
+                )
+                if _schema_accepts(member, projected, root_schema):
+                    return projected
+
+    if isinstance(value, Mapping) and isinstance(properties, Mapping):
+        projected = dict(value)
+        for name, child_schema in properties.items():
+            if name in value and isinstance(child_schema, Mapping):
+                projected[name] = _project_runtime_material_values(
+                    child_schema,
+                    value[name],
+                    root_schema=root_schema,
+                    ref_stack=ref_stack,
+                )
+        return projected
+
+    items = schema.get("items")
+    if (
+        isinstance(value, Sequence)
+        and not isinstance(value, (str, bytes))
+        and isinstance(items, Mapping)
+    ):
+        return [
+            _project_runtime_material_values(
+                items,
+                item,
+                root_schema=root_schema,
+                ref_stack=ref_stack,
+            )
+            for item in value
+        ]
+    return value
 
 
 def _validate_material_lock_extensions(

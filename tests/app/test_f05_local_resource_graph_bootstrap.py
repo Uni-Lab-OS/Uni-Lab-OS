@@ -116,6 +116,23 @@ class _RegistryWithHostExecutor(_Registry):
         ]
 
 
+class _RegistryWithChangedAction(_Registry):
+    """仅修改设备动作合同、不修改库存资源模板的注册表。"""
+
+    def obtain_registry_device_info(self) -> list[dict[str, Any]]:
+        """返回带新动作字段的同一设备资源模板。"""
+
+        device = super().obtain_registry_device_info()[0]
+        device["class"]["action_value_mappings"] = {
+            "pick": {
+                "type": "UniLabJsonCommand",
+                "goal": {"resource": {}},
+                "result": {"resource": {}},
+            }
+        }
+        return [device]
+
+
 class _RegistryWithConfigSite(_Registry):
     """提供配置式库位（Site）占用所需的父子设备资源模板。"""
 
@@ -458,6 +475,36 @@ def test_restart_with_same_source_and_fingerprint_is_idempotent(tmp_path: Path) 
     assert receipt["status"] == "unchanged"
     assert material_count == {"count": 1}
     assert site_count == {"count": 2}
+
+
+def test_registry_action_change_does_not_invalidate_identical_inventory_graph(
+    tmp_path: Path,
+) -> None:
+    """设备动作合同变化不应伪装成库存资源图变化。
+
+    参数：``tmp_path`` 隔离 SQLite 文件。返回无；断言实际物料、
+    库位（Site）和位置投影相同时，新注册表代际仍为幂等启动。
+    """
+
+    database_path = tmp_path / "inventory.db"
+    first = InventoryStore(str(database_path))
+    try:
+        assert _bootstrap(first, _ResourceTree())[
+            "status"
+        ] == "imported"
+    finally:
+        first.close()
+    reopened = InventoryStore(str(database_path))
+    try:
+        receipt = _bootstrap(
+            reopened,
+            _ResourceTree(),
+            registry=_RegistryWithChangedAction(),
+        )
+    finally:
+        reopened.close()
+
+    assert receipt["status"] == "unchanged"
 
 
 def test_changed_fingerprint_fails_closed_without_overwriting_public_graph() -> None:

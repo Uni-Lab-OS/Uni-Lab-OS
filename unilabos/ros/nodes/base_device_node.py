@@ -87,6 +87,7 @@ from unilabos.utils.import_manager import default_manager
 from unilabos.utils.log import info, debug, warning, error, critical, logger, trace
 from unilabos.utils.tracing import (
     add_event,
+    attach_workflow_execution_identity,
     await_with_context,
     capture_context,
     extract_trace_context,
@@ -127,6 +128,47 @@ def _resource_lookup_identity(
 
 def _is_blank_resource_placeholder(value: Any) -> bool:
     return isinstance(value, dict) and _resource_lookup_identity(value) is None
+
+
+def _stable_resource_uuid(value: Any) -> str:
+    """读取 PLR 实例或资源接口原始映射中的稳定 UUID。"""
+
+    if isinstance(value, dict):
+        return str(value.get("uuid") or value.get("unilabos_uuid") or value.get("id") or "")
+    return str(
+        getattr(value, "unilabos_uuid", None)
+        or getattr(value, "uuid", None)
+        or getattr(value, "id", None)
+        or ""
+    )
+
+
+def _device_root_mapping(tree: Any) -> Optional[Dict[str, Any]]:
+    """保留会被 PLR 默认投影跳过的设备型资源根。"""
+
+    content = tree.root_node.res_content
+    resource_type = content.get("type") if isinstance(content, dict) else getattr(content, "type", None)
+    if str(getattr(resource_type, "value", resource_type)).casefold() != "device":
+        return None
+    if isinstance(content, dict):
+        return dict(content)
+    model_dump = getattr(content, "model_dump", None)
+    if callable(model_dump):
+        return dict(model_dump(by_alias=True))
+    return None
+
+
+def _is_resource_slot_arg_type(arg_type: Any) -> bool:
+    """识别普通或 Annotated 包装的物料占位符（ResourceSlot）参数。"""
+
+    if not isinstance(arg_type, str):
+        return False
+    normalized = arg_type.strip()
+    for prefix in ("Annotated[", "typing.Annotated["):
+        if normalized.startswith(prefix):
+            normalized = normalized[len(prefix) :].split(",", 1)[0].strip()
+            break
+    return normalized == "ResourceSlot" or normalized.endswith(":ResourceSlot")
 
 
 def _native_driver_result_failed(
@@ -1418,14 +1460,14 @@ class BaseROS2DeviceNode(Node, Generic[T]):
         uids = []
         target_uids = []
         for plr_resource in plr_resources:
-            uid = getattr(plr_resource, "unilabos_uuid", None)
-            if uid is None:
-                raise ValueError(f"来源物料{plr_resource}没有unilabos_uuid属性，无法转运")
+            uid = _stable_resource_uuid(plr_resource)
+            if not uid:
+                raise ValueError(f"来源物料{plr_resource}没有稳定 UUID，无法转运")
             uids.append(uid)
         for target_resource in target_resources:
-            uid = getattr(target_resource, "unilabos_uuid", None)
-            if uid is None:
-                raise ValueError(f"目标物料{target_resource}没有unilabos_uuid属性，无法转运")
+            uid = _stable_resource_uuid(target_resource)
+            if not uid:
+                raise ValueError(f"目标物料{target_resource}没有稳定 UUID，无法转运")
             target_uids.append(uid)
         _ns = target_device_id if target_device_id.startswith("/devices/") else f"/devices/{target_device_id.lstrip('/')}"
         srv_address = f"/srv{_ns}/s2c_resource_tree"
@@ -2918,10 +2960,15 @@ class BaseROS2DeviceNode(Node, Generic[T]):
                 },
             )
             try:
-                return await await_with_context(
-                    action_span.context,
-                    _execute_callback_impl(goal_handle, job_context),
-                )
+                with attach_workflow_execution_identity(
+                    job_context.get("job_id", ""),
+                    job_context.get("task_id", ""),
+                ):
+                    contextual_awaitable = await_with_context(
+                        action_span.context,
+                        _execute_callback_impl(goal_handle, job_context),
+                    )
+                return await contextual_awaitable
             except BaseException as exc:
                 action_span.fail(exc)
                 raise
@@ -2980,14 +3027,19 @@ class BaseROS2DeviceNode(Node, Generic[T]):
                 # 处理单个 ResourceSlot（单物料两种入参形态：
                 #   dict = 资源引用，按 uuid 重新 with_children 拉取；
                 #   list = 一棵树的扁平节点组（上游 handle 的 @flatten），就地装配成一个物料）
-                if arg_type == "unilabos.registry.placeholder_type:ResourceSlot":
+                if _is_resource_slot_arg_type(arg_type):
                     # 内部解析层：raw 值可能是 list（@flatten 节点组）或 dict（资源引用）
                     resource_data: ResourceSlotRawInput = function_args[arg_name]
                     try:
                         if isinstance(resource_data, list):
                             function_args[arg_name] = self._assemble_single_resource(resource_data)
-                        elif isinstance(resource_data, dict) and "id" in resource_data:
-                            function_args[arg_name] = self._convert_resources_sync(resource_data["uuid"])[0]
+                        elif isinstance(resource_data, dict) and (
+                            "uuid" in resource_data or "unilabos_uuid" in resource_data
+                        ):
+                            resource_uuid = resource_data.get("uuid") or resource_data.get(
+                                "unilabos_uuid"
+                            )
+                            function_args[arg_name] = self._convert_resources_sync(str(resource_uuid))[0]
                     except Exception as e:
                         self.lab_logger().error(
                             f"转换ResourceSlot参数 {arg_name} 失败: {e}\n{traceback.format_exc()}"
@@ -2996,12 +3048,20 @@ class BaseROS2DeviceNode(Node, Generic[T]):
 
                 # 处理 ResourceSlot 列表
                 elif isinstance(arg_type, tuple) and len(arg_type) == 2:
-                    resource_slot_type = "unilabos.registry.placeholder_type:ResourceSlot"
-                    if arg_type[0] == "list" and arg_type[1] == resource_slot_type:
+                    resource_slot_types = {
+                        "ResourceSlot",
+                        "unilabos.registry.placeholder_type:ResourceSlot",
+                    }
+                    if arg_type[0] == "list" and arg_type[1] in resource_slot_types:
                         resource_list = function_args[arg_name]
                         if isinstance(resource_list, list):
                             try:
-                                uuids = [r["uuid"] for r in resource_list if isinstance(r, dict) and "id" in r]
+                                uuids = [
+                                    str(r.get("uuid") or r.get("unilabos_uuid"))
+                                    for r in resource_list
+                                    if isinstance(r, dict)
+                                    and (r.get("uuid") or r.get("unilabos_uuid"))
+                                ]
                                 function_args[arg_name] = self._convert_resources_sync(*uuids) if uuids else []
                             except Exception as e:
                                 self.lab_logger().error(
@@ -3065,24 +3125,70 @@ class BaseROS2DeviceNode(Node, Generic[T]):
         plr_resources = tree_set.to_plr_resources()
 
         # 通过资源跟踪器获取本地实例
-        figured_resources: List[ResourcePLR] = []
-        for plr_resource, tree in zip(plr_resources, tree_set.trees):
+        figured_resources: List[Any] = []
+        resolved_roots: List[tuple[Any, Any]] = []
+        plr_by_uuid = {
+            _stable_resource_uuid(plr_resource): plr_resource
+            for plr_resource in plr_resources
+            if _stable_resource_uuid(plr_resource)
+        }
+        for tree in tree_set.trees:
+            root_content = tree.root_node.res_content
+            plr_resource = plr_by_uuid.get(_stable_resource_uuid(root_content))
+            if plr_resource is None:
+                device_root = _device_root_mapping(tree)
+                if device_root is None:
+                    raise ValueError(f"资源树根未生成 PLR 实例: {root_content}")
+                figured_resources.append(device_root)
+                resolved_roots.append((device_root, device_root))
+                continue
             res = self.resource_tracker.figure_resource(plr_resource, try_mode=True)
             if len(res) == 0:
                 self.lab_logger().warning(f"资源转换未能索引到实例: {tree.root_node.res_content}，返回新建实例")
-                figured_resources.append(plr_resource)
+                resolved_resource = plr_resource
             elif len(res) == 1:
-                figured_resources.append(res[0])
+                resolved_resource = res[0]
             else:
                 raise ValueError(f"资源转换得到多个实例: {res}")
+            figured_resources.append(resolved_resource)
+            resolved_roots.append((plr_resource, resolved_resource))
 
         mapped_plr_resources = []
         for uuid in uuids_list:
             found = None
             for plr_resource in figured_resources:
+                if _stable_resource_uuid(plr_resource) == uuid:
+                    found = plr_resource
+                    break
                 r = self.resource_tracker.loop_find_with_uuid(plr_resource, uuid)
                 if r is not None:
                     found = r
+                    break
+            if found is None:
+                # EdgeScheduler 返回库存稳定 UUID；设备资源跟踪器可能把同一根资源
+                # 解析为图中的运行时 UUID。保留查询根与本地根的成对关系，避免稳定
+                # 身份在 ``figure_resource`` 后消失。
+                for source_root, resolved_root in resolved_roots:
+                    if _stable_resource_uuid(source_root) == uuid:
+                        found = resolved_root
+                        break
+                    source_match = self.resource_tracker.loop_find_with_uuid(
+                        source_root, uuid
+                    )
+                    if source_match is None:
+                        continue
+                    if source_match is source_root:
+                        found = resolved_root
+                        break
+                    local_matches = self.resource_tracker.figure_resource(
+                        source_match, try_mode=True
+                    )
+                    if len(local_matches) == 1:
+                        found = local_matches[0]
+                        break
+                    if len(local_matches) > 1:
+                        raise ValueError(f"资源转换得到多个实例: {local_matches}")
+                    found = source_match
                     break
             if found is None:
                 raise Exception(f"未能在已解析的资源树中找到 uuid={uuid} 对应的资源")
@@ -3167,14 +3273,17 @@ class BaseROS2DeviceNode(Node, Generic[T]):
                 # 处理单个 ResourceSlot（单物料两种入参形态：
                 #   dict = 资源引用，按 uuid 重新 with_children 拉取；
                 #   list = 一棵树的扁平节点组（上游 handle 的 @flatten），就地装配成一个物料）
-                _is_resource_slot = isinstance(arg_type, str) and arg_type.endswith(":ResourceSlot")
+                _is_resource_slot = _is_resource_slot_arg_type(arg_type)
                 if _is_resource_slot:
                     # 内部解析层：raw 值可能是 list（@flatten 节点组）或 dict（资源引用）
                     resource_data: ResourceSlotRawInput = function_args[arg_name]
                     try:
                         if isinstance(resource_data, list):
                             function_args[arg_name] = self._assemble_single_resource(resource_data)
-                        elif isinstance(resource_data, dict) and "id" in resource_data:
+                        elif isinstance(resource_data, dict) and any(
+                            resource_data.get(key)
+                            for key in ("uuid", "unilabos_uuid", "id")
+                        ):
                             function_args[arg_name] = await self._convert_resource_async(resource_data)
                     except Exception as e:
                         self.lab_logger().error(
@@ -3184,13 +3293,23 @@ class BaseROS2DeviceNode(Node, Generic[T]):
 
                 # 处理 ResourceSlot 列表
                 elif isinstance(arg_type, tuple) and len(arg_type) == 2:
-                    if arg_type[0] == "list" and isinstance(arg_type[1], str) and arg_type[1].endswith(":ResourceSlot"):
+                    if (
+                        arg_type[0] == "list"
+                        and isinstance(arg_type[1], str)
+                        and (
+                            arg_type[1] == "ResourceSlot"
+                            or arg_type[1].endswith(":ResourceSlot")
+                        )
+                    ):
                         resource_list = function_args[arg_name]
                         if isinstance(resource_list, list):
                             try:
                                 converted_resources = []
                                 for resource_data in resource_list:
-                                    if isinstance(resource_data, dict) and "id" in resource_data:
+                                    if isinstance(resource_data, dict) and any(
+                                        resource_data.get(key)
+                                        for key in ("uuid", "unilabos_uuid", "id")
+                                    ):
                                         converted_resource = await self._convert_resource_async(resource_data)
                                         converted_resources.append(converted_resource)
                                 function_args[arg_name] = converted_resources
@@ -3208,7 +3327,9 @@ class BaseROS2DeviceNode(Node, Generic[T]):
 
     async def _convert_resource_async(self, resource_data: "ResourceDictType"):
         """异步转换 ResourceDictType 为 PLR 实例，优先用 uuid 查询"""
-        unilabos_uuid = resource_data.get("uuid")
+        unilabos_uuid = resource_data.get("uuid") or resource_data.get(
+            "unilabos_uuid"
+        )
 
         if unilabos_uuid:
             resource_tree = await self.get_resource([unilabos_uuid], with_children=True)
@@ -3216,7 +3337,11 @@ class BaseROS2DeviceNode(Node, Generic[T]):
             if plr_resources:
                 plr_resource = plr_resources[0]
             else:
-                raise ValueError(f"通过 uuid={unilabos_uuid} 查询资源为空")
+                trees = resource_tree.trees
+                device_root = _device_root_mapping(trees[0]) if len(trees) == 1 else None
+                if device_root is None or _stable_resource_uuid(device_root) != str(unilabos_uuid):
+                    raise ValueError(f"通过 uuid={unilabos_uuid} 查询资源为空")
+                return device_root
         else:
             res_id = resource_data.get("id") or resource_data.get("name", "")
             if not res_id:

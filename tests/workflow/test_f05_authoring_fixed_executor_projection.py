@@ -28,7 +28,9 @@ ACTION_TEMPLATE_UUID = "53000000-0000-4000-8000-000000000001"
 DEVICE_RESOURCE_TEMPLATE_UUID = "31000000-0000-4000-8000-000000000001"
 
 
-def _catalog() -> AuthoringCatalogSnapshot:
+def _catalog(
+    *, action_type: str = "UniLabJsonCommand",
+) -> AuthoringCatalogSnapshot:
     """构造带完整动作合同（Action Contract）的 ``ILab`` 目录快照（Catalog Snapshot）。
 
     参数说明：无。返回：仅含一个设备动作模板（Action Template）、不含
@@ -45,6 +47,7 @@ def _catalog() -> AuthoringCatalogSnapshot:
         handles=[],
     )
     action_template["node_type"] = "ILab"
+    action_template["type"] = action_type
     action_template["schema"] = {"type": "object", "properties": {}}
     action_template["meta_data"] = {
         "unilab": {
@@ -90,7 +93,11 @@ def fixed_executor_projection():
 '''
 
 
-def _build_graph(device_identity: str | None) -> dict[str, Any]:
+def _build_graph(
+    device_identity: str | None,
+    *,
+    action_type: str = "UniLabJsonCommand",
+) -> dict[str, Any]:
     """经公共接缝生成尚未进入候选包（Candidate Bundle）校验的候选图（Candidate Graph）。
 
     参数说明：``device_identity`` 控制固定或动态执行器绑定（ExecutorBinding）。
@@ -108,7 +115,7 @@ def _build_graph(device_identity: str | None) -> dict[str, Any]:
     # 同次构建产生、但本接缝测试不消费的候选变更集（CandidateChangeset）。
     graph, _changeset = build_candidate_graph(
         program=program,
-        catalog=_catalog(),
+        catalog=_catalog(action_type=action_type),
         applied_graph=_applied_graph(),
     )
     return graph
@@ -226,6 +233,28 @@ def test_trusted_compile_freezes_same_device_identity_into_execution_plan() -> N
     planned_action = execution_plan["nodes"][0]
     assert planned_action["material_uuid"] == DEVICE_MATERIAL_UUID
     assert planned_action["device_id"] == DEVICE_MATERIAL_UUID
+
+
+def test_async_action_type_is_frozen_into_candidate_and_execution_plan() -> None:
+    """异步目录动作必须穿过候选图并冻结进执行计划（ExecutionPlan）。"""
+
+    graph = _build_graph(
+        DEVICE_MATERIAL_UUID,
+        action_type="UniLabJsonCommandAsync",
+    )
+
+    assert graph["nodes"][0]["action_type"] == "UniLabJsonCommandAsync"
+
+    # 历史应用图可能尚未冻结动作类型；执行计划仍须只从同一冻结模板恢复，
+    # 不能把异步动作静默降级为同步 JSON 动作。
+    graph["nodes"][0]["action_type"] = None
+    execution_plan, _jobs = ExecutionPlanBuilder().build(
+        graph,
+        run_mode="normal",
+        target_node_uuid=None,
+    )
+
+    assert execution_plan["nodes"][0]["action_type"] == "UniLabJsonCommandAsync"
 
 
 def test_fixed_device_projection_survives_authoring_round_trip() -> None:

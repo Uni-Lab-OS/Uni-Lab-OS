@@ -185,15 +185,26 @@ def validate_graph(
         ):
             raise GraphValidationError("边两端 Handle 类型不兼容")
         target_input = (edge.target_node_uuid, edge.target_handle_uuid)
-        if target_input in incoming:
-            raise GraphValidationError("同一目标 Handle 只能有一条入边")
-        incoming[target_input] = edge.uuid
         enabled_edges.append(edge)
-        if not _dependency_only(source_handle):
-            connected_inputs[target_input] = edge.uuid
-            available_data_keys[edge.target_node_uuid].append(
-                _handle_data_key(target_handle)
-            )
+        if _dependency_only(source_handle):
+            continue
+        if target_input in incoming:
+            raise GraphValidationError("同一目标 Handle 只能有一条数据入边")
+        incoming[target_input] = edge.uuid
+        connected_inputs[target_input] = edge.uuid
+        available_data_keys[edge.target_node_uuid].append(
+            _handle_data_key(target_handle)
+        )
+
+    _project_composite_boundary_inputs(
+        nodes=enabled,
+        handles=handles,
+        effective_params=effective_params,
+        node_meta_data=node_meta_data,
+        bindings_by_node=bindings_by_node,
+        connected_inputs=connected_inputs,
+        available_data_keys=available_data_keys,
+    )
 
     _validate_edge_cycles(enabled, enabled_edges)
     for node_uuid, node in enabled.items():
@@ -240,6 +251,96 @@ def validate_graph(
         if _node_kind(node, templates) == "device_action":
             if node.material_uuid is None:
                 raise GraphValidationError("设备动作节点必须绑定 material_uuid")
+
+
+def _project_composite_boundary_inputs(
+    *,
+    nodes: Mapping[str, WorkflowNodeWrite],
+    handles: Mapping[str, Dict[str, Any]],
+    effective_params: Mapping[str, Dict[str, Any]],
+    node_meta_data: Mapping[str, Dict[str, Any]],
+    bindings_by_node: Mapping[str, Mapping[str, Mapping[str, str]]],
+    connected_inputs: Dict[tuple[str, str], str],
+    available_data_keys: Dict[str, List[str]],
+) -> None:
+    """把组合调用边界已提供的值投影到展开内部目标。
+
+    参数：已启用节点、目录连接点（Handle）、实参、元数据、输入绑定
+    和已连线事实。返回：无；原地补充内部目标的可用键。异常：
+    边界映射不闭合、跨调用层级或引用错误连接点时抛出
+    ``GraphValidationError``。
+    """
+
+    for invocation_uuid, invocation in nodes.items():
+        metadata = node_meta_data.get(invocation_uuid, {})
+        unilab = metadata.get("unilab") if isinstance(metadata, Mapping) else None
+        composite = unilab.get("composite") if isinstance(unilab, Mapping) else None
+        mappings = (
+            composite.get("target_mappings")
+            if isinstance(composite, Mapping)
+            else None
+        )
+        if mappings is None:
+            continue
+        if not isinstance(mappings, Mapping):
+            raise GraphValidationError("组合工作流目标映射必须是对象")
+        for boundary_handle_uuid, targets in mappings.items():
+            boundary_handle = (
+                handles.get(boundary_handle_uuid)
+                if isinstance(boundary_handle_uuid, str)
+                else None
+            )
+            if (
+                boundary_handle is None
+                or boundary_handle.get("workflow_node_template_uuid")
+                != invocation.workflow_node_template_uuid
+                or boundary_handle.get("io_type") != "target"
+                or not isinstance(targets, list)
+            ):
+                raise GraphValidationError("组合工作流目标映射边界无效")
+            boundary_key = _handle_data_key(boundary_handle)
+            provided = (
+                (invocation_uuid, boundary_handle_uuid) in connected_inputs
+                or boundary_handle_uuid in bindings_by_node.get(invocation_uuid, {})
+                or boundary_key in effective_params.get(invocation_uuid, {})
+            )
+            if not provided:
+                continue
+            for target in targets:
+                if not isinstance(target, Mapping):
+                    raise GraphValidationError("组合工作流内部目标映射无效")
+                target_node_uuid = target.get("workflow_node_uuid")
+                target_handle_uuid = target.get("target_handle_uuid")
+                target_node = (
+                    nodes.get(target_node_uuid)
+                    if isinstance(target_node_uuid, str)
+                    else None
+                )
+                target_handle = (
+                    handles.get(target_handle_uuid)
+                    if isinstance(target_handle_uuid, str)
+                    else None
+                )
+                if (
+                    target_node is None
+                    or target_handle is None
+                    or target_node.parent_uuid != invocation_uuid
+                    or target_handle.get("workflow_node_template_uuid")
+                    != target_node.workflow_node_template_uuid
+                    or target_handle.get("io_type") != "target"
+                ):
+                    raise GraphValidationError("组合工作流内部目标越过调用边界")
+                target_input = (target_node_uuid, target_handle_uuid)
+                target_key = _handle_data_key(target_handle)
+                if (
+                    target_input in connected_inputs
+                    or target_handle_uuid
+                    in bindings_by_node.get(target_node_uuid, {})
+                    or target_key in effective_params.get(target_node_uuid, {})
+                ):
+                    continue
+                connected_inputs[target_input] = f"composite:{invocation_uuid}"
+                available_data_keys[target_node_uuid].append(target_key)
 
 
 def _validate_parent_cycles(nodes: Iterable[WorkflowNodeWrite]) -> None:
@@ -359,7 +460,9 @@ def _dependency_only(handle: Mapping[str, Any]) -> bool:
     if str(handle.get("handle_key") or "").strip().lower() == "ready":
         return True
     data_source = str(handle.get("data_source") or "").strip()
-    return bool(data_source) and data_source.lower() != "executor"
+    # 已发布工作流边界的业务输出使用 ``result``；它与普通
+    # 动作的 ``executor`` 输出一样承载值，不能被降级为纯依赖边。
+    return bool(data_source) and data_source.lower() not in {"executor", "result"}
 
 
 def _validate_required_handles(

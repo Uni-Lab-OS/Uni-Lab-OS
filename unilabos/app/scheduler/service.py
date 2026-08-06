@@ -372,6 +372,85 @@ class EdgeScheduler:
             "dispatched": dispatched,
         }
 
+    def restore_workflow(
+        self,
+        spec: WorkflowSpec,
+        completed_results: Dict[str, Any],
+    ) -> Dict[str, Any]:
+        """从持久成功事实恢复一个未终态工作流（Workflow）。
+
+        参数：``spec`` 是原任务冻结规格；``completed_results`` 按节点
+        UUID 提供已持久成功的返回值。返回：恢复后状态与本轮新派
+        发摘要。异常：未知完成节点、重复运行或派发失败原样传播；
+        已完成节点只恢复 DAG 状态，绝不重放设备动作。
+        """
+
+        completed_node_ids = set(completed_results)
+        known_node_ids = {node.id for node in spec.nodes if not node.disabled}
+        unknown_node_ids = completed_node_ids - known_node_ids
+        if unknown_node_ids:
+            raise ValueError(
+                f"workflow {spec.workflow_id} has unknown completed nodes: "
+                f"{sorted(unknown_node_ids)}"
+            )
+        with self._lock:
+            if (
+                spec.workflow_id in self._workflows
+                or spec.workflow_id in self._workflow_spans
+            ):
+                raise ValueError(f"workflow {spec.workflow_id} already submitted")
+            workflow_trace = start_detached_span(
+                "workflow.task.run",
+                attributes={
+                    "workflow.uuid": spec.workflow_id,
+                    "workflow.task.uuid": spec.task_id,
+                    "workflow.plan.node_count": len(spec.nodes),
+                    "workflow.recovered.node_count": len(completed_results),
+                },
+            )
+            self._workflow_spans[spec.workflow_id] = workflow_trace
+        try:
+            with workflow_trace.activate(), self._lock:
+                run = WorkflowRun(spec)
+                self._workflows[spec.workflow_id] = run
+                requirements = spec.material_requirements_by_node()
+                if requirements and self._inventory is not None:
+                    self._material_workflows.add(spec.workflow_id)
+                    if not self._try_reserve(run):
+                        run.state = WorkflowState.WAITING_MATERIAL
+                for node in spec.nodes:
+                    if node.id in completed_results:
+                        run.mark_finished(node.id, completed_results[node.id])
+                logger.info(
+                    "[EdgeScheduler] workflow %s restored (%d/%d nodes completed)",
+                    spec.workflow_id,
+                    len(completed_results),
+                    len(spec.nodes),
+                )
+                self._emit_monitor(
+                    "scheduler",
+                    "workflow_restored",
+                    {
+                        "workflow_id": spec.workflow_id,
+                        "completed_nodes": len(completed_results),
+                        "nodes": len(spec.nodes),
+                        "state": run.state.value,
+                    },
+                )
+                dispatched = self._reschedule_locked()
+                notifications = self._collect_terminal_notifications()
+            self._fire_notifications(notifications)
+            return {
+                "workflow_id": spec.workflow_id,
+                "state": run.state.value,
+                "dispatched": dispatched,
+            }
+        except BaseException as exc:
+            workflow_trace.fail(exc)
+            workflow_trace.end()
+            self._workflow_spans.pop(spec.workflow_id, None)
+            raise
+
     def _try_reserve(self, run: WorkflowRun) -> bool:
         """尝试整 DAG 预留；不足返回 False（幂等，可反复重试）。"""
         try:
@@ -715,6 +794,7 @@ class EdgeScheduler:
                                 "device_action_key": key,
                                 "estimated_s": round(estimated_s, 3),
                                 "estimate_source": estimate_source,
+                                "resolved_args": resolved_args,
                             }
                         )
                         # 派发意图持久化后，先保守登记本地在途作业和动作物料锁，再

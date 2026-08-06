@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import json
 from copy import deepcopy
 
 from fastapi.testclient import TestClient
@@ -103,6 +104,58 @@ def test_legacy_query_returns_flat_resource_dict_tree() -> None:
     assert len(tree_set.trees) == 1
     assert tree_set.trees[0].root_node.res_content.uuid == "edge-rack"
     assert tree_set.trees[0].root_node.children[0].res_content.uuid == "edge-tube"
+
+
+def test_canonical_generic_resource_instance_remains_plr_convertible() -> None:
+    """规范物料字段不得在旧 HostNode 查询边界降级或丢失。"""
+
+    service = InventoryService(InventoryStore(":memory:"))
+    service.upsert_template(
+        "tpl-beaker",
+        name="SZLab 500 mL 烧杯",
+        category="resource",
+        spec={"format": "xacro", "entry": "beaker/resource.xacro"},
+    )
+    service.register_instance(
+        template_id="tpl-beaker",
+        edge_uuid="edge-beaker",
+    )
+    with service.store.transaction() as connection:
+        connection.execute(
+            "UPDATE material SET description=?,class=?,name=?,config=?,data=? "
+            "WHERE uuid=?",
+            (
+                "S03/S11 使用的 500 mL 烧杯",
+                "community.szlab.beaker_500ml",
+                "烧杯堆栈 L1B1 烧杯",
+                json.dumps(
+                    {
+                        "size_x": 86,
+                        "size_y": 86,
+                        "size_z": 120,
+                        "category": "beaker",
+                        "num_items_x": 6,
+                    }
+                ),
+                json.dumps({"sample_id": "sample-001"}),
+                "edge-beaker",
+            ),
+        )
+
+    nodes = TestClient(create_app(service)).post(
+        "/api/v1/edge/material/query",
+        json={"uuids": ["edge-beaker"], "with_children": True},
+    ).json()["data"]["nodes"]
+    resource = ResourceTreeSet.from_raw_dict_list(deepcopy(nodes)).to_plr_resources()[0]
+
+    assert nodes[0]["name"] == "烧杯堆栈 L1B1 烧杯"
+    assert nodes[0]["description"] == "S03/S11 使用的 500 mL 烧杯"
+    assert nodes[0]["class"] == "community.szlab.beaker_500ml"
+    assert nodes[0]["config"]["category"] == "beaker"
+    assert nodes[0]["config"]["num_items_x"] == 6
+    assert nodes[0]["data"]["sample_id"] == "sample-001"
+    assert resource.name == "烧杯堆栈 L1B1 烧杯"
+    assert resource.category == "beaker"
 
 
 def test_query_supports_legacy_cloud_uuid_id_and_without_children() -> None:

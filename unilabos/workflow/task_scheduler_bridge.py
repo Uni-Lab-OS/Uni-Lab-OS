@@ -4,8 +4,10 @@ from __future__ import annotations
 
 import logging
 from collections.abc import Mapping
+from copy import deepcopy
 from typing import Any
 
+from unilabos.app.scheduler.dag_state import WorkflowRun
 from unilabos.app.scheduler.material_source_resolution import (
     MaterialSourceResolutionCoordinator,
 )
@@ -103,6 +105,10 @@ class TaskSchedulerBridge:
                 self._admission_pending_tasks.add(task_uuid)
                 return self._aggregate(task_uuid)
             self._admission_pending_tasks.discard(task_uuid)
+            # 自动物料来源（MaterialSource）的准入结果已原子写入既有动作作业参数；
+            # 重新读取同一作业身份后再编译，禁止派发准入前的空参数快照。
+            jobs = self._store.list_jobs(task_uuid)
+            spec = self._compiler.compile(persisted_task, jobs)
             if not spec.nodes:
                 # 仅来源任务没有普通作业可触发调度器终态清理；协调器必须在返回成功
                 # 前幂等释放仍活跃的短期预留，不能让测试或调用方承担内部清理。
@@ -161,6 +167,185 @@ class TaskSchedulerBridge:
         self._scheduler.reschedule()
         return self._aggregate(normalized_uuid)
 
+    def recover_active_tasks(self) -> list[dict[str, Any]]:
+        """恢复没有结果不明作业的运行中工作流任务（WorkflowTask）。
+
+        参数：无。返回：已恢复任务的标准聚合列表。已成功作业仅
+        恢复 DAG 返回值，待处理作业才可派发；发现 ``dispatched`` 或
+        ``running`` 作业时跳过该任务，禁止重放结果不明的物理动作。
+        异常：冻结计划或持久事实不一致时记录后跳过，不阻止其他
+        可证明安全的任务恢复。
+        """
+
+        if self._closed:
+            raise TaskSchedulerBridgeError("工作流任务调度桥已经关闭")
+        recovered: list[dict[str, Any]] = []
+        page = 1
+        while True:
+            task_page = self._store.list_tasks(
+                page=page,
+                page_size=200,
+                status="running",
+            )
+            tasks = task_page["items"]
+            for task in tasks:
+                try:
+                    aggregate = self._recover_running_task(task)
+                except Exception:  # noqa: BLE001 - 单任务损坏不影响其他恢复
+                    logger.exception(
+                        "运行中工作流任务无法安全恢复：%s",
+                        task.get("uuid"),
+                    )
+                    continue
+                if aggregate is not None:
+                    recovered.append(aggregate)
+            if page * 200 >= int(task_page["total"]):
+                break
+            page += 1
+        return recovered
+
+    def _recover_running_task(
+        self,
+        task: Mapping[str, Any],
+    ) -> dict[str, Any] | None:
+        """恢复单个可证明无结果不明作业的运行中任务。"""
+
+        task_uuid = self._required_text(task.get("uuid"), field="task.uuid")
+        jobs = self._store.list_jobs(task_uuid)
+        uncertain_jobs = [
+            job for job in jobs if job.get("status") in {"dispatched", "running"}
+        ]
+        if uncertain_jobs:
+            logger.error(
+                "工作流任务 %s 存在 %d 个结果不明作业，禁止自动恢复",
+                task_uuid,
+                len(uncertain_jobs),
+            )
+            return None
+        source_jobs = [
+            job for job in jobs if job.get("executor_kind") == "material_source"
+        ]
+        ordinary_jobs = [
+            job for job in jobs if job.get("executor_kind") != "material_source"
+        ]
+        if any(job.get("status") != "succeeded" for job in source_jobs):
+            raise TaskSchedulerBridgeError("运行中任务存在未完成的物料来源作业")
+        if source_jobs:
+            # 旧冻结计划可能只记录第一个物理消费者；幂等重放同一准入结果会从
+            # 计划边补齐复合工作流隐式透传的其他待处理动作参数，不再次查询或
+            # 占用库存（Inventory）。
+            bindings: dict[str, Mapping[str, str]] = {}
+            for source_job in source_jobs:
+                return_info = source_job.get("return_info")
+                material = (
+                    return_info.get("material")
+                    if isinstance(return_info, Mapping)
+                    else None
+                )
+                if not isinstance(material, Mapping):
+                    raise TaskSchedulerBridgeError("物料来源成功作业缺少绑定结果")
+                source_node_uuid = self._required_text(
+                    source_job.get("workflow_node_uuid"),
+                    field="material_source_job.workflow_node_uuid",
+                )
+                bindings[source_node_uuid] = material
+            self._projection.project_material_source_admission(task_uuid, bindings)
+            jobs = self._store.list_jobs(task_uuid)
+            ordinary_jobs = [
+                job
+                for job in jobs
+                if job.get("executor_kind") != "material_source"
+            ]
+        if any(
+            job.get("status") not in {"pending", "succeeded"}
+            for job in ordinary_jobs
+        ):
+            raise TaskSchedulerBridgeError("运行中任务包含不可恢复的作业终态")
+        pending_jobs = [job for job in ordinary_jobs if job.get("status") == "pending"]
+        if not pending_jobs:
+            raise TaskSchedulerBridgeError("运行中任务没有待处理作业")
+
+        spec = self._compiler.compile(task, jobs)
+        plan = task.get("execution_plan")
+        raw_nodes = plan.get("nodes") if isinstance(plan, Mapping) else None
+        if not isinstance(raw_nodes, list):
+            raise TaskSchedulerBridgeError("执行计划节点必须是数组")
+        nodes_by_uuid = {
+            str(node.get("uuid") or ""): node
+            for node in raw_nodes
+            if isinstance(node, Mapping)
+        }
+        jobs_by_node = {
+            str(job.get("workflow_node_uuid") or ""): job
+            for job in ordinary_jobs
+        }
+        completed_results: dict[str, Any] = {}
+        recovery_run = WorkflowRun(spec)
+        for node in spec.nodes:
+            job = jobs_by_node.get(node.id)
+            if job is None or job.get("status") != "succeeded":
+                continue
+            # 按冻结拓扑顺序重建当时最终参数；这只读取已成功
+            # 父节点事实，不派发任何动作。
+            resolved_param = recovery_run.resolve_params(node.id)
+            recovered_result = self._recover_test_mode_return(
+                job,
+                nodes_by_uuid.get(node.id, {}),
+                resolved_param=resolved_param,
+            )
+            completed_results[node.id] = recovered_result
+            recovery_run.mark_finished(node.id, recovered_result)
+        for job in pending_jobs:
+            job_uuid = self._required_text(job.get("uuid"), field="job.uuid")
+            self._task_by_job[job_uuid] = task_uuid
+        self._submitted_tasks.add(task_uuid)
+        try:
+            self._scheduler.restore_workflow(spec, completed_results)
+        except Exception:
+            if not self._crossed_dispatch_boundary(jobs):
+                self._submitted_tasks.discard(task_uuid)
+                for job in pending_jobs:
+                    self._task_by_job.pop(str(job.get("uuid") or ""), None)
+            raise
+        return self._aggregate(task_uuid)
+
+    @staticmethod
+    def _recover_test_mode_return(
+        job: Mapping[str, Any],
+        plan_node: Mapping[str, Any],
+        *,
+        resolved_param: Mapping[str, Any] | None = None,
+    ) -> Any:
+        """为历史测试模式回执重建同名输入的物料透传。"""
+
+        return_info = job.get("return_info")
+        if (
+            not isinstance(return_info, Mapping)
+            or return_info.get("test_mode") is not True
+        ):
+            return deepcopy(return_info)
+        recovered = deepcopy(dict(return_info))
+        param = resolved_param if resolved_param is not None else job.get("param")
+        param_schema = plan_node.get("param_schema")
+        properties = (
+            param_schema.get("properties")
+            if isinstance(param_schema, Mapping)
+            else None
+        )
+        result_schema = (
+            properties.get("result") if isinstance(properties, Mapping) else None
+        )
+        result_properties = (
+            result_schema.get("properties")
+            if isinstance(result_schema, Mapping)
+            else None
+        )
+        if isinstance(param, Mapping) and isinstance(result_properties, Mapping):
+            for output_key in result_properties:
+                if output_key not in recovered and output_key in param:
+                    recovered[output_key] = deepcopy(param[output_key])
+        return recovered
+
     def close(self) -> None:
         """幂等注销本桥的调度生命周期监听器。
 
@@ -208,9 +393,13 @@ class TaskSchedulerBridge:
         )
         if dispatch_task_uuid != task_uuid:
             raise StoreConflict(f"派发作业与任务身份不一致：{job_uuid}")
+        resolved_args = dispatching.get("resolved_args")
+        if not isinstance(resolved_args, Mapping):
+            raise StoreConflict(f"派发作业缺少最终解析参数：{job_uuid}")
         self._projection.project_pre_dispatch(
             task_uuid=task_uuid,
             job_uuid=job_uuid,
+            resolved_param=resolved_args,
         )
 
     def _on_job_finished(
@@ -246,12 +435,23 @@ class TaskSchedulerBridge:
                     "suc_type": suc_type,
                 }
             ]
-        self._projection.project_job_finished(
+        aggregate = self._projection.project_job_finished(
             job_uuid=job_uuid,
             scheduler_state="success" if success else "failed",
             return_info=return_info,
             error_info=error_info,
         )
+        terminal_status = aggregate["task"]["status"]
+        if terminal_status in {"succeeded", "failed"} and any(
+            job.get("executor_kind") == "material_source"
+            for job in aggregate["jobs"]
+        ):
+            # 物料来源解析作业不进入旧调度 DAG，因此其任务级短期预留不会被普通
+            # 节点逐一消费；业务任务明确成功或失败后由本桥按同一任务身份幂等释放。
+            self._material_sources.release_terminal_reservations(
+                task_uuid,
+                reason=f"workflow_{terminal_status}",
+            )
         self._task_by_job.pop(job_uuid, None)
         if task_uuid not in self._task_by_job.values():
             self._submitted_tasks.discard(task_uuid)

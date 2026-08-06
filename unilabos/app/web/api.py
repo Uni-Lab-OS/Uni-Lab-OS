@@ -27,6 +27,7 @@ from unilabos.app.model import (
     JobData,
 )
 from unilabos.app.web.utils.host_utils import get_host_node_info
+from unilabos.app.web.device_catalog import project_device_catalog
 from unilabos.registry.registry import lab_registry
 from unilabos.utils.type_check import NoAliasDumper
 
@@ -1240,7 +1241,19 @@ def get_devices():
     if not isok:
         return Resp(code=RespCode.ErrorHostNotInit, message=str(data))
 
-    return Resp(data=dict(data))
+    online_ok, online_data = get_online_devices()
+    online_devices = (
+        online_data.get("online_devices", {})
+        if online_ok and isinstance(online_data, dict)
+        else {}
+    )
+    return Resp(
+        data=project_device_catalog(
+            resources=data,
+            registry_devices=lab_registry.obtain_registry_device_info(),
+            online_devices=online_devices,
+        )
+    )
 
 
 @api.get("/online-devices", summary="Online devices list", response_model=Resp)

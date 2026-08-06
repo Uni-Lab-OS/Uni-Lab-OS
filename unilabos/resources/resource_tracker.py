@@ -648,6 +648,7 @@ class ResourceTreeSet(object):
 
         # 类型映射
         TYPE_MAP = {
+            "resource": "Resource",
             "plate": "Plate",
             "well": "Well",
             "deck": "Deck",
@@ -735,9 +736,9 @@ class ResourceTreeSet(object):
             }
             if has_model:
                 d["model"] = res.config.get("model", None)
-            if res.type == "warehouse":
-                # 每个仓库节点都降级为通用资源；在递归构造阶段过滤，才能同时
-                # 覆盖根仓库与工作台下的嵌套仓库。
+            if plr_type == "Resource":
+                # 每个通用资源节点都只保留 PLR Resource 构造合同；在递归构造
+                # 阶段过滤，才能覆盖仓库、自定义资源及其嵌套子资源。
                 d = {
                     key: value
                     for key, value in d.items()

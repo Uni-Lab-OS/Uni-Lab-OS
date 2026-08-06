@@ -28,9 +28,7 @@ import asyncio
 import json
 import queue as queue_mod
 import time
-from typing import Any, Dict, List, Optional
-
-from typing import Callable
+from typing import Any, Callable, Dict, List, Optional
 
 from fastapi import APIRouter, FastAPI, HTTPException, Request
 from fastapi.middleware.cors import CORSMiddleware
@@ -62,6 +60,9 @@ class MaterialRequirementIn(BaseModel):
     unit: str = ""
     instance_uuid: str = ""
     barcode: str = ""
+    mount_uuid: str = ""
+    site_uuid: str = ""
+    slot_uuids: List[str] = Field(default_factory=list)
 
 
 class NodeIn(BaseModel):

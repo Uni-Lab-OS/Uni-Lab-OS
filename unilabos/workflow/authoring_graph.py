@@ -88,13 +88,18 @@ def build_candidate_graph(
             AuthoringCatalogAction,
         ],
     ] = {}
+    result_output_schemas: dict[tuple[str, str], dict[str, Any]] = {}
     nodes: list[dict[str, Any]] = []
     edges: list[dict[str, Any]] = []
     parent_by_node = dict(program.parent_by_node)
     source_order = {
         node_uuid: index for index, node_uuid in enumerate(program.source_order)
     }
-    effective_input_contract = deepcopy(program.input_contract)
+    effective_input_contract = _resolved_input_contract(program, catalog=catalog)
+    resolved_output_schemas = _resolved_declared_output_schemas(
+        program,
+        catalog=catalog,
+    )
     compatible_catalog_replacements: set[str] = set()
     for declaration in program.groups:
         try:
@@ -122,9 +127,13 @@ def build_candidate_graph(
                     "composite_catalog_mismatch",
                     "工作流创作编译器未配置已发布工作流展开端口",
                 )
-            keyword_arguments = _composite_keyword_arguments(
+            (
+                keyword_arguments,
+                resolved_resource_references,
+            ) = _composite_keyword_arguments(
                 declaration,
                 result_nodes=result_nodes,
+                resource_reference_resolver=resource_reference_resolver,
             )
             expansion = composite_authoring.compile_invocation(
                 parent_workflow_uuid=program.workflow_uuid,
@@ -143,10 +152,15 @@ def build_candidate_graph(
             )
             if compatible_template_uuid is not None:
                 compatible_catalog_replacements.add(compatible_template_uuid)
-            invocation = _composite_invocation_node(
-                declaration,
-                expansion=expansion,
-                catalog=catalog,
+            invocation = _apply_authoring_structure(
+                _composite_invocation_node(
+                    declaration,
+                    expansion=expansion,
+                    catalog=catalog,
+                    source_order=source_order[declaration.node_uuid],
+                    resolved_resource_references=resolved_resource_references,
+                ),
+                parent_uuid=parent_by_node.get(declaration.node_uuid),
                 source_order=source_order[declaration.node_uuid],
             )
             nodes.append(invocation)
@@ -168,6 +182,17 @@ def build_candidate_graph(
                     ) from error
                 action_catalog[str(expanded_node["uuid"])] = expanded_action
             invocation_action = action_catalog[declaration.node_uuid]
+            _record_composite_output_schemas(
+                declaration,
+                invocation_node=invocation,
+                action=invocation_action,
+                catalog=catalog,
+                expansion=expansion,
+                result_nodes=result_nodes,
+                result_output_schemas=result_output_schemas,
+                input_contract=expansion.effective_parent_input_contract,
+                resolved_resource_references=resolved_resource_references,
+            )
             result_nodes[declaration.result_name] = (
                 declaration,
                 invocation_action,
@@ -208,19 +233,28 @@ def build_candidate_graph(
                 "工作流创作目录缺少唯一动作模板",
             ) from error
         action_catalog[declaration.node_uuid] = catalog_action
-        result_nodes[declaration.result_name] = (declaration, catalog_action)
-        nodes.append(
-            _apply_authoring_structure(
-                _candidate_node(
-                    declaration=declaration,
-                    device=device,
-                    catalog_action=catalog_action,
-                    resource_reference_resolver=resource_reference_resolver,
-                ),
-                parent_uuid=parent_by_node.get(declaration.node_uuid),
-                source_order=source_order[declaration.node_uuid],
-            )
+        node = _apply_authoring_structure(
+            _candidate_node(
+                declaration=declaration,
+                device=device,
+                catalog_action=catalog_action,
+                resource_reference_resolver=resource_reference_resolver,
+            ),
+            parent_uuid=parent_by_node.get(declaration.node_uuid),
+            source_order=source_order[declaration.node_uuid],
         )
+        _record_action_material_passthrough_schemas(
+            declaration,
+            node=node,
+            action=catalog_action,
+            catalog=catalog,
+            result_nodes=result_nodes,
+            result_output_schemas=result_output_schemas,
+            input_contract=effective_input_contract,
+            resource_reference_resolver=resource_reference_resolver,
+        )
+        result_nodes[declaration.result_name] = (declaration, catalog_action)
+        nodes.append(node)
 
     for declaration in program.actions:
         target_catalog = action_catalog[declaration.node_uuid]
@@ -307,7 +341,13 @@ def build_candidate_graph(
                 )
             ),
             "input_contract": effective_input_contract,
-            "output_contract": _output_contract(program, result_nodes),
+            "output_contract": _output_contract(
+                program,
+                result_nodes,
+                input_contract=effective_input_contract,
+                declared_output_schemas=resolved_output_schemas,
+                result_output_schemas=result_output_schemas,
+            ),
             "output_bindings": _output_bindings(program, result_nodes),
         }
     )
@@ -395,15 +435,18 @@ def _composite_keyword_arguments(
             AuthoringCatalogAction,
         ],
     ],
-) -> dict[str, object]:
+    resource_reference_resolver: ResourceReferenceResolver | None,
+) -> tuple[dict[str, object], dict[str, dict[str, str | None]]]:
     """把静态值绑定转换为组合展开端口接受的边界来源。
 
     参数：``declaration`` 是调用声明，``result_nodes`` 解析前序节点输出连接点。
-    返回：按参数名排序语义无关的来源字典。异常：未知绑定或输出连接点不唯一时
-    抛出 ``AuthoringGraphError``。
+    返回：按参数名索引的边界来源及已解析资源引用；后者保留模板身份供调用
+    连接点兼容性校验。异常：未知绑定、资源身份或输出连接点不唯一时抛出
+    ``AuthoringGraphError``。
     """
 
     result: dict[str, object] = {}
+    resolved_resources: dict[str, dict[str, str | None]] = {}
     for name, binding in declaration.arguments:
         if binding.kind == "literal":
             result[name] = deepcopy(binding.value)
@@ -426,12 +469,25 @@ def _composite_keyword_arguments(
                 "workflow_node_uuid": source_declaration.node_uuid,
                 "source_handle_uuid": str(source_handle["uuid"]),
             }
+        elif binding.kind == "resource_ref":
+            try:
+                resolved_reference = resolve_resource_reference(
+                    str(binding.value),
+                    resource_reference_resolver,
+                )
+            except ResourceReferenceResolutionError as error:
+                raise AuthoringGraphError(
+                    "resource_reference_resolution_error",
+                    str(error),
+                ) from error
+            result[name] = {"uuid": resolved_reference["uuid"]}
+            resolved_resources[name] = resolved_reference
         else:
             raise AuthoringGraphError(
                 "composite_boundary_mapping_invalid",
                 "已发布工作流参数来源不受支持",
             )
-    return result
+    return result, resolved_resources
 
 
 def _require_composite_expansion(expansion: CompositeExpansion) -> None:
@@ -453,6 +509,223 @@ def _require_composite_expansion(expansion: CompositeExpansion) -> None:
         str(diagnostic.get("code") or "composite_catalog_mismatch"),
         str(diagnostic.get("message") or "组合工作流展开失败"),
     )
+
+
+def _record_composite_output_schemas(
+    declaration: CompositeDeclaration,
+    *,
+    invocation_node: dict[str, Any],
+    action: AuthoringCatalogAction,
+    catalog: AuthoringCatalogSnapshot,
+    expansion: CompositeExpansion,
+    result_nodes: Mapping[
+        str,
+        tuple[
+            ActionDeclaration | CompositeDeclaration | MaterialSourceDeclaration,
+            AuthoringCatalogAction,
+        ],
+    ],
+    result_output_schemas: dict[tuple[str, str], dict[str, Any]],
+    input_contract: Mapping[str, Any],
+    resolved_resource_references: Mapping[str, Mapping[str, str | None]],
+) -> None:
+    """记录组合调用中隐式物料透传输出的实际来源类型。
+
+    参数：调用声明、发布动作、展开映射及已解析上游事实。返回：
+    无；原地追加按结果变量与输出键索引的 Schema。异常：边界映射
+    引用不存在的调用参数或来源时抛出 ``AuthoringGraphError``。
+    """
+
+    arguments = dict(declaration.arguments)
+    input_schemas = {
+        str(item["name"]): deepcopy(item["schema"])
+        for item in input_contract["parameters"]
+    }
+    for handle in action.detached_handles():
+        if handle.get("io_type") != "source":
+            continue
+        handle_uuid = str(handle.get("uuid") or "")
+        mapping = expansion.source_mappings.get(handle_uuid)
+        if not isinstance(mapping, Mapping) or mapping.get("kind") != "workflow_input":
+            continue
+        parameter_name = str(mapping.get("parameter") or "")
+        binding = arguments.get(parameter_name)
+        if binding is None:
+            raise AuthoringGraphError(
+                "composite_boundary_mapping_invalid",
+                "组合工作流隐式输出缺少调用参数来源",
+            )
+        if binding.kind == "workflow_input":
+            schema = input_schemas.get(str(binding.value))
+        elif binding.kind == "node_output":
+            source_declaration, source_action = result_nodes[
+                binding.result_name or ""
+            ]
+            if isinstance(source_declaration, MaterialSourceDeclaration):
+                schema = {
+                    "$slot": "ResourceSlot",
+                    "allowed_resource_template_uuids": [
+                        catalog.require_resource_template_uuid(
+                            source_declaration.resource_template_symbol
+                        )
+                    ],
+                }
+            else:
+                schema = result_output_schemas.get(
+                    (source_declaration.result_name, str(binding.value))
+                )
+            if schema is None:
+                schema = _handle_schema(
+                    _require_handle(
+                        source_action,
+                        key=str(binding.value),
+                        io_type="source",
+                    )
+                )
+        elif binding.kind == "resource_ref":
+            reference = resolved_resource_references.get(parameter_name)
+            template_uuid = (
+                reference.get("resource_template_uuid")
+                if isinstance(reference, Mapping)
+                else None
+            )
+            schema = {"$slot": "ResourceSlot"}
+            if isinstance(template_uuid, str):
+                schema["allowed_resource_template_uuids"] = [template_uuid]
+        else:
+            schema = None
+        if not isinstance(schema, Mapping):
+            raise AuthoringGraphError(
+                "composite_boundary_mapping_invalid",
+                "组合工作流隐式输出来源类型无法证明",
+            )
+        result_output_schemas[
+            (declaration.result_name, str(handle["handle_key"]))
+        ] = deepcopy(dict(schema))
+        unilab = invocation_node.setdefault("meta_data", {}).setdefault(
+            "unilab", {}
+        )
+        overrides = unilab.setdefault("output_schema_overrides", {})
+        if not isinstance(overrides, dict):
+            raise AuthoringGraphError(
+                "composite_boundary_mapping_invalid",
+                "组合工作流输出类型覆盖必须是对象",
+            )
+        overrides[handle_uuid] = deepcopy(dict(schema))
+
+
+def _record_action_material_passthrough_schemas(
+    declaration: ActionDeclaration,
+    *,
+    node: dict[str, Any],
+    action: AuthoringCatalogAction,
+    catalog: AuthoringCatalogSnapshot,
+    result_nodes: Mapping[
+        str,
+        tuple[
+            ActionDeclaration | CompositeDeclaration | MaterialSourceDeclaration,
+            AuthoringCatalogAction,
+        ],
+    ],
+    result_output_schemas: dict[tuple[str, str], dict[str, Any]],
+    input_contract: Mapping[str, Any],
+    resource_reference_resolver: ResourceReferenceResolver | None,
+) -> None:
+    """为普通动作的同名物料输入输出保留上游实际类型。
+
+    参数：动作声明、候选节点、目录合同及已解析上游事实。返回：
+    无；原地记录结果 Schema 和可验证的连接点对。异常：资源引用无法
+    解析时抛出 ``AuthoringGraphError``。
+    """
+
+    arguments = dict(declaration.arguments)
+    input_schemas = {
+        str(item["name"]): deepcopy(item["schema"])
+        for item in input_contract["parameters"]
+    }
+    for source_handle in action.detached_handles():
+        handle_key = str(source_handle.get("handle_key") or "")
+        if (
+            source_handle.get("io_type") != "source"
+            or handle_key == "ready"
+            or not schema_contains_resource_slot(_handle_schema(source_handle))
+            or handle_key not in arguments
+        ):
+            continue
+        try:
+            target_handle = _require_handle(
+                action,
+                key=handle_key,
+                io_type="target",
+            )
+        except AuthoringGraphError:
+            continue
+        if not schema_contains_resource_slot(_handle_schema(target_handle)):
+            continue
+        binding = arguments[handle_key]
+        if binding.kind == "workflow_input":
+            schema = input_schemas.get(str(binding.value))
+        elif binding.kind == "node_output":
+            source_declaration, source_action = result_nodes[
+                binding.result_name or ""
+            ]
+            if isinstance(source_declaration, MaterialSourceDeclaration):
+                schema = {
+                    "$slot": "ResourceSlot",
+                    "allowed_resource_template_uuids": [
+                        catalog.require_resource_template_uuid(
+                            source_declaration.resource_template_symbol
+                        )
+                    ],
+                }
+            else:
+                schema = result_output_schemas.get(
+                    (source_declaration.result_name, str(binding.value))
+                )
+            if schema is None:
+                schema = _handle_schema(
+                    _require_handle(
+                        source_action,
+                        key=str(binding.value),
+                        io_type="source",
+                    )
+                )
+        elif binding.kind == "resource_ref":
+            try:
+                reference = resolve_resource_reference(
+                    str(binding.value),
+                    resource_reference_resolver,
+                )
+            except ResourceReferenceResolutionError as error:
+                raise AuthoringGraphError(
+                    "resource_reference_resolution_error",
+                    str(error),
+                ) from error
+            schema = {"$slot": "ResourceSlot"}
+            template_uuid = reference.get("resource_template_uuid")
+            if isinstance(template_uuid, str):
+                schema["allowed_resource_template_uuids"] = [template_uuid]
+        else:
+            schema = None
+        if (
+            not isinstance(schema, Mapping)
+            or not schema_is_assignable(schema, _handle_schema(source_handle))
+        ):
+            continue
+        source_uuid = str(source_handle["uuid"])
+        result_output_schemas[(declaration.result_name, handle_key)] = deepcopy(
+            dict(schema)
+        )
+        unilab = node.setdefault("meta_data", {}).setdefault("unilab", {})
+        overrides = unilab.setdefault("output_schema_overrides", {})
+        passthroughs = unilab.setdefault("material_passthrough_handles", {})
+        if not isinstance(overrides, dict) or not isinstance(passthroughs, dict):
+            raise AuthoringGraphError(
+                "template_catalog_mismatch",
+                "物料透传类型元数据必须是对象",
+            )
+        overrides[source_uuid] = deepcopy(dict(schema))
+        passthroughs[source_uuid] = str(target_handle["uuid"])
 
 
 def _assert_composite_pin_compatible(
@@ -509,11 +782,13 @@ def _composite_invocation_node(
     expansion: CompositeExpansion,
     catalog: AuthoringCatalogSnapshot,
     source_order: int,
+    resolved_resource_references: Mapping[str, Mapping[str, str | None]],
 ) -> dict[str, Any]:
     """把展开调用节点补齐作者结果、输入绑定和展示元数据。
 
-    参数：调用声明、成功展开、不可变目录和源码顺序。返回：不含数据库读字段的
-    候选调用节点。异常：边界连接点或模板缺失时抛出 ``AuthoringGraphError``。
+    参数：调用声明、成功展开、不可变目录、源码顺序及已解析资源引用。返回：
+    不含数据库读字段的候选调用节点。异常：边界连接点、资源模板或目录模板
+    缺失时抛出 ``AuthoringGraphError``。
     """
 
     assert expansion.invocation_node is not None
@@ -523,14 +798,28 @@ def _composite_invocation_node(
     action = catalog.require_template(str(node["workflow_node_template_uuid"]))
     params: dict[str, Any] = {}
     input_bindings: dict[str, dict[str, str]] = {}
+    resource_refs: dict[str, dict[str, str]] = {}
     for name, binding in declaration.arguments:
         handle = _require_handle(action, key=name, io_type="target")
+        handle_uuid = str(handle["uuid"])
         if binding.kind == "literal":
             params[name] = deepcopy(binding.value)
         elif binding.kind == "workflow_input":
-            input_bindings[str(handle["uuid"])] = {
-                "parameter": str(binding.value)
-            }
+            input_bindings[handle_uuid] = {"parameter": str(binding.value)}
+        elif binding.kind == "resource_ref":
+            resolved_reference = resolved_resource_references.get(name)
+            if not isinstance(resolved_reference, Mapping):
+                raise AuthoringGraphError(
+                    "resource_reference_resolution_error",
+                    f"已发布工作流参数 {name} 缺少已解析资源身份",
+                )
+            _validate_action_resource_reference(
+                resolved_reference,
+                target_handle=handle,
+                argument_name=name,
+            )
+            params[name] = {"uuid": str(resolved_reference["uuid"])}
+            resource_refs[handle_uuid] = {"resource_id": str(binding.value)}
     node["param"] = params
     template = action.template
     node["name"] = declaration.title or str(
@@ -550,6 +839,8 @@ def _composite_invocation_node(
             "authoring_source_order": source_order,
         }
     )
+    if resource_refs:
+        unilab["resource_refs"] = dict(sorted(resource_refs.items()))
     return node
 
 
@@ -569,6 +860,10 @@ def _generated_composite_node(
         result.pop(field, None)
     action = catalog.require_template(str(result["workflow_node_template_uuid"]))
     template = action.template
+    if result.get("action_name"):
+        result["action_type"] = str(
+            template.get("type") or "UniLabJsonCommand"
+        )
     if result.get("description") is None:
         result["description"] = template.get("description")
     return result
@@ -759,7 +1054,7 @@ def _candidate_node(
         "param": params,
         "footer": template.get("footer"),
         "action_name": declaration.action_name,
-        "action_type": None,
+        "action_type": str(template.get("type") or "UniLabJsonCommand"),
         "execution_policy": {},
         "disabled": False,
         "minimized": False,
@@ -880,28 +1175,41 @@ def _output_contract(
             AuthoringCatalogAction,
         ],
     ],
+    *,
+    input_contract: Mapping[str, Any],
+    declared_output_schemas: Mapping[str, Mapping[str, Any]],
+    result_output_schemas: Mapping[tuple[str, str], Mapping[str, Any]],
 ) -> dict[str, Any]:
     """从输出绑定构造版本 1 工作流输出合同。
 
-    参数说明：``program`` 含输入合同和输出声明，``result_nodes`` 提供节点输出
-    连接点（Handle）类型。返回：包含版本和规范输出描述列表的工作流输出合同；
-    输出引用缺失或歧义、显式结果记录 Schema 与绑定类型不一致、结果记录字段集
-    与返回字典不一致时抛出 ``AuthoringGraphError``，不生成部分合同。
+    参数说明：``program`` 含输出声明，``result_nodes`` 提供节点输出连接点
+    （Handle）类型，另两个参数是已按目录代际解析资源模板身份的输入合同和结果
+    Schema。返回：包含版本和规范输出描述列表的工作流输出合同；输出引用缺失或
+    歧义、显式结果记录 Schema 与绑定类型不一致、结果记录字段集与返回字典不
+    一致时抛出 ``AuthoringGraphError``，不生成部分合同。
     异常：上述输出引用或 Schema 合同不成立时抛出 ``AuthoringGraphError``。
     """
 
     inputs = {
-        item["name"]: item["schema"] for item in program.input_contract["parameters"]
+        item["name"]: item["schema"] for item in input_contract["parameters"]
     }
-    declared = dict(program.declared_output_schemas)
+    declared = {
+        name: deepcopy(schema)
+        for name, schema in declared_output_schemas.items()
+    }
     outputs: list[dict[str, Any]] = []
     for name, binding in program.outputs:
         if binding.kind == "workflow_input":
             schema = deepcopy(inputs[str(binding.value)])
         else:
-            _declaration, action = result_nodes[binding.result_name or ""]
+            declaration, action = result_nodes[binding.result_name or ""]
             handle = _require_handle(action, key=str(binding.value), io_type="source")
-            schema = _handle_schema(handle)
+            schema = deepcopy(
+                result_output_schemas.get(
+                    (declaration.result_name, str(binding.value)),
+                    _handle_schema(handle),
+                )
+            )
         if name in declared and not schema_is_assignable(schema, declared[name]):
             raise AuthoringGraphError(
                 "invalid_workflow_output",
@@ -916,7 +1224,7 @@ def _output_contract(
     # ``outputs_by_name`` 只用于检查作者显式输出；服务端隐式输出随后按工作流
     # 输入合同顺序追加，保持 integration D-068 的确定性身份和渲染固定点。
     outputs_by_name = {str(item["name"]): item for item in outputs}
-    for parameter in program.input_contract["parameters"]:
+    for parameter in input_contract["parameters"]:
         parameter_name = str(parameter["name"])
         parameter_schema = parameter["schema"]
         if not schema_contains_resource_slot(parameter_schema):
@@ -945,6 +1253,99 @@ def _output_contract(
         outputs.append(implicit_output)
         outputs_by_name[parameter_name] = implicit_output
     return {"version": 1, "outputs": outputs}
+
+
+def _resolved_input_contract(
+    program: WorkflowProgram,
+    *,
+    catalog: AuthoringCatalogSnapshot,
+) -> dict[str, Any]:
+    """把工作流输入注解中的资源模板源码身份冻结为本代 UUID。"""
+
+    contract = deepcopy(program.input_contract)
+    schemas = {
+        str(parameter["name"]): parameter["schema"]
+        for parameter in contract["parameters"]
+    }
+    _resolve_resource_template_symbols(
+        schemas,
+        program.input_resource_template_symbols,
+        catalog=catalog,
+    )
+    return contract
+
+
+def _resolved_declared_output_schemas(
+    program: WorkflowProgram,
+    *,
+    catalog: AuthoringCatalogSnapshot,
+) -> dict[str, dict[str, Any]]:
+    """把显式结果记录的资源模板源码身份冻结为本代 UUID。"""
+
+    schemas = {
+        name: deepcopy(schema)
+        for name, schema in program.declared_output_schemas
+    }
+    _resolve_resource_template_symbols(
+        schemas,
+        program.output_resource_template_symbols,
+        catalog=catalog,
+    )
+    return schemas
+
+
+def _resolve_resource_template_symbols(
+    schemas: Mapping[str, dict[str, Any]],
+    symbol_groups: tuple[tuple[str, tuple[str, ...]], ...],
+    *,
+    catalog: AuthoringCatalogSnapshot,
+) -> None:
+    """在已解析物料占位符（ResourceSlot）Schema 上写入目录 UUID 允许集合。"""
+
+    for name, symbols in symbol_groups:
+        schema = schemas.get(name)
+        if schema is None:
+            raise AuthoringGraphError(
+                "candidate_invalid",
+                "资源模板注解没有对应的工作流输入或结果字段",
+            )
+        try:
+            template_uuids = [
+                catalog.require_resource_template_uuid(symbol)
+                for symbol in symbols
+            ]
+        except AuthoringCatalogError as error:
+            raise AuthoringGraphError(
+                "template_catalog_mismatch",
+                "工作流注解引用了目录外资源模板",
+            ) from error
+        slot_schemas = _resource_slot_schemas(schema)
+        if len(slot_schemas) != 1:
+            raise AuthoringGraphError(
+                "candidate_invalid",
+                "资源模板注解必须唯一约束物料占位符（ResourceSlot）",
+            )
+        slot_schemas[0]["allowed_resource_template_uuids"] = template_uuids
+
+
+def _resource_slot_schemas(schema: dict[str, Any]) -> list[dict[str, Any]]:
+    """返回值 Schema 中全部物料占位符（ResourceSlot）子 Schema。"""
+
+    result: list[dict[str, Any]] = []
+    pending = [schema]
+    while pending:
+        item = pending.pop()
+        if item.get("$slot") == "ResourceSlot":
+            result.append(item)
+        members = item.get("anyOf")
+        if isinstance(members, list):
+            pending.extend(
+                member for member in members if isinstance(member, dict)
+            )
+        child = item.get("items")
+        if isinstance(child, dict):
+            pending.append(child)
+    return result
 
 
 def _output_bindings(

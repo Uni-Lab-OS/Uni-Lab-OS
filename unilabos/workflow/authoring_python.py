@@ -123,7 +123,8 @@ def render_authoring_python(
     }
 
     annotations = [
-        _render_parameter(item) for item in input_contract.get("parameters", [])
+        _render_parameter(item, catalog=catalog)
+        for item in input_contract.get("parameters", [])
     ]
     output_schemas = {
         item["name"]: item["schema"]
@@ -133,7 +134,11 @@ def render_authoring_python(
         and isinstance(item.get("schema"), Mapping)
     }
     output_annotations = {
-        name: _render_schema(dict(output_schemas[name]))
+        name: _render_schema(
+            dict(output_schemas[name]),
+            catalog=catalog,
+            include_resource_templates=False,
+        )
         for name in explicit_output_bindings
     }
     typing_names: set[str] = (
@@ -141,12 +146,15 @@ def render_authoring_python(
     )
     needs_field = False
     needs_resource_slot = False
-    for _name, annotation, _default, imports in annotations:
+    annotation_resource_imports: set[tuple[str, str]] = set()
+    for _name, annotation, _default, imports, resource_imports in annotations:
         typing_names.update(imports & {"Annotated", "Literal"})
+        annotation_resource_imports.update(resource_imports)
         needs_field = needs_field or "Field(" in annotation
         needs_resource_slot = needs_resource_slot or "ResourceSlot" in annotation
-    for annotation, imports in output_annotations.values():
+    for annotation, imports, resource_imports in output_annotations.values():
         typing_names.update(imports & {"Annotated", "Literal"})
+        annotation_resource_imports.update(resource_imports)
         needs_field = needs_field or "Field(" in annotation
         needs_resource_slot = needs_resource_slot or "ResourceSlot" in annotation
 
@@ -157,9 +165,16 @@ def render_authoring_python(
     if needs_field:
         lines.append("from pydantic import Field")
     for module, symbol in sorted(
-        device_imports | material_imports | published_workflow_imports
+        device_imports
+        | material_imports
+        | published_workflow_imports
+        | annotation_resource_imports
     ):
         lines.append(f"from {module} import {symbol}")
+    if annotation_resource_imports:
+        lines.append(
+            "from unilabos.registry.annotations import AllowedResourceTemplates"
+        )
     if needs_resource_slot:
         lines.append("from unilabos.registry.placeholder_type import ResourceSlot")
     group_nodes = [
@@ -197,7 +212,7 @@ def render_authoring_python(
     if explicit_output_bindings:
         lines.append(f"class {result_record_name}(TypedDict):")
         for output_name in explicit_output_bindings:
-            annotation, _imports = output_annotations[output_name]
+            annotation, _imports, _resource_imports = output_annotations[output_name]
             lines.append(f"    {output_name}: {annotation}")
         lines.extend(["", ""])
     for selector_key, symbol in device_symbols.items():
@@ -229,7 +244,7 @@ def render_authoring_python(
     if annotations:
         lines.append(f"def {function_name}(")
         lines.append("    *,")
-        for name, annotation, default, _imports in annotations:
+        for name, annotation, default, _imports, _resource_imports in annotations:
             suffix = "" if default is _NO_DEFAULT else f" = {default!r}"
             lines.append(f"    {name}: {annotation}{suffix},")
         return_annotation = (
@@ -242,7 +257,10 @@ def render_authoring_python(
         )
         lines.append(f"def {function_name}(){return_annotation}:")
 
-    incoming = _incoming_bindings(visible_edges)
+    incoming = _incoming_bindings(
+        visible_edges,
+        catalog_by_node=catalog_by_node,
+    )
     source_map: list[dict[str, Any]] = []
     # Python 动作结果变量承载节点间数据依赖，必须唯一且不能被节点展示标题改写。
     result_names: set[str] = set()
@@ -816,28 +834,71 @@ def _authoring_metadata(
 
 def _render_parameter(
     descriptor: Mapping[str, Any],
-) -> tuple[str, str, Any, set[str]]:
+    *,
+    catalog: AuthoringCatalogSnapshot,
+) -> tuple[str, str, Any, set[str], set[tuple[str, str]]]:
     """把输入合同参数渲染为函数参数片段。
 
     参数说明：``descriptor`` 是版本 1 参数描述；返回名称、注解、默认值和所需
-    typing 名称集合，非法描述抛出 ``AuthoringGraphError``。
+    typing 名称集合及资源模板 import，非法描述抛出 ``AuthoringGraphError``。
     """
 
     name = descriptor.get("name")
     schema = descriptor.get("schema")
     if not isinstance(name, str) or not isinstance(schema, Mapping):
         raise AuthoringGraphError("candidate_invalid", "工作流输入合同无效")
-    annotation, imports = _render_schema(dict(schema))
+    annotation, imports, resource_imports = _render_schema(
+        dict(schema),
+        catalog=catalog,
+    )
     default = descriptor.get("default", _NO_DEFAULT)
-    return name, annotation, default, imports
+    return name, annotation, default, imports, resource_imports
 
 
-def _render_schema(schema: dict[str, Any]) -> tuple[str, set[str]]:
+def _render_schema(
+    schema: dict[str, Any],
+    *,
+    catalog: AuthoringCatalogSnapshot,
+    include_resource_templates: bool = True,
+) -> tuple[str, set[str], set[tuple[str, str]]]:
     """把规范值 Schema 渲染为静态 Python 注解。
 
-    参数说明：``schema`` 是工作流版本 1 值 Schema；返回注解文本和所需 typing
-    名称，当前合同之外的 Schema 失败关闭。
+    参数说明：``schema`` 是工作流版本 1 值 Schema，``catalog`` 反解本代资源
+    模板源码身份；``include_resource_templates=False`` 用于显式结果记录，因为
+    其生产者连接点会在回编译时重新给出更精确保证。返回注解文本、所需 typing
+    名称和资源模板 import，当前合同之外的 Schema 失败关闭。
     """
+
+    template_uuids = (
+        _resource_template_allowlist(schema)
+        if include_resource_templates
+        else None
+    )
+    annotation, imports = _render_schema_base(schema)
+    resource_imports: set[tuple[str, str]] = set()
+    if template_uuids is not None:
+        symbols: list[str] = []
+        for template_uuid in template_uuids:
+            try:
+                identity = catalog.require_resource_template_symbol(template_uuid)
+            except AuthoringCatalogError as error:
+                raise AuthoringGraphError(
+                    "template_catalog_mismatch",
+                    "工作流合同引用了目录外资源模板",
+                ) from error
+            module, symbol = identity.rsplit(":", 1)
+            resource_imports.add((module, symbol))
+            symbols.append(symbol)
+        annotation = (
+            f"Annotated[{annotation}, "
+            f"AllowedResourceTemplates({', '.join(symbols)})]"
+        )
+        imports.add("Annotated")
+    return annotation, imports, resource_imports
+
+
+def _render_schema_base(schema: dict[str, Any]) -> tuple[str, set[str]]:
+    """渲染不含资源模板 metadata 的工作流值 Schema 主体。"""
 
     if schema.get("$slot") == "ResourceSlot":
         return "ResourceSlot", set()
@@ -849,7 +910,7 @@ def _render_schema(schema: dict[str, Any]) -> tuple[str, set[str]]:
             or members[1] != {"type": "null"}
         ):
             raise AuthoringGraphError("candidate_invalid", "nullable Schema 无效")
-        base, imports = _render_schema(dict(members[0]))
+        base, imports = _render_schema_base(dict(members[0]))
         return f"{base} | None", imports
     value_type = schema.get("type")
     names = {
@@ -864,6 +925,12 @@ def _render_schema(schema: dict[str, Any]) -> tuple[str, set[str]]:
         if not isinstance(values, list) or not values:
             raise AuthoringGraphError("candidate_invalid", "枚举 Schema 无效")
         return f"Literal[{', '.join(repr(item) for item in values)}]", {"Literal"}
+    if value_type == "array":
+        items = schema.get("items")
+        if not isinstance(items, Mapping):
+            raise AuthoringGraphError("candidate_invalid", "数组 Schema 无效")
+        item_annotation, imports = _render_schema_base(dict(items))
+        return f"list[{item_annotation}]", imports
     if value_type not in names:
         raise AuthoringGraphError("candidate_invalid", "暂不支持的输入 Schema")
     annotation = names[value_type]
@@ -883,15 +950,62 @@ def _render_schema(schema: dict[str, Any]) -> tuple[str, set[str]]:
     return annotation, set()
 
 
+def _resource_template_allowlist(schema: Mapping[str, Any]) -> list[str] | None:
+    """读取值 Schema 中唯一的资源模板允许集合。"""
+
+    found: list[list[str]] = []
+    pending = [schema]
+    while pending:
+        item = pending.pop()
+        raw_allowlist = item.get("allowed_resource_template_uuids")
+        if raw_allowlist is not None:
+            if (
+                not isinstance(raw_allowlist, list)
+                or not raw_allowlist
+                or any(not isinstance(value, str) for value in raw_allowlist)
+            ):
+                raise AuthoringGraphError(
+                    "candidate_invalid",
+                    "资源模板允许集合无效",
+                )
+            found.append(list(raw_allowlist))
+        members = item.get("anyOf")
+        if isinstance(members, list):
+            pending.extend(
+                member for member in members if isinstance(member, Mapping)
+            )
+        child = item.get("items")
+        if isinstance(child, Mapping):
+            pending.append(child)
+    if len(found) > 1:
+        raise AuthoringGraphError(
+            "candidate_invalid",
+            "值 Schema 包含多个资源模板允许集合",
+        )
+    return found[0] if found else None
+
+
 def _incoming_bindings(
     edges: list[Any],
+    *,
+    catalog_by_node: Mapping[str, AuthoringCatalogAction],
 ) -> dict[tuple[str, str], tuple[str, str]]:
     """按目标节点和目标连接点索引数据边来源。
 
-    参数说明：``edges`` 是完整候选边；返回目标二元组到源二元组映射，重复目标
-    失败关闭。
+    参数说明：``edges`` 是完整候选边，``catalog_by_node`` 证明哪些目标连接点
+    属于动作参数。返回数据目标二元组到源二元组映射；多个 ``ready`` 控制依赖
+    可汇合到同一结构连接点，不进入参数渲染，数据目标重复仍失败关闭。
     """
 
+    data_targets = {
+        (node_uuid, str(handle["uuid"]))
+        for node_uuid, action in catalog_by_node.items()
+        for handle in action.handles
+        if handle.get("io_type") == "target"
+        and handle.get("handle_key") != "ready"
+        and str(handle.get("data_source") or "executor").lower()
+        in {"executor", "goal"}
+    }
     result: dict[tuple[str, str], tuple[str, str]] = {}
     for value in edges:
         if not isinstance(value, Mapping):
@@ -900,12 +1014,17 @@ def _incoming_bindings(
             str(value.get("target_node_uuid")),
             str(value.get("target_handle_uuid")),
         )
+        if target not in data_targets:
+            continue
         source = (
             str(value.get("source_node_uuid")),
             str(value.get("source_handle_uuid")),
         )
         if target in result:
-            raise AuthoringGraphError("candidate_invalid", "目标连接点存在多条入边")
+            raise AuthoringGraphError(
+                "candidate_invalid",
+                f"目标连接点存在多条入边：{target[0]}/{target[1]}",
+            )
         result[target] = source
     return result
 

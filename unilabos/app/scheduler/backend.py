@@ -219,9 +219,12 @@ class JobExecutionBackend:
             # （normal / skip / operator_intervention，见 registry.action_policy）
             ret_value = return_info.get("return_value")
             suc_type = str(return_info.get("suc_type") or "normal")
+        effective_success = status == "success"
+        if isinstance(ret_value, Mapping) and ret_value.get("success") is False:
+            effective_success = False
         parent = extract_trace_context(item.trace_context)
         self._put_event(
-            ("finished", item.job_id, status == "success", ret_value, suc_type),
+            ("finished", item.job_id, effective_success, ret_value, suc_type),
             context=parent,
         )
 
@@ -435,7 +438,9 @@ class JobExecutionBackend:
     def _default_host_getter() -> Any:
         from unilabos.ros.nodes.presets.host_node import HostNode
 
-        return HostNode.get_instance(0)
+        # 工作流任务（WorkflowTask）恢复可早于 ROS 设备树初始化；
+        # 该窗口内作业仍未越过设备边界，等待 Host 就绪后再发送。
+        return HostNode.get_instance(30)
 
 
 def make_device_material_lock_resolver(

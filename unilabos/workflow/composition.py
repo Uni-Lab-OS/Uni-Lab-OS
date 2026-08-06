@@ -188,6 +188,10 @@ def compose_workflow_runtime(
             discovery_plan = discover_editable_sources(configured_roots)
             new_service.replace_discovered_source_authorizations(discovery_plan)
             new_service.recover_registered_sources()
+            if task_scheduler_bridge is not None:
+                # 只恢复没有结果不明作业的运行中任务；已成功动作
+                # 仅重建 DAG 状态，不越过物理派发边界重放。
+                task_scheduler_bridge.recover_active_tasks()
             new_monitor = WorkflowSourceMonitor(new_service)
         except BaseException as startup_error:
             _cleanup_partial_composition(

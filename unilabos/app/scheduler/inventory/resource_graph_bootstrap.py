@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import logging
 import math
 import sqlite3
 import uuid
@@ -21,7 +22,11 @@ from unilabos.registry.template_snapshot import RegistryTemplateSnapshot
 _SITE_TYPES = frozenset({"well", "tipspot", "tip_spot", "tip-spot"})
 _SOURCE_KEY = "resource_graph_bootstrap_source"
 _FINGERPRINT_KEY = "resource_graph_bootstrap_fingerprint"
+_FINGERPRINT_VERSION_KEY = "resource_graph_bootstrap_fingerprint_version"
+_FINGERPRINT_VERSION = "2"
 _HOST_EXECUTOR_ID = "host_node"
+
+logger = logging.getLogger(__name__)
 
 
 class ResourceGraphBootstrapError(RuntimeError):
@@ -453,12 +458,37 @@ def _commit_projection(
             )
             stored_source = _meta(connection, _SOURCE_KEY)
             stored_fingerprint = _meta(connection, _FINGERPRINT_KEY)
+            stored_fingerprint_version = _meta(
+                connection,
+                _FINGERPRINT_VERSION_KEY,
+            )
             if (
                 material_count
                 or stored_source is not None
                 or stored_fingerprint is not None
             ):
                 if stored_source == source_name and stored_fingerprint == fingerprint:
+                    if stored_fingerprint_version is None:
+                        connection.execute(
+                            "INSERT INTO lab_meta(meta_key,meta_value) VALUES (?,?)",
+                            (_FINGERPRINT_VERSION_KEY, _FINGERPRINT_VERSION),
+                        )
+                    return "unchanged"
+                if (
+                    stored_source == source_name
+                    and stored_fingerprint_version is None
+                    and _projection_matches_persisted_rows(connection, projection)
+                ):
+                    # 第 1 版指纹错误包含整个设备动作注册表。仅当当前库存基础行与
+                    # 候选投影逐字段相同时，原子升级为只覆盖库存图的第 2 版指纹。
+                    connection.execute(
+                        "UPDATE lab_meta SET meta_value=? WHERE meta_key=?",
+                        (fingerprint, _FINGERPRINT_KEY),
+                    )
+                    connection.execute(
+                        "INSERT INTO lab_meta(meta_key,meta_value) VALUES (?,?)",
+                        (_FINGERPRINT_VERSION_KEY, _FINGERPRINT_VERSION),
+                    )
                     return "unchanged"
                 raise ResourceGraphBootstrapError(
                     "既有库存权威与资源图来源或指纹（fingerprint）冲突"
@@ -559,7 +589,11 @@ def _commit_projection(
                     )
             connection.executemany(
                 "INSERT INTO lab_meta(meta_key,meta_value) VALUES (?,?)",
-                ((_SOURCE_KEY, source_name), (_FINGERPRINT_KEY, fingerprint)),
+                (
+                    (_SOURCE_KEY, source_name),
+                    (_FINGERPRINT_KEY, fingerprint),
+                    (_FINGERPRINT_VERSION_KEY, _FINGERPRINT_VERSION),
+                ),
             )
     except ResourceGraphBootstrapError:
         raise
@@ -568,6 +602,192 @@ def _commit_projection(
     except sqlite3.Error as error:
         raise ResourceGraphBootstrapError("资源图投影事务失败") from error
     return "imported"
+
+
+def _projection_matches_persisted_rows(
+    connection: sqlite3.Connection,
+    projection: Mapping[str, list[dict[str, Any]]],
+) -> bool:
+    """核对旧指纹库中的库存资源图基础行是否与当前投影完全一致。
+
+    参数：``connection`` 是当前启动事务，``projection`` 是已解析稳定
+    模板 UUID 的候选。返回：物料、相对位置和库位（Site）的数量
+    与持久字段全部一致时为真。异常：SQL 错误交由外层统一包装。
+    """
+
+    material_fields = (
+        "uuid",
+        "description",
+        "meta_data",
+        "resource_template_uuid",
+        "parent_uuid",
+        "class",
+        "barcode",
+        "name",
+        "config",
+        "data",
+    )
+    expected_materials = sorted(
+        (
+            material["uuid"],
+            material["description"],
+            _stable_projection_meta(material["meta_data"]),
+            material["template_uuid"],
+            material["parent_uuid"],
+            material["class"],
+            material["barcode"],
+            material["name"],
+            _dump(material["config"]),
+            _dump(material["data"]),
+        )
+        for material in projection["materials"]
+    )
+    persisted_materials = []
+    for row in connection.execute(
+        f"SELECT {','.join(material_fields)} FROM material "
+        "WHERE deleted_at IS NULL"
+    ).fetchall():
+        normalized = list(row)
+        normalized[2] = _stable_projection_meta(normalized[2])
+        persisted_materials.append(tuple(normalized))
+    persisted_materials.sort()
+    if not _same_projection_rows(
+        "material",
+        material_fields,
+        persisted_materials,
+        expected_materials,
+    ):
+        return False
+
+    position_fields = (
+        "uuid",
+        "material_uuid",
+        "position_x",
+        "position_y",
+        "position_z",
+        "depth",
+        "length",
+        "width",
+        "scale_x",
+        "scale_y",
+        "scale_z",
+        "rotation_x",
+        "rotation_y",
+        "rotation_z",
+    )
+    expected_positions = sorted(
+        tuple(position[field] for field in position_fields)
+        for position in projection["relative_positions"]
+    )
+    persisted_positions = sorted(
+        tuple(row)
+        for row in connection.execute(
+            f"SELECT {','.join(position_fields)} FROM relative_position "
+            "WHERE deleted_at IS NULL"
+        ).fetchall()
+    )
+    if not _same_projection_rows(
+        "relative_position",
+        position_fields,
+        persisted_positions,
+        expected_positions,
+    ):
+        return False
+
+    site_fields = (
+        "uuid",
+        "description",
+        "meta_data",
+        "material_uuid",
+        "name",
+        "sort_order",
+        "allowed_resource_template_uuids",
+        "occupied_material_uuid",
+        "position_x",
+        "position_y",
+        "position_z",
+        "depth",
+        "length",
+        "width",
+    )
+    expected_sites = sorted(
+        (
+            site["uuid"],
+            site["description"],
+            _stable_projection_meta(site["meta_data"]),
+            site["material_uuid"],
+            site["name"],
+            site["sort_order"],
+            _dump(site["allowed_template_uuids"]),
+            site["occupied_material_uuid"],
+            site["position_x"],
+            site["position_y"],
+            site["position_z"],
+            site["depth"],
+            site["length"],
+            site["width"],
+        )
+        for site in projection["sites"]
+    )
+    persisted_sites = []
+    for row in connection.execute(
+        f"SELECT {','.join(site_fields)} FROM site WHERE deleted_at IS NULL"
+    ).fetchall():
+        normalized = list(row)
+        normalized[2] = _stable_projection_meta(normalized[2])
+        persisted_sites.append(tuple(normalized))
+    persisted_sites.sort()
+    return _same_projection_rows(
+        "site",
+        site_fields,
+        persisted_sites,
+        expected_sites,
+    )
+
+
+def _same_projection_rows(
+    table: str,
+    fields: tuple[str, ...],
+    persisted: list[tuple[Any, ...]],
+    expected: list[tuple[Any, ...]],
+) -> bool:
+    """比较一类投影行，并仅记录首个结构差异用于启动诊断。"""
+
+    if persisted == expected:
+        return True
+    persisted_by_uuid = {str(row[0]): row for row in persisted}
+    expected_by_uuid = {str(row[0]): row for row in expected}
+    missing = sorted(set(expected_by_uuid) - set(persisted_by_uuid))
+    extra = sorted(set(persisted_by_uuid) - set(expected_by_uuid))
+    changed_uuid = next(
+        (
+            row_uuid
+            for row_uuid in sorted(set(persisted_by_uuid) & set(expected_by_uuid))
+            if persisted_by_uuid[row_uuid] != expected_by_uuid[row_uuid]
+        ),
+        "",
+    )
+    changed_fields: list[str] = []
+    if changed_uuid:
+        actual_row = persisted_by_uuid[changed_uuid]
+        expected_row = expected_by_uuid[changed_uuid]
+        changed_fields = [
+            field
+            for index, field in enumerate(fields)
+            if actual_row[index] != expected_row[index]
+        ]
+    logger.warning(
+        "旧资源图指纹迁移核对失败 table=%s persisted=%d expected=%d "
+        "missing=%s extra=%s changed_uuid=%s changed_fields=%s",
+        table,
+        len(persisted),
+        len(expected),
+        missing[:3],
+        extra[:3],
+        changed_uuid,
+        changed_fields,
+    )
+    return False
 
 
 def _is_site_node(node: Mapping[str, Any]) -> bool:
@@ -665,23 +885,69 @@ def _site_pose(node: Mapping[str, Any]) -> dict[str, float]:
 
 def _fingerprint(
     source_name: str,
-    snapshot: RegistryTemplateSnapshot,
+    _snapshot: RegistryTemplateSnapshot,
     projection: Mapping[str, Any],
 ) -> str:
-    """计算资源图与模板代际的规范 SHA-256 指纹。
+    """计算资源图的规范 SHA-256 指纹。
 
-    参数：来源、注册表快照和已解析投影。返回：``sha256:`` 前缀指纹。
-    异常：非 JSON 值由 ``json.dumps`` 原样拒绝并由公开入口包装。
+    参数：来源、仅用于接口代际兼容的注册表快照，以及已解析
+    投影。返回：``sha256:`` 前缀指纹。异常：非 JSON 值由
+    ``json.dumps`` 原样拒绝并由公开入口包装。
     """
 
+    # ``projection`` 已包含实际使用的稳定资源模板 UUID。设备动作
+    # 合同虽会改变全注册表快照指纹，但不属于库存资源图。
+    stable_projection = {
+        section: [
+            {
+                **row,
+                **(
+                    {"meta_data": _stable_projection_meta_object(row["meta_data"])}
+                    if "meta_data" in row
+                    else {}
+                ),
+            }
+            for row in rows
+        ]
+        for section, rows in projection.items()
+    }
     payload = json.dumps(
-        {"source_id": source_name, "registry": snapshot.fingerprint, **projection},
+        {
+            "version": _FINGERPRINT_VERSION,
+            "source_id": source_name,
+            **stable_projection,
+        },
         ensure_ascii=False,
         allow_nan=False,
         sort_keys=True,
         separators=(",", ":"),
     ).encode("utf-8")
     return "sha256:" + hashlib.sha256(payload).hexdigest()
+
+
+def _stable_projection_meta(value: object) -> str:
+    """序列化不含进程内资源 UUID 的启动投影元数据。"""
+
+    if isinstance(value, str):
+        try:
+            decoded = json.loads(value)
+        except json.JSONDecodeError:
+            return value
+    else:
+        decoded = value
+    return _dump(_stable_projection_meta_object(decoded))
+
+
+def _stable_projection_meta_object(value: object) -> dict[str, Any]:
+    """移除只用于单次资源树关系解析的运行时元数据。"""
+
+    if not isinstance(value, Mapping):
+        return {}
+    return {
+        str(key): item
+        for key, item in value.items()
+        if key != "source_runtime_uuid"
+    }
 
 
 def _stable_uuid(source_name: str, domain: str, node_id: str) -> str:

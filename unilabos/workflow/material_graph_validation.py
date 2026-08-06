@@ -11,6 +11,7 @@ from unilabos.workflow.workflow_io import (
     ValidatedWorkflowIO,
     WorkflowIOValidationError,
     handle_value_schema,
+    node_output_value_schema,
     schema_contains_resource_slot,
     schema_is_assignable,
     validate_workflow_graph_io,
@@ -58,9 +59,11 @@ def validate_material_graph(
     # ``reachability`` 是候选 DAG 的传递可达关系；同一物料来源允许被多个严格
     # 排序的动作复用，但任何一对可并发兄弟消费者仍然关闭失败。
     reachability = _node_reachability(nodes=nodes, edges=edges)
+    composite_internal_nodes = _composite_internal_node_uuids(nodes)
     _validate_workflow_input_linearity(
         validated_workflow_io,
         reachability=reachability,
+        ignored_node_uuids=composite_internal_nodes,
     )
     # ``outgoing_edges`` 按来源节点和来源连接点聚合全部提交边；禁用节点也不能把
     # 非法物料分叉藏进持久图，因此这里不按运行状态过滤。
@@ -109,7 +112,9 @@ def validate_material_graph(
         if not schema_is_assignable(producer_schema, consumer_schema):
             raise MaterialGraphValidationError(
                 "material_template_mismatch",
-                "物料生产者的资源模板保证不能满足消费者约束",
+                "物料生产者的资源模板保证不能满足消费者约束："
+                f"{source_node_uuid}:{source_handle.get('handle_key')} -> "
+                f"{_field(edge, 'target_node_uuid')}:{target_handle.get('handle_key')}",
             )
 
 
@@ -228,6 +233,27 @@ def _producer_schema(
             "$slot": "ResourceSlot",
             "allowed_resource_template_uuids": [resource_template_uuid],
         }
+    node_uuid = str(_field(node, "uuid"))
+    meta_data = (
+        node.get("meta_data")
+        if isinstance(node, Mapping)
+        else getattr(node, "meta_data", {})
+    )
+    unilab = meta_data.get("unilab") if isinstance(meta_data, Mapping) else None
+    overrides = (
+        unilab.get("output_schema_overrides")
+        if isinstance(unilab, Mapping)
+        else None
+    )
+    source_handle_uuid = str(_field(source_handle, "uuid"))
+    if isinstance(overrides, Mapping) and source_handle_uuid in overrides:
+        return node_output_value_schema(
+            node_uuid=node_uuid,
+            handle_uuid=source_handle_uuid,
+            handle=source_handle,
+            handles=handles,
+            node_meta_data={node_uuid: meta_data},
+        )
     if _is_implicit_passthrough(source_handle):
         passthrough_input = _same_name_input(
             source_handle,
@@ -241,6 +267,7 @@ def _validate_workflow_input_linearity(
     validated_workflow_io: ValidatedWorkflowIO | None,
     *,
     reachability: Mapping[str, frozenset[str]],
+    ignored_node_uuids: frozenset[str] = frozenset(),
 ) -> None:
     """把工作流输入物料绑定计入物理消费路径。
 
@@ -259,21 +286,71 @@ def _validate_workflow_input_linearity(
     }
     consumers: dict[str, list[str]] = defaultdict(list)
     for node_uuid, bindings in validated_workflow_io.input_bindings.items():
+        # 组合工作流内部节点的绑定是执行计划（ExecutionPlan）
+        # 展开事实；父图物料流权威仍由调用边界节点承担，
+        # 不能把两者重复计为两个物理消费者。
+        if node_uuid in ignored_node_uuids:
+            continue
         for binding in bindings.values():
             parameter = binding["parameter"]
             if schema_contains_resource_slot(schemas[parameter]):
                 consumers[parameter].append(node_uuid)
-    if any(
-        not _consumer_nodes_are_strictly_ordered(
+    unordered_parameters = sorted(
+        parameter
+        for parameter, consumer_nodes in consumers.items()
+        if not _consumer_nodes_are_strictly_ordered(
             consumer_nodes,
             reachability=reachability,
         )
-        for consumer_nodes in consumers.values()
-    ):
+    )
+    if unordered_parameters:
         raise MaterialGraphValidationError(
             "material_flow_fan_out",
-            "同一个工作流输入物料不能绑定多个物理消费者",
+            "工作流输入物料不能绑定多个无序物理消费者："
+            + ", ".join(unordered_parameters),
         )
+
+
+def _composite_internal_node_uuids(nodes: Sequence[Any]) -> frozenset[str]:
+    """找出展示父级链中位于组合调用边界下的内部节点。
+
+    参数：``nodes`` 是候选图全部节点。返回：仅含展开内部节点
+    UUID 的不可变集合，组合调用边界本身不在其中。异常：无；图形状
+    仍由上层通用校验器负责。
+    """
+
+    def value(node: Any, name: str) -> Any:
+        """兼容读取普通映射和 Pydantic 节点字段。"""
+
+        return node.get(name) if isinstance(node, Mapping) else getattr(node, name, None)
+
+    by_uuid = {
+        str(value(node, "uuid")): node
+        for node in nodes
+        if isinstance(value(node, "uuid"), str)
+    }
+    composite_roots: set[str] = set()
+    for node_uuid, node in by_uuid.items():
+        meta_data = value(node, "meta_data")
+        unilab = (
+            meta_data.get("unilab") if isinstance(meta_data, Mapping) else None
+        )
+        if isinstance(unilab, Mapping) and isinstance(
+            unilab.get("composite"), Mapping
+        ):
+            composite_roots.add(node_uuid)
+    internal: set[str] = set()
+    for node_uuid, node in by_uuid.items():
+        parent_uuid = value(node, "parent_uuid")
+        visited: set[str] = set()
+        while isinstance(parent_uuid, str) and parent_uuid not in visited:
+            if parent_uuid in composite_roots:
+                internal.add(node_uuid)
+                break
+            visited.add(parent_uuid)
+            parent = by_uuid.get(parent_uuid)
+            parent_uuid = value(parent, "parent_uuid") if parent is not None else None
+    return frozenset(internal)
 
 
 def _node_reachability(

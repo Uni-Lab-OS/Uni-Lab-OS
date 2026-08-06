@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import importlib
+import json
 from collections.abc import Iterator
 from pathlib import Path
 from typing import Any
@@ -16,10 +17,12 @@ TASK_UUID = "20000000-0000-4000-8000-000000000001"
 NODE_UUIDS = (
     "30000000-0000-4000-8000-000000000001",
     "30000000-0000-4000-8000-000000000002",
+    "30000000-0000-4000-8000-000000000003",
 )
 JOB_UUIDS = (
     "40000000-0000-4000-8000-000000000001",
     "40000000-0000-4000-8000-000000000002",
+    "40000000-0000-4000-8000-000000000003",
 )
 _CREATED_AT = "2026-08-05T00:00:00Z"
 
@@ -64,8 +67,8 @@ def _seed_task(store: WorkflowStore, *, job_count: int = 2) -> tuple[str, ...]:
     异常：数量不在测试支持范围内时抛出 ``ValueError``；数据库约束异常原样传播。
     """
 
-    if job_count not in {1, 2}:
-        raise ValueError("测试任务只支持一或两个工作流节点作业")
+    if job_count not in {1, 2, 3}:
+        raise ValueError("测试任务只支持一至三个工作流节点作业")
     store.create_workflow(
         workflow_uuid=WORKFLOW_UUID,
         name="F05.3-B 运行投影",
@@ -187,6 +190,141 @@ def test_material_source_admission_projects_typed_result_atomically(
     assert jobs_by_uuid[source_job_uuid]["status"] == "succeeded"
     assert jobs_by_uuid[source_job_uuid]["return_info"] == {"material": binding}
     assert jobs_by_uuid[action_job_uuid]["status"] == "pending"
+
+
+def test_running_admission_replay_repairs_implicit_passthrough_binding(
+    store: WorkflowStore,
+) -> None:
+    """运行中恢复必须补齐旧计划遗漏的隐式物料透传参数。
+
+    参数：``store`` 是隔离工作流权威。返回无；断言已成功物料来源
+    （MaterialSource）的幂等准入重放会从冻结边推导待处理动作参数，且不会
+    改写任务或来源终态。
+    """
+
+    source_job_uuid, action_job_uuid = _seed_material_source_task(
+        store,
+        with_action=True,
+    )
+    binding = {
+        "uuid": "50000000-0000-4000-8000-000000000001",
+        "resource_template_uuid": "60000000-0000-4000-8000-000000000001",
+    }
+    plan = {
+        "version": 1,
+        "nodes": [
+            {
+                "uuid": NODE_UUIDS[0],
+                "kind": "material_source",
+                "material_binding_targets": [],
+            },
+            {"uuid": NODE_UUIDS[1], "kind": "device_action"},
+        ],
+        "edges": [
+            {
+                "source_node_uuid": NODE_UUIDS[0],
+                "target_node_uuid": NODE_UUIDS[1],
+                "source_type": "ResourceSlot",
+                "target_type": "ResourceSlot",
+                "target_data_key": "beaker",
+            }
+        ],
+    }
+    with store.transaction() as connection:
+        connection.execute(
+            "UPDATE workflow_task SET status = 'running', execution_plan = ? "
+            "WHERE uuid = ?",
+            (json.dumps(plan), TASK_UUID),
+        )
+        connection.execute(
+            "UPDATE workflow_node_job SET status = 'succeeded', return_info = ? "
+            "WHERE uuid = ?",
+            (json.dumps({"material": binding}), source_job_uuid),
+        )
+
+    _projection(store).project_material_source_admission(
+        TASK_UUID,
+        {NODE_UUIDS[0]: binding},
+    )
+
+    assert store.get_task(TASK_UUID)["status"] == "running"
+    assert store.get_job(source_job_uuid)["status"] == "succeeded"
+    assert store.get_job(action_job_uuid)["param"] == {
+        "beaker": {"uuid": binding["uuid"]}
+    }
+
+
+def test_multiple_material_sources_targeting_one_action_keep_all_bindings(
+    store: WorkflowStore,
+) -> None:
+    """同一动作的多个自动物料来源必须在一笔准入中累积全部参数。
+
+    参数：``store`` 是隔离工作流权威。返回无；断言两个物料来源
+    （MaterialSource）分别投影到同一动作的不同参数时，后写来源不会从事务开始
+    时的陈旧作业快照覆盖先写来源。
+    """
+
+    source_job_1, source_job_2, action_job = _seed_task(store, job_count=3)
+    with store.transaction() as connection:
+        connection.execute(
+            "UPDATE workflow_node_job SET executor_kind = 'material_source' "
+            "WHERE uuid IN (?, ?)",
+            (source_job_1, source_job_2),
+        )
+        connection.execute(
+            "UPDATE workflow_task SET execution_plan = ? WHERE uuid = ?",
+            (
+                json.dumps(
+                    {
+                        "version": 1,
+                        "nodes": [
+                            {
+                                "uuid": NODE_UUIDS[0],
+                                "kind": "material_source",
+                                "material_binding_targets": [
+                                    {
+                                        "workflow_node_uuid": NODE_UUIDS[2],
+                                        "param_key": "solvent_pump_1",
+                                    }
+                                ],
+                            },
+                            {
+                                "uuid": NODE_UUIDS[1],
+                                "kind": "material_source",
+                                "material_binding_targets": [
+                                    {
+                                        "workflow_node_uuid": NODE_UUIDS[2],
+                                        "param_key": "solvent_pump_2",
+                                    }
+                                ],
+                            },
+                            {"uuid": NODE_UUIDS[2], "kind": "device_action"},
+                        ],
+                        "edges": [],
+                    }
+                ),
+                TASK_UUID,
+            ),
+        )
+
+    binding_1 = {
+        "uuid": "50000000-0000-4000-8000-000000000001",
+        "resource_template_uuid": "60000000-0000-4000-8000-000000000001",
+    }
+    binding_2 = {
+        "uuid": "50000000-0000-4000-8000-000000000002",
+        "resource_template_uuid": "60000000-0000-4000-8000-000000000001",
+    }
+
+    _projection(store).project_material_source_admission(
+        TASK_UUID,
+        {NODE_UUIDS[0]: binding_1, NODE_UUIDS[1]: binding_2},
+    )
+
+    assert store.get_job(action_job)["param"] == {
+        "solvent_pump_1": {"uuid": binding_1["uuid"]},
+        "solvent_pump_2": {"uuid": binding_2["uuid"]},
+    }
 
 
 def test_source_only_admission_completes_task_without_running_state(

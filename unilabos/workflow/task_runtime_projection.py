@@ -6,6 +6,7 @@ import sqlite3
 from collections.abc import Mapping, Sequence
 from typing import Any
 
+from unilabos.workflow._execution_plan_graph import final_target_data_key
 from unilabos.workflow.json_codec import decode_json_bytes, encode_json
 from unilabos.workflow.store import (
     StoreConflict,
@@ -248,9 +249,15 @@ class TaskRuntimeProjection:
             source_node_uuids = {str(row["workflow_node_uuid"]) for row in source_rows}
             if not source_rows or set(normalized_bindings) != source_node_uuids:
                 raise StoreConflict(f"物料来源绑定集合不完整：{task_uuid}")
-            if task_row["status"] not in {"pending", "succeeded"}:
+            if task_row["status"] not in {"pending", "running", "succeeded"}:
                 raise StoreConflict(f"任务不能提交物料来源结果：{task_uuid}")
 
+            self._project_material_binding_params(
+                connection,
+                task_row=task_row,
+                job_rows=job_rows,
+                bindings=normalized_bindings,
+            )
             projected_at = utc_now()
             for row in source_rows:
                 node_uuid = str(row["workflow_node_uuid"])
@@ -295,18 +302,131 @@ class TaskRuntimeProjection:
                     raise StoreConflict(f"来源任务终态发生并发变化：{task_uuid}")
             return self._aggregate(connection, task_uuid)
 
+    @staticmethod
+    def _project_material_binding_params(
+        connection: sqlite3.Connection,
+        *,
+        task_row: sqlite3.Row,
+        job_rows: Sequence[sqlite3.Row],
+        bindings: Mapping[str, Mapping[str, str]],
+    ) -> None:
+        """把自动库存选择结果原子写入既有普通动作作业参数。
+
+        参数：连接、任务行和作业行属于同一工作流存储（WorkflowStore）事务；
+        ``bindings`` 是已整组占用的逐来源物料（Material）身份。返回无。异常：
+        计划目标、作业状态或既有参数冲突时抛 ``StoreConflict``，来源成功状态与
+        参数写入一起回滚。
+        """
+
+        plan = _decode_json_field(task_row["execution_plan"], fallback={})
+        # 早期兼容任务没有冻结绑定目标；它们仍只投影来源结果，不补写动作参数。
+        if plan == {}:
+            return
+        raw_nodes = plan.get("nodes") if isinstance(plan, Mapping) else None
+        if not isinstance(raw_nodes, Sequence) or isinstance(raw_nodes, (str, bytes)):
+            raise StoreConflict("执行计划节点必须是数组")
+        jobs_by_node = {str(row["workflow_node_uuid"]): row for row in job_rows}
+        raw_edges = plan.get("edges", [])
+        if not isinstance(raw_edges, Sequence) or isinstance(raw_edges, (str, bytes)):
+            raise StoreConflict("执行计划边必须是数组")
+        inferred_targets: dict[str, list[dict[str, str]]] = {}
+        for raw_edge in raw_edges:
+            if not isinstance(raw_edge, Mapping):
+                raise StoreConflict("执行计划边必须是对象")
+            if (
+                raw_edge.get("dependency_only") is True
+                or raw_edge.get("source_type") != "ResourceSlot"
+                or raw_edge.get("target_type") != "ResourceSlot"
+            ):
+                continue
+            source_uuid = str(raw_edge.get("source_node_uuid") or "").strip()
+            target_uuid = str(raw_edge.get("target_node_uuid") or "").strip()
+            param_key = final_target_data_key(
+                str(raw_edge.get("target_data_key") or "")
+            )
+            if source_uuid and target_uuid and param_key:
+                inferred_targets.setdefault(source_uuid, []).append(
+                    {"workflow_node_uuid": target_uuid, "param_key": param_key}
+                )
+        claimed_targets: set[tuple[str, str]] = set()
+        for raw_node in raw_nodes:
+            if not isinstance(raw_node, Mapping) or raw_node.get("kind") != "material_source":
+                continue
+            source_uuid = str(raw_node.get("uuid") or "")
+            binding = bindings.get(source_uuid)
+            if binding is None:
+                raise StoreConflict(f"物料来源缺少运行绑定：{source_uuid}")
+            raw_targets = raw_node.get("material_binding_targets", [])
+            if not isinstance(raw_targets, Sequence) or isinstance(
+                raw_targets, (str, bytes)
+            ):
+                raise StoreConflict("物料来源绑定目标必须是数组")
+            combined_targets = [*raw_targets, *inferred_targets.get(source_uuid, [])]
+            for raw_target in combined_targets:
+                if not isinstance(raw_target, Mapping):
+                    raise StoreConflict("物料来源绑定目标必须是对象")
+                target_uuid = str(raw_target.get("workflow_node_uuid") or "").strip()
+                param_key = str(raw_target.get("param_key") or "").strip()
+                target = (target_uuid, param_key)
+                if not target_uuid or not param_key:
+                    raise StoreConflict("物料来源绑定目标不能为空")
+                if target in claimed_targets:
+                    continue
+                claimed_targets.add(target)
+                target_row = jobs_by_node.get(target_uuid)
+                if target_row is None or target_row["executor_kind"] == "material_source":
+                    raise StoreConflict(f"物料来源绑定目标不是普通动作：{target_uuid}")
+                # 多个物料来源（MaterialSource）可以把不同参数绑定到同一个动作。
+                # ``jobs_by_node`` 来自事务开始时的快照；每次写入前重新读取目标，
+                # 否则后一个来源会用陈旧参数覆盖前一个来源刚提交的绑定。
+                current_target_row = TaskRuntimeProjection._job_row(
+                    connection,
+                    str(target_row["uuid"]),
+                )
+                param = _decode_json_field(current_target_row["param"], fallback={})
+                if not isinstance(param, Mapping):
+                    raise StoreConflict(
+                        f"工作流节点作业参数不是对象：{current_target_row['uuid']}"
+                    )
+                updated_param = dict(param)
+                material_reference = {"uuid": str(binding["uuid"])}
+                existing = updated_param.get(param_key)
+                if existing is not None and existing != material_reference:
+                    raise StoreConflict(
+                        f"物料来源绑定与作业参数冲突：{current_target_row['uuid']}"
+                    )
+                if existing == material_reference:
+                    continue
+                updated_param[param_key] = material_reference
+                changed = connection.execute(
+                    "UPDATE workflow_node_job SET param = ?, update_time = ? "
+                    "WHERE uuid = ? AND status = 'pending' AND deleted_at IS NULL",
+                    (
+                        _encode_json_field(updated_param, field_name="param"),
+                        utc_now(),
+                        current_target_row["uuid"],
+                    ),
+                ).rowcount
+                if changed != 1:
+                    raise StoreConflict(
+                        "物料来源绑定目标状态发生并发变化："
+                        f"{current_target_row['uuid']}"
+                    )
+
     def project_pre_dispatch(
         self,
         *,
         task_uuid: str,
         job_uuid: str,
+        resolved_param: Mapping[str, Any] | None = None,
     ) -> dict[str, Any]:
         """在物理派发前原子推进目标作业及父任务。
 
         参数：``task_uuid`` 是父工作流任务（WorkflowTask）身份；``job_uuid`` 是
-        即将派发的工作流节点作业（WorkflowNodeJob）身份。返回：提交后的标准
-        聚合。异常：身份不匹配或状态转换冲突时抛出 ``StoreConflict``；身份缺失
-        时抛出 ``StoreNotFound``。同一派发意图重放时零写入。
+        即将派发的工作流节点作业（WorkflowNodeJob）身份；``resolved_param``
+        是已投影全部父节点输出的最终参数。返回：提交后的标准聚合。异常：
+        身份不匹配或状态转换冲突时抛出 ``StoreConflict``；身份缺失时抛出
+        ``StoreNotFound``。同一派发意图重放时零写入。
         """
 
         with self._store.transaction() as connection:
@@ -321,16 +441,21 @@ class TaskRuntimeProjection:
                 raise StoreConflict(f"作业不能进入 dispatched：{job_uuid}")
             if task_row["status"] not in {"pending", "running"}:
                 raise StoreConflict(f"任务不能开始派发：{task_uuid}")
+            param_json = (
+                job_row["param"]
+                if resolved_param is None
+                else _encode_json_field(resolved_param, field_name="resolved_param")
+            )
 
             # ``projected_at`` 是同一事务内任务与作业共享的投影时间。
             projected_at = utc_now()
             updated_jobs = connection.execute(
                 """
                 UPDATE workflow_node_job
-                SET status = 'dispatched', update_time = ?
+                SET status = 'dispatched', param = ?, update_time = ?
                 WHERE uuid = ? AND status = 'pending' AND deleted_at IS NULL
                 """,
-                (projected_at, job_uuid),
+                (param_json, projected_at, job_uuid),
             ).rowcount
             if updated_jobs != 1:
                 raise StoreConflict(f"作业派发前状态发生并发变化：{job_uuid}")

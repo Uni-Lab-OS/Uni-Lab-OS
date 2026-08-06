@@ -70,9 +70,15 @@ def validate_workflow_io(
             node_meta_data=node_meta_data,
             input_parameters=input_parameters,
         )
+        _validate_node_output_schema_overrides(
+            nodes=nodes,
+            handles=handles,
+            node_meta_data=node_meta_data,
+        )
         output_bindings = _validate_output_bindings(
             nodes=nodes,
             handles=handles,
+            node_meta_data=node_meta_data,
             raw_bindings=unilab.get("output_bindings", {}),
             input_parameters=input_parameters,
             output_contract=output_contract,
@@ -345,7 +351,9 @@ def _validate_input_bindings(
                 handle_value_schema(handle),
             ):
                 raise WorkflowIOValidationError(
-                    "input_binding 与工作流参数类型不兼容"
+                    "input_binding "
+                    f"{node_uuid}:{handle.get('handle_key')} 与工作流参数 "
+                    f"{parameter_name} 类型不兼容"
                 )
             bindings[handle_uuid] = MappingProxyType(
                 {"parameter": parameter_name}
@@ -358,6 +366,7 @@ def _validate_output_bindings(
     *,
     nodes: Mapping[str, WorkflowNodeWrite],
     handles: Mapping[str, Mapping[str, Any]],
+    node_meta_data: Mapping[str, Mapping[str, Any]],
     raw_bindings: Any,
     input_parameters: Mapping[str, Mapping[str, Any]],
     output_contract: WorkflowOutputContract,
@@ -425,10 +434,14 @@ def _validate_output_bindings(
                 raise WorkflowIOValidationError(
                     "node_output 未引用本节点的来源连接点（Handle）"
                 )
-            if not schema_is_assignable(
-                handle_value_schema(handle),
-                output["schema"],
-            ):
+            producer_schema = node_output_value_schema(
+                node_uuid=node_uuid,
+                handle_uuid=handle_uuid,
+                handle=handle,
+                handles=handles,
+                node_meta_data=node_meta_data,
+            )
+            if not schema_is_assignable(producer_schema, output["schema"]):
                 raise WorkflowIOValidationError(
                     "节点输出不能满足工作流输出 Schema"
                 )
@@ -441,6 +454,109 @@ def _validate_output_bindings(
             raise WorkflowIOValidationError("未知工作流输出绑定 kind")
         result[output_name] = MappingProxyType(normalized)
     return result
+
+
+def node_output_value_schema(
+    *,
+    node_uuid: str,
+    handle_uuid: str,
+    handle: Mapping[str, Any],
+    handles: Mapping[str, Mapping[str, Any]],
+    node_meta_data: Mapping[str, Mapping[str, Any]],
+) -> dict[str, Any]:
+    """读取节点输出的有效 Schema，并验证组合透传类型覆盖。
+
+    参数：节点与来源连接点（Handle）身份、目录连接点和节点元数据。
+    返回：默认为目录 Schema；经证明的隐式物料透传则返回窄化 Schema。
+    异常：覆盖形状、来源映射或可赋值关系不合法时抛出
+    ``WorkflowIOValidationError``。
+    """
+
+    base_schema = handle_value_schema(handle)
+    unilab = _unilab_metadata(
+        node_meta_data.get(node_uuid, {}),
+        label="节点",
+    )
+    raw_overrides = unilab.get("output_schema_overrides", {})
+    if not isinstance(raw_overrides, Mapping):
+        raise WorkflowIOValidationError("output_schema_overrides 必须是对象")
+    override = raw_overrides.get(handle_uuid)
+    if override is None:
+        return base_schema
+    composite = unilab.get("composite")
+    source_mappings = (
+        composite.get("source_mappings")
+        if isinstance(composite, Mapping)
+        else None
+    )
+    source_mapping = (
+        source_mappings.get(handle_uuid)
+        if isinstance(source_mappings, Mapping)
+        else None
+    )
+    composite_passthrough = (
+        isinstance(source_mapping, Mapping)
+        and source_mapping.get("kind") == "workflow_input"
+    )
+    raw_passthroughs = unilab.get("material_passthrough_handles", {})
+    target_uuid = (
+        raw_passthroughs.get(handle_uuid)
+        if isinstance(raw_passthroughs, Mapping)
+        else None
+    )
+    target_handle = handles.get(target_uuid) if isinstance(target_uuid, str) else None
+    action_passthrough = (
+        isinstance(override, Mapping)
+        and isinstance(target_handle, Mapping)
+        and target_handle.get("workflow_node_template_uuid")
+        == handle.get("workflow_node_template_uuid")
+        and target_handle.get("io_type") == "target"
+        and target_handle.get("handle_key") == handle.get("handle_key")
+        and schema_is_assignable(override, handle_value_schema(target_handle))
+    )
+    if (
+        not isinstance(override, Mapping)
+        or not (composite_passthrough or action_passthrough)
+        or not schema_is_assignable(override, base_schema)
+    ):
+        raise WorkflowIOValidationError("组合工作流输出类型覆盖无效")
+    return _plain_mapping(override)
+
+
+def _validate_node_output_schema_overrides(
+    *,
+    nodes: Mapping[str, WorkflowNodeWrite],
+    handles: Mapping[str, Mapping[str, Any]],
+    node_meta_data: Mapping[str, Mapping[str, Any]],
+) -> None:
+    """对所有节点输出类型覆盖执行一次全图闭合验证。"""
+
+    for node_uuid, node in nodes.items():
+        unilab = _unilab_metadata(
+            node_meta_data.get(node_uuid, {}),
+            label="节点",
+        )
+        overrides = unilab.get("output_schema_overrides", {})
+        if not isinstance(overrides, Mapping):
+            raise WorkflowIOValidationError("output_schema_overrides 必须是对象")
+        for handle_uuid in overrides:
+            handle = handles.get(handle_uuid) if isinstance(handle_uuid, str) else None
+            if (
+                handle is None
+                or handle.get("workflow_node_template_uuid")
+                != node.workflow_node_template_uuid
+                or handle.get("io_type") != "source"
+            ):
+                raise WorkflowIOValidationError(
+                    "output_schema_overrides 未引用本节点来源连接点（Handle）"
+                )
+            node_output_value_schema(
+                node_uuid=node_uuid,
+                handle_uuid=handle_uuid,
+                handle=handle,
+                handles=handles,
+                node_meta_data=node_meta_data,
+            )
 
 
 def _validate_resource_slot_output_authority(
@@ -811,6 +927,7 @@ __all__ = [
     "ValidatedWorkflowIO",
     "WorkflowIOValidationError",
     "handle_value_schema",
+    "node_output_value_schema",
     "resource_slot_passthrough_is_compatible",
     "schema_contains_resource_slot",
     "schema_is_assignable",

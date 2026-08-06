@@ -184,6 +184,9 @@ def graph_payload(
     material_uuid: str,
     device_material_uuid: str,
     mode: str,
+    automatic: bool = False,
+    site_uuid: str | None = None,
+    slot_uuids: list[str] | None = None,
 ) -> dict[str, list[dict[str, Any]]]:
     """构造公开图接口使用的真实物料来源工作流图。
 
@@ -196,7 +199,9 @@ def graph_payload(
     if mode not in {"existing", "create_new"}:
         raise ValueError("测试物料来源模式必须是 existing 或 create_new")
     # ``selector_material_uuid`` 仅在 existing 模式固定具体待消费物料身份。
-    selector_material_uuid = material_uuid if mode == "existing" else None
+    selector_material_uuid = (
+        material_uuid if mode == "existing" and not automatic else None
+    )
     return {
         "nodes": [
             {
@@ -210,8 +215,8 @@ def graph_payload(
                     "resource_template_uuid": material_resource_template_uuid,
                     "material_uuid": selector_material_uuid,
                     "mount": {"uuid": material_uuid},
-                    "site": None,
-                    "slot_range": None,
+                    "site": site_uuid,
+                    "slot_range": slot_uuids,
                     "flow_role": "primary_sample",
                 },
                 "execution_policy": {},
@@ -266,6 +271,9 @@ def install_applied_graph(
     material_uuid: str,
     device_material_uuid: str,
     mode: str,
+    automatic: bool = False,
+    site_uuid: str | None = None,
+    slot_uuids: list[str] | None = None,
 ) -> str:
     """投影模板并经公开 HTTP 保存真实已应用工作流图。
 
@@ -305,6 +313,9 @@ def install_applied_graph(
         material_uuid=material_uuid,
         device_material_uuid=device_material_uuid,
         mode=mode,
+        automatic=automatic,
+        site_uuid=site_uuid,
+        slot_uuids=slot_uuids,
     )
     # ``node_values``/``edge_values`` 先建立服务端拥有的执行器绑定；后续公开 PUT
     # 必须保留而不能接受浏览器篡改该保留元数据。

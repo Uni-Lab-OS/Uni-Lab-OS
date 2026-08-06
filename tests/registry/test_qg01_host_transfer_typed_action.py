@@ -9,7 +9,7 @@ import pytest
 
 from unilabos.registry.registry import Registry
 from unilabos.registry.template_projection import RegistryTemplateProjection
-from unilabos.ros.nodes.presets.host_node import HostNode
+from unilabos.ros.nodes.presets.host_node import HostNode, _dump_resource_slot
 from unilabos.workflow.store import WorkflowStore
 
 HOST_RESOURCE_TEMPLATE_UUID = "90000000-0000-4000-8000-000000000001"
@@ -145,6 +145,53 @@ class _TransferRuntime:
         }
 
 
+class _TransferExecutionRuntime:
+    """模拟执行核心并记录物理转运与库存提交的先后顺序。"""
+
+    def __init__(self, calls: list[tuple[Any, ...]]) -> None:
+        """保存共享调用记录；参数 ``calls`` 供库存替身共同追加事实。"""
+
+        self.calls = calls
+
+    async def transfer_resource_to_another(
+        self,
+        resources: list[Any],
+        target_device: str,
+        mount_resources: list[Any],
+        sites: list[str | None],
+    ) -> str:
+        """记录既有本地资源树转运并返回成功结果。"""
+
+        self.calls.append(
+            ("resource_tree", resources, target_device, mount_resources, sites)
+        )
+        return "转运完成"
+
+
+class _InventoryTransferRecorder:
+    """记录主机动作提交到边缘库存权威（Inventory Authority）的移动事实。"""
+
+    def __init__(self, calls: list[tuple[Any, ...]]) -> None:
+        """保存共享调用记录；参数 ``calls`` 用于验证提交发生在转运之后。"""
+
+        self.calls = calls
+
+    def move_instance(
+        self,
+        edge_uuid: str,
+        parent_uuid: str,
+        slot_id: str,
+        *,
+        actor: str,
+    ) -> dict[str, Any]:
+        """记录物料（Material）新父级与目标库位（Site）并返回版本事实。"""
+
+        self.calls.append(
+            ("inventory", edge_uuid, parent_uuid, slot_id, actor)
+        )
+        return {"edge_uuid": edge_uuid, "version": 9}
+
+
 @pytest.mark.asyncio
 async def test_typed_host_transfer_preserves_direct_runtime_call_shape() -> None:
     """类型化动作（Typed Action）必须保留旧调用参数和四键结果字典。
@@ -175,3 +222,58 @@ async def test_typed_host_transfer_preserves_direct_runtime_call_shape() -> None
         "site": "L1B1",
         "result": "转运完成",
     }
+
+
+@pytest.mark.asyncio
+async def test_host_transfer_commits_edge_inventory_after_resource_tree_transfer(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """系统转运成功后必须把同一物料身份提交到目标库位（Site）。
+
+    参数：``monkeypatch`` 把进程内库存权威替换为只记录调用的替身。返回：无；
+    断言资源树转运先完成，随后使用稳定物料 UUID、目标父物料 UUID 和库位名调用
+    正式 ``move_instance``，防止设备动作成功但库存仍停留在来源仓。异常：任一提交
+    缺失、顺序错误或身份漂移时断言保持 RED。
+    """
+
+    calls: list[tuple[Any, ...]] = []
+    inventory = _InventoryTransferRecorder(calls)
+    monkeypatch.setattr(
+        "unilabos.app.scheduler.integration.get_inventory_service",
+        lambda: inventory,
+    )
+    runtime = _TransferExecutionRuntime(calls)
+    resource = {"uuid": "10000000-0000-4000-8000-000000000001"}
+    mount = {"uuid": "20000000-0000-4000-8000-000000000002"}
+
+    result = await HostNode._do_transfer_resource(
+        runtime,
+        resource,
+        "host_node",
+        mount,
+        "L1B1",
+    )
+
+    assert calls == [
+        ("resource_tree", [resource], "host_node", [mount], ["L1B1"]),
+        (
+            "inventory",
+            "10000000-0000-4000-8000-000000000001",
+            "20000000-0000-4000-8000-000000000002",
+            "L1B1",
+            "host_node.transfer_resource",
+        ),
+    ]
+    assert result["result"] == "转运完成"
+
+
+def test_transfer_result_preserves_device_root_mapping_shape() -> None:
+    """设备型库位父资源必须保持物料占位符（ResourceSlot）的嵌套树形状。"""
+
+    mount = {
+        "uuid": "50000000-0000-4000-8000-000000000009",
+        "type": "device",
+        "class": "community.szlab_poly_studio.szlab_mixer_pipetting_station",
+    }
+
+    assert _dump_resource_slot(mount) == [[mount]]

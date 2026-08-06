@@ -27,6 +27,432 @@ class ExecutionPlanBuildError(StoreConflict):
 class ExecutionPlanGraphNormalizer:
     """收敛虚拟节点、实例化连接点（Handle）并生成确定性拓扑。"""
 
+    def flatten_composite_edges(
+        self,
+        *,
+        nodes: Mapping[str, Mapping[str, Any]],
+        edges: Sequence[Mapping[str, Any]],
+        handles: Mapping[str, Mapping[str, Any]],
+    ) -> tuple[list[dict[str, Any]], dict[str, dict[str, Any]]]:
+        """把组合工作流调用（CompositeWorkflowInvocation）边界改写为平面边。
+
+        参数：``nodes``/``edges``/``handles`` 来自同一已应用冻结图。返回：不再
+        经过组合调用虚拟节点的业务值边与必须投影到实际动作的静态参数。异常：
+        边界映射引用缺失节点、连接点或入参提供者不唯一时抛
+        ``ExecutionPlanBuildError``；禁止在运行时猜测组合边界。
+        """
+
+        flattened = [dict(edge) for edge in edges]
+        param_overrides: dict[str, dict[str, Any]] = defaultdict(dict)
+        invocations = [
+            (node_uuid, node)
+            for node_uuid, node in nodes.items()
+            if executor_kind(str(node.get("type") or "")) == "workflow"
+        ]
+        # 最深的调用先收敛，使外层映射若指向嵌套调用时仍能在后续轮次继续改写。
+        invocations.sort(
+            key=lambda item: self._composite_depth(item[0], nodes), reverse=True
+        )
+        for invocation_uuid, invocation in invocations:
+            flattened = self._flatten_invocation(
+                invocation_uuid=invocation_uuid,
+                invocation=invocation,
+                edges=flattened,
+                nodes=nodes,
+                handles=handles,
+                param_overrides=param_overrides,
+            )
+        return flattened, dict(param_overrides)
+
+    def _flatten_invocation(
+        self,
+        *,
+        invocation_uuid: str,
+        invocation: Mapping[str, Any],
+        edges: Sequence[Mapping[str, Any]],
+        nodes: Mapping[str, Mapping[str, Any]],
+        handles: Mapping[str, Mapping[str, Any]],
+        param_overrides: dict[str, dict[str, Any]],
+    ) -> list[dict[str, Any]]:
+        """收敛一个组合工作流调用（CompositeWorkflowInvocation）的全部边界。
+
+        参数：调用身份、调用节点、当前边集、节点与连接点索引均来自同一平面
+        快照；``param_overrides`` 收集静态透传值。返回：删除调用边界边并补齐
+        内部值流、入口依赖和完成依赖后的边集。异常：组合元数据不闭合或映射
+        引用快照外事实时失败关闭。
+        """
+
+        unilab = invocation.get("meta_data")
+        unilab = unilab.get("unilab") if isinstance(unilab, Mapping) else None
+        composite = unilab.get("composite") if isinstance(unilab, Mapping) else None
+        if not isinstance(composite, Mapping):
+            raise ExecutionPlanBuildError(
+                "composite_boundary_mapping_invalid",
+                "组合工作流调用缺少冻结边界映射",
+            )
+        target_mappings = self._mapping_object(
+            composite.get("target_mappings"), field="target_mappings"
+        )
+        source_mappings = self._mapping_object(
+            composite.get("source_mappings"), field="source_mappings"
+        )
+        structural = self._mapping_object(
+            composite.get("structural_mappings"), field="structural_mappings"
+        )
+        incoming = [
+            edge for edge in edges if edge.get("target_node_uuid") == invocation_uuid
+        ]
+        outgoing = [
+            edge for edge in edges if edge.get("source_node_uuid") == invocation_uuid
+        ]
+        retained = [
+            dict(edge)
+            for edge in edges
+            if edge.get("target_node_uuid") != invocation_uuid
+            and edge.get("source_node_uuid") != invocation_uuid
+        ]
+        generated: list[dict[str, Any]] = []
+
+        incoming_by_handle: dict[str, list[Mapping[str, Any]]] = defaultdict(list)
+        for edge in incoming:
+            incoming_by_handle[str(edge.get("target_handle_uuid") or "")].append(edge)
+        contract = composite.get("contract_compatibility")
+        contract_inputs = (
+            contract.get("inputs") if isinstance(contract, Mapping) else None
+        )
+        input_handles_by_name = {
+            str(item.get("name") or ""): str(item.get("handle_uuid") or "")
+            for item in self._mapping_items(
+                contract_inputs or [], field="contract.inputs"
+            )
+        }
+        input_names_by_handle = {
+            handle_uuid: name for name, handle_uuid in input_handles_by_name.items()
+        }
+        raw_invocation_param = invocation.get("param")
+        invocation_param = (
+            raw_invocation_param if isinstance(raw_invocation_param, Mapping) else {}
+        )
+        for boundary_handle_uuid, mapped_targets in target_mappings.items():
+            providers = incoming_by_handle.get(boundary_handle_uuid, [])
+            targets = self._mapping_items(mapped_targets, field="target_mappings")
+            for provider in providers:
+                for target in targets:
+                    generated.append(
+                        self._rewired_edge(
+                            invocation_uuid=invocation_uuid,
+                            label="input",
+                            source_edge=provider,
+                            source_node_uuid=str(
+                                provider.get("source_node_uuid") or ""
+                            ),
+                            source_handle_uuid=str(
+                                provider.get("source_handle_uuid") or ""
+                            ),
+                            target_node_uuid=self._mapped_identity(
+                                target,
+                                "workflow_node_uuid",
+                                nodes,
+                            ),
+                            target_handle_uuid=self._mapped_handle(
+                                target, "target_handle_uuid", handles
+                            ),
+                        )
+                    )
+            parameter = input_names_by_handle.get(boundary_handle_uuid, "")
+            if not providers and parameter in invocation_param:
+                for target in targets:
+                    self._project_static_parameter(
+                        param_overrides=param_overrides,
+                        node_uuid=self._mapped_identity(
+                            target, "workflow_node_uuid", nodes
+                        ),
+                        handle_uuid=self._mapped_handle(
+                            target, "target_handle_uuid", handles
+                        ),
+                        handles=handles,
+                        value=invocation_param[parameter],
+                    )
+
+        entry_targets = self._mapping_items(
+            structural.get("entry_targets", []), field="entry_targets"
+        )
+        # 没有业务目标映射的入边是 ready 等纯结构边；它必须落到全部入口节点。
+        mapped_input_handles = set(target_mappings)
+        for edge in incoming:
+            if str(edge.get("target_handle_uuid") or "") in mapped_input_handles:
+                continue
+            for entry in entry_targets:
+                generated.append(
+                    self._rewired_edge(
+                        invocation_uuid=invocation_uuid,
+                        label="entry",
+                        source_edge=edge,
+                        source_node_uuid=str(edge.get("source_node_uuid") or ""),
+                        source_handle_uuid=str(edge.get("source_handle_uuid") or ""),
+                        target_node_uuid=self._mapped_identity(
+                            entry, "workflow_node_uuid", nodes
+                        ),
+                        target_handle_uuid=self._mapped_handle(
+                            entry, "target_handle_uuid", handles
+                        ),
+                    )
+                )
+
+        completion_sources = self._mapping_items(
+            structural.get("completion_sources", []), field="completion_sources"
+        )
+        for edge in outgoing:
+            boundary_handle_uuid = str(edge.get("source_handle_uuid") or "")
+            source_mapping = source_mappings.get(boundary_handle_uuid)
+            boundary_handle = handles.get(boundary_handle_uuid)
+            structural_output = (
+                source_mapping is None
+                and isinstance(boundary_handle, Mapping)
+                and dependency_only(boundary_handle)
+            )
+            if not isinstance(source_mapping, Mapping) and not structural_output:
+                raise ExecutionPlanBuildError(
+                    "composite_boundary_mapping_invalid",
+                    "组合工作流来源边界缺少唯一映射",
+                )
+            kind = (
+                source_mapping.get("kind")
+                if isinstance(source_mapping, Mapping)
+                else None
+            )
+            value_providers: list[tuple[str, str, Mapping[str, Any]]] = []
+            if structural_output:
+                pass
+            elif kind == "node_output":
+                value_providers.append(
+                    (
+                        self._mapped_identity(
+                            source_mapping, "workflow_node_uuid", nodes
+                        ),
+                        self._mapped_handle(
+                            source_mapping, "source_handle_uuid", handles
+                        ),
+                        edge,
+                    )
+                )
+            elif kind == "workflow_input":
+                parameter = str(source_mapping.get("parameter") or "")
+                input_handle_uuid = input_handles_by_name.get(parameter, "")
+                providers = incoming_by_handle.get(input_handle_uuid, [])
+                if not providers and parameter in invocation_param:
+                    self._project_static_parameter(
+                        param_overrides=param_overrides,
+                        node_uuid=str(edge.get("target_node_uuid") or ""),
+                        handle_uuid=str(edge.get("target_handle_uuid") or ""),
+                        handles=handles,
+                        value=invocation_param[parameter],
+                    )
+                elif len(providers) != 1:
+                    raise ExecutionPlanBuildError(
+                        "composite_boundary_mapping_invalid",
+                        "组合工作流透传输出没有唯一边提供者："
+                        f"调用 {invocation_uuid} 参数 {parameter}，"
+                        f"边提供者数量 {len(providers)}",
+                    )
+                else:
+                    provider = providers[0]
+                    value_providers.append(
+                        (
+                            str(provider.get("source_node_uuid") or ""),
+                            str(provider.get("source_handle_uuid") or ""),
+                            provider,
+                        )
+                    )
+            else:
+                raise ExecutionPlanBuildError(
+                    "composite_boundary_mapping_invalid",
+                    "组合工作流来源映射种类不受支持",
+                )
+            for source_node_uuid, source_handle_uuid, identity_edge in value_providers:
+                generated.append(
+                    self._rewired_edge(
+                        invocation_uuid=invocation_uuid,
+                        label="output",
+                        source_edge=identity_edge,
+                        source_node_uuid=source_node_uuid,
+                        source_handle_uuid=source_handle_uuid,
+                        target_node_uuid=str(edge.get("target_node_uuid") or ""),
+                        target_handle_uuid=str(edge.get("target_handle_uuid") or ""),
+                    )
+                )
+            # 透传值仍须等待内部物理动作完成，不能只按原始值提供者提前放行。
+            for completion in completion_sources:
+                generated.append(
+                    self._rewired_edge(
+                        invocation_uuid=invocation_uuid,
+                        label="completion",
+                        source_edge=edge,
+                        source_node_uuid=self._mapped_identity(
+                            completion, "workflow_node_uuid", nodes
+                        ),
+                        source_handle_uuid=self._mapped_handle(
+                            completion, "source_handle_uuid", handles
+                        ),
+                        target_node_uuid=str(edge.get("target_node_uuid") or ""),
+                        target_handle_uuid=str(edge.get("target_handle_uuid") or ""),
+                    )
+                )
+        return self._deduplicate_edges([*retained, *generated])
+
+    @staticmethod
+    def _composite_depth(node_uuid: str, nodes: Mapping[str, Mapping[str, Any]]) -> int:
+        """计算组合调用的静态父链深度；父链循环由后续图校验失败关闭。"""
+
+        depth = 0
+        current = nodes.get(node_uuid)
+        visited = {node_uuid}
+        while isinstance(current, Mapping):
+            parent_uuid = str(current.get("parent_uuid") or "")
+            if not parent_uuid or parent_uuid in visited:
+                return depth
+            visited.add(parent_uuid)
+            current = nodes.get(parent_uuid)
+            depth += 1
+        return depth
+
+    @staticmethod
+    def _mapping_object(raw: Any, *, field: str) -> Mapping[str, Any]:
+        """收窄组合映射对象；非法形状以稳定计划错误失败关闭。"""
+
+        if not isinstance(raw, Mapping):
+            raise ExecutionPlanBuildError(
+                "composite_boundary_mapping_invalid", f"组合工作流 {field} 非对象"
+            )
+        return raw
+
+    @staticmethod
+    def _mapping_items(raw: Any, *, field: str) -> list[Mapping[str, Any]]:
+        """收窄组合映射数组；非法成员不允许被静默忽略。"""
+
+        if not isinstance(raw, Sequence) or isinstance(raw, (str, bytes)):
+            raise ExecutionPlanBuildError(
+                "composite_boundary_mapping_invalid", f"组合工作流 {field} 非数组"
+            )
+        if any(not isinstance(item, Mapping) for item in raw):
+            raise ExecutionPlanBuildError(
+                "composite_boundary_mapping_invalid", f"组合工作流 {field} 成员非对象"
+            )
+        return list(raw)
+
+    @staticmethod
+    def _mapped_identity(
+        mapping: Mapping[str, Any],
+        field: str,
+        nodes: Mapping[str, Mapping[str, Any]],
+    ) -> str:
+        """读取且验证组合映射中的节点身份。"""
+
+        identity = str(mapping.get(field) or "")
+        if identity not in nodes:
+            raise ExecutionPlanBuildError(
+                "composite_boundary_mapping_invalid", "组合工作流映射引用快照外节点"
+            )
+        return identity
+
+    @staticmethod
+    def _mapped_handle(
+        mapping: Mapping[str, Any],
+        field: str,
+        handles: Mapping[str, Mapping[str, Any]],
+    ) -> str:
+        """读取且验证组合映射中的连接点（Handle）身份。"""
+
+        identity = str(mapping.get(field) or "")
+        if identity not in handles:
+            raise ExecutionPlanBuildError(
+                "composite_boundary_mapping_invalid",
+                "组合工作流映射引用快照外连接点",
+            )
+        return identity
+
+    @staticmethod
+    def _rewired_edge(
+        *,
+        invocation_uuid: str,
+        label: str,
+        source_edge: Mapping[str, Any],
+        source_node_uuid: str,
+        source_handle_uuid: str,
+        target_node_uuid: str,
+        target_handle_uuid: str,
+    ) -> dict[str, Any]:
+        """生成可重复构建的平面组合边。"""
+
+        seed = ":".join(
+            (
+                label,
+                str(source_edge.get("uuid") or ""),
+                source_node_uuid,
+                source_handle_uuid,
+                target_node_uuid,
+                target_handle_uuid,
+            )
+        )
+        return {
+            "uuid": str(uuid5(UUID(invocation_uuid), f"execution-plan:{seed}")),
+            "source_node_uuid": source_node_uuid,
+            "source_handle_uuid": source_handle_uuid,
+            "target_node_uuid": target_node_uuid,
+            "target_handle_uuid": target_handle_uuid,
+        }
+
+    @staticmethod
+    def _project_static_parameter(
+        *,
+        param_overrides: dict[str, dict[str, Any]],
+        node_uuid: str,
+        handle_uuid: str,
+        handles: Mapping[str, Mapping[str, Any]],
+        value: Any,
+    ) -> None:
+        """把组合静态透传值投影到实际执行节点的最终动作参数键。
+
+        参数：``param_overrides`` 是计划级覆盖集合；节点与连接点身份定位实际
+        目标，``handles`` 提供参数路径，``value`` 是调用时已冻结静态值。返回：
+        无，原地写入覆盖集合。异常：连接点、参数键或重复写值冲突时失败关闭。
+        """
+
+        handle = handles.get(handle_uuid)
+        if not isinstance(handle, Mapping):
+            raise ExecutionPlanBuildError(
+                "composite_boundary_mapping_invalid",
+                "组合工作流静态透传引用快照外连接点",
+            )
+        data_key = final_target_data_key(handle_data_key(handle))
+        if not data_key:
+            raise ExecutionPlanBuildError(
+                "composite_boundary_mapping_invalid",
+                "组合工作流静态透传目标缺少动作参数键",
+            )
+        existing = param_overrides[node_uuid].get(data_key)
+        if existing is not None and existing != value:
+            raise ExecutionPlanBuildError(
+                "composite_boundary_mapping_invalid",
+                "组合工作流静态透传向同一动作参数写入冲突值",
+            )
+        param_overrides[node_uuid][data_key] = value
+
+    @staticmethod
+    def _deduplicate_edges(edges: Sequence[Mapping[str, Any]]) -> list[dict[str, Any]]:
+        """按完整端点去重并稳定排序平面边。"""
+
+        unique: dict[tuple[str, str, str, str], dict[str, Any]] = {}
+        for edge in edges:
+            key = (
+                str(edge.get("source_node_uuid") or ""),
+                str(edge.get("source_handle_uuid") or ""),
+                str(edge.get("target_node_uuid") or ""),
+                str(edge.get("target_handle_uuid") or ""),
+            )
+            unique.setdefault(key, dict(edge))
+        return [unique[key] for key in sorted(unique)]
+
     def runtime_handles(
         self,
         *,
@@ -342,7 +768,9 @@ def dependency_only(handle: Mapping[str, Any]) -> bool:
     if str(handle.get("handle_key") or "").strip().lower() == "ready":
         return True
     source = str(handle.get("data_source") or "").strip().lower()
-    return bool(source) and source != "executor"
+    # ``result`` 是动作返回值的正式数据提供者；只有 ready/状态等非值来源才是
+    # 纯顺序依赖。把 result 降级会令必填动作输入在计划冻结时丢失提供者。
+    return bool(source) and source not in {"executor", "result"}
 
 
 __all__ = [

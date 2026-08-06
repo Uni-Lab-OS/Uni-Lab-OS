@@ -157,6 +157,42 @@ def test_material_lock_marker_can_be_a_local_ref_sibling() -> None:
     ) == (_UUID_A,)
 
 
+def test_runtime_resource_projection_keeps_non_material_fields_strict() -> None:
+    """运行时 PLR 富对象可提锁，但不得放宽其他动作参数合同。"""
+
+    raw_schema = _action_schema(
+        {
+            "type": "object",
+            "properties": {
+                "plate": _material_reference(locked=True),
+                "site": {"type": "string"},
+            },
+            "required": ["plate", "site"],
+            "additionalProperties": False,
+        }
+    )
+    compiled = compile_material_lock_schema(raw_schema)
+    runtime_param = {
+        "plate": {
+            # ROS 结果把 PLR ``Resource.unilabos_uuid`` 原样序列化；调度器
+            # 内部投影需把它恢复成物料占位符（ResourceSlot）的 ``uuid``。
+            "unilabos_uuid": _UUID_A,
+            "name": "beaker-1",
+            "children": [],
+            "unilabos_extra": {"resource_template_uuid": _UUID_B},
+        },
+        "site": "A1",
+    }
+
+    assert compiled.material_lock_uuids(runtime_param) == (_UUID_A,)
+
+    with pytest.raises(MaterialLockSchemaError) as caught:
+        compiled.material_lock_uuids({**runtime_param, "unexpected": True})
+
+    assert caught.value.code == "invalid_action_param"
+    assert caught.value.path == "/"
+
+
 @pytest.mark.parametrize(
     ("goal", "expected_code"),
     [

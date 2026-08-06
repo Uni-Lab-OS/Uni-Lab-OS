@@ -11,7 +11,6 @@ from dataclasses import dataclass, field
 from enum import Enum
 from typing import Dict, List, Mapping, TypeAlias, Union
 
-
 JsonPrimitive: TypeAlias = Union[str, int, float, bool, None]
 JsonValue: TypeAlias = Union[
     JsonPrimitive,
@@ -161,6 +160,8 @@ class MaterialRequirement:
 
     - lot 需求：template_id/lot_id + quantity（数量型，FIFO 扣 lot）
     - instance 需求：instance_uuid 或 barcode（实体型，deploy 具体实例）
+    - 自动实例需求：template_id + mount_uuid，可选 site_uuid 或 slot_uuids
+      （在挂载物料的库位（Site）集合中确定性选择占用物料）
     """
 
     template_id: str = ""
@@ -169,9 +170,18 @@ class MaterialRequirement:
     unit: str = ""
     instance_uuid: str = ""
     barcode: str = ""
+    mount_uuid: str = ""
+    site_uuid: str = ""
+    slot_uuids: List[str] = field(default_factory=list)
 
     def is_instance_requirement(self) -> bool:
-        return bool(self.instance_uuid or self.barcode)
+        return bool(
+            self.instance_uuid
+            or self.barcode
+            or self.mount_uuid
+            or self.site_uuid
+            or self.slot_uuids
+        )
 
     def to_dict(self) -> JsonObject:
         return {
@@ -181,6 +191,9 @@ class MaterialRequirement:
             "unit": self.unit,
             "instance_uuid": self.instance_uuid,
             "barcode": self.barcode,
+            "mount_uuid": self.mount_uuid,
+            "site_uuid": self.site_uuid,
+            "slot_uuids": list(self.slot_uuids),
         }
 
     @classmethod
@@ -192,6 +205,14 @@ class MaterialRequirement:
             unit=str(data.get("unit") or ""),
             instance_uuid=str(data.get("instance_uuid") or data.get("instanceUuid") or ""),
             barcode=str(data.get("barcode") or ""),
+            mount_uuid=str(data.get("mount_uuid") or data.get("mountUuid") or ""),
+            site_uuid=str(data.get("site_uuid") or data.get("siteUuid") or ""),
+            slot_uuids=[
+                str(value)
+                for value in (
+                    data.get("slot_uuids") or data.get("slotUuids") or []
+                )
+            ],
         )
 
 

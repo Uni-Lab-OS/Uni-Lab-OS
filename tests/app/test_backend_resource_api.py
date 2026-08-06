@@ -184,6 +184,7 @@ def test_created_material_is_immediately_reservable_by_stable_uuid(tmp_path):
     assert reserved == {
         "workflow_id": workflow_task_uuid,
         "reserved_nodes": [workflow_node_uuid],
+        "allocations": {workflow_node_uuid: [material_uuid]},
     }
     inventory.release_workflow(workflow_task_uuid, reason="test_cleanup")
     store.close()

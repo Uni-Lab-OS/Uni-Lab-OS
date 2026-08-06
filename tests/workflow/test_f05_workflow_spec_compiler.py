@@ -57,6 +57,7 @@ def _task_snapshot(
     mode: str = "existing",
     material_uuid: str | None = MATERIAL_UUID,
     disable_first_consumer: bool = False,
+    implicit_passthrough: bool = False,
 ) -> tuple[dict[str, Any], list[dict[str, Any]]]:
     """构造冻结任务快照与工作流节点作业（WorkflowNodeJob）列表。
 
@@ -96,7 +97,9 @@ def _task_snapshot(
             "type": "ILab",
             "action_name": "distribute",
             "action_type": "UniLabJsonCommand",
-            "param": {"plate": {"uuid": MATERIAL_UUID}},
+            "param": (
+                {"plate": {"uuid": material_uuid}} if material_uuid is not None else {}
+            ),
             "disabled": disable_first_consumer,
             "meta_data": {
                 "unilab": {
@@ -112,7 +115,9 @@ def _task_snapshot(
             "type": "ILab",
             "action_name": "read_plate",
             "action_type": "UniLabJsonCommand",
-            "param": {"plate": {"uuid": MATERIAL_UUID}},
+            "param": (
+                {"plate": {"uuid": material_uuid}} if material_uuid is not None else {}
+            ),
             "disabled": False,
             "meta_data": {
                 "unilab": {
@@ -132,8 +137,14 @@ def _task_snapshot(
         },
         {
             "uuid": "72000000-0000-4000-8000-000000000002",
-            "source_node_uuid": FIRST_NODE_UUID,
-            "source_handle_uuid": "73000000-0000-4000-8000-000000000003",
+            "source_node_uuid": (
+                SOURCE_NODE_UUID if implicit_passthrough else FIRST_NODE_UUID
+            ),
+            "source_handle_uuid": (
+                "73000000-0000-4000-8000-000000000001"
+                if implicit_passthrough
+                else "73000000-0000-4000-8000-000000000003"
+            ),
             "target_node_uuid": SECOND_NODE_UUID,
             "target_handle_uuid": "73000000-0000-4000-8000-000000000004",
         },
@@ -319,14 +330,50 @@ def test_create_new_material_source_fails_closed_before_scheduling() -> None:
     assert caught.value.code == "unsupported_material_source_mode"
 
 
-def test_unresolved_existing_material_source_fails_closed_before_scheduling() -> None:
-    """尚未固定物料 UUID 的既有来源必须等待权威准入而不能临时选择。
+def test_automatic_existing_source_freezes_selector_without_inventory_lookup() -> None:
+    """自动既有来源只冻结选择条件和运行时写入目标。
 
-    参数：无。返回：无；断言自动分配既有物料的选择器不会在编译期查询库存
-    （Inventory）或产生派发。异常：预期稳定物料解析错误码。
+    参数：无。返回：无；断言执行计划（ExecutionPlan）不查询库存权威
+    （Inventory Authority）或伪造具体物料（Material）身份，但保留挂载点、资源
+    模板和首个物理消费者参数目标，供边缘调度器（EdgeScheduler）准入时解析。
+    异常：计划构建或规格编译失败即测试失败。
     """
 
-    with pytest.raises(ExecutionPlanBuildError) as caught:
-        _task_snapshot(material_uuid=None)
+    task_snapshot, jobs = _task_snapshot(material_uuid=None)
 
-    assert caught.value.code == "material_source_resolution_required"
+    source = task_snapshot["execution_plan"]["nodes"][0]
+    assert source["material_requirements"] == [
+        {
+            "template_id": "70000000-0000-4000-8000-000000000001",
+            "mount_uuid": "70000000-0000-4000-8000-000000000002",
+            "site_uuid": "",
+            "slot_uuids": [],
+        }
+    ]
+    assert source["material_binding_targets"] == [
+        {"workflow_node_uuid": FIRST_NODE_UUID, "param_key": "plate"}
+    ]
+    assert "plate" not in task_snapshot["execution_plan"]["nodes"][1]["param"]
+    assert "plate" not in jobs[1]["param"]
+
+
+def test_automatic_source_binds_every_ordered_implicit_passthrough_consumer() -> None:
+    """自动来源必须冻结所有隐式透传消费者的运行绑定目标。
+
+    参数：无。返回无；断言复合工作流（CompositeWorkflow）展开后同一
+    物料占位符（ResourceSlot）直接连接多个严格有序动作时，每个动作都能从
+    调度边缘（EdgeScheduler）的单次预分配取得同一个物料（Material）身份。
+    """
+
+    task_snapshot, jobs = _task_snapshot(
+        material_uuid=None,
+        implicit_passthrough=True,
+    )
+
+    source = task_snapshot["execution_plan"]["nodes"][0]
+    assert source["material_binding_targets"] == [
+        {"workflow_node_uuid": FIRST_NODE_UUID, "param_key": "plate"},
+        {"workflow_node_uuid": SECOND_NODE_UUID, "param_key": "plate"},
+    ]
+    assert "plate" not in jobs[1]["param"]
+    assert "plate" not in jobs[2]["param"]

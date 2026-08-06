@@ -174,6 +174,14 @@ def _replace_handle_with_list_schema(
     unilab["value_schema"] = _list_resource_slot_schema(allowlist)
     unilab["allowed_resource_template_uuids"] = list(allowlist)
     handle["type"] = "array"
+    # F06 起，动作物料输出的精确类型还会冻结到节点级输出 Schema 覆盖中；测试
+    # 改写候选目录时必须同步该投影，否则会先被组合工作流输出合同拒绝，无法抵达
+    # 本测试要验证的物料流线性（MaterialFlowLinearity）边界。
+    for node in graph["nodes"]:
+        node_unilab = node.get("meta_data", {}).get("unilab", {})
+        overrides = node_unilab.get("output_schema_overrides", {})
+        if handle_uuid in overrides:
+            overrides[handle_uuid] = _list_resource_slot_schema(allowlist)
 
 
 def _duplicate_edge_consumer(
@@ -249,6 +257,17 @@ def _list_boundary_candidate(
     _replace_handle_with_list_schema(
         graph,
         handle_uuid=PASSTHROUGH_SOURCE_UUID,
+        allowlist=(PLATE_TEMPLATE_UUID,),
+    )
+    passthrough_node = next(
+        node for node in graph["nodes"] if node["uuid"] == PASSTHROUGH_NODE_UUID
+    )
+    passthrough_target_uuid = passthrough_node["meta_data"]["unilab"][
+        "material_passthrough_handles"
+    ][PASSTHROUGH_SOURCE_UUID]
+    _replace_handle_with_list_schema(
+        graph,
+        handle_uuid=passthrough_target_uuid,
         allowlist=(PLATE_TEMPLATE_UUID,),
     )
     _replace_handle_with_list_schema(

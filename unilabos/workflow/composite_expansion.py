@@ -1105,7 +1105,10 @@ def _materialize_boundary_arguments(
                 continue
             if isinstance(value, Mapping) and value.get("kind") == "node_output":
                 # 节点输出仍由父调用边界和 ``target_mappings`` 表达；执行计划
-                # （ExecutionPlan）在 F07 冻结时完成平面来源替换。
+                # （ExecutionPlan）在 F07 冻结时完成平面来源替换。子快照中指向
+                # 其自身工作流参数的旧绑定必须移除，否则父图通用 I/O
+                # 校验会把子边界名误解为父工作流参数。
+                bindings.pop(target_uuid, None)
                 continue
             bindings.pop(target_uuid, None)
             param = node.setdefault("param", {})

@@ -605,6 +605,32 @@ def test_direct_invocation_returns_hierarchical_expansion_mappings_and_pin() -> 
     assert provider.read_count == 1
 
 
+def test_parent_node_output_removes_child_scoped_input_binding() -> None:
+    """父节点输出实参不把子工作流参数绑定泄漏到父图。
+
+    参数：无。返回：无；断言展开后的真实节点仅通过父调用边界
+    接收上游值。异常：展开失败或遗留子边界绑定时由 pytest 报告。
+    """
+
+    authoring, _provider = _world()
+    expansion = authoring.compile_invocation(
+        parent_workflow_uuid=PARENT_WORKFLOW_UUID,
+        invocation_uuid=INVOCATION_UUID,
+        module="c1_published_lab.workflows.child",
+        symbol="prepare_sample",
+        keyword_arguments={
+            "value": {
+                "kind": "node_output",
+                "workflow_node_uuid": OTHER_INVOCATION_UUID,
+                "source_handle_uuid": ACTION_VALUE_SOURCE_UUID,
+            }
+        },
+    )
+
+    assert expansion.diagnostics == ()
+    assert expansion.nodes[0]["meta_data"]["unilab"]["input_bindings"] == {}
+
+
 def test_presentation_group_does_not_require_structural_ready_handles() -> None:
     """展示分组不参与执行结构根/终点的连接点（Handle）投影。
 

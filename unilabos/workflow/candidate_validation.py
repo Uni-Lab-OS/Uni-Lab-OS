@@ -125,7 +125,10 @@ def validate_candidate_bundle(
         ValidationError,
         ValueError,
     ) as error:
-        raise CandidateBundleError("候选结果不满足可信工作流合同") from error
+        raise CandidateBundleError(
+            "候选结果不满足可信工作流合同："
+            f"{type(error).__name__}: {error}"
+        ) from error
 
 
 def _closed_graph(value: Any) -> dict[str, Any]:

@@ -13,7 +13,6 @@ from unilabos.workflow._execution_plan_graph import (
     ExecutionPlanGraphNormalizer,
     executor_kind,
     final_target_data_key,
-    handle_data_key,
 )
 from unilabos.workflow.store import StoreConflict
 
@@ -76,6 +75,11 @@ class ExecutionPlanBuilder:
         # 和来源到首消费动作的直连边成为冻结执行计划（ExecutionPlan）事实。
         planned_graph_nodes = {**material_sources, **active}
         graph_normalizer = ExecutionPlanGraphNormalizer()
+        flattened_edges, composite_params = graph_normalizer.flatten_composite_edges(
+            nodes=nodes,
+            edges=edges,
+            handles=handles,
+        )
         runtime_handles, runtime_handle_ids = graph_normalizer.runtime_handles(
             active=planned_graph_nodes,
             handles=handles,
@@ -83,20 +87,22 @@ class ExecutionPlanBuilder:
         planned_edges = graph_normalizer.contract_edges(
             nodes=nodes,
             active=planned_graph_nodes,
-            edges=edges,
+            edges=flattened_edges,
             handles=handles,
             runtime_handle_ids=runtime_handle_ids,
-        )
-        requirements, material_params = self._fixed_material_inputs(
-            nodes=nodes,
-            active=active,
-            kinds=kinds,
-            edges=edges,
-            handles=handles,
         )
         graph_order = graph_normalizer.topological_order(
             planned_graph_nodes,
             planned_edges,
+        )
+        requirements, material_params, material_binding_targets = (
+            self._material_source_inputs(
+                nodes=nodes,
+                active=active,
+                kinds=kinds,
+                edges=planned_edges,
+                topological_order=graph_order,
+            )
         )
         # 来源与普通节点都先遵守冻结图拓扑，再由计划作业序列保证全部协调责任先于
         # 任何物理动作；这样不会让无边来源受创建时间影响而落到动作之后。
@@ -138,6 +144,7 @@ class ExecutionPlanBuilder:
             policy = dict(node.get("execution_policy") or {})
             # ``planned_param`` 是任务提交时冻结的动作输入，不是运行时回退视图。
             planned_param = dict(node.get("param") or {})
+            planned_param.update(composite_params.get(node_uuid, {}))
             # ``fixed_params`` 是固定的 ``existing`` 物料来源（MaterialSource）沿物料占位符链投影的实例引用。
             fixed_params = material_params.get(node_uuid, {})
             planned_param.update(fixed_params)
@@ -165,7 +172,9 @@ class ExecutionPlanBuilder:
                 ],
             }
             if kind == "device_action":
-                planned_node.update(self._device_action_contract(node))
+                planned_node.update(
+                    self._device_action_contract(node, template=template)
+                )
                 # ``action_contract`` 来自模板投影保留元数据，而 ``template.schema``
                 # 只承载 Backend 规范的 Goal 参数子模式。
                 action_contract = self._frozen_action_contract(
@@ -181,6 +190,10 @@ class ExecutionPlanBuilder:
                 planned_node["param_schema"] = template["schema"]
             if requirements.get(node_uuid):
                 planned_node["material_requirements"] = requirements[node_uuid]
+            if material_binding_targets.get(node_uuid):
+                planned_node["material_binding_targets"] = (
+                    material_binding_targets[node_uuid]
+                )
             planned_nodes.append(planned_node)
             jobs.append(
                 {
@@ -204,47 +217,49 @@ class ExecutionPlanBuilder:
             plan["target_node_uuid"] = target_node_uuid
         return plan, jobs
 
-    def _fixed_material_inputs(
+    def _material_source_inputs(
         self,
         *,
         nodes: Mapping[str, Mapping[str, Any]],
         active: Mapping[str, Mapping[str, Any]],
         kinds: Mapping[str, str],
         edges: Sequence[Mapping[str, Any]],
-        handles: Mapping[str, Mapping[str, Any]],
+        topological_order: Sequence[str],
     ) -> tuple[
         dict[str, list[dict[str, Any]]],
         dict[str, dict[str, dict[str, str]]],
+        dict[str, list[dict[str, str]]],
     ]:
-        """投影固定的 `existing` 物料来源（MaterialSource）运行输入。
+        """投影 ``existing`` 物料来源（MaterialSource）的静态准入输入。
 
-        参数：完整节点、活动节点、执行种类、边与连接点来自同一应用图。返回：
-        首个启用设备动作的遗留库存预留（inventory_reservation）
-        需求和最终物料引用参数；它不是任务物料预留
-        （TaskMaterialReservation）。异常：create_new、自动 existing、UUID
+        参数：完整节点、活动节点、执行种类、平面计划边与拓扑顺序来自同一应用
+        图。返回：遗留库存预留（inventory_reservation）需求、仅固定来源可提前
+        写入的最终物料引用参数，以及自动来源成功准入后的作业参数目标；它不是
+        任务物料预留（TaskMaterialReservation）。异常：create_new、选择器 UUID
         非法或物料流分叉/循环时抛稳定计划错误。
         """
 
         # ``outgoing`` 保留每条物料边的目标节点与最终参数键。
         outgoing: dict[str, list[tuple[str, str]]] = defaultdict(list)
         for edge in edges:
-            source_handle = handles.get(str(edge.get("source_handle_uuid") or ""))
-            target_handle = handles.get(str(edge.get("target_handle_uuid") or ""))
             if (
-                source_handle is not None
-                and target_handle is not None
-                and source_handle.get("type") == "ResourceSlot"
-                and target_handle.get("type") == "ResourceSlot"
+                edge.get("dependency_only") is not True
+                and edge.get("source_type") == "ResourceSlot"
+                and edge.get("target_type") == "ResourceSlot"
             ):
                 outgoing[str(edge["source_node_uuid"])].append(
                     (
                         str(edge["target_node_uuid"]),
-                        final_target_data_key(handle_data_key(target_handle)),
+                        final_target_data_key(str(edge.get("target_data_key") or "")),
                     )
                 )
+        order = {node_uuid: index for index, node_uuid in enumerate(topological_order)}
         requirements: dict[str, list[dict[str, Any]]] = defaultdict(list)
         # ``material_params`` 把具体物料身份绑定到首消费动作的参数键。
         material_params: dict[str, dict[str, dict[str, str]]] = defaultdict(dict)
+        # ``binding_targets`` 只描述运行时绑定应写到哪里，不包含库存选择结果。
+        binding_targets: dict[str, list[dict[str, str]]] = defaultdict(list)
+        target_owners: dict[tuple[str, str], str] = {}
         for source_uuid, node in nodes.items():
             if kinds[source_uuid] != "material_source" or node.get("disabled") is True:
                 continue
@@ -259,81 +274,154 @@ class ExecutionPlanBuilder:
                     "短期调度桥只接受固定的 existing 物料来源",
                 )
             material_uuid = str(selector.get("material_uuid") or "")
-            if not material_uuid:
-                raise ExecutionPlanBuildError(
-                    "material_source_resolution_required",
-                    "existing 物料来源尚未固定具体物料 UUID",
+            if material_uuid:
+                material_uuid = self._selector_uuid(
+                    material_uuid,
+                    code="invalid_material_uuid",
+                    message="物料来源 UUID 非法",
                 )
-            try:
-                material_uuid = str(UUID(material_uuid))
-            except ValueError as exc:
-                raise ExecutionPlanBuildError(
-                    "invalid_material_uuid", "物料来源 UUID 非法"
-                ) from exc
+                requirement = {"instance_uuid": material_uuid}
+            else:
+                mount = selector.get("mount")
+                if not isinstance(mount, Mapping):
+                    raise ExecutionPlanBuildError(
+                        "invalid_material_source_selector",
+                        "自动物料来源缺少挂载点",
+                    )
+                template_uuid = self._selector_uuid(
+                    selector.get("resource_template_uuid"),
+                    code="invalid_material_source_selector",
+                    message="物料来源资源模板 UUID 非法",
+                )
+                mount_uuid = self._selector_uuid(
+                    mount.get("uuid"),
+                    code="invalid_material_source_selector",
+                    message="物料来源挂载点 UUID 非法",
+                )
+                site_uuid = ""
+                if selector.get("site") is not None:
+                    site_uuid = self._selector_uuid(
+                        selector.get("site"),
+                        code="invalid_material_source_selector",
+                        message="物料来源库位 UUID 非法",
+                    )
+                raw_slot_uuids = selector.get("slot_range") or []
+                if not isinstance(raw_slot_uuids, Sequence) or isinstance(
+                    raw_slot_uuids, (str, bytes)
+                ):
+                    raise ExecutionPlanBuildError(
+                        "invalid_material_source_selector",
+                        "物料来源库位范围必须是数组",
+                    )
+                slot_uuids = [
+                    self._selector_uuid(
+                        value,
+                        code="invalid_material_source_selector",
+                        message="物料来源库位范围 UUID 非法",
+                    )
+                    for value in raw_slot_uuids
+                ]
+                if site_uuid and slot_uuids:
+                    raise ExecutionPlanBuildError(
+                        "invalid_material_source_selector",
+                        "物料来源不能同时指定库位和库位范围",
+                    )
+                requirement = {
+                    "template_id": template_uuid,
+                    "mount_uuid": mount_uuid,
+                    "site_uuid": site_uuid,
+                    "slot_uuids": slot_uuids,
+                }
             # 短期遗留预留（inventory_reservation）归属来源协调责任；普通设备
             # 动作只消费已经准入的稳定物料引用，不再次取得任务级预留。
-            requirements[source_uuid].append({"instance_uuid": material_uuid})
-            consumer_binding = self._first_device_consumer(
+            requirements[source_uuid].append(requirement)
+            consumer_bindings = self._device_consumer_bindings(
                 source_uuid,
                 active=active,
                 kinds=kinds,
                 outgoing=outgoing,
+                order=order,
             )
-            if consumer_binding is None:
-                continue
-            consumer, param_key = consumer_binding
-            if not param_key:
-                raise ExecutionPlanBuildError(
-                    "invalid_execution_graph",
-                    "物料占位符目标连接点缺少参数键",
+            for consumer, param_key in consumer_bindings:
+                if not param_key:
+                    raise ExecutionPlanBuildError(
+                        "invalid_execution_graph",
+                        "物料占位符目标连接点缺少参数键",
+                    )
+                target_key = (consumer, param_key)
+                existing_owner = target_owners.get(target_key)
+                if existing_owner is not None and existing_owner != source_uuid:
+                    raise ExecutionPlanBuildError(
+                        "invalid_execution_graph",
+                        "多个 existing 物料来源冲突写入同一动作参数",
+                    )
+                target_owners[target_key] = source_uuid
+                binding_targets[source_uuid].append(
+                    {"workflow_node_uuid": consumer, "param_key": param_key}
                 )
-            material_reference = {"uuid": material_uuid}
-            existing_reference = material_params[consumer].get(param_key)
-            if (
-                existing_reference is not None
-                and existing_reference != material_reference
-            ):
-                raise ExecutionPlanBuildError(
-                    "invalid_execution_graph",
-                    "多个固定的 existing 物料来源冲突写入同一动作参数",
-                )
-            material_params[consumer][param_key] = material_reference
-        return dict(requirements), dict(material_params)
+                if material_uuid:
+                    material_params[consumer][param_key] = {"uuid": material_uuid}
+        return dict(requirements), dict(material_params), dict(binding_targets)
 
     @staticmethod
-    def _first_device_consumer(
+    def _selector_uuid(value: Any, *, code: str, message: str) -> str:
+        """把选择器身份规范为非 nil UUID。
+
+        参数：``value`` 是冻结选择器字段；``code``/``message`` 是稳定计划诊断。
+        返回：规范小写 UUID。异常：空值、非法值或 nil UUID 抛计划错误。
+        """
+
+        try:
+            identity = UUID(str(value or ""))
+        except ValueError as exc:
+            raise ExecutionPlanBuildError(code, message) from exc
+        if identity.int == 0:
+            raise ExecutionPlanBuildError(code, message)
+        return str(identity)
+
+    @staticmethod
+    def _device_consumer_bindings(
         source_uuid: str,
         *,
         active: Mapping[str, Mapping[str, Any]],
         kinds: Mapping[str, str],
         outgoing: Mapping[str, Sequence[tuple[str, str]]],
-    ) -> tuple[str, str] | None:
-        """沿物料占位符（ResourceSlot）链寻找首个设备动作。
+        order: Mapping[str, int],
+    ) -> list[tuple[str, str]]:
+        """沿物料占位符（ResourceSlot）链寻找首层设备动作集合。
 
-        参数：来源 UUID、活动节点、执行种类和带目标参数键的邻接表
-        描述一条冻结物料链。返回：首个启用 ``device_action`` UUID
-        及它的物料参数键，无消费者时返回 ``None``。异常：分叉/循环时
-        抛计划错误。
+        参数：来源 UUID、活动节点、执行种类、带目标参数键的邻接表和稳定拓扑
+        排名描述一条冻结物料链。返回：按拓扑稳定排序的首层启用
+        ``device_action`` UUID 及其物料参数键；复合工作流展开形成隐式透传时，
+        同一来源可直接绑定多个严格有序消费者。异常：循环时抛计划错误。
         """
 
-        current = source_uuid
+        pending = [source_uuid]
         visited: set[str] = set()
-        while True:
+        consumers: list[tuple[str, str]] = []
+        while pending:
+            current = pending.pop(0)
             if current in visited:
                 raise ExecutionPlanBuildError(
                     "material_flow_not_linear", "物料占位符链含循环"
                 )
             visited.add(current)
             targets = list(outgoing.get(current, ()))
-            if len(targets) > 1:
-                raise ExecutionPlanBuildError(
-                    "material_flow_not_linear", "同一物料不能分叉到多个消费者"
+            targets.sort(
+                key=lambda target: (
+                    order.get(target[0], len(order)),
+                    target[0],
+                    target[1],
                 )
-            if not targets:
-                return None
-            current, target_param_key = targets[0]
-            if current in active and kinds[current] == "device_action":
-                return current, target_param_key
+            )
+            for target_uuid, target_param_key in targets:
+                if target_uuid in active and kinds[target_uuid] == "device_action":
+                    binding = (target_uuid, target_param_key)
+                    if binding not in consumers:
+                        consumers.append(binding)
+                    continue
+                pending.append(target_uuid)
+        return consumers
 
     @staticmethod
     def _frozen_action_contract(
@@ -371,7 +459,11 @@ class ExecutionPlanBuilder:
         return deepcopy(dict(contract))
 
     @staticmethod
-    def _device_action_contract(node: Mapping[str, Any]) -> dict[str, Any]:
+    def _device_action_contract(
+        node: Mapping[str, Any],
+        *,
+        template: Mapping[str, Any],
+    ) -> dict[str, Any]:
         """冻结设备动作执行器和动作合同。
 
         参数：``node`` 是应用图设备动作节点。返回：显式固定执行器
@@ -393,10 +485,14 @@ class ExecutionPlanBuilder:
                 "invalid_executor_binding",
                 "设备动作缺少显式固定执行器绑定",
             )
+        action_type = str(node.get("action_type") or "").strip()
+        frozen_template_type = str(template.get("type") or "").strip()
+        if not action_type and frozen_template_type.startswith("UniLabJsonCommand"):
+            action_type = frozen_template_type
         return {
             "device_id": device_id,
             "action_name": node.get("action_name"),
-            "action_type": node.get("action_type") or "UniLabJsonCommand",
+            "action_type": action_type or "UniLabJsonCommand",
         }
 
     @staticmethod

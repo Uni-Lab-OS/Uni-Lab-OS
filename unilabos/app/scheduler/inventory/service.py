@@ -541,6 +541,7 @@ class InventoryService:
         """
         now = self._now_ms()
         created: List[str] = []
+        allocations: Dict[str, List[str]] = {}
         with self._tx() as conn:
             for node_id, requirements in node_requirements.items():
                 if not requirements:
@@ -553,6 +554,10 @@ class InventoryService:
                 if existing is not None and existing["status"] in (
                     ReservationState.ACTIVE.value, ReservationState.CONSUMED.value,
                 ):
+                    existing_amounts = json.loads(existing["amounts_json"])
+                    allocations[node_id] = list(
+                        existing_amounts.get("instances", [])
+                    )
                     continue  # 幂等重放
                 amounts = self._tx_allocate(conn, now, workflow_id, node_id, requirements,
                                             actor, causation_id)
@@ -573,13 +578,18 @@ class InventoryService:
                          ReservationState.ACTIVE.value, json.dumps(amounts), now),
                     )
                 created.append(node_id)
+                allocations[node_id] = list(amounts.get("instances", []))
                 self._emit(
                     conn, now, "reservation", reservation_id, 1, "reservation.created",
                     {"workflow_id": workflow_id, "node_id": node_id, "attempt": attempt,
                      "amounts": amounts},
                     causation_id=causation_id, actor=actor,
                 )
-        return {"workflow_id": workflow_id, "reserved_nodes": created}
+        return {
+            "workflow_id": workflow_id,
+            "reserved_nodes": created,
+            "allocations": allocations,
+        }
 
     def _tx_allocate(
         self,
@@ -635,18 +645,112 @@ class InventoryService:
 
     @staticmethod
     def _tx_resolve_instance(conn: sqlite3.Connection, req: MaterialRequirement) -> Dict[str, Any]:
+        selector_fields = bool(req.mount_uuid or req.site_uuid or req.slot_uuids)
+        if (req.instance_uuid or req.barcode) and selector_fields:
+            raise CommandRejected(
+                "instance_uuid/barcode cannot be combined with a site selector"
+            )
         if req.instance_uuid:
             row = conn.execute(
                 "SELECT * FROM material_instance WHERE edge_uuid = ?", (req.instance_uuid,)
             ).fetchone()
-        else:
+        elif req.barcode:
             placeholders = ",".join("?" for _ in _ACTIVE_STATES_TUPLE)
             row = conn.execute(
                 f"SELECT * FROM material_instance WHERE barcode = ? AND status IN ({placeholders})",
                 (req.barcode, *_ACTIVE_STATES_TUPLE),
             ).fetchone()
+        else:
+            return InventoryService._tx_select_site_instance(conn, req)
         if row is None:
             raise NotFound(f"instance {req.instance_uuid or req.barcode} not found")
+        return dict(row)
+
+    @staticmethod
+    def _tx_select_site_instance(
+        conn: sqlite3.Connection,
+        req: MaterialRequirement,
+    ) -> Dict[str, Any]:
+        """在当前占用事务内按挂载点与库位集合确定性选择一个实例。
+
+        参数：``conn`` 是 ``BEGIN IMMEDIATE`` 写事务；``req`` 提供资源模板、
+        挂载物料及可选精确库位（Site）/库位（Slot）集合。返回：首个仍为
+        ``warehouse`` 的兼容物料实例。异常：选择器结构非法抛
+        ``CommandRejected``/``NotFound``，没有可用占用物料抛
+        ``InsufficientStock``。
+        """
+
+        if not req.template_id or not req.mount_uuid:
+            raise CommandRejected(
+                "automatic instance requirement needs template_id and mount_uuid"
+            )
+        if req.site_uuid and req.slot_uuids:
+            raise CommandRejected("site_uuid and slot_uuids are mutually exclusive")
+        if len(set(req.slot_uuids)) != len(req.slot_uuids):
+            raise CommandRejected("slot_uuids contains duplicate sites")
+        mount = conn.execute(
+            "SELECT uuid FROM material WHERE uuid = ? AND deleted_at IS NULL",
+            (req.mount_uuid,),
+        ).fetchone()
+        if mount is None:
+            raise NotFound(f"mount material {req.mount_uuid} not found")
+
+        selected_sites: List[str] = []
+        if req.site_uuid:
+            selected_sites = [req.site_uuid]
+        elif req.slot_uuids:
+            selected_sites = list(req.slot_uuids)
+        if selected_sites:
+            placeholders = ",".join("?" for _ in selected_sites)
+            site_rows = conn.execute(
+                f"SELECT uuid, material_uuid FROM site WHERE uuid IN ({placeholders}) "
+                "AND deleted_at IS NULL",
+                tuple(selected_sites),
+            ).fetchall()
+            found_sites = {str(row["uuid"]): str(row["material_uuid"]) for row in site_rows}
+            missing = sorted(set(selected_sites) - set(found_sites))
+            if missing:
+                raise NotFound(f"sites not found: {','.join(missing)}")
+            foreign = sorted(
+                site_uuid
+                for site_uuid, owner_uuid in found_sites.items()
+                if owner_uuid != req.mount_uuid
+            )
+            if foreign:
+                raise CommandRejected(
+                    f"sites do not belong to mount {req.mount_uuid}: {','.join(foreign)}"
+                )
+
+        where = [
+            "site.deleted_at IS NULL",
+            "site.material_uuid = ?",
+            "material.deleted_at IS NULL",
+            "material.resource_template_uuid = ?",
+            "instance.status = ?",
+        ]
+        values: List[Any] = [
+            req.mount_uuid,
+            req.template_id,
+            InstanceState.WAREHOUSE.value,
+        ]
+        if selected_sites:
+            placeholders = ",".join("?" for _ in selected_sites)
+            where.append(f"site.uuid IN ({placeholders})")
+            values.extend(selected_sites)
+        row = conn.execute(
+            "SELECT instance.* FROM site AS site "
+            "JOIN material AS material ON material.uuid = site.occupied_material_uuid "
+            "JOIN material_instance AS instance ON instance.edge_uuid = material.uuid "
+            f"WHERE {' AND '.join(where)} "
+            "ORDER BY site.sort_order ASC, site.create_time ASC, site.uuid ASC, "
+            "material.create_time ASC, material.uuid ASC LIMIT 1",
+            tuple(values),
+        ).fetchone()
+        if row is None:
+            scope = req.site_uuid or ",".join(req.slot_uuids) or req.mount_uuid
+            raise InsufficientStock(
+                f"no warehouse instance for template {req.template_id} in {scope}"
+            )
         return dict(row)
 
     def _tx_candidate_lots(
