@@ -8,6 +8,7 @@ import threading
 from collections.abc import Callable
 from contextlib import ExitStack
 from datetime import datetime, timezone
+from functools import partial
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Protocol, Tuple
 from uuid import uuid4
@@ -22,6 +23,9 @@ from unilabos.workflow.authoring_identity import declared_workflow_uuid
 from unilabos.workflow.candidate_validation import (
     CandidateBundleError,
     validate_candidate_bundle,
+)
+from unilabos.workflow.catalog_dependent_authoring_refresh import (
+    refresh_catalog_dependent_authoring,
 )
 from unilabos.workflow.device_action_run import (
     DeviceActionRunConflict,
@@ -1511,46 +1515,17 @@ class WorkflowService:
                 },
                 "authoring": authoring,
             }
-        self._refresh_catalog_dependent_sources(
+        refresh_catalog_dependent_authoring(
+            registrations=self.list_registered_sources(),
+            load_authoring_record=self._store.get_authoring_record,
+            reconcile_source=partial(
+                self.reconcile_registered_source,
+                _refresh_catalog_dependent_state=True,
+            ),
             mutated_workflow_uuid=workflow_uuid,
             warnings=warnings,
         )
         return result
-
-    def _refresh_catalog_dependent_sources(
-        self,
-        *,
-        mutated_workflow_uuid: str,
-        warnings: List[Dict[str, str]],
-    ) -> None:
-        """在工作流发布后刷新其他活动来源的目录相关派生编译结果。
-
-        参数：``mutated_workflow_uuid`` 是刚完成应用的工作流身份；``warnings``
-        收集提交后无法回滚的刷新警告。返回：无；无候选且无诊断的稳定已应用来源
-        不重编译。异常：单项刷新异常被隔离并转成警告，不把已提交应用伪装成失败。
-        """
-
-        for registration in self.list_registered_sources():
-            # ``dependent_uuid`` 是可能引用新发布合同的另一活动工作流身份。
-            dependent_uuid = registration["workflow_uuid"]
-            if dependent_uuid == mutated_workflow_uuid:
-                continue
-            # ``record`` 的候选和诊断都是随模板目录变化失效的可重建投影。
-            record = self._store.get_authoring_record(dependent_uuid)
-            if record.get("candidate") is None and not record.get("diagnostics"):
-                continue
-            try:
-                self.reconcile_registered_source(
-                    dependent_uuid,
-                    _refresh_catalog_dependent_state=True,
-                )
-            except Exception:  # noqa: BLE001 - 主应用已提交，只能隔离派生刷新故障。
-                warnings.append(
-                    {
-                        "code": "dependent_authoring_refresh_pending",
-                        "message": "工作流已应用，但依赖创作草稿仍待重新编译",
-                    }
-                )
 
     def list_events(
         self,

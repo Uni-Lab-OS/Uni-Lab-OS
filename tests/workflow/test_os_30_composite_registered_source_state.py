@@ -13,6 +13,7 @@ from unilabos.workflow.published_workflow_runtime import (
 )
 
 from .test_c1_r2_static_expansion_contract import (
+    APPLIED_SOURCE_HASH,
     CHILD_TEMPLATE_UUID,
     CHILD_WORKFLOW_UUID,
     HOST_RESOURCE_TEMPLATE_UUID,
@@ -24,7 +25,7 @@ from .test_c1_r2_static_expansion_contract import (
 
 _MODULE = "c1_published_lab.workflows.child"
 _SYMBOL = "prepare_sample"
-_CATALOG_SOURCE_HASH = "sha256:" + "3" * 64
+_CATALOG_SOURCE_HASH = "sha256:" + "4" * 64
 
 
 def _registration() -> dict[str, str]:
@@ -178,7 +179,7 @@ def test_registered_but_unapplied_child_source_is_distinguished() -> None:
 
 
 def test_registered_and_applied_child_source_expands_statically() -> None:
-    """已登记且具有同内容同修订应用快照的子来源完成静态展开（Static Expansion）。
+    """已登记且具有同修订应用快照的子来源完成静态展开（Static Expansion）。
 
     参数：无。
     返回：无；断言来源、模板和组合解析来自同一代际并产生一个内部动作节点。
@@ -238,6 +239,8 @@ def test_registered_and_applied_child_source_expands_statically() -> None:
         catalog=published_catalog,
     )
 
+    # 包目录来源文件摘要与应用快照规范源码摘要属于两类独立证据。
+    assert _CATALOG_SOURCE_HASH != APPLIED_SOURCE_HASH
     assert expansion.diagnostics == ()
     assert expansion.invocation_node is not None
     assert len(expansion.nodes) == 1
