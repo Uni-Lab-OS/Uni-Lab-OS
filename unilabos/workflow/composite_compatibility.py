@@ -14,6 +14,7 @@ from unilabos.workflow.handle_projection import (
     resource_slot_schema,
     workflow_handle_type,
 )
+from unilabos.workflow.json_codec import strict_json_equal
 from unilabos.workflow.models import validate_uuid
 
 _SHA256 = re.compile(r"sha256:[0-9a-f]{64}\Z")
@@ -93,6 +94,16 @@ def published_workflow_compatibility_projection(
     inputs: list[dict[str, Any]] = []
     for name in input_order:
         value_schema = _plain(goal_properties[name])
+        if not isinstance(value_schema, dict):
+            raise TypeError("已发布工作流输入 Schema 无效")
+        has_schema_default = "default" in value_schema
+        schema_default = value_schema.pop("default", None)
+        has_default = name in goal_default
+        if has_schema_default != has_default or (
+            has_default
+            and not strict_json_equal(schema_default, goal_default[name])
+        ):
+            raise ValueError("已发布工作流默认值无效")
         handle = by_key[("target", name)]
         _validate_value_handle(
             handle,
@@ -104,10 +115,10 @@ def published_workflow_compatibility_projection(
             "name": name,
             "schema": value_schema,
             "required": name in required_inputs,
-            "has_default": name in goal_default,
+            "has_default": has_default,
             "handle_uuid": _uuid(handle.get("uuid")),
         }
-        if name in goal_default:
+        if has_default:
             descriptor["default"] = _plain(goal_default[name])
         inputs.append(descriptor)
 

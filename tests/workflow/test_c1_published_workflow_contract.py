@@ -16,6 +16,9 @@ from unilabos.workflow.composite import (
     PublishedWorkflowContractError,
     project_published_workflow_contract,
 )
+from unilabos.workflow.composite_compatibility import (
+    published_workflow_projection_is_canonical,
+)
 from unilabos.workflow.store import WorkflowStore
 from unilabos.workflow.template_projection_store import (
     RegistryTemplateProjectionStore,
@@ -319,6 +322,64 @@ def test_applied_workflow_projects_exact_contract_digest_and_provenance() -> Non
         "input_order": ["value"],
         "output_order": ["result"],
     }
+
+
+def test_optional_default_is_published_in_schema_and_remains_canonical(
+    tmp_path: Path,
+) -> None:
+    """可选输入默认值同时进入 Schema 与聚合，且持久化后仍为规范合同。
+
+    参数：``tmp_path`` 隔离模板投影存储。返回：无；通过公共投影和持久化读取
+    断言默认值合同闭合。异常：投影、存储或断言失败时由 pytest 报告。
+    """
+
+    snapshot = _applied_snapshot()
+    parameter = snapshot["workflow"]["meta_data"]["unilab"]["input_contract"][
+        "parameters"
+    ][0]
+    parameter.update({"required": False, "default": 2.5})
+    catalog = PublishedSourceCatalog.from_records(_source_records())
+    projected = project_published_workflow_contract(
+        source=catalog.resolve(
+            "c1_published_lab.workflows.child", "prepare_sample"
+        ),
+        applied_snapshot=snapshot,
+        host_node_resource_template={
+            "uuid": HOST_RESOURCE_TEMPLATE_UUID,
+            "name": "host_node",
+            "display_name": "Host Node",
+        },
+    )
+    assert projected is not None
+    goal_schema = projected.template["schema"]["properties"]["goal"]
+    assert goal_schema["properties"]["value"] == {
+        "type": "number",
+        "default": 2.5,
+    }
+    assert projected.template["goal_default"] == {"value": 2.5}
+    assert projected.handles[0]["meta_data"]["unilab"]["value_schema"] == {
+        "type": "number"
+    }
+
+    store = WorkflowStore(tmp_path / "workflow-default.db")
+    try:
+        generation = RegistryTemplateProjectionStore(store).replace_generation(
+            authority_id="local",
+            node_templates=[_group_template(), projected.template],
+            handle_templates=projected.handles,
+            resource_template_symbols={},
+        )
+        template = next(
+            item for item in generation.node_templates if item["type"] == "workflow"
+        )
+        handles = [
+            item
+            for item in generation.handle_templates
+            if item["workflow_node_template_uuid"] == template["uuid"]
+        ]
+        assert published_workflow_projection_is_canonical(template, handles)
+    finally:
+        store.close()
 
 
 def test_projection_emits_business_handles_then_separate_ready_handles() -> None:

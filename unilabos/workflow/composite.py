@@ -223,7 +223,8 @@ def _workflow_schema(
                 "type": "object",
                 "additionalProperties": False,
                 "properties": {
-                    str(item["name"]): _plain(item["schema"]) for item in inputs
+                    str(item["name"]): _input_property_schema(item)
+                    for item in inputs
                 },
                 "required": [
                     str(item["name"]) for item in inputs if item.get("required") is True
@@ -251,6 +252,21 @@ def _workflow_schema(
             "output_order": [str(item["name"]) for item in outputs],
         },
     }
+
+
+def _input_property_schema(descriptor: Mapping[str, Any]) -> dict[str, Any]:
+    """构造包含可选默认值的已发布工作流输入属性 Schema。
+
+    参数：``descriptor`` 是规范输入描述符。返回：独立值 Schema；有默认值时
+    写入 JSON Schema ``default``。异常：Schema 不是对象时抛出 ``TypeError``。
+    """
+
+    schema = _plain(descriptor["schema"])
+    if not isinstance(schema, dict):
+        raise TypeError("已发布工作流输入 Schema 无效")
+    if "default" in descriptor:
+        schema["default"] = _plain(descriptor["default"])
+    return schema
 
 
 def _contract_digest(
