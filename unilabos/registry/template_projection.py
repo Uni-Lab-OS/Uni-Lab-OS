@@ -10,6 +10,11 @@ from unilabos.registry.action_template_projection import (
     compile_action_template_handles,
     goal_parameter_schema,
 )
+from unilabos.registry.template_delta import (
+    TemplateProjectionDelta,
+    TemplateProjectionDeltaError,
+    build_template_projection_delta,
+)
 from unilabos.registry.template_snapshot import (
     RegistryTemplateSnapshot,
     RegistryTemplateSnapshotError,
@@ -167,6 +172,12 @@ class RegistryTemplateProjection:
                 generation.handle_templates,
                 resource_template_symbols=generation.resource_template_symbols,
             )
+            self._last_delta = build_template_projection_delta(
+                authority_id=authority_id,
+                current_generation=generation.generation,
+                previous_members=(),
+                candidate_members=(),
+            )
         except (AuthoringCatalogError, TemplateProjectionIdentityConflict) as error:
             raise RegistryTemplateProjectionError(str(error)) from error
 
@@ -230,20 +241,25 @@ class RegistryTemplateProjection:
             )
 
         try:
-            self._store.replace_generation(
+            _committed_generation, delta = self._store.replace_generation_with_delta(
                 authority_id=self._authority_id,
                 node_templates=nodes,
                 handle_templates=handles,
                 resource_template_symbols=resource_template_symbols,
                 validate_generation=validate_generation,
             )
-        except TemplateProjectionIdentityConflict as error:
+        except (
+            TemplateProjectionDeltaError,
+            TemplateProjectionIdentityConflict,
+        ) as error:
             raise RegistryTemplateProjectionError(f"模板身份冲突: {error!s}") from error
         except AuthoringCatalogError as error:
             raise RegistryTemplateProjectionError(str(error)) from error
         if next_snapshot is None:
             raise RegistryTemplateProjectionError("模板投影未执行完整目录校验")
+        # 内存快照和最近差量只在 SQLite 事务成功提交后共同替换。
         self._snapshot = next_snapshot
+        self._last_delta = delta
         return next_snapshot
 
     def snapshot(self) -> AuthoringCatalogSnapshot:
@@ -253,6 +269,17 @@ class RegistryTemplateProjection:
         """
 
         return self._snapshot
+
+    def last_delta(self) -> TemplateProjectionDelta:
+        """返回最近一次成功刷新产生的模板投影差量。
+
+        参数：无。
+        返回：提交后保存的不可变模板投影差量（TemplateProjectionDelta）；构造后
+        尚未刷新时返回当前持久代际上的空差量。
+        异常：无；失败刷新不会替换最近成功差量。
+        """
+
+        return self._last_delta
 
     def close(self) -> None:
         """关闭投影持有的本地工作流存储连接。"""
@@ -306,6 +333,7 @@ class RegistryTemplateProjection:
         resource_name_by_symbol = compile_resource_template_source_aliases(
             resource_definitions
         )
+
         def source_alias_sort_key(item: tuple[str, str]) -> str:
             """读取资源模板源码别名的稳定排序键。
 

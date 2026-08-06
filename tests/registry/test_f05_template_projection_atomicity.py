@@ -94,12 +94,21 @@ def _persisted_projection_state(database_path: Path) -> dict[str, Any]:
             ORDER BY uuid
             """
         ).fetchall()
+        manifest = connection.execute(
+            """
+            SELECT authority_id, projection_kind, source_definition_key,
+                   business_key, target_uuid, semantic_hash, generation
+            FROM registry_template_projection_member
+            ORDER BY projection_kind, business_key
+            """
+        ).fetchall()
     finally:
         connection.close()
     return {
         "generation": [tuple(row) for row in generation],
         "nodes": [tuple(row) for row in nodes],
         "handles": [tuple(row) for row in handles],
+        "manifest": [tuple(row) for row in manifest],
     }
 
 
@@ -117,12 +126,15 @@ def test_invalid_catalog_generation_rolls_back_before_durable_publish(
     database_path = tmp_path / "workflow_history.db"
     projection = _projection(database_path)
     good_snapshot = projection.refresh(FakeRegistry())
+    # ``good_delta`` 是最近成功提交的模板投影差量，失败刷新不得提前替换它。
+    good_delta = projection.last_delta()
     good_state = _persisted_projection_state(database_path)
 
     with pytest.raises(RegistryTemplateProjectionError, match="动作业务身份重复"):
         projection.refresh(_DuplicateActionBusinessIdentityRegistry())
 
     assert projection.snapshot().fingerprint == good_snapshot.fingerprint
+    assert projection.last_delta() == good_delta
     assert _persisted_projection_state(database_path) == good_state
     projection.close()
 
