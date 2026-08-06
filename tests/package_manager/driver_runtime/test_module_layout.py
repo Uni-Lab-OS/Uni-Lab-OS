@@ -5,6 +5,10 @@ from __future__ import annotations
 import ast
 import builtins
 import importlib
+import json
+import os
+import subprocess
+import sys
 from pathlib import Path
 from types import SimpleNamespace
 from typing import Any
@@ -63,6 +67,66 @@ def test_driver_runtime_has_no_forbidden_runtime_dependencies() -> None:
         item
         for item in imported
         if any(fragment in item for fragment in forbidden_fragments)
+    }
+
+
+def test_driver_runtime_cold_import_keeps_higher_layers_and_author_code_unloaded(
+    tmp_path: Path,
+) -> None:
+    """隔离解释器冷导入驱动运行时只加载该层，不加载高层或作者驱动。
+
+    参数：``tmp_path`` 提供一个位于 ``PYTHONPATH``、但绝不应执行的作者模块。
+    返回：无；断言包分发、工作区运行时和作者模块均未进入冷进程模块表。
+    异常：子进程导入失败、惰性门面退化或作者副作用执行时断言失败。
+    """
+
+    author_module = tmp_path / "phase4_author_driver.py"
+    author_module.write_text(
+        "import builtins\n"
+        "builtins._phase4_author_driver_executed = True\n"
+        "class Driver:\n"
+        "    pass\n",
+        encoding="utf-8",
+    )
+    # ``probe`` 是全新解释器执行的冷导入审计，不受 pytest 模块缓存影响。
+    probe = """
+import builtins
+import json
+import sys
+
+import unilabos.package_manager.driver_runtime
+
+print(json.dumps({
+    "package_distribution": "unilabos.package_manager.package_distribution" in sys.modules,
+    "workspace_runtime": "unilabos.package_manager.workspace_runtime" in sys.modules,
+    "author_module": "phase4_author_driver" in sys.modules,
+    "author_side_effect": hasattr(builtins, "_phase4_author_driver_executed"),
+}))
+"""
+    environment = dict(os.environ)
+    existing_pythonpath = environment.get("PYTHONPATH", "")
+    environment["PYTHONPATH"] = os.pathsep.join(
+        item
+        for item in (str(tmp_path), str(REPOSITORY_ROOT), existing_pythonpath)
+        if item
+    )
+
+    result = subprocess.run(
+        [sys.executable, "-c", probe],
+        cwd=REPOSITORY_ROOT,
+        env=environment,
+        capture_output=True,
+        check=False,
+        text=True,
+        timeout=30,
+    )
+
+    assert result.returncode == 0, result.stderr
+    assert json.loads(result.stdout.strip()) == {
+        "package_distribution": False,
+        "workspace_runtime": False,
+        "author_module": False,
+        "author_side_effect": False,
     }
 
 

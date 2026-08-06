@@ -12,7 +12,7 @@ from unilabos.utils.import_manager import default_manager
 
 
 def initialize_device_from_dict(
-    device_id, device_config: ResourceDictInstance
+    device_id: str, device_config: ResourceDictInstance
 ) -> ROS2DeviceNode | None:
     """根据物理图设备配置解析并初始化唯一选中的设备执行器。
 

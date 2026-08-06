@@ -85,6 +85,23 @@ def activate_python_driver(
             definition_identity,
             "设备驱动必须使用合法的绝对 module:symbol 源码身份",
         )
+    # 三项 ``driver_contract`` 在加载作者代码前完成关闭式结构校验；只有缺键可默认。
+    status_types = _contract_mapping(
+        class_mapping,
+        "status_types",
+        definition_identity=definition_identity,
+    )
+    action_value_mappings = _contract_mapping(
+        class_mapping,
+        "action_value_mappings",
+        definition_identity=definition_identity,
+    )
+    hardware_interface = _contract_mapping(
+        class_mapping,
+        "hardware_interface",
+        definition_identity=definition_identity,
+        default=_DEFAULT_HARDWARE_INTERFACE,
+    )
 
     package_evidence = _validate_package_evidence(
         registry_entry,
@@ -126,14 +143,9 @@ def activate_python_driver(
             package_catalog_digest=package_evidence[2],
             driver_class=driver_class,
             driver_params=driver_params,
-            status_types=_mapping_copy(class_mapping.get("status_types")),
-            action_value_mappings=_mapping_copy(
-                class_mapping.get("action_value_mappings")
-            ),
-            hardware_interface=_mapping_copy(
-                class_mapping.get("hardware_interface"),
-                default=_DEFAULT_HARDWARE_INTERFACE,
-            ),
+            status_types=status_types,
+            action_value_mappings=action_value_mappings,
+            hardware_interface=hardware_interface,
             driver_is_ros=class_mapping.get("type") == "ros2",
         )
     except DriverActivationError:
@@ -254,17 +266,35 @@ def _valid_identifier(value: str) -> bool:
     return value.isidentifier() and not keyword.iskeyword(value)
 
 
-def _mapping_copy(
-    value: Any,
+def _contract_mapping(
+    class_mapping: Mapping[str, Any],
+    key: str,
     *,
+    definition_identity: str,
     default: Mapping[str, Any] | None = None,
 ) -> dict[str, Any]:
-    """把可选注册表映射规范化为隔离普通字典。
+    """关闭式读取并隔离一个设备类映射合同。
 
-    参数：``value`` 是可选合同值；``default`` 是缺失或非映射时的默认合同。
-    返回：原映射或默认映射的深复制普通字典。
-    异常：值无法深复制时传播原始异常并由激活入口稳定包装。
+    参数：``class_mapping`` 是设备类合同；``key`` 是待读取字段；
+    ``definition_identity`` 是错误关联的设备定义身份；``default`` 只在键完全
+    缺失时使用，不能替换显式 ``None`` 或其他非法类型。
+    返回：原映射或缺键默认映射的深复制普通字典。
+    异常：显式值不是映射或内容无法隔离复制时抛出 ``DriverActivationError``。
     """
 
-    source = value if isinstance(value, Mapping) else (default or {})
-    return copy.deepcopy(dict(source))
+    # ``contract_value`` 保留“键缺失”与“显式空值”的区别，防止非法合同降级。
+    contract_value = class_mapping.get(key, default or {})
+    if not isinstance(contract_value, Mapping):
+        raise DriverActivationError(
+            "invalid_registry_entry",
+            definition_identity,
+            f"设备注册表 class.{key} 必须是对象",
+        )
+    try:
+        return copy.deepcopy(dict(contract_value))
+    except Exception as error:
+        raise DriverActivationError(
+            "invalid_registry_entry",
+            definition_identity,
+            f"设备注册表 class.{key} 无法隔离复制",
+        ) from error

@@ -445,6 +445,77 @@ def test_invalid_registry_contract_fails_before_loading(
     assert loaded_sources == []
 
 
+@pytest.mark.parametrize(
+    ("contract_field", "invalid_value"),
+    (
+        ("status_types", None),
+        ("action_value_mappings", "not-a-mapping"),
+        ("hardware_interface", ["not", "a", "mapping"]),
+    ),
+    ids=("status-types-none", "action-mappings-string", "hardware-interface-list"),
+)
+def test_explicit_invalid_driver_contract_mapping_fails_before_load_and_merge(
+    monkeypatch: pytest.MonkeyPatch,
+    contract_field: str,
+    invalid_value: Any,
+) -> None:
+    """显式非法驱动合同不能被缺省值掩盖，并在加载与配置合并前失败。
+
+    参数：``monkeypatch`` 监测配置合并；``contract_field`` 是被破坏的类合同键；
+    ``invalid_value`` 是显式 ``None``、字符串或列表非法值。
+    返回：无；断言稳定注册表错误、加载器零调用且合并器零调用。
+    异常：若显式非法值被静默替换为默认合同或发生作者代码加载则断言失败。
+    """
+
+    from unilabos.package_manager.driver_runtime import python_activation
+
+    entry = _package_entry()
+    entry["class"][contract_field] = invalid_value
+    registry = _Registry({"community.demo.heater": entry})
+    loaded_sources: list[str] = []
+    merge_calls: list[tuple[Any, Any]] = []
+
+    def reject_load(source_identity: str) -> type[_Driver]:
+        """记录非法合同后不应发生的作者驱动加载。
+
+        参数：``source_identity`` 是意外请求的驱动源码身份。
+        返回：测试驱动类，仅为满足接口。
+        异常：无。
+        """
+
+        loaded_sources.append(source_identity)
+        return _Driver
+
+    def reject_merge(config: Any, enforce: Any) -> dict[str, Any]:
+        """记录非法合同后不应发生的配置合并。
+
+        参数：``config`` 是实例配置；``enforce`` 是注册表强制配置。
+        返回：空配置，仅为满足合并接口。
+        异常：无。
+        """
+
+        merge_calls.append((config, enforce))
+        return {}
+
+    monkeypatch.setattr(
+        python_activation,
+        "merge_init_param_enforce",
+        reject_merge,
+    )
+
+    with pytest.raises(DriverActivationError) as caught:
+        activate_python_driver(
+            registry,
+            "community.demo.heater",
+            {},
+            loader=reject_load,
+        )
+
+    assert caught.value.code == "invalid_registry_entry"
+    assert loaded_sources == []
+    assert merge_calls == []
+
+
 def test_builtin_registry_entry_needs_no_package_evidence() -> None:
     """稳定内置注册表条目无需伪造包摘要即可激活。
 
