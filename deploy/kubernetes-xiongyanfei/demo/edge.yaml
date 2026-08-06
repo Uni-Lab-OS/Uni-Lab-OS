@@ -153,7 +153,6 @@ spec:
             - /etc/unilabos/local_config.py
             - --working_dir
             - /work
-            - --skip_env_check
             - --addr
             - http://uni-lab-demo-backend:8080/api/v1
             - template-sync
@@ -230,7 +229,6 @@ spec:
             - /etc/unilabos/local_config.py
             - --working_dir
             - /work
-            - --skip_env_check
             - --addr
             - http://uni-lab-demo-backend:8080/api/v1
             - instance-sync
@@ -327,7 +325,6 @@ spec:
             - /etc/unilabos/local_config.py
             - --working_dir
             - /tmp/unilabos
-            - --skip_env_check
             - --addr
             - http://uni-lab-demo-backend:8080/api/v1
             - instance-sync
@@ -370,32 +367,13 @@ spec:
             - --backend
             - ros
             - --app_bridges
-            - edge_control
             - fastapi
             - --port
             - "8002"
             - --disable_browser
-            - --skip_env_check
             - --visual
             - disable
-            - --addr
-            - http://uni-lab-demo-backend:8080/api/v1
-            - --schedule_addr
-            - http://uni-lab-demo-scheduler:8081
-            - --edge_key
-            - demo-edge-a
-            - --edge_instance_uuid
-            - 80000000-0000-4000-8000-000000000001
-            - --edge_capability_revision
-            - manual-confirm-20260803-1
-            - --edge_state_db
-            - /data/edge_control.db
           env:
-            - name: UNILABOS_EDGECONTROLCONFIG_API_KEY
-              valueFrom:
-                secretKeyRef:
-                  name: uni-lab-demo-secrets
-                  key: edge-api-key
             - name: UNILABOS_OTELCONFIG_ENABLED
               value: "true"
             - name: OTEL_EXPORTER_OTLP_TRACES_ENDPOINT

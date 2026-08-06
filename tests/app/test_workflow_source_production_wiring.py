@@ -97,31 +97,19 @@ def test_basic_config_declares_an_empty_tuple_allowlist_by_default() -> None:
     assert isinstance(BasicConfig.workflow_editable_package_roots, tuple)
 
 
-def test_cli_roots_override_config_and_main_freezes_absolute_tuple(
-    tmp_path: Path,
-) -> None:
-    """重复 CLI 参数必须覆盖配置并由主流程冻结为绝对路径 tuple。
+def test_cli_rejects_workflow_editable_package_root(tmp_path: Path) -> None:
+    """公共启动命令必须拒绝工作区（Workspace）已经覆盖的源码授权参数。
 
-    参数：``tmp_path`` 提供两个目录参数。返回：无；证明 CLI→main→BasicConfig
-    传递不保留可变列表或相对路径。
+    参数：``tmp_path`` 提供一个有效目录值，确保失败来自未知参数而不是缺少参数值。
+    返回：无；证明工作流源码（Workflow Source）授权不再形成第二个 CLI 入口。
     """
 
-    first = tmp_path / "first"
-    second = tmp_path / "second"
     parser = app_main.parse_args()
-    parsed = parser.parse_args(
-        [
-            "--workflow_editable_package_root",
-            str(first),
-            "--workflow_editable_package_root",
-            str(second),
-        ]
-    )
 
-    configured = app_main.configure_workflow_editable_package_roots(vars(parsed))
-
-    assert configured == (str(first.resolve()), str(second.resolve()))
-    assert BasicConfig.workflow_editable_package_roots == configured
+    with pytest.raises(SystemExit):
+        parser.parse_args(
+            ["--workflow_editable_package_root", str(tmp_path / "editable")]
+        )
 
 
 def test_main_rejects_a_non_tuple_config_allowlist() -> None:

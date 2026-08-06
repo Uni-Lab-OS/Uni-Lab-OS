@@ -1656,11 +1656,11 @@ class WebSocketClient(BaseCommunicationClient):
         logger.info(f"[WebSocketClient] Client_id: {self.client_id}")
 
     def _build_websocket_url(self) -> Optional[str]:
-        """构建 schedule 通道的 WebSocket 连接 URL
+        """构建旧云端调度通道的 WebSocket 连接 URL。
 
-        地址来源优先级：
-        1. HTTPConfig.schedule_addr（--schedule_addr 显式指定）→ 直接使用，不做端口偏移
-        2. HTTPConfig.remote_addr（--addr）派生：带端口则 +1，否则沿用原 netloc
+        参数：无。返回：优先使用配置文件中的 ``HTTPConfig.schedule_addr``，否则
+        从 ``HTTPConfig.remote_addr`` 派生；没有远端地址时返回 ``None``。异常：无。
+        主启动不再暴露独立 ``schedule_addr`` 参数。
         """
         # 1. 显式 schedule 地址
         if HTTPConfig.schedule_addr:

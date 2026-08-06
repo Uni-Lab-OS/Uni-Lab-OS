@@ -209,8 +209,9 @@ unilab --ak your_ak --sk your_sk -g graph.json --port 8080
 # 测试环境
 unilab --addr test --ak your_ak --sk your_sk -g graph.json
 
-# 跳过环境检查（加快启动）
-unilab --ak your_ak --sk your_sk -g graph.json --skip_env_check
+# 工作区默认检查并自动补齐依赖；离线镜像可在 pyproject.toml 的
+# [tool.unilabos.startup] 中设置 ensure_dependencies = false
+unilab --workspace /data/szlab-workspace
 ```
 
 ---
@@ -232,7 +233,7 @@ unilab --ak your_ak --sk your_sk -g graph.json --skip_env_check
 #### 4.3 如何上传注册表
 
 ```bash
-unilab --ak your_ak --sk your_sk -g graph.json --upload_registry
+unilab --ak your_ak --sk your_sk template-sync
 ```
 
 **性能影响说明：**
@@ -641,7 +642,7 @@ sudo systemctl stop ufw
 ```bash
 # 在主机（Host）上启动
 conda activate unilab
-unilab --ak your_ak --sk your_sk -g host.json --upload_registry
+unilab --ak your_ak --sk your_sk -g host.json
 ```
 
 **主节点职责：**
@@ -1186,9 +1187,8 @@ my_pump:
 启动时指定注册表路径：
 
 ```bash
-unilab --ak your_ak --sk your_sk -g graph.json \
-       --registry_path ./my_lab_devices/registry \
-       --upload_registry
+unilab --ak your_ak --sk your_sk \
+       --registry_path ./my_lab_devices/registry template-sync
 ```
 
 **支持多个注册表路径**（按顺序查找）：
@@ -1630,7 +1630,7 @@ git clone https://github.com/Xuwznln/LabDeviceWorkstationDemo.git
 python -m unilabos.app.main \
   --devices <克隆目录下的设备包目录> \
   --external_devices_only \
-  --ak your_ak --sk your_sk --addr test --upload_registry \
+  --ak your_ak --sk your_sk --addr test \
   --disable_browser --port 8100 \
   -g <仓库内提供的图文件>
 ```
@@ -1798,9 +1798,8 @@ properties:
 1. **注册物料**：
 
 ```bash
-unilab --ak your_ak --sk your_sk -g graph.json \
-       --registry_path ./my_lab_devices/my_lab_devices/registry \
-       --upload_registry
+unilab --ak your_ak --sk your_sk \
+       --registry_path ./my_lab_devices/my_lab_devices/registry template-sync
 ```
 
 2. **在组态图中添加**：

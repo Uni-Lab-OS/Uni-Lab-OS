@@ -10,16 +10,18 @@ import os
 from typing import Any, Dict, List, Optional, Tuple
 from urllib.parse import urlsplit
 
+import requests
+
+from unilabos.config.config import BasicConfig, HTTPConfig
+from unilabos.resources.resource_tracker import ResourceTreeSet
+from unilabos.utils import logger
+from unilabos.utils.log import info
 from unilabos.utils.tools import (
     fast_dumps as _fast_dumps,
+)
+from unilabos.utils.tools import (
     fast_dumps_pretty as _fast_dumps_pretty,
 )
-
-import requests
-from unilabos.resources.resource_tracker import ResourceTreeSet
-from unilabos.utils.log import info
-from unilabos.config.config import HTTPConfig, BasicConfig
-from unilabos.utils import logger
 from unilabos.utils.tracing import inject_trace_context, span
 
 
@@ -58,8 +60,6 @@ class HTTPClient:
         self,
         remote_addr: Optional[str] = None,
         auth: Optional[str] = None,
-        material_source: Optional[str] = None,
-        material_microbackend_addr: Optional[str] = None,
     ) -> None:
         """
         初始化HTTP客户端
@@ -70,8 +70,6 @@ class HTTPClient:
         """
         self.initialized = False
         self.remote_addr = remote_addr or HTTPConfig.remote_addr
-        self._material_source_override = material_source
-        self._material_microbackend_addr_override = material_microbackend_addr
         if auth is not None:
             self.auth = auth
         else:
@@ -92,37 +90,14 @@ class HTTPClient:
             return base
         return f"{base}/api/v1"
 
-    def _material_microbackend_base(self) -> str:
-        configured = (
-            self._material_microbackend_addr_override
-            if self._material_microbackend_addr_override is not None
-            else HTTPConfig.material_microbackend_addr
-        )
-        if not configured:
-            configured = f"http://127.0.0.1:{BasicConfig.port}"
-        return self._api_base(str(configured))
+    def _local_material_base(self) -> str:
+        """返回当前 OS 主机内嵌物料（Material）接口的规范 API 根地址。
 
-    def _material_sources(self) -> List[str]:
-        configured = (
-            self._material_source_override
-            if self._material_source_override is not None
-            else HTTPConfig.material_source
-        )
-        source = str(configured or "microbackend").strip().lower()
-        aliases = {
-            "edge": "microbackend",
-            "local": "microbackend",
-            "cloud": "backend",
-            "remote": "backend",
-        }
-        source = aliases.get(source, source)
-        if source == "auto":
-            return ["microbackend", "backend"]
-        if source not in {"microbackend", "backend"}:
-            raise ValueError(
-                "HTTPConfig.material_source must be microbackend, backend, or auto"
-            )
-        return [source]
+        参数：无。返回：由当前 OS HTTP 端口确定的 ``/api/v1`` 地址。异常：无；
+        OS 不接受外部微后端地址，也不代理正式后端（Backend）数据源。
+        """
+
+        return self._api_base(f"http://127.0.0.1:{BasicConfig.port}")
 
     @staticmethod
     def _extract_material_nodes(payload: Any) -> List[Dict[str, Any]]:
@@ -163,42 +138,33 @@ class HTTPClient:
         except OSError as exc:
             logger.debug(f"写入物料查询诊断文件失败: {exc}")
 
-    def _query_material_source(
+    def _query_local_material(
         self,
-        source: str,
         *,
         uuids: List[str],
         resource_id: Optional[str],
         with_children: bool,
     ) -> List[Dict[str, Any]]:
+        """只查询当前 OS 的本地库存权威（Inventory Authority）。
+
+        参数：``uuids`` 是具体物料（Material）身份集合，``resource_id`` 是遗留
+        本地资源标识，``with_children`` 控制是否返回子资源。返回：本地扁平物料
+        节点；HTTP 或响应合同错误原样抛出，由公开兼容入口关闭失败。
+        """
+
         timeout = int(HTTPConfig.material_query_timeout)
-        if source == "microbackend":
-            url = f"{self._material_microbackend_base()}/edge/material/query"
-            body: Dict[str, Any] = {
-                "uuids": uuids,
-                "with_children": with_children,
-            }
-            if resource_id:
-                body["id"] = resource_id
-            response = self._session.post(url, json=body, timeout=timeout)
-        elif uuids:
-            url = f"{self.remote_addr.rstrip('/')}/edge/material/query"
-            response = self._session.post(
-                url,
-                json={"uuids": uuids, "with_children": with_children},
-                timeout=timeout,
-            )
-        else:
-            url = f"{self.remote_addr.rstrip('/')}/lab/material"
-            response = self._session.get(
-                url,
-                params={"id": resource_id, "with_children": with_children},
-                timeout=timeout,
-            )
+        url = f"{self._local_material_base()}/edge/material/query"
+        body: Dict[str, Any] = {
+            "uuids": uuids,
+            "with_children": with_children,
+        }
+        if resource_id:
+            body["id"] = resource_id
+        response = self._session.post(url, json=body, timeout=timeout)
 
         self._write_material_debug(
             "res_material_query.json",
-            f"source={source}\nurl={url}\n{response.status_code}\n{response.text}",
+            f"source=os-local\nurl={url}\n{response.status_code}\n{response.text}",
         )
         if response.status_code != 200:
             raise requests.HTTPError(
@@ -214,11 +180,13 @@ class HTTPClient:
         resource_id: Optional[str] = None,
         with_children: bool = True,
     ) -> List[Dict[str, Any]]:
-        """Query the configured material component and preserve legacy shape.
+        """查询当前 OS 的本地物料（Material）接口并保留遗留返回形状。
 
-        ``microbackend`` uses local HTTP IPC, ``backend`` uses the formal
-        service, and ``auto`` tries them in that order.  Empty results in auto
-        mode fall through so an Edge cache can be introduced incrementally.
+        参数：``uuids`` 是具体物料身份集合，``resource_id`` 是遗留本地资源标识，
+        ``with_children`` 控制是否返回子资源。返回：本地库存权威（Inventory
+        Authority）的扁平节点；从节点或本地接口不可用时返回空列表。异常：调用者
+        未提供任何查询身份时抛出 ``ValueError``。OS 不回退查询正式后端
+        （Backend）。
         """
 
         if not BasicConfig.is_host_mode:
@@ -238,25 +206,17 @@ class HTTPClient:
             json.dumps(request_body, ensure_ascii=False, indent=4),
         )
 
-        sources = self._material_sources()
-        for index, source in enumerate(sources):
-            try:
-                nodes = self._query_material_source(
-                    source,
-                    uuids=uuid_list,
-                    resource_id=resource_id,
-                    with_children=with_children,
-                )
-                if nodes or index == len(sources) - 1:
-                    logger.trace(
-                        f"material_query source={source} 查询到 {len(nodes)} 个节点"
-                    )
-                    return nodes
-            except (requests.RequestException, TypeError, ValueError) as exc:
-                logger.warning(f"物料查询失败 source={source}: {exc}")
-                if index == len(sources) - 1:
-                    return []
-        return []
+        try:
+            nodes = self._query_local_material(
+                uuids=uuid_list,
+                resource_id=resource_id,
+                with_children=with_children,
+            )
+        except (requests.RequestException, TypeError, ValueError) as exc:
+            logger.warning(f"OS 本地物料查询失败: {exc}")
+            return []
+        logger.trace(f"OS 本地物料查询到 {len(nodes)} 个节点")
+        return nodes
 
     def resource_edge_add(self, resources: List[Dict[str, Any]]) -> requests.Response:
         """
@@ -450,22 +410,29 @@ class HTTPClient:
 
     def resource_get(self, id: str, with_children: bool = False) -> Dict[str, Any]:
         """
-        获取资源
+        从旧云端版本获取启动资源。
 
         Args:
-            id: 资源ID
-            with_children: 是否包含子资源
+            id: 遗留云端资源 ID。
+            with_children: 是否包含子资源。
 
         Returns:
-            Dict: 返回的资源数据
+            Dict: 旧云端响应封装。
+
+        该入口只由显式 ``--use_remote_resource`` 遗留兼容路径使用；当前 OS
+        物料（Material）读写始终由本地库存权威（Inventory Authority）承担。
         """
-        nodes = self.material_query(
-            resource_id=id,
-            with_children=with_children,
+        response = self._session.get(
+            f"{self.remote_addr.rstrip('/')}/lab/material",
+            params={"id": id, "with_children": with_children},
+            timeout=int(HTTPConfig.material_query_timeout),
         )
-        # ``/lab/material`` historically returned data directly as a list;
-        # retain that envelope for startup and third-party callers.
-        return {"code": 0, "data": nodes}
+        if response.status_code != 200:
+            return {"code": response.status_code, "message": response.text, "data": []}
+        payload = response.json()
+        if isinstance(payload, dict):
+            return payload
+        return {"code": 0, "data": payload}
 
     def resource_del(self, id: str) -> requests.Response:
         """

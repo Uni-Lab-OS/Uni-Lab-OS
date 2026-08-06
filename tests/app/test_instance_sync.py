@@ -197,7 +197,6 @@ def test_instance_sync_command_reads_graph_without_starting_edge(tmp_path):
                 str(graph_path),
                 "--addr",
                 "http://backend:8080/api/v1",
-                "--skip_env_check",
                 "instance-sync",
             ]
         )

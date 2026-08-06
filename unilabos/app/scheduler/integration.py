@@ -1,4 +1,4 @@
-"""Edge scheduler 与 unilab 主进程 / 云端 ws 链路的装配层（composition root）。
+"""边缘调度器（EdgeScheduler）与 OS 主进程、旧云端 WS 的装配层。
 
 装配关系：
 
@@ -24,7 +24,7 @@ from copy import deepcopy
 from typing import Any, Optional, Tuple
 
 from unilabos.app.scheduler.backend import JobExecutionBackend, create_edge_stack
-from unilabos.app.scheduler.ordering import HttpSchedulerOrderer, StableLocalOrderer
+from unilabos.app.scheduler.ordering import StableLocalOrderer
 from unilabos.app.scheduler.service import EdgeScheduler
 from unilabos.utils.tracing import inject_trace_context
 
@@ -254,7 +254,6 @@ def setup_edge_inventory(
     if _inventory is None:
         from unilabos.app.scheduler.inventory.service import InventoryService
         from unilabos.app.scheduler.inventory.store import InventoryStore
-
         from unilabos.app.scheduler.monitor import monitor_bus
 
         _inventory = InventoryService(
@@ -318,8 +317,6 @@ def setup_edge_inventory(
 
 def setup_edge_scheduler(
     ws_client: Any = None,
-    ordering_url: str = "",
-    ordering_algorithm: str = "WeightedCriticalPath",
     lab_id: str = "edge-lab",
     host_node_getter: Any = None,
     inventory_db_path: str = "",
@@ -328,15 +325,17 @@ def setup_edge_scheduler(
     device_state_db_path: str = "",
     workflow_history_db_path: str = "",
 ) -> Tuple[EdgeScheduler, JobExecutionBackend]:
-    """装配 EdgeScheduler + 微后端，并接通云端 ws 链路（幂等）。
+    """装配本地调度器（Scheduler）与执行后端，并可接通旧云端 WS。
 
-    Args:
-        ws_client: WebSocketClient 实例。传入时：
+    参数：
+        ws_client: 旧云端 ``WebSocketClient`` 实例。传入时：
             - 注入 message_processor.edge_scheduler（workflow_start/cancel 转发目标）
             - 注入 message_processor.inventory_service（inventory_command 执行目标）
             - 注册工作流终态上报（workflow_status 消息）
-        ordering_url: uni-lab-scheduler 地址（空则本地稳定排序）
+        lab_id: 当前实验室标识。
+        host_node_getter: 获取 ``HostNode`` 的可调用对象。
         inventory_db_path: Edge 仓储 SQLite 路径（空 = 不启用仓储/物料衔接）
+        edge_id: 当前边缘实例标识。
         sync_sender: outbox 上报 callable（events → acked_sequence）；
             传入时启动 OutboxWorker，不传则事件保留在 outbox（云端端点就绪后再挂）
         device_state_db_path: 设备状态 SQLite 路径（独立于仓储/工作流库；
@@ -347,8 +346,12 @@ def setup_edge_scheduler(
             空则用 ULAB_WORKFLOW_HISTORY_DB，默认
             ~/.unilabos/workflow_history.db，"off" 关闭）。启动时把上一
             世代残留的非终态 run 标记 interrupted。
-    Returns:
-        (scheduler, backend)；backend 需由调用方追加进 HostNode bridges 列表。
+    返回：
+        ``(scheduler, backend)``；``backend`` 需由调用方追加进
+        ``HostNode.bridges``。
+
+    异常：
+        本函数不吞掉数据库、调度器（Scheduler）或执行后端初始化异常。
     """
     global _scheduler, _backend, _inventory, _outbox_worker
     if _scheduler is not None and _backend is not None:
@@ -365,15 +368,7 @@ def setup_edge_scheduler(
         default_s=float(os.environ.get("ULAB_ESTIMATE_DEFAULT_S", "60")),
     )
 
-    if ordering_url:
-        orderer: Any = HttpSchedulerOrderer(
-            base_url=ordering_url,
-            lab_id=lab_id,
-            algorithm=ordering_algorithm,
-            estimator=estimator,
-        )
-    else:
-        orderer = StableLocalOrderer()
+    orderer = StableLocalOrderer()
 
     inventory = _inventory
     if inventory_db_path:
@@ -439,7 +434,7 @@ def setup_edge_scheduler(
 
     logger.info(
         "[EdgeSchedulerIntegration] edge scheduler ready (ordering=%s)",
-        ordering_url or "local-stable",
+        "local-stable",
     )
     return scheduler, backend
 

@@ -18,7 +18,6 @@ from unilabos.app.scheduler.inventory.resource_reference import (
     build_inventory_resource_reference_resolver,
 )
 from unilabos.app.scheduler.inventory.store import InventoryStore
-from unilabos.config.config import HTTPConfig
 from unilabos.registry.template_snapshot import RegistryTemplateSnapshot
 
 MOUNT_MATERIAL_UUID = "97539b08-24de-5003-8b2e-9eb6e983c68a"
@@ -583,32 +582,15 @@ def test_dangling_site_parent_rolls_back_all_projection_rows() -> None:
     assert bootstrap_meta == []
 
 
-def test_bootstrap_gate_requires_local_scheduler_and_embedded_inventory(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    """启动投影只允许本地调度与嵌入式库存共同启用。
+def test_bootstrap_gate_follows_os_host_authority() -> None:
+    """启动投影只由 OS 主机的本地后端权威决定。
 
-    参数：``monkeypatch`` 隔离全局物料来源配置。返回：无。断言：后端控制、
-    外部库存和显式关闭调度器均不得打开启动投影路径。
+    参数：无。返回：无；断言主机固定建立本地库存（Inventory）与资源图，从节点
+    不建立第二份权威。异常：权威边界退化为可选远端数据源时测试失败。
     """
 
-    monkeypatch.setattr(HTTPConfig, "material_source", "microbackend")
-    local_args = {
-        "app_bridges": ["fastapi"],
-        "edge_scheduler": True,
-        "_material_service_mode": "embedded",
-    }
-    assert should_bootstrap_local_resource_graph(local_args, is_host_mode=True)
-
-    backend_args = {**local_args, "app_bridges": ["edge_control", "fastapi"]}
-    external_args = {**local_args, "_material_service_mode": "external"}
-    scheduler_off_args = {**local_args, "edge_scheduler": False}
-    assert not should_bootstrap_local_resource_graph(backend_args, is_host_mode=True)
-    assert not should_bootstrap_local_resource_graph(external_args, is_host_mode=True)
-    assert not should_bootstrap_local_resource_graph(
-        scheduler_off_args, is_host_mode=True
-    )
-    assert not should_bootstrap_local_resource_graph(local_args, is_host_mode=False)
+    assert should_bootstrap_local_resource_graph(is_host_mode=True)
+    assert not should_bootstrap_local_resource_graph(is_host_mode=False)
 
 
 def test_inventory_composition_bootstraps_before_legacy_cloud_upload(
