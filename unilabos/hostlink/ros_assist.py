@@ -33,6 +33,7 @@ from pathlib import Path
 from typing import Any, Dict, List, MutableMapping, Optional, Sequence, Tuple
 
 _VALID_RANGES = ("SYSTEM_DEFAULT", "SUBNET", "LOCALHOST", "OFF")
+_PLATFORM = sys.platform
 
 
 @dataclass
@@ -197,13 +198,18 @@ def _discovery_command() -> Optional[Sequence[str]]:
     direct = shutil.which("fast-discovery-server")
     if direct:
         return [direct]
-    sibling = Path(sys.executable).resolve().with_name("fast-discovery-server")
+    executable_suffix = ".exe" if _PLATFORM.startswith("win") else ""
+    sibling = Path(sys.executable).resolve().with_name(
+        f"fast-discovery-server{executable_suffix}"
+    )
     if sibling.is_file():
         return [str(sibling)]
     fastdds = shutil.which("fastdds")
     if fastdds:
         return [fastdds, "discovery"]
-    sibling_fastdds = Path(sys.executable).resolve().with_name("fastdds")
+    sibling_fastdds = Path(sys.executable).resolve().with_name(
+        f"fastdds{executable_suffix}"
+    )
     if sibling_fastdds.is_file():
         return [str(sibling_fastdds), "discovery"]
     return None
@@ -230,12 +236,23 @@ class FastDDSDiscoveryServer:
         if self.bind not in ("", "0.0.0.0", "::"):
             args.extend(["-l", self.bind])
         args.extend(["-p", str(self.port)])
+        process_group_options: Dict[str, Any]
+        if _PLATFORM.startswith("win"):
+            process_group_options = {
+                "creationflags": getattr(
+                    subprocess,
+                    "CREATE_NEW_PROCESS_GROUP",
+                    0,
+                )
+            }
+        else:
+            process_group_options = {"start_new_session": True}
         self.process = subprocess.Popen(
             args,
             stdin=subprocess.DEVNULL,
             stdout=subprocess.DEVNULL,
             stderr=subprocess.DEVNULL,
-            start_new_session=True,
+            **process_group_options,
         )
         # The CLI reports bind/config errors immediately.  A short admission
         # window prevents advertising a dead endpoint to every Slave.
@@ -253,11 +270,17 @@ class FastDDSDiscoveryServer:
         if process is None or process.poll() is not None:
             return
         try:
-            os.killpg(process.pid, signal.SIGTERM)
+            if _PLATFORM.startswith("win"):
+                process.terminate()
+            else:
+                os.killpg(process.pid, signal.SIGTERM)
             process.wait(timeout=3)
         except (OSError, subprocess.TimeoutExpired):
             try:
-                os.killpg(process.pid, signal.SIGKILL)
+                if _PLATFORM.startswith("win"):
+                    process.kill()
+                else:
+                    os.killpg(process.pid, signal.SIGKILL)
             except OSError:
                 pass
             try:

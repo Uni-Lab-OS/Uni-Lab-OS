@@ -12,10 +12,19 @@
 import base64
 import json
 import os
-import fcntl
+from dataclasses import asdict, dataclass, field
 from pathlib import Path
-from typing import Optional, Dict, Any
-from dataclasses import dataclass, field, asdict
+from typing import Any, Dict, Optional
+
+try:  # pragma: no cover - 导入分支由目标操作系统决定
+    import fcntl as _fcntl
+except ImportError:  # pragma: no cover - Windows 没有 fcntl
+    _fcntl = None
+
+try:  # pragma: no cover - 导入分支由目标操作系统决定
+    import msvcrt as _msvcrt
+except ImportError:  # pragma: no cover - POSIX 没有 msvcrt
+    _msvcrt = None
 
 
 DEFAULT_BASE_URL = "https://leap-lab.bohrium.com/api/v1"
@@ -122,19 +131,42 @@ class SessionManager:
     def _acquire_lock(self):
         self.working_dir.mkdir(parents=True, exist_ok=True)
         lock_file_path = self.working_dir / "session.lock"
-        self._lock_file = open(lock_file_path, "w")
-        fcntl.flock(self._lock_file.fileno(), fcntl.LOCK_EX)
+        self._lock_file = open(lock_file_path, "a+b")
+        if _fcntl is not None:
+            _fcntl.flock(self._lock_file.fileno(), _fcntl.LOCK_EX)
+            return
+        if _msvcrt is not None:
+            self._lock_file.seek(0, os.SEEK_END)
+            if self._lock_file.tell() == 0:
+                self._lock_file.write(b"\0")
+                self._lock_file.flush()
+            self._lock_file.seek(0)
+            _msvcrt.locking(self._lock_file.fileno(), _msvcrt.LK_LOCK, 1)
+            return
+        self._lock_file.close()
+        self._lock_file = None
+        raise RuntimeError("当前平台不支持会话文件锁")
 
     def _release_lock(self):
         if self._lock_file:
-            fcntl.flock(self._lock_file.fileno(), fcntl.LOCK_UN)
-            self._lock_file.close()
-            self._lock_file = None
+            try:
+                if _fcntl is not None:
+                    _fcntl.flock(self._lock_file.fileno(), _fcntl.LOCK_UN)
+                elif _msvcrt is not None:
+                    self._lock_file.seek(0)
+                    _msvcrt.locking(
+                        self._lock_file.fileno(),
+                        _msvcrt.LK_UNLCK,
+                        1,
+                    )
+            finally:
+                self._lock_file.close()
+                self._lock_file = None
 
     def _load_state(self) -> SessionState:
         if self.session_file.exists():
             try:
-                with open(self.session_file, "r") as f:
+                with open(self.session_file, "r", encoding="utf-8") as f:
                     return SessionState.from_dict(json.load(f))
             except (json.JSONDecodeError, KeyError):
                 pass
@@ -144,8 +176,8 @@ class SessionManager:
         if self._state is None:
             return
         self.working_dir.mkdir(parents=True, exist_ok=True)
-        with open(self.session_file, "w") as f:
-            json.dump(self._state.to_dict(), f, indent=2)
+        with open(self.session_file, "w", encoding="utf-8", newline="\n") as f:
+            json.dump(self._state.to_dict(), f, indent=2, ensure_ascii=False)
 
     def get_state(self) -> SessionState:
         if self._state is None:

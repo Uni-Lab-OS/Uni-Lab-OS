@@ -9,6 +9,7 @@ from pathlib import Path, PurePosixPath
 
 from unilabos.workflow.source_file_access import (
     StableFileAccessError,
+    binary_open_flags,
     read_stable_descriptor,
 )
 from unilabos.workflow.source_workspace_errors import SourceWorkspaceError
@@ -28,7 +29,7 @@ def directory_flags() -> int:
 def file_flags() -> int:
     """返回安全只读文件标志；参数无，返回禁止链接和 FIFO 阻塞的标志组合。"""
 
-    return (
+    return binary_open_flags(
         os.O_RDONLY
         | getattr(os, "O_CLOEXEC", 0)
         | getattr(os, "O_NOFOLLOW", 0)

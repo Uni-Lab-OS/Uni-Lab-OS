@@ -18,6 +18,7 @@ from uuid import uuid4
 from unilabos.workflow.source_file_access import (
     StableFileAccessError,
     assert_directory_identity,
+    binary_open_flags,
     directory_identity,
     is_reparse_point,
     read_regular_path,
@@ -126,9 +127,14 @@ class _PublicationDirectory:
 
         self.assert_current()
         if self.descriptor is not None:
-            return os.open(name, flags, mode, dir_fd=self.descriptor)
+            return os.open(
+                name,
+                binary_open_flags(flags),
+                mode,
+                dir_fd=self.descriptor,
+            )
         assert self.path is not None
-        return os.open(self.path / name, flags, mode)
+        return os.open(self.path / name, binary_open_flags(flags), mode)
 
     def stat_child(self, name: str) -> os.stat_result:
         """不跟随符号链接读取一个单段子文件元数据。
