@@ -8,7 +8,7 @@ import json
 import sys
 from collections.abc import Callable
 from pathlib import Path
-from types import ModuleType, SimpleNamespace
+from types import ModuleType
 from typing import Any
 
 import pytest
@@ -22,6 +22,10 @@ from unilabos.package_manager import (
     WorkspaceSource,
     compile_package_source,
     compile_registry_snapshot,
+)
+from unilabos.package_manager.driver_runtime import (
+    DriverActivationError,
+    activate_python_driver,
 )
 from unilabos.package_manager.package_catalog import RegistrySnapshotError
 from unilabos.package_manager.workspace_runtime.activation import (
@@ -457,17 +461,17 @@ def test_workflow_source_plan_reuses_compiled_catalog_without_manifest_reread(
     ),
     ids=("canonical-fqid", "unique-short-identity"),
 )
-def test_selected_device_activation_uses_one_registry_resolver(
+def test_workspace_selection_activates_only_one_registry_driver(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
     graph_identity: str,
 ) -> None:
-    """规范全限定身份与唯一短名通过同一注册表解析器激活选中设备。
+    """工作区有限选择以规范全限定身份或唯一短名只激活一个注册表驱动。
 
     参数：``tmp_path`` 提供隔离工作区；``monkeypatch`` 隔离全局注册表和驱动
     导入；``graph_identity`` 是本例的规范或兼容设备身份。
-    返回：无；断言只请求选中驱动模块，未选模块保持零导入。
-    异常：身份无法统一解析或目录发布导入未选模块时测试失败。
+    返回：无；断言驱动运行时只请求选中模块，未选模块保持零导入。
+    异常：工作区选择无法统一解析或目录发布导入未选模块时测试失败。
     """
 
     source = _write_workspace(
@@ -510,46 +514,16 @@ def test_selected_device_activation_uses_one_registry_resolver(
         imported_modules.append(module)
         return SelectedDriver
 
-    def preserve_selected_driver(
-        driver: type[SelectedDriver],
-        **_wrapper_options: Any,
-    ) -> type[SelectedDriver]:
-        """绕过 ROS2 包装并保留已经解析的测试驱动。
-
-        参数：``driver`` 是注册表解析得到的驱动类；``_wrapper_options`` 是包装器
-        收到的设备元数据。
-        返回：原始测试驱动类。
-        异常：无。
-        """
-
-        return driver
-
-    initialize_device = importlib.import_module("unilabos.ros.initialize_device")
-    monkeypatch.setattr(
-        initialize_device.default_manager,
-        "get_class",
-        get_selected_class,
-    )
-    monkeypatch.setattr(
-        initialize_device,
-        "ros2_device_node",
-        preserve_selected_driver,
-    )
-    # ``device_config`` 是物理图选中实例，身份保持作者写入的规范或兼容形式。
-    device_config = SimpleNamespace(
-        res_content=SimpleNamespace(
-            klass=graph_identity,
-            uuid="72000000-0000-4000-8000-000000000001",
-            config={},
-        )
+    # ``activation`` 是工作区物理图有限选择产生的唯一驱动激活结果。
+    activation = activate_python_driver(
+        lab_registry,
+        graph_identity,
+        {},
+        loader=get_selected_class,
     )
 
-    initialized = initialize_device.initialize_device_from_dict(
-        "selected-device-instance",
-        device_config,
-    )
-
-    assert initialized is not None
+    assert activation.driver_class is SelectedDriver
+    assert activation.definition_identity == "community.runtime_lab.selected_device"
     assert imported_modules == ["runtime_lab.selected_device:SelectedDevice"]
     assert not hasattr(
         builtins,
@@ -557,7 +531,7 @@ def test_selected_device_activation_uses_one_registry_resolver(
     )
 
 
-def test_ambiguous_short_identity_fails_before_device_import(
+def test_workspace_ambiguous_short_identity_fails_before_device_import(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -594,9 +568,30 @@ def test_ambiguous_short_identity_fails_before_device_import(
     monkeypatch.setattr(lab_registry, "_package_snapshot", None, raising=False)
     publish_registry_snapshot(snapshot, lab_registry)
 
-    with pytest.raises(RegistrySnapshotError, match="歧义"):
-        lab_registry.resolve_definition("device", "shared_device")
+    imported_modules: list[str] = []
 
+    def reject_load(source_identity: str) -> type[object]:
+        """记录歧义解析后不应发生的作者驱动加载。
+
+        参数：``source_identity`` 是意外请求的驱动源码身份。
+        返回：普通测试类，仅为满足加载器接口。
+        异常：无。
+        """
+
+        imported_modules.append(source_identity)
+        return object
+
+    with pytest.raises(DriverActivationError) as caught:
+        activate_python_driver(
+            lab_registry,
+            "shared_device",
+            {},
+            loader=reject_load,
+        )
+
+    assert caught.value.code == "definition_resolution_error"
+    assert isinstance(caught.value.__cause__, RegistrySnapshotError)
+    assert imported_modules == []
     assert "first_lab.shared_device" not in sys.modules
     assert "second_lab.shared_device" not in sys.modules
 

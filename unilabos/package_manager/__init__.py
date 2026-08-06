@@ -1,6 +1,11 @@
 """工作区（Workspace）和包目录（PackageCatalog）的公开接口。"""
 
 from .cli import PackageCLIError, cmd_package, register_package_subcommands
+from .driver_runtime import (
+    DriverActivationError,
+    PythonDriverActivation,
+    activate_python_driver,
+)
 from .inspection import inspect_package
 from .package_catalog import (
     PackageCatalog,
@@ -55,6 +60,7 @@ from .workspace_runtime import (
 )
 
 __all__ = [
+    "DriverActivationError",
     "LockedPackage",
     "PackageCLIError",
     "PackageCatalog",
@@ -64,6 +70,7 @@ __all__ = [
     "PackageDependencyManager",
     "PackageProject",
     "PreparedWorkspaceProductGeneration",
+    "PythonDriverActivation",
     "RegistryActivationPlan",
     "RegistrySnapshot",
     "RegistrySnapshotError",
@@ -82,6 +89,7 @@ __all__ = [
     "WorkspaceRuntimeStatus",
     "WorkspaceSource",
     "WorkspaceStartupPlan",
+    "activate_python_driver",
     "close_workspace_product_lifecycle",
     "cmd_package",
     "compile_catalog_material_shapes",
