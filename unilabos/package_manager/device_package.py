@@ -2,8 +2,8 @@
 
 from __future__ import annotations
 
-import re
 import math
+import re
 from dataclasses import dataclass
 from typing import Any, Mapping
 from urllib.parse import urlsplit, urlunsplit
@@ -124,8 +124,13 @@ def configuration_schema_for_definition(
 ) -> dict[str, Any]:
     """把 Catalog 初始化参数投影为 Electron 可渲染的固定 JSON Schema。
 
-    首版拒绝疑似秘密参数，避免 Electron 把凭据明文写进设备图。未知 Python
-    注解保留为 object 并附带原注解，调用方不得据此猜测字符串输入。
+    参数 ``definition`` 是已验证 PackageCatalog 中的目标设备定义。返回封闭的
+    object Schema；初始化参数结构、秘密类型或默认值无法安全投影时抛出
+    :class:`DevicePackageError`。
+
+    疑似秘密参数只允许是字符串，并投影为写入专用字段；它们不得携带 Catalog
+    默认值。未知 Python 注解保留为 object 并附带原注解，调用方不得据此猜测
+    字符串输入。
     """
 
     raw_parameters = definition.details.get("init_parameters", ())
@@ -145,12 +150,14 @@ def configuration_schema_for_definition(
             raise DevicePackageError(
                 f"设备 definition 包含空或重复初始化参数: {definition.fqid}"
             )
-        if _SECRET_PARAMETER.search(name):
-            raise DevicePackageError(
-                f"首版不支持把秘密参数 {name} 写入设备图；请使用非秘密引用合同"
-            )
         property_schema = _parameter_schema(str(raw.get("type") or "Any"))
-        if "default" in raw and not _contains_dynamic_default(raw["default"]):
+        is_secret = _SECRET_PARAMETER.search(name) is not None
+        if is_secret and property_schema.get("type") != "string":
+            raise DevicePackageError(f"设备秘密参数 {name} 必须声明为 str")
+        if is_secret:
+            property_schema["writeOnly"] = True
+            property_schema["x-unilab-secret"] = True
+        elif "default" in raw and not _contains_dynamic_default(raw["default"]):
             property_schema["default"] = _plain_json(raw["default"])
         properties[name] = property_schema
         if bool(raw.get("required")):
@@ -228,8 +235,9 @@ def validate_configuration_for_definition(
 ) -> dict[str, Any]:
     """按设备 definition 的固定配置 Schema 校验并补齐静态默认值。
 
-    参数 ``definition`` 是目标设备定义，参数 ``configuration`` 是用户提交的
-    非秘密初始化参数。返回可安全写入设备图的普通 JSON 对象；未知字段、缺失
+    参数 ``definition`` 是目标设备定义，参数 ``configuration`` 是用户通过封闭
+    stdin 提交的一次性初始化参数。返回完成类型校验的普通 JSON 对象；返回值仍
+    可能含短生命周期秘密，调用方必须在写图前转换为秘密引用。未知字段、缺失
     必填字段或 JSON 类型不匹配时抛出 :class:`DevicePackageError`。该函数不做
     字符串到数字等隐式转换，避免配置含义随调用端改变。
     """
@@ -260,7 +268,12 @@ def _validate_configuration_value(
     value: Any,
     schema: Mapping[str, Any],
 ) -> None:
-    """校验一个配置值的 JSON 类型，不执行任何隐式类型转换。"""
+    """校验一个配置值的 JSON 类型，不执行任何隐式类型转换。
+
+    参数 ``name`` 是 PackageCatalog 字段身份，``value`` 是用户值，``schema``
+    是该字段的冻结 Schema。函数无返回值；类型不匹配时抛出
+    :class:`DevicePackageError`。
+    """
 
     expected = schema.get("type")
     valid = False

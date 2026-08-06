@@ -1,29 +1,28 @@
 from typing import Optional
 
+from unilabos.config.config import BasicConfig
+from unilabos.package_manager.consumers import resolve_registry_definition
+from unilabos.package_manager.device_secrets import resolve_device_configuration
 from unilabos.registry.init_enforce import merge_init_param_enforce
 from unilabos.registry.registry import lab_registry
-from unilabos.package_manager.consumers import resolve_registry_definition
-from unilabos.ros.device_node_wrapper import ros2_device_node
-from unilabos.ros.nodes.base_device_node import ROS2DeviceNode, DeviceInitError
 from unilabos.resources.resource_tracker import ResourceDictInstance
+from unilabos.ros.device_node_wrapper import ros2_device_node
+from unilabos.ros.nodes.base_device_node import DeviceInitError, ROS2DeviceNode
 from unilabos.utils import logger
 from unilabos.utils.exception import DeviceClassInvalid
 from unilabos.utils.import_manager import default_manager
 
 
-def initialize_device_from_dict(device_id, device_config: ResourceDictInstance) -> Optional[ROS2DeviceNode]:
-    """Initializes a device based on its configuration.
+def initialize_device_from_dict(
+    device_id,
+    device_config: ResourceDictInstance,
+) -> Optional[ROS2DeviceNode]:
+    """按设备图声明加载驱动，并在构造边界解析本地秘密引用。
 
-    This function dynamically imports the appropriate device class and creates an
-    instance of it using the provided device configuration.
-    It also sets up action clients for the device based on its action value mappings.
-
-    Args:
-        device_id (str): The unique identifier for the device.
-        device_config (dict): The configuration dictionary for the device.
-
-    Returns:
-        None
+    参数 ``device_id`` 是当前设备图中的稳定实例 ID，``device_config`` 是保留
+    引用形态配置的 Resource 投影。返回完成包装的 ROS2 设备节点；驱动初始化
+    失败时沿用既有 ``None`` 语义。秘密只进入短生命周期 ``driver_params``，不会
+    回写设备图或 Resource 投影；引用不可解析时失败关闭。
     """
     d = None
     device_class_config = device_config.res_content.klass
@@ -66,6 +65,10 @@ def initialize_device_from_dict(device_id, device_config: ResourceDictInstance) 
             runtime_config = device_config.res_content.config
             if not isinstance(runtime_config, dict):
                 runtime_config = {}
+            runtime_config = resolve_device_configuration(
+                runtime_config,
+                working_dir=BasicConfig.working_dir,
+            )
             driver_params = merge_init_param_enforce(
                 runtime_config,
                 registry_entry.get("init_param_enforce"),
@@ -76,7 +79,7 @@ def initialize_device_from_dict(device_id, device_config: ResourceDictInstance) 
                 driver_is_ros=device_class_config["type"] == "ros2",
                 driver_params=driver_params,
             )
-        except DeviceInitError as ex:
+        except DeviceInitError:
             return d
     else:
         logger.warning(f"initialize device {device_id} failed, provided device_config: {device_config}")
