@@ -1,4 +1,4 @@
-"""``package inspect`` 与软件包目录（PackageCatalog）同源合同。"""
+"""``package inspect`` 与包目录（PackageCatalog）同源合同。"""
 
 from __future__ import annotations
 

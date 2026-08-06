@@ -55,7 +55,7 @@ def compile_catalog_material_shapes(
     source: WorkspaceSource,
     catalog: PackageCatalog,
 ) -> tuple[dict[str, Any], ...]:
-    """从同代软件包目录（PackageCatalog）编译静态物料外形。
+    """从同代包目录（PackageCatalog）编译静态物料外形。
 
     参数：``source`` 是本次目录编译唯一授权的工作区来源；``catalog`` 是同一来源
     的冻结目录代，提供声明文件、静态 ``registry_entry.model`` 和资产摘要。
@@ -90,9 +90,7 @@ def compile_catalog_material_shapes(
         expected_digest = catalog_assets.get(logical_shape_path)
         actual_digest = "sha256:" + hashlib.sha256(shape_bytes).hexdigest()
         if expected_digest is None or expected_digest != actual_digest:
-            raise ValueError(
-                f"外形资产不属于当前软件包目录代或摘要漂移: {logical_shape_path}"
-            )
+            raise ValueError(f"外形资产不属于当前包目录（PackageCatalog）代或摘要漂移: {logical_shape_path}")
         shape = _load_public_shape_bytes(
             shape_bytes,
             logical_shape_path=logical_shape_path,
@@ -212,7 +210,7 @@ def _catalog_shape_path(
         or declaration_path.parts[:1] != package_prefix.parts
         or any(part in {"", ".", ".."} for part in declaration_path.parts)
     ):
-        raise ValueError("软件包目录声明文件不在规范导入包内")
+        raise ValueError("包目录（PackageCatalog）声明文件不在规范导入包内")
     entry = binding.get("entry")
     if not isinstance(entry, str) or not entry or "\\" in entry:
         raise ValueError("工作区外形资产入口必须是非空 POSIX 相对路径")

@@ -164,7 +164,7 @@ def cmd_package(args_dict: dict[str, Any], http_client: Any = None) -> None:
         )
         return
     if not package_path:
-        raise PackageCLIError("缺少 --path（社区软件包目录）")
+        raise PackageCLIError("缺少 --path（社区软件包工作区路径）")
     if action == "inspect":
         inspect_package(
             package_path,

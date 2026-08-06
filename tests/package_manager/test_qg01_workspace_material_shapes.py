@@ -201,7 +201,7 @@ def test_workspace_shape_entry_cannot_escape_declaring_package(
 def test_catalog_shapes_use_same_generation_definition_without_registry_paths(
     tmp_path: Path,
 ) -> None:
-    """物料外形只从同代软件包目录（PackageCatalog）定义和工作区来源编译。
+    """物料外形只从同代包目录（PackageCatalog）定义和工作区来源编译。
 
     参数：``tmp_path`` 隔离包含真实装饰器、声明文件与外形资产的工作区。
     返回：无；断言新接缝不需要注册表（Registry）的 AST ``file_path``，并保持
@@ -244,7 +244,7 @@ def test_catalog_shapes_use_same_generation_definition_without_registry_paths(
 def test_catalog_shapes_reject_source_drift_after_catalog_compilation(
     tmp_path: Path,
 ) -> None:
-    """物料外形资产必须属于同一软件包目录（PackageCatalog）内容代。
+    """物料外形资产必须属于同一包目录（PackageCatalog）内容代。
 
     参数：``tmp_path`` 提供可在目录编译后改写外形资产的隔离工作区。
     返回：无；断言来源摘要漂移时关闭式失败，不把新资产错误归入旧目录代。

@@ -263,7 +263,7 @@ def _prepare_runtime(
     """通过公开接缝准备一个尚未发布或导入作者模块的工作区运行计划。
 
     参数：``source`` 是授权工作区来源；``compile_catalog`` 是可注入的单次完整
-    软件包目录（PackageCatalog）编译接缝。
+    包目录（PackageCatalog）编译接缝。
     返回：公开 ``WorkspaceRegistryRuntime`` 计划与被应用的启动参数。
     异常：工作区、目录、注册表快照或物理图无效时传播公开异常。
     """
@@ -285,7 +285,8 @@ def test_workspace_runtime_compiles_catalog_once_without_ast_scan_roots(
     """工作区启动只完整编译一次，且不再向注册表传目录扫描根。
 
     参数：``tmp_path`` 提供隔离工作区。
-    返回：无；断言同一软件包目录只经注入编译接缝一次，遗留 ``devices`` 保持空。
+    返回：无；断言同一包目录（PackageCatalog）只经注入编译接缝一次，遗留
+    ``devices`` 保持空。
     异常：重复编译或重新启用 AST 扫描时断言失败。
     """
 
@@ -294,10 +295,10 @@ def test_workspace_runtime_compiles_catalog_once_without_ast_scan_roots(
     compile_calls: list[WorkspaceSource] = []
 
     def compile_once(candidate: WorkspaceSource):
-        """记录运行时请求的软件包目录编译。
+        """记录运行时请求的包目录（PackageCatalog）编译。
 
         参数：``candidate`` 是运行时传入的授权来源。
-        返回：预先完整编译的软件包目录（PackageCatalog）。
+        返回：预先完整编译的包目录（PackageCatalog）。
         异常：来源身份漂移时断言失败。
         """
 

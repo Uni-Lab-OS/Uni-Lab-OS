@@ -137,7 +137,7 @@ def compose_workflow_runtime(
     参数：``working_dir`` 决定现有工作流 SQLite 路径；``compiler`` 是可信工作流
     创作编译器；``compiler_rebuilder`` 在应用后原子刷新完整模板代际；
     ``editable_package_roots`` 是唯一允许发现源码的显式授权目录；
-    ``editable_source_discovery_plan`` 是软件包目录（PackageCatalog）
+    ``editable_source_discovery_plan`` 是包目录（PackageCatalog）
     编译代际产生的预编译工作流源码（Workflow Source）计划；
     ``material_resolver`` 按稳定 UUID 读取本地物料权威摘要；``scheduler`` 是仅在
     本地调度模式装配的现有调度器（EdgeScheduler）；``start_source_monitor``

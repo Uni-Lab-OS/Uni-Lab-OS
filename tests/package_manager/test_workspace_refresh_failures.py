@@ -44,7 +44,7 @@ def test_failed_refresh_preserves_all_old_generation_authorities(
         if generation is initial_input:
             return initial_candidate
         if failure_kind == "compile":
-            raise ValueError("注入的软件包目录编译失败")
+            raise ValueError("注入的包目录（PackageCatalog）编译失败")
         return changed_candidate
 
     runtime = WorkspacePackageRuntime(
@@ -67,4 +67,3 @@ def test_failed_refresh_preserves_all_old_generation_authorities(
     assert status.observed_input_identity == "input-b"
     assert status.last_outcome == "failed"
     assert status.last_error is not None
-

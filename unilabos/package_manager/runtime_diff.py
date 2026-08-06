@@ -135,7 +135,7 @@ def _dependency_revision(
 def _implementation_identity(definition: Any) -> tuple[str, str, str]:
     """读取一个静态定义的作者实现身份。
 
-    参数：``definition`` 是软件包目录（PackageCatalog）定义。
+    参数：``definition`` 是包目录（PackageCatalog）定义。
     返回：模块、符号和声明文件内容摘要三元组。
     异常：无；正式候选已完成目录字段验证。
     """
@@ -146,7 +146,7 @@ def _implementation_identity(definition: Any) -> tuple[str, str, str]:
 def _action_contract(definition: Any) -> Any:
     """读取设备定义的规范动作合同（Action Contract）投影。
 
-    参数：``definition`` 是软件包目录（PackageCatalog）中的设备定义。
+    参数：``definition`` 是包目录（PackageCatalog）中的设备定义。
     返回：规范 ``action_value_mappings`` 冻结值；缺失时返回空元组。
     异常：无；目录已保证详情只含不可变 JSON 值。
     """

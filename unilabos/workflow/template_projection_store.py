@@ -569,8 +569,12 @@ class RegistryTemplateProjectionStore:
     ) -> str:
         """按显式 UUID 或活动业务唯一键写入一个节点模板。
 
-        参数说明：``connection`` 是当前唯一写事务；其余参数描述来源、候选、身份
-        和事务时间。返回值是本轮节点模板稳定 UUID。
+        参数：``connection`` 是当前唯一写事务；``authority_id`` 是模板来源权威；
+        ``candidate`` 是已经规范化的节点模板候选；``business_key`` 是来源内稳定
+        业务唯一键；``now`` 是本事务统一更新时间。
+        返回：本轮解析或创建的稳定节点模板 UUID。
+        异常：显式 UUID 与活动业务身份冲突、候选字段无效或 SQL 写入失败时传播
+        原始异常；同一事务不得留下部分节点模板投影（Template Projection）。
         """
 
         template_uuid = self._resolve_node_uuid(

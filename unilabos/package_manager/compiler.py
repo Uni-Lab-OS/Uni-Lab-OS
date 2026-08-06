@@ -1,4 +1,4 @@
-"""显式软件包来源到完整软件包目录（PackageCatalog）的深模块。"""
+"""显式软件包来源到完整包目录（PackageCatalog）的深模块。"""
 
 from __future__ import annotations
 
@@ -28,7 +28,7 @@ def compile_package_source(source: WorkspaceSource) -> PackageCatalog:
 
     参数：``source`` 是唯一授权的工作区来源 Adapter。
     返回：包含全部设备、资源、显式工作流源码（Workflow Source）和资产的不可变
-    软件包目录（PackageCatalog）。
+    包目录（PackageCatalog）。
     异常：来源、语法、身份、动作合同（Action Contract）或资产不合法时抛出
     ``PackageCompileError``；函数不修改 ``sys.path``、不导入作者模块且不发布部分状态。
     """
@@ -149,12 +149,12 @@ def _collect_package_files(
         try:
             entries = sorted(current_directory.iterdir(), key=lambda item: item.name)
         except OSError as error:
-            raise ValueError("软件包目录不可读取") from error
+            raise ValueError("软件包工作区不可读取") from error
         for entry in entries:
             if entry.name in _IGNORED_PARTS:
                 continue
             if entry.is_symlink():
-                raise ValueError("软件包目录不得包含符号链接")
+                raise ValueError("软件包工作区不得包含符号链接")
             if entry.is_dir():
                 pending_directories.append(entry)
                 continue

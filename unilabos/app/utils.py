@@ -199,60 +199,59 @@ def cleanup_for_restart() -> bool:
     异常：各可选组件的普通清理异常转换为警告并继续后续步骤；导入或 ROS 清理
     故障按既有策略返回 ``False``。本函数不直接退出进程。
     """
-    print_status("[Restart] Starting cleanup for restart...", "info")
+    print_status("[重启] 开始执行重启前清理", "info")
 
     # 先停止工作区文件世代监视，避免后续关闭数据库和设备时继续提交刷新。
     try:
         from unilabos.package_manager import close_workspace_product_lifecycle
 
         close_workspace_product_lifecycle()
-        print_status("[Restart] Workspace product lifecycle stopped", "info")
-    except Exception as e:
+        print_status("[重启] 工作区产品生命周期已停止", "info")
+    except Exception as error:
         print_status(
-            f"[Restart] Error stopping workspace lifecycle: {e}",
+            f"[重启] 停止工作区产品生命周期时出错: {error}",
             "warning",
         )
 
-    # Step 1: Stop WebSocket communication client
-    print_status("[Restart] Step 1: Stopping WebSocket client...", "info")
+    # 第一步：停止 WebSocket 通信客户端。
+    print_status("[重启] 第一步：正在停止 WebSocket 客户端", "info")
     try:
         from unilabos.app.communication import get_communication_client
 
         comm_client = get_communication_client()
         if comm_client is not None:
             comm_client.stop()
-            print_status("[Restart] WebSocket client stopped", "info")
-    except Exception as e:
-        print_status(f"[Restart] Error stopping WebSocket: {e}", "warning")
+            print_status("[重启] WebSocket 客户端已停止", "info")
+    except Exception as error:
+        print_status(f"[重启] 停止 WebSocket 客户端时出错: {error}", "warning")
 
-    # Step 2: Get HostNode and cleanup ROS
-    print_status("[Restart] Step 2: Cleaning up ROS nodes...", "info")
+    # 第二步：取得主机节点并清理 ROS 运行时。
+    print_status("[重启] 第二步：正在清理 ROS 节点", "info")
     try:
         from unilabos.ros.nodes.presets.host_node import HostNode
         import rclpy
         from rclpy.timer import Timer
 
+        # ``host_instance`` 是当前进程唯一的主机节点运行实例。
         host_instance = HostNode.get_instance(timeout=5)
         if host_instance is not None:
-            print_status(f"[Restart] Found HostNode: {host_instance.device_id}", "info")
+            print_status(f"[重启] 已找到主机节点: {host_instance.device_id}", "info")
 
-            # Gracefully shutdown background threads
-            print_status("[Restart] Shutting down background threads...", "info")
+            # 先有界停止后台线程，避免销毁节点后仍有回调访问它。
+            print_status("[重启] 正在停止后台线程", "info")
             HostNode.shutdown_background_threads(timeout=5.0)
-            print_status("[Restart] Background threads shutdown complete", "info")
+            print_status("[重启] 后台线程已停止", "info")
 
-            # Stop discovery timer
+            # 停止发现计时器，阻止清理期间产生新的节点发现回调。
             if hasattr(host_instance, "_discovery_timer") and isinstance(
                 host_instance._discovery_timer, Timer
             ):
                 host_instance._discovery_timer.cancel()
-                print_status("[Restart] Discovery timer cancelled", "info")
+                print_status("[重启] 节点发现计时器已取消", "info")
 
-            # Destroy device nodes
+            # ``device_count`` 是本轮需要销毁的设备运行实例数量。
             device_count = len(host_instance.devices_instances)
-            print_status(
-                f"[Restart] Destroying {device_count} device instances...", "info"
-            )
+            print_status(f"[重启] 正在销毁 {device_count} 个设备实例", "info")
             for device_id, device_node in list(host_instance.devices_instances.items()):
                 try:
                     if (
@@ -260,77 +259,76 @@ def cleanup_for_restart() -> bool:
                         and device_node.ros_node_instance is not None
                     ):
                         device_node.ros_node_instance.destroy_node()
-                        print_status(f"[Restart] Device {device_id} destroyed", "info")
-                except Exception as e:
+                        print_status(f"[重启] 设备 {device_id} 已销毁", "info")
+                except Exception as error:
                     print_status(
-                        f"[Restart] Error destroying device {device_id}: {e}", "warning"
+                        f"[重启] 销毁设备 {device_id} 时出错: {error}", "warning"
                     )
 
-            # Clear devices instances
+            # 清除设备实例索引，避免监督器下一代复用旧对象。
             host_instance.devices_instances.clear()
             host_instance.devices_names.clear()
 
-            # Destroy host node
+            # 销毁主机节点。
             try:
                 host_instance.destroy_node()
-                print_status("[Restart] HostNode destroyed", "info")
-            except Exception as e:
-                print_status(f"[Restart] Error destroying HostNode: {e}", "warning")
+                print_status("[重启] 主机节点已销毁", "info")
+            except Exception as error:
+                print_status(f"[重启] 销毁主机节点时出错: {error}", "warning")
 
-            # Reset HostNode state
+            # 重置进程级主机节点状态。
             HostNode.reset_state()
-            print_status("[Restart] HostNode state reset", "info")
+            print_status("[重启] 主机节点状态已重置", "info")
 
-        # Shutdown executor first (to stop executor.spin() gracefully)
+        # 先停止执行器，确保 ``executor.spin()`` 有序退出。
         if hasattr(rclpy, "__executor") and rclpy.__executor is not None:
             try:
                 rclpy.__executor.shutdown()
-                rclpy.__executor = None  # Clear for restart
-                print_status("[Restart] ROS executor shutdown complete", "info")
-            except Exception as e:
-                print_status(f"[Restart] Error shutting down executor: {e}", "warning")
+                rclpy.__executor = None  # 清除旧执行器，允许下一代进程重新创建。
+                print_status("[重启] ROS 执行器已停止", "info")
+            except Exception as error:
+                print_status(f"[重启] 停止 ROS 执行器时出错: {error}", "warning")
 
-        # Shutdown rclpy
+        # 最后关闭 rclpy 上下文。
         if rclpy.ok():
             rclpy.shutdown()
-            print_status("[Restart] rclpy shutdown complete", "info")
+            print_status("[重启] rclpy 已关闭", "info")
 
-    except ImportError as e:
-        print_status(f"[Restart] ROS modules not available: {e}", "warning")
-    except Exception as e:
-        print_status(f"[Restart] Error in ROS cleanup: {e}", "warning")
+    except ImportError as error:
+        print_status(f"[重启] ROS 模块不可用: {error}", "warning")
+    except Exception as error:
+        print_status(f"[重启] 清理 ROS 时出错: {error}", "warning")
         return False
 
-    # Step 3: Stop the Edge microbackend before clearing process singletons.
-    # This closes the Host listener / Slave client as well as scheduler stores,
-    # so a restart can bind the same HostLink and SQLite resources again.
-    print_status("[Restart] Step 3: Stopping Edge microbackend...", "info")
+    # 第三步：先停止 Edge 微后端，再清理进程单例；这会关闭主机监听器、从机客户端和
+    # 调度器（Scheduler）存储，使重启后的进程能重新绑定 HostLink 与 SQLite 资源。
+    print_status("[重启] 第三步：正在停止 Edge 微后端", "info")
     try:
         from unilabos.app.scheduler.integration import shutdown_edge_services
 
         shutdown_edge_services()
-        print_status("[Restart] Edge microbackend stopped", "info")
-    except Exception as e:
-        print_status(f"[Restart] Error stopping Edge microbackend: {e}", "warning")
+        print_status("[重启] Edge 微后端已停止", "info")
+    except Exception as error:
+        print_status(f"[重启] 停止 Edge 微后端时出错: {error}", "warning")
 
-    # Step 4: Reset communication client singleton
-    print_status("[Restart] Step 4: Resetting singletons...", "info")
+    # 第四步：重置通信客户端进程单例。
+    print_status("[重启] 第四步：正在重置进程单例", "info")
     try:
         from unilabos.app import communication
 
         if hasattr(communication, "_communication_client"):
             communication._communication_client = None
-            print_status("[Restart] Communication client singleton reset", "info")
-    except Exception as e:
+            print_status("[重启] 通信客户端单例已重置", "info")
+    except Exception as error:
         print_status(
-            f"[Restart] Error resetting communication singleton: {e}", "warning"
+            f"[重启] 重置通信客户端单例时出错: {error}", "warning"
         )
 
-    # Step 5: Wait for threads to finish
-    print_status("[Restart] Step 5: Waiting for threads to finish...", "info")
-    time.sleep(3)  # Give threads time to finish
+    # 第五步：给后台线程有限时间完成退出。
+    print_status("[重启] 第五步：等待后台线程退出", "info")
+    time.sleep(3)
 
-    # Check remaining threads
+    # ``remaining_threads`` 记录清理后仍存活的非主线程名称，供重启诊断。
     remaining_threads = []
     for t in threading.enumerate():
         if t.name != "MainThread" and t.is_alive():
@@ -338,25 +336,25 @@ def cleanup_for_restart() -> bool:
 
     if remaining_threads:
         print_status(
-            f"[Restart] Warning: {len(remaining_threads)} threads still running: {remaining_threads}",
+            f"[重启] 警告：仍有 {len(remaining_threads)} 个线程运行: {remaining_threads}",
             "warning",
         )
     else:
-        print_status("[Restart] All threads stopped", "info")
+        print_status("[重启] 所有后台线程均已停止", "info")
 
     # exporter flush 有界且 fail-open；os._exit 前也尽量送出已结束 span。
     try:
         from unilabos.utils.tracing import shutdown_tracing
 
         shutdown_tracing()
-    except Exception as e:
-        print_status(f"[Restart] Error shutting down tracing: {e}", "warning")
+    except Exception as error:
+        print_status(f"[重启] 关闭追踪导出器时出错: {error}", "warning")
 
-    # Step 6: Force garbage collection
-    print_status("[Restart] Step 6: Running garbage collection...", "info")
+    # 第六步：执行垃圾回收并清除弱引用对象。
+    print_status("[重启] 第六步：正在执行垃圾回收", "info")
     gc.collect()
-    gc.collect()  # Run twice for weak references
-    print_status("[Restart] Garbage collection complete", "info")
+    gc.collect()
+    print_status("[重启] 垃圾回收已完成", "info")
 
-    print_status("[Restart] Cleanup complete. Ready for re-initialization.", "info")
+    print_status("[重启] 清理完成，可以重新初始化", "info")
     return True

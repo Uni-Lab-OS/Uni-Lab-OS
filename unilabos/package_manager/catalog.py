@@ -1,4 +1,4 @@
-"""不可变软件包目录（PackageCatalog）及其规范摘要。"""
+"""不可变包目录（PackageCatalog）及其规范摘要。"""
 
 from __future__ import annotations
 
@@ -17,7 +17,7 @@ JSONValue = JSONScalar | tuple["JSONValue", ...] | Mapping[str, "JSONValue"]
 def _freeze_json(value: Any) -> JSONValue:
     """把 JSON 值递归冻结，阻止目录发布后被调用者修改。
 
-    参数：``value`` 是待进入软件包目录（PackageCatalog）的普通 JSON 值。
+    参数：``value`` 是待进入包目录（PackageCatalog）的普通 JSON 值。
     返回：映射和数组均不可变的等价值。
     异常：遇到非 JSON 类型时抛出 ``TypeError``，关闭式拒绝不稳定实现对象。
     """
@@ -33,13 +33,13 @@ def _freeze_json(value: Any) -> JSONValue:
         )
     if isinstance(value, (list, tuple)):
         return tuple(_freeze_json(item) for item in value)
-    raise TypeError(f"软件包目录只接受 JSON 值，收到 {type(value).__name__}")
+    raise TypeError(f"包目录（PackageCatalog）只接受 JSON 值，收到 {type(value).__name__}")
 
 
 def _thaw_json(value: JSONValue) -> Any:
     """把冻结 JSON 值转换为可序列化的新容器。
 
-    参数：``value`` 是软件包目录（PackageCatalog）拥有的冻结值。
+    参数：``value`` 是包目录（PackageCatalog）拥有的冻结值。
     返回：不共享内部容器的普通 JSON 值。
     异常：无；输入类型已在冻结阶段验证。
     """
@@ -77,7 +77,7 @@ class PackageDiagnostic:
 
 
 class PackageCompileError(RuntimeError):
-    """表示完整软件包目录（PackageCatalog）无法安全产生。"""
+    """表示完整包目录（PackageCatalog）无法安全产生。"""
 
     def __init__(self, diagnostics: tuple[PackageDiagnostic, ...]) -> None:
         """保存稳定诊断并构造不包含源码正文的错误消息。
@@ -239,7 +239,7 @@ class PackageAsset:
 
 @dataclass(frozen=True, slots=True)
 class PackageCatalog:
-    """一次完整静态编译产生的不可变软件包目录。"""
+    """一次完整静态编译产生的不可变包目录（PackageCatalog）。"""
 
     schema_version: Literal["1"]
     distribution: PackageDistributionIdentity

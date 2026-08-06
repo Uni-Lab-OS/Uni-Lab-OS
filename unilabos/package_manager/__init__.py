@@ -1,4 +1,4 @@
-"""工作区（Workspace）和软件包目录（PackageCatalog）的公开接口。"""
+"""工作区（Workspace）和包目录（PackageCatalog）的公开接口。"""
 
 from .catalog import PackageCatalog, PackageCompileError
 from .cli import PackageCLIError, cmd_package, register_package_subcommands

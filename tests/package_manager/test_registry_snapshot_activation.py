@@ -118,7 +118,7 @@ def _write_registry_workspace(
     异常：文件系统写入失败时传播原始异常；生成内容不导入作者模块。
     """
 
-    # ``package_root`` 是软件包目录（PackageCatalog）允许扫描的唯一导入包边界。
+    # ``package_root`` 是包目录（PackageCatalog）允许扫描的唯一导入包边界。
     package_root = root / import_package
     package_root.mkdir(parents=True)
     package_root.joinpath("__init__.py").write_text("", encoding="utf-8")
@@ -192,13 +192,13 @@ def _compile_snapshot(*sources: WorkspaceSource):
     """经确认的公开缝编译一个注册表快照（Registry Snapshot）。
 
     参数：``sources`` 是本次启动显式授权的全部软件包来源。
-    返回：由完整软件包目录集合编译的不可变注册表快照。
+    返回：由完整包目录（PackageCatalog）集合编译的不可变注册表快照。
     异常：公共接口缺失或任一目录冲突时传播被测实现异常。
     """
 
     from unilabos.package_manager import compile_registry_snapshot
 
-    # ``catalogs`` 是启动观察到的完整软件包目录（PackageCatalog）集合。
+    # ``catalogs`` 是启动观察到的完整包目录（PackageCatalog）集合。
     catalogs = tuple(compile_package_source(source) for source in sources)
     return compile_registry_snapshot(catalogs)
 

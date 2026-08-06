@@ -25,7 +25,7 @@ def test_precompiled_source_plan_skips_manifest_rediscovery(
     from unilabos.workflow import composition
 
     composition.reset_workflow_service_for_test()
-    # ``source_plan`` 是软件包目录（PackageCatalog）编译阶段已
+    # ``source_plan`` 是包目录（PackageCatalog）编译阶段已
     # 完整验证的工作流源码（Workflow Source）登记计划。
     source_plan = EditableSourceDiscoveryPlan(registrations=(), root_identities=())
     observed_plans: list[EditableSourceDiscoveryPlan] = []

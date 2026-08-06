@@ -21,11 +21,16 @@ from unilabos.workflow.source_file_access import (
 )
 
 from .catalog import PackageCatalog, PackageDefinition
+from .catalog_source import (
+    PackageCatalogSource,
+    compile_generation_material_shapes,
+    selected_package_import_roots,
+)
 from .compiler import compile_package_source
 from .dependency_lock import (
     DEPENDENCY_DECLARATION_FILE,
     DEPENDENCY_LOCK_FILE,
-    load_locked_package_catalogs,
+    load_locked_package_sources,
 )
 from .registry_snapshot import (
     RegistryActivationPlan,
@@ -46,6 +51,8 @@ class WorkspaceRegistryRuntime:
     registry_snapshot: RegistrySnapshot
     activation_plan: RegistryActivationPlan
     workflow_source_plan: EditableSourceDiscoveryPlan
+    package_catalog_sources: tuple[PackageCatalogSource, ...] = ()
+    material_shapes: tuple[dict[str, object], ...] = ()
     dependency_revision: str = ""
     _published: bool = field(default=False, init=False, repr=False, compare=False)
     _import_path_active: bool = field(
@@ -54,6 +61,23 @@ class WorkspaceRegistryRuntime:
         repr=False,
         compare=False,
     )
+
+    def __post_init__(self) -> None:
+        """补齐只含主包的遗留候选构造形状。
+
+        参数：无；读取 ``source``、``catalog`` 和 ``package_catalog_sources``。
+        返回：无；正式完整候选保持原配对，旧测试或 Adapter 省略配对时只补入
+        已有主包来源和目录（PackageCatalog），绝不发现外部依赖。
+        异常：主包来源或目录类型无效时由 ``PackageCatalogSource`` 抛出
+        ``TypeError``；不会根据 ``sys.path`` 猜测缺失来源。
+        """
+
+        if not self.package_catalog_sources:
+            object.__setattr__(
+                self,
+                "package_catalog_sources",
+                (PackageCatalogSource(source=self.source, catalog=self.catalog),),
+            )
 
     def publish(self, registry: Any) -> None:
         """先完整发布注册表快照，再开放作者模块导入资格。
@@ -90,13 +114,25 @@ class WorkspaceRegistryRuntime:
 
         if not self._published:
             raise RuntimeError("注册表快照发布（publish）成功前不得激活作者导入路径")
-        # ``workspace_import_root`` 是本运行时代唯一授权的作者 Python 导入根。
-        workspace_import_root = str(self.source.root)
-        if self._import_path_active and sys.path[:1] == [workspace_import_root]:
+        # ``workspace_import_roots`` 保留主可编辑根，并仅加入物理图实际选中的
+        # 外部包根；完整目录中未选驱动不会因此获得导入资格。
+        workspace_import_roots = tuple(
+            str(root)
+            for root in selected_package_import_roots(
+                self.package_catalog_sources,
+                self.activation_plan,
+                editable_source=self.source,
+            )
+        )
+        if self._import_path_active and tuple(
+            sys.path[: len(workspace_import_roots)]
+        ) == (workspace_import_roots):
             return
-        while workspace_import_root in sys.path:
-            sys.path.remove(workspace_import_root)
-        sys.path.insert(0, workspace_import_root)
+        for workspace_import_root in workspace_import_roots:
+            while workspace_import_root in sys.path:
+                sys.path.remove(workspace_import_root)
+        for workspace_import_root in reversed(workspace_import_roots):
+            sys.path.insert(0, workspace_import_root)
         object.__setattr__(self, "_import_path_active", True)
 
 
@@ -110,7 +146,7 @@ def prepare_workspace_registry_runtime(
     """从公共启动参数准备一个无作者导入副作用的工作区运行时。
 
     参数：``arguments`` 是公共命令行（CLI）解析后的可变参数；
-    ``compile_catalog`` 是可测试替换、每次准备只调用一次的软件包目录
+    ``compile_catalog`` 是可测试替换、每次准备只调用一次的包目录
     （PackageCatalog）编译接缝。
     返回：未配置 ``--workspace`` 时返回 ``None``；否则返回同时持有完整目录、完整
     注册表快照、有限激活计划和工作流源码计划的运行时。
@@ -138,9 +174,16 @@ def prepare_workspace_registry_runtime(
     catalog = compile_catalog(workspace_source)
     if not isinstance(catalog, PackageCatalog):
         raise TypeError("compile_catalog 必须返回 PackageCatalog")
-    # ``dependency_catalogs`` 只来自工作区显式依赖声明和锁，绝不扫描环境包。
-    dependency_catalogs = _locked_dependency_catalogs(workspace_source)
-    registry_snapshot = compile_registry_snapshot((catalog, *dependency_catalogs))
+    # ``dependency_packages`` 只来自工作区显式依赖声明和锁，同时保留后续有限
+    # 运行激活所需的来源根；主包已有目录不会在聚合验证中被再次编译。
+    dependency_packages = _locked_dependency_packages(workspace_source)
+    package_catalog_sources = (
+        PackageCatalogSource(source=workspace_source, catalog=catalog),
+        *dependency_packages,
+    )
+    registry_snapshot = compile_registry_snapshot(
+        tuple(item.catalog for item in package_catalog_sources)
+    )
     graph_argument = arguments.get("graph") or "graph.json"
     graph_path, graph_data = _read_fixed_graph(
         workspace_source,
@@ -154,6 +197,8 @@ def prepare_workspace_registry_runtime(
         source=workspace_source,
         catalog=catalog,
     )
+    # ``material_shapes`` 与设备、资源、显式工作流和资产消费同一完整候选代。
+    material_shapes = compile_generation_material_shapes(package_catalog_sources)
     # ``arguments`` 只接收不会开启第二套扫描权威的稳定路径事实。
     arguments["_workspace_root"] = str(workspace_source.root)
     arguments["graph"] = str(graph_path)
@@ -165,17 +210,20 @@ def prepare_workspace_registry_runtime(
         registry_snapshot=registry_snapshot,
         activation_plan=activation_plan,
         workflow_source_plan=workflow_source_plan,
+        package_catalog_sources=package_catalog_sources,
+        material_shapes=material_shapes,
         dependency_revision=_dependency_files_revision(workspace_source),
     )
 
 
-def _locked_dependency_catalogs(
+def _locked_dependency_packages(
     source: WorkspaceSource,
-) -> tuple[PackageCatalog, ...]:
-    """读取当前工作区显式锁定的外部软件包目录（PackageCatalog）。
+) -> tuple[PackageCatalogSource, ...]:
+    """读取当前工作区显式锁定的外部包来源与目录（PackageCatalog）。
 
     参数：``source`` 是主工作区的唯一文件读取边界。
-    返回：未声明依赖时返回空元组；否则返回经过锁摘要复核的完整外部目录。
+    返回：未声明依赖时返回空元组；否则返回经过锁摘要复核、且保留显式来源根的
+    完整外部目录配对。
     异常：声明和锁缺一、外部来源或摘要无效、聚合身份冲突时传播关闭式异常；
     不回退到 ``sys.path`` 或环境软件包扫描。
     """
@@ -190,7 +238,7 @@ def _locked_dependency_catalogs(
     )
     if not any(dependency_files_present):
         return ()
-    return load_locked_package_catalogs(source.root)
+    return load_locked_package_sources(source.root)
 
 
 def _dependency_files_revision(source: WorkspaceSource) -> str:

@@ -124,7 +124,7 @@ def _definition(
 
     参数：``kind`` 是设备、资源或工作流种类；``definition_id`` 是包内身份；
     ``content_hash`` 表示作者实现内容；``action_schema`` 是设备动作合同。
-    返回：可进入真实软件包目录（PackageCatalog）的不可变定义。
+    返回：可进入真实包目录（PackageCatalog）的不可变定义。
     异常：种类不受支持时抛出 ``ValueError``。
     """
 
@@ -180,9 +180,11 @@ def _candidate(
 ) -> WorkspaceRegistryRuntime:
     """构造覆盖刷新分类维度的真实注册表候选代。
 
-    参数：``root`` 是测试来源根；四类摘要分别代表活跃/非活跃驱动、资源结构和
-    工作流源码；``action_schema`` 是活跃动作合同；``graph_revision`` 控制物理图。
-    返回：使用真实软件包目录和注册表快照类型的工作区候选代。
+    参数：``root`` 是测试来源根；``selected_driver_hash`` 与
+    ``idle_driver_hash`` 分别代表活跃/非活跃驱动摘要；``action_schema`` 是活跃
+    动作合同；``resource_hash`` 是资源结构摘要；``workflow_hash`` 是工作流源码
+    摘要；``graph_revision`` 控制物理图。
+    返回：使用真实包目录（PackageCatalog）和注册表快照类型的工作区候选代。
     异常：目录或注册表不变量无效时传播真实构造异常。
     """
 

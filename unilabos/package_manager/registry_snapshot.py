@@ -1,4 +1,4 @@
-"""聚合软件包目录（PackageCatalog）的不可变注册表快照（Registry Snapshot）。"""
+"""聚合包目录（PackageCatalog）的不可变注册表快照（Registry Snapshot）。"""
 
 from __future__ import annotations
 
@@ -40,7 +40,7 @@ class RegistryAsset:
 
         参数：``namespace`` 是软件包规范命名空间；``asset`` 是目录内静态资产。
         返回：保留来源命名空间和完整性摘要的不可变资产身份。
-        异常：无；软件包目录（PackageCatalog）已验证资产字段。
+        异常：无；包目录（PackageCatalog）已验证资产字段。
         """
 
         return cls(
@@ -312,7 +312,8 @@ def compile_registry_snapshot(
 ) -> RegistrySnapshot:
     """聚合并完整校验一代软件包注册表快照（Registry Snapshot）。
 
-    参数：``catalogs`` 是本次启动显式授权且已完整编译的软件包目录集合。
+    参数：``catalogs`` 是本次启动显式授权且已完整编译的包目录（PackageCatalog）
+    集合。
     返回：顺序稳定、完整可查询且不会导入作者模块的不可变注册表快照。
     异常：目录类型、命名空间、FQID、工作流 UUID 或资产身份冲突时抛出
     ``RegistrySnapshotError``，不产生可发布的部分结果。
@@ -326,9 +327,9 @@ def compile_registry_snapshot(
             )
         )
     except (AttributeError, TypeError) as error:
-        raise RegistrySnapshotError("输入必须全部是软件包目录") from error
+        raise RegistrySnapshotError("输入必须全部是包目录（PackageCatalog）") from error
     if any(not isinstance(item, PackageCatalog) for item in package_catalogs):
-        raise RegistrySnapshotError("输入必须全部是软件包目录")
+        raise RegistrySnapshotError("输入必须全部是包目录（PackageCatalog）")
     namespaces: set[str] = set()
     definitions_by_kind: dict[str, dict[str, PackageDefinition]] = {
         "device": {},

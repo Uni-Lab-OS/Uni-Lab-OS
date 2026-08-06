@@ -1,4 +1,4 @@
-"""纯静态软件包目录（PackageCatalog）编译合同。"""
+"""纯静态包目录（PackageCatalog）编译合同。"""
 
 from __future__ import annotations
 
@@ -19,7 +19,7 @@ def _write_package(workspace_root: Path, *, broken_source: bool = False) -> None
     异常：文件系统写入失败时向测试传播原始异常。
     """
 
-    # ``package_root`` 是软件包目录（PackageCatalog）允许读取的 Python 包边界。
+    # ``package_root`` 是包目录（PackageCatalog）允许读取的 Python 包边界。
     package_root = workspace_root / "catalog_lab"
     workflow_root = package_root / "workflows"
     workflow_root.mkdir(parents=True)
@@ -97,7 +97,7 @@ def test_compile_package_source_discovers_complete_catalog_without_import(
         raising=False,
     )
 
-    # ``catalog`` 是完整校验后一次发布的软件包目录（PackageCatalog）候选。
+    # ``catalog`` 是完整校验后一次发布的包目录（PackageCatalog）候选。
     catalog = compile_package_source(WorkspaceSource(workspace_root))
 
     assert catalog.distribution.name == "catalog-lab"
@@ -185,7 +185,7 @@ def test_any_python_syntax_error_rejects_the_complete_catalog(
 def test_empty_package_compiles_to_a_stable_empty_definition_catalog(
     tmp_path: Path,
 ) -> None:
-    """证明新包骨架可形成零定义但有稳定身份的软件包目录。
+    """证明新包骨架可形成零定义但有稳定身份的包目录（PackageCatalog）。
 
     参数：``tmp_path`` 提供隔离空包来源。
     返回：无；断言三类定义与资产为空，摘要仍存在。
@@ -220,7 +220,7 @@ def test_empty_package_compiles_to_a_stable_empty_definition_catalog(
 def test_legacy_no_output_workflow_compiles_as_empty_output_contract(
     tmp_path: Path,
 ) -> None:
-    """证明遗留无输出工作流可进入完整软件包目录（PackageCatalog）。
+    """证明遗留无输出工作流可进入完整包目录（PackageCatalog）。
 
     参数：``tmp_path`` 提供隔离工作区并复用完整设备/资源夹具。
     返回：无；断言旧 ``@workflow_definition``、``-> None`` 与隐式函数返回被

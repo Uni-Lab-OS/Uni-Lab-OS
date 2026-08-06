@@ -104,7 +104,7 @@ def test_stable_product_preparation_rejects_compile_time_file_change(
         """编译一次目录后模拟编辑器在同一启动窗口写入声明资产。
 
         参数：``source`` 是产品统一工作区来源。
-        返回：文件变化前已经完成的完整软件包目录（PackageCatalog）。
+        返回：文件变化前已经完成的完整包目录（PackageCatalog）。
         异常：真实静态编译失败时传播异常。
         """
 

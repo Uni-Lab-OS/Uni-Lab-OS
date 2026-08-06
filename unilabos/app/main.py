@@ -348,6 +348,37 @@ def should_prepare_workspace_product_runtime(args_dict: dict[str, Any]) -> bool:
     return args_dict.get("command") not in {"package", "pkg"}
 
 
+def dispatch_local_package_command(args_dict: dict[str, Any]) -> bool:
+    """在产品启动前分派不依赖远端配置的包命令。
+
+    参数：``args_dict`` 是公共命令行（CLI）解析出的完整参数字典。
+    返回：inspect、add、update、remove 已由软件包管理深模块处理时返回 ``True``；
+    非包命令、缺少子动作或需要显式鉴权的 upload 返回 ``False``，由后续既有路径
+    处理。
+    异常：软件包命令行（Package CLI）合同错误转换为退出码 1 的 ``SystemExit``；
+    本接缝不得创建工作目录、读取产品配置、执行环境检查或启动 ROS/设备运行时。
+    """
+
+    command = args_dict.get("command")
+    package_action = args_dict.get("package_action")
+    if command not in {"package", "pkg"} or package_action not in {
+        "inspect",
+        "add",
+        "update",
+        "remove",
+    }:
+        return False
+
+    from unilabos.package_manager.cli import PackageCLIError, cmd_package
+
+    try:
+        cmd_package(args_dict)
+    except PackageCLIError as error:
+        print_status(str(error), "error")
+        raise SystemExit(1) from error
+    return True
+
+
 def parse_args():
     """构建 UniLab-OS 主进程命令行解析器。
 
@@ -913,7 +944,7 @@ def main():
 
     参数：无。返回：普通服务退出时为 ``None``，部分一次性子命令返回整数状态；
     配置、环境或子命令失败沿用现有退出策略。工作区（Workspace）
-    软件包目录（PackageCatalog）、注册表快照（Registry Snapshot）、
+    包目录（PackageCatalog）、注册表快照（Registry Snapshot）、
     有限激活计划和工作流源码（Workflow Source）授权在任何
     作者模块导入或 Web 组合根启动前一次冻结。
     """
@@ -928,6 +959,11 @@ def main():
         from unilabos.hostlink.doctor import run_doctor
 
         sys.exit(run_doctor(args_dict))
+
+    # 纯本地软件包命令行（Package CLI）不得落入产品启动路径；upload 仍需后续
+    # 显式鉴权和远端配置，但同样不会安装工作区产品生命周期。
+    if dispatch_local_package_command(args_dict):
+        return
 
     # 处理 HTTP 客户端子命令（login, logout, whoami, config, lab, material, workflow）
     # 这些命令不需要加载完整的 UniLab-OS 环境，提前处理并退出
@@ -1030,7 +1066,7 @@ def main():
         return
 
     # 工作区（Workspace）只在常驻启动路径静态编译一次；运行时
-    # 同时持有软件包目录（PackageCatalog）、注册表快照（Registry
+    # 同时持有包目录（PackageCatalog）、注册表快照（Registry
     # Snapshot）、有限激活与工作流源码（Workflow Source）计划。
     from unilabos.package_manager import (
         PackageCompileError,
@@ -1494,7 +1530,6 @@ def main():
         # 完整注册表快照（Registry Snapshot）只在内置定义成功后原子
         # 发布；作者导入路径必须更晚激活，禁止静态编译期导入驱动。
         from unilabos.package_manager import (
-            compile_catalog_material_shapes,
             install_workspace_product_lifecycle,
         )
 
@@ -1513,12 +1548,10 @@ def main():
                 request_restart=_request_workspace_restart,
             )
 
-        # ``workspace_material_shapes`` 只消费同一静态编译代的软件包目录
-        # （PackageCatalog）和工作区来源，不再依赖注册表 AST ``file_path``。
-        workspace_material_shapes = compile_catalog_material_shapes(
-            workspace_registry_runtime.source,
-            workspace_registry_runtime.catalog,
-        )
+        # ``workspace_material_shapes`` 直接消费完整候选代已经聚合的物料外形；
+        # 主包和显式外部包均来自同一包目录（PackageCatalog）/来源配对，不再
+        # 重读来源或退回注册表 AST ``file_path``。
+        workspace_material_shapes = workspace_registry_runtime.material_shapes
     else:
         workspace_material_shapes = ()
 

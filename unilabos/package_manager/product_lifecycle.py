@@ -164,7 +164,7 @@ def prepare_stable_workspace_product_generation(
     """用编译前后相同文件身份准备产品首代。
 
     参数：``arguments`` 是公共命令行（CLI）参数；``compile_catalog`` 是统一静态
-    软件包目录（PackageCatalog）编译接缝。
+    包目录（PackageCatalog）编译接缝。
     返回：未启用工作区时返回 ``None``；否则返回稳定输入、恰好一次编译的候选和
     已建立同一基线的文件监视器。
     异常：编译前后任一相关文件发生变化时抛出
@@ -290,7 +290,9 @@ def install_workspace_product_lifecycle(
     """安装并启动进程唯一的工作区产品生命周期。
 
     参数：``prepared`` 绑定编译前后相同输入身份的首代；``registry`` 是产品实时
-    注册表（Registry）；其余参数控制安全监督重启。
+    注册表（Registry）；``restart_mode`` 表示是否受监督器管理；
+    ``execution_states`` 读取当前持久执行状态；``request_restart`` 在确认安全后
+    提交待重启原因。
     返回：已启动的进程唯一生命周期；同一对象重复安装保持幂等。
     异常：试图替换运行中生命周期或启动失败时传播异常，失败对象不会被公开。
     """
@@ -352,7 +354,7 @@ def _prepare_changed_generation(
     """用统一静态编译器准备后续稳定工作区代。
 
     参数：``generation`` 是文件监视器稳定提交的根、物理图和内容身份。
-    返回：完整软件包目录（PackageCatalog）、注册表快照（Registry Snapshot）和
+    返回：完整包目录（PackageCatalog）、注册表快照（Registry Snapshot）和
     工作流源码（Workflow Source）计划组成的候选运行时。
     异常：静态编译或身份校验失败时传播异常，旧产品代保持活跃。
     """

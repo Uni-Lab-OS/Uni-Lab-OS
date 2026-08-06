@@ -34,6 +34,22 @@ class _Snapshot:
         self._aliases = aliases or {}
         self._failure = failure
 
+    def to_dict(self) -> dict[str, Any]:
+        """返回包含主包与外部包静态定义的完整查询投影。
+
+        参数：无。
+        返回：每次调用均新建、可由查询调用方修改而不影响当前权威代际的字典。
+        异常：无。
+        """
+
+        return {
+            "packages": ["workspace-lab", "external-lab"],
+            "devices": sorted(self._devices),
+            "resources": sorted(self._resources),
+            "workflows": ["community.external_lab.inspect_external"],
+            "assets": ["community.external_lab:models/shape.yml"],
+        }
+
     def registry_candidates(
         self,
         _original_devices: dict[str, Any],
@@ -137,3 +153,77 @@ def test_generation_resolves_exact_identity_before_package_alias() -> None:
         generation.resolve("resource", "missing")
     with pytest.raises(ValueError, match="种类"):
         generation.resolve("workflow", "builtin.device")  # type: ignore[arg-type]
+
+
+def test_generation_exposes_detached_complete_snapshot_projection() -> None:
+    """注册表（Registry）必须稳定查询完整且与调用方修改隔离的包目录代。
+
+    参数：无。
+    返回：无；断言查询投影同时包含主包、外部包、设备、资源、显式工作流
+    （Workflow）与资产，且修改一次返回值不会改变后续查询。
+    异常：未发布时查询或快照不提供查询投影应关闭式失败；若泄漏内部可变容器，
+    第二次查询断言失败。
+    """
+
+    registry = SimpleNamespace(
+        device_type_registry={},
+        resource_type_registry={},
+    )
+    generation = PackageRegistryGeneration(registry)
+    with pytest.raises(RuntimeError, match="尚未发布"):
+        generation.snapshot_projection()
+
+    snapshot = _Snapshot(
+        devices={"community.external_lab.reader": {"version": "1"}},
+        resources={"community.external_lab.plate": {"version": "1"}},
+    )
+    generation.publish(snapshot)
+    first_projection = generation.snapshot_projection()
+    first_projection["packages"].append("caller-mutation")
+    second_projection = generation.snapshot_projection()
+
+    assert second_projection == {
+        "packages": ["workspace-lab", "external-lab"],
+        "devices": ["community.external_lab.reader"],
+        "resources": ["community.external_lab.plate"],
+        "workflows": ["community.external_lab.inspect_external"],
+        "assets": ["community.external_lab:models/shape.yml"],
+    }
+
+
+def test_product_registry_delegates_complete_snapshot_query(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """产品注册表（Registry）公开同一代完整包目录查询而不建立第二投影权威。
+
+    参数：``monkeypatch`` 隔离进程级产品注册表映射和包目录发布代。
+    返回：无；断言 ``package_snapshot`` 直接查询当前
+    ``PackageRegistryGeneration``，并保留外部显式工作流（Workflow）与资产。
+    异常：产品注册表缺少查询委派或自行重建不完整目录时断言失败。
+    """
+
+    from unilabos.registry.registry import lab_registry
+
+    monkeypatch.setattr(lab_registry, "device_type_registry", {})
+    monkeypatch.setattr(lab_registry, "resource_type_registry", {})
+    # ``product_package_generation`` 是本例唯一的包目录（PackageCatalog）发布与
+    # 查询权威。
+    product_package_generation = PackageRegistryGeneration(lab_registry)
+    monkeypatch.setattr(
+        lab_registry,
+        "_package_generation",
+        product_package_generation,
+    )
+    snapshot = _Snapshot(
+        devices={"community.external_lab.reader": {"version": "1"}},
+        resources={"community.external_lab.plate": {"version": "1"}},
+    )
+
+    lab_registry.publish_package_snapshot(snapshot)
+
+    assert lab_registry.package_snapshot()["workflows"] == [
+        "community.external_lab.inspect_external"
+    ]
+    assert lab_registry.package_snapshot()["assets"] == [
+        "community.external_lab:models/shape.yml"
+    ]

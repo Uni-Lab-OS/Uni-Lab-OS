@@ -1015,7 +1015,7 @@ def resource_plr_to_bioyond(plr_resources: list[ResourcePLR], type_mapping: dict
                             if not site or (site.get("x") == 0 and site.get("y") == 0):
                                 # 找到bottle在children中的索引位置
                                 try:
-                                    # 遍历所有槽位找到bottle的实际位置
+                                    # 遍历所有库位找到 bottle 的实际位置。
                                     for idx in range(resource.num_items_x * resource.num_items_y):
                                         if resource[idx] is bottle:
                                             # 根据载架布局计算行列坐标

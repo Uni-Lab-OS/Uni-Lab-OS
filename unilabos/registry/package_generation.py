@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import copy
 import threading
 from typing import Any, Literal
 
@@ -98,3 +99,25 @@ class PackageRegistryGeneration:
                     f"软件包注册表快照与实时定义映射不一致: {package_definition.fqid}"
                 )
             return live_entry
+
+    def snapshot_projection(self) -> dict[str, Any]:
+        """查询当前完整包目录代的隔离注册表快照（Registry Snapshot）投影。
+
+        参数：无。
+        返回：包含主包和外部包设备、资源、显式工作流（Workflow）与资产的全新
+        JSON 字典；调用方修改任何层级都不会改变当前注册表权威代际。
+        异常：尚未发布快照、快照缺少 ``to_dict`` 接口或返回值不是字典时抛出
+        ``RuntimeError``/``TypeError``，不会从实时映射猜测不完整投影。
+        """
+
+        with self._lock:
+            if self._snapshot is None:
+                raise RuntimeError("软件包注册表快照尚未发布")
+            projection_builder = getattr(self._snapshot, "to_dict", None)
+            if not callable(projection_builder):
+                raise TypeError("软件包注册表快照缺少 to_dict 查询接口")
+            # ``snapshot_projection`` 是从同一锁内当前代生成的调用方独占查询对象。
+            snapshot_projection = projection_builder()
+            if not isinstance(snapshot_projection, dict):
+                raise TypeError("软件包注册表快照查询投影必须是字典")
+            return copy.deepcopy(snapshot_projection)

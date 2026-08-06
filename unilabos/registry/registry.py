@@ -177,6 +177,18 @@ class Registry:
 
         return self._package_generation.resolve(kind, identity)
 
+    def package_snapshot(self) -> Dict[str, Any]:
+        """查询当前完整包目录代的注册表快照（Registry Snapshot）投影。
+
+        参数：无。
+        返回：包含主包和外部包设备、资源、显式工作流（Workflow）与资产，且与
+        注册表权威内部容器隔离的全新字典。
+        异常：软件包代尚未发布或快照查询接口无效时传播关闭式异常；不会退回到
+        只含设备与资源的历史注册表映射。
+        """
+
+        return self._package_generation.snapshot_projection()
+
     # ------------------------------------------------------------------
     # 统一入口
     # ------------------------------------------------------------------

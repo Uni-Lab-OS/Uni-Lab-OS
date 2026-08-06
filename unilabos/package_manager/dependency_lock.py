@@ -16,6 +16,7 @@ import rfc8785
 import yaml
 
 from .catalog import PackageCatalog
+from .catalog_source import PackageCatalogSource
 from .compiler import compile_package_source
 from .registry_snapshot import compile_registry_snapshot
 from .sources import WorkspaceSource
@@ -47,7 +48,8 @@ def _serialized_dependency_mutation(operation: Any) -> Any:
         异常：文件锁或原方法异常原样传播，且不会遗留进程级互斥。
         """
 
-        # ``guard_path`` 只协调声明和锁的写权威，不进入软件包目录或运行时依赖。
+        # ``guard_path`` 只协调声明和锁的写权威，不进入包目录（PackageCatalog）
+        # 或运行时依赖。
         guard_path = manager._workspace.root / _DEPENDENCY_MUTATION_GUARD
         try:
             with guard_path.open("a+b") as guard_handle:
@@ -85,7 +87,7 @@ class LockedPackage:
     ) -> LockedPackage:
         """从已完整编译的目录建立一项锁定依赖。
 
-        参数：``catalog`` 是已验证的软件包目录（PackageCatalog）；``source`` 是
+        参数：``catalog`` 是已验证的包目录（PackageCatalog）；``source`` 是
         相对主工作区保存的显式来源路径。
         返回：包含发行身份、目录摘要和完整定义身份集合的不可变锁条目。
         异常：无；目录字段已由统一静态编译器关闭式验证。
@@ -429,30 +431,60 @@ class PackageDependencyManager:
 def load_locked_package_catalogs(
     workspace: str | Path,
 ) -> tuple[PackageCatalog, ...]:
-    """只从显式声明和锁文件加载外部软件包目录。
+    """只从显式声明和锁文件加载外部包目录（PackageCatalog）。
 
     参数：``workspace`` 是主工作区根；函数从不扫描 ``sys.path`` 或 ambient
     site-packages。
-    返回：按命名空间排序、重新完整编译且摘要与锁一致的软件包目录元组。
+    返回：按命名空间排序、重新完整编译且摘要与锁一致的包目录元组。
     异常：声明/锁缺一、身份或摘要漂移、来源无效、跨包冲突时抛出
     ``PackageDependencyError``，不返回部分集合。
     """
 
     workspace_source = WorkspaceSource(workspace)
-    _declarations, dependency_lock = _load_dependency_state(workspace_source.root)
-    catalogs = tuple(
-        _catalog_for_entry(
-            workspace_root=workspace_source.root,
-            entry=item,
-            verify_lock=True,
-        )
-        for item in dependency_lock.packages
-    )
+    # ``package_sources`` 保留每个依赖目录对应的显式来源，但兼容接口只返回目录。
+    package_sources = load_locked_package_sources(workspace_source.root)
+    catalogs = tuple(item.catalog for item in package_sources)
     _validate_complete_generation(
         workspace=workspace_source,
         dependency_catalogs=catalogs,
     )
     return tuple(sorted(catalogs, key=lambda item: item.namespace))
+
+
+def load_locked_package_sources(
+    workspace: str | Path,
+) -> tuple[PackageCatalogSource, ...]:
+    """一次编译并返回显式锁定外部包的来源/目录配对。
+
+    参数：``workspace`` 是主工作区根；只读取成对依赖声明与锁定的 workspace
+    来源，绝不发现 ambient site-packages。
+    返回：按包命名空间稳定排序、摘要与锁完全一致的 ``PackageCatalogSource``
+    元组；主包不在结果中，由完整候选代组合者复用其已有编译结果。
+    异常：声明、锁、来源、摘要或静态编译无效时抛出
+    ``PackageDependencyError``，不返回部分集合；本函数不重复编译主包。
+    """
+
+    workspace_source = WorkspaceSource(workspace)
+    _declarations, dependency_lock = _load_dependency_state(workspace_source.root)
+    # ``package_sources`` 让后续有限运行激活不必从目录字段反推物理路径。
+    package_sources: list[PackageCatalogSource] = []
+    for entry in dependency_lock.packages:
+        source_path, _portable_source = _resolve_dependency_source(
+            workspace_source.root,
+            entry.source,
+        )
+        catalog = _catalog_for_entry(
+            workspace_root=workspace_source.root,
+            entry=entry,
+            verify_lock=True,
+        )
+        package_sources.append(
+            PackageCatalogSource(
+                source=WorkspaceSource(source_path),
+                catalog=catalog,
+            )
+        )
+    return tuple(sorted(package_sources, key=lambda item: item.catalog.namespace))
 
 
 def _resolve_dependency_source(
@@ -581,7 +613,7 @@ def _catalog_for_entry(
 
     参数：``workspace_root`` 是主工作区；``entry`` 是锁条目；``verify_lock``
     决定是否要求重编译目录与现有锁完全一致。
-    返回：只从显式路径观察得到的软件包目录（PackageCatalog）。
+    返回：只从显式路径观察得到的包目录（PackageCatalog）。
     异常：来源越界、编译失败或任一锁字段漂移时抛出
     ``PackageDependencyError``。
     """
@@ -624,7 +656,7 @@ def _compile_dependency_catalog(source: WorkspaceSource) -> PackageCatalog:
     """通过唯一静态编译器规范化依赖错误边界。
 
     参数：``source`` 是主工作区或显式外部工作区来源。
-    返回：完整、不可变且没有导入作者模块的软件包目录（PackageCatalog）。
+    返回：完整、不可变且没有导入作者模块的包目录（PackageCatalog）。
     异常：来源、语法、动作合同（Action Contract）或身份无效时统一抛出
     ``PackageDependencyError``，保留原异常作为诊断链。
     """
@@ -761,4 +793,5 @@ __all__ = [
     "PackageDependencyLock",
     "PackageDependencyManager",
     "load_locked_package_catalogs",
+    "load_locked_package_sources",
 ]
