@@ -406,8 +406,14 @@ def _append_function_docstring(*, lines: list[str], docstring: str) -> None:
         lines.append(f'    """{escaped_lines[0]}"""')
         return
     lines.append(f'    """{escaped_lines[0]}')
-    lines.extend(f"    {line}" for line in escaped_lines[1:-1])
-    lines.append(f'    {escaped_lines[-1]}"""')
+    for escaped_line in escaped_lines[1:]:
+        # ``escaped_line`` 是一行语义文档内容；空内容必须输出真正的空行，
+        # 避免生成仅含函数缩进的尾随空白并触发 Ruff W293。
+        lines.append(f"    {escaped_line}" if escaped_line else "")
+    # 多行文档的闭合分隔符独占一行，并以空行隔开后续节点展示注释，使作者
+    # 源码与规范源码保持同一个人类/AI 可读的稳定版式。
+    lines.append('    """')
+    lines.append("")
 
 
 def _append_group_source(

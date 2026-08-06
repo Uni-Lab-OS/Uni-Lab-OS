@@ -22,6 +22,25 @@ _WORKFLOW_DOCSTRING = """执行单样品的预处理与分析。
 返回：
     样品与报告结果。"""
 
+# ``_CANONICAL_SOURCE_PREFIX`` 是规范作者源码中工作流装饰器之前的稳定声明区。
+_CANONICAL_SOURCE_PREFIX = """from typing import Annotated, Literal, TypedDict
+
+from pydantic import Field
+from lab.devices import Reactor
+from unilabos.registry.placeholder_type import ResourceSlot
+from unilabos.workflow.authoring import device, workflow
+
+
+class PrepareSampleResult(TypedDict):
+    sample: ResourceSlot
+    report: str
+
+
+reactor: Reactor = device()
+
+
+"""
+
 # ``_NO_DOCSTRING_FUNCTION`` 是功能修改前既有规范输出的独立金丝雀文本。
 _NO_DOCSTRING_FUNCTION = """@workflow(
     workflow_uuid="10000000-0000-4000-8000-000000000001",
@@ -52,13 +71,16 @@ def _source_with_docstring() -> str:
     异常：基础夹具结构漂移而找不到唯一函数体入口时抛出 ``AssertionError``。
     """
 
-    # ``source`` 是既有可信创作语法夹具，包含两个稳定工作流节点身份。
-    source = _annotated_source()
+    # ``source`` 是已经规范化的作者源码，包含两个稳定工作流节点身份。
+    source = _CANONICAL_SOURCE_PREFIX + _NO_DOCSTRING_FUNCTION
     # ``body_marker`` 精确标识函数签名结束与第一个节点展示注释之间的接缝。
-    body_marker = "):\n    # [加入预混液]: PCR 中预混液的分配"
+    body_marker = (
+        ") -> PrepareSampleResult:\n"
+        "    # [加入预混液]: PCR 中预混液的分配"
+    )
     assert source.count(body_marker) == 1
     # ``rendered_docstring`` 是包作者输入的标准三引号中文函数合同。
-    rendered_docstring = '''):
+    rendered_docstring = ''') -> PrepareSampleResult:
     """执行单样品的预处理与分析。
 
     参数：
@@ -66,7 +88,9 @@ def _source_with_docstring() -> str:
         cycles：处理循环次数。
         mode：分析模式。
     返回：
-        样品与报告结果。"""
+        样品与报告结果。
+    """
+
     # [加入预混液]: PCR 中预混液的分配'''
     return source.replace(body_marker, rendered_docstring, 1)
 
@@ -97,13 +121,27 @@ def test_multiline_chinese_docstring_reaches_normalized_source_fixed_point() -> 
     异常：编译、静态解析或固定点断言失败时由 pytest 报告。
     """
 
+    # ``source`` 是采用常见作者版式的规范输入：空行不含尾随空格，闭合三引号
+    # 独占一行，并在第一个节点展示注释之前保留一个空行。
+    source = _source_with_docstring()
     # ``compiled`` 是第一次从包作者源码产生的工作流创作候选。
-    compiled = _compile(_engine(), _source_with_docstring())
+    compiled = _compile(_engine(), source)
     assert compiled.valid and compiled.graph is not None, compiled.diagnostics
     assert compiled.normalized_python_source is not None
     # ``workflow_function`` 是第一次规范源码中的工作流函数声明。
     workflow_function = _workflow_function(compiled.normalized_python_source)
     assert ast.get_docstring(workflow_function, clean=True) == _WORKFLOW_DOCSTRING
+    # ``source_function`` 与 ``normalized_function`` 从工作流装饰器起比较，排除
+    # 导入整理之外的噪声，直接证明真实作者源码已经达到规范化固定点。
+    source_function = source[source.index("@workflow(") :]
+    normalized_function = compiled.normalized_python_source[
+        compiled.normalized_python_source.index("@workflow(") :
+    ]
+    assert normalized_function == source_function
+    assert not any(
+        line and not line.strip()
+        for line in compiled.normalized_python_source.splitlines()
+    )
 
     # ``repeated`` 证明规范源码自身再次编译后不丢失或重写 docstring。
     repeated = _compile(
@@ -129,6 +167,7 @@ def test_docstring_preserves_node_comment_anchor_and_source_map_lines() -> None:
     assert compiled.normalized_python_source is not None
     # ``source_lines`` 按一基 SourceMap 行号提供规范源码的独立文本判据。
     source_lines = compiled.normalized_python_source.splitlines()
+    assert not any(line and not line.strip() for line in source_lines)
     # ``workflow_function`` 与 ``docstring_statement`` 证明映射从真实多行文档之后开始。
     workflow_function = _workflow_function(compiled.normalized_python_source)
     docstring_statement = workflow_function.body[0]
@@ -161,7 +200,7 @@ def test_docstring_preserves_node_comment_anchor_and_source_map_lines() -> None:
         assert source_lines[start_index + 1].strip() == anchor
         assert source_lines[end_index].strip() == action
     assert source_map_by_node[PREPARE_NODE_UUID]["start_line"] == (
-        docstring_statement.end_lineno + 1
+        docstring_statement.end_lineno + 2
     )
 
 
