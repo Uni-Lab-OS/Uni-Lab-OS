@@ -92,10 +92,7 @@ def build_published_workflow_generation(
                 "definition_content_hash": definition_content_hash,
             }
         )
-        if snapshot is not None and _eligible(
-            snapshot,
-            definition_content_hash=definition_content_hash,
-        ):
+        if snapshot is not None and _eligible(snapshot):
             snapshots[workflow_uuid] = snapshot
     try:
         source_catalog = PublishedSourceCatalog.from_records(records)
@@ -132,16 +129,12 @@ def build_published_workflow_generation(
     )
 
 
-def _eligible(
-    snapshot: Mapping[str, Any],
-    *,
-    definition_content_hash: str | None = None,
-) -> bool:
+def _eligible(snapshot: Mapping[str, Any]) -> bool:
     """判断快照是否具有同修订应用源码且哈希可用于静态发布。
 
-    参数：``snapshot`` 是只读存储回执；``definition_content_hash`` 是可选的同代
-    包目录源码摘要。返回：工作流、正修订和同修订同内容应用哈希完整时为
-    ``True``。异常：无；不完整或内容漂移值不进入模板投影。
+    参数：``snapshot`` 是只读存储回执。返回：工作流、正修订和同修订应用哈希
+    完整时为 ``True``。异常：无；包目录源码哈希和规范化应用源码哈希分别作为
+    来源证据与应用证据保存，不要求字节相同。
     """
 
     workflow = snapshot.get("workflow") if isinstance(snapshot, Mapping) else None
@@ -156,10 +149,6 @@ def _eligible(
         and revision >= 1
         and applied.get("workflow_revision") == revision
         and isinstance(source_hash, str)
-        and (
-            definition_content_hash is None
-            or source_hash == definition_content_hash
-        )
     )
 
 
