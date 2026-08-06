@@ -109,6 +109,13 @@ def setup_server() -> FastAPI:
             # ``edge_scheduler`` 是本地调度权威（Scheduler Authority）；只把同一
             # 已装配实例交给工作流组合根，禁止重新创建第二个调度器。
             edge_scheduler = get_edge_scheduler()
+            # ``source_plan_arguments`` 只在工作区运行时传入预编译工作流
+            # 源码（Workflow Source）计划，保持旧可编辑包组合接线兼容。
+            source_plan_arguments = {}
+            if BasicConfig.workflow_source_discovery_plan is not None:
+                source_plan_arguments["editable_source_discovery_plan"] = (
+                    BasicConfig.workflow_source_discovery_plan
+                )
             if inventory_service is not None and edge_scheduler is not None:
                 from unilabos.registry.registry import lab_registry
 
@@ -121,6 +128,7 @@ def setup_server() -> FastAPI:
                         editable_package_roots=(
                             BasicConfig.workflow_editable_package_roots
                         ),
+                        **source_plan_arguments,
                     )
                 )
             else:
@@ -129,6 +137,7 @@ def setup_server() -> FastAPI:
                     editable_package_roots=(
                         BasicConfig.workflow_editable_package_roots
                     ),
+                    **source_plan_arguments,
                 )
             install_workflow_api(
                 app,

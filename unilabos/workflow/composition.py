@@ -30,7 +30,10 @@ from unilabos.workflow.published_workflow_runtime import (
     build_published_workflow_generation,
 )
 from unilabos.workflow.service import AuthoringCompiler, WorkflowService
-from unilabos.workflow.source_discovery import discover_editable_sources
+from unilabos.workflow.source_discovery import (
+    EditableSourceDiscoveryPlan,
+    discover_editable_sources,
+)
 from unilabos.workflow.source_monitor import WorkflowSourceMonitor
 from unilabos.workflow.store import WorkflowStore
 from unilabos.workflow.task_scheduler_bridge import TaskSchedulerBridge
@@ -43,6 +46,7 @@ _template_projection: Optional[RegistryTemplateProjection] = None
 _compiler: Optional[AuthoringCompiler] = None
 _compiler_rebuilder: Optional[Callable[[], AuthoringCompiler]] = None
 _editable_package_roots: tuple[Path, ...] = ()
+_editable_source_discovery_plan: Optional[EditableSourceDiscoveryPlan] = None
 
 
 @dataclass
@@ -122,6 +126,7 @@ def compose_workflow_runtime(
     compiler: Optional[AuthoringCompiler] = None,
     compiler_rebuilder: Optional[Callable[[], AuthoringCompiler]] = None,
     editable_package_roots: Iterable[str | Path] = (),
+    editable_source_discovery_plan: Optional[EditableSourceDiscoveryPlan] = None,
     material_resolver: Optional[Callable[[str], Optional[dict[str, Any]]]] = None,
     scheduler: Optional[Any] = None,
 ) -> WorkflowService:
@@ -130,19 +135,29 @@ def compose_workflow_runtime(
     参数：``working_dir`` 决定现有工作流 SQLite 路径；``compiler`` 是可信工作流
     创作编译器；``compiler_rebuilder`` 在应用后原子刷新完整模板代际；
     ``editable_package_roots`` 是唯一允许发现源码的显式授权目录；
+    ``editable_source_discovery_plan`` 是软件包目录（PackageCatalog）
+    编译代际产生的预编译工作流源码（Workflow Source）计划；
     ``material_resolver`` 按稳定 UUID 读取本地物料权威摘要；``scheduler`` 是仅在
     本地调度模式装配的现有调度器（EdgeScheduler）。
     返回：完成来源注册与启动恢复后发布的进程唯一工作流服务（WorkflowService）。
-    异常：运行期间切换数据库、编译器或授权目录集合时失败关闭。
+    异常：同时提供授权目录与预编译计划，或运行期间
+    切换数据库、编译器、授权目录或来源计划时关闭式失败。
     """
 
     global _compiler, _compiler_rebuilder, _database_path
-    global _editable_package_roots, _failed_runtime
+    global _editable_package_roots, _editable_source_discovery_plan, _failed_runtime
     global _monitor, _service
     # 后端形态合同（Backend-shaped Contract）的定义/任务与遗留执行历史共享
     # ``workflow_history.db``，但继续使用相互独立的表。
     database_path = Path(working_dir).resolve() / "workflow_history.db"
     configured_roots = _configured_package_roots(editable_package_roots)
+    if configured_roots and editable_source_discovery_plan is not None:
+        raise TypeError("工作流源码授权目录与预编译发现计划不能同时提供")
+    if editable_source_discovery_plan is not None and not isinstance(
+        editable_source_discovery_plan,
+        EditableSourceDiscoveryPlan,
+    ):
+        raise TypeError("预编译工作流源码计划类型无效")
     with _lock:
         if _failed_runtime is not None:
             raise RuntimeError("工作流运行时仍有部分启动资源等待显式重置清理")
@@ -162,6 +177,10 @@ def compose_workflow_runtime(
             if configured_roots != _editable_package_roots:
                 raise RuntimeError(
                     "工作流权威（Workflow Authority）运行期间不能切换可编辑包"
+                )
+            if editable_source_discovery_plan != _editable_source_discovery_plan:
+                raise RuntimeError(
+                    "工作流权威（Workflow Authority）运行期间不能切换源码发现计划"
                 )
             return _service
         # ``workflow_store`` 是本地标准工作流任务（WorkflowTask）/工作流节点作业
@@ -185,7 +204,11 @@ def compose_workflow_runtime(
             )
             # ``discovery_plan`` 是全量文件预校验结果；服务在单事务中注册后，
             # 才能恢复草稿并建立一致的监视基线。
-            discovery_plan = discover_editable_sources(configured_roots)
+            discovery_plan = (
+                editable_source_discovery_plan
+                if editable_source_discovery_plan is not None
+                else discover_editable_sources(configured_roots)
+            )
             new_service.replace_discovered_source_authorizations(discovery_plan)
             new_service.recover_registered_sources()
             new_monitor = WorkflowSourceMonitor(new_service)
@@ -203,6 +226,7 @@ def compose_workflow_runtime(
         _compiler = compiler
         _compiler_rebuilder = compiler_rebuilder
         _editable_package_roots = configured_roots
+        _editable_source_discovery_plan = editable_source_discovery_plan
         _monitor = new_monitor
         try:
             new_monitor.start()
@@ -214,6 +238,7 @@ def compose_workflow_runtime(
             _compiler = None
             _compiler_rebuilder = None
             _editable_package_roots = ()
+            _editable_source_discovery_plan = None
             _monitor = None
             cleanup_owner = _RuntimeCleanupOwner(new_service, new_monitor)
             _failed_runtime = cleanup_owner
@@ -254,6 +279,7 @@ def compose_local_workflow_template_runtime(
     registry: Any,
     scheduler: Optional[Any] = None,
     editable_package_roots: Iterable[str | Path] = (),
+    editable_source_discovery_plan: Optional[EditableSourceDiscoveryPlan] = None,
 ) -> tuple[WorkflowService, RegistryTemplateProjection]:
     """装配本地模板权威、F02 创作编译器与工作流服务。
 
@@ -262,7 +288,9 @@ def compose_local_workflow_template_runtime(
     ``registry`` 是原始注册表（Registry）或不可变注册表快照（Registry Snapshot）；
     ``scheduler`` 是仅在本地调度模式装配的既有调度器（EdgeScheduler）；
     ``editable_package_roots`` 是本次进程唯一授权的工作流源码（Workflow
-    Source）目录 tuple。返回：共享同一已发布目录代际的工作流服务
+    Source）目录 tuple；``editable_source_discovery_plan`` 是与注册表快照
+    （Registry Snapshot）同代的预编译来源计划，存在时禁止再读
+    ``package.yaml``。返回：共享同一已发布目录代际的工作流服务
     （WorkflowService）与模板投影（Template Projection）。异常：注册表快照构造、
     本地模板身份同步或模板投影失败时统一抛出
     ``RegistryTemplateProjectionError``，不发布工作流权威（Workflow Authority）；
@@ -279,6 +307,7 @@ def compose_local_workflow_template_runtime(
                 compiler=_compiler,
                 compiler_rebuilder=_compiler_rebuilder,
                 editable_package_roots=editable_package_roots,
+                editable_source_discovery_plan=editable_source_discovery_plan,
             )
             return service, _template_projection
         if _service is not None:
@@ -322,7 +351,15 @@ def compose_local_workflow_template_runtime(
             return dict(material_row) if material_row is not None else None
 
         configured_roots = _configured_package_roots(editable_package_roots)
-        publication_plan = discover_editable_sources(configured_roots)
+        if configured_roots and editable_source_discovery_plan is not None:
+            raise TypeError(
+                "工作流源码授权目录与预编译发现计划不能同时提供"
+            )
+        publication_plan = (
+            editable_source_discovery_plan
+            if editable_source_discovery_plan is not None
+            else discover_editable_sources(configured_roots)
+        )
         active_registrations = tuple(
             {
                 "workflow_uuid": item.workflow_uuid,
@@ -402,6 +439,7 @@ def compose_local_workflow_template_runtime(
                 compiler=compiler,
                 compiler_rebuilder=rebuild_compiler,
                 editable_package_roots=editable_package_roots,
+                editable_source_discovery_plan=editable_source_discovery_plan,
                 material_resolver=resolve_material_identity,
                 scheduler=scheduler,
             )
@@ -441,7 +479,7 @@ def reset_workflow_service_for_test() -> None:
     """
 
     global _compiler, _compiler_rebuilder, _database_path
-    global _editable_package_roots, _failed_runtime
+    global _editable_package_roots, _editable_source_discovery_plan, _failed_runtime
     global _monitor, _service, _template_projection
     with _lock:
         if _failed_runtime is not None:
@@ -461,6 +499,7 @@ def reset_workflow_service_for_test() -> None:
         _compiler = None
         _compiler_rebuilder = None
         _editable_package_roots = ()
+        _editable_source_discovery_plan = None
         _template_projection = None
 
 

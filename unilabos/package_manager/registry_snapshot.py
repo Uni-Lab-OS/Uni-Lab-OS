@@ -94,9 +94,7 @@ class RegistryActivationPlan:
         异常：无。
         """
 
-        return tuple(
-            sorted({item.fqid for item in (*self.devices, *self.resources)})
-        )
+        return tuple(sorted({item.fqid for item in (*self.devices, *self.resources)}))
 
 
 @dataclass(frozen=True, slots=True)
@@ -137,15 +135,11 @@ class RegistrySnapshot:
             raise RegistrySnapshotError("注册表定义身份不能为空")
         normalized_identity = identity.strip()
         # ``canonical_definition`` 是规范 FQID 精确命中的定义，绝不降级短名。
-        canonical_definition = self._definitions_by_kind[kind].get(
-            normalized_identity
-        )
+        canonical_definition = self._definitions_by_kind[kind].get(normalized_identity)
         if canonical_definition is not None:
             return canonical_definition
         if "." in normalized_identity:
-            raise RegistrySnapshotError(
-                f"{kind} 规范定义不存在: {normalized_identity}"
-            )
+            raise RegistrySnapshotError(f"{kind} 规范定义不存在: {normalized_identity}")
         # ``short_candidates`` 是整代快照中共享同一遗留短身份的定义集合。
         short_candidates = self._short_identities[kind].get(
             normalized_identity,
@@ -185,8 +179,11 @@ class RegistrySnapshot:
             if not isinstance(raw_identity, str) or not raw_identity.strip():
                 continue
             identity = raw_identity.strip()
+            raw_node_type = raw_node.get("type")
+            # ``node_kind`` 兼容历史图中缺失 ``type`` 的设备节点；只有明确的非设备
+            # 类型才按资源定义解析，避免旧设备被错误投影为资源。
             node_kind: Literal["device", "resource"] = (
-                "device" if raw_node.get("type") == "device" else "resource"
+                "device" if raw_node_type in (None, "device") else "resource"
             )
             # 非社区且未被软件包短名索引收录的身份属于内置注册表，本快照不接管。
             if (
@@ -228,18 +225,10 @@ class RegistrySnapshot:
             original_devices = copy.deepcopy(dict(registry.device_type_registry))
             original_resources = copy.deepcopy(dict(registry.resource_type_registry))
         except (AttributeError, TypeError) as error:
-            raise RegistrySnapshotError(
-                "注册表必须提供设备和资源定义映射"
-            ) from error
-        candidate_devices = _merge_registry_definitions(
-            originals=original_devices,
-            definitions=self.devices,
-            catalogs=self.package_catalogs,
-        )
-        candidate_resources = _merge_registry_definitions(
-            originals=original_resources,
-            definitions=self.resources,
-            catalogs=self.package_catalogs,
+            raise RegistrySnapshotError("注册表必须提供设备和资源定义映射") from error
+        candidate_devices, candidate_resources = self.registry_candidates(
+            original_devices,
+            original_resources,
         )
         try:
             registry.device_type_registry = candidate_devices
@@ -256,6 +245,40 @@ class RegistrySnapshot:
                 original=original_resources,
             )
             raise
+
+    def registry_candidates(
+        self,
+        original_devices: Mapping[str, Any],
+        original_resources: Mapping[str, Any],
+    ) -> tuple[dict[str, Any], dict[str, Any]]:
+        """构造可在注册表锁内一次发布的完整候选集合。
+
+        参数：``original_devices`` 与 ``original_resources`` 是发布前的完整设备和
+        资源注册表事实。
+        返回：保留内置定义、移除上一代软件包托管项并加入本代完整目录的两个新
+        字典；返回容器不与输入共享可变值。
+        异常：输入不是映射、软件包定义缺少注册表条目或与未托管定义冲突时抛出
+        ``RegistrySnapshotError``；实时注册表不会被本方法修改。
+        """
+
+        if not isinstance(original_devices, Mapping) or not isinstance(
+            original_resources,
+            Mapping,
+        ):
+            raise RegistrySnapshotError("注册表候选输入必须是设备和资源映射")
+        # ``candidate_devices`` 与 ``candidate_resources`` 先完整构造，供产品注册表
+        # 在同一把锁中校验并替换，避免设备与资源出现跨代部分发布。
+        candidate_devices = _merge_registry_definitions(
+            originals=original_devices,
+            definitions=self.devices,
+            catalogs=self.package_catalogs,
+        )
+        candidate_resources = _merge_registry_definitions(
+            originals=original_resources,
+            definitions=self.resources,
+            catalogs=self.package_catalogs,
+        )
+        return candidate_devices, candidate_resources
 
     def to_dict(self) -> dict[str, Any]:
         """返回完整注册表快照（Registry Snapshot）的可序列化查询对象。
@@ -321,9 +344,7 @@ def compile_registry_snapshot(
     assets_by_identity: dict[str, RegistryAsset] = {}
     for catalog in package_catalogs:
         if catalog.namespace in namespaces:
-            raise RegistrySnapshotError(
-                f"软件包命名空间重复: {catalog.namespace}"
-            )
+            raise RegistrySnapshotError(f"软件包命名空间重复: {catalog.namespace}")
         namespaces.add(catalog.namespace)
         for kind, definitions in (
             ("device", catalog.definitions.devices),
@@ -338,9 +359,7 @@ def compile_registry_snapshot(
                         f"注册表规范身份重复: {definition.fqid}"
                     )
                 definitions_by_kind[kind][definition.fqid] = definition
-                short_identities[kind].setdefault(definition.id, []).append(
-                    definition
-                )
+                short_identities[kind].setdefault(definition.id, []).append(definition)
                 if kind == "workflow":
                     workflow_uuid = definition.details.get("workflow_uuid")
                     if isinstance(workflow_uuid, str) and workflow_uuid:
@@ -380,20 +399,23 @@ def compile_registry_snapshot(
         }
     )
     # ``fingerprint`` 只依赖规范软件包摘要集合，不依赖调用顺序或绝对路径。
-    fingerprint = "sha256:" + hashlib.sha256(
-        rfc8785.dumps(
-            {
-                "catalogs": [
-                    {
-                        "catalog_digest": item.catalog_digest,
-                        "namespace": item.namespace,
-                    }
-                    for item in package_catalogs
-                ],
-                "schema_version": "1",
-            }
-        )
-    ).hexdigest()
+    fingerprint = (
+        "sha256:"
+        + hashlib.sha256(
+            rfc8785.dumps(
+                {
+                    "catalogs": [
+                        {
+                            "catalog_digest": item.catalog_digest,
+                            "namespace": item.namespace,
+                        }
+                        for item in package_catalogs
+                    ],
+                    "schema_version": "1",
+                }
+            )
+        ).hexdigest()
+    )
     return RegistrySnapshot(
         fingerprint=fingerprint,
         package_catalogs=package_catalogs,
@@ -421,11 +443,13 @@ def _merge_registry_definitions(
     """
 
     # ``catalog_digests`` 允许每个定义携带其来源目录的稳定证据。
-    catalog_digests = {catalog.namespace: catalog.catalog_digest for catalog in catalogs}
+    catalog_digests = {
+        catalog.namespace: catalog.catalog_digest for catalog in catalogs
+    }
     candidate = {
         key: copy.deepcopy(value)
         for key, value in originals.items()
-        if not (isinstance(value, Mapping) and value.get("source_fqid"))
+        if not (isinstance(value, Mapping) and value.get("package_definition_fqid"))
     }
     for definition in definitions:
         if definition.fqid in candidate:
@@ -435,12 +459,13 @@ def _merge_registry_definitions(
         details = definition.to_dict()["details"]
         registry_entry = details.get("registry_entry")
         if not isinstance(registry_entry, dict):
-            raise RegistrySnapshotError(
-                f"软件包定义缺少注册表条目: {definition.fqid}"
-            )
+            raise RegistrySnapshotError(f"软件包定义缺少注册表条目: {definition.fqid}")
         entry = copy.deepcopy(registry_entry)
         entry["id"] = definition.fqid
-        entry["source_fqid"] = definition.fqid
+        # ``source_fqid`` 是产品模板投影使用的 Python 源码身份，必须保持
+        # ``module:symbol``；软件包内的规范定义身份由独立字段承担。
+        entry["source_fqid"] = f"{definition.module}:{definition.symbol}"
+        entry["package_definition_fqid"] = definition.fqid
         entry["content_hash"] = definition.content_hash
         entry["package_catalog_digest"] = catalog_digests[
             definition.fqid.rsplit(".", 1)[0]

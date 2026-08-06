@@ -13,6 +13,9 @@ class BasicConfig:
     # 当前进程唯一允许发现/读取/写入的工作流源码（Workflow Source）选择目录。
     # 使用不可变 tuple，空值表示没有本地源码授权，禁止隐式扫描工作区。
     workflow_editable_package_roots: tuple[str, ...] = ()
+    # 工作区软件包目录（PackageCatalog）已编译的工作流源码
+    # （Workflow Source）发现计划；``None`` 时保留旧可编辑包根目录发现。
+    workflow_source_discovery_plan: object | None = None
     config_path = ""
     is_host_mode = True
     # False（默认）：Slave 必须等 HostLink/Host ROS 服务就绪后才初始化 ROS。

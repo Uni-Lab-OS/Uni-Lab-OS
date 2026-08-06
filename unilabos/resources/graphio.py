@@ -1221,16 +1221,14 @@ def resource_plr_to_bioyond(plr_resources: list[ResourcePLR], type_mapping: dict
 
 
 def initialize_resource(resource_config: dict, resource_type: Any = None) -> Union[list[dict], ResourcePLR]:
-    """Initializes a resource based on its configuration.
+    """根据物理图配置解析并初始化一个选中的资源定义。
 
-    If the config is detailed, then do nothing;
-    If it is a string, then import the appropriate class and create an instance of it.
-
-    Args:
-        resource_config (dict): The configuration dictionary for the resource, which includes the class type and other parameters.
-
-    Returns:
-        None
+    参数：``resource_config`` 是包含资源定义身份、实例名和初始化参数的物理图
+    节点；``resource_type`` 指定调用者是否要求保留原始 ``ResourcePLR`` 对象。
+    返回：初始化后的资源字典列表，或调用者明确要求的 ``ResourcePLR`` 对象；
+    无定义身份及遗留未知非软件包身份继续返回原配置列表。
+    异常：软件包规范身份缺失、短身份歧义、快照与实时注册表代际不一致，或作者
+    资源工厂导入/初始化失败时关闭式传播异常。已知软件包定义不再静默降级。
     """
     from unilabos.registry.registry import lab_registry
 
@@ -1238,16 +1236,30 @@ def initialize_resource(resource_config: dict, resource_type: Any = None) -> Uni
     if resource_class_config is None:
         return [resource_config]
     elif type(resource_class_config) == str:
-        # Allow special resource class names to be used
-        if resource_class_config not in lab_registry.resource_type_registry:
-            logger.warning(f"❌ 类 {resource_class_config} 不在 registry 中，返回原始配置")
-            logger.debug(f"   可用的类: {list(lab_registry.resource_type_registry.keys())[:10]}...")
+        if not resource_class_config:
             return [resource_config]
-        # If the resource class is a string, look up the class in the
-        # resource_type_registry and import it
-        resource_class_config = resource_config["class"] = lab_registry.resource_type_registry[resource_class_config][
-            "class"
-        ]
+        # ``resource_definition_identity`` 是物理图选择的规范 FQID 或兼容短身份。
+        resource_definition_identity = resource_class_config
+        try:
+            registry_entry = lab_registry.resolve_definition(
+                "resource",
+                resource_definition_identity,
+            )
+        except ValueError as error:
+            # 社区规范身份与歧义短名属于已知软件包语义，必须关闭式失败；普通遗留
+            # 图中的未知类仍保留原始配置，避免本轮最小接缝扩大兼容范围。
+            if resource_definition_identity.startswith("community.") or "歧义" in str(error):
+                raise
+            logger.warning(
+                f"❌ 类 {resource_definition_identity} 不在 registry 中，返回原始配置"
+            )
+            return [resource_config]
+        except KeyError:
+            logger.warning(
+                f"❌ 类 {resource_definition_identity} 不在 registry 中，返回原始配置"
+            )
+            return [resource_config]
+        resource_class_config = resource_config["class"] = registry_entry["class"]
     if type(resource_class_config) == dict:
         module = importlib.import_module(resource_class_config["module"].split(":")[0])
         mclass = resource_class_config["module"].split(":")[1]

@@ -934,8 +934,10 @@ def main():
     """解析产品配置并启动所选 UniLab-OS 运行模式。
 
     参数：无。返回：普通服务退出时为 ``None``，部分一次性子命令返回整数状态；
-    配置、环境或子命令失败沿用现有退出策略。工作流源码（Workflow Source）
-    授权在配置文件加载后、任何 Web 组合根启动前一次冻结。
+    配置、环境或子命令失败沿用现有退出策略。工作区（Workspace）
+    软件包目录（PackageCatalog）、注册表快照（Registry Snapshot）、
+    有限激活计划和工作流源码（Workflow Source）授权在任何
+    作者模块导入或 Web 组合根启动前一次冻结。
     """
     # 解析命令行参数
     parser = parse_args()
@@ -1049,18 +1051,31 @@ def main():
         _run_as_supervisor(args_dict.get("auto_restart_count", 5))
         return
 
-    # 工作区（Workspace）只在常驻启动路径投影一次；模块内部隐藏目录、命名空间、
-    # 工作流源码授权和相对物理图解析，不把包管理细节继续堆进历史主函数。
-    from unilabos.package_manager import prepare_workspace_startup
+    # 工作区（Workspace）只在常驻启动路径静态编译一次；运行时
+    # 同时持有软件包目录（PackageCatalog）、注册表快照（Registry
+    # Snapshot）、有限激活与工作流源码（Workflow Source）计划。
+    from unilabos.package_manager import (
+        PackageCompileError,
+        prepare_workspace_registry_runtime,
+    )
 
     try:
-        workspace_startup_plan = prepare_workspace_startup(args_dict)
-    except (TypeError, ValueError) as error:
+        workspace_registry_runtime = prepare_workspace_registry_runtime(args_dict)
+    except (PackageCompileError, TypeError, ValueError) as error:
         parser.error(str(error))
-    if workspace_startup_plan is not None:
+    if workspace_registry_runtime is not None:
+        # ``workspace_package_directory`` 只用于告知社区包解析器本地命名
+        # 空间已满足，不会传入注册表（Registry）再次 AST 扫描。
+        workspace_package_directory = str(
+            workspace_registry_runtime.source.root
+            / workspace_registry_runtime.catalog.import_package
+        )
+        args_dict["_community_namespaces"] = {
+            workspace_package_directory: workspace_registry_runtime.catalog.namespace
+        }
         print_status(
-            "已加载工作区（Workspace）启动计划: "
-            f"{workspace_startup_plan.import_package}",
+            "已编译工作区（Workspace）注册表运行时: "
+            f"{workspace_registry_runtime.catalog.import_package}",
             "info",
         )
 
@@ -1224,6 +1239,13 @@ def main():
     BasicConfig.working_dir = working_dir
     BasicConfig.extra_resource = bool(args_dict.get("extra_resource", False))
     configure_workflow_editable_package_roots(args_dict)
+    # ``workflow_source_discovery_plan`` 与工作区注册表快照（Registry
+    # Snapshot）来自同一编译代；无工作区时保持旧授权根发现。
+    BasicConfig.workflow_source_discovery_plan = (
+        workspace_registry_runtime.workflow_source_plan
+        if workspace_registry_runtime is not None
+        else None
+    )
 
     if args_dict.get("command") in ("template-sync", "template_sync"):
         from unilabos.app.template_sync import (
@@ -1394,11 +1416,17 @@ def main():
     # Step -1: 预读取 graph 中的 community.* class，并在 build_registry 前挂载社区设备包
     if not check_mode and not workflow_upload:
         startup_json_preview = None
-        graph_file_path = _resolve_graph_file_path(
-            args_dict.get("graph") or BasicConfig.startup_json_path
-        )
+        if workspace_registry_runtime is not None:
+            # ``graph_file_path`` 只保留固定物理图（Graph）的来源身份；预览内容
+            # 必须从工作区运行时快照分离，禁止再次打开 graph.json。
+            graph_file_path = str(workspace_registry_runtime.graph_path)
+            graph_preview = workspace_registry_runtime.graph_copy()
+        else:
+            graph_file_path = _resolve_graph_file_path(
+                args_dict.get("graph") or BasicConfig.startup_json_path
+            )
+            graph_preview = _load_graph_json_preview(graph_file_path)
         args_dict["_graph_file_path"] = graph_file_path
-        graph_preview = _load_graph_json_preview(graph_file_path)
 
         http_client_for_community = None
         if BasicConfig.ak and BasicConfig.sk:
@@ -1467,15 +1495,21 @@ def main():
         complete_registry=complete_registry,
         external_only=external_only,
     )
-    # 工作区外形只从注册表（Registry）已发现的装饰器绑定编译；不做第二次目录发现。
-    workspace_material_shapes = ()
-    if workspace_startup_plan is not None:
-        from unilabos.package_manager import compile_workspace_material_shapes
+    if workspace_registry_runtime is not None:
+        # 完整注册表快照（Registry Snapshot）只在内置定义成功后原子
+        # 发布；作者导入路径必须更晚激活，禁止静态编译期导入驱动。
+        workspace_registry_runtime.publish(lab_registry)
+        workspace_registry_runtime.activate_import_path()
+        from unilabos.package_manager import compile_catalog_material_shapes
 
-        workspace_material_shapes = compile_workspace_material_shapes(
-            workspace_startup_plan,
-            lab_registry,
+        # ``workspace_material_shapes`` 只消费同一静态编译代的软件包目录
+        # （PackageCatalog）和工作区来源，不再依赖注册表 AST ``file_path``。
+        workspace_material_shapes = compile_catalog_material_shapes(
+            workspace_registry_runtime.source,
+            workspace_registry_runtime.catalog,
         )
+    else:
+        workspace_material_shapes = ()
 
     # Check mode: 注册表验证完成后直接退出
     if check_mode:
@@ -1544,7 +1578,14 @@ def main():
         )
     else:
         if file_path.endswith(".json"):
-            graph, resource_tree_set, resource_links = read_node_link_json(file_path)
+            # 工作区（Workspace）的资源图解析使用同一固定物理图（Graph）观察；
+            # 解析器会规范化并修改输入，所以每个消费者取得独立副本。
+            graph_input = (
+                workspace_registry_runtime.graph_copy()
+                if workspace_registry_runtime is not None
+                else file_path
+            )
+            graph, resource_tree_set, resource_links = read_node_link_json(graph_input)
         else:
             graph, resource_tree_set, resource_links = read_graphml(file_path)
     import unilabos.resources.graphio as graph_res
