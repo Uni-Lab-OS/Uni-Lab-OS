@@ -171,6 +171,7 @@ def test_draft_put_rejects_s06_source_without_breaking_registered_s04(
     assert response.status_code == 200, response.text
     payload = response.json()
     assert payload["code"] == 3003
+    assert payload["error"]["code"] == "workflow_identity_mismatch"
     assert S04_WORKFLOW_UUID in payload["error"]["msg"]
     assert S06_WORKFLOW_UUID in payload["error"]["msg"]
     assert source_path.read_bytes() == original_s04

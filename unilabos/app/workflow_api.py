@@ -279,11 +279,16 @@ def _error(error: WorkflowError) -> _BackendJSONResponse:
         business_code = 5001
     else:
         business_code = 1
+    error_content = {"msg": error.message}
+    if error.code == "workflow_identity_mismatch":
+        # product Backend 包络保持 HTTP 200；该窄符号码让前端区分身份拒绝与
+        # 需要重读远端版本的普通 3003 CAS 冲突。
+        error_content["code"] = error.code
     return _BackendJSONResponse(
         status_code=200,
         content={
             "code": business_code,
-            "error": {"msg": error.message},
+            "error": error_content,
         },
     )
 
