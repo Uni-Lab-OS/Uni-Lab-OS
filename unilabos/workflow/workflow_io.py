@@ -277,14 +277,35 @@ def schema_contains_resource_slot(
 
 
 def _value_set_schema(schema: dict[str, Any]) -> dict[str, Any]:
-    """删除只影响展示或默认值、不影响可赋值集合的 Schema 注解。
+    """把动作字段 JSON Schema 规范化为闭合的工作流值 Schema。
 
-    参数说明：`schema` 是调用者已复制的普通字典；函数原地规范嵌套成员并
-    返回同一逻辑对象，使目录注解不改变工作流类型兼容结论。
+    参数：``schema`` 是调用者已深复制的普通字典，可包含 JSON Schema 的
+    可空 ``type`` 联合、默认值和展示注解。
+    返回：规范化后的同一逻辑值集合；合法的“一个非空类型加 ``null``”联合
+    确定性转成非空成员在前的 ``anyOf``，其余非法联合保持原状供严格解析器拒绝。
+    异常：无；本边界不猜测非法联合，关闭失败由后续 ``parse_value_schema``
+    统一产生 ``WorkflowSchemaError``。
     """
 
     for key in ("default", "title", "description"):
         schema.pop(key, None)
+    # ``json_types`` 是 Pydantic 动作合同常用的可空 JSON Schema 表达；工作流
+    # 值 Schema 只接受一个规范 ``anyOf`` 形态，避免两套可空语义继续向内传播。
+    json_types = schema.get("type")
+    if isinstance(json_types, (list, tuple)):
+        non_null_types = [item for item in json_types if item != "null"]
+        if (
+            len(json_types) == 2
+            and len(non_null_types) == 1
+            and json_types.count("null") == 1
+        ):
+            schema["type"] = non_null_types[0]
+            return {
+                "anyOf": [
+                    _value_set_schema(schema),
+                    {"type": "null"},
+                ]
+            }
     if "anyOf" in schema:
         members = schema.get("anyOf")
         if not isinstance(members, list):
