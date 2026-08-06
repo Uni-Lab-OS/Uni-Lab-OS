@@ -19,6 +19,7 @@ from unilabos.package_manager.device_provisioning import (
     stage_device_instance,
     update_device_instance,
 )
+from unilabos.package_manager.device_secrets import resolve_device_configuration
 from unilabos.package_manager.distribution import BuildArtifact, build_workspace_wheel
 
 _TEMPLATE_UUID = "d8f0fe85-d34a-4eb7-965a-5af0e2cf6939"
@@ -41,8 +42,17 @@ class _CopyDownloadPort:
         destination.write_bytes(self._wheel.read_bytes())
 
 
-def _build_device_artifact(root: Path, *, version: str = "2.4.0") -> BuildArtifact:
-    """构建带必填 endpoint 和静态 retries 默认值的最小设备 wheel。"""
+def _build_device_artifact(
+    root: Path,
+    *,
+    version: str = "2.4.0",
+    init_signature: str = "endpoint: str, retries: int = 3",
+) -> BuildArtifact:
+    """按指定初始化合同构建最小设备 wheel。
+
+    ``root`` 是隔离构建目录，``version`` 是发布版本，``init_signature`` 是设备
+    构造函数参数源码。返回带摘要的测试 Artifact。
+    """
 
     workspace = root / "workspace"
     package = workspace / "provisioning_lab"
@@ -54,10 +64,9 @@ from unilabos.registry.decorators import device
 
 @device(id="pump", category=["test"])
 class Pump:
-    def __init__(self, endpoint: str, retries: int = 3):
+    def __init__(self, {init_signature}):
         self.endpoint = endpoint
-        self.retries = retries
-""".strip(),
+""".strip().format(init_signature=init_signature),
         encoding="utf-8",
     )
     (workspace / "pyproject.toml").write_text(
@@ -78,10 +87,18 @@ include = ["provisioning_lab*"]
     return build_workspace_wheel(workspace, root / "dist")
 
 
-def _cache_device_package(tmp_path: Path) -> tuple[str, Path]:
-    """下载测试 Artifact 并返回稳定 cache_key 与受管工作目录。"""
+def _cache_device_package(
+    tmp_path: Path,
+    *,
+    init_signature: str = "endpoint: str, retries: int = 3",
+) -> tuple[str, Path]:
+    """下载指定初始化合同的 Artifact 并返回缓存身份与受管目录。
 
-    artifact = _build_device_artifact(tmp_path)
+    ``tmp_path`` 是测试隔离目录，``init_signature`` 是目标设备构造合同。返回
+    ``cache_key`` 与当前测试的 OS 受管工作目录。
+    """
+
+    artifact = _build_device_artifact(tmp_path, init_signature=init_signature)
     working_dir = tmp_path / "runtime"
     result = download_device_package(
         template_uuid=_TEMPLATE_UUID,
@@ -171,6 +188,52 @@ def test_stage_device_instance_preserves_graph_and_writes_recoverable_backup(
         "retries": 3,
     }
     assert added["extra"]["unilab"]["package_cache_key"] == cache_key
+
+
+def test_stage_device_instance_writes_secret_reference_instead_of_password(
+    tmp_path: Path,
+) -> None:
+    """秘密配置必须进入受管存储，设备图只能持久化版本化引用。"""
+
+    cache_key, working_dir = _cache_device_package(
+        tmp_path,
+        init_signature="endpoint: str, password: str",
+    )
+    graph_path, _ = _write_graph(tmp_path)
+    request = _stage_kwargs(graph_path, working_dir, cache_key)
+    request["configuration"] = {
+        "endpoint": "serial:///dev/ttyUSB0",
+        "password": "device-password",
+    }
+
+    first = stage_device_instance(**request)
+
+    graph_bytes = graph_path.read_bytes()
+    graph = json.loads(graph_bytes)
+    added = next(node for node in graph["nodes"] if node["id"] == "local-pump-1")
+    assert b"device-password" not in graph_bytes
+    assert added["config"]["password"] == {
+        "$unilab_secret": {
+            "schema_version": "device-secret-ref/v1",
+            "id": added["config"]["password"]["$unilab_secret"]["id"],
+        }
+    }
+    secret_id = added["config"]["password"]["$unilab_secret"]["id"]
+    secret_file = working_dir / "device-secrets" / "v1" / secret_id
+    assert secret_file.stat().st_mode & 0o777 == 0o600
+    assert resolve_device_configuration(
+        added["config"],
+        working_dir=working_dir,
+    ) == {
+        "endpoint": "serial:///dev/ttyUSB0",
+        "password": "device-password",
+    }
+
+    second = stage_device_instance(**request)
+
+    assert first.changed is True
+    assert second.changed is False
+    assert second.backup_path is None
 
 
 def test_stage_device_instance_is_idempotent_for_identical_declaration(

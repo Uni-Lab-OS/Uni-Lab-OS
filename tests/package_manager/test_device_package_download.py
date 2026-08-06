@@ -194,22 +194,27 @@ def test_download_device_package_rejects_artifact_digest_mismatch(
     ).exists()
 
 
-def test_download_device_package_rejects_secret_configuration_before_publish(
+def test_download_device_package_projects_secret_configuration_without_plaintext_default(
     tmp_path: Path,
 ) -> None:
-    """疑似秘密初始化参数必须失败关闭，避免后续明文进入设备图。"""
+    """秘密初始化参数必须进入写入专用合同，不能阻断设备包下载。"""
 
     artifact = _build_device_artifact(
         tmp_path,
-        init_signature="endpoint: str, api_key: str",
+        init_signature="endpoint: str, password: str = 'unsafe-default'",
     )
 
-    with pytest.raises(DevicePackageError, match="秘密参数 api_key"):
-        download_device_package(
-            **_download_kwargs(tmp_path, artifact, _CopyDownloadPort(artifact.wheel))
-        )
+    result = download_device_package(
+        **_download_kwargs(tmp_path, artifact, _CopyDownloadPort(artifact.wheel))
+    )
 
-    assert not (
+    assert result.configuration_schema["properties"]["password"] == {
+        "type": "string",
+        "writeOnly": True,
+        "x-unilab-secret": True,
+    }
+    assert "default" not in result.configuration_schema["properties"]["password"]
+    assert (
         tmp_path / "runtime/community_packages/cache-index.json"
     ).exists()
 

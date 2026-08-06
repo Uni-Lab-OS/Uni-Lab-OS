@@ -16,9 +16,11 @@ from uuid import UUID, uuid4
 from .community import CommunityPackageError, load_cached_community_package
 from .device_package import (
     DevicePackageError,
+    configuration_schema_for_definition,
     device_definition_from_catalog,
     validate_configuration_for_definition,
 )
+from .device_secrets import DeviceSecretError, protect_device_configuration
 
 _INSTANCE_ID = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_.-]{0,127}$")
 
@@ -69,9 +71,10 @@ def stage_device_instance(
     ``graph_path`` 是 Electron 当前 LocalRuntime 选择的设备图，``working_dir``
     是同一 OS 的受管缓存目录；``cache_key`` 与 ``definition_fqid`` 绑定已校验
     设备包；``instance_id``/``instance_uuid`` 是本地实例身份；
-    ``display_name`` 与 ``configuration`` 是用户确认的非秘密配置。返回
-    ``graph_staged`` 结果。完全相同的重复请求幂等成功；身份冲突或任一校验
-    失败时抛出 :class:`DeviceProvisioningError`，原图保持不变。
+    ``display_name`` 与 ``configuration`` 是用户确认且只经 stdin 传递的配置。
+    秘密字段会进入受管秘密存储，设备图只保存版本化引用。返回 ``graph_staged``
+    结果。完全相同的重复请求幂等成功；身份冲突或任一校验失败时抛出
+    :class:`DeviceProvisioningError`，原图保持不变。
     """
 
     return _write_device_instance(
@@ -248,6 +251,7 @@ def _write_device_instance(
             definition,
             configuration,
         )
+        configuration_schema = configuration_schema_for_definition(definition)
     except (CommunityPackageError, DevicePackageError, OSError, ValueError) as exc:
         raise DeviceProvisioningError(str(exc)) from exc
     path, graph, original = _read_graph(graph_path)
@@ -263,13 +267,26 @@ def _write_device_instance(
             raise DeviceProvisioningError("同名设备实例绑定了不同 definition")
         if requested_uuid and existing_uuid != requested_uuid:
             raise DeviceProvisioningError("同名设备实例 UUID 与请求不一致")
+        try:
+            protected_configuration = protect_device_configuration(
+                normalized_configuration,
+                configuration_schema,
+                working_dir=working_dir,
+                existing_configuration=(
+                    existing.get("config")
+                    if isinstance(existing.get("config"), Mapping)
+                    else None
+                ),
+            )
+        except DeviceSecretError as exc:
+            raise DeviceProvisioningError(str(exc)) from exc
         candidate = _device_node(
             instance_id=instance_id,
             instance_uuid=existing_uuid,
             display_name=normalized_name,
             definition_fqid=definition_fqid,
             cache_key=cache_key,
-            configuration=normalized_configuration,
+            configuration=protected_configuration,
         )
         if not update_existing and existing != candidate:
             raise DeviceProvisioningError("同名设备实例已存在且内容不同")
@@ -290,6 +307,14 @@ def _write_device_instance(
         stable_uuid = requested_uuid or str(uuid4())
         if any(str(node.get("uuid") or "") == stable_uuid for node in graph["nodes"]):
             raise DeviceProvisioningError("设备实例 UUID 已被其他节点使用")
+        try:
+            protected_configuration = protect_device_configuration(
+                normalized_configuration,
+                configuration_schema,
+                working_dir=working_dir,
+            )
+        except DeviceSecretError as exc:
+            raise DeviceProvisioningError(str(exc)) from exc
         graph["nodes"].append(
             _device_node(
                 instance_id=instance_id,
@@ -297,7 +322,7 @@ def _write_device_instance(
                 display_name=normalized_name,
                 definition_fqid=definition_fqid,
                 cache_key=cache_key,
-                configuration=normalized_configuration,
+                configuration=protected_configuration,
             )
         )
     backup = _commit_graph(path, graph, original)
