@@ -642,7 +642,11 @@ def _load_graph_json_preview(file_path: str | None) -> dict[str, Any] | None:
 
 
 def main():
-    """主函数"""
+    """解析根 CLI 并把命令路由到轻量子命令或完整设备 Runtime。
+
+    函数无参数和业务返回值；设备包 ``--auth-stdin`` 在配置加载前进入安全上传
+    深模块。参数、配置或运行失败按既有 CLI 合同退出进程。
+    """
     # 解析命令行参数
     parser = parse_args()
     convert_argv_dashes_to_underscores(parser)
@@ -654,6 +658,19 @@ def main():
         from unilabos.hostlink.doctor import run_doctor
 
         sys.exit(run_doctor(args_dict))
+
+    # Electron 上传凭据只通过 stdin 进入短生命周期进程；该路径不得执行 local_config.py。
+    if (
+        args_dict.get("command") in ("package", "pkg")
+        and args_dict.get("package_action") == "upload"
+        and args_dict.get("auth_stdin") is True
+    ):
+        from unilabos.package_manager.secure_upload import (
+            run_secure_package_upload,
+        )
+
+        run_secure_package_upload(args_dict)
+        return
 
     # 除 upload 外的设备包命令不需要 Runtime 配置、凭据或设备 bootstrap。
     if (
