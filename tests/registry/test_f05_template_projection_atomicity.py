@@ -44,19 +44,28 @@ def _projection(database_path: Path) -> RegistryTemplateProjection:
     参数说明：``database_path`` 是跨失败刷新与重启复用的 SQLite 路径。返回：
     使用确定资源模板（ResourceTemplate）UUID 的设备注册表模板投影；未知业务
     身份返回空串，由投影边界关闭式失败。
+    异常：数据库或模板投影初始化失败时传播原异常。
     """
 
     identities = {
         "pump": PRIMARY_RESOURCE_TEMPLATE_UUID,
         "backup_pump": SECONDARY_RESOURCE_TEMPLATE_UUID,
     }
+
+    def resolve_resource_template_identity(resource_name: str) -> str:
+        """按资源业务名读取本用例固定的资源模板身份。
+
+        参数：``resource_name`` 是设备动作合同引用的资源业务名。
+        返回：已声明名称的稳定 UUID；未知名称返回空串并由投影边界拒绝。
+        异常：无。
+        """
+
+        return identities.get(resource_name, "")
+
     return RegistryTemplateProjection(
         WorkflowStore(database_path),
         authority_id="local",
-        resource_template_identity_resolver=lambda resource_name: identities.get(
-            resource_name,
-            "",
-        ),
+        resource_template_identity_resolver=resolve_resource_template_identity,
     )
 
 
@@ -94,12 +103,21 @@ def _persisted_projection_state(database_path: Path) -> dict[str, Any]:
             ORDER BY uuid
             """
         ).fetchall()
+        manifest = connection.execute(
+            """
+            SELECT authority_id, projection_kind, source_definition_key,
+                   business_key, target_uuid, semantic_hash, generation
+            FROM registry_template_projection_member
+            ORDER BY projection_kind, business_key
+            """
+        ).fetchall()
     finally:
         connection.close()
     return {
         "generation": [tuple(row) for row in generation],
         "nodes": [tuple(row) for row in nodes],
         "handles": [tuple(row) for row in handles],
+        "manifest": [tuple(row) for row in manifest],
     }
 
 
@@ -117,12 +135,15 @@ def test_invalid_catalog_generation_rolls_back_before_durable_publish(
     database_path = tmp_path / "workflow_history.db"
     projection = _projection(database_path)
     good_snapshot = projection.refresh(FakeRegistry())
+    # ``good_delta`` 是最近成功提交的模板投影差量，失败刷新不得提前替换它。
+    good_delta = projection.last_delta()
     good_state = _persisted_projection_state(database_path)
 
     with pytest.raises(RegistryTemplateProjectionError, match="动作业务身份重复"):
         projection.refresh(_DuplicateActionBusinessIdentityRegistry())
 
     assert projection.snapshot().fingerprint == good_snapshot.fingerprint
+    assert projection.last_delta() == good_delta
     assert _persisted_projection_state(database_path) == good_state
     projection.close()
 

@@ -24,12 +24,14 @@ def clean_product_runtime(monkeypatch: pytest.MonkeyPatch) -> Any:
 
     参数：``monkeypatch`` 在用例结束时恢复产品配置。返回：pytest 生命周期值；
     前后均关闭进程级工作流权威。
+    异常：测试装配或清理失败时传播原异常，禁止污染后续用例。
     """
 
     composition.reset_workflow_service_for_test()
     monkeypatch.setattr(BasicConfig, "working_dir", "")
     if hasattr(BasicConfig, "workflow_editable_package_roots"):
         monkeypatch.setattr(BasicConfig, "workflow_editable_package_roots", ())
+    monkeypatch.setattr(BasicConfig, "workflow_source_discovery_plan", None)
     try:
         yield
     finally:
@@ -41,11 +43,10 @@ def _seed_workflow(working_dir: Path) -> None:
 
     参数：``working_dir`` 决定产品使用的 ``workflow_history.db``。返回：无；
     创建后立即关闭播种服务。
+    异常：数据库创建、工作流写入或关闭失败时传播原异常。
     """
 
-    service = WorkflowService(
-        WorkflowStore(working_dir / "workflow_history.db")
-    )
+    service = WorkflowService(WorkflowStore(working_dir / "workflow_history.db"))
     try:
         service.create_workflow(
             workflow_uuid=WORKFLOW_UUID,
@@ -132,6 +133,7 @@ def test_real_web_server_passes_configured_roots_into_runtime(
 
     参数：``tmp_path`` 隔离产品数据库与包；``monkeypatch`` 固定配置和关闭本地
     调度器适配器。返回：无；验证生产入口而非直接调用底层组合函数。
+    异常：产品入口未传递授权根或服务装配失败时测试失败。
     """
 
     working_dir = tmp_path / "runtime"
@@ -147,6 +149,7 @@ def test_real_web_server_passes_configured_roots_into_runtime(
     scheduler_integration = importlib.import_module(
         "unilabos.app.scheduler.integration"
     )
+
     def no_inventory_service() -> None:
         """表示本用例没有本地库存权威（Inventory Authority）。"""
 
@@ -207,6 +210,7 @@ def test_local_product_composition_forwards_the_exact_configured_roots(
 
     参数：``tmp_path`` 提供产品工作目录和授权目录；``monkeypatch`` 用最小
     产品替身隔离模板投影细节。返回：无；遗漏参数或发生隐式根目录推导即失败。
+    异常：组合依赖、授权根或接口安装身份不一致时测试失败。
     """
 
     working_dir = tmp_path / "runtime"
@@ -246,11 +250,13 @@ def test_local_product_composition_forwards_the_exact_configured_roots(
         registry: object,
         scheduler: object,
         editable_package_roots: tuple[str, ...],
+        start_source_monitor: bool,
     ) -> tuple[object, object]:
         """记录本地组合根收到的工作目录、依赖和源码授权。
 
         参数：所有参数对应产品入口的完整显式依赖。返回：工作流服务
         （WorkflowService）和模板投影替身；不产生持久状态。
+        异常：无。
         """
 
         captured.update(
@@ -259,6 +265,7 @@ def test_local_product_composition_forwards_the_exact_configured_roots(
             registry=registry,
             scheduler=scheduler,
             editable_package_roots=editable_package_roots,
+            start_source_monitor=start_source_monitor,
         )
         return workflow_service, template_projection
 
@@ -319,6 +326,7 @@ def test_local_product_composition_forwards_the_exact_configured_roots(
     assert captured["inventory_store"] is inventory_service.store
     assert captured["scheduler"] is edge_scheduler
     assert captured["editable_package_roots"] == configured_roots
+    assert captured["start_source_monitor"] is True
 
 
 def test_local_composition_failure_never_falls_back_to_uncompiled_runtime(
@@ -329,6 +337,7 @@ def test_local_composition_failure_never_falls_back_to_uncompiled_runtime(
 
     参数：``tmp_path`` 提供真实产品工作目录；``monkeypatch`` 注入本地组合安全
     失败并记录回退与 API 挂载。返回：无；失败必须使工作流合同关闭且不调用回退。
+    异常：失败后发生回退、挂载接口或发布部分服务时测试失败。
     """
 
     monkeypatch.setattr(BasicConfig, "working_dir", str(tmp_path / "runtime"))
@@ -351,11 +360,14 @@ def test_local_composition_failure_never_falls_back_to_uncompiled_runtime(
 
         return edge_scheduler
 
-    def fail_local_composition(*args: object, **kwargs: object) -> tuple[object, object]:
+    def fail_local_composition(
+        *args: object, **kwargs: object
+    ) -> tuple[object, object]:
         """注入本地模板投影或来源安全校验失败。
 
         参数：``args`` 与 ``kwargs`` 捕获产品组合依赖。返回：永不返回；抛出
         ``RuntimeError`` 模拟不得降级的启动失败。
+        异常：固定抛出 ``RuntimeError``。
         """
 
         raise RuntimeError("注入的本地工作流安全组合失败")
