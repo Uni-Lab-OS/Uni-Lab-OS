@@ -14,6 +14,7 @@ from unilabos.app.scheduler.inventory.backend_contract import (
 from unilabos.app.scheduler.inventory.domain import MaterialRequirement
 from unilabos.app.scheduler.inventory.service import InventoryService
 from unilabos.app.scheduler.inventory.store import InventoryStore
+from unilabos.package_manager import WorkspaceMaterialModelAsset
 
 
 def _client(tmp_path):
@@ -62,6 +63,47 @@ def test_material_shapes_use_backend_envelope_without_inventory_routes(
 
     assert response.status_code == 200
     assert response.json() == {"code": 0, "data": {"items": list(material_shapes)}}
+    store.close()
+
+
+def test_material_model_assets_use_public_route_with_cache_identity(tmp_path) -> None:
+    """工作区模型资产必须通过公共路由返回真实字节和内容摘要。
+
+    参数：``tmp_path`` 提供隔离库存数据库。返回：无；断言 Xacro 成功且未知资产
+    返回 404。异常：模型目录没有装配到资源 API 或响应丢失媒体信息时测试失败。
+    """
+
+    class _ModelCatalog:
+        """只允许读取一个固定 Xacro 的模型目录替身。"""
+
+        def read_asset(self, public_path: str) -> WorkspaceMaterialModelAsset:
+            """读取固定资产。参数：公共路径。返回：模型字节。异常：未知路径失败。"""
+
+            if public_path != "/api/v1/material-models/szlab/device.xacro":
+                raise KeyError("模型资产未授权")
+            return WorkspaceMaterialModelAsset(
+                content=b"<robot/>",
+                media_type="application/xml",
+                etag="sha256:model",
+            )
+
+    store = InventoryStore(str(tmp_path / "inventory.db"))
+    app = FastAPI()
+    install_backend_resource_api(
+        app,
+        BackendResourceService(store),
+        material_model_catalog=_ModelCatalog(),
+    )
+    client = TestClient(app)
+
+    response = client.get("/api/v1/material-models/szlab/device.xacro")
+    missing = client.get("/api/v1/material-models/szlab/missing.stl")
+
+    assert response.status_code == 200
+    assert response.content == b"<robot/>"
+    assert response.headers["content-type"].startswith("application/xml")
+    assert response.headers["etag"] == '"sha256:model"'
+    assert missing.status_code == 404
     store.close()
 
 

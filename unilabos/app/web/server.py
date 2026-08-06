@@ -147,6 +147,7 @@ def setup_server() -> FastAPI:
             get_edge_backend,
             get_edge_scheduler,
             get_inventory_service,
+            get_material_model_catalog,
             get_material_shapes,
         )
 
@@ -176,6 +177,7 @@ def setup_server() -> FastAPI:
                     app,
                     BackendResourceService(inventory_service.store),
                     material_shapes=get_material_shapes(),
+                    material_model_catalog=get_material_model_catalog(),
                 )
                 resource_contract_routes_mounted = True
             app.include_router(create_inventory_router(inventory_service))

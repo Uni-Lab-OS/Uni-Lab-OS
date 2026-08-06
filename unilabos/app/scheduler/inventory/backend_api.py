@@ -7,10 +7,10 @@ from copy import deepcopy
 from typing import Any, Dict, List, Optional
 from uuid import UUID
 
-from fastapi import APIRouter, FastAPI, Query, Request
+from fastapi import APIRouter, FastAPI, HTTPException, Query, Request
 from fastapi.exception_handlers import request_validation_exception_handler
 from fastapi.exceptions import RequestValidationError
-from fastapi.responses import JSONResponse
+from fastapi.responses import JSONResponse, Response
 from pydantic import BaseModel, ConfigDict, Field
 
 from unilabos.app.scheduler.inventory.backend_contract import (
@@ -113,12 +113,14 @@ def create_backend_resource_router(
     service: BackendResourceService,
     *,
     material_shapes: Sequence[Mapping[str, Any]] = (),
+    material_model_catalog: Any = None,
 ) -> APIRouter:
     """创建前端资源合同路由并附带静态物料外形。
 
     参数：``service`` 提供公共资源读写；``material_shapes`` 是已由包资产编译器
-    校验的静态外形投影。返回：不包含 Edge 私有库存路由的 ``APIRouter``。
-    异常：外形项目不是对象时抛出 ``TypeError``。
+    校验的静态外形投影；``material_model_catalog`` 只读取本启动代际授权的模型
+    资产。返回：不包含 Edge 私有库存路由的 ``APIRouter``。异常：外形项目或模型
+    目录形状非法时原样抛出。
     """
 
     router = APIRouter(prefix="/api/v1", tags=["backend-resource-contract"])
@@ -133,6 +135,31 @@ def create_backend_resource_router(
         """
 
         return _success({"items": deepcopy(list(frozen_material_shapes))})
+
+    @router.get("/material-models/{asset_path:path}")
+    def read_material_model(asset_path: str) -> Response:
+        """返回一项工作区 3D 模型资产。
+
+        参数：``asset_path`` 是公共模型路由内的相对路径。返回：带媒体类型、摘要
+        和禁止陈旧缓存策略的资产字节。异常：目录未安装或资产未授权时返回 404。
+        """
+
+        if material_model_catalog is None:
+            raise HTTPException(status_code=404, detail="模型资产目录未安装")
+        public_path = f"/api/v1/material-models/{asset_path}"
+        try:
+            # ``asset`` 是当前工作区启动代际完成边界校验后的不可变读取结果。
+            asset = material_model_catalog.read_asset(public_path)
+        except KeyError as error:
+            raise HTTPException(status_code=404, detail="模型资产未找到") from error
+        return Response(
+            content=asset.content,
+            media_type=asset.media_type,
+            headers={
+                "Cache-Control": "private, max-age=0, must-revalidate",
+                "ETag": f'"{asset.etag}"',
+            },
+        )
 
     @router.post("/resource-templates")
     def sync_resource_templates(body: ResourceTemplateSyncRequest) -> JSONResponse:
@@ -283,12 +310,14 @@ def install_backend_resource_api(
     service: BackendResourceService,
     *,
     material_shapes: Sequence[Mapping[str, Any]] = (),
+    material_model_catalog: Any = None,
 ) -> None:
     """安装公共资源路由与 Backend 校验信封。
 
     参数：``app`` 是产品 FastAPI 应用；``service`` 是资源合同服务；
-    ``material_shapes`` 是工作区包资产的静态公共投影。返回：无。
-    异常：路由或外形装配错误原样抛出。
+    ``material_shapes`` 是工作区包资产的静态公共投影；
+    ``material_model_catalog`` 是同代受限模型目录。返回：无。
+    异常：路由、外形或模型装配错误原样抛出。
     """
 
     @app.exception_handler(RequestValidationError)
@@ -309,7 +338,11 @@ def install_backend_resource_api(
         return await request_validation_exception_handler(request, error)
 
     app.include_router(
-        create_backend_resource_router(service, material_shapes=material_shapes)
+        create_backend_resource_router(
+            service,
+            material_shapes=material_shapes,
+            material_model_catalog=material_model_catalog,
+        )
     )
 
 

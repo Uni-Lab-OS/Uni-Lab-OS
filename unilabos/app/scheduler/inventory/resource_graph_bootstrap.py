@@ -39,13 +39,16 @@ def bootstrap_local_resource_graph(
     resource_tree_set: Any,
     registry_snapshot: RegistryTemplateSnapshot,
     source_id: str,
+    material_rendering_by_template: Mapping[str, Mapping[str, Any]] | None = None,
 ) -> dict[str, Any]:
     """预校验并原子提交本地资源图的物料（Material）与库位（Site）。
 
     参数：``store`` 是当前主机唯一库存 SQLite；``resource_tree_set`` 提供产品
     ``dump()`` 快照；``registry_snapshot`` 冻结同代资源模板定义；``source_id``
-    标识资源图来源。返回：``imported`` 或 ``unchanged`` 幂等回执。异常：身份、
-    拓扑、数值、模板、既有权威或指纹冲突时抛出 ``ResourceGraphBootstrapError``；
+    标识资源图来源；``material_rendering_by_template`` 是工作区编译后、仅指向
+    OS 公开 HTTP 路由的模型快照。返回：``imported`` 或 ``unchanged`` 幂等
+    回执。异常：身份、拓扑、数值、模板、模型路径、既有权威或指纹冲突时
+    抛出 ``ResourceGraphBootstrapError``；
     物料、位置、库位与指纹始终在同一事务提交或全部回滚。
     """
 
@@ -66,7 +69,12 @@ def bootstrap_local_resource_graph(
     )
     aliases = _template_aliases(registry_snapshot)
     # ``projection`` 在任何模板或库存写入前完成结构验证，避免非法图留下部分事实。
-    projection = _compile_projection(raw_trees, source_name, aliases)
+    projection = _compile_projection(
+        raw_trees,
+        source_name,
+        aliases,
+        material_rendering_by_template=material_rendering_by_template,
+    )
     try:
         resolve_template_uuid = synchronize_local_template_identities(
             inventory_store=store,
@@ -199,12 +207,15 @@ def _compile_projection(
     raw_trees: object,
     source_name: str,
     aliases: Mapping[str, str],
+    *,
+    material_rendering_by_template: Mapping[str, Mapping[str, Any]] | None = None,
 ) -> dict[str, list[dict[str, Any]]]:
     """把可疑资源树快照编译成无数据库依赖的规范投影。
 
     参数：``raw_trees`` 是嵌套树列表；``source_name`` 提供稳定命名空间；
-    ``aliases`` 校验资源类已进入注册表。返回：物料、位置和库位候选集合。
-    异常：集合形状、重复身份、模板、父关系或数值非法时关闭式失败。
+    ``aliases`` 校验资源类已进入注册表；``material_rendering_by_template``
+    按模板业务身份提供公开模型快照。返回：物料、位置和库位候选集合。
+    异常：集合形状、重复身份、模板、模型路径、父关系或数值非法时关闭式失败。
     """
 
     if not isinstance(raw_trees, Sequence) or isinstance(raw_trees, (str, bytes)):
@@ -264,6 +275,12 @@ def _compile_projection(
             raise ResourceGraphBootstrapError(f"Material {node_id} 父关系悬空")
         material_uuid = material_uuid_by_runtime[runtime_uuid]
         pose = _pose(node)
+        # ``material_config`` 是前端读模型；模型资产仅发布 OS 公开 URL。
+        material_config = _material_config_with_rendering(
+            node,
+            template_name=template_name,
+            material_rendering_by_template=material_rendering_by_template,
+        )
         materials.append(
             {
                 "uuid": material_uuid,
@@ -280,7 +297,7 @@ def _compile_projection(
                     "source_node_id": node_id,
                     "source_runtime_uuid": runtime_uuid,
                 },
-                "config": _json_object(node.get("config"), "material.config"),
+                "config": material_config,
                 "data": _json_object(node.get("data"), "material.data"),
             }
         )
@@ -408,6 +425,57 @@ def _compile_projection(
                 }
             )
     return {"materials": materials, "relative_positions": positions, "sites": sites}
+
+
+def _material_config_with_rendering(
+    node: Mapping[str, Any],
+    *,
+    template_name: str,
+    material_rendering_by_template: Mapping[str, Mapping[str, Any]] | None,
+) -> dict[str, Any]:
+    """编译物料外形与公开 3D 模型读快照。
+
+    参数：``node`` 是资源树物料节点；``template_name`` 是已解析的资源
+    模板（ResourceTemplate）业务身份；``material_rendering_by_template`` 是工作区
+    公开模型快照。返回：无共享引用的物料配置。异常：既有渲染字段非对象、
+    模型快照非对象或资产不指向 OS 公开路由时关闭式失败。
+    """
+
+    config = _json_object(node.get("config"), "material.config")
+    raw_rendering = config.get("rendering")
+    if raw_rendering is not None and not isinstance(raw_rendering, Mapping):
+        raise ResourceGraphBootstrapError("material.config.rendering 必须是 JSON 对象")
+    rendering = _json_object(raw_rendering, "material.config.rendering")
+
+    # ``kind`` 优先保留资源图显式声明，否则使用物料自身类别匹配外形库。
+    explicit_kind = rendering.get("kind") or rendering.get("type")
+    category = config.get("category") or config.get("type")
+    if isinstance(explicit_kind, str) and explicit_kind.strip():
+        rendering["kind"] = explicit_kind.strip()
+    elif isinstance(category, str) and category.strip():
+        rendering["kind"] = category.strip()
+
+    model_snapshot = None
+    if material_rendering_by_template is not None:
+        if not isinstance(material_rendering_by_template, Mapping):
+            raise ResourceGraphBootstrapError("物料模型快照索引必须是对象")
+        model_snapshot = material_rendering_by_template.get(template_name)
+    if model_snapshot is not None and "model" not in rendering:
+        if not isinstance(model_snapshot, Mapping):
+            raise ResourceGraphBootstrapError("物料模型快照必须是对象")
+        model = _json_object(model_snapshot, "material.rendering.model")
+        # ``model_path`` 是浏览器唯一允许的资产入口，不允许 local_bridge。
+        model_path = model.get("path")
+        if not isinstance(model_path, str) or not model_path.startswith(
+            "/api/v1/material-models/"
+        ):
+            raise ResourceGraphBootstrapError(
+                "工作区物料模型必须通过 OS 公开 HTTP 路由发布"
+            )
+        rendering["model"] = model
+    if rendering:
+        config["rendering"] = rendering
+    return config
 
 
 def _resolve_projection_templates(

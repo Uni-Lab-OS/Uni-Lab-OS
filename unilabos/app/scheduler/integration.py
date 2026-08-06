@@ -37,6 +37,8 @@ _inventory: Optional[Any] = None
 _outbox_worker: Optional[Any] = None
 # 工作区物料外形是包资产编译结果，不属于库存数据库私有事实。
 _material_shapes: tuple[dict[str, Any], ...] = ()
+# 工作区模型目录仅授权 OS 公开 HTTP 路由，不经过 local_bridge。
+_material_model_catalog: Optional[Any] = None
 
 
 class CloudBusinessError(RuntimeError):
@@ -83,6 +85,16 @@ def get_material_shapes() -> list[dict[str, Any]]:
     """
 
     return deepcopy(list(_material_shapes))
+
+
+def get_material_model_catalog() -> Optional[Any]:
+    """返回当前启动代际的 OS 公开物料模型目录。
+
+    参数：无。返回：尚未组装时为 ``None``，否则返回受限目录同一
+    对象，供 HTTP 资产路由读取。异常：无；目录自身是不可变启动快照。
+    """
+
+    return _material_model_catalog
 
 
 def make_http_sync_sender() -> Any:
@@ -189,18 +201,21 @@ def setup_edge_inventory(
     registry_snapshot: Any = None,
     resource_graph_source_id: str = "",
     material_shapes: Any = None,
+    material_model_catalog: Any = None,
 ) -> Any:
     """启动主机库存服务并可选建立资源图投影（Resource Graph Projection）。
 
     参数：``inventory_db_path`` 是主机私有 SQLite 路径；``edge_id`` 与
     ``lab_id`` 是库存事件身份；``ws_client`` 和 ``sync_sender`` 分别接入主机链路
     与发件箱（Outbox）；资源树、注册表快照和来源身份共同提供资源图投影；
-    ``material_shapes`` 是工作区包资产编译后的静态公共投影。返回：进程内唯一库存
-    服务。异常：路径切换、外形形状、投影参数不完整或资源图不安全时关闭式失败；
+    ``material_shapes`` 是工作区包资产编译后的静态公共投影；
+    ``material_model_catalog`` 是只通过 OS 公开 HTTP 路由读取的同代模型目录。
+    返回：进程内唯一库存服务。异常：路径切换、外形形状、模型目录换代、
+    投影参数不完整或资源图不安全时关闭式失败；
     从节点不调用本函数，因此不会打开此数据库。
     """
 
-    global _inventory, _material_shapes, _outbox_worker
+    global _inventory, _material_model_catalog, _material_shapes, _outbox_worker
     path = str(inventory_db_path or "").strip()
     if not path:
         raise ValueError("inventory_db_path is required")
@@ -214,6 +229,24 @@ def setup_edge_inventory(
         if _inventory is not None and _material_shapes != compiled_shapes:
             raise RuntimeError("库存服务启动后不得切换工作区物料外形代际")
         _material_shapes = compiled_shapes
+    if material_model_catalog is not None:
+        models_by_template = getattr(
+            material_model_catalog,
+            "models_by_template",
+            None,
+        )
+        if not isinstance(models_by_template, dict) and not hasattr(
+            models_by_template,
+            "items",
+        ):
+            raise TypeError("物料模型目录必须提供 models_by_template 映射")
+        if (
+            _inventory is not None
+            and _material_model_catalog is not material_model_catalog
+        ):
+            raise RuntimeError("库存服务启动后不得切换工作区物料模型目录代际")
+        # ``_material_model_catalog`` 固定资产授权根和模板模型的同一启动快照。
+        _material_model_catalog = material_model_catalog
     if path != ":memory:":
         path = os.path.abspath(os.path.expanduser(path))
         os.makedirs(os.path.dirname(path) or ".", exist_ok=True)
@@ -261,6 +294,11 @@ def setup_edge_inventory(
             resource_tree_set=resource_tree_set,
             registry_snapshot=registry_snapshot,
             source_id=resource_graph_source,
+            material_rendering_by_template=(
+                _material_model_catalog.models_by_template
+                if _material_model_catalog is not None
+                else None
+            ),
         )
 
     if ws_client is not None:
@@ -442,7 +480,8 @@ def shutdown_edge_services() -> None:
     参数：无。返回：无。异常：底层关闭错误原样抛出，避免遗留半关闭单例。
     """
 
-    global _scheduler, _backend, _inventory, _material_shapes, _outbox_worker
+    global _scheduler, _backend, _inventory
+    global _material_model_catalog, _material_shapes, _outbox_worker
     from unilabos.app.scheduler.host_network import shutdown_network_services
 
     # 先拒绝新 Slave/物料请求，再关闭请求会触达的调度与存储组件。
@@ -463,6 +502,7 @@ def shutdown_edge_services() -> None:
     _scheduler = None
     _backend = None
     _inventory = None
+    _material_model_catalog = None
     _material_shapes = ()
     _outbox_worker = None
 
@@ -478,6 +518,7 @@ __all__ = [
     "get_edge_backend",
     "get_edge_scheduler",
     "get_inventory_service",
+    "get_material_model_catalog",
     "get_material_shapes",
     "make_http_snapshot_sender",
     "make_http_sync_sender",

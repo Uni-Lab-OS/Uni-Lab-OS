@@ -306,12 +306,14 @@ def _bootstrap(
     tree: _ResourceTree,
     *,
     registry: _Registry | None = None,
+    material_rendering_by_template: dict[str, dict[str, Any]] | None = None,
 ) -> dict[str, Any]:
     """通过正式深模块接口执行一次启动投影。
 
     参数：``store`` 是本地库存权威，``tree`` 是资源树集合替身；``registry``
-    可注入含共享实现类的注册表（Registry），缺省使用单模板注册表。返回：导入
-    回执。异常：资源图非法或与既有权威冲突时传播
+    可注入含共享实现类的注册表（Registry），缺省使用单模板注册表；
+    ``material_rendering_by_template`` 是已编译的公共模型快照。返回：导入回执。
+    异常：资源图非法或与既有权威冲突时传播
     ``ResourceGraphBootstrapError``。
     """
 
@@ -322,6 +324,7 @@ def _bootstrap(
         resource_tree_set=tree,
         registry_snapshot=registry_snapshot,
         source_id="/workspace/m2b-native-workspace/graph.json",
+        material_rendering_by_template=material_rendering_by_template,
     )
 
 
@@ -349,6 +352,37 @@ def test_first_bootstrap_exposes_stable_device_material_and_ordered_sites() -> N
     ]
     assert [site["sort_order"] for site in sites] == [0, 1]
     assert all(site["material_uuid"] == MOUNT_MATERIAL_UUID for site in sites)
+
+
+def test_bootstrap_projects_public_shape_kind_and_model_url() -> None:
+    """物料读模型必须携带外形类型与 OS 公开模型 URL。
+
+    参数：无。返回：无。断言：资源树类别进入 ``rendering.kind``，
+    工作区编译结果进入 ``rendering.model``，且路径不使用
+    ``local_bridge``。异常：任一投影丢失时测试失败。
+    """
+
+    # ``public_model`` 是浏览器只能通过 OS HTTP 读取的模型快照。
+    public_model = {
+        "path": "/api/v1/material-models/szlab/device.xacro",
+        "format": "xacro",
+        "meshDir": "/api/v1/material-models/szlab/models",
+        "macro": "m2b_mount",
+    }
+    store = InventoryStore(":memory:")
+    try:
+        _bootstrap(
+            store,
+            _ResourceTree(),
+            material_rendering_by_template={"m2b_mount": public_model},
+        )
+        graph = BackendResourceService(store).material_graph()
+    finally:
+        store.close()
+
+    rendering = graph["nodes"][0]["material"]["config"]["rendering"]
+    assert rendering == {"kind": "stacker", "model": public_model}
+    assert "local_bridge" not in rendering["model"]["path"]
 
 
 def test_config_sites_project_ordered_occupied_inventory_sites() -> None:

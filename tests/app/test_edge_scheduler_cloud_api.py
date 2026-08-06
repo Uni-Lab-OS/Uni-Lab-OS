@@ -8,6 +8,8 @@ import time
 from queue import Queue
 from typing import Any, Dict, List
 
+import pytest
+
 from unilabos.app.scheduler import integration
 from unilabos.app.scheduler.dispatch import RecordingDispatcher
 from unilabos.app.scheduler.service import EdgeScheduler
@@ -162,6 +164,44 @@ class TestIntegrationWiring:
         first_read[0]["id"] = "tampered"
 
         assert integration.get_material_shapes() == list(material_shapes)
+
+    def test_inventory_composition_retains_public_material_model_catalog(
+        self,
+        tmp_path,
+    ) -> None:
+        """库存组合根必须保留 OS 公开物料模型目录的启动代际。
+
+        参数：``tmp_path`` 提供隔离的库存数据库。返回：无；断言 Web
+        组合只能取回同一目录对象，不允许在库存启动后换代。异常：目录
+        丢失或换代未关闭式失败时测试失败。
+        """
+
+        class _ModelCatalog:
+            """表示已限定 OS 公开路由的模型目录启动代际。"""
+
+            def __init__(self) -> None:
+                """创建单模板快照。参数：无。返回：无。异常：无。"""
+
+                # ``models_by_template`` 只含 OS HTTP 公开路径，不含 local_bridge。
+                self.models_by_template = {
+                    "m2b_mount": {
+                        "path": "/api/v1/material-models/szlab/device.xacro",
+                        "format": "xacro",
+                    }
+                }
+
+        model_catalog = _ModelCatalog()
+        integration.setup_edge_inventory(
+            str(tmp_path / "host-material.db"),
+            material_model_catalog=model_catalog,
+        )
+
+        assert integration.get_material_model_catalog() is model_catalog
+        with pytest.raises(RuntimeError, match="物料模型目录代际"):
+            integration.setup_edge_inventory(
+                str(tmp_path / "host-material.db"),
+                material_model_catalog=_ModelCatalog(),
+            )
 
     def test_setup_injects_scheduler_and_reports_state(self, tmp_path):
         """缺少设备动作目录时应在派发前失败，并上报工作流终态。

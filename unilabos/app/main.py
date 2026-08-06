@@ -1465,12 +1465,21 @@ def main():
         complete_registry=complete_registry,
         external_only=external_only,
     )
-    # 工作区外形只从注册表（Registry）已发现的装饰器绑定编译；不做第二次目录发现。
+    # 工作区外形与 3D 模型只从注册表（Registry）已发现的装饰器绑定编译。
     workspace_material_shapes = ()
+    workspace_material_models = None
     if workspace_startup_plan is not None:
-        from unilabos.package_manager import compile_workspace_material_shapes
+        from unilabos.package_manager import (
+            compile_workspace_material_models,
+            compile_workspace_material_shapes,
+        )
 
         workspace_material_shapes = compile_workspace_material_shapes(
+            workspace_startup_plan,
+            lab_registry,
+        )
+        # ``workspace_material_models`` 只发布 OS 公开 HTTP URL，不向前端暴露本地路径。
+        workspace_material_models = compile_workspace_material_models(
             workspace_startup_plan,
             lab_registry,
         )
@@ -1707,6 +1716,7 @@ def main():
                     else ""
                 ),
                 material_shapes=workspace_material_shapes,
+                material_model_catalog=workspace_material_models,
             )
             print_status(
                 f"Host Edge 物料服务已启用 (SQLite WAL: {inventory_db})",
