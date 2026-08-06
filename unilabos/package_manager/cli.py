@@ -16,17 +16,17 @@ import tomllib
 from .catalog import PackageCatalog, PackageCompileError
 from .community import RequestsCommunityDownloadAdapter
 from .compiler import compile_package_source
-from .distribution import (
-    BuildArtifact,
-    PackageDistributionError,
-    build_workspace_wheel,
-)
 from .device_package import download_device_package
 from .device_provisioning import (
     remove_device_instance,
     restore_device_graph,
     stage_device_instance,
     update_device_instance,
+)
+from .distribution import (
+    BuildArtifact,
+    PackageDistributionError,
+    build_workspace_wheel,
 )
 from .publication import HttpClientPublicationAdapter, publish_build
 from .sources import InstalledDistributionSource, WorkspaceSource
@@ -124,6 +124,14 @@ def register_package_subcommands(subparsers: Any) -> None:
         help="Validate a cached device package and atomically add one Graph instance",
     )
     _add_device_instance_arguments(add_device, require_instance_uuid=False)
+    add_device.add_argument(
+        "--adopt-existing",
+        action="store_true",
+        help=(
+            "Explicitly assign the requested UUID to a same-definition legacy "
+            "Graph instance whose UUID is empty"
+        ),
+    )
 
     update_device = actions.add_parser(
         "update-device",
@@ -309,7 +317,9 @@ def run_package_command(
             try:
                 payload = json.load(configuration_input)
             except (OSError, json.JSONDecodeError) as exc:
-                raise PackageCommandError(f"设备配置 stdin 不是合法 JSON: {exc}") from exc
+                raise PackageCommandError(
+                    f"设备配置 stdin 不是合法 JSON: {exc}"
+                ) from exc
             if not isinstance(payload, dict):
                 raise PackageCommandError("设备配置 stdin 根必须是 JSON object")
             display_name = str(payload.get("display_name") or "")
@@ -325,9 +335,7 @@ def run_package_command(
                 "definition_fqid": str(args.get("definition_fqid") or ""),
                 "instance_id": str(args.get("instance_id") or ""),
                 "instance_uuid": (
-                    str(args["instance_uuid"])
-                    if args.get("instance_uuid")
-                    else None
+                    str(args["instance_uuid"]) if args.get("instance_uuid") else None
                 ),
                 "display_name": display_name,
                 "configuration": configuration,
@@ -335,7 +343,10 @@ def run_package_command(
             result = (
                 update_device_instance(**common)
                 if action == "update-device"
-                else stage_device_instance(**common)
+                else stage_device_instance(
+                    **common,
+                    adopt_existing=bool(args.get("adopt_existing")),
+                )
             )
             _write_graph_mutation_result(result, output, args)
             return result
@@ -344,9 +355,7 @@ def run_package_command(
                 graph_path=str(args.get("graph") or ""),
                 instance_id=str(args.get("instance_id") or ""),
                 instance_uuid=(
-                    str(args["instance_uuid"])
-                    if args.get("instance_uuid")
-                    else None
+                    str(args["instance_uuid"]) if args.get("instance_uuid") else None
                 ),
             )
             _write_graph_mutation_result(result, output, args)
