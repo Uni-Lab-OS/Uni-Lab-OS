@@ -178,6 +178,34 @@ class TestResourceLock:
         assert result["dispatched"] == []
         assert dispatcher.dispatched == []
 
+    def test_malformed_external_action_keys_are_not_promoted_to_device_keys(self):
+        """证明只有严格动作键形状才会提升为设备级内存互斥键。
+
+        参数：无；测试注入多段路径、空设备和空动作等非规范外部键。
+        返回：无；断言这些键被原样保留但不会误阻塞合法设备动作。
+        异常：若宽松路径解析把无关外部事实提升为设备互斥，断言失败。
+        """
+        # 非规范键覆盖多余层级、空设备和空动作，均不得推导设备身份。
+        malformed_external_keys = {
+            "/devices/shared/run/status",
+            "/devices//run",
+            "/devices/shared/",
+        }
+        dispatcher = RecordingDispatcher()
+        scheduler = EdgeScheduler(
+            dispatcher=dispatcher,
+            external_busy_keys=malformed_external_keys,
+        )
+        result = scheduler.submit_workflow(
+            WorkflowSpec(
+                workflow_id="wf-malformed-external-key",
+                nodes=[_node("inspect-node", device="shared", action="inspect")],
+            )
+        )
+
+        assert len(result["dispatched"]) == 1
+        assert [item["action"] for item in dispatcher.dispatched] == ["inspect"]
+
     def test_completion_releases_device_for_only_one_waiting_action(self):
         """证明设备完成一个作业后，同轮准入只放行一个等待中的不同动作。
 

@@ -76,6 +76,32 @@ from unilabos.utils.tracing import (
 logger = logging.getLogger(__name__)
 
 
+def _device_key_from_strict_action_key(action_key: Any) -> str | None:
+    """从严格动作级忙碌键提取设备级内存互斥键。
+
+    参数：``action_key`` 是外部忙碌提供者返回的候选键。
+    返回：仅当输入严格符合 ``/devices/{device_id}/{action_name}`` 且设备、动作
+    均非空时返回 ``/devices/{device_id}``；其他输入返回 ``None``。
+    异常：不主动抛出异常；非字符串和歧义路径一律不解析，避免误扩大互斥范围。
+
+    该转换只桥接既有动作级内存事实，不产生持久作业执行占用
+    （JobExecutionClaim）或栅栏（Fence）。
+    """
+
+    if not isinstance(action_key, str):
+        return None
+    path_parts = action_key.split("/")
+    if (
+        len(path_parts) != 4
+        or path_parts[0] != ""
+        or path_parts[1] != "devices"
+        or not path_parts[2]
+        or not path_parts[3]
+    ):
+        return None
+    return f"/devices/{path_parts[2]}"
+
+
 class EdgeScheduler:
     def __init__(
         self,
@@ -1030,6 +1056,12 @@ class EdgeScheduler:
                 busy |= set(self._busy_key_provider())
             except Exception:  # noqa: BLE001 - 锁视图失败时退化为 inflight 视图
                 logger.exception("[EdgeScheduler] busy_key_provider failed")
+        # 外部执行层仍使用动作级忙碌键；保留原键用于既有协议，同时把严格
+        # 形状稳定提升为设备键，使取消后的物理在途作业继续阻塞同设备其他动作。
+        for external_action_key in tuple(busy):
+            device_key = _device_key_from_strict_action_key(external_action_key)
+            if device_key is not None:
+                busy.add(device_key)
         for job in self._inflight.values():
             # 由在途作业身份回到其工作流节点，只为识别不占设备的人工确认节点。
             run = self._workflows.get(job.workflow_id)
