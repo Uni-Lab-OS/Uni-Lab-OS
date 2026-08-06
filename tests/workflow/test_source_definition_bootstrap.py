@@ -200,6 +200,88 @@ def test_bootstrapped_definition_replays_without_changing_any_persisted_fact(
     assert after_authoring["update_time"] == before_authoring["update_time"]
 
 
+@pytest.mark.parametrize(
+    "package_root",
+    (
+        r"C:\workspace\alpha_lab",
+        r"\\server\share\alpha_lab",
+    ),
+    ids=("windows-drive", "windows-unc"),
+)
+def test_canonical_windows_package_roots_install_and_replay_verbatim(
+    tmp_path: Path,
+    package_root: str,
+) -> None:
+    """规范 Windows 包根应安装、原值持久化并在重启后幂等重放。
+
+    参数：``tmp_path`` 提供真实 SQLite 文件；``package_root`` 分别覆盖驱动器与
+    UNC 绝对路径。返回：无；两次安装必须复用同一来源身份且不改写路径字符串。
+    """
+
+    database_path = tmp_path / "workflow_history.db"
+    registration = _registration(package_root=package_root)
+    first = WorkflowStore(database_path)
+    try:
+        first.install_discovered_sources((registration,))
+        before = first.get_source_registration(WORKFLOW_A_UUID)
+    finally:
+        first.close()
+
+    reopened = WorkflowStore(database_path)
+    try:
+        installed = reopened.install_discovered_sources((registration,))
+        after = reopened.get_source_registration(WORKFLOW_A_UUID)
+    finally:
+        reopened.close()
+
+    assert before["package_root"] == package_root
+    assert after == before
+    assert installed == [after]
+
+
+@pytest.mark.parametrize(
+    "package_root",
+    (
+        r"C:workspace\alpha_lab",
+        r"C:\workspace\alpha_lab\..\other",
+        r"C:\workspace/alpha_lab",
+        r"\workspace\alpha_lab",
+        "C:\\",
+        r"\\server\share",
+        "C:\\workspace\\alpha_lab\\",
+        r"\\?\C:\workspace\alpha_lab",
+        r"\\.\C:\workspace\alpha_lab",
+        r"C:\workspace\alpha_lab:stream",
+        "C:\\workspace\\alpha_lab.",
+    ),
+    ids=(
+        "drive-relative",
+        "parent-traversal",
+        "mixed-separators",
+        "root-without-drive",
+        "drive-root",
+        "unc-share-root",
+        "trailing-separator-alias",
+        "extended-device-namespace",
+        "device-namespace",
+        "alternate-data-stream",
+        "trailing-dot-alias",
+    ),
+)
+def test_noncanonical_windows_package_roots_are_rejected_without_writes(
+    workflow_store: WorkflowStore,
+    package_root: str,
+) -> None:
+    """Windows 相对路径、穿越、根目录与需改写别名必须关闭式拒绝。"""
+
+    with pytest.raises(StoreConflict):
+        workflow_store.install_discovered_sources(
+            (_registration(package_root=package_root),)
+        )
+
+    _assert_absent(workflow_store, WORKFLOW_A_UUID)
+
+
 def test_discovered_install_rejects_all_c0_and_del_path_characters_without_writes(
     workflow_store: WorkflowStore,
 ) -> None:

@@ -5,7 +5,7 @@ from __future__ import annotations
 import re
 import sqlite3
 from collections.abc import Callable, Iterable, Mapping
-from pathlib import PurePosixPath
+from pathlib import PurePosixPath, PureWindowsPath
 from typing import Any
 
 from unilabos.workflow.json_codec import encode_json
@@ -137,22 +137,45 @@ def _normalize_registrations(
 
 
 def _validate_package_root(package_root: str) -> None:
-    """验证持久包根是规范绝对 POSIX 路径。
+    """验证持久包根是规范 POSIX 或 Windows 绝对路径。
 
     参数：``package_root`` 是工作流源码（Workflow Source）的包目录身份。返回：合法
-    时无返回值。异常：相对路径、控制字符、父级穿越或需规范化改写时抛出
-    ``SourceBootstrapConflict``；本函数只验证身份形状，不授予文件系统权限。
+    时无返回值。异常：相对路径、控制字符、父级穿越、文件系统根、Windows 设备命名
+    空间或需规范化改写时抛出 ``SourceBootstrapConflict``；本函数只验证身份形状，
+    不授予文件系统权限。
     """
 
-    # ``root_path`` 只用于纯词法验证，不访问或解析真实文件系统。
-    root_path = PurePosixPath(package_root)
-    if (
-        _contains_path_control_character(package_root)
-        or "\\" in package_root
-        or not root_path.is_absolute()
-        or package_root != root_path.as_posix()
-        or ".." in root_path.parts
-        or len(root_path.parts) < 2
+    # 两种 ``PurePath`` 都只做词法验证；实际目录授权仍由源码发现阶段固定。
+    posix_path = PurePosixPath(package_root)
+    windows_path = PureWindowsPath(package_root)
+    canonical_posix = (
+        "\\" not in package_root
+        and posix_path.is_absolute()
+        and package_root == posix_path.as_posix()
+        and ".." not in posix_path.parts
+        and len(posix_path.parts) >= 2
+    )
+    windows_drive = windows_path.drive
+    canonical_windows_drive = re.fullmatch(r"[A-Za-z]:", windows_drive) is not None
+    canonical_windows_unc = windows_drive.startswith(
+        "\\\\"
+    ) and not windows_drive.startswith(("\\\\?\\", "\\\\.\\"))
+    canonical_windows_components = all(
+        not any(character in '<>:"|?*' for character in component)
+        and not component.endswith((" ", "."))
+        for component in windows_path.parts[1:]
+    )
+    canonical_windows = (
+        "/" not in package_root
+        and windows_path.is_absolute()
+        and package_root == str(windows_path)
+        and ".." not in windows_path.parts
+        and len(windows_path.parts) >= 2
+        and (canonical_windows_drive or canonical_windows_unc)
+        and canonical_windows_components
+    )
+    if _contains_path_control_character(package_root) or not (
+        canonical_posix or canonical_windows
     ):
         raise SourceBootstrapConflict("可编辑包根目录身份无效")
 

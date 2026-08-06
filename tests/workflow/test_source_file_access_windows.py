@@ -29,6 +29,7 @@ def test_windows_regular_file_read_uses_binary_mode(
     expected = b"package:\r\n  name: portable_lab\r\n"
     source_path.write_bytes(expected)
     binary_flag = 1 << 29
+    host_binary_flag = getattr(os, "O_BINARY", 0)
     original_open = os.open
     original_read = os.read
     text_descriptors: set[int] = set()
@@ -46,7 +47,7 @@ def test_windows_regular_file_read_uses_binary_mode(
         observed_flags.append(flags)
         descriptor = original_open(
             path,
-            flags & ~binary_flag,
+            (flags & ~binary_flag) | host_binary_flag,
             mode,
             dir_fd=dir_fd,
         )
