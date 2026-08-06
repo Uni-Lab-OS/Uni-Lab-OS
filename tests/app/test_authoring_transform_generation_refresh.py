@@ -11,6 +11,7 @@ import pytest
 from fastapi.testclient import TestClient
 
 from tests.app.test_authoring_transform_api import (
+    CATALOG_UNAVAILABLE,
     RecordingTransformEngine,
     _assert_success,
     _generate_body,
@@ -21,6 +22,11 @@ from unilabos.workflow.models import CandidateCompilation
 
 GENERATION_A_FINGERPRINT = "sha256:" + "a" * 64
 GENERATION_B_FINGERPRINT = "sha256:" + "b" * 64
+AUTHORING_TRANSFORM_PATHS = {
+    "/api/v1/authoring/compile",
+    "/api/v1/authoring/generate-python",
+    "/api/v1/authoring/validate",
+}
 
 
 class _GenerationTransformEngine(RecordingTransformEngine):
@@ -77,6 +83,110 @@ def _reload_server() -> Any:
     return importlib.reload(importlib.import_module("unilabos.app.web.server"))
 
 
+def _setup_product_app(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    workflow_service: Any,
+) -> Any:
+    """用指定工作流服务（WorkflowService）装配真实产品 Web 应用。
+
+    参数：``tmp_path`` 提供隔离工作目录；``monkeypatch`` 注入产品组合接缝；
+    ``workflow_service`` 是本用例要观察的身份稳定服务。返回：已完成产品路由
+    装配的 FastAPI 应用；库存权威（Inventory Authority）与调度器（Scheduler）
+    在本测试中均明确缺席。
+    """
+
+    monkeypatch.setattr(BasicConfig, "working_dir", str(tmp_path / "runtime"))
+    monkeypatch.setattr(BasicConfig, "workflow_editable_package_roots", ())
+    scheduler_integration = importlib.import_module(
+        "unilabos.app.scheduler.integration"
+    )
+
+    def no_inventory_service() -> None:
+        """返回缺席的本地库存权威（Inventory Authority）。"""
+
+        return
+
+    def no_edge_scheduler() -> None:
+        """返回缺席的本地调度器（Scheduler）。"""
+
+        return
+
+    def compose_runtime(
+        _working_dir: str,
+        *,
+        editable_package_roots: tuple[str, ...],
+    ) -> Any:
+        """返回测试指定的工作流服务（WorkflowService）。
+
+        参数：``_working_dir`` 是产品工作目录；``editable_package_roots`` 是显式
+        可编辑包授权。返回：调用方提供且可推进编译器代际的同一服务对象。
+        """
+
+        assert editable_package_roots == ()
+        return workflow_service
+
+    monkeypatch.setattr(
+        scheduler_integration,
+        "get_inventory_service",
+        no_inventory_service,
+    )
+    monkeypatch.setattr(
+        scheduler_integration,
+        "get_edge_scheduler",
+        no_edge_scheduler,
+    )
+    monkeypatch.setattr(composition, "compose_workflow_runtime", compose_runtime)
+    return _reload_server().setup_server()
+
+
+def test_product_does_not_mount_authoring_transforms_without_compiler(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """缺少编译器时必须保持基线产品路由形状。
+
+    参数：``tmp_path`` 提供隔离工作目录；``monkeypatch`` 注入没有编译器的
+    工作流服务（WorkflowService）。返回：无；断言三个可信工作流创作转换
+    （Trusted Authoring Transform）路径均不进入公开 OpenAPI，等价于未挂载。
+    """
+
+    app = _setup_product_app(
+        tmp_path,
+        monkeypatch,
+        SimpleNamespace(compiler=None),
+    )
+
+    assert AUTHORING_TRANSFORM_PATHS.isdisjoint(app.openapi()["paths"])
+
+
+def test_installed_authoring_transform_maps_lost_compiler_to_catalog_unavailable(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """路由安装后编译器被撤销时必须返回目录不可用信封。
+
+    参数：``tmp_path`` 提供隔离工作目录；``monkeypatch`` 注入可在请求前撤销
+    编译器的工作流服务（WorkflowService）。返回：无；断言后端信封
+    （Backend Envelope）稳定为 ``code=5001``，不得退化为内部错误。
+    """
+
+    workflow_service = SimpleNamespace(
+        compiler=_GenerationTransformEngine(fingerprint=GENERATION_A_FINGERPRINT)
+    )
+    app = _setup_product_app(tmp_path, monkeypatch, workflow_service)
+    workflow_service.compiler = None
+
+    with TestClient(app) as client:
+        response = client.post(
+            "/api/v1/authoring/generate-python",
+            json=_generate_body(),
+        )
+
+    assert response.status_code == 200
+    assert response.json() == CATALOG_UNAVAILABLE
+
+
 def test_installed_authoring_transform_observes_rebuilt_compiler_generation(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
@@ -94,51 +204,7 @@ def test_installed_authoring_transform_observes_rebuilt_compiler_generation(
     generation_a = _GenerationTransformEngine(fingerprint=GENERATION_A_FINGERPRINT)
     generation_b = _GenerationTransformEngine(fingerprint=GENERATION_B_FINGERPRINT)
     workflow_service = SimpleNamespace(compiler=generation_a)
-    monkeypatch.setattr(BasicConfig, "working_dir", str(tmp_path / "runtime"))
-    monkeypatch.setattr(BasicConfig, "workflow_editable_package_roots", ())
-
-    scheduler_integration = importlib.import_module(
-        "unilabos.app.scheduler.integration"
-    )
-
-    def no_inventory_service() -> None:
-        """表示本测试不装配本地库存权威（Inventory Authority）。"""
-
-        return
-
-    def no_edge_scheduler() -> None:
-        """表示本测试不装配本地调度器（Scheduler）。"""
-
-        return
-
-    def compose_runtime(
-        _working_dir: str,
-        *,
-        editable_package_roots: tuple[str, ...],
-    ) -> Any:
-        """返回身份稳定但编译器代际可推进的工作流服务。
-
-        参数说明：``_working_dir`` 是产品工作目录；
-        ``editable_package_roots`` 是显式可编辑包授权。返回：同一服务对象，
-        其 ``compiler`` 可在路由安装后由应用操作推进。
-        """
-
-        assert editable_package_roots == ()
-        return workflow_service
-
-    monkeypatch.setattr(
-        scheduler_integration,
-        "get_inventory_service",
-        no_inventory_service,
-    )
-    monkeypatch.setattr(
-        scheduler_integration,
-        "get_edge_scheduler",
-        no_edge_scheduler,
-    )
-    monkeypatch.setattr(composition, "compose_workflow_runtime", compose_runtime)
-
-    app = _reload_server().setup_server()
+    app = _setup_product_app(tmp_path, monkeypatch, workflow_service)
     with TestClient(app) as client:
         first = client.post(
             "/api/v1/authoring/generate-python",
