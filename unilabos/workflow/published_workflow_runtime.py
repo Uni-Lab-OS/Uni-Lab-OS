@@ -61,9 +61,7 @@ def build_published_workflow_generation(
                 f"活动工作流来源 {index} 字段不完整"
             ) from None
         try:
-            snapshot = snapshot_provider.get_published_workflow_snapshot(
-                workflow_uuid
-            )
+            snapshot = snapshot_provider.get_published_workflow_snapshot(workflow_uuid)
         except LookupError:
             # 活动来源指向缺失/软删除定义时不能被猜成发布合同；启动目录保持关闭。
             continue
@@ -107,9 +105,7 @@ def build_published_workflow_generation(
         except PublishedWorkflowContractError as error:
             raise PublishedWorkflowGenerationError(error.code) from error
         if projected is None:
-            raise PublishedWorkflowGenerationError(
-                "发布资格在同一目录构造期间发生漂移"
-            )
+            raise PublishedWorkflowGenerationError("发布资格在同一目录构造期间发生漂移")
         nodes.append(projected.template)
         handles.extend(projected.handles)
     return PublishedWorkflowGeneration(
@@ -150,7 +146,9 @@ def _authoring_symbol(workflow: Mapping[str, Any]) -> str:
 
     meta_data = workflow.get("meta_data")
     unilab = meta_data.get("unilab") if isinstance(meta_data, Mapping) else None
-    symbol = unilab.get("authoring_function_name") if isinstance(unilab, Mapping) else None
+    symbol = (
+        unilab.get("authoring_function_name") if isinstance(unilab, Mapping) else None
+    )
     if not isinstance(symbol, str) or not symbol.isidentifier():
         raise PublishedWorkflowGenerationError("已应用工作流缺少作者函数符号")
     return symbol
@@ -159,12 +157,20 @@ def _authoring_symbol(workflow: Mapping[str, Any]) -> str:
 def _source_module(package_id: str, relative_path: str) -> str:
     """把已授权包身份和规范相对路径转换为绝对 Python 模块。
 
-    参数：包 ID 与 ``workflows/*.py`` 相对路径来自来源注册。返回：不导入模块的
-    静态点分身份。异常：任一分段不是 Python 标识符时抛出发布代际错误。
+    参数：包 ID 与源码相对路径来自来源注册；路径既可相对包根，也可包含与
+    包 ID 精确相等的首段。返回：包根恰好出现一次且不导入模块的静态点分身份。
+    异常：任一分段不是 Python 标识符时抛出发布代际错误；只按完整首段去重，
+    不对前缀相似的包名做模糊裁剪。
     """
 
+    # ``path`` 是来源注册交付的 POSIX 源码身份，不访问本地文件系统。
     path = PurePosixPath(relative_path)
-    parts = (package_id, *path.with_suffix("").parts)
+    # ``relative_parts`` 去除扩展名后只消除精确重复的包根，保留真实子包层级。
+    relative_parts = path.with_suffix("").parts
+    if relative_parts[:1] == (package_id,):
+        relative_parts = relative_parts[1:]
+    # ``parts`` 是最终绝对 Python 模块的有序身份分段。
+    parts = (package_id, *relative_parts)
     if any(not part.isidentifier() for part in parts):
         raise PublishedWorkflowGenerationError("工作流来源不能转换为绝对模块")
     return ".".join(parts)
@@ -184,9 +190,7 @@ def _host_summary(
         meta_data = template.get("meta_data")
         unilab = meta_data.get("unilab") if isinstance(meta_data, Mapping) else None
         summary = (
-            unilab.get("resource_template")
-            if isinstance(unilab, Mapping)
-            else None
+            unilab.get("resource_template") if isinstance(unilab, Mapping) else None
         )
         if isinstance(summary, Mapping) and summary.get("name") == "host_node":
             candidate = {
