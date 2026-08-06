@@ -6,7 +6,6 @@ import os
 from collections.abc import Callable
 from pathlib import Path
 
-from ..catalog_source import PackageCatalogSource
 from ..package_catalog import (
     PackageCatalog,
     WorkspaceSource,
@@ -17,6 +16,7 @@ from .models import (
     LockedPackage,
     PackageDependencyError,
     PackageDependencyLock,
+    ResolvedPackageSource,
 )
 from .transaction import (
     publish_dependency_state,
@@ -283,12 +283,12 @@ def load_locked_package_sources(
     workspace: str | Path,
     *,
     compile_catalog: CatalogCompiler,
-) -> tuple[PackageCatalogSource, ...]:
+) -> tuple[ResolvedPackageSource, ...]:
     """一次编译并返回显式锁定外部包的来源/目录配对。
 
     参数：``workspace`` 是主工作区根；``compile_catalog`` 是显式目录编译器；
     只读取成对依赖声明与锁定的 workspace 来源，绝不发现 ambient site-packages。
-    返回：按包命名空间稳定排序、摘要与锁完全一致的 ``PackageCatalogSource``
+    返回：按包命名空间稳定排序、摘要与锁完全一致的 ``ResolvedPackageSource``
     元组；主包不在结果中，由完整候选代组合者复用其已有编译结果。
     异常：声明、锁、来源、摘要或静态编译无效时抛出
     ``PackageDependencyError``，不返回部分集合；本函数不重复编译主包。
@@ -299,7 +299,7 @@ def load_locked_package_sources(
     # ``dependency_lock`` 是本次加载唯一授权的完整外部包代际；声明仅用于成对校验。
     _declarations, dependency_lock = load_dependency_state(workspace_source.root)
     # ``package_sources`` 让后续有限运行激活不必从目录字段反推物理路径。
-    package_sources: list[PackageCatalogSource] = []
+    package_sources: list[ResolvedPackageSource] = []
     for entry in dependency_lock.packages:
         # ``source_path`` 是条目的安全绝对来源；相对身份已由锁校验，不再另行使用。
         source_path, _portable_source = resolve_dependency_source(
@@ -314,7 +314,7 @@ def load_locked_package_sources(
             compile_catalog=compile_catalog,
         )
         package_sources.append(
-            PackageCatalogSource(
+            ResolvedPackageSource(
                 source=WorkspaceSource(source_path),
                 catalog=catalog,
             )
@@ -480,7 +480,7 @@ def catalog_namespace(catalog: PackageCatalog) -> str:
     return catalog.namespace
 
 
-def package_source_namespace(package: PackageCatalogSource) -> str:
+def package_source_namespace(package: ResolvedPackageSource) -> str:
     """读取外部包来源/目录配对的社区命名空间排序键。
 
     参数：``package`` 是完成锁复核的来源与目录配对。

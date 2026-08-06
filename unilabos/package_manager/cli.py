@@ -7,10 +7,59 @@ from typing import Any
 
 from unilabos.utils.banner_print import print_status
 
-from .errors import PackageCLIError
-from .inspection import inspect_package
-from .package_distribution import PackageDependencyManager, upload_package
+from .package_distribution import PackageDependencyManager
+from .package_distribution.adapters.cloud import upload_package as _upload_package
+from .package_distribution.errors import PackageCLIError
+from .package_distribution.inspection import inspect_package as _inspect_package
 from .workspace_runtime.discovery import compile_package_source
+
+
+def inspect_package(
+    path: str,
+    namespace: str | None = None,
+    out_dir: str | None = None,
+) -> dict[str, Any]:
+    """用产品统一编译器检查并归档一个软件包。
+
+    参数：``path`` 是软件包根；``namespace`` 是仅供遗留包使用的类命名空间；
+    ``out_dir`` 是可选产物目录。
+    返回：包含规范包目录（PackageCatalog）摘要、遗留 DTO 和归档路径的结果。
+    异常：路径、静态编译、归档或遗留投影失败时保持 ``PackageCLIError`` 和既有
+    文件系统异常语义；不执行作者驱动代码。
+    """
+
+    return _inspect_package(
+        path,
+        namespace=namespace,
+        out_dir=out_dir,
+        compile_catalog=compile_package_source,
+    )
+
+
+def upload_package(
+    path: str,
+    http_client: Any,
+    namespace: str | None = None,
+    out_dir: str | None = None,
+    download_url: str = "",
+) -> dict[str, Any]:
+    """检查软件包并通过云端 Adapter 发布既有兼容投影。
+
+    参数：``path`` 是软件包根；``http_client`` 是鉴权 HTTP Adapter；
+    ``namespace`` 仅供遗留包使用；``out_dir`` 是产物目录；``download_url`` 是
+    可选显式归档地址。
+    返回：云端发布结果。
+    异常：检查、鉴权、上传或云端拒绝时保留既有 ``PackageCLIError``/传输异常语义。
+    """
+
+    return _upload_package(
+        path,
+        http_client,
+        namespace=namespace,
+        out_dir=out_dir,
+        download_url=download_url,
+        package_inspector=inspect_package,
+    )
 
 
 def register_package_subcommands(subparsers: Any) -> None:
@@ -185,4 +234,10 @@ def cmd_package(args_dict: dict[str, Any], http_client: Any = None) -> None:
     raise PackageCLIError(f"未知 package 子动作：{action}")
 
 
-__all__ = ["PackageCLIError", "cmd_package", "register_package_subcommands"]
+__all__ = [
+    "PackageCLIError",
+    "cmd_package",
+    "inspect_package",
+    "register_package_subcommands",
+    "upload_package",
+]

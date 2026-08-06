@@ -1,4 +1,4 @@
-"""软件包项目元数据的唯一静态解析入口。"""
+"""包目录（PackageCatalog）使用的软件包项目声明唯一解析器。"""
 
 from __future__ import annotations
 
@@ -182,12 +182,10 @@ def _parse_startup_defaults(
             not isinstance(startup_app_bridges_value, list)
             or not startup_app_bridges_value
             or any(
-                not isinstance(bridge, str)
-                or bridge not in {"websocket", "fastapi"}
+                not isinstance(bridge, str) or bridge not in {"websocket", "fastapi"}
                 for bridge in startup_app_bridges_value
             )
-            or len(set(startup_app_bridges_value))
-            != len(startup_app_bridges_value)
+            or len(set(startup_app_bridges_value)) != len(startup_app_bridges_value)
         ):
             raise ValueError("工作区启动 app_bridges 必须是非空且不重复的已知集合")
         startup_app_bridges = tuple(startup_app_bridges_value)

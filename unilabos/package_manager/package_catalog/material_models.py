@@ -8,10 +8,20 @@ from collections.abc import Mapping
 from dataclasses import dataclass
 from pathlib import Path, PurePosixPath
 from types import MappingProxyType
-from typing import Any
+from typing import Any, Protocol
 from urllib.parse import quote
 
-from .workspace_runtime.discovery import WorkspaceStartupPlan
+from .sources import WorkspaceSource
+
+
+class WorkspaceMaterialPlan(Protocol):
+    """物料（Material）资产编译所需的工作区只读 Interface。"""
+
+    source: WorkspaceSource
+    distribution_name: str
+    import_package: str
+    package_directory: Path
+
 
 _MODEL_MEDIA_TYPES = {
     ".dae": "model/vnd.collada+xml",
@@ -43,7 +53,7 @@ class WorkspaceMaterialModelAsset:
 class WorkspaceMaterialModelCatalog:
     """固定工作区来源、模型绑定和可读取模型目录的启动代际。"""
 
-    startup_plan: WorkspaceStartupPlan
+    startup_plan: WorkspaceMaterialPlan
     models_by_template: Mapping[str, Mapping[str, Any]]
     allowed_model_roots: tuple[PurePosixPath, ...]
 
@@ -99,7 +109,7 @@ class WorkspaceMaterialModelCatalog:
 
 
 def compile_workspace_material_models(
-    startup_plan: WorkspaceStartupPlan,
+    startup_plan: WorkspaceMaterialPlan,
     registry: Any,
 ) -> WorkspaceMaterialModelCatalog:
     """编译工作区装饰器声明的 3D 模型绑定与公共资产授权根。
@@ -109,8 +119,7 @@ def compile_workspace_material_models(
     异常：声明路径、模型格式、入口、重复身份或 JSON 字段无效时关闭式失败。
     """
 
-    if not isinstance(startup_plan, WorkspaceStartupPlan):
-        raise TypeError("startup_plan 必须是 WorkspaceStartupPlan")
+    _validate_workspace_material_plan(startup_plan)
     try:
         # ``definitions`` 只能来自注册表（Registry）已经完成的唯一静态扫描。
         definitions = (
@@ -175,7 +184,7 @@ def compile_workspace_material_models(
 
 
 def _workspace_declaration_file(
-    startup_plan: WorkspaceStartupPlan,
+    startup_plan: WorkspaceMaterialPlan,
     definition: Mapping[str, Any],
 ) -> Path | None:
     """取得当前工作区内的装饰器声明文件。
@@ -201,7 +210,7 @@ def _workspace_declaration_file(
 
 
 def _logical_model_path(
-    startup_plan: WorkspaceStartupPlan,
+    startup_plan: WorkspaceMaterialPlan,
     declaration_file: Path,
     entry: str,
 ) -> str:
@@ -230,7 +239,7 @@ def _logical_model_path(
 
 
 def _public_model_path(
-    startup_plan: WorkspaceStartupPlan,
+    startup_plan: WorkspaceMaterialPlan,
     logical_path: str,
 ) -> str:
     """生成当前发行包内模型资产的公共 HTTP 路径。
@@ -265,6 +274,27 @@ def _json_value(value: object, field: str) -> Any:
         )
     except (TypeError, ValueError) as error:
         raise ValueError(f"{field} 必须是严格 JSON 值") from error
+
+
+def _validate_workspace_material_plan(startup_plan: object) -> None:
+    """关闭式验证物料（Material）资产编译所需工作区计划形状。
+
+    参数：``startup_plan`` 是高层工作区运行时（Workspace Runtime）提供的计划。
+    返回：无；结构具备安全来源、发行身份、导入包和包目录时完成。
+    异常：缺少任一必需只读事实时抛出 ``TypeError``，不反向依赖具体运行时类。
+    """
+
+    # ``required_attributes`` 是低层物料（Material）资产编译使用的完整计划事实集。
+    required_attributes = (
+        "source",
+        "distribution_name",
+        "import_package",
+        "package_directory",
+    )
+    if not all(hasattr(startup_plan, name) for name in required_attributes):
+        raise TypeError("startup_plan 必须提供工作区物料编译计划 Interface")
+    if not isinstance(startup_plan.source, WorkspaceSource):
+        raise TypeError("startup_plan.source 必须是 WorkspaceSource")
 
 
 __all__ = [

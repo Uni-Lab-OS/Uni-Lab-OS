@@ -13,7 +13,9 @@ from unilabos.registry.ast_registry_scanner import scan_directory
 from unilabos.utils import logger
 from unilabos.utils.banner_print import print_status
 
-from ...errors import PackageCLIError
+from ..archive import ARCHIVE_EXCLUDE_DIRS
+from ..errors import PackageCLIError
+from ..registry_discovery import read_pyproject
 
 
 def install_package(spec: str, run_inspect: bool = True) -> dict[str, object]:
@@ -148,9 +150,6 @@ def _local_dist_name(spec: str) -> str:
     # ``package_root`` 是读取 pyproject.toml 所需的软件包目录。
     package_root = selected_path if selected_path.is_dir() else selected_path.parent
     try:
-        # 函数内导入只打破初始化环；项目元数据行为继续由既有检查入口单点拥有。
-        from ...inspection import read_pyproject
-
         return str(read_pyproject(package_root).get("name") or "").strip()
     except PackageCLIError:
         return ""
@@ -197,9 +196,6 @@ def _installed_device_ids(distribution_name: str) -> list[str]:
         top_modules = sorted(inferred_modules) or [distribution_name.replace("-", "_")]
 
     # ``scan_files`` 是已安装分发允许静态观察的 Python 文件。
-    # 函数内导入只延迟初始化；归档与安装后扫描继续共用同一忽略目录集合。
-    from ...inspection import ARCHIVE_EXCLUDE_DIRS
-
     scan_files: list[Path] = []
     for module_name in top_modules:
         try:

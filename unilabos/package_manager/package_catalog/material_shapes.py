@@ -7,12 +7,22 @@ import json
 import math
 from collections.abc import Iterable, Mapping
 from pathlib import Path, PurePosixPath
-from typing import Any
+from typing import Any, Protocol
 
 import yaml
 
-from .package_catalog import PackageCatalog, PackageDefinition, WorkspaceSource
-from .workspace_runtime.discovery import WorkspaceStartupPlan
+from .model import PackageCatalog, PackageDefinition
+from .sources import WorkspaceSource
+
+
+class WorkspaceMaterialPlan(Protocol):
+    """物料（Material）外形编译所需的工作区只读 Interface。"""
+
+    source: WorkspaceSource
+    distribution_name: str
+    import_package: str
+    package_directory: Path
+
 
 _PART_TYPES = frozenset(
     {"box", "slab", "cylinder", "lathe", "disc", "rect", "edge", "grid", "sites"}
@@ -112,7 +122,7 @@ def compile_catalog_material_shapes(
 
 
 def compile_workspace_material_shapes(
-    startup_plan: WorkspaceStartupPlan,
+    startup_plan: WorkspaceMaterialPlan,
     registry: Any,
 ) -> tuple[dict[str, Any], ...]:
     """编译工作区装饰器显式绑定的静态物料外形。
@@ -123,8 +133,7 @@ def compile_workspace_material_shapes(
     无效时抛出 ``TypeError``/``ValueError``，不返回部分目录。
     """
 
-    if not isinstance(startup_plan, WorkspaceStartupPlan):
-        raise TypeError("startup_plan 必须是 WorkspaceStartupPlan")
+    _validate_workspace_material_plan(startup_plan)
     try:
         # ``definitions`` 是注册表（Registry）一次静态扫描后的设备与资源定义全集。
         definitions = (
@@ -227,7 +236,7 @@ def _catalog_shape_path(
 
 
 def _workspace_declaration_file(
-    startup_plan: WorkspaceStartupPlan,
+    startup_plan: WorkspaceMaterialPlan,
     definition: Mapping[str, Any],
 ) -> Path | None:
     """取得属于当前工作区导入包的装饰器声明文件。
@@ -278,7 +287,7 @@ def _shape_binding(model: object) -> Mapping[str, Any] | None:
 
 
 def _logical_shape_path(
-    startup_plan: WorkspaceStartupPlan,
+    startup_plan: WorkspaceMaterialPlan,
     declaration_file: Path,
     binding: Mapping[str, Any],
 ) -> str:
@@ -310,7 +319,7 @@ def _logical_shape_path(
 
 
 def _load_public_shape(
-    startup_plan: WorkspaceStartupPlan,
+    startup_plan: WorkspaceMaterialPlan,
     logical_shape_path: str,
     *,
     bundle: str,
@@ -489,6 +498,27 @@ def _json_object(value: object, field: str) -> dict[str, Any]:
         )
     except (TypeError, ValueError) as error:
         raise ValueError(f"{field} 必须是严格 JSON 对象") from error
+
+
+def _validate_workspace_material_plan(startup_plan: object) -> None:
+    """关闭式验证物料（Material）外形编译所需工作区计划形状。
+
+    参数：``startup_plan`` 是高层工作区运行时（Workspace Runtime）提供的计划。
+    返回：无；结构具备安全来源、发行身份、导入包和包目录时完成。
+    异常：缺少任一必需只读事实时抛出 ``TypeError``，不反向依赖具体运行时类。
+    """
+
+    # ``required_attributes`` 是低层外形编译使用的完整工作区计划事实集。
+    required_attributes = (
+        "source",
+        "distribution_name",
+        "import_package",
+        "package_directory",
+    )
+    if not all(hasattr(startup_plan, name) for name in required_attributes):
+        raise TypeError("startup_plan 必须提供工作区物料编译计划 Interface")
+    if not isinstance(startup_plan.source, WorkspaceSource):
+        raise TypeError("startup_plan.source 必须是 WorkspaceSource")
 
 
 __all__ = [

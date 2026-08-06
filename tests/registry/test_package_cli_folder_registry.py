@@ -6,8 +6,8 @@
 
 from pathlib import Path
 
-from unilabos.package_manager.inspection import (
-    inspect_package,
+from unilabos.package_manager import inspect_package
+from unilabos.package_manager.package_distribution.registry_discovery import (
     read_external_registry_devices,
     read_registry_yaml_devices,
 )

@@ -1,4 +1,4 @@
-"""软件包命令行（Package CLI）的稳定错误边界。"""
+"""包分发（Package Distribution）CLI Adapter 使用的稳定错误边界。"""
 
 
 class PackageCLIError(RuntimeError):

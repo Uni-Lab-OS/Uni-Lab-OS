@@ -2,12 +2,14 @@
 
 from __future__ import annotations
 
-from collections.abc import Mapping
+from collections.abc import Callable, Mapping
 from typing import Any, Protocol
 
 from unilabos.utils.banner_print import print_status
 
-from ...errors import PackageCLIError
+from ..errors import PackageCLIError
+
+PackageInspector = Callable[..., dict[str, Any]]
 
 
 class PublicationPort(Protocol):
@@ -134,12 +136,15 @@ def upload_package(
     namespace: str | None = None,
     out_dir: str | None = None,
     download_url: str = "",
+    *,
+    package_inspector: PackageInspector,
 ) -> dict[str, Any]:
     """检查软件包并把兼容资源投影发布到远端。
 
     参数：``path`` 是软件包根；``http_client`` 是已鉴权的 HTTP Adapter；
     ``namespace`` 仅供遗留包使用；``out_dir`` 是可选产物目录；
-    ``download_url`` 是可选显式归档地址。
+    ``download_url`` 是可选显式归档地址；``package_inspector`` 是组合根注入的
+    软件包检查（Package Inspect）Interface。
     返回：发布后的 ``package_info``、资源 DTO、下载地址和 HTTP 状态。
     异常：鉴权客户端缺失、归档上传或资源发布失败时抛出
     ``PackageCLIError``。
@@ -148,12 +153,10 @@ def upload_package(
     if http_client is None:
         raise PackageCLIError("upload 需要有效的 http_client（请确认已传 --ak/--sk）")
 
+    if not callable(package_inspector):
+        raise TypeError("package_inspector 必须可调用")
     # ``inspection`` 是规范目录、归档与遗留上传 DTO 的唯一共同来源。
-    # 延迟导入保留遗留“检查后发布”编排，同时避免包分发（Package Distribution）
-    # 在 Module 加载时反向初始化工作区运行时（Workspace Runtime）。
-    from ...inspection import inspect_package
-
-    inspection = inspect_package(path, namespace=namespace, out_dir=out_dir)
+    inspection = package_inspector(path, namespace=namespace, out_dir=out_dir)
     # ``publication`` 只消费已检查产物，不允许传输 Adapter 重新扫描来源。
     publication = publish_inspection(
         inspection,
@@ -213,6 +216,7 @@ def _resolve_download_target(
 
 __all__ = [
     "HttpClientPublicationAdapter",
+    "PackageInspector",
     "PublicationPort",
     "publish_inspection",
     "upload_package",

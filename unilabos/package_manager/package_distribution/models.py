@@ -9,7 +9,7 @@ from typing import Any, Literal
 
 import rfc8785
 
-from ..package_catalog import PackageCatalog
+from ..package_catalog import PackageCatalog, WorkspaceSource
 
 # 声明文件与规范锁文件共同保存同一完整软件包依赖代际，必须成对读写。
 DEPENDENCY_DECLARATION_FILE = "unilabos.packages.yaml"
@@ -20,6 +20,27 @@ DEPENDENCY_MUTATION_GUARD = ".unilabos.packages.mutation.lock"
 
 class PackageDependencyError(RuntimeError):
     """表示显式软件包依赖不能被安全解析、验证或发布。"""
+
+
+@dataclass(frozen=True, slots=True)
+class ResolvedPackageSource:
+    """保存包分发（Package Distribution）已经核验的来源与目录配对。"""
+
+    source: WorkspaceSource
+    catalog: PackageCatalog
+
+    def __post_init__(self) -> None:
+        """关闭式校验解析结果不会丢失安全来源或包目录。
+
+        参数：无；读取构造时传入的 ``source`` 与 ``catalog``。
+        返回：无；合法配对保持不可变。
+        异常：来源或目录类型错误时抛出 ``TypeError``，禁止高层激活不完整结果。
+        """
+
+        if not isinstance(self.source, WorkspaceSource):
+            raise TypeError("解析软件包来源必须是 WorkspaceSource")
+        if not isinstance(self.catalog, PackageCatalog):
+            raise TypeError("解析软件包来源必须配对 PackageCatalog")
 
 
 @dataclass(frozen=True, slots=True)
@@ -229,5 +250,6 @@ __all__ = [
     "LockedPackage",
     "PackageDependencyError",
     "PackageDependencyLock",
+    "ResolvedPackageSource",
     "locked_package_sort_key",
 ]

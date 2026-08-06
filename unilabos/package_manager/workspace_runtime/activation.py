@@ -21,11 +21,6 @@ from unilabos.workflow.source_file_access import (
     directory_identity,
 )
 
-from ..catalog_source import (
-    PackageCatalogSource,
-    compile_generation_material_shapes,
-    selected_package_import_roots,
-)
 from ..package_catalog import PackageCatalog, PackageDefinition
 from ..package_catalog.registry_snapshot import (
     RegistryActivationPlan,
@@ -44,6 +39,11 @@ from .discovery import (
     compile_package_source,
     compile_workspace_startup,
     project_catalog_startup_plan,
+)
+from .package_source import (
+    PackageCatalogSource,
+    compile_generation_material_shapes,
+    selected_package_import_roots,
 )
 
 
@@ -343,9 +343,15 @@ def _locked_dependency_packages(
     )
     if not any(dependency_files_present):
         return ()
-    return load_locked_package_sources(
+    # ``resolved_dependencies`` 是包分发（Package Distribution）核验后的低层配对；
+    # 工作区运行时在此将其提升为候选代所需的来源对象。
+    resolved_dependencies = load_locked_package_sources(
         source.root,
         compile_catalog=compile_catalog,
+    )
+    return tuple(
+        PackageCatalogSource(source=item.source, catalog=item.catalog)
+        for item in resolved_dependencies
     )
 
 

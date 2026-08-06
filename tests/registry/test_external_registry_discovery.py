@@ -2,7 +2,9 @@
 
 from pathlib import Path
 
-from unilabos.package_manager.inspection import discover_registry_paths_from_project
+from unilabos.package_manager.package_distribution.registry_discovery import (
+    discover_registry_paths_from_project,
+)
 
 
 def test_discover_registry_paths_from_pyproject_tool_section():

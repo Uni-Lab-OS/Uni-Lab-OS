@@ -27,12 +27,12 @@ from ..package_catalog.model import (
     PackageCompileError,
     PackageDiagnostic,
 )
-from ..package_catalog.sources import WorkspaceSource
-from ..project_metadata import (
+from ..package_catalog.project_metadata import (
     PackageProject,
     normalize_distribution_name,
     parse_project_metadata,
 )
+from ..package_catalog.sources import WorkspaceSource
 
 
 @dataclass(frozen=True)

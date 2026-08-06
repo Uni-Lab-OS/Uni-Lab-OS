@@ -5,12 +5,12 @@ from __future__ import annotations
 from dataclasses import dataclass
 from pathlib import Path
 
-from .package_catalog import (
+from ..package_catalog import (
     PackageCatalog,
     RegistryActivationPlan,
     WorkspaceSource,
 )
-from .workspace_material_shapes import compile_catalog_material_shapes
+from ..package_catalog.material_shapes import compile_catalog_material_shapes
 
 
 @dataclass(frozen=True, slots=True)

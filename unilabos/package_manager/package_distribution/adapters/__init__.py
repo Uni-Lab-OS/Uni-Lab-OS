@@ -2,6 +2,7 @@
 
 from .cloud import (
     HttpClientPublicationAdapter,
+    PackageInspector,
     PublicationPort,
     publish_inspection,
     upload_package,
@@ -10,6 +11,7 @@ from .directory import install_package
 
 __all__ = [
     "HttpClientPublicationAdapter",
+    "PackageInspector",
     "PublicationPort",
     "install_package",
     "publish_inspection",

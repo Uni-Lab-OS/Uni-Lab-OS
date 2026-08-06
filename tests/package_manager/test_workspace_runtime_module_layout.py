@@ -126,25 +126,16 @@ def test_product_callers_depend_directly_on_workspace_runtime_module() -> None:
     """产品调用者依赖工作区运行时（Workspace Runtime），不穿过已删除平铺路径。
 
     参数：无。
-    返回：无；断言根门面、投影编译器和产品组合根采用新 Module 路径。
+    返回：无；断言根门面和产品组合根采用新 Module 路径。
     异常：内部调用者重新引用已删除平铺路径时测试失败。
     """
 
     # ``repository_root`` 是解析 OS 产品调用者导入方向的源码根。
     repository_root = Path(__file__).resolve().parents[2]
-    # ``expected_imports`` 固定每个产品调用者应采用的新分层 Module 身份。
+    # ``expected_imports`` 固定两个产品组合入口应采用的新分层 Module 身份。
     expected_imports = {
         "unilabos/package_manager/__init__.py": {
             "unilabos.package_manager.workspace_runtime",
-        },
-        "unilabos/package_manager/inspection.py": {
-            "unilabos.package_manager.workspace_runtime.discovery",
-        },
-        "unilabos/package_manager/workspace_material_models.py": {
-            "unilabos.package_manager.workspace_runtime.discovery",
-        },
-        "unilabos/package_manager/workspace_material_shapes.py": {
-            "unilabos.package_manager.workspace_runtime.discovery",
         },
         "unilabos/app/workspace_package_bootstrap.py": {
             "unilabos.package_manager.workspace_runtime",

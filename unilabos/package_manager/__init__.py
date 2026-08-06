@@ -12,9 +12,11 @@ if TYPE_CHECKING:
     from .cli import (
         cmd_package as cmd_package,
     )
+    from .cli import inspect_package as inspect_package
     from .cli import (
         register_package_subcommands as register_package_subcommands,
     )
+    from .cli import upload_package as upload_package
     from .driver_runtime import (
         DriverActivationError as DriverActivationError,
     )
@@ -24,7 +26,6 @@ if TYPE_CHECKING:
     from .driver_runtime import (
         activate_python_driver as activate_python_driver,
     )
-    from .inspection import inspect_package as inspect_package
     from .package_catalog import (
         PackageCatalog as PackageCatalog,
     )
@@ -46,6 +47,27 @@ if TYPE_CHECKING:
     from .package_catalog import (
         compile_registry_snapshot as compile_registry_snapshot,
     )
+    from .package_catalog.material_models import (
+        WorkspaceMaterialModelAsset as WorkspaceMaterialModelAsset,
+    )
+    from .package_catalog.material_models import (
+        WorkspaceMaterialModelCatalog as WorkspaceMaterialModelCatalog,
+    )
+    from .package_catalog.material_models import (
+        compile_workspace_material_models as compile_workspace_material_models,
+    )
+    from .package_catalog.material_shapes import (
+        compile_catalog_material_shapes as compile_catalog_material_shapes,
+    )
+    from .package_catalog.material_shapes import (
+        compile_workspace_material_shapes as compile_workspace_material_shapes,
+    )
+    from .package_catalog.project_metadata import (
+        PackageProject as PackageProject,
+    )
+    from .package_catalog.project_metadata import (
+        parse_project_metadata as parse_project_metadata,
+    )
     from .package_distribution import (
         LockedPackage as LockedPackage,
     )
@@ -60,30 +82,6 @@ if TYPE_CHECKING:
     )
     from .package_distribution import (
         load_locked_package_catalogs as load_locked_package_catalogs,
-    )
-    from .package_distribution import (
-        upload_package as upload_package,
-    )
-    from .project_metadata import (
-        PackageProject as PackageProject,
-    )
-    from .project_metadata import (
-        parse_project_metadata as parse_project_metadata,
-    )
-    from .workspace_material_models import (
-        WorkspaceMaterialModelAsset as WorkspaceMaterialModelAsset,
-    )
-    from .workspace_material_models import (
-        WorkspaceMaterialModelCatalog as WorkspaceMaterialModelCatalog,
-    )
-    from .workspace_material_models import (
-        compile_workspace_material_models as compile_workspace_material_models,
-    )
-    from .workspace_material_shapes import (
-        compile_catalog_material_shapes as compile_catalog_material_shapes,
-    )
-    from .workspace_material_shapes import (
-        compile_workspace_material_shapes as compile_workspace_material_shapes,
     )
     from .workspace_runtime import (
         PreparedWorkspaceProductGeneration as PreparedWorkspaceProductGeneration,
@@ -156,7 +154,13 @@ if TYPE_CHECKING:
 _EXPORT_GROUPS: tuple[tuple[str, tuple[str, ...]], ...] = (
     (
         ".cli",
-        ("PackageCLIError", "cmd_package", "register_package_subcommands"),
+        (
+            "PackageCLIError",
+            "cmd_package",
+            "inspect_package",
+            "register_package_subcommands",
+            "upload_package",
+        ),
     ),
     (
         ".driver_runtime",
@@ -166,7 +170,6 @@ _EXPORT_GROUPS: tuple[tuple[str, tuple[str, ...]], ...] = (
             "activate_python_driver",
         ),
     ),
-    (".inspection", ("inspect_package",)),
     (
         ".package_catalog",
         (
@@ -187,12 +190,14 @@ _EXPORT_GROUPS: tuple[tuple[str, tuple[str, ...]], ...] = (
             "PackageDependencyLock",
             "PackageDependencyManager",
             "load_locked_package_catalogs",
-            "upload_package",
         ),
     ),
-    (".project_metadata", ("PackageProject", "parse_project_metadata")),
     (
-        ".workspace_material_models",
+        ".package_catalog.project_metadata",
+        ("PackageProject", "parse_project_metadata"),
+    ),
+    (
+        ".package_catalog.material_models",
         (
             "WorkspaceMaterialModelAsset",
             "WorkspaceMaterialModelCatalog",
@@ -200,7 +205,7 @@ _EXPORT_GROUPS: tuple[tuple[str, tuple[str, ...]], ...] = (
         ),
     ),
     (
-        ".workspace_material_shapes",
+        ".package_catalog.material_shapes",
         (
             "compile_catalog_material_shapes",
             "compile_workspace_material_shapes",

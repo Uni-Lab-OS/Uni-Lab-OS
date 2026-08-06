@@ -2,7 +2,9 @@
 
 from pathlib import Path
 
-from unilabos.package_manager.inspection import discover_registry_paths_from_project
+from unilabos.package_manager.package_distribution.registry_discovery import (
+    discover_registry_paths_from_project,
+)
 
 
 def test_external_variant_fixture_registry_path_is_discoverable():
