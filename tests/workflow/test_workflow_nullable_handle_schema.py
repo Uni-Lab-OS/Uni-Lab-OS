@@ -91,3 +91,41 @@ def test_invalid_json_schema_type_union_fails_closed() -> None:
         match="连接点（Handle）value_schema 无效",
     ):
         handle_value_schema(invalid_handle)
+
+
+@pytest.mark.parametrize(
+    "invalid_type",
+    (
+        ["object", "null", "null"],
+        ["object", "string"],
+        ["null"],
+    ),
+)
+def test_invalid_nullable_material_type_union_fails_closed(
+    invalid_type: list[str],
+) -> None:
+    """验证物料引用不能在严格联合校验前被投影成物料占位符（ResourceSlot）。
+
+    参数：``invalid_type`` 分别表达重复 ``null``、多个非空成员和缺少非空成员的
+    非法 JSON Schema 联合。
+    返回：无；断言动作物料锁（Action Material Lock）元数据不能绕过失败关闭。
+    异常：预期 ``WorkflowIOValidationError``；若非法联合被接受则测试失败。
+    """
+
+    # ``invalid_material_schema`` 保持合法 UUID 引用外形，确保 RED 只证明联合
+    # 基数检查不能被物料语义投影短路。
+    invalid_material_schema: dict[str, object] = {
+        "type": invalid_type,
+        "x-unilabos-material-lock": True,
+        "properties": {
+            "uuid": {"type": "string", "format": "uuid"},
+        },
+        "required": ["uuid"],
+        "additionalProperties": False,
+    }
+
+    with pytest.raises(
+        WorkflowIOValidationError,
+        match="连接点（Handle）value_schema 无效",
+    ):
+        handle_value_schema(_handle(invalid_material_schema, value_type="ResourceSlot"))
