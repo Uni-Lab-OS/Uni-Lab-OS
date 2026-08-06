@@ -3,12 +3,13 @@
 from .catalog import PackageCatalog, PackageCompileError
 from .cli import PackageCLIError, cmd_package, register_package_subcommands
 from .compiler import compile_package_source
-from .dependency_lock import (
+from .package_distribution import (
     LockedPackage,
     PackageDependencyError,
     PackageDependencyLock,
     PackageDependencyManager,
     load_locked_package_catalogs,
+    upload_package,
 )
 from .inspection import inspect_package
 from .product_lifecycle import (
@@ -22,7 +23,6 @@ from .product_lifecycle import (
     prepare_stable_workspace_product_generation,
 )
 from .project_metadata import PackageProject, parse_project_metadata
-from .publication import upload_package
 from .refresh_coordinator import (
     StableWorkspaceGenerationMonitor,
     WorkspaceRefreshCoordinator,

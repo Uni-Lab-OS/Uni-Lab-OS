@@ -27,7 +27,7 @@ from .catalog_source import (
     selected_package_import_roots,
 )
 from .compiler import compile_package_source
-from .dependency_lock import (
+from .package_distribution import (
     DEPENDENCY_DECLARATION_FILE,
     DEPENDENCY_LOCK_FILE,
     load_locked_package_sources,
@@ -346,10 +346,7 @@ def _freeze_graph_json(value: Any) -> Any:
         return value
     if isinstance(value, Mapping):
         return MappingProxyType(
-            {
-                str(key): _freeze_graph_json(item)
-                for key, item in value.items()
-            }
+            {str(key): _freeze_graph_json(item) for key, item in value.items()}
         )
     if isinstance(value, (list, tuple)):
         return tuple(_freeze_graph_json(item) for item in value)

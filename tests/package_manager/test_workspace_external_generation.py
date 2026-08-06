@@ -17,7 +17,9 @@ from unilabos.package_manager import (
     compile_package_source,
     prepare_workspace_registry_runtime,
 )
-from unilabos.package_manager import dependency_lock as dependency_lock_module
+from unilabos.package_manager.package_distribution import (
+    dependency_manager as dependency_manager_module,
+)
 
 EXTERNAL_WORKFLOW_UUID = "73333333-3333-4333-8333-333333333333"
 
@@ -237,7 +239,7 @@ def test_runtime_compiles_each_explicit_package_exactly_once(
 
     workspace_root, external_root = _prepare_external_workspace(tmp_path)
     compile_roots: list[Path] = []
-    original_compile = dependency_lock_module.compile_package_source
+    original_compile = dependency_manager_module.compile_package_source
 
     def compile_dependency_once(source: WorkspaceSource):
         """记录显式依赖加载执行的每次完整静态编译。
@@ -253,7 +255,7 @@ def test_runtime_compiles_each_explicit_package_exactly_once(
         return original_compile(source)
 
     monkeypatch.setattr(
-        dependency_lock_module,
+        dependency_manager_module,
         "compile_package_source",
         compile_dependency_once,
     )

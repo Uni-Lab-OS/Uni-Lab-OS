@@ -7,10 +7,9 @@ from typing import Any
 
 from unilabos.utils.banner_print import print_status
 
-from .dependency_lock import PackageDependencyManager
 from .errors import PackageCLIError
 from .inspection import inspect_package
-from .publication import upload_package
+from .package_distribution import PackageDependencyManager, upload_package
 
 
 def register_package_subcommands(subparsers: Any) -> None:
@@ -152,9 +151,7 @@ def cmd_package(args_dict: dict[str, Any], http_client: Any = None) -> None:
                     replacement_source,
                 )
             else:
-                result = manager.remove(
-                    args_dict.get("dependency_identity") or ""
-                )
+                result = manager.remove(args_dict.get("dependency_identity") or "")
         except (RuntimeError, TypeError, ValueError) as error:
             raise PackageCLIError(str(error)) from error
         # ``result`` 是命令成功切换后的完整软件包依赖锁代际。
