@@ -225,8 +225,8 @@ def test_local_product_composition_forwards_the_exact_configured_roots(
     selected_root = tmp_path / "editable"
     configured_roots = (str(selected_root),)
     captured: dict[str, Any] = {}
-    authoring_transform = object()
-    workflow_service = SimpleNamespace(compiler=authoring_transform)
+    initial_compiler = object()
+    workflow_service = SimpleNamespace(compiler=initial_compiler)
     template_projection = object()
     inventory_service = SimpleNamespace(store=object())
     edge_scheduler = object()
@@ -299,7 +299,9 @@ def test_local_product_composition_forwards_the_exact_configured_roots(
         assert target_app is server.app
         assert installed_service is workflow_service
         assert template_snapshot_provider is template_projection
-        assert authoring_transform is workflow_service.compiler
+        assert authoring_transform is not initial_compiler
+        assert authoring_transform._workflow_service is workflow_service
+        captured["authoring_transform"] = authoring_transform
 
     monkeypatch.setattr(
         scheduler_integration,
@@ -331,6 +333,7 @@ def test_local_product_composition_forwards_the_exact_configured_roots(
     assert captured["inventory_store"] is inventory_service.store
     assert captured["scheduler"] is edge_scheduler
     assert captured["editable_package_roots"] == configured_roots
+    assert captured["authoring_transform"] is not initial_compiler
 
 
 def test_local_composition_failure_never_falls_back_to_uncompiled_runtime(

@@ -38,30 +38,52 @@ class _CurrentAuthoringTransform:
     """逐请求委派到工作流服务（WorkflowService）的当前可信创作转换。"""
 
     def __init__(self, workflow_service: Any) -> None:
-        """绑定身份稳定的工作流服务；参数可在应用后替换其编译器代际。"""
+        """绑定身份稳定的工作流服务（WorkflowService）。
+
+        参数：``workflow_service`` 持有可在应用后替换的当前编译器
+        （Compiler）。返回：无。异常：构造阶段不读取编译器，不主动抛错。
+        """
 
         self._workflow_service = workflow_service
 
     def _current(self) -> Any:
-        """返回当前编译器；目录重建失败并撤销入口时关闭失败。"""
+        """读取一次当前编译器（Compiler）引用。
+
+        参数：无。返回：本次请求固定使用的编译器。异常：目录重建失败并撤销
+        编译入口时抛出稳定 ``template_catalog_unavailable`` 工作流错误。
+        """
+
+        from unilabos.workflow.service import WorkflowError
 
         compiler = self._workflow_service.compiler
         if compiler is None:
-            raise RuntimeError("当前工作流创作模板目录不可用")
+            raise WorkflowError("template_catalog_unavailable")
         return compiler
 
     def compile(self, **values: Any) -> Any:
-        """使用当前目录代际编译工作流源码（Workflow Source）。"""
+        """使用当前目录代际编译工作流源码（Workflow Source）。
+
+        参数：``values`` 是可信转换接口已经校验的编译参数。返回：当前编译器
+        的编译结果。异常：目录不可用或编译器拒绝请求时原样传播。
+        """
 
         return self._current().compile(**values)
 
     def generate_python(self, **values: Any) -> Any:
-        """使用当前目录代际生成规范工作流源码（Workflow Source）。"""
+        """使用当前目录代际生成规范工作流源码（Workflow Source）。
+
+        参数：``values`` 是可信转换接口已经校验的候选图参数。返回：当前编译器
+        的规范源码生成结果。异常：目录不可用或编译器拒绝请求时原样传播。
+        """
 
         return self._current().generate_python(**values)
 
     def validate(self, **values: Any) -> Any:
-        """使用当前目录代际共同校验图和工作流源码（Workflow Source）。"""
+        """使用当前目录代际共同校验图和工作流源码（Workflow Source）。
+
+        参数：``values`` 是可信转换接口已经校验的图和源码参数。返回：当前
+        编译器的校验结果。异常：目录不可用或编译器拒绝请求时原样传播。
+        """
 
         return self._current().validate(**values)
 
@@ -168,11 +190,15 @@ def setup_server() -> FastAPI:
                 app,
                 workflow_service,
                 template_snapshot_provider=template_projection,
-                authoring_transform=_CurrentAuthoringTransform(workflow_service),
+                authoring_transform=(
+                    _CurrentAuthoringTransform(workflow_service)
+                    if workflow_service.compiler is not None
+                    else None
+                ),
             )
             workflow_routes_mounted = True
         except Exception as e:  # noqa: BLE001 - unrelated Edge routes remain available
-            error(f"[Web] 挂载 Backend Workflow 合同失败: {e!s}")
+            error(f"[Web] 挂载后端（Backend）工作流（Workflow）合同失败: {e!s}")
 
     # Edge 调度器与 Host 物料路由独立挂载；默认 embedded 物料服务不要求 --edge_scheduler。
     try:
