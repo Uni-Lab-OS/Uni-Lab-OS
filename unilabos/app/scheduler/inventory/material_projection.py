@@ -134,7 +134,7 @@ def build_package_material_projection(
                 if record.kind == "device"
                 else f"{record.module}:{record.symbol}"
             )
-            definitions[record.id] = MaterialDefinitionProjection(
+            definition = MaterialDefinitionProjection(
                 graph_class=record.id,
                 source_identity=source_identity,
                 kind=kind,
@@ -146,6 +146,13 @@ def build_package_material_projection(
                     bundle=catalog.namespace,
                 ),
             )
+            for graph_class in (record.id, record.fqid):
+                existing = definitions.get(graph_class)
+                if existing is not None and existing != definition:
+                    raise ValueError(
+                        f"同一 ResourceTreeSet class 指向不同 Package 定义: {graph_class}"
+                    )
+                definitions[graph_class] = definition
     shapes = sorted(
         shapes_by_identity.values(), key=lambda item: (item["bundle"], item["id"])
     )
@@ -195,6 +202,10 @@ def build_resource_graph_import(
     material_nodes = [node for node in nodes if not _is_internal_site(node)]
     material_uuid_by_runtime_uuid = {
         str(node["uuid"]): _stable_uuid(source_id, "material", str(node["id"]))
+        for node in material_nodes
+    }
+    material_uuid_by_node_id = {
+        str(node["id"]): material_uuid_by_runtime_uuid[str(node["uuid"])]
         for node in material_nodes
     }
     materials: list[dict[str, Any]] = []
@@ -263,6 +274,82 @@ def build_resource_graph_import(
         )
 
     sites: list[dict[str, Any]] = []
+    for node in material_nodes:
+        node_id = _required_string(node.get("id"), "node.id")
+        owner_uuid = material_uuid_by_node_id[node_id]
+        config = _json_object(node.get("config"))
+        configured_sites = config.get("sites")
+        if configured_sites is None:
+            continue
+        if not isinstance(configured_sites, Sequence) or isinstance(
+            configured_sites, (str, bytes)
+        ):
+            raise ValueError(f"Material {node_id} config.sites 必须是数组")
+        seen_labels: set[str] = set()
+        for raw_site in configured_sites:
+            if not isinstance(raw_site, Mapping):
+                raise ValueError(f"Material {node_id} config.sites 成员必须是对象")
+            label = _required_string(
+                raw_site.get("label") or raw_site.get("name"),
+                f"Material {node_id} site.label",
+            )
+            if label in seen_labels:
+                raise ValueError(f"Material {node_id} Site label 重复: {label}")
+            seen_labels.add(label)
+            raw_content_types = raw_site.get("content_type") or []
+            if not isinstance(raw_content_types, Sequence) or isinstance(
+                raw_content_types, (str, bytes)
+            ):
+                raise ValueError(f"Material {node_id} Site content_type 必须是数组")
+            allowed_templates: list[str] = []
+            for graph_class in raw_content_types:
+                definition = package_projection.definitions.get(str(graph_class))
+                if definition is None:
+                    raise ValueError(
+                        f"Site content_type 未进入 PackageCatalog: {graph_class}"
+                    )
+                template_uuid = resolved_identities.get(definition.source_identity)
+                if template_uuid is None:
+                    raise ValueError(
+                        f"ResourceTemplate identity 未解析: {definition.source_identity}"
+                    )
+                allowed_templates.append(template_uuid)
+            occupied_by = _optional_string(raw_site.get("occupied_by"))
+            occupied_material_uuid = (
+                material_uuid_by_node_id.get(occupied_by)
+                if occupied_by is not None
+                else None
+            )
+            if occupied_by is not None and occupied_material_uuid is None:
+                raise ValueError(
+                    f"Material {node_id} Site {label} occupied_by 不存在: {occupied_by}"
+                )
+            position = _json_object(raw_site.get("position"))
+            size = _json_object(raw_site.get("size"))
+            sites.append(
+                {
+                    "uuid": _stable_uuid(source_id, "site", f"{node_id}:{label}"),
+                    "material_uuid": owner_uuid,
+                    "name": str(raw_site.get("name") or label),
+                    "sort_order": len(sites),
+                    "allowed_resource_template_uuids": sorted(
+                        set(allowed_templates)
+                    ),
+                    "occupied_material_uuid": occupied_material_uuid,
+                    "description": _optional_string(raw_site.get("description")),
+                    "meta_data": {
+                        "source": "resource-tree-config",
+                        "source_node_id": node_id,
+                        "source_site_label": label,
+                    },
+                    "position_x": _number(position.get("x")),
+                    "position_y": _number(position.get("y")),
+                    "position_z": _number(position.get("z")),
+                    "depth": max(_number(size.get("depth")), 0.0),
+                    "length": max(_number(size.get("height")), 0.0),
+                    "width": max(_number(size.get("width")), 0.0),
+                }
+            )
     for node in nodes:
         if not _is_internal_site(node):
             continue

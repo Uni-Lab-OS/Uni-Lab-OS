@@ -184,6 +184,36 @@ def workflow_template_imports_from_registry_snapshot(
             NodeTemplateImport(
                 template={
                     "resource_template_uuid": owner_uuid,
+                    "name": "group",
+                    "display_name": "Group",
+                    "description": "Presentation group for workflow actions",
+                    "class": "unilabos.workflow.authoring:group",
+                    "goal": {},
+                    "goal_default": {},
+                    "feedback": {},
+                    "result": {},
+                    "schema": None,
+                    "type": "group",
+                    "node_type": "group",
+                    "meta_data": {
+                        "unilab": {
+                            "authority_id": authority_id,
+                            "source_fqid": "unilabos.workflow.authoring:group",
+                            "resource_template": {
+                                "uuid": owner_uuid,
+                                "name": owner_identity,
+                                "display_name": owner_display_name,
+                            },
+                        }
+                    },
+                },
+                handles=(),
+            )
+        )
+        imports.append(
+            NodeTemplateImport(
+                template={
+                    "resource_template_uuid": owner_uuid,
                     "name": "material_source",
                     "display_name": "Material Source",
                     "description": "Declare one material at an OS-owned mount",

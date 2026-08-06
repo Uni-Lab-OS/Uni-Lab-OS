@@ -8,13 +8,12 @@ from concurrent.futures import Future as ConcurrentFuture, ThreadPoolExecutor
 
 from unilabos.utils.tools import fast_dumps_str as _fast_dumps_str, fast_loads as _fast_loads
 from dataclasses import dataclass, field
-from typing import TYPE_CHECKING, Optional, Dict, Any, List, ClassVar, Set, Tuple, Union
+from typing import TYPE_CHECKING, Optional, Dict, Any, List, ClassVar, Set, Tuple, TypedDict, Union
 
 from action_msgs.msg import GoalStatus
 from geometry_msgs.msg import Point
 from rclpy.action import ActionClient, get_action_server_names_and_types_by_node
 from rclpy.service import Service
-from typing_extensions import TypedDict
 from unilabos_msgs.action import EmptyIn, StrSingleInput, ResourceCreateFromOuterEasy, ResourceCreateFromOuter
 from unilabos_msgs.msg import Resource  # type: ignore
 from unilabos_msgs.srv import (
@@ -39,6 +38,7 @@ from unilabos.registry.decorators import (
     ActionOutputHandle,
     DataSource,
     NodeType,
+    action,
     device,
     legacy_action,
 )
@@ -120,10 +120,9 @@ class TransferResourceReturn(TypedDict):
     经 @flatten 后即一棵树的扁平节点 list），与 apply_deduct 输出一致、可直接连到下游单物料输入。
     """
 
-    resource: List[List[ResourceDictType]]
-    mount_resource: List[List[ResourceDictType]]
+    resource: ResourceSlot
+    mount_resource: ResourceSlot
     site: str
-    result: Any
 
 
 class TransferManualReturn(TypedDict):
@@ -2578,79 +2577,27 @@ class HostNode(BaseROS2DeviceNode):
         if mount_resource is None:
             raise ValueError("转移失败：未指定挂载目标孔位")
         target_id = str(target_device).split("/")[-1]
-        result = await self.transfer_resource_to_another(
+        await self.transfer_resource_to_another(
             [resource], target_id, [mount_resource], [site if site else None]
         )
         return {
             "resource": ResourceTreeSet.from_plr_resources([resource]).dump(),
             "mount_resource": ResourceTreeSet.from_plr_resources([mount_resource]).dump(),
             "site": site,
-            "result": result,
         }
 
-    @legacy_action(
+    @action(
         description="转移物料（系统派发）：把已物理就位的物料在系统中改挂到目标设备的目标孔位（人工/机械臂工作流的统一末步）",
         always_free=True,
         placeholder_keys={
             "target_device": PLACEHOLDER_DEVICES,
             "mount_resource": PLACEHOLDER_NODES,
         },
-        handles=[
-            ActionInputHandle(
-                key="resource",
-                data_type="resource",
-                label="待转移物料",
-                data_key="resource",
-                data_source=DataSource.HANDLE,
-            ),
-            ActionInputHandle(
-                key="target_device",
-                data_type="device_id",
-                label="目标设备",
-                data_key="target_device",
-                data_source=DataSource.HANDLE,
-            ),
-            ActionInputHandle(
-                key="mount_resource",
-                data_type="resource",
-                label="目标孔位",
-                data_key="mount_resource",
-                data_source=DataSource.HANDLE,
-            ),
-            ActionInputHandle(
-                key="site",
-                data_type="site",
-                label="目标槽位",
-                data_key="site",
-                data_source=DataSource.HANDLE,
-            ),
-            ActionOutputHandle(
-                key="resource",
-                data_type="resource",
-                label="已转移物料",
-                data_key="resource.@flatten",
-                data_source=DataSource.EXECUTOR,
-            ),
-            ActionOutputHandle(
-                key="mount_resource",
-                data_type="resource",
-                label="目标孔位",
-                data_key="mount_resource.@flatten",
-                data_source=DataSource.EXECUTOR,
-            ),
-            ActionOutputHandle(
-                key="site",
-                data_type="site",
-                label="目标槽位",
-                data_key="site",
-                data_source=DataSource.EXECUTOR,
-            ),
-        ],
     )
     async def transfer_resource(
         self,
         resource: ResourceSlot,
-        target_device: DeviceSlot,
+        target_device: str,
         mount_resource: ResourceSlot,
         site: str = "",
     ) -> TransferResourceReturn:

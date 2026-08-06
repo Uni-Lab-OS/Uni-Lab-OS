@@ -15,6 +15,7 @@ from unilabos.resources.resource_tracker import (
     TRACKER_STATE_KEYS,
     ResourceDict,
     ResourceDictInstance,
+    ResourceTreeInstance,
     ResourceTreeSet,
     assemble_tracker_state,
 )
@@ -178,6 +179,37 @@ class TestGraphWhitelist:
         assert res.barcode == "BC-1"
         for state_key in TRACKER_STATE_KEYS:
             assert state_key not in res.config
+
+
+class TestLogicalWarehouseConversion:
+    def test_graph_sites_supply_legacy_plr_dimensions(self):
+        instance = ResourceDictInstance.get_resource_instance_from_dict(
+            make_content(
+                id="s07_process_warehouse",
+                name="s07_process_warehouse",
+                type="warehouse",
+                config={
+                    "sites": [
+                        {"name": "P01"},
+                        {"label": "S0721", "position": {"x": 1, "y": 2, "z": 3}},
+                    ]
+                },
+            )
+        )
+
+        resources = ResourceTreeSet(
+            [ResourceTreeInstance(instance)]
+        ).to_plr_resources()
+
+        assert len(resources) == 1
+        warehouse = resources[0]
+        assert type(warehouse).__name__ == "WareHouse"
+        assert (warehouse.num_items_x, warehouse.num_items_y, warehouse.num_items_z) == (
+            2,
+            1,
+            1,
+        )
+        assert len(warehouse.sites) == 2
 
 
 class TestRosMsgConversion:

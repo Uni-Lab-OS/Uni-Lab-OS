@@ -648,6 +648,7 @@ class ResourceTreeSet(object):
             "deck": "Deck",
             "container": "RegularContainer",
             "tip_spot": "TipSpot",
+            "warehouse": "WareHouse",
         }
 
         def collect_node_data(node: ResourceDictInstance, name_to_uuid: dict, all_states: dict, name_to_extra: dict):
@@ -672,6 +673,31 @@ class ResourceTreeSet(object):
             # （PLR Barcode dict {data, symbology, position_on_resource}），与
             # get_resource_instance_from_dict 从 config 读取的逻辑对称；position 未保留，默认兜底。
             config = dict(res.config)
+            if res.type == "warehouse":
+                raw_sites = config.get("sites")
+                if isinstance(raw_sites, list):
+                    normalized_sites = []
+                    for index, raw_site in enumerate(raw_sites):
+                        if not isinstance(raw_site, dict):
+                            normalized_sites.append(raw_site)
+                            continue
+                        site = dict(raw_site)
+                        site.setdefault("label", site.get("name") or str(index))
+                        site.setdefault("name", site["label"])
+                        site.setdefault("position", {"x": 0, "y": 0, "z": 0})
+                        site.setdefault(
+                            "size", {"width": 0, "height": 0, "depth": 0}
+                        )
+                        site.setdefault("occupied_by", None)
+                        normalized_sites.append(site)
+                    config["sites"] = normalized_sites
+                    # Deployment graphs may describe logical sites directly
+                    # without the legacy PLR carrier dimensions. Preserve
+                    # explicitly supplied dimensions and provide a harmless
+                    # one-row fallback for the old constructor.
+                    config.setdefault("num_items_x", max(len(normalized_sites), 1))
+                    config.setdefault("num_items_y", 1)
+                    config.setdefault("num_items_z", 1)
             if res.barcode:
                 config["barcode"] = {
                     "data": res.barcode,

@@ -1,6 +1,10 @@
 
 
 def register():
+    # Logical warehouses are valid device-mounted resources. Importing the
+    # class here makes it discoverable by pylabrobot's subclass resolver.
+    from unilabos.resources.warehouse import WareHouse  # noqa: F401
+
     # noinspection PyUnresolvedReferences
     from unilabos.devices.liquid_handling.prcxi.prcxi import PRCXI9300Deck
     # noinspection PyUnresolvedReferences
@@ -17,4 +21,3 @@ def register():
 
     from unilabos.devices.liquid_handling.rviz_backend import UniLiquidHandlerRvizBackend
     from unilabos.devices.liquid_handling.laiyu.backend.laiyu_v_backend import UniLiquidHandlerLaiyuBackend
-
