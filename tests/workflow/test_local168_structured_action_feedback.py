@@ -9,6 +9,7 @@ from uuid import uuid4
 
 import pytest
 
+import unilabos.ros.action_feedback as action_feedback_module
 from unilabos.app.ws_client import QueueItem
 from unilabos.ros.action_feedback import (
     attach_action_feedback,
@@ -73,8 +74,16 @@ def _create_running_job(
     return task["uuid"], job["uuid"]
 
 
-def test_feedback_context_throttles_ticks_and_preserves_identity() -> None:
+def test_feedback_context_throttles_ticks_and_preserves_identity(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
     published: list[dict[str, object]] = []
+    diagnostic_logs: list[str] = []
+    monkeypatch.setattr(
+        action_feedback_module.logger,
+        "info",
+        lambda message: diagnostic_logs.append(str(message)),
+    )
     with attach_action_feedback(
         lambda payload: published.append(payload) is None,
         job_uuid="job-1",
@@ -84,15 +93,36 @@ def test_feedback_context_throttles_ticks_and_preserves_identity() -> None:
     ):
         assert publish_action_feedback(
             "waiting_precondition",
-            {"actual_value": False, "elapsed_s": 0.0},
+            {
+                "diagnostic_event": "precondition_check_started",
+                "sensor": "传感器状态_上位机[2].NO[10]",
+                "position": 1,
+                "expected_value": True,
+                "actual_value": False,
+                "elapsed_s": 0.0,
+            },
         )
         assert not publish_action_feedback(
             "waiting_precondition",
-            {"actual_value": False, "elapsed_s": 0.1},
+            {
+                "diagnostic_event": "precondition_check_started",
+                "sensor": "传感器状态_上位机[2].NO[10]",
+                "position": 1,
+                "expected_value": True,
+                "actual_value": False,
+                "elapsed_s": 0.1,
+            },
         )
         assert publish_action_feedback(
             "waiting_precondition",
-            {"actual_value": True, "elapsed_s": 0.2},
+            {
+                "diagnostic_event": "satisfied",
+                "sensor": "传感器状态_上位机[2].NO[10]",
+                "position": 1,
+                "expected_value": True,
+                "actual_value": True,
+                "elapsed_s": 0.2,
+            },
         )
 
     assert [item["feedback_sequence"] for item in published] == [1, 2]
@@ -101,6 +131,17 @@ def test_feedback_context_throttles_ticks_and_preserves_identity() -> None:
         "device_id": "stirrer",
         "action_name": "run_stirring",
     }
+    assert published[0]["effect"] == {
+        "identity": "job-1:1",
+        "phase": "waiting_precondition",
+    }
+    assert len(diagnostic_logs) == 2
+    first_log = json.loads(diagnostic_logs[0].split("] ", 1)[1])
+    assert first_log["diagnostic_event"] == "precondition_check_started"
+    assert first_log["task_uuid"] == "task-1"
+    assert first_log["job_uuid"] == "job-1"
+    assert first_log["effect"]["identity"] == "job-1:1"
+    assert first_log["sensor"] == "传感器状态_上位机[2].NO[10]"
     assert decode_action_feedback(
         {"feedback": '{"phase":"processing","position":2}'}
     ) == {"phase": "processing", "position": 2}

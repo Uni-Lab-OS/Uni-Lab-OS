@@ -11,7 +11,10 @@ from dataclasses import dataclass
 from datetime import datetime, timezone
 from typing import Any
 
+from unilabos.utils.log import logger
+
 ACTION_FEEDBACK_TOPIC = "/unilabos/action_feedback"
+ACTION_FEEDBACK_LOG_MARKER = "[UNILAB-ACTION-FEEDBACK]"
 
 ActionFeedbackPublisher = Callable[[dict[str, Any]], bool]
 
@@ -92,11 +95,10 @@ def publish_action_feedback(
 
     context.sequence += 1
     identity = context.identity
+    feedback_event_id = f"{identity['job_uuid'] or 'standalone'}:{context.sequence}"
     payload: dict[str, Any] = {
         "phase": phase.strip(),
-        "feedback_event_id": (
-            f"{identity['job_uuid'] or 'standalone'}:{context.sequence}"
-        ),
+        "feedback_event_id": feedback_event_id,
         "feedback_sequence": context.sequence,
         "observed_at": datetime.now(timezone.utc).isoformat(),
         "task_uuid": identity["task_uuid"],
@@ -105,11 +107,18 @@ def publish_action_feedback(
             "device_id": identity["device_id"],
             "action_name": identity["action_name"],
         },
-        "effect": {"phase": phase.strip()},
+        "effect": {
+            "identity": feedback_event_id,
+            "phase": phase.strip(),
+        },
         **details,
     }
     if not context.publish(payload):
         return False
+    logger.info(
+        f"{ACTION_FEEDBACK_LOG_MARKER} "
+        f"{json.dumps(payload, ensure_ascii=False, sort_keys=True, default=str)}"
+    )
     context.last_change_key = change_key
     context.last_publish_monotonic = now
     return True
@@ -129,6 +138,7 @@ def decode_action_feedback(value: Mapping[str, Any]) -> dict[str, Any]:
 
 
 __all__ = [
+    "ACTION_FEEDBACK_LOG_MARKER",
     "ACTION_FEEDBACK_TOPIC",
     "attach_action_feedback",
     "decode_action_feedback",
