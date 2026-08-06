@@ -156,6 +156,14 @@ def resolve_graph_packages(
             acquisition.catalog,
             (item for item in classes if _community_namespace(item) == namespace),
         )
+        workspace_catalog = available.get(namespace)
+        if workspace_catalog is not None:
+            if workspace_catalog.catalog_digest != acquisition.catalog.catalog_digest:
+                raise CommunityPackageError(
+                    f"{namespace} Workspace Catalog 与设备图固定版本不一致；"
+                    "请移除 --workspace，或切换到与已下载设备包完全一致的代码"
+                )
+            continue
         sources.append(acquisition.source)
         catalogs.append(acquisition.catalog)
         dependencies.extend(acquisition.catalog.distribution.dependencies)
