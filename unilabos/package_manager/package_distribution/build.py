@@ -148,30 +148,47 @@ def build_workspace_package(
             expected_digest=candidate_digest,
             compile_catalog=compile_catalog,
         )
-        # ``target_wheel`` 是审计成功后原子替换的唯一可上传归档。
+        # ``target_wheel`` 是本版本正式就绪标志；准备新投影前必须先隐藏旧标志。
         target_wheel = artifact_root / candidate_wheel.name
+        if target_wheel.exists() or target_wheel.is_symlink():
+            # ``previous_marker`` 只在临时构建代际中保留旧标志，失败后不再误报就绪。
+            previous_marker = temporary_root / "previous-wheel" / target_wheel.name
+            previous_marker.parent.mkdir()
+            target_wheel.replace(previous_marker)
+        # ``generation_root`` 是全部发布投影先完整准备的临时代际边界。
+        generation_root = temporary_root / "generation"
+        generation_root.mkdir()
+        # 以下投影只从已通过 wheel 来源重编译的同一目录与摘要生成。
+        package_info, resources = _publication_projections(
+            catalog,
+            staging_project_bytes=generated_members[
+                f"{catalog.import_package}/_generated/pyproject.toml"
+            ],
+            artifact_digest=candidate_digest,
+        )
+        prepared_catalog = generation_root / "package.catalog.json"
+        prepared_package_info = generation_root / "package_info.json"
+        prepared_resources = generation_root / "resources.json"
+        _write_output_file(prepared_catalog, catalog.to_canonical_bytes())
+        _write_output_file(
+            prepared_package_info,
+            json.dumps(package_info, ensure_ascii=False, indent=2).encode("utf-8"),
+        )
+        _write_output_file(
+            prepared_resources,
+            json.dumps(resources, ensure_ascii=False, indent=2).encode("utf-8"),
+        )
+
+        # 三个正式投影必须先就绪，wheel 最后提交并作为本代际就绪标志。
+        catalog_path = artifact_root / prepared_catalog.name
+        package_info_path = artifact_root / prepared_package_info.name
+        resources_path = artifact_root / prepared_resources.name
+        _publish_file(prepared_catalog, catalog_path)
+        _publish_file(prepared_package_info, package_info_path)
+        _publish_file(prepared_resources, resources_path)
+        # 全部投影成功后才提交新的 ``target_wheel``。
         _publish_file(candidate_wheel, target_wheel)
 
-    # 以下投影全部从已经通过 wheel 来源重编译的同一目录与产物摘要生成。
-    package_info, resources = _publication_projections(
-        catalog,
-        staging_project_bytes=generated_members[
-            f"{catalog.import_package}/_generated/pyproject.toml"
-        ],
-        artifact_digest=candidate_digest,
-    )
-    catalog_path = artifact_root / "package.catalog.json"
-    package_info_path = artifact_root / "package_info.json"
-    resources_path = artifact_root / "resources.json"
-    _write_output_file(catalog_path, catalog.to_canonical_bytes())
-    _write_output_file(
-        package_info_path,
-        json.dumps(package_info, ensure_ascii=False, indent=2).encode("utf-8"),
-    )
-    _write_output_file(
-        resources_path,
-        json.dumps(resources, ensure_ascii=False, indent=2).encode("utf-8"),
-    )
     return PackageBuildArtifact(
         wheel=target_wheel,
         artifact_digest=candidate_digest,
@@ -205,8 +222,16 @@ def audit_package_wheel(
         raise TypeError("compile_catalog 必须可调用")
     if not isinstance(catalog, PackageCatalog):
         raise TypeError("catalog 必须是 PackageCatalog")
-    # ``wheel_path`` 是不允许符号链接且必须匹配固定摘要的候选归档。
-    wheel_path = Path(wheel).expanduser().resolve()
+    # ``selected_wheel`` 保留调用者原始路径身份，必须在 resolve 前执行 lstat。
+    selected_wheel = Path(wheel).expanduser()
+    try:
+        selected_metadata = selected_wheel.lstat()
+    except OSError as error:
+        raise PackageBuildError(f"wheel 不存在或不可访问：{selected_wheel}") from error
+    if stat.S_ISLNK(selected_metadata.st_mode) or selected_wheel.is_symlink():
+        raise PackageBuildError(f"wheel 路径不得是符号链接：{selected_wheel}")
+    # ``wheel_path`` 是解析后的普通文件位置，后续仍须验证大小和摘要。
+    wheel_path = selected_wheel.resolve()
     _verify_artifact(wheel_path, expected_digest)
     try:
         with zipfile.ZipFile(wheel_path) as archive:

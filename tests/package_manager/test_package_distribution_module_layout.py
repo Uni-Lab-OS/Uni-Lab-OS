@@ -521,7 +521,7 @@ def test_http_publication_adapter_preserves_delegate_contract() -> None:
     assert http_client.publication_calls[0][1] is package_info
 
     http_client.fail_publication = True
-    # ``artifact`` 使用显式地址跳过第二次 wheel 上传，但仍是已审计构建产物。
+    # ``artifact`` 再次经过 wheel 上传，然后在资源发布边界触发原始传输失败。
     artifact = _BuildArtifactStub(
         {
             "archive_path": "/tmp/lab.whl",
@@ -533,10 +533,37 @@ def test_http_publication_adapter_preserves_delegate_contract() -> None:
         publish_build(
             artifact,
             adapter,
-            download_url="https://packages.example/lab.whl",
         )
 
     assert caught.value is transport_error
+    assert http_client.upload_calls[-1] == ("/tmp/lab.whl", "models")
+
+
+def test_upload_interfaces_have_no_external_download_url_bypass() -> None:
+    """规范上传 Interface 必须实际上传本次已审计 wheel。
+
+    参数：无。
+    返回：无；断言 CLI、上传编排和发布编排均不接受外部下载 URL 参数。
+    异常：任一隐藏绕行参数残留时签名断言失败。
+    """
+
+    from unilabos.package_manager.cli import upload_package as cli_upload_package
+    from unilabos.package_manager.package_distribution import publish_build
+    from unilabos.package_manager.package_distribution.adapters.cloud import (
+        upload_package as adapter_upload_package,
+    )
+
+    # ``upload_interfaces`` 是所有可能绕过本次 wheel 直传的规范入口集合。
+    upload_interfaces = (
+        cli_upload_package,
+        adapter_upload_package,
+        publish_build,
+    )
+
+    assert all(
+        "download_url" not in inspect.signature(operation).parameters
+        for operation in upload_interfaces
+    )
 
 
 def test_publication_port_rejects_backend_error_status() -> None:

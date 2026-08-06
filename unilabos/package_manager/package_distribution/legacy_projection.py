@@ -257,14 +257,12 @@ def build_package_info(
     project: dict[str, Any],
     class_namespace: str,
     sha256: str,
-    download_url: str = "",
-    oss_object_key: str = "",
 ) -> dict[str, Any]:
     """构造后端与 Edge 共同消费的遗留 ``package_info`` 上传投影。
 
     参数：``project`` 是统一项目解析结果；``class_namespace`` 是本次编译采用的
-    类命名空间；``sha256`` 是归档内容摘要；``download_url`` 是可选可达下载地址；
-    ``oss_object_key`` 是可选对象存储身份。
+    类命名空间；``sha256`` 是归档内容摘要。云端地址和对象键只能由本次已审计
+    wheel 的上传回执补入，不能由投影调用者预置。
     返回：包含发行身份、版本、安装声明、依赖、摘要和远端定位字段的字典。
     异常：项目缺少必须的 ``name`` 或 ``version`` 时传播 ``KeyError``；该投影不
     替代包目录（PackageCatalog）的规范身份。
@@ -290,10 +288,8 @@ def build_package_info(
         "homepage": project.get("homepage", ""),
         "dependencies": list(project.get("dependencies") or []),
         "sha256": sha256,
-        "download_url": download_url,
+        "download_url": "",
     }
-    if oss_object_key:
-        info["oss_object_key"] = oss_object_key
     return info
 
 

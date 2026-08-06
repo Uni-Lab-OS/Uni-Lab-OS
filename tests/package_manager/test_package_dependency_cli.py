@@ -190,6 +190,36 @@ def test_package_inspect_parser_keeps_public_argument_contract(
     assert parsed.out == "/tmp/dist"
 
 
+def test_package_upload_parser_rejects_external_download_url_bypass(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """公共上传命令不得接受绕过本次 wheel 直传的 URL。
+
+    参数：``monkeypatch`` 隔离公共命令行参数。
+    返回：无；断言 argparse 关闭式拒绝历史 ``--download-url``。
+    异常：预期 ``SystemExit``；若参数仍被接受则测试失败。
+    """
+
+    from unilabos.app.main import parse_args
+
+    monkeypatch.setattr(
+        sys,
+        "argv",
+        [
+            "unilab",
+            "package",
+            "upload",
+            "--path",
+            "/tmp/example-package",
+            "--download-url",
+            "https://packages.example/bypass.whl",
+        ],
+    )
+
+    with pytest.raises(SystemExit):
+        parse_args().parse_args()
+
+
 @pytest.mark.parametrize(
     "package_action",
     ("inspect", "build", "upload", "add", "update", "remove"),

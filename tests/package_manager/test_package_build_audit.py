@@ -416,3 +416,149 @@ def test_upload_builds_once_and_publishes_the_same_audited_wheel() -> None:
     assert build_calls == [("/workspace/catalog-lab", "/workspace/dist")]
     assert http_client.uploaded == ["/tmp/catalog_lab-1.2.3-py3-none-any.whl"]
     assert result["artifact"].endswith(".whl")
+
+
+def test_projection_preparation_failure_never_publishes_the_target_wheel(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """任一发布投影准备失败时不得留下作为就绪标志的目标 wheel。
+
+    参数：``tmp_path`` 提供可构建工作区与空产物目录；``monkeypatch`` 在资源投影
+    写入点注入确定失败。
+    返回：无；断言失败发生在目标 wheel 提交前，正式产物目录没有就绪标志。
+    异常：预期测试注入的 ``OSError``；若 wheel 先发布则断言失败。
+    """
+
+    from unilabos.package_manager.package_distribution import build as build_module
+    from unilabos.package_manager.workspace_runtime import compile_package_source
+
+    # ``workspace_root`` 是本轮构建唯一作者源码来源。
+    workspace_root = tmp_path / "workspace"
+    # ``output_root`` 是失败后不得出现正式 wheel 的发布目录。
+    output_root = tmp_path / "dist"
+    output_root.mkdir()
+    # ``previous_marker`` 模拟同版本上一次构建留下的正式就绪标志。
+    previous_marker = output_root / "catalog_lab-1.2.3-py3-none-any.whl"
+    previous_marker.write_bytes(b"previous-ready-generation")
+    _prepare_buildable_package(workspace_root)
+    # ``original_writer`` 保留非资源投影的真实临时文件写入行为。
+    original_writer = build_module._write_output_file
+
+    def fail_resources_projection(target: Path, payload: bytes) -> None:
+        """只在资源投影准备点注入确定文件系统失败。
+
+        参数：``target`` 是候选投影路径；``payload`` 是完整投影字节。
+        返回：非资源投影委托真实写入；资源投影不返回。
+        异常：资源投影固定抛出 ``OSError``。
+        """
+
+        if target.name == "resources.json":
+            raise OSError("resources projection unavailable")
+        original_writer(target, payload)
+
+    monkeypatch.setattr(
+        build_module,
+        "_write_output_file",
+        fail_resources_projection,
+    )
+
+    with pytest.raises(OSError, match="resources projection unavailable"):
+        build_module.build_workspace_package(
+            workspace_root,
+            output_root,
+            compile_catalog=compile_package_source,
+        )
+
+    assert not tuple(output_root.glob("*.whl"))
+    assert not output_root.joinpath("package.catalog.json").exists()
+    assert not output_root.joinpath("package_info.json").exists()
+    assert not output_root.joinpath("resources.json").exists()
+
+
+def test_wheel_audit_rejects_the_callers_symlink_before_resolving_path(
+    tmp_path: Path,
+) -> None:
+    """wheel 审计必须按调用者原始路径拒绝符号链接。
+
+    参数：``tmp_path`` 提供真实已审计 wheel 和指向它的符号链接。
+    返回：无；断言链接即使指向合法 wheel 且摘要匹配也被关闭式拒绝。
+    异常：预期 ``PackageBuildError``；若先 resolve 后检查则测试失败。
+    """
+
+    from unilabos.package_manager.package_distribution import (
+        PackageBuildError,
+        audit_package_wheel,
+        build_workspace_package,
+    )
+    from unilabos.package_manager.workspace_runtime import compile_package_source
+
+    # ``workspace_root`` 是产生合法 wheel 和规范目录的源码工作区。
+    workspace_root = tmp_path / "workspace"
+    _prepare_buildable_package(workspace_root)
+    # ``artifact`` 是符号链接目标对应的可信构建产物。
+    artifact = build_workspace_package(
+        workspace_root,
+        tmp_path / "dist",
+        compile_catalog=compile_package_source,
+    )
+    # ``wheel_link`` 保留调用者提交的符号链接身份，不能被 resolve 隐藏。
+    wheel_link = tmp_path / "linked-wheel.whl"
+    wheel_link.symlink_to(artifact.wheel)
+
+    with pytest.raises(PackageBuildError, match="符号链接"):
+        audit_package_wheel(
+            wheel_link,
+            artifact.catalog,
+            expected_digest=artifact.artifact_digest,
+            compile_catalog=compile_package_source,
+        )
+
+
+def test_target_wheel_is_the_last_published_generation_file(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """正式 wheel 必须晚于全部投影提交并作为代际就绪标志。
+
+    参数：``tmp_path`` 提供可构建工作区；``monkeypatch`` 记录正式文件提交顺序。
+    返回：无；断言三个 JSON 投影在前且 wheel 严格最后。
+    异常：构建或发布顺序漂移时测试失败。
+    """
+
+    from unilabos.package_manager.package_distribution import build as build_module
+    from unilabos.package_manager.workspace_runtime import compile_package_source
+
+    # ``workspace_root`` 是本轮构建唯一作者源码来源。
+    workspace_root = tmp_path / "workspace"
+    _prepare_buildable_package(workspace_root)
+    # ``published_names`` 按实际原子替换顺序记录正式代际文件名。
+    published_names: list[str] = []
+    # ``original_publisher`` 保留真实文件提交行为。
+    original_publisher = build_module._publish_file
+
+    def record_publication(source: Path, target: Path) -> None:
+        """记录并执行一个正式代际文件提交。
+
+        参数：``source`` 是临时候选；``target`` 是正式产物路径。
+        返回：无；成功委托真实原子替换。
+        异常：文件提交失败时传播原始异常。
+        """
+
+        published_names.append(target.name)
+        original_publisher(source, target)
+
+    monkeypatch.setattr(build_module, "_publish_file", record_publication)
+
+    build_module.build_workspace_package(
+        workspace_root,
+        tmp_path / "dist",
+        compile_catalog=compile_package_source,
+    )
+
+    assert published_names[:3] == [
+        "package.catalog.json",
+        "package_info.json",
+        "resources.json",
+    ]
+    assert published_names[-1].endswith(".whl")

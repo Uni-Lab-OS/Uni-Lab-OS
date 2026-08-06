@@ -95,12 +95,11 @@ def upload_package(
     path: str,
     http_client: Any,
     out_dir: str | None = None,
-    download_url: str = "",
 ) -> dict[str, Any]:
     """检查软件包并通过云端 Adapter 发布既有兼容投影。
 
     参数：``path`` 是软件包根；``http_client`` 是鉴权 HTTP Adapter；``out_dir``
-    是产物目录；``download_url`` 是可选显式 wheel 地址。
+    是产物目录。
     返回：云端发布结果。
     异常：检查、鉴权、上传或云端拒绝时保留既有 ``PackageCLIError``/传输异常语义。
     """
@@ -109,7 +108,6 @@ def upload_package(
         path,
         http_client,
         out_dir=out_dir,
-        download_url=download_url,
         package_builder=build_package,
     )
 
@@ -164,13 +162,6 @@ def register_package_subcommands(subparsers: Any) -> None:
             default=None,
             help="Artifact output directory",
         )
-        if action_name == "upload":
-            action_parser.add_argument(
-                "--download-url",
-                dest="download_url",
-                default="",
-                help="Explicit reachable artifact URL",
-            )
 
     add_parser = actions.add_parser(
         "add",
@@ -287,7 +278,6 @@ def cmd_package(args_dict: dict[str, Any], http_client: Any = None) -> None:
             package_path,
             http_client=http_client,
             out_dir=output_directory,
-            download_url=args_dict.get("download_url", "") or "",
         )
         return
     raise PackageCLIError(f"未知 package 子动作：{action}")

@@ -84,13 +84,11 @@ class HttpClientPublicationAdapter:
 def publish_build(
     artifact: PackageBuildArtifact,
     port: PublicationPort,
-    *,
-    download_url: str = "",
 ) -> dict[str, Any]:
     """发布一次已经完成 wheel 来源重编译审计的构建产物。
 
     参数：``artifact`` 是软件包构建（Package Build）深模块的完整结果；``port``
-    是注入的传输 Adapter；``download_url`` 是可选的调用者指定 wheel 地址。
+    是必须上传本次 wheel 的传输 Adapter。
     返回：发布后的软件包信息、资源 DTO、下载地址和 HTTP 状态。
     异常：归档上传没有身份或资源接口返回非成功状态时抛出
     ``PackageCLIError``；``port.publish_resources`` 的传输异常保持原对象和类型
@@ -105,11 +103,7 @@ def publish_build(
     # ``archive_path`` 实际指向与目录摘要绑定的标准 wheel。
     archive_path = publication_input["archive_path"]
     # ``final_url`` 与 ``object_key`` 共同标识本次发布可引用的同一归档产物。
-    final_url, object_key = _resolve_download_target(
-        port,
-        archive_path,
-        download_url,
-    )
+    final_url, object_key = _upload_audited_wheel(port, archive_path)
     package_info["download_url"] = final_url
     if object_key:
         package_info["oss_object_key"] = object_key
@@ -139,15 +133,14 @@ def upload_package(
     path: str,
     http_client: Any,
     out_dir: str | None = None,
-    download_url: str = "",
     *,
     package_builder: PackageBuilder,
 ) -> dict[str, Any]:
     """构建、自审计软件包并把同一 wheel 的兼容投影发布到远端。
 
     参数：``path`` 是软件包根；``http_client`` 是已鉴权的 HTTP Adapter；
-    ``out_dir`` 是可选产物目录；``download_url`` 是可选显式 wheel 地址；
-    ``package_builder`` 是组合根注入的软件包构建（Package Build）Interface。
+    ``out_dir`` 是可选产物目录；``package_builder`` 是组合根注入的软件包构建
+    （Package Build）Interface。
     返回：发布后的 ``package_info``、资源 DTO、下载地址和 HTTP 状态。
     异常：鉴权客户端缺失、归档上传或资源发布失败时抛出
     ``PackageCLIError``。
@@ -164,15 +157,13 @@ def upload_package(
     publication = publish_build(
         artifact,
         HttpClientPublicationAdapter(http_client),
-        download_url=download_url,
     )
     print_status(
         "package upload 完成，设备模板已落库 package_info + source_registry",
         "info",
     )
     print_status(
-        "  download_url : "
-        f"{publication['download_url'] or '(空，请确认 OSS 或 --download-url)'}",
+        f"  download_url : {publication['download_url']}",
         "info",
     )
     # ``package_info`` 是状态输出引用的同一已发布软件包身份投影。
@@ -185,35 +176,26 @@ def upload_package(
     return publication
 
 
-def _resolve_download_target(
+def _upload_audited_wheel(
     port: PublicationPort,
     archive_path: str,
-    download_url: str,
 ) -> tuple[str, str]:
-    """确定软件包归档的可达地址。
+    """上传本次已审计 wheel 并读取云端身份。
 
-    参数：``port`` 提供产物上传 Interface；``archive_path`` 是本地归档；
-    ``download_url`` 是可选的调用者指定地址。
+    参数：``port`` 提供产物上传 Interface；``archive_path`` 是本次本地 wheel。
     返回：公开下载地址与可选对象键。
-    异常：直传失败或未返回任何可引用身份时抛出 ``PackageCLIError``。
+    异常：直传失败或未返回任何可引用身份时抛出 ``PackageCLIError``；不存在
+    外部 URL 绕行。
     """
-
-    if download_url:
-        print_status(f"使用显式 download_url：{download_url}", "info")
-        return download_url, ""
 
     print_status(f"上传已审计 wheel 到 OSS（预签名直传）：{archive_path}", "info")
     try:
         # ``public_url`` 与 ``object_key`` 共同标识云端可引用的归档产物。
         public_url, object_key = port.upload_artifact(archive_path)
     except Exception as error:
-        raise PackageCLIError(
-            f"归档预签名直传失败：{error}；可改用 --download-url 指向可达地址"
-        ) from error
+        raise PackageCLIError(f"已审计 wheel 预签名直传失败：{error}") from error
     if not public_url and not object_key:
-        raise PackageCLIError(
-            "OSS 直传未返回 public_url/object_key；可改用 --download-url"
-        )
+        raise PackageCLIError("OSS 直传未返回 public_url/object_key")
     return public_url, object_key
 
 
