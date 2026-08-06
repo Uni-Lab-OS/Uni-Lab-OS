@@ -11,6 +11,22 @@ from .catalog import (
     PackageDiagnostic,
 )
 from .compiler import compile_package_source, normalize_distribution_name
+from .device_package import (
+    DevicePackageDownloadResult,
+    DevicePackageError,
+    configuration_schema_for_definition,
+    device_definition_from_catalog,
+    download_device_package,
+    validate_configuration_for_definition,
+)
+from .device_provisioning import (
+    DeviceGraphMutationResult,
+    DeviceProvisioningError,
+    remove_device_instance,
+    restore_device_graph,
+    stage_device_instance,
+    update_device_instance,
+)
 from .sources import (
     CachedArchiveSource,
     InstalledDistributionSource,
@@ -23,6 +39,10 @@ __all__ = [
     "DefinitionCatalog",
     "DefinitionRecord",
     "DistributionIdentity",
+    "DevicePackageDownloadResult",
+    "DevicePackageError",
+    "DeviceGraphMutationResult",
+    "DeviceProvisioningError",
     "InstalledDistributionSource",
     "PackageAsset",
     "PackageAssetResolver",
@@ -32,5 +52,13 @@ __all__ = [
     "PackageSource",
     "WorkspaceSource",
     "compile_package_source",
+    "configuration_schema_for_definition",
+    "device_definition_from_catalog",
+    "download_device_package",
     "normalize_distribution_name",
+    "remove_device_instance",
+    "restore_device_graph",
+    "stage_device_instance",
+    "update_device_instance",
+    "validate_configuration_for_definition",
 ]
