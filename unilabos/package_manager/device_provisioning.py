@@ -8,9 +8,10 @@ import os
 import re
 import stat
 import tempfile
+from collections.abc import Mapping
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any, Mapping
+from typing import Any
 from uuid import UUID, uuid4
 
 from .community import CommunityPackageError, load_cached_community_package
@@ -558,13 +559,36 @@ def _commit_graph(path: Path, graph: dict[str, Any], original: bytes) -> Path:
 
 
 def _write_backup(path: Path, payload: bytes, graph: Mapping[str, Any]) -> Path:
-    """按原图指纹创建不可覆盖的同目录备份并完成 fsync。"""
+    """按原图语义指纹创建或复用不可覆盖的同目录备份。
 
+    ``path`` 是当前设备图路径，``payload`` 是变更前必须可恢复的原始字节，
+    ``graph`` 是同一字节已经校验的设备图语义。返回同目录受信备份路径。
+    JSON 排版不同但语义相同的既有备份可安全复用；符号链接、损坏内容或不同
+    设备图即使文件名碰撞也会抛出 :class:`DeviceProvisioningError`。新建备份在
+    返回前同步文件与目录，既有备份永不覆盖。
+    """
+
+    # 设备图语义指纹只用于确定备份身份和文件名，不受 JSON 排版影响。
     fingerprint = _graph_fingerprint(graph).removeprefix("sha256:")[:16]
     backup = path.with_name(f"{path.name}.unilab-backup-{fingerprint}.json")
     if backup.exists():
-        if backup.is_symlink() or backup.read_bytes() != payload:
-            raise DeviceProvisioningError("设备图备份身份冲突")
+        if backup.is_symlink():
+            raise DeviceProvisioningError("设备图备份身份冲突：既有备份是符号链接")
+        try:
+            existing_payload = backup.read_bytes()
+        except OSError as exc:
+            raise DeviceProvisioningError(
+                f"设备图备份身份冲突：既有备份无法读取: {exc}"
+            ) from exc
+        if existing_payload == payload:
+            return backup
+        try:
+            # 既有备份语义用于区分无害的 JSON 重排与真实身份冲突。
+            existing_graph = _decode_graph(existing_payload, backup)
+        except DeviceProvisioningError as exc:
+            raise DeviceProvisioningError("设备图备份身份冲突：既有备份已损坏") from exc
+        if existing_graph != graph:
+            raise DeviceProvisioningError("设备图备份身份冲突：既有备份属于不同设备图")
         return backup
     try:
         with backup.open("xb") as stream:
