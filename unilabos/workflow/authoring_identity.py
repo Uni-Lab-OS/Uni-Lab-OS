@@ -75,7 +75,8 @@ def declared_workflow_uuid(python_source: str) -> str | None:
         for decorator in statement.decorator_list:
             if not isinstance(decorator, ast.Call):
                 continue
-            if _expression_path(decorator.func, imports) not in _WORKFLOW_DECORATOR_PATHS:
+            decorator_path = _expression_path(decorator.func, imports)
+            if decorator_path not in _WORKFLOW_DECORATOR_PATHS:
                 continue
             workflow_uuid_keywords = [
                 keyword
