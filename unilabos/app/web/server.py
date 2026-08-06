@@ -5,17 +5,18 @@ Web服务器模块
 """
 
 import webbrowser
+from typing import Any
 
 from fastapi import FastAPI, Request
 from fastapi.middleware.cors import CORSMiddleware
 from starlette.responses import Response
 
-from unilabos.utils.fastapi.log_adapter import setup_fastapi_logging
-from unilabos.utils.log import info, error
-from unilabos.utils.tracing import install_http_tracing
 from unilabos.app.web.api import setup_api_routes
 from unilabos.app.web.pages import setup_web_pages
 from unilabos.config.config import BasicConfig
+from unilabos.utils.fastapi.log_adapter import setup_fastapi_logging
+from unilabos.utils.log import error, info
+from unilabos.utils.tracing import install_http_tracing
 
 # 创建FastAPI应用
 app = FastAPI(
@@ -31,6 +32,39 @@ install_http_tracing(app)
 pages = None
 workflow_routes_mounted = False
 resource_contract_routes_mounted = False
+
+
+class _CurrentAuthoringTransform:
+    """逐请求委派到工作流服务（WorkflowService）的当前可信创作转换。"""
+
+    def __init__(self, workflow_service: Any) -> None:
+        """绑定身份稳定的工作流服务；参数可在应用后替换其编译器代际。"""
+
+        self._workflow_service = workflow_service
+
+    def _current(self) -> Any:
+        """返回当前编译器；目录重建失败并撤销入口时关闭失败。"""
+
+        compiler = self._workflow_service.compiler
+        if compiler is None:
+            raise RuntimeError("当前工作流创作模板目录不可用")
+        return compiler
+
+    def compile(self, **values: Any) -> Any:
+        """使用当前目录代际编译工作流源码（Workflow Source）。"""
+
+        return self._current().compile(**values)
+
+    def generate_python(self, **values: Any) -> Any:
+        """使用当前目录代际生成规范工作流源码（Workflow Source）。"""
+
+        return self._current().generate_python(**values)
+
+    def validate(self, **values: Any) -> Any:
+        """使用当前目录代际共同校验图和工作流源码（Workflow Source）。"""
+
+        return self._current().validate(**values)
+
 
 # noinspection PyTypeChecker
 app.add_middleware(
@@ -92,11 +126,11 @@ def setup_server() -> FastAPI:
     # /workflows 表示定义，/workflow-tasks 表示运行。
     if not workflow_routes_mounted and BasicConfig.working_dir:
         try:
-            from unilabos.app.workflow_api import install_workflow_api
             from unilabos.app.scheduler.integration import (
                 get_edge_scheduler,
                 get_inventory_service,
             )
+            from unilabos.app.workflow_api import install_workflow_api
             from unilabos.workflow.composition import (
                 compose_local_workflow_template_runtime,
                 compose_workflow_runtime,
@@ -134,11 +168,11 @@ def setup_server() -> FastAPI:
                 app,
                 workflow_service,
                 template_snapshot_provider=template_projection,
-                authoring_transform=workflow_service.compiler,
+                authoring_transform=_CurrentAuthoringTransform(workflow_service),
             )
             workflow_routes_mounted = True
         except Exception as e:  # noqa: BLE001 - unrelated Edge routes remain available
-            error(f"[Web] 挂载 Backend Workflow 合同失败: {str(e)}")
+            error(f"[Web] 挂载 Backend Workflow 合同失败: {e!s}")
 
     # Edge 调度器与 Host 物料路由独立挂载；默认 embedded 物料服务不要求 --edge_scheduler。
     try:
@@ -160,15 +194,17 @@ def setup_server() -> FastAPI:
         )
         inventory_service = get_inventory_service()
         if inventory_service is not None:
+            from unilabos.app.scheduler.inventory.api import (
+                create_legacy_material_router,
+            )
+            from unilabos.app.scheduler.inventory.api import (
+                create_router as create_inventory_router,
+            )
             from unilabos.app.scheduler.inventory.backend_api import (
                 install_backend_resource_api,
             )
             from unilabos.app.scheduler.inventory.backend_contract import (
                 BackendResourceService,
-            )
-            from unilabos.app.scheduler.inventory.api import (
-                create_legacy_material_router,
-                create_router as create_inventory_router,
             )
             from unilabos.app.scheduler.inventory.layout import create_lab_router
 
@@ -184,21 +220,23 @@ def setup_server() -> FastAPI:
             app.include_router(create_legacy_material_router(inventory_service))
             app.include_router(create_lab_router(inventory_service))
     except Exception as e:  # noqa: BLE001 - 调度器路由挂载失败不影响主服务
-        error(f"[Web] 挂载 Edge 调度器路由失败: {str(e)}")
+        error(f"[Web] 挂载 Edge 调度器路由失败: {e!s}")
 
     # 设置页面路由
     try:
         setup_web_pages(pages)
         # info("[Web] 已加载Web UI模块")
     except ImportError as e:
-        info(f"[Web] 未找到Web页面模块: {str(e)}")
-    except Exception as e:
-        error(f"[Web] 加载Web页面模块时出错: {str(e)}")
+        info(f"[Web] 未找到Web页面模块: {e!s}")
+    except Exception as e:  # noqa: BLE001 - 页面扩展不能阻断 API 服务
+        error(f"[Web] 加载Web页面模块时出错: {e!s}")
 
     return app
 
 
-def start_server(host: str = "0.0.0.0", port: int = 8002, open_browser: bool = True) -> bool:
+def start_server(
+    host: str = "0.0.0.0", port: int = 8002, open_browser: bool = True
+) -> bool:
     """
     启动服务器
 
@@ -212,6 +250,7 @@ def start_server(host: str = "0.0.0.0", port: int = 8002, open_browser: bool = T
     """
     import threading
     import time
+
     from uvicorn import Config, Server
 
     # 设置服务器
@@ -227,8 +266,8 @@ def start_server(host: str = "0.0.0.0", port: int = 8002, open_browser: bool = T
         info(f"[Web] 正在打开浏览器访问: {url}")
         try:
             webbrowser.open(url)
-        except Exception as e:
-            error(f"[Web] 无法打开浏览器: {str(e)}")
+        except Exception as e:  # noqa: BLE001 - 浏览器启动失败不能阻断服务器
+            error(f"[Web] 无法打开浏览器: {e!s}")
 
     # 启动服务器
     info(f"[Web] 启动FastAPI服务器: {host}:{port}")
@@ -238,7 +277,9 @@ def start_server(host: str = "0.0.0.0", port: int = 8002, open_browser: bool = T
     server = Server(config)
 
     # 启动服务器线程
-    server_thread = threading.Thread(target=server.run, daemon=True, name="uvicorn_server")
+    server_thread = threading.Thread(
+        target=server.run, daemon=True, name="uvicorn_server"
+    )
     server_thread.start()
 
     # info("[Web] Server started, monitoring for restart requests...")
@@ -247,7 +288,10 @@ def start_server(host: str = "0.0.0.0", port: int = 8002, open_browser: bool = T
     import unilabos.app.main as main_module
 
     while server_thread.is_alive():
-        if hasattr(main_module, "_restart_requested") and main_module._restart_requested:
+        if (
+            hasattr(main_module, "_restart_requested")
+            and main_module._restart_requested
+        ):
             info(
                 f"[Web] Restart requested via WebSocket, reason: {getattr(main_module, '_restart_reason', 'unknown')}"
             )
