@@ -5,7 +5,7 @@ from __future__ import annotations
 import logging
 import re
 from collections.abc import Mapping
-from typing import Any, Protocol, Self
+from typing import Any, Callable, Protocol, Self
 
 from fastapi import APIRouter, FastAPI, Request
 from fastapi.exceptions import RequestValidationError
@@ -186,6 +186,52 @@ class AuthoringTransform(Protocol):
         """共同校验图与源码；参数是闭合请求字段，返回候选编译结果。"""
 
 
+class AuthoringTransformUnavailable(RuntimeError):
+    """当前可信创作转换目录不可用。"""
+
+
+class LiveAuthoringTransform:
+    """在每次 HTTP 转换时解析当前创作编译器的稳定代理。
+
+    工作流应用会原子重建模板目录并替换 ``WorkflowService.compiler``。HTTP
+    Router 的生命周期更长，因此不能在启动时永久捕获旧编译器对象；本代理保留
+    稳定路由身份，同时让每次调用都落到服务当前发布的目录代际。
+    """
+
+    def __init__(
+        self,
+        provider: Callable[[], AuthoringTransform | None],
+    ) -> None:
+        """保存动态编译器提供者；参数必须可调用，返回无。"""
+
+        if not callable(provider):
+            raise TypeError("provider 必须是可调用对象")
+        self._provider = provider
+
+    def _current(self) -> AuthoringTransform:
+        """返回当前编译器；目录重建失败关闭入口时抛出稳定不可用错误。"""
+
+        engine = self._provider()
+        if engine is None:
+            raise AuthoringTransformUnavailable("创作模板目录暂不可用")
+        return engine
+
+    def compile(self, **values: Any) -> CandidateCompilation:
+        """使用当前目录编译源码。"""
+
+        return self._current().compile(**values)
+
+    def generate_python(self, **values: Any) -> CandidateCompilation:
+        """使用当前目录从候选图生成规范 Python。"""
+
+        return self._current().generate_python(**values)
+
+    def validate(self, **values: Any) -> CandidateCompilation:
+        """使用当前目录共同校验图与源码。"""
+
+        return self._current().validate(**values)
+
+
 def _assert_entity_fields(
     values: Any,
     *,
@@ -359,6 +405,8 @@ def _transform_response(
                 WorkflowError("template_catalog_unavailable")
             )
         return workflow_success_response(data)
+    except AuthoringTransformUnavailable:
+        return workflow_error_response(WorkflowError("template_catalog_unavailable"))
     except Exception:
         _LOGGER.exception("可信工作流创作纯转换失败")
         return workflow_error_response(WorkflowError("internal_error"))
@@ -462,7 +510,9 @@ __all__ = [
     "AuthoringCompileRequest",
     "AuthoringGeneratePythonRequest",
     "AuthoringTransform",
+    "AuthoringTransformUnavailable",
     "AuthoringValidateRequest",
+    "LiveAuthoringTransform",
     "create_authoring_transform_app",
     "create_authoring_transform_router",
 ]

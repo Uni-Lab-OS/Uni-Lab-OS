@@ -93,6 +93,9 @@ def setup_server() -> FastAPI:
     if not workflow_routes_mounted and BasicConfig.working_dir:
         try:
             from unilabos.app.workflow_api import install_workflow_api
+            from unilabos.app.workflow_authoring_transform import (
+                LiveAuthoringTransform,
+            )
             from unilabos.app.scheduler.integration import (
                 get_edge_scheduler,
                 get_inventory_service,
@@ -134,7 +137,9 @@ def setup_server() -> FastAPI:
                 app,
                 workflow_service,
                 template_snapshot_provider=template_projection,
-                authoring_transform=workflow_service.compiler,
+                authoring_transform=LiveAuthoringTransform(
+                    lambda: workflow_service.compiler
+                ),
             )
             workflow_routes_mounted = True
         except Exception as e:  # noqa: BLE001 - unrelated Edge routes remain available

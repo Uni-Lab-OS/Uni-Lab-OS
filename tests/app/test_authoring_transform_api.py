@@ -9,6 +9,7 @@ import pytest
 from fastapi.testclient import TestClient
 
 from unilabos.app.workflow_authoring_transform import (
+    LiveAuthoringTransform,
     create_authoring_transform_app,
     create_authoring_transform_router,
 )
@@ -321,6 +322,41 @@ def test_router_contains_only_the_three_pure_routes() -> None:
         ("/api/v1/authoring/generate-python", frozenset({"POST"})),
         ("/api/v1/authoring/validate", frozenset({"POST"})),
     }
+
+
+def test_live_transform_uses_the_current_engine_for_every_request() -> None:
+    """目录代际替换后，现有 HTTP Router 必须立即调用新编译器。
+
+    参数：无。返回：无；先后替换动态提供者中的引擎并关闭目录，证明请求不会
+    永久捕获启动时对象，关闭状态映射为稳定目录不可用业务错误。
+    """
+
+    first = RecordingTransformEngine()
+    second = RecordingTransformEngine()
+    current: list[RecordingTransformEngine | None] = [first]
+    live = LiveAuthoringTransform(lambda: current[0])
+
+    with TestClient(create_authoring_transform_app(live)) as client:
+        first_response = client.post(
+            "/api/v1/authoring/generate-python",
+            json=_generate_body(),
+        )
+        current[0] = second
+        second_response = client.post(
+            "/api/v1/authoring/generate-python",
+            json=_generate_body(),
+        )
+        current[0] = None
+        unavailable_response = client.post(
+            "/api/v1/authoring/generate-python",
+            json=_generate_body(),
+        )
+
+    _assert_success(first_response.json())
+    _assert_success(second_response.json())
+    assert [item[0] for item in first.calls] == ["generate_python"]
+    assert [item[0] for item in second.calls] == ["generate_python"]
+    assert unavailable_response.json() == CATALOG_UNAVAILABLE
 
 
 @pytest.mark.parametrize(
