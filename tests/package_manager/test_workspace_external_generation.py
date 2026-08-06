@@ -10,6 +10,7 @@ from tests.package_manager.test_package_dependency_lock import _write_package
 from unilabos.app.community_packages import prepare_community_packages
 from unilabos.app.workspace_package_bootstrap import local_package_namespaces
 from unilabos.package_manager import (
+    PackageCatalog,
     PackageDependencyManager,
     WorkspaceSource,
     compile_package_source,
@@ -235,7 +236,7 @@ def test_runtime_compiles_each_explicit_package_exactly_once(
     # ``compile_roots`` 记录依赖编排实际观察的来源根，证明每项只编译一次。
     compile_roots: list[Path] = []
 
-    def compile_generation_once(source: WorkspaceSource):
+    def compile_generation_once(source: WorkspaceSource) -> PackageCatalog:
         """记录完整工作区候选代执行的每次静态目录编译。
 
         参数：``source`` 是主包或锁定外部包的显式工作区来源。

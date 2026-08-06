@@ -4,12 +4,128 @@ from __future__ import annotations
 
 import ast
 import importlib.util
+from collections.abc import Iterable
 from pathlib import Path
 from types import SimpleNamespace
 
 import pytest
 
 from tests.package_manager.test_package_dependency_lock import _write_package
+from unilabos.package_manager.package_catalog import PackageCatalog
+
+
+def _iter_imports_with_enclosing_function(
+    node: ast.AST,
+    *,
+    enclosing_function: str | None = None,
+) -> Iterable[tuple[ast.Import | ast.ImportFrom, str | None]]:
+    """递归枚举导入节点及其最内层所属函数。
+
+    参数：``node`` 是当前 AST 子树；``enclosing_function`` 是父子树所属的最内层
+    函数名，模块级为 ``None``。
+    返回：按源码树顺序产生导入节点与所属函数名，不执行被检查源码。
+    异常：无；Python 解析错误由调用者在进入本函数前传播。
+    """
+
+    # ``current_function`` 在进入同步或异步函数时推进精确白名单上下文。
+    current_function = (
+        node.name
+        if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef))
+        else enclosing_function
+    )
+    if isinstance(node, (ast.Import, ast.ImportFrom)):
+        yield node, current_function
+    for child_node in ast.iter_child_nodes(node):
+        # ``child_node`` 继承当前最内层函数，嵌套函数会在下一层自行替换。
+        yield from _iter_imports_with_enclosing_function(
+            child_node,
+            enclosing_function=current_function,
+        )
+
+
+def _package_distribution_reverse_dependency_violations(
+    module_root: Path,
+) -> list[str]:
+    """检查包分发（Package Distribution）全部源码的反向层依赖。
+
+    参数：``module_root`` 是待检查 Module 根，文件按相对路径稳定排序。
+    返回：``文件:行号:模块`` 格式的稳定违规列表；只允许规范默认编译器函数内
+    唯一、无别名地延迟导入工作区目录编译器。
+    异常：源码不可读或语法无效时传播文件系统或 ``SyntaxError``，不得跳过检查。
+    """
+
+    # ``forbidden_prefixes`` 是包分发层禁止拥有的历史或高层 Module 闭集。
+    forbidden_prefixes = (
+        "unilabos.package_manager.dependency_lock",
+        "unilabos.package_manager.installation",
+        "unilabos.package_manager.publication",
+        "unilabos.package_manager.workspace_runtime",
+        "unilabos.package_manager.driver_runtime",
+    )
+    # ``violations`` 按文件和 AST 顺序保存精确越层依赖位置。
+    violations: list[str] = []
+    for source_file in sorted(module_root.rglob("*.py")):
+        # ``relative_file`` 是报告和唯一兼容桥匹配使用的 Module 内稳定路径。
+        relative_file = source_file.relative_to(module_root)
+        # ``module_parts`` 用于恢复相对 import 所在 Python 包身份。
+        module_parts = list(relative_file.with_suffix("").parts)
+        if module_parts[-1] == "__init__":
+            module_parts.pop()
+        # ``package_name`` 是 ``resolve_name`` 解析相对导入所需当前包身份。
+        package_name = ".".join(
+            [
+                "unilabos",
+                "package_manager",
+                "package_distribution",
+                *module_parts[:-1],
+            ]
+        )
+        if relative_file.name == "__init__.py":
+            package_name = ".".join(
+                [
+                    "unilabos",
+                    "package_manager",
+                    "package_distribution",
+                    *module_parts,
+                ]
+            )
+        # ``syntax_tree`` 只观察依赖方向，不导入或执行被检查 Module。
+        syntax_tree = ast.parse(source_file.read_text(encoding="utf-8"))
+        for node, enclosing_function in _iter_imports_with_enclosing_function(
+            syntax_tree
+        ):
+            if isinstance(node, ast.Import):
+                # ``imported_names`` 是普通 import 声明的完整模块身份集合。
+                imported_names = [alias.name for alias in node.names]
+            else:
+                # ``imported_name`` 结合当前包把相对声明解析为绝对模块身份。
+                imported_name = node.module or ""
+                if node.level:
+                    imported_name = importlib.util.resolve_name(
+                        "." * node.level + imported_name,
+                        package_name,
+                    )
+                imported_names = [imported_name]
+            for imported_name in imported_names:
+                # ``allowed_default_compiler_bridge`` 是唯一接受的函数内反向依赖：
+                # 历史调用未注入编译器时，延迟取得规范工作区目录编译器。
+                allowed_default_compiler_bridge = (
+                    relative_file.as_posix() == "dependency_manager.py"
+                    and enclosing_function == "_default_compile_package_source"
+                    and isinstance(node, ast.ImportFrom)
+                    and imported_name
+                    == "unilabos.package_manager.workspace_runtime.discovery"
+                    and [(alias.name, alias.asname) for alias in node.names]
+                    == [("compile_package_source", None)]
+                )
+                if allowed_default_compiler_bridge:
+                    continue
+                if (
+                    imported_name == "unilabos.package_manager"
+                    or imported_name.startswith(forbidden_prefixes)
+                ):
+                    violations.append(f"{relative_file}:{node.lineno}:{imported_name}")
+    return violations
 
 
 def test_new_package_distribution_interface_manages_explicit_dependency(
@@ -50,7 +166,7 @@ def test_new_package_distribution_interface_manages_explicit_dependency(
     # ``compiled_roots`` 记录两个公开操作实际委托给同一目录编译 Interface 的来源。
     compiled_roots: list[Path] = []
 
-    def compile_catalog(source: WorkspaceSource):
+    def compile_catalog(source: WorkspaceSource) -> PackageCatalog:
         """记录包分发（Package Distribution）公开 Interface 的每次目录编译。
 
         参数：``source`` 是主工作区或显式外部包的安全来源。
@@ -185,12 +301,12 @@ def test_internal_callers_depend_on_package_distribution_interface() -> None:
 
 
 def test_package_distribution_module_has_no_reverse_layer_dependency() -> None:
-    """包分发（Package Distribution）加载时不反向导入历史实现或运行时层。
+    """包分发（Package Distribution）全树不反向依赖历史实现或运行时层。
 
     参数：无。
-    返回：无；解析新 Module 的模块级 import 并断言依赖只指向自身或底层能力。
-    异常：加载阶段出现历史根实现、工作区运行时或驱动运行时依赖时测试失败；
-    未注入编译器的遗留直接调用允许函数内延迟兼容桥。
+    返回：无；解析新 Module 的全部顶层和函数内 import，仅允许默认编译器函数内
+    的精确延迟兼容桥。
+    异常：其他位置出现历史根实现、工作区运行时或驱动运行时依赖时测试失败。
     """
 
     # ``module_root`` 是包分发（Package Distribution）新 Module 的源码边界。
@@ -200,66 +316,41 @@ def test_package_distribution_module_has_no_reverse_layer_dependency() -> None:
         / "package_manager"
         / "package_distribution"
     )
-    # ``forbidden_prefixes`` 防止分发实现回流到历史 wrapper 或高层运行时。
-    forbidden_prefixes = (
-        "unilabos.package_manager.dependency_lock",
-        "unilabos.package_manager.installation",
-        "unilabos.package_manager.publication",
-        "unilabos.package_manager.workspace_runtime",
-        "unilabos.package_manager.driver_runtime",
-    )
-    # ``violations`` 记录相对文件、行号和越层导入，便于修复依赖方向。
-    violations: list[str] = []
-    for source_file in sorted(module_root.rglob("*.py")):
-        # ``relative_file`` 是不绑定工作树绝对路径的 Module 内文件身份。
-        relative_file = source_file.relative_to(module_root)
-        # ``module_parts`` 用于恢复相对 import 所在 Python 包身份。
-        module_parts = list(relative_file.with_suffix("").parts)
-        if module_parts[-1] == "__init__":
-            module_parts.pop()
-        # ``package_name`` 是 ``resolve_name`` 解析相对导入所需当前包。
-        package_name = ".".join(
-            [
-                "unilabos",
-                "package_manager",
-                "package_distribution",
-                *module_parts[:-1],
-            ]
-        )
-        if relative_file.name == "__init__.py":
-            package_name = ".".join(
-                [
-                    "unilabos",
-                    "package_manager",
-                    "package_distribution",
-                    *module_parts,
-                ]
-            )
-        # ``syntax_tree`` 只用于读取 import 依赖，不触发任何安装或网络操作。
-        syntax_tree = ast.parse(source_file.read_text(encoding="utf-8"))
-        # 只检查模块加载会执行的顶层 import；函数内延迟默认编译器属于明确兼容桥。
-        for node in syntax_tree.body:
-            if isinstance(node, ast.Import):
-                # ``imported_names`` 是普通 import 的绝对 Module 身份集合。
-                imported_names = [alias.name for alias in node.names]
-            elif isinstance(node, ast.ImportFrom):
-                imported_name = node.module or ""
-                if node.level:
-                    imported_name = importlib.util.resolve_name(
-                        "." * node.level + imported_name,
-                        package_name,
-                    )
-                imported_names = [imported_name]
-            else:
-                continue
-            for imported_name in imported_names:
-                if (
-                    imported_name == "unilabos.package_manager"
-                    or imported_name.startswith(forbidden_prefixes)
-                ):
-                    violations.append(f"{relative_file}:{node.lineno}:{imported_name}")
+    # ``violations`` 必须为空，且伪非法函数回归测试已证明 helper 不会漏检。
+    violations = _package_distribution_reverse_dependency_violations(module_root)
 
     assert violations == []
+
+
+def test_reverse_dependency_guard_rejects_non_whitelisted_function_import(
+    tmp_path: Path,
+) -> None:
+    """依赖方向守卫必须拒绝白名单函数以外的函数内运行时反向导入。
+
+    参数：``tmp_path`` 提供一个隔离的伪包分发（Package Distribution）源码根。
+    返回：无；断言相同运行时导入出现在其他函数时仍被报告为越层依赖。
+    异常：守卫错误跳过全部函数内导入时，精确违规列表断言失败。
+    """
+
+    # ``module_root`` 是只包含一个非法函数内反向导入的伪 Module 边界。
+    module_root = tmp_path / "package_distribution"
+    module_root.mkdir()
+    # ``source_file`` 模拟非白名单函数偷偷依赖工作区运行时（Workspace Runtime）。
+    source_file = module_root / "rogue.py"
+    source_file.write_text(
+        "def load_runtime_compiler():\n"
+        "    from unilabos.package_manager.workspace_runtime.discovery "
+        "import compile_package_source\n"
+        "    return compile_package_source\n",
+        encoding="utf-8",
+    )
+
+    # ``violations`` 必须包含非法函数内导入，证明白名单不会扩大到整棵 AST。
+    violations = _package_distribution_reverse_dependency_violations(module_root)
+
+    assert violations == [
+        "rogue.py:2:unilabos.package_manager.workspace_runtime.discovery"
+    ]
 
 
 def test_publication_port_uploads_artifact_before_publishing_resources() -> None:
