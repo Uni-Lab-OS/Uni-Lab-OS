@@ -294,7 +294,7 @@ def prepare_workspace_registry_runtime(
     graph_snapshot = _freeze_graph_json(graph_data)
     assert isinstance(graph_snapshot, Mapping)
     activation_plan = registry_snapshot.select(graph_snapshot)
-    workflow_source_plan = _workflow_source_plan_from_catalog(
+    workflow_source_plan = workflow_source_plan_from_catalog(
         source=workspace_source,
         catalog=catalog,
     )
@@ -455,7 +455,7 @@ def _thaw_graph_json(value: Any) -> Any:
     raise TypeError(f"物理图快照含不支持的值: {type(value).__name__}")
 
 
-def _workflow_source_plan_from_catalog(
+def workflow_source_plan_from_catalog(
     *,
     source: WorkspaceSource,
     catalog: PackageCatalog,
@@ -527,6 +527,9 @@ def _workflow_source_registration(
         package_root=package_root,
         relative_path=relative_path,
         source_uri=source_uri,
+        module=definition.module,
+        symbol=definition.symbol,
+        definition_content_hash=definition.content_hash,
     )
 
 
@@ -534,4 +537,5 @@ __all__ = [
     "WorkspaceRegistryRuntime",
     "prepare_workspace_registry_runtime",
     "publish_registry_snapshot",
+    "workflow_source_plan_from_catalog",
 ]

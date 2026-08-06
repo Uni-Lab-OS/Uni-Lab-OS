@@ -48,6 +48,9 @@ class EditableSourceRegistration:
     package_root: Path
     relative_path: str
     source_uri: str
+    module: str | None = None
+    symbol: str | None = None
+    definition_content_hash: str | None = None
 
 
 @dataclass(frozen=True)

@@ -449,6 +449,11 @@ def test_workflow_source_plan_reuses_compiled_catalog_without_manifest_reread(
     assert registrations[0].package_root == source.root / "runtime_lab"
     assert registrations[0].relative_path == "workflows/prepare.py"
     assert registrations[0].source_uri == ("package://runtime_lab/workflows/prepare.py")
+    assert registrations[0].module == "runtime_lab.workflows.prepare"
+    assert registrations[0].symbol == "prepare"
+    assert registrations[0].definition_content_hash == (
+        runtime.catalog.definitions.workflows[0].content_hash
+    )
     assert startup_arguments["workflow_editable_package_root"] is None
     assert not hasattr(runtime.workflow_source_plan, "workflow_task")
 

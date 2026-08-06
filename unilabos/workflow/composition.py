@@ -385,6 +385,9 @@ def compose_local_workflow_template_runtime(
                 "package_root": str(item.package_root),
                 "relative_path": item.relative_path,
                 "source_uri": item.source_uri,
+                "module": item.module,
+                "symbol": item.symbol,
+                "definition_content_hash": item.definition_content_hash,
             }
             for item in publication_plan.registrations
         )

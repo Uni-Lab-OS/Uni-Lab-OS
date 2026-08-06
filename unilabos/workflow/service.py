@@ -1026,7 +1026,17 @@ class WorkflowService:
     def reconcile_registered_source(
         self,
         workflow_uuid: str,
+        *,
+        _refresh_catalog_dependent_state: bool = False,
     ) -> Dict[str, Any]:
+        """协调一个已注册工作流源码及其可重建创作派生状态。
+
+        参数：``workflow_uuid`` 是工作流（Workflow）稳定身份；
+        ``_refresh_catalog_dependent_state`` 仅供同服务在发布目录变化后强制重编译
+        目录相关诊断或候选版本（Candidate）。返回：最新创作聚合。异常：来源、
+        编译或持久化失败时传播稳定工作流错误；本函数不发布模板目录。
+        """
+
         workflow_uuid = self._get_authoring_workflow(workflow_uuid)["uuid"]
         with self._authoring_lock(workflow_uuid):
             workflow = self._get_authoring_workflow(workflow_uuid)
@@ -1114,6 +1124,7 @@ class WorkflowService:
                 actual_hash == record["observed_draft_hash"]
                 and not invalid_writeback_marker
                 and not (actual_hash is None and record.get("candidate") is not None)
+                and not _refresh_catalog_dependent_state
             ):
                 return self.get_authoring(workflow_uuid)
 
@@ -1489,7 +1500,7 @@ class WorkflowService:
                         record=fallback_record,
                     )
 
-            return {
+            result = {
                 "apply_result": {
                     "kind": candidate["changeset"]["kind"],
                     "previous_workflow_revision": previous_revision,
@@ -1500,6 +1511,46 @@ class WorkflowService:
                 },
                 "authoring": authoring,
             }
+        self._refresh_catalog_dependent_sources(
+            mutated_workflow_uuid=workflow_uuid,
+            warnings=warnings,
+        )
+        return result
+
+    def _refresh_catalog_dependent_sources(
+        self,
+        *,
+        mutated_workflow_uuid: str,
+        warnings: List[Dict[str, str]],
+    ) -> None:
+        """在工作流发布后刷新其他活动来源的目录相关派生编译结果。
+
+        参数：``mutated_workflow_uuid`` 是刚完成应用的工作流身份；``warnings``
+        收集提交后无法回滚的刷新警告。返回：无；无候选且无诊断的稳定已应用来源
+        不重编译。异常：单项刷新异常被隔离并转成警告，不把已提交应用伪装成失败。
+        """
+
+        for registration in self.list_registered_sources():
+            # ``dependent_uuid`` 是可能引用新发布合同的另一活动工作流身份。
+            dependent_uuid = registration["workflow_uuid"]
+            if dependent_uuid == mutated_workflow_uuid:
+                continue
+            # ``record`` 的候选和诊断都是随模板目录变化失效的可重建投影。
+            record = self._store.get_authoring_record(dependent_uuid)
+            if record.get("candidate") is None and not record.get("diagnostics"):
+                continue
+            try:
+                self.reconcile_registered_source(
+                    dependent_uuid,
+                    _refresh_catalog_dependent_state=True,
+                )
+            except Exception:  # noqa: BLE001 - 主应用已提交，只能隔离派生刷新故障。
+                warnings.append(
+                    {
+                        "code": "dependent_authoring_refresh_pending",
+                        "message": "工作流已应用，但依赖创作草稿仍待重新编译",
+                    }
+                )
 
     def list_events(
         self,

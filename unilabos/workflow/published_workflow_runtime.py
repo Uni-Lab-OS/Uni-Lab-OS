@@ -48,6 +48,8 @@ def build_published_workflow_generation(
         (str, bytes),
     ):
         raise PublishedWorkflowGenerationError("活动工作流来源必须是数组")
+    # ``snapshots`` 只保存与活动包目录源码内容一致的同修订应用事实；来源解析
+    # 目录仍保留已登记未应用项，以便组合编译返回准确诊断。
     snapshots: dict[str, Mapping[str, Any]] = {}
     records: list[dict[str, str]] = []
     for index, registration in enumerate(registrations):
@@ -60,17 +62,26 @@ def build_published_workflow_generation(
             raise PublishedWorkflowGenerationError(
                 f"活动工作流来源 {index} 字段不完整"
             ) from None
+        # ``catalog_identity`` 来自同次包目录（PackageCatalog）静态编译，不触发
+        # 第二次扫描、Python import 或作者源码执行。
+        catalog_identity = _catalog_identity(registration)
         try:
-            snapshot = snapshot_provider.get_published_workflow_snapshot(workflow_uuid)
+            snapshot: Mapping[str, Any] | None = (
+                snapshot_provider.get_published_workflow_snapshot(workflow_uuid)
+            )
         except LookupError:
-            # 活动来源指向缺失/软删除定义时不能被猜成发布合同；启动目录保持关闭。
-            continue
-        if not _eligible(snapshot):
-            continue
-        workflow = snapshot["workflow"]
-        applied_source = snapshot["applied_source"]
-        symbol = _authoring_symbol(workflow)
-        module = _source_module(package_id, relative_path)
+            snapshot = None
+        if catalog_identity is None:
+            # 非工作区遗留入口没有冻结包目录身份时，仅保留既有已应用来源行为。
+            if snapshot is None or not _eligible(snapshot):
+                continue
+            workflow = snapshot["workflow"]
+            applied_source = snapshot["applied_source"]
+            symbol = _authoring_symbol(workflow)
+            module = _source_module(package_id, relative_path)
+            definition_content_hash = str(applied_source["source_hash"])
+        else:
+            module, symbol, definition_content_hash = catalog_identity
         records.append(
             {
                 "workflow_uuid": workflow_uuid,
@@ -78,15 +89,19 @@ def build_published_workflow_generation(
                 "module": module,
                 "symbol": symbol,
                 "source_uri": source_uri,
-                "definition_content_hash": str(applied_source["source_hash"]),
+                "definition_content_hash": definition_content_hash,
             }
         )
-        snapshots[workflow_uuid] = snapshot
+        if snapshot is not None and _eligible(
+            snapshot,
+            definition_content_hash=definition_content_hash,
+        ):
+            snapshots[workflow_uuid] = snapshot
     try:
         source_catalog = PublishedSourceCatalog.from_records(records)
     except (TypeError, ValueError) as error:
         raise PublishedWorkflowGenerationError(str(error)) from error
-    if not source_catalog.sources:
+    if not snapshots:
         return PublishedWorkflowGeneration(
             source_catalog=source_catalog,
             node_templates=(),
@@ -96,6 +111,8 @@ def build_published_workflow_generation(
     nodes: list[dict[str, Any]] = []
     handles: list[dict[str, Any]] = []
     for source in source_catalog.sources:
+        if source.workflow_uuid not in snapshots:
+            continue
         try:
             projected = project_published_workflow_contract(
                 source=source,
@@ -115,11 +132,16 @@ def build_published_workflow_generation(
     )
 
 
-def _eligible(snapshot: Mapping[str, Any]) -> bool:
+def _eligible(
+    snapshot: Mapping[str, Any],
+    *,
+    definition_content_hash: str | None = None,
+) -> bool:
     """判断快照是否具有同修订应用源码且哈希可用于静态发布。
 
-    参数：``snapshot`` 是只读存储回执。返回：工作流、正修订和同修订应用哈希
-    完整时为 ``True``。异常：无；不完整值不进入来源目录。
+    参数：``snapshot`` 是只读存储回执；``definition_content_hash`` 是可选的同代
+    包目录源码摘要。返回：工作流、正修订和同修订同内容应用哈希完整时为
+    ``True``。异常：无；不完整或内容漂移值不进入模板投影。
     """
 
     workflow = snapshot.get("workflow") if isinstance(snapshot, Mapping) else None
@@ -134,7 +156,36 @@ def _eligible(snapshot: Mapping[str, Any]) -> bool:
         and revision >= 1
         and applied.get("workflow_revision") == revision
         and isinstance(source_hash, str)
+        and (
+            definition_content_hash is None
+            or source_hash == definition_content_hash
+        )
     )
+
+
+def _catalog_identity(
+    registration: Mapping[str, Any],
+) -> tuple[str, str, str] | None:
+    """读取包目录（PackageCatalog）已经静态编译的来源身份。
+
+    参数：``registration`` 是同一发现计划中的源码登记项。
+    返回：模块、符号和内容哈希均缺失时返回 ``None``；三者完整时返回元组。
+    异常：字段部分缺失或不是字符串时抛出
+    ``PublishedWorkflowGenerationError``，禁止退回路径猜测。
+    """
+
+    # ``values`` 是同一冻结包目录必须整体交付的三项源码证据。
+    values = (
+        registration.get("module"),
+        registration.get("symbol"),
+        registration.get("definition_content_hash"),
+    )
+    if values == (None, None, None):
+        return None
+    if any(not isinstance(value, str) or not value for value in values):
+        raise PublishedWorkflowGenerationError("活动工作流来源目录身份不完整")
+    module, symbol, definition_content_hash = values
+    return module, symbol, definition_content_hash
 
 
 def _authoring_symbol(workflow: Mapping[str, Any]) -> str:
