@@ -764,68 +764,10 @@ def parse_args():
         help="Skip host registration service visibility check",
     )
 
-    # package subcommand: 社区设备包 inspect / upload
-    package_parser = subparsers.add_parser(
-        "package",
-        aliases=["pkg"],
-        help="Community device package tools: inspect / upload / install",
-    )
-    package_actions = package_parser.add_subparsers(
-        title="package actions", dest="package_action"
-    )
-    for action_name in ("inspect", "upload"):
-        action_parser = package_actions.add_parser(
-            action_name,
-            help=(
-                "Scan package dir and generate package_info/archive (local only)"
-                if action_name == "inspect"
-                else "Inspect then upload archive + package_info to backend /lab/resource"
-            ),
-        )
-        action_parser.add_argument(
-            "--path",
-            dest="package_path",
-            type=str,
-            required=True,
-            help="Path to the community device package directory (contains pyproject.toml)",
-        )
-        action_parser.add_argument(
-            "--namespace",
-            type=str,
-            default=None,
-            help="Class namespace, e.g. community.acme; defaults to community.<normalized pyproject name>",
-        )
-        action_parser.add_argument(
-            "--out",
-            type=str,
-            default=None,
-            help="Output dir for archive/package_info.json (default: <package>/../dist)",
-        )
-        if action_name == "upload":
-            action_parser.add_argument(
-                "--download-url",
-                dest="download_url",
-                type=str,
-                default="",
-                help="Explicit reachable archive URL (skips OSS upload; handy for local static server)",
-            )
+    # 软件包命令行（Package CLI）的解析合同由 package_manager 深模块唯一维护。
+    from unilabos.package_manager.cli import register_package_subcommands
 
-    # install：开发者本地调试入口
-    install_parser = package_actions.add_parser(
-        "install",
-        help="Install a pip spec / git URL locally (uv pip > pip), then scan @device IDs",
-    )
-    install_parser.add_argument(
-        "install_spec",
-        type=str,
-        help="pip spec (name==version / name) or git URL (git+https://...)",
-    )
-    install_parser.add_argument(
-        "--no-inspect",
-        dest="no_inspect",
-        action="store_true",
-        help="Skip post-install @device scan / device listing",
-    )
+    register_package_subcommands(subparsers)
 
     # HTTP 客户端子命令（与现有 --ak/--sk/--addr 复用）
     parser.add_argument(

@@ -1,6 +1,6 @@
 """社区设备使用稳定完整命名空间，不再建立本地 alias。"""
 
-from unilabos.app.package_cli import resolve_class_namespace
+from unilabos.package_manager.inspection import resolve_class_namespace
 
 
 def test_default_community_namespace_is_derived_from_normalized_project_name():

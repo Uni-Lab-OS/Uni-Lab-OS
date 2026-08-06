@@ -3,12 +3,12 @@
 from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 
-from unilabos.app.package_cli import discover_registry_paths_from_project
+from tests.registry.fixtures.initializer_drivers import SharedDevice
+from unilabos.package_manager.inspection import discover_registry_paths_from_project
 from unilabos.registry.init_enforce import merge_init_param_enforce
 from unilabos.registry.registry import Registry
 from unilabos.resources.resource_tracker import DeviceNodeResourceTracker
 from unilabos.ros.utils.driver_creator import DeviceClassCreator
-from tests.registry.fixtures.initializer_drivers import SharedDevice
 
 PKG = Path(__file__).parent / "fixtures" / "external_variant_pkg"
 
