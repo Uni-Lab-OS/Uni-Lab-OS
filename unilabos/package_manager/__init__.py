@@ -7,6 +7,12 @@ from .inspection import inspect_package
 from .installation import install_package
 from .project_metadata import PackageProject, parse_project_metadata
 from .publication import upload_package
+from .registry_snapshot import (
+    RegistryActivationPlan,
+    RegistrySnapshot,
+    RegistrySnapshotError,
+    compile_registry_snapshot,
+)
 from .sources import WorkspaceSource
 from .workspace_material_shapes import compile_workspace_material_shapes
 from .workspace_startup import (
@@ -20,10 +26,14 @@ __all__ = [
     "PackageCatalog",
     "PackageCompileError",
     "PackageProject",
+    "RegistryActivationPlan",
+    "RegistrySnapshot",
+    "RegistrySnapshotError",
     "WorkspaceSource",
     "WorkspaceStartupPlan",
     "cmd_package",
     "compile_package_source",
+    "compile_registry_snapshot",
     "compile_workspace_material_shapes",
     "compile_workspace_startup",
     "inspect_package",
