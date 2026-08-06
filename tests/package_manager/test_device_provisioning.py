@@ -170,9 +170,7 @@ def test_stage_device_instance_preserves_graph_and_writes_recoverable_backup(
     cache_key, working_dir = _cache_device_package(tmp_path)
     graph_path, original = _write_graph(tmp_path)
 
-    result = stage_device_instance(
-        **_stage_kwargs(graph_path, working_dir, cache_key)
-    )
+    result = stage_device_instance(**_stage_kwargs(graph_path, working_dir, cache_key))
 
     graph = json.loads(graph_path.read_text(encoding="utf-8"))
     added = next(node for node in graph["nodes"] if node["id"] == "local-pump-1")
@@ -272,9 +270,7 @@ def test_graph_activation_keeps_the_staged_package_release(
         port=_CopyDownloadPort(first_artifact.wheel),
     )
     graph_path, _ = _write_graph(tmp_path)
-    stage_device_instance(
-        **_stage_kwargs(graph_path, working_dir, first.cache_key)
-    )
+    stage_device_instance(**_stage_kwargs(graph_path, working_dir, first.cache_key))
     second_artifact = _build_device_artifact(tmp_path / "second", version="2.5.0")
     download_device_package(
         template_uuid=_TEMPLATE_UUID,
@@ -373,13 +369,43 @@ def test_update_remove_and_restore_device_instance_are_explicit_and_atomic(
     assert json.loads(graph_path.read_text(encoding="utf-8")) == staged_graph
 
 
-def test_package_add_device_cli_reads_configuration_only_from_stdin(
+def test_package_add_device_cli_explicitly_adopts_uuidless_legacy_instance(
     tmp_path: Path,
 ) -> None:
-    """CLI 必须从 stdin 读取封闭配置并输出单行 graph_staged JSON。"""
+    """CLI 只有收到显式接管意图时才能为同定义旧节点补齐稳定 UUID。"""
 
     cache_key, working_dir = _cache_device_package(tmp_path)
     graph_path, _ = _write_graph(tmp_path)
+    # 遗留节点身份为空，但其既有拓扑、运行数据与部署扩展都必须继续有效。
+    legacy_graph = json.loads(graph_path.read_text(encoding="utf-8"))
+    legacy_graph["nodes"][0]["children"] = ["local-pump-1"]
+    legacy_graph["links"].append(
+        {"source": "existing-device", "target": "local-pump-1", "type": "owns"}
+    )
+    legacy_graph["nodes"].append(
+        {
+            "id": "local-pump-1",
+            "name": "Legacy Pump",
+            "children": [],
+            "parent": "existing-device",
+            "type": "device",
+            "class": _DEFINITION_FQID,
+            "position": {"x": 120, "y": 340, "z": 0},
+            "config": {"endpoint": "serial:///dev/legacy", "retries": 2},
+            "data": {"status": "Idle"},
+            "extra": {"legacy_marker": "preserve-me"},
+        }
+    )
+    graph_path.write_text(
+        json.dumps(legacy_graph, ensure_ascii=False, indent=2) + "\n",
+        encoding="utf-8",
+    )
+    legacy_bytes = graph_path.read_bytes()
+
+    with pytest.raises(DeviceProvisioningError, match="同名设备实例缺少 UUID"):
+        stage_device_instance(**_stage_kwargs(graph_path, working_dir, cache_key))
+    assert graph_path.read_bytes() == legacy_bytes
+
     parser = parse_args()
     args = vars(
         parser.parse_args(
@@ -396,6 +422,7 @@ def test_package_add_device_cli_reads_configuration_only_from_stdin(
                 "local-pump-1",
                 "--instance-uuid",
                 _INSTANCE_UUID,
+                "--adopt-existing",
                 "--graph",
                 str(graph_path),
                 "--config-stdin",
@@ -421,3 +448,32 @@ def test_package_add_device_cli_reads_configuration_only_from_stdin(
 
     assert json.loads(output.getvalue()) == result.to_dict()
     assert json.loads(output.getvalue())["status"] == "graph_staged"
+    adopted_graph = json.loads(graph_path.read_text(encoding="utf-8"))
+    adopted = next(
+        node for node in adopted_graph["nodes"] if node["id"] == "local-pump-1"
+    )
+    assert adopted["uuid"] == _INSTANCE_UUID
+    assert adopted["parent"] == "existing-device"
+    assert adopted["position"] == {"x": 120, "y": 340, "z": 0}
+    assert adopted["data"] == {"status": "Idle"}
+    assert adopted["extra"]["legacy_marker"] == "preserve-me"
+    assert adopted["extra"]["unilab"]["package_cache_key"] == cache_key
+    assert adopted_graph["nodes"][0]["children"] == ["local-pump-1"]
+    assert adopted_graph["links"][-1] == {
+        "source": "existing-device",
+        "target": "local-pump-1",
+        "type": "owns",
+    }
+    adopted_bytes = graph_path.read_bytes()
+    replayed = stage_device_instance(
+        **_stage_kwargs(graph_path, working_dir, cache_key)
+    )
+    assert replayed.changed is False
+    assert replayed.backup_path is None
+    assert graph_path.read_bytes() == adopted_bytes
+
+    conflicting_request = _stage_kwargs(graph_path, working_dir, cache_key)
+    conflicting_request["instance_uuid"] = "10b3dffd-5f98-46b8-ac0d-354254793ec4"
+    with pytest.raises(DeviceProvisioningError, match="UUID 与请求不一致"):
+        stage_device_instance(**conflicting_request, adopt_existing=True)
+    assert graph_path.read_bytes() == adopted_bytes

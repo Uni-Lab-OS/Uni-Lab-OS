@@ -65,16 +65,19 @@ def stage_device_instance(
     instance_uuid: str | None,
     display_name: str,
     configuration: Mapping[str, Any],
+    adopt_existing: bool = False,
 ) -> DeviceGraphMutationResult:
     """校验缓存、配置和设备图后原子新增一个本地设备实例声明。
 
     ``graph_path`` 是 Electron 当前 LocalRuntime 选择的设备图，``working_dir``
     是同一 OS 的受管缓存目录；``cache_key`` 与 ``definition_fqid`` 绑定已校验
     设备包；``instance_id``/``instance_uuid`` 是本地实例身份；
-    ``display_name`` 与 ``configuration`` 是用户确认且只经 stdin 传递的配置。
-    秘密字段会进入受管秘密存储，设备图只保存版本化引用。返回 ``graph_staged``
-    结果。完全相同的重复请求幂等成功；身份冲突或任一校验失败时抛出
-    :class:`DeviceProvisioningError`，原图保持不变。
+    ``display_name`` 与 ``configuration`` 是用户确认且只经 stdin 传递的配置；
+    ``adopt_existing`` 只允许为同 ID、同 definition 且 UUID 为空的遗留节点补齐
+    请求 UUID，并保留该节点的拓扑和扩展字段。秘密字段会进入受管秘密存储，
+    设备图只保存版本化引用。返回 ``graph_staged`` 结果。完全相同的重复请求
+    幂等成功；身份冲突或任一校验失败时抛出 :class:`DeviceProvisioningError`，
+    原图保持不变。
     """
 
     return _write_device_instance(
@@ -87,6 +90,7 @@ def stage_device_instance(
         display_name=display_name,
         configuration=configuration,
         update_existing=False,
+        adopt_existing=adopt_existing,
     )
 
 
@@ -118,6 +122,7 @@ def update_device_instance(
         display_name=display_name,
         configuration=configuration,
         update_existing=True,
+        adopt_existing=False,
     )
 
 
@@ -155,8 +160,7 @@ def remove_device_instance(
     if instance_uuid and target_uuid != _canonical_uuid(instance_uuid, "instance UUID"):
         raise DeviceProvisioningError("设备实例 UUID 与移除请求不一致")
     if any(
-        node is not target
-        and node.get("parent") in {instance_id, target_uuid}
+        node is not target and node.get("parent") in {instance_id, target_uuid}
         for node in nodes
     ):
         raise DeviceProvisioningError("设备实例仍有子节点，不能直接移除")
@@ -227,11 +231,22 @@ def _write_device_instance(
     display_name: str,
     configuration: Mapping[str, Any],
     update_existing: bool,
+    adopt_existing: bool,
 ) -> DeviceGraphMutationResult:
-    """实现新增与显式更新共享的缓存、身份、配置和原子写入规则。"""
+    """实现新增、遗留节点接管与显式更新共享的原子写入规则。
+
+    ``graph_path`` 与 ``working_dir`` 指向当前设备图和受管状态目录；
+    ``cache_key``/``definition_fqid`` 固定已校验驱动身份；实例 ID、UUID、显示名称
+    和配置来自上层明确意图。``update_existing`` 选择普通更新，``adopt_existing``
+    选择 UUID 为空的同定义遗留节点接管，二者不会同时启用。返回原子写入结果；
+    缓存、身份、配置、Graph 或秘密保护失败时抛出
+    :class:`DeviceProvisioningError`，设备图保持不变。
+    """
 
     if not _INSTANCE_ID.fullmatch(instance_id):
-        raise DeviceProvisioningError("设备实例 ID 只能包含字母、数字、点、横线和下划线")
+        raise DeviceProvisioningError(
+            "设备实例 ID 只能包含字母、数字、点、横线和下划线"
+        )
     normalized_name = display_name.strip()
     if not normalized_name or len(normalized_name) > 200:
         raise DeviceProvisioningError("设备显示名称不能为空且不能超过 200 字符")
@@ -265,8 +280,23 @@ def _write_device_instance(
         existing_uuid = str(existing.get("uuid") or "")
         if str(existing.get("class") or "") != definition_fqid:
             raise DeviceProvisioningError("同名设备实例绑定了不同 definition")
-        if requested_uuid and existing_uuid != requested_uuid:
+        adopting_uuidless = bool(adopt_existing and not existing_uuid)
+        if not existing_uuid and not adopt_existing:
+            raise DeviceProvisioningError(
+                "同名设备实例缺少 UUID；确认接管同 definition 旧节点后请显式启用接管"
+            )
+        if requested_uuid and existing_uuid != requested_uuid and not adopting_uuidless:
             raise DeviceProvisioningError("同名设备实例 UUID 与请求不一致")
+        if adopting_uuidless:
+            if not requested_uuid:
+                raise DeviceProvisioningError(
+                    "接管同名旧设备实例必须提供 instance UUID"
+                )
+            if any(
+                node is not existing and str(node.get("uuid") or "") == requested_uuid
+                for node in graph["nodes"]
+            ):
+                raise DeviceProvisioningError("设备实例 UUID 已被其他节点使用")
         try:
             protected_configuration = protect_device_configuration(
                 normalized_configuration,
@@ -280,16 +310,37 @@ def _write_device_instance(
             )
         except DeviceSecretError as exc:
             raise DeviceProvisioningError(str(exc)) from exc
-        candidate = _device_node(
-            instance_id=instance_id,
-            instance_uuid=existing_uuid,
-            display_name=normalized_name,
-            definition_fqid=definition_fqid,
-            cache_key=cache_key,
-            configuration=protected_configuration,
+        candidate = (
+            _adopted_device_node(
+                existing=existing,
+                instance_uuid=requested_uuid or "",
+                display_name=normalized_name,
+                definition_fqid=definition_fqid,
+                cache_key=cache_key,
+                configuration=protected_configuration,
+            )
+            if adopting_uuidless
+            else _device_node(
+                instance_id=instance_id,
+                instance_uuid=existing_uuid,
+                display_name=normalized_name,
+                definition_fqid=definition_fqid,
+                cache_key=cache_key,
+                configuration=protected_configuration,
+            )
         )
-        if not update_existing and existing != candidate:
-            raise DeviceProvisioningError("同名设备实例已存在且内容不同")
+        if not update_existing and not adopting_uuidless:
+            if not _same_managed_device_declaration(existing, candidate):
+                raise DeviceProvisioningError("同名设备实例已存在且内容不同")
+            return DeviceGraphMutationResult(
+                status="graph_staged",
+                instance_id=instance_id,
+                instance_uuid=existing_uuid,
+                definition_fqid=definition_fqid,
+                graph_fingerprint=_graph_fingerprint(graph),
+                backup_path=None,
+                changed=False,
+            )
         if existing == candidate:
             return DeviceGraphMutationResult(
                 status="graph_staged",
@@ -302,7 +353,7 @@ def _write_device_instance(
             )
         existing.clear()
         existing.update(candidate)
-        stable_uuid = existing_uuid
+        stable_uuid = requested_uuid if adopting_uuidless else existing_uuid
     else:
         stable_uuid = requested_uuid or str(uuid4())
         if any(str(node.get("uuid") or "") == stable_uuid for node in graph["nodes"]):
@@ -366,6 +417,87 @@ def _device_node(
             }
         },
     }
+
+
+def _adopted_device_node(
+    *,
+    existing: Mapping[str, Any],
+    instance_uuid: str,
+    display_name: str,
+    definition_fqid: str,
+    cache_key: str,
+    configuration: Mapping[str, Any],
+) -> dict[str, Any]:
+    """为 UUID 为空的同定义旧节点补齐身份并保留既有拓扑与扩展事实。
+
+    ``existing`` 是已经通过 ID 与 definition 校验的遗留节点；其位置、父子关系、
+    连接引用、运行数据和未知扩展字段保持不变。其余参数是用户确认的稳定 UUID、
+    名称、精确设备包身份和已保护配置。返回新的完整节点字典，输入不被原地修改。
+    """
+
+    candidate = dict(existing)
+    existing_extra = candidate.get("extra")
+    if existing_extra is None:
+        extra: dict[str, Any] = {}
+    elif isinstance(existing_extra, Mapping):
+        extra = dict(existing_extra)
+    else:
+        raise DeviceProvisioningError("同名旧设备实例 extra 必须是 object")
+    existing_unilab = extra.get("unilab")
+    if existing_unilab is None:
+        unilab: dict[str, Any] = {}
+    elif isinstance(existing_unilab, Mapping):
+        unilab = dict(existing_unilab)
+    else:
+        raise DeviceProvisioningError("同名旧设备实例 extra.unilab 必须是 object")
+    unilab.update(
+        {
+            "package_cache_key": cache_key,
+            "definition_fqid": definition_fqid,
+        }
+    )
+    extra["unilab"] = unilab
+    candidate.update(
+        {
+            "uuid": instance_uuid,
+            "name": display_name,
+            "config": dict(configuration),
+            "extra": extra,
+        }
+    )
+    return candidate
+
+
+def _same_managed_device_declaration(
+    existing: Mapping[str, Any],
+    candidate: Mapping[str, Any],
+) -> bool:
+    """比较接入模块拥有的节点字段，同时忽略既有拓扑与运行投影。
+
+    ``existing`` 是设备图中的完整节点，``candidate`` 是本次请求生成的规范声明。
+    返回值只在 ID、UUID、名称、类型、definition、受保护配置和精确包身份全部
+    一致时为真；位置、父子关系、连接、运行数据和未知扩展不参与幂等判断。
+    """
+
+    managed_keys = ("id", "uuid", "name", "type", "class", "config")
+    if any(existing.get(key) != candidate.get(key) for key in managed_keys):
+        return False
+    existing_extra = existing.get("extra")
+    candidate_extra = candidate.get("extra")
+    if not isinstance(existing_extra, Mapping) or not isinstance(
+        candidate_extra, Mapping
+    ):
+        return False
+    existing_unilab = existing_extra.get("unilab")
+    candidate_unilab = candidate_extra.get("unilab")
+    if not isinstance(existing_unilab, Mapping) or not isinstance(
+        candidate_unilab, Mapping
+    ):
+        return False
+    return all(
+        existing_unilab.get(key) == candidate_unilab.get(key)
+        for key in ("package_cache_key", "definition_fqid")
+    )
 
 
 def _read_graph(
