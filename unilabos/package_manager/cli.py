@@ -3,11 +3,18 @@
 from __future__ import annotations
 
 import argparse
+from pathlib import Path
 from typing import Any
 
 from unilabos.utils.banner_print import print_status
 
-from .package_distribution import PackageDependencyManager
+from .package_catalog import PackageCompileError
+from .package_distribution import (
+    PackageBuildArtifact,
+    PackageBuildError,
+    PackageDependencyManager,
+    build_workspace_package,
+)
 from .package_distribution.adapters.cloud import upload_package as _upload_package
 from .package_distribution.errors import PackageCLIError
 from .package_distribution.inspection import inspect_package as _inspect_package
@@ -36,18 +43,64 @@ def inspect_package(
     )
 
 
+def build_package(
+    path: str,
+    out_dir: str | None = None,
+) -> PackageBuildArtifact:
+    """构建并自审计一个规范软件包工作区（Package Workspace）。
+
+    参数：``path`` 是软件包根；``out_dir`` 是可选发布产物目录，默认使用工作区
+    同级 ``dist``。
+    返回：已通过 wheel 来源重编译和闭包校验的软件包构建产物。
+    异常：工作区、标准构建或自审计失败时统一抛出 ``PackageCLIError``；作者源码
+    不会被写入生成目录。
+    """
+
+    # ``workspace_root`` 是公共命令显式选择的规范源码边界。
+    workspace_root = Path(path).expanduser().resolve()
+    # ``output_root`` 是审计通过后才接收 wheel 和投影的发布目录。
+    output_root = (
+        Path(out_dir).expanduser().resolve()
+        if out_dir
+        else workspace_root.parent / "dist"
+    )
+    try:
+        # ``artifact`` 是包分发深模块完成全部物理构建和内容证明后的结果。
+        artifact = build_workspace_package(
+            workspace_root,
+            output_root,
+            compile_catalog=compile_package_source,
+        )
+    except PackageCompileError as error:
+        # ``diagnostic_codes`` 提供稳定、无源码正文的目录编译失败摘要。
+        diagnostic_codes = ", ".join(item.code for item in error.diagnostics)
+        raise PackageCLIError(
+            f"包目录（PackageCatalog）编译失败：{diagnostic_codes}"
+        ) from error
+    except (PackageBuildError, TypeError, ValueError) as error:
+        raise PackageCLIError(str(error)) from error
+    print_status(
+        "package build 完成："
+        f"{artifact.catalog.distribution.name}@"
+        f"{artifact.catalog.distribution.version}",
+        "info",
+    )
+    print_status(f"  wheel           : {artifact.wheel}", "info")
+    print_status(f"  catalog_digest  : {artifact.catalog.catalog_digest}", "info")
+    print_status(f"  artifact_digest : {artifact.artifact_digest}", "info")
+    return artifact
+
+
 def upload_package(
     path: str,
     http_client: Any,
-    namespace: str | None = None,
     out_dir: str | None = None,
     download_url: str = "",
 ) -> dict[str, Any]:
     """检查软件包并通过云端 Adapter 发布既有兼容投影。
 
-    参数：``path`` 是软件包根；``http_client`` 是鉴权 HTTP Adapter；
-    ``namespace`` 仅供遗留包使用；``out_dir`` 是产物目录；``download_url`` 是
-    可选显式归档地址。
+    参数：``path`` 是软件包根；``http_client`` 是鉴权 HTTP Adapter；``out_dir``
+    是产物目录；``download_url`` 是可选显式 wheel 地址。
     返回：云端发布结果。
     异常：检查、鉴权、上传或云端拒绝时保留既有 ``PackageCLIError``/传输异常语义。
     """
@@ -55,10 +108,9 @@ def upload_package(
     return _upload_package(
         path,
         http_client,
-        namespace=namespace,
         out_dir=out_dir,
         download_url=download_url,
-        package_inspector=inspect_package,
+        package_builder=build_package,
     )
 
 
@@ -75,19 +127,23 @@ def register_package_subcommands(subparsers: Any) -> None:
     package_parser = subparsers.add_parser(
         "package",
         aliases=["pkg"],
-        help="Community package inspect, upload, and explicit dependency tools",
+        help="Community package inspect, build, upload, and dependency tools",
     )
     actions = package_parser.add_subparsers(
         title="package actions",
         dest="package_action",
     )
-    for action_name in ("inspect", "upload"):
+    for action_name in ("inspect", "build", "upload"):
         action_parser = actions.add_parser(
             action_name,
             help=(
                 "Compile one package and write package catalog artifacts"
                 if action_name == "inspect"
-                else "Inspect and upload one package artifact"
+                else (
+                    "Build and audit one Catalog-embedded wheel"
+                    if action_name == "build"
+                    else "Build, audit, and upload one package wheel"
+                )
             ),
         )
         action_parser.add_argument(
@@ -97,11 +153,12 @@ def register_package_subcommands(subparsers: Any) -> None:
             required=True,
             help="Package workspace containing pyproject.toml",
         )
-        action_parser.add_argument(
-            "--namespace",
-            default=None,
-            help="Legacy class namespace override",
-        )
+        if action_name == "inspect":
+            action_parser.add_argument(
+                "--namespace",
+                default=None,
+                help="Legacy class namespace override",
+            )
         action_parser.add_argument(
             "--out",
             default=None,
@@ -187,7 +244,7 @@ def cmd_package(args_dict: dict[str, Any], http_client: Any = None) -> None:
     if not action:
         raise PackageCLIError(
             "缺少 package 子动作，请使用 "
-            "`unilab package inspect|upload|add|update|remove`"
+            "`unilab package inspect|build|upload|add|update|remove`"
         )
     if action in {"add", "update", "remove"}:
         try:
@@ -222,11 +279,13 @@ def cmd_package(args_dict: dict[str, Any], http_client: Any = None) -> None:
             out_dir=output_directory,
         )
         return
+    if action == "build":
+        build_package(package_path, out_dir=output_directory)
+        return
     if action == "upload":
         upload_package(
             package_path,
             http_client=http_client,
-            namespace=namespace,
             out_dir=output_directory,
             download_url=args_dict.get("download_url", "") or "",
         )
@@ -236,6 +295,7 @@ def cmd_package(args_dict: dict[str, Any], http_client: Any = None) -> None:
 
 __all__ = [
     "PackageCLIError",
+    "build_package",
     "cmd_package",
     "inspect_package",
     "register_package_subcommands",

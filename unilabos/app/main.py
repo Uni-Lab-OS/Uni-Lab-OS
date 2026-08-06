@@ -192,7 +192,7 @@ def dispatch_local_package_command(args_dict: dict[str, Any]) -> bool:
     """在产品启动前分派不依赖远端配置的包命令。
 
     参数：``args_dict`` 是公共命令行（CLI）解析出的完整参数字典。
-    返回：inspect、add、update、remove 已由软件包管理深模块处理时返回 ``True``；
+    返回：inspect、build、add、update、remove 由包管理深模块处理时返回 ``True``；
     非包命令、缺少子动作或需要显式鉴权的 upload 返回 ``False``，由后续既有路径
     处理。
     异常：软件包命令行（Package CLI）合同错误转换为退出码 1 的 ``SystemExit``；
@@ -203,6 +203,7 @@ def dispatch_local_package_command(args_dict: dict[str, Any]) -> bool:
     package_action = args_dict.get("package_action")
     if command not in {"package", "pkg"} or package_action not in {
         "inspect",
+        "build",
         "add",
         "update",
         "remove",

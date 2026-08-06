@@ -211,9 +211,10 @@ def _print_inspection_summary(
     print_status(f"  class_namespace : {class_namespace}", "info")
     print_status(f"  设备来源        : {device_source}", "info")
     print_status(
-        f"  设备数          : {len(resources)} ({', '.join(device_ids) or '无'})",
+        f"  设备数          : {len(device_ids)} ({', '.join(device_ids) or '无'})",
         "info",
     )
+    print_status(f"  资源投影数      : {len(resources)}", "info")
     print_status(f"  归档            : {archive_path} ({archive_digest})", "info")
     print_status(f"  package_info    : {package_info_path}", "info")
     print_status(f"  resources       : {resources_path}", "info")

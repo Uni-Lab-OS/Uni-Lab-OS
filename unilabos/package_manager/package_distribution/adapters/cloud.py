@@ -1,24 +1,25 @@
-"""规范检查产物到既有云端广场 HTTP 合同的发布 Adapter。"""
+"""已审计构建产物到既有云端广场 HTTP 合同的发布 Adapter。"""
 
 from __future__ import annotations
 
-from collections.abc import Callable, Mapping
+from collections.abc import Callable
 from typing import Any, Protocol
 
 from unilabos.utils.banner_print import print_status
 
+from ..build import PackageBuildArtifact
 from ..errors import PackageCLIError
 
-PackageInspector = Callable[..., dict[str, Any]]
+PackageBuilder = Callable[..., PackageBuildArtifact]
 
 
 class PublicationPort(Protocol):
-    """发布已经检查的软件包产物所需的最小传输 Interface。"""
+    """发布已经审计的软件包构建产物所需的最小传输 Interface。"""
 
     def upload_artifact(self, path: str) -> tuple[str, str]:
         """上传归档并返回公开地址和可选对象键。
 
-        参数：``path`` 是本地已经检查的软件包归档路径。
+        参数：``path`` 是本地已经完成来源重编译审计的 wheel 路径。
         返回：公开下载地址与存储对象键；至少一项必须非空。
         异常：传输失败时由 Adapter 抛出原始异常，编排层负责归一化。
         """
@@ -32,8 +33,8 @@ class PublicationPort(Protocol):
     ) -> Any:
         """发布资源模板投影及其软件包身份。
 
-        参数：``resources`` 是检查产物生成的兼容资源 DTO；``package_info`` 是
-        同一归档的软件包身份和下载信息。
+        参数：``resources`` 是构建产物生成的兼容资源 DTO；``package_info`` 是
+        同一 wheel 的软件包身份和下载信息。
         返回：携带 HTTP 状态与响应文本的传输结果对象。
         异常：网络或鉴权失败时由具体 Adapter 传播。
         """
@@ -80,26 +81,29 @@ class HttpClientPublicationAdapter:
         return self._http_client.upload_package_resources(resources, package_info)
 
 
-def publish_inspection(
-    inspection: Mapping[str, Any],
+def publish_build(
+    artifact: PackageBuildArtifact,
     port: PublicationPort,
     *,
     download_url: str = "",
 ) -> dict[str, Any]:
-    """发布一次已经完成目录编译和归档构建的检查产物。
+    """发布一次已经完成 wheel 来源重编译审计的构建产物。
 
-    参数：``inspection`` 是 ``inspect_package`` 的冻结结果；``port`` 是注入的
-    传输 Adapter；``download_url`` 是可选的调用者指定归档地址。
+    参数：``artifact`` 是软件包构建（Package Build）深模块的完整结果；``port``
+    是注入的传输 Adapter；``download_url`` 是可选的调用者指定 wheel 地址。
     返回：发布后的软件包信息、资源 DTO、下载地址和 HTTP 状态。
     异常：归档上传没有身份或资源接口返回非成功状态时抛出
     ``PackageCLIError``；``port.publish_resources`` 的传输异常保持原对象和类型
-    传播。函数不会重新扫描工作区或重建包目录（PackageCatalog）。
+    传播。函数不会重新扫描工作区、重新构建 wheel 或重建包目录
+    （PackageCatalog）。
     """
 
-    # ``package_info`` 是检查产物生成的兼容软件包投影，本发布独占一份容器。
-    package_info = dict(inspection["package_info"])
-    # ``archive_path`` 是已检查且与当前包目录对应的本地归档路径。
-    archive_path = str(inspection["archive_path"])
+    # ``publication_input`` 是构建产物为本次发布生成的独立可变输入。
+    publication_input = artifact.publication_input()
+    # ``package_info`` 是已审计构建生成的兼容软件包投影。
+    package_info = publication_input["package_info"]
+    # ``archive_path`` 实际指向与目录摘要绑定的标准 wheel。
+    archive_path = publication_input["archive_path"]
     # ``final_url`` 与 ``object_key`` 共同标识本次发布可引用的同一归档产物。
     final_url, object_key = _resolve_download_target(
         port,
@@ -111,9 +115,9 @@ def publish_inspection(
         package_info["oss_object_key"] = object_key
 
     # ``resources`` 是本次发布独占的兼容资源 DTO，不是新的目录权威。
-    resources = [dict(item) for item in inspection["resources"]]
-    for item in resources:
-        item["package_info"] = package_info
+    resources = [dict(item) for item in publication_input["resources"]]
+    for resource in resources:
+        resource["package_info"] = package_info
 
     # ``response`` 是云端资源发布调用的原始传输结果；传输异常必须原样传播。
     response = port.publish_resources(resources, package_info)
@@ -123,6 +127,7 @@ def publish_inspection(
     if status not in (200, 201):
         raise PackageCLIError(f"上传 /lab/resource 失败：{status} {response_text}")
     return {
+        "artifact": archive_path,
         "package_info": package_info,
         "resources": resources,
         "download_url": final_url,
@@ -133,18 +138,16 @@ def publish_inspection(
 def upload_package(
     path: str,
     http_client: Any,
-    namespace: str | None = None,
     out_dir: str | None = None,
     download_url: str = "",
     *,
-    package_inspector: PackageInspector,
+    package_builder: PackageBuilder,
 ) -> dict[str, Any]:
-    """检查软件包并把兼容资源投影发布到远端。
+    """构建、自审计软件包并把同一 wheel 的兼容投影发布到远端。
 
     参数：``path`` 是软件包根；``http_client`` 是已鉴权的 HTTP Adapter；
-    ``namespace`` 仅供遗留包使用；``out_dir`` 是可选产物目录；
-    ``download_url`` 是可选显式归档地址；``package_inspector`` 是组合根注入的
-    软件包检查（Package Inspect）Interface。
+    ``out_dir`` 是可选产物目录；``download_url`` 是可选显式 wheel 地址；
+    ``package_builder`` 是组合根注入的软件包构建（Package Build）Interface。
     返回：发布后的 ``package_info``、资源 DTO、下载地址和 HTTP 状态。
     异常：鉴权客户端缺失、归档上传或资源发布失败时抛出
     ``PackageCLIError``。
@@ -153,13 +156,13 @@ def upload_package(
     if http_client is None:
         raise PackageCLIError("upload 需要有效的 http_client（请确认已传 --ak/--sk）")
 
-    if not callable(package_inspector):
-        raise TypeError("package_inspector 必须可调用")
-    # ``inspection`` 是规范目录、归档与遗留上传 DTO 的唯一共同来源。
-    inspection = package_inspector(path, namespace=namespace, out_dir=out_dir)
-    # ``publication`` 只消费已检查产物，不允许传输 Adapter 重新扫描来源。
-    publication = publish_inspection(
-        inspection,
+    if not callable(package_builder):
+        raise TypeError("package_builder 必须可调用")
+    # ``artifact`` 是上传唯一允许消费的已审计 wheel 与目录投影代际。
+    artifact = package_builder(path, out_dir=out_dir)
+    # ``publication`` 不允许传输 Adapter 重新扫描来源或绕过构建审计。
+    publication = publish_build(
+        artifact,
         HttpClientPublicationAdapter(http_client),
         download_url=download_url,
     )
@@ -199,7 +202,7 @@ def _resolve_download_target(
         print_status(f"使用显式 download_url：{download_url}", "info")
         return download_url, ""
 
-    print_status(f"上传归档到 OSS（预签名直传）：{archive_path}", "info")
+    print_status(f"上传已审计 wheel 到 OSS（预签名直传）：{archive_path}", "info")
     try:
         # ``public_url`` 与 ``object_key`` 共同标识云端可引用的归档产物。
         public_url, object_key = port.upload_artifact(archive_path)
@@ -216,8 +219,8 @@ def _resolve_download_target(
 
 __all__ = [
     "HttpClientPublicationAdapter",
-    "PackageInspector",
+    "PackageBuilder",
     "PublicationPort",
-    "publish_inspection",
+    "publish_build",
     "upload_package",
 ]

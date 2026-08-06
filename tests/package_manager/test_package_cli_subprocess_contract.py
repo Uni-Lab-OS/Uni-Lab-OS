@@ -101,6 +101,59 @@ def test_package_inspect_runs_from_clean_cwd_without_product_bootstrap(
     _assert_no_product_bootstrap_artifacts(clean_cwd, command_output)
 
 
+def test_package_build_runs_from_clean_cwd_and_publishes_an_audited_wheel(
+    tmp_path: Path,
+) -> None:
+    """真实 ``package build`` 在产品启动前完成标准 wheel 自审计。
+
+    参数：``tmp_path`` 提供干净当前目录、可构建包和产物目录。
+    返回：无；断言公共入口生成 wheel、目录投影且没有产品启动副作用。
+    异常：若命令缺失、进入 ROS/配置 bootstrap 或审计失败，测试失败。
+    """
+
+    # ``clean_cwd`` 是不得被产品运行态污染的公共命令当前目录。
+    clean_cwd = tmp_path / "clean-cwd"
+    # ``package_root`` 与 ``output_root`` 分别是作者源码和发布产物边界。
+    package_root = tmp_path / "build-package"
+    output_root = tmp_path / "artifacts"
+    clean_cwd.mkdir()
+    _write_package(
+        package_root,
+        distribution_name="build-lab",
+        package_name="build_lab",
+        device_ids=("reader",),
+    )
+    package_root.joinpath("pyproject.toml").write_text(
+        "[build-system]\n"
+        'requires = ["setuptools>=68", "wheel"]\n'
+        'build-backend = "setuptools.build_meta"\n\n'
+        "[project]\n"
+        'name = "build-lab"\n'
+        'version = "1.0.0"\n\n'
+        "[tool.setuptools.packages.find]\n"
+        'include = ["build_lab*"]\n',
+        encoding="utf-8",
+    )
+
+    # ``result`` 是真实 public CLI 进程的完成状态与输出。
+    result = _run_public_package_command(
+        clean_cwd,
+        "build",
+        "--path",
+        str(package_root),
+        "--out",
+        str(output_root),
+    )
+    command_output = result.stdout + result.stderr
+
+    assert result.returncode == 0, command_output
+    assert len(tuple(output_root.glob("*.whl"))) == 1
+    assert output_root.joinpath("package.catalog.json").is_file()
+    assert output_root.joinpath("package_info.json").is_file()
+    assert output_root.joinpath("resources.json").is_file()
+    _assert_no_product_bootstrap_artifacts(clean_cwd, command_output)
+
+
 def test_package_dependency_commands_use_early_local_dispatch_without_product_bootstrap(
     tmp_path: Path,
 ) -> None:

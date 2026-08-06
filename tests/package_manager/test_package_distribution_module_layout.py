@@ -14,6 +14,31 @@ from tests.package_manager.test_package_dependency_lock import _write_package
 from unilabos.package_manager.package_catalog import PackageCatalog
 
 
+class _BuildArtifactStub:
+    """为云端发布 Adapter 提供最小已审计构建产物 Interface。"""
+
+    def __init__(self, publication_input: dict[str, object]) -> None:
+        """保存一次测试发布输入。
+
+        参数：``publication_input`` 是 wheel、软件包信息和资源投影字典。
+        返回：无。
+        异常：无；具体字段由被测发布编排验证。
+        """
+
+        # ``_publication_input`` 是每次调用都要复制的冻结测试模板。
+        self._publication_input = publication_input
+
+    def publication_input(self) -> dict[str, object]:
+        """返回本次发布独占的浅复制输入。
+
+        参数：无。
+        返回：构建产物已完成自审计后交给传输 Adapter 的字段字典。
+        异常：无。
+        """
+
+        return dict(self._publication_input)
+
+
 def _package_distribution_reverse_dependency_violations(
     module_root: Path,
 ) -> list[str]:
@@ -329,14 +354,14 @@ def test_reverse_dependency_guard_rejects_function_local_runtime_import(
 
 
 def test_publication_port_uploads_artifact_before_publishing_resources() -> None:
-    """云端发布 Adapter 只消费既有检查产物并按顺序完成归档与资源发布。
+    """云端发布 Adapter 只消费已审计构建并按顺序完成 wheel 与资源发布。
 
     参数：无。
     返回：无；断言公开地址、对象键和同一软件包信息进入全部资源 DTO。
     异常：实现重新检查工作区、漏传归档身份或没有发布资源时测试失败。
     """
 
-    from unilabos.package_manager.package_distribution import publish_inspection
+    from unilabos.package_manager.package_distribution import publish_build
 
     class RecordingPublicationPort:
         """记录测试中跨系统发布调用的最小传输 Adapter。"""
@@ -355,13 +380,13 @@ def test_publication_port_uploads_artifact_before_publishing_resources() -> None
         def upload_artifact(self, path: str) -> tuple[str, str]:
             """记录归档上传并返回固定云端身份。
 
-            参数：``path`` 是被发布的本地检查产物路径。
+            参数：``path`` 是被发布的本地已审计 wheel 路径。
             返回：独立给定的公开地址和对象键。
             异常：无。
             """
 
             self.calls.append(("artifact", path))
-            return "https://packages.example/lab.tar.gz", "models/lab.tar.gz"
+            return "https://packages.example/lab.whl", "models/lab.whl"
 
         def publish_resources(
             self,
@@ -386,21 +411,23 @@ def test_publication_port_uploads_artifact_before_publishing_resources() -> None
             )
             return SimpleNamespace(status_code=201, text="created")
 
-    # ``inspection`` 是已经完成包目录（PackageCatalog）编译和归档构建的输入。
-    inspection = {
-        "archive_path": "/tmp/lab.tar.gz",
-        "package_info": {"class_namespace": "community.lab"},
-        "resources": [{"id": "community.lab.reader"}],
-    }
+    # ``artifact`` 是已经完成 wheel 来源重编译审计的最小构建产物。
+    artifact = _BuildArtifactStub(
+        {
+            "archive_path": "/tmp/lab.whl",
+            "package_info": {"class_namespace": "community.lab"},
+            "resources": [{"id": "community.lab.reader"}],
+        }
+    )
     # ``port`` 是测试唯一替代的外部云端系统边界。
     port = RecordingPublicationPort()
 
     # ``published`` 是新云端 Adapter 返回的稳定发布结果。
-    published = publish_inspection(inspection, port)
+    published = publish_build(artifact, port)
 
     assert [item[0] for item in port.calls] == ["artifact", "resources"]
-    assert published["download_url"] == "https://packages.example/lab.tar.gz"
-    assert published["package_info"]["oss_object_key"] == "models/lab.tar.gz"
+    assert published["download_url"] == "https://packages.example/lab.whl"
+    assert published["package_info"]["oss_object_key"] == "models/lab.whl"
     assert published["resources"][0]["package_info"] == published["package_info"]
     assert published["response_status"] == 201
 
@@ -410,13 +437,13 @@ def test_http_publication_adapter_preserves_delegate_contract() -> None:
 
     参数：无。
     返回：无；断言归档场景、资源 DTO 和软件包信息原样委托，并且
-    ``publish_inspection`` 不改包传输 Adapter 抛出的异常对象。
+    ``publish_build`` 不改包传输 Adapter 抛出的异常对象。
     异常：参数被复制或改写、传输异常被包装成 ``PackageCLIError`` 时测试失败。
     """
 
     from unilabos.package_manager.package_distribution import (
         HttpClientPublicationAdapter,
-        publish_inspection,
+        publish_build,
     )
 
     class PublicationTransportError(RuntimeError):
@@ -457,7 +484,7 @@ def test_http_publication_adapter_preserves_delegate_contract() -> None:
             """
 
             self.upload_calls.append((path, scene))
-            return "https://packages.example/direct.tar.gz", "models/direct.tar.gz"
+            return "https://packages.example/direct.whl", "models/direct.whl"
 
         def upload_package_resources(
             self,
@@ -483,28 +510,30 @@ def test_http_publication_adapter_preserves_delegate_contract() -> None:
     resources = [{"id": "community.lab.reader"}]
     package_info = {"class_namespace": "community.lab"}
 
-    assert adapter.upload_artifact("/tmp/direct.tar.gz") == (
-        "https://packages.example/direct.tar.gz",
-        "models/direct.tar.gz",
+    assert adapter.upload_artifact("/tmp/direct.whl") == (
+        "https://packages.example/direct.whl",
+        "models/direct.whl",
     )
     adapter.publish_resources(resources, package_info)
 
-    assert http_client.upload_calls == [("/tmp/direct.tar.gz", "models")]
+    assert http_client.upload_calls == [("/tmp/direct.whl", "models")]
     assert http_client.publication_calls[0][0] is resources
     assert http_client.publication_calls[0][1] is package_info
 
     http_client.fail_publication = True
-    # ``inspection`` 是进入发布编排但使用显式地址跳过第二次归档上传的检查产物。
-    inspection = {
-        "archive_path": "/tmp/lab.tar.gz",
-        "package_info": {"class_namespace": "community.lab"},
-        "resources": [{"id": "community.lab.reader"}],
-    }
+    # ``artifact`` 使用显式地址跳过第二次 wheel 上传，但仍是已审计构建产物。
+    artifact = _BuildArtifactStub(
+        {
+            "archive_path": "/tmp/lab.whl",
+            "package_info": {"class_namespace": "community.lab"},
+            "resources": [{"id": "community.lab.reader"}],
+        }
+    )
     with pytest.raises(PublicationTransportError) as caught:
-        publish_inspection(
-            inspection,
+        publish_build(
+            artifact,
             adapter,
-            download_url="https://packages.example/lab.tar.gz",
+            download_url="https://packages.example/lab.whl",
         )
 
     assert caught.value is transport_error
@@ -519,7 +548,7 @@ def test_publication_port_rejects_backend_error_status() -> None:
     """
 
     from unilabos.package_manager import PackageCLIError
-    from unilabos.package_manager.package_distribution import publish_inspection
+    from unilabos.package_manager.package_distribution import publish_build
 
     class FailingPublicationPort:
         """模拟归档成功但资源发布失败的云端传输 Adapter。"""
@@ -532,7 +561,7 @@ def test_publication_port_rejects_backend_error_status() -> None:
             异常：无。
             """
 
-            return "https://packages.example/lab.tar.gz", ""
+            return "https://packages.example/lab.whl", ""
 
         def publish_resources(
             self,
@@ -548,15 +577,17 @@ def test_publication_port_rejects_backend_error_status() -> None:
 
             return SimpleNamespace(status_code=503, text="catalog unavailable")
 
-    # ``inspection`` 是无需重新扫描的最小已检查发布产物。
-    inspection = {
-        "archive_path": "/tmp/lab.tar.gz",
-        "package_info": {"class_namespace": "community.lab"},
-        "resources": [{"id": "community.lab.reader"}],
-    }
+    # ``artifact`` 是无需重新扫描的最小已审计发布产物。
+    artifact = _BuildArtifactStub(
+        {
+            "archive_path": "/tmp/lab.whl",
+            "package_info": {"class_namespace": "community.lab"},
+            "resources": [{"id": "community.lab.reader"}],
+        }
+    )
 
     with pytest.raises(
         PackageCLIError,
         match="503 catalog unavailable",
     ):
-        publish_inspection(inspection, FailingPublicationPort())
+        publish_build(artifact, FailingPublicationPort())

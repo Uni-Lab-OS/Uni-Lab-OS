@@ -98,6 +98,7 @@ def test_package_manager_root_contains_only_public_entry_modules() -> None:
         "package_catalog/material_models.py",
         "package_catalog/material_shapes.py",
         "package_distribution/errors.py",
+        "package_distribution/build.py",
         "package_distribution/inspection.py",
         "package_distribution/archive.py",
         "package_distribution/registry_discovery.py",

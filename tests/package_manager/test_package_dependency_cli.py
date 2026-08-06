@@ -192,7 +192,7 @@ def test_package_inspect_parser_keeps_public_argument_contract(
 
 @pytest.mark.parametrize(
     "package_action",
-    ("inspect", "upload", "add", "update", "remove"),
+    ("inspect", "build", "upload", "add", "update", "remove"),
 )
 def test_package_commands_skip_workspace_product_runtime_preparation(
     package_action: str,

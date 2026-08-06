@@ -7,7 +7,7 @@
 
 ## 公开 Interface
 
-`directory.py` 提供安装入口，`cloud.py` 提供 `PublicationPort`、检查产物发布与上传
+`directory.py` 提供安装入口，`cloud.py` 提供 `PublicationPort`、已审计构建发布与上传
 编排；`__init__.py` 是本目录唯一公开索引。
 
 ## 依赖方向
@@ -18,7 +18,7 @@ Adapter 可依赖同层归档、错误和投影能力以及真实外部 SDK；�
 ## 不变量
 
 - 外部网络异常保持原异常，稳定业务拒绝使用 `PackageCLIError`。
-- 发布只消费同一检查产物，不重新扫描或编译包。
+- 发布只消费同一已审计 wheel 产物，不重新扫描、编译或构建包。
 - 安装后设备发现只做 AST 静态扫描，不执行作者驱动代码。
 
 ## 修改路由

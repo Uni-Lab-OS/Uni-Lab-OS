@@ -10,6 +10,9 @@ if TYPE_CHECKING:
         PackageCLIError as PackageCLIError,
     )
     from .cli import (
+        build_package as build_package,
+    )
+    from .cli import (
         cmd_package as cmd_package,
     )
     from .cli import inspect_package as inspect_package
@@ -156,6 +159,7 @@ _EXPORT_GROUPS: tuple[tuple[str, tuple[str, ...]], ...] = (
         ".cli",
         (
             "PackageCLIError",
+            "build_package",
             "cmd_package",
             "inspect_package",
             "register_package_subcommands",

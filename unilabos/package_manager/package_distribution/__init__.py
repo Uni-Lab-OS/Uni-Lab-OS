@@ -2,11 +2,17 @@
 
 from .adapters import (
     HttpClientPublicationAdapter,
-    PackageInspector,
+    PackageBuilder,
     PublicationPort,
     install_package,
-    publish_inspection,
+    publish_build,
     upload_package,
+)
+from .build import (
+    PackageBuildArtifact,
+    PackageBuildError,
+    audit_package_wheel,
+    build_workspace_package,
 )
 from .dependency_manager import (
     PackageDependencyManager,
@@ -29,16 +35,20 @@ __all__ = [
     "CatalogCompiler",
     "HttpClientPublicationAdapter",
     "LockedPackage",
+    "PackageBuildArtifact",
+    "PackageBuildError",
+    "PackageBuilder",
     "PackageDependencyError",
     "PackageDependencyLock",
     "PackageDependencyManager",
-    "PackageInspector",
     "PublicationPort",
     "ResolvedPackageSource",
+    "audit_package_wheel",
+    "build_workspace_package",
     "inspect_package",
     "install_package",
     "load_locked_package_catalogs",
     "load_locked_package_sources",
-    "publish_inspection",
+    "publish_build",
     "upload_package",
 ]
