@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import hashlib
 import json
 import sys
 from collections.abc import Callable, Mapping
@@ -21,6 +22,11 @@ from unilabos.workflow.source_file_access import (
 
 from .catalog import PackageCatalog, PackageDefinition
 from .compiler import compile_package_source
+from .dependency_lock import (
+    DEPENDENCY_DECLARATION_FILE,
+    DEPENDENCY_LOCK_FILE,
+    load_locked_package_catalogs,
+)
 from .registry_snapshot import (
     RegistryActivationPlan,
     RegistrySnapshot,
@@ -40,6 +46,7 @@ class WorkspaceRegistryRuntime:
     registry_snapshot: RegistrySnapshot
     activation_plan: RegistryActivationPlan
     workflow_source_plan: EditableSourceDiscoveryPlan
+    dependency_revision: str = ""
     _published: bool = field(default=False, init=False, repr=False, compare=False)
     _import_path_active: bool = field(
         default=False,
@@ -131,7 +138,9 @@ def prepare_workspace_registry_runtime(
     catalog = compile_catalog(workspace_source)
     if not isinstance(catalog, PackageCatalog):
         raise TypeError("compile_catalog 必须返回 PackageCatalog")
-    registry_snapshot = compile_registry_snapshot((catalog,))
+    # ``dependency_catalogs`` 只来自工作区显式依赖声明和锁，绝不扫描环境包。
+    dependency_catalogs = _locked_dependency_catalogs(workspace_source)
+    registry_snapshot = compile_registry_snapshot((catalog, *dependency_catalogs))
     graph_argument = arguments.get("graph") or "graph.json"
     graph_path, graph_data = _read_fixed_graph(
         workspace_source,
@@ -156,7 +165,60 @@ def prepare_workspace_registry_runtime(
         registry_snapshot=registry_snapshot,
         activation_plan=activation_plan,
         workflow_source_plan=workflow_source_plan,
+        dependency_revision=_dependency_files_revision(workspace_source),
     )
+
+
+def _locked_dependency_catalogs(
+    source: WorkspaceSource,
+) -> tuple[PackageCatalog, ...]:
+    """读取当前工作区显式锁定的外部软件包目录（PackageCatalog）。
+
+    参数：``source`` 是主工作区的唯一文件读取边界。
+    返回：未声明依赖时返回空元组；否则返回经过锁摘要复核的完整外部目录。
+    异常：声明和锁缺一、外部来源或摘要无效、聚合身份冲突时传播关闭式异常；
+    不回退到 ``sys.path`` 或环境软件包扫描。
+    """
+
+    # ``dependency_files_present`` 区分无依赖的既有工作区与损坏的半对文件。
+    dependency_files_present = tuple(
+        source.has_file(logical_path)
+        for logical_path in (
+            DEPENDENCY_DECLARATION_FILE,
+            DEPENDENCY_LOCK_FILE,
+        )
+    )
+    if not any(dependency_files_present):
+        return ()
+    return load_locked_package_catalogs(source.root)
+
+
+def _dependency_files_revision(source: WorkspaceSource) -> str:
+    """计算显式软件包依赖声明与锁原始字节的稳定摘要。
+
+    参数：``source`` 是主工作区的安全文件来源。
+    返回：固定文件顺序、包含存在性和原始字节的 ``sha256:`` 摘要；没有依赖
+    文件时也返回确定摘要。
+    异常：路径不安全或文件读取失败时传播 ``ValueError``，禁止发布不完整输入代。
+    """
+
+    # ``digest`` 同时覆盖文件名、存在性、长度和内容，避免两文件拼接歧义。
+    digest = hashlib.sha256()
+    for logical_path in (
+        DEPENDENCY_DECLARATION_FILE,
+        DEPENDENCY_LOCK_FILE,
+    ):
+        encoded_path = logical_path.encode("utf-8")
+        digest.update(len(encoded_path).to_bytes(4, "big"))
+        digest.update(encoded_path)
+        if not source.has_file(logical_path):
+            digest.update(b"absent")
+            continue
+        content = source.read_bytes(logical_path)
+        digest.update(b"present")
+        digest.update(len(content).to_bytes(8, "big"))
+        digest.update(content)
+    return "sha256:" + digest.hexdigest()
 
 
 def _read_fixed_graph(
