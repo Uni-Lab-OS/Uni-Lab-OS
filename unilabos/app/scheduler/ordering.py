@@ -59,7 +59,7 @@ class StableLocalOrderer:
 class HttpSchedulerOrderer:
     """HTTP 调 uni-lab-scheduler 的排序实现。
 
-    把每个 ready 节点映射为单 step 的 Task，机器类型用 device_action_key
+    把每个 ready 节点映射为单 step 的 Task，机器类型用物理 device_id
     表达设备互斥；busy 锁通过 in_flight 无法表达（schedule 接口），
     因此这里只做全局排序，锁过滤仍由 service 层执行。
 
@@ -113,7 +113,7 @@ class HttpSchedulerOrderer:
         tasks = []
         key_by_step: Dict[str, ReadyTask] = {}
         for t in ready:
-            machine_type = t.node.device_action_key or "unknown"
+            machine_type = t.node.device_id or "unknown"
             machines[machine_type] = machines.get(machine_type, 0) + 1
             step_id = f"{t.workflow_id}:{t.node.id}"
             key_by_step[step_id] = t

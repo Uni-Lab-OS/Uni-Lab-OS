@@ -125,6 +125,44 @@ class TestResourceLock:
         scheduler.submit_workflow(_chain_spec("wf2", device="d2"))
         assert len(dispatcher.dispatched) == 2
 
+    def test_different_actions_on_same_physical_device_are_serialized(self):
+        dispatcher = RecordingDispatcher()
+        scheduler = EdgeScheduler(dispatcher=dispatcher)
+        spec = WorkflowSpec(
+            workflow_id="same-device-different-actions",
+            nodes=[
+                WorkflowNode(id="pick", device_id="robot", action_name="pick"),
+                WorkflowNode(id="place", device_id="robot", action_name="place"),
+            ],
+        )
+
+        first = scheduler.submit_workflow(spec)
+        assert len(first["dispatched"]) == 1
+        second = scheduler.on_job_finished(
+            first["dispatched"][0]["job_id"], success=True
+        )
+        assert len(second["dispatched"]) == 1
+
+    def test_always_free_action_does_not_take_physical_device_lock(self):
+        dispatcher = RecordingDispatcher()
+        scheduler = EdgeScheduler(
+            dispatcher=dispatcher,
+            always_free_resolver=lambda _device, action: action == "status",
+        )
+        spec = WorkflowSpec(
+            workflow_id="always-free",
+            nodes=[
+                WorkflowNode(id="move", device_id="robot", action_name="move"),
+                WorkflowNode(id="status", device_id="robot", action_name="status"),
+            ],
+        )
+
+        result = scheduler.submit_workflow(spec)
+        assert {item["node_id"] for item in result["dispatched"]} == {
+            "move",
+            "status",
+        }
+
     def test_external_busy_key_blocks(self):
         busy = {"/devices/dev1/run"}
         dispatcher = RecordingDispatcher()

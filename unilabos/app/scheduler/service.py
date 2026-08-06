@@ -9,7 +9,7 @@
 
     收集所有 RUNNING 工作流的 ready 节点
       → TaskOrderer 排序（本地 stub 或 HTTP 调 uni-lab-scheduler）
-      → 按序下发；device_action_key 被占用的节点跳过，等下一次触发
+      → 按序下发；物理 device_id 被占用的节点跳过，等下一次触发
       → 下发前解析父节点传参（gjson/sjson + ``@@@`` 语义）
 
 不做一次性拓扑序：ready 集合每次触发点都重新计算、重新排序。
@@ -115,6 +115,7 @@ class EdgeScheduler:
         workflow_state_listener: Callable[[str, str], None] | None = None,
         inventory: Any = None,
         lock_resource_resolver: Callable[[str, str], list[str]] | None = None,
+        always_free_resolver: Callable[[str, str], bool] | None = None,
         estimator: DurationEstimator | None = None,
         timeline_capacity: int = 400,
         monitor: Any = None,
@@ -146,6 +147,8 @@ class EdgeScheduler:
         # 物料/资源锁：resolver(device_id, action_name) -> @action(lock_resource=[...])
         # 声明的参数名列表；None = 物料锁关闭
         self._lock_resource_resolver = lock_resource_resolver
+        # 物理设备默认独占；@action(always_free=True) 不占设备锁。
+        self._always_free_resolver = always_free_resolver
         # job_id -> 该 job 持有的资源锁键（job 完成/取消时释放）
         self._job_resource_locks: dict[str, set[str]] = {}
         # 时长预估器（declared / historical / auto 三种 mode，内含两种计算模式）
@@ -644,16 +647,20 @@ class EdgeScheduler:
             return []
 
         busy = self._busy_keys()
+        busy_device_ids = self._busy_device_ids()
         held_resource_locks = self._held_resource_locks()
         ordered = self._orderer.order(ready, OrderingContext(set(busy)))
 
         dispatched: list[dict[str, Any]] = []
         for task in ordered:
             key = task.node.device_action_key
-            # manual_confirm 是 always-free 特殊节点：不占设备动作锁，也不受其阻塞
+            # manual_confirm 和 always_free action 不占物理设备锁。
             manual_confirm = task.node.is_manual_confirm()
-            if not manual_confirm and key in busy:
-                # 设备/动作被占用：本轮跳过，等占用 job 完成的那次重排再下发
+            always_free = manual_confirm or self._is_action_always_free(
+                task.node.device_id, task.node.action_name
+            )
+            if not always_free and task.node.device_id in busy_device_ids:
+                # 物理设备被占用：本轮跳过，等占用 job 完成的那次重排再下发
                 continue
 
             run = self._workflows[task.workflow_id]
@@ -709,8 +716,9 @@ class EdgeScheduler:
                 estimated_s=estimated_s,
                 estimate_source=estimate_source,
             )
-            if not manual_confirm:
+            if not always_free:
                 busy.add(key)
+                busy_device_ids.add(task.node.device_id)
             if lock_keys:
                 self._job_resource_locks[job_id] = lock_keys
                 held_resource_locks |= lock_keys
@@ -737,9 +745,10 @@ class EdgeScheduler:
                     "estimated_s": round(estimated_s, 3),
                     "estimate_source": estimate_source,
                     "manual_confirm": manual_confirm,
+                    "always_free": always_free,
                 },
             )
-            if not manual_confirm:
+            if not always_free:
                 self._emit_monitor(
                     "device",
                     "device_busy",
@@ -835,6 +844,34 @@ class EdgeScheduler:
         for job in self._inflight.values():
             busy.add(job.device_action_key)
         return busy
+
+    def _busy_device_ids(self) -> set[str]:
+        """Return physical devices occupied by external or in-flight jobs."""
+
+        busy: set[str] = set()
+        external_keys = set(self._external_busy_keys)
+        if self._busy_key_provider is not None:
+            try:
+                external_keys |= set(self._busy_key_provider())
+            except Exception:
+                logger.exception("[EdgeScheduler] busy_key_provider failed")
+        for key in external_keys:
+            parts = key.split("/")
+            if len(parts) >= 4 and parts[1] == "devices" and parts[2]:
+                busy.add(parts[2])
+        for job in self._inflight.values():
+            if not self._is_action_always_free(job.device_id, job.action_name):
+                busy.add(job.device_id)
+        return busy
+
+    def _is_action_always_free(self, device_id: str, action_name: str) -> bool:
+        if self._always_free_resolver is None:
+            return False
+        try:
+            return bool(self._always_free_resolver(device_id, action_name))
+        except Exception:
+            logger.exception("[EdgeScheduler] always_free resolver failed")
+            return False
 
     # ── 泳道图时间线 ─────────────────────────────────────────
 

@@ -514,6 +514,39 @@ def make_device_lock_resource_resolver(
     return resolve
 
 
+def make_device_always_free_resolver(
+    host_node_getter: Callable[[], Any] | None = None,
+) -> Callable[[str, str], bool]:
+    """Read ``@action(always_free=True)`` from the Host registry mirror."""
+
+    getter = host_node_getter or JobExecutionBackend._default_host_getter
+
+    def _flag_from(mappings: Any, action_name: str) -> bool | None:
+        if not isinstance(mappings, dict):
+            return None
+        mapping = mappings.get(action_name) or mappings.get(f"auto-{action_name}")
+        if not isinstance(mapping, dict):
+            return None
+        return bool(mapping.get("always_free", False))
+
+    def resolve(device_id: str, action_name: str) -> bool:
+        host_node = getter()
+        if host_node is None:
+            return False
+        host_mappings = getattr(host_node, "_action_value_mappings", None) or {}
+        found = _flag_from(host_mappings.get(device_id), action_name)
+        if found is not None:
+            return found
+        wrapper = getattr(host_node, "devices_instances", {}).get(device_id)
+        base_node = getattr(wrapper, "_ros_node", None) if wrapper is not None else None
+        found = _flag_from(
+            getattr(base_node, "_action_value_mappings", None), action_name
+        )
+        return found if found is not None else False
+
+    return resolve
+
+
 def create_edge_stack(
     orderer: Any = None,
     device_manager: DeviceActionManager | None = None,
@@ -531,6 +564,7 @@ def create_edge_stack(
     ``HostNode.bridges``（或在测试中手动回调 ``publish_job_status``）。
     ``inventory`` 传入 InventoryService 时启用物料预留/消费衔接。
     物料锁 resolver 默认接设备 action_value_mappings 的 lock_resource 声明。
+    物理设备独占默认开启；``always_free`` resolver 保留查询动作并发。
     ``estimator`` 传入 DurationEstimator 时用于泳道图预估（与 orderer 共享）。
     ``monitor`` 传入 MonitorBus 时向实时监控面板推事件。
     ``device_state_store`` 传入 DeviceStateStore 时启用设备状态落盘
@@ -552,6 +586,7 @@ def create_edge_stack(
         busy_key_provider=backend.busy_device_action_keys,
         inventory=inventory,
         lock_resource_resolver=make_device_lock_resource_resolver(host_node_getter),
+        always_free_resolver=make_device_always_free_resolver(host_node_getter),
         estimator=estimator,
         monitor=monitor,
         history=history,
@@ -566,5 +601,6 @@ __all__ = [
     "JobExecutionBackend",
     "JobFinishedListener",
     "create_edge_stack",
+    "make_device_always_free_resolver",
     "make_device_lock_resource_resolver",
 ]
