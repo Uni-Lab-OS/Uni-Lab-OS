@@ -4,10 +4,14 @@ linear_motion.grbl:
   class:
     action_value_mappings:
       auto-initialize:
+        displayname: auto-initialize
+        estimate_duration_express: ''
+        estimate_duration_fixed: 60.0
         feedback: {}
         goal: {}
         goal_default: {}
         handles: {}
+        lock_resource: []
         placeholder_keys: {}
         result: {}
         schema:
@@ -25,10 +29,14 @@ linear_motion.grbl:
           type: object
         type: UniLabJsonCommand
       auto-list:
+        displayname: auto-list
+        estimate_duration_express: ''
+        estimate_duration_fixed: 60.0
         feedback: {}
         goal: {}
         goal_default: {}
         handles: {}
+        lock_resource: []
         placeholder_keys: {}
         result: {}
         schema:
@@ -46,11 +54,15 @@ linear_motion.grbl:
           type: object
         type: UniLabJsonCommand
       auto-set_position:
+        displayname: auto-set_position
+        estimate_duration_express: ''
+        estimate_duration_fixed: 60.0
         feedback: {}
         goal: {}
         goal_default:
           position: null
         handles: {}
+        lock_resource: []
         placeholder_keys: {}
         result: {}
         schema:
@@ -71,10 +83,14 @@ linear_motion.grbl:
           type: object
         type: UniLabJsonCommand
       auto-stop_operation:
+        displayname: auto-stop_operation
+        estimate_duration_express: ''
+        estimate_duration_fixed: 60.0
         feedback: {}
         goal: {}
         goal_default: {}
         handles: {}
+        lock_resource: []
         placeholder_keys: {}
         result: {}
         schema:
@@ -92,10 +108,14 @@ linear_motion.grbl:
           type: object
         type: UniLabJsonCommand
       auto-wait_error:
+        displayname: auto-wait_error
+        estimate_duration_express: ''
+        estimate_duration_fixed: 60.0
         feedback: {}
         goal: {}
         goal_default: {}
         handles: {}
+        lock_resource: []
         placeholder_keys: {}
         result: {}
         schema:
@@ -113,6 +133,9 @@ linear_motion.grbl:
           type: object
         type: UniLabJsonCommandAsync
       move_through_points:
+        displayname: move_through_points
+        estimate_duration_express: ''
+        estimate_duration_fixed: 60.0
         feedback:
           current_pose: current_pose
           distance_remaining: distance_remaining
@@ -128,6 +151,7 @@ linear_motion.grbl:
           behavior_tree: ''
           poses: []
         handles: {}
+        lock_resource: []
         placeholder_keys: {}
         result:
           result: result
@@ -360,6 +384,9 @@ linear_motion.grbl:
           type: object
         type: NavigateThroughPoses
       set_spindle_speed:
+        displayname: set_spindle_speed
+        estimate_duration_express: ''
+        estimate_duration_fixed: 60.0
         feedback:
           error: error
           header: header
@@ -377,6 +404,7 @@ linear_motion.grbl:
             sec: 0
           position: 0.0
         handles: {}
+        lock_resource: []
         placeholder_keys: {}
         result: {}
         schema:
@@ -471,8 +499,10 @@ linear_motion.grbl:
     type: python
   config_info: []
   description: Grbl数控机床（CNC）设备，用于实验室精密加工和三轴定位操作。该设备基于Grbl固件，通过串口通信控制步进电机实现X、Y、Z三轴的精确运动。支持绝对定位、轨迹规划、主轴控制和实时状态监控。具备安全限位保护和运动平滑控制功能。适用于精密钻孔、铣削、雕刻、样品制备等需要高精度定位和加工的实验室应用场景。
+  displayname: linear_motion.grbl
   handles: []
   icon: ''
+  init_param_enforce: {}
   init_param_schema:
     config:
       properties:
@@ -508,6 +538,7 @@ linear_motion.grbl:
       - spindle_speed
       - status
       type: object
+  metadata: {}
   version: 1.0.0
 linear_motion.toyo_xyz.sim:
   category:
@@ -515,10 +546,14 @@ linear_motion.toyo_xyz.sim:
   class:
     action_value_mappings:
       auto-check_tf_update_actions:
+        displayname: auto-check_tf_update_actions
+        estimate_duration_express: ''
+        estimate_duration_fixed: 60.0
         feedback: {}
         goal: {}
         goal_default: {}
         handles: {}
+        lock_resource: []
         placeholder_keys: {}
         result: {}
         schema:
@@ -536,6 +571,9 @@ linear_motion.toyo_xyz.sim:
           type: object
         type: UniLabJsonCommand
       auto-moveit_joint_task:
+        displayname: auto-moveit_joint_task
+        estimate_duration_express: ''
+        estimate_duration_fixed: 60.0
         feedback: {}
         goal: {}
         goal_default:
@@ -545,6 +583,7 @@ linear_motion.toyo_xyz.sim:
           retry: 10
           speed: 1
         handles: {}
+        lock_resource: []
         placeholder_keys: {}
         result: {}
         schema:
@@ -576,6 +615,9 @@ linear_motion.toyo_xyz.sim:
           type: object
         type: UniLabJsonCommand
       auto-moveit_task:
+        displayname: auto-moveit_task
+        estimate_duration_express: ''
+        estimate_duration_fixed: 60.0
         feedback: {}
         goal: {}
         goal_default:
@@ -591,6 +633,7 @@ linear_motion.toyo_xyz.sim:
           speed: 1
           target_link: null
         handles: {}
+        lock_resource: []
         placeholder_keys: {}
         result: {}
         schema:
@@ -634,12 +677,16 @@ linear_motion.toyo_xyz.sim:
           type: object
         type: UniLabJsonCommand
       auto-resource_manager:
+        displayname: auto-resource_manager
+        estimate_duration_express: ''
+        estimate_duration_fixed: 60.0
         feedback: {}
         goal: {}
         goal_default:
           parent_link: null
           resource: null
         handles: {}
+        lock_resource: []
         placeholder_keys: {}
         result: {}
         schema:
@@ -663,10 +710,14 @@ linear_motion.toyo_xyz.sim:
           type: object
         type: UniLabJsonCommand
       auto-wait_for_resource_action:
+        displayname: auto-wait_for_resource_action
+        estimate_duration_express: ''
+        estimate_duration_fixed: 60.0
         feedback: {}
         goal: {}
         goal_default: {}
         handles: {}
+        lock_resource: []
         placeholder_keys: {}
         result: {}
         schema:
@@ -684,6 +735,9 @@ linear_motion.toyo_xyz.sim:
           type: object
         type: UniLabJsonCommand
       pick_and_place:
+        displayname: pick_and_place
+        estimate_duration_express: ''
+        estimate_duration_fixed: 60.0
         feedback:
           status: status
         goal:
@@ -691,6 +745,7 @@ linear_motion.toyo_xyz.sim:
         goal_default:
           command: ''
         handles: {}
+        lock_resource: []
         placeholder_keys: {}
         result:
           return_info: return_info
@@ -729,6 +784,9 @@ linear_motion.toyo_xyz.sim:
           type: object
         type: SendCmd
       set_position:
+        displayname: set_position
+        estimate_duration_express: ''
+        estimate_duration_fixed: 60.0
         feedback:
           status: status
         goal:
@@ -736,6 +794,7 @@ linear_motion.toyo_xyz.sim:
         goal_default:
           command: ''
         handles: {}
+        lock_resource: []
         placeholder_keys: {}
         result:
           return_info: return_info
@@ -774,6 +833,9 @@ linear_motion.toyo_xyz.sim:
           type: object
         type: SendCmd
       set_status:
+        displayname: set_status
+        estimate_duration_express: ''
+        estimate_duration_fixed: 60.0
         feedback:
           status: status
         goal:
@@ -781,6 +843,7 @@ linear_motion.toyo_xyz.sim:
         goal_default:
           command: ''
         handles: {}
+        lock_resource: []
         placeholder_keys: {}
         result:
           return_info: return_info
@@ -822,8 +885,10 @@ linear_motion.toyo_xyz.sim:
     type: python
   config_info: []
   description: 东洋XYZ三轴运动平台，基于MoveIt2运动规划框架的精密定位设备。该设备通过ROS2和MoveIt2实现三维空间的精确运动控制，支持复杂轨迹规划、多点定位、速度控制等功能。具备高精度定位、平稳运动、实时轨迹监控等特性。适用于精密加工、样品定位、检测扫描、自动化装配等需要高精度三维运动控制的实验室和工业应用场景。
+  displayname: linear_motion.toyo_xyz.sim
   handles: []
   icon: ''
+  init_param_enforce: {}
   init_param_schema:
     config:
       properties:
@@ -843,6 +908,7 @@ linear_motion.toyo_xyz.sim:
       properties: {}
       required: []
       type: object
+  metadata: {}
   model:
     mesh: toyo_xyz
     type: device
@@ -853,6 +919,9 @@ motor.iCL42:
   class:
     action_value_mappings:
       auto-execute_run_motor:
+        displayname: auto-execute_run_motor
+        estimate_duration_express: ''
+        estimate_duration_fixed: 60.0
         feedback: {}
         goal: {}
         goal_default:
@@ -860,6 +929,7 @@ motor.iCL42:
           position: null
           velocity: null
         handles: {}
+        lock_resource: []
         placeholder_keys: {}
         result: {}
         schema:
@@ -886,10 +956,14 @@ motor.iCL42:
           type: object
         type: UniLabJsonCommand
       auto-init_device:
+        displayname: auto-init_device
+        estimate_duration_express: ''
+        estimate_duration_fixed: 60.0
         feedback: {}
         goal: {}
         goal_default: {}
         handles: {}
+        lock_resource: []
         placeholder_keys: {}
         result: {}
         schema:
@@ -907,6 +981,9 @@ motor.iCL42:
           type: object
         type: UniLabJsonCommand
       auto-run_motor:
+        displayname: auto-run_motor
+        estimate_duration_express: ''
+        estimate_duration_fixed: 60.0
         feedback: {}
         goal: {}
         goal_default:
@@ -914,6 +991,7 @@ motor.iCL42:
           position: null
           velocity: null
         handles: {}
+        lock_resource: []
         placeholder_keys: {}
         result: {}
         schema:
@@ -940,12 +1018,16 @@ motor.iCL42:
           type: object
         type: UniLabJsonCommand
       execute_command_from_outer:
+        displayname: execute_command_from_outer
+        estimate_duration_express: ''
+        estimate_duration_fixed: 60.0
         feedback: {}
         goal:
           command: command
         goal_default:
           command: ''
         handles: {}
+        lock_resource: []
         result:
           success: success
         schema:
@@ -987,8 +1069,10 @@ motor.iCL42:
     type: python
   config_info: []
   description: iCL42步进电机驱动器，用于实验室设备的精密线性运动控制。该设备通过串口通信控制iCL42型步进电机驱动器，支持多种运动模式和精确的位置、速度控制。具备位置反馈、运行状态监控和故障检测功能。适用于自动进样器、样品传送、精密定位平台等需要准确线性运动控制的实验室自动化设备。
+  displayname: motor.iCL42
   handles: []
   icon: ''
+  init_param_enforce: {}
   init_param_schema:
     config:
       properties:
@@ -1013,4 +1097,5 @@ motor.iCL42:
       - motor_position
       - success
       type: object
+  metadata: {}
   version: 1.0.0

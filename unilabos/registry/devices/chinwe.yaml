@@ -5,10 +5,14 @@ separator.chinwe:
   class:
     action_value_mappings:
       auto-connect:
+        displayname: auto-connect
+        estimate_duration_express: ''
+        estimate_duration_fixed: 60.0
         feedback: {}
         goal: {}
         goal_default: {}
         handles: {}
+        lock_resource: []
         placeholder_keys: {}
         result: {}
         schema:
@@ -27,10 +31,14 @@ separator.chinwe:
           type: object
         type: UniLabJsonCommand
       auto-disconnect:
+        displayname: auto-disconnect
+        estimate_duration_express: ''
+        estimate_duration_fixed: 60.0
         feedback: {}
         goal: {}
         goal_default: {}
         handles: {}
+        lock_resource: []
         placeholder_keys: {}
         result: {}
         schema:
@@ -48,11 +56,15 @@ separator.chinwe:
           type: object
         type: UniLabJsonCommand
       auto-execute_command_from_outer:
+        displayname: auto-execute_command_from_outer
+        estimate_duration_express: ''
+        estimate_duration_fixed: 60.0
         feedback: {}
         goal: {}
         goal_default:
           command_dict: null
         handles: {}
+        lock_resource: []
         placeholder_keys: {}
         result: {}
         schema:
@@ -74,6 +86,9 @@ separator.chinwe:
           type: object
         type: UniLabJsonCommand
       motor_rotate_quarter:
+        displayname: motor_rotate_quarter
+        estimate_duration_express: ''
+        estimate_duration_fixed: 60.0
         feedback: {}
         goal:
           direction: 顺时针
@@ -84,6 +99,7 @@ separator.chinwe:
           motor_id: null
           speed: 60
         handles: {}
+        lock_resource: []
         placeholder_keys: {}
         result: {}
         schema:
@@ -113,6 +129,9 @@ separator.chinwe:
           type: object
         type: UniLabJsonCommand
       motor_run_continuous:
+        displayname: motor_run_continuous
+        estimate_duration_express: ''
+        estimate_duration_fixed: 60.0
         feedback: {}
         goal:
           direction: 顺时针
@@ -123,6 +142,7 @@ separator.chinwe:
           motor_id: null
           speed: null
         handles: {}
+        lock_resource: []
         placeholder_keys: {}
         result: {}
         schema:
@@ -152,12 +172,16 @@ separator.chinwe:
           type: object
         type: UniLabJsonCommand
       motor_stop:
+        displayname: motor_stop
+        estimate_duration_express: ''
+        estimate_duration_fixed: 60.0
         feedback: {}
         goal:
           motor_id: 4
         goal_default:
           motor_id: null
         handles: {}
+        lock_resource: []
         placeholder_keys: {}
         result: {}
         schema:
@@ -180,6 +204,9 @@ separator.chinwe:
           type: object
         type: UniLabJsonCommand
       pump_aspirate:
+        displayname: pump_aspirate
+        estimate_duration_express: ''
+        estimate_duration_fixed: 60.0
         feedback: {}
         goal:
           pump_id: 1
@@ -190,6 +217,7 @@ separator.chinwe:
           valve_port: null
           volume: null
         handles: {}
+        lock_resource: []
         placeholder_keys: {}
         result: {}
         schema:
@@ -219,6 +247,9 @@ separator.chinwe:
           type: object
         type: UniLabJsonCommand
       pump_dispense:
+        displayname: pump_dispense
+        estimate_duration_express: ''
+        estimate_duration_fixed: 60.0
         feedback: {}
         goal:
           pump_id: 1
@@ -229,6 +260,7 @@ separator.chinwe:
           valve_port: null
           volume: null
         handles: {}
+        lock_resource: []
         placeholder_keys: {}
         result: {}
         schema:
@@ -258,6 +290,9 @@ separator.chinwe:
           type: object
         type: UniLabJsonCommand
       pump_initialize:
+        displayname: pump_initialize
+        estimate_duration_express: ''
+        estimate_duration_fixed: 60.0
         feedback: {}
         goal:
           drain_port: 0
@@ -270,6 +305,7 @@ separator.chinwe:
           pump_id: null
           speed: 10
         handles: {}
+        lock_resource: []
         placeholder_keys: {}
         result: {}
         schema:
@@ -304,6 +340,9 @@ separator.chinwe:
           type: object
         type: UniLabJsonCommand
       pump_valve:
+        displayname: pump_valve
+        estimate_duration_express: ''
+        estimate_duration_fixed: 60.0
         feedback: {}
         goal:
           port: 1
@@ -312,6 +351,7 @@ separator.chinwe:
           port: null
           pump_id: null
         handles: {}
+        lock_resource: []
         placeholder_keys: {}
         result: {}
         schema:
@@ -337,6 +377,9 @@ separator.chinwe:
           type: object
         type: UniLabJsonCommand
       wait_sensor_level:
+        displayname: wait_sensor_level
+        estimate_duration_express: ''
+        estimate_duration_fixed: 60.0
         feedback: {}
         goal:
           target_state: 有液
@@ -345,6 +388,7 @@ separator.chinwe:
           target_state: 有液
           timeout: 30
         handles: {}
+        lock_resource: []
         placeholder_keys: {}
         result: {}
         schema:
@@ -371,12 +415,16 @@ separator.chinwe:
           type: object
         type: UniLabJsonCommand
       wait_time:
+        displayname: wait_time
+        estimate_duration_express: ''
+        estimate_duration_fixed: 60.0
         feedback: {}
         goal:
           duration: 10
         goal_default:
           duration: null
         handles: {}
+        lock_resource: []
         placeholder_keys: {}
         result: {}
         schema:
@@ -406,8 +454,10 @@ separator.chinwe:
     type: python
   config_info: []
   description: ChinWe 简易工作站控制器 (3泵, 2电机, 1传感器)
+  displayname: separator.chinwe
   handles: []
   icon: ''
+  init_param_enforce: {}
   init_param_schema:
     config:
       properties:
@@ -449,4 +499,5 @@ separator.chinwe:
       - sensor_level
       - sensor_rssi
       type: object
+  metadata: {}
   version: 2.1.0

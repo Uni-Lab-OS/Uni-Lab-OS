@@ -169,6 +169,7 @@ def test_complete_registry_projection_keeps_host_owner_and_package_typed_actions
     )
 
     assert {item.template["name"] for item in imports} >= {
+        "group",
         "material_source",
         "prepare",
         "finish",

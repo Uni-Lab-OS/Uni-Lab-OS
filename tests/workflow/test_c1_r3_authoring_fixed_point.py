@@ -9,22 +9,46 @@ from pathlib import Path
 from typing import Any
 
 from unilabos.workflow.authoring_engine import WorkflowAuthoringEngine
-from unilabos.workflow.composite import CompositeAuthoring
+from unilabos.workflow.composite import (
+    CompositeAuthoring,
+    PublishedWorkflowSource,
+    project_published_workflow_contract,
+)
 from unilabos.workflow.models import WorkflowEdgeWrite, WorkflowNodeWrite
 
 from .c1_r2_static_expansion_fixture import (
     AUTHORITY,
+    HOST_RESOURCE_TEMPLATE_UUID,
     INVOCATION_UUID,
     MATERIAL_TEMPLATE_B_UUID,
     PARENT_WORKFLOW_UUID,
     make_direct_world,
     resource_slot_schema,
+    scalar_schema,
+)
+from .m2a_material_source_authority_fixture import (
+    StaticMaterialSourceAuthority,
+    material_record,
 )
 
 CHILD_MODULE = "tests.c1_r2.child"
 CHILD_SYMBOL = "child"
 RESOURCE_SYMBOL = "tests.c1_r3.resources:material_b"
 OTHER_CONTRACT_DIGEST = "sha256:" + "f" * 64
+FIXED_COMPOSITE_RESOURCE_UUID = "52000000-0000-4000-8000-000000000001"
+FIXED_COMPOSITE_RESOURCE_ID = "fixed_composite_warehouse"
+
+
+class _NamedResourceAuthority(StaticMaterialSourceAuthority):
+    def resolve_material_ref(
+        self,
+        resource_id: str,
+        *,
+        uow: object | None = None,
+    ) -> Any:
+        if resource_id != FIXED_COMPOSITE_RESOURCE_ID:
+            raise LookupError(resource_id)
+        return self.get_material(FIXED_COMPOSITE_RESOURCE_UUID, uow=uow)
 
 
 class _ResourceTemplateIdentityIndex:
@@ -98,7 +122,11 @@ def parent(*, value: ResourceSlot) -> None:
 '''
 
 
-def _opened_engine(tmp_path: Path) -> tuple[Any, WorkflowAuthoringEngine]:
+def _opened_engine(
+    tmp_path: Path,
+    *,
+    material_source_authority: object | None = None,
+) -> tuple[Any, WorkflowAuthoringEngine]:
     world = make_direct_world(
         tmp_path,
         input_schema=resource_slot_schema(MATERIAL_TEMPLATE_B_UUID),
@@ -115,6 +143,7 @@ def _opened_engine(tmp_path: Path) -> tuple[Any, WorkflowAuthoringEngine]:
         authority=AUTHORITY,
         resource_template_identity_index=_ResourceTemplateIdentityIndex(),
         composite_authoring=composite,
+        material_source_authority=material_source_authority,
     )
     return world, engine
 
@@ -192,6 +221,140 @@ def test_absolute_published_workflow_call_is_a_canonical_fixed_point(
             compiled.template_catalog_fingerprint
         )
         assert CHILD_MODULE not in sys.modules
+    finally:
+        world.close()
+
+
+def test_published_workflow_resource_ref_is_preserved_as_canonical_source(
+    tmp_path: Path,
+) -> None:
+    material_source_authority = _NamedResourceAuthority(
+        materials=(
+            material_record(
+                FIXED_COMPOSITE_RESOURCE_UUID,
+                resource_template_uuid=MATERIAL_TEMPLATE_B_UUID,
+            ),
+        ),
+        sites=(),
+    )
+    world, engine = _opened_engine(
+        tmp_path,
+        material_source_authority=material_source_authority,
+    )
+    source = f'''from unilabos.workflow.authoring import resource_ref, workflow_definition
+from {CHILD_MODULE} import {CHILD_SYMBOL}
+
+
+@workflow_definition(
+    workflow_uuid="{PARENT_WORKFLOW_UUID}",
+    displayname="fixed-resource parent",
+)
+def fixed_resource_parent() -> None:
+    # unilab:node_uuid={INVOCATION_UUID}
+    result = {CHILD_SYMBOL}(value=resource_ref("{FIXED_COMPOSITE_RESOURCE_ID}"))
+'''
+    try:
+        compiled = _compile(
+            engine,
+            source,
+            world.store.get_graph(PARENT_WORKFLOW_UUID),
+        )
+
+        assert compiled.valid and compiled.graph is not None, compiled.diagnostics
+        invocation = next(
+            node for node in compiled.graph["nodes"] if node["uuid"] == INVOCATION_UUID
+        )
+        target_handle = next(
+            handle
+            for handle in compiled.graph["handle_templates"]
+            if handle["workflow_node_template_uuid"]
+            == invocation["workflow_node_template_uuid"]
+            and handle["io_type"] == "target"
+            and handle["data_key"] == "value"
+        )
+        assert invocation["param"]["value"] == {
+            "uuid": FIXED_COMPOSITE_RESOURCE_UUID,
+            "resource_template_uuid": MATERIAL_TEMPLATE_B_UUID,
+        }
+        assert invocation["meta_data"]["unilab"]["resource_refs"] == {
+            target_handle["uuid"]: {"resource_id": FIXED_COMPOSITE_RESOURCE_ID}
+        }
+        normalized = compiled.normalized_python_source
+        assert normalized is not None
+        assert (
+            f'{CHILD_SYMBOL}(value=resource_ref(\'{FIXED_COMPOSITE_RESOURCE_ID}\'))'
+            in normalized
+        )
+
+        recompiled = _compile(engine, normalized, compiled.graph)
+
+        assert recompiled.valid and recompiled.graph is not None, recompiled.diagnostics
+        assert _semantic_graph(recompiled.graph) == _semantic_graph(compiled.graph)
+        assert recompiled.normalized_python_source == normalized
+    finally:
+        world.close()
+
+
+def test_publishing_parent_ignores_expanded_child_private_input_bindings(
+    tmp_path: Path,
+) -> None:
+    world = make_direct_world(
+        tmp_path,
+        input_schema=scalar_schema(),
+        output_schema=scalar_schema(),
+    )
+    composite = CompositeAuthoring(
+        store=world.store,
+        catalog=world.catalog,
+        authority=AUTHORITY,
+        resolver=world.resolver,
+    )
+    engine = WorkflowAuthoringEngine(
+        catalog=world.catalog,
+        authority=AUTHORITY,
+        composite_authoring=composite,
+    )
+    source = f'''from unilabos.workflow.authoring import workflow_definition
+from {CHILD_MODULE} import {CHILD_SYMBOL}
+
+
+@workflow_definition(
+    workflow_uuid="{PARENT_WORKFLOW_UUID}",
+    displayname="literal parent",
+)
+def literal_parent() -> None:
+    # unilab:node_uuid={INVOCATION_UUID}
+    result = {CHILD_SYMBOL}(value=1.0)
+'''
+    parent_source = PublishedWorkflowSource(
+        workflow_uuid=PARENT_WORKFLOW_UUID,
+        definition_fqid="tests.c1_r3.literal_parent",
+        module="tests.c1_r3",
+        symbol="literal_parent",
+        package_catalog_digest="sha256:" + "a" * 64,
+        definition_content_hash="sha256:" + "b" * 64,
+    )
+    try:
+        compiled = _compile(
+            engine,
+            source,
+            world.store.get_graph(PARENT_WORKFLOW_UUID),
+        )
+        assert compiled.valid and compiled.graph is not None, compiled.diagnostics
+        applied_snapshot = deepcopy(compiled.graph)
+        applied_snapshot["workflow"]["revision"] = 1
+        applied_snapshot["applied_source"] = {
+            "workflow_revision": 1,
+            "source_hash": "sha256:" + "c" * 64,
+        }
+
+        projected = project_published_workflow_contract(
+            source=parent_source,
+            applied_snapshot=applied_snapshot,
+            host_node_resource_template_uuid=HOST_RESOURCE_TEMPLATE_UUID,
+        )
+
+        assert projected is not None
     finally:
         world.close()
 

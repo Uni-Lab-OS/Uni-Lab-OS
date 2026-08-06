@@ -4,7 +4,9 @@ POST_PROCESS_PolymerStation_Reagent_Bottle:
   class:
     module: unilabos.devices.workstation.post_process.bottles:POST_PROCESS_PolymerStation_Reagent_Bottle
     type: pylabrobot
+  displayname: POST_PROCESS_PolymerStation_Reagent_Bottle
   handles: []
   icon: ''
   init_param_schema: {}
+  metadata: {}
   version: 1.0.0

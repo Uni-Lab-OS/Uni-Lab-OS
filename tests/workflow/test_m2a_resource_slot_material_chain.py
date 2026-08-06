@@ -45,6 +45,7 @@ MIDDLE_NODE_UUID = "20000000-0000-4000-8000-000000000004"
 MIDDLE_TEMPLATE_UUID = "30000000-0000-4000-8000-000000000003"
 MIDDLE_SAMPLE_TARGET_UUID = "40000000-0000-4000-8000-000000000003"
 MIDDLE_SAMPLE_SOURCE_UUID = "40000000-0000-4000-8000-000000000004"
+SECOND_MATERIAL_SOURCE_NODE_UUID = "20000000-0000-4000-8000-000000000005"
 
 
 @dataclass
@@ -192,6 +193,51 @@ def material_chain():
 '''
 
 
+def _two_material_source_source() -> str:
+    return f'''from lab.devices import Reactor
+from lab.resources import corning_96_well_plate
+from unilabos.workflow.authoring import (
+    MaterialFlowRole,
+    device,
+    material_source,
+    resource_ref,
+    workflow_definition,
+)
+
+
+reactor: Reactor = device()
+
+
+@workflow_definition(
+    workflow_uuid="{WORKFLOW_UUID}",
+    displayname="Two material selectors",
+)
+def two_material_selectors():
+    # unilab:node_uuid={MATERIAL_SOURCE_NODE_UUID}
+    sample_a = material_source(
+        resource_template=corning_96_well_plate,
+        mode="create_new",
+        mount=resource_ref("{MOUNT_MATERIAL_UUID}"),
+        material_uuid=None,
+        site=None,
+        slot_range=None,
+        flow_role=MaterialFlowRole.PRIMARY_SAMPLE,
+    )
+    # unilab:node_uuid={PREPARE_NODE_UUID}
+    prepared_a = reactor.prepare(sample=sample_a)
+    # unilab:node_uuid={SECOND_MATERIAL_SOURCE_NODE_UUID}
+    sample_b = material_source(
+        resource_template=corning_96_well_plate,
+        mode="create_new",
+        mount=resource_ref("{MOUNT_MATERIAL_UUID}"),
+        material_uuid=None,
+        site=None,
+        slot_range=None,
+        flow_role=MaterialFlowRole.REAGENT,
+    )
+'''
+
+
 def _compile(context: _ChainContext, source: str) -> CandidateCompilation:
     return context.engine.compile(
         workflow_uuid=WORKFLOW_UUID,
@@ -319,6 +365,20 @@ def test_material_source_output_fan_out_has_one_stable_engine_diagnostic(
     assert result.graph is None
     assert result.normalized_python_source is None
     assert [item["code"] for item in result.diagnostics] == ["material_flow_fan_out"]
+
+
+def test_two_material_sources_round_trip_as_selectors_not_parallel_actions(
+    tmp_path: Path,
+) -> None:
+    source = _two_material_source_source()
+    with _opened_context(tmp_path / "workflow.db") as context:
+        compiled = _compile(context, source)
+
+    assert compiled.valid, compiled.diagnostics
+    assert compiled.graph is not None
+    assert compiled.normalized_python_source is not None
+    assert compiled.normalized_python_source.count("material_source(") == 2
+    assert "with parallel():" not in compiled.normalized_python_source
 
 
 def test_direct_save_rejects_material_source_fan_out_atomically(

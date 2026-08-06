@@ -5,6 +5,7 @@ from __future__ import annotations
 import logging
 import sqlite3
 import threading
+from copy import deepcopy
 from collections.abc import Callable, Iterable, Mapping
 from datetime import datetime, timezone
 from typing import Any, Dict, Optional, Protocol
@@ -92,7 +93,13 @@ class WorkflowJobDispatcher(Protocol):
 
     def remove_job_finished_listener(self, listener: Callable[..., None]) -> None: ...
 
+    def add_job_completion_listener(self, listener: Callable[..., bool]) -> None: ...
+
+    def remove_job_completion_listener(self, listener: Callable[..., bool]) -> None: ...
+
     def execution_ready(self) -> bool: ...
+
+    def request_cancel(self, job_id: str) -> bool: ...
 
 
 def _json(value: Any) -> str:
@@ -278,6 +285,7 @@ class WorkflowRuntimeCoordinator:
         job_uuid: str,
         status: str,
         *,
+        param: Optional[Dict[str, Any]] = None,
         feedback_data: Optional[Dict[str, Any]] = None,
         return_info: Optional[Dict[str, Any]] = None,
         error_info: Optional[list[Any]] = None,
@@ -309,6 +317,7 @@ class WorkflowRuntimeCoordinator:
                 assignments.append("finished_at = ?")
                 values.append(now)
             for column, value, expected in (
+                ("param", param, dict),
                 ("feedback_data", feedback_data, dict),
                 ("return_info", return_info, dict),
                 ("error_info", error_info, list),
@@ -1052,11 +1061,85 @@ class WorkflowRuntimeCoordinator:
             ).fetchall()
             return [self._project_task(row) for row in rows]
 
+    def _canceling_execution_tasks(self) -> list[Dict[str, Any]]:
+        """Return non-D1A Tasks waiting for physical cancellation settlement."""
+
+        with self._store.transaction() as connection:
+            rows = connection.execute(
+                """
+                SELECT * FROM workflow_task
+                WHERE deleted_at IS NULL AND status = 'canceling'
+                  AND NOT EXISTS (
+                      SELECT 1 FROM device_action_task AS d1a
+                      WHERE d1a.workflow_task_uuid = workflow_task.uuid
+                  )
+                ORDER BY create_time, uuid
+                """
+            ).fetchall()
+            return [self._project_task(row) for row in rows]
+
+    def reconcile_task_cancellation(self, task_uuid: str) -> Dict[str, Any]:
+        """Settle a canceling Task only after every physical Job is terminal."""
+
+        with self._store.transaction() as connection:
+            now = utc_now()
+            task = self._task_row(connection, task_uuid)
+            if task["status"] != "canceling":
+                return self._project_task(task)
+            active = connection.execute(
+                """
+                SELECT COUNT(*) FROM workflow_node_job
+                WHERE workflow_task_uuid = ? AND deleted_at IS NULL
+                  AND status IN (
+                      'dispatched', 'running', 'intervention_required',
+                      'cancel_requested', 'execution_unknown'
+                  )
+                """,
+                (task_uuid,),
+            ).fetchone()[0]
+            if active:
+                return self._project_task(task)
+            connection.execute(
+                """
+                UPDATE workflow_task
+                SET status = 'canceled', cleanup_status = 'settled',
+                    finished_at = COALESCE(finished_at, ?), update_time = ?
+                WHERE uuid = ? AND status = 'canceling'
+                """,
+                (now, now, task_uuid),
+            )
+            self._append_journal(
+                connection,
+                task_uuid=task_uuid,
+                kind="task_transition",
+                from_status="canceling",
+                to_status="canceled",
+                now=now,
+            )
+            self._append_invalidation(connection, task_uuid=task_uuid, now=now)
+            return self._project_task(self._task_row(connection, task_uuid))
+
+    def _execution_task(self, task_uuid: str) -> Dict[str, Any]:
+        return self._store.get_task(task_uuid)
+
     def _execution_jobs(self, task_uuid: str) -> list[Dict[str, Any]]:
         return self._store.list_jobs(task_uuid)
 
     def _execution_job(self, job_uuid: str) -> Dict[str, Any]:
         return self._store.get_job(job_uuid)
+
+    def _is_device_action_task(self, task_uuid: str) -> bool:
+        with self._store.transaction() as connection:
+            return (
+                connection.execute(
+                    """
+                    SELECT 1 FROM device_action_task
+                    WHERE workflow_task_uuid = ?
+                    """,
+                    (task_uuid,),
+                ).fetchone()
+                is not None
+            )
 
 
 class WorkflowRuntimeWorker:
@@ -1084,10 +1167,14 @@ class WorkflowRuntimeWorker:
         self._wake_event = threading.Event()
         self._thread: Optional[threading.Thread] = None
         self._lock = threading.Lock()
+        # Dispatcher 终态回调不在 Worker 扫描线程执行。终态持久化必须与取消确认
+        # 串行，避免任一路径依据过期的 Job 快照推进状态。
+        self._job_settlement_lock = threading.RLock()
         self._listener_registered = False
+        self._uses_completion_listener = False
+        self._cancel_requests_inflight: set[str] = set()
         if dispatcher is not None:
-            dispatcher.add_job_finished_listener(self._on_job_finished)
-            self._listener_registered = True
+            self._register_dispatcher_listener(dispatcher)
         self._task_reconciler: Callable[[str], object] | None = None
         self._task_dispatch_guard: Callable[[str], bool] | None = None
         self._pending_task_reconciliations: set[str] = set()
@@ -1118,8 +1205,7 @@ class WorkflowRuntimeWorker:
             if self._thread is not None and self._thread.is_alive():
                 return
             if self._dispatcher is not None and not self._listener_registered:
-                self._dispatcher.add_job_finished_listener(self._on_job_finished)
-                self._listener_registered = True
+                self._register_dispatcher_listener(self._dispatcher)
             self._stop_event.clear()
             self._thread = threading.Thread(
                 target=self._run,
@@ -1137,7 +1223,27 @@ class WorkflowRuntimeWorker:
             self._listener_registered = False
         if remove_listener:
             assert dispatcher is not None
-            dispatcher.remove_job_finished_listener(self._on_job_finished)
+            if self._uses_completion_listener:
+                dispatcher.remove_job_completion_listener(self._on_job_completion)
+            else:
+                dispatcher.remove_job_finished_listener(self._on_job_finished)
+
+    def _register_dispatcher_listener(
+        self,
+        dispatcher: WorkflowJobDispatcher,
+    ) -> None:
+        add_completion_listener = getattr(
+            dispatcher,
+            "add_job_completion_listener",
+            None,
+        )
+        if callable(add_completion_listener):
+            add_completion_listener(self._on_job_completion)
+            self._uses_completion_listener = True
+        else:
+            dispatcher.add_job_finished_listener(self._on_job_finished)
+            self._uses_completion_listener = False
+        self._listener_registered = True
 
     def join(self, timeout: Optional[float] = None) -> None:
         thread = self._thread
@@ -1161,6 +1267,7 @@ class WorkflowRuntimeWorker:
             self._reconcile_task_mutations()
             try:
                 if self._dispatcher is not None:
+                    self._sweep_execution_cancellations()
                     self._sweep_execution_tasks()
             except (sqlite3.Error, StoreConflict, StoreNotFound):
                 _LOGGER.exception("Workflow runtime execution sweep failed")
@@ -1187,6 +1294,44 @@ class WorkflowRuntimeWorker:
                     task["workflow_uuid"],
                 )
             self._advance_task(task)
+
+    def _sweep_execution_cancellations(self) -> None:
+        dispatcher = self._dispatcher
+        assert dispatcher is not None
+        for task in self._coordinator._canceling_execution_tasks():
+            for job in self._coordinator._execution_jobs(task["uuid"]):
+                job_uuid = job["uuid"]
+                if (
+                    job["status"] != "cancel_requested"
+                    or job_uuid in self._cancel_requests_inflight
+                ):
+                    continue
+                cancel_accepted = dispatcher.request_cancel(job_uuid)
+                with self._job_settlement_lock:
+                    current = self._coordinator._execution_job(job_uuid)
+                    if current["status"] in _JOB_TERMINAL:
+                        self._cancel_requests_inflight.discard(job_uuid)
+                        continue
+                    if current["status"] != "cancel_requested":
+                        continue
+                    if cancel_accepted:
+                        self._cancel_requests_inflight.add(job_uuid)
+                        _LOGGER.info(
+                            "Workflow Job cancel requested task_uuid=%s job_uuid=%s",
+                            task["uuid"],
+                            job_uuid,
+                        )
+                        continue
+                    self._coordinator.mark_job_unknown(
+                        job_uuid,
+                        "workflow_job_cancel_unconfirmed",
+                    )
+                    _LOGGER.error(
+                        "Workflow Job cancel outcome unknown task_uuid=%s job_uuid=%s",
+                        task["uuid"],
+                        job_uuid,
+                    )
+            self._coordinator.reconcile_task_cancellation(task["uuid"])
 
     def _advance_task(self, task: Dict[str, Any]) -> None:
         task_uuid = task["uuid"]
@@ -1275,7 +1420,11 @@ class WorkflowRuntimeWorker:
                     incoming.get(job["workflow_node_uuid"], []),
                     jobs_by_node,
                 )
-                self._coordinator.transition_job(job["uuid"], "dispatched")
+                self._coordinator.transition_job(
+                    job["uuid"],
+                    "dispatched",
+                    param=payload["param"],
+                )
                 self._coordinator.transition_job(job["uuid"], "running")
                 _LOGGER.info(
                     "Workflow Job dispatch task_uuid=%s job_uuid=%s "
@@ -1383,49 +1532,183 @@ class WorkflowRuntimeWorker:
             value = value[part]
         return value
 
+    def _on_job_completion(
+        self,
+        job_uuid: str,
+        success: bool,
+        return_value: Any,
+        success_type: str = "normal",
+    ) -> bool:
+        if self._stop_event.is_set() or not self._listener_registered:
+            return False
+        return self._settle_job_finished(
+            job_uuid,
+            success,
+            return_value,
+            success_type,
+        )
+
     def _on_job_finished(
         self,
         job_uuid: str,
         success: bool,
         return_value: Any,
-        _success_type: str = "normal",
+        success_type: str = "normal",
     ) -> None:
-        if self._stop_event.is_set() or not self._listener_registered:
-            return
         try:
-            job = self._coordinator._execution_job(job_uuid)
-            if job["status"] in _JOB_TERMINAL:
-                return
-            task_uuid = job["workflow_task_uuid"]
-            if success:
-                result = (
-                    return_value
-                    if isinstance(return_value, dict)
-                    else {"value": return_value}
-                )
-                self._coordinator.transition_job(
-                    job_uuid,
-                    "succeeded",
-                    return_info=result,
-                )
-                _LOGGER.info(
-                    "Workflow Job succeeded task_uuid=%s job_uuid=%s",
-                    task_uuid,
-                    job_uuid,
-                )
-            else:
-                self._coordinator.transition_job(
-                    job_uuid,
-                    "failed",
-                    error_info=[{"code": "device_action_failed"}],
-                )
-                _LOGGER.error(
-                    "Workflow Job failed task_uuid=%s job_uuid=%s",
-                    task_uuid,
-                    job_uuid,
-                )
+            self._settle_job_finished(
+                job_uuid,
+                success,
+                return_value,
+                success_type,
+            )
         except (sqlite3.Error, StoreConflict, StoreNotFound):
             _LOGGER.exception("Workflow Job completion could not be committed")
+
+    def _settle_job_finished(
+        self,
+        job_uuid: str,
+        success: bool,
+        return_value: Any,
+        success_type: str,
+    ) -> bool:
+        with self._job_settlement_lock:
+            return self._settle_job_finished_locked(
+                job_uuid,
+                success,
+                return_value,
+                success_type,
+            )
+
+    def _settle_job_finished_locked(
+        self,
+        job_uuid: str,
+        success: bool,
+        return_value: Any,
+        success_type: str,
+    ) -> bool:
+        job = self._coordinator._execution_job(job_uuid)
+        task_uuid = job["workflow_task_uuid"]
+        if self._coordinator._is_device_action_task(task_uuid):
+            return False
+        if job["status"] in _JOB_TERMINAL:
+            return True
+        if success_type == "transport_unknown":
+            self._coordinator.mark_job_unknown(
+                job_uuid,
+                "workflow_job_dispatch_transport_unknown",
+            )
+            self._queue_task_reconciliation(task_uuid)
+            _LOGGER.error(
+                "Workflow Job outcome unknown task_uuid=%s job_uuid=%s",
+                task_uuid,
+                job_uuid,
+            )
+            return True
+        if job["status"] == "cancel_requested":
+            self._coordinator.transition_job(job_uuid, "canceled")
+            self._cancel_requests_inflight.discard(job_uuid)
+            self._coordinator.reconcile_task_cancellation(task_uuid)
+            self._queue_task_reconciliation(task_uuid)
+            _LOGGER.info(
+                "Workflow Job canceled task_uuid=%s job_uuid=%s",
+                task_uuid,
+                job_uuid,
+            )
+            return True
+        if success:
+            result = (
+                return_value
+                if isinstance(return_value, dict)
+                else {"value": return_value}
+            )
+            task = self._coordinator._execution_task(task_uuid)
+            result = self._materialize_implicit_passthrough(
+                task=task,
+                job=job,
+                result=result,
+            )
+            self._coordinator.transition_job(
+                job_uuid,
+                "succeeded",
+                return_info=result,
+            )
+            _LOGGER.info(
+                "Workflow Job succeeded task_uuid=%s job_uuid=%s",
+                task_uuid,
+                job_uuid,
+            )
+            return True
+        self._coordinator.transition_job(
+            job_uuid,
+            "failed",
+            error_info=[{"code": "device_action_failed"}],
+        )
+        _LOGGER.error(
+            "Workflow Job failed task_uuid=%s job_uuid=%s",
+            task_uuid,
+            job_uuid,
+        )
+        return True
+
+    @staticmethod
+    def _materialize_implicit_passthrough(
+        *,
+        task: Mapping[str, Any],
+        job: Mapping[str, Any],
+        result: Mapping[str, Any],
+    ) -> dict[str, Any]:
+        """把 typed Action 的 implicit ResourceSlot 输出固化进 durable result。"""
+
+        materialized = deepcopy(dict(result))
+        snapshot = task.get("workflow_snapshot")
+        if not isinstance(snapshot, Mapping):
+            return materialized
+        nodes = snapshot.get("nodes")
+        handles = snapshot.get("handle_templates")
+        if not isinstance(nodes, list) or not isinstance(handles, list):
+            return materialized
+        node = next(
+            (
+                item
+                for item in nodes
+                if isinstance(item, Mapping)
+                and item.get("uuid") == job.get("workflow_node_uuid")
+            ),
+            None,
+        )
+        if not isinstance(node, Mapping):
+            return materialized
+        template_uuid = node.get("workflow_node_template_uuid")
+        action_input = job.get("param")
+        if not isinstance(template_uuid, str) or not isinstance(
+            action_input,
+            Mapping,
+        ):
+            return materialized
+        for handle in handles:
+            if (
+                not isinstance(handle, Mapping)
+                or handle.get("workflow_node_template_uuid") != template_uuid
+                or handle.get("io_type") != "source"
+            ):
+                continue
+            meta_data = handle.get("meta_data")
+            unilab = (
+                meta_data.get("unilab")
+                if isinstance(meta_data, Mapping)
+                else None
+            )
+            if not isinstance(unilab, Mapping) or unilab.get(
+                "implicit_passthrough"
+            ) is not True:
+                continue
+            name = str(
+                handle.get("data_key") or handle.get("handle_key") or ""
+            ).strip()
+            if name and name in action_input:
+                materialized[name] = deepcopy(action_input[name])
+        return materialized
 
     def _fail_task(
         self,

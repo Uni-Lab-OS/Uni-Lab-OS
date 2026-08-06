@@ -218,6 +218,56 @@ def test_worker_stop_unsubscribes_dispatch_completion_listener(tmp_path: Path) -
     store.close()
 
 
+def test_runtime_materializes_implicit_resource_slot_from_frozen_dispatch_input(
+) -> None:
+    template_uuid = str(uuid4())
+    node_uuid = str(uuid4())
+    resource = {"uuid": str(uuid4()), "name": "powder"}
+    mount_resource = {"uuid": str(uuid4()), "name": "S07"}
+    task = {
+        "workflow_snapshot": {
+            "nodes": [
+                {
+                    "uuid": node_uuid,
+                    "workflow_node_template_uuid": template_uuid,
+                }
+            ],
+            "handle_templates": [
+                {
+                    "workflow_node_template_uuid": template_uuid,
+                    "handle_key": name,
+                    "data_key": name,
+                    "io_type": "source",
+                    "meta_data": {
+                        "unilab": {"implicit_passthrough": True}
+                    },
+                }
+                for name in ("resource", "mount_resource")
+            ],
+        }
+    }
+    job = {
+        "workflow_node_uuid": node_uuid,
+        "param": {
+            "resource": resource,
+            "mount_resource": mount_resource,
+            "site": "P01",
+        },
+    }
+
+    result = WorkflowRuntimeWorker._materialize_implicit_passthrough(
+        task=task,
+        job=job,
+        result={"success": True, "resource": [[{"stale": True}]]},
+    )
+
+    assert result == {
+        "success": True,
+        "resource": resource,
+        "mount_resource": mount_resource,
+    }
+
+
 def test_material_source_task_dispatch_is_fail_closed_until_scheduler_proves_admission(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:

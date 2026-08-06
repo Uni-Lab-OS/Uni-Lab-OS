@@ -1692,6 +1692,7 @@ def _parse_composite(
 
     node_uuid = state.node_uuid(statement)
     keyword_arguments: dict[str, object] = {}
+    resource_ref_arguments: dict[str, tuple[dict[str, str], str, ast.expr]] = {}
     pending_provider_edges: list[tuple[_NodeState, str, str]] = []
     for keyword_node in call.keywords:
         assert keyword_node.arg is not None
@@ -1717,6 +1718,20 @@ def _parse_composite(
             }
             pending_provider_edges.append(
                 (source_node, source_handle["uuid"], keyword_node.arg)
+            )
+            continue
+        resource_reference = _literal_resource_ref(
+            expression,
+            state=state,
+            diagnostic_code="invalid_composite_call",
+        )
+        if resource_reference is not None:
+            resource_slot, resource_id = resource_reference
+            keyword_arguments[keyword_node.arg] = resource_slot
+            resource_ref_arguments[keyword_node.arg] = (
+                resource_slot,
+                resource_id,
+                expression,
             )
             continue
         try:
@@ -1792,6 +1807,31 @@ def _parse_composite(
         "target",
         node=call,
     )
+    if resource_ref_arguments:
+        meta_data = invocation.setdefault("meta_data", {})
+        unilab = meta_data.setdefault("unilab", {})
+        resource_refs = unilab.setdefault("resource_refs", {})
+        for input_name, (
+            resource_slot,
+            resource_id,
+            expression,
+        ) in resource_ref_arguments.items():
+            target_handle = target_handles.get(input_name)
+            if target_handle is None or input_name == "ready":
+                _fail(
+                    "composite_boundary_mapping_invalid",
+                    "Published Workflow resource_ref 未匹配真实 boundary Handle",
+                    node=expression,
+                )
+            _validate_resource_ref_target(
+                resource_slot,
+                target=target_handle,
+                node=expression,
+                owner="Published Workflow",
+                diagnostic_code="invalid_composite_call",
+            )
+            resource_refs[target_handle["uuid"]] = {"resource_id": resource_id}
+        unilab["resource_refs"] = dict(sorted(resource_refs.items()))
     for source_node, source_handle_uuid, input_name in pending_provider_edges:
         target_handle = target_handles.get(input_name)
         if target_handle is None or input_name == "ready":
@@ -2346,6 +2386,25 @@ def _action_resource_ref(
     target: Mapping[str, Any],
     state: _BuildState,
 ) -> tuple[dict[str, str], str] | None:
+    resource_reference = _literal_resource_ref(expression, state=state)
+    if resource_reference is None:
+        return None
+    resource_slot, resource_id = resource_reference
+    _validate_resource_ref_target(
+        resource_slot,
+        target=target,
+        node=expression,
+        owner="Action",
+    )
+    return resource_slot, resource_id
+
+
+def _literal_resource_ref(
+    expression: ast.expr,
+    *,
+    state: _BuildState,
+    diagnostic_code: str = "invalid_action_call",
+) -> tuple[dict[str, str], str] | None:
     if not isinstance(expression, ast.Call) or _call_identity(
         expression, state.imports
     ) != _RESOURCE_REF:
@@ -2357,27 +2416,37 @@ def _action_resource_ref(
         or not isinstance(expression.args[0].value, str)
     ):
         _fail(
-            "invalid_action_call",
+            diagnostic_code,
             "resource_ref 必须接收单个非空 resource id literal",
-            node=expression,
-        )
-    if str(target.get("type") or "").strip().lower() != "resourceslot":
-        _fail(
-            "invalid_action_call",
-            "resource_ref 只能绑定 ResourceSlot Action 参数",
             node=expression,
         )
     resource_id = expression.args[0].value
     if not resource_id.strip() or resource_id != resource_id.strip():
         _fail(
-            "invalid_action_call",
+            diagnostic_code,
             "resource_ref 必须接收单个非空 resource id literal",
             node=expression,
         )
-    resource_slot = resolve_resource_ref(
+    return (
+        resolve_resource_ref(resource_id, state.material_source_authority),
         resource_id,
-        state.material_source_authority,
     )
+
+
+def _validate_resource_ref_target(
+    resource_slot: Mapping[str, str],
+    *,
+    target: Mapping[str, Any],
+    node: ast.AST,
+    owner: str,
+    diagnostic_code: str = "invalid_action_call",
+) -> None:
+    if str(target.get("type") or "").strip().lower() != "resourceslot":
+        _fail(
+            diagnostic_code,
+            f"resource_ref 只能绑定 ResourceSlot {owner} 参数",
+            node=node,
+        )
     unilab = target.get("meta_data", {}).get("unilab", {})
     allowlist = (
         unilab.get("allowed_resource_template_uuids")
@@ -2389,10 +2458,9 @@ def _action_resource_ref(
     ] not in allowlist:
         _fail(
             "material_source_conflict",
-            "resource_ref 物料模板不被 Action ResourceSlot 接受",
-            node=expression,
+            f"resource_ref 物料模板不被 {owner} ResourceSlot 接受",
+            node=node,
         )
-    return resource_slot, resource_id
 
 
 def _parse_group(
@@ -3764,6 +3832,16 @@ def _render_graph(
             templates.get(str(item.get("workflow_node_template_uuid")), {})
         )
     ]
+    material_source_uuids = {item["uuid"] for item in material_source_nodes}
+    execution_nodes = [
+        item for item in nodes if item["uuid"] not in material_source_uuids
+    ]
+    execution_edges = [
+        item
+        for item in graph["edges"]
+        if item["source_node_uuid"] not in material_source_uuids
+        and item["target_node_uuid"] not in material_source_uuids
+    ]
     published_workflow_nodes = [
         item
         for item in visible_nodes
@@ -3788,7 +3866,13 @@ def _render_graph(
     if selectors:
         markers.add("device")
     group_nodes = [item for item in visible_nodes if _is_group_node(item, templates)]
-    root_layers = _root_construct_layers(nodes, graph["edges"], templates)
+    # MaterialSource 是函数体内的 selector 声明，不是可执行 action，也不参与
+    # parallel/group 的结构分层；多物料源统一先声明，再恢复执行 DAG。
+    root_layers = _root_construct_layers(
+        execution_nodes,
+        execution_edges,
+        templates,
+    )
     if group_nodes:
         markers.add("group")
     if any(len(layer) > 1 for layer in root_layers):
@@ -3833,8 +3917,20 @@ def _render_graph(
         alias = "" if imported_name == symbol else f" as {imported_name}"
         emitter.emit(f"from {module} import {symbol}{alias}")
     workflow_import_names: dict[str, str] = {}
+    def workflow_import_sort_key(template_uuid: str) -> tuple[str, str, str]:
+        template = templates.get(template_uuid, {})
+        meta_data = template.get("meta_data")
+        unilab = meta_data.get("unilab") if isinstance(meta_data, Mapping) else None
+        provenance = (
+            unilab.get("workflow_source") if isinstance(unilab, Mapping) else None
+        )
+        module = provenance.get("module") if isinstance(provenance, Mapping) else ""
+        symbol = provenance.get("symbol") if isinstance(provenance, Mapping) else ""
+        return (str(module), str(symbol), template_uuid)
+
     for template_uuid in sorted(
-        {str(node["workflow_node_template_uuid"]) for node in published_workflow_nodes}
+        {str(node["workflow_node_template_uuid"]) for node in published_workflow_nodes},
+        key=workflow_import_sort_key,
     ):
         template = templates[template_uuid]
         try:
@@ -3981,6 +4077,13 @@ def _render_graph(
         emitter.emit(f"def {function_name}() -> {result_annotation}:")
 
     body_indent = "    "
+    for material_source_node in material_source_nodes:
+        _emit_material_source(
+            emitter,
+            material_source_node,
+            indent=body_indent,
+            resource_import_names=resource_import_names,
+        )
     for layer in root_layers:
         if len(layer) > 1:
             if all(
@@ -4038,19 +4141,13 @@ def _render_graph(
                 str(construct.get("workflow_node_template_uuid")),
                 {},
             )
-            if _is_material_source_template(template):
-                _emit_material_source(
-                    emitter,
-                    construct,
-                    indent=body_indent,
-                    resource_import_names=resource_import_names,
-                )
-            elif _is_published_workflow_template(template):
+            if _is_published_workflow_template(template):
                 _emit_published_workflow(
                     emitter,
                     construct,
                     indent=body_indent,
                     template=template,
+                    templates=templates,
                     handles_by_node=handles_by_node,
                     handles=handles,
                     node_by_uuid=node_by_uuid,
@@ -4496,6 +4593,7 @@ def _emit_group(
                 child,
                 indent=indent + "    ",
                 template=template,
+                templates=templates,
                 handles_by_node=handles_by_node,
                 handles=handles,
                 node_by_uuid=node_by_uuid,
@@ -4628,6 +4726,7 @@ def _emit_published_workflow(
     *,
     indent: str,
     template: Mapping[str, Any],
+    templates: Mapping[str, dict[str, Any]],
     handles_by_node: Mapping[str, list[dict[str, Any]]],
     handles: Mapping[str, dict[str, Any]],
     node_by_uuid: Mapping[str, dict[str, Any]],
@@ -4701,14 +4800,33 @@ def _emit_published_workflow(
                 source_handle.get("data_key") or source_handle.get("handle_key") or ""
             )
             if output_name.lower() != "ready":
-                expression = (
-                    f"{_safe_identifier(str(producer.get('name') or 'result'), 'result')}."
-                    f"{_safe_identifier(output_name, 'value')}"
+                producer_name = _safe_identifier(
+                    str(producer.get("name") or "result"),
+                    "result",
                 )
+                producer_template = templates.get(
+                    str(producer.get("workflow_node_template_uuid")),
+                    {},
+                )
+                if (
+                    _is_material_source_template(producer_template)
+                    and output_name == "material"
+                ):
+                    expression = producer_name
+                else:
+                    expression = (
+                        f"{producer_name}."
+                        f"{_safe_identifier(output_name, 'value')}"
+                    )
         if name in param:
             if expression is not None:
                 _fail("candidate_invalid", "Composite target Handle 有多个 provider")
-            expression = repr(param[name])
+            resource_reference = _resource_ref_source(node, handle)
+            expression = (
+                resource_reference
+                if resource_reference is not None
+                else repr(param[name])
+            )
         if expression is not None:
             parameters.append(f"{name}={expression}")
     result_name = _safe_identifier(str(node.get("name") or "result"), "result")

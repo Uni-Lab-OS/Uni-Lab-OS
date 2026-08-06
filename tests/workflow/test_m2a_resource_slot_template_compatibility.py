@@ -87,6 +87,23 @@ def _ordinary_action_imports() -> list[NodeTemplateImport]:
     return imports
 
 
+def _implicit_passthrough_imports() -> list[NodeTemplateImport]:
+    imports = _imports_with_prepare_allowlist((PLATE_RESOURCE_TEMPLATE_UUID,))
+    middle = _middle_action_import()
+    assert isinstance(middle.handles, list)
+    source = next(
+        item for item in middle.handles if item["uuid"] == MIDDLE_SAMPLE_SOURCE_UUID
+    )
+    source["meta_data"] = {
+        "unilab": {
+            "allowed_resource_template_uuids": None,
+            "implicit_passthrough": True,
+        }
+    }
+    imports.append(middle)
+    return imports
+
+
 @contextmanager
 def _opened_context(
     database_path: Path,
@@ -350,3 +367,17 @@ def test_action_output_contract_not_executor_template_proves_compatibility(
 
     assert recompiled.valid, recompiled.diagnostics
     assert recompiled.graph == compiled.graph
+
+
+def test_implicit_resource_slot_passthrough_preserves_upstream_template_guarantee(
+    tmp_path: Path,
+) -> None:
+    source = _source(pass_through=True)
+    with _opened_context(
+        tmp_path / "workflow.db",
+        imports=_implicit_passthrough_imports(),
+    ) as context:
+        compiled = _compile(context, source)
+
+    assert compiled.valid, compiled.diagnostics
+    assert compiled.graph is not None

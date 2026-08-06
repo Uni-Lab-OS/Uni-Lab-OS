@@ -49,7 +49,7 @@ jobs:
           call conda activate check-env
           echo Installing pip dependencies...
           uv pip install -r unilabos/utils/requirements.txt
-          uv pip install pywinauto git+https://github.com/Xuwznln/pylabrobot.git
+          uv pip install pytest pywinauto git+https://github.com/Xuwznln/pylabrobot.git
           uv pip uninstall enum34 || echo enum34 not installed, skipping
           uv pip install .
 
@@ -81,6 +81,11 @@ jobs:
           if %COUNT% LSS %ATTEMPTS% goto retry
           echo All %ATTEMPTS% attempts failed
           exit /b 1
+
+      - name: Run Windows Workflow Draft CAS suite
+        run: |
+          call conda activate check-env
+          python -m pytest -q tests/workflow/test_02g2_windows_draft_cas_contract.py tests/workflow/test_02g2_windows_native_draft_cas.py tests/workflow/test_windows_import_portability.py
 
       - name: Check for uncommitted changes
         shell: bash

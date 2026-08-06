@@ -4,11 +4,15 @@ xyz_stepper_controller:
   class:
     action_value_mappings:
       auto-degrees_to_steps:
+        displayname: auto-degrees_to_steps
+        estimate_duration_express: ''
+        estimate_duration_fixed: 60.0
         feedback: {}
         goal: {}
         goal_default:
           degrees: null
         handles: {}
+        lock_resource: []
         placeholder_keys: {}
         result: {}
         schema:
@@ -31,11 +35,15 @@ xyz_stepper_controller:
           type: object
         type: UniLabJsonCommand
       auto-emergency_stop:
+        displayname: auto-emergency_stop
+        estimate_duration_express: ''
+        estimate_duration_fixed: 60.0
         feedback: {}
         goal: {}
         goal_default:
           axis: null
         handles: {}
+        lock_resource: []
         placeholder_keys: {}
         result: {}
         schema:
@@ -58,11 +66,15 @@ xyz_stepper_controller:
           type: object
         type: UniLabJsonCommand
       auto-enable_all_axes:
+        displayname: auto-enable_all_axes
+        estimate_duration_express: ''
+        estimate_duration_fixed: 60.0
         feedback: {}
         goal: {}
         goal_default:
           enable: true
         handles: {}
+        lock_resource: []
         placeholder_keys: {}
         result: {}
         schema:
@@ -87,12 +99,16 @@ xyz_stepper_controller:
           type: object
         type: UniLabJsonCommand
       auto-enable_motor:
+        displayname: auto-enable_motor
+        estimate_duration_express: ''
+        estimate_duration_fixed: 60.0
         feedback: {}
         goal: {}
         goal_default:
           axis: null
           enable: true
         handles: {}
+        lock_resource: []
         placeholder_keys: {}
         result: {}
         schema:
@@ -119,10 +135,14 @@ xyz_stepper_controller:
           type: object
         type: UniLabJsonCommand
       auto-home_all_axes:
+        displayname: auto-home_all_axes
+        estimate_duration_express: ''
+        estimate_duration_fixed: 60.0
         feedback: {}
         goal: {}
         goal_default: {}
         handles: {}
+        lock_resource: []
         placeholder_keys: {}
         result: {}
         schema:
@@ -143,11 +163,15 @@ xyz_stepper_controller:
           type: object
         type: UniLabJsonCommand
       auto-home_axis:
+        displayname: auto-home_axis
+        estimate_duration_express: ''
+        estimate_duration_fixed: 60.0
         feedback: {}
         goal: {}
         goal_default:
           axis: null
         handles: {}
+        lock_resource: []
         placeholder_keys: {}
         result: {}
         schema:
@@ -170,6 +194,9 @@ xyz_stepper_controller:
           type: object
         type: UniLabJsonCommand
       auto-move_to_position:
+        displayname: auto-move_to_position
+        estimate_duration_express: ''
+        estimate_duration_fixed: 60.0
         feedback: {}
         goal: {}
         goal_default:
@@ -179,6 +206,7 @@ xyz_stepper_controller:
           precision: 100
           speed: 5000
         handles: {}
+        lock_resource: []
         placeholder_keys: {}
         result: {}
         schema:
@@ -217,6 +245,9 @@ xyz_stepper_controller:
           type: object
         type: UniLabJsonCommand
       auto-move_to_position_degrees:
+        displayname: auto-move_to_position_degrees
+        estimate_duration_express: ''
+        estimate_duration_fixed: 60.0
         feedback: {}
         goal: {}
         goal_default:
@@ -226,6 +257,7 @@ xyz_stepper_controller:
           precision: 100
           speed: 5000
         handles: {}
+        lock_resource: []
         placeholder_keys: {}
         result: {}
         schema:
@@ -264,6 +296,9 @@ xyz_stepper_controller:
           type: object
         type: UniLabJsonCommand
       auto-move_to_position_revolutions:
+        displayname: auto-move_to_position_revolutions
+        estimate_duration_express: ''
+        estimate_duration_fixed: 60.0
         feedback: {}
         goal: {}
         goal_default:
@@ -273,6 +308,7 @@ xyz_stepper_controller:
           revolutions: null
           speed: 5000
         handles: {}
+        lock_resource: []
         placeholder_keys: {}
         result: {}
         schema:
@@ -311,6 +347,9 @@ xyz_stepper_controller:
           type: object
         type: UniLabJsonCommand
       auto-move_xyz:
+        displayname: auto-move_xyz
+        estimate_duration_express: ''
+        estimate_duration_fixed: 60.0
         feedback: {}
         goal: {}
         goal_default:
@@ -320,6 +359,7 @@ xyz_stepper_controller:
           y: null
           z: null
         handles: {}
+        lock_resource: []
         placeholder_keys: {}
         result: {}
         schema:
@@ -357,6 +397,9 @@ xyz_stepper_controller:
           type: object
         type: UniLabJsonCommand
       auto-move_xyz_degrees:
+        displayname: auto-move_xyz_degrees
+        estimate_duration_express: ''
+        estimate_duration_fixed: 60.0
         feedback: {}
         goal: {}
         goal_default:
@@ -366,6 +409,7 @@ xyz_stepper_controller:
           y_deg: null
           z_deg: null
         handles: {}
+        lock_resource: []
         placeholder_keys: {}
         result: {}
         schema:
@@ -403,6 +447,9 @@ xyz_stepper_controller:
           type: object
         type: UniLabJsonCommand
       auto-move_xyz_revolutions:
+        displayname: auto-move_xyz_revolutions
+        estimate_duration_express: ''
+        estimate_duration_fixed: 60.0
         feedback: {}
         goal: {}
         goal_default:
@@ -412,6 +459,7 @@ xyz_stepper_controller:
           y_rev: null
           z_rev: null
         handles: {}
+        lock_resource: []
         placeholder_keys: {}
         result: {}
         schema:
@@ -449,11 +497,15 @@ xyz_stepper_controller:
           type: object
         type: UniLabJsonCommand
       auto-revolutions_to_steps:
+        displayname: auto-revolutions_to_steps
+        estimate_duration_express: ''
+        estimate_duration_fixed: 60.0
         feedback: {}
         goal: {}
         goal_default:
           revolutions: null
         handles: {}
+        lock_resource: []
         placeholder_keys: {}
         result: {}
         schema:
@@ -476,6 +528,9 @@ xyz_stepper_controller:
           type: object
         type: UniLabJsonCommand
       auto-set_speed_mode:
+        displayname: auto-set_speed_mode
+        estimate_duration_express: ''
+        estimate_duration_fixed: 60.0
         feedback: {}
         goal: {}
         goal_default:
@@ -483,6 +538,7 @@ xyz_stepper_controller:
           axis: null
           speed: null
         handles: {}
+        lock_resource: []
         placeholder_keys: {}
         result: {}
         schema:
@@ -513,11 +569,15 @@ xyz_stepper_controller:
           type: object
         type: UniLabJsonCommand
       auto-steps_to_degrees:
+        displayname: auto-steps_to_degrees
+        estimate_duration_express: ''
+        estimate_duration_fixed: 60.0
         feedback: {}
         goal: {}
         goal_default:
           steps: null
         handles: {}
+        lock_resource: []
         placeholder_keys: {}
         result: {}
         schema:
@@ -540,11 +600,15 @@ xyz_stepper_controller:
           type: object
         type: UniLabJsonCommand
       auto-steps_to_revolutions:
+        displayname: auto-steps_to_revolutions
+        estimate_duration_express: ''
+        estimate_duration_fixed: 60.0
         feedback: {}
         goal: {}
         goal_default:
           steps: null
         handles: {}
+        lock_resource: []
         placeholder_keys: {}
         result: {}
         schema:
@@ -567,10 +631,14 @@ xyz_stepper_controller:
           type: object
         type: UniLabJsonCommand
       auto-stop_all_axes:
+        displayname: auto-stop_all_axes
+        estimate_duration_express: ''
+        estimate_duration_fixed: 60.0
         feedback: {}
         goal: {}
         goal_default: {}
         handles: {}
+        lock_resource: []
         placeholder_keys: {}
         result: {}
         schema:
@@ -591,12 +659,16 @@ xyz_stepper_controller:
           type: object
         type: UniLabJsonCommand
       auto-wait_for_completion:
+        displayname: auto-wait_for_completion
+        estimate_duration_express: ''
+        estimate_duration_fixed: 60.0
         feedback: {}
         goal: {}
         goal_default:
           axis: null
           timeout: 30.0
         handles: {}
+        lock_resource: []
         placeholder_keys: {}
         result: {}
         schema:
@@ -628,8 +700,10 @@ xyz_stepper_controller:
     type: python
   config_info: []
   description: 新XYZ控制器
+  displayname: xyz_stepper_controller
   handles: []
   icon: ''
+  init_param_enforce: {}
   init_param_schema:
     config:
       properties:
@@ -656,4 +730,5 @@ xyz_stepper_controller:
       required:
       - all_positions
       type: object
+  metadata: {}
   version: 1.0.0

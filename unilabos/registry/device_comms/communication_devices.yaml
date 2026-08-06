@@ -4,12 +4,16 @@ serial:
   class:
     action_value_mappings:
       auto-handle_serial_request:
+        displayname: auto-handle_serial_request
+        estimate_duration_express: ''
+        estimate_duration_fixed: 60.0
         feedback: {}
         goal: {}
         goal_default:
           request: null
           response: null
         handles: {}
+        lock_resource: []
         placeholder_keys: {}
         result: {}
         schema:
@@ -33,10 +37,14 @@ serial:
           type: object
         type: UniLabJsonCommand
       auto-read_data:
+        displayname: auto-read_data
+        estimate_duration_express: ''
+        estimate_duration_fixed: 60.0
         feedback: {}
         goal: {}
         goal_default: {}
         handles: {}
+        lock_resource: []
         placeholder_keys: {}
         result: {}
         schema:
@@ -54,11 +62,15 @@ serial:
           type: object
         type: UniLabJsonCommand
       auto-send_command:
+        displayname: auto-send_command
+        estimate_duration_express: ''
+        estimate_duration_fixed: 60.0
         feedback: {}
         goal: {}
         goal_default:
           command: null
         handles: {}
+        lock_resource: []
         placeholder_keys: {}
         result: {}
         schema:
@@ -84,8 +96,10 @@ serial:
   config_info: []
   description: Serial communication interface, used when sharing same serial port
     for multiple devices
+  displayname: serial
   handles: []
   icon: ''
+  init_param_enforce: {}
   init_param_schema:
     config:
       properties:
@@ -109,4 +123,5 @@ serial:
       properties: {}
       required: []
       type: object
+  metadata: {}
   version: 1.0.0

@@ -15,6 +15,11 @@ try:
 except ModuleNotFoundError:  # pragma: no cover - exercised by Windows CI
     fcntl = None  # type: ignore[assignment]
 
+try:
+    import msvcrt
+except ModuleNotFoundError:  # pragma: no cover - exercised by POSIX CI
+    msvcrt = None  # type: ignore[assignment]
+
 from unilabos.app.scheduler.inventory import (
     InventoryService,
     ResourceTemplateIdentity,
@@ -270,27 +275,46 @@ def _clear_runtime() -> None:
 def _acquire_workspace_lease(working_dir: Path) -> int:
     """在打开数据库前取得工作区唯一 OS Authority 的进程锁。"""
 
-    if fcntl is None:
+    if fcntl is None and msvcrt is None:
         raise RuntimeError("当前平台不支持 Workflow Authority 所需的进程文件锁")
 
     working_dir.mkdir(parents=True, exist_ok=True)
     lease_path = working_dir / ".workflow-authority.lock"
     descriptor = os.open(
         lease_path,
-        os.O_RDWR | os.O_CREAT | os.O_CLOEXEC | os.O_NOFOLLOW,
+        os.O_RDWR
+        | os.O_CREAT
+        | getattr(os, "O_CLOEXEC", 0)
+        | getattr(os, "O_NOFOLLOW", 0)
+        | getattr(os, "O_BINARY", 0),
         0o600,
     )
     try:
         if not stat.S_ISREG(os.fstat(descriptor).st_mode):
             raise RuntimeError("Workflow Authority 租约路径不是普通文件")
-        try:
-            fcntl.flock(descriptor, fcntl.LOCK_EX | fcntl.LOCK_NB)
-        except OSError as error:
-            if error.errno not in {errno.EACCES, errno.EAGAIN}:
-                raise
-            raise RuntimeError(
-                "当前工作区已由另一个 OS Workflow Authority 占用"
-            ) from None
+        if fcntl is not None:
+            try:
+                fcntl.flock(descriptor, fcntl.LOCK_EX | fcntl.LOCK_NB)
+            except OSError as error:
+                if error.errno not in {errno.EACCES, errno.EAGAIN}:
+                    raise
+                raise RuntimeError(
+                    "当前工作区已由另一个 OS Workflow Authority 占用"
+                ) from None
+        else:
+            assert msvcrt is not None
+            if os.fstat(descriptor).st_size == 0:
+                os.write(descriptor, b"\0")
+                os.fsync(descriptor)
+            os.lseek(descriptor, 0, os.SEEK_SET)
+            try:
+                msvcrt.locking(descriptor, msvcrt.LK_NBLCK, 1)
+            except OSError as error:
+                if error.errno not in {errno.EACCES, errno.EAGAIN, errno.EDEADLK}:
+                    raise
+                raise RuntimeError(
+                    "当前工作区已由另一个 OS Workflow Authority 占用"
+                ) from None
         return descriptor
     except BaseException:
         os.close(descriptor)
@@ -304,12 +328,12 @@ def _release_workspace_lease(
 ) -> None:
     if descriptor is None:
         return
-    if fcntl is None:
-        os.close(descriptor)
-        return
     try:
-        if unlock:
+        if unlock and fcntl is not None:
             fcntl.flock(descriptor, fcntl.LOCK_UN)
+        elif unlock and msvcrt is not None:
+            os.lseek(descriptor, 0, os.SEEK_SET)
+            msvcrt.locking(descriptor, msvcrt.LK_UNLCK, 1)
     finally:
         os.close(descriptor)
 

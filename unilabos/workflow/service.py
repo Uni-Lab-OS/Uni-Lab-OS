@@ -9,6 +9,7 @@ import re
 import signal
 import stat
 import struct
+import sys
 import threading
 from collections import defaultdict
 from collections.abc import Iterator
@@ -23,6 +24,11 @@ try:
 except ModuleNotFoundError:  # pragma: no cover - exercised by Windows CI
     fcntl = None  # type: ignore[assignment]
 
+try:
+    import msvcrt
+except ModuleNotFoundError:  # pragma: no cover - exercised by POSIX CI
+    msvcrt = None  # type: ignore[assignment]
+
 from pydantic import ValidationError
 
 from unilabos.app.scheduler.inventory import (
@@ -30,6 +36,13 @@ from unilabos.app.scheduler.inventory import (
     TaskMaterialReleaseResult,
 )
 from unilabos.workflow.candidate_validation import validate_candidate_bundle
+from unilabos.workflow.darwin_draft_cas import (
+    DarwinDraftCasConflict,
+    DarwinDraftCasInternalError,
+    DarwinDraftCasInvalidTarget,
+    supports_darwin_draft_cas,
+    write_darwin_draft_cas,
+)
 from unilabos.workflow.json_codec import encode_json
 from unilabos.workflow.material_source import (
     MaterialSourceAuthorityError,
@@ -63,9 +76,32 @@ from unilabos.workflow.task_input import (
     UnconfiguredResourceSlotResolver,
     preflight_task_input,
 )
+from unilabos.workflow.windows_draft_cas import (
+    WindowsDraftCasConflict,
+    WindowsDraftCasInternalError,
+    WindowsDraftCasInvalidTarget,
+    write_windows_draft_cas,
+)
 
 _LOGGER = logging.getLogger(__name__)
 AUTHORING_SOURCE_BYTE_LIMIT = 8 * 1024 * 1024
+_CANDIDATE_HASH_FIELDS = (
+    "base_workflow_revision",
+    "draft_hash",
+    "graph",
+    "normalized_python_source",
+    "source_map",
+    "changeset",
+    "compiler_version",
+    "template_catalog_fingerprint",
+)
+_GRAPH_AUDIT_FIELDS = frozenset({"create_time", "update_time"})
+_GRAPH_ENTITY_COLLECTIONS = (
+    "nodes",
+    "edges",
+    "node_templates",
+    "handle_templates",
+)
 _ERRORS = {
     "invalid_input": (400, "提交内容格式不正确"),
     "not_found": (404, "请求的资源不存在"),
@@ -116,6 +152,9 @@ _NO_EXPECTED_HASH = object()
 _F_SETOWN_EX = getattr(fcntl, "F_SETOWN_EX", 15)
 _F_OWNER_TID = 0
 _LEASE_BREAK_SIGNAL = getattr(signal, "SIGIO", None)
+_DIRECTORY_FD_PATHS_SUPPORTED = os.open in getattr(
+    os, "supports_dir_fd", ()
+) and os.stat in getattr(os, "supports_dir_fd", ())
 _WORKFLOW_READ_FIELDS = {
     "uuid",
     "create_time",
@@ -126,6 +165,41 @@ _WORKFLOW_READ_FIELDS = {
     "revision",
     "description",
 }
+
+
+def _supports_directory_fd_paths() -> bool:
+    return _DIRECTORY_FD_PATHS_SUPPORTED
+
+
+def _supports_linux_file_lease_cas() -> bool:
+    """判断当前进程是否具备 Linux Draft 强 CAS 所需的全部原语。
+
+    本函数没有参数；返回值为 ``True`` 时，调用方可以使用目录 FD、Linux 文件
+    lease 和同步信号消费保护工作流源码（Workflow Source）的比较并替换窗口。
+    任何平台或原语缺失都返回 ``False``，调用方必须选择其他 Adapter 或失败关闭，
+    不能仅凭 ``fcntl`` 模块或目录 FD 存在就进入 Linux 实现。
+    """
+
+    if not sys.platform.startswith("linux"):
+        return False
+    if not _supports_directory_fd_paths() or fcntl is None:
+        return False
+    return all(
+        hasattr(owner, name)
+        for owner, name in (
+            (fcntl, "F_SETSIG"),
+            (fcntl, "F_SETLEASE"),
+            (fcntl, "F_WRLCK"),
+            (fcntl, "F_UNLCK"),
+            (signal, "SIGIO"),
+            (signal, "SIG_BLOCK"),
+            (signal, "SIG_SETMASK"),
+            (signal, "pthread_sigmask"),
+            (signal, "sigtimedwait"),
+        )
+    )
+
+
 _NODE_TEMPLATE_READ_FIELDS = {
     "uuid",
     "create_time",
@@ -282,6 +356,30 @@ def _canonical_json(value: Any) -> bytes:
     return encode_json(value, sort_keys=True)
 
 
+def _candidate_semantic_hash(candidate: Dict[str, Any]) -> str:
+    """对完整 Candidate 语义求哈希，排除 Backend 只读审计时间。"""
+
+    graph = candidate["graph"]
+
+    def semantic_entity(entity: Dict[str, Any]) -> Dict[str, Any]:
+        return {
+            key: value
+            for key, value in entity.items()
+            if key not in _GRAPH_AUDIT_FIELDS
+        }
+
+    semantic_graph = {
+        "workflow": semantic_entity(graph["workflow"]),
+        **{
+            field: [semantic_entity(item) for item in graph[field]]
+            for field in _GRAPH_ENTITY_COLLECTIONS
+        },
+    }
+    payload = {field: candidate[field] for field in _CANDIDATE_HASH_FIELDS}
+    payload["graph"] = semantic_graph
+    return _sha256(_canonical_json(payload))
+
+
 def _mtime_rfc3339(timestamp: float) -> str:
     return (
         datetime.fromtimestamp(timestamp, timezone.utc)
@@ -381,6 +479,26 @@ class WorkflowService:
         description: Optional[str],
         meta_data: Dict[str, Any],
     ) -> Dict[str, Any]:
+        """更新工作流展示事实并刷新受发布目录影响的工作流创作草稿。
+
+        参数：
+            workflow_uuid: 待更新的工作流（Workflow）UUID。
+            name: 去除首尾空白后必须非空的工作流名称。
+            tags: Backend 形态的 JSON 标签数组。
+            description: 可空工作流说明。
+            meta_data: 不得覆盖 ``unilab`` 保留区的展示元数据。
+
+        返回：
+            更新后的 Backend 形态工作流。
+
+        异常：
+            WorkflowError: 输入、目录发布或持久化失败。
+
+        不变量：
+            已发布工作流目录先在 Catalog guard 内完整替换；依赖 Draft 只在相关
+            工作流锁和 Catalog guard 全部释放后重新编译。
+        """
+
         current = self.get_workflow(workflow_uuid)
         identity = current["uuid"]
         with self._authoring_lock(identity):
@@ -406,9 +524,26 @@ class WorkflowService:
                     catalog_authority_id=catalog_authority_id,
                 )
                 self._publish_catalog_after_mutation()
-                return updated
+        self._refresh_registered_sources_after_catalog_mutation(identity)
+        return updated
 
     def delete_workflow(self, workflow_uuid: str) -> None:
+        """软删除工作流并在发布完成后重编译其余已注册工作流创作草稿。
+
+        参数：
+            workflow_uuid: 待删除的工作流（Workflow）UUID。
+
+        返回：
+            无。
+
+        异常：
+            WorkflowError: 工作流不存在或目录发布失败。
+
+        不变量：
+            删除和 Catalog 失效属于同一持久事务；依赖 Draft 刷新不持有被删除
+            工作流的创作锁，也不把派生刷新失败改写为删除失败。
+        """
+
         identity = self.get_workflow(workflow_uuid)["uuid"]
         with self._authoring_lock(identity):
             self.get_workflow(identity)
@@ -418,6 +553,7 @@ class WorkflowService:
                     catalog_authority_id=catalog_authority_id,
                 )
                 self._publish_catalog_after_mutation()
+        self._refresh_registered_sources_after_catalog_mutation(identity)
 
     def get_graph(self, workflow_uuid: str) -> Dict[str, Any]:
         identity = self.get_workflow(workflow_uuid)["uuid"]
@@ -447,6 +583,26 @@ class WorkflowService:
         nodes: List[WorkflowNodeWrite | Dict[str, Any]],
         edges: List[WorkflowEdgeWrite | Dict[str, Any]],
     ) -> Dict[str, Any]:
+        """保存完整工作流图并刷新依赖已发布合同的工作流创作草稿。
+
+        参数：
+            workflow_uuid: 图所属工作流（Workflow）UUID。
+            revision: 调用方观察到的工作流修订号。
+            nodes: 完整替换图中的工作流节点（WorkflowNode）。
+            edges: 完整替换图中的工作流边（WorkflowEdge）。
+
+        返回：
+            保存后的 Backend 形态工作流图。
+
+        异常：
+            WorkflowConflict: 修订号冲突。
+            WorkflowError: 图、物料来源（MaterialSource）或目录发布无效。
+
+        不变量：
+            图事务和目录发布完成前不重编译其他 Draft；刷新不得嵌套取得另一个
+            工作流创作锁与 Catalog guard。
+        """
+
         identity = self.get_workflow(workflow_uuid)["uuid"]
         with self._authoring_lock(identity):
             self.get_workflow(identity)
@@ -477,7 +633,6 @@ class WorkflowService:
                         catalog_authority_id=catalog_authority_id,
                     )
                     self._publish_catalog_after_mutation()
-                    return saved
             except ValidationError:
                 raise WorkflowError("invalid_input") from None
             except MaterialSourceAuthorityError as error:
@@ -490,6 +645,8 @@ class WorkflowService:
                 raise WorkflowError("not_found") from None
             except StoreConflict:
                 raise WorkflowError("invalid_input") from None
+        self._refresh_registered_sources_after_catalog_mutation(identity)
+        return saved
 
     # WorkflowTask 与 WorkflowNodeJob -----------------------------------
 
@@ -903,10 +1060,10 @@ class WorkflowService:
                     available.sort(key=stable_key)
         if len(ordered) != len(enabled):
             raise StoreConflict("workflow graph contains a cycle")
+        if not ordered:
+            raise StoreConflict("workflow has no enabled nodes")
         if run_mode == "single_node":
             if target_node_uuid is None:
-                if not ordered:
-                    raise StoreConflict("workflow has no enabled nodes")
                 target_node_uuid = ordered[0]
             if target_node_uuid not in enabled:
                 raise StoreConflict("single_node target is not enabled")
@@ -1111,12 +1268,18 @@ class WorkflowService:
         return self._store.list_source_registrations()
 
     def recover_registered_sources(self) -> None:
-        """启动时逐一恢复已注册源码，隔离单个损坏 Draft。"""
+        """启动时恢复全部已注册工作流源码及其 Catalog 相关派生状态。
+
+        本方法没有参数和返回值。每个注册项独立恢复；损坏路径、编译器故障或
+        单个工作流创作错误不会阻止其余 Draft。源码 hash 未变只证明文件未变，
+        不能证明子工作流或模板 Catalog 未变，因此有诊断、过期候选或不完整派生
+        状态时仍会重新编译。
+        """
 
         for registration in self.list_registered_sources():
             try:
                 self.reconcile_registered_source(registration["workflow_uuid"])
-            except (OSError, RuntimeError):
+            except (OSError, RuntimeError, WorkflowError):
                 continue
 
     def close(self) -> None:
@@ -1148,6 +1311,17 @@ class WorkflowService:
         expected_draft_hash: Optional[str],
         expected_workflow_revision: int,
     ) -> Dict[str, Any]:
+        """以双 CAS 保存并编译一个工作流创作草稿（Authoring Draft）。
+
+        ``workflow_uuid`` 标识现有工作流（Workflow），``python_source`` 是完整待保存
+        源码，``expected_draft_hash`` 是调用方开始编辑时观察到的工作流源码
+        （Workflow Source）字节 hash，``expected_workflow_revision`` 是同时观察到的
+        工作流修订（Workflow Revision）。成功返回自洽的工作流创作聚合；相同字节
+        不替换权威文件，但仍重新编译并刷新派生候选状态。hash 或修订冲突抛出
+        ``WorkflowConflict``，非法输入或基础设施故障抛出 ``WorkflowError``；失败不得
+        改写可编辑包（Editable Package）中的权威源码。
+        """
+
         self._validate_hash(expected_draft_hash, nullable=True)
         workflow_uuid = self._get_authoring_workflow(workflow_uuid)["uuid"]
         with self._authoring_lock(workflow_uuid):
@@ -1166,17 +1340,18 @@ class WorkflowService:
                 raise WorkflowError("invalid_input") from None
             if len(encoded) > AUTHORING_SOURCE_BYTE_LIMIT:
                 raise WorkflowError("invalid_input")
-            try:
-                self._atomic_write(
-                    registration,
-                    encoded,
-                    expected_hash=current_hash,
-                )
-            except OSError:
-                raise WorkflowError("internal_error") from None
+            encoded_hash = _sha256(encoded)
+            if encoded_hash != current_hash:
+                try:
+                    self._atomic_write(
+                        registration,
+                        encoded,
+                        expected_hash=current_hash,
+                    )
+                except OSError:
+                    raise WorkflowError("internal_error") from None
             source = self._read_source(registration)
-            assert source is not None
-            if source["draft_hash"] != _sha256(encoded):
+            if source is None or source["draft_hash"] != encoded_hash:
                 raise WorkflowConflict("draft_hash_conflict")
             applied_graph = self.get_graph(workflow_uuid)
             compilation = self._compile(
@@ -1218,6 +1393,50 @@ class WorkflowService:
         self,
         workflow_uuid: str,
     ) -> Dict[str, Any]:
+        """把一个已注册工作流源码的文件变化协调为最新创作聚合。
+
+        参数：
+            workflow_uuid: 已注册源码所属工作流（Workflow）UUID。
+
+        返回：
+            自洽的工作流创作聚合。
+
+        异常：
+            WorkflowError: 工作流、注册路径或编译结果无效。
+
+        不变量：
+            源码、修订、候选指纹和 Applied Source 均可证明仍为当前状态时按 hash
+            去重；诊断或过期候选不能仅凭源码 hash 未变跳过重编译。
+        """
+
+        return self._reconcile_registered_source(
+            workflow_uuid,
+            refresh_catalog_dependent_state=True,
+        )
+
+    def _reconcile_registered_source(
+        self,
+        workflow_uuid: str,
+        *,
+        refresh_catalog_dependent_state: bool,
+    ) -> Dict[str, Any]:
+        """协调一个 Draft，并可刷新由模板 Catalog 决定的派生编译状态。
+
+        参数：
+            workflow_uuid: 已注册源码所属工作流（Workflow）UUID。
+            refresh_catalog_dependent_state: 为真时，即使源码 hash 未变，也检查候选、
+                诊断和已应用源码是否仍足以证明当前创作状态。
+
+        返回：
+            自洽的工作流创作聚合。
+
+        异常：
+            WorkflowError: 工作流、注册路径、Catalog 或编译结果无效。
+
+        不变量：
+            读取、编译和记录更新均在同一工作流创作锁下完成；本方法不发布 Catalog。
+        """
+
         workflow_uuid = self._get_authoring_workflow(workflow_uuid)["uuid"]
         with self._authoring_lock(workflow_uuid):
             workflow = self._get_authoring_workflow(workflow_uuid)
@@ -1225,8 +1444,16 @@ class WorkflowService:
             source = self._read_source(registration)
             record = self._store.get_authoring_record(workflow_uuid)
             actual_hash = source["draft_hash"] if source is not None else None
-            if actual_hash == record["observed_draft_hash"] and not (
-                actual_hash is None and record.get("candidate") is not None
+            source_state_unchanged = actual_hash == record[
+                "observed_draft_hash"
+            ] and not (actual_hash is None and record.get("candidate") is not None)
+            if source_state_unchanged and not (
+                refresh_catalog_dependent_state
+                and self._authoring_record_requires_catalog_refresh(
+                    workflow=workflow,
+                    source=source,
+                    record=record,
+                )
             ):
                 return self.get_authoring(workflow_uuid)
 
@@ -1249,11 +1476,15 @@ class WorkflowService:
                 )
                 diagnostics = compilation.diagnostics
             cause = (
-                "recovered"
-                if source is not None
-                and record["observed_draft_hash"] is None
-                and record["update_time"] is not None
-                else "external_draft_changed"
+                "draft_compiled"
+                if source_state_unchanged
+                else (
+                    "recovered"
+                    if source is not None
+                    and record["observed_draft_hash"] is None
+                    and record["update_time"] is not None
+                    else "external_draft_changed"
+                )
             )
             self._store.record_draft_compilation(
                 workflow_uuid=workflow_uuid,
@@ -1278,12 +1509,83 @@ class WorkflowService:
             )
             return self.get_authoring(workflow_uuid)
 
+    def _authoring_record_requires_catalog_refresh(
+        self,
+        *,
+        workflow: Dict[str, Any],
+        source: Dict[str, Any] | None,
+        record: Dict[str, Any],
+    ) -> bool:
+        """判断同 hash 创作记录是否仍需依据当前模板 Catalog 重新编译。
+
+        参数：
+            workflow: 当前 Backend 形态工作流（Workflow）。
+            source: 当前已注册工作流源码；文件缺失时为空。
+            record: SQLite 中保存的派生工作流创作记录。
+
+        返回：
+            现有记录不能证明对应当前 Catalog、修订和源码时返回 ``True``。
+
+        不变量：
+            Applied Source、诊断和候选均属于可重建派生状态；只要其绑定的 Catalog
+            指纹不再是当前值，即使源码 hash 未变也必须重新编译。
+        """
+
+        if source is None:
+            return record.get("candidate") is not None
+
+        candidate = record.get("candidate")
+        if isinstance(candidate, dict):
+            try:
+                return (
+                    candidate["template_catalog_fingerprint"]
+                    != self._catalog_fingerprint()
+                    or candidate["base_workflow_revision"] != workflow["revision"]
+                    or candidate["draft_hash"] != source["draft_hash"]
+                )
+            except (KeyError, TypeError, WorkflowError):
+                return True
+
+        if record.get("diagnostics"):
+            return True
+
+        applied_source = record.get("applied_source")
+        try:
+            return not (
+                isinstance(applied_source, dict)
+                and applied_source.get("workflow_revision") == workflow["revision"]
+                and applied_source.get("source_hash") == source["draft_hash"]
+                and applied_source.get("template_catalog_fingerprint")
+                == self._catalog_fingerprint()
+            )
+        except WorkflowError:
+            return True
+
     def apply_authoring(
         self,
         workflow_uuid: str,
         *,
         candidate_hash: str,
     ) -> Dict[str, Any]:
+        """原子应用一个服务端候选并刷新依赖其发布合同的工作流创作草稿。
+
+        参数：
+            workflow_uuid: 待应用候选所属工作流（Workflow）UUID。
+            candidate_hash: 服务端签发且已物化到 Draft 的不透明候选 hash。
+
+        返回：
+            Apply 结果和提交后的自洽工作流创作聚合。
+
+        异常：
+            WorkflowConflict: Draft、修订、候选或 Catalog 快照发生冲突。
+            WorkflowError: Draft、候选、物料来源或目录发布无效。
+
+        不变量：
+            Catalog guard 覆盖候选重校验、SQLite Apply 和完整目录发布；依赖 Draft
+            只在该 guard 与当前工作流创作锁释放后刷新，且刷新失败不得把已提交
+            Apply 伪装成失败。
+        """
+
         self._validate_hash(candidate_hash, nullable=False)
         workflow_uuid = self._get_authoring_workflow(workflow_uuid)["uuid"]
         with self._authoring_lock(workflow_uuid):
@@ -1343,7 +1645,13 @@ class WorkflowService:
                 != candidate["template_catalog_fingerprint"]
             ):
                 raise WorkflowConflict("template_catalog_conflict")
-            if revalidated["candidate_hash"] != candidate["candidate_hash"]:
+            try:
+                candidate_changed = _candidate_semantic_hash(
+                    revalidated
+                ) != _candidate_semantic_hash(candidate)
+            except (KeyError, TypeError, UnicodeError, ValueError):
+                raise WorkflowError("candidate_invalid") from None
+            if candidate_changed:
                 raise WorkflowConflict("candidate_hash_conflict")
 
             normalized_source = candidate["normalized_python_source"]
@@ -1465,7 +1773,7 @@ class WorkflowService:
                         record=fallback_record,
                     )
 
-            return {
+            result = {
                 "apply_result": {
                     "kind": candidate["changeset"]["kind"],
                     "previous_workflow_revision": previous_revision,
@@ -1476,6 +1784,8 @@ class WorkflowService:
                 },
                 "authoring": authoring,
             }
+        self._refresh_registered_sources_after_catalog_mutation(workflow_uuid)
+        return result
 
     def list_events(
         self,
@@ -1513,12 +1823,100 @@ class WorkflowService:
         except StoreNotFound:
             raise WorkflowError("workflow_not_found") from None
 
+    @staticmethod
+    def _read_source_by_path(
+        root: Path,
+        target: Path,
+    ) -> Optional[Dict[str, Any]]:
+        """在不支持相对目录 FD 的平台按原始字节读取工作流源码 Draft。
+
+        ``root`` 是已授权的可编辑包根目录，``target`` 是其中已注册的工作流源码
+        （Workflow Source）路径。目标不存在时返回 ``None``；成功时返回源码、mtime
+        与基于原始 UTF-8 字节的 hash。路径越界、符号链接、非普通文件
+        或读取期间身份变化会抛出 ``WorkflowError``。Windows 必须显式请求二进制
+        模式，确保 Authoring GET 与 Draft PUT CAS 观察完全相同的 CRLF 字节。
+        """
+
+        try:
+            root_before = root.lstat()
+        except (OSError, TypeError, ValueError):
+            raise WorkflowError("invalid_input") from None
+        if not stat.S_ISDIR(
+            root_before.st_mode
+        ) or WorkflowService._path_contains_symlink(root):
+            raise WorkflowError("invalid_input")
+        try:
+            parent_before = target.parent.lstat()
+            target_before = target.lstat()
+        except FileNotFoundError:
+            return None
+        except (OSError, TypeError, ValueError):
+            raise WorkflowError("invalid_input") from None
+        if (
+            not stat.S_ISDIR(parent_before.st_mode)
+            or WorkflowService._path_contains_symlink(target.parent)
+            or target.is_symlink()
+            or not stat.S_ISREG(target_before.st_mode)
+        ):
+            raise WorkflowError("invalid_input")
+        descriptor = -1
+        try:
+            descriptor = os.open(
+                target,
+                os.O_RDONLY
+                | getattr(os, "O_BINARY", 0)
+                | getattr(os, "O_CLOEXEC", 0)
+                | getattr(os, "O_NOFOLLOW", 0),
+            )
+            opened = os.fstat(descriptor)
+            if not stat.S_ISREG(opened.st_mode) or (opened.st_dev, opened.st_ino) != (
+                target_before.st_dev,
+                target_before.st_ino,
+            ):
+                raise WorkflowError("invalid_input")
+            raw = WorkflowService._read_regular_fd(
+                descriptor,
+                byte_limit=AUTHORING_SOURCE_BYTE_LIMIT,
+            )
+            root_after = root.lstat()
+            parent_after = target.parent.lstat()
+            target_after = target.lstat()
+            if (
+                WorkflowService._path_contains_symlink(target.parent)
+                or target.is_symlink()
+                or (root_after.st_dev, root_after.st_ino)
+                != (root_before.st_dev, root_before.st_ino)
+                or (parent_after.st_dev, parent_after.st_ino)
+                != (parent_before.st_dev, parent_before.st_ino)
+                or (target_after.st_dev, target_after.st_ino)
+                != (opened.st_dev, opened.st_ino)
+            ):
+                raise WorkflowError("invalid_input")
+        except WorkflowError:
+            raise
+        except (OSError, OverflowError, TypeError, ValueError):
+            raise WorkflowError("invalid_input") from None
+        finally:
+            if descriptor >= 0:
+                os.close(descriptor)
+        try:
+            source = raw.decode("utf-8")
+        except UnicodeError:
+            raise WorkflowError("invalid_input") from None
+        return {
+            "python_source": source,
+            "draft_hash": _sha256(raw),
+            "update_time": _mtime_rfc3339(opened.st_mtime),
+        }
+
     def _read_source(
         self,
         registration: Dict[str, Any],
     ) -> Optional[Dict[str, Any]]:
         root, target = self._source_path(registration)
         self._assert_contained_regular_target(root, target, allow_missing=True)
+        if not _supports_directory_fd_paths():
+            return self._read_source_by_path(root, target)
         with self._source_parent_fd(
             registration,
             create=False,
@@ -1568,6 +1966,62 @@ class WorkflowService:
 
         root, target = self._source_path(registration)
         self._assert_contained_regular_target(root, target, allow_missing=True)
+        if not _supports_directory_fd_paths():
+            try:
+                root_before = root.lstat()
+            except (OSError, TypeError, ValueError):
+                raise WorkflowError("invalid_input") from None
+            if not stat.S_ISDIR(root_before.st_mode) or self._path_contains_symlink(
+                root
+            ):
+                raise WorkflowError("invalid_input")
+            try:
+                parent_before = target.parent.lstat()
+                stat_result = target.lstat()
+            except FileNotFoundError:
+                return ("missing",)
+            except (OSError, TypeError, ValueError):
+                raise WorkflowError("invalid_input") from None
+            if (
+                not stat.S_ISDIR(parent_before.st_mode)
+                or self._path_contains_symlink(target.parent)
+                or target.is_symlink()
+                or not stat.S_ISREG(stat_result.st_mode)
+            ):
+                raise WorkflowError("invalid_input")
+            try:
+                root_after = root.lstat()
+                parent_after = target.parent.lstat()
+                target_after = target.lstat()
+            except (OSError, TypeError, ValueError):
+                raise WorkflowError("invalid_input") from None
+            if (
+                (root_after.st_dev, root_after.st_ino)
+                != (
+                    root_before.st_dev,
+                    root_before.st_ino,
+                )
+                or (parent_after.st_dev, parent_after.st_ino)
+                != (
+                    parent_before.st_dev,
+                    parent_before.st_ino,
+                )
+                or (target_after.st_dev, target_after.st_ino)
+                != (
+                    stat_result.st_dev,
+                    stat_result.st_ino,
+                )
+                or self._path_contains_symlink(target.parent)
+            ):
+                raise WorkflowError("invalid_input")
+            return (
+                "file",
+                stat_result.st_dev,
+                stat_result.st_ino,
+                stat_result.st_size,
+                stat_result.st_mtime_ns,
+                stat_result.st_ctime_ns,
+            )
         with self._source_parent_fd(
             registration,
             create=False,
@@ -1603,8 +2057,71 @@ class WorkflowService:
         *,
         expected_hash: Any = _NO_EXPECTED_HASH,
     ) -> None:
+        """按平台把 ``content`` 以 Draft hash CAS 写入已注册工作流源码。
+
+        `registration` 固定 editable package 根和相对路径，`content` 是有界源码，
+        `expected_hash` 是调用方观察到的旧 Draft hash。成功没有返回值；函数保证
+        Linux 与 Windows 只在目录链、文件身份及旧 hash 可证明稳定时发布；其他
+        平台的受保护写入在选择 Adapter 前失败关闭。路径变化映射为输入错误或冲突，
+        基础设施故障映射为内部错误。
+        """
+
         if len(content) > AUTHORING_SOURCE_BYTE_LIMIT:
             raise WorkflowError("invalid_input")
+        if (
+            expected_hash is not _NO_EXPECTED_HASH
+            and not _supports_linux_file_lease_cas()
+        ):
+            if msvcrt is not None:
+                root, target = self._source_path(registration)
+                self._assert_contained_regular_target(root, target, allow_missing=True)
+                try:
+                    write_windows_draft_cas(
+                        root=root,
+                        target=target,
+                        content=content,
+                        expected_hash=expected_hash,
+                        byte_limit=AUTHORING_SOURCE_BYTE_LIMIT,
+                        locking=msvcrt,
+                    )
+                except WindowsDraftCasConflict:
+                    raise WorkflowConflict("draft_hash_conflict") from None
+                except WindowsDraftCasInvalidTarget:
+                    raise WorkflowError("invalid_input") from None
+                except WindowsDraftCasInternalError:
+                    raise WorkflowError("internal_error") from None
+                return
+            if expected_hash is not None and supports_darwin_draft_cas():
+                root, target = self._source_path(registration)
+                self._assert_contained_regular_target(root, target, allow_missing=False)
+                with self._source_parent_fd(
+                    registration,
+                    create=False,
+                ) as source_parent:
+                    if source_parent is None:
+                        raise WorkflowConflict("draft_hash_conflict")
+                    parent_fd, filename = source_parent
+                    try:
+                        write_darwin_draft_cas(
+                            parent_fd=parent_fd,
+                            target_name=filename,
+                            content=content,
+                            expected_hash=expected_hash,
+                            byte_limit=AUTHORING_SOURCE_BYTE_LIMIT,
+                        )
+                    except DarwinDraftCasConflict:
+                        raise WorkflowConflict("draft_hash_conflict") from None
+                    except DarwinDraftCasInvalidTarget:
+                        raise WorkflowError("invalid_input") from None
+                    except DarwinDraftCasInternalError:
+                        raise WorkflowError("internal_error") from None
+                return
+            if expected_hash is not None:
+                raise WorkflowConflict("draft_hash_conflict")
+            # POSIX 目录 FD 可以用 exclusive link 原子证明 Draft 不存在；这条
+            # missing-target CAS 不依赖 Linux file lease，并在 Darwin 保持可用。
+        if not _supports_directory_fd_paths() or fcntl is None:
+            raise WorkflowConflict("draft_hash_conflict")
         root, target = self._source_path(registration)
         self._assert_contained_regular_target(root, target, allow_missing=True)
         # 先以目录 FD 安全地创建（如有需要）固定的 workflows 目录。
@@ -1672,12 +2189,13 @@ class WorkflowService:
         temporary_name: str,
         expected_hash: Optional[str],
     ) -> None:
-        """在可安全中断的 lease 下执行 fsync 后的原子 CAS replace。"""
+        """在 Linux 可安全中断 lease 下执行 fsync 后的原子 CAS replace。
 
-        if fcntl is None or _LEASE_BREAK_SIGNAL is None:
-            # Windows 没有 Linux file lease / lease break signal；导入和只读
-            # Registry 检查必须可用，但无法证明 CAS 安全时继续失败关闭。
-            raise WorkflowConflict("draft_hash_conflict")
+        ``parent_fd`` 固定已验证源码父目录，``target_name`` 是权威工作流源码文件名，
+        ``temporary_name`` 是同目录且已 fsync 的候选文件，``expected_hash`` 是调用方
+        观察到的旧源码 hash。成功没有返回值；目标身份、内容或 lease 证明变化时抛出
+        ``WorkflowConflict``，并保留任何无法安全回滚的恢复 artifact。
+        """
 
         target_descriptor = -1
         temporary_descriptor = -1
@@ -1710,6 +2228,10 @@ class WorkflowService:
                 return
 
             if expected_hash is None:
+                raise WorkflowConflict("draft_hash_conflict")
+            if not _supports_linux_file_lease_cas():
+                # 非 Linux 或缺少完整 lease/signal 原语时，不能进入部分初始化后再
+                # 清理；否则 Darwin 会用第二个 AttributeError 覆盖受控冲突。
                 raise WorkflowConflict("draft_hash_conflict")
             try:
                 previous_signal_mask = signal.pthread_sigmask(
@@ -2131,12 +2653,58 @@ class WorkflowService:
         with self._catalog_snapshot():
             yield self._catalog_authority_id()
 
+    def _refresh_registered_sources_after_catalog_mutation(
+        self,
+        mutated_workflow_uuid: str,
+    ) -> None:
+        """在 Catalog 发布锁释放后刷新其他已注册工作流的派生编译状态。
+
+        参数：
+            mutated_workflow_uuid: 刚完成持久变更与目录发布的工作流（Workflow）UUID；
+                该工作流自己的 Apply 记录不在本轮重新编译。
+
+        返回：
+            无。
+
+        不变量：
+            调用方不得持有 Catalog guard 或被修改工作流的创作锁。每个依赖 Draft
+            独立刷新；注册源枚举或单个派生刷新失败只记录诊断日志，不改变已经提交
+            的工作流事实或 Catalog 可用性。
+        """
+
+        if self._catalog_publisher is None:
+            return
+        try:
+            registrations = self.list_registered_sources()
+        except Exception:  # noqa: BLE001 - 已提交 mutation 的派生刷新必须隔离
+            _LOGGER.exception(
+                "Catalog 发布后刷新工作流创作草稿时枚举失败: mutated_workflow_uuid=%s",
+                mutated_workflow_uuid,
+            )
+            return
+        for registration in registrations:
+            workflow_uuid = "<unknown>"
+            try:
+                workflow_uuid = registration["workflow_uuid"]
+                if workflow_uuid == mutated_workflow_uuid:
+                    continue
+                self._reconcile_registered_source(
+                    workflow_uuid,
+                    refresh_catalog_dependent_state=True,
+                )
+            except Exception:  # noqa: BLE001 - 已提交 mutation 的派生刷新必须隔离
+                _LOGGER.exception(
+                    "Catalog 发布后刷新工作流创作草稿失败: workflow_uuid=%s",
+                    workflow_uuid,
+                )
+
     def _publish_catalog_after_mutation(self) -> None:
         if self._catalog_publisher is None:
             return
         try:
             self._catalog_publisher.publish()
         except Exception:  # noqa: BLE001 - adapter boundary
+            _LOGGER.exception("Catalog publication 失败")
             try:
                 self._catalog_publisher.invalidate()
             except Exception:  # noqa: BLE001 - marker 已在 Store transaction 内删除
@@ -2271,12 +2839,12 @@ class WorkflowService:
             "template_catalog_fingerprint": template_catalog_fingerprint,
         }
         try:
-            canonical_bundle = _canonical_json(bundle)
-        except (TypeError, UnicodeError, ValueError):
+            candidate_hash = _candidate_semantic_hash(bundle)
+        except (KeyError, TypeError, UnicodeError, ValueError):
             self._set_candidate_invalid_diagnostic(compilation)
             return None
         return {
-            "candidate_hash": _sha256(canonical_bundle),
+            "candidate_hash": candidate_hash,
             **bundle,
             "update_time": utc_now(),
         }

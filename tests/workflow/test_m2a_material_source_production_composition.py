@@ -241,7 +241,7 @@ def _plain(value: Any) -> Any:
     return value
 
 
-def test_registry_adapter_publishes_one_host_owned_material_source_aggregate(
+def test_registry_adapter_publishes_host_owned_authoring_framework_templates(
     tmp_path: Path,
 ) -> None:
     identities = _seed_material_authority(tmp_path / "seed")
@@ -251,8 +251,13 @@ def test_registry_adapter_publishes_one_host_owned_material_source_aggregate(
         resource_template_identity_resolver=identities.by_source.__getitem__,
     )
 
-    assert len(imports) == 1
-    framework = imports[0]
+    assert {item.template["name"] for item in imports} == {
+        "group",
+        "material_source",
+    }
+    framework = next(
+        item for item in imports if item.template["name"] == "material_source"
+    )
     assert {
         "class": framework.template["class"],
         "name": framework.template["name"],
@@ -286,6 +291,13 @@ def test_registry_adapter_publishes_one_host_owned_material_source_aggregate(
         "data_source": "executor",
         "data_key": "material",
     }
+
+    group = next(item for item in imports if item.template["name"] == "group")
+    assert group.template["class"] == "unilabos.workflow.authoring:group"
+    assert group.template["type"] == "group"
+    assert group.template["node_type"] == "group"
+    assert group.template["resource_template_uuid"] == identities.host_uuid
+    assert group.handles == ()
 
     without_host = workflow_template_imports_from_registry_snapshot(
         _registry_snapshot(include_host=False),
@@ -355,10 +367,14 @@ def test_production_composition_compiles_material_source_with_inventory_authorit
         reader = WorkflowStore(working_dir / "workflow.db")
         try:
             with TemplateCatalog(reader).snapshot(AUTHORITY) as snapshot:
-                assert len(snapshot.node_templates) == 1
+                assert len(snapshot.node_templates) == 2
                 assert len(snapshot.handle_templates) == 1
-                assert snapshot.node_templates[0]["resource_template_uuid"] == (
-                    identities.host_uuid
+                assert {
+                    item["name"] for item in snapshot.node_templates
+                } == {"group", "material_source"}
+                assert all(
+                    item["resource_template_uuid"] == identities.host_uuid
+                    for item in snapshot.node_templates
                 )
         finally:
             reader.close()

@@ -4,6 +4,9 @@ workstation:
   class:
     action_value_mappings:
       AGVTransferProtocol:
+        displayname: AGVTransferProtocol
+        estimate_duration_express: ''
+        estimate_duration_fixed: 60.0
         feedback: {}
         goal:
           from_repo: from_repo
@@ -54,6 +57,7 @@ workstation:
             type: ''
           to_repo_position: ''
         handles: {}
+        lock_resource: []
         result: {}
         schema:
           description: ''
@@ -271,6 +275,9 @@ workstation:
           type: object
         type: AGVTransfer
       AddProtocol:
+        displayname: AddProtocol
+        estimate_duration_express: ''
+        estimate_duration_fixed: 60.0
         feedback: {}
         goal:
           amount: amount
@@ -341,6 +348,7 @@ workstation:
             data_type: resource
             handler_key: VesselOut
             label: Vessel
+        lock_resource: []
         placeholder_keys:
           vessel: unilabos_resources
         result: {}
@@ -501,6 +509,9 @@ workstation:
           type: object
         type: Add
       AdjustPHProtocol:
+        displayname: AdjustPHProtocol
+        estimate_duration_express: ''
+        estimate_duration_fixed: 60.0
         feedback: {}
         goal:
           ph_value: ph_value
@@ -552,6 +563,7 @@ workstation:
             data_type: resource
             handler_key: VesselOut
             label: Vessel
+        lock_resource: []
         placeholder_keys:
           vessel: unilabos_resources
         result: {}
@@ -688,6 +700,9 @@ workstation:
           type: object
         type: AdjustPH
       CentrifugeProtocol:
+        displayname: CentrifugeProtocol
+        estimate_duration_express: ''
+        estimate_duration_fixed: 60.0
         feedback: {}
         goal:
           speed: speed
@@ -731,6 +746,7 @@ workstation:
             data_type: resource
             handler_key: VesselOut
             label: Vessel
+        lock_resource: []
         placeholder_keys:
           vessel: unilabos_resources
         result: {}
@@ -881,6 +897,9 @@ workstation:
           type: object
         type: Centrifuge
       CleanProtocol:
+        displayname: CleanProtocol
+        estimate_duration_express: ''
+        estimate_duration_fixed: 60.0
         feedback: {}
         goal:
           repeats: repeats
@@ -931,6 +950,7 @@ workstation:
             data_type: resource
             handler_key: VesselOut
             label: Vessel
+        lock_resource: []
         placeholder_keys:
           vessel: unilabos_resources
         result: {}
@@ -1103,6 +1123,9 @@ workstation:
           type: object
         type: Clean
       CleanVesselProtocol:
+        displayname: CleanVesselProtocol
+        estimate_duration_express: ''
+        estimate_duration_fixed: 60.0
         feedback: {}
         goal:
           repeats: repeats
@@ -1153,6 +1176,7 @@ workstation:
             data_type: resource
             handler_key: VesselOut
             label: Vessel
+        lock_resource: []
         placeholder_keys:
           vessel: unilabos_resources
         result: {}
@@ -1297,6 +1321,9 @@ workstation:
           type: object
         type: CleanVessel
       DissolveProtocol:
+        displayname: DissolveProtocol
+        estimate_duration_express: ''
+        estimate_duration_fixed: 60.0
         feedback: {}
         goal:
           amount: amount
@@ -1364,6 +1391,7 @@ workstation:
             data_type: resource
             handler_key: VesselOut
             label: Vessel
+        lock_resource: []
         placeholder_keys:
           vessel: unilabos_resources
         result: {}
@@ -1516,6 +1544,9 @@ workstation:
           type: object
         type: Dissolve
       DryProtocol:
+        displayname: DryProtocol
+        estimate_duration_express: ''
+        estimate_duration_fixed: 60.0
         feedback: {}
         goal:
           compound: compound
@@ -1555,6 +1586,7 @@ workstation:
             data_type: resource
             handler_key: VesselOut
             label: Vessel
+        lock_resource: []
         placeholder_keys:
           vessel: unilabos_resources
         result: {}
@@ -1687,6 +1719,9 @@ workstation:
           type: object
         type: Dry
       EvacuateAndRefillProtocol:
+        displayname: EvacuateAndRefillProtocol
+        estimate_duration_express: ''
+        estimate_duration_fixed: 60.0
         feedback: {}
         goal:
           gas: gas
@@ -1726,6 +1761,7 @@ workstation:
             data_type: resource
             handler_key: VesselOut
             label: Vessel
+        lock_resource: []
         placeholder_keys:
           vessel: unilabos_resources
         result: {}
@@ -1886,6 +1922,9 @@ workstation:
           type: object
         type: EvacuateAndRefill
       EvaporateProtocol:
+        displayname: EvaporateProtocol
+        estimate_duration_express: ''
+        estimate_duration_fixed: 60.0
         feedback: {}
         goal:
           pressure: pressure
@@ -1938,6 +1977,7 @@ workstation:
             data_type: resource
             handler_key: VesselOut
             label: Evaporation Vessel
+        lock_resource: []
         placeholder_keys:
           vessel: unilabos_nodes
         result: {}
@@ -2112,6 +2152,9 @@ workstation:
           type: object
         type: Evaporate
       FilterProtocol:
+        displayname: FilterProtocol
+        estimate_duration_express: ''
+        estimate_duration_fixed: 60.0
         feedback: {}
         goal:
           continue_heatchill: continue_heatchill
@@ -2190,6 +2233,7 @@ workstation:
             data_type: resource
             handler_key: FiltrateOut
             label: Filtrate Vessel
+        lock_resource: []
         placeholder_keys:
           filtrate_vessel: unilabos_resources
           vessel: unilabos_nodes
@@ -2436,6 +2480,9 @@ workstation:
           type: object
         type: Filter
       FilterThroughProtocol:
+        displayname: FilterThroughProtocol
+        estimate_duration_express: ''
+        estimate_duration_fixed: 60.0
         feedback: {}
         goal:
           eluting_repeats: eluting_repeats
@@ -2538,6 +2585,7 @@ workstation:
             data_type: resource
             handler_key: ToVesselOut
             label: To Vessel
+        lock_resource: []
         placeholder_keys:
           from_vessel: unilabos_resources
           to_vessel: unilabos_resources
@@ -2865,6 +2913,9 @@ workstation:
           type: object
         type: FilterThrough
       HeatChillProtocol:
+        displayname: HeatChillProtocol
+        estimate_duration_express: ''
+        estimate_duration_fixed: 60.0
         feedback: {}
         goal:
           pressure: pressure
@@ -2920,6 +2971,7 @@ workstation:
             data_type: resource
             handler_key: VesselOut
             label: Vessel
+        lock_resource: []
         placeholder_keys:
           vessel: unilabos_resources
         result: {}
@@ -3068,6 +3120,9 @@ workstation:
           type: object
         type: HeatChill
       HeatChillStartProtocol:
+        displayname: HeatChillStartProtocol
+        estimate_duration_express: ''
+        estimate_duration_fixed: 60.0
         feedback: {}
         goal:
           purpose: purpose
@@ -3109,6 +3164,7 @@ workstation:
             data_type: resource
             handler_key: VesselOut
             label: Vessel
+        lock_resource: []
         placeholder_keys:
           vessel: unilabos_resources
         result: {}
@@ -3239,6 +3295,9 @@ workstation:
           type: object
         type: HeatChillStart
       HeatChillStopProtocol:
+        displayname: HeatChillStopProtocol
+        estimate_duration_express: ''
+        estimate_duration_fixed: 60.0
         feedback: {}
         goal:
           vessel: vessel
@@ -3276,6 +3335,7 @@ workstation:
             data_type: resource
             handler_key: VesselOut
             label: Vessel
+        lock_resource: []
         placeholder_keys:
           vessel: unilabos_resources
         result: {}
@@ -3400,6 +3460,9 @@ workstation:
           type: object
         type: HeatChillStop
       HydrogenateProtocol:
+        displayname: HydrogenateProtocol
+        estimate_duration_express: ''
+        estimate_duration_fixed: 60.0
         feedback: {}
         goal:
           temp: temp
@@ -3441,6 +3504,7 @@ workstation:
             data_type: resource
             handler_key: VesselOut
             label: Vessel
+        lock_resource: []
         placeholder_keys:
           vessel: unilabos_resources
         result: {}
@@ -3575,6 +3639,9 @@ workstation:
           type: object
         type: Hydrogenate
       PumpTransferProtocol:
+        displayname: PumpTransferProtocol
+        estimate_duration_express: ''
+        estimate_duration_fixed: 60.0
         feedback: {}
         goal:
           amount: amount
@@ -3674,6 +3741,7 @@ workstation:
             data_type: resource
             handler_key: ToVesselOut
             label: To Vessel
+        lock_resource: []
         placeholder_keys:
           from_vessel: unilabos_nodes
           to_vessel: unilabos_nodes
@@ -3962,6 +4030,9 @@ workstation:
           type: object
         type: PumpTransfer
       RecrystallizeProtocol:
+        displayname: RecrystallizeProtocol
+        estimate_duration_express: ''
+        estimate_duration_fixed: 60.0
         feedback: {}
         goal:
           ratio: ratio
@@ -4017,6 +4088,7 @@ workstation:
             data_type: resource
             handler_key: VesselOut
             label: Vessel
+        lock_resource: []
         placeholder_keys:
           vessel: unilabos_resources
         result: {}
@@ -4155,6 +4227,9 @@ workstation:
           type: object
         type: Recrystallize
       ResetHandlingProtocol:
+        displayname: ResetHandlingProtocol
+        estimate_duration_express: ''
+        estimate_duration_fixed: 60.0
         feedback: {}
         goal:
           solvent: solvent
@@ -4188,6 +4263,7 @@ workstation:
             handler_key: solvent
             label: Solvent
           output: []
+        lock_resource: []
         result: {}
         schema:
           description: ''
@@ -4318,6 +4394,9 @@ workstation:
           type: object
         type: ResetHandling
       RunColumnProtocol:
+        displayname: RunColumnProtocol
+        estimate_duration_express: ''
+        estimate_duration_fixed: 60.0
         feedback: {}
         goal:
           column: column
@@ -4394,6 +4473,7 @@ workstation:
             data_type: resource
             handler_key: ToVesselOut
             label: To Vessel
+        lock_resource: []
         placeholder_keys:
           column: unilabos_devices
           from_vessel: unilabos_resources
@@ -4631,6 +4711,9 @@ workstation:
           type: object
         type: RunColumn
       SeparateProtocol:
+        displayname: SeparateProtocol
+        estimate_duration_express: ''
+        estimate_duration_fixed: 60.0
         feedback: {}
         goal:
           from_vessel: from_vessel
@@ -4825,6 +4908,7 @@ workstation:
             data_type: resource
             handler_key: ToVesselOut
             label: To Vessel
+        lock_resource: []
         placeholder_keys:
           from_vessel: unilabos_resources
           to_vessel: unilabos_resources
@@ -5532,6 +5616,9 @@ workstation:
           type: object
         type: Separate
       StartStirProtocol:
+        displayname: StartStirProtocol
+        estimate_duration_express: ''
+        estimate_duration_fixed: 60.0
         feedback: {}
         goal:
           purpose: purpose
@@ -5573,6 +5660,7 @@ workstation:
             data_type: resource
             handler_key: VesselOut
             label: Vessel
+        lock_resource: []
         placeholder_keys:
           vessel: unilabos_resources
         result: {}
@@ -5713,6 +5801,9 @@ workstation:
           type: object
         type: StartStir
       StirProtocol:
+        displayname: StirProtocol
+        estimate_duration_express: ''
+        estimate_duration_fixed: 60.0
         feedback: {}
         goal:
           event: event
@@ -5762,6 +5853,7 @@ workstation:
             data_type: resource
             handler_key: VesselOut
             label: Vessel
+        lock_resource: []
         placeholder_keys:
           vessel: unilabos_resources
         result: {}
@@ -5904,6 +5996,9 @@ workstation:
           type: object
         type: Stir
       StopStirProtocol:
+        displayname: StopStirProtocol
+        estimate_duration_express: ''
+        estimate_duration_fixed: 60.0
         feedback: {}
         goal:
           vessel: vessel
@@ -5941,6 +6036,7 @@ workstation:
             data_type: resource
             handler_key: VesselOut
             label: Vessel
+        lock_resource: []
         placeholder_keys:
           vessel: unilabos_resources
         result: {}
@@ -6071,6 +6167,9 @@ workstation:
           type: object
         type: StopStir
       TransferProtocol:
+        displayname: TransferProtocol
+        estimate_duration_express: ''
+        estimate_duration_fixed: 60.0
         feedback: {}
         goal:
           amount: amount
@@ -6122,6 +6221,7 @@ workstation:
             data_type: resource
             handler_key: ToVesselOut
             label: To Vessel
+        lock_resource: []
         placeholder_keys:
           from_vessel: unilabos_nodes
           to_vessel: unilabos_nodes
@@ -6194,6 +6294,9 @@ workstation:
           type: object
         type: Transfer
       WashSolidProtocol:
+        displayname: WashSolidProtocol
+        estimate_duration_express: ''
+        estimate_duration_fixed: 60.0
         feedback: {}
         goal:
           filtrate_vessel: filtrate_vessel
@@ -6285,6 +6388,7 @@ workstation:
             data_type: resource
             handler_key: filtrate_vessel_out
             label: Filtrate Vessel
+        lock_resource: []
         placeholder_keys:
           filtrate_vessel: unilabos_resources
           vessel: unilabos_resources
@@ -6539,8 +6643,10 @@ workstation:
     type: python
   config_info: []
   description: Workstation
+  displayname: workstation
   handles: []
   icon: ''
+  init_param_enforce: {}
   init_param_schema:
     config:
       properties:
@@ -6558,4 +6664,5 @@ workstation:
       properties: {}
       required: []
       type: object
+  metadata: {}
   version: 1.0.0
