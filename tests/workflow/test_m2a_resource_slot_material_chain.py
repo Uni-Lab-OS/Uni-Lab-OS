@@ -24,7 +24,9 @@ from unilabos.workflow.service import WorkflowError, WorkflowService
 from unilabos.workflow.store import WorkflowStore
 
 from .m2a_material_source_authority_fixture import (
+    FIXED_MATERIAL_UUID,
     MOUNT_MATERIAL_UUID,
+    PLATE_RESOURCE_TEMPLATE_UUID,
     default_material_source_authority,
 )
 from .test_m2a_material_source_vertical_slice import (
@@ -44,6 +46,7 @@ MIDDLE_NODE_UUID = "20000000-0000-4000-8000-000000000004"
 MIDDLE_TEMPLATE_UUID = "30000000-0000-4000-8000-000000000003"
 MIDDLE_SAMPLE_TARGET_UUID = "40000000-0000-4000-8000-000000000003"
 MIDDLE_SAMPLE_SOURCE_UUID = "40000000-0000-4000-8000-000000000004"
+FIXED_RESOURCE_ID = "fixed-sample"
 
 
 @dataclass
@@ -392,3 +395,77 @@ def test_action_passes_one_material_forward_as_a_sequential_resource_slot_chain(
         "from lab.resources import corning_96_well_plate"
         in generated.normalized_python_source
     )
+
+
+def test_action_resource_ref_resolves_inventory_material_and_round_trips(
+    tmp_path: Path,
+) -> None:
+    source = f'''from lab.devices import Reactor
+from unilabos.workflow.authoring import device, resource_ref, workflow_definition
+
+
+reactor: Reactor = device()
+
+
+@workflow_definition(
+    workflow_uuid="{WORKFLOW_UUID}",
+    displayname="Action resource reference",
+)
+def material_chain():
+    # unilab:node_uuid={PREPARE_NODE_UUID}
+    prepared = reactor.prepare(sample=resource_ref("{FIXED_RESOURCE_ID}"))
+'''
+    with _opened_context(tmp_path / "workflow.db") as context:
+        compiled = _compile(context, source)
+        assert compiled.valid, compiled.diagnostics
+        assert compiled.graph is not None
+        prepare = next(
+            item
+            for item in compiled.graph["nodes"]
+            if item["uuid"] == PREPARE_NODE_UUID
+        )
+        assert prepare["param"]["sample"] == {
+            "uuid": FIXED_MATERIAL_UUID,
+            "resource_template_uuid": PLATE_RESOURCE_TEMPLATE_UUID,
+        }
+        assert not any(
+            item["target_node_uuid"] == PREPARE_NODE_UUID
+            and item["target_handle_uuid"] == SAMPLE_HANDLE_UUID
+            for item in compiled.graph["edges"]
+        )
+
+        generated = context.engine.generate_python(
+            workflow_uuid=WORKFLOW_UUID,
+            workflow_revision=1,
+            graph=compiled.graph,
+            source_uri="package://lab/workflows/m2a_material_chain.py",
+        )
+
+    assert generated.valid, generated.diagnostics
+    assert generated.normalized_python_source is not None
+    assert (
+        f"reactor.prepare(sample=resource_ref('{FIXED_RESOURCE_ID}'))"
+        in generated.normalized_python_source
+    )
+
+
+def test_material_source_mount_resource_id_round_trips_to_inventory_uuid(
+    tmp_path: Path,
+) -> None:
+    source = _source(pass_through=False).replace(MOUNT_MATERIAL_UUID, "mount")
+    with _opened_context(tmp_path / "workflow.db") as context:
+        compiled = _compile(context, source)
+
+    assert compiled.valid, compiled.diagnostics
+    assert compiled.graph is not None
+    material_source = next(
+        item
+        for item in compiled.graph["nodes"]
+        if item["uuid"] == MATERIAL_SOURCE_NODE_UUID
+    )
+    assert material_source["param"]["mount"] == {"uuid": MOUNT_MATERIAL_UUID}
+    assert material_source["meta_data"]["unilab"]["resource_refs"] == {
+        "mount": {"resource_id": "mount"}
+    }
+    assert compiled.normalized_python_source is not None
+    assert "mount=resource_ref('mount')" in compiled.normalized_python_source

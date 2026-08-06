@@ -249,8 +249,13 @@ def test_registry_adapter_publishes_one_host_owned_material_source_aggregate(
         resource_template_identity_resolver=identities.by_source.__getitem__,
     )
 
-    assert len(imports) == 1
-    framework = imports[0]
+    assert {item.template["name"] for item in imports} == {
+        "group",
+        "material_source",
+    }
+    framework = next(
+        item for item in imports if item.template["name"] == "material_source"
+    )
     assert {
         "class": framework.template["class"],
         "name": framework.template["name"],
@@ -301,9 +306,17 @@ def test_production_composition_compiles_material_source_with_inventory_authorit
         reader = WorkflowStore(working_dir / "workflow.db")
         try:
             with TemplateCatalog(reader).snapshot(AUTHORITY) as snapshot:
-                assert len(snapshot.node_templates) == 1
+                assert {item["name"] for item in snapshot.node_templates} == {
+                    "group",
+                    "material_source",
+                }
                 assert len(snapshot.handle_templates) == 1
-                assert snapshot.node_templates[0]["resource_template_uuid"] == (
+                material_source_template = next(
+                    item
+                    for item in snapshot.node_templates
+                    if item["name"] == "material_source"
+                )
+                assert material_source_template["resource_template_uuid"] == (
                     identities.host_uuid
                 )
         finally:

@@ -29,6 +29,7 @@ def material_record(
     material_uuid: str,
     *,
     resource_template_uuid: str,
+    source_node_id: str | None = None,
     deleted_at: str | None = None,
 ) -> MaterialRecord:
     return MaterialRecord(
@@ -37,7 +38,11 @@ def material_record(
         update_time="2026-08-02T00:00:00Z",
         deleted_at=deleted_at,
         description=None,
-        meta_data={},
+        meta_data=(
+            {"source_node_id": source_node_id}
+            if source_node_id is not None
+            else {}
+        ),
         resource_template_uuid=resource_template_uuid,
         parent_uuid=None,
         klass="TestMaterial",
@@ -86,14 +91,17 @@ DEFAULT_MATERIALS = (
     material_record(
         MOUNT_MATERIAL_UUID,
         resource_template_uuid=MOUNT_RESOURCE_TEMPLATE_UUID,
+        source_node_id="mount",
     ),
     material_record(
         OTHER_MOUNT_MATERIAL_UUID,
         resource_template_uuid=MOUNT_RESOURCE_TEMPLATE_UUID,
+        source_node_id="other-mount",
     ),
     material_record(
         FIXED_MATERIAL_UUID,
         resource_template_uuid=PLATE_RESOURCE_TEMPLATE_UUID,
+        source_node_id="fixed-sample",
     ),
 )
 
@@ -154,6 +162,22 @@ class StaticMaterialSourceAuthority:
             return self._materials[material_uuid]
         except KeyError:
             raise MaterialNotFound(f"material {material_uuid} not found") from None
+
+    def resolve_material_ref(
+        self,
+        resource_id: str,
+        *,
+        uow: object | None = None,
+    ) -> MaterialRecord:
+        del uow
+        matches = [
+            item
+            for item in self._materials.values()
+            if item.meta_data.get("source_node_id") == resource_id
+        ]
+        if len(matches) != 1:
+            raise MaterialNotFound(f"resource {resource_id} not found")
+        return matches[0]
 
     def get_site(
         self,

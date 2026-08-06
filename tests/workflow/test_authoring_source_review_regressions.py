@@ -14,7 +14,7 @@ from uuid import UUID
 
 import pytest
 
-from unilabos.workflow import composition, source_discovery
+from unilabos.workflow import composition, service as service_module, source_discovery
 from unilabos.workflow.models import CandidateCompilation
 from unilabos.workflow.service import (
     WorkflowConflict,
@@ -945,3 +945,51 @@ def test_save_draft_cas_bounds_target_temporary_and_published_source_reads(
         f"successful={successful_read_observations!r}, "
         f"target_growth={conflict_read_observations!r}"
     )
+
+
+def test_save_draft_uses_portable_cas_without_linux_file_leases(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    store = WorkflowStore(tmp_path / "workflow.db")
+    service = WorkflowService(store, compiler=SourceOnlyCompiler())
+    package_root = tmp_path / "package"
+    source = package_root / "workflows" / "demo.py"
+    source.parent.mkdir(parents=True)
+    source.write_text("value = 'initial'\n", encoding="utf-8")
+    service.create_workflow(
+        name="portable CAS contract",
+        tags=[],
+        description=None,
+        meta_data={},
+        workflow_uuid=WORKFLOW_A_UUID,
+    )
+    service.register_editable_source(
+        workflow_uuid=WORKFLOW_A_UUID,
+        package_id="portable_cas_contract",
+        package_root=package_root,
+        relative_path="workflows/demo.py",
+    )
+    baseline = service.get_authoring(WORKFLOW_A_UUID)
+    monkeypatch.setattr(service_module, "_HAS_LINUX_FILE_LEASES", False)
+
+    saved = service.save_draft(
+        WORKFLOW_A_UUID,
+        python_source="value = 'saved on macOS'\n",
+        expected_draft_hash=baseline["draft"]["draft_hash"],
+        expected_workflow_revision=1,
+    )
+
+    assert source.read_text(encoding="utf-8") == "value = 'saved on macOS'\n"
+    assert saved["draft"]["draft_hash"] != baseline["draft"]["draft_hash"]
+    with pytest.raises(WorkflowConflict, match="草稿已被其他程序修改") as stale:
+        service.save_draft(
+            WORKFLOW_A_UUID,
+            python_source="value = 'stale writer'\n",
+            expected_draft_hash=baseline["draft"]["draft_hash"],
+            expected_workflow_revision=1,
+        )
+    assert stale.value.code == "draft_hash_conflict"
+    assert source.read_text(encoding="utf-8") == "value = 'saved on macOS'\n"
+    assert sorted(path.name for path in source.parent.iterdir()) == [source.name]
+    store.close()

@@ -106,7 +106,20 @@ _HASH_TOKEN = re.compile(r"sha256:[0-9a-f]{64}\Z")
 _NO_EXPECTED_HASH = object()
 _F_SETOWN_EX = getattr(fcntl, "F_SETOWN_EX", 15)
 _F_OWNER_TID = 0
-_LEASE_BREAK_SIGNAL = signal.SIGRTMAX
+# Linux leases use a realtime signal. macOS has no SIGRTMAX (and no Linux
+# F_SETLEASE support), but importing the workflow service must remain portable;
+# the lease acquisition path below already fails closed when the fcntl feature
+# is unavailable.
+_LEASE_BREAK_SIGNAL = getattr(signal, "SIGRTMAX", signal.SIGUSR2)
+_HAS_LINUX_FILE_LEASES = all(
+    hasattr(owner, name)
+    for owner, name in (
+        (fcntl, "F_SETLEASE"),
+        (fcntl, "F_SETSIG"),
+        (signal, "pthread_sigmask"),
+        (signal, "sigtimedwait"),
+    )
+)
 _WORKFLOW_READ_FIELDS = {
     "uuid",
     "create_time",
@@ -1595,6 +1608,15 @@ class WorkflowService:
     ) -> None:
         """在可安全中断的 lease 下执行 fsync 后的原子 CAS replace。"""
 
+        if not _HAS_LINUX_FILE_LEASES:
+            WorkflowService._compare_and_replace_portable(
+                parent_fd=parent_fd,
+                target_name=target_name,
+                temporary_name=temporary_name,
+                expected_hash=expected_hash,
+            )
+            return
+
         target_descriptor = -1
         temporary_descriptor = -1
         backup_name = f".{target_name}.{uuid4().hex}.cas"
@@ -1775,9 +1797,152 @@ class WorkflowService:
                 os.close(target_descriptor)
 
     @staticmethod
+    def _compare_and_replace_portable(
+        *,
+        parent_fd: int,
+        target_name: str,
+        temporary_name: str,
+        expected_hash: Optional[str],
+    ) -> None:
+        """在不支持 Linux file lease 的平台上执行 advisory-lock CAS。
+
+        macOS 没有 ``F_SETLEASE``/``sigtimedwait``。这里仍通过目录 FD、
+        ``O_NOFOLLOW``、内容 hash、inode 校验和原子 replace 保持 CAS；
+        ``flock`` 则串行化所有遵守相同协议的 Workflow Authority 写入者。
+        """
+
+        target_descriptor = -1
+        temporary_descriptor = -1
+        backup_name = f".{target_name}.{uuid4().hex}.cas"
+        backup_created = False
+        replacement_attempted = False
+        lock_held = False
+        try:
+            try:
+                target_descriptor = os.open(
+                    target_name,
+                    os.O_RDWR | os.O_CLOEXEC | os.O_NOFOLLOW,
+                    dir_fd=parent_fd,
+                )
+            except FileNotFoundError:
+                if expected_hash is not None:
+                    raise WorkflowConflict("draft_hash_conflict") from None
+                try:
+                    os.link(
+                        temporary_name,
+                        target_name,
+                        src_dir_fd=parent_fd,
+                        dst_dir_fd=parent_fd,
+                        follow_symlinks=False,
+                    )
+                except FileExistsError:
+                    raise WorkflowConflict("draft_hash_conflict") from None
+                os.unlink(temporary_name, dir_fd=parent_fd)
+                return
+
+            if expected_hash is None:
+                raise WorkflowConflict("draft_hash_conflict")
+            fcntl.flock(target_descriptor, fcntl.LOCK_EX)
+            lock_held = True
+
+            original = WorkflowService._read_regular_fd(
+                target_descriptor,
+                byte_limit=AUTHORING_SOURCE_BYTE_LIMIT,
+            )
+            if _sha256(original) != expected_hash:
+                raise WorkflowConflict("draft_hash_conflict")
+            if not WorkflowService._target_matches_fd(
+                parent_fd,
+                target_name,
+                target_descriptor,
+            ):
+                raise WorkflowConflict("draft_hash_conflict")
+
+            temporary_descriptor = os.open(
+                temporary_name,
+                os.O_RDONLY | os.O_CLOEXEC | os.O_NOFOLLOW,
+                dir_fd=parent_fd,
+            )
+            replacement_hash = WorkflowService._hash_regular_fd(
+                temporary_descriptor,
+                byte_limit=AUTHORING_SOURCE_BYTE_LIMIT,
+            )
+
+            os.link(
+                target_name,
+                backup_name,
+                src_dir_fd=parent_fd,
+                dst_dir_fd=parent_fd,
+                follow_symlinks=False,
+            )
+            backup_created = True
+            os.fsync(parent_fd)
+
+            # Recheck immediately before publication so an external change
+            # observed while preparing the durable backup becomes a conflict.
+            current = WorkflowService._read_regular_fd(
+                target_descriptor,
+                byte_limit=AUTHORING_SOURCE_BYTE_LIMIT,
+            )
+            if _sha256(current) != expected_hash or not (
+                WorkflowService._target_matches_fd(
+                    parent_fd,
+                    target_name,
+                    target_descriptor,
+                )
+            ):
+                raise WorkflowConflict("draft_hash_conflict")
+
+            replacement_attempted = True
+            os.replace(
+                temporary_name,
+                target_name,
+                src_dir_fd=parent_fd,
+                dst_dir_fd=parent_fd,
+            )
+            os.fsync(parent_fd)
+            if (
+                not WorkflowService._target_matches_fd(
+                    parent_fd,
+                    target_name,
+                    temporary_descriptor,
+                )
+                or WorkflowService._hash_regular_fd(
+                    temporary_descriptor,
+                    byte_limit=AUTHORING_SOURCE_BYTE_LIMIT,
+                )
+                != replacement_hash
+            ):
+                raise WorkflowConflict("draft_hash_conflict")
+
+            with suppress(OSError):
+                os.unlink(backup_name, dir_fd=parent_fd)
+                backup_created = False
+                os.fsync(parent_fd)
+        except Exception as error:
+            if backup_created and not replacement_attempted:
+                with suppress(OSError):
+                    os.unlink(backup_name, dir_fd=parent_fd)
+                    backup_created = False
+                    os.fsync(parent_fd)
+            if isinstance(error, WorkflowError) and error.code == "invalid_input":
+                raise WorkflowConflict("draft_hash_conflict") from None
+            raise
+        finally:
+            if lock_held and target_descriptor >= 0:
+                with suppress(OSError):
+                    fcntl.flock(target_descriptor, fcntl.LOCK_UN)
+            if temporary_descriptor >= 0:
+                os.close(temporary_descriptor)
+            if target_descriptor >= 0:
+                os.close(target_descriptor)
+
+    @staticmethod
     def _drain_lease_break_signal() -> bool:
         """同步消费发给当前线程的 lease 通知。"""
 
+        if not hasattr(signal, "sigtimedwait"):
+            return False
         observed = False
         while True:
             try:
