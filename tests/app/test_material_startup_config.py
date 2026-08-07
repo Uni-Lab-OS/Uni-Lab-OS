@@ -2,6 +2,9 @@
 
 from __future__ import annotations
 
+import importlib
+from pathlib import Path
+
 import pytest
 
 from unilabos.app.main import (
@@ -83,6 +86,64 @@ def test_scheduler_database_paths_are_configurable() -> None:
 
     assert args["edge_device_state_db"] == "/tmp/device-state.db"
     assert args["edge_workflow_history_db"] == "/tmp/workflow-history.db"
+
+
+def test_explicit_working_directory_is_the_only_local_runtime_storage_root(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """证明显式工作目录统一隔离本地运行时 SQLite，且不删除旧库存权威。
+
+    参数：``tmp_path`` 提供显式运行目录与遗留用户目录；``monkeypatch`` 将
+    ``HOME`` 隔离到测试目录。返回：无；断言统一运行时存储路径
+    （RuntimeStoragePaths）把库存权威（Inventory Authority）、设备状态投影和
+    工作流历史全部放入显式 ``working_dir``。存储权威不变量：既有
+    ``~/.unilabos/*.db`` 不得被继承、覆盖或删除，资源图指纹冲突必须通过选择
+    正确的运行时权威解决，不能通过清空旧权威绕过。
+    """
+
+    legacy_home = tmp_path / "legacy-home"
+    legacy_storage = legacy_home / ".unilabos"
+    legacy_storage.mkdir(parents=True)
+    # ``legacy_payloads`` 是升级前仍须原样保留的三类本地持久事实哨兵。
+    legacy_payloads = {
+        legacy_storage / "inventory.db": b"existing-inventory-authority",
+        legacy_storage / "device_state.db": b"existing-device-projection",
+        legacy_storage / "workflow_history.db": b"existing-workflow-authority",
+    }
+    for legacy_path, payload in legacy_payloads.items():
+        legacy_path.write_bytes(payload)
+    monkeypatch.setenv("HOME", str(legacy_home))
+
+    runtime_root = tmp_path / "szlab-runtime"
+    args = vars(parse_args().parse_args(["--working_dir", str(runtime_root)]))
+    try:
+        runtime_storage = importlib.import_module("unilabos.app.runtime_storage")
+    except ModuleNotFoundError as error:
+        if error.name != "unilabos.app.runtime_storage":
+            raise
+        pytest.fail(
+            "显式 --working_dir 尚未接入统一运行时存储路径（RuntimeStoragePaths）；"
+            f"当前库存权威仍继承 {args['edge_inventory_db']!r}",
+            pytrace=False,
+        )
+
+    resolve_paths = getattr(runtime_storage, "resolve_runtime_storage_paths", None)
+    assert callable(resolve_paths), "缺少统一运行时存储路径解析入口"
+    paths = resolve_paths(args, working_dir=str(runtime_root))
+
+    assert paths.inventory_db == str(runtime_root / "inventory.db")
+    assert paths.device_state_db == str(runtime_root / "device_state.db")
+    assert paths.workflow_history_db == str(runtime_root / "workflow_history.db")
+    assert args["edge_inventory_db"] == paths.inventory_db
+    assert args["edge_device_state_db"] == paths.device_state_db
+    assert args["edge_workflow_history_db"] == paths.workflow_history_db
+    assert Path(paths.inventory_db) not in legacy_payloads
+    assert Path(paths.device_state_db) not in legacy_payloads
+    assert Path(paths.workflow_history_db) not in legacy_payloads
+    assert {
+        legacy_path: legacy_path.read_bytes() for legacy_path in legacy_payloads
+    } == legacy_payloads
 
 
 def test_directed_discovery_ports_are_configurable() -> None:
