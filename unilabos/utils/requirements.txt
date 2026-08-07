@@ -13,6 +13,7 @@ uvicorn
 opentelemetry-api
 opentelemetry-sdk
 opentelemetry-exporter-otlp-proto-grpc
+opentelemetry-exporter-otlp-proto-http
 pyautogui
 opcua
 pyserial

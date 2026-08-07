@@ -811,14 +811,15 @@ unilab --config base_config.py \
    ```
    **解决方案**：检查配置类名和字段名是否正确
 
-## OpenTelemetry / SigNoz 追踪
+## OpenTelemetry / SigNoz 追踪与日志
 
-Edge 追踪默认关闭；没有显式配置时不会加载 OpenTelemetry SDK，也不会发起网络请求。生产环境建议通过环境变量开启：
+Edge 观测默认关闭；没有显式配置时不会加载 OpenTelemetry SDK，也不会发起网络请求。启用后，trace 与 Python `logging` 使用同一 OTLP/gRPC collector 和资源属性：
 
 ```bash
 export UNILABOS_OTEL_ENABLED=true
 export OTEL_SERVICE_NAME=uni-lab-edge
 export OTEL_EXPORTER_OTLP_TRACES_ENDPOINT=http://signoz-otel-collector:4317
+export OTEL_EXPORTER_OTLP_LOGS_ENDPOINT=http://signoz-otel-collector:4317
 export OTEL_EXPORTER_OTLP_INSECURE=true
 export OTEL_DEPLOYMENT_ENVIRONMENT=production
 export OTEL_TRACES_SAMPLER=parentbased_traceidratio
@@ -826,9 +827,26 @@ export OTEL_TRACES_SAMPLER_ARG=0.25
 unilab ...
 ```
 
-需要认证 header 时使用运行环境的 secret 注入 `OTEL_EXPORTER_OTLP_HEADERS`，不要写入配置文件、日志或版本控制。也可在 `local_config.py` 的 `OTelConfig` 中配置 `enabled`、`endpoint`、`service_name`、采样率和批处理参数；环境变量优先。
+通过公网 OTLP/HTTP 接入时，将 endpoint 指向 HTTP collector 根地址并显式选择协议：
 
-追踪实现使用异步批量导出和有界队列。collector 不可用、SDK 缺失、队列溢出或关闭 flush 超时均 fail-open，不阻断调度和仪器控制。默认批处理参数是：
+```bash
+export OTEL_EXPORTER_OTLP_ENDPOINT=http://115.190.137.109:30158
+export OTEL_EXPORTER_OTLP_PROTOCOL=http/protobuf
+```
+
+`xiongyanfei` 命名空间的公网 Service 清单位于
+`deploy/kubernetes-xiongyanfei/signoz-otel-nodeport.yaml`，可重复执行：
+
+```bash
+kubectl apply -f deploy/kubernetes-xiongyanfei/signoz-otel-nodeport.yaml
+```
+
+它暴露 OTLP/gRPC `30157` 和 OTLP/HTTP `30158`。当前开发端统一使用 HTTP 端口；公网
+collector 不带应用层认证，应在云防火墙或安全组中仅允许可信开发出口 IP。
+
+需要认证 header 时使用运行环境的 secret 注入 `OTEL_EXPORTER_OTLP_HEADERS`，不要写入配置文件、日志或版本控制。也可在 `local_config.py` 的 `OTelConfig` 中配置 `enabled`、`endpoint`、`logs_enabled`、`logs_endpoint`、`service_name`、采样率和批处理参数；环境变量优先。设置 `UNILABOS_OTEL_LOGS_ENABLED=false` 或 `OTEL_LOGS_EXPORTER=none` 可只保留 traces。
+
+trace 与日志实现都使用异步批量导出和有界队列。collector 不可用、SDK 缺失、队列溢出或关闭 flush 超时均 fail-open，不阻断调度和仪器控制。OTLP exporter 自身及 gRPC 内部日志不会重新进入日志 exporter，避免递归。默认批处理参数是：
 
 - `max_queue_size = 2048`
 - `max_export_batch_size = 512`
@@ -850,7 +868,7 @@ HTTP 路由模板 server span / ws.receive
         └── action.status.publish
 ```
 
-启用追踪后，现有文本日志会自动附加 `trace_id` 和 `span_id`，可直接在 SigNoz 中关联检索。
+启用观测后，现有文本日志会自动附加 `trace_id` 和 `span_id`，同时作为 OTLP LogRecord 写入 SigNoz，可按 `service.name=uni-lab-edge` 关联检索。
 
 ## 相关文档
 

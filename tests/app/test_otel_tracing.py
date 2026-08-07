@@ -6,6 +6,7 @@ import asyncio
 import contextvars
 import itertools
 import json
+import logging
 from concurrent.futures import ThreadPoolExecutor
 from types import SimpleNamespace
 from typing import Any, Dict, Mapping
@@ -191,6 +192,10 @@ def test_runtime_settings_follow_cloud_otel_environment(monkeypatch):
     monkeypatch.setenv("OTEL_SERVICE_VERSION", "v1.2.3")
     monkeypatch.setenv("OTEL_DEPLOYMENT_ENVIRONMENT", "test")
     monkeypatch.setenv("OTEL_EXPORTER_OTLP_ENDPOINT", "http://collector:4317")
+    monkeypatch.setenv("OTEL_EXPORTER_OTLP_PROTOCOL", "http/protobuf")
+    monkeypatch.setenv(
+        "OTEL_EXPORTER_OTLP_LOGS_ENDPOINT", "http://logs-collector:4317"
+    )
     monkeypatch.setenv("OTEL_TRACES_SAMPLER", "parentbased_traceidratio")
     monkeypatch.setenv("OTEL_TRACES_SAMPLER_ARG", "0.25")
     monkeypatch.setenv("OTEL_BSP_MAX_QUEUE_SIZE", "64")
@@ -202,9 +207,99 @@ def test_runtime_settings_follow_cloud_otel_environment(monkeypatch):
     assert settings.service_version == "v1.2.3"
     assert settings.deployment_environment == "test"
     assert settings.endpoint == "http://collector:4317"
+    assert settings.protocol == "http/protobuf"
+    assert settings.logs_enabled is True
+    assert settings.logs_endpoint == "http://logs-collector:4317"
     assert settings.trace_sampler == "parentbased_traceidratio"
     assert settings.sample_ratio == 0.25
     assert settings.max_queue_size == 64
+
+
+def test_otlp_http_signal_endpoint_appends_signal_without_losing_prefix():
+    assert tracing._otlp_http_signal_endpoint(
+        "http://collector:4318/otel/", "traces"
+    ) == "http://collector:4318/otel/v1/traces"
+
+
+def test_log_protocol_reuses_trace_protocol_when_not_overridden(monkeypatch):
+    from unilabos.config.config import OTelConfig
+
+    monkeypatch.setattr(OTelConfig, "protocol", "http/protobuf")
+    monkeypatch.setattr(OTelConfig, "logs_protocol", "")
+
+    settings = tracing.TracingSettings.from_runtime()
+
+    assert settings.protocol == "http/protobuf"
+    assert settings.logs_protocol == "http/protobuf"
+
+
+def test_otel_log_handler_captures_application_logs_without_exporter_recursion():
+    root_logger = logging.Logger("unilabos-test-root")
+    root_logger.setLevel(logging.INFO)
+    emitted: list[logging.LogRecord] = []
+
+    class RecordingHandler(logging.Handler):
+        def emit(self, record: logging.LogRecord) -> None:
+            emitted.append(record)
+
+    handler = tracing._attach_otel_log_handler(
+        root_logger,
+        RecordingHandler(),
+    )
+
+    root_logger.info(
+        "workflow started token=secret-value Authorization: Basic abc123",
+        extra={"auth_token": "raw-secret"},
+    )
+    root_logger.handle(logging.LogRecord(
+        "opentelemetry.exporter.otlp.proto.grpc._log_exporter",
+        logging.ERROR,
+        __file__,
+        1,
+        "collector unavailable",
+        (),
+        None,
+    ))
+
+    assert handler in root_logger.handlers
+    assert [record.getMessage() for record in emitted] == [
+        "workflow started token=<redacted> Authorization: <redacted>"
+    ]
+    assert emitted[0].auth_token == "<redacted>"
+
+
+def test_otel_log_handler_failure_never_escapes_to_business_logger():
+    root_logger = logging.Logger("unilabos-fail-open-root")
+
+    class FailingHandler(logging.Handler):
+        def emit(self, record: logging.LogRecord) -> None:
+            raise RuntimeError("collector unavailable")
+
+    tracing._attach_otel_log_handler(root_logger, FailingHandler())
+
+    root_logger.warning("business operation continues")
+
+
+def test_active_otel_handler_can_attach_to_non_propagating_comm_logger():
+    root_logger = logging.Logger("unilabos-active-root")
+    comm_logger = logging.Logger("unilabos.comm")
+    comm_logger.setLevel(logging.INFO)
+    comm_logger.propagate = False
+    emitted: list[logging.LogRecord] = []
+
+    class RecordingHandler(logging.Handler):
+        def emit(self, record: logging.LogRecord) -> None:
+            emitted.append(record)
+
+    handler = tracing._attach_otel_log_handler(root_logger, RecordingHandler())
+    try:
+        tracing._activate_otel_log_handler(handler, root_logger)
+        tracing.attach_active_otel_log_handler(comm_logger)
+        comm_logger.info("websocket connected")
+    finally:
+        tracing._deactivate_otel_log_handler(handler)
+
+    assert [record.getMessage() for record in emitted] == ["websocket connected"]
 
 
 def test_context_propagates_across_carrier_and_thread(recorder):

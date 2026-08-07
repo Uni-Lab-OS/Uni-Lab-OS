@@ -13,6 +13,7 @@ OpenTelemetry，未安装依赖、配置错误或 SigNoz 不可达时都按 no-o
 from __future__ import annotations
 
 import atexit
+import copy
 import contextlib
 import contextvars
 import logging
@@ -23,10 +24,13 @@ import traceback
 import types
 from dataclasses import dataclass, field
 from typing import Any, Dict, Iterator, Mapping, MutableMapping, Optional
-from urllib.parse import unquote
+from urllib.parse import unquote, urlsplit, urlunsplit
 
 
 logger = logging.getLogger(__name__)
+
+_ACTIVE_OTEL_LOG_HANDLER: Optional[logging.Handler] = None
+_ACTIVE_OTEL_LOG_TARGETS: set[logging.Logger] = set()
 
 INSTRUMENTATION_NAME = "unilabos.edge"
 TRACEPARENT = "traceparent"
@@ -46,6 +50,10 @@ _BEARER_VALUE = re.compile(r"(?i)\b(bearer|lab)\s+[A-Za-z0-9._~+/=-]+")
 _SECRET_ASSIGNMENT = re.compile(
     r"(?i)\b(token|password|passwd|secret|api[_-]?key|access[_-]?key)"
     r"(\s*[:=]\s*)[^\s,;]+"
+)
+_HTTP_SECRET_HEADER = re.compile(
+    r"(?i)\b(authorization|proxy-authorization|cookie|set-cookie)"
+    r"(\s*:\s*)[^\r\n]+"
 )
 
 
@@ -126,6 +134,7 @@ def _sanitize_text(value: Any, limit: int = 1024) -> str:
     text = str(value or "")
     text = _BEARER_VALUE.sub(r"\1 <redacted>", text)
     text = _SECRET_ASSIGNMENT.sub(r"\1\2<redacted>", text)
+    text = _HTTP_SECRET_HEADER.sub(r"\1\2<redacted>", text)
     if len(text) > limit:
         return text[:limit] + "…"
     return text
@@ -168,6 +177,10 @@ class TracingSettings:
     service_version: str = "0.11.3"
     deployment_environment: str = ""
     endpoint: str = ""
+    protocol: str = "grpc"
+    logs_enabled: bool = True
+    logs_endpoint: str = ""
+    logs_protocol: str = "grpc"
     insecure: bool = True
     headers: Dict[str, str] = field(default_factory=dict)
     trace_sampler: str = "parentbased_always_on"
@@ -197,6 +210,12 @@ class TracingSettings:
             or os.environ.get("OTEL_EXPORTER_OTLP_ENDPOINT")
             or str(configured("endpoint", ""))
         ).strip()
+        logs_endpoint = (
+            os.environ.get("OTEL_EXPORTER_OTLP_LOGS_ENDPOINT")
+            or os.environ.get("OTEL_EXPORTER_OTLP_ENDPOINT")
+            or str(configured("logs_endpoint", ""))
+            or endpoint
+        ).strip()
         headers_raw = (
             os.environ.get("OTEL_EXPORTER_OTLP_TRACES_HEADERS")
             or os.environ.get("OTEL_EXPORTER_OTLP_HEADERS")
@@ -212,6 +231,17 @@ class TracingSettings:
                 bool(configured("insecure", True)),
             ),
         )
+        protocol = (
+            os.environ.get("OTEL_EXPORTER_OTLP_TRACES_PROTOCOL")
+            or os.environ.get("OTEL_EXPORTER_OTLP_PROTOCOL")
+            or str(configured("protocol", "grpc"))
+        ).strip().lower()
+        logs_protocol = (
+            os.environ.get("OTEL_EXPORTER_OTLP_LOGS_PROTOCOL")
+            or os.environ.get("OTEL_EXPORTER_OTLP_PROTOCOL")
+            or str(configured("logs_protocol", "")).strip()
+            or protocol
+        ).strip().lower()
         return cls(
             enabled=enabled,
             service_name=(
@@ -231,6 +261,17 @@ class TracingSettings:
                 or str(configured("deployment_environment", ""))
             ).strip(),
             endpoint=endpoint,
+            protocol=protocol,
+            logs_enabled=(
+                _env_bool(
+                    "UNILABOS_OTEL_LOGS_ENABLED",
+                    bool(configured("logs_enabled", enabled)),
+                )
+                and os.environ.get("OTEL_LOGS_EXPORTER", "otlp").strip().lower()
+                != "none"
+            ),
+            logs_endpoint=logs_endpoint,
+            logs_protocol=logs_protocol,
             insecure=insecure,
             headers=_parse_headers(headers_raw),
             trace_sampler=(
@@ -291,15 +332,114 @@ class _NullSpan:
 _NULL_SPAN = _NullSpan()
 
 
+class _OtelExporterNoiseFilter(logging.Filter):
+    """阻止 exporter 自身错误重新进入 OTLP 日志管线形成递归。"""
+
+    def filter(self, record: logging.LogRecord) -> bool:
+        return not record.name.startswith(("opentelemetry", "grpc"))
+
+
+class _SanitizingOtelLogHandler(logging.Handler):
+    """仅向 OTLP 副本写入脱敏后的日志，不修改其他本地 handler 的记录。"""
+
+    def __init__(self, target: logging.Handler):
+        super().__init__(logging.NOTSET)
+        self.target = target
+        self.addFilter(_OtelExporterNoiseFilter())
+
+    def emit(self, record: logging.LogRecord) -> None:
+        try:
+            sanitized = copy.copy(record)
+            sanitized.msg = _sanitize_text(record.getMessage(), 4096)
+            sanitized.args = ()
+            if record.exc_info:
+                sanitized.exc_text = _sanitize_text(
+                    "".join(traceback.format_exception(*record.exc_info)), 8192
+                )
+                sanitized.exc_info = None
+            if record.stack_info:
+                sanitized.stack_info = _sanitize_text(record.stack_info, 8192)
+            standard_fields = logging.makeLogRecord({}).__dict__
+            for key, value in tuple(sanitized.__dict__.items()):
+                if key in standard_fields:
+                    continue
+                if _SENSITIVE_KEY.search(key):
+                    sanitized.__dict__[key] = "<redacted>"
+                elif isinstance(value, str):
+                    sanitized.__dict__[key] = _sanitize_text(value, 1024)
+                elif value is not None and not isinstance(value, (bool, int, float)):
+                    sanitized.__dict__[key] = _sanitize_text(value, 1024)
+            self.target.handle(sanitized)
+        except Exception:
+            # 日志导出必须 fail-open，不能让遥测异常回流到业务 logger 调用。
+            return
+
+
+def _attach_otel_log_handler(
+    target_logger: logging.Logger,
+    handler: logging.Handler,
+) -> logging.Handler:
+    """把 OTLP handler 挂到目标 logger，并过滤 exporter/gRPC 内部日志。"""
+
+    sanitized_handler = _SanitizingOtelLogHandler(handler)
+    target_logger.addHandler(sanitized_handler)
+    return sanitized_handler
+
+
+def attach_active_otel_log_handler(target_logger: logging.Logger) -> None:
+    """让运行期创建的非传播 logger 复用当前 OTLP 日志出口。"""
+
+    handler = _ACTIVE_OTEL_LOG_HANDLER
+    if handler is None or handler in target_logger.handlers:
+        return
+    target_logger.addHandler(handler)
+    _ACTIVE_OTEL_LOG_TARGETS.add(target_logger)
+
+
+def _activate_otel_log_handler(
+    handler: logging.Handler,
+    root_logger: logging.Logger,
+) -> None:
+    global _ACTIVE_OTEL_LOG_HANDLER
+
+    setattr(handler, "_unilabos_otel_handler", True)
+    _ACTIVE_OTEL_LOG_HANDLER = handler
+    _ACTIVE_OTEL_LOG_TARGETS.add(root_logger)
+    comm_logger = logging.getLogger("unilabos.comm")
+    if not comm_logger.propagate:
+        attach_active_otel_log_handler(comm_logger)
+
+
+def _deactivate_otel_log_handler(handler: logging.Handler) -> None:
+    global _ACTIVE_OTEL_LOG_HANDLER
+
+    if _ACTIVE_OTEL_LOG_HANDLER is not handler:
+        return
+    for target_logger in tuple(_ACTIVE_OTEL_LOG_TARGETS):
+        if handler in target_logger.handlers:
+            target_logger.removeHandler(handler)
+    _ACTIVE_OTEL_LOG_TARGETS.clear()
+    _ACTIVE_OTEL_LOG_HANDLER = None
+
+
+def _otlp_http_signal_endpoint(endpoint: str, signal: str) -> str:
+    """把 OTLP/HTTP collector 根地址规范为具体 signal endpoint。"""
+
+    parsed = urlsplit(endpoint)
+    path = parsed.path.rstrip("/")
+    if not path.endswith(f"/v1/{signal}"):
+        path = f"{path}/v1/{signal}"
+    return urlunsplit((parsed.scheme, parsed.netloc, path, "", ""))
+
+
 class _OpenTelemetryBackend:
     """延迟导入 OTel SDK，避免默认路径产生硬依赖。"""
 
     def __init__(self, settings: TracingSettings):
         from opentelemetry import context, propagate, trace
-        from opentelemetry.exporter.otlp.proto.grpc.trace_exporter import (
-            OTLPSpanExporter,
-        )
         from opentelemetry.sdk.resources import Resource
+        from opentelemetry.sdk._logs import LoggerProvider, LoggingHandler
+        from opentelemetry.sdk._logs.export import BatchLogRecordProcessor
         from opentelemetry.sdk.trace import TracerProvider
         from opentelemetry.sdk.trace.export import BatchSpanProcessor
         from opentelemetry.sdk.trace.sampling import (
@@ -317,12 +457,27 @@ class _OpenTelemetryBackend:
         self.trace_api = trace
         self.settings = settings
 
-        exporter = OTLPSpanExporter(
-            endpoint=settings.endpoint,
-            insecure=settings.insecure,
-            headers=settings.headers,
-            timeout=settings.export_timeout_ms / 1000.0,
-        )
+        if settings.protocol == "http/protobuf":
+            from opentelemetry.exporter.otlp.proto.http.trace_exporter import (
+                OTLPSpanExporter,
+            )
+
+            span_exporter = OTLPSpanExporter(
+                endpoint=_otlp_http_signal_endpoint(settings.endpoint, "traces"),
+                headers=settings.headers,
+                timeout=settings.export_timeout_ms / 1000.0,
+            )
+        else:
+            from opentelemetry.exporter.otlp.proto.grpc.trace_exporter import (
+                OTLPSpanExporter,
+            )
+
+            span_exporter = OTLPSpanExporter(
+                endpoint=settings.endpoint,
+                insecure=settings.insecure,
+                headers=settings.headers,
+                timeout=settings.export_timeout_ms / 1000.0,
+            )
         attributes: Dict[str, Any] = dict(settings.resource_attributes)
         attributes.update({
             "service.name": settings.service_name,
@@ -331,6 +486,8 @@ class _OpenTelemetryBackend:
         })
         if settings.deployment_environment:
             attributes["deployment.environment.name"] = settings.deployment_environment
+            attributes["deployment.environment"] = settings.deployment_environment
+        resource = Resource.create(attributes)
         ratio_sampler = TraceIdRatioBased(settings.sample_ratio)
         samplers = {
             "always_on": ALWAYS_ON,
@@ -349,12 +506,12 @@ class _OpenTelemetryBackend:
             )
             sampler = ParentBased(ALWAYS_ON)
         provider = TracerProvider(
-            resource=Resource.create(attributes),
+            resource=resource,
             sampler=sampler,
         )
         provider.add_span_processor(
             BatchSpanProcessor(
-                exporter,
+                span_exporter,
                 max_queue_size=settings.max_queue_size,
                 schedule_delay_millis=settings.schedule_delay_ms,
                 max_export_batch_size=min(
@@ -363,11 +520,70 @@ class _OpenTelemetryBackend:
                 export_timeout_millis=settings.export_timeout_ms,
             )
         )
+        self.provider = provider
+        self.logger_provider: Any = None
+        self.log_handler: Optional[logging.Handler] = None
+        try:
+            if settings.logs_enabled and settings.logs_endpoint:
+                if settings.logs_protocol == "http/protobuf":
+                    from opentelemetry.exporter.otlp.proto.http._log_exporter import (
+                        OTLPLogExporter,
+                    )
+
+                    log_exporter = OTLPLogExporter(
+                        endpoint=_otlp_http_signal_endpoint(
+                            settings.logs_endpoint, "logs"
+                        ),
+                        headers=settings.headers,
+                        timeout=settings.export_timeout_ms / 1000.0,
+                    )
+                else:
+                    from opentelemetry.exporter.otlp.proto.grpc._log_exporter import (
+                        OTLPLogExporter,
+                    )
+
+                    log_exporter = OTLPLogExporter(
+                        endpoint=settings.logs_endpoint,
+                        insecure=settings.insecure,
+                        headers=settings.headers,
+                        timeout=settings.export_timeout_ms / 1000.0,
+                    )
+                logger_provider = LoggerProvider(resource=resource)
+                logger_provider.add_log_record_processor(
+                    BatchLogRecordProcessor(
+                        log_exporter,
+                        max_queue_size=settings.max_queue_size,
+                        schedule_delay_millis=settings.schedule_delay_ms,
+                        max_export_batch_size=min(
+                            settings.max_export_batch_size,
+                            settings.max_queue_size,
+                        ),
+                        export_timeout_millis=settings.export_timeout_ms,
+                    )
+                )
+                self.logger_provider = logger_provider
+                self.log_handler = _attach_otel_log_handler(
+                    logging.getLogger(),
+                    LoggingHandler(
+                        level=logging.NOTSET,
+                        logger_provider=logger_provider,
+                    ),
+                )
+                _activate_otel_log_handler(
+                    self.log_handler,
+                    logging.getLogger(),
+                )
+        except Exception:
+            if self.log_handler is not None:
+                _deactivate_otel_log_handler(self.log_handler)
+            if self.logger_provider is not None:
+                self.logger_provider.shutdown()
+            provider.shutdown()
+            raise
         trace.set_tracer_provider(provider)
         # 云端统一只持久化/传播 W3C traceparent + tracestate。不要透传 baggage，
         # 防止上游把高基数业务参数或敏感数据带入 Edge 消息与 outbox。
         propagate.set_global_textmap(TraceContextTextMapPropagator())
-        self.provider = provider
         self.tracer = provider.get_tracer(
             INSTRUMENTATION_NAME, settings.service_version
         )
@@ -453,7 +669,14 @@ class _OpenTelemetryBackend:
         )
 
     def shutdown(self) -> None:
-        self.provider.shutdown()
+        if self.log_handler is not None:
+            _deactivate_otel_log_handler(self.log_handler)
+            self.log_handler = None
+        try:
+            if self.logger_provider is not None:
+                self.logger_provider.shutdown()
+        finally:
+            self.provider.shutdown()
 
 
 _backend: Any = None

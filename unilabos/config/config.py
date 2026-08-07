@@ -114,6 +114,10 @@ class HostLinkConfig:
 class OTelConfig:
     enabled = False
     endpoint = ""  # OTLP/gRPC，例如 http://127.0.0.1:4317
+    protocol = "grpc"  # grpc 或 http/protobuf
+    logs_enabled = True  # 启用 tracing 后默认同时导出 Python logging
+    logs_endpoint = ""  # 空值复用 endpoint
+    logs_protocol = ""  # 空值复用 protocol
     insecure = True
     service_name = "uni-lab-edge"  # 对齐云端 uni-lab-http / uni-lab-scheduler
     service_namespace = "unilab"

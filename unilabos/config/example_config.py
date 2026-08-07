@@ -41,6 +41,10 @@ class HostLinkConfig:
 class OTelConfig:
     enabled = False
     endpoint = ""  # OTLP/gRPC，例如 http://signoz-otel-collector:4317
+    protocol = "grpc"
+    logs_enabled = True
+    logs_endpoint = ""  # 空值复用 endpoint
+    logs_protocol = ""  # 空值复用 protocol
     insecure = True
     service_name = "uni-lab-edge"
     deployment_environment = ""
