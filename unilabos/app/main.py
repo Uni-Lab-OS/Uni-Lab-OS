@@ -37,6 +37,7 @@ if unilabos_dir not in sys.path:
     sys.path.append(unilabos_dir)
 
 from unilabos.app.process_shutdown import install_host_shutdown_handlers
+from unilabos.app.runtime_storage import resolve_runtime_storage_paths
 from unilabos.app.utils import cleanup_for_restart
 from unilabos.config.config import (
     BasicConfig,
@@ -420,27 +421,27 @@ def parse_args():
         "--material_db",
         dest="edge_inventory_db",
         type=str,
-        default="~/.unilabos/inventory.db",
+        default=None,
         help="Host-only SQLite path for the edge-authoritative material store "
-        "(default: ~/.unilabos/inventory.db). Slaves never open this file.",
+        "(default: <working_dir>/inventory.db). Slaves never open this file.",
     )
     parser.add_argument(
         "--edge_device_state_db",
         "--device_state_db",
         dest="edge_device_state_db",
         type=str,
-        default="~/.unilabos/device_state.db",
+        default=None,
         help="Host scheduler device-state SQLite path (default: "
-        "~/.unilabos/device_state.db; 'off' disables persistence).",
+        "<working_dir>/device_state.db; 'off' disables persistence).",
     )
     parser.add_argument(
         "--edge_workflow_history_db",
         "--workflow_history_db",
         dest="edge_workflow_history_db",
         type=str,
-        default="~/.unilabos/workflow_history.db",
+        default=None,
         help="Host scheduler workflow-history SQLite path (default: "
-        "~/.unilabos/workflow_history.db; 'off' disables persistence).",
+        "<working_dir>/workflow_history.db; 'off' disables persistence).",
     )
     parser.add_argument(
         "--is_slave",
@@ -1220,6 +1221,9 @@ def main():
         BasicConfig.sk = args_dict.get("sk", "")
         print_status("传入了sk参数，优先采用传入参数！", "info")
     BasicConfig.working_dir = working_dir
+    # 一个工作目录同时确定本地库存权威（Inventory Authority）、设备状态投影与
+    # 工作流历史；显式 CLI 覆盖继续兼容，但缺省值不得回落到用户级旧数据库。
+    resolve_runtime_storage_paths(args_dict, working_dir=BasicConfig.working_dir)
     BasicConfig.extra_resource = bool(args_dict.get("extra_resource", False))
     configure_workflow_editable_package_roots(args_dict)
 

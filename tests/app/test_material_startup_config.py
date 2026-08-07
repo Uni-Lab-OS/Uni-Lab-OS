@@ -15,6 +15,7 @@ from unilabos.app.main import (
     should_start_edge_scheduler,
     should_start_embedded_material_service,
 )
+from unilabos.app.runtime_storage import resolve_runtime_storage_paths
 from unilabos.config.config import HTTPConfig
 
 
@@ -24,18 +25,25 @@ def _restore_material_config(monkeypatch):
     monkeypatch.setattr(HTTPConfig, "material_microbackend_addr", "")
 
 
-def test_default_starts_embedded_microbackend_with_host_db() -> None:
+def test_default_starts_embedded_microbackend_with_host_db(tmp_path: Path) -> None:
+    """证明默认本地服务使用统一运行目录中的三类 SQLite。
+
+    参数：``tmp_path`` 是隔离的本地运行目录。返回：无；断言物料服务与调度器
+    默认启用，且库存权威（Inventory Authority）没有继承用户级旧路径。
+    """
+
     args = vars(parse_args().parse_args([]))
 
     mode = configure_material_startup(args)
+    paths = resolve_runtime_storage_paths(args, working_dir=str(tmp_path))
 
     assert HTTPConfig.material_source == "microbackend"
     assert mode == "embedded"
     assert HTTPConfig.material_microbackend_addr == ""
-    assert args["edge_inventory_db"] == "~/.unilabos/inventory.db"
+    assert args["edge_inventory_db"] == paths.inventory_db
     assert args["edge_scheduler"] is True
-    assert args["edge_device_state_db"] == "~/.unilabos/device_state.db"
-    assert args["edge_workflow_history_db"] == "~/.unilabos/workflow_history.db"
+    assert args["edge_device_state_db"] == paths.device_state_db
+    assert args["edge_workflow_history_db"] == paths.workflow_history_db
     assert should_start_embedded_material_service(args, is_host_mode=True)
     assert not should_start_embedded_material_service(args, is_host_mode=False)
     assert should_start_edge_scheduler(args, is_host_mode=True)
@@ -73,6 +81,11 @@ def test_local_graph_does_not_request_legacy_remote_startup() -> None:
 
 
 def test_scheduler_database_paths_are_configurable() -> None:
+    """证明显式数据库路径继续覆盖统一运行目录缺省值。
+
+    参数：无。返回：无；断言设备状态与工作流历史的显式运维配置保持兼容。
+    """
+
     args = vars(
         parse_args().parse_args(
             [
@@ -83,6 +96,7 @@ def test_scheduler_database_paths_are_configurable() -> None:
             ]
         )
     )
+    resolve_runtime_storage_paths(args, working_dir="/tmp/runtime")
 
     assert args["edge_device_state_db"] == "/tmp/device-state.db"
     assert args["edge_workflow_history_db"] == "/tmp/workflow-history.db"
