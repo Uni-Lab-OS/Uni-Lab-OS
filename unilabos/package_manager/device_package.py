@@ -275,6 +275,10 @@ def _validate_configuration_value(
     :class:`DevicePackageError`。
     """
 
+    # Schema 的静态 null 默认值代表该 Python 初始化参数显式可空；Electron
+    # 回传同一个默认值必须与完全省略字段时保持一致。
+    if value is None and "default" in schema and schema["default"] is None:
+        return
     expected = schema.get("type")
     valid = False
     if expected == "string":

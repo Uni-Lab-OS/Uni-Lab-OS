@@ -430,7 +430,7 @@ def resolve_package_remote_addr(raw_value: Any) -> str:
     value = str(raw_value or "").strip()
     aliases = {
         "test": "https://leap-lab.test.bohrium.com/api/v1",
-        "uat": "https://leap-lab.uat.bohrium.com/api/v1",
+        "uat": "https://uni-lab.uat.bohrium.com/api/v1",
         "local": "http://127.0.0.1:48197/api/v1",
     }
     return aliases.get(value, value)

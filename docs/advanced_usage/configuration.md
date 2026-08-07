@@ -210,7 +210,7 @@ unilab --ak "key" --sk "secret" --addr "test" --upload_registry --2d_vis -g grap
 `--addr` 参数支持以下预设值，会自动转换为对应的完整 URL：
 
 - `test` → `https://leap-lab.test.bohrium.com/api/v1`
-- `uat` → `https://leap-lab.uat.bohrium.com/api/v1`
+- `uat` → `https://uni-lab.uat.bohrium.com/api/v1`
 - `local` → `http://127.0.0.1:48197/api/v1`
 - 其他值 → 直接使用作为完整 URL
 
@@ -283,7 +283,7 @@ HTTP 客户端配置用于与云端服务通信：
 
 - 生产环境：`https://leap-lab.bohrium.com/api/v1`（默认）
 - 测试环境：`https://leap-lab.test.bohrium.com/api/v1`
-- UAT 环境：`https://leap-lab.uat.bohrium.com/api/v1`
+- UAT 环境：`https://uni-lab.uat.bohrium.com/api/v1`
 - 本地环境：`http://127.0.0.1:48197/api/v1`
 
 ### 4. ROSConfig - ROS 配置

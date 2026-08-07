@@ -16,6 +16,7 @@ from unilabos.package_manager import (
 from unilabos.package_manager.community import resolve_graph_packages
 from unilabos.package_manager.device_package import (
     configuration_schema_for_definition,
+    validate_configuration_for_definition,
 )
 from unilabos.package_manager.distribution import build_workspace_wheel
 
@@ -65,6 +66,22 @@ def test_mock_configuration_schema_is_renderable_by_electron() -> None:
             "default": None,
         },
     }
+
+
+def test_mock_configuration_accepts_explicit_nullable_default() -> None:
+    """Electron 回传 Schema 的显式 null 默认值时必须与省略字段语义一致。"""
+
+    catalog = compile_package_source(WorkspaceSource(_MOCK_WORKSPACE))
+    definition = catalog.definitions.devices[0]
+
+    omitted = validate_configuration_for_definition(definition, {})
+    explicit = validate_configuration_for_definition(
+        definition,
+        {"channel_map": None},
+    )
+
+    assert omitted["channel_map"] is None
+    assert explicit["channel_map"] is None
 
 
 def test_mock_graph_uses_workspace_catalog_without_duplicate_registration(

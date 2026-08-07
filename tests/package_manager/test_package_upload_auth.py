@@ -20,9 +20,7 @@ from unilabos.package_manager.upload_auth import (
 )
 
 main_module = importlib.import_module("unilabos.app.main")
-secure_upload_module = importlib.import_module(
-    "unilabos.package_manager.secure_upload"
-)
+secure_upload_module = importlib.import_module("unilabos.package_manager.secure_upload")
 
 
 def test_upload_credentials_are_read_from_closed_stdin_contract() -> None:
@@ -72,7 +70,7 @@ def test_publication_diagnostics_do_not_persist_authorization(
 
     session = _RecordingSession()
     client = PackagePublicationHttpClient(
-        base_url="https://leap-lab.uat.bohrium.com/api/v1",
+        base_url="https://uni-lab.uat.bohrium.com/api/v1",
         auth_secret="reversible-auth-secret",
         working_dir=tmp_path,
         session=session,  # type: ignore[arg-type]
@@ -172,7 +170,7 @@ def test_secure_stdin_upload_binds_selected_environment(
         ),
     )
 
-    assert observed["base_url"] == "https://leap-lab.uat.bohrium.com/api/v1"
+    assert observed["base_url"] == "https://uni-lab.uat.bohrium.com/api/v1"
     assert Path(observed["working_dir"]) == tmp_path
     assert base64.b64decode(str(observed["auth_secret"])).decode("utf-8") == (
         "uat-ak:uat-sk"
