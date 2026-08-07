@@ -13,6 +13,8 @@ PRODUCER_UUID = "71000000-0000-4000-8000-000000000002"
 INVOCATION_UUID = "71000000-0000-4000-8000-000000000003"
 INTERNAL_UUID = "71000000-0000-4000-8000-000000000004"
 CONSUMER_UUID = "71000000-0000-4000-8000-000000000005"
+SECOND_INVOCATION_UUID = "71000000-0000-4000-8000-000000000006"
+SECOND_INTERNAL_UUID = "71000000-0000-4000-8000-000000000007"
 PRODUCER_TEMPLATE = "72000000-0000-4000-8000-000000000001"
 INVOCATION_TEMPLATE = "72000000-0000-4000-8000-000000000002"
 INTERNAL_TEMPLATE = "72000000-0000-4000-8000-000000000003"
@@ -90,11 +92,16 @@ def _edge(
     }
 
 
-def _composite_node(*, static_value: int | None = None) -> dict[str, Any]:
+def _composite_node(
+    *,
+    static_value: int | None = None,
+    invocation_uuid: str = INVOCATION_UUID,
+    internal_uuid: str = INTERNAL_UUID,
+) -> dict[str, Any]:
     """构造带输入透传输出和完成边界的组合调用节点。"""
 
     node = _node(
-        INVOCATION_UUID,
+        invocation_uuid,
         INVOCATION_TEMPLATE,
         node_type="workflow",
         param={} if static_value is None else {"value": static_value},
@@ -103,7 +110,7 @@ def _composite_node(*, static_value: int | None = None) -> dict[str, Any]:
         "target_mappings": {
             INVOCATION_TARGET: [
                 {
-                    "workflow_node_uuid": INTERNAL_UUID,
+                    "workflow_node_uuid": internal_uuid,
                     "target_handle_uuid": INTERNAL_TARGET,
                 }
             ]
@@ -114,13 +121,13 @@ def _composite_node(*, static_value: int | None = None) -> dict[str, Any]:
         "structural_mappings": {
             "entry_targets": [
                 {
-                    "workflow_node_uuid": INTERNAL_UUID,
+                    "workflow_node_uuid": internal_uuid,
                     "target_handle_uuid": INTERNAL_TARGET,
                 }
             ],
             "completion_sources": [
                 {
-                    "workflow_node_uuid": INTERNAL_UUID,
+                    "workflow_node_uuid": internal_uuid,
                     "source_handle_uuid": INTERNAL_READY,
                 }
             ],
@@ -298,6 +305,71 @@ def test_composite_passthrough_flattens_value_and_completion_edges() -> None:
         (PRODUCER_UUID, PRODUCER_SOURCE, INTERNAL_UUID, INTERNAL_TARGET),
         (PRODUCER_UUID, PRODUCER_SOURCE, CONSUMER_UUID, CONSUMER_TARGET),
         (INTERNAL_UUID, INTERNAL_READY, CONSUMER_UUID, CONSUMER_TARGET),
+    }
+    assert params == {}
+
+
+def test_chained_composite_passthrough_counts_only_value_provider() -> None:
+    """连续组合调用须保留完成边，但不得把它误算成第二个值提供者。"""
+
+    nodes = {
+        node["uuid"]: node
+        for node in (
+            _node(PRODUCER_UUID, PRODUCER_TEMPLATE),
+            _composite_node(),
+            _node(INTERNAL_UUID, INTERNAL_TEMPLATE),
+            _composite_node(
+                invocation_uuid=SECOND_INVOCATION_UUID,
+                internal_uuid=SECOND_INTERNAL_UUID,
+            ),
+            _node(SECOND_INTERNAL_UUID, INTERNAL_TEMPLATE),
+            _node(CONSUMER_UUID, CONSUMER_TEMPLATE),
+        )
+    }
+    handles = {handle["uuid"]: handle for handle in _handles()}
+    flattened, params = ExecutionPlanGraphNormalizer().flatten_composite_edges(
+        nodes=nodes,
+        edges=[
+            _edge(
+                "74000000-0000-4000-8000-000000000005",
+                PRODUCER_UUID,
+                PRODUCER_SOURCE,
+                INVOCATION_UUID,
+                INVOCATION_TARGET,
+            ),
+            _edge(
+                "74000000-0000-4000-8000-000000000006",
+                INVOCATION_UUID,
+                INVOCATION_SOURCE,
+                SECOND_INVOCATION_UUID,
+                INVOCATION_TARGET,
+            ),
+            _edge(
+                "74000000-0000-4000-8000-000000000007",
+                SECOND_INVOCATION_UUID,
+                INVOCATION_SOURCE,
+                CONSUMER_UUID,
+                CONSUMER_TARGET,
+            ),
+        ],
+        handles=handles,
+    )
+
+    endpoints = {
+        (
+            edge["source_node_uuid"],
+            edge["source_handle_uuid"],
+            edge["target_node_uuid"],
+            edge["target_handle_uuid"],
+        )
+        for edge in flattened
+    }
+    assert endpoints == {
+        (PRODUCER_UUID, PRODUCER_SOURCE, INTERNAL_UUID, INTERNAL_TARGET),
+        (PRODUCER_UUID, PRODUCER_SOURCE, SECOND_INTERNAL_UUID, INTERNAL_TARGET),
+        (INTERNAL_UUID, INTERNAL_READY, SECOND_INTERNAL_UUID, INTERNAL_TARGET),
+        (PRODUCER_UUID, PRODUCER_SOURCE, CONSUMER_UUID, CONSUMER_TARGET),
+        (SECOND_INTERNAL_UUID, INTERNAL_READY, CONSUMER_UUID, CONSUMER_TARGET),
     }
     assert params == {}
 

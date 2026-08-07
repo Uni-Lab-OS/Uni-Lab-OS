@@ -135,6 +135,10 @@ class ExecutionPlanGraphNormalizer:
         )
         for boundary_handle_uuid, mapped_targets in target_mappings.items():
             providers = incoming_by_handle.get(boundary_handle_uuid, [])
+            value_providers = self._value_provider_edges(
+                providers,
+                handles=handles,
+            )
             targets = self._mapping_items(mapped_targets, field="target_mappings")
             for provider in providers:
                 for target in targets:
@@ -160,7 +164,7 @@ class ExecutionPlanGraphNormalizer:
                         )
                     )
             parameter = input_names_by_handle.get(boundary_handle_uuid, "")
-            if not providers and parameter in invocation_param:
+            if not value_providers and parameter in invocation_param:
                 for target in targets:
                     self._project_static_parameter(
                         param_overrides=param_overrides,
@@ -239,7 +243,10 @@ class ExecutionPlanGraphNormalizer:
             elif kind == "workflow_input":
                 parameter = str(source_mapping.get("parameter") or "")
                 input_handle_uuid = input_handles_by_name.get(parameter, "")
-                providers = incoming_by_handle.get(input_handle_uuid, [])
+                providers = self._value_provider_edges(
+                    incoming_by_handle.get(input_handle_uuid, []),
+                    handles=handles,
+                )
                 if not providers and parameter in invocation_param:
                     self._project_static_parameter(
                         param_overrides=param_overrides,
@@ -299,6 +306,32 @@ class ExecutionPlanGraphNormalizer:
                     )
                 )
         return self._deduplicate_edges([*retained, *generated])
+
+    @staticmethod
+    def _value_provider_edges(
+        edges: Sequence[Mapping[str, Any]],
+        *,
+        handles: Mapping[str, Mapping[str, Any]],
+    ) -> list[Mapping[str, Any]]:
+        """从组合边界入边中排除只表达完成顺序的依赖边。
+
+        组合透传输出会同时生成值边和完成边；当下游也是组合调用时，两条边会
+        落到同一个边界输入。唯一值提供者校验只能统计正式值来源，但完成边仍
+        必须保留并继续改写到内部动作，以维持物理执行顺序。
+        """
+
+        result: list[Mapping[str, Any]] = []
+        for edge in edges:
+            source_handle_uuid = str(edge.get("source_handle_uuid") or "")
+            source_handle = handles.get(source_handle_uuid)
+            if not isinstance(source_handle, Mapping):
+                raise ExecutionPlanBuildError(
+                    "composite_boundary_mapping_invalid",
+                    "组合工作流入边引用快照外来源连接点",
+                )
+            if not dependency_only(source_handle):
+                result.append(edge)
+        return result
 
     @staticmethod
     def _composite_depth(node_uuid: str, nodes: Mapping[str, Mapping[str, Any]]) -> int:
