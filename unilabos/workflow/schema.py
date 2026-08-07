@@ -13,6 +13,12 @@ from unilabos.workflow.json_codec import (
     encode_json,
 )
 from unilabos.workflow.models import validate_uuid
+from unilabos.workflow.site_selector_value_schema import (
+    EDITOR_CONTROL_KEY,
+    SITE_SELECTOR_KEY,
+    SiteSelectorValueSchemaError,
+    parse_site_selector_extension,
+)
 
 _INVALID_SCHEMA = "工作流值 Schema 不符合版本 1 合同"
 _INVALID_CONTRACT = "工作流输入输出合同格式不正确"
@@ -363,8 +369,26 @@ def _parse_typed_schema(
     path: str,
     allow_array: bool,
 ) -> dict[str, Any]:
+    """严格解析一个带显式 ``type`` 的工作流值 Schema 成员。
+
+    参数说明：``raw`` 是未信任的闭合 Schema；``path`` 是当前 JSON Pointer；
+    ``allow_array`` 决定本层是否允许数组。返回：规范化且容器分离的 Schema。
+
+    异常说明：类型、约束、未知字段或库位选择（Site Selection）扩展非法时通过
+    ``_fail`` 抛出 ``WorkflowSchemaError``。
+    """
+
     kind = raw["type"]
     type_path = _pointer(path, "type")
+    try:
+        # ``site_selector`` 只承载编辑关系，不得把整数等其他值类型伪装为库位。
+        site_selector = parse_site_selector_extension(
+            raw,
+            path=path,
+            value_kind=kind,
+        )
+    except SiteSelectorValueSchemaError as error:
+        _fail("invalid_schema", error.path, _INVALID_SCHEMA)
     supported = {"string", "integer", "number", "boolean", "object", "array"}
     if (
         type(kind) is not str
@@ -379,7 +403,8 @@ def _parse_typed_schema(
             "enum",
             "minLength",
             "maxLength",
-            "x-unilabos-editor-control",
+            EDITOR_CONTROL_KEY,
+            SITE_SELECTOR_KEY,
         },
         "integer": {"type", "enum", "minimum", "maximum"},
         "number": {"type", "enum", "minimum", "maximum"},
@@ -409,15 +434,9 @@ def _parse_typed_schema(
         ):
             _fail("invalid_schema", _pointer(path, "maximum"), _INVALID_SCHEMA)
     elif kind == "string":
-        if "x-unilabos-editor-control" in raw:
-            control = raw["x-unilabos-editor-control"]
-            if control != "site_selector":
-                _fail(
-                    "invalid_schema",
-                    _pointer(path, "x-unilabos-editor-control"),
-                    _INVALID_SCHEMA,
-                )
-            result["x-unilabos-editor-control"] = control
+        if site_selector is not None:
+            result[EDITOR_CONTROL_KEY] = "site_selector"
+            result[SITE_SELECTOR_KEY] = site_selector
         for field in ("minLength", "maxLength"):
             if field in raw:
                 result[field] = _check_length_bound(

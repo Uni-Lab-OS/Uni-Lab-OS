@@ -18,6 +18,10 @@ from unilabos.workflow.schema import (
     parse_output_contract,
     parse_value_schema,
 )
+from unilabos.workflow.site_selector_value_schema import (
+    SiteSelectorValueSchemaError,
+    normalize_projected_site_selector_schema,
+)
 
 _EMPTY_INPUT_CONTRACT = {"version": 1, "parameters": []}
 _EMPTY_OUTPUT_CONTRACT = {"version": 1, "outputs": []}
@@ -283,14 +287,23 @@ def schema_contains_resource_slot(
 def _value_set_schema(schema: dict[str, Any]) -> dict[str, Any]:
     """把动作字段 JSON Schema 规范化为闭合的工作流值 Schema。
 
-    参数：``schema`` 是调用者已深复制的普通字典，可包含 JSON Schema 的
-    可空 ``type`` 联合、默认值和展示注解。
-    返回：规范化后的同一逻辑值集合；合法的“一个非空类型加 ``null``”联合
+    参数：``schema`` 是调用者已深复制的普通字典；库位选择（SiteSelection）
+    先交给严格适配器，其他字段再删除展示/默认值注解并规范可空 ``type`` 联合。
+    返回：不改变 required 语义的闭合值集合，合法的单一非空类型加 ``null``
     确定性转成非空成员在前的 ``anyOf``。
-    异常：``type`` 数组不是唯一非空类型加唯一 ``null`` 时抛出
-    ``WorkflowIOValidationError``，不把非法联合交给物料投影猜测。
+
+    异常：库位选择合同或可空联合非法时抛出 ``WorkflowIOValidationError``；
+    其他未知字段保留给第 1 版 parser 失败关闭，不交给物料投影猜测。
     """
 
+    try:
+        site_selector_schema = normalize_projected_site_selector_schema(schema)
+    except SiteSelectorValueSchemaError as error:
+        raise WorkflowIOValidationError(
+            f"连接点（Handle）库位选择合同无效: {error.message}"
+        ) from error
+    if site_selector_schema is not None:
+        return site_selector_schema
     for key in ("default", "title", "description"):
         schema.pop(key, None)
     schema = _normalize_nullable_json_type(schema)
