@@ -25,6 +25,7 @@ from unilabos.workflow.candidate_validation import (
     validate_candidate_bundle,
 )
 from unilabos.workflow.catalog_dependent_authoring_refresh import (
+    CatalogAuthoringGenerationTracker,
     refresh_catalog_dependent_authoring,
 )
 from unilabos.workflow.device_action_run import (
@@ -329,6 +330,9 @@ class WorkflowService:
         # 源码（Workflow Source）；SQLite 注册行仅保留跨启动历史身份。
         self._active_sources_lock = threading.RLock()
         self._active_source_workflow_uuids: frozenset[str] = frozenset()
+        # ``_catalog_generation_tracker`` 隐藏本进程目录编译基线、变化判定和源码
+        # 观测签名组合；工作流服务只在编译事务接缝提交已验证指纹。
+        self._catalog_generation_tracker = CatalogAuthoringGenerationTracker()
 
     # 工作流（Workflow）与图（Graph） -------------------------------------
 
@@ -885,14 +889,19 @@ class WorkflowService:
         ]
 
     def recover_registered_sources(self) -> None:
-        """启动时逐一恢复当前授权源码并隔离单项瞬态故障。
+        """启动时按当前模板目录逐一恢复全部授权源码。
 
-        参数：无。返回：无；只读取本轮活动注册，历史路径不会被探测。
+        参数：无。返回：无；只读取本轮活动注册并强制替换旧进程目录产生的候选
+        或诊断，不把普通子源码编译误当成子合同发布。异常：单项文件或运行时
+        瞬态故障保持隔离；其他稳定工作流错误原样传播。
         """
 
         for registration in self.list_registered_sources():
             try:
-                self.reconcile_registered_source(registration["workflow_uuid"])
+                self.reconcile_registered_source(
+                    registration["workflow_uuid"],
+                    force_compile=True,
+                )
             except (OSError, RuntimeError):
                 continue
 
@@ -997,6 +1006,10 @@ class WorkflowService:
                 candidate=candidate,
                 event_data=event_data,
             )
+            self._catalog_generation_tracker.record_compilation(
+                workflow_uuid,
+                compilation.template_catalog_fingerprint,
+            )
             return self.get_authoring(workflow_uuid)
 
     @staticmethod
@@ -1031,14 +1044,14 @@ class WorkflowService:
         self,
         workflow_uuid: str,
         *,
-        _refresh_catalog_dependent_state: bool = False,
+        force_compile: bool = False,
     ) -> Dict[str, Any]:
         """协调一个已注册工作流源码及其可重建创作派生状态。
 
         参数：``workflow_uuid`` 是工作流（Workflow）稳定身份；
-        ``_refresh_catalog_dependent_state`` 仅供同服务在发布目录变化后强制重编译
-        目录相关诊断或候选版本（Candidate）。返回：最新创作聚合。异常：来源、
-        编译或持久化失败时传播稳定工作流错误；本函数不发布模板目录。
+        ``force_compile`` 用于启动恢复或模板目录换代后强制重编译目录相关诊断和
+        候选版本（Candidate）。返回：最新创作聚合。异常：来源、编译或持久化
+        失败时传播稳定工作流错误；本函数不发布模板目录。
         """
 
         workflow_uuid = self._get_authoring_workflow(workflow_uuid)["uuid"]
@@ -1047,6 +1060,18 @@ class WorkflowService:
             registration = self._registration(workflow_uuid)
             source = self._read_source(registration)
             record = self._store.get_authoring_record(workflow_uuid)
+            current_catalog_fingerprint = (
+                self._catalog_fingerprint()
+                if self.compiler is not None
+                else None
+            )
+            catalog_changed = (
+                current_catalog_fingerprint is not None
+                and self._catalog_generation_tracker.changed_from_known_generation(
+                    workflow_uuid,
+                    current_catalog_fingerprint,
+                )
+            )
             applied_source = record.get("applied_source")
             writeback_marker_valid = (
                 record.get("writeback_source") is not None
@@ -1128,7 +1153,7 @@ class WorkflowService:
                 actual_hash == record["observed_draft_hash"]
                 and not invalid_writeback_marker
                 and not (actual_hash is None and record.get("candidate") is not None)
-                and not _refresh_catalog_dependent_state
+                and not force_compile
             ):
                 return self.get_authoring(workflow_uuid)
 
@@ -1150,13 +1175,18 @@ class WorkflowService:
                     applied_graph=applied_graph,
                     draft_python_source=source["python_source"],
                 )
-            cause = (
-                "recovered"
-                if source is not None
+            if force_compile and actual_hash == record["observed_draft_hash"]:
+                # 同一源码代际只在进程内已知目录指纹变化时标记为目录变化；
+                # 冷启动没有旧代际证据，只能记录为恢复编译。
+                cause = "catalog_changed" if catalog_changed else "recovered"
+            elif (
+                source is not None
                 and record["observed_draft_hash"] is None
                 and record["update_time"] is not None
-                else "external_draft_changed"
-            )
+            ):
+                cause = "recovered"
+            else:
+                cause = "external_draft_changed"
             self._store.record_draft_compilation(
                 workflow_uuid=workflow_uuid,
                 draft_hash=actual_hash,
@@ -1178,6 +1208,16 @@ class WorkflowService:
                     ),
                 },
             )
+            if source is not None:
+                self._catalog_generation_tracker.record_compilation(
+                    workflow_uuid,
+                    compilation.template_catalog_fingerprint,
+                )
+            else:
+                self._catalog_generation_tracker.record_compilation(
+                    workflow_uuid,
+                    None,
+                )
             return self.get_authoring(workflow_uuid)
 
     def submit_source_change(
@@ -1197,13 +1237,22 @@ class WorkflowService:
 
         workflow_uuid = self._get_authoring_workflow(workflow_uuid)["uuid"]
         with self._authoring_lock(workflow_uuid):
-            registration = self._registration(workflow_uuid)
             # ``current_signature`` 是服务在取得创作锁后复核的文件世代，防止监视
             # 线程用过期观测授权编译更新中的文件。
             current_signature = self.source_signature(workflow_uuid)
             if current_signature != observed_signature:
                 return False
-            self.reconcile_registered_source(workflow_uuid)
+            # ``catalog_fingerprint`` 是当前服务编译器的目录代际；它与文件签名
+            # 独立变化，必须强制替换旧目录产生的候选或失败诊断。
+            catalog_fingerprint = self._catalog_fingerprint()
+            force_compile = self._catalog_generation_tracker.requires_compile(
+                workflow_uuid,
+                catalog_fingerprint,
+            )
+            self.reconcile_registered_source(
+                workflow_uuid,
+                force_compile=force_compile,
+            )
             # ``latest_signature`` 证明整个状态推进期间规范源码没有再次变化。
             latest_signature = self.source_signature(workflow_uuid)
             if latest_signature != observed_signature:
@@ -1520,7 +1569,7 @@ class WorkflowService:
             load_authoring_record=self._store.get_authoring_record,
             reconcile_source=partial(
                 self.reconcile_registered_source,
-                _refresh_catalog_dependent_state=True,
+                force_compile=True,
             ),
             mutated_workflow_uuid=workflow_uuid,
             warnings=warnings,
@@ -1622,13 +1671,25 @@ class WorkflowService:
         返回：缺失标记或普通文件的身份、大小和时间签名。
         异常：已撤权身份稳定映射为 ``workflow_not_found``；不安全路径或非普通
         文件映射为 ``invalid_input``。安全：每次读取都在工作流创作锁内重新取得
-        当前注册，撤权返回后旧注册信息不能继续触碰文件系统。
+        当前注册，撤权返回后旧注册信息不能继续触碰文件系统；尚未装配编译器的
+        来源管理用途只返回文件签名，不伪造模板目录代际。
         """
 
         with self._authoring_lock(workflow_uuid):
             registration = self._registration(workflow_uuid)
             try:
-                return registered_source_signature(registration)
+                file_signature = registered_source_signature(registration)
+                if self.compiler is None:
+                    return self._catalog_generation_tracker.source_signature(
+                        file_signature,
+                        None,
+                    )
+                # 保留既有文件签名首项，末尾追加模板目录代际；旧诊断调用者仍可
+                # 识别 ``file``/``missing``，统一监视器则会在目录换代时得到新签名。
+                return self._catalog_generation_tracker.source_signature(
+                    file_signature,
+                    self._catalog_fingerprint(),
+                )
             except SourceWorkspaceError:
                 raise WorkflowError("invalid_input") from None
 

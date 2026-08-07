@@ -5,6 +5,90 @@ from __future__ import annotations
 from collections.abc import Callable, Iterable, Mapping
 
 
+class CatalogAuthoringGenerationTracker:
+    """封装工作流创作（Authoring）最后编译目录代际的进程内状态。"""
+
+    def __init__(self) -> None:
+        """建立没有历史目录基线的新进程追踪器。
+
+        参数：无。
+        返回：无；启动时不从数据库猜测旧进程使用的模板目录代际。
+        异常：无。
+        """
+
+        # ``compiled_fingerprints`` 按工作流稳定身份保存本进程已确认完成的最后
+        # 一次编译目录；它不是持久创作权威，重启后刻意为空。
+        self._compiled_fingerprints: dict[str, str] = {}
+
+    def requires_compile(
+        self,
+        workflow_uuid: str,
+        catalog_fingerprint: str,
+    ) -> bool:
+        """判断来源是否尚未按当前模板目录完成编译。
+
+        参数：``workflow_uuid`` 是工作流（Workflow）稳定身份；
+        ``catalog_fingerprint`` 是当前模板目录代际指纹。
+        返回：本进程没有该来源基线或指纹不同返回 ``True``，否则返回 ``False``。
+        异常：无；指纹格式由工作流服务的目录权威读取器先行验证。
+        """
+
+        return self._compiled_fingerprints.get(workflow_uuid) != catalog_fingerprint
+
+    def changed_from_known_generation(
+        self,
+        workflow_uuid: str,
+        catalog_fingerprint: str,
+    ) -> bool:
+        """判断当前目录是否不同于本进程已知前代。
+
+        参数：``workflow_uuid`` 是工作流稳定身份；``catalog_fingerprint`` 是当前
+        模板目录指纹。返回：只有已知前代存在且不同才为 ``True``；启动恢复没有
+        已知前代，不能伪报为目录变化。异常：无。
+        """
+
+        previous_fingerprint = self._compiled_fingerprints.get(workflow_uuid)
+        return (
+            previous_fingerprint is not None
+            and previous_fingerprint != catalog_fingerprint
+        )
+
+    def record_compilation(
+        self,
+        workflow_uuid: str,
+        catalog_fingerprint: str | None,
+    ) -> None:
+        """记录成功编译代际或清除不适用的来源基线。
+
+        参数：``workflow_uuid`` 是工作流稳定身份；``catalog_fingerprint`` 是本次
+        编译结果使用的目录指纹，源码缺失或未装配编译器时传 ``None``。
+        返回：无；``None`` 会清除旧进程内记录，不创建虚假目录代际。
+        异常：无。
+        """
+
+        if catalog_fingerprint is None:
+            self._compiled_fingerprints.pop(workflow_uuid, None)
+            return
+        self._compiled_fingerprints[workflow_uuid] = catalog_fingerprint
+
+    @staticmethod
+    def source_signature(
+        file_signature: tuple[object, ...],
+        catalog_fingerprint: str | None,
+    ) -> tuple[object, ...]:
+        """组合文件身份与可选模板目录代际的监视签名。
+
+        参数：``file_signature`` 是规范源码文件世代；``catalog_fingerprint`` 是
+        已验证的当前模板目录指纹，未装配编译器时为 ``None``。
+        返回：无目录时原样返回文件签名，否则在尾部附加目录标记和指纹。
+        异常：无；不读取文件、数据库或编译器状态。
+        """
+
+        if catalog_fingerprint is None:
+            return file_signature
+        return (*file_signature, "catalog", catalog_fingerprint)
+
+
 def refresh_catalog_dependent_authoring(
     *,
     registrations: Iterable[Mapping[str, object]],
@@ -48,4 +132,7 @@ def refresh_catalog_dependent_authoring(
             )
 
 
-__all__ = ["refresh_catalog_dependent_authoring"]
+__all__ = [
+    "CatalogAuthoringGenerationTracker",
+    "refresh_catalog_dependent_authoring",
+]
