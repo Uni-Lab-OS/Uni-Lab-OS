@@ -72,6 +72,10 @@ from unilabos.resources.resource_tracker import (
     JSON_UNILABOS_PARAM,
     PARAM_SAMPLE_UUIDS, SampleUUIDsType, LabSample,
 )
+from unilabos.ros.action_transport import (
+    required_action_endpoint_ids,
+    wait_for_action_endpoints,
+)
 from unilabos.ros.initialize_device import initialize_device_from_dict
 from unilabos.ros.msgs.message_converter import (
     get_msg_type,
@@ -927,15 +931,13 @@ class HostNode(BaseROS2DeviceNode):
         raise ValueError(f"创建资源时失败！响应为空")
 
     def initialize_device(self, device_id: str, device_config: ResourceDictInstance) -> None:
-        """
-        根据配置初始化设备，
+        """初始化本地设备并在 ROS 动作端点全部就绪后宣告可调度。
 
-        此函数根据提供的设备配置动态导入适当的设备类并创建其实例。
-        同时为设备的动作值映射设置动作客户端。
-
-        Args:
-            device_id: 设备唯一标识符
-            device_config: 设备配置字典，包含类型和其他参数
+        参数：``device_id`` 是设备实例唯一身份；``device_config`` 是包含设备定义、
+        稳定 UUID 与初始化参数的物理资源图（Physical Resource Graph）实例。
+        返回：无；驱动定义非法或既有设备初始化返回空结果时保留原有跳过语义。
+        异常：必需 ROS 动作端点未在共享等待预算内就绪时抛出 ``RuntimeError``，
+        同时禁止把设备加入在线集合或上报动作空闲状态。
         """
         self.lab_logger().info(f"[Host Node] Initializing device: {device_id}")
 
@@ -986,6 +988,24 @@ class HostNode(BaseROS2DeviceNode):
             if action_name in already:
                 continue
             new_action_pairs.append((device_id, action_name))
+        # ``required_endpoint_ids`` 是该设备全部业务动作真正依赖的原生或通用 ROS 端点。
+        required_endpoint_ids = required_action_endpoint_ids(
+            device_id,
+            d._ros_node._action_value_mappings,
+        )
+        # 本地服务端与客户端在同一启动阶段创建；给 DDS 发现一个有界共享预算，
+        # 仍未就绪就按关闭式失败处理，绝不提前宣告设备可调度。
+        if not wait_for_action_endpoints(
+            self._action_clients,
+            required_endpoint_ids,
+            wait_timeout=2.0,
+        ):
+            transport_error = (
+                "device_action_transport_not_ready: "
+                f"device={device_id}, required_endpoints={required_endpoint_ids}"
+            )
+            self.lab_logger().error(transport_error)
+            raise RuntimeError(transport_error)
         device_key = f"{self.devices_names[device_id]}/{device_id}"  # 这里不涉及二级device_id
         # 添加到在线设备列表
         self._online_devices.add(device_key)

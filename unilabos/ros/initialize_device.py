@@ -4,6 +4,7 @@ from unilabos.package_manager.driver_runtime import (
 )
 from unilabos.registry.registry import lab_registry
 from unilabos.resources.resource_tracker import ResourceDictInstance
+from unilabos.ros.action_transport import build_runtime_action_mappings
 from unilabos.ros.device_node_wrapper import ros2_device_node
 from unilabos.ros.nodes.base_device_node import DeviceInitError, ROS2DeviceNode
 from unilabos.utils import logger
@@ -58,12 +59,17 @@ def initialize_device_from_dict(
         )
         return initialized_device
     if isinstance(device_definition_identity, str):
+        # ``runtime_action_mappings`` 是仅供本地 ROS 传输使用的动作合同副本；
+        # 内部通用命令端点不会反向污染包目录（Package Catalog）的公开投影。
+        runtime_action_mappings = build_runtime_action_mappings(
+            activation.action_value_mappings
+        )
         # 不管是ros2的实例，还是python的，都必须包一次，除了HostNode
         wrapped_driver = ros2_device_node(
             activation.driver_class,
             status_types=activation.status_types,
             device_config=device_config,
-            action_value_mappings=activation.action_value_mappings,
+            action_value_mappings=runtime_action_mappings,
             hardware_interface=activation.hardware_interface,
         )
         try:
