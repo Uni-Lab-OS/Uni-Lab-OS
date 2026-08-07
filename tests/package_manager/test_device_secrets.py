@@ -206,7 +206,7 @@ def test_device_initialization_resolves_secret_only_for_driver_constructor(
     )
 
     result = initialize_device_module.initialize_device_from_dict(
-        "local-pump-1",
+        "local_pump_1",
         resource,
     )
 

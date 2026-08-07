@@ -161,7 +161,7 @@ def _stage_kwargs(
         "working_dir": working_dir,
         "cache_key": cache_key,
         "definition_fqid": _DEFINITION_FQID,
-        "instance_id": "local-pump-1",
+        "instance_id": "local_pump_1",
         "instance_uuid": _INSTANCE_UUID,
         "display_name": "Local Pump 1",
         "configuration": {"endpoint": "serial:///dev/ttyUSB0"},
@@ -179,7 +179,7 @@ def test_stage_device_instance_preserves_graph_and_writes_recoverable_backup(
     result = stage_device_instance(**_stage_kwargs(graph_path, working_dir, cache_key))
 
     graph = json.loads(graph_path.read_text(encoding="utf-8"))
-    added = next(node for node in graph["nodes"] if node["id"] == "local-pump-1")
+    added = next(node for node in graph["nodes"] if node["id"] == "local_pump_1")
     assert result.status == "graph_staged"
     assert result.changed is True
     assert result.graph_fingerprint.startswith("sha256:")
@@ -192,6 +192,27 @@ def test_stage_device_instance_preserves_graph_and_writes_recoverable_backup(
         "retries": 3,
     }
     assert added["extra"]["unilab"]["package_cache_key"] == cache_key
+
+
+def test_stage_device_instance_rejects_non_ros_instance_id_before_graph_write(
+    tmp_path: Path,
+) -> None:
+    """含横线的实例 ID 必须在写图前失败关闭，避免 Edge 永远无法加载节点。
+
+    ``tmp_path`` 提供隔离设备包缓存和设备图；函数返回 ``None``，并证明失败
+    不会创建备份或改变原始设备图字节。
+    """
+
+    cache_key, working_dir = _cache_device_package(tmp_path)
+    graph_path, original = _write_graph(tmp_path)
+    request = _stage_kwargs(graph_path, working_dir, cache_key)
+    request["instance_id"] = "szlab_mock-mock_s08_cap_station"
+
+    with pytest.raises(DeviceProvisioningError, match="ROS 2"):
+        stage_device_instance(**request)
+
+    assert graph_path.read_bytes() == original
+    assert list(tmp_path.glob("*.unilab-backup-*.json")) == []
 
 
 def test_stage_device_instance_writes_secret_reference_instead_of_password(
@@ -214,7 +235,7 @@ def test_stage_device_instance_writes_secret_reference_instead_of_password(
 
     graph_bytes = graph_path.read_bytes()
     graph = json.loads(graph_bytes)
-    added = next(node for node in graph["nodes"] if node["id"] == "local-pump-1")
+    added = next(node for node in graph["nodes"] if node["id"] == "local_pump_1")
     assert b"device-password" not in graph_bytes
     assert added["config"]["password"] == {
         "$unilab_secret": {
@@ -308,9 +329,7 @@ def test_graph_activation_deduplicates_identical_workspace_and_cached_catalog(
     """
 
     cache_key, working_dir = _cache_device_package(tmp_path)
-    workspace_catalog = compile_package_source(
-        WorkspaceSource(tmp_path / "workspace")
-    )
+    workspace_catalog = compile_package_source(WorkspaceSource(tmp_path / "workspace"))
     graph = {
         "nodes": [
             {
@@ -349,9 +368,7 @@ def test_graph_activation_rejects_conflicting_workspace_and_cached_catalog(
         ),
         encoding="utf-8",
     )
-    workspace_catalog = compile_package_source(
-        WorkspaceSource(tmp_path / "workspace")
-    )
+    workspace_catalog = compile_package_source(WorkspaceSource(tmp_path / "workspace"))
     graph = {
         "nodes": [
             {
@@ -448,7 +465,7 @@ def test_update_remove_and_restore_device_instance_are_explicit_and_atomic(
     assert updated.changed is True
     updated_graph = json.loads(graph_path.read_text(encoding="utf-8"))
     updated_node = next(
-        node for node in updated_graph["nodes"] if node["id"] == "local-pump-1"
+        node for node in updated_graph["nodes"] if node["id"] == "local_pump_1"
     )
     assert updated_node["uuid"] == _INSTANCE_UUID
     assert updated_node["name"] == "Renamed Local Pump"
@@ -456,12 +473,12 @@ def test_update_remove_and_restore_device_instance_are_explicit_and_atomic(
 
     removed = remove_device_instance(
         graph_path=graph_path,
-        instance_id="local-pump-1",
+        instance_id="local_pump_1",
         instance_uuid=_INSTANCE_UUID,
     )
     assert removed.changed is True
     assert all(
-        node["id"] != "local-pump-1"
+        node["id"] != "local_pump_1"
         for node in json.loads(graph_path.read_text(encoding="utf-8"))["nodes"]
     )
 
@@ -482,13 +499,13 @@ def test_package_add_device_cli_explicitly_adopts_uuidless_legacy_instance(
     graph_path, _ = _write_graph(tmp_path)
     # 遗留节点身份为空，但其既有拓扑、运行数据与部署扩展都必须继续有效。
     legacy_graph = json.loads(graph_path.read_text(encoding="utf-8"))
-    legacy_graph["nodes"][0]["children"] = ["local-pump-1"]
+    legacy_graph["nodes"][0]["children"] = ["local_pump_1"]
     legacy_graph["links"].append(
-        {"source": "existing-device", "target": "local-pump-1", "type": "owns"}
+        {"source": "existing-device", "target": "local_pump_1", "type": "owns"}
     )
     legacy_graph["nodes"].append(
         {
-            "id": "local-pump-1",
+            "id": "local_pump_1",
             "name": "Legacy Pump",
             "children": [],
             "parent": "existing-device",
@@ -523,7 +540,7 @@ def test_package_add_device_cli_explicitly_adopts_uuidless_legacy_instance(
                 "--definition-fqid",
                 _DEFINITION_FQID,
                 "--instance-id",
-                "local-pump-1",
+                "local_pump_1",
                 "--instance-uuid",
                 _INSTANCE_UUID,
                 "--adopt-existing",
@@ -554,7 +571,7 @@ def test_package_add_device_cli_explicitly_adopts_uuidless_legacy_instance(
     assert json.loads(output.getvalue())["status"] == "graph_staged"
     adopted_graph = json.loads(graph_path.read_text(encoding="utf-8"))
     adopted = next(
-        node for node in adopted_graph["nodes"] if node["id"] == "local-pump-1"
+        node for node in adopted_graph["nodes"] if node["id"] == "local_pump_1"
     )
     assert adopted["uuid"] == _INSTANCE_UUID
     assert adopted["parent"] == "existing-device"
@@ -562,10 +579,10 @@ def test_package_add_device_cli_explicitly_adopts_uuidless_legacy_instance(
     assert adopted["data"] == {"status": "Idle"}
     assert adopted["extra"]["legacy_marker"] == "preserve-me"
     assert adopted["extra"]["unilab"]["package_cache_key"] == cache_key
-    assert adopted_graph["nodes"][0]["children"] == ["local-pump-1"]
+    assert adopted_graph["nodes"][0]["children"] == ["local_pump_1"]
     assert adopted_graph["links"][-1] == {
         "source": "existing-device",
-        "target": "local-pump-1",
+        "target": "local_pump_1",
         "type": "owns",
     }
     adopted_bytes = graph_path.read_bytes()
