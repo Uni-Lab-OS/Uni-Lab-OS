@@ -220,7 +220,11 @@ def test_json_command_preserves_device_root_skipped_by_plr_projection(
 
 
 def test_async_resource_conversion_preserves_device_root_skipped_by_plr_projection() -> None:
-    """异步 Host 动作也必须保留设备型库位父资源的原始映射。"""
+    """异步 Host 动作也必须保留设备型库位父资源的原始映射。
+
+    参数：无。返回：无；断言无父资源的设备引用仍走一次查询，并由既有设备根
+    映射返回稳定引用，不误触发物料父上下文补查。
+    """
 
     device_uuid = "50000000-0000-4000-8000-000000000007"
     raw_device = {
@@ -238,11 +242,18 @@ def test_async_resource_conversion_preserves_device_root_skipped_by_plr_projecti
     )
     tree_set = SimpleNamespace(
         trees=[SimpleNamespace(root_node=SimpleNamespace(res_content=device_content))],
-        to_plr_resources=lambda: [],
+        dump=lambda: [[raw_device]],
+        to_plr_resources=list,
     )
     node = object.__new__(BaseROS2DeviceNode)
 
-    async def get_resource(*_args, **_kwargs):
+    async def get_resource(*_args: object, **_kwargs: object) -> SimpleNamespace:
+        """返回无父资源的设备根查询夹具。
+
+        参数说明：位置参数和命名参数承接既有资源查询签名。返回：带 ``dump``
+        能力的设备资源树集合。
+        """
+
         return tree_set
 
     node.get_resource = get_resource

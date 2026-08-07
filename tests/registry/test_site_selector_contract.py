@@ -13,6 +13,7 @@ from unilabos.registry.action_contract_schema import (
     parse_action_contract,
 )
 from unilabos.registry.action_template_projection import (
+    ActionTemplateProjectionError,
     compile_action_template_handles,
 )
 from unilabos.registry.annotations import SiteSelector
@@ -297,3 +298,93 @@ def test_action_template_handle_projects_complete_site_selector_metadata() -> No
         site_handle["meta_data"]["unilab"]["value_schema"]["x-unilabos-site-selector"]
         == site_handle["meta_data"]["unilab"]["site_selector"]
     )
+
+
+@pytest.mark.parametrize(
+    ("field_name", "schema_change", "message"),
+    [
+        pytest.param(
+            "site",
+            {"x-unilabos-site-selector": None},
+            "库位选择控件缺少完整库位选择合同",
+            id="missing-site-selector-contract",
+        ),
+        pytest.param(
+            "site",
+            {"x-unilabos-site-selector": "warehouse"},
+            "库位选择控件缺少完整库位选择合同",
+            id="non-object-site-selector-contract",
+        ),
+        pytest.param(
+            "site",
+            {
+                "x-unilabos-editor-control": "variable_selector",
+                "x-unilabos-site-selector": {
+                    "version": 1,
+                    "owner": "warehouse",
+                    "occupant": None,
+                    "show_occupied": True,
+                    "allow_occupied": False,
+                },
+            },
+            "非库位选择控件不能携带库位选择合同",
+            id="extension-on-non-site-control",
+        ),
+        pytest.param(
+            "warehouse",
+            {
+                "x-unilabos-editor-control": "site_selector",
+                "x-unilabos-site-selector": {
+                    "version": 1,
+                    "owner": "warehouse",
+                    "occupant": None,
+                    "show_occupied": True,
+                    "allow_occupied": False,
+                },
+            },
+            "非库位选择控件不能携带库位选择合同",
+            id="extension-on-material-port",
+        ),
+    ],
+)
+def test_action_template_projection_rejects_invalid_site_selector_extensions(
+    field_name: str,
+    schema_change: dict[str, object],
+    message: str,
+) -> None:
+    """连接点投影必须对不完整或错位的库位选择合同失败关闭。
+
+    参数说明：``field_name`` 选择待篡改字段；``schema_change`` 构造库位选择
+    （Site Selection）扩展反例；``message`` 是稳定中文合同错误。返回：无；断言
+    投影器不降级或猜测。
+    """
+
+    contract = _parse_action(
+        """
+        from typing import Annotated
+        from unilabos.registry.annotations import SiteSelector
+        from unilabos.registry.placeholder_type import ResourceSlot
+
+        def action(
+            warehouse: ResourceSlot,
+            site: Annotated[str, SiteSelector(owner="warehouse")],
+        ) -> None:
+            pass
+        """
+    )
+    # ``action_schema`` 是待投影的规范动作合同副本。
+    action_schema = contract.to_action_schema(action_name="action")
+    # ``field_schema`` 是本轮待篡改的库位或物料字段模式。
+    field_schema = action_schema["properties"]["goal"]["properties"][field_name]
+    for key, value in schema_change.items():
+        if value is None:
+            field_schema.pop(key, None)
+        else:
+            field_schema[key] = value
+
+    with pytest.raises(ActionTemplateProjectionError, match=message):
+        compile_action_template_handles(
+            action_schema,
+            node_business_key=("owner-template", "action"),
+            resource_template_identity_resolver=None,
+        )

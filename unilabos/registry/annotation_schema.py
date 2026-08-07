@@ -607,7 +607,17 @@ def parse_parameter_annotation(
     doc_description: str | None = None,
     allow_material_lock: bool = False,
 ) -> ParsedParameter:
-    """把一个源码参数静态解析为 canonical v1 contract。"""
+    """把一个源码参数静态解析为规范第 1 版输入合同。
+
+    参数说明：``name`` 是参数名；``annotation`` 是不执行的类型注解 AST；
+    ``default`` 是默认值 AST 或 ``NO_DEFAULT``；``imports`` 是可信导入绑定；
+    ``doc_title``/``doc_description`` 是文档注释展示信息；
+    ``allow_material_lock`` 决定是否允许输入侧物料锁与库位选择元数据。返回：解析器
+    签发的不可变参数合同。
+
+    异常说明：注解、默认值、导入、展示文本或规范输入合同非法时抛出
+    ``AnnotationSchemaError``，且不执行任何作者代码。
+    """
 
     if not isinstance(annotation, ast.expr):
         _fail("/annotation")
@@ -668,7 +678,15 @@ def parse_result_annotation(
     *,
     imports: Mapping[str, str],
 ) -> ParsedResult:
-    """把一个源码结果字段静态解析为 canonical v1 output。"""
+    """把一个源码结果字段静态解析为规范第 1 版输出合同。
+
+    参数说明：``name`` 是输出字段名；``annotation`` 是不执行的类型注解 AST；
+    ``imports`` 是可信导入绑定。返回：解析器签发的不可变输出合同；输出侧不接受
+    物料锁或库位选择（Site Selection）元数据。
+
+    异常说明：注解、导入或规范输出合同非法时抛出
+    ``AnnotationSchemaError``，且不执行任何作者代码。
+    """
 
     if not isinstance(annotation, ast.expr):
         _fail("/annotation")

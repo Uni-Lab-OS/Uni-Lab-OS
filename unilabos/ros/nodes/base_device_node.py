@@ -46,6 +46,12 @@ from unilabos.registry.action_policy import (
     resolve_error_options,
 )
 from unilabos.registry.placeholder_type import ResourceSlotRawInput
+from unilabos.ros.nodes.resource_slot_hydration import (
+    hydrate_resource_slot_nodes_sync,
+    hydrate_resource_slot_tree_async,
+    query_resource_nodes_sync,
+    resolve_resource_slot_target,
+)
 from unilabos.utils.decorator import get_all_subscriptions
 
 from unilabos.resources.container import RegularContainer
@@ -3077,46 +3083,35 @@ class BaseROS2DeviceNode(Node, Generic[T]):
             )
 
     def _convert_resources_sync(self, *uuids: str) -> List["ResourcePLR"]:
-        """同步转换资源 UUID 为实例
+        """同步把资源 UUID 转换为驱动可用实例。
 
-        Args:
-            *uuids: 一个或多个资源 UUID
+        参数说明：``uuids`` 是一个或多个物料（Material）或资源稳定 UUID；单个
+        物料占位符（ResourceSlot）若声明 ``parent_uuid``，会再查询完整父资源树。
+        返回：与输入 UUID 顺序一致的资源实例列表。
 
-        Returns:
-            单个 UUID 时返回单个资源实例，多个 UUID 时返回资源实例列表
+        异常说明：查询超时、返回空树、父上下文不唯一或冲突、资源无法唯一映射时
+        抛出异常；父上下文错误必须失败关闭。
         """
         if not uuids:
             raise ValueError("至少需要提供一个 UUID")
 
         uuids_list = list(uuids)
-        future: Future = self._resource_clients["c2s_update_resource_tree"].call_async(
-            SerialCommand.Request(
-                command=json.dumps(
-                    {
-                        "data": {"data": uuids_list, "with_children": True},
-                        "action": "get",
-                    }
-                )
-            )
+        resource_client = self._resource_clients["c2s_update_resource_tree"]
+        raw_data = query_resource_nodes_sync(
+            resource_client,
+            uuids_list,
+            request_factory=SerialCommand.Request,
         )
-
-        # 等待结果（使用while循环，每次sleep 0.05秒，最多等待30秒）
-        timeout = 30.0
-        elapsed = 0.0
-        while not future.done() and elapsed < timeout:
-            time.sleep(0.02)
-            elapsed += 0.02
-
-        if not future.done():
-            raise Exception(f"资源查询超时: {uuids_list}")
-
-        response = future.result()
-        if response is None:
-            raise Exception(f"资源查询返回空结果: {uuids_list}")
-
-        raw_data = json.loads(response.response)
-        if not raw_data:
-            raise Exception(f"资源原始查询返回空结果: {raw_data}")
+        if len(uuids_list) == 1:
+            raw_data = hydrate_resource_slot_nodes_sync(
+                uuids_list[0],
+                raw_data,
+                query_nodes=lambda query_uuids: query_resource_nodes_sync(
+                    resource_client,
+                    query_uuids,
+                    request_factory=SerialCommand.Request,
+                ),
+            )
 
         # 转换为 PLR 资源
         tree_set = ResourceTreeSet.from_raw_dict_list(raw_data)
@@ -3326,23 +3321,42 @@ class BaseROS2DeviceNode(Node, Generic[T]):
             )
 
     async def _convert_resource_async(self, resource_data: "ResourceDictType"):
-        """异步转换 ResourceDictType 为 PLR 实例，优先用 uuid 查询"""
+        """异步把物料引用转换为驱动可用实例。
+
+        参数说明：``resource_data`` 是带稳定 ``uuid``/``unilabos_uuid`` 或本地
+        ``id`` 的物料引用；UUID 引用若声明父资源，会补查完整父树。返回：目标
+        物料实例，而不是承载它的父资源。
+
+        异常说明：身份缺失、父树不唯一或冲突、查询为空、目标物料无法唯一映射时
+        抛出 ``ValueError`` 或父上下文异常并失败关闭。
+        """
         unilabos_uuid = resource_data.get("uuid") or resource_data.get(
             "unilabos_uuid"
         )
 
         if unilabos_uuid:
-            resource_tree = await self.get_resource([unilabos_uuid], with_children=True)
+            # ``target_uuid`` 是普通动作实际引用的目标物料稳定身份。
+            target_uuid = str(unilabos_uuid)
+            resource_tree = await self.get_resource([target_uuid], with_children=True)
+            resource_tree, parent_context = await hydrate_resource_slot_tree_async(
+                target_uuid,
+                resource_tree,
+                query_tree=lambda parent_uuid: self.get_resource(
+                    [parent_uuid], with_children=True
+                ),
+            )
             plr_resources = resource_tree.to_plr_resources()
             if plr_resources:
                 plr_resource = plr_resources[0]
             else:
                 trees = resource_tree.trees
                 device_root = _device_root_mapping(trees[0]) if len(trees) == 1 else None
-                if device_root is None or _stable_resource_uuid(device_root) != str(unilabos_uuid):
+                if device_root is None or _stable_resource_uuid(device_root) != target_uuid:
                     raise ValueError(f"通过 uuid={unilabos_uuid} 查询资源为空")
                 return device_root
         else:
+            parent_context = None
+            target_uuid = None
             res_id = resource_data.get("id") or resource_data.get("name", "")
             if not res_id:
                 raise ValueError(f"资源数据缺少 uuid 和 id: {list(resource_data.keys())}")
@@ -3352,11 +3366,20 @@ class BaseROS2DeviceNode(Node, Generic[T]):
         res = self.resource_tracker.figure_resource(plr_resource, try_mode=True)
         if len(res) == 0:
             self.lab_logger().warning(f"资源转换未能索引到实例: {resource_data.get('id', '?')}，返回新建实例")
-            return plr_resource
+            resolved_resource = plr_resource
         elif len(res) == 1:
-            return res[0]
+            resolved_resource = res[0]
         else:
             raise ValueError(f"资源转换得到多个实例: {res}")
+
+        if parent_context is None or parent_context.parent_uuid is None:
+            return resolved_resource
+        return resolve_resource_slot_target(
+            target_uuid,
+            source_root=plr_resource,
+            resolved_root=resolved_resource,
+            resource_tracker=self.resource_tracker,
+        )
 
     # 异步上下文管理方法
     async def __aenter__(self):
