@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import json
 from pathlib import Path
 from typing import Any
 
@@ -241,6 +242,37 @@ def test_registry_projects_one_stable_material_source_framework_template(
         framework_uuid
     )
     restarted.close()
+
+
+def test_material_source_framework_projects_site_selector_contract(
+    tmp_path: Path,
+) -> None:
+    """物料来源（MaterialSource）必须发布与普通动作相同的库位选择合同。
+
+    参数说明：``tmp_path`` 隔离模板投影 SQLite。返回：无；断言 ``site`` 以
+    ``mount`` 为 owner，并用 ``resource_template_uuid`` 提供待选物料模板，前端
+    不需把框架节点伪装成普通动作或按字段名猜测。
+    """
+
+    projection = _projection(tmp_path / "workflow_history.db")
+    try:
+        source = projection.refresh(_Registry()).require_material_source()
+        # ``template_schema`` 是物料来源参数界面消费的规范框架模式。
+        template_schema = json.loads(source.template["schema"])
+    finally:
+        projection.close()
+
+    expected_selector = {
+        "version": 1,
+        "owner": "mount",
+        "occupant": "resource_template_uuid",
+        "show_occupied": True,
+        "allow_occupied": False,
+    }
+    assert (
+        template_schema["properties"]["site"]["x-unilabos-site-selector"]
+        == expected_selector
+    )
 
 
 def test_registry_projects_one_stable_group_framework_template(tmp_path: Path) -> None:

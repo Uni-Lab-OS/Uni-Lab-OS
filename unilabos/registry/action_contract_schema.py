@@ -22,6 +22,11 @@ from unilabos.registry.module_scope import (
     ModuleScopeError,
     resolve_module_scope,
 )
+from unilabos.registry.site_selector_schema import (
+    ParsedSiteSelector,
+    SiteSelectorSchemaError,
+    validate_site_selector_relations,
+)
 from unilabos.registry.utils import parse_docstring
 from unilabos.workflow.json_codec import strict_json_equal
 from unilabos.workflow.schema import (
@@ -71,6 +76,7 @@ class ParsedActionContract:
         ...,
     ]
     input_material_lock_free: tuple[str, ...]
+    input_site_selectors: tuple[tuple[str, ParsedSiteSelector], ...]
     output_resource_templates: tuple[
         tuple[str, tuple[ResourceTemplateSymbol, ...]],
         ...,
@@ -93,9 +99,18 @@ class ParsedActionContract:
             ...,
         ],
         input_material_lock_free: tuple[str, ...],
+        input_site_selectors: tuple[tuple[str, ParsedSiteSelector], ...],
         *,
         token: object,
     ) -> Self:
+        """仅供解析器组合规范动作合同（Action Contract）。
+
+        参数说明：输入/输出合同保存工作流值；两组资源模板符号保存静态兼容约束；
+        ``input_material_lock_free`` 保存显式免锁输入；``input_site_selectors`` 保存
+        已完成跨字段验证的库位选择器（SiteSelector）关系；``token`` 防止外部构造
+        未验证对象。返回：不可变动作合同。异常：令牌不匹配时抛出 ``TypeError``。
+        """
+
         if token is not _PARSED_ACTION_CONTRACT_TOKEN:
             raise TypeError("ParsedActionContract 只能由模块内 parser 创建")
         contract = object.__new__(cls)
@@ -116,6 +131,7 @@ class ParsedActionContract:
             "input_material_lock_free",
             input_material_lock_free,
         )
+        object.__setattr__(contract, "input_site_selectors", input_site_selectors)
         return contract
 
     def to_dict(self) -> dict[str, Any]:
@@ -144,6 +160,7 @@ class ParsedActionContract:
         outputs = descriptor["output_contract"]["outputs"]
         goal_properties: dict[str, Any] = {}
         required_inputs: list[str] = []
+        site_selectors = dict(self.input_site_selectors)
         for parameter in inputs:
             name = parameter["name"]
             material_lock = None
@@ -153,6 +170,11 @@ class ParsedActionContract:
                 parameter["schema"],
                 material_lock=material_lock,
             )
+            site_selector = site_selectors.get(name)
+            if site_selector is not None:
+                field["format"] = "uuid"
+                field["x-unilabos-editor-control"] = "site_selector"
+                field["x-unilabos-site-selector"] = site_selector.to_extension()
             if "default" in parameter:
                 field["default"] = parameter["default"]
             for key in ("title", "description"):
@@ -643,7 +665,16 @@ def _parse_parameters(
     WorkflowInputContract,
     tuple[tuple[str, tuple[ResourceTemplateSymbol, ...]], ...],
     tuple[str, ...],
+    tuple[tuple[str, ParsedSiteSelector], ...],
 ]:
+    """解析动作全部输入并完成跨字段关系验证。
+
+    参数说明：``action`` 是真实定义模块中的动作函数；``is_method`` 决定是否忽略
+    receiver；``imports`` 是静态导入身份表。返回：规范输入合同、资源模板符号、
+    免物料锁字段及库位选择器（SiteSelector）关系。异常：字段注解、默认值或
+    owner/occupant 关系非法时抛出 ``ActionContractError``。
+    """
+
     arguments = getattr(action, "args", None)
     if not isinstance(arguments, ast.arguments):
         _fail("/parameters")
@@ -696,6 +727,7 @@ def _parse_parameters(
     descriptors: list[dict[str, Any]] = []
     resource_templates: list[tuple[str, tuple[ResourceTemplateSymbol, ...]]] = []
     material_lock_free: list[str] = []
+    site_selectors: list[tuple[str, ParsedSiteSelector]] = []
     seen_names: set[str] = set()
     first_positional = all_positional[0] if all_positional else None
     for argument, default in scheduled:
@@ -741,6 +773,13 @@ def _parse_parameters(
         resource_templates.append((name, parsed.resource_templates))
         if parsed.material_lock_free:
             material_lock_free.append(name)
+        if parsed.site_selector is not None:
+            site_selectors.append((name, parsed.site_selector))
+
+    try:
+        validate_site_selector_relations(descriptors, site_selectors)
+    except SiteSelectorSchemaError as error:
+        _fail(error.path, code="invalid_annotation", message=error.message)
 
     try:
         contract = parse_input_contract({"version": 1, "parameters": descriptors})
@@ -750,7 +789,12 @@ def _parse_parameters(
             code="invalid_schema",
             message=error.message,
         )
-    return contract, tuple(resource_templates), tuple(material_lock_free)
+    return (
+        contract,
+        tuple(resource_templates),
+        tuple(material_lock_free),
+        tuple(site_selectors),
+    )
 
 
 def _parse_results(
@@ -866,7 +910,12 @@ def parse_action_contract(
         _fail("/module")
 
     is_method = _action_context(module, action)
-    input_contract, input_templates, input_material_lock_free = _parse_parameters(
+    (
+        input_contract,
+        input_templates,
+        input_material_lock_free,
+        input_site_selectors,
+    ) = _parse_parameters(
         action,
         is_method=is_method,
         imports=scope.annotation_bindings,
@@ -882,6 +931,7 @@ def parse_action_contract(
         input_templates,
         output_templates,
         input_material_lock_free,
+        input_site_selectors,
         token=_PARSED_ACTION_CONTRACT_TOKEN,
     )
 

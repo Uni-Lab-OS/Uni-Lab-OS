@@ -530,10 +530,36 @@ class RegistryTemplateProjection:
         （ResourceTemplate）的稳定身份；``resource_name`` 与
         ``resource_display_name`` 用于 HTTP 资源摘要。返回：一个物料来源
         （MaterialSource）框架节点和一个 source 物料占位符（ResourceSlot）；
-        稳定 UUID 由持久投影按业务唯一键复用或首次分配。
+        节点 Schema 另行发布物料来源专用库位选择器（SiteSelector）字段，稳定
+        UUID 由持久投影按业务唯一键复用或首次分配。
         """
 
         node_business_key = (resource_template_uuid, "material_source")
+        # ``site_selector`` 与普通动作使用同一扩展形状；物料来源（MaterialSource）
+        # 的 occupant 是资源模板字段，而不是尚未准入产生的具体物料占位符。
+        site_selector = {
+            "version": 1,
+            "owner": "mount",
+            "occupant": "resource_template_uuid",
+            "show_occupied": True,
+            "allow_occupied": False,
+        }
+        # ``mount_schema`` 是拥有候选库位（Site）的部署物料稳定引用。
+        mount_schema = {
+            "type": "object",
+            "properties": {
+                "uuid": {"type": "string", "format": "uuid"},
+            },
+            "required": ["uuid"],
+            "additionalProperties": False,
+        }
+        # ``site_schema`` 表达可选精确候选库位；省略仍表示全部兼容直接库位。
+        site_schema = {
+            "type": ["string", "null"],
+            "format": "uuid",
+            "x-unilabos-editor-control": "site_selector",
+            "x-unilabos-site-selector": dict(site_selector),
+        }
         node = {
             "resource_template_uuid": resource_template_uuid,
             "name": "material_source",
@@ -544,7 +570,50 @@ class RegistryTemplateProjection:
             "goal_default": {},
             "feedback": {},
             "result": {},
-            "schema": None,
+            "schema": {
+                "type": "object",
+                "properties": {
+                    "mode": {
+                        "type": "string",
+                        "enum": ["existing", "create_new"],
+                    },
+                    "resource_template_uuid": {
+                        "type": "string",
+                        "format": "uuid",
+                    },
+                    "mount": mount_schema,
+                    "material_uuid": {
+                        "type": ["string", "null"],
+                        "format": "uuid",
+                    },
+                    "site": site_schema,
+                    "slot_range": {
+                        "type": ["array", "null"],
+                        "items": {"type": "string", "format": "uuid"},
+                        "minItems": 1,
+                        "uniqueItems": True,
+                    },
+                    "flow_role": {
+                        "type": "string",
+                        "enum": [
+                            "primary_sample",
+                            "aliquot_sample",
+                            "reagent",
+                            "consumable",
+                        ],
+                    },
+                },
+                "required": [
+                    "mode",
+                    "resource_template_uuid",
+                    "mount",
+                    "material_uuid",
+                    "site",
+                    "slot_range",
+                    "flow_role",
+                ],
+                "additionalProperties": False,
+            },
             "type": "material_source",
             "node_type": "material_source",
             "meta_data": {
