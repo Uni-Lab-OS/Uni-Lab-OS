@@ -75,13 +75,13 @@ def resolve_addr(addr: str) -> str:
 
     支持别名：
       test  → https://leap-lab.test.bohrium.com/api/v1
-      uat   → https://leap-lab.uat.bohrium.com/api/v1
+      uat   → https://uni-lab.uat.bohrium.com/api/v1
       local → http://127.0.0.1:48197/api/v1
       其他  → 直接作为 URL 使用
     """
     aliases = {
         "test": "https://leap-lab.test.bohrium.com/api/v1",
-        "uat": "https://leap-lab.uat.bohrium.com/api/v1",
+        "uat": "https://uni-lab.uat.bohrium.com/api/v1",
         "local": "http://127.0.0.1:48197/api/v1",
         "prod": DEFAULT_BASE_URL,
     }

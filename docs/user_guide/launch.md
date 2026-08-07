@@ -68,7 +68,7 @@ Uni-Lab 的启动过程分为以下几个阶段：
 支持多种后端环境：
 
 - `--addr test`：测试环境 (`https://leap-lab.test.bohrium.com/api/v1`)
-- `--addr uat`：UAT 环境 (`https://leap-lab.uat.bohrium.com/api/v1`)
+- `--addr uat`：UAT 环境 (`https://uni-lab.uat.bohrium.com/api/v1`)
 - `--addr local`：本地环境 (`http://127.0.0.1:48197/api/v1`)
 - 自定义地址：直接指定完整 URL
 
