@@ -23,7 +23,7 @@ from .device_package import (
 )
 from .device_secrets import DeviceSecretError, protect_device_configuration
 
-_INSTANCE_ID = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_.-]{0,127}$")
+_INSTANCE_ID = re.compile(r"^[A-Za-z_][A-Za-z0-9_]{0,127}$")
 
 
 class DeviceProvisioningError(RuntimeError):
@@ -246,7 +246,8 @@ def _write_device_instance(
 
     if not _INSTANCE_ID.fullmatch(instance_id):
         raise DeviceProvisioningError(
-            "设备实例 ID 只能包含字母、数字、点、横线和下划线"
+            "设备实例 ID 不符合 ROS 2 节点名规则：必须以字母或下划线开头，"
+            "且只能包含字母、数字和下划线（最多 128 字符）"
         )
     normalized_name = display_name.strip()
     if not normalized_name or len(normalized_name) > 200:
