@@ -59,10 +59,10 @@ def project_device_catalog(
         items.append(
             {
                 "id": device_id,
+                "materialUuid": str(raw.get("uuid") or ""),
                 "deviceTypeId": device_type_id,
                 "deviceKey": str(
-                    online_fact.get("device_key")
-                    or f"/devices/{device_id}/{device_id}"
+                    online_fact.get("device_key") or f"/devices/{device_id}/{device_id}"
                 ),
                 "namespace": str(
                     online_fact.get("namespace") or f"/devices/{device_id}"
