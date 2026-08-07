@@ -4,30 +4,34 @@ API模块
 提供API路由和处理函数
 """
 
-from fastapi import APIRouter, WebSocket, WebSocketDisconnect
 import asyncio
 
 import yaml
+from fastapi import APIRouter, WebSocket, WebSocketDisconnect
 
-from unilabos.app.web.controller import (
-    devices,
-    job_add,
-    job_info,
-    get_online_devices,
-    get_device_actions,
-    get_action_schema,
-    get_all_available_actions,
-)
 from unilabos.app.model import (
+    JobAddReq,
+    JobAddResp,
+    JobData,
+    JobStatusResp,
     Resp,
     RespCode,
-    JobStatusResp,
-    JobAddResp,
-    JobAddReq,
-    JobData,
 )
-from unilabos.app.web.utils.host_utils import get_host_node_info
+from unilabos.app.scheduler.integration import get_inventory_service
+from unilabos.app.scheduler.inventory.resource_reference import (
+    build_inventory_resource_reference_resolver,
+)
+from unilabos.app.web.controller import (
+    devices,
+    get_action_schema,
+    get_all_available_actions,
+    get_device_actions,
+    get_online_devices,
+    job_add,
+    job_info,
+)
 from unilabos.app.web.device_catalog import project_device_catalog
+from unilabos.app.web.utils.host_utils import get_host_node_info
 from unilabos.registry.registry import lab_registry
 from unilabos.utils.type_check import NoAliasDumper
 
@@ -1247,11 +1251,21 @@ def get_devices():
         if online_ok and isinstance(online_data, dict)
         else {}
     )
+    # ``material_identity_resolver`` 是当前进程唯一库存权威提供的稳定身份端口；
+    # 库存尚未装配时设备目录仍可读取，但运行入口会因空 ``materialUuid`` 关闭失败。
+    inventory_service = get_inventory_service()
+    inventory_store = getattr(inventory_service, "store", None)
+    material_identity_resolver = (
+        build_inventory_resource_reference_resolver(inventory_store)
+        if inventory_store is not None
+        else lambda _device_id: None
+    )
     return Resp(
         data=project_device_catalog(
             resources=data,
             registry_devices=lab_registry.obtain_registry_device_info(),
             online_devices=online_devices,
+            material_identity_resolver=material_identity_resolver,
         )
     )
 

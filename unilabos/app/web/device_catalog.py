@@ -3,8 +3,10 @@
 from __future__ import annotations
 
 import time
-from collections.abc import Iterable, Mapping
+from collections.abc import Callable, Iterable, Mapping
 from typing import Any
+
+DeviceMaterialIdentityResolver = Callable[[str], Mapping[str, Any] | None]
 
 _INTERNAL_ACTIONS = {
     "_execute_driver_command",
@@ -30,14 +32,17 @@ def project_device_catalog(
     resources: Any,
     registry_devices: Iterable[Mapping[str, Any]],
     online_devices: Mapping[str, Any],
+    material_identity_resolver: DeviceMaterialIdentityResolver,
     generated_at: float | None = None,
 ) -> dict[str, Any]:
     """生成前端与 OS 共享的设备目录（Device Catalog）。
 
     参数说明：``resources`` 是 Host 持有的资源树集合，``registry_devices`` 是
     注册表设备类型合同，``online_devices`` 是 ROS 图当前在线实例；
-    ``generated_at`` 仅供确定性测试覆盖。返回按实例 ID 排序的目录，非设备资源
-    不进入结果；输入结构不可信时按空集合失败关闭。
+    ``material_identity_resolver`` 按部署设备 ID 从库存权威（Inventory Authority）
+    解析稳定设备物料（Material）身份；``generated_at`` 仅供确定性测试覆盖。
+    返回按实例 ID 排序的目录，非设备资源不进入结果；未解析到稳定物料身份时保留
+    空 ``materialUuid``，禁止把资源树运行时 UUID 冒充稳定身份。
     """
 
     registry = {
@@ -56,10 +61,16 @@ def project_device_catalog(
         online = online_devices.get(device_id)
         online_fact = online if isinstance(online, Mapping) else {}
         definition = registry.get(device_type_id, {})
+        material_identity = material_identity_resolver(device_id)
+        material_uuid = (
+            str(material_identity.get("uuid") or "")
+            if isinstance(material_identity, Mapping)
+            else ""
+        )
         items.append(
             {
                 "id": device_id,
-                "materialUuid": str(raw.get("uuid") or ""),
+                "materialUuid": material_uuid,
                 "deviceTypeId": device_type_id,
                 "deviceKey": str(
                     online_fact.get("device_key") or f"/devices/{device_id}/{device_id}"
@@ -164,4 +175,4 @@ def _contract(value: Any) -> dict[str, Any]:
     return dict(value) if isinstance(value, Mapping) else {}
 
 
-__all__ = ["project_device_catalog"]
+__all__ = ["DeviceMaterialIdentityResolver", "project_device_catalog"]
