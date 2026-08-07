@@ -83,12 +83,15 @@ def test_local_graph_does_not_request_legacy_remote_startup() -> None:
 def test_scheduler_database_paths_are_configurable() -> None:
     """证明显式数据库路径继续覆盖统一运行目录缺省值。
 
-    参数：无。返回：无；断言设备状态与工作流历史的显式运维配置保持兼容。
+    参数：无。返回：无；断言库存权威、设备状态与工作流历史的显式运维配置
+    保持兼容。
     """
 
     args = vars(
         parse_args().parse_args(
             [
+                "--material_db",
+                "/tmp/inventory.db",
                 "--device_state_db",
                 "/tmp/device-state.db",
                 "--workflow_history_db",
@@ -98,8 +101,28 @@ def test_scheduler_database_paths_are_configurable() -> None:
     )
     resolve_runtime_storage_paths(args, working_dir="/tmp/runtime")
 
+    assert args["edge_inventory_db"] == "/tmp/inventory.db"
     assert args["edge_device_state_db"] == "/tmp/device-state.db"
     assert args["edge_workflow_history_db"] == "/tmp/workflow-history.db"
+
+
+def test_scheduler_database_persistence_can_be_disabled() -> None:
+    """证明调度器投影数据库继续支持大小写不敏感的 ``off`` 关闭语义。
+
+    参数：无。返回：无；断言设备状态和工作流历史均可显式关闭落盘，而库存权威
+    仍使用统一运行目录中的默认文件。
+    """
+
+    args = vars(
+        parse_args().parse_args(
+            ["--device_state_db", "OFF", "--workflow_history_db", "off"]
+        )
+    )
+    resolve_runtime_storage_paths(args, working_dir="/tmp/runtime")
+
+    assert args["edge_inventory_db"] == "/tmp/runtime/inventory.db"
+    assert args["edge_device_state_db"] == "off"
+    assert args["edge_workflow_history_db"] == "off"
 
 
 def test_explicit_working_directory_is_the_only_local_runtime_storage_root(

@@ -28,11 +28,11 @@ options:
   --edge_scheduler      Enable the host Edge workflow scheduler (default).
   --no_edge_scheduler   Disable scheduler, device-state and workflow-history services.
   --edge_inventory_db EDGE_INVENTORY_DB, --material_db EDGE_INVENTORY_DB
-                        Host-only SQLite path (default: ~/.unilabos/inventory.db).
+                        Host-only SQLite path (default: <working_dir>/inventory.db).
   --edge_device_state_db EDGE_DEVICE_STATE_DB, --device_state_db EDGE_DEVICE_STATE_DB
-                        Device-state SQLite path (default: ~/.unilabos/device_state.db).
+                        Device-state SQLite path (default: <working_dir>/device_state.db).
   --edge_workflow_history_db EDGE_WORKFLOW_HISTORY_DB, --workflow_history_db EDGE_WORKFLOW_HISTORY_DB
-                        Workflow-history SQLite path (default: ~/.unilabos/workflow_history.db).
+                        Workflow-history SQLite path (default: <working_dir>/workflow_history.db).
   --is_slave            Run the backend as slave node (without host privileges).
   --hostlink_addr HOSTLINK_ADDR
                         Slave 连接的 Host 微后端或 Host 监听地址（默认端口 7302）。
@@ -123,9 +123,9 @@ unilab -g graph.json
 
 ```bash
 unilab -g graph.json \
-  --material_db ~/.unilabos/inventory.db \
-  --device_state_db ~/.unilabos/device_state.db \
-  --workflow_history_db ~/.unilabos/workflow_history.db
+  --material_db /data/unilabos-runtime/inventory.db \
+  --device_state_db /data/unilabos-runtime/device_state.db \
+  --workflow_history_db /data/unilabos-runtime/workflow_history.db
 ```
 
 仅在明确需要降级运行时使用 `--no_edge_scheduler`；这会同时关闭微前端的
@@ -141,7 +141,7 @@ unilab -g graph.json --material_source backend
 unilab -g graph.json --material_source auto
 
 # 物料微后端作为独立进程运行；Host 只通过 HTTP IPC 访问
-ULAB_INVENTORY_DB=~/.unilabos/inventory.db \
+ULAB_INVENTORY_DB=/data/unilabos-runtime/inventory.db \
 python -m unilabos.app.scheduler.main
 unilab -g graph.json --material_service_mode external \
   --material_microbackend_addr http://127.0.0.1:8092/api/v1

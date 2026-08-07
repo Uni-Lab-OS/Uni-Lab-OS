@@ -312,17 +312,21 @@ Host 微后端的 HostLink 处理器使用同一个 `HTTPClient.material_query()
 
 Host 默认启动完整 Edge 调度微后端，并在主进程中打开：
 
-- `~/.unilabos/inventory.db`
-- `~/.unilabos/device_state.db`
-- `~/.unilabos/workflow_history.db`
+- `<working_dir>/inventory.db`
+- `<working_dir>/device_state.db`
+- `<working_dir>/workflow_history.db`
+
+`working_dir` 是一次本地 Edge 环境的存储边界。切换资源图或实验环境时应使用对应
+的工作目录，避免不同环境共享库存权威（Inventory Authority）；显式数据库参数仍可
+覆盖默认值，但不会再自动继承用户级 `~/.unilabos/*.db`。
 
 因此微前端直连 Host `:8002` 时默认就能读取调度、物料实体、设备状态和
 工作流历史。推荐通过 UniLabOS 启动参数切换：
 
 ```bash
 # 默认等价形式：Host 内嵌微后端
-unilab -g graph.json --material_source microbackend \
-  --material_service_mode embedded --material_db ~/.unilabos/inventory.db
+unilab -g graph.json --working_dir ./runtime \
+  --material_source microbackend --material_service_mode embedded
 
 # 正式后端 / 自动回源
 unilab -g graph.json --material_source backend
@@ -341,7 +345,7 @@ unilab -g graph.json \
 也可把仓储作为 scheduler 独立进程，通过 HTTP 做进程间通信：
 
 ```bash
-ULAB_INVENTORY_DB=~/.unilabos/inventory.db \
+ULAB_INVENTORY_DB=/data/unilabos-runtime/inventory.db \
 python -m unilabos.app.scheduler.main
 
 unilab -g graph.json --material_source microbackend \
