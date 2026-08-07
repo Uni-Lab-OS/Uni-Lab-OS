@@ -3008,6 +3008,41 @@ class BaseROS2DeviceNode(Node, Generic[T]):
 
             # 处理参数（包含 unilabos 系统参数如 sample_uuids）
             args_list = default_manager._analyze_method_signature(function, skip_unilabos_params=False)["args"]
+            # ``shared_slot_references`` 把同一动作中的单物料 UUID 收集到一次查询，
+            # 使子物料与父载架由同一棵 PLR 对象树装配。
+            shared_slot_references: list[tuple[str, str]] = []
+            for analyzed_arg in args_list:
+                analyzed_name = analyzed_arg["name"]
+                if not _is_resource_slot_arg_type(analyzed_arg["type"]):
+                    continue
+                raw_reference = function_args.get(analyzed_name)
+                if not isinstance(raw_reference, dict):
+                    continue
+                reference_uuid = raw_reference.get("uuid") or raw_reference.get(
+                    "unilabos_uuid"
+                )
+                if reference_uuid:
+                    shared_slot_references.append(
+                        (analyzed_name, str(reference_uuid))
+                    )
+            if len(shared_slot_references) > 1:
+                try:
+                    # ``shared_resources`` 与稳定 UUID 顺序一致，且共享父子实例。
+                    shared_resources = self._convert_resources_sync(
+                        *(reference_uuid for _, reference_uuid in shared_slot_references)
+                    )
+                    if len(shared_resources) != len(shared_slot_references):
+                        raise ValueError("批量物料转换结果数量与请求不一致")
+                    for (argument_name, _), resource in zip(
+                        shared_slot_references,
+                        shared_resources,
+                    ):
+                        function_args[argument_name] = resource
+                except Exception as error:
+                    self.lab_logger().error(
+                        f"批量转换ResourceSlot参数失败: {error}\n{traceback.format_exc()}"
+                    )
+                    raise JsonCommandInitError("批量ResourceSlot参数转换失败") from error
             for arg in args_list:
                 arg_name = arg["name"]
                 arg_type = arg["type"]
