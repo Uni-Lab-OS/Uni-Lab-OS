@@ -283,10 +283,13 @@ def _file_flags() -> int:
     """返回绝对路径普通文件只读所需的平台可用标志。
 
     参数：无。返回：只读、关闭继承、禁止跟随链接和避免 FIFO 阻塞的标志组合。
+    Windows 必须带 ``O_BINARY``，否则 CRLF 翻译会使读取长度与 ``st_size`` 不一致，
+    被误判为 ``unstable_regular_file``。
     """
 
     return (
         os.O_RDONLY
+        | getattr(os, "O_BINARY", 0)
         | getattr(os, "O_CLOEXEC", 0)
         | getattr(os, "O_NOFOLLOW", 0)
         | getattr(os, "O_NONBLOCK", 0)

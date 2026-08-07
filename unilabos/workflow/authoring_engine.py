@@ -38,6 +38,7 @@ from unilabos.workflow.material_selector import (
     validate_material_source_node,
 )
 from unilabos.workflow.models import CandidateCompilation, validate_uuid
+from unilabos.workflow.workflow_io import WorkflowIOValidationError
 from unilabos.workflow.resource_reference import ResourceReferenceResolver
 from unilabos.workflow.source_coordinates import require_utf8_text
 
@@ -169,13 +170,19 @@ class WorkflowAuthoringEngine:
                 code=error.code,
                 message=error.message,
             )
+        except WorkflowIOValidationError as error:
+            return _error_result(
+                fingerprint=self.template_catalog_fingerprint,
+                code="candidate_invalid",
+                message=str(error) or "工作流输入输出合同校验失败",
+            )
         except CandidateBundleError:
             return _error_result(
                 fingerprint=self.template_catalog_fingerprint,
                 code="candidate_invalid",
                 message="生成的候选结果不能通过公共工作流校验",
             )
-        except (KeyError, TypeError, UnicodeError, ValueError):
+        except (KeyError, TypeError, UnicodeError, ValueError) as error:
             return _error_result(
                 fingerprint=self.template_catalog_fingerprint,
                 code="candidate_invalid",

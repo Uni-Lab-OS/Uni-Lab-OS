@@ -31,6 +31,7 @@ from unilabos.workflow.published_workflow_runtime import (
 )
 from unilabos.workflow.service import AuthoringCompiler, WorkflowService
 from unilabos.workflow.source_discovery import discover_editable_sources
+from unilabos.workflow.source_bootstrap import persisted_package_root
 from unilabos.workflow.source_monitor import WorkflowSourceMonitor
 from unilabos.workflow.store import WorkflowStore
 from unilabos.workflow.task_scheduler_bridge import TaskSchedulerBridge
@@ -331,7 +332,7 @@ def compose_local_workflow_template_runtime(
             {
                 "workflow_uuid": item.workflow_uuid,
                 "package_id": item.package_id,
-                "package_root": str(item.package_root),
+                "package_root": persisted_package_root(item.package_root),
                 "relative_path": item.relative_path,
                 "source_uri": item.source_uri,
             }

@@ -125,6 +125,9 @@ class _PublicationDirectory:
         """
 
         self.assert_current()
+        # Windows 文本模式会剥掉 CR，使 ``read_stable_descriptor`` 的长度与
+        # ``st_size`` 不一致，CAS 会被误判为 ``draft_hash_conflict``。
+        flags |= getattr(os, "O_BINARY", 0)
         if self.descriptor is not None:
             return os.open(name, flags, mode, dir_fd=self.descriptor)
         assert self.path is not None

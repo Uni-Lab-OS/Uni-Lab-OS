@@ -1781,60 +1781,138 @@ def main():
 
     args_dict["resources_mesh_config"] = {}
     args_dict["resources_edge_config"] = resource_edge_info
-    # web visiualize 2D
-    if args_dict["visual"] != "disable":
-        enable_rviz = args_dict["visual"] == "rviz"
-        devices_and_resources = dict_from_graph(graph_res.physical_setup_graph)
-        if devices_and_resources is not None:
-            from unilabos.device_mesh.resource_visalization import (
-                ResourceVisualization,
-            )  # 此处开启后，logger会变更为INFO，有需要请调整
 
-            resource_visualization = ResourceVisualization(
-                devices_and_resources,
-                [n.res_content for n in args_dict["resources_config"].all_nodes],  # type: ignore  # FIXME
-                enable_rviz=enable_rviz,
+    devices_and_resources = dict_from_graph(graph_res.physical_setup_graph) or {}
+    from unilabos.device_mesh.motion_runtime_startup import (
+        build_motion_runtime_plan,
+        compile_workspace_package_observations,
+        create_moveit_runtime,
+        should_use_legacy_resource_visualization,
+    )
+
+    motion_plan = build_motion_runtime_plan(
+        devices_and_resources,
+        visual=str(args_dict.get("visual") or "disable"),
+    )
+    if motion_plan.unsupported_physical_device_ids:
+        unsupported = ", ".join(motion_plan.unsupported_physical_device_ids)
+        raise ValueError(
+            "图上声明了尚未支持的物理 MoveIt backend（execution_backend=moveit），"
+            f"请改用 moveit_sim 或非 MoveIt 后端: {unsupported}"
+        )
+
+    moveit_runtime = None
+    if motion_plan.moveit_enabled:
+        workspace_root = args_dict.get("_workspace_root")
+        if not isinstance(workspace_root, str) or not workspace_root.strip():
+            raise ValueError(
+                "图上启用了 moveit_sim，但启动时未提供 --workspace；"
+                "MoveItRuntime 需要工作区 PackageCatalog 装配模型"
             )
-            args_dict["resources_mesh_config"] = resource_visualization.resource_model
-            start_backend(**args_dict)
-            server_thread = threading.Thread(
-                target=start_server,
-                kwargs=dict(
-                    open_browser=not BasicConfig.disable_browser,
-                    port=BasicConfig.port,
-                ),
-            )
-            server_thread.start()
-            asyncio.set_event_loop(asyncio.new_event_loop())
-            try:
-                resource_visualization.start()
-            except OSError as e:
-                if "AMENT_PREFIX_PATH" in str(e):
-                    print_status(
-                        f"ROS 2环境未正确设置，跳过3D可视化启动。错误详情: {e}",
-                        "warning",
-                    )
-                    print_status(
-                        "建议解决方案：\n"
-                        "1. 激活Conda环境: conda activate unilab\n"
-                        "2. 或使用 --backend simple 参数\n"
-                        "3. 或使用 --visual disable 参数禁用可视化",
-                        "info",
-                    )
-                else:
-                    raise
-            while True:
-                time.sleep(1)
+        package_sources, package_catalogs = compile_workspace_package_observations(
+            workspace_root
+        )
+        args_dict["_package_sources"] = package_sources
+        args_dict["_package_catalogs"] = package_catalogs
+        moveit_runtime = create_moveit_runtime(
+            devices_and_resources,
+            motion_plan,
+            package_sources=package_sources,
+            package_catalogs=package_catalogs,
+            runtime_parent=BasicConfig.working_dir or None,
+        )
+        print_status(
+            "MoveIt 仿真 launch tree 将按 graph 提交；"
+            "动作入口仍会等待 /move_action 与新鲜 joint_states，"
+            "且生命周期不依赖 --visual",
+            "info",
+        )
+        if motion_plan.enable_rviz_view:
+            print_status("MoveItRuntime 将附带启动 RViz（--visual rviz）", "info")
         else:
-            start_backend(**args_dict)
-            restart_requested = start_server(
-                open_browser=not args_dict["disable_browser"],
-                port=BasicConfig.port,
+            print_status(
+                "MoveItRuntime 不启动 RViz（--visual 非 rviz）；仅运动栈",
+                "info",
             )
-            if restart_requested:
-                print_status("[Main] Restart requested, cleaning up...", "info")
-                cleanup_for_restart()
-                return
+
+    if moveit_runtime is not None:
+        # MoveIt owns motion (+ optional RViz). Do not start legacy
+        # ResourceVisualization, which would spawn a second RViz / description.
+        args_dict["motion_runtime_enabled"] = True
+        start_backend(**args_dict)
+        server_thread = threading.Thread(
+            target=start_server,
+            kwargs=dict(
+                open_browser=not BasicConfig.disable_browser,
+                port=BasicConfig.port,
+            ),
+        )
+        server_thread.start()
+        try:
+            moveit_runtime.start(timeout=120.0)
+        except OSError as e:
+            if "AMENT_PREFIX_PATH" in str(e):
+                print_status(
+                    f"ROS 2环境未正确设置，跳过 MoveIt 启动。错误详情: {e}",
+                    "warning",
+                )
+                print_status(
+                    "建议解决方案：\n"
+                    "1. 激活Conda环境: conda activate unilab\n"
+                    "2. 或使用 --backend simple 参数\n"
+                    "3. 或从图上去掉 standard_execution_backend=moveit_sim",
+                    "info",
+                )
+            else:
+                raise
+        if moveit_runtime.startup_error is not None:
+            raise RuntimeError(
+                f"MoveItRuntime 启动失败: {moveit_runtime.startup_error}"
+            ) from moveit_runtime.startup_error
+        print_status("MoveItRuntime 已就绪", "info")
+        while True:
+            time.sleep(1)
+    elif should_use_legacy_resource_visualization(motion_plan):
+        enable_rviz = motion_plan.enable_rviz_view
+        from unilabos.device_mesh.resource_visalization import (
+            ResourceVisualization,
+        )  # 此处开启后，logger会变更为INFO，有需要请调整
+
+        resource_visualization = ResourceVisualization(
+            devices_and_resources,
+            [n.res_content for n in args_dict["resources_config"].all_nodes],  # type: ignore  # FIXME
+            enable_rviz=enable_rviz,
+        )
+        args_dict["resources_mesh_config"] = resource_visualization.resource_model
+        start_backend(**args_dict)
+        server_thread = threading.Thread(
+            target=start_server,
+            kwargs=dict(
+                open_browser=not BasicConfig.disable_browser,
+                port=BasicConfig.port,
+            ),
+        )
+        server_thread.start()
+        asyncio.set_event_loop(asyncio.new_event_loop())
+        try:
+            resource_visualization.start()
+        except OSError as e:
+            if "AMENT_PREFIX_PATH" in str(e):
+                print_status(
+                    f"ROS 2环境未正确设置，跳过3D可视化启动。错误详情: {e}",
+                    "warning",
+                )
+                print_status(
+                    "建议解决方案：\n"
+                    "1. 激活Conda环境: conda activate unilab\n"
+                    "2. 或使用 --backend simple 参数\n"
+                    "3. 或使用 --visual disable 参数禁用可视化",
+                    "info",
+                )
+            else:
+                raise
+        while True:
+            time.sleep(1)
     else:
         start_backend(**args_dict)
 

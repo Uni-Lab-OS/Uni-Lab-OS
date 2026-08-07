@@ -5,7 +5,7 @@ from __future__ import annotations
 import re
 import sqlite3
 from collections.abc import Callable, Iterable, Mapping
-from pathlib import PurePosixPath
+from pathlib import Path, PurePosixPath, PureWindowsPath
 from typing import Any
 
 from unilabos.workflow.json_codec import encode_json
@@ -136,25 +136,52 @@ def _normalize_registrations(
     return normalized
 
 
-def _validate_package_root(package_root: str) -> None:
-    """验证持久包根是规范绝对 POSIX 路径。
+def persisted_package_root(package_root: str | Path) -> str:
+    """把包目录规范成可持久化的绝对路径身份（正斜杠、无反斜杠）。
 
-    参数：``package_root`` 是工作流源码（Workflow Source）的包目录身份。返回：合法
-    时无返回值。异常：相对路径、控制字符、父级穿越或需规范化改写时抛出
-    ``SourceBootstrapConflict``；本函数只验证身份形状，不授予文件系统权限。
+    参数：``package_root`` 是发现阶段得到的包目录。返回：可写入
+    ``workflow_source_registration.package_root`` 的稳定字符串；Windows 盘符路径
+    形如 ``F:/a/b``，POSIX 仍为 ``/a/b``。异常：无。
     """
 
-    # ``root_path`` 只用于纯词法验证，不访问或解析真实文件系统。
-    root_path = PurePosixPath(package_root)
-    if (
-        _contains_path_control_character(package_root)
-        or "\\" in package_root
-        or not root_path.is_absolute()
-        or package_root != root_path.as_posix()
-        or ".." in root_path.parts
-        or len(root_path.parts) < 2
-    ):
+    return Path(package_root).as_posix()
+
+
+def _validate_package_root(package_root: str) -> None:
+    """验证持久包根是规范绝对路径身份。
+
+    参数：``package_root`` 是工作流源码（Workflow Source）的包目录身份。返回：合法
+    时无返回值。异常：相对路径、控制字符、父级穿越、反斜杠或需规范化改写时抛出
+    ``SourceBootstrapConflict``；本函数只验证身份形状，不授予文件系统权限。
+    Windows 允许 ``F:/workspace/pkg`` 形式（正斜杠盘符路径），因为
+    ``PurePosixPath`` 不把盘符路径视为绝对路径。
+    """
+
+    if _contains_path_control_character(package_root) or "\\" in package_root:
         raise SourceBootstrapConflict("可编辑包根目录身份无效")
+
+    # ``posix_root`` 覆盖 Linux/macOS 与 WSL 风格绝对路径。
+    posix_root = PurePosixPath(package_root)
+    if (
+        package_root == posix_root.as_posix()
+        and posix_root.is_absolute()
+        and ".." not in posix_root.parts
+        and len(posix_root.parts) >= 2
+    ):
+        return
+
+    # ``windows_root`` 覆盖本机 Windows 盘符绝对路径；必须已经是正斜杠形态。
+    windows_root = PureWindowsPath(package_root)
+    if (
+        package_root == windows_root.as_posix()
+        and windows_root.is_absolute()
+        and bool(windows_root.drive)
+        and ".." not in windows_root.parts
+        and len(windows_root.parts) >= 2
+    ):
+        return
+
+    raise SourceBootstrapConflict("可编辑包根目录身份无效")
 
 
 def _validate_relative_source_path(relative_path: str) -> None:

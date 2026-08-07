@@ -26,10 +26,14 @@ def directory_flags() -> int:
 
 
 def file_flags() -> int:
-    """返回安全只读文件标志；参数无，返回禁止链接和 FIFO 阻塞的标志组合。"""
+    """返回安全只读文件标志；参数无，返回禁止链接和 FIFO 阻塞的标志组合。
+
+    Windows 必须带 ``O_BINARY``，避免 CRLF 翻译破坏字节长度稳定性校验。
+    """
 
     return (
         os.O_RDONLY
+        | getattr(os, "O_BINARY", 0)
         | getattr(os, "O_CLOEXEC", 0)
         | getattr(os, "O_NOFOLLOW", 0)
         | getattr(os, "O_NONBLOCK", 0)

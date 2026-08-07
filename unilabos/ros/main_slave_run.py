@@ -59,10 +59,12 @@ def main(
     bridges: List[Any] = [],
     visual: str = "disable",
     resources_mesh_config: dict = {},
+    motion_runtime_enabled: bool = False,
     rclpy_init_args: List[str] = ["--log-level", "debug"],
     discovery_interval: float = 15.0,
 ) -> None:
     """主函数"""
+
 
     # HostLink must publish/start the directed DDS endpoint before rclpy.init;
     # direct embedders do not pass through app.main's earlier composition root.
@@ -72,7 +74,10 @@ def main(
 
     # Support restart - check if rclpy is already initialized
     if not rclpy.ok():
-        rclpy.init(args=rclpy_init_args)
+        try:
+            rclpy.init(args=rclpy_init_args)
+        except Exception as _rclpy_exc:
+            raise
     else:
         logger.info("[ROS] rclpy already initialized, reusing context")
     executor = rclpy.__executor = MultiThreadedExecutor(
@@ -90,11 +95,14 @@ def main(
         discovery_interval,
     )
 
+
     # HostLink 由 Edge 微后端在 HostNode 之前启动；ROS 层只挂接
     # 实时资源树，不再拥有 TCP 监听或 ROS 组网配置。
     _attach_hostlink_runtime(host_node)
 
-    if visual != "disable":
+    # MoveItRuntime owns motion (+ optional RViz). Skip legacy visual stack to
+    # avoid a second robot_description / RViz and the JointRepublisher path.
+    if visual != "disable" and not motion_runtime_enabled:
         from unilabos.ros.nodes.presets.joint_republisher import JointRepublisher
 
         # 将 ResourceTreeSet 转换为 list 用于 visual 组件
@@ -114,18 +122,14 @@ def main(
             device_uuid=str(uuid.uuid4()),
         )
         joint_republisher = JointRepublisher(
-            "joint_republisher", host_node.resource_tracker
+            "joint_republisher",
+            "joint_republisher",
+            host_node.resource_tracker,
         )
-        # lh_joint_pub = LiquidHandlerJointPublisher(
-        #     resources_config=resources_list, resource_tracker=host_node.resource_tracker
-        # )
         executor.add_node(resource_mesh_manager)
         executor.add_node(joint_republisher)
-        # executor.add_node(lh_joint_pub)
 
-    thread = threading.Thread(
-        target=executor.spin, daemon=True, name="host_executor_thread"
-    )
+    thread = threading.Thread(target=executor.spin, daemon=True, name="host_executor_thread")
     thread.start()
 
     while True:
@@ -316,8 +320,23 @@ def slave(
             resource_tracker=DeviceNodeResourceTracker(),
         )
         executor.add_node(resource_mesh_manager)
-        executor.add_node(joint_republisher)
-        executor.add_node(lh_joint_pub)
+        if visual != "disable":
+            from unilabos.devices.ros_dev.liquid_handler_joint_publisher import (
+                LiquidHandlerJointPublisher,
+            )
+            from unilabos.ros.nodes.presets.joint_republisher import JointRepublisher
+
+            joint_republisher = JointRepublisher(
+                "joint_republisher",
+                "joint_republisher",
+                DeviceNodeResourceTracker(),
+            )
+            lh_joint_pub = LiquidHandlerJointPublisher(
+                resources_config=resources_list,
+                resource_tracker=DeviceNodeResourceTracker(),
+            )
+            executor.add_node(joint_republisher)
+            executor.add_node(lh_joint_pub)
 
     # 7. 保持运行
     while True:

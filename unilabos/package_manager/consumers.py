@@ -6,7 +6,7 @@ import keyword
 from collections.abc import Mapping
 from typing import Any, TypeVar
 
-from unilabos.package_manager import DefinitionRecord, PackageCatalog
+from unilabos.package_manager.catalog import DefinitionRecord, PackageCatalog
 from unilabos.workflow.composite import PublishedWorkflowSource
 
 DefinitionT = TypeVar("DefinitionT")

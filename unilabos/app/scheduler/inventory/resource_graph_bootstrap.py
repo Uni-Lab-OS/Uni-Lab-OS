@@ -447,13 +447,21 @@ def _material_config_with_rendering(
         raise ResourceGraphBootstrapError("material.config.rendering 必须是 JSON 对象")
     rendering = _json_object(raw_rendering, "material.config.rendering")
 
-    # ``kind`` 优先保留资源图显式声明，否则使用物料自身类别匹配外形库。
+    # ``kind`` 优先保留资源图显式声明，否则使用物料自身类别 / 节点 type
+    # （如 ``deck``）匹配外形库；仅看 config.category 时，图节点根上的
+    # ``type: deck`` 会被丢掉，前端占位盒会按中心锚点画在左下角。
     explicit_kind = rendering.get("kind") or rendering.get("type")
-    category = config.get("category") or config.get("type")
+    category = (
+        config.get("category")
+        or config.get("type")
+        or node.get("type")
+        or node.get("category")
+    )
     if isinstance(explicit_kind, str) and explicit_kind.strip():
         rendering["kind"] = explicit_kind.strip()
     elif isinstance(category, str) and category.strip():
         rendering["kind"] = category.strip()
+
 
     model_snapshot = None
     if material_rendering_by_template is not None:

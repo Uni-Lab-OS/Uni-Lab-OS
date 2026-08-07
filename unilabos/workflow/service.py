@@ -48,6 +48,7 @@ from unilabos.workflow.source_discovery import (
     EditableSourceDiscoveryPlan,
     EditableSourceRegistration,
 )
+from unilabos.workflow.source_bootstrap import persisted_package_root
 from unilabos.workflow.source_workspace import (
     NO_EXPECTED_HASH as _NO_EXPECTED_HASH,
 )
@@ -547,8 +548,14 @@ class WorkflowService:
             return aggregate["task"]
         except TaskSchedulerBridgeError:
             raise WorkflowError("internal_error") from None
-        except TaskInputError:
-            raise WorkflowError("invalid_input") from None
+        except TaskInputError as error:
+            # 把合同层具体原因（如 K11 ResourceSlot 拒绝）透出给 FE，避免只剩
+            # 笼统的“提交内容格式不正确”。
+            detail = str(error).strip()
+            raise WorkflowError(
+                "invalid_input",
+                message=detail or None,
+            ) from None
         except StoreConflict:
             raise WorkflowError("invalid_input") from None
 
@@ -782,11 +789,12 @@ class WorkflowService:
             {registration.workflow_uuid for registration in plan.registrations}
         )
         # ``registration_rows`` 是交给 SQLite 写模型的完整、不可变批次。
+        # ``registration_rows`` 是交给 SQLite 写模型的完整、不可变批次。
         registration_rows = tuple(
             {
                 "workflow_uuid": registration.workflow_uuid,
                 "package_id": registration.package_id,
-                "package_root": str(registration.package_root),
+                "package_root": persisted_package_root(registration.package_root),
                 "relative_path": registration.relative_path,
                 "source_uri": registration.source_uri,
             }
@@ -1561,6 +1569,85 @@ class WorkflowService:
             return self._store.get_source_registration(workflow_uuid)
         except StoreNotFound:
             raise WorkflowError("workflow_not_found") from None
+
+    @staticmethod
+    def _read_source_by_path(
+        root: Path,
+        target: Path,
+    ) -> Optional[Dict[str, Any]]:
+        """在不支持相对目录 FD 的平台读取一个 Draft。"""
+
+        try:
+            root_before = root.lstat()
+        except (OSError, TypeError, ValueError):
+            raise WorkflowError("invalid_input") from None
+        if not stat.S_ISDIR(
+            root_before.st_mode
+        ) or WorkflowService._path_contains_symlink(root):
+            raise WorkflowError("invalid_input")
+        try:
+            parent_before = target.parent.lstat()
+            target_before = target.lstat()
+        except FileNotFoundError:
+            return None
+        except (OSError, TypeError, ValueError):
+            raise WorkflowError("invalid_input") from None
+        if (
+            not stat.S_ISDIR(parent_before.st_mode)
+            or WorkflowService._path_contains_symlink(target.parent)
+            or target.is_symlink()
+            or not stat.S_ISREG(target_before.st_mode)
+        ):
+            raise WorkflowError("invalid_input")
+        descriptor = -1
+        try:
+            descriptor = os.open(
+                target,
+                os.O_RDONLY
+                | getattr(os, "O_BINARY", 0)
+                | getattr(os, "O_CLOEXEC", 0)
+                | getattr(os, "O_NOFOLLOW", 0),
+            )
+            opened = os.fstat(descriptor)
+            if not stat.S_ISREG(opened.st_mode) or (opened.st_dev, opened.st_ino) != (
+                target_before.st_dev,
+                target_before.st_ino,
+            ):
+                raise WorkflowError("invalid_input")
+            raw = WorkflowService._read_regular_fd(
+                descriptor,
+                byte_limit=AUTHORING_SOURCE_BYTE_LIMIT,
+            )
+            root_after = root.lstat()
+            parent_after = target.parent.lstat()
+            target_after = target.lstat()
+            if (
+                WorkflowService._path_contains_symlink(target.parent)
+                or target.is_symlink()
+                or (root_after.st_dev, root_after.st_ino)
+                != (root_before.st_dev, root_before.st_ino)
+                or (parent_after.st_dev, parent_after.st_ino)
+                != (parent_before.st_dev, parent_before.st_ino)
+                or (target_after.st_dev, target_after.st_ino)
+                != (opened.st_dev, opened.st_ino)
+            ):
+                raise WorkflowError("invalid_input")
+        except WorkflowError:
+            raise
+        except (OSError, OverflowError, TypeError, ValueError):
+            raise WorkflowError("invalid_input") from None
+        finally:
+            if descriptor >= 0:
+                os.close(descriptor)
+        try:
+            source = raw.decode("utf-8")
+        except UnicodeError:
+            raise WorkflowError("invalid_input") from None
+        return {
+            "python_source": source,
+            "draft_hash": _sha256(raw),
+            "update_time": _mtime_rfc3339(opened.st_mtime),
+        }
 
     def _read_source(
         self,

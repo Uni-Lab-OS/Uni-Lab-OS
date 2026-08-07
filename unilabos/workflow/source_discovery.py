@@ -7,6 +7,7 @@ from dataclasses import dataclass
 from pathlib import Path
 
 from unilabos.workflow.source_manifest import (
+    EditablePackageManifest,
     SourceManifestError,
     parse_editable_package_manifest,
 )
@@ -102,6 +103,23 @@ def discover_editable_sources(
     )
 
 
+def load_editable_package_manifest(
+    package_root: str | Path,
+) -> EditablePackageManifest:
+    """读取并校验一个显式授权目录中的 ``package.yaml``。
+
+    参数：``package_root`` 是工作区或可编辑包根目录。
+    返回：结构合法的 ``EditablePackageManifest``。
+    异常：目录或声明不合法时抛出 ``SourceDeclarationError``。
+    """
+
+    try:
+        snapshot = read_package_root(package_root)
+        return parse_editable_package_manifest(snapshot.manifest_bytes)
+    except (SourceWorkspaceError, SourceManifestError) as error:
+        raise SourceDeclarationError(error.code) from None
+
+
 def _validate_unique_registrations(
     registrations: Iterable[EditableSourceRegistration],
 ) -> None:
@@ -144,4 +162,5 @@ __all__ = [
     "EditableSourceRegistration",
     "SourceDeclarationError",
     "discover_editable_sources",
+    "load_editable_package_manifest",
 ]

@@ -156,7 +156,7 @@ class CompositeAuthoring:
                 )
             try:
                 source = self._resolver.resolve(module, symbol)
-            except (LookupError, PublishedSourceCatalogError):
+            except (LookupError, PublishedSourceCatalogError) as resolve_error:
                 raise _CompositeFailure("composite_child_not_found", "/source") from None
             if not isinstance(source, PublishedWorkflowSource):
                 raise _CompositeFailure("composite_catalog_mismatch", "/source")
@@ -169,7 +169,7 @@ class CompositeAuthoring:
                 snapshot = self._snapshot_provider.get_published_workflow_snapshot(
                     source.workflow_uuid
                 )
-            except LookupError:
+            except LookupError as snapshot_error:
                 raise _CompositeFailure(
                     "composite_child_not_found",
                     "/child/workflow_uuid",

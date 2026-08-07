@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import copy
+import json
 from collections.abc import Mapping
 from typing import Annotated, Any, Protocol
 from uuid import UUID
@@ -80,18 +82,27 @@ class WorkflowTemplateQueryService:
         resource_template_uuid: str | None,
         action_type: str,
         node_type: str,
+        page: int | None = None,
+        page_size: int | None = None,
     ) -> dict[str, Any]:
         """按后端（Backend）当前查询合同返回节点模板摘要页。
 
-        参数说明：``limit`` 被规范到 1..100；``cursor_uuid`` 是上一页末项；其余
-        字段分别筛选名称、资源模板 UUID、动作类型和节点类型。返回游标页对象。
+        参数说明：``limit`` / ``cursor_uuid`` 是游标分页；``page`` / ``page_size``
+        是调试台/FE 使用的偏移分页。二者择一：显式 ``page`` 时返回
+        ``total/page/page_size``；否则返回 ``has_more/next_cursor_uuid``。
+        其余字段分别筛选名称、资源模板 UUID、动作类型和节点类型。
         """
 
-        normalized_limit = _DEFAULT_LIMIT if limit < 1 else min(limit, _MAX_LIMIT)
         snapshot = self._snapshot_provider.snapshot()
         # ``ordered_actions`` 使用 Backend 的创建时间降序、UUID 降序规则。
         ordered_actions = sorted(snapshot.actions, key=_action_order, reverse=True)
         cursor_order: tuple[str, str] | None = None
+        use_offset_page = page is not None
+        if use_offset_page and cursor_uuid is not None:
+            raise WorkflowTemplateQueryError(
+                1000,
+                "page and cursor_uuid cannot be combined",
+            )
         if cursor_uuid is not None:
             cursor_identity = _validated_uuid(cursor_uuid, "cursor_uuid")
             cursor_action = next(
@@ -142,15 +153,37 @@ class WorkflowTemplateQueryService:
                 continue
             matches.append(action)
 
-        page = matches[:normalized_limit]
+        if use_offset_page:
+            normalized_page = 1 if page is None or page < 1 else page
+            normalized_page_size = (
+                _DEFAULT_LIMIT
+                if page_size is None or page_size < 1
+                else min(page_size, _MAX_LIMIT)
+            )
+            total = len(matches)
+            start = (normalized_page - 1) * normalized_page_size
+            page_actions = matches[start : start + normalized_page_size]
+            return {
+                "authority": dict(self._authority),
+                "catalog_fingerprint": snapshot.fingerprint,
+                "items": [_summary(action) for action in page_actions],
+                "total": total,
+                "page": normalized_page,
+                "page_size": normalized_page_size,
+            }
+
+        normalized_limit = _DEFAULT_LIMIT if limit < 1 else min(limit, _MAX_LIMIT)
+        page_actions = matches[:normalized_limit]
         has_more = len(matches) > normalized_limit
         return {
             "authority": dict(self._authority),
             "catalog_fingerprint": snapshot.fingerprint,
-            "items": [_summary(action) for action in page],
+            "items": [_summary(action) for action in page_actions],
             "has_more": has_more,
             "next_cursor_uuid": (
-                str(page[-1].template["uuid"]) if has_more and page else None
+                str(page_actions[-1].template["uuid"])
+                if has_more and page_actions
+                else None
             ),
         }
 
@@ -176,14 +209,120 @@ class WorkflowTemplateQueryService:
                 5001,
                 f"workflow node template {template_identity} does not exist",
             )
-        return _omit_none(
-            {
-                "authority": dict(self._authority),
-                "catalog_fingerprint": snapshot.fingerprint,
-                "template": action.detached_template(),
-                "handles": action.detached_handles(),
-            }
+        template = action.detached_template()
+        handles = action.detached_handles()
+        http_template = _http_authoring_template(template)
+        http_handles = _http_authoring_handles(handles)
+        return _restore_fe_null_fields(
+            _omit_none(
+                {
+                    "authority": dict(self._authority),
+                    "catalog_fingerprint": snapshot.fingerprint,
+                    "template": http_template,
+                    "handles": http_handles,
+                }
+            )
         )
+
+
+def _http_authoring_template(template: Mapping[str, Any]) -> dict[str, Any]:
+    """把存储态节点模板投影为调试台 Action Catalog 可读详情。
+
+    存储列 ``schema`` 是 Backend goal 参数子模式（常为 JSON 字符串）；完整
+    ``x-unilabos-action-contract`` 在 ``meta_data.unilab.action_contract_schema``。
+    FE 只消费详情里的 ``template.schema`` 对象，且要求合同 ``version=1``。
+    """
+
+    projected = copy.deepcopy(dict(template))
+    meta = projected.get("meta_data")
+    unilab = meta.get("unilab") if isinstance(meta, Mapping) else None
+    action_contract_schema = (
+        unilab.get("action_contract_schema") if isinstance(unilab, Mapping) else None
+    )
+    if isinstance(action_contract_schema, Mapping):
+        schema = copy.deepcopy(dict(action_contract_schema))
+        contract = schema.get("x-unilabos-action-contract")
+        if isinstance(contract, dict) and contract.get("version") == 2:
+            contract["version"] = 1
+        projected["schema"] = schema
+        return projected
+
+    schema = projected.get("schema")
+    if isinstance(schema, str) and schema.strip():
+        try:
+            decoded = json.loads(schema)
+        except json.JSONDecodeError:
+            decoded = None
+        if isinstance(decoded, dict):
+            projected["schema"] = decoded
+    return projected
+
+
+def _http_authoring_handles(
+    handles: list[dict[str, Any]],
+) -> list[dict[str, Any]]:
+    """补齐 FE ``projectHandle`` 所需的 ready / allowlist 连接点元数据。"""
+
+    projected: list[dict[str, Any]] = []
+    for handle in handles:
+        item = copy.deepcopy(dict(handle))
+        if item.get("handle_key") == "ready":
+            item["type"] = "boolean"
+            item["data_source"] = "dependency"
+            item["data_key"] = "ready"
+            item["meta_data"] = {
+                "unilab": {
+                    "value_schema": {"type": "boolean"},
+                    "editor_control": "variable_selector",
+                    "allowed_resource_template_uuids": None,
+                    "implicit_passthrough": False,
+                    "structural_role": "ready",
+                }
+            }
+            projected.append(item)
+            continue
+
+        meta = item.get("meta_data")
+        if not isinstance(meta, dict):
+            meta = {}
+            item["meta_data"] = meta
+        unilab = meta.get("unilab")
+        if not isinstance(unilab, dict):
+            unilab = {}
+            meta["unilab"] = unilab
+        if "allowed_resource_template_uuids" not in unilab:
+            unilab["allowed_resource_template_uuids"] = None
+        projected.append(item)
+    return projected
+
+
+def _restore_fe_null_fields(payload: Any) -> Any:
+    """在 ``_omit_none`` 之后写回 FE 解码器要求显式 ``null`` 的字段。
+
+    FE ``allowlistValue`` 只接受 ``null`` 或非空 UUID 数组；缺键会走
+    ``invalidCatalog``。Backend omitempty 会剥掉 ``null``，因此详情响应必须
+    在序列化前把 allowlist 空值写回。
+    """
+
+    if not isinstance(payload, dict):
+        return payload
+    handles = payload.get("handles")
+    if not isinstance(handles, list):
+        return payload
+    for handle in handles:
+        if not isinstance(handle, dict):
+            continue
+        meta = handle.get("meta_data")
+        if not isinstance(meta, dict):
+            meta = {}
+            handle["meta_data"] = meta
+        unilab = meta.get("unilab")
+        if not isinstance(unilab, dict):
+            unilab = {}
+            meta["unilab"] = unilab
+        if "allowed_resource_template_uuids" not in unilab:
+            unilab["allowed_resource_template_uuids"] = None
+    return payload
 
 
 def _validated_uuid(value: str, field: str) -> str:
@@ -314,6 +453,8 @@ def create_workflow_template_router(
     def list_node_templates(
         limit: int = Query(default=0),
         cursor_uuid: Annotated[UUID | None, Query()] = None,
+        page: Annotated[int | None, Query()] = None,
+        page_size: Annotated[int | None, Query()] = None,
         keyword: str = Query(default=""),
         resource_template_uuid: Annotated[UUID | None, Query()] = None,
         action_type: str = Query(default="", alias="type"),
@@ -321,7 +462,8 @@ def create_workflow_template_router(
     ) -> JSONResponse:
         """按 Backend 查询参数返回工作流节点模板摘要页。
 
-        参数说明：``limit`` 和 ``cursor_uuid`` 控制 UUID 游标；``keyword``、资源
+        参数说明：``limit`` 和 ``cursor_uuid`` 控制 UUID 游标；``page`` /
+        ``page_size`` 控制偏移分页（调试台 Action Catalog）；``keyword``、资源
         模板 UUID、动作类型和节点类型执行服务端筛选。返回统一 JSON 外壳。
         """
 
@@ -329,6 +471,8 @@ def create_workflow_template_router(
             service.list_node_templates,
             limit=limit,
             cursor_uuid=str(cursor_uuid) if cursor_uuid else None,
+            page=page,
+            page_size=page_size,
             keyword=keyword,
             resource_template_uuid=(
                 str(resource_template_uuid) if resource_template_uuid else None

@@ -1,9 +1,8 @@
-"""显式 Package Source Adapter。"""
+﻿"""鏄惧紡 Package Source Adapter銆?""
 
 from __future__ import annotations
 
 import hashlib
-import os
 import stat
 import zipfile
 from dataclasses import dataclass
@@ -14,7 +13,7 @@ from typing import Literal, Protocol, runtime_checkable
 
 @runtime_checkable
 class PackageSource(Protocol):
-    """由调用方显式授权的一次 package observation。"""
+    """鐢辫皟鐢ㄦ柟鏄惧紡鎺堟潈鐨勪竴娆?package observation銆?""
 
     @property
     def source_kind(self) -> str: ...
@@ -24,80 +23,32 @@ class PackageSource(Protocol):
 
 @dataclass(frozen=True)
 class WorkspaceSource:
-    """由公共命令行（CLI）显式授权的一次工作区文件来源。"""
-
-    # ``root`` 是不经过符号链接的规范工作区根目录，也是全部文件读取的授权边界。
     root: Path
 
     def __init__(self, root: str | Path):
-        """固定不经过符号链接的工作区根目录。
-
-        参数：``root`` 是调用者显式选择的工作区目录。
-        返回：无；构造后的 ``root`` 是规范绝对路径。
-        异常：目录缺失、不是目录或任一路径段是符号链接时抛出 ``ValueError``。
-        """
-
-        selected_root = Path(os.path.abspath(Path(root).expanduser()))
-        try:
-            resolved_root = selected_root.resolve(strict=True)
-        except (OSError, RuntimeError) as error:
-            raise ValueError("工作区（Workspace）根目录不存在或不可访问") from error
-        if (
-            selected_root.is_symlink()
-            or not resolved_root.is_dir()
-            or resolved_root != selected_root
-        ):
-            raise ValueError("工作区（Workspace）根目录必须是无符号链接的目录")
-        object.__setattr__(self, "root", resolved_root)
+        object.__setattr__(self, "root", Path(root))
 
     @property
     def source_kind(self) -> Literal["workspace"]:
-        """返回包来源的稳定类型。"""
-
         return "workspace"
 
     def read_bytes(self, logical_path: str) -> bytes:
-        """读取工作区根目录内的一个普通文件。"""
-
-        resolved_file = self._resolve_regular_file(logical_path, required=True)
-        assert resolved_file is not None
-        try:
-            return resolved_file.read_bytes()
-        except OSError as error:
-            raise ValueError(f"工作区文件不可读: {logical_path}") from error
-
-    def has_file(self, logical_path: str) -> bool:
-        """判断工作区内是否存在一个安全普通文件。"""
-
-        return self._resolve_regular_file(logical_path, required=False) is not None
-
-    def _resolve_regular_file(
-        self,
-        logical_path: str,
-        *,
-        required: bool,
-    ) -> Path | None:
-        """解析并验证一个工作区相对普通文件。"""
-
-        logical_file = _safe_logical_path(logical_path)
-        selected_file = self.root.joinpath(*logical_file.parts)
-        if not selected_file.exists():
-            if required:
-                raise ValueError(f"工作区文件不存在: {logical_path}")
-            return None
-        if selected_file.is_symlink() or any(
+        logical = _safe_logical_path(logical_path)
+        root = self.root.resolve()
+        path = root.joinpath(*logical.parts)
+        if path.is_symlink() or any(
             parent.is_symlink()
-            for parent in selected_file.parents
-            if parent != self.root and parent.is_relative_to(self.root)
+            for parent in path.parents
+            if parent != root and parent.is_relative_to(root)
         ):
-            raise ValueError(f"工作区文件不得经过符号链接: {logical_path}")
+            raise ValueError(f"Package source 涓嶅緱閫氳繃 symlink 璇诲彇: {logical_path}")
         try:
-            resolved_file = selected_file.resolve(strict=True)
-        except (OSError, RuntimeError) as error:
-            raise ValueError(f"工作区文件不可访问: {logical_path}") from error
-        if not resolved_file.is_relative_to(self.root) or not resolved_file.is_file():
-            raise ValueError(f"工作区文件路径越界或不是普通文件: {logical_path}")
-        return resolved_file
+            resolved = path.resolve(strict=True)
+        except FileNotFoundError as exc:
+            raise ValueError(f"Package source 涓嶅瓨鍦? {logical_path}") from exc
+        if not resolved.is_relative_to(root) or not resolved.is_file():
+            raise ValueError(f"Package source 璺緞閫冮€? {logical_path}")
+        return resolved.read_bytes()
 
 
 @dataclass(frozen=True)
@@ -115,7 +66,7 @@ class CachedArchiveSource:
 
     def verify_artifact(self) -> None:
         if not self.wheel.is_file():
-            raise ValueError(f"wheel 不存在: {self.wheel}")
+            raise ValueError(f"wheel 涓嶅瓨鍦? {self.wheel}")
         actual = "sha256:" + hashlib.sha256(self.wheel.read_bytes()).hexdigest()
         if not self.expected_digest or actual != self.expected_digest:
             raise ValueError(
@@ -136,15 +87,15 @@ class CachedArchiveSource:
                 ]
                 if len(matches) != 1:
                     raise ValueError(
-                        f"wheel 中 Package source 数量不是 1: {logical_path}"
+                        f"wheel 涓?Package source 鏁伴噺涓嶆槸 1: {logical_path}"
                     )
                 item = matches[0]
                 mode = item.external_attr >> 16
                 if item.is_dir() or stat.S_ISLNK(mode):
-                    raise ValueError(f"wheel Package source 非普通文件: {logical_path}")
+                    raise ValueError(f"wheel Package source 闈炴櫘閫氭枃浠? {logical_path}")
                 return archive.read(item)
         except zipfile.BadZipFile as exc:
-            raise ValueError(f"wheel 格式无效: {self.wheel}") from exc
+            raise ValueError(f"wheel 鏍煎紡鏃犳晥: {self.wheel}") from exc
 
     def members(self) -> tuple[str, ...]:
         self.verify_artifact()
@@ -152,7 +103,7 @@ class CachedArchiveSource:
             with zipfile.ZipFile(self.wheel) as archive:
                 return tuple(sorted(item.filename for item in archive.infolist()))
         except zipfile.BadZipFile as exc:
-            raise ValueError(f"wheel 格式无效: {self.wheel}") from exc
+            raise ValueError(f"wheel 鏍煎紡鏃犳晥: {self.wheel}") from exc
 
     def _single_catalog_member(self) -> str:
         candidates = [
@@ -166,7 +117,7 @@ class CachedArchiveSource:
         ]
         if len(candidates) != 1:
             raise ValueError(
-                f"wheel embedded PackageCatalog 数量不是 1: {len(candidates)}"
+                f"wheel embedded PackageCatalog 鏁伴噺涓嶆槸 1: {len(candidates)}"
             )
         return candidates[0]
 
@@ -184,7 +135,7 @@ class InstalledDistributionSource:
             return metadata.distribution(self.distribution)
         except metadata.PackageNotFoundError as exc:
             raise ValueError(
-                f"installed distribution 不存在: {self.distribution}"
+                f"installed distribution 涓嶅瓨鍦? {self.distribution}"
             ) from exc
 
     def embedded_catalog_bytes(self) -> bytes:
@@ -197,7 +148,7 @@ class InstalledDistributionSource:
         ]
         if len(candidates) != 1:
             raise ValueError(
-                "installed distribution embedded PackageCatalog 数量不是 1: "
+                "installed distribution embedded PackageCatalog 鏁伴噺涓嶆槸 1: "
                 f"{len(candidates)}"
             )
         return _read_installed_file(dist, str(candidates[0]))
@@ -214,26 +165,20 @@ def _read_installed_file(dist: metadata.Distribution, logical_path: str) -> byte
     entries = [entry for entry in dist.files or () if str(entry) == logical_path]
     if len(entries) != 1:
         raise ValueError(
-            f"installed distribution 中 Package source 数量不是 1: {logical_path}"
+            f"installed distribution 涓?Package source 鏁伴噺涓嶆槸 1: {logical_path}"
         )
     path = Path(dist.locate_file(entries[0]))
     if path.is_symlink() or not path.is_file():
         raise ValueError(
-            f"installed distribution Package source 非普通文件: {logical_path}"
+            f"installed distribution Package source 闈炴櫘閫氭枃浠? {logical_path}"
         )
     return path.read_bytes()
 
 
 def _safe_logical_path(logical_path: str) -> PurePosixPath:
-    if not isinstance(logical_path, str) or not logical_path or "\\" in logical_path:
-        raise ValueError("工作区逻辑路径必须是非空 POSIX 相对路径")
     logical = PurePosixPath(logical_path)
-    if (
-        logical.is_absolute()
-        or not logical.parts
-        or any(part in {"", ".", ".."} for part in logical.parts)
-    ):
-        raise ValueError(f"工作区逻辑路径非法: {logical_path}")
+    if logical.is_absolute() or ".." in logical.parts or "\\" in logical_path:
+        raise ValueError(f"Package source 璺緞闈炴硶: {logical_path}")
     return logical
 
 
