@@ -4,14 +4,10 @@ hplc.agilent:
   class:
     action_value_mappings:
       auto-check_status:
-        displayname: auto-check_status
-        estimate_duration_express: ''
-        estimate_duration_fixed: 60.0
         feedback: {}
         goal: {}
         goal_default: {}
         handles: {}
-        lock_resource: []
         placeholder_keys: {}
         result: {}
         schema:
@@ -29,15 +25,11 @@ hplc.agilent:
           type: object
         type: UniLabJsonCommand
       auto-extract_data_from_txt:
-        displayname: auto-extract_data_from_txt
-        estimate_duration_express: ''
-        estimate_duration_fixed: 60.0
         feedback: {}
         goal: {}
         goal_default:
           file_path: null
         handles: {}
-        lock_resource: []
         placeholder_keys: {}
         result: {}
         schema:
@@ -58,9 +50,6 @@ hplc.agilent:
           type: object
         type: UniLabJsonCommand
       auto-start_sequence:
-        displayname: auto-start_sequence
-        estimate_duration_express: ''
-        estimate_duration_fixed: 60.0
         feedback: {}
         goal: {}
         goal_default:
@@ -68,7 +57,6 @@ hplc.agilent:
           resource: null
           wf_name: null
         handles: {}
-        lock_resource: []
         placeholder_keys: {}
         result: {}
         schema:
@@ -93,15 +81,11 @@ hplc.agilent:
           type: object
         type: UniLabJsonCommand
       auto-try_close_sub_device:
-        displayname: auto-try_close_sub_device
-        estimate_duration_express: ''
-        estimate_duration_fixed: 60.0
         feedback: {}
         goal: {}
         goal_default:
           device_name: null
         handles: {}
-        lock_resource: []
         placeholder_keys: {}
         result: {}
         schema:
@@ -121,15 +105,11 @@ hplc.agilent:
           type: object
         type: UniLabJsonCommand
       auto-try_open_sub_device:
-        displayname: auto-try_open_sub_device
-        estimate_duration_express: ''
-        estimate_duration_fixed: 60.0
         feedback: {}
         goal: {}
         goal_default:
           device_name: null
         handles: {}
-        lock_resource: []
         placeholder_keys: {}
         result: {}
         schema:
@@ -149,16 +129,12 @@ hplc.agilent:
           type: object
         type: UniLabJsonCommand
       execute_command_from_outer:
-        displayname: execute_command_from_outer
-        estimate_duration_express: ''
-        estimate_duration_fixed: 60.0
         feedback: {}
         goal:
           command: command
         goal_default:
           command: ''
         handles: {}
-        lock_resource: []
         result:
           success: success
         schema:
@@ -204,10 +180,8 @@ hplc.agilent:
     type: python
   config_info: []
   description: 安捷伦高效液相色谱（HPLC）分析设备，用于复杂化合物的分离、检测和定量分析。该设备通过UI自动化技术控制安捷伦ChemStation软件，实现全自动的样品分析流程。具备序列启动、设备状态监控、数据文件提取、结果处理等功能。支持多样品批量处理和实时状态反馈，适用于药物分析、环境检测、食品安全、化学研究等需要高精度色谱分析的实验室应用。
-  displayname: hplc.agilent
   handles: []
   icon: ''
-  init_param_enforce: {}
   init_param_schema:
     config:
       properties:
@@ -241,7 +215,6 @@ hplc.agilent:
       - status_text
       - success
       type: object
-  metadata: {}
   version: 1.0.0
 hplc.agilent-zhida:
   category:
@@ -249,14 +222,10 @@ hplc.agilent-zhida:
   class:
     action_value_mappings:
       abort:
-        displayname: abort
-        estimate_duration_express: ''
-        estimate_duration_fixed: 60.0
         feedback: {}
         goal: {}
         goal_default: {}
         handles: {}
-        lock_resource: []
         placeholder_keys: {}
         result:
           return_info: return_info
@@ -284,14 +253,10 @@ hplc.agilent-zhida:
           type: object
         type: EmptyIn
       auto-close:
-        displayname: auto-close
-        estimate_duration_express: ''
-        estimate_duration_fixed: 60.0
         feedback: {}
         goal: {}
         goal_default: {}
         handles: {}
-        lock_resource: []
         placeholder_keys: {}
         result: {}
         schema:
@@ -309,14 +274,10 @@ hplc.agilent-zhida:
           type: object
         type: UniLabJsonCommand
       auto-connect:
-        displayname: auto-connect
-        estimate_duration_express: ''
-        estimate_duration_fixed: 60.0
         feedback: {}
         goal: {}
         goal_default: {}
         handles: {}
-        lock_resource: []
         placeholder_keys: {}
         result: {}
         schema:
@@ -334,14 +295,10 @@ hplc.agilent-zhida:
           type: object
         type: UniLabJsonCommand
       get_methods:
-        displayname: get_methods
-        estimate_duration_express: ''
-        estimate_duration_fixed: 60.0
         feedback: {}
         goal: {}
         goal_default: {}
         handles: {}
-        lock_resource: []
         result: {}
         schema:
           description: ''
@@ -367,9 +324,6 @@ hplc.agilent-zhida:
           type: object
         type: EmptyIn
       start:
-        displayname: start
-        estimate_duration_express: ''
-        estimate_duration_fixed: 60.0
         feedback: {}
         goal:
           string: string
@@ -377,7 +331,6 @@ hplc.agilent-zhida:
         goal_default:
           string: ''
         handles: {}
-        lock_resource: []
         placeholder_keys: {}
         result:
           return_info: return_info
@@ -417,10 +370,8 @@ hplc.agilent-zhida:
     type: python
   config_info: []
   description: 智达高效液相色谱（HPLC）分析设备，用于实验室样品的分离、检测和定量分析。该设备通过TCP socket与HPLC控制系统通信，支持远程控制和状态监控。具备自动进样、梯度洗脱、多检测器数据采集等功能，可执行复杂的色谱分析方法。适用于化学分析、药物检测、环境监测、生物样品分析等需要高精度分离分析的实验室应用场景。
-  displayname: hplc.agilent-zhida
   handles: []
   icon: ''
-  init_param_enforce: {}
   init_param_schema:
     config:
       properties:
@@ -445,5 +396,4 @@ hplc.agilent-zhida:
       - methods
       - status
       type: object
-  metadata: {}
   version: 1.0.0

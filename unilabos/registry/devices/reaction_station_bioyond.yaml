@@ -5,9 +5,6 @@ reaction_station.bioyond:
   class:
     action_value_mappings:
       add_time_constraint:
-        displayname: add_time_constraint
-        estimate_duration_express: ''
-        estimate_duration_fixed: 60.0
         feedback: {}
         goal:
           duration: duration
@@ -22,7 +19,6 @@ reaction_station.bioyond:
           start_point: 0
           start_step_key: ''
         handles: {}
-        lock_resource: []
         placeholder_keys: {}
         result: {}
         schema:
@@ -60,14 +56,10 @@ reaction_station.bioyond:
           type: object
         type: UniLabJsonCommand
       auto-clear_workflows:
-        displayname: auto-clear_workflows
-        estimate_duration_express: ''
-        estimate_duration_fixed: 60.0
         feedback: {}
         goal: {}
         goal_default: {}
         handles: {}
-        lock_resource: []
         placeholder_keys: {}
         result: {}
         schema:
@@ -85,15 +77,11 @@ reaction_station.bioyond:
           type: object
         type: UniLabJsonCommand
       auto-create_order:
-        displayname: auto-create_order
-        estimate_duration_express: ''
-        estimate_duration_fixed: 60.0
         feedback: {}
         goal: {}
         goal_default:
           json_str: null
         handles: {}
-        lock_resource: []
         placeholder_keys: {}
         result: {}
         schema:
@@ -116,15 +104,11 @@ reaction_station.bioyond:
           type: object
         type: UniLabJsonCommand
       auto-hard_delete_merged_workflows:
-        displayname: auto-hard_delete_merged_workflows
-        estimate_duration_express: ''
-        estimate_duration_fixed: 60.0
         feedback: {}
         goal: {}
         goal_default:
           workflow_ids: null
         handles: {}
-        lock_resource: []
         placeholder_keys: {}
         result: {}
         schema:
@@ -149,15 +133,11 @@ reaction_station.bioyond:
           type: object
         type: UniLabJsonCommand
       auto-merge_workflow_with_parameters:
-        displayname: auto-merge_workflow_with_parameters
-        estimate_duration_express: ''
-        estimate_duration_fixed: 60.0
         feedback: {}
         goal: {}
         goal_default:
           json_str: null
         handles: {}
-        lock_resource: []
         placeholder_keys: {}
         result: {}
         schema:
@@ -180,15 +160,11 @@ reaction_station.bioyond:
           type: object
         type: UniLabJsonCommand
       auto-process_temperature_cutoff_report:
-        displayname: auto-process_temperature_cutoff_report
-        estimate_duration_express: ''
-        estimate_duration_fixed: 60.0
         feedback: {}
         goal: {}
         goal_default:
           report_request: null
         handles: {}
-        lock_resource: []
         placeholder_keys: {}
         result: {}
         schema:
@@ -210,15 +186,11 @@ reaction_station.bioyond:
           type: object
         type: UniLabJsonCommand
       auto-process_web_workflows:
-        displayname: auto-process_web_workflows
-        estimate_duration_express: ''
-        estimate_duration_fixed: 60.0
         feedback: {}
         goal: {}
         goal_default:
           web_workflow_json: null
         handles: {}
-        lock_resource: []
         placeholder_keys: {}
         result: {}
         schema:
@@ -245,16 +217,12 @@ reaction_station.bioyond:
           type: object
         type: UniLabJsonCommand
       auto-set_reactor_temperature:
-        displayname: auto-set_reactor_temperature
-        estimate_duration_express: ''
-        estimate_duration_fixed: 60.0
         feedback: {}
         goal: {}
         goal_default:
           reactor_id: null
           temperature: null
         handles: {}
-        lock_resource: []
         placeholder_keys: {}
         result: {}
         schema:
@@ -281,15 +249,11 @@ reaction_station.bioyond:
           type: object
         type: UniLabJsonCommand
       auto-skip_titration_steps:
-        displayname: auto-skip_titration_steps
-        estimate_duration_express: ''
-        estimate_duration_fixed: 60.0
         feedback: {}
         goal: {}
         goal_default:
           preintake_id: null
         handles: {}
-        lock_resource: []
         placeholder_keys: {}
         result: {}
         schema:
@@ -312,14 +276,10 @@ reaction_station.bioyond:
           type: object
         type: UniLabJsonCommand
       auto-sync_workflow_sequence_from_bioyond:
-        displayname: auto-sync_workflow_sequence_from_bioyond
-        estimate_duration_express: ''
-        estimate_duration_fixed: 60.0
         feedback: {}
         goal: {}
         goal_default: {}
         handles: {}
-        lock_resource: []
         placeholder_keys: {}
         result: {}
         schema:
@@ -338,9 +298,6 @@ reaction_station.bioyond:
           type: object
         type: UniLabJsonCommand
       auto-wait_for_multiple_orders_and_get_reports:
-        displayname: auto-wait_for_multiple_orders_and_get_reports
-        estimate_duration_express: ''
-        estimate_duration_fixed: 60.0
         feedback: {}
         goal: {}
         goal_default:
@@ -348,7 +305,6 @@ reaction_station.bioyond:
           check_interval: 10
           timeout: 7200
         handles: {}
-        lock_resource: []
         placeholder_keys: {}
         result: {}
         schema:
@@ -375,15 +331,11 @@ reaction_station.bioyond:
           type: object
         type: UniLabJsonCommand
       auto-workflow_sequence:
-        displayname: auto-workflow_sequence
-        estimate_duration_express: ''
-        estimate_duration_fixed: 60.0
         feedback: {}
         goal: {}
         goal_default:
           value: null
         handles: {}
-        lock_resource: []
         placeholder_keys: {}
         result: {}
         schema:
@@ -407,15 +359,11 @@ reaction_station.bioyond:
           type: object
         type: UniLabJsonCommand
       auto-workflow_step_query:
-        displayname: auto-workflow_step_query
-        estimate_duration_express: ''
-        estimate_duration_fixed: 60.0
         feedback: {}
         goal: {}
         goal_default:
           workflow_id: null
         handles: {}
-        lock_resource: []
         placeholder_keys: {}
         result: {}
         schema:
@@ -438,14 +386,10 @@ reaction_station.bioyond:
           type: object
         type: UniLabJsonCommand
       clean_all_server_workflows:
-        displayname: clean_all_server_workflows
-        estimate_duration_express: ''
-        estimate_duration_fixed: 60.0
         feedback: {}
         goal: {}
         goal_default: {}
         handles: {}
-        lock_resource: []
         placeholder_keys: {}
         result: {}
         schema:
@@ -464,9 +408,6 @@ reaction_station.bioyond:
           type: object
         type: UniLabJsonCommand
       drip_back:
-        displayname: drip_back
-        estimate_duration_express: ''
-        estimate_duration_fixed: 60.0
         feedback: {}
         goal:
           assign_material_name: assign_material_name
@@ -483,7 +424,6 @@ reaction_station.bioyond:
           torque_variation: 2
           volume: null
         handles: {}
-        lock_resource: []
         placeholder_keys: {}
         result: {}
         schema:
@@ -525,9 +465,6 @@ reaction_station.bioyond:
           type: object
         type: UniLabJsonCommand
       extract_actuals_from_batch_reports:
-        displayname: extract_actuals_from_batch_reports
-        estimate_duration_express: ''
-        estimate_duration_fixed: 60.0
         feedback: {}
         goal:
           batch_reports_result: batch_reports_result
@@ -548,7 +485,6 @@ reaction_station.bioyond:
             handler_key: ACTUALS_EXTRACTED
             io_type: sink
             label: Extracted Actuals
-        lock_resource: []
         placeholder_keys: {}
         result: {}
         schema:
@@ -572,9 +508,6 @@ reaction_station.bioyond:
           type: object
         type: UniLabJsonCommand
       liquid_feeding_beaker:
-        displayname: liquid_feeding_beaker
-        estimate_duration_express: ''
-        estimate_duration_fixed: 60.0
         feedback: {}
         goal:
           assign_material_name: assign_material_name
@@ -591,7 +524,6 @@ reaction_station.bioyond:
           torque_variation: 1
           volume: '350'
         handles: {}
-        lock_resource: []
         placeholder_keys: {}
         result: {}
         schema:
@@ -633,9 +565,6 @@ reaction_station.bioyond:
           type: object
         type: UniLabJsonCommand
       liquid_feeding_solvents:
-        displayname: liquid_feeding_solvents
-        estimate_duration_express: ''
-        estimate_duration_fixed: 60.0
         feedback: {}
         goal:
           assign_material_name: assign_material_name
@@ -661,7 +590,6 @@ reaction_station.bioyond:
             handler_key: solvents
             io_type: source
             label: Solvents Data From Calculation Node
-        lock_resource: []
         placeholder_keys: {}
         result: {}
         schema:
@@ -707,9 +635,6 @@ reaction_station.bioyond:
           type: object
         type: UniLabJsonCommand
       liquid_feeding_titration:
-        displayname: liquid_feeding_titration
-        estimate_duration_express: ''
-        estimate_duration_fixed: 60.0
         feedback: {}
         goal:
           assign_material_name: assign_material_name
@@ -745,7 +670,6 @@ reaction_station.bioyond:
             handler_key: feeding_order
             io_type: source
             label: Feeding Order Data From Calculation Node
-        lock_resource: []
         placeholder_keys: {}
         result: {}
         schema:
@@ -795,9 +719,6 @@ reaction_station.bioyond:
           type: object
         type: UniLabJsonCommand
       liquid_feeding_vials_non_titration:
-        displayname: liquid_feeding_vials_non_titration
-        estimate_duration_express: ''
-        estimate_duration_fixed: 60.0
         feedback: {}
         goal:
           assign_material_name: assign_material_name
@@ -814,7 +735,6 @@ reaction_station.bioyond:
           torque_variation: 1
           volume_formula: null
         handles: {}
-        lock_resource: []
         placeholder_keys: {}
         result: {}
         schema:
@@ -856,9 +776,6 @@ reaction_station.bioyond:
           type: object
         type: UniLabJsonCommand
       process_and_execute_workflow:
-        displayname: process_and_execute_workflow
-        estimate_duration_express: ''
-        estimate_duration_fixed: 60.0
         feedback: {}
         goal:
           task_name: task_name
@@ -867,7 +784,6 @@ reaction_station.bioyond:
           task_name: null
           workflow_name: null
         handles: {}
-        lock_resource: []
         placeholder_keys: {}
         result: {}
         schema:
@@ -894,9 +810,6 @@ reaction_station.bioyond:
           type: object
         type: UniLabJsonCommand
       reactor_taken_in:
-        displayname: reactor_taken_in
-        estimate_duration_express: ''
-        estimate_duration_fixed: 60.0
         feedback: {}
         goal:
           assign_material_name: assign_material_name
@@ -907,7 +820,6 @@ reaction_station.bioyond:
           cutoff: '900000'
           temperature: -10.0
         handles: {}
-        lock_resource: []
         placeholder_keys: {}
         result: {}
         schema:
@@ -937,14 +849,10 @@ reaction_station.bioyond:
           type: object
         type: UniLabJsonCommand
       reactor_taken_out:
-        displayname: reactor_taken_out
-        estimate_duration_express: ''
-        estimate_duration_fixed: 60.0
         feedback: {}
         goal: {}
         goal_default: {}
         handles: {}
-        lock_resource: []
         placeholder_keys: {}
         result: {}
         schema:
@@ -962,14 +870,10 @@ reaction_station.bioyond:
           type: object
         type: UniLabJsonCommand
       scheduler_start:
-        displayname: scheduler_start
-        estimate_duration_express: ''
-        estimate_duration_fixed: 60.0
         feedback: {}
         goal: {}
         goal_default: {}
         handles: {}
-        lock_resource: []
         placeholder_keys: {}
         result: {}
         schema:
@@ -989,9 +893,6 @@ reaction_station.bioyond:
           type: object
         type: UniLabJsonCommand
       solid_feeding_vials:
-        displayname: solid_feeding_vials
-        estimate_duration_express: ''
-        estimate_duration_fixed: 60.0
         feedback: {}
         goal:
           assign_material_name: assign_material_name
@@ -1006,7 +907,6 @@ reaction_station.bioyond:
           time: '0'
           torque_variation: 1
         handles: {}
-        lock_resource: []
         placeholder_keys: {}
         result: {}
         schema:
@@ -1049,10 +949,8 @@ reaction_station.bioyond:
     type: python
   config_info: []
   description: Bioyond反应站
-  displayname: reaction_station.bioyond
   handles: []
   icon: reaction_station.webp
-  init_param_enforce: {}
   init_param_schema:
     config:
       properties:
@@ -1074,7 +972,6 @@ reaction_station.bioyond:
       required:
       - workflow_sequence
       type: object
-  metadata: {}
   version: 1.0.0
 reaction_station.reactor:
   category:
@@ -1083,15 +980,11 @@ reaction_station.reactor:
   class:
     action_value_mappings:
       auto-update_metrics:
-        displayname: auto-update_metrics
-        estimate_duration_express: ''
-        estimate_duration_fixed: 60.0
         feedback: {}
         goal: {}
         goal_default:
           payload: null
         handles: {}
-        lock_resource: []
         placeholder_keys: {}
         result: {}
         schema:
@@ -1116,10 +1009,8 @@ reaction_station.reactor:
     type: python
   config_info: []
   description: 反应站子设备-反应器
-  displayname: reaction_station.reactor
   handles: []
   icon: reaction_station.webp
-  init_param_enforce: {}
   init_param_schema:
     config:
       properties:
@@ -1135,5 +1026,4 @@ reaction_station.reactor:
       properties: {}
       required: []
       type: object
-  metadata: {}
   version: 1.0.0

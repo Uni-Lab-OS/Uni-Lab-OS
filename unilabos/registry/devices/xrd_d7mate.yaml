@@ -4,14 +4,10 @@ xrd_d7mate:
   class:
     action_value_mappings:
       auto-close:
-        displayname: auto-close
-        estimate_duration_express: ''
-        estimate_duration_fixed: 60.0
         feedback: {}
         goal: {}
         goal_default: {}
         handles: {}
-        lock_resource: []
         placeholder_keys: {}
         result: {}
         schema:
@@ -29,14 +25,10 @@ xrd_d7mate:
           type: object
         type: UniLabJsonCommand
       auto-connect:
-        displayname: auto-connect
-        estimate_duration_express: ''
-        estimate_duration_fixed: 60.0
         feedback: {}
         goal: {}
         goal_default: {}
         handles: {}
-        lock_resource: []
         placeholder_keys: {}
         result: {}
         schema:
@@ -54,15 +46,11 @@ xrd_d7mate:
           type: object
         type: UniLabJsonCommand
       auto-start_from_string:
-        displayname: auto-start_from_string
-        estimate_duration_express: ''
-        estimate_duration_fixed: 60.0
         feedback: {}
         goal: {}
         goal_default:
           params: null
         handles: {}
-        lock_resource: []
         placeholder_keys: {}
         result: {}
         schema:
@@ -86,14 +74,10 @@ xrd_d7mate:
           type: object
         type: UniLabJsonCommand
       get_current_acquire_data:
-        displayname: get_current_acquire_data
-        estimate_duration_express: ''
-        estimate_duration_fixed: 60.0
         feedback: {}
         goal: {}
         goal_default: {}
         handles: {}
-        lock_resource: []
         result: {}
         schema:
           description: ''
@@ -119,9 +103,6 @@ xrd_d7mate:
           type: object
         type: EmptyIn
       get_sample_down:
-        displayname: get_sample_down
-        estimate_duration_express: ''
-        estimate_duration_fixed: 60.0
         feedback: {}
         goal:
           int_input: int_input
@@ -129,7 +110,6 @@ xrd_d7mate:
         goal_default:
           int_input: 0
         handles: {}
-        lock_resource: []
         placeholder_keys: {}
         result:
           return_info: return_info
@@ -165,14 +145,10 @@ xrd_d7mate:
           type: object
         type: IntSingleInput
       get_sample_request:
-        displayname: get_sample_request
-        estimate_duration_express: ''
-        estimate_duration_fixed: 60.0
         feedback: {}
         goal: {}
         goal_default: {}
         handles: {}
-        lock_resource: []
         result: {}
         schema:
           description: ''
@@ -198,14 +174,10 @@ xrd_d7mate:
           type: object
         type: EmptyIn
       get_sample_status:
-        displayname: get_sample_status
-        estimate_duration_express: ''
-        estimate_duration_fixed: 60.0
         feedback: {}
         goal: {}
         goal_default: {}
         handles: {}
-        lock_resource: []
         result: {}
         schema:
           description: ''
@@ -231,14 +203,10 @@ xrd_d7mate:
           type: object
         type: EmptyIn
       send_sample_down_ready:
-        displayname: send_sample_down_ready
-        estimate_duration_express: ''
-        estimate_duration_fixed: 60.0
         feedback: {}
         goal: {}
         goal_default: {}
         handles: {}
-        lock_resource: []
         placeholder_keys: {}
         result:
           return_info: return_info
@@ -266,9 +234,6 @@ xrd_d7mate:
           type: object
         type: EmptyIn
       send_sample_ready:
-        displayname: send_sample_ready
-        estimate_duration_express: ''
-        estimate_duration_fixed: 60.0
         feedback: {}
         goal:
           end_theta: 80.0
@@ -283,7 +248,6 @@ xrd_d7mate:
           sample_id: null
           start_theta: null
         handles: {}
-        lock_resource: []
         placeholder_keys: {}
         result: {}
         schema:
@@ -325,14 +289,10 @@ xrd_d7mate:
           type: object
         type: UniLabJsonCommand
       set_power_off:
-        displayname: set_power_off
-        estimate_duration_express: ''
-        estimate_duration_fixed: 60.0
         feedback: {}
         goal: {}
         goal_default: {}
         handles: {}
-        lock_resource: []
         placeholder_keys: {}
         result:
           return_info: return_info
@@ -360,14 +320,10 @@ xrd_d7mate:
           type: object
         type: EmptyIn
       set_power_on:
-        displayname: set_power_on
-        estimate_duration_express: ''
-        estimate_duration_fixed: 60.0
         feedback: {}
         goal: {}
         goal_default: {}
         handles: {}
-        lock_resource: []
         placeholder_keys: {}
         result:
           return_info: return_info
@@ -395,9 +351,6 @@ xrd_d7mate:
           type: object
         type: EmptyIn
       set_voltage_current:
-        displayname: set_voltage_current
-        estimate_duration_express: ''
-        estimate_duration_fixed: 60.0
         feedback: {}
         goal:
           current: 30.0
@@ -406,7 +359,6 @@ xrd_d7mate:
           current: null
           voltage: null
         handles: {}
-        lock_resource: []
         placeholder_keys: {}
         result: {}
         schema:
@@ -436,9 +388,6 @@ xrd_d7mate:
           type: object
         type: UniLabJsonCommand
       start:
-        displayname: start
-        estimate_duration_express: ''
-        estimate_duration_fixed: 60.0
         feedback: {}
         goal: {}
         goal_default:
@@ -450,7 +399,6 @@ xrd_d7mate:
           string: ''
           wait_minutes: 3.0
         handles: {}
-        lock_resource: []
         placeholder_keys: {}
         result: {}
         schema:
@@ -499,16 +447,12 @@ xrd_d7mate:
           type: object
         type: UniLabJsonCommand
       start_auto_mode:
-        displayname: start_auto_mode
-        estimate_duration_express: ''
-        estimate_duration_fixed: 60.0
         feedback: {}
         goal:
           status: true
         goal_default:
           status: null
         handles: {}
-        lock_resource: []
         placeholder_keys: {}
         result: {}
         schema:
@@ -541,10 +485,8 @@ xrd_d7mate:
     type: python
   config_info: []
   description: XRD D7-Mate X射线衍射分析设备，通过TCP通信实现远程控制与状态监控，支持自动模式控制、上样流程、数据获取、下样流程和高压电源控制等功能。
-  displayname: xrd_d7mate
   handles: []
   icon: ''
-  init_param_enforce: {}
   init_param_schema:
     config:
       properties:
@@ -575,5 +517,4 @@ xrd_d7mate:
       - sample_request
       - sample_status
       type: object
-  metadata: {}
   version: 1.0.0

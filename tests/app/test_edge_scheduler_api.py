@@ -10,9 +10,7 @@ from unilabos.app.scheduler.api import create_app  # noqa: E402
 
 @pytest.fixture()
 def client():
-    return TestClient(
-        create_app(include_execution_shaped_workflow_routes=True)
-    )
+    return TestClient(create_app())
 
 
 def _workflow_body(workflow_id: str = "wf-api") -> dict:

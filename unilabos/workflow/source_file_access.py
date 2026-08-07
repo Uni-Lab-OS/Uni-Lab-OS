@@ -279,6 +279,16 @@ def is_reparse_point(metadata: os.stat_result) -> bool:
     return bool(getattr(metadata, "st_file_attributes", 0) & 0x400)
 
 
+def binary_open_flags(flags: int) -> int:
+    """为原始文件描述符显式添加当前平台的二进制模式。
+
+    参数：``flags`` 是传给 ``os.open`` 的既有标志。返回：Windows 上额外包含
+    ``O_BINARY``、其他平台保持等价的标志组合，避免 CRT 把 CRLF 转换为 LF。
+    """
+
+    return flags | getattr(os, "O_BINARY", 0)
+
+
 def _file_flags() -> int:
     """返回绝对路径普通文件只读所需的平台可用标志。
 
@@ -287,7 +297,7 @@ def _file_flags() -> int:
     被误判为 ``unstable_regular_file``。
     """
 
-    return (
+    return binary_open_flags(
         os.O_RDONLY
         | getattr(os, "O_BINARY", 0)
         | getattr(os, "O_CLOEXEC", 0)
@@ -300,6 +310,7 @@ __all__ = [
     "StableFileAccessError",
     "StableFileSnapshot",
     "assert_directory_identity",
+    "binary_open_flags",
     "directory_identity",
     "ensure_child_directory",
     "is_reparse_point",

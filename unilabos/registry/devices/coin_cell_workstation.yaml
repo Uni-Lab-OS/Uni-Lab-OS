@@ -4,15 +4,11 @@ coincellassemblyworkstation_device:
   class:
     action_value_mappings:
       auto-change_hole_sheet_to_2:
-        displayname: auto-change_hole_sheet_to_2
-        estimate_duration_express: ''
-        estimate_duration_fixed: 60.0
         feedback: {}
         goal: {}
         goal_default:
           hole: null
         handles: {}
-        lock_resource: []
         placeholder_keys: {}
         result: {}
         schema:
@@ -33,14 +29,10 @@ coincellassemblyworkstation_device:
           type: object
         type: UniLabJsonCommandAsync
       auto-fill_plate:
-        displayname: auto-fill_plate
-        estimate_duration_express: ''
-        estimate_duration_fixed: 60.0
         feedback: {}
         goal: {}
         goal_default: {}
         handles: {}
-        lock_resource: []
         placeholder_keys: {}
         result: {}
         schema:
@@ -58,14 +50,10 @@ coincellassemblyworkstation_device:
           type: object
         type: UniLabJsonCommandAsync
       auto-fun_wuliao_test:
-        displayname: auto-fun_wuliao_test
-        estimate_duration_express: ''
-        estimate_duration_fixed: 60.0
         feedback: {}
         goal: {}
         goal_default: {}
         handles: {}
-        lock_resource: []
         placeholder_keys: {}
         result: {}
         schema:
@@ -84,9 +72,6 @@ coincellassemblyworkstation_device:
           type: object
         type: UniLabJsonCommand
       auto-func_allpack_cmd:
-        displayname: auto-func_allpack_cmd
-        estimate_duration_express: ''
-        estimate_duration_fixed: 60.0
         feedback: {}
         goal: {}
         goal_default:
@@ -97,7 +82,6 @@ coincellassemblyworkstation_device:
           elec_vol: 50
           file_path: /Users/sml/work
         handles: {}
-        lock_resource: []
         placeholder_keys: {}
         result: {}
         schema:
@@ -134,9 +118,6 @@ coincellassemblyworkstation_device:
           type: object
         type: UniLabJsonCommand
       auto-func_allpack_cmd_simp:
-        displayname: auto-func_allpack_cmd_simp
-        estimate_duration_express: ''
-        estimate_duration_fixed: 60.0
         feedback: {}
         goal: {}
         goal_default:
@@ -159,7 +140,6 @@ coincellassemblyworkstation_device:
           lvbodian: true
           qiangtou_juzhendianwei: 0
         handles: {}
-        lock_resource: []
         placeholder_keys: {}
         result: {}
         schema:
@@ -250,14 +230,10 @@ coincellassemblyworkstation_device:
           type: object
         type: UniLabJsonCommand
       auto-func_get_csv_export_status:
-        displayname: auto-func_get_csv_export_status
-        estimate_duration_express: ''
-        estimate_duration_fixed: 60.0
         feedback: {}
         goal: {}
         goal_default: {}
         handles: {}
-        lock_resource: []
         placeholder_keys: {}
         result: {}
         schema:
@@ -275,14 +251,10 @@ coincellassemblyworkstation_device:
           type: object
         type: UniLabJsonCommand
       auto-func_pack_device_auto:
-        displayname: auto-func_pack_device_auto
-        estimate_duration_express: ''
-        estimate_duration_fixed: 60.0
         feedback: {}
         goal: {}
         goal_default: {}
         handles: {}
-        lock_resource: []
         placeholder_keys: {}
         result: {}
         schema:
@@ -300,14 +272,10 @@ coincellassemblyworkstation_device:
           type: object
         type: UniLabJsonCommand
       auto-func_pack_device_init:
-        displayname: auto-func_pack_device_init
-        estimate_duration_express: ''
-        estimate_duration_fixed: 60.0
         feedback: {}
         goal: {}
         goal_default: {}
         handles: {}
-        lock_resource: []
         placeholder_keys: {}
         result: {}
         schema:
@@ -325,15 +293,11 @@ coincellassemblyworkstation_device:
           type: object
         type: UniLabJsonCommand
       auto-func_pack_device_init_auto_start_combined:
-        displayname: auto-func_pack_device_init_auto_start_combined
-        estimate_duration_express: ''
-        estimate_duration_fixed: 60.0
         feedback: {}
         goal: {}
         goal_default:
           material_search_enable: false
         handles: {}
-        lock_resource: []
         placeholder_keys: {}
         result: {}
         schema:
@@ -362,14 +326,10 @@ coincellassemblyworkstation_device:
           type: object
         type: UniLabJsonCommand
       auto-func_pack_device_start:
-        displayname: auto-func_pack_device_start
-        estimate_duration_express: ''
-        estimate_duration_fixed: 60.0
         feedback: {}
         goal: {}
         goal_default: {}
         handles: {}
-        lock_resource: []
         placeholder_keys: {}
         result: {}
         schema:
@@ -387,14 +347,10 @@ coincellassemblyworkstation_device:
           type: object
         type: UniLabJsonCommand
       auto-func_pack_device_stop:
-        displayname: auto-func_pack_device_stop
-        estimate_duration_express: ''
-        estimate_duration_fixed: 60.0
         feedback: {}
         goal: {}
         goal_default: {}
         handles: {}
-        lock_resource: []
         placeholder_keys: {}
         result: {}
         schema:
@@ -413,15 +369,11 @@ coincellassemblyworkstation_device:
           type: object
         type: UniLabJsonCommand
       auto-func_pack_get_msg_cmd:
-        displayname: auto-func_pack_get_msg_cmd
-        estimate_duration_express: ''
-        estimate_duration_fixed: 60.0
         feedback: {}
         goal: {}
         goal_default:
           file_path: D:\coin_cell_data
         handles: {}
-        lock_resource: []
         placeholder_keys: {}
         result: {}
         schema:
@@ -443,9 +395,6 @@ coincellassemblyworkstation_device:
           type: object
         type: UniLabJsonCommand
       auto-func_pack_send_bottle_num:
-        displayname: auto-func_pack_send_bottle_num
-        estimate_duration_express: ''
-        estimate_duration_fixed: 60.0
         feedback: {}
         goal: {}
         goal_default:
@@ -459,7 +408,6 @@ coincellassemblyworkstation_device:
             io_type: source
             label: 配液瓶数
             required: true
-        lock_resource: []
         placeholder_keys: {}
         result: {}
         schema:
@@ -480,14 +428,10 @@ coincellassemblyworkstation_device:
           type: object
         type: UniLabJsonCommand
       auto-func_pack_send_finished_cmd:
-        displayname: auto-func_pack_send_finished_cmd
-        estimate_duration_express: ''
-        estimate_duration_fixed: 60.0
         feedback: {}
         goal: {}
         goal_default: {}
         handles: {}
-        lock_resource: []
         placeholder_keys: {}
         result: {}
         schema:
@@ -506,9 +450,6 @@ coincellassemblyworkstation_device:
           type: object
         type: UniLabJsonCommand
       auto-func_pack_send_msg_cmd:
-        displayname: auto-func_pack_send_msg_cmd
-        estimate_duration_express: ''
-        estimate_duration_fixed: 60.0
         feedback: {}
         goal: {}
         goal_default:
@@ -517,7 +458,6 @@ coincellassemblyworkstation_device:
           elec_use_num: null
           elec_vol: null
         handles: {}
-        lock_resource: []
         placeholder_keys: {}
         result: {}
         schema:
@@ -548,15 +488,11 @@ coincellassemblyworkstation_device:
           type: object
         type: UniLabJsonCommand
       auto-func_read_data_and_output:
-        displayname: auto-func_read_data_and_output
-        estimate_duration_express: ''
-        estimate_duration_fixed: 60.0
         feedback: {}
         goal: {}
         goal_default:
           file_path: /Users/sml/work
         handles: {}
-        lock_resource: []
         placeholder_keys: {}
         result: {}
         schema:
@@ -577,9 +513,6 @@ coincellassemblyworkstation_device:
           type: object
         type: UniLabJsonCommand
       auto-func_sendbottle_allpack_multi:
-        displayname: auto-func_sendbottle_allpack_multi
-        estimate_duration_express: ''
-        estimate_duration_fixed: 60.0
         feedback: {}
         goal: {}
         goal_default:
@@ -610,7 +543,6 @@ coincellassemblyworkstation_device:
             io_type: source
             label: 配液瓶数
             required: true
-        lock_resource: []
         placeholder_keys: {}
         result: {}
         schema:
@@ -701,14 +633,10 @@ coincellassemblyworkstation_device:
           type: object
         type: UniLabJsonCommand
       auto-func_stop_read_data:
-        displayname: auto-func_stop_read_data
-        estimate_duration_express: ''
-        estimate_duration_fixed: 60.0
         feedback: {}
         goal: {}
         goal_default: {}
         handles: {}
-        lock_resource: []
         placeholder_keys: {}
         result: {}
         schema:
@@ -726,15 +654,11 @@ coincellassemblyworkstation_device:
           type: object
         type: UniLabJsonCommand
       auto-modify_deck_name:
-        displayname: auto-modify_deck_name
-        estimate_duration_express: ''
-        estimate_duration_fixed: 60.0
         feedback: {}
         goal: {}
         goal_default:
           resource_name: null
         handles: {}
-        lock_resource: []
         placeholder_keys: {}
         result: {}
         schema:
@@ -755,9 +679,6 @@ coincellassemblyworkstation_device:
           type: object
         type: UniLabJsonCommand
       auto-qiming_coin_cell_code:
-        displayname: auto-qiming_coin_cell_code
-        estimate_duration_express: ''
-        estimate_duration_fixed: 60.0
         feedback: {}
         goal: {}
         goal_default:
@@ -770,7 +691,6 @@ coincellassemblyworkstation_device:
           gemopanshu: 0
           lvbodian: true
         handles: {}
-        lock_resource: []
         placeholder_keys: {}
         result: {}
         schema:
@@ -836,10 +756,8 @@ coincellassemblyworkstation_device:
     type: python
   config_info: []
   description: ''
-  displayname: coincellassemblyworkstation_device
   handles: []
   icon: koudian.webp
-  init_param_enforce: {}
   init_param_schema:
     config:
       properties:
@@ -919,5 +837,4 @@ coincellassemblyworkstation_device:
       - sys_mode
       - sys_status
       type: object
-  metadata: {}
   version: 1.0.0

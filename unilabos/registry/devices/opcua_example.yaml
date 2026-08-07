@@ -4,14 +4,10 @@ opcua_example:
   class:
     action_value_mappings:
       auto-disconnect:
-        displayname: auto-disconnect
-        estimate_duration_express: ''
-        estimate_duration_fixed: 60.0
         feedback: {}
         goal: {}
         goal_default: {}
         handles: {}
-        lock_resource: []
         placeholder_keys: {}
         result: {}
         schema:
@@ -29,15 +25,11 @@ opcua_example:
           type: object
         type: UniLabJsonCommand
       auto-load_config:
-        displayname: auto-load_config
-        estimate_duration_express: ''
-        estimate_duration_fixed: 60.0
         feedback: {}
         goal: {}
         goal_default:
           config_path: null
         handles: {}
-        lock_resource: []
         placeholder_keys: {}
         result: {}
         schema:
@@ -58,14 +50,10 @@ opcua_example:
           type: object
         type: UniLabJsonCommand
       auto-refresh_node_values:
-        displayname: auto-refresh_node_values
-        estimate_duration_express: ''
-        estimate_duration_fixed: 60.0
         feedback: {}
         goal: {}
         goal_default: {}
         handles: {}
-        lock_resource: []
         placeholder_keys: {}
         result: {}
         schema:
@@ -83,16 +71,12 @@ opcua_example:
           type: object
         type: UniLabJsonCommand
       auto-set_node_value:
-        displayname: auto-set_node_value
-        estimate_duration_express: ''
-        estimate_duration_fixed: 60.0
         feedback: {}
         goal: {}
         goal_default:
           name: null
           value: null
         handles: {}
-        lock_resource: []
         placeholder_keys: {}
         result: {}
         schema:
@@ -116,14 +100,10 @@ opcua_example:
           type: object
         type: UniLabJsonCommand
       auto-start_node_refresh:
-        displayname: auto-start_node_refresh
-        estimate_duration_express: ''
-        estimate_duration_fixed: 60.0
         feedback: {}
         goal: {}
         goal_default: {}
         handles: {}
-        lock_resource: []
         placeholder_keys: {}
         result: {}
         schema:
@@ -141,14 +121,10 @@ opcua_example:
           type: object
         type: UniLabJsonCommand
       auto-stop_node_refresh:
-        displayname: auto-stop_node_refresh
-        estimate_duration_express: ''
-        estimate_duration_fixed: 60.0
         feedback: {}
         goal: {}
         goal_default: {}
         handles: {}
-        lock_resource: []
         placeholder_keys: {}
         result: {}
         schema:
@@ -170,10 +146,8 @@ opcua_example:
     type: python
   config_info: []
   description: null
-  displayname: opcua_example
   handles: []
   icon: ''
-  init_param_enforce: {}
   init_param_schema:
     config:
       properties:
@@ -195,5 +169,4 @@ opcua_example:
       properties: {}
       required: []
       type: object
-  metadata: {}
   version: 1.0.0

@@ -4,9 +4,6 @@ solid_dispenser.laiyu:
   class:
     action_value_mappings:
       add_powder_tube:
-        displayname: add_powder_tube
-        estimate_duration_express: ''
-        estimate_duration_fixed: 60.0
         feedback: {}
         goal:
           compound_mass: compound_mass
@@ -17,7 +14,6 @@ solid_dispenser.laiyu:
           powder_tube_number: 0
           target_tube_position: ''
         handles: {}
-        lock_resource: []
         placeholder_keys: {}
         result:
           actual_mass_mg: actual_mass_mg
@@ -64,15 +60,11 @@ solid_dispenser.laiyu:
           type: object
         type: SolidDispenseAddPowderTube
       auto-calculate_crc:
-        displayname: auto-calculate_crc
-        estimate_duration_express: ''
-        estimate_duration_fixed: 60.0
         feedback: {}
         goal: {}
         goal_default:
           data: null
         handles: {}
-        lock_resource: []
         placeholder_keys: {}
         result: {}
         schema:
@@ -94,15 +86,11 @@ solid_dispenser.laiyu:
           type: object
         type: UniLabJsonCommand
       auto-send_command:
-        displayname: auto-send_command
-        estimate_duration_express: ''
-        estimate_duration_fixed: 60.0
         feedback: {}
         goal: {}
         goal_default:
           command: null
         handles: {}
-        lock_resource: []
         placeholder_keys: {}
         result: {}
         schema:
@@ -124,16 +112,12 @@ solid_dispenser.laiyu:
           type: object
         type: UniLabJsonCommand
       discharge:
-        displayname: discharge
-        estimate_duration_express: ''
-        estimate_duration_fixed: 60.0
         feedback: {}
         goal:
           float_in: float_in
         goal_default:
           float_in: 0.0
         handles: {}
-        lock_resource: []
         placeholder_keys: {}
         result:
           return_info: return_info
@@ -169,16 +153,12 @@ solid_dispenser.laiyu:
           type: object
         type: FloatSingleInput
       move_to_plate:
-        displayname: move_to_plate
-        estimate_duration_express: ''
-        estimate_duration_fixed: 60.0
         feedback: {}
         goal:
           string: string
         goal_default:
           string: ''
         handles: {}
-        lock_resource: []
         placeholder_keys: {}
         result:
           return_info: return_info
@@ -212,9 +192,6 @@ solid_dispenser.laiyu:
           type: object
         type: StrSingleInput
       move_to_xyz:
-        displayname: move_to_xyz
-        estimate_duration_express: ''
-        estimate_duration_fixed: 60.0
         feedback: {}
         goal:
           x: x
@@ -225,7 +202,6 @@ solid_dispenser.laiyu:
           y: 0.0
           z: 0.0
         handles: {}
-        lock_resource: []
         placeholder_keys: {}
         result:
           return_info: return_info
@@ -269,16 +245,12 @@ solid_dispenser.laiyu:
           type: object
         type: Point3DSeparateInput
       pick_powder_tube:
-        displayname: pick_powder_tube
-        estimate_duration_express: ''
-        estimate_duration_fixed: 60.0
         feedback: {}
         goal:
           int_input: int_input
         goal_default:
           int_input: 0
         handles: {}
-        lock_resource: []
         placeholder_keys: {}
         result:
           return_info: return_info
@@ -314,16 +286,12 @@ solid_dispenser.laiyu:
           type: object
         type: IntSingleInput
       put_powder_tube:
-        displayname: put_powder_tube
-        estimate_duration_express: ''
-        estimate_duration_fixed: 60.0
         feedback: {}
         goal:
           int_input: int_input
         goal_default:
           int_input: 0
         handles: {}
-        lock_resource: []
         placeholder_keys: {}
         result:
           return_info: return_info
@@ -359,14 +327,10 @@ solid_dispenser.laiyu:
           type: object
         type: IntSingleInput
       reset:
-        displayname: reset
-        estimate_duration_express: ''
-        estimate_duration_fixed: 60.0
         feedback: {}
         goal: {}
         goal_default: {}
         handles: {}
-        lock_resource: []
         placeholder_keys: {}
         result:
           return_info: return_info
@@ -399,10 +363,8 @@ solid_dispenser.laiyu:
     type: python
   config_info: []
   description: 来渝固体粉末自动分装设备，用于实验室化学试剂的精确称量和分装。该设备通过Modbus RTU协议与控制系统通信，集成了精密天平、三轴运动平台、粉筒管理系统等组件。支持多种粉末试剂的自动拿取、精确称量、定点分装和归位操作。具备高精度称量、位置控制和批量处理能力，适用于化学合成、药物研发、材料制备等需要精确固体试剂配制的实验室应用场景。
-  displayname: solid_dispenser.laiyu
   handles: []
   icon: ''
-  init_param_enforce: {}
   init_param_schema:
     config:
       properties:
@@ -424,5 +386,4 @@ solid_dispenser.laiyu:
       required:
       - status
       type: object
-  metadata: {}
   version: 1.0.0

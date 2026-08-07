@@ -4,9 +4,6 @@ chiller:
   class:
     action_value_mappings:
       auto-build_modbus_frame:
-        displayname: auto-build_modbus_frame
-        estimate_duration_express: ''
-        estimate_duration_fixed: 60.0
         feedback: {}
         goal: {}
         goal_default:
@@ -15,7 +12,6 @@ chiller:
           register_address: null
           value: null
         handles: {}
-        lock_resource: []
         placeholder_keys: {}
         result: {}
         schema:
@@ -46,16 +42,12 @@ chiller:
           type: object
         type: UniLabJsonCommand
       auto-convert_temperature_to_modbus_value:
-        displayname: auto-convert_temperature_to_modbus_value
-        estimate_duration_express: ''
-        estimate_duration_fixed: 60.0
         feedback: {}
         goal: {}
         goal_default:
           decimal_points: 1
           temperature: null
         handles: {}
-        lock_resource: []
         placeholder_keys: {}
         result: {}
         schema:
@@ -80,15 +72,11 @@ chiller:
           type: object
         type: UniLabJsonCommand
       auto-modbus_crc:
-        displayname: auto-modbus_crc
-        estimate_duration_express: ''
-        estimate_duration_fixed: 60.0
         feedback: {}
         goal: {}
         goal_default:
           data: null
         handles: {}
-        lock_resource: []
         placeholder_keys: {}
         result: {}
         schema:
@@ -110,14 +98,10 @@ chiller:
           type: object
         type: UniLabJsonCommand
       auto-stop:
-        displayname: auto-stop
-        estimate_duration_express: ''
-        estimate_duration_fixed: 60.0
         feedback: {}
         goal: {}
         goal_default: {}
         handles: {}
-        lock_resource: []
         placeholder_keys: {}
         result: {}
         schema:
@@ -135,9 +119,6 @@ chiller:
           type: object
         type: UniLabJsonCommand
       set_temperature:
-        displayname: set_temperature
-        estimate_duration_express: ''
-        estimate_duration_fixed: 60.0
         feedback:
           status: status
         goal:
@@ -145,7 +126,6 @@ chiller:
         goal_default:
           command: ''
         handles: {}
-        lock_resource: []
         placeholder_keys: {}
         result:
           return_info: return_info
@@ -186,10 +166,8 @@ chiller:
     type: python
   config_info: []
   description: 实验室制冷设备，用于精确的温度控制和冷却操作。该设备通过Modbus RTU协议与控制系统通信，支持精确的温度设定和监控。具备快速降温、恒温控制和温度保持功能，广泛应用于需要低温环境的化学反应、样品保存、结晶操作等实验场景。提供稳定可靠的冷却性能，确保实验过程的温度精度。
-  displayname: chiller
   handles: []
   icon: ''
-  init_param_enforce: {}
   init_param_schema:
     config:
       properties:
@@ -205,7 +183,6 @@ chiller:
       properties: {}
       required: []
       type: object
-  metadata: {}
   version: 1.0.0
 heaterstirrer.dalong:
   category:
@@ -213,14 +190,10 @@ heaterstirrer.dalong:
   class:
     action_value_mappings:
       auto-close:
-        displayname: auto-close
-        estimate_duration_express: ''
-        estimate_duration_fixed: 60.0
         feedback: {}
         goal: {}
         goal_default: {}
         handles: {}
-        lock_resource: []
         placeholder_keys: {}
         result: {}
         schema:
@@ -238,15 +211,11 @@ heaterstirrer.dalong:
           type: object
         type: UniLabJsonCommand
       auto-set_stir_speed:
-        displayname: auto-set_stir_speed
-        estimate_duration_express: ''
-        estimate_duration_fixed: 60.0
         feedback: {}
         goal: {}
         goal_default:
           speed: null
         handles: {}
-        lock_resource: []
         placeholder_keys: {}
         result: {}
         schema:
@@ -267,16 +236,12 @@ heaterstirrer.dalong:
           type: object
         type: UniLabJsonCommand
       auto-set_temp_inner:
-        displayname: auto-set_temp_inner
-        estimate_duration_express: ''
-        estimate_duration_fixed: 60.0
         feedback: {}
         goal: {}
         goal_default:
           temp: null
           type: warning
         handles: {}
-        lock_resource: []
         placeholder_keys: {}
         result: {}
         schema:
@@ -300,9 +265,6 @@ heaterstirrer.dalong:
           type: object
         type: UniLabJsonCommand
       heatchill:
-        displayname: heatchill
-        estimate_duration_express: ''
-        estimate_duration_fixed: 60.0
         feedback:
           status: status
         goal:
@@ -347,7 +309,6 @@ heaterstirrer.dalong:
             sample_id: ''
             type: ''
         handles: {}
-        lock_resource: []
         placeholder_keys: {}
         result:
           message: message
@@ -498,9 +459,6 @@ heaterstirrer.dalong:
           type: object
         type: HeatChill
       set_temp_target:
-        displayname: set_temp_target
-        estimate_duration_express: ''
-        estimate_duration_fixed: 60.0
         feedback:
           status: status
         goal:
@@ -509,7 +467,6 @@ heaterstirrer.dalong:
         goal_default:
           command: ''
         handles: {}
-        lock_resource: []
         placeholder_keys: {}
         result:
           return_info: return_info
@@ -546,9 +503,6 @@ heaterstirrer.dalong:
           type: object
         type: SendCmd
       set_temp_warning:
-        displayname: set_temp_warning
-        estimate_duration_express: ''
-        estimate_duration_fixed: 60.0
         feedback:
           status: status
         goal:
@@ -557,7 +511,6 @@ heaterstirrer.dalong:
         goal_default:
           command: ''
         handles: {}
-        lock_resource: []
         placeholder_keys: {}
         result:
           return_info: return_info
@@ -603,10 +556,8 @@ heaterstirrer.dalong:
     type: python
   config_info: []
   description: 大龙加热搅拌器，集成加热和搅拌双重功能的实验室设备。该设备通过串口通信控制，支持精确的温度调节、搅拌速度控制和安全保护功能。具备实时温度监测、目标温度设定、安全温度报警等特性。适用于化学合成、样品制备、反应控制等需要同时进行加热和搅拌的实验操作，提供稳定均匀的反应环境。
-  displayname: heaterstirrer.dalong
   handles: []
   icon: ''
-  init_param_enforce: {}
   init_param_schema:
     config:
       properties:
@@ -640,7 +591,6 @@ heaterstirrer.dalong:
       - temp_target
       - temp_warning
       type: object
-  metadata: {}
   version: 1.0.0
 tempsensor:
   category:
@@ -648,9 +598,6 @@ tempsensor:
   class:
     action_value_mappings:
       auto-build_modbus_request:
-        displayname: auto-build_modbus_request
-        estimate_duration_express: ''
-        estimate_duration_fixed: 60.0
         feedback: {}
         goal: {}
         goal_default:
@@ -659,7 +606,6 @@ tempsensor:
           register_address: null
           register_count: null
         handles: {}
-        lock_resource: []
         placeholder_keys: {}
         result: {}
         schema:
@@ -689,15 +635,11 @@ tempsensor:
           type: object
         type: UniLabJsonCommand
       auto-calculate_crc:
-        displayname: auto-calculate_crc
-        estimate_duration_express: ''
-        estimate_duration_fixed: 60.0
         feedback: {}
         goal: {}
         goal_default:
           data: null
         handles: {}
-        lock_resource: []
         placeholder_keys: {}
         result: {}
         schema:
@@ -718,15 +660,11 @@ tempsensor:
           type: object
         type: UniLabJsonCommand
       auto-read_modbus_response:
-        displayname: auto-read_modbus_response
-        estimate_duration_express: ''
-        estimate_duration_fixed: 60.0
         feedback: {}
         goal: {}
         goal_default:
           response: null
         handles: {}
-        lock_resource: []
         placeholder_keys: {}
         result: {}
         schema:
@@ -747,15 +685,11 @@ tempsensor:
           type: object
         type: UniLabJsonCommand
       auto-send_prototype_command:
-        displayname: auto-send_prototype_command
-        estimate_duration_express: ''
-        estimate_duration_fixed: 60.0
         feedback: {}
         goal: {}
         goal_default:
           command: null
         handles: {}
-        lock_resource: []
         placeholder_keys: {}
         result: {}
         schema:
@@ -776,9 +710,6 @@ tempsensor:
           type: object
         type: UniLabJsonCommand
       set_warning:
-        displayname: set_warning
-        estimate_duration_express: ''
-        estimate_duration_fixed: 60.0
         feedback:
           status: status
         goal:
@@ -786,7 +717,6 @@ tempsensor:
         goal_default:
           command: ''
         handles: {}
-        lock_resource: []
         placeholder_keys: {}
         result:
           return_info: return_info
@@ -828,10 +758,8 @@ tempsensor:
     type: python
   config_info: []
   description: 高精度温度传感器设备，用于实验室环境和设备的温度监测。该传感器通过Modbus RTU协议与控制系统通信，提供实时准确的温度数据。具备高精度测量、报警温度设定、数据稳定性好等特点。适用于反应器监控、环境温度监测、设备保护等需要精确温度测量的实验场景，为实验安全和数据可靠性提供保障。
-  displayname: tempsensor
   handles: []
   icon: ''
-  init_param_enforce: {}
   init_param_schema:
     config:
       properties:
@@ -856,5 +784,4 @@ tempsensor:
       required:
       - value
       type: object
-  metadata: {}
   version: 1.0.0

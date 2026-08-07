@@ -6,11 +6,9 @@ bottle_container:
     module: unilabos.devices.resource_container.container:BottleRackContainer
     type: python
   description: 96孔板
-  displayname: bottle_container
   handles: []
   icon: ''
   init_param_schema: {}
-  metadata: {}
   model:
     children_mesh: bottle/meshes/bottle.stl
     children_mesh_path: https://leap-lab.oss-cn-zhangjiakou.aliyuncs.com/uni-lab/resources/bottle/modal.xacro
@@ -40,11 +38,9 @@ tube_container:
     module: unilabos.devices.resource_container.container:TubeRackContainer
     type: python
   description: 96孔板
-  displayname: tube_container
   handles: []
   icon: ''
   init_param_schema: {}
-  metadata: {}
   model:
     children_mesh: tube/meshes/tube.stl
     children_mesh_path: https://leap-lab.oss-cn-zhangjiakou.aliyuncs.com/uni-lab/resources/tube/modal.xacro

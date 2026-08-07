@@ -15,9 +15,17 @@ from dataclasses import dataclass
 from pathlib import Path
 from uuid import uuid4
 
+from unilabos.workflow.darwin_draft_cas import (
+    DarwinDraftCasConflict,
+    DarwinDraftCasInternalError,
+    DarwinDraftCasInvalidTarget,
+    supports_darwin_draft_cas,
+    write_darwin_draft_cas,
+)
 from unilabos.workflow.source_file_access import (
     StableFileAccessError,
     assert_directory_identity,
+    binary_open_flags,
     directory_identity,
     is_reparse_point,
     read_regular_path,
@@ -129,9 +137,14 @@ class _PublicationDirectory:
         # ``st_size`` 不一致，CAS 会被误判为 ``draft_hash_conflict``。
         flags |= getattr(os, "O_BINARY", 0)
         if self.descriptor is not None:
-            return os.open(name, flags, mode, dir_fd=self.descriptor)
+            return os.open(
+                name,
+                binary_open_flags(flags),
+                mode,
+                dir_fd=self.descriptor,
+            )
         assert self.path is not None
-        return os.open(self.path / name, flags, mode)
+        return os.open(self.path / name, binary_open_flags(flags), mode)
 
     def stat_child(self, name: str) -> os.stat_result:
         """不跟随符号链接读取一个单段子文件元数据。
@@ -254,9 +267,17 @@ def atomic_publish_source(
     ):
         raise SourcePublicationError("publication_failed")
     if _PLATFORM.startswith("darwin") and expected_hash is not NO_EXPECTED_HASH:
-        # macOS ``flock`` 是 advisory lock，无法阻止外部编辑器在最终检查后以
-        # rename 覆盖竞争稿；在具备 RENAME_SWAP+backup 证据协议前明确失败关闭。
-        raise SourcePublicationConflict("draft_hash_conflict")
+        # Darwin 使用 renameatx_np(RENAME_SWAP) 原生 CAS；不具备该能力时仍失败关闭，
+        # 绝不退回仅依赖 advisory flock 的替换路径。
+        _atomic_publish_source_darwin(
+            parent_descriptor=parent_descriptor,
+            parent_path=parent_path,
+            target_name=target_name,
+            content=content,
+            byte_limit=byte_limit,
+            expected_hash=expected_hash,
+        )
+        return
     location = _PublicationDirectory.create(
         parent_descriptor=parent_descriptor,
         parent_path=parent_path,
@@ -316,6 +337,117 @@ def atomic_publish_source(
         raise_classified_publication_os_error(error)
     except StableFileAccessError:
         raise SourcePublicationError("publication_failed") from None
+
+
+def _atomic_publish_source_darwin(
+    *,
+    parent_descriptor: int | None,
+    parent_path: str | Path | None,
+    target_name: str,
+    content: bytes,
+    byte_limit: int,
+    expected_hash: str | None,
+) -> None:
+    """在 Darwin 上发布草稿：缺失则独占创建，已有则走原生 RENAME_SWAP CAS。
+
+    参数：父目录访问方式与 ``atomic_publish_source`` 相同；``expected_hash`` 为
+    ``None`` 表示目标必须尚不存在，字符串则必须匹配当前草稿。返回：成功写入后
+    无返回值。异常：CAS 不匹配抛出 ``SourcePublicationConflict``；不具备原生 CAS
+    或不安全目标抛出冲突或 ``SourcePublicationError``。
+    """
+
+    if expected_hash is not None:
+        if not isinstance(expected_hash, str):
+            raise SourcePublicationError("publication_failed")
+        if not supports_darwin_draft_cas():
+            raise SourcePublicationConflict("draft_hash_conflict")
+
+    location = _PublicationDirectory.create(
+        parent_descriptor=parent_descriptor,
+        parent_path=parent_path,
+    )
+    owned_directory = -1
+    try:
+        if location.descriptor is not None:
+            parent_fd = location.descriptor
+        else:
+            assert location.path is not None
+            try:
+                owned_directory = os.open(
+                    location.path,
+                    os.O_RDONLY
+                    | getattr(os, "O_DIRECTORY", 0)
+                    | getattr(os, "O_CLOEXEC", 0),
+                )
+            except OSError as error:
+                raise_classified_publication_os_error(error)
+            parent_fd = owned_directory
+            metadata = os.fstat(parent_fd)
+            if (
+                not stat.S_ISDIR(metadata.st_mode)
+                or (metadata.st_dev, metadata.st_ino) != location.identity
+            ):
+                raise SourcePublicationError("publication_failed")
+
+        if expected_hash is None:
+            _darwin_exclusive_create(
+                parent_fd=parent_fd,
+                target_name=target_name,
+                content=content,
+            )
+            return
+        try:
+            write_darwin_draft_cas(
+                parent_fd=parent_fd,
+                target_name=target_name,
+                content=content,
+                expected_hash=expected_hash,
+                byte_limit=byte_limit,
+            )
+        except DarwinDraftCasConflict:
+            raise SourcePublicationConflict("draft_hash_conflict") from None
+        except DarwinDraftCasInvalidTarget:
+            raise SourcePublicationError("publication_failed") from None
+        except DarwinDraftCasInternalError:
+            raise SourcePublicationError("publication_failed") from None
+    finally:
+        if owned_directory >= 0:
+            os.close(owned_directory)
+
+
+def _darwin_exclusive_create(
+    *,
+    parent_fd: int,
+    target_name: str,
+    content: bytes,
+) -> None:
+    """用 ``O_EXCL`` 在 Darwin 固定目录中创建尚不存在的草稿文件。"""
+
+    descriptor = -1
+    try:
+        descriptor = os.open(
+            target_name,
+            os.O_WRONLY
+            | os.O_CREAT
+            | os.O_EXCL
+            | getattr(os, "O_CLOEXEC", 0)
+            | getattr(os, "O_NOFOLLOW", 0),
+            0o600,
+            dir_fd=parent_fd,
+        )
+        with os.fdopen(descriptor, "wb") as stream:
+            descriptor = -1
+            stream.write(content)
+            stream.flush()
+            os.fsync(stream.fileno())
+        os.fsync(parent_fd)
+    except FileExistsError:
+        raise SourcePublicationConflict("draft_hash_conflict") from None
+    except OSError as error:
+        raise_classified_publication_os_error(error)
+    finally:
+        if descriptor >= 0:
+            os.close(descriptor)
 
 
 def _compare_and_replace(

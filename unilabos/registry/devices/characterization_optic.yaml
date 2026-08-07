@@ -4,15 +4,11 @@ raman.home_made:
   class:
     action_value_mappings:
       auto-ccd_time:
-        displayname: auto-ccd_time
-        estimate_duration_express: ''
-        estimate_duration_fixed: 60.0
         feedback: {}
         goal: {}
         goal_default:
           int_time: null
         handles: {}
-        lock_resource: []
         placeholder_keys: {}
         result: {}
         schema:
@@ -33,15 +29,11 @@ raman.home_made:
           type: object
         type: UniLabJsonCommand
       auto-laser_on_power:
-        displayname: auto-laser_on_power
-        estimate_duration_express: ''
-        estimate_duration_fixed: 60.0
         feedback: {}
         goal: {}
         goal_default:
           output_voltage_laser: null
         handles: {}
-        lock_resource: []
         placeholder_keys: {}
         result: {}
         schema:
@@ -62,16 +54,12 @@ raman.home_made:
           type: object
         type: UniLabJsonCommand
       auto-raman_without_background:
-        displayname: auto-raman_without_background
-        estimate_duration_express: ''
-        estimate_duration_fixed: 60.0
         feedback: {}
         goal: {}
         goal_default:
           int_time: null
           laser_power: null
         handles: {}
-        lock_resource: []
         placeholder_keys: {}
         result: {}
         schema:
@@ -95,9 +83,6 @@ raman.home_made:
           type: object
         type: UniLabJsonCommand
       auto-raman_without_background_average:
-        displayname: auto-raman_without_background_average
-        estimate_duration_express: ''
-        estimate_duration_fixed: 60.0
         feedback: {}
         goal: {}
         goal_default:
@@ -106,7 +91,6 @@ raman.home_made:
           laser_power: null
           sample_name: null
         handles: {}
-        lock_resource: []
         placeholder_keys: {}
         result: {}
         schema:
@@ -136,9 +120,6 @@ raman.home_made:
           type: object
         type: UniLabJsonCommand
       raman_cmd:
-        displayname: raman_cmd
-        estimate_duration_express: ''
-        estimate_duration_fixed: 60.0
         feedback:
           status: status
         goal:
@@ -146,7 +127,6 @@ raman.home_made:
         goal_default:
           command: ''
         handles: {}
-        lock_resource: []
         placeholder_keys: {}
         result:
           return_info: return_info
@@ -187,10 +167,8 @@ raman.home_made:
     type: python
   config_info: []
   description: 拉曼光谱分析设备，用于物质的分子结构和化学成分表征。该设备集成激光器和CCD检测器，通过串口通信控制激光功率和光谱采集。具备背景扣除、多次平均、自动数据处理等功能，支持高精度的拉曼光谱测量。适用于材料表征、化学分析、质量控制、研究开发等需要分子指纹识别和结构分析的实验应用。
-  displayname: raman.home_made
   handles: []
   icon: ''
-  init_param_enforce: {}
   init_param_schema:
     config:
       properties:
@@ -212,5 +190,4 @@ raman.home_made:
       properties: {}
       required: []
       type: object
-  metadata: {}
   version: 1.0.0

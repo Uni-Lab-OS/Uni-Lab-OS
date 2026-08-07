@@ -4,15 +4,11 @@ rotavap.one:
   class:
     action_value_mappings:
       auto-cmd_write:
-        displayname: auto-cmd_write
-        estimate_duration_express: ''
-        estimate_duration_fixed: 60.0
         feedback: {}
         goal: {}
         goal_default:
           cmd: null
         handles: {}
-        lock_resource: []
         placeholder_keys: {}
         result: {}
         schema:
@@ -33,14 +29,10 @@ rotavap.one:
           type: object
         type: UniLabJsonCommand
       auto-main_loop:
-        displayname: auto-main_loop
-        estimate_duration_express: ''
-        estimate_duration_fixed: 60.0
         feedback: {}
         goal: {}
         goal_default: {}
         handles: {}
-        lock_resource: []
         placeholder_keys: {}
         result: {}
         schema:
@@ -58,15 +50,11 @@ rotavap.one:
           type: object
         type: UniLabJsonCommand
       auto-set_pump_time:
-        displayname: auto-set_pump_time
-        estimate_duration_express: ''
-        estimate_duration_fixed: 60.0
         feedback: {}
         goal: {}
         goal_default:
           time: null
         handles: {}
-        lock_resource: []
         placeholder_keys: {}
         result: {}
         schema:
@@ -87,15 +75,11 @@ rotavap.one:
           type: object
         type: UniLabJsonCommand
       auto-set_rotate_time:
-        displayname: auto-set_rotate_time
-        estimate_duration_express: ''
-        estimate_duration_fixed: 60.0
         feedback: {}
         goal: {}
         goal_default:
           time: null
         handles: {}
-        lock_resource: []
         placeholder_keys: {}
         result: {}
         schema:
@@ -116,9 +100,6 @@ rotavap.one:
           type: object
         type: UniLabJsonCommand
       set_timer:
-        displayname: set_timer
-        estimate_duration_express: ''
-        estimate_duration_fixed: 60.0
         feedback:
           status: status
         goal:
@@ -126,7 +107,6 @@ rotavap.one:
         goal_default:
           command: ''
         handles: {}
-        lock_resource: []
         placeholder_keys: {}
         result:
           return_info: return_info
@@ -167,10 +147,8 @@ rotavap.one:
     type: python
   config_info: []
   description: 旋转蒸发仪设备，用于有机化学实验中的溶剂回收和浓缩操作。该设备通过串口通信控制，集成旋转和真空泵功能，支持定时控制和自动化操作。具备旋转速度调节、真空度控制、温度管理等功能，实现高效的溶剂蒸发和回收。适用于有机合成、天然产物提取、药物制备等需要溶剂去除和浓缩的实验室应用场景。
-  displayname: rotavap.one
   handles: []
   icon: ''
-  init_param_enforce: {}
   init_param_schema:
     config:
       properties:
@@ -186,7 +164,6 @@ rotavap.one:
       properties: {}
       required: []
       type: object
-  metadata: {}
   version: 1.0.0
 separator.homemade:
   category:
@@ -194,14 +171,10 @@ separator.homemade:
   class:
     action_value_mappings:
       auto-read_sensor_loop:
-        displayname: auto-read_sensor_loop
-        estimate_duration_express: ''
-        estimate_duration_fixed: 60.0
         feedback: {}
         goal: {}
         goal_default: {}
         handles: {}
-        lock_resource: []
         placeholder_keys: {}
         result: {}
         schema:
@@ -219,16 +192,12 @@ separator.homemade:
           type: object
         type: UniLabJsonCommand
       auto-valve_open:
-        displayname: auto-valve_open
-        estimate_duration_express: ''
-        estimate_duration_fixed: 60.0
         feedback: {}
         goal: {}
         goal_default:
           condition: null
           value: null
         handles: {}
-        lock_resource: []
         placeholder_keys: {}
         result: {}
         schema:
@@ -256,15 +225,11 @@ separator.homemade:
           type: object
         type: UniLabJsonCommand
       auto-write:
-        displayname: auto-write
-        estimate_duration_express: ''
-        estimate_duration_fixed: 60.0
         feedback: {}
         goal: {}
         goal_default:
           data: null
         handles: {}
-        lock_resource: []
         placeholder_keys: {}
         result: {}
         schema:
@@ -285,9 +250,6 @@ separator.homemade:
           type: object
         type: UniLabJsonCommand
       stir:
-        displayname: stir
-        estimate_duration_express: ''
-        estimate_duration_fixed: 60.0
         feedback:
           status: status
         goal:
@@ -326,7 +288,6 @@ separator.homemade:
             sample_id: ''
             type: ''
         handles: {}
-        lock_resource: []
         placeholder_keys: {}
         result:
           message: message
@@ -476,9 +437,6 @@ separator.homemade:
           type: object
         type: Stir
       valve_open_cmd:
-        displayname: valve_open_cmd
-        estimate_duration_express: ''
-        estimate_duration_fixed: 60.0
         feedback:
           status: status
         goal:
@@ -486,7 +444,6 @@ separator.homemade:
         goal_default:
           command: ''
         handles: {}
-        lock_resource: []
         placeholder_keys: {}
         result:
           return_info: return_info
@@ -527,10 +484,8 @@ separator.homemade:
     type: python
   config_info: []
   description: 液-液分离器设备，基于自制Grbl控制器的自动化分离系统。该设备集成搅拌、沉降、阀门控制和电导率传感器，通过串口通信实现精确的分离操作控制。支持自动搅拌、分层沉降、基于传感器反馈的智能分液等功能。适用于有机化学中的萃取分离、相分离、液-液提取等需要精确分离控制的实验应用。
-  displayname: separator.homemade
   handles: []
   icon: ''
-  init_param_enforce: {}
   init_param_schema:
     config:
       properties:
@@ -552,5 +507,4 @@ separator.homemade:
       properties: {}
       required: []
       type: object
-  metadata: {}
   version: 1.0.0

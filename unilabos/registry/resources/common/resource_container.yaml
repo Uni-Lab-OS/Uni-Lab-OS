@@ -5,11 +5,9 @@ hplc_plate:
     module: unilabos.devices.resource_container.container:PlateContainer
     type: python
   description: HPLC板
-  displayname: hplc_plate
   handles: []
   icon: ''
   init_param_schema: {}
-  metadata: {}
   model:
     mesh: hplc_plate/meshes/hplc_plate.stl
     mesh_tf:
@@ -29,11 +27,9 @@ plate_96:
     module: unilabos.devices.resource_container.container:PlateContainer
     type: python
   description: 96孔板
-  displayname: plate_96
   handles: []
   icon: ''
   init_param_schema: {}
-  metadata: {}
   model:
     mesh: plate_96/meshes/plate_96.stl
     mesh_tf:
@@ -53,11 +49,9 @@ plate_96_high:
     module: unilabos.devices.resource_container.container:PlateContainer
     type: python
   description: 96孔板
-  displayname: plate_96_high
   handles: []
   icon: ''
   init_param_schema: {}
-  metadata: {}
   model:
     mesh: plate_96_high/meshes/plate_96_high.stl
     mesh_tf:
@@ -77,11 +71,9 @@ tiprack_96_high:
     module: unilabos.devices.resource_container.container:TipRackContainer
     type: python
   description: 96孔板
-  displayname: tiprack_96_high
   handles: []
   icon: ''
   init_param_schema: {}
-  metadata: {}
   model:
     children_mesh: generic_labware_tube_10_75/meshes/0_base.stl
     children_mesh_path: https://leap-lab.oss-cn-zhangjiakou.aliyuncs.com/uni-lab/resources/generic_labware_tube_10_75/modal.xacro
@@ -110,11 +102,9 @@ tiprack_box:
     module: unilabos.devices.resource_container.container:TipRackContainer
     type: python
   description: 96针头盒
-  displayname: tiprack_box
   handles: []
   icon: ''
   init_param_schema: {}
-  metadata: {}
   model:
     children_mesh: tip/meshes/tip.stl
     children_mesh_path: https://leap-lab.oss-cn-zhangjiakou.aliyuncs.com/uni-lab/resources/tip/modal.xacro

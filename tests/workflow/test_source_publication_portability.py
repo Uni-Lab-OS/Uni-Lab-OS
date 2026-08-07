@@ -274,15 +274,15 @@ def test_windows_without_dir_fd_can_discover_read_and_save_source(
     assert windows_lock.calls
 
 
-def test_macos_cas_fails_closed_before_advisory_flock_or_temporary_write(
+def test_macos_cas_fails_closed_when_darwin_swap_unavailable(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """当前 macOS CAS 不受支持，必须在 advisory ``flock`` 和临时写入前失败。
+    """不具备 Darwin 原生交换时，CAS 必须在 advisory ``flock`` 和临时写入前失败。
 
-    参数：``tmp_path`` 隔离规范工作流草稿（Workflow Draft）；``monkeypatch`` 在
-    当前实现最后身份检查 seam 注入外部 rename/替换竞争。返回：无；安全实现必须
-    明确拒绝 CAS，既不调用 advisory 锁，也不创建临时稿或覆盖外部字节。
+    参数：``tmp_path`` 隔离规范工作流草稿（Workflow Draft）；``monkeypatch`` 强制
+    平台为 Darwin 且关闭 ``renameatx_np`` 能力。返回：无；证明不安全回退路径
+    不会被调用，外部字节保持不变。
     """
 
     parent = tmp_path / "workflows"
@@ -290,29 +290,7 @@ def test_macos_cas_fails_closed_before_advisory_flock_or_temporary_write(
     source_path = parent / "demo.py"
     original = b"value = 'initial'\n"
     source_path.write_bytes(original)
-    displaced = parent / "external-old.py"
     macos_lock = MacOSFcntl()
-    original_target_matches = source_publication._target_matches_descriptor
-    identity_checks = 0
-
-    def inject_external_replace_after_identity_check(
-        location: object,
-        target_name: str,
-        descriptor: int,
-    ) -> bool:
-        """在第二次身份检查返回前，用外部版本替换规范路径。
-
-        参数：目录、目标名和描述符保持被测 seam 形状。返回：攻击前的身份检查结果；
-        当前不安全实现会据此继续 ``os.replace`` 并覆盖竞争字节。
-        """
-
-        nonlocal identity_checks
-        matches = original_target_matches(location, target_name, descriptor)
-        identity_checks += 1
-        if matches and identity_checks == 2:
-            source_path.rename(displaced)
-            source_path.write_bytes(b"value = 'external'\n")
-        return matches
 
     monkeypatch.setattr(
         source_publication,
@@ -320,13 +298,13 @@ def test_macos_cas_fails_closed_before_advisory_flock_or_temporary_write(
         "darwin",
         raising=False,
     )
-    monkeypatch.setattr(source_publication, "_fcntl", macos_lock, raising=False)
-    monkeypatch.setattr(source_publication, "_msvcrt", None, raising=False)
     monkeypatch.setattr(
         source_publication,
-        "_target_matches_descriptor",
-        inject_external_replace_after_identity_check,
+        "supports_darwin_draft_cas",
+        lambda: False,
     )
+    monkeypatch.setattr(source_publication, "_fcntl", macos_lock, raising=False)
+    monkeypatch.setattr(source_publication, "_msvcrt", None, raising=False)
 
     with pytest.raises(source_publication.SourcePublicationConflict):
         source_publication.atomic_publish_source(
@@ -337,8 +315,43 @@ def test_macos_cas_fails_closed_before_advisory_flock_or_temporary_write(
             expected_hash=_draft_hash(original),
         )
 
-    assert identity_checks == 0
-    assert macos_lock.calls == []
     assert source_path.read_bytes() == original
-    assert displaced.exists() is False
-    assert [path.name for path in parent.iterdir()] == [source_path.name]
+    assert macos_lock.calls == []
+    assert list(parent.glob(".demo.py.*.tmp")) == []
+
+
+@pytest.mark.skipif(
+    not source_publication.supports_darwin_draft_cas(),
+    reason="当前进程不具备 Darwin renameatx_np Draft CAS",
+)
+def test_macos_native_cas_replaces_matching_draft(tmp_path: Path) -> None:
+    """Darwin 原生 CAS 在 hash 匹配时应原子替换草稿并保留冲突关闭语义。"""
+
+    parent = tmp_path / "workflows"
+    parent.mkdir()
+    source_path = parent / "demo.py"
+    original = b"value = 'initial'\n"
+    source_path.write_bytes(original)
+    parent_fd = os.open(parent, os.O_RDONLY | getattr(os, "O_DIRECTORY", 0))
+    try:
+        source_publication.atomic_publish_source(
+            parent_descriptor=parent_fd,
+            target_name=source_path.name,
+            content=b"value = 'changed'\n",
+            byte_limit=1024,
+            expected_hash=_draft_hash(original),
+        )
+
+        assert source_path.read_bytes() == b"value = 'changed'\n"
+
+        with pytest.raises(source_publication.SourcePublicationConflict):
+            source_publication.atomic_publish_source(
+                parent_descriptor=parent_fd,
+                target_name=source_path.name,
+                content=b"value = 'stale'\n",
+                byte_limit=1024,
+                expected_hash=_draft_hash(original),
+            )
+        assert source_path.read_bytes() == b"value = 'changed'\n"
+    finally:
+        os.close(parent_fd)

@@ -4,15 +4,11 @@ cameracontroller_device:
   class:
     action_value_mappings:
       auto-start:
-        displayname: auto-start
-        estimate_duration_express: ''
-        estimate_duration_fixed: 60.0
         feedback: {}
         goal: {}
         goal_default:
           config: null
         handles: {}
-        lock_resource: []
         placeholder_keys: {}
         result: {}
         schema:
@@ -32,14 +28,10 @@ cameracontroller_device:
           type: object
         type: UniLabJsonCommand
       auto-stop:
-        displayname: auto-stop
-        estimate_duration_express: ''
-        estimate_duration_fixed: 60.0
         feedback: {}
         goal: {}
         goal_default: {}
         handles: {}
-        lock_resource: []
         placeholder_keys: {}
         result: {}
         schema:
@@ -63,10 +55,8 @@ cameracontroller_device:
     type: python
   config_info: []
   description: Uni-Lab-OS 摄像头驱动（Linux USB 摄像头版，无 PTZ）
-  displayname: cameracontroller_device
   handles: []
   icon: ''
-  init_param_enforce: {}
   init_param_schema:
     config:
       properties:
@@ -114,5 +104,4 @@ cameracontroller_device:
       required:
       - status
       type: object
-  metadata: {}
   version: 1.0.0

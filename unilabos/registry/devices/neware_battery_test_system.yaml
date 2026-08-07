@@ -6,14 +6,10 @@ neware_battery_test_system:
   class:
     action_value_mappings:
       auto-print_status_summary:
-        displayname: auto-print_status_summary
-        estimate_duration_express: ''
-        estimate_duration_fixed: 60.0
         feedback: {}
         goal: {}
         goal_default: {}
         handles: {}
-        lock_resource: []
         placeholder_keys: {}
         result: {}
         schema:
@@ -31,14 +27,10 @@ neware_battery_test_system:
           type: object
         type: UniLabJsonCommand
       auto-test_connection:
-        displayname: auto-test_connection
-        estimate_duration_express: ''
-        estimate_duration_fixed: 60.0
         feedback: {}
         goal: {}
         goal_default: {}
         handles: {}
-        lock_resource: []
         placeholder_keys: {}
         result: {}
         schema:
@@ -57,14 +49,10 @@ neware_battery_test_system:
           type: object
         type: UniLabJsonCommand
       debug_resource_names:
-        displayname: debug_resource_names
-        estimate_duration_express: ''
-        estimate_duration_fixed: 60.0
         feedback: {}
         goal: {}
         goal_default: {}
         handles: {}
-        lock_resource: []
         placeholder_keys: {}
         result: {}
         schema:
@@ -83,16 +71,12 @@ neware_battery_test_system:
           type: object
         type: UniLabJsonCommand
       export_status_json:
-        displayname: export_status_json
-        estimate_duration_express: ''
-        estimate_duration_fixed: 60.0
         feedback: {}
         goal:
           filepath: filepath
         goal_default:
           filepath: bts_status.json
         handles: {}
-        lock_resource: []
         placeholder_keys: {}
         result: {}
         schema:
@@ -115,14 +99,10 @@ neware_battery_test_system:
           type: object
         type: UniLabJsonCommand
       get_device_summary:
-        displayname: get_device_summary
-        estimate_duration_express: ''
-        estimate_duration_fixed: 60.0
         feedback: {}
         goal: {}
         goal_default: {}
         handles: {}
-        lock_resource: []
         result:
           return_info: return_info
           success: success
@@ -151,16 +131,12 @@ neware_battery_test_system:
           type: object
         type: UniLabJsonCommand
       get_plate_status:
-        displayname: get_plate_status
-        estimate_duration_express: ''
-        estimate_duration_fixed: 60.0
         feedback: {}
         goal:
           plate_num: plate_num
         goal_default:
           plate_num: null
         handles: {}
-        lock_resource: []
         placeholder_keys: {}
         result: {}
         schema:
@@ -182,14 +158,10 @@ neware_battery_test_system:
           type: object
         type: UniLabJsonCommand
       print_status_summary_action:
-        displayname: print_status_summary_action
-        estimate_duration_express: ''
-        estimate_duration_fixed: 60.0
         feedback: {}
         goal: {}
         goal_default: {}
         handles: {}
-        lock_resource: []
         placeholder_keys: {}
         result: {}
         schema:
@@ -208,9 +180,6 @@ neware_battery_test_system:
           type: object
         type: UniLabJsonCommand
       query_plate_action:
-        displayname: query_plate_action
-        estimate_duration_express: ''
-        estimate_duration_fixed: 60.0
         feedback: {}
         goal:
           plate_id: plate_id
@@ -218,7 +187,6 @@ neware_battery_test_system:
         goal_default:
           string: ''
         handles: {}
-        lock_resource: []
         placeholder_keys: {}
         result:
           return_info: return_info
@@ -252,9 +220,6 @@ neware_battery_test_system:
           type: object
         type: StrSingleInput
       submit_from_csv:
-        displayname: submit_from_csv
-        estimate_duration_express: ''
-        estimate_duration_fixed: 60.0
         feedback: {}
         goal:
           csv_path: string
@@ -263,7 +228,6 @@ neware_battery_test_system:
           csv_path: null
           output_dir: .
         handles: {}
-        lock_resource: []
         placeholder_keys: {}
         result: {}
         schema:
@@ -290,14 +254,10 @@ neware_battery_test_system:
           type: object
         type: UniLabJsonCommand
       test_connection_action:
-        displayname: test_connection_action
-        estimate_duration_express: ''
-        estimate_duration_fixed: 60.0
         feedback: {}
         goal: {}
         goal_default: {}
         handles: {}
-        lock_resource: []
         placeholder_keys: {}
         result: {}
         schema:
@@ -316,9 +276,6 @@ neware_battery_test_system:
           type: object
         type: UniLabJsonCommand
       upload_backup_to_oss:
-        displayname: upload_backup_to_oss
-        estimate_duration_express: ''
-        estimate_duration_fixed: 60.0
         feedback: {}
         goal:
           backup_dir: backup_dir
@@ -336,7 +293,6 @@ neware_battery_test_system:
             handler_key: uploaded_files
             io_type: sink
             label: Uploaded Files (with standard flow info)
-        lock_resource: []
         placeholder_keys: {}
         result: {}
         schema:
@@ -374,10 +330,8 @@ neware_battery_test_system:
     type: python
   config_info: []
   description: 新威电池测试系统驱动，提供720个通道的电池测试状态监控、物料管理和CSV批量提交功能。支持TCP通信实现远程控制，包含完整的物料管理系统（2盘电池状态映射），以及从CSV文件批量提交测试任务的能力。
-  displayname: neware_battery_test_system
   handles: []
   icon: ''
-  init_param_enforce: {}
   init_param_schema:
     config:
       properties:
@@ -439,5 +393,4 @@ neware_battery_test_system:
       - status
       - total_channels
       type: object
-  metadata: {}
   version: 1.0.0

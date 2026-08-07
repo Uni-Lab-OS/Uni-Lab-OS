@@ -9,6 +9,7 @@ from pathlib import Path, PurePosixPath
 
 from unilabos.workflow.source_file_access import (
     StableFileAccessError,
+    binary_open_flags,
     read_stable_descriptor,
 )
 from unilabos.workflow.source_workspace_errors import SourceWorkspaceError
@@ -31,7 +32,7 @@ def file_flags() -> int:
     Windows 必须带 ``O_BINARY``，避免 CRLF 翻译破坏字节长度稳定性校验。
     """
 
-    return (
+    return binary_open_flags(
         os.O_RDONLY
         | getattr(os, "O_BINARY", 0)
         | getattr(os, "O_CLOEXEC", 0)

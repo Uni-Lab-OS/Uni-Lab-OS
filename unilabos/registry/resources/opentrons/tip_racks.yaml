@@ -5,11 +5,9 @@ eppendorf_96_tiprack_1000ul_eptips:
     module: pylabrobot.resources.opentrons.tip_racks:eppendorf_96_tiprack_1000ul_eptips
     type: pylabrobot
   description: Eppendorf 96 tiprack 1000ul eptips
-  displayname: eppendorf_96_tiprack_1000ul_eptips
   handles: []
   icon: ''
   init_param_schema: {}
-  metadata: {}
   version: 1.0.0
 eppendorf_96_tiprack_10ul_eptips:
   category:
@@ -18,11 +16,9 @@ eppendorf_96_tiprack_10ul_eptips:
     module: pylabrobot.resources.opentrons.tip_racks:eppendorf_96_tiprack_10ul_eptips
     type: pylabrobot
   description: Eppendorf 96 tiprack 10ul eptips
-  displayname: eppendorf_96_tiprack_10ul_eptips
   handles: []
   icon: ''
   init_param_schema: {}
-  metadata: {}
   version: 1.0.0
 geb_96_tiprack_1000ul:
   category:
@@ -31,11 +27,9 @@ geb_96_tiprack_1000ul:
     module: pylabrobot.resources.opentrons.tip_racks:geb_96_tiprack_1000ul
     type: pylabrobot
   description: Geb 96 tiprack 1000ul
-  displayname: geb_96_tiprack_1000ul
   handles: []
   icon: ''
   init_param_schema: {}
-  metadata: {}
   version: 1.0.0
 geb_96_tiprack_10ul:
   category:
@@ -44,11 +38,9 @@ geb_96_tiprack_10ul:
     module: pylabrobot.resources.opentrons.tip_racks:geb_96_tiprack_10ul
     type: pylabrobot
   description: Geb 96 tiprack 10ul
-  displayname: geb_96_tiprack_10ul
   handles: []
   icon: ''
   init_param_schema: {}
-  metadata: {}
   version: 1.0.0
 opentrons_96_filtertiprack_1000ul:
   category:
@@ -57,11 +49,9 @@ opentrons_96_filtertiprack_1000ul:
     module: pylabrobot.resources.opentrons.tip_racks:opentrons_96_filtertiprack_1000ul
     type: pylabrobot
   description: Opentrons 96 filtertiprack 1000ul
-  displayname: opentrons_96_filtertiprack_1000ul
   handles: []
   icon: ''
   init_param_schema: {}
-  metadata: {}
   model:
     children_mesh: generic_labware_tube_10_75/meshes/0_base.stl
     children_mesh_tf:
@@ -89,11 +79,9 @@ opentrons_96_filtertiprack_10ul:
     module: pylabrobot.resources.opentrons.tip_racks:opentrons_96_filtertiprack_10ul
     type: pylabrobot
   description: Opentrons 96 filtertiprack 10ul
-  displayname: opentrons_96_filtertiprack_10ul
   handles: []
   icon: ''
   init_param_schema: {}
-  metadata: {}
   version: 1.0.0
 opentrons_96_filtertiprack_200ul:
   category:
@@ -102,11 +90,9 @@ opentrons_96_filtertiprack_200ul:
     module: pylabrobot.resources.opentrons.tip_racks:opentrons_96_filtertiprack_200ul
     type: pylabrobot
   description: Opentrons 96 filtertiprack 200ul
-  displayname: opentrons_96_filtertiprack_200ul
   handles: []
   icon: ''
   init_param_schema: {}
-  metadata: {}
   version: 1.0.0
 opentrons_96_filtertiprack_20ul:
   category:
@@ -115,11 +101,9 @@ opentrons_96_filtertiprack_20ul:
     module: pylabrobot.resources.opentrons.tip_racks:opentrons_96_filtertiprack_20ul
     type: pylabrobot
   description: Opentrons 96 filtertiprack 20ul
-  displayname: opentrons_96_filtertiprack_20ul
   handles: []
   icon: ''
   init_param_schema: {}
-  metadata: {}
   version: 1.0.0
 opentrons_96_tiprack_1000ul:
   category:
@@ -128,11 +112,9 @@ opentrons_96_tiprack_1000ul:
     module: pylabrobot.resources.opentrons.tip_racks:opentrons_96_tiprack_1000ul
     type: pylabrobot
   description: Opentrons 96 tiprack 1000ul
-  displayname: opentrons_96_tiprack_1000ul
   handles: []
   icon: ''
   init_param_schema: {}
-  metadata: {}
   version: 1.0.0
 opentrons_96_tiprack_10ul:
   category:
@@ -141,11 +123,9 @@ opentrons_96_tiprack_10ul:
     module: pylabrobot.resources.opentrons.tip_racks:opentrons_96_tiprack_10ul
     type: pylabrobot
   description: Opentrons 96 tiprack 10ul
-  displayname: opentrons_96_tiprack_10ul
   handles: []
   icon: ''
   init_param_schema: {}
-  metadata: {}
   version: 1.0.0
 opentrons_96_tiprack_20ul:
   category:
@@ -154,11 +134,9 @@ opentrons_96_tiprack_20ul:
     module: pylabrobot.resources.opentrons.tip_racks:opentrons_96_tiprack_20ul
     type: pylabrobot
   description: Opentrons 96 tiprack 20ul
-  displayname: opentrons_96_tiprack_20ul
   handles: []
   icon: ''
   init_param_schema: {}
-  metadata: {}
   version: 1.0.0
 opentrons_96_tiprack_300ul:
   category:
@@ -166,9 +144,7 @@ opentrons_96_tiprack_300ul:
   class:
     module: pylabrobot.resources.opentrons.tip_racks:opentrons_96_tiprack_300ul
     type: pylabrobot
-  displayname: opentrons_96_tiprack_300ul
   handles: []
   icon: ''
   init_param_schema: {}
-  metadata: {}
   version: 1.0.0

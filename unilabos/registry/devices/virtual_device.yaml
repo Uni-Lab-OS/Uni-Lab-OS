@@ -4,14 +4,10 @@ virtual_centrifuge:
   class:
     action_value_mappings:
       auto-cleanup:
-        displayname: auto-cleanup
-        estimate_duration_express: ''
-        estimate_duration_fixed: 60.0
         feedback: {}
         goal: {}
         goal_default: {}
         handles: {}
-        lock_resource: []
         placeholder_keys: {}
         result: {}
         schema:
@@ -30,14 +26,10 @@ virtual_centrifuge:
           type: object
         type: UniLabJsonCommandAsync
       auto-initialize:
-        displayname: auto-initialize
-        estimate_duration_express: ''
-        estimate_duration_fixed: 60.0
         feedback: {}
         goal: {}
         goal_default: {}
         handles: {}
-        lock_resource: []
         placeholder_keys: {}
         result: {}
         schema:
@@ -56,9 +48,6 @@ virtual_centrifuge:
           type: object
         type: UniLabJsonCommandAsync
       centrifuge:
-        displayname: centrifuge
-        estimate_duration_express: ''
-        estimate_duration_fixed: 60.0
         feedback:
           current_speed: current_speed
           current_status: current_status
@@ -94,7 +83,6 @@ virtual_centrifuge:
             sample_id: ''
             type: ''
         handles: {}
-        lock_resource: []
         placeholder_keys: {}
         result:
           message: message
@@ -263,7 +251,6 @@ virtual_centrifuge:
     type: python
   config_info: []
   description: Virtual Centrifuge for CentrifugeProtocol Testing
-  displayname: virtual_centrifuge
   handles:
   - data_key: vessel
     data_source: handle
@@ -274,7 +261,6 @@ virtual_centrifuge:
     label: centrifuge
     side: NORTH
   icon: ''
-  init_param_enforce: {}
   init_param_schema:
     config:
       properties:
@@ -324,7 +310,6 @@ virtual_centrifuge:
       - target_temp
       - time_remaining
       type: object
-  metadata: {}
   version: 1.0.0
 virtual_column:
   category:
@@ -332,14 +317,10 @@ virtual_column:
   class:
     action_value_mappings:
       auto-cleanup:
-        displayname: auto-cleanup
-        estimate_duration_express: ''
-        estimate_duration_fixed: 60.0
         feedback: {}
         goal: {}
         goal_default: {}
         handles: {}
-        lock_resource: []
         placeholder_keys: {}
         result: {}
         schema:
@@ -358,14 +339,10 @@ virtual_column:
           type: object
         type: UniLabJsonCommandAsync
       auto-initialize:
-        displayname: auto-initialize
-        estimate_duration_express: ''
-        estimate_duration_fixed: 60.0
         feedback: {}
         goal: {}
         goal_default: {}
         handles: {}
-        lock_resource: []
         placeholder_keys: {}
         result: {}
         schema:
@@ -384,9 +361,6 @@ virtual_column:
           type: object
         type: UniLabJsonCommandAsync
       run_column:
-        displayname: run_column
-        estimate_duration_express: ''
-        estimate_duration_fixed: 60.0
         feedback:
           progress: progress
           status: status
@@ -449,7 +423,6 @@ virtual_column:
             sample_id: ''
             type: ''
         handles: {}
-        lock_resource: []
         placeholder_keys: {}
         result:
           message: message
@@ -702,7 +675,6 @@ virtual_column:
     type: python
   config_info: []
   description: Virtual Column Chromatography Device for RunColumn Protocol Testing
-  displayname: virtual_column
   handles:
   - data_key: from_vessel
     data_source: handle
@@ -721,7 +693,6 @@ virtual_column:
     label: columnout
     side: EAST
   icon: ''
-  init_param_enforce: {}
   init_param_schema:
     config:
       properties:
@@ -768,7 +739,6 @@ virtual_column:
       - progress
       - status
       type: object
-  metadata: {}
   version: 1.0.0
 virtual_filter:
   category:
@@ -776,14 +746,10 @@ virtual_filter:
   class:
     action_value_mappings:
       auto-cleanup:
-        displayname: auto-cleanup
-        estimate_duration_express: ''
-        estimate_duration_fixed: 60.0
         feedback: {}
         goal: {}
         goal_default: {}
         handles: {}
-        lock_resource: []
         placeholder_keys: {}
         result: {}
         schema:
@@ -802,14 +768,10 @@ virtual_filter:
           type: object
         type: UniLabJsonCommandAsync
       auto-initialize:
-        displayname: auto-initialize
-        estimate_duration_express: ''
-        estimate_duration_fixed: 60.0
         feedback: {}
         goal: {}
         goal_default: {}
         handles: {}
-        lock_resource: []
         placeholder_keys: {}
         result: {}
         schema:
@@ -828,9 +790,6 @@ virtual_filter:
           type: object
         type: UniLabJsonCommandAsync
       filter:
-        displayname: filter
-        estimate_duration_express: ''
-        estimate_duration_fixed: 60.0
         feedback:
           current_status: current_status
           current_temp: current_temp
@@ -891,7 +850,6 @@ virtual_filter:
             type: ''
           volume: 0.0
         handles: {}
-        lock_resource: []
         placeholder_keys: {}
         result:
           message: message
@@ -1152,7 +1110,6 @@ virtual_filter:
     type: python
   config_info: []
   description: Virtual Filter for FilterProtocol Testing
-  displayname: virtual_filter
   handles:
   - data_key: vessel_in
     data_source: handle
@@ -1179,7 +1136,6 @@ virtual_filter:
     label: retentate_out
     side: EAST
   icon: ''
-  init_param_enforce: {}
   init_param_schema:
     config:
       properties:
@@ -1220,7 +1176,6 @@ virtual_filter:
       - progress
       - status
       type: object
-  metadata: {}
   version: 1.0.0
 virtual_gas_source:
   category:
@@ -1228,14 +1183,10 @@ virtual_gas_source:
   class:
     action_value_mappings:
       auto-cleanup:
-        displayname: auto-cleanup
-        estimate_duration_express: ''
-        estimate_duration_fixed: 60.0
         feedback: {}
         goal: {}
         goal_default: {}
         handles: {}
-        lock_resource: []
         placeholder_keys: {}
         result: {}
         schema:
@@ -1254,14 +1205,10 @@ virtual_gas_source:
           type: object
         type: UniLabJsonCommandAsync
       auto-initialize:
-        displayname: auto-initialize
-        estimate_duration_express: ''
-        estimate_duration_fixed: 60.0
         feedback: {}
         goal: {}
         goal_default: {}
         handles: {}
-        lock_resource: []
         placeholder_keys: {}
         result: {}
         schema:
@@ -1280,14 +1227,10 @@ virtual_gas_source:
           type: object
         type: UniLabJsonCommandAsync
       auto-is_closed:
-        displayname: auto-is_closed
-        estimate_duration_express: ''
-        estimate_duration_fixed: 60.0
         feedback: {}
         goal: {}
         goal_default: {}
         handles: {}
-        lock_resource: []
         placeholder_keys: {}
         result: {}
         schema:
@@ -1305,14 +1248,10 @@ virtual_gas_source:
           type: object
         type: UniLabJsonCommand
       auto-is_open:
-        displayname: auto-is_open
-        estimate_duration_express: ''
-        estimate_duration_fixed: 60.0
         feedback: {}
         goal: {}
         goal_default: {}
         handles: {}
-        lock_resource: []
         placeholder_keys: {}
         result: {}
         schema:
@@ -1330,14 +1269,10 @@ virtual_gas_source:
           type: object
         type: UniLabJsonCommand
       close:
-        displayname: close
-        estimate_duration_express: ''
-        estimate_duration_fixed: 60.0
         feedback: {}
         goal: {}
         goal_default: {}
         handles: {}
-        lock_resource: []
         placeholder_keys: {}
         result:
           return_info: return_info
@@ -1365,14 +1300,10 @@ virtual_gas_source:
           type: object
         type: EmptyIn
       open:
-        displayname: open
-        estimate_duration_express: ''
-        estimate_duration_fixed: 60.0
         feedback: {}
         goal: {}
         goal_default: {}
         handles: {}
-        lock_resource: []
         placeholder_keys: {}
         result:
           return_info: return_info
@@ -1400,16 +1331,12 @@ virtual_gas_source:
           type: object
         type: EmptyIn
       set_status:
-        displayname: set_status
-        estimate_duration_express: ''
-        estimate_duration_fixed: 60.0
         feedback: {}
         goal:
           string: string
         goal_default:
           string: ''
         handles: {}
-        lock_resource: []
         placeholder_keys: {}
         result:
           return_info: return_info
@@ -1448,7 +1375,6 @@ virtual_gas_source:
     type: python
   config_info: []
   description: Virtual gas source
-  displayname: virtual_gas_source
   handles:
   - data_key: fluid_out
     data_source: executor
@@ -1459,7 +1385,6 @@ virtual_gas_source:
     label: gassource
     side: SOUTH
   icon: ''
-  init_param_enforce: {}
   init_param_schema:
     config:
       properties:
@@ -1476,7 +1401,6 @@ virtual_gas_source:
       required:
       - status
       type: object
-  metadata: {}
   version: 1.0.0
 virtual_heatchill:
   category:
@@ -1484,14 +1408,10 @@ virtual_heatchill:
   class:
     action_value_mappings:
       auto-cleanup:
-        displayname: auto-cleanup
-        estimate_duration_express: ''
-        estimate_duration_fixed: 60.0
         feedback: {}
         goal: {}
         goal_default: {}
         handles: {}
-        lock_resource: []
         placeholder_keys: {}
         result: {}
         schema:
@@ -1510,14 +1430,10 @@ virtual_heatchill:
           type: object
         type: UniLabJsonCommandAsync
       auto-initialize:
-        displayname: auto-initialize
-        estimate_duration_express: ''
-        estimate_duration_fixed: 60.0
         feedback: {}
         goal: {}
         goal_default: {}
         handles: {}
-        lock_resource: []
         placeholder_keys: {}
         result: {}
         schema:
@@ -1536,9 +1452,6 @@ virtual_heatchill:
           type: object
         type: UniLabJsonCommandAsync
       heat_chill:
-        displayname: heat_chill
-        estimate_duration_express: ''
-        estimate_duration_fixed: 60.0
         feedback:
           status: status
         goal:
@@ -1583,7 +1496,6 @@ virtual_heatchill:
             sample_id: ''
             type: ''
         handles: {}
-        lock_resource: []
         placeholder_keys: {}
         result:
           message: message
@@ -1734,9 +1646,6 @@ virtual_heatchill:
           type: object
         type: HeatChill
       heat_chill_start:
-        displayname: heat_chill_start
-        estimate_duration_express: ''
-        estimate_duration_fixed: 60.0
         feedback:
           status: status
         goal:
@@ -1767,7 +1676,6 @@ virtual_heatchill:
             sample_id: ''
             type: ''
         handles: {}
-        lock_resource: []
         placeholder_keys: {}
         result:
           return_info: return_info
@@ -1899,9 +1807,6 @@ virtual_heatchill:
           type: object
         type: HeatChillStart
       heat_chill_stop:
-        displayname: heat_chill_stop
-        estimate_duration_express: ''
-        estimate_duration_fixed: 60.0
         feedback:
           status: status
         goal:
@@ -1928,7 +1833,6 @@ virtual_heatchill:
             sample_id: ''
             type: ''
         handles: {}
-        lock_resource: []
         placeholder_keys: {}
         result:
           return_info: return_info
@@ -2067,7 +1971,6 @@ virtual_heatchill:
     type: python
   config_info: []
   description: Virtual HeatChill for HeatChillProtocol Testing
-  displayname: virtual_heatchill
   handles:
   - data_key: vessel
     data_source: handle
@@ -2078,7 +1981,6 @@ virtual_heatchill:
     label: heatchill
     side: NORTH
   icon: Heater.webp
-  init_param_enforce: {}
   init_param_schema:
     config:
       properties:
@@ -2119,7 +2021,6 @@ virtual_heatchill:
       - status
       - stir_speed
       type: object
-  metadata: {}
   version: 1.0.0
 virtual_multiway_valve:
   category:
@@ -2127,14 +2028,10 @@ virtual_multiway_valve:
   class:
     action_value_mappings:
       auto-close:
-        displayname: auto-close
-        estimate_duration_express: ''
-        estimate_duration_fixed: 60.0
         feedback: {}
         goal: {}
         goal_default: {}
         handles: {}
-        lock_resource: []
         placeholder_keys: {}
         result: {}
         schema:
@@ -2152,15 +2049,11 @@ virtual_multiway_valve:
           type: object
         type: UniLabJsonCommand
       auto-is_at_port:
-        displayname: auto-is_at_port
-        estimate_duration_express: ''
-        estimate_duration_fixed: 60.0
         feedback: {}
         goal: {}
         goal_default:
           port_number: null
         handles: {}
-        lock_resource: []
         placeholder_keys: {}
         result: {}
         schema:
@@ -2182,15 +2075,11 @@ virtual_multiway_valve:
           type: object
         type: UniLabJsonCommand
       auto-is_at_position:
-        displayname: auto-is_at_position
-        estimate_duration_express: ''
-        estimate_duration_fixed: 60.0
         feedback: {}
         goal: {}
         goal_default:
           position: null
         handles: {}
-        lock_resource: []
         placeholder_keys: {}
         result: {}
         schema:
@@ -2212,14 +2101,10 @@ virtual_multiway_valve:
           type: object
         type: UniLabJsonCommand
       auto-is_at_pump_position:
-        displayname: auto-is_at_pump_position
-        estimate_duration_express: ''
-        estimate_duration_fixed: 60.0
         feedback: {}
         goal: {}
         goal_default: {}
         handles: {}
-        lock_resource: []
         placeholder_keys: {}
         result: {}
         schema:
@@ -2238,14 +2123,10 @@ virtual_multiway_valve:
           type: object
         type: UniLabJsonCommand
       auto-open:
-        displayname: auto-open
-        estimate_duration_express: ''
-        estimate_duration_fixed: 60.0
         feedback: {}
         goal: {}
         goal_default: {}
         handles: {}
-        lock_resource: []
         placeholder_keys: {}
         result: {}
         schema:
@@ -2263,14 +2144,10 @@ virtual_multiway_valve:
           type: object
         type: UniLabJsonCommand
       auto-reset:
-        displayname: auto-reset
-        estimate_duration_express: ''
-        estimate_duration_fixed: 60.0
         feedback: {}
         goal: {}
         goal_default: {}
         handles: {}
-        lock_resource: []
         placeholder_keys: {}
         result: {}
         schema:
@@ -2288,15 +2165,11 @@ virtual_multiway_valve:
           type: object
         type: UniLabJsonCommand
       auto-set_to_port:
-        displayname: auto-set_to_port
-        estimate_duration_express: ''
-        estimate_duration_fixed: 60.0
         feedback: {}
         goal: {}
         goal_default:
           port_number: null
         handles: {}
-        lock_resource: []
         placeholder_keys: {}
         result: {}
         schema:
@@ -2318,14 +2191,10 @@ virtual_multiway_valve:
           type: object
         type: UniLabJsonCommand
       auto-set_to_pump_position:
-        displayname: auto-set_to_pump_position
-        estimate_duration_express: ''
-        estimate_duration_fixed: 60.0
         feedback: {}
         goal: {}
         goal_default: {}
         handles: {}
-        lock_resource: []
         placeholder_keys: {}
         result: {}
         schema:
@@ -2343,15 +2212,11 @@ virtual_multiway_valve:
           type: object
         type: UniLabJsonCommand
       auto-switch_between_pump_and_port:
-        displayname: auto-switch_between_pump_and_port
-        estimate_duration_express: ''
-        estimate_duration_fixed: 60.0
         feedback: {}
         goal: {}
         goal_default:
           port_number: null
         handles: {}
-        lock_resource: []
         placeholder_keys: {}
         result: {}
         schema:
@@ -2373,9 +2238,6 @@ virtual_multiway_valve:
           type: object
         type: UniLabJsonCommand
       set_position:
-        displayname: set_position
-        estimate_duration_express: ''
-        estimate_duration_fixed: 60.0
         feedback:
           status: status
         goal:
@@ -2383,7 +2245,6 @@ virtual_multiway_valve:
         goal_default:
           command: ''
         handles: {}
-        lock_resource: []
         placeholder_keys: {}
         result:
           return_info: return_info
@@ -2421,9 +2282,6 @@ virtual_multiway_valve:
           type: object
         type: SendCmd
       set_valve_position:
-        displayname: set_valve_position
-        estimate_duration_express: ''
-        estimate_duration_fixed: 60.0
         feedback:
           status: status
         goal:
@@ -2431,7 +2289,6 @@ virtual_multiway_valve:
         goal_default:
           command: ''
         handles: {}
-        lock_resource: []
         placeholder_keys: {}
         result:
           return_info: return_info
@@ -2480,7 +2337,6 @@ virtual_multiway_valve:
     type: python
   config_info: []
   description: Virtual 8-Way Valve for flow direction control
-  displayname: virtual_multiway_valve
   handles:
   - data_key: fluid_in
     data_source: handle
@@ -2563,7 +2419,6 @@ virtual_multiway_valve:
     label: '8'
     side: NORTH
   icon: EightPipeline.webp
-  init_param_enforce: {}
   init_param_schema:
     config:
       properties:
@@ -2600,7 +2455,6 @@ virtual_multiway_valve:
       - valve_position
       - valve_state
       type: object
-  metadata: {}
   version: 1.0.0
 virtual_rotavap:
   category:
@@ -2608,14 +2462,10 @@ virtual_rotavap:
   class:
     action_value_mappings:
       auto-cleanup:
-        displayname: auto-cleanup
-        estimate_duration_express: ''
-        estimate_duration_fixed: 60.0
         feedback: {}
         goal: {}
         goal_default: {}
         handles: {}
-        lock_resource: []
         placeholder_keys: {}
         result: {}
         schema:
@@ -2634,14 +2484,10 @@ virtual_rotavap:
           type: object
         type: UniLabJsonCommandAsync
       auto-initialize:
-        displayname: auto-initialize
-        estimate_duration_express: ''
-        estimate_duration_fixed: 60.0
         feedback: {}
         goal: {}
         goal_default: {}
         handles: {}
-        lock_resource: []
         placeholder_keys: {}
         result: {}
         schema:
@@ -2660,9 +2506,6 @@ virtual_rotavap:
           type: object
         type: UniLabJsonCommandAsync
       evaporate:
-        displayname: evaporate
-        estimate_duration_express: ''
-        estimate_duration_fixed: 60.0
         feedback:
           current_device: current_device
           status: status
@@ -2702,7 +2545,6 @@ virtual_rotavap:
             sample_id: ''
             type: ''
         handles: {}
-        lock_resource: []
         placeholder_keys: {}
         result:
           return_info: return_info
@@ -2893,7 +2735,6 @@ virtual_rotavap:
     type: python
   config_info: []
   description: Virtual Rotary Evaporator for EvaporateProtocol Testing
-  displayname: virtual_rotavap
   handles:
   - data_key: vessel_in
     data_source: handle
@@ -2920,7 +2761,6 @@ virtual_rotavap:
     label: solvent_out
     side: EAST
   icon: Rotaryevaporator.webp
-  init_param_enforce: {}
   init_param_schema:
     config:
       properties:
@@ -2967,7 +2807,6 @@ virtual_rotavap:
       - status
       - vacuum_pressure
       type: object
-  metadata: {}
   version: 1.0.0
 virtual_sample_demo:
   category:
@@ -2975,9 +2814,6 @@ virtual_sample_demo:
   class:
     action_value_mappings:
       analyze_readings:
-        displayname: analyze_readings
-        estimate_duration_express: ''
-        estimate_duration_fixed: 60.0
         feedback: {}
         goal:
           readings: readings
@@ -3013,7 +2849,6 @@ virtual_sample_demo:
             data_type: sample_index
             handler_key: samples_result_out
             label: 样品索引
-        lock_resource: []
         placeholder_keys: {}
         result: {}
         schema:
@@ -3047,9 +2882,6 @@ virtual_sample_demo:
           type: object
         type: UniLabJsonCommandAsync
       measure_samples:
-        displayname: measure_samples
-        estimate_duration_express: ''
-        estimate_duration_fixed: 60.0
         feedback: {}
         goal:
           concentrations: concentrations
@@ -3067,7 +2899,6 @@ virtual_sample_demo:
             data_type: sample_list
             handler_key: absorbance_out
             label: 吸光度列表
-        lock_resource: []
         placeholder_keys: {}
         result: {}
         schema:
@@ -3095,9 +2926,6 @@ virtual_sample_demo:
           type: object
         type: UniLabJsonCommandAsync
       split_and_measure:
-        displayname: split_and_measure
-        estimate_duration_express: ''
-        estimate_duration_fixed: 60.0
         feedback: {}
         goal:
           split_count: split_count
@@ -3122,7 +2950,6 @@ virtual_sample_demo:
             data_type: sample_list
             handler_key: volumes_out
             label: 均分体积
-        lock_resource: []
         placeholder_keys: {}
         result: {}
         schema:
@@ -3159,10 +2986,8 @@ virtual_sample_demo:
     type: python
   config_info: []
   description: Virtual sample tracking demo device
-  displayname: virtual_sample_demo
   handles: []
   icon: ''
-  init_param_enforce: {}
   init_param_schema:
     config:
       properties:
@@ -3179,7 +3004,6 @@ virtual_sample_demo:
       required:
       - status
       type: object
-  metadata: {}
   version: 1.0.0
 virtual_separator:
   category:
@@ -3187,14 +3011,10 @@ virtual_separator:
   class:
     action_value_mappings:
       auto-cleanup:
-        displayname: auto-cleanup
-        estimate_duration_express: ''
-        estimate_duration_fixed: 60.0
         feedback: {}
         goal: {}
         goal_default: {}
         handles: {}
-        lock_resource: []
         placeholder_keys: {}
         result: {}
         schema:
@@ -3213,14 +3033,10 @@ virtual_separator:
           type: object
         type: UniLabJsonCommandAsync
       auto-initialize:
-        displayname: auto-initialize
-        estimate_duration_express: ''
-        estimate_duration_fixed: 60.0
         feedback: {}
         goal: {}
         goal_default: {}
         handles: {}
-        lock_resource: []
         placeholder_keys: {}
         result: {}
         schema:
@@ -3239,9 +3055,6 @@ virtual_separator:
           type: object
         type: UniLabJsonCommandAsync
       separate:
-        displayname: separate
-        estimate_duration_express: ''
-        estimate_duration_fixed: 60.0
         feedback:
           progress: progress
           status: status
@@ -3415,7 +3228,6 @@ virtual_separator:
             sample_id: ''
             type: ''
         handles: {}
-        lock_resource: []
         placeholder_keys: {}
         result:
           message: message
@@ -4135,7 +3947,6 @@ virtual_separator:
     type: python
   config_info: []
   description: Virtual Separator for SeparateProtocol Testing
-  displayname: virtual_separator
   handles:
   - data_key: from_vessel
     data_source: handle
@@ -4170,7 +3981,6 @@ virtual_separator:
     label: bind
     side: WEST
   icon: Separator.webp
-  init_param_enforce: {}
   init_param_schema:
     config:
       properties:
@@ -4211,7 +4021,6 @@ virtual_separator:
       - stir_speed
       - volume
       type: object
-  metadata: {}
   version: 1.0.0
 virtual_solenoid_valve:
   category:
@@ -4219,14 +4028,10 @@ virtual_solenoid_valve:
   class:
     action_value_mappings:
       auto-cleanup:
-        displayname: auto-cleanup
-        estimate_duration_express: ''
-        estimate_duration_fixed: 60.0
         feedback: {}
         goal: {}
         goal_default: {}
         handles: {}
-        lock_resource: []
         placeholder_keys: {}
         result: {}
         schema:
@@ -4245,14 +4050,10 @@ virtual_solenoid_valve:
           type: object
         type: UniLabJsonCommandAsync
       auto-initialize:
-        displayname: auto-initialize
-        estimate_duration_express: ''
-        estimate_duration_fixed: 60.0
         feedback: {}
         goal: {}
         goal_default: {}
         handles: {}
-        lock_resource: []
         placeholder_keys: {}
         result: {}
         schema:
@@ -4271,14 +4072,10 @@ virtual_solenoid_valve:
           type: object
         type: UniLabJsonCommandAsync
       auto-is_closed:
-        displayname: auto-is_closed
-        estimate_duration_express: ''
-        estimate_duration_fixed: 60.0
         feedback: {}
         goal: {}
         goal_default: {}
         handles: {}
-        lock_resource: []
         placeholder_keys: {}
         result: {}
         schema:
@@ -4297,14 +4094,10 @@ virtual_solenoid_valve:
           type: object
         type: UniLabJsonCommand
       auto-reset:
-        displayname: auto-reset
-        estimate_duration_express: ''
-        estimate_duration_fixed: 60.0
         feedback: {}
         goal: {}
         goal_default: {}
         handles: {}
-        lock_resource: []
         placeholder_keys: {}
         result: {}
         schema:
@@ -4322,14 +4115,10 @@ virtual_solenoid_valve:
           type: object
         type: UniLabJsonCommandAsync
       auto-toggle:
-        displayname: auto-toggle
-        estimate_duration_express: ''
-        estimate_duration_fixed: 60.0
         feedback: {}
         goal: {}
         goal_default: {}
         handles: {}
-        lock_resource: []
         placeholder_keys: {}
         result: {}
         schema:
@@ -4347,14 +4136,10 @@ virtual_solenoid_valve:
           type: object
         type: UniLabJsonCommand
       close:
-        displayname: close
-        estimate_duration_express: ''
-        estimate_duration_fixed: 60.0
         feedback: {}
         goal: {}
         goal_default: {}
         handles: {}
-        lock_resource: []
         placeholder_keys: {}
         result:
           return_info: return_info
@@ -4382,14 +4167,10 @@ virtual_solenoid_valve:
           type: object
         type: EmptyIn
       open:
-        displayname: open
-        estimate_duration_express: ''
-        estimate_duration_fixed: 60.0
         feedback: {}
         goal: {}
         goal_default: {}
         handles: {}
-        lock_resource: []
         placeholder_keys: {}
         result:
           return_info: return_info
@@ -4417,16 +4198,12 @@ virtual_solenoid_valve:
           type: object
         type: EmptyIn
       set_status:
-        displayname: set_status
-        estimate_duration_express: ''
-        estimate_duration_fixed: 60.0
         feedback: {}
         goal:
           string: string
         goal_default:
           string: ''
         handles: {}
-        lock_resource: []
         placeholder_keys: {}
         result:
           return_info: return_info
@@ -4461,9 +4238,6 @@ virtual_solenoid_valve:
           type: object
         type: StrSingleInput
       set_valve_position:
-        displayname: set_valve_position
-        estimate_duration_express: ''
-        estimate_duration_fixed: 60.0
         feedback:
           status: status
         goal:
@@ -4471,7 +4245,6 @@ virtual_solenoid_valve:
         goal_default:
           command: ''
         handles: {}
-        lock_resource: []
         placeholder_keys: {}
         result:
           return_info: return_info
@@ -4517,7 +4290,6 @@ virtual_solenoid_valve:
     type: python
   config_info: []
   description: Virtual Solenoid Valve for simple on/off flow control
-  displayname: virtual_solenoid_valve
   handles:
   - data_key: fluid_port_in
     data_source: handle
@@ -4536,7 +4308,6 @@ virtual_solenoid_valve:
     label: out
     side: SOUTH
   icon: ''
-  init_param_enforce: {}
   init_param_schema:
     config:
       properties:
@@ -4562,7 +4333,6 @@ virtual_solenoid_valve:
       - valve_position
       - valve_state
       type: object
-  metadata: {}
   version: 1.0.0
 virtual_solid_dispenser:
   category:
@@ -4570,9 +4340,6 @@ virtual_solid_dispenser:
   class:
     action_value_mappings:
       add_solid:
-        displayname: add_solid
-        estimate_duration_express: ''
-        estimate_duration_fixed: 60.0
         feedback:
           current_status: current_status
           progress: progress
@@ -4628,7 +4395,6 @@ virtual_solid_dispenser:
           viscous: false
           volume: ''
         handles: {}
-        lock_resource: []
         placeholder_keys: {}
         result:
           message: message
@@ -4796,14 +4562,10 @@ virtual_solid_dispenser:
           type: object
         type: Add
       auto-cleanup:
-        displayname: auto-cleanup
-        estimate_duration_express: ''
-        estimate_duration_fixed: 60.0
         feedback: {}
         goal: {}
         goal_default: {}
         handles: {}
-        lock_resource: []
         placeholder_keys: {}
         result: {}
         schema:
@@ -4822,15 +4584,11 @@ virtual_solid_dispenser:
           type: object
         type: UniLabJsonCommandAsync
       auto-find_solid_reagent_bottle:
-        displayname: auto-find_solid_reagent_bottle
-        estimate_duration_express: ''
-        estimate_duration_fixed: 60.0
         feedback: {}
         goal: {}
         goal_default:
           reagent_name: null
         handles: {}
-        lock_resource: []
         placeholder_keys: {}
         result: {}
         schema:
@@ -4852,14 +4610,10 @@ virtual_solid_dispenser:
           type: object
         type: UniLabJsonCommand
       auto-initialize:
-        displayname: auto-initialize
-        estimate_duration_express: ''
-        estimate_duration_fixed: 60.0
         feedback: {}
         goal: {}
         goal_default: {}
         handles: {}
-        lock_resource: []
         placeholder_keys: {}
         result: {}
         schema:
@@ -4878,15 +4632,11 @@ virtual_solid_dispenser:
           type: object
         type: UniLabJsonCommandAsync
       auto-parse_mass_string:
-        displayname: auto-parse_mass_string
-        estimate_duration_express: ''
-        estimate_duration_fixed: 60.0
         feedback: {}
         goal: {}
         goal_default:
           mass_str: null
         handles: {}
-        lock_resource: []
         placeholder_keys: {}
         result: {}
         schema:
@@ -4908,15 +4658,11 @@ virtual_solid_dispenser:
           type: object
         type: UniLabJsonCommand
       auto-parse_mol_string:
-        displayname: auto-parse_mol_string
-        estimate_duration_express: ''
-        estimate_duration_fixed: 60.0
         feedback: {}
         goal: {}
         goal_default:
           mol_str: null
         handles: {}
-        lock_resource: []
         placeholder_keys: {}
         result: {}
         schema:
@@ -4947,7 +4693,6 @@ virtual_solid_dispenser:
   config_info: []
   description: Virtual Solid Dispenser for Add Protocol Testing - supports mass and
     molar additions
-  displayname: virtual_solid_dispenser
   handles:
   - data_key: solid_out
     data_source: executor
@@ -4966,7 +4711,6 @@ virtual_solid_dispenser:
     label: SolidIn
     side: NORTH
   icon: ''
-  init_param_enforce: {}
   init_param_schema:
     config:
       properties:
@@ -4992,7 +4736,6 @@ virtual_solid_dispenser:
       - status
       - total_operations
       type: object
-  metadata: {}
   version: 1.0.0
 virtual_stirrer:
   category:
@@ -5000,14 +4743,10 @@ virtual_stirrer:
   class:
     action_value_mappings:
       auto-cleanup:
-        displayname: auto-cleanup
-        estimate_duration_express: ''
-        estimate_duration_fixed: 60.0
         feedback: {}
         goal: {}
         goal_default: {}
         handles: {}
-        lock_resource: []
         placeholder_keys: {}
         result: {}
         schema:
@@ -5026,14 +4765,10 @@ virtual_stirrer:
           type: object
         type: UniLabJsonCommandAsync
       auto-initialize:
-        displayname: auto-initialize
-        estimate_duration_express: ''
-        estimate_duration_fixed: 60.0
         feedback: {}
         goal: {}
         goal_default: {}
         handles: {}
-        lock_resource: []
         placeholder_keys: {}
         result: {}
         schema:
@@ -5052,9 +4787,6 @@ virtual_stirrer:
           type: object
         type: UniLabJsonCommandAsync
       start_stir:
-        displayname: start_stir
-        estimate_duration_express: ''
-        estimate_duration_fixed: 60.0
         feedback:
           current_speed: current_speed
           current_status: current_status
@@ -5087,7 +4819,6 @@ virtual_stirrer:
             sample_id: ''
             type: ''
         handles: {}
-        lock_resource: []
         placeholder_keys: {}
         result:
           message: message
@@ -5230,9 +4961,6 @@ virtual_stirrer:
           type: object
         type: StartStir
       stir:
-        displayname: stir
-        estimate_duration_express: ''
-        estimate_duration_fixed: 60.0
         feedback:
           status: status
         goal:
@@ -5271,7 +4999,6 @@ virtual_stirrer:
             sample_id: ''
             type: ''
         handles: {}
-        lock_resource: []
         placeholder_keys: {}
         result:
           message: message
@@ -5416,9 +5143,6 @@ virtual_stirrer:
           type: object
         type: Stir
       stop_stir:
-        displayname: stop_stir
-        estimate_duration_express: ''
-        estimate_duration_fixed: 60.0
         feedback:
           current_status: current_status
           progress: progress
@@ -5446,7 +5170,6 @@ virtual_stirrer:
             sample_id: ''
             type: ''
         handles: {}
-        lock_resource: []
         placeholder_keys: {}
         result:
           message: message
@@ -5592,7 +5315,6 @@ virtual_stirrer:
     type: python
   config_info: []
   description: Virtual Stirrer for StirProtocol Testing
-  displayname: virtual_stirrer
   handles:
   - data_key: vessel
     data_source: handle
@@ -5603,7 +5325,6 @@ virtual_stirrer:
     label: stirrer
     side: NORTH
   icon: Stirrer.webp
-  init_param_enforce: {}
   init_param_schema:
     config:
       properties:
@@ -5644,7 +5365,6 @@ virtual_stirrer:
       - remaining_time
       - status
       type: object
-  metadata: {}
   version: 1.0.0
 virtual_transfer_pump:
   category:
@@ -5652,16 +5372,12 @@ virtual_transfer_pump:
   class:
     action_value_mappings:
       auto-aspirate:
-        displayname: auto-aspirate
-        estimate_duration_express: ''
-        estimate_duration_fixed: 60.0
         feedback: {}
         goal: {}
         goal_default:
           velocity: null
           volume: null
         handles: {}
-        lock_resource: []
         placeholder_keys: {}
         result: {}
         schema:
@@ -5684,14 +5400,10 @@ virtual_transfer_pump:
           type: object
         type: UniLabJsonCommandAsync
       auto-cleanup:
-        displayname: auto-cleanup
-        estimate_duration_express: ''
-        estimate_duration_fixed: 60.0
         feedback: {}
         goal: {}
         goal_default: {}
         handles: {}
-        lock_resource: []
         placeholder_keys: {}
         result: {}
         schema:
@@ -5710,16 +5422,12 @@ virtual_transfer_pump:
           type: object
         type: UniLabJsonCommandAsync
       auto-dispense:
-        displayname: auto-dispense
-        estimate_duration_express: ''
-        estimate_duration_fixed: 60.0
         feedback: {}
         goal: {}
         goal_default:
           velocity: null
           volume: null
         handles: {}
-        lock_resource: []
         placeholder_keys: {}
         result: {}
         schema:
@@ -5742,15 +5450,11 @@ virtual_transfer_pump:
           type: object
         type: UniLabJsonCommandAsync
       auto-empty_syringe:
-        displayname: auto-empty_syringe
-        estimate_duration_express: ''
-        estimate_duration_fixed: 60.0
         feedback: {}
         goal: {}
         goal_default:
           velocity: null
         handles: {}
-        lock_resource: []
         placeholder_keys: {}
         result: {}
         schema:
@@ -5770,15 +5474,11 @@ virtual_transfer_pump:
           type: object
         type: UniLabJsonCommandAsync
       auto-fill_syringe:
-        displayname: auto-fill_syringe
-        estimate_duration_express: ''
-        estimate_duration_fixed: 60.0
         feedback: {}
         goal: {}
         goal_default:
           velocity: null
         handles: {}
-        lock_resource: []
         placeholder_keys: {}
         result: {}
         schema:
@@ -5798,14 +5498,10 @@ virtual_transfer_pump:
           type: object
         type: UniLabJsonCommandAsync
       auto-initialize:
-        displayname: auto-initialize
-        estimate_duration_express: ''
-        estimate_duration_fixed: 60.0
         feedback: {}
         goal: {}
         goal_default: {}
         handles: {}
-        lock_resource: []
         placeholder_keys: {}
         result: {}
         schema:
@@ -5824,14 +5520,10 @@ virtual_transfer_pump:
           type: object
         type: UniLabJsonCommandAsync
       auto-is_empty:
-        displayname: auto-is_empty
-        estimate_duration_express: ''
-        estimate_duration_fixed: 60.0
         feedback: {}
         goal: {}
         goal_default: {}
         handles: {}
-        lock_resource: []
         placeholder_keys: {}
         result: {}
         schema:
@@ -5850,14 +5542,10 @@ virtual_transfer_pump:
           type: object
         type: UniLabJsonCommand
       auto-is_full:
-        displayname: auto-is_full
-        estimate_duration_express: ''
-        estimate_duration_fixed: 60.0
         feedback: {}
         goal: {}
         goal_default: {}
         handles: {}
-        lock_resource: []
         placeholder_keys: {}
         result: {}
         schema:
@@ -5876,16 +5564,12 @@ virtual_transfer_pump:
           type: object
         type: UniLabJsonCommand
       auto-pull_plunger:
-        displayname: auto-pull_plunger
-        estimate_duration_express: ''
-        estimate_duration_fixed: 60.0
         feedback: {}
         goal: {}
         goal_default:
           velocity: null
           volume: null
         handles: {}
-        lock_resource: []
         placeholder_keys: {}
         result: {}
         schema:
@@ -5910,16 +5594,12 @@ virtual_transfer_pump:
           type: object
         type: UniLabJsonCommandAsync
       auto-push_plunger:
-        displayname: auto-push_plunger
-        estimate_duration_express: ''
-        estimate_duration_fixed: 60.0
         feedback: {}
         goal: {}
         goal_default:
           velocity: null
           volume: null
         handles: {}
-        lock_resource: []
         placeholder_keys: {}
         result: {}
         schema:
@@ -5944,15 +5624,11 @@ virtual_transfer_pump:
           type: object
         type: UniLabJsonCommandAsync
       auto-set_max_velocity:
-        displayname: auto-set_max_velocity
-        estimate_duration_express: ''
-        estimate_duration_fixed: 60.0
         feedback: {}
         goal: {}
         goal_default:
           velocity: null
         handles: {}
-        lock_resource: []
         placeholder_keys: {}
         result: {}
         schema:
@@ -5973,14 +5649,10 @@ virtual_transfer_pump:
           type: object
         type: UniLabJsonCommand
       auto-stop_operation:
-        displayname: auto-stop_operation
-        estimate_duration_express: ''
-        estimate_duration_fixed: 60.0
         feedback: {}
         goal: {}
         goal_default: {}
         handles: {}
-        lock_resource: []
         placeholder_keys: {}
         result: {}
         schema:
@@ -5998,9 +5670,6 @@ virtual_transfer_pump:
           type: object
         type: UniLabJsonCommandAsync
       set_position:
-        displayname: set_position
-        estimate_duration_express: ''
-        estimate_duration_fixed: 60.0
         feedback:
           current_position: current_position
           progress: progress
@@ -6012,7 +5681,6 @@ virtual_transfer_pump:
           max_velocity: 5.0
           position: 0.0
         handles: {}
-        lock_resource: []
         placeholder_keys: {}
         result:
           message: message
@@ -6068,9 +5736,6 @@ virtual_transfer_pump:
           type: object
         type: SetPumpPosition
       transfer:
-        displayname: transfer
-        estimate_duration_express: ''
-        estimate_duration_fixed: 60.0
         feedback:
           current_status: current_status
           progress: progress
@@ -6100,7 +5765,6 @@ virtual_transfer_pump:
           viscous: false
           volume: 1.0
         handles: {}
-        lock_resource: []
         placeholder_keys: {}
         result:
           message: message
@@ -6184,7 +5848,6 @@ virtual_transfer_pump:
     type: python
   config_info: []
   description: Virtual Transfer Pump for TransferProtocol Testing (Syringe-style)
-  displayname: virtual_transfer_pump
   handles:
   - data_key: fluid_port
     data_source: handle
@@ -6195,7 +5858,6 @@ virtual_transfer_pump:
     label: transferpump
     side: SOUTH
   icon: Pump.webp
-  init_param_enforce: {}
   init_param_schema:
     config:
       properties:
@@ -6229,7 +5891,6 @@ virtual_transfer_pump:
       - status
       - transfer_rate
       type: object
-  metadata: {}
   version: 1.0.0
 virtual_vacuum_pump:
   category:
@@ -6237,14 +5898,10 @@ virtual_vacuum_pump:
   class:
     action_value_mappings:
       auto-cleanup:
-        displayname: auto-cleanup
-        estimate_duration_express: ''
-        estimate_duration_fixed: 60.0
         feedback: {}
         goal: {}
         goal_default: {}
         handles: {}
-        lock_resource: []
         placeholder_keys: {}
         result: {}
         schema:
@@ -6263,14 +5920,10 @@ virtual_vacuum_pump:
           type: object
         type: UniLabJsonCommandAsync
       auto-initialize:
-        displayname: auto-initialize
-        estimate_duration_express: ''
-        estimate_duration_fixed: 60.0
         feedback: {}
         goal: {}
         goal_default: {}
         handles: {}
-        lock_resource: []
         placeholder_keys: {}
         result: {}
         schema:
@@ -6289,14 +5942,10 @@ virtual_vacuum_pump:
           type: object
         type: UniLabJsonCommandAsync
       auto-is_closed:
-        displayname: auto-is_closed
-        estimate_duration_express: ''
-        estimate_duration_fixed: 60.0
         feedback: {}
         goal: {}
         goal_default: {}
         handles: {}
-        lock_resource: []
         placeholder_keys: {}
         result: {}
         schema:
@@ -6314,14 +5963,10 @@ virtual_vacuum_pump:
           type: object
         type: UniLabJsonCommand
       auto-is_open:
-        displayname: auto-is_open
-        estimate_duration_express: ''
-        estimate_duration_fixed: 60.0
         feedback: {}
         goal: {}
         goal_default: {}
         handles: {}
-        lock_resource: []
         placeholder_keys: {}
         result: {}
         schema:
@@ -6339,14 +5984,10 @@ virtual_vacuum_pump:
           type: object
         type: UniLabJsonCommand
       close:
-        displayname: close
-        estimate_duration_express: ''
-        estimate_duration_fixed: 60.0
         feedback: {}
         goal: {}
         goal_default: {}
         handles: {}
-        lock_resource: []
         placeholder_keys: {}
         result:
           return_info: return_info
@@ -6374,14 +6015,10 @@ virtual_vacuum_pump:
           type: object
         type: EmptyIn
       open:
-        displayname: open
-        estimate_duration_express: ''
-        estimate_duration_fixed: 60.0
         feedback: {}
         goal: {}
         goal_default: {}
         handles: {}
-        lock_resource: []
         placeholder_keys: {}
         result:
           return_info: return_info
@@ -6409,16 +6046,12 @@ virtual_vacuum_pump:
           type: object
         type: EmptyIn
       set_status:
-        displayname: set_status
-        estimate_duration_express: ''
-        estimate_duration_fixed: 60.0
         feedback: {}
         goal:
           string: string
         goal_default:
           string: ''
         handles: {}
-        lock_resource: []
         placeholder_keys: {}
         result:
           return_info: return_info
@@ -6457,7 +6090,6 @@ virtual_vacuum_pump:
     type: python
   config_info: []
   description: Virtual vacuum pump
-  displayname: virtual_vacuum_pump
   handles:
   - data_key: fluid_in
     data_source: handle
@@ -6468,7 +6100,6 @@ virtual_vacuum_pump:
     label: vacuumpump
     side: SOUTH
   icon: Vacuum.webp
-  init_param_enforce: {}
   init_param_schema:
     config:
       properties:
@@ -6485,5 +6116,4 @@ virtual_vacuum_pump:
       required:
       - status
       type: object
-  metadata: {}
   version: 1.0.0

@@ -359,6 +359,16 @@ def _transform_response(
                 WorkflowError("template_catalog_unavailable")
             )
         return workflow_success_response(data)
+    except WorkflowError as error:
+        if error.code == "template_catalog_unavailable":
+            return workflow_error_response(
+                WorkflowError("template_catalog_unavailable")
+            )
+        _LOGGER.error(
+            "可信工作流创作纯转换拒绝编译器业务错误并完成出站净化：code=%s",
+            error.code,
+        )
+        return workflow_error_response(WorkflowError("internal_error"))
     except Exception:
         _LOGGER.exception("可信工作流创作纯转换失败")
         return workflow_error_response(WorkflowError("internal_error"))

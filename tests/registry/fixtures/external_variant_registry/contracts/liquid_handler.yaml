@@ -1,6 +1,5 @@
 actions:
   setup:
-    type: UniLabJsonCommand
     goal: {}
     feedback: {}
     result:

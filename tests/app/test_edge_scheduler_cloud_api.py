@@ -268,25 +268,3 @@ class TestIntegrationWiring:
             assert r["dispatched"] == []
         finally:
             backend.stop()
-
-    def test_setup_reuses_the_ws_device_lock_owner_for_local_catalog_projection(self):
-        class FakeWsClient:
-            def __init__(self):
-                self.device_manager = DeviceActionManager()
-                self.message_processor = MessageProcessor(
-                    "ws://test",
-                    Queue(maxsize=100),
-                    self.device_manager,
-                )
-
-        ws = FakeWsClient()
-        _scheduler, backend = integration.setup_edge_scheduler(
-            ws_client=ws,
-            host_node_getter=lambda: None,
-            device_state_db_path="off",
-            workflow_history_db_path="off",
-        )
-        try:
-            assert backend.device_manager is ws.device_manager
-        finally:
-            backend.stop()

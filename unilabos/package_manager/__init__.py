@@ -1,4 +1,4 @@
-"""领域包发现、构建、分发与消费的稳定 Interface。"""
+"""领域包发现、构建、分发、消费与工作区启动的稳定接口。"""
 
 from .assets import PackageAssetResolver
 from .catalog import (
@@ -27,22 +27,6 @@ from .workspace_startup import (
     compile_workspace_startup,
     prepare_workspace_startup,
 )
-
-# ``compile_package_source`` 仍由 ``compiler`` 拥有；当前源码树与
-# ``source_discovery.load_editable_package_manifest`` 尚未对齐，避免在包导入期强拉。
-
-
-def compile_package_source(*args, **kwargs):
-    from .compiler import compile_package_source as _compile
-
-    return _compile(*args, **kwargs)
-
-
-def normalize_distribution_name(*args, **kwargs):
-    from .compiler import normalize_distribution_name as _normalize
-
-    return _normalize(*args, **kwargs)
-
 
 __all__ = [
     "CachedArchiveSource",

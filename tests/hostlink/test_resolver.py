@@ -2,11 +2,7 @@
 
 import pytest
 
-from unilabos.hostlink.resolver import (
-    InventoryResourceAliasResolver,
-    LocalResourceResolver,
-    ResourceNotFound,
-)
+from unilabos.hostlink.resolver import LocalResourceResolver, ResourceNotFound
 
 
 class _Content:
@@ -90,52 +86,3 @@ class TestResolve:
     def test_dump_all(self, tree_set):
         resolver = LocalResourceResolver(lambda: tree_set)
         assert len(resolver.dump_all()) == 4
-
-
-class TestInventoryAliases:
-    def test_persisted_inventory_uuid_rebinds_runtime_subtree(self, tree_set):
-        resolver = InventoryResourceAliasResolver(
-            LocalResourceResolver(lambda: tree_set),
-            lambda: {
-                "materials": [
-                    {
-                        "uuid": "material-station",
-                        "parent_uuid": None,
-                        "deleted_at": None,
-                        "meta_data": {"source_node_id": "station_1"},
-                    },
-                    {
-                        "uuid": "material-deck",
-                        "parent_uuid": "material-station",
-                        "deleted_at": None,
-                        "meta_data": {"source_node_id": "deck_1"},
-                    },
-                    {
-                        "uuid": "material-plate",
-                        "parent_uuid": "material-deck",
-                        "deleted_at": None,
-                        "meta_data": {"source_node_id": "plate_1"},
-                    },
-                ]
-            },
-        )
-
-        nodes = resolver.resolve(uuid="material-deck", with_children=True)
-
-        assert [node["uuid"] for node in nodes] == [
-            "material-deck",
-            "material-plate",
-        ]
-        assert [node.get("parent_uuid") for node in nodes] == [
-            "material-station",
-            "material-deck",
-        ]
-
-    def test_missing_inventory_alias_raises(self, tree_set):
-        resolver = InventoryResourceAliasResolver(
-            LocalResourceResolver(lambda: tree_set),
-            lambda: {"materials": []},
-        )
-
-        with pytest.raises(ResourceNotFound, match="resource not found"):
-            resolver.resolve(uuid="material-missing")

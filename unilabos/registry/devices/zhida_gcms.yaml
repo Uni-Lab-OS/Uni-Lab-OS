@@ -4,14 +4,10 @@ zhida_gcms:
   class:
     action_value_mappings:
       abort:
-        displayname: abort
-        estimate_duration_express: ''
-        estimate_duration_fixed: 60.0
         feedback: {}
         goal: {}
         goal_default: {}
         handles: {}
-        lock_resource: []
         placeholder_keys: {}
         result:
           return_info: return_info
@@ -39,14 +35,10 @@ zhida_gcms:
           type: object
         type: EmptyIn
       auto-close:
-        displayname: auto-close
-        estimate_duration_express: ''
-        estimate_duration_fixed: 60.0
         feedback: {}
         goal: {}
         goal_default: {}
         handles: {}
-        lock_resource: []
         placeholder_keys: {}
         result: {}
         schema:
@@ -64,14 +56,10 @@ zhida_gcms:
           type: object
         type: UniLabJsonCommand
       auto-connect:
-        displayname: auto-connect
-        estimate_duration_express: ''
-        estimate_duration_fixed: 60.0
         feedback: {}
         goal: {}
         goal_default: {}
         handles: {}
-        lock_resource: []
         placeholder_keys: {}
         result: {}
         schema:
@@ -89,14 +77,10 @@ zhida_gcms:
           type: object
         type: UniLabJsonCommand
       get_methods:
-        displayname: get_methods
-        estimate_duration_express: ''
-        estimate_duration_fixed: 60.0
         feedback: {}
         goal: {}
         goal_default: {}
         handles: {}
-        lock_resource: []
         result: {}
         schema:
           description: ''
@@ -122,14 +106,10 @@ zhida_gcms:
           type: object
         type: EmptyIn
       get_status:
-        displayname: get_status
-        estimate_duration_express: ''
-        estimate_duration_fixed: 60.0
         feedback: {}
         goal: {}
         goal_default: {}
         handles: {}
-        lock_resource: []
         result: {}
         schema:
           description: ''
@@ -155,14 +135,10 @@ zhida_gcms:
           type: object
         type: EmptyIn
       get_version:
-        displayname: get_version
-        estimate_duration_express: ''
-        estimate_duration_fixed: 60.0
         feedback: {}
         goal: {}
         goal_default: {}
         handles: {}
-        lock_resource: []
         result: {}
         schema:
           description: ''
@@ -188,14 +164,10 @@ zhida_gcms:
           type: object
         type: EmptyIn
       put_tray:
-        displayname: put_tray
-        estimate_duration_express: ''
-        estimate_duration_fixed: 60.0
         feedback: {}
         goal: {}
         goal_default: {}
         handles: {}
-        lock_resource: []
         placeholder_keys: {}
         result:
           return_info: return_info
@@ -223,9 +195,6 @@ zhida_gcms:
           type: object
         type: EmptyIn
       start:
-        displayname: start
-        estimate_duration_express: ''
-        estimate_duration_fixed: 60.0
         feedback: {}
         goal:
           string: string
@@ -233,7 +202,6 @@ zhida_gcms:
         goal_default:
           string: ''
         handles: {}
-        lock_resource: []
         placeholder_keys: {}
         result:
           return_info: return_info
@@ -268,9 +236,6 @@ zhida_gcms:
           type: object
         type: StrSingleInput
       start_with_csv_file:
-        displayname: start_with_csv_file
-        estimate_duration_express: ''
-        estimate_duration_fixed: 60.0
         feedback: {}
         goal:
           csv_file_path: csv_file_path
@@ -278,7 +243,6 @@ zhida_gcms:
         goal_default:
           string: ''
         handles: {}
-        lock_resource: []
         placeholder_keys: {}
         result:
           return_info: return_info
@@ -320,10 +284,8 @@ zhida_gcms:
     type: python
   config_info: []
   description: 智达气相色谱-质谱联用（GC-MS）分析设备，通过 TCP 通信实现远程控制与状态监控，支持方法管理与任务启动等功能。
-  displayname: zhida_gcms
   handles: []
   icon: ''
-  init_param_enforce: {}
   init_param_schema:
     config:
       properties:
@@ -354,5 +316,4 @@ zhida_gcms:
       - status
       - version
       type: object
-  metadata: {}
   version: 1.0.0

@@ -319,6 +319,9 @@ class WorkflowService:
         self._task_scheduler_bridge = task_scheduler_bridge
         self._locks_guard = threading.Lock()
         self._authoring_locks: Dict[str, threading.RLock] = {}
+        # 不同工作流（Workflow）各自提交后，共用这一临界区串行完成“重建完整
+        # 模板目录＋替换当前编译器”，防止较旧的并发重建最后覆盖较新代际。
+        self._compiler_generation_lock = threading.RLock()
         # ``_source_authorization_replacement_lock`` 串行化完整授权集合替换，使“当前
         # 集合 ∪ 新集合”的锁快照在取得所有创作锁前不会被另一替换命令改变。
         self._source_authorization_replacement_lock = threading.RLock()
@@ -955,18 +958,25 @@ class WorkflowService:
                 workflow_uuid=workflow_uuid,
                 python_source=python_source,
             )
-            try:
-                self._atomic_write(
-                    registration,
-                    encoded,
-                    expected_hash=current_hash,
-                )
-            except OSError:
-                raise WorkflowError("internal_error") from None
-            source = self._read_source(registration)
-            assert source is not None
-            if source["draft_hash"] != _sha256(encoded):
-                raise WorkflowConflict("draft_hash_conflict")
+            next_hash = _sha256(encoded)
+            if current_hash == next_hash:
+                # 同字节保存不替换权威文件；仍重新读取、编译并签发候选。
+                source = self._read_source(registration)
+                if source is None or source["draft_hash"] != next_hash:
+                    raise WorkflowConflict("draft_hash_conflict")
+            else:
+                try:
+                    self._atomic_write(
+                        registration,
+                        encoded,
+                        expected_hash=current_hash,
+                    )
+                except OSError:
+                    raise WorkflowError("internal_error") from None
+                source = self._read_source(registration)
+                assert source is not None
+                if source["draft_hash"] != next_hash:
+                    raise WorkflowConflict("draft_hash_conflict")
             applied_graph = self.get_graph(workflow_uuid)
             compilation = self._compile(
                 workflow=workflow,
@@ -1353,23 +1363,24 @@ class WorkflowService:
 
             warnings: List[Dict[str, str]] = []
             if self._compiler_rebuilder is not None:
-                try:
-                    rebuilt_compiler = self._compiler_rebuilder()
-                except Exception:  # noqa: BLE001 - 主事务已提交，只能关闭目录
-                    # 应用图已经提交，目录刷新失败时撤销编译入口，禁止继续用陈旧
-                    # 指纹签发父候选；下次进程启动会从持久图重建完整代际。
-                    self.compiler = None
-                    warnings.append(
-                        {
-                            "code": "template_catalog_rebuild_pending",
-                            "message": (
-                                "工作流已应用，但模板目录重建失败；"
-                                "创作编译已关闭，重启后将自动恢复。"
-                            ),
-                        }
-                    )
-                else:
-                    self.compiler = rebuilt_compiler
+                with self._compiler_generation_lock:
+                    try:
+                        rebuilt_compiler = self._compiler_rebuilder()
+                    except Exception:  # noqa: BLE001 - 主事务已提交，只能关闭目录
+                        # 应用图已经提交，目录刷新失败时撤销编译入口，禁止继续用陈旧
+                        # 指纹签发父候选；下次进程启动会从持久图重建完整代际。
+                        self.compiler = None
+                        warnings.append(
+                            {
+                                "code": "template_catalog_rebuild_pending",
+                                "message": (
+                                    "工作流已应用，但模板目录重建失败；"
+                                    "创作编译已关闭，重启后将自动恢复。"
+                                ),
+                            }
+                        )
+                    else:
+                        self.compiler = rebuilt_compiler
             response_source = source
 
             def warn_writeback() -> None:

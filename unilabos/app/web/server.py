@@ -5,6 +5,7 @@ Web服务器模块
 """
 
 import webbrowser
+from typing import Any
 
 from fastapi import FastAPI, Request
 from fastapi.middleware.cors import CORSMiddleware
@@ -31,6 +32,61 @@ install_http_tracing(app)
 pages = None
 workflow_routes_mounted = False
 resource_contract_routes_mounted = False
+
+
+class _CurrentAuthoringTransform:
+    """逐请求委派到工作流服务（WorkflowService）的当前可信创作转换。"""
+
+    def __init__(self, workflow_service: Any) -> None:
+        """绑定身份稳定的工作流服务（WorkflowService）。
+
+        参数：``workflow_service`` 持有可在应用后替换的当前编译器
+        （Compiler）。返回：无。异常：构造阶段不读取编译器，不主动抛错。
+        """
+
+        self._workflow_service = workflow_service
+
+    def _current(self) -> Any:
+        """读取一次当前编译器（Compiler）引用。
+
+        参数：无。返回：本次请求固定使用的编译器。异常：目录重建失败并撤销
+        编译入口时抛出稳定 ``template_catalog_unavailable`` 工作流错误。
+        """
+
+        from unilabos.workflow.service import WorkflowError
+
+        compiler = self._workflow_service.compiler
+        if compiler is None:
+            raise WorkflowError("template_catalog_unavailable")
+        return compiler
+
+    def compile(self, **values: Any) -> Any:
+        """使用当前目录代际编译工作流源码（Workflow Source）。
+
+        参数：``values`` 是可信转换接口已经校验的编译参数。返回：当前编译器
+        的编译结果。异常：目录不可用或编译器拒绝请求时原样传播。
+        """
+
+        return self._current().compile(**values)
+
+    def generate_python(self, **values: Any) -> Any:
+        """使用当前目录代际生成规范工作流源码（Workflow Source）。
+
+        参数：``values`` 是可信转换接口已经校验的候选图参数。返回：当前编译器
+        的规范源码生成结果。异常：目录不可用或编译器拒绝请求时原样传播。
+        """
+
+        return self._current().generate_python(**values)
+
+    def validate(self, **values: Any) -> Any:
+        """使用当前目录代际共同校验图和工作流源码（Workflow Source）。
+
+        参数：``values`` 是可信转换接口已经校验的图和源码参数。返回：当前
+        编译器的校验结果。异常：目录不可用或编译器拒绝请求时原样传播。
+        """
+
+        return self._current().validate(**values)
+
 
 # noinspection PyTypeChecker
 app.add_middleware(
@@ -77,7 +133,7 @@ def setup_server() -> FastAPI:
 
     参数：无。返回：进程唯一 FastAPI 应用；重复调用复用已挂载路由。工作流
     源码（Workflow Source）授权形状或组合失败时关闭该合同路由，但不阻止无关
-    Edge 路由继续装配，错误写入产品日志。
+    边缘侧（Edge）路由继续装配，错误写入产品日志。
     """
     global pages, resource_contract_routes_mounted, workflow_routes_mounted
 
@@ -88,22 +144,24 @@ def setup_server() -> FastAPI:
     # 设置API路由
     setup_api_routes(app)
 
-    # 共享 Workflow Interface 必须先于 Edge-only scheduler adapter 挂载，
+    # 共享工作流接口（Workflow Interface）必须先于仅边缘侧（Edge-only）的
+    # 调度器适配器挂载，
     # /workflows 表示定义，/workflow-tasks 表示运行。
     if not workflow_routes_mounted and BasicConfig.working_dir:
         try:
-            from unilabos.app.workflow_api import install_workflow_api
             from unilabos.app.scheduler.integration import (
                 get_edge_scheduler,
                 get_inventory_service,
             )
+            from unilabos.app.workflow_api import install_workflow_api
             from unilabos.workflow.composition import (
                 compose_local_workflow_template_runtime,
                 compose_workflow_runtime,
             )
 
             # ``template_projection`` 只在本地调度与库存权威同时存在时建立；
-            # Backend-controlled 模式不能在 OS 再创建第二个生产模板写权威。
+            # 后端控制（backend_controlled）模式不能在操作系统（OS）再创建
+            # 第二个生产模板写权威。
             template_projection = None
             inventory_service = get_inventory_service()
             # ``edge_scheduler`` 是本地调度权威（Scheduler Authority）；只把同一
@@ -134,13 +192,18 @@ def setup_server() -> FastAPI:
                 app,
                 workflow_service,
                 template_snapshot_provider=template_projection,
-                authoring_transform=workflow_service.compiler,
+                authoring_transform=(
+                    _CurrentAuthoringTransform(workflow_service)
+                    if workflow_service.compiler is not None
+                    else None
+                ),
             )
             workflow_routes_mounted = True
-        except Exception as e:  # noqa: BLE001 - unrelated Edge routes remain available
-            error(f"[Web] 挂载 Backend Workflow 合同失败: {str(e)}")
+        except Exception as e:  # noqa: BLE001 - 无关边缘侧（Edge）路由仍可用
+            error(f"[Web] 挂载后端（Backend）工作流（Workflow）合同失败: {e!s}")
 
-    # Edge 调度器与 Host 物料路由独立挂载；默认 embedded 物料服务不要求 --edge_scheduler。
+    # 边缘调度器（Edge Scheduler）与主机（Host）物料路由独立挂载；默认
+    # 内嵌（embedded）物料服务不要求 --edge_scheduler。
     try:
         from unilabos.app.scheduler.api import create_scheduler_router
         from unilabos.app.scheduler.integration import (
@@ -160,15 +223,17 @@ def setup_server() -> FastAPI:
         )
         inventory_service = get_inventory_service()
         if inventory_service is not None:
+            from unilabos.app.scheduler.inventory.api import (
+                create_legacy_material_router,
+            )
+            from unilabos.app.scheduler.inventory.api import (
+                create_router as create_inventory_router,
+            )
             from unilabos.app.scheduler.inventory.backend_api import (
                 install_backend_resource_api,
             )
             from unilabos.app.scheduler.inventory.backend_contract import (
                 BackendResourceService,
-            )
-            from unilabos.app.scheduler.inventory.api import (
-                create_legacy_material_router,
-                create_router as create_inventory_router,
             )
             from unilabos.app.scheduler.inventory.layout import create_lab_router
 
@@ -184,21 +249,23 @@ def setup_server() -> FastAPI:
             app.include_router(create_legacy_material_router(inventory_service))
             app.include_router(create_lab_router(inventory_service))
     except Exception as e:  # noqa: BLE001 - 调度器路由挂载失败不影响主服务
-        error(f"[Web] 挂载 Edge 调度器路由失败: {str(e)}")
+        error(f"[Web] 挂载边缘调度器（Edge Scheduler）路由失败: {e!s}")
 
     # 设置页面路由
     try:
         setup_web_pages(pages)
         # info("[Web] 已加载Web UI模块")
     except ImportError as e:
-        info(f"[Web] 未找到Web页面模块: {str(e)}")
-    except Exception as e:
-        error(f"[Web] 加载Web页面模块时出错: {str(e)}")
+        info(f"[Web] 未找到Web页面模块: {e!s}")
+    except Exception as e:  # noqa: BLE001 - 页面扩展不能阻断 API 服务
+        error(f"[Web] 加载Web页面模块时出错: {e!s}")
 
     return app
 
 
-def start_server(host: str = "0.0.0.0", port: int = 8002, open_browser: bool = True) -> bool:
+def start_server(
+    host: str = "0.0.0.0", port: int = 8002, open_browser: bool = True
+) -> bool:
     """
     启动服务器
 
@@ -227,8 +294,8 @@ def start_server(host: str = "0.0.0.0", port: int = 8002, open_browser: bool = T
         info(f"[Web] 正在打开浏览器访问: {url}")
         try:
             webbrowser.open(url)
-        except Exception as e:
-            error(f"[Web] 无法打开浏览器: {str(e)}")
+        except Exception as e:  # noqa: BLE001 - 浏览器启动失败不能阻断服务器
+            error(f"[Web] 无法打开浏览器: {e!s}")
 
     # 启动服务器
     info(f"[Web] 启动FastAPI服务器: {host}:{port}")
@@ -247,7 +314,10 @@ def start_server(host: str = "0.0.0.0", port: int = 8002, open_browser: bool = T
     import unilabos.app.main as main_module
 
     while server_thread.is_alive():
-        if hasattr(main_module, "_restart_requested") and main_module._restart_requested:
+        if (
+            hasattr(main_module, "_restart_requested")
+            and main_module._restart_requested
+        ):
             info(
                 f"[Web] Restart requested via WebSocket, reason: {getattr(main_module, '_restart_reason', 'unknown')}"
             )

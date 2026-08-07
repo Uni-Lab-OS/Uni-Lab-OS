@@ -6,11 +6,9 @@ PRCXI_1000uL_Tips:
     module: unilabos.devices.liquid_handling.prcxi.prcxi_labware:PRCXI_1000uL_Tips
     type: pylabrobot
   description: '1000μL Tip头 (Code: ZX-001-1000)'
-  displayname: PRCXI_1000uL_Tips
   handles: []
   icon: ''
   init_param_schema: {}
-  metadata: {}
   version: 1.0.0
 PRCXI_10uL_Tips:
   category:
@@ -20,11 +18,9 @@ PRCXI_10uL_Tips:
     module: unilabos.devices.liquid_handling.prcxi.prcxi_labware:PRCXI_10uL_Tips
     type: pylabrobot
   description: '10μL Tip头 (Code: ZX-001-10)'
-  displayname: PRCXI_10uL_Tips
   handles: []
   icon: ''
   init_param_schema: {}
-  metadata: {}
   version: 1.0.0
 PRCXI_10ul_eTips:
   category:
@@ -34,11 +30,9 @@ PRCXI_10ul_eTips:
     module: unilabos.devices.liquid_handling.prcxi.prcxi_labware:PRCXI_10ul_eTips
     type: pylabrobot
   description: '10μL加长 Tip头 (Code: ZX-001-10+)'
-  displayname: PRCXI_10ul_eTips
   handles: []
   icon: ''
   init_param_schema: {}
-  metadata: {}
   version: 1.0.0
 PRCXI_1250uL_Tips:
   category:
@@ -48,11 +42,9 @@ PRCXI_1250uL_Tips:
     module: unilabos.devices.liquid_handling.prcxi.prcxi_labware:PRCXI_1250uL_Tips
     type: pylabrobot
   description: '1250μL Tip头 (Code: ZX-001-1250)'
-  displayname: PRCXI_1250uL_Tips
   handles: []
   icon: ''
   init_param_schema: {}
-  metadata: {}
   version: 1.0.0
 PRCXI_200uL_Tips:
   category:
@@ -62,11 +54,9 @@ PRCXI_200uL_Tips:
     module: unilabos.devices.liquid_handling.prcxi.prcxi_labware:PRCXI_200uL_Tips
     type: pylabrobot
   description: '200μL Tip头 (Code: ZX-001-200)'
-  displayname: PRCXI_200uL_Tips
   handles: []
   icon: ''
   init_param_schema: {}
-  metadata: {}
   version: 1.0.0
 PRCXI_300ul_Tips:
   category:
@@ -76,9 +66,7 @@ PRCXI_300ul_Tips:
     module: unilabos.devices.liquid_handling.prcxi.prcxi_labware:PRCXI_300ul_Tips
     type: pylabrobot
   description: '300μL Tip头 (Code: ZX-001-300)'
-  displayname: PRCXI_300ul_Tips
   handles: []
   icon: ''
   init_param_schema: {}
-  metadata: {}
   version: 1.0.0

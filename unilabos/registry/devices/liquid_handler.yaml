@@ -4,9 +4,6 @@ liquid_handler:
   class:
     action_value_mappings:
       add_liquid:
-        displayname: add_liquid
-        estimate_duration_express: ''
-        estimate_duration_fixed: 60.0
         feedback: {}
         goal:
           asp_vols: asp_vols
@@ -44,7 +41,6 @@ liquid_handler:
           targets: []
           use_channels: []
         handles: {}
-        lock_resource: []
         placeholder_keys:
           reagent_sources: unilabos_resources
           targets: unilabos_resources
@@ -289,9 +285,6 @@ liquid_handler:
           type: object
         type: LiquidHandlerAdd
       aspirate:
-        displayname: aspirate
-        estimate_duration_express: ''
-        estimate_duration_fixed: 60.0
         feedback: {}
         goal:
           blow_out_air_volume: blow_out_air_volume
@@ -311,7 +304,6 @@ liquid_handler:
           use_channels: []
           vols: []
         handles: {}
-        lock_resource: []
         result:
           name: name
         schema:
@@ -452,9 +444,6 @@ liquid_handler:
           type: object
         type: LiquidHandlerAspirate
       auto-create_protocol:
-        displayname: auto-create_protocol
-        estimate_duration_express: ''
-        estimate_duration_fixed: 60.0
         feedback: {}
         goal: {}
         goal_default:
@@ -466,7 +455,6 @@ liquid_handler:
           protocol_type: null
           protocol_version: null
         handles: {}
-        lock_resource: []
         placeholder_keys: {}
         result: {}
         schema:
@@ -507,16 +495,12 @@ liquid_handler:
           type: object
         type: UniLabJsonCommandAsync
       auto-custom_delay:
-        displayname: auto-custom_delay
-        estimate_duration_express: ''
-        estimate_duration_fixed: 60.0
         feedback: {}
         goal: {}
         goal_default:
           msg: null
           seconds: 0
         handles: {}
-        lock_resource: []
         placeholder_keys: {}
         result: {}
         schema:
@@ -541,15 +525,11 @@ liquid_handler:
           type: object
         type: UniLabJsonCommandAsync
       auto-iter_tips:
-        displayname: auto-iter_tips
-        estimate_duration_express: ''
-        estimate_duration_fixed: 60.0
         feedback: {}
         goal: {}
         goal_default:
           tip_racks: null
         handles: {}
-        lock_resource: []
         placeholder_keys: {}
         result: {}
         schema:
@@ -573,9 +553,6 @@ liquid_handler:
           type: object
         type: UniLabJsonCommand
       auto-set_group:
-        displayname: auto-set_group
-        estimate_duration_express: ''
-        estimate_duration_fixed: 60.0
         feedback: {}
         goal: {}
         goal_default:
@@ -583,7 +560,6 @@ liquid_handler:
           volumes: null
           wells: null
         handles: {}
-        lock_resource: []
         placeholder_keys: {}
         result: {}
         schema:
@@ -614,9 +590,6 @@ liquid_handler:
           type: object
         type: UniLabJsonCommand
       auto-set_liquid:
-        displayname: auto-set_liquid
-        estimate_duration_express: ''
-        estimate_duration_fixed: 60.0
         feedback: {}
         goal: {}
         goal_default:
@@ -624,7 +597,6 @@ liquid_handler:
           volumes: null
           wells: null
         handles: {}
-        lock_resource: []
         placeholder_keys: {}
         result: {}
         schema:
@@ -697,24 +669,6 @@ liquid_handler:
                       description: Resource ID
                       title: Id
                       type: string
-                    liquid_history:
-                      anyOf:
-                      - items: {}
-                        type: array
-                      - type: 'null'
-                      default: null
-                      description: Container liquid event history [(name|None, ±volume),
-                        ...]
-                      title: Liquid History
-                    liquids:
-                      anyOf:
-                      - items: {}
-                        type: array
-                      - type: 'null'
-                      default: null
-                      description: Container current liquids [(name|None, volume),
-                        ...]
-                      title: Liquids
                     machine_name:
                       default: ''
                       description: Machine this resource belongs to
@@ -757,13 +711,6 @@ liquid_handler:
                       - type: string
                       description: Resource type
                       title: Type
-                    unknown_counter:
-                      anyOf:
-                      - type: integer
-                      - type: 'null'
-                      default: null
-                      description: UnknownN naming counter for unnamed liquids
-                      title: Unknown Counter
                     uuid:
                       description: Resource UUID
                       title: Uuid
@@ -906,9 +853,6 @@ liquid_handler:
           type: object
         type: UniLabJsonCommand
       auto-set_liquid_from_plate:
-        displayname: auto-set_liquid_from_plate
-        estimate_duration_express: ''
-        estimate_duration_fixed: 60.0
         feedback: {}
         goal: {}
         goal_default:
@@ -917,7 +861,6 @@ liquid_handler:
           volumes: null
           well_names: null
         handles: {}
-        lock_resource: []
         placeholder_keys:
           plate: unilabos_resources
         result: {}
@@ -1072,24 +1015,6 @@ liquid_handler:
                       description: Resource ID
                       title: Id
                       type: string
-                    liquid_history:
-                      anyOf:
-                      - items: {}
-                        type: array
-                      - type: 'null'
-                      default: null
-                      description: Container liquid event history [(name|None, ±volume),
-                        ...]
-                      title: Liquid History
-                    liquids:
-                      anyOf:
-                      - items: {}
-                        type: array
-                      - type: 'null'
-                      default: null
-                      description: Container current liquids [(name|None, volume),
-                        ...]
-                      title: Liquids
                     machine_name:
                       default: ''
                       description: Machine this resource belongs to
@@ -1132,13 +1057,6 @@ liquid_handler:
                       - type: string
                       description: Resource type
                       title: Type
-                    unknown_counter:
-                      anyOf:
-                      - type: integer
-                      - type: 'null'
-                      default: null
-                      description: UnknownN naming counter for unnamed liquids
-                      title: Unknown Counter
                     uuid:
                       description: Resource UUID
                       title: Uuid
@@ -1289,15 +1207,11 @@ liquid_handler:
           type: object
         type: UniLabJsonCommand
       auto-set_tiprack:
-        displayname: auto-set_tiprack
-        estimate_duration_express: ''
-        estimate_duration_fixed: 60.0
         feedback: {}
         goal: {}
         goal_default:
           tip_racks: null
         handles: {}
-        lock_resource: []
         placeholder_keys: {}
         result: {}
         schema:
@@ -1320,15 +1234,11 @@ liquid_handler:
           type: object
         type: UniLabJsonCommand
       auto-touch_tip:
-        displayname: auto-touch_tip
-        estimate_duration_express: ''
-        estimate_duration_fixed: 60.0
         feedback: {}
         goal: {}
         goal_default:
           targets: null
         handles: {}
-        lock_resource: []
         placeholder_keys: {}
         result: {}
         schema:
@@ -1351,9 +1261,6 @@ liquid_handler:
           type: object
         type: UniLabJsonCommandAsync
       auto-transfer_group:
-        displayname: auto-transfer_group
-        estimate_duration_express: ''
-        estimate_duration_fixed: 60.0
         feedback: {}
         goal: {}
         goal_default:
@@ -1361,7 +1268,6 @@ liquid_handler:
           target_group_name: null
           unit_volume: null
         handles: {}
-        lock_resource: []
         placeholder_keys: {}
         result: {}
         schema:
@@ -1388,16 +1294,12 @@ liquid_handler:
           type: object
         type: UniLabJsonCommandAsync
       discard_tips:
-        displayname: discard_tips
-        estimate_duration_express: ''
-        estimate_duration_fixed: 60.0
         feedback: {}
         goal:
           use_channels: use_channels
         goal_default:
           use_channels: []
         handles: {}
-        lock_resource: []
         result:
           name: name
         schema:
@@ -1431,9 +1333,6 @@ liquid_handler:
           type: object
         type: LiquidHandlerDiscardTips
       dispense:
-        displayname: dispense
-        estimate_duration_express: ''
-        estimate_duration_fixed: 60.0
         feedback: {}
         goal:
           blow_out_air_volume: blow_out_air_volume
@@ -1452,7 +1351,6 @@ liquid_handler:
           use_channels: []
           vols: []
         handles: {}
-        lock_resource: []
         result:
           name: name
         schema:
@@ -1589,9 +1487,6 @@ liquid_handler:
           type: object
         type: LiquidHandlerDispense
       drop_tips:
-        displayname: drop_tips
-        estimate_duration_express: ''
-        estimate_duration_fixed: 60.0
         feedback: {}
         goal:
           allow_nonzero_volume: allow_nonzero_volume
@@ -1604,7 +1499,6 @@ liquid_handler:
           tip_spots: []
           use_channels: []
         handles: {}
-        lock_resource: []
         placeholder_keys:
           tip_spots: unilabos_resources
         result:
@@ -1731,9 +1625,6 @@ liquid_handler:
           type: object
         type: LiquidHandlerDropTips
       drop_tips96:
-        displayname: drop_tips96
-        estimate_duration_express: ''
-        estimate_duration_fixed: 60.0
         feedback: {}
         goal:
           allow_nonzero_volume: allow_nonzero_volume
@@ -1766,7 +1657,6 @@ liquid_handler:
             sample_id: ''
             type: ''
         handles: {}
-        lock_resource: []
         result:
           name: name
         schema:
@@ -1910,9 +1800,6 @@ liquid_handler:
           type: object
         type: LiquidHandlerDropTips96
       mix:
-        displayname: mix
-        estimate_duration_express: ''
-        estimate_duration_fixed: 60.0
         feedback: {}
         goal:
           height_to_bottom: height_to_bottom
@@ -1931,7 +1818,6 @@ liquid_handler:
           offsets: []
           targets: []
         handles: {}
-        lock_resource: []
         placeholder_keys: {}
         result:
           return_info: return_info
@@ -2072,9 +1958,6 @@ liquid_handler:
           type: object
         type: LiquidHandlerMix
       move_lid:
-        displayname: move_lid
-        estimate_duration_express: ''
-        estimate_duration_fixed: 60.0
         feedback: {}
         goal:
           destination_offset: destination_offset
@@ -2143,7 +2026,6 @@ liquid_handler:
             sample_id: ''
             type: ''
         handles: {}
-        lock_resource: []
         result:
           name: name
         schema:
@@ -2424,9 +2306,6 @@ liquid_handler:
           type: object
         type: LiquidHandlerMoveLid
       move_plate:
-        displayname: move_plate
-        estimate_duration_express: ''
-        estimate_duration_fixed: 60.0
         feedback: {}
         goal:
           destination_offset: destination_offset
@@ -2499,7 +2378,6 @@ liquid_handler:
             sample_id: ''
             type: ''
         handles: {}
-        lock_resource: []
         result:
           name: name
         schema:
@@ -2801,9 +2679,6 @@ liquid_handler:
           type: object
         type: LiquidHandlerMovePlate
       move_resource:
-        displayname: move_resource
-        estimate_duration_express: ''
-        estimate_duration_fixed: 60.0
         feedback: {}
         goal:
           destination_offset: destination_offset
@@ -2856,7 +2731,6 @@ liquid_handler:
             y: 0.0
             z: 0.0
         handles: {}
-        lock_resource: []
         result:
           name: name
         schema:
@@ -3067,9 +2941,6 @@ liquid_handler:
           type: object
         type: LiquidHandlerMoveResource
       move_to:
-        displayname: move_to
-        estimate_duration_express: ''
-        estimate_duration_fixed: 60.0
         feedback: {}
         goal:
           channel: channel
@@ -3099,7 +2970,6 @@ liquid_handler:
             sample_id: ''
             type: ''
         handles: {}
-        lock_resource: []
         placeholder_keys: {}
         result:
           return_info: return_info
@@ -3237,9 +3107,6 @@ liquid_handler:
           type: object
         type: LiquidHandlerMoveTo
       pick_up_tips:
-        displayname: pick_up_tips
-        estimate_duration_express: ''
-        estimate_duration_fixed: 60.0
         feedback: {}
         goal:
           offsets: offsets
@@ -3250,7 +3117,6 @@ liquid_handler:
           tip_spots: []
           use_channels: []
         handles: {}
-        lock_resource: []
         result:
           name: name
         schema:
@@ -3373,9 +3239,6 @@ liquid_handler:
           type: object
         type: LiquidHandlerPickUpTips
       pick_up_tips96:
-        displayname: pick_up_tips96
-        estimate_duration_express: ''
-        estimate_duration_fixed: 60.0
         feedback: {}
         goal:
           offset: offset
@@ -3406,7 +3269,6 @@ liquid_handler:
             sample_id: ''
             type: ''
         handles: {}
-        lock_resource: []
         result:
           name: name
         schema:
@@ -3548,9 +3410,6 @@ liquid_handler:
           type: object
         type: LiquidHandlerPickUpTips96
       remove:
-        displayname: remove
-        estimate_duration_express: ''
-        estimate_duration_fixed: 60.0
         feedback: {}
         goal:
           blow_out_air_volume: blow_out_air_volume
@@ -3600,7 +3459,6 @@ liquid_handler:
             sample_id: ''
             type: ''
         handles: {}
-        lock_resource: []
         result: {}
         schema:
           description: ''
@@ -3845,9 +3703,6 @@ liquid_handler:
           type: object
         type: LiquidHandlerRemove
       remove_liquid:
-        displayname: remove_liquid
-        estimate_duration_express: ''
-        estimate_duration_fixed: 60.0
         feedback: {}
         goal:
           blow_out_air_volume: blow_out_air_volume
@@ -3897,7 +3752,6 @@ liquid_handler:
             sample_id: ''
             type: ''
         handles: {}
-        lock_resource: []
         placeholder_keys:
           sources: unilabos_resources
           waste_liquid: unilabos_resources
@@ -4147,9 +4001,6 @@ liquid_handler:
           type: object
         type: LiquidHandlerRemove
       return_tips:
-        displayname: return_tips
-        estimate_duration_express: ''
-        estimate_duration_fixed: 60.0
         feedback: {}
         goal:
           allow_nonzero_volume: allow_nonzero_volume
@@ -4158,7 +4009,6 @@ liquid_handler:
           allow_nonzero_volume: false
           use_channels: []
         handles: {}
-        lock_resource: []
         result:
           name: name
         schema:
@@ -4194,16 +4044,12 @@ liquid_handler:
           type: object
         type: LiquidHandlerReturnTips
       return_tips96:
-        displayname: return_tips96
-        estimate_duration_express: ''
-        estimate_duration_fixed: 60.0
         feedback: {}
         goal:
           allow_nonzero_volume: allow_nonzero_volume
         goal_default:
           allow_nonzero_volume: false
         handles: {}
-        lock_resource: []
         result:
           name: name
         schema:
@@ -4235,9 +4081,6 @@ liquid_handler:
           type: object
         type: LiquidHandlerReturnTips96
       stamp:
-        displayname: stamp
-        estimate_duration_express: ''
-        estimate_duration_fixed: 60.0
         feedback: {}
         goal:
           aspiration_flow_rate: aspiration_flow_rate
@@ -4290,7 +4133,6 @@ liquid_handler:
             type: ''
           volume: 0.0
         handles: {}
-        lock_resource: []
         result:
           name: name
         schema:
@@ -4514,9 +4356,6 @@ liquid_handler:
           type: object
         type: LiquidHandlerStamp
       transfer:
-        displayname: transfer
-        estimate_duration_express: ''
-        estimate_duration_fixed: 60.0
         goal:
           aspiration_flow_rate: aspiration_flow_rate
           dispense_flow_rates: dispense_flow_rates
@@ -4537,7 +4376,6 @@ liquid_handler:
           viscous: false
           volume: 0.0
         handles: {}
-        lock_resource: []
         schema:
           description: ''
           properties:
@@ -4606,9 +4444,6 @@ liquid_handler:
           type: object
         type: Transfer
       transfer_liquid:
-        displayname: transfer_liquid
-        estimate_duration_express: ''
-        estimate_duration_fixed: 60.0
         feedback: {}
         goal:
           asp_flow_rates: asp_flow_rates
@@ -4682,7 +4517,6 @@ liquid_handler:
             data_type: resource
             handler_key: targets_out
             label: 移液后目标孔
-        lock_resource: []
         placeholder_keys:
           sources: unilabos_resources
           targets: unilabos_resources
@@ -5018,10 +4852,8 @@ liquid_handler:
     type: python
   config_info: []
   description: Liquid handler device controlled by pylabrobot
-  displayname: liquid_handler
   handles: []
   icon: icon_yiyezhan.webp
-  init_param_enforce: {}
   init_param_schema:
     config:
       properties:
@@ -5048,7 +4880,6 @@ liquid_handler:
       properties: {}
       required: []
       type: object
-  metadata: {}
   version: 1.0.0
 liquid_handler.biomek:
   category:
@@ -5056,9 +4887,6 @@ liquid_handler.biomek:
   class:
     action_value_mappings:
       auto-create_resource:
-        displayname: auto-create_resource
-        estimate_duration_express: ''
-        estimate_duration_fixed: 60.0
         feedback: {}
         goal: {}
         goal_default:
@@ -5071,7 +4899,6 @@ liquid_handler.biomek:
           resources: null
           slot_on_deck: null
         handles: {}
-        lock_resource: []
         placeholder_keys: {}
         result: {}
         schema:
@@ -5127,16 +4954,12 @@ liquid_handler.biomek:
           type: object
         type: UniLabJsonCommand
       auto-deserialize:
-        displayname: auto-deserialize
-        estimate_duration_express: ''
-        estimate_duration_fixed: 60.0
         feedback: {}
         goal: {}
         goal_default:
           allow_marshal: false
           data: null
         handles: {}
-        lock_resource: []
         placeholder_keys: {}
         result: {}
         schema:
@@ -5161,9 +4984,6 @@ liquid_handler.biomek:
           type: object
         type: UniLabJsonCommand
       auto-instrument_setup_biomek:
-        displayname: auto-instrument_setup_biomek
-        estimate_duration_express: ''
-        estimate_duration_fixed: 60.0
         feedback: {}
         goal: {}
         goal_default:
@@ -5175,7 +4995,6 @@ liquid_handler.biomek:
           parent: null
           slot_on_deck: null
         handles: {}
-        lock_resource: []
         placeholder_keys: {}
         result: {}
         schema:
@@ -5220,9 +5039,6 @@ liquid_handler.biomek:
           type: object
         type: UniLabJsonCommand
       create_protocol:
-        displayname: create_protocol
-        estimate_duration_express: ''
-        estimate_duration_fixed: 60.0
         feedback: {}
         goal:
           none_keys: none_keys
@@ -5241,7 +5057,6 @@ liquid_handler.biomek:
           protocol_type: ''
           protocol_version: ''
         handles: {}
-        lock_resource: []
         placeholder_keys: {}
         result:
           return_info: return_info
@@ -5293,9 +5108,6 @@ liquid_handler.biomek:
           type: object
         type: LiquidHandlerProtocolCreation
       incubation_biomek:
-        displayname: incubation_biomek
-        estimate_duration_express: ''
-        estimate_duration_fixed: 60.0
         feedback: {}
         goal:
           time: time
@@ -5314,7 +5126,6 @@ liquid_handler.biomek:
             data_type: resource
             handler_key: plate_out
             label: plate
-        lock_resource: []
         placeholder_keys: {}
         result:
           return_info: return_info
@@ -5350,9 +5161,6 @@ liquid_handler.biomek:
           type: object
         type: LiquidHandlerIncubateBiomek
       move_biomek:
-        displayname: move_biomek
-        estimate_duration_express: ''
-        estimate_duration_fixed: 60.0
         feedback: {}
         goal:
           source: source
@@ -5375,7 +5183,6 @@ liquid_handler.biomek:
             data_type: resource
             handler_key: targets
             label: targets
-        lock_resource: []
         placeholder_keys: {}
         result:
           return_info: return_info
@@ -5411,9 +5218,6 @@ liquid_handler.biomek:
           type: object
         type: LiquidHandlerMoveBiomek
       oscillation_biomek:
-        displayname: oscillation_biomek
-        estimate_duration_express: ''
-        estimate_duration_fixed: 60.0
         feedback: {}
         goal:
           rpm: rpm
@@ -5434,7 +5238,6 @@ liquid_handler.biomek:
             data_type: resource
             handler_key: plate_out
             label: plate
-        lock_resource: []
         placeholder_keys: {}
         result:
           return_info: return_info
@@ -5474,14 +5277,10 @@ liquid_handler.biomek:
           type: object
         type: LiquidHandlerOscillateBiomek
       run_protocol:
-        displayname: run_protocol
-        estimate_duration_express: ''
-        estimate_duration_fixed: 60.0
         feedback: {}
         goal: {}
         goal_default: {}
         handles: {}
-        lock_resource: []
         placeholder_keys: {}
         result:
           return_info: return_info
@@ -5509,9 +5308,6 @@ liquid_handler.biomek:
           type: object
         type: EmptyIn
       transfer_biomek:
-        displayname: transfer_biomek
-        estimate_duration_express: ''
-        estimate_duration_fixed: 60.0
         feedback: {}
         goal:
           aspirate_technique: aspirate_technique
@@ -5559,7 +5355,6 @@ liquid_handler.biomek:
             data_type: resource
             handler_key: targets_out
             label: targets
-        lock_resource: []
         placeholder_keys: {}
         result:
           return_info: return_info
@@ -5605,9 +5400,6 @@ liquid_handler.biomek:
           type: object
         type: LiquidHandlerTransferBiomek
       transfer_liquid:
-        displayname: transfer_liquid
-        estimate_duration_express: ''
-        estimate_duration_fixed: 60.0
         feedback: {}
         goal:
           asp_flow_rates: asp_flow_rates
@@ -5683,7 +5475,6 @@ liquid_handler.biomek:
             data_type: resource
             handler_key: targets_out
             label: 移液后目标孔
-        lock_resource: []
         placeholder_keys:
           sources: unilabos_resources
           targets: unilabos_resources
@@ -6020,10 +5811,8 @@ liquid_handler.biomek:
     type: python
   config_info: []
   description: Biomek液体处理器设备，基于pylabrobot控制
-  displayname: liquid_handler.biomek
   handles: []
   icon: icon_yiyezhan.webp
-  init_param_enforce: {}
   init_param_schema:
     config:
       properties: {}
@@ -6036,7 +5825,6 @@ liquid_handler.biomek:
       required:
       - success
       type: object
-  metadata: {}
   version: 1.0.0
 liquid_handler.laiyu:
   category:
@@ -6044,9 +5832,6 @@ liquid_handler.laiyu:
   class:
     action_value_mappings:
       add_liquid:
-        displayname: add_liquid
-        estimate_duration_express: ''
-        estimate_duration_fixed: 60.0
         feedback: {}
         goal:
           asp_vols: asp_vols
@@ -6084,7 +5869,6 @@ liquid_handler.laiyu:
           targets: []
           use_channels: []
         handles: {}
-        lock_resource: []
         placeholder_keys:
           reagent_sources: unilabos_resources
           targets: unilabos_resources
@@ -6329,9 +6113,6 @@ liquid_handler.laiyu:
           type: object
         type: LiquidHandlerAdd
       aspirate:
-        displayname: aspirate
-        estimate_duration_express: ''
-        estimate_duration_fixed: 60.0
         feedback: {}
         goal:
           blow_out_air_volume: blow_out_air_volume
@@ -6352,7 +6133,6 @@ liquid_handler.laiyu:
           use_channels: []
           vols: []
         handles: {}
-        lock_resource: []
         placeholder_keys:
           resources: unilabos_resources
         result:
@@ -6496,9 +6276,6 @@ liquid_handler.laiyu:
           type: object
         type: LiquidHandlerAspirate
       auto-transfer_liquid:
-        displayname: auto-transfer_liquid
-        estimate_duration_express: ''
-        estimate_duration_fixed: 60.0
         feedback: {}
         goal: {}
         goal_default:
@@ -6524,7 +6301,6 @@ liquid_handler.laiyu:
           touch_tip: false
           use_channels: null
         handles: {}
-        lock_resource: []
         placeholder_keys: {}
         result: {}
         schema:
@@ -6635,9 +6411,6 @@ liquid_handler.laiyu:
           type: object
         type: UniLabJsonCommandAsync
       dispense:
-        displayname: dispense
-        estimate_duration_express: ''
-        estimate_duration_fixed: 60.0
         feedback: {}
         goal:
           blow_out_air_volume: blow_out_air_volume
@@ -6657,7 +6430,6 @@ liquid_handler.laiyu:
           use_channels: []
           vols: []
         handles: {}
-        lock_resource: []
         placeholder_keys:
           resources: unilabos_resources
         result:
@@ -6797,9 +6569,6 @@ liquid_handler.laiyu:
           type: object
         type: LiquidHandlerDispense
       drop_tips:
-        displayname: drop_tips
-        estimate_duration_express: ''
-        estimate_duration_fixed: 60.0
         feedback: {}
         goal:
           allow_nonzero_volume: allow_nonzero_volume
@@ -6812,7 +6581,6 @@ liquid_handler.laiyu:
           tip_spots: []
           use_channels: []
         handles: {}
-        lock_resource: []
         placeholder_keys:
           tip_spots: unilabos_resources
         result:
@@ -6940,9 +6708,6 @@ liquid_handler.laiyu:
           type: object
         type: LiquidHandlerDropTips
       mix:
-        displayname: mix
-        estimate_duration_express: ''
-        estimate_duration_fixed: 60.0
         feedback: {}
         goal:
           height_to_bottom: height_to_bottom
@@ -6961,7 +6726,6 @@ liquid_handler.laiyu:
           offsets: []
           targets: []
         handles: {}
-        lock_resource: []
         placeholder_keys:
           targets: unilabos_resources
         result:
@@ -7103,9 +6867,6 @@ liquid_handler.laiyu:
           type: object
         type: LiquidHandlerMix
       pick_up_tips:
-        displayname: pick_up_tips
-        estimate_duration_express: ''
-        estimate_duration_fixed: 60.0
         feedback: {}
         goal:
           offsets: offsets
@@ -7116,7 +6877,6 @@ liquid_handler.laiyu:
           tip_spots: []
           use_channels: []
         handles: {}
-        lock_resource: []
         placeholder_keys:
           tip_spots: unilabos_resources
         result:
@@ -7248,10 +7008,8 @@ liquid_handler.laiyu:
     type: python
   config_info: []
   description: Laiyu液体处理器设备，基于pylabrobot控制
-  displayname: liquid_handler.laiyu
   handles: []
   icon: icon_yiyezhan.webp
-  init_param_enforce: {}
   init_param_schema:
     config:
       properties:
@@ -7279,7 +7037,6 @@ liquid_handler.laiyu:
       properties: {}
       required: []
       type: object
-  metadata: {}
   version: 1.0.0
 liquid_handler.prcxi:
   category:
@@ -7287,9 +7044,6 @@ liquid_handler.prcxi:
   class:
     action_value_mappings:
       add_liquid:
-        displayname: add_liquid
-        estimate_duration_express: ''
-        estimate_duration_fixed: 60.0
         feedback: {}
         goal:
           asp_vols: asp_vols
@@ -7327,7 +7081,6 @@ liquid_handler.prcxi:
           targets: []
           use_channels: []
         handles: {}
-        lock_resource: []
         placeholder_keys:
           reagent_sources: unilabos_resources
           targets: unilabos_resources
@@ -7572,9 +7325,6 @@ liquid_handler.prcxi:
           type: object
         type: LiquidHandlerAdd
       aspirate:
-        displayname: aspirate
-        estimate_duration_express: ''
-        estimate_duration_fixed: 60.0
         feedback: {}
         goal:
           blow_out_air_volume: blow_out_air_volume
@@ -7595,7 +7345,6 @@ liquid_handler.prcxi:
           use_channels: []
           vols: []
         handles: {}
-        lock_resource: []
         placeholder_keys:
           resources: unilabos_resources
         result:
@@ -7739,9 +7488,6 @@ liquid_handler.prcxi:
           type: object
         type: LiquidHandlerAspirate
       auto-create_protocol:
-        displayname: auto-create_protocol
-        estimate_duration_express: ''
-        estimate_duration_fixed: 60.0
         feedback: {}
         goal: {}
         goal_default:
@@ -7753,7 +7499,6 @@ liquid_handler.prcxi:
           protocol_type: ''
           protocol_version: ''
         handles: {}
-        lock_resource: []
         placeholder_keys: {}
         result: {}
         schema:
@@ -7794,16 +7539,12 @@ liquid_handler.prcxi:
           type: object
         type: UniLabJsonCommandAsync
       auto-custom_delay:
-        displayname: auto-custom_delay
-        estimate_duration_express: ''
-        estimate_duration_fixed: 60.0
         feedback: {}
         goal: {}
         goal_default:
           msg: null
           seconds: 0
         handles: {}
-        lock_resource: []
         placeholder_keys: {}
         result: {}
         schema:
@@ -7826,16 +7567,12 @@ liquid_handler.prcxi:
           type: object
         type: UniLabJsonCommandAsync
       auto-heater_action:
-        displayname: auto-heater_action
-        estimate_duration_express: ''
-        estimate_duration_fixed: 60.0
         feedback: {}
         goal: {}
         goal_default:
           temperature: null
           time: null
         handles: {}
-        lock_resource: []
         placeholder_keys: {}
         result: {}
         schema:
@@ -7859,15 +7596,11 @@ liquid_handler.prcxi:
           type: object
         type: UniLabJsonCommandAsync
       auto-iter_tips:
-        displayname: auto-iter_tips
-        estimate_duration_express: ''
-        estimate_duration_fixed: 60.0
         feedback: {}
         goal: {}
         goal_default:
           tip_racks: null
         handles: {}
-        lock_resource: []
         placeholder_keys: {}
         result: {}
         schema:
@@ -7891,9 +7624,6 @@ liquid_handler.prcxi:
           type: object
         type: UniLabJsonCommand
       auto-move_to:
-        displayname: auto-move_to
-        estimate_duration_express: ''
-        estimate_duration_fixed: 60.0
         feedback: {}
         goal: {}
         goal_default:
@@ -7901,7 +7631,6 @@ liquid_handler.prcxi:
           dis_to_top: 0
           well: null
         handles: {}
-        lock_resource: []
         placeholder_keys: {}
         result: {}
         schema:
@@ -7928,14 +7657,10 @@ liquid_handler.prcxi:
           type: object
         type: UniLabJsonCommandAsync
       auto-run_protocol:
-        displayname: auto-run_protocol
-        estimate_duration_express: ''
-        estimate_duration_fixed: 60.0
         feedback: {}
         goal: {}
         goal_default: {}
         handles: {}
-        lock_resource: []
         placeholder_keys: {}
         result: {}
         schema:
@@ -7953,9 +7678,6 @@ liquid_handler.prcxi:
           type: object
         type: UniLabJsonCommandAsync
       auto-set_group:
-        displayname: auto-set_group
-        estimate_duration_express: ''
-        estimate_duration_fixed: 60.0
         feedback: {}
         goal: {}
         goal_default:
@@ -7963,7 +7685,6 @@ liquid_handler.prcxi:
           volumes: null
           wells: null
         handles: {}
-        lock_resource: []
         placeholder_keys: {}
         result: {}
         schema:
@@ -7994,9 +7715,6 @@ liquid_handler.prcxi:
           type: object
         type: UniLabJsonCommand
       auto-shaker_action:
-        displayname: auto-shaker_action
-        estimate_duration_express: ''
-        estimate_duration_fixed: 60.0
         feedback: {}
         goal: {}
         goal_default:
@@ -8005,7 +7723,6 @@ liquid_handler.prcxi:
           module_no: null
           time: null
         handles: {}
-        lock_resource: []
         placeholder_keys: {}
         result: {}
         schema:
@@ -8035,15 +7752,11 @@ liquid_handler.prcxi:
           type: object
         type: UniLabJsonCommandAsync
       auto-touch_tip:
-        displayname: auto-touch_tip
-        estimate_duration_express: ''
-        estimate_duration_fixed: 60.0
         feedback: {}
         goal: {}
         goal_default:
           targets: null
         handles: {}
-        lock_resource: []
         placeholder_keys: {}
         result: {}
         schema:
@@ -8066,9 +7779,6 @@ liquid_handler.prcxi:
           type: object
         type: UniLabJsonCommandAsync
       auto-transfer_group:
-        displayname: auto-transfer_group
-        estimate_duration_express: ''
-        estimate_duration_fixed: 60.0
         feedback: {}
         goal: {}
         goal_default:
@@ -8076,7 +7786,6 @@ liquid_handler.prcxi:
           target_group_name: null
           unit_volume: null
         handles: {}
-        lock_resource: []
         placeholder_keys: {}
         result: {}
         schema:
@@ -8103,9 +7812,6 @@ liquid_handler.prcxi:
           type: object
         type: UniLabJsonCommandAsync
       discard_tips:
-        displayname: discard_tips
-        estimate_duration_express: ''
-        estimate_duration_fixed: 60.0
         feedback: {}
         goal:
           allow_nonzero_volume: allow_nonzero_volume
@@ -8114,7 +7820,6 @@ liquid_handler.prcxi:
         goal_default:
           use_channels: []
         handles: {}
-        lock_resource: []
         placeholder_keys: {}
         result:
           return_info: return_info
@@ -8150,9 +7855,6 @@ liquid_handler.prcxi:
           type: object
         type: LiquidHandlerDiscardTips
       dispense:
-        displayname: dispense
-        estimate_duration_express: ''
-        estimate_duration_fixed: 60.0
         feedback: {}
         goal:
           blow_out_air_volume: blow_out_air_volume
@@ -8172,7 +7874,6 @@ liquid_handler.prcxi:
           use_channels: []
           vols: []
         handles: {}
-        lock_resource: []
         placeholder_keys:
           resources: unilabos_resources
         result:
@@ -8312,9 +8013,6 @@ liquid_handler.prcxi:
           type: object
         type: LiquidHandlerDispense
       drop_tips:
-        displayname: drop_tips
-        estimate_duration_express: ''
-        estimate_duration_fixed: 60.0
         feedback: {}
         goal:
           allow_nonzero_volume: allow_nonzero_volume
@@ -8327,7 +8025,6 @@ liquid_handler.prcxi:
           tip_spots: []
           use_channels: []
         handles: {}
-        lock_resource: []
         placeholder_keys:
           tip_spots: unilabos_resources
         result:
@@ -8455,9 +8152,6 @@ liquid_handler.prcxi:
           type: object
         type: LiquidHandlerDropTips
       mix:
-        displayname: mix
-        estimate_duration_express: ''
-        estimate_duration_fixed: 60.0
         feedback: {}
         goal:
           height_to_bottom: height_to_bottom
@@ -8476,7 +8170,6 @@ liquid_handler.prcxi:
           offsets: []
           targets: []
         handles: {}
-        lock_resource: []
         placeholder_keys:
           targets: unilabos_resources
         result:
@@ -8618,9 +8311,6 @@ liquid_handler.prcxi:
           type: object
         type: LiquidHandlerMix
       move_plate:
-        displayname: move_plate
-        estimate_duration_express: ''
-        estimate_duration_fixed: 60.0
         feedback: {}
         goal:
           destination_offset: destination_offset
@@ -8694,7 +8384,6 @@ liquid_handler.prcxi:
             sample_id: ''
             type: ''
         handles: {}
-        lock_resource: []
         placeholder_keys:
           plate: unilabos_resources
           to: unilabos_resources
@@ -9000,9 +8689,6 @@ liquid_handler.prcxi:
           type: object
         type: LiquidHandlerMovePlate
       pick_up_tips:
-        displayname: pick_up_tips
-        estimate_duration_express: ''
-        estimate_duration_fixed: 60.0
         feedback: {}
         goal:
           offsets: offsets
@@ -9013,7 +8699,6 @@ liquid_handler.prcxi:
           tip_spots: []
           use_channels: []
         handles: {}
-        lock_resource: []
         placeholder_keys:
           tip_spots: unilabos_resources
         result:
@@ -9139,9 +8824,6 @@ liquid_handler.prcxi:
           type: object
         type: LiquidHandlerPickUpTips
       remove_liquid:
-        displayname: remove_liquid
-        estimate_duration_express: ''
-        estimate_duration_fixed: 60.0
         feedback: {}
         goal:
           blow_out_air_volume: blow_out_air_volume
@@ -9191,7 +8873,6 @@ liquid_handler.prcxi:
             sample_id: ''
             type: ''
         handles: {}
-        lock_resource: []
         placeholder_keys:
           sources: unilabos_resources
           waste_liquid: unilabos_resources
@@ -9441,9 +9122,6 @@ liquid_handler.prcxi:
           type: object
         type: LiquidHandlerRemove
       set_liquid:
-        displayname: set_liquid
-        estimate_duration_express: ''
-        estimate_duration_fixed: 60.0
         feedback: {}
         goal:
           liquid_names: liquid_names
@@ -9466,7 +9144,6 @@ liquid_handler.prcxi:
             data_type: resource
             handler_key: output_wells
             label: 已设定液体孔
-        lock_resource: []
         placeholder_keys:
           wells: unilabos_resources
         result:
@@ -9578,9 +9255,6 @@ liquid_handler.prcxi:
           type: object
         type: LiquidHandlerSetLiquid
       set_liquid_from_plate:
-        displayname: set_liquid_from_plate
-        estimate_duration_express: ''
-        estimate_duration_fixed: 60.0
         feedback: {}
         goal: {}
         goal_default:
@@ -9611,7 +9285,6 @@ liquid_handler.prcxi:
             data_type: number_array
             handler_key: output_volumes
             label: 各孔设定体积
-        lock_resource: []
         placeholder_keys:
           plate: unilabos_resources
         result: {}
@@ -9766,24 +9439,6 @@ liquid_handler.prcxi:
                       description: Resource ID
                       title: Id
                       type: string
-                    liquid_history:
-                      anyOf:
-                      - items: {}
-                        type: array
-                      - type: 'null'
-                      default: null
-                      description: Container liquid event history [(name|None, ±volume),
-                        ...]
-                      title: Liquid History
-                    liquids:
-                      anyOf:
-                      - items: {}
-                        type: array
-                      - type: 'null'
-                      default: null
-                      description: Container current liquids [(name|None, volume),
-                        ...]
-                      title: Liquids
                     machine_name:
                       default: ''
                       description: Machine this resource belongs to
@@ -9826,13 +9481,6 @@ liquid_handler.prcxi:
                       - type: string
                       description: Resource type
                       title: Type
-                    unknown_counter:
-                      anyOf:
-                      - type: integer
-                      - type: 'null'
-                      default: null
-                      description: UnknownN naming counter for unnamed liquids
-                      title: Unknown Counter
                     uuid:
                       description: Resource UUID
                       title: Uuid
@@ -9983,16 +9631,12 @@ liquid_handler.prcxi:
           type: object
         type: UniLabJsonCommand
       set_tiprack:
-        displayname: set_tiprack
-        estimate_duration_express: ''
-        estimate_duration_fixed: 60.0
         feedback: {}
         goal:
           tip_racks: tip_racks
         goal_default:
           tip_racks: []
         handles: {}
-        lock_resource: []
         placeholder_keys:
           tip_racks: unilabos_resources
         result:
@@ -10099,9 +9743,6 @@ liquid_handler.prcxi:
           type: object
         type: LiquidHandlerSetTipRack
       transfer:
-        displayname: transfer
-        estimate_duration_express: ''
-        estimate_duration_fixed: 60.0
         goal:
           aspiration_flow_rate: aspiration_flow_rate
           dispense_flow_rates: dispense_flow_rates
@@ -10122,7 +9763,6 @@ liquid_handler.prcxi:
           viscous: false
           volume: 0.0
         handles: {}
-        lock_resource: []
         schema:
           description: ''
           properties:
@@ -10191,9 +9831,6 @@ liquid_handler.prcxi:
           type: object
         type: Transfer
       transfer_liquid:
-        displayname: transfer_liquid
-        estimate_duration_express: ''
-        estimate_duration_fixed: 60.0
         feedback: {}
         goal:
           asp_flow_rates: asp_flow_rates
@@ -10267,7 +9904,6 @@ liquid_handler.prcxi:
             data_type: resource
             handler_key: targets_out
             label: 移液后目标孔
-        lock_resource: []
         placeholder_keys:
           sources: unilabos_resources
           targets: unilabos_resources
@@ -10604,10 +10240,8 @@ liquid_handler.prcxi:
     type: python
   config_info: []
   description: prcxi液体处理器设备，基于pylabrobot控制
-  displayname: liquid_handler.prcxi
   handles: []
   icon: icon_yiyezhan.webp
-  init_param_enforce: {}
   init_param_schema:
     config:
       properties:
@@ -10656,7 +10290,6 @@ liquid_handler.prcxi:
       required:
       - reset_ok
       type: object
-  metadata: {}
   version: 1.0.0
 liquid_handler.revvity:
   category:
@@ -10664,9 +10297,6 @@ liquid_handler.revvity:
   class:
     action_value_mappings:
       run:
-        displayname: run
-        estimate_duration_express: ''
-        estimate_duration_fixed: 60.0
         feedback:
           gantt: gantt
           status: status
@@ -10699,7 +10329,6 @@ liquid_handler.revvity:
             type: ''
           wf_name: ''
         handles: {}
-        lock_resource: []
         placeholder_keys: {}
         result:
           return_info: return_info
@@ -10837,10 +10466,8 @@ liquid_handler.revvity:
     type: python
   config_info: []
   description: ''
-  displayname: liquid_handler.revvity
   handles: []
   icon: ''
-  init_param_enforce: {}
   init_param_schema:
     config:
       properties: {}
@@ -10856,5 +10483,4 @@ liquid_handler.revvity:
       - status
       - success
       type: object
-  metadata: {}
   version: 1.0.0

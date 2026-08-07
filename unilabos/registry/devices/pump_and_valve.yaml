@@ -4,14 +4,10 @@ solenoid_valve:
   class:
     action_value_mappings:
       auto-close:
-        displayname: auto-close
-        estimate_duration_express: ''
-        estimate_duration_fixed: 60.0
         feedback: {}
         goal: {}
         goal_default: {}
         handles: {}
-        lock_resource: []
         placeholder_keys: {}
         result: {}
         schema:
@@ -29,14 +25,10 @@ solenoid_valve:
           type: object
         type: UniLabJsonCommand
       auto-is_closed:
-        displayname: auto-is_closed
-        estimate_duration_express: ''
-        estimate_duration_fixed: 60.0
         feedback: {}
         goal: {}
         goal_default: {}
         handles: {}
-        lock_resource: []
         placeholder_keys: {}
         result: {}
         schema:
@@ -54,14 +46,10 @@ solenoid_valve:
           type: object
         type: UniLabJsonCommand
       auto-is_open:
-        displayname: auto-is_open
-        estimate_duration_express: ''
-        estimate_duration_fixed: 60.0
         feedback: {}
         goal: {}
         goal_default: {}
         handles: {}
-        lock_resource: []
         placeholder_keys: {}
         result: {}
         schema:
@@ -79,14 +67,10 @@ solenoid_valve:
           type: object
         type: UniLabJsonCommand
       auto-open:
-        displayname: auto-open
-        estimate_duration_express: ''
-        estimate_duration_fixed: 60.0
         feedback: {}
         goal: {}
         goal_default: {}
         handles: {}
-        lock_resource: []
         placeholder_keys: {}
         result: {}
         schema:
@@ -104,14 +88,10 @@ solenoid_valve:
           type: object
         type: UniLabJsonCommand
       auto-read_data:
-        displayname: auto-read_data
-        estimate_duration_express: ''
-        estimate_duration_fixed: 60.0
         feedback: {}
         goal: {}
         goal_default: {}
         handles: {}
-        lock_resource: []
         placeholder_keys: {}
         result: {}
         schema:
@@ -129,15 +109,11 @@ solenoid_valve:
           type: object
         type: UniLabJsonCommand
       auto-send_command:
-        displayname: auto-send_command
-        estimate_duration_express: ''
-        estimate_duration_fixed: 60.0
         feedback: {}
         goal: {}
         goal_default:
           command: null
         handles: {}
-        lock_resource: []
         placeholder_keys: {}
         result: {}
         schema:
@@ -158,9 +134,6 @@ solenoid_valve:
           type: object
         type: UniLabJsonCommand
       set_valve_position:
-        displayname: set_valve_position
-        estimate_duration_express: ''
-        estimate_duration_fixed: 60.0
         feedback: {}
         goal:
           position: position
@@ -168,7 +141,6 @@ solenoid_valve:
         goal_default:
           string: ''
         handles: {}
-        lock_resource: []
         placeholder_keys: {}
         result:
           return_info: return_info
@@ -208,10 +180,8 @@ solenoid_valve:
     type: python
   config_info: []
   description: 电磁阀控制设备，用于精确的流体路径控制和开关操作。该设备通过串口通信控制电磁阀的开关状态，支持远程操作和状态监测。具备快速响应、可靠密封、状态反馈等特性，广泛应用于流体输送、样品进样、路径切换等需要精确流体控制的实验室自动化应用。
-  displayname: solenoid_valve
   handles: []
   icon: ''
-  init_param_enforce: {}
   init_param_schema:
     config:
       properties:
@@ -230,7 +200,6 @@ solenoid_valve:
       - status
       - valve_position
       type: object
-  metadata: {}
   version: 1.0.0
 solenoid_valve.mock:
   category:
@@ -238,14 +207,10 @@ solenoid_valve.mock:
   class:
     action_value_mappings:
       auto-is_closed:
-        displayname: auto-is_closed
-        estimate_duration_express: ''
-        estimate_duration_fixed: 60.0
         feedback: {}
         goal: {}
         goal_default: {}
         handles: {}
-        lock_resource: []
         placeholder_keys: {}
         result: {}
         schema:
@@ -263,14 +228,10 @@ solenoid_valve.mock:
           type: object
         type: UniLabJsonCommand
       auto-is_open:
-        displayname: auto-is_open
-        estimate_duration_express: ''
-        estimate_duration_fixed: 60.0
         feedback: {}
         goal: {}
         goal_default: {}
         handles: {}
-        lock_resource: []
         placeholder_keys: {}
         result: {}
         schema:
@@ -288,15 +249,11 @@ solenoid_valve.mock:
           type: object
         type: UniLabJsonCommand
       auto-set_valve_position:
-        displayname: auto-set_valve_position
-        estimate_duration_express: ''
-        estimate_duration_fixed: 60.0
         feedback: {}
         goal: {}
         goal_default:
           position: null
         handles: {}
-        lock_resource: []
         placeholder_keys: {}
         result: {}
         schema:
@@ -317,14 +274,10 @@ solenoid_valve.mock:
           type: object
         type: UniLabJsonCommand
       close:
-        displayname: close
-        estimate_duration_express: ''
-        estimate_duration_fixed: 60.0
         feedback: {}
         goal: {}
         goal_default: {}
         handles: {}
-        lock_resource: []
         placeholder_keys: {}
         result:
           return_info: return_info
@@ -352,14 +305,10 @@ solenoid_valve.mock:
           type: object
         type: EmptyIn
       open:
-        displayname: open
-        estimate_duration_express: ''
-        estimate_duration_fixed: 60.0
         feedback: {}
         goal: {}
         goal_default: {}
         handles: {}
-        lock_resource: []
         placeholder_keys: {}
         result:
           return_info: return_info
@@ -393,7 +342,6 @@ solenoid_valve.mock:
     type: python
   config_info: []
   description: 模拟电磁阀设备，用于系统测试和开发调试。该设备模拟真实电磁阀的开关操作和状态变化，提供与实际设备相同的控制接口和反馈机制。支持流体路径的虚拟控制，便于在没有实际硬件的情况下进行流体系统的集成测试和算法验证。适用于系统开发、流程调试和培训演示等场景。
-  displayname: solenoid_valve.mock
   handles:
   - data_type: fluid
     handler_key: in
@@ -406,7 +354,6 @@ solenoid_valve.mock:
     label: out
     side: SOUTH
   icon: ''
-  init_param_enforce: {}
   init_param_schema:
     config:
       properties:
@@ -425,7 +372,6 @@ solenoid_valve.mock:
       - status
       - valve_position
       type: object
-  metadata: {}
   version: 1.0.0
 syringe_pump_with_valve.runze.SY03B-T06:
   category:
@@ -433,14 +379,10 @@ syringe_pump_with_valve.runze.SY03B-T06:
   class:
     action_value_mappings:
       auto-close:
-        displayname: auto-close
-        estimate_duration_express: ''
-        estimate_duration_fixed: 60.0
         feedback: {}
         goal: {}
         goal_default: {}
         handles: {}
-        lock_resource: []
         placeholder_keys: {}
         result: {}
         schema:
@@ -458,14 +400,10 @@ syringe_pump_with_valve.runze.SY03B-T06:
           type: object
         type: UniLabJsonCommand
       auto-initialize:
-        displayname: auto-initialize
-        estimate_duration_express: ''
-        estimate_duration_fixed: 60.0
         feedback: {}
         goal: {}
         goal_default: {}
         handles: {}
-        lock_resource: []
         placeholder_keys: {}
         result: {}
         schema:
@@ -483,14 +421,10 @@ syringe_pump_with_valve.runze.SY03B-T06:
           type: object
         type: UniLabJsonCommand
       auto-list:
-        displayname: auto-list
-        estimate_duration_express: ''
-        estimate_duration_fixed: 60.0
         feedback: {}
         goal: {}
         goal_default: {}
         handles: {}
-        lock_resource: []
         placeholder_keys: {}
         result: {}
         schema:
@@ -508,15 +442,11 @@ syringe_pump_with_valve.runze.SY03B-T06:
           type: object
         type: UniLabJsonCommand
       auto-pull_plunger:
-        displayname: auto-pull_plunger
-        estimate_duration_express: ''
-        estimate_duration_fixed: 60.0
         feedback: {}
         goal: {}
         goal_default:
           volume: null
         handles: {}
-        lock_resource: []
         placeholder_keys: {}
         result: {}
         schema:
@@ -538,15 +468,11 @@ syringe_pump_with_valve.runze.SY03B-T06:
           type: object
         type: UniLabJsonCommand
       auto-push_plunger:
-        displayname: auto-push_plunger
-        estimate_duration_express: ''
-        estimate_duration_fixed: 60.0
         feedback: {}
         goal: {}
         goal_default:
           volume: null
         handles: {}
-        lock_resource: []
         placeholder_keys: {}
         result: {}
         schema:
@@ -568,14 +494,10 @@ syringe_pump_with_valve.runze.SY03B-T06:
           type: object
         type: UniLabJsonCommand
       auto-query_aux_input_status_1:
-        displayname: auto-query_aux_input_status_1
-        estimate_duration_express: ''
-        estimate_duration_fixed: 60.0
         feedback: {}
         goal: {}
         goal_default: {}
         handles: {}
-        lock_resource: []
         placeholder_keys: {}
         result: {}
         schema:
@@ -593,14 +515,10 @@ syringe_pump_with_valve.runze.SY03B-T06:
           type: object
         type: UniLabJsonCommand
       auto-query_aux_input_status_2:
-        displayname: auto-query_aux_input_status_2
-        estimate_duration_express: ''
-        estimate_duration_fixed: 60.0
         feedback: {}
         goal: {}
         goal_default: {}
         handles: {}
-        lock_resource: []
         placeholder_keys: {}
         result: {}
         schema:
@@ -618,14 +536,10 @@ syringe_pump_with_valve.runze.SY03B-T06:
           type: object
         type: UniLabJsonCommand
       auto-query_backlash_position:
-        displayname: auto-query_backlash_position
-        estimate_duration_express: ''
-        estimate_duration_fixed: 60.0
         feedback: {}
         goal: {}
         goal_default: {}
         handles: {}
-        lock_resource: []
         placeholder_keys: {}
         result: {}
         schema:
@@ -643,14 +557,10 @@ syringe_pump_with_valve.runze.SY03B-T06:
           type: object
         type: UniLabJsonCommand
       auto-query_command_buffer_status:
-        displayname: auto-query_command_buffer_status
-        estimate_duration_express: ''
-        estimate_duration_fixed: 60.0
         feedback: {}
         goal: {}
         goal_default: {}
         handles: {}
-        lock_resource: []
         placeholder_keys: {}
         result: {}
         schema:
@@ -668,14 +578,10 @@ syringe_pump_with_valve.runze.SY03B-T06:
           type: object
         type: UniLabJsonCommand
       auto-query_software_version:
-        displayname: auto-query_software_version
-        estimate_duration_express: ''
-        estimate_duration_fixed: 60.0
         feedback: {}
         goal: {}
         goal_default: {}
         handles: {}
-        lock_resource: []
         placeholder_keys: {}
         result: {}
         schema:
@@ -693,15 +599,11 @@ syringe_pump_with_valve.runze.SY03B-T06:
           type: object
         type: UniLabJsonCommand
       auto-send_command:
-        displayname: auto-send_command
-        estimate_duration_express: ''
-        estimate_duration_fixed: 60.0
         feedback: {}
         goal: {}
         goal_default:
           full_command: null
         handles: {}
-        lock_resource: []
         placeholder_keys: {}
         result: {}
         schema:
@@ -722,15 +624,11 @@ syringe_pump_with_valve.runze.SY03B-T06:
           type: object
         type: UniLabJsonCommand
       auto-set_baudrate:
-        displayname: auto-set_baudrate
-        estimate_duration_express: ''
-        estimate_duration_fixed: 60.0
         feedback: {}
         goal: {}
         goal_default:
           baudrate: null
         handles: {}
-        lock_resource: []
         placeholder_keys: {}
         result: {}
         schema:
@@ -751,15 +649,11 @@ syringe_pump_with_valve.runze.SY03B-T06:
           type: object
         type: UniLabJsonCommand
       auto-set_max_velocity:
-        displayname: auto-set_max_velocity
-        estimate_duration_express: ''
-        estimate_duration_fixed: 60.0
         feedback: {}
         goal: {}
         goal_default:
           velocity: null
         handles: {}
-        lock_resource: []
         placeholder_keys: {}
         result: {}
         schema:
@@ -780,16 +674,12 @@ syringe_pump_with_valve.runze.SY03B-T06:
           type: object
         type: UniLabJsonCommand
       auto-set_position:
-        displayname: auto-set_position
-        estimate_duration_express: ''
-        estimate_duration_fixed: 60.0
         feedback: {}
         goal: {}
         goal_default:
           max_velocity: null
           position: null
         handles: {}
-        lock_resource: []
         placeholder_keys: {}
         result: {}
         schema:
@@ -814,15 +704,11 @@ syringe_pump_with_valve.runze.SY03B-T06:
           type: object
         type: UniLabJsonCommand
       auto-set_valve_position:
-        displayname: auto-set_valve_position
-        estimate_duration_express: ''
-        estimate_duration_fixed: 60.0
         feedback: {}
         goal: {}
         goal_default:
           position: null
         handles: {}
-        lock_resource: []
         placeholder_keys: {}
         result: {}
         schema:
@@ -846,15 +732,11 @@ syringe_pump_with_valve.runze.SY03B-T06:
           type: object
         type: UniLabJsonCommand
       auto-set_velocity_grade:
-        displayname: auto-set_velocity_grade
-        estimate_duration_express: ''
-        estimate_duration_fixed: 60.0
         feedback: {}
         goal: {}
         goal_default:
           velocity: null
         handles: {}
-        lock_resource: []
         placeholder_keys: {}
         result: {}
         schema:
@@ -877,14 +759,10 @@ syringe_pump_with_valve.runze.SY03B-T06:
           type: object
         type: UniLabJsonCommand
       auto-stop_operation:
-        displayname: auto-stop_operation
-        estimate_duration_express: ''
-        estimate_duration_fixed: 60.0
         feedback: {}
         goal: {}
         goal_default: {}
         handles: {}
-        lock_resource: []
         placeholder_keys: {}
         result: {}
         schema:
@@ -902,14 +780,10 @@ syringe_pump_with_valve.runze.SY03B-T06:
           type: object
         type: UniLabJsonCommand
       auto-wait_error:
-        displayname: auto-wait_error
-        estimate_duration_express: ''
-        estimate_duration_fixed: 60.0
         feedback: {}
         goal: {}
         goal_default: {}
         handles: {}
-        lock_resource: []
         placeholder_keys: {}
         result: {}
         schema:
@@ -944,7 +818,6 @@ syringe_pump_with_valve.runze.SY03B-T06:
     type: python
   config_info: []
   description: 润泽精密注射泵设备，集成阀门控制的高精度流体输送系统。该设备通过串口通信控制，支持多种运行模式和精确的体积控制。具备可变速度控制、精密定位、阀门切换、实时状态监控等功能。适用于微量液体输送、精密进样、流速控制、化学反应进料等需要高精度流体操作的实验室自动化应用。
-  displayname: syringe_pump_with_valve.runze.SY03B-T06
   handles:
   - data_key: fluid_port_1
     data_source: executor
@@ -1003,7 +876,6 @@ syringe_pump_with_valve.runze.SY03B-T06:
     label: 6-in
     side: WEST
   icon: ''
-  init_param_enforce: {}
   init_param_schema:
     config:
       properties:
@@ -1051,7 +923,6 @@ syringe_pump_with_valve.runze.SY03B-T06:
       - velocity_grade
       - velocity_init
       type: object
-  metadata: {}
   version: 1.0.0
 syringe_pump_with_valve.runze.SY03B-T08:
   category:
@@ -1059,14 +930,10 @@ syringe_pump_with_valve.runze.SY03B-T08:
   class:
     action_value_mappings:
       auto-close:
-        displayname: auto-close
-        estimate_duration_express: ''
-        estimate_duration_fixed: 60.0
         feedback: {}
         goal: {}
         goal_default: {}
         handles: {}
-        lock_resource: []
         placeholder_keys: {}
         result: {}
         schema:
@@ -1084,14 +951,10 @@ syringe_pump_with_valve.runze.SY03B-T08:
           type: object
         type: UniLabJsonCommand
       auto-initialize:
-        displayname: auto-initialize
-        estimate_duration_express: ''
-        estimate_duration_fixed: 60.0
         feedback: {}
         goal: {}
         goal_default: {}
         handles: {}
-        lock_resource: []
         placeholder_keys: {}
         result: {}
         schema:
@@ -1109,14 +972,10 @@ syringe_pump_with_valve.runze.SY03B-T08:
           type: object
         type: UniLabJsonCommand
       auto-list:
-        displayname: auto-list
-        estimate_duration_express: ''
-        estimate_duration_fixed: 60.0
         feedback: {}
         goal: {}
         goal_default: {}
         handles: {}
-        lock_resource: []
         placeholder_keys: {}
         result: {}
         schema:
@@ -1134,15 +993,11 @@ syringe_pump_with_valve.runze.SY03B-T08:
           type: object
         type: UniLabJsonCommand
       auto-pull_plunger:
-        displayname: auto-pull_plunger
-        estimate_duration_express: ''
-        estimate_duration_fixed: 60.0
         feedback: {}
         goal: {}
         goal_default:
           volume: null
         handles: {}
-        lock_resource: []
         placeholder_keys: {}
         result: {}
         schema:
@@ -1164,15 +1019,11 @@ syringe_pump_with_valve.runze.SY03B-T08:
           type: object
         type: UniLabJsonCommand
       auto-push_plunger:
-        displayname: auto-push_plunger
-        estimate_duration_express: ''
-        estimate_duration_fixed: 60.0
         feedback: {}
         goal: {}
         goal_default:
           volume: null
         handles: {}
-        lock_resource: []
         placeholder_keys: {}
         result: {}
         schema:
@@ -1194,14 +1045,10 @@ syringe_pump_with_valve.runze.SY03B-T08:
           type: object
         type: UniLabJsonCommand
       auto-query_aux_input_status_1:
-        displayname: auto-query_aux_input_status_1
-        estimate_duration_express: ''
-        estimate_duration_fixed: 60.0
         feedback: {}
         goal: {}
         goal_default: {}
         handles: {}
-        lock_resource: []
         placeholder_keys: {}
         result: {}
         schema:
@@ -1219,14 +1066,10 @@ syringe_pump_with_valve.runze.SY03B-T08:
           type: object
         type: UniLabJsonCommand
       auto-query_aux_input_status_2:
-        displayname: auto-query_aux_input_status_2
-        estimate_duration_express: ''
-        estimate_duration_fixed: 60.0
         feedback: {}
         goal: {}
         goal_default: {}
         handles: {}
-        lock_resource: []
         placeholder_keys: {}
         result: {}
         schema:
@@ -1244,14 +1087,10 @@ syringe_pump_with_valve.runze.SY03B-T08:
           type: object
         type: UniLabJsonCommand
       auto-query_backlash_position:
-        displayname: auto-query_backlash_position
-        estimate_duration_express: ''
-        estimate_duration_fixed: 60.0
         feedback: {}
         goal: {}
         goal_default: {}
         handles: {}
-        lock_resource: []
         placeholder_keys: {}
         result: {}
         schema:
@@ -1269,14 +1108,10 @@ syringe_pump_with_valve.runze.SY03B-T08:
           type: object
         type: UniLabJsonCommand
       auto-query_command_buffer_status:
-        displayname: auto-query_command_buffer_status
-        estimate_duration_express: ''
-        estimate_duration_fixed: 60.0
         feedback: {}
         goal: {}
         goal_default: {}
         handles: {}
-        lock_resource: []
         placeholder_keys: {}
         result: {}
         schema:
@@ -1294,14 +1129,10 @@ syringe_pump_with_valve.runze.SY03B-T08:
           type: object
         type: UniLabJsonCommand
       auto-query_software_version:
-        displayname: auto-query_software_version
-        estimate_duration_express: ''
-        estimate_duration_fixed: 60.0
         feedback: {}
         goal: {}
         goal_default: {}
         handles: {}
-        lock_resource: []
         placeholder_keys: {}
         result: {}
         schema:
@@ -1319,15 +1150,11 @@ syringe_pump_with_valve.runze.SY03B-T08:
           type: object
         type: UniLabJsonCommand
       auto-send_command:
-        displayname: auto-send_command
-        estimate_duration_express: ''
-        estimate_duration_fixed: 60.0
         feedback: {}
         goal: {}
         goal_default:
           full_command: null
         handles: {}
-        lock_resource: []
         placeholder_keys: {}
         result: {}
         schema:
@@ -1348,15 +1175,11 @@ syringe_pump_with_valve.runze.SY03B-T08:
           type: object
         type: UniLabJsonCommand
       auto-set_baudrate:
-        displayname: auto-set_baudrate
-        estimate_duration_express: ''
-        estimate_duration_fixed: 60.0
         feedback: {}
         goal: {}
         goal_default:
           baudrate: null
         handles: {}
-        lock_resource: []
         placeholder_keys: {}
         result: {}
         schema:
@@ -1377,15 +1200,11 @@ syringe_pump_with_valve.runze.SY03B-T08:
           type: object
         type: UniLabJsonCommand
       auto-set_max_velocity:
-        displayname: auto-set_max_velocity
-        estimate_duration_express: ''
-        estimate_duration_fixed: 60.0
         feedback: {}
         goal: {}
         goal_default:
           velocity: null
         handles: {}
-        lock_resource: []
         placeholder_keys: {}
         result: {}
         schema:
@@ -1406,16 +1225,12 @@ syringe_pump_with_valve.runze.SY03B-T08:
           type: object
         type: UniLabJsonCommand
       auto-set_position:
-        displayname: auto-set_position
-        estimate_duration_express: ''
-        estimate_duration_fixed: 60.0
         feedback: {}
         goal: {}
         goal_default:
           max_velocity: null
           position: null
         handles: {}
-        lock_resource: []
         placeholder_keys: {}
         result: {}
         schema:
@@ -1440,15 +1255,11 @@ syringe_pump_with_valve.runze.SY03B-T08:
           type: object
         type: UniLabJsonCommand
       auto-set_valve_position:
-        displayname: auto-set_valve_position
-        estimate_duration_express: ''
-        estimate_duration_fixed: 60.0
         feedback: {}
         goal: {}
         goal_default:
           position: null
         handles: {}
-        lock_resource: []
         placeholder_keys: {}
         result: {}
         schema:
@@ -1472,15 +1283,11 @@ syringe_pump_with_valve.runze.SY03B-T08:
           type: object
         type: UniLabJsonCommand
       auto-set_velocity_grade:
-        displayname: auto-set_velocity_grade
-        estimate_duration_express: ''
-        estimate_duration_fixed: 60.0
         feedback: {}
         goal: {}
         goal_default:
           velocity: null
         handles: {}
-        lock_resource: []
         placeholder_keys: {}
         result: {}
         schema:
@@ -1503,14 +1310,10 @@ syringe_pump_with_valve.runze.SY03B-T08:
           type: object
         type: UniLabJsonCommand
       auto-stop_operation:
-        displayname: auto-stop_operation
-        estimate_duration_express: ''
-        estimate_duration_fixed: 60.0
         feedback: {}
         goal: {}
         goal_default: {}
         handles: {}
-        lock_resource: []
         placeholder_keys: {}
         result: {}
         schema:
@@ -1528,14 +1331,10 @@ syringe_pump_with_valve.runze.SY03B-T08:
           type: object
         type: UniLabJsonCommand
       auto-wait_error:
-        displayname: auto-wait_error
-        estimate_duration_express: ''
-        estimate_duration_fixed: 60.0
         feedback: {}
         goal: {}
         goal_default: {}
         handles: {}
-        lock_resource: []
         placeholder_keys: {}
         result: {}
         schema:
@@ -1570,7 +1369,6 @@ syringe_pump_with_valve.runze.SY03B-T08:
     type: python
   config_info: []
   description: 润泽精密注射泵设备，集成阀门控制的高精度流体输送系统。该设备通过串口通信控制，支持多种运行模式和精确的体积控制。具备可变速度控制、精密定位、阀门切换、实时状态监控等功能。适用于微量液体输送、精密进样、流速控制、化学反应进料等需要高精度流体操作的实验室自动化应用。
-  displayname: syringe_pump_with_valve.runze.SY03B-T08
   handles:
   - data_key: fluid_port_1
     data_source: executor
@@ -1645,7 +1443,6 @@ syringe_pump_with_valve.runze.SY03B-T08:
     label: '8'
     side: NORTH
   icon: ''
-  init_param_enforce: {}
   init_param_schema:
     config:
       properties:
@@ -1693,5 +1490,4 @@ syringe_pump_with_valve.runze.SY03B-T08:
       - velocity_grade
       - velocity_init
       type: object
-  metadata: {}
   version: 1.0.0

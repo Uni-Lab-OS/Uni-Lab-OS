@@ -6,11 +6,9 @@ PRCXI_30mm_Adapter:
     module: unilabos.devices.liquid_handling.prcxi.prcxi_labware:PRCXI_30mm_Adapter
     type: pylabrobot
   description: '30mm适配器 (Code: ZX-58-30)'
-  displayname: PRCXI_30mm_Adapter
   handles: []
   icon: ''
   init_param_schema: {}
-  metadata: {}
   version: 1.0.0
 PRCXI_Adapter:
   category:
@@ -20,11 +18,9 @@ PRCXI_Adapter:
     module: unilabos.devices.liquid_handling.prcxi.prcxi_labware:PRCXI_Adapter
     type: pylabrobot
   description: '适配器 (Code: Fhh478)'
-  displayname: PRCXI_Adapter
   handles: []
   icon: ''
   init_param_schema: {}
-  metadata: {}
   version: 1.0.0
 PRCXI_Deep10_Adapter:
   category:
@@ -34,11 +30,9 @@ PRCXI_Deep10_Adapter:
     module: unilabos.devices.liquid_handling.prcxi.prcxi_labware:PRCXI_Deep10_Adapter
     type: pylabrobot
   description: '10ul专用深孔板适配器 (Code: ZX-002-10)'
-  displayname: PRCXI_Deep10_Adapter
   handles: []
   icon: ''
   init_param_schema: {}
-  metadata: {}
   version: 1.0.0
 PRCXI_Deep300_Adapter:
   category:
@@ -48,11 +42,9 @@ PRCXI_Deep300_Adapter:
     module: unilabos.devices.liquid_handling.prcxi.prcxi_labware:PRCXI_Deep300_Adapter
     type: pylabrobot
   description: '300ul深孔板适配器 (Code: ZX-002-300)'
-  displayname: PRCXI_Deep300_Adapter
   handles: []
   icon: ''
   init_param_schema: {}
-  metadata: {}
   version: 1.0.0
 PRCXI_PCR_Adapter:
   category:
@@ -62,11 +54,9 @@ PRCXI_PCR_Adapter:
     module: unilabos.devices.liquid_handling.prcxi.prcxi_labware:PRCXI_PCR_Adapter
     type: pylabrobot
   description: '全裙边 PCR适配器 (Code: ZX-58-0001)'
-  displayname: PRCXI_PCR_Adapter
   handles: []
   icon: ''
   init_param_schema: {}
-  metadata: {}
   version: 1.0.0
 PRCXI_Reservoir_Adapter:
   category:
@@ -76,11 +66,9 @@ PRCXI_Reservoir_Adapter:
     module: unilabos.devices.liquid_handling.prcxi.prcxi_labware:PRCXI_Reservoir_Adapter
     type: pylabrobot
   description: '储液槽 适配器 (Code: ZX-ADP-001)'
-  displayname: PRCXI_Reservoir_Adapter
   handles: []
   icon: ''
   init_param_schema: {}
-  metadata: {}
   version: 1.0.0
 PRCXI_Tip10_Adapter:
   category:
@@ -90,11 +78,9 @@ PRCXI_Tip10_Adapter:
     module: unilabos.devices.liquid_handling.prcxi.prcxi_labware:PRCXI_Tip10_Adapter
     type: pylabrobot
   description: '吸头10ul 适配器 (Code: ZX-58-10)'
-  displayname: PRCXI_Tip10_Adapter
   handles: []
   icon: ''
   init_param_schema: {}
-  metadata: {}
   version: 1.0.0
 PRCXI_Tip1250_Adapter:
   category:
@@ -104,11 +90,9 @@ PRCXI_Tip1250_Adapter:
     module: unilabos.devices.liquid_handling.prcxi.prcxi_labware:PRCXI_Tip1250_Adapter
     type: pylabrobot
   description: 'Tip头适配器 1250uL (Code: ZX-58-1250)'
-  displayname: PRCXI_Tip1250_Adapter
   handles: []
   icon: ''
   init_param_schema: {}
-  metadata: {}
   version: 1.0.0
 PRCXI_Tip300_Adapter:
   category:
@@ -118,9 +102,7 @@ PRCXI_Tip300_Adapter:
     module: unilabos.devices.liquid_handling.prcxi.prcxi_labware:PRCXI_Tip300_Adapter
     type: pylabrobot
   description: 'ZHONGXI 适配器 300uL (Code: ZX-58-300)'
-  displayname: PRCXI_Tip300_Adapter
   handles: []
   icon: ''
   init_param_schema: {}
-  metadata: {}
   version: 1.0.0
