@@ -232,6 +232,30 @@ CREATE INDEX IF NOT EXISTS ix_workflow_task_workflow
 CREATE INDEX IF NOT EXISTS ix_workflow_task_status
     ON workflow_task(status);
 
+CREATE TABLE IF NOT EXISTS workflow_task_command (
+    uuid TEXT PRIMARY KEY,
+    create_time TEXT NOT NULL,
+    update_time TEXT NOT NULL,
+    deleted_at TEXT,
+    description TEXT,
+    meta_data TEXT NOT NULL,
+    workflow_task_uuid TEXT NOT NULL,
+    type TEXT NOT NULL CHECK (type IN ('step', 'pause', 'resume', 'cancel')),
+    target_node_uuid TEXT,
+    idempotency_key TEXT NOT NULL,
+    status TEXT NOT NULL CHECK (status IN ('pending', 'succeeded', 'rejected')),
+    result TEXT NOT NULL,
+    trace_context TEXT NOT NULL,
+    consumed_at TEXT,
+    FOREIGN KEY(workflow_task_uuid) REFERENCES workflow_task(uuid) ON DELETE CASCADE
+);
+CREATE UNIQUE INDEX IF NOT EXISTS ux_workflow_task_command_idempotency_active
+    ON workflow_task_command(workflow_task_uuid, idempotency_key)
+    WHERE deleted_at IS NULL;
+CREATE INDEX IF NOT EXISTS ix_workflow_task_command_pending
+    ON workflow_task_command(workflow_task_uuid, create_time, uuid)
+    WHERE deleted_at IS NULL AND status = 'pending';
+
 CREATE TABLE IF NOT EXISTS workflow_node_job (
     uuid TEXT PRIMARY KEY,
     create_time TEXT NOT NULL,
@@ -1287,6 +1311,109 @@ class WorkflowStore:
             raise StoreNotFound(f"workflow node job {job_uuid} not found")
         return self._job_row(row)
 
+    def create_task_command(
+        self,
+        *,
+        task_uuid: str,
+        command_uuid: str,
+        command_type: str,
+        target_node_uuid: Optional[str],
+        idempotency_key: str,
+        description: Optional[str],
+        meta_data: Dict[str, Any],
+    ) -> tuple[Dict[str, Any], bool]:
+        """幂等创建工作流任务控制命令。"""
+
+        now = utc_now()
+        with self.transaction() as conn:
+            task = conn.execute(
+                "SELECT uuid FROM workflow_task WHERE uuid = ? AND deleted_at IS NULL",
+                (task_uuid,),
+            ).fetchone()
+            if task is None:
+                raise StoreNotFound(f"workflow task {task_uuid} not found")
+            existing = conn.execute(
+                """
+                SELECT * FROM workflow_task_command
+                WHERE workflow_task_uuid = ? AND idempotency_key = ?
+                  AND deleted_at IS NULL
+                """,
+                (task_uuid, idempotency_key),
+            ).fetchone()
+            if existing is not None:
+                return self._task_command_row(existing), False
+            conn.execute(
+                """
+                INSERT INTO workflow_task_command(
+                    uuid, create_time, update_time, deleted_at, description,
+                    meta_data, workflow_task_uuid, type, target_node_uuid,
+                    idempotency_key, status, result, trace_context, consumed_at
+                ) VALUES (?, ?, ?, NULL, ?, ?, ?, ?, ?, ?, 'pending', '{}', '{}', NULL)
+                """,
+                (
+                    command_uuid,
+                    now,
+                    now,
+                    description,
+                    _json(meta_data),
+                    task_uuid,
+                    command_type,
+                    target_node_uuid,
+                    idempotency_key,
+                ),
+            )
+            row = conn.execute(
+                "SELECT * FROM workflow_task_command WHERE uuid = ?",
+                (command_uuid,),
+            ).fetchone()
+            return self._task_command_row(row), True
+
+    def complete_task_command(
+        self,
+        command_uuid: str,
+        *,
+        status: str,
+        result: Dict[str, Any],
+    ) -> Dict[str, Any]:
+        """把已接收控制命令原子标记为成功或拒绝。"""
+
+        if status not in {"succeeded", "rejected"}:
+            raise StoreConflict("任务命令终态非法")
+        now = utc_now()
+        with self.transaction() as conn:
+            row = conn.execute(
+                """
+                SELECT * FROM workflow_task_command
+                WHERE uuid = ? AND deleted_at IS NULL
+                """,
+                (command_uuid,),
+            ).fetchone()
+            if row is None:
+                raise StoreNotFound(f"workflow task command {command_uuid} not found")
+            if row["status"] != "pending":
+                return self._task_command_row(row)
+            conn.execute(
+                """
+                UPDATE workflow_task_command
+                SET status = ?, result = ?, consumed_at = ?, update_time = ?
+                WHERE uuid = ? AND status = 'pending' AND deleted_at IS NULL
+                """,
+                (status, _json(result), now, now, command_uuid),
+            )
+            self._append_runtime_event(
+                conn,
+                task_uuid=str(row["workflow_task_uuid"]),
+                command_uuid=command_uuid,
+                kind="command_consumed",
+                now=now,
+                data={"type": row["type"], "status": status, "result": result},
+            )
+            updated = conn.execute(
+                "SELECT * FROM workflow_task_command WHERE uuid = ?",
+                (command_uuid,),
+            ).fetchone()
+            return self._task_command_row(updated)
+
     def list_task_runtime_events(
         self,
         task_uuid: str,
@@ -2068,6 +2195,7 @@ class WorkflowStore:
             "workflow_node",
             "workflow_edge",
             "workflow_task",
+            "workflow_task_command",
             "workflow_node_job",
             "workflow_authoring",
             "frontend_event",
@@ -2224,6 +2352,20 @@ class WorkflowStore:
             "started_at",
             "finished_at",
         )
+        return result
+
+    @classmethod
+    def _task_command_row(cls, row: sqlite3.Row) -> Dict[str, Any]:
+        result = {
+            **cls._base(row),
+            "workflow_task_uuid": row["workflow_task_uuid"],
+            "type": row["type"],
+            "idempotency_key": row["idempotency_key"],
+            "status": row["status"],
+            "result": _load(row["result"], {}),
+            "trace_context": _load(row["trace_context"], {}),
+        }
+        cls._add_optional(result, row, "target_node_uuid", "consumed_at")
         return result
 
     @classmethod

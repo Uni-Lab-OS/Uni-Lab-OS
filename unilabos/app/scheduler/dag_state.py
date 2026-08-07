@@ -35,7 +35,12 @@ class WorkflowRun:
 
     def __init__(self, spec: WorkflowSpec):
         self.spec = spec
-        self.state = WorkflowState.RUNNING
+        # 单步任务创建后必须停在首个节点之前；只有显式 step 命令可以临时放行。
+        self.state = (
+            WorkflowState.PAUSED
+            if spec.run_mode == "step"
+            else WorkflowState.RUNNING
+        )
 
         self._nodes: Dict[str, WorkflowNode] = {}
         # node_id -> 未完成父节点集合（Go d.dependencies 等价，入度表）

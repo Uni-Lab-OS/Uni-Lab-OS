@@ -167,10 +167,32 @@ class TaskSchedulerBridge:
         self._scheduler.reschedule()
         return self._aggregate(normalized_uuid)
 
-    def recover_active_tasks(self) -> list[dict[str, Any]]:
-        """恢复没有结果不明作业的运行中工作流任务（WorkflowTask）。
+    def step(
+        self,
+        task_uuid: str,
+        *,
+        target_node_uuid: str | None = None,
+    ) -> dict[str, Any]:
+        """让已经提交且暂停的单步任务只派发一个就绪节点。"""
 
-        参数：无。返回：已恢复任务的标准聚合列表。已成功作业仅
+        if self._closed:
+            raise TaskSchedulerBridgeError("工作流任务调度桥已经关闭")
+        normalized_uuid = self._required_text(task_uuid, field="task_uuid")
+        if normalized_uuid not in self._submitted_tasks:
+            raise TaskSchedulerBridgeError("工作流任务尚未提交到本地调度器")
+        try:
+            return self._scheduler.step_workflow(
+                normalized_uuid,
+                target_node_id=target_node_uuid,
+            )
+        except ValueError as error:
+            raise TaskSchedulerBridgeError(str(error)) from error
+
+    def recover_active_tasks(self) -> list[dict[str, Any]]:
+        """恢复没有结果不明作业的活动工作流任务（WorkflowTask）。
+
+        参数：无。返回：已恢复任务的标准聚合列表；包括运行中任务和尚未执行
+        首步的 ``pending + paused`` 单步任务。已成功作业仅
         恢复 DAG 返回值，待处理作业才可派发；发现 ``dispatched`` 或
         ``running`` 作业时跳过该任务，禁止重放结果不明的物理动作。
         异常：冻结计划或持久事实不一致时记录后跳过，不阻止其他
@@ -180,28 +202,34 @@ class TaskSchedulerBridge:
         if self._closed:
             raise TaskSchedulerBridgeError("工作流任务调度桥已经关闭")
         recovered: list[dict[str, Any]] = []
-        page = 1
-        while True:
-            task_page = self._store.list_tasks(
-                page=page,
-                page_size=200,
-                status="running",
-            )
-            tasks = task_page["items"]
-            for task in tasks:
-                try:
-                    aggregate = self._recover_running_task(task)
-                except Exception:  # noqa: BLE001 - 单任务损坏不影响其他恢复
-                    logger.exception(
-                        "运行中工作流任务无法安全恢复：%s",
-                        task.get("uuid"),
-                    )
-                    continue
-                if aggregate is not None:
-                    recovered.append(aggregate)
-            if page * 200 >= int(task_page["total"]):
-                break
-            page += 1
+        for status in ("running", "pending"):
+            page = 1
+            while True:
+                task_page = self._store.list_tasks(
+                    page=page,
+                    page_size=200,
+                    status=status,
+                )
+                tasks = task_page["items"]
+                for task in tasks:
+                    if status == "pending" and not (
+                        task.get("run_mode") == "step"
+                        and task.get("control_status") == "paused"
+                    ):
+                        continue
+                    try:
+                        aggregate = self._recover_running_task(task)
+                    except Exception:  # noqa: BLE001 - 单任务损坏不影响其他恢复
+                        logger.exception(
+                            "活动工作流任务无法安全恢复：%s",
+                            task.get("uuid"),
+                        )
+                        continue
+                    if aggregate is not None:
+                        recovered.append(aggregate)
+                if page * 200 >= int(task_page["total"]):
+                    break
+                page += 1
         return recovered
 
     def _recover_running_task(

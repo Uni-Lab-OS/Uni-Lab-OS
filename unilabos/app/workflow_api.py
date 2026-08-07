@@ -202,6 +202,19 @@ class WorkflowTaskCreateRequest(_BackendModel):
         return normalize_json_object(value)
 
 
+class WorkflowTaskCommandRequest(_StrictModel):
+    type: str
+    target_node_uuid: Optional[str] = None
+    idempotency_key: str
+    description: Optional[str] = None
+    meta_data: Dict[str, Any] = Field(default_factory=dict)
+
+    @field_validator("meta_data", mode="before")
+    @classmethod
+    def _json_object(cls, value: Any) -> Dict[str, Any]:
+        return normalize_json_object(value)
+
+
 class DeviceActionRunCreateRequest(_StrictModel):
     """Backend 规范的设备单动作运行（DeviceActionRun）创建 DTO。"""
 
@@ -455,6 +468,25 @@ def create_workflow_router(service: WorkflowService) -> APIRouter:
     @router.get("/workflow-tasks/{task_uuid}")
     def get_workflow_task(task_uuid: str) -> JSONResponse:
         return _success(service.get_workflow_task(task_uuid))
+
+    @router.post("/workflow-tasks/{task_uuid}/commands")
+    def command_workflow_task(
+        task_uuid: str,
+        body: WorkflowTaskCommandRequest,
+    ) -> JSONResponse:
+        """幂等提交一次工作流任务控制命令。"""
+
+        return _success(
+            service.command_workflow_task(
+                task_uuid,
+                command_type=body.type,
+                target_node_uuid=body.target_node_uuid,
+                idempotency_key=body.idempotency_key,
+                description=body.description,
+                meta_data=body.meta_data,
+            ),
+            status=201,
+        )
 
     @router.get("/workflow-tasks/{task_uuid}/jobs")
     def list_workflow_node_jobs(task_uuid: str) -> JSONResponse:

@@ -115,6 +115,8 @@ class EdgeScheduler:
         self._lock = threading.RLock()
 
         self._workflows: Dict[str, WorkflowRun] = {}
+        # workflow_id -> 本次单步命令唯一允许派发的节点。只在一次重排期间存在。
+        self._step_targets: Dict[str, str] = {}
         # job_id -> DispatchedJob（完成回调路由 + 资源锁）
         self._inflight: Dict[str, DispatchedJob] = {}
         # 外部注入的锁（例如 DeviceActionManager 已占用的设备），可选
@@ -371,6 +373,57 @@ class EdgeScheduler:
             "state": run.state.value,
             "dispatched": dispatched,
         }
+
+    def step_workflow(
+        self,
+        workflow_id: str,
+        target_node_id: Optional[str] = None,
+    ) -> Dict[str, Any]:
+        """让暂停的单步工作流只派发一个就绪节点，随后立即恢复暂停。
+
+        参数：``workflow_id`` 是已提交运行身份；``target_node_id`` 可指定本次
+        必须放行的就绪节点，空值按稳定图顺序选择第一个。返回本轮派发摘要。
+        异常：未知任务、非单步任务、非暂停状态或目标尚未就绪时抛 ``ValueError``。
+        """
+
+        with self._lock:
+            run = self._workflows.get(workflow_id)
+            if run is None:
+                raise ValueError(f"workflow {workflow_id} not found")
+            if run.spec.run_mode != "step":
+                raise ValueError(f"workflow {workflow_id} is not in step mode")
+            if run.state is not WorkflowState.PAUSED:
+                raise ValueError(f"workflow {workflow_id} is not paused")
+
+            # ready_nodes 只允许 RUNNING 状态读取；该活动态仅存在于本次锁内重排。
+            run.state = WorkflowState.RUNNING
+            ready_nodes = run.ready_nodes()
+            if target_node_id is None:
+                selected = ready_nodes[0] if ready_nodes else None
+            else:
+                selected = next(
+                    (node for node in ready_nodes if node.id == target_node_id),
+                    None,
+                )
+            if selected is None:
+                run.state = WorkflowState.PAUSED
+                raise ValueError("step target is not ready")
+
+            self._step_targets[workflow_id] = selected.id
+            try:
+                dispatched = self._reschedule_locked()
+            finally:
+                self._step_targets.pop(workflow_id, None)
+                if run.state is WorkflowState.RUNNING:
+                    run.state = WorkflowState.PAUSED
+            notifications = self._collect_terminal_notifications()
+            result = {
+                "workflow_id": workflow_id,
+                "state": run.state.value,
+                "dispatched": dispatched,
+            }
+        self._fire_notifications(notifications)
+        return result
 
     def restore_workflow(
         self,
@@ -653,6 +706,9 @@ class EdgeScheduler:
                 continue
             weight = priority_weight(run.spec.priority)
             for node in run.ready_nodes():
+                step_target = self._step_targets.get(run.spec.workflow_id)
+                if step_target is not None and node.id != step_target:
+                    continue
                 ready.append(
                     ReadyTask(
                         workflow_id=run.spec.workflow_id,

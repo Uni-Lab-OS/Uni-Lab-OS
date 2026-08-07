@@ -9,11 +9,14 @@ from pathlib import Path
 from typing import Any
 
 import pytest
+from fastapi.testclient import TestClient
 
+from unilabos.app.workflow_api import create_workflow_app
 from unilabos.app.scheduler.dispatch import RecordingDispatcher
 from unilabos.app.scheduler.inventory.domain import InsufficientStock
 from unilabos.app.scheduler.service import EdgeScheduler
 from unilabos.workflow.store import WorkflowStore
+from unilabos.workflow.service import WorkflowService
 
 WORKFLOW_UUID = "11000000-0000-4000-8000-000000000001"
 TASK_UUID = "21000000-0000-4000-8000-000000000001"
@@ -81,7 +84,12 @@ def store(tmp_path: Path) -> Iterator[WorkflowStore]:
         opened_store.close()
 
 
-def _seed_task(store: WorkflowStore, *, with_material: bool) -> dict[str, Any]:
+def _seed_task(
+    store: WorkflowStore,
+    *,
+    with_material: bool,
+    run_mode: str = "normal",
+) -> dict[str, Any]:
     """持久化一个带冻结执行计划（ExecutionPlan）的待处理任务。
 
     参数：``store`` 是工作流写权威；``with_material`` 决定计划是否包含遗留短期
@@ -100,7 +108,7 @@ def _seed_task(store: WorkflowStore, *, with_material: bool) -> dict[str, Any]:
     material_requirements = [{"instance_uuid": MATERIAL_UUID}] if with_material else []
     execution_plan = {
         "version": 1,
-        "run_mode": "normal",
+        "run_mode": run_mode,
         "target_node_uuid": None,
         "nodes": [
             {
@@ -136,7 +144,7 @@ def _seed_task(store: WorkflowStore, *, with_material: bool) -> dict[str, Any]:
                 execution_plan, run_mode, target_node_uuid, control_status,
                 cleanup_status, trace_context, input, output, error_info
             ) VALUES (?, ?, ?, NULL, NULL, '{}', ?, 'pending', '{}', ?,
-                      'normal', NULL, 'active', 'none', '{}', '{}', '{}', '[]')
+                      ?, NULL, ?, 'none', '{}', '{}', '{}', '[]')
             """,
             (
                 TASK_UUID,
@@ -144,6 +152,8 @@ def _seed_task(store: WorkflowStore, *, with_material: bool) -> dict[str, Any]:
                 _CREATED_AT,
                 WORKFLOW_UUID,
                 json.dumps(execution_plan),
+                run_mode,
+                "paused" if run_mode == "step" else "active",
             ),
         )
         connection.execute(
@@ -367,6 +377,70 @@ def test_persisted_task_compiles_and_dispatches_with_stable_identities(
     assert dispatcher.dispatched[0]["task_id"] == TASK_UUID
     assert dispatcher.dispatched[0]["job_id"] == JOB_UUID
     assert aggregate["task"]["status"] == "running"
+
+
+def test_step_task_stays_paused_until_bridge_step_dispatches_one_job(
+    store: WorkflowStore,
+) -> None:
+    task = _seed_task(store, with_material=False, run_mode="step")
+    dispatcher = RecordingDispatcher()
+    scheduler = EdgeScheduler(dispatcher=dispatcher)
+    bridge = _bridge(store, scheduler)
+    try:
+        aggregate = bridge.submit(task)
+        assert aggregate["task"]["status"] == "pending"
+        assert aggregate["task"]["control_status"] == "paused"
+        assert dispatcher.dispatched == []
+
+        result = bridge.step(TASK_UUID)
+        assert [item["job_id"] for item in result["dispatched"]] == [JOB_UUID]
+        assert len(dispatcher.dispatched) == 1
+        assert store.get_task(TASK_UUID)["control_status"] == "paused"
+    finally:
+        bridge.close()
+
+
+def test_step_command_api_is_idempotent_and_dispatches_once(
+    store: WorkflowStore,
+) -> None:
+    task = _seed_task(store, with_material=False, run_mode="step")
+    dispatcher = RecordingDispatcher()
+    scheduler = EdgeScheduler(dispatcher=dispatcher)
+    bridge = _bridge(store, scheduler)
+    service = WorkflowService(store, task_scheduler_bridge=bridge)
+    client = TestClient(create_workflow_app(service))
+    try:
+        bridge.submit(task)
+        body = {"type": "step", "idempotency_key": "step-once", "meta_data": {}}
+
+        first = client.post(f"/api/v1/workflow-tasks/{TASK_UUID}/commands", json=body)
+        replay = client.post(f"/api/v1/workflow-tasks/{TASK_UUID}/commands", json=body)
+
+        assert first.status_code == 201
+        assert first.json()["data"]["status"] == "succeeded"
+        assert replay.json()["data"]["uuid"] == first.json()["data"]["uuid"]
+        assert len(dispatcher.dispatched) == 1
+        assert store.count_rows("workflow_task_command") == 1
+    finally:
+        bridge.close()
+
+
+def test_restart_recovers_pending_paused_step_task_without_dispatch(
+    store: WorkflowStore,
+) -> None:
+    _seed_task(store, with_material=False, run_mode="step")
+    dispatcher = RecordingDispatcher()
+    scheduler = EdgeScheduler(dispatcher=dispatcher)
+    bridge = _bridge(store, scheduler)
+    try:
+        recovered = bridge.recover_active_tasks()
+        assert [item["task"]["uuid"] for item in recovered] == [TASK_UUID]
+        assert dispatcher.dispatched == []
+
+        result = bridge.step(TASK_UUID)
+        assert [item["job_id"] for item in result["dispatched"]] == [JOB_UUID]
+    finally:
+        bridge.close()
 
 
 def test_material_task_without_scheduler_inventory_fails_closed(

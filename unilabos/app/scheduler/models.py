@@ -150,6 +150,7 @@ class WorkflowSpec:
     submitted_at: float = field(default_factory=time.time)
     lab_id: str = ""
     task_id: str = ""  # 云端 WorkflowTask uuid（可空，Edge 本地提交时等于 workflow_id）
+    run_mode: str = "normal"  # normal / step / single_node
 
     def __post_init__(self) -> None:
         if not self.task_id:
@@ -286,6 +287,7 @@ def spec_from_dict(data: Dict[str, Any]) -> WorkflowSpec:
         submitted_at=float(data.get("submitted_at") or time.time()),
         lab_id=str(data.get("lab_id", "") or ""),
         task_id=str(data.get("task_id", "") or ""),
+        run_mode=str(data.get("run_mode", "normal") or "normal"),
     )
 
 

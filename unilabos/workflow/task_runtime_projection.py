@@ -176,12 +176,13 @@ class TaskRuntimeProjection:
         """投影本地调度器（EdgeScheduler）的首次接收状态。
 
         参数：``task_uuid`` 是既有工作流任务（WorkflowTask）身份；
-        ``scheduler_state`` 只接受 ``waiting_for_material`` 或 ``running``。返回：不
+        ``scheduler_state`` 接受 ``waiting_for_material``、``running`` 或单步任务
+        的 ``paused``。返回：不
         改写标准状态的任务/作业聚合。异常：未知本地状态或不合法的既有聚合抛出
         ``StoreConflict``；身份缺失抛出 ``StoreNotFound``。
         """
 
-        if scheduler_state not in {"waiting_for_material", "running"}:
+        if scheduler_state not in {"waiting_for_material", "running", "paused"}:
             raise StoreConflict(f"不支持的本地提交状态：{scheduler_state}")
         with self._store.transaction() as connection:
             # ``aggregate`` 是首次提交后可公开给 Backend-shaped 接口的标准事实。

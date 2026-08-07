@@ -126,6 +126,7 @@ class WorkflowSpecCompiler:
             handles=compiled_handles,
             priority=task.get("priority", 1.0),
             lab_id=str(task.get("lab_id") or "").strip(),
+            run_mode=str(task.get("run_mode") or plan.get("run_mode") or "normal"),
         )
 
     def _compile_nodes(

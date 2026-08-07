@@ -42,6 +42,13 @@ def _chain_spec(workflow_id: str, device: str = "dev1", priority=1.0) -> Workflo
     )
 
 
+def _step_chain_spec(workflow_id: str, device: str = "dev1") -> WorkflowSpec:
+    """A → B 两节点单步任务。"""
+    spec = _chain_spec(workflow_id, device=device)
+    spec.run_mode = "step"
+    return spec
+
+
 def _make() -> "tuple[EdgeScheduler, RecordingDispatcher]":
     dispatcher = RecordingDispatcher()
     scheduler = EdgeScheduler(dispatcher=dispatcher)
@@ -79,6 +86,35 @@ class TestTriggerOnSubmit:
             assert False, "expected ValueError"
         except ValueError:
             pass
+
+    def test_step_submit_stays_paused_without_dispatch(self):
+        scheduler, dispatcher = _make()
+
+        result = scheduler.submit_workflow(_step_chain_spec("wf-step"))
+
+        assert result["state"] == "paused"
+        assert result["dispatched"] == []
+        assert dispatcher.dispatched == []
+
+
+class TestStepControl:
+    def test_each_step_dispatches_one_node_and_pauses_before_next(self):
+        scheduler, dispatcher = _make()
+        scheduler.submit_workflow(_step_chain_spec("wf-step"))
+
+        first = scheduler.step_workflow("wf-step")
+        assert first["state"] == "paused"
+        assert [item["node_id"] for item in first["dispatched"]] == ["A"]
+
+        finished = scheduler.on_job_finished(
+            first["dispatched"][0]["job_id"], success=True, ret_value={}
+        )
+        assert finished["workflow_state"] == "paused"
+        assert finished["dispatched"] == []
+        assert [item["node_id"] for item in dispatcher.dispatched] == ["A"]
+
+        second = scheduler.step_workflow("wf-step")
+        assert [item["node_id"] for item in second["dispatched"]] == ["B"]
 
 
 class TestTriggerOnJobFinish:

@@ -268,6 +268,16 @@ class WorkflowTaskSchedulerBridge(Protocol):
 
         ...
 
+    def step(
+        self,
+        task_uuid: str,
+        *,
+        target_node_uuid: str | None = None,
+    ) -> dict[str, Any]:
+        """让暂停的单步任务放行一个节点并返回调度摘要。"""
+
+        ...
+
 
 def _sha256(data: bytes) -> str:
     return f"sha256:{hashlib.sha256(data).hexdigest()}"
@@ -555,6 +565,84 @@ class WorkflowService:
         except TaskInputError:
             raise WorkflowError("invalid_input") from None
         except StoreConflict:
+            raise WorkflowError("invalid_input") from None
+
+    def command_workflow_task(
+        self,
+        task_uuid: str,
+        *,
+        command_type: str,
+        target_node_uuid: Optional[str],
+        idempotency_key: str,
+        description: Optional[str],
+        meta_data: Dict[str, Any],
+    ) -> Dict[str, Any]:
+        """幂等执行本地工作流任务控制命令。
+
+        当前 Edge 调度内核先开放单步命令；它只允许暂停的 ``step`` 任务放行
+        一个就绪节点。返回与 Backend 相同的 WorkflowTaskCommand 投影。
+        """
+
+        try:
+            task_uuid = validate_uuid(task_uuid)
+            if command_type != "step":
+                raise WorkflowError("invalid_input")
+            if target_node_uuid is not None:
+                target_node_uuid = validate_uuid(target_node_uuid)
+            normalized_key = str(idempotency_key).strip()
+            if not normalized_key:
+                raise WorkflowError("invalid_input")
+            meta_data = normalize_json_object(meta_data)
+            description = self._optional_text(description)
+            task = self._store.get_task(task_uuid)
+            if (
+                task.get("run_mode") != "step"
+                or task.get("control_status") != "paused"
+                or task.get("status") in {
+                    "succeeded",
+                    "success",
+                    "failed",
+                    "canceled",
+                    "timeout",
+                }
+            ):
+                raise WorkflowError("invalid_input")
+            command, created = self._store.create_task_command(
+                task_uuid=task_uuid,
+                command_uuid=str(uuid4()),
+                command_type=command_type,
+                target_node_uuid=target_node_uuid,
+                idempotency_key=normalized_key,
+                description=description,
+                meta_data=meta_data,
+            )
+            if not created or command["status"] != "pending":
+                return command
+            if self._task_scheduler_bridge is None:
+                return self._store.complete_task_command(
+                    command["uuid"],
+                    status="rejected",
+                    result={"reason": "scheduler_unavailable"},
+                )
+            try:
+                result = self._task_scheduler_bridge.step(
+                    task_uuid,
+                    target_node_uuid=target_node_uuid,
+                )
+            except TaskSchedulerBridgeError as error:
+                return self._store.complete_task_command(
+                    command["uuid"],
+                    status="rejected",
+                    result={"reason": str(error)},
+                )
+            return self._store.complete_task_command(
+                command["uuid"],
+                status="succeeded",
+                result=result,
+            )
+        except WorkflowError:
+            raise
+        except (StoreNotFound, StoreConflict, ValueError):
             raise WorkflowError("invalid_input") from None
 
     def create_device_action_run(
