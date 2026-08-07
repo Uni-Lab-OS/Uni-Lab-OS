@@ -5784,9 +5784,10 @@ class InventoryService:
     ) -> tuple[str, ...]:
         """Add missing executor Materials from the same ResourceTreeSet source.
 
-        Existing Inventory rows are durable truth and are never rewritten here.  The
-        ResourceTreeSet projection may only contribute a previously unseen device
-        identity; reusing a source node id with another Material UUID fails closed.
+        Existing Inventory rows are durable truth and are never rewritten here.  A
+        ResourceTreeSet projection may regenerate its runtime UUID while retaining
+        the same graph node, template and class; in that case the durable Material
+        UUID wins.  Other identity conflicts fail closed.
         """
 
         existing_by_source_node: dict[str, sqlite3.Row] = {}
@@ -5878,9 +5879,35 @@ class InventoryService:
             existing = existing_by_source_node.get(source_node_id)
             if existing is not None:
                 if existing["uuid"] != projected["uuid"]:
-                    raise MaterialConflict(
-                        "ResourceTreeSet device identity changed Material UUID"
+                    existing_meta = _stored_json_object(existing["meta_data"])
+                    existing_runtime_uuid = str(
+                        existing_meta.get("source_runtime_uuid") or ""
+                    ).strip()
+                    projected_runtime_uuid = str(
+                        projected["meta_data"].get("source_runtime_uuid") or ""
+                    ).strip()
+                    runtime_projection_regenerated = bool(
+                        existing_runtime_uuid
+                        and projected_runtime_uuid
+                        and existing_runtime_uuid != projected_runtime_uuid
                     )
+                    same_device_contract = bool(
+                        existing["resource_template_uuid"]
+                        == projected["resource_template_uuid"]
+                        and existing["class"] == projected["class"]
+                    )
+                    projected_uuid_owner = conn.execute(
+                        "SELECT uuid FROM material WHERE uuid = ?",
+                        (projected["uuid"],),
+                    ).fetchone()
+                    if (
+                        not runtime_projection_regenerated
+                        or not same_device_contract
+                        or projected_uuid_owner is not None
+                    ):
+                        raise MaterialConflict(
+                            "ResourceTreeSet device identity changed Material UUID"
+                        )
                 continue
             uuid_owner = conn.execute(
                 "SELECT meta_data FROM material WHERE uuid = ?",
