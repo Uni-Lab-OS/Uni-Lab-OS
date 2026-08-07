@@ -103,6 +103,7 @@ def _client(
     tmp_path: Any,
     *,
     with_scheduler: bool = False,
+    material_meta_data: dict[str, Any] | None = None,
 ) -> tuple[
     TestClient,
     WorkflowStore,
@@ -113,9 +114,10 @@ def _client(
     """装配带模板投影和设备物料解析器的本地工作流权威。
 
     参数：``tmp_path`` 是隔离 SQLite 文件的 pytest 临时目录。
-    ``with_scheduler`` 决定是否装配唯一公共任务调度桥。返回：HTTP 客户端、工作流
-    存储、动作模板 UUID，以及可选派发记录器和需要关闭的公共桥。异常：模板投影
-    或工作流组合错误原样传播。
+    ``with_scheduler`` 决定是否装配唯一公共任务调度桥；``material_meta_data``
+    可替换设备物料的明确部署来源元数据。返回：HTTP 客户端、工作流存储、动作
+    模板 UUID，以及可选派发记录器和需要关闭的公共桥。异常：模板投影或工作流
+    组合错误原样传播。
     """
 
     # ``store`` 同时保存模板、工作流任务（WorkflowTask）和工作流节点作业
@@ -144,7 +146,7 @@ def _client(
         return {
             "uuid": DEVICE_MATERIAL_UUID,
             "resource_template_uuid": DEVICE_RESOURCE_TEMPLATE_UUID,
-            "meta_data": {"edge_local_id": "contract-device"},
+            "meta_data": material_meta_data or {"edge_local_id": "contract-device"},
         }
 
     dispatcher: RecordingDispatcher | None = None
@@ -232,6 +234,40 @@ def test_device_action_run_creates_backend_shaped_task_and_job(tmp_path: Any) ->
         client.close()
         if bridge is not None:
             bridge.close()
+        store.close()
+
+
+def test_device_action_run_uses_resource_graph_device_identity(tmp_path: Any) -> None:
+    """资源图启动投影的部署设备 ID 可冻结为本地执行器身份。
+
+    参数：``tmp_path`` 是隔离工作流 SQLite 文件的 pytest 临时目录。返回：无；
+    断言库存权威（Inventory Authority）已证明来源为资源树时，设备单动作运行
+    （DeviceActionRun）使用 ``source_node_id`` 派发，不要求重复保存第二个身份
+    字段。异常：HTTP、持久化或调度异常原样传播。
+    """
+
+    client, store, template_uuid, dispatcher, bridge = _client(
+        tmp_path,
+        with_scheduler=True,
+        material_meta_data={
+            "source": "resource-tree-set",
+            "source_node_id": "contract-device",
+        },
+    )
+    assert dispatcher is not None
+    assert bridge is not None
+    try:
+        response = client.post(
+            "/api/v1/device-action-runs",
+            json=_request(template_uuid),
+        )
+
+        assert response.status_code == 201
+        assert response.json()["code"] == 0
+        assert dispatcher.dispatched[0]["device_id"] == "contract-device"
+    finally:
+        client.close()
+        bridge.close()
         store.close()
 
 
