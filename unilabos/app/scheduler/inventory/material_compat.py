@@ -1,20 +1,23 @@
-"""Edge inventory to the legacy HostNode material-query contract.
+"""OS 本地库存（Inventory）到旧 HostNode 物料查询合同的兼容投影。
 
-The inventory service deliberately stores normalized templates, instances,
-relations and contents.  HostNode consumers still expect a flat list of
-``ResourceDict``-shaped nodes.  This module is the compatibility seam between
-those two models; callers outside the microbackend should not need to know the
-inventory table layout.
+库存服务规范保存资源模板、物料实例、父关系、库位（Site）和运行内容；旧
+HostNode 调用方仍消费扁平 ``ResourceDict`` 行。本模块集中承担两个模型之间的
+只读兼容边界，微后端之外的调用方不需要了解库存表结构，也不能把兼容投影写回
+库存权威（Inventory Authority）。
 """
 
 from __future__ import annotations
 
 import json
+from collections.abc import Iterable
 from copy import deepcopy
-from typing import Any, Dict, Iterable, List, Optional
+from typing import Any, Dict, List, Optional
 
 from unilabos.app.scheduler.inventory.store import InventoryStore
-
+from unilabos.resources.plr_contract import (
+    SITE_NAME_BY_UUID_EXTRA_KEY,
+    SiteNameByUuid,
+)
 
 _RESOURCE_FIELDS = {
     "id",
@@ -102,6 +105,33 @@ def _canonical_material(
     )
 
 
+def _active_site_name_by_uuid(
+    store: InventoryStore,
+    material_uuid: str,
+) -> SiteNameByUuid:
+    """读取一个父物料直接拥有的有效库位（Site）名称映射。
+
+    参数说明：``store`` 是本地库存权威（Inventory Authority）只读查询接缝；
+    ``material_uuid`` 是拥有库位的父物料稳定身份。返回：按库位顺序生成的闭合
+    ``{site_uuid: local_name}`` 映射；无有效库位时明确返回空映射。
+
+    异常说明：数据库查询异常原样传播；查询以 ``material_uuid`` 和
+    ``deleted_at IS NULL`` 同时限制，禁止跨父物料或投影软删除库位。
+    """
+
+    # ``site_rows`` 仅含该父物料直接拥有且未软删除的库位事实。
+    site_rows = store.query_all(
+        "SELECT uuid,name FROM site "
+        "WHERE material_uuid=? AND deleted_at IS NULL "
+        "ORDER BY sort_order,create_time,uuid",
+        (material_uuid,),
+    )
+    return {
+        str(site_row["uuid"]): str(site_row["name"])
+        for site_row in site_rows
+    }
+
+
 def _canonical_pose(
     store: InventoryStore,
     material_uuid: str,
@@ -154,10 +184,22 @@ def _canonical_pose(
 def _node_from_instance(
     store: InventoryStore, instance: Dict[str, Any]
 ) -> Dict[str, Any]:
+    """把一个库存物料实例投影为旧 HostNode ``ResourceDict`` 行。
+
+    参数说明：``store`` 提供规范物料、库位和运行内容只读事实；``instance`` 是
+    当前兼容物料实例。返回：保留稳定物料身份、父关系和物理位置资源（PLR）
+    兼容字段的独立字典，其中 ``extra`` 始终含只读库位名称映射。
+
+    异常说明：数据库或模板数据无法读取时原样传播；模板携带的同名映射会被
+    权威库位事实覆盖，调用方不能通过模板注入伪造映射。
+    """
+
     template = store.get_template(str(instance.get("template_id") or ""))
     base = _resource_spec(template)
 
+    # ``edge_uuid`` 是当前物料在 OS 兼容投影中的稳定身份。
     edge_uuid = str(instance.get("edge_uuid") or "")
+    # ``material`` 是未删除的 Backend 形状规范物料事实。
     material = _canonical_material(store, edge_uuid) or {}
     material_config = _json_object(material.get("config", "{}"))
     material_data = _json_object(material.get("data", "{}"))
@@ -177,7 +219,13 @@ def _node_from_instance(
     data = deepcopy(data)
     extra = deepcopy(extra)
     config.update(material_config)
+    # 只读映射必须由库存权威重建；即使为空也覆盖模板中的任何同名值。
+    extra[SITE_NAME_BY_UUID_EXTRA_KEY] = _active_site_name_by_uuid(
+        store,
+        edge_uuid,
+    )
 
+    # ``relation`` 与 ``slot_id`` 是子物料当前设备局部挂载关系，不是父库位目录。
     relation = store.get_relation(edge_uuid)
     slot_id = str((relation or {}).get("slot_id") or "")
     if slot_id:
