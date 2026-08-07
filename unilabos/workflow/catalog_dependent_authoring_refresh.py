@@ -4,86 +4,89 @@ from __future__ import annotations
 
 from collections.abc import Callable, Iterable, Mapping
 
-_RETRYABLE_CATALOG_DIAGNOSTICS = frozenset(
-    {
-        "composite_child_not_found",
-        "composite_child_unapplied",
-    }
-)
 
+class CatalogAuthoringGenerationTracker:
+    """封装工作流创作（Authoring）最后编译目录代际的进程内状态。"""
 
-def recover_catalog_dependent_authoring_fixed_point(
-    *,
-    registrations: Iterable[Mapping[str, object]],
-    reconcile_source: Callable[[str], object],
-    load_authoring_record: Callable[[str], Mapping[str, object]],
-) -> None:
-    """把冷启动来源编译推进到组合工作流依赖固定点。
+    def __init__(self) -> None:
+        """建立没有历史目录基线的新进程追踪器。
 
-    参数：``registrations`` 是当前活动软件包目录（Package Catalog）代际的完整
-    工作流源码（Workflow Source）登记；``reconcile_source`` 强制按当前模板目录
-    编译一个来源；``load_authoring_record`` 读取本次编译提交后的创作记录。
-    返回：无；首轮编译全部来源，后续只重试仍因子工作流尚未进入当前目录而失败
-    的来源，直到没有待重试项或连续两轮待处理事实完全相同。
-    异常：回调异常原样传播，由工作流服务（WorkflowService）维持既有单项故障
-    隔离语义；循环最多执行“来源数 + 1”轮，不会因永久缺失子来源而无界重试。
-    """
+        参数：无。
+        返回：无；启动时不从数据库猜测旧进程使用的模板目录代际。
+        异常：无。
+        """
 
-    # ``workflow_uuids`` 保持持久注册顺序；首轮必须覆盖全部活动来源，不能只从
-    # 已有诊断反推，因为全新数据库尚未产生任何创作投影。
-    workflow_uuids = tuple(
-        str(registration["workflow_uuid"])
-        for registration in registrations
-    )
-    pending_workflow_uuids = workflow_uuids
-    # ``previous_pending_facts`` 是上一轮仍未解析的身份及诊断集合，用于识别永久
-    # 缺失，而非通过固定次数盲目重复同一确定性失败。
-    previous_pending_facts: tuple[tuple[str, tuple[str, ...]], ...] | None = None
-    for _pass_index in range(len(workflow_uuids) + 1):
-        if not pending_workflow_uuids:
-            return
-        current_pending_facts: list[tuple[str, tuple[str, ...]]] = []
-        for workflow_uuid in pending_workflow_uuids:
-            reconcile_source(workflow_uuid)
-            # ``authoring_record`` 是编译事务提交后的唯一诊断事实，不从异常消息或
-            # 测试编译器内部状态猜测依赖是否已经收敛。
-            authoring_record = load_authoring_record(workflow_uuid)
-            retryable_codes = _retryable_catalog_diagnostic_codes(authoring_record)
-            if retryable_codes:
-                current_pending_facts.append((workflow_uuid, retryable_codes))
-        frozen_pending_facts = tuple(current_pending_facts)
-        if not frozen_pending_facts or frozen_pending_facts == previous_pending_facts:
-            return
-        previous_pending_facts = frozen_pending_facts
-        pending_workflow_uuids = tuple(
-            workflow_uuid
-            for workflow_uuid, _diagnostic_codes in frozen_pending_facts
+        # ``compiled_fingerprints`` 按工作流稳定身份保存本进程已确认完成的最后
+        # 一次编译目录；它不是持久创作权威，重启后刻意为空。
+        self._compiled_fingerprints: dict[str, str] = {}
+
+    def requires_compile(
+        self,
+        workflow_uuid: str,
+        catalog_fingerprint: str,
+    ) -> bool:
+        """判断来源是否尚未按当前模板目录完成编译。
+
+        参数：``workflow_uuid`` 是工作流（Workflow）稳定身份；
+        ``catalog_fingerprint`` 是当前模板目录代际指纹。
+        返回：本进程没有该来源基线或指纹不同返回 ``True``，否则返回 ``False``。
+        异常：无；指纹格式由工作流服务的目录权威读取器先行验证。
+        """
+
+        return self._compiled_fingerprints.get(workflow_uuid) != catalog_fingerprint
+
+    def changed_from_known_generation(
+        self,
+        workflow_uuid: str,
+        catalog_fingerprint: str,
+    ) -> bool:
+        """判断当前目录是否不同于本进程已知前代。
+
+        参数：``workflow_uuid`` 是工作流稳定身份；``catalog_fingerprint`` 是当前
+        模板目录指纹。返回：只有已知前代存在且不同才为 ``True``；启动恢复没有
+        已知前代，不能伪报为目录变化。异常：无。
+        """
+
+        previous_fingerprint = self._compiled_fingerprints.get(workflow_uuid)
+        return (
+            previous_fingerprint is not None
+            and previous_fingerprint != catalog_fingerprint
         )
 
+    def record_compilation(
+        self,
+        workflow_uuid: str,
+        catalog_fingerprint: str | None,
+    ) -> None:
+        """记录成功编译代际或清除不适用的来源基线。
 
-def _retryable_catalog_diagnostic_codes(
-    authoring_record: Mapping[str, object],
-) -> tuple[str, ...]:
-    """读取仍可能随子工作流目录就绪而消失的诊断集合。
+        参数：``workflow_uuid`` 是工作流稳定身份；``catalog_fingerprint`` 是本次
+        编译结果使用的目录指纹，源码缺失或未装配编译器时传 ``None``。
+        返回：无；``None`` 会清除旧进程内记录，不创建虚假目录代际。
+        异常：无。
+        """
 
-    参数：``authoring_record`` 是工作流创作（Authoring）持久记录。
-    返回：排序去重后的可重试目录诊断码；记录没有相关错误时返回空元组。
-    异常：无；畸形诊断视为不可自动重试，继续由原创作投影公开。
-    """
+        if catalog_fingerprint is None:
+            self._compiled_fingerprints.pop(workflow_uuid, None)
+            return
+        self._compiled_fingerprints[workflow_uuid] = catalog_fingerprint
 
-    diagnostics = authoring_record.get("diagnostics")
-    if not isinstance(diagnostics, list):
-        return ()
-    # ``retryable_codes`` 只收录闭合集合内的错误码；语法或绑定错误不能因启动
-    # 固定点机制被无意义地重复编译。
-    retryable_codes = {
-        str(diagnostic.get("code"))
-        for diagnostic in diagnostics
-        if isinstance(diagnostic, Mapping)
-        and str(diagnostic.get("severity", "")).lower() == "error"
-        and diagnostic.get("code") in _RETRYABLE_CATALOG_DIAGNOSTICS
-    }
-    return tuple(sorted(retryable_codes))
+    @staticmethod
+    def source_signature(
+        file_signature: tuple[object, ...],
+        catalog_fingerprint: str | None,
+    ) -> tuple[object, ...]:
+        """组合文件身份与可选模板目录代际的监视签名。
+
+        参数：``file_signature`` 是规范源码文件世代；``catalog_fingerprint`` 是
+        已验证的当前模板目录指纹，未装配编译器时为 ``None``。
+        返回：无目录时原样返回文件签名，否则在尾部附加目录标记和指纹。
+        异常：无；不读取文件、数据库或编译器状态。
+        """
+
+        if catalog_fingerprint is None:
+            return file_signature
+        return (*file_signature, "catalog", catalog_fingerprint)
 
 
 def refresh_catalog_dependent_authoring(
@@ -130,6 +133,6 @@ def refresh_catalog_dependent_authoring(
 
 
 __all__ = [
-    "recover_catalog_dependent_authoring_fixed_point",
+    "CatalogAuthoringGenerationTracker",
     "refresh_catalog_dependent_authoring",
 ]

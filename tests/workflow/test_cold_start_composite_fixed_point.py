@@ -16,6 +16,8 @@ from unilabos.package_manager.workspace_runtime.activation import (
 from unilabos.workflow import composition
 from unilabos.workflow.composition import compose_local_workflow_template_runtime
 from unilabos.workflow.models import CandidateCompilation
+from unilabos.workflow.service import WorkflowService
+from unilabos.workflow.store import WorkflowStore
 
 from .test_c1_r2_static_expansion_contract import (
     CHILD_WORKFLOW_UUID as PUBLISHED_CHILD_WORKFLOW_UUID,
@@ -34,103 +36,6 @@ PARENT_WORKFLOW_UUID = "11111111-1111-4111-8111-111111111111"
 CHILD_WORKFLOW_UUID = "22222222-2222-4222-8222-222222222222"
 INITIAL_CATALOG_FINGERPRINT = f"sha256:{'a' * 64}"
 CHILD_READY_CATALOG_FINGERPRINT = f"sha256:{'b' * 64}"
-
-
-class ColdStartCompositeCompiler:
-    """模拟恢复回调使外部子合同目录事实前进的可控接缝。
-
-    本替身只验证固定点编排算法；它不表示普通子工作流源码编译可以发布子合同。
-    产品发布语义由本文件的真实 ``apply_authoring`` 回归单独证明。
-    """
-
-    compiler_version = "cold-start-fixed-point-v1"
-
-    def __init__(self) -> None:
-        """建立子合同尚不可用的冷启动目录。
-
-        参数：无。
-        返回：无；``compiled_workflow_uuids`` 记录实际编译顺序，
-        ``child_contract_available`` 表示测试外部目录是否已进入下一代际。
-        异常：无。
-        """
-
-        # ``compiled_workflow_uuids`` 是启动恢复实际访问的工作流身份顺序证据。
-        self.compiled_workflow_uuids: list[str] = []
-        # ``child_contract_available`` 只模拟恢复回调期间外部目录事实前进；普通
-        # 工作流源码编译不具有发布权威。
-        self.child_contract_available = False
-
-    @property
-    def template_catalog_fingerprint(self) -> str:
-        """返回当前模板目录（Template Catalog）代际指纹。
-
-        参数：无。
-        返回：子工作流合同尚不可用时返回初始指纹，可用后返回下一代指纹。
-        异常：无。
-        """
-
-        if self.child_contract_available:
-            return CHILD_READY_CATALOG_FINGERPRINT
-        return INITIAL_CATALOG_FINGERPRINT
-
-    def compile(
-        self,
-        *,
-        workflow_uuid: str,
-        workflow_revision: int,
-        python_source: str,
-        source_uri: str,
-        applied_graph: dict[str, Any],
-    ) -> CandidateCompilation:
-        """按冷启动顺序编译父、子工作流源码。
-
-        参数：``workflow_uuid`` 与 ``workflow_revision`` 标识当前工作流；
-        ``python_source`` 与 ``source_uri`` 是已授权源码及来源；``applied_graph``
-        是当前应用图。返回：父来源过早编译时返回
-        ``composite_child_not_found``；处理子身份时测试外部目录前进，后续父来源
-        返回可信候选。该副作用不是产品编译器语义。
-        异常：未知工作流身份触发测试断言失败。
-        """
-
-        # 这些编译上下文字段在本测试只作为公开接口形状，不参与目录模拟。
-        del workflow_revision, source_uri
-        assert workflow_uuid in {PARENT_WORKFLOW_UUID, CHILD_WORKFLOW_UUID}
-        self.compiled_workflow_uuids.append(workflow_uuid)
-        if (
-            workflow_uuid == PARENT_WORKFLOW_UUID
-            and not self.child_contract_available
-        ):
-            return CandidateCompilation(
-                diagnostics=[
-                    {
-                        "severity": "error",
-                        "code": "composite_child_not_found",
-                        "message": "子工作流 material_transfer 尚未进入发布目录",
-                    }
-                ],
-                compiler_version=self.compiler_version,
-                template_catalog_fingerprint=self.template_catalog_fingerprint,
-            )
-        if workflow_uuid == CHILD_WORKFLOW_UUID:
-            self.child_contract_available = True
-        return CandidateCompilation(
-            diagnostics=[],
-            graph=applied_graph,
-            normalized_python_source=python_source,
-            source_map=[],
-            changeset={
-                "kind": "source_only",
-                "created_node_uuids": [],
-                "updated_node_uuids": [],
-                "deleted_node_uuids": [],
-                "created_edge_uuids": [],
-                "updated_edge_uuids": [],
-                "deleted_edge_uuids": [],
-                "reserved_metadata_changed": False,
-            },
-            compiler_version=self.compiler_version,
-            template_catalog_fingerprint=self.template_catalog_fingerprint,
-        )
 
 
 class MutableCatalogCompiler:
@@ -247,42 +152,6 @@ def _write_parent_before_child_package(package_root: Path) -> None:
         "    source: cold_start_lab/workflows/material_transfer.py\n",
         encoding="utf-8",
     )
-
-
-def test_fresh_database_retries_parent_after_child_catalog_becomes_available(
-    tmp_path: Path,
-) -> None:
-    """全新数据库冷启动编排必须把可前进目录回调推进到依赖固定点。
-
-    参数：``tmp_path`` 隔离真实包目录与全新 ``workflow_history.db``。
-    返回：无；断言父工作流先失败、子合同随后可用、父工作流同次启动再次编译并
-    离开 ``draft_invalid``。本测试只覆盖固定点编排，不把普通子源码编译当成
-    发布；真实发布另由 ``apply_authoring`` 回归覆盖。异常：若启动仍只做单轮恢复，本测试以
-    ``composite_child_not_found`` 保留状态失败。
-    """
-
-    # ``package_root`` 是公开组合根唯一允许发现源码的可编辑包目录。
-    package_root = tmp_path / "workspace"
-    _write_parent_before_child_package(package_root)
-    # ``compiler`` 模拟父来源先执行、随后外部目录事实在恢复回调间前进的顺序。
-    compiler = ColdStartCompositeCompiler()
-
-    service = composition.compose_workflow_runtime(
-        tmp_path / "runtime",
-        compiler=compiler,
-        editable_package_roots=(package_root,),
-        start_source_monitor=False,
-    )
-
-    # ``parent_authoring`` 是服务公开后的最终工作流创作（Authoring）投影。
-    parent_authoring = service.get_authoring(PARENT_WORKFLOW_UUID)
-    assert parent_authoring["state"] == "unapplied_source_only"
-    assert parent_authoring["draft"]["diagnostics"] == []
-    assert compiler.compiled_workflow_uuids == [
-        PARENT_WORKFLOW_UUID,
-        CHILD_WORKFLOW_UUID,
-        PARENT_WORKFLOW_UUID,
-    ]
 
 
 def test_catalog_generation_change_recompiles_unchanged_workspace_source(
@@ -465,9 +334,60 @@ def test_restart_recompiles_persisted_parent_failure_against_current_catalog(
         )
         restarted_parent = restarted.get_authoring(PUBLISHED_PARENT_WORKFLOW_UUID)
 
+        # ``parent_recovery_causes`` 只观察父工作流本次及历史创作事件；重启没有
+        # 已知本进程前代，必须记为恢复而不是伪造一次目录变化。
+        parent_recovery_causes = [
+            event["data"]["cause"]
+            for event in restarted.list_events(after_sequence=0)["items"]
+            if event["data"].get("workflow_uuid")
+            == PUBLISHED_PARENT_WORKFLOW_UUID
+        ]
+
         assert restarted_parent["state"] == "unapplied_graph"
         assert restarted_parent["candidate"] is not None
         assert restarted_parent["draft"]["diagnostics"] == []
+        assert parent_recovery_causes[-1] == "recovered"
     finally:
         composition.reset_workflow_service_for_test()
         inventory_store.close()
+
+
+def test_missing_source_recovery_does_not_require_template_catalog(
+    tmp_path: Path,
+) -> None:
+    """缺失源码恢复不得要求尚未装配的模板目录（Template Catalog）。
+
+    参数：``tmp_path`` 隔离工作流 SQLite 与空包目录。
+    返回：无；无编译器服务强制恢复缺失工作流源码（Workflow Source）后公开
+    ``draft_missing``，且不会伪造目录代际。异常：若恢复尾部仍调用
+    ``_catalog_fingerprint``，测试以 ``template_catalog_unavailable`` 失败。
+    """
+
+    # ``store`` 与 ``service`` 模拟仅承担来源授权、尚未装配创作编译器的启动阶段。
+    store = WorkflowStore(tmp_path / "workflow.db")
+    service = WorkflowService(store)
+    package_root = tmp_path / "missing_source_lab"
+    package_root.mkdir()
+    service.create_workflow(
+        workflow_uuid=PARENT_WORKFLOW_UUID,
+        name="缺失源码恢复",
+        tags=[],
+        description=None,
+        meta_data={},
+    )
+    service.replace_active_editable_source_authorization(
+        workflow_uuid=PARENT_WORKFLOW_UUID,
+        package_id="missing_source_lab",
+        package_root=package_root,
+        relative_path="workflows/missing.py",
+    )
+    try:
+        recovered = service.reconcile_registered_source(
+            PARENT_WORKFLOW_UUID,
+            force_compile=True,
+        )
+    finally:
+        service.close()
+
+    assert recovered["state"] == "draft_missing"
+    assert recovered["candidate"] is None
