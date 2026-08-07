@@ -1025,8 +1025,10 @@ class InventoryService:
         """Resolve a deployment resource id to one visible durable Material."""
 
         del uow
-        if not isinstance(resource_id, str) or not resource_id.strip() or (
-            resource_id != resource_id.strip()
+        if (
+            not isinstance(resource_id, str)
+            or not resource_id.strip()
+            or (resource_id != resource_id.strip())
         ):
             raise MaterialInvalidInput("resource_id must be a non-empty string")
         try:
@@ -5772,8 +5774,161 @@ class InventoryService:
             "snapshot_sequence": int(sequence_row["value"]),
         }
 
+    def _reconcile_resource_graph_devices(
+        self,
+        conn: sqlite3.Connection,
+        *,
+        source_id: str,
+        materials: list[Any],
+        now_iso: str,
+    ) -> tuple[str, ...]:
+        """Add missing executor Materials from the same ResourceTreeSet source.
+
+        Existing Inventory rows are durable truth and are never rewritten here.  The
+        ResourceTreeSet projection may only contribute a previously unseen device
+        identity; reusing a source node id with another Material UUID fails closed.
+        """
+
+        existing_by_source_node: dict[str, sqlite3.Row] = {}
+        for row in conn.execute(
+            """
+            SELECT * FROM material
+            WHERE material_kind = 'device'
+              AND json_extract(meta_data, '$.source') = 'resource-tree-set'
+              AND json_extract(meta_data, '$.source_graph') = ?
+            ORDER BY uuid
+            """,
+            (source_id,),
+        ).fetchall():
+            meta_data = _stored_json_object(row["meta_data"])
+            source_node_id = str(meta_data.get("source_node_id") or "").strip()
+            if not source_node_id:
+                raise MaterialConflict(
+                    "stored ResourceTreeSet device identity is incomplete"
+                )
+            if source_node_id in existing_by_source_node:
+                raise MaterialConflict(
+                    "stored ResourceTreeSet device identity is ambiguous"
+                )
+            existing_by_source_node[source_node_id] = row
+
+        projected_by_source_node: dict[str, dict[str, Any]] = {}
+        projected_uuid_to_source_node: dict[str, str] = {}
+        for raw in materials:
+            if not isinstance(raw, Mapping):
+                raise MaterialInvalidInput("bootstrap material must be an object")
+            if str(raw.get("material_kind") or "") != "device":
+                continue
+            material_uuid = _canonical_uuid(raw.get("uuid"), "material.uuid")
+            template_uuid = _canonical_uuid(
+                raw.get("resource_template_uuid"),
+                "material.resource_template_uuid",
+            )
+            if template_uuid not in self._resource_templates:
+                raise MaterialInvalidInput(
+                    "bootstrap resource_template_uuid is not registered"
+                )
+            meta_data = _json_object(raw.get("meta_data"), "meta_data")
+            source_node_id = str(meta_data.get("source_node_id") or "").strip()
+            if (
+                meta_data.get("source") != "resource-tree-set"
+                or meta_data.get("source_graph") != source_id
+                or not source_node_id
+            ):
+                raise MaterialInvalidInput(
+                    "bootstrap device source identity is invalid"
+                )
+            if source_node_id in projected_by_source_node:
+                raise MaterialConflict("bootstrap device source_node_id must be unique")
+            previous_source_node = projected_uuid_to_source_node.get(material_uuid)
+            if previous_source_node is not None:
+                raise MaterialConflict("bootstrap Material UUID must be unique")
+            projected_uuid_to_source_node[material_uuid] = source_node_id
+            name = str(raw.get("name") or "").strip()
+            klass = str(raw.get("class") or "").strip()
+            if not name or not klass:
+                raise MaterialInvalidInput(
+                    "bootstrap Material name/class must not be blank"
+                )
+            description = raw.get("description")
+            if description is not None and not isinstance(description, str):
+                raise MaterialInvalidInput(
+                    "bootstrap Material description must be string or null"
+                )
+            parent_value = raw.get("parent_uuid")
+            projected_by_source_node[source_node_id] = {
+                "uuid": material_uuid,
+                "resource_template_uuid": template_uuid,
+                "parent_uuid": (
+                    _canonical_uuid(parent_value, "material.parent_uuid")
+                    if parent_value is not None
+                    else None
+                ),
+                "class": klass,
+                "barcode": str(raw.get("barcode") or ""),
+                "name": name,
+                "description": description,
+                "meta_data": meta_data,
+                "config": _json_object(raw.get("config"), "config"),
+                "data": _json_object(raw.get("data"), "data"),
+            }
+
+        added: list[str] = []
+        for source_node_id, projected in projected_by_source_node.items():
+            existing = existing_by_source_node.get(source_node_id)
+            if existing is not None:
+                if existing["uuid"] != projected["uuid"]:
+                    raise MaterialConflict(
+                        "ResourceTreeSet device identity changed Material UUID"
+                    )
+                continue
+            uuid_owner = conn.execute(
+                "SELECT meta_data FROM material WHERE uuid = ?",
+                (projected["uuid"],),
+            ).fetchone()
+            if uuid_owner is not None:
+                raise MaterialConflict(
+                    "ResourceTreeSet device Material UUID is already in use"
+                )
+            parent_uuid = projected["parent_uuid"]
+            if parent_uuid is not None:
+                parent = conn.execute(
+                    "SELECT uuid FROM material WHERE uuid = ? AND deleted_at IS NULL",
+                    (parent_uuid,),
+                ).fetchone()
+                if parent is None or parent_uuid == projected["uuid"]:
+                    raise MaterialInvalidInput(
+                        "bootstrap device parent Material is missing"
+                    )
+            conn.execute(
+                """
+                INSERT INTO material(
+                    uuid, create_time, update_time, deleted_at,
+                    description, meta_data, resource_template_uuid,
+                    parent_uuid, class, barcode, name, config, data,
+                    disposition, material_kind, version
+                ) VALUES (?, ?, ?, NULL, ?, ?, ?, ?, ?, ?, ?, ?, ?, NULL, 'device', 1)
+                """,
+                (
+                    projected["uuid"],
+                    now_iso,
+                    now_iso,
+                    projected["description"],
+                    json.dumps(projected["meta_data"]),
+                    projected["resource_template_uuid"],
+                    parent_uuid,
+                    projected["class"],
+                    projected["barcode"],
+                    projected["name"],
+                    json.dumps(projected["config"]),
+                    json.dumps(projected["data"]),
+                ),
+            )
+            added.append(projected["uuid"])
+        return tuple(added)
+
     def bootstrap_resource_graph(self, command: Mapping[str, Any]) -> dict[str, Any]:
-        """仅在空库内原子导入一次 ResourceTreeSet；既有 durable truth 永不覆盖。"""
+        """首次导入 ResourceTreeSet，并幂等补齐同源新增的 device Material。"""
 
         if not isinstance(command, Mapping):
             raise MaterialInvalidInput("resource graph bootstrap must be an object")
@@ -5803,13 +5958,64 @@ class InventoryService:
                     "SELECT meta_value FROM lab_meta WHERE meta_key = ?",
                     ("resource_graph_bootstrap_fingerprint",),
                 ).fetchone()
+                stored_source_row = conn.execute(
+                    "SELECT meta_value FROM lab_meta WHERE meta_key = ?",
+                    ("resource_graph_bootstrap_source",),
+                ).fetchone()
                 stored = str(stored_row["meta_value"]) if stored_row else ""
+                stored_source = (
+                    str(stored_source_row["meta_value"]) if stored_source_row else ""
+                )
                 if existing:
+                    if stored_source != source_id:
+                        return {
+                            "status": "preserved",
+                            "source_id": source_id,
+                            "fingerprint": stored or None,
+                            "material_count": existing,
+                        }
+                    if stored == fingerprint:
+                        return {
+                            "status": "unchanged",
+                            "source_id": source_id,
+                            "fingerprint": stored,
+                            "material_count": existing,
+                        }
+                    added_device_uuids = self._reconcile_resource_graph_devices(
+                        conn,
+                        source_id=source_id,
+                        materials=materials,
+                        now_iso=now_iso,
+                    )
+                    conn.execute(
+                        """
+                        UPDATE lab_meta SET meta_value = ?
+                        WHERE meta_key = 'resource_graph_bootstrap_fingerprint'
+                        """,
+                        (fingerprint,),
+                    )
+                    material_count = existing + len(added_device_uuids)
+                    if added_device_uuids:
+                        self._emit(
+                            conn,
+                            now_ms,
+                            "material_graph",
+                            source_id,
+                            1,
+                            "material_graph.devices_reconciled",
+                            {
+                                "source_id": source_id,
+                                "fingerprint": fingerprint,
+                                "added_device_uuids": list(added_device_uuids),
+                                "material_count": material_count,
+                            },
+                        )
                     return {
-                        "status": "unchanged" if stored == fingerprint else "preserved",
+                        "status": "reconciled",
                         "source_id": source_id,
-                        "fingerprint": stored or None,
-                        "material_count": existing,
+                        "fingerprint": fingerprint,
+                        "material_count": material_count,
+                        "added_device_count": len(added_device_uuids),
                     }
 
                 material_ids: set[str] = set()
