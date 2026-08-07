@@ -950,18 +950,25 @@ class WorkflowService:
                 workflow_uuid=workflow_uuid,
                 python_source=python_source,
             )
-            try:
-                self._atomic_write(
-                    registration,
-                    encoded,
-                    expected_hash=current_hash,
-                )
-            except OSError:
-                raise WorkflowError("internal_error") from None
-            source = self._read_source(registration)
-            assert source is not None
-            if source["draft_hash"] != _sha256(encoded):
-                raise WorkflowConflict("draft_hash_conflict")
+            next_hash = _sha256(encoded)
+            if current_hash == next_hash:
+                # 同字节保存不替换权威文件；仍重新读取、编译并签发候选。
+                source = self._read_source(registration)
+                if source is None or source["draft_hash"] != next_hash:
+                    raise WorkflowConflict("draft_hash_conflict")
+            else:
+                try:
+                    self._atomic_write(
+                        registration,
+                        encoded,
+                        expected_hash=current_hash,
+                    )
+                except OSError:
+                    raise WorkflowError("internal_error") from None
+                source = self._read_source(registration)
+                assert source is not None
+                if source["draft_hash"] != next_hash:
+                    raise WorkflowConflict("draft_hash_conflict")
             applied_graph = self.get_graph(workflow_uuid)
             compilation = self._compile(
                 workflow=workflow,
