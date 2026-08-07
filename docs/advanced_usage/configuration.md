@@ -827,22 +827,18 @@ export OTEL_TRACES_SAMPLER_ARG=0.25
 unilab ...
 ```
 
-通过公网 OTLP/HTTP 接入时，将 endpoint 指向 HTTP collector 根地址并显式选择协议：
+本地开发通过 Docker Desktop 中的 SigNoz 接入时，将 endpoint 指向宿主机发布的
+OTLP/HTTP collector，并显式选择协议：
 
 ```bash
-export OTEL_EXPORTER_OTLP_ENDPOINT=http://115.190.137.109:30158
+export OTEL_EXPORTER_OTLP_ENDPOINT=http://127.0.0.1:4318
 export OTEL_EXPORTER_OTLP_PROTOCOL=http/protobuf
+export OTEL_EXPORTER_OTLP_INSECURE=true
 ```
 
-`xiongyanfei` 命名空间的公网 Service 清单位于
-`deploy/kubernetes-xiongyanfei/signoz-otel-nodeport.yaml`，可重复执行：
-
-```bash
-kubectl apply -f deploy/kubernetes-xiongyanfei/signoz-otel-nodeport.yaml
-```
-
-它暴露 OTLP/gRPC `30157` 和 OTLP/HTTP `30158`。当前开发端统一使用 HTTP 端口；公网
-collector 不带应用层认证，应在云防火墙或安全组中仅允许可信开发出口 IP。
+SigNoz 管理界面位于 `http://localhost:8080`，OTLP/gRPC 和 OTLP/HTTP 分别监听
+`localhost:4317` 与 `localhost:4318`。Electron 一键启动 Edge 时会自动注入以上
+OTLP/HTTP 配置。
 
 需要认证 header 时使用运行环境的 secret 注入 `OTEL_EXPORTER_OTLP_HEADERS`，不要写入配置文件、日志或版本控制。也可在 `local_config.py` 的 `OTelConfig` 中配置 `enabled`、`endpoint`、`logs_enabled`、`logs_endpoint`、`service_name`、采样率和批处理参数；环境变量优先。设置 `UNILABOS_OTEL_LOGS_ENABLED=false` 或 `OTEL_LOGS_EXPORTER=none` 可只保留 traces。
 
@@ -869,6 +865,9 @@ HTTP 路由模板 server span / ws.receive
 ```
 
 启用观测后，现有文本日志会自动附加 `trace_id` 和 `span_id`，同时作为 OTLP LogRecord 写入 SigNoz，可按 `service.name=uni-lab-edge` 关联检索。
+Electron 直连 Edge 时，REST 与 SSE 使用 W3C `traceparent` 请求头，设备状态 WebSocket
+握手使用同名查询参数；CORS 已放行 `traceparent`/`tracestate`。Edge server span 会
+继承该远程上下文，因此可以在 SigNoz 中按同一个 Trace ID 查看请求与后续调度链路。
 
 ## 相关文档
 

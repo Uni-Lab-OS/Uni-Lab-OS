@@ -302,6 +302,24 @@ def test_active_otel_handler_can_attach_to_non_propagating_comm_logger():
     assert [record.getMessage() for record in emitted] == ["websocket connected"]
 
 
+def test_edge_cors_allows_w3c_trace_context_headers():
+    from fastapi.middleware.cors import CORSMiddleware
+
+    from unilabos.app.scheduler.api import create_app
+
+    app = create_app()
+    cors = next(
+        middleware
+        for middleware in app.user_middleware
+        if middleware.cls is CORSMiddleware
+    )
+    allowed = {str(value).lower() for value in cors.kwargs["allow_headers"]}
+    exposed = {str(value).lower() for value in cors.kwargs["expose_headers"]}
+
+    assert {"traceparent", "tracestate"} <= allowed
+    assert {"trace_id", "span_id"} <= exposed
+
+
 def test_context_propagates_across_carrier_and_thread(recorder):
     def make_child():
         with tracing.span("thread.child") as child_span:

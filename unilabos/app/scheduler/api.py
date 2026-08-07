@@ -485,7 +485,14 @@ def create_app(
         CORSMiddleware,
         allow_origins=["*"],
         allow_methods=["GET", "POST", "PUT", "DELETE", "OPTIONS"],
-        allow_headers=["Content-Type", "Accept"],
+        allow_headers=[
+            "Content-Type",
+            "Accept",
+            "Last-Event-ID",
+            "traceparent",
+            "tracestate",
+        ],
+        expose_headers=["trace_id", "span_id"],
     )
     app.state.scheduler = scheduler or EdgeScheduler(monitor=monitor_bus)
     app.state.device_state = device_state

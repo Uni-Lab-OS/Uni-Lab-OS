@@ -244,7 +244,23 @@ async def broadcast_status_page_data():
 @api.websocket("/ws/device_status")
 async def websocket_device_status(websocket: WebSocket):
     """WebSocket端点，用于实时获取设备状态"""
-    await websocket.accept()
+    from unilabos.utils.tracing import extract_trace_context, span
+
+    carrier = {
+        key: value
+        for key in ("traceparent", "tracestate")
+        if (value := websocket.query_params.get(key))
+    }
+    with span(
+        "WS CONNECT /api/v1/ws/device_status",
+        attributes={
+            "http.route": "/api/v1/ws/device_status",
+            "network.protocol.name": "websocket",
+        },
+        kind="server",
+        parent_context=extract_trace_context(carrier),
+    ):
+        await websocket.accept()
     active_connections.add(websocket)
     try:
         while True:

@@ -38,7 +38,15 @@ app.add_middleware(
     allow_origins=["*"],
     allow_credentials=True,
     allow_methods=["GET", "POST", "PUT", "DELETE", "PATCH", "OPTIONS"],
-    allow_headers=["Authorization", "Content-Type", "Accept", "Last-Event-ID"],
+    allow_headers=[
+        "Authorization",
+        "Content-Type",
+        "Accept",
+        "Last-Event-ID",
+        "traceparent",
+        "tracestate",
+    ],
+    expose_headers=["trace_id", "span_id"],
 )
 
 
