@@ -150,6 +150,11 @@ class EdgeScheduler:
         # 生命周期监听器仅承载标准 Task/Job 兼容回写，不成为第二个状态权威。
         self._job_pre_dispatch_listeners: List[Callable[[Dict[str, Any]], None]] = []
         self._job_finished_listeners: List[Callable[[str, bool, Any, str], None]] = []
+        # 派发门控在消耗物料和写派发意图之前读取标准任务的持久控制权威。
+        # 返回 False 只跳过当前候选节点，不改变旧调度器的 DAG 状态。
+        self._workflow_dispatch_gate_listeners: List[
+            Callable[[str, str], bool]
+        ] = []
         # 准入重试监听器把尚未注册为旧调度运行的来源受阻任务接到同一个公开
         # 重排触发点；监听器本身仍由工作流任务桥拥有。
         self._admission_retry_listeners: List[Callable[[], None]] = []
@@ -223,6 +228,30 @@ class EdgeScheduler:
 
         self._job_pre_dispatch_listeners.append(listener)
 
+    def add_workflow_dispatch_gate(
+        self,
+        listener: Callable[[str, str], bool],
+    ) -> None:
+        """注册物理派发门控；参数是工作流任务身份和候选节点身份。
+
+        返回无。任一门控返回 ``False`` 时当前候选保持就绪；异常原样传播并阻止
+        本轮派发，避免控制事实不可读时误操作真实设备。
+        """
+
+        self._workflow_dispatch_gate_listeners.append(listener)
+
+    def remove_workflow_dispatch_gate(
+        self,
+        listener: Callable[[str, str], bool],
+    ) -> None:
+        """幂等移除此前注册的物理派发门控。"""
+
+        self._workflow_dispatch_gate_listeners = [
+            current
+            for current in self._workflow_dispatch_gate_listeners
+            if current != listener
+        ]
+
     def remove_job_pre_dispatch_listener(
         self,
         listener: Callable[[Dict[str, Any]], None],
@@ -266,6 +295,14 @@ class EdgeScheduler:
 
         for listener in tuple(self._job_pre_dispatch_listeners):
             listener(dict(dispatching))
+
+    def _workflow_dispatch_allowed(self, workflow_id: str, node_id: str) -> bool:
+        """读取全部派发门控；无监听器的遗留工作流保持原有行为。"""
+
+        return all(
+            listener(workflow_id, node_id)
+            for listener in tuple(self._workflow_dispatch_gate_listeners)
+        )
 
     def _notify_job_finished(
         self,
@@ -712,6 +749,14 @@ class EdgeScheduler:
                     sorted(lock_keys & held_resource_locks),
                     task.workflow_id,
                 )
+                continue
+
+            # 门控必须位于所有就绪/锁判断之后、任何物料消费和物理派发之前。
+            # step 许可因此只会被真正可派发的一个节点消费。
+            if not self._workflow_dispatch_allowed(
+                task.workflow_id,
+                task.node.id,
+            ):
                 continue
 
             # 节点开始：预留 → FIFO lot 消费 + 实例 deploy（同一 SQLite 事务，幂等）

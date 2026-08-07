@@ -79,6 +79,7 @@ _ERRORS = {
     "invalid_input": (400, "提交内容格式不正确"),
     "not_found": (404, "请求的资源不存在"),
     "conflict": (409, "资源已发生冲突，请刷新后重试"),
+    "invalid_transition": (409, "当前工作流任务状态不接受该命令"),
     "workflow_not_found": (404, "工作流不存在或已被删除"),
     "draft_hash_conflict": (
         409,
@@ -260,6 +261,11 @@ class WorkflowTaskSchedulerBridge(Protocol):
         参数：``task`` 是标准工作流任务（WorkflowTask）投影。返回：同步推进后的
         任务/作业聚合。异常：编译、准入或派发前投影失败时由实现抛稳定桥接错误。
         """
+
+        ...
+
+    def command(self, command: dict[str, Any]) -> dict[str, Any]:
+        """应用持久任务命令并驱动调度运行收敛。"""
 
         ...
 
@@ -689,6 +695,76 @@ class WorkflowService:
     def list_workflow_node_jobs(self, task_uuid: str) -> List[Dict[str, Any]]:
         identity = self.get_workflow_task(task_uuid)["uuid"]
         return self._store.list_jobs(identity)
+
+    def create_workflow_task_command(
+        self,
+        task_uuid: str,
+        *,
+        command_type: str,
+        target_node_uuid: Optional[str],
+        idempotency_key: str,
+        description: Optional[str],
+        meta_data: Optional[Dict[str, Any]],
+    ) -> Dict[str, Any]:
+        """创建并同步应用一个工作流任务控制命令。
+
+        参数：``task_uuid`` 是父任务身份；其余字段对应 Backend 命令 DTO。返回：
+        持久命令投影。异常：非法输入、任务终态、幂等冲突和本地调度失败分别映射
+        为稳定业务错误；同一幂等键可重放，以便上次重排失败后再次推进。
+        """
+
+        try:
+            task_identity = validate_uuid(task_uuid)
+        except ValueError:
+            raise WorkflowError("invalid_input") from None
+        task = self.get_workflow_task(task_identity)
+        if task["status"] in {"succeeded", "failed", "canceled", "timeout"}:
+            raise WorkflowError("invalid_transition")
+        if command_type not in {"step", "pause", "resume", "cancel"}:
+            raise WorkflowError("invalid_input")
+        if command_type == "step" and task["run_mode"] != "step":
+            raise WorkflowError("invalid_transition")
+        if command_type != "step" and target_node_uuid is not None:
+            raise WorkflowError("invalid_input")
+        if target_node_uuid is not None:
+            try:
+                target_node_uuid = validate_uuid(target_node_uuid)
+            except ValueError:
+                raise WorkflowError("invalid_input") from None
+        try:
+            idempotency_key = idempotency_key.strip()
+        except AttributeError:
+            raise WorkflowError("invalid_input") from None
+        if not idempotency_key or len(idempotency_key.encode("utf-8")) > 255:
+            raise WorkflowError("invalid_input")
+        try:
+            normalized_meta_data = normalize_json_object(meta_data)
+        except ValueError:
+            raise WorkflowError("invalid_input") from None
+        try:
+            command, created = self._store.create_task_command(
+                command_uuid=str(uuid4()),
+                task_uuid=task_identity,
+                command_type=command_type,
+                target_node_uuid=target_node_uuid,
+                idempotency_key=idempotency_key,
+                description=self._optional_text(description),
+                meta_data=normalized_meta_data,
+            )
+            if not created and (
+                command["type"] != command_type
+                or command.get("target_node_uuid") != target_node_uuid
+            ):
+                raise WorkflowConflict("conflict")
+            if self._task_scheduler_bridge is None:
+                return command
+            return self._task_scheduler_bridge.command(command)
+        except TaskSchedulerBridgeError:
+            raise WorkflowError("internal_error") from None
+        except StoreNotFound:
+            raise WorkflowError("not_found") from None
+        except StoreConflict:
+            raise WorkflowError("invalid_transition") from None
 
     def list_workflow_task_runtime_events(
         self,

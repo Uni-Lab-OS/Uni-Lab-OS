@@ -188,7 +188,16 @@ class TaskRuntimeProjection:
             aggregate = self._aggregate(connection, task_uuid)
             task_status = aggregate["task"]["status"]
             job_statuses = {job["status"] for job in aggregate["jobs"]}
-            if task_status == "pending" and job_statuses == {"pending"}:
+            if task_status == "pending" and all(
+                job["status"] == "pending"
+                or (
+                    job["status"] == "succeeded"
+                    and job.get("executor_kind") == "material_source"
+                )
+                for job in aggregate["jobs"]
+            ):
+                # 单步任务会先同步完成协调器所有的 MaterialSource，再由派发门控
+                # 保持普通动作 pending；父任务要到首次真实派发时才进入 running。
                 return aggregate
             # 协调器所有的物料来源解析作业可能已经成功；它不属于设备在途状态，
             # 但不应阻止普通动作提交后的任务聚合校验。

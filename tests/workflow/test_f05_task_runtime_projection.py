@@ -192,6 +192,38 @@ def test_material_source_admission_projects_typed_result_atomically(
     assert jobs_by_uuid[action_job_uuid]["status"] == "pending"
 
 
+def test_step_submission_accepts_completed_sources_before_first_action_dispatch(
+    store: WorkflowStore,
+) -> None:
+    """单步任务完成来源准入后仍可保持 pending，等待首次持久 step 许可。"""
+
+    _seed_material_source_task(store, with_action=True)
+    projection = _projection(store)
+    binding = {
+        "uuid": "50000000-0000-4000-8000-000000000001",
+        "resource_template_uuid": "60000000-0000-4000-8000-000000000001",
+    }
+    with store.transaction() as connection:
+        connection.execute(
+            "UPDATE workflow_task SET run_mode = 'step', control_status = 'paused' "
+            "WHERE uuid = ?",
+            (TASK_UUID,),
+        )
+    projection.project_material_source_admission(
+        TASK_UUID,
+        {NODE_UUIDS[0]: binding},
+    )
+
+    observed = projection.project_submission(TASK_UUID, "running")
+
+    assert observed["task"]["status"] == "pending"
+    assert observed["task"]["control_status"] == "paused"
+    assert [job["status"] for job in observed["jobs"]] == [
+        "succeeded",
+        "pending",
+    ]
+
+
 def test_running_admission_replay_repairs_implicit_passthrough_binding(
     store: WorkflowStore,
 ) -> None:

@@ -232,6 +232,47 @@ CREATE INDEX IF NOT EXISTS ix_workflow_task_workflow
 CREATE INDEX IF NOT EXISTS ix_workflow_task_status
     ON workflow_task(status);
 
+CREATE TABLE IF NOT EXISTS workflow_task_command (
+    uuid TEXT PRIMARY KEY,
+    create_time TEXT NOT NULL,
+    update_time TEXT NOT NULL,
+    deleted_at TEXT,
+    description TEXT,
+    meta_data TEXT NOT NULL DEFAULT '{}' CHECK (json_valid(meta_data)),
+    workflow_task_uuid TEXT NOT NULL,
+    type TEXT NOT NULL CHECK (type IN ('step', 'pause', 'resume', 'cancel')),
+    target_node_uuid TEXT,
+    idempotency_key TEXT NOT NULL,
+    status TEXT NOT NULL
+        CHECK (status IN ('pending', 'succeeded', 'rejected')),
+    result TEXT NOT NULL DEFAULT '{}' CHECK (json_valid(result)),
+    trace_context TEXT NOT NULL DEFAULT '{}' CHECK (json_valid(trace_context)),
+    consumed_at TEXT,
+    FOREIGN KEY(workflow_task_uuid) REFERENCES workflow_task(uuid) ON DELETE CASCADE
+);
+CREATE UNIQUE INDEX IF NOT EXISTS ux_workflow_task_command_idempotency_active
+    ON workflow_task_command(workflow_task_uuid, idempotency_key)
+    WHERE deleted_at IS NULL;
+CREATE INDEX IF NOT EXISTS ix_workflow_task_command_pending
+    ON workflow_task_command(workflow_task_uuid, create_time, uuid)
+    WHERE deleted_at IS NULL AND status = 'pending';
+
+CREATE TABLE IF NOT EXISTS workflow_task_step_permit (
+    workflow_task_command_uuid TEXT PRIMARY KEY,
+    workflow_task_uuid TEXT NOT NULL,
+    target_node_uuid TEXT,
+    status TEXT NOT NULL CHECK (status IN ('available', 'consumed')),
+    create_time TEXT NOT NULL,
+    consumed_at TEXT,
+    FOREIGN KEY(workflow_task_command_uuid)
+        REFERENCES workflow_task_command(uuid) ON DELETE CASCADE,
+    FOREIGN KEY(workflow_task_uuid) REFERENCES workflow_task(uuid) ON DELETE CASCADE
+);
+CREATE INDEX IF NOT EXISTS ix_workflow_task_step_permit_available
+    ON workflow_task_step_permit(workflow_task_uuid, create_time,
+                                 workflow_task_command_uuid)
+    WHERE status = 'available';
+
 CREATE TABLE IF NOT EXISTS workflow_node_job (
     uuid TEXT PRIMARY KEY,
     create_time TEXT NOT NULL,
@@ -1211,6 +1252,270 @@ class WorkflowStore:
             raise StoreNotFound(f"workflow task {task_uuid} not found")
         return self._task_row(row)
 
+    def create_task_command(
+        self,
+        *,
+        command_uuid: str,
+        task_uuid: str,
+        command_type: str,
+        target_node_uuid: Optional[str],
+        idempotency_key: str,
+        description: Optional[str],
+        meta_data: Dict[str, Any],
+    ) -> Tuple[Dict[str, Any], bool]:
+        """持久化任务控制命令；同一幂等键重放时返回原始冻结事实。"""
+
+        now = utc_now()
+        try:
+            with self.transaction() as conn:
+                task = conn.execute(
+                    "SELECT uuid FROM workflow_task WHERE uuid = ? AND deleted_at IS NULL",
+                    (task_uuid,),
+                ).fetchone()
+                if task is None:
+                    raise StoreNotFound(f"workflow task {task_uuid} not found")
+                conn.execute(
+                    """
+                    INSERT INTO workflow_task_command(
+                        uuid, create_time, update_time, deleted_at, description,
+                        meta_data, workflow_task_uuid, type, target_node_uuid,
+                        idempotency_key, status, result, trace_context, consumed_at
+                    ) VALUES (?, ?, ?, NULL, ?, ?, ?, ?, ?, ?, 'pending', '{}',
+                              '{}', NULL)
+                    """,
+                    (
+                        command_uuid,
+                        now,
+                        now,
+                        description,
+                        _json(meta_data),
+                        task_uuid,
+                        command_type,
+                        target_node_uuid,
+                        idempotency_key,
+                    ),
+                )
+        except sqlite3.IntegrityError as error:
+            try:
+                return self.get_task_command_by_key(task_uuid, idempotency_key), False
+            except StoreNotFound:
+                raise StoreConflict("task command could not be persisted") from error
+        return self.get_task_command(command_uuid), True
+
+    def get_task_command(self, command_uuid: str) -> Dict[str, Any]:
+        """按稳定身份读取一个未删除的工作流任务命令。"""
+
+        with self._lock:
+            row = self._conn.execute(
+                """
+                SELECT * FROM workflow_task_command
+                WHERE uuid = ? AND deleted_at IS NULL
+                """,
+                (command_uuid,),
+            ).fetchone()
+        if row is None:
+            raise StoreNotFound(f"workflow task command {command_uuid} not found")
+        return self._task_command_row(row)
+
+    def get_task_command_by_key(
+        self,
+        task_uuid: str,
+        idempotency_key: str,
+    ) -> Dict[str, Any]:
+        """按父任务与幂等键读取冻结命令事实。"""
+
+        with self._lock:
+            row = self._conn.execute(
+                """
+                SELECT * FROM workflow_task_command
+                WHERE workflow_task_uuid = ? AND idempotency_key = ?
+                  AND deleted_at IS NULL
+                """,
+                (task_uuid, idempotency_key),
+            ).fetchone()
+        if row is None:
+            raise StoreNotFound(
+                f"workflow task command key {idempotency_key!r} not found"
+            )
+        return self._task_command_row(row)
+
+    def apply_task_command(self, command_uuid: str) -> Dict[str, Any]:
+        """原子应用控制命令，并把 step 表达为可消费的一次性持久许可。"""
+
+        with self.transaction() as conn:
+            command = conn.execute(
+                """
+                SELECT * FROM workflow_task_command
+                WHERE uuid = ? AND deleted_at IS NULL
+                """,
+                (command_uuid,),
+            ).fetchone()
+            if command is None:
+                raise StoreNotFound(
+                    f"workflow task command {command_uuid} not found"
+                )
+            if command["status"] != "pending":
+                return self._task_command_row(command)
+            task_uuid = command["workflow_task_uuid"]
+            task = conn.execute(
+                "SELECT * FROM workflow_task WHERE uuid = ? AND deleted_at IS NULL",
+                (task_uuid,),
+            ).fetchone()
+            if task is None:
+                raise StoreNotFound(f"workflow task {task_uuid} not found")
+            if task["status"] in {"succeeded", "failed", "canceled", "timeout"}:
+                raise StoreConflict("terminal task cannot accept a command")
+
+            now = utc_now()
+            command_type = command["type"]
+            if command_type == "pause":
+                conn.execute(
+                    "UPDATE workflow_task SET control_status = 'paused', "
+                    "update_time = ? WHERE uuid = ?",
+                    (now, task_uuid),
+                )
+            elif command_type == "resume":
+                conn.execute(
+                    "UPDATE workflow_task SET control_status = 'active', "
+                    "update_time = ? WHERE uuid = ?",
+                    (now, task_uuid),
+                )
+            elif command_type == "step":
+                conn.execute(
+                    """
+                    INSERT INTO workflow_task_step_permit(
+                        workflow_task_command_uuid, workflow_task_uuid,
+                        target_node_uuid, status, create_time, consumed_at
+                    ) VALUES (?, ?, ?, 'available', ?, NULL)
+                    """,
+                    (
+                        command_uuid,
+                        task_uuid,
+                        command["target_node_uuid"],
+                        now,
+                    ),
+                )
+            elif command_type == "cancel":
+                active_jobs = conn.execute(
+                    """
+                    SELECT uuid, status FROM workflow_node_job
+                    WHERE workflow_task_uuid = ? AND deleted_at IS NULL
+                      AND status NOT IN (
+                          'succeeded', 'failed', 'skipped', 'canceled', 'timeout'
+                      )
+                    """,
+                    (task_uuid,),
+                ).fetchall()
+                for job in active_jobs:
+                    conn.execute(
+                        """
+                        UPDATE workflow_node_job
+                        SET status = 'canceled', update_time = ?, finished_at = ?
+                        WHERE uuid = ?
+                        """,
+                        (now, now, job["uuid"]),
+                    )
+                    self._append_runtime_event(
+                        conn,
+                        task_uuid=task_uuid,
+                        job_uuid=job["uuid"],
+                        kind="job_transition",
+                        from_status=job["status"],
+                        to_status="canceled",
+                        now=now,
+                    )
+                conn.execute(
+                    """
+                    UPDATE workflow_task
+                    SET status = 'canceled', control_status = 'paused',
+                        cleanup_status = 'settled', update_time = ?, finished_at = ?
+                    WHERE uuid = ?
+                    """,
+                    (now, now, task_uuid),
+                )
+                self._append_runtime_event(
+                    conn,
+                    task_uuid=task_uuid,
+                    kind="task_transition",
+                    from_status=task["status"],
+                    to_status="canceled",
+                    now=now,
+                )
+            else:
+                raise StoreConflict(f"unsupported workflow task command {command_type}")
+
+            result = {"outcome": "applied"}
+            conn.execute(
+                """
+                UPDATE workflow_task_command
+                SET status = 'succeeded', result = ?, update_time = ?, consumed_at = ?
+                WHERE uuid = ?
+                """,
+                (_json(result), now, now, command_uuid),
+            )
+            self._append_runtime_event(
+                conn,
+                task_uuid=task_uuid,
+                command_uuid=command_uuid,
+                kind="command_consumed",
+                from_status="pending",
+                to_status="succeeded",
+                data={"type": command_type},
+                now=now,
+            )
+            self._append_event(
+                conn,
+                event="workflow.runtime.changed",
+                data={"workflow_task_uuid": task_uuid},
+                now=now,
+            )
+        return self.get_task_command(command_uuid)
+
+    def claim_task_dispatch_permission(
+        self,
+        task_uuid: str,
+        node_uuid: str,
+    ) -> bool:
+        """读取任务控制权威；暂停任务仅可原子消费一个匹配的 step 许可。"""
+
+        with self.transaction() as conn:
+            task = conn.execute(
+                "SELECT status, control_status FROM workflow_task "
+                "WHERE uuid = ? AND deleted_at IS NULL",
+                (task_uuid,),
+            ).fetchone()
+            if task is None:
+                raise StoreNotFound(f"workflow task {task_uuid} not found")
+            if task["status"] in {"succeeded", "failed", "canceled", "timeout"}:
+                return False
+            if task["control_status"] == "active":
+                return True
+            if task["control_status"] != "paused":
+                return False
+            permit = conn.execute(
+                """
+                SELECT workflow_task_command_uuid
+                FROM workflow_task_step_permit
+                WHERE workflow_task_uuid = ? AND status = 'available'
+                  AND (target_node_uuid IS NULL OR target_node_uuid = ?)
+                ORDER BY create_time, workflow_task_command_uuid
+                LIMIT 1
+                """,
+                (task_uuid, node_uuid),
+            ).fetchone()
+            if permit is None:
+                return False
+            now = utc_now()
+            conn.execute(
+                """
+                UPDATE workflow_task_step_permit
+                SET status = 'consumed', consumed_at = ?
+                WHERE workflow_task_command_uuid = ? AND status = 'available'
+                """,
+                (now, permit["workflow_task_command_uuid"]),
+            )
+            return True
+
     def list_tasks(
         self,
         *,
@@ -2068,6 +2373,7 @@ class WorkflowStore:
             "workflow_node",
             "workflow_edge",
             "workflow_task",
+            "workflow_task_command",
             "workflow_node_job",
             "workflow_authoring",
             "frontend_event",
@@ -2224,6 +2530,22 @@ class WorkflowStore:
             "started_at",
             "finished_at",
         )
+        return result
+
+    @classmethod
+    def _task_command_row(cls, row: sqlite3.Row) -> Dict[str, Any]:
+        """把持久命令恢复为 Backend WorkflowTaskCommand 读投影。"""
+
+        result = {
+            **cls._base(row),
+            "workflow_task_uuid": row["workflow_task_uuid"],
+            "type": row["type"],
+            "idempotency_key": row["idempotency_key"],
+            "status": row["status"],
+            "result": _load(row["result"], {}),
+            "trace_context": _load(row["trace_context"], {}),
+        }
+        cls._add_optional(result, row, "target_node_uuid", "consumed_at")
         return result
 
     @classmethod

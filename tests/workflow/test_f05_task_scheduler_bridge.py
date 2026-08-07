@@ -81,7 +81,12 @@ def store(tmp_path: Path) -> Iterator[WorkflowStore]:
         opened_store.close()
 
 
-def _seed_task(store: WorkflowStore, *, with_material: bool) -> dict[str, Any]:
+def _seed_task(
+    store: WorkflowStore,
+    *,
+    with_material: bool,
+    run_mode: str = "normal",
+) -> dict[str, Any]:
     """持久化一个带冻结执行计划（ExecutionPlan）的待处理任务。
 
     参数：``store`` 是工作流写权威；``with_material`` 决定计划是否包含遗留短期
@@ -100,7 +105,7 @@ def _seed_task(store: WorkflowStore, *, with_material: bool) -> dict[str, Any]:
     material_requirements = [{"instance_uuid": MATERIAL_UUID}] if with_material else []
     execution_plan = {
         "version": 1,
-        "run_mode": "normal",
+        "run_mode": run_mode,
         "target_node_uuid": None,
         "nodes": [
             {
@@ -136,7 +141,7 @@ def _seed_task(store: WorkflowStore, *, with_material: bool) -> dict[str, Any]:
                 execution_plan, run_mode, target_node_uuid, control_status,
                 cleanup_status, trace_context, input, output, error_info
             ) VALUES (?, ?, ?, NULL, NULL, '{}', ?, 'pending', '{}', ?,
-                      'normal', NULL, 'active', 'none', '{}', '{}', '{}', '[]')
+                      ?, NULL, ?, 'none', '{}', '{}', '{}', '[]')
             """,
             (
                 TASK_UUID,
@@ -144,6 +149,8 @@ def _seed_task(store: WorkflowStore, *, with_material: bool) -> dict[str, Any]:
                 _CREATED_AT,
                 WORKFLOW_UUID,
                 json.dumps(execution_plan),
+                run_mode,
+                "paused" if run_mode == "step" else "active",
             ),
         )
         connection.execute(
@@ -369,6 +376,77 @@ def test_persisted_task_compiles_and_dispatches_with_stable_identities(
     assert aggregate["task"]["status"] == "running"
 
 
+def test_step_task_dispatches_exactly_one_node_per_durable_permit(
+    store: WorkflowStore,
+) -> None:
+    """step 任务先暂停；持久 step 许可只允许一个普通动作越过派发边界。"""
+
+    task = _seed_task(store, with_material=False, run_mode="step")
+    dispatcher = RecordingDispatcher()
+    scheduler = EdgeScheduler(dispatcher=dispatcher)
+    bridge = _bridge(store, scheduler)
+    try:
+        aggregate = bridge.submit(task)
+        assert aggregate["task"]["control_status"] == "paused"
+        assert dispatcher.dispatched == []
+
+        command, created = store.create_task_command(
+            command_uuid="71000000-0000-4000-8000-000000000001",
+            task_uuid=TASK_UUID,
+            command_type="step",
+            target_node_uuid=None,
+            idempotency_key="toolbar-step-1",
+            description=None,
+            meta_data={},
+        )
+        assert created is True
+
+        applied = bridge.command(command)
+
+        assert applied["status"] == "succeeded"
+        assert [item["job_id"] for item in dispatcher.dispatched] == [JOB_UUID]
+        assert store.get_task(TASK_UUID)["control_status"] == "paused"
+    finally:
+        bridge.close()
+
+
+def test_restart_recovers_pending_step_task_before_accepting_next_permit(
+    store: WorkflowStore,
+) -> None:
+    """首次动作前重启也必须恢复 paused DAG，并让后续 step 许可继续派发。"""
+
+    task = _seed_task(store, with_material=False, run_mode="step")
+    first_scheduler = EdgeScheduler(dispatcher=RecordingDispatcher())
+    first_bridge = _bridge(store, first_scheduler)
+    try:
+        first_bridge.submit(task)
+    finally:
+        first_bridge.close()
+
+    dispatcher = RecordingDispatcher()
+    scheduler = EdgeScheduler(dispatcher=dispatcher)
+    bridge = _bridge(store, scheduler)
+    try:
+        recovered = bridge.recover_active_tasks()
+        assert [item["task"]["uuid"] for item in recovered] == [TASK_UUID]
+        assert dispatcher.dispatched == []
+        command, _ = store.create_task_command(
+            command_uuid="71000000-0000-4000-8000-000000000002",
+            task_uuid=TASK_UUID,
+            command_type="step",
+            target_node_uuid=None,
+            idempotency_key="toolbar-step-after-restart",
+            description=None,
+            meta_data={},
+        )
+
+        bridge.command(command)
+
+        assert [item["job_id"] for item in dispatcher.dispatched] == [JOB_UUID]
+    finally:
+        bridge.close()
+
+
 def test_material_task_without_scheduler_inventory_fails_closed(
     store: WorkflowStore,
 ) -> None:
@@ -543,12 +621,14 @@ def test_close_is_idempotent_and_unregisters_scheduler_listeners(
 
     assert len(scheduler._job_pre_dispatch_listeners) == 1
     assert len(scheduler._job_finished_listeners) == 1
+    assert len(scheduler._workflow_dispatch_gate_listeners) == 1
 
     bridge.close()
     bridge.close()
 
     assert scheduler._job_pre_dispatch_listeners == []
     assert scheduler._job_finished_listeners == []
+    assert scheduler._workflow_dispatch_gate_listeners == []
 
 
 def test_restart_recovers_succeeded_test_mode_passthrough_without_replay(

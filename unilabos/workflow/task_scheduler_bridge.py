@@ -12,7 +12,7 @@ from unilabos.app.scheduler.material_source_resolution import (
     MaterialSourceResolutionCoordinator,
 )
 from unilabos.app.scheduler.service import EdgeScheduler
-from unilabos.workflow.store import StoreConflict, WorkflowStore
+from unilabos.workflow.store import StoreConflict, StoreNotFound, WorkflowStore
 from unilabos.workflow.task_runtime_projection import TaskRuntimeProjection
 from unilabos.workflow.workflow_spec_compiler import WorkflowSpecCompiler
 
@@ -62,6 +62,7 @@ class TaskSchedulerBridge:
         self._admission_pending_tasks: set[str] = set()
         self._closed = False
         scheduler.add_admission_retry_listener(self._retry_pending_admissions)
+        scheduler.add_workflow_dispatch_gate(self._allow_dispatch)
         scheduler.add_job_pre_dispatch_listener(self._on_job_pre_dispatch)
         scheduler.add_job_finished_listener(self._on_job_finished)
 
@@ -167,41 +168,95 @@ class TaskSchedulerBridge:
         self._scheduler.reschedule()
         return self._aggregate(normalized_uuid)
 
-    def recover_active_tasks(self) -> list[dict[str, Any]]:
-        """恢复没有结果不明作业的运行中工作流任务（WorkflowTask）。
+    def command(self, command: Mapping[str, Any]) -> dict[str, Any]:
+        """应用一个持久任务控制命令并驱动同一调度运行收敛。
 
-        参数：无。返回：已恢复任务的标准聚合列表。已成功作业仅
-        恢复 DAG 返回值，待处理作业才可派发；发现 ``dispatched`` 或
-        ``running`` 作业时跳过该任务，禁止重放结果不明的物理动作。
-        异常：冻结计划或持久事实不一致时记录后跳过，不阻止其他
-        可证明安全的任务恢复。
+        参数：``command`` 是工作流存储已创建或幂等复用的命令投影。返回：应用后
+        的持久命令。异常：桥关闭、命令字段不完整或调度推进失败时抛稳定桥接
+        错误；已应用命令可用同一幂等键重放以再次触发安全重排。
+        """
+
+        if self._closed:
+            raise TaskSchedulerBridgeError("工作流任务调度桥已经关闭")
+        command_uuid = self._required_text(command.get("uuid"), field="command.uuid")
+        task_uuid = self._required_text(
+            command.get("workflow_task_uuid"),
+            field="command.workflow_task_uuid",
+        )
+        command_type = self._required_text(command.get("type"), field="command.type")
+        if command_type not in {"step", "pause", "resume", "cancel"}:
+            raise TaskSchedulerBridgeError("工作流任务命令类型不受支持")
+        try:
+            applied = self._store.apply_task_command(command_uuid)
+            if command_type == "cancel":
+                self._scheduler.cancel_workflow(task_uuid)
+                self._material_sources.release_terminal_reservations(
+                    task_uuid,
+                    reason="workflow_canceled",
+                )
+                self._submitted_tasks.discard(task_uuid)
+                self._admission_pending_tasks.discard(task_uuid)
+                for job_uuid, owner_uuid in tuple(self._task_by_job.items()):
+                    if owner_uuid == task_uuid:
+                        self._task_by_job.pop(job_uuid, None)
+            elif command_type in {"step", "resume"}:
+                # step 许可和 active 控制事实已经提交；公开重排会在派发边界读取它们。
+                self._scheduler.reschedule()
+            return applied
+        except (StoreConflict, StoreNotFound):
+            raise
+        except TaskSchedulerBridgeError:
+            raise
+        except Exception as error:
+            raise TaskSchedulerBridgeError(
+                "工作流任务命令无法安全应用到本地调度器"
+            ) from error
+
+    def recover_active_tasks(self) -> list[dict[str, Any]]:
+        """恢复没有结果不明作业的待派发或运行中工作流任务（WorkflowTask）。
+
+        参数：无。返回：已恢复任务的标准聚合列表。尚未首次派发的 ``pending``
+        任务可重新提交；已成功作业仅恢复 DAG 返回值，待处理作业才可派发；发现
+        ``dispatched`` 或 ``running`` 作业时跳过该任务，禁止重放结果不明的物理
+        动作。异常：冻结计划或持久事实不一致时记录后跳过，不阻止其他可证明
+        安全的任务恢复。
         """
 
         if self._closed:
             raise TaskSchedulerBridgeError("工作流任务调度桥已经关闭")
         recovered: list[dict[str, Any]] = []
-        page = 1
-        while True:
-            task_page = self._store.list_tasks(
-                page=page,
-                page_size=200,
-                status="running",
-            )
-            tasks = task_page["items"]
-            for task in tasks:
-                try:
-                    aggregate = self._recover_running_task(task)
-                except Exception:  # noqa: BLE001 - 单任务损坏不影响其他恢复
-                    logger.exception(
-                        "运行中工作流任务无法安全恢复：%s",
-                        task.get("uuid"),
-                    )
-                    continue
-                if aggregate is not None:
-                    recovered.append(aggregate)
-            if page * 200 >= int(task_page["total"]):
-                break
-            page += 1
+        for task_status in ("pending", "running"):
+            page = 1
+            while True:
+                task_page = self._store.list_tasks(
+                    page=page,
+                    page_size=200,
+                    status=task_status,
+                )
+                tasks = task_page["items"]
+                for task in tasks:
+                    if task_status == "pending" and task.get("run_mode") != "step":
+                        # 普通 pending 可能是既有物料准入受阻或历史人工保留任务；
+                        # 本桥只恢复此次新增且由 paused 门控保护的首次单步运行。
+                        continue
+                    try:
+                        aggregate = (
+                            self.submit(task)
+                            if task_status == "pending"
+                            else self._recover_running_task(task)
+                        )
+                    except Exception:  # noqa: BLE001 - 单任务损坏不影响其他恢复
+                        logger.exception(
+                            "%s 工作流任务无法安全恢复：%s",
+                            task_status,
+                            task.get("uuid"),
+                        )
+                        continue
+                    if aggregate is not None:
+                        recovered.append(aggregate)
+                if page * 200 >= int(task_page["total"]):
+                    break
+                page += 1
         return recovered
 
     def _recover_running_task(
@@ -359,11 +414,22 @@ class TaskSchedulerBridge:
         self._scheduler.remove_admission_retry_listener(
             self._retry_pending_admissions
         )
+        self._scheduler.remove_workflow_dispatch_gate(self._allow_dispatch)
         self._scheduler.remove_job_pre_dispatch_listener(self._on_job_pre_dispatch)
         self._scheduler.remove_job_finished_listener(self._on_job_finished)
         self._task_by_job.clear()
         self._submitted_tasks.clear()
         self._admission_pending_tasks.clear()
+
+    def _allow_dispatch(self, task_uuid: str, node_uuid: str) -> bool:
+        """在物理派发边界读取标准任务控制状态并消费至多一个 step 许可。"""
+
+        try:
+            return self._store.claim_task_dispatch_permission(task_uuid, node_uuid)
+        except StoreNotFound:
+            # 共享调度器仍可承载未经过标准任务桥提交的遗留工作流；它们没有标准
+            # 任务控制事实，必须保持此前不受门控的行为。
+            return True
 
     def _retry_pending_admissions(self) -> None:
         """重试全部尚未注册到旧调度器的物料来源准入。

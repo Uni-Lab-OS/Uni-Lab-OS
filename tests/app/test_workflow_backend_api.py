@@ -2,13 +2,18 @@
 
 from __future__ import annotations
 
+import json
+
 from fastapi.testclient import TestClient
 
+from unilabos.app.scheduler.dispatch import RecordingDispatcher
 from unilabos.app.scheduler.api import create_scheduler_router
+from unilabos.app.scheduler.service import EdgeScheduler
 from unilabos.app.workflow_api import create_workflow_app
 from unilabos.workflow.authoring_kernel import AuthoringCatalogSnapshot
 from unilabos.workflow.service import WorkflowService
 from unilabos.workflow.store import WorkflowStore
+from unilabos.workflow.task_scheduler_bridge import TaskSchedulerBridge
 
 
 class EmptyTemplateSnapshotProvider:
@@ -99,6 +104,132 @@ def test_workflow_definition_task_snapshot_and_soft_delete_match_backend(tmp_pat
     ).fetchone()
     assert row["deleted_at"] is not None
     store.close()
+
+
+def test_workflow_task_command_route_persists_step_command(tmp_path):
+    """单步命令必须进入公共 WorkflowTask 命令合同而不是返回路由 404。"""
+
+    client, store = _client(tmp_path)
+    workflow = client.post(
+        "/api/v1/workflows",
+        json={"name": "step command", "tags": [], "meta_data": {}},
+    ).json()["data"]
+    task = client.post(
+        "/api/v1/workflow-tasks",
+        json={
+            "workflow_uuid": workflow["uuid"],
+            "run_mode": "step",
+            "meta_data": {},
+        },
+    ).json()["data"]
+
+    response = client.post(
+        f"/api/v1/workflow-tasks/{task['uuid']}/commands",
+        json={"type": "step", "idempotency_key": "toolbar-step-1"},
+    )
+
+    assert response.status_code == 201, response.text
+    command = response.json()["data"]
+    assert command["workflow_task_uuid"] == task["uuid"]
+    assert command["type"] == "step"
+    assert command["idempotency_key"] == "toolbar-step-1"
+    assert command["status"] == "pending"
+    store.close()
+
+
+def test_workflow_task_step_command_applies_once_through_scheduler_bridge(tmp_path):
+    """公共命令路由必须让单个就绪节点越过门控，幂等重放不得再发一次。"""
+
+    store = WorkflowStore(tmp_path / "workflow_history.db")
+    dispatcher = RecordingDispatcher()
+    scheduler = EdgeScheduler(dispatcher=dispatcher)
+    bridge = TaskSchedulerBridge(store, scheduler=scheduler)
+    service = WorkflowService(store, task_scheduler_bridge=bridge)
+    client = TestClient(create_workflow_app(service))
+    try:
+        workflow_uuid = "11000000-0000-4000-8000-000000000001"
+        task_uuid = "21000000-0000-4000-8000-000000000001"
+        node_uuid = "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa"
+        job_uuid = "41000000-0000-4000-8000-000000000001"
+        created_at = "2026-08-07T00:00:00Z"
+        plan = {
+            "version": 1,
+            "run_mode": "step",
+            "nodes": [
+                {
+                    "uuid": node_uuid,
+                    "kind": "device_action",
+                    "device_id": "reactor-a",
+                    "action_name": "distribute",
+                    "action_type": "UniLabJsonCommand",
+                    "param": {},
+                    "param_schema": {
+                        "type": "object",
+                        "properties": {"goal": {"type": "object"}},
+                    },
+                }
+            ],
+            "handles": [],
+            "edges": [],
+        }
+        store.create_workflow(
+            workflow_uuid=workflow_uuid,
+            name="bridged step",
+            tags=[],
+            description=None,
+            meta_data={},
+        )
+        with store.transaction() as connection:
+            connection.execute(
+                """
+                INSERT INTO workflow_task(
+                    uuid, create_time, update_time, deleted_at, description,
+                    meta_data, workflow_uuid, status, workflow_snapshot,
+                    execution_plan, run_mode, target_node_uuid, control_status,
+                    cleanup_status, trace_context, input, output, error_info
+                ) VALUES (?, ?, ?, NULL, NULL, '{}', ?, 'pending', '{}', ?,
+                          'step', NULL, 'paused', 'none', '{}', '{}', '{}', '[]')
+                """,
+                (task_uuid, created_at, created_at, workflow_uuid, json.dumps(plan)),
+            )
+            connection.execute(
+                """
+                INSERT INTO workflow_node_job(
+                    uuid, create_time, update_time, deleted_at, description,
+                    meta_data, workflow_task_uuid, workflow_node_uuid,
+                    feedback_sequence, topological_index, executor_kind,
+                    execution_policy, execution_timeout_seconds, status, attempt,
+                    param, feedback_data, return_info, control_data, error_info
+                ) VALUES (?, ?, ?, NULL, NULL, '{}', ?, ?, 0, 0,
+                          'device_action', '{}', 0, 'pending', 1, '{}', '{}',
+                          '{}', '{}', '[]')
+                """,
+                (job_uuid, created_at, created_at, task_uuid, node_uuid),
+            )
+        aggregate = bridge.submit(store.get_task(task_uuid))
+        assert aggregate["task"]["control_status"] == "paused"
+        assert store.list_jobs(task_uuid)[0]["status"] == "pending"
+        assert dispatcher.dispatched == []
+
+        body = {"type": "step", "idempotency_key": "toolbar-step-1"}
+        first = client.post(
+            f"/api/v1/workflow-tasks/{task_uuid}/commands",
+            json=body,
+        )
+        replay = client.post(
+            f"/api/v1/workflow-tasks/{task_uuid}/commands",
+            json=body,
+        )
+
+        assert first.status_code == 201, first.text
+        assert replay.status_code == 201, replay.text
+        assert first.json()["data"]["status"] == "succeeded"
+        assert replay.json()["data"]["uuid"] == first.json()["data"]["uuid"]
+        assert store.list_jobs(task_uuid)[0]["status"] == "dispatched"
+        assert [payload["job_id"] for payload in dispatcher.dispatched] == [job_uuid]
+        assert store.count_rows("workflow_task_command") == 1
+    finally:
+        service.close()
 
 
 def test_workflow_invalid_uuid_uses_backend_business_error(tmp_path):
