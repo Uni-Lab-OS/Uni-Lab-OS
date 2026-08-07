@@ -229,7 +229,7 @@ def _node_from_instance(
     relation = store.get_relation(edge_uuid)
     slot_id = str((relation or {}).get("slot_id") or "")
     if slot_id:
-        # Existing device-side mounting code already consumes this key.
+        # 既有设备侧挂载代码已消费该兼容键，不能在本投影中擅自改名。
         extra.setdefault("update_resource_site", slot_id)
 
     inventory_meta = extra.setdefault("edge_inventory", {})
@@ -257,8 +257,7 @@ def _node_from_instance(
     for key in _TRACKER_STATE_FIELDS:
         if key in state:
             base[key] = state.pop(key)
-    # Content is runtime state.  Unknown state keys stay in ``data`` so older
-    # consumers retain them instead of losing information during projection.
+    # ``content`` 是运行时状态；未知状态键继续留在 ``data``，避免旧调用方在投影时丢失信息。
     data.update(state)
 
     node: Dict[str, Any] = {
@@ -275,8 +274,7 @@ def _node_from_instance(
         "model": base.get("model") if isinstance(base.get("model"), dict) else {},
         "icon": str(base.get("icon") or ""),
         "parent_uuid": str(instance.get("parent_uuid") or ""),
-        # ``container`` is the safest PLR-compatible fallback for an instance
-        # whose early inventory template only carried warehouse properties.
+        # 对只携带早期仓库属性的库存实例，``container`` 是最安全的物理位置资源（PLR）兼容回退类型。
         "type": str(
             base.get("type") or (template or {}).get("category") or "container"
         ),
