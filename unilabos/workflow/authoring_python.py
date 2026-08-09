@@ -1289,8 +1289,12 @@ def _node_metadata_comment(
     # 动作模板显示名是人类可读默认值，动作业务名只用于兼容旧目录。
     template_title = action.template.get("display_name") or action.template.get("name")
     template_description = action.template.get("description")
-    descriptions_match = description == template_description or (
-        description in (None, "") and template_description in (None, "")
+    descriptions_match = (
+        description == template_description
+        or (
+            title == template_title
+            and description in (None, "")
+        )
     )
     if title == template_title and descriptions_match:
         return None
