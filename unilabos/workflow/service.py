@@ -1082,17 +1082,22 @@ class WorkflowService:
                 workflow_uuid=workflow_uuid,
                 python_source=python_source,
             )
-            try:
-                self._atomic_write(
-                    registration,
-                    encoded,
-                    expected_hash=current_hash,
-                )
-            except OSError:
-                raise WorkflowError("internal_error") from None
+            encoded_hash = _sha256(encoded)
+            # IDE 保存事件发生时，文件系统已经发布了作者字节；随后对同一哈希
+            # 发起的 CAS 只用于静态编译和签发候选。再次原子替换会无意义地改变
+            # 文件世代，还可能触发工作区监视器的第二轮刷新。
+            if encoded_hash != current_hash:
+                try:
+                    self._atomic_write(
+                        registration,
+                        encoded,
+                        expected_hash=current_hash,
+                    )
+                except OSError:
+                    raise WorkflowError("internal_error") from None
             source = self._read_source(registration)
             assert source is not None
-            if source["draft_hash"] != _sha256(encoded):
+            if source["draft_hash"] != encoded_hash:
                 raise WorkflowConflict("draft_hash_conflict")
             applied_graph = self.get_graph(workflow_uuid)
             compilation = self._compile(
