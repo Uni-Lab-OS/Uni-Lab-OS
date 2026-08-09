@@ -110,24 +110,18 @@ class WorkspaceMaterialModelCatalog:
 
 def compile_workspace_material_models(
     startup_plan: WorkspaceMaterialPlan,
-    registry: Any,
+    definition_source: Any,
 ) -> WorkspaceMaterialModelCatalog:
     """编译工作区装饰器声明的 3D 模型绑定与公共资产授权根。
 
-    参数：``startup_plan`` 固定唯一工作区来源；``registry`` 提供同代设备和资源
-    模板定义。返回：按资源模板身份索引的不可变模型快照及受限资产读取目录。
-    异常：声明路径、模型格式、入口、重复身份或 JSON 字段无效时关闭式失败。
+    参数：``startup_plan`` 固定唯一工作区来源；``definition_source`` 优先接受同代
+    不可变包目录（PackageCatalog），并兼容旧注册表读取接口。返回：按资源模板身份
+    索引的不可变模型快照及受限资产读取目录。异常：来源代际、声明路径、模型格式、
+    入口、重复身份或 JSON 字段无效时关闭式失败。
     """
 
     _validate_workspace_material_plan(startup_plan)
-    try:
-        # ``definitions`` 只能来自注册表（Registry）已经完成的唯一静态扫描。
-        definitions = (
-            *registry.obtain_registry_device_info(),
-            *registry.obtain_registry_resource_info(),
-        )
-    except AttributeError:
-        raise TypeError("registry 必须提供设备和资源定义读取接口") from None
+    definitions = _material_definitions(startup_plan, definition_source)
 
     models_by_template: dict[str, Mapping[str, Any]] = {}
     allowed_roots: set[PurePosixPath] = set()
@@ -181,6 +175,81 @@ def compile_workspace_material_models(
             sorted(allowed_roots, key=lambda path: path.as_posix())
         ),
     )
+
+
+def _material_definitions(
+    startup_plan: WorkspaceMaterialPlan,
+    definition_source: Any,
+) -> tuple[Mapping[str, Any], ...]:
+    """读取同代包目录定义，并兼容旧注册表投影。
+
+    参数：工作区计划和定义来源。返回：带规范身份与绝对声明证据的只读定义集合。
+    异常：包目录不属于当前工作区，或来源不满足任一受支持合同时关闭式失败。
+    """
+
+    # ``catalog_definitions`` 是 PackageCatalog 的不可变静态结果；它保留声明文件的
+    # 工作区逻辑身份，因此不依赖发布到旧注册表后被刻意删除的绝对 ``file_path``。
+    catalog_definitions = getattr(definition_source, "definitions", None)
+    if catalog_definitions is not None:
+        if (
+            getattr(definition_source, "import_package", None)
+            != startup_plan.import_package
+            or getattr(
+                getattr(definition_source, "distribution", None),
+                "name",
+                None,
+            )
+            != startup_plan.distribution_name
+        ):
+            raise ValueError("包目录不属于当前工作区启动代际")
+        try:
+            definitions = (
+                *catalog_definitions.devices,
+                *catalog_definitions.resources,
+            )
+        except AttributeError:
+            raise TypeError("包目录必须提供设备和资源定义") from None
+        projected: list[Mapping[str, Any]] = []
+        for definition in definitions:
+            try:
+                raw_definition = definition.to_dict()
+            except AttributeError:
+                raise TypeError("包目录定义必须提供不可变定义读取接口") from None
+            details = raw_definition.get("details")
+            registry_entry = (
+                details.get("registry_entry")
+                if isinstance(details, Mapping)
+                else None
+            )
+            if not isinstance(registry_entry, Mapping):
+                raise TypeError("包目录定义缺少注册表静态投影")
+            # ``projected_definition`` 仅在本次内存编译中恢复绝对声明证据；HTTP 快照
+            # 继续只包含公共 URL，不向前端或持久化目录泄漏本地路径。
+            projected_definition = dict(registry_entry)
+            projected_definition["id"] = _required_text(
+                raw_definition.get("fqid"),
+                "包目录定义 fqid",
+            )
+            declaring_file = _required_text(
+                raw_definition.get("declaring_file"),
+                "包目录定义 declaring_file",
+            )
+            projected_definition["file_path"] = str(
+                startup_plan.source.root / declaring_file
+            )
+            projected.append(MappingProxyType(projected_definition))
+        return tuple(projected)
+
+    try:
+        # 兼容非工作区启动与既有测试仍使用的产品注册表（Registry）接口。
+        return (
+            *definition_source.obtain_registry_device_info(),
+            *definition_source.obtain_registry_resource_info(),
+        )
+    except AttributeError:
+        raise TypeError(
+            "definition_source 必须是包目录或提供设备和资源定义读取接口"
+        ) from None
 
 
 def _workspace_declaration_file(

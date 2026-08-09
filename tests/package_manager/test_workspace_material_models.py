@@ -9,6 +9,7 @@ import pytest
 
 from unilabos.package_manager import (
     WorkspaceSource,
+    compile_package_source,
     compile_workspace_material_models,
     compile_workspace_startup,
 )
@@ -50,7 +51,23 @@ def _workspace(root: Path) -> tuple[Any, Path]:
     mesh = model_root / "meshes" / "beaker.stl"
     mesh.parent.mkdir(parents=True)
     (package / "__init__.py").write_text("", encoding="utf-8")
-    declaration.write_text("# static resource declaration\n", encoding="utf-8")
+    declaration.write_text(
+        """from unilabos.registry.decorators import resource
+
+
+@resource(
+    id="szlab_beaker_500ml",
+    model={
+        "format": "xacro",
+        "entry": "beaker/models/resource.xacro",
+        "macro": "szlab_beaker_500ml",
+    },
+)
+def szlab_beaker_500ml(name: str = "beaker"):
+    return object()
+""",
+        encoding="utf-8",
+    )
     (model_root / "resource.xacro").write_text(
         '<robot><mesh filename="file://${mesh_path}/meshes/beaker.stl"/></robot>',
         encoding="utf-8",
@@ -107,6 +124,30 @@ def test_workspace_model_catalog_projects_binding_and_serves_related_assets(
     assert mesh.content.startswith(b"solid beaker")
     assert mesh.media_type == "model/stl"
     assert entry.etag.startswith("sha256:")
+
+
+def test_workspace_model_catalog_compiles_package_catalog_definitions(
+    tmp_path: Path,
+) -> None:
+    """模型目录必须直接消费工作区同代包目录，而不依赖注册表绝对路径。
+
+    参数：``tmp_path`` 隔离工作区。返回：无；断言不可变包目录仍能发布模型。
+    异常：模型编译退回旧注册表 ``file_path`` 合同时测试失败。
+    """
+
+    plan, _ = _workspace(tmp_path / "workspace")
+    package_catalog = compile_package_source(plan.source, startup_plan=plan)
+
+    catalog = compile_workspace_material_models(plan, package_catalog)
+
+    model = catalog.models_by_template[
+        "community.szlab_poly_studio.szlab_beaker_500ml"
+    ]
+    assert model["path"] == (
+        "/api/v1/material-models/szlab-poly-studio/"
+        "szlab_poly_studio/resources/beaker/models/resource.xacro"
+    )
+    assert catalog.read_asset(model["path"]).content.startswith(b"<robot>")
 
 
 def test_workspace_model_catalog_rejects_assets_outside_declared_model_root(
