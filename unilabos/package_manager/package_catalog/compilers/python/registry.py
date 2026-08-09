@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 from collections.abc import Mapping
-from pathlib import Path
+from pathlib import Path, PurePosixPath
 from typing import Any
 
 from unilabos.registry.ast_registry_scanner import _parse_file
@@ -181,6 +181,10 @@ def _resource_definition(
             "metadata": metadata.get("metadata") or {},
             "registry_type": "resource",
             "version": metadata.get("version", "1.0.0"),
+            # Workbench navigation consumes the package identity published by
+            # the same static catalog generation; it never reconstructs a
+            # local path from a Python module name.
+            "source_uri": _package_source_uri(namespace, logical_path),
         }
         if metadata.get("model") is not None:
             registry_entry["model"] = metadata["model"]
@@ -207,6 +211,17 @@ def _resource_definition(
         description=str(metadata.get("description") or ""),
         details={"registry_entry": stable_entry},
     )
+
+
+def _package_source_uri(namespace: str, logical_path: str) -> str:
+    """Return the move-stable authoring URI for one package declaration."""
+
+    package_id = namespace.removeprefix("community.")
+    path = PurePosixPath(logical_path)
+    parts = path.parts
+    if not package_id or not parts or parts[0] != package_id or len(parts) < 2:
+        raise ValueError("资源定义源码必须位于规范导入包内")
+    return f"package://{package_id}/{PurePosixPath(*parts[1:]).as_posix()}"
 
 
 def _static_device_entry(

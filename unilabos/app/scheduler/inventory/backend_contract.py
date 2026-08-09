@@ -110,11 +110,27 @@ class BackendResourceService:
                 for resource, name in zip(resources, normalized_names):
                     # ``existing`` 只能是当前活动业务 ID；软删除历史不得被复活。
                     existing = conn.execute(
-                        "SELECT uuid FROM resource_template "
+                        "SELECT uuid,meta_data FROM resource_template "
                         "WHERE name = ? AND deleted_at IS NULL",
                         (name,),
                     ).fetchone()
                     template_uuid = str(existing["uuid"]) if existing else str(uuid4())
+                    existing_meta = _json(existing["meta_data"], {}) if existing else {}
+                    source_uri = resource.get("source_uri")
+                    if source_uri is not None and (
+                        not isinstance(source_uri, str)
+                        or not source_uri.startswith("package://")
+                    ):
+                        raise BackendContractError(
+                            TEMPLATE_DEFINITION_INVALID,
+                            "resource template source_uri must use package://",
+                        )
+                    meta_data = dict(existing_meta)
+                    if source_uri:
+                        meta_data["unilab"] = {
+                            **_json(meta_data.get("unilab"), {}),
+                            "source_uri": source_uri,
+                        }
                     # ``class_definition`` 是当前模板冻结的 Python 实现身份合同。
                     class_definition = resource.get("class") or {}
                     # ``schema`` 是资源模板初始化参数的数据/配置命名空间合同。
@@ -128,7 +144,7 @@ class BackendResourceService:
                         _now(),
                         _now(),
                         resource.get("description"),
-                        _dump({}),
+                        _dump(meta_data),
                         name,
                         str(resource.get("display_name") or name),
                         str(resource.get("registry_type") or "resource"),
@@ -158,6 +174,7 @@ class BackendResourceService:
                             update_time=excluded.update_time,
                             deleted_at=NULL,
                             description=excluded.description,
+                            meta_data=excluded.meta_data,
                             display_name=excluded.display_name,
                             resource_type=excluded.resource_type,
                             icon=excluded.icon,
@@ -218,7 +235,7 @@ class BackendResourceService:
             where.append("resource_type = ?")
             values.append(resource_type)
         rows = self.store.query_all(
-            "SELECT uuid,name,display_name,resource_type,tags "
+            "SELECT uuid,name,display_name,resource_type,tags,meta_data "
             f"FROM resource_template WHERE {' AND '.join(where)} "
             "ORDER BY uuid LIMIT ?",
             (*values, limit + 1),
@@ -232,6 +249,9 @@ class BackendResourceService:
                     "display_name": row["display_name"],
                     "resource_type": row["resource_type"],
                     "tags": _json(row["tags"], []),
+                    "source_uri": _json(row["meta_data"], {})
+                    .get("unilab", {})
+                    .get("source_uri"),
                 }
                 for row in page
             ],

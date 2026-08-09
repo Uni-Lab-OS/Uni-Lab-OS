@@ -103,3 +103,32 @@ def test_active_template_wins_over_same_name_soft_deleted_history(
         assert historical_row["deleted_at"] is not None
     finally:
         inventory_store.close()
+
+
+def test_resource_template_catalog_preserves_package_source_identity(
+    tmp_path: Path,
+) -> None:
+    """Template list/detail publish the catalog-signed package source URI."""
+
+    inventory_store = InventoryStore(str(tmp_path / "inventory.db"))
+    try:
+        service = BackendResourceService(inventory_store)
+        definition = _resource_definition()
+        definition["source_uri"] = "package://catalog_lab/definitions.py"
+        template_uuid = str(
+            service.sync_resource_templates([definition])["templates"][0]["uuid"]
+        )
+
+        summary = service.list_resource_templates(
+            limit=20,
+            cursor_uuid=None,
+            keyword="",
+            resource_type="",
+        )["items"][0]
+        detail = service.get_resource_template(template_uuid)
+        assert summary["source_uri"] == "package://catalog_lab/definitions.py"
+        assert detail["meta_data"]["unilab"]["source_uri"] == (
+            "package://catalog_lab/definitions.py"
+        )
+    finally:
+        inventory_store.close()

@@ -35,6 +35,10 @@ _IGNORED_DIRECTORIES = frozenset(
     )
 )
 _IGNORED_FILE_NAMES = frozenset((".unilabos.packages.mutation.lock",))
+_IGNORED_PATH_SEQUENCES = (
+    (".claude", "skills"),
+    (".codex", "skills"),
+)
 _IGNORED_SUFFIXES = frozenset((".pyc", ".pyo", ".swp", ".tmp"))
 _IGNORED_SQLITE_SUFFIXES = ("-journal", "-shm", "-wal")
 
@@ -233,6 +237,16 @@ def _workspace_content_identity(
     for candidate in workspace_root.rglob("*"):
         relative = candidate.relative_to(workspace_root)
         if any(part in _IGNORED_DIRECTORIES for part in relative.parts):
+            continue
+        # AionUi projects selected skills into the native Claude/Codex
+        # workspace locations as links back to Workbench-owned state.  Those
+        # projections are runtime inputs for the coding Agent, not laboratory
+        # package source, and must not invalidate an otherwise safe OS restart.
+        if any(
+            relative.parts[index : index + len(sequence)] == sequence
+            for sequence in _IGNORED_PATH_SEQUENCES
+            for index in range(len(relative.parts) - len(sequence) + 1)
+        ):
             continue
         if any(
             relative == ignored_path or relative.is_relative_to(ignored_path)

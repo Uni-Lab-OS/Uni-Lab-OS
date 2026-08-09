@@ -943,6 +943,20 @@ def main():
         if workspace_registry_runtime is not None
         else None
     )
+    if workspace_registry_runtime is not None:
+        from unilabos.package_manager.workspace_runtime import (
+            compile_workspace_package_mount_projection,
+        )
+
+        BasicConfig.workspace_package_mount_projection = (
+            compile_workspace_package_mount_projection(
+                workspace_registry_runtime.package_catalog_sources,
+                editable_source=workspace_registry_runtime.source,
+                dependency_revision=workspace_registry_runtime.dependency_revision,
+            )
+        )
+    else:
+        BasicConfig.workspace_package_mount_projection = None
 
     if args_dict.get("command") in ("template-sync", "template_sync"):
         from unilabos.app.template_sync import (
