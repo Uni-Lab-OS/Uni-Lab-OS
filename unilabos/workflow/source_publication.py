@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import ctypes
 import hashlib
 import os
 import signal
@@ -256,10 +257,6 @@ def atomic_publish_source(
         or Path(target_name).name != target_name
     ):
         raise SourcePublicationError("publication_failed")
-    if _PLATFORM.startswith("darwin") and expected_hash is not NO_EXPECTED_HASH:
-        # macOS ``flock`` 是 advisory lock，无法阻止外部编辑器在最终检查后以
-        # rename 覆盖竞争稿；在具备 RENAME_SWAP+backup 证据协议前明确失败关闭。
-        raise SourcePublicationConflict("draft_hash_conflict")
     location = _PublicationDirectory.create(
         parent_descriptor=parent_descriptor,
         parent_path=parent_path,
@@ -340,6 +337,15 @@ def _compare_and_replace(
 
     if _PLATFORM.startswith("win"):
         _compare_and_replace_windows(
+            location=location,
+            target_name=target_name,
+            temporary_name=temporary_name,
+            expected_hash=expected_hash,
+            byte_limit=byte_limit,
+        )
+        return
+    if _PLATFORM.startswith("darwin"):
+        _compare_and_replace_darwin(
             location=location,
             target_name=target_name,
             temporary_name=temporary_name,
@@ -428,6 +434,171 @@ def _compare_and_replace(
             os.close(temporary_descriptor)
         if target_descriptor >= 0:
             os.close(target_descriptor)
+
+
+def _compare_and_replace_darwin(
+    *,
+    location: _PublicationDirectory,
+    target_name: str,
+    temporary_name: str,
+    expected_hash: str | None,
+    byte_limit: int,
+) -> None:
+    """用 Darwin ``RENAME_SWAP`` 证据协议完成已有草稿 CAS。
+
+    参数：目录、目标名和临时名固定同目录中的两份文件；``expected_hash`` 是
+    调用者读取的原稿身份；``byte_limit`` 限制所有验证读取。返回：成功时规范
+    路径指向新稿、临时路径保留已验证旧稿并由外层清理。异常：并发变化回滚后
+    抛出 ``SourcePublicationConflict``；无法证明安全回滚时抛出发布错误。
+    """
+
+    target_descriptor = -1
+    temporary_descriptor = -1
+    swapped = False
+    try:
+        try:
+            target_descriptor = location.open_child(
+                target_name,
+                os.O_RDWR
+                | getattr(os, "O_CLOEXEC", 0)
+                | getattr(os, "O_NOFOLLOW", 0),
+            )
+        except FileNotFoundError:
+            if expected_hash is not None:
+                raise SourcePublicationConflict("draft_hash_conflict") from None
+            try:
+                location.link_child(temporary_name, target_name)
+            except FileExistsError:
+                raise SourcePublicationConflict("draft_hash_conflict") from None
+            location.unlink_child(temporary_name)
+            return
+        if expected_hash is None:
+            raise SourcePublicationConflict("draft_hash_conflict")
+
+        with _exclusive_target_lock(target_descriptor):
+            original_bytes = _stable_bytes(
+                target_descriptor,
+                byte_limit=byte_limit,
+            )
+            if (
+                _sha256(original_bytes) != expected_hash
+                or not _target_matches_descriptor(
+                    location,
+                    target_name,
+                    target_descriptor,
+                )
+            ):
+                raise SourcePublicationConflict("draft_hash_conflict")
+            temporary_descriptor = location.open_child(
+                temporary_name,
+                os.O_RDONLY
+                | getattr(os, "O_CLOEXEC", 0)
+                | getattr(os, "O_NOFOLLOW", 0),
+            )
+            replacement_hash = _sha256(
+                _stable_bytes(temporary_descriptor, byte_limit=byte_limit)
+            )
+
+            _darwin_swap_children(location, target_name, temporary_name)
+            swapped = True
+            location.sync()
+            original_was_swapped = _published_identity_matches(
+                location=location,
+                target_name=temporary_name,
+                published_descriptor=target_descriptor,
+                expected_hash=expected_hash,
+                byte_limit=byte_limit,
+            )
+            replacement_was_published = _published_identity_matches(
+                location=location,
+                target_name=target_name,
+                published_descriptor=temporary_descriptor,
+                expected_hash=replacement_hash,
+                byte_limit=byte_limit,
+            )
+            if not original_was_swapped or not replacement_was_published:
+                replacement_still_owns_target = _target_matches_descriptor(
+                    location,
+                    target_name,
+                    temporary_descriptor,
+                )
+                if replacement_still_owns_target:
+                    _darwin_swap_children(location, target_name, temporary_name)
+                    swapped = False
+                    location.sync()
+                raise SourcePublicationConflict("draft_hash_conflict")
+    except (SourcePublicationConflict, SourcePublicationError):
+        raise
+    except OSError as error:
+        if swapped:
+            raise SourcePublicationError("publication_failed") from None
+        raise_classified_publication_os_error(error)
+    except StableFileAccessError:
+        raise SourcePublicationConflict("draft_hash_conflict") from None
+    finally:
+        if temporary_descriptor >= 0:
+            os.close(temporary_descriptor)
+        if target_descriptor >= 0:
+            os.close(target_descriptor)
+
+
+def _darwin_swap_children(
+    location: _PublicationDirectory,
+    first_name: str,
+    second_name: str,
+) -> None:
+    """通过 libc ``renameatx_np(..., RENAME_SWAP)`` 原子交换同目录文件。
+
+    参数：``location`` 固定父目录；两个名称都是已校验的单段子文件名。返回：
+    成功时两条目录项原子交换。异常：缺少 Darwin API 或系统调用失败时抛出
+    ``SourcePublicationError``/``OSError``，调用者据交换状态决定错误分类。
+    """
+
+    if not _PLATFORM.startswith("darwin"):
+        raise SourcePublicationError("publication_failed")
+    location.assert_current()
+    directory_descriptor = location.descriptor
+    opened_descriptor = -1
+    if directory_descriptor is None:
+        assert location.path is not None
+        opened_descriptor = os.open(
+            location.path,
+            os.O_RDONLY
+            | getattr(os, "O_DIRECTORY", 0)
+            | getattr(os, "O_CLOEXEC", 0),
+        )
+        directory_descriptor = opened_descriptor
+        metadata = os.fstat(directory_descriptor)
+        if (metadata.st_dev, metadata.st_ino) != location.identity:
+            os.close(opened_descriptor)
+            raise SourcePublicationError("publication_failed")
+    try:
+        libc = ctypes.CDLL(None, use_errno=True)
+        try:
+            renameatx_np = libc.renameatx_np
+        except AttributeError:
+            raise SourcePublicationError("publication_failed") from None
+        renameatx_np.argtypes = [
+            ctypes.c_int,
+            ctypes.c_char_p,
+            ctypes.c_int,
+            ctypes.c_char_p,
+            ctypes.c_uint,
+        ]
+        renameatx_np.restype = ctypes.c_int
+        result = renameatx_np(
+            directory_descriptor,
+            os.fsencode(first_name),
+            directory_descriptor,
+            os.fsencode(second_name),
+            0x00000002,
+        )
+        if result != 0:
+            error_number = ctypes.get_errno()
+            raise OSError(error_number, os.strerror(error_number))
+    finally:
+        if opened_descriptor >= 0:
+            os.close(opened_descriptor)
 
 
 def _compare_and_replace_windows(
