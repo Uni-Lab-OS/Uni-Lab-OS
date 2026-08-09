@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from copy import deepcopy
 from typing import Any
 
 import pytest
@@ -293,6 +294,57 @@ def test_fixed_device_projection_survives_authoring_round_trip() -> None:
 
     assert repeated.valid, repeated.diagnostics
     assert repeated.graph == compilation.graph
+
+
+@pytest.mark.parametrize(
+    ("field_name", "field_present"),
+    [
+        pytest.param("action_name", True, id="null-action-name"),
+        pytest.param("action_name", False, id="omitted-action-name"),
+        pytest.param("action_type", True, id="null-action-type"),
+        pytest.param("action_type", False, id="omitted-action-type"),
+        pytest.param("description", True, id="null-default-description"),
+        pytest.param("description", False, id="omitted-default-description"),
+    ],
+)
+def test_persisted_nullable_node_defaults_remain_a_canvas_fixed_point(
+    field_name: str,
+    field_present: bool,
+) -> None:
+    """Backend 可空读形状不得让画布生成源码后误报往返不一致。
+
+    参数：``field_name`` 是由动作目录确定的可空节点字段；``field_present``
+    区分显式 ``None`` 与 ``omitempty`` 省略。返回：无；通过画布实际调用的
+    generate-python → validate 链证明目录默认值与旧读形状语义相同。
+    """
+
+    engine = WorkflowAuthoringEngine(catalog=_catalog())
+    compilation = _compile(DEVICE_MATERIAL_UUID)
+    assert compilation.valid and compilation.graph is not None, compilation.diagnostics
+    persisted = deepcopy(compilation.graph)
+    if field_present:
+        persisted["nodes"][0][field_name] = None
+    else:
+        persisted["nodes"][0].pop(field_name, None)
+
+    generated = engine.generate_python(
+        workflow_uuid=WORKFLOW_UUID,
+        workflow_revision=7,
+        graph=persisted,
+        source_uri="package://lab/workflows/persisted_nullable_node.py",
+    )
+    assert generated.valid and generated.graph is not None, generated.diagnostics
+    assert generated.normalized_python_source is not None
+
+    validated = engine.validate(
+        workflow_uuid=WORKFLOW_UUID,
+        workflow_revision=7,
+        graph=generated.graph,
+        python_source=generated.normalized_python_source,
+        source_uri="package://lab/workflows/persisted_nullable_node.py",
+    )
+
+    assert validated.valid, validated.diagnostics
 
 
 def test_dynamic_device_does_not_fabricate_concrete_material_identity() -> None:

@@ -131,11 +131,10 @@ def reconcile_applied_authoring_projection(
 
     # ``nodes`` 与 ``edges`` 是仅保留数据库读形状、不覆盖新业务语义的候选实体。
     nodes = [
-        _retained_runtime_entity(
+        _retained_node_entity(
             generated,
             applied_nodes.get(node_uuid),
-            nullable_fields=_NODE_NULLABLE_READ_FIELDS,
-            exact_shape_fields=_NODE_GRAPH_OWNED_FIELDS,
+            action=action_catalog[node_uuid],
         )
         for node_uuid, generated in generated_node_index.items()
     ]
@@ -309,6 +308,48 @@ def _retained_runtime_entity(
             result[field_name] = deepcopy(applied[field_name])
         else:
             result.pop(field_name, None)
+    return result
+
+
+def _retained_node_entity(
+    generated: Mapping[str, Any],
+    applied: Mapping[str, Any] | None,
+    *,
+    action: AuthoringCatalogAction,
+) -> dict[str, Any]:
+    """保留节点读形状并收敛可由目录无歧义恢复的旧空字段。
+
+    参数：generated 是源码生成节点，applied 是同 UUID 输入读投影，
+    action 是本轮冻结的动作目录项。返回：图拥有字段和数据库投影按公共
+    合并规则保留；当旧字段为 null/省略、生成值又恰好等于当前目录默认值时，
+    精确保留旧 wire 形状。这样不会吞掉作者显式展示覆盖或真实目录演进。
+    """
+
+    result = _retained_runtime_entity(
+        generated,
+        applied,
+        nullable_fields=_NODE_NULLABLE_READ_FIELDS,
+        exact_shape_fields=_NODE_GRAPH_OWNED_FIELDS,
+    )
+    if applied is None:
+        return result
+    template = action.template
+    template_defaults = {
+        "action_name": template.get("name"),
+        "action_type": str(template.get("type") or "UniLabJsonCommand"),
+        "description": template.get("description"),
+        "footer": template.get("footer"),
+        "icon": template.get("icon"),
+    }
+    for field_name, default_value in template_defaults.items():
+        if (
+            applied.get(field_name) is None
+            and generated.get(field_name) == default_value
+        ):
+            if field_name in applied:
+                result[field_name] = None
+            else:
+                result.pop(field_name, None)
     return result
 
 
