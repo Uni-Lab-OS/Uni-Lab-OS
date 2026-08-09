@@ -1,0 +1,393 @@
+"""组合工作流（Composite Workflow）冷启动依赖固定点合同。"""
+
+from __future__ import annotations
+
+from pathlib import Path
+from typing import Any
+
+import pytest
+
+from tests.registry.test_f05_material_source_catalog import _Registry
+from unilabos.app.scheduler.inventory.store import InventoryStore
+from unilabos.package_manager import WorkspaceSource, compile_package_source
+from unilabos.package_manager.workspace_runtime.activation import (
+    workflow_source_plan_from_catalog,
+)
+from unilabos.workflow import composition
+from unilabos.workflow.composition import compose_local_workflow_template_runtime
+from unilabos.workflow.models import CandidateCompilation
+from unilabos.workflow.service import WorkflowService
+from unilabos.workflow.store import WorkflowStore
+
+from .test_c1_r2_static_expansion_contract import (
+    CHILD_WORKFLOW_UUID as PUBLISHED_CHILD_WORKFLOW_UUID,
+)
+from .test_c1_r2_static_expansion_contract import (
+    PARENT_WORKFLOW_UUID as PUBLISHED_PARENT_WORKFLOW_UUID,
+)
+from .test_c1_r4_production_wiring import (
+    PACKAGE_ID as PUBLISHED_PACKAGE_ID,
+)
+from .test_c1_r4_production_wiring import _seed_applied_child
+from .test_c1_r4_production_wiring import _write_package as _write_published_package
+
+# 两个稳定身份刻意让父工作流（Workflow）按 UUID 排在子工作流之前。
+PARENT_WORKFLOW_UUID = "11111111-1111-4111-8111-111111111111"
+CHILD_WORKFLOW_UUID = "22222222-2222-4222-8222-222222222222"
+INITIAL_CATALOG_FINGERPRINT = f"sha256:{'a' * 64}"
+CHILD_READY_CATALOG_FINGERPRINT = f"sha256:{'b' * 64}"
+
+
+class MutableCatalogCompiler:
+    """提供源码不变、模板目录代际可变的可信编译接缝。"""
+
+    compiler_version = "catalog-observation-v1"
+
+    def __init__(self) -> None:
+        """建立初始模板目录代际并清空编译记录。
+
+        参数：无。
+        返回：无；``catalog_fingerprint`` 可由测试推进，``compile_calls`` 记录
+        每次编译绑定的工作流身份与目录指纹。
+        异常：无。
+        """
+
+        # ``catalog_fingerprint`` 是监视器也必须观察的模板目录代际身份。
+        self.catalog_fingerprint = INITIAL_CATALOG_FINGERPRINT
+        # ``compile_calls`` 证明相同源码是否真正按新目录重新编译。
+        self.compile_calls: list[tuple[str, str]] = []
+
+    @property
+    def template_catalog_fingerprint(self) -> str:
+        """返回当前模板目录代际指纹。
+
+        参数：无。
+        返回：测试显式设置的规范 SHA-256 指纹。
+        异常：无。
+        """
+
+        return self.catalog_fingerprint
+
+    def compile(
+        self,
+        *,
+        workflow_uuid: str,
+        workflow_revision: int,
+        python_source: str,
+        source_uri: str,
+        applied_graph: dict[str, Any],
+    ) -> CandidateCompilation:
+        """用当前目录代际生成不改变应用图的可信候选。
+
+        参数：``workflow_uuid``、``workflow_revision`` 和 ``source_uri`` 是编译
+        上下文；``python_source`` 是当前工作流源码；``applied_graph`` 是应用图。
+        返回：绑定当前目录指纹的源码候选。异常：无。
+        """
+
+        # 本适配器只验证源码与目录共同组成观测代，不解释修订和来源 URI。
+        del workflow_revision, source_uri
+        self.compile_calls.append((workflow_uuid, self.catalog_fingerprint))
+        return CandidateCompilation(
+            diagnostics=[],
+            graph=applied_graph,
+            normalized_python_source=python_source,
+            source_map=[],
+            changeset={
+                "kind": "source_only",
+                "created_node_uuids": [],
+                "updated_node_uuids": [],
+                "deleted_node_uuids": [],
+                "created_edge_uuids": [],
+                "updated_edge_uuids": [],
+                "deleted_edge_uuids": [],
+                "reserved_metadata_changed": False,
+            },
+            compiler_version=self.compiler_version,
+            template_catalog_fingerprint=self.catalog_fingerprint,
+        )
+
+
+@pytest.fixture(autouse=True)
+def _isolate_workflow_composition() -> Any:
+    """隔离进程唯一工作流运行时（Workflow Runtime）。
+
+    参数：无。
+    返回：pytest 生命周期控制值。
+    异常：组合根清理失败时原样传播，防止后续测试复用旧权威。
+    """
+
+    composition.reset_workflow_service_for_test()
+    try:
+        yield
+    finally:
+        composition.reset_workflow_service_for_test()
+
+
+def _write_parent_before_child_package(package_root: Path) -> None:
+    """写入父来源先于子来源的最小可编辑包（Editable Package）。
+
+    参数：``package_root`` 是公开工作流组合根授权的包目录。
+    返回：无；清单声明父、子两个稳定身份，源码内容只作为编译器输入证据。
+    异常：文件系统写入失败时原样传播。
+    """
+
+    # ``source_root`` 是清单内两个工作流源码（Workflow Source）的规范父目录。
+    source_root = package_root / "cold_start_lab" / "workflows"
+    source_root.mkdir(parents=True)
+    (source_root / "single_sample.py").write_text(
+        "parent = material_transfer()\n",
+        encoding="utf-8",
+    )
+    (source_root / "material_transfer.py").write_text(
+        "child = transfer_material()\n",
+        encoding="utf-8",
+    )
+    package_root.joinpath("package.yaml").write_text(
+        "package:\n"
+        "  name: cold_start_lab\n"
+        "workflows:\n"
+        f"  - workflow_uuid: {PARENT_WORKFLOW_UUID}\n"
+        "    source: cold_start_lab/workflows/single_sample.py\n"
+        f"  - workflow_uuid: {CHILD_WORKFLOW_UUID}\n"
+        "    source: cold_start_lab/workflows/material_transfer.py\n",
+        encoding="utf-8",
+    )
+
+
+def test_catalog_generation_change_recompiles_unchanged_workspace_source(
+    tmp_path: Path,
+) -> None:
+    """模板目录换代必须让统一监视器重编译未改字节的工作流源码。
+
+    参数：``tmp_path`` 隔离真实包与 SQLite。
+    返回：无；断言源码文件签名不变时目录指纹仍改变公开观测签名，并通过
+    ``submit_source_change`` 产生绑定新目录代际的候选版本（Candidate）。
+    异常：若签名仍只含文件身份，本测试会在新旧签名相等处 RED。
+    """
+
+    # ``package_root`` 复用两个登记来源，但本断言只观察父工作流的稳定源码。
+    package_root = tmp_path / "workspace"
+    _write_parent_before_child_package(package_root)
+    # ``compiler`` 的目录代际可独立于工作流源码字节推进。
+    compiler = MutableCatalogCompiler()
+    service = composition.compose_workflow_runtime(
+        tmp_path / "runtime",
+        compiler=compiler,
+        editable_package_roots=(package_root,),
+        start_source_monitor=False,
+    )
+    initial_signature = service.source_signature(PARENT_WORKFLOW_UUID)
+    initial_compile_count = len(compiler.compile_calls)
+
+    compiler.catalog_fingerprint = CHILD_READY_CATALOG_FINGERPRINT
+    changed_signature = service.source_signature(PARENT_WORKFLOW_UUID)
+
+    assert changed_signature != initial_signature
+    assert service.submit_source_change(
+        PARENT_WORKFLOW_UUID,
+        observed_signature=changed_signature,
+    )
+    parent_authoring = service.get_authoring(PARENT_WORKFLOW_UUID)
+    assert len(compiler.compile_calls) == initial_compile_count + 1
+    assert parent_authoring["candidate"]["template_catalog_fingerprint"] == (
+        CHILD_READY_CATALOG_FINGERPRINT
+    )
+    assert service.list_events(after_sequence=0)["items"][-1]["data"]["cause"] == (
+        "catalog_changed"
+    )
+
+
+def test_applying_child_refreshes_parent_without_rewriting_parent_source(
+    tmp_path: Path,
+) -> None:
+    """应用子工作流后必须自动重编译同目录的组合父工作流。
+
+    参数：``tmp_path`` 隔离全新工作流、库存 SQLite 与真实作者源码。
+    返回：无；先证明父工作流因已登记但未应用的子合同失败，再通过真实
+    ``apply_authoring``、编译器重建器和模板投影发布子合同，最后断言父源码字节
+    未修改也自动得到候选版本（Candidate）。异常：若仍需手工 PUT 父源码，父
+    创作投影会继续保留 ``composite_child_unapplied`` 并使测试失败。
+    """
+
+    # ``selected_root`` 是生产组合根明确授权的可编辑包（Editable Package）。
+    selected_root = tmp_path / "editable"
+    selected_root.mkdir()
+    _write_published_package(selected_root)
+    # ``pyproject.toml`` 与包初始化文件让测试走产品工作区统一包目录编译路径，
+    # 避免遗留可编辑根缺少模块/符号目录身份而退化为未登记语义。
+    selected_root.joinpath("pyproject.toml").write_text(
+        '[project]\nname = "c1-product-lab"\nversion = "0.1.0"\n',
+        encoding="utf-8",
+    )
+    selected_root.joinpath(PUBLISHED_PACKAGE_ID, "__init__.py").write_text(
+        "",
+        encoding="utf-8",
+    )
+    # ``source_plan`` 是工作区包目录（PackageCatalog）同次编译产生的完整来源
+    # 身份，包含组合解析所需的 module、symbol 与内容哈希。
+    workspace_source = WorkspaceSource(selected_root)
+    package_catalog = compile_package_source(workspace_source)
+    source_plan = workflow_source_plan_from_catalog(
+        source=workspace_source,
+        catalog=package_catalog,
+    )
+    # ``parent_source_path`` 是父工作流源码权威；测试前后字节必须完全相同。
+    parent_source_path = (
+        selected_root / PUBLISHED_PACKAGE_ID / "workflows" / "parent.py"
+    )
+    parent_source_before = parent_source_path.read_bytes()
+    # ``inventory_store`` 为模板投影提供本地资源模板身份持久化边界。
+    inventory_store = InventoryStore(str(tmp_path / "inventory.db"))
+    try:
+        service, _projection = compose_local_workflow_template_runtime(
+            tmp_path,
+            inventory_store=inventory_store,
+            registry=_Registry(),
+            editable_source_discovery_plan=source_plan,
+            start_source_monitor=False,
+        )
+        initial_parent = service.get_authoring(PUBLISHED_PARENT_WORKFLOW_UUID)
+        initial_codes = {
+            diagnostic["code"]
+            for diagnostic in initial_parent["draft"]["diagnostics"]
+        }
+        assert initial_parent["state"] == "draft_invalid"
+        assert "composite_child_unapplied" in initial_codes
+        assert "composite_child_not_found" not in initial_codes
+
+        # ``child_candidate`` 是真实编译器为尚未发布的子工作流签发的持久候选。
+        child_authoring = service.get_authoring(PUBLISHED_CHILD_WORKFLOW_UUID)
+        child_candidate = child_authoring["candidate"]
+        assert child_candidate is not None, child_authoring["draft"]["diagnostics"]
+        service.apply_authoring(
+            PUBLISHED_CHILD_WORKFLOW_UUID,
+            candidate_hash=child_candidate["candidate_hash"],
+        )
+
+        # ``refreshed_parent`` 必须来自发布后目录依赖刷新，不能依赖文件重写事件。
+        refreshed_parent = service.get_authoring(PUBLISHED_PARENT_WORKFLOW_UUID)
+        assert refreshed_parent["state"] == "unapplied_graph"
+        assert refreshed_parent["candidate"] is not None
+        assert refreshed_parent["draft"]["diagnostics"] == []
+        assert parent_source_path.read_bytes() == parent_source_before
+    finally:
+        composition.reset_workflow_service_for_test()
+        inventory_store.close()
+
+
+def test_restart_recompiles_persisted_parent_failure_against_current_catalog(
+    tmp_path: Path,
+) -> None:
+    """启动恢复必须用当前发布目录替换父工作流的旧失败诊断。
+
+    参数：``tmp_path`` 隔离真实工作区与 SQLite。
+    返回：无；第一进程持久化 ``composite_child_unapplied``，停机期间子工作流
+    获得同修订应用事实，第二进程不改父源码也必须生成父候选版本（Candidate）。
+    异常：若启动只比较源码哈希并复用旧诊断，重启后的父状态仍为
+    ``draft_invalid`` 并使测试失败。
+    """
+
+    # ``selected_root`` 包含真实父子作者源码和统一包目录声明。
+    selected_root = tmp_path / "editable"
+    selected_root.mkdir()
+    _write_published_package(selected_root)
+    selected_root.joinpath("pyproject.toml").write_text(
+        '[project]\nname = "c1-product-lab"\nversion = "0.1.0"\n',
+        encoding="utf-8",
+    )
+    selected_root.joinpath(PUBLISHED_PACKAGE_ID, "__init__.py").write_text(
+        "",
+        encoding="utf-8",
+    )
+    workspace_source = WorkspaceSource(selected_root)
+    package_catalog = compile_package_source(workspace_source)
+    source_plan = workflow_source_plan_from_catalog(
+        source=workspace_source,
+        catalog=package_catalog,
+    )
+    inventory_store = InventoryStore(str(tmp_path / "inventory.db"))
+    try:
+        first_service, _first_projection = compose_local_workflow_template_runtime(
+            tmp_path,
+            inventory_store=inventory_store,
+            registry=_Registry(),
+            editable_source_discovery_plan=source_plan,
+            start_source_monitor=False,
+        )
+        first_parent = first_service.get_authoring(PUBLISHED_PARENT_WORKFLOW_UUID)
+        first_codes = {
+            diagnostic["code"]
+            for diagnostic in first_parent["draft"]["diagnostics"]
+        }
+        assert first_codes == {"composite_child_unapplied"}
+        composition.reset_workflow_service_for_test()
+
+        # ``_seed_applied_child`` 模拟进程关闭期间已经完成的子工作流发布事实；父
+        # 源码和父创作记录均保持不变，用于验证启动恢复而非文件监视。
+        _seed_applied_child(tmp_path, selected_root)
+        restarted, _restarted_projection = compose_local_workflow_template_runtime(
+            tmp_path,
+            inventory_store=inventory_store,
+            registry=_Registry(),
+            editable_source_discovery_plan=source_plan,
+            start_source_monitor=False,
+        )
+        restarted_parent = restarted.get_authoring(PUBLISHED_PARENT_WORKFLOW_UUID)
+
+        # ``parent_recovery_causes`` 只观察父工作流本次及历史创作事件；重启没有
+        # 已知本进程前代，必须记为恢复而不是伪造一次目录变化。
+        parent_recovery_causes = [
+            event["data"]["cause"]
+            for event in restarted.list_events(after_sequence=0)["items"]
+            if event["data"].get("workflow_uuid")
+            == PUBLISHED_PARENT_WORKFLOW_UUID
+        ]
+
+        assert restarted_parent["state"] == "unapplied_graph"
+        assert restarted_parent["candidate"] is not None
+        assert restarted_parent["draft"]["diagnostics"] == []
+        assert parent_recovery_causes[-1] == "recovered"
+    finally:
+        composition.reset_workflow_service_for_test()
+        inventory_store.close()
+
+
+def test_missing_source_recovery_does_not_require_template_catalog(
+    tmp_path: Path,
+) -> None:
+    """缺失源码恢复不得要求尚未装配的模板目录（Template Catalog）。
+
+    参数：``tmp_path`` 隔离工作流 SQLite 与空包目录。
+    返回：无；无编译器服务强制恢复缺失工作流源码（Workflow Source）后公开
+    ``draft_missing``，且不会伪造目录代际。异常：若恢复尾部仍调用
+    ``_catalog_fingerprint``，测试以 ``template_catalog_unavailable`` 失败。
+    """
+
+    # ``store`` 与 ``service`` 模拟仅承担来源授权、尚未装配创作编译器的启动阶段。
+    store = WorkflowStore(tmp_path / "workflow.db")
+    service = WorkflowService(store)
+    package_root = tmp_path / "missing_source_lab"
+    package_root.mkdir()
+    service.create_workflow(
+        workflow_uuid=PARENT_WORKFLOW_UUID,
+        name="缺失源码恢复",
+        tags=[],
+        description=None,
+        meta_data={},
+    )
+    service.replace_active_editable_source_authorization(
+        workflow_uuid=PARENT_WORKFLOW_UUID,
+        package_id="missing_source_lab",
+        package_root=package_root,
+        relative_path="workflows/missing.py",
+    )
+    try:
+        recovered = service.reconcile_registered_source(
+            PARENT_WORKFLOW_UUID,
+            force_compile=True,
+        )
+    finally:
+        service.close()
+
+    assert recovered["state"] == "draft_missing"
+    assert recovered["candidate"] is None

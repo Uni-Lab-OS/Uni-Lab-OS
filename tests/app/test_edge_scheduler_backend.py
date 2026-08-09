@@ -307,3 +307,98 @@ class TestEdgeStackEndToEnd:
             assert len(host.sent_goals) == 4
         finally:
             backend.stop()
+
+    def test_composition_root_serializes_different_actions_on_one_device(self):
+        """证明真实组合根在派发器边界前串行同一设备的不同动作。
+
+        参数：无；测试通过 ``create_edge_stack`` 装配真实作业执行微后端。
+        返回：无；断言只有第一个动作到达模拟 HostNode。
+        异常：若第二个动作越过真实派发器（Dispatcher）边界，断言失败。
+        """
+        backend_ref: dict[str, Any] = {}
+        host = FakeHostNode(backend_ref, auto_complete=False)
+        # 为第二个动作提供合法注册表 Schema，避免合同缺失掩盖设备级互斥行为。
+        host._action_value_mappings["shared"]["inspect"] = _unlocked_action_mapping()
+        scheduler, backend = create_edge_stack(host_node_getter=lambda: host)
+        backend_ref["backend"] = backend
+        try:
+            first_result = scheduler.submit_workflow(
+                WorkflowSpec(
+                    workflow_id="wf-real-run",
+                    nodes=[_node("run-node", device="shared", action="run")],
+                )
+            )
+            second_result = scheduler.submit_workflow(
+                WorkflowSpec(
+                    workflow_id="wf-real-inspect",
+                    nodes=[_node("inspect-node", device="shared", action="inspect")],
+                )
+            )
+
+            assert backend.wait_idle()
+            assert len(first_result["dispatched"]) == 1
+            assert second_result["dispatched"] == []
+            assert [(goal.device_id, goal.action_name) for goal in host.sent_goals] == [
+                ("shared", "run")
+            ]
+        finally:
+            backend.stop()
+
+    def test_canceled_workflow_waits_for_external_device_terminal_before_reuse(self):
+        """证明本地取消不能绕过作业执行微后端仍持有的动作级忙碌事实。
+
+        参数：无；测试通过真实 ``create_edge_stack`` 依次执行派发、取消、再次
+        准入和明确终态回报。
+        返回：无；断言取消后同设备不同动作保持等待，只有执行器（Executor）
+        明确终态且外部忙碌事实消失后才允许重新派发。
+        异常：若取消被错误当成物理停止证明，或严格动作键未提升为设备键，断言失败。
+        """
+        backend_ref: dict[str, Any] = {}
+        host = FakeHostNode(backend_ref, auto_complete=False)
+        # 两个动作合同均合法，使本测试只观察设备级准入而非 Schema 失败。
+        host._action_value_mappings["shared"]["inspect"] = _unlocked_action_mapping()
+        scheduler, backend = create_edge_stack(host_node_getter=lambda: host)
+        backend_ref["backend"] = backend
+        try:
+            first_result = scheduler.submit_workflow(
+                WorkflowSpec(
+                    workflow_id="wf-canceled-run",
+                    nodes=[_node("run-node", device="shared", action="run")],
+                )
+            )
+            assert backend.wait_idle()
+            assert scheduler.cancel_workflow("wf-canceled-run") is True
+
+            # 本地在途作业已移除，但微后端仍持有 run 的动作级物理忙碌事实。
+            waiting_result = scheduler.submit_workflow(
+                WorkflowSpec(
+                    workflow_id="wf-waiting-inspect-after-cancel",
+                    nodes=[_node("inspect-node", device="shared", action="inspect")],
+                )
+            )
+            assert waiting_result["dispatched"] == []
+            assert [(goal.device_id, goal.action_name) for goal in host.sent_goals] == [
+                ("shared", "run")
+            ]
+
+            # 明确终态引用原作业身份；微后端释放动作键后，公开重排才可准入 inspect。
+            run_job_uuid = first_result["dispatched"][0]["job_id"]
+            backend.publish_job_status(
+                {},
+                host.sent_goals[0],
+                "success",
+                serialize_result_info("", True, {"stopped": True}),
+            )
+            assert backend.wait_idle()
+            assert backend.device_manager.get_job_info(run_job_uuid) is None
+
+            released = scheduler.reschedule()
+            assert len(released) == 1
+            assert released[0]["workflow_id"] == "wf-waiting-inspect-after-cancel"
+            assert backend.wait_idle()
+            assert [(goal.device_id, goal.action_name) for goal in host.sent_goals] == [
+                ("shared", "run"),
+                ("shared", "inspect"),
+            ]
+        finally:
+            backend.stop()

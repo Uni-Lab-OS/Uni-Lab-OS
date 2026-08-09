@@ -48,6 +48,8 @@ def build_published_workflow_generation(
         (str, bytes),
     ):
         raise PublishedWorkflowGenerationError("活动工作流来源必须是数组")
+    # ``snapshots`` 只保存与活动包目录源码内容一致的同修订应用事实；来源解析
+    # 目录仍保留已登记未应用项，以便组合编译返回准确诊断。
     snapshots: dict[str, Mapping[str, Any]] = {}
     records: list[dict[str, str]] = []
     for index, registration in enumerate(registrations):
@@ -60,19 +62,26 @@ def build_published_workflow_generation(
             raise PublishedWorkflowGenerationError(
                 f"活动工作流来源 {index} 字段不完整"
             ) from None
+        # ``catalog_identity`` 来自同次包目录（PackageCatalog）静态编译，不触发
+        # 第二次扫描、Python import 或作者源码执行。
+        catalog_identity = _catalog_identity(registration)
         try:
-            snapshot = snapshot_provider.get_published_workflow_snapshot(
-                workflow_uuid
+            snapshot: Mapping[str, Any] | None = (
+                snapshot_provider.get_published_workflow_snapshot(workflow_uuid)
             )
         except LookupError:
-            # 活动来源指向缺失/软删除定义时不能被猜成发布合同；启动目录保持关闭。
-            continue
-        if not _eligible(snapshot):
-            continue
-        workflow = snapshot["workflow"]
-        applied_source = snapshot["applied_source"]
-        symbol = _authoring_symbol(workflow)
-        module = _source_module(package_id, relative_path)
+            snapshot = None
+        if catalog_identity is None:
+            # 非工作区遗留入口没有冻结包目录身份时，仅保留既有已应用来源行为。
+            if snapshot is None or not _eligible(snapshot):
+                continue
+            workflow = snapshot["workflow"]
+            applied_source = snapshot["applied_source"]
+            symbol = _authoring_symbol(workflow)
+            module = _source_module(package_id, relative_path)
+            definition_content_hash = str(applied_source["source_hash"])
+        else:
+            module, symbol, definition_content_hash = catalog_identity
         records.append(
             {
                 "workflow_uuid": workflow_uuid,
@@ -80,15 +89,16 @@ def build_published_workflow_generation(
                 "module": module,
                 "symbol": symbol,
                 "source_uri": source_uri,
-                "definition_content_hash": str(applied_source["source_hash"]),
+                "definition_content_hash": definition_content_hash,
             }
         )
-        snapshots[workflow_uuid] = snapshot
+        if snapshot is not None and _eligible(snapshot):
+            snapshots[workflow_uuid] = snapshot
     try:
         source_catalog = PublishedSourceCatalog.from_records(records)
     except (TypeError, ValueError) as error:
         raise PublishedWorkflowGenerationError(str(error)) from error
-    if not source_catalog.sources:
+    if not snapshots:
         return PublishedWorkflowGeneration(
             source_catalog=source_catalog,
             node_templates=(),
@@ -98,6 +108,8 @@ def build_published_workflow_generation(
     nodes: list[dict[str, Any]] = []
     handles: list[dict[str, Any]] = []
     for source in source_catalog.sources:
+        if source.workflow_uuid not in snapshots:
+            continue
         try:
             projected = project_published_workflow_contract(
                 source=source,
@@ -107,9 +119,7 @@ def build_published_workflow_generation(
         except PublishedWorkflowContractError as error:
             raise PublishedWorkflowGenerationError(error.code) from error
         if projected is None:
-            raise PublishedWorkflowGenerationError(
-                "发布资格在同一目录构造期间发生漂移"
-            )
+            raise PublishedWorkflowGenerationError("发布资格在同一目录构造期间发生漂移")
         nodes.append(projected.template)
         handles.extend(projected.handles)
     return PublishedWorkflowGeneration(
@@ -123,7 +133,8 @@ def _eligible(snapshot: Mapping[str, Any]) -> bool:
     """判断快照是否具有同修订应用源码且哈希可用于静态发布。
 
     参数：``snapshot`` 是只读存储回执。返回：工作流、正修订和同修订应用哈希
-    完整时为 ``True``。异常：无；不完整值不进入来源目录。
+    完整时为 ``True``。异常：无；包目录源码哈希和规范化应用源码哈希分别作为
+    来源证据与应用证据保存，不要求字节相同。
     """
 
     workflow = snapshot.get("workflow") if isinstance(snapshot, Mapping) else None
@@ -141,6 +152,31 @@ def _eligible(snapshot: Mapping[str, Any]) -> bool:
     )
 
 
+def _catalog_identity(
+    registration: Mapping[str, Any],
+) -> tuple[str, str, str] | None:
+    """读取包目录（PackageCatalog）已经静态编译的来源身份。
+
+    参数：``registration`` 是同一发现计划中的源码登记项。
+    返回：模块、符号和内容哈希均缺失时返回 ``None``；三者完整时返回元组。
+    异常：字段部分缺失或不是字符串时抛出
+    ``PublishedWorkflowGenerationError``，禁止退回路径猜测。
+    """
+
+    # ``values`` 是同一冻结包目录必须整体交付的三项源码证据。
+    values = (
+        registration.get("module"),
+        registration.get("symbol"),
+        registration.get("definition_content_hash"),
+    )
+    if values == (None, None, None):
+        return None
+    if any(not isinstance(value, str) or not value for value in values):
+        raise PublishedWorkflowGenerationError("活动工作流来源目录身份不完整")
+    module, symbol, definition_content_hash = values
+    return module, symbol, definition_content_hash
+
+
 def _authoring_symbol(workflow: Mapping[str, Any]) -> str:
     """读取已应用工作流唯一作者函数符号。
 
@@ -150,7 +186,9 @@ def _authoring_symbol(workflow: Mapping[str, Any]) -> str:
 
     meta_data = workflow.get("meta_data")
     unilab = meta_data.get("unilab") if isinstance(meta_data, Mapping) else None
-    symbol = unilab.get("authoring_function_name") if isinstance(unilab, Mapping) else None
+    symbol = (
+        unilab.get("authoring_function_name") if isinstance(unilab, Mapping) else None
+    )
     if not isinstance(symbol, str) or not symbol.isidentifier():
         raise PublishedWorkflowGenerationError("已应用工作流缺少作者函数符号")
     return symbol
@@ -159,12 +197,27 @@ def _authoring_symbol(workflow: Mapping[str, Any]) -> str:
 def _source_module(package_id: str, relative_path: str) -> str:
     """把已授权包身份和规范相对路径转换为绝对 Python 模块。
 
-    参数：包 ID 与 ``workflows/*.py`` 相对路径来自来源注册。返回：不导入模块的
-    静态点分身份。异常：任一分段不是 Python 标识符时抛出发布代际错误。
+    参数：包 ID 与源码相对路径来自来源注册；路径必须是规范 POSIX 相对路径、
+    以 ``.py`` 结尾，且既可相对包根，也可包含与包 ID 精确相等的首段。
+    返回：包根恰好出现一次且不导入模块的静态点分身份。异常：路径不规范、
+    后缀不是 ``.py`` 或任一分段不是 Python 标识符时抛出发布代际错误；只按
+    原始完整首段去重，不对去除后缀后的文件名或前缀相似包名做模糊裁剪。
     """
 
+    # ``path`` 是来源注册交付的 POSIX 源码身份，不访问本地文件系统。
     path = PurePosixPath(relative_path)
-    parts = (package_id, *path.with_suffix("").parts)
+    if path.is_absolute() or relative_path != path.as_posix() or path.suffix != ".py":
+        raise PublishedWorkflowGenerationError("工作流来源不能转换为绝对模块")
+    # ``source_parts`` 保留文件后缀，确保同名 ``pkg.py`` 不会被误当成包根。
+    source_parts = path.parts
+    # ``has_package_root`` 只记录原始首段是否为完整包身份，不做字符串前缀匹配。
+    has_package_root = source_parts[:1] == (package_id,)
+    # ``relative_parts`` 仅在判断原始首段后移除精确 ``.py``，保留真实子包层级。
+    relative_parts = path.with_suffix("").parts
+    if has_package_root:
+        relative_parts = relative_parts[1:]
+    # ``parts`` 是最终绝对 Python 模块的有序身份分段。
+    parts = (package_id, *relative_parts)
     if any(not part.isidentifier() for part in parts):
         raise PublishedWorkflowGenerationError("工作流来源不能转换为绝对模块")
     return ".".join(parts)
@@ -184,9 +237,7 @@ def _host_summary(
         meta_data = template.get("meta_data")
         unilab = meta_data.get("unilab") if isinstance(meta_data, Mapping) else None
         summary = (
-            unilab.get("resource_template")
-            if isinstance(unilab, Mapping)
-            else None
+            unilab.get("resource_template") if isinstance(unilab, Mapping) else None
         )
         if isinstance(summary, Mapping) and summary.get("name") == "host_node":
             candidate = {

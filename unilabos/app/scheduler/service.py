@@ -9,7 +9,7 @@
 
     收集所有 RUNNING 工作流的 ready 节点
       → TaskOrderer 排序（本地 stub 或 HTTP 调 uni-lab-scheduler）
-      → 按序下发；device_action_key 被占用的节点跳过，等下一次触发
+      → 按序下发；动作键或设备级互斥键被占用的节点跳过，等下一次触发
       → 下发前解析父节点传参（gjson/sjson + ``@@@`` 语义）
 
 不做一次性拓扑序：ready 集合每次触发点都重新计算、重新排序。
@@ -74,6 +74,32 @@ from unilabos.utils.tracing import (
 )
 
 logger = logging.getLogger(__name__)
+
+
+def _device_key_from_strict_action_key(action_key: Any) -> str | None:
+    """从严格动作级忙碌键提取设备级内存互斥键。
+
+    参数：``action_key`` 是外部忙碌提供者返回的候选键。
+    返回：仅当输入严格符合 ``/devices/{device_id}/{action_name}`` 且设备、动作
+    均非空时返回 ``/devices/{device_id}``；其他输入返回 ``None``。
+    异常：不主动抛出异常；非字符串和歧义路径一律不解析，避免误扩大互斥范围。
+
+    该转换只桥接既有动作级内存事实，不产生持久作业执行占用
+    （JobExecutionClaim）或栅栏（Fence）。
+    """
+
+    if not isinstance(action_key, str):
+        return None
+    path_parts = action_key.split("/")
+    if (
+        len(path_parts) != 4
+        or path_parts[0] != ""
+        or path_parts[1] != "devices"
+        or not path_parts[2]
+        or not path_parts[3]
+    ):
+        return None
+    return f"/devices/{path_parts[2]}"
 
 
 class EdgeScheduler:
@@ -664,8 +690,14 @@ class EdgeScheduler:
     def _reschedule_impl(self) -> List[Dict[str, Any]]:
         """执行一轮完整重排，并下发当前能够安全执行的作业（Job）。
 
+        参数：无；读取当前调度器（Scheduler）的工作流、库存、动作物料锁和
+        进程内设备忙碌事实。
         Returns:
             本轮成功派发的作业摘要列表；物料冲突保持等待，合同错误标记失败。
+
+        异常：参数解析和动作物料锁合同错误在对应工作流节点上失败关闭；库存
+        或派发基础设施异常按既有边界处理。设备级互斥只提供当前进程安全桥，
+        不表示已经取得持久作业执行占用（JobExecutionClaim）。
         """
 
         self._reschedule_count += 1
@@ -727,11 +759,14 @@ class EdgeScheduler:
 
         dispatched: List[Dict[str, Any]] = []
         for task in ordered:
-            key = task.node.device_action_key
+            # 动作键继续服务时长估算、遥测与既有执行协议；设备键独立负责保证
+            # 同一设备上的不同动作不会在本轮或跨重排并行派发。
+            action_key = task.node.device_action_key
+            device_key = task.node.device_lock_key
             # manual_confirm 是 always-free 特殊节点：不占设备动作锁，也不受其阻塞
             manual_confirm = task.node.is_manual_confirm()
-            if not manual_confirm and key in busy:
-                # 设备/动作被占用：本轮跳过，等占用 job 完成的那次重排再下发
+            if not manual_confirm and (action_key in busy or device_key in busy):
+                # 动作或设备已被占用：本轮跳过，等占用作业完成后准入重试。
                 continue
 
             run = self._workflows[task.workflow_id]
@@ -811,7 +846,9 @@ class EdgeScheduler:
             )
             # 预估基于 sjson 覆写后的 resolved 参数：父节点经 gjson/sjson 传下来的
             # 实际值（如 time）直接决定声明式预估结果
-            estimated_s, estimate_source = self._estimator.estimate(key, resolved_args)
+            estimated_s, estimate_source = self._estimator.estimate(
+                action_key, resolved_args
+            )
             workflow_trace = self._workflow_spans.get(task.workflow_id)
             action_trace = start_detached_span(
                 "action.run",
@@ -847,7 +884,7 @@ class EdgeScheduler:
                                 "job_id": job_id,
                                 "workflow_id": task.workflow_id,
                                 "node_id": task.node.id,
-                                "device_action_key": key,
+                                "device_action_key": action_key,
                                 "estimated_s": round(estimated_s, 3),
                                 "estimate_source": estimate_source,
                                 "resolved_args": resolved_args,
@@ -860,7 +897,7 @@ class EdgeScheduler:
                             job_id=job_id,
                             workflow_id=task.workflow_id,
                             node_id=task.node.id,
-                            device_action_key=key,
+                            device_action_key=action_key,
                             device_id=task.node.device_id,
                             action_name=task.node.action_name,
                             estimated_s=estimated_s,
@@ -887,13 +924,14 @@ class EdgeScheduler:
                 },
             )
             if not manual_confirm:
-                busy.add(key)
+                # 同轮立即登记两种键；后续候选即使动作不同，也不能绕过设备互斥。
+                busy.update((action_key, device_key))
             # ``dispatched_item`` 同时供返回值、监控和标准 Task/Job 状态投影使用。
             dispatched_item = {
                 "job_id": job_id,
                 "workflow_id": task.workflow_id,
                 "node_id": task.node.id,
-                "device_action_key": key,
+                "device_action_key": action_key,
                 "estimated_s": round(estimated_s, 3),
                 "estimate_source": estimate_source,
             }
@@ -907,7 +945,7 @@ class EdgeScheduler:
                     "node_id": task.node.id,
                     "device_id": task.node.device_id,
                     "action_name": task.node.action_name,
-                    "device_action_key": key,
+                    "device_action_key": action_key,
                     "estimated_s": round(estimated_s, 3),
                     "estimate_source": estimate_source,
                     "manual_confirm": manual_confirm,
@@ -920,7 +958,7 @@ class EdgeScheduler:
                     {
                         "device_id": task.node.device_id,
                         "action_name": task.node.action_name,
-                        "device_action_key": key,
+                        "device_action_key": action_key,
                         "job_id": job_id,
                         "workflow_id": task.workflow_id,
                     },
@@ -1058,14 +1096,37 @@ class EdgeScheduler:
         return keys
 
     def _busy_keys(self) -> Set[str]:
+        """合并外部与本地在途作业的动作级、设备级内存忙碌键。
+
+        参数：无；外部键来自构造注入集合和可选实时提供者。
+        返回：供一次准入重排使用的忙碌键副本；不会把人工确认节点计入互斥。
+        异常：外部提供者异常会被记录，并沿用既有降级，仅使用已知本地事实。
+
+        该集合不会跨进程重启恢复，也没有占用 UUID 或栅栏令牌，因此不是持久
+        作业执行占用（JobExecutionClaim）。
+        """
+
         busy = set(self._external_busy_keys)
         if self._busy_key_provider is not None:
             try:
                 busy |= set(self._busy_key_provider())
             except Exception:  # noqa: BLE001 - 锁视图失败时退化为 inflight 视图
                 logger.exception("[EdgeScheduler] busy_key_provider failed")
+        # 外部执行层仍使用动作级忙碌键；保留原键用于既有协议，同时把严格
+        # 形状稳定提升为设备键，使取消后的物理在途作业继续阻塞同设备其他动作。
+        for external_action_key in tuple(busy):
+            device_key = _device_key_from_strict_action_key(external_action_key)
+            if device_key is not None:
+                busy.add(device_key)
         for job in self._inflight.values():
+            # 由在途作业身份回到其工作流节点，只为识别不占设备的人工确认节点。
+            run = self._workflows.get(job.workflow_id)
+            node = run.node(job.node_id) if run is not None else None
+            # 人工确认节点只等待操作者输入，不使用设备执行器，也不建立设备互斥。
+            if node is not None and node.is_manual_confirm():
+                continue
             busy.add(job.device_action_key)
+            busy.add(f"/devices/{job.device_id}")
         return busy
 
     # ── 泳道图时间线 ─────────────────────────────────────────

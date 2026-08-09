@@ -18,6 +18,10 @@ from unilabos.workflow.schema import (
     parse_output_contract,
     parse_value_schema,
 )
+from unilabos.workflow.site_selector_value_schema import (
+    SiteSelectorValueSchemaError,
+    normalize_projected_site_selector_schema,
+)
 
 _EMPTY_INPUT_CONTRACT = {"version": 1, "parameters": []}
 _EMPTY_OUTPUT_CONTRACT = {"version": 1, "outputs": []}
@@ -158,8 +162,12 @@ def validate_workflow_graph_io(
 def handle_value_schema(handle: Mapping[str, Any]) -> WorkflowValueSchema:
     """读取连接点（Handle）的规范值 Schema。
 
-    参数说明：`handle` 是目录中的连接点（Handle）投影。优先读取规范
-    `value_schema`，旧 `type` 只作为兼容输入；返回严格解析后的不可变 Schema。
+    参数：``handle`` 是目录中的连接点（Handle）投影，优先携带规范
+    ``value_schema``，旧 ``type`` 只作为兼容输入。
+    返回：经过可空联合规范化、物料占位符（ResourceSlot）投影和严格解析的
+    不可变工作流值 Schema。
+    异常：连接点元数据、可空联合、物料模板约束或值 Schema 非法时抛出
+    ``WorkflowIOValidationError``，不会按旧显示类型猜测有效合同。
     """
 
     meta_data = handle.get("meta_data", {})
@@ -171,7 +179,7 @@ def handle_value_schema(handle: Mapping[str, Any]) -> WorkflowValueSchema:
         raise WorkflowIOValidationError("连接点（Handle）value_schema 无效")
     # ``plain_schema`` 是与冻结目录分离的动作字段 JSON Schema；物料字段需先
     # 投影成工作流唯一的物料占位符（ResourceSlot）值 Schema，再做 I/O 校验。
-    plain_schema = _plain_mapping(raw_schema)
+    plain_schema = _normalize_nullable_json_type(_plain_mapping(raw_schema))
     schema = _projected_material_value_schema(plain_schema)
     if schema is None and str(handle.get("type") or "").lower() == "resourceslot":
         schema = {"$slot": "ResourceSlot"}
@@ -277,14 +285,28 @@ def schema_contains_resource_slot(
 
 
 def _value_set_schema(schema: dict[str, Any]) -> dict[str, Any]:
-    """删除只影响展示或默认值、不影响可赋值集合的 Schema 注解。
+    """把动作字段 JSON Schema 规范化为闭合的工作流值 Schema。
 
-    参数说明：`schema` 是调用者已复制的普通字典；函数原地规范嵌套成员并
-    返回同一逻辑对象，使目录注解不改变工作流类型兼容结论。
+    参数：``schema`` 是调用者已深复制的普通字典；库位选择（SiteSelection）
+    先交给严格适配器，其他字段再删除展示/默认值注解并规范可空 ``type`` 联合。
+    返回：不改变 required 语义的闭合值集合，合法的单一非空类型加 ``null``
+    确定性转成非空成员在前的 ``anyOf``。
+
+    异常：库位选择合同或可空联合非法时抛出 ``WorkflowIOValidationError``；
+    其他未知字段保留给第 1 版 parser 失败关闭，不交给物料投影猜测。
     """
 
+    try:
+        site_selector_schema = normalize_projected_site_selector_schema(schema)
+    except SiteSelectorValueSchemaError as error:
+        raise WorkflowIOValidationError(
+            f"连接点（Handle）库位选择合同无效: {error.message}"
+        ) from error
+    if site_selector_schema is not None:
+        return site_selector_schema
     for key in ("default", "title", "description"):
         schema.pop(key, None)
+    schema = _normalize_nullable_json_type(schema)
     if "anyOf" in schema:
         members = schema.get("anyOf")
         if not isinstance(members, list):
@@ -299,6 +321,38 @@ def _value_set_schema(schema: dict[str, Any]) -> dict[str, Any]:
     if schema.get("type") == "object" and schema.get("additionalProperties") is True:
         schema.pop("additionalProperties")
     return schema
+
+
+def _normalize_nullable_json_type(schema: dict[str, Any]) -> dict[str, Any]:
+    """严格规范化单个 JSON Schema 的可空 ``type`` 联合。
+
+    参数：``schema`` 是已与冻结目录分离的动作字段 JSON Schema 普通字典。
+    返回：无 ``type`` 数组时返回原字典；合法的唯一非空类型加唯一 ``null``
+    联合返回非空成员在前的规范 ``anyOf``。
+    异常：联合成员数、``null`` 基数或非空成员类型非法时抛出
+    ``WorkflowIOValidationError``，确保任何物料语义投影前已经失败关闭。
+    """
+
+    # ``json_types`` 是 Pydantic 动作合同输出的联合成员；列表出现就必须完整
+    # 满足当前可空闭集，不能因后续识别出物料 UUID 外形而跳过基数校验。
+    json_types = schema.get("type")
+    if not isinstance(json_types, (list, tuple)):
+        return schema
+    non_null_types = [item for item in json_types if item != "null"]
+    if (
+        len(json_types) != 2
+        or len(non_null_types) != 1
+        or json_types.count("null") != 1
+        or not isinstance(non_null_types[0], str)
+    ):
+        raise WorkflowIOValidationError("连接点（Handle）value_schema 无效")
+    schema["type"] = non_null_types[0]
+    return {
+        "anyOf": [
+            schema,
+            {"type": "null"},
+        ]
+    }
 
 
 def _validate_input_bindings(
@@ -788,11 +842,18 @@ def _projected_material_value_schema(
 ) -> dict[str, Any] | None:
     """把动作字段 JSON Schema 投影为规范物料占位符值 Schema。
 
-    参数说明：``schema`` 是动作合同投影保留的对象、数组或可空物料引用；返回
-    对应的 ``ResourceSlot``、物料数组或可空规范 Schema，非物料字段返回
-    ``None``。物料锁标记只决定执行占用，不进入工作流值类型。
-    异常：无；无法识别的 Schema 关闭式返回 ``None``。
+    参数：``schema`` 是动作合同投影保留的对象、数组或可空物料引用。
+    返回：对应的物料占位符（ResourceSlot）、物料数组或可空规范 Schema；
+    非物料字段返回 ``None``。动作物料锁（Action Material Lock）标记只决定
+    执行占用，不进入工作流值类型。
+    异常：嵌套物料 Schema 的可空 ``type`` 联合非法时抛出
+    ``WorkflowIOValidationError``，无法识别的合法 Schema 则关闭式返回 ``None``。
     """
+
+    # ``normalized_schema`` 确保数组成员或 anyOf 成员递归进入物料投影前也使用
+    # 与根连接点（Handle）相同的严格可空联合规则。
+    normalized_schema = _normalize_nullable_json_type(_plain_mapping(schema))
+    schema = normalized_schema
 
     # 已规范化工作流连接点（Handle）会直接携带物料占位符
     # （ResourceSlot）；不能把它降级为旧 ``type`` 推断，否则数组/可空包装会丢失。
@@ -816,17 +877,7 @@ def _projected_material_value_schema(
             if projected is not None:
                 return {"anyOf": [projected, {"type": "null"}]}
 
-    # ``json_types`` 接受 Pydantic 生成的 ``["object", "null"]`` 可空形态。
     json_type = schema.get("type")
-    if isinstance(json_type, (list, tuple)) and "null" in json_type:
-        non_null_types = [item for item in json_type if item != "null"]
-        if len(non_null_types) == 1:
-            non_null_schema = _plain_mapping(schema)
-            non_null_schema["type"] = non_null_types[0]
-            projected = _projected_material_value_schema(non_null_schema)
-            if projected is not None:
-                return {"anyOf": [projected, {"type": "null"}]}
-
     if json_type == "array" and isinstance(schema.get("items"), Mapping):
         projected_items = _projected_material_value_schema(schema["items"])
         if projected_items is None:

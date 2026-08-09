@@ -2,15 +2,27 @@
 
 from __future__ import annotations
 
+import hashlib
 import json
 import math
 from collections.abc import Iterable, Mapping
 from pathlib import Path, PurePosixPath
-from typing import Any
+from typing import Any, Protocol
 
 import yaml
 
-from .workspace_startup import WorkspaceStartupPlan
+from .model import PackageCatalog, PackageDefinition
+from .sources import WorkspaceSource
+
+
+class WorkspaceMaterialPlan(Protocol):
+    """物料（Material）外形编译所需的工作区只读 Interface。"""
+
+    source: WorkspaceSource
+    distribution_name: str
+    import_package: str
+    package_directory: Path
+
 
 _PART_TYPES = frozenset(
     {"box", "slab", "cylinder", "lathe", "disc", "rect", "edge", "grid", "sites"}
@@ -48,8 +60,69 @@ _SITE_GENERATORS = frozenset(
 )
 
 
+def compile_catalog_material_shapes(
+    source: WorkspaceSource,
+    catalog: PackageCatalog,
+) -> tuple[dict[str, Any], ...]:
+    """从同代包目录（PackageCatalog）编译静态物料外形。
+
+    参数：``source`` 是本次目录编译唯一授权的工作区来源；``catalog`` 是同一来源
+    的冻结目录代，提供声明文件、静态 ``registry_entry.model`` 和资产摘要。
+    返回：按 ``bundle/id`` 排序且容器互不共享的前端公共外形 tuple。
+    异常：来源类型、目录声明路径、外形绑定、资产摘要、YAML 或公共外形合同无效
+    时抛出 ``TypeError``/``ValueError``，不读取旧注册表 AST ``file_path``，也不
+    返回部分目录。
+    """
+
+    if not isinstance(source, WorkspaceSource):
+        raise TypeError("source 必须是 WorkspaceSource")
+    if not isinstance(catalog, PackageCatalog):
+        raise TypeError("catalog 必须是 PackageCatalog")
+    # ``catalog_assets`` 是本代内容摘要索引，用于拒绝目录编译后的来源漂移。
+    catalog_assets = {asset.logical_path: asset.digest for asset in catalog.assets}
+    # ``shapes_by_identity`` 按发行包与外形 ID 保持跨定义幂等和冲突检测。
+    shapes_by_identity: dict[tuple[str, str], dict[str, Any]] = {}
+    for definition in (
+        *catalog.definitions.devices,
+        *catalog.definitions.resources,
+    ):
+        shape_binding = _catalog_shape_binding(definition)
+        if shape_binding is None:
+            continue
+        # ``logical_shape_path`` 只由同代定义的规范声明文件位置解析。
+        logical_shape_path = _catalog_shape_path(
+            catalog=catalog,
+            definition=definition,
+            binding=shape_binding,
+        )
+        shape_bytes = source.read_bytes(logical_shape_path)
+        expected_digest = catalog_assets.get(logical_shape_path)
+        actual_digest = "sha256:" + hashlib.sha256(shape_bytes).hexdigest()
+        if expected_digest is None or expected_digest != actual_digest:
+            raise ValueError(
+                f"外形资产不属于当前包目录（PackageCatalog）代或摘要漂移: {logical_shape_path}"
+            )
+        shape = _load_public_shape_bytes(
+            shape_bytes,
+            logical_shape_path=logical_shape_path,
+            bundle=catalog.distribution.name,
+        )
+        shape_identity = (shape["bundle"], shape["id"])
+        existing = shapes_by_identity.get(shape_identity)
+        if existing is not None and existing != shape:
+            raise ValueError(
+                "同一工作区外形身份指向不同内容: "
+                f"{shape_identity[0]}/{shape_identity[1]}"
+            )
+        shapes_by_identity[shape_identity] = shape
+    return tuple(
+        _json_object(shapes_by_identity[identity], "公开外形")
+        for identity in sorted(shapes_by_identity)
+    )
+
+
 def compile_workspace_material_shapes(
-    startup_plan: WorkspaceStartupPlan,
+    startup_plan: WorkspaceMaterialPlan,
     registry: Any,
 ) -> tuple[dict[str, Any], ...]:
     """编译工作区装饰器显式绑定的静态物料外形。
@@ -60,8 +133,7 @@ def compile_workspace_material_shapes(
     无效时抛出 ``TypeError``/``ValueError``，不返回部分目录。
     """
 
-    if not isinstance(startup_plan, WorkspaceStartupPlan):
-        raise TypeError("startup_plan 必须是 WorkspaceStartupPlan")
+    _validate_workspace_material_plan(startup_plan)
     try:
         # ``definitions`` 是注册表（Registry）一次静态扫描后的设备与资源定义全集。
         definitions = (
@@ -108,8 +180,63 @@ def compile_workspace_material_shapes(
     )
 
 
+def _catalog_shape_binding(
+    definition: PackageDefinition,
+) -> Mapping[str, Any] | None:
+    """从同代目录定义读取外形绑定。
+
+    参数：``definition`` 是设备或资源的不可变目录定义。
+    返回：未声明外形时为 ``None``，否则返回冻结 ``model.shape`` 映射。
+    异常：定义详情缺少规范 ``registry_entry`` 对象时抛出 ``TypeError``；外形绑定
+    结构错误由共享 ``_shape_binding`` 校验并传播。
+    """
+
+    registry_entry = definition.details.get("registry_entry")
+    if not isinstance(registry_entry, Mapping):
+        raise TypeError(f"目录定义缺少 registry_entry: {definition.fqid}")
+    return _shape_binding(registry_entry.get("model"))
+
+
+def _catalog_shape_path(
+    *,
+    catalog: PackageCatalog,
+    definition: PackageDefinition,
+    binding: Mapping[str, Any],
+) -> str:
+    """相对目录定义声明文件解析安全的外形资产逻辑路径。
+
+    参数：``catalog`` 提供规范导入包边界；``definition`` 提供同代声明文件；
+    ``binding`` 提供外形资产相对入口。
+    返回：相对工作区根的 POSIX 逻辑路径。
+    异常：声明文件或入口为空、绝对、越出导入包，或包含父目录语义时抛出
+    ``ValueError``。
+    """
+
+    declaration_path = PurePosixPath(definition.declaring_file)
+    package_prefix = PurePosixPath(catalog.import_package)
+    if (
+        declaration_path.is_absolute()
+        or len(declaration_path.parts) < 2
+        or declaration_path.parts[:1] != package_prefix.parts
+        or any(part in {"", ".", ".."} for part in declaration_path.parts)
+    ):
+        raise ValueError("包目录（PackageCatalog）声明文件不在规范导入包内")
+    entry = binding.get("entry")
+    if not isinstance(entry, str) or not entry or "\\" in entry:
+        raise ValueError("工作区外形资产入口必须是非空 POSIX 相对路径")
+    relative_entry = PurePosixPath(entry)
+    if relative_entry.is_absolute() or any(
+        part in {"", ".", ".."} for part in relative_entry.parts
+    ):
+        raise ValueError("工作区外形资产入口不得包含绝对或父目录语义")
+    logical_shape_path = declaration_path.parent.joinpath(relative_entry)
+    if logical_shape_path.parts[:1] != package_prefix.parts:
+        raise ValueError("工作区外形资产入口必须位于导入包内")
+    return logical_shape_path.as_posix()
+
+
 def _workspace_declaration_file(
-    startup_plan: WorkspaceStartupPlan,
+    startup_plan: WorkspaceMaterialPlan,
     definition: Mapping[str, Any],
 ) -> Path | None:
     """取得属于当前工作区导入包的装饰器声明文件。
@@ -160,7 +287,7 @@ def _shape_binding(model: object) -> Mapping[str, Any] | None:
 
 
 def _logical_shape_path(
-    startup_plan: WorkspaceStartupPlan,
+    startup_plan: WorkspaceMaterialPlan,
     declaration_file: Path,
     binding: Mapping[str, Any],
 ) -> str:
@@ -192,7 +319,7 @@ def _logical_shape_path(
 
 
 def _load_public_shape(
-    startup_plan: WorkspaceStartupPlan,
+    startup_plan: WorkspaceMaterialPlan,
     logical_shape_path: str,
     *,
     bundle: str,
@@ -204,10 +331,29 @@ def _load_public_shape(
     异常：编码、YAML、版本或外形字段无效时抛出 ``ValueError``。
     """
 
+    return _load_public_shape_bytes(
+        startup_plan.source.read_bytes(logical_shape_path),
+        logical_shape_path=logical_shape_path,
+        bundle=bundle,
+    )
+
+
+def _load_public_shape_bytes(
+    shape_bytes: bytes,
+    *,
+    logical_shape_path: str,
+    bundle: str,
+) -> dict[str, Any]:
+    """从一次固定读取的资产字节编译前端公共物料外形。
+
+    参数：``shape_bytes`` 是已完成同代摘要校验的 YAML 字节；
+    ``logical_shape_path`` 是仅用于诊断的包内逻辑路径；``bundle`` 是发行包身份。
+    返回：完成版本和字段校验的公共外形对象。
+    异常：编码、YAML、版本或外形字段无效时抛出 ``ValueError``/``TypeError``。
+    """
+
     try:
-        manifest = yaml.safe_load(
-            startup_plan.source.read_bytes(logical_shape_path).decode("utf-8")
-        )
+        manifest = yaml.safe_load(shape_bytes.decode("utf-8"))
     except (UnicodeError, yaml.YAMLError) as error:
         raise ValueError(f"工作区外形 YAML 无效: {logical_shape_path}") from error
     if not isinstance(manifest, Mapping) or manifest.get("schema_version") != 1:
@@ -245,9 +391,7 @@ def _public_shape(raw: Mapping[str, Any], *, bundle: str) -> dict[str, Any]:
         if rule.get("category"):
             categories.append(_normalize_category(str(rule["category"])))
         if rule.get("category_contains"):
-            category_tokens.append(
-                _normalize_category(str(rule["category_contains"]))
-            )
+            category_tokens.append(_normalize_category(str(rule["category_contains"])))
     if not categories and not category_tokens:
         raise ValueError(f"外形 {shape_id} 缺少 applies_to")
     result: dict[str, Any] = {
@@ -356,4 +500,28 @@ def _json_object(value: object, field: str) -> dict[str, Any]:
         raise ValueError(f"{field} 必须是严格 JSON 对象") from error
 
 
-__all__ = ["compile_workspace_material_shapes"]
+def _validate_workspace_material_plan(startup_plan: object) -> None:
+    """关闭式验证物料（Material）外形编译所需工作区计划形状。
+
+    参数：``startup_plan`` 是高层工作区运行时（Workspace Runtime）提供的计划。
+    返回：无；结构具备安全来源、发行身份、导入包和包目录时完成。
+    异常：缺少任一必需只读事实时抛出 ``TypeError``，不反向依赖具体运行时类。
+    """
+
+    # ``required_attributes`` 是低层外形编译使用的完整工作区计划事实集。
+    required_attributes = (
+        "source",
+        "distribution_name",
+        "import_package",
+        "package_directory",
+    )
+    if not all(hasattr(startup_plan, name) for name in required_attributes):
+        raise TypeError("startup_plan 必须提供工作区物料编译计划 Interface")
+    if not isinstance(startup_plan.source, WorkspaceSource):
+        raise TypeError("startup_plan.source 必须是 WorkspaceSource")
+
+
+__all__ = [
+    "compile_catalog_material_shapes",
+    "compile_workspace_material_shapes",
+]

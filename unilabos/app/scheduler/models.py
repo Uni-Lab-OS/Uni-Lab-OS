@@ -112,6 +112,21 @@ class WorkflowNode:
         """与 ws_client 一致的设备动作锁 key。"""
         return f"/devices/{self.device_id}/{self.action_name}"
 
+    @property
+    def device_lock_key(self) -> str:
+        """返回设备级内存准入互斥键。
+
+        参数：无；设备身份来自当前工作流节点（Workflow Node）的 ``device_id``。
+        返回：``/devices/{device_id}`` 形式的稳定进程内键，用于保证同一设备的
+        不同动作不会并行派发。
+        异常：不主动抛出异常；设备身份合法性仍由上游工作流合同校验。
+
+        该键只是持久调度内核（Durable Scheduler Kernel）落地前的内存安全桥，
+        不是持久作业执行占用（JobExecutionClaim），也不提供栅栏（Fence）。
+        """
+
+        return f"/devices/{self.device_id}"
+
     def is_ilab(self) -> bool:
         return normalize_node_type(self.node_type) == "ILab"
 

@@ -1,7 +1,6 @@
 import argparse
 import asyncio
 import faulthandler
-import json
 import os
 import platform
 import shutil
@@ -36,7 +35,13 @@ if unilabos_dir not in sys.path:
     sys.path.append(unilabos_dir)
 
 from unilabos.app.process_shutdown import install_host_shutdown_handlers
+from unilabos.app.process_supervisor import RESTART_EXIT_CODE, run_as_supervisor
 from unilabos.app.utils import cleanup_for_restart
+from unilabos.app.workspace_package_bootstrap import (
+    WorkspaceCommunityBootstrapError,
+    prepare_startup_community_packages,
+    resolve_graph_file_path as _resolve_graph_file_path,
+)
 from unilabos.config.config import (
     BasicConfig,
     HTTPConfig,
@@ -48,7 +53,18 @@ from unilabos.utils.banner_print import print_status, print_unilab_banner
 _restart_requested: bool = False
 _restart_reason: str = ""
 
-RESTART_EXIT_CODE = 42
+def _request_workspace_restart(reasons: tuple[str, ...]) -> None:
+    """把安全工作区待重启原因提交给现有产品重启循环。
+
+    参数：``reasons`` 是工作区包运行时（Workspace Package Runtime）给出的稳定
+    原因集合。
+    返回：无；仅设置现有进程级重启标志，不直接退出或停止设备。
+    异常：无。
+    """
+
+    global _restart_reason, _restart_requested
+    _restart_reason = ",".join(reasons)
+    _restart_requested = True
 
 
 def load_config_from_file(config_path):
@@ -160,11 +176,56 @@ def should_request_remote_startup(
     )
 
 
+def should_prepare_workspace_product_runtime(args_dict: dict[str, Any]) -> bool:
+    """判断当前命令是否属于需要工作区产品运行时的常驻启动。
+
+    参数：``args_dict`` 是公共命令行（CLI）参数。
+    返回：软件包管理命令返回 ``False``，普通常驻启动返回 ``True``；软件包查询、
+    上传和依赖增改删不得预读物理图（Graph）或现有依赖锁并启动监视线程。
+    异常：无。
+    """
+
+    return args_dict.get("command") not in {"package", "pkg"}
+
+
+def dispatch_local_package_command(args_dict: dict[str, Any]) -> bool:
+    """在产品启动前分派不依赖远端配置的包命令。
+
+    参数：``args_dict`` 是公共命令行（CLI）解析出的完整参数字典。
+    返回：inspect、build、add、update、remove 由包管理深模块处理时返回 ``True``；
+    非包命令、缺少子动作或需要显式鉴权的 upload 返回 ``False``，由后续既有路径
+    处理。
+    异常：软件包命令行（Package CLI）合同错误转换为退出码 1 的 ``SystemExit``；
+    本接缝不得创建工作目录、读取产品配置、执行环境检查或启动 ROS/设备运行时。
+    """
+
+    command = args_dict.get("command")
+    package_action = args_dict.get("package_action")
+    if command not in {"package", "pkg"} or package_action not in {
+        "inspect",
+        "build",
+        "add",
+        "update",
+        "remove",
+    }:
+        return False
+
+    from unilabos.package_manager.cli import PackageCLIError, cmd_package
+
+    try:
+        cmd_package(args_dict)
+    except PackageCLIError as error:
+        print_status(str(error), "error")
+        raise SystemExit(1) from error
+    return True
+
+
 def parse_args():
     """构建 UniLab-OS 主进程命令行解析器。
 
     参数：无。返回：包含产品启动和子命令参数的 ``ArgumentParser``；本函数只
     定义合同，不读取或修改进程参数。
+    异常：无；参数错误只会在调用者后续执行 ``parse_args`` 时产生 ``SystemExit``。
     """
     parser = argparse.ArgumentParser(description="Start Uni-Lab Edge server.")
     subparsers = parser.add_subparsers(title="Valid subcommands", dest="command")
@@ -173,8 +234,10 @@ def parse_args():
     parser.add_argument(
         "--workspace",
         type=str,
+        nargs="?",
+        const=".",
         default=None,
-        help="显式 Uni-Lab 工作区（Workspace）根目录。",
+        help="显式 Uni-Lab 工作区（Workspace）根目录；省略路径时使用当前目录。",
     )
     parser.add_argument(
         "-c", "--controllers", default=None, help="Controllers config file path."
@@ -467,68 +530,10 @@ def parse_args():
         help="Skip host registration service visibility check",
     )
 
-    # package subcommand: 社区设备包 inspect / upload
-    package_parser = subparsers.add_parser(
-        "package",
-        aliases=["pkg"],
-        help="Community device package tools: inspect / upload / install",
-    )
-    package_actions = package_parser.add_subparsers(
-        title="package actions", dest="package_action"
-    )
-    for action_name in ("inspect", "upload"):
-        action_parser = package_actions.add_parser(
-            action_name,
-            help=(
-                "Scan package dir and generate package_info/archive (local only)"
-                if action_name == "inspect"
-                else "Inspect then upload archive + package_info to backend /lab/resource"
-            ),
-        )
-        action_parser.add_argument(
-            "--path",
-            dest="package_path",
-            type=str,
-            required=True,
-            help="Path to the community device package directory (contains pyproject.toml)",
-        )
-        action_parser.add_argument(
-            "--namespace",
-            type=str,
-            default=None,
-            help="Class namespace, e.g. community.acme; defaults to community.<normalized pyproject name>",
-        )
-        action_parser.add_argument(
-            "--out",
-            type=str,
-            default=None,
-            help="Output dir for archive/package_info.json (default: <package>/../dist)",
-        )
-        if action_name == "upload":
-            action_parser.add_argument(
-                "--download-url",
-                dest="download_url",
-                type=str,
-                default="",
-                help="Explicit reachable archive URL (skips OSS upload; handy for local static server)",
-            )
+    # 软件包命令行（Package CLI）的解析合同由 package_manager 深模块唯一维护。
+    from unilabos.package_manager.cli import register_package_subcommands
 
-    # install：开发者本地调试入口
-    install_parser = package_actions.add_parser(
-        "install",
-        help="Install a pip spec / git URL locally (uv pip > pip), then scan @device IDs",
-    )
-    install_parser.add_argument(
-        "install_spec",
-        type=str,
-        help="pip spec (name==version / name) or git URL (git+https://...)",
-    )
-    install_parser.add_argument(
-        "--no-inspect",
-        dest="no_inspect",
-        action="store_true",
-        help="Skip post-install @device scan / device listing",
-    )
+    register_package_subcommands(subparsers)
 
     # HTTP 客户端子命令（与现有 --ak/--sk/--addr 复用）。输出格式只属于真正
     # 产生客户端输出的叶子命令，不再污染常驻 OS 根启动合同。
@@ -619,39 +624,16 @@ def parse_args():
     return parser
 
 
-def _resolve_graph_file_path(file_path: str | None) -> str | None:
-    if file_path is None:
-        return None
-    if os.path.isfile(file_path):
-        return file_path
-    temp_file_path = os.path.abspath(str(os.path.join(__file__, "..", "..", file_path)))
-    if os.path.isfile(temp_file_path):
-        print_status(f"使用相对路径{temp_file_path}", "info")
-        return temp_file_path
-    return file_path
-
-
-def _load_graph_json_preview(file_path: str | None) -> Dict[str, Any] | None:
-    if (
-        not file_path
-        or not file_path.endswith(".json")
-        or not os.path.isfile(file_path)
-    ):
-        return None
-    try:
-        with open(file_path, encoding="utf-8") as f:
-            return json.load(f)
-    except Exception as exc:
-        print_status(f"预读取 graph JSON 失败，跳过 community 包解析: {exc}", "warning")
-        return None
-
-
 def main():
     """解析产品配置并启动所选 UniLab-OS 运行模式。
 
     参数：无。返回：普通服务退出时为 ``None``，部分一次性子命令返回整数状态；
-    配置、环境或子命令失败沿用现有退出策略。工作流源码（Workflow Source）
-    授权在配置文件加载后、任何 Web 组合根启动前一次冻结。
+    配置、环境或子命令失败沿用现有退出策略。工作区（Workspace）
+    包目录（PackageCatalog）、注册表快照（Registry Snapshot）、
+    有限激活计划和工作流源码（Workflow Source）授权在任何
+    作者模块导入或 Web 组合根启动前一次冻结。
+    异常：命令行错误以 ``SystemExit`` 结束；静态编译、配置和设备启动故障按各
+    既有边界传播或转换为产品退出状态，不发布部分工作区候选代。
     """
     # 解析命令行参数
     parser = parse_args()
@@ -664,6 +646,11 @@ def main():
         from unilabos.hostlink.doctor import run_doctor
 
         sys.exit(run_doctor(args_dict))
+
+    # 纯本地软件包命令行（Package CLI）不得落入产品启动路径；upload 仍需后续
+    # 显式鉴权和远端配置，但同样不会安装工作区产品生命周期。
+    if dispatch_local_package_command(args_dict):
+        return
 
     # 处理 HTTP 客户端子命令（login, logout, whoami, config, lab, material, workflow）
     # 这些命令不需要加载完整的 UniLab-OS 环境，提前处理并退出
@@ -759,22 +746,49 @@ def main():
         sys.stderr.flush()
         os._exit(0)
 
-    # 工作区（Workspace）只在常驻启动路径投影一次；模块内部隐藏目录、命名空间、
-    # 工作流源码授权和相对物理图解析，不把包管理细节继续堆进历史主函数。
-    from unilabos.package_manager import prepare_workspace_startup
+    # Supervisor mode: spawn child processes and monitor for restart
+    if args_dict.get("restart_mode", False):
+        run_as_supervisor(args_dict.get("auto_restart_count", 5))
+        return
+
+    # 工作区（Workspace）只在常驻启动路径静态编译一次；运行时
+    # 同时持有包目录（PackageCatalog）、注册表快照（Registry
+    # Snapshot）、有限激活与工作流源码（Workflow Source）计划。
+    from unilabos.package_manager import (
+        PackageCompileError,
+        PackageDependencyError,
+        WorkspaceGenerationChangedError,
+        prepare_stable_workspace_product_generation,
+    )
 
     try:
-        workspace_startup_plan = prepare_workspace_startup(args_dict)
-    except (TypeError, ValueError) as error:
+        prepared_workspace_generation = (
+            prepare_stable_workspace_product_generation(args_dict)
+            if should_prepare_workspace_product_runtime(args_dict)
+            else None
+        )
+        workspace_registry_runtime = (
+            prepared_workspace_generation.candidate
+            if prepared_workspace_generation is not None
+            else None
+        )
+    except (
+        PackageCompileError,
+        PackageDependencyError,
+        TypeError,
+        ValueError,
+        WorkspaceGenerationChangedError,
+    ) as error:
         parser.error(str(error))
-    if workspace_startup_plan is not None:
+    if workspace_registry_runtime is not None:
         print_status(
-            "已加载工作区（Workspace）启动计划: "
-            f"{workspace_startup_plan.import_package}",
+            "已编译工作区（Workspace）注册表运行时: "
+            f"{workspace_registry_runtime.catalog.import_package}",
             "info",
         )
 
     # 环境检查 - 检查并自动安装必需的包 (可选)
+    # ``ensure_dependencies`` 只来自已验证工作区计划；产品不再保留重复命令行入口。
     ensure_dependencies = args_dict.get("_ensure_dependencies", True)
     check_mode = args_dict.get("check_mode", False)
 
@@ -922,6 +936,13 @@ def main():
     BasicConfig.working_dir = working_dir
     BasicConfig.extra_resource = bool(args_dict.get("extra_resource", False))
     configure_workflow_editable_package_roots(args_dict)
+    # ``workflow_source_discovery_plan`` 与工作区注册表快照（Registry
+    # Snapshot）来自同一编译代；无工作区时保持旧授权根发现。
+    BasicConfig.workflow_source_discovery_plan = (
+        workspace_registry_runtime.workflow_source_plan
+        if workspace_registry_runtime is not None
+        else None
+    )
 
     if args_dict.get("command") in ("template-sync", "template_sync"):
         from unilabos.app.template_sync import (
@@ -986,7 +1007,7 @@ def main():
 
     # package 子命令：在配置/鉴权就绪后尽早处理，不进入设备 bootstrap
     if args_dict.get("command") in ("package", "pkg"):
-        from unilabos.app.package_cli import PackageCLIError, cmd_package
+        from unilabos.package_manager.cli import PackageCLIError, cmd_package
 
         package_http_client = None
         if args_dict.get("package_action") == "upload":
@@ -1084,67 +1105,18 @@ def main():
     # 显示启动横幅
     print_unilab_banner(args_dict)
 
-    # Step -1: 预读取 graph 中的 community.* class，并在 build_registry 前挂载社区设备包
-    if not check_mode and not workflow_upload:
-        startup_json_preview = None
-        graph_file_path = _resolve_graph_file_path(
-            args_dict.get("graph") or BasicConfig.startup_json_path
+    # Step -1：把完整工作区本地来源与真正缺失的远端社区包一次接入旧启动链。
+    try:
+        prepare_startup_community_packages(
+            args_dict,
+            runtime=workspace_registry_runtime,
+            check_mode=check_mode,
+            workflow_upload=workflow_upload,
+            ensure_dependencies=ensure_dependencies,
         )
-        args_dict["_graph_file_path"] = graph_file_path
-        graph_preview = _load_graph_json_preview(graph_file_path)
-
-        http_client_for_community = None
-        if BasicConfig.ak and BasicConfig.sk:
-            from unilabos.app.web import http_client as _http_client_for_community
-
-            http_client_for_community = _http_client_for_community
-            if graph_preview is None and graph_file_path is None:
-                startup_json_preview = http_client_for_community.request_startup_json()
-                args_dict["_startup_json"] = startup_json_preview
-                graph_preview = startup_json_preview
-
-        if graph_preview:
-            from unilabos.app.community_packages import (
-                CommunityPackageError,
-                prepare_community_packages,
-            )
-
-            try:
-                community_result = prepare_community_packages(
-                    graph_preview,
-                    working_dir=BasicConfig.working_dir,
-                    http_client=http_client_for_community,
-                    available_namespaces=args_dict.get("_community_namespaces"),
-                )
-            except CommunityPackageError as exc:
-                print_status(str(exc), "error")
-                os._exit(1)
-
-            if community_result.devices_dirs:
-                existing_devices_dirs = args_dict.get("devices") or []
-                args_dict["devices"] = (
-                    existing_devices_dirs + community_result.devices_dirs
-                )
-                if ensure_dependencies:
-                    from unilabos.utils.environment_check import (
-                        check_device_package_requirements,
-                        install_requirements_list,
-                    )
-
-                    # 社区包依赖：pyproject [project].dependencies 为标准来源，只装依赖不装包体
-                    # （保持源码挂载，便于 track/卸载）；requirements.txt 作为补充兜底
-                    if community_result.dependencies and not install_requirements_list(
-                        community_result.dependencies, label="community"
-                    ):
-                        print_status(
-                            "community 设备包 pyproject 依赖安装失败，程序退出", "error"
-                        )
-                        os._exit(1)
-                    if not check_device_package_requirements(args_dict["devices"]):
-                        print_status("community 设备包依赖检查失败，程序退出", "error")
-                        os._exit(1)
-            # 社区包设备直接以 community.<ns>.<id> 注册（扫描期命名空间化），不做 alias 桥接
-            args_dict["_community_namespaces"] = community_result.namespaces
+    except WorkspaceCommunityBootstrapError as error:
+        print_status(str(error), "error")
+        os._exit(1)
 
     # Step 0: AST 分析优先 + YAML 注册表加载
     # ``check_mode`` 会执行实际 import 验证；模板同步只走独立子命令。
@@ -1160,24 +1132,45 @@ def main():
         complete_registry=complete_registry,
         external_only=external_only,
     )
-    # 工作区外形与 3D 模型只从注册表（Registry）已发现的装饰器绑定编译。
-    workspace_material_shapes = ()
     workspace_material_models = None
-    if workspace_startup_plan is not None:
+    if workspace_registry_runtime is not None:
+        # 完整注册表快照（Registry Snapshot）只在内置定义成功后原子
+        # 发布；作者导入路径必须更晚激活，禁止静态编译期导入驱动。
         from unilabos.package_manager import (
             compile_workspace_material_models,
-            compile_workspace_material_shapes,
+            install_workspace_product_lifecycle,
         )
 
-        workspace_material_shapes = compile_workspace_material_shapes(
-            workspace_startup_plan,
-            lab_registry,
-        )
-        # ``workspace_material_models`` 只发布 OS 公开 HTTP URL，不向前端暴露本地路径。
+        assert prepared_workspace_generation is not None
+        if check_mode:
+            # 静态检查只验证首代发布形状并立即退出，不安装后台文件监视生命周期。
+            workspace_registry_runtime.publish(lab_registry)
+            workspace_registry_runtime.activate_import_path()
+        else:
+            install_workspace_product_lifecycle(
+                prepared_workspace_generation,
+                registry=lab_registry,
+                restart_mode=(
+                    os.environ.get("UNILABOS_RESTART_SUPERVISED") == "1"
+                ),
+                request_restart=_request_workspace_restart,
+            )
+
+        # ``workspace_material_models`` 只消费同一工作区启动计划和已发布注册表，
+        # 并只投影 OS 公开 HTTP URL，不向前端暴露本地资产路径。
+        workspace_startup_plan = workspace_registry_runtime.startup_plan
+        if workspace_startup_plan is None:
+            raise RuntimeError("产品工作区注册表运行时缺少同代启动计划")
         workspace_material_models = compile_workspace_material_models(
             workspace_startup_plan,
             lab_registry,
         )
+        # ``workspace_material_shapes`` 直接消费完整候选代已经聚合的物料外形；
+        # 主包和显式外部包均来自同一包目录（PackageCatalog）/来源配对，不再
+        # 重读来源或退回注册表 AST ``file_path``。
+        workspace_material_shapes = workspace_registry_runtime.material_shapes
+    else:
+        workspace_material_shapes = ()
 
     # Check mode: 注册表验证完成后直接退出
     if check_mode:
@@ -1240,7 +1233,14 @@ def main():
         )
     else:
         if file_path.endswith(".json"):
-            graph, resource_tree_set, resource_links = read_node_link_json(file_path)
+            # 工作区（Workspace）的资源图解析使用同一固定物理图（Graph）观察；
+            # 解析器会规范化并修改输入，所以每个消费者取得独立副本。
+            graph_input = (
+                workspace_registry_runtime.graph_copy()
+                if workspace_registry_runtime is not None
+                else file_path
+            )
+            graph, resource_tree_set, resource_links = read_node_link_json(graph_input)
         else:
             graph, resource_tree_set, resource_links = read_graphml(file_path)
     import unilabos.resources.graphio as graph_res

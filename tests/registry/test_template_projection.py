@@ -279,6 +279,13 @@ class FakeRegistry:
                         "type": ["string", "null"],
                         "default": None,
                         "x-unilabos-editor-control": "site_selector",
+                        "x-unilabos-site-selector": {
+                            "version": 1,
+                            "owner": "tips",
+                            "occupant": None,
+                            "show_occupied": True,
+                            "allow_occupied": False,
+                        },
                     },
                 },
                 "required": ["tips"],

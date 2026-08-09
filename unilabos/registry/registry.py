@@ -37,6 +37,7 @@ from unilabos.registry.decorators import (
     normalize_enum_value,
 )
 from unilabos.registry.init_enforce import validate_init_param_enforce
+from unilabos.registry.package_generation import PackageRegistryGeneration
 from unilabos.registry.yaml_ref import resolve_yaml_refs
 from unilabos.registry.utils import (
     ROSMsgNotFound,
@@ -116,6 +117,15 @@ class Registry:
     """
 
     def __init__(self, registry_paths=None):
+        """初始化实时注册表（Registry）及其软件包发布代际。
+
+        参数：``registry_paths`` 是需要加载的遗留 YAML 注册表根集合；省略时只
+        使用 OS 内置注册表目录。
+        返回：无；实例保存设备、资源定义映射和当前软件包注册表快照
+        （Registry Snapshot）。
+        异常：基础 ROS 消息包缺失时记录错误并终止进程；动态库探测失败会被
+        忽略，以兼容不使用对应 Windows 类型支持的运行环境。
+        """
         import ctypes
 
         try:
@@ -137,9 +147,47 @@ class Registry:
         self.device_type_registry: Dict[str, Any] = {}
         self.resource_type_registry: Dict[str, Any] = {}
         self._type_resolve_cache: Dict[str, Any] = {}
+        # ``_package_generation`` 将软件包发布与解析复杂性收敛到独立深模块。
+        self._package_generation = PackageRegistryGeneration(self)
 
         self._setup_called = False
         self._startup_executor: Optional[ThreadPoolExecutor] = None
+
+    def publish_package_snapshot(self, snapshot: Any) -> None:
+        """委派发布一代完整软件包注册表快照（Registry Snapshot）。
+
+        参数：``snapshot`` 是已完整编译和全局校验的软件包注册表快照，必须提供
+        ``registry_candidates`` 候选构造接口。
+        返回：无；成功后设备、资源映射和快照整体前进。
+        异常：快照接口无效、定义冲突或候选构造失败时传播原始异常；实时注册表
+        保持原代际，绝不发布部分设备或资源定义。
+        """
+
+        self._package_generation.publish(snapshot)
+
+    def resolve_definition(self, kind: str, identity: str) -> Dict[str, Any]:
+        """解析一个实时设备或资源定义身份。
+
+        参数：``kind`` 是 ``device`` 或 ``resource``；``identity`` 是现有精确
+        注册表 key、软件包规范全限定身份或全代唯一兼容短名。
+        返回：当前实时注册表权威代际中的定义条目；软件包短名不会创建别名行。
+        异常：定义种类无效、身份为空、定义不存在、软件包短名歧义，或已发布
+        快照与实时映射不一致时关闭式抛出异常。
+        """
+
+        return self._package_generation.resolve(kind, identity)
+
+    def package_snapshot(self) -> Dict[str, Any]:
+        """查询当前完整包目录代的注册表快照（Registry Snapshot）投影。
+
+        参数：无。
+        返回：包含主包和外部包设备、资源、显式工作流（Workflow）与资产，且与
+        注册表权威内部容器隔离的全新字典。
+        异常：软件包代尚未发布或快照查询接口无效时传播关闭式异常；不会退回到
+        只含设备与资源的历史注册表映射。
+        """
+
+        return self._package_generation.snapshot_projection()
 
     # ------------------------------------------------------------------
     # 统一入口

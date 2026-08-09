@@ -2,24 +2,37 @@
 
 from __future__ import annotations
 
-import re
 import sys
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
 
-import tomllib
-
-from unilabos.workflow.source_discovery import (
-    SourceDeclarationError,
-    discover_editable_sources,
-)
 from unilabos.workflow.source_manifest import (
+    EditablePackageManifest,
     SourceManifestError,
     parse_editable_package_manifest,
 )
+from unilabos.workflow.source_workspace import (
+    PackageRootSnapshot,
+    SourceWorkspaceError,
+    read_package_root,
+    validate_declared_sources,
+)
 
-from .sources import WorkspaceSource
+from ..package_catalog.compilers.python import (
+    compile_package_source as compile_python_package_source,
+)
+from ..package_catalog.model import (
+    PackageCatalog,
+    PackageCompileError,
+    PackageDiagnostic,
+)
+from ..package_catalog.project_metadata import (
+    PackageProject,
+    normalize_distribution_name,
+    parse_project_metadata,
+)
+from ..package_catalog.sources import WorkspaceSource
 
 
 @dataclass(frozen=True)
@@ -28,6 +41,8 @@ class WorkspaceStartupPlan:
 
     # ``source`` 是本轮启动唯一被授权的工作区文件来源。
     source: WorkspaceSource
+    # ``project_metadata`` 是工作区、注册表（Registry）和包工具共用的项目声明。
+    project_metadata: PackageProject
     # ``distribution_name`` 是 pyproject.toml 声明的原始发行包身份。
     distribution_name: str
     # ``import_package`` 是从发行元数据规范化得到的 Python 导入包身份。
@@ -40,6 +55,8 @@ class WorkspaceStartupPlan:
     has_workflow_manifest: bool
     # ``workflow_source_count`` 是清单静态校验通过的工作流源码数量。
     workflow_source_count: int
+    # ``workflow_manifest`` 是本次完整解析后的封闭来源清单；缺失文件时为 None。
+    workflow_manifest: EditablePackageManifest | None
     # ``default_graph`` 是工作区为普通启动选择的物理图相对路径。
     default_graph: str | None
     # ``default_config`` 是工作区为普通启动选择的配置文件相对路径。
@@ -48,6 +65,10 @@ class WorkspaceStartupPlan:
     default_app_bridges: tuple[str, ...] | None
     # ``ensure_dependencies`` 决定启动时是否检查并自动补齐 Python 依赖。
     ensure_dependencies: bool
+    # ``project_file_bytes`` 是本次计划解析过的唯一项目清单原始字节。
+    project_file_bytes: bytes = field(repr=False, compare=False)
+    # ``workflow_manifest_bytes`` 是可选工作流源码清单的同次固定原始字节。
+    workflow_manifest_bytes: bytes | None = field(repr=False, compare=False)
 
     def apply(self, arguments: dict[str, Any]) -> None:
         """把启动计划一次应用到现有产品参数字典。
@@ -72,6 +93,21 @@ class WorkspaceStartupPlan:
         arguments["workflow_editable_package_root"] = (
             [workspace_root] if self.has_workflow_manifest else None
         )
+        self.apply_product_defaults(arguments)
+        if workspace_root in sys.path:
+            sys.path.remove(workspace_root)
+        sys.path.insert(0, workspace_root)
+
+    def apply_product_defaults(self, arguments: dict[str, Any]) -> None:
+        """只应用不授权作者模块导入的产品启动默认值。
+
+        参数：``arguments`` 是公共命令行（CLI）的可变参数投影。
+        返回：无；只补全运行目录、物理图、配置、桥接器与依赖保障策略。
+        异常：默认文件逃逸、缺失或经过符号链接时传播 ``ValueError``；本方法不设置
+        ``devices``、工作流源码授权或 ``sys.path``，有限激活仍由注册表快照
+        （Registry Snapshot）负责。
+        """
+
         # ``working_dir`` 是可写运行状态根，不与只读工作区语义合并；普通启动
         # 仅省略其 CLI 输入，并从工作区确定性派生隐藏的 ``.unilabos`` 子目录。
         if not arguments.get("working_dir"):
@@ -86,15 +122,13 @@ class WorkspaceStartupPlan:
             )
         # argparse 的通用默认值包含遗留云 WebSocket；工作区只有在调用者没有选择
         # 其他桥接组合时才用自己的本地部署默认值替换它。
-        if self.default_app_bridges is not None and arguments.get(
-            "app_bridges"
-        ) == ["websocket", "fastapi"]:
+        if self.default_app_bridges is not None and arguments.get("app_bridges") == [
+            "websocket",
+            "fastapi",
+        ]:
             arguments["app_bridges"] = list(self.default_app_bridges)
         # 依赖策略是已校验工作区计划的内部投影，不再形成第二个公共 CLI 入口。
         arguments["_ensure_dependencies"] = self.ensure_dependencies
-        if workspace_root in sys.path:
-            sys.path.remove(workspace_root)
-        sys.path.insert(0, workspace_root)
 
     def resolve_graph(self, graph_argument: str) -> Path:
         """解析公共命令行（CLI）的物理图文件参数。
@@ -134,22 +168,6 @@ class WorkspaceStartupPlan:
         return self.source.root.joinpath(*Path(logical_file).parts).resolve()
 
 
-def normalize_distribution_name(distribution_name: str) -> str:
-    """把发行包名称规范化为当前工作区导入包身份。
-
-    参数：``distribution_name`` 是 ``pyproject.toml`` 的 ``project.name``。
-    返回：小写并把连字符、点和下划线段统一为下划线的 Python 包名。
-    异常：参数不是非空字符串或不能形成 Python 标识符时抛出 ``ValueError``。
-    """
-
-    if not isinstance(distribution_name, str) or not distribution_name.strip():
-        raise ValueError("pyproject.toml project.name 必须是非空字符串")
-    import_package = re.sub(r"[-_.]+", "_", distribution_name.strip().lower())
-    if not import_package.isidentifier():
-        raise ValueError("工作区发行包名称不能规范化为 Python 包身份")
-    return import_package
-
-
 def compile_workspace_startup(source: WorkspaceSource) -> WorkspaceStartupPlan:
     """静态编译启动门禁所需的最小工作区计划。
 
@@ -161,16 +179,16 @@ def compile_workspace_startup(source: WorkspaceSource) -> WorkspaceStartupPlan:
 
     if not isinstance(source, WorkspaceSource):
         raise TypeError("source 必须是 WorkspaceSource")
-    # ``project_name`` 是发行元数据身份；``import_package`` 是规范 Python 包身份。
-    project_document = _read_project_document(source)
-    project_name = _read_project_name(project_document)
-    import_package = normalize_distribution_name(project_name)
-    (
-        default_graph,
-        default_config,
-        default_app_bridges,
-        ensure_dependencies,
-    ) = _read_startup_defaults(project_document)
+    # ``project_metadata`` 是所有包调用者共用的唯一 TOML 解析结果。
+    project_file_bytes = source.read_bytes("pyproject.toml")
+    project_metadata = parse_project_metadata(project_file_bytes)
+    # ``import_package`` 是发行身份规范化后的唯一 Python 包身份。
+    import_package = project_metadata.normalized_name
+    # 下列默认值来自同一项目元数据解析，不建立第二套 TOML 解释权威。
+    default_graph = project_metadata.startup_graph
+    default_config = project_metadata.startup_config
+    default_app_bridges = project_metadata.startup_app_bridges
+    ensure_dependencies = project_metadata.startup_ensure_dependencies
     # ``package_directory`` 是注册表（Registry）唯一允许扫描的包目录。
     package_directory = source.root / import_package
     if (
@@ -188,23 +206,34 @@ def compile_workspace_startup(source: WorkspaceSource) -> WorkspaceStartupPlan:
     has_workflow_manifest = source.has_file("package.yaml")
     # ``workflow_source_count`` 证明本次计划确实加载了封闭来源声明。
     workflow_source_count = 0
+    # ``workflow_manifest`` 保留本次已验证模型，后续目录编译不得再次解释 YAML。
+    workflow_manifest: EditablePackageManifest | None = None
+    # ``workflow_manifest_bytes`` 与已解析模型绑定，供完整目录摘要复用同一观察。
+    workflow_manifest_bytes: bytes | None = None
     if has_workflow_manifest:
-        workflow_source_count = _validate_workflow_manifest(
-            source,
+        manifest_snapshot = read_package_root(source.root)
+        workflow_manifest_bytes = manifest_snapshot.manifest_bytes
+        workflow_manifest = _validate_workflow_manifest(
+            manifest_snapshot,
             import_package=import_package,
         )
+        workflow_source_count = len(workflow_manifest.workflows)
     startup_plan = WorkspaceStartupPlan(
         source=source,
-        distribution_name=project_name.strip(),
+        project_metadata=project_metadata,
+        distribution_name=project_metadata.name,
         import_package=import_package,
         package_directory=package_directory,
         community_namespace=f"community.{import_package}",
         has_workflow_manifest=has_workflow_manifest,
         workflow_source_count=workflow_source_count,
+        workflow_manifest=workflow_manifest,
         default_graph=default_graph,
         default_config=default_config,
         default_app_bridges=default_app_bridges,
         ensure_dependencies=ensure_dependencies,
+        project_file_bytes=project_file_bytes,
+        workflow_manifest_bytes=workflow_manifest_bytes,
     )
     # 启动计划在返回前验证其默认文件；显式 CLI 覆盖不能掩盖损坏的工作区声明。
     if default_graph is not None:
@@ -240,113 +269,103 @@ def prepare_workspace_startup(
     return startup_plan
 
 
-def _read_project_document(source: WorkspaceSource) -> dict[str, Any]:
-    """读取工作区项目元数据。
+def project_catalog_startup_plan(
+    source: WorkspaceSource,
+    catalog: Any,
+) -> WorkspaceStartupPlan:
+    """从已编译包目录（PackageCatalog）投影只读产品启动计划。
 
-    参数：``source`` 是已固定根目录的工作区来源。返回：TOML 根表。
-    异常：UTF-8、TOML 或根形状无效时抛出 ``ValueError``/``TypeError``。
+    参数：``source`` 是目录编译使用的显式来源；``catalog`` 是同一次完整静态编译
+    已冻结的包目录（PackageCatalog）。
+    返回：复用目录身份和工作流定义计数、但不重新读取 ``package.yaml`` 的启动计划。
+    异常：来源、发行身份、导入包、命名空间或定义集合与当前项目元数据不一致时
+    抛出 ``TypeError``/``ValueError``；不会应用工作流图或创建工作流任务
+    （WorkflowTask）。
     """
 
-    try:
-        document = tomllib.loads(
-            source.read_bytes("pyproject.toml").decode("utf-8")
-        )
-    except (UnicodeError, tomllib.TOMLDecodeError) as error:
-        raise ValueError("工作区 pyproject.toml 无效") from error
-    if not isinstance(document, dict):
-        raise TypeError("pyproject.toml 根必须是表")
-    return document
-
-
-def _read_project_name(project_document: dict[str, Any]) -> str:
-    """从已解析项目元数据读取稳定发行包名称。"""
-
-    project_table = project_document.get("project")
-    if project_table is None:
-        raise ValueError("pyproject.toml 缺少 [project]")
-    if not isinstance(project_table, dict):
-        raise TypeError("pyproject.toml [project] 必须是表")
-    project_name = project_table.get("name")
-    if not isinstance(project_name, str) or not project_name.strip():
-        raise ValueError("pyproject.toml project.name 必须是非空字符串")
-    return project_name
-
-
-def _read_startup_defaults(
-    project_document: dict[str, Any],
-) -> tuple[str | None, str | None, tuple[str, ...] | None, bool]:
-    """读取 ``tool.unilabos.startup`` 中可确定性补全的启动默认值。
-
-    参数：``project_document`` 是已安全解析的项目元数据。返回：图、配置、应用
-    桥接器默认值和依赖保障策略。异常：未知字段或字段形状无效时抛出
-    ``ValueError``。
-    """
-
-    tool_table = project_document.get("tool", {})
-    if not isinstance(tool_table, dict):
-        raise TypeError("pyproject.toml [tool] 必须是表")
-    unilabos_table = tool_table.get("unilabos", {})
-    if not isinstance(unilabos_table, dict):
-        raise TypeError("pyproject.toml [tool.unilabos] 必须是表")
-    startup_table = unilabos_table.get("startup")
-    if startup_table is None:
-        return None, None, None, True
-    if not isinstance(startup_table, dict) or not set(startup_table).issubset(
-        {"graph", "config", "app_bridges", "ensure_dependencies"}
+    if not isinstance(source, WorkspaceSource):
+        raise TypeError("source 必须是 WorkspaceSource")
+    # ``project_metadata`` 只读取产品启动默认值；工作流清单已经由包目录冻结。
+    project_file_bytes = source.read_bytes("pyproject.toml")
+    project_metadata = parse_project_metadata(project_file_bytes)
+    catalog_distribution = getattr(catalog, "distribution", None)
+    catalog_import_package = getattr(catalog, "import_package", None)
+    catalog_namespace = getattr(catalog, "namespace", None)
+    catalog_definitions = getattr(catalog, "definitions", None)
+    catalog_workflows = getattr(catalog_definitions, "workflows", None)
+    if (
+        getattr(catalog_distribution, "name", None) != project_metadata.name
+        or catalog_import_package != project_metadata.normalized_name
+        or catalog_namespace != f"community.{project_metadata.normalized_name}"
+        or not isinstance(catalog_workflows, tuple)
     ):
-        raise ValueError("pyproject.toml [tool.unilabos.startup] 字段无效")
+        raise ValueError("包目录与当前工作区项目身份不一致")
 
-    graph = startup_table.get("graph")
-    config = startup_table.get("config")
-    for field_name, field_value in (("graph", graph), ("config", config)):
-        if field_value is not None and (
-            not isinstance(field_value, str) or not field_value.strip()
-        ):
-            raise ValueError(f"工作区启动 {field_name} 必须是非空字符串")
-
-    bridges = startup_table.get("app_bridges")
-    parsed_bridges: tuple[str, ...] | None = None
-    if bridges is not None:
-        if (
-            not isinstance(bridges, list)
-            or not bridges
-            or any(
-                not isinstance(bridge, str)
-                or bridge not in {"websocket", "fastapi"}
-                for bridge in bridges
-            )
-            or len(set(bridges)) != len(bridges)
-        ):
-            raise ValueError("工作区启动 app_bridges 必须是非空且不重复的已知集合")
-        parsed_bridges = tuple(bridges)
-    ensure_dependencies = startup_table.get("ensure_dependencies", True)
-    if not isinstance(ensure_dependencies, bool):
-        raise ValueError("工作区启动 ensure_dependencies 必须是布尔值")
-    return graph, config, parsed_bridges, ensure_dependencies
+    # ``package_directory`` 只供同代模型资产和产品默认值解析，不重新扫描动作合同。
+    package_directory = source.root / project_metadata.normalized_name
+    if (
+        package_directory.is_symlink()
+        or not package_directory.is_dir()
+        or package_directory.resolve() != package_directory
+        or not package_directory.joinpath("__init__.py").is_file()
+    ):
+        raise ValueError("包目录对应的规范 Python 包目录不存在")
+    startup_plan = WorkspaceStartupPlan(
+        source=source,
+        project_metadata=project_metadata,
+        distribution_name=project_metadata.name,
+        import_package=project_metadata.normalized_name,
+        package_directory=package_directory,
+        community_namespace=f"community.{project_metadata.normalized_name}",
+        has_workflow_manifest=source.has_file("package.yaml"),
+        workflow_source_count=len(catalog_workflows),
+        workflow_manifest=None,
+        default_graph=project_metadata.startup_graph,
+        default_config=project_metadata.startup_config,
+        default_app_bridges=project_metadata.startup_app_bridges,
+        ensure_dependencies=project_metadata.startup_ensure_dependencies,
+        project_file_bytes=project_file_bytes,
+        workflow_manifest_bytes=None,
+    )
+    if startup_plan.default_graph is not None:
+        startup_plan.resolve_graph(startup_plan.default_graph)
+    if startup_plan.default_config is not None:
+        startup_plan.resolve_workspace_file(
+            startup_plan.default_config,
+            label="配置文件",
+        )
+    return startup_plan
 
 
 def _validate_workflow_manifest(
-    source: WorkspaceSource,
+    root_snapshot: PackageRootSnapshot,
     *,
     import_package: str,
-) -> int:
+) -> EditablePackageManifest:
     """验证工作流源码（Workflow Source）声明与项目包身份一致。
 
-    参数：``source`` 是已固定工作区来源；``import_package`` 是项目规范导入身份。
-    返回：完整声明中的工作流源码（Workflow Source）数量。
+    参数：``root_snapshot`` 是已经一次读取清单字节并固定目录身份的工作区快照；
+    ``import_package`` 是项目规范导入身份。
+    返回：完成身份与源码路径校验的封闭可编辑包（Editable Package）清单。
     异常：YAML、身份或源码路径无效时转换为不泄漏内容的 ``ValueError``。
     """
 
     try:
         # ``manifest`` 拥有包身份与工作流源码（Workflow Source）声明顺序。
-        manifest = parse_editable_package_manifest(source.read_bytes("package.yaml"))
+        manifest = parse_editable_package_manifest(root_snapshot.manifest_bytes)
         if manifest.package_id != import_package:
             raise ValueError("package.yaml 包身份与 pyproject.toml 不一致")
-        # ``discovery_plan`` 固定所有来源身份，但不应用候选工作流图。
-        discovery_plan = discover_editable_sources((source.root,))
-    except (SourceManifestError, SourceDeclarationError) as error:
+        # ``source_snapshot`` 用同一目录快照验证全部声明源码，不再次读取清单。
+        source_snapshot = validate_declared_sources(
+            root_snapshot,
+            package_id=manifest.package_id,
+            relative_paths=(workflow.relative_path for workflow in manifest.workflows),
+        )
+    except (SourceManifestError, SourceWorkspaceError) as error:
         raise ValueError("工作区 package.yaml 或工作流源码声明无效") from error
-    return len(discovery_plan.registrations)
+    if source_snapshot.package_root.name != manifest.package_id:
+        raise ValueError("工作区工作流源码包身份不一致")
+    return manifest
 
 
 def _validate_registry_python_tree(
@@ -393,8 +412,43 @@ def _validate_registry_python_tree(
                 raise ValueError(f"注册表 Python 文件不存在: {entry}")
 
 
+def compile_package_source(
+    source: WorkspaceSource,
+    *,
+    startup_plan: WorkspaceStartupPlan | None = None,
+) -> PackageCatalog:
+    """解析工作区启动输入后调用 Python 包目录（PackageCatalog）纯编译器。
+
+    参数：``source`` 是显式授权的工作区来源；``startup_plan`` 是可选的同来源
+    已冻结启动输入，产品启动传入后不会再次读取清单。
+    返回：完整校验且不可变的包目录（PackageCatalog）。
+    异常：来源发现失败或静态定义无效时保持既有 ``PackageCompileError`` 行为。
+    """
+
+    if not isinstance(source, WorkspaceSource):
+        raise TypeError("source 必须是 WorkspaceSource")
+    # ``resolved_startup_plan`` 是工作区运行时（Workspace Runtime）唯一允许解析的
+    # 启动输入；失败保持结构化诊断，不向调用者泄漏文件系统实现细节。
+    try:
+        resolved_startup_plan = startup_plan or compile_workspace_startup(source)
+    except (TypeError, ValueError) as error:
+        raise PackageCompileError(
+            (
+                PackageDiagnostic(
+                    code="package_source_invalid",
+                    message="软件包来源或项目元数据无效",
+                ),
+            )
+        ) from error
+    return compile_python_package_source(
+        source,
+        startup_plan=resolved_startup_plan,
+    )
+
+
 __all__ = [
     "WorkspaceStartupPlan",
+    "compile_package_source",
     "compile_workspace_startup",
     "normalize_distribution_name",
     "prepare_workspace_startup",

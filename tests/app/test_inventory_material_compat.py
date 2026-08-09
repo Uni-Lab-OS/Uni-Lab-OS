@@ -1,4 +1,4 @@
-"""HostNode-compatible material query over the Edge inventory microbackend."""
+"""验证 OS 本地库存（Inventory）的旧 HostNode 物料查询兼容投影。"""
 
 from __future__ import annotations
 
@@ -10,10 +10,19 @@ from fastapi.testclient import TestClient
 from unilabos.app.scheduler.inventory.api import create_app
 from unilabos.app.scheduler.inventory.service import InventoryService
 from unilabos.app.scheduler.inventory.store import InventoryStore
-from unilabos.resources.resource_tracker import ResourceDict, ResourceTreeSet
+from unilabos.resources.resource_tracker import (
+    ResourceDict,
+    ResourceTreeSet,
+)
 
 
 def _service() -> InventoryService:
+    """建立含父子物料和旧 relation 库位关系的内存库存服务。
+
+    参数：无。返回：可通过公共 HTTP 兼容接口查询的 ``InventoryService``；
+    初始化或数据库异常原样传播。
+    """
+
     service = InventoryService(InventoryStore(":memory:"))
     service.upsert_template(
         "tpl-rack",

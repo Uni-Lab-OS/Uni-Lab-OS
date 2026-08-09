@@ -9,6 +9,12 @@ from dataclasses import dataclass
 from itertools import pairwise
 from typing import Any, Never, Self
 
+from unilabos.registry.annotation_rendering import render_parameter_descriptor
+from unilabos.registry.site_selector_schema import (
+    ParsedSiteSelector,
+    SiteSelectorSchemaError,
+    parse_site_selector_call,
+)
 from unilabos.workflow.schema import (
     WorkflowInputContract,
     WorkflowOutputContract,
@@ -31,6 +37,7 @@ _MATERIAL_LOCK = "unilabos.registry.annotations:MaterialLock"
 _OPTIONAL = "typing:Optional"
 _RESOURCE_SLOT = "unilabos.registry.placeholder_type:ResourceSlot"
 _RESOURCE_TEMPLATES = "unilabos.registry.annotations:AllowedResourceTemplates"
+_SITE_SELECTOR = "unilabos.registry.annotations:SiteSelector"
 _ERROR_MESSAGE = "参数注解不符合 Workflow 版本 1 合同"
 _AUTHORING_INTEGER_DIGITS = 4096
 _AUTHORING_INTEGER_LIMIT = 10**_AUTHORING_INTEGER_DIGITS
@@ -61,6 +68,7 @@ class ParsedParameter:
     _contract: WorkflowInputContract
     resource_templates: tuple[ResourceTemplateSymbol, ...]
     material_lock_free: bool
+    site_selector: ParsedSiteSelector | None
 
     def __new__(cls, *_args: Any, **_kwargs: Any) -> Never:
         raise TypeError("请通过 parse_parameter_annotation 创建 ParsedParameter")
@@ -71,9 +79,19 @@ class ParsedParameter:
         contract: WorkflowInputContract,
         resource_templates: tuple[ResourceTemplateSymbol, ...],
         material_lock_free: bool,
+        site_selector: ParsedSiteSelector | None,
         *,
         token: object,
     ) -> Self:
+        """仅供解析器从规范参数合同构造不可变结果。
+
+        参数说明：``contract`` 是已校验工作流输入合同；``resource_templates``
+        保存资源模板源码符号；``material_lock_free`` 保存显式免物料锁声明；
+        ``site_selector`` 保存可选库位选择器（SiteSelector）关系；``token`` 防止
+        外部绕过解析边界。返回：不可变解析参数。异常：令牌不匹配时抛出
+        ``TypeError``。
+        """
+
         if token is not _PARSED_PARAMETER_TOKEN:
             raise TypeError("ParsedParameter 只能由模块内 parser 创建")
         parameter = object.__new__(cls)
@@ -84,6 +102,7 @@ class ParsedParameter:
             resource_templates,
         )
         object.__setattr__(parameter, "material_lock_free", material_lock_free)
+        object.__setattr__(parameter, "site_selector", site_selector)
         return parameter
 
     def to_dict(self) -> dict[str, Any]:
@@ -493,7 +512,17 @@ def _parse_annotation(
     str | None,
     tuple[ResourceTemplateSymbol, ...],
     bool,
+    ParsedSiteSelector | None,
 ]:
+    """解析一个参数或结果注解及其有限元数据。
+
+    参数说明：``annotation`` 是未执行的注解 AST；``imports`` 证明每个名称的
+    静态导入身份；``allow_material_lock`` 同时控制仅动作输入可用的物料锁和
+    库位选择器（SiteSelector）元数据。返回：规范值模式、展示文本、资源模板
+    符号、免锁标记及可选库位关系；非法或重复元数据抛出
+    ``AnnotationSchemaError``。
+    """
+
     metadata: list[ast.expr] = []
     type_node = annotation
     if isinstance(annotation, ast.Subscript) and _is_import(
@@ -516,6 +545,8 @@ def _parse_annotation(
     material_lock_seen = False
     templates_seen = False
     material_lock_free = False
+    site_selector_seen = False
+    site_selector = None
     for index, item in enumerate(metadata):
         path = f"/annotation/metadata/{index}"
         if not isinstance(item, ast.Call):
@@ -540,9 +571,17 @@ def _parse_annotation(
                 _fail(path)
             material_lock_seen = True
             material_lock_free = _parse_material_lock(item, schema, path=path)
+        elif allow_material_lock and _is_import(item.func, _SITE_SELECTOR, imports):
+            if site_selector_seen:
+                _fail(path)
+            site_selector_seen = True
+            try:
+                site_selector = parse_site_selector_call(item, schema, path=path)
+            except SiteSelectorSchemaError as error:
+                _fail(error.path, message=error.message)
         else:
             _fail(path)
-    return schema, title, description, templates, material_lock_free
+    return schema, title, description, templates, material_lock_free, site_selector
 
 
 def _optional_presentation(value: str | None, *, path: str) -> str | None:
@@ -568,19 +607,34 @@ def parse_parameter_annotation(
     doc_description: str | None = None,
     allow_material_lock: bool = False,
 ) -> ParsedParameter:
-    """把一个源码参数静态解析为 canonical v1 contract。"""
+    """把一个源码参数静态解析为规范第 1 版输入合同。
+
+    参数说明：``name`` 是参数名；``annotation`` 是不执行的类型注解 AST；
+    ``default`` 是默认值 AST 或 ``NO_DEFAULT``；``imports`` 是可信导入绑定；
+    ``doc_title``/``doc_description`` 是文档注释展示信息；
+    ``allow_material_lock`` 决定是否允许输入侧物料锁与库位选择元数据。返回：解析器
+    签发的不可变参数合同。
+
+    异常说明：注解、默认值、导入、展示文本或规范输入合同非法时抛出
+    ``AnnotationSchemaError``，且不执行任何作者代码。
+    """
 
     if not isinstance(annotation, ast.expr):
         _fail("/annotation")
     if not isinstance(imports, Mapping):
         _fail("/imports")
 
-    schema, field_title, field_description, templates, material_lock_free = (
-        _parse_annotation(
-            annotation,
-            imports,
-            allow_material_lock=allow_material_lock,
-        )
+    (
+        schema,
+        field_title,
+        field_description,
+        templates,
+        material_lock_free,
+        site_selector,
+    ) = _parse_annotation(
+        annotation,
+        imports,
+        allow_material_lock=allow_material_lock,
     )
     title = field_title or _optional_presentation(
         doc_title,
@@ -613,6 +667,7 @@ def parse_parameter_annotation(
         contract,
         templates,
         material_lock_free,
+        site_selector,
         token=_PARSED_PARAMETER_TOKEN,
     )
 
@@ -623,17 +678,27 @@ def parse_result_annotation(
     *,
     imports: Mapping[str, str],
 ) -> ParsedResult:
-    """把一个源码结果字段静态解析为 canonical v1 output。"""
+    """把一个源码结果字段静态解析为规范第 1 版输出合同。
+
+    参数说明：``name`` 是输出字段名；``annotation`` 是不执行的类型注解 AST；
+    ``imports`` 是可信导入绑定。返回：解析器签发的不可变输出合同；输出侧不接受
+    物料锁或库位选择（Site Selection）元数据。
+
+    异常说明：注解、导入或规范输出合同非法时抛出
+    ``AnnotationSchemaError``，且不执行任何作者代码。
+    """
 
     if not isinstance(annotation, ast.expr):
         _fail("/annotation")
     if not isinstance(imports, Mapping):
         _fail("/imports")
 
-    schema, title, description, templates, _material_lock_free = _parse_annotation(
-        annotation,
-        imports,
-        allow_material_lock=False,
+    schema, title, description, templates, _material_lock_free, _site_selector = (
+        _parse_annotation(
+            annotation,
+            imports,
+            allow_material_lock=False,
+        )
     )
     descriptor: dict[str, Any] = {
         "name": name,
@@ -656,137 +721,21 @@ def parse_result_annotation(
     )
 
 
-def _constant(value: Any) -> ast.Constant:
-    return ast.Constant(value=value)
-
-
-def _render_schema(schema: dict[str, Any]) -> ast.expr:
-    if "anyOf" in schema:
-        return ast.BinOp(
-            left=_render_schema(schema["anyOf"][0]),
-            op=ast.BitOr(),
-            right=_constant(None),
-        )
-    if "$slot" in schema:
-        return ast.Name(id="ResourceSlot", ctx=ast.Load())
-    kind = schema["type"]
-    if "enum" in schema:
-        values = [_constant(value) for value in schema["enum"]]
-        slice_node: ast.expr
-        if len(values) == 1:
-            slice_node = values[0]
-        else:
-            slice_node = ast.Tuple(elts=values, ctx=ast.Load())
-        return ast.Subscript(
-            value=ast.Name(id="Literal", ctx=ast.Load()),
-            slice=slice_node,
-            ctx=ast.Load(),
-        )
-    names = {
-        "string": "str",
-        "integer": "int",
-        "number": "float",
-        "boolean": "bool",
-    }
-    if kind in names:
-        return ast.Name(id=names[kind], ctx=ast.Load())
-    if kind == "object":
-        return ast.Subscript(
-            value=ast.Name(id="dict", ctx=ast.Load()),
-            slice=ast.Tuple(
-                elts=[
-                    ast.Name(id="str", ctx=ast.Load()),
-                    ast.Name(id="JSONValue", ctx=ast.Load()),
-                ],
-                ctx=ast.Load(),
-            ),
-            ctx=ast.Load(),
-        )
-    if kind == "array":
-        return ast.Subscript(
-            value=ast.Name(id="list", ctx=ast.Load()),
-            slice=_render_schema(schema["items"]),
-            ctx=ast.Load(),
-        )
-    raise AssertionError(f"unsupported canonical schema kind: {kind}")
-
-
-def _render_templates(
-    symbols: tuple[ResourceTemplateSymbol, ...],
-) -> ast.Call:
-    return ast.Call(
-        func=ast.Name(id="AllowedResourceTemplates", ctx=ast.Load()),
-        args=[ast.Name(id=symbol.local_name, ctx=ast.Load()) for symbol in symbols],
-        keywords=[],
-    )
-
-
-def _render_material_lock_free() -> ast.Call:
-    return ast.Call(
-        func=ast.Name(id="MaterialLock", ctx=ast.Load()),
-        args=[],
-        keywords=[ast.keyword(arg="free", value=_constant(True))],
-    )
-
-
-def _field_keywords(descriptor: dict[str, Any]) -> list[ast.keyword]:
-    keywords: list[ast.keyword] = []
-    if "title" in descriptor:
-        keywords.append(ast.keyword(arg="title", value=_constant(descriptor["title"])))
-    if "description" in descriptor:
-        keywords.append(
-            ast.keyword(
-                arg="description",
-                value=_constant(descriptor["description"]),
-            )
-        )
-    base = _schema_base(descriptor["schema"])
-    for schema_key, field_key in (
-        ("minimum", "ge"),
-        ("maximum", "le"),
-        ("minLength", "min_length"),
-        ("maxLength", "max_length"),
-        ("minItems", "min_length"),
-        ("maxItems", "max_length"),
-    ):
-        if schema_key in base:
-            keywords.append(
-                ast.keyword(
-                    arg=field_key,
-                    value=_constant(base[schema_key]),
-                )
-            )
-    return keywords
-
-
 def render_parameter_annotation(parameter: ParsedParameter) -> ast.expr:
-    """只从 canonical 参数值生成确定性的 annotation expression。"""
+    """只从规范参数事实生成确定性的 annotation expression。
+
+    参数说明：``parameter`` 是唯一解析器创建的不可变参数合同。返回：包含资源
+    模板、免物料锁、库位选择器（SiteSelector）和 ``Field`` 展示约束的 Python
+    AST；类型非法时抛出 ``AnnotationSchemaError``。
+    """
 
     if not isinstance(parameter, ParsedParameter):
         _fail("/parameter")
-    descriptor = parameter.to_dict()
-    rendered = _render_schema(descriptor["schema"])
-    metadata: list[ast.expr] = []
-    if parameter.resource_templates:
-        metadata.append(_render_templates(parameter.resource_templates))
-    if parameter.material_lock_free:
-        metadata.append(_render_material_lock_free())
-    field_keywords = _field_keywords(descriptor)
-    if field_keywords:
-        metadata.append(
-            ast.Call(
-                func=ast.Name(id="Field", ctx=ast.Load()),
-                args=[],
-                keywords=field_keywords,
-            )
-        )
-    if metadata:
-        rendered = ast.Subscript(
-            value=ast.Name(id="Annotated", ctx=ast.Load()),
-            slice=ast.Tuple(
-                elts=[rendered, *metadata],
-                ctx=ast.Load(),
-            ),
-            ctx=ast.Load(),
-        )
-    return ast.fix_missing_locations(rendered)
+    return render_parameter_descriptor(
+        parameter.to_dict(),
+        resource_template_names=tuple(
+            symbol.local_name for symbol in parameter.resource_templates
+        ),
+        material_lock_free=parameter.material_lock_free,
+        site_selector=parameter.site_selector,
+    )

@@ -10,6 +10,11 @@ from unilabos.registry.action_template_projection import (
     compile_action_template_handles,
     goal_parameter_schema,
 )
+from unilabos.registry.template_delta import (
+    TemplateProjectionDelta,
+    TemplateProjectionDeltaError,
+    build_template_projection_delta,
+)
 from unilabos.registry.template_snapshot import (
     RegistryTemplateSnapshot,
     RegistryTemplateSnapshotError,
@@ -33,6 +38,17 @@ from unilabos.workflow.template_projection_store import (
 
 class RegistryTemplateProjectionError(ValueError):
     """设备注册表不能安全投影为规范模板。"""
+
+
+def _definition_business_id(definition: Mapping[str, Any]) -> str:
+    """读取注册表定义的稳定业务身份排序键。
+
+    参数：``definition`` 是同一完整注册表快照中的设备或资源定义。
+    返回：``id`` 字段的字符串表示。
+    异常：无；字段合法性由后续编译函数关闭式校验。
+    """
+
+    return str(definition.get("id", ""))
 
 
 def compile_resource_template_source_aliases(
@@ -167,6 +183,12 @@ class RegistryTemplateProjection:
                 generation.handle_templates,
                 resource_template_symbols=generation.resource_template_symbols,
             )
+            self._last_delta = build_template_projection_delta(
+                authority_id=authority_id,
+                current_generation=generation.generation,
+                previous_members=(),
+                candidate_members=(),
+            )
         except (AuthoringCatalogError, TemplateProjectionIdentityConflict) as error:
             raise RegistryTemplateProjectionError(str(error)) from error
 
@@ -230,20 +252,25 @@ class RegistryTemplateProjection:
             )
 
         try:
-            self._store.replace_generation(
+            _committed_generation, delta = self._store.replace_generation_with_delta(
                 authority_id=self._authority_id,
                 node_templates=nodes,
                 handle_templates=handles,
                 resource_template_symbols=resource_template_symbols,
                 validate_generation=validate_generation,
             )
-        except TemplateProjectionIdentityConflict as error:
+        except (
+            TemplateProjectionDeltaError,
+            TemplateProjectionIdentityConflict,
+        ) as error:
             raise RegistryTemplateProjectionError(f"模板身份冲突: {error!s}") from error
         except AuthoringCatalogError as error:
             raise RegistryTemplateProjectionError(str(error)) from error
         if next_snapshot is None:
             raise RegistryTemplateProjectionError("模板投影未执行完整目录校验")
+        # 内存快照和最近差量只在 SQLite 事务成功提交后共同替换。
         self._snapshot = next_snapshot
+        self._last_delta = delta
         return next_snapshot
 
     def snapshot(self) -> AuthoringCatalogSnapshot:
@@ -253,6 +280,17 @@ class RegistryTemplateProjection:
         """
 
         return self._snapshot
+
+    def last_delta(self) -> TemplateProjectionDelta:
+        """返回最近一次成功刷新产生的模板投影差量。
+
+        参数：无。
+        返回：提交后保存的不可变模板投影差量（TemplateProjectionDelta）；构造后
+        尚未刷新时返回当前持久代际上的空差量。
+        异常：无；失败刷新不会替换最近成功差量。
+        """
+
+        return self._last_delta
 
     def close(self) -> None:
         """关闭投影持有的本地工作流存储连接。"""
@@ -267,6 +305,8 @@ class RegistryTemplateProjection:
 
         参数说明：``device_definitions`` 是设备注册表已完成构建的只读快照；返回
         两个完整候选集合，只接收第 2 版强类型动作合同（Action Contract）。
+        异常：输入不是数组或任一设备/动作合同无效时抛出
+        ``RegistryTemplateProjectionError``，不返回部分候选。
         """
 
         if not isinstance(device_definitions, Sequence) or isinstance(
@@ -277,7 +317,7 @@ class RegistryTemplateProjection:
         handles: list[dict[str, Any]] = []
         for device in sorted(
             device_definitions,
-            key=lambda item: str(item.get("id", "")),
+            key=_definition_business_id,
         ):
             node_candidates, handle_candidates = self._compile_device(device)
             nodes.extend(node_candidates)
@@ -296,6 +336,8 @@ class RegistryTemplateProjection:
         UUID 为值的新字典；业务唯一名缺失、身份解析失败、显式身份冲突或 UUID
         被多个符号复用时关闭式失败。共享 ``class.module`` 的遗留模板仍按业务 ID
         同步库存身份，但不猜测源码符号映射。
+        异常：资源定义或本地资源模板（ResourceTemplate）身份无效、歧义或冲突时
+        抛出 ``RegistryTemplateProjectionError``。
         """
 
         # ``template_uuid_by_symbol`` 供工作流源码（Workflow Source）编译使用；
@@ -306,6 +348,7 @@ class RegistryTemplateProjection:
         resource_name_by_symbol = compile_resource_template_source_aliases(
             resource_definitions
         )
+
         def source_alias_sort_key(item: tuple[str, str]) -> str:
             """读取资源模板源码别名的稳定排序键。
 
@@ -487,10 +530,36 @@ class RegistryTemplateProjection:
         （ResourceTemplate）的稳定身份；``resource_name`` 与
         ``resource_display_name`` 用于 HTTP 资源摘要。返回：一个物料来源
         （MaterialSource）框架节点和一个 source 物料占位符（ResourceSlot）；
-        稳定 UUID 由持久投影按业务唯一键复用或首次分配。
+        节点 Schema 另行发布物料来源专用库位选择器（SiteSelector）字段，稳定
+        UUID 由持久投影按业务唯一键复用或首次分配。
         """
 
         node_business_key = (resource_template_uuid, "material_source")
+        # ``site_selector`` 与普通动作使用同一扩展形状；物料来源（MaterialSource）
+        # 的 occupant 是资源模板字段，而不是尚未准入产生的具体物料占位符。
+        site_selector = {
+            "version": 1,
+            "owner": "mount",
+            "occupant": "resource_template_uuid",
+            "show_occupied": True,
+            "allow_occupied": False,
+        }
+        # ``mount_schema`` 是拥有候选库位（Site）的部署物料稳定引用。
+        mount_schema = {
+            "type": "object",
+            "properties": {
+                "uuid": {"type": "string", "format": "uuid"},
+            },
+            "required": ["uuid"],
+            "additionalProperties": False,
+        }
+        # ``site_schema`` 表达可选精确候选库位；省略仍表示全部兼容直接库位。
+        site_schema = {
+            "type": ["string", "null"],
+            "format": "uuid",
+            "x-unilabos-editor-control": "site_selector",
+            "x-unilabos-site-selector": dict(site_selector),
+        }
         node = {
             "resource_template_uuid": resource_template_uuid,
             "name": "material_source",
@@ -501,7 +570,50 @@ class RegistryTemplateProjection:
             "goal_default": {},
             "feedback": {},
             "result": {},
-            "schema": None,
+            "schema": {
+                "type": "object",
+                "properties": {
+                    "mode": {
+                        "type": "string",
+                        "enum": ["existing", "create_new"],
+                    },
+                    "resource_template_uuid": {
+                        "type": "string",
+                        "format": "uuid",
+                    },
+                    "mount": mount_schema,
+                    "material_uuid": {
+                        "type": ["string", "null"],
+                        "format": "uuid",
+                    },
+                    "site": site_schema,
+                    "slot_range": {
+                        "type": ["array", "null"],
+                        "items": {"type": "string", "format": "uuid"},
+                        "minItems": 1,
+                        "uniqueItems": True,
+                    },
+                    "flow_role": {
+                        "type": "string",
+                        "enum": [
+                            "primary_sample",
+                            "aliquot_sample",
+                            "reagent",
+                            "consumable",
+                        ],
+                    },
+                },
+                "required": [
+                    "mode",
+                    "resource_template_uuid",
+                    "mount",
+                    "material_uuid",
+                    "site",
+                    "slot_range",
+                    "flow_role",
+                ],
+                "additionalProperties": False,
+            },
             "type": "material_source",
             "node_type": "material_source",
             "meta_data": {

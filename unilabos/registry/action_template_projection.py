@@ -185,6 +185,21 @@ def _compile_data_handles(
             editor_control = "material_port"
         elif editor_control != "site_selector":
             editor_control = "variable_selector"
+        # ``raw_site_selector`` 是库位选择（Site Selection）的完整关系合同；它与
+        # 控件类型必须成对出现，投影层禁止把破损合同降级为普通变量。
+        raw_site_selector = value_schema.get("x-unilabos-site-selector")
+        if editor_control == "site_selector":
+            if not isinstance(raw_site_selector, Mapping):
+                raise ActionTemplateProjectionError(
+                    "库位选择控件缺少完整库位选择合同"
+                )
+        elif raw_site_selector is not None:
+            raise ActionTemplateProjectionError(
+                "非库位选择控件不能携带库位选择合同"
+            )
+        # ``site_selector`` 是已由动作合同编译器验证的完整库位关系；连接点投影
+        # 直接携带副本，使前端不必按参数名或动作根 Schema 猜测 owner/occupant。
+        site_selector = raw_site_selector
         allowed_template_uuids = _resolve_allowed_template_uuids(
             symbol_fields.get(handle_key),
             resolver=resource_template_identity_resolver,
@@ -205,6 +220,11 @@ def _compile_data_handles(
                         "value_schema": _copy_json(value_schema),
                         "contract_order": order_offset + index,
                         "editor_control": editor_control,
+                        "site_selector": (
+                            _copy_json(site_selector)
+                            if isinstance(site_selector, Mapping)
+                            else None
+                        ),
                         "allowed_resource_template_uuids": allowed_template_uuids,
                         "implicit_passthrough": False,
                         "structural_role": None,
