@@ -932,9 +932,7 @@ class WorkflowStore:
             (node.uuid,),
         ).fetchone()
         if existing is not None and existing["workflow_uuid"] != workflow_uuid:
-            raise StoreConflict(
-                f"workflow node {node.uuid} belongs to another workflow"
-            )
+            raise StoreAuthoringConflict("candidate_identity_conflict")
         meta_data = self._protected_metadata(
             node.meta_data,
             existing["meta_data"] if existing is not None else None,
@@ -1030,9 +1028,7 @@ class WorkflowStore:
             (edge.uuid,),
         ).fetchone()
         if existing is not None and existing["workflow_uuid"] != workflow_uuid:
-            raise StoreConflict(
-                f"workflow edge {edge.uuid} belongs to another workflow"
-            )
+            raise StoreAuthoringConflict("candidate_identity_conflict")
         meta_data = self._protected_metadata(
             edge.meta_data,
             existing["meta_data"] if existing is not None else None,
@@ -1612,6 +1608,36 @@ class WorkflowStore:
         result["candidate"] = _load(result["candidate"], None)
         result["applied_source"] = _load(result["applied_source"], None)
         return result
+
+    def validate_candidate_identity_ownership(
+        self,
+        *,
+        workflow_uuid: str,
+        node_uuids: Iterable[str],
+        edge_uuids: Iterable[str],
+    ) -> None:
+        """验证候选节点和连线身份未被其他工作流占用。
+
+        参数：``workflow_uuid`` 是候选所属工作流；``node_uuids``、``edge_uuids``
+        是已完成候选结构校验的稳定身份。返回：无。异常：任一身份已属于其他
+        工作流时抛 ``candidate_identity_conflict``，让服务在签发候选前暴露明确
+        诊断，而不是把冲突延迟到 Apply 事务。
+        """
+
+        with self._lock:
+            for table, identities in (
+                ("workflow_node", node_uuids),
+                ("workflow_edge", edge_uuids),
+            ):
+                for identity in identities:
+                    owner = self._conn.execute(
+                        f"SELECT workflow_uuid FROM {table} WHERE uuid = ?",
+                        (identity,),
+                    ).fetchone()
+                    if owner is not None and owner["workflow_uuid"] != workflow_uuid:
+                        raise StoreAuthoringConflict(
+                            "candidate_identity_conflict"
+                        )
 
     def record_draft_compilation(
         self,

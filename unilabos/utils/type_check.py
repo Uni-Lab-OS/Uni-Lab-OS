@@ -4,6 +4,7 @@ from collections import OrderedDict
 from typing import Optional, get_origin, get_args
 
 import yaml
+from pylabrobot.resources import Resource
 
 from unilabos.registry.action_policy import SUCCESS_TYPE_NORMAL, SuccessType
 
@@ -54,6 +55,11 @@ class ResultInfoEncoder(json.JSONEncoder):
     def default(self, obj):
         if isinstance(obj, type):
             return json_default(obj)
+        if isinstance(obj, Resource):
+            resource_uuid = getattr(obj, "unilabos_uuid", None)
+            if resource_uuid is not None:
+                return {"uuid": str(resource_uuid)}
+            return obj.serialize()
 
         try:
             if hasattr(obj, "__dict__"):

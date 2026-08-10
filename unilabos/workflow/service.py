@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import hashlib
+import logging
 import re
 import threading
 from collections.abc import Callable
@@ -80,6 +81,8 @@ from unilabos.workflow.task_input import (
 )
 from unilabos.workflow.task_scheduler_bridge import TaskSchedulerBridgeError
 
+logger = logging.getLogger(__name__)
+
 _ERRORS = {
     "invalid_input": (400, "提交内容格式不正确"),
     "not_found": (404, "请求的资源不存在"),
@@ -108,6 +111,10 @@ _ERRORS = {
     "candidate_not_ready": (409, "当前草稿尚未生成可应用的工作流"),
     "draft_invalid": (422, "草稿存在错误，修复后才能应用"),
     "candidate_invalid": (422, "工作流校验失败，请检查节点、连线和输入输出"),
+    "candidate_identity_conflict": (
+        409,
+        "节点或连线 UUID 已被其他工作流占用，请更新源码中的节点身份",
+    ),
     "invalid_material_source": (400, "物料来源选择器不符合规范"),
     "material_flow_fan_out": (409, "同一个物料输出不能连接多个物理消费者"),
     "material_template_mismatch": (409, "物料资源模板与消费者约束不兼容"),
@@ -1027,6 +1034,104 @@ class WorkflowService:
             except (OSError, RuntimeError):
                 continue
 
+    def activate_registered_sources_to_fixed_point(self) -> None:
+        """恢复并应用工作区源码，直到组合工作流依赖达到固定点。
+
+        参数：无。返回：无；先让全部活动来源形成候选或稳定诊断，再逐轮应用
+        当前有效候选。应用子工作流会刷新发布目录并重编译持有
+        ``composite_child_unapplied`` 的父来源，后续轮次继续应用这些新候选。
+        没有候选时停止；缺失、循环或无效来源保留真实诊断，不被伪装成成功。
+        单个候选的稳定业务失败会撤销该候选并成为该工作流的持久诊断，其他来源
+        仍继续推进；未知基础设施异常原样传播，禁止静默发布损坏的工作区。
+        """
+
+        self.recover_registered_sources()
+        registrations = self.list_registered_sources()
+        while True:
+            applied_in_pass = False
+            for registration in registrations:
+                workflow_uuid = str(registration["workflow_uuid"])
+                record = self._store.get_authoring_record(workflow_uuid)
+                candidate = record.get("candidate")
+                if not isinstance(candidate, dict):
+                    continue
+                candidate_hash = candidate.get("candidate_hash")
+                if not isinstance(candidate_hash, str) or not candidate_hash:
+                    raise WorkflowError("candidate_invalid")
+                try:
+                    self.apply_authoring(
+                        workflow_uuid,
+                        candidate_hash=candidate_hash,
+                    )
+                except WorkflowError as error:
+                    self._record_workspace_activation_failure(
+                        workflow_uuid,
+                        error=error,
+                    )
+                    continue
+                applied_in_pass = True
+            if not applied_in_pass:
+                return
+
+    def _record_workspace_activation_failure(
+        self,
+        workflow_uuid: str,
+        *,
+        error: WorkflowError,
+    ) -> None:
+        """把一个自动应用业务失败收敛为该来源自己的持久诊断。
+
+        参数：``workflow_uuid`` 是失败来源身份；``error`` 是已经稳定映射的工作流
+        业务错误。返回：无；撤销不可再次应用的旧候选，保留当前源码代，并发布
+        一次可观察创作事件。异常：读取来源或写入诊断失败时原样传播，避免把存储
+        故障误当成普通草稿错误。
+        """
+
+        workflow_uuid = self._get_authoring_workflow(workflow_uuid)["uuid"]
+        with self._authoring_lock(workflow_uuid):
+            registration = self._registration(workflow_uuid)
+            source = self._read_source(registration)
+            record = self._store.get_authoring_record(workflow_uuid)
+            draft_hash = (
+                source["draft_hash"]
+                if source is not None
+                else record["observed_draft_hash"]
+            )
+            draft_update_time = (
+                source["update_time"]
+                if source is not None
+                else record["draft_update_time"]
+            )
+            self._store.record_draft_compilation(
+                workflow_uuid=workflow_uuid,
+                draft_hash=draft_hash,
+                draft_update_time=draft_update_time,
+                diagnostics=[
+                    {
+                        "severity": "error",
+                        "code": error.code,
+                        "message": error.message,
+                    }
+                ],
+                candidate_hash=None,
+                candidate=None,
+                event_data={
+                    "workflow_uuid": workflow_uuid,
+                    "cause": "workspace_activation_failed",
+                    "workflow_revision": self._get_authoring_workflow(workflow_uuid)[
+                        "revision"
+                    ],
+                    "draft_hash": draft_hash,
+                    "candidate_hash": None,
+                },
+            )
+        logger.warning(
+            "工作区工作流自动激活失败 workflow_uuid=%s code=%s message=%s",
+            workflow_uuid,
+            error.code,
+            error.message,
+        )
+
     def close(self) -> None:
         """关闭共享本地调度桥和由服务独占的工作流存储。
 
@@ -1938,12 +2043,22 @@ class WorkflowService:
                 source_map=source_map,
                 changeset=changeset,
             )
+            self._store.validate_candidate_identity_ownership(
+                workflow_uuid=graph["workflow"]["uuid"],
+                node_uuids=(item["uuid"] for item in graph["nodes"]),
+                edge_uuids=(item["uuid"] for item in graph["edges"]),
+            )
             compiler_version = compilation.compiler_version
             if not compiler_version.strip():
                 raise ValueError
             template_catalog_fingerprint = compilation.template_catalog_fingerprint
             if _HASH_TOKEN.fullmatch(template_catalog_fingerprint) is None:
                 raise ValueError
+        except StoreAuthoringConflict as error:
+            if error.code != "candidate_identity_conflict":
+                raise
+            self._set_candidate_identity_conflict_diagnostic(compilation)
+            return None
         except (
             GraphValidationError,
             CandidateBundleError,
@@ -1988,6 +2103,20 @@ class WorkflowService:
                 "severity": "error",
                 "code": "candidate_invalid",
                 "message": _ERRORS["candidate_invalid"][1],
+            }
+        ]
+
+    @staticmethod
+    def _set_candidate_identity_conflict_diagnostic(
+        compilation: CandidateCompilation,
+    ) -> None:
+        """把跨工作流节点/连线身份占用投影为可行动候选诊断。"""
+
+        compilation.diagnostics = [
+            {
+                "severity": "error",
+                "code": "candidate_identity_conflict",
+                "message": _ERRORS["candidate_identity_conflict"][1],
             }
         ]
 

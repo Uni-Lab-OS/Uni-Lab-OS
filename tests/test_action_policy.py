@@ -3,6 +3,7 @@ import ast
 import json
 
 import pytest
+from pylabrobot.resources import Coordinate, Resource
 
 from unilabos.registry.action_policy import (
     SUCCESS_TYPE_NORMAL,
@@ -175,6 +176,35 @@ def test_failed_result_does_not_claim_success_type():
     result = serialize_result_info("failed", False, None)
 
     assert result == {"error": "failed", "suc": False, "return_value": None}
+
+
+def test_result_info_serializes_attached_resource_as_stable_reference():
+    """PLR resources contain parent/child cycles and must stay wire-safe."""
+
+    carrier = Resource(
+        name="carrier",
+        size_x=10,
+        size_y=10,
+        size_z=10,
+        category="carrier",
+    )
+    material = Resource(
+        name="material",
+        size_x=1,
+        size_y=1,
+        size_z=1,
+        category="material",
+    )
+    material.unilabos_uuid = "10000000-0000-4000-8000-000000000001"
+    carrier.assign_child_resource(material, location=Coordinate())
+
+    encoded = json.loads(
+        get_result_info_str("", True, {"resource": material})
+    )
+
+    assert encoded["return_value"] == {
+        "resource": {"uuid": material.unilabos_uuid}
+    }
 
 
 def test_policy_rejects_empty_class_options():

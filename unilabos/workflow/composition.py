@@ -216,7 +216,13 @@ def compose_workflow_runtime(
                 else discover_editable_sources(configured_roots)
             )
             new_service.replace_discovered_source_authorizations(discovery_plan)
-            new_service.recover_registered_sources()
+            if editable_source_discovery_plan is not None:
+                # managed-local 工作区把同代 PackageCatalog 当作激活权威；OS
+                # 只有在子到父的组合依赖全部推进到固定点后才能发布 ready。
+                new_service.activate_registered_sources_to_fixed_point()
+            else:
+                # 遗留显式目录入口继续保留候选/人工应用语义。
+                new_service.recover_registered_sources()
             if task_scheduler_bridge is not None:
                 # 只恢复没有结果不明作业的运行中任务；已成功动作
                 # 仅重建 DAG 状态，不越过物理派发边界重放。
