@@ -321,6 +321,85 @@ def test_workspace_activation_propagates_authority_conflict(
     assert captured.value.code == "template_catalog_conflict"
 
 
+def test_workspace_activation_fails_closed_after_catalog_rebuild_warning(
+    tmp_path: Path,
+) -> None:
+    """自动应用提交后目录重建失败不得让组合根发布 ready。
+
+    参数：``tmp_path`` 隔离来源与 SQLite。返回：无；真实 Apply 已提交图后，
+    目录重建器失败产生的 warning 必须在固定点边界重新升级为目录不可用错误。
+    异常：若自动激活忽略提交后 warning，本测试因没有抛错而保持 RED。
+    """
+
+    package_root = tmp_path / "workspace"
+    _write_parent_before_child_package(package_root)
+
+    def fail_catalog_rebuild() -> MutableCatalogCompiler:
+        raise RuntimeError("目录重建基础设施不可用")
+
+    service = composition.compose_workflow_runtime(
+        tmp_path / "runtime",
+        compiler=MutableCatalogCompiler(),
+        compiler_rebuilder=fail_catalog_rebuild,
+        editable_package_roots=(package_root,),
+        start_source_monitor=False,
+    )
+
+    with pytest.raises(WorkflowError) as captured:
+        service.activate_registered_sources_to_fixed_point()
+    assert captured.value.code == "template_catalog_unavailable"
+
+
+def test_workspace_activation_fails_closed_after_dependent_refresh_warning(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """自动应用提交后的父/子依赖重编译失败不得被 warning 隔离成 ready。
+
+    参数：``tmp_path`` 隔离来源与 SQLite；``monkeypatch`` 让首次恢复保持原状，
+    再只在已提交 Apply 的依赖刷新阶段注入失败。返回：无；固定点把真实刷新
+    warning 升级为目录不可用。异常：若 Apply 结果 warning 未被检查则保持 RED。
+    """
+
+    package_root = tmp_path / "workspace"
+    _write_parent_before_child_package(package_root)
+    service = composition.compose_workflow_runtime(
+        tmp_path / "runtime",
+        compiler=MutableCatalogCompiler(),
+        editable_package_roots=(package_root,),
+        start_source_monitor=False,
+    )
+    original_reconcile = service.reconcile_registered_source
+
+    def skip_recovery(*, preserve_author_source: bool = False) -> None:
+        del preserve_author_source
+
+    def fail_dependent_refresh(
+        workflow_uuid: str,
+        *,
+        force_compile: bool = False,
+        preserve_author_source: bool = False,
+    ) -> dict[str, Any]:
+        if workflow_uuid == CHILD_WORKFLOW_UUID and force_compile:
+            raise RuntimeError("依赖来源无法按新目录重编译")
+        return original_reconcile(
+            workflow_uuid,
+            force_compile=force_compile,
+            preserve_author_source=preserve_author_source,
+        )
+
+    monkeypatch.setattr(service, "recover_registered_sources", skip_recovery)
+    monkeypatch.setattr(
+        service,
+        "reconcile_registered_source",
+        fail_dependent_refresh,
+    )
+
+    with pytest.raises(WorkflowError) as captured:
+        service.activate_registered_sources_to_fixed_point()
+    assert captured.value.code == "template_catalog_unavailable"
+
+
 def test_workspace_activation_refreshes_parent_after_child_application(
     tmp_path: Path,
 ) -> None:

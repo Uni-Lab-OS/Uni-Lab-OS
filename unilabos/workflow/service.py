@@ -6,7 +6,7 @@ import hashlib
 import logging
 import re
 import threading
-from collections.abc import Callable
+from collections.abc import Callable, Mapping
 from contextlib import ExitStack
 from datetime import datetime, timezone
 from functools import partial
@@ -1065,11 +1065,12 @@ class WorkflowService:
                 if not isinstance(candidate_hash, str) or not candidate_hash:
                     raise WorkflowError("candidate_invalid")
                 try:
-                    self.apply_authoring(
+                    result = self.apply_authoring(
                         workflow_uuid,
                         candidate_hash=candidate_hash,
                         preserve_author_source=True,
                     )
+                    self._require_workspace_activation_apply_complete(result)
                 except WorkflowError as error:
                     if error.code not in _ISOLATED_WORKSPACE_ACTIVATION_ERRORS:
                         raise
@@ -1081,6 +1082,39 @@ class WorkflowService:
                 applied_in_pass = True
             if not applied_in_pass:
                 return
+
+    def _require_workspace_activation_apply_complete(
+        self,
+        result: Mapping[str, Any],
+    ) -> None:
+        """禁止工作区自动激活在提交后恢复未完成时发布 ready。
+
+        参数：``result`` 是刚完成的 ``apply_authoring`` 结果。返回：没有提交后
+        warning 且当前目录编译器仍可用时无返回值。异常：目录重建或依赖来源刷新
+        未完成时抛 ``template_catalog_unavailable``；其他提交后恢复 warning 抛
+        ``internal_error``。图事务可能已经提交，但组合根必须失败关闭并由下次冷
+        启动从持久事实继续恢复，绝不把部分固定点误报为 ready。
+        """
+
+        apply_result = result.get("apply_result")
+        if not isinstance(apply_result, Mapping):
+            raise WorkflowError("candidate_invalid")
+        warnings = apply_result.get("warnings")
+        if not isinstance(warnings, list):
+            raise WorkflowError("candidate_invalid")
+        warning_codes = {
+            str(warning.get("code"))
+            for warning in warnings
+            if isinstance(warning, Mapping)
+        }
+        catalog_incomplete = {
+            "template_catalog_rebuild_pending",
+            "dependent_authoring_refresh_pending",
+        }
+        if self.compiler is None or warning_codes & catalog_incomplete:
+            raise WorkflowError("template_catalog_unavailable")
+        if warnings:
+            raise WorkflowError("internal_error")
 
     def _record_workspace_activation_failure(
         self,
