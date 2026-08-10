@@ -400,6 +400,70 @@ def test_workspace_activation_fails_closed_after_dependent_refresh_warning(
     assert captured.value.code == "template_catalog_unavailable"
 
 
+def test_product_composition_does_not_publish_after_catalog_rebuild_failure(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """产品组合根在自动应用后的目录重建失败时不得发布工作流 ready。
+
+    参数：``tmp_path`` 隔离真实预编译工作区与两份 SQLite；``monkeypatch`` 让
+    产品模板投影第一次建立成功、首次 Apply 后刷新失败。返回：无；组合入口抛
+    稳定目录错误，且工作流服务和模板投影单例都保持未发布。异常：若产品入口
+    绕过固定点 fail-closed，本测试会观察到已发布权威并保持 RED。
+    """
+
+    selected_root = tmp_path / "editable"
+    selected_root.mkdir()
+    _write_published_package(selected_root)
+    selected_root.joinpath("pyproject.toml").write_text(
+        '[project]\nname = "c1-product-lab"\nversion = "0.1.0"\n',
+        encoding="utf-8",
+    )
+    selected_root.joinpath(PUBLISHED_PACKAGE_ID, "__init__.py").write_text(
+        "",
+        encoding="utf-8",
+    )
+    workspace_source = WorkspaceSource(selected_root)
+    source_plan = workflow_source_plan_from_catalog(
+        source=workspace_source,
+        catalog=compile_package_source(workspace_source),
+    )
+    inventory_store = InventoryStore(str(tmp_path / "inventory.db"))
+    original_refresh = composition.RegistryTemplateProjection.refresh
+    refresh_count = 0
+
+    def fail_second_refresh(
+        projection: Any,
+        registry_snapshot: Any,
+    ) -> Any:
+        nonlocal refresh_count
+        refresh_count += 1
+        if refresh_count == 2:
+            raise RuntimeError("自动应用后目录刷新失败")
+        return original_refresh(projection, registry_snapshot)
+
+    monkeypatch.setattr(
+        composition.RegistryTemplateProjection,
+        "refresh",
+        fail_second_refresh,
+    )
+    try:
+        with pytest.raises(WorkflowError) as captured:
+            compose_local_workflow_template_runtime(
+                tmp_path,
+                inventory_store=inventory_store,
+                registry=_Registry(),
+                editable_source_discovery_plan=source_plan,
+                start_source_monitor=False,
+            )
+        assert captured.value.code == "template_catalog_unavailable"
+        assert composition.get_workflow_service() is None
+        assert composition.get_registry_template_projection() is None
+    finally:
+        composition.reset_workflow_service_for_test()
+        inventory_store.close()
+
+
 def test_workspace_activation_refreshes_parent_after_child_application(
     tmp_path: Path,
 ) -> None:
