@@ -108,6 +108,9 @@ def test_compile_package_source_discovers_complete_catalog_without_import(
     assert [item.fqid for item in catalog.definitions.resources] == [
         "community.catalog_lab.plate"
     ]
+    assert catalog.definitions.resources[0].details["registry_entry"]["source_uri"] == (
+        "package://catalog_lab/definitions.py"
+    )
     assert [item.id for item in catalog.definitions.workflows] == ["prepare"]
     assert catalog.definitions.workflows[0].details["workflow_uuid"] == WORKFLOW_UUID
     assert catalog.definitions.workflows[0].details["source_uri"] == (
@@ -153,6 +156,33 @@ def test_catalog_digest_is_independent_of_absolute_workspace_path(
     assert first_catalog.content_digest == second_catalog.content_digest
     assert first_catalog.catalog_digest == second_catalog.catalog_digest
     assert first_catalog.to_canonical_bytes() == second_catalog.to_canonical_bytes()
+
+
+def test_catalog_excludes_agent_native_skill_projections(
+    tmp_path: Path,
+) -> None:
+    """AionUi 的原生技能链接不得进入目录摘要或破坏安全静态编译。"""
+
+    from unilabos.package_manager import WorkspaceSource, compile_package_source
+
+    workspace_root = tmp_path / "workspace"
+    _write_package(workspace_root)
+    package_root = workspace_root / "catalog_lab"
+    private_skill = workspace_root / ".unilabos" / "agent" / "skill"
+    private_skill.parent.mkdir(parents=True)
+    private_skill.write_text("runtime skill\n", encoding="utf-8")
+    for native_root in (".claude", ".codex"):
+        skill_link = package_root / native_root / "skills" / "runtime-skill"
+        skill_link.parent.mkdir(parents=True)
+        skill_link.symlink_to(private_skill)
+
+    projected = compile_package_source(WorkspaceSource(workspace_root))
+    for native_root in (".claude", ".codex"):
+        (package_root / native_root / "skills" / "runtime-skill").unlink()
+    clean = compile_package_source(WorkspaceSource(workspace_root))
+
+    assert projected.content_digest == clean.content_digest
+    assert projected.catalog_digest == clean.catalog_digest
 
 
 def test_any_python_syntax_error_rejects_the_complete_catalog(

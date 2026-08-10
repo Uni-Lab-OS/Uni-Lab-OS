@@ -7,6 +7,8 @@ from pathlib import Path
 from types import SimpleNamespace
 from typing import Any
 
+import pytest
+
 from unilabos.package_manager import StableWorkspaceFileMonitor
 
 
@@ -140,6 +142,41 @@ def test_monitor_excludes_runtime_build_and_environment_outputs_but_keeps_assets
 
     assert after_runtime_writes.identity == initial.identity
     assert after_asset_change.identity != initial.identity
+
+
+def test_monitor_excludes_agent_native_skill_projections_but_rejects_other_links(
+    tmp_path: Path,
+) -> None:
+    """Agent 技能投影不属于实验源码，其他符号链接仍须关闭式拒绝。"""
+
+    workspace_root = tmp_path / "workspace"
+    workspace_root.mkdir()
+    workspace_root.joinpath("graph.json").write_text(
+        '{"nodes": []}\n',
+        encoding="utf-8",
+    )
+    private_skill = workspace_root / ".unilabos" / "agent" / "skill"
+    private_skill.parent.mkdir(parents=True)
+    private_skill.write_text("runtime skill\n", encoding="utf-8")
+    package_root = workspace_root / "editable_package"
+    for native_root in (".claude", ".codex"):
+        skill_link = package_root / native_root / "skills" / "runtime-skill"
+        skill_link.parent.mkdir(parents=True)
+        skill_link.symlink_to(private_skill)
+    monitor = StableWorkspaceFileMonitor(
+        workspace_root,
+        graph_argument="graph.json",
+    )
+
+    initial = monitor.capture()
+    private_skill.write_text("updated runtime skill\n", encoding="utf-8")
+    assert monitor.capture().identity == initial.identity
+
+    unsafe_link = workspace_root / "workflows" / "unsafe.py"
+    unsafe_link.parent.mkdir()
+    unsafe_link.symlink_to(private_skill)
+    with pytest.raises(ValueError, match="不得包含符号链接"):
+        monitor.capture()
 
 
 def test_monitor_excludes_explicit_working_directory_inside_workspace(

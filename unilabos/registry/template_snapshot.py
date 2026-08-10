@@ -158,6 +158,9 @@ def _template_definition(
     if isinstance(source_fqid, str) and source_fqid.strip():
         # ``source_fqid`` 是资源模板源码身份；Backend 用它解析动作字段允许集。
         definition["source_fqid"] = source_fqid.strip()
+    source_uri = source.get("source_uri")
+    if isinstance(source_uri, str) and source_uri.startswith("package://"):
+        definition["source_uri"] = source_uri
     schema = _initial_parameter_schema(source.get("init_param_schema"))
     if schema:
         definition["init_param_schema"] = schema

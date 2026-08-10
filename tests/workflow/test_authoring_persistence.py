@@ -147,6 +147,43 @@ def test_authoring_http_keeps_backend_response_envelope(
     assert payload["data"]["candidate"]["candidate_hash"].startswith("sha256:")
 
 
+def test_same_content_cas_compiles_external_draft_without_rewriting_source(
+    authoring_service: tuple[WorkflowService, Path],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """IDE 对已落盘源码做同内容 CAS 时只签发候选，不得再次发布文件。
+
+    参数：``authoring_service`` 提供真实来源文件和编译器；``monkeypatch`` 把
+    物理写入替换为失败哨兵。返回：无；证明外部保存后的补编译保留作者文件
+    世代，同时推进候选版本（Candidate）。异常：若服务仍重写同内容文件或未
+    产生候选，测试失败。
+    """
+
+    service, source_path = authoring_service
+    python_source = _source()
+    source_path.write_text(python_source, encoding="utf-8")
+    observed = service.get_authoring(WORKFLOW_UUID)
+    assert observed["state"] == "applied_source_stale"
+
+    def reject_rewrite(*_args: object, **_kwargs: object) -> None:
+        """暴露同内容 CAS 中任何不必要的物理文件重写。"""
+
+        raise AssertionError("same-content CAS must not rewrite source")
+
+    monkeypatch.setattr(service, "_atomic_write", reject_rewrite)
+
+    saved = service.save_draft(
+        WORKFLOW_UUID,
+        python_source=python_source,
+        expected_draft_hash=observed["draft"]["draft_hash"],
+        expected_workflow_revision=observed["workflow_revision"],
+    )
+
+    assert saved["candidate"] is not None
+    assert saved["candidate"]["draft_hash"] == saved["draft"]["draft_hash"]
+    assert source_path.read_text(encoding="utf-8") == python_source
+
+
 @pytest.mark.parametrize("request_variant", ["legacy_three_tokens", "candidate_bundle"])
 def test_authoring_apply_http_rejects_client_supplied_candidate_facts(
     authoring_service: tuple[WorkflowService, Path],

@@ -5,6 +5,11 @@ from .activation import (
     prepare_workspace_registry_runtime,
     publish_registry_snapshot,
 )
+from .authoring_mounts import (
+    WorkspacePackageMount,
+    WorkspacePackageMountProjection,
+    compile_workspace_package_mount_projection,
+)
 from .discovery import (
     WorkspaceSource,
     WorkspaceStartupPlan,
@@ -48,6 +53,8 @@ __all__ = [
     "WorkspaceGenerationPublisher",
     "WorkspaceInputGeneration",
     "WorkspacePackageRuntime",
+    "WorkspacePackageMount",
+    "WorkspacePackageMountProjection",
     "WorkspaceProductLifecycle",
     "WorkspaceRefreshCoordinator",
     "WorkspaceRefreshResult",
@@ -58,6 +65,7 @@ __all__ = [
     "candidate_fingerprint",
     "close_workspace_product_lifecycle",
     "compile_package_source",
+    "compile_workspace_package_mount_projection",
     "compile_workspace_startup",
     "compose_workspace_product_lifecycle",
     "get_workspace_product_lifecycle",

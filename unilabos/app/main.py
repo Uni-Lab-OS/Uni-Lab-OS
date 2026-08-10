@@ -935,6 +935,20 @@ def main():
         if workspace_registry_runtime is not None
         else None
     )
+    if workspace_registry_runtime is not None:
+        from unilabos.package_manager.workspace_runtime import (
+            compile_workspace_package_mount_projection,
+        )
+
+        BasicConfig.workspace_package_mount_projection = (
+            compile_workspace_package_mount_projection(
+                workspace_registry_runtime.package_catalog_sources,
+                editable_source=workspace_registry_runtime.source,
+                dependency_revision=workspace_registry_runtime.dependency_revision,
+            )
+        )
+    else:
+        BasicConfig.workspace_package_mount_projection = None
 
     if args_dict.get("command") in ("template-sync", "template_sync"):
         from unilabos.app.template_sync import (
@@ -1148,14 +1162,14 @@ def main():
                 request_restart=_request_workspace_restart,
             )
 
-        # ``workspace_material_models`` 只消费同一工作区启动计划和已发布注册表，
-        # 并只投影 OS 公开 HTTP URL，不向前端暴露本地资产路径。
+        # ``workspace_material_models`` 直接消费同代不可变包目录，保留声明文件的
+        # 工作区逻辑证据，并只投影 OS 公开 HTTP URL，不向前端暴露本地资产路径。
         workspace_startup_plan = workspace_registry_runtime.startup_plan
         if workspace_startup_plan is None:
             raise RuntimeError("产品工作区注册表运行时缺少同代启动计划")
         workspace_material_models = compile_workspace_material_models(
             workspace_startup_plan,
-            lab_registry,
+            workspace_registry_runtime.catalog,
         )
         # ``workspace_material_shapes`` 直接消费完整候选代已经聚合的物料外形；
         # 主包和显式外部包均来自同一包目录（PackageCatalog）/来源配对，不再

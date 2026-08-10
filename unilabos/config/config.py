@@ -17,6 +17,8 @@ class BasicConfig:
     # 工作区包目录（PackageCatalog）已编译的工作流源码
     # （Workflow Source）发现计划；``None`` 时保留旧可编辑包根目录发现。
     workflow_source_discovery_plan: object | None = None
+    # 与当前包目录编译代绑定的 Workbench 精确源码挂载；无工作区时保持 ``None``。
+    workspace_package_mount_projection: object | None = None
     config_path = ""
     is_host_mode = True
     # False（默认）：Slave 必须等 HostLink/Host ROS 服务就绪后才初始化 ROS。

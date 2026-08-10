@@ -11,6 +11,7 @@ ARCHIVE_EXCLUDE_DIRS = {
     ".git",
     ".idea",
     ".vscode",
+    ".unilabos",
     "dist",
     "build",
     ".pytest_cache",
@@ -20,6 +21,10 @@ ARCHIVE_EXCLUDE_DIRS = {
     "node_modules",
 }
 ARCHIVE_EXCLUDE_SUFFIXES = {".pyc", ".pyo"}
+ARCHIVE_EXCLUDE_RELATIVE_SUBTREES = {
+    (".claude", "skills"),
+    (".codex", "skills"),
+}
 
 
 def build_archive(pkg_dir: Path, archive_path: Path) -> str:
@@ -44,8 +49,15 @@ def build_archive(pkg_dir: Path, archive_path: Path) -> str:
         """
 
         # ``parts`` 用于判断候选归档成员是否落入任何禁止发布的目录。
-        parts = set(Path(tarinfo.name).parts)
+        member_parts = Path(tarinfo.name).parts
+        parts = set(member_parts)
         if parts & ARCHIVE_EXCLUDE_DIRS:
+            return None
+        relative_parts = member_parts[1:]
+        if any(
+            relative_parts[: len(subtree)] == subtree
+            for subtree in ARCHIVE_EXCLUDE_RELATIVE_SUBTREES
+        ):
             return None
         if Path(tarinfo.name).suffix in ARCHIVE_EXCLUDE_SUFFIXES:
             return None
@@ -79,6 +91,7 @@ def sha256_file(path: Path) -> str:
 
 __all__ = [
     "ARCHIVE_EXCLUDE_DIRS",
+    "ARCHIVE_EXCLUDE_RELATIVE_SUBTREES",
     "ARCHIVE_EXCLUDE_SUFFIXES",
     "build_archive",
     "sha256_file",

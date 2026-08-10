@@ -20,6 +20,10 @@ from .registry import compile_registry_definitions
 from .workflow import compile_workflow_definitions
 
 _IGNORED_PARTS = {"__pycache__", ".git", ".pytest_cache", ".mypy_cache"}
+_IGNORED_AGENT_SKILL_PATHS = {
+    (".claude", "skills"),
+    (".codex", "skills"),
+}
 _IGNORED_SUFFIXES = {".pyc", ".pyo"}
 
 
@@ -233,6 +237,12 @@ def _collect_package_files(
             raise ValueError("软件包工作区不可读取") from error
         for entry in entries:
             if entry.name in _IGNORED_PARTS:
+                continue
+            relative_entry_parts = entry.relative_to(package_directory).parts
+            if any(
+                relative_entry_parts[: len(ignored_path)] == ignored_path
+                for ignored_path in _IGNORED_AGENT_SKILL_PATHS
+            ):
                 continue
             if entry.is_symlink():
                 raise ValueError("软件包工作区不得包含符号链接")
