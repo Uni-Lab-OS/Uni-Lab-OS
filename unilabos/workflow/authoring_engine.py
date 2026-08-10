@@ -9,6 +9,7 @@ from typing import Any
 
 from unilabos.workflow.authoring_ast import (
     AuthoringSyntaxError,
+    author_source_map,
     diagnostic_source_range,
     parse_authoring_source,
 )
@@ -185,6 +186,52 @@ class WorkflowAuthoringEngine:
                 code="candidate_invalid",
                 message="作者源码无法生成可信候选图",
             )
+
+    def preserve_author_source(
+        self,
+        *,
+        compilation: CandidateCompilation,
+        workflow_uuid: str,
+        workflow_revision: int,
+        python_source: str,
+        applied_graph: dict[str, Any],
+    ) -> CandidateCompilation:
+        """把成功编译结果投影回完全相同的作者源码及其源码映射。
+
+        参数说明：``compilation`` 是本引擎刚生成的可信候选；其余参数与
+        ``compile`` 的同名输入一致。返回图与变更集不变、但规范源码改为原始
+        作者字节且源码映射指向该文本的候选。该能力只供工作区启动激活使用，
+        交互式 Apply 仍通过 ``compile`` 的规范化源码展示和写回完整 diff。
+        异常：输入不是成功候选，或源码不能再次证明相同图合同，抛出
+        ``CandidateBundleError``/``AuthoringSyntaxError``，禁止静默改写作者文件。
+        """
+
+        if not compilation.valid or compilation.graph is None:
+            raise CandidateBundleError("只有成功编译结果才能保留作者源码")
+        if compilation.normalized_python_source == python_source:
+            return compilation
+        program = parse_authoring_source(
+            python_source=python_source,
+            expected_workflow_uuid=workflow_uuid,
+        )
+        source_map = author_source_map(
+            program=program,
+            python_source=python_source,
+        )
+        validate_candidate_bundle(
+            graph=compilation.graph,
+            base_graph=applied_graph,
+            workflow_uuid=workflow_uuid,
+            revision=workflow_revision,
+            source_map=source_map,
+            changeset=compilation.changeset,
+        )
+        return compilation.model_copy(
+            update={
+                "normalized_python_source": python_source,
+                "source_map": source_map,
+            }
+        )
 
     def generate_python(
         self,

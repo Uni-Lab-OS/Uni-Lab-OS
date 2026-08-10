@@ -3,9 +3,10 @@
 from __future__ import annotations
 
 import hashlib
+import logging
 import re
 import threading
-from collections.abc import Callable
+from collections.abc import Callable, Mapping
 from contextlib import ExitStack
 from datetime import datetime, timezone
 from functools import partial
@@ -80,6 +81,8 @@ from unilabos.workflow.task_input import (
 )
 from unilabos.workflow.task_scheduler_bridge import TaskSchedulerBridgeError
 
+logger = logging.getLogger(__name__)
+
 _ERRORS = {
     "invalid_input": (400, "提交内容格式不正确"),
     "not_found": (404, "请求的资源不存在"),
@@ -108,6 +111,10 @@ _ERRORS = {
     "candidate_not_ready": (409, "当前草稿尚未生成可应用的工作流"),
     "draft_invalid": (422, "草稿存在错误，修复后才能应用"),
     "candidate_invalid": (422, "工作流校验失败，请检查节点、连线和输入输出"),
+    "candidate_identity_conflict": (
+        409,
+        "节点或连线 UUID 已被其他工作流占用，请更新源码中的节点身份",
+    ),
     "invalid_material_source": (400, "物料来源选择器不符合规范"),
     "material_flow_fan_out": (409, "同一个物料输出不能连接多个物理消费者"),
     "material_template_mismatch": (409, "物料资源模板与消费者约束不兼容"),
@@ -118,6 +125,9 @@ _ERRORS = {
     "internal_error": (500, "本地工作流服务出现错误，请重试或查看日志"),
 }
 _HASH_TOKEN = re.compile(r"sha256:[0-9a-f]{64}\Z")
+_ISOLATED_WORKSPACE_ACTIVATION_ERRORS = frozenset(
+    {"candidate_invalid", "draft_invalid"}
+)
 _WORKFLOW_READ_FIELDS = {
     "uuid",
     "create_time",
@@ -1010,22 +1020,160 @@ class WorkflowService:
             if registration["workflow_uuid"] in active_workflow_uuids
         ]
 
-    def recover_registered_sources(self) -> None:
+    def recover_registered_sources(
+        self,
+        *,
+        preserve_author_source: bool = False,
+    ) -> None:
         """启动时按当前模板目录逐一恢复全部授权源码。
 
-        参数：无。返回：无；只读取本轮活动注册并强制替换旧进程目录产生的候选
-        或诊断，不把普通子源码编译误当成子合同发布。异常：单项文件或运行时
-        瞬态故障保持隔离；其他稳定工作流错误原样传播。
+        参数：``preserve_author_source`` 只供工作区自动激活使用，使成功候选绑定
+        原始作者源码和对应映射。返回：无；只读取本轮活动注册并强制替换旧进程
+        目录产生的候选或诊断，不把普通子源码编译误当成子合同发布。异常：文件、
+        目录或持久化失败全部传播到组合根，禁止启动在不完整恢复后误报 ready。
         """
 
         for registration in self.list_registered_sources():
-            try:
-                self.reconcile_registered_source(
-                    registration["workflow_uuid"],
-                    force_compile=True,
-                )
-            except (OSError, RuntimeError):
-                continue
+            self.reconcile_registered_source(
+                registration["workflow_uuid"],
+                force_compile=True,
+                preserve_author_source=preserve_author_source,
+            )
+
+    def activate_registered_sources_to_fixed_point(self) -> None:
+        """恢复并应用工作区源码，直到组合工作流依赖达到固定点。
+
+        参数：无。返回：无；先让全部活动来源形成候选或稳定诊断，再逐轮应用
+        当前有效候选。应用子工作流会刷新发布目录并重编译持有
+        ``composite_child_unapplied`` 的父来源，后续轮次继续应用这些新候选。
+        没有候选时停止；缺失、循环或无效来源保留真实诊断，不被伪装成成功。
+        单个候选的稳定业务失败会撤销该候选并成为该工作流的持久诊断，其他来源
+        仍继续推进；未知基础设施异常原样传播，禁止静默发布损坏的工作区。
+        """
+
+        self.recover_registered_sources(preserve_author_source=True)
+        registrations = self.list_registered_sources()
+        while True:
+            applied_in_pass = False
+            for registration in registrations:
+                workflow_uuid = str(registration["workflow_uuid"])
+                record = self._store.get_authoring_record(workflow_uuid)
+                candidate = record.get("candidate")
+                if not isinstance(candidate, dict):
+                    continue
+                candidate_hash = candidate.get("candidate_hash")
+                if not isinstance(candidate_hash, str) or not candidate_hash:
+                    raise WorkflowError("candidate_invalid")
+                try:
+                    result = self.apply_authoring(
+                        workflow_uuid,
+                        candidate_hash=candidate_hash,
+                        preserve_author_source=True,
+                    )
+                    self._require_workspace_activation_apply_complete(result)
+                except WorkflowError as error:
+                    if error.code not in _ISOLATED_WORKSPACE_ACTIVATION_ERRORS:
+                        raise
+                    self._record_workspace_activation_failure(
+                        workflow_uuid,
+                        error=error,
+                    )
+                    continue
+                applied_in_pass = True
+            if not applied_in_pass:
+                return
+
+    def _require_workspace_activation_apply_complete(
+        self,
+        result: Mapping[str, Any],
+    ) -> None:
+        """禁止工作区自动激活在提交后恢复未完成时发布 ready。
+
+        参数：``result`` 是刚完成的 ``apply_authoring`` 结果。返回：没有提交后
+        warning 且当前目录编译器仍可用时无返回值。异常：目录重建或依赖来源刷新
+        未完成时抛 ``template_catalog_unavailable``；其他提交后恢复 warning 抛
+        ``internal_error``。图事务可能已经提交，但组合根必须失败关闭并由下次冷
+        启动从持久事实继续恢复，绝不把部分固定点误报为 ready。
+        """
+
+        apply_result = result.get("apply_result")
+        if not isinstance(apply_result, Mapping):
+            raise WorkflowError("candidate_invalid")
+        warnings = apply_result.get("warnings")
+        if not isinstance(warnings, list):
+            raise WorkflowError("candidate_invalid")
+        warning_codes = {
+            str(warning.get("code"))
+            for warning in warnings
+            if isinstance(warning, Mapping)
+        }
+        catalog_incomplete = {
+            "template_catalog_rebuild_pending",
+            "dependent_authoring_refresh_pending",
+        }
+        if self.compiler is None or warning_codes & catalog_incomplete:
+            raise WorkflowError("template_catalog_unavailable")
+        if warnings:
+            raise WorkflowError("internal_error")
+
+    def _record_workspace_activation_failure(
+        self,
+        workflow_uuid: str,
+        *,
+        error: WorkflowError,
+    ) -> None:
+        """把一个自动应用业务失败收敛为该来源自己的持久诊断。
+
+        参数：``workflow_uuid`` 是失败来源身份；``error`` 是已经稳定映射的工作流
+        业务错误。返回：无；撤销不可再次应用的旧候选，保留当前源码代，并发布
+        一次可观察创作事件。异常：读取来源或写入诊断失败时原样传播，避免把存储
+        故障误当成普通草稿错误。
+        """
+
+        workflow_uuid = self._get_authoring_workflow(workflow_uuid)["uuid"]
+        with self._authoring_lock(workflow_uuid):
+            registration = self._registration(workflow_uuid)
+            source = self._read_source(registration)
+            record = self._store.get_authoring_record(workflow_uuid)
+            draft_hash = (
+                source["draft_hash"]
+                if source is not None
+                else record["observed_draft_hash"]
+            )
+            draft_update_time = (
+                source["update_time"]
+                if source is not None
+                else record["draft_update_time"]
+            )
+            self._store.record_draft_compilation(
+                workflow_uuid=workflow_uuid,
+                draft_hash=draft_hash,
+                draft_update_time=draft_update_time,
+                diagnostics=[
+                    {
+                        "severity": "error",
+                        "code": error.code,
+                        "message": error.message,
+                    }
+                ],
+                candidate_hash=None,
+                candidate=None,
+                event_data={
+                    "workflow_uuid": workflow_uuid,
+                    "cause": "workspace_activation_failed",
+                    "workflow_revision": self._get_authoring_workflow(workflow_uuid)[
+                        "revision"
+                    ],
+                    "draft_hash": draft_hash,
+                    "candidate_hash": None,
+                },
+            )
+        logger.warning(
+            "工作区工作流自动激活失败 workflow_uuid=%s code=%s message=%s",
+            workflow_uuid,
+            error.code,
+            error.message,
+        )
 
     def close(self) -> None:
         """关闭共享本地调度桥和由服务独占的工作流存储。
@@ -1172,12 +1320,14 @@ class WorkflowService:
         workflow_uuid: str,
         *,
         force_compile: bool = False,
+        preserve_author_source: bool = False,
     ) -> Dict[str, Any]:
         """协调一个已注册工作流源码及其可重建创作派生状态。
 
         参数：``workflow_uuid`` 是工作流（Workflow）稳定身份；
         ``force_compile`` 用于启动恢复或模板目录换代后强制重编译目录相关诊断和
-        候选版本（Candidate）。返回：最新创作聚合。异常：来源、编译或持久化
+        候选版本（Candidate）；``preserve_author_source`` 让自动激活候选保留
+        原始作者源码与相应映射。返回：最新创作聚合。异常：来源、编译或持久化
         失败时传播稳定工作流错误；本函数不发布模板目录。
         """
 
@@ -1294,6 +1444,13 @@ class WorkflowService:
                     registration=registration,
                     python_source=source["python_source"],
                 )
+                if preserve_author_source:
+                    compilation = self._preserve_author_source_compilation(
+                        compilation=compilation,
+                        workflow=workflow,
+                        graph=applied_graph,
+                        python_source=source["python_source"],
+                    )
                 diagnostics = compilation.diagnostics
                 candidate = self._issue_candidate(
                     workflow_revision=workflow["revision"],
@@ -1392,14 +1549,17 @@ class WorkflowService:
         workflow_uuid: str,
         *,
         candidate_hash: str,
+        preserve_author_source: bool = False,
     ) -> Dict[str, Any]:
         """按服务端候选哈希线性化应用可信工作流创作结果。
 
         参数：``workflow_uuid`` 是工作流（Workflow）稳定身份；``candidate_hash``
         是服务端持久并签发的候选哈希（Candidate Hash），客户端不得重述草稿、
-        工作流修订或候选包。返回：应用结果与最新创作聚合。异常：候选、源码
-        权威（Source Authority）、工作流修订（Workflow Revision）或目录指纹已
-        变化时抛出稳定 ``WorkflowConflict``；候选无效时抛出 ``WorkflowError``。
+        工作流修订或候选包；``preserve_author_source`` 仅供启动固定点激活，
+        禁止把自动扫描变成未确认的规范化编辑。返回：应用结果与最新创作聚合。
+        异常：候选、源码权威（Source Authority）、工作流修订（Workflow
+        Revision）或目录指纹已变化时抛出稳定 ``WorkflowConflict``；候选无效时
+        抛出 ``WorkflowError``。
         """
 
         self._validate_hash(candidate_hash, nullable=False)
@@ -1452,6 +1612,13 @@ class WorkflowService:
                 registration=registration,
                 python_source=source["python_source"],
             )
+            if preserve_author_source:
+                compilation = self._preserve_author_source_compilation(
+                    compilation=compilation,
+                    workflow=workflow,
+                    graph=applied_graph,
+                    python_source=source["python_source"],
+                )
             if not self._normalize_candidate_diagnostics(
                 compilation,
                 python_source=source["python_source"],
@@ -1588,13 +1755,18 @@ class WorkflowService:
                 latest = self._read_source(registration)
                 if latest is None or latest["draft_hash"] != actual_hash:
                     raise WorkflowError("draft_hash_conflict")
-                self._atomic_write(
-                    registration,
-                    normalized_bytes,
-                    expected_hash=actual_hash,
-                )
-                written = self._read_source(registration)
-                assert written is not None
+                if normalized_hash == actual_hash:
+                    # 自动激活以及已经规范的交互 Apply 都不替换相同作者字节，
+                    # 避免制造虚假的 IDE 保存事件和文件世代。
+                    written = latest
+                else:
+                    self._atomic_write(
+                        registration,
+                        normalized_bytes,
+                        expected_hash=actual_hash,
+                    )
+                    written = self._read_source(registration)
+                    assert written is not None
                 response_source = written
                 if written["draft_hash"] != normalized_hash:
                     raise WorkflowConflict("draft_hash_conflict")
@@ -1697,6 +1869,7 @@ class WorkflowService:
             reconcile_source=partial(
                 self.reconcile_registered_source,
                 force_compile=True,
+                preserve_author_source=preserve_author_source,
             ),
             mutated_workflow_uuid=workflow_uuid,
             warnings=warnings,
@@ -1873,6 +2046,49 @@ class WorkflowService:
         except Exception:
             raise WorkflowError("internal_error") from None
 
+    def _preserve_author_source_compilation(
+        self,
+        *,
+        compilation: CandidateCompilation,
+        workflow: Dict[str, Any],
+        graph: Dict[str, Any],
+        python_source: str,
+    ) -> CandidateCompilation:
+        """让自动激活候选使用原始作者源码及其精确源码映射。
+
+        参数：``compilation`` 是当前目录刚生成的结果；``workflow``、``graph``
+        和 ``python_source`` 是同一编译事务的权威输入。返回可按普通候选合同
+        签发的源码保留结果。异常：编译器不支持可信源码保留或投影失败时抛
+        ``candidate_invalid``，固定点激活会隔离该来源且绝不回写规范化文本。
+        """
+
+        if (
+            not compilation.valid
+            or compilation.normalized_python_source == python_source
+        ):
+            return compilation
+        if self.compiler is None:
+            raise WorkflowError("template_catalog_unavailable")
+        preserve = getattr(self.compiler, "preserve_author_source", None)
+        if not callable(preserve):
+            raise WorkflowError("candidate_invalid")
+        try:
+            result = preserve(
+                compilation=compilation,
+                workflow_uuid=workflow["uuid"],
+                workflow_revision=workflow["revision"],
+                python_source=python_source,
+                applied_graph=graph,
+            )
+            preserved = CandidateCompilation.model_validate(result)
+        except WorkflowError:
+            raise
+        except Exception:
+            raise WorkflowError("candidate_invalid") from None
+        if preserved.normalized_python_source != python_source:
+            raise WorkflowError("candidate_invalid")
+        return preserved
+
     def _catalog_fingerprint(self) -> str:
         if self.compiler is None:
             raise WorkflowError("template_catalog_unavailable")
@@ -1938,12 +2154,22 @@ class WorkflowService:
                 source_map=source_map,
                 changeset=changeset,
             )
+            self._store.validate_candidate_identity_ownership(
+                workflow_uuid=graph["workflow"]["uuid"],
+                node_uuids=(item["uuid"] for item in graph["nodes"]),
+                edge_uuids=(item["uuid"] for item in graph["edges"]),
+            )
             compiler_version = compilation.compiler_version
             if not compiler_version.strip():
                 raise ValueError
             template_catalog_fingerprint = compilation.template_catalog_fingerprint
             if _HASH_TOKEN.fullmatch(template_catalog_fingerprint) is None:
                 raise ValueError
+        except StoreAuthoringConflict as error:
+            if error.code != "candidate_identity_conflict":
+                raise
+            self._set_candidate_identity_conflict_diagnostic(compilation)
+            return None
         except (
             GraphValidationError,
             CandidateBundleError,
@@ -1988,6 +2214,20 @@ class WorkflowService:
                 "severity": "error",
                 "code": "candidate_invalid",
                 "message": _ERRORS["candidate_invalid"][1],
+            }
+        ]
+
+    @staticmethod
+    def _set_candidate_identity_conflict_diagnostic(
+        compilation: CandidateCompilation,
+    ) -> None:
+        """把跨工作流节点/连线身份占用投影为可行动候选诊断。"""
+
+        compilation.diagnostics = [
+            {
+                "severity": "error",
+                "code": "candidate_identity_conflict",
+                "message": _ERRORS["candidate_identity_conflict"][1],
             }
         ]
 

@@ -3120,9 +3120,9 @@ class BaseROS2DeviceNode(Node, Generic[T]):
     def _convert_resources_sync(self, *uuids: str) -> List["ResourcePLR"]:
         """同步把资源 UUID 转换为驱动可用实例。
 
-        参数说明：``uuids`` 是一个或多个物料（Material）或资源稳定 UUID；单个
-        物料占位符（ResourceSlot）若声明 ``parent_uuid``，会再查询完整父资源树。
-        返回：与输入 UUID 顺序一致的资源实例列表。
+        参数说明：``uuids`` 是一个或多个物料（Material）或资源稳定 UUID；每个
+        物料占位符（ResourceSlot）都独立查询并验证完整父资源上下文。返回：与输入
+        UUID 顺序一致的资源实例列表。
 
         异常说明：查询超时、返回空树、父上下文不唯一或冲突、资源无法唯一映射时
         抛出异常；父上下文错误必须失败关闭。
@@ -3131,22 +3131,30 @@ class BaseROS2DeviceNode(Node, Generic[T]):
             raise ValueError("至少需要提供一个 UUID")
 
         uuids_list = list(uuids)
+        # 不把多个 ResourceSlot 合并成一棵资源树：其中任一目标直属 ``device`` 时，
+        # PLR 投影会跳过设备根，并可能连带丢弃其他目标。逐项走同一套严格水合流程，
+        # 既隔离父上下文，也保持调用方参数顺序。
+        if len(uuids_list) > 1:
+            return [
+                self._convert_resources_sync(resource_uuid)[0]
+                for resource_uuid in uuids_list
+            ]
+
         resource_client = self._resource_clients["c2s_update_resource_tree"]
         raw_data = query_resource_nodes_sync(
             resource_client,
             uuids_list,
             request_factory=SerialCommand.Request,
         )
-        if len(uuids_list) == 1:
-            raw_data = hydrate_resource_slot_nodes_sync(
-                uuids_list[0],
-                raw_data,
-                query_nodes=lambda query_uuids: query_resource_nodes_sync(
-                    resource_client,
-                    query_uuids,
-                    request_factory=SerialCommand.Request,
-                ),
-            )
+        raw_data = hydrate_resource_slot_nodes_sync(
+            uuids_list[0],
+            raw_data,
+            query_nodes=lambda query_uuids: query_resource_nodes_sync(
+                resource_client,
+                query_uuids,
+                request_factory=SerialCommand.Request,
+            ),
+        )
 
         # 转换为 PLR 资源
         tree_set = ResourceTreeSet.from_raw_dict_list(raw_data)

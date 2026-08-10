@@ -76,6 +76,53 @@ def _save_candidate(service: WorkflowService) -> dict[str, Any]:
     return candidate
 
 
+def test_candidate_is_not_issued_when_node_identity_belongs_to_other_workflow(
+    authoring_runtime: tuple[WorkflowService, Path, Path],
+) -> None:
+    """跨工作流节点 UUID 冲突必须在候选阶段成为明确诊断。
+
+    参数：``authoring_runtime`` 先应用一份真实候选并提供同包第二来源。返回：
+    无；第二工作流复用首个工作流节点锚点时不得签发一个注定无法应用的候选，
+    并公开 ``candidate_identity_conflict``。异常：若冲突仍延迟到 Apply/SQLite
+    upsert，测试保持 RED。
+    """
+
+    service, source_path, _database_path = authoring_runtime
+    first_candidate = _save_candidate(service)
+    service.apply_authoring(
+        WORKFLOW_UUID,
+        candidate_hash=first_candidate["candidate_hash"],
+    )
+    second_workflow_uuid = "2e471942-30b7-4de5-b75b-361f94cd99d0"
+    package_root = source_path.parent.parent
+    second_source = _source().replace(WORKFLOW_UUID, second_workflow_uuid)
+    service.create_workflow(
+        workflow_uuid=second_workflow_uuid,
+        name="Conflicting workflow",
+        tags=[],
+        description=None,
+        meta_data={},
+    )
+    service.replace_active_editable_source_authorization(
+        workflow_uuid=second_workflow_uuid,
+        package_id="lab",
+        package_root=package_root,
+        relative_path="workflows/conflicting.py",
+    )
+
+    aggregate = service.save_draft(
+        second_workflow_uuid,
+        python_source=second_source,
+        expected_draft_hash=None,
+        expected_workflow_revision=1,
+    )
+
+    assert aggregate["candidate"] is None
+    assert {item["code"] for item in aggregate["draft"]["diagnostics"]} == {
+        "candidate_identity_conflict"
+    }
+
+
 def test_apply_rejects_candidate_when_derived_draft_is_stale(
     authoring_runtime: tuple[WorkflowService, Path, Path],
 ) -> None:

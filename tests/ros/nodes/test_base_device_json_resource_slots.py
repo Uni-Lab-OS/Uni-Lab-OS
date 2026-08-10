@@ -219,6 +219,121 @@ def test_json_command_preserves_device_root_skipped_by_plr_projection(
     assert node._convert_resources_sync(device_uuid) == [raw_device]
 
 
+def test_json_command_hydrates_each_resource_slot_in_mixed_device_batch(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """批量参数必须逐个水合，不能让设备根吞掉直属物料。
+
+    参数：pytest monkeypatch。返回：无；模拟同一动作同时引用设备直属物料与该
+    设备仓库。资源服务的合并查询会形成设备根树，而逐项查询可分别保留物料子树
+    与设备稳定引用。
+    """
+
+    device_uuid = "50000000-0000-4000-8000-000000000012"
+    target_uuid = "50000000-0000-4000-8000-000000000013"
+    raw_device = {
+        "uuid": device_uuid,
+        "id": device_uuid,
+        "name": "S08 开关盖",
+        "type": "device",
+    }
+    raw_target = {
+        "uuid": target_uuid,
+        "id": target_uuid,
+        "name": "S082 瓶盖暂存位物料",
+        "type": "resource",
+        "parent_uuid": device_uuid,
+    }
+    target_resource = SimpleNamespace(
+        unilabos_uuid=target_uuid,
+        children=[],
+    )
+    target_content = SimpleNamespace(
+        uuid=target_uuid,
+        id=target_uuid,
+        type="resource",
+    )
+    device_content = SimpleNamespace(
+        uuid=device_uuid,
+        id=device_uuid,
+        type="device",
+        model_dump=lambda **_kwargs: dict(raw_device),
+    )
+
+    def tree_set_from_rows(rows: list[dict[str, object]]) -> SimpleNamespace:
+        if rows == [raw_target]:
+            return SimpleNamespace(
+                trees=[
+                    SimpleNamespace(
+                        root_node=SimpleNamespace(res_content=target_content)
+                    )
+                ],
+                to_plr_resources=lambda: [target_resource],
+            )
+        if rows == [raw_device]:
+            return SimpleNamespace(
+                trees=[
+                    SimpleNamespace(
+                        root_node=SimpleNamespace(res_content=device_content)
+                    )
+                ],
+                to_plr_resources=list,
+            )
+        if rows == [raw_device, raw_target]:
+            return SimpleNamespace(
+                trees=[
+                    SimpleNamespace(
+                        root_node=SimpleNamespace(res_content=device_content)
+                    )
+                ],
+                to_plr_resources=list,
+            )
+        raise AssertionError(rows)
+
+    observed_queries: list[list[str]] = []
+
+    def query_nodes(
+        _resource_client: object,
+        query_uuids: list[str],
+        **_kwargs: object,
+    ) -> list[dict[str, object]]:
+        observed_queries.append(query_uuids)
+        if query_uuids == [target_uuid]:
+            return [raw_target]
+        if query_uuids == [device_uuid]:
+            # 第一次是目标物料的父树验证，第二次是设备参数自身的查询。
+            if observed_queries.count([device_uuid]) == 1:
+                return [raw_device, raw_target]
+            return [raw_device]
+        if query_uuids == [target_uuid, device_uuid]:
+            return [raw_device, raw_target]
+        raise AssertionError(query_uuids)
+
+    monkeypatch.setattr(
+        base_device_node.ResourceTreeSet,
+        "from_raw_dict_list",
+        tree_set_from_rows,
+    )
+    monkeypatch.setattr(base_device_node, "query_resource_nodes_sync", query_nodes)
+
+    node = object.__new__(BaseROS2DeviceNode)
+    node._resource_clients = {"c2s_update_resource_tree": object()}
+    node.resource_tracker = SimpleNamespace(
+        figure_resource=lambda _resource, try_mode: [],
+        loop_find_with_uuid=lambda _resource, _uuid: None,
+    )
+    node.lab_logger = lambda: _Logger()
+
+    converted = node._convert_resources_sync(target_uuid, device_uuid)
+
+    assert observed_queries == [
+        [target_uuid],
+        [device_uuid],
+        [device_uuid],
+    ]
+    assert converted == [target_resource, raw_device]
+
+
 def test_async_resource_conversion_preserves_device_root_skipped_by_plr_projection() -> None:
     """异步 Host 动作也必须保留设备型库位父资源的原始映射。
 
@@ -263,6 +378,77 @@ def test_async_resource_conversion_preserves_device_root_skipped_by_plr_projecti
     converted = asyncio.run(node._convert_resource_async({"uuid": device_uuid}))
 
     assert converted == raw_device
+
+
+def test_async_resource_conversion_preserves_resource_directly_mounted_on_device() -> None:
+    """设备根只提供归属上下文时，动作仍应收到其直接挂载的物料。
+
+    参数：无。返回：无；模拟库存先按目标 UUID 返回完整物料子树，再按父 UUID
+    返回以设备为根的完整树。设备根不会被投影为 PLR Resource，但不能因此丢弃
+    已经由第一次查询完整取得的目标仓库。
+    """
+
+    device_uuid = "50000000-0000-4000-8000-000000000010"
+    target_uuid = "50000000-0000-4000-8000-000000000011"
+    raw_device = {
+        "uuid": device_uuid,
+        "id": device_uuid,
+        "name": "S07 固体加料",
+        "type": "device",
+    }
+    raw_target = {
+        "uuid": target_uuid,
+        "id": target_uuid,
+        "name": "S07 固体加料转盘仓",
+        "type": "resource",
+        "parent_uuid": device_uuid,
+    }
+    target_resource = SimpleNamespace(
+        unilabos_uuid=target_uuid,
+        children=[],
+    )
+    direct_tree = SimpleNamespace(
+        trees=[
+            SimpleNamespace(
+                root_node=SimpleNamespace(res_content=target_resource)
+            )
+        ],
+        dump=lambda: [[raw_target]],
+        to_plr_resources=lambda: [target_resource],
+    )
+    device_content = SimpleNamespace(
+        uuid=device_uuid,
+        id=device_uuid,
+        type="device",
+        model_dump=lambda **_kwargs: dict(raw_device),
+    )
+    parent_tree = SimpleNamespace(
+        trees=[SimpleNamespace(root_node=SimpleNamespace(res_content=device_content))],
+        dump=lambda: [[raw_device, raw_target]],
+        to_plr_resources=list,
+    )
+    observed_queries: list[str] = []
+    node = object.__new__(BaseROS2DeviceNode)
+
+    async def get_resource(resources_uuid: list[str], **_kwargs: object) -> object:
+        observed_queries.extend(resources_uuid)
+        if resources_uuid == [target_uuid]:
+            return direct_tree
+        if resources_uuid == [device_uuid]:
+            return parent_tree
+        raise AssertionError(resources_uuid)
+
+    node.get_resource = get_resource
+    node.resource_tracker = SimpleNamespace(
+        figure_resource=lambda _resource, try_mode: [],
+        loop_find_with_uuid=lambda _resource, _uuid: None,
+    )
+    node.lab_logger = lambda: _Logger()
+
+    converted = asyncio.run(node._convert_resource_async({"uuid": target_uuid}))
+
+    assert observed_queries == [target_uuid, device_uuid]
+    assert converted is target_resource
 
 
 def test_transfer_accepts_uuid_mapping_as_target_resource() -> None:

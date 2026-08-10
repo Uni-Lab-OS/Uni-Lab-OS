@@ -93,7 +93,13 @@ def hydrate_resource_slot_nodes_sync(
     if context.parent_uuid is None:
         return [dict(node) for node in direct_nodes]
     parent_nodes = query_nodes([context.parent_uuid])
-    return validate_resource_slot_parent_context(context, parent_nodes)
+    validated_parent_nodes = validate_resource_slot_parent_context(
+        context,
+        parent_nodes,
+    )
+    if _parent_tree_root_is_device(context, validated_parent_nodes):
+        return [dict(node) for node in direct_nodes]
+    return validated_parent_nodes
 
 
 async def hydrate_resource_slot_tree_async(
@@ -115,7 +121,12 @@ async def hydrate_resource_slot_tree_async(
     if context.parent_uuid is None:
         return direct_tree, context
     parent_tree = await query_tree(context.parent_uuid)
-    validate_resource_slot_parent_context(context, parent_tree.dump())
+    validated_parent_nodes = validate_resource_slot_parent_context(
+        context,
+        parent_tree.dump(),
+    )
+    if _parent_tree_root_is_device(context, validated_parent_nodes):
+        return direct_tree, context
     return parent_tree, context
 
 
@@ -243,6 +254,27 @@ def validate_resource_slot_parent_context(
     if context.parent_uuid not in rows_by_uuid:
         raise ResourceSlotHydrationError("父资源查询未包含声明的父资源")
     return list(rows_by_uuid.values())
+
+
+def _parent_tree_root_is_device(
+    context: ResourceSlotParentContext,
+    parent_nodes: Sequence[Mapping[str, Any]],
+) -> bool:
+    """判断已验证父树是否只以设备节点承载物料归属。
+
+    参数说明：``context`` 是已验证的父查询计划；``parent_nodes`` 是同一计划通过
+    ``validate_resource_slot_parent_context`` 验证后的扁平父树。返回：父根明确为
+    ``type=device`` 时为真，否则为假。
+
+    设备不属于 PLR Resource 投影。目标物料已经由第一次 ``with_children`` 查询
+    完整取得时，父设备只用于验证归属，不能替换掉可装配的目标子树。
+    """
+
+    return any(
+        _resource_uuid(node) == context.parent_uuid
+        and str(node.get("type") or "").strip().lower() == "device"
+        for node in parent_nodes
+    )
 
 
 def _flatten_resource_nodes(

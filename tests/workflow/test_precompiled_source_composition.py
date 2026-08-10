@@ -68,8 +68,8 @@ def test_precompiled_source_plan_skips_manifest_rediscovery(
 
             observed_plans.append(plan)
 
-        def recover_registered_sources(self) -> None:
-            """模拟恢复已登记工作流源码。
+        def activate_registered_sources_to_fixed_point(self) -> None:
+            """模拟恢复并应用预编译工作区源码。
 
             参数：无。返回：无。异常：无。
             """
