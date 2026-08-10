@@ -414,24 +414,11 @@ class HostNode(BaseROS2DeviceNode):
         # 首次发现网络中的设备
         self._discover_devices()
 
-        # 初始化所有本机设备节点，多一次过滤，防止重复初始化
-        local_machine = BasicConfig.machine_name
-        for device_config in devices_config.root_nodes:
-            device_id = device_config.res_content.id
-            if device_config.res_content.type != "device":
-                continue
-            dev_machine = device_config.res_content.machine_name
-            if dev_machine and local_machine and dev_machine != local_machine:
-                self.lab_logger().info(
-                    f"[Host Node] Device {device_id} belongs to machine '{dev_machine}', "
-                    f"local is '{local_machine}', skipping initialization."
-                )
-                continue
-            if device_id not in self.devices_names:
-                self.initialize_device(device_id, device_config)
-            else:
-                self.lab_logger().warning(f"[Host Node] Device {device_id} already existed, skipping.")
+        # 单台物理设备离线不得中断 HostNode；否则 Web/调度层仍存活但设备目录
+        # 永久返回 ``Host node not initialized``，掩盖真正的设备连接诊断。
+        self._initialize_local_devices(devices_config)
         self.update_device_status_subscriptions()
+
         # TODO: 需要验证 初始化所有控制器节点
         if controllers_config:
             update_rate = controllers_config["controller_manager"]["ros__parameters"]["update_rate"]
@@ -458,6 +445,38 @@ class HostNode(BaseROS2DeviceNode):
             if hasattr(bridge, "publish_host_ready"):
                 bridge.publish_host_ready()
                 self.lab_logger().debug(f"Host ready signal sent via {bridge.__class__.__name__}")
+
+    def _initialize_local_devices(self, devices_config: ResourceTreeSet) -> None:
+        """逐台初始化本机设备，并把单台失败隔离为离线诊断。
+
+        参数：``devices_config`` 是当前不可变启动代解析出的物理设备树集合。
+        返回：无；成功设备继续注册，失败设备保持离线且不阻断 HostNode。
+        异常：进程级 ``BaseException`` 保持传播；普通驱动异常被记录并隔离。
+        """
+
+        local_machine = BasicConfig.machine_name
+        for device_config in devices_config.root_nodes:
+            device_id = device_config.res_content.id
+            if device_config.res_content.type != "device":
+                continue
+            dev_machine = device_config.res_content.machine_name
+            if dev_machine and local_machine and dev_machine != local_machine:
+                self.lab_logger().info(
+                    f"[Host Node] Device {device_id} belongs to machine '{dev_machine}', "
+                    f"local is '{local_machine}', skipping initialization."
+                )
+                continue
+            if device_id not in self.devices_names:
+                try:
+                    self.initialize_device(device_id, device_config)
+                except Exception as error:
+                    self.lab_logger().error(
+                        "device_initialization_failed: "
+                        f"device={device_id}, error={type(error).__name__}: {error}; "
+                        "device remains offline and HostNode startup continues"
+                    )
+            else:
+                self.lab_logger().warning(f"[Host Node] Device {device_id} already existed, skipping.")
 
     def _send_re_register(self, sclient, device_namespace: str):
         """

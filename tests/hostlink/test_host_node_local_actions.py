@@ -134,6 +134,53 @@ def _fake_host() -> tuple[SimpleNamespace, list[list[tuple[str, str]]], _Logger]
     return host, reported_locks, logger
 
 
+def test_local_device_initialization_failure_does_not_abort_host_node(
+    monkeypatch,
+) -> None:
+    """一台本机设备启动失败时继续初始化其余设备并保留 HostNode。
+
+    参数：``monkeypatch`` 固定本机身份并替换单设备初始化边界。
+    返回：无；断言失败设备保持离线、后续设备仍被初始化且错误可诊断。
+    异常：单设备异常逃逸并中断组合根时由测试失败暴露。
+    """
+
+    monkeypatch.setattr(host_node_module.BasicConfig, "machine_name", "test-host")
+    attempted: list[str] = []
+    host, _reported_locks, logger = _fake_host()
+
+    def initialize_local_device(device_id: str, _device_config: Any) -> None:
+        """记录初始化顺序，并让首台设备模拟物理连接失败。"""
+
+        attempted.append(device_id)
+        if device_id == "offline-plc":
+            raise ConnectionRefusedError("PLC simulator is offline")
+        host._online_devices.add(f"/devices/{device_id}/{device_id}")
+
+    host.initialize_device = initialize_local_device
+    devices_config = SimpleNamespace(root_nodes=[
+        SimpleNamespace(res_content=SimpleNamespace(
+            id="offline-plc",
+            type="device",
+            machine_name=None,
+        )),
+        SimpleNamespace(res_content=SimpleNamespace(
+            id="online-robot",
+            type="device",
+            machine_name="test-host",
+        )),
+    ])
+
+    HostNode._initialize_local_devices(host, devices_config)
+
+    assert attempted == ["offline-plc", "online-robot"]
+    assert "/devices/online-robot/online-robot" in host._online_devices
+    assert all("offline-plc" not in item for item in host._online_devices)
+    assert any(
+        "device_initialization_failed" in message and "offline-plc" in message
+        for message in logger.messages
+    )
+
+
 def test_local_json_action_is_online_only_after_generic_endpoint_is_ready(
     monkeypatch,
 ) -> None:
