@@ -256,6 +256,52 @@ CREATE INDEX IF NOT EXISTS ix_workflow_task_command_pending
     ON workflow_task_command(workflow_task_uuid, create_time, uuid)
     WHERE deleted_at IS NULL AND status = 'pending';
 
+CREATE TABLE IF NOT EXISTS workflow_task_debug_configuration (
+    workflow_task_uuid TEXT PRIMARY KEY,
+    create_time TEXT NOT NULL,
+    update_time TEXT NOT NULL,
+    start_node_uuids TEXT NOT NULL,
+    breakpoint_node_uuids TEXT NOT NULL,
+    execution_policy TEXT NOT NULL CHECK (execution_policy IN ('step', 'continue')),
+    status TEXT NOT NULL CHECK (status IN ('paused', 'running', 'completed', 'stopped')),
+    FOREIGN KEY(workflow_task_uuid) REFERENCES workflow_task(uuid) ON DELETE CASCADE
+);
+
+CREATE TABLE IF NOT EXISTS workflow_node_admission_hold (
+    uuid TEXT PRIMARY KEY,
+    create_time TEXT NOT NULL,
+    update_time TEXT NOT NULL,
+    workflow_task_uuid TEXT NOT NULL,
+    workflow_node_job_uuid TEXT NOT NULL,
+    workflow_node_uuid TEXT NOT NULL,
+    attempt INTEGER NOT NULL,
+    reason TEXT NOT NULL CHECK (reason IN ('start', 'breakpoint', 'step')),
+    status TEXT NOT NULL CHECK (status IN ('open', 'released', 'canceled')),
+    released_at TEXT,
+    FOREIGN KEY(workflow_task_uuid) REFERENCES workflow_task(uuid) ON DELETE CASCADE,
+    FOREIGN KEY(workflow_node_job_uuid) REFERENCES workflow_node_job(uuid) ON DELETE CASCADE
+);
+CREATE UNIQUE INDEX IF NOT EXISTS ux_workflow_node_admission_hold_open
+    ON workflow_node_admission_hold(workflow_task_uuid)
+    WHERE status = 'open';
+
+CREATE TABLE IF NOT EXISTS workflow_task_debug_command (
+    uuid TEXT PRIMARY KEY,
+    create_time TEXT NOT NULL,
+    update_time TEXT NOT NULL,
+    workflow_task_uuid TEXT NOT NULL,
+    type TEXT NOT NULL CHECK (type IN ('step', 'continue')),
+    hold_uuid TEXT NOT NULL,
+    idempotency_key TEXT NOT NULL,
+    status TEXT NOT NULL CHECK (status IN ('pending', 'succeeded', 'rejected')),
+    result TEXT NOT NULL,
+    consumed_at TEXT,
+    FOREIGN KEY(workflow_task_uuid) REFERENCES workflow_task(uuid) ON DELETE CASCADE,
+    FOREIGN KEY(hold_uuid) REFERENCES workflow_node_admission_hold(uuid)
+);
+CREATE UNIQUE INDEX IF NOT EXISTS ux_workflow_task_debug_command_idempotency
+    ON workflow_task_debug_command(workflow_task_uuid, idempotency_key);
+
 CREATE TABLE IF NOT EXISTS workflow_node_job (
     uuid TEXT PRIMARY KEY,
     create_time TEXT NOT NULL,
@@ -1409,6 +1455,410 @@ class WorkflowStore:
                 (command_uuid,),
             ).fetchone()
             return self._task_command_row(updated)
+
+    # Workflow Debugger -------------------------------------------------
+
+    def create_debug_configuration(
+        self,
+        *,
+        task_uuid: str,
+        start_node_uuids: list[str],
+        breakpoint_node_uuids: list[str],
+    ) -> Dict[str, Any]:
+        """冻结调试配置并在首个活动作业前建立持久 Hold。"""
+
+        now = utc_now()
+        with self.transaction() as conn:
+            task = conn.execute(
+                "SELECT uuid FROM workflow_task WHERE uuid = ? AND deleted_at IS NULL",
+                (task_uuid,),
+            ).fetchone()
+            if task is None:
+                raise StoreNotFound(f"workflow task {task_uuid} not found")
+            conn.execute(
+                """
+                INSERT INTO workflow_task_debug_configuration(
+                    workflow_task_uuid, create_time, update_time,
+                    start_node_uuids, breakpoint_node_uuids,
+                    execution_policy, status
+                ) VALUES (?, ?, ?, ?, ?, 'step', 'paused')
+                """,
+                (
+                    task_uuid,
+                    now,
+                    now,
+                    _json(start_node_uuids),
+                    _json(breakpoint_node_uuids),
+                ),
+            )
+            first_job = conn.execute(
+                """
+                SELECT uuid, workflow_node_uuid, attempt
+                FROM workflow_node_job
+                WHERE workflow_task_uuid = ? AND deleted_at IS NULL
+                  AND status = 'pending'
+                ORDER BY topological_index, create_time, uuid
+                LIMIT 1
+                """,
+                (task_uuid,),
+            ).fetchone()
+            if first_job is None:
+                raise StoreConflict("debug task has no active job")
+            self._insert_debug_hold(
+                conn,
+                task_uuid=task_uuid,
+                job_row=first_job,
+                reason="start",
+                now=now,
+            )
+            self._append_event(
+                conn,
+                event="workflow.runtime.changed",
+                data={"workflow_task_uuid": task_uuid},
+                now=now,
+            )
+        return self.get_debug_projection(task_uuid)
+
+    def get_debug_projection(self, task_uuid: str) -> Dict[str, Any]:
+        """读取不可变配置和完整 Hold 历史。"""
+
+        with self._lock:
+            configuration = self._conn.execute(
+                """
+                SELECT * FROM workflow_task_debug_configuration
+                WHERE workflow_task_uuid = ?
+                """,
+                (task_uuid,),
+            ).fetchone()
+            if configuration is None:
+                raise StoreNotFound(f"debug configuration {task_uuid} not found")
+            holds = self._conn.execute(
+                """
+                SELECT * FROM workflow_node_admission_hold
+                WHERE workflow_task_uuid = ?
+                ORDER BY create_time, uuid
+                """,
+                (task_uuid,),
+            ).fetchall()
+        return {
+            "configuration": {
+                "start_node_uuids": _load(configuration["start_node_uuids"], []),
+                "breakpoint_node_uuids": _load(
+                    configuration["breakpoint_node_uuids"], []
+                ),
+            },
+            "execution_policy": configuration["execution_policy"],
+            "status": configuration["status"],
+            "holds": [self._debug_hold_row(row) for row in holds],
+        }
+
+    def begin_debug_command(
+        self,
+        *,
+        task_uuid: str,
+        command_uuid: str,
+        command_type: str,
+        hold_uuid: str,
+        idempotency_key: str,
+    ) -> tuple[Dict[str, Any], bool, str]:
+        """幂等接收命令、核对精确 Hold，并在同一事务放行。"""
+
+        if command_type not in {"step", "continue"}:
+            raise StoreConflict("invalid debug command")
+        now = utc_now()
+        with self.transaction() as conn:
+            existing = conn.execute(
+                """
+                SELECT * FROM workflow_task_debug_command
+                WHERE workflow_task_uuid = ? AND idempotency_key = ?
+                """,
+                (task_uuid, idempotency_key),
+            ).fetchone()
+            if existing is not None:
+                hold = conn.execute(
+                    "SELECT workflow_node_uuid FROM workflow_node_admission_hold WHERE uuid = ?",
+                    (existing["hold_uuid"],),
+                ).fetchone()
+                if hold is None:
+                    raise StoreConflict("debug command hold missing")
+                return self._debug_command_row(existing), False, str(
+                    hold["workflow_node_uuid"]
+                )
+            hold = conn.execute(
+                """
+                SELECT * FROM workflow_node_admission_hold
+                WHERE uuid = ? AND workflow_task_uuid = ? AND status = 'open'
+                """,
+                (hold_uuid, task_uuid),
+            ).fetchone()
+            if hold is None:
+                raise StoreConflict("debug hold is not open")
+            conn.execute(
+                """
+                INSERT INTO workflow_task_debug_command(
+                    uuid, create_time, update_time, workflow_task_uuid,
+                    type, hold_uuid, idempotency_key, status, result, consumed_at
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, 'pending', '{}', NULL)
+                """,
+                (
+                    command_uuid,
+                    now,
+                    now,
+                    task_uuid,
+                    command_type,
+                    hold_uuid,
+                    idempotency_key,
+                ),
+            )
+            conn.execute(
+                """
+                UPDATE workflow_node_admission_hold
+                SET status = 'released', released_at = ?, update_time = ?
+                WHERE uuid = ? AND status = 'open'
+                """,
+                (now, now, hold_uuid),
+            )
+            conn.execute(
+                """
+                UPDATE workflow_task_debug_configuration
+                SET execution_policy = ?, status = 'running', update_time = ?
+                WHERE workflow_task_uuid = ?
+                """,
+                (command_type, now, task_uuid),
+            )
+            row = conn.execute(
+                "SELECT * FROM workflow_task_debug_command WHERE uuid = ?",
+                (command_uuid,),
+            ).fetchone()
+            self._append_event(
+                conn,
+                event="workflow.runtime.changed",
+                data={"workflow_task_uuid": task_uuid},
+                now=now,
+            )
+            return (
+                self._debug_command_row(row),
+                True,
+                str(hold["workflow_node_uuid"]),
+            )
+
+    def complete_debug_command(
+        self,
+        command_uuid: str,
+        *,
+        status: str,
+        result: Dict[str, Any],
+    ) -> Dict[str, Any]:
+        """完成调试命令；重复调用返回既有终态。"""
+
+        if status not in {"succeeded", "rejected"}:
+            raise StoreConflict("invalid debug command status")
+        now = utc_now()
+        with self.transaction() as conn:
+            row = conn.execute(
+                "SELECT * FROM workflow_task_debug_command WHERE uuid = ?",
+                (command_uuid,),
+            ).fetchone()
+            if row is None:
+                raise StoreNotFound(f"debug command {command_uuid} not found")
+            if row["status"] == "pending":
+                conn.execute(
+                    """
+                    UPDATE workflow_task_debug_command
+                    SET status = ?, result = ?, consumed_at = ?, update_time = ?
+                    WHERE uuid = ? AND status = 'pending'
+                    """,
+                    (status, _json(result), now, now, command_uuid),
+                )
+            updated = conn.execute(
+                "SELECT * FROM workflow_task_debug_command WHERE uuid = ?",
+                (command_uuid,),
+            ).fetchone()
+            return self._debug_command_row(updated)
+
+    def advance_debug_after_job_finished(self, task_uuid: str) -> Dict[str, Any]:
+        """按调试策略为下一个待处理作业建 Hold，或请求继续派发。"""
+
+        now = utc_now()
+        with self.transaction() as conn:
+            configuration = conn.execute(
+                """
+                SELECT * FROM workflow_task_debug_configuration
+                WHERE workflow_task_uuid = ?
+                """,
+                (task_uuid,),
+            ).fetchone()
+            if configuration is None:
+                return {"type": "none"}
+            task = conn.execute(
+                "SELECT status FROM workflow_task WHERE uuid = ? AND deleted_at IS NULL",
+                (task_uuid,),
+            ).fetchone()
+            if task is None:
+                raise StoreNotFound(f"workflow task {task_uuid} not found")
+            if task["status"] in {"succeeded", "failed", "canceled", "timeout"}:
+                conn.execute(
+                    """
+                    UPDATE workflow_task_debug_configuration
+                    SET status = 'completed', update_time = ?
+                    WHERE workflow_task_uuid = ?
+                    """,
+                    (now, task_uuid),
+                )
+                return {"type": "complete"}
+            pending = conn.execute(
+                """
+                SELECT uuid, workflow_node_uuid, attempt
+                FROM workflow_node_job
+                WHERE workflow_task_uuid = ? AND deleted_at IS NULL
+                  AND status = 'pending'
+                ORDER BY topological_index, create_time, uuid
+                LIMIT 1
+                """,
+                (task_uuid,),
+            ).fetchone()
+            if pending is None:
+                return {"type": "none"}
+            breakpoints = set(_load(configuration["breakpoint_node_uuids"], []))
+            node_uuid = str(pending["workflow_node_uuid"])
+            should_hold = (
+                configuration["execution_policy"] == "step"
+                or node_uuid in breakpoints
+            )
+            if not should_hold:
+                return {"type": "step", "workflow_node_uuid": node_uuid}
+            open_hold = conn.execute(
+                """
+                SELECT uuid FROM workflow_node_admission_hold
+                WHERE workflow_task_uuid = ? AND status = 'open'
+                """,
+                (task_uuid,),
+            ).fetchone()
+            if open_hold is None:
+                self._insert_debug_hold(
+                    conn,
+                    task_uuid=task_uuid,
+                    job_row=pending,
+                    reason=("breakpoint" if node_uuid in breakpoints else "step"),
+                    now=now,
+                )
+            conn.execute(
+                """
+                UPDATE workflow_task_debug_configuration
+                SET status = 'paused', update_time = ?
+                WHERE workflow_task_uuid = ?
+                """,
+                (now, task_uuid),
+            )
+            self._append_event(
+                conn,
+                event="workflow.runtime.changed",
+                data={"workflow_task_uuid": task_uuid},
+                now=now,
+            )
+            return {"type": "hold", "workflow_node_uuid": node_uuid}
+
+    def stop_debug(self, task_uuid: str) -> None:
+        """关闭调试配置并取消尚未放行的 Hold；普通任务调用是幂等空操作。"""
+
+        now = utc_now()
+        with self.transaction() as conn:
+            configuration = conn.execute(
+                """
+                SELECT workflow_task_uuid FROM workflow_task_debug_configuration
+                WHERE workflow_task_uuid = ?
+                """,
+                (task_uuid,),
+            ).fetchone()
+            if configuration is None:
+                return
+            conn.execute(
+                """
+                UPDATE workflow_task_debug_configuration
+                SET status = 'stopped', update_time = ?
+                WHERE workflow_task_uuid = ?
+                """,
+                (now, task_uuid),
+            )
+            conn.execute(
+                """
+                UPDATE workflow_node_admission_hold
+                SET status = 'canceled', update_time = ?
+                WHERE workflow_task_uuid = ? AND status = 'open'
+                """,
+                (now, task_uuid),
+            )
+            self._append_event(
+                conn,
+                event="workflow.runtime.changed",
+                data={"workflow_task_uuid": task_uuid},
+                now=now,
+            )
+
+    @staticmethod
+    def _insert_debug_hold(
+        conn: sqlite3.Connection,
+        *,
+        task_uuid: str,
+        job_row: sqlite3.Row,
+        reason: str,
+        now: str,
+    ) -> str:
+        hold_uuid = str(uuid4())
+        conn.execute(
+            """
+            INSERT INTO workflow_node_admission_hold(
+                uuid, create_time, update_time, workflow_task_uuid,
+                workflow_node_job_uuid, workflow_node_uuid, attempt,
+                reason, status, released_at
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, 'open', NULL)
+            """,
+            (
+                hold_uuid,
+                now,
+                now,
+                task_uuid,
+                job_row["uuid"],
+                job_row["workflow_node_uuid"],
+                int(job_row["attempt"]),
+                reason,
+            ),
+        )
+        return hold_uuid
+
+    @staticmethod
+    def _debug_hold_row(row: sqlite3.Row) -> Dict[str, Any]:
+        result = {
+            "uuid": row["uuid"],
+            "workflow_task_uuid": row["workflow_task_uuid"],
+            "workflow_node_job_uuid": row["workflow_node_job_uuid"],
+            "workflow_node_uuid": row["workflow_node_uuid"],
+            "attempt": row["attempt"],
+            "reason": row["reason"],
+            "status": row["status"],
+            "create_time": row["create_time"],
+            "update_time": row["update_time"],
+        }
+        if row["released_at"] is not None:
+            result["released_at"] = row["released_at"]
+        return result
+
+    @staticmethod
+    def _debug_command_row(row: sqlite3.Row) -> Dict[str, Any]:
+        result = {
+            "uuid": row["uuid"],
+            "workflow_task_uuid": row["workflow_task_uuid"],
+            "type": row["type"],
+            "scope": {"type": "hold", "hold_uuid": row["hold_uuid"]},
+            "idempotency_key": row["idempotency_key"],
+            "status": row["status"],
+            "result": _load(row["result"], {}),
+            "create_time": row["create_time"],
+            "update_time": row["update_time"],
+        }
+        if row["consumed_at"] is not None:
+            result["consumed_at"] = row["consumed_at"]
+        return result
 
     def list_task_runtime_events(
         self,

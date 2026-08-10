@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from copy import deepcopy
 from pathlib import Path
 from typing import Any
 
@@ -195,6 +196,66 @@ def test_transform_routes_do_not_write_workflow_history(
         assert {table: store.count_rows(table) for table in persistent_tables} == before
     finally:
         service.close()
+
+
+def test_disabled_node_survives_public_generate_validate_round_trip() -> None:
+    """画布禁用必须进入规范 Python 锚点并可无损编译回候选图。"""
+
+    engine = _engine()
+    compiled = engine.compile(
+        workflow_uuid=WORKFLOW_UUID,
+        workflow_revision=7,
+        python_source=_source(),
+        source_uri=SOURCE_URI,
+        applied_graph=_applied_graph(),
+    )
+    assert compiled.valid and compiled.graph is not None
+    applied_graph = deepcopy(compiled.graph)
+    graph = deepcopy(applied_graph)
+    graph["nodes"][-1]["disabled"] = True
+    with TestClient(create_workflow_app(
+        WorkflowService(WorkflowStore(":memory:")),
+        authoring_transform=engine,
+    )) as client:
+        generated = _post(
+            client,
+            "/api/v1/authoring/generate-python",
+            _generate_body(graph),
+        )
+        assert " disabled=true" in generated["normalized_python_source"]
+        recompiled = _post(
+            client,
+            "/api/v1/authoring/compile",
+            _compile_body(
+                source=generated["normalized_python_source"],
+                graph=applied_graph,
+            ),
+        )
+        assert recompiled["graph"]["nodes"][-1]["disabled"] is True
+        disabled_applied_graph = deepcopy(recompiled["graph"])
+        reenabled_graph = deepcopy(disabled_applied_graph)
+        reenabled_graph["nodes"][-1]["disabled"] = False
+        reenabled_source = _post(
+            client,
+            "/api/v1/authoring/generate-python",
+            _generate_body(reenabled_graph),
+        )["normalized_python_source"]
+        assert " disabled=true" not in reenabled_source
+        reenabled = _post(
+            client,
+            "/api/v1/authoring/compile",
+            _compile_body(
+                source=reenabled_source,
+                graph=disabled_applied_graph,
+            ),
+        )
+        assert reenabled["graph"]["nodes"][-1]["disabled"] is False
+        validated = _post(
+            client,
+            "/api/v1/authoring/validate",
+            _validate_body(graph, generated["normalized_python_source"]),
+        )
+    assert validated["graph"]["nodes"][-1]["disabled"] is True
 
 
 def test_persisted_material_source_generate_validate_fixed_point_is_read_only(

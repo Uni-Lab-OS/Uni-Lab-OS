@@ -599,7 +599,7 @@ class WorkflowService:
 
         try:
             task_uuid = validate_uuid(task_uuid)
-            if command_type != "step":
+            if command_type not in {"step", "cancel"}:
                 raise WorkflowError("invalid_input")
             if target_node_uuid is not None:
                 target_node_uuid = validate_uuid(target_node_uuid)
@@ -609,16 +609,17 @@ class WorkflowService:
             meta_data = normalize_json_object(meta_data)
             description = self._optional_text(description)
             task = self._store.get_task(task_uuid)
-            if (
-                task.get("run_mode") != "step"
-                or task.get("control_status") != "paused"
-                or task.get("status") in {
+            if task.get("status") in {
                     "succeeded",
                     "success",
                     "failed",
                     "canceled",
                     "timeout",
-                }
+                }:
+                raise WorkflowError("invalid_input")
+            if command_type == "step" and (
+                task.get("run_mode") != "step"
+                or task.get("control_status") != "paused"
             ):
                 raise WorkflowError("invalid_input")
             command, created = self._store.create_task_command(
@@ -639,9 +640,13 @@ class WorkflowService:
                     result={"reason": "scheduler_unavailable"},
                 )
             try:
-                result = self._task_scheduler_bridge.step(
-                    task_uuid,
-                    target_node_uuid=target_node_uuid,
+                result = (
+                    self._task_scheduler_bridge.step(
+                        task_uuid,
+                        target_node_uuid=target_node_uuid,
+                    )
+                    if command_type == "step"
+                    else self._task_scheduler_bridge.cancel(task_uuid)
                 )
             except TaskSchedulerBridgeError as error:
                 return self._store.complete_task_command(
@@ -657,6 +662,165 @@ class WorkflowService:
         except WorkflowError:
             raise
         except (StoreNotFound, StoreConflict, ValueError):
+            raise WorkflowError("invalid_input") from None
+
+    def create_debug_workflow_task(
+        self,
+        *,
+        workflow_uuid: str,
+        start_node_uuids: List[str],
+        breakpoint_node_uuids: List[str],
+        input_value: Dict[str, Any],
+        description: Optional[str],
+        meta_data: Dict[str, Any],
+    ) -> Dict[str, Any]:
+        """创建带不可变起始点、断点和首个 Admission Hold 的调试任务。"""
+
+        workflow_uuid = self.get_workflow(workflow_uuid)["uuid"]
+        try:
+            normalized_starts = [validate_uuid(value) for value in start_node_uuids]
+            normalized_breakpoints = [
+                validate_uuid(value) for value in breakpoint_node_uuids
+            ]
+            if len(normalized_starts) != 1 or len(set(normalized_starts)) != 1:
+                raise ValueError
+            if len(set(normalized_breakpoints)) != len(normalized_breakpoints):
+                raise ValueError
+            input_value = normalize_json_object(input_value)
+            meta_data = normalize_json_object(meta_data)
+        except (TypeError, ValueError):
+            raise WorkflowError("invalid_input") from None
+        description = self._optional_text(description)
+        meta_data = {**meta_data, "debug": True}
+        start_node_uuid = normalized_starts[0]
+
+        def plan_builder(graph: Dict[str, Any]) -> PreparedTaskInput:
+            prepared = self._prepare_task_input(
+                graph,
+                input_value=input_value,
+                run_mode="step",
+                target_node_uuid=None,
+            )
+            return self._scope_debug_task_input(
+                prepared,
+                start_node_uuid=start_node_uuid,
+                breakpoint_node_uuids=normalized_breakpoints,
+            )
+
+        try:
+            task = self._store.create_task_with_jobs(
+                workflow_uuid=workflow_uuid,
+                task_uuid=str(uuid4()),
+                run_mode="step",
+                target_node_uuid=None,
+                description=description,
+                meta_data=meta_data,
+                plan_builder=plan_builder,
+            )
+            self._store.create_debug_configuration(
+                task_uuid=task["uuid"],
+                start_node_uuids=normalized_starts,
+                breakpoint_node_uuids=normalized_breakpoints,
+            )
+            if self._task_scheduler_bridge is None:
+                return task
+            return self._task_scheduler_bridge.submit(task)["task"]
+        except (TaskInputError, StoreConflict, ValueError):
+            raise WorkflowError("invalid_input") from None
+        except TaskSchedulerBridgeError:
+            raise WorkflowError("internal_error") from None
+
+    def get_debug_workflow_task(self, task_uuid: str) -> Dict[str, Any]:
+        """返回标准 Task/Jobs 与调试配置、范围和 Hold 的三源一致投影。"""
+
+        try:
+            task_uuid = validate_uuid(task_uuid)
+            task = self._store.get_task(task_uuid)
+            jobs = self._store.list_jobs(task_uuid)
+            debug = self._store.get_debug_projection(task_uuid)
+        except (StoreNotFound, ValueError):
+            raise WorkflowError("not_found") from None
+        snapshot_nodes = task.get("workflow_snapshot", {}).get("nodes", [])
+        disabled = [
+            str(node.get("uuid"))
+            for node in snapshot_nodes
+            if isinstance(node, Mapping) and node.get("disabled") is True
+        ]
+        enabled = [
+            str(node.get("uuid"))
+            for node in snapshot_nodes
+            if isinstance(node, Mapping)
+            and node.get("disabled") is not True
+            and node.get("uuid")
+        ]
+        active = [
+            str(node.get("uuid"))
+            for node in task.get("execution_plan", {}).get("nodes", [])
+            if isinstance(node, Mapping) and node.get("uuid")
+        ]
+        active_set = set(active)
+        return {
+            "task": task,
+            "jobs": jobs,
+            **debug,
+            "active_node_uuids": active,
+            "out_of_scope_node_uuids": [
+                node_uuid for node_uuid in enabled if node_uuid not in active_set
+            ],
+            "disabled_node_uuids": disabled,
+        }
+
+    def command_debug_workflow_task(
+        self,
+        task_uuid: str,
+        *,
+        command_type: str,
+        scope_type: str,
+        hold_uuid: str,
+        idempotency_key: str,
+    ) -> Dict[str, Any]:
+        """按精确 Hold 范围幂等执行调试单步或继续。"""
+
+        try:
+            task_uuid = validate_uuid(task_uuid)
+            hold_uuid = validate_uuid(hold_uuid)
+            if command_type not in {"step", "continue"} or scope_type != "hold":
+                raise ValueError
+            normalized_key = str(idempotency_key).strip()
+            if not normalized_key:
+                raise ValueError
+            command, created, node_uuid = self._store.begin_debug_command(
+                task_uuid=task_uuid,
+                command_uuid=str(uuid4()),
+                command_type=command_type,
+                hold_uuid=hold_uuid,
+                idempotency_key=normalized_key,
+            )
+            if not created or command["status"] != "pending":
+                return command
+            if self._task_scheduler_bridge is None:
+                return self._store.complete_debug_command(
+                    command["uuid"],
+                    status="rejected",
+                    result={"reason": "scheduler_unavailable"},
+                )
+            try:
+                result = self._task_scheduler_bridge.step(
+                    task_uuid,
+                    target_node_uuid=node_uuid,
+                )
+            except TaskSchedulerBridgeError as error:
+                return self._store.complete_debug_command(
+                    command["uuid"],
+                    status="rejected",
+                    result={"reason": str(error)},
+                )
+            return self._store.complete_debug_command(
+                command["uuid"], status="succeeded", result=result
+            )
+        except WorkflowError:
+            raise
+        except (StoreNotFound, StoreConflict, TypeError, ValueError):
             raise WorkflowError("invalid_input") from None
 
     def create_device_action_run(
@@ -881,6 +1045,69 @@ class WorkflowService:
             execution_plan=plan,
             jobs=jobs,
             resource_resolver=self._material_resolver,
+        )
+
+    @staticmethod
+    def _scope_debug_task_input(
+        prepared: PreparedTaskInput,
+        *,
+        start_node_uuid: str,
+        breakpoint_node_uuids: List[str],
+    ) -> PreparedTaskInput:
+        """把已验证计划裁成从起始点可达的活动子图，快照保持完整。"""
+
+        plan = dict(prepared.execution_plan)
+        nodes = [dict(node) for node in plan.get("nodes", [])]
+        node_ids = {str(node.get("uuid") or "") for node in nodes}
+        if start_node_uuid not in node_ids:
+            raise StoreConflict("debug start node is not enabled and executable")
+        snapshot_nodes = prepared.workflow_snapshot.get("nodes", [])
+        enabled_snapshot_ids = {
+            str(node.get("uuid") or "")
+            for node in snapshot_nodes
+            if isinstance(node, Mapping) and node.get("disabled") is not True
+        }
+        if any(node_uuid not in enabled_snapshot_ids for node_uuid in breakpoint_node_uuids):
+            raise StoreConflict("debug breakpoint node is not enabled")
+        outgoing: Dict[str, List[str]] = {}
+        for edge in plan.get("edges", []):
+            if not isinstance(edge, Mapping):
+                continue
+            source = str(edge.get("source_node_uuid") or "")
+            target = str(edge.get("target_node_uuid") or "")
+            outgoing.setdefault(source, []).append(target)
+        reachable: set[str] = set()
+        pending = [start_node_uuid]
+        while pending:
+            current = pending.pop()
+            if current in reachable:
+                continue
+            reachable.add(current)
+            pending.extend(outgoing.get(current, []))
+        plan["nodes"] = [node for node in nodes if str(node.get("uuid")) in reachable]
+        plan["edges"] = [
+            edge
+            for edge in plan.get("edges", [])
+            if str(edge.get("source_node_uuid")) in reachable
+            and str(edge.get("target_node_uuid")) in reachable
+        ]
+        plan["handles"] = [
+            handle
+            for handle in plan.get("handles", [])
+            if str(handle.get("node_uuid")) in reachable
+        ]
+        jobs = [
+            job
+            for job in prepared.jobs
+            if str(job.get("workflow_node_uuid")) in reachable
+        ]
+        if not jobs:
+            raise StoreConflict("debug task has no reachable jobs")
+        return PreparedTaskInput(
+            workflow_snapshot=prepared.workflow_snapshot,
+            resolved_input=prepared.resolved_input,
+            execution_plan=plan,
+            jobs=jobs,
         )
 
     # 工作流创作（Authoring） ---------------------------------------------
