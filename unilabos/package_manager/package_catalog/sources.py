@@ -114,6 +114,53 @@ class WorkspaceSource:
         return resolved_file
 
 
+@dataclass(frozen=True)
+class CachedArchiveSource(WorkspaceSource):
+    """由已验证 wheel 在隔离目录重建的只读包目录来源。"""
+
+    archive_path: Path
+    artifact_digest: str
+
+    @classmethod
+    def _from_verified_workspace(
+        cls,
+        root: str | Path,
+        *,
+        archive_path: str | Path,
+        artifact_digest: str,
+    ) -> CachedArchiveSource:
+        """从 wheel 审计器拥有的临时工作区建立归档来源。
+
+        参数：``root`` 是仅由已验证 wheel 成员重建的目录；``archive_path`` 是
+        对应归档位置；``artifact_digest`` 是已复算的 Artifact digest。
+        返回：仍满足 ``WorkspaceSource`` 读取合同的 ``CachedArchiveSource``。
+        异常：工作区无效或摘要形状错误时抛出 ``ValueError``。该构造入口仅供
+        包分发审计深模块调用，普通调用方不能借此跳过 wheel 验证。
+        """
+
+        if not isinstance(artifact_digest, str) or not artifact_digest.startswith(
+            "sha256:"
+        ):
+            raise ValueError("缓存归档来源缺少有效 Artifact digest")
+        instance = cls.__new__(cls)
+        WorkspaceSource.__init__(instance, root)
+        selected_archive = Path(archive_path).expanduser()
+        object.__setattr__(instance, "archive_path", selected_archive)
+        object.__setattr__(instance, "artifact_digest", artifact_digest)
+        return instance
+
+    @property
+    def source_kind(self) -> Literal["cached_archive"]:
+        """返回包来源的稳定类型。
+
+        参数：无。
+        返回：固定 wire value ``cached_archive``。
+        异常：无。
+        """
+
+        return "cached_archive"
+
+
 def _safe_logical_path(logical_path: str) -> PurePosixPath:
     """校验一个工作区逻辑路径不含逃逸语义。
 
@@ -135,4 +182,4 @@ def _safe_logical_path(logical_path: str) -> PurePosixPath:
     return logical_file
 
 
-__all__ = ["WorkspaceSource"]
+__all__ = ["CachedArchiveSource", "WorkspaceSource"]

@@ -27,9 +27,10 @@ from .registry_snapshot import (
     RegistrySnapshotError,
     compile_registry_snapshot,
 )
-from .sources import WorkspaceSource
+from .sources import CachedArchiveSource, WorkspaceSource
 
 __all__ = [
+    "CachedArchiveSource",
     "PackageAsset",
     "PackageCatalog",
     "PackageCompileError",

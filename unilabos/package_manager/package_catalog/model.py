@@ -379,6 +379,24 @@ class PackageCatalog:
 
         return self._canonical_bytes(include_catalog_digest=True)
 
+    @classmethod
+    def from_canonical_bytes(cls, payload: bytes) -> PackageCatalog:
+        """严格解码并复算一个规范包目录文档。
+
+        参数：``payload`` 是应符合 RFC 8785 且包含 ``catalog_digest`` 的 UTF-8
+        JSON 字节。
+        返回：字段形状、规范编码和目录摘要全部匹配的不可变目录。
+        异常：非字节、重复键、未知字段、字段类型、非规范编码或摘要不一致时抛出
+        ``TypeError``/``ValueError``。
+        """
+
+        from .codec import catalog_from_canonical_bytes
+
+        catalog = catalog_from_canonical_bytes(payload)
+        if not isinstance(catalog, cls):
+            raise TypeError("包目录解码器返回了错误类型")
+        return catalog
+
 
 __all__ = [
     "PackageAsset",

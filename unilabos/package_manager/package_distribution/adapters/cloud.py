@@ -64,7 +64,7 @@ class HttpClientPublicationAdapter:
         异常：网络、鉴权和服务端异常原样传播，由发布编排转为 ``PackageCLIError``。
         """
 
-        return self._http_client.upload_file_to_oss(path, scene="models")
+        return self._http_client.upload_file_to_oss(path, scene="file")
 
     def publish_resources(
         self,
@@ -120,6 +120,14 @@ def publish_build(
     response_text = getattr(response, "text", "")
     if status not in (200, 201):
         raise PackageCLIError(f"上传 /lab/resource 失败：{status} {response_text}")
+    response_json = getattr(response, "json", None)
+    if callable(response_json):
+        try:
+            envelope = response_json()
+        except ValueError as error:
+            raise PackageCLIError("上传 /lab/resource 返回了非法 JSON 信封") from error
+        if not isinstance(envelope, dict) or envelope.get("code") != 0:
+            raise PackageCLIError("上传 /lab/resource 返回了非成功业务码")
     return {
         "artifact": archive_path,
         "package_info": package_info,

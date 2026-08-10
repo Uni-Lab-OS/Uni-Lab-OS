@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import json
 import os
 import subprocess
 import sys
@@ -188,3 +189,139 @@ def test_package_dependency_commands_use_early_local_dispatch_without_product_bo
         command_output = result.stdout + result.stderr
         assert result.returncode == 0, command_output
         _assert_no_product_bootstrap_artifacts(workspace_root, command_output)
+
+
+def test_package_download_json_failure_is_single_document_without_bootstrap(
+    tmp_path: Path,
+) -> None:
+    """download 选择器失败必须在联网和产品启动前输出单一稳定 JSON。
+
+    参数：``tmp_path`` 提供干净当前目录。
+    返回：无；断言非零退出、stdout 单文档和环境证据位于 stderr。
+    异常：若命令联网等待、进入产品启动或污染 stdout 则测试失败。
+    """
+
+    result = subprocess.run(
+        [
+            sys.executable,
+            "-m",
+            "unilabos.app.main",
+            "--addr",
+            "production",
+            "package",
+            "download",
+            "--template-uuid",
+            "not-a-uuid",
+            "--json",
+        ],
+        cwd=tmp_path,
+        env={**os.environ, "PYTHONPATH": str(REPOSITORY_ROOT)},
+        stdin=subprocess.DEVNULL,
+        capture_output=True,
+        text=True,
+        timeout=10,
+        check=False,
+    )
+    document = json.loads(result.stdout)
+
+    assert result.returncode == 1
+    assert result.stdout.count("\n") == 1
+    assert document["environment"] == "prod"
+    assert document["error"]["code"] == "invalid_selector"
+    assert "environment: prod" in result.stderr
+    _assert_no_product_bootstrap_artifacts(tmp_path, result.stdout + result.stderr)
+
+
+def test_package_upload_auth_stdin_precedes_python_local_config(
+    tmp_path: Path,
+) -> None:
+    """--auth-stdin 必须在加载可执行 local_config.py 前完成凭据选择。
+
+    参数：``tmp_path`` 提供故意抛错的本地配置和不存在的软件包路径。
+    返回：无；断言命令推进到本地 build 失败，而不是执行配置文件。
+    异常：若 stdin 合同失效或配置先执行则测试失败。
+    """
+
+    tmp_path.joinpath("local_config.py").write_text(
+        'raise RuntimeError("local config must not execute")\n',
+        encoding="utf-8",
+    )
+    auth_document = json.dumps(
+        {
+            "schema_version": "unilab-package-upload-auth/v1",
+            "ak": "test-ak",
+            "sk": "test-sk",
+        }
+    )
+    result = subprocess.run(
+        [
+            sys.executable,
+            "-m",
+            "unilabos.app.main",
+            "--addr",
+            "uat",
+            "--working_dir",
+            str(tmp_path),
+            "package",
+            "upload",
+            "--path",
+            str(tmp_path / "missing-package"),
+            "--auth-stdin",
+            "--json",
+        ],
+        cwd=tmp_path,
+        env={**os.environ, "PYTHONPATH": str(REPOSITORY_ROOT)},
+        input=auth_document,
+        capture_output=True,
+        text=True,
+        timeout=10,
+        check=False,
+    )
+    document = json.loads(result.stdout)
+
+    assert result.returncode == 1
+    assert document["environment"] == "uat"
+    assert document["error"]["code"] == "package_build_failed"
+    assert "local config must not execute" not in result.stdout + result.stderr
+
+
+def test_package_upload_missing_auth_is_read_only_and_reports_environment(
+    tmp_path: Path,
+) -> None:
+    """缺少上传凭据时不得创建空会话，并应保留固定环境 JSON 证据。
+
+    参数：``tmp_path`` 是显式受管目录和当前目录。
+    返回：无；断言认证先于构建失败，且未创建 session 文件或锁。
+    异常：凭据解析产生持久副作用或丢失环境标签时测试失败。
+    """
+
+    result = subprocess.run(
+        [
+            sys.executable,
+            "-m",
+            "unilabos.app.main",
+            "--addr",
+            "production",
+            "--working_dir",
+            str(tmp_path),
+            "package",
+            "upload",
+            "--path",
+            str(tmp_path / "missing-package"),
+            "--json",
+        ],
+        cwd=tmp_path,
+        env={**os.environ, "PYTHONPATH": str(REPOSITORY_ROOT)},
+        stdin=subprocess.DEVNULL,
+        capture_output=True,
+        text=True,
+        timeout=10,
+        check=False,
+    )
+    document = json.loads(result.stdout)
+
+    assert result.returncode == 1
+    assert document["environment"] == "prod"
+    assert document["error"]["code"] == "authentication_required"
+    assert not tmp_path.joinpath("session.json").exists()
+    assert not tmp_path.joinpath("session.lock").exists()

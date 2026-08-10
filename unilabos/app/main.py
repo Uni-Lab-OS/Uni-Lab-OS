@@ -1,6 +1,7 @@
 import argparse
 import asyncio
 import faulthandler
+import json
 import os
 import platform
 import shutil
@@ -189,31 +190,71 @@ def should_prepare_workspace_product_runtime(args_dict: dict[str, Any]) -> bool:
 
 
 def dispatch_local_package_command(args_dict: dict[str, Any]) -> bool:
-    """在产品启动前分派不依赖远端配置的包命令。
+    """在产品启动前分派全部本地或远端包命令。
 
     参数：``args_dict`` 是公共命令行（CLI）解析出的完整参数字典。
-    返回：inspect、build、add、update、remove 由包管理深模块处理时返回 ``True``；
-    非包命令、缺少子动作或需要显式鉴权的 upload 返回 ``False``，由后续既有路径
-    处理。
+    返回：识别并处理任一 package 动作时返回 ``True``，非包命令或缺少子动作时
+    返回 ``False``。
     异常：软件包命令行（Package CLI）合同错误转换为退出码 1 的 ``SystemExit``；
-    本接缝不得创建工作目录、读取产品配置、执行环境检查或启动 ROS/设备运行时。
+    本接缝不执行环境检查或启动 ROS/设备运行时。远端动作只读取显式 stdin、现有
+    会话/配置并写受管包缓存和构建输出。
     """
 
     command = args_dict.get("command")
     package_action = args_dict.get("package_action")
-    if command not in {"package", "pkg"} or package_action not in {
-        "inspect",
-        "build",
-        "add",
-        "update",
-        "remove",
-    }:
+    if command not in {"package", "pkg"} or not package_action:
         return False
 
-    from unilabos.package_manager.cli import PackageCLIError, cmd_package
+    from unilabos.package_manager.cli import cmd_package
+    from unilabos.package_manager.package_distribution.errors import (
+        PackageCLIError,
+        PackageTransferError,
+    )
 
+    environment_name = "unknown"
     try:
-        cmd_package(args_dict)
+        if package_action in {"upload", "download"}:
+            from unilabos.app.cli.package import package_cloud_command_context
+            from unilabos.package_manager.package_distribution.environment import (
+                resolve_package_environment,
+            )
+
+            environment_name = resolve_package_environment(
+                args_dict.get("addr")
+            ).name
+            with package_cloud_command_context(
+                args_dict,
+                require_auth=package_action == "upload",
+            ) as context:
+                print(
+                    "package "
+                    f"{package_action} environment: {environment_name} "
+                    f"({context.environment.base_url})",
+                    file=sys.stderr,
+                )
+                cmd_package(
+                    args_dict,
+                    transfer_port=context.adapter,
+                    environment=environment_name,
+                    cache_root=context.cache_root,
+                )
+        else:
+            cmd_package(args_dict)
+    except PackageTransferError as error:
+        if args_dict.get("json"):
+            print(
+                json.dumps(
+                    error.to_command_dict(
+                        command=f"package.{package_action}",
+                        environment=environment_name,
+                    ),
+                    ensure_ascii=False,
+                    sort_keys=True,
+                )
+            )
+        else:
+            print_status(f"[{error.code}] {error}", "error")
+        raise SystemExit(1) from error
     except PackageCLIError as error:
         print_status(str(error), "error")
         raise SystemExit(1) from error
@@ -649,8 +690,7 @@ def main():
 
         sys.exit(run_doctor(args_dict))
 
-    # 纯本地软件包命令行（Package CLI）不得落入产品启动路径；upload 仍需后续
-    # 显式鉴权和远端配置，但同样不会安装工作区产品生命周期。
+    # 软件包命令行不得落入产品启动路径；远端动作也只初始化短生命周期 Adapter。
     if dispatch_local_package_command(args_dict):
         return
 
@@ -1010,25 +1050,6 @@ def main():
         print_status(
             "Slave 不启动物料数据库，物料查询仅通过 HostLink 访问 Host", "info"
         )
-
-    # package 子命令：在配置/鉴权就绪后尽早处理，不进入设备 bootstrap
-    if args_dict.get("command") in ("package", "pkg"):
-        from unilabos.package_manager.cli import PackageCLIError, cmd_package
-
-        package_http_client = None
-        if args_dict.get("package_action") == "upload":
-            if not (BasicConfig.ak and BasicConfig.sk):
-                print_status("package upload 需要 --ak/--sk 鉴权信息", "error")
-                os._exit(1)
-            from unilabos.app.web import http_client as _http_client_for_package
-
-            package_http_client = _http_client_for_package
-        try:
-            cmd_package(args_dict, http_client=package_http_client)
-        except PackageCLIError as exc:
-            print_status(str(exc), "error")
-            os._exit(1)
-        return
 
     workflow_upload = args_dict.get("command") in ("workflow_upload", "wf")
 

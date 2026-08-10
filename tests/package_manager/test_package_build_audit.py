@@ -367,7 +367,7 @@ def test_upload_builds_once_and_publishes_the_same_audited_wheel() -> None:
             异常：无。
             """
 
-            assert scene == "models"
+            assert scene == "file"
             self.uploaded.append(path)
             return "https://packages.example/catalog_lab.whl", "models/catalog.whl"
 

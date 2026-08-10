@@ -15,6 +15,7 @@ if TYPE_CHECKING:
     from .cli import (
         cmd_package as cmd_package,
     )
+    from .cli import download_package as download_package
     from .cli import inspect_package as inspect_package
     from .cli import (
         register_package_subcommands as register_package_subcommands,
@@ -28,6 +29,9 @@ if TYPE_CHECKING:
     )
     from .driver_runtime import (
         activate_python_driver as activate_python_driver,
+    )
+    from .package_catalog import (
+        CachedArchiveSource as CachedArchiveSource,
     )
     from .package_catalog import (
         PackageCatalog as PackageCatalog,
@@ -161,6 +165,7 @@ _EXPORT_GROUPS: tuple[tuple[str, tuple[str, ...]], ...] = (
             "PackageCLIError",
             "build_package",
             "cmd_package",
+            "download_package",
             "inspect_package",
             "register_package_subcommands",
             "upload_package",
@@ -182,6 +187,7 @@ _EXPORT_GROUPS: tuple[tuple[str, tuple[str, ...]], ...] = (
             "RegistryActivationPlan",
             "RegistrySnapshot",
             "RegistrySnapshotError",
+            "CachedArchiveSource",
             "WorkspaceSource",
             "compile_registry_snapshot",
         ),

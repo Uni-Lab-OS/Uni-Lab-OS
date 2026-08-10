@@ -8,9 +8,12 @@ from .cloud import (
     upload_package,
 )
 from .directory import install_package
+from .legacy_backend import LEGACY_CAPABILITY, LegacyTemplateBackendAdapter
 
 __all__ = [
+    "LEGACY_CAPABILITY",
     "HttpClientPublicationAdapter",
+    "LegacyTemplateBackendAdapter",
     "PackageBuilder",
     "PublicationPort",
     "install_package",

@@ -223,6 +223,8 @@ def build_resources_from_registry(
         # ``resource`` 是当前设备定义的完整后端资源上传 DTO。
         resource: dict[str, Any] = {
             "id": device_id,
+            "source_fqid": entry.get("source_fqid", ""),
+            "content_hash": entry.get("content_hash", ""),
             "registry_type": str(
                 entry.get("registry_type", entry.get("resource_type", "device"))
             ),

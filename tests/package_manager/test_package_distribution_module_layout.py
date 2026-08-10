@@ -516,7 +516,7 @@ def test_http_publication_adapter_preserves_delegate_contract() -> None:
     )
     adapter.publish_resources(resources, package_info)
 
-    assert http_client.upload_calls == [("/tmp/direct.whl", "models")]
+    assert http_client.upload_calls == [("/tmp/direct.whl", "file")]
     assert http_client.publication_calls[0][0] is resources
     assert http_client.publication_calls[0][1] is package_info
 
@@ -536,7 +536,7 @@ def test_http_publication_adapter_preserves_delegate_contract() -> None:
         )
 
     assert caught.value is transport_error
-    assert http_client.upload_calls[-1] == ("/tmp/lab.whl", "models")
+    assert http_client.upload_calls[-1] == ("/tmp/lab.whl", "file")
 
 
 def test_upload_interfaces_have_no_external_download_url_bypass() -> None:

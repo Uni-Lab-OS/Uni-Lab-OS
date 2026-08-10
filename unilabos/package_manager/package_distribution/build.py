@@ -8,7 +8,6 @@ import hashlib
 import io
 import json
 import shutil
-import stat
 import subprocess
 import sys
 import tempfile
@@ -23,8 +22,11 @@ from ..package_catalog.project_metadata import (
     parse_project_metadata,
     project_to_legacy_dict,
 )
+from .errors import PackageBuildError
 from .inspection import CatalogCompiler
 from .legacy_projection import build_package_info, build_resources_from_registry
+from .wheel import artifact_digest, audit_package_wheel
+from .workspace_manifest import build_workspace_manifest_member
 
 # 暂存排除集合禁止把本地缓存、运行数据和旧构建产物带入发布 wheel。
 _STAGING_EXCLUDES = frozenset(
@@ -46,18 +48,6 @@ _STAGING_EXCLUDES = frozenset(
         "venv",
     }
 )
-# 以下上限约束不可信 wheel 的压缩包观察，避免解压炸弹或异常成员耗尽资源。
-_MAX_ARCHIVE_BYTES = 2 * 1024 * 1024 * 1024
-_MAX_MEMBER_BYTES = 1024 * 1024 * 1024
-_MAX_TOTAL_UNCOMPRESSED_BYTES = 4 * 1024 * 1024 * 1024
-_MAX_ARCHIVE_MEMBERS = 50_000
-_MAX_COMPRESSION_RATIO = 1_000
-
-
-class PackageBuildError(RuntimeError):
-    """表示软件包不能构建为经过自审计的标准 wheel。"""
-
-
 @dataclass(frozen=True, slots=True)
 class PackageBuildArtifact:
     """一次通过来源重编译审计的完整软件包发布代际。"""
@@ -144,9 +134,16 @@ def build_workspace_package(
         generated_members = _write_generated_catalog(staging_source, catalog)
         # ``candidate_wheel`` 尚未发布，只有完整自审计通过后才复制到目标目录。
         candidate_wheel = _build_standard_wheel(staging_root, wheel_output)
+        manifest_name, manifest_payload = build_workspace_manifest_member(
+            candidate_wheel,
+            staging_source,
+            catalog,
+            generated_members=generated_members,
+        )
+        generated_members[manifest_name] = manifest_payload
         _inject_wheel_members(candidate_wheel, generated_members)
         # ``candidate_digest`` 绑定重写 RECORD 后的最终候选 wheel 字节。
-        candidate_digest = _artifact_digest(candidate_wheel)
+        candidate_digest = artifact_digest(candidate_wheel)
         audit_package_wheel(
             candidate_wheel,
             catalog,
@@ -204,67 +201,6 @@ def build_workspace_package(
         package_info=package_info,
         resources=tuple(resources),
     )
-
-
-def audit_package_wheel(
-    wheel: str | Path,
-    catalog: PackageCatalog,
-    *,
-    expected_digest: str,
-    compile_catalog: CatalogCompiler,
-) -> None:
-    """验证 wheel 摘要、标准记录、闭包及实际源码目录 parity。
-
-    参数：``wheel`` 是待审计标准 wheel；``catalog`` 是暂存源码的规范目录；
-    ``expected_digest`` 是构建后固定的产物摘要；``compile_catalog`` 是同一目录编译
-    Interface。
-    返回：无；只有所有安全与内容不变量成立时正常返回。
-    异常：摘要、ZIP、RECORD、顶层载荷、闭包、内嵌目录或重编译结果无效时抛出
-    ``PackageBuildError``。
-    """
-
-    if not callable(compile_catalog):
-        raise TypeError("compile_catalog 必须可调用")
-    if not isinstance(catalog, PackageCatalog):
-        raise TypeError("catalog 必须是 PackageCatalog")
-    # ``selected_wheel`` 保留调用者原始路径身份，必须在 resolve 前执行 lstat。
-    selected_wheel = Path(wheel).expanduser()
-    try:
-        selected_metadata = selected_wheel.lstat()
-    except OSError as error:
-        raise PackageBuildError(f"wheel 不存在或不可访问：{selected_wheel}") from error
-    if stat.S_ISLNK(selected_metadata.st_mode) or selected_wheel.is_symlink():
-        raise PackageBuildError(f"wheel 路径不得是符号链接：{selected_wheel}")
-    # ``wheel_path`` 是解析后的普通文件位置，后续仍须验证大小和摘要。
-    wheel_path = selected_wheel.resolve()
-    _verify_artifact(wheel_path, expected_digest)
-    try:
-        with zipfile.ZipFile(wheel_path) as archive:
-            # ``members`` 是经过压缩包安全校验的唯一普通成员索引。
-            members = _validated_wheel_members(archive)
-            _verify_wheel_record(members)
-            _verify_payload_and_closure(members, catalog)
-            embedded_catalog_name = (
-                f"{catalog.import_package}/_generated/package.catalog.json"
-            )
-            if members[embedded_catalog_name] != catalog.to_canonical_bytes():
-                raise PackageBuildError("wheel 内嵌包目录与暂存源码目录不一致")
-            # ``gettempdir`` 在 macOS 可能返回经过系统符号链接的 ``/var``；审计
-            # 来源必须使用其规范父路径，同时仍让 WorkspaceSource 拒绝调用者链接。
-            audit_temporary_parent = Path(tempfile.gettempdir()).resolve()
-            with tempfile.TemporaryDirectory(
-                prefix="unilab-package-audit-",
-                dir=audit_temporary_parent,
-            ) as temporary:
-                # ``audit_root`` 是只从 wheel 成员重建、无作者工作区回退的审计来源。
-                audit_root = Path(temporary) / "workspace"
-                _reconstruct_workspace_from_wheel(members, catalog, audit_root)
-                # ``audited_catalog`` 必须由同一编译器重新解释实际 wheel 源码。
-                audited_catalog = compile_catalog(WorkspaceSource(audit_root))
-    except zipfile.BadZipFile as error:
-        raise PackageBuildError("wheel 不是合法 ZIP 归档") from error
-    if audited_catalog.to_canonical_bytes() != catalog.to_canonical_bytes():
-        raise PackageBuildError("wheel 来源重编译目录与暂存源码目录不一致")
 
 
 def _copy_workspace(source: Path, target: Path) -> None:
@@ -437,211 +373,6 @@ def _wheel_record(members: Mapping[str, bytes], record_name: str) -> bytes:
     return stream.getvalue().encode("utf-8")
 
 
-def _verify_artifact(wheel: Path, expected_digest: str) -> None:
-    """验证 wheel 是大小受限的普通文件且摘要匹配。
-
-    参数：``wheel`` 是候选路径；``expected_digest`` 是带前缀 SHA-256。
-    返回：无。
-    异常：路径、大小或摘要不符时抛出 ``PackageBuildError``。
-    """
-
-    if wheel.is_symlink() or not wheel.is_file():
-        raise PackageBuildError(f"wheel 不存在或不是普通文件：{wheel}")
-    if wheel.stat().st_size > _MAX_ARCHIVE_BYTES:
-        raise PackageBuildError("wheel 超过归档大小上限")
-    # ``actual_digest`` 是对候选最终字节重新计算的事实摘要。
-    actual_digest = _artifact_digest(wheel)
-    if not expected_digest or actual_digest != expected_digest:
-        raise PackageBuildError(
-            f"wheel 摘要不匹配：{actual_digest} != {expected_digest or '-'}"
-        )
-
-
-def _validated_wheel_members(archive: zipfile.ZipFile) -> dict[str, bytes]:
-    """关闭式验证 wheel 成员安全并读取普通文件内容。
-
-    参数：``archive`` 是已打开的候选 wheel。
-    返回：按逻辑成员名索引的普通文件字节。
-    异常：重复、加密、符号链接、路径逃逸或压缩资源超限时抛出
-    ``PackageBuildError``。
-    """
-
-    # ``infos`` 与 ``names`` 用于在读取内容前完成数量和重复身份校验。
-    infos = tuple(archive.infolist())
-    if len(infos) > _MAX_ARCHIVE_MEMBERS:
-        raise PackageBuildError("wheel 成员数量超过上限")
-    names: set[str] = set()
-    total_size = 0
-    members: dict[str, bytes] = {}
-    for item in infos:
-        _safe_member_name(item.filename.rstrip("/"))
-        if item.filename in names:
-            raise PackageBuildError(f"wheel 包含重复成员：{item.filename}")
-        names.add(item.filename)
-        mode = item.external_attr >> 16
-        if item.flag_bits & 0x1:
-            raise PackageBuildError(f"wheel 包含加密成员：{item.filename}")
-        if stat.S_ISLNK(mode):
-            raise PackageBuildError(f"wheel 包含符号链接成员：{item.filename}")
-        if item.file_size > _MAX_MEMBER_BYTES:
-            raise PackageBuildError(f"wheel 成员超过大小上限：{item.filename}")
-        total_size += item.file_size
-        if total_size > _MAX_TOTAL_UNCOMPRESSED_BYTES:
-            raise PackageBuildError("wheel 解压后总大小超过上限")
-        if (item.file_size > 0 and item.compress_size == 0) or (
-            item.compress_size > 0
-            and item.file_size / item.compress_size > _MAX_COMPRESSION_RATIO
-        ):
-            raise PackageBuildError(f"wheel 成员压缩比超过上限：{item.filename}")
-        if not item.is_dir():
-            members[item.filename] = archive.read(item)
-    return members
-
-
-def _safe_member_name(member_name: str) -> PurePosixPath:
-    """验证 wheel 成员名是规范 POSIX 相对路径。
-
-    参数：``member_name`` 是 ZIP 中声明的逻辑路径。
-    返回：完成检查的 ``PurePosixPath``。
-    异常：空、绝对、反斜杠或父目录语义抛出 ``PackageBuildError``。
-    """
-
-    if not member_name or "\\" in member_name:
-        raise PackageBuildError("wheel 成员路径必须是非空 POSIX 相对路径")
-    # ``logical_path`` 只表达归档内部身份，不允许文件系统规范化掩盖逃逸。
-    logical_path = PurePosixPath(member_name)
-    if logical_path.is_absolute() or any(
-        part in {"", ".", ".."} for part in logical_path.parts
-    ):
-        raise PackageBuildError(f"wheel 成员路径非法：{member_name}")
-    return logical_path
-
-
-def _verify_wheel_record(members: Mapping[str, bytes]) -> None:
-    """验证 wheel RECORD 覆盖全部成员并匹配摘要与大小。
-
-    参数：``members`` 是安全读取后的完整普通成员。
-    返回：无。
-    异常：RECORD 缺失、重复、字段或哈希不匹配时抛出 ``PackageBuildError``。
-    """
-
-    # ``record_names`` 必须唯一，且签名文件不参与当前无签名 wheel 合同。
-    record_names = [name for name in members if name.endswith(".dist-info/RECORD")]
-    if len(record_names) != 1:
-        raise PackageBuildError(f"wheel RECORD 数量不是 1：{len(record_names)}")
-    record_name = record_names[0]
-    try:
-        # ``rows`` 是 RECORD 中按成员身份索引的三字段记录。
-        rows = {
-            row[0]: row
-            for row in csv.reader(
-                io.StringIO(members[record_name].decode("utf-8"), newline="")
-            )
-            if row
-        }
-    except (UnicodeError, csv.Error, IndexError) as error:
-        raise PackageBuildError("wheel RECORD 不是合法 UTF-8 CSV") from error
-    if set(rows) != set(members):
-        raise PackageBuildError("wheel RECORD 未完整覆盖普通成员")
-    for name, payload in members.items():
-        # ``row`` 是当前成员在 RECORD 中的唯一完整性声明。
-        row = rows[name]
-        if len(row) != 3:
-            raise PackageBuildError(f"wheel RECORD 字段数量无效：{name}")
-        if name == record_name:
-            if row[1:] != ["", ""]:
-                raise PackageBuildError("wheel RECORD 自身摘要或大小必须为空")
-            continue
-        expected_hash = (
-            base64.urlsafe_b64encode(hashlib.sha256(payload).digest())
-            .decode("ascii")
-            .rstrip("=")
-        )
-        if row[1] != f"sha256={expected_hash}" or row[2] != str(len(payload)):
-            raise PackageBuildError(f"wheel RECORD 摘要或大小不匹配：{name}")
-
-
-def _verify_payload_and_closure(
-    members: Mapping[str, bytes],
-    catalog: PackageCatalog,
-) -> None:
-    """验证 wheel 只有规范导入根且完整携带目录源码与资产闭包。
-
-    参数：``members`` 是安全 wheel 内容；``catalog`` 是暂存源码目录。
-    返回：无。
-    异常：额外顶层载荷或任一必需成员缺失时抛出 ``PackageBuildError``。
-    """
-
-    # ``payload_roots`` 排除标准发行元数据后，只允许唯一规范 import package。
-    payload_roots = {
-        PurePosixPath(name).parts[0]
-        for name in members
-        if not PurePosixPath(name).parts[0].endswith((".dist-info", ".data"))
-    }
-    if payload_roots != {catalog.import_package}:
-        raise PackageBuildError(
-            "wheel 必须只有规范顶层导入包；实际为：" + ", ".join(sorted(payload_roots))
-        )
-    # ``required_members`` 是目录定义、静态资产及重编译证据的完整闭包。
-    required_members = {
-        *(item.declaring_file for item in catalog.definitions.devices),
-        *(item.declaring_file for item in catalog.definitions.resources),
-        *(item.declaring_file for item in catalog.definitions.workflows),
-        *(item.logical_path for item in catalog.assets),
-        f"{catalog.import_package}/_generated/package.catalog.json",
-        f"{catalog.import_package}/_generated/pyproject.toml",
-    }
-    if catalog.definitions.workflows:
-        required_members.add(f"{catalog.import_package}/_generated/package.yaml")
-    # ``missing_members`` 稳定报告标准构建没有实际携带的目录闭包。
-    missing_members = sorted(required_members - set(members))
-    if missing_members:
-        raise PackageBuildError("wheel 缺失包目录闭包：" + ", ".join(missing_members))
-
-
-def _reconstruct_workspace_from_wheel(
-    members: Mapping[str, bytes],
-    catalog: PackageCatalog,
-    audit_root: Path,
-) -> None:
-    """仅从 wheel 普通成员重建可交给统一编译器的安全工作区。
-
-    参数：``members`` 是已经验证的 wheel 内容；``catalog`` 给出唯一 import package；
-    ``audit_root`` 是隔离临时目标。
-    返回：无；写出包源码、根 pyproject 和可选 workflow 清单。
-    异常：临时目录不可写时传播文件系统异常。
-    """
-
-    audit_root.mkdir(parents=True)
-    package_prefix = f"{catalog.import_package}/"
-    generated_prefix = f"{catalog.import_package}/_generated"
-    for name, payload in members.items():
-        if not name.startswith(package_prefix) or name.startswith(
-            f"{generated_prefix}/"
-        ):
-            continue
-        # ``target`` 由已验证 POSIX 成员路径映射到隔离审计根。
-        target = audit_root.joinpath(*PurePosixPath(name).parts)
-        target.parent.mkdir(parents=True, exist_ok=True)
-        target.write_bytes(payload)
-    # ``generated_prefix`` 保存根声明在 wheel 内的规范生成位置。
-    audit_root.joinpath("pyproject.toml").write_bytes(
-        members[f"{generated_prefix}/pyproject.toml"]
-    )
-    package_manifest = members.get(f"{generated_prefix}/package.yaml")
-    if package_manifest is not None:
-        audit_root.joinpath("package.yaml").write_bytes(package_manifest)
-    workspace_evidence_prefix = f"{generated_prefix}/workspace/"
-    for name, payload in members.items():
-        if not name.startswith(workspace_evidence_prefix):
-            continue
-        # ``workspace_relative`` 已通过 wheel 成员检查，只恢复到隔离审计根。
-        workspace_relative = name.removeprefix(workspace_evidence_prefix)
-        target = audit_root.joinpath(*PurePosixPath(workspace_relative).parts)
-        target.parent.mkdir(parents=True, exist_ok=True)
-        target.write_bytes(payload)
-
-
 def _publication_projections(
     catalog: PackageCatalog,
     *,
@@ -669,33 +400,19 @@ def _publication_projections(
     package_info["content_digest"] = catalog.content_digest
     # ``catalog_document`` 解冻注册条目，避免兼容投影误把只读映射当成缺失字典。
     catalog_document = catalog.to_dict()
-    registry_entries = {
-        item["id"]: item["details"]["registry_entry"]
-        for definition_kind in ("devices", "resources")
-        for item in catalog_document["definitions"][definition_kind]
-    }
+    registry_entries: dict[str, dict[str, Any]] = {}
+    for definition_kind in ("devices", "resources"):
+        for item in catalog_document["definitions"][definition_kind]:
+            # ``registry_entry`` 重复保存遗留 Backend 会持久化的源码身份证据；
+            # 规范定义身份仍由 PackageCatalog 权威拥有。
+            registry_entry = dict(item["details"]["registry_entry"])
+            registry_entry["id"] = item["id"]
+            registry_entry["source_fqid"] = f"{item['module']}:{item['symbol']}"
+            registry_entry["content_hash"] = item["content_hash"]
+            registry_entry["package_definition_fqid"] = item["fqid"]
+            registry_entries[item["id"]] = registry_entry
     resources = build_resources_from_registry(registry_entries, package_info)
     return package_info, resources
-
-
-def _artifact_digest(path: Path) -> str:
-    """分块计算 wheel 的带前缀 SHA-256 摘要。
-
-    参数：``path`` 是已完成写入的候选或发布 wheel。
-    返回：``sha256:<hex>`` 格式摘要。
-    异常：文件不可读时传播原始 IO 异常。
-    """
-
-    # ``digest`` 累积完整 wheel 字节，不把文件整体载入内存。
-    digest = hashlib.sha256()
-    with path.open("rb") as stream:
-        while True:
-            # ``chunk`` 是下一段固定上限原始 wheel 字节。
-            chunk = stream.read(1024 * 1024)
-            if not chunk:
-                break
-            digest.update(chunk)
-    return "sha256:" + digest.hexdigest()
 
 
 def _publish_file(source: Path, target: Path) -> None:

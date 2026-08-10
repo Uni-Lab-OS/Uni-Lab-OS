@@ -1,16 +1,16 @@
-import hashlib
+"""物理图遗留社区包引用的解析与可信缓存兼容层。"""
+
 import json
-import shutil
-import tarfile
-import tempfile
-import zipfile
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Dict, Iterable, List, Optional
 
+from unilabos.app.community_package_acquisition import (
+    acquire_community_workspace,
+    safe_package_info,
+)
 from unilabos.utils import logger
 from unilabos.utils.banner_print import print_status
-
 
 COMMUNITY_PREFIX = "community."
 COMMUNITY_CACHE_DIR = "community_devices"
@@ -260,6 +260,15 @@ def _ensure_remote_item_cached(
     manifest: Dict[str, Any],
     http_client: Any = None,
 ) -> Optional[Path]:
+    """把一个远端解析结果收敛到统一 acquisition/cache 与派生工作区。
+
+    参数：``item`` 是遗留 resolve 投影；``working_dir`` 是受管运行目录；
+    ``manifest`` 是迁移期社区缓存索引；``http_client`` 只提供同环境 Backend 根。
+    返回：已验证派生工作区目录；项目没有命名空间时返回 ``None``。
+    异常：远端身份、可信获取或工作区导出失败时抛出 ``CommunityPackageError``；
+    不再接受 resolve 响应中的任意 ``download_url`` 直接解压。
+    """
+
     package_info = item.get("package_info") or item
     namespace = item.get("class_namespace") or package_info.get("class_namespace")
     if not namespace:
@@ -268,29 +277,53 @@ def _ensure_remote_item_cached(
     packages = manifest.setdefault("packages", {})
     cached = packages.get(namespace) or {}
     version = str(package_info.get("version") or cached.get("version") or "unknown")
-    sha256 = str(package_info.get("sha256") or cached.get("sha256") or "")
+    remote_digest = str(
+        package_info.get("artifact_digest") or package_info.get("sha256") or ""
+    )
+    cached_digest = str(
+        cached.get("artifact_digest") or cached.get("sha256") or ""
+    )
     cached_dir = Path(cached.get("package_dir", ""))
-    if cached_dir.is_dir() and cached.get("version") == version and cached.get("sha256", "") == sha256:
+    if (
+        cached.get("acquisition") == "package-cache/v1"
+        and cached_dir.is_dir()
+        and cached.get("version") == version
+        and remote_digest
+        and cached_digest == remote_digest
+    ):
         logger.trace(
             f"[CommunityPackage] 缓存命中(版本/指纹一致): {namespace}@{version} "
-            f"sha256={sha256} dir={cached_dir}"
+            f"artifact_digest={remote_digest} dir={cached_dir}"
         )
         return cached_dir
 
     logger.trace(
         f"[CommunityPackage] 缓存未命中/需更新: {namespace} "
-        f"目标 version={version} sha256={sha256}; "
-        f"本地 version={cached.get('version')} sha256={cached.get('sha256')} dir_exists={cached_dir.is_dir()}"
+        f"目标 version={version} artifact_digest={remote_digest}; "
+        f"本地 version={cached.get('version')} artifact_digest={cached_digest} "
+        f"dir_exists={cached_dir.is_dir()}"
     )
 
-    download_url = package_info.get("download_url")
-    if not download_url:
+    try:
+        package_dir, acquisition = acquire_community_workspace(
+            package_info,
+            working_dir=working_dir,
+            namespace=namespace,
+            version=version,
+            http_client=http_client,
+        )
+    except Exception as error:
         if cached_dir.is_dir() and package_info.get("allow_cached_fallback"):
-            logger.warning(f"[CommunityPackage] {namespace} 无下载地址，使用旧缓存")
+            logger.warning(
+                f"[CommunityPackage] {namespace} 可信获取失败，使用显式允许的旧缓存"
+            )
             return cached_dir
-        raise CommunityPackageError(f"community package {namespace} 缺少 download_url")
+        if isinstance(error, CommunityPackageError):
+            raise
+        raise CommunityPackageError(
+            f"community package {namespace}@{version} 可信获取失败: {error}"
+        ) from error
 
-    package_dir = _download_and_extract_package(download_url, working_dir, namespace, version, sha256, http_client)
     pyproject = _find_pyproject(package_dir)
     pyproject_meta = read_pyproject_metadata(pyproject)
     aliases = _normalize_aliases(item, [])
@@ -303,84 +336,27 @@ def _ensure_remote_item_cached(
 
     packages[namespace] = {
         "class_namespace": namespace,
-        "version": version,
-        "sha256": sha256,
-        "download_url": download_url,
+        "version": acquisition["version"],
+        "sha256": acquisition["artifact_digest"],
+        "artifact_digest": acquisition["artifact_digest"],
+        "catalog_digest": acquisition["catalog_digest"],
+        "content_digest": acquisition["content_digest"],
+        "cache_key": acquisition["cache_key"],
+        "acquisition": "package-cache/v1",
         "package_dir": str(package_dir),
         "pyproject": pyproject_meta,
         "aliases": aliases,
         "dependencies": dependencies,
     }
     (package_dir / "package_info.json").write_text(
-        json.dumps(package_info, ensure_ascii=False, indent=2),
+        json.dumps(
+            safe_package_info(package_info, acquisition),
+            ensure_ascii=False,
+            indent=2,
+        ),
         encoding="utf-8",
     )
     return package_dir
-
-
-def _download_and_extract_package(
-    download_url: str,
-    working_dir: str | Path,
-    namespace: str,
-    version: str,
-    expected_sha256: str = "",
-    http_client: Any = None,
-) -> Path:
-    import requests
-
-    normalized = _normalize_package_dir_name(namespace)
-    target_root = Path(working_dir) / COMMUNITY_CACHE_DIR / normalized / version
-    package_dir = target_root / "package"
-    tmp_root = Path(tempfile.mkdtemp(prefix=f"{normalized}-{version}-", dir=str(_cache_root(working_dir))))
-    archive_path = tmp_root / "package.archive"
-
-    try:
-        print_status(f"下载 community 设备包 {namespace}@{version}", "info")
-        requester = getattr(http_client, "_session", None) or requests
-        use_session = getattr(http_client, "_session", None) is not None
-        logger.trace(
-            f"[CommunityPackage] 下载开始: {namespace}@{version} url={download_url} "
-            f"requester={'http_client._session' if use_session else 'requests'} -> {archive_path}"
-        )
-        downloaded_bytes = 0
-        with requester.get(download_url, stream=True, timeout=(5, 120)) as response:
-            response.raise_for_status()
-            with archive_path.open("wb") as f:
-                for chunk in response.iter_content(chunk_size=1024 * 1024):
-                    if chunk:
-                        f.write(chunk)
-                        downloaded_bytes += len(chunk)
-        logger.trace(
-            f"[CommunityPackage] 下载完成: {namespace}@{version} "
-            f"大小={downloaded_bytes} bytes ({downloaded_bytes / 1024 / 1024:.2f} MiB)"
-        )
-
-        if expected_sha256:
-            actual = "sha256:" + _sha256_file(archive_path)
-            if actual != expected_sha256:
-                raise CommunityPackageError(f"{namespace}@{version} sha256 不匹配: {actual} != {expected_sha256}")
-            logger.trace(f"[CommunityPackage] sha256 校验通过: {namespace}@{version} {actual}")
-        else:
-            logger.trace(f"[CommunityPackage] 未提供 expected_sha256，跳过校验: {namespace}@{version}")
-
-        extract_root = tmp_root / "extract"
-        extract_root.mkdir(parents=True, exist_ok=True)
-        _extract_archive(archive_path, extract_root)
-        pyproject = _find_pyproject(extract_root)
-        source_root = pyproject.parent
-        logger.trace(
-            f"[CommunityPackage] 解压完成: {namespace}@{version} "
-            f"source_root={source_root} pyproject={pyproject.name}"
-        )
-
-        if target_root.exists():
-            shutil.rmtree(target_root)
-        target_root.mkdir(parents=True, exist_ok=True)
-        shutil.copytree(source_root, package_dir)
-        logger.trace(f"[CommunityPackage] 落盘: {namespace}@{version} -> {package_dir}")
-        return package_dir
-    finally:
-        shutil.rmtree(tmp_root, ignore_errors=True)
 
 
 def _normalize_aliases(item: Dict[str, Any], classes: Iterable[str]) -> Dict[str, str]:
@@ -452,37 +428,6 @@ def _dedupe_preserve_order(items: Iterable[str]) -> List[str]:
         seen.add(value)
         result.append(value)
     return result
-
-
-def _sha256_file(path: Path) -> str:
-    digest = hashlib.sha256()
-    with path.open("rb") as f:
-        for chunk in iter(lambda: f.read(1024 * 1024), b""):
-            digest.update(chunk)
-    return digest.hexdigest()
-
-
-def _extract_archive(archive_path: Path, target_dir: Path) -> None:
-    if zipfile.is_zipfile(archive_path):
-        with zipfile.ZipFile(archive_path) as zf:
-            for member in zf.namelist():
-                _assert_safe_archive_member(target_dir, member)
-            zf.extractall(target_dir)
-        return
-    if tarfile.is_tarfile(archive_path):
-        with tarfile.open(archive_path) as tf:
-            for member in tf.getmembers():
-                _assert_safe_archive_member(target_dir, member.name)
-            tf.extractall(target_dir)
-        return
-    raise CommunityPackageError("community package 只支持 zip/tar/tar.gz 格式")
-
-
-def _assert_safe_archive_member(target_dir: Path, member_name: str) -> None:
-    target_root = target_dir.resolve()
-    target_path = (target_dir / member_name).resolve()
-    if target_root != target_path and target_root not in target_path.parents:
-        raise CommunityPackageError(f"community package 包含非法路径: {member_name}")
 
 
 def _find_pyproject(root: Path) -> Path:

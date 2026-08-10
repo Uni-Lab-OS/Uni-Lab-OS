@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import argparse
+import json
 from pathlib import Path
 from typing import Any
 
@@ -15,9 +16,12 @@ from .package_distribution import (
     PackageDependencyManager,
     build_workspace_package,
 )
-from .package_distribution.adapters.cloud import upload_package as _upload_package
-from .package_distribution.errors import PackageCLIError
+from .package_distribution.acquisition import acquire_package
+from .package_distribution.cache import PackageCache
+from .package_distribution.errors import PackageCLIError, PackageTransferError
 from .package_distribution.inspection import inspect_package as _inspect_package
+from .package_distribution.publication import publish_package_artifact
+from .package_distribution.transfer_models import PackageDownloadRequest
 from .workspace_runtime.discovery import compile_package_source
 
 
@@ -46,86 +50,130 @@ def inspect_package(
 def build_package(
     path: str,
     out_dir: str | None = None,
+    *,
+    emit_status: bool = True,
 ) -> PackageBuildArtifact:
     """构建并自审计一个规范软件包工作区（Package Workspace）。
 
     参数：``path`` 是软件包根；``out_dir`` 是可选发布产物目录，默认使用工作区
-    同级 ``dist``。
+    同级 ``dist``；``emit_status`` 控制人类进度输出。
     返回：已通过 wheel 来源重编译和闭包校验的软件包构建产物。
     异常：工作区、标准构建或自审计失败时统一抛出 ``PackageCLIError``；作者源码
     不会被写入生成目录。
     """
 
-    # ``workspace_root`` 是公共命令显式选择的规范源码边界。
     workspace_root = Path(path).expanduser().resolve()
-    # ``output_root`` 是审计通过后才接收 wheel 和投影的发布目录。
     output_root = (
         Path(out_dir).expanduser().resolve()
         if out_dir
         else workspace_root.parent / "dist"
     )
     try:
-        # ``artifact`` 是包分发深模块完成全部物理构建和内容证明后的结果。
         artifact = build_workspace_package(
             workspace_root,
             output_root,
             compile_catalog=compile_package_source,
         )
     except PackageCompileError as error:
-        # ``diagnostic_codes`` 提供稳定、无源码正文的目录编译失败摘要。
         diagnostic_codes = ", ".join(item.code for item in error.diagnostics)
         raise PackageCLIError(
             f"包目录（PackageCatalog）编译失败：{diagnostic_codes}"
         ) from error
     except (PackageBuildError, TypeError, ValueError) as error:
         raise PackageCLIError(str(error)) from error
-    print_status(
-        "package build 完成："
-        f"{artifact.catalog.distribution.name}@"
-        f"{artifact.catalog.distribution.version}",
-        "info",
-    )
-    print_status(f"  wheel           : {artifact.wheel}", "info")
-    print_status(f"  catalog_digest  : {artifact.catalog.catalog_digest}", "info")
-    print_status(f"  artifact_digest : {artifact.artifact_digest}", "info")
+    if emit_status:
+        print_status(
+            "package build 完成："
+            f"{artifact.catalog.distribution.name}@"
+            f"{artifact.catalog.distribution.version}",
+            "info",
+        )
+        print_status(f"  wheel           : {artifact.wheel}", "info")
+        print_status(f"  catalog_digest  : {artifact.catalog.catalog_digest}", "info")
+        print_status(f"  artifact_digest : {artifact.artifact_digest}", "info")
     return artifact
 
 
 def upload_package(
     path: str,
-    http_client: Any,
+    transfer_port: Any,
     out_dir: str | None = None,
+    *,
+    environment: str,
 ) -> dict[str, Any]:
-    """检查软件包并通过云端 Adapter 发布既有兼容投影。
+    """构建一次软件包并通过云端 Adapter 发布既有兼容投影。
 
-    参数：``path`` 是软件包根；``http_client`` 是鉴权 HTTP Adapter；``out_dir``
-    是产物目录。
-    返回：云端发布结果。
-    异常：检查、鉴权、上传或云端拒绝时保留既有 ``PackageCLIError``/传输异常语义。
+    参数：``path`` 是软件包根；``transfer_port`` 是 Backend 无关发布 Interface；
+    ``out_dir`` 是产物目录；``environment`` 是本次固定环境标签。
+    返回：完成设备广场对账的稳定命令结果。
+    异常：构建、鉴权、上传、版本冲突或广场对账失败时抛出稳定错误。
     """
 
-    return _upload_package(
-        path,
-        http_client,
-        out_dir=out_dir,
-        package_builder=build_package,
+    try:
+        artifact = build_package(path, out_dir=out_dir, emit_status=False)
+    except (PackageCLIError, OSError) as error:
+        raise PackageTransferError(
+            "package_build_failed",
+            f"设备软件包构建失败：{error}",
+            retryable=False,
+        ) from error
+    return publish_package_artifact(
+        artifact,
+        port=transfer_port,
+        environment=environment,
     )
+
+
+def download_package(
+    request: PackageDownloadRequest,
+    transfer_port: Any,
+    *,
+    cache_root: str | Path,
+    environment: str,
+    out_dir: str | None = None,
+    extract_source: str | None = None,
+) -> dict[str, Any]:
+    """解析、验证并缓存一个远端设备软件包。
+
+    参数：``request`` 是互斥选择器；``transfer_port`` 是远端获取 Interface；
+    ``cache_root`` 是内容寻址缓存；``environment`` 是固定环境；``out_dir`` 是可选
+    wheel 副本目录；``extract_source`` 是可选派生工作区目标。
+    返回：稳定 ``package.download`` 命令结果。
+    异常：能力、远端描述、归档、缓存或导出失败时抛出稳定错误；不安装软件包。
+    """
+
+    try:
+        return acquire_package(
+            request,
+            port=transfer_port,
+            cache=PackageCache(cache_root),
+            environment=environment,
+            compile_catalog=compile_package_source,
+            output_dir=out_dir,
+            extract_source=extract_source,
+        )
+    except PackageTransferError:
+        raise
+    except OSError as error:
+        raise PackageTransferError(
+            "package_cache_failed",
+            "设备软件包缓存目录不可用",
+            retryable=False,
+        ) from error
 
 
 def register_package_subcommands(subparsers: Any) -> None:
     """把软件包命令行（Package CLI）完整注册到公共 ``unilab`` 解析器。
 
-    参数：``subparsers`` 是应用组合根（Composition Root）创建的顶层 argparse
-    子解析器集合。
-    返回：无；注册 ``package``/``pkg`` 及 inspect、upload、add、update、remove。
-    异常：重复注册或传入对象不兼容 argparse 时传播原始异常。依赖管理动作都
-    支持末尾 ``--workspace [PATH]``，省略 PATH 时使用当前目录。
+    参数：``subparsers`` 是应用组合根创建的顶层 argparse 子解析器集合。
+    返回：无；注册 inspect、build、upload、download 和依赖管理动作。
+    异常：重复注册或传入对象不兼容 argparse 时传播原始异常。
     """
 
     package_parser = subparsers.add_parser(
         "package",
         aliases=["pkg"],
-        help="Community package inspect, build, upload, and dependency tools",
+        help="Community package inspect, build, upload, download, and dependency tools",
     )
     actions = package_parser.add_subparsers(
         title="package actions",
@@ -162,6 +210,52 @@ def register_package_subcommands(subparsers: Any) -> None:
             default=None,
             help="Artifact output directory",
         )
+        if action_name == "upload":
+            action_parser.add_argument(
+                "--auth-stdin",
+                action="store_true",
+                help="Read upload AK/SK from the closed JSON stdin contract",
+            )
+            action_parser.add_argument(
+                "--json",
+                action="store_true",
+                help="Write one stable JSON document to stdout",
+            )
+
+    download_parser = actions.add_parser(
+        "download",
+        help="Resolve, verify, and cache one package wheel without installing it",
+    )
+    selector = download_parser.add_mutually_exclusive_group(required=True)
+    selector.add_argument(
+        "--template-uuid",
+        help="Exact device square template UUID",
+    )
+    selector.add_argument(
+        "--package",
+        dest="package_name",
+        help="Package distribution name in the device square",
+    )
+    download_parser.add_argument(
+        "--version",
+        default=None,
+        help="Exact version used together with --package",
+    )
+    download_parser.add_argument(
+        "--out",
+        default=None,
+        help="Optional directory receiving a verified wheel copy",
+    )
+    download_parser.add_argument(
+        "--extract-source",
+        default=None,
+        help="Optional new directory receiving a derived Package Workspace",
+    )
+    download_parser.add_argument(
+        "--json",
+        action="store_true",
+        help="Write one stable JSON document to stdout",
+    )
 
     add_parser = actions.add_parser(
         "add",
@@ -217,12 +311,18 @@ def _add_dependency_workspace_flag(parser: argparse.ArgumentParser) -> None:
     )
 
 
-def cmd_package(args_dict: dict[str, Any], http_client: Any = None) -> None:
+def cmd_package(
+    args_dict: dict[str, Any],
+    transfer_port: Any = None,
+    *,
+    environment: str = "",
+    cache_root: str | Path | None = None,
+) -> dict[str, Any] | None:
     """分派一次软件包子命令。
 
-    参数：``args_dict`` 是公共命令行解析结果；``http_client`` 是仅发布
-    动作需要的可选鉴权 HTTP 适配器。
-    返回：无；成功结果由具体子命令输出。
+    参数：``args_dict`` 是公共命令行解析结果；``transfer_port`` 是远端动作使用的
+    Adapter；``environment`` 与 ``cache_root`` 由应用组合根固定。
+    返回：远端动作返回稳定结果字典，本地动作返回 ``None``。
     异常：动作、路径、显式依赖或具体操作无效时抛出 ``PackageCLIError``；
     依赖管理绝不扫描或安装 ambient site-packages。
     """
@@ -235,7 +335,7 @@ def cmd_package(args_dict: dict[str, Any], http_client: Any = None) -> None:
     if not action:
         raise PackageCLIError(
             "缺少 package 子动作，请使用 "
-            "`unilab package inspect|build|upload|add|update|remove`"
+            "`unilab package inspect|build|upload|download|add|update|remove`"
         )
     if action in {"add", "update", "remove"}:
         try:
@@ -246,47 +346,99 @@ def cmd_package(args_dict: dict[str, Any], http_client: Any = None) -> None:
             if action == "add":
                 result = manager.add(args_dict.get("dependency_source") or "")
             elif action == "update":
-                replacement_source = args_dict.get("dependency_source") or None
                 result = manager.update(
                     args_dict.get("dependency_identity") or "",
-                    replacement_source,
+                    args_dict.get("dependency_source") or None,
                 )
             else:
                 result = manager.remove(args_dict.get("dependency_identity") or "")
         except (RuntimeError, TypeError, ValueError) as error:
             raise PackageCLIError(str(error)) from error
-        # ``result`` 是命令成功切换后的完整软件包依赖锁代际。
         print_status(
             f"package {action} 完成：锁定 {len(result.packages)} 个显式外部包",
             "info",
         )
-        return
+        return None
+    if action == "download":
+        if transfer_port is None or cache_root is None or not environment:
+            raise PackageTransferError(
+                "command_context_missing",
+                "package download 缺少固定远端命令上下文",
+                retryable=False,
+            )
+        try:
+            request = PackageDownloadRequest(
+                template_uuid=args_dict.get("template_uuid"),
+                package_name=args_dict.get("package_name"),
+                version=args_dict.get("version"),
+            )
+        except ValueError as error:
+            raise PackageTransferError(
+                "invalid_selector",
+                str(error),
+                retryable=False,
+            ) from error
+        remote_result = download_package(
+            request,
+            transfer_port,
+            cache_root=cache_root,
+            environment=environment,
+            out_dir=output_directory,
+            extract_source=args_dict.get("extract_source"),
+        )
+        _emit_remote_result(remote_result, json_output=bool(args_dict.get("json")))
+        return remote_result
     if not package_path:
         raise PackageCLIError("缺少 --path（社区软件包工作区路径）")
     if action == "inspect":
-        inspect_package(
-            package_path,
-            namespace=namespace,
-            out_dir=output_directory,
-        )
-        return
+        inspect_package(package_path, namespace=namespace, out_dir=output_directory)
+        return None
     if action == "build":
         build_package(package_path, out_dir=output_directory)
-        return
+        return None
     if action == "upload":
-        upload_package(
+        if transfer_port is None or not environment:
+            raise PackageTransferError(
+                "command_context_missing",
+                "package upload 缺少固定远端命令上下文",
+                retryable=False,
+            )
+        remote_result = upload_package(
             package_path,
-            http_client=http_client,
+            transfer_port,
             out_dir=output_directory,
+            environment=environment,
         )
-        return
+        _emit_remote_result(remote_result, json_output=bool(args_dict.get("json")))
+        return remote_result
     raise PackageCLIError(f"未知 package 子动作：{action}")
+
+
+def _emit_remote_result(result: dict[str, Any], *, json_output: bool) -> None:
+    """输出一次上传或下载的最终结果。
+
+    参数：``result`` 是稳定命令字典；``json_output`` 控制机器或人类模式。
+    返回：无。
+    异常：stdout 不可写时传播原始 IO 异常。
+    """
+
+    if json_output:
+        print(json.dumps(result, ensure_ascii=False, sort_keys=True))
+        return
+    print_status(
+        f"{result['command']} 完成：{result['distribution']}@{result['version']} "
+        f"({result['status']})",
+        "info",
+    )
+    print_status(f"  environment     : {result['environment']}", "info")
+    print_status(f"  artifact_digest : {result['artifact_digest']}", "info")
 
 
 __all__ = [
     "PackageCLIError",
     "build_package",
     "cmd_package",
+    "download_package",
     "inspect_package",
     "register_package_subcommands",
     "upload_package",
