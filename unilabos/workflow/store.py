@@ -1491,16 +1491,18 @@ class WorkflowStore:
                     _json(breakpoint_node_uuids),
                 ),
             )
+            # MaterialSource 作业会被保留以完成任务级物料准入，但调试首个 Hold
+            # 必须落在用户选择的可执行起点，不能退化为“第一个拓扑作业”。
             first_job = conn.execute(
                 """
                 SELECT uuid, workflow_node_uuid, attempt
                 FROM workflow_node_job
                 WHERE workflow_task_uuid = ? AND deleted_at IS NULL
+                  AND workflow_node_uuid = ?
                   AND status = 'pending'
-                ORDER BY topological_index, create_time, uuid
                 LIMIT 1
                 """,
-                (task_uuid,),
+                (task_uuid, start_node_uuids[0]),
             ).fetchone()
             if first_job is None:
                 raise StoreConflict("debug task has no active job")

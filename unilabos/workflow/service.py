@@ -1084,22 +1084,91 @@ class WorkflowService:
                 continue
             reachable.add(current)
             pending.extend(outgoing.get(current, []))
-        plan["nodes"] = [node for node in nodes if str(node.get("uuid")) in reachable]
+        # 调试起点只裁掉此前的物理动作；MaterialSource 是任务级物料准入，
+        # 不是可以跳过的设备动作。资源可能先经过被跳过动作的 ResourceSlot
+        # 透传链，再进入活动子图。此时把来源的冻结绑定目标重接到活动子图的
+        # 第一个消费者，既不补跑起点前的物理动作，也不会丢失稳定物料身份。
+        resource_outgoing: Dict[str, List[Mapping[str, Any]]] = {}
+        for edge in plan.get("edges", []):
+            if not isinstance(edge, Mapping):
+                continue
+            if (
+                edge.get("dependency_only") is True
+                or edge.get("source_type") != "ResourceSlot"
+                or edge.get("target_type") != "ResourceSlot"
+            ):
+                continue
+            resource_outgoing.setdefault(
+                str(edge.get("source_node_uuid") or ""),
+                [],
+            ).append(edge)
+        supporting_material_sources: set[str] = set()
+        for node in nodes:
+            if str(node.get("kind") or "") != "material_source":
+                continue
+            source_uuid = str(node.get("uuid") or "")
+            raw_targets = node.get("material_binding_targets", [])
+            if not isinstance(raw_targets, list):
+                continue
+            rebound_targets: List[Dict[str, str]] = []
+            seen_targets: set[tuple[str, str]] = set()
+
+            def append_target(target_uuid: str, param_key: str) -> None:
+                identity = (target_uuid, param_key)
+                if not target_uuid or not param_key or identity in seen_targets:
+                    return
+                seen_targets.add(identity)
+                rebound_targets.append(
+                    {
+                        "workflow_node_uuid": target_uuid,
+                        "param_key": param_key,
+                    }
+                )
+
+            for target in raw_targets:
+                if not isinstance(target, Mapping):
+                    continue
+                target_uuid = str(target.get("workflow_node_uuid") or "")
+                if target_uuid in reachable:
+                    append_target(target_uuid, str(target.get("param_key") or ""))
+
+            visited_resource_nodes = {source_uuid}
+            pending_resource_nodes = [source_uuid]
+            while pending_resource_nodes:
+                current = pending_resource_nodes.pop()
+                for edge in resource_outgoing.get(current, []):
+                    target_uuid = str(edge.get("target_node_uuid") or "")
+                    if target_uuid in reachable:
+                        append_target(
+                            target_uuid,
+                            str(edge.get("target_data_key") or ""),
+                        )
+                        continue
+                    if target_uuid and target_uuid not in visited_resource_nodes:
+                        visited_resource_nodes.add(target_uuid)
+                        pending_resource_nodes.append(target_uuid)
+            if rebound_targets:
+                supporting_material_sources.add(source_uuid)
+                node["material_binding_targets"] = rebound_targets
+        scoped_node_ids = reachable | supporting_material_sources
+        plan["nodes"] = [
+            node for node in nodes if str(node.get("uuid")) in scoped_node_ids
+        ]
         plan["edges"] = [
             edge
             for edge in plan.get("edges", [])
-            if str(edge.get("source_node_uuid")) in reachable
-            and str(edge.get("target_node_uuid")) in reachable
+            if str(edge.get("source_node_uuid")) in scoped_node_ids
+            and str(edge.get("target_node_uuid")) in scoped_node_ids
         ]
         plan["handles"] = [
             handle
             for handle in plan.get("handles", [])
-            if str(handle.get("node_uuid")) in reachable
+            if str(handle.get("node_uuid")) in scoped_node_ids
         ]
         jobs = [
             job
             for job in prepared.jobs
-            if str(job.get("workflow_node_uuid")) in reachable
+            if str(job.get("workflow_node_uuid")) in scoped_node_ids
         ]
         if not jobs:
             raise StoreConflict("debug task has no reachable jobs")

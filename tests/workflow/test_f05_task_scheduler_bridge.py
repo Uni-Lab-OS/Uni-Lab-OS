@@ -400,6 +400,27 @@ def test_step_task_stays_paused_until_bridge_step_dispatches_one_job(
         bridge.close()
 
 
+def test_step_uses_scheduler_runtime_when_bridge_route_ledger_is_stale(
+    store: WorkflowStore,
+) -> None:
+    """桥接层临时路由账本丢失时，单步仍以调度器运行事实为准。"""
+
+    task = _seed_task(store, with_material=False, run_mode="step")
+    dispatcher = RecordingDispatcher()
+    scheduler = EdgeScheduler(dispatcher=dispatcher)
+    bridge = _bridge(store, scheduler)
+    try:
+        bridge.submit(task)
+        bridge._submitted_tasks.clear()
+
+        result = bridge.step(TASK_UUID)
+
+        assert [item["job_id"] for item in result["dispatched"]] == [JOB_UUID]
+        assert len(dispatcher.dispatched) == 1
+    finally:
+        bridge.close()
+
+
 def test_step_command_api_is_idempotent_and_dispatches_once(
     store: WorkflowStore,
 ) -> None:
@@ -476,6 +497,50 @@ def test_debug_hold_step_continue_and_stop_use_real_scheduler_projection(
         assert stopped.status_code == 201, stopped.text
         assert store.get_task(TASK_UUID)["status"] == "canceled"
         assert store.get_debug_projection(TASK_UUID)["status"] == "stopped"
+    finally:
+        bridge.close()
+
+
+def test_debug_continue_advances_only_after_current_dag_node_is_settled(
+    store: WorkflowStore,
+) -> None:
+    """继续模式在当前节点完成后自动派发已就绪的后继节点。"""
+
+    task = _seed_two_node_debug_task(store)
+    with store.transaction() as connection:
+        connection.execute(
+            """
+            UPDATE workflow_task_debug_configuration
+            SET breakpoint_node_uuids = '[]'
+            WHERE workflow_task_uuid = ?
+            """,
+            (TASK_UUID,),
+        )
+    dispatcher = RecordingDispatcher()
+    scheduler = EdgeScheduler(dispatcher=dispatcher)
+    bridge = _bridge(store, scheduler)
+    service = WorkflowService(store, task_scheduler_bridge=bridge)
+    client = TestClient(create_workflow_app(service))
+    try:
+        bridge.submit(task)
+        first_hold = store.get_debug_projection(TASK_UUID)["holds"][0]
+        continued = client.post(
+            f"/api/v1/debug/workflow-tasks/{TASK_UUID}/commands",
+            json={
+                "type": "continue",
+                "scope": {"type": "hold", "hold_uuid": first_hold["uuid"]},
+                "idempotency_key": "debug-continue-from-start",
+            },
+        )
+        assert continued.status_code == 201, continued.text
+        assert [item["job_id"] for item in dispatcher.dispatched] == [JOB_UUID]
+
+        scheduler.on_job_finished(JOB_UUID, True, {"ok": True})
+
+        assert [item["job_id"] for item in dispatcher.dispatched] == [
+            JOB_UUID,
+            SECOND_JOB_UUID,
+        ]
     finally:
         bridge.close()
 
@@ -775,12 +840,14 @@ def test_close_is_idempotent_and_unregisters_scheduler_listeners(
 
     assert len(scheduler._job_pre_dispatch_listeners) == 1
     assert len(scheduler._job_finished_listeners) == 1
+    assert len(scheduler._job_settled_listeners) == 1
 
     bridge.close()
     bridge.close()
 
     assert scheduler._job_pre_dispatch_listeners == []
     assert scheduler._job_finished_listeners == []
+    assert scheduler._job_settled_listeners == []
 
 
 def test_restart_recovers_succeeded_test_mode_passthrough_without_replay(

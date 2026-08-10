@@ -9,6 +9,7 @@ from fastapi.testclient import TestClient
 from unilabos.app.workflow_api import create_workflow_app
 from unilabos.workflow.service import WorkflowService
 from unilabos.workflow.store import WorkflowStore
+from unilabos.workflow.task_input import PreparedTaskInput
 
 
 START_NODE_UUID = "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa"
@@ -157,3 +158,159 @@ def test_debug_step_requires_exact_open_hold_and_is_idempotent(tmp_path) -> None
     ).json()["data"]["holds"][0]
     assert released["status"] == "released"
     store.close()
+
+
+def test_debug_scope_keeps_material_source_needed_by_start_node() -> None:
+    source_uuid = "cccccccc-cccc-4ccc-8ccc-cccccccccccc"
+    skipped_uuid = "dddddddd-dddd-4ddd-8ddd-dddddddddddd"
+    downstream_uuid = "eeeeeeee-eeee-4eee-8eee-eeeeeeeeeeee"
+    prepared = PreparedTaskInput(
+        workflow_snapshot={"nodes": []},
+        resolved_input={},
+        execution_plan={
+            "nodes": [
+                {
+                    "uuid": source_uuid,
+                    "kind": "material_source",
+                    "material_binding_targets": [
+                        {
+                            "workflow_node_uuid": START_NODE_UUID,
+                            "param_key": "resource",
+                        }
+                    ],
+                },
+                {"uuid": skipped_uuid, "kind": "device_action"},
+                {"uuid": START_NODE_UUID, "kind": "device_action"},
+                {"uuid": downstream_uuid, "kind": "device_action"},
+            ],
+            "edges": [
+                {
+                    "source_node_uuid": source_uuid,
+                    "target_node_uuid": START_NODE_UUID,
+                },
+                {
+                    "source_node_uuid": skipped_uuid,
+                    "target_node_uuid": START_NODE_UUID,
+                },
+                {
+                    "source_node_uuid": START_NODE_UUID,
+                    "target_node_uuid": downstream_uuid,
+                },
+            ],
+            "handles": [],
+        },
+        jobs=[
+            {"workflow_node_uuid": source_uuid},
+            {"workflow_node_uuid": skipped_uuid},
+            {"workflow_node_uuid": START_NODE_UUID},
+            {"workflow_node_uuid": downstream_uuid},
+        ],
+    )
+
+    scoped = WorkflowService._scope_debug_task_input(
+        prepared,
+        start_node_uuid=START_NODE_UUID,
+        breakpoint_node_uuids=[],
+    )
+
+    assert [node["uuid"] for node in scoped.execution_plan["nodes"]] == [
+        source_uuid,
+        START_NODE_UUID,
+        downstream_uuid,
+    ]
+    assert [job["workflow_node_uuid"] for job in scoped.jobs] == [
+        source_uuid,
+        START_NODE_UUID,
+        downstream_uuid,
+    ]
+    assert scoped.execution_plan["edges"] == [
+        {
+            "source_node_uuid": source_uuid,
+            "target_node_uuid": START_NODE_UUID,
+        },
+        {
+            "source_node_uuid": START_NODE_UUID,
+            "target_node_uuid": downstream_uuid,
+        },
+    ]
+
+
+def test_debug_scope_rebinds_material_across_skipped_resource_passthrough() -> None:
+    source_uuid = "cccccccc-cccc-4ccc-8ccc-cccccccccccc"
+    skipped_uuid = "dddddddd-dddd-4ddd-8ddd-dddddddddddd"
+    downstream_uuid = "eeeeeeee-eeee-4eee-8eee-eeeeeeeeeeee"
+    prepared = PreparedTaskInput(
+        workflow_snapshot={"nodes": []},
+        resolved_input={},
+        execution_plan={
+            "nodes": [
+                {
+                    "uuid": source_uuid,
+                    "kind": "material_source",
+                    "material_binding_targets": [
+                        {
+                            "workflow_node_uuid": skipped_uuid,
+                            "param_key": "material",
+                        }
+                    ],
+                },
+                {"uuid": skipped_uuid, "kind": "device_action"},
+                {"uuid": START_NODE_UUID, "kind": "device_action"},
+                {"uuid": downstream_uuid, "kind": "device_action"},
+            ],
+            "edges": [
+                {
+                    "source_node_uuid": source_uuid,
+                    "target_node_uuid": skipped_uuid,
+                    "source_type": "ResourceSlot",
+                    "target_type": "ResourceSlot",
+                    "target_data_key": "material",
+                },
+                {
+                    "source_node_uuid": skipped_uuid,
+                    "target_node_uuid": downstream_uuid,
+                    "source_type": "ResourceSlot",
+                    "target_type": "ResourceSlot",
+                    "target_data_key": "resource",
+                },
+                {
+                    "source_node_uuid": START_NODE_UUID,
+                    "target_node_uuid": downstream_uuid,
+                    "dependency_only": True,
+                },
+            ],
+            "handles": [],
+        },
+        jobs=[
+            {"workflow_node_uuid": source_uuid},
+            {"workflow_node_uuid": skipped_uuid},
+            {"workflow_node_uuid": START_NODE_UUID},
+            {"workflow_node_uuid": downstream_uuid},
+        ],
+    )
+
+    scoped = WorkflowService._scope_debug_task_input(
+        prepared,
+        start_node_uuid=START_NODE_UUID,
+        breakpoint_node_uuids=[],
+    )
+
+    assert [node["uuid"] for node in scoped.execution_plan["nodes"]] == [
+        source_uuid,
+        START_NODE_UUID,
+        downstream_uuid,
+    ]
+    source = scoped.execution_plan["nodes"][0]
+    assert source["material_binding_targets"] == [
+        {
+            "workflow_node_uuid": downstream_uuid,
+            "param_key": "resource",
+        }
+    ]
+    assert scoped.execution_plan["edges"] == [
+        {
+            "source_node_uuid": START_NODE_UUID,
+            "target_node_uuid": downstream_uuid,
+            "dependency_only": True,
+        }
+    ]
